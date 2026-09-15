@@ -1095,22 +1095,22 @@ mod tests {
     }
 
     #[test]
-    fn pre_707_regression_level_fails_overall_pass_again_905() {
-        // THE most important test for issue 881's calibration (acceptance criterion 2, issue 854
-        // design). EACH of 10 windows here carries exactly 1 undecodable frame (well within the
-        // per-window floor of 4) and is individually clean on copies/gaps. The SUM across the
-        // whole run is 10, the pre-#707 regression level (#707's own before/after: 10 -> 3
-        // undecodable) — `run_wide_undecodable_within_floor` computes this as OVER the run-wide cap
-        // (now 6). Issue 915 made the run report-only (it PASSED); issue 905 item 3 (2026-09-04)
-        // RE-GATED the floor, so this run FAILS `overall_pass` again — the run-wide term catching
-        // the pre-#707 regression is exactly what this gate exists to do.
+    fn spread_over_run_wide_floor_fails_overall_pass_915() {
+        // The run-wide cap is STILL load-bearing after the issue-915 recalibration (6 -> 15): a
+        // per-window-only check would tolerate a wide spread of windows each within their own floor.
+        // EACH of 16 windows here carries exactly 1 undecodable frame (well within the per-window
+        // floor of 4) and is individually clean on copies/gaps. The SUM across the whole run is 16,
+        // OVER the run-wide cap (now 15) -- `run_wide_undecodable_within_floor` reads false, so the
+        // run FAILS `overall_pass`. (The old pre-#707 level of 10 is now BELOW the floor and
+        // correctly PASSES -- it is a measured physical value, not a regression: see
+        // run_wide_floor_vector_..._915 in optical_floor.rs.)
         let n = 50;
         let dt = 1000i64;
         let window_span = (n as i64 + 2) * dt;
         let camboxes = ["cam1", "cam2", "cam3", "cam4"];
         let mut schedule = Vec::new();
         let mut frames = Vec::new();
-        for w in 0..10 {
+        for w in 0..16 {
             let start = w as i64 * window_span;
             let end = start + window_span;
             schedule.push(win(camboxes[w % camboxes.len()], start, end));
@@ -1125,8 +1125,8 @@ mod tests {
         let v = segment_continuity(&frames, &schedule, 0, 1);
         assert_eq!(
             v.segments.iter().map(|s| s.undecodable).sum::<u32>(),
-            10,
-            "sanity: 10 windows x 1 undecodable each: {v:?}"
+            16,
+            "sanity: 16 windows x 1 undecodable each: {v:?}"
         );
         assert!(
             v.segments.iter().all(|s| s.copies == 0 && s.gaps == 0),
@@ -1137,17 +1137,17 @@ mod tests {
             "every window individually is within the per-window floor: {v:?}"
         );
         assert_eq!(
-            v.total_undecodable, 10,
+            v.total_undecodable, 16,
             "#915: the run-wide sum stays correctly computed: {v:?}"
         );
         assert!(
             !v.run_wide_undecodable_within_floor,
-            "the run-wide floor computation is UNCHANGED -- 10 > 6 reads as over-floor: {v:?}"
+            "the run-wide floor computation is UNCHANGED -- 16 > 15 reads as over-floor: {v:?}"
         );
         assert!(
             !v.overall_pass,
-            "issue 905: the pre-#707 regression level (10 total) FAILS overall_pass again -- the \
-             re-gated run-wide floor (6) catches it: {v:?}"
+            "issue 915: a spread of 16 total undecodable FAILS overall_pass -- the run-wide floor \
+             (15) still catches a wide spread even though each window alone passes: {v:?}"
         );
     }
 

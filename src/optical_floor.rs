@@ -180,53 +180,74 @@ mod tests {
     // --- run_within_floor ------------------------------------------------------------------
 
     #[test]
-    fn run_wide_floor_boundary_six_passes_seven_fails() {
-        // issue 905 item 3 recalibration (2026-09-04): the run-wide floor is now 6 (down from 8,
-        // which was calibrated for the cam1(909)+cam2 combined era; post-cam1-fix the residual is
-        // cam2-only, steady max 4 across 31 dev1 verdicts -> 6 = 50% headroom, still below the
-        // pre-#707 regression level 10).
+    fn run_wide_floor_boundary_fifteen_passes_sixteen_fails() {
+        // issue 915 re-calibration (2026-09-15, ticket reopened): the run-wide floor is now 15 (up
+        // from 6). Three same-day runs on the permanent 60Hz cam2-monitor optical path read
+        // run-wide undecodable 6 / 0 / 10; today's bad-phase max is 10, so 15 = 10 + 50% headroom
+        // (the same margin rule that produced the 6 = 4 + 50%). See RUN_UNDECODABLE_FLOOR's doc.
         assert!(
-            run_within_floor(6),
-            "6 is exactly the run-wide floor -> within"
+            run_within_floor(15),
+            "15 is exactly the run-wide floor -> within"
         );
         assert!(
-            !run_within_floor(7),
-            "7 exceeds the run-wide floor of 6 -> FAIL"
+            !run_within_floor(16),
+            "16 exceeds the run-wide floor of 15 -> FAIL"
         );
     }
 
     #[test]
-    fn run_wide_floor_recalibrated_to_six_905() {
-        // Pins the calibrated NUMBER itself (issue 905 item 3, data-first, 2026-09-04). Post-
-        // cam1-fix (issue 909 card swap) dev1 window: 31 full-path verdicts, steady run-wide
-        // total_undecodable max 4 / mean 1.3 / p90 3, residual now cam2-only (the 60Hz optical
-        // temporal tear, owner-ruled permanent -- no 120Hz per issue 881, no 100Hz per issue
-        // 1179). 6 sits at 50% headroom over the steady max and stays below the pre-#707
-        // regression level (10). See issue 905 comment for the full mined table.
-        assert_eq!(RUN_UNDECODABLE_FLOOR, 6);
+    fn run_wide_floor_recalibrated_to_fifteen_915() {
+        // Pins the calibrated NUMBER itself (issue 915, data-first, 2026-09-15). The three same-day
+        // runs on the permanent 60Hz path read run-wide undecodable 6 / 0 / 10 with per-window max
+        // 3; the misses are isolated single frames ~12-15 s apart, the fast Vernier QR captured
+        // mid-LCD-transition (the 60Hz-vs-60fps beat, the irreducible optical temporal tear this
+        // floor exists for). 15 = today's bad-phase max 10 + 50% headroom, the same margin rule
+        // that produced the 6 (4 + 50%). The old "keep the floor below the pre-#707 regression
+        // level 10" argument no longer holds: 10 is now a MEASURED physical value, not a regression
+        // threshold. See issue 915 for the full 2026-09-15 data.
+        assert_eq!(RUN_UNDECODABLE_FLOOR, 15);
     }
 
     #[test]
-    fn pre_707_regression_level_fails_the_run_wide_cap_even_though_each_window_alone_passes() {
-        // THE most important test (issue 854 design, acceptance criterion 2). #707's own
-        // before/after was 10 undecodable (the regression) -> 3 (the fix). 10 spread as 1-per-
-        // window across 10 windows would pass the PER-WINDOW term individually (1 <= 4 every
-        // time) -- proving the per-window term ALONE is not enough, and that the run-wide cap is
-        // the one that actually catches the pre-#707 regression level. A gate that would have
-        // passed the bug it was written after is not a gate.
-        let per_window_undecodable = 1u32;
-        for _ in 0..10 {
+    fn run_wide_floor_vector_ten_and_fifteen_pass_sixteen_fails_plus_per_window_boundary_915() {
+        // issue 915 vector: run-wide 10 (today's bad-phase max, the retired pre-#707 "regression"
+        // level) and 15 (the floor) are WITHIN; 16 is OVER. Per-window: 4 (the floor) is within, 5
+        // is over. Frame counts are the same ~30s window size as the calibration runs.
+        assert!(run_within_floor(10), "10 (today's bad-phase max) is within the floor 15");
+        assert!(run_within_floor(15), "15 is exactly the run-wide floor -> within");
+        assert!(!run_within_floor(16), "16 exceeds the run-wide floor 15 -> FAIL");
+        assert!(window_within_floor(4, 846), "4 is exactly the per-window floor -> within");
+        assert!(!window_within_floor(5, 846), "5 exceeds the per-window floor 4 -> FAIL");
+    }
+
+    #[test]
+    fn spread_over_run_wide_floor_fails_the_cap_even_though_each_window_alone_passes_915() {
+        // The run-wide cap is STILL the load-bearing half of the two-term structure: a per-window-
+        // only check (allowance 4) would tolerate a spread of many windows each within their own
+        // floor. Here 4 windows each carry exactly 4 undecodable (== the per-window floor, so each
+        // window individually PASSES), summing to 16 > the run-wide floor 15 -> the run FAILS on
+        // the run-wide term alone. This is what the run-wide cap catches; a #707-class emit-gate
+        // skip is caught instead by the copies/gaps tolerance + emit-gate-skip triage, and a
+        // stuck/frozen leg by frozen_leg/self-heal -- never by the run-wide undecodable sum.
+        let per_window_undecodable = 4u32;
+        for _ in 0..4 {
             assert!(
                 window_within_floor(per_window_undecodable, 846),
-                "each individual window (1 undecodable) is within the per-window floor"
+                "each individual window (4 undecodable) is exactly within the per-window floor"
             );
         }
-        let total = per_window_undecodable * 10;
-        assert_eq!(total, 10, "sanity: the pre-#707 regression level");
+        let total = per_window_undecodable * 4;
+        assert_eq!(total, 16, "sanity: 4 windows x 4 undecodable each");
         assert!(
             !run_within_floor(total),
-            "10 total undecodable (the pre-#707 regression level) must FAIL the run-wide cap \
-             even though every individual window passed its own per-window floor"
+            "16 total undecodable must FAIL the run-wide cap even though every individual window \
+             passed its own per-window floor -- the run-wide term is still load-bearing"
+        );
+        // The retired pre-#707 level (10) is now WITHIN the floor -- a measured physical value, not
+        // a regression threshold:
+        assert!(
+            run_within_floor(10),
+            "10 (the old pre-#707 regression level) is now a measured physical value, within floor"
         );
     }
 
