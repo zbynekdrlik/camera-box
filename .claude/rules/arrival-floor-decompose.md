@@ -149,3 +149,10 @@ grabber-skew difference vs the cam4/cam5 anchors. Re-run `--multi` after each re
   not the naive "reduce floors then hard-fail on any residual" the ticket first envisioned. See
   `qr-align.md` "Re-tighten (issue 1168)". Re-arm (lower the budget toward parity) only once the N=2
   quantum itself is addressed — floor reduction alone will not move it.
+- **Task 2 production-persistence landed as the SAME sub-frame conclusion, from the jitter-floor axis
+  (lane prodpins).** The per-box floor excess (~13.7 ms median) is SUB-source-frame, and the strih FIFO
+  is a whole-source-frame conveyor, so no strih pin can carry/equalize it (a whole-frame hold overshoots;
+  a sub-frame hold DOUBLES the on-screen spread, run 1899055119). `floor_equalization_plan` returns
+  floor-only (`reason="irreducible"`) for the current data → production stays floor-3, no regression;
+  the excess is grabber-owned (this tool's own attribution) so the real lever is the cambox grabber, a
+  per-box rig task, not the strih pin. See `qr-align.md` "Production per-box equalization".

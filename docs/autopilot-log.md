@@ -12396,3 +12396,11 @@ no version bump (worktree lane; supervisor cherry-picks).
   -Werror lifts of the C decision/is-camera/JSON builder reproduce the Rust; pytest -k genlock -> 111.
 - Commits: 9ac1ca469 [red] -> 7e2e98c5e [green] pure decision + C mirror; 13547e701 widget+facet+py;
   cf71d6cfc parity+guards+pwsh; c0e7ba7c4 python tests; 2d15bc03e fmt; docs this commit.
+- **#1168 (task 2/3, lane prodpins):** floor_equalization_plan / cross_camera_floor_spread /
+  floor_spread_hard_fail / baseline_strih_block + --equalization-plan CLI + report-only floor_spread_ms
+  in align(). RED 84dd7f9e5 -> GREEN f9d7574be. FINDING: the ~13.7 ms per-box excess is sub-source-frame
+  and the strih FIFO is a whole-source-frame conveyor, so no pin carries it (sub-frame hold doubles the
+  on-screen spread, run 1899055119); direction-correct plan = anchor OLDEST/max-floor, freshest gets the
+  pin (the 15.9. worked numbers were inverted); production stays floor-3 (no-op, no regression);
+  grabber-vs-pin decision raised on the ticket (needs-answer). No production pins applied, recording-e2e.sh
+  untouched. 15 new pytest, 260 related green.
