@@ -10,6 +10,8 @@ paths:
   - "tests/harness_imag_power_dedup_preserve_1076.rs"
   - "scripts/lib/imag-power-stepdown-wait.sh"
   - "tests/harness_imag_power_stepdown_wait_1268.rs"
+  - "scripts/lib/mv-fps-preflight.sh"
+  - "tests/harness_mv_fps_preflight_settle_1040.rs"
   - "systemd/imag-power-envelope-alert-watchdog.service"
   - "systemd/imag-power-envelope-alert-watchdog.timer"
 ---
@@ -310,3 +312,44 @@ and NO RESTORE to wait for): keying on `throttle_reason_pl1=1` alone would false
 run whose gate would pass (#1116 documents that under-floor condition as chronic + render-healthy).
 The guard `STEPPED=` state is a supplement (ORs into clamped; the RAPL-unreadable fallback);
 `throttle_reason_pl1` is logged context only.
+
+## The `[4d1/8]` MV-fps preflight SETTLES on FRESH samples after a clamp — the median straddles a just-recovered window (#1040 harness item)
+
+The `[4d0/8]` step-down wait (above) proceeds the instant the RAPL PL1 is back at the full
+envelope — but the box's Multiview render does NOT recover instantly, and the very next gate,
+`[4d1/8]` (`scripts/lib/mv-fps-preflight.sh`), reads a BACKWARD-LOOKING signal: `mv-fps-gate`
+classifies each projector's WINDOW MEDIAN `rendered_fps` over its most recent ~12 `multiview-audit`
+samples (`median_recent_rendered_fps`, `src/mv_audit.rs`). Right after a 62 s clamp the `[4d0/8]`
+wait just cleared, that recent window still carries the clamp-era low samples, so the MEDIAN reads
+below floor while the LATEST individual sample is already at target — run 34986461596 aborted with
+`median_fps=23.0 < floor=28.0 ... latest rendered_fps 30.0`. The one-shot 6 s grace re-read re-reads
+the SAME tail and re-runs the SAME median gate, so it CANNOT rescue this straddling-median shape:
+a false abort of a ~40-min run on a box that had already recovered.
+
+**The fix (STRICT box only): after a BELOW first read, SETTLE on FRESH samples instead of the
+one-shot grace re-read.** `mv_fps_preflight_settle_strict` polls for NEW `multiview-audit` lines and
+decides from the INDIVIDUAL fresh samples (never the median), via two pure functions:
+`mv_fps_preflight_latest_sample` (newest audit line -> `id<TAB>rendered_fps<TAB>floor`, where the id
+is the whole line verbatim — the OBS-log timestamp prefix advances ~every 5 s, so freshness is an
+IDENTITY comparison against the first BELOW read's baseline line, never a wall-clock divisor, the
+issue-797 lesson) and `mv_fps_preflight_sample_verdict` (float `ok|below|bad`). Decision:
+- **N (default 3, `MV_FPS_PREFLIGHT_SETTLE_N`) consecutive fresh >= floor -> recovered**, proceed
+  (`ok: ... recovered on fresh samples (N/N >= floor) after Ns`).
+- **any fresh < floor sample -> collapse CONFIRMED**, abort exactly as before (`ERROR: [4d1/8] ...
+  CONFIRMED below its floor`).
+- **< N fresh within a bounded budget (<= 120 s, `MV_FPS_PREFLIGHT_SETTLE_S`), or an unreadable
+  re-read -> UNKNOWN -> report-only NOTE**, proceed. NEVER false-abort a CI gate (the user's hardest
+  constraint); the live issue-1083 dev1 watchdog owns a genuinely sustained collapse.
+
+A stale re-read of the baseline line (identity unchanged — the "no new lines" case) is NOT a fresh
+sample, so it neither confirms a collapse nor counts toward recovery: exactly what avoids re-deciding
+on the same straddling data. Three termination bounds (wall budget, `est = pass*poll` for a wedged
+clock, a hard pass ceiling) + injectable clock/sleep/read seams (`MV_FPS_PREFLIGHT_SETTLE_NOW_CMD` /
+`_SLEEP_CMD` / the existing `MV_FPS_PREFLIGHT_PROBE_CMD`) mirror `scripts/lib/genlock-settle.sh`
+(issue 1221), so the whole thing is Tier-0-testable with zero ssh and zero real waiting
+(`tests/harness_mv_fps_preflight_settle_1040.rs`). The strih report-only term (issue 1260) keeps its
+own grace re-read path, behaviour untouched — only the STRICT (imag) box routes to the settle. The
+fix lives entirely in the sourced lib; `scripts/recording-e2e.sh` is unchanged (the issue-675
+pattern). The PHYSICAL thermal item (the box runs 83-95 °C under the 7-camera load and keeps
+tripping the 25 W step-down; a cooling pad / cleaned fan path removes the episodes at the source)
+stays the owner's — this harness item only stops the recovered-box false abort.

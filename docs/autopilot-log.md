@@ -12309,3 +12309,19 @@ Supervisor install (imag, once the fleet genlock bundle is deployed):
   lock-step anchors added to both windows-genlock{,-fast}.yml (YAML valid). Review: fresh-context
   general-purpose /review + /requesting-code-review. Docs: genlock-lock-indicator.md +
   genlock-lock-facet.md.
+- issue 1040 (harness item; lane/1040-mvsettle): the `[4d1/8]` MV-fps preflight strict term now
+  SETTLES on FRESH `multiview-audit` samples after a BELOW first read, instead of a one-shot 6 s
+  grace re-read of a window whose MEDIAN can straddle a `[4d0/8]`-cleared 25 W PL1 clamp (run
+  34986461596: `median_fps=23.0 < floor=28.0 ... latest rendered_fps 30.0` — recovered box, false
+  abort). RED 4f751a1f2 → GREEN 9faf74438. New pure fns `mv_fps_preflight_latest_sample` /
+  `mv_fps_preflight_sample_verdict` + runner `mv_fps_preflight_settle_strict` in
+  scripts/lib/mv-fps-preflight.sh (freshness by line identity — never a wall-clock divisor;
+  N=3 consecutive ≥floor → recover, a fresh <floor → confirm+abort, <N fresh in ≤120 s budget /
+  unreadable → UNKNOWN report-only NOTE, never false-abort). Injectable clock/sleep/read seams +
+  three termination bounds mirror genlock-settle.sh (issue 1221); recording-e2e.sh untouched (issue
+  675 pattern). strih report-only term (issue 1260) grace path untouched. The 1091 + 1263 imag
+  static-probe tests now feed a per-call-unique line so the settle sees fresh samples + still
+  aborts. Tier-0: bash RED→GREEN over stale-below/fresh-below/no-new-lines/unreadable sequences,
+  bash -n + shellcheck -S warning clean, cargo fmt --all --check clean, doc-lazy grep clean; CI is
+  the first Rust type-check. New test tests/harness_mv_fps_preflight_settle_1040.rs. Docs:
+  .claude/rules/imag-power-envelope.md. The PHYSICAL thermal item (cooling) stays open for the owner.
