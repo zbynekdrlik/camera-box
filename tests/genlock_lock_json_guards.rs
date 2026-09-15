@@ -87,6 +87,30 @@ fn genlock_lock_recent_event_offender_present_1299_part3() {
 }
 
 #[test]
+fn genlock_lock_audio_unexpected_offender_present_1303() {
+    // #1303: the widget flags an audio-ENABLED silent-by-contract source (a camera) via the C mirror
+    // of the certified-table camera classifier, and emits the offender in the v4
+    // audio_unexpected_inputs list so a DEGRADED/audio_unexpected page names it. A subtree pull that
+    // reverts any of these silently re-opens the double-audio blind spot.
+    // the widget scan uses the header's parity-gated camera classifier
+    assert_has(STATUSBAR_CPP, "genlock_name_is_camera(nm.c_str())");
+    // the v4 JSON key the bundle-state parser reads
+    assert_has(STATUSBAR_CPP, "\\\"audio_unexpected_inputs\\\":[");
+    // the greppable reason token
+    assert_has(STATUSBAR_CPP, "return \"audio_unexpected\";");
+    // the pure camera classifier + its private helper in the header (parity-gated by
+    // tests/genlock_lock_state_parity.rs against the canonical genlock_forced_table_audit::is_camera_input)
+    assert_has(
+        "vendor/obs-studio/frontend/widgets/GenlockLockState.hpp",
+        "static inline int genlock_name_is_camera(const char *name)",
+    );
+    assert_has(
+        "vendor/obs-studio/frontend/widgets/GenlockLockState.hpp",
+        "GENLOCK_LOCK_REASON_AUDIO_UNEXPECTED = 10,",
+    );
+}
+
+#[test]
 fn genlock_lock_json_marker_is_mutually_non_substring() {
     // The new OBS-log family `genlock-lock-json:` must be mutually non-substring with every
     // existing marker (jitter-audit-parser.md) — ESPECIALLY the #1298 `genlock-lock:` line it sits
