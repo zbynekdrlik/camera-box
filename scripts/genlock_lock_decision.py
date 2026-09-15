@@ -52,15 +52,19 @@ R_INPUT_UNLOCKED = "input_unlocked"
 R_RECENT_EVENT = "recent_event"
 R_NTP_FAILED = "ntp_failed"
 R_QPC_DRIFT = "qpc_drift"
+R_AUDIO_PAIRING = "audio_pairing"      # #1303: audio-enabled source unpaired with its video FIFO hold
+R_AUDIO_UNEXPECTED = "audio_unexpected"  # #1303: silent-by-contract source found audible (double-audio hazard)
 
 
 def decide(n_inputs, n_locked, recent_event, qpc_drift_beyond_bound, clock_present,
-           clock_locked, clock_ntp_failed, output_present, output_stamping, n_absent=0):
+           clock_locked, clock_ntp_failed, output_present, output_stamping, n_absent=0,
+           audio_unpaired=False, audio_unexpected=False):
     """Pure three-state decision -- a byte-faithful mirror of src/genlock_lock_state.rs `decide`.
 
     UNLOCKED precedence: clock (absent/unlocked) > output (present but not stamping) >
     no-input-locked. DEGRADED precedence (only when no UNLOCKED condition holds): some-input-
-    unlocked > recent-event > ntp-failed > qpc-drift. Otherwise LOCKED. Returns (state, reason).
+    unlocked > recent-event > ntp-failed > qpc-drift > audio-pairing > audio-unexpected (#1303).
+    Otherwise LOCKED. Returns (state, reason).
 
     #1299: `n_absent` = of `n_inputs`, how many have NO live NDI receiver connection (sender not
     running). The input decisions judge only CONNECTED inputs (`n_connected = n_inputs - n_absent`),
@@ -92,6 +96,13 @@ def decide(n_inputs, n_locked, recent_event, qpc_drift_beyond_bound, clock_prese
         return (ST_DEGRADED, R_NTP_FAILED)
     if qpc_drift_beyond_bound:
         return (ST_DEGRADED, R_QPC_DRIFT)
+    # #1303 -- the two lowest-precedence DEGRADED audio axes (below the video reasons): an
+    # audio-enabled source unpaired with its video hold, then a silent-by-contract source found
+    # audible. Both default False so a pre-#1303 caller reproduces the old verdict exactly.
+    if audio_unpaired:
+        return (ST_DEGRADED, R_AUDIO_PAIRING)
+    if audio_unexpected:
+        return (ST_DEGRADED, R_AUDIO_UNEXPECTED)
 
     # --- LOCKED (green) -------------------------------------------------------------
     return (ST_LOCKED, R_NONE)
@@ -159,6 +170,7 @@ def analyze(bundle_json_text, box_reachable):
     n_absent = facet.get("n_absent")  # #1299: senderless inputs (observability; the widget already
                                       # decided `state`, so this never changes the verdict here).
     reason = _enrich_recent_event_reason(reason, facet)
+    reason = _enrich_audio_unexpected_reason(reason, facet)
     return {"verdict": classify(state, box_reachable), "state": state, "reason": reason,
             "n_inputs": n_inputs, "n_locked": n_locked, "n_absent": n_absent}
 
@@ -181,6 +193,27 @@ def _enrich_recent_event_reason(reason, facet):
     if not isinstance(name, str) or not name:
         return reason
     return f"{R_RECENT_EVENT}:{name}"
+
+
+def _enrich_audio_unexpected_reason(reason, facet):
+    """#1303: for an `audio_unexpected` reason, append the offending input's name so the watchdog
+    log line + Discord body read `audio_unexpected:<name>` (an actionable page — WHICH source is
+    bleeding audio into a Dante-fed mix). The widget carries the offender in the v4
+    `audio_unexpected_inputs` list; when it is absent/empty (a v1/v2/v3 line, or no offender) the
+    bare `audio_unexpected` token is returned unchanged — never `audio_unexpected:` with an empty
+    name. Any other reason is returned verbatim (a stray offender list never corrupts it)."""
+    if reason != R_AUDIO_UNEXPECTED:
+        return reason
+    aui = facet.get("audio_unexpected_inputs")
+    if not isinstance(aui, list) or not aui:
+        return reason
+    top = aui[0]
+    if not isinstance(top, dict):
+        return reason
+    name = top.get("name")
+    if not isinstance(name, str) or not name:
+        return reason
+    return f"{R_AUDIO_UNEXPECTED}:{name}"
 
 
 def _fmt(v):

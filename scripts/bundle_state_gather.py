@@ -119,12 +119,16 @@ def genlock_lock_facet_from_log(text):
       {state, reason, n_inputs, n_locked, n_absent, latency_ms, recent_event, qpc_drift_ms,
        clock:{state}, output:{present, stamping_wallclock},
        inputs:{<name>:{locked, connected, latency_ms, underruns, relocks, late_holds, depth}},
-       [recent_event_inputs:[{name, events}]], source:"log"}
+       [recent_event_inputs:[{name, events}]], [audio_unexpected_inputs:[{name}]], source:"log"}
 
     #1299 (schema v3, Part 3): `recent_event_inputs` is the top recent-event offender (name+count),
     present ONLY when the v3 line carries a non-empty list (a DEGRADED/recent_event page names it).
     Omitted for a v1/v2 line from an older build, or an empty list, so an older line never fabricates
     an attribution.
+
+    #1303 (schema v4): `audio_unexpected_inputs` is a silent-by-contract source found AUDIBLE (the
+    double-audio hazard), present ONLY when the v4 line carries a non-empty list. Omitted for a
+    v1/v2/v3 line, or an empty list.
 
     #1299 (schema v2): `n_absent` (senderless input count) and per-input `connected` distinguish an
     idle NDI input (no sender) from a connected-but-unlocked one so the fleet watchdog never
@@ -218,6 +222,25 @@ def genlock_lock_facet_from_log(text):
             rei.append({"name": name, "events": row.get("events")})
         if rei:
             facet["recent_event_inputs"] = rei
+
+    # #1303 (schema v4): the audio-unexpected offender(s) — [{name}] — a silent-by-contract source
+    # found AUDIBLE, so a DEGRADED/audio_unexpected page can NAME it (reason=audio_unexpected:<name>).
+    # Omit the key entirely when absent (a v1/v2/v3 line from an older build) or empty (no offender),
+    # so an older line never fabricates an attribution. Each entry is tolerant: a malformed row is
+    # skipped. Names-only (no events count — unlike recent_event, an unexpected-audio input is a
+    # binary condition, not a cumulative counter).
+    raw_aui = payload.get("audio_unexpected_inputs")
+    if isinstance(raw_aui, list):
+        aui = []
+        for row in raw_aui:
+            if not isinstance(row, dict):
+                continue
+            name = row.get("name")
+            if not isinstance(name, str) or not name:
+                continue
+            aui.append({"name": name})
+        if aui:
+            facet["audio_unexpected_inputs"] = aui
 
     return facet
 

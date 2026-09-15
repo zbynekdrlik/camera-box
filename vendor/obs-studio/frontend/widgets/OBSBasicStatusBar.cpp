@@ -71,8 +71,10 @@ struct GenlockScan {
 	uint32_t max_latency_ms = 0;
 	bool any_input = false;
 	bool audio_unpaired = false;                    /* #1303: an audio-enabled genlock source is unpaired with its video FIFO hold */
+	bool audio_unexpected = false;                  /* #1303: a source is audible when the certified per-box table expects it silent */
 	std::vector<std::string> unlocked_names;
 	std::vector<std::string> audio_unpaired_names;  /* #1303: which sources tripped the audio pairing bound */
+	std::vector<std::string> audio_unexpected_names;/* #1303: silent-by-contract sources that are audible (double-audio hazard) */
 	std::vector<std::string> rows; /* per-input tooltip rows */
 	std::vector<GenlockInputRow> inputs; /* #1299 per-input machine-readable records */
 };
@@ -124,6 +126,17 @@ bool genlock_scan_source(void *param, obs_source_t *source)
 			scan->audio_unpaired = true;
 			scan->audio_unpaired_names.push_back(nm);
 		}
+	}
+	/* #1303: the audio-UNEXPECTED term (box-class-agnostic subset) — a source that is AUDIBLE
+	 * (ndi_audio on) when it is silent-by-contract per the certified per-box audio table. A CAMERA
+	 * input is silent-by-contract on EVERY box (genlock_forced_table_audit::is_camera_input), so this
+	 * needs no box identity and can never false-DEGRADE a correctly-configured box (cameras are
+	 * forced ndi_audio=false); an audible camera is the double-audio hazard. The box-class-DEPENDENT
+	 * cases (a non-camera audible on a Dante-fed box; a program source silent on the cg box) need a
+	 * box-role marker and stay owned by the deploy-time #1303 part-4 preflight (a followup). */
+	if (st.version >= 2 && st.audio_enabled && genlock_name_is_camera(nm.c_str())) {
+		scan->audio_unexpected = true;
+		scan->audio_unexpected_names.push_back(nm);
 	}
 	char row[320];
 	snprintf(row, sizeof(row),
@@ -198,6 +211,8 @@ const char *genlock_reason_key(genlock_lock_reason_t r)
 		return "ntp_failed";
 	case GENLOCK_LOCK_REASON_AUDIO_PAIRING:
 		return "audio_pairing";
+	case GENLOCK_LOCK_REASON_AUDIO_UNEXPECTED:
+		return "audio_unexpected";
 	default:
 		return "qpc_drift";
 	}
@@ -249,13 +264,15 @@ std::string genlock_build_lock_json(const char *state_name, const char *reason_k
 				    int n_locked, int n_absent, uint32_t latency_ms, const char *clock_str,
 				    const char *output_str, bool recent_event,
 				    const char *recent_event_input_name, uint64_t recent_event_input_events,
-				    int64_t qpc_drift_ms, const std::vector<GenlockInputRow> &inputs)
+				    int64_t qpc_drift_ms, const char *audio_unexpected_input_name,
+				    const std::vector<GenlockInputRow> &inputs)
 {
 	/* #1299: schema v2 added top-level n_absent + per-input connected; Part 3 (v3) adds
-	 * recent_event_inputs (the top recent-event offender name+count). All additive: the bundle-state
-	 * parser defaults n_absent->None, connected->true, and OMITS recent_event_inputs when absent/empty,
-	 * so a v1/v2 line from an older build reads cleanly. */
-	std::string j = "{\"v\":3,\"state\":";
+	 * recent_event_inputs (the top recent-event offender name+count). #1303 (v4) adds
+	 * audio_unexpected_inputs (a silent-by-contract source found audible). All additive: the
+	 * bundle-state parser defaults n_absent->None, connected->true, and OMITS recent_event_inputs /
+	 * audio_unexpected_inputs when absent/empty, so a v1/v2/v3 line from an older build reads cleanly. */
+	std::string j = "{\"v\":4,\"state\":";
 	genlock_json_append_escaped(j, state_name);
 	j += ",\"reason\":";
 	genlock_json_append_escaped(j, reason_key);
@@ -277,6 +294,16 @@ std::string genlock_build_lock_json(const char *state_name, const char *reason_k
 		genlock_json_append_escaped(j, recent_event_input_name);
 		snprintf(num, sizeof(num), ",\"events\":%llu}", (unsigned long long)recent_event_input_events);
 		j += num;
+	}
+	j += "]";
+	/* #1303 (v4): the audio-unexpected offender (a one-element list; empty when none), so a
+	 * DEGRADED/audio_unexpected page can name the audible silent-by-contract source. The parser omits
+	 * an empty list, so a line without a real offender never fabricates an attribution. */
+	j += ",\"audio_unexpected_inputs\":[";
+	if (audio_unexpected_input_name && audio_unexpected_input_name[0]) {
+		j += "{\"name\":";
+		genlock_json_append_escaped(j, audio_unexpected_input_name);
+		j += "}";
 	}
 	j += "]";
 	snprintf(num, sizeof(num), ",\"qpc_drift_ms\":%lld,\"inputs\":[", (long long)qpc_drift_ms);
@@ -1021,6 +1048,7 @@ void OBSBasicStatusBar::UpdateGenlockLabel()
 	f.output_present = out.present ? 1 : 0;
 	f.output_stamping = out.stamping ? 1 : 0;
 	f.audio_unpaired = scan.audio_unpaired ? 1 : 0;
+	f.audio_unexpected = scan.audio_unexpected ? 1 : 0;
 
 	genlock_lock_reason_t reason;
 	const genlock_lock_state_t state = genlock_decide_lock_state(&f, &reason);
@@ -1074,6 +1102,16 @@ void OBSBasicStatusBar::UpdateGenlockLabel()
 				reasonText += QString(" +%1 more").arg(scan.audio_unpaired_names.size() - 1);
 		} else {
 			reasonText = "audio unpaired";
+		}
+		break;
+	case GENLOCK_LOCK_REASON_AUDIO_UNEXPECTED:
+		if (!scan.audio_unexpected_names.empty()) {
+			reasonText = QString("audio unexpected: %1")
+					     .arg(QString::fromStdString(scan.audio_unexpected_names.front()));
+			if (scan.audio_unexpected_names.size() > 1)
+				reasonText += QString(" +%1 more").arg(scan.audio_unexpected_names.size() - 1);
+		} else {
+			reasonText = "audio unexpected";
 		}
 		break;
 	}
@@ -1160,7 +1198,9 @@ void OBSBasicStatusBar::UpdateGenlockLabel()
 			!clock_present ? "absent" : (f.clock_locked ? "locked" : "unlocked"),
 			!out.present ? "absent" : (out.stamping ? "stamping" : "not-stamping"), recent_event,
 			has_offender ? recent_event_input_name.c_str() : nullptr, recent_event_input_events,
-			scan.max_abs_qpc_drift_ms, scan.inputs);
+			scan.max_abs_qpc_drift_ms,
+			scan.audio_unexpected_names.empty() ? nullptr : scan.audio_unexpected_names.front().c_str(),
+			scan.inputs);
 		blog(LOG_INFO, "genlock-lock-json: %s (#1299)", gl_json.c_str());
 	}
 }
