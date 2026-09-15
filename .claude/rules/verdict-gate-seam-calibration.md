@@ -55,7 +55,7 @@ ticket.
 every green run with margin AND is not tripped by an unrelated hardware fault. The cam1 ShadowCast
 grabber defect (issue 909) is why `optical_floor` WAS report-only — it, `frozen_leg` and
 `av_window` were all restored to blocking once the fleet went clean (`optical_floor` LIVE at
-floor 6 since issue 905 item 3, `frozen_leg` since item 2, `av_window` since issue 861). Verify
+floor 15 since issue 915 (was 6 per issue 905 item 3), `frozen_leg` since item 2, `av_window` since issue 861). Verify
 your metric empirically survives it before going LIVE: `presentation_cadence` is LIVE because the
 worst green `paired_fraction` (0.00473) INCLUDES CAM1 windows that carry the defect — do NOT argue
 LIVE-safety from a mechanical "that defect can't manufacture this signature" claim (a capture-side
@@ -385,7 +385,7 @@ fix). When the promote cycle finally had real green-run data (the 2026-09-01 gre
   without it means dup-cadence hard-fails a spanning freeze, which is precisely why the freeze-adjacent
   gates historically stayed report-only for this reason (§5; `frozen_leg`/`av_window` have since been
 restored blocking once the fleet went clean — issue 905 item 2 / issue 861 — and `optical_floor`
-LIVE at floor 6 since issue 905 item 3). With no spanning-freeze
+LIVE at floor 15 since issue 915 (was 6 per issue 905 item 3)). With no spanning-freeze
   datapoint to calibrate the boundary (0/44 green runs masked, incl. all cam1 windows), the honest
   disposition is NO-FLIP-WITH-DATA: keep report-only (observability is retained in the verdict JSON),
   correct the seam's own now-stale doc (a `gates_overall_pass()` doc that still cites a since-satisfied
