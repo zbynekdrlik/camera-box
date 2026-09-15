@@ -558,44 +558,186 @@ pub fn summarize_send_all(samples: &[SendAuditSample]) -> Vec<SendAuditSummary> 
 
 // ---------------------------------------------------------------------------
 // #1318 — RELOCK-BURST family: the `genlock-relock '<source>':` per-EVENT line.
-// (RED stub — real bodies land in the following [green] commit.)
+//
+// The third parser family over the SAME OBS log, beside the INPUT (`genlock-fifo
+// audit`) and SEND (`genlock-ndi-output/filter`) families above. The periodic
+// audit line already carries `relocks=` as a CUMULATIVE counter, so a live
+// watchdog reading it after a storm sees a frozen value with zero window delta —
+// it cannot tell "a 462-relock storm happened 50 min ago" from "never". This
+// family parses the individual per-EVENT `genlock-relock` lines
+// (`vendor/obs-studio/libobs/obs-source.c`, the backlog/ACQUIRE relock emit site)
+// and clusters them on their own OBS `HH:MM:SS.mmm` timestamps into BURST episodes
+// — the page-able signal a strih render-freeze / sender stall produces on the
+// receiver FIFO (issue 1318: one 17 s storm from a scene-switch render freeze).
+//
+// Marker `genlock-relock '` is mutually NON-SUBSTRING with `genlock-fifo audit '`,
+// `genlock-ndi-output audit '`, `genlock-ndi-filter audit '` (asserted both ways in
+// tests) — that is what lets all three families run over one log independently.
+// Pure std (no serde), so it stays Tier-0 standalone-rustc testable.
 // ---------------------------------------------------------------------------
 
-/// One parsed `genlock-relock '<source>':` per-event line (RED stub).
+/// One parsed `genlock-relock '<source>':` per-event line, placed on the log's own
+/// timeline by its leading OBS `HH:MM:SS.mmm` timestamp.
+///
+/// `at_ms` is milliseconds-since-midnight parsed from the OBS `blog()` timestamp
+/// that immediately precedes the marker (robust to any journald/SSH wrapper prefix
+/// — the LAST `HH:MM:SS.mmm` token before the marker is the OBS one). OBS log lines
+/// carry no date, so a capture that crosses midnight resets `at_ms` to a smaller
+/// value; [`summarize_relock_bursts`] treats any backward step as a cluster
+/// boundary (a burst never spans midnight in practice), never a negative gap.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RelockEvent {
     pub source: String,
     pub at_ms: u64,
 }
 
-/// Parse ONE `genlock-relock` line into a [`RelockEvent`] (RED stub).
-pub fn parse_relock_line(_line: &str) -> Option<RelockEvent> {
-    None
+/// Parse `HH:MM:SS`/`HH:MM:SS.mmm` (an optional trailing `:` is stripped) into
+/// milliseconds-since-midnight. Returns `None` on any malformed field so a stray
+/// token before the marker never fabricates a timeline position.
+fn parse_hhmmss_ms(tok: &str) -> Option<u64> {
+    let tok = tok.strip_suffix(':').unwrap_or(tok);
+    let mut it = tok.split(':');
+    let hh: u64 = it.next()?.parse().ok()?;
+    let mm: u64 = it.next()?.parse().ok()?;
+    let sec_frac = it.next()?;
+    if it.next().is_some() {
+        return None; // more than 3 colon-parts is not a clock time
+    }
+    let sub_ms = match sec_frac.split_once('.') {
+        Some((s, f)) => {
+            let ss: u64 = s.parse().ok()?;
+            let mut fs = f.to_string();
+            while fs.len() < 3 {
+                fs.push('0');
+            }
+            let fms: u64 = fs.get(..3)?.parse().ok()?;
+            ss * 1000 + fms
+        }
+        None => sec_frac.parse::<u64>().ok()? * 1000,
+    };
+    Some(hh * 3_600_000 + mm * 60_000 + sub_ms)
 }
 
-/// Parse every `genlock-relock` line found in `text`, in order.
+/// Parse ONE `genlock-relock '<source>':` line into a [`RelockEvent`].
+///
+/// Returns `None` if the line has no `genlock-relock '<source>':` marker OR carries
+/// no parseable leading OBS `HH:MM:SS.mmm` timestamp (an event with no timeline
+/// position cannot be clustered). Any `genlock-fifo audit` / `genlock-ndi-*` line is
+/// rejected (the marker is non-substring), so this parser is safe to run over the
+/// same mixed log as the other two families.
+pub fn parse_relock_line(line: &str) -> Option<RelockEvent> {
+    const MARK: &str = "genlock-relock '";
+    let mark_at = line.find(MARK)?;
+    let after_mark = &line[mark_at + MARK.len()..];
+    let quote_end = after_mark.find('\'')?;
+    let source = after_mark[..quote_end].to_string();
+    let ts_tok = line[..mark_at].split_whitespace().last()?;
+    let at_ms = parse_hhmmss_ms(ts_tok)?;
+    Some(RelockEvent { source, at_ms })
+}
+
+/// Parse every `genlock-relock` line found in `text`, in order. Non-relock lines
+/// (and relock lines with no timestamp) are silently skipped.
 pub fn parse_relock_lines(text: &str) -> Vec<RelockEvent> {
     text.lines().filter_map(parse_relock_line).collect()
 }
 
-/// Per-source relock-burst summary over a captured window (RED stub struct).
+/// Per-source relock-burst summary over a captured window. A relock STORM (a
+/// scene-switch render freeze on the sender starving this receiver's FIFO into an
+/// underrun→overshoot recovery, issue 1318) shows up here as `bursts >= 1` with a
+/// high `max_per_second`; steady operation is `bursts=0`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RelockBurstSummary {
     pub source: String,
+    /// Total relock events seen for this source across the window.
     pub total_relocks: u64,
+    /// Number of BURST episodes: gap-separated clusters whose densest 1 s (the
+    /// `window_ms`) sliding sub-window reached at least `min_burst_relocks` events.
     pub bursts: u64,
+    /// Peak relocks in any `window_ms`-wide window across the whole source — the
+    /// storm-intensity signal a watchdog thresholds on.
     pub max_per_second: u64,
+    /// `at_ms` of the first / last relock event (0 when there were none) — lets a
+    /// report show WHEN the storm was without re-scanning the log.
     pub first_at_ms: u64,
     pub last_at_ms: u64,
 }
 
-/// Cluster each source's relock events into burst episodes (RED stub).
+/// Cluster each source's relock events (grouped in first-seen order, kept in log
+/// order) into burst episodes. A new cluster starts on a gap greater than
+/// `window_ms` OR a backward time step (midnight wrap / a new log concatenated); a
+/// cluster is a BURST when its densest `window_ms` sliding window holds at least
+/// `min_burst_relocks` events. `window_ms` is the "within 1 s" width (pass 1000).
 pub fn summarize_relock_bursts(
-    _events: &[RelockEvent],
-    _min_burst_relocks: usize,
-    _window_ms: u64,
+    events: &[RelockEvent],
+    min_burst_relocks: usize,
+    window_ms: u64,
 ) -> Vec<RelockBurstSummary> {
-    Vec::new()
+    let mut order: Vec<String> = Vec::new();
+    let mut groups: HashMap<String, Vec<u64>> = HashMap::new();
+    for e in events {
+        if !groups.contains_key(&e.source) {
+            order.push(e.source.clone());
+        }
+        groups.entry(e.source.clone()).or_default().push(e.at_ms);
+    }
+    order
+        .into_iter()
+        .map(|name| {
+            let times = groups.remove(&name).unwrap_or_default();
+            summarize_one_source_bursts(name, &times, min_burst_relocks, window_ms)
+        })
+        .collect()
+}
+
+/// Peak count of events within any `window_ms`-wide window over an ascending slice
+/// (two-pointer; inclusive `t[j] - t[i] <= window_ms`).
+fn peak_in_window(times: &[u64], window_ms: u64) -> u64 {
+    let mut left = 0usize;
+    let mut peak = 0u64;
+    for right in 0..times.len() {
+        while times[right] - times[left] > window_ms {
+            left += 1;
+        }
+        peak = peak.max((right - left + 1) as u64);
+    }
+    peak
+}
+
+fn summarize_one_source_bursts(
+    source: String,
+    times: &[u64],
+    min_burst_relocks: usize,
+    window_ms: u64,
+) -> RelockBurstSummary {
+    let mut summary = RelockBurstSummary {
+        source,
+        total_relocks: times.len() as u64,
+        first_at_ms: times.first().copied().unwrap_or(0),
+        last_at_ms: times.last().copied().unwrap_or(0),
+        ..RelockBurstSummary::default()
+    };
+    let mut cluster_start = 0usize;
+    for i in 0..times.len() {
+        let boundary =
+            i > cluster_start && (times[i] < times[i - 1] || times[i] - times[i - 1] > window_ms);
+        if boundary {
+            let peak = peak_in_window(&times[cluster_start..i], window_ms);
+            summary.max_per_second = summary.max_per_second.max(peak);
+            if peak as usize >= min_burst_relocks {
+                summary.bursts += 1;
+            }
+            cluster_start = i;
+        }
+    }
+    if cluster_start < times.len() {
+        let peak = peak_in_window(&times[cluster_start..], window_ms);
+        summary.max_per_second = summary.max_per_second.max(peak);
+        if peak as usize >= min_burst_relocks {
+            summary.bursts += 1;
+        }
+    }
+    summary
 }
 
 #[cfg(test)]
