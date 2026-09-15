@@ -312,6 +312,20 @@ pub fn realtime_fifo_priority(role: RtThreadRole) -> Option<i32> {
     }
 }
 
+/// SCHED_FIFO scheduling-policy id (Linux `sched.h`; equal to `libc::SCHED_FIFO`,
+/// which is 1). Kept as a plain numeric literal — with no `libc` dependency — so
+/// the pure policy-word decision below compiles standalone and a std-only replica
+/// can mirror it under Tier-0 (a `#[cfg(test)]` parity check ties it to libc).
+const SCHED_FIFO_POLICY: i32 = 1;
+
+/// The `sched_setscheduler` POLICY WORD the capture + NDI-emit hot path is raised
+/// with (issue 899 defect 2). Composed from plain numeric constants (no `libc`) so
+/// it is pure and Tier-0-replicable; [`set_current_thread_realtime`] passes the
+/// result as the `policy` argument of `sched_setscheduler`.
+pub fn capture_emit_sched_policy_word() -> i32 {
+    SCHED_FIFO_POLICY
+}
+
 // ---------------------------------------------------------------------------
 // IO / syscall glue around the pure logic above (not unit-tested — reads /sys,
 // /proc, calls sched_setaffinity).
@@ -970,5 +984,20 @@ LOC:    1000000    1000000    1000000    1000000   Local timer interrupts
             let is_fifo = realtime_fifo_priority(role).is_some();
             assert_eq!(is_fifo, matches!(role, RtThreadRole::CaptureEmit));
         }
+    }
+
+    #[test]
+    fn capture_emit_policy_word_carries_reset_on_fork_and_is_fifo() {
+        // issue 899: the capture+emit raise runs on a tokio WORKER thread; a bare
+        // SCHED_FIFO policy is INHERITED across clone(), so the NDI SDK / blocking
+        // threads that worker later spawns come up FIFO 90 too (measured: 19 vs 1
+        // FIFO threads on cam2, nondeterministic). SCHED_RESET_ON_FORK (0x40000000)
+        // makes those children fall back to SCHED_OTHER while this thread keeps FIFO.
+        let w = capture_emit_sched_policy_word();
+        assert!(
+            w & 0x4000_0000 != 0,
+            "policy word must carry SCHED_RESET_ON_FORK so spawned threads stay SCHED_OTHER (got {w:#x})"
+        );
+        assert_eq!(w & 0xff, 1, "policy word low byte must be SCHED_FIFO (1), got {w:#x}");
     }
 }
