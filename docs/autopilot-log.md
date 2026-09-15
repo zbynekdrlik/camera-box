@@ -12041,3 +12041,25 @@ tmpfs-`/var/log` box, destroyed by the owner's power-cycle). Layered defence acr
   TESTS + DOCS only, no rig touched, no push (supervisor integrates by cherry-pick). Overlap with
   release-train PR (append-only `docs/autopilot-log.md` + `.claude/rules/realtime-isolation.md`) is
   union-resolved at cherry-pick.
+## 2026-09-15 — issue 1311 boot-order fix (off-box remote-logging units survive a clean cambox boot)
+
+- **Lane:** worktree `lane/1311-bootorder` (based on `origin/dev` b5db81dd7). CODE + TESTS + DOCS
+  only; no push (supervisor cherry-picks).
+- **Defect (live cam2 15.9.2026):** both #1311 units failed at every clean boot and stayed dead
+  until a hand restart — a cambox masks `systemd-networkd-wait-online` (the 547 boot-stall fix), so
+  `network-online.target` is reached before `systemd-networkd` applies the static IP/route.
+  netconsole's setup script checked the egress route ONCE and `exit 1`ed on the first miss;
+  journal-upload kept the stock `Restart=on-failure` + default StartLimit and exhausted after 5
+  instant restarts.
+- **Fix (`scripts/lib/remote-logging.sh`):** netconsole setup script waits for the egress route in a
+  bounded retry loop (new `REMOTE_LOG_NC_ROUTE_RETRIES` / `…_ROUTE_RETRY_SLEEP_S` knobs, defaults
+  30×2s); `cambox-netconsole.service` also orders `After=systemd-networkd.service` +
+  `Wants=systemd-networkd.service` (kept the network-online lines); journal-upload drop-in gets
+  `[Unit] StartLimitIntervalSec=0` + `[Service] Restart=always` / `RestartSec=5`. `REMOTE_LOG_NC_CONFIGFS`
+  made env-overridable for the arm test.
+- **Commits:** RED 822cf0c44 (`tests/python/test_remote_logging_boot_order_1311.py`), GREEN b89b40d4a,
+  docs (this entry + `.claude/rules/cambox-remote-logging.md` gotcha).
+- **Local verify (Tier-0):** `bash -n` + `shellcheck -S warning` clean; the new boot-order pytest RED
+  (3 failed) → GREEN (3 passed) + the existing gather pytest (2 passed) = 5 passed. The Rust harness
+  `harness_remote_logging_1311.rs` runs at CI / for the supervisor; audited its substrings survive
+  by rendering the generated unit/drop-in/setup-script.

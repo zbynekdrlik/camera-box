@@ -106,3 +106,33 @@ all three provisioners — a worktree-isolated worker CANNOT run it (the isolati
 lib and call each pure function (mac parser cases, verdict green/fail-closed, generator shapes,
 `bash -n` on the generated on-box setup script); a `--emit`/plan render of the installer; and
 `cargo fmt --all --check` (parses the `.rs`). The Rust harness runs at CI / for the supervisor.
+
+## GOTCHA — network-online.target is INSTANT on a cambox (wait-online is masked), so every network-dependent unit must RETRY or order on systemd-networkd.service (#1311, live on cam2 15.9.2026)
+
+A cambox MASKS `systemd-networkd-wait-online` (`setup-device.sh` STEP 11 / `create-usb-linux.sh`
+`ln -sf /dev/null …/systemd-networkd-wait-online.service`, the #547 boot-stall fix). With
+wait-online masked, `network-online.target` is reached INSTANTLY at boot — before
+`systemd-networkd` has applied the static IP + default route. So a unit that orders only on
+`network-online.target` starts BEFORE the box can actually reach dev1.
+
+Both #1311 units hit this at every clean boot and stayed dead until a hand restart:
+
+- `cambox-netconsole.service` (a oneshot) resolved the egress route to dev1 ONCE and `exit 1`ed on
+  the first miss → dead for the whole boot.
+- `systemd-journal-upload` kept the stock `Restart=on-failure` + default StartLimit → 5 instant
+  "connection refused" restarts exhausted the limit → unit stayed `failed`.
+
+**The fix, and the rule for ANY new network-dependent unit on a cambox:** do NOT trust
+`network-online.target` on this box class — a network-dependent boot unit must EITHER retry the
+resource in a bounded loop (the netconsole setup script now waits for the egress route via
+`REMOTE_LOG_NC_ROUTE_RETRIES` × `…_ROUTE_RETRY_SLEEP_S` before giving up) AND/OR order on
+`systemd-networkd.service` itself (`After=systemd-networkd.service` + `Wants=systemd-networkd.service`),
+AND, for a long-lived `Restart=` unit, disable the restart-storm ceiling
+(`StartLimitIntervalSec=0` + `Restart=always` + a spaced `RestartSec=`) so it keeps retrying until
+the peer answers. The netconsole unit keeps its `network-online.target` lines as documented intent
+(and `harness_remote_logging_1311.rs` pins them), but the retry loop + `systemd-networkd.service`
+ordering are what actually make it survive a clean boot.
+
+Tier-0 boot-order coverage: `tests/python/test_remote_logging_boot_order_1311.py` (a fake `ip` whose
+`route get` misses the first N calls proves the retry arm; unit/drop-in text asserts). Make
+`REMOTE_LOG_NC_CONFIGFS` env-overridable for that arm test.
