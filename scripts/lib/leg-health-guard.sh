@@ -143,6 +143,10 @@ leg_health_eproto_fail_threshold() { echo 6; }
 # lifecycle line is EXCLUDED from the >=6/hr bar (only steady-state -71 count); a genuine wire fault
 # (-71 BETWEEN restarts) is unaffected and still refuses. 3s covers the parity-align stop->start gap
 # (e.g. 13:24:58 -> 13:25:01) while staying far tighter than the ~minutes between run restarts.
+# NOTE (#1133 review 🔵): both epoch lists are floored to whole seconds (`grep -oE '^[0-9]+'` on the
+# `short-unix` `<sec>.<usec>` form), so the effective window is up to ~4s in real time — this biases
+# toward EXCLUSION of a restart-coincident -71 (exactly the artifact class we drop), never toward
+# hiding a between-restarts wire fault.
 leg_health_eproto_restart_adjacent_secs() { echo 3; }
 
 # REPORT-ONLY threshold for the DEQUEUE STALL diagnostic (was leg_health_stall_fail_threshold, HARD,
@@ -219,6 +223,10 @@ leg_health_journal_count_cmd() {
 # -k gives the identical uvcvideo lines with clean absolute-epoch windowing and no dmesg
 # boot-relative-timestamp parsing). No InvocationID here: kernel messages are not scoped to a
 # userspace unit instance; the time window IS the scope.
+#
+# #1133 review 🔵: this generic `journalctl -k` COUNT builder is no longer on the read_all path (the
+# EPROTO term switched to the restart-adjacency epoch readers below). It is retained deliberately as
+# a reusable kernel-count helper (its own unit test pins the shape), not dead-by-accident.
 leg_health_kmsg_count_cmd() {
   local since_epoch="${1:-}" until_epoch="${2:-}" pattern="${3:-}"
   printf 'journalctl -k --since=@%s --until=@%s --no-pager 2>/dev/null | grep -Ec '\''%s'\''' \
