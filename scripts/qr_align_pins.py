@@ -458,6 +458,19 @@ def arrival_floors_from_jitter(jitter_json, sources, min_samples=MIN_FLOOR_SAMPL
     return out
 
 
+def floor_samples_sufficient(jitter_json, sources, min_samples=MIN_FLOOR_SAMPLES):
+    """#1168: True iff EVERY source in `sources` has an arrival floor in `jitter_json` that
+    arrival_floors_from_jitter would KEEP -- i.e. present, well-formed, and NOT dropped as a phantom
+    (explicit `samples < min_samples`). When it returns False the budget check WILL be skipped for a
+    missing/phantom floor, so qr-align.sh re-fetches the post-reset audit ONCE more before letting
+    align() fall back to the budget-unchecked plan (a transient thin window -- run 34973535496's cam4
+    samples=2 -- must not be mistaken for a genuinely-unobtainable floor). Reuses
+    arrival_floors_from_jitter's OWN drop semantics (no second copy): a MISSING samples count is
+    trusted (kept), only an explicit low count is the known phantom."""
+    floors = arrival_floors_from_jitter(jitter_json, sources, min_samples)
+    return all(s in floors for s in sources)
+
+
 def floor_aware_partition(arrival_floors, deltas, floor_ms=DEFAULT_FLOOR_MS,
                           max_abs_latency_ms=DEFAULT_MAX_ABS_LATENCY_MS, current_pins=None):
     """The PURE core of the ADDITIVE plan (#1161 mechanism, #1253 additive fix) that PARTITIONS
@@ -1653,6 +1666,11 @@ def main(argv=None):
                     help="#1161 two-phase reset PHASE 0: force every --sources pin to --floor-ms and "
                          "exit (the caller settles + re-fetches the audit so floors are TRUE "
                          "transports). Mutually exclusive with the measure/plan/--execute flow.")
+    ap.add_argument("--floor-samples-ok", action="store_true",
+                    help="#1168: read --jitter-json and EXIT 0 iff every --sources arrival floor is "
+                         "well-sampled (>= MIN_FLOOR_SAMPLES), else EXIT 1 -- the sufficiency check "
+                         "qr-align.sh gates a bounded audit RE-FETCH on before the budget-unchecked "
+                         "fallback. Read-only; mutually exclusive with the measure/plan/--execute flow.")
     ap.add_argument("--execute", action="store_true",
                     help="APPLY the floor-aware pins (default: DRY-RUN -- measure + plan, write nothing)")
     a = ap.parse_args(argv)
@@ -1675,6 +1693,26 @@ def main(argv=None):
         print(f"[qr-align] #1161 reset {n} source(s) to the {a.floor_ms} ms floor "
               "(settle + re-fetch the audit before the floor-aware plan).", file=sys.stderr)
         return 0
+
+    if a.floor_samples_ok:
+        # #1168: read-only sufficiency check on the post-reset audit -> exit 0 (well-sampled) / 1
+        # (a floor is missing or a phantom) / 2 (no/unreadable --jitter-json). qr-align.sh gates a
+        # bounded re-fetch on a non-zero exit.
+        if not a.jitter_json:
+            print("[qr-align] #1168 --floor-samples-ok requires --jitter-json", file=sys.stderr)
+            return 2
+        try:
+            with open(a.jitter_json, encoding="utf-8") as f:
+                jj = json.load(f)
+        except (OSError, ValueError) as exc:
+            print(f"[qr-align] #1168 --floor-samples-ok: could not read --jitter-json "
+                  f"{a.jitter_json!r} ({exc})", file=sys.stderr)
+            return 2
+        ok = floor_samples_sufficient(jj, sources)
+        print(f"[qr-align] #1168 arrival-floor audit samples "
+              f"{'SUFFICIENT' if ok else 'INSUFFICIENT (>=1 align source missing a well-sampled floor)'} "
+              f"for {sources}", file=sys.stderr)
+        return 0 if ok else 1
 
     jitter_json = None
     if a.jitter_json:
