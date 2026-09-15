@@ -539,6 +539,13 @@ _AV_OFFSET_SUGGEST_RE = re.compile(
     r"(\d+) -> \d+ms \(measured offset=(-?\d+(?:\.\d+)?)ms\)"
 )
 
+# #1319 — the dock's per-10s heartbeat line, present whenever the dock is LIVE regardless of the
+# measured offset (`av-sync-dock: diag ... locked=yes state=LIVE`). Its freshness
+# (av_offset_dock_live_age_from_log) lets the dev1 band decision distinguish "dock LIVE, offset in
+# the suggestion dead band" (IN_BAND_QUIET, healthy) from "dock silent" (STALE) — the false-STALE
+# the SUGGESTED-only age read during a dead-band quiet window.
+_AV_OFFSET_DIAG_LOCKED_RE = re.compile(r"av-sync-dock: diag .*\blocked=yes\b")
+
 # #1267 — rolling-window bounds, in-log seconds behind the log head. RECENT = the freshest 10 min;
 # BASELINE = the 10..40 min region behind it (a rolling reference that predates the recent window).
 # The BASELINE is bounded above by how far the #1222 bounded TAIL reaches (~50 min on a long
@@ -643,6 +650,35 @@ def av_offset_series_from_log(text, recent_window_s=AV_OFFSET_RECENT_WINDOW_S,
         str(len(recent_offs)),
         str(len(base_offs)),
     )
+
+
+def av_offset_dock_live_age_from_log(text):
+    """#1319 — the in-log whole-second age of the freshest `av-sync-dock: diag ... locked=yes` line
+    behind the log's newest parseable line of ANY kind. Returns "" when there is NO such line.
+
+    The dock emits this heartbeat (~every 10 s) whenever it is LIVE, INDEPENDENT of the measured
+    offset — so a FRESH age here while the SUGGESTED offset series is silent means "dock LIVE, offset
+    inside the suggestion dead band" (the dev1 band decision reads IN_BAND_QUIET, healthy), whereas a
+    STALE age means the dock itself stopped (STALE). This closes the false-STALE the SUGGESTED-only
+    `av_offset_age_s` read during a dead-band quiet window (the owner's 19:44-19:55 gap, 15.9.2026).
+
+    Same recency model as av_offset_series_from_log (`_recency_gap_s`, midnight-wrap corrected, file
+    order IS time order) over ONLY the #1222 bounded TAIL, one pass, no wall clock injected."""
+    t = text or ""
+    if LOG_BOUNDED_READ_SEPARATOR in t:
+        t = t.rsplit(LOG_BOUNDED_READ_SEPARATOR, 1)[-1]
+    log_newest_ts = None
+    last_live_ts = None
+    for line in t.splitlines():
+        ts = _log_line_seconds(line)
+        if ts is not None:
+            log_newest_ts = ts
+        if ts is not None and _AV_OFFSET_DIAG_LOCKED_RE.search(line):
+            last_live_ts = ts
+    if last_live_ts is None:
+        return ""
+    gap = _recency_gap_s(log_newest_ts, last_live_ts)
+    return "" if gap is None else str(round(gap))
 
 
 def distroav_dll_paths(scan_roots):
@@ -1072,6 +1108,7 @@ def build_bundle_state(
     av_offset_age_s="",
     av_offset_n_recent="",
     av_offset_n_base="",
+    av_offset_dock_live_age_s="",
     vb_matrix_running="",
     vb_matrix_name="",
     vb_matrix_pid="",
@@ -1172,6 +1209,11 @@ def build_bundle_state(
         "av_offset_age_s": av_offset_age_s,
         "av_offset_n_recent": av_offset_n_recent,
         "av_offset_n_base": av_offset_n_base,
+        # #1319 — the dock-LIVE freshness age (in-log seconds behind the log head of the freshest
+        # `av-sync-dock: diag ... locked=yes` heartbeat). Lets the dev1 band decision read
+        # IN_BAND_QUIET (dock LIVE, offset in the suggestion dead band) instead of a false STALE.
+        # Same omit-when-empty rule (absent == UNKNOWN downstream, never a fake 0).
+        "av_offset_dock_live_age_s": av_offset_dock_live_age_s,
         # #1227 — the VB-Matrix presence facet the dev1 VB-Matrix alert watchdog reads. Same
         # omit-when-empty rule: running="0" (installed but the VBAudioMatrix* process is DEAD) is a
         # truthy string and is KEPT (surfaces as DOWN); running="" (a box with no VB-Matrix install,

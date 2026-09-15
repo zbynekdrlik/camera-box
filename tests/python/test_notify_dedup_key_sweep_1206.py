@@ -162,6 +162,12 @@ _PRODUCTION_CRITICAL_TIME_BUCKETED = {
     "avsync-heartbeat-alert-watchdog.sh",  # #812  -- A/V-sync heartbeat stale
     "imag-obs-alert-watchdog.sh",          # #882  -- imag OBS down / latency-drift / restart-storm
     "measurement-audio-alert-watchdog.sh", # #1310 -- mbc measurement-audio chain reads digital silence
+    # #1319 -- av-step's file also carries the production-critical absolute A/V-offset BAND arm: its
+    # OUT_OF_BAND page (av-band-$box) time-buckets so it re-pings "dokolečka" while the stream A/V
+    # offset stays outside the E2E-aligned band (owner: A/V-sync measurement is production-critical,
+    # issue 1308). The file's OTHER notify (the #1267 STEP arm, av-step-$box) stays a stable key --
+    # allowlisting the FILE permits the bucketed band line without requiring every line to bucket.
+    "av-step-alert-watchdog.sh",          # #1319 -- absolute A/V-offset BAND arm (OUT_OF_BAND)
 }
 
 # The bucketing markers an inline --dedup-key carries when it time-buckets: the shared bash helper

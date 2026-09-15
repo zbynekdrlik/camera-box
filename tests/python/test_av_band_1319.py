@@ -82,15 +82,17 @@ def test_suggested_only_series_is_unchanged():
     assert recent == "21.0" and int(nr) == 20 and int(nb) == 0
 
 
-def test_updated_locked_fold_into_series_pin_carried():
-    # SUGGESTED first (sets latest_pin=932), then a dead-band burst of UPDATED/LOCKED lines. All
-    # land in the recent window; pin is carried from the nearest SUGGESTED, so pin_stable stays "1".
+def test_raw_updated_locked_lines_are_deliberately_not_in_the_series():
+    # DECISION (issue 1319): the raw per-tick UPDATED/LOCKED offset lines are NOT folded into the
+    # series. Folding was contradictory (the #1267 test_locked_updated_line_is_not_the_step_signal
+    # asserts they are excluded, and the byte-identical mandate holds) AND wrong (their transient
+    # lock-acquisition values would push a quiet dead-band window OUT_OF_BAND). The dead-band case is
+    # handled instead by the dock-live-age facet -> IN_BAND_QUIET. Here: SUGGESTED sets the series,
+    # a following UPDATED/LOCKED burst adds NOTHING to n_recent.
     lines = [_sugg(19, 59, 0, 932, 10.0), _sugg(19, 59, 2, 932, 10.0)]
-    lines += [_upd(19, 59, 10 + i, 12.0) for i in range(6)]
-    lines += [_locked(19, 59, 20, 12.0)]
+    lines += [_upd(19, 59, 10 + i, 12.0) for i in range(6)] + [_locked(19, 59, 20, 12.0)]
     recent, base, pin, ps, age, nr, nb = bsg.av_offset_series_from_log("\n".join(lines) + "\n")
-    # 2 SUGGESTED + 6 UPDATED + 1 LOCKED = 9 recent samples (folding worked)
-    assert int(nr) == 9, nr
+    assert int(nr) == 2, nr           # only the 2 SUGGESTED samples, the raw burst is excluded
     assert pin == "932" and ps == "1"
 
 
@@ -170,11 +172,12 @@ def _shape_lines(head_h, head_m, head_s):
     then 19:42/19:43 one each, NOTHING 19:44-19:55, then 19:56-19:59 resuming near +47; an
     UPDATED/LOCKED burst at 19:40:54-19:41:09."""
     head = head_h * 3600 + head_m * 60 + head_s
-    out = []
+    rows = []  # (tsec, line) — a real OBS log is in time order, so we SORT before joining.
 
     def emit(h, m, s, line):
-        if h * 3600 + m * 60 + s <= head:
-            out.append(line)
+        tsec = h * 3600 + m * 60 + s
+        if tsec <= head:
+            rows.append((tsec, line))
 
     for tsec in range(19 * 3600 + 33 * 60, 20 * 3600 + 1, 10):
         h, rem = divmod(tsec, 3600)
@@ -195,7 +198,8 @@ def _shape_lines(head_h, head_m, head_s):
     for mm, cnt in ((56, 1), (57, 2), (58, 1), (59, 2)):
         for i in range(cnt):
             emit(19, mm, 10 + i * 20, _sugg(19, mm, 10 + i * 20, 932, 47.0))
-    return "\n".join(out) + "\n"
+    rows.sort(key=lambda r: r[0])
+    return "\n".join(line for _t, line in rows) + "\n"
 
 
 def test_realistic_out_of_band_at_head_2000():

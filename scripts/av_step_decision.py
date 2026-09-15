@@ -193,6 +193,80 @@ def analyze(bundle_json_text, box_reachable, step_threshold_ms=DEFAULT_STEP_THRE
             "n_base": n_base, "recovered": recovered}
 
 
+# #1319 — the ABSOLUTE-BAND arm. The #1267 STEP term measures the CHANGE-rate of the 10-min median
+# vs a rolling baseline, so it is structurally blind to a SLOW absolute drift (the owner's 15.9.2026
+# +13->+47 ms wander at a constant pin never crosses a 45 ms adjacent-median delta, and the rolling
+# baseline self-normalizes it). The band term pages when the recent median offset leaves ±band of a
+# FIXED E2E-aligned reference. The reference is resolved dev1-side (env / a ~/.camera-box file / a
+# stated 0 ms fallback) and passed in — this pure kernel never does I/O.
+DEFAULT_BAND_MS = 30
+DEFAULT_BAND_REFERENCE_MS = 0.0
+
+
+def classify_av_band(recent_med, pin_stable, n_recent, dock_live_age_s, box_reachable,
+                     band_reference_ms=DEFAULT_BAND_REFERENCE_MS, band_ms=DEFAULT_BAND_MS,
+                     min_samples=DEFAULT_MIN_SAMPLES, stale_threshold_s=DEFAULT_STALE_THRESHOLD_S):
+    """One box's ABSOLUTE-BAND verdict (`box_reachable` is 1 iff the JSON was fetched this pass):
+
+      box_reachable != 1                          -> SKIP          (defer #732/#1001; never our page)
+      n_recent >= min_samples (enough offset samples in the recent window):
+          pin_stable != "1"                       -> REPIN         (a pin move — the offset<->pin
+                                                                    settling lag means the band is
+                                                                    judged only at a CONSTANT pin,
+                                                                    no page; a missing flag is not
+                                                                    "1", never masks a drift)
+          |recent_med - band_reference_ms| > band -> OUT_OF_BAND   (page after a 2-pass confirm)
+          otherwise                               -> IN_BAND       (healthy)
+      too few / no recent offset samples:
+          dock_live_age_s is None                 -> UNKNOWN       (no dock heartbeat at all — can't
+                                                                    judge; never a false anything)
+          dock_live_age_s > stale_threshold_s     -> STALE         (the dock's LIVE line itself is
+                                                                    stale — the dock stopped; never
+                                                                    a page)
+          otherwise                               -> IN_BAND_QUIET (dock LIVE + offset in the dock's
+                                                                    suggestion dead band = healthy;
+                                                                    this is the #1267 false STALE
+                                                                    the freshness facet fixes)
+
+    Judged against a FIXED anchor (`band_reference_ms`, the E2E-aligned value), so — unlike the
+    STEP arm's rolling baseline — recovery is a plain return into band, no frozen-baseline latch.
+    Band samples, when present, are judged even if the dock-live facet is absent (an older box)."""
+    if box_reachable != 1:
+        return "SKIP"
+    if recent_med is not None and n_recent is not None and n_recent >= min_samples:
+        if pin_stable != "1":
+            return "REPIN"
+        if abs(recent_med - band_reference_ms) > band_ms:
+            return "OUT_OF_BAND"
+        return "IN_BAND"
+    if dock_live_age_s is None:
+        return "UNKNOWN"
+    if dock_live_age_s > stale_threshold_s:
+        return "STALE"
+    return "IN_BAND_QUIET"
+
+
+def analyze_band(bundle_json_text, box_reachable, band_reference_ms=DEFAULT_BAND_REFERENCE_MS,
+                 band_ms=DEFAULT_BAND_MS, min_samples=DEFAULT_MIN_SAMPLES,
+                 stale_threshold_s=DEFAULT_STALE_THRESHOLD_S):
+    """Fetch-result -> the FULL band decision dict (`verdict`, `recent_med_ms`, `band_reference_ms`,
+    `band_delta_ms`, `dock_live_age_s`, `pin`, `pin_stable`, `n_recent`). ONE parse->classify path
+    (the tested path is the production path); SKIP returns WITHOUT parsing the empty body."""
+    if box_reachable != 1:
+        return {"verdict": "SKIP", "recent_med_ms": None, "band_reference_ms": band_reference_ms,
+                "band_delta_ms": None, "dock_live_age_s": None, "pin": None, "pin_stable": None,
+                "n_recent": None}
+    obj = _loads_obj(bundle_json_text)
+    (recent_med, _base, pin, pin_stable, _age, n_recent, _nb) = _from_obj(obj)
+    dock_live_age_s = _int_or_none(obj.get("av_offset_dock_live_age_s")) if isinstance(obj, dict) else None
+    verdict = classify_av_band(recent_med, pin_stable, n_recent, dock_live_age_s, box_reachable,
+                               band_reference_ms, band_ms, min_samples, stale_threshold_s)
+    band_delta_ms = None if recent_med is None else round(recent_med - band_reference_ms, 1)
+    return {"verdict": verdict, "recent_med_ms": recent_med, "band_reference_ms": band_reference_ms,
+            "band_delta_ms": band_delta_ms, "dock_live_age_s": dock_live_age_s, "pin": pin,
+            "pin_stable": pin_stable, "n_recent": n_recent}
+
+
 def _fmt(v):
     return "" if v is None else str(v)
 
@@ -213,6 +287,18 @@ def _main(argv):
     # the rolling-baseline self-normalization cannot fake. Omitted -> `recovered=` blank.
     a.add_argument("--recovery-base", type=float, default=None)
 
+    # #1319 — the ABSOLUTE-BAND arm: read /bundle-state.json on stdin -> the band verdict vs a FIXED
+    # E2E-aligned reference (resolved dev1-side, passed here). Separate subcommand so the #1267 step
+    # `analyze` and its tests are untouched.
+    b = sub.add_parser(
+        "analyze-band",
+        help="read /bundle-state.json on stdin -> band verdict + recent_med + delta + dock_live_age")
+    b.add_argument("--box-reachable", type=int, required=True)
+    b.add_argument("--band-reference-ms", type=float, default=DEFAULT_BAND_REFERENCE_MS)
+    b.add_argument("--band-ms", type=float, default=DEFAULT_BAND_MS)
+    b.add_argument("--min-samples", type=int, default=DEFAULT_MIN_SAMPLES)
+    b.add_argument("--stale-threshold-s", type=int, default=DEFAULT_STALE_THRESHOLD_S)
+
     ns = ap.parse_args(argv)
 
     if ns.cmd == "analyze":
@@ -226,6 +312,15 @@ def _main(argv):
                     ns.stale_threshold_s, recovery_base=ns.recovery_base)
         for k in ("verdict", "recent_med_ms", "base_med_ms", "pin", "step_ms", "age_s",
                   "pin_stable", "n_recent", "n_base", "recovered"):
+            print(f"{k}={_fmt(d[k])}")
+        return 0
+
+    if ns.cmd == "analyze-band":
+        text = "" if ns.box_reachable != 1 else sys.stdin.buffer.read().decode("utf-8", errors="replace")
+        d = analyze_band(text, ns.box_reachable, ns.band_reference_ms, ns.band_ms, ns.min_samples,
+                         ns.stale_threshold_s)
+        for k in ("verdict", "recent_med_ms", "band_reference_ms", "band_delta_ms",
+                  "dock_live_age_s", "pin", "pin_stable", "n_recent"):
             print(f"{k}={_fmt(d[k])}")
         return 0
 
