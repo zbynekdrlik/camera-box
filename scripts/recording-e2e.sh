@@ -1600,7 +1600,15 @@ for _lht in $LEG_HEALTH_TARGETS; do
     2>/dev/null || true)"
   _lhstall="$(leg_health_extract STALL "$_lhout")"
   _lhskip="$(leg_health_extract SKIP "$_lhout")"
-  _lheproto="$(leg_health_extract EPROTO "$_lhout")"
+  # #1133 reopen: EPROTO steady count = total -71 MINUS the restart-adjacent artifacts (a -71 within
+  # +-3s of a camera-box(-burn) lifecycle line is a UVC teardown/re-open artifact from the harness's
+  # own restart churn, not a wire fault). The steady count feeds the >=6/hr HARD bar; the excluded
+  # count is reported. A genuine wire fault (-71 BETWEEN restarts) is unaffected and still refuses.
+  _lhep_ts="$(leg_health_extract_eproto_ts "$_lhout")"
+  _lhrestart_ts="$(leg_health_extract_restart_ts "$_lhout")"
+  _lhep_pair="$(leg_health_eproto_steady_count "$_lhep_ts" "$_lhrestart_ts")"
+  _lheproto="${_lhep_pair%% *}"
+  _lheproto_adj="${_lhep_pair##* }"
   _lhstreaming="$(leg_health_extract_streaming "$_lhout")"
   # HARD signal A (count-based): emit-gate SKIP aggregates + kernel uvcvideo -EPROTO. #1133 DROPPED
   # the DEQUEUE STALL count from this classify — it gated on a quantity ANTI-correlated with real
@@ -1621,7 +1629,7 @@ for _lht in $LEG_HEALTH_TARGETS; do
   # Report-only (#1133): the DEQUEUE STALL count is now diagnostics-only (anti-correlated with real
   # frame loss, issue 1198 — never aborts).
   leg_health_dequeue_stall_report "$_lhbox" "$_lhstall"
-  echo "    ok: $_lhbox capture leg healthy (loss-ok skip=$_lhskip eproto=$_lheproto, stall=$_lhstall report-only in-window)"
+  echo "    ok: $_lhbox capture leg healthy (loss-ok skip=$_lhskip eproto=$_lheproto steady ($_lheproto_adj restart-adjacent ignored), stall=$_lhstall report-only in-window)"
 done
 # #1141: head-end OPTICAL blur/shutter fail-fast. The capture-RATE gate above (#656) proves the
 # source camera captures at the right RATE, but is BLIND to a camera capturing at that rate yet
