@@ -211,6 +211,14 @@ jobs:
           if ($sb -notmatch [regex]::Escape('f.audio_unpaired = scan.audio_unpaired ? 1 : 0;') -or $sb -notmatch [regex]::Escape('GENLOCK_LOCK_REASON_AUDIO_PAIRING')) {
             Write-Error "OBSBasicStatusBar.cpp: the #1303 audio-parity LOCK-indicator DEGRADE term is gone — an unpaired audio leg would no longer show DEGRADED; re-apply"; exit 1
           }
+          # #1303: the audio-UNEXPECTED term — a source that is AUDIBLE when the certified per-box audio table expects it silent (a camera on any box; the double-audio hazard) turns the indicator DEGRADED and names the offender in the v4 audio_unexpected_inputs list. Mirror of src/genlock_lock_state.rs (audio_unexpected facet + LockReason::AudioUnexpected=10) + GenlockLockState.hpp genlock_name_is_camera + tests/genlock_lock_json_guards.rs::genlock_lock_audio_unexpected_offender_present_1303.
+          if ($sb -notmatch [regex]::Escape('f.audio_unexpected = scan.audio_unexpected ? 1 : 0;') -or $sb -notmatch [regex]::Escape('genlock_name_is_camera(nm.c_str())') -or $sb -notmatch [regex]::Escape('audio_unexpected_inputs')) {
+            Write-Error "OBSBasicStatusBar.cpp: the #1303 audio-UNEXPECTED LOCK-indicator term is gone — an audible silent-by-contract source would no longer show DEGRADED; re-apply"; exit 1
+          }
+          # #1299 Part 3: recent_event is fed by CONNECTED inputs' PHASE events only (relocks+late_holds+backward_steps; underruns dropped), and the top offender rides the json (recent_event_inputs). A revert re-opens the chronic recent_event false-page. Mirror of src/genlock_lock_state.rs::input_phase_events + tests/genlock_lock_json_guards.rs::genlock_lock_recent_event_offender_present_1299_part3.
+          if ($sb -notmatch [regex]::Escape('genlock_input_phase_events(r.connected ? 1 : 0, r.relocks, r.late_holds,') -or $sb -notmatch [regex]::Escape('recent_event_input_name')) {
+            Write-Error "OBSBasicStatusBar.cpp: the #1299 Part 3 connected-phase recent_event feed / offender attribution is gone — the chronic recent_event false-page would re-open; re-apply"; exit 1
+          }
           Write-Output "in-OBS genlock LOCK indicator present (stats API + shared audit fill + output wall-stamping + statusbar widget + genlock-lock: log + genlock-lock-json: fleet facet) — OK"
 
       # #245: assert the PER-SOURCE genlock latency (ms) override is present in the
@@ -1085,6 +1093,17 @@ jobs:
           }
           if ($ndi -notmatch [regex]::Escape('ndi_recv_create_retry_backoff_ns(framesync_create_fail_count)')) {
             Write-Error "ndi-source.cpp: the #1097 framesync branch no longer CALLS ndi_recv_create_retry_backoff_ns(framesync_create_fail_count) -- a failed framesync_create reverts to the permanent-death break. Re-apply the #1097 retry"; exit 1
+          }
+          # camera-box #1320: the av-thread's exit-path receiver teardown (NDIlib_recv_destroy, live-observed
+          # ~7.5 s) must run on a DETACHED reaper, not inline -- ndi_source_thread_stop's pthread_join waits on
+          # that exit and runs on the OBS GRAPHICS thread (ndi_source_update is deferred to obs_source_video_tick
+          # for an ASYNC_VIDEO source), so a blocking teardown there froze the PROGRAM render (lagged=228). A
+          # subtree pull re-importing stock DistroAV silently drops this (mirrors tests/distroav_scene_switch_reinit_1320.rs).
+          if ($ndi -notmatch [regex]::Escape('static void ndi_reap_receiver_detached(')) {
+            Write-Error "ndi-source.cpp: the #1320 ndi_reap_receiver_detached reaper is gone -- the blocking NDIlib_recv_destroy runs inline on the av-thread exit again, freezing the PROGRAM render on a scene-switch reattach. Re-apply the #1320 fix"; exit 1
+          }
+          if ($ndi -notmatch [regex]::Escape('ndi_reap_receiver_detached(ndiLib, reap_frame_sync, reap_receiver);')) {
+            Write-Error "ndi-source.cpp: the receiver-loop exit path no longer hands its teardown to ndi_reap_receiver_detached(ndiLib, reap_frame_sync, reap_receiver) -- the recv_destroy blocks the graphics-thread pthread_join again. Re-apply the #1320 wiring"; exit 1
           }
           # #257: the UI is a HARD WHITELIST — the forced knobs are REMOVED from the UI (not hidden via
           # apply_genlock_lockdown_visibility, which is gone). getproperties must expose EXACTLY the

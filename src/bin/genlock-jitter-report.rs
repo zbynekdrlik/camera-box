@@ -45,6 +45,14 @@
 //! receiver; near-zero send-wait + drops = frames never reached the send, fault is upstream
 //! in libobs). A log may carry input lines, send lines, or both.
 //!
+//! #1318: the same log also carries per-EVENT `genlock-relock '<source>':` lines. In text
+//! mode this binary ALSO prints a per-source relock-BURST table (below the others) when those
+//! lines are present: `total_relocks`, `bursts` (gap-separated storm episodes whose densest
+//! 1 s window reached `--relock-burst-min N`, default 8), the peak relocks-per-second, and the
+//! first/last storm time. A relock storm is the receiver-side fingerprint of a sender render
+//! freeze / stall (issue 1318) — a signal the cumulative `relocks=` audit counter hides once
+//! it freezes. This table is ADDITIVE and text-mode only; `--json` is NOT touched (#757).
+//!
 //! `--json` (#757): prints [`camera_box::jitter_audit::summaries_to_json`]'s per-source
 //! object instead of the text table — the machine-readable shape a pre-record phase
 //! calibrator (`scripts/prerecord_phase_calibrate.py`) consumes to reconstruct each source's
@@ -57,8 +65,9 @@
 //! reported; `2` — no audit lines of either kind found in the input, or an I/O error.
 
 use camera_box::jitter_audit::{
-    parse_audit_lines, parse_send_audit_lines, summaries_to_json, summarize_all,
-    summarize_send_all, AuditSummary, SendAuditKind, SendAuditSummary,
+    parse_audit_lines, parse_relock_lines, parse_send_audit_lines, summaries_to_json,
+    summarize_all, summarize_relock_bursts, summarize_send_all, AuditSummary, RelockBurstSummary,
+    SendAuditKind, SendAuditSummary,
 };
 use camera_box::resolume_playback::{evaluate, PlaybackBounds, PlaybackVerdict, PlaybackWindow};
 use std::io::Read;
@@ -77,6 +86,16 @@ fn main() {
     // `--skew-bound-ms N` (default 20), `--min-samples N` (default 2).
     let verdict_sources = collect_repeated_flag(&args, "--verdict-source");
     let verdict_report_only = args.iter().any(|a| a == "--verdict-report-only");
+    // #1318 — a relock cluster counts as a BURST when its densest 1 s window holds at
+    // least this many relocks (default 8). A malformed value is a hard error (never a
+    // silent fallback masking an operator typo behind a misleading table).
+    let relock_burst_min = match parse_usize_flag(&args, "--relock-burst-min", 8) {
+        Ok(v) => v,
+        Err(msg) => {
+            eprintln!("ERROR: {msg}");
+            std::process::exit(2);
+        }
+    };
 
     let text = match read_input() {
         Ok(t) => t,
@@ -144,10 +163,13 @@ fn main() {
     // same log. Text mode reports whichever kinds are present: input FIFO lines, send-side
     // lines, or both.
     let send_samples = parse_send_audit_lines(&text);
-    if samples.is_empty() && send_samples.is_empty() {
+    // #1318 — the per-event relock lines (a third, independent family over the same log).
+    let relock_events = parse_relock_lines(&text);
+    if samples.is_empty() && send_samples.is_empty() && relock_events.is_empty() {
         eprintln!(
-            "ERROR: no 'genlock-fifo audit' or 'genlock-ndi-output/filter audit' lines found \
-             in the input (wrong log file, or this OBS build isn't genlocked/logging yet)"
+            "ERROR: no 'genlock-fifo audit', 'genlock-ndi-output/filter audit' or \
+             'genlock-relock' lines found in the input (wrong log file, or this OBS build \
+             isn't genlocked/logging yet)"
         );
         std::process::exit(2);
     }
@@ -196,6 +218,47 @@ fn main() {
             println!();
         }
         print_send_table(&summarize_send_all(&send_samples));
+    }
+
+    // #1318 — relock-burst table, additive, below whatever precedes it.
+    if !relock_events.is_empty() {
+        if !samples.is_empty() || !send_samples.is_empty() {
+            println!();
+        }
+        print_relock_burst_table(&summarize_relock_bursts(
+            &relock_events,
+            relock_burst_min,
+            1000,
+        ));
+    }
+}
+
+/// `at_ms` (ms-since-midnight) back to an `HH:MM:SS.mmm` clock string for the table.
+fn fmt_ms_of_day(at_ms: u64) -> String {
+    let ms = at_ms % 1000;
+    let total_s = at_ms / 1000;
+    let (h, m, s) = (total_s / 3600, (total_s / 60) % 60, total_s % 60);
+    format!("{h:02}:{m:02}:{s:02}.{ms:03}")
+}
+
+/// #1318 — print the per-source relock-BURST table. A relock storm (sender render
+/// freeze starving the receiver FIFO into an underrun->overshoot recovery) shows up
+/// as `bursts >= 1` with a high `peak/s`; steady operation is all zeros.
+fn print_relock_burst_table(summaries: &[RelockBurstSummary]) {
+    println!(
+        "{:<20} {:>13} {:>8} {:>8} {:>14} {:>14}",
+        "relock-source", "total_relock", "bursts", "peak/s", "first", "last"
+    );
+    for s in summaries {
+        println!(
+            "{:<20} {:>13} {:>8} {:>8} {:>14} {:>14}",
+            s.source,
+            s.total_relocks,
+            s.bursts,
+            s.max_per_second,
+            fmt_ms_of_day(s.first_at_ms),
+            fmt_ms_of_day(s.last_at_ms),
+        );
     }
 }
 

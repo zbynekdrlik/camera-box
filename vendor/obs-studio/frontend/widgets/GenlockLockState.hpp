@@ -15,6 +15,8 @@
 // C++ (the gate compiles it as C; OBSBasicStatusBar.cpp includes it as C++).
 #pragma once
 
+#include <stdint.h> /* #1299 Part 3: uint64_t / UINT64_MAX for genlock_input_phase_events (pure C — not <obs>/<Q>, so the parity-lift + purity guard stay green) */
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -36,6 +38,7 @@ typedef enum genlock_lock_reason {
 	GENLOCK_LOCK_REASON_NTP_FAILED = 7,      /* clock up but NTP phase failed */
 	GENLOCK_LOCK_REASON_QPC_DRIFT = 8,       /* wall-vs-monotonic drift beyond bound */
 	GENLOCK_LOCK_REASON_AUDIO_PAIRING = 9,   /* #1303 audio-enabled source unpaired with its video FIFO hold */
+	GENLOCK_LOCK_REASON_AUDIO_UNEXPECTED = 10, /* #1303 source audible when the certified per-box table expects it silent (double-audio hazard) */
 } genlock_lock_reason_t;
 
 typedef struct genlock_lock_facets {
@@ -50,11 +53,13 @@ typedef struct genlock_lock_facets {
 	int output_present;         /* bool: a genlock NDI sender is active here */
 	int output_stamping;        /* bool: ...and it is stamping wall-clock timecodes */
 	int audio_unpaired;         /* bool: #1303 an audio-enabled genlock source's audio is unpaired with its video FIFO hold */
+	int audio_unexpected;       /* bool: #1303 a source is audible when the certified per-box audio table expects it silent (double-audio hazard) */
 } genlock_lock_facets_t;
 
 /* Mirror of camera_box::genlock_lock_state::decide (src/genlock_lock_state.rs) — keep
  * both in lock-step. UNLOCKED precedence: clock > output > no-input-locked. DEGRADED
- * precedence: some-input-unlocked > recent-event > ntp-failed > qpc-drift > audio-pairing. Else LOCKED.
+ * precedence: some-input-unlocked > recent-event > ntp-failed > qpc-drift > audio-pairing >
+ * audio-unexpected. Else LOCKED.
  * #1299: the input decisions judge only CONNECTED inputs (n_connected = n_inputs - n_absent); a
  * senderless input is idle (never DEGRADES), and inputs-present-but-ALL-senderless is HEALTHY-idle
  * (LOCKED), not UNLOCKED. n_inputs<=0 stays UNLOCKED/no_genlock.
@@ -101,7 +106,10 @@ static inline genlock_lock_state_t genlock_decide_lock_state(const genlock_lock_
 		reason = GENLOCK_LOCK_REASON_QPC_DRIFT;
 		state = GENLOCK_LOCK_DEGRADED;
 	} else if (f->audio_unpaired) {
-		reason = GENLOCK_LOCK_REASON_AUDIO_PAIRING; /* #1303 lowest-precedence DEGRADED axis */
+		reason = GENLOCK_LOCK_REASON_AUDIO_PAIRING; /* #1303 audio-pairing DEGRADED axis */
+		state = GENLOCK_LOCK_DEGRADED;
+	} else if (f->audio_unexpected) {
+		reason = GENLOCK_LOCK_REASON_AUDIO_UNEXPECTED; /* #1303 lowest-precedence DEGRADED axis */
 		state = GENLOCK_LOCK_DEGRADED;
 	} else {
 		reason = GENLOCK_LOCK_REASON_NONE;
@@ -111,6 +119,79 @@ static inline genlock_lock_state_t genlock_decide_lock_state(const genlock_lock_
 	if (reason_out)
 		*reason_out = reason;
 	return state;
+}
+
+/* #1299 Part 3 — the pure "phase event" count for ONE genlock input feeding recent_event: the
+ * clock/phase class a LOCK verdict owns (relocks + late_holds + backward_steps). UNDERRUNS are
+ * EXCLUDED (a latency-budget miss owned by the genlock-fifo audit + cg-chain-verify / issue 1302,
+ * and bursty) and a DISCONNECTED input contributes 0 (its #1096 rebind churn is idle, not a fault).
+ * Byte-for-byte mirror of camera_box::genlock_lock_state::input_phase_events — the parity gate
+ * tests/genlock_lock_state_parity.rs lifts THIS function too. Saturating so a pathological count can
+ * never wrap (matches the Rust saturating_add). Placed AFTER genlock_decide_lock_state so the
+ * decision-block lift is unaffected. */
+static inline uint64_t genlock_input_phase_events(int connected, uint64_t relocks,
+						  uint64_t late_holds, uint64_t backward_steps)
+{
+	uint64_t sum;
+	if (!connected)
+		return 0;
+	sum = relocks;
+	if (sum > UINT64_MAX - late_holds)
+		return UINT64_MAX;
+	sum += late_holds;
+	if (sum > UINT64_MAX - backward_steps)
+		return UINT64_MAX;
+	sum += backward_steps;
+	return sum;
+}
+
+/* #1303 — case-insensitive ASCII substring test, a private helper for genlock_name_is_camera below.
+ * Returns 1 iff `needle` (assumed non-empty) occurs in `hay`. Pure C (no libc strcasestr, which is
+ * non-standard), so it lifts + compiles standalone in the parity gate. */
+static inline int genlock_ci_contains(const char *hay, const char *needle)
+{
+	const char *h;
+	if (!hay || !needle || !*needle)
+		return 0;
+	for (h = hay; *h; ++h) {
+		const char *a = h;
+		const char *b = needle;
+		while (*a && *b) {
+			char ca = *a;
+			char cb = *b;
+			if (ca >= 'A' && ca <= 'Z')
+				ca = (char)(ca - 'A' + 'a');
+			if (cb >= 'A' && cb <= 'Z')
+				cb = (char)(cb - 'A' + 'a');
+			if (ca != cb)
+				break;
+			++a;
+			++b;
+		}
+		if (!*b)
+			return 1;
+	}
+	return 0;
+}
+
+/* #1303 — byte-for-byte mirror of camera_box::genlock_forced_table_audit::is_camera_input: a camera
+ * NDI input is one whose name contains "(usb)", OR contains "cam" AND an ASCII digit anywhere
+ * (CAM3 / cam 2 / camera1). The widget uses it to identify a silent-by-contract input for the
+ * #1303 audio_unexpected term. Parity-gated against the Rust canonical by
+ * tests/genlock_lock_state_parity.rs, so the two name classifiers can never drift. */
+static inline int genlock_name_is_camera(const char *name)
+{
+	const char *p;
+	if (!name)
+		return 0;
+	if (genlock_ci_contains(name, "(usb)"))
+		return 1;
+	if (!genlock_ci_contains(name, "cam"))
+		return 0;
+	for (p = name; *p; ++p)
+		if (*p >= '0' && *p <= '9')
+			return 1;
+	return 0;
 }
 
 #ifdef __cplusplus

@@ -26,6 +26,7 @@
 #include <QUrl>
 
 #include <thread>
+#include <cstdio>
 /* camera-box #257: the OBS_GENLOCK_* / OBS_BURN_* env reads + the read-only info-text
  * labels were removed (hard-lock whitelist UI), so cstdio/cstdlib are no longer needed here. */
 
@@ -195,6 +196,19 @@ static inline uint64_t ndi_recv_create_retry_backoff_ns(unsigned consecutive_fai
 static const uint32_t NDI_FRESH_FIND_WAIT_MS = 500;
 static const unsigned NDI_FRESH_FIND_MAX_WAITS = 4;
 
+/* camera-box #1096 (reopen 15.9.2026): when strih's SDK finder never re-discovers a restarted
+ * sender's mDNS record (the issue-1199 flaky-NIC / multicast-reception class), the fresh-finder
+ * BY-URL path resolves nothing and the loop falls to the poisoned BY-NAME resolver forever. After
+ * this many CONSECUTIVE finder-blind resets, synthesize the sender address from the fleet naming
+ * contract instead (ndi_fleet_url_for_name). K ~= 30 s at the ~10 s/reset cadence -- long enough
+ * that a normally-recovering finder is always preferred first. */
+static const unsigned NDI_FLEET_AFTER_NO_URL_CYCLES = 3;
+/* camera-box #1096 (reopen): ports probed across consecutive frame-less fleet-map binds -- base 5961,
+ * then 5962, 5963 (a restarted sender that did not fully release its first instance takes the next
+ * port, the exact ports imag's working finder resolved). BOUNDED (never an unbounded in-reset loop):
+ * one port per reset, cycled by the existing #1287 frame-less alternation. */
+static const unsigned NDI_FLEET_PORT_CANDIDATES = 3;
+
 /* camera-box #1180: bounded fresh-finder budget for the post-connect BY-URL identity verify. Shorter
  * than the reset-block resolution (NDI_FRESH_FIND_MAX_WAITS) because the correct sender for our name
  * is expected to be advertising already -- SOMETHING at our URL just delivered frames -- so this only
@@ -275,6 +289,52 @@ static inline bool ndi_force_by_name_after_frameless(bool connected_by_url, bool
 	if (frames_seen_since_reset)
 		return false; /* frames flowed -> not a wedge; #1180 identity path owns it */
 	return connected_by_url; /* frame-less BY-URL -> force BY-NAME next (alternates; default is BY-URL) */
+}
+
+/* camera-box #1096 (reopen): synthesize the CURRENT network address for a camera-box sender from the
+ * fleet naming contract when the local SDK finder stays BLIND to its mDNS record -- the exact address
+ * imag's working finder resolved (10.77.9.67:5961). The contract (scripts/camera-set.sh): "CAMn (usb)"
+ * with n in 1..7  <->  10.77.9.6n , NDI base port 5961. `port_index` (0..2) selects 5961/5962/5963
+ * for a restarted sender that rotated its port. Writes "ip:port" into `buf` and returns true ONLY for
+ * a contract camera name + valid port_index; returns false for ANY other name (cg / "NDI obs hudba" /
+ * etc.) so a non-camera input is NEVER given a guessed URL. Exact "CAM" <n> " (usb)" match -- mirrors
+ * camera-set.sh's injection-safe literal case match. PURE (primitives + the caller's buffer) so it
+ * lift-compiles + truth-table-tests offline -- CI is otherwise the first compiler for this file
+ * (tests/distroav_by_url_fleet_fallback_1096.rs). */
+static inline bool ndi_fleet_url_for_name(const char *name, unsigned port_index, char *buf, size_t buflen)
+{
+	if (!name || !buf || buflen == 0)
+		return false;
+	if (port_index > 2)
+		return false; /* bounded 5961..5963; mirror of NDI_FLEET_PORT_CANDIDATES at the call site */
+	if (name[0] != 'C' || name[1] != 'A' || name[2] != 'M')
+		return false;
+	char d = name[3];
+	if (d < '1' || d > '7')
+		return false;
+	if (strcmp(name + 4, " (usb)") != 0)
+		return false; /* reject a trailing suffix / two-digit n / missing " (usb)" */
+	unsigned n = (unsigned)(d - '0');
+	unsigned port = 5961u + port_index;
+	int w = snprintf(buf, buflen, "10.77.9.6%u:%u", n, port);
+	return w > 0 && (size_t)w < buflen;
+}
+
+/* camera-box #1096 (reopen): choose the BY-URL fallback when a reset's FRESH finder resolved NO url
+ * and BY-NAME was not force-required (#1180/#1287). Ladder: once the finder has been blind for
+ * `fleet_after_k` consecutive resets, prefer the fleet-map URL (the finder is persistently blind --
+ * name resolution will not recover on its own); before that, retry the last URL that actually
+ * DELIVERED frames (a graceful restart usually returns on the same port); else the plain BY-NAME
+ * upstream fallback. Returns 0 = BY-NAME, 1 = last-known URL, 2 = fleet-map URL. PURE so it
+ * lift-compiles + truth-table-tests offline (tests/distroav_by_url_fleet_fallback_1096.rs). */
+static inline int ndi_fallback_bind_mode_1096(bool have_last_known_url, bool have_fleet_url,
+					      unsigned no_url_cycles, unsigned fleet_after_k)
+{
+	if (no_url_cycles >= fleet_after_k && have_fleet_url)
+		return 2; /* fleet-map BY-URL */
+	if (have_last_known_url)
+		return 1; /* last-known-good BY-URL */
+	return 0;         /* BY-NAME (no worse than upstream) */
 }
 
 /* camera-box #257: per-source MEASUREMENT-BURN setter, runtime-resolved by name — same
@@ -811,6 +871,61 @@ void ndi_source_thread_process_audio3(ndi_source_config_t *config, NDIlib_audio_
 void ndi_source_thread_process_video2(ndi_source_t *source, NDIlib_video_frame_v2_t *ndi_video_frame,
 				      obs_source *obs_source, obs_source_frame *obs_video_frame);
 
+/* camera-box #1320: is there a receiver/framesync teardown worth handing to the detached reaper?
+ * PURE decision (only primitives) so it lift-compiles + truth-table-tests offline -- CI is
+ * otherwise the first compiler for this file (tests/distroav_scene_switch_reinit_1320.rs). Mirrors
+ * ndi_reap_receiver_detached's early-return guard: a reaper is spawned ONLY when the NDI lib is
+ * present AND at least one handle exists to destroy. See .claude/rules/distroav-receiver-lifecycle.md
+ * and .claude/rules/program-render-audit.md. */
+static inline bool ndi_reap_should_defer(bool have_framesync, bool have_receiver, bool have_ndilib)
+{
+	if (!have_ndilib)
+		return false; /* no lib -> nothing can be destroyed (mirrors the ndiLib null-guard) */
+	return have_framesync || have_receiver; /* something to tear down -> defer it off-thread */
+}
+
+/* camera-box #1320: destroy the NDI framesync + receiver on a DETACHED reaper thread so a slow
+ * (live-observed ~7.5 s) NDIlib_recv_destroy never blocks the caller. The caller here is the
+ * av-thread's exit path, and ndi_source_thread_stop's pthread_join waits on that exit -- and that
+ * join is executed on the OBS GRAPHICS thread, because ndi_source_update is DEFERRED to
+ * obs_source_video_tick for an ASYNC_VIDEO source (obs-source.c obs_source_deferred_update). A
+ * blocking teardown on that join therefore FROZE the PROGRAM render (issue 1320: a scene-switch-
+ * coincident reattach CLEAR-then-SET on 'NDI cam1' -> recv_destroy 7.56 s -> program-render-audit
+ * lagged=228 avg_frame_ms=782 -> 2ME PGM starved -> stream FIFO underrun -> relock storm -> +2/+3
+ * frame presented age for ~40 min). framesync is destroyed BEFORE the receiver it was created from.
+ * The handles are plain NDI instances, independent of ndi_source_t, so the reaper races nothing in
+ * `s` or in a freshly-started av-thread. Falls back to a synchronous destroy if the thread cannot be
+ * spawned (never crash; worst case is the pre-fix behaviour).
+ *
+ * ACCEPTED TRADEOFF (issue 1320 review F1): on OBS process shutdown the join in ndi_source_destroy
+ * now returns in ~ms, so obs_module_unload's ndiLib->destroy() (plugin-main.cpp) could in principle
+ * race ahead of a reaper still mid-recv_destroy and deref an unmapped NDI runtime -> a rare
+ * crash-ON-EXIT. This is deliberately accepted here: it is shutdown-only, needs a teardown in flight
+ * at the exact unload instant, and a crash-on-exit is far less harmful than the ~7.5 s LIVE PROGRAM
+ * render freeze this fixes. A clean drain (an outstanding-reaper atomic counter spin-waited before
+ * ndiLib->destroy()) is left as a bounded follow-up rather than widening this surgical fix into a
+ * second vendored file with its own shutdown-latency tradeoff. */
+static void ndi_reap_receiver_detached(const NDIlib_v6 *lib, NDIlib_framesync_instance_t frame_sync,
+				       NDIlib_recv_instance_t receiver)
+{
+	if (!ndi_reap_should_defer(frame_sync != nullptr, receiver != nullptr, lib != nullptr))
+		return;
+	try {
+		std::thread([lib, frame_sync, receiver]() {
+			if (frame_sync)
+				lib->framesync_destroy(frame_sync);
+			if (receiver)
+				lib->recv_destroy(receiver);
+		}).detach();
+	} catch (...) {
+		/* thread spawn failed (resource exhaustion) -> synchronous fallback, never leak/crash */
+		if (frame_sync)
+			lib->framesync_destroy(frame_sync);
+		if (receiver)
+			lib->recv_destroy(receiver);
+	}
+}
+
 void *ndi_source_thread(void *data)
 {
 	auto s = (ndi_source_t *)data;
@@ -888,6 +1003,17 @@ void *ndi_source_thread(void *data)
 	bool identity_verify_pending_1180 = false;
 	bool frames_seen_since_reset_1180 = false;
 	bool force_by_name_next_reset_1180 = false;
+
+	/* camera-box #1096 (reopen): finder-blind BY-URL fallback state. last_delivered_url_1096 = the URL
+	 * that actually DELIVERED frames on a BY-URL bind (retried before by-name when the fresh finder
+	 * resolves nothing); no_url_cycles_1096 = the consecutive finder-blind reset count driving the
+	 * K-cycle escalation to the fleet map; fleet_port_index_1096 = the 5961..5963 cursor advanced per
+	 * frame-less fleet bind; bind_recovery_recorded_1096 = per-bind one-shot so recovery records once.
+	 * All freed on thread exit. */
+	char *last_delivered_url_1096 = nullptr;
+	unsigned no_url_cycles_1096 = 0;
+	unsigned fleet_port_index_1096 = 0;
+	bool bind_recovery_recorded_1096 = false;
 
 	/* camera-box #797 recv-timing instrumentation: locate the ~50-of-60fps pull-loop
 	 * throttle. Times recv_capture_v3 (wait for SDK) vs process_video2+free (our cost,
@@ -1025,6 +1151,10 @@ void *ndi_source_thread(void *data)
 			// config_mutex (dropped above), matching the 'no blocking NDI call under the lock' rule.
 			//
 			bool url_resolved_1096 = false;
+			// camera-box #1096 (reopen): which URL source THIS reset bound to (0 fresh finder, 1
+			// last-known-good, 2 fleet map) -- used ONLY for the log line; url_resolved_1096 stays the
+			// umbrella "bound BY-URL" flag so the #1180/#1287 arming below is byte-identical.
+			int url_bind_kind_1096 = 0;
 			// camera-box #1180: a confirmed BY-URL identity mismatch forces THIS one reset to connect
 			// BY-NAME (skip the #1096 fresh-finder BY-URL resolution), abandoning the wrong-sender URL
 			// and letting NDI's own name resolution re-point at whatever now advertises our name (the
@@ -1050,6 +1180,10 @@ void *ndi_source_thread(void *data)
 							bfree(owned_source_url);
 							owned_source_url = bstrdup(fresh_url);
 							url_resolved_1096 = true;
+							url_bind_kind_1096 = 0;
+							// The finder resolved -> it is healthy; drop the finder-blind escalation clock.
+							no_url_cycles_1096 = 0;
+							fleet_port_index_1096 = 0;
 							break;
 						}
 					}
@@ -1060,13 +1194,55 @@ void *ndi_source_thread(void *data)
 						obs_source_name);
 				}
 			}
+			//
+			// camera-box #1096 (reopen): the fresh finder resolved NO url and BY-NAME was not
+			// force-required. Rather than fall to the poisoned BY-NAME resolver forever (the strih
+			// wedge: 607 dead cycles / 12 min while imag recovered BY-URL in 6 s), escalate through a
+			// bounded BY-URL ladder: (b) retry the last URL that DELIVERED frames, then (a) after K
+			// consecutive finder-blind cycles, the fleet-map URL synthesized from the naming contract.
+			// Both are BY-URL binds, so #1180 identity verify + #1287 frame-less alternation apply
+			// unchanged (a wrong-sender/dead-port guess is caught + forced BY-NAME next). owned_source_name
+			// is non-empty here (the fresh block guarded on it); the fleet helper false-guards non-camera names.
+			//
+			if (!url_resolved_1096 && !force_by_name_1180 && owned_source_name && owned_source_name[0]) {
+				no_url_cycles_1096++;
+				bool have_last_known = last_delivered_url_1096 && last_delivered_url_1096[0];
+				char fleet_url_buf[32];
+				bool have_fleet =
+					ndi_fleet_url_for_name(owned_source_name, fleet_port_index_1096, fleet_url_buf, sizeof fleet_url_buf);
+				int mode = ndi_fallback_bind_mode_1096(have_last_known, have_fleet, no_url_cycles_1096,
+								       NDI_FLEET_AFTER_NO_URL_CYCLES);
+				if (mode == 2) {
+					bfree(owned_source_url);
+					owned_source_url = bstrdup(fleet_url_buf);
+					url_resolved_1096 = true;
+					url_bind_kind_1096 = 2;
+					// Advance the port cursor so the NEXT fleet bind probes the next candidate port.
+					fleet_port_index_1096 = (fleet_port_index_1096 + 1) % NDI_FLEET_PORT_CANDIDATES;
+				} else if (mode == 1) {
+					bfree(owned_source_url);
+					owned_source_url = bstrdup(last_delivered_url_1096);
+					url_resolved_1096 = true;
+					url_bind_kind_1096 = 1;
+				}
+				// mode == 0 -> keep the BY-NAME fallback below (no worse than upstream).
+			}
 			if (url_resolved_1096) {
 				// Empty p_ndi_name => the SDK uses p_url_address directly (bypass the finder).
 				recv_desc.source_to_connect_to.p_ndi_name = "";
 				recv_desc.source_to_connect_to.p_url_address = owned_source_url;
-				obs_log(LOG_INFO,
-					"'%s' ndi_source_thread: reset_ndi_receiver: #1096 connect BY-URL '%s' (fresh finder; bypassing poisoned name resolver)",
-					obs_source_name, owned_source_url);
+				if (url_bind_kind_1096 == 2)
+					obs_log(LOG_WARNING,
+						"'%s' ndi_source_thread: reset_ndi_receiver: #1096 rebind BY-URL '%s' (fleet map after finder-blind cycles; contract-derived, port-cycling)",
+						obs_source_name, owned_source_url);
+				else if (url_bind_kind_1096 == 1)
+					obs_log(LOG_INFO,
+						"'%s' ndi_source_thread: reset_ndi_receiver: #1096 rebind BY-URL '%s' (last-known good; fresh finder resolved none)",
+						obs_source_name, owned_source_url);
+				else
+					obs_log(LOG_INFO,
+						"'%s' ndi_source_thread: reset_ndi_receiver: #1096 connect BY-URL '%s' (fresh finder; bypassing poisoned name resolver)",
+						obs_source_name, owned_source_url);
 			} else {
 				// Name-based connect. Two reasons: the fresh finder resolved no URL (the #1096
 				// upstream fallback), OR #1180 forced BY-NAME after a confirmed identity mismatch.
@@ -1144,6 +1320,7 @@ void *ndi_source_thread(void *data)
 			connected_by_url_1180 = url_resolved_1096;
 			identity_verify_pending_1180 = url_resolved_1096;
 			frames_seen_since_reset_1180 = false;
+			bind_recovery_recorded_1096 = false; // camera-box #1096 (reopen): re-arm the per-bind recovery one-shot
 
 			if (snap_hw_accel_enabled) {
 				//
@@ -1386,6 +1563,19 @@ void *ndi_source_thread(void *data)
 		// BY-NAME-connected receiver never enters here (connected_by_url_1180 stays false), so its
 		// behaviour is byte-identical. The fresh finder blocks a bounded window and NEVER holds
 		// config_mutex, matching the 'no blocking NDI call under the lock' rule.
+		// camera-box #1096 (reopen): first frames on THIS bind = recovery. Reset the finder-blind
+		// escalation clock/port cursor, and if it was a BY-URL bind remember the delivering URL as the
+		// per-source last-known-good so a future finder-blind reset retries it BEFORE the fleet map /
+		// by-name. Once per bind (bind_recovery_recorded_1096 re-armed on every reset).
+		if (frames_seen_since_reset_1180 && !bind_recovery_recorded_1096) {
+			bind_recovery_recorded_1096 = true;
+			no_url_cycles_1096 = 0;
+			fleet_port_index_1096 = 0;
+			if (connected_by_url_1180 && owned_source_url && owned_source_url[0]) {
+				bfree(last_delivered_url_1096);
+				last_delivered_url_1096 = bstrdup(owned_source_url);
+			}
+		}
 		if (connected_by_url_1180 && frames_seen_since_reset_1180 &&
 		    genlock_source_is_active(s->obs_source)) {
 			if (identity_verify_pending_1180) {
@@ -1610,26 +1800,40 @@ void *ndi_source_thread(void *data)
 	// Main NDI receiver loop: END
 	//
 
-	if (ndi_frame_sync) {
+	// camera-box #1320: hand the (potentially multi-second, live-observed ~7.5 s) framesync +
+	// receiver teardown to a DETACHED reaper instead of destroying inline. ndi_source_thread_stop's
+	// pthread_join waits on this thread's exit, and that join runs on the OBS GRAPHICS thread
+	// (ndi_source_update is deferred to obs_source_video_tick for an ASYNC_VIDEO source), so a
+	// blocking NDIlib_recv_destroy here froze the PROGRAM render (lagged=228 avg_frame_ms=782). We
+	// snapshot the handles, null the locals, keep the existing diagnostic log lines byte-identical,
+	// then reap off-thread so the join (and the render thread) return in ~ms.
+	NDIlib_framesync_instance_t reap_frame_sync = ndi_frame_sync;
+	NDIlib_recv_instance_t reap_receiver = ndi_receiver;
+	ndi_frame_sync = nullptr; // TODO: Investigate if this should be put right after framesync_destroy() ?
+	ndi_receiver = nullptr;
+
+	if (reap_frame_sync) {
 		if (ndiLib) {
 			obs_log(LOG_DEBUG,
 				"'%s' ndi_source_thread: (out of loop) ndiLib->framesync_destroy(ndi_frame_sync)",
 				obs_source_name);
-			ndiLib->framesync_destroy(ndi_frame_sync);
 		}
-		ndi_frame_sync = nullptr; // TODO: Investigate if this should be put right after framesync_destroy() ?
 		obs_log(LOG_DEBUG, "'%s' ndi_source_thread: Reset NDI Frame Sync", obs_source_name);
 	}
 
-	if (ndi_receiver) {
+	if (reap_receiver) {
 		if (ndiLib) {
 			obs_log(LOG_DEBUG, "'%s' ndi_source_thread: ndiLib->recv_destroy(ndi_receiver)",
 				obs_source_name);
-			ndiLib->recv_destroy(ndi_receiver);
 		}
 		obs_log(LOG_DEBUG, "'%s' ndi_source_thread: Reset NDI Receiver", obs_source_name);
-		ndi_receiver = nullptr;
 	}
+
+	if (ndi_reap_should_defer(reap_frame_sync != nullptr, reap_receiver != nullptr, ndiLib != nullptr))
+		obs_log(LOG_INFO,
+			"genlock-reap: #1320 detached receiver teardown (no graphics-thread join block) '%s'",
+			obs_source_name);
+	ndi_reap_receiver_detached(ndiLib, reap_frame_sync, reap_receiver);
 
 	// camera-box #93: free the av_thread-owned name copies. bfree(nullptr) is a no-op.
 	bfree(owned_source_name);
@@ -1638,6 +1842,8 @@ void *ndi_source_thread(void *data)
 	owned_receiver_name = nullptr;
 	bfree(owned_source_url);
 	owned_source_url = nullptr;
+	bfree(last_delivered_url_1096);
+	last_delivered_url_1096 = nullptr;
 
 	obs_log(LOG_DEBUG, "'%s' -ndi_source_thread(…)", obs_source_name);
 

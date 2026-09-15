@@ -58,8 +58,12 @@ pub enum LockReason {
     /// Wall-clock vs monotonic (QPC) drift is beyond the allowed bound.
     QpcDrift = 8,
     /// #1303 — an audio-enabled genlock source's audio is not paired with its video FIFO hold
-    /// (residual A/V pairing offset beyond one frame). The lowest-precedence DEGRADED reason.
+    /// (residual A/V pairing offset beyond one frame). A DEGRADED reason below the video ones.
     AudioPairing = 9,
+    /// #1303 — a genlock source is AUDIBLE (`ndi_audio=true`) when it is silent-by-contract per the
+    /// certified per-box audio table (a camera on any box; a Dante-fed box's every NDI input) — the
+    /// double-audio hazard. The lowest-precedence DEGRADED reason, below `AudioPairing`.
+    AudioUnexpected = 10,
 }
 
 impl LockState {
@@ -115,13 +119,22 @@ pub struct GenlockFacets {
     /// per-input wall-vs-monotonic drift for [`GenlockFacets::qpc_drift_beyond_bound`] — surfacing
     /// the pairing-offset branch of [`crate::genlock_audio_pairing::decide_audio_health`].
     pub audio_unpaired: bool,
+    /// #1303 — a genlock source is AUDIBLE when the certified per-box audio table
+    /// (`crate::genlock_forced_table_audit`) expects it SILENT: a camera input on ANY box, or (once
+    /// box identity is wired) any NDI input on a Dante-fed box. NDI audio there is the double-audio
+    /// hazard (owner ruling 2026-09-15). The widget reduces the per-source
+    /// `audio_enabled && is-silent-by-contract` condition into this one scalar (the twin of
+    /// [`GenlockFacets::audio_unpaired`]); audio disabled/absent never sets it, so it can only
+    /// DEGRADE, never take a healthy box off LOCKED spuriously.
+    pub audio_unexpected: bool,
 }
 
 /// Decide the genlock lock state and its dominant reason from the scalarised facets.
 ///
 /// UNLOCKED precedence: clock (absent/unlocked) > output (present but not stamping) >
 /// no-input-locked. DEGRADED precedence (only once none of the UNLOCKED conditions hold):
-/// some-input-unlocked > recent-event > ntp-failed > qpc-drift > audio-pairing. Otherwise LOCKED.
+/// some-input-unlocked > recent-event > ntp-failed > qpc-drift > audio-pairing > audio-unexpected.
+/// Otherwise LOCKED.
 ///
 /// #1299 — the DEGRADED/no-input decisions judge only CONNECTED inputs (`n_connected = n_inputs -
 /// n_absent`): an input whose NDI sender is not running (`n_absent`) is idle, not a fault, so it
@@ -180,9 +193,82 @@ pub fn decide(f: &GenlockFacets) -> (LockState, LockReason) {
     if f.audio_unpaired {
         return (LockState::Degraded, LockReason::AudioPairing);
     }
+    // #1303 — the lowest-precedence DEGRADED axis: a source audible when the certified per-box
+    // audio table expects it silent (a camera anywhere; the double-audio hazard). Additive: an
+    // all-false `audio_unexpected` leaves every pre-this-change verdict unchanged.
+    if f.audio_unexpected {
+        return (LockState::Degraded, LockReason::AudioUnexpected);
+    }
 
     // --- LOCKED (green) -----------------------------------------------------------
     (LockState::Locked, LockReason::None)
+}
+
+/// #1299 Part 3 — one genlock input's cumulative event counters as the recent-event aggregation
+/// reads them. Plain scalars so the C mirror (`GenlockLockState.hpp`, `genlock_input_phase_events`)
+/// ports byte-for-byte; the committed parity gate `tests/genlock_lock_state_parity.rs` keeps the two
+/// numerically identical.
+#[derive(Debug, Clone, Copy)]
+pub struct InputEventCounts {
+    /// The DistroAV receiver has a live NDI connection (sender running). A disconnected input
+    /// contributes ZERO — its #1096 fresh-finder rebind churn is not a lock event.
+    pub connected: bool,
+    /// FIFO relock count (a boundary was re-acquired — a phase-discipline event).
+    pub relocks: u64,
+    /// Late-hold count (a hold fired after its deadline — a phase-discipline event).
+    pub late_holds: u64,
+    /// Backward-step count (the phase stepped back — a phase-discipline event).
+    pub backward_steps: u64,
+}
+
+/// #1299 Part 3 — the "phase event" count for ONE input feeding `recent_event`: the clock/phase
+/// class a genlock LOCK verdict owns — `relocks + late_holds + backward_steps`.
+///
+/// UNDERRUNS ARE EXCLUDED (decision (c)): an underrun is a LATENCY-BUDGET miss (the FIFO ran dry
+/// because the upstream frame arrived after the certified `latency_ms` pin), which the
+/// `genlock-fifo audit` line + cg-chain-verify (issue 1302) already surface and gate; it is also
+/// bursty, so counting it here latched `recent_event` DEGRADED chronically. An ABSENT input
+/// (`connected == false`) contributes 0 — its rebind/reset churn is idle, not a fault. Saturating
+/// so a synthetic near-`u64::MAX` parity vector can never overflow (the C mirror clamps identically).
+pub fn input_phase_events(c: &InputEventCounts) -> u64 {
+    if !c.connected {
+        return 0;
+    }
+    c.relocks
+        .saturating_add(c.late_holds)
+        .saturating_add(c.backward_steps)
+}
+
+/// #1299 Part 3 — the aggregate phase-event counter (summed over CONNECTED inputs) whose INCREASE
+/// across the widget's 1 Hz samples sets `recent_event`. Absent + underrun contributions are
+/// excluded per [`input_phase_events`], so the existing 60 s recency window ages out normally
+/// instead of latching on a continuously-incrementing underrun / absent-sender rebind driver.
+pub fn connected_phase_event_sum(inputs: &[InputEventCounts]) -> u64 {
+    inputs
+        .iter()
+        .map(input_phase_events)
+        .fold(0u64, |a, e| a.saturating_add(e))
+}
+
+/// #1299 Part 3 (b) — the top recent-event offender: the index of the CONNECTED input carrying the
+/// most phase events, and that count. `None` when no connected input carries any phase event (so the
+/// DEGRADED reason is never enriched with a spurious `:<name>` and the JSON `recent_event_inputs`
+/// list stays empty). Ties resolve to the FIRST (lowest index) in scan order — deterministic,
+/// mirroring the widget's `unlocked_names.front()` selection. The widget maps the index back to the
+/// input's name for `reason=recent_event:<name>`.
+pub fn top_phase_event_offender(inputs: &[InputEventCounts]) -> Option<(usize, u64)> {
+    let mut best: Option<(usize, u64)> = None;
+    for (i, c) in inputs.iter().enumerate() {
+        let e = input_phase_events(c);
+        if e == 0 {
+            continue;
+        }
+        match best {
+            Some((_, be)) if be >= e => {}
+            _ => best = Some((i, e)),
+        }
+    }
+    best
 }
 
 #[cfg(test)]
@@ -203,6 +289,7 @@ mod tests {
             output_present: true,
             output_stamping: true,
             audio_unpaired: false,
+            audio_unexpected: false,
         }
     }
 
@@ -365,6 +452,37 @@ mod tests {
     }
 
     #[test]
+    fn audio_unexpected_is_degraded_audio() {
+        // #1303: an audio-enabled source that is silent-by-contract per the certified table
+        // (the widget reduces it into audio_unexpected) degrades an otherwise-LOCKED box.
+        let mut f = healthy();
+        f.audio_unexpected = true;
+        assert_eq!(
+            decide(&f),
+            (LockState::Degraded, LockReason::AudioUnexpected)
+        );
+    }
+
+    #[test]
+    fn audio_unexpected_never_leaves_unlocked() {
+        // #1303: audio-unexpected is a DEGRADE-only axis — it never rescues an UNLOCKED box.
+        let mut f = healthy();
+        f.audio_unexpected = true;
+        f.clock_locked = false;
+        assert_eq!(decide(&f), (LockState::Unlocked, LockReason::Clock));
+    }
+
+    #[test]
+    fn audio_pairing_beats_audio_unexpected() {
+        // #1303: audio_unexpected is the lowest-precedence DEGRADED reason — even audio_pairing
+        // (itself the previous lowest) wins over it.
+        let mut f = healthy();
+        f.audio_unpaired = true;
+        f.audio_unexpected = true;
+        assert_eq!(decide(&f), (LockState::Degraded, LockReason::AudioPairing));
+    }
+
+    #[test]
     fn audio_unpaired_never_leaves_unlocked() {
         // #1303: audio is a DEGRADE-only axis — it never rescues an UNLOCKED box (clock down),
         // and never fires while an input is still unlocked (that reason takes precedence).
@@ -446,5 +564,68 @@ mod tests {
         assert_eq!(LockReason::NtpFailed.code(), 7);
         assert_eq!(LockReason::QpcDrift.code(), 8);
         assert_eq!(LockReason::AudioPairing.code(), 9);
+        assert_eq!(LockReason::AudioUnexpected.code(), 10);
+    }
+
+    // --- #1299 Part 3: the connected-phase-only recent-event feed + offender attribution ----------
+
+    fn ev(connected: bool, relocks: u64, late_holds: u64, backward_steps: u64) -> InputEventCounts {
+        InputEventCounts {
+            connected,
+            relocks,
+            late_holds,
+            backward_steps,
+        }
+    }
+
+    #[test]
+    fn phase_events_sum_the_three_phase_classes() {
+        assert_eq!(input_phase_events(&ev(true, 2, 3, 4)), 9);
+    }
+
+    #[test]
+    fn phase_events_exclude_underruns_by_construction() {
+        // InputEventCounts has NO underrun field — an underrun can never contribute to a phase-event
+        // count. Two inputs differing only in (hypothetical) underruns compute identically here.
+        assert_eq!(input_phase_events(&ev(true, 1, 0, 0)), 1);
+    }
+
+    #[test]
+    fn absent_input_contributes_no_phase_events() {
+        // The #1096 rebind churn of a senderless input (its relocks climb) must NOT count.
+        assert_eq!(input_phase_events(&ev(false, 99, 88, 77)), 0);
+    }
+
+    #[test]
+    fn connected_sum_excludes_absent_inputs() {
+        let inputs = [ev(true, 1, 0, 0), ev(false, 500, 0, 0), ev(true, 0, 2, 0)];
+        assert_eq!(connected_phase_event_sum(&inputs), 3);
+    }
+
+    #[test]
+    fn offender_is_the_top_connected_phase_input() {
+        // cg (index 1) has the most phase events among CONNECTED inputs; the absent input at index 2
+        // has more raw counters but is excluded.
+        let inputs = [ev(true, 1, 0, 0), ev(true, 20, 5, 0), ev(false, 9999, 0, 0)];
+        assert_eq!(top_phase_event_offender(&inputs), Some((1, 25)));
+    }
+
+    #[test]
+    fn no_offender_when_no_connected_phase_event() {
+        // Only an absent input carries counters -> no connected phase event -> None (the reason is
+        // never enriched with a spurious :<name>, the JSON list stays empty).
+        let inputs = [ev(true, 0, 0, 0), ev(false, 50, 0, 0)];
+        assert_eq!(top_phase_event_offender(&inputs), None);
+    }
+
+    #[test]
+    fn offender_ties_resolve_to_the_first_in_scan_order() {
+        let inputs = [ev(true, 3, 0, 0), ev(true, 3, 0, 0)];
+        assert_eq!(top_phase_event_offender(&inputs), Some((0, 3)));
+    }
+
+    #[test]
+    fn saturating_never_overflows_on_a_pathological_count() {
+        assert_eq!(input_phase_events(&ev(true, u64::MAX, 5, 0)), u64::MAX);
     }
 }

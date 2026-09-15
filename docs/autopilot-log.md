@@ -12272,3 +12272,161 @@ Supervisor install (imag, once the fleet genlock bundle is deployed):
   lookup at a window edge — both stay fail-closed). Tier-0: pure module RED→GREEN via rustc --test,
   cargo fmt --all --check clean (parses the whole probe-gated bin), doc-lazy-continuation grep clean;
   CI is the first type-check for the probe-gated glue. Docs: .claude/rules/gate-allowance-restore-red-green.md.
+
+- #1096 (reopened 15.9.2026) — strih DistroAV receiver stayed dead 12 min after a cambox sender restart:
+  the SDK finder never re-discovered the restarted `NDI cam7` mDNS record (607 identical BY-NAME cycles at
+  received=Δ0), so the fresh-finder-only BY-URL fix fell to the poisoned by-name resolver forever; imag
+  (finder healthy) recovered BY-URL in 6 s. Lane = vendored DistroAV receiver, candidates (a)+(b); (c) the
+  dev1 watchdog is a sibling lane. Commits: 3e29181d9 test(#1096) [red] → c6dfec49c fix(#1096) [green].
+  Fix (vendor/distroav/src/ndi-source.cpp ndi_source_thread): when the fresh finder resolves nothing and
+  by-name is not force-required, a bounded BY-URL ladder — (b) retry last_delivered_url_1096 (the URL that
+  DELIVERED frames), then (a) after K=3 finder-blind cycles the fleet-map URL from the pure
+  ndi_fleet_url_for_name ("CAMn (usb)"<->10.77.9.6n:5961, false for non-camera names, ports 5961..5963
+  cycled one-per-reset, NO raw sockets), chosen by the pure ndi_fallback_bind_mode_1096. Both route through
+  the same connected_by_url_1180=url_resolved_1096 arming so issue-1180 identity verify + issue-1287
+  frame-less alternation apply unchanged (by-name/last-known/fleet ladder, no dead path pins a leg). RED→GREEN
+  tests/distroav_by_url_fleet_fallback_1096.rs: 10/10 via rustc --test (both pure helpers lift-compile under
+  cc -Werror -Wconversion + truth-table pass); existing issue-1096/1180/1287 anchor tests green; cargo fmt
+  --all --check clean. UNVERIFIED live — CI-only C++ compile, reproduces only live; supervisor rig repro
+  after full-bundle deploy. Docs: .claude/rules/distroav-receiver-lifecycle.md ("finder-blind fallback ladder").
+- #1299 (Part 3): recent_event over CONNECTED inputs + PHASE events only, name the offender.
+  RED a6c3bbe93 (2 python failures: parser drops recent_event_inputs, decision returns the bare
+  recent_event token) -> GREEN 53114ccd4. Root cause: OBSBasicStatusBar.cpp genlock_scan_source
+  summed underruns+relocks+late_holds+backward_steps over EVERY input (connected AND absent), so a
+  per-tick underrun on the cg feed or an absent input's issue-1096 rebind churn refreshed the 60 s
+  recency window forever -> chronic DEGRADED/recent_event false-page on every box (live 18:13, all
+  four). Fix: pure input_phase_events (src/genlock_lock_state.rs, C-mirrored in GenlockLockState.hpp,
+  second-lift parity in genlock_lock_state_parity.rs) = connected-only, relocks+late_holds+
+  backward_steps, underruns DROPPED (latency-budget, issue 1302). Widget recomputes the driver
+  post-scan + picks the top offender; it rides genlock-lock-json: as recent_event_inputs (v2->v3,
+  omit-when-absent) + the human line as reason=recent_event:cg; bundle_state_gather parses it,
+  genlock_lock_decision.analyze enriches the reason for the watchdog. Underruns stay report-only
+  per-input. 60 s window UNCHANGED (fix was the feed). Design decision (c): an underrun on a
+  connected program input is NOT a lock class (clock/phase) — recorded on the ticket + issue 1302.
+  Tier-0: module rustc --test 34/34; C mirror cc -Werror replica matches; json/indicator guards
+  3/3+8/8 via rustc --test; roundtrip lift-compile g++ -Werror 1/1; python recent_event+decision+
+  gather 216/216; cargo fmt --all --check clean; doc-lazy-continuation grep clean; pwsh 3-copy
+  lock-step anchors added to both windows-genlock{,-fast}.yml (YAML valid). Review: fresh-context
+  general-purpose /review + /requesting-code-review. Docs: genlock-lock-indicator.md +
+  genlock-lock-facet.md.
+- issue 1040 (harness item; lane/1040-mvsettle): the `[4d1/8]` MV-fps preflight strict term now
+  SETTLES on FRESH `multiview-audit` samples after a BELOW first read, instead of a one-shot 6 s
+  grace re-read of a window whose MEDIAN can straddle a `[4d0/8]`-cleared 25 W PL1 clamp (run
+  34986461596: `median_fps=23.0 < floor=28.0 ... latest rendered_fps 30.0` — recovered box, false
+  abort). RED 4f751a1f2 → GREEN 9faf74438. New pure fns `mv_fps_preflight_latest_sample` /
+  `mv_fps_preflight_sample_verdict` + runner `mv_fps_preflight_settle_strict` in
+  scripts/lib/mv-fps-preflight.sh (freshness by line identity — never a wall-clock divisor;
+  N=3 consecutive ≥floor → recover, a fresh <floor → confirm+abort, <N fresh in ≤120 s budget /
+  unreadable → UNKNOWN report-only NOTE, never false-abort). Injectable clock/sleep/read seams +
+  three termination bounds mirror genlock-settle.sh (issue 1221); recording-e2e.sh untouched (issue
+  675 pattern). strih report-only term (issue 1260) grace path untouched. The 1091 + 1263 imag
+  static-probe tests now feed a per-call-unique line so the settle sees fresh samples + still
+  aborts. Tier-0: bash RED→GREEN over stale-below/fresh-below/no-new-lines/unreadable sequences,
+  bash -n + shellcheck -S warning clean, cargo fmt --all --check clean, doc-lazy grep clean; CI is
+  the first Rust type-check. New test tests/harness_mv_fps_preflight_settle_1040.rs. Docs:
+  .claude/rules/imag-power-envelope.md. The PHYSICAL thermal item (cooling) stays open for the owner.
+  - issue 1040 review hardening (RED 7d366874c → GREEN 1e7301ec1): the settle now confirms a
+    collapse only after `MV_FPS_PREFLIGHT_SETTLE_BELOW_N` (default 2) CONSECUTIVE fresh below-floor
+    samples — symmetric with the 3-consecutive-≥floor recovery — so a single recovery-lag below emit
+    right after the `[4d0/8]` clamp clears no longer false-aborts (the fresh-context /review 🟡). A
+    flapping box that reaches neither streak stays UNKNOWN → report-only NOTE. New tests
+    single_fresh_below_then_recovery_does_not_abort_1040 + two_consecutive_fresh_below_confirms_1040.
+
+## issue 1318 — A/V offset wander at constant pin (relock bursts on strih->stream PGM), 2026-09-15
+- Root cause (read-only live diag, stream 10.77.9.204 + strih 10.77.9.202 OBS logs): a ONE-OFF
+  strih PROGRAM render freeze (`program-render-audit avg_frame_ms=782 lagged=228` at 18:27:27,
+  the only lagged>0 window in 95 min) triggered by `User switched to scene 'Cam 6'` +
+  DistroAV NDI re-init under a tight 4K multiview. It starved the 2ME PGM NDI output -> stream
+  FIFO underran (depth=0) -> catch-up burst -> depth overshoot 41 -> 462-relock storm in 17 s
+  (18:27:28-44) -> presented head-skew +2 frames deep for ~40 min. Baseline +-1-frame wander =
+  issue-1003 structural residual (refuted receiver-side).
+- Delivered (Tier-0, no local cargo): a `relock_bursts` parser family in src/jitter_audit.rs
+  (parse_relock_line/parse_relock_lines/RelockEvent + summarize_relock_bursts/RelockBurstSummary,
+  timestamp-clustered burst episodes + peak/s) — RED 0f2b474dc -> GREEN 459c3f521 (8 tests via
+  std-only rustc replica, 8/8); genlock-jitter-report relock-burst table + `--relock-burst-min`
+  flag (2b667b16f), `--json` byte-lock untouched. Verified on the real 462-relock capture:
+  bursts=1 peak/s=31 18:27:28.205->18:27:44.671.
+- NOT done (followup): the SENDER cure (strih render freeze on scene switch / DistroAV re-init
+  under the 4K multiview) — large vendored OBS/DistroAV change, CI-only compile, needs rig soak.
+- UNVERIFIED: the 2 h <15 ms / <5 relocks/h acceptance needs a live post-deploy soak (no code
+  deploy here — a report-only detection metric).
+- #1319 — absolute A/V offset BAND alarm + dock-live freshness facet (owner 15.9.2026: no
+  notification while the stream dock read a +13→+47 ms wander at a constant pin; the issue-1267 STEP
+  detector is blind to a slow drift and false-read STALE in the dock's dead-band quiet windows).
+  RED 5eaefe660 → GREEN aa6af5248. Box-side: NEW `av_offset_dock_live_age_from_log` →
+  `av_offset_dock_live_age_s` facet (freshness of the `av-sync-dock: diag … locked=yes` heartbeat →
+  IN_BAND_QUIET vs STALE); `av_offset_series_from_log` kept byte-identical (raw UPDATED/LOCKED lines
+  DELIBERATELY not folded — ROZHODNUTÉ on the ticket: broke the #1267 exclusion test + pushed a quiet
+  window OUT_OF_BAND). Decision: NEW `classify_av_band`/`analyze_band` + `analyze-band` CLI
+  (OUT_OF_BAND / IN_BAND / IN_BAND_QUIET / STALE / REPIN / SKIP / UNKNOWN vs a FIXED E2E-aligned
+  reference); the step path untouched. Watchdog: NEW band arm in `av-step-alert-watchdog.sh`
+  (`resolve_band_reference` env→`residual_median_ms`→0 ms fallback; 2-pass confirm; production-critical
+  TIME-BUCKETED `av-band-$box` dedup key, allowlisted in the #1206 sweep). Live dry-run (stream :8899):
+  ref −16.7 ms, recent 38.4 → OUT_OF_BAND confirmed → page "obraz mešká za zvukom". Tier-0: pytest 229
+  green, bash -n + shellcheck clean. New test tests/python/test_av_band_1319.py.
+
+- issue 1309 (relay/service logging + gphoto2 bound + verify (am) + handover shading item): lane/1309-relaylog @ base cfb59a9cf. RED d81511df0 -> GREEN 6ea9bf46f. Five 15.9. decisions: centralised Gphoto2Cli::run info logging + timeout/kill + online-transition; service forward_set logging + reach_transitions/heartbeat (relay-unreachable WARN -> debug); pure SetQueue coalescer (proto); verify-device (am) TasksMax<=512 + info-logging verdict; rig-dev-handover shading item. Tier-0: fmt clean; rustc replicas (proto 5, verify 108) green; handover pytest 21 green; bash -n + shellcheck clean.
+## 2026-09-15 — issue 1303 follow-up: LOCK-indicator AUDIO term (audio_unexpected), lane/1303-lockaudio
+
+The last deferred #1303 followup (the LOCK-indicator audio taxonomy). Base fbd6d105e (1.7.0-dev.631),
+no version bump (worktree lane; supervisor cherry-picks).
+
+- Root cause: the in-OBS genlock LOCK indicator judged audio ONLY via part-3b's `audio_unpaired`
+  (pairing-offset breach on an audio-ENABLED source); its `audio_enabled` guard structurally cannot
+  flag a source AUDIBLE when the certified per-box table expects it SILENT (the double-audio hazard).
+- New pure axis: `GenlockFacets.audio_unexpected` -> `LockReason::AudioUnexpected` (=10), lowest
+  DEGRADED precedence (below audio-pairing). Rust `src/genlock_lock_state.rs` + the C mirror in
+  `GenlockLockState.hpp`, parity sweep extended 2^8 -> 2^9; a new parity gate compiles the header's
+  `genlock_name_is_camera` (mirror of `genlock_forced_table_audit::is_camera_input`) and requires it
+  to agree with the canonical Rust over rig names.
+- Widget: reduces `audio_enabled && genlock_name_is_camera(name)` (box-class-AGNOSTIC, fail-safe:
+  cameras are silent-by-contract on every box) into the facet + names the offender on the human
+  `genlock-lock:` line and the v3->v4 `genlock-lock-json:` line (`audio_unexpected_inputs:[{name}]`).
+- Facet/watchdog: `bundle_state_gather.genlock_lock_facet_from_log` parses the v4 list; 
+  `genlock_lock_decision` gains R_AUDIO_PAIRING + R_AUDIO_UNEXPECTED, the two audio axes in the
+  decide() mirror, and enriches the reason to `audio_unexpected:<name>`.
+- Scoping decision (recorded on the ticket): the box-class-DEPENDENT live cases (non-camera audible
+  on a Dante-fed box; program silent on the cg box) are DEFERRED — the widget has no box identity
+  today, and a hostname match is non-fail-safe (false DEGRADE on the live cg box). They are already
+  covered at DEPLOY time by the #1303 part-4 preflight. followup: a robust deploy-written box-role
+  marker for the live version.
+- 3-copy lock-step: `tests/genlock_lock_json_guards.rs` + `tests/genlock_lock_indicator_guards.rs`
+  + the pwsh anchor in BOTH `windows-genlock{,-fast}.yml`.
+- Tier-0 verified (no cargo): rustc --test on the pure module (37) + both guard files (4+9); gcc/g++
+  -Werror lifts of the C decision/is-camera/JSON builder reproduce the Rust; pytest -k genlock -> 111.
+- Commits: 9ac1ca469 [red] -> 7e2e98c5e [green] pure decision + C mirror; 13547e701 widget+facet+py;
+  cf71d6cfc parity+guards+pwsh; c0e7ba7c4 python tests; 2d15bc03e fmt; docs this commit.
+- **#1168 (task 2/3, lane prodpins):** floor_equalization_plan / cross_camera_floor_spread /
+  floor_spread_hard_fail / baseline_strih_block + --equalization-plan CLI + report-only floor_spread_ms
+  in align(). RED 84dd7f9e5 -> GREEN f9d7574be. FINDING: the ~13.7 ms per-box excess is sub-source-frame
+  and the strih FIFO is a whole-source-frame conveyor, so no pin carries it (sub-frame hold doubles the
+  on-screen spread, run 1899055119); direction-correct plan = anchor OLDEST/max-floor, freshest gets the
+  pin (the 15.9. worked numbers were inverted); production stays floor-3 (no-op, no regression);
+  grabber-vs-pin decision raised on the ticket (needs-answer). No production pins applied, recording-e2e.sh
+  untouched. 15 new pytest, 260 related green.
+- issue 1320 (RED 4ff188a37 → GREEN 5a846ad4e → feat 9f3305b68 → review-F1 1ffd475f6): strih PROGRAM
+  render freeze on a scene-switch-coincident NDI reattach. ROOT CAUSE (traced + confirmed live,
+  read-only strih OBS logs 15.9.2026 — 7 severe freezes in one afternoon, identical signature): an
+  ASYNC_VIDEO `ndi_source_update` is DEFERRED to `obs_source_video_tick` → runs ON THE GRAPHICS THREAD;
+  a CLEAR-then-SET reattach clears the name to `""` → `ndi_source_thread_stop` → `pthread_join` waits on
+  the av-thread's exit-path `NDIlib_recv_destroy` which blocks ~7.5 s → PROGRAM render freeze
+  (`program-render-audit lagged=228 avg_frame_ms=782`) → 2ME PGM starved → stream FIFO underrun →
+  462-relock storm → +2/+3 frame presented age ~40 min. NOT the scene switch itself (60 switches, incl.
+  a rapid-fire storm, produced exactly ONE lagged>0 window). FIX: hand the exit-path teardown to a
+  DETACHED reaper (`ndi_reap_receiver_detached`, pure `ndi_reap_should_defer` gate) so the join returns
+  in ~ms; existing diag logs byte-identical; new `genlock-reap:` marker; yml mirrors in both
+  windows-genlock*.yml. Report-only `program_render_lagged` bundle-state facet
+  (`scripts/bundle_state_gather.py` + `bundle-state-server.py`). Tests: distroav_scene_switch_reinit_1320.rs
+  (lift-compile + 8-row truth table) + test_program_render_lagged_gather_1320.py. Reviewed clean (7/7
+  lenses OK); F1 (shutdown-race crash-on-exit) accepted + documented, clean reaper-drain = follow-up.
+  Vendored C++ compiles only on CI (Tier-0). Live cure UNVERIFIED — supervisor full-bundle deploy + soak.
+
+- issue 1319 (item 16 `watchdogs` in the development-handover check): the dev1 `--user`
+  production-critical alert-watchdog TIMERS are now verified. RED 04856a2f1 → GREEN 059405f6c.
+  New `scripts/lib/watchdog-roster.sh` (16 timers, imag-scoped marked `:imag` for issue 1316) is the
+  ONE runtime source of truth; pure `classify_watchdogs` + a new `SUPERVISOR` attribution
+  (`nezapnutý watchdog: <names>`, never `zabudol si`, exit 1) in `rig_dev_handover_decision.py`;
+  read-only dev1-local `probe_watchdogs` (systemctl is-enabled/is-active + LastTriggerUSec age) in
+  `rig-dev-handover-check.sh`. Live dev1 dry-run: 16/16 timers OK; a really-disabled timer →
+  SUPERVISOR; a fake timer → UNKNOWN. Tests: test_rig_dev_handover_watchdogs_1319.py (12) + the
+  1312 full-fleet fixture extension. Tier-0: pytest 40 passed + bash -n + shellcheck, zero cargo.

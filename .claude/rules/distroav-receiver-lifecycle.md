@@ -312,3 +312,84 @@ offline-verifiable — confirmed only by the supervisor's post-deploy rig repro 
 `#1287 ... forcing BY-NAME` → `#1180 connect BY-NAME` → `received=` Δ>0 within ~2 stale windows).
 The `[1/8]` frozen-camera gate (pixel-hash, 2 samples) was RIGHT to fail on the live incident —
 cross-check with the `received=` Δ before calling any FROZEN a false positive.
+
+## A FINDER-BLIND sender needs a fallback ladder — by-name/BY-URL both die when discovery itself is blind (#1096 reopen)
+
+**Distinct from every wedge above: this one is not the receiver's fault.** The #1080 `break` death, the
+#1096 poisoned-name wedge, and the #1287 dead-port wedge all assume the local SDK finder will EVENTUALLY
+re-discover the sender's mDNS record — the fresh per-reset finder, the #767 watchdog, and the #1287
+BY-URL↔BY-NAME alternation are all built on that. When strih's finder stays BLIND (the #1199 flaky-NIC /
+multicast-reception class), NONE of them can reach the sender: the fresh finder resolves nothing → the
+`#1096 connect BY-NAME (fresh finder resolved no URL)` path re-consults the poisoned per-process finder →
+black. Live 15.9.2026: strih `NDI cam7` ran **607 identical BY-NAME cycles over 12 min** at `received=` Δ0
+while the sender emitted 60.0 fps and imag (finder healthy) recovered BY-URL in 6 s.
+
+**The fix LANDED (#1096 reopen, `ndi_source_thread`, `tests/distroav_by_url_fleet_fallback_1096.rs`),
+vendored receiver side only.** When a reset's fresh finder resolves nothing and BY-NAME is not
+force-required, escalate through a BOUNDED BY-URL ladder before falling to by-name:
+- **(b) last-known-good:** `last_delivered_url_1096` persists the URL that actually DELIVERED frames on a
+  BY-URL bind; the ladder retries it BY-URL first (a graceful restart usually returns on the same :5961).
+- **(a) fleet map:** after `NDI_FLEET_AFTER_NO_URL_CYCLES`=3 consecutive finder-blind resets, the pure
+  `ndi_fleet_url_for_name(name, port_index, buf, buflen)` synthesizes the address from the naming
+  contract (`CAMn (usb)` ↔ `10.77.9.6n:5961`, cf. `scripts/camera-set.sh`) — returns FALSE for any
+  non-camera name so `cg`/`NDI obs hudba` are NEVER given a guessed URL — cycling ports 5961..5963
+  (`NDI_FLEET_PORT_CANDIDATES`) one-per-reset across consecutive frame-less fleet binds (bounded, never an
+  in-reset socket loop — deliberately NO raw sockets, which would drag winsock2 into a CI-first-compile
+  Windows build). The BY-URL fallback choice is the pure `ndi_fallback_bind_mode_1096(...)` ladder.
+
+**Key invariant — both fallbacks route through the SAME `connected_by_url_1180 = url_resolved_1096`
+arming** (a separate `url_bind_kind_1096` tags fresh/last-known/fleet for the log line ONLY), so #1180
+identity verify (a wrong-sender fleet/last-known guess WITH frames is caught + forced by-name) and #1287
+frame-less alternation (a dead-port guess is caught + forced by-name NEXT) apply UNCHANGED. The three
+coexist as a by-name → last-known → fleet ladder that no single dead path can pin: e.g. finder-blind +
+rotated port → last-known(:5961 dead) → BY-NAME → … → (K reached) fleet(:5961) → BY-NAME → fleet(:5962
+LIVE); first frames record the delivering URL as the new last-known and zero the escalation clock. New
+log markers use `#1096 rebind BY-URL` (mutually non-substring vs the existing `#1096 connect BY-URL`/
+`BY-NAME` lines other tests anchor on). The two pure helpers are the std-only lift-compile/truth-table
+gate; CI is the first real compiler. The live cure reproduces only live — UNVERIFIED until the
+supervisor's post-deploy rig repro (bounce a cambox sender against strih; expect `#1096 rebind BY-URL …
+(last-known good` / `(fleet map …` → `received=` Δ>0 without an OBS restart). Candidate (c), the dev1
+frozen-input watchdog extension to strih camera inputs, is a SEPARATE lane (`scripts/frozen-input-*`).
+
+## #1320 — `ndi_source_update` runs on the GRAPHICS thread, so a blocking teardown in its stop-path freezes the PROGRAM render
+
+`ndi_source` is `OBS_SOURCE_ASYNC_VIDEO` (⇒ `OBS_SOURCE_VIDEO`), so `obs_source_update()`
+(`vendor/obs-studio/libobs/obs-source.c`) does NOT run `info.update` inline — it **defers** it
+(`os_atomic_inc_long(&source->defer_update_count)`), and the deferred `ndi_source_update` runs from
+`obs_source_video_tick` → `obs_source_deferred_update`, which `obs-video.c`'s
+`obs_graphics_thread_loop` calls **ON THE OBS GRAPHICS/RENDER THREAD**. So anything `ndi_source_update`
+does synchronously blocks the PROGRAM render, not just the caller's WS/main thread.
+
+The live incident (issue 1320, strih 15.9.2026 — 7 severe freezes in one afternoon, read-only logs):
+a CLEAR-then-SET reattach (a heal/`set-ndi-mapping`-class script, see the #1114 note above) clears the
+NDI source name to `""` → `ndi_source_update` → `ndi_source_thread_stop` → `pthread_join`, and the
+av-thread's EXIT-path `NDIlib_recv_destroy()` blocks **~7.5 s** (an SDK-internal teardown timeout). The
+graphics thread sits in that join the whole time → PROGRAM render freeze (`program-render-audit
+lagged=228 avg_frame_ms=782`, the ONLY `lagged>0` window in a 95 min session) → the `2ME PGM` NDI
+output starves → the stream receive FIFO underruns → a 462-relock storm → the presented video sits
++2/+3 frames late for ~40 min. EVERY freeze has the identical signature: `ndi_source_update: No NDI
+Source selected; Requesting Source Thread Stop` → exit `recv_destroy` → **~7.5 s** → `Reset NDI
+Receiver`, and the freeze window's timestamp == the recv_destroy completion. A scene switch is NOT the
+cause: 60 scene switches in the same session (incl. a 8-switch rapid-fire storm ~1.5 s apart) produced
+exactly ONE `lagged>0` window — the one coincident with the slow reattach.
+
+**The fix (`ndi_reap_receiver_detached` + the pure `ndi_reap_should_defer` gate):** the av-thread's
+EXIT-path framesync+receiver teardown is handed to a DETACHED reaper thread, so the blocking
+`recv_destroy` never holds up the `pthread_join` — the join, and the render thread, return in ~ms. The
+NDI handles are plain instances independent of `ndi_source_t`, so the reaper races nothing in `s` or a
+freshly-started av-thread; a `std::thread` spawn failure falls back to a synchronous destroy (never
+crash). All existing exit-path diagnostic log lines are kept **byte-identical** (they only PRINT now;
+the destroy is deferred — F2 of the review, deliberate) and a new mutually-non-substring `genlock-reap:`
+marker records each handoff. Anchors mirrored into BOTH `windows-genlock*.yml` (the fast path hot-swaps
+`distroav.dll` un-gated). Std-only gate + truth table: `tests/distroav_scene_switch_reinit_1320.rs`.
+
+**Scoped to the EXIT path only.** The in-loop `reset_ndi_receiver` block's `recv_destroy` (a warm-
+receiver recreate) is the SAME defect class but runs on the av-thread and only contributes to the join
+latency in the rare case the stop lands mid-reset (the 17:04 partial, `lagged=61`); it sits in the
+issue-1080/1096 minefield with its own test anchors, so async-reaping it is a bounded FOLLOW-UP, not
+folded here. Accepted shutdown-race (review F1): a detached reaper can outlive `ndiLib->destroy()` on
+OBS process shutdown (a rare crash-on-exit) — accepted vs the live freeze; a clean outstanding-reaper
+drain before `ndiLib->destroy()` is the follow-up. Detection: the report-only `program_render_lagged`
+bundle-state facet (see `program-render-audit.md`); a dev1 watchdog paging on it + `relock_bursts>=1`
+is the supervisor's follow-up. The live cure (20 scene switches, no `lagged>0`, dock ±15 ms ≥2 h) is
+UNVERIFIED until the supervisor's full-bundle deploy + rig soak.

@@ -119,7 +119,16 @@ def genlock_lock_facet_from_log(text):
       {state, reason, n_inputs, n_locked, n_absent, latency_ms, recent_event, qpc_drift_ms,
        clock:{state}, output:{present, stamping_wallclock},
        inputs:{<name>:{locked, connected, latency_ms, underruns, relocks, late_holds, depth}},
-       source:"log"}
+       [recent_event_inputs:[{name, events}]], [audio_unexpected_inputs:[{name}]], source:"log"}
+
+    #1299 (schema v3, Part 3): `recent_event_inputs` is the top recent-event offender (name+count),
+    present ONLY when the v3 line carries a non-empty list (a DEGRADED/recent_event page names it).
+    Omitted for a v1/v2 line from an older build, or an empty list, so an older line never fabricates
+    an attribution.
+
+    #1303 (schema v4): `audio_unexpected_inputs` is a silent-by-contract source found AUDIBLE (the
+    double-audio hazard), present ONLY when the v4 line carries a non-empty list. Omitted for a
+    v1/v2/v3 line, or an empty list.
 
     #1299 (schema v2): `n_absent` (senderless input count) and per-input `connected` distinguish an
     idle NDI input (no sender) from a connected-but-unlocked one so the fleet watchdog never
@@ -196,6 +205,43 @@ def genlock_lock_facet_from_log(text):
         "inputs": inputs_map,
         "source": "log",
     }
+
+    # #1299 (schema v3, Part 3): the top recent-event offender(s) — [{name, events}] — so a
+    # DEGRADED/recent_event page can NAME the offending input (reason=recent_event:<name>). Omit the
+    # key entirely when absent (a v1/v2 line from an older build) or empty (no offender), so an older
+    # line never fabricates an attribution. Each entry is tolerant: a malformed row is skipped.
+    raw_rei = payload.get("recent_event_inputs")
+    if isinstance(raw_rei, list):
+        rei = []
+        for row in raw_rei:
+            if not isinstance(row, dict):
+                continue
+            name = row.get("name")
+            if not isinstance(name, str) or not name:
+                continue
+            rei.append({"name": name, "events": row.get("events")})
+        if rei:
+            facet["recent_event_inputs"] = rei
+
+    # #1303 (schema v4): the audio-unexpected offender(s) — [{name}] — a silent-by-contract source
+    # found AUDIBLE, so a DEGRADED/audio_unexpected page can NAME it (reason=audio_unexpected:<name>).
+    # Omit the key entirely when absent (a v1/v2/v3 line from an older build) or empty (no offender),
+    # so an older line never fabricates an attribution. Each entry is tolerant: a malformed row is
+    # skipped. Names-only (no events count — unlike recent_event, an unexpected-audio input is a
+    # binary condition, not a cumulative counter).
+    raw_aui = payload.get("audio_unexpected_inputs")
+    if isinstance(raw_aui, list):
+        aui = []
+        for row in raw_aui:
+            if not isinstance(row, dict):
+                continue
+            name = row.get("name")
+            if not isinstance(name, str) or not name:
+                continue
+            aui.append({"name": name})
+        if aui:
+            facet["audio_unexpected_inputs"] = aui
+
     return facet
 
 
@@ -269,6 +315,11 @@ def read_bounded_log_text(path, head_bytes=LOG_HEAD_BYTES, tail_bytes=LOG_TAIL_B
 # anchor makes the summary line `audio-telemetry #800: total_buffering=...` (no quoted name) never
 # match. ts_lag_ms may be negative (-1 == audio_ts==0, i.e. no audio timeline yet).
 _AUDIO_TS_LAG_RE = re.compile(r"audio-telemetry #800 '([^']*)': ts_lag_ms=(-?\d+)")
+
+# #1320 — the PROGRAM-render freeze signal. `program-render-audit:` (obs-video.c
+# obs_graphics_thread_loop, ~5 s) carries the PROGRAM output's render cadence; `lagged` ==
+# renderSkipped in that window, so a `lagged>0` window is a render-thread freeze.
+_PROGRAM_RENDER_LAGGED_RE = re.compile(r"program-render-audit:.*?\blagged=(\d+)\b")
 
 # #1231 — freshness/recency for the audio-lag facet (follow-up to the #1226 review finding W1). The
 # #1226 facet took the LAST reading PER source with NO age bound, so a source removed/renamed while
@@ -405,6 +456,50 @@ def audio_ts_lag_ms_from_log(text):
     return (lag, src)
 
 
+def program_render_lagged_from_log(text):
+    """#1320 — the strih PROGRAM-render freeze signal `(max_lagged_str, age_s_str)`, `("", "")` when
+    no `program-render-audit:` line exists (absent -> UNKNOWN downstream, never a fabricated 0).
+
+    `program-render-audit:` (obs-video.c obs_graphics_thread_loop, ~5 s) reports the PROGRAM output's
+    render cadence; `lagged` == renderSkipped in that window, so a `lagged>0` window is a render-
+    thread freeze. Issue 1320: a scene-switch-coincident DistroAV reattach whose blocking
+    NDIlib_recv_destroy ran on the graphics thread froze the PROGRAM render ~7.5 s (lagged=228
+    avg_frame_ms=782) -> 2ME PGM starved -> stream FIFO underrun -> relock storm -> presented video
+    +2/+3 frames late ~40 min. This facet exposes the MAX `lagged` across the tail's
+    program-render-audit lines + the in-log age (whole seconds) of the MOST RECENT window achieving
+    that max, so the dev1 watchdog can page on a RECENT freeze (not one that scrolled out of the
+    tail). `"0"` (a healthy tail: render telemetry live, no freeze) is a truthy string and is KEPT;
+    `""` (no telemetry at all) is dropped by the omit-when-empty filter.
+
+    Reads ONLY the TAIL slice of the #1222 bounded head+separator+tail read (a freeze surviving only
+    in the head is never reported; a small whole-file log is scanned entirely), in ONE pass (no
+    second log read). File order is time order (append-only log), so `_recency_gap_s` corrects a
+    single midnight wrap on the date-less OBS timestamps."""
+    t = text or ""
+    if LOG_BOUNDED_READ_SEPARATOR in t:
+        t = t.rsplit(LOG_BOUNDED_READ_SEPARATOR, 1)[-1]
+    log_newest_ts = None   # ts of the LAST parseable line in file order (the log write head)
+    max_lagged = None
+    max_ts = None          # ts of the most-recent line achieving max_lagged
+    for line in t.splitlines():
+        ts = _log_line_seconds(line)
+        if ts is not None:
+            log_newest_ts = ts
+        m = _PROGRAM_RENDER_LAGGED_RE.search(line)
+        if m:
+            lagged = int(m.group(1))
+            if max_lagged is None or lagged > max_lagged:
+                max_lagged = lagged
+                max_ts = ts
+            elif lagged == max_lagged and ts is not None:
+                max_ts = ts   # a LATER window at the same max -> report the fresher age
+    if max_lagged is None:
+        return ("", "")
+    gap = _recency_gap_s(log_newest_ts, max_ts)
+    age_s = "0" if gap is None else str(round(gap))
+    return (str(max_lagged), age_s)
+
+
 def _median_int(values):
     """Plain sorted median of a non-empty int list, rounded to int. (No numpy — small lists.)"""
     s = sorted(values)
@@ -516,6 +611,17 @@ _AV_OFFSET_SUGGEST_RE = re.compile(
     r"(\d+) -> \d+ms \(measured offset=(-?\d+(?:\.\d+)?)ms\)"
 )
 
+# #1319 — the dock's per-10s heartbeat line, emitted whenever the dock is LOCKED regardless of the
+# measured offset (`av-sync-dock: diag ... locked=yes state=LIVE`). NOTE (review F3): the diag line
+# prints `locked=%s state=%s` INDEPENDENTLY, and this regex keys on `locked=yes` — NOT the `state`
+# token. A dock that is `locked=no` (still acquiring) is therefore treated as non-live here, so the
+# thin-sample branch reads STALE rather than IN_BAND_QUIET — the SAFE direction (no page; a genuine
+# dock/lock loss is the genlock-lock/frozen-input watchdogs' job), and moot on the samples-present
+# OUT_OF_BAND path. Its freshness (av_offset_dock_live_age_from_log) lets the dev1 band decision
+# distinguish "dock LOCKED, offset in the suggestion dead band" (IN_BAND_QUIET, healthy) from "dock
+# silent" (STALE) — the false-STALE the SUGGESTED-only age read during a dead-band quiet window.
+_AV_OFFSET_DIAG_LOCKED_RE = re.compile(r"av-sync-dock: diag .*\blocked=yes\b")
+
 # #1267 — rolling-window bounds, in-log seconds behind the log head. RECENT = the freshest 10 min;
 # BASELINE = the 10..40 min region behind it (a rolling reference that predates the recent window).
 # The BASELINE is bounded above by how far the #1222 bounded TAIL reaches (~50 min on a long
@@ -620,6 +726,35 @@ def av_offset_series_from_log(text, recent_window_s=AV_OFFSET_RECENT_WINDOW_S,
         str(len(recent_offs)),
         str(len(base_offs)),
     )
+
+
+def av_offset_dock_live_age_from_log(text):
+    """#1319 — the in-log whole-second age of the freshest `av-sync-dock: diag ... locked=yes` line
+    behind the log's newest parseable line of ANY kind. Returns "" when there is NO such line.
+
+    The dock emits this heartbeat (~every 10 s) whenever it is LIVE, INDEPENDENT of the measured
+    offset — so a FRESH age here while the SUGGESTED offset series is silent means "dock LIVE, offset
+    inside the suggestion dead band" (the dev1 band decision reads IN_BAND_QUIET, healthy), whereas a
+    STALE age means the dock itself stopped (STALE). This closes the false-STALE the SUGGESTED-only
+    `av_offset_age_s` read during a dead-band quiet window (the owner's 19:44-19:55 gap, 15.9.2026).
+
+    Same recency model as av_offset_series_from_log (`_recency_gap_s`, midnight-wrap corrected, file
+    order IS time order) over ONLY the #1222 bounded TAIL, one pass, no wall clock injected."""
+    t = text or ""
+    if LOG_BOUNDED_READ_SEPARATOR in t:
+        t = t.rsplit(LOG_BOUNDED_READ_SEPARATOR, 1)[-1]
+    log_newest_ts = None
+    last_live_ts = None
+    for line in t.splitlines():
+        ts = _log_line_seconds(line)
+        if ts is not None:
+            log_newest_ts = ts
+        if ts is not None and _AV_OFFSET_DIAG_LOCKED_RE.search(line):
+            last_live_ts = ts
+    if last_live_ts is None:
+        return ""
+    gap = _recency_gap_s(log_newest_ts, last_live_ts)
+    return "" if gap is None else str(round(gap))
 
 
 def distroav_dll_paths(scan_roots):
@@ -1049,10 +1184,13 @@ def build_bundle_state(
     av_offset_age_s="",
     av_offset_n_recent="",
     av_offset_n_base="",
+    av_offset_dock_live_age_s="",
     vb_matrix_running="",
     vb_matrix_name="",
     vb_matrix_pid="",
     vb_matrix_start="",
+    program_render_lagged="",
+    program_render_lagged_age_s="",
 ):
     """Assemble the flat bundle-state dict `version-integrity-gate.sh --win-state`'s
     `compare_args_from_state()` parses. Every value is a STRING (its regex requires a quoted JSON
@@ -1149,6 +1287,11 @@ def build_bundle_state(
         "av_offset_age_s": av_offset_age_s,
         "av_offset_n_recent": av_offset_n_recent,
         "av_offset_n_base": av_offset_n_base,
+        # #1319 — the dock-LIVE freshness age (in-log seconds behind the log head of the freshest
+        # `av-sync-dock: diag ... locked=yes` heartbeat). Lets the dev1 band decision read
+        # IN_BAND_QUIET (dock LIVE, offset in the suggestion dead band) instead of a false STALE.
+        # Same omit-when-empty rule (absent == UNKNOWN downstream, never a fake 0).
+        "av_offset_dock_live_age_s": av_offset_dock_live_age_s,
         # #1227 — the VB-Matrix presence facet the dev1 VB-Matrix alert watchdog reads. Same
         # omit-when-empty rule: running="0" (installed but the VBAudioMatrix* process is DEAD) is a
         # truthy string and is KEPT (surfaces as DOWN); running="" (a box with no VB-Matrix install,
@@ -1158,5 +1301,12 @@ def build_bundle_state(
         "vb_matrix_name": vb_matrix_name,
         "vb_matrix_pid": vb_matrix_pid,
         "vb_matrix_start": vb_matrix_start,
+        # #1320 — the strih PROGRAM-render freeze facet the dev1 render-freeze watchdog reads: the
+        # MAX `program-render-audit lagged` over the tail + the in-log age (s) of the most recent
+        # window achieving it. Same omit-when-empty rule: "0" (render telemetry live, no freeze) is
+        # a truthy string and is KEPT; "" (no program-render-audit line at all) is dropped ->
+        # UNKNOWN downstream, never a fabricated 0. From `program_render_lagged_from_log`.
+        "program_render_lagged": program_render_lagged,
+        "program_render_lagged_age_s": program_render_lagged_age_s,
     }
     return {k: v for k, v in values.items() if v}

@@ -2320,3 +2320,43 @@ fn verify_device_documents_ag_in_header_and_usage_1240() {
         "usage()'s own Checks doc block must document (ag) ethtool: {usage_block}"
     );
 }
+
+// --- (am) #1309 bkshading-relay blast-radius + info-logging verdict ------------------------------
+
+#[test]
+fn relay_tasksmax_within_ceiling_yes_only_for_numeric_le_ceiling() {
+    for (raw, want) in [
+        ("512", "yes"),
+        ("100", "yes"),
+        ("18761", "no"),
+        ("infinity", "no"),
+        ("", "no"),
+        ("abc", "no"),
+    ] {
+        let (code, out, err) =
+            run_sourced(&format!(r#"relay_tasksmax_within_ceiling "{raw}" 512"#));
+        assert_eq!(code, 0, "harness must not crash. stderr: {err}");
+        assert_eq!(out.trim(), want, "relay_tasksmax_within_ceiling({raw})");
+    }
+}
+
+#[test]
+fn relay_blast_radius_verdict_grades_each_case() {
+    // not provisioned -> na (never a fail)
+    let (_, out, _) = run_sourced(r#"relay_blast_radius_verdict no 512 active 5 512"#);
+    assert_eq!(out.trim(), "na");
+    // provisioned + bounded + active + logging -> ok
+    let (_, out, _) = run_sourced(r#"relay_blast_radius_verdict yes 512 active 5 512"#);
+    assert_eq!(out.trim(), "ok");
+    // provisioned + bounded + inactive (TEST-mode default) -> ok (logging skipped)
+    let (_, out, _) = run_sourced(r#"relay_blast_radius_verdict yes 512 inactive 0 512"#);
+    assert_eq!(out.trim(), "ok");
+    // TasksMax over ceiling -> FAIL (blast radius)
+    let (_, out, _) = run_sourced(r#"relay_blast_radius_verdict yes 18761 active 5 512"#);
+    assert!(out.trim().starts_with("FAIL:"), "over-ceiling FAIL: {out}");
+    assert!(out.contains("TasksMax=18761"));
+    // active but zero info lines -> FAIL (broken logging, the 2026-09-15 symptom)
+    let (_, out, _) = run_sourced(r#"relay_blast_radius_verdict yes 512 active 0 512"#);
+    assert!(out.trim().starts_with("FAIL:"), "zero-lines FAIL: {out}");
+    assert!(out.contains("ZERO info journal lines"));
+}

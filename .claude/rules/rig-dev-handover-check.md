@@ -2,7 +2,9 @@
 paths:
   - "scripts/rig-dev-handover-check.sh"
   - "scripts/rig_dev_handover_decision.py"
+  - "scripts/lib/watchdog-roster.sh"
   - "tests/python/test_rig_dev_handover_1312.py"
+  - "tests/python/test_rig_dev_handover_watchdogs_1319.py"
 ---
 
 # "development" handover check (#1312)
@@ -20,8 +22,10 @@ ONE Slovak checklist of what the owner forgot to switch back into development st
   rig** — no `--fix` (a `--fix` mode is a followup, not this script).
 - **`scripts/rig_dev_handover_decision.py`** is the PURE engine: it parses the captures
   (watchdog `verdict=`/`-> REACHABLE` lines, exit codes, the rig-mode bare token), maps every item
-  to `OK` / `FORGOT-BY-OWNER` / `FIXED-BY-ME` / `UNKNOWN` + a Slovak line, and decides the exit
-  code (0 all-OK; 1 any FORGOT; 2 UNKNOWN-only). **ALL logic + ALL tests live here** — Tier-0 #557:
+  to `OK` / `FORGOT-BY-OWNER` / `SUPERVISOR` / `FIXED-BY-ME` / `UNKNOWN` + a Slovak line, and decides
+  the exit code (0 all-OK; 1 any FORGOT **or SUPERVISOR**; 2 UNKNOWN-only). `SUPERVISOR` (issue 1319)
+  is a problem the SUPERVISOR must fix — the owner SEES it but is never blamed (`nezapnutý watchdog:
+  …`, not `zabudol si: …`). **ALL logic + ALL tests live here** — Tier-0 #557:
   no cargo, `tests/python/test_rig_dev_handover_1312.py` feeds captured dry-run fixtures to the
   pure functions. Verify a change with `python3 -m pytest tests/python/test_rig_dev_handover_1312.py`;
   verify the bash with `bash -n` + `shellcheck -S warning` (the orchestrator has no cargo/live
@@ -45,6 +49,7 @@ ONE Slovak checklist of what the owner forgot to switch back into development st
 | dantesync | `dantesync-version-gate.sh` | exit 0 | exit 20 (drift) | exit 11 |
 | cambox | `camera-box-version-gate.sh` | exit 0 | exit 20 (drift) | exit 11 |
 | avlatency | `measurement-chain-latency.sh` (marker emit vs `mbc` relative onset) | `verdict=ALIGNED` | `verdict=DRIFTED` (>90 ms vs baseline) | monotonic-emit / no-baseline / chain-silent (all <−60 dB) / <3 onsets / cam2 down / stream OBS down |
+| watchdogs | `systemctl --user` per timer in `lib/watchdog-roster.sh` (dev1-local, no ssh) | all enabled+active+fired <15 min → OK | disabled/inactive/never-run/stale → **SUPERVISOR** (`nezapnutý watchdog: …`, never `zabudol si`) | no unit file → UNKNOWN with names |
 
 ## `avlatency` (#1312) — the mbc measurement-chain LATENCY, not just presence
 
@@ -122,6 +127,33 @@ median, classify, the wall-clock guard) is the pure `scripts/measurement_chain_l
   (after the `--wall-clock` switch is live), never a mix — the pure kernel's `all()` wall-clock guard
   is exactly right. The supervisor's FIRST `--baseline` run must still confirm `onsets >= 3` (ideally
   6) over the window before trusting the written baseline.
+
+## `watchdogs` (issue 1319) — the dev1 `--user` production-critical watchdog TIMERS
+
+The 16th item catches the exact class the owner hit on 15.9.: `av-step-alert-watchdog.timer` +
+`avsync-lineup-alert-watchdog.timer` had NEVER been installed on dev1, A/V-sync notifications
+silently never fired, and NOTHING reported it. It reads (dev1-LOCAL, no ssh) `systemctl --user
+is-enabled/is-active` + the timer's `LastTriggerUSec` age for every timer in the ONE roster
+`scripts/lib/watchdog-roster.sh`, emits ONE raw per-timer line (`watchdog <t> scope=.. unit=..
+enabled=.. active=.. age_s=..`), and the pure `classify_watchdogs` decides it.
+
+- **The roster is the source of truth, NOT the test artefact.** `scripts/lib/watchdog-roster.sh`
+  (`WATCHDOG_TIMERS`, entries `timer:scope`) is authoritative. The
+  `_PRODUCTION_CRITICAL_TIME_BUCKETED` set in `tests/python/test_notify_dedup_key_sweep_1206.py`
+  asserts a *notify-dedup* property and is a TEST artefact — keep the two conceptually aligned, but
+  the roster is what the handover check reads. To add/remove a watchdog, edit the roster (and the
+  `WATCHDOGS_OK` fixture in `test_rig_dev_handover_1312.py`'s full-fleet capture set).
+- **A disabled/inactive/never-run/stale timer → SUPERVISOR, never FORGOT.** The owner cannot install
+  a systemd unit; that is the supervisor's job. The Slovak line names the exact timers
+  (`nezapnutý watchdog: <names>`) and the summary reads `supervisor musí zapnúť watchdogy: <names>`
+  (exit 1) — the owner SEES the gap without being blamed. A timer with **no unit file** → UNKNOWN
+  with the names (`chýba unit súbor pre watchdog: …`); nothing readable → UNKNOWN.
+- **OK-recency bar = 15 min** (`WD_MAX_AGE_S`=900, the fleet's watchdog timers all run on ≤5-min
+  cadences). An enabled+active timer that has not fired within it reads `off-stale` → SUPERVISOR.
+- **imag-scoped timers are marked `:imag`** (`imag-obs-alert-watchdog.timer`) so
+  `classify_watchdogs(imag_retired=True)` (env `RDH_IMAG_RETIRED`) drops them once imag is retired
+  (issue 1316). imag-nb currently returns next year, so they are LIVE (counted) today.
+- **NEVER mutates** — no `systemctl enable/disable/start`. The probe only reads.
 
 ## Gotchas / invariants
 

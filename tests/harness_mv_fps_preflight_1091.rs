@@ -195,11 +195,28 @@ fn recording_e2e_sh_wires_the_preflight_before_the_render_budget_gate() {
 // -------------------------------------------------------------------------------------------
 
 /// A fake probe that ignores its <ip> <os> args and prints $FAKE_PROBE_OUT.
+///
+/// issue 1040: when $FAKE_PROBE_COUNTER is set it appends a per-call `probe_seq=N` token, so each
+/// read returns a UNIQUE multiview-audit line — exactly as a real OBS advances the log timestamp
+/// every ~5 s. The strict (imag) term's fresh-sample settle (issue 1040) decides on FRESH samples
+/// (identity != the baseline read), so a STATIC repeated line would be "no new lines" (UNKNOWN); the
+/// token makes the fake reads genuinely fresh while keeping the line a valid multiview-audit line
+/// (marker + rendered_fps=/floor= intact, ignored by the gate). An empty $FAKE_PROBE_OUT stays empty
+/// (no token) so the "no audit line -> UNKNOWN" path is preserved.
 fn write_fake_probe(dir: &Path) -> PathBuf {
     let p = dir.join("fake-probe.sh");
     std::fs::write(
         &p,
-        "#!/usr/bin/env bash\nprintf '%s\\n' \"${FAKE_PROBE_OUT:-}\"\n",
+        r#"#!/usr/bin/env bash
+out="${FAKE_PROBE_OUT:-}"
+if [ -n "$out" ] && [ -n "${FAKE_PROBE_COUNTER:-}" ]; then
+  n=0; [ -f "$FAKE_PROBE_COUNTER" ] && n="$(cat "$FAKE_PROBE_COUNTER" 2>/dev/null || echo 0)"
+  case "$n" in ''|*[!0-9]*) n=0 ;; esac
+  echo $((n + 1)) > "$FAKE_PROBE_COUNTER"
+  out="$out probe_seq=$n"
+fi
+printf '%s\n' "$out"
+"#,
     )
     .unwrap();
     std::fs::set_permissions(&p, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
@@ -245,6 +262,7 @@ fn run_assert(box_spec: &str, probe_out: &str, gate_exits: &str) -> (i32, String
     let probe = write_fake_probe(dir.path());
     let gate = write_fake_gate(dir.path());
     let counter = dir.path().join("gate.counter");
+    let probe_counter = dir.path().join("probe.counter");
     let out = Command::new("bash")
         .arg("-c")
         .arg("set -euo pipefail\n. \"$LIB\"\nmv_fps_preflight_assert \"$GATE\" \"$BOX\"\necho PROCEEDED")
@@ -253,6 +271,10 @@ fn run_assert(box_spec: &str, probe_out: &str, gate_exits: &str) -> (i32, String
         .env("BOX", box_spec)
         .env("MV_FPS_PREFLIGHT_PROBE_CMD", &probe)
         .env("MV_FPS_PREFLIGHT_REPROBE_SLEEP", "0")
+        // issue 1040: the strict-box settle needs FRESH reads (probe_seq token) + a no-op poll sleep
+        // so the confirmed-collapse abort resolves on the first fresh sample without a real wait.
+        .env("FAKE_PROBE_COUNTER", &probe_counter)
+        .env("MV_FPS_PREFLIGHT_SETTLE_SLEEP_CMD", ":")
         .env("FAKE_PROBE_OUT", probe_out)
         .env("FAKE_GATE_EXITS", gate_exits)
         .env("FAKE_GATE_COUNTER", &counter)

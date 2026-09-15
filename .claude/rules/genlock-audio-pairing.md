@@ -60,6 +60,21 @@ update all three.
   `libserde_json-*.rlib`.
 - The parity gate + genlock_preload guard run on CI (they `use camera_box::…` / are probe-gated).
 
+## LOCK-indicator audio DEGRADE term — audible-but-expected-silent (#1303 part 3b/c — DONE)
+
+Part 3c (the `audio_unexpected` axis) landed atop part 3b: `GenlockFacets`/`genlock_lock_facets_t`
+gained a second bool `audio_unexpected` → `LockReason::AudioUnexpected` (=10), the LOWEST-precedence
+DEGRADED branch (below `AudioPairing`), parity-gated in the now-2^9 sweep. The widget flags an
+audio-ENABLED source that is silent-by-contract per the certified table — the SHIPPED subset is
+box-class-agnostic (an audible CAMERA input via the parity-gated C mirror `genlock_name_is_camera`
+of `genlock_forced_table_audit::is_camera_input`), named on the human `genlock-lock:` line
+(`audio unexpected: <src>`) and the v3→v4 `genlock-lock-json:` line
+(`audio_unexpected_inputs:[{name}]`, omit-when-empty), parsed by `bundle_state_gather`, enriched to
+`audio_unexpected:<name>` by `genlock_lock_decision.analyze`. The box-class-DEPENDENT cases (a
+non-camera audible on a Dante-fed box; a program source silent on the cg box) are DEFERRED — the
+widget has no box identity today — and stay covered at DEPLOY time by the part-4 preflight below.
+Full contract: `genlock-lock-indicator.md` + `genlock-lock-facet.md`.
+
 ## LOCK-indicator audio DEGRADE term (#1303 part 3b — DONE)
 
 Landed as an additive term in the parity-gated LOCK decision: `GenlockFacets` (Rust
@@ -121,8 +136,14 @@ signal gated on the OLD classification — a `matches!(expected, …)`-style gat
 
 ## Deferred followups (NOT in the #1303 code lane)
 
+- **Box-class-aware LIVE audio-mismatch** — surface the box-class-DEPENDENT cert-table cases in
+  the LOCK indicator LIVE: a NON-camera input audible on a Dante-fed box (strih/stream/imag) and a
+  program source SILENT on the cg box (resolume). Part 3c wired only the box-class-AGNOSTIC
+  audible-camera subset (the widget has no box identity); a robust version needs a deploy-written
+  box-role marker (read like `GENLOCK_BUILD_SHA.txt`). Already covered at DEPLOY time by the part-4
+  preflight, so the live version is defense-in-depth.
 - **Audio DEGRADE full taxonomy** — surface `decide_audio_health`'s AudioDisabledOnProgram +
-  AsrcSaturated branches in the LOCK indicator (part 3b only wired the pairing-offset branch);
-  needs the widget to know is-program-source + per-source asrc-saturation, neither in `obs_genlock_stats` v2.
+  AsrcSaturated branches in the LOCK indicator; needs the widget to know is-program-source +
+  per-source asrc-saturation, neither in `obs_genlock_stats` v2.
 - Live A/V soak acceptance (±20 ms over 1 h, cg OBS `locked=1` + audio facet green) is a
   post-merge SUPERVISOR rig step — never rig-verified from the code lane.

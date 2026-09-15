@@ -94,6 +94,7 @@ DANTESYNC_PROBE="${RDH_DANTESYNC_PROBE:-$HERE/dantesync-version-gate.sh}"
 CAMBOX_PROBE="${RDH_CAMBOX_PROBE:-$HERE/camera-box-version-gate.sh}"
 AVLATENCY_PROBE="${RDH_AVLATENCY_PROBE:-$HERE/measurement-chain-latency.sh}"
 RIGMODE_LIB="${RDH_RIGMODE_LIB:-$HERE/lib/rig-mode-state.sh}"
+WATCHDOG_ROSTER="${RDH_WATCHDOG_ROSTER:-$HERE/lib/watchdog-roster.sh}"
 DECIDE="${RDH_DECIDE:-$HERE/rig_dev_handover_decision.py}"
 
 WORKDIR="$(mktemp -d "${TMPDIR:-/tmp}/rig-dev-handover.XXXXXX")"
@@ -225,6 +226,92 @@ fi
 # a green E2E) and reads UNKNOWN when cam2 is down / no baseline / the painter emit_ts is not wall-clock.
 export STREAM_HOST CAM2_HOST CAM_PW
 run_probe avlatency bash "$AVLATENCY_PROBE"
+
+# --- item 15: shading (per-cambox bkshading-relay enabled/active + camera online, #1309) ----------
+# Read-only per box: systemctl is-enabled/is-active bkshading-relay + curl :8771/api/state for the
+# camera-online flag. Emits ONE `verdict=SHADING-*` line per box for the pure decider:
+#   SHADING-ON   relay enabled+active AND camera online   (good)
+#   SHADING-DEAD relay enabled but NOT active             (forgot: should run, crashed -- #1309)
+#   SHADING-OFF  relay disabled/masked (the TEST-mode default per bkshading.md)   (neutral)
+#   SHADING-NO-CAMERA relay active but online:false       (neutral)
+#   SHADING-UNREACHABLE ssh/curl failed / no /api/state    (neutral -> UNKNOWN, never a false page)
+# The per-box detail lives in the capture; a DOWN box fails safe to SHADING-UNREACHABLE (never OK).
+probe_shading() {
+  local spec="$1" pw="$2" tok label ip en act online verdict body port="${SHADING_RELAY_PORT:-8771}"
+  # Bounds are PER BOX (timeout 8 ssh / 6 curl below), not the whole-item RDH_*_TIMEOUT budget --
+  # a per-box bound keeps the worst case linear in the small cambox count and never hangs the run.
+  [ -n "$spec" ] || { printf 'roster empty -- no camboxes to probe\n'; return 0; }
+  command -v sshpass >/dev/null 2>&1 || { printf 'sshpass missing -- cannot probe shading\n'; return 0; }
+  for tok in $spec; do
+    label="${tok%%=*}"; ip="${tok#*=root@}"
+    en=""; act=""; online=""
+    en="$(timeout 8 sshpass -p "$pw" ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+      -o ConnectTimeout=5 "root@$ip" \
+      'systemctl is-enabled bkshading-relay 2>/dev/null; echo ---; systemctl is-active bkshading-relay 2>/dev/null' \
+      2>/dev/null || true)"
+    act="$(printf '%s\n' "$en" | sed -n '/^---$/,$p' | sed '1d' | head -1)"
+    en="$(printf '%s\n' "$en" | sed -n '1p')"
+    body="$(timeout 6 curl -fsS "http://$ip:$port/api/state" 2>/dev/null || true)"
+    online="$(printf '%s' "$body" | grep -o '"online"[[:space:]]*:[[:space:]]*[a-z]*' | grep -o '[a-z]*$' | head -1)"
+    case "$en" in
+      enabled|static|indirect)
+        if [ "$act" = active ]; then
+          if [ "$online" = true ]; then verdict=SHADING-ON; else verdict=SHADING-NO-CAMERA; fi
+        else
+          verdict=SHADING-DEAD
+        fi ;;
+      disabled|masked) verdict=SHADING-OFF ;;
+      *) verdict=SHADING-UNREACHABLE ;;
+    esac
+    printf '%s (%s): enabled=%s active=%s online=%s -> verdict=%s\n' \
+      "$label" "$ip" "${en:-?}" "${act:-?}" "${online:-?}" "$verdict"
+  done
+  return 0
+}
+probe_shading "$CAM_LINUX_SPEC" "$CAM_PW" >"$WORKDIR/shading.out" 2>&1 || true
+echo 0 >"$WORKDIR/shading.rc"
+
+# --- item 16: watchdogs (dev1 --user production-critical alert-watchdog timers, #1319) ------------
+# Read-only, dev1-LOCAL (no ssh): the ROOT of the owner's 15.9. complaint was that av-step +
+# avsync-lineup timers had NEVER been installed and NOTHING reported it. For every timer in the ONE
+# roster (scripts/lib/watchdog-roster.sh) emit ONE raw line for the pure decider:
+#   watchdog <timer> scope=<core|imag> unit=<present|absent> enabled=<yes|no> active=<yes|no> age_s=<N|na>
+# from `systemctl --user is-enabled/is-active` + the timer's LastTriggerUSec age. A disabled/inactive/
+# never-run/stale timer -> SUPERVISOR (the supervisor's to fix, never the owner); no unit file ->
+# UNKNOWN. This NEVER mutates -- no enable/disable/start. imag-scoped timers are emitted with
+# scope=imag so the decider can drop them once imag is retired (issue 1316).
+probe_watchdogs() {
+  local roster_lib="$1" entry timer scope en act last age le now unit enabled active
+  if [ ! -e "$roster_lib" ]; then printf 'roster lib %s missing\n' "$roster_lib"; return 0; fi
+  # shellcheck source=scripts/lib/watchdog-roster.sh
+  . "$roster_lib" 2>/dev/null || { printf 'roster lib %s unreadable\n' "$roster_lib"; return 0; }
+  command -v systemctl >/dev/null 2>&1 || { printf 'systemctl missing -- cannot probe watchdogs\n'; return 0; }
+  now="$(date +%s)"
+  for entry in "${WATCHDOG_TIMERS[@]}"; do
+    timer="${entry%%:*}"; scope="${entry##*:}"
+    en="$(systemctl --user is-enabled "$timer" 2>&1 || true)"; en="${en%%$'\n'*}"
+    act="$(systemctl --user is-active "$timer" 2>&1 || true)"; act="${act%%$'\n'*}"
+    last="$(systemctl --user show "$timer" -p LastTriggerUSec --value 2>/dev/null || true)"
+    age=na
+    if [ -n "$last" ]; then
+      le="$(date -d "$last" +%s 2>/dev/null || true)"
+      [ -n "$le" ] && age="$(( now - le ))"
+    fi
+    unit=present; enabled=no; active=no
+    case "$en" in
+      enabled | enabled-runtime | static | indirect | generated | alias) enabled=yes ;;
+      disabled | masked | linked | linked-runtime | bad) enabled=no ;;
+      not-found | "" | *"No such file"*) unit=absent ;;
+      *) enabled=no ;;
+    esac
+    [ "$act" = active ] && active=yes
+    printf 'watchdog %s scope=%s unit=%s enabled=%s active=%s age_s=%s\n' \
+      "$timer" "$scope" "$unit" "$enabled" "$active" "$age"
+  done
+  return 0
+}
+probe_watchdogs "$WATCHDOG_ROSTER" >"$WORKDIR/watchdogs.out" 2>&1 || true
+echo 0 >"$WORKDIR/watchdogs.rc"
 
 # --- decide + print ------------------------------------------------------------------------------
 json_flag=()

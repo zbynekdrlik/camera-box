@@ -95,6 +95,25 @@ STALE_THRESHOLD_S="${AV_STEP_STALE_THRESHOLD_S:-300}"
 CONFIRM_THRESHOLD="${AV_STEP_CONFIRM_THRESHOLD:-2}"
 ALERT_THROTTLE_PASSES="${AV_STEP_ALERT_THROTTLE_PASSES:-12}"   # ~1h at the 5-min cadence
 
+# -- #1319 absolute-BAND arm config (env-overridable) -------------------------------------------
+# The owner-facing ABSOLUTE offset alarm: page when the recent median A/V offset leaves ±BAND_MS of
+# the E2E-aligned REFERENCE for BAND_CONFIRM_THRESHOLD passes. This catches the SLOW wander the STEP
+# term above is structurally blind to (the owner's 15.9.2026 +13->+47 ms drift at a constant pin,
+# each 10-min-median step under 45 ms, absorbed by the rolling baseline).
+BAND_MS="${AV_BAND_MS:-30}"                                    # ± half-width of the acceptable band
+BAND_CONFIRM_THRESHOLD="${AV_BAND_CONFIRM_THRESHOLD:-2}"       # 2-pass confirm before paging
+# The E2E-aligned reference offset (ms). Resolved by resolve_band_reference() in order:
+#   AV_BAND_REFERENCE_MS env  ->  AV_BAND_REFERENCE_FILE's residual_median_ms (the [4i/8] A/V align
+#   residual av_sync_apply_guard persists)  ->  0 ms fallback (stated in the log). The band is judged
+#   as |recent_med - reference|, so the reference is the aligned RESIDUAL, never the genlock pin.
+BAND_REFERENCE_FILE="${AV_BAND_REFERENCE_FILE:-$HOME/.camera-box/av-sync-residual-last.json}"
+BAND_REF=""            # resolved in main(); a global so handle_box_band can read it
+BAND_REF_SRC=""
+# Production-critical class (issue 1308): the OUT_OF_BAND page re-pings "dokolečka" while it persists
+# via a TIME-BUCKETED --dedup-key (watchdog_notify_key). REPING_INTERVAL_S (the ONE shared env name,
+# default 600 s, floored 60 s) sets the bucket width.
+REPING_INTERVAL_S="${REPING_INTERVAL_S:-600}"
+
 DECIDE="${AV_STEP_DECIDE:-$HERE/av_step_decision.py}"
 NOTIFY="${AIRULESET_NOTIFY:-$HOME/devel/airuleset/airuleset.py}"
 REPO_SLUG="${AV_STEP_ALERT_REPO:-zbynekdrlik/camera-box}"
@@ -299,6 +318,121 @@ handle_box() {
   fi
 }
 
+# -- #1319 absolute-BAND arm -------------------------------------------------------------------
+# resolve_band_reference -> prints "<value_ms> <source>" (a single line): the E2E-aligned reference
+# offset the band is judged against. Order: AV_BAND_REFERENCE_MS env -> the residual_median_ms in
+# AV_BAND_REFERENCE_FILE (the [4i/8] align residual av_sync_apply_guard persists) -> 0 ms fallback.
+resolve_band_reference() {
+  if [ -n "${AV_BAND_REFERENCE_MS:-}" ]; then
+    printf '%s env(AV_BAND_REFERENCE_MS)\n' "$AV_BAND_REFERENCE_MS"
+    return 0
+  fi
+  local f="$BAND_REFERENCE_FILE" v=""
+  if [ -r "$f" ]; then
+    v="$(python3 -c 'import json,math,sys
+try:
+    d=json.load(open(sys.argv[1]))
+except Exception:
+    sys.exit(0)
+for k in ("residual_median_ms","residual_ms","offset_ms","combined_offset_ms_raw"):
+    x=d.get(k)
+    # #1319 review F2: json.load accepts a bare NaN/Infinity; a non-finite reference would make
+    # abs(recent - ref) > band ALWAYS false -> the band arm silently NEVER pages (the exact blind
+    # alarm this ticket kills). Reject a non-finite value so resolve falls through to the 0 ms
+    # fallback (stated in the log) instead.
+    if isinstance(x,(int,float)) and not isinstance(x,bool) and math.isfinite(x):
+        print(round(float(x),1)); break' "$f" 2>/dev/null)"
+    if [ -n "$v" ]; then
+      printf '%s file(%s:residual_median_ms)\n' "$v" "$f"
+      return 0
+    fi
+  fi
+  printf '0 fallback(no AV_BAND_REFERENCE_MS env, no readable %s)\n' "$f"
+}
+
+# handle_box_band <box> <ip>: the ABSOLUTE-offset band arm, run alongside handle_box (the STEP arm).
+# Pages a report-only ⚠️ with a TIME-BUCKETED dedup key when the recent median offset sits > BAND_MS
+# from the reference at a CONSTANT pin for BAND_CONFIRM_THRESHOLD passes. IN_BAND_QUIET (dock LIVE,
+# offset in the suggestion dead band) + STALE (dock line itself stale) are healthy/quiet, never a
+# page -- the exact fix for the 19:51 false STALE.
+handle_box_band() {
+  local box="$1" ip="$2" body reachable analyze_out verdict recent delta dla pin pinstable nrec
+  if body="$(fetch_bundle_json "$ip")"; then reachable=1; else reachable=0; body=""; fi
+  analyze_out="$(printf '%s' "$body" | python3 "$DECIDE" analyze-band --box-reachable "$reachable" --band-reference-ms "$BAND_REF" --band-ms "$BAND_MS" --min-samples "$MIN_SAMPLES" --stale-threshold-s "$STALE_THRESHOLD_S" 2>/dev/null)"
+  verdict="$(printf '%s\n' "$analyze_out" | sed -n 's/^verdict=//p')"
+  recent="$(printf '%s\n' "$analyze_out" | sed -n 's/^recent_med_ms=//p')"
+  delta="$(printf '%s\n' "$analyze_out" | sed -n 's/^band_delta_ms=//p')"
+  dla="$(printf '%s\n' "$analyze_out" | sed -n 's/^dock_live_age_s=//p')"
+  pin="$(printf '%s\n' "$analyze_out" | sed -n 's/^pin=//p')"
+  pinstable="$(printf '%s\n' "$analyze_out" | sed -n 's/^pin_stable=//p')"
+  nrec="$(printf '%s\n' "$analyze_out" | sed -n 's/^n_recent=//p')"
+  log "$box ($ip) BAND: reachable=$reachable verdict=${verdict:-<none>} recent_med=${recent:-} delta=${delta:-} ref=${BAND_REF}ms band=±${BAND_MS}ms pin=${pin:-} pin_stable=${pinstable:-} dock_live_age=${dla:-} n_recent=${nrec:-}"
+
+  case "$verdict" in
+    OUT_OF_BAND) : ;;   # fall through to confirm + page
+    IN_BAND | IN_BAND_QUIET)
+      # healthy: clear the confirm counter, and if we had alerted, this is a genuine RECOVERY back
+      # into band (machine-channel only -- a ✅ recovery is never a phone ping, #1206).
+      local was_alerted
+      was_alerted="$(read_state_field "band_alerted_${box}" 0)"
+      if [ "$was_alerted" = "1" ]; then
+        if [ "$DRY_RUN" -eq 1 ]; then
+          log "[dry-run] WOULD send recovery: $box A/V offset back within ±${BAND_MS}ms of ref ${BAND_REF}ms (recent_med=${recent}ms)"
+        else
+          log "RECOVERY: $box A/V offset back within ±${BAND_MS}ms of ref ${BAND_REF}ms (recent_med=${recent}ms) -- machine-channel only (#1206)"
+        fi
+        write_state_field "band_alerted_${box}" 0
+      fi
+      write_state_field "band_confirm_${box}" 0
+      return 0
+      ;;
+    SKIP | STALE | UNKNOWN | REPIN)
+      # unmeasured / unjudgeable pass: hold the alert latch (no recovery claimed), reset only the
+      # confirm counter so a fresh excursion re-confirms from scratch.
+      log "$box BAND ${verdict}: no band judgement this pass -- holding state, no page"
+      write_state_field "band_confirm_${box}" 0
+      return 0
+      ;;
+    *)
+      log "$box BAND: unexpected verdict '${verdict:-<empty>}' (analyze-band failed?) -- holding, no page"
+      return 0
+      ;;
+  esac
+
+  # OUT_OF_BAND -> confirm across consecutive passes before paging.
+  local prev decision confirm act
+  prev="$(read_state_field "band_confirm_${box}" 0)"
+  decision="$(obs_watchdog_confirm "$prev" 1 "$BAND_CONFIRM_THRESHOLD")"
+  confirm="$(printf '%s\n' "$decision" | sed -n 's/^confirm=//p')"
+  act="$(printf '%s\n' "$decision" | sed -n 's/^act=//p')"
+  write_state_field "band_confirm_${box}" "${confirm:-0}"
+  log "$box BAND confirm=$prev -> $confirm act=$act (threshold=$BAND_CONFIRM_THRESHOLD)"
+  if [ "${act:-0}" != "1" ]; then
+    log "$box A/V offset OUT_OF_BAND (recent_med=${recent}ms, ${delta}ms off ref ${BAND_REF}ms) this pass but not yet CONFIRMED across $BAND_CONFIRM_THRESHOLD passes -- holding"
+    return 0
+  fi
+
+  write_state_field "band_alerted_${box}" 1
+  # Sign wording from the dock convention: a POSITIVE measured offset makes the dock want a SMALLER
+  # video delay -> video is late (obraz mešká za zvukom); a NEGATIVE offset -> audio is late.
+  local sign_txt="obraz mešká za zvukom" disp_off="$recent"
+  case "$recent" in
+    -*) sign_txt="zvuk mešká za obrazom" ;;
+    "") : ;;
+    *) disp_off="+$recent" ;;
+  esac
+
+  if [ "$DRY_RUN" -eq 1 ]; then
+    log "[dry-run] WOULD alert (OUT_OF_BAND, time-bucketed): $box A/V offset ${disp_off}ms mimo pásma ±${BAND_MS}ms (${delta}ms od ref ${BAND_REF}ms, pin ${pin}) -- $sign_txt"
+    return 0
+  fi
+  log "ALERT: firing Discord notification for $box A/V offset OUT_OF_BAND (${disp_off}ms vs ref ${BAND_REF}ms)"
+  python3 "$NOTIFY" notify --body \
+    "⚠️ stream A/V offset ${disp_off} ms mimo pásma ±${BAND_MS} ms ($REPO_SLUG): **$box** ($ip) — av-sync dock meria A/V ofset ${disp_off} ms, čo je ${delta} ms od E2E-zarovnanej referencie ${BAND_REF} ms pri gen-pine ${pin}. $sign_txt. Toto je pomalý posun (wander), ktorý #1267 STEP detektor nezachytí. Skontroluj audio reťazec / mastering; ak treba, pomôže reštart stream OBS (owner rozhodnutie). Report-only." \
+    --dedup-key "$(watchdog_notify_key "av-band-$box" "$(date +%s)")" \
+    >/dev/null 2>&1 || log "ALERT: airuleset.py notify failed (non-fatal)"
+}
+
 # require_tools -> exit non-zero (loud) if a REQUIRED external tool OR the decision module is
 # missing. A missing `curl` would make every fetch fail -> every box SKIP; a missing/unreadable
 # $DECIDE would make `analyze` emit nothing -> every box "unexpected verdict, holding" -> both
@@ -326,10 +460,19 @@ main() {
   log "pass start (dry_run=$DRY_RUN, threshold=${STEP_THRESHOLD_MS}ms, min_samples=${MIN_SAMPLES}, stale=${STALE_THRESHOLD_S}s, boxes='$BOXES')"
   require_tools || { log "pass end (aborted: missing required tools)"; return 3; }
 
+  # #1319 — resolve the E2E-aligned band reference ONCE per pass (before the boxes), so the log
+  # states which source it came from (env / file / the 0 ms fallback) exactly as required.
+  local ref_out
+  ref_out="$(resolve_band_reference)"
+  BAND_REF="${ref_out%% *}"
+  BAND_REF_SRC="${ref_out#* }"
+  log "band arm: reference=${BAND_REF}ms (source: ${BAND_REF_SRC}), band=±${BAND_MS}ms, confirm=${BAND_CONFIRM_THRESHOLD}, reping_bucket=${REPING_INTERVAL_S}s"
+
   local pair box ip
   for pair in $BOXES; do
     box="${pair%%|*}"; ip="${pair##*|}"
-    handle_box "$box" "$ip"
+    handle_box "$box" "$ip"        # #1267 STEP arm
+    handle_box_band "$box" "$ip"   # #1319 absolute-BAND arm
   done
   log "pass end"
 }
