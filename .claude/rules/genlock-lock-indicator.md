@@ -20,7 +20,7 @@ facet + dev1 watchdog that CONSUMES the same structs over obs-websocket).
 |---|---|---|
 | The DECISION (pure) | `src/genlock_lock_state.rs` (`decide`) | Tier-0 authority, crate-root, std-only. |
 | The DECISION (C port) | `vendor/obs-studio/frontend/widgets/GenlockLockState.hpp` (`genlock_decide_lock_state`) | Byte-for-byte mirror; OBS/Qt-free so the parity gate lifts + `cc`-compiles it. Keep the two enums + struct + fn CONTIGUOUS (the lift slices from the first enum through the fn's closing brace). |
-| C-vs-Rust parity gate | `tests/genlock_lock_state_parity.rs` | Lifts the C block, `cc`-compiles it, compares `(state, reason)` over all 2^8 flag combos × 10 input/locked pairs (the 8th flag is #1303's `audio_unpaired`). |
+| C-vs-Rust parity gate | `tests/genlock_lock_state_parity.rs` | Lifts the C block, `cc`-compiles it, compares `(state, reason)` over all 2^8 flag combos × a set of `(n_inputs, n_locked, n_absent)` triples (the 8th flag is #1303's `audio_unpaired`; the `n_absent` axis is #1299's — some-absent-but-all-connected-locked → LOCKED, some-absent-with-a-connected-unlocked → DEGRADED, all-absent → HEALTHY-idle, and the impossible `n_absent > n_inputs` both ports saturate to `n_connected=0`). |
 | Per-source stats API | `obs.h` (`struct obs_genlock_stats`, `obs_source_get_genlock_stats`) + `obs-source.c` (`genlock_fill_stats`) | The `genlock-fifo audit` log line and the API BOTH route through `genlock_fill_stats` — they can never disagree. Additive + versioned (`OBS_GENLOCK_STATS_VERSION`). |
 | Per-output stats API | `obs.h` (`struct obs_genlock_output_stats`, `obs_output_set_genlock_wall_stamping`, `obs_output_get_genlock_stats`) + `obs-output.c` + `obs-internal.h` (two bool fields, bzalloc-zeroed) | DistroAV's `ndi-output.cpp` sets `wall_stamping=true` at `begin_data_capture` success, `false` at stop. |
 | The widget | `OBSBasicStatusBar.{hpp,cpp}` (`UpdateGenlockLabel`, `PollGenlockClock`) | A permanent `QLabel` + an ALWAYS-ON 1 Hz `QTimer` (NOT the stream-only `refreshTimer`). |
@@ -47,10 +47,24 @@ no-input-locked; then DEGRADED (amber) precedence some-input-unlocked > recent-e
   `audio_enabled` guard), so a camera input with `ndi_audio=false` is silent by design; the
   AudioDisabledOnProgram + AsrcSaturated branches (which need is-program-source / asrc-ppm data the
   v2 stats don't carry) are a deferred followup.
-- **LOCKED:** `GENLOCK ● LOCKED n/m @ L ms` (n=locked, m=genlock inputs, L=min latency or a range).
+- **LOCKED:** `GENLOCK ● LOCKED n/m @ L ms` (n=locked, m=**connected** genlock inputs = `n_inputs - n_absent`, L=min latency or a range), plus ` (+K idle)` when `K = n_absent > 0` — #1299: a senderless input shows as idle, never as an unlocked shortfall.
 
 ## Gotchas
 
+- **An input with NO NDI receiver connection (`n_absent`, #1299) is EXCLUDED from the DEGRADED
+  gate, not counted as unlocked.** The DEGRADED/no-input decisions judge only CONNECTED inputs
+  (`n_connected = n_inputs - n_absent`): a genlock input whose sender is simply not running
+  (stream's 'NDIA cg stream') is idle, not a fault, so it never pages — a dead/frozen sender is the
+  reachability (#1001) / frozen-input (#1052) watchdogs' concern. Inputs-present-but-ALL-senderless
+  (`n_connected == 0`, `n_inputs > 0`) is HEALTHY-idle → LOCKED, never UNLOCKED (the 3-state enum
+  has no UNKNOWN, and UNKNOWN is a watchdog facet-absence concept, not a lock state); `n_inputs == 0`
+  (no genlock configured at all) stays UNLOCKED/`no_genlock`. The producer chain: DistroAV's
+  `ndi-source.cpp` receiver loop → `obs_source_set_genlock_connected` (runtime-resolved, from
+  `recv_get_no_connections() > 0`) → `obs_source.genlock_connected` (default **true** at create, so
+  an unreported source / an old build with the setter unresolved never masks a real degrade) →
+  `obs_genlock_stats.connected` (v2→v3) → the widget's `n_absent` + per-input `connected` (JSON
+  schema v1→v2). Both new JSON fields are additive: `bundle_state_gather` defaults `n_absent`→None
+  and `connected`→True, so a v1 line from an older build reads exactly as pre-#1299.
 - **The output facet is ABSENT on a pure receiver (imag) and must NOT force UNLOCKED.** The widget
   only penalizes `output_present && !output_stamping`; `output_present` requires an ACTIVE output
   whose `is_genlock_output` flag is set (only DistroAV's dedicated NDI output sets it). A

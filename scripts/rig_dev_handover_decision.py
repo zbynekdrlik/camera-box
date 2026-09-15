@@ -261,9 +261,9 @@ ITEMS = [
          forgot_msg="meracia zvuková cesta (mbc/Ableton reťazec) má posunutú latenciu oproti baseline "
                     "(nad 90 ms) — over DVS/Dante/Ableton mbc cestu; baseline sa prepisuje po zelenom "
                     "E2E cez `scripts/measurement-chain-latency.sh --baseline`",
-         unknown_msg="latenciu meracej cesty sa nepodarilo zmerať (cam2 dole / marker log chýba / málo "
-                     "onsetov / žiadna baseline / painter emit_ts nie je wall-clock / stream OBS "
-                     "nedostupné) — over v TEST režime",
+         unknown_msg="latenciu meracej cesty sa nepodarilo zmerať (cam2 dole / marker log chýba / "
+                     "meracia cesta ticho pod −60 dB / málo onsetov / žiadna baseline / painter "
+                     "emit_ts nie je wall-clock / stream OBS nedostupné) — over v TEST režime",
          good={"ALIGNED"}, forgot={"DRIFTED"}),
 ]
 

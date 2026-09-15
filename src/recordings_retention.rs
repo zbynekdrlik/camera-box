@@ -14,6 +14,10 @@
 //! operator/debug recording (proven concrete: `strih700105.mkv` sits in `D:\_REC` today) is
 //! PROTECTED and can never be deleted, no matter how old or large.
 //!
+//! #1276 (owner ruling 15.9.2026): production-shaped recordings are ADDITIONALLY protected by SIZE
+//! -- any recording at or above `PRODUCTION_SIZE_FLOOR_BYTES` (~1 GiB) is kept regardless of age or
+//! newest-N rank; only the small E2E-run files stay eligible for the DELETE set.
+//!
 //! PARITY: `scripts/strih-recordings-retention.ps1` is a faithful port of THIS decision (same
 //! allowlist shape + newest-N ∪ younger-than-D rule). This module + `tests/recordings_retention.rs`
 //! are the canonical spec — keep the PowerShell mirror in sync with them.
@@ -43,6 +47,9 @@ pub enum KeepReason {
     NewestRuns,
     /// Younger than the keep-within-days horizon.
     WithinDays,
+    /// #1276 -- size is at or above `PRODUCTION_SIZE_FLOOR_BYTES`: a production-shaped recording,
+    /// PROTECTED by SIZE regardless of age or newest-N rank (owner ruling 15.9.2026, issue 1276).
+    ProductionSized,
 }
 
 /// A kept file plus the reason it was kept.
@@ -86,6 +93,16 @@ impl RetentionPlan {
 
 /// Seconds in a day, for turning `keep_within_days` into an age horizon.
 pub const SECONDS_PER_DAY: f64 = 86_400.0;
+
+/// #1276 -- production-size PROTECT floor (bytes). Any matching recording whose size is at or above
+/// this value is a production-shaped recording and is PROTECTED (kept, never deleted) regardless of
+/// age or newest-N rank -- owner ruling 15.9.2026 (issue 1276). Calibration from the 2.9. strih
+/// dry-run: E2E-run captures were 0.0-0.8 GB; real production recordings were 5.6 / 7.9 / 17.3 GB.
+/// The floor is ONE GiB (1_073_741_824 B) -- comfortably above the 0.8 GB E2E max and well below the
+/// 5.6 GB smallest production file, so it separates the two populations with a wide margin. Only
+/// below-floor E2E-run files stay eligible for the newest-N UNION younger-than-D DELETE rule. The
+/// PowerShell mirror `strih-recordings-retention.ps1` carries the byte-identical value.
+pub const PRODUCTION_SIZE_FLOOR_BYTES: u64 = 1_073_741_824;
 
 /// The EXPLICIT allowlist. Does `name` match OBS's `%CCYY-%MM-%DD %hh-%mm-%ss` FilenameFormatting
 /// with a `.mkv`/`.mp4` recording extension and an OPTIONAL OBS ` (n)` dedup suffix? i.e.
@@ -177,8 +194,24 @@ pub fn plan(files: &[RecordingFile], policy: &RetentionPolicy, now_epoch: f64) -
             .then_with(|| a.name.cmp(&b.name))
     });
 
+    // #1276: production-shaped recordings (size at or above PRODUCTION_SIZE_FLOOR_BYTES) are
+    // PROTECTED regardless of age or newest-N rank (owner ruling 15.9.2026). Only the remaining
+    // below-floor E2E-run files run through the newest-N ∪ younger-than-D eligibility below, so a
+    // production recording never consumes a newest-N slot meant for the small E2E captures.
+    let mut below_floor: Vec<&RecordingFile> = Vec::new();
+    for file in &matching {
+        if file.size_bytes >= PRODUCTION_SIZE_FLOOR_BYTES {
+            keep.push(KeptEntry {
+                file: (*file).clone(),
+                reason: KeepReason::ProductionSized,
+            });
+        } else {
+            below_floor.push(*file);
+        }
+    }
+
     let mut delete: Vec<RecordingFile> = Vec::new();
-    for (idx, file) in matching.iter().enumerate() {
+    for (idx, file) in below_floor.iter().enumerate() {
         let within_newest = idx < policy.keep_newest_runs;
         // age >= 0 for a past mtime; a future mtime (age < 0) is treated as young → kept.
         let within_days = policy.keep_within_days > 0.0 && (now_epoch - file.mtime_epoch) < horizon;

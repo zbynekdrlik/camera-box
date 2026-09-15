@@ -60,7 +60,9 @@ def test_locked_line_parses_to_facet():
     # inputs are keyed by name
     assert set(f["inputs"]) == {"NDI cam1", "NDI cam2"}
     assert f["inputs"]["NDI cam1"] == {
-        "locked": True, "latency_ms": 3, "underruns": 0, "relocks": 1, "late_holds": 0, "depth": 2
+        # #1299 v2: `connected` defaults True for this v1 fixture (no `connected` key in the line).
+        "locked": True, "connected": True, "latency_ms": 3, "underruns": 0, "relocks": 1,
+        "late_holds": 0, "depth": 2
     }
 
 
@@ -94,3 +96,39 @@ def test_marker_present_but_no_braces_is_none():
 def test_non_object_payload_is_none():
     # a JSON array / scalar after the marker must not be mistaken for a facet.
     assert bsg.genlock_lock_facet_from_log('x: genlock-lock-json: [1,2,3] (#1299)\n') is None
+
+
+# ---- #1299 v2: n_absent (senderless input count) + per-input connected --------------------------
+
+# A v2 LOCKED line: 4 genlock inputs, 3 connected+locked, the 4th ('NDIA cg stream') has NO sender
+# (connected:false). This is the reopen scenario — the widget already decided LOCKED (not DEGRADED)
+# because n_connected=3 == n_locked; the facet must carry n_absent + per-input connected through.
+V2_ABSENT_LINE = (
+    '10:47:06.003: genlock-lock-json: {"v":2,"state":"LOCKED","reason":"none","n_inputs":4,'
+    '"n_locked":3,"n_absent":1,"latency_ms":3,"clock":"locked","output":"absent","recent_event":false,'
+    '"qpc_drift_ms":0,"inputs":['
+    '{"name":"NDI cam1","locked":true,"connected":true,"latency_ms":3,"underruns":0,"relocks":0,"late_holds":0,"depth":2},'
+    '{"name":"NDIA cg stream","locked":false,"connected":false,"latency_ms":3,"underruns":0,"relocks":0,"late_holds":0,"depth":0}'
+    ']} (#1299)\n'
+)
+
+
+def test_v2_line_carries_n_absent_and_per_input_connected():
+    f = bsg.genlock_lock_facet_from_log(V2_ABSENT_LINE)
+    assert f is not None
+    assert f["state"] == "LOCKED" and f["reason"] == "none"
+    assert f["n_inputs"] == 4 and f["n_locked"] == 3 and f["n_absent"] == 1
+    assert f["inputs"]["NDI cam1"]["connected"] is True
+    # the senderless input is visible (report-only) with connected=false — never dropped
+    assert f["inputs"]["NDIA cg stream"]["connected"] is False
+    assert f["inputs"]["NDIA cg stream"]["locked"] is False
+
+
+def test_v1_line_defaults_n_absent_none_and_connected_true():
+    # A v1 line from an older build (no n_absent / no per-input connected) must degrade gracefully:
+    # n_absent -> None (decision treats absent as 0, the pre-#1299 all-connected reading) and every
+    # input -> connected True. LOCKED_LINE is the existing v1 fixture.
+    f = bsg.genlock_lock_facet_from_log(LOCKED_LINE)
+    assert f["n_absent"] is None
+    assert f["inputs"]["NDI cam1"]["connected"] is True
+    assert f["inputs"]["NDI cam2"]["connected"] is True

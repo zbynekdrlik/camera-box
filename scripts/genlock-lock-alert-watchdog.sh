@@ -163,7 +163,7 @@ genlock_lock_recovery_decision() {
 # -- per-box decision --------------------------------------------------------------------------
 # handle_box <box> <ip>
 handle_box() {
-  local box="$1" ip="$2" body reachable analyze_out verdict state reason
+  local box="$1" ip="$2" body reachable analyze_out verdict state reason n_absent
 
   # resolume is a TRAVELING box -- page it only while home (the #1296 condition). strih/stream/imag
   # are home-check=always so this never skips them; resolume away -> no fetch, no page.
@@ -183,7 +183,10 @@ handle_box() {
   verdict="$(printf '%s\n' "$analyze_out" | sed -n 's/^verdict=//p')"
   state="$(printf '%s\n' "$analyze_out" | sed -n 's/^state=//p')"
   reason="$(printf '%s\n' "$analyze_out" | sed -n 's/^reason=//p')"
-  log "$box ($ip): reachable=$reachable verdict=${verdict:-<none>} state=${state:-} reason=${reason:-}"
+  # #1299: senderless input count -- observability only (an absent sender never pages; it is
+  # excluded from the widget's DEGRADED gate). Logged so a HEALTHY box with idle inputs is visible.
+  n_absent="$(printf '%s\n' "$analyze_out" | sed -n 's/^n_absent=//p')"
+  log "$box ($ip): reachable=$reachable verdict=${verdict:-<none>} state=${state:-} reason=${reason:-} n_absent=${n_absent:-}"
 
   case "$verdict" in
     SKIP)

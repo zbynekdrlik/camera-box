@@ -40,6 +40,7 @@ _STUB_HEADER = """#include <cstdio>
 struct GenlockInputRow {
 \tstd::string name;
 \tbool locked = false;
+\tbool connected = true;
 \tuint32_t latency_ms = 0;
 \tuint64_t underruns = 0;
 \tuint64_t relocks = 0;
@@ -53,12 +54,13 @@ struct GenlockInputRow {
 _MAIN = r'''
 int main() {
     std::vector<GenlockInputRow> ins;
-    GenlockInputRow a; a.name="NDI cam1"; a.locked=true; a.latency_ms=3; a.underruns=0; a.relocks=1; a.late_holds=0; a.depth=2;
-    GenlockInputRow b; b.name="weird \" name \\ x"; b.locked=false; b.latency_ms=13; b.depth=4;
+    GenlockInputRow a; a.name="NDI cam1"; a.locked=true; a.connected=true; a.latency_ms=3; a.underruns=0; a.relocks=1; a.late_holds=0; a.depth=2;
+    GenlockInputRow b; b.name="weird \" name \\ x"; b.locked=false; b.connected=false; b.latency_ms=13; b.depth=4;
     ins.push_back(a); ins.push_back(b);
-    printf("%s\n", genlock_build_lock_json("LOCKED","none",7,7,3,"locked","stamping",false,0,ins).c_str());
-    printf("%s\n", genlock_build_lock_json("UNLOCKED","clock",7,0,0,"absent","not-stamping",true,-5,{}).c_str());
-    printf("%s\n", genlock_build_lock_json("LOCKED","none",7,7,3,"locked","absent",false,0,{}).c_str());
+    // signature (#1299 v2): (state, reason, n_inputs, n_locked, n_absent, latency_ms, clock, output, recent_event, qpc_drift, inputs)
+    printf("%s\n", genlock_build_lock_json("LOCKED","none",7,7,1,3,"locked","stamping",false,0,ins).c_str());
+    printf("%s\n", genlock_build_lock_json("UNLOCKED","clock",7,0,0,0,"absent","not-stamping",true,-5,{}).c_str());
+    printf("%s\n", genlock_build_lock_json("LOCKED","none",7,7,0,3,"locked","absent",false,0,{}).c_str());
     return 0;
 }
 '''
@@ -112,6 +114,7 @@ def test_cpp_builder_output_roundtrips_through_the_python_parser(tmp_path):
         assert facet["reason"] == obj["reason"]
         assert facet["n_inputs"] == obj["n_inputs"]
         assert facet["n_locked"] == obj["n_locked"]
+        assert facet["n_absent"] == obj["n_absent"]  # #1299 v2 additive field
         assert facet["latency_ms"] == obj["latency_ms"]
         assert facet["recent_event"] == obj["recent_event"]
         assert facet["qpc_drift_ms"] == obj["qpc_drift_ms"]
@@ -125,6 +128,7 @@ def test_cpp_builder_output_roundtrips_through_the_python_parser(tmp_path):
         for r in obj["inputs"]:
             got = facet["inputs"][r["name"]]
             assert got["locked"] == r["locked"]
+            assert got["connected"] == r["connected"]  # #1299 v2 per-input field
             assert got["latency_ms"] == r["latency_ms"]
             assert got["underruns"] == r["underruns"]
             assert got["relocks"] == r["relocks"]

@@ -41,6 +41,7 @@ typedef enum genlock_lock_reason {
 typedef struct genlock_lock_facets {
 	int n_inputs;               /* genlock-FIFO inputs present */
 	int n_locked;               /* of those, currently locked */
+	int n_absent;               /* #1299: of n_inputs, how many have NO live NDI receiver connection (sender not running); n_connected = n_inputs - n_absent is the DEGRADED-gate denominator */
 	int recent_event;           /* bool: relock/underrun/late-hold/backward-step in last 60 s */
 	int qpc_drift_beyond_bound; /* bool */
 	int clock_present;          /* bool: dantesync :8898/status answered */
@@ -54,12 +55,21 @@ typedef struct genlock_lock_facets {
 /* Mirror of camera_box::genlock_lock_state::decide (src/genlock_lock_state.rs) — keep
  * both in lock-step. UNLOCKED precedence: clock > output > no-input-locked. DEGRADED
  * precedence: some-input-unlocked > recent-event > ntp-failed > qpc-drift > audio-pairing. Else LOCKED.
+ * #1299: the input decisions judge only CONNECTED inputs (n_connected = n_inputs - n_absent); a
+ * senderless input is idle (never DEGRADES), and inputs-present-but-ALL-senderless is HEALTHY-idle
+ * (LOCKED), not UNLOCKED. n_inputs<=0 stays UNLOCKED/no_genlock.
  * Writes the dominant reason to *reason_out (if non-NULL) and returns the state. */
 static inline genlock_lock_state_t genlock_decide_lock_state(const genlock_lock_facets_t *f,
 							     genlock_lock_reason_t *reason_out)
 {
 	genlock_lock_reason_t reason = GENLOCK_LOCK_REASON_NONE;
 	genlock_lock_state_t state;
+
+	/* #1299: connected inputs only (saturating at 0 keeps the decision total under a transient
+	 * n_absent > n_inputs). */
+	int n_connected = f->n_inputs - f->n_absent;
+	if (n_connected < 0)
+		n_connected = 0;
 
 	if (!f->clock_present || !f->clock_locked) {
 		reason = GENLOCK_LOCK_REASON_CLOCK;
@@ -68,9 +78,17 @@ static inline genlock_lock_state_t genlock_decide_lock_state(const genlock_lock_
 		reason = GENLOCK_LOCK_REASON_OUTPUT;
 		state = GENLOCK_LOCK_UNLOCKED;
 	} else if (f->n_locked <= 0) {
-		reason = (f->n_inputs <= 0) ? GENLOCK_LOCK_REASON_NO_GENLOCK : GENLOCK_LOCK_REASON_NO_INPUT_LOCKED;
-		state = GENLOCK_LOCK_UNLOCKED;
-	} else if (f->n_locked < f->n_inputs) {
+		if (f->n_inputs <= 0) {
+			reason = GENLOCK_LOCK_REASON_NO_GENLOCK; /* no genlock configured at all */
+			state = GENLOCK_LOCK_UNLOCKED;
+		} else if (n_connected <= 0) {
+			reason = GENLOCK_LOCK_REASON_NONE; /* #1299: inputs present but all senderless -> HEALTHY-idle */
+			state = GENLOCK_LOCK_LOCKED;
+		} else {
+			reason = GENLOCK_LOCK_REASON_NO_INPUT_LOCKED; /* live senders, none locking -> fault */
+			state = GENLOCK_LOCK_UNLOCKED;
+		}
+	} else if (f->n_locked < n_connected) {
 		reason = GENLOCK_LOCK_REASON_INPUT_UNLOCKED;
 		state = GENLOCK_LOCK_DEGRADED;
 	} else if (f->recent_event) {

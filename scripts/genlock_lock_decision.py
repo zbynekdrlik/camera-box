@@ -55,24 +55,36 @@ R_QPC_DRIFT = "qpc_drift"
 
 
 def decide(n_inputs, n_locked, recent_event, qpc_drift_beyond_bound, clock_present,
-           clock_locked, clock_ntp_failed, output_present, output_stamping):
+           clock_locked, clock_ntp_failed, output_present, output_stamping, n_absent=0):
     """Pure three-state decision -- a byte-faithful mirror of src/genlock_lock_state.rs `decide`.
 
     UNLOCKED precedence: clock (absent/unlocked) > output (present but not stamping) >
     no-input-locked. DEGRADED precedence (only when no UNLOCKED condition holds): some-input-
     unlocked > recent-event > ntp-failed > qpc-drift. Otherwise LOCKED. Returns (state, reason).
+
+    #1299: `n_absent` = of `n_inputs`, how many have NO live NDI receiver connection (sender not
+    running). The input decisions judge only CONNECTED inputs (`n_connected = n_inputs - n_absent`),
+    so a senderless input never DEGRADES; inputs-present-but-ALL-senderless is HEALTHY-idle (LOCKED),
+    not UNLOCKED. `n_absent` defaults 0 so a pre-#1299 caller reproduces the old verdict exactly.
     """
+    # #1299 -- connected inputs only (max(0, ...) keeps the decision total under a transient
+    # n_absent > n_inputs, mirroring the Rust saturating_sub / the C clamp).
+    n_connected = max(0, n_inputs - n_absent)
+
     # --- UNLOCKED (red): clock > output > no-input-locked ---------------------------
     if not clock_present or not clock_locked:
         return (ST_UNLOCKED, R_CLOCK)
     if output_present and not output_stamping:
         return (ST_UNLOCKED, R_OUTPUT)
     if n_locked == 0:
-        reason = R_NO_GENLOCK if n_inputs == 0 else R_NO_INPUT_LOCKED
-        return (ST_UNLOCKED, reason)
+        if n_inputs == 0:
+            return (ST_UNLOCKED, R_NO_GENLOCK)          # no genlock configured at all
+        if n_connected == 0:
+            return (ST_LOCKED, R_NONE)                  # #1299: all senderless -> HEALTHY-idle
+        return (ST_UNLOCKED, R_NO_INPUT_LOCKED)         # live senders, none locking -> fault
 
     # --- DEGRADED (amber): some-unlocked > recent-event > ntp > qpc ------------------
-    if n_locked < n_inputs:
+    if n_locked < n_connected:
         return (ST_DEGRADED, R_INPUT_UNLOCKED)
     if recent_event:
         return (ST_DEGRADED, R_RECENT_EVENT)
@@ -135,17 +147,19 @@ def analyze(bundle_json_text, box_reachable):
     box was not reachable this pass; UNKNOWN (state None) when the facet is absent."""
     if box_reachable != 1:
         return {"verdict": "SKIP", "state": None, "reason": None,
-                "n_inputs": None, "n_locked": None}
+                "n_inputs": None, "n_locked": None, "n_absent": None}
     facet = facet_from_obj(_loads_obj(bundle_json_text))
     if facet is None:
         return {"verdict": "UNKNOWN", "state": None, "reason": None,
-                "n_inputs": None, "n_locked": None}
+                "n_inputs": None, "n_locked": None, "n_absent": None}
     state = facet.get("state")
     reason = facet.get("reason")
     n_inputs = facet.get("n_inputs")
     n_locked = facet.get("n_locked")
+    n_absent = facet.get("n_absent")  # #1299: senderless inputs (observability; the widget already
+                                      # decided `state`, so this never changes the verdict here).
     return {"verdict": classify(state, box_reachable), "state": state, "reason": reason,
-            "n_inputs": n_inputs, "n_locked": n_locked}
+            "n_inputs": n_inputs, "n_locked": n_locked, "n_absent": n_absent}
 
 
 def _fmt(v):
@@ -170,7 +184,7 @@ def _main(argv):
         text = "" if ns.box_reachable != 1 else sys.stdin.buffer.read().decode("utf-8", errors="replace")
         res = analyze(text, ns.box_reachable)
         for k, key in (("verdict", "verdict"), ("state", "state"), ("reason", "reason"),
-                       ("n_inputs", "n_inputs"), ("n_locked", "n_locked")):
+                       ("n_inputs", "n_inputs"), ("n_locked", "n_locked"), ("n_absent", "n_absent")):
             print(f"{k}={_fmt(res[key])}")
         return 0
 

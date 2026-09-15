@@ -312,6 +312,39 @@ pub fn realtime_fifo_priority(role: RtThreadRole) -> Option<i32> {
     }
 }
 
+/// SCHED_FIFO scheduling-policy id (Linux `sched.h`; equal to `libc::SCHED_FIFO`,
+/// which is 1). Kept as a plain numeric literal — with no `libc` dependency — so
+/// the pure policy-word decision below compiles standalone and a std-only replica
+/// can mirror it under Tier-0 (a `#[cfg(test)]` parity check ties it to libc).
+const SCHED_FIFO_POLICY: i32 = 1;
+
+/// `SCHED_RESET_ON_FORK` policy flag (Linux >= 2.6.32; equal to
+/// `libc::SCHED_RESET_ON_FORK`, which is `0x4000_0000`). ORed into the policy word
+/// so children the raised thread later spawns (clone) fall back to SCHED_OTHER /
+/// normal priority instead of INHERITING SCHED_FIFO. Same plain-literal, no-`libc`
+/// treatment as [`SCHED_FIFO_POLICY`] for Tier-0 replicability.
+const SCHED_RESET_ON_FORK_FLAG: i32 = 0x4000_0000;
+
+/// The `sched_setscheduler` POLICY WORD the capture + NDI-emit hot path is raised
+/// with (issue 899 defect 2): `SCHED_FIFO | SCHED_RESET_ON_FORK`.
+///
+/// The raise runs on a tokio runtime WORKER thread. On Linux a thread's scheduling
+/// policy is INHERITED across `clone()`, so without `SCHED_RESET_ON_FORK` every
+/// thread that worker later spawns — the NDI SDK threads (`ndis:recv`/`ndis:send`/
+/// `ndir:reconn`) and the tokio blocking pool — comes up SCHED_FIFO prio 90 too.
+/// That re-creates, through inheritance, exactly the process-wide-FIFO regression
+/// defect 2 removed (measured on cam2: 19 FIFO threads at boot vs 1 after a
+/// restart, nondeterministic — it depends on which worker spawns the NDI threads).
+/// The reset-on-fork flag makes those children fall back to SCHED_OTHER / normal
+/// while THIS thread keeps FIFO 90.
+///
+/// Composed from plain numeric constants (no `libc`) so it is pure and
+/// Tier-0-replicable; [`set_current_thread_realtime`] passes the result as the
+/// `policy` argument of `sched_setscheduler`.
+pub fn capture_emit_sched_policy_word() -> i32 {
+    SCHED_FIFO_POLICY | SCHED_RESET_ON_FORK_FLAG
+}
+
 // ---------------------------------------------------------------------------
 // IO / syscall glue around the pure logic above (not unit-tested — reads /sys,
 // /proc, calls sched_setaffinity).
@@ -428,9 +461,12 @@ pub fn pin_off_capture_core(label: &str) {
 
 /// Apply the realtime scheduling policy for `role` to the CURRENT thread (issue 899
 /// defect 2). For [`RtThreadRole::CaptureEmit`] this raises the thread to SCHED_FIFO at
-/// [`CAPTURE_FIFO_PRIORITY`] via `sched_setscheduler`; for [`RtThreadRole::Auxiliary`] it
-/// is a no-op (the thread keeps the process default SCHED_OTHER, now that the unit no
-/// longer sets a process-wide `CPUSchedulingPolicy`).
+/// [`CAPTURE_FIFO_PRIORITY`] via `sched_setscheduler`, using the
+/// [`capture_emit_sched_policy_word`] — `SCHED_FIFO | SCHED_RESET_ON_FORK` — so that the
+/// threads this tokio worker later spawns (NDI SDK, tokio blocking pool) do NOT inherit
+/// FIFO 90 across `clone()` and instead fall back to SCHED_OTHER; for
+/// [`RtThreadRole::Auxiliary`] it is a no-op (the thread keeps the process default
+/// SCHED_OTHER, now that the unit no longer sets a process-wide `CPUSchedulingPolicy`).
 ///
 /// Best-effort, exactly like the affinity pins above: raising FIFO needs `CAP_SYS_NICE`
 /// (granted by the unit's `setcap cap_sys_nice,cap_ipc_lock`), and on failure this logs a
@@ -443,12 +479,14 @@ pub fn set_current_thread_realtime(role: RtThreadRole) {
     };
     // SAFETY: sched_setscheduler(0, ...) targets the CURRENT thread (always permitted for
     // the caller's own thread when it holds CAP_SYS_NICE) and reads `param` for the passed
-    // struct only; `param` is a plain initialised value with no pointers.
+    // struct only; `param` is a plain initialised value with no pointers. The policy word is
+    // SCHED_FIFO | SCHED_RESET_ON_FORK (issue 899): the flag stops threads spawned by this
+    // tokio worker from inheriting FIFO 90 across clone().
     let ok = unsafe {
         let param = libc::sched_param {
             sched_priority: prio,
         };
-        libc::sched_setscheduler(0, libc::SCHED_FIFO, &param) == 0
+        libc::sched_setscheduler(0, capture_emit_sched_policy_word(), &param) == 0
     };
     if ok {
         tracing::info!(
@@ -970,5 +1008,37 @@ LOC:    1000000    1000000    1000000    1000000   Local timer interrupts
             let is_fifo = realtime_fifo_priority(role).is_some();
             assert_eq!(is_fifo, matches!(role, RtThreadRole::CaptureEmit));
         }
+    }
+
+    #[test]
+    fn capture_emit_policy_word_carries_reset_on_fork_and_is_fifo() {
+        // issue 899: the capture+emit raise runs on a tokio WORKER thread; a bare
+        // SCHED_FIFO policy is INHERITED across clone(), so the NDI SDK / blocking
+        // threads that worker later spawns come up FIFO 90 too (measured: 19 vs 1
+        // FIFO threads on cam2, nondeterministic). SCHED_RESET_ON_FORK (0x40000000)
+        // makes those children fall back to SCHED_OTHER while this thread keeps FIFO.
+        let w = capture_emit_sched_policy_word();
+        assert!(
+            w & 0x4000_0000 != 0,
+            "policy word must carry SCHED_RESET_ON_FORK so spawned threads stay SCHED_OTHER (got {w:#x})"
+        );
+        assert_eq!(
+            w & 0xff,
+            1,
+            "policy word low byte must be SCHED_FIFO (1), got {w:#x}"
+        );
+    }
+
+    #[test]
+    fn capture_emit_policy_word_matches_libc_constants() {
+        // The pure decision uses plain numeric literals (no libc) so a std-only replica
+        // can mirror it under Tier-0; this ties those literals to the real libc values,
+        // so a platform where they ever differed would fail loudly here on CI rather than
+        // silently raising the wrong policy.
+        assert_eq!(
+            capture_emit_sched_policy_word(),
+            libc::SCHED_FIFO | libc::SCHED_RESET_ON_FORK,
+            "pure policy word must equal libc SCHED_FIFO | SCHED_RESET_ON_FORK"
+        );
     }
 }

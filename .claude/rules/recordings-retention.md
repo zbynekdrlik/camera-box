@@ -39,6 +39,27 @@ free). Since **#1276** the WARN fires when the recordings VOLUME has at most `RE
 The **DELETE-set** computation below is UNCHANGED — the owner ruled only on the warning trigger; a
 `--execute` deletion remains an owner-only step.
 
+## Production recordings PROTECTED by SIZE (owner ruling #1276, 15.9.2026)
+
+The DELETE-set decision now ALSO protects production-shaped recordings by SIZE. Owner ruling (issue
+#1276 comment 5678041040): any recording at or above a size floor is PROTECTED, never deleted,
+regardless of age or newest-N rank; only the small E2E-run files are eligible for the DELETE set.
+No archive step, no age-based deletion of production files.
+
+- ONE named constant **`PRODUCTION_SIZE_FLOOR_BYTES = 1_073_741_824`** (1 GiB) in
+  `src/recordings_retention.rs`, calibrated from the 2.9. dry-run: E2E runs were 0.0–0.8 GB,
+  production recordings 5.6 / 7.9 / 17.3 GB — so 1 GiB sits above the E2E max and well below the
+  smallest production file. `plan()` pulls at/above-floor files out of the newest-N pool into the
+  kept set with the new `KeepReason::ProductionSized` reason (so a big production recording never
+  consumes an E2E keep slot); below-floor files keep the newest-N ∪ younger-than-D rule.
+- The `.ps1` mirror carries the **byte-identical** `$ProductionSizeFloorBytes = 1073741824`, a
+  `$fl.Length -ge $ProductionSizeFloorBytes` PROTECT branch tagging Reason `"production-sized"`, and
+  a `SizeFloor` header line so every dry-run shows the floor and WHY files are kept. Parity is pinned
+  statically by `tests/python/test_recordings_retention_mirror_1276.py` (no pwsh on dev1): the two
+  constants are equal, the `-ge` (never `-gt`) branch and the reason tag are present, and the header
+  prints the floor. Re-calibrate the ONE constant (both places) only if E2E-run sizes ever grow past
+  ~1 GB.
+
 ## Where the recordings live
 
 - **strih** live OBS record dir (`GetRecordDirectory`, "light" profile): `D:\_REC`.

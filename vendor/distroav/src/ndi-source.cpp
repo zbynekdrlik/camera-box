@@ -107,6 +107,28 @@ static get_genlock_fifo_fn resolve_get_genlock_fifo()
 	return fn;
 }
 
+/* camera-box #1299: runtime-resolve the per-source RECEIVER-CONNECTION setter, same rationale as
+ * the resolvers above (the Windows DistroAV build fetches stock OBS SDK headers with no genlock
+ * symbols, so a link-time call cannot build). The receiver thread calls it each loop with
+ * no_connections>0 so the in-OBS lock indicator + the #1299 fleet facet can tell a legitimately-idle
+ * NDI input (sender not running) from a connected-but-unlocked one. A stock/old OBS resolves nullptr
+ * here → the call is skipped and libobs keeps the source at its default connected=true (no regress). */
+typedef void (*set_genlock_connected_fn)(obs_source_t *, bool);
+static set_genlock_connected_fn resolve_set_genlock_connected()
+{
+	static set_genlock_connected_fn fn = nullptr;
+	static bool tried = false;
+	if (!tried) {
+		tried = true;
+		fn = (set_genlock_connected_fn)resolve_obs_export("obs_source_set_genlock_connected");
+		if (!fn)
+			obs_log(LOG_WARNING,
+				"genlock: obs_source_set_genlock_connected not exported by this OBS build — "
+				"the #1299 absent-sender LOCK facet is inert (stock/old OBS?)");
+	}
+	return fn;
+}
+
 /* camera-box #764 (event-critical, 2026-07-15): is `source` a genlocked source RIGHT NOW?
  * Pure passthrough to the runtime-resolved getter -- honest false (never a guess) when the
  * export isn't available. */
@@ -1236,6 +1258,12 @@ void *ndi_source_thread(void *data)
 			continue;
 		}
 		int no_conn = ndiLib->recv_get_no_connections(ndi_receiver);
+		/* camera-box #1299: surface the live receiver-connection state to libobs so the in-OBS lock
+		 * indicator + the #1299 fleet facet exclude a senderless (idle) NDI input from the DEGRADED
+		 * gate. no_connections>0 == connected. Resolved once (nullptr on stock/old OBS → skipped,
+		 * source stays default connected=true). */
+		if (auto set_genlock_connected = resolve_set_genlock_connected())
+			set_genlock_connected(s->obs_source, no_conn > 0);
 		if (no_conn == 0) {
 #if 0
 			obs_log(LOG_DEBUG,

@@ -45,20 +45,46 @@ def marker_csv(emit_ts_list):
 
 
 def meter_text(onset_ts_list, latency_ns=None, burst_len=3, dt_ns=50_000_000):
-    """Build an `InputVolumeMeters` sample stream (`sample <t_ns> <db>` rows): a leading SILENT sample
-    (so the detector is armed), then for each onset a short LOUD burst preceded by a SILENT gap.
-    `onset_ts_list` are the burst-start wall times on dev1's clock."""
-    rows = [f"sample {onset_ts_list[0] - 10 * dt_ns} {SILENT}"]  # leading silence → arm the detector
+    """Build a CONTINUOUS `InputVolumeMeters` sample stream (`sample <t_ns> <db>` rows) — a steady
+    SILENT floor sampled every `dt_ns` with a short LOUD burst at each onset. The real WS sampler emits
+    an event every ~50 ms REGARDLESS of level (`measurement_chain_latency_probe.stream_samples`), so a
+    realistic fixture is continuous. #1312: continuity matters for the relative rolling floor — a SPARSE
+    stream (only the burst samples, 5 s apart) would let the 20-sample window span several bursts and
+    flip the median to LOUD; the physical stream never does that."""
+    start = onset_ts_list[0] - 10 * dt_ns
+    end = onset_ts_list[-1] + (burst_len + 10) * dt_ns
+    loud_slots = set()
     for on in onset_ts_list:
-        rows.append(f"sample {on - dt_ns} {SILENT}")             # gap right before the burst
         for k in range(burst_len):
-            rows.append(f"sample {on + k * dt_ns} {LOUD}")       # the burst (first sample IS the onset)
-        rows.append(f"sample {on + burst_len * dt_ns} {SILENT}")  # burst ends
+            loud_slots.add(round((on + k * dt_ns - start) / dt_ns))
+    n = round((end - start) / dt_ns)
+    rows = []
+    for i in range(n + 1):
+        db = LOUD if i in loud_slots else SILENT  # first LOUD slot of each burst IS the onset sample
+        rows.append(f"sample {start + i * dt_ns} {db}")
     return "\n".join(rows) + "\n"
 
 
 def emits(n, base=WALL0):
     return [base + i * CADENCE_NS for i in range(n)]
+
+
+# the REAL rig room/PA floor through the measurement mic (~-44.5 dB median, never below the -60 bar).
+FLOOR = -44.0
+DT_NS = 50_000_000  # ~50 ms InputVolumeMeters cadence
+
+
+def flat_series(db, n, t0=0, dt_ns=DT_NS):
+    """A steady `db` meter series (`sample <t_ns> <db>` semantics as (t, db) tuples)."""
+    return [(t0 + i * dt_ns, db) for i in range(n)]
+
+
+def flat_meter_text(db, n, t0=0, dt_ns=DT_NS):
+    return "\n".join(f"sample {t0 + i * dt_ns} {db}" for i in range(n)) + "\n"
+
+
+def _fixture(name):
+    return (pathlib.Path(__file__).resolve().parent / "fixtures" / name).read_text()
 
 
 # --- low-level parsers --------------------------------------------------------------------------
@@ -92,17 +118,54 @@ def test_wall_clock_shape_guard():
     assert m.emits_are_wall_clock([]) is False
 
 
-# --- onset detection ----------------------------------------------------------------------------
-def test_detect_onsets_rising_edge_with_debounce():
-    # one clean burst → exactly one onset (the first sample at/above the bar after silence)
-    samples = [(0, SILENT), (10, LOUD), (20, LOUD), (30, SILENT), (40, LOUD)]
-    assert m.detect_onsets(samples, THRESH) == [10, 40]
-    # starting ABOVE the bar (mid-burst) does NOT count until it has dropped below then risen again
-    samples2 = [(0, LOUD), (10, LOUD), (20, SILENT), (30, LOUD)]
-    assert m.detect_onsets(samples2, THRESH) == [30]
-    # exactly at the bar counts as present (>= threshold, matching audio_preflight strict-< silence)
-    assert m.detect_onsets([(0, SILENT), (10, THRESH)], THRESH) == [10]
-    assert m.detect_onsets([], THRESH) == []
+# --- onset detection (relative rolling-floor, #1312) ---------------------------------------------
+def test_detect_onsets_relative_rolling_floor():
+    # #1312: onsets are RELATIVE — a sample rises ≥ ONSET_DELTA_DB above the trailing rolling-floor
+    # median, then re-arms with hysteresis. The absolute −60 bar is NO LONGER the onset criterion
+    # (the rig floor sits at ~−44 dB, always above −60, so the old absolute detector never armed).
+    # single-sample +24 dB spikes on a −44 dB floor (the REAL rig burst shape) → one onset each
+    samples = flat_series(FLOOR, 25)
+    samples[10] = (10 * DT_NS, -20.0)
+    samples[20] = (20 * DT_NS, -20.0)
+    assert m.detect_onsets(samples) == [10 * DT_NS, 20 * DT_NS]
+    # a flat floor with only sub-Δ noise never fires — the exact case the −60 absolute bar mis-handled
+    noisy = [(i * DT_NS, FLOOR + (2.0 if i % 2 else -2.0)) for i in range(25)]
+    assert m.detect_onsets(noisy) == []
+    # a sustained multi-sample burst is ONE onset (hysteresis holds until the level drops near floor)
+    sustained = flat_series(FLOOR, 25)
+    for i in (10, 11, 12):
+        sustained[i] = (i * DT_NS, -18.0)
+    assert m.detect_onsets(sustained) == [10 * DT_NS]
+    assert m.detect_onsets([]) == []
+
+
+def test_detect_onsets_live_44db_room_floor_fixture():
+    # (a) the #1312 defect data: a REAL 45 s capture of the stream `mbc` peak — floor ~−44.5 dB (NEVER
+    # below −60), ~5 s cadence QPSK marker bursts. The absolute −60 bar yielded markers=145 onsets=0 on
+    # this exact data; relative detection must recover ≥ 3 onsets at roughly the ~5 s marker cadence.
+    samples = m.parse_meter_samples(_fixture("mbc_meter_live_2026-09-15.txt"))
+    assert len(samples) > 800
+    onsets = m.detect_onsets(samples)
+    assert len(onsets) >= 3
+    gaps = [(onsets[i + 1] - onsets[i]) / 1e9 for i in range(len(onsets) - 1)]
+    assert 4.0 <= min(gaps) <= 6.0                 # the base ~5 s permanent-unit marker cadence
+    # every gap is a small multiple of the ~5 s cadence (a missed weak marker → ~10 s), never spurious
+    for g in gaps:
+        assert min(abs(g - k * 5.0) for k in (1, 2, 3)) < 1.5, f"gap {g:.2f}s off the ~5 s marker grid"
+    # the chain is NOT silent — bursts ride above the −60 guard even though the floor is ~−44 dB
+    assert m.chain_is_silent(samples, THRESH) is False
+
+
+def test_chain_is_silent_guard():
+    # every sample below the −60 bar → silent chain (nothing to pair, reason chain-silent)
+    assert m.chain_is_silent(flat_series(-72.0, 50), THRESH) is True
+    # a −44 dB floor is NOT silent (it is above the bar) even with no bursts → NOT chain-silent
+    assert m.chain_is_silent(flat_series(FLOOR, 50), THRESH) is False
+    # a silent floor with real bursts above the bar is NOT silent
+    mixed = flat_series(-72.0, 50)
+    mixed[25] = (25 * DT_NS, -8.0)
+    assert m.chain_is_silent(mixed, THRESH) is False
+    assert m.chain_is_silent([], THRESH) is False   # no samples → not "silent", a different UNKNOWN
 
 
 # --- pairing ------------------------------------------------------------------------------------
@@ -156,6 +219,34 @@ def test_measure_monotonic_emit_ts_is_not_paired():
     assert res["wall_clock_ok"] is False
     assert res["paired"] == 0
     assert res["latency_ms"] is None
+
+
+def test_measure_flat_room_floor_no_bursts_is_not_chain_silent():
+    # (b) a steady −44 dB room floor with NO marker bursts: 0 onsets (nothing rises Δ above the floor)
+    # but the chain is NOT silent (−44 ≥ the −60 bar) → the reason must be too-few-onsets, NOT
+    # chain-silent (it is a marker/onset problem, not a dead audio chain).
+    res = m.measure(marker_csv(emits(6)), flat_meter_text(-44.0, 200), THRESH,
+                    max_pair_ns=2_000_000_000)
+    assert res["onsets"] == 0
+    assert res["paired"] == 0
+    assert res["chain_silent"] is False
+    r = m.reason(m.UNKNOWN, res["markers"], res["wall_clock_ok"], res["paired"], 3,
+                 chain_silent=res["chain_silent"])
+    assert r != "chain-silent"
+    assert r == "too-few-onsets"
+
+
+def test_measure_all_below_bar_is_chain_silent():
+    # (c) every meter sample below the −60 bar → the mbc chain is SILENT → onsets 0, chain_silent True,
+    # reason chain-silent (UNKNOWN, never a baseline). This is the honest SILENT-CHAIN guard the −60 bar
+    # still owns.
+    res = m.measure(marker_csv(emits(6)), flat_meter_text(-72.0, 200), THRESH,
+                    max_pair_ns=2_000_000_000)
+    assert res["onsets"] == 0
+    assert res["paired"] == 0
+    assert res["chain_silent"] is True
+    assert m.reason(m.UNKNOWN, res["markers"], res["wall_clock_ok"], res["paired"], 3,
+                    chain_silent=res["chain_silent"]) == "chain-silent"
 
 
 # --- classify (the decision table) --------------------------------------------------------------
@@ -293,6 +384,47 @@ def test_cli_skip_when_box_unreachable(tmp_path):
                   "--box-reachable", "0", "--threshold-db", "-60", "--baseline-file", str(bl)])
     assert r.returncode == 0, r.stderr
     assert _kv(r.stdout)["verdict"] == m.SKIP
+
+
+def test_cli_chain_silent_reason(tmp_path):
+    # (c) at the CLI: every mbc sample below the −60 bar → verdict UNKNOWN, reason chain-silent, and the
+    # baseline is never consulted for a drift (a silent chain is a #1310-class problem, never a drift).
+    e = emits(6)
+    mk = tmp_path / "markers.txt"
+    mt = tmp_path / "meter.txt"
+    bl = tmp_path / "baseline.json"
+    mk.write_text(marker_csv(e))
+    mt.write_text(flat_meter_text(-72.0, 200))
+    bl.write_text(json.dumps({"baseline_ms": 5.0}))
+    r = _run_cli(["classify", "--marker-file", str(mk), "--meter-file", str(mt),
+                  "--box-reachable", "1", "--threshold-db", "-60", "--baseline-file", str(bl)])
+    assert r.returncode == 0, r.stderr
+    kv = _kv(r.stdout)
+    assert kv["verdict"] == m.UNKNOWN
+    assert kv["reason"] == "chain-silent"
+    assert kv["onsets"] == "0"
+
+
+def test_cli_live_fixture_pairs_and_is_no_baseline(tmp_path):
+    # (a) end-to-end at the CLI over the REAL fixture: with wall-clock markers aligned to the fixture's
+    # onsets the chain PAIRS (onsets ≥ 3, paired ≥ 3); with no baseline seeded it reports NO-BASELINE
+    # (a healthy read, awaiting the supervisor's --baseline seed) — NEVER the old markers=145 onsets=0.
+    samples = m.parse_meter_samples(_fixture("mbc_meter_live_2026-09-15.txt"))
+    onsets = m.detect_onsets(samples)
+    # synthesise wall-clock emits ~120 ms before each detected onset so pairing succeeds
+    emit_ts = [o - 120_000_000 for o in onsets]
+    mk = tmp_path / "markers.txt"
+    mt = tmp_path / "meter.txt"
+    mk.write_text(marker_csv(emit_ts))
+    mt.write_text(_fixture("mbc_meter_live_2026-09-15.txt"))
+    r = _run_cli(["classify", "--marker-file", str(mk), "--meter-file", str(mt),
+                  "--box-reachable", "1", "--threshold-db", "-60", "--baseline-file",
+                  str(tmp_path / "baseline.json")])
+    assert r.returncode == 0, r.stderr
+    kv = _kv(r.stdout)
+    assert int(kv["onsets"]) >= 3
+    assert int(kv["paired"]) >= 3
+    assert kv["verdict"] == m.NO_BASELINE
 
 
 def test_cli_monotonic_emit_is_unknown(tmp_path):

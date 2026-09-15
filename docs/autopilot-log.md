@@ -12011,3 +12011,140 @@ tmpfs-`/var/log` box, destroyed by the owner's power-cycle). Layered defence acr
   repointed to `origin/dev` (de31d8ac2) at start via `checkout -B`. 3 work commits on top; INTEGRATE BY
   CHERRY-PICK of 6e29ee6c9..HEAD onto `dev`. Durability backup on
   `refs/autopilot-wip/worktree-agent-a478c1a0e9e8f63ad`.
+
+## 2026-09-15 — issue 899 defect 2 follow-up: SCHED_RESET_ON_FORK on the capture+emit FIFO raise
+
+- **Root cause.** `src/affinity.rs::set_current_thread_realtime(CaptureEmit)` raised the CURRENT
+  thread with `sched_setscheduler(0, SCHED_FIFO, ...)`. That thread is a tokio runtime WORKER; a
+  Linux thread's scheduling policy is INHERITED across `clone()` unless `SCHED_RESET_ON_FORK` is
+  set, so the NDI SDK threads (`ndis:recv`/`ndis:send`/`ndir:reconn`) and the tokio blocking pool
+  spawned from that worker came up SCHED_FIFO prio 90 too — re-creating the process-wide-FIFO
+  regression defect 2 removed, through inheritance. Live evidence (ticket comment): boot-time cam2
+  process had 19 SCHED_FIFO threads, a restarted process of the SAME binary had 1 — nondeterministic
+  (depends which worker spawns the NDI threads), so `verify-device.sh` check `(ah)`
+  (`rt_fifo_thread_ceiling`, <= 4) failed nondeterministically.
+- **Fix.** Pure std-only `capture_emit_sched_policy_word()` (crate-root, numeric literals, no
+  `libc`) returns `SCHED_FIFO | SCHED_RESET_ON_FORK` (`0x40000000`); the raise passes it as the
+  `sched_setscheduler` policy word. Children of the hot-path worker now fall back to SCHED_OTHER
+  while the hot-path thread keeps FIFO 90. NO thread moves cores. A libc-parity crate test ties
+  the numeric literals to `libc::SCHED_FIFO | libc::SCHED_RESET_ON_FORK`. The two `#899` watchdog
+  log strings are byte-unchanged.
+- **RED sha `fb893e593`** (pure fn returning SCHED_FIFO alone + crate test asserting the
+  RESET_ON_FORK bit) → **GREEN sha `f144b3bfa`** (fn returns the OR + wired into the raise + docs).
+  Verified locally under Tier-0: a std-only `rustc --test` replica FAILED at the RED policy word
+  and PASSED at the GREEN one; `cargo fmt --all --check` clean; doc-lint grep clean on added lines.
+  The crate tests themselves only RUN on CI (Tier-0 bans local cargo).
+- **Follow-up (Finding A, NOT implemented here).** The running fleet units on cam1/3/4/5/6/7 still
+  carry the process-wide FIFO until each box is re-provisioned — nothing in `deploy-fleet.sh`
+  refreshes `camera-box.service`; the M.2 migration re-provisions box by box.
+- **Lane scope.** worktree lane `lane/899-resetonfork` (based on `origin/dev` b5db81dd7), CODE +
+  TESTS + DOCS only, no rig touched, no push (supervisor integrates by cherry-pick). Overlap with
+  release-train PR (append-only `docs/autopilot-log.md` + `.claude/rules/realtime-isolation.md`) is
+  union-resolved at cherry-pick.
+## 2026-09-15 — issue 1311 boot-order fix (off-box remote-logging units survive a clean cambox boot)
+
+- **Lane:** worktree `lane/1311-bootorder` (based on `origin/dev` b5db81dd7). CODE + TESTS + DOCS
+  only; no push (supervisor cherry-picks).
+- **Defect (live cam2 15.9.2026):** both #1311 units failed at every clean boot and stayed dead
+  until a hand restart — a cambox masks `systemd-networkd-wait-online` (the 547 boot-stall fix), so
+  `network-online.target` is reached before `systemd-networkd` applies the static IP/route.
+  netconsole's setup script checked the egress route ONCE and `exit 1`ed on the first miss;
+  journal-upload kept the stock `Restart=on-failure` + default StartLimit and exhausted after 5
+  instant restarts.
+- **Fix (`scripts/lib/remote-logging.sh`):** netconsole setup script waits for the egress route in a
+  bounded retry loop (new `REMOTE_LOG_NC_ROUTE_RETRIES` / `…_ROUTE_RETRY_SLEEP_S` knobs, defaults
+  30×2s); `cambox-netconsole.service` also orders `After=systemd-networkd.service` +
+  `Wants=systemd-networkd.service` (kept the network-online lines); journal-upload drop-in gets
+  `[Unit] StartLimitIntervalSec=0` + `[Service] Restart=always` / `RestartSec=5`. `REMOTE_LOG_NC_CONFIGFS`
+  made env-overridable for the arm test.
+- **Commits:** RED 822cf0c44 (`tests/python/test_remote_logging_boot_order_1311.py`), GREEN b89b40d4a,
+  docs (this entry + `.claude/rules/cambox-remote-logging.md` gotcha).
+- **Local verify (Tier-0):** `bash -n` + `shellcheck -S warning` clean; the new boot-order pytest RED
+  (3 failed) → GREEN (3 passed) + the existing gather pytest (2 passed) = 5 passed. The Rust harness
+  `harness_remote_logging_1311.rs` runs at CI / for the supervisor; audited its substrings survive
+  by rendering the generated unit/drop-in/setup-script.
+
+## 2026-09-15 — issue 1276 — production recordings PROTECTED by SIZE floor (retention sweep)
+
+- **Lane:** worktree `lane/1276-sizefloor` (based on `origin/dev` d55afb726). CODE + TESTS + DOCS
+  only; no push (supervisor cherry-picks).
+- **Ruling (owner 15.9.2026, issue 1276 comment 5678041040):** any recording at or above a size
+  floor is PROTECTED, never deleted, regardless of age or newest-N rank; only the small E2E-run
+  files are eligible for the DELETE set. No archive step, no age-based deletion of production files.
+  Calibration from the 2.9. dry-run: E2E runs were 0.0–0.8 GB; production recordings 5.6 / 7.9 /
+  17.3 GB.
+- **Root cause:** the DELETE set (`recordings_retention::plan()` + its `.ps1` mirror) was computed
+  by rank/age only, blind to a file's size — a 17.3 GB production recording that was old and beyond
+  newest-N was eligible for deletion exactly like a 0.8 GB E2E-run file.
+- **Fix:** new `PRODUCTION_SIZE_FLOOR_BYTES = 1_073_741_824` (1 GiB — above the 0.8 GB E2E max, well
+  below the 5.6 GB smallest production file) + a `KeepReason::ProductionSized` reason; `plan()`
+  partitions at/above-floor files into the kept set with that reason (out of the newest-N pool, so a
+  production file never eats an E2E keep slot); below-floor files keep the newest-N ∪ younger-than-D
+  rule. The `.ps1` mirror carries the byte-identical `$ProductionSizeFloorBytes`, a `-ge` PROTECT
+  branch tagging Reason "production-sized", and a `SizeFloor` header line shown in every dry-run.
+- **Commits:** RED 139fcc063 (`tests/recordings_retention.rs` — production-sized protection scenarios),
+  GREEN 59bd72bba (src + ps1 mirror + realistic-scenario test rewrite + the python parity test),
+  docs (this entry + `.claude/rules/recordings-retention.md` paragraph).
+- **Local verify (Tier-0):** a std-only `rustc --test` replica RED (17.3 GB run deleted without the
+  floor) → GREEN (protected with the floor); the full-suite replica = 19 passed; the python mirror
+  test `test_recordings_retention_mirror_1276.py` = 6 passed; `cargo fmt --all --check` clean;
+  doc-lint grep clean. The crate `tests/recordings_retention.rs` runs at CI (no local cargo path).
+## 2026-09-15 — #1312 avlatency: relative rolling-floor onset detection (fix NO-BASELINE on a live chain)
+
+- **Defect:** `scripts/measurement-chain-latency.sh --baseline` returned `markers=145 onsets=0
+  paired=0 verdict=NO-BASELINE` on a LIVE, working mbc chain (the E2E A/V gate paired the same chain
+  at −23 ms minutes earlier). `detect_onsets` armed only after a sample BELOW the absolute −60 dB bar
+  (`audio_preflight_default_threshold_db`, the issue-748 silence guard) and fired on the next at/above.
+- **Root cause (confirmed live):** a 45 s read-only capture of the stream `mbc` peak
+  (`measurement_chain_latency_probe.py --input mbc --sample-s 45 10.77.9.204`, exit 0) shows the
+  room/PA floor through the measurement mic sits continuously at −41…−47 dB (median −44.5), never
+  below −60 → the absolute detector never armed. The −60 bar is the right SILENT-CHAIN guard but the
+  wrong ONSET criterion (the floor moves with PA level / mic gain, so no fixed absolute bar works).
+- **Fix (`scripts/measurement_chain_latency.py`):** onsets detected RELATIVE to a rolling floor —
+  median of the trailing `ROLLING_FLOOR_WINDOW`=20 samples (≈1 s at ~50 ms cadence); a burst rises ≥
+  `ONSET_DELTA_DB`=6 dB above it, re-arm hysteresis at Δ/2. Δ=6 calibrated from the capture (noise ≤
+  3.8 dB rise p99, weakest real burst +7.0 dB, strongest +25 → 2.2 dB margin above noise, catches all
+  7 bursts, clean ~5 s cadence). The −60 bar kept as `chain_is_silent`'s guard: all-below-bar → 0
+  onsets, reason `chain-silent` (UNKNOWN, never a baseline). `measure()` returns `chain_silent`;
+  `reason()` surfaces it; `rig_dev_handover_decision.py`'s `avlatency` UNKNOWN wording names it.
+- **Commits:** RED d6258ebb6 (relative + chain-silent tests + the live fixture
+  `tests/python/fixtures/mbc_meter_live_2026-09-15.txt`), fixture-realism 755948c1a (continuous
+  synthetic meter stream — a sparse fixture defeats the sample-count rolling floor), GREEN af96b0c4d,
+  docs (this entry + the `.claude/rules/rig-dev-handover-check.md` gotcha).
+- **Local verify (Tier-0, pure python):** RED 7 failed / 18 passed → GREEN 25 passed
+  (`test_measurement_chain_latency_1312.py`); broader `-k "measurement_chain or handover"` 45 passed.
+- **Live read-only measure (no `--baseline`):** `markers=79 onsets=9 paired=0 verdict=NO-BASELINE` —
+  the onset FIX is proven live (the defect read `onsets=0`; relative detection now recovers 9 onsets
+  at the ~5–6 s marker cadence off the ~−44 dB room floor). `paired=0` is a SEPARATE rig-state issue,
+  not this fix: `cam2-painter.service` was `inactive` and its persistent marker log
+  `/run/rig-qpsk-markers.csv` was frozen ~385 s ago while marker audio still sounded, so the log's
+  `emit_ts` are ~330 s behind the live onsets (cam2↔dev1 clock offset measured 0.36 s — NOT the cause).
+  The verdict is the correct fail-safe (NO-BASELINE UNKNOWN, never a false forgot). Before seeding the
+  avlatency baseline the supervisor must confirm `cam2-painter.service` is active in TEST steady state
+  with a FRESH marker log so onsets pair (`onsets>=3` AND `paired>=3`).
+
+## 2026-09-15 — #1299 reopen Part 1: a `connected` term so an absent-sender input never grades the box DEGRADED
+
+- Issue #1299 REOPENED (fleet-visible genlock LOCK facet + dev1 watchdog): the live dry-run after the
+  d55afb726 deploy showed stream graded `DEGRADED reason=input_unlocked` because its 'NDIA cg stream'
+  input has no sender running — a chronic false page on a production-critical time-bucketed key, so
+  the timer stayed OFF. Root cause: `decide()` gated DEGRADED on `n_locked < n_inputs` with no notion
+  of a receiver connection.
+- FIX (Part 1, this lane): propagate the DistroAV receiver connection state through libobs into the
+  pure decision. New `obs_source.genlock_connected` (default true), runtime setter
+  `obs_source_set_genlock_connected`, `obs_genlock_stats.connected` (v2→v3), driven by
+  `ndi-source.cpp`'s receiver loop from `recv_get_no_connections() > 0`. The decision (Rust authority
+  `src/genlock_lock_state.rs` + C mirror `GenlockLockState.hpp`) gains an `n_absent` facet and gates
+  DEGRADED on `n_locked < n_connected` (`n_connected = n_inputs - n_absent`); all-senderless is
+  HEALTHY-idle (LOCKED). Widget emits per-input `connected` + top-level `n_absent`
+  (`genlock-lock-json:` schema v1→v2); python `genlock_lock_decision.py` + `bundle_state_gather.py`
+  carry them (v1 lines default `connected`→True, `n_absent`→None); watchdog logs `n_absent`.
+- Commits: RED `ed843c1ea` (test: absent-sender must not DEGRADE, 7 python decision failures vs HEAD's
+  module) → GREEN `35238fa73` (impl + parity/contract test updates). Local verify: rustc --test on the
+  Rust module (26), a C-vs-Rust parity replica over 4352 vectors incl. the n_absent axis (identical),
+  the g++ -Werror round-trip of the JSON builder, the guard tests (rustc --test, 8), the python suite
+  (45), `cargo fmt --all --check`, `bash -n` + `shellcheck -S warning`. Vendored Qt/OBS compile is
+  CI-only (full-bundle deploy).
+- Part 2 (imag has NO :8899 bundle-state server → coverage hole) returned as a followup_candidate:
+  a Linux `bundle-state-server` install path (a `--user` unit + `setup-imag.sh`/`verify-imag.sh`
+  wiring) with the Windows-only gathers degrading to ABSENT on Linux. Split per the ≤600 LoC gate.
