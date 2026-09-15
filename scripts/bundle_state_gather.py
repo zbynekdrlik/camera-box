@@ -316,6 +316,11 @@ def read_bounded_log_text(path, head_bytes=LOG_HEAD_BYTES, tail_bytes=LOG_TAIL_B
 # match. ts_lag_ms may be negative (-1 == audio_ts==0, i.e. no audio timeline yet).
 _AUDIO_TS_LAG_RE = re.compile(r"audio-telemetry #800 '([^']*)': ts_lag_ms=(-?\d+)")
 
+# #1320 — the PROGRAM-render freeze signal. `program-render-audit:` (obs-video.c
+# obs_graphics_thread_loop, ~5 s) carries the PROGRAM output's render cadence; `lagged` ==
+# renderSkipped in that window, so a `lagged>0` window is a render-thread freeze.
+_PROGRAM_RENDER_LAGGED_RE = re.compile(r"program-render-audit:.*?\blagged=(\d+)\b")
+
 # #1231 — freshness/recency for the audio-lag facet (follow-up to the #1226 review finding W1). The
 # #1226 facet took the LAST reading PER source with NO age bound, so a source removed/renamed while
 # LAGGING kept its stale-high line winning the MAX until the log rotated (concern a), and a telemetry
@@ -449,6 +454,50 @@ def audio_ts_lag_ms_from_log(text):
     contract."""
     lag, src, _age = audio_telemetry_from_log(text)
     return (lag, src)
+
+
+def program_render_lagged_from_log(text):
+    """#1320 — the strih PROGRAM-render freeze signal `(max_lagged_str, age_s_str)`, `("", "")` when
+    no `program-render-audit:` line exists (absent -> UNKNOWN downstream, never a fabricated 0).
+
+    `program-render-audit:` (obs-video.c obs_graphics_thread_loop, ~5 s) reports the PROGRAM output's
+    render cadence; `lagged` == renderSkipped in that window, so a `lagged>0` window is a render-
+    thread freeze. Issue 1320: a scene-switch-coincident DistroAV reattach whose blocking
+    NDIlib_recv_destroy ran on the graphics thread froze the PROGRAM render ~7.5 s (lagged=228
+    avg_frame_ms=782) -> 2ME PGM starved -> stream FIFO underrun -> relock storm -> presented video
+    +2/+3 frames late ~40 min. This facet exposes the MAX `lagged` across the tail's
+    program-render-audit lines + the in-log age (whole seconds) of the MOST RECENT window achieving
+    that max, so the dev1 watchdog can page on a RECENT freeze (not one that scrolled out of the
+    tail). `"0"` (a healthy tail: render telemetry live, no freeze) is a truthy string and is KEPT;
+    `""` (no telemetry at all) is dropped by the omit-when-empty filter.
+
+    Reads ONLY the TAIL slice of the #1222 bounded head+separator+tail read (a freeze surviving only
+    in the head is never reported; a small whole-file log is scanned entirely), in ONE pass (no
+    second log read). File order is time order (append-only log), so `_recency_gap_s` corrects a
+    single midnight wrap on the date-less OBS timestamps."""
+    t = text or ""
+    if LOG_BOUNDED_READ_SEPARATOR in t:
+        t = t.rsplit(LOG_BOUNDED_READ_SEPARATOR, 1)[-1]
+    log_newest_ts = None   # ts of the LAST parseable line in file order (the log write head)
+    max_lagged = None
+    max_ts = None          # ts of the most-recent line achieving max_lagged
+    for line in t.splitlines():
+        ts = _log_line_seconds(line)
+        if ts is not None:
+            log_newest_ts = ts
+        m = _PROGRAM_RENDER_LAGGED_RE.search(line)
+        if m:
+            lagged = int(m.group(1))
+            if max_lagged is None or lagged > max_lagged:
+                max_lagged = lagged
+                max_ts = ts
+            elif lagged == max_lagged and ts is not None:
+                max_ts = ts   # a LATER window at the same max -> report the fresher age
+    if max_lagged is None:
+        return ("", "")
+    gap = _recency_gap_s(log_newest_ts, max_ts)
+    age_s = "0" if gap is None else str(round(gap))
+    return (str(max_lagged), age_s)
 
 
 def _median_int(values):
@@ -1140,6 +1189,8 @@ def build_bundle_state(
     vb_matrix_name="",
     vb_matrix_pid="",
     vb_matrix_start="",
+    program_render_lagged="",
+    program_render_lagged_age_s="",
 ):
     """Assemble the flat bundle-state dict `version-integrity-gate.sh --win-state`'s
     `compare_args_from_state()` parses. Every value is a STRING (its regex requires a quoted JSON
@@ -1250,5 +1301,12 @@ def build_bundle_state(
         "vb_matrix_name": vb_matrix_name,
         "vb_matrix_pid": vb_matrix_pid,
         "vb_matrix_start": vb_matrix_start,
+        # #1320 — the strih PROGRAM-render freeze facet the dev1 render-freeze watchdog reads: the
+        # MAX `program-render-audit lagged` over the tail + the in-log age (s) of the most recent
+        # window achieving it. Same omit-when-empty rule: "0" (render telemetry live, no freeze) is
+        # a truthy string and is KEPT; "" (no program-render-audit line at all) is dropped ->
+        # UNKNOWN downstream, never a fabricated 0. From `program_render_lagged_from_log`.
+        "program_render_lagged": program_render_lagged,
+        "program_render_lagged_age_s": program_render_lagged_age_s,
     }
     return {k: v for k, v in values.items() if v}
