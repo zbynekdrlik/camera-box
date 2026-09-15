@@ -32,6 +32,11 @@ param(
     [int]$KeepRuns = 20,
     [double]$KeepDays = 3,
     [double]$BudgetGb = 50,
+    # #1276 -- production-size PROTECT floor (bytes). A matching recording at or above this size is
+    # a production-shaped recording and is PROTECTED regardless of age or newest-N rank (owner ruling
+    # 15.9.2026). Byte-identical to Rust PRODUCTION_SIZE_FLOOR_BYTES = 1073741824 (1 GiB): E2E runs
+    # were 0.0-0.8 GB, production recordings 5.6/7.9/17.3 GB in the 2.9. dry-run.
+    [long]$ProductionSizeFloorBytes = 1073741824,
     [switch]$Execute
 )
 $ErrorActionPreference = "Stop"
@@ -40,7 +45,7 @@ $ErrorActionPreference = "Stop"
 # extension + an OPTIONAL OBS ` (n)` dedup suffix. Case-SENSITIVE (`-cmatch`): OBS writes lowercase,
 # and a `.MKV` / custom-named file must stay protected. Mirrors is_harness_recording() in Rust.
 # `[0-9]`, NOT `\d`: .NET `\d` also matches Unicode decimal digits (fullwidth/Arabic/Devanagari),
-# which would make the executor MORE permissive than the Rust spec's `is_ascii_digit()` — the wrong
+# which would make the executor MORE permissive than the Rust spec's `is_ascii_digit()` -- the wrong
 # direction for a delete gate. `[0-9]` keeps the mirror byte-exact with the canonical decision.
 $allow = '^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}-[0-9]{2}-[0-9]{2}( \([0-9]+\))?\.(mkv|mp4)$'
 
@@ -49,6 +54,7 @@ function Format-Gb([long]$bytes) { return ("{0:N1} GB" -f ($bytes / 1GB)) }
 Write-Output "=== strih-recordings-retention (#1122) ==="
 Write-Output ("RecordDir : {0}" -f $RecordDir)
 Write-Output ("Policy    : keep newest {0} runs UNION younger than {1} days" -f $KeepRuns, $KeepDays)
+Write-Output ("SizeFloor : {0} bytes ({1}) -- files >= this are PROTECTED as production-sized (#1276)" -f $ProductionSizeFloorBytes, (Format-Gb $ProductionSizeFloorBytes))
 Write-Output ("Budget    : {0} GB" -f $BudgetGb)
 Write-Output ("Mode      : {0}" -f ($(if ($Execute) { "EXECUTE (deleting)" } else { "DRY-RUN (no deletion)" })))
 Write-Output ""
@@ -63,12 +69,23 @@ $now = Get-Date
 
 # Newest first, with a deterministic Name tie-break (mtime desc, then name asc) so the on-box plan
 # matches the Rust spec's ordering at an exact LastWriteTime tie (PS 5.1 Sort-Object is not stable).
-$matching  = @($files | Where-Object { $_.Name -cmatch $allow } |
+$allMatching = @($files | Where-Object { $_.Name -cmatch $allow } |
     Sort-Object @{ Expression = 'LastWriteTime'; Descending = $true }, @{ Expression = 'Name'; Descending = $false })
 $protected = @($files | Where-Object { $_.Name -cnotmatch $allow })
 
+# #1276: production-shaped recordings (size >= floor) are PROTECTED by SIZE regardless of age/rank;
+# they are pulled OUT of the newest-N pool so a big production file never consumes an E2E keep slot.
+# Mirrors src/recordings_retention.rs plan(): the newest-N UNION younger-than-D rule runs over the
+# BELOW-floor files only. `-ge` mirrors the Rust `>=` (at-or-above is protected).
+$productionSized = @($allMatching | Where-Object { $_.Length -ge $ProductionSizeFloorBytes })
+$matching        = @($allMatching | Where-Object { $_.Length -lt $ProductionSizeFloorBytes })
+
 $keep = New-Object System.Collections.Generic.List[object]
 $delete = New-Object System.Collections.Generic.List[object]
+foreach ($fl in $productionSized) {
+    $ageDays = ($now - $fl.LastWriteTime).TotalDays
+    $keep.Add([pscustomobject]@{ File = $fl; Reason = "production-sized"; AgeDays = $ageDays })
+}
 for ($i = 0; $i -lt $matching.Count; $i++) {
     $fl = $matching[$i]
     $ageDays = ($now - $fl.LastWriteTime).TotalDays

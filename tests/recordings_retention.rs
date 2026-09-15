@@ -269,20 +269,37 @@ fn totals_sum_only_the_delete_set() {
 }
 
 #[test]
-fn realistic_strih_scenario_brings_under_budget_and_protects_foreign() {
-    // Mirror the live strih shape at a small scale: a foreign file + many timestamp runs, some
-    // huge and old. Keep newest 3 + younger-than-2-days; confirm the foreign file survives and the
-    // big old runs are the ones freed.
+fn realistic_strih_scenario_protects_production_and_frees_old_e2e_runs() {
+    // Live strih shape at small scale under the #1276 size-floor rule: a foreign operator file
+    // (protected by NAME), two production-shaped recordings above the ~1 GiB floor (protected by
+    // SIZE even though old and beyond newest-N), and a set of small E2E runs (below the floor) of
+    // which only the newest-3 UNION younger-than-2-days survive. Under the OLD rank/age-only rule
+    // the big old runs would have been the first freed; the ruling inverts that -- production files
+    // are never deletable, only the small E2E captures are.
     let now = 1_000_000.0;
     let gib = 1024u64 * 1024 * 1024;
-    let mut files = vec![f("strih700105.mkv", 5 * gib, now - 300.0 * SECONDS_PER_DAY)];
-    // 8 runs, oldest→newest, the two oldest are the space hogs.
-    let sizes = [46 * gib, 33 * gib, 8 * gib, 8 * gib, gib, gib, gib, gib];
-    for (i, sz) in sizes.iter().enumerate() {
+    let mib = 1024u64 * 1024;
+    let mut files = vec![
+        // foreign operator recording -- protected by NAME.
+        f("strih700105.mkv", 5 * gib, now - 300.0 * SECONDS_PER_DAY),
+        // production-shaped timestamp recordings -- above the floor, protected by SIZE despite age.
+        f(
+            "2026-02-01 10-00-00.mkv",
+            17 * gib,
+            now - 200.0 * SECONDS_PER_DAY,
+        ),
+        f(
+            "2026-02-02 10-00-00.mkv",
+            8 * gib,
+            now - 150.0 * SECONDS_PER_DAY,
+        ),
+    ];
+    // 8 small E2E runs (below the floor), oldest -> newest.
+    for i in 0..8u64 {
         let age_days = (8 - i) as f64 * 5.0; // 40,35,...,5 days
         files.push(f(
             &format!("2026-01-{:02} 10-00-00.mkv", i + 1),
-            *sz,
+            200 * mib,
             now - age_days * SECONDS_PER_DAY,
         ));
     }
@@ -294,18 +311,38 @@ fn realistic_strih_scenario_brings_under_budget_and_protects_foreign() {
         },
         now,
     );
-    // The foreign file is never deletable.
-    assert!(!p.delete.iter().any(|d| d.name == "strih700105.mkv"));
-    // The two space-hog old runs ARE freed.
+
+    // Foreign file protected by NAME.
+    let foreign = p
+        .keep
+        .iter()
+        .find(|k| k.file.name == "strih700105.mkv")
+        .expect("foreign file must be kept");
+    assert_eq!(foreign.reason, KeepReason::ProtectedNonMatching);
+    // Both production-shaped files protected by SIZE (never deleted), with the production-sized reason.
+    for name in ["2026-02-01 10-00-00.mkv", "2026-02-02 10-00-00.mkv"] {
+        assert!(!p.delete.iter().any(|d| d.name == name));
+        let k = p
+            .keep
+            .iter()
+            .find(|k| k.file.name == name)
+            .expect("production-shaped file must be kept");
+        assert_eq!(k.reason, KeepReason::ProductionSized);
+    }
+    // The oldest small E2E runs (beyond newest-3 and older than 2d) ARE freed.
     assert!(p.delete.iter().any(|d| d.name == "2026-01-01 10-00-00.mkv"));
     assert!(p.delete.iter().any(|d| d.name == "2026-01-02 10-00-00.mkv"));
-    // Newest 3 runs kept.
+    // The newest E2E run is kept (newest-3).
     assert!(p
         .keep
         .iter()
-        .any(|k| k.file.name == "2026-01-08 10-00-00.mkv"));
-    // Freed bytes are dominated by the two hogs.
-    assert!(p.bytes_to_delete() >= 79 * gib);
+        .any(|k| k.file.name == "2026-01-08 10-00-00.mkv" && k.reason == KeepReason::NewestRuns));
+    // ONLY below-floor E2E runs are ever in the delete set -- no production/foreign bytes freed.
+    assert!(p
+        .delete
+        .iter()
+        .all(|d| d.size_bytes < PRODUCTION_SIZE_FLOOR_BYTES));
+    assert_eq!(p.delete_count(), 5);
 }
 
 // ---- #1276: free-space WARNING verdict (the E2E preflight semantics owner-ruled 2026-09-14) ----
@@ -501,9 +538,7 @@ fn production_sized_never_deletable_takes_precedence_over_delete_eligibility() {
     );
     let del: Vec<&str> = p.delete.iter().map(|d| d.name.as_str()).collect();
     assert_eq!(del, vec!["2026-01-02 10-00-00.mkv"]);
-    assert!(p
-        .keep
-        .iter()
-        .any(|k| k.file.name == "2026-01-01 10-00-00.mkv"
-            && k.reason == KeepReason::ProductionSized));
+    assert!(p.keep.iter().any(
+        |k| k.file.name == "2026-01-01 10-00-00.mkv" && k.reason == KeepReason::ProductionSized
+    ));
 }
