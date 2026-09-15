@@ -471,6 +471,121 @@ def floor_samples_sufficient(jitter_json, sources, min_samples=MIN_FLOOR_SAMPLES
     return all(s in floors for s in sources)
 
 
+# --------------------------------------------------------------------------------------------------
+# issue 1168 task 2/3 -- PRODUCTION per-box equalization + a re-tighten hard-fail on the JITTER-FLOOR
+# instrument (distinct from the painter-QR barrier residual the budget-bound branch already tracks).
+#
+# WHY these are separate from the existing floor_aware_* plan: that plan drives off the PAINTER-QR
+# barrier deltas (round_deltas), which read the sub-frame N=2 quantum as ~0 (issue 1252) and so apply
+# NOTHING. The mining (15.9.) shows a STABLE ~13.7 ms median cross-camera spread on the JITTER-FLOOR
+# instrument (arrival_floors_from_jitter = latency_ms + mean_head_skew_ms). These pure helpers reason
+# about THAT instrument for the production-persistence + re-tighten questions issue 1168 asks.
+#
+# THE PHYSICS (issue 1049 narrative in src/genlock_backlog.rs; live run 1899055119): the strih FIFO is
+# a WHOLE-source-frame conveyor -- it moves a source's on-air age S only in interval/n = 16.667 ms
+# (one 60 fps source frame) steps, so `S mod 16.667` is INVARIANT under every pin. A SUB-source-frame
+# cross-camera spread is therefore IRREDUCIBLE by any pin: a whole-frame hold OVERSHOOTS (adds a full
+# frame, does not shrink a sub-frame gap) and a genuinely sub-frame hold lands in the issue-998
+# frac(latency/33.3)<0.5 limit-cycle band that DOUBLES the on-screen spread. So floor_equalization_plan
+# emits an above-floor pin ONLY when a whole-frame hold measurably REDUCES the spread; for the current
+# sub-frame data it returns floor-only (the excess is grabber-owned, task 1 -- not a strih-pin lever).
+# DIRECTION: equalizing means ADDING latency to the FRESHEST (min-floor) cameras to bring them UP to
+# the OLDEST (max-floor) camera, which anchors at the floor -- the shipped floor_aware_partition
+# direction, the MIRROR of the dispatch's inverted worked numbers.
+DEFAULT_FLOOR_SPREAD_TOLERANCE_MS = 33.3   # ~one 30 fps canvas frame (see floor_spread_hard_fail)
+
+
+def cross_camera_floor_spread(arrival_floors):
+    """The cross-camera present-age spread (max - min arrival floor), in ms. {} or a single source
+    -> 0.0 (no spread to measure). Pure."""
+    if not arrival_floors or len(arrival_floors) < 2:
+        return 0.0
+    vals = list(arrival_floors.values())
+    return max(vals) - min(vals)
+
+
+def floor_spread_hard_fail(spread_ms, tolerance_ms=DEFAULT_FLOOR_SPREAD_TOLERANCE_MS):
+    """issue 1168 task 3 RE-TIGHTEN (jitter-floor axis): True iff the cross-camera arrival-floor
+    spread EXCEEDS `tolerance_ms` -- a genuinely-worse per-box misalignment (>= ~one canvas frame) the
+    pin conveyor CAN correct, not the sub-source-frame residual it cannot. A None spread (missing
+    measurement) is honest-None -> False (NEVER fabricate a fail from an absent measurement).
+
+    Tolerance = ~one 30 fps canvas frame (33.3 ms), NOT the dispatch's suggested 15 ms: the mining
+    median spread is 13.7 ms with an 8.4 ms anchor run-level std, so a 15 ms bound would FALSE-FAIL
+    routinely (13.7 + 8.4 = 22 ms), and below one source frame the spread is physically irreducible.
+    One canvas frame matches the existing painter-QR budget-bound scale (45 ms) and marks the boundary
+    where a whole-frame pin becomes an effective lever."""
+    if spread_ms is None:
+        return False
+    return spread_ms > tolerance_ms
+
+
+def floor_equalization_plan(arrival_floors, floor_ms=DEFAULT_FLOOR_MS, source_frame_ms=SOURCE_FRAME_MS,
+                            max_abs_latency_ms=DEFAULT_MAX_ABS_LATENCY_MS,
+                            sanity_ms=DEFAULT_MAX_DELTA_MS):
+    """issue 1168 task 2: the DIRECTION-CORRECT per-box equalization plan from the JITTER arrival
+    floors {src: present_age_ms}. Anchor = the OLDEST (max-floor) camera at `floor_ms`; each fresher
+    camera would need `deficit = max_floor - floor_i` of ADDED latency to reach the common target. The
+    strih FIFO adds only WHOLE source frames, so each deficit is rounded to the NEAREST whole source
+    frame (issue-998 frac rule: nearest, so a sub-frame deficit -> 0 = no limit-cycle-prone sub-frame
+    pin), and a pin is applied ONLY IF the resulting configuration measurably REDUCES the cross-camera
+    spread AND stays within `max_abs_latency_ms` (deep-pin doctrine). A spread beyond `sanity_ms` is a
+    degraded grabber (not equalizable) -> floor-only.
+
+    Returns (plan, meta):
+      plan -- {src: pin_ms(int)}: `floor_ms` for the anchor + every camera a whole-frame hold does not
+              help; `floor_ms + round(frames*source_frame_ms)` for a camera a hold reduces.
+      meta -- {anchor, pre_spread_ms, post_spread_ms, reducible(bool), sub_frame_only(bool),
+               added_latency_ms, reason}. Pure, Tier-0."""
+    sources = list(arrival_floors)
+    floor_plan = {s: int(floor_ms) for s in sources}
+    if len(sources) < 2:
+        return floor_plan, {"anchor": None, "pre_spread_ms": 0.0, "post_spread_ms": 0.0,
+                            "reducible": False, "sub_frame_only": True, "added_latency_ms": 0.0,
+                            "reason": "insufficient"}
+    anchor = max(sources, key=lambda s: arrival_floors[s])   # the OLDEST (max-floor) camera
+    target = arrival_floors[anchor]
+    pre_spread = target - min(arrival_floors.values())
+    if pre_spread > sanity_ms:
+        return floor_plan, {"anchor": anchor, "pre_spread_ms": round(pre_spread, 2),
+                            "post_spread_ms": round(pre_spread, 2), "reducible": False,
+                            "sub_frame_only": False, "added_latency_ms": 0.0, "reason": "degraded"}
+    # Candidate whole-source-frame holds (nearest), budget-clamped.
+    frames = {}
+    sub_frame_only = True
+    for s in sources:
+        deficit = target - arrival_floors[s]
+        f = int(round(deficit / source_frame_ms))
+        if f != 0:
+            sub_frame_only = False
+        if arrival_floors[s] + f * source_frame_ms > max_abs_latency_ms:
+            f = 0                                            # budget clamp: never deep-pin past the ceiling
+        frames[s] = max(0, f)
+    post_ages = {s: arrival_floors[s] + frames[s] * source_frame_ms for s in sources}
+    post_spread = max(post_ages.values()) - min(post_ages.values())
+    reducible = post_spread < pre_spread - 1e-9
+    if not reducible:
+        return floor_plan, {"anchor": anchor, "pre_spread_ms": round(pre_spread, 2),
+                            "post_spread_ms": round(pre_spread, 2), "reducible": False,
+                            "sub_frame_only": sub_frame_only, "added_latency_ms": 0.0,
+                            "reason": "irreducible"}
+    plan = {s: int(floor_ms + round(frames[s] * source_frame_ms)) for s in sources}
+    added = sum(plan[s] - int(floor_ms) for s in sources)
+    return plan, {"anchor": anchor, "pre_spread_ms": round(pre_spread, 2),
+                  "post_spread_ms": round(post_spread, 2), "reducible": True,
+                  "sub_frame_only": sub_frame_only, "added_latency_ms": float(added),
+                  "reason": "equalized"}
+
+
+def baseline_strih_block(applied_pins, sources, floor_ms=DEFAULT_FLOOR_MS):
+    """issue 1168 task 2(b): the strih named-pin block to persist into latency-pins-baseline.json
+    after a GREEN align -- every align source at its applied pin (`floor_ms` default), the shape
+    latency_pins_verify.verify_box diffs the live pins against (report-only). Pure; the WRITER (the
+    --persist-baseline CLI mode) prints it for a PR, never a runtime mutation of the tracked file (the
+    baseline's own "update this file in a PR" convention)."""
+    return {s: int(applied_pins.get(s, floor_ms)) for s in sources}
+
+
 def floor_aware_partition(arrival_floors, deltas, floor_ms=DEFAULT_FLOOR_MS,
                           max_abs_latency_ms=DEFAULT_MAX_ABS_LATENCY_MS, current_pins=None):
     """The PURE core of the ADDITIVE plan (#1161 mechanism, #1253 additive fix) that PARTITIONS
@@ -1412,6 +1527,14 @@ def align(sources, host, password, *, execute, stable_tail_rounds, stable_tol_id
                 "the budget-unchecked floor+delta plan rather than aborting the run.\n")
             arrival_floors, pure_deltas = {}, None
     result["arrival_floors_ms"] = {s: round(v, 1) for s, v in arrival_floors.items()}
+    # issue 1168 task 3 (REPORT-ONLY): surface the JITTER-FLOOR cross-camera spread + the re-tighten
+    # verdict alongside the painter-QR residual, on every floor-aware path. Report-only here (NO
+    # abort) -- the hard-fail arm lives in the --equalization-plan diagnostic + a future env arm,
+    # pending the grabber-vs-pin decision (the issue-1168 sub-frame finding). Adds keys only.
+    if arrival_floors:
+        _floor_spread = cross_camera_floor_spread(arrival_floors)
+        result["floor_spread_ms"] = round(_floor_spread, 2)
+        result["floor_spread_retighten_hard_fail"] = floor_spread_hard_fail(_floor_spread)
 
     # #1161 review: the SPREAD sanity gates the PURE present-age spread when floors are available --
     # the pin-FOLDED deltas over-read by ~the pin elevation from a pinned steady state and would
@@ -1674,6 +1797,15 @@ def main(argv=None):
                          "well-sampled (>= MIN_FLOOR_SAMPLES), else EXIT 1 -- the sufficiency check "
                          "qr-align.sh gates a bounded audit RE-FETCH on before the budget-unchecked "
                          "fallback. Read-only; mutually exclusive with the measure/plan/--execute flow.")
+    ap.add_argument("--equalization-plan", action="store_true",
+                    help="#1168 task 2/3 DIAGNOSTIC: read --jitter-json, print the per-box "
+                         "equalization plan + meta (anchor/pre/post spread/reducible), the "
+                         "cross-camera floor spread and the re-tighten hard-fail verdict as JSON, and "
+                         "exit 0. Read-only; mutually exclusive with the measure/plan/--execute flow.")
+    ap.add_argument("--persist-baseline", action="store_true",
+                    help="#1168 task 2(b): with --equalization-plan, ALSO print the strih baseline "
+                         "block to persist in latency-pins-baseline.json via a PR. For the current "
+                         "sub-frame data this is floor-3 (a documented no-op).")
     ap.add_argument("--execute", action="store_true",
                     help="APPLY the floor-aware pins (default: DRY-RUN -- measure + plan, write nothing)")
     a = ap.parse_args(argv)
@@ -1716,6 +1848,37 @@ def main(argv=None):
               f"{'SUFFICIENT' if ok else 'INSUFFICIENT (>=1 align source missing a well-sampled floor)'} "
               f"for {sources}", file=sys.stderr)
         return 0 if ok else 1
+
+    if a.equalization_plan:
+        # #1168 task 2/3 DIAGNOSTIC (read-only): print the per-box equalization plan + the jitter-floor
+        # spread + the re-tighten verdict from --jitter-json. NEVER writes a pin; the supervisor uses
+        # this to decide the grabber-vs-pin lever (issue 1168 sub-frame finding).
+        if not a.jitter_json:
+            print("[qr-align] #1168 --equalization-plan requires --jitter-json", file=sys.stderr)
+            return 2
+        try:
+            with open(a.jitter_json, encoding="utf-8") as f:
+                jj = json.load(f)
+        except (OSError, ValueError) as exc:
+            print(f"[qr-align] #1168 --equalization-plan: could not read --jitter-json "
+                  f"{a.jitter_json!r} ({exc})", file=sys.stderr)
+            return 2
+        floors = arrival_floors_from_jitter(jj, sources)
+        plan, meta = floor_equalization_plan(
+            floors, a.floor_ms, max_abs_latency_ms=a.max_abs_latency_ms, sanity_ms=a.max_delta_ms)
+        spread = cross_camera_floor_spread(floors)
+        payload = {
+            "arrival_floors_ms": {s: round(v, 1) for s, v in floors.items()},
+            "plan": plan,
+            "floor_spread_ms": round(spread, 2),
+            "floor_spread_hard_fail": floor_spread_hard_fail(spread),
+            "floor_spread_tolerance_ms": DEFAULT_FLOOR_SPREAD_TOLERANCE_MS,
+            **meta,
+        }
+        if a.persist_baseline:
+            payload["baseline_strih_block"] = baseline_strih_block(plan, sources, a.floor_ms)
+        print(json.dumps(payload, default=str))
+        return 0
 
     jitter_json = None
     if a.jitter_json:
