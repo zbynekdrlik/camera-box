@@ -208,6 +208,10 @@ def test_painter_item():
 
 
 SHADING_ON = "cam1 (10.77.9.61): enabled=enabled active=active online=true -> verdict=SHADING-ON\n"
+# #1319: an all-healthy watchdogs capture (enabled+active+recent) -> OK for the full-fleet test.
+WATCHDOGS_OK = (
+    "watchdog av-step-alert-watchdog.timer scope=core unit=present enabled=yes active=yes age_s=30\n"
+    "watchdog avsync-lineup-alert-watchdog.timer scope=core unit=present enabled=yes active=yes age_s=45\n")
 SHADING_DEAD = "cam1 (10.77.9.61): enabled=enabled active=inactive online=? -> verdict=SHADING-DEAD\n"
 SHADING_OFF = ("cam1 (10.77.9.61): enabled=disabled active=inactive online=? -> verdict=SHADING-OFF\n"
                "cam2 (10.77.9.62): enabled=disabled active=inactive online=? -> verdict=SHADING-OFF\n")
@@ -371,6 +375,7 @@ def test_evaluate_over_a_work_dir(tmp_path):
         "cambox": ("", 0),
         "avlatency": (AVLAT_ALIGNED, 0),
         "shading": (SHADING_ON, 0),
+        "watchdogs": (WATCHDOGS_OK, 0),
     }
     for name, (text, rc) in caps.items():
         (tmp_path / (name + ".out")).write_text(text, encoding="utf-8")

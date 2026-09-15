@@ -94,6 +94,7 @@ DANTESYNC_PROBE="${RDH_DANTESYNC_PROBE:-$HERE/dantesync-version-gate.sh}"
 CAMBOX_PROBE="${RDH_CAMBOX_PROBE:-$HERE/camera-box-version-gate.sh}"
 AVLATENCY_PROBE="${RDH_AVLATENCY_PROBE:-$HERE/measurement-chain-latency.sh}"
 RIGMODE_LIB="${RDH_RIGMODE_LIB:-$HERE/lib/rig-mode-state.sh}"
+WATCHDOG_ROSTER="${RDH_WATCHDOG_ROSTER:-$HERE/lib/watchdog-roster.sh}"
 DECIDE="${RDH_DECIDE:-$HERE/rig_dev_handover_decision.py}"
 
 WORKDIR="$(mktemp -d "${TMPDIR:-/tmp}/rig-dev-handover.XXXXXX")"
@@ -269,6 +270,48 @@ probe_shading() {
 }
 probe_shading "$CAM_LINUX_SPEC" "$CAM_PW" >"$WORKDIR/shading.out" 2>&1 || true
 echo 0 >"$WORKDIR/shading.rc"
+
+# --- item 16: watchdogs (dev1 --user production-critical alert-watchdog timers, #1319) ------------
+# Read-only, dev1-LOCAL (no ssh): the ROOT of the owner's 15.9. complaint was that av-step +
+# avsync-lineup timers had NEVER been installed and NOTHING reported it. For every timer in the ONE
+# roster (scripts/lib/watchdog-roster.sh) emit ONE raw line for the pure decider:
+#   watchdog <timer> scope=<core|imag> unit=<present|absent> enabled=<yes|no> active=<yes|no> age_s=<N|na>
+# from `systemctl --user is-enabled/is-active` + the timer's LastTriggerUSec age. A disabled/inactive/
+# never-run/stale timer -> SUPERVISOR (the supervisor's to fix, never the owner); no unit file ->
+# UNKNOWN. This NEVER mutates -- no enable/disable/start. imag-scoped timers are emitted with
+# scope=imag so the decider can drop them once imag is retired (issue 1316).
+probe_watchdogs() {
+  local roster_lib="$1" entry timer scope en act last age le now unit enabled active
+  if [ ! -e "$roster_lib" ]; then printf 'roster lib %s missing\n' "$roster_lib"; return 0; fi
+  # shellcheck source=scripts/lib/watchdog-roster.sh
+  . "$roster_lib" 2>/dev/null || { printf 'roster lib %s unreadable\n' "$roster_lib"; return 0; }
+  command -v systemctl >/dev/null 2>&1 || { printf 'systemctl missing -- cannot probe watchdogs\n'; return 0; }
+  now="$(date +%s)"
+  for entry in "${WATCHDOG_TIMERS[@]}"; do
+    timer="${entry%%:*}"; scope="${entry##*:}"
+    en="$(systemctl --user is-enabled "$timer" 2>&1 || true)"; en="${en%%$'\n'*}"
+    act="$(systemctl --user is-active "$timer" 2>&1 || true)"; act="${act%%$'\n'*}"
+    last="$(systemctl --user show "$timer" -p LastTriggerUSec --value 2>/dev/null || true)"
+    age=na
+    if [ -n "$last" ]; then
+      le="$(date -d "$last" +%s 2>/dev/null || true)"
+      [ -n "$le" ] && age="$(( now - le ))"
+    fi
+    unit=present; enabled=no; active=no
+    case "$en" in
+      enabled | enabled-runtime | static | indirect | generated | alias) enabled=yes ;;
+      disabled | masked | linked | linked-runtime | bad) enabled=no ;;
+      not-found | "" | *"No such file"*) unit=absent ;;
+      *) enabled=no ;;
+    esac
+    [ "$act" = active ] && active=yes
+    printf 'watchdog %s scope=%s unit=%s enabled=%s active=%s age_s=%s\n' \
+      "$timer" "$scope" "$unit" "$enabled" "$active" "$age"
+  done
+  return 0
+}
+probe_watchdogs "$WATCHDOG_ROSTER" >"$WORKDIR/watchdogs.out" 2>&1 || true
+echo 0 >"$WORKDIR/watchdogs.rc"
 
 # --- decide + print ------------------------------------------------------------------------------
 json_flag=()

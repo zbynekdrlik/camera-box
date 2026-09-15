@@ -28,9 +28,14 @@ import sys
 OK = "OK"
 FORGOT = "FORGOT-BY-OWNER"
 FIXED = "FIXED-BY-ME"  # reserved for a future --fix mode; never emitted by this report-only lane
+# #1319: a problem the SUPERVISOR (not the owner) must fix -- e.g. a production-critical dev1
+# watchdog timer left disabled/inactive/never-run. The owner MUST see it, but is NEVER blamed for
+# it (its Slovak line says `nezapnutý watchdog: …`, not `zabudol si: …`). A not-clean state -> exit 1.
+SUPERVISOR = "SUPERVISOR"
 UNKNOWN = "UNKNOWN"
 
-GLYPH = {OK: "✅", FORGOT: "❌", FIXED: "\U0001f527", UNKNOWN: "❔"}  # ✅ ❌ 🔧 ❔
+GLYPH = {OK: "✅", FORGOT: "❌", FIXED: "\U0001f527", SUPERVISOR: "\U0001f6e0",
+         UNKNOWN: "❔"}  # ✅ ❌ 🔧 🛠 ❔
 
 # A missing capture file / a probe that could not be run reads as this exit code sentinel.
 RC_MISSING = 127
@@ -108,6 +113,80 @@ def status_from_exit(rc, ok_codes, forgot_codes):
     return UNKNOWN
 
 
+# --- item 16: watchdogs (#1319) -----------------------------------------------------------------
+# The OK-recency bar: a production-critical dev1 watchdog timer must have fired within this many
+# seconds. Env-overridable (RDH_WATCHDOG_MAX_AGE_S) -- the fleet's watchdog timers all run on
+# <= 5-min cadences, so 15 min is a safe "hasn't fired recently" ceiling.
+WD_MAX_AGE_S = 900
+
+# One raw per-timer line the bash probe (scripts/rig-dev-handover-check.sh probe_watchdogs) emits:
+#   watchdog <timer> scope=<core|imag> unit=<present|absent> enabled=<yes|no> active=<yes|no> age_s=<N|na>
+_WD_LINE_RE = re.compile(
+    r"^watchdog\s+(\S+)\s+scope=(\S+)\s+unit=(\S+)\s+enabled=(\S+)\s+active=(\S+)\s+age_s=(\S+)")
+
+
+def _wd_reason(unit, enabled, active, age_s, max_age_s):
+    """Classify ONE timer's raw fields: 'ok' | 'off-*' (a supervisor problem) | 'missing'."""
+    if unit != "present":
+        return "missing"
+    if enabled != "yes":
+        return "off-disabled"
+    if active != "yes":
+        return "off-inactive"
+    if age_s == "na":
+        return "off-neverrun"
+    try:
+        if int(age_s) > max_age_s:
+            return "off-stale"
+    except (TypeError, ValueError):
+        return "off-neverrun"
+    return "ok"
+
+
+def classify_watchdogs(text, imag_retired=False, max_age_s=WD_MAX_AGE_S):
+    """Decide the `watchdogs` item from the probe's raw per-timer lines.
+
+    A disabled/inactive/never-run/stale timer is a SUPERVISOR problem (never blamed on the owner);
+    a timer with no unit file reads UNKNOWN with the names; nothing readable reads UNKNOWN.
+    `imag_retired` drops scope=imag timers (issue 1316) so a retired imag never forces a problem.
+    Returns {status, message, off, missing, ok}."""
+    off, missing, ok = [], [], []
+    scanned = 0
+    for line in (text or "").splitlines():
+        m = _WD_LINE_RE.match(line.strip())
+        if not m:
+            continue
+        name, scope, unit, enabled, active, age_s = m.groups()
+        if imag_retired and scope == "imag":
+            continue
+        scanned += 1
+        reason = _wd_reason(unit, enabled, active, age_s, max_age_s)
+        if reason == "ok":
+            ok.append(name)
+        elif reason == "missing":
+            missing.append(name)
+        else:
+            off.append(name)
+
+    if off:
+        msg = "nezapnutý watchdog: " + ", ".join(off)
+        if missing:
+            msg += "; chýba unit súbor pre: " + ", ".join(missing)
+        status = SUPERVISOR
+    elif missing:
+        msg = ("chýba unit súbor pre watchdog: " + ", ".join(missing)
+               + " — over inštaláciu na dev1 (neoverené)")
+        status = UNKNOWN
+    elif scanned == 0:
+        msg = "žiadny watchdog timer sa nepodarilo prečítať (systemctl --user na dev1 nedostupné)"
+        status = UNKNOWN
+    else:
+        msg = ("všetkých %d watchdog timerov beží (enabled+active, spustené za posledných 15 min)"
+               % len(ok))
+        status = OK
+    return {"status": status, "message": msg, "off": off, "missing": missing, "ok": ok}
+
+
 # --- item specifications ------------------------------------------------------------------------
 class Item(object):
     """One checklist item. `captures` are the <name> keys the orchestrator wrote (.out/.rc). `kind`
@@ -148,10 +227,18 @@ class Item(object):
             return status_from_exit(rc, self.ok_codes, self.forgot_codes)
         raise ValueError("unknown item kind %r" % self.kind)
 
-    def decide(self, captures_data):
+    def decide(self, captures_data, imag_retired=False):
         """`captures_data`: {name: (text, rc)} for THIS item's captures (a missing name reads as
         ("", RC_MISSING)). Combine the per-capture statuses (FORGOT > OK > UNKNOWN) and produce the
-        Slovak line."""
+        Slovak line. `imag_retired` (issue 1316) is used only by the `watchdogs` kind."""
+        if self.kind == "watchdogs":
+            text, _rc = captures_data.get(self.captures[0], ("", RC_MISSING))
+            r = classify_watchdogs(text, imag_retired=imag_retired)
+            entry = {"key": self.key, "label": self.label, "status": r["status"],
+                     "message": r["message"]}
+            if r["status"] == SUPERVISOR:
+                entry["names"] = r["off"]  # the timers the supervisor must (re-)enable, for the summary
+            return entry
         statuses = []
         for name in self.captures:
             text, rc = captures_data.get(name, ("", RC_MISSING))
@@ -280,6 +367,16 @@ ITEMS = [
                      "meracia cesta ticho pod −60 dB / málo onsetov / žiadna baseline / painter "
                      "emit_ts nie je wall-clock / stream OBS nedostupné) — over v TEST režime",
          good={"ALIGNED"}, forgot={"DRIFTED"}),
+    # #1319: the dev1 `--user` production-critical alert-watchdog TIMERS must be enabled + active +
+    # fired recently. Their absence is what let av-step/avsync-lineup go uninstalled unnoticed. A
+    # disabled/inactive/never-run/stale timer -> SUPERVISOR (the supervisor's to fix, never the
+    # owner's fault); a timer with no unit file -> UNKNOWN. The roster is the ONE source of truth
+    # scripts/lib/watchdog-roster.sh; the "watchdogs" kind uses classify_watchdogs (above), not the
+    # verdict/exit reducers, because it must carry the offending timer NAMES into the message/summary.
+    Item("watchdogs", "dev1 watchdog timery", ["watchdogs"], "watchdogs",
+         ok_msg="všetky production-critical watchdog timery na dev1 bežia",
+         forgot_msg="",  # never emitted for this kind (no owner-forgot path)
+         unknown_msg="stav watchdog timerov sa nepodarilo prečítať"),
 ]
 
 
@@ -293,15 +390,25 @@ def build_checklist(entries):
     lines = []
     forgot = []
     unknown = []
+    supervisor = []  # #1319: timer names the supervisor must (re-)enable; owner is not blamed
     for e in entries:
         lines.append("%s %s: %s" % (GLYPH[e["status"]], e["label"], e["message"]))
         if e["status"] == FORGOT:
             forgot.append(e["label"])
+        elif e["status"] == SUPERVISOR:
+            supervisor.extend(e.get("names") or [e["label"]])
         elif e["status"] == UNKNOWN:
             unknown.append(e["label"])
 
     if forgot:
         summary = "zabudol si: " + ", ".join(forgot)
+        if supervisor:
+            summary += " (supervisor musí zapnúť: " + ", ".join(supervisor) + ")"
+        if unknown:
+            summary += " (neoverené: " + ", ".join(unknown) + ")"
+        exit_code = 1
+    elif supervisor:
+        summary = "supervisor musí zapnúť watchdogy: " + ", ".join(supervisor)
         if unknown:
             summary += " (neoverené: " + ", ".join(unknown) + ")"
         exit_code = 1
@@ -334,14 +441,14 @@ def _read_capture(work_dir, name):
     return text, rc
 
 
-def evaluate(work_dir, items=None):
+def evaluate(work_dir, items=None, imag_retired=False):
     """Read every item's captures from work_dir and decide. Returns (entries, lines, summary,
-    exit_code)."""
+    exit_code). `imag_retired` (issue 1316) drops imag-scoped watchdog timers."""
     items = ITEMS if items is None else items
     entries = []
     for item in items:
         cap = {name: _read_capture(work_dir, name) for name in item.captures}
-        entries.append(item.decide(cap))
+        entries.append(item.decide(cap, imag_retired=imag_retired))
     lines, summary, exit_code = build_checklist(entries)
     return entries, lines, summary, exit_code
 
@@ -355,7 +462,9 @@ def main(argv=None):
     ap.add_argument("--json", action="store_true", help="emit machine-readable JSON")
     ns = ap.parse_args(argv)
 
-    entries, lines, summary, exit_code = evaluate(ns.work_dir)
+    # #1316: once imag-nb is retired, drop imag-scoped watchdog timers via RDH_IMAG_RETIRED.
+    imag_retired = os.environ.get("RDH_IMAG_RETIRED", "").strip().lower() not in ("", "0", "false", "no")
+    entries, lines, summary, exit_code = evaluate(ns.work_dir, imag_retired=imag_retired)
 
     if ns.json:
         print(json.dumps({
