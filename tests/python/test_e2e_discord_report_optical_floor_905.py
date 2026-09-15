@@ -18,7 +18,7 @@ if str(_SCRIPTS) not in sys.path:
 import e2e_discord_report as edr  # noqa: E402
 
 
-def _verdict(*, cont_overall_pass, within_floor, floor_gates, seg_undec=7, total=7):
+def _verdict(*, cont_overall_pass, within_floor, floor_gates, seg_undec=16, total=16):
     # A run whose only continuity signal is the optical undecodable floor: the window is clean on
     # copies/gaps (so block 4 attributes the failure to the floor, not to tolerance).
     return {
@@ -35,7 +35,7 @@ def _verdict(*, cont_overall_pass, within_floor, floor_gates, seg_undec=7, total
             "run_wide_undecodable_within_floor": within_floor,
             "undecodable_floor_gates_overall_pass": floor_gates,
             "per_window_undecodable_floor": 4,
-            "run_undecodable_floor": 6,
+            "run_undecodable_floor": 15,
         },
     }
 
@@ -50,7 +50,7 @@ def test_optical_floor_live_run_wide_over_floor_is_blocking_and_not_report_only(
     # Re-gated: the run-wide floor failed -> all_cambox_continuity.overall_pass is False. block 4
     # must NAME it as an optical-readability failure (not the generic "chyba kontinuity"), and it
     # must NOT ALSO appear in _report_only_tripped.
-    v = _verdict(cont_overall_pass=False, within_floor=False, floor_gates=True, seg_undec=7, total=7)
+    v = _verdict(cont_overall_pass=False, within_floor=False, floor_gates=True, seg_undec=16, total=16)
     assert _has(edr._blocking_failures(v), "nad floor"), edr._blocking_failures(v)
     assert not any("optická" in n.lower() for n in edr._report_only_tripped(v)), \
         edr._report_only_tripped(v)
@@ -59,7 +59,7 @@ def test_optical_floor_live_run_wide_over_floor_is_blocking_and_not_report_only(
 
 def test_optical_floor_live_per_window_over_floor_is_named():
     # A single window over the PER-WINDOW floor (5 > 4) while the run total stays within the run-wide
-    # floor (5 <= 6): overall_pass fails via overall_pass_term, and block 4 must still NAME it as a
+    # floor (5 <= 15): overall_pass fails via overall_pass_term, and block 4 must still NAME it as a
     # floor red rather than the generic fallback (review 🟡2).
     v = _verdict(cont_overall_pass=False, within_floor=True, floor_gates=True, seg_undec=5, total=5)
     assert _has(edr._blocking_failures(v), "nad floor"), edr._blocking_failures(v)
@@ -72,7 +72,7 @@ def test_optical_floor_live_per_window_over_floor_is_named():
 def test_optical_floor_pre_flip_over_floor_stays_report_only():
     # A verdict predating the flip (floor still report-only): the over-floor count is reported as a
     # report-only cross, never as a blocking floor failure, and never double-counted.
-    v = _verdict(cont_overall_pass=True, within_floor=False, floor_gates=False, seg_undec=7, total=7)
+    v = _verdict(cont_overall_pass=True, within_floor=False, floor_gates=False, seg_undec=16, total=16)
     assert any("optická" in n.lower() for n in edr._report_only_tripped(v)), \
         edr._report_only_tripped(v)
     assert not _has(edr._blocking_failures(v), "nad floor"), edr._blocking_failures(v)

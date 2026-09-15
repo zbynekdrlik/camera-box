@@ -10399,7 +10399,7 @@ mod tests {
             // whole-window net-span gap this creates (1008 -> 1020) is exactly credited by the 5
             // undecodable slots (painted_tick_gaps, issue 625), so copies=0 and gaps=0 stay
             // clean and this fixture isolates the floor term alone. 5 exceeds the per-window
-            // floor (4) but stays within the run-wide floor (6) -- so the failure is per-window.
+            // floor (4) but stays within the run-wide floor (15) -- so the failure is per-window.
             let mut payloads = vec![Payload {
                 run_id: STRIH,
                 frame_id: 1670 + i as u32,
@@ -10481,7 +10481,7 @@ mod tests {
         assert_eq!(
             seg["run_wide_undecodable_within_floor"],
             serde_json::json!(true),
-            "905: 5 stays within the run-wide floor (6) -- isolates the per-window term: {seg}"
+            "905: 5 stays within the run-wide floor (15) -- isolates the per-window term: {seg}"
         );
         assert_eq!(
             seg["undecodable_floor_gates_overall_pass"],
