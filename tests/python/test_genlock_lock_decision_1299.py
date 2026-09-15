@@ -213,3 +213,78 @@ def test_analyze_unknown_when_facet_not_a_dict():
     # a malformed facet (string, list) must read UNKNOWN, never crash / never a false UNLOCKED.
     assert d.analyze(json.dumps({"genlock_lock": "oops"}), box_reachable=1)["verdict"] == "UNKNOWN"
     assert d.analyze(json.dumps({"genlock_lock": [1, 2]}), box_reachable=1)["verdict"] == "UNKNOWN"
+
+
+# ================================================================================================
+# #1299 REOPEN — an absent-sender input (no live NDI receiver connection) must NEVER grade the box
+# DEGRADED. The Python `decide()` mirror gains an `n_absent` param; the input decisions judge only
+# CONNECTED inputs (n_connected = n_inputs - n_absent). Mirrors the src/genlock_lock_state.rs tests
+# and the C parity gate's new n_absent axis. These FAIL on the pre-#1299 decide() (no n_absent kwarg
+# -> TypeError) and pass once the connected-term lands.
+# ================================================================================================
+def test_absent_sender_only_unlocked_is_still_locked():
+    # The reopen scenario (stream 'NDIA cg stream'): 4 inputs, 3 connected+locked, 1 senderless.
+    # n_connected=3 == n_locked -> nothing CONNECTED is unlocked -> LOCKED, never a false DEGRADED.
+    f = healthy()
+    f["n_inputs"] = 4
+    f["n_locked"] = 3
+    assert d.decide(n_absent=1, **f) == (d.ST_LOCKED, d.R_NONE)
+
+
+def test_all_senders_absent_is_healthy_idle_locked():
+    # Every input present but senderless -> HEALTHY-idle (nothing to lock onto), NOT UNLOCKED.
+    f = healthy()
+    f["n_inputs"] = 4
+    f["n_locked"] = 0
+    assert d.decide(n_absent=4, **f) == (d.ST_LOCKED, d.R_NONE)
+
+
+def test_absent_plus_a_connected_unlocked_still_degrades():
+    # 4 inputs: 1 absent, 3 connected of which only 2 locked -> a CONNECTED input is genuinely
+    # unlocked -> DEGRADED. A real fault still pages; the absent one is merely excluded.
+    f = healthy()
+    f["n_inputs"] = 4
+    f["n_locked"] = 2
+    assert d.decide(n_absent=1, **f) == (d.ST_DEGRADED, d.R_INPUT_UNLOCKED)
+
+
+def test_connected_senders_none_locking_is_unlocked_no_input():
+    # Live senders present (n_connected>0) but none locking -> a genuine fault, UNLOCKED.
+    f = healthy()
+    f["n_inputs"] = 3
+    f["n_locked"] = 0
+    assert d.decide(n_absent=1, **f) == (d.ST_UNLOCKED, d.R_NO_INPUT_LOCKED)
+
+
+def test_no_genlock_inputs_at_all_stays_unlocked_no_genlock():
+    # n_inputs==0 (no genlock configured) is a real misconfiguration -> UNLOCKED, distinct from the
+    # inputs-present-but-all-senderless HEALTHY-idle case above.
+    f = healthy()
+    f["n_inputs"] = 0
+    f["n_locked"] = 0
+    assert d.decide(n_absent=0, **f) == (d.ST_UNLOCKED, d.R_NO_GENLOCK)
+
+
+def test_absent_default_zero_reproduces_pre_1299_verdict():
+    # n_absent defaults 0 (a pre-#1299 caller) -> the old behaviour: 5 of 7 -> DEGRADED.
+    f = healthy()
+    f["n_locked"] = 5
+    assert d.decide(**f) == (d.ST_DEGRADED, d.R_INPUT_UNLOCKED)
+
+
+def test_analyze_carries_n_absent_from_a_v2_facet():
+    # analyze() surfaces n_absent for the watchdog's observability log (the widget already decided
+    # `state`, so this never changes the verdict).
+    body = json.dumps({"genlock_lock": {"state": "LOCKED", "reason": "none",
+                                        "n_inputs": 4, "n_locked": 3, "n_absent": 1}})
+    res = d.analyze(body, box_reachable=1)
+    assert res["verdict"] == "HEALTHY"
+    assert res["n_absent"] == 1
+
+
+def test_analyze_n_absent_none_for_a_v1_facet():
+    # A v1 facet (no n_absent) -> analyze surfaces None (the pre-#1299 all-connected reading).
+    body = json.dumps({"genlock_lock": {"state": "LOCKED", "reason": "none",
+                                        "n_inputs": 7, "n_locked": 7}})
+    res = d.analyze(body, box_reachable=1)
+    assert res["n_absent"] is None
