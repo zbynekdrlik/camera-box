@@ -116,10 +116,15 @@ def genlock_lock_facet_from_log(text):
     yet — UNKNOWN downstream, NEVER a fabricated UNLOCKED).
 
     Shape:
-      {state, reason, n_inputs, n_locked, latency_ms, recent_event, qpc_drift_ms,
+      {state, reason, n_inputs, n_locked, n_absent, latency_ms, recent_event, qpc_drift_ms,
        clock:{state}, output:{present, stamping_wallclock},
-       inputs:{<name>:{locked, latency_ms, underruns, relocks, late_holds, depth}},
+       inputs:{<name>:{locked, connected, latency_ms, underruns, relocks, late_holds, depth}},
        source:"log"}
+
+    #1299 (schema v2): `n_absent` (senderless input count) and per-input `connected` distinguish an
+    idle NDI input (no sender) from a connected-but-unlocked one so the fleet watchdog never
+    false-pages a legitimately-idle input. Both degrade gracefully for a v1 line from an older
+    build (`n_absent`->None, `connected`->True).
 
     `state`/`reason` are the verdict the widget ALREADY decided (so the facet can never disagree
     with the statusbar). The per-input array is keyed by name; a duplicate name keeps the last."""
@@ -161,6 +166,10 @@ def genlock_lock_facet_from_log(text):
                 continue
             inputs_map[name] = {
                 "locked": bool(row.get("locked")),
+                # #1299 (schema v2): whether the DistroAV receiver has a live NDI connection. Default
+                # True for a v1 line from an older build (no `connected` key) so a senderless-but-
+                # unreported input reads connected, exactly as the pre-#1299 behaviour.
+                "connected": bool(row.get("connected", True)),
                 "latency_ms": row.get("latency_ms"),
                 "underruns": row.get("underruns"),
                 "relocks": row.get("relocks"),
@@ -173,6 +182,9 @@ def genlock_lock_facet_from_log(text):
         "reason": payload.get("reason"),
         "n_inputs": payload.get("n_inputs"),
         "n_locked": payload.get("n_locked"),
+        # #1299 (schema v2): senderless (no-NDI-connection) input count. None for a v1 line from an
+        # older build -> the decision treats absent as 0, i.e. the pre-#1299 all-connected reading.
+        "n_absent": payload.get("n_absent"),
         "latency_ms": payload.get("latency_ms"),
         "recent_event": bool(payload.get("recent_event")),
         "qpc_drift_ms": payload.get("qpc_drift_ms"),

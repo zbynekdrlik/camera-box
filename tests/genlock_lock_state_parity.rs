@@ -55,27 +55,38 @@ fn lift_decision() -> String {
 
 /// The facet grid both sides must agree on: an exhaustive sweep of all 2^8 boolean-flag
 /// combinations (the #1303 `audio_unpaired` is the 8th flag, bit 128) crossed with a small set of
-/// (n_inputs, n_locked) pairs — including the impossible `n_locked > n_inputs` (the decision is
-/// total and both ports must treat it identically).
+/// (n_inputs, n_locked, n_absent) triples — including the impossible `n_locked > n_inputs` and
+/// `n_absent > n_inputs` (the decision is total and both ports must treat them identically). The
+/// #1299 n_absent axis exercises: none absent (old behaviour), some absent with a real connected
+/// unlocked (DEGRADED), some absent with all connected locked (LOCKED), and ALL absent (HEALTHY-idle).
 fn vectors() -> Vec<GenlockFacets> {
     let counts = [
-        (0u32, 0u32),
-        (1, 0),
-        (1, 1),
-        (3, 0),
-        (3, 2),
-        (3, 3),
-        (7, 0),
-        (7, 6),
-        (7, 7),
-        (2, 7),
+        (0u32, 0u32, 0u32),
+        (1, 0, 0),
+        (1, 1, 0),
+        (3, 0, 0),
+        (3, 2, 0),
+        (3, 3, 0),
+        (7, 0, 0),
+        (7, 6, 0),
+        (7, 7, 0),
+        (2, 7, 0),
+        // #1299 — absent-sender axis
+        (4, 3, 1), // 3 connected+locked of 4, 1 absent -> LOCKED (the reopen scenario)
+        (4, 2, 1), // 3 connected, only 2 locked -> DEGRADED
+        (4, 0, 4), // all senders absent -> HEALTHY-idle LOCKED
+        (3, 0, 1), // 2 connected, none locked -> UNLOCKED no_input_locked
+        (7, 5, 2), // 5 connected+locked of 5 connected -> LOCKED
+        (7, 4, 2), // 5 connected, 4 locked -> DEGRADED
+        (2, 3, 5), // n_absent > n_inputs (impossible) -> both ports saturate n_connected to 0
     ];
     let mut v = Vec::new();
-    for &(n_inputs, n_locked) in &counts {
+    for &(n_inputs, n_locked, n_absent) in &counts {
         for bits in 0u32..(1 << 8) {
             v.push(GenlockFacets {
                 n_inputs,
                 n_locked,
+                n_absent,
                 recent_event: bits & 1 != 0,
                 qpc_drift_beyond_bound: bits & 2 != 0,
                 clock_present: bits & 4 != 0,
@@ -101,11 +112,12 @@ fn c_lock_state_decision_matches_the_rust_authority_1298() {
     c.push_str("int main(void){\n    genlock_lock_facets_t f; genlock_lock_reason_t r; genlock_lock_state_t s;\n");
     for g in &vs {
         c.push_str(&format!(
-            "    f.n_inputs={}; f.n_locked={}; f.recent_event={}; f.qpc_drift_beyond_bound={}; \
+            "    f.n_inputs={}; f.n_locked={}; f.n_absent={}; f.recent_event={}; f.qpc_drift_beyond_bound={}; \
              f.clock_present={}; f.clock_locked={}; f.clock_ntp_failed={}; f.output_present={}; f.output_stamping={}; f.audio_unpaired={};\n\
              \x20   s=genlock_decide_lock_state(&f,&r); printf(\"%d %d\\n\",(int)s,(int)r);\n",
             g.n_inputs,
             g.n_locked,
+            g.n_absent,
             g.recent_event as i32,
             g.qpc_drift_beyond_bound as i32,
             g.clock_present as i32,
@@ -181,8 +193,8 @@ fn c_lock_state_decision_matches_the_rust_authority_1298() {
         let got_rs = (state.code(), reason.code());
         if got_rs != *got_c {
             diffs.push(format!(
-                "  n_inputs={} n_locked={} recent={} qpc={} clk_present={} clk_locked={} ntp={} out_present={} out_stamp={} -> C {:?}, Rust {:?}",
-                g.n_inputs, g.n_locked, g.recent_event as i32, g.qpc_drift_beyond_bound as i32,
+                "  n_inputs={} n_locked={} n_absent={} recent={} qpc={} clk_present={} clk_locked={} ntp={} out_present={} out_stamp={} -> C {:?}, Rust {:?}",
+                g.n_inputs, g.n_locked, g.n_absent, g.recent_event as i32, g.qpc_drift_beyond_bound as i32,
                 g.clock_present as i32, g.clock_locked as i32, g.clock_ntp_failed as i32,
                 g.output_present as i32, g.output_stamping as i32, got_c, got_rs
             ));

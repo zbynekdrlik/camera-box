@@ -1637,13 +1637,22 @@ EXPORT uint32_t obs_source_get_genlock_latency_ms(const obs_source_t *source);
 EXPORT void obs_source_set_genlock_burn(obs_source_t *source, bool enabled);
 EXPORT bool obs_source_get_genlock_burn(const obs_source_t *source);
 
+/* camera-box #1299: per-source NDI RECEIVER-CONNECTION flag (runtime, no OBS restart). Driven by
+ * DistroAV's ndi-source receiver loop from NDIlib_recv_get_no_connections() (>0 == connected); the
+ * in-OBS lock indicator + the #1299 fleet bundle-state facet read it via obs_genlock_stats.connected
+ * so an input whose sender is simply not running never grades the box DEGRADED. A plain bool write
+ * (same shape as obs_source_set_genlock_burn); default true at create so an old DistroAV build whose
+ * runtime resolve of this symbol fails leaves every source connected (no decision regression). */
+EXPORT void obs_source_set_genlock_connected(obs_source_t *source, bool connected);
+EXPORT bool obs_source_get_genlock_connected(const obs_source_t *source);
+
 /* camera-box #1298: a per-source genlock FIFO stats snapshot, read by BOTH the
  * `genlock-fifo audit` log line AND the in-OBS statusbar lock indicator (and the issue-1299
  * bundle-state facet over obs-websocket) so the logged numbers and the UI can never disagree
  * — both route through one internal fill (genlock_fill_stats). Additive + versioned: grow it
  * ONLY by appending fields and bumping OBS_GENLOCK_STATS_VERSION; a consumer reads `version`
  * before touching any field added after v1. */
-#define OBS_GENLOCK_STATS_VERSION 2
+#define OBS_GENLOCK_STATS_VERSION 3
 struct obs_genlock_stats {
 	uint32_t version;             /* = OBS_GENLOCK_STATS_VERSION */
 	bool genlock_fifo;            /* this source is genlock-FIFO enabled */
@@ -1670,6 +1679,13 @@ struct obs_genlock_stats {
 	bool audio_enabled;              /* this source's NDI audio is active (obs_source_audio_active) */
 	uint32_t audio_delay_ms;         /* the audio hold last applied at ingest (= latency_ms for a genlock_fifo source; 0 = not held / no audio yet) */
 	int64_t audio_pairing_offset_ms; /* residual A/V offset: audio_delay_ms - latency_ms; 0 = paired, -latency_ms = audio never held */
+	/* camera-box #1299 — receiver connection state (added in v3; a consumer reads `version >= 3`
+	 * before touching it). true = the DistroAV receiver has a live NDI connection (no_connections>0);
+	 * false = its sender is not running. An input with connected=false is EXCLUDED from the DEGRADED
+	 * gate (n_connected = n_inputs - n_absent) so a legitimately-idle NDI input never false-pages;
+	 * a dead/frozen sender is the #1001/#1052 watchdogs' concern. Default true (see genlock_connected
+	 * in obs-source.c) so an old build with the setter unresolved never regresses the decision. */
+	bool connected;
 };
 
 /* Fill `stats` from `source`'s live genlock counters (version-stamped). Returns true for a

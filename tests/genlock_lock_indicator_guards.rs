@@ -34,6 +34,7 @@ const HEADER: &str = "vendor/obs-studio/frontend/widgets/GenlockLockState.hpp";
 const STATUSBAR_CPP: &str = "vendor/obs-studio/frontend/widgets/OBSBasicStatusBar.cpp";
 const STATUSBAR_HPP: &str = "vendor/obs-studio/frontend/widgets/OBSBasicStatusBar.hpp";
 const NDI_OUTPUT: &str = "vendor/distroav/src/ndi-output.cpp";
+const NDI_SOURCE: &str = "vendor/distroav/src/ndi-source.cpp";
 
 fn assert_has(file: &str, needle: &str) {
     let src = squish(&vendor_file(file));
@@ -48,8 +49,9 @@ fn assert_has(file: &str, needle: &str) {
 #[test]
 fn source_stats_api_present() {
     // #1303 bumped the stats struct to v2 (append-only: +audio_enabled/audio_delay_ms/
-    // audio_pairing_offset_ms). The API is still present; pin the current version.
-    assert_has(OBS_API, "#define OBS_GENLOCK_STATS_VERSION 2");
+    // audio_pairing_offset_ms); #1299 bumped it to v3 (append-only: +connected). Pin the current
+    // version so a subtree pull that reverts the bump is caught.
+    assert_has(OBS_API, "#define OBS_GENLOCK_STATS_VERSION 3");
     assert_has(OBS_API, "struct obs_genlock_stats {");
     assert_has(
         OBS_API,
@@ -57,6 +59,29 @@ fn source_stats_api_present() {
     );
     assert_has(OBS_SOURCE, "static void genlock_fill_stats(const obs_source_t *source, struct obs_genlock_stats *stats)");
     assert_has(OBS_SOURCE, "bool obs_source_get_genlock_stats(const obs_source_t *source, struct obs_genlock_stats *stats)");
+    // #1299 — the receiver-connection producer chain: the setter export (driven by DistroAV's
+    // recv_get_no_connections) + its use in the shared genlock_fill_stats. A revert of either
+    // silently re-opens the absent-sender false-page.
+    assert_has(
+        OBS_API,
+        "obs_source_set_genlock_connected(obs_source_t *source, bool connected)",
+    );
+    assert_has(OBS_SOURCE, "stats->connected = source->genlock_connected;");
+    assert_has(
+        OBS_SOURCE,
+        "void obs_source_set_genlock_connected(obs_source_t *source, bool connected)",
+    );
+    // #1299 — the DistroAV producer: the receiver loop drives the connection state from
+    // recv_get_no_connections()>0. A subtree pull that drops this call leaves connected=default(true)
+    // forever, silently re-opening the absent-sender false-page.
+    assert_has(
+        NDI_SOURCE,
+        "set_genlock_connected(s->obs_source, no_conn > 0)",
+    );
+    assert_has(
+        NDI_SOURCE,
+        "resolve_obs_export(\"obs_source_set_genlock_connected\")",
+    );
 }
 
 #[test]

@@ -294,6 +294,12 @@ static bool obs_source_init(struct obs_source *source)
 	 * explicit for intent). Toggled live (no restart) via obs_source_set_genlock_burn()
 	 * from the DistroAV PROP_BURN field; read by the QR burn filter each render. */
 	source->genlock_burn = false;
+	/* camera-box #1299: assume CONNECTED at create (bzalloc zeroes it, so this OVERRIDES the
+	 * zero-default deliberately). Rationale: an unreported source — or an old DistroAV build whose
+	 * obs_source_set_genlock_connected resolver comes back NULL — must read connected so the LOCK
+	 * decision behaves exactly as before this field existed (never masking a real degrade, never
+	 * excluding a live input). Only the DistroAV receiver loop drives it to `no_connections>0`. */
+	source->genlock_connected = true;
 
 	/* camera-box #803: per-source ASRC servo OFF at create (bzalloc already zeroes
 	 * asrc_enabled/asrc_last_wall_ns/asrc_has_last_wall; explicit for intent). Init the servo
@@ -5194,6 +5200,11 @@ static void genlock_fill_stats(const obs_source_t *source, struct obs_genlock_st
 	stats->audio_delay_ms = source->genlock_audio_delay_ms;
 	stats->audio_pairing_offset_ms = genlock_audio_pairing_offset_ms(
 		(int64_t)genlock_audio_present_delay_ns(source->genlock_audio_delay_ms), effective_latency_ms);
+	/* camera-box #1299 (v3): the DistroAV receiver's live NDI connection state. An input with
+	 * connected=false (sender not running) is excluded from the LOCK decision's DEGRADED gate so a
+	 * legitimately-idle NDI input never false-pages the fleet watchdog. Default true (obs_source_init),
+	 * driven live by obs_source_set_genlock_connected from ndi-source.cpp's receiver loop. */
+	stats->connected = source->genlock_connected;
 }
 
 /* Periodic audit log: emit the FIFO health counters every ~5 s so underruns are
@@ -8169,6 +8180,24 @@ void obs_source_set_genlock_burn(obs_source_t *source, bool enabled)
 bool obs_source_get_genlock_burn(const obs_source_t *source)
 {
 	return obs_source_valid(source, "obs_source_get_genlock_burn") ? source->genlock_burn : false;
+}
+
+/* camera-box #1299: per-source NDI RECEIVER-CONNECTION flag write. A plain bool (same shape as
+ * obs_source_set_genlock_burn) — the statusbar/audit read of a single bool needs no lock (a torn
+ * bool is not a concept on the target ABIs, exactly as genlock_fifo/genlock_burn). Driven every
+ * DistroAV receiver loop from NDIlib_recv_get_no_connections()>0. Intentionally SILENT (no
+ * state-change blog): the receiver calls it every poll and a flapping sender would spam the log;
+ * DistroAV already logs its own disconnect/rebind events (#767/#1096). */
+void obs_source_set_genlock_connected(obs_source_t *source, bool connected)
+{
+	if (!obs_source_valid(source, "obs_source_set_genlock_connected"))
+		return;
+	source->genlock_connected = connected;
+}
+
+bool obs_source_get_genlock_connected(const obs_source_t *source)
+{
+	return obs_source_valid(source, "obs_source_get_genlock_connected") ? source->genlock_connected : false;
 }
 
 /* camera-box #803: per-source ASRC toggle. A plain bool write (same shape as

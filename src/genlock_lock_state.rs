@@ -85,6 +85,12 @@ pub struct GenlockFacets {
     pub n_inputs: u32,
     /// Of those, how many are currently locked (FIFO cadence locked onto a boundary).
     pub n_locked: u32,
+    /// #1299 — of `n_inputs`, how many have NO live NDI receiver connection (their sender is not
+    /// running): `obs_genlock_stats.connected == false`. `n_connected = n_inputs - n_absent` is the
+    /// denominator the DEGRADED gate uses, so a legitimately-idle NDI input never trips a page — a
+    /// dead/frozen sender is the #1001/#1052 watchdogs' concern, not the lock decision's. Additive:
+    /// an all-zero `n_absent` reproduces every pre-#1299 verdict exactly (`n_connected == n_inputs`).
+    pub n_absent: u32,
     /// A relock / underrun / late-hold / backward-step was observed in the last 60 s
     /// (the widget tracks counter deltas across its 1 Hz samples to compute this).
     pub recent_event: bool,
@@ -115,10 +121,21 @@ pub struct GenlockFacets {
 ///
 /// UNLOCKED precedence: clock (absent/unlocked) > output (present but not stamping) >
 /// no-input-locked. DEGRADED precedence (only once none of the UNLOCKED conditions hold):
-/// some-input-unlocked > recent-event > ntp-failed > qpc-drift. Otherwise LOCKED.
+/// some-input-unlocked > recent-event > ntp-failed > qpc-drift > audio-pairing. Otherwise LOCKED.
+///
+/// #1299 — the DEGRADED/no-input decisions judge only CONNECTED inputs (`n_connected = n_inputs -
+/// n_absent`): an input whose NDI sender is not running (`n_absent`) is idle, not a fault, so it
+/// never DEGRADES the box, and a box whose inputs are ALL senderless (`n_connected == 0` with
+/// `n_inputs > 0`) is HEALTHY-idle (LOCKED), not UNLOCKED — a dead sender is the #1001/#1052
+/// watchdogs' concern. `n_inputs == 0` (no genlock configured at all) stays UNLOCKED/NoGenlock.
 ///
 /// Mirror of `genlock_decide_lock_state` in `GenlockLockState.hpp` — keep both in lock-step.
 pub fn decide(f: &GenlockFacets) -> (LockState, LockReason) {
+    // #1299 — CONNECTED inputs (a live NDI receiver) are the only ones the lock decision judges;
+    // a senderless input (`n_absent`) is idle, not a fault. `saturating_sub` keeps the decision
+    // total even under a transient `n_absent > n_inputs`.
+    let n_connected = f.n_inputs.saturating_sub(f.n_absent);
+
     // --- UNLOCKED (red): clock > output > no-input-locked -------------------------
     if !f.clock_present || !f.clock_locked {
         return (LockState::Unlocked, LockReason::Clock);
@@ -127,16 +144,25 @@ pub fn decide(f: &GenlockFacets) -> (LockState, LockReason) {
         return (LockState::Unlocked, LockReason::Output);
     }
     if f.n_locked == 0 {
-        let reason = if f.n_inputs == 0 {
-            LockReason::NoGenlock
-        } else {
-            LockReason::NoInputLocked
-        };
-        return (LockState::Unlocked, reason);
+        if f.n_inputs == 0 {
+            // No genlock inputs configured at all — a real misconfiguration.
+            return (LockState::Unlocked, LockReason::NoGenlock);
+        }
+        if n_connected == 0 {
+            // #1299 — inputs exist but EVERY sender is absent: the genlock subsystem is healthy with
+            // nothing to lock onto (HEALTHY-idle). Not this watchdog's alarm — a box with all senders
+            // gone is the #1001 (reachability) / #1052 (frozen-input) watchdogs' concern. So LOCKED,
+            // never UNLOCKED (which would false-page); the 3-state enum has no UNKNOWN to emit, and
+            // UNKNOWN is a watchdog facet-absence concept anyway, not a lock state.
+            return (LockState::Locked, LockReason::None);
+        }
+        // Connected senders present but none locking — a genuine fault.
+        return (LockState::Unlocked, LockReason::NoInputLocked);
     }
 
     // --- DEGRADED (amber): some-unlocked > recent-event > ntp > qpc ----------------
-    if f.n_locked < f.n_inputs {
+    // #1299 — gate on n_connected (not n_inputs): an absent sender is excluded so it never DEGRADES.
+    if f.n_locked < n_connected {
         return (LockState::Degraded, LockReason::InputUnlocked);
     }
     if f.recent_event {
@@ -168,6 +194,7 @@ mod tests {
         GenlockFacets {
             n_inputs: 7,
             n_locked: 7,
+            n_absent: 0,
             recent_event: false,
             qpc_drift_beyond_bound: false,
             clock_present: true,
@@ -236,6 +263,75 @@ mod tests {
         let mut f = healthy();
         f.n_locked = 5; // 5 of 7
         assert_eq!(decide(&f), (LockState::Degraded, LockReason::InputUnlocked));
+    }
+
+    // ---- #1299: an absent-sender input never grades the box ------------------------
+
+    #[test]
+    fn absent_sender_only_unlocked_is_still_locked() {
+        // The reopen scenario: 4 genlock inputs, 3 connected+locked, the 4th has NO sender
+        // (n_absent=1). n_connected=3, n_locked=3 -> nothing CONNECTED is unlocked -> LOCKED,
+        // never a false DEGRADED/input_unlocked page (stream's 'NDIA cg stream', #1299).
+        let mut f = healthy();
+        f.n_inputs = 4;
+        f.n_locked = 3;
+        f.n_absent = 1;
+        assert_eq!(decide(&f), (LockState::Locked, LockReason::None));
+    }
+
+    #[test]
+    fn all_senders_absent_is_healthy_idle_locked() {
+        // Every genlock input present but senderless: HEALTHY-idle (nothing to lock onto), NOT
+        // UNLOCKED. A box with all senders gone is #1001/#1052's alarm, not the lock decision's.
+        let mut f = healthy();
+        f.n_inputs = 4;
+        f.n_locked = 0;
+        f.n_absent = 4;
+        assert_eq!(decide(&f), (LockState::Locked, LockReason::None));
+    }
+
+    #[test]
+    fn absent_plus_a_connected_unlocked_still_degrades() {
+        // 4 inputs: 1 absent, 3 connected of which only 2 are locked -> a CONNECTED input is
+        // genuinely unlocked -> DEGRADED. The absent one is excluded, but a real fault still pages.
+        let mut f = healthy();
+        f.n_inputs = 4;
+        f.n_locked = 2;
+        f.n_absent = 1; // n_connected=3, n_locked=2 < 3
+        assert_eq!(decide(&f), (LockState::Degraded, LockReason::InputUnlocked));
+    }
+
+    #[test]
+    fn no_genlock_inputs_at_all_stays_unlocked_no_genlock() {
+        // n_inputs==0 (no genlock configured) is a real misconfiguration, UNLOCKED — distinct from
+        // "inputs present but all senderless" (HEALTHY-idle above).
+        let mut f = healthy();
+        f.n_inputs = 0;
+        f.n_locked = 0;
+        f.n_absent = 0;
+        assert_eq!(decide(&f), (LockState::Unlocked, LockReason::NoGenlock));
+    }
+
+    #[test]
+    fn connected_senders_none_locking_is_unlocked_no_input() {
+        // Live senders present (n_connected>0) but none locking -> a genuine fault, UNLOCKED.
+        let mut f = healthy();
+        f.n_inputs = 3;
+        f.n_locked = 0;
+        f.n_absent = 1; // n_connected=2 > 0, none locked
+        assert_eq!(decide(&f), (LockState::Unlocked, LockReason::NoInputLocked));
+    }
+
+    #[test]
+    fn absent_never_leaves_unlocked_on_clock_down() {
+        // #1299: n_absent is a DEGRADE-suppressor on the input axis only; it never rescues a box
+        // whose clock is down (clock precedence wins).
+        let mut f = healthy();
+        f.n_inputs = 4;
+        f.n_locked = 0;
+        f.n_absent = 4;
+        f.clock_locked = false;
+        assert_eq!(decide(&f), (LockState::Unlocked, LockReason::Clock));
     }
 
     #[test]
