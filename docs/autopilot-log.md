@@ -12232,3 +12232,17 @@ Supervisor install (imag, once the fleet genlock bundle is deployed):
   fallback. RED tests/python/test_qr_align_floor_samples_1168.py -> GREEN. No .rs touched; Tier-0
   pytest all green (133 align suite), bash -n + shellcheck clean, anchor occurrence-count sweep clean.
   Docs: .claude/rules/qr-align.md + .claude/rules/latency-pins-verify.md.
+- issue 1133 (reopen 15.9.2026, leg-health EPROTO restart-adjacency) — lane/1133-eproto worktree.
+  RED d0c6c8d1d → GREEN 4eecefb7d. The [0/8] leg-health EPROTO term counted every uvcvideo
+  Non-zero status/-71 kernel line in the last hour against the >=6/hr bar, but a -71 is a UVC stream
+  teardown/re-open ARTIFACT emitted once per camera-box.service / camera-box-burn-* restart at the
+  same second — so chained E2E runs' own restart churn refused a healthy cam4 leg (E2E run
+  34977348169: 9 restarts/2h, one -71 each, over_current_count 0, zero -71 steady state). Fix: read
+  both journals with -o short-unix epochs in the one read_all round trip; leg_health_eproto_ts_read_cmd
+  + leg_health_restart_ts_read_cmd (full-journal, systemd-signature + camera-box + lifecycle-verb
+  filter — rejects app + foreign-unit "Started" lines); pure leg_health_eproto_steady_count excludes
+  -71 within +-leg_health_eproto_restart_adjacent_secs (3s) of a restart epoch, feeds STEADY count to
+  leg_health_classify, reports the excluded count. Wire fault (-71 BETWEEN restarts) still refuses.
+  Tier-0: sourced-lib functional RED->GREEN + fake-journalctl end-to-end readers under set -euo
+  pipefail, bash -n + shellcheck -S warning clean, cargo fmt --all --check clean, slice-anchor
+  occurrence sweep on recording-e2e.sh (no anchor moved). Docs: .claude/rules/leg-health-frame-loss.md.
