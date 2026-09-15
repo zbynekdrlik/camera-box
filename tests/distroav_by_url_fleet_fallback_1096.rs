@@ -170,7 +170,8 @@ fn new_log_markers_are_present_and_non_substring() {
     );
     // Mutually non-substring vs the existing #1096 connect BY-URL / BY-NAME lines (other tests anchor
     // on those): the new markers use "rebind BY-URL", never "connect BY-URL".
-    let existing_fresh = "#1096 connect BY-URL '%s' (fresh finder; bypassing poisoned name resolver)";
+    let existing_fresh =
+        "#1096 connect BY-URL '%s' (fresh finder; bypassing poisoned name resolver)";
     assert!(
         !last_known.contains(existing_fresh) && !existing_fresh.contains(last_known),
         "#1096 (reopen) last-known marker collides with the existing fresh BY-URL marker."
@@ -231,8 +232,14 @@ fn compile_and_run(prelude: &str, helper: &str, main_body: &str, tag: &str) -> V
          CI:\n--- cc stderr ---\n{}\n--- harness ---\n{c}",
         String::from_utf8_lossy(&out.stderr)
     );
-    let run = Command::new(&bin).output().expect("the compiled harness failed to execute");
-    assert!(run.status.success(), "#1096 (reopen): {tag} harness exited non-zero: {}", String::from_utf8_lossy(&run.stderr));
+    let run = Command::new(&bin)
+        .output()
+        .expect("the compiled harness failed to execute");
+    assert!(
+        run.status.success(),
+        "#1096 (reopen): {tag} harness exited non-zero: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
     String::from_utf8(run.stdout)
         .expect("harness stdout is utf-8")
         .lines()
@@ -242,7 +249,10 @@ fn compile_and_run(prelude: &str, helper: &str, main_body: &str, tag: &str) -> V
 
 #[test]
 fn fleet_url_computes_the_spec_truth_table() {
-    let helper = lift_helper("static inline bool ndi_fleet_url_for_name(", "ndi_fleet_url_for_name");
+    let helper = lift_helper(
+        "static inline bool ndi_fleet_url_for_name(",
+        "ndi_fleet_url_for_name",
+    );
     // (name, port_index, expected)  expected "NONE" => false
     let vectors: &[(&str, u32, &str)] = &[
         ("CAM1 (usb)", 0, "10.77.9.61:5961"),
@@ -254,9 +264,9 @@ fn fleet_url_computes_the_spec_truth_table() {
         ("CAM0 (usb)", 0, "NONE"),
         ("cg", 0, "NONE"),
         ("NDI obs hudba", 0, "NONE"),
-        ("CAM7", 0, "NONE"),              // missing suffix
-        ("CAM7 (usb) extra", 0, "NONE"),  // trailing junk
-        ("CAM70 (usb)", 0, "NONE"),       // two digits
+        ("CAM7", 0, "NONE"),             // missing suffix
+        ("CAM7 (usb) extra", 0, "NONE"), // trailing junk
+        ("CAM70 (usb)", 0, "NONE"),      // two digits
         ("", 0, "NONE"),
     ];
     let mut body = String::from("    char buf[64];\n");
@@ -266,21 +276,37 @@ fn fleet_url_computes_the_spec_truth_table() {
             "    if (ndi_fleet_url_for_name(\"{name}\", {pi}u, buf, sizeof buf)) printf(\"%s\\n\", buf); else printf(\"NONE\\n\");\n"
         ));
     }
-    let prelude = "#include <stdio.h>\n#include <string.h>\n#include <stdbool.h>\n#include <stddef.h>\n";
+    let prelude =
+        "#include <stdio.h>\n#include <string.h>\n#include <stdbool.h>\n#include <stddef.h>\n";
     let got = compile_and_run(prelude, &helper, &body, "fleet_url");
-    assert_eq!(got.len(), vectors.len(), "#1096 (reopen): fleet_url harness printed {} lines for {} vectors", got.len(), vectors.len());
+    assert_eq!(
+        got.len(),
+        vectors.len(),
+        "#1096 (reopen): fleet_url harness printed {} lines for {} vectors",
+        got.len(),
+        vectors.len()
+    );
     let mut diffs = Vec::new();
     for ((name, pi, exp), g) in vectors.iter().zip(&got) {
         if g != exp {
-            diffs.push(format!("  ndi_fleet_url_for_name({name:?}, {pi}) -> {g:?}, expected {exp:?}"));
+            diffs.push(format!(
+                "  ndi_fleet_url_for_name({name:?}, {pi}) -> {g:?}, expected {exp:?}"
+            ));
         }
     }
-    assert!(diffs.is_empty(), "#1096 (reopen): ndi_fleet_url_for_name DIVERGED:\n{}", diffs.join("\n"));
+    assert!(
+        diffs.is_empty(),
+        "#1096 (reopen): ndi_fleet_url_for_name DIVERGED:\n{}",
+        diffs.join("\n")
+    );
 }
 
 #[test]
 fn fallback_bind_mode_computes_the_spec_truth_table() {
-    let helper = lift_helper("static inline int ndi_fallback_bind_mode_1096(", "ndi_fallback_bind_mode_1096");
+    let helper = lift_helper(
+        "static inline int ndi_fallback_bind_mode_1096(",
+        "ndi_fallback_bind_mode_1096",
+    );
     // (have_last, have_fleet, no_url_cycles, K, expected)  0=BY-NAME 1=last-known 2=fleet
     let vectors: &[(bool, bool, u32, u32, i32)] = &[
         (true, true, 3, 3, 2),   // K reached + fleet -> fleet
@@ -301,13 +327,25 @@ fn fallback_bind_mode_computes_the_spec_truth_table() {
     }
     let prelude = "#include <stdio.h>\n#include <stdbool.h>\n";
     let got = compile_and_run(prelude, &helper, &body, "fallback_mode");
-    assert_eq!(got.len(), vectors.len(), "#1096 (reopen): fallback_mode harness printed {} lines for {} vectors", got.len(), vectors.len());
+    assert_eq!(
+        got.len(),
+        vectors.len(),
+        "#1096 (reopen): fallback_mode harness printed {} lines for {} vectors",
+        got.len(),
+        vectors.len()
+    );
     let mut diffs = Vec::new();
     for ((hl, hf, nc, k, exp), g) in vectors.iter().zip(&got) {
         let want = exp.to_string();
         if g != &want {
-            diffs.push(format!("  ndi_fallback_bind_mode_1096({hl},{hf},{nc},{k}) -> {g:?}, expected {want:?}"));
+            diffs.push(format!(
+                "  ndi_fallback_bind_mode_1096({hl},{hf},{nc},{k}) -> {g:?}, expected {want:?}"
+            ));
         }
     }
-    assert!(diffs.is_empty(), "#1096 (reopen): ndi_fallback_bind_mode_1096 DIVERGED:\n{}", diffs.join("\n"));
+    assert!(
+        diffs.is_empty(),
+        "#1096 (reopen): ndi_fallback_bind_mode_1096 DIVERGED:\n{}",
+        diffs.join("\n")
+    );
 }
