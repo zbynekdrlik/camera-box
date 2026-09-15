@@ -871,6 +871,52 @@ void ndi_source_thread_process_audio3(ndi_source_config_t *config, NDIlib_audio_
 void ndi_source_thread_process_video2(ndi_source_t *source, NDIlib_video_frame_v2_t *ndi_video_frame,
 				      obs_source *obs_source, obs_source_frame *obs_video_frame);
 
+/* camera-box #1320: is there a receiver/framesync teardown worth handing to the detached reaper?
+ * PURE decision (only primitives) so it lift-compiles + truth-table-tests offline -- CI is
+ * otherwise the first compiler for this file (tests/distroav_scene_switch_reinit_1320.rs). Mirrors
+ * ndi_reap_receiver_detached's early-return guard: a reaper is spawned ONLY when the NDI lib is
+ * present AND at least one handle exists to destroy. See .claude/rules/distroav-receiver-lifecycle.md
+ * and .claude/rules/program-render-audit.md. */
+static inline bool ndi_reap_should_defer(bool have_framesync, bool have_receiver, bool have_ndilib)
+{
+	if (!have_ndilib)
+		return false; /* no lib -> nothing can be destroyed (mirrors the ndiLib null-guard) */
+	return have_framesync || have_receiver; /* something to tear down -> defer it off-thread */
+}
+
+/* camera-box #1320: destroy the NDI framesync + receiver on a DETACHED reaper thread so a slow
+ * (live-observed ~7.5 s) NDIlib_recv_destroy never blocks the caller. The caller here is the
+ * av-thread's exit path, and ndi_source_thread_stop's pthread_join waits on that exit -- and that
+ * join is executed on the OBS GRAPHICS thread, because ndi_source_update is DEFERRED to
+ * obs_source_video_tick for an ASYNC_VIDEO source (obs-source.c obs_source_deferred_update). A
+ * blocking teardown on that join therefore FROZE the PROGRAM render (issue 1320: a scene-switch-
+ * coincident reattach CLEAR-then-SET on 'NDI cam1' -> recv_destroy 7.56 s -> program-render-audit
+ * lagged=228 avg_frame_ms=782 -> 2ME PGM starved -> stream FIFO underrun -> relock storm -> +2/+3
+ * frame presented age for ~40 min). framesync is destroyed BEFORE the receiver it was created from.
+ * The handles are plain NDI instances, independent of ndi_source_t, so the reaper races nothing in
+ * `s` or in a freshly-started av-thread. Falls back to a synchronous destroy if the thread cannot be
+ * spawned (never crash; worst case is the pre-fix behaviour). */
+static void ndi_reap_receiver_detached(const NDIlib_v6 *lib, NDIlib_framesync_instance_t frame_sync,
+				       NDIlib_recv_instance_t receiver)
+{
+	if (!ndi_reap_should_defer(frame_sync != nullptr, receiver != nullptr, lib != nullptr))
+		return;
+	try {
+		std::thread([lib, frame_sync, receiver]() {
+			if (frame_sync)
+				lib->framesync_destroy(frame_sync);
+			if (receiver)
+				lib->recv_destroy(receiver);
+		}).detach();
+	} catch (...) {
+		/* thread spawn failed (resource exhaustion) -> synchronous fallback, never leak/crash */
+		if (frame_sync)
+			lib->framesync_destroy(frame_sync);
+		if (receiver)
+			lib->recv_destroy(receiver);
+	}
+}
+
 void *ndi_source_thread(void *data)
 {
 	auto s = (ndi_source_t *)data;
@@ -1745,26 +1791,40 @@ void *ndi_source_thread(void *data)
 	// Main NDI receiver loop: END
 	//
 
-	if (ndi_frame_sync) {
+	// camera-box #1320: hand the (potentially multi-second, live-observed ~7.5 s) framesync +
+	// receiver teardown to a DETACHED reaper instead of destroying inline. ndi_source_thread_stop's
+	// pthread_join waits on this thread's exit, and that join runs on the OBS GRAPHICS thread
+	// (ndi_source_update is deferred to obs_source_video_tick for an ASYNC_VIDEO source), so a
+	// blocking NDIlib_recv_destroy here froze the PROGRAM render (lagged=228 avg_frame_ms=782). We
+	// snapshot the handles, null the locals, keep the existing diagnostic log lines byte-identical,
+	// then reap off-thread so the join (and the render thread) return in ~ms.
+	NDIlib_framesync_instance_t reap_frame_sync = ndi_frame_sync;
+	NDIlib_recv_instance_t reap_receiver = ndi_receiver;
+	ndi_frame_sync = nullptr; // TODO: Investigate if this should be put right after framesync_destroy() ?
+	ndi_receiver = nullptr;
+
+	if (reap_frame_sync) {
 		if (ndiLib) {
 			obs_log(LOG_DEBUG,
 				"'%s' ndi_source_thread: (out of loop) ndiLib->framesync_destroy(ndi_frame_sync)",
 				obs_source_name);
-			ndiLib->framesync_destroy(ndi_frame_sync);
 		}
-		ndi_frame_sync = nullptr; // TODO: Investigate if this should be put right after framesync_destroy() ?
 		obs_log(LOG_DEBUG, "'%s' ndi_source_thread: Reset NDI Frame Sync", obs_source_name);
 	}
 
-	if (ndi_receiver) {
+	if (reap_receiver) {
 		if (ndiLib) {
 			obs_log(LOG_DEBUG, "'%s' ndi_source_thread: ndiLib->recv_destroy(ndi_receiver)",
 				obs_source_name);
-			ndiLib->recv_destroy(ndi_receiver);
 		}
 		obs_log(LOG_DEBUG, "'%s' ndi_source_thread: Reset NDI Receiver", obs_source_name);
-		ndi_receiver = nullptr;
 	}
+
+	if (ndi_reap_should_defer(reap_frame_sync != nullptr, reap_receiver != nullptr, ndiLib != nullptr))
+		obs_log(LOG_INFO,
+			"genlock-reap: #1320 detached receiver teardown (no graphics-thread join block) '%s'",
+			obs_source_name);
+	ndi_reap_receiver_detached(ndiLib, reap_frame_sync, reap_receiver);
 
 	// camera-box #93: free the av_thread-owned name copies. bfree(nullptr) is a no-op.
 	bfree(owned_source_name);
