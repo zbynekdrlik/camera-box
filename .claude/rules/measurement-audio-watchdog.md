@@ -88,6 +88,17 @@ production-critical dev1 watchdog class (umbrella **#1308**).
   notify line (the #1206 sweep `test_production_critical_watchdogs_actually_bucket_their_inline_key`
   requires the helper literally there). Allowlisted in `test_notify_dedup_key_sweep_1206.py`; recovery
   stays ONE machine-channel log line (#1206).
+- **#1323 followup blocker — an in-preflight QPSK DECODABILITY probe is NOT cheaply buildable.** The
+  honest "is the marker actually decodable" signal is the QPSK demod's `preamble_screens` / CRC-
+  consistent cluster count over a short live mbc capture. But the ONLY existing decode entrypoint,
+  `recording-verdict --av-sync` (`av_sync_from_recording`), HARD-requires a cam2 emit marker-log CSV
+  (`--av-marker-log`, `ensure!(!emit_log.is_empty())`) AND decodes the VIDEO dual-QR track to pair
+  (`marker_coverage_overlaps_video_ticks`) — neither exists for a standalone ~20 s audio-only probe.
+  There is NO standalone "decode the mbc audio track → preamble/cluster count" mode. Building one edits
+  probe-gated `src/bin/recording-verdict.rs` + `src/qpsk_marker.rs` (`required-features=["probe"]` →
+  ZERO local verification path, CI-only) plus an ffmpeg audio-extract + a download-to-dev1 hop. The
+  LEVEL ceiling (#1323) covers the common flood-present-at-preflight case; the decodability probe is
+  the residual (flood arrives after the probe window) — a separate ticket, not a same-lane add.
 - **DETECTION ONLY** — the cure (unmute the mic / Ableton mbc channel, fix the Dante route) is a
   rig-ops call; this watchdog only pages the checklist. `require_tools` fails LOUD (python3, sshpass,
   the decision module readable, the threshold getter sourced) so a missing dependency can never SKIP
