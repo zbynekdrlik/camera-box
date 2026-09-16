@@ -45,11 +45,12 @@
 #   (already time-bounded by the caller's `--since` window, so its mere PRESENCE is the liveness
 #   signal). An empty/`PROBE_OK`-less raw (ssh failed / box off the wire) -> reachable=0 = NODATA,
 #   never a false signal.
-#   `rough=` is the #1079 per-frame spatial-roughness metric (mean adjacent-pixel luma delta),
-#   REPORT-ONLY here — surfaced fleet-wide by the watchdog so a data-first follow-up can calibrate a
-#   noise threshold; it does NOT feed splitter_health_classify yet. A cambox not yet redeployed with
-#   the metric logs the OLD line (no `rough=`) -> rough=- (a placeholder, never a bogus number), so a
-#   rolling fleet redeploy is safe and the 6-field record shape is stable regardless of box version.
+#   `rough=` is the #1079 per-frame spatial-roughness metric (mean adjacent-pixel luma delta). It is
+#   parsed here and (issue 1099) FEEDS splitter_health_classify, which classifies a colour frame whose
+#   roughness exceeds the calibrated noise threshold as PURPLE_NOISE — but the watchdog surfaces that
+#   REPORT-ONLY (never a page). A cambox not yet redeployed with the metric logs the OLD line (no
+#   `rough=`) -> rough=- (a placeholder, never a bogus number), so a rolling fleet redeploy is safe
+#   and the 6-field record shape is stable regardless of box version.
 splitter_health_parse_probe() {
   local raw="${1:-}"
   local reachable=0 capturing=0 colour=0 u_dev="-" v_dev="-" rough="-"

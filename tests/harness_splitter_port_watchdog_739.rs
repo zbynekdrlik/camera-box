@@ -149,8 +149,9 @@ fn driver_purple_noise_box_alongside_clean_siblings_pages_nothing_1099() {
         "cam2 => PURPLE_NOISE: {log}"
     );
     assert!(
-        log.contains("cam1 (10.77.9.61)") && log.contains("-> OK"),
-        "cam1 clean colour => OK: {log}"
+        log.lines()
+            .any(|l| l.contains("cam1 (10.77.9.61)") && l.contains("-> OK")),
+        "cam1 clean colour => OK on its OWN log line: {log}"
     );
     assert!(
         !log.contains("WOULD alert"),
@@ -277,5 +278,41 @@ fn driver_lone_grey_box_with_no_reachable_sibling_never_pages() {
     assert!(
         !log.contains("DEAD_PORT"),
         "must not be DEAD_PORT without a proven-good sibling: {log}"
+    );
+}
+
+#[test]
+fn noise_threshold_watchdog_mirror_matches_rust_const_1099() {
+    // #1099: the watchdog's NOISE_ROUGHNESS_THRESHOLD default MUST stay in lock-step with the Rust
+    // source-of-truth src/capture.rs::NOISE_ROUGHNESS_THRESHOLD (bash cannot read the const, so it
+    // mirrors the literal). A future const change that forgets the mirror would silently desync the
+    // dev1 gate from the appliance classifier; this pins them (mirrors the repo's other const-mirror
+    // parity gates). Normalised numerically so 40.0 == 40.
+    let rust =
+        std::fs::read_to_string(manifest_dir().join("src/capture.rs")).expect("read capture.rs");
+    let sh =
+        std::fs::read_to_string(manifest_dir().join("scripts/splitter-port-alert-watchdog.sh"))
+            .expect("read watchdog");
+    let rust_val = rust
+        .lines()
+        .find_map(|l| {
+            l.trim()
+                .strip_prefix("pub const NOISE_ROUGHNESS_THRESHOLD: f32 = ")
+                .and_then(|s| s.strip_suffix(';'))
+        })
+        .expect("Rust NOISE_ROUGHNESS_THRESHOLD const not found");
+    let sh_val = sh
+        .lines()
+        .find_map(|l| {
+            l.trim()
+                .strip_prefix("NOISE_ROUGHNESS_THRESHOLD=\"${SPLITTER_WATCH_NOISE_THRESHOLD:-")
+                .and_then(|s| s.strip_suffix("}\""))
+        })
+        .expect("watchdog NOISE_ROUGHNESS_THRESHOLD mirror not found");
+    let rn: f32 = rust_val.parse().expect("Rust const value numeric");
+    let sn: f32 = sh_val.parse().expect("shell mirror value numeric");
+    assert_eq!(
+        rn, sn,
+        "watchdog mirror ({sh_val}) must equal the Rust const ({rust_val})"
     );
 }
