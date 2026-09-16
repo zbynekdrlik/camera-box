@@ -40,6 +40,7 @@ Verdicts (classify_av_step):
 """
 import argparse
 import json
+import math
 import sys
 
 # Normal 10-min dock medians wander ±30 ms within an hour; the 2026-09-01 step was ≈ −60…−90 ms
@@ -220,11 +221,15 @@ def band_quality_ok(recent_mad_ms, recent_matched_min,
           e.g. an older box or no LOCKED/UPDATED line in the window. The band decision treats None
           as "proceed" -- NOT LOW_QUALITY -- so a genuine sustained offset with no recent cluster
           line still pages; the safe direction is never SWALLOWING a real drift.)
+      recent_mad_ms present but NON-FINITE (NaN/Inf)     -> False (#1319 review: a corrupt reading is
+          untrustworthy, distinct from ABSENT -- treat it as failing quality, never as "proceed").
       mad <= max_mad_ms AND matched >= min_matched                 -> True  (trustworthy)
       otherwise (present AND (mad too wide OR cluster too small))  -> False (-> LOW_QUALITY, no page)
     """
     if recent_mad_ms is None or recent_matched_min is None:
         return None
+    if not math.isfinite(recent_mad_ms):
+        return False
     return recent_mad_ms <= max_mad_ms and recent_matched_min >= min_matched
 
 
@@ -296,6 +301,8 @@ def analyze_band(bundle_json_text, box_reachable, band_reference_ms=DEFAULT_BAND
     (recent_med, _base, pin, pin_stable, _age, n_recent, _nb) = _from_obj(obj)
     dock_live_age_s = _int_or_none(obj.get("av_offset_dock_live_age_s")) if isinstance(obj, dict) else None
     # #1319 Part 2 — the dock estimator's recent-window measurement quality (median MAD + min matched).
+    # A non-finite mad (NaN/Inf) is handled INSIDE band_quality_ok (-> False -> LOW_QUALITY), distinct
+    # from an ABSENT facet (None -> proceed), so it is read here as a plain float-or-None.
     recent_mad_ms = _float_or_none(obj.get("av_offset_recent_mad_ms")) if isinstance(obj, dict) else None
     recent_matched_min = _int_or_none(obj.get("av_offset_recent_matched_min")) if isinstance(obj, dict) else None
     verdict = classify_av_band(recent_med, pin_stable, n_recent, dock_live_age_s, box_reachable,
@@ -333,7 +340,10 @@ def dock_reference(bundle_json_text, box_reachable,
     recent_mad_ms = _float_or_none(obj.get("av_offset_recent_mad_ms")) if isinstance(obj, dict) else None
     recent_matched_min = _int_or_none(obj.get("av_offset_recent_matched_min")) if isinstance(obj, dict) else None
     q = band_quality_ok(recent_mad_ms, recent_matched_min, quality_max_mad_ms, quality_min_matched)
-    ok = (recent_med is not None and n_recent is not None and n_recent >= min_samples
+    # #1319 review: a non-finite median must never be recorded as the dock-native reference (it would
+    # blind the band arm on read); require a FINITE median for quality_ok, mirroring the mad guard.
+    median_finite = recent_med is not None and math.isfinite(recent_med)
+    ok = (median_finite and n_recent is not None and n_recent >= min_samples
           and pin_stable == "1" and q is True)
     return {"quality_ok": 1 if ok else 0, "median_ms": recent_med, "n": n_recent,
             "mad_ms": recent_mad_ms, "matched_min": recent_matched_min, "pin_stable": pin_stable}

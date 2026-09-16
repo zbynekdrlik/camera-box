@@ -193,3 +193,21 @@ def test_resolve_band_reference_prefers_dock_native_median(tmp_path):
     f.write_text(json.dumps({"residual_median_ms": -35.3}))
     out = _resolve()
     assert out.split()[0] == "-35.3" and "residual_median_ms" in out
+
+
+# ---------------------------------------------------------------- non-finite guard (review fix)
+def test_non_finite_quality_and_median_are_rejected():
+    # #1319 review: json.load accepts a bare NaN; a non-finite mad must fail-safe to LOW_QUALITY
+    # (not silently read as <=15), and a non-finite dock median must NOT be recorded as a reference.
+    lowq = json.dumps({"av_offset_recent_med_ms": "85.0", "av_offset_pin": "939",
+                       "av_offset_pin_stable": "1", "av_offset_n_recent": "12",
+                       "av_offset_recent_mad_ms": "NaN", "av_offset_recent_matched_min": "36"})
+    d = asd.analyze_band(lowq, 1, band_reference_ms=-35.0, band_ms=30)
+    # a non-finite mad is CORRUPT-but-present -> band_quality_ok returns False -> LOW_QUALITY
+    # (distinct from an ABSENT facet which would proceed); never the would-be OUT_OF_BAND page.
+    assert d["verdict"] == "LOW_QUALITY" and d["quality_ok"] == 0, d
+    # a non-finite dock median -> quality_ok 0 (records nothing)
+    badmed = json.dumps({"av_offset_recent_med_ms": "Infinity", "av_offset_n_recent": "12",
+                         "av_offset_pin_stable": "1", "av_offset_recent_mad_ms": "9.0",
+                         "av_offset_recent_matched_min": "34"})
+    assert asd.dock_reference(badmed, 1)["quality_ok"] == 0
