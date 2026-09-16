@@ -206,3 +206,44 @@ def test_orchestrator_good_quality_step_still_confirms(tmp_path):
     # suppresses UNTRUSTWORTHY readings, never a genuine step).
     stderr, state, _notified = _run_step_arm(tmp_path, _GOODQ_STEP_JSON, preseed_confirm=0)
     assert "confirm_stream=1" in state, (stderr, state)
+
+
+def _run_step_arm_preseed_state(tmp_path, body_json, preseed_lines):
+    """Like _run_step_arm but seeds an ARBITRARY set of state lines (e.g. an ALERTED latch)."""
+    body_file = tmp_path / "body.json"
+    body_file.write_text(body_json)
+    state = tmp_path / "st.state"
+    state.write_text("\n".join(preseed_lines) + "\n")
+    marker = tmp_path / "notified"
+    fake_notify = tmp_path / "fake_notify.py"
+    fake_notify.write_text(
+        "import pathlib\npathlib.Path(r'%s').write_text('called')\n" % marker)
+    script = f'''
+      export AV_STEP_ALERT_STATE_FILE="{state}"
+      export AV_STEP_DECIDE="{_SCRIPTS / 'av_step_decision.py'}"
+      export AIRULESET_NOTIFY="{fake_notify}"
+      source "{_WD}"
+      fetch_bundle_json() {{ cat "{body_file}"; return 0; }}
+      handle_box stream 10.0.0.9
+    '''
+    p = subprocess.run(["bash", "-c", script], capture_output=True, text=True)
+    st = state.read_text() if state.exists() else ""
+    return p.stderr, st, marker.exists()
+
+
+def test_orchestrator_low_quality_while_alerted_holds_the_latch_no_false_recovery(tmp_path):
+    # The load-bearing incident invariant: a LOW_QUALITY pass while the box is ALREADY ALERTED must
+    # NOT clear the recovery latch (alerted_/alert_base_) and must NOT log a RECOVERY — otherwise a
+    # noisy pass would falsely claim the upstream step healed. Pre-seed the alerted latch, feed a
+    # LOW_QUALITY reading, and assert the latch survives, no recovery, no notify.
+    stderr, state, notified = _run_step_arm_preseed_state(
+        tmp_path, _1509_JSON,
+        ["alerted_stream=1", "alert_base_stream=68.0", "confirm_stream=1",
+         "alert_sig_stream=avstep:stream", "alert_passes_stream=3"])
+    assert "step not judged, no page" in stderr, stderr
+    assert "RECOVERY" not in stderr, stderr           # a noisy pass is never a recovery
+    assert not notified
+    # the alert latch is untouched (a genuine later recovery can still fire); only confirm reset.
+    assert "alerted_stream=1" in state, state
+    assert "alert_base_stream=68.0" in state, state
+    assert "confirm_stream=0" in state, state

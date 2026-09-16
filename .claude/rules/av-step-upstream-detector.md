@@ -220,6 +220,12 @@ pre-fix STEP page since |−61| > 45) now classifies **LOW_QUALITY — step not 
 matching the BAND arm in the same pass. Until this deploys, the dev1 timer's STEP arm is neutered
 with an `AV_STEP_THRESHOLD_MS=100000` drop-in (remove after deploy, same as the P2 band drop-in).
 
-**Tier-0:** `pytest tests/python/test_av_step_stepgate_1319.py` (classify/analyze/CLI + a sourced-bash
-orchestrator test that overrides `fetch_bundle_json` and asserts the LOW_QUALITY branch is log-only,
-no notify, confirm reset) + the existing `test_av_step_decision_1267.py` (unchanged, still green).
+Like the BAND arm, a LOW_QUALITY pass RESETS the STEP confirm counter, so an upstream step whose dock
+quality FLAPS good/bad every pass never reaches the 2-pass confirm and its STEP page is deferred
+indefinitely. Acceptable for a report-only early-warning (the E2E A/V gate is the real net), and the
+right trade — pages must come only from a TRUSTWORTHY sustained reading.
+
+**Tier-0:** `pytest tests/python/test_av_step_stepgate_1319.py` (classify/analyze/CLI + sourced-bash
+orchestrator tests that override `fetch_bundle_json` and assert the LOW_QUALITY branch is log-only,
+no notify, confirm reset, AND — while the box is ALERTED — the `alerted_/alert_base_` latch survives
+with no false RECOVERY) + the existing `test_av_step_decision_1267.py` (unchanged, still green).
