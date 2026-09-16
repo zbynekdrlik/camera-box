@@ -304,3 +304,17 @@ asrc_servo_master_clock_is_os_gettime_ns_and_sign_negated_1325` + byte-identical
 `windows-genlock.yml` and `windows-genlock-fast.yml` (positive: `const uint64_t mixer_now_ns =
 os_gettime_ns();` + the `-applied_ppm` call; negative: the pre-fix non-negated `applied_ppm,` call
 must be ABSENT). The `RealtimeAsrcCompensator` corrected-advance model itself is UNCHANGED by #1325.
+
+## Tier-0 RED→GREEN for a SELF-CONTAINED pure module — plain `rustc --test`, no cargo (#1325)
+
+The `# airuleset:build-ok` bypass is DISABLED (#477) and #557 blocks even `cargo test --no-run`, so
+the old "cargo test --lib asrc_bench" observation path in the sections above is HISTORY. For a
+crate-root pure module that has NO crate-internal deps (`src/asrc_compensation_quantization.rs` —
+only std, no `use crate::`), the working Tier-0 RED→GREEN is a STANDALONE rustc compile of the file
+itself: `rustc --test --edition 2021 src/asrc_compensation_quantization.rs -o /tmp/x && /tmp/x`. No
+`CARGO_MANIFEST_DIR` is needed (that env is only for a `tests/*.rs` file that reads vendored source
+via `env!("CARGO_MANIFEST_DIR")` or `use camera_box::…`, e.g. `genlock_preload.rs`). Used live for
+#1325's sign gate: buggy body → 1 failed, negated body → 11 passed, a genuine local RED→GREEN with
+zero cargo. The precondition is a module with no `use crate::`/`use super::` CODE deps (intra-doc
+`[crate::…]` links in comments are fine — rustc ignores doc content); check with
+`grep -nE '^use (crate|super)::' src/<module>.rs` before trusting the standalone compile.
