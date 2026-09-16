@@ -88,6 +88,25 @@ pub const PRE_1016_CALLER_DISTANCE_MS: u32 = 1_000;
 /// issue 1016's own starting-point measurement, kept for historical/regression-proof purposes.
 pub const PRE_1016_ZERO_EFFECT_FLOOR_PPM: f64 = 10.4167;
 
+/// camera-box #1325: the END-TO-END sample-delta swresample actually receives for a given
+/// COMPENSATOR `applied_ppm`, through `obs-source.c asrc_process_audio()` -> the swresample-native
+/// wrapper -- i.e. the composition of the servo->wrapper sign conversion AND the integer
+/// quantization. The parity test [`servo_negates_applied_ppm_so_a_slow_source_stretches_1325`]
+/// pins the required sign: a SLOW source (`applied_ppm < 0`, the compensator's "stretch" state)
+/// MUST produce a POSITIVE `sample_delta` (= swresample adds samples = stretch). See the test for
+/// the full reciprocal-sign reasoning.
+pub fn servo_applied_ppm_to_sample_delta(
+    applied_ppm: f64,
+    distance_ms: u32,
+    output_freq: u32,
+) -> i64 {
+    // RED (#1325): this mirrors the UNFIXED obs-source.c, which feeds the compensator's applied_ppm
+    // STRAIGHT to the swresample-native wrapper (no negation). Because the wrapper's convention is
+    // the RECIPROCAL of the compensator's lock model, a slow source (applied<0) COMPRESSES here --
+    // the exact drain the parity test below forbids. The GREEN fix negates (`-applied_ppm`).
+    compensation_sample_delta(applied_ppm, distance_ms, output_freq)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -164,6 +183,39 @@ mod tests {
     #[test]
     fn zero_distance_ms_is_a_safe_no_op_not_a_panic_or_division_surprise() {
         assert_eq!(compensation_sample_delta(300.0, 0, REAL_OUTPUT_FREQ), 0);
+    }
+
+    // ---- #1325: the servo->swresample SIGN conversion --------------------------------------------
+
+    #[test]
+    fn servo_negates_applied_ppm_so_a_slow_source_stretches_1325() {
+        // The compensator's model is `corrected = raw / (1 + applied/1e6)`: a SLOW source has
+        // `applied_ppm < 0`, which stretches raw UP to master (bench truth, src/asrc_bench.rs).
+        // The swresample-native wrapper (`compensation_sample_delta`) is the RECIPROCAL sign:
+        // `output = input * (1 + ppm/1e6)`, so a POSITIVE ppm = MORE output samples = stretch.
+        // Therefore a slow source (applied<0, "stretch") MUST reach swresample as a POSITIVE
+        // sample_delta. Feeding applied_ppm straight through (the pre-#1325 bug) compressed it and
+        // drained the mix buffer (issue 1325). This is the exact gap the #804 bench never caught:
+        // it asserts against `compensate()`'s RETURN, never the swresample-fed sample_delta.
+        let slow = servo_applied_ppm_to_sample_delta(-50.0, REAL_DISTANCE_MS, REAL_OUTPUT_FREQ);
+        assert!(
+            slow > 0,
+            "a SLOW source (applied_ppm=-50, compensator 'stretch') must reach swresample as a \
+             POSITIVE sample_delta (add samples = stretch), got {slow} -- the reciprocal-sign bug \
+             #1325 fixed drains the mix buffer instead"
+        );
+        // Symmetric: a FAST source (applied>0, "compress") must reach swresample NEGATIVE.
+        let fast = servo_applied_ppm_to_sample_delta(50.0, REAL_DISTANCE_MS, REAL_OUTPUT_FREQ);
+        assert!(
+            fast < 0,
+            "a FAST source (applied_ppm=+50, compensator 'compress') must reach swresample as a \
+             NEGATIVE sample_delta (drop samples = compress), got {fast}"
+        );
+        // Magnitude is preserved (only the sign flips) -- it is exactly the negated quantization.
+        assert_eq!(
+            servo_applied_ppm_to_sample_delta(-50.0, REAL_DISTANCE_MS, REAL_OUTPUT_FREQ),
+            -compensation_sample_delta(50.0, REAL_DISTANCE_MS, REAL_OUTPUT_FREQ)
+        );
     }
 
     // Historical/regression proof (issue 1016): the pure `compensation_sample_delta` formula was
