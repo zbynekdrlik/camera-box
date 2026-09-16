@@ -22,5 +22,9 @@
   "resolume": {
     "_comment": "#1295 RESOLUME-SNV cg OBS: the SongPlayer `sp-*_video` inputs ride the genlock FIFO at the 3ms floor. REPORT-ONLY drift reference (latency_pins_verify.py --box resolume), same as every box here. NOTE the genlock build DEFAULTS every ndi_source to genlock_fifo=true + genlock_latency_ms_src=3 (vendor/distroav/src/ndi-source.cpp) + auto-forces the certified coercion (ndi_sync=2 timecode / ndi_bw_mode=0 highest), so this pin is CONFIRMED by the build, not written by a tool; a hand re-pin uses `apply_latency_pins.py --box resolume --host <ip> --pins '{...}' --execute` with the live sp-* names. A PREFIX-MATCH sentinel (not a fixed name list and not the all-inputs floor): only the sp-*_video inputs are in scope; the box's NDIAr/VBAN overlays may legitimately differ and must NOT be drift-reported. The regex mirrors scripts/lib/cg-chain-verify.sh's operator-overridable `sp-.*_video` (CASE-INSENSITIVE) -- the sp-* name set is a pattern, never a hardcoded list.",
     "_ndi_inputs_matching": {"regex": "(?i)^sp-.*_video$", "ms": 3}
+  },
+  "strih-lx": {
+    "_comment": "issue 1317: the Linux strih notebook running IN PARALLEL with the Windows STRIH-SNV cutter. Its camera NDI inputs (CAM1..CAM7 (usb)) ride the genlock FIFO at the same FLOOR-3 model as strih above (the per-run [4i/8align] aligner writes any RELATIVE offset live and it is NEVER committed here, so this reference is the floor). REPORT-ONLY drift reference (verify-strih.sh reads _all_camera_ndi_inputs_ms; per-source latency is the operator's A/V-align domain -- never overwritten). The self-feedback 2ME + RESOLUME-SNV (cg-obs) inputs are not floored here (see .claude/rules/strih-linux-provisioning.md).",
+    "_all_camera_ndi_inputs_ms": 3
   }
 }

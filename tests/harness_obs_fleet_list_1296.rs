@@ -154,9 +154,11 @@ fn fleet_boxes_genlock_lock_carries_all_four_incl_imag_1299() {
     // #1299: the genlock LOCKED/DEGRADED/UNLOCKED facet is fleet-wide — the two Windows genlock
     // boxes, the Linux imag receiver (it still locks every input to the fleet clock), and the
     // traveling resolume cg box (paged only while obs_fleet_is_home, gated by the consumer).
+    // issue 1317: strih-lx (the Linux strih notebook) also joins genlock-lock (a linux-genlock box
+    // that locks every input to the fleet clock), appended after resolume.
     assert_eq!(
         boxes("genlock-lock"),
-        "strih|10.77.9.202 stream|10.77.9.204 imag|10.77.9.182 resolume|resolume.lan"
+        "strih|10.77.9.202 stream|10.77.9.204 imag|10.77.9.182 resolume|resolume.lan strih-lx|strih-lx.lan"
     );
     // imag carries genlock-lock but NOT the audio/vb facets (it is a pure receiver, no mbc chain).
     for facet in ["audio-lag", "av-step", "vb-matrix"] {
@@ -166,6 +168,30 @@ fn fleet_boxes_genlock_lock_carries_all_four_incl_imag_1299() {
             boxes(facet)
         );
     }
+}
+
+#[test]
+fn fleet_carries_strih_lx_on_the_three_declared_facets_only_1317() {
+    // issue 1317: the Linux strih notebook joins bundle-state, obs-liveness and genlock-lock; it
+    // must NOT be in the Windows program-audio / av-sync-dock / VB-Matrix facets.
+    for facet in ["bundle-state", "obs-liveness", "genlock-lock"] {
+        assert!(
+            boxes(facet).contains("strih-lx|strih-lx.lan"),
+            "facet {facet} must carry strih-lx: {}",
+            boxes(facet)
+        );
+    }
+    for facet in ["audio-lag", "av-step", "vb-matrix"] {
+        assert!(
+            !boxes(facet).contains("strih-lx"),
+            "facet {facet} must NOT carry strih-lx: {}",
+            boxes(facet)
+        );
+    }
+    // Fact lookups + the traveling home-check (a not-yet-arrived box never pages).
+    assert_eq!(fleet_stdout("obs_fleet_host strih-lx"), "strih-lx.lan");
+    assert_eq!(fleet_stdout("obs_fleet_class strih-lx"), "linux-genlock");
+    assert_eq!(fleet_stdout("obs_fleet_home_check strih-lx"), "traveling");
 }
 
 #[test]

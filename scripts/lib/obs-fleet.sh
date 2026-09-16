@@ -70,7 +70,13 @@
 OBS_FLEET="${OBS_FLEET:-strih|10.77.9.202|windows-genlock|always
 stream|10.77.9.204|windows-genlock|always
 imag|10.77.9.182|linux-genlock|always
-resolume|resolume.lan|windows-genlock|traveling}"
+resolume|resolume.lan|windows-genlock|traveling
+strih-lx|strih-lx.lan|linux-genlock|traveling}"
+# issue 1317: strih-lx is the Linux notebook replacing the Windows strih PC, running IN PARALLEL
+# until tuned. home-check=traveling (home only when strih-lx.lan resolves AND its OBS-WS :4455
+# answers) so a not-yet-arrived / not-yet-provisioned box never pages. It joins the bundle-state,
+# obs-liveness and genlock-lock facets below (NOT audio-lag/av-step/vb-matrix -- those are the
+# Windows program-audio / av-sync-dock / VB-Matrix facets that do not apply to it yet).
 
 # _obs_fleet_entry <name> -> prints the whole `name|host|class|home-check` row for NAME on stdout and
 # returns 0; returns 1 (no output) for an unknown name. Word-exact on the leading `name|` so a
@@ -114,10 +120,10 @@ obs_fleet_facet_members() {
     audio-lag)     printf 'strih stream' ;;
     av-step)       printf 'stream' ;;
     vb-matrix)     printf 'strih stream' ;;
-    bundle-state)  printf 'strih stream resolume' ;;
+    bundle-state)  printf 'strih stream resolume strih-lx' ;;
     network-reach) printf 'strih stream resolume' ;;
-    obs-liveness)  printf 'strih stream resolume' ;;
-    genlock-lock)  printf 'strih stream imag resolume' ;;
+    obs-liveness)  printf 'strih stream resolume strih-lx' ;;
+    genlock-lock)  printf 'strih stream imag resolume strih-lx' ;;
     *)
       echo "obs-fleet: unknown facet '${facet}' (expected one of: audio-lag av-step vb-matrix bundle-state network-reach obs-liveness genlock-lock)" >&2
       return 1

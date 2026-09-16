@@ -269,3 +269,105 @@ jobs:
           name: obs-genlock-linux-x86_64
           path: stage/
           if-no-files-found: error
+
+
+  # issue 1317: the strih-lx FULL build variant. The strih role needs the same full plugin set as
+  # the imag-parity full build above (obs-websocket, obs-ffmpeg + NVENC, obs-x264, obs-outputs,
+  # obs-filters, image-source, text-freetype2, linux-capture/v4l2, DistroAV) -- all ON in the
+  # ubuntu-ci preset default (AJA/decklink/VLC/whatsnew off), so this job copies the full build
+  # byte-for-byte and differs ONLY by artifact name + a build-flags marker. The one plugin the strih
+  # role additionally needs vs the imag artifact is obs-browser (the 4 browser sources); it needs
+  # CEF, which the vendored ubuntu-ci preset does not fetch (no buildspec/CEF in the subtree), so
+  # this variant ships with ENABLE_BROWSER=OFF and a BROWSER-OFF marker -- browser/CEF is the FIRST
+  # follow-up (.claude/rules/strih-linux-provisioning.md). Flip STRIH_ENABLE_BROWSER once CEF is wired.
+  # The imag-parity linux-genlock-build job above is left byte-identical.
+  linux-genlock-build-strih:
+    name: Full Linux genlock bundle -- strih variant (issue 1317)
+    needs: [linux-distroav-compile-check]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      STRIH_ENABLE_BROWSER: 'OFF'   # flip to ON once a CEF fetch step is wired (follow-up)
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies (apt)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ${{ env.OBS_APT_PACKAGES }}
+
+      - name: Configure OBS (ubuntu-ci preset + genlock build flags, strih variant)
+        working-directory: vendor/obs-studio
+        run: >
+          cmake --preset ubuntu-ci
+          '-DOBS_VERSION_OVERRIDE=32.2.0'
+          -DENABLE_WHATSNEW=OFF
+          -DENABLE_AJA=OFF
+          -DENABLE_VLC=OFF
+          -DENABLE_TEST_INPUT=OFF
+          -DENABLE_BROWSER=${{ env.STRIH_ENABLE_BROWSER }}
+
+      - name: Build OBS
+        working-directory: vendor/obs-studio
+        run: cmake --build build_ubuntu --parallel
+
+      - name: Install OBS SDK prefix (+ Development component, the #392 trick)
+        working-directory: vendor/obs-studio
+        run: |
+          cmake --install build_ubuntu --prefix "$GITHUB_WORKSPACE/obs-sdk"
+          cmake --install build_ubuntu --prefix "$GITHUB_WORKSPACE/obs-sdk" --component Development
+
+      - name: Configure DistroAV against the genlocked OBS SDK
+        working-directory: vendor/distroav
+        run: >
+          cmake --preset ubuntu-ci-x86_64
+          -DCMAKE_PREFIX_PATH="$GITHUB_WORKSPACE/obs-sdk"
+
+      - name: Build DistroAV
+        working-directory: vendor/distroav
+        run: cmake --build --preset ubuntu-ci-x86_64
+
+      - name: Stage artifact (OBS rundir + distroav.so + data + build SHA + strih flags marker)
+        run: |
+          set -euo pipefail
+          rundir="vendor/obs-studio/build_ubuntu/rundir/RelWithDebInfo"
+          if [ ! -d "$rundir" ]; then echo "OBS rundir not found: $rundir"; exit 1; fi
+          mkdir -p stage
+          cp -a "$rundir"/. stage/
+
+          distroav_so=$(find vendor/distroav -name 'distroav.so' -not -path '*/CMakeFiles/*' | head -1)
+          if [ -z "$distroav_so" ]; then echo "distroav.so not found after the DistroAV build"; exit 1; fi
+
+          plugin_lib_dir=$(find stage -type d -path '*/obs-plugins' -not -path '*/share/*' | head -1)
+          if [ -z "$plugin_lib_dir" ]; then
+            echo "ERROR: no lib/obs-plugins dir found in the staged rundir"
+            exit 1
+          fi
+          cp "$distroav_so" "$plugin_lib_dir/"
+
+          data_root=$(find stage -type d -path '*/share/obs/obs-plugins' | head -1)
+          if [ -z "$data_root" ]; then data_root="stage/share/obs/obs-plugins"; fi
+          if [ -d "vendor/distroav/data" ]; then
+            mkdir -p "$data_root/distroav"
+            cp -a vendor/distroav/data/. "$data_root/distroav/"
+          fi
+
+          git rev-parse HEAD > stage/GENLOCK_BUILD_SHA.txt
+          # issue 1317: the strih variant's build-flags marker -- written INTO the stage BEFORE the
+          # manifest step so genlock-manifest.sh --check accounts for it (an unlisted file in stage
+          # would fail the manifest self-consistency check).
+          printf 'variant=strih\nENABLE_BROWSER=%s\nBROWSER-OFF: obs-browser/CEF is the first follow-up (issue 1317); flip STRIH_ENABLE_BROWSER once a CEF fetch is wired.\n' "$STRIH_ENABLE_BROWSER" > stage/STRIH_BUILD_FLAGS.txt
+          echo "staged strih variant (ENABLE_BROWSER=$STRIH_ENABLE_BROWSER)"
+
+      - name: Generate per-component SHA manifest (#120)
+        run: scripts/genlock-manifest.sh --stage stage --out stage/BUNDLE_MANIFEST.json
+
+      - name: Assert bundle manifest self-consistent (#120)
+        run: scripts/genlock-manifest.sh --check stage/BUNDLE_MANIFEST.json --stage stage
+
+      - name: Upload artifact (strih variant)
+        uses: actions/upload-artifact@v4
+        with:
+          name: obs-genlock-linux-x86_64-strih
+          path: stage/
+          if-no-files-found: error

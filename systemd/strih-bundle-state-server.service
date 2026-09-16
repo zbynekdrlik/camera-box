@@ -1,0 +1,35 @@
+[Unit]
+# issue 1317 -- strih-lx's :8899 bundle-state HTTP server, the Linux twin of the Windows
+# strih/stream Scheduled-Task bundle-state-server (and the sibling of imag-bundle-state-server,
+# #1299). It serves /bundle-state.json (fresh per request) so the dev1 genlock-lock alert watchdog
+# (scripts/genlock-lock-alert-watchdog.sh) -- which lists strih-lx in the obs-fleet genlock-lock
+# facet -- can page a strih-lx genlock LOCK loss. The canonical scripts/bundle-state-server.py runs
+# here unchanged; its Windows-only identity facets (obs_installs / shortcut_* / AHK) degrade to
+# absent on Linux (its IS_WINDOWS gate), so on strih-lx it serves genlock_lock, genlock_build_sha,
+# obs_version, audio_ts_lag_* and record-dir-stats.
+Description=strih-lx :8899 bundle-state server (fleet-visible genlock-lock facet, issue 1317)
+Documentation=https://github.com/zbynekdrlik/camera-box
+After=strih-obs.service graphical-session.target
+Wants=graphical-session.target
+
+[Service]
+Type=simple
+# bundle-state-server.py + its bundle_state_gather / obs_phase2 siblings are installed together under
+# /opt/camera-box by setup-strih.sh so the sibling imports resolve. strih-lx's OBS-WS has NO password,
+# so OBS_PASSWORD is left unset -> "". %h expands to the user home so the OBS log dir is home-relative.
+ExecStart=/usr/bin/python3 /opt/camera-box/bundle-state-server.py --port 8899 --obs-host 127.0.0.1 --obs-log-dir %h/.config/obs-studio/logs --genlock-build-sha-file /opt/obs-genlock/GENLOCK_BUILD_SHA.txt
+Restart=on-failure
+RestartSec=5
+# NoNewPrivileges engages under an unprivileged --user manager. Mount-namespace hardening
+# (ProtectHome/PrivateTmp/...) is deliberately NOT set: it would block the OBS-log + /opt/obs-genlock
+# marker reads this server needs, and is inert under the --user manager anyway
+# (.claude/rules/dev1-systemd-user-unit-hardening.md) -- declared-intent only, no isolation claimed.
+NoNewPrivileges=true
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=strih-bundle-state-server
+
+[Install]
+WantedBy=graphical-session.target

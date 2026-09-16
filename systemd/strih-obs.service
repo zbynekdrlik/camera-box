@@ -1,0 +1,29 @@
+[Unit]
+Description=strih-lx supervised OBS (genlock) -- auto-restart on segfault, issue 1317
+Documentation=https://github.com/zbynekdrlik/camera-box
+After=graphical-session.target
+Wants=graphical-session.target
+
+[Service]
+Type=simple
+# The strih-lx OBS launcher (sibling of imag-obs-start.sh / imag-obs-stop.sh) starts OBS with the
+# strih-lx profile + scene collection. It is installed by setup-strih.sh; the launcher itself is
+# the first follow-up (a bespoke start/stop pair like scripts/imag-obs-start.sh, issue 882).
+ExecStart=/usr/local/bin/strih-obs-start.sh
+ExecStop=/usr/local/bin/strih-obs-stop.sh --exec-stop
+# on-failure (never `always`): restart ONLY on an abnormal/signal death (a real segfault) -- a
+# clean exit(0), e.g. the operator quitting OBS's own UI, is left alone (imag-obs.service #882 /
+# issue 788 reasoning: never fight the operator on a deliberate manual quit).
+Restart=on-failure
+RestartSec=2
+# Enable core dumps for the process tree (obs inherits) so a segfault leaves something debuggable
+# (requires systemd-coredump; the same #882 rationale as imag-obs.service).
+LimitCORE=infinity
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=strih-obs
+
+[Install]
+WantedBy=graphical-session.target

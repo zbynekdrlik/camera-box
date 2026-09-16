@@ -55,8 +55,11 @@ fn ndi_inputs_are_the_ten_role_inputs() {
     let lines: Vec<&str> = out.lines().filter(|l| !l.is_empty()).collect();
     assert_eq!(lines.len(), 10, "exactly 10 NDI inputs, got: {out}");
     for want in [
-        "CAM1 (usb)", "CAM7 (usb)",
-        "STRIH-SNV (2ME PGM)", "STRIH-SNV (2ME PVW)", "RESOLUME-SNV (cg-obs)",
+        "CAM1 (usb)",
+        "CAM7 (usb)",
+        "STRIH-SNV (2ME PGM)",
+        "STRIH-SNV (2ME PVW)",
+        "RESOLUME-SNV (cg-obs)",
     ] {
         assert!(lines.contains(&want), "missing input {want} in: {out}");
     }
@@ -70,7 +73,10 @@ fn ndi_outputs_and_republishes_are_namespaced_strih_lx_never_strih_snv() {
             l.starts_with("STRIH-LX ("),
             "every output/republish must be STRIH-LX-namespaced, got: {l}"
         );
-        assert!(!l.starts_with("STRIH-SNV "), "a STRIH-SNV sender leaked: {l}");
+        assert!(
+            !l.starts_with("STRIH-SNV "),
+            "a STRIH-SNV sender leaked: {l}"
+        );
     }
     assert!(outs.contains("STRIH-LX (2ME PGM)"));
     assert!(outs.contains("STRIH-LX (2ME PVW)"));
@@ -93,25 +99,37 @@ fn bundle_artifact_is_the_strih_variant() {
 fn dantesync_client_args_point_at_the_ntp_server_and_never_server_mode() {
     let (_c, out, _e) = run_sourced(&[], "strih_lx_dantesync_client_args");
     assert!(out.contains("--ntp-server strih.lan"), "got: {out}");
-    assert!(!out.contains("server_mode") && !out.contains("--master"), "must not be master: {out}");
+    assert!(
+        !out.contains("server_mode") && !out.contains("--master"),
+        "must not be master: {out}"
+    );
     // Overridable NTP server seam.
-    let (_c2, out2, _e2) =
-        run_sourced(&[("STRIH_LX_NTP_SERVER", "strih2.lan")], "strih_lx_dantesync_client_args");
-    assert!(out2.contains("--ntp-server strih2.lan"), "override ignored: {out2}");
+    let (_c2, out2, _e2) = run_sourced(
+        &[("STRIH_LX_NTP_SERVER", "strih2.lan")],
+        "strih_lx_dantesync_client_args",
+    );
+    assert!(
+        out2.contains("--ntp-server strih2.lan"),
+        "override ignored: {out2}"
+    );
 }
 
 #[test]
 fn dantesync_client_check_is_fail_closed_and_rejects_master_modes() {
     // Client modes pass.
     for mode in ["client", "ntp-server=strih.lan", "slave"] {
-        let (code, _o, _e) =
-            run_sourced(&[], &format!("strih_lx_dantesync_is_client_not_master '{mode}'"));
+        let (code, _o, _e) = run_sourced(
+            &[],
+            &format!("strih_lx_dantesync_is_client_not_master '{mode}'"),
+        );
         assert_eq!(code, 0, "client mode '{mode}' should pass");
     }
     // Master/server/empty must FAIL (fail-closed).
     for mode in ["ntp_server_mode", "server", "master", "grandmaster", ""] {
-        let (code, _o, _e) =
-            run_sourced(&[], &format!("strih_lx_dantesync_is_client_not_master '{mode}'"));
+        let (code, _o, _e) = run_sourced(
+            &[],
+            &format!("strih_lx_dantesync_is_client_not_master '{mode}'"),
+        );
         assert_ne!(code, 0, "master/empty mode '{mode}' must fail-closed");
     }
 }
@@ -120,8 +138,14 @@ fn dantesync_client_check_is_fail_closed_and_rejects_master_modes() {
 fn profile_facts_carry_the_windows_light_profile_shape() {
     let (_c, out, _e) = run_sourced(&[], "strih_lx_profile_facts");
     for want in [
-        "base_res=1920x1080", "fps=30", "color_format=NV12", "out_mode=Advanced",
-        "rec_encoder=obs_nvenc_hevc_tex", "rec_path=/srv/_REC", "rec_format=mkv", "rec_split_min=15",
+        "base_res=1920x1080",
+        "fps=30",
+        "color_format=NV12",
+        "out_mode=Advanced",
+        "rec_encoder=obs_nvenc_hevc_tex",
+        "rec_path=/srv/_REC",
+        "rec_format=mkv",
+        "rec_split_min=15",
     ] {
         assert!(out.contains(want), "profile fact missing {want} in: {out}");
     }
@@ -131,11 +155,19 @@ fn profile_facts_carry_the_windows_light_profile_shape() {
 fn audio_route_is_a_fail_loud_todo_until_wired() {
     // Unwired (default) -> the predicate fails, so setup-strih's audio step FAILS loud.
     let (code, _o, _e) = run_sourced(&[], "strih_lx_audio_route_wired");
-    assert_ne!(code, 0, "audio route must read UNWIRED by default (fail-loud TODO)");
+    assert_ne!(
+        code, 0,
+        "audio route must read UNWIRED by default (fail-loud TODO)"
+    );
     // Explicitly wired -> passes.
-    let (code2, _o2, _e2) =
-        run_sourced(&[("STRIH_LX_AUDIO_WIRED", "1")], "strih_lx_audio_route_wired");
-    assert_eq!(code2, 0, "audio route must read wired when STRIH_LX_AUDIO_WIRED=1");
+    let (code2, _o2, _e2) = run_sourced(
+        &[("STRIH_LX_AUDIO_WIRED", "1")],
+        "strih_lx_audio_route_wired",
+    );
+    assert_eq!(
+        code2, 0,
+        "audio route must read wired when STRIH_LX_AUDIO_WIRED=1"
+    );
     let (_c, name, _e) = run_sourced(&[], "strih_lx_audio_input_name");
     assert_eq!(name.trim(), "MiniFuse 4");
 }
