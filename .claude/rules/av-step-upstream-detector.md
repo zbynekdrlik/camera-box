@@ -74,11 +74,13 @@ consequences, both handled:
 
 SKIP (fetch failed → defer #732/#1001) · STALE (dock stopped while the log advanced — `av_offset_age_s
 > stale_threshold`, decided BEFORE the step check) · UNKNOWN (facet absent OR too few samples) ·
-REPIN (pin moved in the span → report-only) · HEALTHY · STEP (`|recent_med - base_med| >
-AV_STEP_THRESHOLD_MS`, default 45 — normal medians wander ±30, the real step was −60..−90; page after
-2-pass confirm). The ONLY page condition is a fetched POSITIVE step reading, so a dev1-side outage →
-SKIP → no page (no reference-anchor needed). Report-only ⚠️ with a stable `--dedup-key av-step-$box`
-(#1206); recovery is machine-channel only. Ships DISABLED (units committed, not enabled).
+REPIN (pin moved in the span → report-only) · LOW_QUALITY (#1319 P3 — dock reading too noisy/thin or
+non-finite, log-only, decided AFTER REPIN and BEFORE STEP/HEALTHY; see the P3 section below) ·
+HEALTHY · STEP (`|recent_med - base_med| > AV_STEP_THRESHOLD_MS`, default 45 — normal medians wander
+±30, the real step was −60..−90; page after 2-pass confirm). The ONLY page condition is a fetched
+POSITIVE step reading AT A TRUSTWORTHY QUALITY, so a dev1-side outage → SKIP → no page (no
+reference-anchor needed). Report-only ⚠️ with a stable `--dedup-key av-step-$box` (#1206); recovery
+is machine-channel only. Ships DISABLED (units committed, not enabled).
 
 ## Tier-0 verify (no cargo)
 
@@ -182,3 +184,42 @@ gather + step + notify-dedup siblings) + `bash -n`/`shellcheck` + a functional `
 `av_sync_persist_dock_reference` (good quality merges the dock keys, bad/absent records nothing);
 the C++ compiles at CI only. The band arm is held OFF via a dev1 `AV_BAND_MS=100000` drop-in until
 this deploys; re-enable after.
+
+## #1319 P3 — the STEP arm gets the SAME dock-quality gate (both arms quality-gated)
+
+Part 2 quality-gated only the BAND arm. The STEP arm (`classify_av_step`/`analyze`, the path
+`handle_box` calls) was still deciding purely on `|recent_med − base_med| > threshold` — so on
+**16.9.2026** it fired **two owner pages** (13:44 `step 1069 ms`, 15:09 `step −92 ms`, plus the
+hourly „still stepped" re-arm) on readings whose medians swung `recent_med −1391…+940 ms` /
+`base_med −887…+625 ms` **within 5-minute passes** — impossible for a real upstream A/V shift. In the
+SAME passes the BAND arm already logged `verdict=LOW_QUALITY … band not judged, no page`, because
+`band_quality_ok()` (mad 9-31 ms wide, matched down to 10) rejected the reading. The two arms
+disagreed because only one consulted quality.
+
+The fix: **wire the STEP arm through the SAME `band_quality_ok()` predicate** (the P2 one, its module
+defaults `DEFAULT_BAND_QUALITY_MAX_MAD_MS=15.0` / `DEFAULT_BAND_QUALITY_MIN_MATCHED=30` — single-sourced,
+never a retyped 15/30).
+
+- **`classify_av_step`** gains `recent_mad_ms` / `recent_matched_min` params and one check —
+  `band_quality_ok(...) is False → LOW_QUALITY` — positioned AFTER REPIN and BEFORE the STEP/HEALTHY
+  decision, byte-identical ordering to `classify_av_band`. The three-state ABSENT-vs-CORRUPT rule is
+  the same and load-bearing: an ABSENT facet (older box) → `None` (NOT False) → PROCEED to the legacy
+  step judgement, so a genuine step is never swallowed; a NON-FINITE mad → False → LOW_QUALITY.
+- **`analyze`** reads `av_offset_recent_mad_ms` / `av_offset_recent_matched_min` from the parsed
+  bundle dict via the same `_float_or_none`/`_int_or_none` path `analyze_band` uses and passes them
+  through. `extract_av_step` (the 7-field public helper) is untouched.
+- **`handle_box`** gains a `LOW_QUALITY` case: log-only with the BAND arm's exact wording
+  (`… dock reading not trustworthy … -- step not judged, no page`), NO page, NO „still stepped"
+  re-ping, and NO RECOVERY ping. It resets ONLY the confirm counter (a noisy pass must not count
+  toward the 2-pass confirm — mirroring the BAND arm's LOW_QUALITY) and leaves the alert latch
+  (`alerted_/alert_base_`) untouched; crucially it does NOT run the HEALTHY branch, so
+  `recovered_to_baseline` never treats a LOW_QUALITY pass as a recovery.
+
+Live proof (16.9., stream, threshold unset): `recent_med 343.5 / base 404.5` (`step_ms −61.0`, a
+pre-fix STEP page since |−61| > 45) now classifies **LOW_QUALITY — step not judged, no page**,
+matching the BAND arm in the same pass. Until this deploys, the dev1 timer's STEP arm is neutered
+with an `AV_STEP_THRESHOLD_MS=100000` drop-in (remove after deploy, same as the P2 band drop-in).
+
+**Tier-0:** `pytest tests/python/test_av_step_stepgate_1319.py` (classify/analyze/CLI + a sourced-bash
+orchestrator test that overrides `fetch_bundle_json` and asserts the LOW_QUALITY branch is log-only,
+no notify, confirm reset) + the existing `test_av_step_decision_1267.py` (unchanged, still green).
