@@ -12541,3 +12541,25 @@ no version bump (worktree lane; supervisor cherry-picks).
     here). bash -n + shellcheck clean; py_compile clean. LIVE read-only --dry-run 16.9. against
     strih/stream/resolume = HEALTHY (relaunch/stale lags correctly not paged), strih-lx = SKIP
     (unreachable). NO rig writes.
+## issue 1099 — calibrate the issue-1079 purple-noise roughness threshold + wire PURPLE_NOISE report-only (lane/1099-noise) — 2026-09-16
+- Phase 2 (report-only) of the issue-1079 Elgato purple-noise metric. UNPARKED 16.9 after the rig
+  returned to the LAN (13.9); mined the calibration data read-only.
+- DATA (read-only journal mining, no rig writes): dev1 `splitter-port-alert-watchdog` journal since
+  13.9 (7217 per-box verdict lines — every degraded DEAD_PORT/SOURCE_WIDE was `colour=0` flat, rough
+  0.0–14.1, incl. the cam2 12:59–13:04 re-cabling window at rough=0.1) + all 7 camboxes' OWN journals
+  (~38.1k colour + 421 grayscale `capture chroma:` samples). Fleet healthy COLOUR roughness: p99 18.5,
+  MAX 22.5 (cam2 imag-HDMI path; splitter cams ≤13.7); grayscale ≤14.7. Purple-noise POSITIVE CLASS
+  ABSENT — 0 colour samples ≥25/≥30/≥40 anywhere.
+- CALIBRATION: NOISE_ROUGHNESS_THRESHOLD 30.0 → 40.0 (≥2× healthy p99=37, 1.78× healthy max, below the
+  analytic ~73 noise floor). Wired `splitter_health_classify` PURPLE_NOISE (colour + rough>threshold,
+  optional/backward-compatible args + a float-safe compare) + a watchdog NOISE-SUSPECT report-only
+  branch; NEVER pages (positive class unmeasured). DEAD_PORT stays the only paging verdict.
+- GO-LIVE deferred (documented in the rule): needs a real Elgato no-signal `rough=` (measures the true
+  noise floor) + the ≥1-low-rough-sibling self-anchor before arming the page. Owner stance "prah bez
+  kalibracneho bodu nehybem" honoured — the page is off; the report-only surface + the healthy-side
+  calibration ship.
+- Commits: RED 30570fc5d test(#1099) → GREEN 3e93cb0ba fix(#1099) → docs (this).
+- Tier-0 verify (no cargo): rustc --test replica RED@30.0 / GREEN@40.0; splitter-health.sh classify
+  12/12 (incl. backward-compat + DEAD_PORT/SOURCE_WIDE/NODATA/NO_CAPTURE regressions) + watchdog
+  driver replica (PURPLE_NOISE report-only, no page; mixed fleet; grey-box DEAD_PORT still pages);
+  cargo fmt --all --check + bash -n + shellcheck -S warning clean. The Rust harnesses run at CI.
