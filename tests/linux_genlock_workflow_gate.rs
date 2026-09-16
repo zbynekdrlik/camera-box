@@ -72,18 +72,20 @@ fn full_build_depends_on_the_compile_check() {
 #[test]
 fn distroav_configured_against_installed_obs_sdk() {
     let wf = read(WF);
+    // issue 1317: the strih-lx full bundle is the THIRD job that builds DistroAV against its own
+    // installed OBS SDK prefix, so every count below is 3 (compile-check + imag-parity + strih).
     assert_eq!(
         wf.matches("--component Development").count(),
-        2,
-        "#460: both jobs must `cmake --install ... --component Development` (the #392 trick) — \
-         without it, libobsConfig.cmake / obs-frontend-apiConfig.cmake never land in the SDK \
-         prefix and DistroAV's find_package(libobs REQUIRED) fails to resolve."
+        3,
+        "#460/1317: all three jobs must `cmake --install ... --component Development` (the #392 \
+         trick) — without it, libobsConfig.cmake / obs-frontend-apiConfig.cmake never land in the \
+         SDK prefix and DistroAV's find_package(libobs REQUIRED) fails to resolve."
     );
     assert_eq!(
         wf.matches("CMAKE_PREFIX_PATH").count(),
-        2,
-        "#460: both DistroAV configure steps must set -DCMAKE_PREFIX_PATH=<installed OBS SDK> \
-         so DistroAV links against the genlock-patched libobs, not a system OBS."
+        3,
+        "#460/1317: all three DistroAV configure steps must set -DCMAKE_PREFIX_PATH=<installed OBS \
+         SDK> so DistroAV links against the genlock-patched libobs, not a system OBS."
     );
 }
 
