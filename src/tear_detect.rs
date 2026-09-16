@@ -934,7 +934,7 @@ mod tests {
         );
         // Report-only signals that make "no aux source" honest without a separate viability.
         assert!(
-            !signal_operable(&[&s]),
+            !signal_operable(std::slice::from_ref(&s)),
             "aux never decoded -> not operable (report-only)"
         );
         let proof = summarize_projection_leg(&[&s]);
