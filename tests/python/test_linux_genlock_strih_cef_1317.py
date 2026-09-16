@@ -49,6 +49,15 @@ def _job_run_text(job):
     return "\n".join(parts)
 
 
+def _step_run_containing(job, needle):
+    """Return the `run` of the FIRST step whose run text contains `needle` (or None)."""
+    for step in job.get("steps", []):
+        run = step.get("run")
+        if isinstance(run, str) and needle in run:
+            return run
+    return None
+
+
 # ---- group 1: the workflow ---------------------------------------------------------------------
 
 def test_strih_job_enables_browser():
@@ -98,9 +107,14 @@ def test_strih_job_caches_cef_keyed_on_version():
 
 
 def test_strih_job_passes_cef_root_dir_to_cmake():
-    jobs = _wf_jobs()
-    run = _job_run_text(jobs[STRIH_JOB])
-    assert "CEF_ROOT_DIR" in run, (
+    # Scoped to the OBS Configure step (the load-bearing arg) — NOT the whole job, where the fetch
+    # step's CEF_ROOT_DIR=$GITHUB_ENV export would satisfy a job-wide substring even if the cmake
+    # flag were deleted (review finding 1).
+    # Target the OBS configure step unambiguously (OBS_VERSION_OVERRIDE is only in it — 'ubuntu-ci'
+    # alone is a prefix of the DistroAV step's 'ubuntu-ci-x86_64').
+    configure = _step_run_containing(_wf_jobs()[STRIH_JOB], "OBS_VERSION_OVERRIDE")
+    assert configure is not None, "1317: the strih job must have an OBS configure step"
+    assert "-DCEF_ROOT_DIR" in configure, (
         "1317: the strih OBS configure must pass -DCEF_ROOT_DIR pointing at the extracted CEF dir"
     )
 
@@ -135,6 +149,13 @@ def test_workflow_cef_hash_matches_vendored_pin():
     assert cef["version"] == CEF_VERSION
     assert cef["hashes"]["ubuntu-x86_64"] == CEF_UBUNTU_X64_SHA256
     assert CEF_UBUNTU_X64_SHA256 in _wf_text(), "workflow CEF hash drifted from the vendored pin"
+    # The archive's revision suffix (_v<rev>) must track the vendored revision.ubuntu-x86_64 pin — a
+    # bump to _v7 at the same 6533 version would otherwise 404 at CI (review finding 2).
+    rev = cef["revision"]["ubuntu-x86_64"]
+    archive = str(_wf_jobs()[STRIH_JOB]["env"]["CEF_ARCHIVE"])
+    assert f"_v{rev}." in archive, (
+        f"1317: CEF_ARCHIVE ({archive}) must carry the vendored revision suffix _v{rev}"
+    )
 
 
 # ---- group 2: verify-strih browser-bundle predicates (sourced bash over a fixture root) ---------
@@ -174,3 +195,14 @@ def test_browser_bundle_ok_present_and_missing(tmp_path):
         f'| strih_lx_browser_bundle_ok'
     )
     assert _source(find_cmd2).returncode != 0, "missing libcef.so must fail the bundle check"
+
+    # missing obs-browser.so: libcef.so alone must also FAIL (review finding 5).
+    root3 = tmp_path / "obs-genlock-nobrowser"
+    plug3 = root3 / "lib" / "obs-plugins"
+    plug3.mkdir(parents=True)
+    (plug3 / "libcef.so").write_text("")
+    find_cmd3 = (
+        f'find "{root3}" -type f \\( -name obs-browser.so -o -name libcef.so \\) '
+        f'| strih_lx_browser_bundle_ok'
+    )
+    assert _source(find_cmd3).returncode != 0, "missing obs-browser.so must fail the bundle check"
