@@ -62,6 +62,16 @@ DEFAULT_MIN_SAMPLES = 6
 # reports the raw age; this dev1 threshold is the single place the STALE bound lives.
 DEFAULT_STALE_THRESHOLD_S = 300
 
+# #1325 — the freshness window for the dock's own QUALITY (UPDATED/LOCKED matched/mad) line. When the
+# quality facet is ABSENT (recent_mad_ms None) but the dock has emitted NO quality line within this
+# many seconds, its decoder has stopped (the QPSK marker cadence 0.5 s incident, 16.9.2026) and the
+# SUGGESTED offsets it is still emitting are untrustworthy -> LOW_QUALITY (no page). A FRESH quality
+# age (dock actively measuring, just no cluster in THIS recent window) OR an ABSENT age (older box
+# with no quality line at all) keeps #1319's "absent quality -> proceed, never swallow a real drift".
+# Matches DEFAULT_STALE_THRESHOLD_S so an absent-quality reading is trusted for the same window a
+# present series is, before it is judged dead.
+DEFAULT_QUALITY_STALE_S = 300
+
 
 def _loads_obj(bundle_json_text):
     """A /bundle-state.json body -> its dict, or None (empty/None input, non-JSON, or a non-object
@@ -124,7 +134,8 @@ def extract_av_step(bundle_json_text):
 def classify_av_step(recent_med, base_med, pin_stable, age_s, n_recent, n_base, box_reachable,
                      step_threshold_ms=DEFAULT_STEP_THRESHOLD_MS, min_samples=DEFAULT_MIN_SAMPLES,
                      stale_threshold_s=DEFAULT_STALE_THRESHOLD_S,
-                     recent_mad_ms=None, recent_matched_min=None):
+                     recent_mad_ms=None, recent_matched_min=None,
+                     quality_age_s=None, quality_stale_s=DEFAULT_QUALITY_STALE_S):
     """One box's verdict. `box_reachable` is 1 iff the JSON was fetched this pass.
 
       box_reachable != 1                    -> SKIP    (defer #732/#1001; never our page)
@@ -168,7 +179,13 @@ def classify_av_step(recent_med, base_med, pin_stable, age_s, n_recent, n_base, 
     # DEFAULT_BAND_QUALITY_* — single-sourced, never a retyped 15/30). None (facet absent, older box)
     # is NOT False, so the step still judges; a non-finite mad -> False -> LOW_QUALITY (a corrupt
     # reading is untrustworthy). See the 16.9.2026 false-page incident.
-    if band_quality_ok(recent_mad_ms, recent_matched_min) is False:
+    q = band_quality_ok(recent_mad_ms, recent_matched_min)
+    if q is False:
+        return "LOW_QUALITY"
+    # #1325 — the quality facet is ABSENT (q is None) AND the dock's last quality line is STALE ->
+    # its decoder has stopped, so the SUGGESTED offsets driving recent_med/base_med are untrustworthy
+    # -> LOW_QUALITY (no page). A FRESH or ABSENT quality age preserves #1319's absent->proceed.
+    if q is None and quality_age_s is not None and quality_age_s > quality_stale_s:
         return "LOW_QUALITY"
     if abs(recent_med - base_med) > step_threshold_ms:
         return "STEP"
@@ -215,9 +232,13 @@ def analyze(bundle_json_text, box_reachable, step_threshold_ms=DEFAULT_STEP_THRE
     # None -> band_quality_ok None -> today's legacy step judgement (older box unchanged).
     recent_mad_ms = _float_or_none(obj.get("av_offset_recent_mad_ms")) if isinstance(obj, dict) else None
     recent_matched_min = _int_or_none(obj.get("av_offset_recent_matched_min")) if isinstance(obj, dict) else None
+    # #1325 — the freshest dock-quality-line age; gates an ABSENT quality facet to LOW_QUALITY when
+    # the dock stopped decoding (age stale), else proceeds (older box / dock actively measuring).
+    quality_age_s = _int_or_none(obj.get("av_offset_quality_age_s")) if isinstance(obj, dict) else None
     verdict = classify_av_step(recent_med, base_med, pin_stable, age_s, n_recent, n_base,
                                box_reachable, step_threshold_ms, min_samples, stale_threshold_s,
-                               recent_mad_ms=recent_mad_ms, recent_matched_min=recent_matched_min)
+                               recent_mad_ms=recent_mad_ms, recent_matched_min=recent_matched_min,
+                               quality_age_s=quality_age_s)
     step_ms = None
     if recent_med is not None and base_med is not None:
         step_ms = round(recent_med - base_med, 1)
@@ -274,7 +295,8 @@ def classify_av_band(recent_med, pin_stable, n_recent, dock_live_age_s, box_reac
                      min_samples=DEFAULT_MIN_SAMPLES, stale_threshold_s=DEFAULT_STALE_THRESHOLD_S,
                      recent_mad_ms=None, recent_matched_min=None,
                      quality_max_mad_ms=DEFAULT_BAND_QUALITY_MAX_MAD_MS,
-                     quality_min_matched=DEFAULT_BAND_QUALITY_MIN_MATCHED):
+                     quality_min_matched=DEFAULT_BAND_QUALITY_MIN_MATCHED,
+                     quality_age_s=None, quality_stale_s=DEFAULT_QUALITY_STALE_S):
     """One box's ABSOLUTE-BAND verdict (`box_reachable` is 1 iff the JSON was fetched this pass):
 
       box_reachable != 1                          -> SKIP          (defer #732/#1001; never our page)
@@ -309,8 +331,14 @@ def classify_av_band(recent_med, pin_stable, n_recent, dock_live_age_s, box_reac
         # is LOW_QUALITY: the OUT_OF_BAND page requires a trustworthy reading. band_quality_ok
         # returns None when the quality facet is absent (older box / no cluster line in the window),
         # which is NOT False, so the band still judges -- a real sustained offset is never swallowed.
-        if band_quality_ok(recent_mad_ms, recent_matched_min, quality_max_mad_ms,
-                           quality_min_matched) is False:
+        q = band_quality_ok(recent_mad_ms, recent_matched_min, quality_max_mad_ms,
+                            quality_min_matched)
+        if q is False:
+            return "LOW_QUALITY"
+        # #1325 — quality facet ABSENT but the dock's last quality line is STALE (its decoder stopped,
+        # the 16.9.2026 marker-cadence incident): the SUGGESTED offsets are untrustworthy -> LOW_QUALITY
+        # (no page). A fresh/absent quality age keeps #1319's absent->proceed (real drift never swallowed).
+        if q is None and quality_age_s is not None and quality_age_s > quality_stale_s:
             return "LOW_QUALITY"
         if abs(recent_med - band_reference_ms) > band_ms:
             return "OUT_OF_BAND"
@@ -341,9 +369,12 @@ def analyze_band(bundle_json_text, box_reachable, band_reference_ms=DEFAULT_BAND
     # from an ABSENT facet (None -> proceed), so it is read here as a plain float-or-None.
     recent_mad_ms = _float_or_none(obj.get("av_offset_recent_mad_ms")) if isinstance(obj, dict) else None
     recent_matched_min = _int_or_none(obj.get("av_offset_recent_matched_min")) if isinstance(obj, dict) else None
+    # #1325 — the freshest dock-quality-line age (LOW_QUALITY gate on an absent-but-stale reading).
+    quality_age_s = _int_or_none(obj.get("av_offset_quality_age_s")) if isinstance(obj, dict) else None
     verdict = classify_av_band(recent_med, pin_stable, n_recent, dock_live_age_s, box_reachable,
                                band_reference_ms, band_ms, min_samples, stale_threshold_s,
-                               recent_mad_ms=recent_mad_ms, recent_matched_min=recent_matched_min)
+                               recent_mad_ms=recent_mad_ms, recent_matched_min=recent_matched_min,
+                               quality_age_s=quality_age_s)
     band_delta_ms = None if recent_med is None else round(recent_med - band_reference_ms, 1)
     q = band_quality_ok(recent_mad_ms, recent_matched_min)
     return {"verdict": verdict, "recent_med_ms": recent_med, "band_reference_ms": band_reference_ms,
