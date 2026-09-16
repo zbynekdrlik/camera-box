@@ -101,6 +101,15 @@ BAND_DUTY_MIN_PCT="${AUDIO_BAND_DUTY_MIN_PCT:-10}"
 BAND_MIN_SAMPLES="${AUDIO_BAND_MIN_SAMPLES:-8}"
 BAND_CONFIRM_THRESHOLD="${AUDIO_BAND_CONFIRM_THRESHOLD:-$CONFIRM_THRESHOLD}"
 
+# camera-box #1325 — the buffered_ms DRIFT/STEP arm. REPORT-ONLY: it never pages (no notify, no
+# confirm/throttle/dedup state) — it LOGS the mbc buffered_ms verdict every pass to the machine
+# channel so the audio-timeline drift the ASRC fails to hold (issue 1325) is visible between runs.
+# Promoting STEP/DRIFT to a phone page is a future ticket once the vendored ASRC fix is measured.
+BUFFERED_DRIFT_MS_PER_MIN="${AUDIO_BUFFERED_DRIFT_MS_PER_MIN:-0.6}"
+BUFFERED_STEP_MS="${AUDIO_BUFFERED_STEP_MS:-20}"
+BUFFERED_MIN_SAMPLES="${AUDIO_BUFFERED_MIN_SAMPLES:-6}"
+BUFFERED_STALE_S="${AUDIO_BUFFERED_STALE_S:-180}"
+
 DECIDE="${AUDIO_LAG_DECIDE:-$HERE/audio_lag_decision.py}"
 NOTIFY="${AIRULESET_NOTIFY:-$HOME/devel/airuleset/airuleset.py}"
 REPO_SLUG="${AUDIO_LAG_ALERT_REPO:-zbynekdrlik/camera-box}"
@@ -409,6 +418,31 @@ require_tools() {
   return 0
 }
 
+# #1325 — the buffered_ms arm. REPORT-ONLY (no notify / no confirm / no dedup state): it fetches the
+# bundle-state, classifies the mbc buffered_ms drift/step, and LOGS the verdict. Self-contained and
+# disjoint from the lag/band arms; a fetch failure is SKIP (deferred to #732/#1001), never a page.
+# handle_box_buffered <box> <ip>
+handle_box_buffered() {
+  local box="$1" ip="$2" body reachable buf_out verdict slope max_step n age
+
+  if body="$(fetch_bundle_json "$ip")"; then
+    reachable=1
+  else
+    reachable=0
+    body=""
+  fi
+
+  buf_out="$(printf '%s' "$body" | python3 "$DECIDE" buffered --box-reachable "$reachable" --drift-ms-per-min "$BUFFERED_DRIFT_MS_PER_MIN" --step-ms "$BUFFERED_STEP_MS" --min-samples "$BUFFERED_MIN_SAMPLES" --stale-threshold-s "$BUFFERED_STALE_S" 2>/dev/null)"
+  verdict="$(printf '%s\n' "$buf_out" | sed -n 's/^buffered_verdict=//p')"
+  slope="$(printf '%s\n' "$buf_out" | sed -n 's/^buffered_slope_ms_per_min=//p')"
+  max_step="$(printf '%s\n' "$buf_out" | sed -n 's/^buffered_max_step_ms=//p')"
+  n="$(printf '%s\n' "$buf_out" | sed -n 's/^buffered_n=//p')"
+  age="$(printf '%s\n' "$buf_out" | sed -n 's/^buffered_age_s=//p')"
+  # REPORT-ONLY: one machine-channel log line per pass. STEP/DRIFT are the sawtooth / drain the
+  # ASRC fails to hold (issue 1325); no phone page until the vendored fix is measured.
+  log "$box buffered ($ip): reachable=$reachable verdict=${verdict:-<none>} slope=${slope:-}ms/min max_step=${max_step:-}ms n=${n:-} age=${age:-}s (report-only; drift>${BUFFERED_DRIFT_MS_PER_MIN}ms/min or step>=${BUFFERED_STEP_MS}ms)"
+}
+
 main() {
   log "pass start (dry_run=$DRY_RUN, threshold=${THRESHOLD_MS}ms, stale=${STALE_THRESHOLD_S}s, boxes='$BOXES')"
   require_tools || { log "pass end (aborted: missing required tools)"; return 3; }
@@ -419,6 +453,8 @@ main() {
     handle_box "$box" "$ip"
     # #1265 — the BAND arm (self-contained, disjoint state; runs regardless of the lag arm's verdict).
     handle_box_band "$box" "$ip"
+    # #1325 — the buffered_ms arm (REPORT-ONLY; self-contained, log-only, no page).
+    handle_box_buffered "$box" "$ip"
   done
   log "pass end"
 }
