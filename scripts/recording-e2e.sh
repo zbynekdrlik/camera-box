@@ -3265,7 +3265,9 @@ else
   _md_json="$("$_md_probe_bin" --qpsk-probe "$_md_wav_local" --av-audio-track 0 \
     --qpsk-probe-seconds "$AUDIO_DECODABILITY_PROBE_SECS" \
     --qpsk-min-clusters "$AUDIO_DECODABILITY_MIN_CLUSTERS" \
-    --qpsk-silent-db "$AUDIO_DECODABILITY_SILENT_DB" --qpsk-loud-db "$AUDIO_DECODABILITY_LOUD_DB" 2>&1 || true)"
+    "--qpsk-silent-db=$AUDIO_DECODABILITY_SILENT_DB" "--qpsk-loud-db=$AUDIO_DECODABILITY_LOUD_DB" 2>&1 || true)"
+  # (the `=` form is mandatory: both bars are NEGATIVE dB and clap reads a separate `-60` token as
+  #  the short flag `-6` -- PR 1326 E2E 35134835641 aborted [4b3/8] on exactly that, issue 1324)
   rm -f "$_md_wav_local"
   _md_verdict="$(marker_decodability_parse_verdict "$_md_json" || true)"
   if [ -z "$_md_verdict" ]; then

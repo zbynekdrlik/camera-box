@@ -469,12 +469,12 @@ struct Args {
     qpsk_min_clusters: u64,
     /// #1324: the SILENCE floor (dBFS) — below it AND undecodable ⇒ SILENT. Single-sourced from
     /// `audio-presence-preflight.sh::audio_preflight_default_threshold_db` (−60) by the shell step.
-    #[arg(long, default_value_t = -60.0)]
+    #[arg(long, default_value_t = -60.0, allow_negative_numbers = true)]
     qpsk_silent_db: f64,
     /// #1324: the LOUD covariate (dBFS) — above it AND undecodable ⇒ POLLUTED. Single-sourced from
     /// `audio_preflight_default_ceiling_db` (−20). A COVARIATE only (issue 1323's bar was
     /// miscalibrated on the broken chain): a loud-but-DECODABLE capture is OK, never POLLUTED.
-    #[arg(long, default_value_t = -20.0)]
+    #[arg(long, default_value_t = -20.0, allow_negative_numbers = true)]
     qpsk_loud_db: f64,
 }
 
@@ -8288,6 +8288,40 @@ mod tests {
              corner burn (#463); reserve cam3 a FRESH, unique run_id instead of reusing it",
             args.burn_cam3_run_id
         );
+    }
+
+    /// #1324 — the qpsk-probe dB bars are NEGATIVE numbers; clap must accept them as values both in
+    /// the `--flag=-60` form (what recording-e2e.sh passes) and as a separate `-60` token
+    /// (`allow_negative_numbers`). PR 1326's E2E 35134835641 aborted [4b3/8] with
+    /// `error: unexpected argument '-6' found` because the separate-token form was read as the
+    /// short flag `-6` — a live-rig-only failure the fake-probe python test could never see.
+    #[test]
+    fn qpsk_probe_negative_db_bars_parse_in_both_forms_1324() {
+        use clap::Parser;
+
+        let eq = super::Args::try_parse_from([
+            "recording-verdict",
+            "--qpsk-probe",
+            "x.wav",
+            "--qpsk-silent-db=-60",
+            "--qpsk-loud-db=-20",
+        ])
+        .expect("#1324: the `--flag=-N` form must parse");
+        assert_eq!(eq.qpsk_silent_db, -60.0);
+        assert_eq!(eq.qpsk_loud_db, -20.0);
+
+        let sep = super::Args::try_parse_from([
+            "recording-verdict",
+            "--qpsk-probe",
+            "x.wav",
+            "--qpsk-silent-db",
+            "-60",
+            "--qpsk-loud-db",
+            "-20",
+        ])
+        .expect("#1324: a separate negative token must parse (allow_negative_numbers)");
+        assert_eq!(sep.qpsk_silent_db, -60.0);
+        assert_eq!(sep.qpsk_loud_db, -20.0);
     }
 
     /// #312/#755 — cam2/cam5/cam6/cam7's default capture-burn run_ids must ALSO be unique among

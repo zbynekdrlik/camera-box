@@ -150,3 +150,15 @@ def test_e2e_single_sources_the_db_bars_from_the_audio_presence_lib():
     region = s[start:end]
     assert "audio_preflight_default_threshold_db" in region
     assert "audio_preflight_default_ceiling_db" in region
+
+
+def test_harness_passes_the_negative_db_bars_in_equals_form():
+    """PR 1326 E2E 35134835641 aborted [4b3/8] with clap's `error: unexpected argument '-6' found`:
+    a separate `-60` token after `--qpsk-silent-db` is read as the short flag `-6`. The harness must
+    pass BOTH negative bars in the `--flag=VALUE` form, which clap always takes literally."""
+    s = _E2E.read_text(encoding="utf-8")
+    step = s.index("[4b3/8] #1324 marker-decodability preflight")
+    block = s[step : s.index("[4c/8]", step)]
+    assert '"--qpsk-silent-db=$AUDIO_DECODABILITY_SILENT_DB"' in block
+    assert '"--qpsk-loud-db=$AUDIO_DECODABILITY_LOUD_DB"' in block
+    assert '--qpsk-silent-db "' not in block and '--qpsk-loud-db "' not in block
