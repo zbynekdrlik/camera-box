@@ -318,3 +318,50 @@ above the floor / with margin" and reconcile any N now on the wrong side of the 
 fmt/type check never catches a stale narrative number. Reconcile it in ONE direction (here: those
 readings were on PRE-fix bundles carrying the now-fixed churn; the post-fix rig reads ~0.998), and
 name the one-line report-only revert as the guard rail for the residual thin-sample false-red risk.
+
+## Issue 1242 STRICT-ZERO RESTORE (2026-09-16, FINAL step): both seams disarmed, CAM2 override dropped
+
+The interim walk-back above left the tolerance channel governing on an n=1 post-cure sample. The
+FINAL step fired once the precondition it stated was met: `scripts/window_gate_walkdown.py
+02b53180b 7e8efff6a` (segregated by the rig-verified `version-strih.json.genlock_build_sha`; the
+cure bundle `02b53180b` OR its descendant `7e8efff6a` = POST) mined the four post-cure runs:
+
+| run | genlock | w_fail_strict | worst BEAT-unif | CAM2 max | nonzero windows |
+|---|---|---|---|---|---|
+| 180691712 | 02b53180b | 0 | 0.9988 | 0 | all 0/0 |
+| 977889848 | 7e8efff6a | 0 | 0.9988 | 0 | all 0/0 (PR #1322 attempt 2) |
+| 2019585820 | 7e8efff6a | 0 | 0.9976 | 0 | all 0/0 (attempt 3, undec 1 report-only) |
+| 622403283 | 7e8efff6a | 1 | 0.9976 | 0 | CAM1 0/1 (attempt 1) |
+
+`w_fail_strict` = `windows_failed_report_only`; `CAM2 max` = the new `cam_max` column (worst
+`max(copies,gaps)` for CAM2, the override-removal signal). Two subtleties the restore turned on:
+
+1. **>= 2 consecutive strict-clean post-cure runs MET** (977889848 + 2019585820, plus 180691712,
+   all `windows_failed_report_only == 0`). So the restore = DISARM BOTH seams
+   (`copies_gaps_tolerance_gates_overall_pass()` AND `segment_singleton_allowance_gates_overall_pass()`
+   -> `false`), routing `decide`'s fold to the `else` arm (`copies == 0 && gaps == 0`). This is a
+   ONE-FUNCTION flip per seam; the mechanism stays wired (`gate-allowance-restore-red-green`).
+2. **The `WINDOW_COPIES_GAPS_TOLERANCE` const is KEPT at 2, NOT set to 0.** Once the seams are
+   disarmed the BLOCKING fold ignores the const entirely (the `else` arm has no tolerance term), so
+   its value is pure OBSERVABILITY. It stays 2 as the #1132/#1220 dormant lens so `relaxed_pass`
+   still reports what a tol-2 rescue WOULD say -- a `relaxed_pass==true`, `overall_pass_term==false`
+   window is the disarmed rescue visibly doing nothing (the #1132 masking guard). Run 622403283's
+   CAM1 gap reads exactly this: `windows_over_copies_gaps_tolerance=0` (within the tol-2 lens) yet
+   `windows_failed_report_only=1` (strict-failing). Setting the const to 0 would collapse
+   `relaxed_pass` into `strict_pass` and destroy that visibility, and would shrink the probe-gated
+   `switch_schedule_continuity.rs` `over_by_one = TOL+1` fixture to the minimal 1-slot edge (Tier-0
+   #557 can't compile-verify it). So "tolerance 0" is honoured for the FOLD (the else arm tolerates
+   zero) without the const going to 0. A future re-arm re-calibrates the const from fresh data.
+
+**CAM2 per-cambox override DROPPED (`&[]`).** cam2 became splitter-fed ~16.9 13:00 (the imag-HDMI
+projection tap retired with imag-nb, issue 1316); all four post-16.9 splitter-fed runs read CAM2 0/0
+on every window (the `CAM2 max` column = 0), so the issue-1249 HW carve-out is no longer needed. The
+lookup machinery (`copies_gaps_tolerance_for_cambox`, `decide_with_tolerance`, the per-window field)
+stays fully wired -- the empty map is the tested walk-back state.
+
+**Guard rail (the one-line report-only revert).** Attempt 1 (622403283) carried one CAM1 gap 0/1 --
+under strict-zero it correctly REDs `overall_pass` (the owner's "copies=0 must block" directive). If
+a healthy-chain run ever reds on ONLY these seams, the documented revert is re-arming
+`copies_gaps_tolerance_gates_overall_pass() -> true` (back to the tol-2 fold) -- a data-thin
+false-red safety valve, NEVER a silent widen. Data table reproduced by
+`scripts/window_gate_walkdown.py 02b53180b 7e8efff6a`.

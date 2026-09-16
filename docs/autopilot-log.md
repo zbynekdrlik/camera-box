@@ -12642,3 +12642,28 @@ no version bump (worktree lane; supervisor cherry-picks).
 - **Verify:** anchor-count + first-occurrence sweep over recording-e2e.sh clean (only generic substrings and
   the new anchors moved), 703 merge->exit distance unchanged (10106), `bash -n` + `shellcheck -S warning`
   clean, `cargo fmt --all --check` clean, full `pytest tests/python` green (see commit).
+
+## issue 1242 — FINAL strict-zero restore (walk-back completed) — lane/1242-strictzero (2026-09-16)
+- **What:** the residual FIFO copy churn source was fixed upstream (issues 1318/1320 render-freeze cure,
+  genlock bundle 02b53180b / descendant 7e8efff6a). The interim lane tightened tol 5->2 + floor 0.90->0.95
+  on n=1 post-cure data; this FINAL step restores the absolute strict-zero per-segment blocking fold.
+- **Change (`src/window_gate.rs`):** DISARM both seams — `copies_gaps_tolerance_gates_overall_pass()` AND
+  `segment_singleton_allowance_gates_overall_pass()` -> `false` — so `decide`'s `else` arm
+  (`copies == 0 && gaps == 0`) governs `overall_pass_term` (any nonzero copies/gaps REDs). Drop the CAM2
+  per-cambox override to `&[]`. `WINDOW_COPIES_GAPS_TOLERANCE` KEPT at 2 as the dormant observability lens
+  (NOT set to 0 — the fold ignores the const once the seams are disarmed; the const stays the #1132/#1220
+  lens so `relaxed_pass` still shows the disarmed rescue visibly doing nothing). `UNIFORM_FRACTION_MIN`
+  already 0.95 from the interim lane — unchanged.
+- **Data (mining tool, segregated by rig-verified genlock sha):** post-cure runs 180691712 (02b53180b) +
+  977889848 + 2019585820 (7e8efff6a) all windows_failed_report_only==0, every window 0/0, worst
+  beat-corrected uniformity >= 0.9976, CAM2 max 0 across all four post-16.9 splitter-fed runs. Attempt 1
+  (622403283) carried one CAM1 gap 0/1 — strict-zero correctly REDs it (owner directive); guard rail =
+  one-line report-only revert re-arming the tolerance seam.
+- **Commits:** RED 477bc2699 (`tests/verdict_gate_strict_fold_1242.rs` pins the strict-fold state, fails at
+  armed seams) -> GREEN eb2f96c0e (both seams disarmed, CAM2 map emptied, in-module #1220/#1251 tests
+  inverted, docs) -> 3055edebe (`scripts/window_gate_walkdown.py` `cam_max` CAM2 column + pytest) -> docs.
+- **Verify (Tier-0, zero cargo compile):** `rustc --edition 2021 --test` replica of the fold RED(armed)->
+  GREEN(disarmed) + every disarmed-target assertion; `cargo fmt --all --check` clean; doc-lint grep clean
+  (no new list-continuation lines); `python3 -m pytest tests/python/test_window_gate_walkdown_1242.py` 8/8.
+  CI type-checks the probe-gated files (switch_schedule_continuity.rs tracks TOL+1 dynamically at the
+  retained tol=2, needs no edit).
