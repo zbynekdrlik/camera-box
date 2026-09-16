@@ -708,14 +708,25 @@ def gather_bundle_state(
             # it. Appended at the END of the tuple (order-sensitive unpack below). "" -> facet
             # omitted (steady state, no relock line), never a fabricated 0.
             bsg.relock_bursts_from_log(log_text),
+            # #1325 — the in-log age of the freshest dock QUALITY line (a single string) from the
+            # SAME bounded log_text (no second read); the dev1 band/step arms gate LOW_QUALITY on it
+            # when the quality facet is absent AND this age is stale. Appended at the END.
+            bsg.av_offset_quality_age_from_log(log_text),
+            # #1325 — the mbc buffered_ms DRIFT/STEP shape (slope, max_step, n, age) from the SAME
+            # bounded log_text (no second read); the dev1 audio-lag watchdog's REPORT-ONLY buffered
+            # arm reads it. Appended at the END (order-sensitive unpack below).
+            bsg.buffered_ms_series_from_log(log_text, ref_src=ref_band_src),
         )
 
     (obs_version, distroav_version, output_fps, genlock_wall_clock, genlock_capability,
      audio_ts_lag, audio_ref_band, av_offset, av_offset_dock_live_age_s_val, genlock_lock,
-     program_render_lagged, av_offset_quality, relock_bursts) = _timed(
+     program_render_lagged, av_offset_quality, relock_bursts,
+     av_offset_quality_age_s_val, buffered_ms_series) = _timed(
         timings, "obs_log_parse", _parse_log_facets)
     av_offset_recent_mad_ms_val, av_offset_recent_matched_min_val = av_offset_quality
     relock_bursts_val, relock_bursts_age_s_val = relock_bursts
+    (buffered_ms_slope_val, buffered_ms_max_step_val, buffered_ms_n_val,
+     buffered_ms_age_s_val) = buffered_ms_series
     audio_ts_lag_ms_val, audio_ts_lag_src_val, audio_ts_lag_age_s_val = audio_ts_lag
     program_render_lagged_val, program_render_lagged_age_s_val = program_render_lagged
     (audio_ref_lag_src_val, audio_ref_lag_base_ms_val, audio_ref_lag_high_ms_val,
@@ -869,6 +880,13 @@ def gather_bundle_state(
         # LOW_QUALITY unless recent_mad_ms <= 15 AND recent_matched_min >= 30).
         av_offset_recent_mad_ms=av_offset_recent_mad_ms_val,
         av_offset_recent_matched_min=av_offset_recent_matched_min_val,
+        # #1325 — the freshest dock-quality-line age (LOW_QUALITY gate when quality absent + stale)
+        # and the mbc buffered_ms drift/step shape (REPORT-ONLY buffered arm). Omit-when-empty.
+        av_offset_quality_age_s=av_offset_quality_age_s_val,
+        buffered_ms_slope_ms_per_min=buffered_ms_slope_val,
+        buffered_ms_max_step_ms=buffered_ms_max_step_val,
+        buffered_ms_n=buffered_ms_n_val,
+        buffered_ms_age_s=buffered_ms_age_s_val,
         # #1227 — VB-Matrix presence (omit-when-empty; running="0" installed-but-dead surfaces as
         # DOWN, running="" not-installed is dropped -> UNKNOWN downstream, never a false negative).
         vb_matrix_running=vb_matrix_running_val,

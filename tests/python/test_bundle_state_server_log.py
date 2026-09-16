@@ -141,6 +141,42 @@ def test_gather_bundle_state_omits_audio_ts_lag_when_no_telemetry(monkeypatch, t
     assert "audio_ts_lag_src" not in state
 
 
+# #1325 — the mbc buffered_ms drift/step facets AND the dock-quality-line age facet must FLOW through
+# the server's gather (the order-sensitive _parse_log_facets tuple unpack must assign them correctly).
+def test_gather_bundle_state_exposes_buffered_ms_facets(monkeypatch, tmp_path):
+    lines = ["OBS 32.1.2 (64-bit, windows)"]
+    # a steady mbc buffered_ms drain over 10 min then a +47 refill jump (the tonight sawtooth)
+    for i, b in enumerate([76, 74, 72, 70, 68, 66, 64, 62, 60, 39, 86]):
+        lines.append(f"20:{i:02d}:24.585: audio-telemetry #800 'mbc': "
+                     f"ts_lag_ms=86 buffered_ms={b} pending=0 timing_adjust_ms=0")
+    state = _gather_with_log(monkeypatch, tmp_path, "\n".join(lines) + "\n")
+    assert state["buffered_ms_max_step_ms"] == "47"
+    assert int(state["buffered_ms_n"]) == 11
+    assert state["buffered_ms_age_s"] == "0"
+    assert "buffered_ms_slope_ms_per_min" in state
+
+
+def test_gather_bundle_state_exposes_quality_age_facet(monkeypatch, tmp_path):
+    pfx = "[obs-audio-video-sync-dock] av-sync-dock:"
+    lines = [
+        "OBS 32.1.2 (64-bit, windows)",
+        f"20:00:00.000: {pfx} UPDATED offset=12ms source=cluster matched=36 mad=9.0ms",
+    ]
+    # the decoder then stops emitting quality lines; only heartbeats advance the log for ~10 min
+    for m in range(1, 11):
+        lines.append(f"20:{m:02d}:00.000: {pfx} diag locked=yes")
+    state = _gather_with_log(monkeypatch, tmp_path, "\n".join(lines) + "\n")
+    assert "av_offset_quality_age_s" in state
+    assert int(state["av_offset_quality_age_s"]) >= 590
+
+
+def test_gather_bundle_state_omits_buffered_and_quality_age_when_absent(monkeypatch, tmp_path):
+    state = _gather_with_log(monkeypatch, tmp_path, "OBS 32.1.2 (64-bit, windows)\n")
+    for k in ("buffered_ms_slope_ms_per_min", "buffered_ms_max_step_ms", "buffered_ms_n",
+              "buffered_ms_age_s", "av_offset_quality_age_s"):
+        assert k not in state
+
+
 # #1231 — the FRESHNESS facet `audio_ts_lag_age_s` (in-log age of the freshest #800 line behind the
 # log's newest line) must FLOW through the server's gather from the SAME bounded log_text, so the
 # dev1 watchdog can surface a stale-while-log-advancing telemetry stall distinctly.
