@@ -175,6 +175,19 @@ to a bare-exe launch that drops strih's `--enable-media-stream` (interkom Browse
 stay LOCKED past a 3 s sleep — the swap's Copy-Item fails `being used by another process`; wait
 ~5 s+ or retry the copy once after the process list confirms obs64 is gone.
 
+**strih fast-DLL swap + the planner's #978 AHK gate (issue 1325 deploy, 16.9.2026):** a swap
+script that stops AutoHotkey64 BEFORE killing obs64 (so the watcher cannot respawn a bare-exe OBS
+mid-copy) leaves AHK=0 when the planner's launch program runs afterwards — the program's #978 gate
+then FAILS (`expected exactly 1 AutoHotkey64 process on this box, found 0`) AFTER it has already
+launched + session-verified OBS (SESSION OK printed first; exit code 1). The end state is still
+correct once you `Start-Process 'D:\_APPS\NL_STARTUP.ahk'` from the MCP Shell and re-count
+(AHK=1 session 1, obs64=1, title carries the new build sha), but the gate's red is expected in
+this order, not a defect. Two clean orderings: (a) restart AHK (MCP Shell) and confirm AHK=1 BEFORE
+running the launch program, so the #978 gate passes in-program (the deploy-genlock-fleet
+"AHK stop→restart-verified-BEFORE-launch" contract); or (b) run the program first and start AHK
+last, then verify by hand. Never leave the box with AHK=0 — the respawn watcher is the operator's
+safety net.
+
 **A libobs-touching deploy MUST converge ALL THREE boxes — imag included — or the next E2E
 refuses on genlock_parity (issue 962 session, 2026-08-03).** The fast-DLL variant above covers
 only strih+stream, but imag-nb consumes the SAME `vendor/obs-studio/**` tree (its libobs.so.30);
