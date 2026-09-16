@@ -162,7 +162,11 @@ fn synthesized_marker_audio_decodes_and_loud_is_still_ok() {
         r.cluster_samples >= 4,
         "a synthetic healthy cadence must cluster (got {r:?})"
     );
-    assert!(r.peak_dbfs > -20.0, "amp 0.5 is loud (> −20): {}", r.peak_dbfs);
+    assert!(
+        r.peak_dbfs > -20.0,
+        "amp 0.5 is loud (> −20): {}",
+        r.peak_dbfs
+    );
     assert_eq!(
         r.verdict,
         QpskProbeVerdict::Ok,
