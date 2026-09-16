@@ -401,3 +401,22 @@ window is genuinely clean (0/0) vs a nonzero absorbed one.
 Verify the flip locally with a std-only `rustc --edition 2021 --test` replica of
 `decide_with_tolerance` at armed vs disarmed seams (the fold logic is pure crate-root); CI is the
 first place the probe consumers type-check + run.
+
+## 16.9.2026 (release PR 1326 E2E attempt 2) — the strict-zero restore REDDED the 3rd splitter-fed run; the guard rail was pulled (full revert to the .632 fold)
+
+Run 35136632198 (RECORDING_E2E_RUN_ID 443513281) failed ONLY on the per-segment fold: CAM2 window 1
+copies=1 (`tick_before == tick_after`, `paired_with_catchup=false`) + gaps=1 (issue-883 net-span
+fallback), CAM2 window 2 gaps=1; every other window 0/0, A/V measured on 7 cams, painter CLEAN,
+`relaxed_pass=true` on both. The two clean runs the restore was calibrated on were a thin sample.
+Rather than the "re-arm only the tol-2 seam" one-liner, the supervisor `git revert`ed the THREE code
+commits of the restore (`076c56542` probe-fold consumers, `beb2a3254` seam flips + CAM2-override
+drop, `a2f6c72a2` strict pin test) — a MIXED state (tol seam armed, singleton disarmed, CAM2
+override dropped) has no matching probe-gated test expectations anywhere and cannot be compiled
+locally (Tier-0), so the exact .632 fold (CI-green + rig-green) is the only state provable without
+a CI round-trip. The docs/mining-tool commits stay. Issue 1242 stays OPEN: the residual churn is
+NOT root-caused. Data point from this run's per-box burn logs (mean of the last 20 `Streaming:`
+5 s windows): cam2 captured **299.4** / 300.5 emitted, cam1 299.7 / 300.6, cam3–7 ≥ 300.2 — the
+two under-cadence GRABBERS are the copy/gap sources (emit-fill repeats → a recording copy when it
+lands in strih's 30 fps decimation → the 883 net-span gap), not FIFO/optics. Re-entry for the
+strict restore: fix the cam1/cam2 capture cadence first, then ≥ 5 clean runs, then the seam flips
+(with the consumer sweep above).

@@ -12703,3 +12703,8 @@ no version bump (worktree lane; supervisor cherry-picks).
   `test_bundle_state_server_log.py`; `test_notify_dedup_key_sweep_1206.py` green — the report-only arm
   is notify-free); `bash -n` + `shellcheck -S warning` clean on `audio-lag-alert-watchdog.sh`. Rules
   updated: asrc-residual-floor, audio-lag-watchdog, av-step-upstream-detector.
+
+## 16.9.2026 21:45 — supervisor: strict-zero fold (issue 1242) reverted after the 3rd splitter-fed run redded on CAM2 1/1 + 0/1
+
+- Release PR 1326 E2E attempt 2 (35136632198) failed only on the per-segment fold; A/V measured on 7 cams with the 0.5 s marker, painter clean.
+- `git revert` of 076c56542 / beb2a3254 / a2f6c72a2 = the exact .632 fold; issue 1242 stays open with the grabber under-cadence data (cam2 299.4, cam1 299.7 captured per 300.5 emitted).
