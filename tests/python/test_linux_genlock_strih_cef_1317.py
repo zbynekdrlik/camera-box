@@ -60,15 +60,26 @@ def test_strih_job_enables_browser():
     )
 
 
-def test_strih_job_cef_fetch_with_sha256_and_pinned_hash():
-    jobs = _wf_jobs()
-    run = _job_run_text(jobs[STRIH_JOB])
-    assert "sha256sum" in run, "1317: the CEF fetch step must sha256-verify the download"
-    assert CEF_UBUNTU_X64_SHA256 in run, (
-        "1317: the strih job must verify CEF against the vendored pin's ubuntu-x86_64 sha256"
+def test_strih_job_pins_cef_in_env():
+    # Single-source: the version + sha256 + archive pin live ONCE in the job env block; the steps
+    # reference ${{ env.CEF_* }}. Assert the pin is present AND exact (the vendored ubuntu-x86_64 pin).
+    env = _wf_jobs()[STRIH_JOB].get("env", {})
+    assert str(env.get("CEF_VERSION")) == CEF_VERSION, "1317: strih job must pin CEF_VERSION=6533"
+    assert env.get("CEF_SHA256") == CEF_UBUNTU_X64_SHA256, (
+        "1317: strih job must pin CEF_SHA256 to the vendored ubuntu-x86_64 sha256"
     )
-    assert f"cef_binary_{CEF_VERSION}_linux_x86_64" in run, (
-        "1317: the CEF fetch must reference the pinned linux x86_64 CEF archive"
+    assert f"cef_binary_{CEF_VERSION}_linux_x86_64" in str(env.get("CEF_ARCHIVE", "")), (
+        "1317: strih job must pin CEF_ARCHIVE to the linux x86_64 CEF archive"
+    )
+
+
+def test_strih_job_cef_fetch_verifies_sha256():
+    # The fetch step must download the pinned archive and sha256-verify it (referencing the env pin).
+    run = _job_run_text(_wf_jobs()[STRIH_JOB])
+    assert "sha256sum" in run, "1317: the CEF fetch step must sha256-verify the download"
+    assert "CEF_SHA256" in run, "1317: the verify must use the pinned CEF_SHA256 env var"
+    assert "CEF_ARCHIVE" in run and "CEF_BASE_URL" in run, (
+        "1317: the fetch must download the pinned CEF_ARCHIVE from CEF_BASE_URL"
     )
 
 
@@ -80,7 +91,10 @@ def test_strih_job_caches_cef_keyed_on_version():
     ]
     assert cache_steps, "1317: the strih job must cache the CEF tarball (actions/cache)"
     keys = " ".join(str(s.get("with", {}).get("key", "")) for s in cache_steps)
-    assert CEF_VERSION in keys, "1317: the CEF cache key must be keyed on the CEF version (6533)"
+    # Keyed on the CEF version (single-source via the env var expansion), so a version bump busts it.
+    assert "CEF_VERSION" in keys or CEF_VERSION in keys, (
+        "1317: the CEF cache key must be keyed on the CEF version"
+    )
 
 
 def test_strih_job_passes_cef_root_dir_to_cmake():

@@ -140,3 +140,30 @@ strih_lx_single_timesync_authority_ok() {
   done
   [ "$has_dante" = 1 ] && [ "$competitor" = 0 ]
 }
+
+# --- issue 1317: strih FULL-build browser bundle (obs-browser + CEF) acceptance predicates --------
+
+# strih_lx_browser_bundle_required  (arg1: STRIH_BUILD_FLAGS.txt content) -> 0 iff it declares
+# BROWSER-ON (obs-browser + CEF are expected in the bundle). Fail-closed: absent/OFF/empty -> 1
+# (browser not required, so verify-strih NOTE-skips the file-presence check rather than failing).
+strih_lx_browser_bundle_required() {
+  case "${1:-}" in
+    *BROWSER-ON*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# strih_lx_browser_bundle_ok  (stdin: file paths found under the strih install root, one per line --
+# what `find <root> -name obs-browser.so -o -name libcef.so` prints) -> 0 iff BOTH obs-browser.so AND
+# the CEF runtime libcef.so are present. Drain-safe (reads the whole stream, no early break).
+strih_lx_browser_bundle_ok() {
+  local line has_browser=0 has_cef=0
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    case "$line" in
+      *obs-browser.so) has_browser=1 ;;
+      *libcef.so)      has_cef=1 ;;
+    esac
+  done
+  [ "$has_browser" = 1 ] && [ "$has_cef" = 1 ]
+}

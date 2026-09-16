@@ -276,18 +276,30 @@ jobs:
   # obs-filters, image-source, text-freetype2, linux-capture/v4l2, DistroAV) -- all ON in the
   # ubuntu-ci preset default (AJA/decklink/VLC/whatsnew off), so this job copies the full build
   # byte-for-byte and differs ONLY by artifact name + a build-flags marker. The one plugin the strih
-  # role additionally needs vs the imag artifact is obs-browser (the 4 browser sources); it needs
-  # CEF, which the vendored ubuntu-ci preset does not fetch (no buildspec/CEF in the subtree), so
-  # this variant ships with ENABLE_BROWSER=OFF and a BROWSER-OFF marker -- browser/CEF is the FIRST
-  # follow-up (.claude/rules/strih-linux-provisioning.md). Flip STRIH_ENABLE_BROWSER once CEF is wired.
-  # The imag-parity linux-genlock-build job above is left byte-identical.
+  # role additionally needs vs the imag artifact is obs-browser (the 4 browser sources: VDO.ninja
+  # interkom, Ableset, camera crew, 1pixel). obs-browser needs CEF, which the vendored ubuntu-ci
+  # preset does NOT auto-fetch on Linux (no cmake/linux/buildspec.cmake) -- so this variant fetches
+  # the pinned obs-deps CEF itself (see the CEF steps below), sha256-verifies it, and passes
+  # CEF_ROOT_DIR, with STRIH_ENABLE_BROWSER=ON (issue 1317). Flip that one env var to 'OFF' to drop
+  # the browser sources again. The imag-parity linux-genlock-build job above is left byte-identical
+  # (browser OFF -- imag needs no browser source).
   linux-genlock-build-strih:
     name: Full Linux genlock bundle -- strih variant (issue 1317)
     needs: [linux-distroav-compile-check]
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     env:
-      STRIH_ENABLE_BROWSER: 'OFF'   # flip to ON once a CEF fetch step is wired (follow-up)
+      # issue 1317: obs-browser + CEF ARE wired below (the CEF fetch/verify/extract step). Flip to
+      # 'OFF' to drop the browser sources again -- that is the ONLY change needed (the fetch step and
+      # the CEF_ROOT_DIR arg are both gated on this value, and the STRIH_BUILD_FLAGS marker follows).
+      STRIH_ENABLE_BROWSER: 'ON'
+      # CEF pin -- MUST match vendor/obs-studio/CMakePresets.json configurePresets[dependencies]
+      # .vendor."obsproject.com/obs-studio".dependencies.cef (ubuntu-x86_64). tests/python/
+      # test_linux_genlock_strih_cef_1317.py::test_workflow_cef_hash_matches_vendored_pin guards drift.
+      CEF_VERSION: '6533'
+      CEF_ARCHIVE: 'cef_binary_6533_linux_x86_64_v6.tar.xz'
+      CEF_SHA256: '7963335519a19ccdc5233f7334c5ab023026e2f3e9a0cc417007c09d86608146'
+      CEF_BASE_URL: 'https://cdn-fastly.obsproject.com/downloads'
     steps:
       - uses: actions/checkout@v4
 
@@ -295,6 +307,40 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends ${{ env.OBS_APT_PACKAGES }}
+
+      # issue 1317: fetch the EXACT obs-deps CEF the vendored OBS pins so obs-browser links against
+      # it. The vendored ubuntu-ci preset does NOT auto-fetch CEF on Linux (no cmake/linux/
+      # buildspec.cmake -- only macos/windows call _check_dependencies), so we do it the same way
+      # upstream OBS's own Linux CI does: download the pinned tarball, sha256-verify, extract, and
+      # hand FindCEF.cmake a CEF_ROOT_DIR. Cached by version+hash so the ~325 MB download is paid once.
+      - name: Cache CEF binary distribution (issue 1317)
+        if: env.STRIH_ENABLE_BROWSER == 'ON'
+        uses: actions/cache@v4
+        with:
+          path: cef-dl/${{ env.CEF_ARCHIVE }}
+          key: cef-${{ env.CEF_VERSION }}-${{ env.CEF_SHA256 }}
+
+      - name: Fetch + verify + extract CEF (issue 1317)
+        if: env.STRIH_ENABLE_BROWSER == 'ON'
+        run: |
+          set -euo pipefail
+          mkdir -p cef-dl cef-root
+          archive="cef-dl/${CEF_ARCHIVE}"
+          if [ ! -f "$archive" ]; then
+            echo "Downloading ${CEF_BASE_URL}/${CEF_ARCHIVE}"
+            curl -fSL --retry 3 -o "$archive" "${CEF_BASE_URL}/${CEF_ARCHIVE}"
+          else
+            echo "CEF archive restored from cache: $archive"
+          fi
+          echo "${CEF_SHA256}  ${archive}" | sha256sum -c -
+          tar -xf "$archive" -C cef-root
+          # The tarball extracts to a top-level cef_binary_<ver>_linux_x86_64[_v<rev>]/ dir -- point
+          # CEF_ROOT_DIR at THAT dir (never its parent), located by name so the _v<rev> suffix never
+          # has to be guessed. Absolute path so it survives the OBS configure step's working-directory.
+          cef_dir="$(find "$PWD/cef-root" -maxdepth 1 -type d -name 'cef_binary_*' | head -1)"
+          if [ -z "$cef_dir" ]; then echo "ERROR: extracted CEF top dir not found under cef-root"; exit 1; fi
+          echo "CEF_ROOT_DIR=$cef_dir" >> "$GITHUB_ENV"
+          echo "resolved CEF_ROOT_DIR=$cef_dir"
 
       - name: Configure OBS (ubuntu-ci preset + genlock build flags, strih variant)
         working-directory: vendor/obs-studio
@@ -306,6 +352,7 @@ jobs:
           -DENABLE_VLC=OFF
           -DENABLE_TEST_INPUT=OFF
           -DENABLE_BROWSER=${{ env.STRIH_ENABLE_BROWSER }}
+          -DCEF_ROOT_DIR=${{ env.CEF_ROOT_DIR }}
 
       - name: Build OBS
         working-directory: vendor/obs-studio
@@ -355,8 +402,15 @@ jobs:
           git rev-parse HEAD > stage/GENLOCK_BUILD_SHA.txt
           # issue 1317: the strih variant's build-flags marker -- written INTO the stage BEFORE the
           # manifest step so genlock-manifest.sh --check accounts for it (an unlisted file in stage
-          # would fail the manifest self-consistency check).
-          printf 'variant=strih\nENABLE_BROWSER=%s\nBROWSER-OFF: obs-browser/CEF is the first follow-up (issue 1317); flip STRIH_ENABLE_BROWSER once a CEF fetch is wired.\n' "$STRIH_ENABLE_BROWSER" > stage/STRIH_BUILD_FLAGS.txt
+          # would fail the manifest self-consistency check). Env-conditional so a flip of
+          # STRIH_ENABLE_BROWSER is the ONLY change: ON => a truthful BROWSER-ON marker (which
+          # verify-strih.sh's browser-bundle gate reads), OFF => the original BROWSER-OFF text.
+          if [ "$STRIH_ENABLE_BROWSER" = "ON" ]; then
+            marker="BROWSER-ON: obs-browser + CEF ${CEF_VERSION}"
+          else
+            marker="BROWSER-OFF: obs-browser/CEF not built (flip STRIH_ENABLE_BROWSER=ON to build it, issue 1317)"
+          fi
+          printf 'variant=strih\nENABLE_BROWSER=%s\n%s\n' "$STRIH_ENABLE_BROWSER" "$marker" > stage/STRIH_BUILD_FLAGS.txt
           echo "staged strih variant (ENABLE_BROWSER=$STRIH_ENABLE_BROWSER)"
 
       - name: Generate per-component SHA manifest (#120)

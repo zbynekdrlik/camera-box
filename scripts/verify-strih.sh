@@ -26,6 +26,7 @@ bad()  { echo -e "  ${RED}FAIL${NC} $1"; FAILS=$((FAILS+1)); }
 note() { echo -e "  ${YELLOW}NOTE${NC} $1"; }
 
 WS_HOST="${OBS_WS_HOST:-127.0.0.1}"
+GENLOCK_DIR="${STRIH_GENLOCK_DIR:-/opt/obs-genlock}"   # installed bundle root (setup-strih.sh step 4)
 USER_HOME="/home/${STRIH_LX_USER:-newlevel}"
 OBS_LOG_DIR="${OBS_LOG_DIR:-${USER_HOME}/.config/obs-studio/logs}"
 newest_log() { ls -1t "${OBS_LOG_DIR}"/*.txt 2>/dev/null | head -1; }
@@ -115,6 +116,21 @@ if arecord -l 2>/dev/null | grep -qi 'MiniFuse'; then ok "MiniFuse 4 PipeWire in
 # 12) single timesync authority (dantesync only).
 UNITS="$(systemctl list-units --type=service --state=active --no-legend 2>/dev/null | awk '{print $1}')"
 printf '%s\n' "$UNITS" | strih_lx_single_timesync_authority_ok && ok "single timesync authority (dantesync only)" || bad "timesync authority not single (dantesync missing or a competitor active)"
+
+# 13) browser bundle (issue 1317): when the installed STRIH_BUILD_FLAGS.txt declares BROWSER-ON, the
+#     bundle MUST carry obs-browser.so AND the CEF runtime (libcef.so) -- fail loud by name. A
+#     BROWSER-OFF (or absent) marker means browser was not built, so this item NOTE-skips.
+FLAGS_FILE="${GENLOCK_DIR}/STRIH_BUILD_FLAGS.txt"
+if [ -f "$FLAGS_FILE" ] && strih_lx_browser_bundle_required "$(cat "$FLAGS_FILE")"; then
+  if find "$GENLOCK_DIR" -type f \( -name 'obs-browser.so' -o -name 'libcef.so' \) 2>/dev/null \
+       | strih_lx_browser_bundle_ok; then
+    ok "BROWSER-ON: obs-browser.so + CEF runtime (libcef.so) present in ${GENLOCK_DIR}"
+  else
+    bad "BROWSER-ON declared but obs-browser.so and/or CEF runtime (libcef.so) missing under ${GENLOCK_DIR}"
+  fi
+else
+  note "browser bundle not required (STRIH_BUILD_FLAGS.txt absent or BROWSER-OFF at ${GENLOCK_DIR})"
+fi
 
 echo ""
 if [ "$FAILS" -eq 0 ]; then
