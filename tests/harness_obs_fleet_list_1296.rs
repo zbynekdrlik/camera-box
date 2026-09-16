@@ -349,9 +349,12 @@ fn sourced_boxes_default_is_byte_exact_for_the_legacy_facets_1296() {
 
 #[test]
 fn bundle_state_default_carries_resolume_1296() {
+    // issue 1317: the Linux strih-lx notebook joins the bundle-state facet too (appended after
+    // resolume, per the obs-fleet.sh facet table) -- a fully-unreachable traveling box is deferred
+    // to the reachability watchdog by bundle-state itself, so it is traveling-safe without a gate.
     assert_eq!(
         watchdog_var("bundle-state-alert-watchdog.sh", "BOXES", &[]),
-        "strih|10.77.9.202 stream|10.77.9.204 resolume|resolume.lan"
+        "strih|10.77.9.202 stream|10.77.9.204 resolume|resolume.lan strih-lx|strih-lx.lan"
     );
 }
 

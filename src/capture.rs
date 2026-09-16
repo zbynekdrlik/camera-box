@@ -2689,21 +2689,23 @@ mod tests {
         const FLEET_HEALTHY_COLOUR_P99: f32 = 18.5;
         const FLEET_HEALTHY_COLOUR_MAX: f32 = 22.5;
         const ANALYTIC_NOISE_FLOOR: f32 = 73.0;
+        // Both sides are `const`, so these three margins are compile-time assertions (the
+        // capture_rate_health.rs / painter_wedge.rs pattern -- a runtime `assert!` on constants
+        // trips clippy::assertions_on_constants under `-D warnings`).
         // (a) >= 2x the healthy p99 — a data-first separation margin (the calibration guideline).
-        assert!(
+        const _: () = assert!(
             NOISE_ROUGHNESS_THRESHOLD >= 2.0 * FLEET_HEALTHY_COLOUR_P99,
-            "threshold {NOISE_ROUGHNESS_THRESHOLD} must clear 2x the healthy colour p99 (>= {})",
-            2.0 * FLEET_HEALTHY_COLOUR_P99
+            "NOISE_ROUGHNESS_THRESHOLD must clear 2x the fleet healthy colour p99"
         );
         // (b) above the measured healthy colour max, with margin.
-        assert!(
+        const _: () = assert!(
             NOISE_ROUGHNESS_THRESHOLD > FLEET_HEALTHY_COLOUR_MAX,
-            "threshold {NOISE_ROUGHNESS_THRESHOLD} must exceed the measured healthy colour max {FLEET_HEALTHY_COLOUR_MAX}"
+            "NOISE_ROUGHNESS_THRESHOLD must exceed the measured fleet healthy colour max"
         );
         // (c) well below the analytic noise floor, so genuine structureless static is still caught.
-        assert!(
+        const _: () = assert!(
             NOISE_ROUGHNESS_THRESHOLD < ANALYTIC_NOISE_FLOOR,
-            "threshold {NOISE_ROUGHNESS_THRESHOLD} must stay below the analytic noise floor {ANALYTIC_NOISE_FLOOR}"
+            "NOISE_ROUGHNESS_THRESHOLD must stay below the analytic uncorrelated-luma noise floor"
         );
         // the measured healthy max must NOT read as noise; a structureless colour sample must.
         assert!(
