@@ -158,3 +158,140 @@ fn recording_e2e_wires_a_pre_record_audio_presence_gate() {
         "#748: the audio-presence preflight must run BEFORE [5/8] StartRecord"
     );
 }
+
+// ---- #1323: the marker-SNR LEVEL CEILING — a foreign flood reads far HOTTER than the QPSK marker
+// alone; a max_volume above the ceiling is POLLUTED (the marker is undecodable underneath), refused
+// at [4b2/8] before the run burns ~40 min on cluster_samples=0. The ceiling is a single-sourced
+// sibling of the -60 floor; POLLUTED uses strict '>' mirroring is_silent's strict '<'.
+
+#[test]
+fn default_ceiling_db_single_sources_the_pollution_bar() {
+    // one source of the -20 literal — the [4b2/8] step and the #1310 watchdog both read this
+    let (ok, v) = run("audio_preflight_default_ceiling_db");
+    assert!(ok, "the ceiling getter must succeed");
+    assert_eq!(
+        v, "-20",
+        "#1323 calibrated ceiling (empty gap -9..-20 dBFS on the 16.9 data)"
+    );
+}
+
+#[test]
+fn flood_above_ceiling_is_polluted() {
+    let (_ok, v) = run("audio_preflight_is_polluted -5.5");
+    assert_eq!(
+        v, "true",
+        "-5.5 dB flood is above the -20 ceiling -> polluted"
+    );
+    let (_ok, v) = run("audio_preflight_is_polluted -47.8");
+    assert_eq!(
+        v, "false",
+        "marker-only -47.8 dB max_volume is below the ceiling -> not polluted"
+    );
+}
+
+#[test]
+fn ceiling_strict_boundary_exactly_at_is_not_polluted() {
+    // exactly at the ceiling is NOT polluted (strict >), just above IS — mirrors is_silent
+    let (_ok, at) = run("audio_preflight_is_polluted -20 -20");
+    assert_eq!(
+        at, "false",
+        "exactly at the ceiling is not polluted (strict >)"
+    );
+    let (_ok, above) = run("audio_preflight_is_polluted -19.9 -20");
+    assert_eq!(above, "true", "just above the ceiling is polluted");
+}
+
+#[test]
+fn polluted_message_names_the_level_and_ceiling() {
+    let (_ok, m) = run("audio_preflight_polluted_message -5.5");
+    for needle in ["-5.5", "POLLUTED", "-20"] {
+        assert!(
+            m.contains(needle),
+            "#1323 polluted message missing {needle:?}: {m}"
+        );
+    }
+}
+
+/// #1323: the [4b2/8] preflight must ALSO wire the level-ceiling reject (audio_preflight_is_polluted)
+/// BEFORE [5/8] StartRecord, next to the existing silence check — the issue-675 sourced-helper
+/// pattern (no edit to any anchored line).
+#[test]
+fn recording_e2e_wires_the_pollution_ceiling_before_startrecord() {
+    let s = std::fs::read_to_string(format!(
+        "{}/scripts/recording-e2e.sh",
+        env!("CARGO_MANIFEST_DIR")
+    ))
+    .expect("read recording-e2e.sh");
+    let step = s
+        .find("audio-presence preflight")
+        .expect("recording-e2e.sh must have the pre-record audio-presence preflight step");
+    let poll_rel = s[step..].find("audio_preflight_is_polluted").expect(
+        "#1323: the preflight step must classify pollution via audio_preflight_is_polluted",
+    );
+    let start = s
+        .find("[5/8] StartRecord")
+        .expect("recording-e2e.sh has the [5/8] StartRecord step");
+    assert!(
+        step + poll_rel < start,
+        "#1323: the pollution-ceiling check must run BEFORE [5/8] StartRecord"
+    );
+}
+
+/// #1323 calibration correction (supervisor, 16.9.2026): the -20 dB ceiling was derived from a
+/// BROKEN chain's marker-only plateau; a HEALTHY QPSK marker bursts to ~-5 dBFS at the mbc input
+/// (green E2E 34856629289 read max_volume -18.9 dB), so a level bar alone cannot separate the
+/// marker from a foreign flood. The [4b2/8] ceiling branch is therefore REPORT-ONLY by default:
+/// the `exit 1` sits ONLY inside an `AUDIO_PREFLIGHT_CEILING_ENFORCE=1` guard, and the default
+/// path logs a WARNING and continues. Issue 1324's decodability probe is the honest POLLUTED gate.
+#[test]
+fn pollution_ceiling_is_report_only_unless_enforced_1323() {
+    let s = std::fs::read_to_string(format!(
+        "{}/scripts/recording-e2e.sh",
+        env!("CARGO_MANIFEST_DIR")
+    ))
+    .expect("read recording-e2e.sh");
+    let step = s
+        .find("audio-presence preflight")
+        .expect("the pre-record audio-presence preflight step exists");
+    let poll = step
+        + s[step..]
+            .find("if [ \"$(audio_preflight_is_polluted")
+            .expect("#1323: the ceiling classification `if` exists in the preflight step");
+    // the ceiling branch = from its `if` to the matching outer `fi` (the next `\n  fi\n` at the
+    // step's own indentation)
+    let end = poll
+        + s[poll..]
+            .find("\n  fi\n")
+            .expect("the ceiling branch closes with `fi`")
+        + 6;
+    let branch = &s[poll..end];
+    assert!(
+        branch.contains("AUDIO_PREFLIGHT_CEILING_ENFORCE"),
+        "#1323: the ceiling abort must be gated on AUDIO_PREFLIGHT_CEILING_ENFORCE:\n{branch}"
+    );
+    let enforce_if = branch
+        .find("if [ \"$AUDIO_PREFLIGHT_CEILING_ENFORCE\" = \"1\" ]")
+        .expect("#1323: the enforce guard is an explicit `= \"1\"` check");
+    let exit = branch
+        .find("exit 1")
+        .expect("#1323: the enforced path still aborts with exit 1");
+    assert!(
+        exit > enforce_if,
+        "#1323: `exit 1` must sit INSIDE the enforce guard, never on the default path:\n{branch}"
+    );
+    assert_eq!(
+        branch.matches("exit 1").count(),
+        1,
+        "#1323: exactly one exit path (the enforced one) in the ceiling branch:\n{branch}"
+    );
+    assert!(
+        branch.contains("WARNING (report-only"),
+        "#1323: the default path must log a report-only WARNING:\n{branch}"
+    );
+    // the enforce knob defaults OFF right above the branch
+    let pre = &s[step..poll];
+    assert!(
+        pre.contains("AUDIO_PREFLIGHT_CEILING_ENFORCE=\"${AUDIO_PREFLIGHT_CEILING_ENFORCE:-0}\""),
+        "#1323: AUDIO_PREFLIGHT_CEILING_ENFORCE must default to 0 (report-only)"
+    );
+}

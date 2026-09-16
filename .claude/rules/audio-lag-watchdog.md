@@ -189,3 +189,33 @@ per-run `av-sync-apply-hold-<run>.txt` AND a durable `~/.camera-box/av-sync-appl
 reason; when the guard says proceed, #856 is byte-identical. The residual EARLY-WARNING (before the
 E2E even runs) is the separate upstream-step detector, issue 1267. See
 `.claude/rules/avsync-monitoring.md` for the guard's placement in the cleanup composition.
+
+## #1325 — the mbc `buffered_ms` DRIFT/STEP arm (REPORT-ONLY, a THIRD dimension)
+
+The #1226/#1231 lag arm and the #1265 band arm both read `ts_lag`; `buffered_ms` (the OTHER field of
+the same `#800` line) is the honest signal for the audio-timeline drift the ASRC servo fails to hold
+out of the mix buffer (the ≈ −18 ppm Dante-GM-vs-UTC floor, `.claude/rules/asrc-residual-floor.md`
+issue-1325 addendum). On the stream box it drains ~1.1 ms/min then JUMPS +20…+57 ms when OBS
+re-buffers — the sawtooth every dock/E2E A/V reading inherits.
+
+- **Box facet (`bundle_state_gather.buffered_ms_series_from_log(text, ref_src)`)** — for ONE named
+  `#800` source (default `mbc`, reusing the `ref_band_src` the #1265 band arm already resolves),
+  from the SAME #1222 bounded TAIL (one read): `buffered_ms_slope_ms_per_min` (endpoint linear DRIFT
+  over the recent window — a steady drain reads small NEGATIVE, tonight ≈ −1.1; endpoint-over-a-long-
+  window so the refill JUMPS do not swamp the trend), `buffered_ms_max_step_ms` (the largest single
+  positive consecutive jump = the OBS re-buffer refill, tonight +21..+49), `buffered_ms_n`,
+  `buffered_ms_age_s`. Omit-when-empty (< 2 readings for the ref source → UNKNOWN). A per-source
+  drift is invisible in a max-across-sources scalar, so this is per-reference-source like the band.
+- **dev1 decision (`audio_lag_decision.classify_buffered`/`analyze_buffered` + the `buffered` CLI):**
+  SKIP (unreachable) → STALE (age > 180 s, telemetry stopped) → UNKNOWN (facet absent / n < 6) →
+  STEP (`max_step_ms >= BUFFERED_STEP_MS`, 20 — checked BEFORE drift: a re-buffering source has both)
+  → DRIFT (`|slope| > BUFFERED_DRIFT_MS_PER_MIN`, 0.6) → HEALTHY. All env-overridable.
+- **Watchdog arm (`handle_box_buffered` in `audio-lag-alert-watchdog.sh`):** REPORT-ONLY — no notify,
+  no confirm/throttle/dedup state; it LOGS the verdict every pass to the machine channel. Self-
+  contained + disjoint from the lag/band arms; a fetch failure is SKIP (deferred to #732/#1001). The
+  root fix is the vendored ASRC (issue 1325); promoting STEP/DRIFT to a phone page is a future ticket
+  once that fix is measured. Because it never calls `notify`, the #1206 dedup sweep has nothing to
+  enforce for it — keep it notify-free until a page is added (then it needs a stable dedup key).
+- **Tier-0:** `pytest tests/python/test_buffered_ms_1325.py` (gather + classify + analyze + the
+  build_bundle_state passthrough) + `test_bundle_state_server_log.py` (the server gather FLOWS the
+  facets — the order-sensitive `_parse_log_facets` unpack) + the #1206 sweep; `bash -n`/`shellcheck`.

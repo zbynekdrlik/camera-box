@@ -318,3 +318,105 @@ above the floor / with margin" and reconcile any N now on the wrong side of the 
 fmt/type check never catches a stale narrative number. Reconcile it in ONE direction (here: those
 readings were on PRE-fix bundles carrying the now-fixed churn; the post-fix rig reads ~0.998), and
 name the one-line report-only revert as the guard rail for the residual thin-sample false-red risk.
+
+## Issue 1242 STRICT-ZERO RESTORE (2026-09-16, FINAL step): both seams disarmed, CAM2 override dropped
+
+The interim walk-back above left the tolerance channel governing on an n=1 post-cure sample. The
+FINAL step fired once the precondition it stated was met: `scripts/window_gate_walkdown.py
+02b53180b 7e8efff6a` (segregated by the rig-verified `version-strih.json.genlock_build_sha`; the
+cure bundle `02b53180b` OR its descendant `7e8efff6a` = POST) mined the four post-cure runs:
+
+| run | genlock | w_fail_strict | worst BEAT-unif | CAM2 max | nonzero windows |
+|---|---|---|---|---|---|
+| 180691712 | 02b53180b | 0 | 0.9988 | 0 | all 0/0 |
+| 977889848 | 7e8efff6a | 0 | 0.9988 | 0 | all 0/0 (PR #1322 attempt 2) |
+| 2019585820 | 7e8efff6a | 0 | 0.9976 | 0 | all 0/0 (attempt 3, undec 1 report-only) |
+| 622403283 | 7e8efff6a | 1 | 0.9976 | 0 | CAM1 0/1 (attempt 1) |
+
+`w_fail_strict` = `windows_failed_report_only`; `CAM2 max` = the new `cam_max` column (worst
+`max(copies,gaps)` for CAM2, the override-removal signal). Two subtleties the restore turned on:
+
+1. **>= 2 consecutive strict-clean post-cure runs MET** (977889848 + 2019585820, plus 180691712,
+   all `windows_failed_report_only == 0`). So the restore = DISARM BOTH seams
+   (`copies_gaps_tolerance_gates_overall_pass()` AND `segment_singleton_allowance_gates_overall_pass()`
+   -> `false`), routing `decide`'s fold to the `else` arm (`copies == 0 && gaps == 0`). This is a
+   ONE-FUNCTION flip per seam; the mechanism stays wired (`gate-allowance-restore-red-green`).
+2. **The `WINDOW_COPIES_GAPS_TOLERANCE` const is KEPT at 2, NOT set to 0.** Once the seams are
+   disarmed the BLOCKING fold ignores the const entirely (the `else` arm has no tolerance term), so
+   its value is pure OBSERVABILITY. It stays 2 as the #1132/#1220 dormant lens so `relaxed_pass`
+   still reports what a tol-2 rescue WOULD say -- a `relaxed_pass==true`, `overall_pass_term==false`
+   window is the disarmed rescue visibly doing nothing (the #1132 masking guard). Run 622403283's
+   CAM1 gap reads exactly this: `windows_over_copies_gaps_tolerance=0` (within the tol-2 lens) yet
+   `windows_failed_report_only=1` (strict-failing). Setting the const to 0 would collapse
+   `relaxed_pass` into `strict_pass` and destroy that visibility, and would shrink the probe-gated
+   `switch_schedule_continuity.rs` `over_by_one = TOL+1` fixture to the minimal 1-slot edge (Tier-0
+   #557 can't compile-verify it). So "tolerance 0" is honoured for the FOLD (the else arm tolerates
+   zero) without the const going to 0. A future re-arm re-calibrates the const from fresh data.
+
+**CAM2 per-cambox override DROPPED (`&[]`).** cam2 became splitter-fed ~16.9 13:00 (the imag-HDMI
+projection tap retired with imag-nb, issue 1316); all four post-16.9 splitter-fed runs read CAM2 0/0
+on every window (the `CAM2 max` column = 0), so the issue-1249 HW carve-out is no longer needed. The
+lookup machinery (`copies_gaps_tolerance_for_cambox`, `decide_with_tolerance`, the per-window field)
+stays fully wired -- the empty map is the tested walk-back state.
+
+**Guard rail (the one-line report-only revert).** Attempt 1 (622403283) carried one CAM1 gap 0/1 --
+under strict-zero it correctly REDs `overall_pass` (the owner's "copies=0 must block" directive). If
+a healthy-chain run ever reds on ONLY these seams, the documented revert is re-arming
+`copies_gaps_tolerance_gates_overall_pass() -> true` (back to the tol-2 fold) -- a data-thin
+false-red safety valve, NEVER a silent widen. Data table reproduced by
+`scripts/window_gate_walkdown.py 02b53180b 7e8efff6a`.
+
+## SEAM-FLIP (disarm/re-arm) has a DIFFERENT consumer sweep than a CONST-WALK — the probe-gated overall_pass fold tests (issue 1242 review-caught)
+
+Step 4 above ("both-directions test update") covers a CONST walk (literal fixtures pinned at the old
+boundary). **Flipping a FOLD SEAM (`copies_gaps_tolerance_gates_overall_pass()` /
+`segment_singleton_allowance_gates_overall_pass()` true<->false) is DIFFERENT and breaks a set the
+const-walk sweep misses:** every probe-gated test that folds `overall_pass` through
+`segment_continuity` -> `decide_with_tolerance(...).overall_pass_term`. These live in
+`src/probe/recording_segments.rs` + `src/bin/recording-verdict.rs`, are `#[cfg(feature="probe")]`
+(CI-only compile, Tier-0 #557 bans compiling them locally), so a change confined to the seam is
+INVISIBLE locally and only reds at CI. Issue 1242's strict-zero restore shipped a first pass that
+left ALL of them asserting the OLD absorbing behavior; an adversarial review caught it.
+
+**The exact break-signature detector (run it before pushing any seam flip):** a test asserting
+`overall_pass == true` (json!(true) or `assert!(v.overall_pass,`) while ALSO asserting
+`windows_failed_report_only` at a NONZERO value — that is "a strict-failing window absorbed into
+overall_pass", exactly what disarming the seams inverts. A pure-Python fn-splitter over both files
+finds them (see the issue-1242 lane). It does NOT catch tests with no `windows_failed_report_only`
+assertion (e.g. a `two_or_three_copies` overall-only test, or the boundary differential's
+at-tolerance fixture), so ALSO grep every positive `overall_pass`/`json!(true)` and check its
+window is genuinely clean (0/0) vs a nonzero absorbed one.
+
+**The full consumer list a seam flip must sweep (issue 1242):**
+- `src/probe/recording_segments.rs`: the copies/gaps absorption tests (single-copy, copy-stale,
+  non-adjacent-freeze, benign-reorder-gap, mixed-run, two-or-three-copies) + the per-cambox override
+  end-to-end test (`per_cambox_override_...` — dropping the map also changes its
+  `copies_gaps_tolerance`/`relaxed_pass`/`windows_over_copies_gaps_tolerance` assertions).
+- `src/bin/recording-verdict.rs`: `all_cambox_continuity_single_copy_...` + the boundary
+  differential `copies_gaps_tolerance_boundary_gates_overall_pass_...` at-tolerance fixture (+ its
+  fn doc + the "(a) must NOT swing" inline comment).
+- NOT affected: the v4l2 CAPTURE-leg band (`camleg_capture_band` / `v4l2_dropped`, issue 1169) is a
+  SEPARATE seam that does not call these two functions — confirm it's independent, don't invert it.
+
+Verify the flip locally with a std-only `rustc --edition 2021 --test` replica of
+`decide_with_tolerance` at armed vs disarmed seams (the fold logic is pure crate-root); CI is the
+first place the probe consumers type-check + run.
+
+## 16.9.2026 (release PR 1326 E2E attempt 2) — the strict-zero restore REDDED the 3rd splitter-fed run; the guard rail was pulled (full revert to the .632 fold)
+
+Run 35136632198 (RECORDING_E2E_RUN_ID 443513281) failed ONLY on the per-segment fold: CAM2 window 1
+copies=1 (`tick_before == tick_after`, `paired_with_catchup=false`) + gaps=1 (issue-883 net-span
+fallback), CAM2 window 2 gaps=1; every other window 0/0, A/V measured on 7 cams, painter CLEAN,
+`relaxed_pass=true` on both. The two clean runs the restore was calibrated on were a thin sample.
+Rather than the "re-arm only the tol-2 seam" one-liner, the supervisor `git revert`ed the THREE code
+commits of the restore (`076c56542` probe-fold consumers, `beb2a3254` seam flips + CAM2-override
+drop, `a2f6c72a2` strict pin test) — a MIXED state (tol seam armed, singleton disarmed, CAM2
+override dropped) has no matching probe-gated test expectations anywhere and cannot be compiled
+locally (Tier-0), so the exact .632 fold (CI-green + rig-green) is the only state provable without
+a CI round-trip. The docs/mining-tool commits stay. Issue 1242 stays OPEN: the residual churn is
+NOT root-caused. Data point from this run's per-box burn logs (mean of the last 20 `Streaming:`
+5 s windows): cam2 captured **299.4** / 300.5 emitted, cam1 299.7 / 300.6, cam3–7 ≥ 300.2 — the
+two under-cadence GRABBERS are the copy/gap sources (emit-fill repeats → a recording copy when it
+lands in strih's 30 fps decimation → the 883 net-span gap), not FIFO/optics. Re-entry for the
+strict restore: fix the cam1/cam2 capture cadence first, then ≥ 5 clean runs, then the seam flips
+(with the consumer sweep above).

@@ -329,6 +329,17 @@ def read_bounded_log_text(path, head_bytes=LOG_HEAD_BYTES, tail_bytes=LOG_TAIL_B
 # match. ts_lag_ms may be negative (-1 == audio_ts==0, i.e. no audio timeline yet).
 _AUDIO_TS_LAG_RE = re.compile(r"audio-telemetry #800 '([^']*)': ts_lag_ms=(-?\d+)")
 
+# camera-box #1325 — the `buffered_ms` field of the SAME #800 line (obs-audio.c:698). It is the
+# honest signal for the mbc (Dante/ASIO) source's audio-timeline drift against the OBS mix clock:
+# on the stream box `buffered_ms` drains ~1.1 ms/min (the ≈ −18 ppm Dante-GM-vs-UTC floor the ASRC
+# fails to hold out of the buffer) then JUMPS +20…+57 ms when OBS re-buffers — a sawtooth that
+# makes every dock/E2E A/V-offset reading wander ±30–50 ms. Captures (src, buffered_ms) so the
+# per-reference-source drift/step verdict can watch ONE named source (default mbc), never a
+# max-across-sources scalar (a per-source drift is invisible in a global max).
+_AUDIO_800_BUFFERED_RE = re.compile(
+    r"audio-telemetry #800 '([^']*)': ts_lag_ms=-?\d+ buffered_ms=(-?\d+)")
+BUFFERED_MS_DEFAULT_SRC = "mbc"
+
 # #1320 — the PROGRAM-render freeze signal. `program-render-audit:` (obs-video.c
 # obs_graphics_thread_loop, ~5 s) carries the PROGRAM output's render cadence; `lagged` ==
 # renderSkipped in that window, so a `lagged>0` window is a render-thread freeze.
@@ -985,6 +996,110 @@ def av_offset_quality_from_log(text, recent_window_s=AV_OFFSET_RECENT_WINDOW_S):
     )
 
 
+def av_offset_quality_age_from_log(text):
+    """camera-box #1325 — the in-log whole-second age of the freshest dock QUALITY line
+    (`av-sync-dock: {LOCKED,UPDATED} offset= … matched= mad=`, the _AV_OFFSET_QUALITY_RE lines)
+    behind the log's newest parseable line of ANY kind. Returns "" when there is NO such line at all.
+
+    Why (the 3× false page 16.9.2026): when the QPSK marker cadence dropped to 0.5 s the dock stopped
+    decoding, so it emitted NO more UPDATED/LOCKED quality lines, yet its SUGGESTED offset SERIES kept
+    producing (stale) offsets — so `av_offset_recent_mad_ms` read ABSENT (None) and the band arm's
+    `band_quality_ok(None) -> proceed` (#1319: "never swallow a real drift") paged on an untrustworthy
+    reading. This age lets the dev1 decision distinguish "dock actively measuring, just no cluster in
+    THIS recent window" (fresh age -> keep proceeding) from "dock stopped measuring entirely"
+    (stale/large age -> LOW_QUALITY, no page). Distinct from `av_offset_dock_live_age_s`, which ages
+    the `diag … locked=yes` heartbeat (the dock's MONITOR loop keeps beating even with a dead decoder,
+    so it stayed fresh through the incident and could not gate the estimator's own staleness).
+
+    Same recency model as av_offset_dock_live_age_from_log (`_recency_gap_s`, midnight-wrap corrected,
+    file order IS time order) over ONLY the #1222 bounded TAIL, one pass, no wall clock injected."""
+    t = text or ""
+    if LOG_BOUNDED_READ_SEPARATOR in t:
+        t = t.rsplit(LOG_BOUNDED_READ_SEPARATOR, 1)[-1]
+    log_newest_ts = None
+    last_quality_ts = None
+    for line in t.splitlines():
+        ts = _log_line_seconds(line)
+        if ts is not None:
+            log_newest_ts = ts
+        if ts is not None and _AV_OFFSET_QUALITY_RE.search(line):
+            last_quality_ts = ts
+    if last_quality_ts is None:
+        return ""
+    gap = _recency_gap_s(log_newest_ts, last_quality_ts)
+    return "" if gap is None else str(round(gap))
+
+
+def buffered_ms_series_from_log(text, ref_src=BUFFERED_MS_DEFAULT_SRC,
+                                recent_window_s=AV_OFFSET_RECENT_WINDOW_S):
+    """camera-box #1325 — the `buffered_ms` DRIFT/STEP shape for ONE named #800 source (default mbc),
+    the honest signal for the audio-timeline drift the ASRC servo fails to hold out of the mix buffer.
+    Returns `(slope_ms_per_min_str, max_step_ms_str, n_str, age_s_str)`, all "" when the ref source
+    has < 2 buffered readings in the recent window (UNKNOWN downstream, never a fabricated 0):
+
+    * slope_ms_per_min — the linear DRIFT of buffered_ms over the recent window, in ms/min (1 dp).
+      Computed as (last − first) / span_minutes over the freshest recent_window_s of readings; a
+      steady drain reads a small NEGATIVE slope (tonight ≈ −1.1). It is deliberately the endpoint
+      slope over a long window (not a per-step delta) so the +20…+57 ms refill JUMPS do not swamp
+      the underlying drain trend (the STEP term below carries the jumps).
+    * max_step_ms — the LARGEST single SIGNED delta between consecutive readings in the window. A
+      large POSITIVE value is the OBS re-buffer refill step (tonight +21…+49) — the decision gates
+      STEP on `max_step_ms >= BUFFERED_STEP_MS`, so a pure drain (only negative deltas -> a negative
+      max) never trips STEP. A large value here = OBS is periodically re-buffering the source, the
+      sawtooth the dock/E2E inherit.
+    * n — buffered readings in the recent window; span guards the slope (see the decision module).
+
+    Reads ONLY the #1222 bounded TAIL, `_recency_gap_s` recency (file order IS time order), one pass,
+    no wall clock, no second log read. `ts_lag_ms=-1` lines (no audio timeline) still carry a real
+    buffered_ms and are kept — buffered_ms is a queue depth, valid regardless of the timeline state."""
+    t = text or ""
+    if LOG_BOUNDED_READ_SEPARATOR in t:
+        t = t.rsplit(LOG_BOUNDED_READ_SEPARATOR, 1)[-1]
+    samples = []          # (ts_or_None, buffered_int) for the ref source, in file order
+    log_newest_ts = None
+    for line in t.splitlines():
+        ts = _log_line_seconds(line)
+        if ts is not None:
+            log_newest_ts = ts
+        m = _AUDIO_800_BUFFERED_RE.search(line)
+        if m and m.group(1) == ref_src:
+            samples.append((ts, int(m.group(2))))
+    # Keep only the freshest recent_window_s of readings (drop stale head-region readings the same
+    # way the quality/series parsers do — a settled steady state is what we judge, not startup).
+    recent = []
+    for ts, buffered in samples:
+        g = _recency_gap_s(log_newest_ts, ts)
+        if g is None or g > recent_window_s:
+            continue
+        recent.append((ts, buffered))
+    if len(recent) < 2:
+        return ("", "", "", "")
+    first_ts, first_buf = recent[0]
+    last_ts, last_buf = recent[-1]
+    # span in seconds between the oldest and newest recent reading (midnight-wrap corrected). The
+    # freshness age is the newest reading's own gap behind the log head.
+    span_s = _recency_gap_s(last_ts, first_ts)
+    slope_str = ""
+    if span_s is not None and span_s > 0:
+        slope_str = f"{(last_buf - first_buf) / (span_s / 60.0):.1f}"
+    max_step = None
+    prev = None
+    for _ts, buffered in recent:
+        if prev is not None:
+            step = buffered - prev
+            if max_step is None or step > max_step:
+                max_step = step
+        prev = buffered
+    age_gap = _recency_gap_s(log_newest_ts, last_ts)
+    age_s = "0" if age_gap is None else str(round(age_gap))
+    return (
+        slope_str,
+        "" if max_step is None else str(max_step),
+        str(len(recent)),
+        age_s,
+    )
+
+
 def distroav_dll_paths(scan_roots):
     """Every `distroav.dll` found (case-insensitive) under *scan_roots* (each walked recursively),
     comma-joined, in the order given. "" if none found anywhere (UNKNOWN — never a false clean;
@@ -1415,6 +1530,11 @@ def build_bundle_state(
     av_offset_dock_live_age_s="",
     av_offset_recent_mad_ms="",
     av_offset_recent_matched_min="",
+    av_offset_quality_age_s="",
+    buffered_ms_slope_ms_per_min="",
+    buffered_ms_max_step_ms="",
+    buffered_ms_n="",
+    buffered_ms_age_s="",
     vb_matrix_running="",
     vb_matrix_name="",
     vb_matrix_pid="",
@@ -1531,6 +1651,19 @@ def build_bundle_state(
         # omit-when-empty rule (absent == quality unjudgeable -> the band proceeds, never a fake 0).
         "av_offset_recent_mad_ms": av_offset_recent_mad_ms,
         "av_offset_recent_matched_min": av_offset_recent_matched_min,
+        # #1325 — the in-log age (s) of the freshest dock QUALITY line. The dev1 band/step arms read
+        # LOW_QUALITY (no page) when the quality facet is ABSENT (mad None) AND this age is stale (the
+        # dock stopped decoding — the 3× false page of 16.9.2026), while an ABSENT age (older box, or
+        # a dock actively measuring) keeps the #1319 "absent -> proceed, never swallow a real drift"
+        # behaviour. Omit-when-empty (absent == no quality line at all -> UNKNOWN downstream).
+        "av_offset_quality_age_s": av_offset_quality_age_s,
+        # #1325 — the mbc buffered_ms DRIFT/STEP shape (slope ms/min + max positive refill step +
+        # n + freshness age) the dev1 audio-lag watchdog's buffered arm reads (REPORT-ONLY). Same
+        # omit-when-empty rule (absent == < 2 buffered readings for the ref source -> UNKNOWN).
+        "buffered_ms_slope_ms_per_min": buffered_ms_slope_ms_per_min,
+        "buffered_ms_max_step_ms": buffered_ms_max_step_ms,
+        "buffered_ms_n": buffered_ms_n,
+        "buffered_ms_age_s": buffered_ms_age_s,
         # #1227 — the VB-Matrix presence facet the dev1 VB-Matrix alert watchdog reads. Same
         # omit-when-empty rule: running="0" (installed but the VBAudioMatrix* process is DEAD) is a
         # truthy string and is KEPT (surfaces as DOWN); running="" (a box with no VB-Matrix install,

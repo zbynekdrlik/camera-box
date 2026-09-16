@@ -54,3 +54,32 @@ never against the literal "+8". The A/V gate stayed green through it (15.9.: res
 −12.0 / −49.8 ms at pins 927/927/905, all inside ±90; stream `audio_ts_lag_ms` in its 107 ms low
 mode). Only a residual whose magnitude does NOT match `|f_phase|` — with `ptp.exe` (or anything but
 dantesync) on 319/320 — is the collision class.
+
+## Addendum (issue 1325, 16.9.2026): the ASRC MEASURES the floor but does NOT hold it out of `buffered_ms`
+
+Distinct from the "is the floor magnitude the #109 collision?" question above: even when the floor
+is genuine (`estimated ≈ −f_phase`, `ptp.exe` owns 319/320 — the healthy DVS bind, live-confirmed
+16.9.), the stream `mbc` source's mix buffer STILL drains at the full uncorrected rate. Live: `#800
+'mbc' buffered_ms` drains ~1.1 ms/min then JUMPS +20…+57 ms when OBS re-buffers, and the ASRC's OWN
+`cumulative_correction` (1.06 ms/60s) EQUALS the drain rate — the servo computes the right magnitude
+but it never reaches the buffer, so every dock/E2E A/V-offset reading inherits a ±30–50 ms sawtooth.
+
+Root cause traced in code: `asrc_compensator_compensate()` returns a corrected timeline via its OWN
+model `corrected = raw / (1 + applied/1e6)` (a slow source, applied<0, DIVIDES → stretches raw UP to
+master; this return is what `src/asrc_bench.rs` / the issue-804 harness validate as "locked"). But
+`asrc_process_audio()` in `obs-source.c` **DISCARDS that corrected return** and feeds only
+`applied_ppm` to `swr_set_compensation`, whose contract (measured in
+`scripts/asrc-quality-bench/RESULTS-1016.md`: requested +50 ppm → out/in=+50 ppm) is `output = input
+× (1 + applied/1e6)` — the RECIPROCAL ratio sign of the compensator's own lock model. The bench never
+catches it because it asserts against `compensate()`'s RETURN, never against a real swresample-fed
+buffer. The live drain is 1× (not the 2× a pure sign flip predicts), so the net effect is
+compensation-does-not-reach-the-buffer, not a clean inversion.
+
+**Whose job / how to fix (do NOT blind-fix in a worker lane):** a vendored ASRC change compiles at CI
+only + needs a FULL-BUNDLE deploy + ≥2 h of `buffered_ms`-flat measurement — supervisor-only, and a
+wrong-sign "fix" would DOUBLE the drift on the live broadcast rig. The decisive on-box discriminator
+BEFORE deploying: drive `swr_set_compensation` from a KNOWN +18 ppm and watch whether `buffered_ms`
+goes FLAT (sign was the only bug → negate the ppm fed to swresample / drive the ratio from the
+compensator's corrected return) or still drains (net-zero → the corrected timeline must be consumed
+directly). Tracked as issue 1325; the dev1 audio-lag watchdog's REPORT-ONLY buffered arm
+(`audio_lag_decision.classify_buffered`) makes the drift visible between runs meanwhile.

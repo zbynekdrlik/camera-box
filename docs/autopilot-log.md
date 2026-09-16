@@ -12618,3 +12618,93 @@ no version bump (worktree lane; supervisor cherry-picks).
   Rust gate anchors. Compile of the workflow itself is UNVERIFIED locally (Tier-0) — the supervisor's
   dev push runs the `Linux genlock build` job. CEF URL live: `curl -sI` 200, 325417128 bytes.
 - #1319 (P3 — av-step STEP arm dock-quality gate): RED `test(#1319): [red]` (tests/python/test_av_step_stepgate_1319.py: `test_1509_low_quality_is_not_a_step`, `test_nan_mad_is_low_quality`, orchestrator `test_orchestrator_step_arm_low_quality_log_only_no_page_no_confirm`) → GREEN `fix(#1319): [green]`. `classify_av_step`/`analyze` now consult the SAME `band_quality_ok()` predicate the BAND arm has (single-sourced 15/30 defaults): untrustworthy dock reading (mad>15 OR matched<30, or non-finite mad) → new LOW_QUALITY verdict, decided AFTER REPIN / BEFORE STEP-HEALTHY; absent facet → None → legacy STEP path unchanged. `handle_box` LOW_QUALITY case = log-only, no page/re-ping/recovery, confirm reset only. Live dry-run (stream, threshold unset): recent 343.5/base 404.5 (step_ms −61.0, a pre-fix STEP page) → LOW_QUALITY, matching the BAND arm. Closes the 16.9.2026 13:44/15:09 false owner pages. Rule `.claude/rules/av-step-upstream-detector.md` P3 section + Verdicts line updated. Full pytest suite 2672 passed; branch lane/1319-stepgate (worktree).
+- issue 1323 ([4b2/8] marker-SNR level ceiling — refuse a POLLUTED mbc chain up front): RED `test(#1323): [red]` (e7e92e3c0) → GREEN `fix(#1323): [green]` (59259adb0), worktree lane/1323-markersnr off origin/dev 446b42d6e (1.7.0-dev.632, no bump). Root cause: the mbc preflight only proved NOT-SILENT; a loud FOREIGN signal flooding the chain passed the -60 floor (run 622403283: preflight max_volume -47.8 dB AUDIBLE, verdict cluster_samples=0 all 7 cams → the run burned ~40 min then failed). Calibrated from the dev1 measurement-audio-alert-watchdog journal (16.9 13:00+): bimodal peaks — marker-only plateau -55..-61 dBFS, flood -5..-8 dBFS, empty gap -9..-20 → CEILING -20 dBFS. Single-sourced `audio_preflight_default_ceiling_db` (-20) + `audio_preflight_is_polluted` (strict >) + `audio_preflight_polluted_message` in scripts/lib/audio-presence-preflight.sh; recording-e2e.sh [4b2/8] rejects POLLUTED right after the silence check (sourced-helper pattern, no anchored-line edit, same ERROR/exit-1 shape); measurement_audio_decision.py classify/analyze gain an OPTIONAL ceiling_db + a POLLUTED verdict (pre-existing 3/4-arg callers byte-unchanged, ceiling None disables); the between-run watchdog sources the ceiling, passes --ceiling-db, pages POLLUTED on the SAME "stream" fault path (dedup key shape unchanged — issue 1206 sweep still passes). Point 2 (in-preflight QPSK decodability probe) returned as a followup_candidate — the only decode entrypoint (recording-verdict --av-sync) hard-requires a cam2 emit marker-log CSV + video dual-QR track, neither exists for a standalone audio-only probe, and adding an audio-only decode mode edits probe-gated recording-verdict.rs (no local verify path). Tier-0: pytest 31/31 on the decision file (POLLUTED fixtures -5.5/-57/-64.8/None), bash predicate RED→GREEN, full pytest 2701 passed, bash -n + shellcheck clean, anchor-count sweep 0 existing recording-e2e anchors changed, cargo fmt --all --check clean; live watchdog --dry-run from the worktree read stream peak -58.0 dBFS → PRESENT (marker below the -20 ceiling, above the -60 floor — correct). Rule `.claude/rules/measurement-audio-watchdog.md` gained a POLLUTED-ceiling bullet.
+- issue 1324 (in-preflight QPSK DECODABILITY probe + [4b3/8] gate — the honest sibling of the issue-1323 level ceiling): RED `test(#1324): [red]` → GREEN `fix(#1324): [green]`, worktree lane/1324-decodability STACKED on lane/1323-markersnr head 65c7a608c (1.7.0-dev.632, no bump). Root cause: the #748 floor proves NOT-silent + the issue-1323 ceiling proves NOT-flooded, but neither catches a chain at a plausible level whose QPSK marker is UNDECODABLE. Real 16.9 data (mined the stream-partials): green run 180691712 decoded 107 self-consistent markers (104/106 gaps at the ~3 s / index-step-180 emitter cadence), preamble_screens 3028; failed 622403283 / 977889848 decoded MORE (480/551) but SCATTERED (9/479, 7/550 in the cadence band), preamble_screens 2.37M/1.38M, every cam cluster_samples=0 — so a raw decode count does NOT separate good from bad; the SELF-CONSISTENCY of the index-vs-time progression does. Blocker (why its own lane): the demod (qpsk_marker::decode_markers_with_stats) is reachable only via probe-gated av_sync_recording, which needs the emit-log CSV + video dual-QR to pair against — no audio-only entrypoint. Supervisor correction folded in (16.9 20:10): the issue-1323 −20 ceiling was miscalibrated on the broken chain (healthy reads ≈ −19 dB), so DECODABILITY is PRIMARY here (cluster_samples ≥ N ⇒ OK at ANY level — loud+decodable=OK) and the level bars are COVARIATES that only name WHY when undecodable (SILENT below −60, POLLUTED above −20).
+  - Layers: (1) pure crate-root `src/qpsk_probe_decision.rs` (default-feature, Tier-0) — `consistency_cluster_size` (self-calibrated modal step+gap chain tolerating a single miss, bakes in NO fixed cadence), `peak_dbfs`, `classify`, `build_report`, `report_json`; (2) probe-gated `recording-verdict --qpsk-probe <wav|mkv>` (reuses `av_sync_recording::extract_audio_mono_f32`, now pub, + `decode_markers_with_stats`, prints ONE JSON line, exit 0 — a pure reporter); (3) `scripts/lib/marker-decodability-preflight.sh` (pure command/message builders + JSON parse) + a thin `[4b3/8]` block in recording-e2e.sh (after the issue-1323 ceiling, before StartRecord; sourced-helper, no anchored-line edit): ~25 s stream probe recording → ffmpeg-extract mbc a:0 to a mono-f32 WAV on the box → win_ssh_download to dev1 → run the probe → abort naming the class on non-OK; SKIP only when the probe binary absent (loud UNVERIFIED). Env knobs `AUDIO_DECODABILITY_*`; the −60/−20 bars READ from audio-presence-preflight.sh (never retyped).
+  - Calibration N=4 @ 25 s window: measured on the real recordings GREEN ∈ [5,9], FAILED ∈ [1,3] (Rust `consistency_cluster_size` reproduced this exactly via a rustc replica on the real audio_markers) → margin ≥3 on green, ≥1 on failed. n=1 green + 2 failed real runs → all knobs env-overridable, ENABLE default-on but disablable.
+  - Tests: RED `tests/harness_qpsk_probe_decision_1324.rs` (12 Rust tests incl. the FULL synthesized-audio → demod → decision path proving loud+decodable=OK) + `tests/python/test_marker_decodability_preflight_1324.py` (15 tests: lib pure fns + the recording-e2e [4b3/8] static wiring). Verified locally: rustc `--test` combined replica (qpsk_marker+qpsk_probe_decision+harness) 12/12 pass; full pytest suite 2716 passed (exit 0); `cargo fmt --all --check` clean; `bash -n` + shellcheck clean; anchor-count sweep — 0 slicing anchors changed (the one 1→2 risk, `[5/8] StartRecord` accidentally in a comment, was reworded to 1→1). The probe-gated `--qpsk-probe` ffmpeg glue in recording-verdict.rs is CI-only (no local compile path, Tier-0). Rule `.claude/rules/av-audio-silent-discriminator.md` gained the #1324 probe + [4b3/8] section.
+
+## 2026-09-16 — issue 1323 integration correction (supervisor): the marker-SNR level ceiling ships REPORT-ONLY; POLLUTED pages disabled
+
+- **Why:** the lane calibrated the -20 dBFS ceiling from the 16.9. dev1 watchdog journal, reading the day's
+  `-55..-61 dBFS` plateau as "marker-only". That day the mbc chain was BROKEN (issue 1318: the QPSK marker
+  reached the stream input only intermittently; two release-PR E2E runs decoded 0 clusters). The healthy
+  marker bursts to ~-5 dBFS at the mbc input (live meter 16.9. 21:00-22:00, every 3-5 s) and the green E2E
+  34856629289 preflight read `max_volume -18.9 dB` -- a healthy run would have aborted as POLLUTED under
+  the -20 bar, and a level bar alone cannot separate the loud marker from a loud foreign flood.
+- **Change:** `scripts/recording-e2e.sh` `[4b2/8]` -- the ceiling classification stays, the abort is gated
+  on `AUDIO_PREFLIGHT_CEILING_ENFORCE=1` (default 0 -> `WARNING (report-only ...)`), pinned by
+  `pollution_ceiling_is_report_only_unless_enforced_1323` in `tests/harness_audio_presence_preflight.rs`;
+  `scripts/measurement-audio-alert-watchdog.sh` `POLLUTED)` -> log-only (no page, SILENT/PRESENT latch
+  untouched); `.claude/rules/measurement-audio-watchdog.md` carries the correction + the re-arm condition
+  (>= 3 healthy-run readings vs a real flood sample). The honest POLLUTED/UNDECODED signal is issue 1324's
+  `[4b3/8]` decodability probe, integrated in the same batch.
+- **Verify:** anchor-count + first-occurrence sweep over recording-e2e.sh clean (only generic substrings and
+  the new anchors moved), 703 merge->exit distance unchanged (10106), `bash -n` + `shellcheck -S warning`
+  clean, `cargo fmt --all --check` clean, full `pytest tests/python` green (see commit).
+
+## issue 1242 — FINAL strict-zero restore (walk-back completed) — lane/1242-strictzero (2026-09-16)
+- **What:** the residual FIFO copy churn source was fixed upstream (issues 1318/1320 render-freeze cure,
+  genlock bundle 02b53180b / descendant 7e8efff6a). The interim lane tightened tol 5->2 + floor 0.90->0.95
+  on n=1 post-cure data; this FINAL step restores the absolute strict-zero per-segment blocking fold.
+- **Change (`src/window_gate.rs`):** DISARM both seams — `copies_gaps_tolerance_gates_overall_pass()` AND
+  `segment_singleton_allowance_gates_overall_pass()` -> `false` — so `decide`'s `else` arm
+  (`copies == 0 && gaps == 0`) governs `overall_pass_term` (any nonzero copies/gaps REDs). Drop the CAM2
+  per-cambox override to `&[]`. `WINDOW_COPIES_GAPS_TOLERANCE` KEPT at 2 as the dormant observability lens
+  (NOT set to 0 — the fold ignores the const once the seams are disarmed; the const stays the #1132/#1220
+  lens so `relaxed_pass` still shows the disarmed rescue visibly doing nothing). `UNIFORM_FRACTION_MIN`
+  already 0.95 from the interim lane — unchanged.
+- **Data (mining tool, segregated by rig-verified genlock sha):** post-cure runs 180691712 (02b53180b) +
+  977889848 + 2019585820 (7e8efff6a) all windows_failed_report_only==0, every window 0/0, worst
+  beat-corrected uniformity >= 0.9976, CAM2 max 0 across all four post-16.9 splitter-fed runs. Attempt 1
+  (622403283) carried one CAM1 gap 0/1 — strict-zero correctly REDs it (owner directive); guard rail =
+  one-line report-only revert re-arming the tolerance seam.
+- **Commits:** RED 477bc2699 (`tests/verdict_gate_strict_fold_1242.rs` pins the strict-fold state, fails at
+  armed seams) -> GREEN eb2f96c0e (both seams disarmed, CAM2 map emptied, in-module #1220/#1251 tests
+  inverted, docs) -> 3055edebe (`scripts/window_gate_walkdown.py` `cam_max` CAM2 column + pytest) -> docs.
+- **Verify (Tier-0, zero cargo compile):** `rustc --edition 2021 --test` replica of the fold RED(armed)->
+  GREEN(disarmed) + every disarmed-target assertion; `cargo fmt --all --check` clean; doc-lint grep clean
+  (no new list-continuation lines); `python3 -m pytest tests/python/test_window_gate_walkdown_1242.py` 8/8.
+  CI type-checks the probe-gated files (switch_schedule_continuity.rs tracks TOL+1 dynamically at the
+  retained tol=2, needs no edit).
+
+## issue 1325 — mbc (Dante/ASIO) audio-timeline drift + sawtooth-immune measurement (worktree lane, 16.9.2026)
+
+- **Root cause (deliverables 1&2), evidenced from code + LIVE stream reads:** the `mbc` source runs
+  ≈ −18 ppm slow (the genuine Dante-GM-vs-UTC floor `≈ −f_phase`, live `f_phase=+20.97`, `ptp.exe`
+  owns 319/320 = healthy DVS bind, dantesync LOCK/settled — NOT the dantesync#109 collision, so no
+  clock-side restart). The ASRC servo MEASURES it (`estimated=applied=−18`, `cumulative_correction=
+  1.06 ms/60s`) but does NOT hold it out of `buffered_ms` (live drain ~1.1 ms/min == the servo's own
+  cumulative_correction, then +20…+57 ms re-buffer jumps). `asrc_compensator_compensate()` returns a
+  corrected timeline via `corrected = raw/(1+applied/1e6)` (what `src/asrc_bench.rs` validates as
+  locked), but `asrc_process_audio()` DISCARDS that return and feeds only `applied_ppm` to
+  `swr_set_compensation`, whose `output = input×(1+applied/1e6)` is the RECIPROCAL sign — the bench
+  never checks the swresample-fed buffer. The vendored fix is CI-compile + full-bundle deploy + ≥2 h
+  measurement (supervisor-only; a wrong sign DOUBLES the drift live), so it is NOT applied in-lane —
+  handed off with the on-box +18 ppm discriminator experiment (buffered goes FLAT = sign-only bug;
+  still drains = corrected-return must be consumed). See `.claude/rules/asrc-residual-floor.md` addendum.
+- **Deliverable 3(i) — dock quality-line freshness gate (the 3× false page, 16.9.):** new
+  `bundle_state_gather.av_offset_quality_age_from_log` + `classify_av_band`/`classify_av_step` gate:
+  absent quality (`av_offset_recent_mad_ms` None) AND a PRESENT quality age (a quality line existed
+  earlier == the decoder stopped) → LOW_QUALITY (no page); ABSENT age (older box) keeps #1319's
+  absent→proceed. Plain age-presence check, no threshold — `band_quality_ok` returns None only when
+  no quality line is in the 600 s window, so a present age is necessarily >600 s stale (review 🟡).
+  `analyze`/`analyze_band` read the facet from the JSON.
+- **Deliverable 3(ii) — dock-native reference at align time:** ALREADY landed by #1319
+  (`av_sync_persist_dock_reference` merges `dock_offset_median_ms`, `resolve_band_reference` prefers
+  it). Confirmed present; no new code.
+- **Deliverable 3(iii) — buffered_ms DRIFT/STEP detector (REPORT-ONLY):** new
+  `bundle_state_gather.buffered_ms_series_from_log` (slope/max_step/n/age, per-ref-source) +
+  `audio_lag_decision.classify_buffered` (SKIP/STALE/UNKNOWN/STEP/DRIFT/HEALTHY, `buffered` CLI) +
+  `handle_box_buffered` in `audio-lag-alert-watchdog.sh` (log-only, no notify/page). Fixture = tonight's
+  series. Both new facets wired through `build_bundle_state` + the server `_parse_log_facets`.
+- **Verify (Tier-0, zero cargo):** `python3 -m pytest tests/python -q` = 2748+ passed exit 0
+  (new: `test_av_step_quality_age_1325.py`, `test_buffered_ms_1325.py`, +4 server-flow tests in
+  `test_bundle_state_server_log.py`; `test_notify_dedup_key_sweep_1206.py` green — the report-only arm
+  is notify-free); `bash -n` + `shellcheck -S warning` clean on `audio-lag-alert-watchdog.sh`. Rules
+  updated: asrc-residual-floor, audio-lag-watchdog, av-step-upstream-detector.
+
+## 16.9.2026 21:45 — supervisor: strict-zero fold (issue 1242) reverted after the 3rd splitter-fed run redded on CAM2 1/1 + 0/1
+
+- Release PR 1326 E2E attempt 2 (35136632198) failed only on the per-segment fold; A/V measured on 7 cams with the 0.5 s marker, painter clean.
+- `git revert` of 076c56542 / beb2a3254 / a2f6c72a2 = the exact .632 fold; issue 1242 stays open with the grabber under-cadence data (cam2 299.4, cam1 299.7 captured per 300.5 emitted).

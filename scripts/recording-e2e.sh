@@ -204,6 +204,10 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # "unknown, candidates: 0" (the run 237189640 silence that went unnoticed for a week).
 # shellcheck source=scripts/lib/audio-presence-preflight.sh
 . "$HERE/lib/audio-presence-preflight.sh"
+# #1324: the marker-DECODABILITY preflight (the honest sibling of the #1323 level ceiling) — pure
+# decision + remote command builders + the class-named messages; the [4b3/8] step is a thin caller.
+# shellcheck source=scripts/lib/marker-decodability-preflight.sh
+. "$HERE/lib/marker-decodability-preflight.sh"
 # #711: Discord full-report sender (fail-open, reuses the existing bot-token #notifications
 # path — never a second sender) — called once the merge verdict is genuinely computed, in the
 # E2E_EXECUTE_VERDICT=1 branch of [8/8] below.
@@ -2774,7 +2778,7 @@ sshpass -p "$CAM_PW" scp -o StrictHostKeyChecking=no \
 # already uses below (`--audio-marker`/`--marker-log`, #420/#421) — reused, not reinvented. The
 # plain single-camera path (ALL_CAMBOX unset) is UNCHANGED: no marker flags, no self-check.
 AV_SYNC_MARKER_DEVICE="${AV_SYNC_MARKER_DEVICE:-hw:CARD=PCH,DEV=3}"
-AV_SYNC_MARKER_CADENCE="${AV_SYNC_MARKER_CADENCE:-180}"
+AV_SYNC_MARKER_CADENCE="${AV_SYNC_MARKER_CADENCE:-30}"   # ~0.5 s @ 60 Hz (issue 1318, owner 17.9.2026: keep the mic-chain gate open)
 _cam2_marker_flags=""
 _cam2_marker_check=""
 if [ "${ALL_CAMBOX:-0}" = "1" ]; then
@@ -3123,6 +3127,10 @@ echo "[4b2/8] #748 audio-presence preflight — the mbc measurement chain MUST b
 # sanctioned exception to the one-full-test rule (a preflight, not a partial measurement).
 AUDIO_PREFLIGHT_ENABLE="${AUDIO_PREFLIGHT_ENABLE:-1}"
 AUDIO_PREFLIGHT_THRESHOLD_DB="${AUDIO_PREFLIGHT_THRESHOLD_DB:--60}"
+# issue 1323 — the POLLUTION ceiling (single-sourced from the lib, env-overridable like every knob).
+# A loud FOREIGN signal flooding the mbc chain reads far above this and drowns the QPSK marker, so
+# the run would burn ~40 min then fail on cluster_samples=0; refuse it up front, next to the floor.
+AUDIO_PREFLIGHT_CEILING_DB="${AUDIO_PREFLIGHT_CEILING_DB:-$(audio_preflight_default_ceiling_db)}"
 AUDIO_PREFLIGHT_PROBE_SECS="${AUDIO_PREFLIGHT_PROBE_SECS:-15}"
 AUDIO_PREFLIGHT_SSH_TIMEOUT="${AUDIO_PREFLIGHT_SSH_TIMEOUT:-90}"
 # #748 live finding (run 29282790031): OBS-WS StopRecord's RPC reply lands BEFORE the mp4 muxer
@@ -3172,9 +3180,108 @@ if [ "$AUDIO_PREFLIGHT_ENABLE" = "1" ]; then
     echo "ERROR: $(audio_preflight_silent_message "$_ap_db" "$AUDIO_PREFLIGHT_THRESHOLD_DB")" >&2
     exit 1
   fi
-  echo "    ok: mbc measurement audio AUDIBLE (max_volume ${_ap_db} dB >= ${AUDIO_PREFLIGHT_THRESHOLD_DB} dB threshold)"
+  # issue 1323 — level CEILING: above the silence floor, but a loud foreign flood drowns the marker.
+  # REPORT-ONLY by default (supervisor calibration correction, 16.9.2026): the -20 dB ceiling was
+  # derived from a BROKEN chain's marker-only plateau; a HEALTHY marker bursts to ~-5 dBFS at the
+  # mbc input (green run 34856629289 read max_volume -18.9 dB), so a level bar alone cannot tell a
+  # loud marker from a loud foreign flood -- the [4b3/8] decodability probe (issue 1324) is the
+  # honest signal. Flip AUDIO_PREFLIGHT_CEILING_ENFORCE=1 only after the ceiling is re-calibrated
+  # from >= 3 healthy runs; until then the classification is logged as a WARNING and never aborts.
+  AUDIO_PREFLIGHT_CEILING_ENFORCE="${AUDIO_PREFLIGHT_CEILING_ENFORCE:-0}"
+  if [ "$(audio_preflight_is_polluted "$_ap_db" "$AUDIO_PREFLIGHT_CEILING_DB")" = "true" ]; then
+    if [ "$AUDIO_PREFLIGHT_CEILING_ENFORCE" = "1" ]; then
+      echo "ERROR: $(audio_preflight_polluted_message "$_ap_db" "$AUDIO_PREFLIGHT_CEILING_DB")" >&2
+      exit 1
+    fi
+    echo "    WARNING (report-only, issue 1323 ceiling not yet calibrated on healthy runs): $(audio_preflight_polluted_message "$_ap_db" "$AUDIO_PREFLIGHT_CEILING_DB")" >&2
+  fi
+  echo "    ok: mbc measurement audio AUDIBLE (max_volume ${_ap_db} dB >= ${AUDIO_PREFLIGHT_THRESHOLD_DB} dB threshold, <= ${AUDIO_PREFLIGHT_CEILING_DB} dB ceiling)"
 else
   echo "    [audio-presence preflight] SKIPPED (AUDIO_PREFLIGHT_ENABLE=0)"
+fi
+
+echo "[4b3/8] #1324 marker-decodability preflight — the mbc QPSK marker MUST be DECODABLE before recording"
+# The honest sibling of the #1323 level ceiling above: the floor proves NOT-silent and the ceiling
+# proves NOT-flooded, but neither can tell a DECODABLE marker from a chain at a plausible level whose
+# marker is not decodable (drowned / off-axis mic / wrong Dante channel / format mismatch). Make a
+# short probe recording on the stream box (same hop as [4b2/8]), extract the mbc audio track to a
+# small mono-f32 WAV, pull it to dev1, and run the AUDIO-ONLY QPSK decodability probe from the
+# probe-tools artifact — decodability is PRIMARY, so a loud-but-decodable capture is OK. FAIL LOUD
+# and abort before recording begins so an undecodable chain never burns ~40 min on cluster_samples=0
+# (runs 622403283 / 977889848, 16.9.2026). Every knob is env-overridable; a preflight guarding the
+# whole run is the sanctioned exception to the one-full-test rule.
+AUDIO_DECODABILITY_ENABLE="${AUDIO_DECODABILITY_ENABLE:-1}"
+AUDIO_DECODABILITY_MIN_CLUSTERS="${AUDIO_DECODABILITY_MIN_CLUSTERS:-$(marker_decodability_default_min_clusters)}"
+AUDIO_DECODABILITY_PROBE_SECS="${AUDIO_DECODABILITY_PROBE_SECS:-$(marker_decodability_default_probe_secs)}"
+AUDIO_DECODABILITY_SSH_TIMEOUT="${AUDIO_DECODABILITY_SSH_TIMEOUT:-120}"
+AUDIO_DECODABILITY_READ_ATTEMPTS="${AUDIO_DECODABILITY_READ_ATTEMPTS:-4}"
+AUDIO_DECODABILITY_READ_RETRY_SLEEP="${AUDIO_DECODABILITY_READ_RETRY_SLEEP:-3}"
+# The −60 floor and −20 loud covariate are SINGLE-SOURCED from audio-presence-preflight.sh, never
+# retyped here (the same values the [4b2/8] floor/ceiling read).
+AUDIO_DECODABILITY_SILENT_DB="${AUDIO_DECODABILITY_SILENT_DB:-$(audio_preflight_default_threshold_db)}"
+AUDIO_DECODABILITY_LOUD_DB="${AUDIO_DECODABILITY_LOUD_DB:-$(audio_preflight_default_ceiling_db)}"
+_md_probe_bin="$PROBE_BIN_DIR/recording-verdict"
+if [ "$AUDIO_DECODABILITY_ENABLE" != "1" ]; then
+  echo "    [marker-decodability preflight] SKIPPED (AUDIO_DECODABILITY_ENABLE=0)"
+elif [ ! -x "$_md_probe_bin" ]; then
+  # The ONE sanctioned skip: the probe-tools artifact is absent (never a silent pass).
+  echo "    $(marker_decodability_unverified_message)"
+else
+  mkdir -p "$OUTDIR"
+  _md_wav_win='C:\camera-box\mbc-decodability.wav'
+  _md_wav_local="$OUTDIR/mbc-decodability-${RUN_ID}.wav"
+  rm -f "$_md_wav_local"
+  # Short throwaway probe recording on stream (an orphan from an abort self-heals on the next run's
+  # --action start, exactly like [4b2/8]).
+  python3 "$HERE/obs_phase2.py" record --host "$STREAM" --action start >/dev/null
+  sleep "$AUDIO_DECODABILITY_PROBE_SECS"
+  _md_rec="$(python3 "$HERE/obs_phase2.py" record --host "$STREAM" --action stop || true)"
+  if [ -z "$_md_rec" ]; then
+    echo "ERROR: $(audio_preflight_norec_message)" >&2
+    exit 1
+  fi
+  # Extract the mbc a:0 track to a WAV on the box, then pull it back. Bounded retry absorbs the mp4
+  # moov-atom finalize race (same transient the [4b2/8] read hits) without masking a real failure.
+  for _md_attempt in $(seq 1 "$AUDIO_DECODABILITY_READ_ATTEMPTS"); do
+    # `timeout` execvp()s directly and cannot run the win_ssh_run shell FUNCTION — route through
+    # `bash -c` re-sourcing the lib, the SAME fix every other timeout-bounded win_ssh_run uses.
+    timeout "$AUDIO_DECODABILITY_SSH_TIMEOUT" bash -c '. "$1"; win_ssh_run "$2" "$3" "$4" "$5"' _ \
+      "$HERE/lib/win-ssh-exec.sh" "$STREAM_USER" "$STREAM_PW" "$STREAM" \
+      "$(marker_decodability_extract_wav_ps "$_md_rec" "$_md_wav_win" 0)" >/dev/null 2>&1 || true
+    win_ssh_download "$STREAM_USER" "$STREAM_PW" "$STREAM" "$_md_wav_win" "$_md_wav_local" >/dev/null 2>&1 || true
+    if [ -s "$_md_wav_local" ]; then
+      break
+    fi
+    if [ "$_md_attempt" -lt "$AUDIO_DECODABILITY_READ_ATTEMPTS" ]; then
+      echo "    [marker-decodability preflight] attempt ${_md_attempt}/${AUDIO_DECODABILITY_READ_ATTEMPTS} no WAV yet (mp4 likely still finalizing) — settling ${AUDIO_DECODABILITY_READ_RETRY_SLEEP}s, retrying"
+      sleep "$AUDIO_DECODABILITY_READ_RETRY_SLEEP"
+    fi
+  done
+  win_ssh_run "$STREAM_USER" "$STREAM_PW" "$STREAM" "$(marker_decodability_delete_ps "$_md_wav_win")" >/dev/null 2>&1 || true
+  if [ ! -s "$_md_wav_local" ]; then
+    echo "ERROR: $(marker_decodability_probe_unreadable_message 'mbc WAV never arrived on dev1')" >&2
+    exit 1
+  fi
+  _md_json="$("$_md_probe_bin" --qpsk-probe "$_md_wav_local" --av-audio-track 0 \
+    --qpsk-probe-seconds "$AUDIO_DECODABILITY_PROBE_SECS" \
+    --qpsk-min-clusters "$AUDIO_DECODABILITY_MIN_CLUSTERS" \
+    "--qpsk-silent-db=$AUDIO_DECODABILITY_SILENT_DB" "--qpsk-loud-db=$AUDIO_DECODABILITY_LOUD_DB" 2>&1 || true)"
+  # (the `=` form is mandatory: both bars are NEGATIVE dB and clap reads a separate `-60` token as
+  #  the short flag `-6` -- PR 1326 E2E 35134835641 aborted [4b3/8] on exactly that, issue 1324)
+  rm -f "$_md_wav_local"
+  _md_verdict="$(marker_decodability_parse_verdict "$_md_json" || true)"
+  if [ -z "$_md_verdict" ]; then
+    echo "ERROR: $(marker_decodability_probe_unreadable_message "$_md_json")" >&2
+    exit 1
+  fi
+  _md_cluster="$(marker_decodability_parse_num "$_md_json" cluster_samples || echo '?')"
+  _md_preamble="$(marker_decodability_parse_num "$_md_json" preamble_screens || echo '?')"
+  _md_peak="$(marker_decodability_parse_num "$_md_json" peak_dbfs || echo '?')"
+  if [ "$(marker_decodability_is_ok "$_md_verdict")" != "true" ]; then
+    echo "ERROR: $(marker_decodability_fail_message "$_md_verdict" "$_md_cluster" "$AUDIO_DECODABILITY_MIN_CLUSTERS" "$_md_preamble" "$_md_peak")" >&2
+    exit 1
+  fi
+  echo "    ok: mbc QPSK marker DECODABLE (cluster_samples ${_md_cluster} >= ${AUDIO_DECODABILITY_MIN_CLUSTERS}, preamble_screens ${_md_preamble}, peak ${_md_peak} dBFS)"
 fi
 
 echo "[4c/8] #365 frozen-camera gate — every strih raw NDI input must be updating (not a frozen feed)"
@@ -3532,7 +3639,7 @@ if [ "${AV_RESTART_GATE:-0}" = "1" ]; then
       ;;
   esac
   AV_RESTART_MARKER_DEVICE="${AV_RESTART_MARKER_DEVICE:-hw:CARD=PCH,DEV=3}"
-  AV_RESTART_MARKER_CADENCE="${AV_RESTART_MARKER_CADENCE:-180}"
+  AV_RESTART_MARKER_CADENCE="${AV_RESTART_MARKER_CADENCE:-30}"   # ~0.5 s @ 60 Hz (issue 1318)
   AV_RESTART_AUDIO_TRACK="${AV_RESTART_AUDIO_TRACK:-0}"
   AV_RESTART_TOLERANCE_MS="${AV_RESTART_TOLERANCE_MS:-50}"
   AV_RESTART_GATE_BIN="${AV_RESTART_GATE_BIN:-$PROBE_BIN_DIR/av-restart-sync-gate}"

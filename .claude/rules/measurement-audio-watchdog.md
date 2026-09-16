@@ -43,6 +43,34 @@ production-critical dev1 watchdog class (umbrella **#1308**).
   `--threshold-db "$(audio_preflight_default_threshold_db)"` to the pure decision; `classify`/`analyze`
   take the threshold as a REQUIRED argument (no hardcoded -60 default in python). SILENT uses strict
   `<` — byte-identical to `audio_preflight_is_silent` (exactly at the bar is PRESENT).
+- **#1323 POLLUTED — the level CEILING, the counterpart of the silence floor, ALSO single-sourced.**
+  The silence floor proves NOT-SILENT but cannot tell a decodable marker from a chain flooded by a
+  loud FOREIGN signal (16.9.2026 data: watchdog peak plateau `-55..-61 dBFS` marker-only vs a flat
+  `-5..-8 dBFS` flood, empty gap `-9..-20`). `audio_preflight_default_ceiling_db` (**-20 dBFS**, added
+  to the lib by #1323) is the ONE source; the `[4b2/8]` preflight and this watchdog both READ it,
+  never retype. `classify(peak_db, box_reachable, meter_present, threshold_db, ceiling_db=None)` →
+  `POLLUTED` when `peak_db > ceiling` (strict `>` — exactly at the ceiling is PRESENT). `ceiling_db`
+  defaults to `None` so the pre-#1323 4-arg / 3-arg callers keep the SILENT/PRESENT-only behaviour;
+  the watchdog passes `--ceiling-db "$(audio_preflight_default_ceiling_db)"`. `require_tools` also
+  fails LOUD if that getter is not sourced. POLLUTED shares the SILENT `"stream"` fault path / latch /
+  `measurement-audio-stream` dedup base (the chain is unusable either way; recovery only on PRESENT),
+  so the #1206 bucketed-key shape is UNCHANGED — no `test_notify_dedup_key_sweep_1206.py` change.
+  Since the floor (-60) is far below the ceiling (-20), SILENT and POLLUTED are mutually exclusive
+  (SILENT checked first). Applies to BOTH scales: the preflight's `max_volume` and the watchdog's
+  `InputVolumeMeters` peak — the marker reads far below -20 on both, a flood far above.
+- **CALIBRATION CORRECTION (supervisor, 16.9.2026 evening) — the ceiling is REPORT-ONLY until
+  re-calibrated on HEALTHY runs.** The "-55..-61 dBFS marker-only plateau" above was the level of a
+  BROKEN chain that day (issue 1318: the marker reached the mbc input only intermittently); a HEALTHY
+  QPSK marker bursts to **~-5 dBFS** at this input (live meter 16.9. 21:00–22:00, every 3–5 s) and a
+  green E2E preflight read `max_volume -18.9 dB` (run 34856629289). So a healthy run would read
+  POLLUTED under a -20 bar, and a level bar alone cannot tell the loud marker from a loud foreign
+  flood (the "flat -5.5 dBFS flood" plateaus were the marker itself at the chain's limiter ceiling).
+  Consequences, both in code: the `[4b2/8]` ceiling branch logs a `WARNING (report-only …)` and
+  aborts ONLY under `AUDIO_PREFLIGHT_CEILING_ENFORCE=1` (default 0, pinned by
+  `pollution_ceiling_is_report_only_unless_enforced_1323`); the watchdog's `POLLUTED` case is
+  log-only (no page, SILENT/PRESENT latch untouched). The honest POLLUTED/UNDECODED signal is issue
+  1324's `[4b3/8]` decodability probe (`cluster_samples` over a 20 s capture). Re-arm the ceiling
+  only from ≥3 healthy-run `max_volume` readings vs a REAL flood sample, with the margin stated.
 - **`meter_present` distinguishes UNKNOWN from SILENT.** Digital silence is `mbc` PRESENT in the meter
   stream with all-zero levels → peak_db clamped to the floor (−100 dB) → SILENT. `mbc` never appearing
   in any event this window → `meter_present=0` → UNKNOWN (a renamed/removed input, or the meter event
@@ -73,6 +101,17 @@ production-critical dev1 watchdog class (umbrella **#1308**).
   notify line (the #1206 sweep `test_production_critical_watchdogs_actually_bucket_their_inline_key`
   requires the helper literally there). Allowlisted in `test_notify_dedup_key_sweep_1206.py`; recovery
   stays ONE machine-channel log line (#1206).
+- **#1323 followup blocker — an in-preflight QPSK DECODABILITY probe is NOT cheaply buildable.** The
+  honest "is the marker actually decodable" signal is the QPSK demod's `preamble_screens` / CRC-
+  consistent cluster count over a short live mbc capture. But the ONLY existing decode entrypoint,
+  `recording-verdict --av-sync` (`av_sync_from_recording`), HARD-requires a cam2 emit marker-log CSV
+  (`--av-marker-log`, `ensure!(!emit_log.is_empty())`) AND decodes the VIDEO dual-QR track to pair
+  (`marker_coverage_overlaps_video_ticks`) — neither exists for a standalone ~20 s audio-only probe.
+  There is NO standalone "decode the mbc audio track → preamble/cluster count" mode. Building one edits
+  probe-gated `src/bin/recording-verdict.rs` + `src/qpsk_marker.rs` (`required-features=["probe"]` →
+  ZERO local verification path, CI-only) plus an ffmpeg audio-extract + a download-to-dev1 hop. The
+  LEVEL ceiling (#1323) covers the common flood-present-at-preflight case; the decodability probe is
+  the residual (flood arrives after the probe window) — a separate ticket, not a same-lane add.
 - **DETECTION ONLY** — the cure (unmute the mic / Ableton mbc channel, fix the Dante route) is a
   rig-ops call; this watchdog only pages the checklist. `require_tools` fails LOUD (python3, sshpass,
   the decision module readable, the threshold getter sourced) so a missing dependency can never SKIP

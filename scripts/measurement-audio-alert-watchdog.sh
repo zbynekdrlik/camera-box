@@ -25,9 +25,11 @@ set -uo pipefail
 #
 # HOW: every 60 s (dev1 systemd timer) read the `mbc` input's peak LEVEL off stream OBS via the
 # obs-websocket InputVolumeMeters event (scripts/measurement_audio_meter_probe.py -- NO recording, no
-# disk, no rig mutation), classify SILENT vs PRESENT at the SAME -60 dB bar as the #748 preflight
-# (sourced from scripts/lib/audio-presence-preflight.sh, NEVER retyped), and page
-# MEASUREMENT_AUDIO_SILENT after a 2-pass confirm. The VERDICT is decided by the PURE
+# disk, no rig mutation), classify SILENT vs PRESENT at the SAME -60 dB bar as the #748 preflight AND
+# POLLUTED (issue 1323) above the SAME -20 dB ceiling the [4b2/8] preflight uses -- both sourced from
+# scripts/lib/audio-presence-preflight.sh, NEVER retyped -- and page after a 2-pass confirm. A loud
+# FOREIGN signal flooding the mbc chain drowns the QPSK marker exactly like silence kills it, so both
+# SILENT and POLLUTED are "the measurement instrument is unusable" faults. The VERDICT is decided by the PURE
 # scripts/measurement_audio_decision.py (pytest Tier-0, the #1199 python-mirror pattern).
 #
 # TEST-PREMISE (gated on rig-mode-state.sh like splitter-port #1290): the QPSK marker only sounds in
@@ -227,6 +229,10 @@ require_tools() {
     log "FATAL: audio_preflight_default_threshold_db not sourced -- refusing to run (cannot resolve the -60 dB silence bar; check scripts/lib/audio-presence-preflight.sh)"
     return 1
   fi
+  if ! declare -F audio_preflight_default_ceiling_db >/dev/null 2>&1; then
+    log "FATAL: audio_preflight_default_ceiling_db not sourced -- refusing to run (cannot resolve the -20 dB pollution ceiling for #1323; check scripts/lib/audio-presence-preflight.sh)"
+    return 1
+  fi
   return 0
 }
 
@@ -247,8 +253,11 @@ main() {
   fi
   # TEST or UNKNOWN -> proceed (fail-safe: an unreadable mode never silences a real TEST-mode fault).
 
-  # -- the -60 dB silence bar, SOURCED from the #748 lib (never retyped here) ----------------------
+  # -- the -60 dB silence bar + the -20 dB pollution ceiling, both SOURCED from the lib (issue 748 /
+  #    issue 1323), never retyped here --------------------------------------------------------------
+  local ceiling_db
   threshold_db="$(audio_preflight_default_threshold_db)"
+  ceiling_db="$(audio_preflight_default_ceiling_db)"
 
   # -- probe the mbc peak level off stream OBS (no recording) --------------------------------------
   local body reachable out verdict peak present
@@ -257,7 +266,7 @@ main() {
   else
     reachable=0; body=""
   fi
-  out="$(printf '%s' "$body" | python3 "$DECIDE" analyze --box-reachable "$reachable" --threshold-db "$threshold_db" 2>/dev/null)"
+  out="$(printf '%s' "$body" | python3 "$DECIDE" analyze --box-reachable "$reachable" --threshold-db "$threshold_db" --ceiling-db "$ceiling_db" 2>/dev/null)"
   verdict="$(printf '%s\n' "$out" | sed -n 's/^verdict=//p')"
   peak="$(printf '%s\n' "$out" | sed -n 's/^peak_db=//p')"
   present="$(printf '%s\n' "$out" | sed -n 's/^meter_present=//p')"
@@ -278,6 +287,15 @@ main() {
     SILENT)
       confirm_then_alert "stream" 1 "measurement-audio-stream" \
         "🚨 Meracia audio ($REPO_SLUG): stream OBS vstup **$INPUT_NAME** číta DIGITÁLNE TICHO (peak ${peak} dB < ${threshold_db} dB; ticho je ~-91 dB, živý QPSK marker ~-5 dB). Meracia mbc cesta je mŕtva -- A/V-sync gate na nej stojí, takže ďalšia produkcia sa neoverí. Skontroluj v poradí: (1) je meracie mikrofón zapnutý pri reproduktore cam2 monitora? (2) je mbc kanál v Ableton Live na 10.77.7.232 ODMUTOVANÝ? (3) je Dante routing z mbc do DVS -> stream OBS v poriadku? (targets.md mbc riadok má checklist). Potvrdené počas ${CONFIRM_THRESHOLD} kontrol; re-ping každých ~$((REPING_INTERVAL_S/60)) min kým to trvá."
+      ;;
+    POLLUTED)
+      # issue 1323 — a loud signal above the ceiling. REPORT-ONLY (log, never a page) until the
+      # ceiling is re-calibrated from healthy runs: the -20 dB bar came from a BROKEN chain's
+      # marker-only plateau, while a HEALTHY QPSK marker bursts to ~-5 dBFS at this input (green
+      # E2E 34856629289: max_volume -18.9 dB) -- a level bar alone cannot separate the marker from a
+      # foreign flood; issue 1324's decodability probe is the honest POLLUTED signal. The
+      # SILENT/PRESENT latch is left untouched (no recovery, no page).
+      log "stream: POLLUTED (peak ${peak} dB > ${ceiling_db} dB ceiling) -- REPORT-ONLY, no page (issue 1323 ceiling awaits healthy-run calibration; a healthy marker peaks ~-5 dB)"
       ;;
     *)
       log "stream: unexpected verdict '${verdict:-<empty>}' from measurement_audio_decision.py (analyze failed?) -- holding, no page"

@@ -67,18 +67,36 @@ def nonzero_windows(summary):
     return out
 
 
-def distribution_table(rows):
-    """Pure: a markdown table from [(run, genlock_sha, era, summary)] rows."""
-    hdr = ("| run | genlock | era | wcg | w>tol | w_fail_strict | undec | worst BEAT-unif "
-           "| nonzero windows |")
-    sep = "|---|---|---|---|---|---|---|---|---|"
+def cam_max(summary, cam):
+    """Pure: the worst per-window `max(copies, gaps)` for ONE cambox, or None if it has no windows.
+
+    The signal the issue-1242 CAM2 per-cambox override REMOVAL question turns on: is the given box
+    within the default tolerance (small/zero) across the post-16.9 splitter-fed runs, so the #1251
+    carve-out can be dropped? None (absent box) is distinct from 0 (present + strict-clean)."""
+    wins = summary["per_cam"].get(cam)
+    if not wins:
+        return None
+    return max(max(copies, gaps) for copies, gaps, _ in wins)
+
+
+def distribution_table(rows, per_cambox_col="CAM2"):
+    """Pure: a markdown table from [(run, genlock_sha, era, summary)] rows.
+
+    `per_cambox_col` adds a worst-`max(copies,gaps)` column for ONE box (default CAM2 -- the box
+    whose #1251 override the issue-1242 walk-back drops): `-` = absent that run, else the worst
+    value, so a run of `0` across the post-16.9 splitter-fed runs is the removal precondition."""
+    hdr = (f"| run | genlock | era | wcg | w>tol | w_fail_strict | undec | worst BEAT-unif "
+           f"| {per_cambox_col} max | nonzero windows |")
+    sep = "|---|---|---|---|---|---|---|---|---|---|"
     lines = [hdr, sep]
     for run, sha, era, s in rows:
         nz = "; ".join(f"{c} {cp}/{gp}" for c, cp, gp, _ in nonzero_windows(s)) or "all 0/0"
         wb = "" if s["worst_beat_unif"] is None else f"{s['worst_beat_unif']:.4f}"
+        cm = cam_max(s, per_cambox_col)
+        cms = "-" if cm is None else str(cm)
         lines.append(
             f"| {run} | {sha[:9]} | {era} | {s['wcg']} | {s['w_over_tol']} "
-            f"| {s['w_fail_strict']} | {s['undec']} | {wb} | {nz} |"
+            f"| {s['w_fail_strict']} | {s['undec']} | {wb} | {cms} | {nz} |"
         )
     return "\n".join(lines)
 

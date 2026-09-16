@@ -82,7 +82,7 @@
 #   AUDIO_MARKER_DEVICE    #420: ALSA device for the QPSK A/V-sync audio marker (default
 #                          hw:CARD=PCH,DEV=3 — the cam2 BenQ HDMI out with the connected speaker,
 #                          confirmed live; card0 is the intercom, held exclusively by camera-box).
-#   AUDIO_MARKER_CADENCE_TICKS  emit the marker every N painter ticks (default 180 ≈ 3s @ 60Hz —
+#   AUDIO_MARKER_CADENCE_TICKS  emit the marker every N painter ticks (default 30 ≈ 0.5s @ 60Hz, issue 1318 —
 #                          the av-sync skill's proven recipe).
 #   AUDIO_MARKER_LOG       path on cam2 for the emitted-marker CSV (default
 #                          /run/rig-qpsk-markers.csv — pull it off cam2 for recording-verdict
@@ -263,7 +263,7 @@ PAINTER_EXTRA_FLAGS="${PAINTER_EXTRA_FLAGS:-}"
 # whole A/V-sync measurement (#188/#398) was silently unmeasured. Defaults match the proven
 # av-sync skill recipe (.claude/skills/av-sync).
 AUDIO_MARKER_DEVICE="${AUDIO_MARKER_DEVICE:-hw:CARD=PCH,DEV=3}"        # cam2 BenQ HDMI (confirmed: has a connected speaker)
-AUDIO_MARKER_CADENCE_TICKS="${AUDIO_MARKER_CADENCE_TICKS:-180}"        # ~3s @ 60Hz painter ticks
+AUDIO_MARKER_CADENCE_TICKS="${AUDIO_MARKER_CADENCE_TICKS:-30}"         # ~0.5s @ 60Hz painter ticks (issue 1318, owner 17.9.2026)
 AUDIO_MARKER_LOG="${AUDIO_MARKER_LOG:-/run/rig-qpsk-markers.csv}"      # emitted-marker CSV on cam2
 # RIG_TEST_DROPIN (the transient no-display drop-in TEST mode installs / EVENT mode removes) is now
 # defined in scripts/lib/rig-test-dropin.sh, sourced above — the single source shared with the e2e
@@ -345,7 +345,7 @@ painter_launch_remote() {
   local dropin_dir; dropin_dir="$(dirname "$dropin")"
   # #420: the QPSK audio-marker params — same positional-with-env-fallback shape as fps/dropin.
   local audio_dev="${8:-${AUDIO_MARKER_DEVICE:-hw:CARD=PCH,DEV=3}}"
-  local audio_cadence="${9:-${AUDIO_MARKER_CADENCE_TICKS:-180}}"
+  local audio_cadence="${9:-${AUDIO_MARKER_CADENCE_TICKS:-30}}"
   local marker_log="${10:-${AUDIO_MARKER_LOG:-/run/rig-qpsk-markers.csv}}"
   # #420/#421: the ALSA CARD/DEV parsing + the audible RUNNING-poll self-check are DRY-extracted
   # into scripts/lib/audio-marker-check.sh (sourced above) — shared with recording-e2e.sh's

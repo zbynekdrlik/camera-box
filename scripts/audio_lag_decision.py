@@ -242,6 +242,94 @@ def analyze_band(bundle_json_text, box_reachable, dev_threshold_ms=BAND_DEV_THRE
     }
 
 
+# camera-box #1325 — the mbc buffered_ms DRIFT/STEP arm (REPORT-ONLY). The #1226/#1231 lag arm and
+# the #1265 band arm both read ts_lag; buffered_ms is the honest signal for the audio-timeline drift
+# the ASRC servo fails to hold out of the mix buffer (the ≈ −18 ppm Dante-GM-vs-UTC floor). On the
+# stream box it drains ~1.1 ms/min then JUMPS +20…+57 ms when OBS re-buffers — the sawtooth every
+# dock/E2E A/V reading inherits. Report-only: this arm never pages (the E2E A/V gate is the real net
+# and the root fix is the vendored ASRC, issue 1325); it makes the drift VISIBLE between runs.
+BUFFERED_DRIFT_MS_PER_MIN = 0.6   # |slope| steeper than this over the recent window = DRIFTING drain/
+                                  # fill (tonight ≈ −1.1..−1.2; a calm buffer wanders ~0).
+BUFFERED_STEP_MS = 20             # a single positive jump >= this between consecutive readings = STEP
+                                  # (an OBS re-buffer refill; tonight +21..+49, all >= 21).
+BUFFERED_MIN_SAMPLES = 6          # fewer buffered readings than this in the window -> UNKNOWN.
+BUFFERED_STALE_S = 180            # buffered telemetry silent this long behind the log head -> STALE.
+
+
+def _float_or_none(raw):
+    """`raw` (a facet value that is a str/int/float/None) -> float, or None for absent/empty/non-num."""
+    if raw is None or (isinstance(raw, str) and raw.strip() == ""):
+        return None
+    try:
+        return float(str(raw).strip())
+    except (ValueError, TypeError):
+        return None
+
+
+def _buffered_from_obj(obj):
+    """The buffered facets `{slope_ms_per_min,max_step_ms,n,age_s}` (floats/ints/None) from an
+    already-parsed bundle dict (or None). Absent facet == < 2 buffered readings for the ref source."""
+    if not isinstance(obj, dict):
+        return {"slope_ms_per_min": None, "max_step_ms": None, "n": None, "age_s": None}
+    return {
+        "slope_ms_per_min": _float_or_none(obj.get("buffered_ms_slope_ms_per_min")),
+        "max_step_ms": _int_or_none(obj.get("buffered_ms_max_step_ms")),
+        "n": _int_or_none(obj.get("buffered_ms_n")),
+        "age_s": _int_or_none(obj.get("buffered_ms_age_s")),
+    }
+
+
+def extract_buffered(bundle_json_text):
+    """Parse a /bundle-state.json body -> the buffered facets (see `_buffered_from_obj`)."""
+    return _buffered_from_obj(_loads_obj(bundle_json_text))
+
+
+def classify_buffered(slope_ms_per_min, max_step_ms, n, age_s, box_reachable,
+                      drift_ms_per_min=BUFFERED_DRIFT_MS_PER_MIN, step_ms=BUFFERED_STEP_MS,
+                      min_samples=BUFFERED_MIN_SAMPLES, stale_threshold_s=BUFFERED_STALE_S):
+    """One box's buffered_ms verdict (REPORT-ONLY — no verdict of this arm ever pages):
+
+      box_reachable != 1                 -> SKIP     (defer #732/#1001)
+      age_s > stale_threshold_s          -> STALE    (buffered telemetry stopped while the log
+                                                      advanced; age_s None — old box — skips this)
+      n absent OR n < min_samples        -> UNKNOWN   (no buffered facet, or too few readings)
+      max_step_ms >= step_ms             -> STEP      (an OBS re-buffer refill jump — the sawtooth)
+      |slope_ms_per_min| > drift          -> DRIFT     (a sustained drain/fill trend)
+      otherwise                          -> HEALTHY   (buffer flat)
+
+    UNKNOWN gates on `n` (not slope), so a degenerate zero-span window (>=2 readings that share one
+    timestamp -> `slope` empty but `max_step` present) still evaluates STEP; DRIFT is skipped when
+    slope is None. STEP is checked before DRIFT so a re-buffering source (both a step AND, over the
+    window, a net drain) reads STEP (the more specific signal). All verdicts are report-only."""
+    if box_reachable != 1:
+        return "SKIP"
+    if age_s is not None and age_s > stale_threshold_s:
+        return "STALE"
+    if n is None or n < min_samples:
+        return "UNKNOWN"
+    if max_step_ms is not None and max_step_ms >= step_ms:
+        return "STEP"
+    if slope_ms_per_min is not None and abs(slope_ms_per_min) > drift_ms_per_min:
+        return "DRIFT"
+    return "HEALTHY"
+
+
+def analyze_buffered(bundle_json_text, box_reachable, drift_ms_per_min=BUFFERED_DRIFT_MS_PER_MIN,
+                     step_ms=BUFFERED_STEP_MS, min_samples=BUFFERED_MIN_SAMPLES,
+                     stale_threshold_s=BUFFERED_STALE_S):
+    """Fetch-result -> `{verdict, slope_ms_per_min, max_step_ms, n, age_s}`. SKIP without parsing
+    when the box was not reachable this pass (mirrors the lag/band arms' no-double-page guard)."""
+    if box_reachable != 1:
+        return {"verdict": "SKIP", "slope_ms_per_min": None, "max_step_ms": None, "n": None,
+                "age_s": None}
+    buf = _buffered_from_obj(_loads_obj(bundle_json_text))
+    verdict = classify_buffered(buf["slope_ms_per_min"], buf["max_step_ms"], buf["n"], buf["age_s"],
+                                box_reachable, drift_ms_per_min, step_ms, min_samples,
+                                stale_threshold_s)
+    return {"verdict": verdict, "slope_ms_per_min": buf["slope_ms_per_min"],
+            "max_step_ms": buf["max_step_ms"], "n": buf["n"], "age_s": buf["age_s"]}
+
+
 def _fmt(v):
     return "" if v is None else str(v)
 
@@ -263,6 +351,16 @@ def _main(argv):
     b.add_argument("--dev-threshold-ms", type=int, default=BAND_DEV_THRESHOLD_MS)
     b.add_argument("--duty-min-pct", type=int, default=BAND_DUTY_MIN_PCT)
     b.add_argument("--min-samples", type=int, default=BAND_MIN_SAMPLES)
+
+    # #1325 — the buffered_ms DRIFT/STEP arm (REPORT-ONLY): read /bundle-state.json on stdin -> the
+    # mbc buffered_ms drift/step verdict.
+    bf = sub.add_parser("buffered",
+                        help="read /bundle-state.json on stdin -> buffered_verdict + slope/max_step/n/age_s")
+    bf.add_argument("--box-reachable", type=int, required=True)
+    bf.add_argument("--drift-ms-per-min", type=float, default=BUFFERED_DRIFT_MS_PER_MIN)
+    bf.add_argument("--step-ms", type=int, default=BUFFERED_STEP_MS)
+    bf.add_argument("--min-samples", type=int, default=BUFFERED_MIN_SAMPLES)
+    bf.add_argument("--stale-threshold-s", type=int, default=BUFFERED_STALE_S)
 
     ns = ap.parse_args(argv)
 
@@ -291,6 +389,17 @@ def _main(argv):
         for k, key in (("band_verdict", "verdict"), ("band_high_ms", "high_ms"),
                        ("band_base_ms", "base_ms"), ("band_low_ms", "low_ms"),
                        ("band_duty_pct", "duty_pct"), ("band_n", "n"), ("band_src", "src")):
+            print(f"{k}={_fmt(res[key])}")
+        return 0
+
+    if ns.cmd == "buffered":
+        # #1325 — the buffered arm (REPORT-ONLY). Same tolerant read (box_reachable=0 needs no stdin).
+        text = "" if ns.box_reachable != 1 else sys.stdin.buffer.read().decode("utf-8", errors="replace")
+        res = analyze_buffered(text, ns.box_reachable, ns.drift_ms_per_min, ns.step_ms,
+                               ns.min_samples, ns.stale_threshold_s)
+        for k, key in (("buffered_verdict", "verdict"), ("buffered_slope_ms_per_min", "slope_ms_per_min"),
+                       ("buffered_max_step_ms", "max_step_ms"), ("buffered_n", "n"),
+                       ("buffered_age_s", "age_s")):
             print(f"{k}={_fmt(res[key])}")
         return 0
 
