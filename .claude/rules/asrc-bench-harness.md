@@ -268,3 +268,53 @@ Read `gh issue view 1084 --comments` for the full root cause; the short version 
   asrc_uses_sliding_regression_estimator_1084` + byte-identical pwsh blocks in BOTH
   `windows-genlock.yml` and `windows-genlock-fast.yml` (positive: the regression constants/fields/
   slope/flush; negative: `exp(-window_master_s`/`ASRC_TIME_CONSTANT_S` must be ABSENT).
+
+## #1325's servo→swresample SIGN + the servo's MASTER clock — the bench's blind spot, closed
+
+The bench (`RealtimeAsrcCompensator`) asserts against `compensate()`'s RETURN (`corrected_advance_s`),
+which is the compensator's OWN lock model `corrected = raw/(1+applied/1e6)` — it NEVER modelled the
+value that reaches libswresample, so it was structurally blind to TWO real defects that drained the
+live `mbc` mix buffer (issue 1325). Both are fixed in `obs-source.c asrc_process_audio()`:
+
+- **Master clock.** The servo's `master_block_s` now comes from `os_gettime_ns()` (the monotonic QPC
+  clock the OBS audio MIXER thread paces on — `media-io/audio-io.c`, and what `buffered_ms` is
+  balanced against), NOT `genlock_wall_now_ns()` (the dantesync-slewed system clock). Measuring vs
+  the slewed clock made `estimated ≈ −f_phase` (~18 ppm) — a drift the QPC mixer never sees — instead
+  of the true source-vs-mixer residual (~−5 ppm). `asrc-residual-floor.md` carries the reading change.
+
+- **Sign.** The compensator's convention (`applied<0` = slow source = STRETCH) is the RECIPROCAL of
+  the swresample-native wrapper (`audio_resampler_set_compensation_ppm` → `sample_delta =
+  round(ppm/1e6·distance)`, `output = input·(1+ppm/1e6)`, so `+ppm` = ADD samples = stretch). The
+  call site now passes `-applied_ppm`, so a slow source (applied<0) becomes a POSITIVE `sample_delta`
+  = stretch. The `swr_set_compensation` bullet above documents the wrapper is a one-shot ramp; THIS
+  bullet documents its SIGN relative to the compensator.
+
+**The Tier-0 gate that closes the blind spot** is a NEW pure function, NOT a bench change:
+`src/asrc_compensation_quantization.rs::servo_applied_ppm_to_sample_delta(applied_ppm, distance_ms,
+output_freq)` = `compensation_sample_delta(-applied_ppm, …)` — the composition of the negation and
+the existing #929/#1016 integer quantization, i.e. the exact end-to-end value swresample receives.
+Its parity test `servo_negates_applied_ppm_so_a_slow_source_stretches_1325` pins `applied<0 ⇒
+sample_delta > 0` (and the fast-source symmetry). Keep the negation in exactly ONE place: the
+`obs-source.c` call site AND this pure mirror must agree — the wrapper itself
+(`audio_resampler_set_compensation_ppm`) keeps its swresample-native convention, so its own
+`compensation_sample_delta` mirror and every #929/#1016 quantization test stay UNCHANGED (do NOT
+negate inside the wrapper — that would conflate the sign fix with the quantization floor and break
+those tests). Lock-step anchor: `tests/genlock_preload.rs::vendored_source::
+asrc_servo_master_clock_is_os_gettime_ns_and_sign_negated_1325` + byte-identical pwsh blocks in BOTH
+`windows-genlock.yml` and `windows-genlock-fast.yml` (positive: `const uint64_t mixer_now_ns =
+os_gettime_ns();` + the `-applied_ppm` call; negative: the pre-fix non-negated `applied_ppm,` call
+must be ABSENT). The `RealtimeAsrcCompensator` corrected-advance model itself is UNCHANGED by #1325.
+
+## Tier-0 RED→GREEN for a SELF-CONTAINED pure module — plain `rustc --test`, no cargo (#1325)
+
+The `# airuleset:build-ok` bypass is DISABLED (#477) and #557 blocks even `cargo test --no-run`, so
+the old "cargo test --lib asrc_bench" observation path in the sections above is HISTORY. For a
+crate-root pure module that has NO crate-internal deps (`src/asrc_compensation_quantization.rs` —
+only std, no `use crate::`), the working Tier-0 RED→GREEN is a STANDALONE rustc compile of the file
+itself: `rustc --test --edition 2021 src/asrc_compensation_quantization.rs -o /tmp/x && /tmp/x`. No
+`CARGO_MANIFEST_DIR` is needed (that env is only for a `tests/*.rs` file that reads vendored source
+via `env!("CARGO_MANIFEST_DIR")` or `use camera_box::…`, e.g. `genlock_preload.rs`). Used live for
+#1325's sign gate: buggy body → 1 failed, negated body → 11 passed, a genuine local RED→GREEN with
+zero cargo. The precondition is a module with no `use crate::`/`use super::` CODE deps (intra-doc
+`[crate::…]` links in comments are fine — rustc ignores doc content); check with
+`grep -nE '^use (crate|super)::' src/<module>.rs` before trusting the standalone compile.

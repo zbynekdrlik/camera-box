@@ -1794,6 +1794,44 @@ mod vendored_source {
     }
 
     #[test]
+    fn asrc_servo_master_clock_is_os_gettime_ns_and_sign_negated_1325() {
+        // issue #1325: two coupled defects in asrc_process_audio() (obs-source.c):
+        //   (1) the servo's MASTER basis must be os_gettime_ns() -- the monotonic QPC clock the
+        //       OBS audio mixer thread paces on (media-io/audio-io.c) and buffered_ms balances
+        //       against -- NOT genlock_wall_now_ns() (GetSystemTimePreciseAsFileTime = the SYSTEM
+        //       clock dantesync SLEWS). Measuring vs the slewed clock made the servo see
+        //       |estimated| = f_phase and "correct" a drift the QPC-paced mixer never sees.
+        //   (2) the ppm handed to the swresample-native wrapper must be NEGATED (`-applied_ppm`):
+        //       the compensator's lock model `corrected = raw/(1+applied/1e6)` is the reciprocal
+        //       sign of swresample's `output = input*(1+ppm/1e6)`, so a non-negated applied_ppm
+        //       COMPRESSED a slow source and drained the mix buffer (live discriminator 16.9.,
+        //       issue 1325 comments 5703177274 / 5703688577).
+        // Src authority: obs-source.c asrc_process_audio(). Tier-0 sign gate:
+        // src/asrc_compensation_quantization.rs::servo_negates_applied_ppm_so_a_slow_source_stretches_1325.
+        let src = squish(&vendor_file(OBS_SOURCE));
+        assert!(
+            src.contains("const uint64_t mixer_now_ns = os_gettime_ns();"),
+            "{OBS_SOURCE}: #1325 — asrc_process_audio no longer reads os_gettime_ns() as the servo \
+             master basis (the QPC clock the audio mixer paces on); it reverted to the slewed \
+             genlock_wall_now_ns(), the exact wrong-clock drain #1325 fixed. Re-apply."
+        );
+        assert!(
+            src.contains(
+                "audio_resampler_set_compensation_ppm(source->resampler, -applied_ppm, ASRC_COMPENSATION_DISTANCE_MS)"
+            ),
+            "{OBS_SOURCE}: #1325 — the ppm fed to swresample is no longer NEGATED (-applied_ppm); a \
+             non-negated applied_ppm applies the reciprocal sign and drains/grows the mix buffer. \
+             Re-apply."
+        );
+        assert!(
+            !src.contains("audio_resampler_set_compensation_ppm(source->resampler, applied_ppm,"),
+            "{OBS_SOURCE}: #1325 — the pre-fix non-negated call \
+             (audio_resampler_set_compensation_ppm(source->resampler, applied_ppm, ...)) is BACK; \
+             the sign fix was reverted."
+        );
+    }
+
+    #[test]
     fn build_latch_drains_burst_to_target_in_vendored_source() {
         // #116: the genlock_fifo branch of ready_async_frame must DRAIN the excess
         // oldest frames at the build latch (and after a preload-change re-arm) so every
