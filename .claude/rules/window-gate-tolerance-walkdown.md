@@ -420,3 +420,44 @@ two under-cadence GRABBERS are the copy/gap sources (emit-fill repeats → a rec
 lands in strih's 30 fps decimation → the 883 net-span gap), not FIFO/optics. Re-entry for the
 strict restore: fix the cam1/cam2 capture cadence first, then ≥ 5 clean runs, then the seam flips
 (with the consumer sweep above).
+
+## Issue 1242 (task 1, 17.9.2026): DATA-FIRST attribution — the residual churn is DOWNSTREAM, per-box cadence is a COVARIATE
+
+The 16.9. supervisor note above (from run 443513281's per-box `Streaming:` means) read the residual
+as GRABBER-owned: cam1/cam2 capture ~0.1–0.2 fps under the 60 Hz emit cadence, so the emit-fill
+repeat → a recording copy. Task 1 mined that hypothesis to the ground with a new pure tool
+(`scripts/residual_churn_attribution.py` + `tests/python/test_residual_churn_attribution_1242.py`,
+Tier-0). It aligns EVERY residual event's `wall_clock_epoch_s` to that cambox's OWN burn log and
+classifies the SOURCE side (5-s `Streaming:` sent−captured deficit; 1-s `#707 emit-1s/cap-1s`
+deficit; the `(#889) dupe-preferring decimation` line's `late-dupe copies emitted` and `starvation
+last-frame repeats`). Verdict, from 5 post-cure splitter-fed runs (977889848, 2019585820, 443513281,
+605445038, 1249662438; genlock 7e8efff6a / ca46fc166), 9 residual events:
+
+- **All 9 events → DOWNSTREAM (0 SOURCE).** No event carries an anomalous source signal: the cambox
+  emitted **ZERO `late-dupe copies` in every window of every run** (it never itself put a duplicate
+  into NDI), no corruption ROSE above each box's steady floor at an event, and no 5-s deficit ever
+  reached the ≥3 burst floor (the steady background is 1–2). The copy signature `tick_before ==
+  tick_after` + a same-box `883` net-span gap within ~10 s = the genlock-FIFO hold-then-catchup /
+  60→30 decimation-phase limit cycle (painter CLEAN, cited).
+- **The counterfactual kills the grabber-cadence story.** cam1 & cam2 carry a LARGE, steady capture
+  deficit — ~90–110 emit-fill (`starvation last-frame repeat`) frames PER RUN — in EVERY run,
+  INCLUDING the two fully-clean 0/0 runs: **609 emit-fill frames across the clean runs produced 0
+  residuals.** Copy survival ratio ≈ **0.0026** (4 recording copies per 1562 source emit-fills). A
+  grabber-owned defect would show residuals proportional to the emit-fill rate (dozens per run on
+  cam2); we see 0–2.
+- **The survivor does NOT track the worst grabber.** In 605445038 the singletons landed on CAM7
+  (mean_cap 300.5, only 42 emit-fills) while CAM2 (94 emit-fills) read 0/0; residuals landed on a
+  non-worst-emit-fill grabber in 2/3 runs. cam1/cam2's under-cadence is REAL and persistent
+  (mean_cap 299.8–300.1 vs cam3–7 300.4–300.6) but it only supplies the raw material — WHICH box and
+  WHEN a survivor lands is decided downstream (decimation phase + FIFO), stochastically.
+
+**Consequence for the strict-zero restore trail:** the residual is an IRREDUCIBLE ≤1/≤1 steady-state
+noise floor of the 60→30 decimation + genlock FIFO at this splitter topology, NOT a fixable source
+fault (`calibrate-artifact-vs-fix-robustness`). A grabber self-heal threshold change (issue 1193 /
+1200 / #656 capture-rate class) would NOT remove it (the clean runs already carry the same grabber
+deficit with 0 residuals). The honest recommendation is to KEEP the #1169 `<=1/<=1` singleton
+allowance (or the tol-2 seam) as the calibrated floor and gate on `>=2` — do NOT restore absolute
+strict-zero, because there is no root cause to fix and it will RED any run where one FIFO hold
+survives (exactly what killed run 443513281). Only if the owner insists on strict-zero would the
+sole lever be reducing the cam1/cam2 capture-rate deficit at the driver/USB level — and even a
+perfect cadence would not guarantee zero (a genlock FIFO hold can still create a `<=1` copy).

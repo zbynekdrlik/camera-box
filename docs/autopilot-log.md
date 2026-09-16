@@ -12743,3 +12743,11 @@ no version bump (worktree lane; supervisor cherry-picks).
 - E2E 35152458072 GREEN on the fixed audio path (A/V on 7 cams); fleet cam1-7 on .634; obs.dll ca46fc166 (fast-DLL) live on strih+stream since 16.9. 22:51.
 - mbc buffered_ms 22:51-00:52: n=122, slope -0.033 ms/min (-0.5 ppm), 98-106 ms, max step 6, zero refills (pre-fix -1.1..-1.5 ms/min + refills); asrc estimated -6..-7 ppm; dock offset stable ~1-3 ms.
 - Owner-side: mbc is the stream's only unmuted audio input (VB-Matrix path retired, StartVBMatrix Disabled) — the fix removed a periodic audio-timeline jump from the live program.
+
+## 17.9.2026 — issue 1242 task 1: DATA-FIRST attribution of the ~0.06% residual copy/gap churn (lane/1242-churn-attrib)
+
+- New pure mining tool `scripts/residual_churn_attribution.py` + `tests/python/test_residual_churn_attribution_1242.py` (15/15). Reuses `arrival_floor_decompose._strip_ansi/_STREAMING_RE` + `window_gate_walkdown._genlock_sha/summarize_verdict`; new regexes only for the `#707 emit-1s/cap-1s` + `(#889) dupe-preferring decimation` lines (no existing python parser).
+- Verdict across 5 post-cure splitter-fed runs (977889848, 2019585820, 443513281, 605445038, 1249662438), 9 residual events: **all 9 DOWNSTREAM, 0 SOURCE.** genlock-FIFO / 60→30 decimation-phase / optical-beat class; per-box capture cadence is a COVARIATE, not the cause.
+- Counterfactual: 609 emit-fill frames across the 2 fully-clean 0/0 runs produced 0 residuals; copy survival ratio ≈ 0.0026; cambox emitted 0 `late-dupe copies` in every window; residuals landed on a non-worst grabber in 2/3 runs (CAM7 got one while CAM2 with 2× the emit-fill read 0/0).
+- Fix proposal (NOT implemented, task 2 material): do NOT restore absolute strict-zero (no root cause to fix; it RED-ed run 443513281 on one surviving FIFO hold). Keep the #1169 `<=1/<=1` singleton allowance / tol-2 seam as the calibrated irreducible floor, gate on `>=2`. Grabber self-heal (issue 1193/1200/#656) would not remove it — the clean runs carry the same deficit with 0 residuals.
+- Findings appended to `.claude/rules/window-gate-tolerance-walkdown.md`. No Cargo bump (walk-back/analysis only, dev .635 > main .634). No rig, no fold-seam change.
