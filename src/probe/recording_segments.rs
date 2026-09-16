@@ -984,6 +984,8 @@ mod tests {
 
     #[test]
     fn undecodable_within_floor_and_a_copy_present_now_passes_relaxed_but_still_fails_strict_889() {
+        // #1242 (FINAL, 2026-09-16): BOTH copies/gaps seams are now DISARMED -- this window's nonzero
+        // copies/gaps REDs overall_pass (see the assertion). The #1132->#1169->#1220 narrative below is HISTORY.
         // The #881 floor governs ONLY the optical `undecodable` term. A copy in the SAME window
         // used to still fail the window (`copies == 0` / `gaps == 0` were "not relaxed, now or
         // ever" per issue 854's design) -- issue 889 (2026-07-30 user decision on issue 883)
@@ -1032,13 +1034,13 @@ mod tests {
             v.segments[0]
         );
         assert!(
-            v.overall_pass,
-            "issue 1220: the single copy is ABSORBED into overall_pass via the re-armed tolerance: {v:?}"
+            !v.overall_pass,
+            "#1242 strict-zero: with both seams disarmed the single copy now REDs overall_pass -- \
+             visible via strict_pass, still reported by the tol-2 lens (relaxed_pass), never masked: {v:?}"
         );
         assert!(
             v.segments[0].singleton_allowance_note.is_none(),
-            "issue 1220: the singleton mechanism is dormant -- the tolerance channel absorbed \
-             this, not the singleton band: {:?}",
+            "#1242: the singleton mechanism is disarmed -- no note, no absorption: {:?}",
             v.segments[0]
         );
         assert_eq!(
@@ -1152,7 +1154,9 @@ mod tests {
     }
 
     #[test]
-    fn copy_stale_frame_fails_strict_but_is_absorbed_by_the_1220_tolerance_channel() {
+    fn copy_stale_frame_fails_strict_and_now_reds_the_strict_zero_fold_1242() {
+        // #1242 (FINAL, 2026-09-16): BOTH copies/gaps seams are now DISARMED -- this window's nonzero
+        // copies/gaps REDs overall_pass (see the assertion). The #1132->#1169->#1220 narrative below is HISTORY.
         // cam2 repeats a painted tick (500,500,501) → a stale/frozen copy → STRICT FAIL.
         // Renamed from `..._absorbed_by_the_1169_singleton_allowance_supersedes_1132`. #1132 made
         // a single copy FAIL overall_pass; #1169 refined that with a <=1/<=1 SINGLETON absorption;
@@ -1181,8 +1185,8 @@ mod tests {
         ]);
         let v = segment_continuity(&frames, &schedule, 0, 1);
         assert!(
-            v.overall_pass,
-            "#1220: a single copy is now ABSORBED into overall_pass via the re-armed tolerance: {v:?}"
+            !v.overall_pass,
+            "#1242 strict-zero: a single copy now REDs overall_pass (both seams disarmed): {v:?}"
         );
         assert!(v.segments[0].pass);
         assert!(
@@ -1219,6 +1223,8 @@ mod tests {
 
     #[test]
     fn non_adjacent_freeze_hiding_a_real_drop_still_fails_strict() {
+        // #1242 (FINAL, 2026-09-16): BOTH copies/gaps seams are now DISARMED -- this window's nonzero
+        // copies/gaps REDs overall_pass (see the assertion). The #1132->#1169->#1220 narrative below is HISTORY.
         // REGRESSION (code-review finding): at expected_step=1 the per-node burn check's
         // PerEmittedFrame #226 logic would reclassify the dropped tick 102 as BURN-UNREADABLE
         // (a non-adjacent duplicate 100 sits in the gap) while a consecutive-only copy counter
@@ -1285,9 +1291,9 @@ mod tests {
             "issue 1220: the STRICT count still records the hidden drop (report-only, visible): {v:?}"
         );
         assert!(
-            v.overall_pass,
-            "issue 1220: the single counted drop is ABSORBED into overall_pass via the re-armed \
-             tolerance channel -- counted, never masked: {v:?}"
+            !v.overall_pass,
+            "#1242 strict-zero: the single counted drop now REDs overall_pass (both seams \
+             disarmed) -- counted, visible via strict, reported by the tol-2 lens, never masked: {v:?}"
         );
         // Companion: the SAME freeze-hiding shape with SIX real drops (102, 104, 106, 108, 110
         // AND 112 missing) exceeds the walked-up (#1243, 2026-08-31) <=5 tolerance ceiling --
@@ -1405,7 +1411,9 @@ mod tests {
     }
 
     #[test]
-    fn benign_delivery_reorder_gap_is_counted_and_absorbed_by_the_1220_tolerance_channel_625() {
+    fn benign_delivery_reorder_gap_is_counted_and_now_reds_the_strict_zero_fold_1242_625() {
+        // #1242 (FINAL, 2026-09-16): BOTH copies/gaps seams are now DISARMED -- this window's nonzero
+        // copies/gaps REDs overall_pass (see the assertion). The #1132->#1169->#1220 narrative below is HISTORY.
         // The reorder-tolerance fix must never MASK a genuine drop either: 1004 is truly missing
         // (never delivered) on top of the same 1002/1006-adjacent reorder pattern. Issue 889
         // (2026-07-30 user decision on issue 883): `gaps` is report-only for `overall_pass` now,
@@ -1466,9 +1474,9 @@ mod tests {
             "issue 1220: the STRICT count still records the gap (report-only, visible): {v:?}"
         );
         assert!(
-            v.overall_pass,
-            "issue 1220: a single counted gap is ABSORBED into overall_pass via the re-armed \
-             tolerance channel -- counted, never masked: {v:?}"
+            !v.overall_pass,
+            "#1242 strict-zero: a single counted gap now REDs overall_pass (both seams disarmed) \
+             -- counted, visible via strict, reported by the tol-2 lens, never masked: {v:?}"
         );
     }
 
@@ -2131,6 +2139,8 @@ mod tests {
 
     #[test]
     fn windows_failed_report_only_counts_strict_failures_across_a_mixed_run_889() {
+        // #1242 (FINAL, 2026-09-16): BOTH copies/gaps seams are now DISARMED -- this window's nonzero
+        // copies/gaps REDs overall_pass (see the assertion). The #1132->#1169->#1220 narrative below is HISTORY.
         // 3 windows: cam1 clean, cam2 has a copy only (fails strict), cam3 clean. Issue 1220
         // (owner mandate, 2026-08-29) re-arms the <=3 tolerance channel: cam2's single copy is
         // ABSORBED into `overall_pass` (true) through it, not the (now-dormant) #1169 <=1/<=1
@@ -2162,9 +2172,9 @@ mod tests {
         frames.extend(clean_frames(2000, 100, 4, 1, 900));
         let v = segment_continuity(&frames, &schedule, 0, 1);
         assert!(
-            v.overall_pass,
-            "issue 1220: cam2's single copy is ABSORBED into overall_pass via the re-armed \
-             tolerance channel: {v:?}"
+            !v.overall_pass,
+            "#1242 strict-zero: cam2's single copy now REDs overall_pass (both seams disarmed); \
+             windows_failed_report_only still honestly counts the one strict-failing window: {v:?}"
         );
         assert!(v.segments[0].pass, "cam1 clean");
         assert!(!v.segments[1].pass, "cam2 has the copy -> STRICT fail");
@@ -2346,7 +2356,9 @@ mod tests {
     }
 
     #[test]
-    fn a_single_copy_window_is_absorbed_by_the_1220_tolerance_channel() {
+    fn a_single_copy_window_now_reds_the_strict_zero_fold_1242() {
+        // #1242 (FINAL, 2026-09-16): BOTH copies/gaps seams are now DISARMED -- this window's nonzero
+        // copies/gaps REDs overall_pass (see the assertion). The #1132->#1169->#1220 narrative below is HISTORY.
         // Renamed from `..._absorbed_by_the_1169_singleton_allowance_supersedes_1132`. A window
         // with exactly ONE copy is the designed issue-1167 paced-trickle + FIFO stale_replay
         // residual (post cam1 card swap), NOT a hardware-sick leg. #1132 made it FAIL overall_pass
@@ -2387,12 +2399,12 @@ mod tests {
             v.segments[1]
         );
         assert!(
-            v.overall_pass,
-            "#1220: a single copy is ABSORBED into overall_pass via the re-armed tolerance: {v:?}"
+            !v.overall_pass,
+            "#1242 strict-zero: a single copy now REDs overall_pass (both seams disarmed): {v:?}"
         );
         assert!(
             v.segments[1].singleton_allowance_note.is_none(),
-            "#1220: the singleton mechanism is dormant -- the tolerance channel absorbed this: {:?}",
+            "#1242: the singleton mechanism is disarmed -- no note, no absorption: {:?}",
             v.segments[1]
         );
         assert_eq!(
@@ -2410,7 +2422,9 @@ mod tests {
     }
 
     #[test]
-    fn two_or_three_copies_in_one_window_now_pass_overall_1220() {
+    fn two_or_three_copies_in_one_window_now_red_overall_1242() {
+        // #1242 (FINAL, 2026-09-16): BOTH copies/gaps seams are now DISARMED -- this window's nonzero
+        // copies/gaps REDs overall_pass (see the assertion). The #1132->#1169->#1220 narrative below is HISTORY.
         // Renamed from `two_copies_in_one_window_still_fail_overall_1169`, INVERTED: #1132 made a
         // window with TWO copies (>1, over the #1169 singleton band) FAIL overall_pass; #1220
         // (owner mandate, 2026-08-29) re-arms the WIDER <=3 tolerance channel, so 2 (and 3) copies
@@ -2443,8 +2457,9 @@ mod tests {
         let v = segment_continuity(&frames, &schedule, 0, 1);
         assert_eq!(v.segments[1].copies, 2, "{:?}", v.segments[1]);
         assert!(
-            v.overall_pass,
-            "#1220: 2 copies sit within the re-armed tolerance -- must now PASS overall_pass: {v:?}"
+            !v.overall_pass,
+            "#1242 strict-zero: 2 copies now RED overall_pass (both seams disarmed -- only 0/0 \
+             passes); still within the tol-2 lens so relaxed_pass stays true (observability): {v:?}"
         );
         assert!(
             v.segments[1].singleton_allowance_note.is_none(),
@@ -2459,12 +2474,13 @@ mod tests {
     }
 
     #[test]
-    fn per_cambox_override_absorbs_cam2_starvation_but_not_other_boxes_1251() {
-        // #1251: an UPPERCASE `CAM2` window carrying a starvation burst (copies=8 -- the shape of
-        // run 1326320314's cam2 windows, over the default 5, under CAM2's 25 override) is ABSORBED,
-        // while a `CAM3` window over the default 5 still FAILS. Uppercase labels on purpose:
-        // production emits CAMN, and the lowercase-`cam2` fixtures above deliberately keep the
-        // default so the override touches only the real rig.
+    fn per_cambox_override_dropped_cam2_folds_like_every_box_1242() {
+        // #1242 final: the CAM2 override map is now EMPTY, so `segment_continuity` (which still
+        // calls `decide_for_cambox`, machinery wired) resolves CAM2 to the DEFAULT tolerance like
+        // every other box. An UPPERCASE `CAM2` window carrying a starvation burst (copies=8 -- the
+        // shape of run 1326320314's cam2 windows) is NO LONGER absorbed: its applied tolerance is
+        // the default, so it fails the lens AND (with the seams disarmed) the strict-zero fold,
+        // exactly like the `CAM3` gaps=6 window. Uppercase labels on purpose: production emits CAMN.
         let schedule = vec![win("CAM2", 0, 2000), win("CAM3", 2000, 3000)];
         // CAM2: tick 500 repeated 9 times -> copies=8, gaps=0 (all-same value dedups to one span).
         let mut frames: Vec<SegmentFrame> = (0..9)
@@ -2499,9 +2515,8 @@ mod tests {
         ]);
         let v = segment_continuity(&frames, &schedule, 0, 1);
 
-        // CAM2 window: the applied per-window tolerance is the 25 override, carried on the segment
-        // (serialized into the verdict JSON as `copies_gaps_tolerance` so the report shows the
-        // override).
+        // CAM2 window: the applied per-window tolerance is now the DEFAULT (the override map is
+        // empty), serialized into the verdict JSON as `copies_gaps_tolerance`.
         assert_eq!(v.segments[0].cambox, "CAM2");
         assert_eq!(
             v.segments[0].copies, 8,
@@ -2514,13 +2529,14 @@ mod tests {
             v.segments[0]
         );
         assert_eq!(
-            v.segments[0].copies_gaps_tolerance, 25,
-            "CAM2 applied tolerance = the 25 override: {:?}",
+            v.segments[0].copies_gaps_tolerance,
+            crate::window_gate::WINDOW_COPIES_GAPS_TOLERANCE,
+            "#1242: CAM2 applied tolerance = the DEFAULT now (override dropped): {:?}",
             v.segments[0]
         );
         assert!(
-            v.segments[0].relaxed_pass,
-            "CAM2 copies=8 is ABSORBED by its 25 override: {:?}",
+            !v.segments[0].relaxed_pass,
+            "#1242: CAM2 copies=8 over the default tolerance now fails the lens (no override): {:?}",
             v.segments[0]
         );
         assert!(
@@ -2544,19 +2560,20 @@ mod tests {
         );
         assert!(
             !v.segments[1].relaxed_pass,
-            "CAM3 gaps=6 over the default 5 still fails: {:?}",
+            "CAM3 gaps=6 over the default tolerance still fails: {:?}",
             v.segments[1]
         );
 
-        // The run still fails -- on the genuinely-broken box (CAM3), never masked by the CAM2 relax.
+        // The run fails -- now on BOTH boxes (no CAM2 carve-out); the strict-zero fold reds both.
         assert!(
             !v.overall_pass,
-            "run fails on CAM3, not CAM2 (the override never masks a real defect): {v:?}"
+            "#1242: the run fails (both CAM2's copies=8 and CAM3's gaps=6 exceed the default): {v:?}"
         );
-        // `windows_over_copies_gaps_tolerance` uses each window's OWN tolerance: only CAM3 is over.
+        // `windows_over_copies_gaps_tolerance` uses each window's OWN (now uniform default) tolerance:
+        // BOTH CAM2 (8) and CAM3 (6) are over it.
         assert_eq!(
-            v.windows_over_copies_gaps_tolerance, 1,
-            "only CAM3 exceeds its own tolerance; CAM2's 8 is within 25: {v:?}"
+            v.windows_over_copies_gaps_tolerance, 2,
+            "#1242: both CAM2 (8) and CAM3 (6) exceed the default tolerance now: {v:?}"
         );
     }
 }
