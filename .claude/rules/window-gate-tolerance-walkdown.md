@@ -255,3 +255,54 @@ single global tolerance cannot tell the sick box from the healthy ones.
   default for every box; the map-empty state is the tested walk-back state. Never masks a real
   defect: a non-overridden box over its default still fails the run (proven by
   `per_cambox_override_absorbs_cam2_starvation_but_not_other_boxes_1251`).
+
+## Issue 1242 walk-BACK (2026-09-16): tol 5 -> 2 + uniformity floor 0.90 -> 0.95 (interim, n=1 post-fix)
+
+The paired walk-BACK ticket fired once issues 1318/1320 root-caused + FIXED the residual FIFO copy
+churn's source (the strih PROGRAM render-freeze -> stream FIFO underrun -> relock storm; cure =
+genlock bundle `02b53180b`, deployed 15.9 ~21:36). The whole segregation was done on the
+rig-verified `version-strih.json.genlock_build_sha` (NOT prose timestamps — the exact "verify the
+deploy time on the RIG" doctrine of section 2 above), via the new pure mining tool
+`scripts/window_gate_walkdown.py`. The mined distribution:
+
+| run | genlock sha | era | wcg | w>tol | w_fail_strict | undec | worst BEAT-unif | nonzero windows |
+|---|---|---|---|---|---|---|---|---|
+| 841811381 | 3ffe2fbc5 | PRE | 3 | 0 | 3 | 6 | 0.9870 | CAM2 1/0; CAM3 1/1; CAM3 1/2 |
+| 25635487 | 3ffe2fbc5 | PRE | 2 | 1 | 2 | 0 | 0.9481 | CAM2 12/10; **CAM6 26/27** (render-freeze) |
+| 158154134 | d55afb726 | PRE | 3 | 0 | 3 | 10 | 0.9823 | CAM1 2/1; CAM2 5/5; CAM3 1/1 |
+| 241316104 | d55afb726 | mid | 0 | 0 | 0 | 0 | 0.9976 | all 0/0 |
+| 1651388579 | d55afb726 | mid | 0 | 0 | 0 | 0 | 0.9976 | all 0/0 |
+| 494687603 | c4b16074c | mid | 0 | 0 | 0 | 0 | 0.9976 | all 0/0 |
+| **180691712** | **02b53180b** | **POST-FIX** | **0** | **0** | **0** | **0** | **0.9988** | **all 0/0** |
+
+`wcg`=windows_with_copies_or_gaps; `w_fail_strict`=windows_failed_report_only (windows a strict
+`copies==0&&gaps==0` fold would RED); worst BEAT-unif = MIN `beat_corrected_uniform_fraction` (the
+#1250-gated field, NOT `derived`).
+
+**The DECISION and its two subtleties:**
+
+1. **Post-fix sample = n=1 (only 180691712 on the cure bundle) -> DO NOT restore absolute
+   strict-zero on one run.** The whole #889/#1132/#1169 calibration history shows a lone clean run
+   is repeatedly followed by a churny one. So the copies/gaps step is INTERIM: walk
+   `WINDOW_COPIES_GAPS_TOLERANCE` 5 -> 2 (seam 2 `copies_gaps_tolerance_gates_overall_pass()` stays
+   `true` -> the tolerance channel still governs the fold; strict-zero mechanism stays wired
+   dormant). 2 still REDs the 9-45/window burst class AND the CAM6 26/27 render-freeze class (both
+   >> 2) while every post-fix window sits at 0. The FULL strict-zero restore (disarm BOTH
+   `copies_gaps_tolerance_gates_overall_pass()` AND `segment_singleton_allowance_gates_overall_pass()`
+   -> the `else` `copies==0&&gaps==0` arm) is the EXPLICIT next step, gated on >= 2 more
+   `02b53180b`-or-later runs with `windows_failed_report_only == 0`. The single-copy churn signature
+   (copies=1) is caught ONLY by that strict-zero arm — tol=2 (and the `<=1/<=1` singleton band)
+   both absorb it — so the interim is a regression-catch tighten, not a churn catch.
+2. **The uniformity floor gates `beat_corrected_uniform_fraction` (since #1250), so re-derive the
+   restore value on THAT field, not `derived`.** The ticket body quotes derived numbers (0.9397);
+   the gate reads beat-corrected. Post-fix beat-corrected worst 0.9976-0.9988 supports restoring
+   `UNIFORM_FRACTION_MIN` to the original 0.95 (the #1243 walk 0.95->0.93->0.90 fully reversed) with
+   ~0.05 margin, while the churny pre-fix run (0.9481) correctly REDs. Restoring EXACTLY 0.95 (not
+   tighter) honors "never widen past the ship value".
+
+**CAM2 per-cambox 25 KEPT + its removal precondition PINNED data-conditionally.** cam2 was still
+the imag-HDMI projection tap at 15.9 22:31 (180691712); it became splitter-fed only ~16.9 13:00, so
+NO post-16.9 splitter-fed run exists yet. `tests/verdict_gate_strict_fold_1242.rs` pins the current
+`&[("CAM2", 25)]` state + documents the removal precondition (first post-16.9 splitter-fed run whose
+CAM2 windows sit within the default tolerance -> set the map to `&[]`) — a report-only,
+data-conditional pin, never a widen.

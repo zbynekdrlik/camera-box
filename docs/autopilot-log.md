@@ -12563,3 +12563,25 @@ no version bump (worktree lane; supervisor cherry-picks).
   12/12 (incl. backward-compat + DEAD_PORT/SOURCE_WIDE/NODATA/NO_CAPTURE regressions) + watchdog
   driver replica (PURPLE_NOISE report-only, no page; mixed fleet; grey-box DEAD_PORT still pages);
   cargo fmt --all --check + bash -n + shellcheck -S warning clean. The Rust harnesses run at CI.
+## issue 1242 — walk-back step: copies/gaps tol 5->2 + uniformity floor 0.90->0.95 (lane/1242-strictfold) — 2026-09-16
+- Root cause of the residual ~0.06% FIFO copy churn: the strih PROGRAM render-freeze -> stream FIFO
+  underrun -> relock storm, root-caused + fixed by issues 1318/1320 (cure = genlock bundle
+  02b53180b, deployed 15.9 ~21:36). This is the WALK-BACK: tighten the gate now the churn source is
+  gone.
+- DATA (mined via the new `scripts/window_gate_walkdown.py`, segregated by rig-verified
+  `version-strih.json.genlock_build_sha`): POST-fix run 180691712 (02b53180b) = every window 0/0,
+  worst beat-corrected uniformity 0.9988; adjacent clean runs 0.9976; PRE-fix runs carried the churn
+  (25635487 CAM6 26/27 = the render-freeze, worst 0.9481; 841811381/158154134 singleton churn).
+- DECISION (window-gate-tolerance-walkdown / gate-allowance-restore-red-green): post-fix sample is
+  n=1, too thin for absolute strict-zero. INTERIM: `WINDOW_COPIES_GAPS_TOLERANCE` 5->2 (seam 2/4
+  stay armed, tolerance channel governs), `UNIFORM_FRACTION_MIN` 0.90->0.95 (restored ship value,
+  on the beat-corrected field). CAM2 25 override KEPT (no post-16.9 splitter-fed run yet; removal
+  precondition pinned data-conditionally). STRICT-zero restore = explicit next step (disarm both
+  seams), gated on >=2 more 02b53180b-or-later runs with windows_failed_report_only==0.
+- Commits: [red] test(#1242) tests/verdict_gate_strict_fold_1242.rs -> [green] fix(#1242) (const
+  changes + boundary/at-tolerance fixture recalibration incl. the two walk-down-era uniformity runs
+  now RED at 0.95 + probe-gated prose updates) -> mining tool + pytest -> docs. Verify (Tier-0, no
+  cargo compile): std-only rustc --test replica RED(5,0.90)/GREEN(2,0.95) + every recalibrated value
+  re-checked at (2,0.95); mining-tool pytest 5/5; cargo fmt --all --check clean; doc-lint grep clean.
+  The Rust tests (verdict_gate_strict_fold_1242 + the window_gate/presentation_cadence unit tests) +
+  full suite run at CI/integration.
