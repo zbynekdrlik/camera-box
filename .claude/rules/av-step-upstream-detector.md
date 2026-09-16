@@ -88,3 +88,40 @@ machine (STEP → confirm → alert → absorbed-hold → recovery) has no Rust 
 with a stubbed `curl` on `$PATH` serving a different crafted bundle-state body per pass (the #836
 executable-fixture pattern) + a persistent `AV_STEP_ALERT_STATE_FILE`, and assert the log lines +
 the `alerted_/alert_base_` state transitions across passes.
+
+## #1319 — the absolute-BAND arm (owner-facing alarm the STEP term is blind to)
+
+The STEP term above measures the CHANGE-rate of the 10-min median vs a ROLLING baseline, so it is
+structurally blind to a SLOW absolute drift: the owner's 15.9.2026 wander (+13 → +47 ms over 80 min
+at a constant pin) never crossed a 45 ms adjacent-median delta and the rolling baseline absorbed it,
+so no notification fired. The SAME watchdog file (`av-step-alert-watchdog.sh`) now carries a SECOND
+arm, run alongside the step arm per box:
+
+- **Signal + facet.** `classify_av_band`/`analyze_band` (in `av_step_decision.py`, pure, the
+  `analyze-band` CLI subcommand) page **OUT_OF_BAND** when the RECENT median offset (≥ `min_samples`,
+  at a CONSTANT pin) leaves ±`AV_BAND_MS` (default 30) of a **FIXED E2E-aligned reference**. The
+  reference is judged against the aligned RESIDUAL, **never the genlock pin** — `resolve_band_reference`
+  reads (in order) `AV_BAND_REFERENCE_MS` → `residual_median_ms` of
+  `~/.camera-box/av-sync-residual-last.json` (the `[4i/8]` align residual `av_sync_apply_guard`
+  persists) → a 0 ms fallback STATED in the log. A fixed anchor means recovery is a plain return into
+  band, no frozen-baseline latch (unlike the STEP arm).
+- **The dead-band freshness facet.** The dock only logs its SUGGESTED offset line while `|offset|` is
+  OUTSIDE its suggestion dead band, so a quiet in-band window makes the SUGGESTED series go silent and
+  the old `av_offset_age_s` read STALE even though the dock is LIVE (the 19:51 `age_s=427` false
+  STALE). `bundle_state_gather.av_offset_dock_live_age_from_log` adds the `av_offset_dock_live_age_s`
+  facet = age of the freshest `av-sync-dock: diag … locked=yes` heartbeat, so `classify_av_band`
+  reads **IN_BAND_QUIET** (dock LIVE + offset in the dead band = healthy) instead of STALE. **STALE**
+  fires only when that dock-live line ITSELF is stale.
+- **DELIBERATELY not folded (ROZHODNUTÉ):** the raw per-tick `UPDATED/LOCKED offset=` lines are NOT
+  folded into the offset series — it broke the #1267 exclusion test (`av_offset_series_from_log` stays
+  byte-identical) AND was wrong (their transient lock-acquisition values pushed a quiet dead-band
+  window OUT_OF_BAND). The freshness facet is the correct fix.
+- **Production-critical re-ping.** A/V-sync measurement is production-critical (issue 1308), so the
+  OUT_OF_BAND page uses a TIME-BUCKETED `--dedup-key` (`watchdog_notify_key "av-band-$box"`) — it
+  re-pings "dokolečka" while the offset stays out of band; recovery is machine-channel only. The
+  file is allowlisted in the #1206 dedup sweep; the STEP arm's own `av-step-$box` key stays a stable
+  (non-bucketed) one. New band tunables: `AV_BAND_MS`, `AV_BAND_REFERENCE_MS`, `AV_BAND_REFERENCE_FILE`,
+  `AV_BAND_CONFIRM_THRESHOLD`, `REPING_INTERVAL_S`.
+- **Never a false page:** OUT_OF_BAND needs a FETCHED positive reading, so SKIP/STALE/UNKNOWN/REPIN/
+  IN_BAND/IN_BAND_QUIET never page. Tier-0: `tests/python/test_av_band_1319.py` (incl. the realistic
+  19:40-19:59 fixture) + the sweep + `bash -n`/`shellcheck`; live dry-run against stream `:8899`.

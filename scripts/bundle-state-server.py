@@ -687,17 +687,26 @@ def gather_bundle_state(
             # age + per-window counts) from the SAME bounded log_text (no second read); the dev1
             # upstream-step watchdog reads these facets.
             bsg.av_offset_series_from_log(log_text),
+            # #1319 — the dock-LIVE heartbeat freshness age (a single string) from the SAME bounded
+            # log_text (no second read); the dev1 band decision reads it to tell "dock LIVE, offset
+            # in the dead band" (IN_BAND_QUIET) from "dock silent" (STALE).
+            bsg.av_offset_dock_live_age_from_log(log_text),
             # #1299 — the fleet-visible genlock LOCK facet (the decided state the #1298 statusbar
             # emits on its genlock-lock-json: line) from the SAME bounded log_text (no second read);
             # the dev1 genlock-lock watchdog + rig-status read it. None -> facet omitted (a stock OBS
             # / no line yet), never a false UNLOCKED.
             bsg.genlock_lock_facet_from_log(log_text),
+            # #1320 — the strih PROGRAM-render freeze facet (max lagged + freshness age) from the
+            # SAME bounded log_text (no second read); the dev1 render-freeze watchdog reads it.
+            bsg.program_render_lagged_from_log(log_text),
         )
 
     (obs_version, distroav_version, output_fps, genlock_wall_clock, genlock_capability,
-     audio_ts_lag, audio_ref_band, av_offset, genlock_lock) = _timed(
+     audio_ts_lag, audio_ref_band, av_offset, av_offset_dock_live_age_s_val, genlock_lock,
+     program_render_lagged) = _timed(
         timings, "obs_log_parse", _parse_log_facets)
     audio_ts_lag_ms_val, audio_ts_lag_src_val, audio_ts_lag_age_s_val = audio_ts_lag
+    program_render_lagged_val, program_render_lagged_age_s_val = program_render_lagged
     (audio_ref_lag_src_val, audio_ref_lag_base_ms_val, audio_ref_lag_high_ms_val,
      audio_ref_lag_low_ms_val, audio_ref_lag_duty_pct_val, audio_ref_lag_n_val) = audio_ref_band
     (av_offset_recent_med_val, av_offset_base_med_val, av_offset_pin_val, av_offset_pin_stable_val,
@@ -843,12 +852,19 @@ def gather_bundle_state(
         av_offset_age_s=av_offset_age_s_val,
         av_offset_n_recent=av_offset_n_recent_val,
         av_offset_n_base=av_offset_n_base_val,
+        # #1319 — the dock-LIVE heartbeat freshness age (omit-when-empty; IN_BAND_QUIET vs STALE).
+        av_offset_dock_live_age_s=av_offset_dock_live_age_s_val,
         # #1227 — VB-Matrix presence (omit-when-empty; running="0" installed-but-dead surfaces as
         # DOWN, running="" not-installed is dropped -> UNKNOWN downstream, never a false negative).
         vb_matrix_running=vb_matrix_running_val,
         vb_matrix_name=vb_matrix_name_val,
         vb_matrix_pid=vb_matrix_pid_val,
         vb_matrix_start=vb_matrix_start_val,
+        # #1320 — the PROGRAM-render freeze facet the dev1 render-freeze watchdog reads (omit-when-
+        # empty; "0" = render telemetry live/no freeze is KEPT, "" = no program-render-audit line is
+        # dropped -> UNKNOWN downstream, never a fabricated 0).
+        program_render_lagged=program_render_lagged_val,
+        program_render_lagged_age_s=program_render_lagged_age_s_val,
     )
 
     # #1299 — the genlock_lock facet is a NESTED object, not a flat string, so it is attached here

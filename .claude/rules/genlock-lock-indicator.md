@@ -31,22 +31,34 @@ facet + dev1 watchdog that CONSUMES the same structs over obs-websocket).
 
 `genlock_decide_lock_state(facets, &reason)` — UNLOCKED (red) takes precedence clock > output >
 no-input-locked; then DEGRADED (amber) precedence some-input-unlocked > recent-event > ntp-failed
-> qpc-drift > **audio-pairing (#1303, lowest)**; else LOCKED (green).
+> qpc-drift > audio-pairing > **audio-unexpected (#1303, lowest)**; else LOCKED (green).
 
 - **UNLOCKED:** clock absent/not-locked (`no clock discipline` / `clock not locked`); OR a genlock
   NDI output is present but not stamping wall time (`output not stamping`); OR inputs exist but
   none locked (`no input locked`) / none configured (`no genlock inputs`).
 - **DEGRADED:** some (not all) inputs unlocked (names the input, e.g. `NDI cam7`); OR a
-  relock/underrun/late-hold/backward-step in the last 60 s (`recent relock/underrun`); OR clock
+  relock/late-hold/backward-step on a CONNECTED input in the last 60 s (#1299 Part 3: underruns are
+  NO LONGER a recent-event class; the label names the offender, `recent event: cg`); OR clock
   `ntp_failed`; OR `wall_qpc_drift` beyond `GENLOCK_QPC_DRIFT_BOUND_MS` (100 ms); OR (#1303, lowest
-  precedence) an audio-ENABLED genlock source whose `|audio_pairing_offset_ms|` breaches
+  precedence, part 3b) an audio-ENABLED genlock source whose `|audio_pairing_offset_ms|` breaches
   `GENLOCK_AUDIO_PAIRING_BOUND_MS` (33 ms / one 30 fps frame) — `audio unpaired: <src>`. The widget
   aggregates the per-source breach into `GenlockFacets.audio_unpaired` (the twin of how it reduces
   per-input qpc drift), surfacing the pairing-offset branch of
-  `genlock_audio_pairing::decide_audio_health`. Audio disabled/absent NEVER degrades (the
-  `audio_enabled` guard), so a camera input with `ndi_audio=false` is silent by design; the
-  AudioDisabledOnProgram + AsrcSaturated branches (which need is-program-source / asrc-ppm data the
-  v2 stats don't carry) are a deferred followup.
+  `genlock_audio_pairing::decide_audio_health`; OR (#1303, **the lowest** DEGRADED axis)
+  `GenlockFacets.audio_unexpected` — a source that is AUDIBLE (`ndi_audio=true`) when it is
+  silent-by-contract per the certified per-box audio table, `audio unexpected: <src>` +
+  `LockReason::AudioUnexpected` (=10). The SHIPPED subset is BOX-CLASS-AGNOSTIC: an audio-enabled
+  CAMERA input (`genlock_name_is_camera` — the C mirror of `genlock_forced_table_audit::is_camera_input`,
+  parity-gated), which is silent-by-contract on EVERY box, so it needs no box identity and can never
+  false-DEGRADE a correctly-configured box (cameras are forced `ndi_audio=false`). Audio
+  disabled/absent NEVER degrades (either term), so a camera input with `ndi_audio=false` is silent by
+  design. **DEFERRED** (needs a robust deploy-written box-role marker — the widget does NOT know its
+  box class today): the box-class-DEPENDENT audio cases — a NON-camera input audible on a Dante-fed
+  box (strih/stream/imag), and a program source SILENT on the cg box (resolume) — which are already
+  covered at DEPLOY time by the #1303 part-4 preflight (`genlock_forced_table_audit` +
+  `deploy-genlock-fleet.sh`), so the live version is defense-in-depth. The
+  AudioDisabledOnProgram + AsrcSaturated branches of `decide_audio_health` (which need
+  is-program-source / asrc-ppm data the v2 stats don't carry) remain a deferred followup.
 - **LOCKED:** `GENLOCK ● LOCKED n/m @ L ms` (n=locked, m=**connected** genlock inputs = `n_inputs - n_absent`, L=min latency or a range), plus ` (+K idle)` when `K = n_absent > 0` — #1299: a senderless input shows as idle, never as an unlocked shortfall.
 
 ## Gotchas
@@ -75,10 +87,23 @@ no-input-locked; then DEGRADED (amber) precedence some-input-unlocked > recent-e
   (async on the event loop). `clock_present` = a successful `:8898/status` poll within the last 3 s
   — so killing dantesync flips the widget to UNLOCKED within ~3-5 s (the acceptance bar). JSON is
   parsed with OBS's own `obs_data_create_from_json` (no new dependency).
-- **`recent_event` is derived by the WIDGET, not libobs** — it tracks the aggregate cumulative
-  counter (underruns+relocks+late_holds+backward_steps) across its 1 Hz samples and stamps "now"
-  on any increase; a decrease (reconnect reset the counters) re-baselines with no event. This
-  keeps libobs free of a new hot-path remembered-state field.
+- **`recent_event` is derived by the WIDGET, not libobs** — it stamps "now" on any INCREASE of an
+  aggregate cumulative counter across its 1 Hz samples (a decrease = reconnect reset → re-baseline,
+  no event), and `recent_event = (now − last) < 60 s`. This keeps libobs free of a new hot-path
+  remembered-state field.
+  - **#1299 Part 3: that aggregate is CONNECTED inputs' PHASE events only.** The driver is
+    `sum over connected inputs of (relocks + late_holds + backward_steps)` — computed post-scan via
+    the pure `genlock_input_phase_events` (mirrored in `GenlockLockState.hpp`, parity-gated). UNDERRUNS
+    are DROPPED from the lock verdict (a latency-budget miss owned by the `genlock-fifo audit` +
+    cg-chain-verify / issue 1302, and bursty — counting them latched the 60 s window chronically),
+    and an ABSENT input's #1096 rebind churn is excluded (`connected == false` contributes 0).
+    Underruns stay in the per-input facet counters (report-only). The window itself is unchanged and
+    correct — the fix was the FEED, not the window.
+  - **The DEGRADED/recent_event reason NAMES the offender** — the connected input carrying the most
+    phase events. It rides the `genlock-lock-json:` line as `recent_event_inputs:[{name, events}]`
+    (schema v2→v3, additive, omit-when-absent) and the human `genlock-lock:` line as
+    `reason=recent_event:<name>`; `genlock_lock_decision.analyze` enriches the watchdog's reason to
+    `recent_event:<name>` so a page is actionable.
 - **`genlock-lock:` is a new OBS-log family** (emitted on state/reason CHANGE, not every tick) —
   mutually non-substring with `genlock-fifo audit '`, `genlock-ndi-output audit '`,
   `genlock-ndi-filter audit '`, `genlock-relock`, `genlock-acquire-bracket '%s':` (guarded by

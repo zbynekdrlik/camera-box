@@ -556,6 +556,190 @@ pub fn summarize_send_all(samples: &[SendAuditSample]) -> Vec<SendAuditSummary> 
         .collect()
 }
 
+// ---------------------------------------------------------------------------
+// #1318 — RELOCK-BURST family: the `genlock-relock '<source>':` per-EVENT line.
+//
+// The third parser family over the SAME OBS log, beside the INPUT (`genlock-fifo
+// audit`) and SEND (`genlock-ndi-output/filter`) families above. The periodic
+// audit line already carries `relocks=` as a CUMULATIVE counter, so a live
+// watchdog reading it after a storm sees a frozen value with zero window delta —
+// it cannot tell "a 462-relock storm happened 50 min ago" from "never". This
+// family parses the individual per-EVENT `genlock-relock` lines
+// (`vendor/obs-studio/libobs/obs-source.c`, the backlog/ACQUIRE relock emit site)
+// and clusters them on their own OBS `HH:MM:SS.mmm` timestamps into BURST episodes
+// — the page-able signal a strih render-freeze / sender stall produces on the
+// receiver FIFO (issue 1318: one 17 s storm from a scene-switch render freeze).
+//
+// Marker `genlock-relock '` is mutually NON-SUBSTRING with `genlock-fifo audit '`,
+// `genlock-ndi-output audit '`, `genlock-ndi-filter audit '` (asserted both ways in
+// tests) — that is what lets all three families run over one log independently.
+// Pure std (no serde), so it stays Tier-0 standalone-rustc testable.
+// ---------------------------------------------------------------------------
+
+/// One parsed `genlock-relock '<source>':` per-event line, placed on the log's own
+/// timeline by its leading OBS `HH:MM:SS.mmm` timestamp.
+///
+/// `at_ms` is milliseconds-since-midnight parsed from the OBS `blog()` timestamp
+/// that immediately precedes the marker (robust to any journald/SSH wrapper prefix
+/// — the LAST `HH:MM:SS.mmm` token before the marker is the OBS one). OBS log lines
+/// carry no date, so a capture that crosses midnight resets `at_ms` to a smaller
+/// value; [`summarize_relock_bursts`] treats any backward step as a cluster
+/// boundary (a burst never spans midnight in practice), never a negative gap.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RelockEvent {
+    pub source: String,
+    pub at_ms: u64,
+}
+
+/// Parse `HH:MM:SS`/`HH:MM:SS.mmm` (an optional trailing `:` is stripped) into
+/// milliseconds-since-midnight. Returns `None` on any malformed field so a stray
+/// token before the marker never fabricates a timeline position.
+fn parse_hhmmss_ms(tok: &str) -> Option<u64> {
+    let tok = tok.strip_suffix(':').unwrap_or(tok);
+    let mut it = tok.split(':');
+    let hh: u64 = it.next()?.parse().ok()?;
+    let mm: u64 = it.next()?.parse().ok()?;
+    let sec_frac = it.next()?;
+    if it.next().is_some() {
+        return None; // more than 3 colon-parts is not a clock time
+    }
+    let sub_ms = match sec_frac.split_once('.') {
+        Some((s, f)) => {
+            let ss: u64 = s.parse().ok()?;
+            let mut fs = f.to_string();
+            while fs.len() < 3 {
+                fs.push('0');
+            }
+            let fms: u64 = fs.get(..3)?.parse().ok()?;
+            ss * 1000 + fms
+        }
+        None => sec_frac.parse::<u64>().ok()? * 1000,
+    };
+    Some(hh * 3_600_000 + mm * 60_000 + sub_ms)
+}
+
+/// Parse ONE `genlock-relock '<source>':` line into a [`RelockEvent`].
+///
+/// Returns `None` if the line has no `genlock-relock '<source>':` marker OR carries
+/// no parseable leading OBS `HH:MM:SS.mmm` timestamp (an event with no timeline
+/// position cannot be clustered). Any `genlock-fifo audit` / `genlock-ndi-*` line is
+/// rejected (the marker is non-substring), so this parser is safe to run over the
+/// same mixed log as the other two families.
+pub fn parse_relock_line(line: &str) -> Option<RelockEvent> {
+    const MARK: &str = "genlock-relock '";
+    let mark_at = line.find(MARK)?;
+    let after_mark = &line[mark_at + MARK.len()..];
+    let quote_end = after_mark.find('\'')?;
+    let source = after_mark[..quote_end].to_string();
+    let ts_tok = line[..mark_at].split_whitespace().last()?;
+    let at_ms = parse_hhmmss_ms(ts_tok)?;
+    Some(RelockEvent { source, at_ms })
+}
+
+/// Parse every `genlock-relock` line found in `text`, in order. Non-relock lines
+/// (and relock lines with no timestamp) are silently skipped.
+pub fn parse_relock_lines(text: &str) -> Vec<RelockEvent> {
+    text.lines().filter_map(parse_relock_line).collect()
+}
+
+/// Per-source relock-burst summary over a captured window. A relock STORM (a
+/// scene-switch render freeze on the sender starving this receiver's FIFO into an
+/// underrun→overshoot recovery, issue 1318) shows up here as `bursts >= 1` with a
+/// high `max_per_second`; steady operation is `bursts=0`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RelockBurstSummary {
+    pub source: String,
+    /// Total relock events seen for this source across the window.
+    pub total_relocks: u64,
+    /// Number of BURST episodes: gap-separated clusters whose densest 1 s (the
+    /// `window_ms`) sliding sub-window reached at least `min_burst_relocks` events.
+    pub bursts: u64,
+    /// Peak relocks in any `window_ms`-wide window across the whole source — the
+    /// storm-intensity signal a watchdog thresholds on.
+    pub max_per_second: u64,
+    /// `at_ms` of the first / last relock event (0 when there were none) — lets a
+    /// report show WHEN the storm was without re-scanning the log.
+    pub first_at_ms: u64,
+    pub last_at_ms: u64,
+}
+
+/// Cluster each source's relock events (grouped in first-seen order, kept in log
+/// order) into burst episodes. A new cluster starts on a gap greater than
+/// `window_ms` OR a backward time step (midnight wrap / a new log concatenated); a
+/// cluster is a BURST when its densest `window_ms` sliding window holds at least
+/// `min_burst_relocks` events. `window_ms` is the "within 1 s" width (pass 1000).
+pub fn summarize_relock_bursts(
+    events: &[RelockEvent],
+    min_burst_relocks: usize,
+    window_ms: u64,
+) -> Vec<RelockBurstSummary> {
+    let mut order: Vec<String> = Vec::new();
+    let mut groups: HashMap<String, Vec<u64>> = HashMap::new();
+    for e in events {
+        if !groups.contains_key(&e.source) {
+            order.push(e.source.clone());
+        }
+        groups.entry(e.source.clone()).or_default().push(e.at_ms);
+    }
+    order
+        .into_iter()
+        .map(|name| {
+            let times = groups.remove(&name).unwrap_or_default();
+            summarize_one_source_bursts(name, &times, min_burst_relocks, window_ms)
+        })
+        .collect()
+}
+
+/// Peak count of events within any `window_ms`-wide window over an ascending slice
+/// (two-pointer; inclusive `t[j] - t[i] <= window_ms`).
+fn peak_in_window(times: &[u64], window_ms: u64) -> u64 {
+    let mut left = 0usize;
+    let mut peak = 0u64;
+    for right in 0..times.len() {
+        while times[right] - times[left] > window_ms {
+            left += 1;
+        }
+        peak = peak.max((right - left + 1) as u64);
+    }
+    peak
+}
+
+fn summarize_one_source_bursts(
+    source: String,
+    times: &[u64],
+    min_burst_relocks: usize,
+    window_ms: u64,
+) -> RelockBurstSummary {
+    let mut summary = RelockBurstSummary {
+        source,
+        total_relocks: times.len() as u64,
+        first_at_ms: times.first().copied().unwrap_or(0),
+        last_at_ms: times.last().copied().unwrap_or(0),
+        ..RelockBurstSummary::default()
+    };
+    let mut cluster_start = 0usize;
+    for i in 0..times.len() {
+        let boundary =
+            i > cluster_start && (times[i] < times[i - 1] || times[i] - times[i - 1] > window_ms);
+        if boundary {
+            let peak = peak_in_window(&times[cluster_start..i], window_ms);
+            summary.max_per_second = summary.max_per_second.max(peak);
+            if peak as usize >= min_burst_relocks {
+                summary.bursts += 1;
+            }
+            cluster_start = i;
+        }
+    }
+    if cluster_start < times.len() {
+        let peak = peak_in_window(&times[cluster_start..], window_ms);
+        summary.max_per_second = summary.max_per_second.max(peak);
+        if peak as usize >= min_burst_relocks {
+            summary.bursts += 1;
+        }
+    }
+    summary
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1046,5 +1230,117 @@ mod tests {
         assert_eq!(s.delta_offered, 0);
         assert_eq!(s.delta_sent, 0);
         assert_eq!(s.delta_dropped, 0);
+    }
+
+    // ===== #1318 relock-burst family =====
+
+    /// A real `genlock-relock` line from the stream OBS log (issue 1318, 18:27 storm).
+    const RELOCK_LINE: &str = "18:27:28.205: genlock-relock 'NDI 2ME PGM': depth=41 \
+steady_depth_frames=28 due=1 erased=0 head_skew_ms=938 tick_phase_ns=19461 anchor_ns=0 \
+sel_vs_newest_due=0 interval_ns=33333333 latency_ms=925";
+
+    #[test]
+    fn parses_a_real_relock_line_1318() {
+        let ev = parse_relock_line(RELOCK_LINE).expect("should parse");
+        assert_eq!(ev.source, "NDI 2ME PGM");
+        // 18:27:28.205 = ((18*60+27)*60+28)*1000 + 205
+        assert_eq!(ev.at_ms, 66_448_205);
+    }
+
+    #[test]
+    fn relock_parser_rejects_the_input_and_send_audit_lines_1318() {
+        // The relock parser must reject the other two families' lines...
+        assert!(parse_relock_line(SAMPLE_LINE_CAM1).is_none());
+        assert!(parse_relock_line(OUT_LINE).is_none());
+        assert!(parse_relock_line(FIL_LINE).is_none());
+        // ...and both of them must reject a relock line (mutual non-substring).
+        assert!(parse_audit_line(RELOCK_LINE).is_none());
+        assert!(parse_send_audit_line(RELOCK_LINE).is_none());
+    }
+
+    #[test]
+    fn a_relock_line_without_a_timestamp_is_unclusterable_1318() {
+        // No leading HH:MM:SS.mmm -> no timeline position -> None.
+        let bare = "genlock-relock 'NDI 2ME PGM': depth=41 erased=0";
+        assert!(parse_relock_line(bare).is_none());
+    }
+
+    fn ev(source: &str, at_ms: u64) -> RelockEvent {
+        RelockEvent {
+            source: source.into(),
+            at_ms,
+        }
+    }
+
+    #[test]
+    fn clusters_a_relock_storm_into_one_burst_1318() {
+        // 30 events at 33 ms spacing (span 957 ms) — all inside one 1 s window.
+        let evs: Vec<RelockEvent> = (0..30)
+            .map(|i| ev("NDI 2ME PGM", 1_000_000 + i * 33))
+            .collect();
+        let out = summarize_relock_bursts(&evs, 8, 1000);
+        assert_eq!(out.len(), 1);
+        let s = &out[0];
+        assert_eq!(s.total_relocks, 30);
+        assert_eq!(s.bursts, 1);
+        assert_eq!(s.max_per_second, 30);
+        assert_eq!(s.first_at_ms, 1_000_000);
+        assert_eq!(s.last_at_ms, 1_000_000 + 29 * 33);
+    }
+
+    #[test]
+    fn ignores_isolated_single_relocks_below_threshold_1318() {
+        // Four lone relocks 2 s apart: four 1-event clusters, none is a burst.
+        let evs = vec![
+            ev("NDI cam1", 0),
+            ev("NDI cam1", 2000),
+            ev("NDI cam1", 4000),
+            ev("NDI cam1", 6000),
+        ];
+        let out = summarize_relock_bursts(&evs, 8, 1000);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].total_relocks, 4);
+        assert_eq!(out[0].bursts, 0);
+        assert_eq!(out[0].max_per_second, 1);
+    }
+
+    #[test]
+    fn separates_two_storms_by_a_gap_1318() {
+        let mut evs: Vec<RelockEvent> = (0..10).map(|i| ev("NDI 2ME PGM", 100 + i * 33)).collect();
+        // 5 s idle gap, then a second storm.
+        evs.extend((0..10).map(|i| ev("NDI 2ME PGM", 100 + 5000 + i * 33)));
+        let out = summarize_relock_bursts(&evs, 8, 1000);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].bursts, 2);
+        assert_eq!(out[0].max_per_second, 10);
+        assert_eq!(out[0].total_relocks, 20);
+    }
+
+    #[test]
+    fn groups_bursts_by_source_in_first_seen_order_1318() {
+        let mut evs = vec![ev("NDI 2ME PGM", 0)];
+        evs.extend((1..12).map(|i| ev("NDI 2ME PGM", i * 33)));
+        evs.push(ev("NDI cam1", 500)); // a lone cam1 relock
+        let out = summarize_relock_bursts(&evs, 8, 1000);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].source, "NDI 2ME PGM");
+        assert_eq!(out[0].bursts, 1);
+        assert_eq!(out[1].source, "NDI cam1");
+        assert_eq!(out[1].bursts, 0);
+    }
+
+    #[test]
+    fn a_backward_time_step_starts_a_new_cluster_1318() {
+        // Midnight wrap: a big at_ms then a small one must not be one 86 400 s gap.
+        let evs = vec![
+            ev("NDI 2ME PGM", 86_399_900),
+            ev("NDI 2ME PGM", 86_399_933),
+            ev("NDI 2ME PGM", 33), // wrapped past midnight
+            ev("NDI 2ME PGM", 66),
+        ];
+        let out = summarize_relock_bursts(&evs, 2, 1000);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].bursts, 2); // two 2-event clusters, not one
+        assert_eq!(out[0].max_per_second, 2);
     }
 }

@@ -491,3 +491,51 @@ pipeline is byte-unchanged (only wrapped in the loop); anchor-safe (all Rust anc
 are `.contains()` presence checks; the loop adds no `--box stream`). Tier-0: `floor_samples_sufficient`
 + the `--floor-samples-ok` CLI in `test_qr_align_floor_samples_1168.py`; the live win_ssh re-fetch is
 supervisor-verified on the rig (bash -n + shellcheck are the only local net for the shell half).
+
+## Production per-box equalization + the jitter-floor re-tighten (issue 1168 task 2/3, lane prodpins)
+
+The mining (15.9.) showed a STABLE ~13.7 ms median cross-camera spread on the JITTER-FLOOR instrument
+(`arrival_floors_from_jitter` = `latency_ms + mean_head_skew_ms`), grabber-owned (task 1). Task 2 asked
+to carry that excess via strih pins + persist as the baseline; task 3 to re-tighten to a hard-fail.
+
+**The decisive physics (why the pin lever cannot carry a sub-frame excess).** The strih FIFO is a
+WHOLE-source-frame conveyor (the issue-1049 narrative in `src/genlock_backlog.rs`: it moves a source's
+on-air age `S` only in `interval/n` = 16.667 ms steps, so `S mod 16.667` is INVARIANT under every pin).
+The mining deficits vs the OLDEST camera are all SUB-source-frame (max ~14 ms < 16.667). Correcting
+them with the whole-frame conveyor is defeated on two fronts: a whole-frame hold OVERSHOOTS the anchor
+(a 0.5-1.0-frame deficit rounds UP to a full frame, landing PAST the max-floor target), and a hold
+whose `frac(pin/33.3) < 0.5` lands in the issue-998 limit-cycle band that DOUBLES the on-screen spread
+(proven live, run 1899055119). For the ACTUAL 7-camera distribution the overshoot preserves the
+overall max-min (the freshest cameras jump past the anchor while the mid-floor cameras stay the new
+minimum), so no whole-frame plan reduces the spread → floor-only. So the correct lever for the ~14 ms
+per-box offset is the CAMBOX GRABBER, not the strih pin.
+
+**Direction (the shipped/physically-correct anchor).** Equalizing means ADDING latency to the FRESHEST
+(min-floor) cameras to bring them UP to the OLDEST (max-floor) camera, which anchors at the floor —
+the same direction as `floor_aware_partition` (`base = min(deltas)` = the oldest-present anchor). The
+freshest camera carries the largest pin. (The 15.9. 20:15 worked numbers `cam4→3, cam2→23` are the
+inverted mirror of this.)
+
+**What shipped (all pure, Tier-0):**
+- `floor_equalization_plan(arrival_floors, ...)` — anchor = max-floor camera at the floor; each deficit
+  rounded to the NEAREST whole source frame; an above-floor pin is applied ONLY IF (a) a whole-frame
+  hold measurably REDUCES the OVERALL cross-camera spread, (b) it stays within the 94 ms ceiling, AND
+  (c) it clears the issue-998 frac guard (`frac(pin/33.333) >= 0.5`, `_frac_of_canvas_frame`) so it is
+  not a limit-cycle-prone pin. For the current mining data → floor-only (`reducible=False`,
+  `reason="irreducible"`) via (a) = NO production change, no regression.
+- `cross_camera_floor_spread` / `floor_spread_hard_fail(spread, tolerance=33.3 ms)` — the task-3
+  re-tighten on the jitter-floor axis. Tolerance = ~one 30 fps canvas frame, NOT the ticket's 15 ms
+  (which would false-fail: 13.7 ms median + 8.4 ms anchor std ≈ 22 ms, and below one source frame the
+  spread is irreducible). Surfaced REPORT-ONLY in the `align()` result (`floor_spread_ms`,
+  `floor_spread_retighten_hard_fail`) on every floor-aware path; the hard-fail arm is NOT wired into
+  recording-e2e.sh (pending the grabber-vs-pin decision + rig calibration on the noisy jitter-floor
+  instrument, cam6 floor max 193 ms in the mining).
+- `baseline_strih_block` + `--equalization-plan [--persist-baseline]` read-only CLI — prints the
+  equalization plan + spread + the strih baseline block to persist in a PR (never a runtime mutation of
+  the tracked `latency-pins-baseline.json`; the baseline's own "update this file in a PR" convention).
+  For the sub-frame data the block is floor-3 (a documented no-op). `latency_pins_verify.verify_box`
+  already diffs the live pin against WHATEVER the persisted strih baseline says (task 2c: no change).
+
+Re-arm the equalization to actually add pins ONLY if the owner accepts the added latency for a
+super-frame misalignment the conveyor CAN correct, OR redirect the ~14 ms offset to a grabber-side
+ticket (the physically-correct lever). Raised on issue 1168 (needs-answer).

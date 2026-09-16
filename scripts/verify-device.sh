@@ -163,6 +163,10 @@
 #       instead of dying with the stick like the on-STICK #1309 journal does. FAILs fail-closed on any
 #       missing/wrong facet. journal-upload's ACTIVE state is not gated (it depends on the dev1 sink,
 #       a separate supervisor step); enabled + correct config is the cambox-side bar.
+#   (am) bkshading-relay blast-radius + info logging (#1309) -- HARD FAIL on the box that RUNS the
+#        relay: TasksMax <= 512 (fork/thread runaway can't starve the box pid space) AND a running
+#        relay logs at info (zero journal lines while active = an old binary predating info-by-
+#        default logging). A box without the relay = `na`; a disabled/inactive relay skips logging.
 #   (al) named `cam-box` UEFI boot entry (#1066 D6) -- HARD FAIL: efibootmgr reports a `cam-box`
 #       entry AND it is FIRST in BootOrder -- so the box boots its internal disk without depending on
 #       the AMI USB auto-entry (which failed on cam2 after a warm reboot). setup-device.sh STEP 17d
@@ -637,6 +641,41 @@ rt_irq_placement_verdict() {
 # gate runs against the production camera-box.service, never a burn unit).
 rt_fifo_thread_ceiling() { printf '4'; }
 
+# --- (am) bkshading-relay blast-radius ceiling + info logging (#1309) — pure verdict -------------
+# relay_tasksmax_within_ceiling RAW CEIL -> yes|no. RAW is `systemctl show -p TasksMax --value`
+# output (a plain integer, `infinity`, or empty). `infinity`/empty/non-numeric/over-ceiling = no.
+relay_tasksmax_within_ceiling() {
+  case "$1" in
+    '' | infinity | *[!0-9]*) printf 'no' ;;
+    *) if [ "$1" -le "$2" ]; then printf 'yes'; else printf 'no'; fi ;;
+  esac
+}
+
+# relay_blast_radius_verdict PRESENT TASKSMAX ACTIVE INFO_LINES CEIL -> na | ok | FAIL: <reason>
+#   PRESENT (yes|no): whether bkshading-relay.service exists on the box. no -> `na` (not every
+#     cambox provisions the relay; never a fail).
+#   TASKSMAX: the unit's TasksMax (must be <= CEIL, #1309 blast-radius; infinity/unset -> FAIL).
+#   ACTIVE (active|...): only when active do we require info logging (a disabled/inactive relay --
+#     the TEST-mode default -- legitimately emits nothing this boot).
+#   INFO_LINES: count of bkshading-relay journal lines this boot (0 while active -> FAIL: a running
+#     relay that logs nothing is the exact 2026-09-15 symptom -- a deployed binary predating
+#     info-by-default logging, a "crash after two SETs" undiagnosable).
+relay_blast_radius_verdict() {
+  local present="$1" tm="$2" active="$3" lines="$4" ceil="$5"
+  [ "$present" = yes ] || { printf 'na'; return; }
+  if [ "$(relay_tasksmax_within_ceiling "$tm" "$ceil")" != yes ]; then
+    printf 'FAIL: TasksMax=%s exceeds %s (a relay fork/thread runaway could starve the box pid space -> the #1309 half-dead wedge)' "${tm:-<unset>}" "$ceil"
+    return
+  fi
+  case "$lines" in '' | *[!0-9]*) lines=0 ;; esac
+  if [ "$active" = active ] && [ "$lines" -eq 0 ]; then
+    printf 'FAIL: bkshading-relay is active but emits ZERO info journal lines this boot (deployed binary predates info-by-default logging; a "crash after two SETs" would be undiagnosable) -- redeploy the relay'
+    return
+  fi
+  printf 'ok'
+}
+RELAY_TASKSMAX_CEILING="${RELAY_TASKSMAX_CEILING:-512}"
+
 # rt_thread_policy_verdict HAS_PROCESS_WIDE_FIFO FIFO_THREAD_COUNT CEILING -> a verdict token
 # for the issue-899-defect-2 per-thread realtime policy. Inputs:
 #   HAS_PROCESS_WIDE_FIFO -- "1" if the deployed unit still carries a process-wide
@@ -829,6 +868,8 @@ Checks:
       target to dev1:514, AND systemd-journal-upload enabled with URL -> the dev1 sink + a /run cursor
   (al) named cam-box UEFI boot entry (#1066 D6): efibootmgr reports a `cam-box` entry that is FIRST
       in BootOrder -- FAILs if absent / not leading / efibootmgr unreadable (test-strictness)
+  (am) bkshading-relay blast-radius + info logging (#1309): TasksMax <= 512 AND a running relay
+      logs at info (zero journal lines while active FAILs); relay not provisioned = n/a
 
 Env: KERNEL_PIN (optional exact running-kernel pin), NDI_VERSION_PIN (default 6.3.2),
      DANTESYNC_OFFSET_FRESHNESS_S (max age of a fresh [NTP] offset line, default 300),
@@ -1709,6 +1750,49 @@ else
   else
     fail "UEFI boot entry: ${EFI_AL_VERDICT#FAIL: }"
   fi
+fi
+
+# (am) bkshading-relay blast-radius ceiling + info logging (#1309) -- HARD FAIL -----------------
+# The 2026-09-13/15 half-dead-cambox class lands right after bkshading-relay activity. This certifies
+# two #1309 mitigations on the box that RUNS the relay: (1) the unit's TasksMax caps the relay
+# cgroup's tasks far below the box pid space, so a relay fork/thread runaway can never starve sshd;
+# (2) the relay LOGS at info -- a running relay that emits ZERO journal lines this boot (the exact
+# 2026-09-15 symptom) is a deployed binary predating info-by-default logging, and a "crash after two
+# SETs" would be undiagnosable. A box WITHOUT the relay provisioned is `na` (never a fail -- not
+# every cambox has bkshading); a disabled/inactive relay (the TEST-mode default) skips the logging
+# assertion. Graded by the pure relay_blast_radius_verdict. Inserted BEFORE (q) per
+# .claude/rules/provisioning-scripts.md (the (q)-last invariant).
+amrc=0
+RELAY_STATE="$(ssh_box '
+  en="$(systemctl is-enabled bkshading-relay 2>/dev/null)"
+  present=no; case "$en" in enabled|disabled|static|indirect|masked) present=yes ;; esac
+  act="$(systemctl is-active bkshading-relay 2>/dev/null)"
+  tm="$(systemctl show -p TasksMax --value bkshading-relay 2>/dev/null)"
+  lines=0
+  if [ "$act" = active ]; then
+    lines="$(journalctl -u bkshading-relay -b --no-pager 2>/dev/null | grep -cE "bkshading-relay starting|gphoto2 command|camera online|camera offline|startup camera detect" || true)"
+  fi
+  printf "PRESENT=%s\nACTIVE=%s\nTASKSMAX=%s\nLINES=%s\n" "$present" "$act" "$tm" "$lines"
+')" || amrc=$?
+if [ "$amrc" -ne 0 ]; then
+  fail "could not read bkshading-relay state over SSH (rc=$amrc) -- cannot certify the #1309 relay TasksMax ceiling + info logging"
+else
+  R_PRESENT="$(printf '%s\n' "$RELAY_STATE" | sed -n 's/^PRESENT=//p')"
+  R_ACTIVE="$(printf '%s\n' "$RELAY_STATE" | sed -n 's/^ACTIVE=//p')"
+  R_TM="$(printf '%s\n' "$RELAY_STATE" | sed -n 's/^TASKSMAX=//p')"
+  R_LINES="$(printf '%s\n' "$RELAY_STATE" | sed -n 's/^LINES=//p')"
+  RELAY_VERDICT="$(relay_blast_radius_verdict "$R_PRESENT" "$R_TM" "$R_ACTIVE" "$R_LINES" "$RELAY_TASKSMAX_CEILING")"
+  case "$RELAY_VERDICT" in
+    na) ok "bkshading-relay not provisioned on this box -- #1309 TasksMax/logging check n/a" ;;
+    ok)
+      if [ "$R_ACTIVE" = active ]; then
+        ok "bkshading-relay blast-radius bounded: TasksMax=${R_TM} (<= ${RELAY_TASKSMAX_CEILING}) + logging at info (${R_LINES} lines this boot) -- #1309"
+      else
+        ok "bkshading-relay blast-radius bounded: TasksMax=${R_TM} (<= ${RELAY_TASKSMAX_CEILING}); unit present but ${R_ACTIVE:-inactive} (TEST-mode default), logging asserted when active -- #1309"
+      fi ;;
+    FAIL:*) fail "bkshading-relay: ${RELAY_VERDICT#FAIL: }" ;;
+    *) fail "could not grade bkshading-relay state (verdict='${RELAY_VERDICT}', present='${R_PRESENT}')" ;;
+  esac
 fi
 
 # (q) .bak cruft drift -- WARNING only, never a FAIL (#453) -------------------------------------

@@ -142,6 +142,22 @@ systemctl --user disable --now av-step-alert-watchdog.timer
 | `AV_STEP_BOXES` | `stream\|10.77.9.204` | `name\|ip` pairs to watch (stream-only by default) |
 | `AV_STEP_CURL_TIMEOUT` | `10` | `:8899` HTTP fetch timeout (s) |
 | `AV_STEP_ALERT_STATE_FILE` | `$XDG_RUNTIME_DIR/camera-box-av-step-alert.state` | per-box confirm/throttle/recovery state |
+| `AV_BAND_MS` | `30` | #1319 band arm: ± half-width (ms) of the acceptable A/V offset band around the reference |
+| `AV_BAND_REFERENCE_MS` | *(unset)* | #1319: explicit E2E-aligned reference offset (ms); overrides the file below |
+| `AV_BAND_REFERENCE_FILE` | `~/.camera-box/av-sync-residual-last.json` | #1319: read `residual_median_ms` as the reference when `AV_BAND_REFERENCE_MS` is unset; 0 ms fallback (stated in the log) if neither is readable |
+| `AV_BAND_CONFIRM_THRESHOLD` | `2` | #1319: consecutive OUT_OF_BAND readings before paging |
+| `REPING_INTERVAL_S` | `600` | #1319: time-bucket width (s) for the production-critical OUT_OF_BAND re-ping (floored 60 s) |
+
+## #1319 — the absolute-BAND arm (runs alongside the STEP arm)
+
+The same watchdog now ALSO pages when the stream box's measured A/V offset leaves ±`AV_BAND_MS` of the
+E2E-aligned reference (`residual_median_ms` of `~/.camera-box/av-sync-residual-last.json`) for
+`AV_BAND_CONFIRM_THRESHOLD` passes at a constant pin — the SLOW-wander alarm the STEP term is blind to
+(the owner's 15.9.2026 +13→+47 ms drift). It is **production-critical** (issue 1308): the OUT_OF_BAND
+page uses a TIME-BUCKETED `--dedup-key` (`av-band-$box`) so it re-pings while the offset stays out of
+band; recovery is machine-channel only. IN_BAND_QUIET (dock LIVE, offset in the suggestion dead band)
+and STALE (dock line itself stale) are healthy/quiet, never a page. Verify with `--dry-run` against
+the live stream `:8899` — the log states the resolved reference + its source.
 
 ## What this does NOT do
 

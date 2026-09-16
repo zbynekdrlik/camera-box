@@ -175,6 +175,28 @@ fn audio_parity_lock_term_present_1303() {
 }
 
 #[test]
+fn audio_unexpected_lock_term_present_1303() {
+    // #1303: the audio-UNEXPECTED DEGRADE term — a source AUDIBLE when the certified per-box audio
+    // table expects it silent (a camera on any box; the double-audio hazard). The pure decision + C
+    // mirror gain an additive `audio_unexpected` facet + a new `AudioUnexpected=10` reason; the
+    // widget flags it via the header's parity-gated camera classifier (the C mirror of
+    // genlock_forced_table_audit::is_camera_input). Linux-CI twin of the #1303 pwsh gate in BOTH
+    // windows-genlock{,-fast}.yml — keep all three in lock-step.
+    assert_has(HEADER, "GENLOCK_LOCK_REASON_AUDIO_UNEXPECTED = 10,");
+    assert_has(HEADER, "int audio_unexpected;");
+    assert_has(
+        HEADER,
+        "static inline int genlock_name_is_camera(const char *name)",
+    );
+    assert_has(
+        STATUSBAR_CPP,
+        "f.audio_unexpected = scan.audio_unexpected ? 1 : 0;",
+    );
+    assert_has(STATUSBAR_CPP, "return \"audio_unexpected\";");
+    assert_has(STATUSBAR_CPP, "genlock_name_is_camera(nm.c_str())");
+}
+
+#[test]
 fn genlock_lock_marker_is_mutually_non_substring() {
     // The new OBS-log family `genlock-lock:` must be mutually non-substring with every existing
     // marker (jitter-audit-parser.md), so a grep / parser keyed on one never matches another.
