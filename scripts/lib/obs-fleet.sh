@@ -40,6 +40,12 @@
 #                   facet is fleet-wide -- imag is a pure receiver that still locks every input to the
 #                   fleet clock, so it IS in scope; resolume is paged only while obs_fleet_is_home;
 #                   issue 1317: the Linux strih-lx box joins too, appended after resolume)
+#   render-freeze = strih stream resolume strih-lx   (#1320: a PROGRAM render-thread freeze
+#                   (program_render_lagged) can strike ANY genlock OBS box, and a receiver relock
+#                   storm (relock_bursts) any receiving box -- resolume runs the cg-obs PROGRAM
+#                   render + receives, so it IS in scope. Traveling-safe with NO is_home gate: the
+#                   only page condition is a SUCCESSFULLY-FETCHED positive reading, so a dark
+#                   resolume just SKIPs -> #732/#1001, exactly like audio-lag/bundle-state.)
 #
 # TRAVELING-BOX SAFETY (resolume is home only sometimes): a naive add to the PAGING watchdogs would
 # false-page whenever resolume is away (the owner's hardest sensitivity -- the #739 5x false-page
@@ -133,8 +139,9 @@ obs_fleet_facet_members() {
     network-reach) printf 'strih stream resolume' ;;
     obs-liveness)  printf 'strih stream resolume strih-lx' ;;
     genlock-lock)  printf 'strih stream imag resolume strih-lx' ;;
+    render-freeze) printf 'strih stream resolume strih-lx' ;;
     *)
-      echo "obs-fleet: unknown facet '${facet}' (expected one of: audio-lag av-step vb-matrix bundle-state network-reach obs-liveness genlock-lock)" >&2
+      echo "obs-fleet: unknown facet '${facet}' (expected one of: audio-lag av-step vb-matrix bundle-state network-reach obs-liveness genlock-lock render-freeze)" >&2
       return 1
       ;;
   esac

@@ -514,23 +514,131 @@ def program_render_lagged_from_log(text):
 
 
 # #1320 — the RELOCK-BURST facet: a receiver FIFO overshoot STORM (the downstream consequence of a
-# sender PROGRAM render freeze). This PORTS issue 1318's summarize_relock_bursts (src/jitter_audit.rs)
-# to Python so the dev1 render-freeze watchdog can page on it off :8899; a parity test pins the
-# summarizer to the Rust test fixtures. RED STUB below (implemented in the [green] commit).
+# sender PROGRAM render freeze). PORTS issue 1318's summarize_relock_bursts (src/jitter_audit.rs) to
+# Python so the dev1 render-freeze watchdog can page on it off :8899; the summarizer is NOT
+# re-implemented across languages beyond this one mirror (the ndi_halving_decision / #1199
+# python-mirror precedent) and a parity test pins it to the Rust test fixtures BYTE-for-byte.
 RELOCK_BURSTS_MIN_DEFAULT = 8  # N: >= this many relocks within 1 s on ONE input == a burst (issue 1318)
 _RELOCK_MARK = "genlock-relock '"
 
 
 def _parse_relock_event(line):
-    return None
+    """`(source, at_ms_int)` from a `genlock-relock '<src>':` line, or None. Mirror of
+    src/jitter_audit.rs parse_relock_line: needs the `genlock-relock '` marker (mutually
+    non-substring vs `genlock-fifo audit '`/`genlock-ndi-*`) AND a leading OBS HH:MM:SS.mmm clock
+    time (an event with no timeline position cannot be clustered). Fractional seconds are padded to
+    3 digits (`.205` -> 205 ms), matching the Rust `parse_hhmmss_ms`."""
+    i = line.find(_RELOCK_MARK)
+    if i < 0:
+        return None
+    after = line[i + len(_RELOCK_MARK):]
+    q = after.find("'")
+    if q < 0:
+        return None
+    source = after[:q]
+    m = _LOG_LINE_TS_RE.match(line)   # the leading clock time == the event's timeline position
+    if not m:
+        return None
+    h, mm, s = int(m.group(1)), int(m.group(2)), int(m.group(3))
+    if h > 23 or mm > 59 or s >= 60:
+        return None
+    frac = m.group(4) or ""
+    sub_ms = int((frac + "000")[:3]) if frac else 0
+    at_ms = ((h * 60 + mm) * 60 + s) * 1000 + sub_ms
+    return (source, at_ms)
+
+
+def _peak_in_window(times, window_ms):
+    """Peak count of events within any `window_ms`-wide window over an ASCENDING slice (two-pointer,
+    inclusive `t[j] - t[i] <= window_ms`). Mirror of src/jitter_audit.rs peak_in_window."""
+    left = 0
+    peak = 0
+    for right in range(len(times)):
+        while times[right] - times[left] > window_ms:
+            left += 1
+        peak = max(peak, right - left + 1)
+    return peak
+
+
+def _summarize_one_source_bursts(source, times, min_burst_relocks, window_ms):
+    """Cluster ONE source's relock timestamps into burst episodes. A new cluster starts on a gap
+    greater than `window_ms` OR a backward time step (midnight wrap / a new log concatenated); a
+    cluster is a BURST when its densest `window_ms` window holds >= `min_burst_relocks` events.
+    Mirror of src/jitter_audit.rs summarize_one_source_bursts."""
+    summary = {
+        "source": source,
+        "total_relocks": len(times),
+        "bursts": 0,
+        "max_per_second": 0,
+        "first_at_ms": times[0] if times else 0,
+        "last_at_ms": times[-1] if times else 0,
+    }
+    cluster_start = 0
+    for i in range(len(times)):
+        boundary = i > cluster_start and (times[i] < times[i - 1] or times[i] - times[i - 1] > window_ms)
+        if boundary:
+            peak = _peak_in_window(times[cluster_start:i], window_ms)
+            summary["max_per_second"] = max(summary["max_per_second"], peak)
+            if peak >= min_burst_relocks:
+                summary["bursts"] += 1
+            cluster_start = i
+    if cluster_start < len(times):
+        peak = _peak_in_window(times[cluster_start:], window_ms)
+        summary["max_per_second"] = max(summary["max_per_second"], peak)
+        if peak >= min_burst_relocks:
+            summary["bursts"] += 1
+    return summary
 
 
 def _summarize_relock_bursts(events, min_burst_relocks, window_ms):
-    return []
+    """Per-source relock-burst summaries (grouped in first-seen order, kept in log order). `events`
+    is a list of `(source, at_ms)` tuples. Mirror of src/jitter_audit.rs summarize_relock_bursts."""
+    order = []
+    groups = {}
+    for source, at_ms in events:
+        if source not in groups:
+            order.append(source)
+            groups[source] = []
+        groups[source].append(at_ms)
+    return [_summarize_one_source_bursts(name, groups[name], min_burst_relocks, window_ms)
+            for name in order]
 
 
 def relock_bursts_from_log(text):
-    return ("", "")
+    """#1320 — the RELOCK-BURST facet `(max_bursts_str, age_s_str)`, `("", "")` when there is NO
+    `genlock-relock` line at all (steady state; absent -> UNKNOWN downstream, never a fabricated 0).
+
+    `max_bursts_str` is the MAX per-input burst count over the tail (>=8 relocks within 1 s ==
+    a FIFO overshoot storm, issue 1318); `age_s_str` is the whole-second in-log age of the NEWEST
+    relock event behind the tail's newest line of any kind, so the dev1 watchdog pages on a RECENT
+    storm (not one that scrolled into the tail). `"0"` (relock telemetry live, no storm) is a truthy
+    string and is KEPT; `""` is dropped by the omit-when-empty filter.
+
+    Reads ONLY the TAIL slice of the #1222 bounded head+separator+tail read, in ONE pass (no second
+    log read). File order is time order (append-only log), so `_recency_gap_s` corrects a single
+    midnight wrap on the date-less OBS timestamps."""
+    t = text or ""
+    if LOG_BOUNDED_READ_SEPARATOR in t:
+        t = t.rsplit(LOG_BOUNDED_READ_SEPARATOR, 1)[-1]
+    log_newest_ts = None    # ts of the LAST parseable line in file order (the log write head)
+    newest_relock_ts = None  # seconds-of-day of the newest relock line (file order == time order)
+    events = []
+    for line in t.splitlines():
+        ts = _log_line_seconds(line)
+        if ts is not None:
+            log_newest_ts = ts
+        ev = _parse_relock_event(line)
+        if ev is not None:
+            events.append(ev)
+            if ts is not None:
+                newest_relock_ts = ts
+    if not events:
+        return ("", "")
+    summaries = _summarize_relock_bursts(events, RELOCK_BURSTS_MIN_DEFAULT, 1000)
+    max_bursts = max(s["bursts"] for s in summaries)
+    gap = _recency_gap_s(log_newest_ts, newest_relock_ts)
+    age_s = "0" if gap is None else str(round(gap))
+    return (str(max_bursts), age_s)
 
 
 def _median_int(values):

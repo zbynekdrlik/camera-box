@@ -703,13 +703,19 @@ def gather_bundle_state(
             # min matched) from the SAME bounded log_text (no second read); the dev1 band arm reads
             # LOW_QUALITY off it so a noisy/biased dock reading no longer false-pages.
             bsg.av_offset_quality_from_log(log_text),
+            # #1320 — the RELOCK-BURST facet (max per-input bursts + freshness age) from the SAME
+            # bounded log_text (no second read); the dev1 render-freeze watchdog's relock arm reads
+            # it. Appended at the END of the tuple (order-sensitive unpack below). "" -> facet
+            # omitted (steady state, no relock line), never a fabricated 0.
+            bsg.relock_bursts_from_log(log_text),
         )
 
     (obs_version, distroav_version, output_fps, genlock_wall_clock, genlock_capability,
      audio_ts_lag, audio_ref_band, av_offset, av_offset_dock_live_age_s_val, genlock_lock,
-     program_render_lagged, av_offset_quality) = _timed(
+     program_render_lagged, av_offset_quality, relock_bursts) = _timed(
         timings, "obs_log_parse", _parse_log_facets)
     av_offset_recent_mad_ms_val, av_offset_recent_matched_min_val = av_offset_quality
+    relock_bursts_val, relock_bursts_age_s_val = relock_bursts
     audio_ts_lag_ms_val, audio_ts_lag_src_val, audio_ts_lag_age_s_val = audio_ts_lag
     program_render_lagged_val, program_render_lagged_age_s_val = program_render_lagged
     (audio_ref_lag_src_val, audio_ref_lag_base_ms_val, audio_ref_lag_high_ms_val,
@@ -874,6 +880,8 @@ def gather_bundle_state(
         # dropped -> UNKNOWN downstream, never a fabricated 0).
         program_render_lagged=program_render_lagged_val,
         program_render_lagged_age_s=program_render_lagged_age_s_val,
+        relock_bursts=relock_bursts_val,
+        relock_bursts_age_s=relock_bursts_age_s_val,
     )
 
     # #1299 — the genlock_lock facet is a NESTED object, not a flat string, so it is attached here
