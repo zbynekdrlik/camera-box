@@ -3123,6 +3123,10 @@ echo "[4b2/8] #748 audio-presence preflight — the mbc measurement chain MUST b
 # sanctioned exception to the one-full-test rule (a preflight, not a partial measurement).
 AUDIO_PREFLIGHT_ENABLE="${AUDIO_PREFLIGHT_ENABLE:-1}"
 AUDIO_PREFLIGHT_THRESHOLD_DB="${AUDIO_PREFLIGHT_THRESHOLD_DB:--60}"
+# issue 1323 — the POLLUTION ceiling (single-sourced from the lib, env-overridable like every knob).
+# A loud FOREIGN signal flooding the mbc chain reads far above this and drowns the QPSK marker, so
+# the run would burn ~40 min then fail on cluster_samples=0; refuse it up front, next to the floor.
+AUDIO_PREFLIGHT_CEILING_DB="${AUDIO_PREFLIGHT_CEILING_DB:-$(audio_preflight_default_ceiling_db)}"
 AUDIO_PREFLIGHT_PROBE_SECS="${AUDIO_PREFLIGHT_PROBE_SECS:-15}"
 AUDIO_PREFLIGHT_SSH_TIMEOUT="${AUDIO_PREFLIGHT_SSH_TIMEOUT:-90}"
 # #748 live finding (run 29282790031): OBS-WS StopRecord's RPC reply lands BEFORE the mp4 muxer
@@ -3172,7 +3176,12 @@ if [ "$AUDIO_PREFLIGHT_ENABLE" = "1" ]; then
     echo "ERROR: $(audio_preflight_silent_message "$_ap_db" "$AUDIO_PREFLIGHT_THRESHOLD_DB")" >&2
     exit 1
   fi
-  echo "    ok: mbc measurement audio AUDIBLE (max_volume ${_ap_db} dB >= ${AUDIO_PREFLIGHT_THRESHOLD_DB} dB threshold)"
+  # issue 1323 — level CEILING: above the silence floor, but a loud foreign flood drowns the marker.
+  if [ "$(audio_preflight_is_polluted "$_ap_db" "$AUDIO_PREFLIGHT_CEILING_DB")" = "true" ]; then
+    echo "ERROR: $(audio_preflight_polluted_message "$_ap_db" "$AUDIO_PREFLIGHT_CEILING_DB")" >&2
+    exit 1
+  fi
+  echo "    ok: mbc measurement audio AUDIBLE (max_volume ${_ap_db} dB >= ${AUDIO_PREFLIGHT_THRESHOLD_DB} dB threshold, <= ${AUDIO_PREFLIGHT_CEILING_DB} dB ceiling)"
 else
   echo "    [audio-presence preflight] SKIPPED (AUDIO_PREFLIGHT_ENABLE=0)"
 fi

@@ -169,22 +169,34 @@ fn default_ceiling_db_single_sources_the_pollution_bar() {
     // one source of the -20 literal — the [4b2/8] step and the #1310 watchdog both read this
     let (ok, v) = run("audio_preflight_default_ceiling_db");
     assert!(ok, "the ceiling getter must succeed");
-    assert_eq!(v, "-20", "#1323 calibrated ceiling (empty gap -9..-20 dBFS on the 16.9 data)");
+    assert_eq!(
+        v, "-20",
+        "#1323 calibrated ceiling (empty gap -9..-20 dBFS on the 16.9 data)"
+    );
 }
 
 #[test]
 fn flood_above_ceiling_is_polluted() {
     let (_ok, v) = run("audio_preflight_is_polluted -5.5");
-    assert_eq!(v, "true", "-5.5 dB flood is above the -20 ceiling -> polluted");
+    assert_eq!(
+        v, "true",
+        "-5.5 dB flood is above the -20 ceiling -> polluted"
+    );
     let (_ok, v) = run("audio_preflight_is_polluted -47.8");
-    assert_eq!(v, "false", "marker-only -47.8 dB max_volume is below the ceiling -> not polluted");
+    assert_eq!(
+        v, "false",
+        "marker-only -47.8 dB max_volume is below the ceiling -> not polluted"
+    );
 }
 
 #[test]
 fn ceiling_strict_boundary_exactly_at_is_not_polluted() {
     // exactly at the ceiling is NOT polluted (strict >), just above IS — mirrors is_silent
     let (_ok, at) = run("audio_preflight_is_polluted -20 -20");
-    assert_eq!(at, "false", "exactly at the ceiling is not polluted (strict >)");
+    assert_eq!(
+        at, "false",
+        "exactly at the ceiling is not polluted (strict >)"
+    );
     let (_ok, above) = run("audio_preflight_is_polluted -19.9 -20");
     assert_eq!(above, "true", "just above the ceiling is polluted");
 }
@@ -193,7 +205,10 @@ fn ceiling_strict_boundary_exactly_at_is_not_polluted() {
 fn polluted_message_names_the_level_and_ceiling() {
     let (_ok, m) = run("audio_preflight_polluted_message -5.5");
     for needle in ["-5.5", "POLLUTED", "-20"] {
-        assert!(m.contains(needle), "#1323 polluted message missing {needle:?}: {m}");
+        assert!(
+            m.contains(needle),
+            "#1323 polluted message missing {needle:?}: {m}"
+        );
     }
 }
 
@@ -210,9 +225,9 @@ fn recording_e2e_wires_the_pollution_ceiling_before_startrecord() {
     let step = s
         .find("audio-presence preflight")
         .expect("recording-e2e.sh must have the pre-record audio-presence preflight step");
-    let poll_rel = s[step..]
-        .find("audio_preflight_is_polluted")
-        .expect("#1323: the preflight step must classify pollution via audio_preflight_is_polluted");
+    let poll_rel = s[step..].find("audio_preflight_is_polluted").expect(
+        "#1323: the preflight step must classify pollution via audio_preflight_is_polluted",
+    );
     let start = s
         .find("[5/8] StartRecord")
         .expect("recording-e2e.sh has the [5/8] StartRecord step");

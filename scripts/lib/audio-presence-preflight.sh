@@ -107,6 +107,49 @@ audio_preflight_norec_message() {
   echo "measurement-audio preflight: the stream box returned NO recording path from StopRecord — the short probe recording never started (OBS WebSocket / encoder problem on stream). Cannot confirm the mbc measurement chain before the real run (#748)."
 }
 
+# --- #1323: a LEVEL CEILING — the counterpart of the silence floor above. The silence floor
+# proves NOT-SILENT; it cannot tell a decodable QPSK marker from a chain FLOODED by a loud FOREIGN
+# signal. The marker alone is quiet (16.9.2026 data: watchdog peak plateau -55..-61 dBFS,
+# preflight max_volume ~-47.8 dB); a loud flood reads within ~20 dB of full scale (-5..-8 dBFS) and
+# DROWNS the marker, so the demod decodes nothing (cluster_samples=0) yet the -60 floor calls it
+# AUDIBLE — the run then burns ~40 min before the A/V-offset gate fails (run 622403283). The two
+# plateaus have a clean empty gap at -9..-20 dBFS, so a single ceiling separates flood from marker
+# with wide margin. This ceiling is the ONE source of the -20 literal — the recording-e2e.sh
+# [4b2/8] preflight and the #1310 between-run watchdog (scripts/measurement_audio_decision.py) both
+# READ it here (never retyped), exactly as they both read audio_preflight_default_threshold_db.
+
+# audio_preflight_default_ceiling_db -> the canonical measurement-audio POLLUTION bar in dB
+# (-20 dBFS: in the empty -9..-20 gap, ~35 dB above the quiet marker plateau, ~12-15 dB below the
+# loud foreign flood). "Within ~20 dB of full scale is foreign" (issue 1323). Applies to BOTH the
+# preflight's ffmpeg volumedetect max_volume AND the watchdog's InputVolumeMeters peak_db — both
+# read the marker far below it and a flood far above it.
+audio_preflight_default_ceiling_db() {
+  printf '%s\n' "-20"
+}
+
+# audio_preflight_is_polluted DB [CEILING_DB=audio_preflight_default_ceiling_db (-20)] -> "true"/"false".
+# Polluted (a fail) iff the measured DB is STRICTLY ABOVE the ceiling — a level exactly at the
+# ceiling is treated as clean, not polluted (mirrors audio_preflight_is_silent's strict-< convention
+# on the other bar). Float-safe (levels are like -5.4 / -47.8) via awk. DB MUST already be a
+# validated numeric (the caller routes an unparseable value to the unreadable diagnostic first).
+audio_preflight_is_polluted() {
+  local db="$1" ceiling="${2:-$(audio_preflight_default_ceiling_db)}"
+  if awk -v d="$db" -v c="$ceiling" 'BEGIN { exit !((d + 0) > (c + 0)) }'; then
+    echo "true"
+  else
+    echo "false"
+  fi
+}
+
+# audio_preflight_polluted_message DB [CEILING_DB=audio_preflight_default_ceiling_db (-20)] -> the
+# operator-facing fail message, a pure string formatter (no I/O) so it is directly unit-testable —
+# names the measured level, the ceiling, and the exact cause to check (a loud foreign signal routed
+# into the measurement mic / mbc chain that drowns the QPSK marker).
+audio_preflight_polluted_message() {
+  local db="$1" ceiling="${2:-$(audio_preflight_default_ceiling_db)}"
+  echo "measurement audio POLLUTED — the stream program recording measured max_volume ${db} dB (> ${ceiling} dB ceiling; the QPSK marker alone reads ~-47..-57 dB, a loud foreign signal reads within ~20 dB of full scale). A LOUD foreign signal is flooding the mbc measurement chain and drowns the marker, so the demod decodes nothing (cluster_samples=0) even though the level passes the silence floor. Check what is being routed hot into the measurement mic / mbc Ableton channel / Dante into stream OBS (owner rig activity, a music mix left up, a wrong Dante subscription); quiet it back to the marker-only level, then re-run — a run on a polluted measurement instrument burns a full cycle before the A/V-sync gate fails (#1323)."
+}
+
 # --- #901: a THREE-tier, non-blocking classification for rig-mode.sh's own TEST-mode chain-verify
 # (a lighter-weight check than recording-e2e.sh's real STRICT gate above, which is UNCHANGED --
 # audio_preflight_is_silent/_silent_message keep serving that gate exactly as before). Issue 976

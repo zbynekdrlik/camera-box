@@ -43,6 +43,21 @@ production-critical dev1 watchdog class (umbrella **#1308**).
   `--threshold-db "$(audio_preflight_default_threshold_db)"` to the pure decision; `classify`/`analyze`
   take the threshold as a REQUIRED argument (no hardcoded -60 default in python). SILENT uses strict
   `<` — byte-identical to `audio_preflight_is_silent` (exactly at the bar is PRESENT).
+- **#1323 POLLUTED — the level CEILING, the counterpart of the silence floor, ALSO single-sourced.**
+  The silence floor proves NOT-SILENT but cannot tell a decodable marker from a chain flooded by a
+  loud FOREIGN signal (16.9.2026 data: watchdog peak plateau `-55..-61 dBFS` marker-only vs a flat
+  `-5..-8 dBFS` flood, empty gap `-9..-20`). `audio_preflight_default_ceiling_db` (**-20 dBFS**, added
+  to the lib by #1323) is the ONE source; the `[4b2/8]` preflight and this watchdog both READ it,
+  never retype. `classify(peak_db, box_reachable, meter_present, threshold_db, ceiling_db=None)` →
+  `POLLUTED` when `peak_db > ceiling` (strict `>` — exactly at the ceiling is PRESENT). `ceiling_db`
+  defaults to `None` so the pre-#1323 4-arg / 3-arg callers keep the SILENT/PRESENT-only behaviour;
+  the watchdog passes `--ceiling-db "$(audio_preflight_default_ceiling_db)"`. `require_tools` also
+  fails LOUD if that getter is not sourced. POLLUTED shares the SILENT `"stream"` fault path / latch /
+  `measurement-audio-stream` dedup base (the chain is unusable either way; recovery only on PRESENT),
+  so the #1206 bucketed-key shape is UNCHANGED — no `test_notify_dedup_key_sweep_1206.py` change.
+  Since the floor (-60) is far below the ceiling (-20), SILENT and POLLUTED are mutually exclusive
+  (SILENT checked first). Applies to BOTH scales: the preflight's `max_volume` and the watchdog's
+  `InputVolumeMeters` peak — the marker reads far below -20 on both, a flood far above.
 - **`meter_present` distinguishes UNKNOWN from SILENT.** Digital silence is `mbc` PRESENT in the meter
   stream with all-zero levels → peak_db clamped to the floor (−100 dB) → SILENT. `mbc` never appearing
   in any event this window → `meter_present=0` → UNKNOWN (a renamed/removed input, or the meter event
