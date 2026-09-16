@@ -39,7 +39,13 @@ no-input-locked; then DEGRADED (amber) precedence some-input-unlocked > recent-e
 - **DEGRADED:** some (not all) inputs unlocked (names the input, e.g. `NDI cam7`); OR a
   relock/late-hold/backward-step on a CONNECTED input in the last 60 s (#1299 Part 3: underruns are
   NO LONGER a recent-event class; the label names the offender, `recent event: cg`); OR clock
-  `ntp_failed`; OR `wall_qpc_drift` beyond `GENLOCK_QPC_DRIFT_BOUND_MS` (100 ms); OR (#1303, lowest
+  `ntp_failed`; OR (#1299 Part 4) the wall-vs-QPC drift is a genuine hazard — the WINDOWED drift
+  RATE departs from the dantesync-reported slew (`f_ptp_ppm + f_phase_ppm`) by more than
+  `GENLOCK_QPC_DRIFT_PPM_BOUND` (50 ppm) once the rolling `GENLOCK_QPC_WINDOW_S` (300 s) window has
+  filled, OR a single-sample wall STEP exceeds `GENLOCK_QPC_STEP_BOUND_MS` (33 ms = one 30 fps
+  frame, judged immediately). This REPLACED the old cumulative `wall_qpc_drift > 100 ms` gate, which
+  grew unbounded on a dantesync-disciplined box (the wall runs at the GM rate vs the free QPC
+  crystal, ~50 ms/h) and false-paged the whole fleet after ~2 h; OR (#1303, lowest
   precedence, part 3b) an audio-ENABLED genlock source whose `|audio_pairing_offset_ms|` breaches
   `GENLOCK_AUDIO_PAIRING_BOUND_MS` (33 ms / one 30 fps frame) — `audio unpaired: <src>`. The widget
   aggregates the per-source breach into `GenlockFacets.audio_unpaired` (the twin of how it reduces
@@ -104,6 +110,34 @@ no-input-locked; then DEGRADED (amber) precedence some-input-unlocked > recent-e
     (schema v2→v3, additive, omit-when-absent) and the human `genlock-lock:` line as
     `reason=recent_event:<name>`; `genlock_lock_decision.analyze` enriches the watchdog's reason to
     `recent_event:<name>` so a page is actionable.
+- **#1299 Part 4 — `qpc_drift` is a WINDOWED RATE + STEP, never the cumulative offset.** The libobs
+  producer `genlock_wall_qpc_drift_ms()` is a wall-RTC-vs-QPC accumulator since OBS start; on a
+  dantesync-disciplined box the wall clock is slewed to the GM rate (`f_ptp + f_phase`) vs the free
+  QPC crystal, so it grows without bound (~14 ppm ≈ 50 ms/h) BY DESIGN — the old `> 100 ms` gate was
+  a bound on an unbounded quantity and false-paged the fleet after ~2 h. The verdict is the pure
+  `genlock_qpc_drift_beyond_bound(rate_ready, drift_delta_ms, elapsed_ms, expected_ppm, ppm_bound,
+  max_step_ms, step_bound_ms, &measured_ppm)` (Rust authority in `src/genlock_lock_state.rs`, C
+  mirror in `GenlockLockState.hpp`, parity-gated by the 4th lift in
+  `tests/genlock_lock_state_parity.rs`): a STEP > `GENLOCK_QPC_STEP_BOUND_MS` (33 ms) trips
+  IMMEDIATELY (before the window fills); the RATE mismatch (|measured − expected| >
+  `GENLOCK_QPC_DRIFT_PPM_BOUND` = 50 ppm) trips only once `rate_ready` (the ring spans ≥ 90 % of
+  `GENLOCK_QPC_WINDOW_S` = 300 s — long enough that the integer-ms drift resolves the rate:
+  at 14 ppm the window accrues ≈ 4.2 ms, quantisation ≈ 3.3 ppm ≪ 50 ppm). The WINDOW state (the
+  `genlockQpcHistory` `(monotonic_ms, SIGNED drift_ms)` ring) lives in the widget; `expected_ppm =
+  f_ptp_ppm + f_phase_ppm` is polled from `:8898/status` (absent on an old dantesync → 0.0, the wide
+  bound tolerates it). `qpc_drift_ms` stays in the JSON as raw report-only telemetry; the additive
+  `qpc_drift_ppm` / `qpc_expected_ppm` / `qpc_step` (schema v4→v5) are report-only too. **A steady
+  disciplined slew must read LOCKED** — the reopen bug; never re-introduce a bound on the cumulative
+  value.
+- **A `tests/genlock_lock_json_guards.rs` needle for a REAL C++ quote uses Rust `\"`, not the
+  escaped-JSON `\\\"` (#1299 Part 4).** The guards `squish()` the source then `.contains(needle)`.
+  A JSON KEY in the builder is an escaped-quote C string literal (`,\"qpc_drift_ppm\":`), so its
+  needle is `"\\\"qpc_drift_ppm\\\":"` (→ literal `\"qpc_drift_ppm\":`). But a plain call like
+  `obs_data_get_double(d, "f_ptp_ppm")` uses REAL C++ quotes, so its needle is
+  `"obs_data_get_double(d, \"f_ptp_ppm\")"` (Rust `\"` → literal `"`). Using the `\\\"` form for a
+  real-quote anchor fails the guard ("anchor GONE") even though the source is correct — distinguish
+  the two when adding an anchor, and run `rustc --test tests/genlock_lock_json_guards.rs` (with
+  `CARGO_MANIFEST_DIR` set) to confirm it actually matches before trusting green.
 - **`genlock-lock:` is a new OBS-log family** (emitted on state/reason CHANGE, not every tick) —
   mutually non-substring with `genlock-fifo audit '`, `genlock-ndi-output audit '`,
   `genlock-ndi-filter audit '`, `genlock-relock`, `genlock-acquire-bracket '%s':` (guarded by

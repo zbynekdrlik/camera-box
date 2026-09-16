@@ -12444,3 +12444,18 @@ no version bump (worktree lane; supervisor cherry-picks).
   sync-test-output.cpp (Rust anchor + pwsh mirror in both windows-genlock*.yml). Tests:
   test_av_band_quality_1319.py (new) + extended test_av_band_1319.py + av_sync_dock_pin_observability_1319.rs.
   Tier-0 pytest 177 green; C++ compiles at CI only. Rule addendum in av-step-upstream-detector.md.
+## 2026-09-16 — #1299 Part 4: windowed-rate + step qpc_drift (fix the cumulative-slew false page)
+- RED cfff46cf3 → GREEN aa7bac3e9. The genlock LOCK indicator's `qpc_drift` term gated on the
+  CUMULATIVE `wall_qpc_drift_ms`, which grows unbounded on a dantesync-disciplined box (wall slewed
+  to the GM rate vs the free QPC crystal, ~14 ppm ≈ 50 ms/h) — crossed 100 ms after ~2 h and
+  produced 38 false Discord pages overnight 15./16.9.
+- Redefined as pure `genlock_qpc_drift_beyond_bound` (Rust authority `src/genlock_lock_state.rs` +
+  C mirror `GenlockLockState.hpp` + python mirror, C-vs-Rust parity-gated): DEGRADE on a STEP > 33 ms
+  (one 30 fps frame, immediate) OR a windowed drift RATE off the dantesync-reported `f_ptp+f_phase`
+  slew by > 50 ppm over a filled 300 s window. Widget keeps a signed-drift ring + polls the expected
+  slew from :8898; `qpc_drift_ms` stays report-only, additive `qpc_drift_ppm`/`qpc_expected_ppm`/
+  `qpc_step` at the JSON END (v4→v5). Gather parser + watchdog log + both windows-genlock pwsh
+  anchors + json-guard test in lock-step.
+- Verify (Tier-0): rustc --test module 44/44; standalone C-vs-Rust parity replica 14/14; guard 5/5;
+  python decision+gather+roundtrip+qpc_window 52; fmt clean; bash -n + shellcheck clean; both yml
+  valid YAML; doc-lint clean. Vendored C++/Qt compiles at CI (FULL-BUNDLE frontend deploy).
