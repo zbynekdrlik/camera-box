@@ -522,12 +522,43 @@ RELOCK_BURSTS_MIN_DEFAULT = 8  # N: >= this many relocks within 1 s on ONE input
 _RELOCK_MARK = "genlock-relock '"
 
 
+def _parse_hhmmss_ms(tok):
+    """A `HH:MM:SS[.mmm]` (optional trailing `:`) token -> milliseconds-of-day, or None. Byte-faithful
+    mirror of src/jitter_audit.rs `parse_hhmmss_ms`: strips one trailing `:`, requires exactly 3
+    colon-parts, pads the fractional to 3 digits (`.205` -> 205 ms)."""
+    if tok.endswith(":"):
+        tok = tok[:-1]
+    parts = tok.split(":")
+    if len(parts) != 3:
+        return None
+    try:
+        hh = int(parts[0])
+        mm = int(parts[1])
+    except ValueError:
+        return None
+    sec_frac = parts[2]
+    if "." in sec_frac:
+        s, f = sec_frac.split(".", 1)
+        try:
+            ss = int(s)
+        except ValueError:
+            return None
+        fms = int((f + "000")[:3]) if f else 0
+        sub_ms = ss * 1000 + fms
+    else:
+        try:
+            sub_ms = int(sec_frac) * 1000
+        except ValueError:
+            return None
+    return hh * 3_600_000 + mm * 60_000 + sub_ms
+
+
 def _parse_relock_event(line):
-    """`(source, at_ms_int)` from a `genlock-relock '<src>':` line, or None. Mirror of
-    src/jitter_audit.rs parse_relock_line: needs the `genlock-relock '` marker (mutually
-    non-substring vs `genlock-fifo audit '`/`genlock-ndi-*`) AND a leading OBS HH:MM:SS.mmm clock
-    time (an event with no timeline position cannot be clustered). Fractional seconds are padded to
-    3 digits (`.205` -> 205 ms), matching the Rust `parse_hhmmss_ms`."""
+    """`(source, at_ms_int)` from a `genlock-relock '<src>':` line, or None. Byte-faithful mirror of
+    src/jitter_audit.rs parse_relock_line: needs the `genlock-relock '` marker (mutually non-substring
+    vs `genlock-fifo audit '`/`genlock-ndi-*`) AND a parseable clock time in the LAST whitespace token
+    before the marker (so a journald/SSH-wrapper-prefixed line still clusters, exactly like the Rust).
+    An event with no timeline position cannot be clustered -> None."""
     i = line.find(_RELOCK_MARK)
     if i < 0:
         return None
@@ -536,15 +567,12 @@ def _parse_relock_event(line):
     if q < 0:
         return None
     source = after[:q]
-    m = _LOG_LINE_TS_RE.match(line)   # the leading clock time == the event's timeline position
-    if not m:
+    before = line[:i].split()          # the token right before the marker carries the OBS timestamp
+    if not before:
         return None
-    h, mm, s = int(m.group(1)), int(m.group(2)), int(m.group(3))
-    if h > 23 or mm > 59 or s >= 60:
+    at_ms = _parse_hhmmss_ms(before[-1])
+    if at_ms is None:
         return None
-    frac = m.group(4) or ""
-    sub_ms = int((frac + "000")[:3]) if frac else 0
-    at_ms = ((h * 60 + mm) * 60 + s) * 1000 + sub_ms
     return (source, at_ms)
 
 

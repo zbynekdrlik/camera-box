@@ -117,9 +117,9 @@ write_state_field() {
 recovery_now() { [ "${1:-0}" = "1" ] && printf '1' || printf '0'; }
 
 # -- one arm's confirm + throttled, time-bucketed alert -----------------------------------------
-# handle_arm <box> <ip> <arm-tag> <state-prefix> <dedup-base> <body-text>
+# handle_arm <box> <arm-tag> <state-prefix> <dedup-base> <body-text>
 # arm-tag identifies the incident for the log; state-prefix isolates this arm's disjoint state keys;
-# dedup-base is the time-bucketed --dedup-key base; body-text is the Slovak page.
+# dedup-base is the time-bucketed --dedup-key base; body-text is the Slovak page (already carries the box+ip).
 handle_arm() {
   local box="$1" arm="$2" prefix="$3" dedup_base="$4" body_text="$5"
   # confirm across consecutive passes before paging.

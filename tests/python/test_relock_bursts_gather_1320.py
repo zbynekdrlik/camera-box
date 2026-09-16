@@ -48,6 +48,16 @@ def test_parser_rejects_non_relock_and_timestampless_lines():
     assert bsg._parse_relock_event("18:00:00.000: [obs] unrelated") is None
 
 
+def test_parser_reads_the_timestamp_token_before_the_marker_wrapper_robust():
+    # Byte-faithful to the Rust `parse_hhmmss_ms(line[..mark].split_whitespace().last())`: a
+    # journald/SSH-wrapper prefix before the OBS timestamp still clusters (the LAST token before the
+    # marker carries the clock time), whereas a line-start regex would drop it. (review finding F1)
+    line = "<7>host journald: 18:27:28.205: genlock-relock 'NDI 2ME PGM': depth=41 erased=0"
+    assert bsg._parse_relock_event(line) == ("NDI 2ME PGM", 66_448_205)
+    # and the bare-seconds form (no fractional) the Rust also accepts:
+    assert bsg._parse_relock_event("00:00:01: genlock-relock 'X': z") == ("X", 1000)
+
+
 # ── the summarizer (byte-for-byte parity with src/jitter_audit.rs::tests) ────────────────────────
 def _ev(source, at_ms):
     return (source, at_ms)
