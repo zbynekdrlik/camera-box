@@ -2030,6 +2030,12 @@ fi"
   # MUST run AFTER the guard decide above (which read the PREVIOUS run's value) and BEFORE the
   # apply-persist below (so pin_at_measure reads the measure-time pin). Sourced-helper (#675).
   av_sync_persist_residual "$REPORT_JSON" "$RUN_ID"
+  # issue 1319 Part 2: ALSO record the stream dock's OWN quality-gated post-align median (fetched
+  # from the stream box's :8899 bundle-state) next to the residual, so the dev1 band alarm compares
+  # dock-to-dock and the ~120 ms recording-vs-dock frame bias (78-page overnight false alarm) cancels.
+  # Best-effort, merges into the file the line above wrote; a low-quality/unreachable box records
+  # nothing (the alarm then falls back to the recording residual). Sourced-helper (#675).
+  av_sync_persist_dock_reference "$RUN_ID" "$STREAM" "$HERE/av_step_decision.py"
   if [ -n "$AV_SYNC_APPLY_OFFSET_MS" ]; then
     echo "[cleanup] #856: applying this run's own computed rig-wide A/V correction (${AV_SYNC_APPLY_OFFSET_MS}ms) to '$STREAM_PROG_SOURCE' on stream (av_sync_calibrate.py --apply, read-back verified)"
     timeout "$OBS_CLEANUP_TIMEOUT" python3 "$HERE/av_sync_calibrate.py" --host "$STREAM" \

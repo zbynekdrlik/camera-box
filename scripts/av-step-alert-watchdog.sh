@@ -327,23 +327,29 @@ resolve_band_reference() {
     printf '%s env(AV_BAND_REFERENCE_MS)\n' "$AV_BAND_REFERENCE_MS"
     return 0
   fi
-  local f="$BAND_REFERENCE_FILE" v=""
+  local f="$BAND_REFERENCE_FILE" out="" v="" k=""
   if [ -r "$f" ]; then
-    v="$(python3 -c 'import json,math,sys
+    # #1319 Part 2 — PREFER the DOCK-NATIVE median (`dock_offset_median_ms`, the [4i/8] persist step
+    # records it quality-gated), so the band judges the dock estimator against a DOCK-derived
+    # reference and the ~120 ms recording-vs-dock frame bias cancels. Only when that is absent does
+    # it fall back to the recording residual (`residual_median_ms`), and the log states WHICH key it
+    # used. Prints "<value> <key>".
+    out="$(python3 -c 'import json,math,sys
 try:
     d=json.load(open(sys.argv[1]))
 except Exception:
     sys.exit(0)
-for k in ("residual_median_ms","residual_ms","offset_ms","combined_offset_ms_raw"):
+for k in ("dock_offset_median_ms","residual_median_ms","residual_ms","offset_ms","combined_offset_ms_raw"):
     x=d.get(k)
     # #1319 review F2: json.load accepts a bare NaN/Infinity; a non-finite reference would make
     # abs(recent - ref) > band ALWAYS false -> the band arm silently NEVER pages (the exact blind
-    # alarm this ticket kills). Reject a non-finite value so resolve falls through to the 0 ms
-    # fallback (stated in the log) instead.
+    # alarm this ticket kills). Reject a non-finite value so resolve falls through to the next key
+    # or the 0 ms fallback (stated in the log) instead.
     if isinstance(x,(int,float)) and not isinstance(x,bool) and math.isfinite(x):
-        print(round(float(x),1)); break' "$f" 2>/dev/null)"
+        print("%s %s" % (round(float(x),1), k)); break' "$f" 2>/dev/null)"
+    v="${out%% *}"; k="${out#* }"
     if [ -n "$v" ]; then
-      printf '%s file(%s:residual_median_ms)\n' "$v" "$f"
+      printf '%s file(%s:%s)\n' "$v" "$f" "$k"
       return 0
     fi
   fi
@@ -383,6 +389,15 @@ handle_box_band() {
         fi
         write_state_field "band_alerted_${box}" 0
       fi
+      write_state_field "band_confirm_${box}" 0
+      return 0
+      ;;
+    LOW_QUALITY)
+      # #1319 Part 2 — the dock reading is present but too noisy/thin to trust (recent-window
+      # median MAD > 15 ms OR min matched < 30). A +-${BAND_MS}ms band cannot be judged from an
+      # estimator that scattered -- this is the exact overnight 78-page false alarm. Log-only,
+      # NEVER a page; reset the confirm so a later trustworthy excursion re-confirms from scratch.
+      log "$box BAND LOW_QUALITY: dock reading not trustworthy (recent_med=${recent:-?}ms, mad/matched below the quality bar) -- band not judged, no page"
       write_state_field "band_confirm_${box}" 0
       return 0
       ;;

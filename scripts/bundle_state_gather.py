@@ -622,6 +622,20 @@ _AV_OFFSET_SUGGEST_RE = re.compile(
 # silent" (STALE) — the false-STALE the SUGGESTED-only age read during a dead-band quiet window.
 _AV_OFFSET_DIAG_LOCKED_RE = re.compile(r"av-sync-dock: diag .*\blocked=yes\b")
 
+# #1319 Part 2 — the dock's own cluster-QUALITY line (`av-sync-dock: {LOCKED,UPDATED} offset=Xms
+# source=cluster matched=M mad=Dms`, sync-test-output.cpp:1378). It carries the estimator's
+# per-lock cluster SIZE (`matched`) and per-sample SCATTER (`mad`) — the two things the band alarm
+# needs to know a reading is trustworthy. The overnight 78-page false alarm judged a dock reading
+# whose MAD (9-31 ms) was as wide as the +-30 ms band against a recording-based reference; the dev1
+# band decision now reads LOW_QUALITY (log-only, never a page) unless the recent window's median MAD
+# is <= 15 ms AND its min matched is >= 30. This is a SEPARATE facet from the offset SERIES
+# (av_offset_series_from_log stays BYTE-IDENTICAL — the Part-1 decision that the raw UPDATED/LOCKED
+# lines are NOT folded into the series holds; only their matched/mad feed this quality facet).
+_AV_OFFSET_QUALITY_RE = re.compile(
+    r"av-sync-dock: (?:LOCKED|UPDATED) offset=-?\d+(?:\.\d+)?ms source=cluster "
+    r"matched=(\d+) mad=(\d+(?:\.\d+)?)ms"
+)
+
 # #1267 — rolling-window bounds, in-log seconds behind the log head. RECENT = the freshest 10 min;
 # BASELINE = the 10..40 min region behind it (a rolling reference that predates the recent window).
 # The BASELINE is bounded above by how far the #1222 bounded TAIL reaches (~50 min on a long
@@ -755,6 +769,51 @@ def av_offset_dock_live_age_from_log(text):
         return ""
     gap = _recency_gap_s(log_newest_ts, last_live_ts)
     return "" if gap is None else str(round(gap))
+
+
+def av_offset_quality_from_log(text, recent_window_s=AV_OFFSET_RECENT_WINDOW_S):
+    """#1319 Part 2 — the dock estimator's measurement QUALITY over the RECENT window, as SCALARS
+    for the dev1 band alarm. Returns `(recent_mad_str, recent_matched_min_str)`, both "" when there
+    is no `LOCKED/UPDATED offset= ... matched= mad=` line in the recent window (UNKNOWN downstream,
+    never fabricated):
+
+    * recent_mad — MEDIAN of the per-lock `mad=` scatter (ms, 1 decimal) over the freshest
+      recent_window_s of dock quality lines. The band arm requires this <= 15 ms.
+    * recent_matched_min — the MINIMUM `matched=` cluster size in that window (the worst-case
+      trust). The band arm requires this >= 30. Min (not median) so a single thin lock in the
+      window is enough to read LOW_QUALITY — the safe direction (never page off a thin cluster).
+
+    Reads ONLY the TAIL slice of the #1222 bounded read, same recency model (`_recency_gap_s`,
+    file order IS time order) as av_offset_series_from_log, one pass, no wall clock. This is a
+    SEPARATE parser from the offset series (which stays byte-identical): it consumes the same
+    LOCKED/UPDATED lines the series deliberately excludes, but ONLY for matched/mad — never their
+    offset (a different sign/bias from the SUGGESTED series, #952)."""
+    t = text or ""
+    if LOG_BOUNDED_READ_SEPARATOR in t:
+        t = t.rsplit(LOG_BOUNDED_READ_SEPARATOR, 1)[-1]
+    samples = []          # (ts_or_None, matched_int, mad_float) in file order
+    log_newest_ts = None
+    for line in t.splitlines():
+        ts = _log_line_seconds(line)
+        if ts is not None:
+            log_newest_ts = ts
+        m = _AV_OFFSET_QUALITY_RE.search(line)
+        if m:
+            samples.append((ts, int(m.group(1)), float(m.group(2))))
+    recent_mads, recent_matched = [], []
+    for ts, matched, mad in samples:
+        g = _recency_gap_s(log_newest_ts, ts)
+        if g is None or g > recent_window_s:
+            continue
+        recent_mads.append(mad)
+        recent_matched.append(matched)
+    if not recent_mads:
+        return ("", "")
+    med = _median(recent_mads)
+    return (
+        "" if med is None else f"{med:.1f}",
+        str(min(recent_matched)),
+    )
 
 
 def distroav_dll_paths(scan_roots):
@@ -1185,6 +1244,8 @@ def build_bundle_state(
     av_offset_n_recent="",
     av_offset_n_base="",
     av_offset_dock_live_age_s="",
+    av_offset_recent_mad_ms="",
+    av_offset_recent_matched_min="",
     vb_matrix_running="",
     vb_matrix_name="",
     vb_matrix_pid="",
@@ -1292,6 +1353,13 @@ def build_bundle_state(
         # IN_BAND_QUIET (dock LIVE, offset in the suggestion dead band) instead of a false STALE.
         # Same omit-when-empty rule (absent == UNKNOWN downstream, never a fake 0).
         "av_offset_dock_live_age_s": av_offset_dock_live_age_s,
+        # #1319 Part 2 — the dock estimator's recent-window measurement QUALITY (median MAD +
+        # min matched), from av_offset_quality_from_log. The dev1 band arm reads LOW_QUALITY
+        # (log-only, never a page) unless recent_mad_ms <= 15 AND recent_matched_min >= 30, so a
+        # noisy/biased dock reading no longer trips the +-30 ms band on its own scatter. Same
+        # omit-when-empty rule (absent == quality unjudgeable -> the band proceeds, never a fake 0).
+        "av_offset_recent_mad_ms": av_offset_recent_mad_ms,
+        "av_offset_recent_matched_min": av_offset_recent_matched_min,
         # #1227 — the VB-Matrix presence facet the dev1 VB-Matrix alert watchdog reads. Same
         # omit-when-empty rule: running="0" (installed but the VBAudioMatrix* process is DEAD) is a
         # truthy string and is KEPT (surfaces as DOWN); running="" (a box with no VB-Matrix install,
