@@ -37,7 +37,9 @@ Verdicts (classify):
   POLLUTED — (#1323) reachable, `mbc` meter present, peak_db > ceiling (a loud foreign signal
              flooding the chain drowns the QPSK marker) → page after a 2-pass confirm. Only when a
              ceiling is passed in (the #1310 3/4-arg callers keep the SILENT/PRESENT-only behavior).
-  PRESENT — reachable, `mbc` meter present, threshold <= peak_db <= ceiling → healthy.
+  PRESENT — reachable, `mbc` meter present, peak_db >= threshold and (ceiling_db is None or
+             peak_db <= ceiling) → healthy. (No upper bound when no ceiling is passed — the #1310
+             SILENT/PRESENT-only behavior.)
 """
 import argparse
 import sys
