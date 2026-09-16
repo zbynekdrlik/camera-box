@@ -107,3 +107,14 @@ Mined all 44 local `verdict-*.json` incl. the first 3-run green 7-cam series (13
   wake-up — calibrate it WITH the genuine-cold run, never from warm-only data (same trap as the
   wake-up ceiling). The sustained-fps floor (27.0 = 30 − 3) is warm-safe: healthy min is
   CAM3/CAM7 ~29.2-29.5, so keep the floor ≤ ~29.2.
+
+
+## GOTCHA — a `gh run rerun` of a MERGED PR's E2E cannot be the genuine-cold run (17.9.2026)
+
+Once the PR is merged, the `#646` docs-only-diff detector at the top of `full-path-e2e.yml` sees an EMPTY diff
+(base already contains head) and every downstream step — the cold-cut arm check, the rig-busy gate, the
+recording harness, the fail-closed guard — is SKIPPED; the attempt completes green in ~15 s having measured
+nothing (live: run 35152458072 attempt 2 with both `COLD_CUT_BYPASS_*` variables set). The genuine-cold run
+must therefore ride an OPEN pull_request run: set the two repository variables immediately BEFORE opening
+the next dev→main PR, harvest the verdict, unset them. A `workflow_dispatch` run is plan-only
+(`E2E_EXECUTE_VERDICT=0`) and equally useless for it.
