@@ -12490,3 +12490,27 @@ no version bump (worktree lane; supervisor cherry-picks).
 - Commits: RED bcd72707c test(#1096) → GREEN a84b18f2a fix(#1096) → docs (this).
 - Tests: tests/distroav_frameless_connected_1096.rs 3/3 offline (lift-compile + spec truth table; >=->> mutation goes RED); existing distroav_*_767/1080/1096/1180/1287 still green; cargo fmt --all --check clean; both yml valid YAML.
 - UNVERIFIED locally: full vendored C++ (CI first compiler) + the live receive-path cure (live-only). Acceptance = supervisor's post-deploy fleet-wave repro: every strih camera input received= advances within 60 s with no WS heal / no OBS relaunch.
+## issue 1316 — imag-nb RETIRED (returned to owner 16.9.2026): CODE + DOCS half (lane/1316-retire)
+- Context: imag-nb (10.77.9.182) returned to the owner 16.9.2026, confirmed dark (ping 100% loss);
+  IMAG role re-provisions on a new notebook next year. Supervisor did the dev1-side rig-fleet ack +
+  imag timer disables; THIS lane = the repo CODE + DOCS.
+- obs-fleet.sh: THIRD home-check state `retired` — `obs_fleet_is_home imag`=false, `obs_fleet_boxes`
+  EXCLUDES a retired box centrally (genlock-lock drops imag automatically), row+history kept, one-word
+  flip back to `always` on re-provision.
+- Rosters (one-line each): dropped dead 10.77.9.182 anchor from network-reach/bundle-state
+  REFERENCE_HOSTS; dropped imag from dantesync-clock DANTE_CLOCK_OBS_NODES, mv-fps MV_FPS_BOXES, and
+  the deploy-genlock-fleet empty --boxes default (imag stays a valid explicit target).
+- cam2 SEMANTICS (owner „do cam2 uz ide obraz zo splitru"): cam2 stays in CAMERA_ACTIVE_SET as a
+  normal splitter leg; src/tear_detect.rs gained report-only TearSignalViability::Absent (decodable
+  primary, zero aux) — never a red, self-clearing when the IMAG role returns.
+- Manual tools: rig-health-audit.py check_imag renders a neutral RETIRED row (exit-neutral);
+  rig-dev-handover-check.sh + rig_dev_handover_decision.py drop the imag-scoped pins_imag capture —
+  both read the rig-fleet.txt imag ack (env-overridable).
+- Docs: targets.md imag row RETIRED (pathspec commit); wol-targets.txt commented; rule addenda in
+  projection-tap-tear-detect / cambox-tick-decodability / obs-fleet-list / imag-offline-ack.
+- Commits: [red] test(#1316) → [green] fix(#1316) → rustfmt → docs. Verify (Tier-0, no cargo compile):
+  std-only tear replica rustc --test 5/5 (RED-confirmed by stripping the Absent branch);
+  rig-dev-handover pytest 15/15; rig-health-audit pytest 5/5; obs-fleet.sh sourced-behavior checks;
+  bash -n + shellcheck clean on all edited scripts; cargo fmt --all --check clean; doc-lint grep
+  clean. The Rust harnesses (harness_obs_fleet_list, deploy_genlock_fleet, tear inline test) + the
+  full cargo suite run at CI/integration.

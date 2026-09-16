@@ -309,3 +309,29 @@ real fix is DE-CONFLICTING the painted aux band and the OBS burn layout — cros
 as issue 1270. If a painted best-effort is ever demanded, it must be ADDITIVE (a THIRD mark, LEFT
 and RIGHT byte-identical/untouched so the splitter control + committed fixtures are safe) with a
 written post-deploy kill criterion — NEVER a relocation.
+
+## imag-nb RETIRED 16.9.2026 (issue 1316) — cam2 is a NORMAL camera leg; the tear signal reads `Absent`, never a red
+
+The owner returned imag-nb 16.9.2026 and confirmed „do cam2 uz ide obraz zo splitru ako do
+ostatnych kamier" — **cam2's grabber now receives the SPLITTER feed like every other cambox, NOT
+imag's HDMI projection output.** So the entire premise of "cam2's leg IS the projection path" (the
+top of this rule) is SUSPENDED until the IMAG role returns on a new notebook: there is no imag
+scanout to film, the aux Vernier tick pair has NO source on cam2, and cam2 behaves as an ordinary
+camera window (primary dual-QR decodes from the fb0 painter path, aux never decodes).
+
+- **cam2 STAYS in `CAMERA_ACTIVE_SET`** (owner: same presented-age class as the others now; the
+  `[4i/8align]` baseline may drop cam2's pin 6→3). This is a SEMANTICS change, NOT a set-removal.
+- **`src/tear_detect.rs` gained `TearSignalViability::Absent`** — a window with decodable primary
+  frames but ZERO aux decode (`aux_any_decode_fraction == 0.0`) reads `Absent`, distinct from
+  `Unproven` (aux present but blind on content). `tear_gate_pass` passes it (report-only, never a
+  red); `hdmi1_proof_backed` already reads NOT-backed (aux coverage 0 < `AUX_ANY_OPERABLE_FLOOR`).
+  The `decodable_frames > 0` term excludes the multi-tile-skew (`decodable_frames == 0`) and empty
+  (`total_frames == 0`) cases, which stay `Unproven`. Pinned by the inline
+  `no_projection_source_cam2_window_is_absent_and_passes_1316` + the std-only Tier-0 replica
+  `tests/tear_detect_imag_absent_1316.rs`.
+- **The LIVE gate stays armed and honest:** a genuine cross-band tear is still `Observed` and still
+  fails (the `Absent` change never blinds a real tear — the `a_real_tear_still_fails_the_gate`
+  regression guard). On the current no-imag rig cam2 simply reads `Absent` every window.
+- **When the IMAG role returns:** re-provision imag, and cam2's projection tap comes back on its
+  own (aux decodes again → `Observed`/`Unproven` as before). No code change needed to re-arm — the
+  `Absent` state is self-clearing the moment aux starts decoding.

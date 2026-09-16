@@ -14,7 +14,9 @@ stream    10.77.9.204    E8:9C:25:CE:B6:EA
 # MAC was live-read on 2026-08-18 (`cat /sys/class/net/<nic>/address`, `Supports Wake-on: pumbg`).
 # The imag ROLE permanently owns .182 (scripts/imag-host.sh); WoL from a full shutdown additionally
 # needs the box's BIOS to keep the USB port powered in standby -- see docs/wake-on-lan.md.
-imag-nb   10.77.9.182    6C:1F:F7:66:15:4B
+# imag-nb RETIRED 16.9.2026 (issue 1316) — the notebook was RETURNED to the owner; nothing to wake.
+# Re-add this row when the IMAG role returns on a new notebook (its MAC will differ).
+# imag-nb   10.77.9.182    6C:1F:F7:66:15:4B
 # resolume (#811): the Resolume Arena CG box, fleet-managed per the owner's 2026-08-21 approval.
 # Owner confirmed Wake-on-LAN works ("simple" mode) and provided BOTH NIC MACs at the rig
 # (2026-08-21) -- primary row below; the second NIC is listed as resolume-alt so a wake sweep

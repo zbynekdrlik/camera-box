@@ -149,7 +149,7 @@ before trusting this table for anything operational.
 
 | Host | IP Address | Status | Notes |
 |------|------------|--------|-------|
-| imag-nb | 10.77.9.182 | Active | SSH: newlevel/newlevel (sudo needs pw); 60fps IMAG OBS box, genlock hot-swap over PPA base (#460); dev1 also has headless key-based SSH (`~/.ssh/id_ed25519`) for `scripts/drift-guard.sh --check-imag` (#541), installed by `setup-imag.sh` step 19 |
+| imag-nb | 10.77.9.182 | RETIRED 16.9.2026 | RETURNED to the owner 16.9.2026 (10.77.9.182 dark), issue 1316. The IMAG role returns on a NEW notebook next year — re-provision via `setup-imag.sh` + the imag-nb-20260915 backup, then flip `scripts/lib/obs-fleet.sh`'s imag row `retired`→`always` + remove the `imag:`/`imag-nb:` acks from `rig-fleet.txt`. Role address ownership: `scripts/imag-host.sh`. (Was: 60fps IMAG OBS box, genlock hot-swap over PPA base #460; dev1 key-based SSH for drift-guard --check-imag #541.) |
 
 ## Important Notes
 

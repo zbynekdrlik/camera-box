@@ -46,3 +46,14 @@ future rig where the splitter path to one box is broken (or the stale doc's per-
 returns) would make that box's tick genuinely `None`, and a health check keyed on `tick.is_some()`
 would read a healthy window as black and false-red. If that ever holds, scope the check to
 tick-bearing windows or add a non-tick signal (brightness/black detection) for the affected boxes.
+
+## imag-nb RETIRED 16.9.2026 (issue 1316) — cam2 is now a normal splitter leg
+
+imag-nb was returned to the owner 16.9.2026; cam2's grabber now receives the SPLITTER feed like
+every other cambox (owner: „do cam2 uz ide obraz zo splitru ako do ostatnych kamier"). This does
+NOT change the "every cambox window decodes the cam2 Vernier tick" conclusion above — the tick is
+painted by cam2's fb0 painter and filmed through the splitter, which is unchanged. What changed is
+the PROJECTION-tap aux tick (issue 1196, `src/tear_detect.rs`), which was fed by imag's HDMI
+scanout and now has no source on cam2 → it reads report-only `Absent`, never a red
+(`.claude/rules/projection-tap-tear-detect.md`). The primary Vernier tick decodability on every
+active cambox (this rule's subject) is unaffected.

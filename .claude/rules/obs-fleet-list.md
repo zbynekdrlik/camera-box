@@ -87,3 +87,23 @@ tests/ops). Three helpers consume it:
   exemption stays), never FAIL/WARN. Pinned by `tests/python/test_rig_health_audit_resolume_1296.py`.
 - The ON-BOX `:8899` BundleStateServer install on RESOLUME-SNV (Scheduled Task) is a SUPERVISOR rig
   step — see the `resolume-snv` section of `.claude/skills/ops/SKILL.md` + `targets.md`.
+
+## The `retired` home-check state (issue 1316) — a box that is GONE but whose ROLE returns
+
+imag-nb was returned to the owner 16.9.2026 (10.77.9.182 dark). Its `OBS_FLEET` row is now
+`imag|10.77.9.182|linux-genlock|retired` — a THIRD home-check state beside `always`/`traveling`:
+
+- `obs_fleet_is_home imag` → FALSE (a `retired) return 1` arm), so every watchdog that gates on
+  `obs_fleet_is_home` (genlock-lock, etc.) skips it — a paging facet can NEVER page the dead box.
+- `obs_fleet_boxes <facet>` EXCLUDES a retired member CENTRALLY (a `home-check == retired` skip in
+  the loop), so `genlock-lock` drops from `strih stream imag resolume` to `strih stream resolume`
+  with NO per-consumer edit. `obs_fleet_facet_members genlock-lock` still LISTS imag (the policy is
+  unchanged); the exclusion is the `retired` filter, so re-provisioning is a ONE-WORD flip of the
+  row's home-check back to `always` — the box re-enters every facet automatically.
+- The ROW + its `obs_fleet_host`/`obs_fleet_class` fact lookups STAY (history + the re-provisioning
+  target). Pinned by `harness_obs_fleet_list_1296.rs`
+  (`fleet_retired_box_is_never_home_1316`, `fleet_boxes_genlock_lock_excludes_retired_imag_1316`).
+- The static-literal rosters that do NOT derive from `obs_fleet_boxes` were edited separately
+  (issue 1316): `network-reach`/`bundle-state` `REFERENCE_HOSTS` dropped the dead `.182` anchor;
+  `dantesync-clock` `DANTE_CLOCK_OBS_NODES` + `mv-fps` `MV_FPS_BOXES` + `deploy-genlock-fleet`'s
+  empty `--boxes` default dropped imag (imag stays a valid EXPLICIT deploy target).
