@@ -925,7 +925,10 @@ mod tests {
             f(&[], &[]), // an occasional fully-undecodable frame, still no aux anywhere
         ];
         let s = window_tear_stats(&frames);
-        assert!(s.decodable_frames > 0, "primary decodes on a real camera leg");
+        assert!(
+            s.decodable_frames > 0,
+            "primary decodes on a real camera leg"
+        );
         assert_eq!(s.tear_frames, 0);
         assert_eq!(s.aux_any_decode_fraction, 0.0, "no projection aux source");
         assert_eq!(
@@ -940,10 +943,12 @@ mod tests {
         assert!(!window_promotable(&s), "an Absent window is not promotable");
         // The projection-proof summary must read NOT-backed for an all-Absent run (aux coverage 0).
         let proof = summarize_projection_leg(&[&s]);
-        assert!(!proof.hdmi1_proof_backed, "no aux source -> HDMI-1 proof not backed");
+        assert!(
+            !proof.hdmi1_proof_backed,
+            "no aux source -> HDMI-1 proof not backed"
+        );
         assert!(proof.tear_gate_clean, "an Absent window is tear-clean");
     }
-
 
     #[test]
     fn aux_single_mark_is_operative_while_both_marks_read_zero_1196() {

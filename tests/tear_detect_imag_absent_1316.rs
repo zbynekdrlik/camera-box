@@ -112,7 +112,10 @@ fn no_projection_source_cam2_window_is_absent_1316() {
         f(&[], &[]),
     ];
     let s = classify(&frames);
-    assert!(s.decodable_frames > 0, "primary decodes on a real camera leg");
+    assert!(
+        s.decodable_frames > 0,
+        "primary decodes on a real camera leg"
+    );
     assert_eq!(s.tear_frames, 0);
     assert_eq!(s.aux_any_decode_fraction, 0.0, "no projection aux source");
     assert_eq!(
@@ -120,7 +123,10 @@ fn no_projection_source_cam2_window_is_absent_1316() {
         Viability::Absent,
         "a sourceless cam2 leg reads Absent, not Unproven"
     );
-    assert!(tear_gate_pass(&s), "an Absent leg never fails the tear gate");
+    assert!(
+        tear_gate_pass(&s),
+        "an Absent leg never fails the tear gate"
+    );
 }
 
 #[test]

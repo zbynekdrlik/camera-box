@@ -166,7 +166,13 @@ fn fleet_boxes_genlock_lock_excludes_retired_imag_1316() {
         "strih|10.77.9.202 stream|10.77.9.204 resolume|resolume.lan strih-lx|strih-lx.lan"
     );
     // A retired imag must not appear in ANY facet roster.
-    for facet in ["genlock-lock", "audio-lag", "av-step", "vb-matrix", "bundle-state"] {
+    for facet in [
+        "genlock-lock",
+        "audio-lag",
+        "av-step",
+        "vb-matrix",
+        "bundle-state",
+    ] {
         assert!(
             !boxes(facet).contains("imag"),
             "facet {facet} must NOT carry retired imag: {}",
