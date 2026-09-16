@@ -78,3 +78,12 @@ decision is `src/qpsk_probe_decision.rs` (crate-root, default-feature, Tier-0): 
   decision path (incl. loud+decodable=OK) is verifiable via a rustc `--test` replica; the bash lib +
   `[4b3/8]` wiring via `tests/python/test_marker_decodability_preflight_1324.py`. The probe-gated
   `--qpsk-probe` ffmpeg glue in `recording-verdict.rs` is CI-only.
+- **TRAP — do NOT "fix" `consistency_cluster_size`'s strict-consecutive run with a gap-budget.** The
+  chain resets on ANY interspersed off-cadence pair BY DESIGN. A reviewer will suggest tolerating K
+  intervening non-matching pairs (to survive a false decode mid-sequence); it was TESTED against the
+  real 16.9 recordings and FALSE-PASSES the drowned chain — a 1-pair budget lifts the failed-window
+  cluster 3→5, above the N=4 floor (the scattered false decodes chain across the skipped pair). Strict
+  is exactly what keeps a drowned window's coincidental runs short. Residual risk is a slightly-more-
+  degraded-but-healthy chain false-ABORTING (fails SAFE, never a bad run through; class named loudly;
+  `min_clusters`/window/ENABLE env-overridable). To widen the green margin, widen the WINDOW (25 s →
+  green ∈ [7,9]), never relax the run.
