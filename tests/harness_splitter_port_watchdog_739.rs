@@ -111,24 +111,50 @@ fn driver_mixed_fleet_pages_dead_port_for_the_grey_box() {
 }
 
 #[test]
-fn driver_surfaces_rough_metric_in_per_box_log_1079() {
-    // #1079 report-only: the watchdog must SURFACE each box's rough= metric in its per-box log
-    // line (fleet-wide telemetry so a data-first follow-up can calibrate the noise threshold).
-    // No paging change this PR — a high-roughness colour box still classifies OK (colour=1); the
-    // rough= number is observational only until the threshold is calibrated.
+fn driver_surfaces_rough_metric_and_purple_noise_report_only_1099() {
+    // #1099: the threshold is now CALIBRATED + WIRED report-only. A colour box whose rough EXCEEDS
+    // the threshold (52.3 > 40.0) classifies PURPLE_NOISE (the Elgato structureless-static no-signal
+    // mode) — but it is REPORT-ONLY: the per-box log surfaces the rough= number AND the PURPLE_NOISE
+    // verdict, yet it NEVER pages (the live page is deferred until a real positive-class episode
+    // calibrates the noise floor + adds the sibling self-anchor). Two passes prove even a "sustained"
+    // report-only verdict never escalates to a page.
     let cases = format!("*) {COLOUR_ROUGH} ;;");
-    let log = run_driver(&cases, 1);
+    let log = run_driver(&cases, 2);
     assert!(
         log.contains("rough=52.3"),
         "the per-box log must surface the rough= metric: {log}"
     );
     assert!(
-        log.contains("-> OK"),
-        "a high-roughness colour box still classifies OK this PR (report-only): {log}"
+        log.contains("PURPLE_NOISE"),
+        "colour + rough>threshold => PURPLE_NOISE report-only: {log}"
+    );
+    assert!(
+        log.to_uppercase().contains("NOISE-SUSPECT"),
+        "the per-box report-only line must flag NOISE-SUSPECT: {log}"
     );
     assert!(
         !log.contains("WOULD alert"),
-        "report-only: roughness must not page this PR: {log}"
+        "report-only: PURPLE_NOISE must never page: {log}"
+    );
+}
+
+#[test]
+fn driver_purple_noise_box_alongside_clean_siblings_pages_nothing_1099() {
+    // a mixed fleet: cam2 reads colour+high-rough (PURPLE_NOISE), cam1/cam3 read clean colour (OK).
+    // The noise box is surfaced report-only; NOTHING in the fleet pages (report-only phase 2).
+    let cases = format!("10.77.9.62) {COLOUR_ROUGH} ;; *) {COLOUR} ;;");
+    let log = run_driver(&cases, 2);
+    assert!(
+        log.contains("cam2 (10.77.9.62)") && log.contains("PURPLE_NOISE"),
+        "cam2 => PURPLE_NOISE: {log}"
+    );
+    assert!(
+        log.contains("cam1 (10.77.9.61)") && log.contains("-> OK"),
+        "cam1 clean colour => OK: {log}"
+    );
+    assert!(
+        !log.contains("WOULD alert"),
+        "report-only: no box pages this phase: {log}"
     );
 }
 

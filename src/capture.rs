@@ -2672,4 +2672,43 @@ mod tests {
             "just above the roughness threshold must be noise"
         );
     }
+
+    #[test]
+    fn noise_roughness_threshold_calibrated_1099() {
+        // #1099 phase-2 calibration from mined fleet telemetry (16.9.2026, ~38.1k live COLOUR
+        // `capture chroma:` samples across all 7 camboxes' own journals). The healthy side is
+        // measured; the purple-noise POSITIVE CLASS is absent (0 colour samples >= 25), so the
+        // threshold is calibrated from the measured healthy ceiling + the analytic noise floor and
+        // stays REPORT-ONLY. It must sit in the clean gap between the two classes:
+        //   fleet healthy COLOUR roughness: p99 = 18.5, max = 22.5 (grayscale <= 14.7),
+        //   analytic uncorrelated-luma noise floor ~= 73 = (235-16)/3 = E[|Y0-Y1|] over 16-235.
+        const FLEET_HEALTHY_COLOUR_P99: f32 = 18.5;
+        const FLEET_HEALTHY_COLOUR_MAX: f32 = 22.5;
+        const ANALYTIC_NOISE_FLOOR: f32 = 73.0;
+        // (a) >= 2x the healthy p99 — a data-first separation margin (the calibration guideline).
+        assert!(
+            NOISE_ROUGHNESS_THRESHOLD >= 2.0 * FLEET_HEALTHY_COLOUR_P99,
+            "threshold {NOISE_ROUGHNESS_THRESHOLD} must clear 2x the healthy colour p99 (>= {})",
+            2.0 * FLEET_HEALTHY_COLOUR_P99
+        );
+        // (b) above the measured healthy colour max, with margin.
+        assert!(
+            NOISE_ROUGHNESS_THRESHOLD > FLEET_HEALTHY_COLOUR_MAX,
+            "threshold {NOISE_ROUGHNESS_THRESHOLD} must exceed the measured healthy colour max {FLEET_HEALTHY_COLOUR_MAX}"
+        );
+        // (c) well below the analytic noise floor, so genuine structureless static is still caught.
+        assert!(
+            NOISE_ROUGHNESS_THRESHOLD < ANALYTIC_NOISE_FLOOR,
+            "threshold {NOISE_ROUGHNESS_THRESHOLD} must stay below the analytic noise floor {ANALYTIC_NOISE_FLOOR}"
+        );
+        // the measured healthy max must NOT read as noise; a structureless colour sample must.
+        assert!(
+            !is_likely_noise(1.9, 3.4, FLEET_HEALTHY_COLOUR_MAX),
+            "the measured healthy colour max must not classify as noise"
+        );
+        assert!(
+            is_likely_noise(6.0, 9.0, 45.0),
+            "a structureless colour sample (rough=45) must classify as noise"
+        );
+    }
 }
