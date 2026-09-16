@@ -72,4 +72,8 @@ contract: `"0"` (render telemetry live, no freeze) is a truthy string and is KEP
 (no `program-render-audit` line at all → dropped → UNKNOWN downstream, never a fabricated 0). Wired
 through `build_bundle_state` + `bundle-state-server.py` so it appears on `:8899/bundle-state.json`;
 pytest `tests/python/test_program_render_lagged_gather_1320.py`. The dev1 render-freeze watchdog that
-pages on this facet + on `relock_bursts>=1` (issue 1318's `summarize_relock_bursts`) is a follow-up.
+pages on this facet + on `relock_bursts>=1` (issue 1318's `summarize_relock_bursts`, ported to the
+gather as `relock_bursts_from_log`) is SHIPPED — `scripts/render-freeze-alert-watchdog.sh` +
+`scripts/render_freeze_decision.py`, production-critical time-bucketed re-ping, ships DISABLED. See
+`.claude/rules/render-freeze-watchdog.md` (RENDER arm's magnitude-floor-vs-relaunch discriminator,
+the `render-freeze` fleet facet, the relock parity mirror).

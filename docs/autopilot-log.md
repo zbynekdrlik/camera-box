@@ -12516,3 +12516,28 @@ no version bump (worktree lane; supervisor cherry-picks).
   bash -n + shellcheck clean on all edited scripts; cargo fmt --all --check clean; doc-lint grep
   clean. The Rust harnesses (harness_obs_fleet_list, deploy_genlock_fleet, tear inline test) + the
   full cargo suite run at CI/integration.
+
+- #1320 (dev1 render-freeze / relock-storm pager — item 3, the guardrail for the cured scene-switch
+  render freeze): RED 7d23b8f1b → GREEN cdbcdcdce → feat a0fd8907c → docs. Two new bundle-state
+  facet + a pure two-arm decision core + a dev1 systemd watchdog (ships DISABLED).
+  * relock_bursts facet: `relock_bursts_from_log` in scripts/bundle_state_gather.py PORTS issue
+    1318's summarize_relock_bursts (src/jitter_audit.rs) to Python — the summarizer is not
+    re-implemented across languages beyond this ONE mirror; test_relock_bursts_gather_1320.py's
+    parity block feeds the SAME synthetic sequences the Rust tests use and asserts identical
+    bursts/max_per_second. Wired at the END of bundle-state-server.py's _parse_log_facets tuple.
+  * render_freeze_decision.py: RENDER arm pages RENDER_FREEZE on lagged >= a magnitude FLOOR
+    (default 30 — above the relaunch band 1/2/11, below the 61/228 real freeze) AND a fresh age
+    (chosen OVER an obs_start/uptime facet: none exists on :8899, the burn-reconcile restart signal
+    is renderTotalFrames over the OBS WS which a dev1-only watchdog can't reach, and a magnitude
+    floor is more robust than an uptime guess); RELOCK arm on bursts>=1 fresh. SKIP=unfetchable
+    (issue 732/1001), UNKNOWN=facet absent.
+  * render-freeze-alert-watchdog.sh: reuses obs-watchdog-decision.sh confirm/throttle +
+    watchdog_notify_key; both arms PRODUCTION-CRITICAL time-bucketed (render-freeze-$box /
+    relock-storm-$box, allowlisted in test_notify_dedup_key_sweep_1206.py); DETECTION-ONLY,
+    recovery log-only. render-freeze fleet facet in obs-fleet.sh = strih stream resolume strih-lx;
+    roster entry for the #1319 handover check.
+  * Tier-0 green: pytest 28/28 (my suites) + 102/102 (sweep+gather); full suite 2648 passed (1
+    PRE-EXISTING rig-health-audit failure the supervisor's held fix-forward commit owns — untouched
+    here). bash -n + shellcheck clean; py_compile clean. LIVE read-only --dry-run 16.9. against
+    strih/stream/resolume = HEALTHY (relaunch/stale lags correctly not paged), strih-lx = SKIP
+    (unreachable). NO rig writes.
