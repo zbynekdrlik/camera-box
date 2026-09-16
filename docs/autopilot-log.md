@@ -12601,3 +12601,19 @@ no version bump (worktree lane; supervisor cherry-picks).
 - RED test(#1316) 97cb37589 → GREEN fix. Tests: tests/python/test_rig_status_retired_1316.py (7).
 - Tier-0 verify (no cargo): `python3 -m pytest tests/python` = 2657 passed (exit 0); rule doc
   `.claude/rules/rig-status-page.md` updated.
+
+## issue 1317 (CEF into the strih Linux genlock build — follow-up) — lane/1317-cef
+- RED 3cec9f63d test(#1317) → GREEN a031da682 fix(#1317). Wired obs-browser + CEF into the
+  `linux-genlock-build-strih` job: `STRIH_ENABLE_BROWSER: ON`, a gated CEF fetch step (download the
+  pinned obs-deps CEF — version 6533, ubuntu-x86_64 sha256 `79633355…` from
+  `vendor/obs-studio/CMakePresets.json` dependencies.cef — sha256-verify, extract, locate the
+  `cef_binary_*` top dir by name, pass `-DCEF_ROOT_DIR`), `actions/cache` keyed on the CEF
+  version+hash. imag-parity `linux-genlock-build` job left byte-identical (browser OFF; the
+  `-DENABLE_BROWSER=OFF` count stays 2). `STRIH_BUILD_FLAGS.txt` marker env-conditional
+  (BROWSER-ON/OFF). `verify-strih.sh` gained a browser-bundle gate (obs-browser.so + libcef.so under
+  `/opt/obs-genlock` when BROWSER-ON) via pure predicates in `scripts/lib/strih-provision.sh`.
+- Tests: RED tests `tests/python/test_linux_genlock_strih_cef_1317.py` (workflow ON + CEF fetch/sha/
+  cache/CEF_ROOT_DIR + imag OFF; sourced-bash predicate over a fixture install root present/missing).
+  Verified: full pytest suite 2660 passed; yaml valid; shellcheck clean; anchor-count sweep 0 changed
+  Rust gate anchors. Compile of the workflow itself is UNVERIFIED locally (Tier-0) — the supervisor's
+  dev push runs the `Linux genlock build` job. CEF URL live: `curl -sI` 200, 325417128 bytes.

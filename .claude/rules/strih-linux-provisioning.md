@@ -55,20 +55,46 @@ capture is not yet wired — `setup-strih.sh` step 12 **FAILS LOUD** (`strih_lx_
 until an operator wires it and re-runs with `STRIH_LX_AUDIO_WIRED=1`. Arena stays on the Windows PC
 (Spout has no Linux); its cg feed reaches the notebook over NDI (`RESOLUME-SNV (cg-obs)`).
 
-## CI — the strih FULL-build variant, and the browser follow-up
+## CI — the strih FULL-build variant, with obs-browser + CEF (issue 1317)
 
 `linux-genlock.yml` has a `linux-genlock-build-strih` job (artifact
 `obs-genlock-linux-x86_64-strih`) copying the imag-parity full build byte-for-byte. The full build
 already ships obs-websocket / obs-ffmpeg+NVENC / x264 / outputs / filters / v4l2 / DistroAV (the
-ubuntu-ci preset defaults). The one plugin the strih role additionally needs is **obs-browser** (the
-4 browser sources), which needs CEF — the vendored ubuntu-ci preset does NOT fetch it, so the
-variant ships `ENABLE_BROWSER=OFF` with a `STRIH_BUILD_FLAGS.txt` `BROWSER-OFF` marker. **Browser/CEF
-is the first follow-up** — flip `STRIH_ENABLE_BROWSER` in the job once a CEF fetch step is wired.
+ubuntu-ci preset defaults). The strih role additionally needs **obs-browser** (the 4 browser
+sources: VDO.ninja interkom, Ableset, camera crew, 1pixel), which needs **CEF**.
+
+**CEF is now WIRED** (issue 1317). The vendored ubuntu-ci preset does NOT auto-fetch CEF on Linux
+(no `cmake/linux/buildspec.cmake` — only macos/windows call `_check_dependencies`), so the strih job
+fetches it the same way upstream OBS's own Linux CI does:
+
+- **The pin.** `STRIH_ENABLE_BROWSER: 'ON'` plus a CEF pin block in the job `env`: `CEF_VERSION`,
+  `CEF_ARCHIVE`, `CEF_SHA256`, `CEF_BASE_URL`. These MUST match
+  `vendor/obs-studio/CMakePresets.json` → `configurePresets[dependencies].vendor."obsproject.com/obs-studio".dependencies.cef`
+  (the `ubuntu-x86_64` hash). For OBS 32.2.0 that is version `6533`, archive
+  `cef_binary_6533_linux_x86_64_v6.tar.xz`, sha256 `7963335519a19ccdc5233f7334c5ab023026e2f3e9a0cc417007c09d86608146`,
+  base `https://cdn-fastly.obsproject.com/downloads`. The `revision` (6) is the `_v6` archive
+  suffix. `tests/python/test_linux_genlock_strih_cef_1317.py::test_workflow_cef_hash_matches_vendored_pin`
+  guards against the workflow pin drifting from the vendored one.
+- **The fetch step** (`if: env.STRIH_ENABLE_BROWSER == 'ON'`): download → `sha256sum -c` against the
+  pin → `tar -xf` → locate the extracted `cef_binary_*` top dir by NAME (`find … -name 'cef_binary_*'`,
+  never guessing the `_v<rev>` suffix) → export its ABSOLUTE path as `CEF_ROOT_DIR` to `$GITHUB_ENV`.
+  The OBS configure passes `-DCEF_ROOT_DIR=${{ env.CEF_ROOT_DIR }}`.
+- **Cache.** `actions/cache` keyed `cef-${CEF_VERSION}-${CEF_SHA256}`, so the ~325 MB download is
+  paid once and a version bump busts it automatically.
+- **Marker.** `STRIH_BUILD_FLAGS.txt` is env-conditional: `BROWSER-ON: obs-browser + CEF <version>`
+  when ON, the original `BROWSER-OFF` text when OFF.
+- **Verify.** `verify-strih.sh` reads the installed `/opt/obs-genlock/STRIH_BUILD_FLAGS.txt`; when it
+  says `BROWSER-ON` it fails loud unless `obs-browser.so` AND the CEF runtime `libcef.so` are present
+  under the bundle root (pure predicates `strih_lx_browser_bundle_required` /
+  `strih_lx_browser_bundle_ok` in `scripts/lib/strih-provision.sh`).
+
+**To flip browser OFF again:** set `STRIH_ENABLE_BROWSER: 'OFF'` in the job `env` — the ONLY change
+needed (the CEF fetch step, the `CEF_ROOT_DIR` arg, the marker, and the verify item all follow it).
 
 ## Follow-ups (not done in the preparation lane)
 
-- **obs-browser / CEF** in the strih CI variant (the 4 browser sources: VDO.ninja interkom, Ableset,
-  camera crew, 1pixel).
+- ~~obs-browser / CEF in the strih CI variant~~ — **DONE (issue 1317, CEF now wired)**, see the CI
+  section above.
 - **A bespoke `strih_scenes.py`** WS seeder (sibling of `imag_scenes.py`) that seeds the 10 inputs
   (genlock_fifo + floor 3) + the `STRIH-LX (...)` outputs from `/opt/camera-box/strih-lx-seed.json`
   and enforces Studio Mode. `setup-strih.sh` installs the seed manifest + `obs_phase2.py` primitives;
