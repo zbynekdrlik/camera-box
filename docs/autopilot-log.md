@@ -12737,3 +12737,9 @@ no version bump (worktree lane; supervisor cherry-picks).
   Read shows the encoded video output frame is stamped on `os_gettime_ns()` too (`obs-video.c`
   video_time), so Approach 1 does NOT diverge the recording's A/V; Approach 2 is a separate
   exploration. Supervisor: fast-DLL deploy strih+stream + ≥2 h buffered_ms-flat measurement.
+
+## 17.9.2026 00:55 — RELEASE 1.7.0-dev.634 merged (PR 1327, main b175d1f0b) + issue 1325 CLOSED on a 2 h live acceptance
+
+- E2E 35152458072 GREEN on the fixed audio path (A/V on 7 cams); fleet cam1-7 on .634; obs.dll ca46fc166 (fast-DLL) live on strih+stream since 16.9. 22:51.
+- mbc buffered_ms 22:51-00:52: n=122, slope -0.033 ms/min (-0.5 ppm), 98-106 ms, max step 6, zero refills (pre-fix -1.1..-1.5 ms/min + refills); asrc estimated -6..-7 ppm; dock offset stable ~1-3 ms.
+- Owner-side: mbc is the stream's only unmuted audio input (VB-Matrix path retired, StartVBMatrix Disabled) — the fix removed a periodic audio-timeline jump from the live program.

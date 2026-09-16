@@ -101,3 +101,15 @@ mean the fix REGRESSED (the servo is back on the wall clock) — no longer the "
 logs from PRE-fix builds. The vendored change is CI-compile + fast-DLL deploy (obs.dll) strih/stream
 + ≥2 h `buffered_ms`-flat measurement — supervisor-only; the dev1 audio-lag watchdog's REPORT-ONLY
 buffered arm (`audio_lag_decision.classify_buffered`) makes the drift visible between runs meanwhile.
+
+
+## Live acceptance of the fix (17.9.2026, release 1.7.0-dev.634)
+
+obs.dll `ca46fc166` on stream since 16.9. 22:51 CEST: `mbc` `buffered_ms` over 22:51–00:52 (n=122) slope −0.033 ms/min
+(−0.5 ppm), 98–106 ms, largest step 6 ms, zero refills; `asrc: source 'mbc' estimated` −6…−7.2 ppm steady with
+`applied = estimated` (the negated value stretches into swresample). So the HEALTHY post-fix mbc reading is a
+single-digit-ppm `estimated` (source vs the MIXER clock) and a FLAT buffer — a reading whose magnitude equals
+dantesync's `f_phase` again means the deployed obs.dll regressed to the system-clock master. The `#806` outer-loop
+bias is folded in BEFORE the negation: `+bias` now COMPRESSES (drains) — re-derive its sign before re-enabling
+`av_sync_measure.py --outer-loop`. The asio-starve default list still names `ASIO Input Capture` (VB-Matrix, retired
+on this rig, task Disabled) — trim it before enabling that watchdog.
