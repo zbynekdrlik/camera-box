@@ -4224,12 +4224,6 @@ static void process_audio_balancing(struct obs_source *source, uint32_t frames, 
 }
 
 /* resamples/remixes new audio to the designated main audio output format */
-/* forward decl (#803): genlock_wall_now_ns() is defined further down (the video-FIFO wall-clock
- * helper) but process_audio() needs it as the ASRC servo's master-clock basis -- same forward-decl
- * convention as genlock_source_drop_cap() above (without it MSVC assumes an implicit int-returning
- * extern, C4013 -> C2220 as an error). */
-static inline uint64_t genlock_wall_now_ns(void);
-
 /* camera-box #1016: the ASRC servo's compensation-application window, in OUTPUT milliseconds --
  * passed to audio_resampler_set_compensation_ppm() below as its distance_ms argument. This sets
  * the achievable resolution ("quantum") of the whole mechanism: swr_set_compensation() only takes
@@ -4265,16 +4259,27 @@ static inline void asrc_process_audio(obs_source_t *source, uint32_t frames, uin
 	if (!source->asrc_enabled || !source->resampler || samples_per_sec == 0)
 		return;
 
-	const uint64_t wall_now_ns = genlock_wall_now_ns();
+	/* camera-box #1325: the servo's MASTER basis is os_gettime_ns() -- the monotonic QPC clock
+	 * the OBS audio mixer thread paces its ticks on (media-io/audio-io.c audio_thread:
+	 * start_time = os_gettime_ns()) and that buffered_ms (obs-audio.c audio_input_buf[0].size)
+	 * is balanced against. It is NOT genlock_wall_now_ns() (GetSystemTimePreciseAsFileTime = the
+	 * SYSTEM clock dantesync SLEWS by f_phase ~+20 ppm): measuring the source against the slewed
+	 * system clock made the servo see |estimated| = f_phase (~18 ppm) and "correct" a drift the
+	 * QPC-paced mixer never sees -- the correction then drained the mix buffer at the applied
+	 * rate (live discriminator 16.9., SetAsrcOuterBiasPpm +10 moved the drain 1:1 with applied).
+	 * Measured against the mixer's own clock the residual is the true source-vs-mixer deficit
+	 * (~-5 ppm). See issue 1325's design/discriminator comments and
+	 * .claude/rules/asrc-residual-floor.md. */
+	const uint64_t mixer_now_ns = os_gettime_ns();
 
 	if (!source->asrc_has_last_wall) {
-		source->asrc_last_wall_ns = wall_now_ns;
+		source->asrc_last_wall_ns = mixer_now_ns;
 		source->asrc_has_last_wall = true;
 		return;
 	}
 
-	const double master_block_s = (double)(wall_now_ns - source->asrc_last_wall_ns) / 1000000000.0;
-	source->asrc_last_wall_ns = wall_now_ns;
+	const double master_block_s = (double)(mixer_now_ns - source->asrc_last_wall_ns) / 1000000000.0;
+	source->asrc_last_wall_ns = mixer_now_ns;
 
 	const double raw_advance_s = (double)frames / (double)samples_per_sec;
 	double applied_ppm = 0.0;
@@ -4285,8 +4290,16 @@ static inline void asrc_process_audio(obs_source_t *source, uint32_t frames, uin
 	 * keeps the correction continuously tracking the servo's current estimate
 	 * (audio-resampler-ffmpeg.c's own doc comment on this wrapper). camera-box #1016: widened
 	 * from the original 1000ms to lower the integer-rounding no-op floor for typical
-	 * single-digit-ppm drift -- see ASRC_COMPENSATION_DISTANCE_MS's own doc comment above. */
-	audio_resampler_set_compensation_ppm(source->resampler, applied_ppm, ASRC_COMPENSATION_DISTANCE_MS);
+	 * single-digit-ppm drift -- see ASRC_COMPENSATION_DISTANCE_MS's own doc comment above.
+	 * camera-box #1325: the ppm is NEGATED here (-applied_ppm). The compensator's lock model
+	 * (corrected = raw/(1+applied/1e6); applied<0 = slow source = STRETCH) is the RECIPROCAL sign
+	 * of this swresample-native wrapper (output = input*(1+ppm/1e6); +ppm = add samples = stretch,
+	 * measured RESULTS-1016). Feeding applied_ppm un-negated made a slow source COMPRESS and
+	 * drained the mix buffer; negating makes a slow source (applied<0) a POSITIVE sample_delta =
+	 * stretch. Pure mirror + parity gate: src/asrc_compensation_quantization.rs
+	 * ::servo_applied_ppm_to_sample_delta. The telemetry log below still prints the compensator's
+	 * own applied_ppm (dev1 watchdogs / bundle_state_gather.py parse it unchanged). */
+	audio_resampler_set_compensation_ppm(source->resampler, -applied_ppm, ASRC_COMPENSATION_DISTANCE_MS);
 
 	double cumulative_correction_ms = 0.0;
 	uint32_t starved_block_count = 0;

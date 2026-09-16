@@ -100,11 +100,14 @@ pub fn servo_applied_ppm_to_sample_delta(
     distance_ms: u32,
     output_freq: u32,
 ) -> i64 {
-    // RED (#1325): this mirrors the UNFIXED obs-source.c, which feeds the compensator's applied_ppm
-    // STRAIGHT to the swresample-native wrapper (no negation). Because the wrapper's convention is
-    // the RECIPROCAL of the compensator's lock model, a slow source (applied<0) COMPRESSES here --
-    // the exact drain the parity test below forbids. The GREEN fix negates (`-applied_ppm`).
-    compensation_sample_delta(applied_ppm, distance_ms, output_freq)
+    // #1325: NEGATE the compensator's applied_ppm before the swresample-native quantizer. The
+    // compensator's lock model `corrected = raw/(1+applied/1e6)` (applied<0 = slow source =
+    // STRETCH, bench truth in src/asrc_bench.rs) is the RECIPROCAL sign of `compensation_sample_delta`
+    // (swresample-native: `output = input*(1+ppm/1e6)`, +ppm = add samples = stretch). obs-source.c's
+    // asrc_process_audio() passes `-applied_ppm` to `audio_resampler_set_compensation_ppm()`; this
+    // mirrors that exact end-to-end path, so a slow source (applied<0) becomes a POSITIVE
+    // sample_delta = stretch, instead of the pre-#1325 compress that drained the mix buffer.
+    compensation_sample_delta(-applied_ppm, distance_ms, output_freq)
 }
 
 #[cfg(test)]
@@ -211,10 +214,12 @@ mod tests {
             "a FAST source (applied_ppm=+50, compensator 'compress') must reach swresample as a \
              NEGATIVE sample_delta (drop samples = compress), got {fast}"
         );
-        // Magnitude is preserved (only the sign flips) -- it is exactly the negated quantization.
+        // Magnitude is preserved (only the sign flips vs the direct swresample-native feed): the
+        // servo delta for a given applied_ppm is exactly the NEGATION of quantizing that SAME
+        // applied_ppm directly (the pre-#1325 bug fed the direct value).
         assert_eq!(
             servo_applied_ppm_to_sample_delta(-50.0, REAL_DISTANCE_MS, REAL_OUTPUT_FREQ),
-            -compensation_sample_delta(50.0, REAL_DISTANCE_MS, REAL_OUTPUT_FREQ)
+            -compensation_sample_delta(-50.0, REAL_DISTANCE_MS, REAL_OUTPUT_FREQ)
         );
     }
 

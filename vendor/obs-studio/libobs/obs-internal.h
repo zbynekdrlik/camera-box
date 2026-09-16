@@ -999,9 +999,12 @@ struct obs_source {
 	 * way ASRC gets turned on. `asrc` is the servo's own state (see
 	 * media-io/asrc-compensator.h), mutated ONLY from process_audio() on this source's own
 	 * audio-ingest call path (single-writer, no lock needed for the struct itself).
-	 * `asrc_last_wall_ns`/`asrc_has_last_wall` track the wall-clock timestamp of the PREVIOUS
-	 * audio callback (genlock_wall_now_ns(), the same basis the video FIFO release uses) so
-	 * process_audio() can measure this callback's true master-clock block duration. */
+	 * `asrc_last_wall_ns`/`asrc_has_last_wall` track the master-clock timestamp of the PREVIOUS
+	 * audio callback so process_audio() can measure this callback's true master-clock block
+	 * duration. camera-box #1325: that basis is now os_gettime_ns() -- the monotonic QPC clock the
+	 * OBS audio MIXER thread paces on (media-io/audio-io.c) and buffered_ms is balanced against --
+	 * NOT genlock_wall_now_ns() (the dantesync-slewed system clock the video FIFO release uses).
+	 * The field name keeps its historical `_wall_` spelling; the stored VALUE is the QPC clock. */
 	bool asrc_enabled;
 	struct asrc_compensator asrc;
 	uint64_t asrc_last_wall_ns;
