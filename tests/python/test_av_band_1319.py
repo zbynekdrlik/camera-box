@@ -248,3 +248,29 @@ def test_reference_resolution_rejects_non_finite(tmp_path):
     assert _resolve().startswith("0 fallback"), "Infinity must fall to the 0 ms fallback"
     f.write_text('{"residual_median_ms": -16.7}')
     assert _resolve().split()[0] == "-16.7", "a finite reference is returned"
+
+
+# ---------------------------------------------------------------- Part 2 (#1319): quality gate wiring
+def _upd_q(h, m, s, off, matched, mad):
+    return (f"{_ts(h, m, s)}: {_PFX} UPDATED offset={off}ms source=cluster "
+            f"matched={matched} mad={mad}ms")
+
+
+def test_part2_low_quality_suppresses_the_overnight_false_page():
+    # The 15./16.9. shape reproduced end-to-end: a wandering dock (~+85 ms recent median, a bias vs
+    # the -35.3 recording residual) whose UPDATED lines carry MAD ~28 ms + matched 27 in the recent
+    # window. The series/dock-live parsers are untouched; the NEW quality parser makes classify_av_band
+    # read LOW_QUALITY (log-only) instead of the 78-page OUT_OF_BAND.
+    lines = []
+    for i in range(12):
+        lines.append(_sugg(19, 59, i, 939, 85.0))           # recent offset series ~+85
+    for i in range(8):
+        lines.append(_upd_q(19, 59, 20 + i, 84.0 + i, 27, 28.0))   # noisy cluster: mad 28, matched 27
+    lines.append(_diag(20, 0, 0))
+    txt = "\n".join(lines) + "\n"
+    recent, base, pin, ps, age, nr, nb = bsg.av_offset_series_from_log(txt)
+    mad, mmin = bsg.av_offset_quality_from_log(txt)
+    v = asd.classify_av_band(float(recent), ps, int(nr), 0, 1, band_reference_ms=-35.3, band_ms=30,
+                             recent_mad_ms=float(mad), recent_matched_min=int(mmin))
+    assert (mad, mmin) == ("28.0", "27"), (mad, mmin)
+    assert v == "LOW_QUALITY", (recent, mad, mmin, v)   # NOT the 78-page OUT_OF_BAND
