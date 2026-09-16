@@ -32,44 +32,82 @@ fn read(rel: &str) -> String {
 // 1. scripts/wol-targets.txt -- the checked-in imag-nb row (live-read MAC)
 // ---------------------------------------------------------------------------------------------
 
+/// The imag-nb notebook was RETURNED to the owner on 16.9.2026 (issue 1316): its WoL row is kept
+/// ONLY as a retirement comment (the historical ip + MAC stay readable for the day the IMAG role
+/// returns on a new notebook, whose MAC will differ) -- an ACTIVE `imag-nb` row must be ABSENT, so
+/// nothing can wake a box that no longer exists on the wire.
 #[test]
-fn wol_targets_table_has_the_imag_nb_row() {
+fn wol_targets_table_keeps_imag_nb_only_as_a_retired_comment() {
     let s = read("scripts/wol-targets.txt");
-    // imag-nb owns .182 permanently (imag-host.sh); MAC live-read from its r8152 USB NDI NIC.
+    let active: Vec<&str> = s
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        .filter(|l| l.split_whitespace().next() == Some("imag-nb"))
+        .collect();
     assert!(
-        s.contains("imag-nb") && s.contains("10.77.9.182") && s.contains("6C:1F:F7:66:15:4B"),
-        "#1103: wol-targets.txt must carry the imag-nb row (ip + the live-read USB-NIC MAC)"
+        active.is_empty(),
+        "issue 1316: the retired imag-nb must have NO active wol-targets.txt row: {active:?}"
+    );
+    assert!(
+        s.contains("imag-nb RETIRED") && s.contains("1316"),
+        "issue 1316: the retirement comment (imag-nb RETIRED ... issue 1316) must stay in the table"
+    );
+    // the historical MAC survives as a comment for the re-provisioning day
+    assert!(
+        s.contains("6C:1F:F7:66:15:4B"),
+        "#1103: keep the last live-read imag-nb MAC readable in the retirement comment"
     );
 }
 
 // ---------------------------------------------------------------------------------------------
-// 2. scripts/wake-box.sh -- table-driven end-to-end (no sender code change)
+// 2. scripts/wake-box.sh -- table-driven end-to-end: a retired box FAILS LOUD, never a packet
 // ---------------------------------------------------------------------------------------------
 
 #[test]
-fn wake_box_dry_run_resolves_imag_nb_from_the_table() {
+fn wake_box_dry_run_refuses_the_retired_imag_nb_loudly() {
     let out = Command::new("bash")
         .current_dir(manifest_dir())
         .args(["scripts/wake-box.sh", "imag-nb", "--dry-run"])
         .output()
         .expect("run wake-box.sh");
     let so = String::from_utf8_lossy(&out.stdout);
+    let se = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success(),
+        "issue 1316: `wake-box.sh imag-nb --dry-run` must FAIL once the row is retired:\n{so}"
+    );
+    assert!(
+        se.contains("unknown box imag-nb"),
+        "issue 1316: the refusal must name the box (wol_table_lookup: unknown box imag-nb):\n{se}"
+    );
+    assert!(
+        !so.contains("mac=") && !so.contains("DRY-RUN"),
+        "issue 1316: no MAC may resolve and no send path may be reached for a retired box:\n{so}"
+    );
+}
+
+/// The table-driven sender itself is unchanged (#1103 contract) -- proven on a LIVE row.
+#[test]
+fn wake_box_dry_run_still_resolves_a_live_row_from_the_table() {
+    let out = Command::new("bash")
+        .current_dir(manifest_dir())
+        .args(["scripts/wake-box.sh", "strih", "--dry-run"])
+        .output()
+        .expect("run wake-box.sh");
+    let so = String::from_utf8_lossy(&out.stdout);
     assert!(
         out.status.success(),
-        "#1103: `wake-box.sh imag-nb --dry-run` must succeed once imag-nb is in the table: {}",
+        "#1103: `wake-box.sh strih --dry-run` must succeed for a live table row: {}",
         String::from_utf8_lossy(&out.stderr)
     );
     assert!(
-        so.contains("mac=6C:1F:F7:66:15:4B"),
-        "#1103: imag-nb MAC resolved from the table:\n{so}"
-    );
-    assert!(
-        so.contains("102 bytes"),
-        "#1103: 102-byte magic packet reported:\n{so}"
+        so.contains("mac=") && so.contains("102 bytes"),
+        "#1103: MAC resolved from the table + the 102-byte magic packet reported:\n{so}"
     );
     assert!(
         so.contains("10.77.9.255:9") && so.contains("255.255.255.255:9"),
-        "#1103: dry-run must target imag's subnet + limited broadcast on port 9:\n{so}"
+        "#1103: dry-run must target the subnet + limited broadcast on port 9:\n{so}"
     );
     assert!(
         so.contains("DRY-RUN: no packet sent"),
