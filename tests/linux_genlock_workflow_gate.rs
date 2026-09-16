@@ -38,11 +38,17 @@ fn both_jobs_run_on_ubuntu_24_04() {
         wf.contains("linux-genlock-build:"),
         "#460: {WF} must define the linux-genlock-build job — the full production bundle."
     );
+    // issue 1317: the strih-lx variant is the THIRD job (a full bundle with browser/CEF ON for
+    // the Linux strih notebook, also Ubuntu 24.04 noble) — every job pins the same runner image.
+    assert!(
+        wf.contains("linux-genlock-build-strih:"),
+        "issue 1317: {WF} must define the linux-genlock-build-strih job — the strih-lx full bundle."
+    );
     assert_eq!(
         wf.matches("runs-on: ubuntu-24.04").count(),
-        2,
-        "#460: both jobs must pin runs-on: ubuntu-24.04 (imag-nb's own distro, noble) — a \
-         different Ubuntu version risks a glibc/ABI mismatch against the deploy target."
+        3,
+        "#460/1317: all three jobs must pin runs-on: ubuntu-24.04 (the imag-nb + strih-lx distro, \
+         noble) — a different Ubuntu version risks a glibc/ABI mismatch against the deploy target."
     );
 }
 
