@@ -54,6 +54,7 @@ every other cambox (owner: „do cam2 uz ide obraz zo splitru ako do ostatnych k
 NOT change the "every cambox window decodes the cam2 Vernier tick" conclusion above — the tick is
 painted by cam2's fb0 painter and filmed through the splitter, which is unchanged. What changed is
 the PROJECTION-tap aux tick (issue 1196, `src/tear_detect.rs`), which was fed by imag's HDMI
-scanout and now has no source on cam2 → it reads report-only `Absent`, never a red
-(`.claude/rules/projection-tap-tear-detect.md`). The primary Vernier tick decodability on every
+scanout and now has no source on cam2 → those windows read `Unproven` and PASS the tear gate
+(never a red; "no aux source" is surfaced report-only, `.claude/rules/projection-tap-tear-detect.md`).
+The primary Vernier tick decodability on every
 active cambox (this rule's subject) is unaffected.

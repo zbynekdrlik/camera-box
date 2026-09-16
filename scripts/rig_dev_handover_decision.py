@@ -245,7 +245,9 @@ class Item(object):
             # `pins_imag`) so the item is judged on the remaining boxes only — probing the dark box
             # would otherwise read UNKNOWN/timeout and drag the whole item to UNKNOWN. The other
             # imag-scoped gate (dantesync version) EXCLUDES imag-nb via its rig-fleet.txt ack.
-            if imag_retired and "imag" in name:
+            # PRECISE match on the box-suffix convention (`<item>_imag`) — never a bare `in` that
+            # could drop an unrelated future capture like `imaging`/`mapping_imag`.
+            if imag_retired and (name == "imag" or name.endswith("_imag")):
                 continue
             text, rc = captures_data.get(name, ("", RC_MISSING))
             statuses.append(self._status_for_capture(text, rc))

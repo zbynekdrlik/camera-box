@@ -12501,15 +12501,17 @@ no version bump (worktree lane; supervisor cherry-picks).
   REFERENCE_HOSTS; dropped imag from dantesync-clock DANTE_CLOCK_OBS_NODES, mv-fps MV_FPS_BOXES, and
   the deploy-genlock-fleet empty --boxes default (imag stays a valid explicit target).
 - cam2 SEMANTICS (owner „do cam2 uz ide obraz zo splitru"): cam2 stays in CAMERA_ACTIVE_SET as a
-  normal splitter leg; src/tear_detect.rs gained report-only TearSignalViability::Absent (decodable
-  primary, zero aux) — never a red, self-clearing when the IMAG role returns.
+  normal splitter leg; cam2's now-sourceless projection leg reads Unproven and passes the tear gate
+  (never a red; "no aux source" surfaced report-only). No new viability state was added — an
+  auto `Absent` was UNSOUND (it reclassified the aux-empty pre-aux 781 fixtures, caught in review).
 - Manual tools: rig-health-audit.py check_imag renders a neutral RETIRED row (exit-neutral);
   rig-dev-handover-check.sh + rig_dev_handover_decision.py drop the imag-scoped pins_imag capture —
   both read the rig-fleet.txt imag ack (env-overridable).
 - Docs: targets.md imag row RETIRED (pathspec commit); wol-targets.txt commented; rule addenda in
   projection-tap-tear-detect / cambox-tick-decodability / obs-fleet-list / imag-offline-ack.
 - Commits: [red] test(#1316) → [green] fix(#1316) → rustfmt → docs. Verify (Tier-0, no cargo compile):
-  std-only tear replica rustc --test 5/5 (RED-confirmed by stripping the Absent branch);
+  std-only tear replica rustc --test 5/5 (incl. a guard that the pre-aux 781-fixture shape is NOT
+  reclassified);
   rig-dev-handover pytest 15/15; rig-health-audit pytest 5/5; obs-fleet.sh sourced-behavior checks;
   bash -n + shellcheck clean on all edited scripts; cargo fmt --all --check clean; doc-lint grep
   clean. The Rust harnesses (harness_obs_fleet_list, deploy_genlock_fleet, tear inline test) + the

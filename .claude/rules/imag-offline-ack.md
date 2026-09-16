@@ -146,7 +146,8 @@ imag-nb:returned-to-vendor-16.9.2026
   the first reachable-and-acked run fails loudly as a stale ack — that is the intended signal.
 - **The CODE + DOCS half of the decommission (issue 1316)** — separate from this E2E-ack half —
   added a `retired` fleet state (`obs-fleet-list.md`), made cam2 a normal splitter leg with a
-  report-only tear `Absent` state (`projection-tap-tear-detect.md`), dropped the dead `.182`/imag
+  report-only tolerance of cam2's now-sourceless projection leg (it reads `Unproven` and passes,
+  `projection-tap-tear-detect.md`), dropped the dead `.182`/imag
   from the watchdog/deploy rosters, and made `rig-health-audit.py` check_imag +
   `rig-dev-handover-check.sh` pins retired-aware (both read the `imag:`/`imag-nb:` ack here as the
   rig-wide source of truth).
