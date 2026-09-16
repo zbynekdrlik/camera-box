@@ -10371,7 +10371,7 @@ mod tests {
     /// all, which stopped being true once the re-gate landed; a single copy still passes because
     /// 1 <= the tolerance, not because the term is inert.
     #[test]
-    fn all_cambox_continuity_single_copy_now_reds_overall_1242_strict_zero() {
+    fn all_cambox_continuity_single_copy_within_tolerance_passes_overall_889_regate() {
         use super::{build_and_print_verdict, Cam1Source, DecodedRec};
         use clap::Parser;
 
@@ -10471,10 +10471,10 @@ mod tests {
         );
         assert_eq!(
             seg["overall_pass"],
-            serde_json::json!(false),
-            "#1242 strict-zero: a single copy now REDs overall_pass end-to-end (both seams \
-             disarmed -- only copies==0 && gaps==0 passes); still visible via strict pass and \
-             reported by the tol-2 lens (relaxed), never masked: {seg}"
+            serde_json::json!(true),
+            "1220: a single copy is now ABSORBED into overall_pass via the RE-ARMED issue-1220 \
+             tolerance channel (owner mandate, 2026-08-29) -- the issue-1169 <=1/<=1 \
+             singleton band is dormant (superseded by precedence), not what did the absorbing: {seg}"
         );
         assert_eq!(
             seg["windows_singleton_allowance_consumed"],
@@ -10506,10 +10506,9 @@ mod tests {
     }
 
     /// Issue 889 re-gate (2026-08-05 ROZHODNUTÉ, recalibrated 1 → 2 → 3 on 2026-08-06, ticket 889
-    /// comments 5198131539 / 5200533407) differential proof, UPDATED for the #1242 strict-zero
-    /// restore: `overall_pass` swings from PASS to FAIL on ANY nonzero copies/gaps -- including AT
-    /// the (now report-only) tol-2 lens band (even combined), since both seams are disarmed and
-    /// only 0/0 passes the fold. Uses the SAME differential-fixture technique the
+    /// comments 5198131539 / 5200533407) differential proof: `overall_pass` must swing from PASS
+    /// to FAIL exactly at the tolerance boundary, and must NOT swing at all when copies/gaps stay
+    /// AT the tolerance (even combined). Uses the SAME differential-fixture technique the
     /// `frozen_leg_and_self_heal_reset_restored_to_blocking_905` fixture uses: build
     /// otherwise-IDENTICAL fixtures varying only the defect under test, and diff `overall_pass`
     /// against a clean baseline, rather than asserting an absolute value (many other unrelated
@@ -10652,8 +10651,7 @@ mod tests {
         // future recalibration of `WINDOW_COPIES_GAPS_TOLERANCE`.
         let tolerance = camera_box::window_gate::WINDOW_COPIES_GAPS_TOLERANCE;
 
-        // (a) BOTH terms AT the (report-only) tol-2 lens band simultaneously -- #1242 strict-zero
-        // now SWINGS overall_pass to FAIL (only 0/0 passes; the lens value no longer gates).
+        // (a) BOTH terms AT the tolerance simultaneously -- must NOT swing overall_pass.
         let at_tolerance = build_fixture("at-tolerance", base, &sched, tolerance, tolerance);
         let at_seg = &at_tolerance["all_cambox_continuity"];
         assert_eq!(
@@ -10668,10 +10666,10 @@ mod tests {
         );
         assert_eq!(
             at_seg["overall_pass"],
-            serde_json::json!(false),
-            "#1242 strict-zero: copies AND gaps AT the (now report-only) tol-2 lens band STILL \
-             swing overall_pass to FAIL -- both seams disarmed, so the fold is strict-zero and \
-             only 0/0 passes: clean={clean}, at_tolerance={at_tolerance}"
+            serde_json::json!(true),
+            "1220: copies AND gaps AT the re-armed tolerance must NOT swing overall_pass -- the \
+             tolerance channel is armed again (owner mandate, 2026-08-29): \
+             clean={clean}, at_tolerance={at_tolerance}"
         );
         assert_eq!(
             at_seg["windows_over_copies_gaps_tolerance"],
