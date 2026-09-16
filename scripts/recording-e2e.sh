@@ -2778,7 +2778,7 @@ sshpass -p "$CAM_PW" scp -o StrictHostKeyChecking=no \
 # already uses below (`--audio-marker`/`--marker-log`, #420/#421) — reused, not reinvented. The
 # plain single-camera path (ALL_CAMBOX unset) is UNCHANGED: no marker flags, no self-check.
 AV_SYNC_MARKER_DEVICE="${AV_SYNC_MARKER_DEVICE:-hw:CARD=PCH,DEV=3}"
-AV_SYNC_MARKER_CADENCE="${AV_SYNC_MARKER_CADENCE:-180}"
+AV_SYNC_MARKER_CADENCE="${AV_SYNC_MARKER_CADENCE:-30}"   # ~0.5 s @ 60 Hz (issue 1318, owner 17.9.2026: keep the mic-chain gate open)
 _cam2_marker_flags=""
 _cam2_marker_check=""
 if [ "${ALL_CAMBOX:-0}" = "1" ]; then
@@ -3637,7 +3637,7 @@ if [ "${AV_RESTART_GATE:-0}" = "1" ]; then
       ;;
   esac
   AV_RESTART_MARKER_DEVICE="${AV_RESTART_MARKER_DEVICE:-hw:CARD=PCH,DEV=3}"
-  AV_RESTART_MARKER_CADENCE="${AV_RESTART_MARKER_CADENCE:-180}"
+  AV_RESTART_MARKER_CADENCE="${AV_RESTART_MARKER_CADENCE:-30}"   # ~0.5 s @ 60 Hz (issue 1318)
   AV_RESTART_AUDIO_TRACK="${AV_RESTART_AUDIO_TRACK:-0}"
   AV_RESTART_TOLERANCE_MS="${AV_RESTART_TOLERANCE_MS:-50}"
   AV_RESTART_GATE_BIN="${AV_RESTART_GATE_BIN:-$PROBE_BIN_DIR/av-restart-sync-gate}"

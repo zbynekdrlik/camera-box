@@ -150,8 +150,11 @@ struct Args {
     /// re-resolved).
     #[arg(long)]
     audio_marker_device: Option<String>,
-    /// Emit the QPSK marker every N painter refresh ticks (~5 s @ 60 Hz with the default 300).
-    #[arg(long, default_value_t = 300)]
+    /// Emit the QPSK marker every N painter refresh ticks (~0.5 s @ 60 Hz with the default 30 —
+    /// owner directive 17.9.2026, issue 1318: a dense marker keeps the mic-chain gate/AGC open so the
+    /// receiver-side demod never has to hunt for a burst; the old 300 (~5 s) lost ~50 % of bursts
+    /// to the gate and whole minutes could pass without one).
+    #[arg(long, default_value_t = 30)]
     audio_marker_cadence_ticks: u64,
     /// With --audio-marker: write the emitted-marker CSV (`index,frame_id,emit_ts_ns`) to this
     /// path. scp it back to dev1 so recording-verdict can pair audio index → frame → A/V offset.

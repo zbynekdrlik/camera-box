@@ -510,9 +510,9 @@ fn test_mode_starts_qpsk_audio_marker_alongside_painter() {
          audio out (hw:CARD=PCH,DEV=3 — the connected-speaker device, confirmed live). Got:\n{p}"
     );
     assert!(
-        p.contains("--audio-marker-cadence-ticks 180"),
-        "#420: default cadence must be 180 ticks (~3s @ 60Hz painter ticks — the av-sync skill \
-         recipe). Got:\n{p}"
+        p.contains("--audio-marker-cadence-ticks 30"),
+        "#420/1318: default cadence must be 30 ticks (~0.5 s @ 60Hz painter ticks — owner \
+         directive 17.9.2026: a dense marker keeps the mic-chain gate open). Got:\n{p}"
     );
     assert!(
         p.contains("--marker-log /run/rig-qpsk-markers.csv"),
