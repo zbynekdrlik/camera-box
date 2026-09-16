@@ -113,7 +113,7 @@ fn probe_stream_start_time(path: &Path, selector: &str) -> Result<f64> {
 
 /// Extract audio track `track` of `path` as mono f32 @ 48 kHz via ffmpeg (channels mixed to mono —
 /// the marker survives the mix, and the QPSK decode is amplitude-tolerant).
-fn extract_audio_mono_f32(path: &Path, track: u32, sample_rate: u32) -> Result<Vec<f32>> {
+pub fn extract_audio_mono_f32(path: &Path, track: u32, sample_rate: u32) -> Result<Vec<f32>> {
     let out = Command::new("ffmpeg")
         .args(["-v", "error", "-i"])
         .arg(path)

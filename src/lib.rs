@@ -87,6 +87,12 @@ pub mod audio_marker_policy;
 // ALSA emitter (`probe::qpsk_emit`) and recording-verdict decode call into this. Supersedes the chirp.
 pub mod qpsk_marker;
 
+// #1324 — the AUDIO-ONLY QPSK decodability probe decision (pure Tier-0, default features):
+// the [4b3/8] preflight's verdict from the demod's decoded markers + stats. No I/O, no probe deps
+// (like `qpsk_marker` / `colour_scale`), so it unit-tests on default features; the ffmpeg/WAV glue
+// is the probe-gated `recording-verdict --qpsk-probe`.
+pub mod qpsk_probe_decision;
+
 // #398 — the LIVE OBS A/V-sync dock decode logic, pure Tier-0 so the vendored C++ dock
 // (`vendor/av-sync-dock/src/camera-box-*.hpp`) can MIRROR it and a committed C++ self-test can
 // cross-check the mirror against these Rust results. Holds the streaming QPSK marker detector

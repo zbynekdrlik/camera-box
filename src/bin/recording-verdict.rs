@@ -449,6 +449,33 @@ struct Args {
     /// dropped (`SelfHealResetEvent::parse`) — never aborts an otherwise-valid verdict run.
     #[arg(long, value_name = "KIND:CAMBOX:EPOCH_NS")]
     restart_event: Vec<String>,
+    /// #1324 AUDIO-ONLY QPSK DECODABILITY PROBE — decode the mbc measurement marker from a short
+    /// audio-only capture (WAV/MKV) and print ONE JSON line
+    /// `{preamble_screens,candidates,cluster_samples,crc_ok,crc_fail,peak_dbfs,verdict}`
+    /// (verdict ∈ OK/UNDECODED/SILENT/POLLUTED), exit 0 (a pure reporter — the `[4b3/8]` shell step
+    /// decides the abort). Reuses the SAME `qpsk_marker` demod as `--av-sync` but needs NO emit-log
+    /// / video pairing, so the `[4b3/8]` preflight can call it BEFORE burning a ~40-min run. Uses
+    /// `--av-audio-track` / `--av-threshold`; a standalone mode, not part of the zero-loss verdict.
+    #[arg(long, value_name = "AUDIO")]
+    qpsk_probe: Option<PathBuf>,
+    /// #1324: analyze only the FIRST N seconds of the capture (0 or absent = the whole file). The
+    /// `[4b3/8]` step captures ~25 s and passes it here so the window matches the calibration.
+    #[arg(long, default_value_t = 0.0)]
+    qpsk_probe_seconds: f64,
+    /// #1324: minimum self-consistency cluster size to call the chain DECODABLE (else UNDECODED).
+    /// Calibrated on the real 16.9 recordings (healthy 25 s window ≥ 7, drowned ≤ 3); default 4
+    /// leaves margin on BOTH sides. Env-overridable via the shell step's `AUDIO_DECODABILITY_MIN_CLUSTERS`.
+    #[arg(long, default_value_t = 4)]
+    qpsk_min_clusters: u64,
+    /// #1324: the SILENCE floor (dBFS) — below it AND undecodable ⇒ SILENT. Single-sourced from
+    /// `audio-presence-preflight.sh::audio_preflight_default_threshold_db` (−60) by the shell step.
+    #[arg(long, default_value_t = -60.0)]
+    qpsk_silent_db: f64,
+    /// #1324: the LOUD covariate (dBFS) — above it AND undecodable ⇒ POLLUTED. Single-sourced from
+    /// `audio_preflight_default_ceiling_db` (−20). A COVARIATE only (issue 1323's bar was
+    /// miscalibrated on the broken chain): a loud-but-DECODABLE capture is OK, never POLLUTED.
+    #[arg(long, default_value_t = -20.0)]
+    qpsk_loud_db: f64,
 }
 
 impl Args {
@@ -3039,6 +3066,11 @@ fn main() -> Result<()> {
     //   (neither)                : fused — decode every supplied recording on THIS host.
     if let Some(box_name) = args.extract_partial.clone() {
         return extract_partial(&args, &box_name);
+    }
+    // #1324: the audio-only QPSK decodability probe (the [4b3/8] preflight's engine). A standalone
+    // reporter — prints one JSON line and exits, never part of the fused verdict.
+    if let Some(audio) = args.qpsk_probe.clone() {
+        return qpsk_probe(&args, &audio);
     }
     if !args.merge_partials.is_empty() {
         return run_merge(&args);
@@ -7687,6 +7719,41 @@ fn args_expected_burns_for(box_name: &str, args: &Args) -> Option<Vec<u32>> {
 /// `<partial>-pixels` dir. The strih box decodes its strih recording (cam1 + strih burns); the
 /// stream box decodes its stream recording (all three burns). dev1 then `--merge-partials` the
 /// small JSONs (+ pulls back the pixel dirs) — the recording is NEVER copied box-to-box (nor to dev1).
+/// #1324 — the AUDIO-ONLY QPSK decodability probe. Reuse the SAME `qpsk_marker` demod as `--av-sync`
+/// over a short audio-only capture (WAV/MKV, NO emit-log / video pairing), then hand the decoded
+/// markers + stats + samples to the pure crate-root decision (`qpsk_probe_decision`) and print ONE
+/// JSON line. A pure REPORTER — always exits 0 when it prints a verdict; the `[4b3/8]` shell step
+/// reads the JSON and decides the abort. A genuine read error (ffmpeg missing / unreadable file)
+/// propagates as `Err` (non-zero exit, no JSON) so the shell can tell "unreadable" from "UNDECODED".
+fn qpsk_probe(args: &Args, audio: &Path) -> Result<()> {
+    use camera_box::probe::av_sync_recording::extract_audio_mono_f32;
+    use camera_box::qpsk_marker::{decode_markers_with_stats, AudioParams};
+    use camera_box::qpsk_probe_decision::{
+        build_report, report_json, ClusterParams, QpskProbeThresholds,
+    };
+    // The emitter's rig params (48 kHz / 442 Hz / c=1) — the SAME the recording av-sync path uses.
+    let params = AudioParams::rig60();
+    // Reuse the recording av-sync ffmpeg mono-f32 @ 48 kHz extraction (channels mixed — the marker
+    // survives, the decode is amplitude-tolerant). On a pre-extracted mono WAV this is a passthrough.
+    let mut samples = extract_audio_mono_f32(audio, args.av_audio_track, params.sample_rate)?;
+    // Bound to the first N seconds when requested (the [4b3/8] window matches the calibration).
+    if args.qpsk_probe_seconds > 0.0 {
+        let want = (args.qpsk_probe_seconds * params.sample_rate as f64) as usize;
+        if want > 0 && want < samples.len() {
+            samples.truncate(want);
+        }
+    }
+    let (markers, stats) = decode_markers_with_stats(&samples, &params, args.av_threshold);
+    let th = QpskProbeThresholds {
+        min_clusters: args.qpsk_min_clusters,
+        silent_db: args.qpsk_silent_db,
+        loud_db: args.qpsk_loud_db,
+    };
+    let report = build_report(&markers, &stats, &samples, ClusterParams::default(), &th);
+    println!("{}", report_json(&report));
+    Ok(())
+}
+
 fn extract_partial(args: &Args, box_name: &str) -> Result<()> {
     let expected_burns = args_expected_burns_for(box_name, args).ok_or_else(|| {
         anyhow::anyhow!(

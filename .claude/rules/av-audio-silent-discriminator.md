@@ -3,6 +3,8 @@ paths:
   - "src/av_window.rs"
   - "src/probe/av_sync_recording.rs"
   - "src/bin/recording-verdict.rs"
+  - "src/qpsk_probe_decision.rs"
+  - "scripts/lib/marker-decodability-preflight.sh"
   - "scripts/e2e_discord_report.py"
 ---
 
@@ -43,3 +45,36 @@ audio_markers.len() as u64` BEFORE the `audio_markers` move (struct fields evalu
 so the `.len()` borrow is released before the move — no use-after-move). `AvMarkerInputs` derives only
 `PartialEq`, not `Eq`, so a future `f64` field is safe (the #726 Eq-derive trap does not bite here).
 Verify locally with `cargo fmt --all --check` (rustfmt parses cfg-gated files); CI is the first type check.
+
+
+## In-preflight AUDIO-ONLY decodability probe + the `[4b3/8]` gate (#1324)
+
+The discriminator above is a VERDICT-time (post-recording) read. #1324 adds the PRE-record sibling so
+an undecodable mbc chain never burns ~40 min: `recording-verdict --qpsk-probe <wav|mkv>` reuses the
+SAME `qpsk_marker::decode_markers_with_stats` demod on a short AUDIO-ONLY capture (no emit-log / video
+pairing) and prints ONE JSON line `{preamble_screens,candidates,cluster_samples,crc_ok,crc_fail,
+peak_dbfs,verdict}` (verdict ∈ OK/UNDECODED/SILENT/POLLUTED), exit 0 (a pure reporter). The pure
+decision is `src/qpsk_probe_decision.rs` (crate-root, default-feature, Tier-0): `consistency_cluster_size`,
+`peak_dbfs`, `classify`, `build_report`, `report_json`.
+
+- **Why a SELF-CONSISTENCY cluster, not `crc_ok`:** on a drowned chain the demod fires MORE CRC-valid
+  decodes than a healthy one (real-data 16.9: failed 480/551 false vs green 107 real, and per-cam
+  `cluster_samples=0`), so a raw count PASSES the broken chain. `consistency_cluster_size` counts the
+  longest chain of consecutive-in-time decoded markers sharing ONE emit cadence (modal index-step S +
+  modal gap G, tolerating a single miss via 2S/2G), SELF-CALIBRATED from the window (bakes in no fixed
+  painter cadence). Measured over 20/25 s windows: GREEN ∈ [5,9], FAILED ∈ [1,3] → clean split at N=4.
+- **Decodability is PRIMARY (supervisor correction 16.9):** `cluster_samples >= min_clusters ⇒ OK at
+  ANY level` (a loud-but-decodable capture is the healthy marker ≈ −19 dB; issue 1323's −20 bar was
+  miscalibrated on the broken chain, so it is a COVARIATE here). Only when UNDECODABLE do the level
+  bars name WHY: `peak < −60` (#748 floor, single-sourced) ⇒ SILENT; `peak > −20` (loud covariate,
+  single-sourced) ⇒ POLLUTED; else ⇒ UNDECODED. Verdict words are DISJOINT so the abort names the class.
+- **`[4b3/8]` step** (`scripts/lib/marker-decodability-preflight.sh` + a thin block in `recording-e2e.sh`,
+  after the #1323 ceiling, before StartRecord): make a ~25 s stream probe recording, ffmpeg-extract the
+  mbc `a:0` track to a mono-f32 WAV on the stream box (`win_ssh_run`), `win_ssh_download` to dev1, run
+  the probe from `$PROBE_BIN_DIR`, abort (`exit 1`) naming the class on any non-OK verdict. SKIP only
+  when the probe binary is absent (a loud UNVERIFIED, never a silent pass). Every knob env-overridable
+  (`AUDIO_DECODABILITY_*`); the −60/−20 bars are READ from `audio-presence-preflight.sh`, never retyped.
+- **Tier-0:** the pure decision + demod are default-feature, so the full synthesized-audio → demod →
+  decision path (incl. loud+decodable=OK) is verifiable via a rustc `--test` replica; the bash lib +
+  `[4b3/8]` wiring via `tests/python/test_marker_decodability_preflight_1324.py`. The probe-gated
+  `--qpsk-probe` ffmpeg glue in `recording-verdict.rs` is CI-only.
