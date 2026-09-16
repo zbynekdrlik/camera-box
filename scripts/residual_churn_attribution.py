@@ -327,10 +327,9 @@ def aggregate(run_results):
             runs_with_residual += 1
             if run_fill:
                 worst_box = max(run_fill, key=lambda c: run_fill[c])
-                if worst_box not in res_boxes or len(res_boxes) > 1:
-                    # a residual box that is not the single worst grabber exists this run
-                    if any(b != worst_box for b in res_boxes):
-                        nonworst += 1
+                # this run has a residual on a box that is NOT the single worst-emit-fill grabber
+                if any(b != worst_box for b in res_boxes):
+                    nonworst += 1
     survival_ratio = (total_copies / total_emitfill) if total_emitfill else None
     if n_events == 0:
         verdict = "no residual events in the sampled runs"

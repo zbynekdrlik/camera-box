@@ -439,15 +439,18 @@ last-frame repeats`). Verdict, from 5 post-cure splitter-fed runs (977889848, 20
   reached the ≥3 burst floor (the steady background is 1–2). The copy signature `tick_before ==
   tick_after` + a same-box `883` net-span gap within ~10 s = the genlock-FIFO hold-then-catchup /
   60→30 decimation-phase limit cycle (painter CLEAN, cited).
-- **The counterfactual kills the grabber-cadence story.** cam1 & cam2 carry a LARGE, steady capture
-  deficit — ~90–110 emit-fill (`starvation last-frame repeat`) frames PER RUN — in EVERY run,
-  INCLUDING the two fully-clean 0/0 runs: **609 emit-fill frames across the clean runs produced 0
-  residuals.** Copy survival ratio ≈ **0.0026** (4 recording copies per 1562 source emit-fills). A
-  grabber-owned defect would show residuals proportional to the emit-fill rate (dozens per run on
-  cam2); we see 0–2.
+- **The counterfactual kills the grabber-cadence story.** cam1 & cam2 carry a LARGE, steady
+  CAPTURE DEFICIT — `total_emitfill` = the run-summed `sent − captured` deficit, ~90–110 emit-fill
+  frames PER RUN (the finer `starvation last-frame repeat` on-box counter is even larger, ~100–245)
+  — in EVERY run, INCLUDING the two fully-clean 0/0 runs: **609 emit-fill (capture-deficit) frames
+  across the clean runs produced 0 residuals.** Copy survival ratio ≈ **0.0026** (4 recording copies
+  per 1562 source emit-fills). A grabber-owned defect would show residuals proportional to the
+  emit-fill rate (dozens per run on cam2); we see 0–2.
 - **The survivor does NOT track the worst grabber.** In 605445038 the singletons landed on CAM7
-  (mean_cap 300.5, only 42 emit-fills) while CAM2 (94 emit-fills) read 0/0; residuals landed on a
-  non-worst-emit-fill grabber in 2/3 runs. cam1/cam2's under-cadence is REAL and persistent
+  (mean_cap 300.5, only 42 emit-fills) AND CAM1 (a worst-tier grabber, 94 emit-fills) while CAM2
+  (also 94 emit-fills, tied-worst) read 0/0 — i.e. of the two tied-worst grabbers only one got a
+  residual and a healthy-cadence box got the other; residuals landed on a non-worst-emit-fill
+  grabber in 2/3 runs. cam1/cam2's under-cadence is REAL and persistent
   (mean_cap 299.8–300.1 vs cam3–7 300.4–300.6) but it only supplies the raw material — WHICH box and
   WHEN a survivor lands is decided downstream (decimation phase + FIFO), stochastically.
 
