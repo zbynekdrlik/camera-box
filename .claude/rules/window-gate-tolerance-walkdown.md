@@ -306,3 +306,15 @@ NO post-16.9 splitter-fed run exists yet. `tests/verdict_gate_strict_fold_1242.r
 `&[("CAM2", 25)]` state + documents the removal precondition (first post-16.9 splitter-fed run whose
 CAM2 windows sit within the default tolerance -> set the map to `&[]`) — a report-only,
 data-conditional pin, never a widen.
+
+**Walk-UP/RESTORE prose-staleness gotcha (issue 1242 review round-trip).** A walk-DOWN breaks
+PASS-asserting FIXTURES pinned at the old (looser) boundary (step 4 above). A walk-UP / RESTORE
+(tightening a floor) breaks those SAME fixtures AND, additionally, any retained DOC/COMMENT PROSE
+that narrates "value X PASSES" for an X that now sits BELOW the tightened floor — e.g. the retained
+#1250 "the beat-corrected worst 0.916/0.947 PASSES (healthy benign beat)" paragraphs, true at the
+then-0.90 floor, became self-contradictory the moment 0.95 went live (0.916/0.947 < 0.95). When you
+tighten a gate, grep the touched file(s) for every prose claim of the shape "reads N ... passes /
+above the floor / with margin" and reconcile any N now on the wrong side of the new value — a
+fmt/type check never catches a stale narrative number. Reconcile it in ONE direction (here: those
+readings were on PRE-fix bundles carrying the now-fixed churn; the post-fix rig reads ~0.998), and
+name the one-line report-only revert as the guard rail for the residual thin-sample false-red risk.
