@@ -1100,8 +1100,26 @@ jobs:
           if ($ndi -notmatch [regex]::Escape('static inline bool ndi_force_by_name_after_frameless(')) {
             Write-Error "ndi-source.cpp: the #1287 ndi_force_by_name_after_frameless decision helper is gone -- a frame-less BY-URL bind (dead cached sender port after a graceful restart) can no longer be forced onto BY-NAME and loops BY-URL forever. Re-apply the #1287 fix"; exit 1
           }
-          if (([regex]::Matches($ndi, [regex]::Escape('ndi_force_by_name_after_frameless(connected_by_url_1180, frames_seen_since_reset_1180)) { force_by_name_next_reset_1180 = true;'))).Count -lt 2) {
-            Write-Error "ndi-source.cpp: the #1287 helper-gated corrective set is wired at fewer than 2 reset-forcing arms -- it must gate AND SET force_by_name_next_reset_1180 in BOTH the no_connections==0 arm AND the #767 stale-while-connected arm (anchoring the whole adjacency so deleting only the set is caught), else a frame-less BY-URL bind is never flipped to BY-NAME. Re-apply the #1287 wiring at both sites"; exit 1
+          if (([regex]::Matches($ndi, [regex]::Escape('ndi_force_by_name_after_frameless(connected_by_url_1180, frames_seen_since_reset_1180)) { force_by_name_next_reset_1180 = true;'))).Count -lt 3) {
+            Write-Error "ndi-source.cpp: the #1287 helper-gated corrective set is wired at fewer than 3 reset-forcing arms -- it must gate AND SET force_by_name_next_reset_1180 in the no_connections==0 arm, the #767 stale-while-connected arm, AND the #1096 (reopen 16.9) connected-but-frameless arm (anchoring the whole adjacency so deleting only the set is caught), else a frame-less bind is never flipped to BY-NAME. Re-apply the wiring at all three sites"; exit 1
+          }
+          # camera-box #1096 (reopen 16.9.2026): a bind that CONNECTS (no_connections>0) but delivers
+          # ZERO frames (reset BY-NAME into the poisoned finder in the 12:10 fleet-deploy wedge on
+          # cam2/5/6) leaves s->last_frame_timestamp==0, invisible to genlock_reconnect_decision
+          # (which skips last_frame_ns==0 to avoid judging a warming-up receiver), so neither #767 nor
+          # the no_connections==0 ladder re-arms and the leg sits black for an hour. The fix ages a
+          # connected, never-delivered bind from its recv_create_v3 timestamp (recv_bind_ns_1096) over
+          # FRAMELESS_BIND_STALE_NS and forces the SAME reset ladder + #1287 alternation. A subtree
+          # pull re-importing stock DistroAV silently drops this (mirrors
+          # tests/distroav_frameless_connected_1096.rs).
+          if ($ndi -notmatch [regex]::Escape('static inline bool genlock_frameless_bind_reconnect_decision(')) {
+            Write-Error "ndi-source.cpp: the #1096 (reopen 16.9) genlock_frameless_bind_reconnect_decision decision helper is gone -- a connected-but-frameless bind has no aging clock and sits black forever. Re-apply the #1096 connected-but-frameless watchdog"; exit 1
+          }
+          if ($ndi -notmatch [regex]::Escape('genlock_frameless_bind_reconnect_decision(genlock_source_is_active(s->obs_source), no_conn,')) {
+            Write-Error "ndi-source.cpp: the receiver loop no longer CALLS the #1096 (reopen 16.9) connected-but-frameless watchdog with the live source state -- a bind that never delivers a frame is never force-rebound. Re-apply the watchdog call"; exit 1
+          }
+          if ($ndi -notmatch [regex]::Escape('recv_bind_ns_1096 = os_gettime_ns();')) {
+            Write-Error "ndi-source.cpp: the #1096 (reopen 16.9) recv_bind_ns_1096 create-timestamp record at recv_create_v3 is gone -- the frameless watchdog has no baseline to age a never-delivered bind from. Re-apply the bind-timestamp record"; exit 1
           }
           # camera-box #1097: the framesync_create failure branch in the reset path must retry (not
           # break) -- the dormant sibling of #1080 (framesync forced OFF today, but a break there is

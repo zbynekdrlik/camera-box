@@ -168,6 +168,42 @@ static inline bool genlock_reconnect_decision(bool genlock_active, int no_connec
 	return (now_ns - last_frame_ns) >= stale_ns;
 }
 
+/* camera-box #1096 (reopen 16.9.2026): window for the CONNECTED-but-FRAMELESS watchdog below. A
+ * bind that has connected (no_connections > 0) but delivered ZERO frames for this long is broken --
+ * a healthy bind delivers its first frame within a few hundred ms, so 5 s is far above any
+ * legitimate warm-up yet recovers well inside the 60 s acceptance bound. Shorter than the 10 s #767
+ * stale window on purpose: #767 covers "was delivering, now silent" (conservative, avoid churning a
+ * briefly-hiccupping healthy feed), this covers "connected, never delivered one frame" (always
+ * broken). */
+static const uint64_t FRAMELESS_BIND_STALE_NS = 5ULL * 1000ULL * 1000ULL * 1000ULL;
+
+/* camera-box #1096 (reopen 16.9.2026): should this genlocked, CONNECTED receiver that has NEVER
+ * delivered a frame since its bind force a full receiver rebind? A strict COMPLEMENT of
+ * genlock_reconnect_decision: that helper returns false on last_frame_ns == 0 (never judge a
+ * warming-up receiver), which leaves a bind that connects but delivers nothing (the 12:10 fleet-
+ * deploy wedge on cam2/5/6 -- reset BY-NAME into the poisoned finder, connected, zero frames for an
+ * hour) with NO aging clock at all. This one fires ONLY when last_frame_ns == 0, aging the bind from
+ * its recorded create timestamp (bind_ns) instead. On a fire the caller forces the SAME reset ladder
+ * (fresh finder -> last-known -> fleet map) + the #1287 BY-URL<->BY-NAME alternation. PURE decision
+ * (no OBS/NDI calls, only primitives) so it lift-compiles + truth-table-tests offline -- CI is
+ * otherwise the first compiler for this file (tests/distroav_frameless_connected_1096.rs). */
+static inline bool genlock_frameless_bind_reconnect_decision(bool genlock_active, int no_connections,
+							     uint64_t now_ns, uint64_t last_frame_ns,
+							     uint64_t bind_ns, uint64_t frameless_stale_ns)
+{
+	if (!genlock_active)
+		return false; /* genlocked sources only (mirrors genlock_reconnect_decision) */
+	if (no_connections <= 0)
+		return false; /* not connected -> the no_connections==0 / #767 ladder owns it */
+	if (last_frame_ns != 0)
+		return false; /* has delivered a frame -> genlock_reconnect_decision judges it, not this */
+	if (bind_ns == 0)
+		return false; /* no bind timestamp recorded yet -> nothing to age */
+	if (now_ns <= bind_ns)
+		return false; /* clock has not advanced past the bind -> no measurable age */
+	return (now_ns - bind_ns) >= frameless_stale_ns;
+}
+
 /* camera-box #1080: back-off (ns) before the next recv_create_v3 retry after a create FAILURE.
  * recv_create_v3 realistically fails only under transient resource exhaustion; hammering it in a
  * tight loop worsens the exhaustion. Exponential from 250 ms, doubling, capped at 3 s -- fast
@@ -1015,6 +1051,12 @@ void *ndi_source_thread(void *data)
 	unsigned fleet_port_index_1096 = 0;
 	bool bind_recovery_recorded_1096 = false;
 
+	/* camera-box #1096 (reopen 16.9.2026): os_gettime_ns() at the current receiver's successful
+	 * recv_create_v3. The CONNECTED-but-FRAMELESS watchdog ages a bind that connected but never
+	 * delivered a frame (last_frame_ns stays 0, so genlock_reconnect_decision can't judge it) from
+	 * this timestamp instead. Plain uint64_t, no teardown; set at the one create site below. */
+	uint64_t recv_bind_ns_1096 = 0;
+
 	/* camera-box #797 recv-timing instrumentation: locate the ~50-of-60fps pull-loop
 	 * throttle. Times recv_capture_v3 (wait for SDK) vs process_video2+free (our cost,
 	 * dominated by obs_source_output_video) per VIDEO frame; logs a 5s summary per
@@ -1312,6 +1354,11 @@ void *ndi_source_thread(void *data)
 			// camera-box #1080: a successful create clears the retry backoff.
 			recv_create_fail_count = 0;
 
+			// camera-box #1096 (reopen 16.9): record the bind timestamp so the connected-but-
+			// frameless watchdog can age a bind that connects but never delivers a frame (its
+			// last_frame_ns stays 0, invisible to genlock_reconnect_decision).
+			recv_bind_ns_1096 = os_gettime_ns();
+
 			// camera-box #1180: arm the post-connect identity verify IFF this receiver connected
 			// BY-URL (url_resolved_1096). A BY-NAME bind leaves connected_by_url false, so the verify
 			// path below never runs for it -- upstream/default behaviour stays byte-identical. Reset
@@ -1546,6 +1593,37 @@ void *ndi_source_thread(void *data)
 			s->config.reset_ndi_receiver = true;
 			pthread_mutex_unlock(&s->config_mutex);
 			s->last_frame_timestamp = os_gettime_ns();
+			continue;
+		}
+
+		//
+		// camera-box #1096 (reopen 16.9.2026): CONNECTED-but-FRAMELESS watchdog. A receiver reset
+		// BY-NAME into the poisoned finder (the 12:10 fleet-deploy wedge on cam2/5/6) connects
+		// (no_conn>0) but delivers ZERO frames, so s->last_frame_timestamp stays 0 and
+		// genlock_reconnect_decision above (which skips last_frame_ns==0 to avoid judging a
+		// warming-up receiver) never fires -- and neither the no_connections==0 ladder nor #767
+		// re-arms, so the leg sits black for an hour (cured only by an external re-create, e.g. a
+		// same-value SetInputSettings --heal). Age the bind from its recv_create_v3 timestamp
+		// instead: a bind that has delivered NO frame for FRAMELESS_BIND_STALE_NS is broken. This is
+		// a strict complement of #767 (fires ONLY when last_frame_ns==0), so a bind whose #767
+		// reconnect-epoch refresh set last_frame_timestamp is untouched here. Force the SAME reset
+		// ladder (fresh finder -> last-known -> fleet map) + the #1287 alternation (frames_seen is
+		// false), so a frame-less BY-URL bind flips BY-NAME and no dead path pins the leg.
+		if (genlock_frameless_bind_reconnect_decision(genlock_source_is_active(s->obs_source), no_conn,
+							      os_gettime_ns(), s->last_frame_timestamp,
+							      recv_bind_ns_1096, FRAMELESS_BIND_STALE_NS)) {
+			if (ndi_force_by_name_after_frameless(connected_by_url_1180, frames_seen_since_reset_1180)) {
+				force_by_name_next_reset_1180 = true;
+				obs_log(LOG_WARNING,
+					"genlock: #1287 frame-less BY-URL bind never delivered -- forcing BY-NAME on the next rebind '%s'",
+					obs_source_name);
+			}
+			obs_log(LOG_INFO,
+				"genlock: NDI receiver connected but FRAMELESS for %llu s since bind -- forcing rebind '%s'",
+				(unsigned long long)(FRAMELESS_BIND_STALE_NS / 1000000000ULL), obs_source_name);
+			pthread_mutex_lock(&s->config_mutex);
+			s->config.reset_ndi_receiver = true;
+			pthread_mutex_unlock(&s->config_mutex);
 			continue;
 		}
 

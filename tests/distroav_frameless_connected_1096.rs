@@ -172,7 +172,10 @@ fn vectors() -> Vec<(Args, bool)> {
         ((true, -1, 100_000_000_000, 0, 10_000_000_000, s), false),
         // has delivered a frame (last != 0) -> genlock_reconnect_decision owns it, not this.
         // "a receiver that delivered 1 s ago must NOT" fire here even though age from bind is huge.
-        ((true, 1, 100_000_000_000, 99_000_000_000, 10_000_000_000, s), false),
+        (
+            (true, 1, 100_000_000_000, 99_000_000_000, 10_000_000_000, s),
+            false,
+        ),
         // no bind timestamp recorded yet (bind == 0) -> nothing to age.
         ((true, 1, 100_000_000_000, 0, 0, s), false),
         // clock not advanced past bind (now <= bind) -> no measurable age.
@@ -188,7 +191,10 @@ fn vectors() -> Vec<(Args, bool)> {
         ((true, 3, 3_910_000_000_000, 0, 10_000_000_000, s), true), // multi-connection, same
         // Honour the frameless_stale_ns PARAMETER (not a hardcoded 5 s): age 7 s over a 10 s window
         // -> false; age 7 s over a 5 s window -> true.
-        ((true, 1, 17_000_000_000, 0, 10_000_000_000, 10_000_000_000), false),
+        (
+            (true, 1, 17_000_000_000, 0, 10_000_000_000, 10_000_000_000),
+            false,
+        ),
         ((true, 1, 17_000_000_000, 0, 10_000_000_000, s), true),
     ]
 }
