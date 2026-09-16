@@ -229,3 +229,27 @@ right trade — pages must come only from a TRUSTWORTHY sustained reading.
 orchestrator tests that override `fetch_bundle_json` and assert the LOW_QUALITY branch is log-only,
 no notify, confirm reset, AND — while the box is ALERTED — the `alerted_/alert_base_` latch survives
 with no false RECOVERY) + the existing `test_av_step_decision_1267.py` (unchanged, still green).
+
+## #1325 — the dock QUALITY-line FRESHNESS gate (both arms): absent quality + stale = LOW_QUALITY
+
+The #1319 P2/P3 gate treats an ABSENT quality facet (`av_offset_recent_mad_ms` None) as
+`band_quality_ok -> None -> proceed` ("never swallow a real sustained drift"). On **16.9.2026** that
+paged the owner **3×**: the QPSK marker cadence dropped to 0.5 s, the dock's decoder stopped emitting
+its `UPDATED/LOCKED … matched= mad=` QUALITY lines, yet its SUGGESTED offset SERIES kept producing
+(stale) offsets — so quality read absent and the band arm paged on an untrustworthy reading.
+
+The fix threads a FRESHNESS facet through both arms:
+
+- **`bundle_state_gather.av_offset_quality_age_from_log`** — the in-log whole-second age of the
+  freshest dock QUALITY line behind the log head (mirrors `av_offset_dock_live_age_from_log`; same
+  `_recency_gap_s` midnight-wrap model). DISTINCT from `av_offset_dock_live_age_s`, which ages the
+  `diag … locked=yes` heartbeat — the dock's MONITOR loop keeps beating even with a dead decoder, so
+  that facet stayed FRESH through the incident and could not gate the estimator's own staleness.
+- **`classify_av_band` / `classify_av_step`** gain `quality_age_s` + `quality_stale_s`
+  (`DEFAULT_QUALITY_STALE_S` 300): after `band_quality_ok`, if it is None (absent) AND
+  `quality_age_s > quality_stale_s` → **LOW_QUALITY** (no page); a FRESH age (dock actively measuring,
+  just no cluster in THIS recent window) OR an ABSENT age (older box, or a fully-rotated tail) keeps
+  #1319's absent→proceed, so a genuine sustained drift on a live dock still pages. `analyze` /
+  `analyze_band` read the facet from the JSON body (no watchdog shell change needed).
+- **Tier-0:** `pytest tests/python/test_av_step_quality_age_1325.py` + `test_bundle_state_server_log.py`
+  (the facet FLOWS through gather) + the existing #1319/#1267 arms stay green.

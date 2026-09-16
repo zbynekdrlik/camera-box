@@ -12667,3 +12667,36 @@ no version bump (worktree lane; supervisor cherry-picks).
   (no new list-continuation lines); `python3 -m pytest tests/python/test_window_gate_walkdown_1242.py` 8/8.
   CI type-checks the probe-gated files (switch_schedule_continuity.rs tracks TOL+1 dynamically at the
   retained tol=2, needs no edit).
+
+## issue 1325 — mbc (Dante/ASIO) audio-timeline drift + sawtooth-immune measurement (worktree lane, 16.9.2026)
+
+- **Root cause (deliverables 1&2), evidenced from code + LIVE stream reads:** the `mbc` source runs
+  ≈ −18 ppm slow (the genuine Dante-GM-vs-UTC floor `≈ −f_phase`, live `f_phase=+20.97`, `ptp.exe`
+  owns 319/320 = healthy DVS bind, dantesync LOCK/settled — NOT the dantesync#109 collision, so no
+  clock-side restart). The ASRC servo MEASURES it (`estimated=applied=−18`, `cumulative_correction=
+  1.06 ms/60s`) but does NOT hold it out of `buffered_ms` (live drain ~1.1 ms/min == the servo's own
+  cumulative_correction, then +20…+57 ms re-buffer jumps). `asrc_compensator_compensate()` returns a
+  corrected timeline via `corrected = raw/(1+applied/1e6)` (what `src/asrc_bench.rs` validates as
+  locked), but `asrc_process_audio()` DISCARDS that return and feeds only `applied_ppm` to
+  `swr_set_compensation`, whose `output = input×(1+applied/1e6)` is the RECIPROCAL sign — the bench
+  never checks the swresample-fed buffer. The vendored fix is CI-compile + full-bundle deploy + ≥2 h
+  measurement (supervisor-only; a wrong sign DOUBLES the drift live), so it is NOT applied in-lane —
+  handed off with the on-box +18 ppm discriminator experiment (buffered goes FLAT = sign-only bug;
+  still drains = corrected-return must be consumed). See `.claude/rules/asrc-residual-floor.md` addendum.
+- **Deliverable 3(i) — dock quality-line freshness gate (the 3× false page, 16.9.):** new
+  `bundle_state_gather.av_offset_quality_age_from_log` + `classify_av_band`/`classify_av_step` gate:
+  absent quality (`av_offset_recent_mad_ms` None) AND a STALE quality age → LOW_QUALITY (no page);
+  fresh/absent age keeps #1319's absent→proceed. `analyze`/`analyze_band` read the facet from the JSON.
+- **Deliverable 3(ii) — dock-native reference at align time:** ALREADY landed by #1319
+  (`av_sync_persist_dock_reference` merges `dock_offset_median_ms`, `resolve_band_reference` prefers
+  it). Confirmed present; no new code.
+- **Deliverable 3(iii) — buffered_ms DRIFT/STEP detector (REPORT-ONLY):** new
+  `bundle_state_gather.buffered_ms_series_from_log` (slope/max_step/n/age, per-ref-source) +
+  `audio_lag_decision.classify_buffered` (SKIP/STALE/UNKNOWN/STEP/DRIFT/HEALTHY, `buffered` CLI) +
+  `handle_box_buffered` in `audio-lag-alert-watchdog.sh` (log-only, no notify/page). Fixture = tonight's
+  series. Both new facets wired through `build_bundle_state` + the server `_parse_log_facets`.
+- **Verify (Tier-0, zero cargo):** `python3 -m pytest tests/python -q` = 2748+ passed exit 0
+  (new: `test_av_step_quality_age_1325.py`, `test_buffered_ms_1325.py`, +4 server-flow tests in
+  `test_bundle_state_server_log.py`; `test_notify_dedup_key_sweep_1206.py` green — the report-only arm
+  is notify-free); `bash -n` + `shellcheck -S warning` clean on `audio-lag-alert-watchdog.sh`. Rules
+  updated: asrc-residual-floor, audio-lag-watchdog, av-step-upstream-detector.
