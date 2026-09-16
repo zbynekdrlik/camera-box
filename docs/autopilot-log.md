@@ -12708,3 +12708,9 @@ no version bump (worktree lane; supervisor cherry-picks).
 
 - Release PR 1326 E2E attempt 2 (35136632198) failed only on the per-segment fold; A/V measured on 7 cams with the 0.5 s marker, painter clean.
 - `git revert` of 076c56542 / beb2a3254 / a2f6c72a2 = the exact .632 fold; issue 1242 stays open with the grabber under-cadence data (cam2 299.4, cam1 299.7 captured per 300.5 emitted).
+
+## 16.9.2026 22:30 — RELEASE 1.7.0-dev.633 merged (PR 1326, main ebcaf3f96) after E2E attempt 3 GREEN (35141890973)
+
+- Ships: 0.5 s QPSK marker default (issue 1318), the [4b3/8] decodability preflight (issue 1324, closed with the run), the report-only level ceiling (issue 1323), the issue-1325 measurement half (buffered_ms + dock-quality-age facets, watchdog arms; bundle-state scripts deployed to strih/stream/resolume 22:24), the bkshading test hermeticity; the strict-zero fold (issue 1242) was tried + reverted (attempt 2 red on CAM2 1/1 + 0/1; attempt 3 carried the singletons on CAM7/CAM1 instead — not per-grabber).
+- Attempt 3 verdict: overall_pass=true, zero_loss, real_drops 0, A/V measured on 7 cams (preamble screens 20092), rig-wide correction applied via [8/8g].
+- Issue 1325 discriminator (live, no deploy): SetAsrcOuterBiasPpm +10 moved the mbc buffered_ms drain 1:1 with `applied` — the servo measures against the dantesync-slewed system clock while the mixer paces on QPC, and the sign into swresample drains the buffer; the fix lane (vendored libobs) is running.
