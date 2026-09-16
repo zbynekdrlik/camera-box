@@ -12459,3 +12459,28 @@ no version bump (worktree lane; supervisor cherry-picks).
 - Verify (Tier-0): rustc --test module 44/44; standalone C-vs-Rust parity replica 14/14; guard 5/5;
   python decision+gather+roundtrip+qpc_window 52; fmt clean; bash -n + shellcheck clean; both yml
   valid YAML; doc-lint clean. Vendored C++/Qt compiles at CI (FULL-BUNDLE frontend deploy).
+
+## issue 1317 — strih-lx: Linux notebook replacing the Windows strih PC (preparation, runs in parallel) — 2026-09-16
+- RED 4bf3b21ca `test(#1317): [red]` (tests/strih_provision_pure_functions.rs, lib not yet added) →
+  GREEN 18ae40b12 `feat(#1317): [green]`. Base 1.7.0-dev.632 (77220660c), no version bump (prep lane).
+- New source-only role lib scripts/lib/strih-provision.sh (obs-fleet.sh/camera-set.sh convention):
+  the 10 NDI inputs, the STRIH-LX-namespaced outputs/republishes (never a 2nd STRIH-SNV sender),
+  floor-3 latency, the strih CI artifact name, dantesync-CLIENT args + fail-closed not-master check,
+  the light-profile facts, the MiniFuse-4/PipeWire fail-loud audio TODO, + verify predicates
+  (render-tick/distroav/nvenc/single-timesync). Sourced by setup/verify + the RED test.
+- scripts/setup-strih.sh (13 numbered enable-only fail-loud steps, BASH_SOURCE-guarded) +
+  scripts/verify-strih.sh acceptance gate; systemd/strih-obs.service + strih-bundle-state-server.service.
+- CI: linux-genlock.yml gained a `linux-genlock-build-strih` job (artifact obs-genlock-linux-x86_64-strih),
+  ENABLE_BROWSER=OFF + STRIH_BUILD_FLAGS.txt BROWSER-OFF marker (obs-browser/CEF = first follow-up).
+  imag-parity job byte-identical (git diff shows no deletions there).
+- obs-fleet.sh: strih-lx|strih-lx.lan|linux-genlock|traveling row joining bundle-state/obs-liveness/
+  genlock-lock only; harness_obs_fleet_list_1296.rs genlock-lock exact-match updated + a strih-lx
+  membership test added. deploy-genlock-fleet.sh: normalize/box_ip/fleet_linux_bundle_artifact_for +
+  a plan arm (execute deploy = follow-up, box does not exist yet). latency-pins-baseline.json strih-lx
+  floor-3 report-only block.
+- Verify (Tier-0, worktree-isolated — the sourced-lib Rust harness runs at CI): bash -n + shellcheck
+  clean on all .sh; the lib + verify predicates exercised via standalone bash source (RED→GREEN,
+  incl. a shellcheck-caught client-not-master pattern bug fixed pre-commit); deploy pure helpers
+  match deploy_genlock_fleet.rs expectations; latency JSON + linux-genlock.yml valid; cargo fmt
+  --all --check clean; doc-lint grep clean. Sibling lane on issue 1316 (imag retirement) also edits
+  obs-fleet.sh/targets.md — additive-only here, supervisor merges both.

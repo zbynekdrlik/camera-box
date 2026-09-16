@@ -25,6 +25,12 @@ carry the hostname (rollout tracked in #1307). Verify live: `getent hosts video-
 | songs | 10.77.9.212 | Active | SSH: newlevel/newlevel |
 | piano | 10.77.9.236 | Offline | SSH: newlevel/newlevel |
 
+### strih-lx — Linux notebook replacing the Windows strih PC (issue 1317)
+
+| Host | IP Address | Status | Notes |
+|------|------------|--------|-------|
+| strih-lx | `strih-lx.lan` (STATIC IP TBD — assigned 17.9.2026 on arrival, then set `STRIH_LX_IP` + pin it here) | Provisioning (parallel run) | SSH: newlevel/newlevel. The Linux (Ubuntu) notebook taking over the strih cutter/mix role from the Windows STRIH-SNV PC (10.77.9.202). Owner ruling 16.9.2026: runs **IN PARALLEL** with the Windows PC until tuned — the Windows PC stays the production cutter, the ONE dantesync NTP master, and keeps emitting `STRIH-SNV (...)`; strih-lx is a dantesync CLIENT and emits **namespaced `STRIH-LX (...)` NDI outputs** so the wire never carries a 2nd `STRIH-SNV (...)` sender. Provisioned by `scripts/setup-strih.sh` → `scripts/verify-strih.sh` (`.claude/rules/strih-linux-provisioning.md`). Fleet: `scripts/lib/obs-fleet.sh` row `strih-lx|strih-lx.lan|linux-genlock|traveling` (home-check via OBS-WS :4455 so a not-yet-arrived box never pages), joining bundle-state/obs-liveness/genlock-lock. Genlock build = the `obs-genlock-linux-x86_64-strih` CI artifact (linux-genlock.yml strih variant, ENABLE_BROWSER=OFF until the CEF follow-up). Program audio = MiniFuse 4 USB → PipeWire (NO Dante on the strih PC; PipeWire replaces VB-Matrix). Arena stays on the Windows PC (Spout has no Linux); its cg feed reaches strih-lx over NDI. |
+
 ### RESOLUME-SNV — dev1 fleet membership + the `:8899` on-box install (#1296)
 
 **DONE 15.9.2026 (supervisor):** the `:8899` BundleStateServer is installed and serving on RESOLUME-SNV (24 facets incl. `genlock_lock`, read from dev1 `curl http://resolume.lan:8899/bundle-state.json` HTTP 200); the checklist below is the record of how.
