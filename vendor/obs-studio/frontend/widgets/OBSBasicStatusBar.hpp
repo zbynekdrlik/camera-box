@@ -8,6 +8,10 @@
 #include <QPointer>
 #include <QStatusBar>
 
+#include <cstdint>
+#include <deque>
+#include <utility>
+
 class QTimer;
 class QLabel;
 class QNetworkAccessManager;
@@ -78,11 +82,20 @@ private:
 	/* cached dantesync clock facet (written by the async reply, read by UpdateGenlock) */
 	bool genlockClockLocked = false;
 	bool genlockClockNtpFailed = false;
+	/* #1299 Part 4: the slew the disciplined clock reports it applies (f_ptp servo + f_phase integral,
+	 * ppm) — the EXPECTED wall-vs-QPC drift rate the qpc_drift verdict compares the measured windowed
+	 * rate against. Cached by the async :8898 reply, read by UpdateGenlockLabel. */
+	double genlockClockFptpPpm = 0.0;
+	double genlockClockFphasePpm = 0.0;
 	qint64 genlockClockLastOkMs = -1; /* monotonic ms of the last successful :8898 poll; -1 = never */
 	/* recent-event (relock/underrun/late-hold/backward-step in the last 60 s) tracking */
 	quint64 genlockLastEventSum = 0;
 	qint64 genlockLastEventMs = -1; /* monotonic ms of the last observed counter increase */
 	bool genlockFirstSample = true;
+	/* #1299 Part 4: windowed wall-vs-QPC drift RATE. A ring of (monotonic ms, SIGNED cumulative drift
+	 * ms) samples over GENLOCK_QPC_WINDOW_S; the qpc_drift verdict keys on the RATE vs the dantesync
+	 * f_ptp+f_phase slew + a single-sample STEP, not the unbounded cumulative offset. */
+	std::deque<std::pair<qint64, int64_t>> genlockQpcHistory;
 	/* genlock-lock: log-on-change de-dup */
 	int genlockLastLoggedState = -1;
 	int genlockLastLoggedReason = -1;

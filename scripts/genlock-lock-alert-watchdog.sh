@@ -163,7 +163,7 @@ genlock_lock_recovery_decision() {
 # -- per-box decision --------------------------------------------------------------------------
 # handle_box <box> <ip>
 handle_box() {
-  local box="$1" ip="$2" body reachable analyze_out verdict state reason n_absent
+  local box="$1" ip="$2" body reachable analyze_out verdict state reason n_absent qpc_ppm qpc_exp
 
   # resolume is a TRAVELING box -- page it only while home (the #1296 condition). strih/stream/imag
   # are home-check=always so this never skips them; resolume away -> no fetch, no page.
@@ -186,7 +186,12 @@ handle_box() {
   # #1299: senderless input count -- observability only (an absent sender never pages; it is
   # excluded from the widget's DEGRADED gate). Logged so a HEALTHY box with idle inputs is visible.
   n_absent="$(printf '%s\n' "$analyze_out" | sed -n 's/^n_absent=//p')"
-  log "$box ($ip): reachable=$reachable verdict=${verdict:-<none>} state=${state:-} reason=${reason:-} n_absent=${n_absent:-}"
+  # #1299 Part 4: windowed wall-vs-QPC drift telemetry -- observability only (the widget already
+  # folded the rate/step verdict into `state`; a steady disciplined slew no longer pages). Logged so a
+  # genuine rate anomaly (measured far off the dantesync-reported expected slew) is visible in-band.
+  qpc_ppm="$(printf '%s\n' "$analyze_out" | sed -n 's/^qpc_drift_ppm=//p')"
+  qpc_exp="$(printf '%s\n' "$analyze_out" | sed -n 's/^qpc_expected_ppm=//p')"
+  log "$box ($ip): reachable=$reachable verdict=${verdict:-<none>} state=${state:-} reason=${reason:-} n_absent=${n_absent:-} qpc_drift_ppm=${qpc_ppm:-} qpc_expected_ppm=${qpc_exp:-}"
 
   case "$verdict" in
     SKIP)

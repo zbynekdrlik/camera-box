@@ -219,6 +219,10 @@ jobs:
           if ($sb -notmatch [regex]::Escape('genlock_input_phase_events(r.connected ? 1 : 0, r.relocks, r.late_holds,') -or $sb -notmatch [regex]::Escape('recent_event_input_name')) {
             Write-Error "OBSBasicStatusBar.cpp: the #1299 Part 3 connected-phase recent_event feed / offender attribution is gone — the chronic recent_event false-page would re-open; re-apply"; exit 1
           }
+          # #1299 Part 4: the qpc_drift verdict is a WINDOWED RATE + STEP (vs the dantesync-reported f_ptp+f_phase slew), NOT the cumulative wall-vs-QPC offset that grew unbounded and false-paged the fleet overnight 15./16.9. Mirror of GenlockLockState.hpp genlock_qpc_drift_beyond_bound (parity-gated by tests/genlock_lock_state_parity.rs) + tests/genlock_lock_json_guards.rs::genlock_lock_qpc_windowed_drift_present_1299_part4.
+          if ($sb -notmatch [regex]::Escape('genlock_qpc_drift_beyond_bound(') -or $sb -notmatch [regex]::Escape('GENLOCK_QPC_DRIFT_PPM_BOUND')) {
+            Write-Error "OBSBasicStatusBar.cpp: the #1299 Part 4 windowed qpc_drift verdict is gone — the cumulative-slew false-page would re-open; re-apply"; exit 1
+          }
           Write-Output "in-OBS genlock LOCK indicator present (stats API + shared audit fill + output wall-stamping + statusbar widget + genlock-lock: log + genlock-lock-json: fleet facet) — OK"
 
       # #245: assert the PER-SOURCE genlock latency (ms) override is present in the

@@ -117,9 +117,15 @@ def genlock_lock_facet_from_log(text):
 
     Shape:
       {state, reason, n_inputs, n_locked, n_absent, latency_ms, recent_event, qpc_drift_ms,
+       qpc_drift_ppm, qpc_expected_ppm, qpc_step,
        clock:{state}, output:{present, stamping_wallclock},
        inputs:{<name>:{locked, connected, latency_ms, underruns, relocks, late_holds, depth}},
        [recent_event_inputs:[{name, events}]], [audio_unexpected_inputs:[{name}]], source:"log"}
+
+    #1299 (schema v5, Part 4): `qpc_drift_ppm` (measured windowed drift rate), `qpc_expected_ppm` (the
+    dantesync-reported slew the verdict compares against) and `qpc_step` (a single-sample wall STEP
+    tripped) are report-only telemetry — the qpc_drift VERDICT is folded into `state` by the widget.
+    All three default to None for a v1-v4 line from an older build (the cumulative `qpc_drift_ms` stays).
 
     #1299 (schema v3, Part 3): `recent_event_inputs` is the top recent-event offender (name+count),
     present ONLY when the v3 line carries a non-empty list (a DEGRADED/recent_event page names it).
@@ -197,6 +203,13 @@ def genlock_lock_facet_from_log(text):
         "latency_ms": payload.get("latency_ms"),
         "recent_event": bool(payload.get("recent_event")),
         "qpc_drift_ms": payload.get("qpc_drift_ms"),
+        # #1299 Part 4 (schema v5): windowed wall-vs-QPC drift telemetry (report-only). The qpc_drift
+        # VERDICT now keys on the RATE (`qpc_drift_ppm`) vs the dantesync-reported slew
+        # (`qpc_expected_ppm`) + a STEP (`qpc_step`), not the unbounded cumulative `qpc_drift_ms` above
+        # (kept as raw telemetry). All three default to None for a v1-v4 line from an older build.
+        "qpc_drift_ppm": payload.get("qpc_drift_ppm"),
+        "qpc_expected_ppm": payload.get("qpc_expected_ppm"),
+        "qpc_step": payload.get("qpc_step"),
         "clock": {"state": clock_str} if isinstance(clock_str, str) else {},
         "output": {
             "present": output_str != "absent",

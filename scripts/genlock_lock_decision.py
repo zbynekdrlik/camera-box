@@ -55,6 +55,40 @@ R_QPC_DRIFT = "qpc_drift"
 R_AUDIO_PAIRING = "audio_pairing"      # #1303: audio-enabled source unpaired with its video FIFO hold
 R_AUDIO_UNEXPECTED = "audio_unexpected"  # #1303: silent-by-contract source found audible (double-audio hazard)
 
+# #1299 Part 4 -- the windowed wall-vs-QPC drift bounds (mirror src/genlock_lock_state.rs +
+# GenlockLockState.hpp / OBSBasicStatusBar.cpp). The verdict is a WINDOWED RATE + STEP, not the
+# unbounded cumulative offset (which grows ~50 ms/h on a disciplined clock and false-paged the fleet).
+GENLOCK_QPC_DRIFT_PPM_BOUND = 50.0   # max |measured - expected| drift rate (ppm) before DEGRADED
+GENLOCK_QPC_STEP_BOUND_MS = 33       # a single-sample wall STEP beyond this (one 30 fps frame) DEGRADES
+GENLOCK_QPC_WINDOW_S = 300           # rolling window (s) the widget averages the drift rate over
+
+
+def qpc_window_rate_ppm(drift_delta_ms, elapsed_ms):
+    """#1299 Part 4 -- the windowed drift RATE in ppm from an integer-ms cumulative-drift delta over an
+    integer-ms elapsed span. `delta/elapsed` is dimensionless; x 1e6 is ppm. 0.0 for a non-positive
+    span (not-ready / degenerate). Byte-faithful mirror of camera_box::genlock_lock_state::
+    qpc_window_rate_ppm and the arithmetic inside the C genlock_qpc_drift_beyond_bound."""
+    if elapsed_ms <= 0:
+        return 0.0
+    return float(drift_delta_ms) / float(elapsed_ms) * 1_000_000.0
+
+
+def qpc_drift_beyond_bound(rate_ready, drift_delta_ms, elapsed_ms, expected_ppm, ppm_bound,
+                           max_step_ms, step_bound_ms):
+    """#1299 Part 4 -- decide whether wall-vs-QPC drift is a genuine genlock hazard, and report the
+    measured windowed rate. A steady slew on a dantesync-disciplined box is BY DESIGN, so the cumulative
+    offset must NOT gate. DEGRADED only when (a) a single-sample STEP exceeds `step_bound_ms` (judged as
+    soon as two samples exist, rate_ready or not), OR (b) once `rate_ready`, the measured rate departs
+    from `expected_ppm` by more than `ppm_bound`. Returns (beyond_bound: bool, measured_ppm: float) --
+    byte-faithful mirror of camera_box::genlock_lock_state::qpc_drift_beyond_bound (C-vs-Rust
+    parity-gated), so the test suite can pin the same fixture the Rust/C gate uses."""
+    measured_ppm = qpc_window_rate_ppm(drift_delta_ms, elapsed_ms) if rate_ready else 0.0
+    if abs(max_step_ms) > step_bound_ms:
+        return (True, measured_ppm)          # a STEP is an immediate hazard
+    if not rate_ready:
+        return (False, measured_ppm)         # the rate branch needs a filled window
+    return (abs(measured_ppm - expected_ppm) > ppm_bound, measured_ppm)
+
 
 def decide(n_inputs, n_locked, recent_event, qpc_drift_beyond_bound, clock_present,
            clock_locked, clock_ntp_failed, output_present, output_stamping, n_absent=0,
@@ -158,11 +192,13 @@ def analyze(bundle_json_text, box_reachable):
     box was not reachable this pass; UNKNOWN (state None) when the facet is absent."""
     if box_reachable != 1:
         return {"verdict": "SKIP", "state": None, "reason": None,
-                "n_inputs": None, "n_locked": None, "n_absent": None}
+                "n_inputs": None, "n_locked": None, "n_absent": None,
+                "qpc_drift_ppm": None, "qpc_expected_ppm": None}
     facet = facet_from_obj(_loads_obj(bundle_json_text))
     if facet is None:
         return {"verdict": "UNKNOWN", "state": None, "reason": None,
-                "n_inputs": None, "n_locked": None, "n_absent": None}
+                "n_inputs": None, "n_locked": None, "n_absent": None,
+                "qpc_drift_ppm": None, "qpc_expected_ppm": None}
     state = facet.get("state")
     reason = facet.get("reason")
     n_inputs = facet.get("n_inputs")
@@ -172,7 +208,11 @@ def analyze(bundle_json_text, box_reachable):
     reason = _enrich_recent_event_reason(reason, facet)
     reason = _enrich_audio_unexpected_reason(reason, facet)
     return {"verdict": classify(state, box_reachable), "state": state, "reason": reason,
-            "n_inputs": n_inputs, "n_locked": n_locked, "n_absent": n_absent}
+            "n_inputs": n_inputs, "n_locked": n_locked, "n_absent": n_absent,
+            # #1299 Part 4: windowed drift telemetry (report-only; the widget already decided `state`
+            # from these, so they never change the verdict here — logged so a rate anomaly is visible).
+            "qpc_drift_ppm": facet.get("qpc_drift_ppm"),
+            "qpc_expected_ppm": facet.get("qpc_expected_ppm")}
 
 
 def _enrich_recent_event_reason(reason, facet):
@@ -238,7 +278,8 @@ def _main(argv):
         text = "" if ns.box_reachable != 1 else sys.stdin.buffer.read().decode("utf-8", errors="replace")
         res = analyze(text, ns.box_reachable)
         for k, key in (("verdict", "verdict"), ("state", "state"), ("reason", "reason"),
-                       ("n_inputs", "n_inputs"), ("n_locked", "n_locked"), ("n_absent", "n_absent")):
+                       ("n_inputs", "n_inputs"), ("n_locked", "n_locked"), ("n_absent", "n_absent"),
+                       ("qpc_drift_ppm", "qpc_drift_ppm"), ("qpc_expected_ppm", "qpc_expected_ppm")):
             print(f"{k}={_fmt(res[key])}")
         return 0
 

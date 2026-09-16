@@ -450,3 +450,121 @@ fn c_name_is_camera_matches_the_rust_authority_1303() {
         diffs.len(), names.len(), diffs.join("\n")
     );
 }
+
+/// #1299 Part 4 — lift the `genlock_qpc_drift_beyond_bound` function VERBATIM out of the header (it sits
+/// AFTER `genlock_name_is_camera`, contiguous, so this is a separate lift). It takes doubles + a
+/// double out-param, so the harness compares BOTH the int verdict and the measured-rate telemetry
+/// against the Rust authority `camera_box::genlock_lock_state::qpc_drift_beyond_bound`.
+fn lift_qpc_drift() -> String {
+    let path = repo(HEADER);
+    let src = fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+    let start = src
+        .find("static inline int genlock_qpc_drift_beyond_bound(")
+        .unwrap_or_else(|| {
+            panic!("#1299 Part 4: {HEADER} no longer defines genlock_qpc_drift_beyond_bound — the windowed wall-vs-QPC drift decision's C mirror is gone, nothing to parity-check.")
+        });
+    let end = src[start..]
+        .find("\n}\n")
+        .map(|i| start + i + 3)
+        .expect("#1299 Part 4: genlock_qpc_drift_beyond_bound has no closing brace");
+    src[start..end].to_string()
+}
+
+#[test]
+fn c_qpc_drift_beyond_bound_matches_the_rust_authority_1299_part4() {
+    use camera_box::genlock_lock_state::qpc_drift_beyond_bound;
+    let block = lift_qpc_drift();
+
+    // (rate_ready, drift_delta_ms, elapsed_ms, expected_ppm, ppm_bound, max_step_ms, step_bound_ms)
+    // — the reopen fixture shapes + edge cases (negative drift/step, elapsed 0, exactly-at-bound).
+    let vs: [(i32, i64, i64, f64, f64, i64, i64); 14] = [
+        (1, 641, 45_000_000, 12.0, 50.0, 0, 33), // overnight strih slope ≈14.24 ppm -> not beyond
+        (0, 0, 0, 12.0, 50.0, 40, 33),           // 40 ms step -> beyond (rate not ready)
+        (1, 6, 45_000, 12.0, 50.0, 1, 33),       // ≈133 ppm rate mismatch -> beyond
+        (0, 999, 1000, 12.0, 50.0, 0, 33),       // not ready, big delta ignored -> not beyond, 0.0
+        (0, 0, 0, 12.0, 50.0, -40, 33),          // negative step magnitude -> beyond
+        (1, -641, 45_000_000, -12.0, 50.0, 0, 33), // wall stepping back, matches -12 ppm -> not beyond
+        (1, 5, 0, 12.0, 50.0, 0, 33),              // rate_ready but elapsed 0 -> measured 0.0 guard
+        (1, 4, 300_000, 13.0, 50.0, 1, 33),        // ≈13.3 ppm steady -> not beyond
+        (1, 30, 300_000, 12.0, 50.0, 0, 33),       // 100 ppm -> beyond
+        (1, 0, 300_000, 12.0, 50.0, 33, 33), // step exactly at bound (not > ) + 0 ppm -> not beyond
+        (1, 0, 300_000, 12.0, 50.0, 34, 33), // step one over bound -> beyond
+        (1, 186, 300_000, 12.0, 50.0, 0, 33), // 620 ppm huge -> beyond
+        (0, 0, 0, 0.0, 50.0, 0, 33),         // nothing happening -> not beyond
+        (1, 19, 300_000, 12.0, 50.0, 0, 33), // ≈63.3 ppm, |63.3-12|=51.3 just over 50 -> beyond
+    ];
+
+    let mut c = String::from("#include <stdio.h>\n");
+    c.push_str(&block);
+    c.push_str("int main(void){\n    double m; int r;\n");
+    for &(ready, dd, el, exp, pb, ms, sb) in &vs {
+        c.push_str(&format!(
+            "    m=0; r=genlock_qpc_drift_beyond_bound({ready},{dd}LL,{el}LL,{exp},{pb},{ms}LL,{sb}LL,&m); printf(\"%d %.9g\\n\", r, m);\n"
+        ));
+    }
+    c.push_str("    return 0;\n}\n");
+
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("genlock_qpc_drift_parity_1299p4");
+    fs::create_dir_all(&dir).expect("create the parity scratch dir");
+    let cfile = dir.join("qpc.c");
+    let bin = dir.join("qpc.bin");
+    fs::write(&cfile, &c).expect("write the parity harness");
+
+    let cc = std::env::var("CC").unwrap_or_else(|_| "cc".to_string());
+    let out = Command::new(&cc)
+        .args(["-std=gnu99", "-Wall", "-Wextra", "-Werror", "-O1"])
+        .arg(&cfile)
+        .arg("-o")
+        .arg(&bin)
+        .output()
+        .unwrap_or_else(|e| {
+            panic!("#1299 Part 4: could not run the C compiler `{cc}` ({e}). This gate compiles the vendored genlock_qpc_drift_beyond_bound to prove the C and the Rust authority agree; it must FAIL rather than skip. Install a C compiler or set CC.")
+        });
+    assert!(
+        out.status.success(),
+        "#1299 Part 4: genlock_qpc_drift_beyond_bound lifted from {HEADER} does NOT COMPILE standalone under -Wall -Wextra -Werror:\n--- cc stderr ---\n{}\n--- harness ---\n{c}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let run = Command::new(&bin)
+        .output()
+        .expect("#1299 Part 4: the compiled qpc-drift parity harness failed to execute");
+    assert!(
+        run.status.success(),
+        "#1299 Part 4: harness exited non-zero: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let stdout = String::from_utf8(run.stdout).expect("harness stdout is utf-8");
+    let c_out: Vec<(bool, f64)> = stdout
+        .lines()
+        .map(|l| {
+            let mut it = l.split_whitespace();
+            let r = it.next().unwrap() == "1";
+            let m: f64 = it.next().unwrap().parse().expect("measured ppm f64");
+            (r, m)
+        })
+        .collect();
+    assert_eq!(
+        c_out.len(),
+        vs.len(),
+        "#1299 Part 4: harness printed {} lines for {} vectors",
+        c_out.len(),
+        vs.len()
+    );
+
+    let mut diffs = Vec::new();
+    for (&(ready, dd, el, exp, pb, ms, sb), &(cr, cm)) in vs.iter().zip(&c_out) {
+        let v = qpc_drift_beyond_bound(ready != 0, dd, el, exp, pb, ms, sb);
+        let ppm_ok = (v.measured_ppm - cm).abs() <= 1e-6 * v.measured_ppm.abs().max(1.0);
+        if v.beyond_bound != cr || !ppm_ok {
+            diffs.push(format!(
+                "  ready={ready} dd={dd} el={el} exp={exp} pb={pb} step={ms} sb={sb} -> C ({cr},{cm}), Rust ({},{})",
+                v.beyond_bound, v.measured_ppm
+            ));
+        }
+    }
+    assert!(
+        diffs.is_empty(),
+        "#1299 Part 4: the vendored C genlock_qpc_drift_beyond_bound DIVERGED from the Rust authority on {} of {} vectors — the windowed wall-vs-QPC drift decision must be numerically identical on both ports:\n{}",
+        diffs.len(), vs.len(), diffs.join("\n")
+    );
+}
