@@ -12585,3 +12585,19 @@ no version bump (worktree lane; supervisor cherry-picks).
   re-checked at (2,0.95); mining-tool pytest 5/5; cargo fmt --all --check clean; doc-lint grep clean.
   The Rust tests (verdict_gate_strict_fold_1242 + the window_gate/presentation_cadence unit tests) +
   full suite run at CI/integration.
+
+## issue 1316 (follow-up) — rig-status renders the imag RETIRED verdict as a neutral row (lane/1316-retired-row)
+- Problem: rig-health-audit.py emits a neutral `[RETIRED] imag …` row, but rig-status.py's
+  `_NODE_RE` matched only PASS/WARN/FAIL → the returned box's row was silently DROPPED (invisible),
+  and `summarize` would KeyError if it were ever parsed. Reproduced live (RIG_HEALTH_IMAG_RETIRED=1
+  audit emits the row; parse_audit dropped it; no `imag` in the HTML).
+- Fix (scripts/rig-status.py): single-source `RETIRED_VERDICT` from the audit constant
+  (`_load_audit_constant("IMAG_RETIRED_VERDICT")`, importlib); admit it in `_NODE_RE`; `summarize`
+  skips neutral verdicts; `overall_state` never flips on RETIRED AND now returns ERROR for a
+  neutral-only records-set (no real health tier) — closing the false-green hole; grey `.b-RETIRED`
+  badge (`--retired-*` light+dark vars) with Slovak label „VRÁTENÝ", sorted last. No emitter change
+  needed (the audit already emits the right neutral token; test_rig_health_audit_imag_retired_1316
+  stays green).
+- RED test(#1316) 97cb37589 → GREEN fix. Tests: tests/python/test_rig_status_retired_1316.py (7).
+- Tier-0 verify (no cargo): `python3 -m pytest tests/python` = 2657 passed (exit 0); rule doc
+  `.claude/rules/rig-status-page.md` updated.
