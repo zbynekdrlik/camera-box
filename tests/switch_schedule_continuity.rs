@@ -86,8 +86,8 @@ fn one_cambox_dropping_over_tolerance_fails_overall_889_regate() {
     // cam2: inject a REAL gap deep in the settled core (gen_ts 2.5s into its window) — the tail
     // is shifted up by `(tolerance+1) * STEP`, so the painted tick jumps by `(tolerance+2) * STEP`
     // at the seam where it should jump by STEP alone, well past the guard, producing exactly
-    // `tolerance+1` dropped slots (one over whatever the tolerance is walked to). At the shipped
-    // tolerance=5 that's shift=12, a 14-step jump, 6 dropped slots.
+    // `tolerance+1` dropped slots (one over whatever the tolerance is walked to). At the current
+    // walked-back tolerance=2 (issue 1242) that's shift=6, an 8-step jump, 3 dropped slots.
     let over_by_one = WINDOW_COPIES_GAPS_TOLERANCE + 1;
     let shift = over_by_one * (STEP as u32);
     let mut cam2 = clean_window_frames(5 * S, 1000, 9000);

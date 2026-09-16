@@ -88,7 +88,8 @@ def _genlock_sha(run_dir):
         p = os.path.join(run_dir, vf)
         if os.path.exists(p):
             try:
-                return json.load(open(p)).get("genlock_build_sha", "?")
+                with open(p) as fh:
+                    return json.load(fh).get("genlock_build_sha", "?")
             except (OSError, ValueError):
                 pass
     return "?"
@@ -103,7 +104,8 @@ def main(argv):
         if not vjs:
             continue
         try:
-            v = json.load(open(vjs[0]))
+            with open(vjs[0]) as fh:
+                v = json.load(fh)
         except (OSError, ValueError):
             continue
         run = os.path.basename(vjs[0])[len("verdict-"):-len(".json")]

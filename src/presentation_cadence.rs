@@ -300,10 +300,14 @@ pub fn gates_overall_pass() -> bool {
 ///
 /// The floor is CONSERVATIVE. #1142 read the sick fleet at 0.67-0.78 on `derived_uniform_fraction`
 /// and RED'd it by design; #1250 (below) then showed most of that depression was a benign
-/// sampling-phase BEAT (balanced 1↔3 net-zero pairs), so the gate now reads
-/// `beat_corrected_uniform_fraction` (typical windows 0.92-0.99; the GATED worst window is 0.916 /
-/// 0.947 on the two mined runs — PASS with ~0.016 margin) and REDs only GENUINE
-/// non-uniformity beyond the beat. A healthy 60fps-through-30fps chain reads ~1.0.
+/// sampling-phase BEAT (balanced 1↔3 net-zero pairs), so the gate reads
+/// `beat_corrected_uniform_fraction` and REDs only GENUINE non-uniformity beyond the beat. A
+/// healthy 60fps-through-30fps chain reads ~1.0. (The pre-#1250 mined runs read beat-corrected
+/// worst 0.916/0.947 at the THEN-0.90 floor; those runs were on PRE-render-freeze-fix bundles, and
+/// issue 1242 RESTORED the floor to 0.95, above which those specific 0.916/0.947 readings now RED —
+/// the POST-fix rig reads beat-corrected worst ~0.998, see `UNIFORM_FRACTION_MIN`'s own doc. If a
+/// genuinely-clean POST-fix window ever proves to dip below 0.95, the guard rail is the one-line
+/// report-only revert `uniformity_gates_overall_pass() -> false`.)
 ///
 /// #1243 (walk-back: issue 1242): floor WALKED 0.95 -> 0.93 -> 0.90 (two steps, same ticket).
 /// Step 1: run 1629895310 (the FIRST complete 7-cam post-fix verdict, dev 45a856945) had worst
@@ -326,10 +330,13 @@ pub fn gates_overall_pass() -> bool {
 /// complementary steps (1↔3 around the mode 2) that net to zero, but `derived` counts each 1 and 3
 /// as non-uniform, dropping to 0.57–0.92 on a chain with copies==0/gaps==0 (run 1326320314; the
 /// "sick 0.67–0.78" numbers above were mostly this beat, not FIFO churn). `beat_corrected_uniform_
-/// fraction` collapses those balanced pairs back to uniform (see the field doc), so the current rig's
-/// GATED worst window reads 0.916 / 0.947 on the two mined runs (typical windows 0.92-0.99) and
-/// PASSES — the floor now catches GENUINE non-uniformity (real churn/judder beyond the benign beat),
-/// not the measurement beat. The block surfaces ALL THREE
+/// fraction` collapses those balanced pairs back to uniform (see the field doc). On the PRE-fix
+/// mined runs the beat-corrected worst read 0.916 / 0.947, which PASSED at the THEN-0.90 floor; but
+/// those runs were on PRE-render-freeze-fix bundles (the churn issues 1318/1320 fixed co-depressed
+/// their windows), so issue 1242 RESTORED the floor to 0.95 (above 0.916/0.947 — they now RED)
+/// against the POST-fix rig which reads beat-corrected worst ~0.998. The floor now catches GENUINE
+/// non-uniformity (real churn/judder beyond the benign beat), not the measurement beat. The block
+/// surfaces ALL THREE
 /// (`worst_uniform_fraction` = beat-corrected gated, `worst_derived_uniform_fraction` +
 /// `worst_raw_uniform_fraction` diagnostics), so reverting to `derived` is a one-line consumer
 /// change.
@@ -338,10 +345,15 @@ pub fn gates_overall_pass() -> bool {
 /// root-caused + fixed the strih render-freeze churn source (cure = genlock bundle `02b53180b`),
 /// so the residual real churn is now characterized on the BEAT-CORRECTED reading. Data-first
 /// (mining tool `scripts/window_gate_walkdown.py`, segregated by the rig-verified
-/// `version-strih.json.genlock_build_sha`): the post-fix run (180691712, `02b53180b`) reads worst
-/// beat-corrected uniformity 0.9988, and the adjacent clean runs (494687603, 241316104,
-/// 1651388579) all read 0.9976 -- so a 0.95 floor passes every clean run with ~0.05 margin while
-/// the pre-fix churny run (25635487) at 0.9481 correctly REDs. 0.95 is the original ship value
+/// `version-strih.json.genlock_build_sha`): the ONLY run on the cure bundle -- 180691712,
+/// `02b53180b` -- reads worst beat-corrected uniformity 0.9988 (post-fix sample is n=1), and clean
+/// runs on ADJACENT pre-cure bundles (494687603 `c4b16074c`, 241316104 / 1651388579 `d55afb726`)
+/// read 0.9976 -- so no observed clean run sits below 0.9976, while the pre-fix churny run
+/// (25635487) at 0.9481 correctly REDs. 0.95 clears every observed clean window with ~0.05 margin;
+/// the n=1 post-fix thinness is guarded by the one-line report-only revert
+/// (`uniformity_gates_overall_pass() -> false`) if a genuinely-clean post-fix window ever dips below
+/// it -- the SAME data-thin discipline the copies/gaps interim step carries. 0.95 is the original
+/// ship value
 /// (the walk 0.95 -> 0.93 -> 0.90 on issue 1243 fully reversed); a future tighten below 0.95 is
 /// out of scope here (would be widening past the ship value). Gated on the beat-corrected field,
 /// unchanged (#1250).
@@ -825,8 +837,10 @@ mod tests {
         // The load-bearing intent: a GENUINELY non-uniform window (~0.67-0.78) must FAIL the floor
         // (restored to 0.95 by issue 1242). NOTE (#1250): these 0.67-0.78
         // numbers were the DERIVED reading of the sick rig, which #1250 showed was mostly a benign
-        // sampling-phase beat (the BEAT-CORRECTED gated worst of that same rig is 0.916/0.947 and PASSES).
-        // The gate now reads `beat_corrected_uniform_fraction`, so a value this low means genuine
+        // sampling-phase beat (the BEAT-CORRECTED gated worst of those PRE-render-freeze-fix runs was
+        // 0.916/0.947 — which PASSED at the then-0.90 floor but now RED at the restored 0.95; the
+        // POST-fix rig reads ~0.998). The gate reads `beat_corrected_uniform_fraction`, so a value
+        // this low (0.67) means genuine
         // non-uniformity beyond the beat (real churn/judder). This is a pure FUNCTION test — the
         // gate compares whatever fraction it is fed against the floor, field-agnostic — so a 0.67
         // input must still FAIL regardless of which field produced it.
