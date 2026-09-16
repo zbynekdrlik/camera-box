@@ -171,3 +171,7 @@ to airuleset and the webhook branch actually throttles (see
 fires on a path an existing test already exercised with `webhook=None` (av_sync_measure's
 `one_measurement` now delivers on the default path when `|offset| >= threshold`, so the #805
 calibration-log tests had to stub `deliver_alert` to avoid firing a real notify).
+
+## Production-critical re-ping needs a QUALITY-GATED input — the 16.9.2026 night storm (135 pages)
+
+The 10-min re-ping class did exactly what the ruling asks, on THREE inputs that were false or stale: a CUMULATIVE widget term (`qpc_drift_ms`, unbounded on a disciplined clock → 38 pages), an estimator with MAD as wide as the band (the av-sync dock, ±40 ms → 78 pages), and a stale checked-in baseline (port map → 14 pages). Rule for every production-critical watchdog: (1) never feed the verdict a cumulative/since-start quantity — windowed rates + steps only; (2) an estimator-fed verdict carries its own quality gate (MAD/sample-count) and reads LOW_QUALITY (log-only) when it fails; (3) a baseline-fed verdict is re-captured in the same sitting as any deploy that legitimately moves the baseline. A storm of true-by-construction pages is a defect of the INPUT, not a reason to relax the re-ping.

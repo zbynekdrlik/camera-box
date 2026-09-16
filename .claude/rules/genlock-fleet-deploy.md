@@ -227,3 +227,9 @@ OBS-WS (reusing `latency_pins_verify.py`'s `_conn` + `GetInputList` + `GetInputS
   (a saved `--plan` .ps1 is parsed whole in file mode, so the plan ends on a clean `exit 0` and the
   fleet-log record is emitted as a `#`-comment, never a bare trailing tab record that breaks the
   parse).
+
+## A dev push CANCELS every in-flight run on ancestor commits — dispatch the genlock builds LAST (16.9.2026)
+
+The airuleset `post-push-ci-cleanup` hook cancels every run whose commit is an ancestor of the new dev HEAD, regardless of workflow — including the three manually dispatched genlock builds (`gh workflow run "Windows genlock build …"/"… FAST …"/"Linux genlock build …" --ref dev`) that a harness-only follow-up push does NOT re-trigger (the `paths:` filters skip it). 15.9.2026: ~45 min of bundle builds on cfb59a9cf died to a scripts-only push. Batch rule: integrate + push every ready lane FIRST, then dispatch the builds ONCE, then HOLD further dev pushes (cherry-pick returned lanes locally, push after the bundle is downloaded). A push to `dev` never cancels `main` runs (main's merge commits are not ancestors of dev).
+
+After every fleet relaunch, re-run `scripts/ndi-portmap-audit.sh --check`: the sender-output pin (issue 1185) re-orders strih's NDI ports on relaunch, so the checked-in baseline goes stale and the dev1 port-map watchdog pages (14 pages 15./16.9.) — `--capture` + commit the baseline as part of the deploy sitting.

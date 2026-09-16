@@ -121,3 +121,7 @@ that Qt widget; it is NOT reachable from the obs-websocket RequestHandler. So:
   three-line open satisfies the hook (`-euo` present) and nets exactly `-uo pipefail` (the `set +e`
   turns `-e` back off). Document the `set +e` with a one-line reason so a reviewer sees it is
   deliberate.
+
+## Roster override on dev1 = quoted `name|host` entries (16.9.2026)
+
+`GENLOCK_LOCK_BOXES` mirrors `obs_fleet_boxes genlock-lock` byte-for-byte: `strih|10.77.9.202 stream|10.77.9.204 resolume|resolume.lan` (bare names resolve as hosts and read `:8899 not fetchable`). In a systemd drop-in the value has spaces, so it MUST be quoted — `Environment="GENLOCK_LOCK_BOXES=strih|10.77.9.202 stream|10.77.9.204 resolume|resolume.lan"`; unquoted, systemd keeps only the first token and logs `Invalid environment assignment`. imag is excluded this way while the box is being returned (issue 1316) and runs thermally clamped (issue 1040).
