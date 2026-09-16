@@ -31,8 +31,10 @@
 # monochrome)`. This robustly catches the flat-grey no-signal mode (ShadowCast) and any frame-stall
 # mode (no fresh line). The Elgato purple-noise mode (colourful, frames flow) reads as colour, so it
 # needs the #1079 `rough=` term (per-frame spatial-roughness): high roughness + colour = the structure-
-# less-noise signature. This lib PARSES + surfaces `rough=` REPORT-ONLY (fleet-wide telemetry); it does
-# NOT gate/classify on it yet — a data-first follow-up calibrates the threshold before it pages.
+# less-noise signature. This lib PARSES `rough=` and (issue 1099) classifies a colour frame whose
+# roughness exceeds the calibrated noise threshold as PURPLE_NOISE — but the watchdog surfaces it
+# REPORT-ONLY (never a page): the healthy side is measured (threshold clears it), yet the positive
+# class (a real Elgato no-signal episode) is unmeasured, so arming the page is deferred.
 #
 # Source-only: pure functions, no side effects at source time.
 
@@ -88,7 +90,21 @@ splitter_health_is_healthy() {
   fi
 }
 
-# splitter_health_classify <reachable> <capturing> <colour> <healthy_siblings> -> stdout: verdict=<X>
+# _splitter_rough_exceeds <rough> <threshold> -> stdout: 1 | 0
+#   #1099 float-safe compare (bash has no native float ops). Returns 1 IFF BOTH `rough` and
+#   `threshold` are numeric AND rough > threshold (EXCLUSIVE, mirroring is_likely_noise). Any
+#   non-numeric input -- a `-` placeholder from an old cambox, an empty/unset threshold (noise
+#   detection disabled), garbage -- returns 0, so a rolling redeploy or a disabled threshold can
+#   NEVER manufacture a false PURPLE_NOISE verdict.
+_splitter_rough_exceeds() {
+  local rough="${1:-}" thr="${2:-}"
+  case "$rough" in "" | *[!0-9.]* | "." ) printf '0\n'; return 0 ;; esac
+  case "$thr"   in "" | *[!0-9.]* | "." ) printf '0\n'; return 0 ;; esac
+  awk -v a="$rough" -v b="$thr" 'BEGIN { exit (a > b) ? 0 : 1 }' && printf '1\n' || printf '0\n'
+}
+
+# splitter_health_classify <reachable> <capturing> <colour> <healthy_siblings> [rough] [noise_thr]
+#     -> stdout: verdict=<X>
 #   NODATA       : reachable != 1 (box unreadable -- never a per-port claim; box off / network).
 #   NO_CAPTURE   : reachable + NOT capturing (no fresh chroma line). Report-only, NEVER paged: a
 #                  DIFFERENT, ambiguous failure class (camera-box crashed / device-busy / stopped by
@@ -98,7 +114,15 @@ splitter_health_is_healthy() {
 #                  ShadowCast flat grey) = capturing=1 with bad CONTENT -- which is what DEAD_PORT keys
 #                  on. A fully-stalled grabber on a dead port therefore lands in this report bucket
 #                  (operator-visible in the log) rather than a mis-attributed splitter-port page.
-#   OK           : reachable + capturing + colour.
+#   PURPLE_NOISE : reachable + capturing + COLOUR + rough > noise_thr (#1099). The Elgato 4K S
+#                  no-signal mode is COLOURFUL structureless static (frames flow, colour=1), the axis
+#                  the colour/grayscale label alone misses. REPORT-ONLY in the watchdog (never a
+#                  page): the calibrated threshold (mirrored from src/capture.rs NOISE_ROUGHNESS_
+#                  THRESHOLD) clears the measured healthy ceiling, but the positive class is unmeasured
+#                  so the page is deferred. `rough`/`noise_thr` are OPTIONAL trailing args -- absent /
+#                  `-` / empty threshold -> pre-#1099 behaviour (colour -> OK), so a rolling fleet
+#                  redeploy and the 4-arg callers are unaffected.
+#   OK           : reachable + capturing + colour (and rough within the noise threshold, or no threshold).
 #   DEAD_PORT    : reachable + capturing + GRAYSCALE + >=1 proven-good sibling. The tight splitter-port
 #                  signal: the box is alive and capturing, but its filmed content lost the signal a
 #                  sibling on the SAME camera+splitter still receives -> that box's own output leg.
@@ -107,7 +131,7 @@ splitter_health_is_healthy() {
 #   A non-numeric healthy_siblings is treated as 0 (a garbage count must NEVER be read as "a healthy
 #   sibling exists" and produce a false DEAD_PORT page -- fail toward SOURCE_WIDE, the report-only side).
 splitter_health_classify() {
-  local r="${1:-0}" c="${2:-0}" k="${3:-0}" sib="${4:-0}"
+  local r="${1:-0}" c="${2:-0}" k="${3:-0}" sib="${4:-0}" rough="${5:--}" noise_thr="${6:-}"
   case "$sib" in *[!0-9]* | "") sib=0 ;; esac
   if [ "$r" != "1" ]; then
     printf 'verdict=NODATA\n'
@@ -118,7 +142,14 @@ splitter_health_classify() {
     return 0
   fi
   if [ "$k" = "1" ]; then
-    printf 'verdict=OK\n'
+    # #1099: a COLOUR frame whose roughness exceeds the calibrated noise threshold is the Elgato
+    # purple-noise no-signal signature -> PURPLE_NOISE (REPORT-ONLY in the watchdog). Absent /
+    # non-numeric rough or an unset threshold -> the compare returns 0 -> plain OK (pre-#1099).
+    if [ "$(_splitter_rough_exceeds "$rough" "$noise_thr")" = "1" ]; then
+      printf 'verdict=PURPLE_NOISE\n'
+    else
+      printf 'verdict=OK\n'
+    fi
     return 0
   fi
   if [ "$sib" -ge 1 ]; then

@@ -309,16 +309,20 @@ pub fn is_color_frame(u_dev: f32, v_dev: f32) -> bool {
 /// frame is more likely UNSTRUCTURED noise (an Elgato-class no-signal purple-noise
 /// render) than a real picture.
 ///
-/// UNCALIBRATED / REPORT-ONLY (#1079). This constant is the calibratable home for the
-/// dormant [`is_likely_noise`] classifier; nothing live pages or gates on it yet. A real
-/// picture (church scene, QR/Vernier test pattern) has strongly correlated neighbouring
-/// pixels → low roughness (typ. <15); uncorrelated coloured static → high roughness
-/// (typ. 40+ on the 16-235 video luma range). The provisional value is deliberately
-/// conservative and mid-band; a data-first follow-up walks it against fleet `rough=`
-/// telemetry before it is ever wired into a live page/gate (the #905 "keep the mechanism
-/// dormant, not deleted" discipline). `pub` for the same reason as [`CHROMA_SAMPLE_FRAMES`]
-/// — the `camera-box` binary is a SEPARATE crate that reads it.
-pub const NOISE_ROUGHNESS_THRESHOLD: f32 = 30.0;
+/// CALIBRATED (issue 1099) from mined fleet telemetry, but the live page stays REPORT-ONLY.
+/// A real picture (church scene, QR/Vernier test pattern) has strongly correlated neighbouring
+/// pixels → low roughness; uncorrelated coloured static → high roughness (analytic floor
+/// ≈73 on the 16-235 video luma range, `E[|Y0−Y1|]=(235−16)/3`). The value is set from the
+/// MEASURED healthy side (16.9.2026, ~38.1k live COLOUR samples across all 7 camboxes: fleet
+/// healthy-colour p99 = 18.5, max = 22.5, grayscale ≤ 14.7) — 40.0 clears 2× the healthy p99
+/// AND the healthy max (by 1.78×) while sitting well below the noise floor. The purple-noise
+/// POSITIVE CLASS is still absent from live data, so the dev1 watchdog SURFACES the derived
+/// PURPLE_NOISE verdict REPORT-ONLY (never a page); arming the page is deferred until a real
+/// Elgato no-signal `rough=` measures the noise floor + adds the sibling self-anchor (the #905
+/// "keep the mechanism dormant, not deleted" discipline, now wired report-only). `pub` for the
+/// same reason as [`CHROMA_SAMPLE_FRAMES`] — the `camera-box` binary is a SEPARATE crate that
+/// reads it, and `scripts/splitter-port-alert-watchdog.sh` mirrors the value for the dev1 gate.
+pub const NOISE_ROUGHNESS_THRESHOLD: f32 = 40.0;
 
 /// Compute the mean adjacent-pixel luma difference ("spatial roughness") over a
 /// subsampled YUYV422 frame — the per-frame STRUCTURE metric that separates a real
