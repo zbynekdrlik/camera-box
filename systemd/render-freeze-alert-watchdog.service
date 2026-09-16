@@ -1,0 +1,18 @@
+[Unit]
+# strih/stream/resolume PROGRAM render-freeze + receiver relock-storm alert (#1320), DEV1-SIDE. ONE
+# fetch -> decide -> alert pass. Reads the `program_render_lagged` + `relock_bursts` facets
+# bundle_state_gather exposes on :8899/bundle-state.json and pages on a RECURRENCE of the issue-1320
+# render freeze (a scene-switch reattach that blocked the OBS graphics thread ~7.5 s, cured in bundle
+# 02b53180b) or its downstream stream relock storm (issue 1318). DETECTION ONLY — no auto-action (the
+# cure is a full-bundle redeploy / an OBS relaunch, an owner/supervisor call). SAME dev1 topology as
+# audio-lag-alert-watchdog.service (#1226) / bundle-state-alert-watchdog.service (#732).
+Description=camera-box render-freeze / relock-storm alert (#1320) — one fetch/decide/alert pass
+Documentation=https://github.com/zbynekdrlik/camera-box
+
+[Service]
+Type=oneshot
+# %h = the installing user's home on dev1. Adjust if the checkout lives elsewhere.
+ExecStart=%h/devel/camera-box/scripts/render-freeze-alert-watchdog.sh
+# Per pass: up to 4 boxes × one :8899 curl (RENDER_FREEZE_CURL_TIMEOUT, default 10 s each) + a local
+# python decision. Generous ceiling so a slow event-day link never hangs the timer.
+TimeoutStartSec=60

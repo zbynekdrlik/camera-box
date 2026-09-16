@@ -1,0 +1,17 @@
+[Unit]
+# Fires the #1320 render-freeze / relock-storm health-check every 5 min (dev1-side), matching the
+# audio-lag / network-reach / bundle-state / genlock-lock alert-timer cadence so the fleet's dev1
+# alert timers stay in lockstep. A recurrence of the strih PROGRAM render freeze (or the stream
+# relock storm) is caught within ~10 min (2-pass confirm) and paged — instead of the ~90-min silent
+# on-air A/V drift issue 1318 first surfaced.
+Description=Run the camera-box render-freeze / relock-storm health-check every 5 min (#1320)
+Documentation=https://github.com/zbynekdrlik/camera-box
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+AccuracySec=20s
+Persistent=false
+
+[Install]
+WantedBy=timers.target
