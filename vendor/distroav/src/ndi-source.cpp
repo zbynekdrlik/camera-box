@@ -177,26 +177,34 @@ static inline bool genlock_reconnect_decision(bool genlock_active, int no_connec
  * broken). */
 static const uint64_t FRAMELESS_BIND_STALE_NS = 5ULL * 1000ULL * 1000ULL * 1000ULL;
 
-/* camera-box #1096 (reopen 16.9.2026): should this genlocked, CONNECTED receiver that has NEVER
- * delivered a frame since its bind force a full receiver rebind? A strict COMPLEMENT of
- * genlock_reconnect_decision: that helper returns false on last_frame_ns == 0 (never judge a
- * warming-up receiver), which leaves a bind that connects but delivers nothing (the 12:10 fleet-
- * deploy wedge on cam2/5/6 -- reset BY-NAME into the poisoned finder, connected, zero frames for an
- * hour) with NO aging clock at all. This one fires ONLY when last_frame_ns == 0, aging the bind from
- * its recorded create timestamp (bind_ns) instead. On a fire the caller forces the SAME reset ladder
- * (fresh finder -> last-known -> fleet map) + the #1287 BY-URL<->BY-NAME alternation. PURE decision
- * (no OBS/NDI calls, only primitives) so it lift-compiles + truth-table-tests offline -- CI is
- * otherwise the first compiler for this file (tests/distroav_frameless_connected_1096.rs). */
+/* camera-box #1096 (reopen 16.9.2026): should this genlocked, CONNECTED receiver that has delivered
+ * NO frame SINCE ITS CURRENT BIND force a full receiver rebind? A strict COMPLEMENT of
+ * genlock_reconnect_decision, keyed on frames_seen_since_reset (frames delivered on THIS bind), NOT
+ * on last_frame_ns. Why not last_frame_ns==0: the #767 reconnect-epoch refresh (`if
+ * (was_disconnected) { s->last_frame_timestamp = os_gettime_ns(); ... }`) runs one branch earlier and
+ * makes last_frame_ns non-zero the instant a bind connects, so a last_frame_ns==0 guard is DEAD CODE
+ * (it never holds at this call site). frames_seen_since_reset is set true ONLY by an actual delivered
+ * frame (never by the refresh) and re-armed false on every reset, so it is the honest "no frame since
+ * this bind" signal -- reachable regardless of the refresh, and IMMUNE to any path that keeps
+ * last_frame_ns fresh without real frames (the exact class that can silently defeat the #767 stale
+ * watchdog). The wedge it cures: the 12:10 fleet deploy reset cam2/5/6 BY-NAME into the poisoned
+ * finder, they CONNECTED (no_connections>0) but delivered zero frames for an hour with no rebind.
+ * Fires ONLY when frames_seen_since_reset is false, aging the bind from its recorded create timestamp
+ * (bind_ns). A bind that HAS delivered (frames_seen true) is left to genlock_reconnect_decision. On a
+ * fire the caller forces the SAME reset ladder (fresh finder -> last-known -> fleet map) + the #1287
+ * BY-URL<->BY-NAME alternation. PURE decision (no OBS/NDI calls, only primitives) so it lift-compiles
+ * + truth-table-tests offline -- CI is otherwise the first compiler for this file
+ * (tests/distroav_frameless_connected_1096.rs). */
 static inline bool genlock_frameless_bind_reconnect_decision(bool genlock_active, int no_connections,
-							     uint64_t now_ns, uint64_t last_frame_ns,
+							     uint64_t now_ns, bool frames_seen_since_reset,
 							     uint64_t bind_ns, uint64_t frameless_stale_ns)
 {
 	if (!genlock_active)
 		return false; /* genlocked sources only (mirrors genlock_reconnect_decision) */
 	if (no_connections <= 0)
 		return false; /* not connected -> the no_connections==0 / #767 ladder owns it */
-	if (last_frame_ns != 0)
-		return false; /* has delivered a frame -> genlock_reconnect_decision judges it, not this */
+	if (frames_seen_since_reset)
+		return false; /* delivered a frame on THIS bind -> genlock_reconnect_decision owns later silence */
 	if (bind_ns == 0)
 		return false; /* no bind timestamp recorded yet -> nothing to age */
 	if (now_ns <= bind_ns)
@@ -1599,18 +1607,19 @@ void *ndi_source_thread(void *data)
 		//
 		// camera-box #1096 (reopen 16.9.2026): CONNECTED-but-FRAMELESS watchdog. A receiver reset
 		// BY-NAME into the poisoned finder (the 12:10 fleet-deploy wedge on cam2/5/6) connects
-		// (no_conn>0) but delivers ZERO frames, so s->last_frame_timestamp stays 0 and
-		// genlock_reconnect_decision above (which skips last_frame_ns==0 to avoid judging a
-		// warming-up receiver) never fires -- and neither the no_connections==0 ladder nor #767
-		// re-arms, so the leg sits black for an hour (cured only by an external re-create, e.g. a
-		// same-value SetInputSettings --heal). Age the bind from its recv_create_v3 timestamp
-		// instead: a bind that has delivered NO frame for FRAMELESS_BIND_STALE_NS is broken. This is
-		// a strict complement of #767 (fires ONLY when last_frame_ns==0), so a bind whose #767
-		// reconnect-epoch refresh set last_frame_timestamp is untouched here. Force the SAME reset
-		// ladder (fresh finder -> last-known -> fleet map) + the #1287 alternation (frames_seen is
-		// false), so a frame-less BY-URL bind flips BY-NAME and no dead path pins the leg.
+		// (no_conn>0) but delivers ZERO frames for an hour, cured only by an external re-create (a
+		// same-value SetInputSettings --heal). Keyed on frames_seen_since_reset_1180 (a real frame on
+		// THIS bind), NOT last_frame_timestamp: the #767 reconnect-epoch refresh above sets
+		// last_frame_timestamp non-zero the instant a bind connects, so a last_frame-based key here
+		// would be DEAD CODE -- and frames_seen (set only by a delivered frame) is also IMMUNE to
+		// whatever keeps last_frame fresh without real frames and can silence #767 in this wedge. Age
+		// the bind from its recv_create_v3 timestamp (recv_bind_ns_1096): a connected bind that has
+		// delivered NO frame for FRAMELESS_BIND_STALE_NS is broken. Strict complement of #767 (fires
+		// only when frames_seen is false; a bind that delivered then went silent is #767's). On a fire
+		// force the SAME reset ladder (fresh finder -> last-known -> fleet map) + the #1287 alternation
+		// (frames_seen is false), so a frame-less BY-URL bind flips BY-NAME and no dead path pins the leg.
 		if (genlock_frameless_bind_reconnect_decision(genlock_source_is_active(s->obs_source), no_conn,
-							      os_gettime_ns(), s->last_frame_timestamp,
+							      os_gettime_ns(), frames_seen_since_reset_1180,
 							      recv_bind_ns_1096, FRAMELESS_BIND_STALE_NS)) {
 			if (ndi_force_by_name_after_frameless(connected_by_url_1180, frames_seen_since_reset_1180)) {
 				force_by_name_next_reset_1180 = true;

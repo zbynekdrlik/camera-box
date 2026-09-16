@@ -4,19 +4,22 @@
 //! Background: the 15.9 finder-blind ladder (last-known + fleet-map BY-URL) is landed. The 12:10
 //! fleet deploy of 1.7.0-dev.631 then produced a DIFFERENT wedge: strih reset `NDI cam5`/`cam2`/
 //! `cam6` BY-NAME into the poisoned long-lived finder, the bind CONNECTED (`no_connections > 0`) but
-//! delivered ZERO frames -- `genlock-fifo audit received=` frozen for over an hour. Root cause: the
-//! issue-767 stale watchdog `genlock_reconnect_decision(...)` guards `if (last_frame_ns == 0) return
-//! false;` (never judge a warming-up receiver), so a bind that connects and NEVER delivers a frame
-//! (`s->last_frame_timestamp` stays 0) is invisible to it; the `no_connections == 0` last-known/
-//! fleet-map ladder cannot re-arm once the receiver believes it is connected; the issue-1287
-//! alternation runs only inside a reset-forcing arm that never fires. So the receiver has NO clock
-//! that ages a connected bind which never delivered.
+//! delivered ZERO frames -- `genlock-fifo audit received=` frozen for over an hour. The issue-767
+//! stale watchdog `genlock_reconnect_decision(...)` did not cure it; the `no_connections == 0`
+//! last-known/fleet-map ladder cannot re-arm once the receiver believes it is connected; the
+//! issue-1287 alternation runs only inside a reset-forcing arm that never fired. So the receiver had
+//! NO clock that ages a connected bind which never delivered a frame SINCE ITS BIND.
 //!
 //! The fix: record a bind timestamp at every recv_create_v3 and add a sibling pure decision
 //! `genlock_frameless_bind_reconnect_decision(...)` -- a strict COMPLEMENT of genlock_reconnect_decision
-//! that fires ONLY when last_frame_ns == 0 (the case the 767 helper skips), connected, genlock-active,
-//! and now - bind_ns >= FRAMELESS_BIND_STALE_NS -- forcing the SAME reset ladder + issue-1287
-//! alternation.
+//! keyed on frames_seen_since_reset (a real frame on THIS bind), NOT last_frame_ns. Keying on
+//! last_frame_ns == 0 would be DEAD CODE: the issue-767 reconnect-epoch refresh (`if
+//! (was_disconnected) { s->last_frame_timestamp = os_gettime_ns(); ... }`) runs one branch earlier
+//! and makes last_frame non-zero the instant a bind connects. frames_seen_since_reset is set true
+//! ONLY by a delivered frame (never by the refresh) and re-armed false on every reset, so it is
+//! reachable AND immune to whatever keeps last_frame fresh without real frames. Fires when
+//! frames_seen is false, connected, genlock-active, and now - bind_ns >= FRAMELESS_BIND_STALE_NS --
+//! forcing the SAME reset ladder + issue-1287 alternation.
 //!
 //! Why this test is std-only + runs offline: camera-box's `# airuleset:build-ok` bypass is disabled
 //! and the vendored C compiles only on CI, so per `.claude/rules/vendored-libobs-change-safety.md`
@@ -60,8 +63,8 @@ fn frameless_bind_decision_helper_and_const_present() {
         src.contains("static inline bool genlock_frameless_bind_reconnect_decision("),
         "{NDI_SOURCE}: #1096 (reopen 16.9) patch missing -- the pure \
          `genlock_frameless_bind_reconnect_decision(...)` decision helper is gone. Without it a \
-         receiver that CONNECTS but never delivers a frame (last_frame_ns stays 0) sits frameless \
-         forever (the 12:10 fleet-deploy wedge on cam2/5/6). A `git subtree pull` likely reverted it."
+         receiver that CONNECTS but never delivers a frame since its bind sits frameless forever \
+         (the 12:10 fleet-deploy wedge on cam2/5/6). A `git subtree pull` likely reverted it."
     );
     assert!(
         src.contains("FRAMELESS_BIND_STALE_NS"),
@@ -75,7 +78,7 @@ fn receiver_loop_records_bind_ts_and_wires_the_frameless_watchdog() {
     let src = squish(&vendor_file(NDI_SOURCE));
 
     // The bind timestamp must be recorded at the successful create so the frameless watchdog has a
-    // baseline (last_frame_ns is 0 for a never-delivered bind).
+    // baseline to age a bind that has delivered no frame since it was created.
     assert!(
         src.contains("recv_bind_ns_1096 = os_gettime_ns();"),
         "{NDI_SOURCE}: #1096 (reopen 16.9) patch missing -- the receiver loop no longer records \
@@ -101,6 +104,20 @@ fn receiver_loop_records_bind_ts_and_wires_the_frameless_watchdog() {
         src.contains("recv_bind_ns_1096, FRAMELESS_BIND_STALE_NS)"),
         "{NDI_SOURCE}: #1096 (reopen 16.9) patch missing -- the frameless watchdog call no longer \
          passes recv_bind_ns_1096 + FRAMELESS_BIND_STALE_NS as the bind baseline + window."
+    );
+
+    // REACHABILITY (the #1096 reopen dead-code catch): the call MUST key on frames_seen_since_reset_1180,
+    // NOT s->last_frame_timestamp. The #767 reconnect-epoch refresh (`if (was_disconnected) {
+    // s->last_frame_timestamp = os_gettime_ns(); ... }`) runs one branch earlier and makes last_frame
+    // non-zero the instant a bind connects, so a last_frame-keyed arm here would NEVER fire (dead code).
+    assert!(
+        src.contains(
+            "genlock_frameless_bind_reconnect_decision(genlock_source_is_active(s->obs_source), no_conn, os_gettime_ns(), frames_seen_since_reset_1180,"
+        ),
+        "{NDI_SOURCE}: #1096 (reopen 16.9) DEAD-CODE regression -- the frameless watchdog must be fed \
+         frames_seen_since_reset_1180 (a real frame on THIS bind), NOT s->last_frame_timestamp. The \
+         #767 reconnect-epoch refresh sets last_frame non-zero the instant a bind connects, so a \
+         last_frame-keyed arm can never fire."
     );
 
     // The distinctive log marker (unique substring, mutually non-substring vs every other genlock: line).
@@ -159,43 +176,47 @@ fn lift_decision_helper() -> String {
     src[start..end].to_string()
 }
 
-/// `(genlock_active, no_connections, now_ns, last_frame_ns, bind_ns, frameless_stale_ns)`.
-type Args = (bool, i32, u64, u64, u64, u64);
+/// `(genlock_active, no_connections, now_ns, frames_seen_since_reset, bind_ns, frameless_stale_ns)`.
+type Args = (bool, i32, u64, bool, u64, u64);
 
 fn vectors() -> Vec<(Args, bool)> {
     let s = 5_000_000_000u64; // 5 s frameless window, in ns
     vec![
         // genlock OFF -> never fires.
-        ((false, 5, 100_000_000_000, 0, 10_000_000_000, s), false),
+        ((false, 5, 100_000_000_000, false, 10_000_000_000, s), false),
         // not connected (no_conn <= 0) -> the no_connections==0 ladder owns it.
-        ((true, 0, 100_000_000_000, 0, 10_000_000_000, s), false),
-        ((true, -1, 100_000_000_000, 0, 10_000_000_000, s), false),
-        // has delivered a frame (last != 0) -> genlock_reconnect_decision owns it, not this.
-        // "a receiver that delivered 1 s ago must NOT" fire here even though age from bind is huge.
-        (
-            (true, 1, 100_000_000_000, 99_000_000_000, 10_000_000_000, s),
-            false,
-        ),
+        ((true, 0, 100_000_000_000, false, 10_000_000_000, s), false),
+        ((true, -1, 100_000_000_000, false, 10_000_000_000, s), false),
+        // has delivered a frame on THIS bind (frames_seen == true) -> genlock_reconnect_decision owns
+        // it, not this. "a receiver that delivered must NOT" fire here even though age from bind is huge.
+        ((true, 1, 100_000_000_000, true, 10_000_000_000, s), false),
         // no bind timestamp recorded yet (bind == 0) -> nothing to age.
-        ((true, 1, 100_000_000_000, 0, 0, s), false),
+        ((true, 1, 100_000_000_000, false, 0, s), false),
         // clock not advanced past bind (now <= bind) -> no measurable age.
-        ((true, 1, 10_000_000_000, 0, 10_000_000_000, s), false),
-        ((true, 1, 9_000_000_000, 0, 10_000_000_000, s), false),
-        // connected + genlock + last==0 + bind set: age < window -> false, at/over -> true.
+        ((true, 1, 10_000_000_000, false, 10_000_000_000, s), false),
+        ((true, 1, 9_000_000_000, false, 10_000_000_000, s), false),
+        // connected + genlock + no frame since bind + bind set: age < window -> false, at/over -> true.
         // "a bind 2 s old must NOT" (age 2 s < 5 s window).
-        ((true, 1, 12_000_000_000, 0, 10_000_000_000, s), false), // age 2 s
-        ((true, 1, 14_999_999_999, 0, 10_000_000_000, s), false), // age 4.999... s
-        ((true, 1, 15_000_000_000, 0, 10_000_000_000, s), true),  // age exactly 5 s (>=)
-        // "today's shape: connected, last_frame 0, bind ~65 min ago -> RECONNECT".
-        ((true, 1, 3_910_000_000_000, 0, 10_000_000_000, s), true), // age ~65 min
-        ((true, 3, 3_910_000_000_000, 0, 10_000_000_000, s), true), // multi-connection, same
+        ((true, 1, 12_000_000_000, false, 10_000_000_000, s), false), // age 2 s
+        ((true, 1, 14_999_999_999, false, 10_000_000_000, s), false), // age 4.999... s
+        ((true, 1, 15_000_000_000, false, 10_000_000_000, s), true),  // age exactly 5 s (>=)
+        // "today's shape: connected, no frame since bind, bind ~65 min ago -> RECONNECT".
+        ((true, 1, 3_910_000_000_000, false, 10_000_000_000, s), true), // age ~65 min
+        ((true, 3, 3_910_000_000_000, false, 10_000_000_000, s), true), // multi-connection, same
         // Honour the frameless_stale_ns PARAMETER (not a hardcoded 5 s): age 7 s over a 10 s window
         // -> false; age 7 s over a 5 s window -> true.
         (
-            (true, 1, 17_000_000_000, 0, 10_000_000_000, 10_000_000_000),
+            (
+                true,
+                1,
+                17_000_000_000,
+                false,
+                10_000_000_000,
+                10_000_000_000,
+            ),
             false,
         ),
-        ((true, 1, 17_000_000_000, 0, 10_000_000_000, s), true),
+        ((true, 1, 17_000_000_000, false, 10_000_000_000, s), true),
     ]
 }
 
@@ -207,10 +228,11 @@ fn frameless_bind_decision_computes_the_spec_truth_table() {
     let mut c = String::from("#include <stdint.h>\n#include <stdbool.h>\n#include <stdio.h>\n");
     c.push_str(&helper);
     c.push_str("\nint main(void){\n");
-    for ((ga, nc, now, last, bind, stale), _) in &vs {
+    for ((ga, nc, now, frames_seen, bind, stale), _) in &vs {
         c.push_str(&format!(
-            "    printf(\"%d\\n\", genlock_frameless_bind_reconnect_decision({}, {nc}, {now}ULL, {last}ULL, {bind}ULL, {stale}ULL));\n",
-            if *ga { "true" } else { "false" }
+            "    printf(\"%d\\n\", genlock_frameless_bind_reconnect_decision({}, {nc}, {now}ULL, {}, {bind}ULL, {stale}ULL));\n",
+            if *ga { "true" } else { "false" },
+            if *frames_seen { "true" } else { "false" }
         ));
     }
     c.push_str("    return 0;\n}\n");
@@ -272,10 +294,10 @@ fn frameless_bind_decision_computes_the_spec_truth_table() {
     );
 
     let mut diffs = Vec::new();
-    for (((ga, nc, now, last, bind, stale), want), g) in vs.iter().zip(&got) {
+    for (((ga, nc, now, frames_seen, bind, stale), want), g) in vs.iter().zip(&got) {
         if g != want {
             diffs.push(format!(
-                "  genlock={ga} no_conn={nc} now={now} last={last} bind={bind} stale={stale} -> C {g}, expected {want}"
+                "  genlock={ga} no_conn={nc} now={now} frames_seen={frames_seen} bind={bind} stale={stale} -> C {g}, expected {want}"
             ));
         }
     }
