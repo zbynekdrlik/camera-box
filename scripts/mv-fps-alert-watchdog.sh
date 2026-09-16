@@ -69,7 +69,10 @@ esac
 # The OBS boxes to watch, space-separated "name|ip|os" (os = linux | win). Default: imag + strih --
 # the two boxes whose Multiview render cadence #771 emits. (stream also runs OBS but has no operator
 # Multiview projector; add it here only if it grows one.)
-MV_FPS_BOXES="${MV_FPS_BOXES:-imag|10.77.9.182|linux strih|10.77.9.202|win}"
+# issue 1316: `imag` DROPPED from the default — imag-nb was returned to the owner (dark). This
+# timer has no dev1 unit installed today, but the default must not name a dead box before it is ever
+# timer-installed. Re-add `imag|<ip>|linux` when the IMAG role returns on a new notebook.
+MV_FPS_BOXES="${MV_FPS_BOXES:-strih|10.77.9.202|win}"
 
 SSH_USER="${MV_FPS_SSH_USER:-newlevel}"
 SSH_PW="${MV_FPS_SSH_PW:-newlevel}"

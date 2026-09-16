@@ -98,7 +98,10 @@ OBS_WS_PORT="${NETWORK_REACH_OBS_WS_PORT:-4455}"       # OBS WebSocket, live on 
 BUNDLE_PORT="${NETWORK_REACH_BUNDLE_PORT:-8899}"       # bundle-state HTTP, on strih/stream only (#650)
 # Reference rig nodes that share the rig's network fate (cam1 cam2 imag-nb) -- the dev1-side-outage
 # anchor. If NONE answer, dev1's own path to the rig subnet is down -> nothing to decide.
-REFERENCE_HOSTS="${NETWORK_REACH_REFERENCE_HOSTS:-10.77.9.61 10.77.9.62 10.77.9.182}"
+# issue 1316: 10.77.9.182 (imag-nb) DROPPED — the box was returned to the owner (dark), so it is a
+# dead reference anchor that would WEAKEN the dev1-outage guard (a permanently-unreachable anchor
+# reads like a dev1 path outage). The two cams remain as live anchors.
+REFERENCE_HOSTS="${NETWORK_REACH_REFERENCE_HOSTS:-10.77.9.61 10.77.9.62}"
 
 PING_COUNT="${NETWORK_REACH_PING_COUNT:-2}"
 PING_TIMEOUT="${NETWORK_REACH_PING_TIMEOUT:-2}"        # per-packet wait (s); generous for event-day mobile link

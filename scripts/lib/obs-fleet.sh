@@ -21,8 +21,12 @@
 #                    DHCP lease drifts (resolume.lan), so `getent`/ping/`/dev/tcp` resolve it live.
 #   * class       -- windows-genlock | linux-genlock (the genlock-build platform; used by the
 #                    version-integrity / rig-health rows to pick the right parity check).
-#   * home-check  -- `always` (a permanent box: obs_fleet_is_home is unconditionally true) or
-#                    `traveling` (home ONLY when resolvable AND its OBS-WS answers; see below).
+#   * home-check  -- `always` (a permanent box: obs_fleet_is_home is unconditionally true),
+#                    `traveling` (home ONLY when resolvable AND its OBS-WS answers; see below), or
+#                    `retired` (issue 1316: the box is physically GONE but the ROLE returns on a new
+#                    notebook next year -- obs_fleet_is_home is always FALSE and obs_fleet_boxes
+#                    EXCLUDES it from every facet, so a paging facet can never page a dead box; the
+#                    row + its history stay, and re-provisioning is a one-word flip back to `always`).
 #
 # FACET POLICY (`obs_fleet_boxes <facet>`): which boxes carry each dev1-side facet, decided honestly
 # per each watchdog's own header, NOT per-entry -- so the entry row stays the fixed 4-field shape:
@@ -68,9 +72,13 @@
 
 # OBS_FLEET -- the table (env-overridable as a whole for tests/ops). One row per line,
 # `name|host-or-ip|class|home-check`. Blank lines are ignored by the parser below.
+# imag is `retired` (issue 1316): imag-nb was RETURNED to the owner 16.9.2026 (10.77.9.182 dark),
+# so its home-check is `retired` -- obs_fleet_is_home imag is FALSE and obs_fleet_boxes drops it
+# from genlock-lock (and any future facet) automatically. The row + its history are KEPT because the
+# IMAG role returns on a NEW notebook next year; re-provisioning re-flips this ONE word to `always`.
 OBS_FLEET="${OBS_FLEET:-strih|10.77.9.202|windows-genlock|always
 stream|10.77.9.204|windows-genlock|always
-imag|10.77.9.182|linux-genlock|always
+imag|10.77.9.182|linux-genlock|retired
 resolume|resolume.lan|windows-genlock|traveling
 strih-lx|strih-lx.lan|linux-genlock|traveling}"
 # issue 1317: strih-lx is the Linux notebook replacing the Windows strih PC, running IN PARALLEL
@@ -138,13 +146,18 @@ obs_fleet_facet_members() {
 # OBS_FLEET table (single source of truth); an unknown member name (a table/policy mismatch) fails
 # loudly rather than emitting a nameless pair.
 obs_fleet_boxes() {
-  local facet="${1:-}" members m host out=""
+  local facet="${1:-}" members m host check out=""
   members="$(obs_fleet_facet_members "$facet")" || return 1
   for m in $members; do
     host="$(obs_fleet_host "$m")" || {
       echo "obs-fleet: facet '${facet}' names box '${m}' absent from OBS_FLEET" >&2
       return 1
     }
+    # issue 1316: a `retired` box (imag-nb, returned to the owner) is EXCLUDED from every facet
+    # roster centrally here -- so genlock-lock (and any future derived facet) drops it with no
+    # per-consumer edit, and re-adding it next year is a one-word flip of its home-check to `always`.
+    check="$(obs_fleet_home_check "$m")" || check=""
+    [ "$check" = "retired" ] && continue
     out="${out:+$out }${m}|${host}"
   done
   printf '%s' "$out"
@@ -170,7 +183,8 @@ obs_fleet_status_probe() {
 }
 
 # obs_fleet_is_home <name> -> returns 0 iff NAME is currently "home" (reachable + serving), 1 if away
-# or unknown. A `home-check=always` box is unconditionally home. A `traveling` box is home iff it
+# or unknown. A `home-check=always` box is unconditionally home; a `retired` box (issue 1316) is
+# NEVER home. A `traveling` box is home iff it
 # resolves AND its OBS-WS (OBS_FLEET_HOME_PORT, default 4455) answers. TEST/OPS OVERRIDE: when
 # OBS_FLEET_HOME is set (space-separated names) it is authoritative -- NAME is home iff it is a word
 # in that list -- so a test (or a supervisor forcing a known state) never depends on live I/O. An
@@ -186,6 +200,9 @@ obs_fleet_is_home() {
   check="$(obs_fleet_home_check "$name")" || return 1
   case "$check" in
     always) return 0 ;;
+    # issue 1316: a retired box (imag-nb, returned to the owner) is NEVER home -- so no watchdog
+    # that gates on obs_fleet_is_home ever probes or pages it. Re-flip to `always` on re-provision.
+    retired) return 1 ;;
     traveling)
       host="$(obs_fleet_host "$name")" || return 1
       ip="$(obs_fleet_resolve_host "$host")"

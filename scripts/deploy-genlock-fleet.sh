@@ -39,8 +39,9 @@ set -euo pipefail
 #   --full     deploy the full windows-genlock bundle (obs.dll + data + obs-plugins) -- the default;
 #              required for any vendor/<plugin>/** or frontend change (fast has no deploy path for it).
 #   --fast     deploy only the libobs hot-swap dll (obs.dll) -- a libobs-only change (§5b).
-#   --boxes    comma list of strih,stream,imag,resolume (default: strih,stream,imag -- resolume is a
-#              TRAVELING maintenance box, issue 1295, deployed ONLY when explicitly named).
+#   --boxes    comma list of strih,stream,imag,resolume (default: strih,stream -- resolume is a
+#              TRAVELING maintenance box, issue 1295, deployed ONLY when explicitly named; imag was
+#              RETIRED, issue 1316 -- dropped from the default, still a valid explicit target).
 #   --plan     print the plan only; no gh/ssh/scp. Requires --stage + --sha (no network).
 #   --stage    local dir holding the (pre-)downloaded artifact bytes (plan mode / test seam).
 #   --sha      the canonical build SHA to stamp into the markers (plan mode override).
@@ -67,15 +68,17 @@ RETENTION_KEEP=3
 # ============================================================================================
 
 # fleet_normalize_boxes CSV -> the requested boxes in canonical order (strih,stream,imag,resolume),
-# deduped and validated. Empty -> the DEFAULT fleet strih,stream,imag ONLY. An unknown box is a
+# deduped and validated. Empty -> the DEFAULT fleet strih,stream ONLY. An unknown box is a
 # fail-loud usage error (return 2). resolume = RESOLUME-SNV, the traveling CG box (issue 1295): a
 # windows-genlock box like strih/stream, so it rides the SAME Windows emit-only plan path -- but it
 # is a traveling maintenance target (often off/away, NOT a measured E2E source, targets.md), so it
 # is deployed ONLY when explicitly named (`--boxes resolume`), never pulled into the empty-default
-# "whole fleet".
+# "whole fleet". issue 1316: `imag` DROPPED from the empty-default too -- imag-nb was returned to the
+# owner (dark), so a default deploy would fail on it; it stays a VALID explicit target (`--boxes
+# imag`) so the IMAG role's re-provisioning next year needs no code change here.
 fleet_normalize_boxes() {
   local csv="${1:-}" b out="" has_strih=0 has_stream=0 has_imag=0 has_resolume=0 has_strihlx=0
-  [ -n "$csv" ] || csv="strih,stream,imag"
+  [ -n "$csv" ] || csv="strih,stream"
   local IFS=','
   for b in $csv; do
     b="${b//[[:space:]]/}"

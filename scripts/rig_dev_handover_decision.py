@@ -241,6 +241,12 @@ class Item(object):
             return entry
         statuses = []
         for name in self.captures:
+            # issue 1316: a retired imag-nb (returned to the owner) drops its OWN capture (e.g.
+            # `pins_imag`) so the item is judged on the remaining boxes only — probing the dark box
+            # would otherwise read UNKNOWN/timeout and drag the whole item to UNKNOWN. The other
+            # imag-scoped gate (dantesync version) EXCLUDES imag-nb via its rig-fleet.txt ack.
+            if imag_retired and "imag" in name:
+                continue
             text, rc = captures_data.get(name, ("", RC_MISSING))
             statuses.append(self._status_for_capture(text, rc))
         status = combine_statuses(statuses)
