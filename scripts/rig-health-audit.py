@@ -79,7 +79,9 @@ def imag_is_retired() -> bool:
     non-comment `imag:`/`imag-nb:` ack line in rig-fleet.txt (the same file the E2E offline-ack
     reads). A missing/erroring file -> not retired (fail-safe: keep auditing rather than skip)."""
     env = os.environ.get("RIG_HEALTH_IMAG_RETIRED", "").strip().lower()
-    if env not in ("", "0", "false", "no"):
+    if env in ("0", "false", "no"):
+        return False  # an explicit falsey override WINS over the rig-fleet.txt ack (tests / a re-provisioned box)
+    if env:
         return True
     path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "rig-fleet.txt")
     if not os.path.exists(path):

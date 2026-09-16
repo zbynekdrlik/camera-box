@@ -34,13 +34,20 @@ def _clean_env(monkeypatch):
     _mod.results.clear()
 
 
-def test_env_override_marks_retired(monkeypatch):
+def test_env_override_marks_retired(monkeypatch, tmp_path):
     for truthy in ("1", "true", "yes", "returned-16.9.2026"):
         monkeypatch.setenv("RIG_HEALTH_IMAG_RETIRED", truthy)
         assert _mod.imag_is_retired() is True, truthy
-    for falsey in ("0", "false", "no", ""):
+    # An explicit falsey override WINS even when the checked-in rig-fleet.txt carries the real
+    # imag:/imag-nb: acks (it does since 16.9.2026) -- no path redirect here on purpose.
+    for falsey in ("0", "false", "no"):
         monkeypatch.setenv("RIG_HEALTH_IMAG_RETIRED", falsey)
         assert _mod.imag_is_retired() is False, falsey
+    # EMPTY = no override -> falls through to the ack file; hermetic: point it at a dir without one.
+    monkeypatch.setenv("RIG_HEALTH_IMAG_RETIRED", "")
+    monkeypatch.setattr(_mod.os.path, "abspath", lambda p: str(tmp_path / "scripts" / "x.py"))
+    (tmp_path / "scripts").mkdir()
+    assert _mod.imag_is_retired() is False, "empty override + no ack file"
 
 
 def test_rig_fleet_ack_marks_retired(monkeypatch, tmp_path):
