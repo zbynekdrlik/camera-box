@@ -1,24 +1,39 @@
-//! issue 1242 — the WALK-BACK step for the residual FIFO copy churn, after issues 1318/1320
-//! root-caused + fixed the strih PROGRAM render-freeze → stream FIFO underrun → relock storm that
-//! produced it (cure = genlock bundle `02b53180b`). Data-first (mining tool
-//! `scripts/window_gate_walkdown.py` over the live verdict corpus): the ONLY post-fix run on the
-//! cure bundle (180691712) is strict-clean (every window 0 copies / 0 gaps, worst beat-corrected
-//! uniformity 0.9988), but that is n=1 — too thin to restore absolute strict-zero on one run. So
-//! this step TIGHTENS two blocking-gate constants a data-supported amount and leaves the full
-//! strict-zero restore as the explicit NEXT step:
+//! issue 1242 — the FINAL step: the ABSOLUTE strict-zero per-segment fold is RESTORED, now that the
+//! residual FIFO copy churn's source is fixed (issues 1318/1320 render-freeze cure, bundle
+//! `02b53180b` / its descendant `7e8efff6a`) AND the interim lane's precondition is met: >= 2
+//! consecutive strict-clean post-cure runs. Data-first (mining tool
+//! `scripts/window_gate_walkdown.py 02b53180b 7e8efff6a` over the live verdict corpus, segregated by
+//! the rig-verified `version-strih.json.genlock_build_sha`):
 //!
-//!   - `WINDOW_COPIES_GAPS_TOLERANCE` 5 → 2  (interim; the tolerance CHANNEL still governs the fold
-//!     via `copies_gaps_tolerance_gates_overall_pass() == true`, per #1220; strict-zero mechanism
-//!     stays wired-but-dormant — the `gate-allowance-restore-red-green` pattern).
-//!   - `UNIFORM_FRACTION_MIN` 0.90 → 0.95  (the issue-1142 cadence floor, gated on
-//!     `beat_corrected_uniform_fraction` since #1250; post-fix worst beat-corrected 0.9976–0.9988,
-//!     the churny pre-fix run 0.9481 correctly REDs).
-//!   - `WINDOW_COPIES_GAPS_TOLERANCE_PER_CAMBOX` CAM2 → 25 kept (no post-16.9 splitter-fed run
-//!     exists yet; removal precondition PINNED below, data-conditional).
+//!   | run | genlock | w_fail_strict | worst BEAT-unif | CAM2 windows |
+//!   |---|---|---|---|---|
+//!   | 180691712 | 02b53180b | 0 | 0.9988 | 0/0 0/0 |
+//!   | 977889848 | 7e8efff6a | 0 | 0.9988 | 0/0 0/0 |   (PR #1322 attempt 2)
+//!   | 2019585820 | 7e8efff6a | 0 | 0.9976 | 0/0 0/0 |   (PR #1322 attempt 3)
+//!   | 622403283 | 7e8efff6a | 1 | 0.9976 | 0/0 0/0 |   (attempt 1: ONE CAM1 gap 0/1)
+//!
+//! 977889848 + 2019585820 = >= 2 consecutive `02b53180b`-or-later runs with
+//! `windows_failed_report_only == 0` (plus 180691712) → the strict-zero restore precondition. CAM2
+//! reads 0/0 on every window across all four post-16.9 splitter-fed runs (cam2 became splitter-fed
+//! ~16.9 13:00, the imag-HDMI projection tap retired with imag-nb, issue 1316) → the #1251 CAM2
+//! per-cambox override removal precondition. Attempt 1's single CAM1 gap is exactly what strict-zero
+//! now REDs (the owner's "copies=0 must block" directive); the guard rail for a healthy-chain false
+//! red is the one-line report-only revert (re-arm `copies_gaps_tolerance_gates_overall_pass() ->
+//! true`), never a silent widen.
+//!
+//! The restore is a ONE-FUNCTION flip per seam (`gate-allowance-restore-red-green` dormant-mechanism
+//! pattern): DISARM both `copies_gaps_tolerance_gates_overall_pass()` AND
+//! `segment_singleton_allowance_gates_overall_pass()` -> the `decide` `else` arm `copies==0 &&
+//! gaps==0` governs `overall_pass_term`. `WINDOW_COPIES_GAPS_TOLERANCE` stays 2 as the #1132/#1220
+//! dormant OBSERVABILITY lens (`relaxed_pass` still reports "the disarmed rescue would pass this,
+//! strict blocks it" — the masking-guard visibility that run 622403283's CAM1 gap exercises); the
+//! blocking fold is absolute strict-zero via the disarmed seams, not via the const. The CAM2
+//! override map is emptied (`&[]`); the override machinery stays fully wired for a future per-box
+//! need. `UNIFORM_FRACTION_MIN` was already restored to 0.95 by the interim lane — unchanged here.
 //!
 //! Default-feature test (no `#![cfg(feature = "probe")]`) — both modules are crate-root pub.
-//! Tier-0 #557 bans even `cargo test --no-run` locally; the fold logic was verified RED→GREEN via
-//! a std-only `rustc --test` replica of `decide_with_tolerance` + `cadence_uniformity_gate_pass`.
+//! Tier-0 #557 bans even `cargo test --no-run` locally; the fold logic was verified RED→GREEN via a
+//! std-only `rustc --test` replica of `decide_with_tolerance` (seams armed vs disarmed).
 
 use camera_box::presentation_cadence::{cadence_uniformity_gate_pass, UNIFORM_FRACTION_MIN};
 use camera_box::window_gate::{
@@ -27,72 +42,116 @@ use camera_box::window_gate::{
     WINDOW_COPIES_GAPS_TOLERANCE_PER_CAMBOX,
 };
 
-// --- the two walked constants (RED against the pre-change 5 / 0.90) ---
+// --- the restore: BOTH copies/gaps seams are DISARMED (the absolute strict-zero fold) ---
 
 #[test]
-fn copies_gaps_tolerance_walked_to_two() {
+fn both_copies_gaps_seams_are_disarmed_for_the_strict_zero_fold() {
+    // The FINAL step: disarm BOTH seams so `decide`'s `else` arm (`copies==0 && gaps==0`) governs
+    // `overall_pass_term`. RED against the interim state (both `true`).
+    assert!(
+        !copies_gaps_tolerance_gates_overall_pass(),
+        "issue 1242 strict-zero restore: the <=2 tolerance channel must NOT rescue the blocking fold"
+    );
+    assert!(
+        !segment_singleton_allowance_gates_overall_pass(),
+        "issue 1242 strict-zero restore: the <=1/<=1 singleton band must NOT rescue the blocking fold"
+    );
+}
+
+#[test]
+fn any_nonzero_copies_or_gaps_now_reds_the_blocking_fold() {
+    // The core of the restore: ANY nonzero copies/gaps fails `overall_pass_term` — including the
+    // single-copy/single-gap churn signature the interim tol=2 (and the singleton band) absorbed.
+    // RED against the interim state (copies=1..2 passed the fold there).
+    for &(c, g) in &[(1u32, 0u32), (0, 1), (1, 1), (2, 0), (0, 2), (2, 2)] {
+        let d = decide(100, 0, c, g);
+        assert!(
+            !d.overall_pass_term,
+            "issue 1242: copies={c} gaps={g} must RED the strict-zero blocking fold: {d:?}"
+        );
+        assert!(
+            !d.strict_pass,
+            "and still fails strict_pass — visible, never masked: {d:?}"
+        );
+    }
+    // 622403283's exact shape (a single CAM1 gap) now reds — the restored gate working as designed.
+    assert!(
+        !decide(100, 0, 0, 1).overall_pass_term,
+        "issue 1242: a single gap (run 622403283 CAM1 0/1) now REDs the fold"
+    );
+}
+
+#[test]
+fn a_clean_window_still_passes_all_three_verdicts() {
+    let d = decide(100, 0, 0, 0);
+    assert!(
+        d.strict_pass && d.overall_pass_term && d.relaxed_pass,
+        "a 0/0 window passes every verdict: {d:?}"
+    );
+}
+
+#[test]
+fn the_tolerance_const_stays_the_dormant_observability_lens_at_two() {
+    // The const is NOT set to 0: it stays 2 as the #1132/#1220 dormant observability lens. The
+    // blocking fold is strict-zero via the DISARMED seams (the `else` arm ignores the const), while
+    // `relaxed_pass` still reports what the tol-2 rescue WOULD say — a `relaxed_pass==true`,
+    // `overall_pass_term==false` window is the disarmed rescue visibly doing nothing (the #1132
+    // masking guard). Run 622403283's CAM1 gap reads exactly this: within the tol-2 lens
+    // (`windows_over_copies_gaps_tolerance=0`) yet strict-failing (`windows_failed_report_only=1`).
     assert_eq!(
         WINDOW_COPIES_GAPS_TOLERANCE, 2,
-        "issue 1242 interim walk 5 -> 2 (post-fix n=1 too thin for strict-zero)"
+        "the const stays 2 as the observability lens; the fold is strict-zero via disarmed seams"
     );
-}
-
-#[test]
-fn uniformity_floor_restored_to_point_ninety_five() {
-    assert_eq!(
-        UNIFORM_FRACTION_MIN, 0.95,
-        "issue 1242 restore 0.90 -> 0.95; post-fix beat-corrected worst >= 0.9976"
-    );
-}
-
-// --- the fold behaviour at the new tolerance boundary ---
-
-#[test]
-fn window_over_two_now_reds_the_fold() {
-    // 3 copies exceeded the OLD tol=5 fold (passed); at tol=2 it must RED overall_pass_term.
-    assert!(
-        !decide(100, 0, 3, 0).overall_pass_term,
-        "copies=3 > tol 2 must fail the fold"
-    );
-    // 2 copies sit exactly at the new tolerance and still pass.
-    assert!(
-        decide(100, 0, 2, 0).overall_pass_term,
-        "copies=2 == tol 2 still passes"
-    );
-}
-
-#[test]
-fn clean_window_passes_both_verdicts() {
-    let d = decide(100, 0, 0, 0);
-    assert!(d.strict_pass && d.overall_pass_term && d.relaxed_pass);
-}
-
-#[test]
-fn single_copy_is_the_documented_interim_gap() {
-    // HONEST interim limitation: a single-copy window still passes the tol=2 fold — only the
-    // strict-zero restore (the explicit NEXT step) catches the ticket's exact churn signature.
-    // The single copy stays VISIBLE as a strict failure, never silent.
     let d = decide(100, 0, 1, 0);
     assert!(
-        d.overall_pass_term,
-        "copies=1 absorbed at tol 2 (interim; strict restore is next)"
+        d.relaxed_pass,
+        "the tol-2 lens still absorbs a single copy (observability): {d:?}"
     );
     assert!(
-        !d.strict_pass,
-        "copies=1 still fails strict_pass — visible, never masked"
+        !d.overall_pass_term,
+        "but the strict-zero blocking fold rejects it — visibly, never masked: {d:?}"
     );
 }
 
-// --- the uniformity floor at the restored value, on the BEAT-corrected reading ---
+// --- CAM2 per-cambox override DROPPED (removal precondition met) ---
 
 #[test]
-fn floor_reds_the_prefix_churn_passes_postfix() {
+fn cam2_override_dropped_cam2_now_uses_the_default_strict_fold() {
+    // RED against the interim `&[("CAM2", 25)]`: the map is now empty — CAM2 reads 0/0 on every
+    // window across all four post-16.9 splitter-fed runs (180691712, 977889848, 2019585820,
+    // 622403283), so the HW carve-out (issue 1249, the imag-HDMI-tap era) is no longer needed.
+    assert_eq!(
+        WINDOW_COPIES_GAPS_TOLERANCE_PER_CAMBOX,
+        &[] as &[(&str, u32)],
+        "issue 1242: the CAM2 tolerance-25 override is dropped (post-16.9 splitter-fed CAM2 is 0/0)"
+    );
+    // CAM2 now folds exactly like every other box: strict-zero, no per-box relaxation.
+    let cam2 = decide_for_cambox("CAM2", 100, 0, 3, 0);
+    let default = decide(100, 0, 3, 0);
+    assert_eq!(
+        cam2, default,
+        "CAM2 decision == the default decide (override gone): {cam2:?}"
+    );
+    assert!(
+        !cam2.overall_pass_term,
+        "CAM2 copies=3 now REDs under the default strict-zero fold: {cam2:?}"
+    );
+}
+
+// --- the uniformity floor at the restored value (already 0.95 from the interim lane) ---
+
+#[test]
+fn uniformity_floor_stays_at_the_restored_point_ninety_five() {
+    assert_eq!(
+        UNIFORM_FRACTION_MIN, 0.95,
+        "the interim lane already restored 0.90 -> 0.95; this step leaves it there"
+    );
     // pre-fix churny run 25635487 worst beat-corrected 0.9481 -> RED at floor 0.95.
     assert!(!cadence_uniformity_gate_pass(
         Some(0.9481),
         Some(UNIFORM_FRACTION_MIN)
     ));
-    // post-fix run 180691712 worst beat-corrected 0.9988, adjacent clean 0.9976 -> PASS.
+    // post-fix runs 180691712 / 977889848 (0.9988) + 2019585820 / 622403283 (0.9976) -> PASS.
     assert!(cadence_uniformity_gate_pass(
         Some(0.9988),
         Some(UNIFORM_FRACTION_MIN)
@@ -101,41 +160,4 @@ fn floor_reds_the_prefix_churn_passes_postfix() {
         Some(0.9976),
         Some(UNIFORM_FRACTION_MIN)
     ));
-}
-
-// --- CAM2 override kept; its removal precondition PINNED (data-conditional, report-only) ---
-
-#[test]
-fn cam2_override_kept_until_a_post_16_9_splitter_fed_run() {
-    // KEPT at 25: no post-16.9 splitter-fed run exists yet (cam2 was the imag-HDMI projection tap
-    // until ~16.9 13:00; the post-fix run 180691712 at 15.9 22:31 predates the swap). REMOVAL
-    // PRECONDITION for the next step: the first post-16.9 splitter-fed E2E whose CAM2 windows sit
-    // within the DEFAULT tolerance -> set this map to `&[]`. Until then it stays exactly here.
-    assert_eq!(WINDOW_COPIES_GAPS_TOLERANCE_PER_CAMBOX, &[("CAM2", 25)]);
-    // The override still absorbs CAM2's over-rate band while the default gate is now tighter.
-    assert!(
-        decide_for_cambox("CAM2", 100, 0, 20, 0).overall_pass_term,
-        "CAM2 tol 25 absorbs 20"
-    );
-    assert!(
-        !decide_for_cambox("CAM3", 100, 0, 20, 0).overall_pass_term,
-        "CAM3 uses default tol 2"
-    );
-}
-
-// --- strict-zero restore is the EXPLICIT next step, NOT taken here (both seams stay armed) ---
-
-#[test]
-fn strict_restore_is_the_next_step_not_this_one() {
-    // Interim: the tolerance channel still governs the fold (NOT strict-zero). The full restore =
-    // flip BOTH seams to `false`, gated on >= 2 more consecutive `02b53180b`-or-later runs with
-    // windows_failed_report_only == 0. Both stay wired/armed here (dormant-mechanism pattern).
-    assert!(
-        copies_gaps_tolerance_gates_overall_pass(),
-        "tolerance channel still governs (interim)"
-    );
-    assert!(
-        segment_singleton_allowance_gates_overall_pass(),
-        "singleton fallback stays wired"
-    );
 }
