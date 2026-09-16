@@ -63,11 +63,18 @@ fn run_with_fakes(body: &str, env: &[(&str, &str)], ping_rc: Option<&str>) -> (S
     // `set +e` after the source neutralizes the sourced script's own `set -euo pipefail` leaking into
     // the harness (the run_sourced -e-leak documented in .claude/rules/ci-testing-gotchas.md).
     let harness = format!("set -uo pipefail\n. \"$SCRIPT\"\nset +e\n{body}");
+    // Hermetic ack input: the harness falls back to the CHECKED-IN rig-fleet.txt when
+    // CAMBOX_OFFLINE_ACK is empty (issue 1013's default-ack file), and that file legitimately
+    // carries real acks (imag:/imag-nb: since the notebook was returned 16.9.2026) -- point the
+    // seam at an EMPTY file so every case below is decided by the env this test sets.
+    let ack_file = dir.path().join("rig-fleet.txt");
+    fs::write(&ack_file, "# empty (hermetic test ack file)\n").expect("write empty ack file");
     let mut cmd = Command::new("bash");
     cmd.arg("-c")
         .arg(&harness)
         .env("SCRIPT", script())
-        .env("PATH", path);
+        .env("PATH", path)
+        .env("RIG_FLEET_ACK_FILE", &ack_file);
     for (k, v) in env {
         cmd.env(k, v);
     }
