@@ -365,3 +365,39 @@ a healthy-chain run ever reds on ONLY these seams, the documented revert is re-a
 `copies_gaps_tolerance_gates_overall_pass() -> true` (back to the tol-2 fold) -- a data-thin
 false-red safety valve, NEVER a silent widen. Data table reproduced by
 `scripts/window_gate_walkdown.py 02b53180b 7e8efff6a`.
+
+## SEAM-FLIP (disarm/re-arm) has a DIFFERENT consumer sweep than a CONST-WALK — the probe-gated overall_pass fold tests (issue 1242 review-caught)
+
+Step 4 above ("both-directions test update") covers a CONST walk (literal fixtures pinned at the old
+boundary). **Flipping a FOLD SEAM (`copies_gaps_tolerance_gates_overall_pass()` /
+`segment_singleton_allowance_gates_overall_pass()` true<->false) is DIFFERENT and breaks a set the
+const-walk sweep misses:** every probe-gated test that folds `overall_pass` through
+`segment_continuity` -> `decide_with_tolerance(...).overall_pass_term`. These live in
+`src/probe/recording_segments.rs` + `src/bin/recording-verdict.rs`, are `#[cfg(feature="probe")]`
+(CI-only compile, Tier-0 #557 bans compiling them locally), so a change confined to the seam is
+INVISIBLE locally and only reds at CI. Issue 1242's strict-zero restore shipped a first pass that
+left ALL of them asserting the OLD absorbing behavior; an adversarial review caught it.
+
+**The exact break-signature detector (run it before pushing any seam flip):** a test asserting
+`overall_pass == true` (json!(true) or `assert!(v.overall_pass,`) while ALSO asserting
+`windows_failed_report_only` at a NONZERO value — that is "a strict-failing window absorbed into
+overall_pass", exactly what disarming the seams inverts. A pure-Python fn-splitter over both files
+finds them (see the issue-1242 lane). It does NOT catch tests with no `windows_failed_report_only`
+assertion (e.g. a `two_or_three_copies` overall-only test, or the boundary differential's
+at-tolerance fixture), so ALSO grep every positive `overall_pass`/`json!(true)` and check its
+window is genuinely clean (0/0) vs a nonzero absorbed one.
+
+**The full consumer list a seam flip must sweep (issue 1242):**
+- `src/probe/recording_segments.rs`: the copies/gaps absorption tests (single-copy, copy-stale,
+  non-adjacent-freeze, benign-reorder-gap, mixed-run, two-or-three-copies) + the per-cambox override
+  end-to-end test (`per_cambox_override_...` — dropping the map also changes its
+  `copies_gaps_tolerance`/`relaxed_pass`/`windows_over_copies_gaps_tolerance` assertions).
+- `src/bin/recording-verdict.rs`: `all_cambox_continuity_single_copy_...` + the boundary
+  differential `copies_gaps_tolerance_boundary_gates_overall_pass_...` at-tolerance fixture (+ its
+  fn doc + the "(a) must NOT swing" inline comment).
+- NOT affected: the v4l2 CAPTURE-leg band (`camleg_capture_band` / `v4l2_dropped`, issue 1169) is a
+  SEPARATE seam that does not call these two functions — confirm it's independent, don't invert it.
+
+Verify the flip locally with a std-only `rustc --edition 2021 --test` replica of
+`decide_with_tolerance` at armed vs disarmed seams (the fold logic is pure crate-root); CI is the
+first place the probe consumers type-check + run.
