@@ -79,3 +79,34 @@ def test_distribution_table_renders_both_eras():
     assert "CAM6 26/27" in t and "| PRE |" in t
     assert "| POST |" in t and "all 0/0" in t
     assert "0.9988" in t and "0.9481" in t
+
+
+def test_cam_max_present_absent_and_zero():
+    # issue 1242 CAM2-override-removal signal: worst max(copies,gaps) for one box.
+    pre = w.summarize_verdict(PRE_FREEZE)
+    assert w.cam_max(pre, "CAM2") == 12  # max(12,10) over the one CAM2 window
+    assert w.cam_max(pre, "CAM6") == 27  # max(26,27)
+    # A strict-clean CAM2 (the post-16.9 splitter-fed runs) reads 0, distinct from ABSENT (None).
+    assert w.cam_max(w.summarize_verdict(POST_CLEAN), "CAM2") == 0
+    assert w.cam_max(pre, "CAM1") is None  # absent box -> None, never a false 0
+
+
+def test_cam_max_worst_across_multiple_windows():
+    v = _verdict(False, 2, 0, 2, 0, 0.99, 0.98,
+                 [("CAM2", 1, 0, 0.99), ("CAM2", 3, 5, 0.98)])
+    assert w.cam_max(w.summarize_verdict(v), "CAM2") == 5  # max over both windows
+
+
+def test_distribution_table_cam2_column():
+    rows = [
+        ("25635487", "3ffe2fbc5", "PRE", w.summarize_verdict(PRE_FREEZE)),
+        ("180691712", "02b53180b", "POST", w.summarize_verdict(POST_CLEAN)),
+    ]
+    t = w.distribution_table(rows)  # default per-cambox col = CAM2
+    assert "CAM2 max" in t
+    lines = t.splitlines()
+    # POST run's CAM2 column reads 0 (strict-clean, the removal precondition); PRE reads 12.
+    post_row = next(ln for ln in lines if "180691712" in ln)
+    pre_row = next(ln for ln in lines if "25635487" in ln)
+    assert post_row.split("|")[9].strip() == "0"
+    assert pre_row.split("|")[9].strip() == "12"
