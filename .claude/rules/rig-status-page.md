@@ -88,5 +88,5 @@ overall with the retired row visible as a grey `.b-RETIRED` badge labelled „VR
 TOKEN is single-sourced: `RETIRED_VERDICT = _load_audit_constant("IMAG_RETIRED_VERDICT")` imports it
 from the audit via `importlib` — never a retyped `"RETIRED"` literal that can drift. `overall_state`
 also gained a companion false-green guard: a records-set with rows but ZERO real PASS/WARN/FAIL tiers
-(only neutral rows) is ERROR, not PASS — neutral rows are not proof of health. Tests:
+(only neutral rows) is ERROR, not PASS — neutral rows are not proof of health, and `alert_condition` MIRRORS that guard (pages `prober-down:no-health-tiers`) so a neutral-only sweep never renders ERROR while staying silent on Discord. Tests:
 `tests/python/test_rig_status_retired_1316.py`.
