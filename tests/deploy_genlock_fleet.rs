@@ -1103,11 +1103,12 @@ fn normalize_accepts_resolume_explicit_only_not_default_1295() {
         run_sourced(&script(), "fleet_normalize_boxes resolume,strih,resolume").trim(),
         "strih,resolume"
     );
-    // the empty default is strih,stream,imag ONLY -- resolume (traveling maintenance box) is never
-    // pulled into the whole-fleet default; it deploys only when explicitly named.
+    // the empty default is strih,stream ONLY -- resolume (traveling maintenance box) is never
+    // pulled into the whole-fleet default, and imag left it when imag-nb was RETIRED (issue 1316,
+    // 16.9.2026); both deploy only when explicitly named.
     assert_eq!(
         run_sourced(&script(), "fleet_normalize_boxes ''").trim(),
-        "strih,stream,imag"
+        "strih,stream"
     );
 }
 
