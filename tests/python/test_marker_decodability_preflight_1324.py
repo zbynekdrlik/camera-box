@@ -67,7 +67,8 @@ def test_parse_verdict_reads_the_word():
 def test_is_ok_only_the_literal_ok_word():
     assert run("marker_decodability_is_ok OK")[1] == "true"
     for w in ("UNDECODED", "SILENT", "POLLUTED", "", "ok"):
-        assert run(f"marker_decodability_is_ok {w or '\"\"'}")[1] == "false"
+        arg = w if w else '""'  # pass an explicit empty-string arg, no backslash in an f-string
+        assert run(f"marker_decodability_is_ok {arg}")[1] == "false"
 
 
 # --- remote command builders ------------------------------------------------

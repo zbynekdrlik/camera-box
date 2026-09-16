@@ -100,8 +100,19 @@ fn circ_dist(a: u32, b: u32) -> u32 {
 /// The self-consistency cluster size (see the module docs). `markers` are the demod's
 /// `(audio_ts_s, index)` decodes (any order). Returns the number of markers in the LONGEST chain of
 /// consecutive-in-time markers that share the modal emit cadence (index-step S ± `step_tol` and
-/// inter-arrival gap ≈ modal G, tolerating a single missed marker via 2S/2G). Fewer than 3 markers,
-/// or no dominant step, ⇒ 0 (nothing decodable to speak of).
+/// inter-arrival gap ≈ modal G, tolerating a single *missed* marker via 2S/2G). Fewer than 3
+/// markers, or no dominant step, ⇒ 0 (nothing decodable to speak of).
+///
+/// The chain is STRICTLY consecutive — a single *interspersed* off-cadence decode RESETS `cur`, so a
+/// healthy window's run can shorten by a false decode landing mid-sequence. This is DELIBERATE and
+/// load-bearing, NOT a tolerance to relax: an "allow K intervening non-matching pairs" gap-budget was
+/// tested against the real 16.9 recordings and FALSE-PASSES the broken chain — with a 1-pair budget
+/// the drowned-window cluster rose from ≤3 to 5 (its scattered false decodes chain across the skipped
+/// pair), above the N=4 floor. Strict-consecutive is exactly what keeps a drowned window's coincidental
+/// runs short while a real cadence chains fully; the green calibration ([7,9] over a 25 s window)
+/// already reflects the real chain's own interspersed false-decode rate. Residual risk is a
+/// slightly-more-degraded-but-healthy chain false-ABORTING (never a bad run passing) — it fails SAFE,
+/// names the class loudly, and `min_clusters` / the window / the whole gate are env-overridable.
 pub fn consistency_cluster_size(markers: &[(f64, u8)], p: ClusterParams) -> u64 {
     if markers.len() < 3 {
         return 0;
