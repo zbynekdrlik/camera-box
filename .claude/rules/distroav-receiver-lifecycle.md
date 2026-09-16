@@ -393,3 +393,64 @@ drain before `ndiLib->destroy()` is the follow-up. Detection: the report-only `p
 bundle-state facet (see `program-render-audit.md`); a dev1 watchdog paging on it + `relock_bursts>=1`
 is the supervisor's follow-up. The live cure (20 scene switches, no `lagged>0`, dock ±15 ms ≥2 h) is
 UNVERIFIED until the supervisor's full-bundle deploy + rig soak.
+
+## #1096 (reopen 16.9.2026) — a CONNECTED bind that never delivers a frame has no aging clock; age it from bind time
+
+A DIFFERENT shape of the wedge, seen right after the 12:10 fleet deploy of 1.7.0-dev.631: strih
+reset `NDI cam5`/`cam2`/`cam6` BY-NAME into the poisoned finder, the bind CONNECTED
+(`no_connections > 0`) but delivered ZERO frames — `genlock-fifo audit received=` frozen for over an
+hour, cam1/3/4/7 fine. None of the existing recovery paths covered it:
+
+- `genlock_reconnect_decision` (the issue-767 stale watchdog, `no_connections > 0`) did not cure it.
+- the last-known/fleet-map ladder is gated inside `if (no_conn == 0)` — it cannot re-arm once the
+  receiver reports `no_connections > 0`.
+- the issue-1287 BY-URL↔BY-NAME alternation runs only *inside* a reset-forcing arm, which never
+  fires here.
+
+So the receiver had no clock that ages a connected bind which never delivered a frame SINCE ITS BIND
+— cured only by an external re-create (the 13:15 evidence: a same-value `set-ndi-mapping.py --heal`
+reported `7 already-correct` yet drove `obs_source_update → ndi_source_update → the issue-1320
+deferred re-init`, which recreated the receiver silently and the three inputs resumed in ~30 s with
+NO `reset_ndi_receiver` line — proving the cure is a receiver re-create the receiver just never
+applies to itself).
+
+**DO NOT key this on `last_frame_ns == 0` — that is DEAD CODE (fresh-context review catch).** The
+issue-767 reconnect-epoch refresh (`if (was_disconnected) { s->last_frame_timestamp = os_gettime_ns();
+… }`) runs one branch EARLIER in the same loop iteration and makes `s->last_frame_timestamp` non-zero
+the instant a bind connects, so any arm here guarded by `last_frame_ns == 0` never holds. The honest
+signal is `frames_seen_since_reset_1180` — set true ONLY by a delivered frame (never by the refresh),
+re-armed false on every reset — which is both reachable AND immune to whatever keeps `last_frame`
+fresh without real frames (the exact class that can silently defeat the `last_frame`-keyed #767
+watchdog; note the static code says #767 *should* also fire here via the refresh, yet it empirically
+did not for an hour — so the root cause of #767's own silence is not fully explained by static
+analysis, and the acceptance below must confirm live WHICH marker fires).
+
+**The fix (LANDED, `ndi_source_thread`, `tests/distroav_frameless_connected_1096.rs`):** record
+`recv_bind_ns_1096 = os_gettime_ns()` at every successful `recv_create_v3`, and add the pure sibling
+`genlock_frameless_bind_reconnect_decision(genlock_active, no_connections, now_ns,
+frames_seen_since_reset, bind_ns, frameless_stale_ns)` — a STRICT COMPLEMENT of
+`genlock_reconnect_decision`: it fires ONLY when `frames_seen_since_reset` is false (no frame on THIS
+bind), `no_connections > 0`, genlock-active, and `now - bind_ns >= FRAMELESS_BIND_STALE_NS` (5 s —
+far above a healthy sub-second first-frame warm-up, well inside the 60 s acceptance bound; shorter
+than the 10 s #767 window, which covers "was delivering, now silent"). A third watchdog arm sits
+immediately AFTER `genlock_reconnect_decision` (so the healthy stale path always wins) and, on a
+fire, forces the SAME reset ladder (fresh finder → last-known → fleet map) + the issue-1287
+alternation (`frames_seen` is false), logging `genlock: NDI receiver connected but FRAMELESS for N s
+since bind -- forcing rebind '<input>'` (mutually non-substring vs every existing `genlock:` marker).
+
+**Why it doesn't disturb the healthy path:** a bind that has delivered at least one frame has
+`frames_seen_since_reset` true, so this new arm returns false and `genlock_reconnect_decision` owns
+any later silence — byte-identical behaviour. The arm engages ONLY on a connected bind that has never
+delivered a frame since it was created, which is always a real wedge. `recv_bind_ns_1096` is a plain
+thread-local `uint64_t`, no teardown.
+
+The force-by-name gate-and-set adjacency now appears at THREE reset-forcing arms (the
+`no_connections==0` arm, the #767 stale-while-connected arm, and this connected-but-frameless arm);
+both `windows-genlock*.yml` bumped that Count anchor `-lt 2` → `-lt 3` and added the helper/call-site/
+bind-record anchors. The dev1 `frozen-strih-input-alert-watchdog` cure hint now says: WS settings
+touch (`set-ndi-mapping.py --host <ip> --heal`) FIRST, OBS relaunch second.
+
+The pure helper is the std-only lift-compile/truth-table gate (a `>= → >` scratch mutation goes RED
+on the 5 s boundary vector); the live receive-path cure reproduces only live — the acceptance is a
+fleet deploy (7 senders restarting within 45 s) after which every strih camera input's `received=`
+advances within 60 s with no WS heal and no OBS relaunch (the supervisor's post-deploy repro).

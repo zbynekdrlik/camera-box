@@ -194,6 +194,59 @@ except Exception:
   return 0
 }
 
+# av_sync_persist_dock_reference <run_id> <stream_ip> <decide_py> [bundle_port] [curl_timeout] [dest]
+#   -> #1319 Part 2: record the DOCK's OWN post-align median next to the recording residual, so the
+#   dev1 band alarm compares DOCK-to-DOCK (cancelling the ~120 ms recording-vs-dock frame bias that
+#   paged 78 times overnight). Fetches the stream box's `:8899/bundle-state.json`, asks the pure
+#   `av_step_decision.py dock-reference` whether the dock's RECENT window is trustworthy (quality-
+#   gated: median MAD <= 15 ms, min matched >= 30, pin stable, enough samples), and ONLY when it is
+#   MERGES `dock_offset_median_ms`/`dock_offset_n`/`dock_offset_mad_ms` into the residual-last JSON
+#   the line above wrote (read-modify-write, atomic). A low-quality / unreachable / pre-deploy box
+#   records NOTHING, so resolve_band_reference falls back to the recording residual (and says so).
+#   MUST run AFTER av_sync_persist_residual (which created the file). Best-effort, always returns 0
+#   (used as a bare statement in the cleanup() EXIT trap under the caller's set -euo pipefail).
+av_sync_persist_dock_reference() {
+  local run_id="${1:-}" ip="${2:-}" decide="${3:-}" port="${4:-8899}" timeout="${5:-10}"
+  local dest="${6:-$(av_sync_default_residual_last_path)}"
+  [ -n "$ip" ] && [ -n "$decide" ] && [ -f "$decide" ] || return 0
+  local body="" reachable=0 out="" qok="" median="" n="" mad=""
+  body="$(curl -fsS --max-time "$timeout" "http://${ip}:${port}/bundle-state.json" 2>/dev/null || true)"
+  case "$body" in
+    \{*) reachable=1 ;;
+    *) reachable=0; body="" ;;
+  esac
+  out="$(printf '%s' "$body" | python3 "$decide" dock-reference --box-reachable "$reachable" 2>/dev/null || true)"
+  qok="$(printf '%s\n' "$out" | sed -n 's/^quality_ok=//p' | tail -1 || true)"
+  [ "$qok" = "1" ] || return 0
+  median="$(printf '%s\n' "$out" | sed -n 's/^median_ms=//p' | tail -1 || true)"
+  n="$(printf '%s\n' "$out" | sed -n 's/^n=//p' | tail -1 || true)"
+  mad="$(printf '%s\n' "$out" | sed -n 's/^mad_ms=//p' | tail -1 || true)"
+  [ -n "$median" ] || return 0
+  # Merge into the EXISTING residual-last JSON (av_sync_persist_residual wrote it), preserving every
+  # key. A missing/unreadable dest is a no-op (the residual write must precede this). Atomic.
+  python3 -c '
+import json, os, sys
+try:
+    dest, median, n, mad = sys.argv[1:5]
+    with open(dest) as f:
+        d = json.load(f)
+    if not isinstance(d, dict):
+        sys.exit(0)
+    d["dock_offset_median_ms"] = float(median)
+    if n != "":
+        d["dock_offset_n"] = int(n)
+    if mad != "":
+        d["dock_offset_mad_ms"] = float(mad)
+    tmp = dest + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(d, f)
+    os.replace(tmp, dest)
+except Exception:
+    pass
+' "$dest" "$median" "$n" "$mad" 2>/dev/null || true
+  return 0
+}
+
 # av_sync_persist_applied_offset <src_json> [dest_json] -> COPY the calibrate-written success file
 # (av_sync_calibrate.py --json-path "$OUTDIR/av-sync-last-<run>.json", written ONLY on a landed
 # apply) to the dev1-persistent last-applied reference, so the NEXT run's jump-vs-last condition has

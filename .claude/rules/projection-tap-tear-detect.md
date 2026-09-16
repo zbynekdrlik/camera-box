@@ -309,3 +309,34 @@ real fix is DE-CONFLICTING the painted aux band and the OBS burn layout — cros
 as issue 1270. If a painted best-effort is ever demanded, it must be ADDITIVE (a THIRD mark, LEFT
 and RIGHT byte-identical/untouched so the splitter control + committed fixtures are safe) with a
 written post-deploy kill criterion — NEVER a relocation.
+
+## imag-nb RETIRED 16.9.2026 (issue 1316) — cam2 is a NORMAL camera leg; the tear signal reads `Absent`, never a red
+
+The owner returned imag-nb 16.9.2026 and confirmed „do cam2 uz ide obraz zo splitru ako do
+ostatnych kamier" — **cam2's grabber now receives the SPLITTER feed like every other cambox, NOT
+imag's HDMI projection output.** So the entire premise of "cam2's leg IS the projection path" (the
+top of this rule) is SUSPENDED until the IMAG role returns on a new notebook: there is no imag
+scanout to film, the aux Vernier tick pair has NO source on cam2, and cam2 behaves as an ordinary
+camera window (primary dual-QR decodes from the fb0 painter path, aux never decodes).
+
+- **cam2 STAYS in `CAMERA_ACTIVE_SET`** (owner: same presented-age class as the others now; the
+  `[4i/8align]` baseline may drop cam2's pin 6→3). This is a SEMANTICS change, NOT a set-removal.
+- **NO new viability state — the existing `Unproven` already tolerates it (issue 1316).** A first
+  attempt added a `TearSignalViability::Absent` for "decodable primary + zero aux", but that is
+  UNSOUND: from window stats alone a no-projection-source cam2 window is INDISTINGUISHABLE from an
+  ordinary aux-empty content window — exactly the pre-aux `tests/tear_detect_781.rs` fixtures (a
+  healthy 847-frame window, and a multi-tile window with a couple single-source frames, BOTH with an
+  empty aux slice), which legitimately read `Unproven`. An automatic `Absent` reclassified those and
+  broke the 781 tests (caught in review). So the classifier is UNCHANGED (`Observed` iff a tear
+  fired, else `Unproven`); a sourceless cam2 window reads `Unproven` and PASSES the gate (never a
+  red). The honest "no aux source this window" reading is surfaced REPORT-ONLY by
+  `aux_any_decode_fraction == 0.0`, `signal_operable()` false, and `ProjectionProof::hdmi1_proof_backed`
+  false (aux coverage 0 < `AUX_ANY_OPERABLE_FLOOR`). Pinned by the inline
+  `no_projection_source_cam2_window_passes_report_only_1316` + the std-only Tier-0 replica
+  `tests/tear_detect_imag_no_projection_1316.rs` (whose `pre_aux_empty_content_windows_are_not_reclassified`
+  guards the 781-fixture shape).
+- **The LIVE gate stays armed and honest:** a genuine cross-band tear is still `Observed` and still
+  fails (the `a_real_tear_still_fails_the_gate` regression guard). On the current no-imag rig cam2
+  simply reads `Unproven` every window (report-only signals show aux is not operable).
+- **When the IMAG role returns:** re-provision imag and cam2's projection tap comes back on its own
+  (aux decodes again → `Observed`/`Unproven`/promotable as before). No code change needed to re-arm.

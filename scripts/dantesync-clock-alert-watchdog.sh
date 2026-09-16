@@ -86,7 +86,10 @@ esac
 DANTE_CLOCK_CAM_NODES="${DANTE_CLOCK_CAM_NODES-cam1 cam2 cam3 cam4 cam5 cam6 cam7}"
 # The OBS-box dantesync nodes (space-separated NAMES); IPs + the resolume home-gate come from
 # obs-fleet.sh. imag(-nb) IS a dantesync node; resolume is the traveling CG box.
-DANTE_CLOCK_OBS_NODES="${DANTE_CLOCK_OBS_NODES-strih stream imag resolume}"
+# issue 1316: `imag` DROPPED from the default — imag-nb was returned to the owner (dark), so it is
+# no longer a dantesync node. (obs_fleet_is_home imag is also `retired`/false now, so even if named
+# it would SKIP; dropping it from the default removes the dead ssh/probe entirely.)
+DANTE_CLOCK_OBS_NODES="${DANTE_CLOCK_OBS_NODES-strih stream resolume}"
 # #1313: the LOCAL node(s) -- dev1 itself. dev1 runs dantesync too (its clock feeds every dev1-hosted
 # gate: clock-offset-painter-gate.sh, the recording-verdict wall references, every date-stamped gate
 # window), yet it is NOT a probed cam/obs node -- so on 14.9.2026 it silently sat NTP-only for ~a day

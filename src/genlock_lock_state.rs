@@ -271,6 +271,83 @@ pub fn top_phase_event_offender(inputs: &[InputEventCounts]) -> Option<(usize, u
     best
 }
 
+// #1299 Part 4 — the windowed wall-vs-QPC drift bounds. On a dantesync-disciplined box the wall clock
+// is slewed to the grandmaster rate (`f_ptp + f_phase` ≈ +10…20 ppm) vs the free QPC crystal, so the
+// CUMULATIVE offset grows unbounded (~50 ms/h) — the old `> 100 ms` gate crossed after ~2 h on every
+// box (38 false pages overnight 15./16.9.2026). The real hazards are (a) the drift RATE departing from
+// the slew the clock reports it is applying, and (b) a sudden STEP. These are the widget-side defaults;
+// the pure decision takes them as parameters so a test can pin the exact bounds.
+/// Max |measured − expected| drift rate (ppm) before `qpc_drift` DEGRADES. 50 ppm from the overnight
+/// data (measured ≈ 14, expected ≈ 12 → a 2 ppm residual with a ~25× margin).
+pub const GENLOCK_QPC_DRIFT_PPM_BOUND: f64 = 50.0;
+/// A single-sample wall STEP beyond this (ms) DEGRADES immediately — one 30 fps frame, the coarsest
+/// fleet frame interval (same value as the audio-pairing bound), so a sub-frame wobble never trips.
+pub const GENLOCK_QPC_STEP_BOUND_MS: i64 = 33;
+/// The rolling window (s) the widget averages the drift rate over. 300 s so the integer-ms cumulative
+/// drift resolves the rate: at 14 ppm the window accrues ≈ 4.2 ms (quantisation ≈ 3.3 ppm ≪ the bound).
+pub const GENLOCK_QPC_WINDOW_S: i64 = 300;
+
+/// #1299 Part 4 — the wall-vs-QPC drift verdict plus the measured rate it read (for telemetry).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct QpcDriftVerdict {
+    /// Whether the drift is a genuine genlock hazard (a STEP, or a rate off the reported slew).
+    pub beyond_bound: bool,
+    /// The windowed drift rate in ppm (0.0 until the rate window has filled).
+    pub measured_ppm: f64,
+}
+
+/// #1299 Part 4 — the windowed drift RATE in ppm from an integer-ms cumulative-drift delta over an
+/// integer-ms elapsed span. `delta_ms / elapsed_ms` is dimensionless; × 1e6 is ppm. 0.0 for a
+/// non-positive span (not-ready / degenerate). Byte-for-byte the arithmetic the C mirror
+/// `genlock_qpc_drift_beyond_bound` performs internally, kept as a named Tier-0-tested helper so the
+/// JSON `qpc_drift_ppm` telemetry and the parity harness share one formula.
+pub fn qpc_window_rate_ppm(drift_delta_ms: i64, elapsed_ms: i64) -> f64 {
+    if elapsed_ms <= 0 {
+        return 0.0;
+    }
+    drift_delta_ms as f64 / elapsed_ms as f64 * 1_000_000.0
+}
+
+/// #1299 Part 4 — decide whether wall-vs-QPC drift is a genuine genlock hazard, and report the measured
+/// windowed rate. A steady slew on a dantesync-disciplined box is BY DESIGN (the wall runs at the GM
+/// rate; QPC ticks the free crystal), so the cumulative offset must NOT gate. DEGRADED only when:
+///   (a) a single-sample STEP exceeds `step_bound_ms` — the real genlock hazard, judged as soon as two
+///       samples exist (whether or not the rate window has filled); OR
+///   (b) once the rate window is `rate_ready`, the measured rate departs from `expected_ppm` (the slew
+///       the clock reports it is applying, `f_ptp + f_phase`) by more than `ppm_bound`.
+///
+/// Byte-for-byte mirror of `genlock_qpc_drift_beyond_bound` in `GenlockLockState.hpp` — the committed
+/// parity gate `tests/genlock_lock_state_parity.rs` keeps the two numerically identical over a spread
+/// of float/int vectors.
+pub fn qpc_drift_beyond_bound(
+    rate_ready: bool,
+    drift_delta_ms: i64,
+    elapsed_ms: i64,
+    expected_ppm: f64,
+    ppm_bound: f64,
+    max_step_ms: i64,
+    step_bound_ms: i64,
+) -> QpcDriftVerdict {
+    let measured_ppm = if rate_ready {
+        qpc_window_rate_ppm(drift_delta_ms, elapsed_ms)
+    } else {
+        0.0
+    };
+    let beyond_bound = if max_step_ms.saturating_abs() > step_bound_ms {
+        // A STEP is an immediate hazard, judged even before the rate window fills.
+        true
+    } else if rate_ready {
+        // The RATE mismatch needs a filled window (else the integer-ms delta has no resolution).
+        (measured_ppm - expected_ppm).abs() > ppm_bound
+    } else {
+        false
+    };
+    QpcDriftVerdict {
+        beyond_bound,
+        measured_ppm,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -627,5 +704,98 @@ mod tests {
     #[test]
     fn saturating_never_overflows_on_a_pathological_count() {
         assert_eq!(input_phase_events(&ev(true, u64::MAX, 5, 0)), u64::MAX);
+    }
+
+    // ---- #1299 Part 4: windowed qpc_drift ------------------------------------------
+
+    #[test]
+    fn window_rate_ppm_matches_the_overnight_strih_slope() {
+        // 742 − 101 = 641 ms over 12.5 h (45_000_000 ms) ≈ 14.24 ppm.
+        assert!((qpc_window_rate_ppm(641, 45_000_000) - 14.2444).abs() < 0.001);
+    }
+
+    #[test]
+    fn window_rate_ppm_is_zero_for_a_nonpositive_span() {
+        assert_eq!(qpc_window_rate_ppm(5, 0), 0.0);
+        assert_eq!(qpc_window_rate_ppm(5, -10), 0.0);
+    }
+
+    #[test]
+    fn steady_disciplined_slew_does_not_degrade() {
+        // The reopen scenario: measured ≈14 ppm, the clock reports it applies ≈12 ppm.
+        let v = qpc_drift_beyond_bound(
+            true,
+            641,
+            45_000_000,
+            12.0,
+            GENLOCK_QPC_DRIFT_PPM_BOUND,
+            0,
+            GENLOCK_QPC_STEP_BOUND_MS,
+        );
+        assert!((v.measured_ppm - 14.2444).abs() < 0.001);
+        assert!(!v.beyond_bound);
+    }
+
+    #[test]
+    fn a_step_within_the_window_degrades_even_before_ready() {
+        // A 40 ms single-sample jump (an NTP RTC step) > one 30 fps frame (33 ms).
+        let v = qpc_drift_beyond_bound(
+            false,
+            0,
+            0,
+            12.0,
+            GENLOCK_QPC_DRIFT_PPM_BOUND,
+            40,
+            GENLOCK_QPC_STEP_BOUND_MS,
+        );
+        assert!(v.beyond_bound);
+    }
+
+    #[test]
+    fn a_large_rate_mismatch_degrades() {
+        // ≈134 ppm over a filled window while the clock reports ≈12 ppm.
+        let v = qpc_drift_beyond_bound(
+            true,
+            6,
+            45_000,
+            12.0,
+            GENLOCK_QPC_DRIFT_PPM_BOUND,
+            1,
+            GENLOCK_QPC_STEP_BOUND_MS,
+        );
+        assert!(v.measured_ppm > 120.0);
+        assert!(v.beyond_bound);
+    }
+
+    #[test]
+    fn not_ready_window_never_degrades_on_rate_alone() {
+        let v = qpc_drift_beyond_bound(
+            false,
+            999,
+            1000,
+            12.0,
+            GENLOCK_QPC_DRIFT_PPM_BOUND,
+            0,
+            GENLOCK_QPC_STEP_BOUND_MS,
+        );
+        assert_eq!(v.measured_ppm, 0.0);
+        assert!(!v.beyond_bound);
+    }
+
+    #[test]
+    fn windowed_verdict_feeds_the_three_state_decision() {
+        // The verdict's bool is what `decide` consumes for the qpc term.
+        let v = qpc_drift_beyond_bound(
+            false,
+            0,
+            0,
+            12.0,
+            GENLOCK_QPC_DRIFT_PPM_BOUND,
+            40,
+            GENLOCK_QPC_STEP_BOUND_MS,
+        );
+        let mut f = healthy();
+        f.qpc_drift_beyond_bound = v.beyond_bound;
+        assert_eq!(decide(&f), (LockState::Degraded, LockReason::QpcDrift));
     }
 }

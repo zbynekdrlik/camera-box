@@ -58,21 +58,22 @@ int main() {
     GenlockInputRow a; a.name="NDI cam1"; a.locked=true; a.connected=true; a.latency_ms=3; a.underruns=0; a.relocks=1; a.late_holds=0; a.backward_steps=0; a.depth=2;
     GenlockInputRow b; b.name="weird \" name \\ x"; b.locked=false; b.connected=false; b.latency_ms=13; b.depth=4;
     ins.push_back(a); ins.push_back(b);
-    // #1303 v4 signature: (state, reason, n_inputs, n_locked, n_absent, latency_ms, clock, output,
-    //   recent_event, recent_event_input_name, recent_event_input_events, qpc_drift,
-    //   audio_unexpected_input_name, inputs)
+    // #1299 Part 4 v5 signature: (state, reason, n_inputs, n_locked, n_absent, latency_ms, clock,
+    //   output, recent_event, recent_event_input_name, recent_event_input_events, qpc_drift_ms,
+    //   qpc_drift_ppm, qpc_expected_ppm, qpc_step, audio_unexpected_input_name, inputs)
     // no offender (recent_event false / true-but-none) -> recent_event_inputs is []; nullptr audio
     // offender -> audio_unexpected_inputs is []
-    printf("%s\n", genlock_build_lock_json("LOCKED","none",7,7,1,3,"locked","stamping",false,nullptr,0,0,nullptr,ins).c_str());
-    printf("%s\n", genlock_build_lock_json("UNLOCKED","clock",7,0,0,0,"absent","not-stamping",true,nullptr,0,-5,nullptr,{}).c_str());
-    printf("%s\n", genlock_build_lock_json("LOCKED","none",7,7,0,3,"locked","absent",false,nullptr,0,0,nullptr,{}).c_str());
+    printf("%s\n", genlock_build_lock_json("LOCKED","none",7,7,1,3,"locked","stamping",false,nullptr,0,0,14.244,12.0,0,nullptr,ins).c_str());
+    printf("%s\n", genlock_build_lock_json("UNLOCKED","clock",7,0,0,0,"absent","not-stamping",true,nullptr,0,-5,0.0,0.0,0,nullptr,{}).c_str());
+    printf("%s\n", genlock_build_lock_json("LOCKED","none",7,7,0,3,"locked","absent",false,nullptr,0,0,13.3,13.0,0,nullptr,{}).c_str());
     // #1299 Part 3: a DEGRADED/recent_event line NAMING the offender (cg, 25 phase events)
     std::vector<GenlockInputRow> ins2;
     GenlockInputRow c; c.name="cg"; c.locked=true; c.connected=true; c.latency_ms=3; c.underruns=543; c.relocks=25; c.late_holds=0; c.backward_steps=0; c.depth=2;
     ins2.push_back(c);
-    printf("%s\n", genlock_build_lock_json("DEGRADED","recent_event",4,4,0,3,"locked","stamping",true,"cg",25,0,nullptr,ins2).c_str());
+    printf("%s\n", genlock_build_lock_json("DEGRADED","recent_event",4,4,0,3,"locked","stamping",true,"cg",25,0,14.0,13.0,0,nullptr,ins2).c_str());
     // #1303: a DEGRADED/audio_unexpected line NAMING the audible silent-by-contract source
-    printf("%s\n", genlock_build_lock_json("DEGRADED","audio_unexpected",7,7,0,3,"locked","stamping",false,nullptr,0,0,"CAM3 (usb)",ins).c_str());
+    // #1299 Part 4: a DEGRADED/qpc_drift line carrying a STEP (qpc_step=1)
+    printf("%s\n", genlock_build_lock_json("DEGRADED","audio_unexpected",7,7,0,3,"locked","stamping",false,nullptr,0,0,14.0,13.0,1,"CAM3 (usb)",ins).c_str());
     return 0;
 }
 '''
@@ -130,6 +131,10 @@ def test_cpp_builder_output_roundtrips_through_the_python_parser(tmp_path):
         assert facet["latency_ms"] == obj["latency_ms"]
         assert facet["recent_event"] == obj["recent_event"]
         assert facet["qpc_drift_ms"] == obj["qpc_drift_ms"]
+        # #1299 Part 4 v5: windowed-drift telemetry round-trips (report-only).
+        assert facet["qpc_drift_ppm"] == obj["qpc_drift_ppm"]
+        assert facet["qpc_expected_ppm"] == obj["qpc_expected_ppm"]
+        assert facet["qpc_step"] == obj["qpc_step"]
         assert facet["source"] == "log"
         # #1299 v3 (Part 3): recent_event_inputs round-trips when non-empty; omitted when empty.
         obj_rei = obj.get("recent_event_inputs") or []

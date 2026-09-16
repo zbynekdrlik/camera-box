@@ -12430,3 +12430,191 @@ no version bump (worktree lane; supervisor cherry-picks).
   `rig-dev-handover-check.sh`. Live dev1 dry-run: 16/16 timers OK; a really-disabled timer →
   SUPERVISOR; a fake timer → UNKNOWN. Tests: test_rig_dev_handover_watchdogs_1319.py (12) + the
   1312 full-fleet fixture extension. Tier-0: pytest 40 passed + bash -n + shellcheck, zero cargo.
+
+- #1319 Part 2 (A/V BAND false alarm) — lane/1319-quality. RED 61fe961a6 → GREEN c47a6de09 →
+  review-fix 19df2ac26. The band arm paged 78× overnight 15./16.9. (dock estimator biased ~+120 ms
+  vs the recording residual, MAD 9-31 ms judged against a ±30 ms band). Fix: (1) a measurement-
+  QUALITY gate — new `av_offset_recent_mad_ms`/`av_offset_recent_matched_min` facets (parser
+  `av_offset_quality_from_log`, SEPARATE from the byte-identical offset series) + `band_quality_ok`
+  + a `LOW_QUALITY` verdict (log-only) unless mad≤15 AND matched≥30 (absent→proceed, non-finite→
+  fail-safe LOW_QUALITY); (2) a DOCK-NATIVE reference — `av_sync_persist_dock_reference` records the
+  dock's own quality-gated post-align median into av-sync-residual-last.json, `resolve_band_reference`
+  prefers `dock_offset_median_ms` so the band compares dock-to-dock; (3) dock BIAS observability —
+  `lag_idx`/`cands` appended to the UPDATED/LOCKED line + a `pin-change observed` marker in
+  sync-test-output.cpp (Rust anchor + pwsh mirror in both windows-genlock*.yml). Tests:
+  test_av_band_quality_1319.py (new) + extended test_av_band_1319.py + av_sync_dock_pin_observability_1319.rs.
+  Tier-0 pytest 177 green; C++ compiles at CI only. Rule addendum in av-step-upstream-detector.md.
+## 2026-09-16 — #1299 Part 4: windowed-rate + step qpc_drift (fix the cumulative-slew false page)
+- RED cfff46cf3 → GREEN aa7bac3e9. The genlock LOCK indicator's `qpc_drift` term gated on the
+  CUMULATIVE `wall_qpc_drift_ms`, which grows unbounded on a dantesync-disciplined box (wall slewed
+  to the GM rate vs the free QPC crystal, ~14 ppm ≈ 50 ms/h) — crossed 100 ms after ~2 h and
+  produced 38 false Discord pages overnight 15./16.9.
+- Redefined as pure `genlock_qpc_drift_beyond_bound` (Rust authority `src/genlock_lock_state.rs` +
+  C mirror `GenlockLockState.hpp` + python mirror, C-vs-Rust parity-gated): DEGRADE on a STEP > 33 ms
+  (one 30 fps frame, immediate) OR a windowed drift RATE off the dantesync-reported `f_ptp+f_phase`
+  slew by > 50 ppm over a filled 300 s window. Widget keeps a signed-drift ring + polls the expected
+  slew from :8898; `qpc_drift_ms` stays report-only, additive `qpc_drift_ppm`/`qpc_expected_ppm`/
+  `qpc_step` at the JSON END (v4→v5). Gather parser + watchdog log + both windows-genlock pwsh
+  anchors + json-guard test in lock-step.
+- Verify (Tier-0): rustc --test module 44/44; standalone C-vs-Rust parity replica 14/14; guard 5/5;
+  python decision+gather+roundtrip+qpc_window 52; fmt clean; bash -n + shellcheck clean; both yml
+  valid YAML; doc-lint clean. Vendored C++/Qt compiles at CI (FULL-BUNDLE frontend deploy).
+
+## issue 1317 — strih-lx: Linux notebook replacing the Windows strih PC (preparation, runs in parallel) — 2026-09-16
+- RED 4bf3b21ca `test(#1317): [red]` (tests/strih_provision_pure_functions.rs, lib not yet added) →
+  GREEN 18ae40b12 `feat(#1317): [green]`. Base 1.7.0-dev.632 (77220660c), no version bump (prep lane).
+- New source-only role lib scripts/lib/strih-provision.sh (obs-fleet.sh/camera-set.sh convention):
+  the 10 NDI inputs, the STRIH-LX-namespaced outputs/republishes (never a 2nd STRIH-SNV sender),
+  floor-3 latency, the strih CI artifact name, dantesync-CLIENT args + fail-closed not-master check,
+  the light-profile facts, the MiniFuse-4/PipeWire fail-loud audio TODO, + verify predicates
+  (render-tick/distroav/nvenc/single-timesync). Sourced by setup/verify + the RED test.
+- scripts/setup-strih.sh (13 numbered enable-only fail-loud steps, BASH_SOURCE-guarded) +
+  scripts/verify-strih.sh acceptance gate; systemd/strih-obs.service + strih-bundle-state-server.service.
+- CI: linux-genlock.yml gained a `linux-genlock-build-strih` job (artifact obs-genlock-linux-x86_64-strih),
+  ENABLE_BROWSER=OFF + STRIH_BUILD_FLAGS.txt BROWSER-OFF marker (obs-browser/CEF = first follow-up).
+  imag-parity job byte-identical (git diff shows no deletions there).
+- obs-fleet.sh: strih-lx|strih-lx.lan|linux-genlock|traveling row joining bundle-state/obs-liveness/
+  genlock-lock only; harness_obs_fleet_list_1296.rs genlock-lock exact-match updated + a strih-lx
+  membership test added. deploy-genlock-fleet.sh: normalize/box_ip/fleet_linux_bundle_artifact_for +
+  a plan arm (execute deploy = follow-up, box does not exist yet). latency-pins-baseline.json strih-lx
+  floor-3 report-only block.
+- Verify (Tier-0, worktree-isolated — the sourced-lib Rust harness runs at CI): bash -n + shellcheck
+  clean on all .sh; the lib + verify predicates exercised via standalone bash source (RED→GREEN,
+  incl. a shellcheck-caught client-not-master pattern bug fixed pre-commit); deploy pure helpers
+  match deploy_genlock_fleet.rs expectations; latency JSON + linux-genlock.yml valid; cargo fmt
+  --all --check clean; doc-lint grep clean. Sibling lane on issue 1316 (imag retirement) also edits
+  obs-fleet.sh/targets.md — additive-only here, supervisor merges both.
+## #1096 (reopen 16.9.2026) — CONNECTED-but-FRAMELESS receiver arm (16.09.2026)
+- Root cause: a CONNECTED bind (no_connections>0) that never delivers a frame since its bind (12:10 fleet-deploy wedge on strih NDI cam2/5/6) had no aging clock; the no_connections==0 ladder can't re-arm once connected and the issue-1287 alternation never fires. Leg black ~1 h, cured only by an external receiver re-create (a same-value set-ndi-mapping.py --heal → obs_source_update). NOTE (review catch): keying on last_frame_ns==0 is DEAD CODE — the #767 was_disconnected refresh sets last_frame non-zero the instant a bind connects; the honest key is frames_seen_since_reset (set only by a real frame, immune to that refresh). Why the last_frame-keyed #767 itself stayed silent for an hour is not fully explained statically — the live acceptance must confirm which marker fires.
+- Fix (vendor/distroav/src/ndi-source.cpp): record recv_bind_ns_1096 at each recv_create_v3; add pure genlock_frameless_bind_reconnect_decision (strict complement of the 767 helper, fires only when frames_seen_since_reset is false) + FRAMELESS_BIND_STALE_NS=5s; new third watchdog arm forces the SAME reset ladder + issue-1287 alternation, logs "genlock: NDI receiver connected but FRAMELESS for N s since bind -- forcing rebind". Mirrored helper/call-site/bind-record anchors + force-by-name Count -lt 2->3 in both windows-genlock*.yml. dev1 frozen-input cure hint: WS --heal first, OBS relaunch second.
+- Commits: RED bcd72707c test(#1096) → GREEN a84b18f2a fix(#1096) → docs (this).
+- Tests: tests/distroav_frameless_connected_1096.rs 3/3 offline (lift-compile + spec truth table; >=->> mutation goes RED); existing distroav_*_767/1080/1096/1180/1287 still green; cargo fmt --all --check clean; both yml valid YAML.
+- UNVERIFIED locally: full vendored C++ (CI first compiler) + the live receive-path cure (live-only). Acceptance = supervisor's post-deploy fleet-wave repro: every strih camera input received= advances within 60 s with no WS heal / no OBS relaunch.
+## issue 1316 — imag-nb RETIRED (returned to owner 16.9.2026): CODE + DOCS half (lane/1316-retire)
+- Context: imag-nb (10.77.9.182) returned to the owner 16.9.2026, confirmed dark (ping 100% loss);
+  IMAG role re-provisions on a new notebook next year. Supervisor did the dev1-side rig-fleet ack +
+  imag timer disables; THIS lane = the repo CODE + DOCS.
+- obs-fleet.sh: THIRD home-check state `retired` — `obs_fleet_is_home imag`=false, `obs_fleet_boxes`
+  EXCLUDES a retired box centrally (genlock-lock drops imag automatically), row+history kept, one-word
+  flip back to `always` on re-provision.
+- Rosters (one-line each): dropped dead 10.77.9.182 anchor from network-reach/bundle-state
+  REFERENCE_HOSTS; dropped imag from dantesync-clock DANTE_CLOCK_OBS_NODES, mv-fps MV_FPS_BOXES, and
+  the deploy-genlock-fleet empty --boxes default (imag stays a valid explicit target).
+- cam2 SEMANTICS (owner „do cam2 uz ide obraz zo splitru"): cam2 stays in CAMERA_ACTIVE_SET as a
+  normal splitter leg; cam2's now-sourceless projection leg reads Unproven and passes the tear gate
+  (never a red; "no aux source" surfaced report-only). No new viability state was added — an
+  auto `Absent` was UNSOUND (it reclassified the aux-empty pre-aux 781 fixtures, caught in review).
+- Manual tools: rig-health-audit.py check_imag renders a neutral RETIRED row (exit-neutral);
+  rig-dev-handover-check.sh + rig_dev_handover_decision.py drop the imag-scoped pins_imag capture —
+  both read the rig-fleet.txt imag ack (env-overridable).
+- Docs: targets.md imag row RETIRED (pathspec commit); wol-targets.txt commented; rule addenda in
+  projection-tap-tear-detect / cambox-tick-decodability / obs-fleet-list / imag-offline-ack.
+- Commits: [red] test(#1316) → [green] fix(#1316) → rustfmt → docs. Verify (Tier-0, no cargo compile):
+  std-only tear replica rustc --test 5/5 (incl. a guard that the pre-aux 781-fixture shape is NOT
+  reclassified);
+  rig-dev-handover pytest 15/15; rig-health-audit pytest 5/5; obs-fleet.sh sourced-behavior checks;
+  bash -n + shellcheck clean on all edited scripts; cargo fmt --all --check clean; doc-lint grep
+  clean. The Rust harnesses (harness_obs_fleet_list, deploy_genlock_fleet, tear inline test) + the
+  full cargo suite run at CI/integration.
+
+- #1320 (dev1 render-freeze / relock-storm pager — item 3, the guardrail for the cured scene-switch
+  render freeze): RED 7d23b8f1b → GREEN cdbcdcdce → feat a0fd8907c → docs. Two new bundle-state
+  facet + a pure two-arm decision core + a dev1 systemd watchdog (ships DISABLED).
+  * relock_bursts facet: `relock_bursts_from_log` in scripts/bundle_state_gather.py PORTS issue
+    1318's summarize_relock_bursts (src/jitter_audit.rs) to Python — the summarizer is not
+    re-implemented across languages beyond this ONE mirror; test_relock_bursts_gather_1320.py's
+    parity block feeds the SAME synthetic sequences the Rust tests use and asserts identical
+    bursts/max_per_second. Wired at the END of bundle-state-server.py's _parse_log_facets tuple.
+  * render_freeze_decision.py: RENDER arm pages RENDER_FREEZE on lagged >= a magnitude FLOOR
+    (default 30 — above the relaunch band 1/2/11, below the 61/228 real freeze) AND a fresh age
+    (chosen OVER an obs_start/uptime facet: none exists on :8899, the burn-reconcile restart signal
+    is renderTotalFrames over the OBS WS which a dev1-only watchdog can't reach, and a magnitude
+    floor is more robust than an uptime guess); RELOCK arm on bursts>=1 fresh. SKIP=unfetchable
+    (issue 732/1001), UNKNOWN=facet absent.
+  * render-freeze-alert-watchdog.sh: reuses obs-watchdog-decision.sh confirm/throttle +
+    watchdog_notify_key; both arms PRODUCTION-CRITICAL time-bucketed (render-freeze-$box /
+    relock-storm-$box, allowlisted in test_notify_dedup_key_sweep_1206.py); DETECTION-ONLY,
+    recovery log-only. render-freeze fleet facet in obs-fleet.sh = strih stream resolume strih-lx;
+    roster entry for the #1319 handover check.
+  * Tier-0 green: pytest 28/28 (my suites) + 102/102 (sweep+gather); full suite 2648 passed (1
+    PRE-EXISTING rig-health-audit failure the supervisor's held fix-forward commit owns — untouched
+    here). bash -n + shellcheck clean; py_compile clean. LIVE read-only --dry-run 16.9. against
+    strih/stream/resolume = HEALTHY (relaunch/stale lags correctly not paged), strih-lx = SKIP
+    (unreachable). NO rig writes.
+## issue 1099 — calibrate the issue-1079 purple-noise roughness threshold + wire PURPLE_NOISE report-only (lane/1099-noise) — 2026-09-16
+- Phase 2 (report-only) of the issue-1079 Elgato purple-noise metric. UNPARKED 16.9 after the rig
+  returned to the LAN (13.9); mined the calibration data read-only.
+- DATA (read-only journal mining, no rig writes): dev1 `splitter-port-alert-watchdog` journal since
+  13.9 (7217 per-box verdict lines — every degraded DEAD_PORT/SOURCE_WIDE was `colour=0` flat, rough
+  0.0–14.1, incl. the cam2 12:59–13:04 re-cabling window at rough=0.1) + all 7 camboxes' OWN journals
+  (~38.1k colour + 421 grayscale `capture chroma:` samples). Fleet healthy COLOUR roughness: p99 18.5,
+  MAX 22.5 (cam2 imag-HDMI path; splitter cams ≤13.7); grayscale ≤14.7. Purple-noise POSITIVE CLASS
+  ABSENT — 0 colour samples ≥25/≥30/≥40 anywhere.
+- CALIBRATION: NOISE_ROUGHNESS_THRESHOLD 30.0 → 40.0 (≥2× healthy p99=37, 1.78× healthy max, below the
+  analytic ~73 noise floor). Wired `splitter_health_classify` PURPLE_NOISE (colour + rough>threshold,
+  optional/backward-compatible args + a float-safe compare) + a watchdog NOISE-SUSPECT report-only
+  branch; NEVER pages (positive class unmeasured). DEAD_PORT stays the only paging verdict.
+- GO-LIVE deferred (documented in the rule): needs a real Elgato no-signal `rough=` (measures the true
+  noise floor) + the ≥1-low-rough-sibling self-anchor before arming the page. Owner stance "prah bez
+  kalibracneho bodu nehybem" honoured — the page is off; the report-only surface + the healthy-side
+  calibration ship.
+- Commits: RED 30570fc5d test(#1099) → GREEN 3e93cb0ba fix(#1099) → docs (this).
+- Tier-0 verify (no cargo): rustc --test replica RED@30.0 / GREEN@40.0; splitter-health.sh classify
+  12/12 (incl. backward-compat + DEAD_PORT/SOURCE_WIDE/NODATA/NO_CAPTURE regressions) + watchdog
+  driver replica (PURPLE_NOISE report-only, no page; mixed fleet; grey-box DEAD_PORT still pages);
+  cargo fmt --all --check + bash -n + shellcheck -S warning clean. The Rust harnesses run at CI.
+## issue 1242 — walk-back step: copies/gaps tol 5->2 + uniformity floor 0.90->0.95 (lane/1242-strictfold) — 2026-09-16
+- Root cause of the residual ~0.06% FIFO copy churn: the strih PROGRAM render-freeze -> stream FIFO
+  underrun -> relock storm, root-caused + fixed by issues 1318/1320 (cure = genlock bundle
+  02b53180b, deployed 15.9 ~21:36). This is the WALK-BACK: tighten the gate now the churn source is
+  gone.
+- DATA (mined via the new `scripts/window_gate_walkdown.py`, segregated by rig-verified
+  `version-strih.json.genlock_build_sha`): POST-fix run 180691712 (02b53180b) = every window 0/0,
+  worst beat-corrected uniformity 0.9988; adjacent clean runs 0.9976; PRE-fix runs carried the churn
+  (25635487 CAM6 26/27 = the render-freeze, worst 0.9481; 841811381/158154134 singleton churn).
+- DECISION (window-gate-tolerance-walkdown / gate-allowance-restore-red-green): post-fix sample is
+  n=1, too thin for absolute strict-zero. INTERIM: `WINDOW_COPIES_GAPS_TOLERANCE` 5->2 (seam 2/4
+  stay armed, tolerance channel governs), `UNIFORM_FRACTION_MIN` 0.90->0.95 (restored ship value,
+  on the beat-corrected field). CAM2 25 override KEPT (no post-16.9 splitter-fed run yet; removal
+  precondition pinned data-conditionally). STRICT-zero restore = explicit next step (disarm both
+  seams), gated on >=2 more 02b53180b-or-later runs with windows_failed_report_only==0.
+- Commits: [red] test(#1242) tests/verdict_gate_strict_fold_1242.rs -> [green] fix(#1242) (const
+  changes + boundary/at-tolerance fixture recalibration incl. the two walk-down-era uniformity runs
+  now RED at 0.95 + probe-gated prose updates) -> mining tool + pytest -> docs. Verify (Tier-0, no
+  cargo compile): std-only rustc --test replica RED(5,0.90)/GREEN(2,0.95) + every recalibrated value
+  re-checked at (2,0.95); mining-tool pytest 5/5; cargo fmt --all --check clean; doc-lint grep clean.
+  The Rust tests (verdict_gate_strict_fold_1242 + the window_gate/presentation_cadence unit tests) +
+  full suite run at CI/integration.
+
+## issue 1316 (follow-up) — rig-status renders the imag RETIRED verdict as a neutral row (lane/1316-retired-row)
+- Problem: rig-health-audit.py emits a neutral `[RETIRED] imag …` row, but rig-status.py's
+  `_NODE_RE` matched only PASS/WARN/FAIL → the returned box's row was silently DROPPED (invisible),
+  and `summarize` would KeyError if it were ever parsed. Reproduced live (RIG_HEALTH_IMAG_RETIRED=1
+  audit emits the row; parse_audit dropped it; no `imag` in the HTML).
+- Fix (scripts/rig-status.py): single-source `RETIRED_VERDICT` from the audit constant
+  (`_load_audit_constant("IMAG_RETIRED_VERDICT")`, importlib); admit it in `_NODE_RE`; `summarize`
+  skips neutral verdicts; `overall_state` never flips on RETIRED AND now returns ERROR for a
+  neutral-only records-set (no real health tier) — closing the false-green hole; grey `.b-RETIRED`
+  badge (`--retired-*` light+dark vars) with Slovak label „VRÁTENÝ", sorted last. No emitter change
+  needed (the audit already emits the right neutral token; test_rig_health_audit_imag_retired_1316
+  stays green).
+- RED test(#1316) 97cb37589 → GREEN fix. Tests: tests/python/test_rig_status_retired_1316.py (7).
+- Tier-0 verify (no cargo): `python3 -m pytest tests/python` = 2657 passed (exit 0); rule doc
+  `.claude/rules/rig-status-page.md` updated.
+
+## issue 1317 (CEF into the strih Linux genlock build — follow-up) — lane/1317-cef
+- RED 3cec9f63d test(#1317) → GREEN a031da682 fix(#1317). Wired obs-browser + CEF into the
+  `linux-genlock-build-strih` job: `STRIH_ENABLE_BROWSER: ON`, a gated CEF fetch step (download the
+  pinned obs-deps CEF — version 6533, ubuntu-x86_64 sha256 `79633355…` from
+  `vendor/obs-studio/CMakePresets.json` dependencies.cef — sha256-verify, extract, locate the
+  `cef_binary_*` top dir by name, pass `-DCEF_ROOT_DIR`), `actions/cache` keyed on the CEF
+  version+hash. imag-parity `linux-genlock-build` job left byte-identical (browser OFF; the
+  `-DENABLE_BROWSER=OFF` count stays 2). `STRIH_BUILD_FLAGS.txt` marker env-conditional
+  (BROWSER-ON/OFF). `verify-strih.sh` gained a browser-bundle gate (obs-browser.so + libcef.so under
+  `/opt/obs-genlock` when BROWSER-ON) via pure predicates in `scripts/lib/strih-provision.sh`.
+- Tests: RED tests `tests/python/test_linux_genlock_strih_cef_1317.py` (workflow ON + CEF fetch/sha/
+  cache/CEF_ROOT_DIR + imag OFF; sourced-bash predicate over a fixture install root present/missing).
+  Verified: full pytest suite 2660 passed; yaml valid; shellcheck clean; anchor-count sweep 0 changed
+  Rust gate anchors. Compile of the workflow itself is UNVERIFIED locally (Tier-0) — the supervisor's
+  dev push runs the `Linux genlock build` job. CEF URL live: `curl -sI` 200, 325417128 bytes.
+- #1319 (P3 — av-step STEP arm dock-quality gate): RED `test(#1319): [red]` (tests/python/test_av_step_stepgate_1319.py: `test_1509_low_quality_is_not_a_step`, `test_nan_mad_is_low_quality`, orchestrator `test_orchestrator_step_arm_low_quality_log_only_no_page_no_confirm`) → GREEN `fix(#1319): [green]`. `classify_av_step`/`analyze` now consult the SAME `band_quality_ok()` predicate the BAND arm has (single-sourced 15/30 defaults): untrustworthy dock reading (mad>15 OR matched<30, or non-finite mad) → new LOW_QUALITY verdict, decided AFTER REPIN / BEFORE STEP-HEALTHY; absent facet → None → legacy STEP path unchanged. `handle_box` LOW_QUALITY case = log-only, no page/re-ping/recovery, confirm reset only. Live dry-run (stream, threshold unset): recent 343.5/base 404.5 (step_ms −61.0, a pre-fix STEP page) → LOW_QUALITY, matching the BAND arm. Closes the 16.9.2026 13:44/15:09 false owner pages. Rule `.claude/rules/av-step-upstream-detector.md` P3 section + Verdicts line updated. Full pytest suite 2672 passed; branch lane/1319-stepgate (worktree).

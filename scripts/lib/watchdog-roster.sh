@@ -25,6 +25,7 @@ WATCHDOG_TIMERS=(
   audio-lag-alert-watchdog.timer:core           # issue 1226 -- OBS audio-timeline lag / band drift
   measurement-audio-alert-watchdog.timer:core   # issue 1310 -- mbc measurement-audio digital silence
   genlock-lock-alert-watchdog.timer:core        # issue 1299 -- fleet genlock LOCK facet
+  render-freeze-alert-watchdog.timer:core       # issue 1320 -- PROGRAM render freeze / relock storm
   av-step-alert-watchdog.timer:core             # issue 1319 -- absolute A/V-offset STEP + BAND arm
   avsync-lineup-alert-watchdog.timer:core       # issue 1319 -- A/V line-up
   avsync-heartbeat-alert-watchdog.timer:core    # issue 812  -- A/V-sync heartbeat stale

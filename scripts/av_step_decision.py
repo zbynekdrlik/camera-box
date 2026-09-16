@@ -34,12 +34,21 @@ Verdicts (classify_av_step):
              yet), OR too few samples in either window to judge (never a false step off thin data).
   REPIN   -- the pin moved across the analyzed span (a #856/operator/E2E apply settling): report-only,
              NO page. Report-only alarms would be false during pin churn.
+  LOW_QUALITY -- (#1319 P3) the dock estimator's recent window is too noisy/thin to judge (median
+             MAD > 15 ms OR min matched < 30) OR carries a non-finite mad -> the median delta is not
+             trustworthy, so the step is NOT paged (log-only). The SAME band_quality_ok() bar the
+             BAND arm applies, single-sourced. Decided AFTER REPIN and BEFORE STEP/HEALTHY. An ABSENT
+             quality facet (older box) is None (not False) -> proceed to the step judgement, so a
+             genuine step is never swallowed. Closes the 16.9.2026 false-page: the STEP arm paged
+             13:44/15:09 on readings whose medians swung ±1000 ms within 5-min passes (mad 31 > 15),
+             which the BAND arm already rejected as LOW_QUALITY in the same passes.
   HEALTHY -- |recent_med - base_med| <= step_threshold_ms.
   STEP    -- |recent_med - base_med| > step_threshold_ms (a sustained upstream A/V shift at a constant
              pin). The watchdog pages a report-only ⚠️ after a 2-pass confirm.
 """
 import argparse
 import json
+import math
 import sys
 
 # Normal 10-min dock medians wander ±30 ms within an hour; the 2026-09-01 step was ≈ −60…−90 ms
@@ -114,7 +123,8 @@ def extract_av_step(bundle_json_text):
 
 def classify_av_step(recent_med, base_med, pin_stable, age_s, n_recent, n_base, box_reachable,
                      step_threshold_ms=DEFAULT_STEP_THRESHOLD_MS, min_samples=DEFAULT_MIN_SAMPLES,
-                     stale_threshold_s=DEFAULT_STALE_THRESHOLD_S):
+                     stale_threshold_s=DEFAULT_STALE_THRESHOLD_S,
+                     recent_mad_ms=None, recent_matched_min=None):
     """One box's verdict. `box_reachable` is 1 iff the JSON was fetched this pass.
 
       box_reachable != 1                    -> SKIP    (defer #732/#1001; never our page)
@@ -127,8 +137,22 @@ def classify_av_step(recent_med, base_med, pin_stable, age_s, n_recent, n_base, 
       pin_stable != "1"                      -> REPIN   (a #856/operator/E2E pin move; report-only, no
                                                         page. A missing flag (None) is NOT "1", so it
                                                         never masks a step off an unknown-pin span)
+      band_quality_ok(...) is False          -> LOW_QUALITY (#1319 P3: the dock estimator's recent
+                                                        window is too noisy/thin (median MAD > 15 ms
+                                                        OR min matched < 30) OR carries a non-finite
+                                                        mad -> the median delta is not judgeable, so
+                                                        the step is not paged. The SAME predicate the
+                                                        BAND arm applies, single-sourced (its module
+                                                        defaults). An ABSENT quality facet returns
+                                                        None (NOT False) -> proceed to today's step
+                                                        judgement, so an older box is unchanged and a
+                                                        genuine step is never swallowed.)
       |recent_med - base_med| > threshold    -> STEP
       otherwise                              -> HEALTHY
+
+    Verdict order (mirrors the module docstring and classify_av_band): SKIP -> STALE -> UNKNOWN ->
+    REPIN -> quality (LOW_QUALITY) -> STEP/HEALTHY. Quality sits AFTER REPIN (a pin move still wins)
+    and BEFORE the step decision, so a noisy reading never false-pages as a step.
     """
     if box_reachable != 1:
         return "SKIP"
@@ -140,6 +164,12 @@ def classify_av_step(recent_med, base_med, pin_stable, age_s, n_recent, n_base, 
         return "UNKNOWN"
     if pin_stable != "1":
         return "REPIN"
+    # #1319 P3 — consult the SAME dock-measurement quality bar the BAND arm uses (band_quality_ok,
+    # DEFAULT_BAND_QUALITY_* — single-sourced, never a retyped 15/30). None (facet absent, older box)
+    # is NOT False, so the step still judges; a non-finite mad -> False -> LOW_QUALITY (a corrupt
+    # reading is untrustworthy). See the 16.9.2026 false-page incident.
+    if band_quality_ok(recent_mad_ms, recent_matched_min) is False:
+        return "LOW_QUALITY"
     if abs(recent_med - base_med) > step_threshold_ms:
         return "STEP"
     return "HEALTHY"
@@ -177,10 +207,17 @@ def analyze(bundle_json_text, box_reachable, step_threshold_ms=DEFAULT_STEP_THRE
         return {"verdict": "SKIP", "recent_med_ms": None, "base_med_ms": None, "pin": None,
                 "step_ms": None, "age_s": None, "pin_stable": None, "n_recent": None,
                 "n_base": None, "recovered": None}
-    (recent_med, base_med, pin, pin_stable, age_s, n_recent, n_base) = extract_av_step(
-        bundle_json_text)
+    obj = _loads_obj(bundle_json_text)
+    (recent_med, base_med, pin, pin_stable, age_s, n_recent, n_base) = _from_obj(obj)
+    # #1319 P3 — read the SAME dock-measurement quality facets the band arm reads (same
+    # _float_or_none/_int_or_none path), so the STEP arm's classify_av_step can gate an
+    # untrustworthy reading to LOW_QUALITY instead of paging a phantom step. Absent facets read as
+    # None -> band_quality_ok None -> today's legacy step judgement (older box unchanged).
+    recent_mad_ms = _float_or_none(obj.get("av_offset_recent_mad_ms")) if isinstance(obj, dict) else None
+    recent_matched_min = _int_or_none(obj.get("av_offset_recent_matched_min")) if isinstance(obj, dict) else None
     verdict = classify_av_step(recent_med, base_med, pin_stable, age_s, n_recent, n_base,
-                               box_reachable, step_threshold_ms, min_samples, stale_threshold_s)
+                               box_reachable, step_threshold_ms, min_samples, stale_threshold_s,
+                               recent_mad_ms=recent_mad_ms, recent_matched_min=recent_matched_min)
     step_ms = None
     if recent_med is not None and base_med is not None:
         step_ms = round(recent_med - base_med, 1)
@@ -202,10 +239,42 @@ def analyze(bundle_json_text, box_reachable, step_threshold_ms=DEFAULT_STEP_THRE
 DEFAULT_BAND_MS = 30
 DEFAULT_BAND_REFERENCE_MS = 0.0
 
+# #1319 Part 2 — the dock-estimator measurement-QUALITY bar the band verdict requires. The overnight
+# 78-page false alarm judged a dock reading whose per-sample scatter (MAD 9-31 ms) was as wide as
+# the +-30 ms band against a recording-based reference. A band this tight cannot be judged from an
+# estimator that noisy, so an OUT_OF_BAND page now requires the recent window's median MAD to be
+# <= 15 ms AND its min cluster size (matched) to be >= 30; otherwise -> LOW_QUALITY (log-only).
+DEFAULT_BAND_QUALITY_MAX_MAD_MS = 15.0
+DEFAULT_BAND_QUALITY_MIN_MATCHED = 30
+
+
+def band_quality_ok(recent_mad_ms, recent_matched_min,
+                    max_mad_ms=DEFAULT_BAND_QUALITY_MAX_MAD_MS,
+                    min_matched=DEFAULT_BAND_QUALITY_MIN_MATCHED):
+    """Is the dock estimator's recent-window measurement trustworthy enough to page a band excursion?
+
+      recent_mad_ms is None OR recent_matched_min is None -> None (UNJUDGEABLE: no quality facet,
+          e.g. an older box or no LOCKED/UPDATED line in the window. The band decision treats None
+          as "proceed" -- NOT LOW_QUALITY -- so a genuine sustained offset with no recent cluster
+          line still pages; the safe direction is never SWALLOWING a real drift.)
+      recent_mad_ms present but NON-FINITE (NaN/Inf)     -> False (#1319 review: a corrupt reading is
+          untrustworthy, distinct from ABSENT -- treat it as failing quality, never as "proceed").
+      mad <= max_mad_ms AND matched >= min_matched                 -> True  (trustworthy)
+      otherwise (present AND (mad too wide OR cluster too small))  -> False (-> LOW_QUALITY, no page)
+    """
+    if recent_mad_ms is None or recent_matched_min is None:
+        return None
+    if not math.isfinite(recent_mad_ms):
+        return False
+    return recent_mad_ms <= max_mad_ms and recent_matched_min >= min_matched
+
 
 def classify_av_band(recent_med, pin_stable, n_recent, dock_live_age_s, box_reachable,
                      band_reference_ms=DEFAULT_BAND_REFERENCE_MS, band_ms=DEFAULT_BAND_MS,
-                     min_samples=DEFAULT_MIN_SAMPLES, stale_threshold_s=DEFAULT_STALE_THRESHOLD_S):
+                     min_samples=DEFAULT_MIN_SAMPLES, stale_threshold_s=DEFAULT_STALE_THRESHOLD_S,
+                     recent_mad_ms=None, recent_matched_min=None,
+                     quality_max_mad_ms=DEFAULT_BAND_QUALITY_MAX_MAD_MS,
+                     quality_min_matched=DEFAULT_BAND_QUALITY_MIN_MATCHED):
     """One box's ABSOLUTE-BAND verdict (`box_reachable` is 1 iff the JSON was fetched this pass):
 
       box_reachable != 1                          -> SKIP          (defer #732/#1001; never our page)
@@ -236,6 +305,13 @@ def classify_av_band(recent_med, pin_stable, n_recent, dock_live_age_s, box_reac
     if recent_med is not None and n_recent is not None and n_recent >= min_samples:
         if pin_stable != "1":
             return "REPIN"
+        # #1319 Part 2 — a measurement too noisy/thin to trust (present AND out of the quality bar)
+        # is LOW_QUALITY: the OUT_OF_BAND page requires a trustworthy reading. band_quality_ok
+        # returns None when the quality facet is absent (older box / no cluster line in the window),
+        # which is NOT False, so the band still judges -- a real sustained offset is never swallowed.
+        if band_quality_ok(recent_mad_ms, recent_matched_min, quality_max_mad_ms,
+                           quality_min_matched) is False:
+            return "LOW_QUALITY"
         if abs(recent_med - band_reference_ms) > band_ms:
             return "OUT_OF_BAND"
         return "IN_BAND"
@@ -255,16 +331,58 @@ def analyze_band(bundle_json_text, box_reachable, band_reference_ms=DEFAULT_BAND
     if box_reachable != 1:
         return {"verdict": "SKIP", "recent_med_ms": None, "band_reference_ms": band_reference_ms,
                 "band_delta_ms": None, "dock_live_age_s": None, "pin": None, "pin_stable": None,
-                "n_recent": None}
+                "n_recent": None, "recent_mad_ms": None, "recent_matched_min": None,
+                "quality_ok": None}
     obj = _loads_obj(bundle_json_text)
     (recent_med, _base, pin, pin_stable, _age, n_recent, _nb) = _from_obj(obj)
     dock_live_age_s = _int_or_none(obj.get("av_offset_dock_live_age_s")) if isinstance(obj, dict) else None
+    # #1319 Part 2 — the dock estimator's recent-window measurement quality (median MAD + min matched).
+    # A non-finite mad (NaN/Inf) is handled INSIDE band_quality_ok (-> False -> LOW_QUALITY), distinct
+    # from an ABSENT facet (None -> proceed), so it is read here as a plain float-or-None.
+    recent_mad_ms = _float_or_none(obj.get("av_offset_recent_mad_ms")) if isinstance(obj, dict) else None
+    recent_matched_min = _int_or_none(obj.get("av_offset_recent_matched_min")) if isinstance(obj, dict) else None
     verdict = classify_av_band(recent_med, pin_stable, n_recent, dock_live_age_s, box_reachable,
-                               band_reference_ms, band_ms, min_samples, stale_threshold_s)
+                               band_reference_ms, band_ms, min_samples, stale_threshold_s,
+                               recent_mad_ms=recent_mad_ms, recent_matched_min=recent_matched_min)
     band_delta_ms = None if recent_med is None else round(recent_med - band_reference_ms, 1)
+    q = band_quality_ok(recent_mad_ms, recent_matched_min)
     return {"verdict": verdict, "recent_med_ms": recent_med, "band_reference_ms": band_reference_ms,
             "band_delta_ms": band_delta_ms, "dock_live_age_s": dock_live_age_s, "pin": pin,
-            "pin_stable": pin_stable, "n_recent": n_recent}
+            "pin_stable": pin_stable, "n_recent": n_recent, "recent_mad_ms": recent_mad_ms,
+            "recent_matched_min": recent_matched_min,
+            "quality_ok": None if q is None else (1 if q else 0)}
+
+
+# #1319 Part 2 — the DOCK-NATIVE reference the [4i/8] A/V-align persist step records so the band
+# alarm compares DOCK-to-DOCK. The overnight bug: the band judged the dock's live estimator (bias
+# ~ +85 ms) against the RECORDING-based residual (-35.3 ms), an ~120 ms frame mismatch that paged
+# every pass. Recording the dock's OWN post-align median as the reference cancels that fixed bias
+# (the recording residual stays the E2E GATE's truth; only the ALARM's reference changes). The
+# reference is only recorded when the dock reading is trustworthy -- same quality bar as the band.
+def dock_reference(bundle_json_text, box_reachable,
+                   quality_max_mad_ms=DEFAULT_BAND_QUALITY_MAX_MAD_MS,
+                   quality_min_matched=DEFAULT_BAND_QUALITY_MIN_MATCHED,
+                   min_samples=DEFAULT_MIN_SAMPLES):
+    """Fetch-result -> the quality-gated dock-native reference dict (`quality_ok`, `median_ms`, `n`,
+    `mad_ms`, `matched_min`, `pin_stable`). `quality_ok` is 1 ONLY when the box was reachable, the
+    recent window has >= min_samples offset samples, the pin was stable, AND the recent-window
+    quality bar is met; else 0 (the persist step records NO dock reference, so the band falls back
+    to the recording residual). SKIP-reachability returns quality_ok 0 WITHOUT parsing the body."""
+    if box_reachable != 1:
+        return {"quality_ok": 0, "median_ms": None, "n": None, "mad_ms": None,
+                "matched_min": None, "pin_stable": None}
+    obj = _loads_obj(bundle_json_text)
+    (recent_med, _base, _pin, pin_stable, _age, n_recent, _nb) = _from_obj(obj)
+    recent_mad_ms = _float_or_none(obj.get("av_offset_recent_mad_ms")) if isinstance(obj, dict) else None
+    recent_matched_min = _int_or_none(obj.get("av_offset_recent_matched_min")) if isinstance(obj, dict) else None
+    q = band_quality_ok(recent_mad_ms, recent_matched_min, quality_max_mad_ms, quality_min_matched)
+    # #1319 review: a non-finite median must never be recorded as the dock-native reference (it would
+    # blind the band arm on read); require a FINITE median for quality_ok, mirroring the mad guard.
+    median_finite = recent_med is not None and math.isfinite(recent_med)
+    ok = (median_finite and n_recent is not None and n_recent >= min_samples
+          and pin_stable == "1" and q is True)
+    return {"quality_ok": 1 if ok else 0, "median_ms": recent_med, "n": n_recent,
+            "mad_ms": recent_mad_ms, "matched_min": recent_matched_min, "pin_stable": pin_stable}
 
 
 def _fmt(v):
@@ -299,6 +417,17 @@ def _main(argv):
     b.add_argument("--min-samples", type=int, default=DEFAULT_MIN_SAMPLES)
     b.add_argument("--stale-threshold-s", type=int, default=DEFAULT_STALE_THRESHOLD_S)
 
+    # #1319 Part 2 — the quality-gated DOCK-NATIVE reference: read /bundle-state.json on stdin ->
+    # the dock's recent-window median (+ n/mad/matched_min/quality_ok), the persist step records
+    # when quality_ok=1 so the band compares dock-to-dock.
+    r = sub.add_parser(
+        "dock-reference",
+        help="read /bundle-state.json on stdin -> quality-gated dock median + n + mad + quality_ok")
+    r.add_argument("--box-reachable", type=int, required=True)
+    r.add_argument("--quality-max-mad-ms", type=float, default=DEFAULT_BAND_QUALITY_MAX_MAD_MS)
+    r.add_argument("--quality-min-matched", type=int, default=DEFAULT_BAND_QUALITY_MIN_MATCHED)
+    r.add_argument("--min-samples", type=int, default=DEFAULT_MIN_SAMPLES)
+
     ns = ap.parse_args(argv)
 
     if ns.cmd == "analyze":
@@ -320,7 +449,16 @@ def _main(argv):
         d = analyze_band(text, ns.box_reachable, ns.band_reference_ms, ns.band_ms, ns.min_samples,
                          ns.stale_threshold_s)
         for k in ("verdict", "recent_med_ms", "band_reference_ms", "band_delta_ms",
-                  "dock_live_age_s", "pin", "pin_stable", "n_recent"):
+                  "dock_live_age_s", "pin", "pin_stable", "n_recent", "recent_mad_ms",
+                  "recent_matched_min", "quality_ok"):
+            print(f"{k}={_fmt(d[k])}")
+        return 0
+
+    if ns.cmd == "dock-reference":
+        text = "" if ns.box_reachable != 1 else sys.stdin.buffer.read().decode("utf-8", errors="replace")
+        d = dock_reference(text, ns.box_reachable, ns.quality_max_mad_ms, ns.quality_min_matched,
+                           ns.min_samples)
+        for k in ("quality_ok", "median_ms", "n", "mad_ms", "matched_min", "pin_stable"):
             print(f"{k}={_fmt(d[k])}")
         return 0
 

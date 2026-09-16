@@ -95,7 +95,9 @@ fn fleet_class_distinguishes_windows_from_linux_genlock_1296() {
 fn fleet_home_check_is_always_for_fixed_boxes_traveling_for_resolume_1296() {
     assert_eq!(fleet_stdout("obs_fleet_home_check strih"), "always");
     assert_eq!(fleet_stdout("obs_fleet_home_check stream"), "always");
-    assert_eq!(fleet_stdout("obs_fleet_home_check imag"), "always");
+    // issue 1316: imag-nb was RETURNED to the owner (16.9.2026); its home-check is now `retired`
+    // (was `always`). The row + host lookup are KEPT (the role returns on a new notebook next year).
+    assert_eq!(fleet_stdout("obs_fleet_home_check imag"), "retired");
     assert_eq!(fleet_stdout("obs_fleet_home_check resolume"), "traveling");
 }
 
@@ -150,22 +152,57 @@ fn fleet_boxes_carries_resolume_only_where_the_facet_applies_1296() {
 }
 
 #[test]
-fn fleet_boxes_genlock_lock_carries_all_four_incl_imag_1299() {
-    // #1299: the genlock LOCKED/DEGRADED/UNLOCKED facet is fleet-wide — the two Windows genlock
-    // boxes, the Linux imag receiver (it still locks every input to the fleet clock), and the
-    // traveling resolume cg box (paged only while obs_fleet_is_home, gated by the consumer).
+fn fleet_boxes_genlock_lock_excludes_retired_imag_1316() {
+    // #1299 made the genlock LOCKED/DEGRADED/UNLOCKED facet fleet-wide incl. imag; issue 1316
+    // RETIRED imag-nb (returned to the owner), so obs_fleet_boxes now EXCLUDES it from every facet
+    // roster centrally — genlock-lock drops to the two Windows genlock boxes + the traveling
+    // resolume cg box. `obs_fleet_facet_members genlock-lock` still LISTS imag (the policy is
+    // unchanged); the exclusion is the `retired` filter in obs_fleet_boxes, so a one-word flip back
+    // to `always` on re-provision restores it automatically.
+    // issue 1317: strih-lx (the Linux strih notebook) also joins genlock-lock (a linux-genlock box
+    // that locks every input to the fleet clock), appended after resolume.
     assert_eq!(
         boxes("genlock-lock"),
-        "strih|10.77.9.202 stream|10.77.9.204 imag|10.77.9.182 resolume|resolume.lan"
+        "strih|10.77.9.202 stream|10.77.9.204 resolume|resolume.lan strih-lx|strih-lx.lan"
     );
-    // imag carries genlock-lock but NOT the audio/vb facets (it is a pure receiver, no mbc chain).
-    for facet in ["audio-lag", "av-step", "vb-matrix"] {
+    // A retired imag must not appear in ANY facet roster.
+    for facet in [
+        "genlock-lock",
+        "audio-lag",
+        "av-step",
+        "vb-matrix",
+        "bundle-state",
+    ] {
         assert!(
             !boxes(facet).contains("imag"),
-            "facet {facet} must NOT carry imag: {}",
+            "facet {facet} must NOT carry retired imag: {}",
             boxes(facet)
         );
     }
+}
+
+#[test]
+fn fleet_carries_strih_lx_on_the_three_declared_facets_only_1317() {
+    // issue 1317: the Linux strih notebook joins bundle-state, obs-liveness and genlock-lock; it
+    // must NOT be in the Windows program-audio / av-sync-dock / VB-Matrix facets.
+    for facet in ["bundle-state", "obs-liveness", "genlock-lock"] {
+        assert!(
+            boxes(facet).contains("strih-lx|strih-lx.lan"),
+            "facet {facet} must carry strih-lx: {}",
+            boxes(facet)
+        );
+    }
+    for facet in ["audio-lag", "av-step", "vb-matrix"] {
+        assert!(
+            !boxes(facet).contains("strih-lx"),
+            "facet {facet} must NOT carry strih-lx: {}",
+            boxes(facet)
+        );
+    }
+    // Fact lookups + the traveling home-check (a not-yet-arrived box never pages).
+    assert_eq!(fleet_stdout("obs_fleet_host strih-lx"), "strih-lx.lan");
+    assert_eq!(fleet_stdout("obs_fleet_class strih-lx"), "linux-genlock");
+    assert_eq!(fleet_stdout("obs_fleet_home_check strih-lx"), "traveling");
 }
 
 #[test]
@@ -194,7 +231,15 @@ fn is_home(name: &str, env: &[(&str, &str)]) -> bool {
 fn fleet_is_home_always_box_is_unconditionally_home_1296() {
     // a `home-check=always` box needs no probe and no force-list.
     assert!(is_home("strih", &[]));
-    assert!(is_home("imag", &[]));
+    assert!(is_home("stream", &[]));
+}
+
+#[test]
+fn fleet_retired_box_is_never_home_1316() {
+    // issue 1316: imag-nb was returned to the owner; a `retired` box is NEVER home, so no watchdog
+    // gating on obs_fleet_is_home ever probes or pages the dead box. The row/host lookup stay.
+    assert!(!is_home("imag", &[]));
+    assert_eq!(fleet_stdout("obs_fleet_host imag"), "10.77.9.182");
 }
 
 #[test]
@@ -304,9 +349,12 @@ fn sourced_boxes_default_is_byte_exact_for_the_legacy_facets_1296() {
 
 #[test]
 fn bundle_state_default_carries_resolume_1296() {
+    // issue 1317: the Linux strih-lx notebook joins the bundle-state facet too (appended after
+    // resolume, per the obs-fleet.sh facet table) -- a fully-unreachable traveling box is deferred
+    // to the reachability watchdog by bundle-state itself, so it is traveling-safe without a gate.
     assert_eq!(
         watchdog_var("bundle-state-alert-watchdog.sh", "BOXES", &[]),
-        "strih|10.77.9.202 stream|10.77.9.204 resolume|resolume.lan"
+        "strih|10.77.9.202 stream|10.77.9.204 resolume|resolume.lan strih-lx|strih-lx.lan"
     );
 }
 

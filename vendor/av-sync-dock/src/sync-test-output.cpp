@@ -271,6 +271,10 @@ struct sync_test_output
 	 * condition persists. Touched only on the audio thread. */
 	bool cb_lock_source_missing_logged = false; // CAMERA_BOX_LOCK_SOURCE_NAME not found
 	bool cb_rail_pinned_logged = false;         // pinned at a hardware rail with audio still early
+	/* #1319 Part 2: last genlock_latency_ms_src pin observed on a trusted push; -1 = none seen yet.
+	 * A CHANGE is logged once (`pin-change observed <old> -> <new>`) so a wrong-cluster pick after a
+	 * pin move is visible in the log. Touched only on the audio thread. */
+	int32_t cb_last_seen_pin_ms = -1;
 
 	~sync_test_output()
 	{
@@ -1375,10 +1379,19 @@ static void st_raw_audio_camera_box(struct sync_test_output *st, struct audio_da
 			 * cb_dock_lock_display_offset_ms(), so this number agrees in SIGN with the E2E gate's
 			 * own av_offset_ms (#952 established the two disagreed: dock ~= -gate - 55). The
 			 * residual ~55ms bias is not compensated here -- see that function's own doc comment. */
-			blog(LOG_INFO, "av-sync-dock: %s offset=%.1fms source=cluster matched=%zu mad=%.1fms",
+			/* #1319 Part 2: append the chosen cluster's lag bucket + candidate-pool size at the
+			 * END (existing tokens byte-identical). lag_idx = the display offset quantized into
+			 * +-tol buckets, so a WRONG-cluster pick (offset jumps ~one cluster width) changes it
+			 * while a small drift holds it; cands = the total candidate pool the densest window was
+			 * chosen from, so matched<<cands reveals a bimodal pool. Both diagnose the dock bias. */
+			blog(LOG_INFO,
+			     "av-sync-dock: %s offset=%.1fms source=cluster matched=%zu mad=%.1fms lag_idx=%ld cands=%zu",
 			     audit_ev.kind == camerabox::CbLockEventKind::Locked ? "LOCKED" : "UPDATED",
 			     camerabox::cb_dock_lock_display_offset_ms(audit_ev.offset_ms), audit_ev.matched,
-			     audit_ev.mad_ms);
+			     audit_ev.mad_ms,
+			     (long)std::llround(camerabox::cb_dock_lock_display_offset_ms(audit_ev.offset_ms)
+			                        / (2.0 * camerabox::CB_CLUSTER_TOL_MS)),
+			     st->cb_offset_cluster.samples.size());
 			/* #926: fire the coarse locked/unlocked status signal only on the ACTUAL boundary
 			 * crossing (Locked), not on every Updated -- Updated means "still locked, offset
 			 * moved", never a state change the dock's plain-language status text needs to know
@@ -1419,6 +1432,14 @@ static void st_raw_audio_camera_box(struct sync_test_output *st, struct audio_da
 				int32_t current_ms = 0;
 				if (cb_read_lock_latency_ms(&current_ms)) {
 					st->cb_lock_source_missing_logged = false;
+					/* #1319 Part 2: a source-pin CHANGE (the E2E gate / operator moved
+					 * genlock_latency_ms_src) is exactly when the cluster can re-pick a wrong
+					 * QPSK marker lag -- log it once so a wrong pick afterwards is visible.
+					 * -1 sentinel = no pin seen yet, so the first read never logs. */
+					if (st->cb_last_seen_pin_ms >= 0 && current_ms != st->cb_last_seen_pin_ms)
+						blog(LOG_INFO, "av-sync-dock: pin-change observed %d -> %d",
+						     (int)st->cb_last_seen_pin_ms, (int)current_ms);
+					st->cb_last_seen_pin_ms = current_ms;
 					camerabox::CbDockLockAction act = st->cb_lock_corrector.decide(
 						true, est.offset_ms, est.mad_ms, current_ms, audio_ts);
 					/* #955 -- the Write/Suggest/RailWarn/Quiet branch selection below is a pure,

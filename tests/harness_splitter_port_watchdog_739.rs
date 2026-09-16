@@ -111,24 +111,51 @@ fn driver_mixed_fleet_pages_dead_port_for_the_grey_box() {
 }
 
 #[test]
-fn driver_surfaces_rough_metric_in_per_box_log_1079() {
-    // #1079 report-only: the watchdog must SURFACE each box's rough= metric in its per-box log
-    // line (fleet-wide telemetry so a data-first follow-up can calibrate the noise threshold).
-    // No paging change this PR — a high-roughness colour box still classifies OK (colour=1); the
-    // rough= number is observational only until the threshold is calibrated.
+fn driver_surfaces_rough_metric_and_purple_noise_report_only_1099() {
+    // #1099: the threshold is now CALIBRATED + WIRED report-only. A colour box whose rough EXCEEDS
+    // the threshold (52.3 > 40.0) classifies PURPLE_NOISE (the Elgato structureless-static no-signal
+    // mode) — but it is REPORT-ONLY: the per-box log surfaces the rough= number AND the PURPLE_NOISE
+    // verdict, yet it NEVER pages (the live page is deferred until a real positive-class episode
+    // calibrates the noise floor + adds the sibling self-anchor). Two passes prove even a "sustained"
+    // report-only verdict never escalates to a page.
     let cases = format!("*) {COLOUR_ROUGH} ;;");
-    let log = run_driver(&cases, 1);
+    let log = run_driver(&cases, 2);
     assert!(
         log.contains("rough=52.3"),
         "the per-box log must surface the rough= metric: {log}"
     );
     assert!(
-        log.contains("-> OK"),
-        "a high-roughness colour box still classifies OK this PR (report-only): {log}"
+        log.contains("PURPLE_NOISE"),
+        "colour + rough>threshold => PURPLE_NOISE report-only: {log}"
+    );
+    assert!(
+        log.to_uppercase().contains("NOISE-SUSPECT"),
+        "the per-box report-only line must flag NOISE-SUSPECT: {log}"
     );
     assert!(
         !log.contains("WOULD alert"),
-        "report-only: roughness must not page this PR: {log}"
+        "report-only: PURPLE_NOISE must never page: {log}"
+    );
+}
+
+#[test]
+fn driver_purple_noise_box_alongside_clean_siblings_pages_nothing_1099() {
+    // a mixed fleet: cam2 reads colour+high-rough (PURPLE_NOISE), cam1/cam3 read clean colour (OK).
+    // The noise box is surfaced report-only; NOTHING in the fleet pages (report-only phase 2).
+    let cases = format!("10.77.9.62) {COLOUR_ROUGH} ;; *) {COLOUR} ;;");
+    let log = run_driver(&cases, 2);
+    assert!(
+        log.contains("cam2 (10.77.9.62)") && log.contains("PURPLE_NOISE"),
+        "cam2 => PURPLE_NOISE: {log}"
+    );
+    assert!(
+        log.lines()
+            .any(|l| l.contains("cam1 (10.77.9.61)") && l.contains("-> OK")),
+        "cam1 clean colour => OK on its OWN log line: {log}"
+    );
+    assert!(
+        !log.contains("WOULD alert"),
+        "report-only: no box pages this phase: {log}"
     );
 }
 
@@ -251,5 +278,41 @@ fn driver_lone_grey_box_with_no_reachable_sibling_never_pages() {
     assert!(
         !log.contains("DEAD_PORT"),
         "must not be DEAD_PORT without a proven-good sibling: {log}"
+    );
+}
+
+#[test]
+fn noise_threshold_watchdog_mirror_matches_rust_const_1099() {
+    // #1099: the watchdog's NOISE_ROUGHNESS_THRESHOLD default MUST stay in lock-step with the Rust
+    // source-of-truth src/capture.rs::NOISE_ROUGHNESS_THRESHOLD (bash cannot read the const, so it
+    // mirrors the literal). A future const change that forgets the mirror would silently desync the
+    // dev1 gate from the appliance classifier; this pins them (mirrors the repo's other const-mirror
+    // parity gates). Normalised numerically so 40.0 == 40.
+    let rust =
+        std::fs::read_to_string(manifest_dir().join("src/capture.rs")).expect("read capture.rs");
+    let sh =
+        std::fs::read_to_string(manifest_dir().join("scripts/splitter-port-alert-watchdog.sh"))
+            .expect("read watchdog");
+    let rust_val = rust
+        .lines()
+        .find_map(|l| {
+            l.trim()
+                .strip_prefix("pub const NOISE_ROUGHNESS_THRESHOLD: f32 = ")
+                .and_then(|s| s.strip_suffix(';'))
+        })
+        .expect("Rust NOISE_ROUGHNESS_THRESHOLD const not found");
+    let sh_val = sh
+        .lines()
+        .find_map(|l| {
+            l.trim()
+                .strip_prefix("NOISE_ROUGHNESS_THRESHOLD=\"${SPLITTER_WATCH_NOISE_THRESHOLD:-")
+                .and_then(|s| s.strip_suffix("}\""))
+        })
+        .expect("watchdog NOISE_ROUGHNESS_THRESHOLD mirror not found");
+    let rn: f32 = rust_val.parse().expect("Rust const value numeric");
+    let sn: f32 = sh_val.parse().expect("shell mirror value numeric");
+    assert_eq!(
+        rn, sn,
+        "watchdog mirror ({sh_val}) must equal the Rust const ({rust_val})"
     );
 }

@@ -75,3 +75,18 @@ Two placement rules for the awk line in the combined ssh command: keep it so it 
 `END{print}` always exits 0 but still must not displace a positional `lines[-1]` read like check_cam's
 loadavg), and gate its interpretation on a same-journal proxy — an unreadable dantesync journal also
 nulls the `offset:` read, so `off_us is None ⇒ steprate UNKNOWN`, never a false 0 (#833).
+
+## Neutral RETIRED verdict — a returned/absent node renders grey, never green/red (issue 1316)
+
+`rig-health-audit.py` emits ONE neutral row for a returned/absent node — `[RETIRED] imag …` once
+`imag_is_retired()` is true (a `rig-fleet.txt` `imag:`/`imag-nb:` ack, or `RIG_HEALTH_IMAG_RETIRED`)
+— OUTSIDE PASS/WARN/FAIL, so the audit exit code ignores it. The renderer treats RETIRED as a
+first-class **neutral tier**: `parse_audit` admits it (`_NODE_RE` is built from
+`{PASS,WARN,FAIL,RETIRED_VERDICT}`), `summarize` counts it in NEITHER pass/warn/fail, and
+`overall_state` never flips on it — a fleet whose only non-PASS row is imag RETIRED reads **PASS**
+overall with the retired row visible as a grey `.b-RETIRED` badge labelled „VRÁTENÝ". The verdict
+TOKEN is single-sourced: `RETIRED_VERDICT = _load_audit_constant("IMAG_RETIRED_VERDICT")` imports it
+from the audit via `importlib` — never a retyped `"RETIRED"` literal that can drift. `overall_state`
+also gained a companion false-green guard: a records-set with rows but ZERO real PASS/WARN/FAIL tiers
+(only neutral rows) is ERROR, not PASS — neutral rows are not proof of health, and `alert_condition` MIRRORS that guard (pages `prober-down:no-health-tiers`) so a neutral-only sweep never renders ERROR while staying silent on Discord. Tests:
+`tests/python/test_rig_status_retired_1316.py`.

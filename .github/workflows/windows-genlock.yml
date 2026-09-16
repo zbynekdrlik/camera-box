@@ -219,6 +219,10 @@ jobs:
           if ($sb -notmatch [regex]::Escape('genlock_input_phase_events(r.connected ? 1 : 0, r.relocks, r.late_holds,') -or $sb -notmatch [regex]::Escape('recent_event_input_name')) {
             Write-Error "OBSBasicStatusBar.cpp: the #1299 Part 3 connected-phase recent_event feed / offender attribution is gone — the chronic recent_event false-page would re-open; re-apply"; exit 1
           }
+          # #1299 Part 4: the qpc_drift verdict is a WINDOWED RATE + STEP (vs the dantesync-reported f_ptp+f_phase slew), NOT the cumulative wall-vs-QPC offset that grew unbounded and false-paged the fleet overnight 15./16.9. Mirror of GenlockLockState.hpp genlock_qpc_drift_beyond_bound (parity-gated by tests/genlock_lock_state_parity.rs) + tests/genlock_lock_json_guards.rs::genlock_lock_qpc_windowed_drift_present_1299_part4.
+          if ($sb -notmatch [regex]::Escape('genlock_qpc_drift_beyond_bound(') -or $sb -notmatch [regex]::Escape('GENLOCK_QPC_DRIFT_PPM_BOUND')) {
+            Write-Error "OBSBasicStatusBar.cpp: the #1299 Part 4 windowed qpc_drift verdict is gone — the cumulative-slew false-page would re-open; re-apply"; exit 1
+          }
           Write-Output "in-OBS genlock LOCK indicator present (stats API + shared audit fill + output wall-stamping + statusbar widget + genlock-lock: log + genlock-lock-json: fleet facet) — OK"
 
       # #245: assert the PER-SOURCE genlock latency (ms) override is present in the
@@ -423,6 +427,22 @@ jobs:
             Write-Error "sync-test-output.cpp: cb_apply_lock_latency_ms(act.new_delay_ms) appears $applyCount times (expected exactly 1) — #942 gate may be bypassed"; exit 1
           }
           Write-Output "dock lock corrector monitor-only by default (#942 hard-locked seam + gated call site) — OK"
+
+      - name: Assert dock bias observability (#1319)
+        shell: pwsh
+        run: |
+          # #1319 Part 2: the dock BIAS observability additions (mirrors
+          # tests/av_sync_dock_pin_observability_1319.rs — the source-anchor two-language double
+          # coverage the anchor-refactor-safety rule mandates). sync-test-output.cpp compiles ONLY
+          # here, so a refactor dropping either addition must fail on this runner too.
+          $output = (Get-Content "vendor/av-sync-dock/src/sync-test-output.cpp" -Raw) -replace '\s+', ' '
+          if ($output -notmatch [regex]::Escape('lag_idx=%ld cands=%zu')) {
+            Write-Error "sync-test-output.cpp: the UPDATED/LOCKED cluster line no longer appends lag_idx=%ld cands=%zu — #1319 dock-bias observability dropped"; exit 1
+          }
+          if ($output -notmatch [regex]::Escape('av-sync-dock: pin-change observed %d -> %d')) {
+            Write-Error "sync-test-output.cpp: the pin-change observed marker is gone — #1319 wrong-cluster-after-pin-move visibility dropped"; exit 1
+          }
+          Write-Output "dock bias observability (lag_idx/cands + pin-change marker, #1319) — OK"
 
       # #116: assert the build-latch drain-to-target patch is present in the vendored
       # OBS source BEFORE the 150-min build, so a future `git subtree pull` (#44) that
@@ -1080,8 +1100,26 @@ jobs:
           if ($ndi -notmatch [regex]::Escape('static inline bool ndi_force_by_name_after_frameless(')) {
             Write-Error "ndi-source.cpp: the #1287 ndi_force_by_name_after_frameless decision helper is gone -- a frame-less BY-URL bind (dead cached sender port after a graceful restart) can no longer be forced onto BY-NAME and loops BY-URL forever. Re-apply the #1287 fix"; exit 1
           }
-          if (([regex]::Matches($ndi, [regex]::Escape('ndi_force_by_name_after_frameless(connected_by_url_1180, frames_seen_since_reset_1180)) { force_by_name_next_reset_1180 = true;'))).Count -lt 2) {
-            Write-Error "ndi-source.cpp: the #1287 helper-gated corrective set is wired at fewer than 2 reset-forcing arms -- it must gate AND SET force_by_name_next_reset_1180 in BOTH the no_connections==0 arm AND the #767 stale-while-connected arm (anchoring the whole adjacency so deleting only the set is caught), else a frame-less BY-URL bind is never flipped to BY-NAME. Re-apply the #1287 wiring at both sites"; exit 1
+          if (([regex]::Matches($ndi, [regex]::Escape('ndi_force_by_name_after_frameless(connected_by_url_1180, frames_seen_since_reset_1180)) { force_by_name_next_reset_1180 = true;'))).Count -lt 3) {
+            Write-Error "ndi-source.cpp: the #1287 helper-gated corrective set is wired at fewer than 3 reset-forcing arms -- it must gate AND SET force_by_name_next_reset_1180 in the no_connections==0 arm, the #767 stale-while-connected arm, AND the #1096 (reopen 16.9) connected-but-frameless arm (anchoring the whole adjacency so deleting only the set is caught), else a frame-less bind is never flipped to BY-NAME. Re-apply the wiring at all three sites"; exit 1
+          }
+          # camera-box #1096 (reopen 16.9.2026): a bind that CONNECTS (no_connections>0) but delivers
+          # ZERO frames (reset BY-NAME into the poisoned finder in the 12:10 fleet-deploy wedge on
+          # cam2/5/6) leaves s->last_frame_timestamp==0, invisible to genlock_reconnect_decision
+          # (which skips last_frame_ns==0 to avoid judging a warming-up receiver), so neither #767 nor
+          # the no_connections==0 ladder re-arms and the leg sits black for an hour. The fix ages a
+          # connected, never-delivered bind from its recv_create_v3 timestamp (recv_bind_ns_1096) over
+          # FRAMELESS_BIND_STALE_NS and forces the SAME reset ladder + #1287 alternation. A subtree
+          # pull re-importing stock DistroAV silently drops this (mirrors
+          # tests/distroav_frameless_connected_1096.rs).
+          if ($ndi -notmatch [regex]::Escape('static inline bool genlock_frameless_bind_reconnect_decision(')) {
+            Write-Error "ndi-source.cpp: the #1096 (reopen 16.9) genlock_frameless_bind_reconnect_decision decision helper is gone -- a connected-but-frameless bind has no aging clock and sits black forever. Re-apply the #1096 connected-but-frameless watchdog"; exit 1
+          }
+          if ($ndi -notmatch [regex]::Escape('genlock_frameless_bind_reconnect_decision(genlock_source_is_active(s->obs_source), no_conn,')) {
+            Write-Error "ndi-source.cpp: the receiver loop no longer CALLS the #1096 (reopen 16.9) connected-but-frameless watchdog with the live source state -- a bind that never delivers a frame is never force-rebound. Re-apply the watchdog call"; exit 1
+          }
+          if ($ndi -notmatch [regex]::Escape('recv_bind_ns_1096 = os_gettime_ns();')) {
+            Write-Error "ndi-source.cpp: the #1096 (reopen 16.9) recv_bind_ns_1096 create-timestamp record at recv_create_v3 is gone -- the frameless watchdog has no baseline to age a never-delivered bind from. Re-apply the bind-timestamp record"; exit 1
           }
           # camera-box #1097: the framesync_create failure branch in the reset path must retry (not
           # break) -- the dormant sibling of #1080 (framesync forced OFF today, but a break there is

@@ -117,9 +117,15 @@ def genlock_lock_facet_from_log(text):
 
     Shape:
       {state, reason, n_inputs, n_locked, n_absent, latency_ms, recent_event, qpc_drift_ms,
+       qpc_drift_ppm, qpc_expected_ppm, qpc_step,
        clock:{state}, output:{present, stamping_wallclock},
        inputs:{<name>:{locked, connected, latency_ms, underruns, relocks, late_holds, depth}},
        [recent_event_inputs:[{name, events}]], [audio_unexpected_inputs:[{name}]], source:"log"}
+
+    #1299 (schema v5, Part 4): `qpc_drift_ppm` (measured windowed drift rate), `qpc_expected_ppm` (the
+    dantesync-reported slew the verdict compares against) and `qpc_step` (a single-sample wall STEP
+    tripped) are report-only telemetry — the qpc_drift VERDICT is folded into `state` by the widget.
+    All three default to None for a v1-v4 line from an older build (the cumulative `qpc_drift_ms` stays).
 
     #1299 (schema v3, Part 3): `recent_event_inputs` is the top recent-event offender (name+count),
     present ONLY when the v3 line carries a non-empty list (a DEGRADED/recent_event page names it).
@@ -197,6 +203,13 @@ def genlock_lock_facet_from_log(text):
         "latency_ms": payload.get("latency_ms"),
         "recent_event": bool(payload.get("recent_event")),
         "qpc_drift_ms": payload.get("qpc_drift_ms"),
+        # #1299 Part 4 (schema v5): windowed wall-vs-QPC drift telemetry (report-only). The qpc_drift
+        # VERDICT now keys on the RATE (`qpc_drift_ppm`) vs the dantesync-reported slew
+        # (`qpc_expected_ppm`) + a STEP (`qpc_step`), not the unbounded cumulative `qpc_drift_ms` above
+        # (kept as raw telemetry). All three default to None for a v1-v4 line from an older build.
+        "qpc_drift_ppm": payload.get("qpc_drift_ppm"),
+        "qpc_expected_ppm": payload.get("qpc_expected_ppm"),
+        "qpc_step": payload.get("qpc_step"),
         "clock": {"state": clock_str} if isinstance(clock_str, str) else {},
         "output": {
             "present": output_str != "absent",
@@ -500,6 +513,162 @@ def program_render_lagged_from_log(text):
     return (str(max_lagged), age_s)
 
 
+# #1320 — the RELOCK-BURST facet: a receiver FIFO overshoot STORM (the downstream consequence of a
+# sender PROGRAM render freeze). PORTS issue 1318's summarize_relock_bursts (src/jitter_audit.rs) to
+# Python so the dev1 render-freeze watchdog can page on it off :8899; the summarizer is NOT
+# re-implemented across languages beyond this one mirror (the ndi_halving_decision / #1199
+# python-mirror precedent) and a parity test pins it to the Rust test fixtures BYTE-for-byte.
+RELOCK_BURSTS_MIN_DEFAULT = 8  # N: >= this many relocks within 1 s on ONE input == a burst (issue 1318)
+_RELOCK_MARK = "genlock-relock '"
+
+
+def _parse_hhmmss_ms(tok):
+    """A `HH:MM:SS[.mmm]` (optional trailing `:`) token -> milliseconds-of-day, or None. Byte-faithful
+    mirror of src/jitter_audit.rs `parse_hhmmss_ms`: strips one trailing `:`, requires exactly 3
+    colon-parts, pads the fractional to 3 digits (`.205` -> 205 ms)."""
+    if tok.endswith(":"):
+        tok = tok[:-1]
+    parts = tok.split(":")
+    if len(parts) != 3:
+        return None
+    try:
+        hh = int(parts[0])
+        mm = int(parts[1])
+    except ValueError:
+        return None
+    sec_frac = parts[2]
+    if "." in sec_frac:
+        s, f = sec_frac.split(".", 1)
+        try:
+            ss = int(s)
+        except ValueError:
+            return None
+        fms = int((f + "000")[:3]) if f else 0
+        sub_ms = ss * 1000 + fms
+    else:
+        try:
+            sub_ms = int(sec_frac) * 1000
+        except ValueError:
+            return None
+    return hh * 3_600_000 + mm * 60_000 + sub_ms
+
+
+def _parse_relock_event(line):
+    """`(source, at_ms_int)` from a `genlock-relock '<src>':` line, or None. Byte-faithful mirror of
+    src/jitter_audit.rs parse_relock_line: needs the `genlock-relock '` marker (mutually non-substring
+    vs `genlock-fifo audit '`/`genlock-ndi-*`) AND a parseable clock time in the LAST whitespace token
+    before the marker (so a journald/SSH-wrapper-prefixed line still clusters, exactly like the Rust).
+    An event with no timeline position cannot be clustered -> None."""
+    i = line.find(_RELOCK_MARK)
+    if i < 0:
+        return None
+    after = line[i + len(_RELOCK_MARK):]
+    q = after.find("'")
+    if q < 0:
+        return None
+    source = after[:q]
+    before = line[:i].split()          # the token right before the marker carries the OBS timestamp
+    if not before:
+        return None
+    at_ms = _parse_hhmmss_ms(before[-1])
+    if at_ms is None:
+        return None
+    return (source, at_ms)
+
+
+def _peak_in_window(times, window_ms):
+    """Peak count of events within any `window_ms`-wide window over an ASCENDING slice (two-pointer,
+    inclusive `t[j] - t[i] <= window_ms`). Mirror of src/jitter_audit.rs peak_in_window."""
+    left = 0
+    peak = 0
+    for right in range(len(times)):
+        while times[right] - times[left] > window_ms:
+            left += 1
+        peak = max(peak, right - left + 1)
+    return peak
+
+
+def _summarize_one_source_bursts(source, times, min_burst_relocks, window_ms):
+    """Cluster ONE source's relock timestamps into burst episodes. A new cluster starts on a gap
+    greater than `window_ms` OR a backward time step (midnight wrap / a new log concatenated); a
+    cluster is a BURST when its densest `window_ms` window holds >= `min_burst_relocks` events.
+    Mirror of src/jitter_audit.rs summarize_one_source_bursts."""
+    summary = {
+        "source": source,
+        "total_relocks": len(times),
+        "bursts": 0,
+        "max_per_second": 0,
+        "first_at_ms": times[0] if times else 0,
+        "last_at_ms": times[-1] if times else 0,
+    }
+    cluster_start = 0
+    for i in range(len(times)):
+        boundary = i > cluster_start and (times[i] < times[i - 1] or times[i] - times[i - 1] > window_ms)
+        if boundary:
+            peak = _peak_in_window(times[cluster_start:i], window_ms)
+            summary["max_per_second"] = max(summary["max_per_second"], peak)
+            if peak >= min_burst_relocks:
+                summary["bursts"] += 1
+            cluster_start = i
+    if cluster_start < len(times):
+        peak = _peak_in_window(times[cluster_start:], window_ms)
+        summary["max_per_second"] = max(summary["max_per_second"], peak)
+        if peak >= min_burst_relocks:
+            summary["bursts"] += 1
+    return summary
+
+
+def _summarize_relock_bursts(events, min_burst_relocks, window_ms):
+    """Per-source relock-burst summaries (grouped in first-seen order, kept in log order). `events`
+    is a list of `(source, at_ms)` tuples. Mirror of src/jitter_audit.rs summarize_relock_bursts."""
+    order = []
+    groups = {}
+    for source, at_ms in events:
+        if source not in groups:
+            order.append(source)
+            groups[source] = []
+        groups[source].append(at_ms)
+    return [_summarize_one_source_bursts(name, groups[name], min_burst_relocks, window_ms)
+            for name in order]
+
+
+def relock_bursts_from_log(text):
+    """#1320 — the RELOCK-BURST facet `(max_bursts_str, age_s_str)`, `("", "")` when there is NO
+    `genlock-relock` line at all (steady state; absent -> UNKNOWN downstream, never a fabricated 0).
+
+    `max_bursts_str` is the MAX per-input burst count over the tail (>=8 relocks within 1 s ==
+    a FIFO overshoot storm, issue 1318); `age_s_str` is the whole-second in-log age of the NEWEST
+    relock event behind the tail's newest line of any kind, so the dev1 watchdog pages on a RECENT
+    storm (not one that scrolled into the tail). `"0"` (relock telemetry live, no storm) is a truthy
+    string and is KEPT; `""` is dropped by the omit-when-empty filter.
+
+    Reads ONLY the TAIL slice of the #1222 bounded head+separator+tail read, in ONE pass (no second
+    log read). File order is time order (append-only log), so `_recency_gap_s` corrects a single
+    midnight wrap on the date-less OBS timestamps."""
+    t = text or ""
+    if LOG_BOUNDED_READ_SEPARATOR in t:
+        t = t.rsplit(LOG_BOUNDED_READ_SEPARATOR, 1)[-1]
+    log_newest_ts = None    # ts of the LAST parseable line in file order (the log write head)
+    newest_relock_ts = None  # seconds-of-day of the newest relock line (file order == time order)
+    events = []
+    for line in t.splitlines():
+        ts = _log_line_seconds(line)
+        if ts is not None:
+            log_newest_ts = ts
+        ev = _parse_relock_event(line)
+        if ev is not None:
+            events.append(ev)
+            if ts is not None:
+                newest_relock_ts = ts
+    if not events:
+        return ("", "")
+    summaries = _summarize_relock_bursts(events, RELOCK_BURSTS_MIN_DEFAULT, 1000)
+    max_bursts = max(s["bursts"] for s in summaries)
+    gap = _recency_gap_s(log_newest_ts, newest_relock_ts)
+    age_s = "0" if gap is None else str(round(gap))
+    return (str(max_bursts), age_s)
+
+
 def _median_int(values):
     """Plain sorted median of a non-empty int list, rounded to int. (No numpy — small lists.)"""
     s = sorted(values)
@@ -621,6 +790,20 @@ _AV_OFFSET_SUGGEST_RE = re.compile(
 # distinguish "dock LOCKED, offset in the suggestion dead band" (IN_BAND_QUIET, healthy) from "dock
 # silent" (STALE) — the false-STALE the SUGGESTED-only age read during a dead-band quiet window.
 _AV_OFFSET_DIAG_LOCKED_RE = re.compile(r"av-sync-dock: diag .*\blocked=yes\b")
+
+# #1319 Part 2 — the dock's own cluster-QUALITY line (`av-sync-dock: {LOCKED,UPDATED} offset=Xms
+# source=cluster matched=M mad=Dms`, sync-test-output.cpp:1378). It carries the estimator's
+# per-lock cluster SIZE (`matched`) and per-sample SCATTER (`mad`) — the two things the band alarm
+# needs to know a reading is trustworthy. The overnight 78-page false alarm judged a dock reading
+# whose MAD (9-31 ms) was as wide as the +-30 ms band against a recording-based reference; the dev1
+# band decision now reads LOW_QUALITY (log-only, never a page) unless the recent window's median MAD
+# is <= 15 ms AND its min matched is >= 30. This is a SEPARATE facet from the offset SERIES
+# (av_offset_series_from_log stays BYTE-IDENTICAL — the Part-1 decision that the raw UPDATED/LOCKED
+# lines are NOT folded into the series holds; only their matched/mad feed this quality facet).
+_AV_OFFSET_QUALITY_RE = re.compile(
+    r"av-sync-dock: (?:LOCKED|UPDATED) offset=-?\d+(?:\.\d+)?ms source=cluster "
+    r"matched=(\d+) mad=(\d+(?:\.\d+)?)ms"
+)
 
 # #1267 — rolling-window bounds, in-log seconds behind the log head. RECENT = the freshest 10 min;
 # BASELINE = the 10..40 min region behind it (a rolling reference that predates the recent window).
@@ -755,6 +938,51 @@ def av_offset_dock_live_age_from_log(text):
         return ""
     gap = _recency_gap_s(log_newest_ts, last_live_ts)
     return "" if gap is None else str(round(gap))
+
+
+def av_offset_quality_from_log(text, recent_window_s=AV_OFFSET_RECENT_WINDOW_S):
+    """#1319 Part 2 — the dock estimator's measurement QUALITY over the RECENT window, as SCALARS
+    for the dev1 band alarm. Returns `(recent_mad_str, recent_matched_min_str)`, both "" when there
+    is no `LOCKED/UPDATED offset= ... matched= mad=` line in the recent window (UNKNOWN downstream,
+    never fabricated):
+
+    * recent_mad — MEDIAN of the per-lock `mad=` scatter (ms, 1 decimal) over the freshest
+      recent_window_s of dock quality lines. The band arm requires this <= 15 ms.
+    * recent_matched_min — the MINIMUM `matched=` cluster size in that window (the worst-case
+      trust). The band arm requires this >= 30. Min (not median) so a single thin lock in the
+      window is enough to read LOW_QUALITY — the safe direction (never page off a thin cluster).
+
+    Reads ONLY the TAIL slice of the #1222 bounded read, same recency model (`_recency_gap_s`,
+    file order IS time order) as av_offset_series_from_log, one pass, no wall clock. This is a
+    SEPARATE parser from the offset series (which stays byte-identical): it consumes the same
+    LOCKED/UPDATED lines the series deliberately excludes, but ONLY for matched/mad — never their
+    offset (a different sign/bias from the SUGGESTED series, #952)."""
+    t = text or ""
+    if LOG_BOUNDED_READ_SEPARATOR in t:
+        t = t.rsplit(LOG_BOUNDED_READ_SEPARATOR, 1)[-1]
+    samples = []          # (ts_or_None, matched_int, mad_float) in file order
+    log_newest_ts = None
+    for line in t.splitlines():
+        ts = _log_line_seconds(line)
+        if ts is not None:
+            log_newest_ts = ts
+        m = _AV_OFFSET_QUALITY_RE.search(line)
+        if m:
+            samples.append((ts, int(m.group(1)), float(m.group(2))))
+    recent_mads, recent_matched = [], []
+    for ts, matched, mad in samples:
+        g = _recency_gap_s(log_newest_ts, ts)
+        if g is None or g > recent_window_s:
+            continue
+        recent_mads.append(mad)
+        recent_matched.append(matched)
+    if not recent_mads:
+        return ("", "")
+    med = _median(recent_mads)
+    return (
+        "" if med is None else f"{med:.1f}",
+        str(min(recent_matched)),
+    )
 
 
 def distroav_dll_paths(scan_roots):
@@ -1185,12 +1413,16 @@ def build_bundle_state(
     av_offset_n_recent="",
     av_offset_n_base="",
     av_offset_dock_live_age_s="",
+    av_offset_recent_mad_ms="",
+    av_offset_recent_matched_min="",
     vb_matrix_running="",
     vb_matrix_name="",
     vb_matrix_pid="",
     vb_matrix_start="",
     program_render_lagged="",
     program_render_lagged_age_s="",
+    relock_bursts="",
+    relock_bursts_age_s="",
 ):
     """Assemble the flat bundle-state dict `version-integrity-gate.sh --win-state`'s
     `compare_args_from_state()` parses. Every value is a STRING (its regex requires a quoted JSON
@@ -1292,6 +1524,13 @@ def build_bundle_state(
         # IN_BAND_QUIET (dock LIVE, offset in the suggestion dead band) instead of a false STALE.
         # Same omit-when-empty rule (absent == UNKNOWN downstream, never a fake 0).
         "av_offset_dock_live_age_s": av_offset_dock_live_age_s,
+        # #1319 Part 2 — the dock estimator's recent-window measurement QUALITY (median MAD +
+        # min matched), from av_offset_quality_from_log. The dev1 band arm reads LOW_QUALITY
+        # (log-only, never a page) unless recent_mad_ms <= 15 AND recent_matched_min >= 30, so a
+        # noisy/biased dock reading no longer trips the +-30 ms band on its own scatter. Same
+        # omit-when-empty rule (absent == quality unjudgeable -> the band proceeds, never a fake 0).
+        "av_offset_recent_mad_ms": av_offset_recent_mad_ms,
+        "av_offset_recent_matched_min": av_offset_recent_matched_min,
         # #1227 — the VB-Matrix presence facet the dev1 VB-Matrix alert watchdog reads. Same
         # omit-when-empty rule: running="0" (installed but the VBAudioMatrix* process is DEAD) is a
         # truthy string and is KEPT (surfaces as DOWN); running="" (a box with no VB-Matrix install,
@@ -1308,5 +1547,12 @@ def build_bundle_state(
         # UNKNOWN downstream, never a fabricated 0. From `program_render_lagged_from_log`.
         "program_render_lagged": program_render_lagged,
         "program_render_lagged_age_s": program_render_lagged_age_s,
+        # #1320 — the RELOCK-BURST facet the dev1 render-freeze watchdog's relock arm reads: the MAX
+        # per-input burst count (issue 1318 summarize_relock_bursts, >=8 relocks within 1 s) over the
+        # #1222 bounded TAIL + the in-log age (s) of the newest relock event. Same omit-when-empty
+        # rule: "0" (relock telemetry live, no storm) is truthy and KEPT; "" (NO relock line at all,
+        # the steady state) is dropped -> UNKNOWN downstream, never a fabricated 0.
+        "relock_bursts": relock_bursts,
+        "relock_bursts_age_s": relock_bursts_age_s,
     }
     return {k: v for k, v in values.items() if v}

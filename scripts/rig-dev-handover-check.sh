@@ -71,6 +71,22 @@ WIN_SSH_USER="${WIN_SSH_USER:-newlevel}"
 CAMSET_LIB="${RDH_CAMSET_LIB:-$HERE/camera-set.sh}"
 export OBS_PASSWORD="${OBS_PASSWORD:-}"
 
+# --- issue 1316: is imag-nb retired? (returned to the owner) ------------------------------------
+# An explicit RDH_IMAG_RETIRED override wins; else a non-comment `imag:`/`imag-nb:` ack in
+# rig-fleet.txt (the rig-wide source of truth the E2E offline-ack reads). When retired we skip the
+# pins_imag probe (never probe the dark box) and export RDH_IMAG_RETIRED so the decision engine
+# drops the imag-scoped capture (the dantesync version item already EXCLUDES imag-nb via that ack).
+_rig_fleet="${RDH_RIG_FLEET:-$HERE/../rig-fleet.txt}"
+imag_retired=0
+case "${RDH_IMAG_RETIRED:-}" in
+  ""|0|false|no|FALSE|No) ;;
+  *) imag_retired=1 ;;
+esac
+if [ "$imag_retired" -eq 0 ] && [ -f "$_rig_fleet" ] && grep -qE '^[[:space:]]*imag(-nb)?:' "$_rig_fleet"; then
+  imag_retired=1
+fi
+export RDH_IMAG_RETIRED="$imag_retired"
+
 # --- default per-probe timeouts + script paths (RDH_* stub seams) -------------------------------
 RDH_TIMEOUT="${RDH_TIMEOUT:-30}"
 # the two version items ssh the WHOLE fleet (many nodes) -> a more generous default timeout
@@ -164,7 +180,10 @@ run_probe mapping_strih python3 "$MAPPING_PROBE" --host "$STRIH_HOST" --password
 # --- item 6: pins (latency_pins_verify per box) -------------------------------------------------
 run_probe pins_strih  python3 "$PINS_PROBE" --box strih  --host "$STRIH_HOST"  --password "$OBS_PASSWORD"
 run_probe pins_stream python3 "$PINS_PROBE" --box stream --host "$STREAM_HOST" --password "$OBS_PASSWORD"
-run_probe pins_imag   python3 "$PINS_PROBE" --box imag   --host "$IMAG_HOST"   --password "$OBS_PASSWORD"
+# issue 1316: skip pins_imag when imag-nb is retired (dark box) — the decision drops the capture too.
+if [ "$imag_retired" -eq 0 ]; then
+  run_probe pins_imag python3 "$PINS_PROBE" --box imag   --host "$IMAG_HOST"   --password "$OBS_PASSWORD"
+fi
 
 # --- item 7: clock (dantesync-clock --dry-run) --------------------------------------------------
 run_probe clock bash "$CLOCK_PROBE" --dry-run

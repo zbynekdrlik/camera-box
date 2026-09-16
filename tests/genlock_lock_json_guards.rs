@@ -111,6 +111,36 @@ fn genlock_lock_audio_unexpected_offender_present_1303() {
 }
 
 #[test]
+fn genlock_lock_qpc_windowed_drift_present_1299_part4() {
+    // #1299 Part 4: the qpc_drift verdict is a WINDOWED RATE + STEP (vs the dantesync-reported slew),
+    // NOT the cumulative wall-vs-QPC offset that grew unbounded and false-paged the fleet overnight.
+    // A subtree pull that reverts any of these silently re-opens that chronic false page.
+    // the widget calls the parity-gated pure decision (not an inline `> 100 ms` compare)
+    assert_has(STATUSBAR_CPP, "genlock_qpc_drift_beyond_bound(");
+    // it polls the expected slew the disciplined clock reports (f_ptp + f_phase)
+    assert_has(STATUSBAR_CPP, "obs_data_get_double(d, \"f_ptp_ppm\")");
+    assert_has(STATUSBAR_CPP, "obs_data_get_double(d, \"f_phase_ppm\")");
+    // the v5 report-only telemetry keys the bundle-state parser reads
+    assert_has(STATUSBAR_CPP, "\\\"qpc_drift_ppm\\\":");
+    assert_has(STATUSBAR_CPP, "{\\\"v\\\":5,\\\"state\\\":");
+    // the windowed-rate ring member + the bounds
+    assert_has(
+        STATUSBAR_HPP,
+        "std::deque<std::pair<qint64, int64_t>> genlockQpcHistory;",
+    );
+    assert_has(
+        STATUSBAR_CPP,
+        "static constexpr double GENLOCK_QPC_DRIFT_PPM_BOUND = 50.0;",
+    );
+    // the pure decision's C mirror + its parity anchor (kept in lock-step by
+    // tests/genlock_lock_state_parity.rs)
+    assert_has(
+        "vendor/obs-studio/frontend/widgets/GenlockLockState.hpp",
+        "static inline int genlock_qpc_drift_beyond_bound(int rate_ready, long long drift_delta_ms,",
+    );
+}
+
+#[test]
 fn genlock_lock_json_marker_is_mutually_non_substring() {
     // The new OBS-log family `genlock-lock-json:` must be mutually non-substring with every
     // existing marker (jitter-audit-parser.md) — ESPECIALLY the #1298 `genlock-lock:` line it sits

@@ -39,8 +39,9 @@ set -euo pipefail
 #   --full     deploy the full windows-genlock bundle (obs.dll + data + obs-plugins) -- the default;
 #              required for any vendor/<plugin>/** or frontend change (fast has no deploy path for it).
 #   --fast     deploy only the libobs hot-swap dll (obs.dll) -- a libobs-only change (§5b).
-#   --boxes    comma list of strih,stream,imag,resolume (default: strih,stream,imag -- resolume is a
-#              TRAVELING maintenance box, issue 1295, deployed ONLY when explicitly named).
+#   --boxes    comma list of strih,stream,imag,resolume (default: strih,stream -- resolume is a
+#              TRAVELING maintenance box, issue 1295, deployed ONLY when explicitly named; imag was
+#              RETIRED, issue 1316 -- dropped from the default, still a valid explicit target).
 #   --plan     print the plan only; no gh/ssh/scp. Requires --stage + --sha (no network).
 #   --stage    local dir holding the (pre-)downloaded artifact bytes (plan mode / test seam).
 #   --sha      the canonical build SHA to stamp into the markers (plan mode override).
@@ -67,15 +68,17 @@ RETENTION_KEEP=3
 # ============================================================================================
 
 # fleet_normalize_boxes CSV -> the requested boxes in canonical order (strih,stream,imag,resolume),
-# deduped and validated. Empty -> the DEFAULT fleet strih,stream,imag ONLY. An unknown box is a
+# deduped and validated. Empty -> the DEFAULT fleet strih,stream ONLY. An unknown box is a
 # fail-loud usage error (return 2). resolume = RESOLUME-SNV, the traveling CG box (issue 1295): a
 # windows-genlock box like strih/stream, so it rides the SAME Windows emit-only plan path -- but it
 # is a traveling maintenance target (often off/away, NOT a measured E2E source, targets.md), so it
 # is deployed ONLY when explicitly named (`--boxes resolume`), never pulled into the empty-default
-# "whole fleet".
+# "whole fleet". issue 1316: `imag` DROPPED from the empty-default too -- imag-nb was returned to the
+# owner (dark), so a default deploy would fail on it; it stays a VALID explicit target (`--boxes
+# imag`) so the IMAG role's re-provisioning next year needs no code change here.
 fleet_normalize_boxes() {
-  local csv="${1:-}" b out="" has_strih=0 has_stream=0 has_imag=0 has_resolume=0
-  [ -n "$csv" ] || csv="strih,stream,imag"
+  local csv="${1:-}" b out="" has_strih=0 has_stream=0 has_imag=0 has_resolume=0 has_strihlx=0
+  [ -n "$csv" ] || csv="strih,stream"
   local IFS=','
   for b in $csv; do
     b="${b//[[:space:]]/}"
@@ -85,13 +88,18 @@ fleet_normalize_boxes() {
       stream)   has_stream=1 ;;
       imag)     has_imag=1 ;;
       resolume) has_resolume=1 ;;
-      *) echo "fleet_normalize_boxes: unknown box '$b' (valid: strih, stream, imag, resolume)" >&2; return 2 ;;
+      # issue 1317: strih-lx is the Linux strih notebook (a linux-genlock box like imag). Like
+      # resolume it is NOT in the empty-default fleet (deployed only when explicitly named), since
+      # it runs in parallel and is a manual bring-up target, not part of the routine whole-fleet roll.
+      strih-lx) has_strihlx=1 ;;
+      *) echo "fleet_normalize_boxes: unknown box '$b' (valid: strih, stream, imag, resolume, strih-lx)" >&2; return 2 ;;
     esac
   done
   [ "$has_strih" = 1 ]    && out="strih"
   [ "$has_stream" = 1 ]   && out="${out:+$out,}stream"
   [ "$has_imag" = 1 ]     && out="${out:+$out,}imag"
   [ "$has_resolume" = 1 ] && out="${out:+$out,}resolume"
+  [ "$has_strihlx" = 1 ]  && out="${out:+$out,}strih-lx"
   [ -n "$out" ] || { echo "fleet_normalize_boxes: empty box set" >&2; return 2; }
   printf '%s\n' "$out"
 }
@@ -116,6 +124,16 @@ fleet_windows_workflow() {
 
 fleet_linux_bundle_artifact()   { echo "obs-genlock-linux-x86_64"; }
 fleet_linux_distroav_artifact() { echo "distroav-linux-fast-so"; }
+# fleet_linux_bundle_artifact_for BOX -> the linux-genlock.yml bundle artifact for a specific Linux
+# box. imag (and any unnamed default) uses the imag-parity full build; strih-lx (issue 1317) uses
+# the strih FULL-build variant (obs-genlock-linux-x86_64-strih). Kept SEPARATE from the no-arg
+# fleet_linux_bundle_artifact so the existing byte-exact test of that helper stays unchanged.
+fleet_linux_bundle_artifact_for() {
+  case "${1:-}" in
+    strih-lx) echo "obs-genlock-linux-x86_64-strih" ;;
+    *)        fleet_linux_bundle_artifact ;;
+  esac
+}
 
 # fleet_pick_run_at_sha SHA  (stdin: a `gh run list --json databaseId,headSha,conclusion` JSON array)
 #   -> the databaseId of the FIRST successful run whose headSha == SHA, or empty. This is the heart
@@ -135,7 +153,7 @@ fleet_pick_run_at_sha() {
 # currently collides with `bridge` at .201 (targets.md), so the plan resolves + identity-confirms it
 # live (emit_windows_plan prints that step for resolume; the planner emits it, never runs it).
 fleet_box_mcp()     { case "${1:-}" in strih) echo "win-strih" ;; stream) echo "win-stream-snv" ;; resolume) echo "win-resolume" ;; *) return 2 ;; esac; }
-fleet_box_ip()      { case "${1:-}" in strih) echo "10.77.9.202" ;; stream) echo "10.77.9.204" ;; imag) echo "imag" ;; resolume) echo "resolume.lan" ;; *) return 2 ;; esac; }
+fleet_box_ip()      { case "${1:-}" in strih) echo "10.77.9.202" ;; stream) echo "10.77.9.204" ;; imag) echo "imag" ;; resolume) echo "resolume.lan" ;; strih-lx) echo "${STRIH_LX_IP:-strih-lx.lan}" ;; *) return 2 ;; esac; }
 fleet_box_has_ahk() { case "${1:-}" in strih|resolume) echo "1" ;; *) echo "0" ;; esac; }
 
 # fleet_box_ahk_script / fleet_box_ahk_prefer -- the PER-BOX AHK relaunch identity passed into the
@@ -858,6 +876,10 @@ main() {
       case "$b" in
         strih|stream|resolume) emit_windows_plan "$b" "$mode" "$stage" "$sha" "$sha" ;;
         imag)                  emit_imag_plan "$stage" "$sha" "$sha" ;;
+        # issue 1317: strih-lx is a linux-genlock box -- the on-box deploy program is byte-identical
+        # to imag's (same /opt/obs-genlock target, same genlock_write_markers), only the CI artifact
+        # (fleet_linux_bundle_artifact_for strih-lx) + the box IP differ, both resolved at execute.
+        strih-lx)              emit_imag_plan "$stage" "$sha" "$sha" ;;
       esac
     done )
     # issue 1295: emit the fleet-deploy log record as a COMMENT and end the printed plan on `exit 0`.
@@ -889,9 +911,19 @@ main() {
 
   # detect requested box classes without a `local IFS=','` that would leak past a brace group
   # (a { …; } group is not a new scope) -- match the comma-list directly.
-  local want_win=0 want_imag=0
+  local want_win=0 want_imag=0 want_strihlx=0
   case ",$boxes," in *,strih,*|*,stream,*|*,resolume,*) want_win=1 ;; esac
   case ",$boxes," in *,imag,*) want_imag=1 ;; esac
+  case ",$boxes," in *,strih-lx,*) want_strihlx=1 ;; esac
+  # issue 1317: the strih-lx EXECUTE deploy (scp the strih artifact + ssh-run the on-box program)
+  # reuses the imag transport with fleet_linux_bundle_artifact_for strih-lx + STRIH_LX_IP; it is a
+  # follow-up (the notebook does not exist yet, so it cannot be exercised). The PLAN arm above
+  # already previews the identical on-box program. Until then, execute against strih-lx is a no-op
+  # with a loud note rather than a silent success, so an operator is never misled.
+  if [ "$want_strihlx" = 1 ]; then
+    echo "# NOTE(issue 1317): strih-lx EXECUTE deploy is a follow-up -- use --plan for the preview, or run" >&2
+    echo "#   setup-strih.sh with STRIH_LX_BUNDLE_SRC=<dir of the $(fleet_linux_bundle_artifact_for strih-lx) artifact> ON the box." >&2
+  fi
 
   # --- Windows: download the same-SHA artifact, emit the per-box plan (agent uploads + pastes) -----
   if [ "$want_win" = 1 ]; then

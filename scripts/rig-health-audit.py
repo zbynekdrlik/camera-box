@@ -67,6 +67,38 @@ CAMERA_SRC_RE = re.compile(r"^NDI\s+cam\d+$", re.I)
 # main()'s PASS/WARN/FAIL counting ignores. The #787 resolume-rate exemption (CAMERA_SRC_RE above)
 # is unchanged: resolume's non-60 cadence is still never graded by the arrival/cadence checks.
 CG_CHAIN_REPORT_VERDICT = "NOTE"
+# issue 1316: imag-nb was RETURNED to the owner (10.77.9.182 dark). A retired node renders ONE
+# neutral RETIRED row instead of a permanent FAIL "unreachable over ssh"; like NOTE it is NOT
+# PASS/WARN/FAIL, so main()'s exit-code counting ignores it. Retirement is read from the rig-wide
+# source of truth (a rig-fleet.txt `imag:`/`imag-nb:` ack), env-overridable for tests.
+IMAG_RETIRED_VERDICT = "RETIRED"
+
+
+def imag_is_retired() -> bool:
+    """True iff imag-nb is retired/absent: an explicit RIG_HEALTH_IMAG_RETIRED override, else a
+    non-comment `imag:`/`imag-nb:` ack line in rig-fleet.txt (the same file the E2E offline-ack
+    reads). A missing/erroring file -> not retired (fail-safe: keep auditing rather than skip)."""
+    env = os.environ.get("RIG_HEALTH_IMAG_RETIRED", "").strip().lower()
+    if env in ("0", "false", "no"):
+        return False  # an explicit falsey override WINS over the rig-fleet.txt ack (tests / a re-provisioned box)
+    if env:
+        return True
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "rig-fleet.txt")
+    if not os.path.exists(path):
+        return False
+    try:
+        with open(path, encoding="utf-8") as fh:
+            for line in fh:
+                s = line.strip()
+                if not s or s.startswith("#"):
+                    continue
+                if s.split(":", 1)[0].strip() in ("imag", "imag-nb"):
+                    return True
+    except OSError as exc:
+        # Fail-safe: a readable-but-erroring rig-fleet.txt must not silently skip the imag audit.
+        print(f"[NOTE] imag    rig-fleet.txt read error: {exc} (auditing imag as usual)",
+              file=sys.stderr)
+    return False
 CG_CHAIN_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "cg-chain-verify.sh")
 
 results = []
@@ -355,6 +387,13 @@ def check_cam(name: str, ip: str) -> None:
 
 
 def check_imag() -> None:
+    # issue 1316: imag-nb was returned to the owner. A retired node renders ONE neutral RETIRED row
+    # (never FAIL/UNKNOWN, never an ssh probe of the dark box). Re-provisioning on a new notebook
+    # removes the rig-fleet.txt ack and this audits imag normally again.
+    if imag_is_retired():
+        emit(IMAG_RETIRED_VERDICT, "imag", "RETIRED (imag-nb returned to owner 16.9.2026; "
+             "role returns on a new notebook — see scripts/imag-host.sh)")
+        return
     out = ssh(IMAG, "pgrep -x obs >/dev/null && echo obs=up || echo obs=DOWN; "
                     "systemctl is-active imag-obs-watchdog 2>/dev/null; "
                     "grep -o isolcpus /proc/cmdline || echo cmdline-clean; "

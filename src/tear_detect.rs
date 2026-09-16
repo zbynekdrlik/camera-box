@@ -264,9 +264,16 @@ pub enum TearSignalViability {
     /// at least 1 torn frame observed: the signal provably CAN fire on this content/run.
     Observed,
     /// No torn frame observed: cannot distinguish "no tears" from "signal blind on this content"
-    /// (the single-vertical-band dual-QR layout, issue 781; or a multi-tile window where every
-    /// frame is [`is_multi_path_suspect`] and thus unscoreable, issue 1196 v2.1). A LIVE flip
-    /// stays gated on `Observed`.
+    /// (the single-vertical-band dual-QR layout, issue 781; a multi-tile window where every frame
+    /// is [`is_multi_path_suspect`] and thus unscoreable, issue 1196 v2.1; OR — issue 1316 — the
+    /// post-retire cam2 topology where the aux projection tick has NO source and never decodes,
+    /// because imag-nb was returned 16.9.2026 and cam2's grabber now receives the SPLITTER feed).
+    /// All of these pass the gate (never a red). The "no aux source this window" case is surfaced
+    /// REPORT-ONLY by `aux_any_decode_fraction == 0.0` + [`signal_operable`] false +
+    /// [`ProjectionProof::hdmi1_proof_backed`] false — it is NOT given a separate viability, because
+    /// from window stats alone it is INDISTINGUISHABLE from an ordinary aux-empty content window
+    /// (e.g. the pre-aux 781 fixtures), so an automatic "Absent" state would misclassify those.
+    /// A LIVE flip stays gated on `Observed`.
     Unproven,
 }
 
@@ -421,6 +428,11 @@ pub fn window_tear_stats(per_frame_ids: &[(Vec<u32>, Vec<u32>)]) -> TearStats {
     } else {
         (0.0, 0.0, 0.0, 0.0)
     };
+    // issue 1316: the post-retire cam2 "no projection source" case (aux never decodes) is NOT given
+    // its own viability — from window stats alone it is indistinguishable from an ordinary aux-empty
+    // content window (the pre-aux 781 fixtures), so it correctly reads `Unproven` and PASSES the gate
+    // (never a red). "No aux source this window" is surfaced report-only via `aux_any_decode_fraction`
+    // + `signal_operable` + `ProjectionProof::hdmi1_proof_backed`.
     let viability = if tear_frames > 0 {
         TearSignalViability::Observed
     } else {
@@ -447,7 +459,8 @@ pub fn window_tear_stats(per_frame_ids: &[(Vec<u32>, Vec<u32>)]) -> TearStats {
 /// window: `Observed` (the signal fired) AND single-tile (`multi_path_suspect_fraction <=
 /// MULTI_PATH_SUSPECT_CEILING`, so its span is a real tear not inter-path skew) AND over BOTH the
 /// rate ([`TEAR_FRACTION_CEILING`]) and the count ([`TEAR_FRAME_COUNT_FLOOR`]). Everything else passes:
-/// - an `Unproven` window (`tear_fraction` 0.0 — no torn frame);
+/// - an `Unproven` window (`tear_fraction` 0.0 — no torn frame; incl. issue 1316's post-retire
+///   cam2 splitter leg where the aux projection tick has no source — report-only, never a red);
 /// - a MULTI-TILE window (issue 1196 review-hardening — its few single-source residual frames carry
 ///   inter-path skew, and their tiny-denominator rate must not false-fail; without this guard the
 ///   real multi-tile run 1859005342 fails 4/10 windows, the #1127 "❌ on a passing run" trap);
@@ -886,6 +899,50 @@ mod tests {
         assert_eq!(s.max_multi_path_spread, 0);
         assert_eq!(s.viability, TearSignalViability::Unproven);
         assert!(tear_gate_pass(&s));
+    }
+
+    #[test]
+    fn no_projection_source_cam2_window_passes_report_only_1316() {
+        // issue 1316: imag-nb was returned 16.9.2026, so cam2's grabber now receives the SPLITTER
+        // feed like every other cambox (no imag HDMI projection tap). cam2 is then a normal camera
+        // leg: the primary dual-QR decodes (single tile) but the aux projection tick has NO source
+        // and never decodes. This is INDISTINGUISHABLE from an ordinary aux-empty content window
+        // (the pre-aux 781 fixtures), so it correctly reads `Unproven` and PASSES the gate (never a
+        // red) — NOT a new viability. "No aux source this window" is surfaced REPORT-ONLY via
+        // aux_any_decode_fraction / signal_operable / hdmi1_proof_backed, exactly as designed.
+        let frames = vec![
+            f(&[100, 101], &[]),
+            f(&[102, 103], &[]),
+            f(&[104], &[]),
+            f(&[], &[]), // an occasional fully-undecodable frame, still no aux anywhere
+        ];
+        let s = window_tear_stats(&frames);
+        assert!(
+            s.decodable_frames > 0,
+            "primary decodes on a real camera leg"
+        );
+        assert_eq!(s.tear_frames, 0);
+        assert_eq!(s.aux_any_decode_fraction, 0.0, "no projection aux source");
+        assert_eq!(
+            s.viability,
+            TearSignalViability::Unproven,
+            "a sourceless (post-retire) cam2 leg reads Unproven and passes — never a red"
+        );
+        assert!(
+            tear_gate_pass(&s),
+            "a no-projection-source leg never fails the tear gate"
+        );
+        // Report-only signals that make "no aux source" honest without a separate viability.
+        assert!(
+            !signal_operable(std::slice::from_ref(&s)),
+            "aux never decoded -> not operable (report-only)"
+        );
+        let proof = summarize_projection_leg(&[&s]);
+        assert!(
+            !proof.hdmi1_proof_backed,
+            "no aux source -> HDMI-1 proof not backed (report-only)"
+        );
+        assert!(proof.tear_gate_clean, "the window is tear-clean (passes)");
     }
 
     #[test]

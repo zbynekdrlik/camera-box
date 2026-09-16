@@ -5694,13 +5694,14 @@ fn build_and_print_verdict_with_stream_diffs(
                 // the mode 2) that net to zero, which the pre-#1250 `derived_uniform_fraction` counted
                 // as non-uniform (0.57-0.92 on a copies==0/gaps==0 chain — the "sick 0.67-0.78" was
                 // mostly this beat). The beat-corrected reading collapses those balanced pairs back
-                // to uniform, so the healthy rig's GATED worst window reads 0.916/0.947 on the two
-                // mined runs (typical windows 0.92-0.99) and the floor now REDs only a GENUINE
-                // non-uniformity beyond the beat. A per-window RATE (like the judder gate) so a single
+                // to uniform, so the healthy POST-FIX rig's GATED worst window reads ~0.998 (run
+                // 180691712 0.9988; adjacent clean runs 0.9976) and the floor now REDs only a GENUINE
+                // non-uniformity beyond the beat (the pre-fix walk-down-era runs 0.916/0.947 now RED).
+                // A per-window RATE (like the judder gate) so a single
                 // per-window-MIN term is honest (no run-wide second term). `None` worst = no cadence
                 // window (mass decode failure, already hard-failed by copies/gaps/undecodable) = not
                 // applicable, passes. LIVE via `presentation_cadence::uniformity_gates_overall_pass`;
-                // floor 0.90 (walk-back: issue 1242) UNCHANGED.
+                // floor RESTORED 0.90 -> 0.95 (issue 1242 walk-back).
                 let worst_cadence_uniform_fraction: Option<f64> = seg
                     .segments
                     .iter()
@@ -5751,13 +5752,13 @@ fn build_and_print_verdict_with_stream_diffs(
                     "note": "#1142 cadence-uniformity FLOOR (owner mandate). Since #1250 the GATED \
                              value worst_uniform_fraction is the BEAT-AWARE worst per-window \
                              presentation_cadence.beat_corrected_uniform_fraction across cambox \
-                             windows, which must be >= min_uniform_fraction (0.90, walk-back: issue \
-                             1242). A sampling-phase beat emits balanced complementary steps (1<->3 \
+                             windows, which must be >= min_uniform_fraction (0.95, RESTORED by \
+                             issue 1242). A sampling-phase beat emits balanced complementary steps (1<->3 \
                              around the mode 2) that net to zero; #1250 collapses them so a smooth \
-                             60->30 chain reads ~1.0 and the healthy-but-beating rig's GATED worst \
-                             window reads 0.916/0.947 on the two mined runs (typical windows \
-                             0.92-0.99, above the floor) instead of the pre-#1250 derived 0.57-0.92 \
-                             (the '0.67-0.78 sick rig' was mostly this beat, not FIFO churn) — the \
+                             60->30 chain reads ~1.0 and the healthy POST-FIX rig's GATED worst \
+                             window reads ~0.998 (run 180691712 0.9988, adjacent clean 0.9976, \
+                             above the 0.95 floor) while the pre-fix walk-down-era runs (0.916/0.947) \
+                             now correctly RED — the \
                              floor now REDs only \
                              genuine non-uniformity beyond the beat. worst_derived_uniform_fraction \
                              (pre-beat mode-based) and worst_raw_uniform_fraction (caller-step) are \

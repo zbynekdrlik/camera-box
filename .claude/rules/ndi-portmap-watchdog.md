@@ -56,3 +56,7 @@ Same shape as `scripts/netcfg-audit.sh` + `scripts/netcfg-drift-alert-watchdog.s
 avahi). Offline: set `NDI_PORTMAP_AVAHI_FIXTURE=<file>` on the audit to feed captured `avahi-browse
 -rtp _ndi._tcp` output instead of running avahi. Re-capture the checked-in baseline from a LIVE read
 only (`scripts/ndi-portmap-audit.sh --capture`), never hand-type it.
+
+## Baseline goes stale after every genlock relaunch batch (16.9.2026)
+
+A fleet relaunch re-orders strih's sender ports around the issue-1185 pin (`2ME PGM` back on `:5961`, every republish one port lower); the 24.8. baseline then paged 14× overnight through the 12-pass throttle. Re-capture (`scripts/ndi-portmap-audit.sh --capture`, live read only) and commit the JSON in the deploy sitting; `--check` must read `NDI-PORTMAP-STABLE` before the sitting ends.

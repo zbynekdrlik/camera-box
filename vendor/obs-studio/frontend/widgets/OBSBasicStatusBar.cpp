@@ -28,9 +28,20 @@ static constexpr float badThreshold = 1.0f;
 /* camera-box #1298: the in-OBS GENLOCK lock indicator. The DECISION itself lives in the pure,
  * Tier-0-tested + C-vs-Rust-parity-gated GenlockLockState.hpp; everything here is the OBS glue
  * that scalarises the libobs genlock stats + the dantesync clock facet into genlock_lock_facets_t
- * and renders the verdict. GENLOCK_QPC_DRIFT_BOUND_MS is the wall-vs-monotonic drift that trips
- * DEGRADED; 100 ms is generous (the #800 drift is the concern over a day, not a tick). */
-static constexpr int64_t GENLOCK_QPC_DRIFT_BOUND_MS = 100;
+ * and renders the verdict.
+ *
+ * camera-box #1299 Part 4: the qpc_drift term is a WINDOWED RATE + STEP, NOT the cumulative
+ * wall-vs-QPC offset. On a dantesync-disciplined box the wall clock legitimately runs at the
+ * grandmaster rate (f_ptp + f_phase ≈ +10..20 ppm) vs the free QPC crystal, so the cumulative
+ * st.wall_qpc_drift_ms grows unbounded (~50 ms/h) — the old `> 100 ms` gate crossed after ~2 h and
+ * false-paged the whole fleet overnight (38 pages 15./16.9.). We now DEGRADE only on a RATE off the
+ * dantesync-reported slew (GENLOCK_QPC_DRIFT_PPM_BOUND) or a single-sample STEP > one 30 fps frame
+ * (GENLOCK_QPC_STEP_BOUND_MS, the real genlock hazard); the pure decision is
+ * genlock_qpc_drift_beyond_bound in GenlockLockState.hpp. GENLOCK_QPC_WINDOW_S is long enough that
+ * the integer-ms cumulative drift resolves the rate (at 14 ppm the window accrues ≈ 4.2 ms). */
+static constexpr double GENLOCK_QPC_DRIFT_PPM_BOUND = 50.0;
+static constexpr int64_t GENLOCK_QPC_STEP_BOUND_MS = 33;
+static constexpr int GENLOCK_QPC_WINDOW_S = 300;
 
 /* camera-box #1303: the A/V pairing-offset bound that trips the audio DEGRADE term. An
  * audio-ENABLED genlock source whose |audio_pairing_offset_ms| (from obs_genlock_stats v2)
@@ -67,6 +78,7 @@ struct GenlockScan {
 	int n_absent = 0; /* #1299: of n_inputs, how many have NO live NDI receiver connection */
 	quint64 event_sum = 0;
 	int64_t max_abs_qpc_drift_ms = 0;
+	int64_t qpc_signed_ms = 0; /* #1299 Part 4: the SIGNED cumulative wall-vs-QPC drift (process-global, so every input reports the same value; last wins) — feeds the windowed-rate ring */
 	uint32_t min_latency_ms = 0;
 	uint32_t max_latency_ms = 0;
 	bool any_input = false;
@@ -99,6 +111,9 @@ bool genlock_scan_source(void *param, obs_source_t *source)
 	const int64_t d = st.wall_qpc_drift_ms < 0 ? -st.wall_qpc_drift_ms : st.wall_qpc_drift_ms;
 	if (d > scan->max_abs_qpc_drift_ms)
 		scan->max_abs_qpc_drift_ms = d;
+	/* #1299 Part 4: keep the SIGNED cumulative drift for the windowed rate (all inputs report the same
+	 * process-global value, so a plain assignment — last input wins — is correct). */
+	scan->qpc_signed_ms = st.wall_qpc_drift_ms;
 	if (!scan->any_input || st.latency_ms < scan->min_latency_ms)
 		scan->min_latency_ms = st.latency_ms;
 	if (!scan->any_input || st.latency_ms > scan->max_latency_ms)
@@ -264,15 +279,18 @@ std::string genlock_build_lock_json(const char *state_name, const char *reason_k
 				    int n_locked, int n_absent, uint32_t latency_ms, const char *clock_str,
 				    const char *output_str, bool recent_event,
 				    const char *recent_event_input_name, uint64_t recent_event_input_events,
-				    int64_t qpc_drift_ms, const char *audio_unexpected_input_name,
+				    int64_t qpc_drift_ms, double qpc_drift_ppm, double qpc_expected_ppm,
+				    int qpc_step, const char *audio_unexpected_input_name,
 				    const std::vector<GenlockInputRow> &inputs)
 {
 	/* #1299: schema v2 added top-level n_absent + per-input connected; Part 3 (v3) adds
 	 * recent_event_inputs (the top recent-event offender name+count). #1303 (v4) adds
-	 * audio_unexpected_inputs (a silent-by-contract source found audible). All additive: the
-	 * bundle-state parser defaults n_absent->None, connected->true, and OMITS recent_event_inputs /
-	 * audio_unexpected_inputs when absent/empty, so a v1/v2/v3 line from an older build reads cleanly. */
-	std::string j = "{\"v\":4,\"state\":";
+	 * audio_unexpected_inputs (a silent-by-contract source found audible). Part 4 (v5) adds the
+	 * report-only windowed-drift telemetry qpc_drift_ppm / qpc_expected_ppm / qpc_step at the END.
+	 * All additive: the bundle-state parser defaults n_absent->None, connected->true, the qpc_*_ppm
+	 * trio->None, and OMITS recent_event_inputs / audio_unexpected_inputs when absent/empty, so a
+	 * v1/v2/v3/v4 line from an older build reads cleanly. */
+	std::string j = "{\"v\":5,\"state\":";
 	genlock_json_append_escaped(j, state_name);
 	j += ",\"reason\":";
 	genlock_json_append_escaped(j, reason_key);
@@ -324,7 +342,13 @@ std::string genlock_build_lock_json(const char *state_name, const char *reason_k
 			 (unsigned long long)r.late_holds, r.depth);
 		j += num;
 	}
-	j += "]}";
+	j += "]";
+	/* #1299 Part 4 (v5): report-only windowed-drift telemetry at the END of the object. The qpc_drift
+	 * VERDICT keys on these (the RATE vs the dantesync-reported slew + a STEP), not the cumulative
+	 * qpc_drift_ms above (kept as raw telemetry). Additive: the parser defaults all three to None. */
+	snprintf(num, sizeof(num), ",\"qpc_drift_ppm\":%.3f,\"qpc_expected_ppm\":%.3f,\"qpc_step\":%s}",
+		 qpc_drift_ppm, qpc_expected_ppm, qpc_step ? "true" : "false");
+	j += num;
 	return j;
 }
 } // namespace
@@ -975,6 +999,12 @@ void OBSBasicStatusBar::PollGenlockClock()
 			return;
 		genlockClockLocked = obs_data_get_bool(d, "is_locked");
 		genlockClockNtpFailed = obs_data_get_bool(d, "ntp_failed");
+		/* #1299 Part 4: the slew the disciplined clock reports it is APPLYING to the wall clock vs the
+		 * free crystal (f_ptp servo freq + f_phase slew integral, ppm) — the EXPECTED wall-vs-QPC drift
+		 * rate the qpc_drift verdict compares the measured windowed rate against. Absent on an old
+		 * dantesync -> 0.0, which the wide 50 ppm bound tolerates (never a false degrade). */
+		genlockClockFptpPpm = obs_data_get_double(d, "f_ptp_ppm");
+		genlockClockFphasePpm = obs_data_get_double(d, "f_phase_ppm");
 		genlockClockLastOkMs = genlockClock.elapsed();
 		obs_data_release(d);
 	});
@@ -1036,12 +1066,48 @@ void OBSBasicStatusBar::UpdateGenlockLabel()
 	/* clock present iff a successful :8898 poll landed within the last 3 s. */
 	const bool clock_present = genlockClockLastOkMs >= 0 && (now_ms - genlockClockLastOkMs) < 3000;
 
+	/* #1299 Part 4: the windowed wall-vs-QPC drift verdict. Push this tick's SIGNED cumulative drift +
+	 * monotonic timestamp; prune the ring to GENLOCK_QPC_WINDOW_S. Derive the drift delta + elapsed
+	 * span across the window and the largest single-sample STEP within it, and ask the parity-gated
+	 * pure decision whether that is a genuine hazard (a rate off the dantesync-reported slew, or a
+	 * step). A steady slew on a disciplined clock is by design and no longer pages. */
+	const double qpc_expected_ppm = clock_present ? (genlockClockFptpPpm + genlockClockFphasePpm) : 0.0;
+	if (scan.any_input)
+		genlockQpcHistory.emplace_back(now_ms, scan.qpc_signed_ms);
+	while (genlockQpcHistory.size() > 1 &&
+	       now_ms - genlockQpcHistory.front().first > (qint64)GENLOCK_QPC_WINDOW_S * 1000)
+		genlockQpcHistory.pop_front();
+	long long qpc_delta_ms = 0, qpc_elapsed_ms = 0, qpc_max_step_ms = 0;
+	int qpc_rate_ready = 0;
+	if (scan.any_input && genlockQpcHistory.size() >= 2) {
+		const auto &oldest = genlockQpcHistory.front();
+		const auto &newest = genlockQpcHistory.back();
+		qpc_elapsed_ms = (long long)(newest.first - oldest.first);
+		qpc_delta_ms = (long long)(newest.second - oldest.second);
+		/* the rate needs the window ~filled (90%) so the integer-ms delta has usable resolution. */
+		qpc_rate_ready = qpc_elapsed_ms >= (long long)GENLOCK_QPC_WINDOW_S * 1000 * 9 / 10 ? 1 : 0;
+		int64_t prev = genlockQpcHistory.front().second;
+		for (const auto &sample : genlockQpcHistory) {
+			int64_t jump = sample.second - prev;
+			if (jump < 0)
+				jump = -jump;
+			if (jump > qpc_max_step_ms)
+				qpc_max_step_ms = jump;
+			prev = sample.second;
+		}
+	}
+	double qpc_measured_ppm = 0.0;
+	const int qpc_beyond = genlock_qpc_drift_beyond_bound(
+		qpc_rate_ready, qpc_delta_ms, qpc_elapsed_ms, qpc_expected_ppm, GENLOCK_QPC_DRIFT_PPM_BOUND,
+		qpc_max_step_ms, GENLOCK_QPC_STEP_BOUND_MS, &qpc_measured_ppm);
+	const bool qpc_step = qpc_max_step_ms > GENLOCK_QPC_STEP_BOUND_MS;
+
 	genlock_lock_facets_t f;
 	f.n_inputs = scan.n_inputs;
 	f.n_locked = scan.n_locked;
 	f.n_absent = scan.n_absent;
 	f.recent_event = recent_event ? 1 : 0;
-	f.qpc_drift_beyond_bound = scan.max_abs_qpc_drift_ms > GENLOCK_QPC_DRIFT_BOUND_MS ? 1 : 0;
+	f.qpc_drift_beyond_bound = qpc_beyond;
 	f.clock_present = clock_present ? 1 : 0;
 	f.clock_locked = (clock_present && genlockClockLocked) ? 1 : 0;
 	f.clock_ntp_failed = (clock_present && genlockClockNtpFailed) ? 1 : 0;
@@ -1092,7 +1158,13 @@ void OBSBasicStatusBar::UpdateGenlockLabel()
 		reasonText = "clock NTP failed";
 		break;
 	case GENLOCK_LOCK_REASON_QPC_DRIFT:
-		reasonText = QString("clock drift %1 ms").arg(scan.max_abs_qpc_drift_ms);
+		/* #1299 Part 4: the verdict now keys on the RATE vs the reported slew (or a STEP), so the
+		 * label shows the measured/expected rate — not the unbounded cumulative offset. */
+		reasonText = qpc_step
+				     ? QString("clock step %1 ms").arg(qpc_max_step_ms)
+				     : QString("clock rate %1 ppm (exp %2)")
+					       .arg(qpc_measured_ppm, 0, 'f', 1)
+					       .arg(qpc_expected_ppm, 0, 'f', 1);
 		break;
 	case GENLOCK_LOCK_REASON_AUDIO_PAIRING:
 		if (!scan.audio_unpaired_names.empty()) {
@@ -1198,7 +1270,7 @@ void OBSBasicStatusBar::UpdateGenlockLabel()
 			!clock_present ? "absent" : (f.clock_locked ? "locked" : "unlocked"),
 			!out.present ? "absent" : (out.stamping ? "stamping" : "not-stamping"), recent_event,
 			has_offender ? recent_event_input_name.c_str() : nullptr, recent_event_input_events,
-			scan.max_abs_qpc_drift_ms,
+			scan.max_abs_qpc_drift_ms, qpc_measured_ppm, qpc_expected_ppm, qpc_step ? 1 : 0,
 			scan.audio_unexpected_names.empty() ? nullptr : scan.audio_unexpected_names.front().c_str(),
 			scan.inputs);
 		blog(LOG_INFO, "genlock-lock-json: %s (#1299)", gl_json.c_str());

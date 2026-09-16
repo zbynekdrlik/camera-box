@@ -71,7 +71,9 @@ BUNDLE_PORT="${BUNDLE_STATE_BUNDLE_PORT:-8899}"       # the bundle-state HTTP se
 BUNDLE_PATH="${BUNDLE_STATE_BUNDLE_PATH:-/bundle-state.json}"
 # Reference rig nodes that share the rig's network fate (cam1 cam2 imag-nb) -- the dev1-side-outage
 # anchor. If NONE answer AND no watched box is reachable, dev1's own path to the rig subnet is down.
-REFERENCE_HOSTS="${BUNDLE_STATE_REFERENCE_HOSTS:-10.77.9.61 10.77.9.62 10.77.9.182}"
+# issue 1316: 10.77.9.182 (imag-nb) DROPPED — returned to the owner (dark); a permanently-dead
+# reference anchor weakens the dev1-outage guard. The two cams remain as live anchors.
+REFERENCE_HOSTS="${BUNDLE_STATE_REFERENCE_HOSTS:-10.77.9.61 10.77.9.62}"
 
 PING_COUNT="${BUNDLE_STATE_PING_COUNT:-2}"
 PING_TIMEOUT="${BUNDLE_STATE_PING_TIMEOUT:-2}"        # per-packet wait (s); generous for a mobile link

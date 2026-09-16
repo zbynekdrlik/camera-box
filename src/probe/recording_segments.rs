@@ -2433,7 +2433,7 @@ mod tests {
                 frame_index: 102,
                 gen_ts_ns: 1300,
                 tick: Some(500),
-            }, // copy #2 -- over the (now-dormant) singleton allowance, within the <=3 tolerance
+            }, // copy #2 -- over the (now-dormant) singleton allowance, within the tolerance (2 after the issue-1242 walk-back)
             SegmentFrame {
                 frame_index: 103,
                 gen_ts_ns: 1400,

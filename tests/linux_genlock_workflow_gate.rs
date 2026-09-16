@@ -38,11 +38,17 @@ fn both_jobs_run_on_ubuntu_24_04() {
         wf.contains("linux-genlock-build:"),
         "#460: {WF} must define the linux-genlock-build job — the full production bundle."
     );
+    // issue 1317: the strih-lx variant is the THIRD job (a full bundle with browser/CEF ON for
+    // the Linux strih notebook, also Ubuntu 24.04 noble) — every job pins the same runner image.
+    assert!(
+        wf.contains("linux-genlock-build-strih:"),
+        "issue 1317: {WF} must define the linux-genlock-build-strih job — the strih-lx full bundle."
+    );
     assert_eq!(
         wf.matches("runs-on: ubuntu-24.04").count(),
-        2,
-        "#460: both jobs must pin runs-on: ubuntu-24.04 (imag-nb's own distro, noble) — a \
-         different Ubuntu version risks a glibc/ABI mismatch against the deploy target."
+        3,
+        "#460/1317: all three jobs must pin runs-on: ubuntu-24.04 (the imag-nb + strih-lx distro, \
+         noble) — a different Ubuntu version risks a glibc/ABI mismatch against the deploy target."
     );
 }
 
@@ -66,34 +72,38 @@ fn full_build_depends_on_the_compile_check() {
 #[test]
 fn distroav_configured_against_installed_obs_sdk() {
     let wf = read(WF);
+    // issue 1317: the strih-lx full bundle is the THIRD job that builds DistroAV against its own
+    // installed OBS SDK prefix, so every count below is 3 (compile-check + imag-parity + strih).
     assert_eq!(
         wf.matches("--component Development").count(),
-        2,
-        "#460: both jobs must `cmake --install ... --component Development` (the #392 trick) — \
-         without it, libobsConfig.cmake / obs-frontend-apiConfig.cmake never land in the SDK \
-         prefix and DistroAV's find_package(libobs REQUIRED) fails to resolve."
+        3,
+        "#460/1317: all three jobs must `cmake --install ... --component Development` (the #392 \
+         trick) — without it, libobsConfig.cmake / obs-frontend-apiConfig.cmake never land in the \
+         SDK prefix and DistroAV's find_package(libobs REQUIRED) fails to resolve."
     );
     assert_eq!(
         wf.matches("CMAKE_PREFIX_PATH").count(),
-        2,
-        "#460: both DistroAV configure steps must set -DCMAKE_PREFIX_PATH=<installed OBS SDK> \
-         so DistroAV links against the genlock-patched libobs, not a system OBS."
+        3,
+        "#460/1317: all three DistroAV configure steps must set -DCMAKE_PREFIX_PATH=<installed OBS \
+         SDK> so DistroAV links against the genlock-patched libobs, not a system OBS."
     );
 }
 
-/// Browser/CEF must stay OFF — imag-nb needs no browser source, and CEF is the dominant time
-/// cost on the Windows builds; skipping it entirely on Linux (no obs-deps prebuilt bundle
-/// download either) is the whole reason this workflow can run on every push instead of being
-/// workflow_dispatch-only like the 150-min windows-genlock.yml.
+/// Browser/CEF stays OFF in the compile-check lane AND the imag-parity full bundle — imag-nb needs
+/// no browser source, and skipping CEF there keeps those two jobs fast (runnable on every push, not
+/// workflow_dispatch-only like the 150-min windows-genlock.yml). The strih variant
+/// (linux-genlock-build-strih) DELIBERATELY enables browser + fetches CEF as of issue 1317 — its ON
+/// coverage lives in tests/python/test_linux_genlock_strih_cef_1317.py. The count stays 2 because the
+/// strih configure uses the `${{ env.STRIH_ENABLE_BROWSER }}` form, not a literal `-DENABLE_BROWSER=OFF`.
 #[test]
 fn browser_disabled_in_both_jobs() {
     let wf = read(WF);
     assert_eq!(
         wf.matches("-DENABLE_BROWSER=OFF").count(),
         2,
-        "#460: both OBS configure steps must pass -DENABLE_BROWSER=OFF — CEF is the dominant \
-         cost on the Windows builds and imag-nb needs no browser source. Keep it off in both \
-         the compile-check lane and the full bundle."
+        "#460/#1317: the compile-check lane and the imag-parity full bundle must each pass \
+         -DENABLE_BROWSER=OFF (imag-nb needs no browser source). The strih variant is \
+         intentionally ON via the env-var form and is covered by the 1317 python tests."
     );
 }
 

@@ -300,10 +300,14 @@ pub fn gates_overall_pass() -> bool {
 ///
 /// The floor is CONSERVATIVE. #1142 read the sick fleet at 0.67-0.78 on `derived_uniform_fraction`
 /// and RED'd it by design; #1250 (below) then showed most of that depression was a benign
-/// sampling-phase BEAT (balanced 1↔3 net-zero pairs), so the gate now reads
-/// `beat_corrected_uniform_fraction` (typical windows 0.92-0.99; the GATED worst window is 0.916 /
-/// 0.947 on the two mined runs — PASS with ~0.016 margin) and REDs only GENUINE
-/// non-uniformity beyond the beat. A healthy 60fps-through-30fps chain reads ~1.0.
+/// sampling-phase BEAT (balanced 1↔3 net-zero pairs), so the gate reads
+/// `beat_corrected_uniform_fraction` and REDs only GENUINE non-uniformity beyond the beat. A
+/// healthy 60fps-through-30fps chain reads ~1.0. (The pre-#1250 mined runs read beat-corrected
+/// worst 0.916/0.947 at the THEN-0.90 floor; those runs were on PRE-render-freeze-fix bundles, and
+/// issue 1242 RESTORED the floor to 0.95, above which those specific 0.916/0.947 readings now RED —
+/// the POST-fix rig reads beat-corrected worst ~0.998, see `UNIFORM_FRACTION_MIN`'s own doc. If a
+/// genuinely-clean POST-fix window ever proves to dip below 0.95, the guard rail is the one-line
+/// report-only revert `uniformity_gates_overall_pass() -> false`.)
 ///
 /// #1243 (walk-back: issue 1242): floor WALKED 0.95 -> 0.93 -> 0.90 (two steps, same ticket).
 /// Step 1: run 1629895310 (the FIRST complete 7-cam post-fix verdict, dev 45a856945) had worst
@@ -326,15 +330,34 @@ pub fn gates_overall_pass() -> bool {
 /// complementary steps (1↔3 around the mode 2) that net to zero, but `derived` counts each 1 and 3
 /// as non-uniform, dropping to 0.57–0.92 on a chain with copies==0/gaps==0 (run 1326320314; the
 /// "sick 0.67–0.78" numbers above were mostly this beat, not FIFO churn). `beat_corrected_uniform_
-/// fraction` collapses those balanced pairs back to uniform (see the field doc), so the current rig's
-/// GATED worst window reads 0.916 / 0.947 on the two mined runs (typical windows 0.92-0.99) and
-/// PASSES — the floor now catches GENUINE non-uniformity (real churn/judder beyond the benign beat),
-/// not the measurement beat. The block surfaces ALL THREE
+/// fraction` collapses those balanced pairs back to uniform (see the field doc). On the PRE-fix
+/// mined runs the beat-corrected worst read 0.916 / 0.947, which PASSED at the THEN-0.90 floor; but
+/// those runs were on PRE-render-freeze-fix bundles (the churn issues 1318/1320 fixed co-depressed
+/// their windows), so issue 1242 RESTORED the floor to 0.95 (above 0.916/0.947 — they now RED)
+/// against the POST-fix rig which reads beat-corrected worst ~0.998. The floor now catches GENUINE
+/// non-uniformity (real churn/judder beyond the benign beat), not the measurement beat. The block
+/// surfaces ALL THREE
 /// (`worst_uniform_fraction` = beat-corrected gated, `worst_derived_uniform_fraction` +
 /// `worst_raw_uniform_fraction` diagnostics), so reverting to `derived` is a one-line consumer
-/// change. issue 1242 (restore 0.95) is still the tightening trail once the residual real churn is
-/// characterized on the beat-corrected reading.
-pub const UNIFORM_FRACTION_MIN: f64 = 0.90;
+/// change.
+///
+/// **RESTORED 0.90 -> 0.95 on 2026-09-16 (issue 1242, the walk-back ticket).** Issues 1318/1320
+/// root-caused + fixed the strih render-freeze churn source (cure = genlock bundle `02b53180b`),
+/// so the residual real churn is now characterized on the BEAT-CORRECTED reading. Data-first
+/// (mining tool `scripts/window_gate_walkdown.py`, segregated by the rig-verified
+/// `version-strih.json.genlock_build_sha`): the ONLY run on the cure bundle -- 180691712,
+/// `02b53180b` -- reads worst beat-corrected uniformity 0.9988 (post-fix sample is n=1), and clean
+/// runs on ADJACENT pre-cure bundles (494687603 `c4b16074c`, 241316104 / 1651388579 `d55afb726`)
+/// read 0.9976 -- so no observed clean run sits below 0.9976, while the pre-fix churny run
+/// (25635487) at 0.9481 correctly REDs. 0.95 clears every observed clean window with ~0.05 margin;
+/// the n=1 post-fix thinness is guarded by the one-line report-only revert
+/// (`uniformity_gates_overall_pass() -> false`) if a genuinely-clean post-fix window ever dips below
+/// it -- the SAME data-thin discipline the copies/gaps interim step carries. 0.95 is the original
+/// ship value
+/// (the walk 0.95 -> 0.93 -> 0.90 on issue 1243 fully reversed); a future tighten below 0.95 is
+/// out of scope here (would be widening past the ship value). Gated on the beat-corrected field,
+/// unchanged (#1250).
+pub const UNIFORM_FRACTION_MIN: f64 = 0.95;
 
 /// Does the run's WORST (minimum) per-window uniformity satisfy the [`UNIFORM_FRACTION_MIN`] FLOOR?
 /// `worst_uniform_fraction` is the MIN [`CadenceEvenness::beat_corrected_uniform_fraction`] across
@@ -755,36 +778,39 @@ mod tests {
     // residual FIFO churn and restores 0.95.
 
     #[test]
-    fn uniformity_floor_constant_is_the_walked_back_090() {
-        // #1243 relax-to-green (walk-back: issue 1242), second walk step: 0.93 -> 0.90, keeping
-        // margin under BOTH observed steady-rig runs' minimums (0.9397, 0.9221). RED before the
+    fn uniformity_floor_constant_is_the_restored_095() {
+        // Issue 1242 walk-back: RESTORED 0.90 -> 0.95 (the original ship value; the #1243 walk
+        // 0.95 -> 0.93 -> 0.90 fully reversed) after issues 1318/1320 fixed the render-freeze churn
+        // source. Post-fix run 180691712 reads beat-corrected worst 0.9988 (adjacent clean runs
+        // 0.9976), so 0.95 passes every clean run with ~0.05 margin. RED before the
         // source change, GREEN after.
-        assert_eq!(UNIFORM_FRACTION_MIN, 0.90);
+        assert_eq!(UNIFORM_FRACTION_MIN, 0.95);
     }
 
     #[test]
-    fn run_1629895310_worst_uniformity_passes_the_walked_back_090_floor() {
+    fn run_1629895310_worst_uniformity_now_fails_the_restored_095_floor() {
         // #1243 data-first (walk-back: issue 1242): the FIRST complete 7-cam post-fix verdict
-        // (run 1629895310, dev 45a856945) had worst derived_uniform_fraction 0.9397163 — the ONLY
-        // blocking gate that RED'd the run. The walked-back 0.90 floor lets it PASS while the sick
-        // 0.67-0.78 band still FAILS (see `sick_rig_uniformity_070_fails_the_floor`). RED before
-        // the 0.93 -> 0.90 source change, GREEN after.
+        // (run 1629895310, dev 45a856945) had `worst_uniform_fraction` 0.9397163 (verdict on disk),
+        // a PRE-fix run from the walk-down era. After issue 1242 RESTORED the floor to 0.95, this
+        // churny run's worst uniformity correctly REDs (0.9397 < 0.95): the restore catches the
+        // churn the walk-down tolerated, while a healthy post-fix chain (>= 0.9976) passes. Was RED
+        // before the 0.90 -> 0.95 restore's source change, GREEN after.
         assert!(
-            cadence_uniformity_gate_pass(Some(0.9397163120567376), Some(UNIFORM_FRACTION_MIN)),
-            "run 1629895310 worst uniformity (0.9397) must PASS the walked-back {UNIFORM_FRACTION_MIN} floor"
+            !cadence_uniformity_gate_pass(Some(0.9397163120567376), Some(UNIFORM_FRACTION_MIN)),
+            "run 1629895310 worst uniformity (0.9397) must now FAIL the restored {UNIFORM_FRACTION_MIN} floor"
         );
     }
 
     #[test]
-    fn run_1230380558_worst_uniformity_passes_the_walked_back_090_floor() {
-        // #1243 data-first (walk-back: issue 1242), second walk step: the SECOND complete 7-cam
-        // post-fix verdict (run 1230380558, dev 5b997e670) had worst derived_uniform_fraction
-        // 0.922077922077922 (~0.9221) — BELOW the 0.93 floor, the trigger for this second walk.
-        // The 0.90 floor lets it PASS while the sick 0.67-0.78 band still FAILS. RED before the
-        // 0.93 -> 0.90 source change, GREEN after.
+    fn run_1230380558_worst_uniformity_now_fails_the_restored_095_floor() {
+        // Issue 1242 data-first: the SECOND complete 7-cam walk-down-era verdict (run 1230380558,
+        // dev 5b997e670) had `worst_uniform_fraction` 0.922077922077922 (~0.9221, verdict on disk),
+        // a PRE-fix churny run. After the floor RESTORED 0.90 -> 0.95 it correctly REDs
+        // (0.9221 < 0.95) — the restore catches the churn the walk-down tolerated. Was RED before
+        // the restore's source change, GREEN after.
         assert!(
-            cadence_uniformity_gate_pass(Some(0.922077922077922), Some(UNIFORM_FRACTION_MIN)),
-            "run 1230380558 worst uniformity (0.9221) must PASS the walked-back {UNIFORM_FRACTION_MIN} floor"
+            !cadence_uniformity_gate_pass(Some(0.922077922077922), Some(UNIFORM_FRACTION_MIN)),
+            "run 1230380558 worst uniformity (0.9221) must now FAIL the restored {UNIFORM_FRACTION_MIN} floor"
         );
     }
 
@@ -808,11 +834,13 @@ mod tests {
 
     #[test]
     fn sick_rig_uniformity_070_fails_the_floor() {
-        // The load-bearing intent: a GENUINELY non-uniform window (~0.67-0.78) must FAIL the 0.90
-        // floor (#1243 walk-back: issue 1242, second walk step). NOTE (#1250): these 0.67-0.78
+        // The load-bearing intent: a GENUINELY non-uniform window (~0.67-0.78) must FAIL the floor
+        // (restored to 0.95 by issue 1242). NOTE (#1250): these 0.67-0.78
         // numbers were the DERIVED reading of the sick rig, which #1250 showed was mostly a benign
-        // sampling-phase beat (the BEAT-CORRECTED gated worst of that same rig is 0.916/0.947 and PASSES).
-        // The gate now reads `beat_corrected_uniform_fraction`, so a value this low means genuine
+        // sampling-phase beat (the BEAT-CORRECTED gated worst of those PRE-render-freeze-fix runs was
+        // 0.916/0.947 — which PASSED at the then-0.90 floor but now RED at the restored 0.95; the
+        // POST-fix rig reads ~0.998). The gate reads `beat_corrected_uniform_fraction`, so a value
+        // this low (0.67) means genuine
         // non-uniformity beyond the beat (real churn/judder). This is a pure FUNCTION test — the
         // gate compares whatever fraction it is fed against the floor, field-agnostic — so a 0.67
         // input must still FAIL regardless of which field produced it.
@@ -845,13 +873,14 @@ mod tests {
 
     #[test]
     fn uniformity_boundary_at_floor_passes_just_under_fails() {
-        // #1243 (walk-back: issue 1242), second walk step — boundary walked to the new 0.90 floor.
+        // Issue 1242: boundary at the RESTORED 0.95 floor (`>=` mechanic; the arg floor is an
+        // explicit literal, independent of UNIFORM_FRACTION_MIN's value).
         assert!(
-            cadence_uniformity_gate_pass(Some(0.90), Some(0.90)),
+            cadence_uniformity_gate_pass(Some(0.95), Some(0.95)),
             "exactly at the floor passes (>=)"
         );
         assert!(
-            !cadence_uniformity_gate_pass(Some(0.8999), Some(0.90)),
+            !cadence_uniformity_gate_pass(Some(0.9499), Some(0.95)),
             "just under the floor fails"
         );
     }

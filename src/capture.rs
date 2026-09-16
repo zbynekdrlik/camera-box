@@ -309,16 +309,20 @@ pub fn is_color_frame(u_dev: f32, v_dev: f32) -> bool {
 /// frame is more likely UNSTRUCTURED noise (an Elgato-class no-signal purple-noise
 /// render) than a real picture.
 ///
-/// UNCALIBRATED / REPORT-ONLY (#1079). This constant is the calibratable home for the
-/// dormant [`is_likely_noise`] classifier; nothing live pages or gates on it yet. A real
-/// picture (church scene, QR/Vernier test pattern) has strongly correlated neighbouring
-/// pixels → low roughness (typ. <15); uncorrelated coloured static → high roughness
-/// (typ. 40+ on the 16-235 video luma range). The provisional value is deliberately
-/// conservative and mid-band; a data-first follow-up walks it against fleet `rough=`
-/// telemetry before it is ever wired into a live page/gate (the #905 "keep the mechanism
-/// dormant, not deleted" discipline). `pub` for the same reason as [`CHROMA_SAMPLE_FRAMES`]
-/// — the `camera-box` binary is a SEPARATE crate that reads it.
-pub const NOISE_ROUGHNESS_THRESHOLD: f32 = 30.0;
+/// CALIBRATED (issue 1099) from mined fleet telemetry, but the live page stays REPORT-ONLY.
+/// A real picture (church scene, QR/Vernier test pattern) has strongly correlated neighbouring
+/// pixels → low roughness; uncorrelated coloured static → high roughness (analytic floor
+/// ≈73 on the 16-235 video luma range, `E[|Y0−Y1|]=(235−16)/3`). The value is set from the
+/// MEASURED healthy side (16.9.2026, ~38.1k live COLOUR samples across all 7 camboxes: fleet
+/// healthy-colour p99 = 18.5, max = 22.5, grayscale ≤ 14.7) — 40.0 clears 2× the healthy p99
+/// AND the healthy max (by 1.78×) while sitting well below the noise floor. The purple-noise
+/// POSITIVE CLASS is still absent from live data, so the dev1 watchdog SURFACES the derived
+/// PURPLE_NOISE verdict REPORT-ONLY (never a page); arming the page is deferred until a real
+/// Elgato no-signal `rough=` measures the noise floor + adds the sibling self-anchor (the #905
+/// "keep the mechanism dormant, not deleted" discipline, now wired report-only). `pub` for the
+/// same reason as [`CHROMA_SAMPLE_FRAMES`] — the `camera-box` binary is a SEPARATE crate that
+/// reads it, and `scripts/splitter-port-alert-watchdog.sh` mirrors the value for the dev1 gate.
+pub const NOISE_ROUGHNESS_THRESHOLD: f32 = 40.0;
 
 /// Compute the mean adjacent-pixel luma difference ("spatial roughness") over a
 /// subsampled YUYV422 frame — the per-frame STRUCTURE metric that separates a real
@@ -2670,6 +2674,47 @@ mod tests {
         assert!(
             is_likely_noise(6.0, 9.0, NOISE_ROUGHNESS_THRESHOLD + 0.01),
             "just above the roughness threshold must be noise"
+        );
+    }
+
+    #[test]
+    fn noise_roughness_threshold_calibrated_1099() {
+        // #1099 phase-2 calibration from mined fleet telemetry (16.9.2026, ~38.1k live COLOUR
+        // `capture chroma:` samples across all 7 camboxes' own journals). The healthy side is
+        // measured; the purple-noise POSITIVE CLASS is absent (0 colour samples >= 25), so the
+        // threshold is calibrated from the measured healthy ceiling + the analytic noise floor and
+        // stays REPORT-ONLY. It must sit in the clean gap between the two classes:
+        //   fleet healthy COLOUR roughness: p99 = 18.5, max = 22.5 (grayscale <= 14.7),
+        //   analytic uncorrelated-luma noise floor ~= 73 = (235-16)/3 = E[|Y0-Y1|] over 16-235.
+        const FLEET_HEALTHY_COLOUR_P99: f32 = 18.5;
+        const FLEET_HEALTHY_COLOUR_MAX: f32 = 22.5;
+        const ANALYTIC_NOISE_FLOOR: f32 = 73.0;
+        // Both sides are `const`, so these three margins are compile-time assertions (the
+        // capture_rate_health.rs / painter_wedge.rs pattern -- a runtime `assert!` on constants
+        // trips clippy::assertions_on_constants under `-D warnings`).
+        // (a) >= 2x the healthy p99 — a data-first separation margin (the calibration guideline).
+        const _: () = assert!(
+            NOISE_ROUGHNESS_THRESHOLD >= 2.0 * FLEET_HEALTHY_COLOUR_P99,
+            "NOISE_ROUGHNESS_THRESHOLD must clear 2x the fleet healthy colour p99"
+        );
+        // (b) above the measured healthy colour max, with margin.
+        const _: () = assert!(
+            NOISE_ROUGHNESS_THRESHOLD > FLEET_HEALTHY_COLOUR_MAX,
+            "NOISE_ROUGHNESS_THRESHOLD must exceed the measured fleet healthy colour max"
+        );
+        // (c) well below the analytic noise floor, so genuine structureless static is still caught.
+        const _: () = assert!(
+            NOISE_ROUGHNESS_THRESHOLD < ANALYTIC_NOISE_FLOOR,
+            "NOISE_ROUGHNESS_THRESHOLD must stay below the analytic uncorrelated-luma noise floor"
+        );
+        // the measured healthy max must NOT read as noise; a structureless colour sample must.
+        assert!(
+            !is_likely_noise(1.9, 3.4, FLEET_HEALTHY_COLOUR_MAX),
+            "the measured healthy colour max must not classify as noise"
+        );
+        assert!(
+            is_likely_noise(6.0, 9.0, 45.0),
+            "a structureless colour sample (rough=45) must classify as noise"
         );
     }
 }

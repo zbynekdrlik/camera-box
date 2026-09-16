@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import argparse
 import html
+import importlib.util
 import json
 import os
 import re
@@ -49,6 +50,21 @@ from datetime import datetime, timezone
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO_ROOT = os.path.dirname(HERE)
 AUDIT = os.path.join(HERE, "rig-health-audit.py")
+
+
+def _load_audit_constant(name):
+    """Single-source a constant from rig-health-audit.py (the ONE data source) via importlib, so
+    this renderer never retypes a token the audit emits (issue 1316 -- the neutral RETIRED verdict)
+    and can never drift from it. The audit module imports only stdlib and runs nothing at import."""
+    spec = importlib.util.spec_from_file_location("_rig_health_audit_const", AUDIT)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return getattr(mod, name)
+
+
+# The neutral verdict the audit emits for a returned/absent node (imag-nb, issue 1316): rendered as
+# its own grey badge, counted in neither PASS/WARN/FAIL nor the page's overall verdict.
+RETIRED_VERDICT = _load_audit_constant("IMAG_RETIRED_VERDICT")
 THROTTLE_LIB = os.path.join(HERE, "lib", "obs-watchdog-decision.sh")
 DEFAULT_DIR = os.path.expanduser("~/.camera-box/rig-status")
 NOTIFY = os.environ.get("AIRULESET_NOTIFY", os.path.expanduser("~/devel/airuleset/airuleset.py"))
@@ -62,12 +78,19 @@ ALERT_THROTTLE_PASSES = int(os.environ.get("RIG_STATUS_ALERT_THROTTLE_PASSES", "
 # crash (see _run_audit) -- and the systemd unit's TimeoutStartSec is sized above this.
 AUDIT_TIMEOUT_S = int(os.environ.get("RIG_STATUS_AUDIT_TIMEOUT_S", "300"))
 
-_NODE_RE = re.compile(r"^\[(PASS|WARN|FAIL)\]\s+(\S+)\s+(.*)$")
+# PASS/WARN/FAIL are the health tiers; RETIRED_VERDICT is the neutral tier (issue 1316), admitted
+# here so a returned node's row is SURFACED (not dropped) and rendered as a grey neutral badge.
+_NODE_RE = re.compile(
+    r"^\[(" + "|".join(re.escape(v) for v in ("PASS", "WARN", "FAIL", RETIRED_VERDICT))
+    + r")\]\s+(\S+)\s+(.*)$")
 _PROBLEMS_RE = re.compile(r"\s*<<(.*)>>\s*$")
 _FACET_BRACKET_RE = re.compile(r"^([A-Za-z_]\w*)\[(.*)\]$")          # arrivals[...] / cadence[...]
 _FACET_KV_RE = re.compile(r"^([A-Za-z_]\w*)=(.*)$")                  # key=value
 
-_BADGE_ORDER = {"FAIL": 0, "WARN": 1, "PASS": 2}
+_BADGE_ORDER = {"FAIL": 0, "WARN": 1, "PASS": 2, RETIRED_VERDICT: 3}  # retired sorts last (neutral)
+# The human badge text per verdict: the neutral RETIRED token shows a grey Slovak label (issue
+# 1316); the health tiers show their own name. Keyed by verdict token.
+_BADGE_LABEL = {RETIRED_VERDICT: "VRÁTENÝ"}
 
 
 # --------------------------------------------------------------------------- pure: parse + derive
@@ -107,7 +130,11 @@ def summarize(records):
     """PASS/WARN/FAIL counts + the overall verdict (FAIL if any FAIL, else WARN if any WARN)."""
     counts = {"pass": 0, "warn": 0, "fail": 0}
     for r in records:
-        counts[r["verdict"].lower()] += 1
+        # Neutral verdicts (RETIRED, issue 1316) are visible rows but NOT health tiers -- they
+        # never contribute to pass/warn/fail nor the overall verdict.
+        v = r["verdict"].lower()
+        if v in counts:
+            counts[v] += 1
     overall = "FAIL" if counts["fail"] else ("WARN" if counts["warn"] else "PASS")
     return {"pass": counts["pass"], "warn": counts["warn"], "fail": counts["fail"],
             "overall": overall}
@@ -128,7 +155,13 @@ def overall_state(records, exit_code=None):
         return "ERROR"
     if exit_code is not None and exit_code not in (0, 1, 2):
         return "ERROR"
-    return summarize(records)["overall"]
+    s = summarize(records)
+    # Neutral rows (RETIRED) are not proof of health: a records-set with ZERO real PASS/WARN/FAIL
+    # tiers must not paint a green "all healthy" banner (issue 1316 -- the same false-green guard
+    # the empty-records case above enforces, the whole point of this page).
+    if s["pass"] + s["warn"] + s["fail"] == 0:
+        return "ERROR"
+    return s["overall"]
 
 
 def alert_condition(records, exit_code=None):
@@ -138,6 +171,13 @@ def alert_condition(records, exit_code=None):
     exact 'tiché unknown' the rig-degradation-alert rule forbids."""
     if not records or (exit_code is not None and exit_code not in (0, 1, 2)):
         return f"prober-down:exit{exit_code}"
+    # Records present but ZERO real PASS/WARN/FAIL tiers (only neutral rows, e.g. RETIRED) is not
+    # health data -- it must PAGE, mirroring overall_state's ERROR (issue 1316: no-data must scream,
+    # never a silent status page over a neutral-only sweep). A real fleet always carries PASS rows,
+    # so this fires only on a genuinely broken/neutral-only audit.
+    s = summarize(records)
+    if s["pass"] + s["warn"] + s["fail"] == 0:
+        return f"prober-down:no-health-tiers:exit{exit_code}"
     fails = alert_signature(records)
     return f"fail:{fails}" if fails else ""
 
@@ -171,9 +211,9 @@ def render_json(records, version, generated_at, history=None, exit_code=None):
 
 _STYLE = """<style>
 :root{color-scheme:light dark;--bg:#f6f7f9;--fg:#1a1c1e;--card:#fff;--line:#d7dade;
---pass-fg:#0f6b28;--pass-bg:#e6f4ea;--warn-fg:#8a5a00;--warn-bg:#fff4e0;--fail-fg:#b3261e;--fail-bg:#fce8e6;--muted:#5a6067}
+--pass-fg:#0f6b28;--pass-bg:#e6f4ea;--warn-fg:#8a5a00;--warn-bg:#fff4e0;--fail-fg:#b3261e;--fail-bg:#fce8e6;--retired-fg:#5a6470;--retired-bg:#eceef0;--muted:#5a6067}
 @media (prefers-color-scheme:dark){:root{--bg:#16181b;--fg:#e6e8ea;--card:#22262b;--line:#343a41;
---pass-bg:#0f2a17;--warn-bg:#2c2208;--fail-bg:#2c1210;--muted:#9aa2ab}}
+--pass-bg:#0f2a17;--warn-bg:#2c2208;--fail-bg:#2c1210;--retired-fg:#9aa2ab;--retired-bg:#24282d;--muted:#9aa2ab}}
 *{box-sizing:border-box}
 body{margin:0;padding:1.4rem;background:var(--bg);color:var(--fg);
 font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;line-height:1.4}
@@ -185,6 +225,7 @@ h1{margin:0;font-size:1.35rem}h2{font-size:1.05rem;margin:1.6rem 0 .5rem}
 .b-WARN{background:var(--warn-bg);color:var(--warn-fg)}
 .b-FAIL{background:var(--fail-bg);color:var(--fail-fg)}
 .b-ERROR{background:var(--fail-bg);color:var(--fail-fg)}
+.b-RETIRED{background:var(--retired-bg);color:var(--retired-fg)}
 table{width:100%;border-collapse:collapse;background:var(--card);border:1px solid var(--line);
 border-radius:.5rem;overflow:hidden;font-size:.9rem}
 th,td{text-align:left;padding:.5rem .7rem;border-bottom:1px solid var(--line);vertical-align:top}
@@ -216,7 +257,8 @@ def _node_row(r):
         else:
             chips.append(f'<span class="chip"><b>{_esc(f["key"])}</b> {_esc(f["value"])}</span>')
     probs = f'<div class="problems">{_esc(r["problems"])}</div>' if r["problems"] else ""
-    return (f'<tr class="v-{vb}"><td class="badge b-{vb}">{vb}</td>'
+    label = _BADGE_LABEL.get(vb, vb)
+    return (f'<tr class="v-{vb}"><td class="badge b-{vb}">{_esc(label)}</td>'
             f'<td class="node">{_esc(r["node"])}</td>'
             f'<td class="facets">{"".join(chips)}{probs}</td></tr>')
 

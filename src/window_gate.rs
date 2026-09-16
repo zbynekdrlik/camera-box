@@ -246,7 +246,25 @@
 /// duplicates, no self-heal/frozen_leg events, the run's sole blocking-gate failure); 5 gives one
 /// event of margin above that ceiling while staying far under the 9-45/window band every genuine
 /// regression on this const has measured.
-pub const WINDOW_COPIES_GAPS_TOLERANCE: u32 = 5;
+///
+/// **Walked BACK 5 -> 2 on 2026-09-16 (issue 1242, the walk-back ticket) -- interim step.** Issues
+/// 1318/1320 root-caused + fixed the strih PROGRAM render-freeze -> stream FIFO underrun -> relock
+/// storm that produced the residual FIFO copy churn (cure = genlock bundle `02b53180b`, deployed
+/// 15.9 ~21:36). Data-first (mining tool `scripts/window_gate_walkdown.py` over the live verdict
+/// corpus, segregated by the rig-verified `version-strih.json.genlock_build_sha`): the ONLY
+/// post-fix run on the cure bundle -- run 180691712 -- is strict-clean (every window 0 copies / 0
+/// gaps), while the pre-fix bundles (3ffe2fbc5, d55afb726) carried the churn (run 25635487 CAM6
+/// 26/27 = the issue-1320 render-freeze; runs 841811381 / 158154134 singleton churn). But that
+/// post-fix sample is n=1 -- too thin to restore absolute strict-zero on a single run (the whole
+/// #889/#1132/#1169 calibration history shows one clean run is repeatedly followed by a churny
+/// one). So this step tightens 5 -> 2 (a data-supported regression-catch step: it still REDs the
+/// 9-45/window burst class and the CAM6 26/27 render-freeze class, both >> 2, while every post-fix
+/// window sits at 0), keeping seam 2/seam 4 armed (the tolerance channel still governs the fold).
+/// The FULL strict-zero restore (disarm `copies_gaps_tolerance_gates_overall_pass()` AND
+/// `segment_singleton_allowance_gates_overall_pass()`) is the EXPLICIT next step, gated on >= 2
+/// more consecutive `02b53180b`-or-later runs with `windows_failed_report_only == 0`. Walk-back
+/// stays on issue 1242.
+pub const WINDOW_COPIES_GAPS_TOLERANCE: u32 = 2;
 
 /// #1251 (2026-09-01) -- TEMPORARY per-cambox copies/gaps tolerance override, walk-back tracked on
 /// issue 1242 (umbrella) + step recorded on issue 1243 (relax-steps).
@@ -674,7 +692,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn tolerance_is_calibrated_at_five_1243() {
+    fn tolerance_walked_back_to_two_1242() {
         // Pins the calibrated NUMBER itself, not just its use through the const. Issue 1031
         // walk-down history: 3 -> 1 (2026-08-14 morning, one steady post-fix run) -> back to 2
         // the same day (issue-859 residual produces 2-per-window bursts) -> back to 3
@@ -687,27 +705,32 @@ mod tests {
         // leave zero margin given the n=3 variance {1, 1, 4}; 5 gives one event of margin while
         // staying far under the 9-45/window band every genuine regression on this const has
         // measured. See issue 1243's design-addendum comment for the full three-run table.
-        assert_eq!(WINDOW_COPIES_GAPS_TOLERANCE, 5);
+        //
+        // Issue 1242 (2026-09-16, walk-BACK) walked it 5 -> 2 after issues 1318/1320 fixed the
+        // render-freeze churn source: the one post-fix run (180691712) is strict-clean, n=1 is too
+        // thin for strict-zero, so 2 is the interim regression-catch step (strict restore is next).
+        assert_eq!(WINDOW_COPIES_GAPS_TOLERANCE, 2);
     }
 
     #[test]
-    fn six_copies_or_gaps_gate_five_absorbed_after_1243() {
-        // Issue 1243 boundary at the walked-up tolerance=5: SIX copies (or gaps) must FAIL
-        // the relaxed verdict, while FIVE -- one event of margin over the worst observed
-        // steady-run window (run 1142514714, max 4) -- stays absorbed. Literal fixtures on
-        // purpose: this locks the concrete boundary, complementing the const-tracking boundary
-        // tests above.
+    fn three_copies_or_gaps_gate_two_absorbed_after_1242() {
+        // Issue 1242 walk-back boundary at the walked-DOWN tolerance=2: THREE copies (or gaps)
+        // must FAIL the relaxed verdict, while TWO stays absorbed (every post-fix window read 0/0
+        // -- 2 is the interim margin, strict-zero restore is the next step). Recalibrated from the
+        // old tolerance=5 boundary (six-fails/five-absorbed) -- boundary-tracking with the const,
+        // NOT weakening. Literal fixtures on purpose: this locks the concrete boundary,
+        // complementing the const-tracking boundary tests above.
         assert!(
-            !decide(100, 0, 6, 0).relaxed_pass,
-            "1243: six copies must gate the relaxed verdict at tolerance=5"
+            !decide(100, 0, 3, 0).relaxed_pass,
+            "1242: three copies must gate the relaxed verdict at tolerance=2"
         );
         assert!(
-            !decide(100, 0, 0, 6).relaxed_pass,
-            "1243: six gaps must gate the relaxed verdict at tolerance=5"
+            !decide(100, 0, 0, 3).relaxed_pass,
+            "1242: three gaps must gate the relaxed verdict at tolerance=2"
         );
         assert!(
-            decide(100, 0, 5, 5).relaxed_pass,
-            "1243: the observed worst-window burden (up to 5 copies + 5 gaps) stays absorbed at tolerance=5"
+            decide(100, 0, 2, 2).relaxed_pass,
+            "1242: up to 2 copies + 2 gaps stays absorbed at the interim tolerance=2"
         );
     }
 
@@ -1020,16 +1043,18 @@ mod tests {
     }
 
     #[test]
-    fn two_or_three_copies_or_gaps_now_pass_within_the_reactivated_tolerance_1220() {
-        // SUPERSEDES `two_copies_or_a_gap_pair_still_fail_after_singleton_allowance_1169`: with
-        // the `<=3` tolerance channel re-armed, 2 and 3 (unlike under the #1169 `<=1/<=1` band)
-        // are WITHIN tolerance and now PASS the blocking verdict -- exactly the four live-verdict
-        // shapes (CAM2 2/2, CAM6 2/1, CAM7 2/3, and the combined 3/3) issue 1220 was filed to fix.
-        for &(c, g) in &[(2u32, 0u32), (0, 2), (1, 2), (2, 1), (3, 3), (2, 2), (2, 3)] {
+    fn two_copies_or_gaps_now_pass_within_the_walked_tolerance_1242() {
+        // SUPERSEDES `two_copies_or_a_gap_pair_still_fail_after_singleton_allowance_1169`: with the
+        // tolerance channel re-armed (#1220) and walked DOWN to 2 (issue 1242 walk-back), copies/
+        // gaps up to 2 (unlike under the #1169 `<=1/<=1` band) are WITHIN tolerance and PASS the
+        // blocking verdict. Renamed + recalibrated from the tolerance=5-era set that also included
+        // (3,3)/(2,3): those now sit OVER the walked-down tolerance and correctly FAIL (covered by
+        // `tolerance_plus_one_copies_or_gaps_still_fail_over_the_reactivated_tolerance_1220`).
+        for &(c, g) in &[(2u32, 0u32), (0, 2), (1, 2), (2, 1), (2, 2)] {
             let d = decide(847, 0, c, g);
             assert!(
                 d.overall_pass_term,
-                "#1220: copies={c} gaps={g} sits within the re-armed <=3 tolerance -- must pass \
+                "#1242: copies={c} gaps={g} sits within the walked <=2 tolerance -- must pass \
                  the blocking verdict: {d:?}"
             );
             assert!(

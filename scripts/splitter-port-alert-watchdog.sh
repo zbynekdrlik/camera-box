@@ -87,6 +87,15 @@ JOURNAL_WINDOW="${SPLITTER_WATCH_JOURNAL_WINDOW:-120}" # freshness window (s) fo
 CONFIRM_THRESHOLD="${SPLITTER_WATCH_CONFIRM_THRESHOLD:-2}"
 ALERT_THROTTLE_PASSES="${SPLITTER_WATCH_THROTTLE_PASSES:-12}"   # ~1h at the 5-min cadence
 
+# #1099: the calibrated purple-noise roughness threshold. MIRRORS src/capture.rs
+# NOISE_ROUGHNESS_THRESHOLD (bash cannot read the Rust const) -- keep the two in lock-step. Calibrated
+# 16.9.2026 from ~38.1k live COLOUR samples (fleet healthy-colour p99 18.5, max 22.5; grayscale <=14.7;
+# analytic noise floor ~73): 40.0 clears 2x the healthy p99 and the healthy max (1.78x) while below the
+# noise floor. A COLOUR frame whose rough= exceeds this classifies PURPLE_NOISE -- SURFACED REPORT-ONLY
+# (a NOISE-SUSPECT line), NEVER a page: the positive class (a real Elgato no-signal episode) is
+# unmeasured, so arming the page is deferred (see .claude/rules/splitter-port-health-watchdog.md).
+NOISE_ROUGHNESS_THRESHOLD="${SPLITTER_WATCH_NOISE_THRESHOLD:-40.0}"
+
 NOTIFY="${AIRULESET_NOTIFY:-$HOME/devel/airuleset/airuleset.py}"
 REPO_SLUG="${SPLITTER_WATCH_REPO:-zbynekdrlik/camera-box}"
 
@@ -175,8 +184,9 @@ clear_box_throttle() {
 # -- per-box decision --------------------------------------------------------------------------
 # handle_box <box> <ip> <verdict> <capturing> <colour> <u_dev> <v_dev> <rough> -- the verdict + parsed
 # fields are computed ONCE in main() (so the fleet healthy-count can be aggregated first) and passed
-# in. `rough` (#1079) is SURFACED in the per-box log line REPORT-ONLY (fleet-wide telemetry for a
-# data-first noise-threshold calibration follow-up); it does NOT influence the verdict this PR.
+# in. `rough` (#1079) is SURFACED in every per-box log line, and (issue 1099) a colour+high-rough box
+# classifies PURPLE_NOISE -- logged REPORT-ONLY (a NOISE-SUSPECT line), NEVER paged (the page is
+# deferred until the positive class is calibrated). DEAD_PORT stays the only paging verdict.
 handle_box() {
   local box="$1" ip="$2" verdict="$3" capturing="$4" colour="$5" u_dev="$6" v_dev="$7" rough="${8:--}"
   local rig_mode="${9:-UNKNOWN}"
@@ -223,8 +233,21 @@ handle_box() {
     return 0
   fi
 
-  # #1290: reached here ONLY for a DEAD_PORT verdict (OK/NODATA/NO_CAPTURE/SOURCE_WIDE returned
-  # above, and they are all already report-only + mode-independent). DEAD_PORT is the ONE
+  if [ "$verdict" = "PURPLE_NOISE" ]; then
+    # #1099: a COLOUR frame whose spatial roughness (rough=$rough) exceeds the calibrated threshold
+    # ($NOISE_ROUGHNESS_THRESHOLD) -- the Elgato 4K S structureless-static no-signal signature the
+    # colour/grayscale label alone misses. SURFACED REPORT-ONLY (NOISE-SUSPECT), NEVER paged: the
+    # healthy side is calibrated but the positive class (a real no-signal episode) is unmeasured, so
+    # the page stays disarmed (owner stance "prah bez kalibracneho bodu nehybem"). Arming it needs a
+    # real episode to measure the noise floor + the >=1 low-rough-sibling self-anchor. Reset the
+    # per-port confirm/throttle so an eventual armed episode confirms fresh.
+    log "$box NOISE-SUSPECT: colour but rough=$rough > threshold $NOISE_ROUGHNESS_THRESHOLD -> PURPLE_NOISE (Elgato purple-noise no-signal signature) -- report-only, not paging (positive class uncalibrated)"
+    clear_box_throttle "$box"
+    return 0
+  fi
+
+  # #1290: reached here ONLY for a DEAD_PORT verdict (OK/NODATA/NO_CAPTURE/SOURCE_WIDE/PURPLE_NOISE
+  # all returned above, and they are all already report-only + mode-independent). DEAD_PORT is the ONE
   # TEST-premise verdict: it pages a per-port fault only because a proven-good sibling on the SAME
   # camera+splitter is assumed to prove the shared camera is delivering. In provable EVENT/production
   # mode that premise does NOT hold (each cambox has its OWN camera, so a camera-less cambox is
@@ -338,7 +361,10 @@ main() {
     # a degraded box contributes 0 to total_healthy, so it already excludes itself: no off-by-one).
     healthy_siblings="$total_healthy"
     [ "${healths[$i]}" = "1" ] && healthy_siblings=$(( total_healthy - 1 ))
-    verdict="$(splitter_health_classify "${reaches[$i]}" "${caps[$i]}" "${cols[$i]}" "$healthy_siblings" | sed -n 's/^verdict=//p')"
+    # #1099: pass the box's rough= + the calibrated noise threshold so classify can emit PURPLE_NOISE
+    # for a colour+high-rough frame (report-only in handle_box). Backward-compatible: an old box logs
+    # rough=- -> classify's numeric guard -> plain OK, exactly as before.
+    verdict="$(splitter_health_classify "${reaches[$i]}" "${caps[$i]}" "${cols[$i]}" "$healthy_siblings" "${roughs[$i]}" "$NOISE_ROUGHNESS_THRESHOLD" | sed -n 's/^verdict=//p')"
     handle_box "${names[$i]}" "${ips[$i]}" "$verdict" "${caps[$i]}" "${cols[$i]}" "${us[$i]}" "${vs[$i]}" "${roughs[$i]}" "$rig_mode"
   done
   log "pass end"

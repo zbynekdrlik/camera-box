@@ -283,3 +283,65 @@ fn alert_detail_grayscale_names_box_port_and_chroma() {
         "must carry the chroma numbers: {d}"
     );
 }
+
+// ---------------------------------------------------------------------------------------------
+// #1099 — PURPLE_NOISE: the Elgato 4K S no-signal mode is COLOURFUL structureless static (frames
+// flow, `colour=1`), the one axis the colour/grayscale label alone misses. `splitter_health_classify`
+// gains two OPTIONAL trailing args — `rough` (the #1079 per-frame spatial-roughness metric) and a
+// noise `threshold` — and returns a new PURPLE_NOISE verdict when a COLOUR frame's roughness exceeds
+// the threshold. Backward-compatible: the 4-arg form, `rough=-` (a not-yet-redeployed box), or an
+// empty threshold all keep the pre-#1099 behaviour (colour -> OK). The watchdog surfaces PURPLE_NOISE
+// REPORT-ONLY (never a page) until a real positive-class episode calibrates the live flip.
+// ---------------------------------------------------------------------------------------------
+fn classify_n(r: &str, c: &str, k: &str, sib: &str, rough: &str, thr: &str) -> String {
+    stdout_of(&format!(
+        "splitter_health_classify {r} {c} {k} {sib} {rough} {thr}"
+    ))
+}
+
+#[test]
+fn classify_colour_high_rough_is_purple_noise_1099() {
+    // colour + rough above the threshold => PURPLE_NOISE, independent of siblings (report-only; the
+    // sibling self-anchor is added only at the eventual live flip, per the design).
+    assert_eq!(
+        classify_n("1", "1", "1", "1", "45.0", "40.0"),
+        "verdict=PURPLE_NOISE"
+    );
+    assert_eq!(
+        classify_n("1", "1", "1", "0", "50.0", "40.0"),
+        "verdict=PURPLE_NOISE"
+    );
+}
+
+#[test]
+fn classify_colour_low_rough_is_still_ok_1099() {
+    // a real colourful picture (rough at/below the threshold) stays OK — the measured fleet healthy
+    // colour max (22.5) sits far below the 40.0 bound, so no legitimate content trips it. The bound
+    // is EXCLUSIVE (> threshold), mirroring is_color_frame / is_likely_noise.
+    assert_eq!(classify_n("1", "1", "1", "0", "22.5", "40.0"), "verdict=OK");
+    assert_eq!(classify_n("1", "1", "1", "0", "40.0", "40.0"), "verdict=OK");
+}
+
+#[test]
+fn classify_purple_noise_only_when_colour_1099() {
+    // a grayscale no-signal frame with structure is NOT this classifier's job — the grayscale
+    // DEAD_PORT / SOURCE_WIDE path owns it. PURPLE_NOISE is strictly the colour+high-rough shape.
+    assert_eq!(
+        classify_n("1", "1", "0", "1", "50.0", "40.0"),
+        "verdict=DEAD_PORT"
+    );
+    assert_eq!(
+        classify_n("1", "1", "0", "0", "50.0", "40.0"),
+        "verdict=SOURCE_WIDE"
+    );
+}
+
+#[test]
+fn classify_rough_backward_compatible_no_noise_args_1099() {
+    // the pre-#1099 4-arg form, an old box's rough=-, and an unset threshold must all behave EXACTLY
+    // as before: colour -> OK, never PURPLE_NOISE (a rolling fleet redeploy / a disabled threshold
+    // must never manufacture a noise verdict).
+    assert_eq!(classify("1", "1", "1", "0"), "verdict=OK");
+    assert_eq!(classify_n("1", "1", "1", "0", "-", "40.0"), "verdict=OK");
+    assert_eq!(classify_n("1", "1", "1", "0", "50.0", ""), "verdict=OK");
+}

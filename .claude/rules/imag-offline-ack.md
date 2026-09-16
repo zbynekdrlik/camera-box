@@ -126,3 +126,28 @@ host` under `set -euo pipefail`, live 2026-08-23). Since #1171 they all consult 
 makes it emit `IMAG-LEG-NOT-VERIFIED: imag acked offline (<reason>)` instead of the generic "no
 recording path". The 2-arg #798 calls are byte-unchanged. WoL (remote wake) for imag is SEPARATE
 hardware work (issue 1053 is the strih/stream counterpart), never bundled into this gate change.
+
+## PERMANENT-RETIRED ack (issue 1316, 16.9.2026) — the box is GONE, not "taken after an event"
+
+imag-nb was RETURNED to the owner 16.9.2026 (10.77.9.182 dark), and the IMAG role re-provisions on
+a NEW notebook next year. The ack shape is the SAME box-name mechanism as the temporary case above,
+BOTH names present in `rig-fleet.txt` (the naming trap: `imag` for the reachability/leg/parity
+sites, `imag-nb` for the dantesync-version-gate node):
+
+```
+imag:returned-to-vendor-16.9.2026
+imag-nb:returned-to-vendor-16.9.2026
+```
+
+- **Stale-ack implication:** the stale-ack guard (`lib/cambox-offline-ack.sh`) still fires if the
+  box is acked AND reachable — but a permanently-returned box stays dark, so the ack never goes
+  stale on its own. When the role returns on a NEW notebook, REMOVE both lines (and flip
+  `scripts/lib/obs-fleet.sh`'s imag row `retired`→`always`) BEFORE the new box is on the wire, or
+  the first reachable-and-acked run fails loudly as a stale ack — that is the intended signal.
+- **The CODE + DOCS half of the decommission (issue 1316)** — separate from this E2E-ack half —
+  added a `retired` fleet state (`obs-fleet-list.md`), made cam2 a normal splitter leg with a
+  report-only tolerance of cam2's now-sourceless projection leg (it reads `Unproven` and passes,
+  `projection-tap-tear-detect.md`), dropped the dead `.182`/imag
+  from the watchdog/deploy rosters, and made `rig-health-audit.py` check_imag +
+  `rig-dev-handover-check.sh` pins retired-aware (both read the `imag:`/`imag-nb:` ack here as the
+  rig-wide source of truth).

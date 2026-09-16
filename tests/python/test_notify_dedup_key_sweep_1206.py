@@ -162,6 +162,8 @@ _PRODUCTION_CRITICAL_TIME_BUCKETED = {
     "avsync-heartbeat-alert-watchdog.sh",  # #812  -- A/V-sync heartbeat stale
     "imag-obs-alert-watchdog.sh",          # #882  -- imag OBS down / latency-drift / restart-storm
     "measurement-audio-alert-watchdog.sh", # #1310 -- mbc measurement-audio chain reads digital silence
+    "render-freeze-alert-watchdog.sh",     # #1320 -- PROGRAM render freeze / receiver relock storm
+                                           # (both arms silently desync the on-air A/V -> re-ping)
     # #1319 -- av-step's file also carries the production-critical absolute A/V-offset BAND arm: its
     # OUT_OF_BAND page (av-band-$box) time-buckets so it re-pings "dokolečka" while the stream A/V
     # offset stays outside the E2E-aligned band (owner: A/V-sync measurement is production-critical,
