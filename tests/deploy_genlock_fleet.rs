@@ -208,12 +208,13 @@ fn normalize_boxes_dedups_and_validates() {
     assert_eq!(
         run_sourced(&script(), "fleet_normalize_boxes imag,strih,imag").trim(),
         "strih,imag",
-        "canonical order strih,stream,imag with dedup"
+        "canonical order with dedup; imag stays a VALID explicit target (issue 1316)"
     );
     assert_eq!(
         run_sourced(&script(), "fleet_normalize_boxes ''").trim(),
-        "strih,stream,imag",
-        "empty selection defaults to the whole fleet"
+        "strih,stream",
+        "issue 1316: empty selection defaults to strih,stream — imag RETIRED (returned to owner), \
+         dropped from the empty-default (still valid when named explicitly)"
     );
     let (code, _o, err) = run_sourced_status(&script(), "fleet_normalize_boxes bogus");
     assert!(

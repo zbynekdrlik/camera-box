@@ -158,3 +158,40 @@ def test_evaluate_imag_retired_flag_threads_through(tmp_path):
     _, _, _, code_retired = d.evaluate(str(tmp_path), items=only, imag_retired=True)
     assert code_live == 1        # imag timer off = supervisor problem while imag lives
     assert code_retired == 0     # imag retired -> ignored, only healthy core timer remains
+
+
+# --- issue 1316: a retired imag-nb drops its imag-scoped captures (pins_imag) ------------------
+def _pins_item():
+    return [i for i in d.ITEMS if i.key == "pins"][0]
+
+
+def test_pins_imag_retired_drops_the_imag_capture_1316():
+    pins = _pins_item()
+    # imag pins DRIFT (rc 1) but strih/stream clean: live -> FORGOT (imag counts); retired -> OK.
+    caps = {"pins_strih": ("", 0), "pins_stream": ("", 0), "pins_imag": ("", 1)}
+    assert pins.decide(caps, imag_retired=False)["status"] == d.FORGOT
+    assert pins.decide(caps, imag_retired=True)["status"] == d.OK
+
+
+def test_pins_imag_retired_missing_capture_is_not_unknown_1316():
+    pins = _pins_item()
+    # When imag is retired the orchestrator SKIPS the pins_imag probe, so its capture is absent.
+    # Live that absence -> UNKNOWN (a box we could not read); retired -> dropped -> OK on strih/stream.
+    caps = {"pins_strih": ("", 0), "pins_stream": ("", 0)}
+    assert pins.decide(caps, imag_retired=False)["status"] == d.UNKNOWN
+    assert pins.decide(caps, imag_retired=True)["status"] == d.OK
+
+
+def test_evaluate_reads_rdh_imag_retired_env_1316(monkeypatch, tmp_path):
+    # main() reads RDH_IMAG_RETIRED from the environment; prove a truthy value threads to the pins item.
+    (tmp_path / "pins_strih.out").write_text("", encoding="utf-8")
+    (tmp_path / "pins_strih.rc").write_text("0", encoding="utf-8")
+    (tmp_path / "pins_stream.out").write_text("", encoding="utf-8")
+    (tmp_path / "pins_stream.rc").write_text("0", encoding="utf-8")
+    (tmp_path / "pins_imag.out").write_text("", encoding="utf-8")
+    (tmp_path / "pins_imag.rc").write_text("1", encoding="utf-8")  # imag drift
+    only = _pins_item()
+    entries_live, _, _, _ = d.evaluate(str(tmp_path), items=[only], imag_retired=False)
+    entries_ret, _, _, _ = d.evaluate(str(tmp_path), items=[only], imag_retired=True)
+    assert entries_live[0]["status"] == d.FORGOT
+    assert entries_ret[0]["status"] == d.OK
