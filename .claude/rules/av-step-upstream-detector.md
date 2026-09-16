@@ -125,3 +125,60 @@ arm, run alongside the step arm per box:
 - **Never a false page:** OUT_OF_BAND needs a FETCHED positive reading, so SKIP/STALE/UNKNOWN/REPIN/
   IN_BAND/IN_BAND_QUIET never page. Tier-0: `tests/python/test_av_band_1319.py` (incl. the realistic
   19:40-19:59 fixture) + the sweep + `bash -n`/`shellcheck`; live dry-run against stream `:8899`.
+
+## #1319 Part 2 — the band arm FALSE-PAGED 78×; fix = measurement-quality gate + dock-native reference
+
+The Part-1 band arm (above) paged the owner **78 times overnight 15./16.9.2026**. Root cause, two
+defects in the alarm's INPUT (never the rig — the stream `NDI 2ME PGM` FIFO was calm throughout):
+
+1. **No measurement-QUALITY gate.** The band judged the dock's live estimator (per-sample scatter
+   MAD 9-31 ms) against a ±30 ms band — a band cannot be judged from an estimator that noisy.
+2. **A reference-FRAME mismatch.** `resolve_band_reference` used `residual_median_ms` (the
+   RECORDING-based E2E residual, −35.3 ms), while the dock's live estimator carried a NON-constant
+   bias (≈ +85 ± 40 ms). `|85 − (−35.3)| = 120 ms ≫ 30`, re-pinged every 10 min by the
+   production-critical bucket → 78 pages.
+
+The fix (all under this watchdog + its facet source):
+
+- **Quality facet.** `bundle_state_gather.av_offset_quality_from_log` parses the dock's OWN
+  `LOCKED/UPDATED offset= … matched=M mad=Dms` lines (sync-test-output.cpp:1378) into
+  `av_offset_recent_mad_ms` (recent-window MEDIAN MAD) + `av_offset_recent_matched_min` (recent-window
+  MIN matched). It is a SEPARATE parser from `av_offset_series_from_log` — the offset SERIES stays
+  byte-identical (the Part-1 "raw UPDATED/LOCKED lines are NOT folded into the series" decision holds;
+  only their matched/mad feed quality, never their offset — a different sign/bias from the SUGGESTED
+  series, #952).
+- **`band_quality_ok` + the `LOW_QUALITY` verdict.** The OUT_OF_BAND page requires
+  `recent_mad_ms <= 15 ms AND recent_matched_min >= 30`, else `LOW_QUALITY` (log-only, NEVER a page).
+  Three-state, and the ABSENT-vs-CORRUPT distinction is load-bearing: an ABSENT quality facet (older
+  box / no cluster line in the recent window) returns **None → PROCEED (page-capable)** so a genuine
+  sustained offset with no recent `UPDATED` line still pages (never SWALLOW a real drift); a PRESENT
+  but NON-FINITE (NaN/Inf) mad returns **False → LOW_QUALITY** (a corrupt reading is untrustworthy,
+  never a page). `LOW_QUALITY` sits AFTER the REPIN check (a pin move still wins) and inside the
+  enough-samples guard.
+- **Dock-native reference (dock-to-dock).** After a green `[4i/8]` align, the E2E persist step
+  (`av_sync_persist_dock_reference` in `scripts/lib/av-sync-apply-guard.sh`, ONE call line in
+  `recording-e2e.sh` — the #675 sourced-helper pattern) fetches the stream box's `:8899` bundle-state,
+  asks the pure `av_step_decision.dock_reference` whether the dock's RECENT window is trustworthy
+  (reachable AND n>=min_samples AND pin_stable AND quality — all four, and a FINITE median), and ONLY
+  then MERGES `dock_offset_median_ms`/`dock_offset_n`/`dock_offset_mad_ms` into
+  `~/.camera-box/av-sync-residual-last.json` (read-modify-write, atomic). `resolve_band_reference`
+  then PREFERS `dock_offset_median_ms` over `residual_median_ms` (and STATES which key it used), so
+  the ~120 ms recording-vs-dock frame bias cancels. The recording residual stays the E2E GATE's
+  truth; only the ALARM's reference changes.
+- **Dock BIAS observability (vendored C++, CI-compile).** `sync-test-output.cpp` appends
+  `lag_idx=%ld cands=%zu` to the UPDATED/LOCKED line (`lag_idx` = the display offset quantized into
+  ±`CB_CLUSTER_TOL_MS` buckets, so a wrong-cluster pick jumps it; `cands` =
+  `cb_offset_cluster.samples.size()`, the total pool the densest window was scored from, so
+  `matched << cands` is a bimodal tell) and emits a `pin-change observed <old> -> <new>` marker (a
+  `-1`-sentinel `cb_last_seen_pin_ms`, gated on `>= 0 && !=` so the first read never fires) — a pin
+  move is exactly when the cluster can re-pick a wrong QPSK marker lag. Guarded by
+  `tests/av_sync_dock_pin_observability_1319.rs` (source anchor) AND a pwsh presence check in BOTH
+  `windows-genlock*.yml` (the two-language double coverage `av-sync-dock-anchor-refactor-safety.md`
+  mandates). Root-causing the dock bias itself (the cluster lag pick after a pin write) is the
+  remaining follow-up this observability enables.
+
+**Tier-0:** `pytest tests/python/test_av_band_quality_1319.py` (+ the extended `test_av_band_1319.py`,
+gather + step + notify-dedup siblings) + `bash -n`/`shellcheck` + a functional `curl`-stubbed run of
+`av_sync_persist_dock_reference` (good quality merges the dock keys, bad/absent records nothing);
+the C++ compiles at CI only. The band arm is held OFF via a dev1 `AV_BAND_MS=100000` drop-in until
+this deploys; re-enable after.

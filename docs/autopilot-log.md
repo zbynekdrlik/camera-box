@@ -12430,3 +12430,17 @@ no version bump (worktree lane; supervisor cherry-picks).
   `rig-dev-handover-check.sh`. Live dev1 dry-run: 16/16 timers OK; a really-disabled timer →
   SUPERVISOR; a fake timer → UNKNOWN. Tests: test_rig_dev_handover_watchdogs_1319.py (12) + the
   1312 full-fleet fixture extension. Tier-0: pytest 40 passed + bash -n + shellcheck, zero cargo.
+
+- #1319 Part 2 (A/V BAND false alarm) — lane/1319-quality. RED 61fe961a6 → GREEN c47a6de09 →
+  review-fix 19df2ac26. The band arm paged 78× overnight 15./16.9. (dock estimator biased ~+120 ms
+  vs the recording residual, MAD 9-31 ms judged against a ±30 ms band). Fix: (1) a measurement-
+  QUALITY gate — new `av_offset_recent_mad_ms`/`av_offset_recent_matched_min` facets (parser
+  `av_offset_quality_from_log`, SEPARATE from the byte-identical offset series) + `band_quality_ok`
+  + a `LOW_QUALITY` verdict (log-only) unless mad≤15 AND matched≥30 (absent→proceed, non-finite→
+  fail-safe LOW_QUALITY); (2) a DOCK-NATIVE reference — `av_sync_persist_dock_reference` records the
+  dock's own quality-gated post-align median into av-sync-residual-last.json, `resolve_band_reference`
+  prefers `dock_offset_median_ms` so the band compares dock-to-dock; (3) dock BIAS observability —
+  `lag_idx`/`cands` appended to the UPDATED/LOCKED line + a `pin-change observed` marker in
+  sync-test-output.cpp (Rust anchor + pwsh mirror in both windows-genlock*.yml). Tests:
+  test_av_band_quality_1319.py (new) + extended test_av_band_1319.py + av_sync_dock_pin_observability_1319.rs.
+  Tier-0 pytest 177 green; C++ compiles at CI only. Rule addendum in av-step-upstream-detector.md.
