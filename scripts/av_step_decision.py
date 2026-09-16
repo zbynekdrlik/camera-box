@@ -62,16 +62,6 @@ DEFAULT_MIN_SAMPLES = 6
 # reports the raw age; this dev1 threshold is the single place the STALE bound lives.
 DEFAULT_STALE_THRESHOLD_S = 300
 
-# #1325 — the freshness window for the dock's own QUALITY (UPDATED/LOCKED matched/mad) line. When the
-# quality facet is ABSENT (recent_mad_ms None) but the dock has emitted NO quality line within this
-# many seconds, its decoder has stopped (the QPSK marker cadence 0.5 s incident, 16.9.2026) and the
-# SUGGESTED offsets it is still emitting are untrustworthy -> LOW_QUALITY (no page). A FRESH quality
-# age (dock actively measuring, just no cluster in THIS recent window) OR an ABSENT age (older box
-# with no quality line at all) keeps #1319's "absent quality -> proceed, never swallow a real drift".
-# Matches DEFAULT_STALE_THRESHOLD_S so an absent-quality reading is trusted for the same window a
-# present series is, before it is judged dead.
-DEFAULT_QUALITY_STALE_S = 300
-
 
 def _loads_obj(bundle_json_text):
     """A /bundle-state.json body -> its dict, or None (empty/None input, non-JSON, or a non-object
@@ -135,7 +125,7 @@ def classify_av_step(recent_med, base_med, pin_stable, age_s, n_recent, n_base, 
                      step_threshold_ms=DEFAULT_STEP_THRESHOLD_MS, min_samples=DEFAULT_MIN_SAMPLES,
                      stale_threshold_s=DEFAULT_STALE_THRESHOLD_S,
                      recent_mad_ms=None, recent_matched_min=None,
-                     quality_age_s=None, quality_stale_s=DEFAULT_QUALITY_STALE_S):
+                     quality_age_s=None):
     """One box's verdict. `box_reachable` is 1 iff the JSON was fetched this pass.
 
       box_reachable != 1                    -> SKIP    (defer #732/#1001; never our page)
@@ -182,10 +172,13 @@ def classify_av_step(recent_med, base_med, pin_stable, age_s, n_recent, n_base, 
     q = band_quality_ok(recent_mad_ms, recent_matched_min)
     if q is False:
         return "LOW_QUALITY"
-    # #1325 — the quality facet is ABSENT (q is None) AND the dock's last quality line is STALE ->
-    # its decoder has stopped, so the SUGGESTED offsets driving recent_med/base_med are untrustworthy
-    # -> LOW_QUALITY (no page). A FRESH or ABSENT quality age preserves #1319's absent->proceed.
-    if q is None and quality_age_s is not None and quality_age_s > quality_stale_s:
+    # #1325 — the quality facet is ABSENT (q is None) but a dock quality line DID exist earlier in the
+    # log (quality_age_s present). `band_quality_ok` returns None only when there is no quality line in
+    # the recent window, so a PRESENT age here means the dock decoded before but has since stopped (the
+    # QPSK marker cadence 0.5 s incident, 16.9.2026) -> its SUGGESTED offsets are untrustworthy ->
+    # LOW_QUALITY (no page). An ABSENT age (no quality line anywhere = older box / dock never locked)
+    # preserves #1319's "absent quality -> proceed, never swallow a real drift".
+    if q is None and quality_age_s is not None:
         return "LOW_QUALITY"
     if abs(recent_med - base_med) > step_threshold_ms:
         return "STEP"
@@ -296,7 +289,7 @@ def classify_av_band(recent_med, pin_stable, n_recent, dock_live_age_s, box_reac
                      recent_mad_ms=None, recent_matched_min=None,
                      quality_max_mad_ms=DEFAULT_BAND_QUALITY_MAX_MAD_MS,
                      quality_min_matched=DEFAULT_BAND_QUALITY_MIN_MATCHED,
-                     quality_age_s=None, quality_stale_s=DEFAULT_QUALITY_STALE_S):
+                     quality_age_s=None):
     """One box's ABSOLUTE-BAND verdict (`box_reachable` is 1 iff the JSON was fetched this pass):
 
       box_reachable != 1                          -> SKIP          (defer #732/#1001; never our page)
@@ -335,10 +328,11 @@ def classify_av_band(recent_med, pin_stable, n_recent, dock_live_age_s, box_reac
                             quality_min_matched)
         if q is False:
             return "LOW_QUALITY"
-        # #1325 — quality facet ABSENT but the dock's last quality line is STALE (its decoder stopped,
-        # the 16.9.2026 marker-cadence incident): the SUGGESTED offsets are untrustworthy -> LOW_QUALITY
-        # (no page). A fresh/absent quality age keeps #1319's absent->proceed (real drift never swallowed).
-        if q is None and quality_age_s is not None and quality_age_s > quality_stale_s:
+        # #1325 — quality facet ABSENT but a dock quality line existed earlier (age present = the dock
+        # decoded before but stopped, the 16.9.2026 marker-cadence incident): the SUGGESTED offsets are
+        # untrustworthy -> LOW_QUALITY (no page). An ABSENT age (no quality line anywhere = older box)
+        # keeps #1319's absent->proceed (a real drift on a decoding dock has q present, so it is judged).
+        if q is None and quality_age_s is not None:
             return "LOW_QUALITY"
         if abs(recent_med - band_reference_ms) > band_ms:
             return "OUT_OF_BAND"

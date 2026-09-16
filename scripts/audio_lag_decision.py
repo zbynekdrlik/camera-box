@@ -292,22 +292,24 @@ def classify_buffered(slope_ms_per_min, max_step_ms, n, age_s, box_reachable,
       box_reachable != 1                 -> SKIP     (defer #732/#1001)
       age_s > stale_threshold_s          -> STALE    (buffered telemetry stopped while the log
                                                       advanced; age_s None — old box — skips this)
-      slope/n absent OR n < min_samples  -> UNKNOWN   (no buffered facet, or too few readings)
+      n absent OR n < min_samples        -> UNKNOWN   (no buffered facet, or too few readings)
       max_step_ms >= step_ms             -> STEP      (an OBS re-buffer refill jump — the sawtooth)
       |slope_ms_per_min| > drift          -> DRIFT     (a sustained drain/fill trend)
       otherwise                          -> HEALTHY   (buffer flat)
 
-    STEP is checked before DRIFT so a re-buffering source (both a step AND, over the window, a net
-    drain) reads STEP (the more specific, actionable signal). Both are report-only either way."""
+    UNKNOWN gates on `n` (not slope), so a degenerate zero-span window (>=2 readings that share one
+    timestamp -> `slope` empty but `max_step` present) still evaluates STEP; DRIFT is skipped when
+    slope is None. STEP is checked before DRIFT so a re-buffering source (both a step AND, over the
+    window, a net drain) reads STEP (the more specific signal). All verdicts are report-only."""
     if box_reachable != 1:
         return "SKIP"
     if age_s is not None and age_s > stale_threshold_s:
         return "STALE"
-    if slope_ms_per_min is None or n is None or n < min_samples:
+    if n is None or n < min_samples:
         return "UNKNOWN"
     if max_step_ms is not None and max_step_ms >= step_ms:
         return "STEP"
-    if abs(slope_ms_per_min) > drift_ms_per_min:
+    if slope_ms_per_min is not None and abs(slope_ms_per_min) > drift_ms_per_min:
         return "DRIFT"
     return "HEALTHY"
 

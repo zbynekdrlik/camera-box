@@ -245,11 +245,17 @@ The fix threads a FRESHNESS facet through both arms:
   `_recency_gap_s` midnight-wrap model). DISTINCT from `av_offset_dock_live_age_s`, which ages the
   `diag … locked=yes` heartbeat — the dock's MONITOR loop keeps beating even with a dead decoder, so
   that facet stayed FRESH through the incident and could not gate the estimator's own staleness.
-- **`classify_av_band` / `classify_av_step`** gain `quality_age_s` + `quality_stale_s`
-  (`DEFAULT_QUALITY_STALE_S` 300): after `band_quality_ok`, if it is None (absent) AND
-  `quality_age_s > quality_stale_s` → **LOW_QUALITY** (no page); a FRESH age (dock actively measuring,
-  just no cluster in THIS recent window) OR an ABSENT age (older box, or a fully-rotated tail) keeps
-  #1319's absent→proceed, so a genuine sustained drift on a live dock still pages. `analyze` /
-  `analyze_band` read the facet from the JSON body (no watchdog shell change needed).
+- **`classify_av_band` / `classify_av_step`** gain `quality_age_s`: after `band_quality_ok`, if it is
+  None (absent) AND `quality_age_s` is PRESENT → **LOW_QUALITY** (no page); an ABSENT age keeps
+  #1319's absent→proceed. **Why no threshold (issue-1325 review 🟡):** `band_quality_ok` returns None
+  ONLY when there is no quality line in `av_offset_quality_from_log`'s 600 s recent window, so a
+  PRESENT `quality_age_s` here necessarily means the freshest quality line is already >600 s old — the
+  decoder decoded before but has STOPPED. There is no "fresh age + absent quality" case to grant a
+  grace window, so the gate is a plain age-presence check (a `DEFAULT_QUALITY_STALE_S` threshold would
+  be dead code, subsumed by the 600 s window). The ONLY absent-quality proceed case is age ABSENT (no
+  quality line anywhere = an older box / a dock that never locked); a genuine drift on a DECODING dock
+  has `recent_mad_ms` PRESENT, so `band_quality_ok` ≠ None and the gate is skipped entirely — the
+  drift is judged and still pages. `analyze` / `analyze_band` read the facet from the JSON body (no
+  watchdog shell change needed).
 - **Tier-0:** `pytest tests/python/test_av_step_quality_age_1325.py` + `test_bundle_state_server_log.py`
   (the facet FLOWS through gather) + the existing #1319/#1267 arms stay green.

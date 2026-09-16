@@ -146,3 +146,11 @@ def test_build_bundle_state_carries_new_facets_when_present():
     assert st["buffered_ms_max_step_ms"] == "47"
     assert st["buffered_ms_n"] == "12"
     assert st["buffered_ms_age_s"] == "0"
+
+
+def test_classify_step_reachable_in_zero_span_window():
+    # #1325 review nit: a degenerate zero-span window (>=2 readings, one timestamp -> slope "") must
+    # still evaluate STEP off max_step (UNKNOWN gates on n, not slope).
+    assert ald.classify_buffered(None, 47, 10, 0, 1) == "STEP"
+    # ...and with no step, a None slope falls through to HEALTHY (DRIFT is slope-guarded), never a crash.
+    assert ald.classify_buffered(None, 2, 10, 0, 1) == "HEALTHY"

@@ -12685,8 +12685,11 @@ no version bump (worktree lane; supervisor cherry-picks).
   still drains = corrected-return must be consumed). See `.claude/rules/asrc-residual-floor.md` addendum.
 - **Deliverable 3(i) — dock quality-line freshness gate (the 3× false page, 16.9.):** new
   `bundle_state_gather.av_offset_quality_age_from_log` + `classify_av_band`/`classify_av_step` gate:
-  absent quality (`av_offset_recent_mad_ms` None) AND a STALE quality age → LOW_QUALITY (no page);
-  fresh/absent age keeps #1319's absent→proceed. `analyze`/`analyze_band` read the facet from the JSON.
+  absent quality (`av_offset_recent_mad_ms` None) AND a PRESENT quality age (a quality line existed
+  earlier == the decoder stopped) → LOW_QUALITY (no page); ABSENT age (older box) keeps #1319's
+  absent→proceed. Plain age-presence check, no threshold — `band_quality_ok` returns None only when
+  no quality line is in the 600 s window, so a present age is necessarily >600 s stale (review 🟡).
+  `analyze`/`analyze_band` read the facet from the JSON.
 - **Deliverable 3(ii) — dock-native reference at align time:** ALREADY landed by #1319
   (`av_sync_persist_dock_reference` merges `dock_offset_median_ms`, `resolve_band_reference` prefers
   it). Confirmed present; no new code.

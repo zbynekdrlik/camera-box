@@ -7,9 +7,11 @@ Root cause: the QPSK marker cadence dropped to 0.5 s, the dock's decoder stopped
 never swallow a real drift" paged on an untrustworthy reading.
 
 This lane adds `bundle_state_gather.av_offset_quality_age_from_log` (the in-log age of the freshest
-dock quality line) and gates the ABSENT-quality "proceed" on it: absent quality + a STALE quality
-age (the decoder stopped) -> LOW_QUALITY (no page); absent quality + a FRESH or ABSENT age (older
-box, or a dock actively measuring) -> proceed, so #1319's real-drift protection is preserved.
+dock quality line) and gates the ABSENT-quality "proceed" on it. `band_quality_ok` returns None only
+when NO quality line exists in the recent window, so the honest gate is: absent quality + a PRESENT
+age (a quality line existed earlier == the decoder went stale) -> LOW_QUALITY (no page); absent
+quality + an ABSENT age (no quality line anywhere == older box / dock never locked) -> proceed, so
+#1319's real-drift protection is preserved (a drift on a DECODING dock has quality present, judged).
 """
 import importlib.util
 import json
@@ -79,15 +81,18 @@ def test_band_absent_quality_stale_age_is_low_quality_no_page():
     assert v == "LOW_QUALITY"
 
 
-def test_band_absent_quality_fresh_age_still_pages():
-    # #1319 preserved: quality absent but the dock is actively measuring (fresh age) -> proceed;
-    # a genuine sustained offset (80 ms, band 30) is never swallowed.
-    v = asd.classify_av_band(**_kw(quality_age_s=10))
-    assert v == "OUT_OF_BAND"
+def test_band_absent_quality_present_age_is_low_quality():
+    # #1325: quality absent (mad/matched None) but a dock quality line existed earlier (age present ==
+    # the dock decoded before but stopped) -> LOW_QUALITY, NOT the OUT_OF_BAND page. `band_quality_ok`
+    # returns None only when there is no quality line in the recent window, so a present age here
+    # always means the decoder went stale — a small age value is production-impossible in this branch.
+    assert asd.classify_av_band(**_kw(quality_age_s=10)) == "LOW_QUALITY"
+    assert asd.classify_av_band(**_kw(quality_age_s=999)) == "LOW_QUALITY"
 
 
 def test_band_absent_quality_absent_age_still_pages():
-    # An OLDER box with no quality line at all (age None) keeps #1319's absent->proceed.
+    # The ONLY absent-quality "proceed" case: an OLDER box / dock that NEVER emitted a quality line
+    # (age None) keeps #1319's absent->proceed, so a genuine sustained offset is never swallowed.
     v = asd.classify_av_band(**_kw(quality_age_s=None))
     assert v == "OUT_OF_BAND"
 
@@ -113,15 +118,14 @@ def _skw(**over):
     return base
 
 
-def test_step_absent_quality_stale_age_is_low_quality():
+def test_step_absent_quality_present_age_is_low_quality():
+    # Any present age in the absent-quality branch means the dock stopped decoding -> LOW_QUALITY.
     assert asd.classify_av_step(**_skw(quality_age_s=999)) == "LOW_QUALITY"
-
-
-def test_step_absent_quality_fresh_age_still_steps():
-    assert asd.classify_av_step(**_skw(quality_age_s=10)) == "STEP"
+    assert asd.classify_av_step(**_skw(quality_age_s=10)) == "LOW_QUALITY"
 
 
 def test_step_absent_quality_absent_age_still_steps():
+    # Age None (no quality line anywhere = older box) keeps #1319's absent->proceed.
     assert asd.classify_av_step(**_skw(quality_age_s=None)) == "STEP"
 
 

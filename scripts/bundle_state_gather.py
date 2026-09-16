@@ -1042,9 +1042,11 @@ def buffered_ms_series_from_log(text, ref_src=BUFFERED_MS_DEFAULT_SRC,
       steady drain reads a small NEGATIVE slope (tonight ≈ −1.1). It is deliberately the endpoint
       slope over a long window (not a per-step delta) so the +20…+57 ms refill JUMPS do not swamp
       the underlying drain trend (the STEP term below carries the jumps).
-    * max_step_ms — the LARGEST single positive jump between consecutive readings in the window (the
-      OBS re-buffer refill step, tonight +20…+57). A large value = OBS is periodically re-buffering
-      the source, the sawtooth the dock/E2E inherit.
+    * max_step_ms — the LARGEST single SIGNED delta between consecutive readings in the window. A
+      large POSITIVE value is the OBS re-buffer refill step (tonight +21…+49) — the decision gates
+      STEP on `max_step_ms >= BUFFERED_STEP_MS`, so a pure drain (only negative deltas -> a negative
+      max) never trips STEP. A large value here = OBS is periodically re-buffering the source, the
+      sawtooth the dock/E2E inherit.
     * n — buffered readings in the recent window; span guards the slope (see the decision module).
 
     Reads ONLY the #1222 bounded TAIL, `_recency_gap_s` recency (file order IS time order), one pass,
