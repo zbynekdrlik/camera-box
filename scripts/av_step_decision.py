@@ -34,6 +34,14 @@ Verdicts (classify_av_step):
              yet), OR too few samples in either window to judge (never a false step off thin data).
   REPIN   -- the pin moved across the analyzed span (a #856/operator/E2E apply settling): report-only,
              NO page. Report-only alarms would be false during pin churn.
+  LOW_QUALITY -- (#1319 P3) the dock estimator's recent window is too noisy/thin to judge (median
+             MAD > 15 ms OR min matched < 30) OR carries a non-finite mad -> the median delta is not
+             trustworthy, so the step is NOT paged (log-only). The SAME band_quality_ok() bar the
+             BAND arm applies, single-sourced. Decided AFTER REPIN and BEFORE STEP/HEALTHY. An ABSENT
+             quality facet (older box) is None (not False) -> proceed to the step judgement, so a
+             genuine step is never swallowed. Closes the 16.9.2026 false-page: the STEP arm paged
+             13:44/15:09 on readings whose medians swung ±1000 ms within 5-min passes (mad 31 > 15),
+             which the BAND arm already rejected as LOW_QUALITY in the same passes.
   HEALTHY -- |recent_med - base_med| <= step_threshold_ms.
   STEP    -- |recent_med - base_med| > step_threshold_ms (a sustained upstream A/V shift at a constant
              pin). The watchdog pages a report-only ⚠️ after a 2-pass confirm.
@@ -115,7 +123,8 @@ def extract_av_step(bundle_json_text):
 
 def classify_av_step(recent_med, base_med, pin_stable, age_s, n_recent, n_base, box_reachable,
                      step_threshold_ms=DEFAULT_STEP_THRESHOLD_MS, min_samples=DEFAULT_MIN_SAMPLES,
-                     stale_threshold_s=DEFAULT_STALE_THRESHOLD_S):
+                     stale_threshold_s=DEFAULT_STALE_THRESHOLD_S,
+                     recent_mad_ms=None, recent_matched_min=None):
     """One box's verdict. `box_reachable` is 1 iff the JSON was fetched this pass.
 
       box_reachable != 1                    -> SKIP    (defer #732/#1001; never our page)
@@ -128,8 +137,22 @@ def classify_av_step(recent_med, base_med, pin_stable, age_s, n_recent, n_base, 
       pin_stable != "1"                      -> REPIN   (a #856/operator/E2E pin move; report-only, no
                                                         page. A missing flag (None) is NOT "1", so it
                                                         never masks a step off an unknown-pin span)
+      band_quality_ok(...) is False          -> LOW_QUALITY (#1319 P3: the dock estimator's recent
+                                                        window is too noisy/thin (median MAD > 15 ms
+                                                        OR min matched < 30) OR carries a non-finite
+                                                        mad -> the median delta is not judgeable, so
+                                                        the step is not paged. The SAME predicate the
+                                                        BAND arm applies, single-sourced (its module
+                                                        defaults). An ABSENT quality facet returns
+                                                        None (NOT False) -> proceed to today's step
+                                                        judgement, so an older box is unchanged and a
+                                                        genuine step is never swallowed.)
       |recent_med - base_med| > threshold    -> STEP
       otherwise                              -> HEALTHY
+
+    Verdict order (mirrors the module docstring and classify_av_band): SKIP -> STALE -> UNKNOWN ->
+    REPIN -> quality (LOW_QUALITY) -> STEP/HEALTHY. Quality sits AFTER REPIN (a pin move still wins)
+    and BEFORE the step decision, so a noisy reading never false-pages as a step.
     """
     if box_reachable != 1:
         return "SKIP"
@@ -141,6 +164,12 @@ def classify_av_step(recent_med, base_med, pin_stable, age_s, n_recent, n_base, 
         return "UNKNOWN"
     if pin_stable != "1":
         return "REPIN"
+    # #1319 P3 — consult the SAME dock-measurement quality bar the BAND arm uses (band_quality_ok,
+    # DEFAULT_BAND_QUALITY_* — single-sourced, never a retyped 15/30). None (facet absent, older box)
+    # is NOT False, so the step still judges; a non-finite mad -> False -> LOW_QUALITY (a corrupt
+    # reading is untrustworthy). See the 16.9.2026 false-page incident.
+    if band_quality_ok(recent_mad_ms, recent_matched_min) is False:
+        return "LOW_QUALITY"
     if abs(recent_med - base_med) > step_threshold_ms:
         return "STEP"
     return "HEALTHY"
@@ -178,10 +207,17 @@ def analyze(bundle_json_text, box_reachable, step_threshold_ms=DEFAULT_STEP_THRE
         return {"verdict": "SKIP", "recent_med_ms": None, "base_med_ms": None, "pin": None,
                 "step_ms": None, "age_s": None, "pin_stable": None, "n_recent": None,
                 "n_base": None, "recovered": None}
-    (recent_med, base_med, pin, pin_stable, age_s, n_recent, n_base) = extract_av_step(
-        bundle_json_text)
+    obj = _loads_obj(bundle_json_text)
+    (recent_med, base_med, pin, pin_stable, age_s, n_recent, n_base) = _from_obj(obj)
+    # #1319 P3 — read the SAME dock-measurement quality facets the band arm reads (same
+    # _float_or_none/_int_or_none path), so the STEP arm's classify_av_step can gate an
+    # untrustworthy reading to LOW_QUALITY instead of paging a phantom step. Absent facets read as
+    # None -> band_quality_ok None -> today's legacy step judgement (older box unchanged).
+    recent_mad_ms = _float_or_none(obj.get("av_offset_recent_mad_ms")) if isinstance(obj, dict) else None
+    recent_matched_min = _int_or_none(obj.get("av_offset_recent_matched_min")) if isinstance(obj, dict) else None
     verdict = classify_av_step(recent_med, base_med, pin_stable, age_s, n_recent, n_base,
-                               box_reachable, step_threshold_ms, min_samples, stale_threshold_s)
+                               box_reachable, step_threshold_ms, min_samples, stale_threshold_s,
+                               recent_mad_ms=recent_mad_ms, recent_matched_min=recent_matched_min)
     step_ms = None
     if recent_med is not None and base_med is not None:
         step_ms = round(recent_med - base_med, 1)

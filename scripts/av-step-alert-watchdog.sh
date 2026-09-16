@@ -232,6 +232,21 @@ handle_box() {
       log "$box pin moved across the analyzed span (pin=${pin:-?}, #856/operator/E2E settling) -- report-only, holding state, no page"
       return 0
       ;;
+    LOW_QUALITY)
+      # #1319 P3 — the dock estimator's recent window is present but too noisy/thin to trust
+      # (recent-window median MAD > 15 ms OR min matched < 30, or a non-finite mad) -- the SAME
+      # quality bar handle_box_band already applies. The median delta cannot be judged from a
+      # reading that scattered (16.9.2026: medians swung ±1000 ms within 5-min passes, mad 31 ms),
+      # so the step is NOT paged. Log-only, NEVER a page, no "still stepped" re-ping, and (crucially)
+      # NOT the HEALTHY branch -- so recovered_to_baseline never sees a LOW_QUALITY pass as a
+      # recovery, and the alert latch (alerted_/alert_base_) is left untouched so a genuine later
+      # recovery still fires. Reset only the confirm counter (mirroring handle_box_band's LOW_QUALITY
+      # and HEALTHY): a noisy pass must not count toward the 2-pass confirm, so a later TRUSTWORTHY
+      # step re-confirms from scratch. Wording mirrors the BAND arm's LOW_QUALITY line.
+      log "$box dock reading not trustworthy (recent_med=${recent:-?}ms, mad/matched below the quality bar) -- step not judged, no page"
+      write_state_field "confirm_${box}" 0
+      return 0
+      ;;
     HEALTHY)
       local was_alerted
       was_alerted="$(read_state_field "alerted_${box}" 0)"
