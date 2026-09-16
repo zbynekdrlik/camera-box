@@ -77,12 +77,24 @@ else
   note "latency baseline / python3 absent -- pin verify is report-only"
 fi
 
-# 6) dantesync LOCKED as a client (never master).
-DS_MODE="$( { /usr/local/bin/dantesync --status 2>/dev/null || cat /etc/dantesync/config.toml 2>/dev/null; } | tr -d '\r' || true)"
-if [ -n "$DS_MODE" ]; then
-  strih_lx_dantesync_is_client_not_master "$DS_MODE" && ok "dantesync is a CLIENT (not master)" || bad "dantesync is NOT a client (would risk a 2nd NTP master)"
+# 6) dantesync is a CLIENT (never master). Derive a CLEAN mode token from the config's
+#    ntp_server_mode.enabled flag -- NOT the whole config text (which always contains the literal
+#    `ntp_server_mode` key and would false-match the guard's `*server_mode*` master pattern on a
+#    legit client). The config is JSON (/etc/dantesync/config.json), not .toml.
+DS_JSON="${DANTESYNC_CONFIG:-/etc/dantesync/config.json}"
+if [ -f "$DS_JSON" ] && command -v python3 >/dev/null 2>&1; then
+  DS_MODE="$(python3 -c 'import json,sys
+d=json.load(open(sys.argv[1]))
+nsm=d.get("ntp_server_mode")
+en=nsm.get("enabled") if isinstance(nsm,dict) else nsm
+print("server_mode" if en else "client")' "$DS_JSON" 2>/dev/null || echo "")"
+  if [ -n "$DS_MODE" ]; then
+    strih_lx_dantesync_is_client_not_master "$DS_MODE" && ok "dantesync is a CLIENT (not master)" || bad "dantesync is NOT a client (ntp_server_mode enabled -- would risk a 2nd NTP master)"
+  else
+    bad "dantesync config not parseable ($DS_JSON)"
+  fi
 else
-  bad "dantesync status/config not readable"
+  bad "dantesync config not readable ($DS_JSON)"
 fi
 
 # 7) bundle-state :8899.

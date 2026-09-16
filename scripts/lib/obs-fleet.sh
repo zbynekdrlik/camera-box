@@ -29,12 +29,13 @@
 #   audio-lag     = strih stream      (resolume EXCLUDED: no mbc audio chain on the CG box)
 #   av-step       = stream            (the av-sync dock lives on the stream box only, #1267)
 #   vb-matrix     = strih stream      (resolume EXCLUDED: no VB-Matrix install on the CG box)
-#   bundle-state  = strih stream resolume
+#   bundle-state  = strih stream resolume strih-lx   (issue 1317: strih-lx joins here)
 #   network-reach = strih stream resolume   (resolume report-only unless obs_fleet_is_home -- below)
-#   obs-liveness  = strih stream resolume   (resolume polled only while obs_fleet_is_home -- below)
-#   genlock-lock  = strih stream imag resolume  (#1299: the genlock LOCKED/DEGRADED/UNLOCKED facet
-#                   is fleet-wide -- imag is a pure receiver that still locks every input to the
-#                   fleet clock, so it IS in scope; resolume is paged only while obs_fleet_is_home)
+#   obs-liveness  = strih stream resolume strih-lx   (issue 1317: strih-lx joins here)
+#   genlock-lock  = strih stream imag resolume strih-lx  (#1299: the genlock LOCKED/DEGRADED/UNLOCKED
+#                   facet is fleet-wide -- imag is a pure receiver that still locks every input to the
+#                   fleet clock, so it IS in scope; resolume is paged only while obs_fleet_is_home;
+#                   issue 1317: the Linux strih-lx box joins too, appended after resolume)
 #
 # TRAVELING-BOX SAFETY (resolume is home only sometimes): a naive add to the PAGING watchdogs would
 # false-page whenever resolume is away (the owner's hardest sensitivity -- the #739 5x false-page
