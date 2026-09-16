@@ -58,6 +58,19 @@ production-critical dev1 watchdog class (umbrella **#1308**).
   Since the floor (-60) is far below the ceiling (-20), SILENT and POLLUTED are mutually exclusive
   (SILENT checked first). Applies to BOTH scales: the preflight's `max_volume` and the watchdog's
   `InputVolumeMeters` peak — the marker reads far below -20 on both, a flood far above.
+- **CALIBRATION CORRECTION (supervisor, 16.9.2026 evening) — the ceiling is REPORT-ONLY until
+  re-calibrated on HEALTHY runs.** The "-55..-61 dBFS marker-only plateau" above was the level of a
+  BROKEN chain that day (issue 1318: the marker reached the mbc input only intermittently); a HEALTHY
+  QPSK marker bursts to **~-5 dBFS** at this input (live meter 16.9. 21:00–22:00, every 3–5 s) and a
+  green E2E preflight read `max_volume -18.9 dB` (run 34856629289). So a healthy run would read
+  POLLUTED under a -20 bar, and a level bar alone cannot tell the loud marker from a loud foreign
+  flood (the "flat -5.5 dBFS flood" plateaus were the marker itself at the chain's limiter ceiling).
+  Consequences, both in code: the `[4b2/8]` ceiling branch logs a `WARNING (report-only …)` and
+  aborts ONLY under `AUDIO_PREFLIGHT_CEILING_ENFORCE=1` (default 0, pinned by
+  `pollution_ceiling_is_report_only_unless_enforced_1323`); the watchdog's `POLLUTED` case is
+  log-only (no page, SILENT/PRESENT latch untouched). The honest POLLUTED/UNDECODED signal is issue
+  1324's `[4b3/8]` decodability probe (`cluster_samples` over a 20 s capture). Re-arm the ceiling
+  only from ≥3 healthy-run `max_volume` readings vs a REAL flood sample, with the margin stated.
 - **`meter_present` distinguishes UNKNOWN from SILENT.** Digital silence is `mbc` PRESENT in the meter
   stream with all-zero levels → peak_db clamped to the floor (−100 dB) → SILENT. `mbc` never appearing
   in any event this window → `meter_present=0` → UNKNOWN (a renamed/removed input, or the meter event

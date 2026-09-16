@@ -236,3 +236,62 @@ fn recording_e2e_wires_the_pollution_ceiling_before_startrecord() {
         "#1323: the pollution-ceiling check must run BEFORE [5/8] StartRecord"
     );
 }
+
+/// #1323 calibration correction (supervisor, 16.9.2026): the -20 dB ceiling was derived from a
+/// BROKEN chain's marker-only plateau; a HEALTHY QPSK marker bursts to ~-5 dBFS at the mbc input
+/// (green E2E 34856629289 read max_volume -18.9 dB), so a level bar alone cannot separate the
+/// marker from a foreign flood. The [4b2/8] ceiling branch is therefore REPORT-ONLY by default:
+/// the `exit 1` sits ONLY inside an `AUDIO_PREFLIGHT_CEILING_ENFORCE=1` guard, and the default
+/// path logs a WARNING and continues. Issue 1324's decodability probe is the honest POLLUTED gate.
+#[test]
+fn pollution_ceiling_is_report_only_unless_enforced_1323() {
+    let s = std::fs::read_to_string(format!(
+        "{}/scripts/recording-e2e.sh",
+        env!("CARGO_MANIFEST_DIR")
+    ))
+    .expect("read recording-e2e.sh");
+    let step = s
+        .find("audio-presence preflight")
+        .expect("the pre-record audio-presence preflight step exists");
+    let poll = step
+        + s[step..]
+            .find("if [ \"$(audio_preflight_is_polluted")
+            .expect("#1323: the ceiling classification `if` exists in the preflight step");
+    // the ceiling branch = from its `if` to the matching outer `fi` (the next `\n  fi\n` at the
+    // step's own indentation)
+    let end = poll
+        + s[poll..]
+            .find("\n  fi\n")
+            .expect("the ceiling branch closes with `fi`")
+        + 6;
+    let branch = &s[poll..end];
+    assert!(
+        branch.contains("AUDIO_PREFLIGHT_CEILING_ENFORCE"),
+        "#1323: the ceiling abort must be gated on AUDIO_PREFLIGHT_CEILING_ENFORCE:\n{branch}"
+    );
+    let enforce_if = branch
+        .find("if [ \"$AUDIO_PREFLIGHT_CEILING_ENFORCE\" = \"1\" ]")
+        .expect("#1323: the enforce guard is an explicit `= \"1\"` check");
+    let exit = branch
+        .find("exit 1")
+        .expect("#1323: the enforced path still aborts with exit 1");
+    assert!(
+        exit > enforce_if,
+        "#1323: `exit 1` must sit INSIDE the enforce guard, never on the default path:\n{branch}"
+    );
+    assert_eq!(
+        branch.matches("exit 1").count(),
+        1,
+        "#1323: exactly one exit path (the enforced one) in the ceiling branch:\n{branch}"
+    );
+    assert!(
+        branch.contains("WARNING (report-only"),
+        "#1323: the default path must log a report-only WARNING:\n{branch}"
+    );
+    // the enforce knob defaults OFF right above the branch
+    let pre = &s[step..poll];
+    assert!(
+        pre.contains("AUDIO_PREFLIGHT_CEILING_ENFORCE=\"${AUDIO_PREFLIGHT_CEILING_ENFORCE:-0}\""),
+        "#1323: AUDIO_PREFLIGHT_CEILING_ENFORCE must default to 0 (report-only)"
+    );
+}

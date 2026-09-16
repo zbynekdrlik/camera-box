@@ -289,11 +289,13 @@ main() {
         "🚨 Meracia audio ($REPO_SLUG): stream OBS vstup **$INPUT_NAME** číta DIGITÁLNE TICHO (peak ${peak} dB < ${threshold_db} dB; ticho je ~-91 dB, živý QPSK marker ~-5 dB). Meracia mbc cesta je mŕtva -- A/V-sync gate na nej stojí, takže ďalšia produkcia sa neoverí. Skontroluj v poradí: (1) je meracie mikrofón zapnutý pri reproduktore cam2 monitora? (2) je mbc kanál v Ableton Live na 10.77.7.232 ODMUTOVANÝ? (3) je Dante routing z mbc do DVS -> stream OBS v poriadku? (targets.md mbc riadok má checklist). Potvrdené počas ${CONFIRM_THRESHOLD} kontrol; re-ping každých ~$((REPING_INTERVAL_S/60)) min kým to trvá."
       ;;
     POLLUTED)
-      # issue 1323 — a loud foreign signal flooding the mbc chain drowns the QPSK marker. Same
-      # "stream" fault path/latch as SILENT (the chain is unusable either way; recovery only on
-      # PRESENT), so the #1206 time-bucketed dedup key shape is unchanged.
-      confirm_then_alert "stream" 1 "measurement-audio-stream" \
-        "🚨 Meracia audio ($REPO_SLUG): stream OBS vstup **$INPUT_NAME** je ZAPLAVENÝ cudzím signálom (peak ${peak} dB > ${ceiling_db} dB strop; QPSK marker sám číta ~-47..-57 dB). Hlasný cudzí zvuk preváži merací marker, demod nedekóduje nič (cluster_samples=0) -- A/V-sync gate na tom padne. Skontroluj čo ide nahlas do meracieho mikrofónu / mbc kanála v Ableton na 10.77.7.232 / Dante subscription do stream OBS (aktivita pri rigu, pustená hudba, zlá subscription); stíš to späť na úroveň markera. Potvrdené počas ${CONFIRM_THRESHOLD} kontrol; re-ping každých ~$((REPING_INTERVAL_S/60)) min kým to trvá."
+      # issue 1323 — a loud signal above the ceiling. REPORT-ONLY (log, never a page) until the
+      # ceiling is re-calibrated from healthy runs: the -20 dB bar came from a BROKEN chain's
+      # marker-only plateau, while a HEALTHY QPSK marker bursts to ~-5 dBFS at this input (green
+      # E2E 34856629289: max_volume -18.9 dB) -- a level bar alone cannot separate the marker from a
+      # foreign flood; issue 1324's decodability probe is the honest POLLUTED signal. The
+      # SILENT/PRESENT latch is left untouched (no recovery, no page).
+      log "stream: POLLUTED (peak ${peak} dB > ${ceiling_db} dB ceiling) -- REPORT-ONLY, no page (issue 1323 ceiling awaits healthy-run calibration; a healthy marker peaks ~-5 dB)"
       ;;
     *)
       log "stream: unexpected verdict '${verdict:-<empty>}' from measurement_audio_decision.py (analyze failed?) -- holding, no page"

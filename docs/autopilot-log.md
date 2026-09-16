@@ -12623,3 +12623,22 @@ no version bump (worktree lane; supervisor cherry-picks).
   - Layers: (1) pure crate-root `src/qpsk_probe_decision.rs` (default-feature, Tier-0) — `consistency_cluster_size` (self-calibrated modal step+gap chain tolerating a single miss, bakes in NO fixed cadence), `peak_dbfs`, `classify`, `build_report`, `report_json`; (2) probe-gated `recording-verdict --qpsk-probe <wav|mkv>` (reuses `av_sync_recording::extract_audio_mono_f32`, now pub, + `decode_markers_with_stats`, prints ONE JSON line, exit 0 — a pure reporter); (3) `scripts/lib/marker-decodability-preflight.sh` (pure command/message builders + JSON parse) + a thin `[4b3/8]` block in recording-e2e.sh (after the issue-1323 ceiling, before StartRecord; sourced-helper, no anchored-line edit): ~25 s stream probe recording → ffmpeg-extract mbc a:0 to a mono-f32 WAV on the box → win_ssh_download to dev1 → run the probe → abort naming the class on non-OK; SKIP only when the probe binary absent (loud UNVERIFIED). Env knobs `AUDIO_DECODABILITY_*`; the −60/−20 bars READ from audio-presence-preflight.sh (never retyped).
   - Calibration N=4 @ 25 s window: measured on the real recordings GREEN ∈ [5,9], FAILED ∈ [1,3] (Rust `consistency_cluster_size` reproduced this exactly via a rustc replica on the real audio_markers) → margin ≥3 on green, ≥1 on failed. n=1 green + 2 failed real runs → all knobs env-overridable, ENABLE default-on but disablable.
   - Tests: RED `tests/harness_qpsk_probe_decision_1324.rs` (12 Rust tests incl. the FULL synthesized-audio → demod → decision path proving loud+decodable=OK) + `tests/python/test_marker_decodability_preflight_1324.py` (15 tests: lib pure fns + the recording-e2e [4b3/8] static wiring). Verified locally: rustc `--test` combined replica (qpsk_marker+qpsk_probe_decision+harness) 12/12 pass; full pytest suite 2716 passed (exit 0); `cargo fmt --all --check` clean; `bash -n` + shellcheck clean; anchor-count sweep — 0 slicing anchors changed (the one 1→2 risk, `[5/8] StartRecord` accidentally in a comment, was reworded to 1→1). The probe-gated `--qpsk-probe` ffmpeg glue in recording-verdict.rs is CI-only (no local compile path, Tier-0). Rule `.claude/rules/av-audio-silent-discriminator.md` gained the #1324 probe + [4b3/8] section.
+
+## 2026-09-16 — issue 1323 integration correction (supervisor): the marker-SNR level ceiling ships REPORT-ONLY; POLLUTED pages disabled
+
+- **Why:** the lane calibrated the -20 dBFS ceiling from the 16.9. dev1 watchdog journal, reading the day's
+  `-55..-61 dBFS` plateau as "marker-only". That day the mbc chain was BROKEN (issue 1318: the QPSK marker
+  reached the stream input only intermittently; two release-PR E2E runs decoded 0 clusters). The healthy
+  marker bursts to ~-5 dBFS at the mbc input (live meter 16.9. 21:00-22:00, every 3-5 s) and the green E2E
+  34856629289 preflight read `max_volume -18.9 dB` -- a healthy run would have aborted as POLLUTED under
+  the -20 bar, and a level bar alone cannot separate the loud marker from a loud foreign flood.
+- **Change:** `scripts/recording-e2e.sh` `[4b2/8]` -- the ceiling classification stays, the abort is gated
+  on `AUDIO_PREFLIGHT_CEILING_ENFORCE=1` (default 0 -> `WARNING (report-only ...)`), pinned by
+  `pollution_ceiling_is_report_only_unless_enforced_1323` in `tests/harness_audio_presence_preflight.rs`;
+  `scripts/measurement-audio-alert-watchdog.sh` `POLLUTED)` -> log-only (no page, SILENT/PRESENT latch
+  untouched); `.claude/rules/measurement-audio-watchdog.md` carries the correction + the re-arm condition
+  (>= 3 healthy-run readings vs a real flood sample). The honest POLLUTED/UNDECODED signal is issue 1324's
+  `[4b3/8]` decodability probe, integrated in the same batch.
+- **Verify:** anchor-count + first-occurrence sweep over recording-e2e.sh clean (only generic substrings and
+  the new anchors moved), 703 merge->exit distance unchanged (10106), `bash -n` + `shellcheck -S warning`
+  clean, `cargo fmt --all --check` clean, full `pytest tests/python` green (see commit).

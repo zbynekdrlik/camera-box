@@ -3181,9 +3181,19 @@ if [ "$AUDIO_PREFLIGHT_ENABLE" = "1" ]; then
     exit 1
   fi
   # issue 1323 — level CEILING: above the silence floor, but a loud foreign flood drowns the marker.
+  # REPORT-ONLY by default (supervisor calibration correction, 16.9.2026): the -20 dB ceiling was
+  # derived from a BROKEN chain's marker-only plateau; a HEALTHY marker bursts to ~-5 dBFS at the
+  # mbc input (green run 34856629289 read max_volume -18.9 dB), so a level bar alone cannot tell a
+  # loud marker from a loud foreign flood -- the [4b3/8] decodability probe (issue 1324) is the
+  # honest signal. Flip AUDIO_PREFLIGHT_CEILING_ENFORCE=1 only after the ceiling is re-calibrated
+  # from >= 3 healthy runs; until then the classification is logged as a WARNING and never aborts.
+  AUDIO_PREFLIGHT_CEILING_ENFORCE="${AUDIO_PREFLIGHT_CEILING_ENFORCE:-0}"
   if [ "$(audio_preflight_is_polluted "$_ap_db" "$AUDIO_PREFLIGHT_CEILING_DB")" = "true" ]; then
-    echo "ERROR: $(audio_preflight_polluted_message "$_ap_db" "$AUDIO_PREFLIGHT_CEILING_DB")" >&2
-    exit 1
+    if [ "$AUDIO_PREFLIGHT_CEILING_ENFORCE" = "1" ]; then
+      echo "ERROR: $(audio_preflight_polluted_message "$_ap_db" "$AUDIO_PREFLIGHT_CEILING_DB")" >&2
+      exit 1
+    fi
+    echo "    WARNING (report-only, issue 1323 ceiling not yet calibrated on healthy runs): $(audio_preflight_polluted_message "$_ap_db" "$AUDIO_PREFLIGHT_CEILING_DB")" >&2
   fi
   echo "    ok: mbc measurement audio AUDIBLE (max_volume ${_ap_db} dB >= ${AUDIO_PREFLIGHT_THRESHOLD_DB} dB threshold, <= ${AUDIO_PREFLIGHT_CEILING_DB} dB ceiling)"
 else
