@@ -513,6 +513,26 @@ def program_render_lagged_from_log(text):
     return (str(max_lagged), age_s)
 
 
+# #1320 — the RELOCK-BURST facet: a receiver FIFO overshoot STORM (the downstream consequence of a
+# sender PROGRAM render freeze). This PORTS issue 1318's summarize_relock_bursts (src/jitter_audit.rs)
+# to Python so the dev1 render-freeze watchdog can page on it off :8899; a parity test pins the
+# summarizer to the Rust test fixtures. RED STUB below (implemented in the [green] commit).
+RELOCK_BURSTS_MIN_DEFAULT = 8  # N: >= this many relocks within 1 s on ONE input == a burst (issue 1318)
+_RELOCK_MARK = "genlock-relock '"
+
+
+def _parse_relock_event(line):
+    return None
+
+
+def _summarize_relock_bursts(events, min_burst_relocks, window_ms):
+    return []
+
+
+def relock_bursts_from_log(text):
+    return ("", "")
+
+
 def _median_int(values):
     """Plain sorted median of a non-empty int list, rounded to int. (No numpy — small lists.)"""
     s = sorted(values)
@@ -1265,6 +1285,8 @@ def build_bundle_state(
     vb_matrix_start="",
     program_render_lagged="",
     program_render_lagged_age_s="",
+    relock_bursts="",
+    relock_bursts_age_s="",
 ):
     """Assemble the flat bundle-state dict `version-integrity-gate.sh --win-state`'s
     `compare_args_from_state()` parses. Every value is a STRING (its regex requires a quoted JSON
@@ -1389,5 +1411,12 @@ def build_bundle_state(
         # UNKNOWN downstream, never a fabricated 0. From `program_render_lagged_from_log`.
         "program_render_lagged": program_render_lagged,
         "program_render_lagged_age_s": program_render_lagged_age_s,
+        # #1320 — the RELOCK-BURST facet the dev1 render-freeze watchdog's relock arm reads: the MAX
+        # per-input burst count (issue 1318 summarize_relock_bursts, >=8 relocks within 1 s) over the
+        # #1222 bounded TAIL + the in-log age (s) of the newest relock event. Same omit-when-empty
+        # rule: "0" (relock telemetry live, no storm) is truthy and KEPT; "" (NO relock line at all,
+        # the steady state) is dropped -> UNKNOWN downstream, never a fabricated 0.
+        "relock_bursts": relock_bursts,
+        "relock_bursts_age_s": relock_bursts_age_s,
     }
     return {k: v for k, v in values.items() if v}
