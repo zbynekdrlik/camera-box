@@ -193,3 +193,74 @@ def test_cli_threshold_is_required():
     # production must always source + pass the threshold; there is no hardcoded -60 fallback
     p = _run_cli(["analyze", "--box-reachable", "1"], "meter_present=1\npeak_db=-4.0\n")
     assert p.returncode != 0
+
+
+# ---- #1323: POLLUTED — a foreign signal flooding the mbc chain reads far ABOVE a level ceiling ----
+# The QPSK marker alone is quiet (~-57 dBFS peak, 16.9 data); a loud flood reads within ~20 dB of
+# full scale (-5..-8 dBFS) and drowns the marker (cluster_samples=0, run 622403283). The ceiling is
+# the SAME single-sourced constant the #1323 preflight uses (audio_preflight_default_ceiling_db, -20),
+# passed IN like the threshold so the -20 literal is never retyped here. POLLUTED uses strict '>'
+# (exactly at the ceiling is PRESENT), mirroring SILENT's strict '<'.
+CEIL = -20.0
+
+
+def test_classify_flood_above_ceiling_is_polluted():
+    # the 16.9 flood plateau (-5.5 dBFS) is far above the -20 ceiling
+    assert mad.classify(-5.5, 1, 1, THRESH, CEIL) == "POLLUTED"
+
+
+def test_classify_marker_only_is_present_not_polluted():
+    # the QPSK marker-only plateau (~-57 dBFS peak) sits below the ceiling -> PRESENT
+    assert mad.classify(-57.0, 1, 1, THRESH, CEIL) == "PRESENT"
+
+
+def test_classify_silent_still_silent_with_ceiling():
+    # -64.8 dBFS is below the -60 floor -> SILENT wins even with a ceiling present
+    assert mad.classify(-64.8, 1, 1, THRESH, CEIL) == "SILENT"
+
+
+def test_classify_none_peak_unknown_even_with_ceiling():
+    assert mad.classify(None, 1, 1, THRESH, CEIL) == "UNKNOWN"
+
+
+def test_classify_ceiling_strict_boundary():
+    # exactly at the ceiling is PRESENT (strict >), just above is POLLUTED
+    assert mad.classify(-20.0, 1, 1, THRESH, CEIL) == "PRESENT"
+    assert mad.classify(-19.9, 1, 1, THRESH, CEIL) == "POLLUTED"
+
+
+def test_classify_ceiling_none_disables_polluted_backward_compat():
+    # a 4-arg call (no ceiling) keeps the #1310 behavior: a loud reading is PRESENT, never POLLUTED
+    assert mad.classify(-5.5, 1, 1, THRESH) == "PRESENT"
+    assert mad.classify(-5.5, 1, 1, THRESH, None) == "PRESENT"
+
+
+def test_analyze_polluted():
+    r = mad.analyze("meter_present=1\npeak_db=-5.5\n", 1, THRESH, CEIL)
+    assert r["verdict"] == "POLLUTED"
+    assert r["peak_db"] == -5.5
+    assert r["meter_present"] == 1
+
+
+def test_analyze_ceiling_default_none_backward_compat():
+    # the #1310 3-arg analyze call is unchanged: a loud reading stays PRESENT
+    r = mad.analyze("meter_present=1\npeak_db=-5.5\n", 1, THRESH)
+    assert r["verdict"] == "PRESENT"
+
+
+def test_cli_analyze_polluted_emits_verdict():
+    p = _run_cli(["analyze", "--box-reachable", "1", "--threshold-db", "-60", "--ceiling-db", "-20"],
+                 "meter_present=1\npeak_db=-5.5\n")
+    assert p.returncode == 0, p.stderr
+    out = dict(l.split("=", 1) for l in p.stdout.splitlines() if "=" in l)
+    assert out["verdict"] == "POLLUTED"
+    assert out["peak_db"] == "-5.5"
+
+
+def test_cli_ceiling_is_optional_backward_compat():
+    # the #1310 CLI (threshold only, no ceiling) still works and never emits POLLUTED
+    p = _run_cli(["analyze", "--box-reachable", "1", "--threshold-db", "-60"],
+                 "meter_present=1\npeak_db=-5.5\n")
+    assert p.returncode == 0, p.stderr
+    out = dict(l.split("=", 1) for l in p.stdout.splitlines() if "=" in l)
+    assert out["verdict"] == "PRESENT"
