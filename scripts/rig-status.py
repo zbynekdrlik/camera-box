@@ -171,6 +171,13 @@ def alert_condition(records, exit_code=None):
     exact 'tiché unknown' the rig-degradation-alert rule forbids."""
     if not records or (exit_code is not None and exit_code not in (0, 1, 2)):
         return f"prober-down:exit{exit_code}"
+    # Records present but ZERO real PASS/WARN/FAIL tiers (only neutral rows, e.g. RETIRED) is not
+    # health data -- it must PAGE, mirroring overall_state's ERROR (issue 1316: no-data must scream,
+    # never a silent status page over a neutral-only sweep). A real fleet always carries PASS rows,
+    # so this fires only on a genuinely broken/neutral-only audit.
+    s = summarize(records)
+    if s["pass"] + s["warn"] + s["fail"] == 0:
+        return f"prober-down:no-health-tiers:exit{exit_code}"
     fails = alert_signature(records)
     return f"fail:{fails}" if fails else ""
 

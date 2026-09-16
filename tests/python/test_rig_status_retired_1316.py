@@ -9,6 +9,7 @@ own. The verdict TOKEN is single-sourced from the audit's IMAG_RETIRED_VERDICT c
 renderer can never drift from what the audit actually emits.
 """
 import importlib.util
+import inspect
 from pathlib import Path
 
 HERE = Path(__file__).parent
@@ -97,3 +98,15 @@ def test_neutral_only_set_is_not_a_false_green():
 def test_retired_verdict_is_single_sourced_from_the_audit():
     # rig-status must reuse the audit constant, never a retyped literal that can drift
     assert rs.RETIRED_VERDICT == audit.IMAG_RETIRED_VERDICT
+    # and it must LOAD it dynamically (not a hardcoded copy that survives an audit-token rename)
+    assert "_load_audit_constant" in inspect.getsource(rs)
+
+
+def test_neutral_only_sweep_pages_instead_of_silently_passing():
+    # a records-set with zero real health tiers must PAGE (mirrors overall_state ERROR): no silent
+    # status page over a neutral-only sweep (issue 1316 -- no-data must scream).
+    recs = rs.parse_audit(f"[{RETIRED}] imag    RETIRED (box returned)\n")
+    assert rs.alert_condition(recs, exit_code=0) != ""
+    # a healthy fleet with a retired row must NOT page
+    healthy = rs.parse_audit(_RETIRED_SWEEP)
+    assert rs.alert_condition(healthy, exit_code=0) == ""
