@@ -12714,3 +12714,26 @@ no version bump (worktree lane; supervisor cherry-picks).
 - Ships: 0.5 s QPSK marker default (issue 1318), the [4b3/8] decodability preflight (issue 1324, closed with the run), the report-only level ceiling (issue 1323), the issue-1325 measurement half (buffered_ms + dock-quality-age facets, watchdog arms; bundle-state scripts deployed to strih/stream/resolume 22:24), the bkshading test hermeticity; the strict-zero fold (issue 1242) was tried + reverted (attempt 2 red on CAM2 1/1 + 0/1; attempt 3 carried the singletons on CAM7/CAM1 instead — not per-grabber).
 - Attempt 3 verdict: overall_pass=true, zero_loss, real_drops 0, A/V measured on 7 cams (preamble screens 20092), rig-wide correction applied via [8/8g].
 - Issue 1325 discriminator (live, no deploy): SetAsrcOuterBiasPpm +10 moved the mbc buffered_ms drain 1:1 with `applied` — the servo measures against the dantesync-slewed system clock while the mixer paces on QPC, and the sign into swresample drains the buffer; the fix lane (vendored libobs) is running.
+## 16.9.2026 — worker: ASRC servo master-clock + swresample sign fix (issue 1325 FIX half), lane/1325-asrcfix
+
+- RED ed9a582ff → GREEN 6fe420b49. Two coupled defects in `obs-source.c asrc_process_audio()`: the
+  servo measured `master_block_s` vs `genlock_wall_now_ns()` (the dantesync-slewed system clock)
+  instead of `os_gettime_ns()` (the QPC clock the audio mixer paces on / buffered_ms balances
+  against), AND fed `applied_ppm` un-negated to the swresample-native wrapper whose sign is the
+  reciprocal of the compensator's `corrected=raw/(1+applied/1e6)` lock model. Fix: measure vs
+  `os_gettime_ns()` + pass `-applied_ppm`. Both needed (master-only drains 10 ppm, sign-only grows
+  13 ppm; together flat, per the on-box outer-bias discriminator `drain ≈ -applied + 5`).
+- Tests: new pure gate `src/asrc_compensation_quantization.rs::servo_applied_ppm_to_sample_delta` +
+  parity test `servo_negates_applied_ppm_so_a_slow_source_stretches_1325` (applied<0 ⇒ +sample_delta);
+  source anchor `tests/genlock_preload.rs::vendored_source::asrc_servo_master_clock_is_os_gettime_ns_and_sign_negated_1325`
+  mirrored byte-identically into both `windows-genlock.yml` + `windows-genlock-fast.yml`. Forward-decl
+  for `genlock_wall_now_ns()` removed (sole pre-definition consumer); video-deadline uses unchanged.
+- Verify (Tier-0, no cargo): `rustc --test` on the pure module RED (1 fail) → GREEN (11 pass);
+  gcc `-Wall -Wextra -Wformat=2 -Wconversion` clean on the lifted `asrc_process_audio`; brace/paren
+  balance vs HEAD equal; anchor strings verified in the squished source; `cargo fmt --all --check`
+  clean; both YAML parse. Rules updated: asrc-residual-floor, asrc-bench-harness.
+- Deferred (followup_candidate, NOT filed — no worker filing authority): whether the whole audio
+  mixer should pace on the wall clock (issue 1303 direction) so encoded audio shares the video clock.
+  Read shows the encoded video output frame is stamped on `os_gettime_ns()` too (`obs-video.c`
+  video_time), so Approach 1 does NOT diverge the recording's A/V; Approach 2 is a separate
+  exploration. Supervisor: fast-DLL deploy strih+stream + ≥2 h buffered_ms-flat measurement.

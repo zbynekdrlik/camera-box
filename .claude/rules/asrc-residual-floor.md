@@ -75,11 +75,29 @@ catches it because it asserts against `compensate()`'s RETURN, never against a r
 buffer. The live drain is 1× (not the 2× a pure sign flip predicts), so the net effect is
 compensation-does-not-reach-the-buffer, not a clean inversion.
 
-**Whose job / how to fix (do NOT blind-fix in a worker lane):** a vendored ASRC change compiles at CI
-only + needs a FULL-BUNDLE deploy + ≥2 h of `buffered_ms`-flat measurement — supervisor-only, and a
-wrong-sign "fix" would DOUBLE the drift on the live broadcast rig. The decisive on-box discriminator
-BEFORE deploying: drive `swr_set_compensation` from a KNOWN +18 ppm and watch whether `buffered_ms`
-goes FLAT (sign was the only bug → negate the ppm fed to swresample / drive the ratio from the
-compensator's corrected return) or still drains (net-zero → the corrected timeline must be consumed
-directly). Tracked as issue 1325; the dev1 audio-lag watchdog's REPORT-ONLY buffered arm
-(`audio_lag_decision.classify_buffered`) makes the drift visible between runs meanwhile.
+**FIX LANDED (issue 1325 FIX lane, 16.9.2026) — TWO coupled defects, both in `asrc_process_audio()`
+(`obs-source.c`):** (1) the servo measured `master_block_s` against `genlock_wall_now_ns()` = the
+dantesync-SLEWED system clock, but the OBS audio mixer thread paces on `os_gettime_ns()` (QPC,
+`media-io/audio-io.c`) and `buffered_ms` is balanced against THAT — so the servo saw `|estimated| =
+f_phase` and "corrected" a drift the QPC-paced mixer never sees; now it measures against
+`os_gettime_ns()`. (2) The compensator's lock model `corrected = raw/(1+applied/1e6)` (applied<0 =
+slow source = STRETCH) is the RECIPROCAL sign of the swresample-native wrapper (`output =
+input·(1+ppm/1e6)`), so feeding `applied_ppm` un-negated COMPRESSED a slow source and drained the
+buffer; the call now passes `-applied_ppm`. The on-box discriminator that decided it was
+`SetAsrcOuterBiasPpm` +10 (comment 5703688577): the drain tracked `applied` 1:1, `drain ≈ −applied +
+5 ppm`, flat at `applied ≈ +5` (stretch) — so BOTH master-only (compress 5 → drain 10) and sign-only
+(stretch 18 vs a mixer needing 5 → grow 13) are individually wrong; both together flatten it. Tier-0
+sign gate: `src/asrc_compensation_quantization.rs::servo_applied_ppm_to_sample_delta` (parity:
+applied<0 ⇒ POSITIVE sample_delta); anchor: `tests/genlock_preload.rs::vendored_source::
+asrc_servo_master_clock_is_os_gettime_ns_and_sign_negated_1325` + both `windows-genlock*.yml`.
+
+**CROSS-CHECK CHANGE — the `|estimated| ≈ |f_phase|` reading above is PRE-#1325 HISTORY on a FIXED
+build.** It held ONLY while the servo measured against the slewed wall clock. After the #1325 fleet
+deploy, mbc `estimated` reads the true source-vs-MIXER residual (≈ **−5 ppm**, the source is ~5 ppm
+slower than the QPC mixer), NOT `−f_phase`. So on a FIXED (post-#1325-deploy) build: a healthy mbc is
+`estimated ≈ −5 ppm` with `buffered_ms` FLAT; a large `|estimated| ≈ |f_phase|` (~18 ppm) would now
+mean the fix REGRESSED (the servo is back on the wall clock) — no longer the "healthy floor". The
+`|estimated| ≈ |f_phase|` cross-check in the sections above still applies to reading OLD/mixed-fleet
+logs from PRE-fix builds. The vendored change is CI-compile + fast-DLL deploy (obs.dll) strih/stream
++ ≥2 h `buffered_ms`-flat measurement — supervisor-only; the dev1 audio-lag watchdog's REPORT-ONLY
+buffered arm (`audio_lag_decision.classify_buffered`) makes the drift visible between runs meanwhile.
