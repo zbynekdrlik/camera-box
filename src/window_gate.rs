@@ -166,26 +166,6 @@
 //! unaffected). See issue 1243's design-addendum comment for the full rationale, including the
 //! rejected alternatives. The walk-back trail stays on **issue 1242**, unchanged by this step.
 //!
-//! ## 2026-09-16 STRICT-ZERO RESTORE (FINAL) — issue 1242, the walk-back completed
-//!
-//! The residual FIFO copy churn was root-caused + fixed upstream (issues 1318/1320 strih PROGRAM
-//! render-freeze -> stream FIFO underrun -> relock storm; cure = genlock bundle `02b53180b`, live
-//! on strih/stream via its descendant `7e8efff6a` for PR #1322). The interim lane (tol 5 -> 2, floor
-//! 0.90 -> 0.95) gated tighter but kept the tolerance channel governing, because the post-cure
-//! sample was n=1. That precondition is now MET: `scripts/window_gate_walkdown.py 02b53180b
-//! 7e8efff6a` (segregated by the rig-verified `version-strih.json.genlock_build_sha`) shows post-cure
-//! runs 180691712 + 977889848 + 2019585820 all reading `windows_failed_report_only == 0`, every
-//! window 0/0, worst beat-corrected uniformity >= 0.9976, and CAM2 0/0 on every window across all
-//! four post-16.9 splitter-fed runs. So BOTH copies/gaps seams are DISARMED
-//! (`copies_gaps_tolerance_gates_overall_pass()` AND `segment_singleton_allowance_gates_overall_pass()`
-//! -> `false`) -- `decide`'s `else` arm (`copies == 0 && gaps == 0`) governs `overall_pass_term`, the
-//! absolute strict-zero fold. The CAM2 per-cambox override is dropped to `&[]`. The
-//! `WINDOW_COPIES_GAPS_TOLERANCE` const is kept at 2 as the #1132/#1220 dormant OBSERVABILITY lens
-//! (see its own doc for why NOT 0). Attempt 1 (622403283) carried one CAM1 gap 0/1 -- strict-zero
-//! now REDs it (the owner directive); the guard rail is the one-line report-only revert (re-arm the
-//! tolerance seam), never a silent widen. Every mechanism stays WIRED, never deleted
-//! (`gate-allowance-restore-red-green`).
-//!
 //! ## Why this lives at the crate root (default features), not in `probe`
 //!
 //! Same reasoning as `optical_floor.rs` / `av_window.rs`'s `#861` relaxation: the whole `probe`
@@ -280,16 +260,10 @@
 /// one). So this step tightens 5 -> 2 (a data-supported regression-catch step: it still REDs the
 /// 9-45/window burst class and the CAM6 26/27 render-freeze class, both >> 2, while every post-fix
 /// window sits at 0), keeping seam 2/seam 4 armed (the tolerance channel still governs the fold).
-/// **FULL strict-zero restore TAKEN 2026-09-16 (issue 1242 FINAL step):** the precondition was met
-/// (>= 2 consecutive strict-clean post-cure runs, 977889848 + 2019585820, plus 180691712), so BOTH
-/// `copies_gaps_tolerance_gates_overall_pass()` AND `segment_singleton_allowance_gates_overall_pass()`
-/// are now DISARMED (`false`) -- `decide`'s `else` arm (`copies == 0 && gaps == 0`) governs the fold.
-/// **This const is deliberately KEPT at 2, NOT set to 0:** once the seams are disarmed the blocking
-/// fold ignores it entirely, so its value is pure OBSERVABILITY -- it stays 2 as the #1132/#1220
-/// dormant lens so `relaxed_pass` still reports what a tol-2 rescue WOULD say (a `relaxed_pass==true`,
-/// `overall_pass_term==false` window is the disarmed rescue visibly doing nothing). Setting it to 0
-/// would collapse `relaxed_pass` into `strict_pass` and destroy that masking-guard visibility. A
-/// future re-arm re-calibrates it from fresh data, exactly as every prior walk step did.
+/// The FULL strict-zero restore (disarm `copies_gaps_tolerance_gates_overall_pass()` AND
+/// `segment_singleton_allowance_gates_overall_pass()`) is the EXPLICIT next step, gated on >= 2
+/// more consecutive `02b53180b`-or-later runs with `windows_failed_report_only == 0`. Walk-back
+/// stays on issue 1242.
 pub const WINDOW_COPIES_GAPS_TOLERANCE: u32 = 2;
 
 /// #1251 (2026-09-01) -- TEMPORARY per-cambox copies/gaps tolerance override, walk-back tracked on
@@ -310,14 +284,8 @@ pub const WINDOW_COPIES_GAPS_TOLERANCE: u32 = 2;
 /// fixtures deliberately does NOT match, so the override only ever touches the real rig (and the
 /// existing lowercase-cam2 boundary tests stay exactly as calibrated).
 ///
-/// **Walk-back DONE (issue 1242, 2026-09-16 final step):** dropped to `&[]`. cam2 became
-/// splitter-fed ~16.9 13:00 (the imag-HDMI projection tap retired with imag-nb, issue 1316); all
-/// four post-16.9 splitter-fed runs (180691712 / 977889848 / 2019585820 / 622403283) read CAM2 0/0
-/// on every window, so the HW carve-out is no longer needed. CAM2 now folds via the default
-/// (now-strict-zero) path like every other box. The lookup machinery below stays fully wired for a
-/// future per-box need (`gate-allowance-restore-red-green` -- the map-empty state is the tested
-/// walk-back state, never a deletion of the mechanism).
-pub const WINDOW_COPIES_GAPS_TOLERANCE_PER_CAMBOX: &[(&str, u32)] = &[];
+/// **Walk-back:** set this to `&[]` when issue 1249's HW swap lands -- tracked on issue 1242.
+pub const WINDOW_COPIES_GAPS_TOLERANCE_PER_CAMBOX: &[(&str, u32)] = &[("CAM2", 25)];
 
 /// The per-window copies/gaps tolerance that applies to `cambox`: the
 /// [`WINDOW_COPIES_GAPS_TOLERANCE_PER_CAMBOX`] override if one is listed for this EXACT label, else
@@ -364,19 +332,8 @@ pub fn copies_gaps_tolerance_for_cambox(cambox: &str) -> u32 {
 /// module doc's "2026-08-29 RE-ARM" section for the full evidence and the graduated-fallback
 /// property this leaves in place for [`segment_singleton_allowance_gates_overall_pass`] (untouched,
 /// still `true`, now reachable only if this seam is disarmed again in a future walk-down step).
-///
-/// **#1242 (2026-09-16, FINAL strict-zero restore) DISARMS this back to `false`.** The residual FIFO
-/// copy churn this rescue existed for was root-caused + fixed upstream (issues 1318/1320 render-
-/// freeze cure, bundle `02b53180b` / descendant `7e8efff6a`), and the interim lane's precondition is
-/// met: >= 2 consecutive strict-clean post-cure runs (977889848 + 2019585820, plus 180691712, all
-/// `windows_failed_report_only == 0`). With this AND [`segment_singleton_allowance_gates_overall_pass`]
-/// both `false`, [`decide`]'s `else` arm (`copies == 0 && gaps == 0`) governs `overall_pass_term` --
-/// the absolute strict-zero fold. `WINDOW_COPIES_GAPS_TOLERANCE` stays 2 as the dormant observability
-/// lens (`relaxed_pass` still reports what the tol-2 rescue WOULD say -- the #1132 masking-guard
-/// visibility). Re-arm to `true` = the one-line report-only GUARD RAIL if a healthy-chain run ever
-/// reds on ONLY these seams; never a silent widen.
 pub fn copies_gaps_tolerance_gates_overall_pass() -> bool {
-    false
+    true
 }
 
 /// #1169 (owner, 2026-08-22): the per-segment SINGLETON allowance applied to `copies`/`gaps` when
@@ -422,16 +379,8 @@ pub const SEGMENT_SINGLETON_GAPS_ALLOWANCE: u32 = 1;
 /// future walk-down step re-engages automatically if [`copies_gaps_tolerance_gates_overall_pass`]
 /// is ever disarmed again. Issue 1169's own re-tighten trail (this flag to `false`) is unaffected
 /// and independent of #1220's seam.
-///
-/// **#1242 (2026-09-16, FINAL strict-zero restore) DISARMS this to `false`** (with
-/// [`copies_gaps_tolerance_gates_overall_pass`] also disarmed). The `<=1/<=1` singleton band absorbed
-/// the single-copy/single-gap churn signature -- exactly what the strict-zero restore must now RED
-/// (the owner's "copies=0 must block" directive). With BOTH seams `false`, [`decide`]'s `else` arm
-/// governs. The band consts (`SEGMENT_SINGLETON_{COPIES,GAPS}_ALLOWANCE`) and every helper stay
-/// wired (never deleted) as the graduated fallback a future re-arm re-engages -- the
-/// `gate-allowance-restore-red-green` dormant-mechanism pattern.
 pub fn segment_singleton_allowance_gates_overall_pass() -> bool {
-    false
+    true
 }
 
 /// #1169: `true` exactly when a segment's nonzero `copies`/`gaps` are absorbed ONLY by the
@@ -614,16 +563,14 @@ pub fn decide_with_tolerance(
     // CAM1-class mask #1132 removed). Re-tighten to absolute zero = flip
     // `segment_singleton_allowance_gates_overall_pass()` to `false`.
     //
-    // #1242 (2026-09-16, FINAL strict-zero restore): BOTH seams are now DISARMED
-    // (`copies_gaps_tolerance_gates_overall_pass()` AND `segment_singleton_allowance_gates_overall_
-    // pass()` -> `false`, see their own docs), so the FIRST two arms below are skipped and the final
-    // `else` (`copies == 0 && gaps == 0`) governs `overall_pass_term` -- the absolute strict-zero
-    // fold the owner mandated (any nonzero copies/gaps REDs). `within_tolerance` / the singleton band
-    // still feed `relaxed_pass` (the dormant observability lens -- a `relaxed_pass==true`,
-    // `overall_pass_term==false` window is the disarmed rescue visibly doing nothing, never a hidden
-    // mask). Both arms stay WIRED as the graduated fallback a future re-arm re-engages (the guard-rail
-    // one-line revert): re-arm the tolerance seam -> the FIRST arm governs again; re-arm only the
-    // singleton seam -> the `else if` band governs. `gate-allowance-restore-red-green` dormant pattern.
+    // #1220 (owner mandate, 2026-08-29): `copies_gaps_tolerance_gates_overall_pass()` is RE-ARMED
+    // (see its own doc for the full decision record) -- the FIRST arm below is now taken, so
+    // `copies_gaps_ok == within_tolerance` and this term equals `relaxed_pass` exactly, restoring
+    // the pre-#1132 fold. The `else if` singleton arm stays wired as an automatic graduated
+    // FALLBACK: if a future walk-down step disarms the tolerance channel again, the (still-armed,
+    // untouched-by-#1220) `<=1/<=1` singleton band takes back over automatically -- one step down,
+    // never straight to the final `else` strict-zero floor. That `else` arm is reachable only if
+    // BOTH seams are disarmed (neither is, today).
     let copies_gaps_ok = if copies_gaps_tolerance_gates_overall_pass() {
         within_tolerance
     } else if segment_singleton_allowance_gates_overall_pass() {
@@ -759,20 +706,20 @@ mod tests {
         // staying far under the 9-45/window band every genuine regression on this const has
         // measured. See issue 1243's design-addendum comment for the full three-run table.
         //
-        // Issue 1242 (2026-09-16, walk-BACK) walked it 5 -> 2, then (FINAL step, same ticket)
-        // disarmed BOTH copies/gaps seams so the strict-zero `else` arm governs the blocking fold.
-        // The const is deliberately KEPT at 2 -- once the seams are disarmed the fold ignores it, so
-        // 2 is now the #1132/#1220 dormant observability lens (NOT the gate). See the const's own doc.
+        // Issue 1242 (2026-09-16, walk-BACK) walked it 5 -> 2 after issues 1318/1320 fixed the
+        // render-freeze churn source: the one post-fix run (180691712) is strict-clean, n=1 is too
+        // thin for strict-zero, so 2 is the interim regression-catch step (strict restore is next).
         assert_eq!(WINDOW_COPIES_GAPS_TOLERANCE, 2);
     }
 
     #[test]
     fn three_copies_or_gaps_gate_two_absorbed_after_1242() {
-        // Issue 1242 boundary at tolerance=2, which is now the dormant OBSERVABILITY lens (the
-        // blocking fold is strict-zero via the disarmed seams): THREE copies (or gaps) must FAIL the
-        // relaxed lens, while TWO stays absorbed by it (a `relaxed_pass==true`, `overall_pass_term==
-        // false` window is the disarmed rescue visibly doing nothing). Literal fixtures on purpose:
-        // this locks the concrete lens boundary, complementing the const-tracking tests above.
+        // Issue 1242 walk-back boundary at the walked-DOWN tolerance=2: THREE copies (or gaps)
+        // must FAIL the relaxed verdict, while TWO stays absorbed (every post-fix window read 0/0
+        // -- 2 is the interim margin, strict-zero restore is the next step). Recalibrated from the
+        // old tolerance=5 boundary (six-fails/five-absorbed) -- boundary-tracking with the const,
+        // NOT weakening. Literal fixtures on purpose: this locks the concrete boundary,
+        // complementing the const-tracking boundary tests above.
         assert!(
             !decide(100, 0, 3, 0).relaxed_pass,
             "1242: three copies must gate the relaxed verdict at tolerance=2"
@@ -1034,143 +981,130 @@ mod tests {
     // ------------------------------------------------------------------------------------------
 
     #[test]
-    fn both_copies_gaps_seams_are_disarmed_after_1242() {
-        // #1242 (2026-09-16, FINAL strict-zero restore): BOTH seams are DISARMED so `decide`'s
-        // `else` arm (`copies == 0 && gaps == 0`) governs `overall_pass_term`. Inverts the #1220
-        // re-arm assertion this replaces. The mechanism stays wired (the guard-rail re-arm
-        // re-engages it), so a pure-flag test keeps the dormant seam regression-covered.
+    fn copies_gaps_tolerance_re_armed_gates_overall_pass_again_1220() {
+        // #1220 (owner mandate, 2026-08-29) re-arms the seam #1132 (2026-08-19) had disarmed --
+        // see the module doc's "2026-08-29 RE-ARM" section and this function's own doc for the
+        // full decision record (two same-day full-cycle runs, 1989954227 + 797081170, the first
+        // consecutive-green A/V pair in this project's history, with the second run's contiguity
+        // failing purely on windows over the tighter #1169 singleton band while fully within this
+        // already-calibrated `<=3` channel). Renamed from
+        // `copies_gaps_tolerance_no_longer_gates_overall_pass_1132`, whose assertion is now the
+        // exact opposite.
         assert!(
-            !copies_gaps_tolerance_gates_overall_pass(),
-            "#1242: the <=2 tolerance channel must NOT rescue overall_pass anymore (strict-zero)"
-        );
-        assert!(
-            !segment_singleton_allowance_gates_overall_pass(),
-            "#1242: the <=1/<=1 singleton band must NOT rescue overall_pass anymore (strict-zero)"
+            copies_gaps_tolerance_gates_overall_pass(),
+            "#1220: the copies/gaps tolerance must rescue overall_pass again"
         );
     }
 
     #[test]
-    fn a_single_copy_now_reds_the_strict_zero_fold_1242() {
-        // #1242 final: with both seams disarmed, a single copy REDs `overall_pass_term` (the exact
-        // churn signature the owner mandated must block). `relaxed_pass` still absorbs it (the
-        // dormant tol-2 observability lens -- the disarmed rescue visibly doing nothing),
-        // `strict_pass` still fails (visible), and the singleton mechanism never fires (disarmed).
+    fn a_single_copy_is_absorbed_by_the_1220_tolerance_channel_not_the_1169_singleton() {
+        // Renamed from `a_single_copy_is_absorbed_by_the_1169_singleton_allowance_supersedes_1132`.
+        // The observable outcome (absorbed, strict still fails) is UNCHANGED by #1220 -- copies=1
+        // sits within BOTH the `<=1/<=1` singleton band and the wider `<=3` tolerance -- but the
+        // MECHANISM changed: it is absorbed by the re-armed tolerance channel now, never reaching
+        // the (still-armed, now-dormant) singleton branch at all. See
+        // `singleton_helper_fns_are_dormant_while_the_1220_tolerance_channel_is_armed` below for
+        // the proof this window's `singleton_allowance_consumed` is FALSE despite the absorption.
         let d = decide(847, 0, 1, 0);
         assert!(
             d.relaxed_pass,
-            "the tol-2 lens still reports the single copy as absorbed (observability): {d:?}"
+            "relaxed_pass stays tolerant/reported (observability): {d:?}"
         );
         assert!(
-            !d.overall_pass_term,
-            "#1242: a single copy REDs the strict-zero blocking fold: {d:?}"
+            d.overall_pass_term,
+            "#1220: a single copy is absorbed into the blocking verdict via the re-armed tolerance: {d:?}"
         );
         assert!(
             !d.strict_pass,
-            "strict still fails on the copy, visible: {d:?}"
+            "strict still fails on the copy, unchanged/visible: {d:?}"
         );
         assert!(
             !d.singleton_allowance_consumed,
-            "#1242: the singleton mechanism is disarmed -- never fires: {d:?}"
+            "#1220: the SINGLETON mechanism never fires -- the tolerance channel absorbed this, \
+             not the (dormant) singleton band: {d:?}"
         );
     }
 
     #[test]
-    fn a_single_gap_and_a_copy_gap_pair_now_red_the_strict_zero_fold_1242() {
-        // The live verdict 859647390 shapes (seg[4] CAM2 copies=1 gaps=0, seg[3] CAM3 copies=1
-        // gaps=1) plus a lone gap: under the restored strict-zero fold every one REDs
-        // `overall_pass_term`, while `relaxed_pass` still reports them absorbed (the tol-2 lens) and
-        // `strict_pass` stays false (visible).
+    fn a_single_gap_and_a_copy_gap_pair_are_absorbed_by_the_1220_tolerance_channel() {
+        // Renamed from `a_single_gap_and_a_copy_gap_pair_are_absorbed_by_the_1169_singleton_allowance`.
+        // The live verdict 859647390 shapes: seg[4] CAM2 copies=1 gaps=0, and seg[3] CAM3
+        // copies=1 gaps=1 -- both sit within the re-armed `<=3` tolerance (and, incidentally,
+        // within the dormant `<=1/<=1` band too). strict stays false; the singleton mechanism
+        // never fires (see the dedicated dormancy test below).
         for &(c, g) in &[(1u32, 0u32), (0, 1), (1, 1)] {
             let d = decide(847, 0, c, g);
             assert!(
-                d.relaxed_pass,
-                "#1242: copies={c} gaps={g} still within the tol-2 observability lens: {d:?}"
-            );
-            assert!(
-                !d.overall_pass_term,
-                "#1242: copies={c} gaps={g} REDs the strict-zero blocking fold: {d:?}"
+                d.overall_pass_term,
+                "#1220: copies={c} gaps={g} (<=3 each) absorbed into the blocking verdict: {d:?}"
             );
             assert!(!d.strict_pass, "strict still fails, visible: {d:?}");
         }
     }
 
     #[test]
-    fn two_copies_or_gaps_now_red_the_strict_zero_fold_1242() {
-        // SUPERSEDES the interim `two_copies_or_gaps_now_pass_within_the_walked_tolerance_1242`:
-        // with both seams disarmed (#1242 final), copies/gaps of 1 or 2 now RED `overall_pass_term`
-        // (only `copies==0 && gaps==0` passes). The tol-2 lens still reports them within its band
-        // (`relaxed_pass` true) -- the disarmed rescue visibly doing nothing.
-        for &(c, g) in &[(1u32, 0u32), (0, 1), (2, 0), (0, 2), (1, 2), (2, 1), (2, 2)] {
+    fn two_copies_or_gaps_now_pass_within_the_walked_tolerance_1242() {
+        // SUPERSEDES `two_copies_or_a_gap_pair_still_fail_after_singleton_allowance_1169`: with the
+        // tolerance channel re-armed (#1220) and walked DOWN to 2 (issue 1242 walk-back), copies/
+        // gaps up to 2 (unlike under the #1169 `<=1/<=1` band) are WITHIN tolerance and PASS the
+        // blocking verdict. Renamed + recalibrated from the tolerance=5-era set that also included
+        // (3,3)/(2,3): those now sit OVER the walked-down tolerance and correctly FAIL (covered by
+        // `tolerance_plus_one_copies_or_gaps_still_fail_over_the_reactivated_tolerance_1220`).
+        for &(c, g) in &[(2u32, 0u32), (0, 2), (1, 2), (2, 1), (2, 2)] {
             let d = decide(847, 0, c, g);
             assert!(
-                d.relaxed_pass,
-                "#1242: copies={c} gaps={g} stays within the tol-2 observability lens: {d:?}"
-            );
-            assert!(
-                !d.overall_pass_term,
-                "#1242: copies={c} gaps={g} REDs the strict-zero fold (only 0/0 passes): {d:?}"
+                d.overall_pass_term,
+                "#1242: copies={c} gaps={g} sits within the walked <=2 tolerance -- must pass \
+                 the blocking verdict: {d:?}"
             );
             assert!(
                 !d.strict_pass,
-                "strict fails on any nonzero copies/gaps, visible: {d:?}"
+                "strict still fails on any nonzero copies/gaps, unchanged/visible: {d:?}"
             );
         }
     }
 
     #[test]
-    fn over_the_tolerance_lens_band_still_fails_the_fold_1242() {
-        // Over the (now report-only) tol-2 lens band, a window fails BOTH the lens (`relaxed_pass`)
-        // and the strict-zero fold (`overall_pass_term`). Fixture tracks the const (`+1`) so it
-        // stays "genuinely one over the lens band" through any future re-arm. Under #1242 (both
-        // seams disarmed) the fold is strict-zero, so anything nonzero already fails the fold; this
-        // additionally pins that the lens itself still discriminates its band edge.
+    fn tolerance_plus_one_copies_or_gaps_still_fail_over_the_reactivated_tolerance_1220() {
+        // Renamed from `four_copies_or_gaps_still_fail_over_the_reactivated_tolerance_1220` --
+        // the fixture value tracks the const (`+1`), so the old "four" name went stale as soon as
+        // the const walked past 3 (it's 6 today, walked 3 -> 5 on issue 1243). The upper edge
+        // #1220 does NOT touch: `WINDOW_COPIES_GAPS_TOLERANCE + 1` must still FAIL -- this is what
+        // keeps the re-arm a real, still-discriminating gate rather than an open door. Mirrors run
+        // 1989954227's still-red CAM2 windows (copies=10/gaps=9, copies=19/gaps=18), still well
+        // over the walked-up value.
         for &(c, g) in &[
             (WINDOW_COPIES_GAPS_TOLERANCE + 1, 0u32),
             (0, WINDOW_COPIES_GAPS_TOLERANCE + 1),
         ] {
             let d = decide(847, 0, c, g);
             assert!(
-                !d.relaxed_pass,
-                "#1242: copies={c} gaps={g} exceeds the tol-2 lens band ({}) -- lens fails: {d:?}",
-                WINDOW_COPIES_GAPS_TOLERANCE
-            );
-            assert!(
                 !d.overall_pass_term,
-                "#1242: and the strict-zero fold fails it too: {d:?}"
+                "#1220: copies={c} gaps={g} exceeds the re-armed tolerance ({}) -- must still \
+                 fail: {d:?}",
+                WINDOW_COPIES_GAPS_TOLERANCE
             );
         }
     }
 
     #[test]
-    fn overall_pass_term_diverges_from_the_relaxed_lens_on_nonzero_after_1242() {
-        // #1242 final INVERTS the #1220 invariant: `overall_pass_term` (strict-zero) DIVERGES from
-        // `relaxed_pass` (the dormant tol-2 lens) on every nonzero-but-within-band window. They
-        // agree ONLY at copies==0 && gaps==0; from 1 up to the tol-2 band the lens still reports
-        // PASS while the strict fold REDs (the disarmed rescue visibly doing nothing); over the band
-        // both fail.
+    fn overall_pass_term_equals_relaxed_pass_across_the_band_1220() {
+        // The core invariant #1220 restores: `overall_pass_term == relaxed_pass` on EVERY input,
+        // not just clean copies/gaps (see `overall_pass_term_agrees_with_relaxed_on_clean_copies_
+        // gaps_1132` below for the narrower pre-#1220 invariant this generalizes). Swept across
+        // the whole reported tolerance band plus two steps over it, for both copies-only and
+        // gaps-only shapes.
         for n in 0..=(WINDOW_COPIES_GAPS_TOLERANCE + 2) {
             let dc = decide(847, 0, n, 0);
             let dg = decide(847, 0, 0, n);
-            if n == 0 {
-                assert!(
-                    dc.overall_pass_term && dc.relaxed_pass,
-                    "0/0 passes both the strict fold and the lens: {dc:?}"
-                );
-            } else if n <= WINDOW_COPIES_GAPS_TOLERANCE {
-                assert!(
-                    dc.relaxed_pass && !dc.overall_pass_term,
-                    "#1242: copies={n} within the tol lens (relaxed) but strict-zero REDs it: {dc:?}"
-                );
-                assert!(
-                    dg.relaxed_pass && !dg.overall_pass_term,
-                    "#1242: gaps={n} within the tol lens (relaxed) but strict-zero REDs it: {dg:?}"
-                );
-            } else {
-                assert!(
-                    !dc.relaxed_pass && !dc.overall_pass_term,
-                    "#1242: copies={n} over the tol band fails both lens and fold: {dc:?}"
-                );
-            }
+            assert_eq!(
+                dc.overall_pass_term, dc.relaxed_pass,
+                "#1220: copies={n} -- overall_pass_term must equal relaxed_pass: {dc:?}"
+            );
+            assert_eq!(
+                dg.overall_pass_term, dg.relaxed_pass,
+                "#1220: gaps={n} -- overall_pass_term must equal relaxed_pass: {dg:?}"
+            );
         }
     }
 
@@ -1241,73 +1175,80 @@ mod tests {
     // ------------------------------------------------------------------------------------------
 
     #[test]
-    fn singleton_band_consts_stay_calibrated_while_both_seams_are_disarmed_1242() {
-        // #1242 final: BOTH seam flags are now `false` (disarmed), but the singleton band CONSTS
-        // stay calibrated at 1/1 -- the band DEFINITION is wired (never deleted), only its gating
-        // flag is off. This is the `gate-allowance-restore-red-green` dormant-mechanism state: a
-        // guard-rail re-arm re-engages the band without re-deriving the consts.
+    fn singleton_allowance_flag_and_consts_stay_armed_and_calibrated_but_dormant_1220() {
+        // Renamed from `singleton_allowance_is_armed_and_calibrated_at_one_1169`. The FLAG and
+        // CONSTS are untouched by #1220 (still `true`/1/1) -- #1220 supersedes this seam by
+        // PRECEDENCE inside `decide()`, never by flipping this flag. Issue 1169's own re-tighten
+        // trail (this flag to `false`) stays independent and open.
         assert_eq!(SEGMENT_SINGLETON_COPIES_ALLOWANCE, 1);
         assert_eq!(SEGMENT_SINGLETON_GAPS_ALLOWANCE, 1);
         assert!(
-            !segment_singleton_allowance_gates_overall_pass(),
-            "#1242: the singleton band is disarmed (the strict-zero fold governs)"
+            segment_singleton_allowance_gates_overall_pass(),
+            "#1220 does not touch this flag -- it stays armed, now reachable only as a fallback"
         );
         assert!(
-            !copies_gaps_tolerance_gates_overall_pass(),
-            "#1242: the tolerance channel is disarmed too -- decide()'s else arm governs"
+            copies_gaps_tolerance_gates_overall_pass(),
+            "#1220: the WIDER tolerance channel is armed too, and takes precedence in decide()"
         );
     }
 
     #[test]
-    fn singleton_helper_fns_stay_dormant_under_the_disarmed_strict_zero_fold_1242() {
-        // #1242 final: the singleton helpers stay dormant -- now because their OWN seam is disarmed
-        // (not, as under #1220, because the tolerance channel superseded them by precedence).
-        // `segment_singleton_allowance_consumed` requires the singleton seam ARMED, now `false`, so
-        // it never fires; and a `<=1/<=1` window now REDs the strict-zero fold. The pure-method
-        // assertions keep the dormant mechanism regression-covered (`gate-allowance-restore-red-green`).
+    fn singleton_helper_fns_are_dormant_while_the_1220_tolerance_channel_is_armed() {
+        // Renamed from `singleton_allowance_consumed_flag_records_the_absorption_1169`, INVERTED:
+        // every one of these previously-`true`/`Some` results is now permanently `false`/`None`,
+        // because `segment_singleton_allowance_consumed` itself requires
+        // `!copies_gaps_tolerance_gates_overall_pass()`, which #1220 made `false` (armed = true).
+        // This is the "one test at the pure-method level keeps the dormant mechanism regression-
+        // tested" half of `gate-allowance-restore-red-green.md`'s doctrine, applied to a seam that
+        // stays reachable directly (not just through `decide()`).
         let d = decide(847, 0, 1, 1);
         assert!(
-            !d.overall_pass_term,
-            "#1242: copies=1 gaps=1 now REDs the strict-zero fold: {d:?}"
+            d.overall_pass_term,
+            "still absorbed -- by the tolerance channel now: {d:?}"
         );
         assert!(
             !d.singleton_allowance_consumed,
-            "#1242: the singleton mechanism is disarmed -- never attributes an absorption: {d:?}"
+            "#1220: the decision no longer attributes the absorption to the singleton: {d:?}"
         );
         assert!(
             !segment_singleton_allowance_consumed(1, 0),
-            "#1242: dormant -- copies=1 no longer 'consumes' the singleton"
+            "#1220: the singleton helper is dormant -- copies=1 no longer 'consumes' it"
         );
         assert!(
             !segment_singleton_allowance_consumed(0, 1),
-            "#1242: dormant -- gaps=1 no longer 'consumes' it"
+            "#1220: dormant -- gaps=1 no longer 'consumes' it"
         );
         assert!(
             !segment_singleton_allowance_consumed(1, 1),
-            "#1242: dormant -- copies=1 gaps=1 no longer 'consumes' it"
+            "#1220: dormant -- copies=1 gaps=1 no longer 'consumes' it"
         );
         assert!(
             !segment_singleton_allowance_consumed(0, 0),
-            "clean window consumes nothing (unaffected either way)"
+            "clean window still consumes nothing (unaffected either way)"
         );
         assert!(
             !segment_singleton_allowance_consumed(2, 0),
-            "an over-band count never 'consumes' the singleton (unaffected either way)"
+            "an over-singleton-band count still never 'consumes' the singleton (unaffected either way)"
         );
         assert!(
             !decide(847, 0, 0, 0).singleton_allowance_consumed,
             "a clean decision never reports the allowance consumed"
         );
+        assert!(
+            !decide(847, 0, 2, 0).singleton_allowance_consumed,
+            "#1220: copies=2 is now absorbed by the tolerance channel, not the singleton -- \
+             singleton_allowance_consumed stays false even though overall_pass_term is true"
+        );
     }
 
     #[test]
-    fn segment_singleton_note_stays_dormant_under_the_disarmed_strict_zero_fold_1242() {
-        // #1242 final: every shape that could fire the note returns `None`, since
-        // `segment_singleton_note` delegates to `segment_singleton_allowance_consumed`, which is
-        // permanently `false` now that the singleton seam ITSELF is disarmed.
+    fn segment_singleton_note_is_dormant_while_the_1220_tolerance_channel_is_armed() {
+        // Renamed from `segment_singleton_note_fires_only_when_consumed_1169`, INVERTED: every
+        // shape that used to fire the note now returns `None`, since `segment_singleton_note`
+        // delegates straight to the now-permanently-false `segment_singleton_allowance_consumed`.
         assert!(
             segment_singleton_note(1, 1).is_none(),
-            "#1242: the singleton note never fires while the band seam is disarmed"
+            "#1220: the singleton note never fires while the tolerance channel is armed"
         );
         assert!(segment_singleton_note(1, 0).is_none());
         assert!(segment_singleton_note(0, 1).is_none());
@@ -1317,23 +1258,22 @@ mod tests {
         );
         assert!(
             segment_singleton_note(2, 0).is_none(),
-            "an over-band count still gets no singleton note (unaffected either way)"
+            "#1220: copies=2 is absorbed by the tolerance channel now, not the singleton -- still \
+             no singleton note (a genuinely over-tolerance count still gets none either way)"
         );
     }
 
     // ---- #1251: per-cambox copies/gaps tolerance override (CAM2 -> 25, walk-back on issue 1242) ----
 
     #[test]
-    fn per_cambox_override_dropped_cam2_resolves_to_the_default_1242() {
-        // #1242 final: the CAM2 override map is emptied (`&[]`), so CAM2 resolves to the DEFAULT
-        // tolerance like every other box -- the post-16.9 splitter-fed CAM2 reads 0/0 on every
-        // window (180691712 / 977889848 / 2019585820 / 622403283), so the issue-1249 HW carve-out
-        // (the imag-HDMI-tap era) is no longer needed. The exact-match lookup machinery stays wired
-        // (the empty map is the tested walk-back state, never a deletion).
-        assert_eq!(
-            copies_gaps_tolerance_for_cambox("CAM2"),
-            WINDOW_COPIES_GAPS_TOLERANCE
-        );
+    fn per_cambox_tolerance_override_cam2_is_25_others_default_1251() {
+        // #1251: CAM2's grabber HW (issue 1249) starves in sub-second bursts, so the #1167 v4
+        // slot-fill pacer repeats the last frame (a copy) then skips (a gap) -- run 1326320314
+        // measured CAM2 windows at copies=8/gaps=8 and copies=18/gaps=17 while every OTHER box
+        // stayed within 5. The scoped override gives the EXACT production label "CAM2" a tolerance
+        // of 25 (covers the observed 18, one margin band under the ceiling); every other box keeps
+        // the default WINDOW_COPIES_GAPS_TOLERANCE.
+        assert_eq!(copies_gaps_tolerance_for_cambox("CAM2"), 25);
         assert_eq!(
             copies_gaps_tolerance_for_cambox("CAM3"),
             WINDOW_COPIES_GAPS_TOLERANCE
@@ -1342,6 +1282,10 @@ mod tests {
             copies_gaps_tolerance_for_cambox("CAM1"),
             WINDOW_COPIES_GAPS_TOLERANCE
         );
+        // Exact-match on purpose: production emits UPPERCASE `CAMN`, but the recording_segments.rs
+        // unit fixtures use lowercase `cam2` -- those must NOT pick up the override, so the
+        // override only ever touches the real rig (and the existing lowercase-cam2 tests stay red
+        // exactly where they were).
         assert_eq!(
             copies_gaps_tolerance_for_cambox("cam2"),
             WINDOW_COPIES_GAPS_TOLERANCE
@@ -1349,52 +1293,52 @@ mod tests {
     }
 
     #[test]
-    fn decide_for_cambox_cam2_now_folds_strict_zero_like_every_box_1242() {
-        // #1242 final: with the override dropped AND both seams disarmed, CAM2's former "absorbed"
-        // starvation bursts (run 1326320314: 8/8, 18/17) now RED the strict-zero fold exactly like
-        // any other box -- CAM2 is no longer specially relaxed.
+    fn decide_for_cambox_cam2_absorbs_the_observed_starvation_burst_1251() {
+        // The two CAM2 windows from run 1326320314: copies=8/gaps=8 and copies=18/gaps=17. Under
+        // the per-cambox tolerance (25) both are WITHIN tolerance, so relaxed_pass AND (with the
+        // #1220 tolerance seam armed) overall_pass_term become true.
         let d1 = decide_for_cambox("CAM2", 846, 0, 8, 8);
+        assert!(d1.relaxed_pass, "CAM2 8/8 within the 25 override: {d1:?}");
         assert!(
-            !d1.overall_pass_term,
-            "#1242: CAM2 8/8 now REDs the strict-zero fold (override gone): {d1:?}"
+            d1.overall_pass_term,
+            "CAM2 8/8 gates PASS under the override: {d1:?}"
         );
         let d2 = decide_for_cambox("CAM2", 847, 0, 18, 17);
+        assert!(d2.relaxed_pass, "CAM2 18/17 within the 25 override: {d2:?}");
         assert!(
-            !d2.overall_pass_term,
-            "#1242: CAM2 18/17 now REDs the strict-zero fold: {d2:?}"
+            d2.overall_pass_term,
+            "CAM2 18/17 gates PASS under the override: {d2:?}"
         );
+        // The copies/gaps are still COMPUTED -- the strict verdict still fails, never masked.
         assert!(
             !d2.strict_pass,
             "strict still fails on nonzero copies/gaps: {d2:?}"
         );
-        // CAM2 == the default decide across the board (override dropped).
-        assert_eq!(
-            decide_for_cambox("CAM2", 847, 0, 18, 17),
-            decide(847, 0, 18, 17),
-            "CAM2 decision == default decide (no override)"
-        );
     }
 
     #[test]
-    fn decide_for_cambox_cam2_single_copy_now_reds_no_carve_out_1242() {
-        // #1242 final: even a SINGLE copy on CAM2 now REDs the strict-zero fold -- the strongest
-        // proof the per-box carve-out is gone (under the old 25 override CAM2 absorbed up to 25).
-        let d = decide_for_cambox("CAM2", 847, 0, 1, 0);
+    fn decide_for_cambox_cam2_over_the_override_still_fails_1251() {
+        // Over the 25 override the window fails again -- the override is a bounded relax to green,
+        // not a blanket pass for CAM2.
+        let d = decide_for_cambox("CAM2", 847, 0, 26, 0);
+        assert!(
+            !d.relaxed_pass,
+            "CAM2 copies=26 over the 25 override still fails: {d:?}"
+        );
         assert!(
             !d.overall_pass_term,
-            "#1242: CAM2 copies=1 REDs the strict-zero fold (no carve-out): {d:?}"
+            "and therefore fails overall_pass: {d:?}"
         );
     }
 
     #[test]
-    fn decide_for_cambox_any_box_uses_the_default_tolerance_1242() {
-        // With the map empty (#1242), a box (CAM3) gets NO per-box relaxation: copies/gaps=6 over
-        // the default tol-2 lens fails exactly as `decide` (default) would, and its decision equals
-        // the default decide across the board. The per-cambox lookup is now uniform for every box.
+    fn decide_for_cambox_other_box_keeps_the_default_tolerance_1251() {
+        // A non-overridden box (CAM3) gets NO relaxation beyond the default 5: copies/gaps=6 fails
+        // exactly as `decide` (default) would -- the override is CAM2-scoped, never global.
         let d = decide_for_cambox("CAM3", 847, 0, 6, 6);
         assert!(
             !d.relaxed_pass,
-            "CAM3 6/6 over the default tol-2 lens still fails relaxed: {d:?}"
+            "CAM3 6/6 over the default 5 still fails: {d:?}"
         );
         let default = decide(847, 0, 6, 6);
         assert_eq!(
@@ -1418,18 +1362,17 @@ mod tests {
 
     #[test]
     fn relaxed_failure_reasons_with_tolerance_honors_the_per_cambox_band_1251() {
-        // Proves the per-cambox tolerance MACHINERY stays wired even though the override map is now
-        // empty (#1242): judged at an explicit tolerance of 25, copies=20 (over the default 2, UNDER
-        // 25) is NOT an over-tolerance failure reason.
+        // Judged at the 25 override, copies=20 (over the default 5, UNDER 25) is NOT an
+        // over-tolerance failure reason -- it passes relaxed there.
         let none = relaxed_failure_reasons_with_tolerance(847, 0, 20, 0, 25);
         assert!(
             !none.contains(&RelaxedFailureReason::OverCopiesGapsTolerance),
-            "20 copies is within an explicit tolerance of 25 -- not an over-tolerance reason: {none:?}"
+            "20 copies is within the 25 override -- not an over-tolerance reason: {none:?}"
         );
-        // Over that explicit tolerance it IS reported.
+        // Over the override it IS reported.
         let over = relaxed_failure_reasons_with_tolerance(847, 0, 26, 0, 25);
         assert!(over.contains(&RelaxedFailureReason::OverCopiesGapsTolerance));
-        // The default-tolerance wrapper uses the const (2): 20 copies IS over the default.
+        // The default-tolerance wrapper is unchanged (const 5): 20 copies IS over the default.
         let over_default = relaxed_failure_reasons(847, 0, 20, 0);
         assert!(over_default.contains(&RelaxedFailureReason::OverCopiesGapsTolerance));
     }
