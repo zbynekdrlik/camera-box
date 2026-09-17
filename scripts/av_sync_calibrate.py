@@ -34,6 +34,7 @@ Without --apply this is a DRY RUN: prints the plan, changes nothing on the OBS b
 """
 import argparse
 import json
+import math
 import os
 import sys
 import time
@@ -45,6 +46,13 @@ from obs_phase2 import _conn, _rpc  # noqa: E402
 # #805 -- reuse av_sync_measure.py's own constants directly (never duplicate/mirror them --
 # CONF_MIN/FRAME_MS drifting apart silently would be worse than an import).
 from av_sync_measure import CONF_MIN, FRAME_MS  # noqa: E402
+
+# #1333 -- reuse the #1003 phase-safe pin snap + the SAME 30fps program grid it uses (never a
+# second copy of the FIFO release-phase math). phase_snap_pin returns the nearest integer pin whose
+# frac(pin/frame) is in the robust centre band, so the vendored FIFO's ceil-hold is deterministic
+# (no 29/30-frame limit cycle). This is applied to the STRIH per-camera pins today; #1333 adds it to
+# the STREAM 'NDI 2ME PGM' pin, which was never snapped (Nález 1-4).
+from e2e_measurement_pins import FRAME_PERIOD_MS, phase_snap_pin  # noqa: E402
 
 # OBS property name for the per-source genlock latency (PROP_GENLOCK_LATENCY_MS_SRC in
 # ndi-source.cpp, DistroAV fork — the "Latency (ms)" slider per source).
@@ -63,6 +71,21 @@ LATENCY_MAX = 2000
 AV_SYNC_MAX_STEP_MS = int(os.environ.get("AV_SYNC_MAX_STEP_MS", "50"))
 
 DEFAULT_SOURCE = "NDI 2ME PGM"
+
+# #1333 -- the 30fps program grid the stream 'NDI 2ME PGM' genlock FIFO quantizes video to
+# (hold = ceil(pin/33.333) frames). SAME value phase_snap_pin uses (imported, never re-derived).
+STREAM_FRAME_MS = FRAME_PERIOD_MS
+
+# #1333 -- the sub-frame A/V remainder's actuator: the 'mbc' input's obs-websocket 5.x audio sync
+# offset, in MILLISECONDS (POSITIVE DELAYS the audio). Nothing in the repo used it before -- the
+# gate wrote only the frame-quantized pin, so the sub-frame residual had no actuator (Nález 1-4).
+AUDIO_SYNC_OFFSET_KEY = "inputAudioSyncOffset"
+# The stream reference audio input the E2E measures against (av-sync dock 'mbc' source). Default so
+# the #856 controller path applies the audio trim with no recording-e2e.sh change.
+DEFAULT_AUDIO_SOURCE = "mbc"
+# Hardware/sanity clamp on the PERSISTENT audio sync offset (scene collection value). +/-500 ms is
+# far beyond any real sub-frame trim (<= one frame after damping) yet bounds a runaway.
+AUDIO_OFFSET_CLAMP_MS = 500
 
 # Canonical Windows-side destination this script's payload MUST end up at for the #390
 # drift-guard `av_sync_calibrated_ms` best-effort cross-check to read it (see
@@ -175,6 +198,89 @@ def required_delay_ms(current_delay_ms: int, offset_ms: float) -> int:
     return result
 
 
+def split_av_correction(
+    residual_ms: float,
+    current_pin_ms: int,
+    current_audio_offset_ms: float,
+    gain: float,
+    frame_ms: float = STREAM_FRAME_MS,
+):
+    """#1333 (bod 4) — split one measured A/V residual into a FRAME-QUANTIZED, phase-snapped video
+    pin correction and a CONTINUOUS `mbc` audio sync-offset correction.
+
+    Returns (new_pin_ms:int, new_audio_offset_ms:float, diag:dict).
+
+    WHY split (Nález 1-4): the vendored stream FIFO holds video frame-quantized —
+    hold = ceil(pin/frame_ms) frames — so writing the pin as an ARBITRARY integer ms (what
+    `required_delay_ms` did) makes a pin with frac(pin/frame_ms) < 0.5 toggle the hold 29/30 frames
+    (a ±frame_ms limit cycle, live: pin 974 dock 72↔104 for hours), and the sub-frame remainder had
+    NO actuator. So: the whole-frame part goes to the pin (always phase-snapped so the ceil-hold is
+    deterministic), and the sub-frame remainder goes to the audio sync offset (sample-fine).
+
+    Sign convention (matches src/av_window.rs + required_delay_ms):
+      residual_ms = video_time - audio_time; residual > 0 => video LAGS audio.
+      * VIDEO PIN: residual > 0 => REDUCE the pin (video presented earlier).
+          frames    = round(gain * residual / frame_ms)          (whole frames only)
+          pin_raw   = current_pin - frames * frame_ms            (down for positive residual)
+        pin_raw is +/-AV_SYNC_MAX_STEP_MS/run step-clamped (vs current_pin), then phase-snapped via
+        the #1003 `phase_snap_pin` (frac >= 0.5, ~0.75 — round == ceil, no 29/30 toggle), then
+        hardware-clamped to [LATENCY_MIN, LATENCY_MAX]. The snap is applied LAST so the WRITTEN pin
+        is ALWAYS phase-safe; in the rare large-correction case the snap can move the pin up to
+        PHASE_SNAP_MAX_COST_MS beyond the +/-step window — phase-safety takes precedence (it is the
+        whole point of this ticket) and the #1265 guard HOLDs |residual| > 60 anyway.
+      * AUDIO OFFSET (OBS SetInputAudioSyncOffset, ms; POSITIVE DELAYS audio): the sub-frame
+        REMAINDER the pin could not take. The pin's ACTUAL whole-frame video shift is
+          video_shift = (ceil(pin_new/frame_ms) - ceil(pin_cur/frame_ms)) * frame_ms
+        (negative when the pin dropped => video presented earlier => residual reduced by that whole
+        amount), so the residual left for audio is
+          residual_eff = residual + video_shift.
+        residual_eff > 0 => video still lags => DELAY audio => offset INCREASES:
+          audio_new = current_audio_offset + gain * residual_eff
+        step-clamped +/-AV_SYNC_MAX_STEP_MS/run (vs current_audio_offset) then hardware-clamped
+        +/-AUDIO_OFFSET_CLAMP_MS. (residual_eff uses the FINAL pin_new, so the audio always picks up
+        exactly what the pin — after every clamp/snap — did not.)
+
+    Pure: no OBS/ssh/network, no file I/O — fully Tier-0 unit-testable off-rig.
+    """
+    frames = int(round(gain * residual_ms / frame_ms))
+    pin_raw = current_pin_ms - frames * frame_ms
+
+    # +/-step clamp the raw target move, THEN snap phase-safe, THEN hardware clamp. Snap last so the
+    # written pin is never in the prone < 0.5 band (the #1333 invariant), even if the step clamp bit.
+    step = AV_SYNC_MAX_STEP_MS
+    pin_stepped = max(current_pin_ms - step, min(current_pin_ms + step, pin_raw))
+    pin_snapped = phase_snap_pin(pin_stepped)
+    pin_new = max(LATENCY_MIN, min(LATENCY_MAX, pin_snapped))
+
+    video_shift_ms = (
+        math.ceil(pin_new / frame_ms) - math.ceil(current_pin_ms / frame_ms)
+    ) * frame_ms
+    residual_eff_ms = residual_ms + video_shift_ms
+
+    audio_raw = current_audio_offset_ms + gain * residual_eff_ms
+    audio_stepped = max(
+        current_audio_offset_ms - step, min(current_audio_offset_ms + step, audio_raw)
+    )
+    audio_new = max(-AUDIO_OFFSET_CLAMP_MS, min(AUDIO_OFFSET_CLAMP_MS, audio_stepped))
+
+    diag = {
+        "gain": gain,
+        "frames": frames,
+        "pin_raw_ms": pin_raw,
+        "pin_stepped_ms": pin_stepped,
+        "pin_snapped_ms": pin_snapped,
+        "pin_new_ms": pin_new,
+        "video_shift_ms": video_shift_ms,
+        "residual_eff_ms": residual_eff_ms,
+        "audio_raw_ms": audio_raw,
+        "audio_new_ms": audio_new,
+        "pin_step_clamped": pin_stepped != pin_raw,
+        "audio_step_clamped": audio_stepped != audio_raw,
+        "audio_hw_clamped": audio_new != audio_stepped,
+    }
+    return pin_new, audio_new, diag
+
+
 def offset_from_verdict_json(path: str) -> float:
     """Read the measured `av_offset_ms` from a `recording-verdict --av-sync` JSON.
 
@@ -243,9 +349,60 @@ def apply_latency(ws, source: str, current_ms: int, new_ms: int) -> int:
     )
 
 
+def read_current_audio_offset(ws, source: str) -> float:
+    """#1333 — read the CURRENT obs-websocket audio sync offset (ms) on `source` (the pre-change
+    snapshot for the split's audio actuator). Absent/None -> 0.0 (a fresh source has no offset)."""
+    resp = _rpc(ws, "GetInputAudioSyncOffset", {"inputName": source})
+    val = resp.get(AUDIO_SYNC_OFFSET_KEY)
+    current = 0.0 if val is None else float(val)
+    print(f"[av-sync] audio-source='{source}' current {AUDIO_SYNC_OFFSET_KEY}={current:.0f}ms")
+    return current
+
+
+def apply_audio_offset(ws, source: str, current_ms: float, new_ms: float) -> int:
+    """#1333 — set the `mbc` audio sync offset (ms), verify via read-back (#358 pattern), and on a
+    read-back mismatch ROLL BACK to `current_ms` and FAIL LOUD (SystemExit) — the source is never
+    left half-set. Mirrors `apply_latency` exactly, for the audio actuator. Writes an integer ms
+    (obs-websocket stores the offset coarsely; sub-ms is not meaningful)."""
+    target = int(round(new_ms))
+    current_int = int(round(current_ms))
+    print(f"[av-sync] SET AUDIO '{source}' {AUDIO_SYNC_OFFSET_KEY}: {current_int} -> {target}")
+    _rpc(ws, "SetInputAudioSyncOffset", {
+        "inputName": source,
+        AUDIO_SYNC_OFFSET_KEY: target,
+    })
+    back = _rpc(ws, "GetInputAudioSyncOffset", {"inputName": source})
+    actual = back.get(AUDIO_SYNC_OFFSET_KEY)
+    if actual == target:
+        print(f"[av-sync] VERIFIED AUDIO '{source}' {AUDIO_SYNC_OFFSET_KEY}={actual}")
+        return actual
+
+    sys.stderr.write(
+        f"[av-sync] audio read-back mismatch on '{source}': set {target}, got {actual!r} -- "
+        f"rolling back to {current_int}\n"
+    )
+    _rpc(ws, "SetInputAudioSyncOffset", {
+        "inputName": source,
+        AUDIO_SYNC_OFFSET_KEY: current_int,
+    })
+    rb = _rpc(ws, "GetInputAudioSyncOffset", {"inputName": source})
+    rb_actual = rb.get(AUDIO_SYNC_OFFSET_KEY)
+    if rb_actual != current_int:
+        sys.stderr.write(
+            f"[av-sync] WARN audio rollback ALSO mismatched on '{source}': expected {current_int}, "
+            f"got {rb_actual!r} -- manual check required!\n"
+        )
+    raise SystemExit(
+        f"[av-sync] FAILED to apply {AUDIO_SYNC_OFFSET_KEY}={target} on '{source}' "
+        f"(read-back={actual!r}); rolled back to {current_int} "
+        f"(rollback read-back={rb_actual!r}) -- source never left half-set"
+    )
+
+
 def write_last_json(
     json_path: Path, source: str, offset_ms: float, applied_latency_ms: int,
     loop_gain: "float | None" = None, combined_offset_ms_raw: "float | None" = None,
+    audio_offset_ms: "int | None" = None, audio_source: "str | None" = None,
 ) -> dict:
     """Persist the calibrated absolute value: {source, offset_ms, applied_latency_ms, ts}.
 
@@ -273,6 +430,14 @@ def write_last_json(
         payload["loop_gain"] = loop_gain
     if combined_offset_ms_raw is not None:
         payload["combined_offset_ms_raw"] = combined_offset_ms_raw
+    # #1333: the #856 split path ALSO records the applied `mbc` audio sync offset so the NEXT run's
+    # #1265 guard reads BOTH last-applied actuators; ADDED keys only -- the existing
+    # source/offset_ms/applied_latency_ms/ts contract (read by pins-snapshot/rig-mode/drift-guard)
+    # is byte-for-byte unchanged, and the operator/aligner path (no audio) omits them entirely.
+    if audio_offset_ms is not None:
+        payload["audio_offset_ms"] = audio_offset_ms
+    if audio_source is not None:
+        payload["audio_source"] = audio_source
     tmp = json_path.with_suffix(json_path.suffix + ".tmp")
     tmp.write_text(json.dumps(payload, indent=2))
     tmp.replace(json_path)
@@ -436,6 +601,10 @@ def main():
     ap.add_argument("--host", default=None, help="OBS WS host (required unless --calibrate)")
     ap.add_argument("--password", default="")
     ap.add_argument("--source", default=DEFAULT_SOURCE)
+    # #1333: the audio input the sub-frame A/V remainder is trimmed on (the av-sync dock 'mbc'
+    # source). Only used on the #856 SPLIT path (--loop-gain + --combined-offset-ms present); the
+    # operator/aligner --offset-ms path stays pin-only.
+    ap.add_argument("--audio-source", default=DEFAULT_AUDIO_SOURCE)
     group = ap.add_mutually_exclusive_group()
     group.add_argument("--offset-ms", type=float, help="measured offset in ms (video - audio)")
     group.add_argument(
@@ -501,13 +670,39 @@ def main():
         else offset_from_verdict_json(args.verdict_json)
     )
 
+    loop_gain = _opt_float(args.loop_gain)
+    combined_offset_ms_raw = _opt_float(args.combined_offset_ms)
+    # #1333: the SPLIT path is the #856 controller path -- both the loop gain AND the raw combined
+    # residual are supplied (recording-e2e.sh [8/8g] always sets them as a pair). It replaces the old
+    # arbitrary-ms pin write with a frame-quantized + phase-snapped pin PLUS a continuous 'mbc' audio
+    # sync-offset trim of the sub-frame remainder. The operator/aligner --offset-ms path (no gain
+    # context) keeps the legacy pin-only required_delay_ms behavior untouched.
+    split_mode = loop_gain is not None and combined_offset_ms_raw is not None
+
     ws = _conn(args.host, args.password)
     current = read_current_latency(ws, args.source)
-    new_ms = required_delay_ms(current, offset)
-    print(
-        f"[av-sync] source='{args.source}' current={current}ms offset={offset:.1f}ms "
-        f"-> new={new_ms}ms"
-    )
+
+    current_audio = None
+    new_audio = None
+    if split_mode:
+        current_audio = read_current_audio_offset(ws, args.audio_source)
+        new_ms, new_audio, split_diag = split_av_correction(
+            combined_offset_ms_raw, current, current_audio, loop_gain
+        )
+        print(
+            f"[av-sync] source='{args.source}' current={current}ms "
+            f"residual(raw)={combined_offset_ms_raw:.1f}ms gain={loop_gain:.2f} "
+            f"-> pin={new_ms}ms (frames={split_diag['frames']}, "
+            f"video_shift={split_diag['video_shift_ms']:.1f}ms); "
+            f"audio '{args.audio_source}' {current_audio:.0f} -> {int(round(new_audio))}ms "
+            f"(remainder={split_diag['residual_eff_ms']:.1f}ms)"
+        )
+    else:
+        new_ms = required_delay_ms(current, offset)
+        print(
+            f"[av-sync] source='{args.source}' current={current}ms offset={offset:.1f}ms "
+            f"-> new={new_ms}ms"
+        )
 
     # #1265: the ONE grep-able gain line -- raw combined, gain, damped (= the applied offset), the
     # +/-50/run step-clamped offset, and the resulting pin. Emitted ONLY when the #856 controller
@@ -515,8 +710,6 @@ def main():
     # the DAMPED value (the gain was applied upstream at [8/8g]); `clamped` is the offset after the
     # +/-AV_SYNC_MAX_STEP_MS step clamp (the pin `->` value is the real result incl. the hardware
     # clamp). The existing `[av-sync] SET ...: A -> B` line (grepped by other consumers) is unchanged.
-    loop_gain = _opt_float(args.loop_gain)
-    combined_offset_ms_raw = _opt_float(args.combined_offset_ms)
     if loop_gain is not None:
         clamped = max(-AV_SYNC_MAX_STEP_MS, min(AV_SYNC_MAX_STEP_MS, offset))
         raw_disp = combined_offset_ms_raw if combined_offset_ms_raw is not None else offset
@@ -530,15 +723,36 @@ def main():
         return
 
     applied = apply_latency(ws, args.source, current, new_ms)
+    applied_audio = None
+    if split_mode:
+        # #1333: BOTH-or-NEITHER. The pin is applied+verified above; now apply the audio remainder.
+        # If the audio apply fails its own read-back it rolls the AUDIO back and raises -- we then
+        # ALSO roll the PIN back to its pre-change value so the pair is never left half-set, and
+        # re-raise (nothing is persisted for a failed pair).
+        try:
+            applied_audio = apply_audio_offset(ws, args.audio_source, current_audio, new_audio)
+        except SystemExit:
+            try:
+                apply_latency(ws, args.source, applied, current)
+            except SystemExit as pin_rollback_exc:
+                sys.stderr.write(
+                    f"[av-sync] WARN pin rollback after an audio failure ALSO failed: "
+                    f"{pin_rollback_exc} -- manual check required!\n"
+                )
+            raise
+
     used_default_path = args.json_path is None
     json_path = Path(args.json_path) if args.json_path else default_last_json_path()
     payload = write_last_json(
         json_path, args.source, offset, applied,
         loop_gain=loop_gain, combined_offset_ms_raw=combined_offset_ms_raw,
+        audio_offset_ms=applied_audio,
+        audio_source=(args.audio_source if split_mode else None),
     )
     print(
-        f"[av-sync] APPLIED + verified: '{args.source}' {GENLOCK_SRC_LATENCY_KEY}={applied}; "
-        f"persisted {json_path}"
+        f"[av-sync] APPLIED + verified: '{args.source}' {GENLOCK_SRC_LATENCY_KEY}={applied}"
+        + (f"; '{args.audio_source}' {AUDIO_SYNC_OFFSET_KEY}={applied_audio}" if split_mode else "")
+        + f"; persisted {json_path}"
     )
 
     # #465: when this landed on the LOCAL off-box fallback (no PROGRAMDATA -> we are not
