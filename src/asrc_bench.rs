@@ -513,10 +513,10 @@ impl RealtimeAsrcCompensator {
     /// buffer self-heals its calibrated depth. No-op until the setpoint has been captured (first
     /// rate lock). Exact mirror of the C `asrc_compensator_shift_level_target()`.
     pub fn shift_level_target(&mut self, delta_ms: f64) {
-        // RED stub (issue #1335 follow-up): does NOT move the setpoint yet, so the level integral
-        // still refills the buffer toward the OLD depth and the deliberate trim is cancelled — the
-        // bench test below fails until the real body lands in the GREEN commit.
-        let _ = delta_ms;
+        if self.level_captured {
+            self.level_target_ms += delta_ms;
+            self.level_last_ms += delta_ms;
+        }
     }
 
     /// The audio-timeline advance AFTER applying whatever `applied_ppm` is CURRENTLY in effect —

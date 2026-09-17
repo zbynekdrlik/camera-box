@@ -1911,6 +1911,48 @@ mod vendored_source {
     }
 
     #[test]
+    fn asrc_setpoint_follows_sync_offset_1335() {
+        // issue #1335 follow-up: a DELIBERATE audio sync-offset change shifts the source's
+        // placement (in.timestamp += sync_offset) and thus its ASRC mix-buffer depth by the same
+        // delta; the level integral must move its setpoint by that delta (shift_level_target),
+        // NOT refill toward the old one and cancel the deliberate trim (issue 1333). Src authority
+        // + Tier-0 gate: src/asrc_bench.rs (RealtimeAsrcCompensator::shift_level_target + the
+        // shift_level_target_holds_setpoint_after_offset_jump_1335 bench). This static guard keeps
+        // the vendored C mirror in lock-step (a subtree pull / hand-edit reverting the shift would
+        // ship an obs.dll where the servo fights the trim again). Keep byte-exact with the shipped
+        // lines.
+        let h = squish(&vendor_file(ASRC_COMPENSATOR_H));
+        assert!(
+            h.contains(
+                "EXPORT void asrc_compensator_shift_level_target(struct asrc_compensator *c, double delta_ms);"
+            ),
+            "{ASRC_COMPENSATOR_H}: #1335 follow-up — asrc_compensator_shift_level_target is no \
+             longer declared; the offset-change hook cannot move the level setpoint."
+        );
+
+        let c = squish(&vendor_file(ASRC_COMPENSATOR_C));
+        assert!(
+            c.contains(
+                "if (c->level_captured) { c->level_target_ms += delta_ms; c->level_last_ms += delta_ms;"
+            ),
+            "{ASRC_COMPENSATOR_C}: #1335 follow-up — asrc_compensator_shift_level_target no longer \
+             moves level_target_ms/level_last_ms by delta_ms behind the level_captured gate; the \
+             deliberate audio trim would be cancelled again. Keep numerically identical to \
+             src/asrc_bench.rs shift_level_target."
+        );
+
+        let src = squish(&vendor_file(OBS_SOURCE));
+        assert!(
+            src.contains(
+                "asrc_compensator_shift_level_target(&source->asrc, (double)(sync_offset - source->last_sync_offset) / 1e6);"
+            ),
+            "{OBS_SOURCE}: #1335 follow-up — the last_sync_offset change branch no longer calls \
+             asrc_compensator_shift_level_target with the (sync_offset - last_sync_offset)/1e6 \
+             delta; a deliberate offset change is silently undone by the level integral."
+        );
+    }
+
+    #[test]
     fn build_latch_drains_burst_to_target_in_vendored_source() {
         // #116: the genlock_fifo branch of ready_async_frame must DRAIN the excess
         // oldest frames at the build latch (and after a preload-change re-arm) so every

@@ -278,3 +278,15 @@ double asrc_compensator_get_outer_bias_ppm(const struct asrc_compensator *c)
 {
 	return c->outer_bias_ppm;
 }
+
+/* camera-box #1335 follow-up: move the captured buffer-LEVEL setpoint by a deliberate audio
+ * sync-offset delta so the level integral holds the NEW depth instead of refilling toward the old
+ * one and cancelling the deliberate trim. No-op until the setpoint has been captured (first rate
+ * lock). Mirror of src/asrc_bench.rs RealtimeAsrcCompensator::shift_level_target -- keep identical. */
+void asrc_compensator_shift_level_target(struct asrc_compensator *c, double delta_ms)
+{
+	if (c->level_captured) {
+		c->level_target_ms += delta_ms;
+		c->level_last_ms += delta_ms;
+	}
+}

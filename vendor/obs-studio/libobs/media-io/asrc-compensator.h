@@ -280,6 +280,23 @@ EXPORT void asrc_compensator_set_outer_bias_ppm(struct asrc_compensator *c, doub
  * for telemetry (GetAsrcOuterBiasPpm) and tests. */
 EXPORT double asrc_compensator_get_outer_bias_ppm(const struct asrc_compensator *c);
 
+/* camera-box #1335 follow-up: shift the captured buffer-LEVEL setpoint by
+ * `delta_ms` to track a DELIBERATE audio sync-offset change. A sync-offset
+ * change of Delta (ns -> ms) moves this source's audio placement -- and thus
+ * its mix-buffer depth -- by exactly Delta (obs-source.c applies
+ * `in.timestamp += sync_offset` BEFORE placement). Without this, the level
+ * integral would keep the OLD setpoint and REFILL the buffer back toward it,
+ * silently cancelling the deliberate audio trim within ~1-2 h. Move the
+ * setpoint by the SAME Delta so the integral holds the NEW depth (level_last_ms
+ * too, so the first window after the jump does not read a false error against a
+ * stale telemetry sample); the integral itself is left untouched (no windup).
+ * UNINTENDED discontinuities (dropout/relock) must NOT call this -- they flush
+ * the regression (dropping level_captured) so the setpoint re-captures and the
+ * buffer self-heals its calibrated depth. No-op until the setpoint has been
+ * captured (first rate lock). Mirror of src/asrc_bench.rs
+ * RealtimeAsrcCompensator::shift_level_target. */
+EXPORT void asrc_compensator_shift_level_target(struct asrc_compensator *c, double delta_ms);
+
 #ifdef __cplusplus
 }
 #endif

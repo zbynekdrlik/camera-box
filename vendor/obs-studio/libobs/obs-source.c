@@ -1757,6 +1757,17 @@ static void source_output_audio_data(obs_source_t *source, const struct audio_da
 	if (source->last_sync_offset != sync_offset) {
 		if (source->last_sync_offset)
 			push_back = false;
+		/* camera-box #1335 follow-up: a DELIBERATE sync-offset change of Delta shifts this
+		 * source's audio placement (in.timestamp += sync_offset above) and therefore its ASRC
+		 * mix-buffer depth by Delta. Move the level setpoint by the SAME Delta so the level
+		 * integral holds the NEW depth instead of refilling toward the old one and silently
+		 * cancelling the deliberate audio trim (issue 1333). Computed from the OLD
+		 * last_sync_offset BEFORE it is overwritten below; sync_offset is in ns so /1e6 -> ms.
+		 * Audio thread -- source->asrc lives here (asrc_process_audio writes it), no new lock.
+		 * No-op until the setpoint has been captured (first rate lock). Unintended
+		 * discontinuities never reach this branch (they flush the regression instead). */
+		asrc_compensator_shift_level_target(&source->asrc,
+						    (double)(sync_offset - source->last_sync_offset) / 1e6);
 		source->last_sync_offset = sync_offset;
 	}
 
