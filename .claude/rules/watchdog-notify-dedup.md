@@ -103,6 +103,17 @@ absolute A/V-offset BAND arm, whose OUT_OF_BAND page (`av-band-$box`) TIME-BUCKE
 allowlisted in the #1206 sweep; allowlisting the FILE permits the bucketed band line without requiring
 the step line to bucket (the sweep is file-scoped, not key-scoped).
 
+**Split file — `avsync-lineup-alert-watchdog.sh` (#1331):** the #813 GO/NO-GO + liveness arms keep
+STABLE keys (`avsync-lineup-liveness`, `avsync-lineup-preflight-nogo`), but the SAME file now also
+carries the production-critical OFFSET ALARM arm, whose on-air rozladenie page (`avsync-offset-stream`)
+TIME-BUCKETS via `watchdog_notify_key` (`fire_offset_notify`) — the SyncNet-measured stream A/V offset
+being out of band during a LIVE stream is the same production-critical A/V-sync-measurement class as
+av-step's band arm above, so it re-pings "dokolečka" while it persists. The re-ping doctrine's
+quality-gated-input rule (the 16.9 storm caveat) is met by the arm's confidence floor
+(`OFFSET_CONF_FLOOR`, cross-ref `av_sync_measure.py` `CONF_MIN=4.0`): a low-confidence verdict is
+SUPPRESSED (log-only), never a page. The file is allowlisted in the #1206 sweep exactly like av-step
+— only the offset line buckets, the liveness/preflight lines stay stable.
+
 **asio-starve (#1023) and vb-matrix (#1227) were RE-classified OUT of production-critical (#1308 step-3,
 owner ruling 14.9.2026 „5 A"):** VB-Matrix on the stream box is NOT production audio — its
 `ASIO Input Capture` input is muted and lives only in scene `party`, and the `StartVBMatrix` task has

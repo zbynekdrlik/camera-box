@@ -88,6 +88,29 @@ fn watchdog_has_both_modes_and_the_shared_notify_path() {
 }
 
 #[test]
+fn watchdog_runs_the_offset_arm_after_the_liveness_pass() {
+    let body = read("scripts/avsync-lineup-alert-watchdog.sh");
+    assert!(
+        body.contains("run_offset_pass"),
+        "#1331: the offset arm must run as a second pass (run_offset_pass) on the SAME gathered facts"
+    );
+    assert!(
+        body.contains("\"$LINEUP_DECIDER\" offset --facts"),
+        "#1331: the offset arm must route through the pure avsync_lineup.py offset decider: {body}"
+    );
+}
+
+#[test]
+fn offset_arm_uses_a_time_bucketed_production_critical_dedup_key() {
+    let body = read("scripts/avsync-lineup-alert-watchdog.sh");
+    assert!(
+        body.contains("watchdog_notify_key \"avsync-offset-stream\""),
+        "#1331: an on-air A/V rozladenie is production-critical (issue 1308) -- its dedup key must \
+         time-bucket via the shared watchdog_notify_key helper: {body}"
+    );
+}
+
+#[test]
 fn systemd_units_wire_the_script_on_a_5min_timer() {
     let service = read(SERVICE_UNIT);
     let timer = read(TIMER_UNIT);
@@ -238,6 +261,10 @@ const HB_SILENT: &str =
 const HB_BAND: &str =
     "measured: db=-5.4 [2026-08-17 08:00:00] UNMEASURABLE window (best confidence 3.2 < 4.0 - no usable face)";
 const HB_NO_SIGNAL: &str = "no-signal: grab failed: ffmpeg rc=-5 (relay/stream down)";
+// #1331 offset-arm fixtures. ASCII-only (no quotes/`$`/backtick) so they embed cleanly in the fake
+// sshpass shell script -- the single quotes around 2ME PGM in the live verdict are dropped here.
+const HB_MISALIGNED: &str = "measured: db=-5.4 [2026-08-17 08:00:00] AV offset +2 fr (+80 ms) conf 8.1 :: audio predbieha video o ~80 ms -> ZNIZ 2ME PGM latency o 80";
+const HB_MISALIGNED_LOWCONF: &str = "measured: db=-5.4 [2026-07-26 15:00:42] AV offset +2 fr (+80 ms) conf 3.6 :: audio predbieha video o ~80 ms -> ZNIZ 2ME PGM latency o 80";
 
 // --- the load-bearing case: TODAY (2026-08-17) would have paged --------------------------------
 
@@ -328,6 +355,80 @@ fn liveness_ok_when_stream_live_and_line_healthy() {
     assert!(
         !err.contains("WOULD alert"),
         "OK must not alert: stderr={err}"
+    );
+}
+
+// --- #1331 offset arm: page an on-air A/V rozladenie ("hlasenia pocas live") ---------------------
+
+#[test]
+fn offset_alarms_when_stream_live_and_out_of_band_confident() {
+    // a CONFIDENT SyncNet offset (80 ms, conf 8.1) out of the 60 ms band during a live stream.
+    let h = Harness::new(HB_MISALIGNED);
+    let (_c, _o, err) = h.run(
+        ". \"$SCRIPT\"\nDRY_RUN=1\nmain",
+        &[("FAKE_STREAM_ACTIVE", "True")],
+    );
+    assert!(
+        err.contains("offset_action=ALARM") && err.contains("sig=offset"),
+        "a confident out-of-band offset during a live stream must ALARM: stderr={err}"
+    );
+    assert!(
+        err.contains("WOULD alert") && err.contains("ROZLADENIE"),
+        "must reach the (dry-run) offset alert branch: stderr={err}"
+    );
+}
+
+#[test]
+fn offset_ok_when_in_sync_no_false_page() {
+    let h = Harness::new(HB_OK);
+    let (_c, _o, err) = h.run(
+        ". \"$SCRIPT\"\nDRY_RUN=1\nmain",
+        &[("FAKE_STREAM_ACTIVE", "True")],
+    );
+    assert!(err.contains("offset_action=OK"), "stderr={err}");
+    assert!(
+        !err.contains("ROZLADENIE"),
+        "an in-sync program must not offset-alert: stderr={err}"
+    );
+}
+
+#[test]
+fn offset_suppressed_for_a_low_confidence_verdict_the_july_garbage() {
+    // 80 ms out of band but conf 3.6 (< 4.0 floor) -> unreliable -> SUPPRESSED, never a page.
+    let h = Harness::new(HB_MISALIGNED_LOWCONF);
+    let (_c, _o, err) = h.run(
+        ". \"$SCRIPT\"\nDRY_RUN=1\nmain",
+        &[("FAKE_STREAM_ACTIVE", "True")],
+    );
+    assert!(
+        err.contains("offset_action=SUPPRESSED") && err.contains("sig=low-conf"),
+        "a low-confidence verdict must be SUPPRESSED: stderr={err}"
+    );
+    assert!(!err.contains("ROZLADENIE"), "stderr={err}");
+}
+
+#[test]
+fn offset_suppressed_when_stream_off_air() {
+    let h = Harness::new(HB_MISALIGNED);
+    let (_c, _o, err) = h.run(
+        ". \"$SCRIPT\"\nDRY_RUN=1\nmain",
+        &[("FAKE_STREAM_ACTIVE", "False")],
+    );
+    assert!(
+        err.contains("sig=not-live"),
+        "an off-air stream must SUPPRESS the offset arm: stderr={err}"
+    );
+    assert!(!err.contains("ROZLADENIE"), "stderr={err}");
+}
+
+#[test]
+fn offset_fires_notify_with_a_bucketed_dedup_key_when_not_dry_run() {
+    let h = Harness::new(HB_MISALIGNED);
+    let (_c, _o, _e) = h.run(". \"$SCRIPT\"\nmain", &[("FAKE_STREAM_ACTIVE", "True")]);
+    let calls = h.notify_calls();
+    assert!(
+        calls.contains("ROZLADENIE") && calls.contains("--dedup-key avsync-offset-stream-"),
+        "a confirmed offset ALARM must invoke notify with a TIME-BUCKETED dedup key: calls={calls:?}"
     );
 }
 
