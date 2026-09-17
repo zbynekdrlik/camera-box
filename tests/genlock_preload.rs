@@ -1902,7 +1902,9 @@ mod vendored_source {
 
         let audio = squish(&vendor_file(OBS_AUDIO));
         assert!(
-            audio.contains("obs_source_input_buf_ms(tsrc->audio_input_buf[0].size, sample_rate)"),
+            audio.contains(
+                "obs_source_input_buf_ms(tsrc->audio_input_buf[0].size, (uint32_t)sample_rate)"
+            ),
             "{OBS_AUDIO}: #1335 — the #800 audio telemetry no longer uses the shared \
              obs_source_input_buf_ms() helper (a second bytes->ms copy would drift from #1335)."
         );
