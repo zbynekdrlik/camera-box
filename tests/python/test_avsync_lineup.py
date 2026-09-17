@@ -316,10 +316,10 @@ def test_liveness_SUPPRESSED_when_stream_state_unknown_and_line_down():
 # prefixed by avsync-watchdog.ps1 with `measured: db=<X> `.
 # ---------------------------------------------------------------------------
 
-# in-band (nonzero but < 60 ms), high confidence -> OK, must not page.
-HB_IN_BAND = ("measured: db=-5.4 [2026-08-17 08:00:00] AV offset +1 fr (+40 ms) conf 8.0 :: "
-              "audio predbieha video o ~40 ms -> ZNIZ '2ME PGM' latency o 40")
-# out of band (>= 60 ms) but LOW confidence (the 2026-07-26 conf-3.6 garbage era) -> SUPPRESSED.
+# in-band (nonzero but < 30 ms), high confidence -> OK, must not page.
+HB_IN_BAND = ("measured: db=-5.4 [2026-08-17 08:00:00] AV offset +0 fr (+15 ms) conf 8.0 :: "
+              "audio predbieha video o ~15 ms -> ZNIZ '2ME PGM' latency o 15")
+# out of band (>= 30 ms) but LOW confidence (the 2026-07-26 conf-3.6 garbage era) -> SUPPRESSED.
 HB_MISALIGNED_LOWCONF = ("measured: db=-5.4 [2026-07-26 15:00:42] AV offset +2 fr (+80 ms) conf 3.6 "
                          ":: audio predbieha video o ~80 ms -> ZNIZ '2ME PGM' latency o 80")
 # out of band, video-leading (negative), high confidence -> ALARM with the ZVYS advice.
@@ -377,7 +377,7 @@ def _offset_facts():
         "now": 1100,
         "stale_s": 1200,
         "heartbeat_status": HB_MISALIGNED,
-        "offset_alarm_ms": 60,
+        "offset_alarm_ms": 30,
         "offset_conf_floor": 4.0,
     }
 
@@ -405,7 +405,7 @@ def test_offset_OK_when_in_sync():
 
 def test_offset_OK_when_nonzero_but_within_band():
     f = _offset_facts()
-    f["heartbeat_status"] = HB_IN_BAND  # 40 ms < 60 ms
+    f["heartbeat_status"] = HB_IN_BAND  # 15 ms < 30 ms
     action, _, sig = al.offset_alarm(f)
     assert action == "OK" and sig == "ok"
 
@@ -500,6 +500,6 @@ def test_offset_alarm_uses_documented_defaults_when_facts_omit_them():
     f = _offset_facts()
     del f["offset_alarm_ms"]
     del f["offset_conf_floor"]
-    # HB_MISALIGNED = 80 ms conf 5.1 -> default 60 ms / floor 4.0 -> ALARM.
+    # HB_MISALIGNED = 80 ms conf 5.1 -> default 30 ms / floor 4.0 -> ALARM.
     action, _, sig = al.offset_alarm(f)
     assert action == "ALARM" and sig == "offset"

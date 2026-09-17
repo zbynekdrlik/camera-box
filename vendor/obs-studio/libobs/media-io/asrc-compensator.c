@@ -37,6 +37,14 @@ static void asrc_regression_flush(struct asrc_compensator *c)
 	c->cum_master_s = 0.0;
 	c->cum_ymm_s = 0.0;
 	c->reg_locked = false;
+	/* camera-box #1335: a level shift invalidates the captured setpoint AND the integral it built
+	 * up; drop both so a relock re-captures the setpoint and re-integrates from 0 (default-safe). */
+	c->level_integral_ppm = 0.0;
+	c->level_captured = false;
+	/* camera-box #1335 follow-up 2: a flush is an UNINTENDED discontinuity that re-captures the
+	 * setpoint from the post-relock depth, so any in-progress fast level-restore is abandoned (the
+	 * buffer self-heals). step_count/last_step_ms are running telemetry -- never reset here. */
+	c->level_restore = false;
 }
 
 void asrc_compensator_init(struct asrc_compensator *c)
@@ -50,11 +58,16 @@ void asrc_compensator_init(struct asrc_compensator *c)
 	c->window_raw_s = 0.0; /* camera-box #962 */
 	c->window_master_s = 0.0; /* camera-box #962 */
 	c->window_block_count = 0; /* camera-box #962 */
-	asrc_regression_flush(c); /* camera-box #1084: empty buffer, 0 cumulatives, unlocked */
+	c->level_target_ms = 0.0; /* camera-box #1335 */
+	c->level_last_ms = 0.0; /* camera-box #1335 */
+	c->step_count = 0; /* camera-box #1335 follow-up 2 */
+	c->last_step_ms = 0.0; /* camera-box #1335 follow-up 2 */
+	c->level_restore = false; /* camera-box #1335 follow-up 2 */
+	asrc_regression_flush(c); /* camera-box #1084/#1335: empty buffer, 0 cumulatives, 0 integral, unlocked */
 }
 
 double asrc_compensator_compensate(struct asrc_compensator *c, double raw_advance_s, double master_block_s,
-				    double *applied_ppm_out)
+				    double buffered_ms, double *applied_ppm_out)
 {
 	if (master_block_s <= 0.0) {
 		/* A non-positive block duration carries no timing information (e.g. a duplicate or
@@ -115,61 +128,130 @@ double asrc_compensator_compensate(struct asrc_compensator *c, double raw_advanc
 			asrc_regression_flush(c);
 			window_rejected_this_call = true;
 		} else {
-			/* camera-box #1084: push one regression point -- (cumulative accepted-window
-			 * master time, cumulative raw-minus-master) -- into the fixed-capacity ring, slide
-			 * it to the last ASRC_REGRESSION_SPAN_S, and re-fit the rate slope. The Rust authority
-			 * (src/asrc_bench.rs) uses a Vec that evict-before-appends + age-evicts in this
-			 * identical oldest->newest order. The evict-before-append capacity guard is defensive;
-			 * age eviction already bounds a >=1 s-window buffer well below ASRC_REGRESSION_CAP, so
-			 * neither the guard nor a ring wrap ever fires in practice. */
-			c->cum_master_s += window_master_s;
-			c->cum_ymm_s += window_raw_s - window_master_s;
-			/* Defensive capacity guard (mirror of the Rust): evict the oldest point BEFORE
-			 * appending if the ring is already full, so the newest point never overwrites a live
-			 * slot. Age eviction (below) keeps a >=1 s-window buffer at ~601 points, well under
-			 * ASRC_REGRESSION_CAP, so this never fires in practice. */
-			if (c->reg_count == ASRC_REGRESSION_CAP) {
-				c->reg_head = (c->reg_head + 1) % ASRC_REGRESSION_CAP;
-				c->reg_count--;
+			/* camera-box #1335 follow-up 2: STEP DETECTION -> RE-BASE. The prospective new
+			 * cumulative point (advance the anchors by this closed window), and the single-window
+			 * RESIDUAL vs the locked fit's RATE (how far THIS window's own advance increment deviates
+			 * from the slope's expected increment). It is a per-window quantity -- the cumulative
+			 * noise cancels (pt_ymm - cum_ymm_s == this window's increment) -- so ordinary +-1-3 ms
+			 * window jitter stays under ASRC_STEP_RESIDUAL_MS, while a real sample-loss/dup or
+			 * wall-clock step (tens of ms in ONE window) exceeds it. On a step, RE-BASE (shift
+			 * cum_ymm_s onto the pre-step fit line, do NOT insert the step point, keep the lock +
+			 * slope + applied) instead of inserting it (which would bias the 600 s slope; the live
+			 * 17.9. 18:52 est +16 -> -83 -> -152 swing). The Rust None (rate-only bench) path skips
+			 * this; the C path ALWAYS has buffered_ms, so here it is unconditional (mirror of the
+			 * Rust Some path). */
+			const double pt_master = c->cum_master_s + window_master_s;
+			const double pt_ymm = c->cum_ymm_s + (window_raw_s - window_master_s);
+			const double r_s =
+				(window_raw_s - window_master_s) - (c->estimated_ppm / 1000000.0) * window_master_s;
+			bool rebased = false;
+			if (c->reg_locked && fabs(r_s * 1000.0) > ASRC_STEP_RESIDUAL_MS) {
+				/* RE-BASE: cum_ymm_s -= r leaves the anchor on the pre-step fit line
+				 * (cum_ymm_before + slope*window_master), so future points align; keep the lock,
+				 * slope, and applied (no 60 s decay). */
+				c->cum_master_s = pt_master;
+				c->cum_ymm_s = pt_ymm - r_s;
+				c->step_count++;
+				c->last_step_ms = r_s * 1000.0;
+				c->level_last_ms = buffered_ms;
+				/* FAST bounded level restore, but ONLY if the buffer level corroborates a real
+				 * sample loss/dup (|level err| >= half the residual magnitude). A wall-clock-only
+				 * jump leaves buffered_ms unchanged => re-base only, no restore. */
+				if (c->level_captured &&
+				    fabs(buffered_ms - c->level_target_ms) >= 0.5 * fabs(r_s * 1000.0))
+					c->level_restore = true;
+				rebased = true;
 			}
-			const uint32_t tail = (c->reg_head + c->reg_count) % ASRC_REGRESSION_CAP;
-			c->reg_x[tail] = c->cum_master_s;
-			c->reg_y[tail] = c->cum_ymm_s;
-			c->reg_count++;
-			const double cutoff = c->cum_master_s - ASRC_REGRESSION_SPAN_S;
-			while (c->reg_count > 1 && c->reg_x[c->reg_head] < cutoff) {
-				c->reg_head = (c->reg_head + 1) % ASRC_REGRESSION_CAP;
-				c->reg_count--;
-			}
-			const uint32_t n = c->reg_count;
-			if (n >= ASRC_REGRESSION_MIN_POINTS) {
-				/* Re-anchor to the oldest point (bounded magnitudes -> no catastrophic
-				 * cancellation over a long run) and recompute the five ordinary-least-squares
-				 * sums in FULL, in a fixed oldest->newest iteration order -- deterministic and
-				 * bit-identically matching the Rust Vec (no incremental subtract-on-evict, whose
-				 * FP rounding would drift the two apart). slope = (n*Sxy - Sx*Sy) / (n*Sxx -
-				 * Sx*Sx); the rate offset in ppm is slope * 1e6. */
-				const double x0 = c->reg_x[c->reg_head];
-				const double y0 = c->reg_y[c->reg_head];
-				double sx = 0.0, sy = 0.0, sxx = 0.0, sxy = 0.0;
-				for (uint32_t i = 0; i < n; i++) {
-					const uint32_t idx = (c->reg_head + i) % ASRC_REGRESSION_CAP;
-					const double x = c->reg_x[idx] - x0;
-					const double y = c->reg_y[idx] - y0;
-					sx += x;
-					sy += y;
-					sxx += x * x;
-					sxy += x * y;
+
+			if (!rebased) {
+				/* camera-box #1084: push one regression point -- (cumulative accepted-window
+				 * master time, cumulative raw-minus-master) -- into the fixed-capacity ring, slide
+				 * it to the last ASRC_REGRESSION_SPAN_S, and re-fit the rate slope. The Rust authority
+				 * (src/asrc_bench.rs) uses a Vec that evict-before-appends + age-evicts in this
+				 * identical oldest->newest order. The evict-before-append capacity guard is defensive;
+				 * age eviction already bounds a >=1 s-window buffer well below ASRC_REGRESSION_CAP, so
+				 * neither the guard nor a ring wrap ever fires in practice. */
+				c->cum_master_s = pt_master;
+				c->cum_ymm_s = pt_ymm;
+				/* Defensive capacity guard (mirror of the Rust): evict the oldest point BEFORE
+				 * appending if the ring is already full, so the newest point never overwrites a live
+				 * slot. Age eviction (below) keeps a >=1 s-window buffer at ~601 points, well under
+				 * ASRC_REGRESSION_CAP, so this never fires in practice. */
+				if (c->reg_count == ASRC_REGRESSION_CAP) {
+					c->reg_head = (c->reg_head + 1) % ASRC_REGRESSION_CAP;
+					c->reg_count--;
 				}
-				const double nf = (double)n;
-				const double denom = nf * sxx - sx * sx;
-				if (fabs(denom) > 1e-9) {
-					const double slope = (nf * sxy - sx * sy) / denom;
-					c->estimated_ppm = slope * 1000000.0;
+				const uint32_t tail = (c->reg_head + c->reg_count) % ASRC_REGRESSION_CAP;
+				c->reg_x[tail] = c->cum_master_s;
+				c->reg_y[tail] = c->cum_ymm_s;
+				c->reg_count++;
+				const double cutoff = c->cum_master_s - ASRC_REGRESSION_SPAN_S;
+				while (c->reg_count > 1 && c->reg_x[c->reg_head] < cutoff) {
+					c->reg_head = (c->reg_head + 1) % ASRC_REGRESSION_CAP;
+					c->reg_count--;
 				}
-				const uint32_t newest = (c->reg_head + n - 1) % ASRC_REGRESSION_CAP;
-				if (c->reg_x[newest] - c->reg_x[c->reg_head] >= ASRC_REGRESSION_LOCK_SPAN_S)
-					c->reg_locked = true;
+				const uint32_t n = c->reg_count;
+				if (n >= ASRC_REGRESSION_MIN_POINTS) {
+					/* Re-anchor to the oldest point (bounded magnitudes -> no catastrophic
+					 * cancellation over a long run) and recompute the five ordinary-least-squares
+					 * sums in FULL, in a fixed oldest->newest iteration order -- deterministic and
+					 * bit-identically matching the Rust Vec (no incremental subtract-on-evict, whose
+					 * FP rounding would drift the two apart). slope = (n*Sxy - Sx*Sy) / (n*Sxx -
+					 * Sx*Sx); the rate offset in ppm is slope * 1e6. */
+					const double x0 = c->reg_x[c->reg_head];
+					const double y0 = c->reg_y[c->reg_head];
+					double sx = 0.0, sy = 0.0, sxx = 0.0, sxy = 0.0;
+					for (uint32_t i = 0; i < n; i++) {
+						const uint32_t idx = (c->reg_head + i) % ASRC_REGRESSION_CAP;
+						const double x = c->reg_x[idx] - x0;
+						const double y = c->reg_y[idx] - y0;
+						sx += x;
+						sy += y;
+						sxx += x * x;
+						sxy += x * y;
+					}
+					const double nf = (double)n;
+					const double denom = nf * sxx - sx * sx;
+					if (fabs(denom) > 1e-9) {
+						const double slope = (nf * sxy - sx * sy) / denom;
+						c->estimated_ppm = slope * 1000000.0;
+					}
+					const uint32_t newest = (c->reg_head + n - 1) % ASRC_REGRESSION_CAP;
+					if (c->reg_x[newest] - c->reg_x[c->reg_head] >= ASRC_REGRESSION_LOCK_SPAN_S)
+						c->reg_locked = true;
+				}
+
+				/* camera-box #1335: buffer-LEVEL holding integral, updated ONCE per closed ACCEPTED
+				 * window (a rejected window took the branch above; a re-based window took the branch
+				 * above; an unlocked servo skips the update). buffered_ms is the source's current
+				 * mix-buffer depth (obs-source.c reads it from audio_input_buf[0].size). Mirror of
+				 * src/asrc_bench.rs compensate_with_level. */
+				c->level_last_ms = buffered_ms;
+				if (c->reg_locked) {
+					if (!c->level_captured) {
+						/* setpoint = the buffer depth the mixer had settled at when the rate loop
+						 * first locked; re-captured after every flush/relock. */
+						c->level_target_ms = buffered_ms;
+						c->level_captured = true;
+					}
+					/* Anti-windup: integrate only while the composite rate target is not clamped at
+					 * the hard +/-ASRC_MAX_PPM bound AND the fast level-restore burst is not active
+					 * (camera-box #1335 follow-up 2: freeze the integral during a restore so the two
+					 * level correctors don't wind against each other). err_ms = target - buffered; a
+					 * DEFICIT (buffer below setpoint) drives the integral MORE NEGATIVE =>
+					 * more-negative applied => STRETCH => raises the buffer (sign confirmed by the
+					 * #1335 live -5 ppm outer-bias test, 17.9.). window_master_s is this closed
+					 * window's master duration (~1 s). */
+					const double rate_target = c->estimated_ppm + c->outer_bias_ppm + c->level_integral_ppm;
+					const bool saturated = rate_target <= -ASRC_MAX_PPM || rate_target >= ASRC_MAX_PPM;
+					if (!saturated && !c->level_restore) {
+						const double err_ms = c->level_target_ms - buffered_ms;
+						c->level_integral_ppm =
+							asrc_clamp(c->level_integral_ppm -
+									   ASRC_LEVEL_KI_PPM_PER_MS_S * err_ms * window_master_s,
+								   -ASRC_LEVEL_INTEGRAL_MAX_PPM, ASRC_LEVEL_INTEGRAL_MAX_PPM);
+					}
+				}
 			}
 		}
 	}
@@ -187,10 +269,35 @@ double asrc_compensator_compensate(struct asrc_compensator *c, double raw_advanc
 		 * own). Once locked, add the outer-loop bias to the slope estimate and clamp the SUM to the
 		 * hard ppm bound before ever using it as a target. Mirror of src/asrc_bench.rs
 		 * RealtimeAsrcCompensator::compensate. */
-		const double target_ppm = (!c->reg_locked)
-						   ? 0.0
-						   : asrc_clamp(c->estimated_ppm + c->outer_bias_ppm, -ASRC_MAX_PPM,
-								ASRC_MAX_PPM);
+		/* camera-box #1335: the buffer-LEVEL integral is folded in alongside the outer bias, then
+		 * the SUM is clamped to the hard ppm bound (level_integral_ppm is 0 until the first lock).
+		 * camera-box #1335 follow-up 2: the LEVEL P term + the fast bounded restore burst are folded
+		 * in too, both driven by the LIVE buffered_ms. SIGN matches the proven #1335 integral:
+		 * (buffered - target) < 0 (deficit) => negative => stretch => raises the buffer. (The main
+		 * design wrote these with the opposite argument order; see the issue-1335-follow-up-2
+		 * anchors-confirmed comment for the derivation.) */
+		double target_ppm;
+		if (!c->reg_locked) {
+			target_ppm = 0.0;
+		} else {
+			double t = c->estimated_ppm + c->outer_bias_ppm + c->level_integral_ppm;
+			if (c->level_captured) {
+				const double err = buffered_ms - c->level_target_ms;
+				/* P term: gentle damping of the I-only level loop's ~3.9 h oscillation. */
+				t += asrc_clamp(ASRC_LEVEL_KP_PPM_PER_MS * err, -1.0, 1.0);
+				/* Fast bounded restore: a big proportional stretch/compress that refills a
+				 * sample-loss step, then exits once the buffer is back within 5 ms. */
+				if (c->level_restore) {
+					if (fabs(err) < 5.0) {
+						c->level_restore = false;
+					} else {
+						t += asrc_clamp(ASRC_LEVEL_RESTORE_K_PPM_PER_MS * err,
+								-ASRC_LEVEL_RESTORE_MAX_PPM, ASRC_LEVEL_RESTORE_MAX_PPM);
+					}
+				}
+			}
+			target_ppm = asrc_clamp(t, -ASRC_MAX_PPM, ASRC_MAX_PPM);
+		}
 
 		/* Slew-limit the APPLIED correction toward the target -- caps how fast the
 		 * resample-ratio nudge may change, independent of how fast the estimate itself moves. */
@@ -241,4 +348,16 @@ void asrc_compensator_set_outer_bias_ppm(struct asrc_compensator *c, double bias
 double asrc_compensator_get_outer_bias_ppm(const struct asrc_compensator *c)
 {
 	return c->outer_bias_ppm;
+}
+
+/* camera-box #1335 follow-up: move the captured buffer-LEVEL setpoint by a deliberate audio
+ * sync-offset delta so the level integral holds the NEW depth instead of refilling toward the old
+ * one and cancelling the deliberate trim. No-op until the setpoint has been captured (first rate
+ * lock). Mirror of src/asrc_bench.rs RealtimeAsrcCompensator::shift_level_target -- keep identical. */
+void asrc_compensator_shift_level_target(struct asrc_compensator *c, double delta_ms)
+{
+	if (c->level_captured) {
+		c->level_target_ms += delta_ms;
+		c->level_last_ms += delta_ms;
+	}
 }

@@ -164,18 +164,52 @@ def detect_onsets(samples, floor_window=ROLLING_FLOOR_WINDOW, delta_db=ONSET_DEL
     return onsets
 
 
-def pair_latencies(emit_ts_list, onset_ts_list, max_pair_ns):
-    """Per-marker latency (ns): each onset pairs with the LATEST emit at or before it, provided the gap
-    is within `max_pair_ns` (< half the cadence, so the pairing is unambiguous). Tolerant of a missed
-    marker (an emit with no onset, or an onset with no prior emit, simply contributes nothing)."""
+def emit_cadence_ns(emit_ts_list):
+    """Median inter-emit gap (ns), or None for fewer than two emits — the marker cadence derived from
+    the log ITSELF (#1332), never a hardcoded constant. Tells an unambiguous ~5 s cadence (300 painter
+    ticks) apart from the ~0.5 s cadence (30 ticks, live since issue 1318) that puts several candidate
+    emits inside the pairing window."""
+    emits = sorted(emit_ts_list)
+    if len(emits) < 2:
+        return None
+    gaps = [emits[i + 1] - emits[i] for i in range(len(emits) - 1)]
+    return _median_float(gaps)
+
+
+def pairing_is_ambiguous(cadence_ns, max_pair_ns):
+    """True iff the emit cadence is dense enough that more than one candidate emit can fall inside the
+    `[onset − max_pair_ns, onset]` window — i.e. `cadence_ns < max_pair_ns` (#1332). With such a cadence
+    the "latest prior emit" pairing aliases the real latency (1132 → 132 ms at a 0.5 s cadence, 2 s
+    window), so a prior is required to disambiguate. A None cadence (< 2 emits) is never ambiguous."""
+    return cadence_ns is not None and cadence_ns < max_pair_ns
+
+
+def pair_latencies(emit_ts_list, onset_ts_list, max_pair_ns, prior_ns=None):
+    """Per-marker latency (ns). The candidates for each onset are every emit in
+    `[onset − max_pair_ns, onset]`. With `prior_ns` (the baseline as a prior, #1332) the candidate whose
+    latency is CLOSEST to the prior is chosen — this resolves the 0.5 s-cadence alias. Without a prior
+    the LATEST prior emit is chosen (the legacy behaviour, correct for an unambiguous ≥-window cadence).
+    Tolerant of a missed marker (an emit with no onset, or an onset with no prior emit in window,
+    simply contributes nothing)."""
     emits = sorted(emit_ts_list)
     lat = []
     for onset in sorted(onset_ts_list):
-        i = bisect.bisect_right(emits, onset) - 1  # latest emit <= onset
-        if i >= 0:
-            d = onset - emits[i]
+        hi = bisect.bisect_right(emits, onset) - 1  # latest emit <= onset
+        if hi < 0:
+            continue
+        if prior_ns is None:
+            d = onset - emits[hi]
             if 0 <= d <= max_pair_ns:
                 lat.append(d)
+            continue
+        lo = bisect.bisect_left(emits, onset - max_pair_ns)  # first emit >= onset − window
+        best = None
+        for i in range(lo, hi + 1):
+            d = onset - emits[i]
+            if 0 <= d <= max_pair_ns and (best is None or abs(d - prior_ns) < abs(best - prior_ns)):
+                best = d
+        if best is not None:
+            lat.append(best)
     return lat
 
 
@@ -190,10 +224,14 @@ def median_ms(latencies_ns):
     return med / 1e6
 
 
-def measure(marker_text, meter_text, threshold_db, max_pair_ns):
+def measure(marker_text, meter_text, threshold_db, max_pair_ns, prior_ns=None):
     """Parse both captures, detect onsets, pair, take the median. Returns
-    `{markers, onsets, paired, latency_ms, wall_clock_ok}`. Never pairs when the emits are not
-    wall-clock (the #1312 monotonic-emit guard) — `latency_ms` stays None, `paired` 0."""
+    `{markers, onsets, paired, latency_ms, wall_clock_ok, chain_silent, ambiguous}`. Never pairs when
+    the emits are not wall-clock (the #1312 monotonic-emit guard) — `latency_ms` stays None, `paired` 0.
+    When the emit cadence is ambiguous (< the pairing window) and no `prior_ns` is available to
+    disambiguate (#1332), does NOT pair and surfaces `ambiguous=True` — the caller reads UNKNOWN reason
+    `ambiguous-cadence`, never a false drift. A `prior_ns` (the baseline) resolves the ambiguity and
+    pairing proceeds via the closest-to-prior candidate."""
     emits = parse_marker_csv(marker_text)
     samples = parse_meter_samples(meter_text)
     wall_ok = emits_are_wall_clock(emits)
@@ -201,7 +239,13 @@ def measure(marker_text, meter_text, threshold_db, max_pair_ns):
     # a silent chain has no real bursts to detect — force 0 onsets so the reason is chain-silent, not a
     # spurious relative onset off the noise floor.
     onsets = [] if silent else detect_onsets(samples)
-    lat = pair_latencies(emits, onsets, max_pair_ns) if wall_ok else []
+    cadence = emit_cadence_ns(emits)
+    # #1332: ambiguity only matters when we WOULD pair (wall-clock emits, a non-silent chain with real
+    # onsets) and have no prior to pick the right alias. A dead/too-quiet chain keeps its own reason.
+    ambiguous = (prior_ns is None and wall_ok and not silent and len(onsets) > 0
+                 and pairing_is_ambiguous(cadence, max_pair_ns))
+    lat = pair_latencies(emits, onsets, max_pair_ns, prior_ns=prior_ns) \
+        if (wall_ok and not ambiguous) else []
     return {
         "markers": len(emits),
         "onsets": len(onsets),
@@ -209,17 +253,20 @@ def measure(marker_text, meter_text, threshold_db, max_pair_ns):
         "latency_ms": median_ms(lat),
         "wall_clock_ok": wall_ok,
         "chain_silent": silent,
+        "ambiguous": ambiguous,
     }
 
 
 # --- the decision table -------------------------------------------------------------------------
 def classify(latency_ms, baseline_ms, paired, box_reachable, markers, wall_clock_ok,
-             tolerance_ms, min_paired):
+             tolerance_ms, min_paired, ambiguous=False):
     """One check's verdict token.
 
       box_reachable != 1        -> SKIP        (stream OBS down — a #1001/#732 page, never ours)
       markers <= 0              -> UNKNOWN     (no marker rows: cam2 down / the marker log is missing)
       not wall_clock_ok         -> UNKNOWN     (monotonic emit_ts — painter needs --wall-clock; #1312)
+      ambiguous                 -> UNKNOWN     (0.5 s cadence, no prior to disambiguate; #1332 —
+                                                NEVER a false DRIFTED, and beats NO-BASELINE)
       baseline_ms is None       -> NO-BASELINE (not seeded yet -> handover UNKNOWN)
       paired < min_paired       -> UNKNOWN     (too few onsets to trust the median)
       latency_ms is None        -> UNKNOWN     (no median)
@@ -232,6 +279,8 @@ def classify(latency_ms, baseline_ms, paired, box_reachable, markers, wall_clock
         return UNKNOWN
     if not wall_clock_ok:
         return UNKNOWN
+    if ambiguous:
+        return UNKNOWN
     if baseline_ms is None:
         return NO_BASELINE
     if paired < min_paired:
@@ -243,7 +292,7 @@ def classify(latency_ms, baseline_ms, paired, box_reachable, markers, wall_clock
     return ALIGNED
 
 
-def reason(verdict, markers, wall_clock_ok, paired, min_paired, chain_silent=False):
+def reason(verdict, markers, wall_clock_ok, paired, min_paired, chain_silent=False, ambiguous=False):
     """A short single-token reason for the CLI/log line (never contains a `verdict=` substring)."""
     if verdict == SKIP:
         return "stream-obs-unreachable"
@@ -254,6 +303,8 @@ def reason(verdict, markers, wall_clock_ok, paired, min_paired, chain_silent=Fal
             return "monotonic-emit"
         if chain_silent:
             return "chain-silent"       # #1312: every mbc sample below the −60 bar (dead audio chain)
+        if ambiguous:
+            return "ambiguous-cadence"  # #1332: dense marker cadence, no prior to pick the right alias
         if paired < min_paired:
             return "too-few-onsets"
         return "no-median"
@@ -307,7 +358,8 @@ def _fmt(v):
 
 
 def _main(argv):
-    ap = argparse.ArgumentParser(description="pure measurement-chain-latency decision (#1312)")
+    ap = argparse.ArgumentParser(
+        description="pure measurement-chain-latency decision (#1312, alias-aware pairing #1332)")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     c = sub.add_parser("classify",
@@ -319,6 +371,11 @@ def _main(argv):
     # audio_preflight_default_threshold_db so the #748 bar is single-source (never retyped here).
     c.add_argument("--threshold-db", type=float, required=True)
     c.add_argument("--max-pair-ms", type=float, default=DEFAULT_MAX_PAIR_MS)
+    # #1332: the pairing PRIOR (ms). An explicit --expected-ms wins over the persisted baseline; it is
+    # REQUIRED to seed a baseline on an ambiguous (dense) marker cadence, else --write-baseline refuses.
+    c.add_argument("--expected-ms", type=float, default=None,
+                   help="known chain latency (ms) used as the pairing prior to resolve a 0.5 s-cadence "
+                        "alias; required with --write-baseline on an ambiguous cadence (#1332)")
     c.add_argument("--baseline-file", default="")
     c.add_argument("--tolerance-ms", type=float, default=DEFAULT_TOLERANCE_MS)
     c.add_argument("--min-paired", type=int, default=DEFAULT_MIN_PAIRED)
@@ -331,17 +388,32 @@ def _main(argv):
 
     reachable = ns.box_reachable
     max_pair_ns = int(ns.max_pair_ms * 1e6)
+    # #1332: the pairing prior — an explicit --expected-ms wins (seeding), else the persisted baseline.
+    # Read the baseline BEFORE measure so it can flow into pairing (this was measure-then-read before).
+    baseline = read_baseline(ns.baseline_file) if ns.baseline_file else None
+    prior_ms = ns.expected_ms if ns.expected_ms is not None else baseline
+    prior_ns = int(prior_ms * 1e6) if prior_ms is not None else None
+
     if reachable != 1:
         # a dead stream box needs no capture parsing — SKIP straight away (#1001/#732 territory).
         res = {"markers": 0, "onsets": 0, "paired": 0, "latency_ms": None, "wall_clock_ok": False,
-               "chain_silent": False}
+               "chain_silent": False, "ambiguous": False}
     else:
         res = measure(_read_file(ns.marker_file), _read_file(ns.meter_file),
-                      ns.threshold_db, max_pair_ns)
+                      ns.threshold_db, max_pair_ns, prior_ns=prior_ns)
 
-    baseline = read_baseline(ns.baseline_file) if ns.baseline_file else None
+    # #1332: --write-baseline must NEVER persist an aliased latency. On an ambiguous (dense) cadence
+    # with no prior (no baseline, no --expected-ms) FAIL LOUD (non-zero) rather than seed garbage.
+    if ns.write_baseline and reachable == 1 and res["ambiguous"]:
+        print("measurement-chain-latency: --write-baseline refused: the marker cadence is ambiguous "
+              "(emit spacing < the pair window) and no prior was available to disambiguate. Pass "
+              "--expected-ms <ms> (the known chain latency) so the correct alias is selected; "
+              "otherwise an aliased latency would be persisted as the baseline.", file=sys.stderr)
+        return 3
+
     verdict = classify(res["latency_ms"], baseline, res["paired"], reachable,
-                       res["markers"], res["wall_clock_ok"], ns.tolerance_ms, ns.min_paired)
+                       res["markers"], res["wall_clock_ok"], ns.tolerance_ms, ns.min_paired,
+                       ambiguous=res["ambiguous"])
 
     if ns.write_baseline and reachable == 1 and res["wall_clock_ok"] \
             and res["paired"] >= ns.min_paired and res["latency_ms"] is not None:
@@ -363,7 +435,7 @@ def _main(argv):
         "tolerance_ms": ns.tolerance_ms,
         "delta_ms": delta,
         "reason": reason(verdict, res["markers"], res["wall_clock_ok"], res["paired"], ns.min_paired,
-                         chain_silent=res["chain_silent"]),
+                         chain_silent=res["chain_silent"], ambiguous=res["ambiguous"]),
         "verdict": verdict,
     }
     for k in ("box_reachable", "markers", "onsets", "paired", "latency_ms", "baseline_ms",

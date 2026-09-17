@@ -404,10 +404,12 @@ jobs:
           cargo build --release --bins -p bkshading-relay
           cargo build --release --features ndi --bins -p bkshading
 
-      # issue 1304: real-browser E2E of the operator panel +/- step buttons. Runs the JUST-BUILT
-      # service (above) against a stdlib stub relay (bkshading/service/tests/stub_relay.py) and
-      # drives the panel with Playwright (chromium only, one spec — small CI budget). Playwright's
-      # webServer manages BOTH the stub and the service and tears them down.
+      # issue 1304 (+ issue 1337): real-browser E2E of the operator panel +/- step buttons. Runs the
+      # JUST-BUILT service (above) against a stdlib stub relay (bkshading/service/tests/stub_relay.py,
+      # whose caps fixture carries isoChoices/shutterChoices) and drives the panel with Playwright
+      # (chromium only, one spec — small CI budget): clona/biely bod/tint AND the issue-1337 ISO +
+      # uzávierka steppers, each one tap = one absolute PUT. Playwright's webServer manages BOTH the
+      # stub and the service and tears them down.
       - name: Setup Node (bkshading panel E2E, issue 1304)
         uses: actions/setup-node@v4
         with:

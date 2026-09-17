@@ -113,3 +113,22 @@ dantesync's `f_phase` again means the deployed obs.dll regressed to the system-c
 bias is folded in BEFORE the negation: `+bias` now COMPRESSES (drains) — re-derive its sign before re-enabling
 `av_sync_measure.py --outer-loop`. The asio-starve default list still names `ASIO Input Capture` (VB-Matrix, retired
 on this rig, task Disabled) — trim it before enabling that watchdog.
+
+## Addendum (issue 1335, 17.9.2026): a FLAT `buffered_ms` HELD at its setpoint is now the healthy reading — the servo holds LEVEL, not just RATE
+
+The #1325 fix (above) made `applied` actually reach the buffer, so the drain went to ≈ −0.5 ppm — but
+the servo was still a pure RATE loop with no LEVEL feedback, so a residual it structurally can't
+remove (the 600 s regression window lagging a wandering true rate, ≈ 0.8 ppm mean) still drifted the
+buffer ~3 ms/h (105→68 over 12.5 h) toward an underrun. #1335 adds a slow LEVEL integral inside
+`asrc_compensator_compensate` (driven by `buffered_ms`) that nulls exactly that residual.
+
+**Reading a POST-#1335-deploy healthy mbc:** `buffered_ms` sits FLAT at the level it locked to (the
+integral holds it, oscillating ~±2 ms with a ~3.9 h period — an I-only loop is bounded, not
+critically damped, by design), and the `asrc:` line gains `level=<ms> target=<ms> integral=<ppm>
+(#1335)`. Healthy `integral` is small (single-digit-tenths of a ppm, ≪ the ±3 ppm clamp) — a
+`|integral|` pinned near 3 ppm means the residual it is fighting is far larger than the ~0.8 ppm the
+design expects (chase THAT, e.g. a genuine rate defect, not the integral). `estimated` is unchanged
+from #1325 (the true source-vs-MIXER residual, ≈ −5…−7 ppm); `level=`/`target=` should track within
+a few ms. A MONOTONICALLY draining `buffered_ms` (the pre-#1335 symptom) on a deployed #1335 build
+means the level integral regressed or isn't reaching the buffer. The `#806` outer-loop bias is folded
+in BEFORE both the level integral and the #1325 negation — re-derive its sign before re-enabling it.

@@ -38,7 +38,7 @@
     "cam1": {"node": "cam1", "verdict": "unknown", "av_offset_ms": null, "mad_ms": null, "candidates": 0, "cluster_samples": 0, "gate_pass": false},
     "cam2": {"node": "cam2", "verdict": "unknown", "av_offset_ms": null, "mad_ms": null, "candidates": 0, "cluster_samples": 0, "gate_pass": false},
     "expected_ms": 0.0,
-    "gate_tolerance_ms": 20.0,
+    "gate_tolerance_ms": 30.0,
     "gate_pass": false
   }
 }

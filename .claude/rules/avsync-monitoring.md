@@ -12,6 +12,10 @@ paths:
   - "systemd/avsync-lineup-alert-watchdog*"
   - "scripts/av_sync_apply_guard.py"
   - "scripts/lib/av-sync-apply-guard.sh"
+  - "scripts/avsync-measure-dev2.sh"
+  - "scripts/lib/avsync-measure.sh"
+  - "scripts/avsync-dev2-install.sh"
+  - "systemd/avsync-measure-dev2*"
 ---
 
 # Stream-box avsync watchdog + VLC monitor + dev1 heartbeat alert (#812/#807)
@@ -249,7 +253,7 @@ are byte-identical (unchanged `fire_notify`, stable keys); only the new arm was 
 
 **What PAGES (🚨):** the stream is LIVE (`outputActive` true) **and** the heartbeat is FRESH +
 measured + non-wedged **and** the SyncNet confidence is `>= OFFSET_CONF_FLOOR` (4.0, the quality
-gate) **and** `|offset_ms| >= OFFSET_ALARM_MS` (60). The alert text carries offset + conf + the
+gate) **and** `|offset_ms| >= OFFSET_ALARM_MS` (30, owner ruling 17.9.2026 / issue 1333). The alert text carries offset + conf + the
 `ZNIZ/ZVYS '2ME PGM'` knob advice already in the verdict.
 
 **What is SUPPRESSED (never a false page):** stream off / unreadable (`not-live`), stale heartbeat
@@ -266,7 +270,7 @@ absolute-offset BAND arm (`.claude/rules/watchdog-notify-dedup.md`, issue 1308/1
 quality-gated-input requirement is met by `OFFSET_CONF_FLOOR` (a low-conf verdict is log-only). The
 file is allowlisted in `test_notify_dedup_key_sweep_1206.py`; only the offset line buckets — the
 liveness/preflight arms keep STABLE keys. `OFFSET_ALARM_MS` / `OFFSET_CONF_FLOOR` cross-reference
-`av_sync_measure.py`'s `--threshold-ms default=60` and `CONF_MIN=4.0` (that module can't be imported
+`av_sync_measure.py`'s `--threshold-ms default=30` and `CONF_MIN=4.0` (that module can't be imported
 on dev1 — it pulls torch/obs_phase2 — so the values are documented, not imported).
 
 ## Fail LOUD on a missing tool — a dev1 alarm must never fail OPEN on a tooling gap
@@ -396,3 +400,80 @@ known to stabilize the loop, only bounded away from 1.
   additions in `test_av_sync_calibrate.py`; `tests/harness_recording_e2e_av_sync_loop_gain_1265.rs`
   guards the wiring at CI (cross-checked locally by a `.find`/window python simulation + a real
   `bash` run of the sourced-lib helpers under `set -euo pipefail`).
+
+# Stream-box measurement RETIRED → dev2 GPU measurer (#1331)
+
+**The SyncNet A/V-sync MEASUREMENT no longer runs on the stream box. It runs on dev2 (GPU).** The
+stream box's Windows tasks `avsync-watchdog` / `avsync-keepalive` / `avsync-vlc-monitor` stay
+DISABLED and are the retirement's subject, not its mechanism.
+
+**Why (the numbers, 17.9.2026):** measuring on the ENCODING stream laptop during a live stream
+loaded its CPU/GPU and rozhadzovalo A/V — `program-render-audit lagged>0` in 19/24/28 windows over
+10 min (5/7 after a pause), plus two audio-buffer STEP events (18:52, ~19:08). So on 17.9. 19:19
+the two stream tasks were DISABLED and dev1's `avsync-lineup-alert-watchdog.timer` STOPPED. The
+only safe amount of ML load on the encoding box during live is ZERO.
+
+**The topology now (contract unchanged, only the HOST + heartbeat SOURCE moved):**
+`stream OBS → restreamer xiu RTMP (0.0.0.0:1234, LAN-pullable) → dev2 ffmpeg 35 s clip → SyncNet
+(CUDA) → ~/.camera-box/avsync-watchdog-heartbeat.txt (dev2) → dev1 watchdogs (ssh cat) →
+avsync_lineup.py → Discord`. The heartbeat LINE contract (`<epoch>\t<status>` with the exact
+`measured: db=… …` / `no-signal: …` shapes) and the whole dev1 alerting/forward logic are
+BYTE-identical to the stream-box path — only the host + transport changed.
+
+- **The measurer:** `scripts/avsync-measure-dev2.sh` — ONE pass per invocation (a `systemd --user`
+  timer, `systemd/avsync-measure-dev2.{service,timer}`, `OnUnitInactiveSec=90s`, drives cadence, no
+  loop). Pure parts (status-line composition, freshness-reason, clip path, the ffmpeg encode argv
+  as SINGLE SOURCE OF TRUTH vs `avsync-watchdog.ps1:99`) live in `scripts/lib/avsync-measure.sh`
+  (`run_sourced` pytest `tests/python/test_avsync_measure_dev2.py`). It runs `av_sync_measure.py`
+  under a 180 s `timeout` cap and writes the heartbeat ATOMICALLY. NO Discord here — delivery is
+  the dev1 watchdogs' job.
+- **Provisioning:** `scripts/avsync-dev2-install.sh` (idempotent, `--check` read-only / `--install`)
+  runs ON dev1, pushes to dev2 over KEY auth (never a password): rsyncs `syncnet_python` + weights +
+  the measurer's python deps, builds `~/avsync/venv --system-site-packages` (reuses the dev2 system
+  cu128 torch/cv2/scipy/numpy stack; only `scenedetect` + `python_speech_features` are pip-added),
+  installs+enables the timer. dev2 needs `loginctl enable-linger newlevel` for a headless user timer.
+- **dev1 heartbeat SOURCE selection:** `scripts/lib/avsync-heartbeat.sh` now selects by
+  `AVSYNC_HEARTBEAT_HOST` — **`dev2` (default): Linux `cat` over plain KEY-auth ssh (no sshpass, no
+  password)**; `stream`: the retired Windows `type`+sshpass probe (kept as fallback). Both
+  `avsync-lineup-alert-watchdog.sh` and `avsync-heartbeat-alert-watchdog.sh` build the ssh call from
+  `avsync_heartbeat_ssh_prefix_argv` + `avsync_heartbeat_remote_cmd`. dev2 has NO VLC-monitor
+  heartbeat, so `avsync_heartbeat_has_vlc_leg` is false for `dev2` → the dev1 vlc leg SKIPs (never a
+  false stale-page); `require_tools sshpass` in the lineup watchdog is now conditional on the stream
+  host. The existing Rust behavioral harnesses (`harness_avsync_heartbeat_alert_watchdog.rs` /
+  `harness_avsync_lineup_alert_watchdog.rs`) that stub a fake `sshpass` binary are PINNED to
+  `AVSYNC_HEARTBEAT_HOST=stream` (they exercise the retired path); the dev2 host selection is unit-
+  tested in `tests/python/test_avsync_heartbeat_host.py`.
+- **Retiring the stream tasks:** `scripts/avsync-watchdog-install.sh --retire` (planner) prints the
+  `schtasks /Change /TN <task> /DISABLE` plan for `avsync-watchdog`/`avsync-keepalive`/
+  `avsync-vlc-monitor` (single-sourced in `avsync_disable_stream_tasks_cmds`). Tasks are DISABLED,
+  never DELETED — re-enable them only if the dev2 measurer is ever unavailable.
+
+## GOTCHA (#1331 review) — moving `av_sync_measure.py` to a NEW box makes it PING DISCORD ITSELF
+
+`av_sync_measure.py`'s DEFAULT alert delivery (`deliver_alert → notify_airuleset`, fired whenever
+`|offset| >= --threshold-ms`, default 60ms) shells out to `AIRULESET_NOTIFY` (default
+`~/devel/airuleset/airuleset.py`). The retired stream-box `avsync-watchdog.ps1` gated Discord behind
+an opt-in webhook FILE, so moving the measurement to dev2 — which HAS `~/devel/airuleset/airuleset.py`
+installed — silently turned that gate into a live self-ping: on exactly the desync events the system
+cares about, dev2 would post to Discord itself, DUPLICATING the dev1 watchdog alert and violating the
+"NO Discord on dev2 — delivery is the dev1 watchdogs' job" contract + the owner's near-zero-Discord rule.
+The measurer SHELL had no Discord; the measurement PASS did. **Fix, and the rule for moving ANY
+av_sync_measure.py / airuleset-notify-capable tool to a box where delivery is NOT that box's job:
+neutralize it with `AIRULESET_NOTIFY=<empty script>` on the subprocess** — `avsync-measure-dev2.sh`'s
+`run_measure` runs it with `AIRULESET_NOTIFY="$MEASURE_NOTIFY_BIN"` (default `/dev/null` → `python3
+/dev/null notify …` is a no-op) and never passes `--webhook`. Do NOT rely on `airuleset.py` being absent
+on the target — it is present on every managed box. A fresh-context review caught this; a self-review
+missed it.
+
+## GOTCHA (#1331) — a NEW default `AVSYNC_HEARTBEAT_HOST` breaks the fake-`sshpass` harnesses
+
+The behavioral Rust harnesses (`harness_avsync_{heartbeat,lineup}_alert_watchdog.rs`) stub a fake
+`sshpass` BINARY on PATH and run `main()`. Flipping the default heartbeat host to `dev2` (plain key-auth
+`ssh`, no sshpass, no vlc leg) means a default-host run would bypass the fake `sshpass` and attempt a
+REAL, reachable ssh to dev2 (non-hermetic) AND skip the vlc leg. Fix: PIN those harnesses to
+`AVSYNC_HEARTBEAT_HOST=stream` (they exercise the retired path — the pin preserves intent, it does not
+hide a regression) and cover the NEW default with its own tests (the pure host-selection funcs in
+`tests/python/test_avsync_heartbeat_host.py` + one behavioral harness case stubbing a fake `ssh` with
+host=dev2, asserting the leg is read and vlc SKIPed). General rule: when you flip a default that selects
+a transport, pin every existing transport-stubbing test to the OLD default and give the NEW default its
+own coverage — never leave the production default untested.

@@ -1757,6 +1757,17 @@ static void source_output_audio_data(obs_source_t *source, const struct audio_da
 	if (source->last_sync_offset != sync_offset) {
 		if (source->last_sync_offset)
 			push_back = false;
+		/* camera-box #1335 follow-up: a DELIBERATE sync-offset change of Delta shifts this
+		 * source's audio placement (in.timestamp += sync_offset above) and therefore its ASRC
+		 * mix-buffer depth by Delta. Move the level setpoint by the SAME Delta so the level
+		 * integral holds the NEW depth instead of refilling toward the old one and silently
+		 * cancelling the deliberate audio trim (issue 1333). Computed from the OLD
+		 * last_sync_offset BEFORE it is overwritten below; sync_offset is in ns so /1e6 -> ms.
+		 * Audio thread -- source->asrc lives here (asrc_process_audio writes it), no new lock.
+		 * No-op until the setpoint has been captured (first rate lock). Unintended
+		 * discontinuities never reach this branch (they flush the regression instead). */
+		asrc_compensator_shift_level_target(&source->asrc,
+						    (double)(sync_offset - source->last_sync_offset) / 1e6);
 		source->last_sync_offset = sync_offset;
 	}
 
@@ -4282,8 +4293,15 @@ static inline void asrc_process_audio(obs_source_t *source, uint32_t frames, uin
 	source->asrc_last_wall_ns = mixer_now_ns;
 
 	const double raw_advance_s = (double)frames / (double)samples_per_sec;
+	/* camera-box #1335: the source's current mix-buffer depth, for the ASRC LEVEL integral. Read
+	 * once per callback from audio_input_buf[0].size against the mixer OUTPUT rate (the rate that
+	 * buffer is filled/drained at -- the same basis obs-audio.c's #800 buffered_ms uses), via the
+	 * shared obs_source_input_buf_ms() helper. A single unlocked size_t read is telemetry-grade
+	 * (+/-1 block), which is ample for a slow (tens-of-minutes) integral. */
+	const uint32_t out_sample_rate = audio_output_get_sample_rate(obs->audio.audio);
+	const double buffered_ms = obs_source_input_buf_ms(source->audio_input_buf[0].size, out_sample_rate);
 	double applied_ppm = 0.0;
-	asrc_compensator_compensate(&source->asrc, raw_advance_s, master_block_s, &applied_ppm);
+	asrc_compensator_compensate(&source->asrc, raw_advance_s, master_block_s, buffered_ms, &applied_ppm);
 
 	/* Refresh the compensation over an ASRC_COMPENSATION_DISTANCE_MS window every callback --
 	 * swr_set_compensation() replaces any still-pending ramp, so re-issuing it each callback
@@ -4310,12 +4328,25 @@ static inline void asrc_process_audio(obs_source_t *source, uint32_t frames, uin
 		 * camera-box #960: starved_blocks appended -- makes a starved/invalid-block state
 		 * explicit instead of only ever showing an estimated/applied pair with no indication
 		 * anything was rejected. Zero on a healthy source. */
+		/* camera-box #1335: level=/target=/integral= appended AFTER the byte-identical
+		 * '(#803/#806/#960)' suffix so every dev1 parser that anchors on starved_blocks= /
+		 * estimated= (scripts/lib/asio-starve-health.sh, scripts/lib/cg-chain-verify.sh; both
+		 * extract by name with .*) is unaffected. level=the live buffered_ms, target=the captured
+		 * setpoint, integral=the level-holding correction in ppm. */
+		/* camera-box #1335 follow-up 2: steps=/last_step_ms=/restore= appended AFTER the
+		 * byte-identical '(#1335)' suffix so every dev1 asrc:-line parser (asio-starve-health,
+		 * cg-chain-verify -- both extract by name with .*) is unaffected. steps=cumulative STEP
+		 * re-base count, last_step_ms=the last step's residual, restore=fast-restore active 0|1. */
 		blog(LOG_INFO,
 		     "asrc: source '%s' estimated=%.2fppm applied=%.2fppm outer_bias=%.2fppm "
-		     "cumulative_correction=%.3fms/%.0fs starved_blocks=%u (#803/#806/#960)",
+		     "cumulative_correction=%.3fms/%.0fs starved_blocks=%u (#803/#806/#960) "
+		     "level=%.1fms target=%.1fms integral=%.3fppm (#1335) "
+		     "steps=%u last_step_ms=%.1f restore=%d (#1335)",
 		     obs_source_get_name(source), source->asrc.estimated_ppm, applied_ppm,
 		     source->asrc.outer_bias_ppm, cumulative_correction_ms, ASRC_LOG_INTERVAL_S,
-		     starved_block_count);
+		     starved_block_count, source->asrc.level_last_ms, source->asrc.level_target_ms,
+		     source->asrc.level_integral_ppm, source->asrc.step_count, source->asrc.last_step_ms,
+		     (int)source->asrc.level_restore);
 	}
 }
 

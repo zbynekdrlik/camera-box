@@ -150,6 +150,20 @@ avsync_freshness_go_no_go() {
   esac
 }
 
+# avsync_disable_stream_tasks_cmds -> #1331: the schtasks commands that DISABLE (retire) the three
+# stream-box avsync tasks. The measurement moved to dev2 (scripts/avsync-measure-dev2.sh) because
+# the stream box's ML load caused OBS render lag + audio buffer steps during live -- so the
+# stream-box tasks STAY disabled. SINGLE SOURCE OF TRUTH for the retirement commands (the --retire
+# plan below + tests both read this). One command per line; `/Change /TN <task> /DISABLE` is
+# idempotent (disabling an already-disabled task is a no-op). Never DELETE the tasks (they can be
+# re-enabled if the dev2 measurer is ever unavailable), only disable.
+avsync_disable_stream_tasks_cmds() {
+  local t
+  for t in avsync-watchdog avsync-keepalive avsync-vlc-monitor; do
+    printf 'schtasks /Change /TN %s /DISABLE\n' "$t"
+  done
+}
+
 # --- source-guard: when sourced (the unit tests), stop here ----------------------------------------
 if [ "${BASH_SOURCE[0]}" != "${0}" ]; then
   return 0
@@ -169,22 +183,46 @@ simulated-crash run (genuine relaunch of the missing process) both pass.
 
 Usage:
   scripts/avsync-watchdog-install.sh [--interval-min 5]
+  scripts/avsync-watchdog-install.sh --retire   # #1331: DISABLE the stream-box avsync tasks
   scripts/avsync-watchdog-install.sh --help
 
 Exit codes: 0 = plan printed, 2 = usage error.
 EOF
 }
 
+# #1331: the retirement plan -- DISABLE the three stream-box avsync tasks (measurement moved to
+# dev2 because the stream box's ML load caused OBS render lag during live). Prints the schtasks
+# commands (single-sourced in avsync_disable_stream_tasks_cmds) for the win-stream-snv MCP Shell.
+retire_plan() {
+  local mcp="win-stream-snv" box_ip="10.77.9.204"
+  cat <<PLAN
+# ===== #1331 avsync stream-box RETIREMENT plan (${mcp}, ${box_ip}) =====
+# The A/V-sync (SyncNet) measurement moved OFF this encoding box onto dev2 (scripts/
+# avsync-measure-dev2.sh + systemd/avsync-measure-dev2.timer), because measuring on the encoding
+# laptop during live caused OBS render lag + audio buffer steps (17.9.2026 evidence:
+# program-render-audit lagged>0 in 19/24/28 windows over 10 min, two audio buffer steps). These
+# stream-box tasks STAY disabled -- run this via the ${mcp} MCP Shell (schtasks, session-agnostic):
+# ----------------------------------------------------------------------------------------------------
+$(avsync_disable_stream_tasks_cmds)
+# ----------------------------------------------------------------------------------------------------
+# Verify each is Disabled:  schtasks /Query /TN avsync-watchdog /FO LIST | findstr Status
+# The task DEFINITIONS are left in place (not deleted) so they can be re-enabled if the dev2 measurer
+# is ever unavailable. dev1 then reads the heartbeat from dev2 (AVSYNC_HEARTBEAT_HOST=dev2, default).
+PLAN
+}
+
 main() {
-  local interval_min=5
+  local interval_min=5 mode=install
   need_val() { [ "$#" -ge 2 ] || { echo "ERROR: $1 needs a value" >&2; usage >&2; exit 2; }; }
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --interval-min) need_val "$@"; interval_min="$2"; shift 2 ;;
+      --retire|--disable) mode=retire; shift ;;
       -h|--help) usage; exit 0 ;;
       *) echo "unknown arg: $1" >&2; usage >&2; exit 2 ;;
     esac
   done
+  if [ "$mode" = "retire" ]; then retire_plan; return 0; fi
 
   local mcp="win-stream-snv" box_ip="10.77.9.204"
   local vlc_monitor_xml keepalive_xml

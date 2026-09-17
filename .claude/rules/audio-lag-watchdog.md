@@ -127,7 +127,7 @@ is a SHAPE facet + a finer verdict.
 
 **This band watch is an OBS audio-timeline HEALTH alarm — it does NOT by itself explain the A/V-gate
 residuals (supervisor finding 2026-09-01).** The same-day A/V failures (residual −77/−111/−126 ms
-past the ±90 gate) were a SEPARATE upstream-audio-latency STEP: after the stream-OBS restart the
+past the ±30 A/V gate — owner ruling 17.9.2026 / issue 1333; historically ±90 at that incident) were a SEPARATE upstream-audio-latency STEP: after the stream-OBS restart the
 `mbc` band went FLAT (~85 ms) yet a PR E2E still measured −111.5 ms across all 7 cameras, and the
 av-sync dock showed the mastered Dante feed into the DVS `mbc` source physically shifting ~60 ms then
 oscillating. So the band watch catches audio-timeline instability (a real health issue worth

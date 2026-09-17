@@ -58,7 +58,7 @@
     "cam6": {"node": "cam6", "excluded": true, "exclude_reason": "powered-off-2026-07-27", "verdict": "excluded", "gate_pass": null, "windows": 0, "candidates": 0, "cluster_samples": 0, "av_offset_ms": null, "mad_ms": null, "effective_offset_ms": null},
     "cam7": {"node": "cam7", "excluded": true, "exclude_reason": "powered-off-2026-07-27", "verdict": "excluded", "gate_pass": null, "windows": 0, "candidates": 0, "cluster_samples": 0, "av_offset_ms": null, "mad_ms": null, "effective_offset_ms": null},
     "expected_ms": 0.0,
-    "gate_tolerance_ms": 20.0,
+    "gate_tolerance_ms": 30.0,
     "gate": "enforced -- every camera under test must be within +/-20ms of expected_ms (#624 deliverable 4 / #312 item 2 PR B)",
     "gate_pass": true
   }

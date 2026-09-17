@@ -1,0 +1,15 @@
+[Unit]
+# dev2 lipsync (SyncNet) A/V-sync measurement -- ONE pass (#1331). Runs on dev2 (GPU), pulling the
+# production RTMP relay over the LAN and writing ~/.camera-box/avsync-watchdog-heartbeat.txt. This
+# replaces the stream-box measurement (retired -- its ML load caused OBS render lag during live).
+# The dev1 watchdogs read this heartbeat with AVSYNC_HEARTBEAT_HOST=dev2.
+Description=camera-box dev2 lipsync (SyncNet) measurement -- one pass (#1331)
+Documentation=https://github.com/zbynekdrlik/camera-box
+
+[Service]
+Type=oneshot
+# Installed to ~/avsync/ on dev2 by scripts/avsync-dev2-install.sh. %h = the dev2 user's home.
+ExecStart=%h/avsync/scripts/avsync-measure-dev2.sh
+# One 35 s RTMP grab + ffprobe/volumedetect + SyncNet inference (itself bounded to 180 s INSIDE the
+# script). Give it comfortable room but never leave a hung pass past the 90 s timer cadence for long.
+TimeoutStartSec=300

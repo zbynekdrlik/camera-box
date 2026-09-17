@@ -1832,6 +1832,202 @@ mod vendored_source {
     }
 
     #[test]
+    fn asrc_holds_buffer_level_with_integral_1335() {
+        // issue #1335: the ASRC servo (a pure RATE loop) must gain a buffer-LEVEL holding integral
+        // driven by buffered_ms, or a residual it cannot remove drifts the mix buffer ~3 ms/h to an
+        // underrun (live mbc root cause). Src authority + Tier-0 gate: src/asrc_bench.rs
+        // (RealtimeAsrcCompensator::compensate_with_level + the level integral) — this static guard
+        // keeps the vendored C mirror in lock-step (a `git subtree pull` / hand-edit reverting the
+        // level term would ship an obs.dll that drifts again). Keep numerically identical to the Rust.
+        const OBS_AUDIO: &str = "vendor/obs-studio/libobs/obs-audio.c";
+        let h = squish(&vendor_file(ASRC_COMPENSATOR_H));
+        assert!(
+            h.contains("#define ASRC_LEVEL_KI_PPM_PER_MS_S 0.0002")
+                && h.contains("#define ASRC_LEVEL_INTEGRAL_MAX_PPM 3.0"),
+            "{ASRC_COMPENSATOR_H}: #1335 — a level-integral constant (ASRC_LEVEL_KI_PPM_PER_MS_S / \
+             ASRC_LEVEL_INTEGRAL_MAX_PPM) is missing or its value changed; re-sync with \
+             src/asrc_bench.rs's LEVEL_KI_PPM_PER_MS_S / LEVEL_INTEGRAL_MAX_PPM."
+        );
+        assert!(
+            h.contains("double level_target_ms;")
+                && h.contains("double level_integral_ppm;")
+                && h.contains("bool level_captured;"),
+            "{ASRC_COMPENSATOR_H}: #1335 — the level-integral state fields (level_target_ms / \
+             level_integral_ppm / level_captured) are missing from struct asrc_compensator."
+        );
+        assert!(
+            h.contains("double buffered_ms, double *applied_ppm_out"),
+            "{ASRC_COMPENSATOR_H}: #1335 — asrc_compensator_compensate no longer takes buffered_ms; \
+             the level integral has no buffer depth to read."
+        );
+
+        let c = squish(&vendor_file(ASRC_COMPENSATOR_C));
+        assert!(
+            c.contains("c->estimated_ppm + c->outer_bias_ppm + c->level_integral_ppm"),
+            "{ASRC_COMPENSATOR_C}: #1335 — the level integral is no longer folded into target_ppm \
+             (estimated + outer_bias + level_integral); the level term does nothing."
+        );
+        assert!(
+            c.contains("ASRC_LEVEL_KI_PPM_PER_MS_S * err_ms * window_master_s"),
+            "{ASRC_COMPENSATOR_C}: #1335 — the level-integral update (Ki * err_ms * window_master_s) \
+             is gone; the buffer level would drift on a residual again."
+        );
+
+        let src = squish(&vendor_file(OBS_SOURCE));
+        assert!(
+            src.contains(
+                "asrc_compensator_compensate(&source->asrc, raw_advance_s, master_block_s, buffered_ms, &applied_ppm)"
+            ),
+            "{OBS_SOURCE}: #1335 — asrc_process_audio no longer passes buffered_ms into the \
+             compensator; the level integral is starved of its input."
+        );
+        assert!(
+            src.contains(
+                "obs_source_input_buf_ms(source->audio_input_buf[0].size, out_sample_rate)"
+            ),
+            "{OBS_SOURCE}: #1335 — asrc_process_audio no longer reads buffered_ms via the shared \
+             obs_source_input_buf_ms() helper."
+        );
+        assert!(
+            src.contains("level=%.1fms target=%.1fms integral=%.3fppm (#1335)"),
+            "{OBS_SOURCE}: #1335 — the asrc: telemetry line no longer reports level=/target=/integral="
+        );
+
+        let internal = squish(&vendor_file(OBS_INTERNAL));
+        assert!(
+            internal.contains("static inline double obs_source_input_buf_ms(size_t input_buf_bytes, uint32_t sample_rate)"),
+            "{OBS_INTERNAL}: #1335 — the shared obs_source_input_buf_ms() bytes->ms helper is gone; \
+             obs-audio.c (#800) and obs-source.c (#1335) would need two copies that could drift."
+        );
+
+        let audio = squish(&vendor_file(OBS_AUDIO));
+        assert!(
+            audio.contains(
+                "obs_source_input_buf_ms(tsrc->audio_input_buf[0].size, (uint32_t)sample_rate)"
+            ),
+            "{OBS_AUDIO}: #1335 — the #800 audio telemetry no longer uses the shared \
+             obs_source_input_buf_ms() helper (a second bytes->ms copy would drift from #1335)."
+        );
+    }
+
+    #[test]
+    fn asrc_setpoint_follows_sync_offset_1335() {
+        // issue #1335 follow-up: a DELIBERATE audio sync-offset change shifts the source's
+        // placement (in.timestamp += sync_offset) and thus its ASRC mix-buffer depth by the same
+        // delta; the level integral must move its setpoint by that delta (shift_level_target),
+        // NOT refill toward the old one and cancel the deliberate trim (issue 1333). Src authority
+        // + Tier-0 gate: src/asrc_bench.rs (RealtimeAsrcCompensator::shift_level_target + the
+        // shift_level_target_holds_setpoint_after_offset_jump_1335 bench). This static guard keeps
+        // the vendored C mirror in lock-step (a subtree pull / hand-edit reverting the shift would
+        // ship an obs.dll where the servo fights the trim again). Keep byte-exact with the shipped
+        // lines.
+        let h = squish(&vendor_file(ASRC_COMPENSATOR_H));
+        assert!(
+            h.contains(
+                "EXPORT void asrc_compensator_shift_level_target(struct asrc_compensator *c, double delta_ms);"
+            ),
+            "{ASRC_COMPENSATOR_H}: #1335 follow-up — asrc_compensator_shift_level_target is no \
+             longer declared; the offset-change hook cannot move the level setpoint."
+        );
+
+        let c = squish(&vendor_file(ASRC_COMPENSATOR_C));
+        assert!(
+            c.contains(
+                "if (c->level_captured) { c->level_target_ms += delta_ms; c->level_last_ms += delta_ms;"
+            ),
+            "{ASRC_COMPENSATOR_C}: #1335 follow-up — asrc_compensator_shift_level_target no longer \
+             moves level_target_ms/level_last_ms by delta_ms behind the level_captured gate; the \
+             deliberate audio trim would be cancelled again. Keep numerically identical to \
+             src/asrc_bench.rs shift_level_target."
+        );
+
+        let src = squish(&vendor_file(OBS_SOURCE));
+        assert!(
+            src.contains(
+                "asrc_compensator_shift_level_target(&source->asrc, (double)(sync_offset - source->last_sync_offset) / 1e6);"
+            ),
+            "{OBS_SOURCE}: #1335 follow-up — the last_sync_offset change branch no longer calls \
+             asrc_compensator_shift_level_target with the (sync_offset - last_sync_offset)/1e6 \
+             delta; a deliberate offset change is silently undone by the level integral."
+        );
+    }
+
+    #[test]
+    fn asrc_step_tolerant_regression_and_p_term_1335() {
+        // issue #1335 follow-up 2: the ASRC servo must (1) RE-BASE a permanent input sample-loss/dup
+        // or wall-clock STEP out of the 600 s regression (a step point biased the slope by ~83 ppm,
+        // the live 17.9. 18:52 swing) instead of inserting it; (2) FAST-RESTORE the buffer level when
+        // the step is level-corroborated; (3) fold a LEVEL P term to damp the I-only oscillation.
+        // Src authority + Tier-0 gate: src/asrc_bench.rs (the four *_1335 follow-up-2 benches) +
+        // bit-identical cc parity. This static guard keeps the vendored C mirror in lock-step; keep
+        // byte-exact with the shipped lines.
+        let h = squish(&vendor_file(ASRC_COMPENSATOR_H));
+        assert!(
+            h.contains("#define ASRC_STEP_RESIDUAL_MS 10.0")
+                && h.contains("#define ASRC_LEVEL_RESTORE_K_PPM_PER_MS 2.0")
+                && h.contains("#define ASRC_LEVEL_RESTORE_MAX_PPM 100.0")
+                && h.contains("#define ASRC_LEVEL_KP_PPM_PER_MS 0.03"),
+            "{ASRC_COMPENSATOR_H}: #1335 follow-up 2 — the step-tolerance/restore/P constants \
+             (ASRC_STEP_RESIDUAL_MS / ASRC_LEVEL_RESTORE_K_PPM_PER_MS / ASRC_LEVEL_RESTORE_MAX_PPM / \
+             ASRC_LEVEL_KP_PPM_PER_MS) are no longer defined."
+        );
+        assert!(
+            h.contains("uint32_t step_count;")
+                && h.contains("double last_step_ms;")
+                && h.contains("bool level_restore;"),
+            "{ASRC_COMPENSATOR_H}: #1335 follow-up 2 — the step_count/last_step_ms/level_restore \
+             state fields are gone."
+        );
+
+        let c = squish(&vendor_file(ASRC_COMPENSATOR_C));
+        assert!(
+            c.contains(
+                "const double r_s = (window_raw_s - window_master_s) - (c->estimated_ppm / 1000000.0) * window_master_s;"
+            ),
+            "{ASRC_COMPENSATOR_C}: #1335 follow-up 2 — the single-window step residual (increment \
+             minus the locked slope's expected increment) is gone; keep numerically identical to \
+             src/asrc_bench.rs."
+        );
+        assert!(
+            c.contains("if (c->reg_locked && fabs(r_s * 1000.0) > ASRC_STEP_RESIDUAL_MS) {")
+                && c.contains("c->cum_ymm_s = pt_ymm - r_s;")
+                && c.contains("c->step_count++;"),
+            "{ASRC_COMPENSATOR_C}: #1335 follow-up 2 — the RE-BASE branch (cum_ymm_s -= r, keep the \
+             lock, count the step) is gone; a sample-loss step would bias the slope again."
+        );
+        assert!(
+            c.contains(
+                "if (c->level_captured && fabs(buffered_ms - c->level_target_ms) >= 0.5 * fabs(r_s * 1000.0)) c->level_restore = true;"
+            ),
+            "{ASRC_COMPENSATOR_C}: #1335 follow-up 2 — the level-corroborated fast-restore entry is \
+             gone; a sample-loss step would not refill the buffer."
+        );
+        assert!(
+            c.contains("t += asrc_clamp(ASRC_LEVEL_KP_PPM_PER_MS * err, -1.0, 1.0);")
+                && c.contains(
+                    "t += asrc_clamp(ASRC_LEVEL_RESTORE_K_PPM_PER_MS * err, -ASRC_LEVEL_RESTORE_MAX_PPM, ASRC_LEVEL_RESTORE_MAX_PPM);"
+                ),
+            "{ASRC_COMPENSATOR_C}: #1335 follow-up 2 — the LEVEL P term and/or the fast-restore fold \
+             into the correction target are gone (sign: Kp/Kr * (buffered - target))."
+        );
+        assert!(
+            c.contains("if (!saturated && !c->level_restore) {"),
+            "{ASRC_COMPENSATOR_C}: #1335 follow-up 2 — the level integral no longer freezes during a \
+             fast restore (anti-windup); the two level correctors would fight."
+        );
+
+        let src = squish(&vendor_file(OBS_SOURCE));
+        assert!(
+            src.contains("steps=%u last_step_ms=%.1f restore=%d (#1335)")
+                && src.contains(
+                    "source->asrc.level_integral_ppm, source->asrc.step_count, source->asrc.last_step_ms, (int)source->asrc.level_restore"
+                ),
+            "{OBS_SOURCE}: #1335 follow-up 2 — the asrc: telemetry line no longer appends \
+             steps=/last_step_ms=/restore=."
+        );
+    }
+
+    #[test]
     fn build_latch_drains_burst_to_target_in_vendored_source() {
         // #116: the genlock_fifo branch of ready_async_frame must DRAIN the excess
         // oldest frames at the build latch (and after a preload-change re-arm) so every
@@ -3332,6 +3528,36 @@ mod distroav_source {
                 wf.contains("starved_blocks=%u"),
                 "{wf_path}: #960 — the build no longer gates on the starved_blocks telemetry \
                  field reaching the asrc: log line; re-add the pwsh #960 gate."
+            );
+        }
+    }
+
+    #[test]
+    fn windows_genlock_workflows_gate_on_asrc_level_integral_1335() {
+        // #1335: BOTH Windows production builds must re-assert the ASRC buffer-LEVEL integral tokens
+        // in pwsh BEFORE their build (this Linux Rust guard can't compile on the runner) — a
+        // `git subtree pull` (#44) or hand-edit reverting the level term would ship an obs.dll that
+        // drifts the mix buffer again. Mirror of every other lock-step guard here.
+        for (wf_const, wf_path) in [
+            (WINDOWS_GENLOCK_WF, "windows-genlock.yml"),
+            (WINDOWS_GENLOCK_FAST_WF, "windows-genlock-fast.yml"),
+        ] {
+            let wf = squish(&vendor_file(wf_const));
+            assert!(
+                wf.contains("ASRC_LEVEL_KI_PPM_PER_MS_S 0.0002")
+                    && wf.contains("ASRC_LEVEL_INTEGRAL_MAX_PPM 3.0"),
+                "{wf_path}: #1335 — the build no longer gates on the level-integral constants \
+                 (ASRC_LEVEL_KI_PPM_PER_MS_S / ASRC_LEVEL_INTEGRAL_MAX_PPM); re-add the pwsh #1335 gate."
+            );
+            assert!(
+                wf.contains("c->estimated_ppm + c->outer_bias_ppm + c->level_integral_ppm"),
+                "{wf_path}: #1335 — the build no longer gates on the level integral being folded into \
+                 target_ppm; re-add the pwsh #1335 gate."
+            );
+            assert!(
+                wf.contains("level=%.1fms target=%.1fms integral=%.3fppm (#1335)"),
+                "{wf_path}: #1335 — the build no longer gates on the asrc: telemetry reporting \
+                 level=/target=/integral=; re-add the pwsh #1335 gate."
             );
         }
     }

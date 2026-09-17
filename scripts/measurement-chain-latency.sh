@@ -23,10 +23,20 @@ set -euo pipefail
 # never a false drift. The item goes green-capable once the painter is switched to --wall-clock
 # (a SAFE no-op for the A/V verdict path -- a supervisor follow-up).
 #
+# ALIAS-AWARE PAIRING (#1332): since issue 1318 the cam2 painter emits the marker every 0.5 s
+# (--audio-marker-cadence-ticks 30), so several candidate emits fall inside the 2 s pairing window and
+# "latest prior emit" aliases the ~1.13 s latency down to ~132 ms (a false DRIFTED). The kernel now
+# pairs each onset to the candidate CLOSEST to the persisted baseline (used as a prior). Without a
+# baseline (no prior) an ambiguous cadence reads UNKNOWN (reason ambiguous-cadence), NEVER DRIFTED. To
+# seed a baseline on an ambiguous cadence pass --expected-ms <ms> (the known chain latency) as the
+# prior; --baseline without it FAILS LOUD (non-zero) rather than persist an aliased value.
+#
 # Usage:
-#   scripts/measurement-chain-latency.sh              # measure, print key=value + a log line
-#   scripts/measurement-chain-latency.sh --baseline   # ALSO persist the measured latency as baseline
-#                                                      # (supervisor, right after a green E2E)
+#   scripts/measurement-chain-latency.sh                       # measure, print key=value + a log line
+#   scripts/measurement-chain-latency.sh --baseline            # ALSO persist the measured latency as
+#                                                              # baseline (supervisor, after a green E2E)
+#   scripts/measurement-chain-latency.sh --baseline --expected-ms 1140   # seed on an ambiguous cadence
+#                                                              # (prior disambiguates, persists real ms)
 #   scripts/measurement-chain-latency.sh --help
 #
 # Env:
@@ -34,6 +44,7 @@ set -euo pipefail
 #   STREAM_HOST / CAM2_HOST      box addresses (defaults below).
 #   CAM_PW                       cam2 ssh password (default newlevel).
 #   MC_BASELINE_FILE             baseline JSON path (default ~/.camera-box/measurement-chain-latency-baseline.json).
+#   MC_EXPECTED_MS               pairing prior (ms) for --baseline on an ambiguous cadence (= --expected-ms).
 #   MC_TOLERANCE_MS / MC_MAX_PAIR_MS / MC_MIN_PAIRED / MC_SAMPLE_S / MC_MARKER_TAIL_N   knobs.
 #   MC_SSH_TIMEOUT / MC_METER_TIMEOUT   per-step bounds.
 #   MC_MARKER_CSV_FILE           Tier-0 seam: cat this file instead of ssh-reading the marker log.
@@ -44,11 +55,21 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 BASELINE=0
+EXPECTED_MS="${MC_EXPECTED_MS:-}"
 while [ $# -gt 0 ]; do
   case "$1" in
     --baseline) BASELINE=1 ;;
+    --expected-ms)
+      shift
+      EXPECTED_MS="${1:-}"
+      if [ -z "$EXPECTED_MS" ]; then
+        echo "measurement-chain-latency: --expected-ms needs a value (ms)" >&2
+        exit 2
+      fi
+      ;;
+    --expected-ms=*) EXPECTED_MS="${1#*=}" ;;
     --help | -h)
-      sed -n '5,49p' "${BASH_SOURCE[0]}"  # description + Usage + Env (skip shebang/summary/set line)
+      sed -n '5,53p' "${BASH_SOURCE[0]}"  # description + Usage + Env (skip shebang/summary/set line)
       exit 0
       ;;
     *)
@@ -124,13 +145,29 @@ fi
 # --- 3) decide (the PURE kernel; --baseline persists the measured latency) ------------------------
 WRITE_FLAG=()
 [ "$BASELINE" -eq 1 ] && WRITE_FLAG=(--write-baseline)
-# `|| OUT=""` so a non-zero CLI exit (should never happen on valid args) does not `set -e`-abort the
-# whole probe -- an empty OUT carries no `verdict=` token, so the handover reads UNKNOWN (fail-safe).
-OUT="$(python3 "$DECIDE" classify \
+EXPECTED_FLAG=()
+[ -n "$EXPECTED_MS" ] && EXPECTED_FLAG=(--expected-ms "$EXPECTED_MS")
+# Capture the CLI's exit code. For a normal measure a non-zero exit (should never happen on valid
+# args) is swallowed to an empty OUT so the handover reads UNKNOWN (fail-safe). For --baseline the
+# kernel exits non-zero to REFUSE persisting an aliased value on an ambiguous cadence with no prior
+# (#1332) -- that refusal must FAIL LOUD, so it is propagated (the kernel already printed why).
+if OUT="$(python3 "$DECIDE" classify \
   --marker-file "$MARKER_FILE" --meter-file "$METER_FILE" \
   --box-reachable "$BOX_REACHABLE" --threshold-db "$THRESH" \
   --max-pair-ms "$MAX_PAIR_MS" --baseline-file "$BASELINE_FILE" \
-  --tolerance-ms "$TOLERANCE_MS" --min-paired "$MIN_PAIRED" "${WRITE_FLAG[@]}")" || OUT=""
+  --tolerance-ms "$TOLERANCE_MS" --min-paired "$MIN_PAIRED" \
+  "${EXPECTED_FLAG[@]}" "${WRITE_FLAG[@]}")"; then
+  DECIDE_RC=0
+else
+  DECIDE_RC=$?
+fi
+if [ "$DECIDE_RC" -ne 0 ]; then
+  if [ "$BASELINE" -eq 1 ]; then
+    echo "measurement-chain-latency: --baseline refused (ambiguous marker cadence and no --expected-ms <ms> prior; not persisting an aliased latency)" >&2
+    exit "$DECIDE_RC"
+  fi
+  OUT=""
+fi
 
 # the key=value block (carries the single `verdict=` token the handover check parses) -> stdout
 printf '%s\n' "$OUT"

@@ -461,8 +461,10 @@ pub fn should_converge_phase(
 //     camera's own floor — it can NEVER equalize across cameras receiver-side without adding latency.
 //     The only remaining lever lives in the pin/config layer (place each pin so the band straddles
 //     one grid line for every camera) — the supervisor's data-first campaign under issue 1168, not a
-//     receiver-side code change. The A/V GATE half (why `AV_OFFSET_GATE_TOLERANCE_MS` stays 90, not
-//     20) is recorded at that const in `src/av_window.rs`; this block records the MECHANISM half.
+//     receiver-side code change. The A/V GATE half (why `AV_OFFSET_GATE_TOLERANCE_MS` is 30 —
+//     owner ruling 17.9.2026, issue 1333 — with the common-offset walk fixed at its root, not by
+//     the gate) is recorded at that const in `src/av_window.rs`; this block records the MECHANISM
+//     half.
 // ---------------------------------------------------------------------------------------------
 
 /// The age (ns) the relock selection should target: the tracked phase anchor, FLOORED at the

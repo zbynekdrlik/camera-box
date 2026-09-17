@@ -125,45 +125,39 @@ pub fn pool_camera_av_sync(
 /// ~0 since the dock is dialed to align video and audio). Issue #624's own deliverable-4 text
 /// asked for ±20ms.
 ///
-/// **#861 interim (2026-08-06): 90.0 = 20 + 2 frames @30fps (2 × 33.33, rounded up together).**
-/// The deep-latency FIFO relock lands its release phase ±1-2 frames differently per lock
-/// episode (issue #1003: four same-day measurements at three knob values stepped −82/−42/+56ms
-/// around zero with intra-episode mad only 10-13ms; stream log shows relocks=13 in 3.8h), so a
-/// ±20ms bound was a ~30% per-episode lottery that would randomly block unrelated PRs. ±90
-/// still catches every gross regression class (pre-ASRC 160ms/h drift, a mis-set knob, a dead
-/// marker chain, the −57ms dock-bias class of #999). Re-tightening 90 → 20 stays issue #1003's
-/// acceptance item 2 — a tracked interim, never a silent weakening.
+/// **AUTHORITY — owner ruling 17.9.2026 („av tolerancia ma byt 30ms!!!", issue 1333): 30.0 ms,
+/// no data-first widening allowed.** The per-camera A/V gate is ±30 ms of `expected_ms` on every
+/// measured camera. The inter-run COMMON-offset walk (medians −1 … −69 ms across the 16.–17.9.
+/// green series, per-camera spread stable ~17 ms) is to be removed at its ROOT — the deep-FIFO
+/// release phase after relock (the ~30 ms = 1-frame @30fps relock "lottery") plus the ASRC
+/// integral term — NOT by loosening this gate (ticket 1333 plan item 4; both are separate lanes).
+/// If the gate reds ONLY because of that common shift, that is the honest state under the ruling:
+/// the release into the root-cause fix stands; the gate is never re-widened to hide it.
 ///
-/// **2026-09-01 DATA-FIRST RE-CALIBRATION (issue 1003) — the value STAYS 90; the earlier "once
-/// the release phase is pinned to the absolute wall-clock frame grid" precondition is RETIRED.**
-/// That vendored-C grid-pin was durably rejected (the 2026-08-19 supervisor ruling): the
-/// deep-source release phase is already deterministic (Tier-0 sim ±33 ns across 12 lock phases per
-/// that ruling; the committed acceptance test pins ±10 ms across 5 forced relocks; the #940
-/// phase-pin deadline + the #1003 history-anchored relock + the #1049 converge, all deployed), and
-/// the live residual is a PHYSICAL arrival-floor / per-connection sender phenomenon a receiver
-/// release-phase pin cannot remove without adding latency the imag 3 ms mandate forbids. The first
-/// stable 7-cam green series (verdicts 1363366080 / 1168855508 / 674135238 — three fresh lock
-/// episodes after fleet redeploys) re-measured the gate at ±90 and DECOMPOSES cleanly: a per-run
-/// COMMON shift −9.2 / +9.5 / +36.3 ms (span 45.5 ms = 1.36 frames — the still-live per-episode
-/// lock lottery) plus a consistent per-camera residual (cam3 the largest every run, mean +17.6 ms
-/// above the run mean; cam4 the most-negative, ≈ −8 ms; ≈ 26 ms peak-to-peak — the un-equalized
-/// production-pin delivery spread). 8/21 measurements exceed ±20 (worst 57.7 ms), so the data
-/// supports NO tighten below the still-accurate `20 + 2 frames`. The re-tighten to ±20 is now
-/// gated on BOTH the production pin-promotion (collapses the inter-camera spread — its own
-/// owner-visual-acceptance lane) AND a viable removal/absorption of the common lock-episode shift
-/// — which the green series itself shows is per-episode (45.5 ms across 3 episodes), so it cannot
-/// be a constant `--av-expected-ms` (the #1004 ruling forbids compensating an unstable
-/// dock-vs-gate residual with a guessed constant); neither exists yet.
-pub const AV_OFFSET_GATE_TOLERANCE_MS: f64 = 90.0;
+/// ## History (the value's earlier lives — kept as record, no longer authoritative):
+/// Issue 624's own deliverable-4 text asked for ±20 ms. **#861 interim (2026-08-06): 90.0 =
+/// 20 + 2 frames @30fps (2 × 33.33, rounded up together)** — the deep-latency FIFO relock lands
+/// its release phase ±1-2 frames differently per lock episode (issue 1003: four same-day
+/// measurements at three knob values stepped −82/−42/+56 ms around zero, intra-episode mad only
+/// 10-13 ms; stream log showed relocks=13 in 3.8 h), so a ±20 ms bound was a ~30 % per-episode
+/// lottery that would randomly block unrelated PRs. The **2026-09-01 DATA-FIRST note (issue 1003)**
+/// re-measured the first stable 7-cam green series (verdicts 1363366080 / 1168855508 / 674135238)
+/// at ±90 and decomposed it cleanly: a per-run COMMON shift −9.2 / +9.5 / +36.3 ms (span 45.5 ms
+/// = 1.36 frames, the per-episode lock lottery) plus a consistent per-camera residual (~26 ms
+/// peak-to-peak, the un-equalized production-pin delivery spread), and held the value at 90 pending
+/// both the production pin-promotion AND removal/absorption of the common lock-episode shift. The
+/// 17.9.2026 owner ruling SUPERSEDES that data-first hold: ±30 is set now, and the common shift is
+/// fixed at its root (plan item 4), not accommodated by the gate.
+pub const AV_OFFSET_GATE_TOLERANCE_MS: f64 = 30.0;
 
 /// #1178 — the fixed video-leg rig offset (ms): the calibrated DEFAULT `expected_ms` the per-camera
-/// A/V gate centres on, so the uniform rig constant no longer eats the whole ±90ms budget.
+/// A/V gate centres on, so the uniform rig constant no longer eats the whole ±30ms budget.
 ///
 /// The measurement chain carries a fixed VIDEO-leg latency the audio path (QPSK marker → Dante →
 /// mbc) does not: cam2 monitor input lag, the BMPCC sensor→HDMI delay, and the USB capture grabber.
 /// The dock being "dialed to 0" nulls the SOURCE A/V, not this measurement-chain leg, so a correctly
 /// aligned rig still MEASURES `av_offset_ms ≈ this constant`, not 0. Gating the raw measured offset
-/// against 0 therefore fails every camera whose leg lands past ±90 (the #1178 body's exact claim).
+/// against 0 therefore fails every camera whose leg lands past ±30 (the #1178 body's exact claim).
 ///
 /// This is a NAMED, surfaced calibration (`rig_video_leg_offset_ms` in the verdict JSON + the gate
 /// log line), never a silent shift. It is the DEFAULT of `--av-expected-ms`; a mode that PHYSICALLY
@@ -716,17 +710,16 @@ mod tests {
         assert!(!av_offset_gate_pass(&measured(m), 0.0));
     }
 
-    /// #861 interim (2026-08-06): the tolerance is pinned at 90ms = the original ±20ms bound +
-    /// 2 frames @30fps (2 × 33.33 = 66.7, rounded up together to 90) — the deep-FIFO relock
-    /// lands its release phase ±1-2 frames differently per lock episode (live 4-run evidence on
-    /// issue #1003; the #940 phase-pin fix reduced but did not eliminate it), so a ±20ms bound
-    /// was a per-episode lottery, not a gate. Re-tightening 90 → 20 is issue #1003's acceptance
-    /// item 2 — when that lands, THIS test is the one-line flip back.
+    /// Owner ruling 17.9.2026 („av tolerancia ma byt 30ms!!!", issue 1333): the per-camera A/V
+    /// gate tolerance is 30 ms. This SUPERSEDES the issue-861 interim 90 ms (20 ms + 2 frames
+    /// @30fps, 2026-08-06) and the earlier ±20 ms ask of issue 624. No data-first widening is
+    /// allowed: the inter-run COMMON-offset walk is fixed at its ROOT (the deep-FIFO release phase
+    /// after relock + the ASRC integral term — ticket plan item 4), never by loosening this gate.
     #[test]
-    fn tolerance_is_the_interim_90ms_episode_quantization_bound_861() {
+    fn tolerance_is_owner_ruling_30ms_1333() {
         assert_eq!(
-            AV_OFFSET_GATE_TOLERANCE_MS, 90.0,
-            "interim bound = 20 + 2 frames @30fps episode quantization (issue #1003 re-tightens)"
+            AV_OFFSET_GATE_TOLERANCE_MS, 30.0,
+            "owner ruling 17.9.2026: A/V gate tolerance is 30 ms (issue 1333)"
         );
     }
 
@@ -955,22 +948,22 @@ mod tests {
     /// The STALE-PAINTER cluster from verdict 845554984 (run 33176192564, 2026-08-29): every
     /// judged camera's measured A/V offset with an un-pinned, uncompensated cam2 frame-probe
     /// painter (the issue-1138 class). Kept ONLY as a negative fixture: the recalibrated
-    /// RIG_VIDEO_LEG_OFFSET_MS=0.0 must REJECT it (three cameras fall outside ±90) — a stale
+    /// RIG_VIDEO_LEG_OFFSET_MS=0.0 must REJECT it (all five cameras fall outside ±30) — a stale
     /// measurement run must never be silently re-accepted as calibration data.
     const STALE_PAINTER_CLUSTER_845554984: [f64; 5] =
         [-95.166_666, -91.979_166, -76.75, -93.916_666, -88.625];
 
     /// The fresh full-fleet cluster from verdict 576990285 — the first complete run AFTER the
     /// issue-1138 painter redeploy (sha f42c66917455, 2026-08-29): every judged camera's measured
-    /// A/V offset, now delay-compensated at source. All five land comfortably inside ±90 of the
+    /// A/V offset, now delay-compensated at source. All five land inside the tightened ±30 of the
     /// recalibrated RIG_VIDEO_LEG_OFFSET_MS = 0.0 — no leg subtraction is needed any more.
     const FRESH_CLUSTER_576990285: [f64; 5] = [2.5, 7.9, 24.9, 9.7, 6.7];
 
     #[test]
     fn fresh_cluster_576990285_passes_the_recalibrated_zero_video_leg_1178() {
-        // GREEN: the painter-fix cluster passes the gate against the recalibrated (0.0) leg with
-        // large margin — the video leg is now compensated at the source, not by a calibration
-        // constant.
+        // GREEN: the painter-fix cluster still passes the gate against the recalibrated (0.0) leg
+        // under the tightened ±30 tolerance (owner ruling 17.9.2026, issue 1333) — the video leg
+        // is compensated at the source, not by a calibration constant.
         for &off in FRESH_CLUSTER_576990285.iter() {
             assert!(
                 av_offset_gate_pass(&measured(off), RIG_VIDEO_LEG_OFFSET_MS),
@@ -978,8 +971,8 @@ mod tests {
             );
         }
         // REJECTED: the stale-painter cluster (issue 1138 class artifact) must NOT pass any more —
-        // exactly cam1/cam2/cam6 (< -90 from the recalibrated 0.0 leg) fail, documenting that the
-        // stale-painter world is rejected, never silently re-derived into a calibration constant.
+        // under ±30 all five cameras (each past ±30 from the recalibrated 0.0 leg) fail, documenting
+        // that the stale-painter world is rejected, never silently re-derived into a calibration constant.
         let fails_now: Vec<f64> = STALE_PAINTER_CLUSTER_845554984
             .iter()
             .copied()
@@ -987,8 +980,8 @@ mod tests {
             .collect();
         assert_eq!(
             fails_now.len(),
-            3,
-            "stale-painter cluster: exactly cam1/cam2/cam6 (< -90 from the recalibrated 0.0 leg) must fail, got {fails_now:?}"
+            5,
+            "stale-painter cluster: under ±30 all five cameras (each past ±30 from the recalibrated 0.0 leg) must fail, got {fails_now:?}"
         );
     }
 
