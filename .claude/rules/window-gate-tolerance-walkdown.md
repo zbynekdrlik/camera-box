@@ -464,3 +464,53 @@ strict-zero, because there is no root cause to fix and it will RED any run where
 survives (exactly what killed run 443513281). Only if the owner insists on strict-zero would the
 sole lever be reducing the cam1/cam2 capture-rate deficit at the driver/USB level — and even a
 perfect cadence would not guarantee zero (a genlock FIFO hold can still create a `<=1` copy).
+
+## Issue 1242 (task 2, 17.9.2026): the walk-down LANDED — the `<=1/<=1` singleton band GOVERNS, CAM2 override dropped
+
+Task 1's attribution (churn is DOWNSTREAM, irreducible, per-box cadence a covariate) was accepted
+by the supervisor ROZHODNUTÉ (comment 5706131227): absolute strict-zero is DROPPED (unattainable on
+an irreducible floor; it RED-ed run 443513281), and task 2 is REDEFINED as the walk-down to the
+owner's 22.8. issue-1169 `<=1/<=1` singleton band. The three code changes (in `src/window_gate.rs`):
+
+- **`copies_gaps_tolerance_gates_overall_pass()` `true` -> `false`** (seam 2 DISARMED). `decide`'s
+  `if`/`else if` fold then falls through to the still-armed seam 4 singleton band.
+- **`segment_singleton_allowance_gates_overall_pass()` stays `true`** and now GOVERNS the fold: a
+  window with `copies <= 1 && gaps <= 1` is absorbed into `overall_pass_term` with the loud
+  `segment_singleton_note` / `windows_singleton_allowance_consumed`; `>= 2` of either REDs.
+- **`WINDOW_COPIES_GAPS_TOLERANCE_PER_CAMBOX` `&[("CAM2", 25)]` -> `&[]`** (override DROPPED). cam2
+  became splitter-fed ~16.9 13:00, so it is a normal splitter leg; the lookup machinery stays wired.
+
+`WINDOW_COPIES_GAPS_TOLERANCE` STAYS 2 as the REPORT-ONLY observability lens (shapes `relaxed_pass`
+only), NOT the fold governor — a `relaxed_pass==true`/`overall_pass_term==false` window (copies/gaps
+in `[2, 2]`) is the disarmed rescue visibly doing nothing (the #1132 masking guard). The uniformity
+floor `UNIFORM_FRACTION_MIN` is UNTOUCHED (stays 0.95).
+
+**Band-safety data (the 5 post-cure splitter-fed runs, `all_cambox_continuity.segments[]`, mined
+live from `/tmp/recording-e2e-<ID>/verdict-<ID>.json`):**
+
+| run | overall (as generated) | max copies | max gaps | nonzero windows | w_fail_strict | w_over_tol |
+|---|---|---|---|---|---|---|
+| 977889848 | true | 0 | 0 | (none) | 0 | 0 |
+| 2019585820 | true | 0 | 0 | (none) | 0 | 0 |
+| 443513281 | false* | 1 | 1 | CAM2 1/1, CAM2 0/1 | 2 | 0 |
+| 605445038 | true | 1 | 1 | CAM7 1/1, CAM1 1/1 | 2 | 0 |
+| 1249662438 | true | 1 | 1 | CAM1 1/0, CAM2 0/1 | 2 | 0 |
+
+`*` run 443513281's stored `overall_pass=false` was generated under the (since-reverted) absolute
+strict-zero fold — the run that RED-ed on one surviving `<=1/<=1` FIFO hold. Under the singleton band
+it is ABSORBED (all its windows are 1/1, 0/1). Across all five runs the worst window is copies=1 /
+gaps=1 — inside the band; a 2 reds. CAM2's own windows are all within the default (1/1, 0/1), so the
+override is safe to drop.
+
+**This is the SEAM-FLIP consumer sweep in action** — the probe-gated `overall_pass`-fold tests in
+`src/probe/recording_segments.rs` + `src/bin/recording-verdict.rs` (the single-copy/copy-stale/
+non-adjacent-freeze/benign-reorder/mixed-run absorption tests, the boundary differential, the
+per-cambox override end-to-end test) were re-pinned from the tol-2 absorbing semantics to the
+`<=1/<=1` singleton semantics (singleton note/count now FIRE on a `<=1/<=1` window; 2 copies now RED;
+CAM2 is a normal box). The `tests/verdict_gate_strict_fold_1242.rs` pin file was re-pinned to the new
+state. Verified locally via a std-only `rustc --test` replica of `decide_with_tolerance` at
+armed-vs-disarmed seams + `cargo fmt --all --check` + the doc-list lint grep; the probe consumers
+type-check at CI. **Guard rail (the one-line report-only revert):** if a healthy-chain run ever reds
+on ONLY these seams, re-arm `copies_gaps_tolerance_gates_overall_pass() -> true` (back to the tol-2
+fold) — a data-thin false-red safety valve, NEVER a silent widen. Data reproduced by
+`scripts/window_gate_walkdown.py 02b53180b 7e8efff6a`. Issue 1242's walk-back trail closes with this.
