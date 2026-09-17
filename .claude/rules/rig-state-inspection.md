@@ -321,3 +321,24 @@ rig looked half-alive):
    `ssh box "sudo -S -p '' bash -s -- <args>" < <(printf '%s\n' "$PW"; cat script.sh)`. The trap
    either way is a REMOTE `printf|sudo` pipeline: the local `< script` then lands on printf's ignored
    stdin, never on `bash -s`, which reads sudo's exhausted pipe (empty program) — a silent no-op.
+
+## Force-kill relaunch (fast-DLL swap, recovery) LOSES obs-websocket runtime writes — save the collection FIRST (issue 1333, 17.9.2026)
+
+`SetInputSettings` / `SetInputAudioSyncOffset` over obs-websocket change the RUNTIME source state but do
+NOT mark the project dirty, so OBS never rewrites the scene-collection JSON for them; a graceful exit
+would save them, but the genlock build has no `ExitOBS` and every swap/recovery path here is a
+`Stop-Process -Force`. Live 17.9.2026: the E2E gate had written the stream `NDI 2ME PGM` pin
+`genlock_latency_ms_src=987` at 16:48 (the dock's `LOCK-CORRECT` line showed 987 for 4.5 h), the
+fast-DLL swap at 21:28 force-killed OBS, and the relaunch loaded `787` from the stale JSON — the next
+E2E measured every camera at −197 ms (video 200 ms early) and the issue-1265 guard HOLDed.
+
+Before ANY force-kill relaunch of strih/stream OBS:
+1. Read the runtime values you care about (`GetInputSettings` pin, `GetInputAudioSyncOffset mbc`).
+2. Force a collection save over WS — `CreateScene "__save_trigger"` then `RemoveScene "__save_trigger"`
+   (scene-list changes DO mark the project dirty; OBS rewrites `basic/scenes/<collection>.json` within
+   ~2 s) — and read the JSON back (`settings.genlock_latency_ms_src`, `sync` in ns) until it matches.
+3. After the relaunch, read the runtime values again and compare; a mismatch = re-apply, never "wait
+   for the gate to fix it" (the guard HOLDs |residual| > 60 ms, so a 200 ms stale pin stays red).
+The scratch `fastdll-swap-*.ps1` programs kill OBS on the box; the save trigger runs from dev1 over WS
+right before them. (The proper fix — the gate's writes persisting on their own — is a `SaveProject`-
+class request in the vendored obs-websocket or a frontend hook; until then this checklist is the rule.)
