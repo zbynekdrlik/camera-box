@@ -74,3 +74,18 @@ is unit-tested in `tests/harness_lipsync_cross_check.rs`. The classifier is grou
 (those event types didn't exist on Aug-5), not a tuned threshold. The actual FIX once WARP is
 confirmed is a `needs-user-decision` tradeoff (the valves keep the burn-id grid locked for the burn
 gate) — do NOT change the production emit path blind.
+
+
+## dev1 SyncNet engine for the paired-run campaign (17.9.2026)
+
+`scripts/av_sync_measure.py` (and through it `scripts/lipsync-cross-check.sh`) runs SyncNet with `sys.executable`,
+so it needs an interpreter that has torch + the upstream deps. On dev1 that is the venv at
+`/home/newlevel/devel/syncnet_python/.venv` (upstream joonson/syncnet_python head 907c0b5, CPU torch,
+opencv-headless, scenedetect, python_speech_features, tqdm, websocket-client) with the SAME weights as the
+stream-box install (`data/syncnet_v2.model`, `detectors/s3fd/weights/sfd_face.pth`). Invoke as
+`/home/newlevel/devel/syncnet_python/.venv/bin/python scripts/av_sync_measure.py --media <clip> --repo
+/home/newlevel/devel/syncnet_python` (cross-check: `LIPSYNC_SYNCNET_REPO=/home/newlevel/devel/syncnet_python` +
+that interpreter as the script's python). Validated: the pinned asset reads `AV offset -2 fr (-80 ms) conf 7.9`
+= the PROVENANCE baseline. CPU cost is ~13 min wall per 35 s clip — capture the pairs on the rig first, analyse
+offline afterwards (dev2 CUDA if speed matters). A missing `websocket-client` in the venv fails the script
+instantly with `missing dep: pip install websocket-client` even in `--media` mode.

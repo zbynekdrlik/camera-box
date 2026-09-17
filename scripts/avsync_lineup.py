@@ -41,6 +41,9 @@ CLI:
   avsync_lineup.py preflight --facts <json>  -> "GO" / "NO-GO: <reasons>", exit 0 / 1
   avsync_lineup.py liveness  --facts <json>  -> "action=<OK|ALARM|SUPPRESSED> reason=<...> sig=<...>",
                                                 exit 0 (OK/SUPPRESSED) / 20 (ALARM)
+  avsync_lineup.py offset    --facts <json>  -> same shape; #1331 A/V-offset alarm (page when a
+                                                CONFIDENT SyncNet offset is out of band during a
+                                                LIVE stream), exit 0 (OK/SUPPRESSED) / 20 (ALARM)
 """
 
 import argparse
@@ -59,7 +62,25 @@ PREFLIGHT_STALE_S_DEFAULT = 300
 # QPSK marker ~-5 dB; -60 sits with wide margin between the two).
 AUDIO_PRESENT_DB = -60.0
 
+# #1331 offset ALERT arm. Page when the SyncNet-measured A/V offset is out of band during a LIVE
+# stream. OFFSET_ALARM_MS_DEFAULT mirrors av_sync_measure.py's operator threshold (its
+# `--threshold-ms default=60`); that value lives there ONLY as an argparse default, not an
+# importable named constant, and importing av_sync_measure.py pulls torch/obs_phase2 (absent on
+# dev1), so the value is cross-referenced here, never imported. OFFSET_CONF_FLOOR is the QUALITY
+# gate the production-critical re-ping doctrine requires (watchdog-notify-dedup.md, the 16.9 storm
+# caveat): a verdict below it is unreliable and MUST NOT page. It mirrors av_sync_measure.py's
+# CONF_MIN=4.0 -- SyncNet's own usability floor below which a window has no reliable face/lip lock
+# (the 2026-07-26 conf-3.6 garbage era falls under it); the healthy pinned-asset baseline reads ~8.
+OFFSET_ALARM_MS_DEFAULT = 60
+OFFSET_CONF_FLOOR = 4.0
+
 _DB_RE = re.compile(r"\bdb=(-?\d+(?:\.\d+)?)\b")
+# The exact verdict shape av_sync_measure.py prints (scripts/av_sync_measure.py:422):
+#   f"[{stamp}] AV offset {offset_frames:+d} fr ({offset_ms:+d} ms) conf {conf:.1f} :: {verdict}"
+# Capture the ms value (what the operator's 2ME PGM latency knob turns) and the SyncNet confidence.
+_OFFSET_RE = re.compile(
+    r"AV offset\s+[+-]?\d+\s+fr\s+\(\s*([+-]?\d+)\s*ms\s*\)\s+conf\s+(-?\d+(?:\.\d+)?)"
+)
 
 # CLI exit codes.
 EXIT_GO = 0
@@ -274,6 +295,120 @@ def liveness_alarm(facts):
             "unknown")
 
 
+# ---------------------------------------------------------------------------
+# Decision surface 3 -- the run-time OFFSET alarm (#1331): page when a CONFIDENT SyncNet A/V offset
+# is out of band during a LIVE stream. Distinct from liveness_alarm (which asks "is the line ALIVE
+# / audio present?"); this asks "is the live program actually IN SYNC?".
+# ---------------------------------------------------------------------------
+
+
+def parse_offset(status):
+    """PURE: parse '(±M ms) conf X' out of a measured heartbeat -> (offset_ms:int, conf:float), or
+    (None, None) when absent/garbled (an UNMEASURABLE band segment, a no-signal/TIMEOUT line, a
+    corrupt status, empty/None). Reads the ms value av_sync_measure.py prints (offset_frames *
+    FRAME_MS) directly, plus the SyncNet confidence. Fail-CLOSED: any parse failure yields
+    (None, None) so the caller can never page on a garbled reading."""
+    if not status:
+        return (None, None)
+    m = _OFFSET_RE.search(str(status))
+    if not m:
+        return (None, None)
+    try:
+        return (int(m.group(1)), float(m.group(2)))
+    except (TypeError, ValueError):
+        return (None, None)
+
+
+def offset_advice_from_status(status):
+    """PURE: the operator advice av_sync_measure.py appends after ' :: ' (e.g. "audio predbieha
+    video o ~80 ms -> ZNIZ '2ME PGM' latency o 80"), or None when absent. Included verbatim in the
+    ALARM reason so the phone alert carries the exact knob direction."""
+    if not status:
+        return None
+    parts = str(status).split(" :: ", 1)
+    if len(parts) != 2:
+        return None
+    advice = parts[1].strip()
+    return advice or None
+
+
+def offset_alarm(facts):
+    """PURE: returns (action, reason, sig) with action in {"OK", "ALARM", "SUPPRESSED"} and `sig` a
+    COARSE stamp-free signature the caller throttles on -- same contract as liveness_alarm.
+
+    ALARM iff ALL hold: the stream is LIVE (outputActive True), the heartbeat is FRESH, it is a
+    measured (grab succeeded) non-wedged reading carrying a PARSEABLE offset verdict, the SyncNet
+    confidence is at/above the floor (the QUALITY gate), AND |offset| >= the threshold. Everything
+    else is SUPPRESSED (never a false page), gated in this order so each SUPPRESSED reason is honest:
+      - stream not LIVE (off, or unreadable=None) -> the offset arm evaluates only during a live
+        stream; off/unknown is owned by the liveness arm's stream gate.
+      - heartbeat STALE -> the reading is not current; staleness is the liveness arm's job.
+      - not a measured/non-wedged heartbeat (no-signal / TIMEOUT) -> nothing to grade; liveness owns it.
+      - no parseable offset (an UNMEASURABLE band/graphics window) -> nothing to rozladit.
+      - LOW confidence (< floor) -> unreliable verdict (the 2026-07-26 conf-3.6 garbage) -> never page.
+      - |offset| < threshold -> in band -> OK.
+    Fail-CLOSED throughout: a missing/garbled fact yields SUPPRESSED, never ALARM."""
+    threshold = facts.get("offset_alarm_ms", OFFSET_ALARM_MS_DEFAULT)
+    try:
+        threshold = abs(float(threshold))
+    except (TypeError, ValueError):
+        threshold = float(OFFSET_ALARM_MS_DEFAULT)
+    conf_floor = facts.get("offset_conf_floor", OFFSET_CONF_FLOOR)
+    try:
+        conf_floor = float(conf_floor)
+    except (TypeError, ValueError):
+        conf_floor = OFFSET_CONF_FLOOR
+
+    status = facts.get("heartbeat_status", "")
+    live = stream_is_live(facts.get("stream_output_active"))
+    fresh = heartbeat_fresh(facts.get("heartbeat_epoch"), facts.get("now"),
+                            facts.get("stale_s", STALE_S_DEFAULT))
+
+    if live is not True:
+        return ("SUPPRESSED",
+                "stream nevysiela alebo sa stav neda precitat -- offset alarm sa vyhodnocuje len "
+                "pocas ZIVEHO streamu",
+                "not-live")
+    if not fresh:
+        return ("SUPPRESSED",
+                "heartbeat nie je cerstvy -- offset nie je aktualny (staleness riesi liveness arm)",
+                "stale")
+    if not is_measured_heartbeat(status) or status_is_wedged(status):
+        return ("SUPPRESSED",
+                "ziadne cerstve meranie (no-signal / TIMEOUT) -- offset arm nema co hodnotit "
+                "(riesi liveness arm)",
+                "not-measured")
+    # A silent measured heartbeat is the liveness arm's no-audio case -- the offset arm DEFERS so the
+    # two arms stay strictly mutually exclusive (a confident SyncNet offset against digital silence is
+    # self-contradictory anyway: SyncNet emits UNMEASURABLE with no face/lip lock there, which
+    # parse_offset already rejects below -- this gate closes the synthetic silent+verdict double-page).
+    if not audio_present(status):
+        return ("SUPPRESSED",
+                "meracia audio linka je TICHA -- rozladenie neposudzujem, no-audio riesi liveness arm",
+                "silent")
+    offset_ms, conf = parse_offset(status)
+    if offset_ms is None or conf is None:
+        return ("SUPPRESSED",
+                "okno bez offset verdiktu (band/graphics segment) -- nie je co rozladit",
+                "no-verdict")
+    if conf < conf_floor:
+        return ("SUPPRESSED",
+                "meranie ma nizku spolahlivost (conf {:g} < {:g}) -- verdikt nie je doveryhodny".format(
+                    conf, conf_floor),
+                "low-conf")
+    if abs(offset_ms) < threshold:
+        return ("OK",
+                "A/V je v tolerancii (offset {:+d} ms < {:g} ms, conf {:g})".format(
+                    offset_ms, threshold, conf),
+                "ok")
+    advice = offset_advice_from_status(status)
+    reason = "A/V je ROZLADENE pocas ZIVEHO streamu: offset {:+d} ms (conf {:g}, prah {:g} ms)".format(
+        offset_ms, conf, threshold)
+    if advice:
+        reason += " -- " + advice
+    return ("ALARM", reason, "offset")
+
+
 def _fmt_db(db):
     return "<necitatelne>" if db is None else "{:g}".format(db)
 
@@ -298,6 +433,9 @@ def main(argv=None):
     p_live = sub.add_parser("liveness", help="run-time liveness alarm bound to stream state")
     p_live.add_argument("--facts", required=True, help="path to the gathered-facts JSON")
 
+    p_off = sub.add_parser("offset", help="run-time A/V offset alarm bound to stream state (#1331)")
+    p_off.add_argument("--facts", required=True, help="path to the gathered-facts JSON")
+
     a = ap.parse_args(argv)
     facts = _load_facts(a.facts)
 
@@ -309,7 +447,10 @@ def main(argv=None):
         print("NO-GO: " + " | ".join(reasons))
         return EXIT_NO_GO
 
-    action, reason, sig = liveness_alarm(facts)
+    if a.mode == "offset":
+        action, reason, sig = offset_alarm(facts)
+    else:
+        action, reason, sig = liveness_alarm(facts)
     print("action={} reason={} sig={}".format(action, reason, sig))
     return EXIT_ALARM if action == "ALARM" else EXIT_GO
 

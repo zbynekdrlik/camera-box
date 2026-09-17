@@ -236,6 +236,39 @@ carries a `[stamp]` that changes every ~90 s) would change the signature every p
 `obs_watchdog_alert_throttle` into re-paging every 5 min instead of ~1 h — the same trap the `#812`
 sibling avoids with its stable `"${leg}:stale"` token.
 
+## Offset ALERT arm — "hlásenia do Discordu počas live" (#1331)
+
+The stream box can never post to Discord itself (`discord-webhook.txt` absent; the default
+`airuleset.py notify` route does not exist on Windows), so a measured A/V *rozladenie* during a live
+stream reached nobody. `run_offset_pass` closes that: it runs as a SECOND decide/alert pass right
+after `run_liveness_pass`, **on the SAME gathered facts** (`HEARTBEAT_*` + `STREAM_ACTIVE_JSON` are
+globals set by the liveness pass — no second ssh/OBS-WS fetch), through the pure
+`avsync_lineup.py offset` decider, with its OWN state keys (`offset_confirm`/`offset_alert_sig`/
+`offset_alert_passes`, never touching the liveness arm's `lineup_*`). The liveness + preflight arms
+are byte-identical (unchanged `fire_notify`, stable keys); only the new arm was added.
+
+**What PAGES (🚨):** the stream is LIVE (`outputActive` true) **and** the heartbeat is FRESH +
+measured + non-wedged **and** the SyncNet confidence is `>= OFFSET_CONF_FLOOR` (4.0, the quality
+gate) **and** `|offset_ms| >= OFFSET_ALARM_MS` (60). The alert text carries offset + conf + the
+`ZNIZ/ZVYS '2ME PGM'` knob advice already in the verdict.
+
+**What is SUPPRESSED (never a false page):** stream off / unreadable (`not-live`), stale heartbeat
+(`stale`, owned by the liveness arm), no-signal / TIMEOUT (`not-measured`), an UNMEASURABLE
+band/graphics window with no offset verdict (`no-verdict`), and — critically — a LOW-confidence
+verdict (`low-conf`): the 2026-07-26 `conf 3.6` garbage era must never page; the healthy pinned-asset
+baseline reads ~8. Fail-CLOSED on any missing/garbled fact.
+
+**Dedup-key class = PRODUCTION-CRITICAL time-bucketed** (`fire_offset_notify` →
+`watchdog_notify_key "avsync-offset-stream"` → `avsync-offset-stream-<bucket>`). An on-air A/V
+rozladenie is the same production-critical A/V-sync-MEASUREMENT class as `av-step-alert-watchdog.sh`'s
+absolute-offset BAND arm (`.claude/rules/watchdog-notify-dedup.md`, issue 1308/1319), so it re-pings
+"dokolečka" while it persists rather than card-editing forever. The re-ping doctrine's
+quality-gated-input requirement is met by `OFFSET_CONF_FLOOR` (a low-conf verdict is log-only). The
+file is allowlisted in `test_notify_dedup_key_sweep_1206.py`; only the offset line buckets — the
+liveness/preflight arms keep STABLE keys. `OFFSET_ALARM_MS` / `OFFSET_CONF_FLOOR` cross-reference
+`av_sync_measure.py`'s `--threshold-ms default=60` and `CONF_MIN=4.0` (that module can't be imported
+on dev1 — it pulls torch/obs_phase2 — so the values are documented, not imported).
+
 ## Fail LOUD on a missing tool — a dev1 alarm must never fail OPEN on a tooling gap
 
 `require_tools sshpass ssh python3 jq` (+ `curl` for a non-dry `--assert`) runs first: a missing jq

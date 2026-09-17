@@ -69,6 +69,15 @@ PREFLIGHT_STALE_S="${AVSYNC_LINEUP_PREFLIGHT_STALE_S:-300}"
 CONFIRM_THRESHOLD="${AVSYNC_LINEUP_CONFIRM_THRESHOLD:-1}"
 ALERT_THROTTLE_PASSES="${AVSYNC_LINEUP_ALERT_THROTTLE_PASSES:-12}"   # ~1h at the 5-min cadence
 
+# #1331 offset ALERT arm thresholds (env-overridable; the pure decider carries the same defaults --
+# passing them explicitly keeps this script the single knob surface, like STALE_S above).
+#   OFFSET_ALARM_MS   -- |offset| at/above which a CONFIDENT reading pages during a live stream
+#                        (mirrors av_sync_measure.py --threshold-ms default=60).
+#   OFFSET_CONF_FLOOR -- SyncNet confidence below which a verdict is unreliable and NEVER pages
+#                        (mirrors av_sync_measure.py CONF_MIN=4.0; healthy pinned-asset baseline ~8).
+OFFSET_ALARM_MS="${AVSYNC_LINEUP_OFFSET_ALARM_MS:-60}"
+OFFSET_CONF_FLOOR="${AVSYNC_LINEUP_OFFSET_CONF_FLOOR:-4.0}"
+
 # stream OBS WebSocket (for the outputActive read via obs_phase2.py stream-status). A missing/wrong
 # password just makes the read fail -> stream state UNKNOWN -> SUPPRESSED (fail-safe: never a false
 # page, and the network-reach/obs-liveness watchdogs own "OBS unreachable").
@@ -205,6 +214,23 @@ fire_notify() {
   python3 "$NOTIFY" notify --body "$body" --dedup-key "$key" >/dev/null 2>&1 || log "ALERT: airuleset.py notify failed (non-fatal)"
 }
 
+# #1331: the offset arm's OWN notify path. Distinct from fire_notify because an on-air A/V
+# rozladenie is a PRODUCTION-CRITICAL A/V-sync-measurement page (watchdog-notify-dedup.md, the #1319
+# av-band arm precedent), so its --dedup-key is TIME-BUCKETED via the shared watchdog_notify_key
+# helper -- a persisting out-of-sync re-pings once per bucket instead of card-editing forever, gated
+# by the offset_alarm confidence floor (the quality-gated-input rule). The liveness + preflight arms
+# keep fire_notify's STABLE key unchanged (they are not this class).
+fire_offset_notify() {
+  local body="$1"
+  if [ "$DRY_RUN" -eq 1 ]; then
+    log "[dry-run] WOULD alert: $body"
+    return 0
+  fi
+  python3 "$NOTIFY" notify --body "$body" \
+    --dedup-key "$(watchdog_notify_key "avsync-offset-stream" "$(date +%s)")" \
+    >/dev/null 2>&1 || log "ALERT: airuleset.py notify failed (non-fatal)"
+}
+
 # ── run-time liveness pass (default mode) ───────────────────────────────────
 run_liveness_pass() {
   gather_heartbeat
@@ -270,6 +296,73 @@ run_liveness_pass() {
   fi
 }
 
+# ── run-time OFFSET pass (#1331) ────────────────────────────────────────────
+# The owner's "hlasenia do Discordu pocas live" arm: page when the SyncNet-measured A/V offset is
+# out of band during a LIVE stream. Runs AFTER run_liveness_pass, on the SAME already-gathered facts
+# (HEARTBEAT_* + STREAM_ACTIVE_JSON are globals set by that pass -- NO second ssh/OBS-WS fetch), and
+# routes the judgment through the pure avsync_lineup.py offset decider + the SAME #391 confirm/
+# throttle, with its OWN state keys (offset_*) so it never clobbers the liveness arm's counters.
+run_offset_pass() {
+  local now facts action reason sig
+  now="$(date +%s)"
+  facts="$(jq -n \
+    --argjson epoch "$(epoch_json)" \
+    --argjson now "$now" \
+    --argjson stale_s "$STALE_S" \
+    --arg status "$HEARTBEAT_STATUS" \
+    --argjson active "$STREAM_ACTIVE_JSON" \
+    --argjson offset_alarm_ms "$OFFSET_ALARM_MS" \
+    --argjson offset_conf_floor "$OFFSET_CONF_FLOOR" \
+    '{heartbeat_epoch:$epoch, now:$now, stale_s:$stale_s, heartbeat_status:$status, stream_output_active:$active, offset_alarm_ms:$offset_alarm_ms, offset_conf_floor:$offset_conf_floor}')"
+  local factfile; factfile="$(mktemp)"
+  printf '%s' "$facts" > "$factfile"
+  local out; out="$(python3 "$LINEUP_DECIDER" offset --facts "$factfile" 2>/dev/null || true)"
+  rm -f "$factfile"
+  action="$(printf '%s\n' "$out" | sed -n 's/^action=\([A-Za-z]*\).*/\1/p' | tail -1)"
+  reason="$(printf '%s\n' "$out" | sed -n 's/^action=[A-Za-z]* reason=\(.*\) sig=[A-Za-z0-9-]*$/\1/p' | tail -1)"
+  sig="$(printf '%s\n' "$out" | sed -n 's/.* sig=\([A-Za-z0-9-]*\)$/\1/p' | tail -1)"
+  log "offset: stream_active=$STREAM_ACTIVE_JSON status='${HEARTBEAT_STATUS:-<none>}' -> offset_action=${action:-<none>} sig=${sig:-<none>}"
+
+  # confirm/throttle ONLY on ALARM; OK and SUPPRESSED reset the pending state (same discipline as
+  # the liveness arm). SUPPRESSED is DELIBERATELY never an alarm (stream off / not measured / low
+  # conf / no verdict / stale -- all owned elsewhere or not a genuine on-air rozladenie).
+  local wedged=0
+  [ "$action" = "ALARM" ] && wedged=1
+  local prev_confirm decision confirm act
+  prev_confirm="$(read_state_field "offset_confirm" 0)"
+  decision="$(obs_watchdog_confirm "$prev_confirm" "$wedged" "$CONFIRM_THRESHOLD")"
+  confirm="$(printf '%s\n' "$decision" | sed -n 's/^confirm=//p')"
+  act="$(printf '%s\n' "$decision" | sed -n 's/^act=//p')"
+  write_state_field "offset_confirm" "${confirm:-0}"
+
+  if [ "$wedged" -eq 0 ]; then
+    write_state_field "offset_alert_sig" ""
+    write_state_field "offset_alert_passes" 0
+    return 0
+  fi
+  [ "${act:-0}" = "1" ] || { log "offset ALARM pending (confirm ${confirm}/${CONFIRM_THRESHOLD})"; return 0; }
+
+  local current_sig prior_sig prior_passes throttle_out alert_now new_sig new_passes
+  # throttle on the COARSE decider sig (offset), never the timestamped heartbeat text, so a sustained
+  # rozladenie keeps ONE signature; the TIME-BUCKETED dedup key (fire_offset_notify) then turns each
+  # throttled re-fire into a fresh ping while it persists (the production-critical class).
+  current_sig="offset:${sig:-alarm}"
+  prior_sig="$(read_state_field "offset_alert_sig" "")"
+  prior_passes="$(read_state_field "offset_alert_passes" 0)"
+  throttle_out="$(obs_watchdog_alert_throttle "$current_sig" "$prior_sig" "$prior_passes" "$ALERT_THROTTLE_PASSES")"
+  alert_now="$(printf '%s\n' "$throttle_out" | sed -n 's/^alert_now=//p')"
+  new_sig="$(printf '%s\n' "$throttle_out" | sed -n 's/^new_sig=//p')"
+  new_passes="$(printf '%s\n' "$throttle_out" | sed -n 's/^new_passes=//p')"
+  write_state_field "offset_alert_sig" "$new_sig"
+  write_state_field "offset_alert_passes" "$new_passes"
+
+  if [ "${alert_now:-0}" = "1" ]; then
+    fire_offset_notify "🚨 avsync-lineup-alert-watchdog: A/V-sync ROZLADENIE pocas ZIVEHO streamu -- ${reason} (${REPO_SLUG})."
+  else
+    log "offset ALERT: suppressed by throttle (pass ${prior_passes}/${ALERT_THROTTLE_PASSES})"
+  fi
+}
+
 # ── pre-event GO/NO-GO assert (--assert mode) ───────────────────────────────
 forwarder_present_json() {
   local unit present="true"
@@ -332,6 +425,8 @@ main() {
   fi
   log "liveness pass (dry_run=$DRY_RUN, stale_s=$STALE_S, threshold=$CONFIRM_THRESHOLD)"
   run_liveness_pass
+  # #1331: the offset arm runs on the SAME facts run_liveness_pass just gathered (globals), no re-fetch.
+  run_offset_pass
   log "pass end"
 }
 

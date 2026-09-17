@@ -306,3 +306,200 @@ def test_liveness_SUPPRESSED_when_stream_state_unknown_and_line_down():
     f["heartbeat_status"] = HB_NO_SIGNAL
     action, _, sig = al.liveness_alarm(f)
     assert action == "SUPPRESSED" and sig == "unknown"
+
+
+# ---------------------------------------------------------------------------
+# #1331 offset ALERT arm -- parse the SyncNet offset verdict out of a measured heartbeat and page
+# when |offset| is out of band during a LIVE stream (a genuine, confident A/V rozladenie on air).
+# Fixtures use the REAL av_sync_measure.py print shape (scripts/av_sync_measure.py:422:
+#   f"[{stamp}] AV offset {offset_frames:+d} fr ({offset_ms:+d} ms) conf {conf:.1f} :: {verdict}")
+# prefixed by avsync-watchdog.ps1 with `measured: db=<X> `.
+# ---------------------------------------------------------------------------
+
+# in-band (nonzero but < 60 ms), high confidence -> OK, must not page.
+HB_IN_BAND = ("measured: db=-5.4 [2026-08-17 08:00:00] AV offset +1 fr (+40 ms) conf 8.0 :: "
+              "audio predbieha video o ~40 ms -> ZNIZ '2ME PGM' latency o 40")
+# out of band (>= 60 ms) but LOW confidence (the 2026-07-26 conf-3.6 garbage era) -> SUPPRESSED.
+HB_MISALIGNED_LOWCONF = ("measured: db=-5.4 [2026-07-26 15:00:42] AV offset +2 fr (+80 ms) conf 3.6 "
+                         ":: audio predbieha video o ~80 ms -> ZNIZ '2ME PGM' latency o 80")
+# out of band, video-leading (negative), high confidence -> ALARM with the ZVYS advice.
+HB_MISALIGNED_NEG = ("measured: db=-5.4 [2026-08-17 08:00:00] AV offset -3 fr (-120 ms) conf 9.0 :: "
+                     "video predbieha audio o ~120 ms -> ZVYS '2ME PGM' latency o 120")
+# a measured heartbeat whose offset text is corrupt -> no parseable verdict -> fail-CLOSED.
+HB_GARBLED_OFFSET = "measured: db=-5.4 [2026-08-17 08:00:00] AV offset ?? fr (?? ms) conf x.y :: garbled"
+
+
+# --- parse_offset -- fail-CLOSED on anything but a clean verdict --------------------------------
+
+
+def test_parse_offset_reads_ms_and_conf_from_a_measured_verdict():
+    assert al.parse_offset(HB_MISALIGNED) == (80, 5.1)
+    assert al.parse_offset(HB_OK) == (0, 8.2)
+    assert al.parse_offset(HB_MISALIGNED_NEG) == (-120, 9.0)
+    assert al.parse_offset(HB_MISALIGNED_LOWCONF) == (80, 3.6)
+
+
+def test_parse_offset_none_for_unmeasurable_or_no_signal_or_garbled():
+    assert al.parse_offset(HB_SILENT) == (None, None)          # UNMEASURABLE band, no offset
+    assert al.parse_offset(HB_BAND_SEGMENT) == (None, None)
+    assert al.parse_offset(HB_NO_SIGNAL) == (None, None)
+    assert al.parse_offset(HB_TIMEOUT) == (None, None)
+    assert al.parse_offset(HB_GARBLED_OFFSET) == (None, None)
+
+
+def test_parse_offset_none_for_empty_or_none():
+    assert al.parse_offset("") == (None, None)
+    assert al.parse_offset(None) == (None, None)
+
+
+# --- offset_advice_from_status -----------------------------------------------------------------
+
+
+def test_offset_advice_extracted_after_the_double_colon():
+    assert al.offset_advice_from_status(HB_MISALIGNED) == (
+        "audio predbieha video o ~80 ms -> ZNIZ '2ME PGM' latency o 80")
+    assert al.offset_advice_from_status(HB_OK) == "A/V sync OK (offset 0 ms)"
+
+
+def test_offset_advice_none_without_a_double_colon():
+    assert al.offset_advice_from_status(HB_SILENT) is None
+    assert al.offset_advice_from_status("") is None
+    assert al.offset_advice_from_status(None) is None
+
+
+# --- offset_alarm -- the run-time offset alert, BOUND TO STREAM STATE + quality-gated ------------
+
+
+def _offset_facts():
+    return {
+        "stream_output_active": True,
+        "heartbeat_epoch": 1000,
+        "now": 1100,
+        "stale_s": 1200,
+        "heartbeat_status": HB_MISALIGNED,
+        "offset_alarm_ms": 60,
+        "offset_conf_floor": 4.0,
+    }
+
+
+def test_offset_ALARM_when_live_measured_over_threshold_and_confident():
+    action, reason, sig = al.offset_alarm(_offset_facts())
+    assert action == "ALARM" and sig == "offset"
+    assert "ROZLADENE" in reason and "+80 ms" in reason and "ZNIZ" in reason
+
+
+def test_offset_ALARM_negative_video_leading():
+    f = _offset_facts()
+    f["heartbeat_status"] = HB_MISALIGNED_NEG
+    action, reason, sig = al.offset_alarm(f)
+    assert action == "ALARM" and sig == "offset"
+    assert "-120 ms" in reason and "ZVYS" in reason
+
+
+def test_offset_OK_when_in_sync():
+    f = _offset_facts()
+    f["heartbeat_status"] = HB_OK
+    action, _, sig = al.offset_alarm(f)
+    assert action == "OK" and sig == "ok"
+
+
+def test_offset_OK_when_nonzero_but_within_band():
+    f = _offset_facts()
+    f["heartbeat_status"] = HB_IN_BAND  # 40 ms < 60 ms
+    action, _, sig = al.offset_alarm(f)
+    assert action == "OK" and sig == "ok"
+
+
+def test_offset_SUPPRESSED_low_confidence_never_pages_the_july_garbage():
+    f = _offset_facts()
+    f["heartbeat_status"] = HB_MISALIGNED_LOWCONF  # 80 ms but conf 3.6 < 4.0
+    action, reason, sig = al.offset_alarm(f)
+    assert action == "SUPPRESSED" and sig == "low-conf"
+    assert "3.6" in reason
+
+
+def test_offset_SUPPRESSED_when_stream_off_air():
+    f = _offset_facts()
+    f["stream_output_active"] = False
+    action, _, sig = al.offset_alarm(f)
+    assert action == "SUPPRESSED" and sig == "not-live"
+
+
+def test_offset_SUPPRESSED_when_stream_state_unknown():
+    f = _offset_facts()
+    f["stream_output_active"] = None
+    action, _, sig = al.offset_alarm(f)
+    assert action == "SUPPRESSED" and sig == "not-live"
+
+
+def test_offset_SUPPRESSED_when_heartbeat_stale():
+    f = _offset_facts()
+    f["now"] = 1000 + 1201  # past the stale window
+    action, _, sig = al.offset_alarm(f)
+    assert action == "SUPPRESSED" and sig == "stale"
+
+
+def test_offset_SUPPRESSED_for_a_band_segment_with_no_verdict():
+    f = _offset_facts()
+    f["heartbeat_status"] = HB_BAND_SEGMENT  # UNMEASURABLE, audio present, no offset
+    action, _, sig = al.offset_alarm(f)
+    assert action == "SUPPRESSED" and sig == "no-verdict"
+
+
+def test_offset_SUPPRESSED_for_timeout_and_no_signal():
+    f = _offset_facts()
+    f["heartbeat_status"] = HB_TIMEOUT
+    assert al.offset_alarm(f)[2] == "not-measured"
+    f["heartbeat_status"] = HB_NO_SIGNAL
+    assert al.offset_alarm(f)[2] == "not-measured"
+
+
+def test_offset_SUPPRESSED_for_garbled_offset_text_fail_closed():
+    f = _offset_facts()
+    f["heartbeat_status"] = HB_GARBLED_OFFSET
+    action, _, sig = al.offset_alarm(f)
+    assert action == "SUPPRESSED" and sig == "no-verdict"
+
+
+def test_offset_SUPPRESSED_when_audio_silent_defers_to_liveness_no_double_page():
+    # A contradictory synthetic heartbeat -- digital silence (db=-91) yet a confident offset verdict.
+    # The real pipeline never emits this (SyncNet reports UNMEASURABLE against silence), but the arm
+    # must still DEFER so it never double-pages alongside the liveness arm's no-audio alarm.
+    f = _offset_facts()
+    f["heartbeat_status"] = ("measured: db=-91.0 [2026-08-17 08:00:00] AV offset +2 fr (+80 ms) "
+                             "conf 8.0 :: audio predbieha video o ~80 ms -> ZNIZ '2ME PGM' latency o 80")
+    action, _, sig = al.offset_alarm(f)
+    assert action == "SUPPRESSED" and sig == "silent"
+
+
+def test_offset_no_exception_on_empty_or_none_facts_fail_closed():
+    # a missing/garbled fact bag must NEVER crash the pass -- fail-CLOSED to SUPPRESSED.
+    for f in ({}, {"stream_output_active": None, "heartbeat_status": None},
+              {"stream_output_active": True, "heartbeat_status": None, "heartbeat_epoch": None,
+               "now": None}):
+        action, _, _ = al.offset_alarm(f)
+        assert action in ("OK", "ALARM", "SUPPRESSED")
+        assert action != "ALARM"  # nothing to page on
+
+
+def test_offset_threshold_is_env_overridable_via_facts():
+    f = _offset_facts()  # 80 ms
+    f["offset_alarm_ms"] = 100  # raise the band above the reading
+    action, _, sig = al.offset_alarm(f)
+    assert action == "OK" and sig == "ok"
+
+
+def test_offset_conf_floor_is_env_overridable_via_facts():
+    f = _offset_facts()  # conf 5.1
+    f["offset_conf_floor"] = 6.0  # raise the floor above the reading
+    action, _, sig = al.offset_alarm(f)
+    assert action == "SUPPRESSED" and sig == "low-conf"
+
+
+def test_offset_alarm_uses_documented_defaults_when_facts_omit_them():
+    f = _offset_facts()
+    del f["offset_alarm_ms"]
+    del f["offset_conf_floor"]
+    # HB_MISALIGNED = 80 ms conf 5.1 -> default 60 ms / floor 4.0 -> ALARM.
+    action, _, sig = al.offset_alarm(f)
+    assert action == "ALARM" and sig == "offset"

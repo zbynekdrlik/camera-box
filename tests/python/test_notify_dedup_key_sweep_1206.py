@@ -170,6 +170,14 @@ _PRODUCTION_CRITICAL_TIME_BUCKETED = {
     # issue 1308). The file's OTHER notify (the #1267 STEP arm, av-step-$box) stays a stable key --
     # allowlisting the FILE permits the bucketed band line without requiring every line to bucket.
     "av-step-alert-watchdog.sh",          # #1319 -- absolute A/V-offset BAND arm (OUT_OF_BAND)
+    # #1331 -- avsync-lineup's file also carries the production-critical OFFSET ALARM arm: its on-air
+    # A/V-rozladenie page (avsync-offset-stream) time-buckets via watchdog_notify_key so it re-pings
+    # "dokolečka" while the LIVE stream stays out of the SyncNet-measured band (owner: A/V-sync
+    # measurement is production-critical, issue 1308; the same class as av-step's band arm above). Its
+    # confidence floor is the quality-gated input the re-ping doctrine requires. The file's OTHER
+    # notifies (the liveness arm avsync-lineup-liveness + the preflight-nogo arm) stay STABLE keys --
+    # allowlisting the FILE permits the bucketed offset line without requiring every line to bucket.
+    "avsync-lineup-alert-watchdog.sh",    # #1331 -- offset ALARM arm (on-air A/V rozladenie)
 }
 
 # The bucketing markers an inline --dedup-key carries when it time-buckets: the shared bash helper
