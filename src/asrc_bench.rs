@@ -506,8 +506,10 @@ impl RealtimeAsrcCompensator {
     /// `in.timestamp += sync_offset` BEFORE placement). Without this, the level integral would keep
     /// the OLD setpoint and REFILL the buffer back toward it, silently cancelling the deliberate
     /// audio trim (issue 1333) within ~1–2 h. Move the setpoint by the SAME Δ so the integral holds
-    /// the NEW depth (`level_last_ms` too, so the first window after the jump does not read a false
-    /// error against a stale telemetry sample); the integral itself is left untouched (no windup).
+    /// the NEW depth. `level_last_ms` is shifted too so the telemetry `level=` reads consistently
+    /// with the shifted `target=` until the next accepted window refreshes it (it is telemetry-only —
+    /// the error term reads the LIVE `buffered_ms`, never `level_last_ms`). The integral itself is
+    /// left untouched (no windup).
     /// UNINTENDED discontinuities (dropout/relock) must NOT call this — they go through
     /// [`Self::regression_flush`], which drops `level_captured` so the setpoint re-captures and the
     /// buffer self-heals its calibrated depth. No-op until the setpoint has been captured (first
