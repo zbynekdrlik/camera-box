@@ -500,6 +500,25 @@ impl RealtimeAsrcCompensator {
         self.level_last_ms
     }
 
+    /// issue #1335 follow-up: shift the captured buffer-LEVEL setpoint by `delta_ms` to track a
+    /// DELIBERATE audio sync-offset change. A sync-offset change of Δ (ns→ms) moves this source's
+    /// audio placement — and therefore its mix-buffer depth — by exactly Δ (obs-source.c applies
+    /// `in.timestamp += sync_offset` BEFORE placement). Without this, the level integral would keep
+    /// the OLD setpoint and REFILL the buffer back toward it, silently cancelling the deliberate
+    /// audio trim (issue 1333) within ~1–2 h. Move the setpoint by the SAME Δ so the integral holds
+    /// the NEW depth (`level_last_ms` too, so the first window after the jump does not read a false
+    /// error against a stale telemetry sample); the integral itself is left untouched (no windup).
+    /// UNINTENDED discontinuities (dropout/relock) must NOT call this — they go through
+    /// [`Self::regression_flush`], which drops `level_captured` so the setpoint re-captures and the
+    /// buffer self-heals its calibrated depth. No-op until the setpoint has been captured (first
+    /// rate lock). Exact mirror of the C `asrc_compensator_shift_level_target()`.
+    pub fn shift_level_target(&mut self, delta_ms: f64) {
+        // RED stub (issue #1335 follow-up): does NOT move the setpoint yet, so the level integral
+        // still refills the buffer toward the OLD depth and the deliberate trim is cancelled — the
+        // bench test below fails until the real body lands in the GREEN commit.
+        let _ = delta_ms;
+    }
+
     /// The audio-timeline advance AFTER applying whatever `applied_ppm` is CURRENTLY in effect —
     /// the single formula both the starved-rejection path and the normal (post-EMA/slew) path in
     /// [`Self::compensate`] return. Factored out (`/review` finding on issue #960) so the two call
@@ -1474,6 +1493,117 @@ mod tests {
             "issue #1335: the rate-only path must drift far out of band with the hidden residual \
              (proving this test CAN fail), got end drift={end_drift:.3} ms -- too small to \
              discriminate; re-check HIDDEN_PPM / SIM_S"
+        );
+    }
+
+    /// issue #1335 follow-up: a DELIBERATE audio sync-offset change shifts the source's audio
+    /// placement (obs-source.c `in.timestamp += sync_offset`, applied BEFORE placement) and
+    /// therefore its mix-buffer depth by the SAME Δ. `shift_level_target(Δ)` must move the captured
+    /// LEVEL setpoint by Δ so the holding integral keeps the NEW depth instead of refilling toward
+    /// the old one and silently cancelling the deliberate audio trim (issue 1333) — the exact
+    /// servo-vs-actuator fight the owner reported (A/V floats by the trim size between E2E runs).
+    ///
+    /// Bench: lock + settle at a depth L with NO hidden residual (so the buffer holds perfectly flat
+    /// once locked), then model the placement change as an instantaneous −14 ms WITHDRAWAL from the
+    /// buffer (the live offset −4 → −18 ms), then observe 2 h.
+    ///   GREEN (shift announced): the setpoint moves to L−14, so the buffer settles at L−14 and the
+    ///   level integral stays within ±0.05 ppm of its pre-jump value — it never has to fight the trim.
+    ///   RED (no shift, in-test anti-tautology): the setpoint stays L, so the integral WINDS (≥0.3 ppm)
+    ///   and drives the buffer back toward L, cancelling the trim — proving the shift does the work.
+    #[test]
+    fn shift_level_target_holds_setpoint_after_offset_jump_1335() {
+        const TRUE_PPM: f64 = -5.0; // healthy mbc floor; no hidden residual → buffer holds flat once locked
+        const BLOCK_S: f64 = 1.0; // one 1 s accepted window per block (matches the #1335 level test)
+        const WARMUP_S: f64 = 2400.0; // well past lock (~65 s) + settle; the integral parks near 0
+        const POST_S: f64 = 2.0 * 3600.0; // the design's 2 h observation window
+        const START_BUF_MS: f64 = 100.0;
+        const JUMP_MS: f64 = -14.0; // the live offset trim, modelled as a placement withdrawal
+
+        // Closed-loop buffer sim with a one-shot placement jump at the end of warmup. `use_shift`
+        // selects whether the offset change is ANNOUNCED to the servo via shift_level_target.
+        // Returns (post-jump trace of (buffer_ms, integral_ppm), pre_jump_integral, final servo).
+        fn simulate(use_shift: bool) -> (Vec<(f64, f64)>, f64, RealtimeAsrcCompensator) {
+            let mut c = RealtimeAsrcCompensator::new();
+            let clock = DriftingAudioClock::new(TRUE_PPM);
+            let mut buffer_ms = START_BUF_MS;
+            // Warmup: lock the rate loop and let the level integral park at ~0 (no hidden residual).
+            let mut t = 0.0;
+            while t < WARMUP_S {
+                let raw = clock.raw_advance(BLOCK_S);
+                let corrected = c.compensate_with_level(raw, BLOCK_S, buffer_ms);
+                buffer_ms += (corrected - BLOCK_S) * 1000.0;
+                t += BLOCK_S;
+            }
+            let pre_jump_integral = c.level_integral_ppm();
+            // The deliberate offset change: an instantaneous placement withdrawal from the buffer,
+            // then (optionally) announce the SAME Δ to the servo. A deliberate change never flushes
+            // the regression (the rate inputs are untouched), so level_captured stays true.
+            buffer_ms += JUMP_MS;
+            if use_shift {
+                c.shift_level_target(JUMP_MS);
+            }
+            // Observe 2 h.
+            let mut post = Vec::new();
+            t = 0.0;
+            while t < POST_S {
+                let raw = clock.raw_advance(BLOCK_S);
+                let corrected = c.compensate_with_level(raw, BLOCK_S, buffer_ms);
+                buffer_ms += (corrected - BLOCK_S) * 1000.0;
+                t += BLOCK_S;
+                post.push((buffer_ms, c.level_integral_ppm()));
+            }
+            (post, pre_jump_integral, c)
+        }
+
+        // GREEN: with the shift, the setpoint moved by Δ, so the buffer holds the NEW depth and the
+        // integral never winds.
+        let (post, pre_jump_integral, c) = simulate(true);
+        let target_after = c.level_target_ms();
+        assert!(
+            (target_after - (START_BUF_MS + JUMP_MS)).abs() < 2.0,
+            "issue #1335 follow-up: shift_level_target must move the setpoint by Δ to ~{:.1} ms, \
+             got {:.3} ms",
+            START_BUF_MS + JUMP_MS,
+            target_after
+        );
+        let mean: f64 = post.iter().map(|(b, _)| *b).sum::<f64>() / post.len() as f64;
+        let peak = post
+            .iter()
+            .fold(0.0_f64, |m, (b, _)| m.max((b - target_after).abs()));
+        assert!(
+            (mean - target_after).abs() < 2.0 && peak < 5.0,
+            "issue #1335 follow-up: with the shift the buffer must settle at the NEW setpoint L−14 \
+             (mean within ±2 ms, peak inside ±5 ms), got mean={mean:.3} peak={peak:.3} \
+             (setpoint {target_after:.3})"
+        );
+        let integral_drift = post
+            .iter()
+            .fold(0.0_f64, |m, (_, i)| m.max((i - pre_jump_integral).abs()));
+        assert!(
+            integral_drift < 0.05,
+            "issue #1335 follow-up: with the shift the level integral must stay within ±0.05 ppm of \
+             its pre-jump value over the 2 h (it never fights the trim), got max drift={integral_drift:.4} ppm"
+        );
+
+        // RED (anti-tautology): WITHOUT the shift the servo fights the trim — the integral winds and
+        // the buffer is dragged back toward the ORIGINAL setpoint L, silently undoing the offset.
+        let (post_red, pre_red, c_red) = simulate(false);
+        let target_orig = c_red.level_target_ms(); // unchanged — never shifted
+        let red_integral_wind = post_red
+            .iter()
+            .fold(0.0_f64, |m, (_, i)| m.max((i - pre_red).abs()));
+        assert!(
+            red_integral_wind >= 0.3,
+            "issue #1335 follow-up: without the shift the level integral must WIND ≥0.3 ppm to \
+             refill the buffer (proving the fix, not the plant, holds the level), got max wind={red_integral_wind:.4} ppm"
+        );
+        let red_return_to_l = post_red
+            .iter()
+            .fold(f64::INFINITY, |m, (b, _)| m.min((b - target_orig).abs()));
+        assert!(
+            red_return_to_l < 2.0,
+            "issue #1335 follow-up: without the shift the buffer must climb back to the ORIGINAL \
+             setpoint L (the cancelled trim), got closest approach={red_return_to_l:.3} ms to {target_orig:.3}"
         );
     }
 }
