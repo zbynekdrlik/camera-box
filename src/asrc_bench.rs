@@ -1399,7 +1399,11 @@ mod tests {
                 };
                 // Physical buffer: fills by the corrected OUTPUT-seconds the resampler produces,
                 // drains by the mixer's master block, MINUS a hidden residual the rate loop cannot
-                // measure (models the live ~0.8 ppm mis-read the level integral must null).
+                // measure (models the live ~0.8 ppm mis-read the level integral must null). Modelling
+                // it as a hidden DRAIN the rate loop can't see is buffer-level-equivalent to the
+                // production mode (the regression settling ~0.8 ppm short of the true rate): both
+                // leave the SAME uncorrected ppm error integrating into the buffer, which is the only
+                // thing that reaches this simulation.
                 buffer_ms += (corrected - block_s) * 1000.0 - (hidden_ppm / 1e6) * block_s * 1000.0;
                 t += block_s;
                 trace.push((t, buffer_ms));
@@ -1446,12 +1450,18 @@ mod tests {
             "issue #1335: with the level integral the buffer PEAK deviation over the settled second \
              half must stay inside the +-5 ms hold band, got peak={peak:.3} ms"
         );
-        // The integral moved NEGATIVE to counter the drain (deficit -> stretch) and never railed at
-        // its ±clamp.
+        // The integral settled into its NEGATIVE equilibrium band (to counter the drain, deficit ->
+        // stretch) and never railed at its ±clamp. Phase-robust bound: the equilibrium is
+        // -HIDDEN_PPM and the undamped transient swings ±HIDDEN_PPM about it, so the value lives in
+        // [-2*HIDDEN_PPM, 0] regardless of where SIM_S lands in the ~3.9 h cycle -- assert that band
+        // (with margin), never the last sample against a hand-tuned 0.2.
         assert!(
-            c.level_integral_ppm() < 0.2 && c.level_integral_ppm().abs() < LEVEL_INTEGRAL_MAX_PPM,
-            "issue #1335: the level integral must have moved negative to counter the drain without \
-             railing at ±{LEVEL_INTEGRAL_MAX_PPM} ppm, got integral={:.4} ppm",
+            c.level_integral_ppm() <= 0.1
+                && c.level_integral_ppm() > -(2.0 * HIDDEN_PPM + 0.5)
+                && c.level_integral_ppm().abs() < LEVEL_INTEGRAL_MAX_PPM,
+            "issue #1335: the level integral must sit in its negative equilibrium band \
+             (~[-2*{HIDDEN_PPM}, 0] ppm) without railing at ±{LEVEL_INTEGRAL_MAX_PPM} ppm, got \
+             integral={:.4} ppm",
             c.level_integral_ppm()
         );
 
