@@ -48,7 +48,7 @@ ONE Slovak checklist of what the owner forgot to switch back into development st
 | genlock | `genlock-lock-alert-watchdog.sh --dry-run` | `verdict=HEALTHY` | DEGRADED/UNLOCKED | **UNKNOWN facet = UNKNOWN, NEVER forgot** |
 | dantesync | `dantesync-version-gate.sh` | exit 0 | exit 20 (drift) | exit 11 |
 | cambox | `camera-box-version-gate.sh` | exit 0 | exit 20 (drift) | exit 11 |
-| avlatency | `measurement-chain-latency.sh` (marker emit vs `mbc` relative onset) | `verdict=ALIGNED` | `verdict=DRIFTED` (>90 ms vs baseline) | monotonic-emit / no-baseline / chain-silent (all <−60 dB) / <3 onsets / cam2 down / stream OBS down |
+| avlatency | `measurement-chain-latency.sh` (marker emit vs `mbc` relative onset) | `verdict=ALIGNED` | `verdict=DRIFTED` (>90 ms vs baseline) | monotonic-emit / no-baseline / **ambiguous-cadence** (#1332) / chain-silent (all <−60 dB) / <3 onsets / cam2 down / stream OBS down |
 | watchdogs | `systemctl --user` per timer in `lib/watchdog-roster.sh` (dev1-local, no ssh) | all enabled+active+fired <15 min → OK | disabled/inactive/never-run/stale → **SUPERVISOR** (`nezapnutý watchdog: …`, never `zabudol si`) | no unit file → UNKNOWN with names |
 
 ## `avlatency` (#1312) — the mbc measurement-chain LATENCY, not just presence
@@ -101,6 +101,24 @@ median, classify, the wall-clock guard) is the pure `scripts/measurement_chain_l
     2 s window (cam2↔dev1 clock offset was 0.36 s — NOT the cause). Correct fail-safe (NO-BASELINE), but
     before `--baseline` confirm the SERVICE is active and the log's newest `emit_ts` is within seconds
     of `date +%s%N`, not just that onsets ≥ 3.
+- **ALIAS-AWARE pairing with the baseline as a PRIOR (#1332, the 0.5 s-cadence regression).** Since
+  issue 1318 the cam2 painter emits the marker every **0.5 s** (`--audio-marker-cadence-ticks 30`, to
+  hold the measurement chain's gate/AGC open), so the ~1.13 s chain latency has FOUR candidate emits
+  inside the 2 s pairing window. The old "latest prior emit" rule picked the alias `1132 − 2×500 ≈
+  132 ms` → `classify` read DRIFTED vs the 1140.7 ms baseline → a FALSE `zabudol si` every handover.
+  `pair_latencies` now pairs each onset to the candidate whose latency is CLOSEST to the persisted
+  baseline (used as a **prior**); the emit cadence is derived from the log (`emit_cadence_ns`), and
+  `pairing_is_ambiguous(cadence, window)` is `cadence < window`. Rules:
+  - **With a baseline** → prior resolves the alias → real ~1132 ms → ALIGNED/DRIFTED normally. An
+    unambiguous ≥-window cadence (the old 5 s) is unchanged (only one candidate, prior is a no-op).
+  - **Without a baseline AND an ambiguous cadence** → the kernel does NOT pair and surfaces
+    `ambiguous=True` → verdict UNKNOWN, reason `ambiguous-cadence` — **NEVER a false DRIFTED, and it
+    beats NO-BASELINE** (in a 0.5 s cadence 132/632/1132 ms cannot be told apart from onset timing
+    alone). This is the honest UNKNOWN, not a red.
+  - **Seeding a baseline on an ambiguous cadence needs `--expected-ms <ms>`.**
+    `measurement-chain-latency.sh --baseline` with an ambiguous cadence and no `--expected-ms` FAILS
+    LOUD (exit 3, nothing persisted) so an aliased latency is never written; `--baseline --expected-ms
+    1140` uses that value as the prior for pairing and persists the REAL measured latency (~1132).
 - **TEST-premise (two-pass, like `mic`/`painter`).** The QPSK marker only sounds in TEST steady state,
   so on the first EVENT-mode pass `avlatency` reads UNKNOWN; it verifies once the rig is in TEST and
   the painter is back up. It samples the meter ~30 s then ssh-reads the marker log AFTER (so the
