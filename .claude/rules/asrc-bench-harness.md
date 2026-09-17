@@ -365,3 +365,44 @@ and drifts it monotonically (~3 ms/h, 105→68 over 12.5 h) toward an eventual u
   main running the SAME 12 h buffer sim as the Rust probe: both produce setpoint 99.652, mean 100.000,
   peak 1.789, integral −0.0773, last 98.885 (identical to the last decimal). Reuse that lift for any
   future change to this pair (per `vendored-libobs-change-safety.md`).
+
+## #1335 follow-up — the LEVEL setpoint must FOLLOW a deliberate audio sync-offset change
+
+The #1335 level integral above holds the buffer at a setpoint captured at first lock. But the mix
+buffer depth is not a free variable: obs-source.c applies `in.timestamp += sync_offset` to the audio
+timestamps BEFORE placement (obs-source.c ~1733-1734), so a DELIBERATE sync-offset change of Δ shifts
+this source's placement — and therefore `audio_input_buf[0]` depth — by exactly Δ (live: `mbc` offset
+−4 → −18 ms moved `level` 96.8 → 81.1). Left alone, the level integral reads that Δ as an error and
+REFILLS the buffer back toward the OLD setpoint (integral winding toward its ±3 clamp = +11 ms/h),
+silently cancelling the deliberate audio trim (the issue-1333 split writes a small mbc offset) within
+~1–2 h. The next E2E re-applies the trim, the integral cancels it again — the servo and the audio
+actuator FIGHT and A/V floats by the trim size between runs (the exact owner complaint).
+
+- **Fix (Prístup 1): the setpoint FOLLOWS the offset.** A new pure
+  `asrc_compensator_shift_level_target(c, delta_ms)` (Rust `RealtimeAsrcCompensator::shift_level_target`)
+  — if `level_captured`: `level_target_ms += delta_ms; level_last_ms += delta_ms;` (the integral is
+  left UNTOUCHED — no windup); no-op if not captured. Called from the EXISTING
+  `last_sync_offset != sync_offset` branch in `source_output_audio_data` (audio thread, `source->asrc`
+  lives there, no new lock) with `delta_ms = (double)(sync_offset − last_sync_offset) / 1e6` computed
+  from the OLD `last_sync_offset` BEFORE it is overwritten. `sync_offset` is nanoseconds (obs
+  `obs_source_set_sync_offset(int64_t)`), so `/1e6` → ms. SIGN: offset −14 ⇒ placement earlier ⇒
+  depth −14 ⇒ `target += Δ` (−14).
+- **Why NOT a blanket re-capture on any placement discontinuity:** an UNINTENDED discontinuity
+  (dropout/relock) must KEEP the calibrated depth and self-heal — those go through
+  `asrc_regression_flush()`, which drops `level_captured` so the setpoint re-captures from the
+  post-relock depth and the buffer self-heals. Only a DELIBERATE `sync_offset` change reaches the
+  `last_sync_offset != sync_offset` branch, so shifting exclusively there distinguishes the two:
+  deliberate change ⇒ move the setpoint; disturbance ⇒ let the flush/re-capture self-heal. (Approaches
+  2/3 — re-capture on every discontinuity, or freeze the integral N minutes — both lose that
+  distinction or only delay the fight; rejected in the design.)
+- **Bench** (`shift_level_target_holds_setpoint_after_offset_jump_1335`): lock+settle at depth L with
+  NO hidden residual (buffer holds flat), model the offset change as an instantaneous −14 ms buffer
+  WITHDRAWAL, observe 2 h. GREEN (shift announced): buffer settles at L−14, `level_integral_ppm` stays
+  within ±0.05 ppm of its pre-jump value. Anti-tautology (no shift): the integral WINDS ≥0.3 ppm and
+  drags the buffer back to L. C↔Rust parity bit-identical via the standalone `cc -Wall -Wextra -Werror`
+  lift: both produce setpoint 85.700000, mean 85.700000, peak 0.000000, integral drift 0.000000, final
+  85.700000.
+- **Lock-step anchor:** `tests/genlock_preload.rs::asrc_setpoint_follows_sync_offset_1335` pins the
+  new C decl + `.c` body + the obs-source.c call site byte-exact (squished). No new pwsh gate — the
+  function rides the existing genlock build; add the 3-copy pwsh lock-step only if a future change
+  needs a windows-genlock gate.
