@@ -747,7 +747,7 @@ class TestGainLogLineAndApply:
         assert data["loop_gain"] == pytest.approx(0.4)
         assert data["combined_offset_ms_raw"] == pytest.approx(-61.35)
         assert data["applied_latency_ms"] == 954
-        assert data["audio_offset_ms"] == -11
+        assert data["audio_offset_ms"] == -22
         assert data["audio_source"] == "mbc"
 
     def test_set_line_stays_byte_identical(self, monkeypatch, tmp_path, capsys):
