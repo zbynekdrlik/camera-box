@@ -378,6 +378,14 @@ def offset_alarm(facts):
                 "ziadne cerstve meranie (no-signal / TIMEOUT) -- offset arm nema co hodnotit "
                 "(riesi liveness arm)",
                 "not-measured")
+    # A silent measured heartbeat is the liveness arm's no-audio case -- the offset arm DEFERS so the
+    # two arms stay strictly mutually exclusive (a confident SyncNet offset against digital silence is
+    # self-contradictory anyway: SyncNet emits UNMEASURABLE with no face/lip lock there, which
+    # parse_offset already rejects below -- this gate closes the synthetic silent+verdict double-page).
+    if not audio_present(status):
+        return ("SUPPRESSED",
+                "meracia audio linka je TICHA -- rozladenie neposudzujem, no-audio riesi liveness arm",
+                "silent")
     offset_ms, conf = parse_offset(status)
     if offset_ms is None or conf is None:
         return ("SUPPRESSED",

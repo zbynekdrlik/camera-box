@@ -461,6 +461,17 @@ def test_offset_SUPPRESSED_for_garbled_offset_text_fail_closed():
     assert action == "SUPPRESSED" and sig == "no-verdict"
 
 
+def test_offset_SUPPRESSED_when_audio_silent_defers_to_liveness_no_double_page():
+    # A contradictory synthetic heartbeat -- digital silence (db=-91) yet a confident offset verdict.
+    # The real pipeline never emits this (SyncNet reports UNMEASURABLE against silence), but the arm
+    # must still DEFER so it never double-pages alongside the liveness arm's no-audio alarm.
+    f = _offset_facts()
+    f["heartbeat_status"] = ("measured: db=-91.0 [2026-08-17 08:00:00] AV offset +2 fr (+80 ms) "
+                             "conf 8.0 :: audio predbieha video o ~80 ms -> ZNIZ '2ME PGM' latency o 80")
+    action, _, sig = al.offset_alarm(f)
+    assert action == "SUPPRESSED" and sig == "silent"
+
+
 def test_offset_no_exception_on_empty_or_none_facts_fail_closed():
     # a missing/garbled fact bag must NEVER crash the pass -- fail-CLOSED to SUPPRESSED.
     for f in ({}, {"stream_output_active": None, "heartbeat_status": None},
