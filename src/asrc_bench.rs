@@ -2039,7 +2039,7 @@ mod tests {
         let target = c.level_target_ms();
         let steps_pre = c.step_count();
         // A pure LEVEL disturbance (raw/master untouched ⇒ no rate residual ⇒ no re-base): the
-        // buffer jumps +20 ms and only the I+P level loop responds.
+        // buffer jumps by DISTURB_MS (+5 ms) and only the I+P level loop responds.
         buffer_ms += DISTURB_MS;
         let mut trace: Vec<f64> = Vec::new();
         let mut integral_peak = 0.0_f64;
