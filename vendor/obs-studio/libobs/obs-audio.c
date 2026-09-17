@@ -695,7 +695,7 @@ bool audio_callback(void *param, uint64_t start_ts_in, uint64_t end_ts_in, uint6
 					/* camera-box #1335: shared bytes->ms helper (obs-internal.h) -- same
 					 * value as the pre-#1335 inline computation, now shared with the ASRC
 					 * level integral in obs-source.c so the two never drift. */
-					const int buf_ms = (int)obs_source_input_buf_ms(tsrc->audio_input_buf[0].size, sample_rate);
+					const int buf_ms = (int)obs_source_input_buf_ms(tsrc->audio_input_buf[0].size, (uint32_t)sample_rate);
 					blog(LOG_INFO,
 					     "audio-telemetry #800 '%s': ts_lag_ms=%" PRId64
 					     " buffered_ms=%d pending=%d timing_adjust_ms=%" PRId64,
