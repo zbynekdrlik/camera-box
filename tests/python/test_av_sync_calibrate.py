@@ -138,10 +138,15 @@ class TestOffsetFromVerdictJson:
 # ---------------------------------------------------------------------------
 
 class FakeObs:
-    """Minimal in-memory OBS-WebSocket stand-in for genlock_latency_ms_src on one source."""
+    """Minimal in-memory OBS-WebSocket stand-in for genlock_latency_ms_src on one source.
 
-    def __init__(self, *, latency_ms=450, readback_override=None):
+    #1333: also serves the `mbc` audio sync offset (Get/SetInputAudioSyncOffset), so the #856
+    controller SPLIT path (loop-gain + combined-offset) can apply BOTH actuators in-test. Legacy
+    pin-only tests never touch the audio RPCs, so this addition is transparent to them."""
+
+    def __init__(self, *, latency_ms=450, readback_override=None, audio_ms=0):
         self.latency_ms = latency_ms
+        self.audio_ms = audio_ms
         # When set, GetInputSettings AFTER a SetInputSettings returns this value instead of the
         # real one -- simulates a genuine read-back mismatch (e.g. the #292 force-drain class).
         self._readback_override = readback_override
@@ -159,10 +164,18 @@ class FakeObs:
         if method == "SetInputSettings":
             self.latency_ms = params["inputSettings"][av_sync_calibrate.GENLOCK_SRC_LATENCY_KEY]
             return {}
+        if method == "GetInputAudioSyncOffset":
+            return {av_sync_calibrate.AUDIO_SYNC_OFFSET_KEY: self.audio_ms}
+        if method == "SetInputAudioSyncOffset":
+            self.audio_ms = params[av_sync_calibrate.AUDIO_SYNC_OFFSET_KEY]
+            return {}
         return {}
 
     def set_calls(self):
         return [(m, p) for (m, p) in self.calls if m == "SetInputSettings"]
+
+    def audio_set_calls(self):
+        return [p for (m, p) in self.calls if m == "SetInputAudioSyncOffset"]
 
 
 # ---------------------------------------------------------------------------
@@ -708,48 +721,59 @@ class TestGainLogLineAndApply:
         av_sync_calibrate.main()
         return fake, json_path
 
-    def test_616_scenario_pin_913_damped_lands_at_938_with_gain_line(self, monkeypatch, tmp_path, capsys):
-        # damped -24.54 (0.4 * combined -61.35) applied at pin 913 -> 938 ~ predicted null 940.
+    def test_616_scenario_pin_913_frame_snapped_with_gain_line(self, monkeypatch, tmp_path, capsys):
+        # #1333 SUPERSEDES the pre-split arbitrary-ms pin (was 913 -> 938): the #856 controller path
+        # now routes through split_av_correction, so the pin is FRAME-QUANTIZED + phase-snapped.
+        # combined -61.35, gain 0.4 -> frames = round(0.4*-61.35/33.333) = -1 (video leads => pin UP
+        # one frame), snapped phase-safe to 954 (frac 0.62); the sub-frame remainder goes to the mbc
+        # audio offset (~-11 ms). The gain-line + persist keys contract is otherwise unchanged.
         fake, json_path = self._run_apply(
             monkeypatch, tmp_path, current=913, offset=-24.54,
             extra_args=["--loop-gain", "0.4", "--combined-offset-ms", "-61.35"],
         )
-        assert fake.latency_ms == 938
+        assert fake.latency_ms == 954
+        assert fake.audio_ms == -11
         out = capsys.readouterr().out
         assert "[av-sync] gain:" in out, f"expected the grep-able gain line, got: {out!r}"
         assert "combined=-61.35" in out
         assert "gain=0.40" in out
         assert "damped=-24.54" in out
         assert "clamped=-24.54" in out
-        assert "pin 913 -> 938" in out
-        # persists the #1265 keys
+        assert "pin 913 -> 954" in out
+        # persists the #1265 keys + the #1333 audio actuator
         data = json.loads(json_path.read_text())
         assert data["loop_gain"] == pytest.approx(0.4)
         assert data["combined_offset_ms_raw"] == pytest.approx(-61.35)
-        assert data["applied_latency_ms"] == 938
+        assert data["applied_latency_ms"] == 954
+        assert data["audio_offset_ms"] == -11
+        assert data["audio_source"] == "mbc"
 
     def test_set_line_stays_byte_identical(self, monkeypatch, tmp_path, capsys):
         # other consumers grep the exact `[av-sync] SET '...' genlock_latency_ms_src: A -> B` line;
-        # the gain line is ADDITIONAL, never a replacement.
+        # the gain line is ADDITIONAL, never a replacement. #1333: the FORMAT is unchanged; the pin
+        # VALUE is now the frame-snapped split result (913 -> 954), not the old arbitrary 938.
         self._run_apply(
             monkeypatch, tmp_path, current=913, offset=-24.54,
             extra_args=["--loop-gain", "0.4", "--combined-offset-ms", "-61.35"],
         )
         out = capsys.readouterr().out
-        assert "[av-sync] SET 'NDI 2ME PGM' genlock_latency_ms_src: 913 -> 938" in out
+        assert "[av-sync] SET 'NDI 2ME PGM' genlock_latency_ms_src: 913 -> 954" in out
 
     def test_gain_line_shows_the_step_clamp_when_it_bites(self, monkeypatch, tmp_path, capsys):
-        # a damped offset larger than the +/-50/run step: clamped shows the +/-50-limited offset,
-        # pin shows the real clamped result.
-        self._run_apply(
+        # a damped offset larger than the +/-50/run step: clamped shows the +/-50-limited offset.
+        # #1333: the pin is the frame-snapped split result. combined -200, gain 0.4 -> frames -2 (pin
+        # UP), target 1066.7 step-clamped to 1050 then snapped phase-safe to 1054 (1050 reads frac
+        # ~0.5-prone under float, snaps up to 0.62). The `clamped=` offset field is unchanged.
+        fake, _ = self._run_apply(
             monkeypatch, tmp_path, current=1000, offset=-80.0,
             extra_args=["--loop-gain", "0.4", "--combined-offset-ms", "-200.0"],
         )
         out = capsys.readouterr().out
         assert "[av-sync] gain:" in out
         assert "damped=-80.00" in out
-        assert "clamped=-50.00" in out  # +/-50/run step clamp on the offset
-        assert "pin 1000 -> 1050" in out
+        assert "clamped=-50.00" in out  # +/-50/run step clamp on the offset (unchanged)
+        assert "pin 1000 -> 1054" in out
+        assert fake.latency_ms == 1054
 
     def test_no_gain_line_without_loop_gain_arg(self, monkeypatch, tmp_path, capsys):
         # the operator/aligner path (no --loop-gain) must NOT emit a gain line or persist the keys.
