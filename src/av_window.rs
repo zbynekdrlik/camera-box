@@ -716,17 +716,16 @@ mod tests {
         assert!(!av_offset_gate_pass(&measured(m), 0.0));
     }
 
-    /// #861 interim (2026-08-06): the tolerance is pinned at 90ms = the original ±20ms bound +
-    /// 2 frames @30fps (2 × 33.33 = 66.7, rounded up together to 90) — the deep-FIFO relock
-    /// lands its release phase ±1-2 frames differently per lock episode (live 4-run evidence on
-    /// issue #1003; the #940 phase-pin fix reduced but did not eliminate it), so a ±20ms bound
-    /// was a per-episode lottery, not a gate. Re-tightening 90 → 20 is issue #1003's acceptance
-    /// item 2 — when that lands, THIS test is the one-line flip back.
+    /// Owner ruling 17.9.2026 („av tolerancia ma byt 30ms!!!", issue 1333): the per-camera A/V
+    /// gate tolerance is 30 ms. This SUPERSEDES the issue-861 interim 90 ms (20 ms + 2 frames
+    /// @30fps, 2026-08-06) and the earlier ±20 ms ask of issue 624. No data-first widening is
+    /// allowed: the inter-run COMMON-offset walk is fixed at its ROOT (the deep-FIFO release phase
+    /// after relock + the ASRC integral term — ticket plan item 4), never by loosening this gate.
     #[test]
-    fn tolerance_is_the_interim_90ms_episode_quantization_bound_861() {
+    fn tolerance_is_owner_ruling_30ms_1333() {
         assert_eq!(
-            AV_OFFSET_GATE_TOLERANCE_MS, 90.0,
-            "interim bound = 20 + 2 frames @30fps episode quantization (issue #1003 re-tightens)"
+            AV_OFFSET_GATE_TOLERANCE_MS, 30.0,
+            "owner ruling 17.9.2026: A/V gate tolerance is 30 ms (issue 1333)"
         );
     }
 
@@ -955,22 +954,22 @@ mod tests {
     /// The STALE-PAINTER cluster from verdict 845554984 (run 33176192564, 2026-08-29): every
     /// judged camera's measured A/V offset with an un-pinned, uncompensated cam2 frame-probe
     /// painter (the issue-1138 class). Kept ONLY as a negative fixture: the recalibrated
-    /// RIG_VIDEO_LEG_OFFSET_MS=0.0 must REJECT it (three cameras fall outside ±90) — a stale
+    /// RIG_VIDEO_LEG_OFFSET_MS=0.0 must REJECT it (all five cameras fall outside ±30) — a stale
     /// measurement run must never be silently re-accepted as calibration data.
     const STALE_PAINTER_CLUSTER_845554984: [f64; 5] =
         [-95.166_666, -91.979_166, -76.75, -93.916_666, -88.625];
 
     /// The fresh full-fleet cluster from verdict 576990285 — the first complete run AFTER the
     /// issue-1138 painter redeploy (sha f42c66917455, 2026-08-29): every judged camera's measured
-    /// A/V offset, now delay-compensated at source. All five land comfortably inside ±90 of the
+    /// A/V offset, now delay-compensated at source. All five land inside the tightened ±30 of the
     /// recalibrated RIG_VIDEO_LEG_OFFSET_MS = 0.0 — no leg subtraction is needed any more.
     const FRESH_CLUSTER_576990285: [f64; 5] = [2.5, 7.9, 24.9, 9.7, 6.7];
 
     #[test]
     fn fresh_cluster_576990285_passes_the_recalibrated_zero_video_leg_1178() {
-        // GREEN: the painter-fix cluster passes the gate against the recalibrated (0.0) leg with
-        // large margin — the video leg is now compensated at the source, not by a calibration
-        // constant.
+        // GREEN: the painter-fix cluster still passes the gate against the recalibrated (0.0) leg
+        // under the tightened ±30 tolerance (owner ruling 17.9.2026, issue 1333) — the video leg
+        // is compensated at the source, not by a calibration constant.
         for &off in FRESH_CLUSTER_576990285.iter() {
             assert!(
                 av_offset_gate_pass(&measured(off), RIG_VIDEO_LEG_OFFSET_MS),
@@ -978,8 +977,8 @@ mod tests {
             );
         }
         // REJECTED: the stale-painter cluster (issue 1138 class artifact) must NOT pass any more —
-        // exactly cam1/cam2/cam6 (< -90 from the recalibrated 0.0 leg) fail, documenting that the
-        // stale-painter world is rejected, never silently re-derived into a calibration constant.
+        // under ±30 all five cameras (each past ±30 from the recalibrated 0.0 leg) fail, documenting
+        // that the stale-painter world is rejected, never silently re-derived into a calibration constant.
         let fails_now: Vec<f64> = STALE_PAINTER_CLUSTER_845554984
             .iter()
             .copied()
@@ -987,8 +986,8 @@ mod tests {
             .collect();
         assert_eq!(
             fails_now.len(),
-            3,
-            "stale-painter cluster: exactly cam1/cam2/cam6 (< -90 from the recalibrated 0.0 leg) must fail, got {fails_now:?}"
+            5,
+            "stale-painter cluster: under ±30 all five cameras (each past ±30 from the recalibrated 0.0 leg) must fail, got {fails_now:?}"
         );
     }
 
