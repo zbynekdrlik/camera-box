@@ -250,6 +250,26 @@ pub const REGRESSION_CAP: usize = 640;
 /// caller should be trusted alone to have already clamped.
 pub const OUTER_BIAS_MAX_PPM: f64 = 10.0;
 
+/// camera-box #1335: integral gain of the buffer-LEVEL holding term, in ppm per (ms of level error
+/// × second of closed-window master time). The issue #1084 regression is a pure RATE loop — it
+/// never reads the mix-buffer LEVEL, so any residual rate error the regression cannot remove (live:
+/// the 600 s window lagging a ±1 ppm wandering true rate ⇒ ~0.8 ppm mean error) INTEGRATES into the
+/// buffer and drifts it ~3 ms/h until an underrun. This slow integral, driven by `buffered_ms`,
+/// nulls exactly that residual. 0.0002 ⇒ a 30 ms level error moves the correction 0.36 ppm/min; the
+/// ±3 ms level noise floor moves it ±0.04 ppm/min (below the issue #1016 quantization resolution),
+/// so it never fights the fast rate loop. Deliberately slow (an I-only loop on the integrator plant
+/// that is the buffer holds the level BOUNDED — period ~3.9 h, amplitude ~2.24·residual_ppm ms — not
+/// critically damped; that is the design's intent, "pomalá slučka … drží ±5 ms"). Mirror of
+/// asrc-compensator.h ASRC_LEVEL_KI_PPM_PER_MS_S — keep numerically identical.
+pub const LEVEL_KI_PPM_PER_MS_S: f64 = 0.0002;
+
+/// camera-box #1335: hard clamp on the buffer-LEVEL integral, in ppm (±). Bounds the level term far
+/// below the rate loop's own MAX_PPM so a stuck/misreported buffer level can never rail the servo;
+/// the live residual it corrects is ~0.8 ppm, well inside ±3. Anti-windup pairs with this clamp: the
+/// integral is not advanced while the composite rate target is saturated at ±MAX_PPM. Mirror of
+/// asrc-compensator.h ASRC_LEVEL_INTEGRAL_MAX_PPM — keep numerically identical.
+pub const LEVEL_INTEGRAL_MAX_PPM: f64 = 3.0;
+
 /// issue #960: sanity ceiling on the (issue #962: WINDOWED, duration-weighted-summed) measured
 /// ppm, in ppm — above this, the measurement carries no real timing information (a starved or
 /// bursting audio source, e.g. a muted/idle device path delivering near-zero samples) and must be
@@ -363,6 +383,22 @@ pub struct RealtimeAsrcCompensator {
     /// issue #1084: whether the buffer span has reached [`REGRESSION_LOCK_SPAN_S`] and the servo may
     /// apply compensation (replaces the pre-#1084 elapsed-lock gate). Cleared by a buffer flush.
     reg_locked: bool,
+    /// issue #1335: the buffer-LEVEL setpoint, in ms — captured the FIRST time the rate regression
+    /// locks (the depth the mixer had settled at), re-captured after every flush/relock (see
+    /// [`Self::regression_flush`] + [`Self::level_captured`]). The level integral drives
+    /// `buffered_ms` back toward this.
+    level_target_ms: f64,
+    /// issue #1335: the integral of the level error, in ppm, folded ADDITIVELY into the correction
+    /// target INSIDE the servo loop (alongside `estimated_ppm` + `outer_bias_ppm`), clamped to
+    /// ±[`LEVEL_INTEGRAL_MAX_PPM`]. Reset to 0 on a flush/relock. Zero (no-op) on the rate-only
+    /// entry ([`AsrcCompensator::compensate`], `buffered_ms == None`).
+    level_integral_ppm: f64,
+    /// issue #1335: the most recent `buffered_ms` observed at an accepted window close — telemetry
+    /// only (the C mirror prints it as the `asrc:` line's `level=` field).
+    level_last_ms: f64,
+    /// issue #1335: whether [`Self::level_target_ms`] has been captured since the last (re)lock —
+    /// gates the one-shot setpoint capture. Cleared by a flush so a relock re-captures.
+    level_captured: bool,
 }
 
 impl RealtimeAsrcCompensator {
@@ -382,6 +418,10 @@ impl RealtimeAsrcCompensator {
             cum_master_s: 0.0,
             cum_ymm_s: 0.0,
             reg_locked: false,
+            level_target_ms: 0.0,   // issue #1335
+            level_integral_ppm: 0.0, // issue #1335
+            level_last_ms: 0.0,     // issue #1335
+            level_captured: false,  // issue #1335
         }
     }
 
@@ -403,6 +443,10 @@ impl RealtimeAsrcCompensator {
         self.cum_master_s = 0.0;
         self.cum_ymm_s = 0.0;
         self.reg_locked = false;
+        // issue #1335: a level shift invalidates the captured setpoint AND the integral it built up;
+        // drop both so a relock re-captures the setpoint and re-integrates from 0 (default-safe).
+        self.level_integral_ppm = 0.0;
+        self.level_captured = false;
     }
 
     /// The current rate estimate, in ppm (issue #1084: the least-squares regression slope times
@@ -438,6 +482,24 @@ impl RealtimeAsrcCompensator {
         self.starved_block_count
     }
 
+    /// issue #1335: the buffer-LEVEL integral currently in effect, in ppm — exposed for
+    /// tests/telemetry (the C mirror prints it as the `asrc:` line's `integral=` field).
+    pub fn level_integral_ppm(&self) -> f64 {
+        self.level_integral_ppm
+    }
+
+    /// issue #1335: the captured buffer-LEVEL setpoint, in ms — exposed for tests/telemetry (the C
+    /// mirror prints it as the `asrc:` line's `target=` field). 0.0 until the first lock.
+    pub fn level_target_ms(&self) -> f64 {
+        self.level_target_ms
+    }
+
+    /// issue #1335: the most recent `buffered_ms` the level loop observed, in ms — exposed for
+    /// tests/telemetry (the C mirror prints it as the `asrc:` line's `level=` field).
+    pub fn level_last_ms(&self) -> f64 {
+        self.level_last_ms
+    }
+
     /// The audio-timeline advance AFTER applying whatever `applied_ppm` is CURRENTLY in effect —
     /// the single formula both the starved-rejection path and the normal (post-EMA/slew) path in
     /// [`Self::compensate`] return. Factored out (`/review` finding on issue #960) so the two call
@@ -455,7 +517,32 @@ impl Default for RealtimeAsrcCompensator {
 }
 
 impl AsrcCompensator for RealtimeAsrcCompensator {
+    /// The RATE-only servo entry (the issue #804 bench seam) — runs the #962 windowing + #1084
+    /// regression + #806 outer bias + clamp/slew, but NOT the issue #1335 buffer-LEVEL integral
+    /// (which needs a `buffered_ms` this trait has no argument for). This entry has NO C analogue —
+    /// the vendored C `asrc_compensator_compensate()` ALWAYS receives `buffered_ms`; use
+    /// [`RealtimeAsrcCompensator::compensate_with_level`] for the C-equivalent full path. Keeping
+    /// this rate-only so the shared trait / `simulate_offset_trace_ms` gate + every pre-#1335 test
+    /// stay unchanged.
     fn compensate(&mut self, raw_advance_s: f64, master_block_s: f64) -> f64 {
+        self.compensate_core(raw_advance_s, master_block_s, None)
+    }
+}
+
+impl RealtimeAsrcCompensator {
+    /// The C-equivalent FULL servo call: identical to [`AsrcCompensator::compensate`] PLUS the issue
+    /// #1335 buffer-LEVEL holding integral, driven by the source's current mix-buffer depth
+    /// `buffered_ms` (obs-source.c reads it from `audio_input_buf[0].size` via the shared
+    /// `obs_source_input_buf_ms()` helper). Exact mirror of the C
+    /// `asrc_compensator_compensate(c, raw, master, buffered_ms, &applied)`.
+    pub fn compensate_with_level(&mut self, raw_advance_s: f64, master_block_s: f64, buffered_ms: f64) -> f64 {
+        self.compensate_core(raw_advance_s, master_block_s, Some(buffered_ms))
+    }
+
+    /// Shared servo body. `buffered_ms == Some(_)` runs the issue #1335 level integral (the C path);
+    /// `None` is the rate-only bench entry. Keep numerically identical to the C
+    /// `asrc_compensator_compensate()`.
+    fn compensate_core(&mut self, raw_advance_s: f64, master_block_s: f64, buffered_ms: Option<f64>) -> f64 {
         if master_block_s <= 0.0 {
             // A non-positive block duration carries no timing information (e.g. a duplicate or
             // backward wall-clock read — an NTP step) and, because the regression accumulates a
@@ -558,6 +645,23 @@ impl AsrcCompensator for RealtimeAsrcCompensator {
                     self.reg_locked = true;
                 }
             }
+
+            // issue #1335: buffer-LEVEL holding integral, updated ONCE per closed ACCEPTED window
+            // (a rejected window early-returned above; an unlocked servo skips the update). The C
+            // mirror reads buffered_ms from source->audio_input_buf[0].size every callback; the
+            // rate-only bench entry passes None and never runs this.
+            if let Some(buf_ms) = buffered_ms {
+                self.level_last_ms = buf_ms;
+                if self.reg_locked && !self.level_captured {
+                    // setpoint = the buffer depth the mixer had settled at when the rate loop first
+                    // locked; re-captured after every flush/relock.
+                    self.level_target_ms = buf_ms;
+                    self.level_captured = true;
+                }
+                // issue #1335 [red]: the level integral is NOT implemented yet -- level_integral_ppm
+                // stays 0, so the buffer drifts at the residual rate exactly as the pre-#1335 servo
+                // does. This is what the GREEN commit adds.
+            }
         }
 
         // Default-safe: no lock yet -> target zero compensation, never guess from a
@@ -568,7 +672,9 @@ impl AsrcCompensator for RealtimeAsrcCompensator {
         let target_ppm = if !self.reg_locked {
             0.0
         } else {
-            (self.estimated_ppm + self.outer_bias_ppm).clamp(-MAX_PPM, MAX_PPM)
+            // issue #1335: the buffer-LEVEL integral is folded in alongside the outer bias, then the
+            // SUM is clamped to the hard ppm bound (inert/0.0 on the rate-only bench entry).
+            (self.estimated_ppm + self.outer_bias_ppm + self.level_integral_ppm).clamp(-MAX_PPM, MAX_PPM)
         };
 
         // Slew-limit the APPLIED correction toward the target — caps how fast the resample-ratio
@@ -1219,6 +1325,121 @@ mod tests {
              already-decided target -- got applied_ppm={} (was {applied_before}), meaning the \
              starved window was allowed to continue advancing an in-progress slew transition",
             compensator.applied_ppm()
+        );
+    }
+
+    /// issue #1335: the buffer-LEVEL holding integral must keep the mix buffer FLAT despite a
+    /// RESIDUAL the rate loop structurally cannot remove. Models the live root cause (issue body):
+    /// on `mbc` the rate servo settled ~0.8 ppm short of the true source-vs-mixer mismatch, so
+    /// WITHOUT a level term the buffer drained ~3 ms/h (105 -> 68 ms over 12.5 h) toward an eventual
+    /// underrun. Here `HIDDEN_PPM` is a fill/drain the RATE regression cannot see (it measures
+    /// raw-vs-master only); only the LEVEL integral (which reads `buffered_ms`) can null it.
+    ///
+    /// An I-only controller on the integrator plant that is the buffer is marginally-stable: it holds
+    /// the level BOUNDED (period ~3.9 h, amplitude ~2.24*HIDDEN_PPM ms for the lock-time step), not
+    /// critically damped -- the design's stated intent ("pomala slucka ... drzi +-5 ms"). So the
+    /// GREEN assertions are: over the settled SECOND HALF the buffer MEAN returns to the captured
+    /// setpoint (+-2 ms) and the PEAK stays inside +-5 ms; the integral moved NEGATIVE to counter the
+    /// drain without railing at its clamp. The rate-only path (the trait `compensate`, no level
+    /// integral) drains ~34 ms and FAILS -- the in-test anti-tautology proves the integral does the
+    /// work.
+    #[test]
+    fn realtime_compensator_holds_buffer_level_with_integral_1335() {
+        const TRUE_PPM: f64 = -5.0; // healthy mbc source-vs-mixer floor (post-#1325)
+        const HIDDEN_PPM: f64 = 0.8; // the residual the rate loop mis-reads (issue body ~0.8 ppm)
+        const BLOCK_S: f64 = 1.0;
+        const SIM_S: f64 = 12.0 * 3600.0;
+        const START_BUF_MS: f64 = 100.0;
+
+        // Run the closed-loop buffer simulation; returns (trace of (t_s, buffer_ms), final servo).
+        // `use_level` selects the #1335 level path vs the rate-only trait entry.
+        fn simulate(
+            use_level: bool,
+            true_ppm: f64,
+            hidden_ppm: f64,
+            sim_s: f64,
+            block_s: f64,
+            start_ms: f64,
+        ) -> (Vec<(f64, f64)>, RealtimeAsrcCompensator) {
+            let mut c = RealtimeAsrcCompensator::new();
+            let clock = DriftingAudioClock::new(true_ppm);
+            let mut buffer_ms = start_ms;
+            let mut trace = Vec::new();
+            let mut t = 0.0;
+            while t < sim_s {
+                let raw = clock.raw_advance(block_s);
+                let corrected = if use_level {
+                    c.compensate_with_level(raw, block_s, buffer_ms)
+                } else {
+                    c.compensate(raw, block_s)
+                };
+                // Physical buffer: fills by the corrected OUTPUT-seconds the resampler produces,
+                // drains by the mixer's master block, MINUS a hidden residual the rate loop cannot
+                // measure (models the live ~0.8 ppm mis-read the level integral must null).
+                buffer_ms += (corrected - block_s) * 1000.0 - (hidden_ppm / 1e6) * block_s * 1000.0;
+                t += block_s;
+                trace.push((t, buffer_ms));
+            }
+            (trace, c)
+        }
+
+        let (trace, c) = simulate(true, TRUE_PPM, HIDDEN_PPM, SIM_S, BLOCK_S, START_BUF_MS);
+
+        // The servo captured its setpoint at the lock instant (~65 s in), a hair below START (the
+        // pre-lock drain), and tracked the live depth in level_last_ms.
+        let setpoint = c.level_target_ms();
+        assert!(
+            (setpoint - START_BUF_MS).abs() < 2.0,
+            "issue #1335: the level setpoint must be captured near the depth at lock (~{START_BUF_MS} ms), got {setpoint:.3} ms"
+        );
+        assert!(
+            (c.level_last_ms() - trace.last().unwrap().1).abs() < 1.5,
+            "issue #1335: level_last_ms must track the live buffer depth, got {:.3} vs {:.3}",
+            c.level_last_ms(),
+            trace.last().unwrap().1
+        );
+
+        // Second half = well past the ~1 h settle + a couple oscillation periods.
+        let half = SIM_S / 2.0;
+        let second: Vec<f64> = trace
+            .iter()
+            .filter(|(t, _)| *t >= half)
+            .map(|(_, b)| *b)
+            .collect();
+        assert!(!second.is_empty());
+        let mean: f64 = second.iter().sum::<f64>() / second.len() as f64;
+        let peak = second
+            .iter()
+            .fold(0.0_f64, |m, b| m.max((b - setpoint).abs()));
+
+        assert!(
+            (mean - setpoint).abs() < 2.0,
+            "issue #1335: with the level integral the buffer MEAN over the settled second half must \
+             return to the setpoint within +-2 ms, got mean={mean:.3} ms (setpoint {setpoint:.3} ms)"
+        );
+        assert!(
+            peak < 5.0,
+            "issue #1335: with the level integral the buffer PEAK deviation over the settled second \
+             half must stay inside the +-5 ms hold band, got peak={peak:.3} ms"
+        );
+        // The integral moved NEGATIVE to counter the drain (deficit -> stretch) and never railed at
+        // its ±clamp.
+        assert!(
+            c.level_integral_ppm() < 0.2 && c.level_integral_ppm().abs() < LEVEL_INTEGRAL_MAX_PPM,
+            "issue #1335: the level integral must have moved negative to counter the drain without \
+             railing at ±{LEVEL_INTEGRAL_MAX_PPM} ppm, got integral={:.4} ppm",
+            c.level_integral_ppm()
+        );
+
+        // Anti-tautology: the SAME residual with the rate-only path (no level integral) must DRIFT
+        // far out of band -- proving the integral, not the rate loop, is what holds the level.
+        let (rate_only, _) = simulate(false, TRUE_PPM, HIDDEN_PPM, SIM_S, BLOCK_S, START_BUF_MS);
+        let end_drift = (rate_only.last().unwrap().1 - START_BUF_MS).abs();
+        assert!(
+            end_drift > 10.0,
+            "issue #1335: the rate-only path must drift far out of band with the hidden residual \
+             (proving this test CAN fail), got end drift={end_drift:.3} ms -- too small to \
+             discriminate; re-check HIDDEN_PPM / SIM_S"
         );
     }
 }
