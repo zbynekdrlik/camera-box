@@ -1,6 +1,6 @@
-//! #768 — the REPORT-ONLY COLD-CUT onset seam: measure the first ~1s after each program switch
-//! to a cambox that had been HIDDEN from strih program for `>= COLD_HIDDEN_SECS`, and report
-//! whether that cut stayed instant + lossless (no wake-up gap).
+//! #768/#1086 — the COLD-CUT onset seam (LIVE since #1086): measure the first ~1s after each
+//! program switch to a cambox that had been HIDDEN from strih program for `>= COLD_HIDDEN_SECS`,
+//! and gate whether that cut stayed instant + lossless (no wake-up gap).
 //!
 //! ## The blind spot this closes
 //!
@@ -35,38 +35,51 @@
 //! - `wakeup_latency_ns` — offset of the FIRST decodable frame from the switch (`None` = the camera delivered no decodable frame within the onset window).
 //!
 //! A cold cut is `clean` when the first decodable frame arrives within `WAKEUP_LATENCY_MAX_NS` and
-//! no onset frame was undecodable.
+//! at most `ONSET_UNDECODABLE_ALLOWANCE` onset frames were undecodable (#1086 — the calibrated
+//! warm-glitch tolerance; the shipped 0-tolerance false-reds a lone optical glitch).
 //!
-//! ## Why report-only (calibration-first) — issue 768
+//! ## LIVE (calibration-complete) — issue 1086
 //!
 //! The onset frames were guarded out of every existing artifact, so there was NO local calibration
-//! data for a wake-up-latency / onset-undecodable bound when this seam shipped (mirrors
+//! data for a wake-up-latency / onset-undecodable bound when this seam SHIPPED report-only (mirrors
 //! `verdict-gate-seam-calibration.md` step 1, except the field it wants to mine did not exist until
-//! THIS seam started emitting it). [`gates_overall_pass`] is STILL hardcoded `false`, but the
-//! calibration story has advanced (issue 1086, 2026-09-01):
+//! THIS seam started emitting it). [`gates_overall_pass`] is now `true` (flipped by issue 1086,
+//! 2026-09-17) — all four prerequisites held:
 //!
-//! - Warm baseline -- ESTABLISHED. Across 44 local E2E verdicts every cold transition is WARM (the
-//!   issue-767 keep-alive receiver never goes cold): worst wake-up 16.09-47.38 ms, never
-//!   `any_wakeup_over_max` / `any_wakeup_missing`. So the report-only ceiling `WAKEUP_LATENCY_MAX_NS`
-//!   = 66.67 ms does not false-flag any warm cut -- validated warm-safe, but UNvalidated for the
-//!   genuine-cold direction it actually guards.
-//! - Per-cambox tick-decodability -- RE-CONFIRMED (the LIVE-flip precondition below): in the 3-run
-//!   green series all 7 camboxes decode the shared cam2 Vernier tick (`undecodable` 0-1 of ~847 per
-//!   window, populated `presentation_cadence`), so no box reads a healthy cold cut black.
-//! - Onset-undecodable 0-tolerance is TOO STRICT. A WARM cut can carry a 1/30 optical-glitch
-//!   undecodable onset frame (observed: a healthy 39 ms warm cut flagged `genuine_cold_cut_miss`),
-//!   so the LIVE gate needs an onset-undecodable ALLOWANCE; because a genuine cold onset's first
-//!   frame(s) are legitimately undecodable during rebind, that allowance is coupled to the cold
-//!   wake-up and MUST be calibrated with the cold run, not from warm-only data.
+//! - Warm baseline -- ESTABLISHED. Across 81 local E2E verdicts (59 with cold transitions, 203 cold
+//!   transitions) every WARM transition is clean (the issue-767 keep-alive receiver never goes
+//!   cold): worst decodable wake-up 47.38 ms (p95 39.4 ms), never `any_wakeup_over_max` /
+//!   `any_wakeup_missing`. So `WAKEUP_LATENCY_MAX_NS` = 66.67 ms clears every observed wake-up with
+//!   a 1.41x margin.
+//! - Genuine-cold run -- DONE. The deliberate keepalive-bypass cut (`COLD_CUT_BYPASS_CAM`, release
+//!   E2E 35166086465 / RECORDING_E2E_RUN_ID 557465489): strih "NDI cam1" torn down cold for 182 s,
+//!   restored 0.18 s before the 2nd cut — onset 30/30 decodable, wake-up 1.76 ms, receive healthy,
+//!   `clean=true`, no `any_*` flag. Even a genuinely-cold receiver rebinds inside the ceiling here
+//!   (the DistroAV reattach is fast), so the bound holds cold-safe as well as warm-safe.
+//! - Per-cambox tick-decodability -- RE-CONFIRMED. Across the recent 12 splitter-era runs every
+//!   active cambox window (CAM1-CAM7) decodes the shared cam2 Vernier tick (`undecodable` 0-3 of
+//!   ~847, populated `presentation_cadence`), so no box reads a healthy cold cut black.
+//! - Onset-undecodable 0-tolerance was TOO STRICT. A WARM cut can carry a single optical-glitch
+//!   undecodable onset frame (run 156174349 CAM2: a healthy 39 ms warm cut flagged a miss;
+//!   `overall_pass=false` for UNRELATED gates), so the LIVE gate carries a calibrated
+//!   `ONSET_UNDECODABLE_ALLOWANCE` = 1 (mined green max = 1, on an otherwise-healthy cut).
 //!
-//! What STILL blocks the LIVE flip: a deliberate keepalive-bypass GENUINELY-cold cut (issue 768
-//! test-design bod 1 / issue 1086 `COLD_CUT_BYPASS_CAM`) -- until then every measured cut is warm
-//! (the CAM KEEPALIVE scene keeps its NDI receiver pulling off-program), a warm-only baseline
-//! cannot set a bound a real cold gap would breach, and the gate must be shown to RED on an
-//! issue-767 revert before it can gate. That run calibrates `WAKEUP_LATENCY_MAX_NS` + the new
-//! onset-undecodable allowance; the flip is then the one-line change this seam exists to make. Same
-//! crate-root pure-seam pattern as `optical_floor.rs` / `presentation_cadence.rs` (default features,
-//! Tier-0 unit-testable); the probe-gated `recording-verdict.rs` is only a thin consumer.
+//! ### What the LIVE fold blocks, and what stays report-only
+//!
+//! The fold ([`cold_cut_gate_pass`]) blocks on a GENUINE cold-cut miss: a `!clean` onset (late /
+//! missing wake-up, OR onset undecodable `> ONSET_UNDECODABLE_ALLOWANCE`) whose switch is late
+//! enough into the run to rule out the issue-793 startup segfault
+//! (`GenuineColdCutMiss`) — zero-FP across all 81 mined verdicts. Report-only (never folds):
+//! (1) a `PossibleSegfaultWindow` miss (switch `< SEGFAULT_WINDOW_MAX_SECS`), because the data
+//! cannot separate a startup segfault from a genuine cold receiver — in production every real cold
+//! cut lands well past the window, so this is not a live blind spot; (2) the steady-state
+//! sustained-receive-fps `ReceiveHealth` (a whole-window issue #1/#799 signal already covered
+//! blocking by the LIVE continuity gates copies/gaps/frozen_leg — gating it here would
+//! double-jeopardy without unique coverage; no genuine cold-restore-degraded datapoint exists to
+//! calibrate a cold-SPECIFIC floor). The raw `any_wakeup_over_max` / `any_wakeup_missing` /
+//! `any_onset_undecodable` / `any_receive_degraded` aggregates stay serialized as diagnostics.
+//! Same crate-root pure-seam pattern as `optical_floor.rs` / `presentation_cadence.rs` (default
+//! features, Tier-0 unit-testable); the probe-gated `recording-verdict.rs` is only a thin consumer.
 //!
 //! ## The onset decodability signal is the SHARED cam2 Vernier tick — cross-cambox on THIS rig
 //!
@@ -83,10 +96,10 @@
 //! healthy CAM1/CAM3 cold cut is `clean` and a genuinely black one is flagged. The metric is
 //! therefore cross-cambox actionable here.
 //!
-//! The LIVE-flip follow-up MUST still re-confirm per-cambox onset tick-decodability on the target
-//! rig before flipping `gates_overall_pass()` — a box that genuinely could not decode the Vernier
-//! at onset (a future rig where the splitter path is broken, or the stale doc's scenario returns)
-//! would read a healthy cold cut as a black one and false-red. If that ever holds, scope the health
+//! The #1086 LIVE flip re-confirmed per-cambox onset tick-decodability (above). It stays a
+//! STANDING invariant: a box that genuinely could not decode the Vernier at onset (a future rig
+//! where the splitter path is broken, or the stale doc's scenario returns) would read a healthy
+//! cold cut as a black one and false-red the now-LIVE gate. If that ever holds, scope the health
 //! check (`clean` / [`cold_cut_gate_pass`] / the aggregate flags) to tick-bearing windows, or add a
 //! non-tick onset signal (brightness/black detection) for the affected boxes.
 
@@ -99,10 +112,25 @@ pub const COLD_HIDDEN_SECS: f64 = 60.0;
 /// discards, i.e. the onset is precisely the guarded material nothing else can see.
 pub const ONSET_WINDOW_NS: i64 = 1_000_000_000;
 
-/// Provisional wake-up-latency ceiling: 2 frames at 30fps (issue 768's "first decoded frame within
-/// X ms, e.g. 2 frames @30fps"). REPORT-ONLY — this is not yet a calibrated LIVE bound (see the
-/// module doc); it only classifies a transition's reported `clean` flag.
+/// Wake-up-latency ceiling: 2 frames at 30fps (issue 768's "first decoded frame within X ms, e.g.
+/// 2 frames @30fps"). #1086 CALIBRATED LIVE: mined across 81 local verdicts (59 with cold
+/// transitions, 203 cold transitions) the worst decodable wake-up is 47.38 ms (p95 39.4 ms), and
+/// the deliberate keepalive-bypass GENUINE-cold CAM1 cut woke up in 1.76 ms — so 66.67 ms clears
+/// every observed wake-up with a 1.41x margin above the worst. Classifies a transition's `clean`
+/// flag and, via that, the genuine-cold-cut-miss fold.
 pub const WAKEUP_LATENCY_MAX_NS: i64 = 66_666_667;
+
+/// #1086 CALIBRATED — the onset-undecodable ALLOWANCE the LIVE gate tolerates. A WARM cut can carry
+/// a single optical-glitch undecodable onset frame (run 156174349 CAM2: a healthy 39 ms warm cut
+/// with 1 undecodable onset frame — that run's `overall_pass=false` was for UNRELATED gates), so
+/// the 0-tolerance criterion the seam shipped with would FALSE-RED a healthy glitch. Mined across
+/// the 81 local verdicts: 80/81 runs carry 0 undecodable onset frames on every cold transition;
+/// exactly ONE carries 1; none carries more. A genuine black cold onset carries its whole rebind
+/// run undecodable (up to 30/30). So `1` allows the lone optical glitch (a 1-frame headroom above
+/// every green run — the honest gates-green-first margin) while a `>= 2`-frame black onset still
+/// fails. A fast healthy rebind (1 undecodable then decodable within the ceiling) is correctly
+/// allowed; a black hole (all-undecodable → no wake-up at all) is caught by the missing wake-up.
+pub const ONSET_UNDECODABLE_ALLOWANCE: u32 = 1;
 
 /// #1086 part-4 — the recorded program's target delivered-frame rate: 30fps on BOTH strih and
 /// stream (recording-e2e.sh records a 30fps cut-to-stream canvas). REPORT-ONLY: used ONLY to
@@ -315,10 +343,12 @@ pub fn onset_stats(
 }
 
 /// A transition is clean when the first decodable frame arrived within `WAKEUP_LATENCY_MAX_NS` and
-/// no onset frame was undecodable. A missing wake-up (`None`) is never clean.
+/// at most `ONSET_UNDECODABLE_ALLOWANCE` onset frames were undecodable (#1086 — the calibrated
+/// warm-glitch tolerance; 0-tolerance false-reds a lone optical glitch). A missing wake-up (`None`)
+/// is never clean.
 pub fn transition_is_clean(wakeup_latency_ns: Option<i64>, onset_undecodable: u32) -> bool {
     match wakeup_latency_ns {
-        Some(w) => w <= WAKEUP_LATENCY_MAX_NS && onset_undecodable == 0,
+        Some(w) => w <= WAKEUP_LATENCY_MAX_NS && onset_undecodable <= ONSET_UNDECODABLE_ALLOWANCE,
         None => false,
     }
 }
@@ -417,18 +447,34 @@ pub fn build_report(windows: &[ColdCutWindow]) -> ColdCutReport {
     }
 }
 
-/// Report-only gate verdict: no cold transition showed a wake-up gap (late/missing wake-up or a
-/// black onset frame). Whether this actually folds into `overall_pass` is [`gates_overall_pass`].
+/// #1086 LIVE gate verdict: no cold transition suffered a GENUINE cold-cut miss — a late/missing
+/// wake-up OR an onset undecodable ABOVE `ONSET_UNDECODABLE_ALLOWANCE` (i.e. `!clean`), whose switch
+/// was late enough into the run to rule out the issue-793 startup segfault (`GenuineColdCutMiss`,
+/// see [`onset_miss_attribution`]). A wake-up gap whose switch fell inside the segfault window
+/// (`PossibleSegfaultWindow`) stays attribution-only (report-only) because the data cannot separate
+/// a startup segfault from a genuine cold receiver — in production every cold cut (the deliberate
+/// bypass at ~182 s hidden, and the natural 2nd appearances) lands well past the window, so this is
+/// not a live blind spot. Folds into `overall_pass` because [`gates_overall_pass`] is now `true`.
+/// The raw `any_wakeup_over_max` / `any_wakeup_missing` / `any_onset_undecodable` aggregates remain
+/// serialized as diagnostics.
 pub fn cold_cut_gate_pass(report: &ColdCutReport) -> bool {
-    !report.any_wakeup_over_max && !report.any_wakeup_missing && !report.any_onset_undecodable
+    !report.any_genuine_cold_cut_miss
 }
 
-/// #768 REPORT-ONLY (calibration-first) — hardcoded `false`. See the module doc: the onset was
-/// never serialized before, so no bound is calibratable yet; a follow-up flips this to `true` once
-/// a warm baseline exists AND a deliberate keepalive-bypass cold cut makes a real cold gap
-/// possible. A one-line flip, exactly the shape this seam exists to make possible.
+/// #768/#1086 LIVE (calibration-complete). Flipped `true` by issue 1086 once all four
+/// prerequisites held: (1) a WARM baseline (44+ verdicts, every cold transition WARM-clean, worst
+/// wake-up 47.38 ms); (2) a deliberate keepalive-bypass GENUINE-cold run (release E2E 35166086465 /
+/// RECORDING_E2E_RUN_ID 557465489: CAM1 torn down cold for 182 s, restored 0.18 s before the 2nd
+/// cut — onset 30/30 decodable, wake-up 1.76 ms, receive healthy, clean); (3) the per-cambox onset
+/// tick re-confirm (every active cambox window decodes the cam2 Vernier tick, undecodable 0-3 of
+/// ~847, populated presentation_cadence — no box reads a healthy cold cut black); (4) the
+/// onset-undecodable ALLOWANCE calibrated (`ONSET_UNDECODABLE_ALLOWANCE`) so a warm optical glitch
+/// no longer false-reds. The fold blocks on [`cold_cut_gate_pass`] (a segfault-window-ruled-out
+/// genuine cold-cut miss), which is zero-FP across all 81 mined verdicts. The steady-state
+/// sustained-receive-fps (`ReceiveHealth`) + the possible-segfault attribution stay REPORT-ONLY
+/// (see the module doc's LIVE-flip section).
 pub fn gates_overall_pass() -> bool {
-    false
+    true
 }
 
 #[cfg(test)]
@@ -544,7 +590,7 @@ mod tests {
     // --- transition_is_clean ---------------------------------------------------------------
 
     #[test]
-    fn transition_clean_only_when_prompt_and_fully_decodable() {
+    fn transition_clean_only_when_prompt_and_within_undecodable_allowance() {
         assert!(
             transition_is_clean(Some(0), 0),
             "immediate decode, no undecodable -> clean"
@@ -558,12 +604,29 @@ mod tests {
             "one ns over the ceiling -> not clean"
         );
         assert!(
-            !transition_is_clean(Some(0), 1),
-            "an undecodable onset frame -> not clean"
-        );
-        assert!(
             !transition_is_clean(None, 0),
             "no wake-up at all -> not clean"
+        );
+    }
+
+    // #1086 — the calibrated onset-undecodable allowance (was 0-tolerance before the LIVE flip).
+    #[test]
+    fn onset_undecodable_allowance_tolerates_one_glitch() {
+        assert_eq!(
+            ONSET_UNDECODABLE_ALLOWANCE, 1,
+            "one optical-glitch frame is allowed (mined green max = 1, on an otherwise-healthy cut)"
+        );
+        assert!(
+            transition_is_clean(Some(0), ONSET_UNDECODABLE_ALLOWANCE),
+            "one undecodable onset frame within a prompt wake-up -> still clean (warm optical glitch)"
+        );
+        assert!(
+            !transition_is_clean(Some(0), ONSET_UNDECODABLE_ALLOWANCE + 1),
+            "two undecodable onset frames -> not clean (over the allowance)"
+        );
+        assert!(
+            !transition_is_clean(Some(0), 5),
+            "a black-onset run of undecodable frames -> not clean"
         );
     }
 
@@ -667,7 +730,7 @@ mod tests {
         assert_eq!(t.onset_undecodable, 3);
         assert!(
             !cold_cut_gate_pass(&r),
-            "the report-only gate verdict fails on a wake-up gap"
+            "the LIVE gate verdict fails on a genuine cold-cut wake-up gap"
         );
     }
 
@@ -698,7 +761,7 @@ mod tests {
         );
         assert!(
             cold_cut_gate_pass(&r),
-            "a clean warm baseline passes the report-only gate verdict"
+            "a clean warm baseline passes the LIVE gate verdict"
         );
     }
 
@@ -727,14 +790,140 @@ mod tests {
         assert_eq!(r.worst_wakeup_latency_ns, Some(3 * FRAME_NS));
     }
 
-    // --- gates_overall_pass (issue 768 report-only) ----------------------------------------
+    // --- gates_overall_pass (#1086 LIVE) ---------------------------------------------------
 
     #[test]
-    fn gates_overall_pass_is_report_only_768() {
+    fn gates_overall_pass_is_live_1086() {
         assert!(
-            !gates_overall_pass(),
-            "#768: the cold-cut onset seam is report-only (calibration-first) until a warm \
-             baseline + a deliberate keepalive-bypass cold cut exist"
+            gates_overall_pass(),
+            "#1086: the cold-cut onset seam is LIVE — warm baseline + a deliberate \
+             keepalive-bypass genuine-cold run + the per-cambox tick re-confirm + the calibrated \
+             onset-undecodable allowance all held, so the fold blocks on a genuine cold-cut miss"
+        );
+    }
+
+    // #1086 — a lone warm optical glitch (1 undecodable onset frame, prompt wake-up) is NOT a
+    // genuine miss, so the LIVE gate PASSES it (the 0-tolerance false-red this flip fixes;
+    // the run-156174349 shape).
+    #[test]
+    fn warm_glitch_one_undecodable_is_not_a_genuine_miss() {
+        // CAM1@seg3 (90s into the run): first onset frame a glitch, then decodable at +1 frame.
+        let glitch = vec![
+            frame(BASE + 3 * SEG_NS, false),
+            frame(BASE + 3 * SEG_NS + FRAME_NS, true),
+            frame(BASE + 3 * SEG_NS + 2 * FRAME_NS, true),
+        ];
+        let windows = vec![
+            window("CAM1", BASE, warm_onset(BASE)),
+            window("CAM2", BASE + SEG_NS, warm_onset(BASE + SEG_NS)),
+            window("CAM3", BASE + 2 * SEG_NS, warm_onset(BASE + 2 * SEG_NS)),
+            window("CAM1", BASE + 3 * SEG_NS, glitch),
+        ];
+        let r = build_report(&windows);
+        assert_eq!(r.cold_transitions_found, 1);
+        let t = &r.transitions[0];
+        assert_eq!(
+            t.onset_undecodable, 1,
+            "the lone glitch frame is still counted (diagnostic)"
+        );
+        assert!(
+            r.any_onset_undecodable,
+            "the raw diagnostic flag still fires"
+        );
+        assert!(t.clean, "one glitch within the allowance -> clean");
+        assert!(!t.has_onset_miss, "a clean transition has no miss");
+        assert_eq!(t.miss_attribution, OnsetMissAttribution::NoMiss);
+        assert!(!r.any_genuine_cold_cut_miss);
+        assert!(
+            cold_cut_gate_pass(&r),
+            "the LIVE gate PASSES a lone warm optical glitch (no genuine miss)"
+        );
+    }
+
+    // #1086 — >= 2 undecodable onset frames at a LATE switch (segfault ruled out) is a genuine miss,
+    // so the LIVE gate BLOCKS it even when the wake-up itself is within the ceiling.
+    #[test]
+    fn two_undecodable_onset_frames_at_a_late_switch_folds_live() {
+        // CAM1@seg3 (90s == SEGFAULT_WINDOW_MAX_SECS -> ruled out): 2 undecodable then decodable at
+        // exactly the ceiling (2 frames @30fps) -> wake-up OK but 2 > allowance -> not clean.
+        let black2 = vec![
+            frame(BASE + 3 * SEG_NS, false),
+            frame(BASE + 3 * SEG_NS + FRAME_NS, false),
+            frame(BASE + 3 * SEG_NS + 2 * FRAME_NS, true),
+        ];
+        let windows = vec![
+            window("CAM1", BASE, warm_onset(BASE)),
+            window("CAM2", BASE + SEG_NS, warm_onset(BASE + SEG_NS)),
+            window("CAM3", BASE + 2 * SEG_NS, warm_onset(BASE + 2 * SEG_NS)),
+            window("CAM1", BASE + 3 * SEG_NS, black2),
+        ];
+        let r = build_report(&windows);
+        assert_eq!(r.cold_transitions_found, 1);
+        let t = &r.transitions[0];
+        assert_eq!(t.onset_undecodable, 2);
+        assert!(
+            !r.any_wakeup_missing,
+            "a frame did decode -> no missing wake-up"
+        );
+        assert!(
+            !r.any_wakeup_over_max,
+            "the decode landed at the ceiling, not over it"
+        );
+        assert!(!t.clean, "2 undecodable > allowance -> not clean");
+        assert_eq!(t.miss_attribution, OnsetMissAttribution::GenuineColdCutMiss);
+        assert!(r.any_genuine_cold_cut_miss);
+        assert!(
+            !cold_cut_gate_pass(&r),
+            "the LIVE gate BLOCKS a >= 2-frame black onset ruled out of the segfault window"
+        );
+    }
+
+    // #1086 — the SAME 2-frame black onset EARLY in the run (< segfault window) is ambiguous
+    // (possible startup segfault), so it stays REPORT-ONLY: the LIVE gate PASSES it.
+    #[test]
+    fn two_undecodable_onset_frames_in_segfault_window_stay_report_only() {
+        // CAM1 shown [0,5s], hidden while CAM2 holds [5s,70s], CAM1 back at 70s (< 90s window).
+        let s2 = BASE + 70 * ONSET_WINDOW_NS;
+        let windows = vec![
+            ColdCutWindow {
+                cambox: "CAM1".to_string(),
+                start_ns: BASE,
+                end_ns: BASE + 5 * ONSET_WINDOW_NS,
+                onset_frames: warm_onset(BASE),
+                window_frames: 150,
+            },
+            ColdCutWindow {
+                cambox: "CAM2".to_string(),
+                start_ns: BASE + 5 * ONSET_WINDOW_NS,
+                end_ns: s2,
+                onset_frames: warm_onset(BASE + 5 * ONSET_WINDOW_NS),
+                window_frames: 1950,
+            },
+            ColdCutWindow {
+                cambox: "CAM1".to_string(),
+                start_ns: s2,
+                end_ns: s2 + SEG_NS,
+                onset_frames: vec![
+                    frame(s2, false),
+                    frame(s2 + FRAME_NS, false),
+                    frame(s2 + 2 * FRAME_NS, true),
+                ],
+                window_frames: 900,
+            },
+        ];
+        let r = build_report(&windows);
+        assert_eq!(r.cold_transitions_found, 1);
+        let t = &r.transitions[0];
+        assert!(t.has_onset_miss, "2 undecodable is a miss");
+        assert_eq!(
+            t.miss_attribution,
+            OnsetMissAttribution::PossibleSegfaultWindow
+        );
+        assert!(r.any_miss_possibly_segfault);
+        assert!(!r.any_genuine_cold_cut_miss);
+        assert!(
+            cold_cut_gate_pass(&r),
+            "a possible-segfault-window miss stays report-only -> the LIVE gate PASSES it"
         );
     }
 
@@ -851,9 +1040,14 @@ mod tests {
             "the ONSET is still clean -- the degradation is steady-state, not the cut"
         );
         assert!(r.any_receive_degraded);
+        // #1086 — the sustained-receive-fps health stays REPORT-ONLY even though the seam is now
+        // LIVE: it is a steady-state whole-window signal (the issue #1/#799 class) already covered
+        // blocking by the LIVE continuity gates (copies/gaps/frozen_leg), so gating it here would
+        // double-jeopardy without unique coverage. A clean-onset window with a degraded whole-window
+        // fps is NOT a genuine cold-cut miss, so the LIVE fold PASSES it.
         assert!(
-            !gates_overall_pass(),
-            "a degraded receive fps is report-only -- it never gates while the seam is report-only"
+            cold_cut_gate_pass(&r),
+            "a degraded receive fps does NOT fold into the cold-cut gate (report-only)"
         );
     }
 

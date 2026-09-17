@@ -6036,10 +6036,12 @@ fn build_and_print_verdict_with_stream_diffs(
                 // rebinds after its sender restarts) survive every gate. This reads the raw decoded
                 // frames in the first ONSET_WINDOW_NS after each switch (bypassing the guard via
                 // `seg_frames`) and reports, per cold cut (cambox hidden >= COLD_HIDDEN_SECS), the
-                // wake-up latency + onset (un)decodable counts. Report-only (calibration-first): the
-                // onset was never serialized before, so no bound is calibratable yet —
-                // `gates_overall_pass()` is false and this fold is a no-op. The pure logic lives in
-                // `camera_box::cold_cut` (Tier-0 tested); this is the thin probe-side consumer.
+                // wake-up latency + onset (un)decodable counts. LIVE since #1086: after a warm
+                // baseline + a deliberate keepalive-bypass genuine-cold run + the per-cambox tick
+                // re-confirm + the calibrated onset-undecodable allowance, `gates_overall_pass()`
+                // is `true` and the fold blocks on a genuine cold-cut miss (zero-FP across 81 mined
+                // verdicts). The pure logic lives in `camera_box::cold_cut` (Tier-0 tested); this is
+                // the thin probe-side consumer.
                 let cold_windows: Vec<camera_box::cold_cut::ColdCutWindow> = schedule
                     .iter()
                     .map(|w| {
@@ -6084,18 +6086,20 @@ fn build_and_print_verdict_with_stream_diffs(
                     obj.insert(
                         "gate".to_string(),
                         serde_json::json!(
-                            "#768/#1086 report-only -- the cold-cut onset (first 1s after a switch \
-                             to a cambox hidden >= 60s) is NOT gated pending a warm baseline + a \
-                             deliberate keepalive-bypass cold cut (COLD_CUT_BYPASS_CAM, #1086); \
-                             measures wake-up latency + onset undecodable + (phase-2) sustained \
-                             receive-fps health + the issue-793 startup-segfault vs genuine \
-                             cold-cut-miss attribution so a future run can calibrate a LIVE bound"
+                            "#768/#1086 LIVE -- the cold-cut onset (first 1s after a switch to a \
+                             cambox hidden >= 60s) GATES: a genuine cold-cut miss (a late/missing \
+                             wake-up or onset undecodable over the calibrated allowance, ruled out \
+                             of the issue-793 startup-segfault window) folds into overall_pass. \
+                             A possible-segfault-window miss + the steady-state sustained-receive-fps \
+                             health + the raw wake-up/undecodable aggregates stay report-only \
+                             diagnostics. Calibrated on the warm baseline + the keepalive-bypass \
+                             genuine-cold run (COLD_CUT_BYPASS_CAM, #1086); zero-FP across 81 verdicts"
                         ),
                     );
                 }
                 report["all_cambox_continuity"]["cold_cut_onset"] = cold_json;
                 println!(
-                    "  #768/#1086 COLD-CUT onset: {} cold transition(s) (hidden >= {}s), worst wakeup {}, receive_degraded={}, possible_segfault_miss={}, genuine_cold_cut_miss={} (report-only, gates_overall_pass={})",
+                    "  #768/#1086 COLD-CUT onset: {} cold transition(s) (hidden >= {}s), worst wakeup {}, receive_degraded={}, possible_segfault_miss={}, genuine_cold_cut_miss={} (LIVE, gates_overall_pass={})",
                     cold_report.cold_transitions_found,
                     cold_report.cold_hidden_secs,
                     cold_report
@@ -6107,7 +6111,8 @@ fn build_and_print_verdict_with_stream_diffs(
                     cold_report.any_genuine_cold_cut_miss,
                     cold_gates_overall,
                 );
-                // Fold: report-only, so this is a no-op while gates_overall_pass() is false.
+                // Fold: LIVE since #1086 — cold_gate_pass is `!any_genuine_cold_cut_miss`, so a
+                // genuine cold-cut miss reds overall_pass; a possible-segfault miss stays report-only.
                 all_pass &= cold_gate_pass || !cold_gates_overall;
 
                 // #758 item 4 — the frozen-leg classifier: distinguishes a SUSTAINED camera
