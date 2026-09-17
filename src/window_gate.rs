@@ -1167,10 +1167,14 @@ mod tests {
         for n in 0..=(WINDOW_COPIES_GAPS_TOLERANCE + 2) {
             let dc = decide(847, 0, n, 0);
             let dg = decide(847, 0, 0, n);
-            let expect_overall = n <= SEGMENT_SINGLETON_COPIES_ALLOWANCE;
+            // Each term is judged against ITS OWN singleton-band const (identical today, but the
+            // copies-window uses the COPIES allowance and the gaps-window the GAPS allowance so a
+            // future divergence of the two consts stays correctly predicted -- review nit).
+            let expect_overall_c = n <= SEGMENT_SINGLETON_COPIES_ALLOWANCE;
+            let expect_overall_g = n <= SEGMENT_SINGLETON_GAPS_ALLOWANCE;
             let expect_relaxed = n <= WINDOW_COPIES_GAPS_TOLERANCE;
             assert_eq!(
-                dc.overall_pass_term, expect_overall,
+                dc.overall_pass_term, expect_overall_c,
                 "#1242: copies={n} -- overall_pass_term follows the `<=1` singleton band: {dc:?}"
             );
             assert_eq!(
@@ -1178,7 +1182,7 @@ mod tests {
                 "#1242: copies={n} -- relaxed_pass follows the tol-2 lens: {dc:?}"
             );
             assert_eq!(
-                dg.overall_pass_term, expect_overall,
+                dg.overall_pass_term, expect_overall_g,
                 "#1242: gaps={n} -- overall_pass_term follows the `<=1` singleton band: {dg:?}"
             );
             assert_eq!(
