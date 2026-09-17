@@ -75,6 +75,12 @@ DEFAULT_SOURCE = "NDI 2ME PGM"
 # #1333 -- the 30fps program grid the stream 'NDI 2ME PGM' genlock FIFO quantizes video to
 # (hold = ceil(pin/33.333) frames). SAME value phase_snap_pin uses (imported, never re-derived).
 STREAM_FRAME_MS = FRAME_PERIOD_MS
+# #1333 bod 4 (live rerun 17.9.2026): the mbc audio sync offset is a LINEAR, sample-fine actuator,
+# so its remainder converges with a higher loop gain than the frame-quantized pin (whose 0.4
+# damping exists to keep the pin from oscillating). 0.8 settles a residual in ~2 E2E runs and keeps
+# 20 % damping against a single noisy per-run median (the #1265 guard HOLDs gross outliers anyway).
+# Build default, never an env knob (owner rule: no forgettable toggles).
+AUDIO_TRIM_LOOP_GAIN = 0.8
 
 # #1333 -- the sub-frame A/V remainder's actuator: the 'mbc' input's obs-websocket 5.x audio sync
 # offset, in MILLISECONDS (POSITIVE DELAYS the audio). Nothing in the repo used it before -- the
@@ -204,6 +210,7 @@ def split_av_correction(
     current_audio_offset_ms: float,
     gain: float,
     frame_ms: float = STREAM_FRAME_MS,
+    audio_gain: "float | None" = None,
 ):
     """#1333 (bod 4) — split one measured A/V residual into a FRAME-QUANTIZED, phase-snapped video
     pin correction and a CONTINUOUS `mbc` audio sync-offset correction.
@@ -240,6 +247,16 @@ def split_av_correction(
         +/-AUDIO_OFFSET_CLAMP_MS. (residual_eff uses the FINAL pin_new, so the audio always picks up
         exactly what the pin — after every clamp/snap — did not.)
 
+    `audio_gain` (default: `gain`) is the gain for the audio remainder only; the controller passes
+    AUDIO_TRIM_LOOP_GAIN (0.8) because that actuator is linear. The pin part always uses `gain`.
+
+    Transition note (live 17.9.2026, PR 1336 run 1 -> 2): when the CURRENT pin is phase-prone
+    (frac < 0.5, e.g. 974) its ACTUAL hold may already sit one frame above ceil(pin/frame_ms)
+    (the 29/30 toggle), so the snap to a safe pin can move the video by a whole frame that
+    video_shift_ms (ceil-based) does not predict. That is a one-time transition: the next run
+    measures the true residual and the audio trim absorbs it. After the snap the hold is
+    deterministic.
+
     Pure: no OBS/ssh/network, no file I/O — fully Tier-0 unit-testable off-rig.
     """
     frames = int(round(gain * residual_ms / frame_ms))
@@ -257,7 +274,8 @@ def split_av_correction(
     ) * frame_ms
     residual_eff_ms = residual_ms + video_shift_ms
 
-    audio_raw = current_audio_offset_ms + gain * residual_eff_ms
+    a_gain = gain if audio_gain is None else audio_gain
+    audio_raw = current_audio_offset_ms + a_gain * residual_eff_ms
     audio_stepped = max(
         current_audio_offset_ms - step, min(current_audio_offset_ms + step, audio_raw)
     )
@@ -265,6 +283,7 @@ def split_av_correction(
 
     diag = {
         "gain": gain,
+        "audio_gain": a_gain,
         "frames": frames,
         "pin_raw_ms": pin_raw,
         "pin_stepped_ms": pin_stepped,
@@ -687,11 +706,13 @@ def main():
     if split_mode:
         current_audio = read_current_audio_offset(ws, args.audio_source)
         new_ms, new_audio, split_diag = split_av_correction(
-            combined_offset_ms_raw, current, current_audio, loop_gain
+            combined_offset_ms_raw, current, current_audio, loop_gain,
+            audio_gain=AUDIO_TRIM_LOOP_GAIN,
         )
         print(
             f"[av-sync] source='{args.source}' current={current}ms "
             f"residual(raw)={combined_offset_ms_raw:.1f}ms gain={loop_gain:.2f} "
+            f"audio_gain={AUDIO_TRIM_LOOP_GAIN:.2f} "
             f"-> pin={new_ms}ms (frames={split_diag['frames']}, "
             f"video_shift={split_diag['video_shift_ms']:.1f}ms); "
             f"audio '{args.audio_source}' {current_audio:.0f} -> {int(round(new_audio))}ms "
