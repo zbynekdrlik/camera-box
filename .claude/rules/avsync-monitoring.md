@@ -12,6 +12,10 @@ paths:
   - "systemd/avsync-lineup-alert-watchdog*"
   - "scripts/av_sync_apply_guard.py"
   - "scripts/lib/av-sync-apply-guard.sh"
+  - "scripts/avsync-measure-dev2.sh"
+  - "scripts/lib/avsync-measure.sh"
+  - "scripts/avsync-dev2-install.sh"
+  - "systemd/avsync-measure-dev2*"
 ---
 
 # Stream-box avsync watchdog + VLC monitor + dev1 heartbeat alert (#812/#807)
@@ -396,3 +400,50 @@ known to stabilize the loop, only bounded away from 1.
   additions in `test_av_sync_calibrate.py`; `tests/harness_recording_e2e_av_sync_loop_gain_1265.rs`
   guards the wiring at CI (cross-checked locally by a `.find`/window python simulation + a real
   `bash` run of the sourced-lib helpers under `set -euo pipefail`).
+
+# Stream-box measurement RETIRED → dev2 GPU measurer (#1331)
+
+**The SyncNet A/V-sync MEASUREMENT no longer runs on the stream box. It runs on dev2 (GPU).** The
+stream box's Windows tasks `avsync-watchdog` / `avsync-keepalive` / `avsync-vlc-monitor` stay
+DISABLED and are the retirement's subject, not its mechanism.
+
+**Why (the numbers, 17.9.2026):** measuring on the ENCODING stream laptop during a live stream
+loaded its CPU/GPU and rozhadzovalo A/V — `program-render-audit lagged>0` in 19/24/28 windows over
+10 min (5/7 after a pause), plus two audio-buffer STEP events (18:52, ~19:08). So on 17.9. 19:19
+the two stream tasks were DISABLED and dev1's `avsync-lineup-alert-watchdog.timer` STOPPED. The
+only safe amount of ML load on the encoding box during live is ZERO.
+
+**The topology now (contract unchanged, only the HOST + heartbeat SOURCE moved):**
+`stream OBS → restreamer xiu RTMP (0.0.0.0:1234, LAN-pullable) → dev2 ffmpeg 35 s clip → SyncNet
+(CUDA) → ~/.camera-box/avsync-watchdog-heartbeat.txt (dev2) → dev1 watchdogs (ssh cat) →
+avsync_lineup.py → Discord`. The heartbeat LINE contract (`<epoch>\t<status>` with the exact
+`measured: db=… …` / `no-signal: …` shapes) and the whole dev1 alerting/forward logic are
+BYTE-identical to the stream-box path — only the host + transport changed.
+
+- **The measurer:** `scripts/avsync-measure-dev2.sh` — ONE pass per invocation (a `systemd --user`
+  timer, `systemd/avsync-measure-dev2.{service,timer}`, `OnUnitInactiveSec=90s`, drives cadence, no
+  loop). Pure parts (status-line composition, freshness-reason, clip path, the ffmpeg encode argv
+  as SINGLE SOURCE OF TRUTH vs `avsync-watchdog.ps1:99`) live in `scripts/lib/avsync-measure.sh`
+  (`run_sourced` pytest `tests/python/test_avsync_measure_dev2.py`). It runs `av_sync_measure.py`
+  under a 180 s `timeout` cap and writes the heartbeat ATOMICALLY. NO Discord here — delivery is
+  the dev1 watchdogs' job.
+- **Provisioning:** `scripts/avsync-dev2-install.sh` (idempotent, `--check` read-only / `--install`)
+  runs ON dev1, pushes to dev2 over KEY auth (never a password): rsyncs `syncnet_python` + weights +
+  the measurer's python deps, builds `~/avsync/venv --system-site-packages` (reuses the dev2 system
+  cu128 torch/cv2/scipy/numpy stack; only `scenedetect` + `python_speech_features` are pip-added),
+  installs+enables the timer. dev2 needs `loginctl enable-linger newlevel` for a headless user timer.
+- **dev1 heartbeat SOURCE selection:** `scripts/lib/avsync-heartbeat.sh` now selects by
+  `AVSYNC_HEARTBEAT_HOST` — **`dev2` (default): Linux `cat` over plain KEY-auth ssh (no sshpass, no
+  password)**; `stream`: the retired Windows `type`+sshpass probe (kept as fallback). Both
+  `avsync-lineup-alert-watchdog.sh` and `avsync-heartbeat-alert-watchdog.sh` build the ssh call from
+  `avsync_heartbeat_ssh_prefix_argv` + `avsync_heartbeat_remote_cmd`. dev2 has NO VLC-monitor
+  heartbeat, so `avsync_heartbeat_has_vlc_leg` is false for `dev2` → the dev1 vlc leg SKIPs (never a
+  false stale-page); `require_tools sshpass` in the lineup watchdog is now conditional on the stream
+  host. The existing Rust behavioral harnesses (`harness_avsync_heartbeat_alert_watchdog.rs` /
+  `harness_avsync_lineup_alert_watchdog.rs`) that stub a fake `sshpass` binary are PINNED to
+  `AVSYNC_HEARTBEAT_HOST=stream` (they exercise the retired path); the dev2 host selection is unit-
+  tested in `tests/python/test_avsync_heartbeat_host.py`.
+- **Retiring the stream tasks:** `scripts/avsync-watchdog-install.sh --retire` (planner) prints the
+  `schtasks /Change /TN <task> /DISABLE` plan for `avsync-watchdog`/`avsync-keepalive`/
+  `avsync-vlc-monitor` (single-sourced in `avsync_disable_stream_tasks_cmds`). Tasks are DISABLED,
+  never DELETED — re-enable them only if the dev2 measurer is ever unavailable.

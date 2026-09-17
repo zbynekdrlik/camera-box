@@ -223,6 +223,12 @@ impl Harness {
         cmd.arg("-c")
             .arg(body)
             .env("SCRIPT", script())
+            // #1331: these behavioral tests stub a fake `sshpass` binary for the heartbeat read --
+            // i.e. the retired STREAM-box path. Pin the host to "stream" so gather_heartbeat uses
+            // the sshpass transport (the fake binary intercepts); the new default "dev2" uses plain
+            // key-auth ssh (covered by tests/python/test_avsync_heartbeat_host.py) and a default-host
+            // run would attempt a REAL ssh to dev2 (non-hermetic).
+            .env("AVSYNC_HEARTBEAT_HOST", "stream")
             .env("AVSYNC_LINEUP_DECIDER", decider())
             .env("AVSYNC_LINEUP_OBS_PHASE2", &self.obs_phase2_fake)
             .env("AIRULESET_NOTIFY", &self.notify_fake)

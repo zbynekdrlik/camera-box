@@ -59,9 +59,12 @@ while [ "$#" -gt 0 ]; do
 done
 
 # ── config (all env-overridable) ─────────────────────────────────────────────
+# #1331: the shared lib's stream-fallback ssh prefix reads STREAM_USER/STREAM_PW/STREAM_IP directly
+# (normalize them here; the old *_SSH aliases were retired when the inline sshpass call moved into
+# avsync_heartbeat_ssh_prefix_argv). STREAM_IP still also feeds STREAM_OBS_WS_HOST below.
 STREAM_IP="${STREAM_IP:-10.77.9.204}"
-STREAM_USER_SSH="${STREAM_USER:-newlevel}"
-STREAM_PW_SSH="${STREAM_PW:-newlevel}"
+STREAM_USER="${STREAM_USER:-newlevel}"
+STREAM_PW="${STREAM_PW:-newlevel}"
 # run-time staleness window: 20 min (the ticket's operator-tolerable event window). The pure decider
 # defaults to the same values; passing them explicitly keeps this script the single knob surface.
 STALE_S="${AVSYNC_LINEUP_STALE_S:-1200}"
@@ -128,8 +131,18 @@ HEARTBEAT_EPOCH=""
 HEARTBEAT_STATUS=""
 gather_heartbeat() {
   local probe_out watchdog_segment
-  probe_out="$(sshpass -p "$STREAM_PW_SSH" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 \
-    "${STREAM_USER_SSH}@${STREAM_IP}" "$(avsync_heartbeat_probe_cmd)" 2>/dev/null || true)"
+  # #1331: transport + remote read command from the shared lib, selected by AVSYNC_HEARTBEAT_HOST
+  # (default "dev2" Linux GPU measurer, key auth, no sshpass; "stream" keeps the Windows path). This
+  # watchdog only ever reads the WATCHDOG segment (the lineup line), so dev2's absent vlc leg is a
+  # non-issue here.
+  local -a pfx=()
+  mapfile -t pfx < <(avsync_heartbeat_ssh_prefix_argv)
+  if [ "${#pfx[@]}" -eq 0 ]; then
+    log "ERROR: unknown AVSYNC_HEARTBEAT_HOST='$(avsync_heartbeat_host)' -- no probe transport"
+    HEARTBEAT_EPOCH=""; HEARTBEAT_STATUS=""
+    return 0
+  fi
+  probe_out="$("${pfx[@]}" "$(avsync_heartbeat_remote_cmd)" 2>/dev/null || true)"
   watchdog_segment="$(avsync_heartbeat_extract_segment "$probe_out" watchdog)"
   HEARTBEAT_EPOCH="$(avsync_heartbeat_last_epoch "$watchdog_segment")"
   HEARTBEAT_STATUS="$(avsync_heartbeat_last_status "$watchdog_segment")"
@@ -415,9 +428,12 @@ run_preflight_assert() {
 
 # ── main ─────────────────────────────────────────────────────────────────────
 main() {
-  # #6: both modes ssh (sshpass/ssh) the heartbeat, build facts (jq) and call the decider (python3) --
-  # a missing one must fail LOUD, never silently mute the alarm.
-  require_tools sshpass ssh python3 jq
+  # #6: both modes ssh the heartbeat, build facts (jq) and call the decider (python3) -- a missing
+  # one must fail LOUD, never silently mute the alarm. #1331: sshpass is only needed for the
+  # "stream" (Windows, password auth) host; the default "dev2" host uses key auth, so require
+  # sshpass ONLY when it is actually the selected transport.
+  require_tools ssh python3 jq
+  if [ "$(avsync_heartbeat_host)" = "stream" ]; then require_tools sshpass; fi
   if [ "$MODE" = "assert" ]; then
     log "pre-event assert (dry_run=$DRY_RUN)"
     run_preflight_assert

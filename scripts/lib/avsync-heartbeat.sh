@@ -20,6 +20,7 @@ AVSYNC_HB_SEP='---AVSYNC-HB-SEP---'
 # file prints to stderr and fails; `2>nul` swallows that so a missing file just produces an EMPTY
 # segment (never a false alert about the ssh call itself failing) and `&` (not `&&`) always runs
 # the next segment regardless of the previous one's exit code.
+# shellcheck disable=SC2120  # optional args are used by the test harness; in-file callers use defaults
 avsync_heartbeat_probe_cmd() {
   local watchdog_path="${1:-C:\\avsync\\avsync-watchdog-heartbeat.txt}"
   local vlc_path="${2:-C:\\avsync\\avsync-vlc-monitor-heartbeat.txt}"
@@ -121,4 +122,72 @@ avsync_heartbeat_is_stale() {
   local age=$(( now - epoch ))
   [ "$age" -ge 0 ] && [ "$age" -le "$stale" ] && return 1   # fresh
   return 0   # stale (negative age -- clock skew/corrupt -- or genuinely too old)
+}
+
+# ── #1331: heartbeat SOURCE selection (dev2 Linux measurer vs the retired stream Windows box) ────
+# The lipsync measurement moved OFF the stream box onto dev2 (GPU) -- the heartbeat CONTRACT is
+# unchanged (one "<epoch>\t<status>" line), only the HOST + transport + remote read command differ.
+# `AVSYNC_HEARTBEAT_HOST` selects: "dev2" (default -- Linux box, key auth, plain ssh, `cat`) or
+# "stream" (the retired Windows box, sshpass, cmd.exe `type`). Pure functions only (no I/O) so the
+# watchdogs build the actual ssh call themselves under their OWN `set -uo pipefail` -- exactly the
+# established shape (this lib's `set -euo pipefail` must never run an ssh inside a `-e` context).
+
+AVSYNC_HEARTBEAT_HOST_DEFAULT="dev2"
+# dev2 (Linux) heartbeat file -- `$HOME` is LEFT LITERAL so the REMOTE shell (dev2) expands it, not
+# the local one (the whole cmd string is passed verbatim through the watchdog's `ssh host "$cmd"`).
+AVSYNC_HB_DEV2_WATCHDOG_PATH="${AVSYNC_HB_DEV2_WATCHDOG_PATH:-\$HOME/.camera-box/avsync-watchdog-heartbeat.txt}"
+
+# avsync_heartbeat_host -> the selected source host ("dev2" | "stream"), defaulting to dev2.
+avsync_heartbeat_host() {
+  printf '%s' "${AVSYNC_HEARTBEAT_HOST:-$AVSYNC_HEARTBEAT_HOST_DEFAULT}"
+}
+
+# avsync_heartbeat_linux_probe_cmd [watchdog_path] -> the remote LINUX (dev2) read command: `cat`
+# the watchdog heartbeat file, then echo the SAME separator the Windows probe uses (so the shared
+# avsync_heartbeat_extract_segment parses BOTH identically). There is NO vlc-monitor heartbeat on
+# dev2 (the #807 VLC babysitter is a stream-box thing), so ONLY the watchdog file + separator are
+# emitted -- the "vlc" half is intentionally absent (empty segment; the dev1 vlc leg is skipped for
+# host=dev2 via avsync_heartbeat_has_vlc_leg, never a false stale-page). `2>/dev/null` swallows a
+# not-yet-written file's error so a fresh box produces an empty (never a crashing) segment.
+# shellcheck disable=SC2120  # optional arg is used by the test harness; in-file callers use the default
+avsync_heartbeat_linux_probe_cmd() {
+  local watchdog_path="${1:-$AVSYNC_HB_DEV2_WATCHDOG_PATH}"
+  printf 'cat "%s" 2>/dev/null; echo "%s"' "$watchdog_path" "$AVSYNC_HB_SEP"
+}
+
+# avsync_heartbeat_remote_cmd [HOST] -> the remote read command string for the selected HOST:
+# dev2 -> the Linux `cat` probe above; stream -> the existing Windows `type` probe (both files).
+avsync_heartbeat_remote_cmd() {
+  local host="${1:-$(avsync_heartbeat_host)}"
+  case "$host" in
+    dev2)   avsync_heartbeat_linux_probe_cmd ;;
+    stream) avsync_heartbeat_probe_cmd ;;
+    *) return 1 ;;
+  esac
+}
+
+# avsync_heartbeat_ssh_prefix_argv [HOST] -> the ssh transport argv (ONE ARG PER LINE, WITHOUT the
+# remote command) for the selected HOST. dev2 = plain `ssh ... newlevel@dev2` (KEY AUTH -- no
+# sshpass, NO password anywhere in the argv). stream = `sshpass -p <pw> ssh ... newlevel@<ip>`
+# (the retired Windows box, password auth). Emitted one-arg-per-line so the caller reads it with
+# `mapfile -t` into an array and never re-splits a password containing spaces.
+avsync_heartbeat_ssh_prefix_argv() {
+  local host="${1:-$(avsync_heartbeat_host)}"
+  case "$host" in
+    dev2)
+      printf '%s\n' ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 "${AVSYNC_HB_DEV2_SSH:-newlevel@dev2}"
+      ;;
+    stream)
+      printf '%s\n' sshpass -p "${STREAM_PW:-newlevel}" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 "${STREAM_USER:-newlevel}@${STREAM_IP:-10.77.9.204}"
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+# avsync_heartbeat_has_vlc_leg [HOST] -> exit 0 iff HOST has the #807 VLC-monitor heartbeat leg.
+# ONLY the stream box ran the VLC babysitter; dev2 does not, so its vlc segment is always empty by
+# design and the dev1 vlc leg MUST skip rather than page on a permanently-missing file.
+avsync_heartbeat_has_vlc_leg() {
+  local host="${1:-$(avsync_heartbeat_host)}"
+  [ "$host" = "stream" ]
 }

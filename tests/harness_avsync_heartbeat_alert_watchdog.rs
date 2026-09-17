@@ -456,6 +456,13 @@ impl Harness {
         cmd.arg("-c")
             .arg(body)
             .env("SCRIPT", script())
+            // #1331: these behavioral tests stub a fake `sshpass` binary and exercise BOTH the
+            // watchdog and vlc legs -- i.e. the retired STREAM-box path. Pin the host to "stream"
+            // so main() uses the sshpass transport (the fake binary intercepts) and processes the
+            // vlc leg; the new default host "dev2" uses plain key-auth ssh and has no vlc leg (that
+            // path is covered by tests/python/test_avsync_heartbeat_host.py). Without this pin a
+            // default-host run would attempt a REAL ssh to dev2 (non-hermetic).
+            .env("AVSYNC_HEARTBEAT_HOST", "stream")
             .env("AVSYNC_HEARTBEAT_STATE_FILE", &self.state_file)
             .env("AIRULESET_NOTIFY", "/dev/null/does-not-matter")
             .env("AVSYNC_DISCORD_ENV", &self.discord_env_file)
@@ -649,6 +656,10 @@ fn empty_probe_output_ssh_failure_never_falsely_alerts() {
         .arg("-c")
         .arg(". \"$SCRIPT\"\nmain")
         .env("SCRIPT", script())
+        // #1331: pin to the STREAM path so the failing fake `sshpass` binary is the transport used
+        // (the default host "dev2" uses plain ssh, which would attempt a real, reachable dev2
+        // connection and make this hermetic test network-dependent).
+        .env("AVSYNC_HEARTBEAT_HOST", "stream")
         .env("AVSYNC_HEARTBEAT_STATE_FILE", &state_file)
         .env("AIRULESET_NOTIFY", "/dev/null/does-not-matter")
         .env("PATH", path)

@@ -2,6 +2,43 @@
 
 Run-scoped decisions + per-issue notes so a resumed/compacted loop re-loads context.
 
+## 2026-09-17 — #1331 part 3 (move stream lipsync measurement OFF the stream box onto dev2 GPU) — worktree worktree-agent-a80308d94dfe21a15, base 802ce482d
+
+Implemented the main-authored design (17.9. 22:55) verbatim. Measuring SyncNet on the ENCODING
+stream box during live caused OBS render lag + audio-buffer steps (nález 1335: program-render-audit
+lagged>0 in 19/24/28 windows/10 min; two buffer steps), so the measurement moves to dev2 (RTX 5050,
+CUDA torch); the stream tasks stay DISABLED. Heartbeat contract unchanged; dev1 reads it from dev2.
+
+- **New `scripts/avsync-measure-dev2.sh` + pure `scripts/lib/avsync-measure.sh`** — one measurement
+  pass for a `systemd --user` timer: ffmpeg pull of `rtmp://10.77.9.204:1234/live/obs-e2e-test`
+  (35 s clip, encode params single-sourced vs `avsync-watchdog.ps1:99`), the shared #814
+  `avsync_freshness.py` fail-CLOSED gate, `av_sync_measure.py` under a 180 s `timeout`, volumedetect
+  db, ATOMIC heartbeat write in the exact `measured: db=… …`/`no-signal: …` shape. NO Discord (dev1's
+  job). Pure parts (status line, freshness reason, clip path, ffmpeg argv, cadence) unit-tested in
+  `tests/python/test_avsync_measure_dev2.py` (run_sourced).
+- **`systemd/avsync-measure-dev2.{service,timer}`** — Type=oneshot, `OnUnitInactiveSec=90s`
+  (systemd-analyze verify clean). **`scripts/avsync-dev2-install.sh`** (idempotent, `--check`
+  read-only / `--install`): runs on dev1, key-auth rsync of syncnet+weights+py deps to
+  `dev2:~/avsync`, `venv --system-site-packages` (system cu128 stack reused; pip only scenedetect +
+  python_speech_features), timer enable. `--check` verified read-only live against dev2 (ffmpeg OK,
+  everything else MISSING = correct pre-install state).
+- **dev1 heartbeat SOURCE selection** in `scripts/lib/avsync-heartbeat.sh` via `AVSYNC_HEARTBEAT_HOST`
+  (default `dev2` = Linux cat over KEY-auth ssh, NO password; `stream` = the retired Windows
+  type+sshpass fallback). Both `avsync-lineup-alert-watchdog.sh` + `avsync-heartbeat-alert-watchdog.sh`
+  use the new `avsync_heartbeat_ssh_prefix_argv`/`avsync_heartbeat_remote_cmd`; dev2 has no VLC
+  heartbeat so the dev1 vlc leg SKIPs (`avsync_heartbeat_has_vlc_leg`), never a false stale-page;
+  lineup's `require_tools sshpass` is now stream-only. New `tests/python/test_avsync_heartbeat_host.py`.
+  Existing Rust behavioral harnesses (stub a fake sshpass binary → the retired stream path) pinned to
+  `AVSYNC_HEARTBEAT_HOST=stream`.
+- **`scripts/avsync-watchdog-install.sh --retire`** (planner) prints the `schtasks … /DISABLE` plan
+  for the three stream tasks (single-sourced `avsync_disable_stream_tasks_cmds`); tasks DISABLED not
+  deleted. Rule `.claude/rules/avsync-monitoring.md` documents the retirement + new topology.
+- Tier-0: bash -n + shellcheck -S warning clean (7 scripts), `cargo fmt --all --check` clean, full
+  `tests/python` suite 2831 passed, systemd-analyze verify clean. Worktree stops at green local;
+  supervisor integrates + runs dev2 `--install`, flips dev1 to `AVSYNC_HEARTBEAT_HOST=dev2`, live
+  acceptance next stream. Shared-benefit: the dev2 measurer also serves the lipsync cross-check
+  (issue 1032) + any future off-rig ML measurement.
+
 ## 2026-09-14 — #1066 D5 + D6 (provisioning defects: gh-less frame-probe fetch + named UEFI entry on the target) — worktree worktree-agent-abf41888552db3de5, base 099a58280
 
 - **D5 (STEP 3b frame-probe on a gh-less box):** RED `930064d6a` → GREEN `b5bea8e6b`.

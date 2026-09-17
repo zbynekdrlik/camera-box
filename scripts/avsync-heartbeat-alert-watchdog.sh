@@ -44,9 +44,12 @@ case "${1:-}" in
 esac
 
 # ── config (all env-overridable) ─────────────────────────────────────────────
+# #1331: the shared lib's stream-fallback ssh prefix reads STREAM_USER/STREAM_PW/STREAM_IP directly
+# (normalize them here so a sourced-lib call sees the same values; the old *_SSH aliases were retired
+# when the inline sshpass call moved into avsync_heartbeat_ssh_prefix_argv).
 STREAM_IP="${STREAM_IP:-10.77.9.204}"
-STREAM_USER_SSH="${STREAM_USER:-newlevel}"
-STREAM_PW_SSH="${STREAM_PW:-newlevel}"
+STREAM_USER="${STREAM_USER:-newlevel}"
+STREAM_PW="${STREAM_PW:-newlevel}"
 # 2x avsync-watchdog.ps1's ~90s natural cadence AND 2x avsync-vlc-monitor.ps1's ~15-35s cadence,
 # with comfortable margin either way -- one env override covers both legs (they run independently
 # but on similar timescales; a per-leg override was not worth the extra complexity here).
@@ -75,9 +78,20 @@ STATE_FILE="${AVSYNC_HEARTBEAT_STATE_FILE:-$STATE_DIR/camera-box-avsync-heartbea
 log() { printf '%s [avsync-heartbeat-alert-watchdog] %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$*" >&2; }
 
 # ── measure (SSH + the shared avsync-heartbeat probe) ───────────────────────
+# #1331: the transport + remote read command now come from the shared lib, selected by
+# AVSYNC_HEARTBEAT_HOST (default "dev2" -- the Linux GPU measurer, key auth, no sshpass/password;
+# "stream" keeps the retired Windows box's sshpass+`type` path). The stream-path STREAM_* env the
+# lib reads is the SAME the config block above sets (STREAM_PW/STREAM_USER/STREAM_IP), so the
+# fallback credentials are unchanged.
 measure() {
-  PROBE_OUT="$(sshpass -p "$STREAM_PW_SSH" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 \
-    "${STREAM_USER_SSH}@${STREAM_IP}" "$(avsync_heartbeat_probe_cmd)" 2>/dev/null || true)"
+  local -a pfx=()
+  mapfile -t pfx < <(avsync_heartbeat_ssh_prefix_argv)
+  if [ "${#pfx[@]}" -eq 0 ]; then
+    log "ERROR: unknown AVSYNC_HEARTBEAT_HOST='$(avsync_heartbeat_host)' -- no probe transport; nothing to decide this pass"
+    PROBE_OUT=""
+    return 0
+  fi
+  PROBE_OUT="$("${pfx[@]}" "$(avsync_heartbeat_remote_cmd)" 2>/dev/null || true)"
 }
 
 # ── read / write persisted state (same key=value shape as the #391/#882 siblings) ──────────────
@@ -259,7 +273,14 @@ main() {
   watchdog_status="$(avsync_heartbeat_last_status "$watchdog_segment")"
 
   process_leg "watchdog" "$watchdog_epoch"
-  process_leg "vlc" "$vlc_epoch"
+  # #1331: the dev2 measurer has NO VLC-monitor heartbeat (that was a stream-box babysitter), so a
+  # permanently-missing vlc segment must SKIP, never page as CONFIRMED-stale. The "stream" host
+  # still has both legs.
+  if avsync_heartbeat_has_vlc_leg; then
+    process_leg "vlc" "$vlc_epoch"
+  else
+    log "vlc: skipped (host=$(avsync_heartbeat_host) has no VLC-monitor heartbeat leg)"
+  fi
   maybe_forward_verdict "$watchdog_epoch" "$watchdog_status"
 
   log "pass end"
