@@ -447,3 +447,33 @@ BYTE-identical to the stream-box path — only the host + transport changed.
   `schtasks /Change /TN <task> /DISABLE` plan for `avsync-watchdog`/`avsync-keepalive`/
   `avsync-vlc-monitor` (single-sourced in `avsync_disable_stream_tasks_cmds`). Tasks are DISABLED,
   never DELETED — re-enable them only if the dev2 measurer is ever unavailable.
+
+## GOTCHA (#1331 review) — moving `av_sync_measure.py` to a NEW box makes it PING DISCORD ITSELF
+
+`av_sync_measure.py`'s DEFAULT alert delivery (`deliver_alert → notify_airuleset`, fired whenever
+`|offset| >= --threshold-ms`, default 60ms) shells out to `AIRULESET_NOTIFY` (default
+`~/devel/airuleset/airuleset.py`). The retired stream-box `avsync-watchdog.ps1` gated Discord behind
+an opt-in webhook FILE, so moving the measurement to dev2 — which HAS `~/devel/airuleset/airuleset.py`
+installed — silently turned that gate into a live self-ping: on exactly the desync events the system
+cares about, dev2 would post to Discord itself, DUPLICATING the dev1 watchdog alert and violating the
+"NO Discord on dev2 — delivery is the dev1 watchdogs' job" contract + the owner's near-zero-Discord rule.
+The measurer SHELL had no Discord; the measurement PASS did. **Fix, and the rule for moving ANY
+av_sync_measure.py / airuleset-notify-capable tool to a box where delivery is NOT that box's job:
+neutralize it with `AIRULESET_NOTIFY=<empty script>` on the subprocess** — `avsync-measure-dev2.sh`'s
+`run_measure` runs it with `AIRULESET_NOTIFY="$MEASURE_NOTIFY_BIN"` (default `/dev/null` → `python3
+/dev/null notify …` is a no-op) and never passes `--webhook`. Do NOT rely on `airuleset.py` being absent
+on the target — it is present on every managed box. A fresh-context review caught this; a self-review
+missed it.
+
+## GOTCHA (#1331) — a NEW default `AVSYNC_HEARTBEAT_HOST` breaks the fake-`sshpass` harnesses
+
+The behavioral Rust harnesses (`harness_avsync_{heartbeat,lineup}_alert_watchdog.rs`) stub a fake
+`sshpass` BINARY on PATH and run `main()`. Flipping the default heartbeat host to `dev2` (plain key-auth
+`ssh`, no sshpass, no vlc leg) means a default-host run would bypass the fake `sshpass` and attempt a
+REAL, reachable ssh to dev2 (non-hermetic) AND skip the vlc leg. Fix: PIN those harnesses to
+`AVSYNC_HEARTBEAT_HOST=stream` (they exercise the retired path — the pin preserves intent, it does not
+hide a regression) and cover the NEW default with its own tests (the pure host-selection funcs in
+`tests/python/test_avsync_heartbeat_host.py` + one behavioral harness case stubbing a fake `ssh` with
+host=dev2, asserting the leg is read and vlc SKIPed). General rule: when you flip a default that selects
+a transport, pin every existing transport-stubbing test to the OLD default and give the NEW default its
+own coverage — never leave the production default untested.
