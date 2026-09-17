@@ -275,42 +275,44 @@ pub const LEVEL_INTEGRAL_MAX_PPM: f64 = 3.0;
 /// point. Live 17.9. 18:52: an OBS StartStream stall lost ~50 ms of `mbc` input samples permanently
 /// (buffered_ms 108 → 51, starved_blocks=0); that 50 ms step entered the 600 s regression and biased
 /// the slope by ~= step/span = 50 ms / 600 s = 83 ppm (est +16 → -83 → -152 after a 2nd step). When
-/// `|(window increment − slope·window)·1000| > 10 ms` the servo RE-BASEs (shifts the cumulative
-/// anchor onto the pre-step fit, keeps the lock+applied, does NOT insert the step point) instead of
-/// flushing (which would enshrine the shifted level). 10 ms sits well above the residual noise floor
-/// of the 1 s windows (ASIO callback jitter ~1-2 ms; ranné dáta reziduály < 3 ms) so ordinary noise
-/// never re-bases (bench (c) pins 0 steps on 3 ms noise). Mirror of asrc-compensator.h
+/// `|(y_actual - y_fit)·1000| > 10 ms` the servo RE-BASEs (shifts the cumulative anchor onto the
+/// pre-step fit, keeps the lock+applied, does NOT insert the step point) instead of flushing (which
+/// would enshrine the shifted level). 10 ms sits well above the residual noise floor of the 1 s
+/// windows (ASIO callback jitter ~1-2 ms; ranné dáta reziduály < 3 ms) so ordinary noise never
+/// re-bases (bench (c) pins 0 steps on 3 ms noise). Mirror of asrc-compensator.h
 /// ASRC_STEP_RESIDUAL_MS — keep numerically identical.
 pub const STEP_RESIDUAL_MS: f64 = 10.0;
 
 /// camera-box #1335 follow-up 2: proportional gain of the FAST bounded level-RESTORE burst, in ppm
 /// per ms of level error. Entered only when a re-base's step is corroborated by the buffer level
 /// (a real sample loss/dup, not a wall-clock-only jump); adds `clamp(Kr·(buffered − target), ±100)`
-/// to the correction target so a big deficit drives a strong stretch (100 ppm = 0.17 cent, inaudible)
-/// that decays as the buffer refills; exits at `|buffered − target| < 5 ms`. SIGN follows the proven
-/// #1335 integral convention — a DEFICIT (buffered < target) yields a NEGATIVE contribution (stretch,
-/// raises the buffer). NOTE (see the issue-1335-follow-up-2 anchors-confirmed comment): the main
-/// design wrote `-Kr·(level − target)`, which for a deficit is POSITIVE = compress = LOWERS the
-/// buffer — the opposite of its own stated "level below target => stretch" intent; the implemented
-/// form `Kr·(buffered − target)` = the negation, matching the integral. Mirror of asrc-compensator.h
-/// ASRC_LEVEL_RESTORE_K_PPM_PER_MS — keep numerically identical.
+/// to the correction target so a 50 ms deficit drives a ~-100 ppm stretch = ~8 min to refill (100 ppm
+/// = 0.17 cent, inaudible), decaying as the buffer refills; exits at `|buffered − target| < 5 ms`.
+/// SIGN follows the proven #1335 integral convention — a DEFICIT (buffered < target) yields a NEGATIVE
+/// contribution (stretch, raises the buffer). NOTE (see the issue-1335-follow-up-2 anchors-confirmed
+/// comment): the main design wrote `-Kr·(level − target)`, which for a deficit is POSITIVE = compress =
+/// LOWERS the buffer — the opposite of its own stated "level below target => stretch" intent; the
+/// implemented form `Kr·(buffered − target)` = the negation, matching the integral. Mirror of
+/// asrc-compensator.h ASRC_LEVEL_RESTORE_K_PPM_PER_MS — keep numerically identical.
 pub const LEVEL_RESTORE_K_PPM_PER_MS: f64 = 2.0;
 
 /// camera-box #1335 follow-up 2: hard clamp on the fast level-RESTORE burst, in ppm (±). 100 ppm is
-/// large yet a 0.17-cent pitch nudge (below audibility); bounds the restore far below the rate loop's
-/// own MAX_PPM. Mirror of asrc-compensator.h ASRC_LEVEL_RESTORE_MAX_PPM — keep numerically identical.
+/// large enough to refill a ~50 ms sample-loss step in ~8 min yet is a 0.17-cent pitch nudge (below
+/// audibility). Bounds the restore far below the rate loop's own MAX_PPM. Mirror of
+/// asrc-compensator.h ASRC_LEVEL_RESTORE_MAX_PPM — keep numerically identical.
 pub const LEVEL_RESTORE_MAX_PPM: f64 = 100.0;
 
 /// camera-box #1335 follow-up 2: proportional gain of the level-LEVEL P term, in ppm per ms of level
 /// error, folded into the correction target every call (once locked) as `clamp(Kp·(buffered −
 /// target), ±1)`. It damps the I-only level loop's ~3.9 h clamp-to-clamp oscillation (observed
-/// 14:00-20:45, level ±10 ms). SIGN matches the proven #1335 integral (deficit ⇒ negative ⇒ stretch);
-/// the main design wrote `Kp·(target − level)` (the anti-damping sign) — the implemented `Kp·(buffered
-/// − target)` is the negation. At Kp=0.03 the loop's damping ratio is only ~0.034, so this is a GENTLE
-/// damping that reduces the integral's clamp-railing and decays the oscillation (measured 5 ms-bump
-/// 2nd/1st-half peak ratio 0.89 vs 1.00 undamped), NOT a critically-damped `<3 ms overshoot` term
-/// (that would need Kp~0.6 + a wider clamp — see the anchors-confirmed comment). Mirror of
-/// asrc-compensator.h ASRC_LEVEL_KP_PPM_PER_MS — keep numerically identical.
+/// 14:00-20:45, level ±10 ms) — the marginally-stable integrator-on-integrator plant. SIGN matches
+/// the proven #1335 integral (deficit ⇒ negative ⇒ stretch); the main design wrote `Kp·(target −
+/// level)` (the anti-damping sign) — the implemented `Kp·(buffered − target)` is the negation. At
+/// Kp=0.03 the loop's damping ratio is only ~0.034 (a 20 ms disturbance still overshoots), so this is
+/// a GENTLE damping that reduces the integral's clamp-railing and decays the oscillation, NOT a
+/// critically-damped `<3 ms overshoot` term (that would need Kp~0.6 + a wider clamp — see the
+/// anchors-confirmed comment). Mirror of asrc-compensator.h ASRC_LEVEL_KP_PPM_PER_MS — keep
+/// numerically identical.
 pub const LEVEL_KP_PPM_PER_MS: f64 = 0.03;
 
 /// issue #960: sanity ceiling on the (issue #962: WINDOWED, duration-weighted-summed) measured
@@ -707,84 +709,136 @@ impl RealtimeAsrcCompensator {
                 return self.corrected_advance(raw_advance_s);
             }
 
-            // issue #1084: push one regression point -- (cumulative accepted-window master time,
-            // cumulative raw-minus-master) -- then slide the buffer to the last REGRESSION_SPAN_S
-            // and re-fit the rate slope. (The evict-before-append guard mirrors the C ring's fixed
-            // capacity; age eviction already bounds a >=1 s-window buffer well under it.)
-            self.cum_master_s += window_master_s;
-            self.cum_ymm_s += window_raw_s - window_master_s;
-            // Defensive capacity guard (mirror of the C ring's fixed capacity): evict the oldest
-            // point BEFORE appending if the buffer is already full, so the newest point never
-            // overwrites a live slot. Age eviction (below) keeps a >=1 s-window buffer at ~601
-            // points, well under REGRESSION_CAP, so this never fires in practice.
-            while self.reg_x.len() >= REGRESSION_CAP {
-                self.reg_x.remove(0);
-                self.reg_y.remove(0);
-            }
-            self.reg_x.push(self.cum_master_s);
-            self.reg_y.push(self.cum_ymm_s);
-            let cutoff = self.cum_master_s - REGRESSION_SPAN_S;
-            while self.reg_x.len() > 1 && self.reg_x[0] < cutoff {
-                self.reg_x.remove(0);
-                self.reg_y.remove(0);
-            }
-
-            let n = self.reg_x.len();
-            if n >= REGRESSION_MIN_POINTS {
-                // Re-anchor to the oldest point (bounded magnitudes -> no catastrophic cancellation
-                // over a long run) and recompute the five ordinary-least-squares sums in FULL, in a
-                // fixed oldest->newest iteration order -- deterministic and bit-identically
-                // mirrorable by the C ring (no incremental subtract-on-evict, whose FP rounding
-                // would drift the two apart). slope = (n*Sxy - Sx*Sy) / (n*Sxx - Sx*Sx); the rate
-                // offset in ppm is slope * 1e6.
-                let x0 = self.reg_x[0];
-                let y0 = self.reg_y[0];
-                let (mut sx, mut sy, mut sxx, mut sxy) = (0.0_f64, 0.0_f64, 0.0_f64, 0.0_f64);
-                for i in 0..n {
-                    let x = self.reg_x[i] - x0;
-                    let y = self.reg_y[i] - y0;
-                    sx += x;
-                    sy += y;
-                    sxx += x * x;
-                    sxy += x * y;
-                }
-                let nf = n as f64;
-                let denom = nf * sxx - sx * sx;
-                if denom.abs() > 1e-9 {
-                    let slope = (nf * sxy - sx * sy) / denom;
-                    self.estimated_ppm = slope * 1_000_000.0;
-                }
-                if self.reg_x[n - 1] - self.reg_x[0] >= REGRESSION_LOCK_SPAN_S {
-                    self.reg_locked = true;
-                }
-            }
-
-            // issue #1335: buffer-LEVEL holding integral, updated ONCE per closed ACCEPTED window
-            // (a rejected window early-returned above; an unlocked servo skips the update). The C
-            // mirror reads buffered_ms from source->audio_input_buf[0].size every callback; the
-            // rate-only bench entry passes None and never runs this.
-            if let Some(buf_ms) = buffered_ms {
-                self.level_last_ms = buf_ms;
-                if self.reg_locked {
-                    if !self.level_captured {
-                        // setpoint = the buffer depth the mixer had settled at when the rate loop
-                        // first locked; re-captured after every flush/relock.
-                        self.level_target_ms = buf_ms;
-                        self.level_captured = true;
+            // issue #1335 follow-up 2: STEP DETECTION -> RE-BASE. The prospective new cumulative
+            // point (advance the anchors by this closed window). A window whose residual against the
+            // CURRENT (pre-insert) fit exceeds STEP_RESIDUAL_MS is a permanent input sample-loss/dup
+            // or a wall-clock jump, NOT a real rate change — inserting it would bias the 600 s slope
+            // by step/span (the live 17.9. 18:52 est +16 -> -83 -> -152 swing). RE-BASE instead:
+            // shift cum_ymm_s onto the pre-step fit (cum_ymm_s -= r), do NOT insert the point, keep
+            // the lock + slope + applied (no 60 s decay). Gated to the C path (buffered_ms.is_some())
+            // + reg_locked so the rate-only bench trait entry (buffered_ms == None) keeps the legacy
+            // insert -- the slew/clamp tests and the #1084 endpoint-jitter gate feed that path with
+            // deliberate outliers and must stay unchanged; the C mirror ALWAYS has buffered_ms, so
+            // there the re-base is unconditional.
+            let pt_master = self.cum_master_s + window_master_s;
+            let pt_ymm = self.cum_ymm_s + (window_raw_s - window_master_s);
+            // The single-window RESIDUAL vs the locked fit's RATE: how far THIS window's own advance
+            // increment (raw − master) deviates from the slope's expected increment for the window.
+            // It is a per-window quantity — the cumulative noise cancels (pt_ymm − cum_ymm_s == this
+            // window's increment) — so ordinary ±1-3 ms window jitter stays well under
+            // STEP_RESIDUAL_MS, while a real sample-loss/dup or wall-clock step (tens of ms in ONE
+            // window) exceeds it. (A cumulative-point-vs-OLS-line residual would instead fire on the
+            // random-walk excursion of accumulated noise — wrong signal; bench (c) pins 0 steps.)
+            let r_s = (window_raw_s - window_master_s)
+                - (self.estimated_ppm / 1_000_000.0) * window_master_s;
+            let mut rebased = false;
+            if buffered_ms.is_some() && self.reg_locked && (r_s * 1000.0).abs() > STEP_RESIDUAL_MS {
+                // RE-BASE: cum_ymm_s -= r (the design's exact form) leaves the anchor on the pre-step
+                // fit line (cum_ymm_before + slope·window_master), so future points align; do NOT
+                // insert the step point; keep the lock + slope + applied (no 60 s decay).
+                self.cum_master_s = pt_master;
+                self.cum_ymm_s = pt_ymm - r_s;
+                self.step_count = self.step_count.saturating_add(1);
+                self.last_step_ms = r_s * 1000.0;
+                if let Some(buf_ms) = buffered_ms {
+                    self.level_last_ms = buf_ms;
+                    // FAST bounded level restore, but ONLY if the buffer level corroborates a real
+                    // sample loss/dup (|level err| >= half the residual magnitude). A wall-clock-only
+                    // jump leaves buffered_ms unchanged => re-base only, no restore. Keeps the
+                    // captured setpoint + integral (the design's intent).
+                    if self.level_captured
+                        && (buf_ms - self.level_target_ms).abs() >= 0.5 * (r_s * 1000.0).abs()
+                    {
+                        self.level_restore = true;
                     }
-                    // Anti-windup: integrate only while the composite rate target is not clamped at
-                    // the hard ±MAX_PPM bound. err_ms = target - buffered; a DEFICIT (buffer below
-                    // setpoint) drives the integral MORE NEGATIVE => more-negative applied => STRETCH
-                    // => raises the buffer (sign confirmed by the issue-1335 live -5 ppm outer-bias
-                    // test, 17.9.). window_master_s is this closed window's master duration (~1 s).
-                    let rate_target =
-                        self.estimated_ppm + self.outer_bias_ppm + self.level_integral_ppm;
-                    let saturated = rate_target <= -MAX_PPM || rate_target >= MAX_PPM;
-                    if !saturated {
-                        let err_ms = self.level_target_ms - buf_ms;
-                        self.level_integral_ppm = (self.level_integral_ppm
-                            - LEVEL_KI_PPM_PER_MS_S * err_ms * window_master_s)
-                            .clamp(-LEVEL_INTEGRAL_MAX_PPM, LEVEL_INTEGRAL_MAX_PPM);
+                }
+                rebased = true;
+            }
+
+            if !rebased {
+                // issue #1084: push one regression point -- (cumulative accepted-window master time,
+                // cumulative raw-minus-master) -- then slide the buffer to the last REGRESSION_SPAN_S
+                // and re-fit the rate slope. (The evict-before-append guard mirrors the C ring's fixed
+                // capacity; age eviction already bounds a >=1 s-window buffer well under it.)
+                self.cum_master_s = pt_master;
+                self.cum_ymm_s = pt_ymm;
+                // Defensive capacity guard (mirror of the C ring's fixed capacity): evict the oldest
+                // point BEFORE appending if the buffer is already full, so the newest point never
+                // overwrites a live slot. Age eviction (below) keeps a >=1 s-window buffer at ~601
+                // points, well under REGRESSION_CAP, so this never fires in practice.
+                while self.reg_x.len() >= REGRESSION_CAP {
+                    self.reg_x.remove(0);
+                    self.reg_y.remove(0);
+                }
+                self.reg_x.push(self.cum_master_s);
+                self.reg_y.push(self.cum_ymm_s);
+                let cutoff = self.cum_master_s - REGRESSION_SPAN_S;
+                while self.reg_x.len() > 1 && self.reg_x[0] < cutoff {
+                    self.reg_x.remove(0);
+                    self.reg_y.remove(0);
+                }
+
+                let n = self.reg_x.len();
+                if n >= REGRESSION_MIN_POINTS {
+                    // Re-anchor to the oldest point (bounded magnitudes -> no catastrophic
+                    // cancellation over a long run) and recompute the five ordinary-least-squares
+                    // sums in FULL, in a fixed oldest->newest iteration order -- deterministic and
+                    // bit-identically mirrorable by the C ring (no incremental subtract-on-evict,
+                    // whose FP rounding would drift the two apart). slope = (n*Sxy - Sx*Sy) / (n*Sxx
+                    // - Sx*Sx); the rate offset in ppm is slope * 1e6.
+                    let x0 = self.reg_x[0];
+                    let y0 = self.reg_y[0];
+                    let (mut sx, mut sy, mut sxx, mut sxy) = (0.0_f64, 0.0_f64, 0.0_f64, 0.0_f64);
+                    for i in 0..n {
+                        let x = self.reg_x[i] - x0;
+                        let y = self.reg_y[i] - y0;
+                        sx += x;
+                        sy += y;
+                        sxx += x * x;
+                        sxy += x * y;
+                    }
+                    let nf = n as f64;
+                    let denom = nf * sxx - sx * sx;
+                    if denom.abs() > 1e-9 {
+                        let slope = (nf * sxy - sx * sy) / denom;
+                        self.estimated_ppm = slope * 1_000_000.0;
+                    }
+                    if self.reg_x[n - 1] - self.reg_x[0] >= REGRESSION_LOCK_SPAN_S {
+                        self.reg_locked = true;
+                    }
+                }
+
+                // issue #1335: buffer-LEVEL holding integral, updated ONCE per closed ACCEPTED window
+                // (a rejected window early-returned above; a re-based window took the branch above;
+                // an unlocked servo skips the update). The C mirror reads buffered_ms from
+                // source->audio_input_buf[0].size every callback; the rate-only bench entry passes
+                // None and never runs this.
+                if let Some(buf_ms) = buffered_ms {
+                    self.level_last_ms = buf_ms;
+                    if self.reg_locked {
+                        if !self.level_captured {
+                            // setpoint = the buffer depth the mixer had settled at when the rate loop
+                            // first locked; re-captured after every flush/relock.
+                            self.level_target_ms = buf_ms;
+                            self.level_captured = true;
+                        }
+                        // Anti-windup: integrate only while the composite rate target is not clamped
+                        // at the hard ±MAX_PPM bound AND the fast level-restore burst is not active
+                        // (issue #1335 follow-up 2: freeze the integral during a restore so the two
+                        // level correctors don't wind against each other). err_ms = target -
+                        // buffered; a DEFICIT (buffer below setpoint) drives the integral MORE
+                        // NEGATIVE => more-negative applied => STRETCH => raises the buffer (sign
+                        // confirmed by the issue-1335 live -5 ppm outer-bias test, 17.9.).
+                        // window_master_s is this closed window's master duration (~1 s).
+                        let rate_target =
+                            self.estimated_ppm + self.outer_bias_ppm + self.level_integral_ppm;
+                        let saturated = rate_target <= -MAX_PPM || rate_target >= MAX_PPM;
+                        if !saturated && !self.level_restore {
+                            let err_ms = self.level_target_ms - buf_ms;
+                            self.level_integral_ppm = (self.level_integral_ppm
+                                - LEVEL_KI_PPM_PER_MS_S * err_ms * window_master_s)
+                                .clamp(-LEVEL_INTEGRAL_MAX_PPM, LEVEL_INTEGRAL_MAX_PPM);
+                        }
                     }
                 }
             }
@@ -798,10 +852,33 @@ impl RealtimeAsrcCompensator {
         let target_ppm = if !self.reg_locked {
             0.0
         } else {
-            // issue #1335: the buffer-LEVEL integral is folded in alongside the outer bias, then the
-            // SUM is clamped to the hard ppm bound (inert/0.0 on the rate-only bench entry).
-            (self.estimated_ppm + self.outer_bias_ppm + self.level_integral_ppm)
-                .clamp(-MAX_PPM, MAX_PPM)
+            // issue #1335: the buffer-LEVEL integral is folded in alongside the outer bias.
+            let mut t = self.estimated_ppm + self.outer_bias_ppm + self.level_integral_ppm;
+            // issue #1335 follow-up 2: the LEVEL P term + the fast bounded restore burst, both driven
+            // by the LIVE buffered_ms (C path only; inert on the rate-only bench entry, where
+            // buffered_ms == None and the level terms have no captured setpoint to act on). SIGN
+            // matches the proven #1335 integral: (buffered - target) < 0 (deficit) => negative =>
+            // stretch => raises the buffer. (The main design wrote these with the opposite argument
+            // order; see the issue-1335-follow-up-2 anchors-confirmed comment for the derivation.)
+            if let Some(buf_ms) = buffered_ms {
+                if self.level_captured {
+                    let err = buf_ms - self.level_target_ms;
+                    // P term: gentle damping of the I-only level loop's ~3.9 h oscillation.
+                    t += (LEVEL_KP_PPM_PER_MS * err).clamp(-1.0, 1.0);
+                    // Fast bounded restore: a big proportional stretch/compress that refills a
+                    // sample-loss step in minutes, then exits once the buffer is back within 5 ms.
+                    if self.level_restore {
+                        if err.abs() < 5.0 {
+                            self.level_restore = false;
+                        } else {
+                            t += (LEVEL_RESTORE_K_PPM_PER_MS * err)
+                                .clamp(-LEVEL_RESTORE_MAX_PPM, LEVEL_RESTORE_MAX_PPM);
+                        }
+                    }
+                }
+            }
+            // The SUM is clamped to the hard ppm bound before ever being used as a target.
+            t.clamp(-MAX_PPM, MAX_PPM)
         };
 
         // Slew-limit the APPLIED correction toward the target — caps how fast the resample-ratio

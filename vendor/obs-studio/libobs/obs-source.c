@@ -4333,14 +4333,20 @@ static inline void asrc_process_audio(obs_source_t *source, uint32_t frames, uin
 		 * estimated= (scripts/lib/asio-starve-health.sh, scripts/lib/cg-chain-verify.sh; both
 		 * extract by name with .*) is unaffected. level=the live buffered_ms, target=the captured
 		 * setpoint, integral=the level-holding correction in ppm. */
+		/* camera-box #1335 follow-up 2: steps=/last_step_ms=/restore= appended AFTER the
+		 * byte-identical '(#1335)' suffix so every dev1 asrc:-line parser (asio-starve-health,
+		 * cg-chain-verify -- both extract by name with .*) is unaffected. steps=cumulative STEP
+		 * re-base count, last_step_ms=the last step's residual, restore=fast-restore active 0|1. */
 		blog(LOG_INFO,
 		     "asrc: source '%s' estimated=%.2fppm applied=%.2fppm outer_bias=%.2fppm "
 		     "cumulative_correction=%.3fms/%.0fs starved_blocks=%u (#803/#806/#960) "
-		     "level=%.1fms target=%.1fms integral=%.3fppm (#1335)",
+		     "level=%.1fms target=%.1fms integral=%.3fppm (#1335) "
+		     "steps=%u last_step_ms=%.1f restore=%d (#1335)",
 		     obs_source_get_name(source), source->asrc.estimated_ppm, applied_ppm,
 		     source->asrc.outer_bias_ppm, cumulative_correction_ms, ASRC_LOG_INTERVAL_S,
 		     starved_block_count, source->asrc.level_last_ms, source->asrc.level_target_ms,
-		     source->asrc.level_integral_ppm);
+		     source->asrc.level_integral_ppm, source->asrc.step_count, source->asrc.last_step_ms,
+		     (int)source->asrc.level_restore);
 	}
 }
 

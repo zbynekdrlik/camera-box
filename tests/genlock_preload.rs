@@ -1953,6 +1953,81 @@ mod vendored_source {
     }
 
     #[test]
+    fn asrc_step_tolerant_regression_and_p_term_1335() {
+        // issue #1335 follow-up 2: the ASRC servo must (1) RE-BASE a permanent input sample-loss/dup
+        // or wall-clock STEP out of the 600 s regression (a step point biased the slope by ~83 ppm,
+        // the live 17.9. 18:52 swing) instead of inserting it; (2) FAST-RESTORE the buffer level when
+        // the step is level-corroborated; (3) fold a LEVEL P term to damp the I-only oscillation.
+        // Src authority + Tier-0 gate: src/asrc_bench.rs (the four *_1335 follow-up-2 benches) +
+        // bit-identical cc parity. This static guard keeps the vendored C mirror in lock-step; keep
+        // byte-exact with the shipped lines.
+        let h = squish(&vendor_file(ASRC_COMPENSATOR_H));
+        assert!(
+            h.contains("#define ASRC_STEP_RESIDUAL_MS 10.0")
+                && h.contains("#define ASRC_LEVEL_RESTORE_K_PPM_PER_MS 2.0")
+                && h.contains("#define ASRC_LEVEL_RESTORE_MAX_PPM 100.0")
+                && h.contains("#define ASRC_LEVEL_KP_PPM_PER_MS 0.03"),
+            "{ASRC_COMPENSATOR_H}: #1335 follow-up 2 — the step-tolerance/restore/P constants \
+             (ASRC_STEP_RESIDUAL_MS / ASRC_LEVEL_RESTORE_K_PPM_PER_MS / ASRC_LEVEL_RESTORE_MAX_PPM / \
+             ASRC_LEVEL_KP_PPM_PER_MS) are no longer defined."
+        );
+        assert!(
+            h.contains("uint32_t step_count;")
+                && h.contains("double last_step_ms;")
+                && h.contains("bool level_restore;"),
+            "{ASRC_COMPENSATOR_H}: #1335 follow-up 2 — the step_count/last_step_ms/level_restore \
+             state fields are gone."
+        );
+
+        let c = squish(&vendor_file(ASRC_COMPENSATOR_C));
+        assert!(
+            c.contains(
+                "const double r_s = (window_raw_s - window_master_s) - (c->estimated_ppm / 1000000.0) * window_master_s;"
+            ),
+            "{ASRC_COMPENSATOR_C}: #1335 follow-up 2 — the single-window step residual (increment \
+             minus the locked slope's expected increment) is gone; keep numerically identical to \
+             src/asrc_bench.rs."
+        );
+        assert!(
+            c.contains("if (c->reg_locked && fabs(r_s * 1000.0) > ASRC_STEP_RESIDUAL_MS) {")
+                && c.contains("c->cum_ymm_s = pt_ymm - r_s;")
+                && c.contains("c->step_count++;"),
+            "{ASRC_COMPENSATOR_C}: #1335 follow-up 2 — the RE-BASE branch (cum_ymm_s -= r, keep the \
+             lock, count the step) is gone; a sample-loss step would bias the slope again."
+        );
+        assert!(
+            c.contains(
+                "if (c->level_captured && fabs(buffered_ms - c->level_target_ms) >= 0.5 * fabs(r_s * 1000.0)) c->level_restore = true;"
+            ),
+            "{ASRC_COMPENSATOR_C}: #1335 follow-up 2 — the level-corroborated fast-restore entry is \
+             gone; a sample-loss step would not refill the buffer."
+        );
+        assert!(
+            c.contains("t += asrc_clamp(ASRC_LEVEL_KP_PPM_PER_MS * err, -1.0, 1.0);")
+                && c.contains(
+                    "t += asrc_clamp(ASRC_LEVEL_RESTORE_K_PPM_PER_MS * err, -ASRC_LEVEL_RESTORE_MAX_PPM, ASRC_LEVEL_RESTORE_MAX_PPM);"
+                ),
+            "{ASRC_COMPENSATOR_C}: #1335 follow-up 2 — the LEVEL P term and/or the fast-restore fold \
+             into the correction target are gone (sign: Kp/Kr * (buffered - target))."
+        );
+        assert!(
+            c.contains("if (!saturated && !c->level_restore) {"),
+            "{ASRC_COMPENSATOR_C}: #1335 follow-up 2 — the level integral no longer freezes during a \
+             fast restore (anti-windup); the two level correctors would fight."
+        );
+
+        let src = squish(&vendor_file(OBS_SOURCE));
+        assert!(
+            src.contains("steps=%u last_step_ms=%.1f restore=%d (#1335)")
+                && src.contains(
+                    "source->asrc.level_integral_ppm, source->asrc.step_count, source->asrc.last_step_ms, (int)source->asrc.level_restore"
+                ),
+            "{OBS_SOURCE}: #1335 follow-up 2 — the asrc: telemetry line no longer appends \
+             steps=/last_step_ms=/restore=."
+        );
+    }
+
+    #[test]
     fn build_latch_drains_burst_to_target_in_vendored_source() {
         // #116: the genlock_fifo branch of ready_async_frame must DRAIN the excess
         // oldest frames at the build latch (and after a preload-change re-arm) so every

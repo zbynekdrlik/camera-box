@@ -406,3 +406,81 @@ actuator FIGHT and A/V floats by the trim size between runs (the exact owner com
   new C decl + `.c` body + the obs-source.c call site byte-exact (squished). No new pwsh gate — the
   function rides the existing genlock build; add the 3-copy pwsh lock-step only if a future change
   needs a windows-genlock gate.
+
+## #1335 follow-up 2 — step-tolerant regression + fast bounded level restore + a LEVEL P term
+
+The #1335 level integral (above) holds the buffer at a captured setpoint, but two live pathologies
+on 17.9. remained: (1) an OBS StartStream stall lost ~50 ms of `mbc` input samples PERMANENTLY
+(buffered_ms 108 -> 51, starved_blocks=0) -- a step the #960 starve gate and the non-positive-master
+guard both miss, so it entered the 600 s least-squares and biased the slope by ~= step/span = 50 ms
+/ 600 s = 83 ppm (est +16 -> -83 -> -152 after a 2nd step); the existing `regression_flush` would
+have ENSHRINED the shifted (50 ms lower) level as the new setpoint. (2) The I-only level loop
+oscillated clamp-to-clamp (14:00-20:45, +-3 ppm, level +-10 ms). Three small changes fix both, all
+mirrored C<->Rust (`asrc-compensator.{c,h}` <-> `src/asrc_bench.rs`), bit-identical.
+
+- **STEP DETECTION -> RE-BASE** (not flush). After each closed ACCEPTED window while `reg_locked`,
+  the SINGLE-WINDOW residual `r_s = (window_raw_s - window_master_s) - (estimated_ppm/1e6)*window_master_s`
+  (this window's own advance increment minus the locked slope's expected increment -- the cumulative
+  noise CANCELS, `pt_ymm - cum_ymm_s == this window's increment`, so it is a per-window quantity, NOT
+  a cumulative-vs-OLS-line residual which would fire on the random-walk excursion of accumulated
+  noise -- that mistake produced 158 spurious steps in bench (c)). If `|r_s*1000| > STEP_RESIDUAL_MS
+  (10.0)`: RE-BASE -- `cum_master_s = pt_master; cum_ymm_s = pt_ymm - r_s` (leaves the anchor on the
+  pre-step fit line so future points align), do NOT insert the point, keep the lock+slope+applied (no
+  60 s decay), `step_count++`, `last_step_ms = r_s*1000`. Gated to the C path (Rust
+  `buffered_ms.is_some()`; C always has buffered_ms so it is unconditional) so the rate-only bench
+  trait entry -- which the slew/clamp tests + the #1084 endpoint-jitter gate feed deliberate outliers
+  -- keeps the legacy insert unchanged.
+- **FAST BOUNDED LEVEL RESTORE.** On a re-base, if the buffer level corroborates a real sample
+  loss/dup (`|buffered - target| >= 0.5*|r_ms|` at detection), enter `level_restore`: fold
+  `clamp(LEVEL_RESTORE_K_PPM_PER_MS (2.0)*(buffered - target), +-LEVEL_RESTORE_MAX_PPM (100.0))` into
+  the correction target; the integral is FROZEN while restoring (anti-windup); exit at
+  `|buffered - target| < 5 ms`. A wall-clock-only step (buffer unchanged) -> re-base only, no restore.
+  A `regression_flush` (unintended discontinuity) clears `level_restore` (the setpoint re-captures).
+- **LEVEL P TERM.** `target_ppm += clamp(LEVEL_KP_PPM_PER_MS (0.03)*(buffered - target), +-1)` every
+  call once locked, to damp the I-only oscillation; Ki/clamp unchanged.
+
+**SIGN CORRECTION (load-bearing).** The main design (comment 5720580172) wrote the P term as
+`Kp*(target - level)` and the restore as `-Kr*(level - target)` -- BOTH of which, for a buffer
+DEFICIT, add a POSITIVE ppm = compress = LOWER the buffer, the OPPOSITE of their own stated intent
+("level below target => stretch") and of the proven #1335 integral. The integral is ground truth
+(shipped, rig-verified 17.9. -5 ppm outer-bias test, and the passing `realtime_compensator_holds_
+buffer_level_with_integral_1335` bench): a deficit drives its contribution NEGATIVE = stretch =
+raises the buffer. Both new terms are implemented as the NEGATION of the design's literal formula --
+`Kp*(buffered - target)` and `Kr*(buffered - target)` -- so a deficit yields a NEGATIVE contribution,
+matching the integral. Routh-Hurwitz confirms the design's literal P sign makes the closed loop GROW
+(unstable); the corrected sign damps. This is documented on the ticket (the follow-up-2
+anchors-confirmed comment) for the main's review; a future edit MUST keep the `(buffered - target)`
+argument order or the loop destabilizes.
+
+**Constants underdeliver the design's stated quantitative acceptance (flagged, not retuned).** The
+main design specified Kp=0.03, Kr=2, clamp +-1/+-100, threshold 10 -- used AS-IS -- but its stated
+targets are not achievable with them: (a) at Kp=0.03 the level loop's damping ratio is only ~0.034,
+so a 20 ms disturbance still overshoots ~90% (NOT the design's `<3 ms overshoot`; that needs Kp~0.6 +
+a wider P clamp, which then bang-bangs the +-1 clamp); (b) the restore is PROPORTIONAL so it decays
+with a ~500 s time constant (k*Kr = 2e-3/s), returning a 50 ms step to within +-5 ms in ~19-25 min,
+NOT the design's `+-5 ms in 12 min` (that needs the +-100 clamp to BIND for most of the return,
+i.e. Kr~20 so the burst stays near-constant 100 ppm for the design's own "50 ms -> 100 ppm -> ~8 min"
+reasoning). The re-base (the actual -83 ppm-swing fix) is unaffected and works fully; the P/restore
+are correctly-signed and HELP, just gentler than the design's aspirational numbers. Retuning Kp/Kr is
+a main-owned control-design decision.
+
+- **Bench** (`src/asrc_bench.rs`, four `*_1335` follow-up-2 tests, calibrated from a measured
+  standalone-rustc probe, deterministic): (a) 50 ms input-loss step + level -50 -> est held within
+  +-2 ppm (RED rate-only path swings >=40), buffer restored within +-5 ms + restore exits (~19-25 min
+  observed); (b) +50 ms wall-clock jump, level unchanged -> re-base, no restore, est +-2; (c) bounded
+  +-3 ms window noise over 2 h -> 0 steps, a 15 ms outlier DOES step; (d) 5 ms LEVEL disturbance
+  (linear regime, no rail) -> the P term decays the oscillation (2nd/1st-half peak ratio 0.89 vs 1.00
+  I-only vs 1.11 wrong-sign P) + integral off its +-3 rail. RED->GREEN proven by neutralizing the
+  compensate_core logic (all 4 fail; 26 pre-existing pass).
+- **C<->Rust parity is bit-identical** -- proven by a standalone `cc -Wall -Wextra -Werror` lift of
+  asrc-compensator.c running the SAME (a) recovery + (d) oscillation sims as a Rust probe: both
+  produce `(a) final=95.021353289 steps=1 last_step=-50.000000000 integral=-0.638579073` and
+  `(d) imin=-1.911140876 imax=2.123645773 p1=4.999848999 p2=4.463095233 ratio=0.892646005` (identical
+  to 9 decimals). Reuse that lift for any future change.
+- **Telemetry:** the `asrc:` line appends `steps=%u last_step_ms=%.1f restore=%d (#1335)` AFTER the
+  byte-identical `... integral=%.3fppm (#1335)` suffix, so every dev1 parser (asio-starve-health,
+  cg-chain-verify -- both extract by name with `.*`) is unaffected.
+- **Lock-step anchor:** `tests/genlock_preload.rs::vendored_source::asrc_step_tolerant_regression_and_p_term_1335`
+  pins the new C constants + re-base + restore + P fold + integral-freeze + the obs-source.c telemetry
+  byte-exact (squished). No new pwsh gate (the change rides the existing genlock build); the existing
+  `level=/target=/integral= (#1335)` pwsh substring is preserved intact.

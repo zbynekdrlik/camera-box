@@ -136,6 +136,41 @@ extern "C" {
  * Mirror of src/asrc_bench.rs LEVEL_INTEGRAL_MAX_PPM -- keep numerically identical. */
 #define ASRC_LEVEL_INTEGRAL_MAX_PPM 3.0
 
+/* camera-box #1335 follow-up 2: residual threshold, in ms, above which a newly-closed window is a
+ * STEP (a permanent input sample-loss/dup or a wall-clock jump) rather than a real rate point. Live
+ * 17.9. 18:52: an OBS StartStream stall lost ~50 ms of mbc input samples permanently (buffered_ms 108
+ * -> 51, starved_blocks=0); that 50 ms step entered the 600 s regression and biased the slope by ~=
+ * step/span = 50 ms / 600 s = 83 ppm (est +16 -> -83 -> -152 after a 2nd step). When the single-window
+ * residual (this window's own advance increment minus the locked slope's expected increment) exceeds
+ * this, the servo RE-BASEs (shifts cum_ymm_s onto the pre-step fit, keeps the lock+applied, does NOT
+ * insert the step point) instead of flushing. 10 ms sits above the 1 s-window residual noise floor
+ * (ASIO callback jitter ~1-2 ms) so ordinary noise never re-bases. Mirror of src/asrc_bench.rs
+ * STEP_RESIDUAL_MS -- keep numerically identical. */
+#define ASRC_STEP_RESIDUAL_MS 10.0
+
+/* camera-box #1335 follow-up 2: proportional gain of the FAST bounded level-RESTORE burst, in ppm per
+ * ms of level error. Entered only when a re-base's step is corroborated by the buffer level (a real
+ * sample loss/dup, not a wall-clock-only jump); adds clamp(Kr*(buffered - target), +/-100) to the
+ * correction target so a big deficit drives a strong stretch that decays as the buffer refills; exits
+ * at |buffered - target| < 5 ms. SIGN follows the proven #1335 integral (deficit => negative =>
+ * stretch => raises the buffer). Mirror of src/asrc_bench.rs LEVEL_RESTORE_K_PPM_PER_MS -- keep
+ * numerically identical. */
+#define ASRC_LEVEL_RESTORE_K_PPM_PER_MS 2.0
+
+/* camera-box #1335 follow-up 2: hard clamp on the fast level-RESTORE burst, in ppm (+/-). 100 ppm is
+ * large yet a 0.17-cent (inaudible) pitch nudge; bounds the restore far below the rate loop's own
+ * ASRC_MAX_PPM. Mirror of src/asrc_bench.rs LEVEL_RESTORE_MAX_PPM -- keep numerically identical. */
+#define ASRC_LEVEL_RESTORE_MAX_PPM 100.0
+
+/* camera-box #1335 follow-up 2: proportional gain of the level-LEVEL P term, in ppm per ms of level
+ * error, folded into the correction target every call (once locked) as clamp(Kp*(buffered - target),
+ * +/-1). It damps the I-only level loop's ~3.9 h clamp-to-clamp oscillation (observed 14:00-20:45,
+ * level +/-10 ms). SIGN matches the proven #1335 integral (deficit => negative => stretch). At Kp=0.03
+ * the damping is gentle (zeta ~0.034) -- it reduces the integral's clamp-railing and decays the
+ * oscillation, not a critically-damped term. Mirror of src/asrc_bench.rs LEVEL_KP_PPM_PER_MS -- keep
+ * numerically identical. */
+#define ASRC_LEVEL_KP_PPM_PER_MS 0.03
+
 /* Per-source servo state. One instance lives per obs_source_t (see
  * obs-internal.h's `struct asrc_compensator asrc` field) and is mutated only
  * from the audio-ingest call path (process_audio(), always invoked from the
@@ -216,6 +251,20 @@ struct asrc_compensator {
 	 * the one-shot setpoint capture. Cleared by a flush so a relock re-captures. Mirror of
 	 * src/asrc_bench.rs RealtimeAsrcCompensator::level_captured. */
 	bool level_captured;
+	/* camera-box #1335 follow-up 2: cumulative count of STEP re-base events (a closed window whose
+	 * single-window residual exceeded ASRC_STEP_RESIDUAL_MS, re-based instead of inserted) -- printed
+	 * as the asrc: line's steps= field. Running total, never reset. Mirror of src/asrc_bench.rs
+	 * RealtimeAsrcCompensator::step_count. */
+	uint32_t step_count;
+	/* camera-box #1335 follow-up 2: the residual (ms) of the most recent re-base -- telemetry only
+	 * (last_step_ms=). Sign preserved. Mirror of src/asrc_bench.rs
+	 * RealtimeAsrcCompensator::last_step_ms. */
+	double last_step_ms;
+	/* camera-box #1335 follow-up 2: whether the FAST bounded level-restore burst is currently active
+	 * -- entered on a level-corroborated re-base, exited at |buffered - target| < 5 ms. Cleared by a
+	 * flush. Printed as restore=0|1. Mirror of src/asrc_bench.rs
+	 * RealtimeAsrcCompensator::level_restore. */
+	bool level_restore;
 };
 
 /* Reset a servo to its just-constructed state: 0 ppm estimated/applied (assume
