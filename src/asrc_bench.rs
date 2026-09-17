@@ -652,15 +652,27 @@ impl RealtimeAsrcCompensator {
             // rate-only bench entry passes None and never runs this.
             if let Some(buf_ms) = buffered_ms {
                 self.level_last_ms = buf_ms;
-                if self.reg_locked && !self.level_captured {
-                    // setpoint = the buffer depth the mixer had settled at when the rate loop first
-                    // locked; re-captured after every flush/relock.
-                    self.level_target_ms = buf_ms;
-                    self.level_captured = true;
+                if self.reg_locked {
+                    if !self.level_captured {
+                        // setpoint = the buffer depth the mixer had settled at when the rate loop
+                        // first locked; re-captured after every flush/relock.
+                        self.level_target_ms = buf_ms;
+                        self.level_captured = true;
+                    }
+                    // Anti-windup: integrate only while the composite rate target is not clamped at
+                    // the hard ±MAX_PPM bound. err_ms = target - buffered; a DEFICIT (buffer below
+                    // setpoint) drives the integral MORE NEGATIVE => more-negative applied => STRETCH
+                    // => raises the buffer (sign confirmed by the issue-1335 live -5 ppm outer-bias
+                    // test, 17.9.). window_master_s is this closed window's master duration (~1 s).
+                    let rate_target = self.estimated_ppm + self.outer_bias_ppm + self.level_integral_ppm;
+                    let saturated = rate_target <= -MAX_PPM || rate_target >= MAX_PPM;
+                    if !saturated {
+                        let err_ms = self.level_target_ms - buf_ms;
+                        self.level_integral_ppm = (self.level_integral_ppm
+                            - LEVEL_KI_PPM_PER_MS_S * err_ms * window_master_s)
+                            .clamp(-LEVEL_INTEGRAL_MAX_PPM, LEVEL_INTEGRAL_MAX_PPM);
+                    }
                 }
-                // issue #1335 [red]: the level integral is NOT implemented yet -- level_integral_ppm
-                // stays 0, so the buffer drifts at the residual rate exactly as the pre-#1335 servo
-                // does. This is what the GREEN commit adds.
             }
         }
 
