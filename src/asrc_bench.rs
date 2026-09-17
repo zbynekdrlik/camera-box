@@ -418,10 +418,10 @@ impl RealtimeAsrcCompensator {
             cum_master_s: 0.0,
             cum_ymm_s: 0.0,
             reg_locked: false,
-            level_target_ms: 0.0,   // issue #1335
+            level_target_ms: 0.0,    // issue #1335
             level_integral_ppm: 0.0, // issue #1335
-            level_last_ms: 0.0,     // issue #1335
-            level_captured: false,  // issue #1335
+            level_last_ms: 0.0,      // issue #1335
+            level_captured: false,   // issue #1335
         }
     }
 
@@ -535,14 +535,24 @@ impl RealtimeAsrcCompensator {
     /// `buffered_ms` (obs-source.c reads it from `audio_input_buf[0].size` via the shared
     /// `obs_source_input_buf_ms()` helper). Exact mirror of the C
     /// `asrc_compensator_compensate(c, raw, master, buffered_ms, &applied)`.
-    pub fn compensate_with_level(&mut self, raw_advance_s: f64, master_block_s: f64, buffered_ms: f64) -> f64 {
+    pub fn compensate_with_level(
+        &mut self,
+        raw_advance_s: f64,
+        master_block_s: f64,
+        buffered_ms: f64,
+    ) -> f64 {
         self.compensate_core(raw_advance_s, master_block_s, Some(buffered_ms))
     }
 
     /// Shared servo body. `buffered_ms == Some(_)` runs the issue #1335 level integral (the C path);
     /// `None` is the rate-only bench entry. Keep numerically identical to the C
     /// `asrc_compensator_compensate()`.
-    fn compensate_core(&mut self, raw_advance_s: f64, master_block_s: f64, buffered_ms: Option<f64>) -> f64 {
+    fn compensate_core(
+        &mut self,
+        raw_advance_s: f64,
+        master_block_s: f64,
+        buffered_ms: Option<f64>,
+    ) -> f64 {
         if master_block_s <= 0.0 {
             // A non-positive block duration carries no timing information (e.g. a duplicate or
             // backward wall-clock read — an NTP step) and, because the regression accumulates a
@@ -664,7 +674,8 @@ impl RealtimeAsrcCompensator {
                     // setpoint) drives the integral MORE NEGATIVE => more-negative applied => STRETCH
                     // => raises the buffer (sign confirmed by the issue-1335 live -5 ppm outer-bias
                     // test, 17.9.). window_master_s is this closed window's master duration (~1 s).
-                    let rate_target = self.estimated_ppm + self.outer_bias_ppm + self.level_integral_ppm;
+                    let rate_target =
+                        self.estimated_ppm + self.outer_bias_ppm + self.level_integral_ppm;
                     let saturated = rate_target <= -MAX_PPM || rate_target >= MAX_PPM;
                     if !saturated {
                         let err_ms = self.level_target_ms - buf_ms;
@@ -686,7 +697,8 @@ impl RealtimeAsrcCompensator {
         } else {
             // issue #1335: the buffer-LEVEL integral is folded in alongside the outer bias, then the
             // SUM is clamped to the hard ppm bound (inert/0.0 on the rate-only bench entry).
-            (self.estimated_ppm + self.outer_bias_ppm + self.level_integral_ppm).clamp(-MAX_PPM, MAX_PPM)
+            (self.estimated_ppm + self.outer_bias_ppm + self.level_integral_ppm)
+                .clamp(-MAX_PPM, MAX_PPM)
         };
 
         // Slew-limit the APPLIED correction toward the target — caps how fast the resample-ratio

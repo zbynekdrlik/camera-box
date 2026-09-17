@@ -119,6 +119,23 @@ extern "C" {
  * numerically identical. */
 #define ASRC_WINDOW_S 1.0
 
+/* camera-box #1335: integral gain of the buffer-LEVEL holding term, in ppm per (ms of level error x
+ * second of closed-window master time). The #1084 regression is a pure RATE loop -- it never reads
+ * the mix-buffer LEVEL, so any residual it cannot remove (live: the 600 s window lagging a +/-1 ppm
+ * wandering true rate => ~0.8 ppm mean error) INTEGRATES into the buffer and drifts it ~3 ms/h until
+ * an underrun. This slow integral, driven by buffered_ms, nulls exactly that residual. 0.0002 => a
+ * 30 ms level error moves the correction 0.36 ppm/min; the +/-3 ms level noise floor moves it
+ * +/-0.04 ppm/min (below the #1016 quantization resolution) so it never fights the fast rate loop.
+ * Mirror of src/asrc_bench.rs LEVEL_KI_PPM_PER_MS_S -- keep numerically identical. */
+#define ASRC_LEVEL_KI_PPM_PER_MS_S 0.0002
+
+/* camera-box #1335: hard clamp on the buffer-LEVEL integral, in ppm (+/-). Bounds the level term far
+ * below the rate loop's own ASRC_MAX_PPM so a stuck/misreported buffer level can never rail the
+ * servo; the live residual it corrects is ~0.8 ppm, well inside +/-3. Anti-windup pairs with this
+ * clamp: the integral is not advanced while the composite rate target is saturated at +/-ASRC_MAX_PPM.
+ * Mirror of src/asrc_bench.rs LEVEL_INTEGRAL_MAX_PPM -- keep numerically identical. */
+#define ASRC_LEVEL_INTEGRAL_MAX_PPM 3.0
+
 /* Per-source servo state. One instance lives per obs_source_t (see
  * obs-internal.h's `struct asrc_compensator asrc` field) and is mutated only
  * from the audio-ingest call path (process_audio(), always invoked from the
@@ -181,6 +198,24 @@ struct asrc_compensator {
 	/* camera-box #1084: whether the buffer span has reached ASRC_REGRESSION_LOCK_SPAN_S and the
 	 * servo may apply compensation (replaces the pre-#1084 elapsed-lock gate). Cleared by a flush. */
 	bool reg_locked;
+	/* camera-box #1335: the buffer-LEVEL setpoint, in ms -- captured the FIRST time the rate
+	 * regression locks (the depth the mixer had settled at), re-captured after every flush/relock
+	 * (via level_captured). The level integral drives buffered_ms back toward this. Mirror of
+	 * src/asrc_bench.rs RealtimeAsrcCompensator::level_target_ms. */
+	double level_target_ms;
+	/* camera-box #1335: the integral of the level error, in ppm, folded ADDITIVELY into the
+	 * correction target INSIDE the servo loop (alongside estimated_ppm + outer_bias_ppm), clamped to
+	 * +/-ASRC_LEVEL_INTEGRAL_MAX_PPM. Reset to 0 on a flush/relock. Mirror of src/asrc_bench.rs
+	 * RealtimeAsrcCompensator::level_integral_ppm. */
+	double level_integral_ppm;
+	/* camera-box #1335: the most recent buffered_ms observed at an accepted window close -- telemetry
+	 * only (obs-source.c prints it as the asrc: line's level= field). Mirror of src/asrc_bench.rs
+	 * RealtimeAsrcCompensator::level_last_ms. */
+	double level_last_ms;
+	/* camera-box #1335: whether level_target_ms has been captured since the last (re)lock -- gates
+	 * the one-shot setpoint capture. Cleared by a flush so a relock re-captures. Mirror of
+	 * src/asrc_bench.rs RealtimeAsrcCompensator::level_captured. */
+	bool level_captured;
 };
 
 /* Reset a servo to its just-constructed state: 0 ppm estimated/applied (assume
@@ -210,11 +245,15 @@ EXPORT void asrc_compensator_init(struct asrc_compensator *c);
  * rejection OR a non-positive master_block_s FLUSHES that buffer (a level shift
  * would corrupt the slope for a full span). The flush drops the lock, so
  * applied_ppm is held on the flushing call, then slews back to 0 over the
- * ~ASRC_REGRESSION_LOCK_SPAN_S re-lock window before re-converging. Mirror of
- * RealtimeAsrcCompensator::compensate() in src/asrc_bench.rs -- keep the two
- * numerically identical. */
+ * ~ASRC_REGRESSION_LOCK_SPAN_S re-lock window before re-converging. camera-box
+ * #1335: `buffered_ms` is the source's current mix-buffer depth (obs-source.c
+ * reads it from audio_input_buf[0].size via obs_source_input_buf_ms()); a slow
+ * LEVEL integral captured at first lock folds into the correction target so the
+ * buffer holds its setpoint instead of drifting on a residual the pure RATE loop
+ * cannot remove. Mirror of RealtimeAsrcCompensator::compensate_with_level() in
+ * src/asrc_bench.rs -- keep the two numerically identical. */
 EXPORT double asrc_compensator_compensate(struct asrc_compensator *c, double raw_advance_s, double master_block_s,
-					   double *applied_ppm_out);
+					   double buffered_ms, double *applied_ppm_out);
 
 /* Whether ASRC_LOG_INTERVAL_S has elapsed since the last telemetry line, and
  * if so, reset the log-interval accumulator (the caller is expected to blog()

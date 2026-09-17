@@ -53,6 +53,16 @@
 #define NUM_ENCODE_TEXTURES 10
 #define NUM_ENCODE_TEXTURE_FRAMES_TO_WAIT 1
 
+/* camera-box #1335: buffered depth of a source's audio_input_buf (channel 0), in ms, from its byte
+ * size and the mixer OUTPUT sample rate. ONE definition shared by the #800 audio telemetry
+ * (obs-audio.c) and the #1335 ASRC level integral (obs-source.c) so the two can never drift apart. */
+static inline double obs_source_input_buf_ms(size_t input_buf_bytes, uint32_t sample_rate)
+{
+	if (sample_rate == 0)
+		return 0.0;
+	return (double)(input_buf_bytes / sizeof(float)) * 1000.0 / (double)sample_rate;
+}
+
 static inline int64_t packet_dts_usec(struct encoder_packet *packet)
 {
 	return packet->dts * MICROSECOND_DEN / packet->timebase_den;

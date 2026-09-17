@@ -318,3 +318,50 @@ via `env!("CARGO_MANIFEST_DIR")` or `use camera_box::…`, e.g. `genlock_preload
 zero cargo. The precondition is a module with no `use crate::`/`use super::` CODE deps (intra-doc
 `[crate::…]` links in comments are fine — rustc ignores doc content); check with
 `grep -nE '^use (crate|super)::' src/<module>.rs` before trusting the standalone compile.
+
+## #1335's buffer-LEVEL holding integral — the RATE loop holds tempo, a slow I-term holds the LEVEL
+
+The #1084 regression is a pure RATE servo: it estimates the source-vs-mixer ppm and slews `applied`
+to it, but it NEVER reads the mix-buffer LEVEL. Any residual it cannot remove (live `mbc`: the 600 s
+window lagging a ±1 ppm wandering true rate ⇒ a ~0.8 ppm MEAN error) integrates into `buffered_ms`
+and drifts it monotonically (~3 ms/h, 105→68 over 12.5 h) toward an eventual underrun/resync jump.
+#1335 adds a slow LEVEL integral INSIDE the compensator that nulls exactly that residual.
+
+- **State + constants** (Rust `src/asrc_bench.rs` ↔ C `asrc-compensator.{h,c}`, numerically
+  identical): `LEVEL_KI_PPM_PER_MS_S=0.0002`, `LEVEL_INTEGRAL_MAX_PPM=3.0`; fields
+  `level_target_ms` / `level_integral_ppm` / `level_last_ms` / `level_captured`. Update, once per
+  closed ACCEPTED window: capture `level_target_ms = buffered_ms` at first lock (re-captured after
+  every flush/relock — the flush resets `level_integral_ppm=0` + `level_captured=false`), then
+  `level_integral_ppm = clamp(level_integral_ppm − Ki·(target−buffered)·window_master_s, ±3)`.
+  Anti-windup: skip the update while the composite rate target saturates at ±MAX_PPM or the servo is
+  unlocked. Folded into `target_ppm = clamp(estimated + outer_bias + level_integral, ±MAX_PPM)`.
+- **SIGN** (the design's live 17.9. −5 ppm outer-bias test): a DEFICIT (buffer below setpoint) drives
+  the integral MORE NEGATIVE ⇒ more-negative `applied` ⇒ (per #1325) a POSITIVE swresample
+  `sample_delta` = STRETCH ⇒ the buffer RISES back to setpoint. `err_ms = target − buffered`.
+- **It is an I-ONLY loop on an integrator plant (the buffer), so it is MARGINALLY stable — bounded,
+  not critically damped.** Closed-form: `d²b/dt² = −(1e-3·Ki)·b` ⇒ an undamped oscillation, period
+  `2π/√(1e-3·Ki) ≈ 3.9 h`, transient amplitude `≈ 2.24·residual_ppm` ms for the lock-time step
+  (~1.8 ms for the live 0.8 ppm). That is the design's stated intent ("pomalá slučka … drží ±5 ms") —
+  it prevents the monotonic drain, it does not critically damp. The bench test asserts the settled
+  MEAN returns to setpoint (±2 ms) + no monotonic trend + PEAK inside ±5 ms; a real re-buffer
+  discontinuity (a flush) resets it, which is the production safety net the linear model omits.
+- **Rust trait split (bench-only asymmetry, no C analogue):** the shared `AsrcCompensator::compensate
+  (raw, master)` trait stays RATE-ONLY (`compensate_core(..., None)`) so `simulate_offset_trace_ms` +
+  every pre-#1335 test are unchanged; the level integral lives in
+  `RealtimeAsrcCompensator::compensate_with_level(raw, master, buffered_ms)` (`compensate_core(...,
+  Some(buffered_ms))`). The C `asrc_compensator_compensate(c, raw, master, buffered_ms, &applied)`
+  ALWAYS takes buffered_ms — it is the exact mirror of `compensate_with_level`, never the `None` path.
+- **`buffered_ms` at the call site:** obs-source.c `asrc_process_audio` reads it from
+  `source->audio_input_buf[0].size` against the mixer OUTPUT rate via the shared
+  `obs_source_input_buf_ms()` helper in `obs-internal.h` — the SAME bytes→ms computation the #800
+  audio telemetry (obs-audio.c) uses (extracted to ONE helper so the two can't drift). Telemetry: the
+  `asrc:` line gains `level=<ms> target=<ms> integral=<ppm> (#1335)`, appended AFTER the byte-identical
+  `starved_blocks=%u (#803/#806/#960)` suffix so every dev1 `asrc:`-line parser (asio-starve-health,
+  cg-chain-verify — both extract by name with `.*`) is unaffected.
+- **Lock-step anchors** for a vendored-C revert: `tests/genlock_preload.rs::vendored_source::
+  asrc_holds_buffer_level_with_integral_1335` + byte-identical pwsh blocks in BOTH
+  `windows-genlock.yml` and `windows-genlock-fast.yml` (constants + fold + update + telemetry).
+- **C↔Rust parity is bit-identical** — proven by a standalone `cc` lift of asrc-compensator.c with a
+  main running the SAME 12 h buffer sim as the Rust probe: both produce setpoint 99.652, mean 100.000,
+  peak 1.789, integral −0.0773, last 98.885 (identical to the last decimal). Reuse that lift for any
+  future change to this pair (per `vendored-libobs-change-safety.md`).

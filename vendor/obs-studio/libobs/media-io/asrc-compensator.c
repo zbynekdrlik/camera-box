@@ -37,6 +37,10 @@ static void asrc_regression_flush(struct asrc_compensator *c)
 	c->cum_master_s = 0.0;
 	c->cum_ymm_s = 0.0;
 	c->reg_locked = false;
+	/* camera-box #1335: a level shift invalidates the captured setpoint AND the integral it built
+	 * up; drop both so a relock re-captures the setpoint and re-integrates from 0 (default-safe). */
+	c->level_integral_ppm = 0.0;
+	c->level_captured = false;
 }
 
 void asrc_compensator_init(struct asrc_compensator *c)
@@ -50,11 +54,13 @@ void asrc_compensator_init(struct asrc_compensator *c)
 	c->window_raw_s = 0.0; /* camera-box #962 */
 	c->window_master_s = 0.0; /* camera-box #962 */
 	c->window_block_count = 0; /* camera-box #962 */
-	asrc_regression_flush(c); /* camera-box #1084: empty buffer, 0 cumulatives, unlocked */
+	c->level_target_ms = 0.0; /* camera-box #1335 */
+	c->level_last_ms = 0.0; /* camera-box #1335 */
+	asrc_regression_flush(c); /* camera-box #1084/#1335: empty buffer, 0 cumulatives, 0 integral, unlocked */
 }
 
 double asrc_compensator_compensate(struct asrc_compensator *c, double raw_advance_s, double master_block_s,
-				    double *applied_ppm_out)
+				    double buffered_ms, double *applied_ppm_out)
 {
 	if (master_block_s <= 0.0) {
 		/* A non-positive block duration carries no timing information (e.g. a duplicate or
@@ -171,6 +177,34 @@ double asrc_compensator_compensate(struct asrc_compensator *c, double raw_advanc
 				if (c->reg_x[newest] - c->reg_x[c->reg_head] >= ASRC_REGRESSION_LOCK_SPAN_S)
 					c->reg_locked = true;
 			}
+
+			/* camera-box #1335: buffer-LEVEL holding integral, updated ONCE per closed ACCEPTED
+			 * window (a rejected window took the branch above; an unlocked servo skips the update).
+			 * buffered_ms is the source's current mix-buffer depth (obs-source.c reads it from
+			 * audio_input_buf[0].size). Mirror of src/asrc_bench.rs compensate_with_level. */
+			c->level_last_ms = buffered_ms;
+			if (c->reg_locked) {
+				if (!c->level_captured) {
+					/* setpoint = the buffer depth the mixer had settled at when the rate loop
+					 * first locked; re-captured after every flush/relock. */
+					c->level_target_ms = buffered_ms;
+					c->level_captured = true;
+				}
+				/* Anti-windup: integrate only while the composite rate target is not clamped at
+				 * the hard +/-ASRC_MAX_PPM bound. err_ms = target - buffered; a DEFICIT (buffer
+				 * below setpoint) drives the integral MORE NEGATIVE => more-negative applied =>
+				 * STRETCH => raises the buffer (sign confirmed by the #1335 live -5 ppm outer-bias
+				 * test, 17.9.). window_master_s is this closed window's master duration (~1 s). */
+				const double rate_target = c->estimated_ppm + c->outer_bias_ppm + c->level_integral_ppm;
+				const bool saturated = rate_target <= -ASRC_MAX_PPM || rate_target >= ASRC_MAX_PPM;
+				if (!saturated) {
+					const double err_ms = c->level_target_ms - buffered_ms;
+					c->level_integral_ppm =
+						asrc_clamp(c->level_integral_ppm -
+								   ASRC_LEVEL_KI_PPM_PER_MS_S * err_ms * window_master_s,
+							   -ASRC_LEVEL_INTEGRAL_MAX_PPM, ASRC_LEVEL_INTEGRAL_MAX_PPM);
+				}
+			}
 		}
 	}
 
@@ -187,10 +221,12 @@ double asrc_compensator_compensate(struct asrc_compensator *c, double raw_advanc
 		 * own). Once locked, add the outer-loop bias to the slope estimate and clamp the SUM to the
 		 * hard ppm bound before ever using it as a target. Mirror of src/asrc_bench.rs
 		 * RealtimeAsrcCompensator::compensate. */
+		/* camera-box #1335: the buffer-LEVEL integral is folded in alongside the outer bias, then
+		 * the SUM is clamped to the hard ppm bound (level_integral_ppm is 0 until the first lock). */
 		const double target_ppm = (!c->reg_locked)
 						   ? 0.0
-						   : asrc_clamp(c->estimated_ppm + c->outer_bias_ppm, -ASRC_MAX_PPM,
-								ASRC_MAX_PPM);
+						   : asrc_clamp(c->estimated_ppm + c->outer_bias_ppm + c->level_integral_ppm,
+								-ASRC_MAX_PPM, ASRC_MAX_PPM);
 
 		/* Slew-limit the APPLIED correction toward the target -- caps how fast the
 		 * resample-ratio nudge may change, independent of how fast the estimate itself moves. */
