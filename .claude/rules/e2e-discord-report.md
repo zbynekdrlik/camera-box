@@ -52,13 +52,18 @@ lists the report-only ones for the `ℹ️` line.
   promote cycle; see `verdict-gate-seam-calibration.md` §15 for the calibration table), and — since
   **#905** — `frozen_leg` (`frozen` non-empty, NOT `stale_replay`) + `self_heal_reset` (`attributed`
   OR `unattributed_events`), both guarded by their node's `gates_overall_pass` (item 15 in
-  `_blocking_failures`; restored from the #914 report-only decoupling).
+  `_blocking_failures`; restored from the #914 report-only decoupling), and — since **#1086** —
+  `all_cambox_continuity.cold_cut_onset` (`any_genuine_cold_cut_miss` + `gates_overall_pass` — a
+  genuine cold-cut miss ruled out of the issue-793 segfault window; item 16 in `_blocking_failures`;
+  see `.claude/rules/cold-cut-gate.md` for the calibration table).
 - **REPORT-ONLY** (`gates_overall_pass=false`, NEVER a `❌`): the imag PER-FRAME CONTENT terms only
   since #1142 (`all_cambox_continuity.imag` continuity + `full_chain.loss.imag.imag_content_pass` —
   the observer-effect-confounded burn/beat; the imag PRESENCE terms are now BLOCKING above),
-  `cold_cut_onset`, lipsync, and `frozen_leg.stale_replay` (which NEVER gates — the `frozen`/
+  lipsync, and `frozen_leg.stale_replay` (which NEVER gates — the `frozen`/
   self-heal terms flipped BLOCKING by **#905** item 2, see LIVE above; only the milder stale-replay
-  signal stays report-only). The optical undecodable floor
+  signal stays report-only). `cold_cut_onset` is now BLOCKING (**#1086**, see LIVE above); a pre-flip
+  verdict (`gates_overall_pass=false`) still classifies report-only, guarded `is not True` in
+  `_report_only_tripped` — the delivery-spread pattern, no double-count. The optical undecodable floor
   (`run_wide_undecodable_within_floor` / `undecodable_floor_gates_overall_pass`) is now BLOCKING
   too — RE-GATED by **#905 item 3** at floor 6, recalibrated to floor 15 by **#915** (the classifier reads the booleans, not the number; guarded `is not True` in `_report_only_tripped`, so
   a pre-flip verdict still classifies report-only without double-counting). **NOTE (#1142
