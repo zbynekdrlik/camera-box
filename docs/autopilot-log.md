@@ -12785,3 +12785,8 @@ no version bump (worktree lane; supervisor cherry-picks).
 
 - E2E 35178277528 GREEN: 10/10 windows 0/0 on the <=1/<=1 band, A/V on 7 cams, cold-cut gate LIVE green (its first normal run after the .636 flip). Fleet deploy follows.
 - Backlog after this: the umbrella 1317 waits for the notebook on the wire; 808/1311 on the owner; 899/1229/1309 after the M.2 swap; 1302 external (30.9.); 1032 = daytime paired-run campaign (SyncNet is on the stream box).
+
+## 17.9.2026 10:30 — issue 808 ROZHODNUTÉ: napájanie ručného shading boxu je vec ownera (docs only)
+
+- Owner: „napajanie si normalne ja riesim nechapem preco ty to riesis" → the 16.9. A/B/C power question is void; power is never a design / bench / question item again. Ticket comment 5711321335; labels −needs-answer −needs-design +ops-wait (re-entry event = the Orange Pi Zero 2W delivery → the hardware bench: gphoto2 detect, WiFi join, live --check, --install).
+- bkshading rule: the power paragraph + bench item 1 rewritten to the ruling; local memory updated. No code change, no Cargo bump (dev .638 > main .637).
