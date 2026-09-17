@@ -420,3 +420,97 @@ two under-cadence GRABBERS are the copy/gap sources (emit-fill repeats → a rec
 lands in strih's 30 fps decimation → the 883 net-span gap), not FIFO/optics. Re-entry for the
 strict restore: fix the cam1/cam2 capture cadence first, then ≥ 5 clean runs, then the seam flips
 (with the consumer sweep above).
+
+## Issue 1242 (task 1, 17.9.2026): DATA-FIRST attribution — the residual churn is DOWNSTREAM, per-box cadence is a COVARIATE
+
+The 16.9. supervisor note above (from run 443513281's per-box `Streaming:` means) read the residual
+as GRABBER-owned: cam1/cam2 capture ~0.1–0.2 fps under the 60 Hz emit cadence, so the emit-fill
+repeat → a recording copy. Task 1 mined that hypothesis to the ground with a new pure tool
+(`scripts/residual_churn_attribution.py` + `tests/python/test_residual_churn_attribution_1242.py`,
+Tier-0). It aligns EVERY residual event's `wall_clock_epoch_s` to that cambox's OWN burn log and
+classifies the SOURCE side (5-s `Streaming:` sent−captured deficit; 1-s `#707 emit-1s/cap-1s`
+deficit; the `(#889) dupe-preferring decimation` line's `late-dupe copies emitted` and `starvation
+last-frame repeats`). Verdict, from 5 post-cure splitter-fed runs (977889848, 2019585820, 443513281,
+605445038, 1249662438; genlock 7e8efff6a / ca46fc166), 9 residual events:
+
+- **All 9 events → DOWNSTREAM (0 SOURCE).** No event carries an anomalous source signal: the cambox
+  emitted **ZERO `late-dupe copies` in every window of every run** (it never itself put a duplicate
+  into NDI), no corruption ROSE above each box's steady floor at an event, and no 5-s deficit ever
+  reached the ≥3 burst floor (the steady background is 1–2). The copy signature `tick_before ==
+  tick_after` + a same-box `883` net-span gap within ~10 s = the genlock-FIFO hold-then-catchup /
+  60→30 decimation-phase limit cycle (painter CLEAN, cited).
+- **The counterfactual kills the grabber-cadence story.** cam1 & cam2 carry a LARGE, steady
+  CAPTURE DEFICIT — `total_emitfill` = the run-summed `sent − captured` deficit, ~90–110 emit-fill
+  frames PER RUN (the finer `starvation last-frame repeat` on-box counter is even larger, ~100–245)
+  — in EVERY run, INCLUDING the two fully-clean 0/0 runs: **609 emit-fill (capture-deficit) frames
+  across the clean runs produced 0 residuals.** Copy survival ratio ≈ **0.0026** (4 recording copies
+  per 1562 source emit-fills). A grabber-owned defect would show residuals proportional to the
+  emit-fill rate (dozens per run on cam2); we see 0–2.
+- **The survivor does NOT track the worst grabber.** In 605445038 the singletons landed on CAM7
+  (mean_cap 300.5, only 42 emit-fills) AND CAM1 (a worst-tier grabber, 94 emit-fills) while CAM2
+  (also 94 emit-fills, tied-worst) read 0/0 — i.e. of the two tied-worst grabbers only one got a
+  residual and a healthy-cadence box got the other; residuals landed on a non-worst-emit-fill
+  grabber in 2/3 runs. cam1/cam2's under-cadence is REAL and persistent
+  (mean_cap 299.8–300.1 vs cam3–7 300.4–300.6) but it only supplies the raw material — WHICH box and
+  WHEN a survivor lands is decided downstream (decimation phase + FIFO), stochastically.
+
+**Consequence for the strict-zero restore trail:** the residual is an IRREDUCIBLE ≤1/≤1 steady-state
+noise floor of the 60→30 decimation + genlock FIFO at this splitter topology, NOT a fixable source
+fault (`calibrate-artifact-vs-fix-robustness`). A grabber self-heal threshold change (issue 1193 /
+1200 / #656 capture-rate class) would NOT remove it (the clean runs already carry the same grabber
+deficit with 0 residuals). The honest recommendation is to KEEP the #1169 `<=1/<=1` singleton
+allowance (or the tol-2 seam) as the calibrated floor and gate on `>=2` — do NOT restore absolute
+strict-zero, because there is no root cause to fix and it will RED any run where one FIFO hold
+survives (exactly what killed run 443513281). Only if the owner insists on strict-zero would the
+sole lever be reducing the cam1/cam2 capture-rate deficit at the driver/USB level — and even a
+perfect cadence would not guarantee zero (a genlock FIFO hold can still create a `<=1` copy).
+
+## Issue 1242 (task 2, 17.9.2026): the walk-down LANDED — the `<=1/<=1` singleton band GOVERNS, CAM2 override dropped
+
+Task 1's attribution (churn is DOWNSTREAM, irreducible, per-box cadence a covariate) was accepted
+by the supervisor ROZHODNUTÉ (comment 5706131227): absolute strict-zero is DROPPED (unattainable on
+an irreducible floor; it RED-ed run 443513281), and task 2 is REDEFINED as the walk-down to the
+owner's 22.8. issue-1169 `<=1/<=1` singleton band. The three code changes (in `src/window_gate.rs`):
+
+- **`copies_gaps_tolerance_gates_overall_pass()` `true` -> `false`** (seam 2 DISARMED). `decide`'s
+  `if`/`else if` fold then falls through to the still-armed seam 4 singleton band.
+- **`segment_singleton_allowance_gates_overall_pass()` stays `true`** and now GOVERNS the fold: a
+  window with `copies <= 1 && gaps <= 1` is absorbed into `overall_pass_term` with the loud
+  `segment_singleton_note` / `windows_singleton_allowance_consumed`; `>= 2` of either REDs.
+- **`WINDOW_COPIES_GAPS_TOLERANCE_PER_CAMBOX` `&[("CAM2", 25)]` -> `&[]`** (override DROPPED). cam2
+  became splitter-fed ~16.9 13:00, so it is a normal splitter leg; the lookup machinery stays wired.
+
+`WINDOW_COPIES_GAPS_TOLERANCE` STAYS 2 as the REPORT-ONLY observability lens (shapes `relaxed_pass`
+only), NOT the fold governor — a `relaxed_pass==true`/`overall_pass_term==false` window (copies/gaps
+in `[2, 2]`) is the disarmed rescue visibly doing nothing (the #1132 masking guard). The uniformity
+floor `UNIFORM_FRACTION_MIN` is UNTOUCHED (stays 0.95).
+
+**Band-safety data (the 5 post-cure splitter-fed runs, `all_cambox_continuity.segments[]`, mined
+live from `/tmp/recording-e2e-<ID>/verdict-<ID>.json`):**
+
+| run | overall (as generated) | max copies | max gaps | nonzero windows | w_fail_strict | w_over_tol |
+|---|---|---|---|---|---|---|
+| 977889848 | true | 0 | 0 | (none) | 0 | 0 |
+| 2019585820 | true | 0 | 0 | (none) | 0 | 0 |
+| 443513281 | false* | 1 | 1 | CAM2 1/1, CAM2 0/1 | 2 | 0 |
+| 605445038 | true | 1 | 1 | CAM7 1/1, CAM1 1/1 | 2 | 0 |
+| 1249662438 | true | 1 | 1 | CAM1 1/0, CAM2 0/1 | 2 | 0 |
+
+`*` run 443513281's stored `overall_pass=false` was generated under the (since-reverted) absolute
+strict-zero fold — the run that RED-ed on one surviving `<=1/<=1` FIFO hold. Under the singleton band
+it is ABSORBED (all its windows are 1/1, 0/1). Across all five runs the worst window is copies=1 /
+gaps=1 — inside the band; a 2 reds. CAM2's own windows are all within the default (1/1, 0/1), so the
+override is safe to drop.
+
+**This is the SEAM-FLIP consumer sweep in action** — the probe-gated `overall_pass`-fold tests in
+`src/probe/recording_segments.rs` + `src/bin/recording-verdict.rs` (the single-copy/copy-stale/
+non-adjacent-freeze/benign-reorder/mixed-run absorption tests, the boundary differential, the
+per-cambox override end-to-end test) were re-pinned from the tol-2 absorbing semantics to the
+`<=1/<=1` singleton semantics (singleton note/count now FIRE on a `<=1/<=1` window; 2 copies now RED;
+CAM2 is a normal box). The `tests/verdict_gate_strict_fold_1242.rs` pin file was re-pinned to the new
+state. Verified locally via a std-only `rustc --test` replica of `decide_with_tolerance` at
+armed-vs-disarmed seams + `cargo fmt --all --check` + the doc-list lint grep; the probe consumers
+type-check at CI. **Guard rail (the one-line report-only revert):** if a healthy-chain run ever reds
+on ONLY these seams, re-arm `copies_gaps_tolerance_gates_overall_pass() -> true` (back to the tol-2
+fold) — a data-thin false-red safety valve, NEVER a silent widen. Data reproduced by
+`scripts/window_gate_walkdown.py 02b53180b 7e8efff6a`. Issue 1242's walk-back trail closes with this.

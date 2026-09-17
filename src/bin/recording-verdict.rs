@@ -10472,18 +10472,17 @@ mod tests {
         assert_eq!(
             seg["overall_pass"],
             serde_json::json!(true),
-            "1220: a single copy is now ABSORBED into overall_pass via the RE-ARMED issue-1220 \
-             tolerance channel (owner mandate, 2026-08-29) -- the issue-1169 <=1/<=1 \
-             singleton band is dormant (superseded by precedence), not what did the absorbing: {seg}"
+            "1242: a single copy is ABSORBED into overall_pass via the `<=1/<=1` singleton band, \
+             which GOVERNS the fold since seam 2 was disarmed (2026-09-17): {seg}"
         );
         assert_eq!(
             seg["windows_singleton_allowance_consumed"],
-            serde_json::json!(0),
-            "1220: the singleton mechanism never fires while the tolerance channel is armed: {seg}"
+            serde_json::json!(1),
+            "1242: the singleton mechanism FIRES now the tolerance seam is disarmed: {seg}"
         );
         assert!(
-            seg["segments"][0]["singleton_allowance_note"].is_null(),
-            "1220: no singleton note -- the tolerance channel absorbed this, not the singleton: {seg}"
+            !seg["segments"][0]["singleton_allowance_note"].is_null(),
+            "1242: the loud singleton note fires on the absorbed copy: {seg}"
         );
         assert_eq!(
             seg["windows_failed_report_only"],
@@ -10505,25 +10504,24 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Issue 889 re-gate (2026-08-05 ROZHODNUTÉ, recalibrated 1 → 2 → 3 on 2026-08-06, ticket 889
-    /// comments 5198131539 / 5200533407) differential proof: `overall_pass` must swing from PASS
-    /// to FAIL exactly at the tolerance boundary, and must NOT swing at all when copies/gaps stay
-    /// AT the tolerance (even combined). Uses the SAME differential-fixture technique the
+    /// Issue 1242 (2026-09-17) differential proof of the `<=1/<=1` SINGLETON-band fold that governs
+    /// `all_cambox_continuity.overall_pass` since seam 2 was disarmed: `overall_pass` must NOT swing
+    /// when copies/gaps stay AT the singleton band (1/1, even combined), and MUST swing to FAIL when
+    /// either term goes over it (2). Uses the SAME differential-fixture technique the
     /// `frozen_leg_and_self_heal_reset_restored_to_blocking_905` fixture uses: build
     /// otherwise-IDENTICAL fixtures varying only the defect under test, and diff `overall_pass`
-    /// against a clean baseline, rather than asserting an absolute value (many other unrelated
-    /// gates also fold into `overall_pass`). Renamed from
-    /// `..._singleton_tolerance_boundary_...` — "singleton" (implying exactly one) stopped being
-    /// an accurate description once the tolerance moved past 1; the fixtures below build AT the
-    /// tolerance and tolerance+1 through the const instead of hardcoded literals, so this test
-    /// tracks whatever the tolerance is calibrated to across every recalibration.
+    /// against a clean baseline, rather than asserting an absolute value (many other unrelated gates
+    /// also fold into `overall_pass`). Renamed from
+    /// `copies_gaps_tolerance_boundary_gates_overall_pass_889_regate` — the governing boundary is now
+    /// the `<=1/<=1` singleton band, NOT the `<=2` tolerance lens. The fixtures build AT the band and
+    /// band+1 through the `SEGMENT_SINGLETON_{COPIES,GAPS}_ALLOWANCE` consts, so this test tracks the
+    /// band across any future recalibration.
     ///
-    /// **This invariant was briefly NOT what governed `overall_pass` between #1132 (2026-08-19,
-    /// disarmed the tolerance rescue for the blocking verdict) and #1220 (owner mandate,
-    /// 2026-08-29, re-armed it)** — fixture (a) below tracked that disarmed reality in between.
-    /// #1220 restores this doc's original framing exactly.
+    /// **The KEY divergence this proves:** an over-band count of 2 REDs `overall_pass` while staying
+    /// WITHIN the report-only tol-2 lens (`windows_over_copies_gaps_tolerance == 0`) — the disarmed
+    /// tolerance rescue visibly doing nothing (the #1132 masking guard).
     #[test]
-    fn copies_gaps_tolerance_boundary_gates_overall_pass_889_regate() {
+    fn copies_gaps_singleton_band_gates_overall_pass_1242() {
         use super::{build_and_print_verdict, Cam1Source, DecodedRec};
         use clap::Parser;
 
@@ -10646,43 +10644,44 @@ mod tests {
             "sanity: the clean fixture must pass: {clean}"
         );
 
-        // Fixture knobs are `u32`; the const is `u32` too, so these read straight from it instead
-        // of hardcoding the pre-recalibration boundary (1/2) -- this test self-adjusts with any
-        // future recalibration of `WINDOW_COPIES_GAPS_TOLERANCE`.
-        let tolerance = camera_box::window_gate::WINDOW_COPIES_GAPS_TOLERANCE;
+        // Fixture knobs are `u32`; the band consts are `u32` too, so these read straight from them
+        // -- this test tracks the `<=1/<=1` singleton band (`SEGMENT_SINGLETON_{COPIES,GAPS}_
+        // ALLOWANCE`), which GOVERNS the fold since #1242, NOT the report-only tol-2 lens.
+        let band_c = camera_box::window_gate::SEGMENT_SINGLETON_COPIES_ALLOWANCE;
+        let band_g = camera_box::window_gate::SEGMENT_SINGLETON_GAPS_ALLOWANCE;
 
-        // (a) BOTH terms AT the tolerance simultaneously -- must NOT swing overall_pass.
-        let at_tolerance = build_fixture("at-tolerance", base, &sched, tolerance, tolerance);
-        let at_seg = &at_tolerance["all_cambox_continuity"];
+        // (a) BOTH terms AT the singleton band simultaneously -- must NOT swing overall_pass.
+        let at_band = build_fixture("at-band", base, &sched, band_c, band_g);
+        let at_seg = &at_band["all_cambox_continuity"];
         assert_eq!(
             at_seg["segments"][0]["copies"],
-            serde_json::json!(tolerance),
+            serde_json::json!(band_c),
             "{at_seg}"
         );
         assert_eq!(
             at_seg["segments"][0]["gaps"],
-            serde_json::json!(tolerance),
+            serde_json::json!(band_g),
             "{at_seg}"
         );
         assert_eq!(
             at_seg["overall_pass"],
             serde_json::json!(true),
-            "1220: copies AND gaps AT the re-armed tolerance must NOT swing overall_pass -- the \
-             tolerance channel is armed again (owner mandate, 2026-08-29): \
-             clean={clean}, at_tolerance={at_tolerance}"
+            "1242: copies AND gaps AT the `<=1/<=1` singleton band must NOT swing overall_pass -- \
+             the band absorbs them: clean={clean}, at_band={at_band}"
         );
         assert_eq!(
-            at_seg["windows_over_copies_gaps_tolerance"],
-            serde_json::json!(0),
-            "{at_seg}"
+            at_seg["windows_singleton_allowance_consumed"],
+            serde_json::json!(1),
+            "1242: the absorbed window consumes the singleton (loud): {at_seg}"
         );
 
-        // (b) copies alone OVER tolerance -- must swing overall_pass to FAIL.
-        let copies_over = build_fixture("copies-over", base, &sched, tolerance + 1, 0);
+        // (b) copies alone OVER the band -- must swing overall_pass to FAIL, yet stay WITHIN the
+        // report-only tol-2 lens (the KEY divergence).
+        let copies_over = build_fixture("copies-over", base, &sched, band_c + 1, 0);
         let copies_seg = &copies_over["all_cambox_continuity"];
         assert_eq!(
             copies_seg["segments"][0]["copies"],
-            serde_json::json!(tolerance + 1),
+            serde_json::json!(band_c + 1),
             "{copies_seg}"
         );
         assert_eq!(
@@ -10692,7 +10691,7 @@ mod tests {
         );
         assert_ne!(
             clean["all_cambox_continuity"]["overall_pass"], copies_seg["overall_pass"],
-            "889 re-gate: copies over the tolerance -- overall_pass must swing to FAIL: \
+            "1242: copies over the singleton band -- overall_pass must swing to FAIL: \
              clean={clean}, copies_over={copies_over}"
         );
         assert_eq!(
@@ -10702,12 +10701,13 @@ mod tests {
         );
         assert_eq!(
             copies_seg["windows_over_copies_gaps_tolerance"],
-            serde_json::json!(1),
-            "{copies_seg}"
+            serde_json::json!(0),
+            "1242 DIVERGENCE: copies=2 REDs the fold but stays WITHIN the tol-2 lens (over-count 0): \
+             {copies_seg}"
         );
 
-        // (c) gaps alone OVER tolerance -- must swing overall_pass to FAIL.
-        let gaps_over = build_fixture("gaps-over", base, &sched, 0, tolerance + 1);
+        // (c) gaps alone OVER the band -- must swing overall_pass to FAIL, same divergence.
+        let gaps_over = build_fixture("gaps-over", base, &sched, 0, band_g + 1);
         let gaps_seg = &gaps_over["all_cambox_continuity"];
         assert_eq!(
             gaps_seg["segments"][0]["copies"],
@@ -10716,12 +10716,12 @@ mod tests {
         );
         assert_eq!(
             gaps_seg["segments"][0]["gaps"],
-            serde_json::json!(tolerance + 1),
+            serde_json::json!(band_g + 1),
             "{gaps_seg}"
         );
         assert_ne!(
             clean["all_cambox_continuity"]["overall_pass"], gaps_seg["overall_pass"],
-            "889 re-gate: gaps over the tolerance -- overall_pass must swing to FAIL: \
+            "1242: gaps over the singleton band -- overall_pass must swing to FAIL: \
              clean={clean}, gaps_over={gaps_over}"
         );
         assert_eq!(
@@ -10731,8 +10731,9 @@ mod tests {
         );
         assert_eq!(
             gaps_seg["windows_over_copies_gaps_tolerance"],
-            serde_json::json!(1),
-            "{gaps_seg}"
+            serde_json::json!(0),
+            "1242 DIVERGENCE: gaps=2 REDs the fold but stays WITHIN the tol-2 lens (over-count 0): \
+             {gaps_seg}"
         );
     }
 
