@@ -974,6 +974,19 @@ def _blocking_failures(verdict):
             _OWN_CLAUDE,
         ))
 
+    # 16) Cold-cut onset — LIVE since issue 1086 (its seam ships gates_overall_pass=true). A GENUINE
+    #     cold-cut miss (a >=60s-hidden receiver whose onset woke up late/missing or stayed black
+    #     over the calibrated undecodable allowance, ruled out of the issue-793 startup-segfault
+    #     window) now gates. Only fires on a post-flip verdict (gates_overall_pass=true on
+    #     cold_cut_onset); a pre-flip verdict stays report-only below (`is not True` guard, the
+    #     delivery-spread pattern — no double-count).
+    cc = _g(verdict, "all_cambox_continuity", "cold_cut_onset", default={}) or {}
+    if cc.get("any_genuine_cold_cut_miss") is True and cc.get("gates_overall_pass") is True:
+        out.append((
+            "Studený strih (cold-cut): prijímač po >=60 s skrytí ostal čierny / neprebudil sa: ZLYHAL",
+            _OWN_CLAUDE,
+        ))
+
     return out
 
 
@@ -1000,7 +1013,13 @@ def _report_only_tripped(verdict):
     if (_g(verdict, "all_cambox_delivery_latency", "spread_gate_pass") is False
             and _g(verdict, "all_cambox_delivery_latency", "gates_overall_pass") is not True):
         names.append("rozptyl doručenia (strih)")
-    if _g(verdict, "all_cambox_continuity", "cold_cut_onset", "any_genuine_cold_cut_miss") is True:
+    # issue 1086 — LIVE since the flip (its seam ships gates_overall_pass=true), so a genuine
+    # cold-cut miss moves to _blocking_failures (item 16). The `is not True` guard mirrors the
+    # delivery-spread pattern: only a PRE-flip verdict (no gates_overall_pass=true on cold_cut_onset)
+    # stays report-only here, so a post-flip verdict routes to blocking instead of double-counting.
+    if (_g(verdict, "all_cambox_continuity", "cold_cut_onset", "any_genuine_cold_cut_miss") is True
+            and _g(verdict, "all_cambox_continuity", "cold_cut_onset",
+                   "gates_overall_pass") is not True):
         names.append("cold-cut")
     # issue 905 item 2 — frozen_leg/self_heal_reset RESTORED to blocking (→ _blocking_failures item
     # 15). `frozen` (hard-frozen) and self-heal (attributed OR unattributed_events) now gate when

@@ -348,7 +348,7 @@ pub fn onset_stats(
 /// is never clean.
 pub fn transition_is_clean(wakeup_latency_ns: Option<i64>, onset_undecodable: u32) -> bool {
     match wakeup_latency_ns {
-        Some(w) => w <= WAKEUP_LATENCY_MAX_NS && onset_undecodable == 0,
+        Some(w) => w <= WAKEUP_LATENCY_MAX_NS && onset_undecodable <= ONSET_UNDECODABLE_ALLOWANCE,
         None => false,
     }
 }
@@ -458,7 +458,7 @@ pub fn build_report(windows: &[ColdCutWindow]) -> ColdCutReport {
 /// The raw `any_wakeup_over_max` / `any_wakeup_missing` / `any_onset_undecodable` aggregates remain
 /// serialized as diagnostics.
 pub fn cold_cut_gate_pass(report: &ColdCutReport) -> bool {
-    !report.any_wakeup_over_max && !report.any_wakeup_missing && !report.any_onset_undecodable
+    !report.any_genuine_cold_cut_miss
 }
 
 /// #768/#1086 LIVE (calibration-complete). Flipped `true` by issue 1086 once all four
@@ -474,7 +474,7 @@ pub fn cold_cut_gate_pass(report: &ColdCutReport) -> bool {
 /// sustained-receive-fps (`ReceiveHealth`) + the possible-segfault attribution stay REPORT-ONLY
 /// (see the module doc's LIVE-flip section).
 pub fn gates_overall_pass() -> bool {
-    false
+    true
 }
 
 #[cfg(test)]
