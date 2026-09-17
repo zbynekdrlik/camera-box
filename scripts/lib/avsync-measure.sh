@@ -48,16 +48,25 @@ avsync_measure_clip_path() {
   printf '%s/live-clip.mp4' "$dir"
 }
 
+# Per-read I/O timeout (microseconds) on the RTMP INPUT -- a dead/half-open relay delivers no data,
+# so ffmpeg exits non-zero within this window and the freshness gate yields an honest no-signal
+# heartbeat, rather than the pass hanging until the systemd TimeoutStartSec SIGTERMs it (which would
+# leave NO heartbeat). 15 s is far above a healthy 25 fps stream's inter-packet gap, so it never
+# fires on a live grab; the timer RESETS on every read, so it does NOT cap the 35 s clip length.
+AVSYNC_MEASURE_RW_TIMEOUT_US="${AVSYNC_MEASURE_RW_TIMEOUT_US:-15000000}"
+
 # avsync_measure_ffmpeg_grab_argv URL CLIP [SECS] -> the ffmpeg grab argv, ONE ARG PER LINE, the
-# SINGLE SOURCE OF TRUTH for the encode params. Byte-mirrors avsync-watchdog.ps1:99:
-#   ffmpeg -v error -y -i URL -t SECS -vf scale=1280:-2,fps=25 -c:v libx264 -preset veryfast
-#          -crf 26 -c:a aac -ar 16000 -ac 1 CLIP
+# SINGLE SOURCE OF TRUTH for the encode params. Encode params byte-mirror avsync-watchdog.ps1:99
+# (scale=1280:-2,fps=25, libx264 veryfast crf26, aac 16 kHz mono); the leading `-rw_timeout` is an
+# INPUT option (before -i) that the ps1 lacks -- a deliberate fail-closed improvement, see above:
+#   ffmpeg -v error -y -rw_timeout US -i URL -t SECS -vf scale=1280:-2,fps=25 -c:v libx264
+#          -preset veryfast -crf 26 -c:a aac -ar 16000 -ac 1 CLIP
 # Emitted one-arg-per-line so the caller reads it with `mapfile -t` into an array (URL/CLIP may
 # never be word-split). The caller prepends the ffmpeg binary.
 avsync_measure_ffmpeg_grab_argv() {
   local url="$1" clip="$2" secs="${3:-$AVSYNC_MEASURE_CLIP_SECS}"
   printf '%s\n' \
-    -v error -y -i "$url" -t "$secs" \
+    -v error -y -rw_timeout "$AVSYNC_MEASURE_RW_TIMEOUT_US" -i "$url" -t "$secs" \
     -vf 'scale=1280:-2,fps=25' -c:v libx264 -preset veryfast -crf 26 \
     -c:a aac -ar 16000 -ac 1 "$clip"
 }

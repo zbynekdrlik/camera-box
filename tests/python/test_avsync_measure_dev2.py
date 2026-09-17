@@ -94,6 +94,24 @@ def test_ffmpeg_grab_argv_secs_override():
     assert "20" in out.splitlines()
 
 
+def test_ffmpeg_grab_argv_has_input_rw_timeout_before_i():
+    # #1331 review nit #4: a per-read INPUT timeout so a dead relay yields an honest no-signal
+    # heartbeat (ffmpeg exits non-zero) instead of a SIGTERM'd pass with NO heartbeat. Must be an
+    # INPUT option -> before `-i`.
+    lines = _measure('avsync_measure_ffmpeg_grab_argv "rtmp://x/y" "/tmp/c.mp4"').splitlines()
+    assert "-rw_timeout" in lines
+    assert "15000000" in lines
+    assert lines.index("-rw_timeout") < lines.index("-i"), "rw_timeout must be an INPUT option (before -i)"
+
+
+def test_ffmpeg_grab_argv_rw_timeout_override():
+    out = _measure(
+        'avsync_measure_ffmpeg_grab_argv "rtmp://x/y" "/tmp/c.mp4"',
+        {"AVSYNC_MEASURE_RW_TIMEOUT_US": "9000000"},
+    )
+    assert "9000000" in out.splitlines()
+
+
 def test_ffmpeg_grab_argv_url_and_clip_are_single_args():
     # A URL/clip with a space must survive as ONE arg (mapfile -t line == the whole value).
     out = _measure('avsync_measure_ffmpeg_grab_argv "rtmp://a b/c" "/tmp/my clip.mp4"')
@@ -197,3 +215,37 @@ def test_dev2_install_pip_deps_are_the_two_syncnet_only_ones():
     out = _source(_DEV2_INSTALL, 'printf "%s\\n" "${PIP_DEPS[@]}"')
     deps = set(l.strip() for l in out.splitlines() if l.strip())
     assert deps == {"scenedetect", "python_speech_features"}, deps
+
+
+# ── #1331 review 🔴: the dev2 measurer must NOT emit Discord (delivery is the dev1 watchdogs' job) ─
+_MEASURER = _ROOT / "scripts" / "avsync-measure-dev2.sh"
+
+
+def test_measurer_neutralizes_av_sync_measure_discord_delivery():
+    # av_sync_measure.py's DEFAULT delivery (deliver_alert -> airuleset.py notify, on |offset| >=
+    # threshold) would make dev2 PING DISCORD ITSELF -- a duplicate of the dev1 watchdog alert.
+    # The measurer must point AIRULESET_NOTIFY at a neutralizing (empty) script, defaulting to
+    # /dev/null, and must NEVER pass --webhook (the raw-webhook path).
+    src = _MEASURER.read_text()
+    assert 'MEASURE_NOTIFY_BIN="${AVSYNC_MEASURE_NOTIFY_BIN:-/dev/null}"' in src, \
+        "MEASURE_NOTIFY_BIN must default to a neutralizing /dev/null"
+    assert 'AIRULESET_NOTIFY="$MEASURE_NOTIFY_BIN"' in src, \
+        "the av_sync_measure.py call must run with AIRULESET_NOTIFY pointed at the neutralizing bin"
+    assert "--webhook" not in src, "the dev2 measurer must never pass --webhook (raw Discord POST)"
+
+
+def test_measurer_notify_bin_default_is_dev_null():
+    # Prove the DEFAULT resolves to /dev/null (a genuine no-op), not the real airuleset.py.
+    out = _source(_MEASURER, 'printf "%s" "$MEASURE_NOTIFY_BIN"')
+    assert out == "/dev/null"
+
+
+def test_neutralized_notify_path_is_a_real_noop():
+    # `python3 /dev/null notify --body X --dedup-key Y` must exit 0 and print nothing -- the exact
+    # invocation av_sync_measure.py's notify_airuleset builds when AIRULESET_NOTIFY=/dev/null.
+    proc = subprocess.run(
+        ["python3", "/dev/null", "notify", "--body", "x", "--dedup-key", "k"],
+        env={"PATH": "/usr/bin:/bin", "HOME": _HOME}, capture_output=True, text=True,
+    )
+    assert proc.returncode == 0
+    assert proc.stdout == "" and proc.stderr == ""

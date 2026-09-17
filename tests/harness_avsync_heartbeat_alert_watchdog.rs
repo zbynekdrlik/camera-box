@@ -677,6 +677,86 @@ fn empty_probe_output_ssh_failure_never_falsely_alerts() {
 }
 
 // ================================================================================================
+// #1331 -- the NEW DEFAULT (dev2) transport path, exercised END-TO-END through main(): a fake `ssh`
+// (NOT sshpass) on PATH returns the dev2-shaped `cat`+separator output, and main() must (a) read
+// the watchdog leg over that transport (proving the mapfile/array-expansion wiring), and (b) SKIP
+// the vlc leg entirely (dev2 has no VLC-monitor heartbeat), never paging a permanently-missing vlc
+// file. Complements the pure-function unit tests in tests/python/test_avsync_heartbeat_host.py.
+// ================================================================================================
+
+#[test]
+fn dev2_host_reads_the_watchdog_leg_over_plain_ssh_and_skips_the_vlc_leg() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let state_file = tmp.path().join("state");
+    let marker_file = tmp.path().join("notify-calls.log");
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    // Fake `ssh` (the dev2 transport is plain key-auth ssh, NOT sshpass): ignore all args and emit
+    // a FRESH watchdog heartbeat + the separator, and NO vlc segment (dev2 has no vlc file). The
+    // fresh epoch (date +%s at run time) keeps the watchdog leg non-stale -> no alert fires; the
+    // point of the test is the transport wiring + the vlc SKIP, not an alert.
+    let ssh = dir.path().join("ssh");
+    fs::write(
+        &ssh,
+        "#!/bin/sh\nprintf '%s\\tmeasured: db=-5.4 [x] AV offset +0 fr (+0 ms) conf 8 :: A/V sync OK (offset 0 ms)\\n' \"$(date +%s)\"\nprintf '%s\\n' '---AVSYNC-HB-SEP---'\nexit 0\n",
+    )
+    .expect("write ssh");
+    let mut perm = fs::metadata(&ssh).unwrap().permissions();
+    std::os::unix::fs::PermissionsExt::set_mode(&mut perm, 0o755);
+    fs::set_permissions(&ssh, perm).unwrap();
+    let python3 = dir.path().join("python3");
+    fs::write(
+        &python3,
+        format!(
+            "#!/bin/sh\necho \"CALLED: $*\" >> {}\nexit 0\n",
+            marker_file.display()
+        ),
+    )
+    .expect("write python3 stub");
+    let mut perm2 = fs::metadata(&python3).unwrap().permissions();
+    std::os::unix::fs::PermissionsExt::set_mode(&mut perm2, 0o755);
+    fs::set_permissions(&python3, perm2).unwrap();
+
+    let path = format!(
+        "{}:{}",
+        dir.path().display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let out = Command::new("bash")
+        .arg("-c")
+        .arg(". \"$SCRIPT\"\nmain")
+        .env("SCRIPT", script())
+        .env("AVSYNC_HEARTBEAT_HOST", "dev2")
+        .env("AVSYNC_HEARTBEAT_STATE_FILE", &state_file)
+        .env("AIRULESET_NOTIFY", "/dev/null/does-not-matter")
+        .env("PATH", path)
+        .output()
+        .expect("run bash harness");
+    assert!(out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    // (a) the watchdog leg was read over the dev2 ssh transport -> processed (array-expansion wired).
+    assert!(
+        err.contains("watchdog: last_heartbeat_epoch="),
+        "dev2 transport must read the watchdog leg (mapfile/array wiring): {err}"
+    );
+    // (b) the vlc leg is SKIPPED for dev2 -- the skip log line present, and NO vlc processing line.
+    assert!(
+        err.contains("vlc: skipped"),
+        "dev2 has no vlc heartbeat -> the vlc leg must be skipped, not processed: {err}"
+    );
+    assert!(
+        !err.contains("vlc: last_heartbeat_epoch="),
+        "the vlc leg must NEVER be processed (which would page on a permanently-missing file): {err}"
+    );
+    // A fresh watchdog heartbeat -> no alert.
+    let calls = fs::read_to_string(&marker_file)
+        .unwrap_or_default()
+        .lines()
+        .count();
+    assert_eq!(calls, 0, "a fresh dev2 heartbeat must never alert");
+}
+
+// ================================================================================================
 // issue 968 -- the durable Discord verdict-forward leg (dev1-side bot POST).
 // ================================================================================================
 

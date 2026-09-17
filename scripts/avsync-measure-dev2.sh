@@ -42,6 +42,10 @@ MEASURE_SCRIPT="${AVSYNC_MEASURE_SCRIPT:-$HOME/avsync/av_sync_measure.py}"
 FRESHNESS_SCRIPT="${AVSYNC_MEASURE_FRESHNESS:-$HOME/avsync/avsync_freshness.py}"
 HEARTBEAT="${AVSYNC_MEASURE_HEARTBEAT:-$HOME/.camera-box/avsync-watchdog-heartbeat.txt}"
 MEASURE_CAP_S="${AVSYNC_MEASURE_CAP_S:-180}"
+# #1331 review 🔴: neutralize av_sync_measure.py's own Discord delivery on dev2 -- AIRULESET_NOTIFY
+# is pointed here; /dev/null (an empty python script) makes its `python3 <bin> notify ...` a no-op.
+# Overridable ONLY for tests; production MUST stay a neutralizing path (never the real airuleset.py).
+MEASURE_NOTIFY_BIN="${AVSYNC_MEASURE_NOTIFY_BIN:-/dev/null}"
 CLIP_SECS="$AVSYNC_MEASURE_CLIP_SECS"   # default 35, single-sourced in scripts/lib/avsync-measure.sh
 FFMPEG="${AVSYNC_MEASURE_FFMPEG:-ffmpeg}"
 FFPROBE="${AVSYNC_MEASURE_FFPROBE:-ffprobe}"
@@ -99,13 +103,27 @@ get_max_db() {
 # ── run av_sync_measure.py bounded to CAP seconds (a hung run is killed, never wedges the pass) ────
 run_measure() {
   local clip="$1" out_f err_f rc last_out last_err
-  out_f="$(mktemp)"; err_f="$(mktemp)"
+  # Guarded under `set -euo pipefail`: a (rare) mktemp failure must not abort the pass before the
+  # heartbeat is written -- degrade to an honest measure-error status instead.
+  out_f="$(mktemp 2>/dev/null)" || { printf 'ERROR: mktemp failed (no temp space?)'; return 0; }
+  err_f="$(mktemp 2>/dev/null)" || { rm -f "$out_f"; printf 'ERROR: mktemp failed (no temp space?)'; return 0; }
   rc=0
-  timeout "$MEASURE_CAP_S" "$PYTHON_BIN" "$MEASURE_SCRIPT" --media "$clip" --repo "$REPO" \
+  # #1331 review 🔴: av_sync_measure.py's own DEFAULT alert delivery (deliver_alert -> airuleset.py
+  # notify, on |offset| >= threshold) would make dev2 PING DISCORD ITSELF -- a duplicate of the dev1
+  # watchdog alert and a violation of the "NO Discord on dev2" contract (delivery is the dev1
+  # watchdogs' job) + the owner's near-zero-Discord rule. av_sync_measure.py reads its notify binary
+  # from AIRULESET_NOTIFY (default ~/devel/airuleset/airuleset.py, which IS deployed on dev2), so
+  # neutralize it: point AIRULESET_NOTIFY at an empty python script (/dev/null) -- `python3 /dev/null
+  # notify ...` runs nothing, ignores the argv, exits 0, never posts. The measurement itself is
+  # UNCHANGED; only the (unwanted) self-delivery is disabled.
+  AIRULESET_NOTIFY="$MEASURE_NOTIFY_BIN" \
+    timeout "$MEASURE_CAP_S" "$PYTHON_BIN" "$MEASURE_SCRIPT" --media "$clip" --repo "$REPO" \
     >"$out_f" 2>"$err_f" || rc=$?
   if [ "$rc" -eq 124 ]; then
     rm -f "$out_f" "$err_f"
-    printf 'TIMEOUT: av_sync_measure.py did not complete within %ss -- killed to prevent a wedged measurer' "$MEASURE_CAP_S"
+    # Wording byte-matches avsync-watchdog.ps1's Invoke-Measurement TIMEOUT line (the retired
+    # stream-box measurer) so the heartbeat status tail is identical wherever it runs.
+    printf 'TIMEOUT: av_sync_measure.py did not complete within %ss -- killed to prevent a wedged watchdog loop' "$MEASURE_CAP_S"
     return 0
   fi
   last_out="$(tail -n 1 "$out_f" 2>/dev/null || true)"
