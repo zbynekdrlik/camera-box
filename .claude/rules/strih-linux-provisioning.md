@@ -111,8 +111,11 @@ sandbox!` → the render process dies). `verify-strih.sh` item 13 only checks th
   <owner> <mode> <present>` → `ok` / `missing` / `wrong-owner` / `wrong-mode`.
 - **`setup-strih.sh` step 4** (right after the bundle install, as root): when the installed
   `STRIH_BUILD_FLAGS.txt` says `BROWSER-ON`, it FAILS LOUD if `chrome-sandbox` is absent, applies the
-  fix, then re-reads owner+mode through the verdict (so a chmod that silently didn't take — e.g. a
-  `nosuid` mount — is caught by name). A `BROWSER-OFF`/absent marker is a loud SKIP.
+  fix, then re-reads owner+mode through the verdict — so a chown/chmod that failed to record
+  `root:root` mode `4755` in the inode (e.g. a `cp -a` that preserved the runner uid and a chown that
+  did not run, or a fix that errored) is caught by name. (It does NOT detect a `nosuid` mount — that
+  is an execve-time property, invisible to `stat`; the S_ISUID bit is still stored and read back.)
+  A `BROWSER-OFF`/absent marker is a loud SKIP.
 - **`verify-strih.sh` item 14** (read-only, on the live box): `stat -c '%U:%G'` / `-c '%a'` the same
   `find`-path and PASS only on the `ok` verdict; `BROWSER-OFF`/absent NOTE-skips. On a live box the
   PASS line reads `chrome-sandbox setuid-root (root:root 4755) -- CEF sandbox launchable`; a regressed

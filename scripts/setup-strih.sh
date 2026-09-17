@@ -108,7 +108,8 @@ CS_FLAGS_FILE="${GENLOCK_DIR}/STRIH_BUILD_FLAGS.txt"
 if [ -f "$CS_FLAGS_FILE" ] && strih_lx_browser_bundle_required "$(cat "$CS_FLAGS_FILE")"; then
   CS_PATH="$(find "$GENLOCK_DIR" -type f -name chrome-sandbox 2>/dev/null | head -n1 || true)"
   [ -n "$CS_PATH" ] || fail "BROWSER-ON bundle but chrome-sandbox is absent under ${GENLOCK_DIR} -- the CEF sandbox helper is missing; the browser sources cannot launch"
-  eval "$(strih_lx_chrome_sandbox_fix_cmd "$GENLOCK_DIR")"
+  eval "$(strih_lx_chrome_sandbox_fix_cmd "$GENLOCK_DIR")" \
+    || fail "chrome-sandbox chown root:root / chmod 4755 failed at ${CS_PATH}"
   CS_OWNER="$(stat -c '%U:%G' "$CS_PATH" 2>/dev/null || echo '?')"
   CS_MODE="$(stat -c '%a' "$CS_PATH" 2>/dev/null || echo '?')"
   CS_VERDICT="$(strih_lx_chrome_sandbox_verdict "$CS_OWNER" "$CS_MODE" 1)" \
