@@ -270,6 +270,49 @@ pub const LEVEL_KI_PPM_PER_MS_S: f64 = 0.0002;
 /// asrc-compensator.h ASRC_LEVEL_INTEGRAL_MAX_PPM — keep numerically identical.
 pub const LEVEL_INTEGRAL_MAX_PPM: f64 = 3.0;
 
+/// camera-box #1335 follow-up 2: residual threshold, in ms, above which a newly-closed window is
+/// treated as a STEP (a permanent sample-loss/dup or a wall-clock jump) rather than a real rate
+/// point. Live 17.9. 18:52: an OBS StartStream stall lost ~50 ms of `mbc` input samples permanently
+/// (buffered_ms 108 → 51, starved_blocks=0); that 50 ms step entered the 600 s regression and biased
+/// the slope by ~= step/span = 50 ms / 600 s = 83 ppm (est +16 → -83 → -152 after a 2nd step). When
+/// `|(window increment − slope·window)·1000| > 10 ms` the servo RE-BASEs (shifts the cumulative
+/// anchor onto the pre-step fit, keeps the lock+applied, does NOT insert the step point) instead of
+/// flushing (which would enshrine the shifted level). 10 ms sits well above the residual noise floor
+/// of the 1 s windows (ASIO callback jitter ~1-2 ms; ranné dáta reziduály < 3 ms) so ordinary noise
+/// never re-bases (bench (c) pins 0 steps on 3 ms noise). Mirror of asrc-compensator.h
+/// ASRC_STEP_RESIDUAL_MS — keep numerically identical.
+pub const STEP_RESIDUAL_MS: f64 = 10.0;
+
+/// camera-box #1335 follow-up 2: proportional gain of the FAST bounded level-RESTORE burst, in ppm
+/// per ms of level error. Entered only when a re-base's step is corroborated by the buffer level
+/// (a real sample loss/dup, not a wall-clock-only jump); adds `clamp(Kr·(buffered − target), ±100)`
+/// to the correction target so a big deficit drives a strong stretch (100 ppm = 0.17 cent, inaudible)
+/// that decays as the buffer refills; exits at `|buffered − target| < 5 ms`. SIGN follows the proven
+/// #1335 integral convention — a DEFICIT (buffered < target) yields a NEGATIVE contribution (stretch,
+/// raises the buffer). NOTE (see the issue-1335-follow-up-2 anchors-confirmed comment): the main
+/// design wrote `-Kr·(level − target)`, which for a deficit is POSITIVE = compress = LOWERS the
+/// buffer — the opposite of its own stated "level below target => stretch" intent; the implemented
+/// form `Kr·(buffered − target)` = the negation, matching the integral. Mirror of asrc-compensator.h
+/// ASRC_LEVEL_RESTORE_K_PPM_PER_MS — keep numerically identical.
+pub const LEVEL_RESTORE_K_PPM_PER_MS: f64 = 2.0;
+
+/// camera-box #1335 follow-up 2: hard clamp on the fast level-RESTORE burst, in ppm (±). 100 ppm is
+/// large yet a 0.17-cent pitch nudge (below audibility); bounds the restore far below the rate loop's
+/// own MAX_PPM. Mirror of asrc-compensator.h ASRC_LEVEL_RESTORE_MAX_PPM — keep numerically identical.
+pub const LEVEL_RESTORE_MAX_PPM: f64 = 100.0;
+
+/// camera-box #1335 follow-up 2: proportional gain of the level-LEVEL P term, in ppm per ms of level
+/// error, folded into the correction target every call (once locked) as `clamp(Kp·(buffered −
+/// target), ±1)`. It damps the I-only level loop's ~3.9 h clamp-to-clamp oscillation (observed
+/// 14:00-20:45, level ±10 ms). SIGN matches the proven #1335 integral (deficit ⇒ negative ⇒ stretch);
+/// the main design wrote `Kp·(target − level)` (the anti-damping sign) — the implemented `Kp·(buffered
+/// − target)` is the negation. At Kp=0.03 the loop's damping ratio is only ~0.034, so this is a GENTLE
+/// damping that reduces the integral's clamp-railing and decays the oscillation (measured 5 ms-bump
+/// 2nd/1st-half peak ratio 0.89 vs 1.00 undamped), NOT a critically-damped `<3 ms overshoot` term
+/// (that would need Kp~0.6 + a wider clamp — see the anchors-confirmed comment). Mirror of
+/// asrc-compensator.h ASRC_LEVEL_KP_PPM_PER_MS — keep numerically identical.
+pub const LEVEL_KP_PPM_PER_MS: f64 = 0.03;
+
 /// issue #960: sanity ceiling on the (issue #962: WINDOWED, duration-weighted-summed) measured
 /// ppm, in ppm — above this, the measurement carries no real timing information (a starved or
 /// bursting audio source, e.g. a muted/idle device path delivering near-zero samples) and must be
@@ -399,6 +442,19 @@ pub struct RealtimeAsrcCompensator {
     /// issue #1335: whether [`Self::level_target_ms`] has been captured since the last (re)lock —
     /// gates the one-shot setpoint capture. Cleared by a flush so a relock re-captures.
     level_captured: bool,
+    /// issue #1335 follow-up 2: cumulative count of STEP re-base events (a closed window whose
+    /// residual vs the current fit exceeded [`STEP_RESIDUAL_MS`], re-based instead of inserted) —
+    /// exposed for tests/telemetry (the C mirror prints it as the `asrc:` line's `steps=` field).
+    /// Never reset (a running total, like the estimate); a healthy source reads a stable count.
+    step_count: u32,
+    /// issue #1335 follow-up 2: the residual (ms) of the most recent re-base — telemetry only (the
+    /// C mirror prints it as `last_step_ms=`). Sign preserved (a lost-samples step is negative).
+    last_step_ms: f64,
+    /// issue #1335 follow-up 2: whether the FAST bounded level-restore burst is currently active —
+    /// entered on a level-corroborated re-base, exited at `|buffered − target| < 5 ms`. Cleared by a
+    /// flush (the setpoint re-captures) and reset on construction. Telemetry: the C mirror prints it
+    /// as `restore=0|1`.
+    level_restore: bool,
 }
 
 impl RealtimeAsrcCompensator {
@@ -422,6 +478,9 @@ impl RealtimeAsrcCompensator {
             level_integral_ppm: 0.0, // issue #1335
             level_last_ms: 0.0,      // issue #1335
             level_captured: false,   // issue #1335
+            step_count: 0,           // issue #1335 follow-up 2
+            last_step_ms: 0.0,       // issue #1335 follow-up 2
+            level_restore: false,    // issue #1335 follow-up 2
         }
     }
 
@@ -447,6 +506,11 @@ impl RealtimeAsrcCompensator {
         // drop both so a relock re-captures the setpoint and re-integrates from 0 (default-safe).
         self.level_integral_ppm = 0.0;
         self.level_captured = false;
+        // issue #1335 follow-up 2: a flush is an UNINTENDED discontinuity that re-captures the
+        // setpoint from the post-relock depth, so any in-progress fast level-restore is abandoned
+        // (the buffer self-heals to whatever depth it re-locks at). step_count/last_step_ms are
+        // running telemetry — never reset here.
+        self.level_restore = false;
     }
 
     /// The current rate estimate, in ppm (issue #1084: the least-squares regression slope times
@@ -498,6 +562,24 @@ impl RealtimeAsrcCompensator {
     /// tests/telemetry (the C mirror prints it as the `asrc:` line's `level=` field).
     pub fn level_last_ms(&self) -> f64 {
         self.level_last_ms
+    }
+
+    /// issue #1335 follow-up 2: cumulative count of STEP re-base events — exposed for tests/telemetry
+    /// (the C mirror prints it as the `asrc:` line's `steps=` field).
+    pub fn step_count(&self) -> u32 {
+        self.step_count
+    }
+
+    /// issue #1335 follow-up 2: the residual (ms) of the most recent re-base — exposed for
+    /// tests/telemetry (the C mirror prints it as `last_step_ms=`).
+    pub fn last_step_ms(&self) -> f64 {
+        self.last_step_ms
+    }
+
+    /// issue #1335 follow-up 2: whether the fast bounded level-restore burst is currently active —
+    /// exposed for tests/telemetry (the C mirror prints it as `restore=0|1`).
+    pub fn level_restore(&self) -> bool {
+        self.level_restore
     }
 
     /// issue #1335 follow-up: shift the captured buffer-LEVEL setpoint by `delta_ms` to track a
@@ -1606,6 +1688,317 @@ mod tests {
             red_return_to_l < 2.0,
             "issue #1335 follow-up: without the shift the buffer must climb back to the ORIGINAL \
              setpoint L (the cancelled trim), got closest approach={red_return_to_l:.3} ms to {target_orig:.3}"
+        );
+    }
+
+    /// issue #1335 follow-up 2 (a): a permanent 50 ms INPUT sample-loss step (the live 17.9. 18:52
+    /// StartStream stall: mbc buffered_ms 108 → 51, starved_blocks=0) must NOT bias the rate slope —
+    /// the servo RE-BASEs the step out of the regression (estimate stays put) AND fast-restores the
+    /// lost 50 ms of buffer within ~12 min, then exits the restore. The anti-tautology: the rate-only
+    /// path (which inserts the step) swings the slope ≥40 ppm — the −83 ppm class this fix kills.
+    #[test]
+    fn step_tolerant_rebase_holds_estimate_and_restores_level_1335() {
+        const TRUE_PPM: f64 = -5.0; // healthy mbc floor
+        const BLOCK_S: f64 = 1.0;
+        const START_BUF_MS: f64 = 100.0;
+        const WARMUP_S: f64 = 200.0; // past lock (~65 s) + settle
+        const STEP_MS: f64 = -50.0; // input sample loss: raw short by 50 ms in one window
+
+        // The restore is PROPORTIONAL (Kr*err, clamped +-100) so it decays with a ~500 s time
+        // constant (k*Kr = 2e-3/s) -- it returns a 50 ms step to within +-5 ms in ~19-25 min, NOT
+        // the design's stated "+-5 ms inside 12 min" (that needs the +-100 clamp to bind for most of
+        // the return, i.e. Kr~20 so it stays near-constant 100 ppm -- see the issue-1335-follow-up-2
+        // anchors-confirmed comment; the specified Kr=2 is used as-is here). Observe 30 min so the
+        // restore completes; a 12-min checkpoint documents the ~76% progress the design assumed done.
+        const POST_S: f64 = 30.0 * 60.0;
+
+        // Closed-loop buffer sim. `use_level` selects the C-equivalent level path (which re-bases)
+        // vs the rate-only trait entry (which inserts the step — the anti-tautology). Returns
+        // (est_pre, target, final_buffer, max |est − est_pre| over recovery, restore_active, servo).
+        fn run(use_level: bool) -> (f64, f64, f64, f64, f64, bool, RealtimeAsrcCompensator) {
+            let mut c = RealtimeAsrcCompensator::new();
+            let clock = DriftingAudioClock::new(TRUE_PPM);
+            let mut buffer_ms = START_BUF_MS;
+            let step = |c: &mut RealtimeAsrcCompensator, raw: f64, buf: &mut f64| {
+                let corrected = if use_level {
+                    c.compensate_with_level(raw, BLOCK_S, *buf)
+                } else {
+                    c.compensate(raw, BLOCK_S)
+                };
+                *buf += (corrected - BLOCK_S) * 1000.0;
+            };
+            let mut t = 0.0;
+            while t < WARMUP_S {
+                let raw = clock.raw_advance(BLOCK_S);
+                step(&mut c, raw, &mut buffer_ms);
+                t += BLOCK_S;
+            }
+            let est_pre = c.estimated_ppm();
+            let target = c.level_target_ms();
+            // The step: ONE window whose input is short by 50 ms of samples (a permanent loss). Those
+            // 50 ms never entered the mix buffer, so buffered_ms is ALREADY 50 ms lower when the ASRC
+            // reads it on this window (live 17.9.: buffered_ms 108 → 51). Model it as a direct buffer
+            // withdrawal read on the step window, plus the short raw that carries the −50 ms rate
+            // residual; the withdrawal replaces the normal fill/drain accounting for the loss window.
+            buffer_ms += STEP_MS;
+            let raw_step = clock.raw_advance(BLOCK_S) + STEP_MS / 1000.0;
+            let _ = if use_level {
+                c.compensate_with_level(raw_step, BLOCK_S, buffer_ms)
+            } else {
+                c.compensate(raw_step, BLOCK_S)
+            };
+            // Observe recovery, capturing the buffer at the design's 12-min checkpoint.
+            let mut est_dev_max = 0.0_f64;
+            let mut buf_at_12min = buffer_ms;
+            t = 0.0;
+            while t < POST_S {
+                let raw = clock.raw_advance(BLOCK_S);
+                step(&mut c, raw, &mut buffer_ms);
+                est_dev_max = est_dev_max.max((c.estimated_ppm() - est_pre).abs());
+                t += BLOCK_S;
+                if (t - 12.0 * 60.0).abs() < BLOCK_S / 2.0 {
+                    buf_at_12min = buffer_ms;
+                }
+            }
+            let restore_active = c.level_restore();
+            (
+                est_pre,
+                target,
+                buffer_ms,
+                buf_at_12min,
+                est_dev_max,
+                restore_active,
+                c,
+            )
+        }
+
+        let (est_pre, target, final_buf, buf_12, est_dev_max, restore_active, c) = run(true);
+        // 1) The step was detected and re-based (not inserted), and recorded in telemetry.
+        assert!(
+            c.step_count() >= 1,
+            "issue #1335 f2: the 50 ms input-loss step must re-base (step_count>=1), got {}",
+            c.step_count()
+        );
+        assert!(
+            (c.last_step_ms() - STEP_MS).abs() < 5.0,
+            "issue #1335 f2: last_step_ms must record the ~{STEP_MS} ms residual, got {:.2}",
+            c.last_step_ms()
+        );
+        // 2) The estimate stays put — the step never entered the slope (RED: swings tens of ppm).
+        assert!(
+            est_dev_max < 2.0,
+            "issue #1335 f2: with re-base the estimate must stay within +-2 ppm of pre-step \
+             ({est_pre:.2}), got max dev {est_dev_max:.3} ppm"
+        );
+        // 3a) By the design's 12-min checkpoint the restore has recovered the bulk of the 50 ms loss
+        //     (data: ~-12 ms of the -50 ms remains, ~76% back) — proving the fast restore is doing
+        //     real work early, even though at Kr=2 it has not yet reached the design's stated ±5 ms.
+        assert!(
+            (buf_12 - target).abs() < 0.5 * STEP_MS.abs(),
+            "issue #1335 f2: by 12 min the restore must have recovered >half the loss (within \
+             {:.0} ms of target {target:.1}), got {buf_12:.2}",
+            0.5 * STEP_MS.abs()
+        );
+        // 3b) The restore returns the level within +-5.5 ms of target and EXITS (data: ~19-25 min at
+        //     Kr=2; the last few ms are then closed by the slow integral over hours).
+        assert!(
+            (final_buf - target).abs() < 5.5,
+            "issue #1335 f2: the fast restore must return the buffer within ~+-5 ms of target \
+             ({target:.1}), got {final_buf:.2}"
+        );
+        assert!(
+            !restore_active,
+            "issue #1335 f2: the restore burst must have EXITED once the buffer was back within 5 ms"
+        );
+        // 4) Anti-tautology: the rate-only path (no re-base) lets the step corrupt the slope.
+        let (rate_est_pre, _, _, _, rate_dev_max, _, _) = run(false);
+        assert!(
+            rate_dev_max >= 40.0,
+            "issue #1335 f2: the rate-only path must swing the estimate >=40 ppm (proving re-base, \
+             not the plant, holds it), got max dev {rate_dev_max:.2} ppm from {rate_est_pre:.2}"
+        );
+    }
+
+    /// issue #1335 follow-up 2 (b): a +50 ms WALL-CLOCK jump (master advanced, input samples normal,
+    /// buffer level UNCHANGED) must re-base the slope out but must NOT engage the fast level restore
+    /// (there was no sample loss to refill) — the "wall-clock skok ⇒ re-base only" case.
+    #[test]
+    fn wall_clock_jump_rebases_without_level_restore_1335() {
+        const TRUE_PPM: f64 = -5.0;
+        const BLOCK_S: f64 = 1.0;
+        const TARGET_MS: f64 = 100.0;
+        const WARMUP_S: f64 = 200.0;
+        const JUMP_MS: f64 = 50.0; // master reads +50 ms longer for one window
+
+        let mut c = RealtimeAsrcCompensator::new();
+        let clock = DriftingAudioClock::new(TRUE_PPM);
+        // Warmup with the buffer held exactly at target (no level error) so the setpoint captures at
+        // TARGET_MS and the integral/P stay at 0 — isolating the rate-side re-base.
+        let mut t = 0.0;
+        while t < WARMUP_S {
+            let raw = clock.raw_advance(BLOCK_S);
+            let _ = c.compensate_with_level(raw, BLOCK_S, TARGET_MS);
+            t += BLOCK_S;
+        }
+        let est_pre = c.estimated_ppm();
+        let steps_pre = c.step_count();
+        // The wall-clock jump: master_block is +50 ms longer, but the input delivered a normal ~1 s
+        // of samples and the buffer level is unchanged.
+        let raw = clock.raw_advance(BLOCK_S);
+        let _ = c.compensate_with_level(raw, BLOCK_S + JUMP_MS / 1000.0, TARGET_MS);
+
+        assert_eq!(
+            c.step_count(),
+            steps_pre + 1,
+            "issue #1335 f2: a +50 ms wall-clock jump must re-base (one step), got step_count {} (was {})",
+            c.step_count(),
+            steps_pre
+        );
+        assert!(
+            !c.level_restore(),
+            "issue #1335 f2: a wall-clock-only jump (buffer unchanged) must NOT engage the fast \
+             level restore"
+        );
+        assert!(
+            (c.estimated_ppm() - est_pre).abs() < 2.0,
+            "issue #1335 f2: the re-base must keep the estimate within +-2 ppm of pre-jump \
+             ({est_pre:.2}), got {:.2}",
+            c.estimated_ppm()
+        );
+        // The residual telemetry records the ~−50 ms step (master went up ⇒ raw−master dropped).
+        assert!(
+            (c.last_step_ms() + JUMP_MS).abs() < 5.0,
+            "issue #1335 f2: last_step_ms must record the ~-{JUMP_MS} ms wall-jump residual, got {:.2}",
+            c.last_step_ms()
+        );
+    }
+
+    /// issue #1335 follow-up 2 (c): ordinary bounded residual noise (±3 ms per 1 s window — the ASIO
+    /// callback jitter floor) must produce ZERO re-bases over 2 h; the 10 ms threshold sits well
+    /// above the noise. Discriminator: a single 15 ms outlier DOES re-base (the detector is live).
+    #[test]
+    fn residual_noise_never_false_rebases_1335() {
+        const TRUE_PPM: f64 = -5.0;
+        const BLOCK_S: f64 = 1.0;
+        const START_BUF_MS: f64 = 100.0;
+        const WARMUP_S: f64 = 200.0;
+        const NOISE_MS: f64 = 3.0; // hard bound on the per-window residual noise
+        const OBSERVE_S: f64 = 2.0 * 3600.0;
+
+        let mut c = RealtimeAsrcCompensator::new();
+        let clock = DriftingAudioClock::new(TRUE_PPM);
+        let mut buffer_ms = START_BUF_MS;
+        // Deterministic bounded noise in [-NOISE_MS, +NOISE_MS] ms (a splitmix-style LCG, no crate).
+        let mut seed: u64 = 0x0BAD_F00D_1335;
+        let mut noise_s = move || {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            let u = (seed >> 33) as f64 / (1u64 << 31) as f64; // [0,1)
+            (u * 2.0 - 1.0) * NOISE_MS / 1000.0 // [-NOISE_MS, +NOISE_MS] ms in seconds
+        };
+        let mut t = 0.0;
+        while t < WARMUP_S {
+            let raw = clock.raw_advance(BLOCK_S);
+            let corrected = c.compensate_with_level(raw, BLOCK_S, buffer_ms);
+            buffer_ms += (corrected - BLOCK_S) * 1000.0;
+            t += BLOCK_S;
+        }
+        let steps_pre = c.step_count();
+        t = 0.0;
+        while t < OBSERVE_S {
+            let raw = clock.raw_advance(BLOCK_S) + noise_s();
+            let corrected = c.compensate_with_level(raw, BLOCK_S, buffer_ms);
+            buffer_ms += (corrected - BLOCK_S) * 1000.0;
+            t += BLOCK_S;
+        }
+        assert_eq!(
+            c.step_count(),
+            steps_pre,
+            "issue #1335 f2: +-{NOISE_MS} ms residual noise must NOT re-base over 2 h, got {} spurious steps",
+            c.step_count() - steps_pre
+        );
+        // Discriminator: a genuine 15 ms residual step DOES re-base (the detector is not dead).
+        let raw_outlier = clock.raw_advance(BLOCK_S) + 15.0 / 1000.0;
+        let _ = c.compensate_with_level(raw_outlier, BLOCK_S, buffer_ms);
+        assert_eq!(
+            c.step_count(),
+            steps_pre + 1,
+            "issue #1335 f2: a 15 ms residual outlier MUST re-base (proving the detector discriminates)"
+        );
+    }
+
+    /// issue #1335 follow-up 2 (d): the P term DAMPS the I-only level loop's marginal oscillation. A
+    /// pure LEVEL disturbance (no rate step ⇒ no re-base, no restore) in the loop's LINEAR regime (a
+    /// 5 ms bump — small enough that the ±3 ppm integral never rails, so the damping is not masked by
+    /// the clamp's own bang-bang) must (i) keep the integral off its ±3 rail and (ii) DECAY: the
+    /// 2nd-half peak deviation is measurably smaller than the 1st. Measured discriminator (4 h,
+    /// deterministic): correct P ⇒ ratio 0.89; I-only (the RED, before the P term) ⇒ ratio 1.00
+    /// (undamped, constant amplitude); WRONG-sign P ⇒ ratio 1.11 (amplifies). With Kp=0.03 the
+    /// damping is gentle (ζ≈0.034), so at the design's 20 ms disturbance the ±3 clamp bang-bangs and
+    /// masks the P entirely (P and I-only both ratio ~0.32) — this is NOT the design's stated
+    /// `<3 ms overshoot for a 20 ms disturbance` (that needs Kp≈0.6 + a wider clamp; see the
+    /// issue-1335-follow-up-2 anchors-confirmed comment). This test proves the P has the CORRECT
+    /// (damping) sign and reduces the oscillation, which is its load-bearing purpose.
+    #[test]
+    fn p_term_damps_the_level_loop_oscillation_1335() {
+        const TRUE_PPM: f64 = -5.0;
+        const BLOCK_S: f64 = 1.0;
+        const START_BUF_MS: f64 = 100.0;
+        const WARMUP_S: f64 = 300.0;
+        const DISTURB_MS: f64 = 5.0; // linear regime — the integral stays off its ±3 rail
+        const OBSERVE_S: f64 = 4.0 * 3600.0;
+
+        let mut c = RealtimeAsrcCompensator::new();
+        let clock = DriftingAudioClock::new(TRUE_PPM);
+        let mut buffer_ms = START_BUF_MS;
+        let mut t = 0.0;
+        while t < WARMUP_S {
+            let raw = clock.raw_advance(BLOCK_S);
+            let corrected = c.compensate_with_level(raw, BLOCK_S, buffer_ms);
+            buffer_ms += (corrected - BLOCK_S) * 1000.0;
+            t += BLOCK_S;
+        }
+        let target = c.level_target_ms();
+        let steps_pre = c.step_count();
+        // A pure LEVEL disturbance (raw/master untouched ⇒ no rate residual ⇒ no re-base): the
+        // buffer jumps +20 ms and only the I+P level loop responds.
+        buffer_ms += DISTURB_MS;
+        let mut trace: Vec<f64> = Vec::new();
+        let mut integral_peak = 0.0_f64;
+        t = 0.0;
+        while t < OBSERVE_S {
+            let raw = clock.raw_advance(BLOCK_S);
+            let corrected = c.compensate_with_level(raw, BLOCK_S, buffer_ms);
+            buffer_ms += (corrected - BLOCK_S) * 1000.0;
+            trace.push(buffer_ms - target);
+            integral_peak = integral_peak.max(c.level_integral_ppm().abs());
+            t += BLOCK_S;
+        }
+        assert_eq!(
+            c.step_count(),
+            steps_pre,
+            "issue #1335 f2: a pure LEVEL disturbance must NOT trigger a rate re-base"
+        );
+        assert!(
+            !c.level_restore(),
+            "issue #1335 f2: a pure LEVEL disturbance must NOT engage the fast restore (that is \
+             step-corroborated only)"
+        );
+        assert!(
+            integral_peak < LEVEL_INTEGRAL_MAX_PPM - 0.1,
+            "issue #1335 f2: in the linear regime the level integral must stay off its \
+             +-{LEVEL_INTEGRAL_MAX_PPM} ppm rail, got peak {integral_peak:.3} ppm"
+        );
+        let half = trace.len() / 2;
+        let peak1 = trace[..half].iter().fold(0.0_f64, |m, d| m.max(d.abs()));
+        let peak2 = trace[half..].iter().fold(0.0_f64, |m, d| m.max(d.abs()));
+        // The P term (correct sign) DECAYS the oscillation (measured ratio ~0.89); the undamped
+        // I-only RED holds it (~1.00) and a wrong-sign P GROWS it (~1.11) — 0.95 sits cleanly between.
+        assert!(
+            peak2 < 0.95 * peak1,
+            "issue #1335 f2: the P term must DECAY the level oscillation (2nd-half peak < 0.95x \
+             1st-half; RED I-only holds ~1.0, wrong-sign grows), got peak1={peak1:.2} peak2={peak2:.2} ms"
         );
     }
 }
