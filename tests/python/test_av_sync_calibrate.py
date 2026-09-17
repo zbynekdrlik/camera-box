@@ -726,13 +726,15 @@ class TestGainLogLineAndApply:
         # now routes through split_av_correction, so the pin is FRAME-QUANTIZED + phase-snapped.
         # combined -61.35, gain 0.4 -> frames = round(0.4*-61.35/33.333) = -1 (video leads => pin UP
         # one frame), snapped phase-safe to 954 (frac 0.62); the sub-frame remainder goes to the mbc
-        # audio offset (~-11 ms). The gain-line + persist keys contract is otherwise unchanged.
+        # audio offset with its OWN linear-actuator gain (AUDIO_TRIM_LOOP_GAIN 0.8, live rerun
+        # 17.9.2026): residual_eff = -61.35 + 33.33 = -28.02 -> 0.8 * -28.02 = -22.4 -> -22 ms.
+        # The gain-line + persist keys contract is otherwise unchanged.
         fake, json_path = self._run_apply(
             monkeypatch, tmp_path, current=913, offset=-24.54,
             extra_args=["--loop-gain", "0.4", "--combined-offset-ms", "-61.35"],
         )
         assert fake.latency_ms == 954
-        assert fake.audio_ms == -11
+        assert fake.audio_ms == -22
         out = capsys.readouterr().out
         assert "[av-sync] gain:" in out, f"expected the grep-able gain line, got: {out!r}"
         assert "combined=-61.35" in out
