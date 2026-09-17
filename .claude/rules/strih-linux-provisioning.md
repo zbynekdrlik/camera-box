@@ -91,6 +91,36 @@ fetches it the same way upstream OBS's own Linux CI does:
 **To flip browser OFF again:** set `STRIH_ENABLE_BROWSER: 'OFF'` in the job `env` — the ONLY change
 needed (the CEF fetch step, the `CEF_ROOT_DIR` arg, the marker, and the verify item all follow it).
 
+## chrome-sandbox setuid-root — the CEF sandbox helper (issue 1317 F6, DONE)
+
+CEF ships a **SUID sandbox helper** `chrome-sandbox` alongside `obs-browser.so`/`libcef.so` (in the
+strih bundle: `lib/x86_64-linux-gnu/obs-plugins/chrome-sandbox`). In the CI artifact it is mode `700`
+owned by the runner uid; Chromium's SUID-sandbox contract requires it **owned root:root, mode 4755
+(setuid root)** or the sandbox helper aborts at browser-source launch (`Running without the SUID
+sandbox!` → the render process dies). `verify-strih.sh` item 13 only checks the *presence* of
+`obs-browser.so`/`libcef.so`, not the sandbox's launchability — F6 closes that gap.
+
+- **The rejected shortcut.** Starting OBS with the sandbox disabled at launch (`--no-sandbox`) would
+  make the sources start with no chmod, but it disables the Chromium sandbox for EVERY browser source
+  for the whole session — a session-wide security downgrade of all 4 web-rendering sources. The
+  setuid helper is Chromium's sanctioned shape and is applied once at provisioning.
+- **Pure helpers** (`scripts/lib/strih-provision.sh`): `strih_lx_chrome_sandbox_fix_cmd <bundle-root>`
+  emits the idempotent `chown root:root` + `chmod 4755` statements (locates the helper by NAME under
+  the install root, every statement `;`-terminated per the `v4l2-neutral.sh` `_cmd`-helper gotcha,
+  runs as an `if` so a missing binary is a no-op / set-e safe). `strih_lx_chrome_sandbox_verdict
+  <owner> <mode> <present>` → `ok` / `missing` / `wrong-owner` / `wrong-mode`.
+- **`setup-strih.sh` step 4** (right after the bundle install, as root): when the installed
+  `STRIH_BUILD_FLAGS.txt` says `BROWSER-ON`, it FAILS LOUD if `chrome-sandbox` is absent, applies the
+  fix, then re-reads owner+mode through the verdict — so a chown/chmod that failed to record
+  `root:root` mode `4755` in the inode (e.g. a `cp -a` that preserved the runner uid and a chown that
+  did not run, or a fix that errored) is caught by name. (It does NOT detect a `nosuid` mount — that
+  is an execve-time property, invisible to `stat`; the S_ISUID bit is still stored and read back.)
+  A `BROWSER-OFF`/absent marker is a loud SKIP.
+- **`verify-strih.sh` item 14** (read-only, on the live box): `stat -c '%U:%G'` / `-c '%a'` the same
+  `find`-path and PASS only on the `ok` verdict; `BROWSER-OFF`/absent NOTE-skips. On a live box the
+  PASS line reads `chrome-sandbox setuid-root (root:root 4755) -- CEF sandbox launchable`; a regressed
+  helper prints e.g. `chrome-sandbox not setuid-root (wrong-owner: owner=newlevel:newlevel mode=700)`.
+
 ## Follow-ups (not done in the preparation lane)
 
 - ~~obs-browser / CEF in the strih CI variant~~ — **DONE (issue 1317, CEF now wired)**, see the CI

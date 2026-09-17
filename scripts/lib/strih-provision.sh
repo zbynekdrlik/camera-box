@@ -167,3 +167,32 @@ strih_lx_browser_bundle_ok() {
   done
   [ "$has_browser" = 1 ] && [ "$has_cef" = 1 ]
 }
+
+# --- issue 1317 (F6): chrome-sandbox setuid-root (the CEF SUID sandbox helper) --------------------
+# The CEF strih bundle ships `chrome-sandbox` mode 700 owned by the CI runner uid. Chromium's SUID
+# sandbox contract requires it to be owned root:root mode 4755 (setuid root); otherwise the sandbox
+# helper aborts at browser-source launch (unless OBS is started `--no-sandbox`, which we REJECT --
+# that weakens every browser source's isolation session-wide). The proper fix is the setuid helper,
+# applied once at provisioning and gated in verify-strih.
+
+# strih_lx_chrome_sandbox_fix_cmd BUNDLE_ROOT -> prints the idempotent remote statements that make
+# the installed CEF chrome-sandbox launchable: locate it by NAME under BUNDLE_ROOT (never guessing
+# the multiarch obs-plugins path) then `chown root:root` + `chmod 4755` it. The emitted statement
+# ends with `;` so a mid-string $(...) embedding never glues the following command (the
+# scripts/lib/v4l2-neutral.sh _cmd-helper gotcha). It runs as an `if` so a missing chrome-sandbox is
+# a no-op (set -e safe); the CALLER (setup-strih.sh) enforces the BROWSER-ON fail-loud presence gate.
+strih_lx_chrome_sandbox_fix_cmd() {
+  local root="${1:?bundle-root required}"
+  printf 'if __csb="$(find %q -type f -name chrome-sandbox 2>/dev/null | head -n1 || true)"; [ -n "$__csb" ]; then chown root:root "$__csb"; chmod 4755 "$__csb"; fi;\n' "$root"
+}
+
+# strih_lx_chrome_sandbox_verdict OWNER MODE PRESENT -> prints one verdict token and returns 0 iff
+# ok. PRESENT is 1 when chrome-sandbox exists, else 0. Fail-closed order: absent -> `missing`; owner
+# not root:root -> `wrong-owner`; mode not 4755 (setuid rwxr-xr-x) -> `wrong-mode`; else -> `ok`.
+strih_lx_chrome_sandbox_verdict() {
+  local owner="${1:-}" mode="${2:-}" present="${3:-}"
+  [ "$present" = 1 ]         || { printf 'missing';     return 1; }
+  [ "$owner" = 'root:root' ] || { printf 'wrong-owner'; return 1; }
+  [ "$mode" = '4755' ]       || { printf 'wrong-mode';  return 1; }
+  printf 'ok'; return 0
+}

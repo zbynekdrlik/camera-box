@@ -98,6 +98,26 @@ else
   warn "  STRIH_LX_BUNDLE_SRC unset -- fetch the ${ART} CI artifact and re-run with STRIH_LX_BUNDLE_SRC=<dir>"
   warn "  (deploy-genlock-fleet.sh --boxes strih-lx does this over ssh once the box is reachable)"
 fi
+# chrome-sandbox setuid-root (issue 1317 F6): the CEF SUID sandbox helper must be owned root:root
+# mode 4755 or the browser sources cannot launch (Chromium aborts unless the sandbox is disabled at
+# launch, which we reject -- disabling it weakens every browser source's isolation session-wide, so
+# the setuid helper is the upstream-sanctioned shape). Runs against the installed bundle ONLY when
+# STRIH_BUILD_FLAGS.txt declares BROWSER-ON; a BROWSER-OFF/absent marker is a loud SKIP. setup-strih
+# already runs as root, so the chown/chmod take effect.
+CS_FLAGS_FILE="${GENLOCK_DIR}/STRIH_BUILD_FLAGS.txt"
+if [ -f "$CS_FLAGS_FILE" ] && strih_lx_browser_bundle_required "$(cat "$CS_FLAGS_FILE")"; then
+  CS_PATH="$(find "$GENLOCK_DIR" -type f -name chrome-sandbox 2>/dev/null | head -n1 || true)"
+  [ -n "$CS_PATH" ] || fail "BROWSER-ON bundle but chrome-sandbox is absent under ${GENLOCK_DIR} -- the CEF sandbox helper is missing; the browser sources cannot launch"
+  eval "$(strih_lx_chrome_sandbox_fix_cmd "$GENLOCK_DIR")" \
+    || fail "chrome-sandbox chown root:root / chmod 4755 failed at ${CS_PATH}"
+  CS_OWNER="$(stat -c '%U:%G' "$CS_PATH" 2>/dev/null || echo '?')"
+  CS_MODE="$(stat -c '%a' "$CS_PATH" 2>/dev/null || echo '?')"
+  CS_VERDICT="$(strih_lx_chrome_sandbox_verdict "$CS_OWNER" "$CS_MODE" 1)" \
+    || fail "chrome-sandbox setuid fix did not take (${CS_VERDICT}: owner=${CS_OWNER} mode=${CS_MODE}); expected root:root 4755"
+  echo "  chrome-sandbox setuid-root (root:root 4755) applied at ${CS_PATH} -- CEF sandbox launchable"
+else
+  warn "  chrome-sandbox setuid fix SKIPPED (STRIH_BUILD_FLAGS.txt absent or BROWSER-OFF at ${GENLOCK_DIR}) -- browser sources not built"
+fi
 
 # ---------------------------------------------------------------------------------------------
 step 5 "OBS profile facts (strih-lx: seeded from the Windows 'light' profile)"

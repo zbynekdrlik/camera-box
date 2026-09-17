@@ -197,3 +197,74 @@ fn no_second_strih_snv_sender_guard_fires_on_a_collision() {
     );
     assert_ne!(code2, 0, "a second STRIH-SNV sender must be rejected");
 }
+
+// --- issue 1317 (F6): chrome-sandbox setuid-root builder + verdict ------------------------------
+
+#[test]
+fn chrome_sandbox_fix_cmd_emits_find_chown_root_and_chmod_4755() {
+    // The builder must locate chrome-sandbox by NAME under the bundle root and chown root:root +
+    // chmod 4755 it (Chromium's SUID sandbox contract). --no-sandbox (the rejected approach) must
+    // never appear.
+    let (code, out, _e) = run_sourced(&[], "strih_lx_chrome_sandbox_fix_cmd /opt/obs-genlock");
+    assert_eq!(code, 0, "builder must succeed");
+    assert!(
+        out.contains("-name chrome-sandbox"),
+        "must locate chrome-sandbox by name: {out}"
+    );
+    assert!(
+        out.contains("chown root:root"),
+        "must chown root:root: {out}"
+    );
+    assert!(
+        out.contains("chmod 4755"),
+        "must chmod 4755 (setuid root): {out}"
+    );
+    assert!(
+        !out.contains("--no-sandbox"),
+        "must not weaken the sandbox with --no-sandbox: {out}"
+    );
+    // Every emitted statement is ;-terminated so a mid-string $(...) embedding never glues the
+    // following command (the v4l2-neutral.sh _cmd-helper gotcha): the last non-empty line ends `;`.
+    let last = out
+        .lines()
+        .rev()
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or("");
+    assert!(
+        last.trim_end().ends_with(';'),
+        "the last emitted statement must end with ';': {out}"
+    );
+}
+
+#[test]
+fn chrome_sandbox_fix_cmd_shell_quotes_a_root_with_spaces() {
+    // %q-style quoting keeps a space in the bundle root from splitting into two find arguments.
+    let (_c, out, _e) = run_sourced(&[], "strih_lx_chrome_sandbox_fix_cmd '/opt/obs genlock'");
+    assert!(
+        out.contains("/opt/obs\\ genlock") || out.contains("'/opt/obs genlock'"),
+        "a bundle root with spaces must be shell-quoted: {out}"
+    );
+}
+
+#[test]
+fn chrome_sandbox_verdict_tokens_ok_missing_wrong_owner_wrong_mode() {
+    // root:root + 4755 + present -> ok (exit 0).
+    let (c, out, _e) = run_sourced(&[], "strih_lx_chrome_sandbox_verdict root:root 4755 1");
+    assert_eq!(c, 0, "root:root/4755/present must be ok");
+    assert_eq!(out.trim(), "ok");
+    // absent -> missing (fail-closed, checked first).
+    let (c, out, _e) = run_sourced(&[], "strih_lx_chrome_sandbox_verdict '?' '?' 0");
+    assert_ne!(c, 0);
+    assert_eq!(out.trim(), "missing");
+    // wrong owner -> wrong-owner.
+    let (c, out, _e) = run_sourced(
+        &[],
+        "strih_lx_chrome_sandbox_verdict newlevel:newlevel 4755 1",
+    );
+    assert_ne!(c, 0);
+    assert_eq!(out.trim(), "wrong-owner");
+    // not setuid (mode 700, the artifact's own state) -> wrong-mode.
+    let (c, out, _e) = run_sourced(&[], "strih_lx_chrome_sandbox_verdict root:root 700 1");
+    assert_ne!(c, 0);
+    assert_eq!(out.trim(), "wrong-mode");
+}

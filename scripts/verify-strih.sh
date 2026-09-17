@@ -132,6 +132,24 @@ else
   note "browser bundle not required (STRIH_BUILD_FLAGS.txt absent or BROWSER-OFF at ${GENLOCK_DIR})"
 fi
 
+# 14) chrome-sandbox setuid (issue 1317 F6): when BROWSER-ON, the CEF SUID sandbox helper must be
+#     owned root:root mode 4755 (setuid root) or the browser sources cannot launch (Chromium aborts
+#     unless the sandbox is disabled at launch). Same GENLOCK_DIR find-path as item 13.
+#     BROWSER-OFF/absent -> NOTE-skip.
+if [ -f "$FLAGS_FILE" ] && strih_lx_browser_bundle_required "$(cat "$FLAGS_FILE")"; then
+  CS="$(find "$GENLOCK_DIR" -type f -name chrome-sandbox 2>/dev/null | head -1 || true)"
+  if [ -n "$CS" ]; then
+    CS_OWNER="$(stat -c '%U:%G' "$CS" 2>/dev/null || echo '?')"
+    CS_MODE="$(stat -c '%a' "$CS" 2>/dev/null || echo '?')"
+    CS_VERDICT="$(strih_lx_chrome_sandbox_verdict "$CS_OWNER" "$CS_MODE" 1 || true)"
+    [ "$CS_VERDICT" = ok ] && ok "chrome-sandbox setuid-root (root:root 4755) -- CEF sandbox launchable" || bad "chrome-sandbox not setuid-root (${CS_VERDICT}: owner=${CS_OWNER} mode=${CS_MODE}); expected root:root 4755"
+  else
+    bad "chrome-sandbox absent under ${GENLOCK_DIR} (BROWSER-ON but the CEF sandbox helper is missing)"
+  fi
+else
+  note "chrome-sandbox setuid check skipped (STRIH_BUILD_FLAGS.txt absent or BROWSER-OFF at ${GENLOCK_DIR})"
+fi
+
 echo ""
 if [ "$FAILS" -eq 0 ]; then
   echo -e "${GREEN}=== verify-strih.sh: ALL CLEAR ===${NC}"; exit 0
