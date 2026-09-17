@@ -55,7 +55,7 @@ ONE Slovak checklist of what the owner forgot to switch back into development st
 
 The 14th item proves, between productions and read-only, that the mbc measurement-audio chain (cam2
 painter QPSK marker → HDMI speaker → mic → mbc Ableton → Dante → stream OBS `mbc`) is still ALIGNED
-with the video within the E2E's ±90 ms gate — the −140 ms A/V step of 14.9. is exactly the class it
+with the video within the E2E's ±30 ms gate (owner ruling 17.9.2026 / issue 1333) — the −140 ms A/V step of 14.9. is exactly the class it
 catches. It reuses the whole verdict-kind item framework (like `mic`): the standalone
 `scripts/measurement-chain-latency.sh` probe computes the token, the item maps `ALIGNED→OK`,
 `DRIFTED→FORGOT`, everything else `→UNKNOWN`. All decision logic (RELATIVE rolling-floor onset

@@ -62,7 +62,7 @@
     "cam5": {"node": "cam5", "verdict": "measured", "av_offset_ms": -1.1, "mad_ms": 2.0, "candidates": 640, "cluster_samples": 90, "gate_pass": true},
     "cam6": {"node": "cam6", "verdict": "measured", "av_offset_ms": 0.6, "mad_ms": 1.7, "candidates": 660, "cluster_samples": 95, "gate_pass": true},
     "expected_ms": 0.0,
-    "gate_tolerance_ms": 20.0,
+    "gate_tolerance_ms": 30.0,
     "gate_pass": true
   }
 }

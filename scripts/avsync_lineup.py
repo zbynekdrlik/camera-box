@@ -64,14 +64,15 @@ AUDIO_PRESENT_DB = -60.0
 
 # #1331 offset ALERT arm. Page when the SyncNet-measured A/V offset is out of band during a LIVE
 # stream. OFFSET_ALARM_MS_DEFAULT mirrors av_sync_measure.py's operator threshold (its
-# `--threshold-ms default=60`); that value lives there ONLY as an argparse default, not an
+# `--threshold-ms default=30`, owner ruling 17.9.2026 / issue 1333 -- one A/V tolerance 30 ms
+# everywhere); that value lives there ONLY as an argparse default, not an
 # importable named constant, and importing av_sync_measure.py pulls torch/obs_phase2 (absent on
 # dev1), so the value is cross-referenced here, never imported. OFFSET_CONF_FLOOR is the QUALITY
 # gate the production-critical re-ping doctrine requires (watchdog-notify-dedup.md, the 16.9 storm
 # caveat): a verdict below it is unreliable and MUST NOT page. It mirrors av_sync_measure.py's
 # CONF_MIN=4.0 -- SyncNet's own usability floor below which a window has no reliable face/lip lock
 # (the 2026-07-26 conf-3.6 garbage era falls under it); the healthy pinned-asset baseline reads ~8.
-OFFSET_ALARM_MS_DEFAULT = 60
+OFFSET_ALARM_MS_DEFAULT = 30
 OFFSET_CONF_FLOOR = 4.0
 
 _DB_RE = re.compile(r"\bdb=(-?\d+(?:\.\d+)?)\b")

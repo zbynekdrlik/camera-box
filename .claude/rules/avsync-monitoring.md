@@ -249,7 +249,7 @@ are byte-identical (unchanged `fire_notify`, stable keys); only the new arm was 
 
 **What PAGES (🚨):** the stream is LIVE (`outputActive` true) **and** the heartbeat is FRESH +
 measured + non-wedged **and** the SyncNet confidence is `>= OFFSET_CONF_FLOOR` (4.0, the quality
-gate) **and** `|offset_ms| >= OFFSET_ALARM_MS` (60). The alert text carries offset + conf + the
+gate) **and** `|offset_ms| >= OFFSET_ALARM_MS` (30, owner ruling 17.9.2026 / issue 1333). The alert text carries offset + conf + the
 `ZNIZ/ZVYS '2ME PGM'` knob advice already in the verdict.
 
 **What is SUPPRESSED (never a false page):** stream off / unreadable (`not-live`), stale heartbeat
@@ -266,7 +266,7 @@ absolute-offset BAND arm (`.claude/rules/watchdog-notify-dedup.md`, issue 1308/1
 quality-gated-input requirement is met by `OFFSET_CONF_FLOOR` (a low-conf verdict is log-only). The
 file is allowlisted in `test_notify_dedup_key_sweep_1206.py`; only the offset line buckets — the
 liveness/preflight arms keep STABLE keys. `OFFSET_ALARM_MS` / `OFFSET_CONF_FLOOR` cross-reference
-`av_sync_measure.py`'s `--threshold-ms default=60` and `CONF_MIN=4.0` (that module can't be imported
+`av_sync_measure.py`'s `--threshold-ms default=30` and `CONF_MIN=4.0` (that module can't be imported
 on dev1 — it pulls torch/obs_phase2 — so the values are documented, not imported).
 
 ## Fail LOUD on a missing tool — a dev1 alarm must never fail OPEN on a tooling gap

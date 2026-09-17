@@ -108,7 +108,7 @@
       "gate_pass": false
     },
     "expected_ms": 0.0,
-    "gate_tolerance_ms": 20.0,
+    "gate_tolerance_ms": 30.0,
     "gate_pass": false,
     "av_audio_silent": false,
     "av_audio_preamble_screens": 137

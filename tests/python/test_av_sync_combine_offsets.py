@@ -47,7 +47,7 @@ class TestMeasuredOffsets:
             "cam3": _entry(None, verdict="derived"),
             "cam5": _entry(None, verdict="excluded"),
             "expected_ms": 0.0,
-            "gate_tolerance_ms": 20.0,
+            "gate_tolerance_ms": 30.0,
             "gate_pass": False,
             "gate": "enforced",
         }

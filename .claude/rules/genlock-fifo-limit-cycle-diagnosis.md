@@ -131,8 +131,8 @@ can:
 
 Full reasoning lives in code, where a worker lands first: the extended "WHY the #940 grid pin was
 not enough" narrative block in `src/genlock_backlog.rs` (MECHANISM half) + the
-`AV_OFFSET_GATE_TOLERANCE_MS` doc in `src/av_window.rs` (GATE half, why the A/V tolerance stays ±90,
-not ±20).
+`AV_OFFSET_GATE_TOLERANCE_MS` doc in `src/av_window.rs` (GATE half, why the A/V tolerance is ±30 —
+owner ruling 17.9.2026 / issue 1333 — not the older ±90 or ±20).
 
 ## Sender render-freeze -> receiver relock STORM + a transient phase excursion (issue 1318, 2026-09-15)
 

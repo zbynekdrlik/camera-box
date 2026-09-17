@@ -72,10 +72,10 @@ ALERT_THROTTLE_PASSES="${AVSYNC_LINEUP_ALERT_THROTTLE_PASSES:-12}"   # ~1h at th
 # #1331 offset ALERT arm thresholds (env-overridable; the pure decider carries the same defaults --
 # passing them explicitly keeps this script the single knob surface, like STALE_S above).
 #   OFFSET_ALARM_MS   -- |offset| at/above which a CONFIDENT reading pages during a live stream
-#                        (mirrors av_sync_measure.py --threshold-ms default=60).
+#                        (mirrors av_sync_measure.py --threshold-ms default=30, owner ruling 17.9.2026 / issue 1333).
 #   OFFSET_CONF_FLOOR -- SyncNet confidence below which a verdict is unreliable and NEVER pages
 #                        (mirrors av_sync_measure.py CONF_MIN=4.0; healthy pinned-asset baseline ~8).
-OFFSET_ALARM_MS="${AVSYNC_LINEUP_OFFSET_ALARM_MS:-60}"
+OFFSET_ALARM_MS="${AVSYNC_LINEUP_OFFSET_ALARM_MS:-30}"
 OFFSET_CONF_FLOOR="${AVSYNC_LINEUP_OFFSET_CONF_FLOOR:-4.0}"
 
 # stream OBS WebSocket (for the outputActive read via obs_phase2.py stream-status). A missing/wrong

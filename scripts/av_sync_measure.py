@@ -13,7 +13,7 @@ Sign convention (VALIDATED 2026-07-19 on synthetic shifts, exact to the frame):
   => knob_delta_ms = -offset_frames * 40
 
 Usage:
-  av_sync_measure.py --media clip.mp4 [--repo DIR] [--webhook URL] [--threshold-ms 60]
+  av_sync_measure.py --media clip.mp4 [--repo DIR] [--webhook URL] [--threshold-ms 30]
   av_sync_measure.py --grab srt://127.0.0.1:9998 --secs 20 [...]        # one-shot from live tap
   av_sync_measure.py --grab ... --loop 300 [...]                        # daemon: measure every 300 s
   av_sync_measure.py --grab ... --loop 420 --outer-loop --ws-host 10.77.9.204 [...]
@@ -446,7 +446,7 @@ def main() -> int:
              "stable per-kind --dedup-key (fleet-standard since #1206); passing a URL keeps the raw "
              "webhook (manual opt-in) with a simple per-kind throttle instead.",
     )
-    ap.add_argument("--threshold-ms", type=int, default=60)
+    ap.add_argument("--threshold-ms", type=int, default=30)  # issue 1333: owner ruling 17.9.2026, one A/V tolerance 30 ms
     ap.add_argument(
         "--require-fresh", action="store_true",
         help="#814: assert the --media clip is a CURRENT grab (rc==0 + size + mtime age + "

@@ -62,7 +62,7 @@
     "cam5": {"node": "cam5", "verdict": "derived", "av_offset_ms": null, "mad_ms": null, "candidates": 192, "cluster_samples": 0, "gate_pass": true, "derived_offset_ms": -1.8, "derived_from_cam2_offset_ms": 1.5, "derived_delivery_spread_ms": 11.0, "derived_note": "estimated (#714) from cam2's own measured whole-recording A/V offset re-centered on this camera's own #286 delivery-latency delta -- NOT an independent audio/video measurement for this camera"},
     "cam6": {"node": "cam6", "verdict": "derived", "av_offset_ms": null, "mad_ms": null, "candidates": 643, "cluster_samples": 0, "gate_pass": false, "derived_offset_ms": 24.7, "derived_from_cam2_offset_ms": 1.5, "derived_delivery_spread_ms": 11.0, "derived_note": "estimated (#714) from cam2's own measured whole-recording A/V offset re-centered on this camera's own #286 delivery-latency delta -- NOT an independent audio/video measurement for this camera"},
     "expected_ms": 0.0,
-    "gate_tolerance_ms": 20.0,
+    "gate_tolerance_ms": 30.0,
     "gate_pass": false
   }
 }
