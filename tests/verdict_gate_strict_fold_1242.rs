@@ -1,24 +1,27 @@
-//! issue 1242 — the WALK-BACK step for the residual FIFO copy churn, after issues 1318/1320
-//! root-caused + fixed the strih PROGRAM render-freeze → stream FIFO underrun → relock storm that
-//! produced it (cure = genlock bundle `02b53180b`). Data-first (mining tool
-//! `scripts/window_gate_walkdown.py` over the live verdict corpus): the ONLY post-fix run on the
-//! cure bundle (180691712) is strict-clean (every window 0 copies / 0 gaps, worst beat-corrected
-//! uniformity 0.9988), but that is n=1 — too thin to restore absolute strict-zero on one run. So
-//! this step TIGHTENS two blocking-gate constants a data-supported amount and leaves the full
-//! strict-zero restore as the explicit NEXT step:
+//! issue 1242 — the WALK-DOWN step (2026-09-17, ROZHODNUTÉ 5706131227) for the residual FIFO copy
+//! churn. After issues 1318/1320 fixed the render-freeze churn SOURCE, task-1 attribution (comment
+//! 5706065579) proved the residual `<=1/<=1` copy/gap churn is a DOWNSTREAM structural floor of the
+//! 60->30 decimation + genlock FIFO on the splitter topology, NOT a fixable source fault. So the
+//! walk-down landed on the calibrated `<=1/<=1` SINGLETON band (the owner's 22.8. issue-1169 bar),
+//! NOT absolute strict-zero (which RED-ed run 443513281 on one surviving FIFO hold and was DROPPED):
 //!
-//!   - `WINDOW_COPIES_GAPS_TOLERANCE` 5 → 2  (interim; the tolerance CHANNEL still governs the fold
-//!     via `copies_gaps_tolerance_gates_overall_pass() == true`, per #1220; strict-zero mechanism
-//!     stays wired-but-dormant — the `gate-allowance-restore-red-green` pattern).
-//!   - `UNIFORM_FRACTION_MIN` 0.90 → 0.95  (the issue-1142 cadence floor, gated on
-//!     `beat_corrected_uniform_fraction` since #1250; post-fix worst beat-corrected 0.9976–0.9988,
-//!     the churny pre-fix run 0.9481 correctly REDs).
-//!   - `WINDOW_COPIES_GAPS_TOLERANCE_PER_CAMBOX` CAM2 → 25 kept (no post-16.9 splitter-fed run
-//!     exists yet; removal precondition PINNED below, data-conditional).
+//!   - `copies_gaps_tolerance_gates_overall_pass()` `true` -> `false` (seam 2 DISARMED), so `decide`'s
+//!     `if`/`else if` fold falls through to the still-armed seam 4 singleton band.
+//!   - `segment_singleton_allowance_gates_overall_pass()` stays `true` and now GOVERNS the fold: a
+//!     window with `copies <= 1 && gaps <= 1` passes (with the loud singleton-consumed note),
+//!     `>= 2` of either REDs `overall_pass`.
+//!   - `WINDOW_COPIES_GAPS_TOLERANCE` stays 2 as the REPORT-ONLY observability lens (shapes
+//!     `relaxed_pass` only) — a `relaxed_pass==true`/`overall_pass_term==false` window (copies/gaps
+//!     in `[2, 2]`) is the disarmed rescue visibly doing nothing (the #1132 masking guard).
+//!   - `WINDOW_COPIES_GAPS_TOLERANCE_PER_CAMBOX` CAM2->25 override DROPPED (`&[]`): cam2 became
+//!     splitter-fed ~16.9 13:00 and all post-16.9 splitter-fed runs read CAM2 within the default.
+//!
+//! Evidence (band safety): the five post-cure splitter-fed runs (977889848, 2019585820, 443513281,
+//! 605445038, 1249662438) read per-window worst copies=1 / gaps=1 — inside the band; a 2 reds.
 //!
 //! Default-feature test (no `#![cfg(feature = "probe")]`) — both modules are crate-root pub.
-//! Tier-0 #557 bans even `cargo test --no-run` locally; the fold logic was verified RED→GREEN via
-//! a std-only `rustc --test` replica of `decide_with_tolerance` + `cadence_uniformity_gate_pass`.
+//! Tier-0 #557 bans even `cargo test --no-run` locally; the fold logic was verified RED->GREEN via
+//! a std-only `rustc --test` replica of `decide_with_tolerance` at the armed-vs-disarmed seams.
 
 use camera_box::presentation_cadence::{cadence_uniformity_gate_pass, UNIFORM_FRACTION_MIN};
 use camera_box::window_gate::{
@@ -27,37 +30,77 @@ use camera_box::window_gate::{
     WINDOW_COPIES_GAPS_TOLERANCE_PER_CAMBOX,
 };
 
-// --- the two walked constants (RED against the pre-change 5 / 0.90) ---
+// --- the seam state the walk-down lands on ---
 
 #[test]
-fn copies_gaps_tolerance_walked_to_two() {
+fn tolerance_seam_disarmed_singleton_band_governs() {
+    // The core walk-down: seam 2 DISARMED, seam 4 (the `<=1/<=1` singleton band) still armed and
+    // now governing the fold. The full strict-zero restore (BOTH `false`) was DROPPED as
+    // unattainable on an irreducible downstream floor.
+    assert!(
+        !copies_gaps_tolerance_gates_overall_pass(),
+        "issue 1242: the `<=2` tolerance seam is DISARMED"
+    );
+    assert!(
+        segment_singleton_allowance_gates_overall_pass(),
+        "issue 1242: the `<=1/<=1` singleton band stays armed and governs the fold"
+    );
+}
+
+#[test]
+fn tolerance_const_stays_two_as_the_observability_lens() {
     assert_eq!(
         WINDOW_COPIES_GAPS_TOLERANCE, 2,
-        "issue 1242 interim walk 5 -> 2 (post-fix n=1 too thin for strict-zero)"
+        "issue 1242: the const stays 2 as the report-only lens (not 0), keeping the #1132 masking guard"
     );
 }
 
 #[test]
-fn uniformity_floor_restored_to_point_ninety_five() {
+fn uniformity_floor_stays_point_ninety_five() {
     assert_eq!(
         UNIFORM_FRACTION_MIN, 0.95,
-        "issue 1242 restore 0.90 -> 0.95; post-fix beat-corrected worst >= 0.9976"
+        "issue 1242 (interim) restored 0.95; the walk-down does not touch the uniformity floor"
     );
 }
 
-// --- the fold behaviour at the new tolerance boundary ---
+// --- the fold behaviour at the singleton-band boundary ---
 
 #[test]
-fn window_over_two_now_reds_the_fold() {
-    // 3 copies exceeded the OLD tol=5 fold (passed); at tol=2 it must RED overall_pass_term.
+fn window_over_one_now_reds_the_fold() {
+    // 2 copies exceeded the `<=1/<=1` singleton band -> must RED overall_pass_term (they DID pass
+    // under the interim tol-2 fold, so this is the walk-down's tightening).
     assert!(
-        !decide(100, 0, 3, 0).overall_pass_term,
-        "copies=3 > tol 2 must fail the fold"
+        !decide(100, 0, 2, 0).overall_pass_term,
+        "copies=2 > the `<=1` singleton band must fail the fold"
     );
-    // 2 copies sit exactly at the new tolerance and still pass.
     assert!(
-        decide(100, 0, 2, 0).overall_pass_term,
-        "copies=2 == tol 2 still passes"
+        !decide(100, 0, 0, 2).overall_pass_term,
+        "gaps=2 > the `<=1` singleton band must fail the fold"
+    );
+    // 1 copy/gap sits exactly at the band and still passes.
+    assert!(
+        decide(100, 0, 1, 0).overall_pass_term,
+        "copies=1 == the singleton band still passes (absorbed)"
+    );
+    assert!(
+        decide(100, 0, 0, 1).overall_pass_term,
+        "gaps=1 == the singleton band still passes (absorbed)"
+    );
+}
+
+#[test]
+fn two_reds_the_fold_but_stays_within_the_relaxed_lens_divergence() {
+    // The KEY divergence: copies=2 REDs the blocking fold (`<=1` singleton) yet the report-only
+    // tol-2 lens still absorbs it (`relaxed_pass == true`) -- the disarmed rescue visibly doing
+    // nothing (the #1132 masking guard).
+    let d = decide(100, 0, 2, 0);
+    assert!(
+        !d.overall_pass_term,
+        "copies=2 REDs the singleton fold: {d:?}"
+    );
+    assert!(
+        d.relaxed_pass,
+        "copies=2 stays within the tol-2 observability lens (non-masking): {d:?}"
     );
 }
 
@@ -68,18 +111,22 @@ fn clean_window_passes_both_verdicts() {
 }
 
 #[test]
-fn single_copy_is_the_documented_interim_gap() {
-    // HONEST interim limitation: a single-copy window still passes the tol=2 fold — only the
-    // strict-zero restore (the explicit NEXT step) catches the ticket's exact churn signature.
-    // The single copy stays VISIBLE as a strict failure, never silent.
+fn single_copy_is_absorbed_by_the_calibrated_singleton_band() {
+    // A single copy is the designed irreducible `<=1/<=1` downstream churn: absorbed into the
+    // blocking verdict by the calibrated singleton band (the owner's issue-1169 bar), LOUDLY
+    // (`singleton_allowance_consumed`), while it stays a visible strict failure -- never masked.
     let d = decide(100, 0, 1, 0);
     assert!(
         d.overall_pass_term,
-        "copies=1 absorbed at tol 2 (interim; strict restore is next)"
+        "copies=1 absorbed by the `<=1/<=1` singleton band"
+    );
+    assert!(
+        d.singleton_allowance_consumed,
+        "the absorption fires the loud singleton note/count"
     );
     assert!(
         !d.strict_pass,
-        "copies=1 still fails strict_pass — visible, never masked"
+        "copies=1 still fails strict_pass -- visible, never masked"
     );
 }
 
@@ -103,39 +150,29 @@ fn floor_reds_the_prefix_churn_passes_postfix() {
     ));
 }
 
-// --- CAM2 override kept; its removal precondition PINNED (data-conditional, report-only) ---
+// --- CAM2 override DROPPED: cam2 is a normal splitter leg now ---
 
 #[test]
-fn cam2_override_kept_until_a_post_16_9_splitter_fed_run() {
-    // KEPT at 25: no post-16.9 splitter-fed run exists yet (cam2 was the imag-HDMI projection tap
-    // until ~16.9 13:00; the post-fix run 180691712 at 15.9 22:31 predates the swap). REMOVAL
-    // PRECONDITION for the next step: the first post-16.9 splitter-fed E2E whose CAM2 windows sit
-    // within the DEFAULT tolerance -> set this map to `&[]`. Until then it stays exactly here.
-    assert_eq!(WINDOW_COPIES_GAPS_TOLERANCE_PER_CAMBOX, &[("CAM2", 25)]);
-    // The override still absorbs CAM2's over-rate band while the default gate is now tighter.
+fn cam2_override_dropped_normal_splitter_leg_1242() {
+    // The #1251 CAM2->25 override is DROPPED (map `&[]`): cam2 became splitter-fed ~16.9 13:00 and
+    // all post-16.9 splitter-fed runs read CAM2 within the default. So CAM2 now uses the default
+    // tolerance and the singleton fold like every box -- a 2-copy CAM2 window REDs.
     assert!(
-        decide_for_cambox("CAM2", 100, 0, 20, 0).overall_pass_term,
-        "CAM2 tol 25 absorbs 20"
+        WINDOW_COPIES_GAPS_TOLERANCE_PER_CAMBOX.is_empty(),
+        "issue 1242: the CAM2 override is dropped (empty map, the tested walk-back state)"
     );
     assert!(
-        !decide_for_cambox("CAM3", 100, 0, 20, 0).overall_pass_term,
-        "CAM3 uses default tol 2"
-    );
-}
-
-// --- strict-zero restore is the EXPLICIT next step, NOT taken here (both seams stay armed) ---
-
-#[test]
-fn strict_restore_is_the_next_step_not_this_one() {
-    // Interim: the tolerance channel still governs the fold (NOT strict-zero). The full restore =
-    // flip BOTH seams to `false`, gated on >= 2 more consecutive `02b53180b`-or-later runs with
-    // windows_failed_report_only == 0. Both stay wired/armed here (dormant-mechanism pattern).
-    assert!(
-        copies_gaps_tolerance_gates_overall_pass(),
-        "tolerance channel still governs (interim)"
+        !decide_for_cambox("CAM2", 100, 0, 2, 0).overall_pass_term,
+        "CAM2 copies=2 REDs the fold now (no override to absorb it)"
     );
     assert!(
-        segment_singleton_allowance_gates_overall_pass(),
-        "singleton fallback stays wired"
+        decide_for_cambox("CAM2", 100, 0, 1, 0).overall_pass_term,
+        "CAM2 copies=1 is absorbed by the singleton band, exactly like any box"
+    );
+    // Byte-identical to the default `decide` for every count now.
+    assert_eq!(
+        decide_for_cambox("CAM2", 100, 0, 8, 0),
+        decide(100, 0, 8, 0),
+        "CAM2 == the default decide (override dropped)"
     );
 }
