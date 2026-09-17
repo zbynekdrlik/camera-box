@@ -4,6 +4,8 @@ paths:
   - "src/window_gate.rs"
   - "src/probe/recording_segments.rs"
   - "vendor/obs-studio/libobs/obs-source.c"
+  - "scripts/av_sync_calibrate.py"
+  - "scripts/e2e_measurement_pins.py"
 ---
 
 # Diagnosing a genlock FIFO limit-cycle from a failed E2E verdict (#998, 2026-08-06)
@@ -164,3 +166,41 @@ The detection metric shipped for this: the `relock_bursts` family in `src/jitter
 storm; the per-event burst metric preserves WHEN + HOW-INTENSE). A dev1 watchdog / bundle-state
 facet paging on `bursts>=1` catches the NEXT sender stall in minutes instead of ~90 min via the
 dock offset. The sender-side cure (strih render freeze on scene switch) is a separate scoped lane.
+
+## The stream 'NDI 2ME PGM' pin is a FRAME-QUANTIZED actuator — split A/V correction (#1333, bod 4)
+
+The E2E A/V controller (issue 856 / issue 1265) wrote the stream `NDI 2ME PGM`
+`genlock_latency_ms_src` as an ARBITRARY integer ms (`av_sync_calibrate.required_delay_ms`:
+`raw = round(current - offset)`). But the deep stream FIFO holds video FRAME-QUANTIZED
+(hold = `ceil(pin / 33.333)` frames), so a pin whose `frac(pin/33.333) < 0.5` is in the same
+`PHASE_PRONE_MAX_FRAC` limit-cycle band as everything above — the release toggles 29/30 frames
+(±33 ms). LIVE evidence (17.9.2026, pin held constant at 974, frac 0.22): the av-sync dock
+`LOCK-CORRECT measured offset` toggled 72 → 104 → 72 → 109 ms while `late_holds` climbed 41 → 127
+— a ±33 ms (one frame @30) hunt at a CONSTANT pin. Between-run medians walked −1 … −69 … +29 ms,
+the `full_chain.latency.strih_stream.p50` sitting on three plateaus 995 / 1029 / 1062 = exactly
+±33.4 ms steps: the pin (a sub-frame actuator) requantizing the hold by a whole frame each time it
+moved. **±30 ms cannot be held with a frame-quantized actuator.**
+
+**The fix is to SPLIT the correction (`av_sync_calibrate.split_av_correction`):**
+
+- **Whole frames → the pin**, `frames = round(gain·residual / frame_ms)`, and the written pin is
+  ALWAYS phase-snapped through the issue-1003 `phase_snap_pin` (`e2e_measurement_pins.py`) so
+  `frac ∈ [0.6, 0.8]` — `round == ceil`, the hold is deterministic, no 29/30 toggle. (Before #1333
+  `phase_snap_pin` was applied ONLY to the strih per-camera pins; the stream pin was never snapped.)
+  The ±`AV_SYNC_MAX_STEP_MS`/run step clamp + the [3, 2000] hardware clamp are kept; the snap is
+  applied LAST so the WRITTEN pin is never in the prone band even when the step clamp bites (in the
+  rare large-correction case the snap can move the pin up to `PHASE_SNAP_MAX_COST_MS` beyond the
+  ±step window — phase-safety wins, and the issue-1265 guard HOLDs |residual| > 60 anyway).
+- **Sub-frame remainder → the `mbc` audio sync offset** (obs-websocket `SetInputAudioSyncOffset`,
+  ms; positive DELAYS audio). `residual_eff = residual + (ceil(pin_new/frame) −
+  ceil(pin_cur/frame))·frame_ms` = the residual left after the pin's ACTUAL whole-frame video
+  shift; `audio_new = current_audio + gain·residual_eff`, ±step-clamped, ±500 ms hardware-clamped.
+  Nothing read/wrote this actuator before #1333 (the sub-frame residual had nowhere to go).
+
+Sign convention (matches `src/av_window.rs`): `residual = video − audio`; `> 0` = video lags ⇒
+pin DOWN (video earlier) AND audio DELAYED (offset up). Both actuators are read-back verified and
+rolled back BOTH on any failure (never a half-set pair); the issue-1265 apply guard (unchanged)
+HOLDs both writes. The applied audio offset + source are persisted additively into
+`av-sync-last.json`. The two remaining continuous-drift terms are separate lanes: the ASRC buffer
+drain (issue 1335) and the free-running camera/display-vs-grid sawtooth (≤ 17 ms, physics, inside
+the ±30 budget). Acceptance is a green ±30 gate across three ≥ 6 h-apart runs.
