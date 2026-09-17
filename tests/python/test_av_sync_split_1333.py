@@ -307,3 +307,34 @@ class TestGuardHoldNoWrite:
             av_sync_calibrate.apply_latency(None, "NDI 2ME PGM", 987, 954)
         assert fake.set_latency_calls() == [], "HOLD must write no pin"
         assert fake.set_audio_calls() == [], "HOLD must write no audio"
+
+
+class TestAudioTrimGain1333:
+    """#1333 bod 4, live rerun finding (17.9.2026 run 2): the audio sync offset is a LINEAR,
+    sample-fine actuator, so it converges with a higher loop gain than the frame-quantized pin
+    (whose 0.4 damping exists to avoid pin oscillation). With the pin gain also applied to the
+    audio remainder, a -34 ms residual needed 4-5 E2E runs to settle; a dedicated audio gain of 0.8
+    settles it in 2 while still leaving 20 % damping against a single noisy median."""
+
+    def test_audio_trim_gain_is_a_build_default_of_0_8(self):
+        assert av_sync_calibrate.AUDIO_TRIM_LOOP_GAIN == pytest.approx(0.8)
+
+    def test_audio_gain_applies_only_to_the_audio_remainder(self):
+        pin, audio, diag = av_sync_calibrate.split_av_correction(
+            residual_ms=-20.0, current_pin_ms=987, current_audio_offset_ms=0.0, gain=0.4,
+            audio_gain=0.8)
+        assert diag["frames"] == 0, "pin part still uses the pin gain: round(0.4*-20/33.3) = 0"
+        assert pin == 987
+        assert audio == pytest.approx(-16.0), "audio part uses audio_gain: 0.8 * -20 = -16"
+        assert diag["audio_gain"] == pytest.approx(0.8)
+
+    def test_audio_gain_defaults_to_the_pin_gain_when_omitted(self):
+        pin, audio, diag = av_sync_calibrate.split_av_correction(
+            residual_ms=-20.0, current_pin_ms=987, current_audio_offset_ms=0.0, gain=0.4)
+        assert audio == pytest.approx(-8.0)
+        assert diag["audio_gain"] == pytest.approx(0.4)
+
+    def test_controller_path_passes_the_audio_trim_gain(self):
+        src = pathlib.Path(av_sync_calibrate.__file__).read_text(encoding="utf-8")
+        assert "audio_gain=AUDIO_TRIM_LOOP_GAIN" in src, (
+            "the --apply split call must pass the dedicated audio trim gain, not the pin gain")
