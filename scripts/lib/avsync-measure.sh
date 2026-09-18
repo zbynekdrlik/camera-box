@@ -112,3 +112,26 @@ avsync_measure_status_line() {
 avsync_measure_heartbeat_record() {
   printf '%s\t%s' "$1" "$2"
 }
+
+# ── #1331 verified-A/V report: the per-day DURABLE measurement log ─────────────────────────────
+# The heartbeat file holds ONLY the last pass; a live broadcast's earlier measurements are
+# overwritten every ~90 s, so the owner saw only "two measurements" on Discord. To report that the
+# A/V was VERIFIED across the WHOLE broadcast, the measurer ALSO appends every pass's record as one
+# row to a per-day TSV that the dev1 report (scripts/avsync_report.py) reads. These two builders are
+# the single source of truth for the log PATH and the log ROW; the append I/O itself lives in the
+# orchestrator (scripts/avsync-measure-dev2.sh), keeping this lib pure.
+
+# avsync_measure_log_path [BASE] DAY -> the per-day log path "<BASE>/avsync/measurements-<DAY>.tsv"
+# (BASE defaults to $HOME; DAY is a YYYY-MM-DD string the caller derives from the pass epoch in
+# LOCAL time). The dev1 report reads today's + yesterday's files by this exact shape.
+avsync_measure_log_path() {
+  local base="${1:-$HOME}" day="$2"
+  printf '%s/avsync/measurements-%s.tsv' "$base" "$day"
+}
+
+# avsync_measure_log_line EPOCH STATUS -> one per-day-log ROW, BYTE-IDENTICAL to the heartbeat
+# record ("<epoch>\t<status>") so the dev1 report parses a row exactly like it parses a heartbeat.
+# No trailing newline -- the caller adds one when it appends.
+avsync_measure_log_line() {
+  avsync_measure_heartbeat_record "$1" "$2"
+}
