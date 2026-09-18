@@ -550,3 +550,30 @@ pass — no unit change needed. Acceptance is the next live (the ticket stays `o
 **Shared benefit.** The same session decider gives issue 1032 its per-live table of confident
 SyncNet clips (the cross-check evidence) for free, and the per-day TSV on dev2 is the durable record
 the E2E / av-step watchdogs can correlate against.
+
+### GOTCHA (issue 1331) — removing a bash function from a watchdog ORPHANS its Rust harness tests + helpers → dead_code under CI clippy `-D warnings`, invisible to Tier-0
+
+Deleting `maybe_forward_verdict` from `scripts/avsync-heartbeat-alert-watchdog.sh` (its Rust tests
+in `tests/harness_avsync_heartbeat_alert_watchdog.rs` source the script and call the function
+directly) means those tests must go too — and their removal cascades: any harness helper/const/
+struct-field used ONLY by the deleted tests (`MEASURED_ZNIZ_BODY`, `run_main_with_fake_curl`,
+`discord_last_call`) becomes `dead_code`, which CI's `cargo clippy --all-targets -D warnings` fails.
+Tier-0 blocks `cargo clippy`/`build`/`test` locally, so this is INVISIBLE until CI. The net that
+catches it WITHOUT compiling: after the deletions, for EVERY remaining `fn`/`const`/struct-field in
+the harness `grep -cE '\bNAME\b' <file>` must be ≥ 2 (definition + ≥ 1 use); a helper left at 1 is
+dead. `cargo fmt --all --check` proves the file still PARSES but does NOT catch dead_code — the grep
+audit is the substitute. Keep a helper only if a SURVIVING test uses it (`discord_call_count` stayed
+— `dry_run_never_calls_notify` still asserts it; `discord_last_call` went — nothing did).
+
+### GOTCHA (issue 1331) — a new `report` pass makes the EXISTING behavioral harness tests invoke the fake `python3`/`ssh` stubs, inflating `notify_call_count`
+
+The dev1 watchdog's behavioral Rust tests stub a fake `sshpass`/`ssh` (returning a heartbeat body)
+AND a fake `python3` (logging `CALLED` to the notify marker) on PATH. Adding a `report` pass that,
+by default, ssh-fetches rows (the fake ssh returns the heartbeat body as "rows") and then runs
+`python3 avsync_report.py` (the fake python3 intercepts) silently INFLATES `notify_call_count`,
+breaking `both_legs_fresh_never_alerts` etc. Fix: neutralize the report pass in every non-report
+test via the `AVSYNC_REPORT_FETCH_CMD=true` seam (a `true` fetch → no rows → the pass returns before
+touching python) — added as a DEFAULT in the shared `run_bash_body_with_env`, AND explicitly in the
+two tests that build their OWN `Command` (`empty_probe_output_...`, `dev2_host_reads_...`). General
+rule: when a watchdog gains a NEW pass that shells out, add an env seam that no-ops it and set that
+seam in every pre-existing behavioral test that isn't testing the new pass.
