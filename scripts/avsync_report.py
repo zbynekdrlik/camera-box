@@ -73,7 +73,10 @@ DEFAULT_STATE = {
     "last_periodic_epoch": None, # tick anchor of the last PERIODIC message (== session_start at start)
     "last_verdict": None,        # "SEDI" | "NESEDI" | None -- last DEFINITE window verdict evaluated
     "end_posted": True,          # the END message has been posted for the current/last session
-    "last_row_epoch": None,      # the fetch cursor: the max row epoch processed so far
+    # Observability only: the max row epoch processed so far. NOT consumed for dedup (idempotency
+    # comes entirely from the session state machine above, which re-derives from all fetched rows);
+    # it is available as a fetch cursor for a future "fetch only rows > cursor" optimization (review F3).
+    "last_row_epoch": None,
 }
 
 
