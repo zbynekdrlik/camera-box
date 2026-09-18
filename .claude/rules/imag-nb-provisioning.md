@@ -866,6 +866,20 @@ sweep for POSITIVE collisions won't catch it. Fix: write chroot-heredoc comments
 HEADER comment (outside `configure_in_chroot`) MAY carry the literal freely — the test reads only the
 function's `declare -f` output, not the whole file.
 
+**26.04 live sticks carry `cdrom.sources` — the installer drops it before apt (issue 1317).** The
+Ubuntu 26.04 live layers ship `/etc/apt/sources.list.d/cdrom.sources` (deb822,
+`URIs: file:///cdrom`, `Suites: resolute`) and `copy_rootfs` copies it into the target; inside the
+chroot `/cdrom` is not mounted, so `apt-get update` aborts with
+`E: The repository 'file:/cdrom resolute Release' does not have a Release file` and the whole chroot
+configuration dies before the openssh/grub install (the 24.04 ISO did not carry that file, so this is
+a 26.04-only trap). The pure `imag_apt_drop_cdrom_sources <etc-apt-dir>` helper — serialized into the
+chroot via the SAME `declare -f` pattern as the kernel-meta fn and called on `/etc/apt` as the FIRST
+apt-touching step — removes every `*.sources` whose `URIs:` line points at `file:///cdrom` (or
+`cdrom:`) and strips `deb cdrom:` / `deb-src cdrom:` lines from a classic `sources.list`, leaving the
+archive sources byte-identical. It is idempotent (exit 0 when nothing matched) and fails loud only on
+a missing dir; the anchor-test's call string must appear exactly once and must sit BEFORE the apt
+update in `declare -f configure_in_chroot`.
+
 **Tier-0 for these self-contained anchor tests** (`tests/install_imag_nb_pure_functions.rs`,
 `tests/strih_provision_pure_functions.rs`, `tests/linux_genlock_workflow_gate.rs` — std-only, no
 crate dep): the sanctioned worktree-worker path is a standalone
