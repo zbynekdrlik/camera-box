@@ -183,8 +183,9 @@ extern "C" {
 
 /* camera-box #1335 follow-up 4: number of CONSECUTIVE accepted windows whose |level - target| is at
  * least ASRC_LEVEL_RESTORE_ARM_ERR_MS required before the sustained-error arm fires (10 windows =
- * 10 s at ASRC_WINDOW_S 1.0). A below-band window resets the count, so a false arm needs 10 one-
- * directional >= 12 ms readings out of the +/-8 ms scatter (rare); the 10 s detection delay plus a
+ * 10 s at ASRC_WINDOW_S 1.0). A below-band window resets the count, so a false arm needs 10 consecutive
+ * windows each >= 12 ms in MAGNITUDE (either sign -- the arm is on |level - target|, not a direction),
+ * which the +/-8 ms scatter cannot produce (8 < 12); the 10 s detection delay plus a
  * bounded burst is the trade-off, and the burst only brings the level back within 5 ms of the
  * setpoint (harmless). Mirror of src/asrc_bench.rs LEVEL_RESTORE_ARM_WINDOWS -- keep numerically
  * identical. */

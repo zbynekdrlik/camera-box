@@ -502,8 +502,8 @@ armed from THREE independent places, never just one:
    mic/Dante re-plug, a mixer hiccup — the case both 1 and 2 miss. A below-band window resets the
    count; reaching the threshold arms the restore and resets the count; the count also resets next to
    every `level_restore` reset (flush/init/restore-exit). The band (12 ms) sits above the ±8 ms 1-s
-   level scatter so ordinary noise never arms; a false arm needs 10 consecutive one-directional
-   ≥12 ms readings.
+   level scatter so ordinary noise never arms; a false arm needs 10 consecutive ≥12 ms MAGNITUDE
+   readings (either sign — the arm is on `|level − target|`, not a direction), which ±8 ms cannot do.
 
 WHY follow-up 4 exists: the 18.9. 12:00 StartStream (obs.dll 52813623a, E2E rerun 35329592422 attempt
 2) dropped `mbc` `buffered_ms=118 → 92` and `level=100.0 → 68.4` with `steps=1 last_step_ms=-14.3` but
