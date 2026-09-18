@@ -24,10 +24,47 @@ fn read(p: &str) -> String {
 
 const WF: &str = ".github/workflows/linux-genlock.yml";
 
-/// Both jobs must exist and run on ubuntu-24.04 — imag-nb's own distro (noble), so the build's
-/// glibc/library ABI matches the deploy target #458 will swap the artifact onto.
+/// Slice ONE top-level job's YAML block: from its exact 2-space-indented `  <name>:` key up to the
+/// next 2-space-indented job key (a line starting with two spaces then an ASCII letter) or end of
+/// file. Never a bare `.find("runs-on")` — issue 1317 gives the strih job a DIFFERENT runner image
+/// than the imag jobs, so a whole-file `runs-on` read would attribute the wrong runner to a job.
+fn job_block(wf: &str, name: &str) -> String {
+    let key = format!("  {name}:");
+    let lines: Vec<&str> = wf.lines().collect();
+    let start = lines
+        .iter()
+        .position(|l| l.trim_end() == key)
+        .unwrap_or_else(|| panic!("job {name} not found in {WF}"));
+    let mut end = lines.len();
+    for (i, l) in lines.iter().enumerate().skip(start + 1) {
+        let b = l.as_bytes();
+        if b.len() >= 3 && &b[0..2] == b"  " && b[2].is_ascii_alphabetic() {
+            end = i;
+            break;
+        }
+    }
+    lines[start..end].join("\n")
+}
+
+/// The value after `<prefix>` on the one block line carrying it, trimmed of quotes — used to pin the
+/// strih runner literal and the `STRIH_TARGET_RELEASE` env literal EQUAL.
+fn value_after(block: &str, prefix: &str) -> String {
+    block
+        .lines()
+        .find_map(|l| l.trim().strip_prefix(prefix))
+        .unwrap_or_else(|| panic!("no line with prefix {prefix:?} in block:\n{block}"))
+        .trim()
+        .trim_matches('\'')
+        .to_string()
+}
+
+/// issue 1317 (owner ROZHODNUTÉ 18.9.): the strih-lx notebook runs Ubuntu 26.04 (resolute) —
+/// noble's ffmpeg/Qt sonames (`libavcodec60`/Qt 6.4) do not exist there, so the strih bundle must
+/// be built on the 26.04 runner. The strih JOB BLOCK pins `runs-on: ubuntu-26.04`; the imag-parity
+/// full build + the DistroAV compile-check stay on ubuntu-24.04 (imag-nb's noble). All three jobs
+/// still exist.
 #[test]
-fn both_jobs_run_on_ubuntu_24_04() {
+fn strih_job_runs_on_2604_the_imag_jobs_stay_2404() {
     let wf = read(WF);
     assert!(
         wf.contains("linux-distroav-compile-check:"),
@@ -38,17 +75,70 @@ fn both_jobs_run_on_ubuntu_24_04() {
         wf.contains("linux-genlock-build:"),
         "#460: {WF} must define the linux-genlock-build job — the full production bundle."
     );
-    // issue 1317: the strih-lx variant is the THIRD job (a full bundle with browser/CEF ON for
-    // the Linux strih notebook, also Ubuntu 24.04 noble) — every job pins the same runner image.
     assert!(
         wf.contains("linux-genlock-build-strih:"),
         "issue 1317: {WF} must define the linux-genlock-build-strih job — the strih-lx full bundle."
     );
+
+    let strih = job_block(&wf, "linux-genlock-build-strih");
+    assert!(
+        strih.contains("runs-on: ubuntu-26.04"),
+        "issue 1317: the strih job must run on ubuntu-26.04 (the box's release); block:\n{strih}"
+    );
+    assert!(
+        !strih.contains("runs-on: ubuntu-24.04"),
+        "issue 1317: the strih job must NOT stay on ubuntu-24.04; block:\n{strih}"
+    );
+
+    let imag = job_block(&wf, "linux-genlock-build");
+    assert!(
+        imag.contains("runs-on: ubuntu-24.04"),
+        "the imag-parity full build stays on ubuntu-24.04 (imag-nb noble); block:\n{imag}"
+    );
+    let cc = job_block(&wf, "linux-distroav-compile-check");
+    assert!(
+        cc.contains("runs-on: ubuntu-24.04"),
+        "the DistroAV compile-check stays on ubuntu-24.04; block:\n{cc}"
+    );
+
     assert_eq!(
         wf.matches("runs-on: ubuntu-24.04").count(),
-        3,
-        "#460/1317: all three jobs must pin runs-on: ubuntu-24.04 (the imag-nb + strih-lx distro, \
-         noble) — a different Ubuntu version risks a glibc/ABI mismatch against the deploy target."
+        2,
+        "issue 1317: exactly TWO jobs (compile-check + imag-parity) stay on ubuntu-24.04."
+    );
+    assert_eq!(
+        wf.matches("runs-on: ubuntu-26.04").count(),
+        1,
+        "issue 1317: exactly ONE job (the strih variant) runs on ubuntu-26.04."
+    );
+}
+
+/// issue 1317: the strih Stage step writes a `TARGET-RELEASE: ubuntu-26.04` line into
+/// `STRIH_BUILD_FLAGS.txt`, single-sourced from a job-level `STRIH_TARGET_RELEASE` env. `runs-on`
+/// cannot read job env, so the two release literals must be PINNED EQUAL by this test — otherwise a
+/// runner bump and a marker bump could silently drift apart and a bundle would claim the wrong
+/// release.
+#[test]
+fn strih_stage_writes_target_release_marker_pinned_equal_to_the_runner() {
+    let wf = read(WF);
+    let strih = job_block(&wf, "linux-genlock-build-strih");
+
+    assert!(
+        strih.contains("TARGET-RELEASE"),
+        "issue 1317: the strih Stage step must write a TARGET-RELEASE line into \
+         STRIH_BUILD_FLAGS.txt; block:\n{strih}"
+    );
+
+    let runner = value_after(&strih, "runs-on:");
+    let target_release = value_after(&strih, "STRIH_TARGET_RELEASE:");
+    assert_eq!(
+        runner, target_release,
+        "issue 1317: the strih runs-on literal and the STRIH_TARGET_RELEASE env literal must be \
+         EQUAL (runs-on can't read job env, so this test is what keeps them pinned together)."
+    );
+    assert_eq!(
+        runner, "ubuntu-26.04",
+        "issue 1317: the pinned strih release is ubuntu-26.04 (owner ROZHODNUTÉ 18.9.)."
     );
 }
 

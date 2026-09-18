@@ -24,6 +24,12 @@ fn lib() -> PathBuf {
     s
 }
 
+/// Read one of the orchestrator scripts as text (for the static-anchor wiring tests below).
+fn read_script(rel: &str) -> String {
+    let p = manifest_dir().join(rel);
+    std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("read {}: {e}", p.display()))
+}
+
 /// Source the real lib and run `body`. Returns (exit_code, stdout, stderr). `env` is passed as
 /// KEY=VALUE pairs so a test can drive the STRIH_LX_* seams without leaking into other tests.
 fn run_sourced(env: &[(&str, &str)], body: &str) -> (i32, String, String) {
@@ -267,4 +273,78 @@ fn chrome_sandbox_verdict_tokens_ok_missing_wrong_owner_wrong_mode() {
     let (c, out, _e) = run_sourced(&[], "strih_lx_chrome_sandbox_verdict root:root 700 1");
     assert_ne!(c, 0);
     assert_eq!(out.trim(), "wrong-mode");
+}
+
+// --- issue 1317 (owner ROZHODNUTÉ 18.9.): bundle-vs-box release parity -----------------------------
+
+/// `strih_lx_release_parity_ok BUNDLE_FLAGS_TEXT BOX_VERSION_ID` -> 0 iff the flags text carries the
+/// marker line `TARGET-RELEASE: ubuntu-<BOX_VERSION_ID>`. Fail-closed: a mismatch (a 24.04-built
+/// bundle on a 26.04 box — the ffmpeg/Qt soname crash) OR an absent marker (a pre-marker bundle that
+/// must be rebuilt, never trusted) OR an empty box VERSION_ID all return non-zero.
+#[test]
+fn release_parity_ok_matches_the_marker_and_is_fail_closed() {
+    let flags_2604 = "variant=strih\\nENABLE_BROWSER=ON\\nBROWSER-ON: obs-browser + CEF 6533\\nTARGET-RELEASE: ubuntu-26.04";
+    let (code, _o, _e) = run_sourced(
+        &[],
+        &format!("strih_lx_release_parity_ok $'{flags_2604}' 26.04"),
+    );
+    assert_eq!(
+        code, 0,
+        "a bundle TARGET-RELEASE == box VERSION_ID must pass"
+    );
+
+    // 24.04-built bundle on a 26.04 box -> FAIL (the soname mismatch this gate exists to catch).
+    let flags_2404 = "variant=strih\\nENABLE_BROWSER=ON\\nTARGET-RELEASE: ubuntu-24.04";
+    let (code, _o, _e) = run_sourced(
+        &[],
+        &format!("strih_lx_release_parity_ok $'{flags_2404}' 26.04"),
+    );
+    assert_ne!(code, 0, "a 24.04 bundle on a 26.04 box must FAIL");
+
+    // no TARGET-RELEASE marker at all -> fail-closed (a pre-marker bundle must be rebuilt).
+    let flags_none = "variant=strih\\nENABLE_BROWSER=ON\\nBROWSER-ON: obs-browser + CEF 6533";
+    let (code, _o, _e) = run_sourced(
+        &[],
+        &format!("strih_lx_release_parity_ok $'{flags_none}' 26.04"),
+    );
+    assert_ne!(code, 0, "an absent TARGET-RELEASE marker must fail closed");
+
+    // empty box VERSION_ID -> fail-closed (the box release must be known).
+    let (code, _o, _e) = run_sourced(
+        &[],
+        &format!("strih_lx_release_parity_ok $'{flags_2604}' ''"),
+    );
+    assert_ne!(code, 0, "an empty box VERSION_ID must fail closed");
+}
+
+/// issue 1317: `setup-strih.sh` step 4 must gate on release parity BEFORE the `cp -a` bundle install
+/// — a bundle built for another Ubuntu release must never be copied onto the box.
+#[test]
+fn setup_strih_gates_release_parity_before_installing_the_bundle() {
+    let s = read_script("scripts/setup-strih.sh");
+    let gate = s
+        .find("strih_lx_release_parity_ok")
+        .expect("setup-strih must call strih_lx_release_parity_ok in step 4");
+    let install = s
+        .find("cp -a \"${STRIH_LX_BUNDLE_SRC%/}/.\"")
+        .expect("setup-strih must install the bundle via cp -a");
+    assert!(
+        gate < install,
+        "the release-parity gate must run BEFORE the bundle cp -a (never install a wrong-release bundle)"
+    );
+}
+
+/// issue 1317: `verify-strih.sh` must assert bundle-vs-box release parity as an acceptance item,
+/// reading the installed TARGET-RELEASE marker vs the box's os-release VERSION_ID.
+#[test]
+fn verify_strih_carries_the_release_parity_check() {
+    let v = read_script("scripts/verify-strih.sh");
+    assert!(
+        v.contains("strih_lx_release_parity_ok"),
+        "verify-strih must run the release-parity predicate"
+    );
+    assert!(
+        v.contains("TARGET-RELEASE") || v.contains("VERSION_ID"),
+        "verify-strih must reference the release marker / os-release it compares"
+    );
 }
