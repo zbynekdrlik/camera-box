@@ -21,6 +21,10 @@ set -euo pipefail
 #
 # Usage:  genlock-runtime-packages.sh --stage <dir> --out <file>
 
+# (Sibling parser: scripts/lib/strih-provision.sh's `strih_ldd_unresolved` LISTS the unresolved
+# sonames on the target box for verify-strih.sh; this one FAILS at build time + maps the resolved
+# ones to packages. Two contracts, two files -- the standalone CI recorder cannot source the
+# provision lib.)
 # runtime_packages_from_ldd STAGE  (stdin: concatenated `ldd` output) -> print the sorted-unique apt
 # package names owning the resolved SYSTEM libraries the bundle links, one per line. Drops sonames
 # whose resolved path is INSIDE STAGE (bundle-internal libs). FAILS LOUD (returns 3) on any
@@ -47,7 +51,15 @@ runtime_packages_from_ldd() {
           "$stage_norm"/*) continue ;;                    # bundle-internal -> drop
         esac
         pkg="$(dpkg -S "$path" 2>/dev/null | head -n1 | cut -d: -f1)" || true
-        [ -n "$pkg" ] && out+="${pkg}"$'\n'
+        if [ -n "$pkg" ]; then
+          out+="${pkg}"$'\n'
+        else
+          # A resolved SYSTEM path that no apt package owns (an aliased / non-apt lib) -- NOTE it so
+          # the gap surfaces at record time rather than only on the box (verify-strih.sh's own
+          # `strih_ldd_unresolved` re-check still fails loud there). Not a hard fail here: only an
+          # unresolvable soname (`=> not found`, above) is a build-blocking error.
+          printf 'runtime_packages_from_ldd: NOTE no apt package owns resolved lib %s (skipped)\n' "$path" >&2
+        fi
         ;;
       *) : ;;                                              # vdso / loader lines (no '=>') -> skip
     esac
@@ -87,11 +99,15 @@ while IFS= read -r _d; do
 done < <(find "$STAGE_ABS" -type f -name '*.so*' -printf '%h\n' | sort -u)
 
 # Collect ldd output over bin/obs + every staged *.so, then map to packages (fail-loud on not-found).
+# Each `ldd` is `|| true`'d so ONLY runtime_packages_from_ldd's return code governs the pipeline
+# (an `ldd` on a non-ELF staged file -- a linker script -- exits 1 and prints nothing useful; under
+# `pipefail` that LEFT-side non-zero would otherwise abort the step with a misleading "unresolved
+# dependency" error even though no `=> not found` line was ever emitted).
 PKGS="$(
   {
-    [ -f "$STAGE_ABS/bin/obs" ] && LD_LIBRARY_PATH="$LLP" ldd "$STAGE_ABS/bin/obs" 2>/dev/null
+    [ -f "$STAGE_ABS/bin/obs" ] && { LD_LIBRARY_PATH="$LLP" ldd "$STAGE_ABS/bin/obs" 2>/dev/null || true; }
     while IFS= read -r _so; do
-      LD_LIBRARY_PATH="$LLP" ldd "$_so" 2>/dev/null
+      LD_LIBRARY_PATH="$LLP" ldd "$_so" 2>/dev/null || true
     done < <(find "$STAGE_ABS" -type f -name '*.so*')
   } | runtime_packages_from_ldd "$STAGE_ABS"
 )" || { echo "genlock-runtime-packages.sh: FAILED -- the bundle has an unresolved runtime dependency (see above)" >&2; exit 1; }
