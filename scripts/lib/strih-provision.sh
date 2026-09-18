@@ -214,3 +214,23 @@ strih_lx_release_parity_ok() {
   [ -n "$version_id" ] || return 1
   printf '%s\n' "$flags" | grep -qxF "TARGET-RELEASE: ubuntu-${version_id}"
 }
+
+# --- issue 1317 (launcher pair): strih-obs-start.sh / strih-obs-stop.sh presence gate -------------
+# strih_launcher_pair_ok BIN_DIR -> 0 iff BOTH launcher scripts the strih-obs.service unit's
+# ExecStart/ExecStop reference (strih-obs-start.sh + strih-obs-stop.sh) exist under BIN_DIR AND are
+# executable. On any failure it PRINTS the offending name(s) (`missing <name>` / `not-executable
+# <name>`), one per line, so a dangling ExecStart names ITSELF in verify-strih.sh (a bare "OBS not
+# running under the supervisor" would otherwise hide WHY the unit never launched). setup-strih.sh
+# step 8 installs the pair mode 0755 BEFORE it enables the unit; this is the acceptance check that
+# the install landed and the unit will not flap 203/EXEC.
+strih_launcher_pair_ok() {
+  local dir="${1:?bin-dir required}" name missing=0
+  for name in strih-obs-start.sh strih-obs-stop.sh; do
+    if [ ! -f "${dir}/${name}" ]; then
+      printf 'missing %s\n' "$name"; missing=1
+    elif [ ! -x "${dir}/${name}" ]; then
+      printf 'not-executable %s\n' "$name"; missing=1
+    fi
+  done
+  [ "$missing" = 0 ]
+}

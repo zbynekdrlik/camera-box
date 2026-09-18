@@ -171,6 +171,16 @@ step 8 "OBS supervision unit (strih-obs.service, Restart=on-failure) -- enable-o
 install -d -o "$DESKTOP_USER" -g "$DESKTOP_USER" "${USER_HOME}/.config/systemd/user"
 install -m 0644 "${HERE}/../systemd/strih-obs.service" "${USER_HOME}/.config/systemd/user/strih-obs.service"
 chown -R "$DESKTOP_USER":"$DESKTOP_USER" "${USER_HOME}/.config/systemd/user" 2>/dev/null || true
+# issue 1317: install the launcher pair the unit's ExecStart/ExecStop reference
+# (/usr/local/bin/strih-obs-start.sh + strih-obs-stop.sh) BEFORE enabling -- an enabled unit whose
+# ExecStart target does not exist flaps 203/EXEC under Restart=on-failure. mode 0755 so systemd can
+# exec them. Fail loud if either launcher is missing next to this script.
+for _launcher in strih-obs-start.sh strih-obs-stop.sh; do
+  [ -f "${HERE}/${_launcher}" ] || fail "launcher scripts/${_launcher} not found next to this script (it is the strih-obs.service ExecStart/ExecStop target)"
+done
+install -m 0755 "${HERE}/strih-obs-start.sh" /usr/local/bin/strih-obs-start.sh
+install -m 0755 "${HERE}/strih-obs-stop.sh"  /usr/local/bin/strih-obs-stop.sh
+echo "  installed launcher pair -> /usr/local/bin/strih-obs-start.sh + strih-obs-stop.sh (mode 0755)"
 sudo -u "$DESKTOP_USER" XDG_RUNTIME_DIR="/run/user/$(id -u "$DESKTOP_USER")" systemctl --user enable strih-obs.service 2>/dev/null \
   || warn "  enable strih-obs.service by hand once the user session bus is up"
 echo "  strih-obs.service installed + enabled (starts on the next graphical session)"

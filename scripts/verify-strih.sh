@@ -34,6 +34,17 @@ tcp_open()   { timeout 4 bash -c "exec 3<>/dev/tcp/${1}/${2}" 2>/dev/null; }
 
 echo -e "${GREEN}=== verify-strih.sh (issue 1317) acceptance gate ===${NC}"
 
+# 0) launcher pair present + executable (issue 1317): strih-obs.service ExecStart/ExecStop reference
+#    /usr/local/bin/strih-obs-start.sh + strih-obs-stop.sh; a missing/dangling launcher makes the
+#    unit flap 203/EXEC. Checked FIRST so a dangling ExecStart names ITSELF here, instead of only
+#    surfacing as the generic "OBS not running under the supervisor" item below.
+LAUNCHER_BIN_DIR="${STRIH_LAUNCHER_BIN_DIR:-/usr/local/bin}"
+if _lp_missing="$(strih_launcher_pair_ok "$LAUNCHER_BIN_DIR")"; then
+  ok "strih-obs launcher pair present + executable in ${LAUNCHER_BIN_DIR}"
+else
+  bad "strih-obs launcher pair not installed in ${LAUNCHER_BIN_DIR} (${_lp_missing//$'\n'/, }) -- strih-obs.service ExecStart would flap 203/EXEC; re-run setup-strih.sh step 8"
+fi
+
 # 1) OBS running under the supervisor.
 if systemctl --user is-active strih-obs.service >/dev/null 2>&1 || pgrep -x obs >/dev/null 2>&1 || pgrep -f 'bin/64bit/obs\|/obs$' >/dev/null 2>&1; then
   ok "OBS running (strih-obs.service / obs process)"

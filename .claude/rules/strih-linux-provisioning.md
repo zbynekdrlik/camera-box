@@ -92,6 +92,50 @@ entry = owner step (the router is read-only for me), scripts dial the IP / hostn
   exits non-zero on any failed item. Latency pins are REPORT-ONLY vs
   `scripts/latency-pins-baseline.json`'s `strih-lx` key (`_all_camera_ndi_inputs_ms` = 3).
 
+## OBS supervision launcher pair — strih-obs-start.sh / strih-obs-stop.sh (issue 1317, DONE)
+
+`systemd/strih-obs.service` (`ExecStart=/usr/local/bin/strih-obs-start.sh`,
+`ExecStop=/usr/local/bin/strih-obs-stop.sh --exec-stop`) supervises OBS on strih-lx — the sibling of
+`imag-obs.service` / `imag-obs-start.sh` (issue 882). The launcher pair now EXISTS
+(`scripts/strih-obs-start.sh` / `scripts/strih-obs-stop.sh`); before it landed the enabled user unit
+flapped `203/EXEC` (executable not found, `Restart=on-failure`) and `verify-strih.sh` failed at "OBS
+not running under the supervisor".
+
+- **strih-lx facts the imag launcher does NOT cover** (why it is a bespoke pair, never a symlink to
+  the imag one): a GNOME **Wayland** session on 26.04 (`DISPLAY` is unset in the user session — the
+  start script resolves `WAYLAND_DISPLAY` from the `wayland-*` socket under `XDG_RUNTIME_DIR`, else
+  XWayland `DISPLAY=:0` when an X socket exists, else FAILS LOUD, via `strih_resolve_session_env`);
+  the OBS binary at `/opt/obs-genlock/bin/obs` (not on `PATH`); NO taskset pin unless
+  `STRIH_ISOLATED_CPUS` / `/etc/strih-isolated-cpus.conf` exists (never a guessed pin, the imag #841
+  lesson); NO DRM lease; NO scene-seeder preflight (the strih seeder is a separate follow-up, so the
+  launcher must not import one). `--profile` / `--collection` are passed only when those OBS dirs
+  exist (a fresh box has none → default).
+- **The unit lifetime IS OBS's lifetime** (`Type=simple`, the imag #882 pattern): the start script
+  `wait`s on the OBS pid and propagates its exit — a segfault → non-zero → `Restart=on-failure`; an
+  operator quit → 0 → left alone. The stop script routes a PLAIN invocation through
+  `systemctl --user stop` (so a deliberate stop is never mistaken for a crash and re-launched), and
+  runs the SIGTERM → 15 s → SIGKILL ladder only under `--exec-stop` (the unit's own `ExecStop` mode).
+- **The install + lock-step gate.** `setup-strih.sh` step 8 `install -m 0755`s BOTH launchers into
+  `/usr/local/bin` BEFORE `systemctl --user enable`. `scripts/lib/strih-provision.sh`
+  `strih_launcher_pair_ok <bin-dir>` (both present + executable; prints the missing/non-executable
+  name) is checked by `verify-strih.sh` FIRST — before the "OBS running under the supervisor" item —
+  so a dangling launcher names itself. A `tests/strih_provision_pure_functions.rs` lock-step anchor
+  pins the unit's ExecStart/ExecStop basenames EQUAL to the installed launcher basenames, so a future
+  rename can never re-dangle the ExecStart target.
+
+## Staging + ssh gotchas for setup-strih (live, 18.9.2026)
+
+- **The tree rsynced to the box must carry `scripts/` AND `systemd/`.** `setup-strih.sh` steps 8/9
+  read `${HERE}/../systemd/strih-obs.service` (a sibling of `scripts/`), so a scripts-only sync FAILS
+  at step 8 (`systemd/strih-obs.service not found next to this script`). Stage the repo `scripts/`
+  and `systemd/` dirs together (run 2 on 18.9. failed exactly here until `systemd/` was synced).
+- **Launching setup-strih over ssh needs the sudo password on stdin.** A bare `sudo … nohup … &` over
+  ssh has no tty → the log holds only `sudo: A terminal is required to authenticate`. Use
+  `echo "$PW" | sudo -S -p "" bash -c "nohup … &"`.
+- **Poll with `pgrep -x setup-strih.sh`, never `pgrep -f`.** `pgrep -f setup-strih.sh` matches its OWN
+  command line and reports RUNNING forever (run 1 on 18.9. "ran" for 20 min this way while setup had
+  actually never started).
+
 ## Audio — the one BLOCKER, fail-loud until wired
 
 There is NO Dante on the strih PC (owner 15.9.): program audio is `MiniFuse 4` USB → VB-Matrix
@@ -178,8 +222,9 @@ sandbox!` → the render process dies). `verify-strih.sh` item 13 only checks th
 - **`deploy-genlock-fleet.sh` strih-lx EXECUTE deploy** (scp the strih artifact + ssh-run the on-box
   program). The pure helpers + the PLAN arm exist; execute reuses the imag transport with
   `fleet_linux_bundle_artifact_for strih-lx` + `STRIH_LX_IP` once the box exists.
-- **`strih-obs-start.sh` / `strih-obs-stop.sh`** launcher pair (sibling of `imag-obs-start.sh`) that
-  `strih-obs.service` ExecStart references.
+- ~~**`strih-obs-start.sh` / `strih-obs-stop.sh`** launcher pair (sibling of `imag-obs-start.sh`) that
+  `strih-obs.service` ExecStart references~~ — **DONE (issue 1317)**, see the "OBS supervision
+  launcher pair" section above.
 - **The 2ME self-feedback INPUT names.** issue 1317's spec lists the multiview-feedback inputs as
   `STRIH-SNV (2ME PGM/PVW)` (what the Windows box publishes). For a fully independent strih-lx the
   box's OWN multiview feedback should read `STRIH-LX (2ME PGM/PVW)` (self-loop); while parallel and
