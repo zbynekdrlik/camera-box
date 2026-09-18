@@ -1768,6 +1768,121 @@ mod tests {
         );
     }
 
+    /// issue #1335 follow-up 3: a DELIBERATE setpoint shift of at least the restore's exit band must
+    /// ARM the fast bounded level restore, so the level reaches the new depth in minutes with the
+    /// integral frozen (follow-up 2) — NOT the ~1 h at the ±3 ppm rail the plain I term needs (the
+    /// live 18.9. 12 h series: a +12 ms sync-offset trim railed the integral for ~1 h and rang for
+    /// hours). A sub-band shift arms nothing (the gentle I+P loop absorbs it). RED before this fix:
+    /// `shift_level_target` moved the setpoint but never armed the restore, so `level_restore()` was
+    /// false, the buffer never reached ±5 ms of the new target inside the window, and the integral
+    /// railed at ±LEVEL_INTEGRAL_MAX_PPM.
+    #[test]
+    fn shift_level_target_arms_fast_restore_on_deliberate_shift_1335() {
+        const TRUE_PPM: f64 = -5.0; // healthy mbc floor; buffer holds flat once locked
+        const BLOCK_S: f64 = 1.0; // one accepted 1 s window per block
+        const WARMUP_S: f64 = 2400.0; // past lock (~65 s); the integral parks near 0
+        const START_BUF_MS: f64 = 100.0;
+        const POST_S: f64 = 900.0; // > the Kr=2 restore settle for a 12 ms move (~433 s, below)
+
+        // Closed-loop buffer sim: warm to lock, then apply a DELIBERATE setpoint shift of `shift_ms`
+        // (announce Δ to the servo; the ALREADY-buffered samples do NOT jump — obs applies the offset
+        // to FUTURE placement — so the level error is now Δ and the only fast actuator is the restore
+        // this follow-up arms). Returns (armed_right_after_shift, restore_active_at_end,
+        // target_before, target_after, post-shift trace of (buffer_ms, integral_ppm)).
+        fn run(shift_ms: f64) -> (bool, bool, f64, f64, Vec<(f64, f64)>) {
+            let mut c = RealtimeAsrcCompensator::new();
+            let clock = DriftingAudioClock::new(TRUE_PPM);
+            let mut buffer_ms = START_BUF_MS;
+            let mut t = 0.0;
+            while t < WARMUP_S {
+                let raw = clock.raw_advance(BLOCK_S);
+                let corrected = c.compensate_with_level(raw, BLOCK_S, buffer_ms);
+                buffer_ms += (corrected - BLOCK_S) * 1000.0;
+                t += BLOCK_S;
+            }
+            let target_before = c.level_target_ms();
+            c.shift_level_target(shift_ms);
+            let armed = c.level_restore();
+            let target_after = c.level_target_ms();
+            let mut post = Vec::new();
+            t = 0.0;
+            while t < POST_S {
+                let raw = clock.raw_advance(BLOCK_S);
+                let corrected = c.compensate_with_level(raw, BLOCK_S, buffer_ms);
+                buffer_ms += (corrected - BLOCK_S) * 1000.0;
+                t += BLOCK_S;
+                post.push((buffer_ms, c.level_integral_ppm()));
+            }
+            (armed, c.level_restore(), target_before, target_after, post)
+        }
+
+        // (a) a +12 ms shift (the live 18.9. trim) arms the restore, which drives the level to within
+        // 5 ms of the NEW setpoint fast and WITHOUT railing the integral, then EXITS.
+        let (armed, active_at_end, tb, ta, post) = run(12.0);
+        assert!(
+            (ta - (tb + 12.0)).abs() < 1e-9,
+            "issue #1335 follow-up 3: the shift must move the setpoint by exactly Δ (from {tb:.3} to \
+             {:.3} ms), got {ta:.3}",
+            tb + 12.0
+        );
+        assert!(
+            armed,
+            "issue #1335 follow-up 3: a +12 ms deliberate shift (≥ the 5 ms arm band) must ARM the \
+             fast level restore (level_restore() == true right after the shift), got false — the \
+             plain ±3 ppm I term would take ~1 h and rail"
+        );
+        // settle time: first window whose buffer is within 5 ms of the new target.
+        let settle_s = post
+            .iter()
+            .position(|(b, _)| (b - ta).abs() < 5.0)
+            .map(|i| (i + 1) as f64)
+            .unwrap_or(-1.0);
+        // The DESIGN quoted ~2 min for a 12 ms move; that assumes the ±100 ppm restore CLAMP binds
+        // (i.e. Kr ~ 20). At the shipped Kr=2 the restore is Kr·err (24 ppm at 12 ms, never near the
+        // clamp), so it decays with a ~500 s time constant — 12 ms → ±5 ms in ~433 s (the same
+        // clamp-does-not-bind calibration the follow-up-2 step test documents for its 50 ms case).
+        // Well under an hour and monotonic, so consecutive E2E offset applies settle between runs.
+        assert!(
+            settle_s > 0.0 && settle_s <= 600.0,
+            "issue #1335 follow-up 3: the armed restore must bring the level within 5 ms of the new \
+             target in ≤ 600 s (measured ~433 s at Kr=2), got settle_s={settle_s:.0}"
+        );
+        let integral_peak = post.iter().fold(0.0_f64, |m, (_, i)| m.max(i.abs()));
+        assert!(
+            integral_peak < LEVEL_INTEGRAL_MAX_PPM - 0.5,
+            "issue #1335 follow-up 3: with the restore doing the work the level integral must NEVER \
+             rail at ±{LEVEL_INTEGRAL_MAX_PPM} ppm (RED: it railed at 3.0), got peak {integral_peak:.3} ppm"
+        );
+        let final_buf = post.last().unwrap().0;
+        assert!(
+            (final_buf - ta).abs() < 5.5,
+            "issue #1335 follow-up 3: the level must stay converged at the new setpoint {ta:.3} ms \
+             (within ±5.5 ms), got {final_buf:.3}"
+        );
+        assert!(
+            !active_at_end,
+            "issue #1335 follow-up 3: the restore burst must EXIT once the buffer is back within 5 ms \
+             (the existing |err| < 5 ms exit is unchanged)"
+        );
+
+        // (b) a +3 ms shift is below the 5 ms arm band — it must arm NOTHING; the gentle I+P loop
+        // absorbs it as before (no restore burst, no windup).
+        let (armed_small, _, tb_s, ta_s, post_small) = run(3.0);
+        assert!(
+            (ta_s - (tb_s + 3.0)).abs() < 1e-9,
+            "issue #1335 follow-up 3: the sub-band shift must still move the setpoint by Δ"
+        );
+        assert!(
+            !armed_small,
+            "issue #1335 follow-up 3: a +3 ms shift (< the 5 ms arm band) must NOT arm the restore, got true"
+        );
+        let small_integral_peak = post_small.iter().fold(0.0_f64, |m, (_, i)| m.max(i.abs()));
+        assert!(
+            small_integral_peak < LEVEL_INTEGRAL_MAX_PPM,
+            "issue #1335 follow-up 3: the sub-band shift must not rail the integral either, got peak {small_integral_peak:.3} ppm"
+        );
+    }
+
     /// issue #1335 follow-up 2 (a): a permanent 50 ms INPUT sample-loss step (the live 17.9. 18:52
     /// StartStream stall: mbc buffered_ms 108 → 51, starved_blocks=0) must NOT bias the rate slope —
     /// the servo RE-BASEs the step out of the regression (estimate stays put) AND fast-restores the
