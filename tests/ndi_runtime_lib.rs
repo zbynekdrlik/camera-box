@@ -132,6 +132,34 @@ fn emitted_recipe_is_valid_bash() {
     );
 }
 
+/// issue 1317 (review fix): an idempotent re-run may omit CAM_PW (the runtime is already present).
+/// The emitter must STILL emit the UNCONDITIONAL perms-normalize / ldconfig / symlink / avahi tail
+/// with an EMPTY pw — only the fetch is CAM_PW-gated — else a re-run silently skips the 0600 re-heal
+/// and diverges from setup-imag's old inline block (which ran that tail unconditionally).
+#[test]
+fn empty_pw_still_emits_the_unconditional_reheal_tail() {
+    let (code, out, _e) = run_sourced("ndi_runtime_install_cmds 10.77.9.61 '' newlevel");
+    assert_eq!(code, 0, "an empty pw must NOT refuse to emit (the idempotent re-run path)");
+    assert!(
+        out.contains("/usr/local/lib/libndi.so.6"),
+        "the /usr/local/lib symlink must still emit on an empty pw: {out}"
+    );
+    assert!(
+        out.contains("chmod a+rX"),
+        "the perms-normalize must still emit on an empty pw: {out}"
+    );
+    assert!(out.contains("ldconfig"), "ldconfig must still emit on an empty pw: {out}");
+    assert!(
+        out.contains("avahi-daemon"),
+        "avahi must still emit on an empty pw: {out}"
+    );
+    // ...but the fetch itself stays CAM_PW-guarded (fail-closed INSIDE the runtime-absent branch).
+    assert!(
+        out.contains("CAM_PW"),
+        "the fetch block must carry a CAM_PW-required guard: {out}"
+    );
+}
+
 /// A default NDI dir (/usr/lib/ndi) is used when the 4th arg is omitted; the 4th arg overrides it.
 #[test]
 fn ndi_dir_defaults_to_usr_lib_ndi_and_is_overridable() {
