@@ -139,7 +139,10 @@ fn emitted_recipe_is_valid_bash() {
 #[test]
 fn empty_pw_still_emits_the_unconditional_reheal_tail() {
     let (code, out, _e) = run_sourced("ndi_runtime_install_cmds 10.77.9.61 '' newlevel");
-    assert_eq!(code, 0, "an empty pw must NOT refuse to emit (the idempotent re-run path)");
+    assert_eq!(
+        code, 0,
+        "an empty pw must NOT refuse to emit (the idempotent re-run path)"
+    );
     assert!(
         out.contains("/usr/local/lib/libndi.so.6"),
         "the /usr/local/lib symlink must still emit on an empty pw: {out}"
@@ -148,7 +151,10 @@ fn empty_pw_still_emits_the_unconditional_reheal_tail() {
         out.contains("chmod a+rX"),
         "the perms-normalize must still emit on an empty pw: {out}"
     );
-    assert!(out.contains("ldconfig"), "ldconfig must still emit on an empty pw: {out}");
+    assert!(
+        out.contains("ldconfig"),
+        "ldconfig must still emit on an empty pw: {out}"
+    );
     assert!(
         out.contains("avahi-daemon"),
         "avahi must still emit on an empty pw: {out}"

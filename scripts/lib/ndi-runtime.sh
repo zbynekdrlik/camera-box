@@ -36,15 +36,21 @@
 # expands them (scp's remote shell does). On a copy / linker-cache failure the emitted recipe writes
 # a message to stderr and `exit 1`s, so a caller runs it as `( eval "$(...)" ) || fail "..."`.
 ndi_runtime_install_cmds() {
-  local peer="${1:?ndi peer required}" pw="${2:?cam pw required}" user="${3:-newlevel}" ndir="${4:-/usr/lib/ndi}"
+  local peer="${1:?ndi peer required}" pw="${2-}" user="${3:-newlevel}" ndir="${4:-/usr/lib/ndi}"
   local q_peer q_pw q_user q_ndir
   q_peer="$(printf '%q' "$peer")"
   q_pw="$(printf '%q' "$pw")"
   q_user="$(printf '%q' "$user")"
   q_ndir="$(printf '%q' "$ndir")"
+  # NOTE: pw is allowed to be EMPTY (${2-}, no colon) -- an idempotent re-run with the runtime
+  # already present does not need it, so the whole recipe (incl. the unconditional perms/ldconfig/
+  # symlink/avahi tail below) must still emit. CAM_PW is required ONLY for the fetch, so the guard
+  # lives INSIDE the runtime-absent branch (matching setup-imag's old inline block, which ran the
+  # tail unconditionally on a re-run).
   printf '%s\n' \
     "__ndir=${q_ndir}" \
     'if [ ! -e "$__ndir/libndi.so.6" ]; then' \
+    "  [ -n ${q_pw} ] || { echo 'ndi-runtime: CAM_PW required to fetch the NDI runtime from the cambox peer' >&2; exit 1; }" \
     '  command -v sshpass >/dev/null 2>&1 || apt-get install -y sshpass >/dev/null' \
     '  mkdir -p "$__ndir"' \
     "  sshpass -p ${q_pw} scp -O -o StrictHostKeyChecking=no ${q_user}@${q_peer}:/usr/lib/ndi/libndi.so.'*.*.*' \"\$__ndir/\" || { echo 'ndi-runtime: NDI runtime copy from the cambox peer failed' >&2; exit 1; }" \
