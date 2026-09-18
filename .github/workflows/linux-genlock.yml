@@ -286,13 +286,25 @@ jobs:
   linux-genlock-build-strih:
     name: Full Linux genlock bundle -- strih variant (issue 1317)
     needs: [linux-distroav-compile-check]
-    runs-on: ubuntu-24.04
+    # issue 1317 (owner ROZHODNUTÉ 18.9.): the strih-lx notebook runs Ubuntu 26.04 (resolute) --
+    # noble's ffmpeg/Qt sonames (libavcodec60 / Qt 6.4) do not exist there, so the strih bundle must
+    # be built on the 26.04 runner or it cannot load on the box. ONLY this job moves; the imag-parity
+    # full build (linux-genlock-build) and the DistroAV compile-check stay on ubuntu-24.04 (imag-nb
+    # noble). `runs-on` cannot read job env, so this literal is pinned EQUAL to STRIH_TARGET_RELEASE
+    # below by tests/linux_genlock_workflow_gate.rs.
+    runs-on: ubuntu-26.04
     timeout-minutes: 120
     env:
       # issue 1317: obs-browser + CEF ARE wired below (the CEF fetch/verify/extract step). Flip to
       # 'OFF' to drop the browser sources again -- that is the ONLY change needed (the fetch step and
       # the CEF_ROOT_DIR arg are both gated on this value, and the STRIH_BUILD_FLAGS marker follows).
       STRIH_ENABLE_BROWSER: 'ON'
+      # issue 1317: the Ubuntu release this strih bundle is built on -- the SINGLE SOURCE for the
+      # STRIH_BUILD_FLAGS `TARGET-RELEASE:` marker line (the Stage step reads $STRIH_TARGET_RELEASE).
+      # MUST stay equal to the `runs-on:` literal above (runs-on can't read job env, so a test pins
+      # them together); verify-strih.sh fails closed if the installed bundle's marker != the box's
+      # /etc/os-release VERSION_ID (a 24.04 bundle on a 26.04 box would crash OBS at load).
+      STRIH_TARGET_RELEASE: 'ubuntu-26.04'
       # CEF pin -- MUST match vendor/obs-studio/CMakePresets.json configurePresets[dependencies]
       # .vendor."obsproject.com/obs-studio".dependencies.cef (ubuntu-x86_64). tests/python/
       # test_linux_genlock_strih_cef_1317.py::test_workflow_cef_hash_matches_vendored_pin guards drift.
@@ -410,8 +422,12 @@ jobs:
           else
             marker="BROWSER-OFF: obs-browser/CEF not built (flip STRIH_ENABLE_BROWSER=ON to build it, issue 1317)"
           fi
-          printf 'variant=strih\nENABLE_BROWSER=%s\n%s\n' "$STRIH_ENABLE_BROWSER" "$marker" > stage/STRIH_BUILD_FLAGS.txt
-          echo "staged strih variant (ENABLE_BROWSER=$STRIH_ENABLE_BROWSER)"
+          # issue 1317: the TARGET-RELEASE line records the Ubuntu release this bundle was BUILT on
+          # (single-sourced from the STRIH_TARGET_RELEASE job env, pinned equal to runs-on). verify-strih.sh
+          # + setup-strih.sh fail closed if this != the box's /etc/os-release VERSION_ID.
+          printf 'variant=strih\nENABLE_BROWSER=%s\n%s\nTARGET-RELEASE: %s\n' \
+            "$STRIH_ENABLE_BROWSER" "$marker" "$STRIH_TARGET_RELEASE" > stage/STRIH_BUILD_FLAGS.txt
+          echo "staged strih variant (ENABLE_BROWSER=$STRIH_ENABLE_BROWSER, TARGET-RELEASE=$STRIH_TARGET_RELEASE)"
 
       - name: Generate per-component SHA manifest (#120)
         run: scripts/genlock-manifest.sh --stage stage --out stage/BUNDLE_MANIFEST.json

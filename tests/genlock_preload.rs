@@ -1940,6 +1940,80 @@ mod vendored_source {
              deliberate audio trim would be cancelled again. Keep numerically identical to \
              src/asrc_bench.rs shift_level_target."
         );
+        // issue #1335 follow-up 3: a DELIBERATE setpoint shift of >= the restore's own exit band must
+        // ALSO arm the fast bounded level restore (asrc_compensator_shift_level_target sets
+        // level_restore), so a deliberate audio-offset trim settles in minutes instead of ringing for
+        // hours at the +/-3 ppm I rail (the 18.9. 12 h series). Src authority + Tier-0 gate: the
+        // shift_level_target_arms_fast_restore_on_deliberate_shift_1335 bench. Keep the ARM constant
+        // and the arming line byte-exact with the shipped C.
+        assert!(
+            h.contains("#define ASRC_LEVEL_RESTORE_ARM_MS 5.0"),
+            "{ASRC_COMPENSATOR_H}: #1335 follow-up 3 — the ASRC_LEVEL_RESTORE_ARM_MS = 5.0 arm-band \
+             constant (equal to the restore's exit band) is no longer defined."
+        );
+        assert!(
+            c.contains(
+                "if (fabs(delta_ms) >= ASRC_LEVEL_RESTORE_ARM_MS) c->level_restore = true;"
+            ),
+            "{ASRC_COMPENSATOR_C}: #1335 follow-up 3 — asrc_compensator_shift_level_target no longer \
+             arms level_restore when |delta_ms| >= ASRC_LEVEL_RESTORE_ARM_MS; a deliberate offset \
+             trim would ring for hours at the +/-3 ppm rail again. Keep numerically identical to \
+             src/asrc_bench.rs shift_level_target."
+        );
+
+        // issue #1335 follow-up 4: a SUSTAINED buffer-level error (a disturbance that arrives with NO
+        // same-window residual step -- the 18.9. 12:00 StartStream shape the step arm + shift arm both
+        // miss) must ALSO arm the fast bounded level restore, counting consecutive accepted windows
+        // whose |level - target| >= the band. Src authority + Tier-0 gate: the
+        // sustained_level_error_arms_fast_restore_1335 / sub_band_level_offset_never_arms_but_band_is_live_1335
+        // benches. Keep the two ARM constants and the accepted-window counter byte-exact with the
+        // shipped C and numerically identical to src/asrc_bench.rs.
+        assert!(
+            h.contains("#define ASRC_LEVEL_RESTORE_ARM_ERR_MS 12.0"),
+            "{ASRC_COMPENSATOR_H}: #1335 follow-up 4 -- the ASRC_LEVEL_RESTORE_ARM_ERR_MS = 12.0 \
+             sustained-error band constant is no longer defined."
+        );
+        assert!(
+            h.contains("#define ASRC_LEVEL_RESTORE_ARM_WINDOWS 10"),
+            "{ASRC_COMPENSATOR_H}: #1335 follow-up 4 -- the ASRC_LEVEL_RESTORE_ARM_WINDOWS = 10 \
+             consecutive-window count constant is no longer defined."
+        );
+        assert!(
+            c.contains("++c->level_err_windows >= ASRC_LEVEL_RESTORE_ARM_WINDOWS"),
+            "{ASRC_COMPENSATOR_C}: #1335 follow-up 4 -- the accepted-window branch no longer counts \
+             consecutive >= ASRC_LEVEL_RESTORE_ARM_ERR_MS windows into level_err_windows and arms the \
+             restore at ASRC_LEVEL_RESTORE_ARM_WINDOWS; a sustained level error would ring for ~an hour \
+             at the +/-3 ppm rail again. Keep numerically identical to src/asrc_bench.rs \
+             compensate_with_level."
+        );
+
+        // issue #1335 follow-up 5: the SMOOTHED proportional term is the NORMAL LAW of the level loop.
+        // The P gain is raised 0.03 -> 2.0 and now reads an EMA (tau ASRC_LEVEL_EMA_TAU_S) of the
+        // per-window level error, clamped +/-ASRC_LEVEL_KP_MAX_PPM (loop time constant ~500 s). The
+        // Kp=2.0 value + the P-term line (Kp * c->level_err_ema_ms) are pinned in the follow-up-2 test
+        // above; here pin the two NEW constants, the two NEW struct fields, and the EMA update line.
+        // Src authority + Tier-0 gate: the smoothed_p_term_holds_level_against_tick_noise_1335 /
+        // smoothed_p_term_does_not_chatter_on_tick_noise_1335 / deliberate_shift_does_not_spike_the_p_term_1335
+        // benches. Keep byte-exact with the shipped C and numerically identical to src/asrc_bench.rs.
+        assert!(
+            h.contains("#define ASRC_LEVEL_KP_MAX_PPM 50.0")
+                && h.contains("#define ASRC_LEVEL_EMA_TAU_S 10.0"),
+            "{ASRC_COMPENSATOR_H}: #1335 follow-up 5 -- the ASRC_LEVEL_KP_MAX_PPM = 50.0 P clamp and/or \
+             the ASRC_LEVEL_EMA_TAU_S = 10.0 EMA time constant are no longer defined; re-sync with \
+             src/asrc_bench.rs LEVEL_KP_MAX_PPM / LEVEL_EMA_TAU_S."
+        );
+        assert!(
+            h.contains("double level_err_ema_ms;") && h.contains("bool level_err_ema_seeded;"),
+            "{ASRC_COMPENSATOR_H}: #1335 follow-up 5 -- the smoothed-error state fields \
+             (level_err_ema_ms / level_err_ema_seeded) are gone."
+        );
+        assert!(
+            c.contains("c->level_err_ema_ms += alpha * (level_err - c->level_err_ema_ms);"),
+            "{ASRC_COMPENSATOR_C}: #1335 follow-up 5 -- the accepted-window branch no longer updates \
+             the level-error EMA (alpha = window_master_s / (ASRC_LEVEL_EMA_TAU_S + window_master_s)); \
+             the strong Kp=2.0 P term would then amplify the +/-10 ms mixer-tick noise. Keep \
+             numerically identical to src/asrc_bench.rs compensate_with_level."
+        );
 
         let src = squish(&vendor_file(OBS_SOURCE));
         assert!(
@@ -1966,10 +2040,11 @@ mod vendored_source {
             h.contains("#define ASRC_STEP_RESIDUAL_MS 10.0")
                 && h.contains("#define ASRC_LEVEL_RESTORE_K_PPM_PER_MS 2.0")
                 && h.contains("#define ASRC_LEVEL_RESTORE_MAX_PPM 100.0")
-                && h.contains("#define ASRC_LEVEL_KP_PPM_PER_MS 0.03"),
+                // #1335 follow-up 5: Kp raised 0.03 -> 2.0 (the smoothed-error normal law).
+                && h.contains("#define ASRC_LEVEL_KP_PPM_PER_MS 2.0"),
             "{ASRC_COMPENSATOR_H}: #1335 follow-up 2 — the step-tolerance/restore/P constants \
              (ASRC_STEP_RESIDUAL_MS / ASRC_LEVEL_RESTORE_K_PPM_PER_MS / ASRC_LEVEL_RESTORE_MAX_PPM / \
-             ASRC_LEVEL_KP_PPM_PER_MS) are no longer defined."
+             ASRC_LEVEL_KP_PPM_PER_MS = 2.0 since follow-up 5) are no longer defined."
         );
         assert!(
             h.contains("uint32_t step_count;")
@@ -2003,12 +2078,16 @@ mod vendored_source {
              gone; a sample-loss step would not refill the buffer."
         );
         assert!(
-            c.contains("t += asrc_clamp(ASRC_LEVEL_KP_PPM_PER_MS * err, -1.0, 1.0);")
+            // #1335 follow-up 5: the P term now reads the SMOOTHED error (c->level_err_ema_ms) at
+            // Kp=2.0 clamped +/-ASRC_LEVEL_KP_MAX_PPM (was the raw err at +/-1.0). The restore burst
+            // below still uses the raw err, unchanged.
+            c.contains("t += asrc_clamp(ASRC_LEVEL_KP_PPM_PER_MS * c->level_err_ema_ms, -ASRC_LEVEL_KP_MAX_PPM, ASRC_LEVEL_KP_MAX_PPM);")
                 && c.contains(
                     "t += asrc_clamp(ASRC_LEVEL_RESTORE_K_PPM_PER_MS * err, -ASRC_LEVEL_RESTORE_MAX_PPM, ASRC_LEVEL_RESTORE_MAX_PPM);"
                 ),
-            "{ASRC_COMPENSATOR_C}: #1335 follow-up 2 — the LEVEL P term and/or the fast-restore fold \
-             into the correction target are gone (sign: Kp/Kr * (buffered - target))."
+            "{ASRC_COMPENSATOR_C}: #1335 follow-up 2/5 — the LEVEL P term (Kp * smoothed level_err_ema_ms, \
+             clamp +/-ASRC_LEVEL_KP_MAX_PPM) and/or the fast-restore fold (Kr * raw err) into the \
+             correction target are gone."
         );
         assert!(
             c.contains("if (!saturated && !c->level_restore) {"),

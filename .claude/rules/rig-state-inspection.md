@@ -342,3 +342,20 @@ Before ANY force-kill relaunch of strih/stream OBS:
 The scratch `fastdll-swap-*.ps1` programs kill OBS on the box; the save trigger runs from dev1 over WS
 right before them. (The proper fix — the gate's writes persisting on their own — is a `SaveProject`-
 class request in the vendored obs-websocket or a frontend hook; until then this checklist is the rule.)
+
+**The same force-kill can also TRUNCATE `plugin_config/obs-websocket/config.json` (issue 1335 follow-up 5
+swap, strih, 18.9.2026 15:27).** obs-websocket rewrites its config on shutdown; a `Stop-Process -Force`
+mid-write leaves an undecodable file, and at the next launch the plugin logs
+`[Config::Load] Existing configuration not found, using defaults` and writes a NEW config with
+`server_enabled: false` and a freshly generated random `server_password` — :4455 stops listening and
+every WS client (the E2E `[0/8]` gate, the burn/pin checks, bundle-state, the watchdogs) fails auth
+even after someone re-enables the server. Checklist additions:
+4. BEFORE the kill, copy `%APPDATA%\obs-studio\plugin_config\obs-websocket\config.json` next to the
+   obs.dll backup (the `fastdll-swap-*.ps1` programs do the DLL + `GENLOCK_BUILD_SHA.txt` backup —
+   add this file to the same `Copy-Item` block).
+5. AFTER the relaunch, assert `Get-NetTCPConnection -LocalPort 4455 -State Listen` is non-empty and
+   grep the new OBS log for `[obs-websocket] [Config::Load] Existing configuration not found` — a hit
+   means the config was regenerated: restore the backed-up file (or rebuild it on dev1 with the fleet
+   password from `~/.config/environment.d/obs-burn-reconcile-watchdog.conf`, scp it, NEVER print the
+   password) and relaunch again. Enabling the server through the OBS UI is not enough — the password
+   is also new.

@@ -162,14 +162,67 @@ extern "C" {
  * ASRC_MAX_PPM. Mirror of src/asrc_bench.rs LEVEL_RESTORE_MAX_PPM -- keep numerically identical. */
 #define ASRC_LEVEL_RESTORE_MAX_PPM 100.0
 
-/* camera-box #1335 follow-up 2: proportional gain of the level-LEVEL P term, in ppm per ms of level
- * error, folded into the correction target every call (once locked) as clamp(Kp*(buffered - target),
- * +/-1). It damps the I-only level loop's ~3.9 h clamp-to-clamp oscillation (observed 14:00-20:45,
- * level +/-10 ms). SIGN matches the proven #1335 integral (deficit => negative => stretch). At Kp=0.03
- * the damping is gentle (zeta ~0.034) -- it reduces the integral's clamp-railing and decays the
- * oscillation, not a critically-damped term. Mirror of src/asrc_bench.rs LEVEL_KP_PPM_PER_MS -- keep
+/* camera-box #1335 follow-up 3: arm band for the FAST level RESTORE when a DELIBERATE setpoint shift
+ * (asrc_compensator_shift_level_target) moves level_target_ms, in ms. A shift whose |delta| is at
+ * least this arms the restore burst so a deliberate audio sync-offset trim settles in minutes with
+ * the integral frozen (follow-up 2), instead of the ~1 h the +/-3 ppm I term needs (the 18.9. 12 h
+ * series: a 12 ms shift railed the integral for ~1 h and rang for hours). Set to the restore's own
+ * exit band (|buffered - target| < 5 ms) -- arming below it would exit on the first tick. Mirror of
+ * src/asrc_bench.rs LEVEL_RESTORE_ARM_MS -- keep numerically identical. */
+#define ASRC_LEVEL_RESTORE_ARM_MS 5.0
+
+/* camera-box #1335 follow-up 4: sustained-level-error band, in ms, that arms the FAST bounded level
+ * RESTORE from the ACCEPTED-window branch, whatever caused the error. A level disturbance that
+ * arrives with NO same-window residual step (an OBS StartStream input-sample loss, a mic/Dante
+ * re-plug, a mixer hiccup) is invisible to the step arm (follow-up 2) and the shift arm (follow-up 3),
+ * so the +/-3 ppm I term alone would take hours; this arm catches it. 12 ms sits well above the
+ * +/-8 ms 1-s level scatter so ordinary noise never arms, yet below the ~14-32 ms StartStream drops
+ * the 18.9. live incident produced (level 100 -> 68 ms). Mirror of src/asrc_bench.rs
+ * LEVEL_RESTORE_ARM_ERR_MS -- keep numerically identical. */
+#define ASRC_LEVEL_RESTORE_ARM_ERR_MS 12.0
+
+/* camera-box #1335 follow-up 4: number of CONSECUTIVE accepted windows whose |level - target| is at
+ * least ASRC_LEVEL_RESTORE_ARM_ERR_MS required before the sustained-error arm fires (10 windows =
+ * 10 s at ASRC_WINDOW_S 1.0). A below-band window resets the count, so a false arm needs 10 consecutive
+ * windows each >= 12 ms in MAGNITUDE (either sign -- the arm is on |level - target|, not a direction),
+ * which the +/-8 ms scatter cannot produce (8 < 12); the 10 s detection delay plus a
+ * bounded burst is the trade-off, and the burst only brings the level back within 5 ms of the
+ * setpoint (harmless). Mirror of src/asrc_bench.rs LEVEL_RESTORE_ARM_WINDOWS -- keep numerically
+ * identical. */
+#define ASRC_LEVEL_RESTORE_ARM_WINDOWS 10
+
+/* camera-box #1335 follow-up 5: proportional gain of the buffer-LEVEL P term, in ppm per ms of level
+ * error, now the NORMAL LAW of the level loop -- folded into the correction target every call (once
+ * locked) as clamp(Kp*level_err_ema_ms, +/-ASRC_LEVEL_KP_MAX_PPM), driven by the SMOOTHED error
+ * (level_err_ema_ms, an EMA with tau ASRC_LEVEL_EMA_TAU_S) rather than the raw per-window level.
+ * SIGN matches the proven #1335 integral (deficit => negative => stretch). At Kp=2.0 the loop time
+ * constant is ~= 1/(Kp*1e-3) = 500 s: a 15 ms error is within ~3 ms in ~13 min (measured ~777 s),
+ * at inaudible rates (a 25 ms error saturates at ASRC_LEVEL_KP_MAX_PPM = 50 ppm = 3 ms/min).
+ * The 18.9. live test showed the raw-error 0.03/+/-1 term (follow-ups 2-4) could not hold the level:
+ * the mean level wandered +/-10-15 ms around the setpoint over hour-scale spans and the E2E A/V
+ * reading inherited it (-0.6 ms vs +15.0 ms 40 min apart, identical pins). The 66x stronger gain is
+ * usable only BECAUSE the error is smoothed first: a raw 2 ppm/ms on the +/-10 ms mixer-tick phase
+ * noise would jitter the rate by +/-20 ppm/s; the EMA attenuates that below the +/-50 clamp's own
+ * resolution. The integral (Ki, +/-3) is kept for the DC residual only; the restore paths
+ * (follow-ups 2-4) become rare backstops. Mirror of src/asrc_bench.rs LEVEL_KP_PPM_PER_MS -- keep
  * numerically identical. */
-#define ASRC_LEVEL_KP_PPM_PER_MS 0.03
+#define ASRC_LEVEL_KP_PPM_PER_MS 2.0
+
+/* camera-box #1335 follow-up 5: hard clamp on the buffer-LEVEL P term, in ppm (+/-). Replaces the
+ * follow-ups 2-4 literal +/-1.0 clamp. A 25 ms error saturates it (Kp*25 = 50 ppm = 3 ms/min = a
+ * 0.005 % pitch offset while a large error decays, well inside the +-300 ppm ASRC envelope and the
+ * 100 ppm bursts follow-up 2 already accepts). Bounds the P term far below the rate loop's own
+ * ASRC_MAX_PPM. Mirror of src/asrc_bench.rs LEVEL_KP_MAX_PPM -- keep numerically identical. */
+#define ASRC_LEVEL_KP_MAX_PPM 50.0
+
+/* camera-box #1335 follow-up 5: time constant, in seconds of master-clock time, of the EMA that
+ * smooths the per-window level error before the P term (ASRC_LEVEL_KP_PPM_PER_MS) reads it. The
+ * per-window level carries +/-10 ms mixer-tick phase noise (18.9. live: consecutive 1-min samples
+ * 75.2 / 95.3 / 85.1 / 96.2 around a ~86 mean); a 10 s EMA kills that noise while adding only ~10 s
+ * of lag, irrelevant at the loop's 500 s time constant. alpha = window_master_s /
+ * (ASRC_LEVEL_EMA_TAU_S + window_master_s) per accepted window (~1 s window => alpha ~= 0.091).
+ * Mirror of src/asrc_bench.rs LEVEL_EMA_TAU_S -- keep numerically identical. */
+#define ASRC_LEVEL_EMA_TAU_S 10.0
 
 /* Per-source servo state. One instance lives per obs_source_t (see
  * obs-internal.h's `struct asrc_compensator asrc` field) and is mutated only
@@ -265,6 +318,27 @@ struct asrc_compensator {
 	 * flush. Printed as restore=0|1. Mirror of src/asrc_bench.rs
 	 * RealtimeAsrcCompensator::level_restore. */
 	bool level_restore;
+	/* camera-box #1335 follow-up 4: count of CONSECUTIVE accepted windows whose |level - target| is
+	 * at least ASRC_LEVEL_RESTORE_ARM_ERR_MS -- reaching ASRC_LEVEL_RESTORE_ARM_WINDOWS arms the FAST
+	 * level restore from a SUSTAINED level error (a disturbance with no same-window residual step, the
+	 * case the step arm and the shift arm both miss). Reset on a below-band window, on arm, and next
+	 * to every level_restore reset (flush/init/restore-exit). Mirror of src/asrc_bench.rs
+	 * RealtimeAsrcCompensator::level_err_windows. */
+	uint32_t level_err_windows;
+	/* camera-box #1335 follow-up 5: the EMA (tau ASRC_LEVEL_EMA_TAU_S) of the per-window level error
+	 * (buffered_ms - level_target_ms), in ms -- the SMOOTHED error the P term reads so the 66x
+	 * stronger Kp=2.0 gain does not amplify the +/-10 ms mixer-tick phase noise. Seeded with the
+	 * first error after capture (level_err_ema_seeded), reset on flush/relock. A deliberate setpoint
+	 * shift moves BOTH level_target_ms AND the buffer level by the same delta, so the error
+	 * (buffered - target) is unchanged and this EMA is left untouched there (see
+	 * asrc_compensator_shift_level_target). Mirror of
+	 * src/asrc_bench.rs RealtimeAsrcCompensator::level_err_ema_ms. */
+	double level_err_ema_ms;
+	/* camera-box #1335 follow-up 5: whether level_err_ema_ms has been seeded since the last (re)lock
+	 * -- gates the one-shot EMA seed (first accepted window seeds ema = err, later windows blend).
+	 * Cleared by a flush so a relock re-seeds. Mirror of src/asrc_bench.rs
+	 * RealtimeAsrcCompensator::level_err_ema_seeded. */
+	bool level_err_ema_seeded;
 };
 
 /* Reset a servo to its just-constructed state: 0 ppm estimated/applied (assume

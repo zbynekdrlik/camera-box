@@ -75,6 +75,15 @@ DISCORD_THREAD_ID="${AVSYNC_DISCORD_THREAD_ID:-1373592666733940816}"   # alerts-
 STATE_DIR="${AVSYNC_HEARTBEAT_STATE_DIR:-${XDG_RUNTIME_DIR:-/tmp}}"
 STATE_FILE="${AVSYNC_HEARTBEAT_STATE_FILE:-$STATE_DIR/camera-box-avsync-heartbeat.state}"
 
+# #1331 -- the VERIFIED-A/V session report (replaces the raw one-clip Discord forward).
+# The dev2 measurer appends every pass to a per-day TSV; this pass fetches those rows and hands them
+# to the PURE session decider scripts/avsync_report.py, which returns the Discord messages to post
+# (a verified summary at the start, every 20 min, on a verdict change, and at end-of-broadcast) plus
+# the new report state. AVSYNC_REPORT_FETCH_CMD is the row-fetch seam the dry-run tests stub.
+REPORT_SCRIPT="${AVSYNC_REPORT_SCRIPT:-$HERE/avsync_report.py}"
+REPORT_PYTHON="${AVSYNC_REPORT_PYTHON:-python3}"
+REPORT_STATE_FILE="${AVSYNC_REPORT_STATE_FILE:-$STATE_DIR/avsync-report-state.json}"
+
 log() { printf '%s [avsync-heartbeat-alert-watchdog] %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$*" >&2; }
 
 # ── measure (SSH + the shared avsync-heartbeat probe) ───────────────────────
@@ -148,13 +157,16 @@ readonly DISCORD_VERDICT_MAX_CONTENT=1900
 # --max-time (mirrors scripts/lib/e2e-discord-report.sh / event-mode-discord-confirm.sh's own
 # Discord POST calls exactly -- never a second timeout convention) so a stalled connection can
 # never wedge this pass beyond the systemd unit's own TimeoutStartSec budget. Never called in
-# --dry-run (see maybe_forward_verdict).
+# --dry-run (see run_report_pass).
+# RETURNS 0 iff the message was DELIVERED (HTTP 200); returns 1 on a missing token or a non-200
+# (still non-fatal -- the caller keeps polling). #1331: run_report_pass uses this rc to COMMIT the
+# advanced dedup state only after delivery succeeds, so a transient POST failure re-emits next pass.
 post_discord_verdict() {
   local text="$1" token content payload response http_code body
   token="$(read_discord_env_field DISCORD_BOT_TOKEN)"
   if [ -z "$token" ]; then
     log "VERDICT-FORWARD: no DISCORD_BOT_TOKEN configured at $DISCORD_ENV_FILE -- skipping post (non-fatal)"
-    return 0
+    return 1
   fi
   content="$(discord_mention_prefix)${text}"
   content="${content:0:$DISCORD_VERDICT_MAX_CONTENT}"
@@ -169,40 +181,89 @@ post_discord_verdict() {
   body="${response%$'\n'*}"
   if [ "$http_code" != "200" ]; then
     log "VERDICT-FORWARD: Discord POST returned HTTP '$http_code' (expected 200, non-fatal). Response body: $body"
-    return 0
+    return 1
   fi
   log "VERDICT-FORWARD: posted to thread $DISCORD_THREAD_ID (message id: $(printf '%s' "$body" | jq -r '.id // "unknown"' 2>/dev/null))"
+  return 0
 }
 
-# maybe_forward_verdict EPOCH STATUS -> forwards a genuinely NEW measured misalignment verdict to
-# Discord at most ONCE per epoch (persisted via the shared state-file mechanism, key
-# "watchdog_verdict_forwarded_epoch"). State advances even in --dry-run (mirrors process_leg's own
-# convention: only the ACTUAL post is skipped, never the bookkeeping) so a real run afterward still
-# sees the SAME epoch as already handled.
-maybe_forward_verdict() {
-  local epoch="$1" status="$2" prev_epoch prev_sig sig text
-  [ -n "$epoch" ] || return 0
-  avsync_heartbeat_is_forwardable_verdict "$status" || return 0
-  prev_epoch="$(read_state_field "watchdog_verdict_forwarded_epoch" "")"
-  [ "$epoch" != "$prev_epoch" ] || return 0
-  write_state_field "watchdog_verdict_forwarded_epoch" "$epoch"
-  # #814 second net: the heartbeat epoch is UtcNow written every pass, so epoch-dedup alone
-  # re-forwards a FROZEN input's byte-identical (offset,conf) verdict every ~90 s. Suppress a POST
-  # whose stamp-stripped signature equals the last forwarded one; a genuine offset change updates
-  # the stored signature and re-posts. The signature is stored (like the epoch) even in --dry-run.
-  sig="$(avsync_heartbeat_verdict_signature "$status")"
-  prev_sig="$(read_state_field "watchdog_verdict_forwarded_sig" "")"
-  if [ -n "$sig" ] && [ "$sig" = "$prev_sig" ]; then
-    log "VERDICT-FORWARD: dup-suppressed (frozen input?) -- identical (offset,conf) signature to the last forwarded verdict: $sig"
+# ── #1331 verified-A/V session report (REPLACES the raw one-clip Discord forward) ─────────
+# report_fetch_rows -> emit the dev2 per-day rows ("<epoch>\t<status>", today + yesterday). The
+# AVSYNC_REPORT_FETCH_CMD seam lets the dry-run tests stub the fetch; otherwise the SAME key-auth ssh
+# transport the heartbeat probe uses (avsync_heartbeat_ssh_prefix_argv) cats the two day files. Never
+# fatal -- a fetch failure yields no rows (the report simply skips this pass).
+# #1331 (review F4): the day FILE names come from THIS box's (dev1) local date, while dev2 wrote the
+# files under dev2's local date -- correct while both boxes share Europe/Bratislava (they do). The
+# fetch pulls today's + YESTERDAY's file, so a row written near local midnight is still in the window;
+# and aggregation is EPOCH-based (TZ-independent), so only which files are fetched depends on the day.
+report_fetch_rows() {
+  if [ -n "${AVSYNC_REPORT_FETCH_CMD:-}" ]; then
+    bash -c "$AVSYNC_REPORT_FETCH_CMD" 2>/dev/null || true
     return 0
   fi
-  write_state_field "watchdog_verdict_forwarded_sig" "$sig"
-  text="📐 A/V-sync meranie: ${status#measured: }"
+  local -a pfx=()
+  mapfile -t pfx < <(avsync_heartbeat_ssh_prefix_argv)
+  if [ "${#pfx[@]}" -eq 0 ]; then
+    log "report: no ssh transport for host=$(avsync_heartbeat_host) -- no rows this pass"
+    return 0
+  fi
+  local today yday
+  today="$(date +%Y-%m-%d)"
+  yday="$(date -d 'yesterday' +%Y-%m-%d 2>/dev/null || echo "$today")"
+  "${pfx[@]}" "cat ~/avsync/measurements-$yday.tsv ~/avsync/measurements-$today.tsv 2>/dev/null" \
+    2>/dev/null || true
+}
+
+# run_report_pass -> fetch the rows, run the PURE decider, and post each returned message (one Discord
+# message per stdout line) via the SAME post_discord_verdict path the forward used. --dry-run logs
+# "WOULD post" and never posts. Never fatal (the watchdog must survive and keep polling).
+#
+# #1331 (review F1/F2): the report state is committed TRANSACTIONALLY -- the decider runs against a
+# COPY of the state, and the advanced state is committed to REPORT_STATE_FILE only AFTER every message
+# in this pass was DELIVERED (post_discord_verdict returned 0). If a POST fails, the advanced state is
+# DISCARDED so the next pass re-derives + re-emits (the decider is idempotent) -- a transient Discord
+# outage never permanently drops a verified-A/V message (the owner's original complaint). And --dry-run
+# NEVER touches the production state (it works on the discarded copy), so a manual dry-run during a
+# live can never consume the real dedup and suppress a production message.
+run_report_pass() {
+  local rows rows_file work_state msgs line all_ok=1
+  rows="$(report_fetch_rows)"
+  if [ -z "$rows" ]; then
+    log "report: no rows fetched this pass (nothing to aggregate)"
+    return 0
+  fi
+  rows_file="$(mktemp 2>/dev/null)" || { log "report: mktemp failed (non-fatal)"; return 0; }
+  printf '%s\n' "$rows" > "$rows_file"
+  work_state="$(mktemp 2>/dev/null)" || { rm -f "$rows_file"; log "report: mktemp failed (non-fatal)"; return 0; }
+  mkdir -p "$(dirname "$REPORT_STATE_FILE")" 2>/dev/null || true
+  # Run the decider against a COPY of the committed state (decider rewrites --state in place).
+  if [ -f "$REPORT_STATE_FILE" ]; then cp -f "$REPORT_STATE_FILE" "$work_state" 2>/dev/null || true; fi
+  msgs="$("$REPORT_PYTHON" "$REPORT_SCRIPT" --state "$work_state" --rows "$rows_file" \
+    2>/dev/null || true)"
+  rm -f "$rows_file"
+  if [ -z "$msgs" ]; then
+    # No messages to deliver -> committing the advanced session-tracking is safe (nothing to lose),
+    # except in --dry-run which must never mutate the production state.
+    if [ "$DRY_RUN" -eq 1 ]; then rm -f "$work_state" 2>/dev/null || true; else mv -f "$work_state" "$REPORT_STATE_FILE" 2>/dev/null || rm -f "$work_state" 2>/dev/null || true; fi
+    log "report: no new messages this pass"
+    return 0
+  fi
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    if [ "$DRY_RUN" -eq 1 ]; then
+      log "[dry-run] WOULD post report message: $line"
+    else
+      post_discord_verdict "$line" || all_ok=0
+    fi
+  done <<< "$msgs"
   if [ "$DRY_RUN" -eq 1 ]; then
-    log "[dry-run] WOULD forward verdict: $text"
-    return 0
+    rm -f "$work_state" 2>/dev/null || true
+  elif [ "$all_ok" -eq 1 ]; then
+    mv -f "$work_state" "$REPORT_STATE_FILE" 2>/dev/null || rm -f "$work_state" 2>/dev/null || true
+  else
+    log "report: a Discord POST failed this pass -- discarding advanced state so the next pass re-emits"
+    rm -f "$work_state" 2>/dev/null || true
   fi
-  post_discord_verdict "$text"
 }
 
 # ── one leg's confirm/throttle/alert pass -- reused for BOTH "watchdog" and "vlc" ───────────────
@@ -261,27 +322,30 @@ main() {
 
   measure
   if [ -z "${PROBE_OUT:-}" ]; then
-    log "ERROR: no probe output from stream box (ssh/connectivity failure) -- nothing to decide this pass"
-    return 0
-  fi
-
-  local watchdog_segment vlc_segment watchdog_epoch vlc_epoch watchdog_status
-  watchdog_segment="$(avsync_heartbeat_extract_segment "$PROBE_OUT" watchdog)"
-  vlc_segment="$(avsync_heartbeat_extract_segment "$PROBE_OUT" vlc)"
-  watchdog_epoch="$(avsync_heartbeat_last_epoch "$watchdog_segment")"
-  vlc_epoch="$(avsync_heartbeat_last_epoch "$vlc_segment")"
-  watchdog_status="$(avsync_heartbeat_last_status "$watchdog_segment")"
-
-  process_leg "watchdog" "$watchdog_epoch"
-  # #1331: the dev2 measurer has NO VLC-monitor heartbeat (that was a stream-box babysitter), so a
-  # permanently-missing vlc segment must SKIP, never page as CONFIRMED-stale. The "stream" host
-  # still has both legs.
-  if avsync_heartbeat_has_vlc_leg; then
-    process_leg "vlc" "$vlc_epoch"
+    # #1331: the heartbeat legs have nothing to decide, but the report pass is INDEPENDENT (its own
+    # fetch), so we skip only the legs here -- never the report.
+    log "ERROR: no probe output from stream box (ssh/connectivity failure) -- skipping heartbeat legs this pass"
   else
-    log "vlc: skipped (host=$(avsync_heartbeat_host) has no VLC-monitor heartbeat leg)"
+    local watchdog_segment vlc_segment watchdog_epoch vlc_epoch
+    watchdog_segment="$(avsync_heartbeat_extract_segment "$PROBE_OUT" watchdog)"
+    vlc_segment="$(avsync_heartbeat_extract_segment "$PROBE_OUT" vlc)"
+    watchdog_epoch="$(avsync_heartbeat_last_epoch "$watchdog_segment")"
+    vlc_epoch="$(avsync_heartbeat_last_epoch "$vlc_segment")"
+
+    process_leg "watchdog" "$watchdog_epoch"
+    # #1331: the dev2 measurer has NO VLC-monitor heartbeat (that was a stream-box babysitter), so a
+    # permanently-missing vlc segment must SKIP, never page as CONFIRMED-stale. The "stream" host
+    # still has both legs.
+    if avsync_heartbeat_has_vlc_leg; then
+      process_leg "vlc" "$vlc_epoch"
+    else
+      log "vlc: skipped (host=$(avsync_heartbeat_host) has no VLC-monitor heartbeat leg)"
+    fi
   fi
-  maybe_forward_verdict "$watchdog_epoch" "$watchdog_status"
+
+  # #1331: the verified-A/V SESSION report (replaces the raw one-clip forward). Independent fetch,
+  # always run regardless of the heartbeat-leg outcome above.
+  run_report_pass
 
   log "pass end"
 }

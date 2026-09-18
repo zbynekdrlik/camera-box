@@ -226,32 +226,83 @@ fn nm_keyfile_pins_the_static_address() {
     );
 }
 
-/// #819 (live, 10.77.9.187, 2026-07-27): the chroot installed the **GA** kernel (`linux-generic`,
-/// 6.8) while the imag role runs the **HWE** line (the incumbent box is on 6.17
-/// `linux-generic-hwe-24.04`). `setup-imag.sh` step 6 holds the HWE package names and step 7
-/// installs `linux-lowlatency-hwe-24.04`, whose deps ARE those HWE packages — so a GA baseline
-/// aborts provisioning outright:
-///   `linux-lowlatency-hwe-24.04 : Depends: linux-image-generic-hwe-24.04 … not going to be installed`
-/// and it also drops the 13th-gen CPU/iGPU/USB-NIC support #482 deliberately kept.
+/// issue 1317 (owner ROZHODNUTÉ 18.9.): the strih-lx notebook runs Ubuntu 26.04, so the chroot
+/// kernel meta can no longer be hardcoded to noble's `linux-generic-hwe-24.04` (that package does
+/// not exist on 26.04 — the install would fail or ship no kernel). The chroot step must DERIVE the
+/// kernel meta from the target release via the pure `imag_kernel_meta_package` decision, reading
+/// the target's `VERSION_ID` from `/etc/os-release`. The #819 HWE intent is preserved
+/// (`linux-generic-hwe-<VERSION_ID>` when available) — it just follows the release now.
 #[test]
-fn the_chroot_kernel_is_the_hwe_line_the_imag_role_runs() {
+fn the_chroot_kernel_is_release_derived_not_hardcoded_noble() {
     let (code, chroot_fn, err) = run_sourced("declare -f configure_in_chroot");
     assert_eq!(code, 0, "configure_in_chroot must exist. stderr: {err}");
     assert!(
-        chroot_fn.contains("linux-generic-hwe-24.04"),
-        "the chroot must install the HWE kernel chain setup-imag.sh assumes: {chroot_fn}"
+        chroot_fn.contains("imag_kernel_meta_package"),
+        "the chroot step must derive the kernel meta via imag_kernel_meta_package: {chroot_fn}"
+    );
+    assert!(
+        chroot_fn.contains("os-release"),
+        "the chroot step must read the target VERSION_ID from /etc/os-release: {chroot_fn}"
+    );
+    assert!(
+        !chroot_fn.contains("linux-generic-hwe-24.04"),
+        "the hardcoded noble kernel meta must be gone (the release is derived now): {chroot_fn}"
+    );
+    assert!(
+        chroot_fn.contains("vmlinuz"),
+        "the chroot step must still verify a kernel actually landed: {chroot_fn}"
     );
     assert!(
         !regex_lite_has_bare_ga_install(&chroot_fn),
-        "a bare `apt-get install … linux-generic` (the GA line) must be gone: {chroot_fn}"
+        "a bare `apt-get install … linux-generic` literal (the GA line) must not reappear — the \
+         install uses the derived meta variable: {chroot_fn}"
     );
 }
 
-/// `apt-get install -y linux-generic` with no `-hwe-24.04` suffix anywhere on the line.
+/// `apt-get install … linux-generic …` with the literal `linux-generic` argument (not the derived
+/// `$kernel_meta` variable). The release-derived install passes the variable, so this must stay
+/// false — a reappearance means someone re-hardcoded a GA/HWE literal.
 fn regex_lite_has_bare_ga_install(body: &str) -> bool {
-    body.lines().any(|l| {
-        l.contains("apt-get install")
-            && l.contains("linux-generic")
-            && !l.contains("linux-generic-hwe-24.04")
-    })
+    body.lines()
+        .any(|l| l.contains("apt-get install") && l.contains("linux-generic"))
+}
+
+/// issue 1317: `imag_kernel_meta_package VERSION_ID AVAILABLE` derives the apt kernel meta from the
+/// target release. AVAILABLE is the newline-separated `apt-cache pkgnames linux-generic` list from
+/// the TARGET's apt cache. It prefers the HWE meta `linux-generic-hwe-<VERSION_ID>` when that exact
+/// name is available (26.04 ships `linux-generic-hwe-26.04`; noble ships `-hwe-24.04`), falls back
+/// to the GA `linux-generic` when it is not, and fails loud (non-zero) when the release is unknown —
+/// never a blind default.
+#[test]
+fn kernel_meta_package_prefers_hwe_when_available_else_ga_and_needs_a_version() {
+    // 26.04 with the HWE meta available -> the 26.04 HWE meta.
+    let (code, out, err) = run_sourced(
+        "imag_kernel_meta_package 26.04 $'linux-generic\\nlinux-generic-hwe-26.04\\nlinux-image-generic'",
+    );
+    assert_eq!(code, 0, "26.04 derive should succeed. stderr: {err}");
+    assert_eq!(out.trim(), "linux-generic-hwe-26.04");
+
+    // 24.04 with its HWE meta available -> the 24.04 HWE meta (noble sticks still work).
+    let (code, out, _e) =
+        run_sourced("imag_kernel_meta_package 24.04 $'linux-generic\\nlinux-generic-hwe-24.04'");
+    assert_eq!(code, 0);
+    assert_eq!(out.trim(), "linux-generic-hwe-24.04");
+
+    // release known but the HWE meta is NOT in the available list -> the GA fallback.
+    let (code, out, _e) =
+        run_sourced("imag_kernel_meta_package 26.04 $'linux-generic\\nlinux-image-generic'");
+    assert_eq!(code, 0);
+    assert_eq!(out.trim(), "linux-generic");
+
+    // empty available list -> GA fallback (never crash).
+    let (code, out, _e) = run_sourced("imag_kernel_meta_package 26.04 ''");
+    assert_eq!(code, 0);
+    assert_eq!(out.trim(), "linux-generic");
+
+    // empty VERSION_ID -> non-zero (a release must be known, never a silent default).
+    let (code, _out, _e) = run_sourced("imag_kernel_meta_package '' $'linux-generic-hwe-26.04'");
+    assert_ne!(
+        code, 0,
+        "an unknown release must fail loud, not default silently"
+    );
 }

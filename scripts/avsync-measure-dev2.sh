@@ -92,6 +92,25 @@ write_heartbeat() {
   mv -f "$tmp" "$HEARTBEAT"
 }
 
+# ── #1331: ALSO append this pass to the per-day DURABLE log the dev1 report reads ────────────────
+# The heartbeat above holds only the LAST pass (overwritten every ~90 s); this appends the SAME
+# "<epoch>\t<status>" row to ~/avsync/measurements-<local-day>.tsv so a live broadcast's whole
+# history survives for scripts/avsync_report.py to aggregate. A single printf append is atomic for a
+# short line (< PIPE_BUF) on a local fs. NEVER fails the pass on an append error -- the heartbeat
+# contract is unchanged; a missing durable row only costs the report one sample (log + continue).
+avsync_measure_append_day_log() {
+  local epoch="$1" status="$2" day path line
+  day="$(date -d "@$epoch" +%Y-%m-%d 2>/dev/null || date +%Y-%m-%d)"
+  path="$(avsync_measure_log_path "$HOME" "$day")"
+  line="$(avsync_measure_log_line "$epoch" "$status")"
+  mkdir -p "$(dirname "$path")" 2>/dev/null || true
+  if printf '%s\n' "$line" >> "$path" 2>/dev/null; then
+    log "day-log appended: $path"
+  else
+    log "WARN: day-log append failed for $path (non-fatal)"
+  fi
+}
+
 # ── measure the audio dB on the SAME clip (#813 content-liveness signal) ──────────────────────────
 get_max_db() {
   local clip="$1" vd m
@@ -172,8 +191,12 @@ main() {
     log "measured: db=$db :: $measure_out"
   fi
   status="$(avsync_measure_status_line "$reason" "$db" "$measure_out")"
-  record="$(avsync_measure_heartbeat_record "$(date +%s)" "$status")"
+  local epoch
+  epoch="$(date +%s)"
+  record="$(avsync_measure_heartbeat_record "$epoch" "$status")"
   write_heartbeat "$record"
+  # #1331: mirror this pass into the per-day durable log the dev1 report reads (non-fatal).
+  avsync_measure_append_day_log "$epoch" "$status"
   log "pass end (heartbeat written: $status)"
 }
 

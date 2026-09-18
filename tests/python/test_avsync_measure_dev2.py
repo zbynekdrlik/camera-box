@@ -249,3 +249,58 @@ def test_neutralized_notify_path_is_a_real_noop():
     )
     assert proc.returncode == 0
     assert proc.stdout == "" and proc.stderr == ""
+
+
+# ── #1331 verified-A/V report: the per-day durable log (builders + the dev2 append) ──────────────
+
+
+def test_log_path_defaults_to_home_avsync_measurements_day():
+    out = _measure('avsync_measure_log_path "" 2026-09-17')
+    assert out == f"{_HOME}/avsync/measurements-2026-09-17.tsv"
+
+
+def test_log_path_explicit_base():
+    out = _measure('avsync_measure_log_path /srv/box 2026-01-02')
+    assert out == "/srv/box/avsync/measurements-2026-01-02.tsv"
+
+
+def test_log_line_is_byte_identical_to_the_heartbeat_record():
+    line = _measure('avsync_measure_log_line 1700000000 "measured: db=-5.4 x"')
+    record = _measure('avsync_measure_heartbeat_record 1700000000 "measured: db=-5.4 x"')
+    assert line == record == "1700000000\tmeasured: db=-5.4 x"
+
+
+def test_append_day_log_creates_the_day_file_and_appends_rows(tmp_path):
+    body = (
+        'avsync_measure_append_day_log 1700000000 "measured: db=-5.0 x"\n'
+        'avsync_measure_append_day_log 1700000090 "no-signal: y"\n'
+        'day=$(date -d @1700000000 +%Y-%m-%d)\n'
+        'cat "$HOME/avsync/measurements-$day.tsv"\n'
+    )
+    out = _source(_MEASURER, body, {"HOME": str(tmp_path)})
+    assert out.splitlines() == [
+        "1700000000\tmeasured: db=-5.0 x",
+        "1700000090\tno-signal: y",
+    ]
+
+
+def test_append_day_log_uses_the_local_day_from_the_pass_epoch(tmp_path):
+    body = (
+        'avsync_measure_append_day_log 1700000000 "measured: db=-5.0 x"\n'
+        'ls "$HOME/avsync"\n'
+    )
+    out = _source(_MEASURER, body, {"HOME": str(tmp_path)})
+    import subprocess as _sp
+
+    day = _sp.run(
+        ["date", "-d", "@1700000000", "+%Y-%m-%d"], capture_output=True, text=True
+    ).stdout.strip()
+    assert out.strip() == f"measurements-{day}.tsv"
+
+
+def test_main_appends_the_day_log_after_writing_the_heartbeat():
+    src = _MEASURER.read_text()
+    assert "avsync_measure_append_day_log" in src
+    hb = src.index('write_heartbeat "$record"')
+    ap = src.index("avsync_measure_append_day_log", hb)
+    assert ap > hb, "the day-log append must come after write_heartbeat in main()"

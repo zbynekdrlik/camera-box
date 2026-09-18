@@ -150,6 +150,17 @@ else
   note "chrome-sandbox setuid check skipped (STRIH_BUILD_FLAGS.txt absent or BROWSER-OFF at ${GENLOCK_DIR})"
 fi
 
+# 15) bundle-vs-box release parity (issue 1317): the installed bundle's TARGET-RELEASE marker must
+#     match the box's /etc/os-release VERSION_ID, or a 24.04-built bundle would silently run on a
+#     26.04 box (ffmpeg/Qt soname mismatch -> OBS crashes at load). Fail-closed: an absent marker or
+#     any mismatch FAILS (a strih bundle always carries TARGET-RELEASE since issue 1317).
+BOX_VERSION_ID="$( . /etc/os-release 2>/dev/null; printf '%s' "${VERSION_ID:-}" )"
+if [ -f "$FLAGS_FILE" ] && strih_lx_release_parity_ok "$(cat "$FLAGS_FILE")" "$BOX_VERSION_ID"; then
+  ok "bundle release parity: TARGET-RELEASE matches box (ubuntu-${BOX_VERSION_ID})"
+else
+  bad "bundle release parity FAILED: ${FLAGS_FILE} must carry 'TARGET-RELEASE: ubuntu-${BOX_VERSION_ID}' (box VERSION_ID=${BOX_VERSION_ID}); a bundle built for another release must never run here"
+fi
+
 echo ""
 if [ "$FAILS" -eq 0 ]; then
   echo -e "${GREEN}=== verify-strih.sh: ALL CLEAR ===${NC}"; exit 0

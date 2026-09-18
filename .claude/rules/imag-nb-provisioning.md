@@ -836,3 +836,39 @@ a new `verify-imag.sh` check locally BEFORE CI — the anchor-collision class (`
 scripts` above) surfaces only at RUN time (not `--no-run`, which Tier-0 also blocks now), and this is
 the one way to run it without cargo. (Confirmed live #1299 Part 2: guards 140/140, remoteos 5/5,
 obs-watchdog 3/3, verify_imag_pure_functions 81/81.)
+
+## Running a repo pure fn INSIDE the chroot: `declare -f` serialization + the comment-in-heredoc negative-anchor trap (issue 1317)
+
+`install-imag-nb.sh` derives the kernel meta package from the target's OWN release
+(`imag_kernel_meta_package VERSION_ID AVAILABLE`, issue 1317) — a decision that must run INSIDE the
+chroot (it reads the target's `/etc/os-release` and `apt-cache pkgnames` AFTER the chroot's own
+`apt-get update`), yet stay the SINGLE source of truth the unit tests exercise (no inlined copy).
+The clean pattern for "run a repo pure bash fn inside the chroot":
+
+- In `configure_in_chroot()`, BEFORE the `cat > … <<CHROOT` heredoc:
+  `local kernel_meta_fn; kernel_meta_fn="$(declare -f imag_kernel_meta_package)"`.
+- The heredoc is UNQUOTED (`<<CHROOT`), so put `${kernel_meta_fn}` on its own line to inject the
+  function TEXT, and escape every RUNTIME `$` as `\$` (`\$( . /etc/os-release; printf … )`,
+  `\$(apt-cache pkgnames linux-generic …)`, `\$(imag_kernel_meta_package "\$version_id" …)`).
+- Why it is sound: bash expands `${kernel_meta_fn}` ONCE; the substituted function text (with its own
+  `$1`/`$version_id`) is NOT re-scanned, so the fn body stays literal for chroot-runtime. Verify by
+  RENDERING the chroot script (python: extract the fn + reconstruct the derivation lines) and
+  `bash -n` it — `bash -n` on the OUTER script does NOT check heredoc-body syntax.
+
+**The trap that cost two rewrites:** a `tests/install_imag_nb_pure_functions.rs` test asserts
+`!declare_f_of("configure_in_chroot").contains("linux-generic-hwe-24.04")` (the hardcoded noble
+literal must be GONE). **A COMMENT you write INSIDE the chroot heredoc is part of
+`declare -f configure_in_chroot`'s output** — so an explanatory comment that merely MENTIONS the
+banned literal (e.g. "24.04 -> linux-generic-hwe-24.04, 26.04 -> …") trips that negative anchor even
+though the CODE is correct. This is the #779/#832 negative-anchor class, one level in: the anchor
+sweep for POSITIVE collisions won't catch it. Fix: write chroot-heredoc comments with placeholders
+(`linux-generic-hwe-<VERSION_ID>` / `<rel>`), never the exact banned release literal. The FILE
+HEADER comment (outside `configure_in_chroot`) MAY carry the literal freely — the test reads only the
+function's `declare -f` output, not the whole file.
+
+**Tier-0 for these self-contained anchor tests** (`tests/install_imag_nb_pure_functions.rs`,
+`tests/strih_provision_pure_functions.rs`, `tests/linux_genlock_workflow_gate.rs` — std-only, no
+crate dep): the sanctioned worktree-worker path is a standalone
+`CARGO_MANIFEST_DIR="<repo>" rustc --edition 2021 --test tests/<f>.rs -o /tmp/x && /tmp/x`
+(same recipe as the setup-imag guards above) — it genuinely RUNS the RED→GREEN, unlike a grep
+simulation, and unlike a sourced-bash harness it is NOT refused by the worktree-isolation guard.

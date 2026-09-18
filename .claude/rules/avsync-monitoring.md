@@ -477,3 +477,103 @@ hide a regression) and cover the NEW default with its own tests (the pure host-s
 host=dev2, asserting the leg is read and vlc SKIPed). General rule: when you flip a default that selects
 a transport, pin every existing transport-stubbing test to the OLD default and give the NEW default its
 own coverage — never leave the production default untested.
+
+## Verified A/V report for the whole broadcast (issue 1331)
+
+**The owner's ask (18.9.2026):** a live A/V-sync measurement must report that it VERIFIED (measured
+continuously across the whole broadcast) and whether it FITS (a median verdict) — not a lone
+unaggregated clip. On 17.9. a 90-minute live produced only TWO raw Discord messages, one at
+`conf 3.2` (below the SyncNet usability floor `OFFSET_CONF_FLOOR`=4.0), with no "overené / sedí"
+statement and no aggregation.
+
+**Why the raw one-clip forward was removed.** The old `maybe_forward_verdict()` (issue 968) forwarded
+the LAST heartbeat line to Discord on the dev1 5-min timer only when it matched `ZNIZ|ZVYS` (a
+misalignment), with NO confidence gate. Against a ~90 s measurement cadence sampled once per 5 min
+this reached Discord at most once per three clips, never showed an "A/V sync OK" verdict, and had no
+verification statement — so a 90-minute live looked like "two measurements". It is REPLACED (not
+supplemented) by the verified-SESSION report below; the separate `offset` ALARM arm
+(`avsync_lineup.py` — a single confident out-of-band clip during a live → page) is untouched.
+
+**The per-day durable log on dev2.** The heartbeat file holds only the LAST pass (overwritten every
+~90 s), so `scripts/avsync-measure-dev2.sh` now ALSO appends every pass's `<epoch>\t<status>` record
+as one row to `~/avsync/measurements-<YYYY-MM-DD>.tsv` (the day is the LOCAL date of the pass epoch;
+a single-`printf` atomic append; NEVER fatal — a failed append costs the report one sample, the
+heartbeat contract is unchanged). The path + row builders (`avsync_measure_log_path` /
+`avsync_measure_log_line`, the row byte-identical to the heartbeat record) live in the PURE
+`scripts/lib/avsync-measure.sh`; the append I/O (`avsync_measure_append_day_log`) is in the
+orchestrator.
+
+**The session decider `scripts/avsync_report.py` (pure, the #1199 decider shape).**
+`decide(rows, state, now_epoch) -> (messages, new_state)`, no I/O beyond the CLI wrapper. It IMPORTS
+`OFFSET_CONF_FLOOR` (4.0) + `OFFSET_ALARM_MS_DEFAULT` (30) + `parse_offset` + `is_measured_heartbeat`
+from `avsync_lineup.py` (single source of truth, never retyped). A SESSION starts at the first
+`measured:` row after ≥ 600 s without one and ends when no `measured:` row follows for ≥ 600 s; a
+clip is CONFIDENT when its status parses `AV offset ±N fr (±X ms) conf C` with `C ≥ floor` (a
+`conf 3.2` clip is "nemerateľné", a `conf 5.4` clip is a verdict); the WINDOW verdict = the median
+offset of the confident clips in the last 1200 s, needing ≥ 3 clips, SEDÍ when `|median| ≤ 30 ms`
+else NESEDÍ with the `ZNIZ/ZVYS '2ME PGM' latency o |median|` advice (byte-parity with
+`av_sync_measure.py`). `decide` is IDEMPOTENT — a re-run with the same rows emits nothing new (the
+persisted state dedups). Times are Europe/Bratislava local.
+
+**The four message kinds (Slovak, phone-readable, each `📐 A/V …`):**
+- **START** — on the first confident clip of a session:
+  `📐 A/V overené HH:MM (začiatok vysielania): 1. meranie +X ms conf C — verdikt po ≥ 3 meraniach`.
+- **PERIODIC** — every 20 min while the session is live:
+  `📐 A/V overené HH:MM: za 20 min N meraní (K nemerateľných), medián +X ms (p10 … p90) → SEDÍ`
+  (or `… → NESEDÍ o X ms → ZNIZ '2ME PGM' latency o X`).
+- **CHANGE** — the window verdict flips SEDÍ↔NESEDÍ between two evaluations → posted at once.
+- **END** — at session end:
+  `📐 A/V počas vysielania HH:MM–HH:MM: N meraní (K nemerateľných), medián +X ms, p10 … p90 → SEDÍ/NESEDÍ`.
+
+Low-confidence / UNMEASURABLE / no-signal rows are never verdicts, only counted (K nemerateľných).
+
+**The dev1 `report` pass.** `scripts/avsync-heartbeat-alert-watchdog.sh` gained a `report` pass after
+the heartbeat legs: fetch the rows newer than the cursor from dev2 over the existing key-auth ssh
+(`AVSYNC_REPORT_FETCH_CMD` is the fetch seam the dry-run tests stub; else `ssh newlevel@<host>` cats
+today's + yesterday's day files), run `avsync_report.py`, and post each returned line with the
+EXISTING `post_discord_verdict` bot-API path (the ONE dev1-side delivery mechanism — never a second
+Discord path; `--dry-run` logs `WOULD post`). The pass runs regardless of the heartbeat-leg probe
+result (its fetch is independent). Volume is ~5–7 messages per 90-minute live (start, 4 periodic,
+end, a change) BY DESIGN — the owner asked to SEE continuity — and the idempotent decider never
+re-posts a repeated state. **Delivery is TRANSACTIONAL:** the decider runs against a COPY of the
+report state, and the advanced state is committed to `avsync-report-state.json` only AFTER every
+message in the pass was DELIVERED (`post_discord_verdict` returns 0 iff HTTP 200); a failed POST
+DISCARDS the advanced state so the next pass re-derives + re-emits (a transient Discord outage never
+permanently drops a verified message — the owner's original complaint), and `--dry-run` works on the
+discarded copy so it never mutates the production state.
+
+**Supervisor redeploy step.** Refresh the dev2 measurer with `scripts/avsync-dev2-install.sh
+--install` on dev2 (it picks up the appended day-log write); the dev1
+`avsync-heartbeat-alert-watchdog` unit picks up the new script + `report` pass on its next timer
+pass — no unit change needed. Acceptance is the next live (the ticket stays `ops-wait`).
+
+**Shared benefit.** The same session decider gives issue 1032 its per-live table of confident
+SyncNet clips (the cross-check evidence) for free, and the per-day TSV on dev2 is the durable record
+the E2E / av-step watchdogs can correlate against.
+
+### GOTCHA (issue 1331) — removing a bash function from a watchdog ORPHANS its Rust harness tests + helpers → dead_code under CI clippy `-D warnings`, invisible to Tier-0
+
+Deleting `maybe_forward_verdict` from `scripts/avsync-heartbeat-alert-watchdog.sh` (its Rust tests
+in `tests/harness_avsync_heartbeat_alert_watchdog.rs` source the script and call the function
+directly) means those tests must go too — and their removal cascades: any harness helper/const/
+struct-field used ONLY by the deleted tests (`MEASURED_ZNIZ_BODY`, `run_main_with_fake_curl`,
+`discord_last_call`) becomes `dead_code`, which CI's `cargo clippy --all-targets -D warnings` fails.
+Tier-0 blocks `cargo clippy`/`build`/`test` locally, so this is INVISIBLE until CI. The net that
+catches it WITHOUT compiling: after the deletions, for EVERY remaining `fn`/`const`/struct-field in
+the harness `grep -cE '\bNAME\b' <file>` must be ≥ 2 (definition + ≥ 1 use); a helper left at 1 is
+dead. `cargo fmt --all --check` proves the file still PARSES but does NOT catch dead_code — the grep
+audit is the substitute. Keep a helper only if a SURVIVING test uses it (`discord_call_count` stayed
+— `dry_run_never_calls_notify` still asserts it; `discord_last_call` went — nothing did).
+
+### GOTCHA (issue 1331) — a new `report` pass makes the EXISTING behavioral harness tests invoke the fake `python3`/`ssh` stubs, inflating `notify_call_count`
+
+The dev1 watchdog's behavioral Rust tests stub a fake `sshpass`/`ssh` (returning a heartbeat body)
+AND a fake `python3` (logging `CALLED` to the notify marker) on PATH. Adding a `report` pass that,
+by default, ssh-fetches rows (the fake ssh returns the heartbeat body as "rows") and then runs
+`python3 avsync_report.py` (the fake python3 intercepts) silently INFLATES `notify_call_count`,
+breaking `both_legs_fresh_never_alerts` etc. Fix: neutralize the report pass in every non-report
+test via the `AVSYNC_REPORT_FETCH_CMD=true` seam (a `true` fetch → no rows → the pass returns before
+touching python) — added as a DEFAULT in the shared `run_bash_body_with_env`, AND explicitly in the
+two tests that build their OWN `Command` (`empty_probe_output_...`, `dev2_host_reads_...`). General
+rule: when a watchdog gains a NEW pass that shells out, add an env seam that no-ops it and set that
+seam in every pre-existing behavioral test that isn't testing the new pass.

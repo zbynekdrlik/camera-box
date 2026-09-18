@@ -88,6 +88,14 @@ ART="$(strih_lx_bundle_artifact)"
 step 4 "Genlock bundle -> ${GENLOCK_DIR} (strih FULL artifact: ${ART})"
 mkdir -p "$GENLOCK_DIR"
 if [ -d "${STRIH_LX_BUNDLE_SRC:-}" ]; then
+  # issue 1317: NEVER install a bundle built for a different Ubuntu release than the box runs -- a
+  # 24.04-built bundle (noble ffmpeg/Qt sonames) would crash OBS at load on the 26.04 strih-lx box.
+  # Gate the STAGED bundle's TARGET-RELEASE marker vs the box's /etc/os-release VERSION_ID BEFORE the
+  # cp -a (fail-closed on an absent marker -- a pre-marker bundle must be rebuilt, never trusted).
+  SETUP_BOX_VERSION_ID="$( . /etc/os-release 2>/dev/null; printf '%s' "${VERSION_ID:-}" )"
+  SRC_FLAGS="${STRIH_LX_BUNDLE_SRC%/}/STRIH_BUILD_FLAGS.txt"
+  strih_lx_release_parity_ok "$(cat "$SRC_FLAGS" 2>/dev/null || true)" "$SETUP_BOX_VERSION_ID" \
+    || fail "bundle release parity: ${SRC_FLAGS} must carry 'TARGET-RELEASE: ubuntu-${SETUP_BOX_VERSION_ID}' (box VERSION_ID=${SETUP_BOX_VERSION_ID}) -- refusing to install a bundle built for another release"
   # A pre-staged bundle dir (deploy-genlock-fleet.sh scp'd it, or an operator did) -- install it.
   cp -a "${STRIH_LX_BUNDLE_SRC%/}/." "$GENLOCK_DIR/" || fail "genlock bundle copy failed"
   GSHA="$(cat "$GENLOCK_DIR/GENLOCK_BUILD_SHA.txt" 2>/dev/null || echo unknown)"
