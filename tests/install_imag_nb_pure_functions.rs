@@ -469,3 +469,66 @@ fn the_chroot_drops_the_cdrom_apt_source_before_updating() {
         "the cdrom apt source must be dropped BEFORE the apt update (call at {call}, update at {update})"
     );
 }
+
+/// issue 1317 (review hardening): the helper runs inside the chroot under `set -euo pipefail`
+/// (`configure_in_chroot`'s heredoc), NOT the `set -uo pipefail` of `run_sourced`. A `grep` that
+/// finds nothing must not abort the chroot mid-configuration. Prove it directly: source under
+/// `set -euo pipefail` and assert a clean (no-match) apt dir still exits 0, and a matching dir is
+/// still cleaned without aborting.
+#[test]
+fn drop_cdrom_sources_survives_set_e_in_the_chroot() {
+    fn run_set_e(etc_apt: &std::path::Path) -> (i32, String) {
+        let harness = format!(
+            "set -euo pipefail\n. \"$SCRIPT\"\nimag_apt_drop_cdrom_sources '{}'\n",
+            etc_apt.display()
+        );
+        let out = Command::new("bash")
+            .arg("-c")
+            .arg(&harness)
+            .env("SCRIPT", script())
+            .output()
+            .expect("failed to run set -e harness");
+        (
+            out.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+        )
+    }
+
+    // Clean dir: a `grep` finding nothing must NOT abort under set -e.
+    let d = tmpdir("cdrom-set-e");
+    let etc_apt = d.join("etc/apt");
+    let sld = etc_apt.join("sources.list.d");
+    std::fs::create_dir_all(&sld).unwrap();
+    std::fs::write(
+        sld.join("ubuntu.sources"),
+        "Types: deb\nURIs: http://archive.ubuntu.com/ubuntu/\nSuites: resolute\nComponents: main\n",
+    )
+    .unwrap();
+    std::fs::write(
+        etc_apt.join("sources.list"),
+        "deb http://archive.ubuntu.com/ubuntu resolute main\n",
+    )
+    .unwrap();
+    let (code, err) = run_set_e(&etc_apt);
+    assert_eq!(
+        code, 0,
+        "clean dir must not abort under set -e. stderr: {err}"
+    );
+
+    // Matching dir: still cleans and exits 0 under set -e.
+    let cdrom = sld.join("cdrom.sources");
+    std::fs::write(
+        &cdrom,
+        "Types: deb\nURIs: file:///cdrom\nSuites: resolute\nComponents: main restricted\n",
+    )
+    .unwrap();
+    let (code, err) = run_set_e(&etc_apt);
+    assert_eq!(
+        code, 0,
+        "matching dir must exit 0 under set -e. stderr: {err}"
+    );
+    assert!(
+        !cdrom.exists(),
+        "the cdrom source must be removed under set -e"
+    );
+}
