@@ -277,3 +277,11 @@ sandbox!` → the render process dies). `verify-strih.sh` item 13 only checks th
 Recording retention, the NIC self-heal watcher, Companion Satellite re-pairing, WoL, and the 4K
 multiview projector budget are all listed in the issue-1317 inventory as NEEDS-WORK but are not part
 of the initial provisioning scaffolding — they follow once the hardware is in hand.
+
+### Anchor-test literal vs an expanded path (18.9.2026, CI 35390761239)
+
+`tests/strih_provision_pure_functions.rs` pins the step-4 fail-closed message by the LITERAL
+`RUNTIME_PACKAGES.txt missing`; a message that expands `${SRC_RUNTIME_PKGS} missing` reads identically
+at runtime but never matches the source-text anchor. Keep the file name literal in the message and put
+the expanded path in parentheses after it — the same rule for every future fail-closed marker a
+static-anchor test pins.
