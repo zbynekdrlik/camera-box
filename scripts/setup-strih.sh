@@ -96,12 +96,37 @@ if [ -d "${STRIH_LX_BUNDLE_SRC:-}" ]; then
   SRC_FLAGS="${STRIH_LX_BUNDLE_SRC%/}/STRIH_BUILD_FLAGS.txt"
   strih_lx_release_parity_ok "$(cat "$SRC_FLAGS" 2>/dev/null || true)" "$SETUP_BOX_VERSION_ID" \
     || fail "bundle release parity: ${SRC_FLAGS} must carry 'TARGET-RELEASE: ubuntu-${SETUP_BOX_VERSION_ID}' (box VERSION_ID=${SETUP_BOX_VERSION_ID}) -- refusing to install a bundle built for another release"
+  # issue 1317: install the runtime packages the CI runner recorded the bundle links against (Qt6 /
+  # ffmpeg 8 / libOpenGL / ...) BEFORE installing the bundle. A fresh 26.04 box has none of them, so
+  # without them the loader fails with the 13-soname `libavcodec.so.62: cannot open shared object`
+  # error. Fail-closed on an absent RUNTIME_PACKAGES.txt (same contract as TARGET-RELEASE: a pre-1317
+  # bundle whose runtime deps are unknown must be rebuilt, never trusted).
+  SRC_RUNTIME_PKGS="${STRIH_LX_BUNDLE_SRC%/}/RUNTIME_PACKAGES.txt"
+  [ -f "$SRC_RUNTIME_PKGS" ] || fail "bundle runtime packages: ${SRC_RUNTIME_PKGS} missing -- a strih bundle records the apt packages it links against since issue 1317; rebuild + re-stage (refusing to install a bundle whose runtime deps are unknown)"
+  RUNTIME_PKGS="$(strih_runtime_packages_from_file "$SRC_RUNTIME_PKGS" | tr '\n' ' ')"
+  if [ -n "${RUNTIME_PKGS// /}" ]; then
+    echo "  installing bundle runtime packages: ${RUNTIME_PKGS}"
+    # shellcheck disable=SC2086
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends $RUNTIME_PKGS \
+      || fail "runtime package install failed (apt-get install ${RUNTIME_PKGS}) -- fix the box's apt sources / package names and re-run"
+  else
+    warn "  RUNTIME_PACKAGES.txt is empty -- no runtime packages to install (unexpected for a strih bundle)"
+  fi
   # A pre-staged bundle dir (deploy-genlock-fleet.sh scp'd it, or an operator did) -- install it.
   cp -a "${STRIH_LX_BUNDLE_SRC%/}/." "$GENLOCK_DIR/" || fail "genlock bundle copy failed"
   GSHA="$(cat "$GENLOCK_DIR/GENLOCK_BUILD_SHA.txt" 2>/dev/null || echo unknown)"
   DSHA="$(cat "$GENLOCK_DIR/DISTROAV_BUILD_SHA.txt" 2>/dev/null || echo unknown)"
   genlock_write_markers "$GENLOCK_DIR" "$GSHA" "$DSHA" || fail "genlock_write_markers failed"
-  echo "  installed genlock bundle (genlock ${GSHA}, distroav ${DSHA})"
+  echo "  installed genlock bundle to ${GENLOCK_DIR} (genlock ${GSHA}, distroav ${DSHA})"
+  # issue 1317: install the bundle into its /usr prefix so the dynamic loader finds it -- the /opt
+  # staged copy above is the marker home, but OBS is BUILT for /usr (libs -> /usr/lib/x86_64-linux-gnu,
+  # the frontend -> /usr/bin/obs, data -> /usr/share/obs). Without this the loader has libobs.so.30 /
+  # distroav.so on no path and the Qt6/ffmpeg runtime is unreachable -- the exact 13-soname load
+  # failure. Mirrors the imag on-box program in scripts/deploy-genlock-fleet.sh (issue 1236
+  # perms-normalize + ldconfig).
+  strih_install_bundle_prefix "$GENLOCK_DIR" /usr/lib/x86_64-linux-gnu /usr/bin /usr/share \
+    || fail "strih_install_bundle_prefix: installing the bundle into the /usr prefix failed -- OBS would not load"
+  echo "  installed bundle into the /usr prefix (/usr/bin/obs + /usr/lib/x86_64-linux-gnu + ldconfig)"
 else
   warn "  STRIH_LX_BUNDLE_SRC unset -- fetch the ${ART} CI artifact and re-run with STRIH_LX_BUNDLE_SRC=<dir>"
   warn "  (deploy-genlock-fleet.sh --boxes strih-lx does this over ssh once the box is reachable)"

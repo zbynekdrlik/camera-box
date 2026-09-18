@@ -8,7 +8,8 @@ set -euo pipefail
 #   * a GNOME WAYLAND session on Ubuntu 26.04 -- DISPLAY is UNSET in the user session, so we resolve
 #     WAYLAND_DISPLAY from the wayland-* socket under XDG_RUNTIME_DIR (XWayland DISPLAY=:0 fallback,
 #     else FAIL LOUD -- the unit is After=graphical-session.target so no display is a hard error);
-#   * the OBS binary lives at /opt/obs-genlock/bin/obs (NOT on PATH);
+#   * the OBS binary is installed into the /usr prefix at /usr/bin/obs (setup-strih.sh step 4 --
+#     issue 1317; /opt/obs-genlock stays the staged copy + marker home). STRIH_OBS_BIN overrides it;
 #   * NO taskset CPU pin unless STRIH_ISOLATED_CPUS / /etc/strih-isolated-cpus.conf exists (never a
 #     guessed pin -- the imag #841 lesson);
 #   * NO DRM lease and NO scene-seeder preflight (the strih scene seeder is a separate follow-up --
@@ -24,7 +25,7 @@ set -euo pipefail
 # strih_resolve_session_env function and returns -- it never runs the live launch flow.
 
 LOG=/tmp/strih-obs-start.log
-OBS_BIN="${STRIH_OBS_BIN:-/opt/obs-genlock/bin/obs}"
+OBS_BIN="${STRIH_OBS_BIN:-/usr/bin/obs}"
 OBS_CFG="$HOME/.config/obs-studio"
 
 # strih_resolve_session_env -> print the resolved graphical-session display env assignment (one

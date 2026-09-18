@@ -123,6 +123,47 @@ not running under the supervisor".
   pins the unit's ExecStart/ExecStop basenames EQUAL to the installed launcher basenames, so a future
   rename can never re-dangle the ExecStart target.
 
+## Runtime packages + the /usr prefix install (issue 1317, DONE)
+
+The genlock bundle is a tarball BUILT for the `/usr` prefix and links release-specific Qt6 /
+ffmpeg 8 / libOpenGL runtime libraries. Before this, `setup-strih.sh` step 4 only `cp -a`d the tree
+to `/opt/obs-genlock` (on no loader path) and installed NO runtime packages, so on a fresh 26.04 box
+`obs` died at exec with `libavcodec.so.62: cannot open shared object file` (13 unresolved sonames:
+`libQt6{Core,DBus,Gui,Network,Svg,Widgets,Xml}.so.6`, `libavcodec.so.62`, `libavformat.so.62`,
+`libavutil.so.60`, `libOpenGL.so.0`, plus the bundle's own `libobs.so.30` / `libobs-frontend-api.so.30`).
+
+- **CI records the runtime package list into the bundle.** `scripts/genlock-runtime-packages.sh
+  --stage <dir> --out <file>` walks `ldd` over the staged `bin/obs` + every `*.so` (with the stage
+  lib dirs on `LD_LIBRARY_PATH` so bundle-internal sonames resolve INSIDE the tree and are DROPPED),
+  maps each remaining resolved SYSTEM library path to its apt package via `dpkg -S`, and writes the
+  sorted-unique package list to `RUNTIME_PACKAGES.txt`. It **fails loud on any `=> not found`**. The
+  runner that BUILT the binary is the only authority on what it links (a hand-curated 26.04 list rots
+  on every soname bump). Its pure half `runtime_packages_from_ldd STAGE` is sourceable + guarded for
+  Tier-0 testing with fake `ldd`/`dpkg` on PATH. BOTH Linux jobs' Stage steps run it BEFORE
+  `genlock-manifest.sh --stage` (a `Record runtime packages (#1317)` step) so `RUNTIME_PACKAGES.txt`
+  is in the bundle manifest; it travels in BOTH bundles (a re-provisioned imag-nb hits the same gap).
+- **setup-strih.sh step 4 installs the packages, then the bundle into its /usr prefix.**
+  `strih_runtime_packages_from_file` (pure, comment/blank-safe parser in `scripts/lib/strih-provision.sh`)
+  → `DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends <list>` BEFORE the
+  bundle install; a bundle WITHOUT `RUNTIME_PACKAGES.txt` **fails the step** (the same fail-closed
+  contract as `TARGET-RELEASE`). Then `strih_install_bundle_prefix <bundle> <libdir> <bindir>
+  <sharedir>` installs libs → `/usr/lib/x86_64-linux-gnu` (root:root, dirs 0755, files a+rX — the
+  issue-1236 perms normalize), `bin/obs` → `/usr/bin/obs` (0755 root), `share/obs` → `/usr/share/obs`,
+  then `ldconfig`. `/opt/obs-genlock` STAYS the staged copy + marker home (`verify-strih.sh` reads
+  the markers there).
+- **The launcher runs `/usr/bin/obs`.** `scripts/strih-obs-start.sh` launches
+  `${STRIH_OBS_BIN:-/usr/bin/obs}` (was `/opt/obs-genlock/bin/obs`).
+- **verify-strih.sh gates both** (a new item BEFORE the "OBS running under the supervisor" check):
+  `strih_ldd_unresolved` (pure parser of `ldd` output) over `/usr/bin/obs`,
+  `/usr/lib/x86_64-linux-gnu/libobs.so.30` and `.../obs-plugins/distroav.so` must be EMPTY, AND
+  `/opt/obs-genlock/RUNTIME_PACKAGES.txt` must exist with every listed package `dpkg -s` installed
+  (the item names the first missing one).
+- **Duplication to consolidate (deploy-arm follow-up).** `strih_install_bundle_prefix` deliberately
+  duplicates ~30 lines of the imag on-box install program (the templated heredoc inside
+  `scripts/deploy-genlock-fleet.sh`, its `cp -a` + issue-1236 perms-normalize + `ldconfig` block).
+  That program has its own probe-gated anchors, so extracting a shared prefix-install helper is the
+  `deploy-genlock-fleet.sh` strih-lx EXECUTE-arm follow-up's job — do it THEN, not now.
+
 ## Staging + ssh gotchas for setup-strih (live, 18.9.2026)
 
 - **The tree rsynced to the box must carry `scripts/` AND `systemd/`.** `setup-strih.sh` steps 8/9

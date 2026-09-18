@@ -234,3 +234,82 @@ strih_launcher_pair_ok() {
   done
   [ "$missing" = 0 ]
 }
+
+# --- issue 1317: bundle runtime packages + the /usr prefix install ---------------------------------
+# The genlock bundle is BUILT for the /usr prefix and links release-specific Qt6 / ffmpeg 8 / OpenGL
+# runtime libraries. On a fresh 26.04 box none of that is installed and the bundle is only copied to
+# /opt (no loader path), so `obs` dies at exec with `libavcodec.so.62: cannot open shared object
+# file` (13 unresolved sonames). scripts/genlock-runtime-packages.sh records the exact apt packages
+# the built bundle links against into RUNTIME_PACKAGES.txt; setup-strih.sh installs them and then
+# installs the bundle into its /usr prefix (below), and verify-strih.sh gates both.
+
+# strih_runtime_packages_from_file FILE -> print the apt package names in FILE, one per line, in file
+# order. Skips blank lines and comment lines (first non-whitespace char '#'); trims surrounding
+# whitespace (dpkg package names never contain whitespace). Returns 1 if FILE does not exist.
+strih_runtime_packages_from_file() {
+  local file="${1:?packages file required}" line pkg
+  [ -f "$file" ] || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    pkg="${line#"${line%%[![:space:]]*}"}"   # ltrim leading whitespace
+    pkg="${pkg%"${pkg##*[![:space:]]}"}"       # rtrim trailing whitespace
+    [ -n "$pkg" ] || continue
+    case "$pkg" in '#'*) continue ;; esac
+    printf '%s\n' "$pkg"
+  done < "$file"
+}
+
+# strih_ldd_unresolved  (stdin: `ldd <file>` output, possibly concatenated for several files) -> print
+# each UNRESOLVED soname (an `<soname> => not found` line), one per line, deduped. EMPTY output means
+# every dependency resolved. verify-strih.sh runs it over /usr/bin/obs + libobs.so.30 + distroav.so
+# and FAILS on any non-empty output (a missing runtime lib IS the 13-soname load failure this fixes).
+strih_ldd_unresolved() {
+  local line soname
+  while IFS= read -r line; do
+    case "$line" in
+      *'=> not found'*)
+        soname="${line%%=>*}"
+        soname="${soname#"${soname%%[![:space:]]*}"}"   # ltrim
+        soname="${soname%"${soname##*[![:space:]]}"}"     # rtrim
+        [ -n "$soname" ] && printf '%s\n' "$soname"
+        ;;
+    esac
+  done | sort -u
+}
+
+# strih_install_bundle_prefix BUNDLE LIBDIR BINDIR SHAREDIR -> install the staged genlock bundle into
+# its /usr prefix so the dynamic loader finds it (the imag on-box program shape in
+# scripts/deploy-genlock-fleet.sh -- issue 1236 perms-normalize + ldconfig): copy
+# BUNDLE/lib/x86_64-linux-gnu/. -> LIBDIR (root:root, dirs 0755, files a+rX), BUNDLE/bin/obs ->
+# BINDIR/obs (0755 root), BUNDLE/share/obs -> SHAREDIR/obs, then `ldconfig`. Runs as root in
+# setup-strih.sh step 4 AFTER the /opt staged copy (which stays the marker home). Returns non-zero on
+# a critical copy failure. NOTE: this ~30-line prefix install duplicates the imag on-box program's
+# install block (a templated heredoc inside deploy-genlock-fleet.sh with its own probe-gated anchors);
+# consolidating the two is the deploy-arm follow-up's job (.claude/rules/strih-linux-provisioning.md).
+strih_install_bundle_prefix() {
+  local bundle="${1:?bundle root required}" libdir="${2:?libdir required}" bindir="${3:?bindir required}" sharedir="${4:?sharedir required}"
+  local rel dst
+  [ -d "${bundle}/lib/x86_64-linux-gnu" ] || { printf 'strih_install_bundle_prefix: %s/lib/x86_64-linux-gnu missing\n' "$bundle" >&2; return 1; }
+  [ -f "${bundle}/bin/obs" ] || { printf 'strih_install_bundle_prefix: %s/bin/obs missing\n' "$bundle" >&2; return 1; }
+  mkdir -p "$libdir" || return 1
+  cp -a "${bundle}/lib/x86_64-linux-gnu/." "${libdir}/" || { printf 'strih_install_bundle_prefix: lib copy failed\n' >&2; return 1; }
+  # normalize perms/ownership deterministically (issue 1236): reset LIBDIR root:root 0755, then chown
+  # root:root + dirs 0755 / files a+rX over EVERY just-installed path (scope to the installed set).
+  chown root:root "$libdir" 2>/dev/null || true
+  chmod 0755 "$libdir" 2>/dev/null || true
+  while IFS= read -r -d '' rel; do
+    dst="${libdir}/${rel}"
+    [ -e "$dst" ] || continue
+    chown root:root "$dst" 2>/dev/null || true
+    if [ -d "$dst" ]; then chmod 0755 "$dst" 2>/dev/null || true; else chmod a+rX "$dst" 2>/dev/null || true; fi
+  done < <(cd "${bundle}/lib/x86_64-linux-gnu" && find . -mindepth 1 -printf '%P\0')
+  install -m 0755 -o root -g root "${bundle}/bin/obs" "${bindir}/obs" || { printf 'strih_install_bundle_prefix: %s/obs install failed\n' "$bindir" >&2; return 1; }
+  if [ -d "${bundle}/share/obs" ]; then
+    mkdir -p "${sharedir}/obs"
+    cp -a "${bundle}/share/obs/." "${sharedir}/obs/" || { printf 'strih_install_bundle_prefix: share/obs copy failed\n' >&2; return 1; }
+    chown -R root:root "${sharedir}/obs" 2>/dev/null || true
+    chmod 0755 "${sharedir}/obs" 2>/dev/null || true
+    find "${sharedir}/obs" -type d -exec chmod 0755 {} + 2>/dev/null || true
+    find "${sharedir}/obs" -type f -exec chmod a+rX {} + 2>/dev/null || true
+  fi
+  ldconfig
+}

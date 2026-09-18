@@ -45,6 +45,45 @@ else
   bad "strih-obs launcher pair not installed in ${LAUNCHER_BIN_DIR} (${_lp_missing//$'\n'/, }) -- strih-obs.service ExecStart would flap 203/EXEC; re-run setup-strih.sh step 8"
 fi
 
+# 0b) runtime libraries resolve + the recorded runtime packages are installed (issue 1317). The
+#     bundle is installed into its /usr prefix (setup-strih.sh step 4), so the loader must resolve
+#     EVERY dependency of /usr/bin/obs, the bundle's libobs.so.30 and distroav.so -- an unresolved
+#     soname IS the 13-soname load failure this fixes. And every package RUNTIME_PACKAGES.txt records
+#     (Qt6/ffmpeg/GL) must be dpkg-installed. Checked BEFORE the "OBS running" item so a bundle that
+#     cannot load names WHY instead of only surfacing as the generic "OBS not running" below.
+STRIH_LIBDIR="${STRIH_LIBDIR:-/usr/lib/x86_64-linux-gnu}"
+STRIH_OBS_BIN_PATH="${STRIH_OBS_BIN_PATH:-/usr/bin/obs}"
+if command -v ldd >/dev/null 2>&1; then
+  _unresolved=""
+  for _obj in "$STRIH_OBS_BIN_PATH" "${STRIH_LIBDIR}/libobs.so.30" "${STRIH_LIBDIR}/obs-plugins/distroav.so"; do
+    [ -e "$_obj" ] || continue
+    _u="$(ldd "$_obj" 2>/dev/null | strih_ldd_unresolved || true)"
+    [ -n "$_u" ] && _unresolved="${_unresolved}${_unresolved:+, }${_u//$'\n'/, }"
+  done
+  if [ -z "$_unresolved" ]; then
+    ok "OBS runtime libraries all resolve (ldd over /usr/bin/obs + libobs.so.30 + distroav.so)"
+  else
+    bad "OBS has UNRESOLVED runtime libraries -- the bundle cannot load (install the runtime packages / re-run setup-strih.sh step 4): ${_unresolved}"
+  fi
+else
+  note "ldd absent -- cannot check runtime library resolution"
+fi
+RUNTIME_PKGS_FILE="${GENLOCK_DIR}/RUNTIME_PACKAGES.txt"
+if [ -f "$RUNTIME_PKGS_FILE" ]; then
+  _missing_pkg=""
+  while IFS= read -r _pkg; do
+    [ -n "$_pkg" ] || continue
+    dpkg -s "$_pkg" >/dev/null 2>&1 || { _missing_pkg="$_pkg"; break; }
+  done < <(strih_runtime_packages_from_file "$RUNTIME_PKGS_FILE")
+  if [ -z "$_missing_pkg" ]; then
+    ok "all bundle runtime packages installed (RUNTIME_PACKAGES.txt)"
+  else
+    bad "bundle runtime package '${_missing_pkg}' is NOT installed (RUNTIME_PACKAGES.txt) -- re-run setup-strih.sh step 4"
+  fi
+else
+  bad "RUNTIME_PACKAGES.txt missing under ${GENLOCK_DIR} -- a strih bundle always records it since issue 1317; rebuild + re-provision"
+fi
+
 # 1) OBS running under the supervisor.
 if systemctl --user is-active strih-obs.service >/dev/null 2>&1 || pgrep -x obs >/dev/null 2>&1 || pgrep -f 'bin/64bit/obs\|/obs$' >/dev/null 2>&1; then
   ok "OBS running (strih-obs.service / obs process)"
