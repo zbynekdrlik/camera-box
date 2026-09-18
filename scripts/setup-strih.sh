@@ -102,7 +102,7 @@ if [ -d "${STRIH_LX_BUNDLE_SRC:-}" ]; then
   # error. Fail-closed on an absent RUNTIME_PACKAGES.txt (same contract as TARGET-RELEASE: a pre-1317
   # bundle whose runtime deps are unknown must be rebuilt, never trusted).
   SRC_RUNTIME_PKGS="${STRIH_LX_BUNDLE_SRC%/}/RUNTIME_PACKAGES.txt"
-  [ -f "$SRC_RUNTIME_PKGS" ] || fail "bundle runtime packages: ${SRC_RUNTIME_PKGS} missing -- a strih bundle records the apt packages it links against since issue 1317; rebuild + re-stage (refusing to install a bundle whose runtime deps are unknown)"
+  [ -f "$SRC_RUNTIME_PKGS" ] || fail "bundle runtime packages: RUNTIME_PACKAGES.txt missing (${SRC_RUNTIME_PKGS}) -- a strih bundle records the apt packages it links against since issue 1317; rebuild + re-stage (refusing to install a bundle whose runtime deps are unknown)"
   RUNTIME_PKGS="$(strih_runtime_packages_from_file "$SRC_RUNTIME_PKGS" | tr '\n' ' ')"
   if [ -n "${RUNTIME_PKGS// /}" ]; then
     echo "  installing bundle runtime packages: ${RUNTIME_PKGS}"
