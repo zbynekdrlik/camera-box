@@ -530,12 +530,17 @@ Low-confidence / UNMEASURABLE / no-signal rows are never verdicts, only counted 
 **The dev1 `report` pass.** `scripts/avsync-heartbeat-alert-watchdog.sh` gained a `report` pass after
 the heartbeat legs: fetch the rows newer than the cursor from dev2 over the existing key-auth ssh
 (`AVSYNC_REPORT_FETCH_CMD` is the fetch seam the dry-run tests stub; else `ssh newlevel@<host>` cats
-today's + yesterday's day files), run `avsync_report.py --state $STATE_DIR/avsync-report-state.json
---rows <fetched>`, and post each returned line with the EXISTING `post_discord_verdict` bot-API path
-(the ONE dev1-side delivery mechanism — never a second Discord path; `--dry-run` logs `WOULD post`).
-The pass runs regardless of the heartbeat-leg probe result (its fetch is independent). Volume is
-~5–7 messages per 90-minute live (start, 4 periodic, end, a change) BY DESIGN — the owner asked to
-SEE continuity — and the idempotent decider never re-posts a repeated state.
+today's + yesterday's day files), run `avsync_report.py`, and post each returned line with the
+EXISTING `post_discord_verdict` bot-API path (the ONE dev1-side delivery mechanism — never a second
+Discord path; `--dry-run` logs `WOULD post`). The pass runs regardless of the heartbeat-leg probe
+result (its fetch is independent). Volume is ~5–7 messages per 90-minute live (start, 4 periodic,
+end, a change) BY DESIGN — the owner asked to SEE continuity — and the idempotent decider never
+re-posts a repeated state. **Delivery is TRANSACTIONAL:** the decider runs against a COPY of the
+report state, and the advanced state is committed to `avsync-report-state.json` only AFTER every
+message in the pass was DELIVERED (`post_discord_verdict` returns 0 iff HTTP 200); a failed POST
+DISCARDS the advanced state so the next pass re-derives + re-emits (a transient Discord outage never
+permanently drops a verified message — the owner's original complaint), and `--dry-run` works on the
+discarded copy so it never mutates the production state.
 
 **Supervisor redeploy step.** Refresh the dev2 measurer with `scripts/avsync-dev2-install.sh
 --install` on dev2 (it picks up the appended day-log write); the dev1
