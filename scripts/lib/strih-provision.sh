@@ -196,3 +196,21 @@ strih_lx_chrome_sandbox_verdict() {
   [ "$mode" = '4755' ]       || { printf 'wrong-mode';  return 1; }
   printf 'ok'; return 0
 }
+
+# --- issue 1317 (owner ROZHODNUTÉ 18.9.): bundle-vs-box release parity --------------------------
+# The strih bundle is built on a SPECIFIC Ubuntu release (26.04 for strih-lx) and links THAT
+# release's ffmpeg/Qt sonames; deploying a 24.04-built bundle onto a 26.04 box (or vice versa) would
+# crash OBS at load (libavcodec60 vs libavcodec62, Qt 6.4 vs 6.10). The CI Stage step stamps a
+# `TARGET-RELEASE: ubuntu-<rel>` line into STRIH_BUILD_FLAGS.txt; this predicate gates the box's
+# VERSION_ID against it.
+
+# strih_lx_release_parity_ok BUNDLE_FLAGS_TEXT BOX_VERSION_ID -> 0 iff BUNDLE_FLAGS_TEXT carries the
+# whole line `TARGET-RELEASE: ubuntu-<BOX_VERSION_ID>` (the release the bundle was built on equals
+# the box's /etc/os-release VERSION_ID). Fail-closed (returns 1): any release mismatch, an ABSENT
+# TARGET-RELEASE marker (a pre-marker bundle that must be rebuilt, never trusted), or an empty
+# BOX_VERSION_ID.
+strih_lx_release_parity_ok() {
+  local flags="${1:-}" version_id="${2:-}"
+  [ -n "$version_id" ] || return 1
+  printf '%s\n' "$flags" | grep -qxF "TARGET-RELEASE: ubuntu-${version_id}"
+}

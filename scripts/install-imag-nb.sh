@@ -3,12 +3,18 @@ set -euo pipefail
 
 # One-shot OS installer for an imag notebook (#815, part of #791).
 #
-# Run this ON the new notebook, from its own Ubuntu 24.04 live-USB session. It installs a clean
-# desktop Ubuntu onto the notebook's internal disk so that `scripts/setup-imag.sh` can take over
-# right after the first boot — the imag equivalent of `scripts/create-usb-linux.sh` for the cam
-# fleet. Swapping the imag NB must never again be manual work (user directive, 2026-07-27).
+# Run this ON the new notebook, from its own Ubuntu live-USB session. It installs a clean desktop
+# Ubuntu onto the notebook's internal disk so that `scripts/setup-imag.sh` can take over right after
+# the first boot — the imag equivalent of `scripts/create-usb-linux.sh` for the cam fleet. Swapping
+# the imag NB must never again be manual work (user directive, 2026-07-27).
 #
-# WHY squashfs LAYERS and not a copy of the running live session: an Ubuntu 24.04 live ISO stacks
+# RELEASE-AGNOSTIC (issue 1317): supports BOTH a 24.04 (noble) and a 26.04 (resolute) live stick —
+# the casper layer chain is the same and the chroot kernel meta is DERIVED from the target's own
+# /etc/os-release VERSION_ID (linux-generic-hwe-<VERSION_ID>, the HWE line the imag/strih-lx role
+# runs, else linux-generic) via `imag_kernel_meta_package`, never a hardcoded release literal. The
+# strih-lx notebook (owner 18.9.) uses a 26.04 stick with --hostname strih-lx --ip 10.77.9.203.
+#
+# WHY squashfs LAYERS and not a copy of the running live session: an Ubuntu live ISO stacks
 #   minimal.squashfs  ->  minimal.standard.squashfs  ->  minimal.standard.live.squashfs
 # and the TOP layer is the live session itself (casper, the `ubuntu` live user, the installer
 # snap). Copying `/` would install all of that. Copying only the lower layers — exactly what the
@@ -86,6 +92,25 @@ imag_layer_chain() {
     if [ "$sb" = "enabled" ]; then
         [ -f "$sbl" ] || { echo "imag_layer_chain: Secure Boot is on but layer missing: $sbl" >&2; return 3; }
         printf '%s\n' "$sbl"
+    fi
+}
+
+# imag_kernel_meta_package VERSION_ID AVAILABLE -> the apt kernel meta-package to install in the
+# target chroot. AVAILABLE is the newline-separated `apt-cache pkgnames linux-generic` list from the
+# TARGET's apt cache. Prefers the HWE meta `linux-generic-hwe-<VERSION_ID>` (the imag role runs the
+# HWE line -- the #819/#482 13th-gen CPU/iGPU/USB-NIC support) when that EXACT name is available on
+# the target release, else falls back to the GA `linux-generic`. issue 1317: this is what lets the
+# ONE installer serve both a 24.04 stick (linux-generic-hwe-24.04) and a 26.04 stick
+# (linux-generic-hwe-26.04) instead of a hardcoded noble literal. Empty VERSION_ID -> non-zero (a
+# release must be known -- never a silent default).
+imag_kernel_meta_package() {
+    local version_id="${1:-}" available="${2:-}"
+    [ -n "$version_id" ] || { echo "imag_kernel_meta_package: VERSION_ID required" >&2; return 2; }
+    local hwe="linux-generic-hwe-${version_id}"
+    if printf '%s\n' "$available" | grep -qxF "$hwe"; then
+        printf '%s\n' "$hwe"
+    else
+        printf '%s\n' "linux-generic"
     fi
 }
 
@@ -306,9 +331,18 @@ EOF
 
 configure_in_chroot() {
     log "Configuring the installed system (user, ssh, grub)"
+    # issue 1317: serialize the pure kernel-meta decision INTO the chroot script so the derivation
+    # (VERSION_ID + apt-cache list -> HWE-or-GA) runs INSIDE the chroot, AFTER its own apt-get update,
+    # using the SAME single source of truth the unit tests exercise (no duplicated inline logic). A
+    # ${kernel_meta_fn} expansion in an unquoted heredoc inserts the function text verbatim; bash does
+    # not re-scan a substituted value, so the function body's own $1/$version_id stay literal.
+    local kernel_meta_fn
+    kernel_meta_fn="$(declare -f imag_kernel_meta_package)"
     cat > "$MOUNT_ROOT/tmp/imag-chroot.sh" <<CHROOT
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
+
+${kernel_meta_fn}
 
 id -u "${DESKTOP_USER}" >/dev/null 2>&1 || useradd -m -s /bin/bash -G sudo,adm,video,audio,plugdev "${DESKTOP_USER}"
 echo "${DESKTOP_USER}:${DESKTOP_PW}" | chpasswd
@@ -318,13 +352,18 @@ apt-get update -qq
 apt-get install -y --no-install-recommends openssh-server network-manager grub-efi-amd64 grub-efi-amd64-signed shim-signed >/dev/null
 
 # The ISO's install layers ship NO kernel (see copy_rootfs) — pull one from apt. It MUST be the
-# **HWE** chain (\`linux-generic-hwe-24.04\`, image + modules + headers), not the GA one (#819):
-# the imag role runs the HWE line (the incumbent box is on 6.17), setup-imag.sh step 6 holds the
-# HWE package names and step 7 installs linux-lowlatency-hwe-24.04 whose deps ARE those packages —
-# a GA baseline aborts provisioning ("Depends: linux-image-generic-hwe-24.04 … not going to be
-# installed") and drops the 13th-gen CPU/iGPU/USB-NIC support #482 deliberately kept.
+# **HWE** chain (image + modules + headers), not the GA one (#819): the imag role runs the HWE line
+# (the incumbent box is on 6.17), setup-imag.sh step 6 holds the HWE package names and step 7 installs
+# linux-lowlatency-hwe-<rel> whose deps ARE those packages — a GA baseline aborts provisioning
+# ("Depends: linux-image-generic-hwe-<rel> … not going to be installed") and drops the 13th-gen
+# CPU/iGPU/USB-NIC support #482 deliberately kept. issue 1317: the release is DERIVED from the target's
+# own /etc/os-release VERSION_ID (linux-generic-hwe-<VERSION_ID> when available on that release, else
+# linux-generic) via imag_kernel_meta_package (serialized in above), never a hardcoded noble literal.
 if ! ls /boot/vmlinuz-* >/dev/null 2>&1; then
-    apt-get install -y linux-generic-hwe-24.04 >/dev/null || exit 1
+    version_id="\$( . /etc/os-release; printf '%s' "\${VERSION_ID:-}" )"
+    kernel_avail="\$(apt-cache pkgnames linux-generic 2>/dev/null || true)"
+    kernel_meta="\$(imag_kernel_meta_package "\$version_id" "\$kernel_avail")" || exit 1
+    apt-get install -y "\$kernel_meta" >/dev/null || exit 1
 fi
 ls /boot/vmlinuz-* >/dev/null 2>&1 || { echo "no kernel installed in the chroot" >&2; exit 1; }
 
