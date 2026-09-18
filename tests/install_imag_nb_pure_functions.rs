@@ -306,3 +306,166 @@ fn kernel_meta_package_prefers_hwe_when_available_else_ga_and_needs_a_version() 
         "an unknown release must fail loud, not default silently"
     );
 }
+
+/// issue 1317 (live failure 18.9. 19:57): the Ubuntu 26.04 live layers ship
+/// `/etc/apt/sources.list.d/cdrom.sources` (deb822, `URIs: file:///cdrom`, `Suites: resolute`) and
+/// `copy_rootfs` copies it into the target. Inside the chroot `/cdrom` is not mounted, so apt aborts
+/// with `E: The repository 'file:/cdrom resolute Release' does not have a Release file` and the
+/// chroot script dies before `apt-get install openssh-server …` (no sshd, no bootloader). The pure
+/// `imag_apt_drop_cdrom_sources <etc-apt-dir>` helper removes every `*.sources` whose `URIs:` line
+/// points at `file:///cdrom` (or `cdrom:`) and strips `deb cdrom:` / `deb-src cdrom:` lines from a
+/// classic `sources.list` — the archive sources are left byte-identical.
+#[test]
+fn drop_cdrom_sources_removes_the_live_iso_apt_sources_only() {
+    let d = tmpdir("cdrom-drop");
+    let etc_apt = d.join("etc/apt");
+    let sld = etc_apt.join("sources.list.d");
+    std::fs::create_dir_all(&sld).unwrap();
+
+    // The 26.04 live-ISO cdrom source (deb822, URIs: file:///cdrom).
+    let cdrom_sources = sld.join("cdrom.sources");
+    std::fs::write(
+        &cdrom_sources,
+        "Types: deb\nURIs: file:///cdrom\nSuites: resolute\nComponents: main restricted\n",
+    )
+    .unwrap();
+
+    // The archive deb822 source must be left byte-identical.
+    let ubuntu_sources = sld.join("ubuntu.sources");
+    std::fs::write(
+        &ubuntu_sources,
+        "Types: deb\nURIs: http://archive.ubuntu.com/ubuntu/\nSuites: resolute\nComponents: main universe\n",
+    )
+    .unwrap();
+    let ubuntu_before = std::fs::read(&ubuntu_sources).unwrap();
+
+    // A classic sources.list carrying one cdrom line and one http line.
+    let list = etc_apt.join("sources.list");
+    std::fs::write(
+        &list,
+        "deb cdrom:[Ubuntu 26.04]/ resolute main\ndeb http://archive.ubuntu.com/ubuntu resolute main\n",
+    )
+    .unwrap();
+
+    let (code, out, err) = run_sourced(&format!(
+        "imag_apt_drop_cdrom_sources '{}'",
+        etc_apt.display()
+    ));
+    assert_eq!(code, 0, "drop should succeed. stderr: {err}");
+
+    assert!(
+        !cdrom_sources.exists(),
+        "the live-ISO cdrom.sources must be removed"
+    );
+    assert!(
+        ubuntu_sources.exists(),
+        "the archive ubuntu.sources must survive"
+    );
+    assert_eq!(
+        std::fs::read(&ubuntu_sources).unwrap(),
+        ubuntu_before,
+        "the archive ubuntu.sources must be byte-identical"
+    );
+    assert!(
+        out.contains("dropped") && out.contains("cdrom.sources"),
+        "it must report the dropped file on stdout: {out}"
+    );
+
+    let list_after = std::fs::read_to_string(&list).unwrap();
+    assert!(
+        !list_after.lines().any(|l| l.contains("cdrom:")),
+        "the `deb cdrom:` line must be stripped: {list_after}"
+    );
+    assert!(
+        list_after
+            .lines()
+            .any(|l| l.contains("deb http://archive.ubuntu.com/ubuntu resolute main")),
+        "the http archive line must survive: {list_after}"
+    );
+}
+
+/// A target apt dir with no cdrom source is the steady state after this runs once — it must be a
+/// no-op (idempotent) and exit 0, never touch the archive sources.
+#[test]
+fn drop_cdrom_sources_is_idempotent_when_nothing_matches() {
+    let d = tmpdir("cdrom-none");
+    let etc_apt = d.join("etc/apt");
+    let sld = etc_apt.join("sources.list.d");
+    std::fs::create_dir_all(&sld).unwrap();
+    let ubuntu = sld.join("ubuntu.sources");
+    std::fs::write(
+        &ubuntu,
+        "Types: deb\nURIs: http://archive.ubuntu.com/ubuntu/\nSuites: resolute\nComponents: main\n",
+    )
+    .unwrap();
+    let list = etc_apt.join("sources.list");
+    std::fs::write(
+        &list,
+        "deb http://archive.ubuntu.com/ubuntu resolute main\n",
+    )
+    .unwrap();
+    let ubuntu_before = std::fs::read(&ubuntu).unwrap();
+    let list_before = std::fs::read(&list).unwrap();
+
+    let (code, _out, err) = run_sourced(&format!(
+        "imag_apt_drop_cdrom_sources '{}'",
+        etc_apt.display()
+    ));
+    assert_eq!(code, 0, "a clean apt dir must exit 0. stderr: {err}");
+    assert_eq!(
+        std::fs::read(&ubuntu).unwrap(),
+        ubuntu_before,
+        "ubuntu.sources must be untouched"
+    );
+    assert_eq!(
+        std::fs::read(&list).unwrap(),
+        list_before,
+        "sources.list must be untouched"
+    );
+}
+
+/// A missing apt dir is a broken/unexpected target — fail LOUD (non-zero), never silently pass
+/// (script-failure-policy).
+#[test]
+fn drop_cdrom_sources_fails_loud_on_a_missing_dir() {
+    let d = tmpdir("cdrom-missing");
+    let etc_apt = d.join("etc/apt-does-not-exist");
+    let (code, _out, err) = run_sourced(&format!(
+        "imag_apt_drop_cdrom_sources '{}'",
+        etc_apt.display()
+    ));
+    assert_ne!(
+        code, 0,
+        "a missing apt dir must fail loud, not silently pass"
+    );
+    assert!(
+        err.to_lowercase().contains("apt"),
+        "the error should name the apt-dir requirement: {err}"
+    );
+}
+
+/// Static anchor: the chroot step must DROP the live-ISO cdrom apt source BEFORE it runs the apt
+/// update — otherwise the update aborts on the unreadable `file:///cdrom` source and the whole
+/// chroot configuration dies. The call must sit on `/etc/apt` and must be unique.
+#[test]
+fn the_chroot_drops_the_cdrom_apt_source_before_updating() {
+    let (code, chroot_fn, err) = run_sourced("declare -f configure_in_chroot");
+    assert_eq!(code, 0, "configure_in_chroot must exist. stderr: {err}");
+    assert_eq!(
+        chroot_fn
+            .matches("imag_apt_drop_cdrom_sources /etc/apt")
+            .count(),
+        1,
+        "the cdrom-drop call anchor must appear exactly once: {chroot_fn}"
+    );
+    let call = chroot_fn
+        .find("imag_apt_drop_cdrom_sources /etc/apt")
+        .expect("the chroot step must drop the live-ISO cdrom apt source on /etc/apt");
+    let update = chroot_fn
+        .find("apt-get update -qq")
+        .expect("the chroot step must run the apt update");
+    assert!(
+        call < update,
+        "the cdrom apt source must be dropped BEFORE the apt update (call at {call}, update at {update})"
+    );
+}
