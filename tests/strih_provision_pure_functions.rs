@@ -451,7 +451,7 @@ fn unit_execstart_execstop_basenames_match_the_installed_launchers() {
             .lines()
             .find(|l| l.trim_start().starts_with(prefix))
             .unwrap_or_else(|| panic!("unit must have an {prefix} line"));
-        let rhs = line.trim_start().splitn(2, '=').nth(1).unwrap().trim();
+        let rhs = line.trim_start().split_once('=').unwrap().1.trim();
         let path = rhs.split_whitespace().next().unwrap();
         path.rsplit('/').next().unwrap().to_string()
     };
