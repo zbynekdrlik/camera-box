@@ -95,6 +95,17 @@ pub struct GenlockFacets {
     /// dead/frozen sender is the #1001/#1052 watchdogs' concern, not the lock decision's. Additive:
     /// an all-zero `n_absent` reproduces every pre-#1299 verdict exactly (`n_connected == n_inputs`).
     pub n_absent: u32,
+    /// #1341 — of `n_inputs`, how many are CONNECTED (a live NDI receiver) but IDLE: their
+    /// received-frame DELTA over the widget's 60 s window is below `GENLOCK_IDLE_INPUT_MIN_FRAMES`
+    /// (a keep-alive-only SongPlayer playlist input sends ~1 frame / 11 s; a live source at
+    /// ≥ 23.98 fps delivers ≥ 1400). An idle input's FIFO churns relocks/late-holds every time a
+    /// keep-alive frame re-acquires a boundary, which would falsely feed `recent_event` and blame it
+    /// as unlocked — so it is excluded from `n_locked` by the widget scan, contributes 0 phase
+    /// events ([`InputEventCounts::idle`]), and drops out of the DEGRADED-gate denominator:
+    /// `n_connected = n_inputs - n_absent - n_idle` (saturating, the `n_absent` shape). A box whose
+    /// inputs are ALL idle/absent stays HEALTHY-idle LOCKED. Additive: an all-zero `n_idle`
+    /// reproduces every pre-#1341 verdict exactly.
+    pub n_idle: u32,
     /// A relock / underrun / late-hold / backward-step was observed in the last 60 s
     /// (the widget tracks counter deltas across its 1 Hz samples to compute this).
     pub recent_event: bool,
@@ -213,6 +224,11 @@ pub struct InputEventCounts {
     /// The DistroAV receiver has a live NDI connection (sender running). A disconnected input
     /// contributes ZERO — its #1096 fresh-finder rebind churn is not a lock event.
     pub connected: bool,
+    /// #1341 — the input is CONNECTED but IDLE (keep-alive-only, received-frame rate below
+    /// `GENLOCK_IDLE_INPUT_MIN_FRAMES` over the window). Contributes ZERO phase events — exactly the
+    /// `connected == false` path — so a SongPlayer playlist input's relock churn on each ~11 s
+    /// keep-alive frame never feeds `recent_event`. Additive: `idle == false` is the pre-#1341 shape.
+    pub idle: bool,
     /// FIFO relock count (a boundary was re-acquired — a phase-discipline event).
     pub relocks: u64,
     /// Late-hold count (a hold fired after its deadline — a phase-discipline event).
@@ -358,6 +374,7 @@ mod tests {
             n_inputs: 7,
             n_locked: 7,
             n_absent: 0,
+            n_idle: 0,
             recent_event: false,
             qpc_drift_beyond_bound: false,
             clock_present: true,
@@ -463,6 +480,63 @@ mod tests {
         f.n_locked = 2;
         f.n_absent = 1; // n_connected=3, n_locked=2 < 3
         assert_eq!(decide(&f), (LockState::Degraded, LockReason::InputUnlocked));
+    }
+
+    // ---- #1341: a connected-but-IDLE input never grades the box --------------------
+
+    #[test]
+    fn idle_sender_only_unlocked_is_still_locked() {
+        // The cg-OBS scenario: 12 inputs, 2 live+locked, 10 idle SongPlayer keep-alive inputs. The
+        // idle ones are excluded from n_connected AND n_locked, so 2/2 CONNECTED-non-idle are locked
+        // -> LOCKED, never the chronic DEGRADED/recent_event the idle relock churn produced (#1341).
+        let mut f = healthy();
+        f.n_inputs = 12;
+        f.n_locked = 2;
+        f.n_idle = 10; // n_connected = 12 - 0 - 10 = 2, n_locked = 2
+        assert_eq!(decide(&f), (LockState::Locked, LockReason::None));
+    }
+
+    #[test]
+    fn all_idle_is_healthy_idle_locked() {
+        // Every input present but idle (keep-alive only): HEALTHY-idle, NOT UNLOCKED — nothing live
+        // to lock onto, exactly like the all-absent arm.
+        let mut f = healthy();
+        f.n_inputs = 4;
+        f.n_locked = 0;
+        f.n_idle = 4; // n_connected = 0 -> HEALTHY-idle
+        assert_eq!(decide(&f), (LockState::Locked, LockReason::None));
+    }
+
+    #[test]
+    fn idle_plus_a_connected_live_unlocked_still_degrades() {
+        // 12 inputs: 10 idle, 2 live of which only 1 is locked -> a LIVE input is genuinely unlocked
+        // -> DEGRADED. Idle inputs are excluded, but a real fault on a live input still pages.
+        let mut f = healthy();
+        f.n_inputs = 12;
+        f.n_locked = 1;
+        f.n_idle = 10; // n_connected = 2, n_locked = 1 < 2
+        assert_eq!(decide(&f), (LockState::Degraded, LockReason::InputUnlocked));
+    }
+
+    #[test]
+    fn n_idle_and_n_absent_together_saturate_n_connected() {
+        // n_absent + n_idle > n_inputs (a transient over-count) saturates n_connected to 0 -> the
+        // decision stays total and reads HEALTHY-idle, never a panic or a wrapped huge denominator.
+        let mut f = healthy();
+        f.n_inputs = 3;
+        f.n_locked = 0;
+        f.n_absent = 2;
+        f.n_idle = 3; // 3 - 2 - 3 saturates to 0
+        assert_eq!(decide(&f), (LockState::Locked, LockReason::None));
+    }
+
+    #[test]
+    fn idle_never_leaves_unlocked_on_clock_down() {
+        // n_idle must never flip an UNLOCKED clock verdict — clock precedence still wins.
+        let mut f = healthy();
+        f.n_idle = 5;
+        f.clock_locked = false;
+        assert_eq!(decide(&f), (LockState::Unlocked, LockReason::Clock));
     }
 
     #[test]
@@ -649,6 +723,18 @@ mod tests {
     fn ev(connected: bool, relocks: u64, late_holds: u64, backward_steps: u64) -> InputEventCounts {
         InputEventCounts {
             connected,
+            idle: false,
+            relocks,
+            late_holds,
+            backward_steps,
+        }
+    }
+
+    // #1341 — an idle (connected-but-keep-alive-only) input, otherwise carrying phase counters.
+    fn ev_idle(relocks: u64, late_holds: u64, backward_steps: u64) -> InputEventCounts {
+        InputEventCounts {
+            connected: true,
+            idle: true,
             relocks,
             late_holds,
             backward_steps,
@@ -671,6 +757,29 @@ mod tests {
     fn absent_input_contributes_no_phase_events() {
         // The #1096 rebind churn of a senderless input (its relocks climb) must NOT count.
         assert_eq!(input_phase_events(&ev(false, 99, 88, 77)), 0);
+    }
+
+    #[test]
+    fn idle_input_contributes_no_phase_events() {
+        // #1341 — a connected-but-idle input's relock/late-hold churn (a keep-alive frame re-acquires
+        // a FIFO boundary every ~11 s) must NOT feed recent_event: exactly the connected==false path.
+        assert_eq!(input_phase_events(&ev_idle(60, 30, 5)), 0);
+    }
+
+    #[test]
+    fn connected_sum_excludes_idle_inputs() {
+        // #1341 — only the connected, NON-idle input contributes; the idle one (raw counters high)
+        // is dropped exactly like the absent one.
+        let inputs = [ev(true, 1, 0, 0), ev_idle(500, 0, 0), ev(true, 0, 2, 0)];
+        assert_eq!(connected_phase_event_sum(&inputs), 3);
+    }
+
+    #[test]
+    fn offender_excludes_idle_inputs() {
+        // #1341 — an idle SongPlayer input carries the most raw counters but must never be named the
+        // recent-event offender; the top CONNECTED-non-idle input wins.
+        let inputs = [ev(true, 2, 0, 0), ev_idle(9999, 0, 0), ev(true, 5, 0, 0)];
+        assert_eq!(top_phase_event_offender(&inputs), Some((2, 5)));
     }
 
     #[test]
