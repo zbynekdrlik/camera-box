@@ -72,36 +72,11 @@ avsync_heartbeat_last_status() {
   printf '%s\n' "$1" | awk -F'\t' '$1 ~ /^[0-9]+$/ {line=$0} END{if (line!="") {sub(/^[^\t]*\t/,"",line); print line}}'
 }
 
-# avsync_heartbeat_is_forwardable_verdict STATUS_TEXT -> exit 0 when STATUS_TEXT is a genuine
-# measured MISALIGNMENT verdict worth forwarding to Discord (issue 968): it must start with the
-# "measured: " prefix avsync-watchdog.ps1's Write-Heartbeat uses for a completed measurement pass
-# AND carry one of av_sync_measure.py's own ZNIZ/ZVYS correction recommendations. This mirrors
-# av_sync_measure.py's OWN threshold semantics exactly (silence when in sync, message when
-# misaligned) -- a "measured: ... A/V sync OK (offset 0 ms)" line, a "measured: TIMEOUT: ..." line,
-# and every "no-signal: ..." line are ALL heartbeat-only states and must NEVER forward. Exit 1
-# otherwise.
-avsync_heartbeat_is_forwardable_verdict() {
-  local status="$1"
-  case "$status" in
-    "measured: "*) : ;;
-    *) return 1 ;;
-  esac
-  case "$status" in
-    *ZNIZ*|*ZVYS*) return 0 ;;
-    *) return 1 ;;
-  esac
-}
-
-# avsync_heartbeat_verdict_signature STATUS -> STATUS with only its "[YYYY-MM-DD HH:MM:SS]"
-# timestamp bracket removed. #814's forwarder second net compares this against the last-forwarded
-# signature to suppress a FROZEN input's re-forward: two passes measuring the SAME (frozen) clip
-# differ ONLY in the stamp -- the offset, conf and verdict text are all deterministic from the
-# measured offset -- so a byte-identical stamp-stripped signature is the frozen-input tell (mirrors
-# the incident's own "dup-suppressed (frozen input?)" net). A genuine offset change alters the
-# signature and re-posts. Pure: string transform only, no I/O.
-avsync_heartbeat_verdict_signature() {
-  printf '%s\n' "$1" | sed -E 's/\[[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}\] //'
-}
+# NOTE (#1331): the two forward-only helpers (the "is this a forwardable ZNIZ/ZVYS verdict" gate and
+# the frozen-input signature) were REMOVED here -- they served ONLY the raw one-clip Discord forward,
+# which the verified-A/V SESSION report (scripts/avsync_report.py, driven by the `report` pass in
+# scripts/avsync-heartbeat-alert-watchdog.sh) now replaces. A grep confirmed no other caller/test
+# referenced them once the forward was removed.
 
 # avsync_heartbeat_is_stale EPOCH NOW STALE_SEC -> exit 0 (STALE, including unparseable/missing) /
 # 1 (fresh). Inverted sense vs a plain "is_fresh" check ON PURPOSE -- this lib's caller wants

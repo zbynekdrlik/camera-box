@@ -75,6 +75,15 @@ DISCORD_THREAD_ID="${AVSYNC_DISCORD_THREAD_ID:-1373592666733940816}"   # alerts-
 STATE_DIR="${AVSYNC_HEARTBEAT_STATE_DIR:-${XDG_RUNTIME_DIR:-/tmp}}"
 STATE_FILE="${AVSYNC_HEARTBEAT_STATE_FILE:-$STATE_DIR/camera-box-avsync-heartbeat.state}"
 
+# #1331 -- the VERIFIED-A/V session report (replaces the raw one-clip Discord forward).
+# The dev2 measurer appends every pass to a per-day TSV; this pass fetches those rows and hands them
+# to the PURE session decider scripts/avsync_report.py, which returns the Discord messages to post
+# (a verified summary at the start, every 20 min, on a verdict change, and at end-of-broadcast) plus
+# the new report state. AVSYNC_REPORT_FETCH_CMD is the row-fetch seam the dry-run tests stub.
+REPORT_SCRIPT="${AVSYNC_REPORT_SCRIPT:-$HERE/avsync_report.py}"
+REPORT_PYTHON="${AVSYNC_REPORT_PYTHON:-python3}"
+REPORT_STATE_FILE="${AVSYNC_REPORT_STATE_FILE:-$STATE_DIR/avsync-report-state.json}"
+
 log() { printf '%s [avsync-heartbeat-alert-watchdog] %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$*" >&2; }
 
 # ── measure (SSH + the shared avsync-heartbeat probe) ───────────────────────
@@ -148,7 +157,7 @@ readonly DISCORD_VERDICT_MAX_CONTENT=1900
 # --max-time (mirrors scripts/lib/e2e-discord-report.sh / event-mode-discord-confirm.sh's own
 # Discord POST calls exactly -- never a second timeout convention) so a stalled connection can
 # never wedge this pass beyond the systemd unit's own TimeoutStartSec budget. Never called in
-# --dry-run (see maybe_forward_verdict).
+# --dry-run (see run_report_pass).
 post_discord_verdict() {
   local text="$1" token content payload response http_code body
   token="$(read_discord_env_field DISCORD_BOT_TOKEN)"
@@ -174,35 +183,58 @@ post_discord_verdict() {
   log "VERDICT-FORWARD: posted to thread $DISCORD_THREAD_ID (message id: $(printf '%s' "$body" | jq -r '.id // "unknown"' 2>/dev/null))"
 }
 
-# maybe_forward_verdict EPOCH STATUS -> forwards a genuinely NEW measured misalignment verdict to
-# Discord at most ONCE per epoch (persisted via the shared state-file mechanism, key
-# "watchdog_verdict_forwarded_epoch"). State advances even in --dry-run (mirrors process_leg's own
-# convention: only the ACTUAL post is skipped, never the bookkeeping) so a real run afterward still
-# sees the SAME epoch as already handled.
-maybe_forward_verdict() {
-  local epoch="$1" status="$2" prev_epoch prev_sig sig text
-  [ -n "$epoch" ] || return 0
-  avsync_heartbeat_is_forwardable_verdict "$status" || return 0
-  prev_epoch="$(read_state_field "watchdog_verdict_forwarded_epoch" "")"
-  [ "$epoch" != "$prev_epoch" ] || return 0
-  write_state_field "watchdog_verdict_forwarded_epoch" "$epoch"
-  # #814 second net: the heartbeat epoch is UtcNow written every pass, so epoch-dedup alone
-  # re-forwards a FROZEN input's byte-identical (offset,conf) verdict every ~90 s. Suppress a POST
-  # whose stamp-stripped signature equals the last forwarded one; a genuine offset change updates
-  # the stored signature and re-posts. The signature is stored (like the epoch) even in --dry-run.
-  sig="$(avsync_heartbeat_verdict_signature "$status")"
-  prev_sig="$(read_state_field "watchdog_verdict_forwarded_sig" "")"
-  if [ -n "$sig" ] && [ "$sig" = "$prev_sig" ]; then
-    log "VERDICT-FORWARD: dup-suppressed (frozen input?) -- identical (offset,conf) signature to the last forwarded verdict: $sig"
+# ── #1331 verified-A/V session report (REPLACES the raw one-clip Discord forward) ─────────
+# report_fetch_rows -> emit the dev2 per-day rows ("<epoch>\t<status>", today + yesterday). The
+# AVSYNC_REPORT_FETCH_CMD seam lets the dry-run tests stub the fetch; otherwise the SAME key-auth ssh
+# transport the heartbeat probe uses (avsync_heartbeat_ssh_prefix_argv) cats the two day files. Never
+# fatal -- a fetch failure yields no rows (the report simply skips this pass).
+report_fetch_rows() {
+  if [ -n "${AVSYNC_REPORT_FETCH_CMD:-}" ]; then
+    bash -c "$AVSYNC_REPORT_FETCH_CMD" 2>/dev/null || true
     return 0
   fi
-  write_state_field "watchdog_verdict_forwarded_sig" "$sig"
-  text="📐 A/V-sync meranie: ${status#measured: }"
-  if [ "$DRY_RUN" -eq 1 ]; then
-    log "[dry-run] WOULD forward verdict: $text"
+  local -a pfx=()
+  mapfile -t pfx < <(avsync_heartbeat_ssh_prefix_argv)
+  if [ "${#pfx[@]}" -eq 0 ]; then
+    log "report: no ssh transport for host=$(avsync_heartbeat_host) -- no rows this pass"
     return 0
   fi
-  post_discord_verdict "$text"
+  local today yday
+  today="$(date +%Y-%m-%d)"
+  yday="$(date -d 'yesterday' +%Y-%m-%d 2>/dev/null || echo "$today")"
+  "${pfx[@]}" "cat ~/avsync/measurements-$yday.tsv ~/avsync/measurements-$today.tsv 2>/dev/null" \
+    2>/dev/null || true
+}
+
+# run_report_pass -> fetch the rows, run the PURE decider, and post each returned message (one Discord
+# message per stdout line) via the SAME post_discord_verdict path the forward used. The decider
+# rewrites REPORT_STATE_FILE in place (idempotent dedup across passes). --dry-run logs "WOULD post"
+# and never posts. Never fatal (the watchdog must survive and keep polling).
+run_report_pass() {
+  local rows rows_file msgs line
+  rows="$(report_fetch_rows)"
+  if [ -z "$rows" ]; then
+    log "report: no rows fetched this pass (nothing to aggregate)"
+    return 0
+  fi
+  rows_file="$(mktemp 2>/dev/null)" || { log "report: mktemp failed (non-fatal)"; return 0; }
+  printf '%s\n' "$rows" > "$rows_file"
+  mkdir -p "$(dirname "$REPORT_STATE_FILE")" 2>/dev/null || true
+  msgs="$("$REPORT_PYTHON" "$REPORT_SCRIPT" --state "$REPORT_STATE_FILE" --rows "$rows_file" \
+    2>/dev/null || true)"
+  rm -f "$rows_file"
+  if [ -z "$msgs" ]; then
+    log "report: no new messages this pass"
+    return 0
+  fi
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    if [ "$DRY_RUN" -eq 1 ]; then
+      log "[dry-run] WOULD post report message: $line"
+    else
+      post_discord_verdict "$line"
+    fi
+  done <<< "$msgs"
 }
 
 # ── one leg's confirm/throttle/alert pass -- reused for BOTH "watchdog" and "vlc" ───────────────
@@ -261,27 +293,30 @@ main() {
 
   measure
   if [ -z "${PROBE_OUT:-}" ]; then
-    log "ERROR: no probe output from stream box (ssh/connectivity failure) -- nothing to decide this pass"
-    return 0
-  fi
-
-  local watchdog_segment vlc_segment watchdog_epoch vlc_epoch watchdog_status
-  watchdog_segment="$(avsync_heartbeat_extract_segment "$PROBE_OUT" watchdog)"
-  vlc_segment="$(avsync_heartbeat_extract_segment "$PROBE_OUT" vlc)"
-  watchdog_epoch="$(avsync_heartbeat_last_epoch "$watchdog_segment")"
-  vlc_epoch="$(avsync_heartbeat_last_epoch "$vlc_segment")"
-  watchdog_status="$(avsync_heartbeat_last_status "$watchdog_segment")"
-
-  process_leg "watchdog" "$watchdog_epoch"
-  # #1331: the dev2 measurer has NO VLC-monitor heartbeat (that was a stream-box babysitter), so a
-  # permanently-missing vlc segment must SKIP, never page as CONFIRMED-stale. The "stream" host
-  # still has both legs.
-  if avsync_heartbeat_has_vlc_leg; then
-    process_leg "vlc" "$vlc_epoch"
+    # #1331: the heartbeat legs have nothing to decide, but the report pass is INDEPENDENT (its own
+    # fetch), so we skip only the legs here -- never the report.
+    log "ERROR: no probe output from stream box (ssh/connectivity failure) -- skipping heartbeat legs this pass"
   else
-    log "vlc: skipped (host=$(avsync_heartbeat_host) has no VLC-monitor heartbeat leg)"
+    local watchdog_segment vlc_segment watchdog_epoch vlc_epoch
+    watchdog_segment="$(avsync_heartbeat_extract_segment "$PROBE_OUT" watchdog)"
+    vlc_segment="$(avsync_heartbeat_extract_segment "$PROBE_OUT" vlc)"
+    watchdog_epoch="$(avsync_heartbeat_last_epoch "$watchdog_segment")"
+    vlc_epoch="$(avsync_heartbeat_last_epoch "$vlc_segment")"
+
+    process_leg "watchdog" "$watchdog_epoch"
+    # #1331: the dev2 measurer has NO VLC-monitor heartbeat (that was a stream-box babysitter), so a
+    # permanently-missing vlc segment must SKIP, never page as CONFIRMED-stale. The "stream" host
+    # still has both legs.
+    if avsync_heartbeat_has_vlc_leg; then
+      process_leg "vlc" "$vlc_epoch"
+    else
+      log "vlc: skipped (host=$(avsync_heartbeat_host) has no VLC-monitor heartbeat leg)"
+    fi
   fi
-  maybe_forward_verdict "$watchdog_epoch" "$watchdog_status"
+
+  # #1331: the verified-A/V SESSION report (replaces the raw one-clip forward). Independent fetch,
+  # always run regardless of the heartbeat-leg outcome above.
+  run_report_pass
 
   log "pass end"
 }
