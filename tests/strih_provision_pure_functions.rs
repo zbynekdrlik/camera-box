@@ -348,3 +348,166 @@ fn verify_strih_carries_the_release_parity_check() {
         "verify-strih must reference the release marker / os-release it compares"
     );
 }
+
+// --- issue 1317 (this lane): the strih-obs-start.sh / strih-obs-stop.sh launcher pair -------------
+
+/// Source an ARBITRARY launcher script (not the lib) and run `body`. The launchers BASH_SOURCE-guard
+/// their live flow (like setup-strih.sh), so sourcing them defines only their pure functions -- no
+/// OBS launch, no session, no side effects.
+fn run_sourced_arb(rel: &str, env: &[(&str, &str)], body: &str) -> (i32, String, String) {
+    let script = manifest_dir().join(rel);
+    assert!(script.exists(), "{} not found", script.display());
+    let harness = format!("set -uo pipefail\n. \"$SCRIPT\"\n{body}");
+    let mut cmd = Command::new("bash");
+    cmd.arg("-c").arg(&harness).env("SCRIPT", script);
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+    let out = cmd.output().expect("failed to run bash harness");
+    (
+        out.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    )
+}
+
+#[test]
+fn launcher_pair_ok_passes_when_both_scripts_are_present_and_executable() {
+    let (code, _o, _e) = run_sourced(
+        &[],
+        "d=$(mktemp -d)\n\
+         : > \"$d/strih-obs-start.sh\"; chmod +x \"$d/strih-obs-start.sh\"\n\
+         : > \"$d/strih-obs-stop.sh\";  chmod +x \"$d/strih-obs-stop.sh\"\n\
+         strih_launcher_pair_ok \"$d\"; rc=$?\n\
+         rm -rf \"$d\"; exit $rc",
+    );
+    assert_eq!(code, 0, "both launchers present + executable must pass");
+}
+
+#[test]
+fn launcher_pair_ok_fails_and_names_a_missing_script() {
+    let (code, out, _e) = run_sourced(
+        &[],
+        "d=$(mktemp -d)\n\
+         : > \"$d/strih-obs-start.sh\"; chmod +x \"$d/strih-obs-start.sh\"\n\
+         out=$(strih_launcher_pair_ok \"$d\"); rc=$?\n\
+         printf '%s' \"$out\"\n\
+         rm -rf \"$d\"; exit $rc",
+    );
+    assert_ne!(code, 0, "a missing launcher must fail");
+    assert!(
+        out.contains("strih-obs-stop.sh"),
+        "the failure output must name the missing script: {out}"
+    );
+}
+
+#[test]
+fn launcher_pair_ok_fails_and_names_a_non_executable_script() {
+    let (code, out, _e) = run_sourced(
+        &[],
+        "d=$(mktemp -d)\n\
+         : > \"$d/strih-obs-start.sh\"; chmod +x \"$d/strih-obs-start.sh\"\n\
+         : > \"$d/strih-obs-stop.sh\";  chmod -x \"$d/strih-obs-stop.sh\"\n\
+         out=$(strih_launcher_pair_ok \"$d\"); rc=$?\n\
+         printf '%s' \"$out\"\n\
+         rm -rf \"$d\"; exit $rc",
+    );
+    assert_ne!(code, 0, "a non-executable launcher must fail");
+    assert!(
+        out.contains("strih-obs-stop.sh"),
+        "the failure output must name the non-executable script: {out}"
+    );
+}
+
+/// issue 1317: `setup-strih.sh` step 8 must install BOTH launcher scripts (mode 0755) BEFORE the
+/// `systemctl --user enable strih-obs.service` line -- an enabled unit whose ExecStart target is
+/// missing flaps 203/EXEC under Restart=on-failure.
+#[test]
+fn setup_strih_installs_both_launchers_before_enabling_the_unit() {
+    let s = read_script("scripts/setup-strih.sh");
+    let start_install = s
+        .find("install -m 0755 \"${HERE}/strih-obs-start.sh\"")
+        .expect("setup-strih must install strih-obs-start.sh mode 0755");
+    let stop_install = s
+        .find("install -m 0755 \"${HERE}/strih-obs-stop.sh\"")
+        .expect("setup-strih must install strih-obs-stop.sh mode 0755");
+    let enable = s
+        .find("systemctl --user enable strih-obs.service")
+        .expect("setup-strih step 8 must enable strih-obs.service");
+    assert!(
+        start_install < enable && stop_install < enable,
+        "both launcher installs must precede the unit enable (starts {start_install} / stops {stop_install} vs enable {enable})"
+    );
+}
+
+/// issue 1317 lock-step: the unit's ExecStart/ExecStop basenames must equal the launcher basenames
+/// setup-strih installs into /usr/local/bin -- so a rename of either can never silently dangle the
+/// ExecStart target again (the very gap this lane closes).
+#[test]
+fn unit_execstart_execstop_basenames_match_the_installed_launchers() {
+    let unit = read_script("systemd/strih-obs.service");
+    let base_of = |prefix: &str| -> String {
+        let line = unit
+            .lines()
+            .find(|l| l.trim_start().starts_with(prefix))
+            .unwrap_or_else(|| panic!("unit must have an {prefix} line"));
+        let rhs = line.trim_start().splitn(2, '=').nth(1).unwrap().trim();
+        let path = rhs.split_whitespace().next().unwrap();
+        path.rsplit('/').next().unwrap().to_string()
+    };
+    let start = base_of("ExecStart=");
+    let stop = base_of("ExecStop=");
+    assert_eq!(start, "strih-obs-start.sh");
+    assert_eq!(stop, "strih-obs-stop.sh");
+
+    let setup = read_script("scripts/setup-strih.sh");
+    assert!(
+        setup.contains(&format!("/usr/local/bin/{start}")),
+        "setup-strih must install the unit's ExecStart target {start} into /usr/local/bin"
+    );
+    assert!(
+        setup.contains(&format!("/usr/local/bin/{stop}")),
+        "setup-strih must install the unit's ExecStop target {stop} into /usr/local/bin"
+    );
+    assert!(
+        manifest_dir().join(format!("scripts/{start}")).exists(),
+        "scripts/{start} must exist"
+    );
+    assert!(
+        manifest_dir().join(format!("scripts/{stop}")).exists(),
+        "scripts/{stop} must exist"
+    );
+}
+
+/// issue 1317: strih-obs-start.sh's session-display resolver (Wayland-first, X11 fallback, else fail
+/// loud) is a pure sourced function -- a wayland-* socket under XDG_RUNTIME_DIR resolves to
+/// WAYLAND_DISPLAY=<sock> (its sibling .lock is ignored); neither a wayland nor an X socket -> a
+/// non-zero return (the unit is After=graphical-session.target, so no display is a hard fail).
+#[test]
+fn start_script_session_env_resolves_wayland_and_fails_loud_when_absent() {
+    let (code, out, _e) = run_sourced_arb(
+        "scripts/strih-obs-start.sh",
+        &[],
+        "rt=$(mktemp -d)\n\
+         : > \"$rt/wayland-0\"; : > \"$rt/wayland-0.lock\"\n\
+         rc=0\n\
+         out=$(XDG_RUNTIME_DIR=\"$rt\" STRIH_X11_SOCKET_DIR=\"$rt/nox\" strih_resolve_session_env) || rc=$?\n\
+         printf '%s' \"$out\"\n\
+         rm -rf \"$rt\"; exit $rc",
+    );
+    assert_eq!(code, 0, "a wayland-0 socket must resolve");
+    assert!(
+        out.contains("WAYLAND_DISPLAY=wayland-0"),
+        "a wayland socket must resolve to WAYLAND_DISPLAY=wayland-0: {out}"
+    );
+
+    let (code2, _o2, _e2) = run_sourced_arb(
+        "scripts/strih-obs-start.sh",
+        &[],
+        "rt=$(mktemp -d)\n\
+         rc=0\n\
+         out=$(XDG_RUNTIME_DIR=\"$rt\" STRIH_X11_SOCKET_DIR=\"$rt/nox\" strih_resolve_session_env) || rc=$?\n\
+         rm -rf \"$rt\"; exit $rc",
+    );
+    assert_ne!(code2, 0, "no wayland + no X socket must fail loud");
+}
