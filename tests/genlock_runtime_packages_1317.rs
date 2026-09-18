@@ -123,3 +123,34 @@ fn program_requires_stage_and_out_args() {
         "a missing --out must be a usage error (exit 2); stderr={err}"
     );
 }
+
+/// issue 1317 (review 🟡): a NON-ELF staged file (a linker script) makes `ldd` exit 1 with no
+/// `=> not found` line. The recorder must NOT abort on that (fail-closed with a misleading
+/// "unresolved dependency" error) — only a genuine `=> not found` is build-blocking. The ELF
+/// objects' packages must still be recorded. Fake ldd exits 1 for non-obs objects.
+#[test]
+fn program_survives_a_non_elf_staged_file() {
+    let fake_ldd = "printf '%s\\n' '#!/usr/bin/env bash' 'case \"$1\" in */bin/obs) printf \"%s\\n\" \"libavcodec.so.62 => /usr/lib/x86_64-linux-gnu/libavcodec.so.62 (0x1)\"; exit 0;; *) exit 1;; esac' > \"$fake/ldd\"; chmod +x \"$fake/ldd\"\n";
+    let body = format!(
+        "stage=$(mktemp -d); mkdir -p \"$stage/bin\" \"$stage/lib/x86_64-linux-gnu\"\n\
+         : > \"$stage/bin/obs\"\n\
+         : > \"$stage/lib/x86_64-linux-gnu/libscript.so\"\n\
+         export STAGE_ABS=$(cd \"$stage\" && pwd)\n\
+         fake=$(mktemp -d)\n{fake_ldd}{FAKE_DPKG}\
+         outf=\"$stage/RUNTIME_PACKAGES.txt\"\n\
+         PATH=\"$fake:$PATH\" bash \"$SCRIPT\" --stage \"$stage\" --out \"$outf\" >/dev/null 2>&1; rc=$?\n\
+         echo \"RC=$rc\"\n\
+         grep -q '^libavcodec62$' \"$outf\" && echo HAS_AVCODEC || echo NO_AVCODEC\n\
+         rm -rf \"$stage\" \"$fake\""
+    );
+    let (code, out, err) = run(&body);
+    assert_eq!(code, 0, "harness must run; stderr={err}");
+    assert!(
+        out.contains("RC=0"),
+        "a non-ELF staged file must NOT abort the recorder (only `=> not found` is build-blocking): {out}"
+    );
+    assert!(
+        out.contains("HAS_AVCODEC"),
+        "the ELF objects' packages must still be recorded: {out}"
+    );
+}
