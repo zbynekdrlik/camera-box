@@ -268,49 +268,18 @@ fn last_status_is_empty_when_nothing_parses_968() {
 #[test]
 fn last_status_returns_the_line_unchanged_when_it_has_no_tab_968() {
     // Review-noted edge case: a numeric-epoch line with no TAB separator at all (malformed
-    // heartbeat write). sub()'s no-match leaves `line` unchanged -- the caller
-    // (avsync_heartbeat_is_forwardable_verdict) then correctly rejects it (no "measured: " prefix
-    // survives), so this is safe by construction, not just by accident.
+    // heartbeat write). sub()'s no-match leaves `line` unchanged -- a downstream measured-prefix
+    // check then correctly rejects it (no "measured: " prefix survives), so this is safe by
+    // construction, not just by accident.
     let (code, out, err) = run_lib("avsync_heartbeat_last_status '100'");
     assert_eq!(code, 0, "stderr={err}");
     assert_eq!(out.trim(), "100");
 }
 
-#[test]
-fn is_forwardable_verdict_true_for_a_real_zniz_or_zvys_recommendation_968() {
-    for status in [
-        "measured: [2026-07-26 14:25:40] AV offset +2 fr (+80 ms) conf 3.6 :: audio predbieha video o ~80 ms -> ZNIZ '2ME PGM' latency o 80",
-        "measured: [2026-07-26 14:25:40] AV offset -2 fr (-80 ms) conf 3.6 :: video predbieha audio o ~80 ms -> ZVYS '2ME PGM' latency o 80",
-    ] {
-        let (code, _out, err) = run_lib(&format!(
-            "avsync_heartbeat_is_forwardable_verdict \"{status}\""
-        ));
-        assert_eq!(
-            code, 0,
-            "a genuine measured misalignment verdict (ZNIZ/ZVYS) must be forwardable: {status} stderr={err}"
-        );
-    }
-}
-
-#[test]
-fn is_forwardable_verdict_false_for_heartbeat_only_states_968() {
-    // #968: silence when in sync, message when misaligned -- mirrors av_sync_measure.py's own
-    // threshold semantics. None of these must be forwarded.
-    for status in [
-        "no-signal: clip too small (94869 B)",
-        "measured: TIMEOUT: av_sync_measure.py did not complete within 180s -- killed to prevent a wedged watchdog loop",
-        "measured: [2026-07-26 14:25:40] AV offset +0 fr (+0 ms) conf 3.6 :: A/V sync OK (offset 0 ms)",
-        "",
-    ] {
-        let (code, _out, err) = run_lib(&format!(
-            "avsync_heartbeat_is_forwardable_verdict \"{status}\""
-        ));
-        assert_eq!(
-            code, 1,
-            "a heartbeat-only / in-sync state must NEVER be forwarded: {status:?} stderr={err}"
-        );
-    }
-}
+// #1331: the `is_forwardable_verdict_*` lib-helper tests were REMOVED here -- the forward-only lib
+// helper they exercised (`avsync_heartbeat_is_forwardable_verdict`) was deleted along with the raw
+// one-clip forward, which the verified-A/V session report now replaces (see
+// tests/python/test_avsync_report_watchdog_1331.py + tests/python/test_avsync_report_1331.py).
 
 // ================================================================================================
 // Behavioral: run main() with a stubbed `sshpass` returning a fixed combined probe response, and a
@@ -426,17 +395,8 @@ impl Harness {
         self.run_bash_body(". \"$SCRIPT\"\nDRY_RUN=1\nmain")
     }
 
-    // #968 -- lets a test force the fake curl stub's response (FAKE_CURL_HTTP_CODE/
-    // FAKE_CURL_BODY) to exercise post_discord_verdict's failure-logging branch, e.g. reproducing
-    // the real "no MANAGE_WEBHOOKS" 403-with-body class of failure this PR's own design comment
-    // discusses. Real, exercised generality (unlike the earlier unused extra_env plumbing this
-    // replaced) -- see fake_curl_failure_response_is_logged_with_its_body_968.
-    fn run_main_with_fake_curl(&self, http_code: &str, body: &str) -> (i32, String, String) {
-        self.run_bash_body_with_env(
-            ". \"$SCRIPT\"\nmain",
-            &[("FAKE_CURL_HTTP_CODE", http_code), ("FAKE_CURL_BODY", body)],
-        )
-    }
+    // #1331: run_main_with_fake_curl was REMOVED -- it only served the deleted forward's
+    // post_discord_verdict failure-logging test (fake_curl_failure_response_...).
 
     fn run_bash_body(&self, body: &str) -> (i32, String, String) {
         self.run_bash_body_with_env(body, &[])
@@ -466,6 +426,15 @@ impl Harness {
             .env("AVSYNC_HEARTBEAT_STATE_FILE", &self.state_file)
             .env("AIRULESET_NOTIFY", "/dev/null/does-not-matter")
             .env("AVSYNC_DISCORD_ENV", &self.discord_env_file)
+            // #1331: neutralize the report pass by default (a `true` fetch => no rows => the report
+            // pass returns before running the decider), so the existing heartbeat-leg behavioral
+            // tests never invoke the fake python3 stub (which would inflate notify_call_count) and
+            // never touch the shared report-state path. A report test overrides this via extra_env.
+            .env("AVSYNC_REPORT_FETCH_CMD", "true")
+            .env(
+                "AVSYNC_REPORT_STATE_FILE",
+                self.state_file.with_file_name("report-state.json"),
+            )
             .env("PATH", path);
         for (k, v) in extra_env {
             cmd.env(k, v);
@@ -500,10 +469,8 @@ impl Harness {
     fn discord_call_count(&self) -> usize {
         self.discord_calls().len()
     }
-
-    fn discord_last_call(&self) -> String {
-        self.discord_calls().last().cloned().unwrap_or_default()
-    }
+    // #1331: discord_last_call was REMOVED -- it only served the deleted forward's message-shape
+    // assertions. discord_calls/discord_call_count stay (dry_run_never_calls_notify asserts count).
 }
 
 fn fresh_body(status: &str) -> String {
@@ -518,9 +485,7 @@ fn fresh_body(status: &str) -> String {
 
 const STALE_BODY: &str = "1000000000\tstale-old";
 
-// #968 -- a FIXED epoch (never `$(date +%s)`) so repeated Harness::run_main() calls in the same
-// test see the byte-identical epoch every time (needed for the "never forwarded twice" proof).
-const MEASURED_ZNIZ_BODY: &str = "1785778776\tmeasured: [2026-07-26 14:25:40] AV offset +2 fr (+80 ms) conf 3.6 :: audio predbieha video o ~80 ms -> ZNIZ '2ME PGM' latency o 80";
+// #1331: MEASURED_ZNIZ_BODY was REMOVED -- it only seeded the deleted raw-forward tests.
 
 #[test]
 fn both_legs_fresh_never_alerts() {
@@ -662,6 +627,10 @@ fn empty_probe_output_ssh_failure_never_falsely_alerts() {
         .env("AVSYNC_HEARTBEAT_HOST", "stream")
         .env("AVSYNC_HEARTBEAT_STATE_FILE", &state_file)
         .env("AIRULESET_NOTIFY", "/dev/null/does-not-matter")
+        // #1331: neutralize the report pass (a `true` fetch => no rows => the report pass
+        // returns before running the decider / the fake python3), so this transport test
+        // measures only the heartbeat legs.
+        .env("AVSYNC_REPORT_FETCH_CMD", "true")
         .env("PATH", path)
         .output()
         .expect("run bash harness");
@@ -729,6 +698,10 @@ fn dev2_host_reads_the_watchdog_leg_over_plain_ssh_and_skips_the_vlc_leg() {
         .env("AVSYNC_HEARTBEAT_HOST", "dev2")
         .env("AVSYNC_HEARTBEAT_STATE_FILE", &state_file)
         .env("AIRULESET_NOTIFY", "/dev/null/does-not-matter")
+        // #1331: neutralize the report pass (a `true` fetch => no rows => the report pass
+        // returns before running the decider / the fake python3), so this transport test
+        // measures only the heartbeat legs.
+        .env("AVSYNC_REPORT_FETCH_CMD", "true")
         .env("PATH", path)
         .output()
         .expect("run bash harness");
@@ -757,165 +730,11 @@ fn dev2_host_reads_the_watchdog_leg_over_plain_ssh_and_skips_the_vlc_leg() {
 }
 
 // ================================================================================================
-// issue 968 -- the durable Discord verdict-forward leg (dev1-side bot POST).
+// #1331: the issue-968 raw one-clip Discord FORWARD tests were REMOVED here -- the forward
+// (`maybe_forward_verdict`) was deleted and REPLACED by the verified-A/V session report; the report
+// pass is covered by tests/python/test_avsync_report_watchdog_1331.py (dry-run wiring) +
+// tests/python/test_avsync_report_1331.py (the pure decider). post_discord_verdict is unchanged.
 // ================================================================================================
-
-#[test]
-fn fresh_measured_verdict_forwards_exactly_once_with_the_expected_message_shape_968() {
-    let h = Harness::new(MEASURED_ZNIZ_BODY, &fresh_body("ok"));
-    let (code, _out, err) = h.run_main();
-    assert_eq!(code, 0, "stderr={err}");
-    assert_eq!(
-        h.discord_call_count(),
-        1,
-        "a fresh measured misalignment verdict must forward exactly once"
-    );
-    let call = h.discord_last_call();
-    assert!(
-        call.contains("<@123456789012345678>"),
-        "must prepend the owner mention (bare numeric DISCORD_MENTION_ZBYNEK wrapped as <@id>): {call}"
-    );
-    assert!(
-        call.contains("A/V-sync meranie:"),
-        "must use the expected message shape: {call}"
-    );
-    assert!(
-        call.contains(
-            "AV offset +2 fr (+80 ms) conf 3.6 :: audio predbieha video o ~80 ms -> ZNIZ"
-        ),
-        "must carry the FULL av_sync_measure.py verdict text (the 'measured: ' prefix stripped): {call}"
-    );
-    assert!(
-        call.contains("Authorization: Bot fake-test-token"),
-        "must authenticate with the bot token read from the fixture .env: {call}"
-    );
-    assert!(
-        call.contains("channels/1373592666733940816/messages"),
-        "must POST to the alerts-snv thread by default: {call}"
-    );
-    assert!(
-        call.contains("--max-time 10"),
-        "review-noted: the POST must be bounded (mirrors scripts/lib/e2e-discord-report.sh's own \
-         curl --max-time 10 convention) so a stalled connection can never wedge this pass beyond \
-         the systemd unit's own budget: {call}"
-    );
-}
-
-#[test]
-fn fake_curl_failure_response_is_logged_with_its_body_968() {
-    // Review-noted: post_discord_verdict must log the Discord API's response BODY on a non-200,
-    // not just the bare http code -- diagnosability matters here (this exact bot identity already
-    // once hit a real Discord permission wall, "no MANAGE_WEBHOOKS guild-wide", per this same
-    // ticket's own design comment). A failure must still be non-fatal (the pass must survive).
-    let h = Harness::new(MEASURED_ZNIZ_BODY, &fresh_body("ok"));
-    let (code, _out, err) = h.run_main_with_fake_curl(
-        "403",
-        "{\"message\": \"Missing Permissions\", \"code\": 50013}",
-    );
-    assert_eq!(
-        code, 0,
-        "a failed Discord POST must never abort the pass: stderr={err}"
-    );
-    assert!(
-        err.contains("HTTP '403'"),
-        "must log the actual failing http code: {err}"
-    );
-    assert!(
-        err.contains("Missing Permissions"),
-        "must log the response BODY, not just the bare code, for diagnosability: {err}"
-    );
-}
-
-#[test]
-fn the_same_epoch_is_never_forwarded_twice_968() {
-    let h = Harness::new(MEASURED_ZNIZ_BODY, &fresh_body("ok"));
-    let (code, _out, err) = h.run_main();
-    assert_eq!(code, 0, "stderr={err}");
-    assert_eq!(h.discord_call_count(), 1);
-
-    let (code2, _out2, err2) = h.run_main();
-    assert_eq!(code2, 0, "stderr={err2}");
-    assert_eq!(
-        h.discord_call_count(),
-        1,
-        "the SAME epoch must never be forwarded twice, even on a repeated pass"
-    );
-}
-
-#[test]
-fn no_signal_and_timeout_and_in_sync_lines_never_forward_968() {
-    let no_signal = Harness::new(
-        &fresh_body("no-signal: clip too small (94869 B)"),
-        &fresh_body("ok"),
-    );
-    no_signal.run_main();
-    assert_eq!(
-        no_signal.discord_call_count(),
-        0,
-        "a no-signal heartbeat must never forward"
-    );
-
-    let timeout = Harness::new(
-        &fresh_body(
-            "measured: TIMEOUT: av_sync_measure.py did not complete within 180s -- killed to prevent a wedged watchdog loop",
-        ),
-        &fresh_body("ok"),
-    );
-    timeout.run_main();
-    assert_eq!(
-        timeout.discord_call_count(),
-        0,
-        "a measured TIMEOUT (no ZNIZ/ZVYS recommendation) must never forward"
-    );
-
-    let in_sync = Harness::new(
-        &fresh_body(
-            "measured: [2026-08-03 20:00:00] AV offset +0 fr (+0 ms) conf 3.6 :: A/V sync OK (offset 0 ms)",
-        ),
-        &fresh_body("ok"),
-    );
-    in_sync.run_main();
-    assert_eq!(
-        in_sync.discord_call_count(),
-        0,
-        "an in-sync measured verdict must never forward -- silence when in sync, message when misaligned"
-    );
-}
-
-#[test]
-fn an_oversize_verdict_text_is_capped_before_posting_968() {
-    // Review-noted: mirrors airuleset's own notify._MAX_CONTENT truncation -- Discord's own
-    // message cap is 2000 chars; post_discord_verdict must never send more than
-    // DISCORD_VERDICT_MAX_CONTENT (1900) regardless of how long the underlying verdict text is.
-    let huge_status = format!("measured: {} ZNIZ", "x".repeat(3000));
-    let h = Harness::new(&format!("1785778776\t{huge_status}"), &fresh_body("ok"));
-    let (code, _out, err) = h.run_main();
-    assert_eq!(code, 0, "stderr={err}");
-    assert_eq!(h.discord_call_count(), 1);
-    let call = h.discord_last_call();
-    let x_count = call.matches('x').count();
-    assert!(
-        x_count < 2000,
-        "the forwarded content must be capped well below the full 3000-char verdict text \
-         (DISCORD_VERDICT_MAX_CONTENT=1900): x_count={x_count}"
-    );
-}
-
-#[test]
-fn dry_run_never_posts_a_forwardable_verdict_but_logs_the_decision_968() {
-    let h = Harness::new(MEASURED_ZNIZ_BODY, &fresh_body("ok"));
-    let (code, _out, err) = h.run_dry_run();
-    assert_eq!(code, 0, "stderr={err}");
-    assert_eq!(
-        h.discord_call_count(),
-        0,
-        "DRY_RUN=1 must never actually POST a forwardable verdict"
-    );
-    assert!(
-        err.contains("[dry-run] WOULD forward verdict"),
-        "must log the would-forward decision even though it never posts: {err}"
-    );
-}
 
 // ================================================================================================
 // systemd/avsync-heartbeat-alert-watchdog.{service,timer} -- dev1-side unit files.
@@ -940,78 +759,8 @@ fn unit_files_exist_and_are_wired_correctly() {
 }
 
 // ================================================================================================
-// #814 second net -- identical-verdict (offset,conf) dedup. The heartbeat epoch is UtcNow written
-// every pass, so it ADVANCES each pass; epoch-only dedup does NOT stop a FROZEN input (a
-// fresh-looking clip whose CONTENT is frozen) from re-forwarding the byte-identical (offset,conf)
-// verdict every ~90 s. This net suppresses a POST whose stamp-stripped signature equals the last
-// forwarded one, mirroring the incident's own "dup-suppressed (frozen input?)" second net.
+// #1331: the #814 frozen-input dedup + verdict-signature tests were REMOVED here -- they exercised
+// the raw forward (`maybe_forward_verdict`) and the lib helper `avsync_heartbeat_verdict_signature`,
+// both deleted with the forward. The verified-A/V session report does its own idempotent dedup via
+// the persisted report state (tests/python/test_avsync_report_1331.py).
 // ================================================================================================
-
-#[test]
-fn verdict_signature_strips_the_timestamp_814() {
-    // The pure helper: two passes measuring the SAME (frozen) clip differ ONLY in their
-    // "[timestamp]" bracket -- everything else (offset, conf, verdict) is deterministic from the
-    // offset, so stripping the bracket makes an identical (offset,conf) byte-identical.
-    let (code, out, err) = run_lib(
-        "avsync_heartbeat_verdict_signature \
-         'measured: [2026-07-26 14:25:40] AV offset +2 fr (+80 ms) conf 3.6 :: ZNIZ latency o 80'",
-    );
-    assert_eq!(code, 0, "stderr={err}");
-    assert_eq!(
-        out.trim(),
-        "measured: AV offset +2 fr (+80 ms) conf 3.6 :: ZNIZ latency o 80",
-        "the signature must be the status with only the [timestamp] bracket removed"
-    );
-
-    // A second pass with a DIFFERENT timestamp but the SAME offset/conf yields the SAME signature.
-    let (_c2, out2, _e2) = run_lib(
-        "avsync_heartbeat_verdict_signature \
-         'measured: [2026-07-26 14:31:10] AV offset +2 fr (+80 ms) conf 3.6 :: ZNIZ latency o 80'",
-    );
-    assert_eq!(
-        out.trim(),
-        out2.trim(),
-        "only the timestamp differs -> identical signature"
-    );
-}
-
-#[test]
-fn an_identical_offset_conf_verdict_is_dedup_suppressed_across_epochs_814() {
-    let h = Harness::new(&fresh_body("ok"), &fresh_body("ok"));
-    // Two forwardable verdicts with DIFFERENT epochs (1111 vs 2222) and different timestamps but
-    // the SAME (offset,conf) -- the frozen-input signature. Only the first must reach Discord.
-    let body = concat!(
-        ". \"$SCRIPT\"\n",
-        "maybe_forward_verdict 1111 'measured: [2026-07-26 14:25:40] AV offset +2 fr (+80 ms) conf 3.6 :: ZNIZ latency o 80'\n",
-        "maybe_forward_verdict 2222 'measured: [2026-07-26 14:31:10] AV offset +2 fr (+80 ms) conf 3.6 :: ZNIZ latency o 80'\n",
-    );
-    let (code, _out, err) = h.run_bash_body(body);
-    assert_eq!(code, 0, "stderr={err}");
-    assert_eq!(
-        h.discord_call_count(),
-        1,
-        "a frozen input re-measuring the SAME (offset,conf) across two epochs must forward ONCE, \
-         not every pass -- the second identical verdict is dedup-suppressed (frozen input?)"
-    );
-}
-
-#[test]
-fn a_changed_offset_verdict_forwards_again_even_after_a_dup_814() {
-    let h = Harness::new(&fresh_body("ok"), &fresh_body("ok"));
-    // v1 (+2) forwards; v2 (+2, dup) suppressed; v3 (-1, a genuine change) must forward again --
-    // the dedup must never block a real change in the measured offset.
-    let body = concat!(
-        ". \"$SCRIPT\"\n",
-        "maybe_forward_verdict 1111 'measured: [2026-07-26 14:25:40] AV offset +2 fr (+80 ms) conf 3.6 :: ZNIZ latency o 80'\n",
-        "maybe_forward_verdict 2222 'measured: [2026-07-26 14:31:10] AV offset +2 fr (+80 ms) conf 3.6 :: ZNIZ latency o 80'\n",
-        "maybe_forward_verdict 3333 'measured: [2026-07-26 14:40:00] AV offset -1 fr (-40 ms) conf 3.6 :: ZVYS latency o 40'\n",
-    );
-    let (code, _out, err) = h.run_bash_body(body);
-    assert_eq!(code, 0, "stderr={err}");
-    assert_eq!(
-        h.discord_call_count(),
-        2,
-        "a CHANGED (offset,conf) after a dup must forward again -- dedup must not over-suppress a \
-         genuine change"
-    );
-}
