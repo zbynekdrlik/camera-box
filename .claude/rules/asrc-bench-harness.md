@@ -485,16 +485,45 @@ a main-owned control-design decision.
   byte-exact (squished). No new pwsh gate (the change rides the existing genlock build); the existing
   `level=/target=/integral= (#1335)` pwsh substring is preserved intact.
 
-## #1335 follow-up 3 — a deliberate setpoint shift ARMS the fast restore (the restore has TWO arm sources)
+## #1335 follow-up 3/4 — a deliberate setpoint shift AND a sustained level error ARM the fast restore (the restore has THREE arm sources)
 
 The fast bounded level restore (`ASRC_LEVEL_RESTORE_K_PPM_PER_MS` / `..._MAX_PPM`, follow-up 2) is now
-armed from TWO independent places, never just one:
+armed from THREE independent places, never just one:
 
 1. **Step-tolerant regression, level-corroborated** (follow-up 2, `asrc-compensator.c` re-base branch):
    a permanent input sample-loss/dup whose buffer deficit corroborates the residual.
 2. **A deliberate setpoint shift `|Δ| >= ASRC_LEVEL_RESTORE_ARM_MS` (5 ms)** (follow-up 3,
    `asrc_compensator_shift_level_target` / Rust `shift_level_target`): a deliberate audio sync-offset
    trim (issue 1333's split) moves `level_target_ms` by Δ, so the level error jumps to Δ.
+3. **A SUSTAINED level error `|level - target| >= ASRC_LEVEL_RESTORE_ARM_ERR_MS` (12 ms) for
+   `ASRC_LEVEL_RESTORE_ARM_WINDOWS` (10) consecutive accepted windows** (follow-up 4, the
+   accepted-window branch, counter `level_err_windows`): a level disturbance that arrives with NO
+   same-window residual step and NO deliberate shift — an OBS StartStream input-sample loss, a
+   mic/Dante re-plug, a mixer hiccup — the case both 1 and 2 miss. A below-band window resets the
+   count; reaching the threshold arms the restore and resets the count; the count also resets next to
+   every `level_restore` reset (flush/init/restore-exit). The band (12 ms) sits above the ±8 ms 1-s
+   level scatter so ordinary noise never arms; a false arm needs 10 consecutive one-directional
+   ≥12 ms readings.
+
+WHY follow-up 4 exists: the 18.9. 12:00 StartStream (obs.dll 52813623a, E2E rerun 35329592422 attempt
+2) dropped `mbc` `buffered_ms=118 → 92` and `level=100.0 → 68.4` with `steps=1 last_step_ms=-14.3` but
+`restore=0` — the step's timestamp jump was detected in a window where the level had not yet drained,
+so the follow-up-2 level-corroboration (`|buffered − target| ≥ 0.5·|residual|`) failed, the regression
+re-based, and no later window produced a step. The level then sat 10–25 ms low for 40 min (the I term
+railed at −3 ppm from 12:17), the run measured **+15 ms** rig-wide (attempt 1, level ON target: −0.6
+ms, identical pins), and cleanup applied a −12 ms `mbc` trim to a transient. The sustained-error arm
+catches exactly this — any disturbance source, no step or shift required. Trade-off: a 10 s detection
+delay plus the bounded proportional burst; at the shipped Kr=2 a 25 ms drop settles to ±5 ms in ~804 s
+(the SAME ~500 s time-constant clamp-does-not-bind calibration follow-ups 2/3 document — the design's
+aspirational ≤600 s is flagged for main ratification alongside the Kp/Kr note), the integral never
+rails (peak ~1.8 ppm, the fast restore does the heavy lifting), "minutes instead of hours". Bench (all
+`src/asrc_bench.rs`, calibrated from a standalone-rustc probe, deterministic):
+`sustained_level_error_arms_fast_restore_1335` (25 ms drop, no step → armed ≤12 windows + settle
+≤900 s + integral off its ±3 rail), `level_scatter_never_arms_fast_restore_1335` (±8 ms scatter → never
+arms), `sub_band_level_offset_never_arms_but_band_is_live_1335` (6/11 ms never arm, 13 ms DOES arm —
+the band is live at 12 ms). Lock-step anchor: the two new ARM constants + the accepted-window
+`++level_err_windows` counter are pinned byte-exact in
+`tests/genlock_preload.rs::asrc_setpoint_follows_sync_offset_1335`.
 
 WHY follow-up 3 exists: the 18.9. 12 h acceptance series showed a +12 ms setpoint shift being worked
 off by the +/-3 ppm I term alone — it took ~1 h, RAILED the integral (34 samples at the -3 clamp), then

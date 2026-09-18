@@ -171,6 +171,25 @@ extern "C" {
  * src/asrc_bench.rs LEVEL_RESTORE_ARM_MS -- keep numerically identical. */
 #define ASRC_LEVEL_RESTORE_ARM_MS 5.0
 
+/* camera-box #1335 follow-up 4: sustained-level-error band, in ms, that arms the FAST bounded level
+ * RESTORE from the ACCEPTED-window branch, whatever caused the error. A level disturbance that
+ * arrives with NO same-window residual step (an OBS StartStream input-sample loss, a mic/Dante
+ * re-plug, a mixer hiccup) is invisible to the step arm (follow-up 2) and the shift arm (follow-up 3),
+ * so the +/-3 ppm I term alone would take hours; this arm catches it. 12 ms sits well above the
+ * +/-8 ms 1-s level scatter so ordinary noise never arms, yet below the ~14-32 ms StartStream drops
+ * the 18.9. live incident produced (level 100 -> 68 ms). Mirror of src/asrc_bench.rs
+ * LEVEL_RESTORE_ARM_ERR_MS -- keep numerically identical. */
+#define ASRC_LEVEL_RESTORE_ARM_ERR_MS 12.0
+
+/* camera-box #1335 follow-up 4: number of CONSECUTIVE accepted windows whose |level - target| is at
+ * least ASRC_LEVEL_RESTORE_ARM_ERR_MS required before the sustained-error arm fires (10 windows =
+ * 10 s at ASRC_WINDOW_S 1.0). A below-band window resets the count, so a false arm needs 10 one-
+ * directional >= 12 ms readings out of the +/-8 ms scatter (rare); the 10 s detection delay plus a
+ * bounded burst is the trade-off, and the burst only brings the level back within 5 ms of the
+ * setpoint (harmless). Mirror of src/asrc_bench.rs LEVEL_RESTORE_ARM_WINDOWS -- keep numerically
+ * identical. */
+#define ASRC_LEVEL_RESTORE_ARM_WINDOWS 10
+
 /* camera-box #1335 follow-up 2: proportional gain of the level-LEVEL P term, in ppm per ms of level
  * error, folded into the correction target every call (once locked) as clamp(Kp*(buffered - target),
  * +/-1). It damps the I-only level loop's ~3.9 h clamp-to-clamp oscillation (observed 14:00-20:45,
@@ -274,6 +293,13 @@ struct asrc_compensator {
 	 * flush. Printed as restore=0|1. Mirror of src/asrc_bench.rs
 	 * RealtimeAsrcCompensator::level_restore. */
 	bool level_restore;
+	/* camera-box #1335 follow-up 4: count of CONSECUTIVE accepted windows whose |level - target| is
+	 * at least ASRC_LEVEL_RESTORE_ARM_ERR_MS -- reaching ASRC_LEVEL_RESTORE_ARM_WINDOWS arms the FAST
+	 * level restore from a SUSTAINED level error (a disturbance with no same-window residual step, the
+	 * case the step arm and the shift arm both miss). Reset on a below-band window, on arm, and next
+	 * to every level_restore reset (flush/init/restore-exit). Mirror of src/asrc_bench.rs
+	 * RealtimeAsrcCompensator::level_err_windows. */
+	uint32_t level_err_windows;
 };
 
 /* Reset a servo to its just-constructed state: 0 ppm estimated/applied (assume

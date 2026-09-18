@@ -1961,6 +1961,32 @@ mod vendored_source {
              src/asrc_bench.rs shift_level_target."
         );
 
+        // issue #1335 follow-up 4: a SUSTAINED buffer-level error (a disturbance that arrives with NO
+        // same-window residual step -- the 18.9. 12:00 StartStream shape the step arm + shift arm both
+        // miss) must ALSO arm the fast bounded level restore, counting consecutive accepted windows
+        // whose |level - target| >= the band. Src authority + Tier-0 gate: the
+        // sustained_level_error_arms_fast_restore_1335 / sub_band_level_offset_never_arms_but_band_is_live_1335
+        // benches. Keep the two ARM constants and the accepted-window counter byte-exact with the
+        // shipped C and numerically identical to src/asrc_bench.rs.
+        assert!(
+            h.contains("#define ASRC_LEVEL_RESTORE_ARM_ERR_MS 12.0"),
+            "{ASRC_COMPENSATOR_H}: #1335 follow-up 4 -- the ASRC_LEVEL_RESTORE_ARM_ERR_MS = 12.0 \
+             sustained-error band constant is no longer defined."
+        );
+        assert!(
+            h.contains("#define ASRC_LEVEL_RESTORE_ARM_WINDOWS 10"),
+            "{ASRC_COMPENSATOR_H}: #1335 follow-up 4 -- the ASRC_LEVEL_RESTORE_ARM_WINDOWS = 10 \
+             consecutive-window count constant is no longer defined."
+        );
+        assert!(
+            c.contains("++c->level_err_windows >= ASRC_LEVEL_RESTORE_ARM_WINDOWS"),
+            "{ASRC_COMPENSATOR_C}: #1335 follow-up 4 -- the accepted-window branch no longer counts \
+             consecutive >= ASRC_LEVEL_RESTORE_ARM_ERR_MS windows into level_err_windows and arms the \
+             restore at ASRC_LEVEL_RESTORE_ARM_WINDOWS; a sustained level error would ring for ~an hour \
+             at the +/-3 ppm rail again. Keep numerically identical to src/asrc_bench.rs \
+             compensate_with_level."
+        );
+
         let src = squish(&vendor_file(OBS_SOURCE));
         assert!(
             src.contains(

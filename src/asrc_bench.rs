@@ -311,6 +311,25 @@ pub const LEVEL_RESTORE_MAX_PPM: f64 = 100.0;
 /// of asrc-compensator.h ASRC_LEVEL_RESTORE_ARM_MS -- keep numerically identical.
 pub const LEVEL_RESTORE_ARM_MS: f64 = 5.0;
 
+/// camera-box #1335 follow-up 4: sustained-level-error band (ms) that arms the FAST bounded level
+/// restore in the accepted-window branch, whatever caused the error. A level disturbance that
+/// arrives with NO same-window residual step (an OBS StartStream input-sample loss, a mic/Dante
+/// re-plug, a mixer hiccup) is invisible to the step arm (follow-up 2) and the shift arm
+/// (follow-up 3), so the +/-3 ppm I term alone would take hours; this arm catches it. 12 ms sits
+/// well above the +/-8 ms 1-s level scatter so ordinary noise never arms, yet below the ~14-32 ms
+/// StartStream drops the 18.9. live incident produced. Mirror of asrc-compensator.h
+/// ASRC_LEVEL_RESTORE_ARM_ERR_MS -- keep numerically identical.
+pub const LEVEL_RESTORE_ARM_ERR_MS: f64 = 12.0;
+
+/// camera-box #1335 follow-up 4: number of CONSECUTIVE accepted windows whose |level - target| is
+/// at least LEVEL_RESTORE_ARM_ERR_MS required before the sustained-error arm fires (10 windows =
+/// 10 s at WINDOW_S 1.0). A below-band window resets the count, so a false arm needs 10 one-
+/// directional >= 12 ms readings out of the +/-8 ms scatter (rare); the 10 s detection delay plus a
+/// bounded burst is the trade-off, and the burst only brings the level back within 5 ms of the
+/// setpoint (harmless). Mirror of asrc-compensator.h ASRC_LEVEL_RESTORE_ARM_WINDOWS -- keep
+/// numerically identical.
+pub const LEVEL_RESTORE_ARM_WINDOWS: u32 = 10;
+
 /// camera-box #1335 follow-up 2: proportional gain of the level-LEVEL P term, in ppm per ms of level
 /// error, folded into the correction target every call (once locked) as `clamp(Kp·(buffered −
 /// target), ±1)`. It damps the I-only level loop's ~3.9 h clamp-to-clamp oscillation (observed
@@ -466,6 +485,11 @@ pub struct RealtimeAsrcCompensator {
     /// flush (the setpoint re-captures) and reset on construction. Telemetry: the C mirror prints it
     /// as `restore=0|1`.
     level_restore: bool,
+    /// issue #1335 follow-up 4: count of CONSECUTIVE accepted windows whose |level - target| >=
+    /// [`LEVEL_RESTORE_ARM_ERR_MS`] -- reaching [`LEVEL_RESTORE_ARM_WINDOWS`] arms the FAST level
+    /// restore from a SUSTAINED level error (a disturbance with no same-window residual step). Reset
+    /// on a below-band window, on arm, and wherever `level_restore` is reset (flush/new/restore-exit).
+    level_err_windows: u32,
 }
 
 impl RealtimeAsrcCompensator {
@@ -492,6 +516,7 @@ impl RealtimeAsrcCompensator {
             step_count: 0,           // issue #1335 follow-up 2
             last_step_ms: 0.0,       // issue #1335 follow-up 2
             level_restore: false,    // issue #1335 follow-up 2
+            level_err_windows: 0,    // issue #1335 follow-up 4
         }
     }
 
@@ -522,6 +547,9 @@ impl RealtimeAsrcCompensator {
         // (the buffer self-heals to whatever depth it re-locks at). step_count/last_step_ms are
         // running telemetry — never reset here.
         self.level_restore = false;
+        // issue #1335 follow-up 4: a flush abandons any in-progress restore, so the sustained-error
+        // window counter resets too.
+        self.level_err_windows = 0;
     }
 
     /// The current rate estimate, in ppm (issue #1084: the least-squares regression slope times
@@ -861,6 +889,27 @@ impl RealtimeAsrcCompensator {
                                 - LEVEL_KI_PPM_PER_MS_S * err_ms * window_master_s)
                                 .clamp(-LEVEL_INTEGRAL_MAX_PPM, LEVEL_INTEGRAL_MAX_PPM);
                         }
+                        // issue #1335 follow-up 4: arm the FAST bounded level restore on a SUSTAINED
+                        // level error, whatever caused it (a StartStream input-sample loss, a
+                        // mic/Dante re-plug, a mixer hiccup) — the case the step arm (follow-up 2) and
+                        // the shift arm (follow-up 3) both miss because it arrives with no same-window
+                        // residual step (the 18.9. 12:00 StartStream: level 100 -> 68 ms,
+                        // steps=1 last_step_ms=-14.3 detected before the level drained, restore never
+                        // armed, run A/V +15 ms). Count consecutive accepted windows >= the band; a
+                        // below-band window resets; reaching the window threshold arms and resets.
+                        // The integral above is frozen while restoring so the two level correctors
+                        // never wind against each other; the restore burst/exit are unchanged.
+                        if self.level_captured && !self.level_restore {
+                            if (buf_ms - self.level_target_ms).abs() >= LEVEL_RESTORE_ARM_ERR_MS {
+                                self.level_err_windows += 1;
+                                if self.level_err_windows >= LEVEL_RESTORE_ARM_WINDOWS {
+                                    self.level_restore = true;
+                                    self.level_err_windows = 0;
+                                }
+                            } else {
+                                self.level_err_windows = 0;
+                            }
+                        }
                     }
                 }
             }
@@ -892,6 +941,9 @@ impl RealtimeAsrcCompensator {
                     if self.level_restore {
                         if err.abs() < 5.0 {
                             self.level_restore = false;
+                            // issue #1335 follow-up 4: the restore just brought the level within band;
+                            // reset the sustained-error counter alongside clearing level_restore.
+                            self.level_err_windows = 0;
                         } else {
                             t += (LEVEL_RESTORE_K_PPM_PER_MS * err)
                                 .clamp(-LEVEL_RESTORE_MAX_PPM, LEVEL_RESTORE_MAX_PPM);

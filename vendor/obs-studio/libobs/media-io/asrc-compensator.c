@@ -45,6 +45,9 @@ static void asrc_regression_flush(struct asrc_compensator *c)
 	 * setpoint from the post-relock depth, so any in-progress fast level-restore is abandoned (the
 	 * buffer self-heals). step_count/last_step_ms are running telemetry -- never reset here. */
 	c->level_restore = false;
+	/* camera-box #1335 follow-up 4: a flush abandons any in-progress restore, so the sustained-error
+	 * window counter resets too. */
+	c->level_err_windows = 0;
 }
 
 void asrc_compensator_init(struct asrc_compensator *c)
@@ -63,6 +66,7 @@ void asrc_compensator_init(struct asrc_compensator *c)
 	c->step_count = 0; /* camera-box #1335 follow-up 2 */
 	c->last_step_ms = 0.0; /* camera-box #1335 follow-up 2 */
 	c->level_restore = false; /* camera-box #1335 follow-up 2 */
+	c->level_err_windows = 0; /* camera-box #1335 follow-up 4 */
 	asrc_regression_flush(c); /* camera-box #1084/#1335: empty buffer, 0 cumulatives, 0 integral, unlocked */
 }
 
@@ -251,6 +255,25 @@ double asrc_compensator_compensate(struct asrc_compensator *c, double raw_advanc
 									   ASRC_LEVEL_KI_PPM_PER_MS_S * err_ms * window_master_s,
 								   -ASRC_LEVEL_INTEGRAL_MAX_PPM, ASRC_LEVEL_INTEGRAL_MAX_PPM);
 					}
+					/* camera-box #1335 follow-up 4: arm the FAST bounded level restore on a SUSTAINED level
+					 * error, whatever caused it (a StartStream input-sample loss, a mic/Dante re-plug, a mixer
+					 * hiccup) -- the case the step arm (follow-up 2) and the shift arm (follow-up 3) both miss
+					 * because it arrives with NO same-window residual step (the 18.9. 12:00 StartStream: level
+					 * 100 -> 68 ms, steps=1 last_step_ms=-14.3 detected before the level drained, restore never
+					 * armed, run A/V +15 ms). Count consecutive accepted windows >= the band; a below-band window
+					 * resets; reaching the threshold arms and resets. The integral above is frozen while restoring
+					 * so the two level correctors never wind against each other; the step arm and the shift arm
+					 * stay as the immediate paths. */
+					if (c->level_captured && !c->level_restore) {
+						if (fabs(buffered_ms - c->level_target_ms) >= ASRC_LEVEL_RESTORE_ARM_ERR_MS) {
+							if (++c->level_err_windows >= ASRC_LEVEL_RESTORE_ARM_WINDOWS) {
+								c->level_restore = true;
+								c->level_err_windows = 0;
+							}
+						} else {
+							c->level_err_windows = 0;
+						}
+					}
 				}
 			}
 		}
@@ -290,6 +313,9 @@ double asrc_compensator_compensate(struct asrc_compensator *c, double raw_advanc
 				if (c->level_restore) {
 					if (fabs(err) < 5.0) {
 						c->level_restore = false;
+						/* camera-box #1335 follow-up 4: the restore just brought the level within band; reset the
+						 * sustained-error counter alongside clearing level_restore. */
+						c->level_err_windows = 0;
 					} else {
 						t += asrc_clamp(ASRC_LEVEL_RESTORE_K_PPM_PER_MS * err,
 								-ASRC_LEVEL_RESTORE_MAX_PPM, ASRC_LEVEL_RESTORE_MAX_PPM);
