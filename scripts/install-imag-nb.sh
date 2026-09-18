@@ -352,13 +352,15 @@ apt-get update -qq
 apt-get install -y --no-install-recommends openssh-server network-manager grub-efi-amd64 grub-efi-amd64-signed shim-signed >/dev/null
 
 # The ISO's install layers ship NO kernel (see copy_rootfs) — pull one from apt. It MUST be the
-# **HWE** chain (image + modules + headers), not the GA one (#819): the imag role runs the HWE line
-# (the incumbent box is on 6.17), setup-imag.sh step 6 holds the HWE package names and step 7 installs
-# linux-lowlatency-hwe-<rel> whose deps ARE those packages — a GA baseline aborts provisioning
-# ("Depends: linux-image-generic-hwe-<rel> … not going to be installed") and drops the 13th-gen
-# CPU/iGPU/USB-NIC support #482 deliberately kept. issue 1317: the release is DERIVED from the target's
-# own /etc/os-release VERSION_ID (linux-generic-hwe-<VERSION_ID> when available on that release, else
-# linux-generic) via imag_kernel_meta_package (serialized in above), never a hardcoded noble literal.
+# **HWE** chain (image + modules + headers), not the GA one (#819): the imag ROLE precedent runs the
+# HWE line (the incumbent box on 6.17; on imag, setup-imag.sh's step-6 HWE holds + the
+# linux-lowlatency-hwe-<rel> install depend on exactly these packages, so a GA baseline aborts
+# provisioning) and it carries the 13th-gen CPU/iGPU/USB-NIC support #482 deliberately kept — the SAME
+# hardware class the strih-lx notebook (setup-strih.sh follow-on) is on. issue 1317: the release is
+# DERIVED from the target's own /etc/os-release VERSION_ID (linux-generic-hwe-<VERSION_ID> when
+# available on that release, else linux-generic) via imag_kernel_meta_package (serialized in above),
+# never a hardcoded noble literal — so the ONE installer serves both an imag (24.04) and a strih-lx
+# (26.04) stick.
 if ! ls /boot/vmlinuz-* >/dev/null 2>&1; then
     version_id="\$( . /etc/os-release; printf '%s' "\${VERSION_ID:-}" )"
     kernel_avail="\$(apt-cache pkgnames linux-generic 2>/dev/null || true)"
