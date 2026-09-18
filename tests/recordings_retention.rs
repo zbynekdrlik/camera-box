@@ -3,15 +3,16 @@
 //! These tests pin the pure retention decision behind the dry-run-first cleanup sweep
 //! (`scripts/strih-recordings-retention.ps1` is a faithful port of the SAME rule). The problem
 //! being fixed: the E2E harness (`scripts/recording-e2e.sh`) records one OBS program capture per
-//! run into each Windows box's live OBS record directory (strih: `D:\_REC`, filename format
-//! `%CCYY-%MM-%DD %hh-%mm-%ss.mkv`), and `[8/8e]` only ever deletes THAT run's own file — aborted
+//! run into each Windows box's live OBS record directory (strih: `C:\_REC` since 17.9.2026 — the D:
+//! NVMe failed, issue 1338; historically `D:\_REC`; filename format `%CCYY-%MM-%DD %hh-%mm-%ss.mkv`),
+//! and `[8/8e]` only ever deletes THAT run's own file — aborted
 //! / skipped / failed-download runs leak forever (strih accumulated 344 `.mkv` = ~691 GiB, ~15x
 //! the 50 GB budget). The retention pass keeps the newest N runs UNION anything younger than D
 //! days, and deletes ONLY files that match the harness's OWN OBS-timestamp allowlist — NEVER a
 //! generic `*.mkv` sweep that could eat a differently-named operator recording.
 //!
 //! The single hardest invariant here (its own test below): a file whose name does NOT match the
-//! allowlist — proven concrete by the real `strih700105.mkv` sitting in `D:\_REC` beside the
+//! allowlist — proven concrete by the real `strih700105.mkv` seen in the strih record dir beside the
 //! timestamp-named runs — is PROTECTED: it can never land in the delete set, no matter how old or
 //! how large.
 

@@ -9,8 +9,10 @@ set -euo pipefail
 # .claude/rules/rig-state-inspection.md).
 #
 # The E2E harness (scripts/recording-e2e.sh) records one OBS program capture per run into the box's
-# live OBS record directory (strih: D:\_REC); [8/8e] only deletes each run's OWN file, so aborted /
-# skipped / failed-download runs leak forever (strih: 344 .mkv = ~691 GiB vs the 50 GB budget).
+# live OBS record directory (strih: C:\_REC since 17.9.2026 — the D: NVMe dropped off the bus and the
+# owner chose to leave recordings on the C: system disk, issue 1338; historically D:\_REC); [8/8e]
+# only deletes each run's OWN file, so aborted / skipped / failed-download runs leak forever
+# (strih: 344 .mkv = ~691 GiB vs the 50 GB budget).
 # The .ps1 keeps the newest N runs UNION anything younger than D days and deletes ONLY files
 # matching the harness's OWN OBS-timestamp allowlist — never a generic *.mkv sweep, so a
 # differently-named operator recording (e.g. strih700105.mkv) is always protected.
@@ -20,7 +22,7 @@ set -euo pipefail
 # leg is READ-ONLY (it lists a plan and deletes nothing).
 #
 # Usage:
-#   scripts/strih-recordings-retention.sh                         # dry-run on strih (D:\_REC, keep 20 runs / 3 days)
+#   scripts/strih-recordings-retention.sh                         # dry-run on strih (C:\_REC, keep 20 runs / 3 days)
 #   scripts/strih-recordings-retention.sh --keep-runs 20 --keep-days 3
 #   scripts/strih-recordings-retention.sh --host 10.77.9.204 --record-dir 'C:\Users\newlevel\Videos'  # stream box
 #   scripts/strih-recordings-retention.sh --execute              # SUPERVISOR only — actually deletes
@@ -29,7 +31,7 @@ set -euo pipefail
 
 HOST="10.77.9.202"
 USER="newlevel"
-RECORD_DIR="D:\\_REC"
+RECORD_DIR="C:\\_REC"
 KEEP_RUNS="20"
 KEEP_DAYS="3"
 BUDGET_GB="50"
