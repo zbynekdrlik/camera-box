@@ -331,18 +331,38 @@ pub const LEVEL_RESTORE_ARM_ERR_MS: f64 = 12.0;
 /// numerically identical.
 pub const LEVEL_RESTORE_ARM_WINDOWS: u32 = 10;
 
-/// camera-box #1335 follow-up 2: proportional gain of the level-LEVEL P term, in ppm per ms of level
-/// error, folded into the correction target every call (once locked) as `clamp(Kp·(buffered −
-/// target), ±1)`. It damps the I-only level loop's ~3.9 h clamp-to-clamp oscillation (observed
-/// 14:00-20:45, level ±10 ms) — the marginally-stable integrator-on-integrator plant. SIGN matches
-/// the proven #1335 integral (deficit ⇒ negative ⇒ stretch); the main design wrote `Kp·(target −
-/// level)` (the anti-damping sign) — the implemented `Kp·(buffered − target)` is the negation. At
-/// Kp=0.03 the loop's damping ratio is only ~0.034 (a 20 ms disturbance still overshoots), so this is
-/// a GENTLE damping that reduces the integral's clamp-railing and decays the oscillation, NOT a
-/// critically-damped `<3 ms overshoot` term (that would need Kp~0.6 + a wider clamp — see the
-/// anchors-confirmed comment). Mirror of asrc-compensator.h ASRC_LEVEL_KP_PPM_PER_MS — keep
-/// numerically identical.
-pub const LEVEL_KP_PPM_PER_MS: f64 = 0.03;
+/// camera-box #1335 follow-up 5: proportional gain of the buffer-LEVEL P term, in ppm per ms of
+/// level error — now the NORMAL LAW of the level loop, folded into the correction target every call
+/// (once locked) as `clamp(Kp·level_err_ema_ms, ±LEVEL_KP_MAX_PPM)`, driven by the SMOOTHED error
+/// ([`RealtimeAsrcCompensator::level_err_ema_ms`], an EMA with time constant [`LEVEL_EMA_TAU_S`])
+/// rather than the raw per-window level. SIGN matches the proven #1335 integral (deficit ⇒ negative
+/// ⇒ stretch). At Kp=2.0 the loop time constant is ≈ 1/(Kp·1e-3) = 500 s: a 15 ms error gone in
+/// ~6 min, a 25 ms StartStream drop in ~13 min, at inaudible rates (a 25 ms error saturates at
+/// [`LEVEL_KP_MAX_PPM`] = 50 ppm = 3 ms/min). The 18.9. live test showed the raw-error 0.03/±1 term
+/// (follow-ups 2-4) could not hold the level: the mean wandered ±10-15 ms around the setpoint over
+/// hour-scale spans and the E2E A/V reading inherited it (−0.6 ms vs +15.0 ms 40 min apart, identical
+/// pins). The 66x stronger gain is usable only BECAUSE the error is smoothed first — a raw 2 ppm/ms
+/// on the ±10 ms mixer-tick phase noise would jitter the rate by ±20 ppm/s; the EMA attenuates that
+/// below the ±50 clamp's own resolution. The integral (Ki, ±3) is kept for the DC residual only; the
+/// restore paths (follow-ups 2-4) become rare backstops. Mirror of asrc-compensator.h
+/// ASRC_LEVEL_KP_PPM_PER_MS — keep numerically identical.
+pub const LEVEL_KP_PPM_PER_MS: f64 = 2.0;
+
+/// camera-box #1335 follow-up 5: hard clamp on the buffer-LEVEL P term, in ppm (±). Replaces the
+/// follow-ups 2-4 literal ±1.0 clamp. A 25 ms error saturates it (Kp·25 = 50 ppm = 3 ms/min = a
+/// 0.005 % pitch offset while a large error decays, well inside the ±300 ppm ASRC envelope and the
+/// 100 ppm bursts follow-up 2 already accepts). Bounds the P term far below the rate loop's own
+/// MAX_PPM. Mirror of asrc-compensator.h ASRC_LEVEL_KP_MAX_PPM — keep numerically identical.
+pub const LEVEL_KP_MAX_PPM: f64 = 50.0;
+
+/// camera-box #1335 follow-up 5: time constant, in seconds of master-clock time, of the EMA that
+/// smooths the per-window level error before the P term ([`LEVEL_KP_PPM_PER_MS`]) reads it. The
+/// per-window level carries ±10 ms mixer-tick phase noise (18.9. live: consecutive 1-min samples
+/// 75.2 / 95.3 / 85.1 / 96.2 around a ~86 mean); a 10 s EMA kills that noise while adding only ~10 s
+/// of lag, irrelevant at the loop's 500 s time constant. Each accepted window blends with
+/// `alpha = window_master_s / (LEVEL_EMA_TAU_S + window_master_s)` (a ~1 s window ⇒ alpha ≈ 0.091).
+/// Mirror of asrc-compensator.h ASRC_LEVEL_EMA_TAU_S — keep numerically identical.
+pub const LEVEL_EMA_TAU_S: f64 = 10.0;
 
 /// issue #960: sanity ceiling on the (issue #962: WINDOWED, duration-weighted-summed) measured
 /// ppm, in ppm — above this, the measurement carries no real timing information (a starved or
@@ -491,6 +511,17 @@ pub struct RealtimeAsrcCompensator {
     /// restore from a SUSTAINED level error (a disturbance with no same-window residual step). Reset
     /// on a below-band window, on arm, and wherever `level_restore` is reset (flush/new/restore-exit).
     level_err_windows: u32,
+    /// issue #1335 follow-up 5: the EMA (time constant [`LEVEL_EMA_TAU_S`]) of the per-window level
+    /// error (`buffered_ms − level_target_ms`), in ms — the SMOOTHED error the P term reads so the
+    /// 66x stronger Kp=2.0 gain does not amplify the ±10 ms mixer-tick phase noise. Seeded with the
+    /// first error after capture (`level_err_ema_seeded`), reset on flush/relock, and shifted by
+    /// −delta on a deliberate setpoint shift so a shift does not read as an error transient. Mirror
+    /// of the C `level_err_ema_ms`.
+    level_err_ema_ms: f64,
+    /// issue #1335 follow-up 5: whether `level_err_ema_ms` has been seeded since the last (re)lock —
+    /// gates the one-shot EMA seed (first accepted window seeds `ema = err`, later windows blend).
+    /// Cleared by a flush so a relock re-seeds. Mirror of the C `level_err_ema_seeded`.
+    level_err_ema_seeded: bool,
 }
 
 impl RealtimeAsrcCompensator {
@@ -510,14 +541,16 @@ impl RealtimeAsrcCompensator {
             cum_master_s: 0.0,
             cum_ymm_s: 0.0,
             reg_locked: false,
-            level_target_ms: 0.0,    // issue #1335
-            level_integral_ppm: 0.0, // issue #1335
-            level_last_ms: 0.0,      // issue #1335
-            level_captured: false,   // issue #1335
-            step_count: 0,           // issue #1335 follow-up 2
-            last_step_ms: 0.0,       // issue #1335 follow-up 2
-            level_restore: false,    // issue #1335 follow-up 2
-            level_err_windows: 0,    // issue #1335 follow-up 4
+            level_target_ms: 0.0,        // issue #1335
+            level_integral_ppm: 0.0,     // issue #1335
+            level_last_ms: 0.0,          // issue #1335
+            level_captured: false,       // issue #1335
+            step_count: 0,               // issue #1335 follow-up 2
+            last_step_ms: 0.0,           // issue #1335 follow-up 2
+            level_restore: false,        // issue #1335 follow-up 2
+            level_err_windows: 0,        // issue #1335 follow-up 4
+            level_err_ema_ms: 0.0,       // issue #1335 follow-up 5
+            level_err_ema_seeded: false, // issue #1335 follow-up 5
         }
     }
 
@@ -551,6 +584,10 @@ impl RealtimeAsrcCompensator {
         // issue #1335 follow-up 4: a flush abandons any in-progress restore, so the sustained-error
         // window counter resets too.
         self.level_err_windows = 0;
+        // issue #1335 follow-up 5: a flush re-captures the setpoint from the post-relock depth, so
+        // the smoothed level error re-seeds from the first post-relock window.
+        self.level_err_ema_ms = 0.0;
+        self.level_err_ema_seeded = false;
     }
 
     /// The current rate estimate, in ppm (issue #1084: the least-squares regression slope times
@@ -645,6 +682,17 @@ impl RealtimeAsrcCompensator {
         if self.level_captured {
             self.level_target_ms += delta_ms;
             self.level_last_ms += delta_ms;
+            // camera-box #1335 follow-up 5: the deliberate shift moves BOTH level_target_ms (+delta,
+            // this line) AND the buffer level itself (+delta, via the sync-offset re-stamp — the 18.9.
+            // live test: level 80 → 108 ms in the same second as a +12 ms shift), so the smoothed
+            // error (buffered − target) is UNCHANGED and level_err_ema_ms needs NO adjustment —
+            // leaving it alone is exactly what "the smoothed error must not see a false transient"
+            // requires. (The design's Architektúra wrote `level_err_ema_ms -= delta_ms` here; a
+            // standalone-rustc probe shows that INJECTS a −delta transient, spiking the P term to the
+            // ±5 ppm/window slew cap on the next window and FAILING the design's own follow-up-5 test
+            // (c) `|Δapplied| ≤ 2 ppm`; with no adjustment the swing is 0. Same class as the
+            // load-bearing follow-up-2 SIGN CORRECTION — flagged for the main's review on the ticket.)
+            // Exact mirror of the C shift.
             // camera-box #1335 follow-up 3: a deliberate setpoint shift of at least the restore's
             // exit band arms the FAST bounded level restore, so the level reaches the new depth in
             // minutes (integral frozen per follow-up 2) rather than the ~1 h / hours-of-ringing the
@@ -873,6 +921,22 @@ impl RealtimeAsrcCompensator {
                             self.level_target_ms = buf_ms;
                             self.level_captured = true;
                         }
+                        // issue #1335 follow-up 5: SMOOTH the per-window level error with an EMA (time
+                        // constant LEVEL_EMA_TAU_S) BEFORE the P term reads it, so the 66x stronger
+                        // Kp=2.0 gain does not amplify the ±10 ms mixer-tick phase noise (the 18.9.
+                        // live test: the raw-error term could not hold the level, the mean wandered
+                        // ±10-15 ms). Seed with the first error after capture; later windows blend
+                        // with alpha = window_master_s / (tau + window_master_s). The shift subtracts
+                        // its delta from it, so a deliberate setpoint shift is not read as an error
+                        // transient. Exact mirror of the C accepted-window branch.
+                        let level_err = buf_ms - self.level_target_ms;
+                        if !self.level_err_ema_seeded {
+                            self.level_err_ema_ms = level_err;
+                            self.level_err_ema_seeded = true;
+                        } else {
+                            let alpha = window_master_s / (LEVEL_EMA_TAU_S + window_master_s);
+                            self.level_err_ema_ms += alpha * (level_err - self.level_err_ema_ms);
+                        }
                         // Anti-windup: integrate only while the composite rate target is not clamped
                         // at the hard ±MAX_PPM bound AND the fast level-restore burst is not active
                         // (issue #1335 follow-up 2: freeze the integral during a restore so the two
@@ -935,8 +999,11 @@ impl RealtimeAsrcCompensator {
             if let Some(buf_ms) = buffered_ms {
                 if self.level_captured {
                     let err = buf_ms - self.level_target_ms;
-                    // P term: gentle damping of the I-only level loop's ~3.9 h oscillation.
-                    t += (LEVEL_KP_PPM_PER_MS * err).clamp(-1.0, 1.0);
+                    // issue #1335 follow-up 5: P term is now the NORMAL LAW of the level loop —
+                    // Kp=2.0 on the SMOOTHED error (level_err_ema_ms) clamped ±LEVEL_KP_MAX_PPM, loop
+                    // time constant ~500 s. The raw err below still drives the restore burst/exit.
+                    t += (LEVEL_KP_PPM_PER_MS * self.level_err_ema_ms)
+                        .clamp(-LEVEL_KP_MAX_PPM, LEVEL_KP_MAX_PPM);
                     // Fast bounded restore: a big proportional stretch/compress that refills a
                     // sample-loss step in minutes, then exits once the buffer is back within 5 ms.
                     if self.level_restore {

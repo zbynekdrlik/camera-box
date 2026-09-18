@@ -48,6 +48,10 @@ static void asrc_regression_flush(struct asrc_compensator *c)
 	/* camera-box #1335 follow-up 4: a flush abandons any in-progress restore, so the sustained-error
 	 * window counter resets too. */
 	c->level_err_windows = 0;
+	/* camera-box #1335 follow-up 5: a flush re-captures the setpoint from the post-relock depth, so
+	 * the smoothed level error re-seeds from the first post-relock window. */
+	c->level_err_ema_ms = 0.0;
+	c->level_err_ema_seeded = false;
 }
 
 void asrc_compensator_init(struct asrc_compensator *c)
@@ -67,6 +71,8 @@ void asrc_compensator_init(struct asrc_compensator *c)
 	c->last_step_ms = 0.0; /* camera-box #1335 follow-up 2 */
 	c->level_restore = false; /* camera-box #1335 follow-up 2 */
 	c->level_err_windows = 0; /* camera-box #1335 follow-up 4 */
+	c->level_err_ema_ms = 0.0; /* camera-box #1335 follow-up 5 */
+	c->level_err_ema_seeded = false; /* camera-box #1335 follow-up 5 */
 	asrc_regression_flush(c); /* camera-box #1084/#1335: empty buffer, 0 cumulatives, 0 integral, unlocked */
 }
 
@@ -238,6 +244,23 @@ double asrc_compensator_compensate(struct asrc_compensator *c, double raw_advanc
 						c->level_target_ms = buffered_ms;
 						c->level_captured = true;
 					}
+					/* camera-box #1335 follow-up 5: SMOOTH the per-window level error with an EMA (tau
+					 * ASRC_LEVEL_EMA_TAU_S) BEFORE the P term reads it, so the 66x stronger Kp=2.0 gain does not
+					 * amplify the +/-10 ms mixer-tick phase noise (the 18.9. live test: the raw-error term could
+					 * not hold the level, the mean wandered +/-10-15 ms). Seed with the first error after capture;
+					 * later windows blend with alpha = window_master_s / (tau + window_master_s). The shift
+					 * subtracts its delta from it, so a deliberate setpoint shift is not read as an error
+					 * transient. Mirror of src/asrc_bench.rs compensate_with_level. */
+					{
+						const double level_err = buffered_ms - c->level_target_ms;
+						if (!c->level_err_ema_seeded) {
+							c->level_err_ema_ms = level_err;
+							c->level_err_ema_seeded = true;
+						} else {
+							const double alpha = window_master_s / (ASRC_LEVEL_EMA_TAU_S + window_master_s);
+							c->level_err_ema_ms += alpha * (level_err - c->level_err_ema_ms);
+						}
+					}
 					/* Anti-windup: integrate only while the composite rate target is not clamped at
 					 * the hard +/-ASRC_MAX_PPM bound AND the fast level-restore burst is not active
 					 * (camera-box #1335 follow-up 2: freeze the integral during a restore so the two
@@ -306,8 +329,11 @@ double asrc_compensator_compensate(struct asrc_compensator *c, double raw_advanc
 			double t = c->estimated_ppm + c->outer_bias_ppm + c->level_integral_ppm;
 			if (c->level_captured) {
 				const double err = buffered_ms - c->level_target_ms;
-				/* P term: gentle damping of the I-only level loop's ~3.9 h oscillation. */
-				t += asrc_clamp(ASRC_LEVEL_KP_PPM_PER_MS * err, -1.0, 1.0);
+				/* camera-box #1335 follow-up 5: P term is now the NORMAL LAW of the level loop --
+				 * Kp=2.0 on the SMOOTHED error (level_err_ema_ms) clamped +/-ASRC_LEVEL_KP_MAX_PPM,
+				 * loop time constant ~500 s. The raw err below still drives the restore burst/exit. */
+				t += asrc_clamp(ASRC_LEVEL_KP_PPM_PER_MS * c->level_err_ema_ms, -ASRC_LEVEL_KP_MAX_PPM,
+					ASRC_LEVEL_KP_MAX_PPM);
 				/* Fast bounded restore: a big proportional stretch/compress that refills a
 				 * sample-loss step, then exits once the buffer is back within 5 ms. */
 				if (c->level_restore) {
@@ -390,6 +416,16 @@ void asrc_compensator_shift_level_target(struct asrc_compensator *c, double delt
 	if (c->level_captured) {
 		c->level_target_ms += delta_ms;
 		c->level_last_ms += delta_ms;
+		/* camera-box #1335 follow-up 5: the deliberate shift moves BOTH level_target_ms (+delta, this
+		 * line) AND the buffer level itself (+delta, via the sync-offset re-stamp -- the 18.9. live
+		 * test: level 80 -> 108 ms in the same second as a +12 ms shift), so the smoothed error
+		 * (buffered - target) is UNCHANGED and level_err_ema_ms needs NO adjustment -- leaving it
+		 * alone is exactly what "the smoothed error must not see a false transient" requires. (The
+		 * design's Architektura wrote `level_err_ema_ms -= delta_ms` here; a standalone-rustc probe
+		 * shows that INJECTS a -delta transient, spiking the P term to the +/-5 ppm/window slew cap on
+		 * the very next window and FAILING the design's own follow-up-5 test (c) `|Δapplied| <= 2 ppm`;
+		 * with no adjustment the swing is 0. Same class as the load-bearing follow-up-2 SIGN CORRECTION
+		 * -- flagged for the main's review on the ticket.) The follow-up-3 arm below is unchanged. */
 		/* camera-box #1335 follow-up 3: a deliberate setpoint shift of at least the restore's exit
 		 * band arms the FAST bounded level restore, so the level reaches the new depth in minutes
 		 * (integral frozen per follow-up 2) instead of the ~1 h / hours-of-ringing the +/-3 ppm I
