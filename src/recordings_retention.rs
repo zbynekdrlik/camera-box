@@ -1,8 +1,10 @@
 //! #1122 — E2E recordings retention decision (pure, dependency-free, Tier-0 testable).
 //!
 //! The camera-box E2E harness (`scripts/recording-e2e.sh`) records ONE OBS program capture per run
-//! into each Windows box's LIVE OBS record directory (strih: `D:\_REC`, OBS filename format
-//! `%CCYY-%MM-%DD %hh-%mm-%ss` → e.g. `2026-08-19 02-23-06.mkv`). `[8/8e]` only ever prints a
+//! into each Windows box's LIVE OBS record directory (strih: `C:\_REC` since 17.9.2026 — the D: NVMe
+//! dropped off the bus and the owner left recordings on the C: system disk, issue 1338; historically
+//! `D:\_REC`; OBS filename format `%CCYY-%MM-%DD %hh-%mm-%ss` → e.g. `2026-08-19 02-23-06.mkv`).
+//! `[8/8e]` only ever prints a
 //! delete plan for THAT run's own file, and the `#652` preflight merely WARNs — so aborted /
 //! `KEEP_RECORDINGS=1` / early-abort / failed-download runs leak forever. Live strih (2026-08-19):
 //! 344 `.mkv` = ~691 GiB in `D:\_REC`, oldest back to 2025-10-27, ~15× the 50 GB working budget.
@@ -11,7 +13,7 @@
 //! directory's top-level files, KEEP the newest `keep_newest_runs` runs UNION anything younger
 //! than `keep_within_days`, and DELETE only files matching the harness's OWN OBS-timestamp
 //! filename allowlist. It is deliberately NOT a generic `*.mkv` sweep: a differently-named
-//! operator/debug recording (proven concrete: `strih700105.mkv` sits in `D:\_REC` today) is
+//! operator/debug recording (proven concrete: `strih700105.mkv` seen in the strih record dir) is
 //! PROTECTED and can never be deleted, no matter how old or large.
 //!
 //! #1276 (owner ruling 15.9.2026): production-shaped recordings are ADDITIONALLY protected by SIZE

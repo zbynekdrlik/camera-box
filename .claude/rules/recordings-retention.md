@@ -62,7 +62,12 @@ No archive step, no age-based deletion of production files.
 
 ## Where the recordings live
 
-- **strih** live OBS record dir (`GetRecordDirectory`, "light" profile): `D:\_REC`.
+- **strih** live OBS record dir (`GetRecordDirectory`, "light" profile): **`C:\_REC`** since 17.9.2026
+  (owner ruling 18.9., issue 1338 — the D: NVMe dropped off the bus and the owner chose to leave
+  recordings on the C: system disk). **Historically `D:\_REC`** (the issue-1122 default). Both wrapper
+  defaults (`RECORD_DIR` / `-RecordDir`) now default to `C:\_REC`; `--record-dir` / `-RecordDir`
+  overrides it, and a missing dir FAILS LOUD (non-zero exit before any enumeration) rather than a
+  silent empty sweep.
 - OBS `FilenameFormatting` = `%CCYY-%MM-%DD %hh-%mm-%ss` → `2026-08-19 02-23-06.mkv`; `RecFormat2=mkv`.
 - The `bundle-state-server` `/record-dir-stats.json` endpoint (curl `http://<box>:8899/…`) reports
   `total_bytes` / `file_count` / `oldest_mtime` / **`free_bytes`** (#1276) over that dir — the quick
@@ -76,8 +81,8 @@ Canonical spec: **`src/recordings_retention.rs`** (pure, Tier-0, `tests/recordin
 
 - The EXPLICIT allowlist matches ONLY OBS-timestamp names: `YYYY-MM-DD HH-MM-SS[ (n)].mkv|.mp4`
   (case-sensitive). It is **NEVER a generic `*.mkv` sweep**: a differently-named operator/debug
-  recording is PROTECTED. Proven live — `strih700105.mkv` sits in `D:\_REC` and lands in PROTECT,
-  never DELETE.
+  recording is PROTECTED. Proven live — `strih700105.mkv` seen in the strih record dir lands in
+  PROTECT, never DELETE.
 - KEEP a matching file if it is in the newest `KeepRuns` runs OR younger than `KeepDays` (union);
   DELETE the rest. Non-matching files (`Screenshot …png`, `strih-partial-*.json`, custom names) are
   always PROTECTED.

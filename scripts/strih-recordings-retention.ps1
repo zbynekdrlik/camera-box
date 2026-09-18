@@ -1,15 +1,21 @@
 <#
   strih-recordings-retention.ps1 -- #1122
 
-  Dry-run-first retention sweep for the E2E harness's OBS recordings (strih: D:\_REC, ~691 GiB of
-  344 old .mkv runs vs the 50 GB working budget). Deletes ONLY files whose name matches the
-  harness's OWN OBS-timestamp allowlist (`YYYY-MM-DD HH-MM-SS[ (n)].mkv|.mp4`), keeping the newest
-  -KeepRuns runs UNION anything younger than -KeepDays. It is DRY-RUN by default: it prints the
-  FULL keep/protect/delete plan and a summary, and deletes NOTHING unless -Execute is passed.
+  Dry-run-first retention sweep for the E2E harness's OBS recordings (strih: C:\_REC since 17.9.2026
+  -- the D: NVMe dropped off the bus and the owner chose to leave recordings on the C: system disk,
+  issue 1338; historically D:\_REC, ~691 GiB of 344 old .mkv runs vs the 50 GB working budget).
+  Deletes ONLY files whose name matches the harness's OWN OBS-timestamp allowlist
+  (`YYYY-MM-DD HH-MM-SS[ (n)].mkv|.mp4`), keeping the newest -KeepRuns runs UNION anything younger
+  than -KeepDays. It is DRY-RUN by default: it prints the FULL keep/protect/delete plan and a
+  summary, and deletes NOTHING unless -Execute is passed.
 
-  A differently-named operator/debug recording (e.g. `strih700105.mkv`, which is really present in
-  D:\_REC) does NOT match the allowlist and is therefore PROTECTED -- a generic `*.mkv` sweep would
-  eat it; this one never touches it.
+  A differently-named operator/debug recording (e.g. `strih700105.mkv`, seen in the record dir)
+  does NOT match the allowlist and is therefore PROTECTED -- a generic `*.mkv` sweep would eat it;
+  this one never touches it.
+
+  The record dir is a DEFAULT (`-RecordDir` overrides it). If the dir does not exist on the box the
+  script FAILS LOUD before any enumeration (never an empty "0 candidates" dry-run against a missing
+  disk -- script-failure-policy), so a stale default can never masquerade as "nothing to sweep".
 
   ** The first real -Execute run is the SUPERVISOR's explicit, reviewed step (issue #1122).**
   Run the dry-run, read the printed plan, and only then re-run with -Execute.
@@ -28,7 +34,7 @@
     powershell -NoProfile -ExecutionPolicy Bypass -File strih-recordings-retention.ps1 -Execute   # SUPERVISOR only
 #>
 param(
-    [string]$RecordDir = "D:\_REC",
+    [string]$RecordDir = "C:\_REC",
     [int]$KeepRuns = 20,
     [double]$KeepDays = 3,
     [double]$BudgetGb = 50,
