@@ -150,12 +150,22 @@ echo "OK: OBS bezi (pid $OBS_PID), WS :4455 up."
 # issue 1317: seed the collection (idempotent) now that OBS's WebSocket is up -- CreateScene +
 # CreateInput per manifest input with the certified genlock settings (genlock_fifo/ndi_sync=2/floor 3)
 # + read-back-verified ndi_source_name + Studio Mode. The import chain was proven by the launch
-# preflight above (imag issue 1156 pattern), so a failure here is a genuine WS/seed problem, not a
-# missing dep. sleep 2 lets the WS ident handshake layer settle before the seed connects (imag's
-# same settle). --host defaults to 127.0.0.1 inside strih_scenes.py.
+# preflight above (imag issue 1156 pattern), so a MISSING-DEP failure is already ruled out here.
+# sleep 2 lets the WS ident handshake layer settle before the seed connects (imag's same settle).
+# --host defaults to 127.0.0.1 inside strih_scenes.py.
+#
+# BEST-EFFORT (issue 1317 review): OBS is ALREADY launched (pid $OBS_PID). A RUNTIME seed failure --
+# a transient WS hiccup, a corrupt strih-lx-seed.json, or the WS demanding auth after a config regen
+# (a documented strih incident) -- must NOT abort this wrapper under `set -euo pipefail`, because that
+# would SIGTERM the cgroup (the live OBS) and Restart=on-failure would FLAP a healthy cut. An
+# empty-but-running OBS is strictly better than a flapping one; verify-strih item 4b reports the
+# unseeded state and the seed is idempotently re-tried on the next launch. Loud WARN, never fatal.
 sleep 2
-python3 "$SCN" --bootstrap
-echo "OK: scenes seednute (strih_scenes.py --bootstrap)."
+if python3 "$SCN" --bootstrap; then
+  echo "OK: scenes seednute (strih_scenes.py --bootstrap)."
+else
+  echo "WARN issue 1317: strih_scenes.py --bootstrap FAILED (non-fatal) -- OBS stays UP; collection may be unseeded. Re-seed: python3 ${SCN} --bootstrap. NOT aborting the unit (would flap a live OBS)."
+fi
 
 # #882: BLOCK until obs itself exits, then propagate ITS exit status -- makes obs (not this wrapper)
 # the process a Type=simple unit tracks. A signal death (segfault) reports non-zero and

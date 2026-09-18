@@ -123,12 +123,16 @@ def scene_order(inputs):
 def input_parity_problems(actual, expected_plan):
     """Pure: given `actual` = {inputName: inputSettings-dict} read over WS and `expected_plan` =
     seed_inputs(...), return a list of human-readable problem strings (empty list = every expected
-    input present, a genlock_fifo source, bound to the right ndi_source_name). Used by --verify-parity
-    and Tier-0-tested directly."""
+    input present, a genlock_fifo source, bound to the right ndi_source_name, with the certified
+    ndi_sync=2 SOURCE_TIMECODE). genlock_fifo and ndi_sync are the two certified genlock keys that
+    define "a genlocked source" (obs_phase2 #149); the DistroAV `latency` mode field is deliberately
+    NOT parity-checked here (a live receiver may normalise/clamp it, which would false-flag this
+    report-only path). Used by --verify-parity and Tier-0-tested directly."""
     problems = []
     for item in expected_plan:
         inp = item["input"]
         src = item["ndi_source_name"]
+        want_sync = item["settings"]["ndi_sync"]
         if inp not in actual:
             problems.append("MISSING %r" % inp)
             continue
@@ -137,6 +141,8 @@ def input_parity_problems(actual, expected_plan):
             problems.append("%r not genlock_fifo" % inp)
         if s.get("ndi_source_name") != src:
             problems.append("%r ndi_source_name %r want %r" % (inp, s.get("ndi_source_name"), src))
+        if s.get("ndi_sync") != want_sync:
+            problems.append("%r ndi_sync %r want %r" % (inp, s.get("ndi_sync"), want_sync))
     return problems
 
 
@@ -278,11 +284,15 @@ def main():
     ap.add_argument("--manifest", default=SEED_MANIFEST_PATH,
                     help="path to strih-lx-seed.json (default %s)" % SEED_MANIFEST_PATH)
     ap.add_argument("--bootstrap", action="store_true",
-                    help="seed scenes/inputs with the certified genlock settings + Studio Mode "
-                         "(the default action when no mode flag is given)")
+                    help="seed scenes/inputs with the certified genlock settings + Studio Mode")
     ap.add_argument("--verify-parity", action="store_true",
                     help="read-only: report whether the 10 seed inputs exist as genlock_fifo sources")
     args = ap.parse_args()
+
+    # An explicit mode is REQUIRED (issue 1317 review): a bare invocation must never silently connect
+    # and MUTATE OBS. --bootstrap seeds; --verify-parity is read-only.
+    if not args.bootstrap and not args.verify_parity:
+        ap.error("specify a mode: --bootstrap (seed) or --verify-parity (read-only)")
 
     manifest_text = _read_manifest(args.manifest)
 
@@ -290,7 +300,7 @@ def main():
     if args.verify_parity:
         verify_parity(obs, manifest_text)
         return
-    # default action = bootstrap seed
+    # --bootstrap: seed the collection
     inputs, _outputs, latency = parse_seed_manifest(manifest_text)
     plan = seed_inputs(inputs, latency)
     statuses = bootstrap(obs, plan, studio=True)

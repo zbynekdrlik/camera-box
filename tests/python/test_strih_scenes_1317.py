@@ -7,6 +7,8 @@ seed_inputs / certified_genlock_settings / scene_order / input_parity_problems) 
 """
 import importlib.util
 import json
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -130,7 +132,11 @@ def test_scene_order_is_stable_deduped_manifest_order():
 def _actual_from_plan(plan):
     """Build a healthy GetInputSettings-shaped {inputName: settings} from a plan."""
     return {
-        item["input"]: {"ndi_source_name": item["ndi_source_name"], "genlock_fifo": True}
+        item["input"]: {
+            "ndi_source_name": item["ndi_source_name"],
+            "genlock_fifo": True,
+            "ndi_sync": item["settings"]["ndi_sync"],
+        }
         for item in plan
     }
 
@@ -151,10 +157,32 @@ def test_input_parity_problems_flags_missing_input():
 def test_input_parity_problems_flags_non_genlock_and_wrong_source():
     plan = _mod.seed_inputs(_TEN_INPUTS, 3)
     actual = _actual_from_plan(plan)
-    actual["NDI CAM1 (usb)"] = {"ndi_source_name": "WRONG", "genlock_fifo": False}
+    actual["NDI CAM1 (usb)"] = {"ndi_source_name": "WRONG", "genlock_fifo": False, "ndi_sync": 2}
     problems = _mod.input_parity_problems(actual, plan)
     assert any("not genlock_fifo" in p for p in problems)
     assert any("ndi_source_name" in p and "WRONG" in p for p in problems)
+
+
+def test_input_parity_problems_flags_wrong_ndi_sync():
+    plan = _mod.seed_inputs(_TEN_INPUTS, 3)
+    actual = _actual_from_plan(plan)
+    # a source that decodes but on ndi_sync=1 (the #149 timing bug) must be flagged
+    actual["NDI CAM2 (usb)"] = {"ndi_source_name": "CAM2 (usb)", "genlock_fifo": True, "ndi_sync": 1}
+    problems = _mod.input_parity_problems(actual, plan)
+    assert any("ndi_sync" in p and "NDI CAM2 (usb)" in p for p in problems)
+
+
+# --- CLI safety: an explicit mode is required (no silent-mutation bare invocation) ----------------
+
+def test_bare_invocation_requires_a_mode_and_never_touches_obs():
+    # ap.error fires BEFORE any manifest read or WS connect, so this exercises the safety guard with
+    # no rig: a bare `strih_scenes.py` must exit non-zero and NOT seed anything.
+    r = subprocess.run(
+        [sys.executable, str(SCRIPTS / "strih_scenes.py")],
+        capture_output=True, text=True,
+    )
+    assert r.returncode != 0
+    assert "specify a mode" in r.stderr.lower()
 
 
 # --- static anchors: the launch-seed wiring -------------------------------------------------------
