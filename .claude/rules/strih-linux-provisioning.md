@@ -160,6 +160,13 @@ importing imag's 70 KB DRM-lease/encoder/picom machinery that strih-lx does not 
   list) that `verify-strih.sh` item 4b greps with `grep -qxF`, **report-only** so a not-yet-launched
   box (OBS/WS down) is a NOTE, never a hard FAIL — the seed is a LAUNCH-time action, not a
   provisioning artifact.
+- **CAVEAT — `latency: 3` in the certified dict.** The seeder sets the DistroAV `latency` key to `3`
+  exactly as the issue-1317 design specified ("use latency 3 not 0 per the manifest"). Note the stock
+  DistroAV `latency` field is a receive-buffer MODE enum (`imag_scenes.py` sets it to `1` = Low), and
+  the 3 ms genlock FLOOR is otherwise carried by the SEPARATE per-source `genlock_latency_ms_src` pin
+  (owned by the per-run aligner, `latency-pins-verify.md`), NOT by this `latency` field. Confirm on the
+  live box that `latency: 3` is accepted/meaningful when the supervisor first runs `--bootstrap`; the
+  `--verify-parity` report deliberately does NOT gate on `latency` (a live receiver may normalise it).
 - **obs_phase2 is imported LAZILY** (`_obs_phase2_module`, the #1156 class): an older box may lack it,
   so the read-back verify degrades to a direct set rather than crashing the boot seed. The top-level
   `from websocket import create_connection` IS the dep the launch preflight validates.
