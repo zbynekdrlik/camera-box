@@ -537,3 +537,55 @@ ratification alongside the follow-up-2 Kp/Kr retune note). Bench:
 `shift_level_target_arms_fast_restore_on_deliberate_shift_1335` (armed + settle <=600 s + integral never
 rails for the +12 ms case; arms nothing for +3 ms). Lock-step anchor: the new ARM constant + arming line
 are pinned byte-exact in `tests/genlock_preload.rs::asrc_setpoint_follows_sync_offset_1335`.
+
+## #1335 follow-up 5 — a SMOOTHED proportional term becomes the NORMAL LAW of the level loop
+
+The 18.9. 12 h live series showed follow-ups 2-4 could not HOLD the buffer level: with `Ki` 0.0002
+(a 15 ms error winds the integral to its +-3 clamp in ~17 min, 3 ppm moves the level only 10 ms/h)
+and the P term at `Kp` 0.03 clamped +-1 ppm on the RAW per-window level, the mean level wandered
++-10-15 ms around the setpoint over hour-scale spans and the E2E A/V reading inherited it (-0.6 ms
+vs +15.0 ms 40 min apart, identical pins). Follow-up 5 makes a SMOOTHED proportional term the normal
+law:
+
+- **`Kp` 0.03 -> 2.0, clamp +-1 -> +-`LEVEL_KP_MAX_PPM` (50 ppm)**, and the P term now reads a
+  SMOOTHED error `level_err_ema_ms` (an EMA of `buffered - target`, `alpha = window_master_s /
+  (LEVEL_EMA_TAU_S + window_master_s)`, `LEVEL_EMA_TAU_S` 10 s) instead of the raw per-window level.
+  Loop time constant `~= 1/(Kp*1e-3) = 500 s` (a 15 ms error is ~3 ms low at ~13 min, a 25 ms drop
+  in ~13 min, at inaudible rates). The 66x stronger gain is usable ONLY because the error is smoothed
+  first: a raw 2 ppm/ms on the +-10 ms mixer-tick phase noise would jitter the rate +-20 ppm/s; the
+  EMA attenuates that below the +-50 clamp's resolution (bench (b): mean `|applied - estimated|`
+  ~0.95 ppm). The integral (`Ki`, +-3) is KEPT but now only carries the DC residual; the restore
+  paths (follow-ups 2-4) become rare backstops.
+- **New state:** `level_err_ema_ms` + `level_err_ema_seeded` (seed with the first error after
+  capture, reset on flush/relock). New constants `LEVEL_KP_MAX_PPM` (50.0) / `LEVEL_EMA_TAU_S` (10.0)
+  mirrored C<->Rust. `LEVEL_KP_PPM_PER_MS` is now 2.0 both sides.
+- **SIGN CORRECTION on the shift (load-bearing, follow-up-2 class).** The main's Architektura wrote
+  `level_err_ema_ms -= delta_ms` in `shift_level_target`. IMPLEMENTED AS NO ADJUSTMENT: a deliberate
+  shift moves BOTH `level_target_ms` (+delta) AND the buffer level itself (+delta, via the sync-offset
+  re-stamp -- the 18.9. live level 80 -> 108 ms in one second), so the smoothed error
+  (`buffered - target`) is UNCHANGED and the EMA needs no adjustment -- leaving it alone is exactly
+  what "the smoothed error must not see a false transient" requires. A standalone-rustc probe shows
+  the literal `-= delta` INJECTS a -delta transient and slews `applied` to the +-5 ppm/window cap on
+  the next window, FAILING the design's own follow-up-5 test (c) `|d applied| <= 2 ppm`; with no
+  adjustment the swing is 0. Documented on the ticket for the main's review (same as the follow-up-2
+  P/restore SIGN CORRECTION). A future edit MUST NOT reintroduce the `-= delta`.
+- **The design's aspirational quantitative targets underdeliver at the shipped Kp=2 (flagged, not
+  retuned).** Test (a)'s design line was "MEAN within +-3 ms after <=600 s"; at Kp=2 (tau ~500 s) a
+  15 ms error is ~4.5 ms at 600 s and reaches +-3 ms at ~777 s (measured), so the bench uses a <=900
+  window cap with a comment -- the SAME ~500 s clamp-does-not-bind calibration follow-ups 2-4 document
+  for their settle times, flagged for main ratification. The loop still holds the level to a few ms in
+  ~13 min vs the old hour-scale wander, which is the ticket's whole point.
+- **Bench** (`src/asrc_bench.rs`, three `*_1335` follow-up-5 tests, calibrated from a standalone-rustc
+  probe, deterministic): `smoothed_p_term_holds_level_against_tick_noise_1335` (15 ms deficit + +-10 ms
+  tick noise -> mean back within +-3 ms by <=900 windows, integral off its +-3 rail; RED on base: dev
+  14.3 ms at 600 s, never within +-3 ms), `smoothed_p_term_does_not_chatter_on_tick_noise_1335` (+-10
+  ms noise at target -> mean `|applied - estimated|` <= 3 ppm, restore never arms -- guards the EMA
+  in), `deliberate_shift_does_not_spike_the_p_term_1335` (shift +12 with the level jumping +12 same
+  window -> `|d applied|` <= 2 ppm -- guards the shift SIGN CORRECTION).
+- **Lock-step anchor:** `Kp` 2.0 + the P-term line (`Kp * c->level_err_ema_ms`, clamp
+  +-`ASRC_LEVEL_KP_MAX_PPM`) are pinned in `asrc_step_tolerant_regression_and_p_term_1335` (the old
+  `0.03` + `-1.0, 1.0` anchors updated there); the two new constants + the two new fields + the EMA
+  update line are pinned in `asrc_setpoint_follows_sync_offset_1335`. No new pwsh gate (the change
+  rides the existing genlock build; the existing `level=/target=/integral= (#1335)` substring is
+  preserved intact). C<->Rust parity is a NUMERICAL contract; re-run a standalone lift for any future
+  change to this pair (per `vendored-libobs-change-safety.md`).
