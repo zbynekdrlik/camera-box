@@ -511,3 +511,165 @@ fn start_script_session_env_resolves_wayland_and_fails_loud_when_absent() {
     );
     assert_ne!(code2, 0, "no wayland + no X socket must fail loud");
 }
+
+// --- issue 1317 (this lane): runtime packages + the /usr prefix install --------------------------
+
+/// issue 1317: `strih_runtime_packages_from_file` parses RUNTIME_PACKAGES.txt into apt package names,
+/// skipping blank lines and comment lines (first non-whitespace `#`) and trimming whitespace.
+#[test]
+fn runtime_packages_from_file_skips_comments_and_blanks() {
+    let (code, out, _e) = run_sourced(
+        &[],
+        "f=$(mktemp)\n\
+         printf '%s\\n' '# issue 1317 header' '' 'libavcodec62' '   libqt6core6t64  ' '# c2' 'libopengl0' > \"$f\"\n\
+         strih_runtime_packages_from_file \"$f\"; rc=$?\n\
+         rm -f \"$f\"; exit $rc",
+    );
+    assert_eq!(code, 0, "parser must succeed on a valid file");
+    let pkgs: Vec<&str> = out.lines().filter(|l| !l.is_empty()).collect();
+    assert_eq!(
+        pkgs,
+        vec!["libavcodec62", "libqt6core6t64", "libopengl0"],
+        "must list only the package names, comments/blanks skipped + whitespace trimmed: {out}"
+    );
+    // A missing file must fail (fail-closed; setup-strih.sh pre-checks existence separately).
+    let (code2, _o2, _e2) = run_sourced(&[], "strih_runtime_packages_from_file /no/such/file");
+    assert_ne!(code2, 0, "a missing packages file must return non-zero");
+}
+
+/// issue 1317: `strih_ldd_unresolved` lists each `=> not found` soname (deduped) and prints NOTHING
+/// when every dependency resolves — verify-strih.sh fails iff its output is non-empty.
+#[test]
+fn ldd_unresolved_lists_not_found_and_is_empty_when_resolved() {
+    let (code, out, _e) = run_sourced(
+        &[],
+        "printf '%s\\n' \
+           '\tlibc.so.6 => /lib/x86_64-linux-gnu/libc.so.6 (0x1)' \
+           '\tlibavcodec.so.62 => not found' \
+           '\tlibobs.so.30 => not found' \
+           '\tlinux-vdso.so.1 (0x2)' | strih_ldd_unresolved",
+    );
+    assert_eq!(code, 0);
+    let mut unresolved: Vec<&str> = out.lines().filter(|l| !l.is_empty()).collect();
+    unresolved.sort_unstable();
+    assert_eq!(
+        unresolved,
+        vec!["libavcodec.so.62", "libobs.so.30"],
+        "must list exactly the two unresolved sonames: {out}"
+    );
+    // All-resolved input -> empty output (the bundle can load).
+    let (_c2, out2, _e2) = run_sourced(
+        &[],
+        "printf '%s\\n' '\tlibc.so.6 => /lib/x86_64-linux-gnu/libc.so.6 (0x1)' | strih_ldd_unresolved",
+    );
+    assert!(
+        out2.trim().is_empty(),
+        "an all-resolved ldd output must produce no unresolved sonames: {out2}"
+    );
+}
+
+/// issue 1317: `setup-strih.sh` step 4 must install the runtime packages (apt-get) BEFORE the /usr
+/// prefix install (`strih_install_bundle_prefix`), and both BEFORE the step-8 unit enable — a fresh
+/// box needs the Qt6/ffmpeg/GL runtime installed and the bundle on the loader path before OBS runs.
+#[test]
+fn setup_strih_installs_runtime_packages_before_the_prefix_install_and_enable() {
+    let s = read_script("scripts/setup-strih.sh");
+    let apt = s
+        .find("apt-get install -y --no-install-recommends")
+        .expect("setup-strih step 4 must apt-get install the runtime packages");
+    let prefix = s
+        .find("strih_install_bundle_prefix \"$GENLOCK_DIR\"")
+        .expect("setup-strih step 4 must install the bundle into the /usr prefix");
+    let enable = s
+        .find("systemctl --user enable strih-obs.service")
+        .expect("setup-strih step 8 must enable strih-obs.service");
+    assert!(
+        apt < prefix,
+        "apt-get install must run BEFORE the /usr prefix install (apt {apt} vs prefix {prefix})"
+    );
+    assert!(
+        prefix < enable,
+        "the /usr prefix install must run BEFORE the unit enable (prefix {prefix} vs enable {enable})"
+    );
+    // Fail-closed: an absent RUNTIME_PACKAGES.txt must `fail` the step (same contract as TARGET-RELEASE).
+    assert!(
+        s.contains("RUNTIME_PACKAGES.txt missing"),
+        "setup-strih must fail-closed when the staged bundle has no RUNTIME_PACKAGES.txt"
+    );
+}
+
+/// issue 1317: `strih_install_bundle_prefix` copies the bundle libs into LIBDIR BEFORE `ldconfig`
+/// (an ldconfig before the copy would not pick up the new libs) and installs the frontend to
+/// BINDIR/obs — the imag on-box program's install shape.
+#[test]
+fn install_bundle_prefix_copies_libs_before_ldconfig() {
+    let lib = read_script("scripts/lib/strih-provision.sh");
+    let cp = lib
+        .find("cp -a \"${bundle}/lib/x86_64-linux-gnu/.\"")
+        .expect("strih_install_bundle_prefix must cp -a the bundle libs into LIBDIR");
+    let ldconfig = lib
+        .find("\n  ldconfig")
+        .expect("strih_install_bundle_prefix must run ldconfig");
+    assert!(
+        cp < ldconfig,
+        "the lib copy must precede ldconfig (cp {cp} vs ldconfig {ldconfig})"
+    );
+    assert!(
+        lib.contains("install -m 0755 -o root -g root \"${bundle}/bin/obs\" \"${bindir}/obs\""),
+        "strih_install_bundle_prefix must install the frontend to BINDIR/obs (0755 root)"
+    );
+}
+
+/// issue 1317: `verify-strih.sh` must gate BOTH runtime-library resolution (via `strih_ldd_unresolved`)
+/// AND the installed runtime packages (via `strih_runtime_packages_from_file` over RUNTIME_PACKAGES.txt),
+/// as an item BEFORE the generic "OBS not running under the supervisor" item.
+#[test]
+fn verify_strih_checks_runtime_resolution_and_packages() {
+    let v = read_script("scripts/verify-strih.sh");
+    let ldd = v
+        .find("strih_ldd_unresolved")
+        .expect("verify-strih must run strih_ldd_unresolved over the installed OBS + libs");
+    assert!(
+        v.contains("RUNTIME_PACKAGES.txt"),
+        "verify-strih must check the installed runtime packages via RUNTIME_PACKAGES.txt"
+    );
+    assert!(
+        v.contains("strih_runtime_packages_from_file"),
+        "verify-strih must parse RUNTIME_PACKAGES.txt via strih_runtime_packages_from_file"
+    );
+    let obs_running = v
+        .find("OBS not running under the strih-obs.service supervisor")
+        .expect("verify-strih must have the OBS-running item");
+    assert!(
+        ldd < obs_running,
+        "the runtime-resolution item must run BEFORE the OBS-running item (ldd {ldd} vs {obs_running})"
+    );
+}
+
+/// issue 1317: `strih-obs-start.sh` must launch the bundle from its /usr prefix
+/// (`${STRIH_OBS_BIN:-/usr/bin/obs}`), not the /opt staged copy — the prefix is now on the loader
+/// path. STRIH_OBS_BIN still overrides it.
+#[test]
+fn start_script_default_obs_bin_is_the_usr_prefix() {
+    let s = read_script("scripts/strih-obs-start.sh");
+    assert!(
+        s.contains("OBS_BIN=\"${STRIH_OBS_BIN:-/usr/bin/obs}\""),
+        "the launcher default OBS binary must be /usr/bin/obs"
+    );
+    assert!(
+        !s.contains("${STRIH_OBS_BIN:-/opt/obs-genlock/bin/obs}"),
+        "the launcher must no longer default to the /opt staged copy (not on the loader path)"
+    );
+    // The STRIH_OBS_BIN seam still works when sourced.
+    let (code, out, _e) = run_sourced_arb(
+        "scripts/strih-obs-start.sh",
+        &[("STRIH_OBS_BIN", "/custom/obs")],
+        "printf '%s' \"$OBS_BIN\"",
+    );
+    assert_eq!(code, 0);
+    assert_eq!(
+        out.trim(),
+        "/custom/obs",
+        "STRIH_OBS_BIN must override the default: {out}"
+    );
+}

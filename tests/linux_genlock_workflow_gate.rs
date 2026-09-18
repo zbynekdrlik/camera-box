@@ -303,3 +303,31 @@ fn does_not_duplicate_the_windows_pwsh_guard_pattern() {
          accidental copy-paste of a Windows guard step that belongs in tests/*.rs instead."
     );
 }
+
+/// issue 1317: BOTH full-bundle Linux jobs must run `genlock-runtime-packages.sh` BEFORE
+/// `genlock-manifest.sh --stage` — the runtime package list must be written INTO stage/ before the
+/// manifest is generated (an unlisted stage file fails the manifest self-consistency check), so a
+/// fresh box can install the Qt6/ffmpeg/GL runtime the bundle links against (the 1317 load-failure fix).
+#[test]
+fn both_jobs_record_runtime_packages_before_the_manifest() {
+    let wf = read(WF);
+    for job in ["linux-genlock-build", "linux-genlock-build-strih"] {
+        let block = job_block(&wf, job);
+        let rec = block.find("scripts/genlock-runtime-packages.sh --stage stage").unwrap_or_else(|| {
+            panic!(
+                "issue 1317: job {job} must run scripts/genlock-runtime-packages.sh --stage stage; block:\n{block}"
+            )
+        });
+        let manifest = block
+            .find("scripts/genlock-manifest.sh --stage stage")
+            .unwrap_or_else(|| panic!("job {job} must generate the manifest; block:\n{block}"));
+        assert!(
+            rec < manifest,
+            "issue 1317: {job} must record runtime packages BEFORE the manifest step (record {rec} vs manifest {manifest})"
+        );
+        assert!(
+            block.contains("stage/RUNTIME_PACKAGES.txt"),
+            "issue 1317: {job} must write stage/RUNTIME_PACKAGES.txt; block:\n{block}"
+        );
+    }
+}
