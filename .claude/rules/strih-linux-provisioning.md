@@ -28,6 +28,52 @@ While both boxes run, TWO strih senders coexist on the NDI wire and must never c
   invocation with `strih_lx_dantesync_is_client_not_master` (fail-closed: an empty/ambiguous mode
   refuses) so a mis-provision can never spawn a second master.
 
+## Ubuntu 26.04 (owner ROZHODNUTÉ 18.9.2026)
+
+The strih-lx notebook runs **Ubuntu 26.04 LTS (resolute)**, NOT 24.04 (owner: „chcem prejst na 26
+to je nova lts verzia … mal by byt este lepsi support"). This is a deliberate divergence from
+imag-nb (retired to the owner, noble) — strih-lx is the only Linux OBS box, so its bundle builds on
+a different image than imag's.
+
+Box facts (live on 10.77.9.187, 26.04.1 LTS `resolute`, i5-13450HX / RTX 5050 Mobile GB207M):
+
+- `linux-generic-hwe-26.04` (7.0.0-31) EXISTS on 26.04, so the derived HWE kernel name works
+  directly; `linux-generic` is the GA fallback.
+- `nvidia-driver-595-open` (595.91.07-0ubuntu0.26.04.1) is recommended for the RTX 5050 — the SAME
+  driver `setup-imag.sh` step 9 installs (the proprietary 595 does not init Blackwell).
+- Runtime sonames differ from noble: `libavcodec62` (ffmpeg 8.0.1), `libqt6core6t64` 6.10.2 —
+  noble's `libavcodec60` / `libqt6core6` do NOT exist there, so a **24.04-built bundle cannot load**.
+  `libgles2-mesa-dev` / `libpipewire-0.3-dev` / `qt6-base-dev` exist under the same names.
+
+What this decision changed (issue 1317, owner 18.9.):
+
+1. **CI: the strih variant builds on the `ubuntu-26.04` hosted runner.** `linux-genlock.yml` job
+   `linux-genlock-build-strih` is `runs-on: ubuntu-26.04` (ONLY that job — the imag-parity
+   `linux-genlock-build` full build and `linux-distroav-compile-check` stay on `ubuntu-24.04`). The
+   apt dependency list stays the shared `OBS_APT_PACKAGES` (the names above exist on 26.04); if a
+   package name ever differs on resolute the job fails loud and the fix is a strih-scoped apt
+   override, never dropping a dependency. The CEF pin is unchanged (CEF 6533 is glibc-portable).
+2. **The release-parity marker + gate.** The Stage step writes `TARGET-RELEASE: ubuntu-26.04` into
+   `STRIH_BUILD_FLAGS.txt`, single-sourced from the job env `STRIH_TARGET_RELEASE: 'ubuntu-26.04'`
+   (`runs-on` cannot read job env, so `tests/linux_genlock_workflow_gate.rs` pins the two literals
+   EQUAL). The pure predicate `strih_lx_release_parity_ok BUNDLE_FLAGS_TEXT BOX_VERSION_ID`
+   (`scripts/lib/strih-provision.sh`) → 0 iff the flags text carries `TARGET-RELEASE:
+   ubuntu-<BOX_VERSION_ID>`; a mismatch OR an absent marker OR an empty VERSION_ID → 1 (fail-closed).
+   `setup-strih.sh` step 4 gates the STAGED bundle's marker vs the box `/etc/os-release` VERSION_ID
+   BEFORE the `cp -a` install (`fail` on mismatch — never install a bundle built for another
+   release), and `verify-strih.sh` item 15 asserts the SAME on the installed bundle. So a
+   24.04-built bundle can never silently run on the 26.04 box (it would crash OBS at load).
+3. **The installer kernel is release-derived.** `scripts/install-imag-nb.sh` gains a pure
+   `imag_kernel_meta_package VERSION_ID AVAILABLE` (`linux-generic-hwe-<VERSION_ID>` when that exact
+   name is in the target's `apt-cache pkgnames linux-generic` list, else `linux-generic`; empty
+   VERSION_ID → non-zero). The chroot step reads `VERSION_ID` from the target's `/etc/os-release`
+   and the available list inside the chroot (after its apt-get update), then installs the derived
+   meta — so the ONE installer serves both a 24.04 and a 26.04 live stick, never a hardcoded noble
+   literal. The `ls /boot/vmlinuz-*` fail-loud checks are unchanged.
+
+Static IP **10.77.9.203** (free; .202 strih, .204 stream); `strih-lx.lan` DNS is a MikroTik static
+entry = owner step (the router is read-only for me), scripts dial the IP / hostname.
+
 ## Module structure (the source-of-truth split)
 
 - **`scripts/lib/strih-provision.sh`** — the ONE place the strih-lx role FACTS + pure decisions live
