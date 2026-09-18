@@ -673,3 +673,166 @@ fn start_script_default_obs_bin_is_the_usr_prefix() {
         "STRIH_OBS_BIN must override the default: {out}"
     );
 }
+
+// --- issue 1317 (this lane): dantesync CLIENT unit + the verify sleep-mask predicate --------------
+
+/// `strih_dantesync_unit_text` emits a systemd unit whose ExecStart is a dantesync CLIENT
+/// invocation (`/usr/local/bin/dantesync --ntp-server …`) — never `--service`, never a master mode —
+/// in the EXACT cambox unit shape (Type=simple, Restart=always, WantedBy=multi-user.target).
+#[test]
+fn dantesync_unit_text_is_a_client_ntp_server_invocation_never_service_or_master() {
+    let (code, out, _e) = run_sourced(&[], "strih_dantesync_unit_text '--ntp-server strih.lan'");
+    assert_eq!(code, 0, "a client invocation must emit a unit");
+    assert!(
+        out.contains("ExecStart=/usr/local/bin/dantesync --ntp-server strih.lan"),
+        "ExecStart must be the dantesync CLIENT daemon at /usr/local/bin/dantesync: {out}"
+    );
+    assert!(
+        out.contains("Type=simple"),
+        "unit must be Type=simple: {out}"
+    );
+    assert!(
+        out.contains("Restart=always"),
+        "unit must Restart=always: {out}"
+    );
+    assert!(
+        out.contains("RestartSec=5"),
+        "unit must set RestartSec=5: {out}"
+    );
+    assert!(
+        out.contains("WantedBy=multi-user.target"),
+        "unit must be WantedBy=multi-user.target: {out}"
+    );
+    assert!(
+        !out.contains("--service"),
+        "`--service` is a run mode, not an installer flag — it must never appear: {out}"
+    );
+    assert!(
+        !out.to_lowercase().contains("server_mode") && !out.to_lowercase().contains("master"),
+        "the unit must never carry a server/master mode: {out}"
+    );
+
+    // With no arg it defaults to the client args helper (still a client unit).
+    let (c2, out2, _e2) = run_sourced(&[], "strih_dantesync_unit_text");
+    assert_eq!(c2, 0);
+    assert!(
+        out2.contains("ExecStart=/usr/local/bin/dantesync --ntp-server"),
+        "the default ExecStart must be the client args: {out2}"
+    );
+
+    // Fail-closed: a master invocation emits NOTHING and returns non-zero. (`--master` matches the
+    // classifier's `*master*` master pattern; note `--ntp-server-mode` would NOT — it matches the
+    // client `*ntp-server*` pattern, so the master token here must be a genuine one.)
+    let (c3, out3, _e3) = run_sourced(&[], "strih_dantesync_unit_text '--master'");
+    assert_ne!(c3, 0, "a master invocation must be refused");
+    assert!(
+        out3.trim().is_empty(),
+        "a refused (master) invocation must emit NOTHING: {out3}"
+    );
+}
+
+/// `strih_verify_sleep_masked` grades the FIRST line only, so a correctly-masked box passes even
+/// when `systemctl is-enabled`'s "masked"-to-stdout-AND-exit-1 makes a `|| echo masked` fallback
+/// DOUBLE-append ("masked\nmasked") — the exact issue-1317 false-FAIL. "enabled"/"static" fail.
+#[test]
+fn verify_sleep_masked_grades_first_line_and_survives_the_double_masked_bug() {
+    let (c1, _o, _e) = run_sourced(&[], "strih_verify_sleep_masked masked");
+    assert_eq!(c1, 0, "a plain 'masked' must pass");
+
+    let (c2, _o, _e) = run_sourced(
+        &[],
+        "s=\"$(printf 'masked\\nmasked')\"; strih_verify_sleep_masked \"$s\"",
+    );
+    assert_eq!(
+        c2, 0,
+        "the double-appended 'masked\\nmasked' must still pass (the false-FAIL bug)"
+    );
+
+    let (c3, _o, _e) = run_sourced(&[], "strih_verify_sleep_masked enabled");
+    assert_ne!(c3, 0, "'enabled' must fail");
+    let (c4, _o, _e) = run_sourced(&[], "strih_verify_sleep_masked static");
+    assert_ne!(c4, 0, "'static' must fail");
+    let (c5, _o, _e) = run_sourced(&[], "strih_verify_sleep_masked ''");
+    assert_ne!(c5, 0, "an empty state must fail-closed");
+}
+
+/// issue 1317: `setup-strih.sh` step 2 must INSTALL the dantesync unit (write it via
+/// `strih_dantesync_unit_text` into /etc/systemd/system/dantesync.service), not merely validate the
+/// client args — and this must precede the OBS unit enable (step 8).
+#[test]
+fn setup_strih_installs_the_dantesync_unit_in_step_2() {
+    let s = read_script("scripts/setup-strih.sh");
+    let emit = s
+        .find("strih_dantesync_unit_text \"$DS_ARGS\"")
+        .expect("setup-strih step 2 must emit the dantesync unit via strih_dantesync_unit_text");
+    assert!(
+        s.contains("/etc/systemd/system/dantesync.service"),
+        "setup-strih must write the dantesync unit to /etc/systemd/system/dantesync.service"
+    );
+    assert!(
+        s.contains("rm -f /var/run/dantesync.lock"),
+        "setup-strih must clear a stale /var/run/dantesync.lock before (re)start"
+    );
+    let enable = s
+        .find("systemctl --user enable strih-obs.service")
+        .expect("setup-strih step 8 must enable strih-obs.service");
+    assert!(
+        emit < enable,
+        "the dantesync unit install (step 2) must precede the OBS enable (emit {emit} vs enable {enable})"
+    );
+}
+
+/// issue 1317: `setup-strih.sh` must install the NDI runtime (via the shared `ndi_runtime_install_cmds`)
+/// BEFORE the OBS launch/enable — DistroAV needs libndi on the loader path at OBS start, else it loads
+/// UI-only (ERR-404). The shared recipe lives in scripts/lib/ndi-runtime.sh.
+#[test]
+fn setup_strih_installs_the_ndi_runtime_before_the_obs_enable() {
+    let s = read_script("scripts/setup-strih.sh");
+    let ndi = s
+        .find("ndi_runtime_install_cmds")
+        .expect("setup-strih must install the NDI runtime via the shared ndi_runtime_install_cmds");
+    let enable = s
+        .find("systemctl --user enable strih-obs.service")
+        .expect("setup-strih step 8 must enable strih-obs.service");
+    assert!(
+        ndi < enable,
+        "the NDI runtime install must precede the OBS enable (ndi {ndi} vs enable {enable})"
+    );
+    assert!(
+        s.contains(". \"${HERE}/lib/ndi-runtime.sh\""),
+        "setup-strih must source the shared scripts/lib/ndi-runtime.sh"
+    );
+    assert!(
+        manifest_dir().join("scripts/lib/ndi-runtime.sh").exists(),
+        "scripts/lib/ndi-runtime.sh must exist"
+    );
+}
+
+/// issue 1317: `verify-strih.sh` item 6 must assert the dantesync UNIT is active + a FRESH offset
+/// (the shared `dantesync_offset_verdict`), NOT read /etc/dantesync/config.json (a Windows/imag
+/// artifact a flag-based Linux client never creates); item 11 must grade sleep via
+/// `strih_verify_sleep_masked` (no `|| echo masked` double-append).
+#[test]
+fn verify_strih_dantesync_and_sleep_items_are_fixed() {
+    let v = read_script("scripts/verify-strih.sh");
+    assert!(
+        v.contains("dantesync_offset_verdict"),
+        "verify-strih item 6 must grade a fresh offset via dantesync_offset_verdict"
+    );
+    assert!(
+        v.contains("systemctl is-active dantesync"),
+        "verify-strih item 6 must assert the dantesync unit is active"
+    );
+    assert!(
+        !v.contains("/etc/dantesync/config.json"),
+        "verify-strih must NOT read /etc/dantesync/config.json (a flag-based Linux client has none)"
+    );
+    assert!(
+        v.contains("strih_verify_sleep_masked"),
+        "verify-strih item 11 must grade sleep via strih_verify_sleep_masked"
+    );
+    assert!(
+        !v.contains("|| echo masked"),
+        "verify-strih must drop the `|| echo masked` double-append (the false-FAIL bug)"
+    );
+}

@@ -154,3 +154,68 @@ fn program_survives_a_non_elf_staged_file() {
         "the ELF objects' packages must still be recorded: {out}"
     );
 }
+
+/// issue 1317: `runtime_packages_with_always_include` unions the ldd-derived list (stdin) with the
+/// always-include extras (args), sorted-unique, blanks dropped — the mechanism that FORCES a package
+/// the bundle dlopens at runtime (invisible to ldd) into the list.
+#[test]
+fn always_include_helper_unions_stdin_and_extras() {
+    let (code, out, err) = run(". \"$SCRIPT\"\n\
+         printf '%s\\n' libavcodec62 libc6 '' | runtime_packages_with_always_include qt6-wayland libc6");
+    assert_eq!(code, 0, "the union helper must succeed; stderr={err}");
+    let pkgs: Vec<&str> = out.lines().filter(|l| !l.is_empty()).collect();
+    assert_eq!(
+        pkgs,
+        vec!["libavcodec62", "libc6", "qt6-wayland"],
+        "must union stdin + extras, sorted-unique, no duplicate libc6, blank dropped: {out}"
+    );
+    // No extras -> stdin unchanged (sorted-unique).
+    let (c2, out2, _e2) = run(". \"$SCRIPT\"\n\
+         printf '%s\\n' libc6 libavcodec62 | runtime_packages_with_always_include");
+    assert_eq!(c2, 0);
+    let pkgs2: Vec<&str> = out2.lines().filter(|l| !l.is_empty()).collect();
+    assert_eq!(
+        pkgs2,
+        vec!["libavcodec62", "libc6"],
+        "no extras -> stdin sorted-unique: {out2}"
+    );
+}
+
+/// issue 1317: the whole `--stage/--out --extra qt6-wayland` program forces qt6-wayland into
+/// RUNTIME_PACKAGES.txt even though `ldd` never lists it (the strih Wayland box needs the Qt platform
+/// plugin, dlopen'd at runtime). The imag bundle (no `--extra`) never gets it.
+#[test]
+fn program_extra_forces_qt6_wayland_into_the_output() {
+    let fake_ldd = "printf '%s\\n' '#!/usr/bin/env bash' 'printf \"%s\\n\" \"libavcodec.so.62 => /usr/lib/x86_64-linux-gnu/libavcodec.so.62 (0x1)\"' > \"$fake/ldd\"; chmod +x \"$fake/ldd\"\n";
+    let body = format!(
+        "stage=$(mktemp -d); mkdir -p \"$stage/bin\"\n\
+         : > \"$stage/bin/obs\"\n\
+         export STAGE_ABS=$(cd \"$stage\" && pwd)\n\
+         fake=$(mktemp -d)\n{fake_ldd}{FAKE_DPKG}\
+         outf=\"$stage/RUNTIME_PACKAGES.txt\"\n\
+         PATH=\"$fake:$PATH\" bash \"$SCRIPT\" --stage \"$stage\" --out \"$outf\" --extra qt6-wayland >/dev/null 2>&1; rc=$?\n\
+         echo \"RC=$rc\"\n\
+         grep -q '^qt6-wayland$' \"$outf\" && echo HAS_QT6WL || echo NO_QT6WL\n\
+         grep -q '^libavcodec62$' \"$outf\" && echo HAS_AVCODEC || echo NO_AVCODEC\n\
+         # a run WITHOUT --extra must NOT carry qt6-wayland\n\
+         outf2=\"$stage/RUNTIME_PACKAGES2.txt\"\n\
+         PATH=\"$fake:$PATH\" bash \"$SCRIPT\" --stage \"$stage\" --out \"$outf2\" >/dev/null 2>&1\n\
+         grep -q '^qt6-wayland$' \"$outf2\" && echo BASE_HAS_QT6WL || echo BASE_NO_QT6WL\n\
+         rm -rf \"$stage\" \"$fake\""
+    );
+    let (code, out, err) = run(&body);
+    assert_eq!(code, 0, "harness must run; stderr={err}");
+    assert!(out.contains("RC=0"), "the program must exit 0: {out}");
+    assert!(
+        out.contains("HAS_QT6WL"),
+        "--extra qt6-wayland must land in the output: {out}"
+    );
+    assert!(
+        out.contains("HAS_AVCODEC"),
+        "the ldd-derived packages must still be recorded: {out}"
+    );
+    assert!(
+        out.contains("BASE_NO_QT6WL"),
+        "a run WITHOUT --extra must NOT carry qt6-wayland (the imag bundle): {out}"
+    );
+}
