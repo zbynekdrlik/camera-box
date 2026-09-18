@@ -14,6 +14,12 @@ RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/strih-provision.sh
 . "${HERE}/lib/strih-provision.sh"
+# issue 1317: the dantesync item grades a FRESH offset via the SHARED freshness-aware verdict (the
+# cambox verify-device (d) shape) instead of reading a Windows/imag dantesync JSON config file a
+# flag-based Linux client never creates. clock-offset-guard.sh has its own source-guard, so sourcing
+# it defines only its pure functions (dantesync_offset_verdict / ptp_locked_from_journal).
+# shellcheck source=scripts/clock-offset-guard.sh
+. "${HERE}/clock-offset-guard.sh"
 
 # --- source-guard: when sourced (the unit tests), stop here -- never run the live checks ----------
 if [ "${BASH_SOURCE[0]}" != "${0}" ]; then
@@ -128,24 +134,30 @@ else
   note "latency baseline / python3 absent -- pin verify is report-only"
 fi
 
-# 6) dantesync is a CLIENT (never master). Derive a CLEAN mode token from the config's
-#    ntp_server_mode.enabled flag -- NOT the whole config text (which always contains the literal
-#    `ntp_server_mode` key and would false-match the guard's `*server_mode*` master pattern on a
-#    legit client). The config is JSON (/etc/dantesync/config.json), not .toml.
-DS_JSON="${DANTESYNC_CONFIG:-/etc/dantesync/config.json}"
-if [ -f "$DS_JSON" ] && command -v python3 >/dev/null 2>&1; then
-  DS_MODE="$(python3 -c 'import json,sys
-d=json.load(open(sys.argv[1]))
-nsm=d.get("ntp_server_mode")
-en=nsm.get("enabled") if isinstance(nsm,dict) else nsm
-print("server_mode" if en else "client")' "$DS_JSON" 2>/dev/null || echo "")"
-  if [ -n "$DS_MODE" ]; then
-    strih_lx_dantesync_is_client_not_master "$DS_MODE" && ok "dantesync is a CLIENT (not master)" || bad "dantesync is NOT a client (ntp_server_mode enabled -- would risk a 2nd NTP master)"
-  else
-    bad "dantesync config not parseable ($DS_JSON)"
-  fi
+# 6) dantesync unit ACTIVE + a FRESH in-bound clock offset (issue 1317 -- the cambox verify-device
+#    (d) shape). A flag-based Linux client has NO dantesync JSON config file (that is a Windows/imag
+#    artifact), so this asserts the RUNNING state: the unit is active AND the journal shows a fresh
+#    offset within bound via the SHARED dantesync_offset_verdict/freshest_offset_us. A `stale`/`absent`
+#    offset with the PTP servo LOCKED is disciplined near-zero (the #550 reasoning) -> PASS; not
+#    locked -> FAIL (no trustworthy clock signal). setup-strih.sh step 2 already fail-closes the unit's
+#    ExecStart to a CLIENT invocation, so a 2nd-master risk is guarded at install time, not here.
+DS_ACTIVE="$(systemctl is-active dantesync 2>/dev/null || true)"
+if [ "$DS_ACTIVE" != active ]; then
+  bad "dantesync.service not active (state='${DS_ACTIVE:-<none>}') -- clock undisciplined/free-running"
 else
-  bad "dantesync config not readable ($DS_JSON)"
+  DS_JOURNAL="$(journalctl -u dantesync --no-pager -n 400 -o short-iso 2>/dev/null || true)"
+  case "$(dantesync_offset_verdict "$DS_JOURNAL" "${DANTESYNC_OFFSET_FRESHNESS_S:-300}" "${CLOCK_GUARD_BOUND_US:-2000}" "${DANTESYNC_STABILITY_US:-2000}")" in
+    ok)
+      ok "dantesync active + FRESH clock offset within ${CLOCK_GUARD_BOUND_US:-2000}us bound" ;;
+    stale|absent)
+      if [ "$(ptp_locked_from_journal "$DS_JOURNAL")" = LOCKED ]; then
+        ok "dantesync active + PTP servo LOCKED (no fresh [NTP] line; offset disciplined near-zero, #550)"
+      else
+        bad "dantesync active but NO fresh clock offset and PTP servo not LOCKED -- no trustworthy clock signal"
+      fi ;;
+    *)
+      bad "dantesync clock offset OUTSIDE the ${CLOCK_GUARD_BOUND_US:-2000}us bound / unstable -- a REAL clock desync" ;;
+  esac
 fi
 
 # 7) bundle-state :8899.
@@ -160,8 +172,11 @@ if arecord -l 2>/dev/null | grep -qi 'MiniFuse'; then ok "MiniFuse 4 PipeWire in
 # 10) NVENC encoder available.
 { ffmpeg -hide_banner -encoders 2>/dev/null || cat "$LOG" 2>/dev/null; } | strih_lx_nvenc_available_ok && ok "NVENC encoder available" || bad "NVENC encoder not available"
 
-# 11) never-sleep (sleep.target masked).
-[ "$(systemctl is-enabled sleep.target 2>/dev/null || echo masked)" = masked ] && ok "sleep.target masked (never-sleep)" || bad "sleep.target not masked"
+# 11) never-sleep (sleep.target masked). issue 1317: `systemctl is-enabled` prints "masked" AND exits
+#     1 for a masked unit, so the old echo-masked-on-failure fallback DOUBLE-appended ("masked" twice) and
+#     FALSE-FAILED a correctly-masked box. strih_verify_sleep_masked grades the FIRST line only.
+SLEEP_STATE="$(systemctl is-enabled sleep.target 2>/dev/null || true)"
+strih_verify_sleep_masked "$SLEEP_STATE" && ok "sleep.target masked (never-sleep)" || bad "sleep.target not masked (is-enabled='${SLEEP_STATE//$'\n'/|}')"
 
 # 12) single timesync authority (dantesync only).
 UNITS="$(systemctl list-units --type=service --state=active --no-legend 2>/dev/null | awk '{print $1}')"

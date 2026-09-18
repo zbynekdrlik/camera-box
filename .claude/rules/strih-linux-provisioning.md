@@ -3,9 +3,12 @@ paths:
   - "scripts/setup-strih.sh"
   - "scripts/verify-strih.sh"
   - "scripts/lib/strih-provision.sh"
+  - "scripts/lib/ndi-runtime.sh"
+  - "scripts/genlock-runtime-packages.sh"
   - "systemd/strih-obs.service"
   - "systemd/strih-bundle-state-server.service"
   - "tests/strih_provision_pure_functions.rs"
+  - "tests/ndi_runtime_lib.rs"
 ---
 
 # strih-lx — the Linux notebook replacing the Windows strih PC (issue 1317)
@@ -163,6 +166,59 @@ to `/opt/obs-genlock` (on no loader path) and installed NO runtime packages, so 
   `scripts/deploy-genlock-fleet.sh`, its `cp -a` + issue-1236 perms-normalize + `ldconfig` block).
   That program has its own probe-gated anchors, so extracting a shared prefix-install helper is the
   `deploy-genlock-fleet.sh` strih-lx EXECUTE-arm follow-up's job — do it THEN, not now.
+
+## Baseline completeness — the six live-found gaps, now durable (issue 1317, DONE)
+
+Bringing the 26.04 notebook up by hand (18.9.2026) surfaced six provisioning steps `setup-strih.sh`
+/ `verify-strih.sh` were missing (each hand-applied to get the box green, now made durable so a
+fresh box reaches a green baseline like imag-nb from a single `setup-strih.sh` run):
+
+1. **dantesync installed as a SERVICE (step 2).** step 2 used to only VALIDATE the client args, so
+   the box had NO timesync. It now writes `/etc/systemd/system/dantesync.service` via the pure
+   `strih_dantesync_unit_text` (the EXACT cambox shape: `Type=simple`, `Restart=always`,
+   `RestartSec=5`, `ExecStart=/usr/local/bin/dantesync --ntp-server strih.lan`,
+   `WantedBy=multi-user.target`), `daemon-reload`, clears a stale `/var/run/dantesync.lock`, enables
+   and (if the binary is present) restarts it. `strih_dantesync_unit_text` **fail-closes** on a
+   server/master invocation (never a 2nd NTP master while parallel); `--service` is a run mode, NOT
+   an installer flag, so it never appears in the unit.
+2. **The NDI 6.3.2 runtime (new step 4b).** `setup-strih.sh` had NO NDI-runtime step, so DistroAV
+   loaded UI-only (`ERR-404 NDI library not found`). The imag step-10 recipe is now the shared
+   **`scripts/lib/ndi-runtime.sh`** (`ndi_runtime_install_cmds NDI_PEER CAM_PW [USER] [NDI_DIR]`,
+   emits the on-box statements for the caller to `eval`), reused by BOTH `setup-imag.sh` step 10
+   (replacing its inline copy — behaviour unchanged, plus an idempotent perms-normalize) AND
+   `setup-strih.sh` step 4b (before the OBS launch). It copies `libndi.so.*.*.*` from a cam box
+   (default cam1; `STRIH_NDI_PEER=<ip>` overrides, `CAM_PW` required when the runtime is absent),
+   **normalizes it root:root a+rX** (a 0600 copy gives the obs user `Permission denied` at dlopen),
+   writes `/etc/ld.so.conf.d/ndi.conf` + `ldconfig` (NO `grep -q` on the pipe — the SIGPIPE footgun),
+   the `/usr/local/lib/libndi.so.6` symlink DistroAV's Linux loader scans, and avahi-daemon.
+3. **qt6-wayland (a RUNTIME_PACKAGES `--extra`).** OBS is a Wayland Qt app on 26.04 GNOME and aborts
+   `Could not find the Qt platform plugin "wayland"` without it; it is DLOPEN'd at runtime so `ldd`
+   never sees it. `genlock-runtime-packages.sh` gained a `--extra <pkg>` always-include flag (union
+   helper `runtime_packages_with_always_include`); the strih CI recorder step passes
+   `--extra qt6-wayland` so it rides `RUNTIME_PACKAGES.txt` and setup-strih step 4 apt-installs it.
+   The non-Wayland imag bundle passes no `--extra`.
+4. **OBS config dir owned by the desktop user (steps 5/7).** step 5's `mkdir -p "$OBS_CFG"` ran under
+   sudo and root-owned `~/.config/obs-studio`, so the obs user could not create `.sentinel`
+   (`Permission denied`). It is now `install -d -o "$DESKTOP_USER" -g "$DESKTOP_USER"`, and step 7
+   chowns `$OBS_CFG` to the desktop user (catches an earlier root-seeded run).
+5. **bundle-state :8899 server tree (step 9).** step 9 installed only the unit and WARNed the server
+   tree was absent. It now installs `bundle-state-server.py` + `bundle_state_gather.py` +
+   `obs_phase2.py` under `/opt/camera-box` (the setup-imag step-28 pattern, via `curl`+`GH_TOKEN`)
+   BEFORE enabling `strih-bundle-state-server.service`, so the unit's `ExecStart` imports resolve.
+6. **verify-strih.sh two false FAILs.** (a) item 6 read `/etc/dantesync/config.json` — a
+   Windows/imag artifact a flag-based Linux client never creates; it now asserts the dantesync UNIT
+   is `active` + a FRESH in-bound offset via the SHARED `dantesync_offset_verdict` /
+   `ptp_locked_from_journal` (the cambox verify-device `(d)` shape, sourced from
+   `scripts/clock-offset-guard.sh`). (b) item 11's
+   `[ "$(systemctl is-enabled sleep.target || echo masked)" = masked ]` DOUBLE-appended (a masked
+   unit makes `is-enabled` print `masked` AND exit 1, so `|| echo masked` yields `masked\nmasked`) —
+   a FALSE FAIL on a correctly-masked box. It now grades via the pure `strih_verify_sleep_masked`
+   (FIRST line only), with the `|| echo masked` dropped.
+
+Pure helpers added to `scripts/lib/strih-provision.sh`: `strih_dantesync_unit_text` +
+`strih_verify_sleep_masked` (unit-tested in `tests/strih_provision_pure_functions.rs`); the new
+shared lib `scripts/lib/ndi-runtime.sh` is unit-tested in `tests/ndi_runtime_lib.rs`; the
+`--extra`/always-include mechanism in `tests/genlock_runtime_packages_1317.rs`.
 
 ## Staging + ssh gotchas for setup-strih (live, 18.9.2026)
 

@@ -313,3 +313,49 @@ strih_install_bundle_prefix() {
   fi
   ldconfig
 }
+
+# --- issue 1317 (this lane): dantesync CLIENT systemd unit + the verify sleep-mask predicate -------
+# The strih notebook joins the cluster clock as a dantesync CLIENT (the Windows PC stays the one NTP
+# master). setup-strih.sh step 2 installs the unit; verify-strih.sh asserts it is active + a fresh
+# offset. These pure helpers are unit-tested in tests/strih_provision_pure_functions.rs.
+
+# strih_dantesync_unit_text [ARGS] -> print the systemd unit text for the strih-lx dantesync CLIENT
+# daemon (the EXACT cambox unit shape: Type=simple, Restart=always, RestartSec=5,
+# WantedBy=multi-user.target). ARGS is the dantesync invocation (default the client args); ExecStart
+# is `/usr/local/bin/dantesync <ARGS>`. `--service` is NOT an installer flag -- it is a run mode, so
+# it never appears here; the daemon IS `dantesync --ntp-server <host>`. Fail-closed: if ARGS classify
+# as a server/master invocation, emit NOTHING and return 1 (a strih-lx unit must never spawn a 2nd
+# NTP master while running in parallel with the Windows PC).
+strih_dantesync_unit_text() {
+  local args="${1:-$(strih_lx_dantesync_client_args)}"
+  strih_lx_dantesync_is_client_not_master "$args" || return 1
+  cat <<EOF
+[Unit]
+Description=Dante Time Sync (PTP/NTP Synchronization)
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/dantesync ${args}
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+EOF
+}
+
+# strih_verify_sleep_masked STATE -> 0 iff STATE reports sleep.target masked. `systemctl is-enabled
+# sleep.target` prints "masked" to stdout AND exits 1 for a masked unit, so a caller's `|| echo
+# masked` fallback DOUBLE-appends -> the captured value is "masked\nmasked" and a naive `= masked`
+# comparison FALSE-FAILS on a correctly-masked box (the issue-1317 verify bug). Grade the FIRST line
+# only, so both the clean "masked" and the defensive "masked\nmasked" pass; "enabled"/"static"/""
+# (or anything whose first line is not exactly "masked") -> not masked (return 1, fail-closed).
+strih_verify_sleep_masked() {
+  local state="${1:-}" first
+  first="${state%%$'\n'*}"
+  [ "$first" = masked ]
+}

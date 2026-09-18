@@ -68,17 +68,32 @@ runtime_packages_from_ldd() {
   return 0
 }
 
-# --- source-guard: sourced (the tests) -> define runtime_packages_from_ldd only, never run main -----
+# runtime_packages_with_always_include  (stdin: the ldd-derived package list, one per line) + args:
+# always-include apt package names -> print the sorted-unique UNION of stdin and the args, blank
+# lines dropped. issue 1317: the strih (Wayland) bundle DLOPENS its Qt platform plugin at runtime
+# (`qt6-wayland`), so `ldd` over bin/obs + the *.so files never sees it and it must be FORCED in --
+# without it OBS aborts on 26.04 GNOME with `Could not find the Qt platform plugin "wayland"`. The
+# strih CI job passes `--extra qt6-wayland`; the non-Wayland imag bundle passes none.
+runtime_packages_with_always_include() {
+  # returns 0 regardless (sort always succeeds); the `if` avoids a no-args `&&` short-circuit exiting
+  # non-zero, and grep's no-match (exit 1 on an all-blank union) is swallowed -- so a caller's
+  # `set -e`/pipefail never aborts on an empty or extras-less union.
+  { cat; if [ "$#" -gt 0 ]; then printf '%s\n' "$@"; fi; } \
+    | { grep -v '^[[:space:]]*$' || true; } | sort -u
+}
+
+# --- source-guard: sourced (the tests) -> define the pure helpers only, never run main -------------
 if [ "${BASH_SOURCE[0]}" != "${0}" ]; then
   return 0 2>/dev/null || true
 fi
 
-STAGE=""; OUT=""
+STAGE=""; OUT=""; EXTRAS=()
 while [ $# -gt 0 ]; do
   case "$1" in
     --stage) STAGE="${2:?--stage needs a dir}"; shift 2 ;;
     --out)   OUT="${2:?--out needs a file}"; shift 2 ;;
-    *) echo "genlock-runtime-packages.sh: unknown arg '$1' (usage: --stage <dir> --out <file>)" >&2; exit 2 ;;
+    --extra) EXTRAS+=("${2:?--extra needs a package name}"); shift 2 ;;   # always-include (dlopen'd at runtime, invisible to ldd)
+    *) echo "genlock-runtime-packages.sh: unknown arg '$1' (usage: --stage <dir> --out <file> [--extra <pkg>]...)" >&2; exit 2 ;;
   esac
 done
 [ -n "$STAGE" ] || { echo "genlock-runtime-packages.sh: --stage <dir> required" >&2; exit 2; }
@@ -111,6 +126,12 @@ PKGS="$(
     done < <(find "$STAGE_ABS" -type f -name '*.so*')
   } | runtime_packages_from_ldd "$STAGE_ABS"
 )" || { echo "genlock-runtime-packages.sh: FAILED -- the bundle has an unresolved runtime dependency (see above)" >&2; exit 1; }
+
+# issue 1317: union in the always-include extras (packages the bundle DLOPENS at runtime, invisible
+# to ldd -- qt6-wayland on the Wayland strih box). No `--extra` -> unchanged.
+if [ "${#EXTRAS[@]}" -gt 0 ]; then
+  PKGS="$(printf '%s\n' "$PKGS" | runtime_packages_with_always_include "${EXTRAS[@]}")"
+fi
 
 {
   echo "# issue 1317: apt packages the built genlock bundle links against (Qt6 / ffmpeg / libOpenGL /"

@@ -37,6 +37,8 @@ fail() { echo -e "${RED}FAIL: $1${NC}" >&2; exit 1; }
 . "${HERE}/lib/strih-provision.sh"
 # shellcheck source=scripts/lib/genlock-markers.sh
 . "${HERE}/lib/genlock-markers.sh"
+# shellcheck source=scripts/lib/ndi-runtime.sh
+. "${HERE}/lib/ndi-runtime.sh"   # issue 1317: shared NDI 6.3.2 runtime install recipe (with setup-imag.sh)
 
 # --- source-guard: when sourced (the unit tests), stop here -- never run the destructive flow ----
 if [ "${BASH_SOURCE[0]}" != "${0}" ]; then
@@ -69,10 +71,27 @@ for svc in systemd-timesyncd chrony chronyd ntp ntpsec; do
 done
 [ -x /usr/local/bin/dantesync ] || warn "  dantesync binary absent -- install it (see setup-imag.sh step 3 / dantesync-fleet-upgrade.md) before go-live"
 DS_ARGS="$(strih_lx_dantesync_client_args)"
-# Fail-closed self-check: the args we will run must be a CLIENT invocation, never a master one.
+# Fail-closed self-check (the guard BEFORE install): the args we will run must be a CLIENT
+# invocation, never a master one.
 strih_lx_dantesync_is_client_not_master "$DS_ARGS" \
   || fail "dantesync args '$DS_ARGS' are not a CLIENT invocation -- refuse to risk a 2nd NTP master"
 echo "  dantesync client args: ${DS_ARGS}  (the Windows PC remains the master)"
+# issue 1317: install dantesync as a systemd SERVICE (was only VALIDATED before -- so the box had NO
+# timesync). The unit is the EXACT cambox shape (Type=simple, Restart=always, ExecStart=
+# /usr/local/bin/dantesync ${DS_ARGS}); strih_dantesync_unit_text fail-closes on a master invocation.
+strih_dantesync_unit_text "$DS_ARGS" > /etc/systemd/system/dantesync.service \
+  || fail "strih_dantesync_unit_text refused to emit a unit for args '$DS_ARGS' (not a CLIENT invocation)"
+systemctl daemon-reload
+# Clear a stale lock a previously-crashed dantesync may have left, or the fresh daemon refuses to start.
+rm -f /var/run/dantesync.lock 2>/dev/null || true
+systemctl enable dantesync 2>/dev/null || true
+if [ -x /usr/local/bin/dantesync ]; then
+  systemctl restart dantesync 2>/dev/null \
+    || warn "  dantesync.service failed to (re)start -- check journalctl -u dantesync"
+  echo "  dantesync.service installed + enabled + started (client: ${DS_ARGS})"
+else
+  warn "  dantesync.service installed + enabled but NOT started (binary absent) -- install /usr/local/bin/dantesync then: systemctl restart dantesync"
+fi
 
 # ---------------------------------------------------------------------------------------------
 REC_ENC="$(strih_lx_profile_facts | grep '^rec_encoder=' | cut -d= -f2)"
@@ -153,8 +172,27 @@ else
 fi
 
 # ---------------------------------------------------------------------------------------------
+step 4b "NDI 6.3.2 runtime (fleet-identical from a cambox) -> DistroAV loads WITH NDI, not UI-only"
+# issue 1317: without this DistroAV logs `ERR-404 NDI library not found` / `plugin loaded (UI-only)`
+# and the box has NO NDI inputs/outputs. Reuse the shared recipe (scripts/lib/ndi-runtime.sh) so
+# strih + imag install the SAME runtime. Runs BEFORE the OBS launch (step 8) -- DistroAV needs libndi
+# on the loader path at OBS start. Copies from a cam box (default cam1); set STRIH_NDI_PEER=<ip> if
+# cam1 is down, and CAM_PW=<cam ssh pw> (only used when the runtime is not already present).
+NDI_PEER="${STRIH_NDI_PEER:-10.77.9.61}"
+NDI_RUNTIME_DIR_STRIH="${STRIH_NDI_DIR:-/usr/lib/ndi}"
+if [ -e "${NDI_RUNTIME_DIR_STRIH}/libndi.so.6" ] || [ -n "${CAM_PW:-}" ]; then
+  ( eval "$(ndi_runtime_install_cmds "$NDI_PEER" "${CAM_PW:-}" "${STRIH_NDI_USER:-newlevel}" "$NDI_RUNTIME_DIR_STRIH")" ) \
+    || fail "NDI runtime install failed (see above) -- set STRIH_NDI_PEER / CAM_PW and re-run"
+  echo "  NDI 6.3.2 runtime installed (${NDI_RUNTIME_DIR_STRIH} + /usr/local/lib/libndi.so.6 symlink + avahi)"
+else
+  fail "NDI runtime absent and CAM_PW unset -- DistroAV would load UI-only (ERR-404). Re-run with CAM_PW=<cam ssh pw> (peer ${NDI_PEER}; override with STRIH_NDI_PEER=<ip>)."
+fi
+
+# ---------------------------------------------------------------------------------------------
 step 5 "OBS profile facts (strih-lx: seeded from the Windows 'light' profile)"
-mkdir -p "$OBS_CFG"
+# issue 1317: create ~/.config/obs-studio owned by the DESKTOP user (this script runs under sudo, so a
+# bare `mkdir` roots it and the obs user cannot then create .sentinel -- `Permission denied`, hit live).
+install -d -o "$DESKTOP_USER" -g "$DESKTOP_USER" "$OBS_CFG"
 strih_lx_profile_facts | tee "$GENLOCK_DIR/strih-lx-profile-facts.txt" | sed 's/^/  /'
 mkdir -p "$REC_DIR" && chown "$DESKTOP_USER":"$DESKTOP_USER" "$REC_DIR" 2>/dev/null || true
 
@@ -183,6 +221,9 @@ warn "  10 inputs (genlock_fifo + floor 3) + the STRIH-LX (...) outputs from str
 
 # ---------------------------------------------------------------------------------------------
 step 7 "OBS pre-seed: WebSocket :4455 no-auth + Studio Mode"
+# issue 1317: ensure ~/.config/obs-studio itself is owned by the DESKTOP user (an earlier root-seeded
+# run would otherwise leave it root-owned and block the obs user from creating .sentinel).
+chown "$DESKTOP_USER":"$DESKTOP_USER" "$OBS_CFG" 2>/dev/null || true
 install -d -o "$DESKTOP_USER" -g "$DESKTOP_USER" "$OBS_CFG/plugin_config/obs-websocket"
 cat > "$OBS_CFG/plugin_config/obs-websocket/config.json" <<'WS'
 {"server_enabled":true,"server_port":4455,"auth_required":false}
@@ -216,7 +257,24 @@ step 9 ":8899 bundle-state server (strih-bundle-state-server.service) -- enable-
 install -m 0644 "${HERE}/../systemd/strih-bundle-state-server.service" "${USER_HOME}/.config/systemd/user/strih-bundle-state-server.service"
 chown -R "$DESKTOP_USER":"$DESKTOP_USER" "${USER_HOME}/.config/systemd/user" 2>/dev/null || true
 echo "  strih-bundle-state-server.service installed (serves /bundle-state.json for the dev1 genlock-lock watchdog)"
-warn "  install bundle-state-server.py + its siblings under /opt/camera-box (setup-imag.sh step 28 pattern) before enabling"
+# issue 1317: install the server tree the unit's ExecStart references BEFORE enabling (the
+# setup-imag.sh step-28 pattern) -- bundle-state-server.py + its bundle_state_gather / obs_phase2
+# sibling imports install together under /opt/camera-box so the server's imports resolve.
+install -d -m 755 /opt/camera-box
+if [ -n "${GH_TOKEN:-}" ]; then
+  for _bss in bundle-state-server.py bundle_state_gather.py obs_phase2.py; do
+    curl -fsSL -H "Authorization: token ${GH_TOKEN}" -H 'Accept: application/vnd.github.raw' \
+      "https://api.github.com/repos/${GENLOCK_REPO}/contents/scripts/${_bss}?ref=dev" \
+      -o "/opt/camera-box/${_bss}" 2>/dev/null \
+      || fail "issue 1317: could not fetch scripts/${_bss} (GH_TOKEN scope?) -- required for the :8899 bundle-state server"
+  done
+  chmod 0644 /opt/camera-box/*.py
+  echo "  installed bundle-state server tree -> /opt/camera-box (bundle-state-server.py + bundle_state_gather.py + obs_phase2.py)"
+  sudo -u "$DESKTOP_USER" XDG_RUNTIME_DIR="/run/user/$(id -u "$DESKTOP_USER")" systemctl --user enable strih-bundle-state-server.service 2>/dev/null \
+    || warn "  enable strih-bundle-state-server.service by hand once the user session bus is up"
+else
+  warn "  GH_TOKEN unset -- install bundle-state-server.py + bundle_state_gather.py + obs_phase2.py under /opt/camera-box, then enable strih-bundle-state-server.service"
+fi
 
 # ---------------------------------------------------------------------------------------------
 step 10 "RemoteOS MCP control-channel agent (canonical install-linux.sh)"
