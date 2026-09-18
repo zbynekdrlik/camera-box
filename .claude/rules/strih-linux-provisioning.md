@@ -220,6 +220,25 @@ Pure helpers added to `scripts/lib/strih-provision.sh`: `strih_dantesync_unit_te
 shared lib `scripts/lib/ndi-runtime.sh` is unit-tested in `tests/ndi_runtime_lib.rs`; the
 `--extra`/always-include mechanism in `tests/genlock_runtime_packages_1317.rs`.
 
+## GOTCHA — an emit-and-eval `_cmd` helper's `${N:?}` fires on an EMPTY optional arg and silently no-ops the whole recipe (issue 1317 review)
+
+The `ndi_runtime_install_cmds` / `strih_lx_chrome_sandbox_fix_cmd` family EMITS on-box bash for the
+caller to `( eval "$(...)" ) || fail`. A parameter written `pw="${2:?cam pw required}"` fires the
+`:?` guard on an **empty** value, not only an unset one — and callers pass optional args as
+`"${CAM_PW:-}"` (empty when unset). So on an idempotent re-run where the arg is legitimately not
+needed (the NDI runtime is already present, so no fetch, so no password), the emitter returns 1 with
+**empty stdout**; `( eval "" ) || fail` then runs `eval ""` → exit 0, `|| fail` never triggers, and
+the ENTIRE recipe — including the parts that should run unconditionally (perms-normalize, ldconfig,
+symlinks, avahi) — is silently skipped while the caller prints success. A false-SUCCESS on re-runs,
+invisible to a fresh-box test (which always supplies the arg).
+
+**Fix:** make the arg `"${N-}"` (no colon, empty allowed) at the function header, and gate it ONLY
+where it is actually used — move a `[ -n <arg> ] || { echo '…required' >&2; exit 1; }` INSIDE the
+branch that needs it (the fetch `if`), not at the top. The unconditional tail then always emits. Bake
+the arg `%q`-quoted so the emitted `[ -n <arg> ]` is safe for empty / spaces / shell-metachars (verify
+all three parse via `ndi_runtime_install_cmds peer '' user | bash -n`). This preserves byte-equivalence
+with an old inline block that ran its tail unconditionally.
+
 ## Staging + ssh gotchas for setup-strih (live, 18.9.2026)
 
 - **The tree rsynced to the box must carry `scripts/` AND `systemd/`.** `setup-strih.sh` steps 8/9
