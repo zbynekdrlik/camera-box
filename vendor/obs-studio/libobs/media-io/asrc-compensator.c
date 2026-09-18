@@ -248,9 +248,10 @@ double asrc_compensator_compensate(struct asrc_compensator *c, double raw_advanc
 					 * ASRC_LEVEL_EMA_TAU_S) BEFORE the P term reads it, so the 66x stronger Kp=2.0 gain does not
 					 * amplify the +/-10 ms mixer-tick phase noise (the 18.9. live test: the raw-error term could
 					 * not hold the level, the mean wandered +/-10-15 ms). Seed with the first error after capture;
-					 * later windows blend with alpha = window_master_s / (tau + window_master_s). The shift
-					 * subtracts its delta from it, so a deliberate setpoint shift is not read as an error
-					 * transient. Mirror of src/asrc_bench.rs compensate_with_level. */
+					 * later windows blend with alpha = window_master_s / (tau + window_master_s). A deliberate
+					 * setpoint shift moves BOTH the target and the buffer by the same delta, so the error is
+					 * unchanged and this EMA is left untouched there (see asrc_compensator_shift_level_target).
+					 * Mirror of src/asrc_bench.rs compensate_with_level. */
 					{
 						const double level_err = buffered_ms - c->level_target_ms;
 						if (!c->level_err_ema_seeded) {

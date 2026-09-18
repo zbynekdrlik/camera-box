@@ -196,8 +196,8 @@ extern "C" {
  * locked) as clamp(Kp*level_err_ema_ms, +/-ASRC_LEVEL_KP_MAX_PPM), driven by the SMOOTHED error
  * (level_err_ema_ms, an EMA with tau ASRC_LEVEL_EMA_TAU_S) rather than the raw per-window level.
  * SIGN matches the proven #1335 integral (deficit => negative => stretch). At Kp=2.0 the loop time
- * constant is ~= 1/(Kp*1e-3) = 500 s: a 15 ms error is gone in ~6 min, a 25 ms StartStream drop in
- * ~13 min, at inaudible rates (a 25 ms error saturates at ASRC_LEVEL_KP_MAX_PPM = 50 ppm = 3 ms/min).
+ * constant is ~= 1/(Kp*1e-3) = 500 s: a 15 ms error is within ~3 ms in ~13 min (measured ~777 s),
+ * at inaudible rates (a 25 ms error saturates at ASRC_LEVEL_KP_MAX_PPM = 50 ppm = 3 ms/min).
  * The 18.9. live test showed the raw-error 0.03/+/-1 term (follow-ups 2-4) could not hold the level:
  * the mean level wandered +/-10-15 ms around the setpoint over hour-scale spans and the E2E A/V
  * reading inherited it (-0.6 ms vs +15.0 ms 40 min apart, identical pins). The 66x stronger gain is
@@ -328,8 +328,10 @@ struct asrc_compensator {
 	/* camera-box #1335 follow-up 5: the EMA (tau ASRC_LEVEL_EMA_TAU_S) of the per-window level error
 	 * (buffered_ms - level_target_ms), in ms -- the SMOOTHED error the P term reads so the 66x
 	 * stronger Kp=2.0 gain does not amplify the +/-10 ms mixer-tick phase noise. Seeded with the
-	 * first error after capture (level_err_ema_seeded), reset on flush/relock, and shifted by -delta
-	 * on a deliberate setpoint shift so a shift does not read as an error transient. Mirror of
+	 * first error after capture (level_err_ema_seeded), reset on flush/relock. A deliberate setpoint
+	 * shift moves BOTH level_target_ms AND the buffer level by the same delta, so the error
+	 * (buffered - target) is unchanged and this EMA is left untouched there (see
+	 * asrc_compensator_shift_level_target). Mirror of
 	 * src/asrc_bench.rs RealtimeAsrcCompensator::level_err_ema_ms. */
 	double level_err_ema_ms;
 	/* camera-box #1335 follow-up 5: whether level_err_ema_ms has been seeded since the last (re)lock
