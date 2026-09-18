@@ -61,8 +61,9 @@ def test_locked_line_parses_to_facet():
     assert set(f["inputs"]) == {"NDI cam1", "NDI cam2"}
     assert f["inputs"]["NDI cam1"] == {
         # #1299 v2: `connected` defaults True for this v1 fixture (no `connected` key in the line).
-        "locked": True, "connected": True, "latency_ms": 3, "underruns": 0, "relocks": 1,
-        "late_holds": 0, "depth": 2
+        # #1341 v6: `idle` defaults False for this pre-v6 fixture (no `idle` key in the line).
+        "locked": True, "connected": True, "idle": False, "latency_ms": 3, "underruns": 0,
+        "relocks": 1, "late_holds": 0, "depth": 2
     }
 
 

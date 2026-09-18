@@ -92,7 +92,7 @@ def qpc_drift_beyond_bound(rate_ready, drift_delta_ms, elapsed_ms, expected_ppm,
 
 def decide(n_inputs, n_locked, recent_event, qpc_drift_beyond_bound, clock_present,
            clock_locked, clock_ntp_failed, output_present, output_stamping, n_absent=0,
-           audio_unpaired=False, audio_unexpected=False):
+           audio_unpaired=False, audio_unexpected=False, n_idle=0):
     """Pure three-state decision -- a byte-faithful mirror of src/genlock_lock_state.rs `decide`.
 
     UNLOCKED precedence: clock (absent/unlocked) > output (present but not stamping) >
@@ -100,14 +100,16 @@ def decide(n_inputs, n_locked, recent_event, qpc_drift_beyond_bound, clock_prese
     unlocked > recent-event > ntp-failed > qpc-drift > audio-pairing > audio-unexpected (#1303).
     Otherwise LOCKED. Returns (state, reason).
 
-    #1299: `n_absent` = of `n_inputs`, how many have NO live NDI receiver connection (sender not
-    running). The input decisions judge only CONNECTED inputs (`n_connected = n_inputs - n_absent`),
-    so a senderless input never DEGRADES; inputs-present-but-ALL-senderless is HEALTHY-idle (LOCKED),
-    not UNLOCKED. `n_absent` defaults 0 so a pre-#1299 caller reproduces the old verdict exactly.
+    #1299/#1341: `n_absent` = senderless inputs (no live NDI connection); `n_idle` = CONNECTED-but-
+    IDLE inputs (keep-alive-only, received-frame rate below the idle floor). The input decisions judge
+    only CONNECTED-non-idle inputs (`n_connected = n_inputs - n_absent - n_idle`), so neither a
+    senderless nor a keep-alive-only input ever DEGRADES; inputs-present-but-ALL-absent/idle is
+    HEALTHY-idle (LOCKED), not UNLOCKED. Both default 0 so a pre-#1299/#1341 caller reproduces the old
+    verdict exactly.
     """
-    # #1299 -- connected inputs only (max(0, ...) keeps the decision total under a transient
-    # n_absent > n_inputs, mirroring the Rust saturating_sub / the C clamp).
-    n_connected = max(0, n_inputs - n_absent)
+    # #1299/#1341 -- connected-non-idle inputs only (max(0, ...) keeps the decision total under a
+    # transient n_absent + n_idle > n_inputs, mirroring the Rust saturating_sub / the C clamp).
+    n_connected = max(0, n_inputs - n_absent - n_idle)
 
     # --- UNLOCKED (red): clock > output > no-input-locked ---------------------------
     if not clock_present or not clock_locked:
@@ -192,12 +194,12 @@ def analyze(bundle_json_text, box_reachable):
     box was not reachable this pass; UNKNOWN (state None) when the facet is absent."""
     if box_reachable != 1:
         return {"verdict": "SKIP", "state": None, "reason": None,
-                "n_inputs": None, "n_locked": None, "n_absent": None,
+                "n_inputs": None, "n_locked": None, "n_absent": None, "n_idle": None,
                 "qpc_drift_ppm": None, "qpc_expected_ppm": None}
     facet = facet_from_obj(_loads_obj(bundle_json_text))
     if facet is None:
         return {"verdict": "UNKNOWN", "state": None, "reason": None,
-                "n_inputs": None, "n_locked": None, "n_absent": None,
+                "n_inputs": None, "n_locked": None, "n_absent": None, "n_idle": None,
                 "qpc_drift_ppm": None, "qpc_expected_ppm": None}
     state = facet.get("state")
     reason = facet.get("reason")
@@ -205,10 +207,11 @@ def analyze(bundle_json_text, box_reachable):
     n_locked = facet.get("n_locked")
     n_absent = facet.get("n_absent")  # #1299: senderless inputs (observability; the widget already
                                       # decided `state`, so this never changes the verdict here).
+    n_idle = facet.get("n_idle")      # #1341: connected-but-idle inputs (observability / card text).
     reason = _enrich_recent_event_reason(reason, facet)
     reason = _enrich_audio_unexpected_reason(reason, facet)
     return {"verdict": classify(state, box_reachable), "state": state, "reason": reason,
-            "n_inputs": n_inputs, "n_locked": n_locked, "n_absent": n_absent,
+            "n_inputs": n_inputs, "n_locked": n_locked, "n_absent": n_absent, "n_idle": n_idle,
             # #1299 Part 4: windowed drift telemetry (report-only; the widget already decided `state`
             # from these, so they never change the verdict here — logged so a rate anomaly is visible).
             "qpc_drift_ppm": facet.get("qpc_drift_ppm"),
@@ -279,6 +282,7 @@ def _main(argv):
         res = analyze(text, ns.box_reachable)
         for k, key in (("verdict", "verdict"), ("state", "state"), ("reason", "reason"),
                        ("n_inputs", "n_inputs"), ("n_locked", "n_locked"), ("n_absent", "n_absent"),
+                       ("n_idle", "n_idle"),
                        ("qpc_drift_ppm", "qpc_drift_ppm"), ("qpc_expected_ppm", "qpc_expected_ppm")):
             print(f"{k}={_fmt(res[key])}")
         return 0

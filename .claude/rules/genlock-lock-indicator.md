@@ -65,10 +65,25 @@ no-input-locked; then DEGRADED (amber) precedence some-input-unlocked > recent-e
   `deploy-genlock-fleet.sh`), so the live version is defense-in-depth. The
   AudioDisabledOnProgram + AsrcSaturated branches of `decide_audio_health` (which need
   is-program-source / asrc-ppm data the v2 stats don't carry) remain a deferred followup.
-- **LOCKED:** `GENLOCK ● LOCKED n/m @ L ms` (n=locked, m=**connected** genlock inputs = `n_inputs - n_absent`, L=min latency or a range), plus ` (+K idle)` when `K = n_absent > 0` — #1299: a senderless input shows as idle, never as an unlocked shortfall.
+- **LOCKED:** `GENLOCK ● LOCKED n/m @ L ms` (n=locked, m=**connected-live** genlock inputs = `n_inputs - n_absent - n_idle`, L=min latency or a range), plus ` (+K idle)` when `K = n_absent + n_idle > 0` — #1299/#1341: a senderless OR a keep-alive-only input shows as idle, never as an unlocked shortfall.
 
 ## Gotchas
 
+- **A CONNECTED-but-IDLE input (`n_idle`, #1341) is ALSO excluded from the DEGRADED gate — the
+  keep-alive-sender class.** The cg OBS (RESOLUME-SNV) has 12 SongPlayer playlist inputs; the ~10
+  idle ones keep a LIVE NDI connection (`connected == true`) but send one keep-alive frame every
+  ~11 s, so their FIFO re-acquires a boundary (a relock) on each keep-alive frame — which fed
+  `recent_event` and flapped the box `DEGRADED reason=recent_event` ~1 min/hour. The widget derives
+  per-input `idle` from the `frames_received` DELTA over the same 60 s window `recent_event` uses:
+  `< GENLOCK_IDLE_INPUT_MIN_FRAMES` (60 = 1 fps × 60 s; a live 23.98 fps source is ≥ 1400) is idle,
+  classified only once the per-input sample ring spans ≥ 90 % of the window (the qpc `rate_ready`
+  precedent, so a live source is never mislabelled idle at startup); a received-counter DECREASE
+  re-baselines (reconnect). An idle input is excluded from `n_locked` by the widget scan, counted in
+  `GenlockFacets.n_idle`, dropped from `n_connected = n_inputs - n_absent - n_idle` (saturating), and
+  contributes 0 phase events via `InputEventCounts.idle` (the `connected == false` path) so it is
+  never the `recent_event` offender. A box whose inputs are ALL idle/absent stays HEALTHY-idle
+  LOCKED. `idle` is orthogonal to `absent`: absent = `connected == false` (sender not running); idle
+  = connected but keep-alive-only. JSON schema v6 (additive): top-level `n_idle`, per-input `idle`.
 - **An input with NO NDI receiver connection (`n_absent`, #1299) is EXCLUDED from the DEGRADED
   gate, not counted as unlocked.** The DEGRADED/no-input decisions judge only CONNECTED inputs
   (`n_connected = n_inputs - n_absent`): a genlock input whose sender is simply not running

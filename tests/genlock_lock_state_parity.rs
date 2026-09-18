@@ -338,7 +338,13 @@ fn c_input_phase_events_matches_the_rust_authority_1299() {
         if got_rs != got_c {
             diffs.push(format!(
                 "  connected={} idle={} relocks={} late={} backward={} -> C {}, Rust {}",
-                v.connected as i32, v.idle as i32, v.relocks, v.late_holds, v.backward_steps, got_c, got_rs
+                v.connected as i32,
+                v.idle as i32,
+                v.relocks,
+                v.late_holds,
+                v.backward_steps,
+                got_c,
+                got_rs
             ));
         }
     }

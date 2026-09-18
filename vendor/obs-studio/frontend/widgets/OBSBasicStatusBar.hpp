@@ -10,6 +10,8 @@
 
 #include <cstdint>
 #include <deque>
+#include <map>
+#include <string>
 #include <utility>
 
 class QTimer;
@@ -96,6 +98,11 @@ private:
 	 * ms) samples over GENLOCK_QPC_WINDOW_S; the qpc_drift verdict keys on the RATE vs the dantesync
 	 * f_ptp+f_phase slew + a single-sample STEP, not the unbounded cumulative offset. */
 	std::deque<std::pair<qint64, int64_t>> genlockQpcHistory;
+	/* #1341: per-input received-frame history (input name -> ring of (monotonic ms, cumulative
+	 * frames_received)) over GENLOCK_IDLE_WINDOW_MS. An input whose received DELTA over the window is
+	 * below GENLOCK_IDLE_INPUT_MIN_FRAMES is IDLE (keep-alive-only) and excluded from the DEGRADED
+	 * gate; entries for inputs no longer present are pruned each tick so the state stays bounded. */
+	std::map<std::string, std::deque<std::pair<qint64, uint64_t>>> genlockRxHistory;
 	/* genlock-lock: log-on-change de-dup */
 	int genlockLastLoggedState = -1;
 	int genlockLastLoggedReason = -1;

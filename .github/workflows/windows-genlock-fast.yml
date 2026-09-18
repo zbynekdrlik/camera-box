@@ -259,8 +259,12 @@ jobs:
             Write-Error "OBSBasicStatusBar.cpp: the #1303 audio-UNEXPECTED LOCK-indicator term is gone — an audible silent-by-contract source would no longer show DEGRADED; re-apply"; exit 1
           }
           # #1299 Part 3: recent_event is fed by CONNECTED inputs' PHASE events only (relocks+late_holds+backward_steps; underruns dropped), and the top offender rides the json (recent_event_inputs). A revert re-opens the chronic recent_event false-page. Mirror of src/genlock_lock_state.rs::input_phase_events + tests/genlock_lock_json_guards.rs::genlock_lock_recent_event_offender_present_1299_part3.
-          if ($sb -notmatch [regex]::Escape('genlock_input_phase_events(r.connected ? 1 : 0, r.relocks, r.late_holds,') -or $sb -notmatch [regex]::Escape('recent_event_input_name')) {
+          if ($sb -notmatch [regex]::Escape('genlock_input_phase_events(r.connected ? 1 : 0, r.idle ? 1 : 0, r.relocks,') -or $sb -notmatch [regex]::Escape('recent_event_input_name')) {
             Write-Error "OBSBasicStatusBar.cpp: the #1299 Part 3 connected-phase recent_event feed / offender attribution is gone — the chronic recent_event false-page would re-open; re-apply"; exit 1
+          }
+          # #1341: a CONNECTED-but-IDLE input (a keep-alive-only SongPlayer playlist input) is excluded from the DEGRADED gate — the widget derives per-input idle from the received-frame delta over the window, carries n_idle + per-input idle in the v6 json, and passes idle to the pure phase-events rule. A revert re-opens the chronic idle-sender recent_event false-page on the cg OBS. Mirror of src/genlock_lock_state.rs (n_idle facet + InputEventCounts.idle) + GenlockLockState.hpp + tests/genlock_lock_json_guards.rs::genlock_lock_idle_input_class_present_1341.
+          if ($sb -notmatch [regex]::Escape('f.n_idle = scan.n_idle;') -or $sb -notmatch [regex]::Escape('GENLOCK_IDLE_INPUT_MIN_FRAMES') -or $sb -notmatch [regex]::Escape('r.idle ? "true" : "false"')) {
+            Write-Error "OBSBasicStatusBar.cpp: the #1341 connected-but-idle input class is gone — an idle SongPlayer input would flap the box DEGRADED again; re-apply"; exit 1
           }
           # #1299 Part 4: the qpc_drift verdict is a WINDOWED RATE + STEP (vs the dantesync-reported f_ptp+f_phase slew), NOT the cumulative wall-vs-QPC offset that grew unbounded and false-paged the fleet overnight 15./16.9. Mirror of GenlockLockState.hpp genlock_qpc_drift_beyond_bound (parity-gated by tests/genlock_lock_state_parity.rs) + tests/genlock_lock_json_guards.rs::genlock_lock_qpc_windowed_drift_present_1299_part4.
           if ($sb -notmatch [regex]::Escape('genlock_qpc_drift_beyond_bound(') -or $sb -notmatch [regex]::Escape('GENLOCK_QPC_DRIFT_PPM_BOUND')) {

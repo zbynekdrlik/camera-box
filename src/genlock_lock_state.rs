@@ -147,6 +147,10 @@ pub struct GenlockFacets {
 /// some-input-unlocked > recent-event > ntp-failed > qpc-drift > audio-pairing > audio-unexpected.
 /// Otherwise LOCKED.
 ///
+/// #1341 — the DEGRADED/no-input decisions judge only CONNECTED-non-idle inputs (`n_connected =
+/// n_inputs - n_absent - n_idle`): a senderless (`n_absent`) OR a keep-alive-only idle (`n_idle`)
+/// input is excluded, so neither trips a page; a box whose inputs are ALL absent/idle is HEALTHY-idle.
+///
 /// #1299 — the DEGRADED/no-input decisions judge only CONNECTED inputs (`n_connected = n_inputs -
 /// n_absent`): an input whose NDI sender is not running (`n_absent`) is idle, not a fault, so it
 /// never DEGRADES the box, and a box whose inputs are ALL senderless (`n_connected == 0` with
@@ -156,9 +160,14 @@ pub struct GenlockFacets {
 /// Mirror of `genlock_decide_lock_state` in `GenlockLockState.hpp` — keep both in lock-step.
 pub fn decide(f: &GenlockFacets) -> (LockState, LockReason) {
     // #1299 — CONNECTED inputs (a live NDI receiver) are the only ones the lock decision judges;
-    // a senderless input (`n_absent`) is idle, not a fault. `saturating_sub` keeps the decision
-    // total even under a transient `n_absent > n_inputs`.
-    let n_connected = f.n_inputs.saturating_sub(f.n_absent);
+    // a senderless input (`n_absent`) is idle, not a fault. #1341 — a CONNECTED-but-IDLE input
+    // (`n_idle`, keep-alive-only) is ALSO excluded: its FIFO churns relocks on each keep-alive frame
+    // but it is not a live locking target. `saturating_sub` keeps the decision total even under a
+    // transient `n_absent + n_idle > n_inputs`.
+    let n_connected = f
+        .n_inputs
+        .saturating_sub(f.n_absent)
+        .saturating_sub(f.n_idle);
 
     // --- UNLOCKED (red): clock > output > no-input-locked -------------------------
     if !f.clock_present || !f.clock_locked {
@@ -247,7 +256,9 @@ pub struct InputEventCounts {
 /// (`connected == false`) contributes 0 — its rebind/reset churn is idle, not a fault. Saturating
 /// so a synthetic near-`u64::MAX` parity vector can never overflow (the C mirror clamps identically).
 pub fn input_phase_events(c: &InputEventCounts) -> u64 {
-    if !c.connected {
+    // #1341 — a disconnected OR a connected-but-idle input contributes 0: an idle input's keep-alive
+    // relock churn is not a phase-discipline event to feed recent_event.
+    if !c.connected || c.idle {
         return 0;
     }
     c.relocks
