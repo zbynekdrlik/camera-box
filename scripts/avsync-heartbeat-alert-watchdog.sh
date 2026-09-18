@@ -158,12 +158,15 @@ readonly DISCORD_VERDICT_MAX_CONTENT=1900
 # Discord POST calls exactly -- never a second timeout convention) so a stalled connection can
 # never wedge this pass beyond the systemd unit's own TimeoutStartSec budget. Never called in
 # --dry-run (see run_report_pass).
+# RETURNS 0 iff the message was DELIVERED (HTTP 200); returns 1 on a missing token or a non-200
+# (still non-fatal -- the caller keeps polling). #1331: run_report_pass uses this rc to COMMIT the
+# advanced dedup state only after delivery succeeds, so a transient POST failure re-emits next pass.
 post_discord_verdict() {
   local text="$1" token content payload response http_code body
   token="$(read_discord_env_field DISCORD_BOT_TOKEN)"
   if [ -z "$token" ]; then
     log "VERDICT-FORWARD: no DISCORD_BOT_TOKEN configured at $DISCORD_ENV_FILE -- skipping post (non-fatal)"
-    return 0
+    return 1
   fi
   content="$(discord_mention_prefix)${text}"
   content="${content:0:$DISCORD_VERDICT_MAX_CONTENT}"
@@ -178,9 +181,10 @@ post_discord_verdict() {
   body="${response%$'\n'*}"
   if [ "$http_code" != "200" ]; then
     log "VERDICT-FORWARD: Discord POST returned HTTP '$http_code' (expected 200, non-fatal). Response body: $body"
-    return 0
+    return 1
   fi
   log "VERDICT-FORWARD: posted to thread $DISCORD_THREAD_ID (message id: $(printf '%s' "$body" | jq -r '.id // "unknown"' 2>/dev/null))"
+  return 0
 }
 
 # ── #1331 verified-A/V session report (REPLACES the raw one-clip Discord forward) ─────────
@@ -188,6 +192,10 @@ post_discord_verdict() {
 # AVSYNC_REPORT_FETCH_CMD seam lets the dry-run tests stub the fetch; otherwise the SAME key-auth ssh
 # transport the heartbeat probe uses (avsync_heartbeat_ssh_prefix_argv) cats the two day files. Never
 # fatal -- a fetch failure yields no rows (the report simply skips this pass).
+# #1331 (review F4): the day FILE names come from THIS box's (dev1) local date, while dev2 wrote the
+# files under dev2's local date -- correct while both boxes share Europe/Bratislava (they do). The
+# fetch pulls today's + YESTERDAY's file, so a row written near local midnight is still in the window;
+# and aggregation is EPOCH-based (TZ-independent), so only which files are fetched depends on the day.
 report_fetch_rows() {
   if [ -n "${AVSYNC_REPORT_FETCH_CMD:-}" ]; then
     bash -c "$AVSYNC_REPORT_FETCH_CMD" 2>/dev/null || true
@@ -207,11 +215,18 @@ report_fetch_rows() {
 }
 
 # run_report_pass -> fetch the rows, run the PURE decider, and post each returned message (one Discord
-# message per stdout line) via the SAME post_discord_verdict path the forward used. The decider
-# rewrites REPORT_STATE_FILE in place (idempotent dedup across passes). --dry-run logs "WOULD post"
-# and never posts. Never fatal (the watchdog must survive and keep polling).
+# message per stdout line) via the SAME post_discord_verdict path the forward used. --dry-run logs
+# "WOULD post" and never posts. Never fatal (the watchdog must survive and keep polling).
+#
+# #1331 (review F1/F2): the report state is committed TRANSACTIONALLY -- the decider runs against a
+# COPY of the state, and the advanced state is committed to REPORT_STATE_FILE only AFTER every message
+# in this pass was DELIVERED (post_discord_verdict returned 0). If a POST fails, the advanced state is
+# DISCARDED so the next pass re-derives + re-emits (the decider is idempotent) -- a transient Discord
+# outage never permanently drops a verified-A/V message (the owner's original complaint). And --dry-run
+# NEVER touches the production state (it works on the discarded copy), so a manual dry-run during a
+# live can never consume the real dedup and suppress a production message.
 run_report_pass() {
-  local rows rows_file msgs line
+  local rows rows_file work_state msgs line all_ok=1
   rows="$(report_fetch_rows)"
   if [ -z "$rows" ]; then
     log "report: no rows fetched this pass (nothing to aggregate)"
@@ -219,11 +234,17 @@ run_report_pass() {
   fi
   rows_file="$(mktemp 2>/dev/null)" || { log "report: mktemp failed (non-fatal)"; return 0; }
   printf '%s\n' "$rows" > "$rows_file"
+  work_state="$(mktemp 2>/dev/null)" || { rm -f "$rows_file"; log "report: mktemp failed (non-fatal)"; return 0; }
   mkdir -p "$(dirname "$REPORT_STATE_FILE")" 2>/dev/null || true
-  msgs="$("$REPORT_PYTHON" "$REPORT_SCRIPT" --state "$REPORT_STATE_FILE" --rows "$rows_file" \
+  # Run the decider against a COPY of the committed state (decider rewrites --state in place).
+  if [ -f "$REPORT_STATE_FILE" ]; then cp -f "$REPORT_STATE_FILE" "$work_state" 2>/dev/null || true; fi
+  msgs="$("$REPORT_PYTHON" "$REPORT_SCRIPT" --state "$work_state" --rows "$rows_file" \
     2>/dev/null || true)"
   rm -f "$rows_file"
   if [ -z "$msgs" ]; then
+    # No messages to deliver -> committing the advanced session-tracking is safe (nothing to lose),
+    # except in --dry-run which must never mutate the production state.
+    if [ "$DRY_RUN" -eq 1 ]; then rm -f "$work_state" 2>/dev/null || true; else mv -f "$work_state" "$REPORT_STATE_FILE" 2>/dev/null || rm -f "$work_state" 2>/dev/null || true; fi
     log "report: no new messages this pass"
     return 0
   fi
@@ -232,9 +253,17 @@ run_report_pass() {
     if [ "$DRY_RUN" -eq 1 ]; then
       log "[dry-run] WOULD post report message: $line"
     else
-      post_discord_verdict "$line"
+      post_discord_verdict "$line" || all_ok=0
     fi
   done <<< "$msgs"
+  if [ "$DRY_RUN" -eq 1 ]; then
+    rm -f "$work_state" 2>/dev/null || true
+  elif [ "$all_ok" -eq 1 ]; then
+    mv -f "$work_state" "$REPORT_STATE_FILE" 2>/dev/null || rm -f "$work_state" 2>/dev/null || true
+  else
+    log "report: a Discord POST failed this pass -- discarding advanced state so the next pass re-emits"
+    rm -f "$work_state" 2>/dev/null || true
+  fi
 }
 
 # ── one leg's confirm/throttle/alert pass -- reused for BOTH "watchdog" and "vlc" ───────────────
