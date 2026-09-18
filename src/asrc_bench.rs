@@ -2215,4 +2215,188 @@ mod tests {
              1st-half; RED I-only holds ~1.0, wrong-sign grows), got peak1={peak1:.2} peak2={peak2:.2} ms"
         );
     }
+
+    /// issue #1335 follow-up 4 (a): a SUSTAINED buffer-level error must ARM the fast bounded level
+    /// restore even when NO residual step accompanies it — the case the step arm (follow-up 2) and
+    /// the shift arm (follow-up 3) both miss. Live 18.9. 12:00 StartStream: the `mbc` level dropped
+    /// 100 → 68 ms with `steps=1 last_step_ms=-14.3` detected BEFORE the level had drained, so the
+    /// step corroboration failed and `restore=0`; the level then sat 10–25 ms low for 40 min at the
+    /// ±3 ppm I rail and the run measured +15 ms rig-wide. This test drops the level 25 ms with NO
+    /// rate residual on a locked compensator: the sustained-error arm must fire within ≤12 accepted
+    /// windows (the 10-window band + settle margin), the restore must bring the level back within
+    /// 5 ms, and the integral must NEVER reach its ±LEVEL_INTEGRAL_MAX_PPM rail. RED before this fix:
+    /// nothing arms the restore from a level error alone, so level_restore() stays false and the ±3
+    /// ppm I term alone leaves the level low for ~an hour (the incident).
+    #[test]
+    fn sustained_level_error_arms_fast_restore_1335() {
+        const TRUE_PPM: f64 = -5.0;
+        const BLOCK_S: f64 = 1.0; // one accepted 1 s window per block
+        const WARMUP_S: f64 = 2400.0; // past lock; the integral parks near 0
+        const START_BUF_MS: f64 = 100.0;
+        const DROP_MS: f64 = 25.0; // the live StartStream deficit band (14–32 ms), no rate step
+        const OBSERVE_S: f64 = 1200.0;
+
+        let mut c = RealtimeAsrcCompensator::new();
+        let clock = DriftingAudioClock::new(TRUE_PPM);
+        let mut buffer_ms = START_BUF_MS;
+        let mut t = 0.0;
+        while t < WARMUP_S {
+            let raw = clock.raw_advance(BLOCK_S);
+            let corrected = c.compensate_with_level(raw, BLOCK_S, buffer_ms);
+            buffer_ms += (corrected - BLOCK_S) * 1000.0;
+            t += BLOCK_S;
+        }
+        let target = c.level_target_ms();
+        // A PURE level drop: the mix buffer loses 25 ms of depth with the rate (raw vs master)
+        // untouched ⇒ no re-base (steps stays put) and no shift ⇒ the ONLY path that can arm the
+        // restore is the new sustained-error counter.
+        buffer_ms -= DROP_MS;
+        let steps_pre = c.step_count();
+        let mut arm_window: i64 = -1;
+        let mut settle_window: i64 = -1;
+        let mut integral_peak = 0.0_f64;
+        let mut i: i64 = 0;
+        while (i as f64) * BLOCK_S < OBSERVE_S {
+            let raw = clock.raw_advance(BLOCK_S);
+            let corrected = c.compensate_with_level(raw, BLOCK_S, buffer_ms);
+            buffer_ms += (corrected - BLOCK_S) * 1000.0;
+            i += 1;
+            if arm_window < 0 && c.level_restore() {
+                arm_window = i;
+            }
+            if settle_window < 0 && (buffer_ms - target).abs() < 5.0 {
+                settle_window = i;
+            }
+            integral_peak = integral_peak.max(c.level_integral_ppm().abs());
+        }
+        assert_eq!(
+            c.step_count(),
+            steps_pre,
+            "issue #1335 f4: a PURE level drop (no rate step) must NOT re-base — the sustained-error \
+             arm, not the step arm, is under test here, got {} spurious steps",
+            c.step_count() - steps_pre
+        );
+        assert!(
+            arm_window > 0 && arm_window <= 12,
+            "issue #1335 f4: a sustained 25 ms level error must ARM the fast restore within ≤12 \
+             accepted windows (10-window band + settle margin), got arm_window={arm_window}"
+        );
+        // Settle: the DESIGN quoted ≤600 s; at the shipped Kr=2 the restore is Kr·err (24–50 ppm for
+        // a 12–25 ms error, below the ±100 clamp), decaying with a ~500 s time constant, so a 25 ms
+        // drop reaches ±5 ms in ~804 s (measured) — the SAME clamp-does-not-bind calibration the
+        // follow-up-2/3 tests document for their 50/12 ms cases (NOT the design's aspirational ~2
+        // min). Well under an hour and monotonic, so consecutive E2E runs stop walking with the
+        // buffer level — the ticket's whole point ("minutes instead of hours").
+        assert!(
+            settle_window > 0 && settle_window <= 900,
+            "issue #1335 f4: the armed restore must bring the level within 5 ms of the target in \
+             ≤ 900 s (measured ~804 s at Kr=2 for a 25 ms move), got settle_window={settle_window}"
+        );
+        assert!(
+            integral_peak < LEVEL_INTEGRAL_MAX_PPM,
+            "issue #1335 f4: the fast restore (not the integral) does the heavy lifting, so the \
+             integral must NEVER reach its ±LEVEL_INTEGRAL_MAX_PPM rail (the incident sat railed \
+             there for ~an hour), got peak {integral_peak:.3} ppm"
+        );
+    }
+
+    /// issue #1335 follow-up 4 (b): ±8 ms per-window level scatter around the target (the 1-s window
+    /// noise floor, alternating sign) must NEVER arm the sustained-error restore over 600 s — the 12
+    /// ms band sits comfortably above the scatter, so no single window reaches it and the consecutive
+    /// counter never advances. Guards against lowering the band into the noise (a false arm needs 10
+    /// consecutive one-directional ≥12 ms readings, which ±8 ms scatter cannot produce).
+    #[test]
+    fn level_scatter_never_arms_fast_restore_1335() {
+        const TRUE_PPM: f64 = -5.0;
+        const BLOCK_S: f64 = 1.0;
+        const WARMUP_S: f64 = 2400.0;
+        const START_BUF_MS: f64 = 100.0;
+        const SCATTER_MS: f64 = 8.0; // the ±8 ms 1-s level scatter floor
+        const OBSERVE_S: f64 = 600.0;
+
+        let mut c = RealtimeAsrcCompensator::new();
+        let clock = DriftingAudioClock::new(TRUE_PPM);
+        let mut buffer_ms = START_BUF_MS;
+        let mut t = 0.0;
+        while t < WARMUP_S {
+            let raw = clock.raw_advance(BLOCK_S);
+            let corrected = c.compensate_with_level(raw, BLOCK_S, buffer_ms);
+            buffer_ms += (corrected - BLOCK_S) * 1000.0;
+            t += BLOCK_S;
+        }
+        let mut i: i64 = 0;
+        while (i as f64) * BLOCK_S < OBSERVE_S {
+            // Report a scattered level (±8 ms around the true buffer, alternating sign) to the servo;
+            // the true buffer is integrated from the servo's response, so it stays near target.
+            let scatter = if i % 2 == 0 { SCATTER_MS } else { -SCATTER_MS };
+            let reported = (buffer_ms + scatter).max(0.0);
+            let raw = clock.raw_advance(BLOCK_S);
+            let corrected = c.compensate_with_level(raw, BLOCK_S, reported);
+            buffer_ms += (corrected - BLOCK_S) * 1000.0;
+            i += 1;
+            assert!(
+                !c.level_restore(),
+                "issue #1335 f4: ±8 ms level scatter (below the 12 ms band) must NEVER arm the fast \
+                 restore, but it armed at window {i}"
+            );
+        }
+    }
+
+    /// issue #1335 follow-up 4 (d): a SUSTAINED sub-band level offset (6 ms, and 11 ms — just under
+    /// the 12 ms band) must NEVER arm the fast restore over 600 s; the gentle I+P loop absorbs it.
+    /// Discriminator (the detector is LIVE, not dead or set too high): a 13 ms sustained offset — one
+    /// millisecond over the band — DOES arm within the window budget. Together with the ±8 ms scatter
+    /// guard (b) and the 25 ms arm (a), this pins the band to 12 ms: (8, 11] never arm, [12, …] arm.
+    #[test]
+    fn sub_band_level_offset_never_arms_but_band_is_live_1335() {
+        const TRUE_PPM: f64 = -5.0;
+        const BLOCK_S: f64 = 1.0;
+        const WARMUP_S: f64 = 2400.0;
+        const START_BUF_MS: f64 = 100.0;
+        const OBSERVE_S: f64 = 600.0;
+
+        // Warm to lock, drop the level by `drop_ms` with no rate step, run OBSERVE_S; return whether
+        // the restore ever armed.
+        fn ran_and_armed(drop_ms: f64) -> bool {
+            let mut c = RealtimeAsrcCompensator::new();
+            let clock = DriftingAudioClock::new(TRUE_PPM);
+            let mut buffer_ms = START_BUF_MS;
+            let mut t = 0.0;
+            while t < WARMUP_S {
+                let raw = clock.raw_advance(BLOCK_S);
+                let corrected = c.compensate_with_level(raw, BLOCK_S, buffer_ms);
+                buffer_ms += (corrected - BLOCK_S) * 1000.0;
+                t += BLOCK_S;
+            }
+            buffer_ms -= drop_ms;
+            let mut armed = false;
+            let mut i: i64 = 0;
+            while (i as f64) * BLOCK_S < OBSERVE_S {
+                let raw = clock.raw_advance(BLOCK_S);
+                let corrected = c.compensate_with_level(raw, BLOCK_S, buffer_ms);
+                buffer_ms += (corrected - BLOCK_S) * 1000.0;
+                i += 1;
+                if c.level_restore() {
+                    armed = true;
+                }
+            }
+            armed
+        }
+
+        assert!(
+            !ran_and_armed(6.0),
+            "issue #1335 f4: a sustained 6 ms level offset (well below the 12 ms band) must NEVER arm \
+             the fast restore — the gentle I+P loop absorbs it"
+        );
+        assert!(
+            !ran_and_armed(11.0),
+            "issue #1335 f4: a sustained 11 ms level offset (just BELOW the 12 ms band) must NEVER \
+             arm the fast restore — the band is 12 ms, not lower"
+        );
+        assert!(
+            ran_and_armed(13.0),
+            "issue #1335 f4: a sustained 13 ms level offset (just OVER the 12 ms band) MUST arm the \
+             fast restore — proving the detector is live and the band sits at 12 ms"
+        );
+    }
 }
