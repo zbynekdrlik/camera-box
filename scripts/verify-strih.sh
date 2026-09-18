@@ -125,6 +125,24 @@ else
   note "strih-lx-seed.json / python3 absent -- run setup-strih.sh step 6 first"
 fi
 
+# 4b) seeded NDI INPUTS present as genlock_fifo sources (issue 1317) -- REPORT-ONLY. Runs the seeder's
+#     own read-only --verify-parity (the imag verify_parity grep-qxF whole-line shape) and reports the
+#     verdict. A not-yet-launched box (OBS/WS down) yields no OK line -> NOTE, never a hard FAIL: the
+#     seed is a LAUNCH-time action (strih-obs-start.sh --bootstrap), not a provisioning artifact, so
+#     the acceptance gate must not depend on OBS being live during verify.
+SCN_BIN="${STRIH_SCENES_BIN:-/usr/local/bin/strih_scenes.py}"
+if [ -f "$SCN_BIN" ] && command -v python3 >/dev/null 2>&1; then
+  SEED_PARITY="$(python3 "$SCN_BIN" --host "$WS_HOST" --verify-parity 2>/dev/null || true)"
+  if printf '%s\n' "$SEED_PARITY" | grep -qxF "strih ndi inputs: OK"; then
+    ok "all seed NDI inputs present as genlock_fifo sources (strih_scenes.py --verify-parity)"
+  else
+    PARITY_LINE="$(printf '%s\n' "$SEED_PARITY" | grep '^strih ndi inputs:' | head -1 || true)"
+    note "seed-input parity not confirmed over WS (OBS/WS down, or a drift) -- report-only: ${PARITY_LINE:-<no verdict line>}"
+  fi
+else
+  note "strih_scenes.py / python3 absent -- run setup-strih.sh step 6 first (seed-input parity report skipped)"
+fi
+
 # 5) Certified latency pins vs scripts/latency-pins-baseline.json (strih-lx key) -- REPORT-ONLY.
 BASELINE="${HERE}/latency-pins-baseline.json"
 if command -v python3 >/dev/null 2>&1 && [ -f "$BASELINE" ]; then

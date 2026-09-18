@@ -27,6 +27,7 @@ set -euo pipefail
 LOG=/tmp/strih-obs-start.log
 OBS_BIN="${STRIH_OBS_BIN:-/usr/bin/obs}"
 OBS_CFG="$HOME/.config/obs-studio"
+SCN="${STRIH_SCENES_BIN:-/usr/local/bin/strih_scenes.py}"   # issue 1317: the input/scene/Studio seeder
 
 # strih_resolve_session_env -> print the resolved graphical-session display env assignment (one
 # KEY=VALUE line) to stdout and return 0; return non-zero (printing nothing) when neither a Wayland
@@ -107,6 +108,20 @@ fi
 
 [ -x "$OBS_BIN" ] || { echo "FAIL: OBS binary '${OBS_BIN}' not found/executable -- install the genlock bundle (setup-strih.sh step 4) first"; exit 1; }
 
+# issue 1317 (imag issue 1156 pattern): PREFLIGHT the seed's Python import chain BEFORE launching
+# OBS. This wrapper launches OBS and only AFTERWARD runs the seeder; if a module
+# the seed imports is missing on the box (e.g. python3-websocket -- strih_scenes imports it at module
+# load), the seed would die on ModuleNotFoundError AFTER OBS is already up -> set -e aborts this
+# script -> Restart=on-failure relaunches -> a HEALTHY OBS flaps on the live cut. Failing HERE, before
+# any launch, fails the unit cleanly and never touches a running OBS. Loading strih_scenes from the
+# REAL on-box install dir transitively validates the websocket dep too. obs_phase2 is imported LAZILY
+# by strih_scenes (an older box may lack it -> the seed degrades to a direct set), so it is not
+# required by this preflight.
+if ! python3 -c "import sys; sys.path.insert(0, '/usr/local/bin'); import strih_scenes"; then
+  echo "FAIL: strih_scenes import preflight failed -- a seed dependency is missing on the box (e.g. python3-websocket). Refusing to launch OBS (a broken seed would Restart-loop it). Fix: re-run setup-strih.sh (step 6 installs strih_scenes.py; python3-websocket is a runtime dep)."
+  exit 1
+fi
+
 if [ -n "$ISOLATED_CPUS" ]; then
   echo "launching: taskset -c ${ISOLATED_CPUS} ${OBS_BIN} ${OBS_ARGS[*]}"
   taskset -c "$ISOLATED_CPUS" "$OBS_BIN" "${OBS_ARGS[@]}" &
@@ -131,6 +146,16 @@ until (exec 3<>/dev/tcp/127.0.0.1/4455) 2>/dev/null; do
 done
 exec 3<&- 3>&- 2>/dev/null || true
 echo "OK: OBS bezi (pid $OBS_PID), WS :4455 up."
+
+# issue 1317: seed the collection (idempotent) now that OBS's WebSocket is up -- CreateScene +
+# CreateInput per manifest input with the certified genlock settings (genlock_fifo/ndi_sync=2/floor 3)
+# + read-back-verified ndi_source_name + Studio Mode. The import chain was proven by the launch
+# preflight above (imag issue 1156 pattern), so a failure here is a genuine WS/seed problem, not a
+# missing dep. sleep 2 lets the WS ident handshake layer settle before the seed connects (imag's
+# same settle). --host defaults to 127.0.0.1 inside strih_scenes.py.
+sleep 2
+python3 "$SCN" --bootstrap
+echo "OK: scenes seednute (strih_scenes.py --bootstrap)."
 
 # #882: BLOCK until obs itself exits, then propagate ITS exit status -- makes obs (not this wrapper)
 # the process a Type=simple unit tracks. A signal death (segfault) reports non-zero and

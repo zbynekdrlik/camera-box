@@ -197,7 +197,7 @@ strih_lx_profile_facts | tee "$GENLOCK_DIR/strih-lx-profile-facts.txt" | sed 's/
 mkdir -p "$REC_DIR" && chown "$DESKTOP_USER":"$DESKTOP_USER" "$REC_DIR" 2>/dev/null || true
 
 # ---------------------------------------------------------------------------------------------
-step 6 "NDI input/output seed manifest + seeding tooling (reuse obs_phase2.py; strih_scenes.py = follow-up)"
+step 6 "NDI input/output seed manifest + seeding tooling (obs_phase2.py + strih_scenes.py seeder)"
 install -d -m 755 /opt/camera-box
 {
   echo '{"inputs":['
@@ -216,8 +216,15 @@ if [ -n "${GH_TOKEN:-}" ]; then
 else
   warn "  GH_TOKEN unset -- install obs_phase2.py before seeding the scene collection"
 fi
-warn "  TODO(follow-up): a bespoke strih_scenes.py WS seeder (sibling of imag_scenes.py) seeds the"
-warn "  10 inputs (genlock_fifo + floor 3) + the STRIH-LX (...) outputs from strih-lx-seed.json"
+# issue 1317: install the strih_scenes.py seeder (sibling of imag_scenes.py). strih-obs-start.sh
+# preflights `import strih_scenes` then runs `strih_scenes.py --bootstrap` on every launch to seed
+# the 10 inputs (certified genlock: genlock_fifo/ndi_sync=2/floor 3) + per-input scenes + Studio Mode
+# from strih-lx-seed.json. It is in the rsynced tree next to this script (like the launcher pair, step
+# 8), so install it locally -- no GH_TOKEN dependency. The 5 STRIH-LX NDI OUTPUTS are a SEPARATE
+# ticket; the seeder never touches outputs.
+[ -f "${HERE}/strih_scenes.py" ] || fail "scripts/strih_scenes.py not found next to this script (the strih-obs-start.sh --bootstrap seed target)"
+install -m 0755 "${HERE}/strih_scenes.py" /usr/local/bin/strih_scenes.py
+echo "  installed strih_scenes.py -> /usr/local/bin (input/scene/Studio-Mode seeder; strih-obs-start.sh runs --bootstrap on launch)"
 
 # ---------------------------------------------------------------------------------------------
 step 7 "OBS pre-seed: WebSocket :4455 no-auth + Studio Mode"

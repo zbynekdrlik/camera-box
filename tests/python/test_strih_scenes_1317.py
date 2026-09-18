@@ -171,11 +171,13 @@ def test_strih_obs_start_preflights_import_before_launch_and_seeds_after_ws():
     assert pre != -1, "strih-obs-start.sh must preflight `import strih_scenes` (the #1156 pattern)"
     assert launch != -1, "strih-obs-start.sh must have the OBS launch (OBS_PID=$!)"
     assert pre < launch, "the import preflight must come BEFORE the OBS launch line"
-    # --bootstrap seed runs AFTER the :4455 WS-up confirmation
+    # --bootstrap seed runs AFTER the :4455 WS-up confirmation. Anchor the REAL invocation line
+    # (`python3 "$SCN" --bootstrap`), never a bare "strih_scenes.py --bootstrap" that a nearby comment
+    # also contains (the #712/#675 self-collision trap).
     ws_up = s.find("WS :4455 up")
-    boot = s.find("strih_scenes.py --bootstrap")
+    boot = s.find('python3 "$SCN" --bootstrap')
     assert ws_up != -1, "strih-obs-start.sh must confirm WS :4455 up"
-    assert boot != -1, "strih-obs-start.sh must run strih_scenes.py --bootstrap"
+    assert boot != -1, 'strih-obs-start.sh must run `python3 "$SCN" --bootstrap` (the seeder)'
     assert boot > ws_up, "the --bootstrap seed must run AFTER the :4455 wait"
 
 

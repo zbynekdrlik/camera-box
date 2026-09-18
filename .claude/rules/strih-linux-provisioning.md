@@ -110,9 +110,15 @@ not running under the supervisor".
   XWayland `DISPLAY=:0` when an X socket exists, else FAILS LOUD, via `strih_resolve_session_env`);
   the OBS binary at `/opt/obs-genlock/bin/obs` (not on `PATH`); NO taskset pin unless
   `STRIH_ISOLATED_CPUS` / `/etc/strih-isolated-cpus.conf` exists (never a guessed pin, the imag #841
-  lesson); NO DRM lease; NO scene-seeder preflight (the strih seeder is a separate follow-up, so the
-  launcher must not import one). `--profile` / `--collection` are passed only when those OBS dirs
+  lesson); NO DRM lease. `--profile` / `--collection` are passed only when those OBS dirs
   exist (a fresh box has none → default).
+- **The scene-seeder preflight + launch-time seed (issue 1317, DONE — was a follow-up).** After the
+  `[ -x "$OBS_BIN" ]` check and BEFORE launching OBS, the start script preflights the seed's Python
+  import chain (`python3 -c "… import strih_scenes"`) and FAILS the unit if it is broken (a missing
+  `python3-websocket` etc.) — the imag issue 1156 pattern, so a broken seed never `Restart`-loops a
+  live OBS. Then, AFTER the `:4455` WS-up wait (+ a 2 s ident settle), it runs
+  `python3 /usr/local/bin/strih_scenes.py --bootstrap`. See the "OBS input/scene/Studio-Mode seeder"
+  section below.
 - **The unit lifetime IS OBS's lifetime** (`Type=simple`, the imag #882 pattern): the start script
   `wait`s on the OBS pid and propagates its exit — a segfault → non-zero → `Restart=on-failure`; an
   operator quit → 0 → left alone. The stop script routes a PLAIN invocation through
@@ -125,6 +131,44 @@ not running under the supervisor".
   so a dangling launcher names itself. A `tests/strih_provision_pure_functions.rs` lock-step anchor
   pins the unit's ExecStart/ExecStop basenames EQUAL to the installed launcher basenames, so a future
   rename can never re-dangle the ExecStart target.
+
+## OBS input/scene/Studio-Mode seeder — strih_scenes.py (issue 1317, DONE)
+
+strih-lx's OBS boots EMPTY (no scenes/inputs) — it cannot receive or switch any fleet source until
+something seeds it. `scripts/strih_scenes.py` is the focused strih-lx sibling of `imag_scenes.py`
+(seeded on every launch), reusing the on-box `obs_phase2.py` certified-genlock primitives instead of
+importing imag's 70 KB DRM-lease/encoder/picom machinery that strih-lx does not need.
+
+- **SCOPE: the 10 NDI INPUTS + one per-input scene + Studio Mode**, read from
+  `/opt/camera-box/strih-lx-seed.json` (setup-strih.sh step 6). The **5 STRIH-LX NDI OUTPUTS are a
+  SEPARATE ticket** — the seeder never touches `outputs`.
+- **Pure helpers (Tier-0 testable, no rig):** `parse_seed_manifest(text) → (inputs, outputs, latency)`;
+  `certified_genlock_settings(latency)` = the locked baseline `{ndi_bw_mode:0, genlock_fifo:True,
+  ndi_sync:2, latency:<floor>}` (latency rides the manifest floor **3**, NOT obs_phase2's probe
+  default 0); `seed_inputs(inputs, latency)` → one `{scene, input, ndi_source_name, settings}` per
+  input (scene = the source display name e.g. `CAM1 (usb)`; input = `NDI ` + name, kept DISTINCT from
+  the scene; `ndi_source_name` is a TOP-LEVEL field, not inside `settings`); `scene_order`;
+  `input_parity_problems`. Duplicate/empty names are dropped so a repeated name never double-creates.
+- **`--bootstrap` (the default action):** connect WS (`127.0.0.1:4455`, no-auth), per input
+  `CreateScene` + `CreateInput` (kind `ndi_source`) ignoring "already exists", THEN re-apply the
+  certified settings over an EXISTING input (`SetInputSettings overlay:True`) — because `CreateInput`
+  on an existing input fails "already exists" and would NOT update settings, so genlock_fifo could
+  otherwise silently drift off across a relaunch (genlock is not a forgettable toggle). Read-back-verify
+  each `ndi_source_name` via `obs_phase2.reenforce_ndi_name` (the #795-safe #1158 shape) when
+  obs_phase2 is importable, else a direct overlay set + read-back. Finally `SetStudioModeEnabled true`.
+- **`--verify-parity` (read-only):** prints ONE whole line `strih ndi inputs: OK` (or the problem
+  list) that `verify-strih.sh` item 4b greps with `grep -qxF`, **report-only** so a not-yet-launched
+  box (OBS/WS down) is a NOTE, never a hard FAIL — the seed is a LAUNCH-time action, not a
+  provisioning artifact.
+- **obs_phase2 is imported LAZILY** (`_obs_phase2_module`, the #1156 class): an older box may lack it,
+  so the read-back verify degrades to a direct set rather than crashing the boot seed. The top-level
+  `from websocket import create_connection` IS the dep the launch preflight validates.
+- **Install + launch wiring.** `setup-strih.sh` step 6 `install -m 0755 "${HERE}/strih_scenes.py"
+  /usr/local/bin/strih_scenes.py` (fail-loud if absent next to the script), alongside the manifest +
+  `obs_phase2.py`. `strih-obs-start.sh` preflights `import strih_scenes` BEFORE launch and runs
+  `--bootstrap` AFTER the `:4455` wait. Tests: `tests/python/test_strih_scenes_1317.py` (pure helpers +
+  the two static-anchor asserts on the launcher/setup wiring — a python assert over the script text,
+  so it runs in Tier-0 with no cargo).
 
 ## Runtime packages + the /usr prefix install (issue 1317, DONE)
 
@@ -331,10 +375,12 @@ sandbox!` → the render process dies). `verify-strih.sh` item 13 only checks th
 
 - ~~obs-browser / CEF in the strih CI variant~~ — **DONE (issue 1317, CEF now wired)**, see the CI
   section above.
-- **A bespoke `strih_scenes.py`** WS seeder (sibling of `imag_scenes.py`) that seeds the 10 inputs
-  (genlock_fifo + floor 3) + the `STRIH-LX (...)` outputs from `/opt/camera-box/strih-lx-seed.json`
-  and enforces Studio Mode. `setup-strih.sh` installs the seed manifest + `obs_phase2.py` primitives;
-  the full seeder is deferred.
+- ~~A bespoke `strih_scenes.py` WS seeder (sibling of `imag_scenes.py`) that seeds the 10 inputs
+  (genlock_fifo + floor 3) + per-input scenes + Studio Mode~~ — **DONE (issue 1317, INPUTS/scenes/
+  Studio only)**, see the "OBS input/scene/Studio-Mode seeder" section above. The **5 STRIH-LX NDI
+  OUTPUTS** (`STRIH-LX (2ME PGM/PVW)` + the `interkom/MULTIVIEW/Grading` republishes) are a SEPARATE
+  ticket — they need a study of the Windows-strih DistroAV output+republish config (imag has one
+  output, no reference); the seeder never touches outputs.
 - **`deploy-genlock-fleet.sh` strih-lx EXECUTE deploy** (scp the strih artifact + ssh-run the on-box
   program). The pure helpers + the PLAN arm exist; execute reuses the imag transport with
   `fleet_linux_bundle_artifact_for strih-lx` + `STRIH_LX_IP` once the box exists.
