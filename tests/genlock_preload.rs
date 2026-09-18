@@ -1940,6 +1940,26 @@ mod vendored_source {
              deliberate audio trim would be cancelled again. Keep numerically identical to \
              src/asrc_bench.rs shift_level_target."
         );
+        // issue #1335 follow-up 3: a DELIBERATE setpoint shift of >= the restore's own exit band must
+        // ALSO arm the fast bounded level restore (asrc_compensator_shift_level_target sets
+        // level_restore), so a deliberate audio-offset trim settles in minutes instead of ringing for
+        // hours at the +/-3 ppm I rail (the 18.9. 12 h series). Src authority + Tier-0 gate: the
+        // shift_level_target_arms_fast_restore_on_deliberate_shift_1335 bench. Keep the ARM constant
+        // and the arming line byte-exact with the shipped C.
+        assert!(
+            h.contains("#define ASRC_LEVEL_RESTORE_ARM_MS 5.0"),
+            "{ASRC_COMPENSATOR_H}: #1335 follow-up 3 — the ASRC_LEVEL_RESTORE_ARM_MS = 5.0 arm-band \
+             constant (equal to the restore's exit band) is no longer defined."
+        );
+        assert!(
+            c.contains(
+                "if (fabs(delta_ms) >= ASRC_LEVEL_RESTORE_ARM_MS) c->level_restore = true;"
+            ),
+            "{ASRC_COMPENSATOR_C}: #1335 follow-up 3 — asrc_compensator_shift_level_target no longer \
+             arms level_restore when |delta_ms| >= ASRC_LEVEL_RESTORE_ARM_MS; a deliberate offset \
+             trim would ring for hours at the +/-3 ppm rail again. Keep numerically identical to \
+             src/asrc_bench.rs shift_level_target."
+        );
 
         let src = squish(&vendor_file(OBS_SOURCE));
         assert!(

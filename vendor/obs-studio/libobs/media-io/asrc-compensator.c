@@ -353,11 +353,22 @@ double asrc_compensator_get_outer_bias_ppm(const struct asrc_compensator *c)
 /* camera-box #1335 follow-up: move the captured buffer-LEVEL setpoint by a deliberate audio
  * sync-offset delta so the level integral holds the NEW depth instead of refilling toward the old
  * one and cancelling the deliberate trim. No-op until the setpoint has been captured (first rate
- * lock). Mirror of src/asrc_bench.rs RealtimeAsrcCompensator::shift_level_target -- keep identical. */
+ * lock). Mirror of src/asrc_bench.rs RealtimeAsrcCompensator::shift_level_target -- keep identical.
+ *
+ * camera-box #1335 follow-up 3: a shift whose |delta| >= ASRC_LEVEL_RESTORE_ARM_MS (5 ms) ALSO arms
+ * the fast bounded level restore, so the level reaches the new depth in minutes with the integral
+ * frozen (follow-up 2) instead of the ~1 h / hours-of-ringing the +/-3 ppm I term needs (the 18.9.
+ * 12 h series). A sub-band shift arms nothing -- the gentle I+P loop absorbs it. */
 void asrc_compensator_shift_level_target(struct asrc_compensator *c, double delta_ms)
 {
 	if (c->level_captured) {
 		c->level_target_ms += delta_ms;
 		c->level_last_ms += delta_ms;
+		/* camera-box #1335 follow-up 3: a deliberate setpoint shift of at least the restore's exit
+		 * band arms the FAST bounded level restore, so the level reaches the new depth in minutes
+		 * (integral frozen per follow-up 2) instead of the ~1 h / hours-of-ringing the +/-3 ppm I
+		 * term needs (the 18.9. 12 h series). Below the band the existing I+P loop settles it. */
+		if (fabs(delta_ms) >= ASRC_LEVEL_RESTORE_ARM_MS)
+			c->level_restore = true;
 	}
 }

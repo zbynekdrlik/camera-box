@@ -302,6 +302,15 @@ pub const LEVEL_RESTORE_K_PPM_PER_MS: f64 = 2.0;
 /// asrc-compensator.h ASRC_LEVEL_RESTORE_MAX_PPM — keep numerically identical.
 pub const LEVEL_RESTORE_MAX_PPM: f64 = 100.0;
 
+/// camera-box #1335 follow-up 3: arm band (ms) for the FAST level restore when a DELIBERATE setpoint
+/// shift ([`RealtimeAsrcCompensator::shift_level_target`]) moves the setpoint. A shift whose |delta|
+/// is at least this arms the restore burst, so a deliberate audio sync-offset trim settles in minutes
+/// with the integral frozen (follow-up 2) rather than the ~1 h the +/-3 ppm I term needs (the 18.9.
+/// 12 h series: a 12 ms shift railed the integral for ~1 h and rang for hours). Equals the restore's
+/// own exit band (`|buffered - target| < 5 ms`); arming below it would exit on the first tick. Mirror
+/// of asrc-compensator.h ASRC_LEVEL_RESTORE_ARM_MS -- keep numerically identical.
+pub const LEVEL_RESTORE_ARM_MS: f64 = 5.0;
+
 /// camera-box #1335 follow-up 2: proportional gain of the level-LEVEL P term, in ppm per ms of level
 /// error, folded into the correction target every call (once locked) as `clamp(Kp·(buffered −
 /// target), ±1)`. It damps the I-only level loop's ~3.9 h clamp-to-clamp oscillation (observed
@@ -598,10 +607,23 @@ impl RealtimeAsrcCompensator {
     /// [`Self::regression_flush`], which drops `level_captured` so the setpoint re-captures and the
     /// buffer self-heals its calibrated depth. No-op until the setpoint has been captured (first
     /// rate lock). Exact mirror of the C `asrc_compensator_shift_level_target()`.
+    ///
+    /// issue #1335 follow-up 3: a shift whose `|delta| >= LEVEL_RESTORE_ARM_MS` (5 ms) ALSO arms the
+    /// fast bounded level restore, so the level reaches the new depth in minutes with the integral
+    /// frozen (follow-up 2) instead of the ~1 h at the +-3 ppm rail the plain I term needs (the 18.9.
+    /// 12 h series). A sub-band shift arms nothing — the gentle I+P loop absorbs it.
     pub fn shift_level_target(&mut self, delta_ms: f64) {
         if self.level_captured {
             self.level_target_ms += delta_ms;
             self.level_last_ms += delta_ms;
+            // camera-box #1335 follow-up 3: a deliberate setpoint shift of at least the restore's
+            // exit band arms the FAST bounded level restore, so the level reaches the new depth in
+            // minutes (integral frozen per follow-up 2) rather than the ~1 h / hours-of-ringing the
+            // +/-3 ppm I term needs (the 18.9. 12 h series). Below the band the existing I+P loop
+            // settles the small shift without a restore burst. Exact mirror of the C arming line.
+            if delta_ms.abs() >= LEVEL_RESTORE_ARM_MS {
+                self.level_restore = true;
+            }
         }
     }
 

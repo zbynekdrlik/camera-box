@@ -162,6 +162,15 @@ extern "C" {
  * ASRC_MAX_PPM. Mirror of src/asrc_bench.rs LEVEL_RESTORE_MAX_PPM -- keep numerically identical. */
 #define ASRC_LEVEL_RESTORE_MAX_PPM 100.0
 
+/* camera-box #1335 follow-up 3: arm band for the FAST level RESTORE when a DELIBERATE setpoint shift
+ * (asrc_compensator_shift_level_target) moves level_target_ms, in ms. A shift whose |delta| is at
+ * least this arms the restore burst so a deliberate audio sync-offset trim settles in minutes with
+ * the integral frozen (follow-up 2), instead of the ~1 h the +/-3 ppm I term needs (the 18.9. 12 h
+ * series: a 12 ms shift railed the integral for ~1 h and rang for hours). Set to the restore's own
+ * exit band (|buffered - target| < 5 ms) -- arming below it would exit on the first tick. Mirror of
+ * src/asrc_bench.rs LEVEL_RESTORE_ARM_MS -- keep numerically identical. */
+#define ASRC_LEVEL_RESTORE_ARM_MS 5.0
+
 /* camera-box #1335 follow-up 2: proportional gain of the level-LEVEL P term, in ppm per ms of level
  * error, folded into the correction target every call (once locked) as clamp(Kp*(buffered - target),
  * +/-1). It damps the I-only level loop's ~3.9 h clamp-to-clamp oscillation (observed 14:00-20:45,

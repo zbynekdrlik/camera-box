@@ -484,3 +484,27 @@ a main-owned control-design decision.
   pins the new C constants + re-base + restore + P fold + integral-freeze + the obs-source.c telemetry
   byte-exact (squished). No new pwsh gate (the change rides the existing genlock build); the existing
   `level=/target=/integral= (#1335)` pwsh substring is preserved intact.
+
+## #1335 follow-up 3 — a deliberate setpoint shift ARMS the fast restore (the restore has TWO arm sources)
+
+The fast bounded level restore (`ASRC_LEVEL_RESTORE_K_PPM_PER_MS` / `..._MAX_PPM`, follow-up 2) is now
+armed from TWO independent places, never just one:
+
+1. **Step-tolerant regression, level-corroborated** (follow-up 2, `asrc-compensator.c` re-base branch):
+   a permanent input sample-loss/dup whose buffer deficit corroborates the residual.
+2. **A deliberate setpoint shift `|Δ| >= ASRC_LEVEL_RESTORE_ARM_MS` (5 ms)** (follow-up 3,
+   `asrc_compensator_shift_level_target` / Rust `shift_level_target`): a deliberate audio sync-offset
+   trim (issue 1333's split) moves `level_target_ms` by Δ, so the level error jumps to Δ.
+
+WHY follow-up 3 exists: the 18.9. 12 h acceptance series showed a +12 ms setpoint shift being worked
+off by the +/-3 ppm I term alone — it took ~1 h, RAILED the integral (34 samples at the -3 clamp), then
+rang with a decaying +-8 ms / ~4 h cycle for hours. The restore burst exists for exactly this move;
+arming it in the shift settles a 12 ms trim in minutes (integral frozen per follow-up 2), no windup, no
+ringing. The arm band equals the restore's own exit band (`|buffered - target| < 5 ms`) — arming below
+it would exit on the first tick. Kr/clamp/exit/integral-freeze are UNCHANGED; at the shipped Kr=2 a
+12 ms move settles to +-5 ms in ~433 s (a ~500 s time constant, the SAME clamp-does-not-bind calibration
+follow-up 2 documents for its 50 ms step, NOT the design's aspirational ~2 min — flagged for main
+ratification alongside the follow-up-2 Kp/Kr retune note). Bench:
+`shift_level_target_arms_fast_restore_on_deliberate_shift_1335` (armed + settle <=600 s + integral never
+rails for the +12 ms case; arms nothing for +3 ms). Lock-step anchor: the new ARM constant + arming line
+are pinned byte-exact in `tests/genlock_preload.rs::asrc_setpoint_follows_sync_offset_1335`.
