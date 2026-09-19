@@ -876,3 +876,127 @@ fn projector_verdict_grades_saveprojectors_hdmi_and_saved_entry() {
     assert_ne!(c5, 0);
     assert_eq!(out5, "saveprojectors-missing");
 }
+
+/// issue 1345 M3a: `strih_janus_audiobridge_jcfg_text ROOM SECRET_PATH` renders the interkom room
+/// jcfg (48 kHz, plain-RTP participants) with the secret as a PLACEHOLDER (never inlined), and names
+/// the secret path only in a provenance comment.
+#[test]
+fn janus_audiobridge_jcfg_renders_interkom_room_without_inlining_a_secret() {
+    let (code, out, err) = run_sourced(
+        &[],
+        "strih_janus_audiobridge_jcfg_text 1000 /etc/intercom-hub/janus-room.secret",
+    );
+    assert_eq!(code, 0, "renderer must succeed; stderr={err}");
+    assert!(
+        out.contains("room-1000:"),
+        "declares room-1000; got:\n{out}"
+    );
+    assert!(
+        out.contains("description = \"interkom\""),
+        "names the interkom room"
+    );
+    assert!(out.contains("sampling_rate = 48000"), "48 kHz room");
+    assert!(
+        out.contains("allow_rtp_participants = true"),
+        "plain-RTP allowed"
+    );
+    assert!(out.contains("record = false"), "recording off");
+    // The secret is a PLACEHOLDER, never a value; the path is only in a comment.
+    assert!(
+        out.contains("@JANUS_ROOM_SECRET@"),
+        "the secret is a placeholder"
+    );
+    assert!(
+        out.contains("/etc/intercom-hub/janus-room.secret"),
+        "the provenance comment names the secret path"
+    );
+    // No hex-looking secret leaked into the rendered text (only the placeholder line carries `secret`).
+    for line in out.lines() {
+        if line.trim_start().starts_with("secret") {
+            assert!(
+                line.contains("@JANUS_ROOM_SECRET@"),
+                "the secret line must be the placeholder, not a value: {line}"
+            );
+        }
+    }
+}
+
+/// issue 1345 M3a: `strih_janus_ws_jcfg_text LAN_IP` renders the WebSocket transport jcfg on :8188
+/// with NO wss (TLS terminates on the dev1 front) and the admin API off; the LAN IP is documented.
+#[test]
+fn janus_ws_jcfg_renders_ws_no_wss() {
+    let (code, out, err) = run_sourced(&[], "strih_janus_ws_jcfg_text 10.77.9.203");
+    assert_eq!(code, 0, "renderer must succeed; stderr={err}");
+    assert!(out.contains("ws = true"), "ws enabled; got:\n{out}");
+    assert!(out.contains("ws_port = 8188"), "ws on :8188");
+    assert!(out.contains("wss = false"), "no wss (TLS on the front)");
+    assert!(out.contains("admin_ws = false"), "admin API off");
+    assert!(out.contains("10.77.9.203"), "the LAN IP is documented");
+}
+
+/// issue 1345 M3a: `strih_janus_room_jcfg_ok ROOM` (stdin: jcfg) grades whether the interkom room is
+/// declared at 48 kHz with plain-RTP participants — a pure grep, no janus binary. A rendered jcfg for
+/// room 1000 passes for 1000 and fails for a different room id (fail-closed).
+#[test]
+fn janus_room_jcfg_ok_grades_the_rendered_room() {
+    let (c_ok, out_ok, _e) = run_sourced(
+        &[],
+        "if strih_janus_audiobridge_jcfg_text 1000 /x | strih_janus_room_jcfg_ok 1000; then echo OK; else echo BAD; fi",
+    );
+    assert_eq!(c_ok, 0);
+    assert!(
+        out_ok.contains("OK"),
+        "the rendered room 1000 jcfg must grade OK; got: {out_ok}"
+    );
+
+    let (_c, out_bad, _e) = run_sourced(
+        &[],
+        "if strih_janus_audiobridge_jcfg_text 1000 /x | strih_janus_room_jcfg_ok 9999; then echo OK; else echo BAD; fi",
+    );
+    assert!(
+        out_bad.contains("BAD"),
+        "a mismatched room id must fail-closed; got: {out_bad}"
+    );
+
+    // A jcfg missing the sampling_rate line fails.
+    let (_c2, out_missing, _e) = run_sourced(
+        &[],
+        "if printf 'room-1000:\\n    description = \"interkom\"\\n    allow_rtp_participants = true\\n' | strih_janus_room_jcfg_ok 1000; then echo OK; else echo BAD; fi",
+    );
+    assert!(
+        out_missing.contains("BAD"),
+        "a jcfg without sampling_rate = 48000 must fail; got: {out_missing}"
+    );
+}
+
+/// issue 1345 M3a: `setup-strih.sh` step 14 must apt-install janus + enable-only (never start) and
+/// run BEFORE the final verify (step 15). Mirrors the dantesync/NDI ordering anchors.
+#[test]
+fn setup_strih_installs_janus_enable_only_before_final_verify() {
+    let s = read_script("scripts/setup-strih.sh");
+    let apt = s
+        .find("apt-get install -y janus")
+        .expect("setup-strih step 14 must apt-get install janus");
+    let enable = s
+        .find("systemctl enable janus")
+        .expect("setup-strih step 14 must enable janus");
+    let verify = s
+        .find("verify-strih.sh acceptance gate")
+        .expect("setup-strih step 15 must run the verify gate");
+    assert!(
+        apt < enable,
+        "install before enable (apt {apt} vs enable {enable})"
+    );
+    assert!(
+        enable < verify,
+        "janus enable must precede the final verify (enable {enable} vs verify {verify})"
+    );
+    assert!(
+        !s.contains("systemctl start janus") && !s.contains("systemctl restart janus"),
+        "janus is enable-only (never start/restart) until the M4 cut-over"
+    );
+    assert!(
+        s.contains("TOTAL_STEPS=15"),
+        "TOTAL_STEPS must be bumped for the janus step"
+    );
+}
