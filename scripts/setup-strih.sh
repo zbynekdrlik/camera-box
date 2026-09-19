@@ -412,7 +412,9 @@ if [ -d /etc/janus ] || command -v janus >/dev/null 2>&1; then
   JANUS_SECRET_VALUE="$(cat "$JANUS_SECRET_FILE")"
   JANUS_AB_JCFG="$(strih_janus_audiobridge_jcfg_text "$JANUS_ROOM" "$JANUS_SECRET_FILE")"
   JANUS_AB_JCFG="${JANUS_AB_JCFG//@JANUS_ROOM_SECRET@/$JANUS_SECRET_VALUE}"
-  printf '%s\n' "$JANUS_AB_JCFG" > /etc/janus/janus.plugin.audiobridge.jcfg
+  # Create it 0640 FROM BIRTH (umask 027 in a subshell) so the secret-bearing file is never briefly
+  # world-readable between the write and a later chmod (F5); the chmod is belt-and-suspenders.
+  ( umask 027; printf '%s\n' "$JANUS_AB_JCFG" > /etc/janus/janus.plugin.audiobridge.jcfg )
   chmod 640 /etc/janus/janus.plugin.audiobridge.jcfg
   unset JANUS_SECRET_VALUE JANUS_AB_JCFG
   strih_janus_ws_jcfg_text "$STATIC_IP" > /etc/janus/janus.transport.websockets.jcfg
