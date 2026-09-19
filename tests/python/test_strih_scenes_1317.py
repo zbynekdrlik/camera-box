@@ -41,7 +41,12 @@ _REAL_MANIFEST = json.dumps(
     {"inputs": _TEN_INPUTS, "outputs": _FIVE_OUTPUTS, "camera_latency_ms": 3}
 )
 
-_CERTIFIED = {"ndi_bw_mode": 0, "genlock_fifo": True, "ndi_sync": 2, "latency": 3}
+# issue 1317 (live finding 19.9.2026): the camera class carries the manifest floor as the REAL per-source
+# genlock ms knob `genlock_latency_ms_src`, NOT the stock DistroAV `latency` receive-buffer MODE enum --
+# the genlock build's certified coercion forces `latency` back to 0 (NORMAL) on every genlock_fifo
+# input, so a seeded `latency: 3` read back 0 forever and --bootstrap re-wrote + name-re-enforced all
+# 8 camera-class inputs on EVERY launch (never the pure read the update-only path promised).
+_CERTIFIED = {"ndi_bw_mode": 0, "genlock_fifo": True, "ndi_sync": 2, "genlock_latency_ms_src": 3}
 # issue 1317: the two per-class settings dicts. camera = the certified genlock baseline; feedback =
 # the Windows strih `light.json` 2ME-input mode (ndi_sync=1 SOURCE_TIMING, latency=1), pinned with
 # genlock_fifo=False EXPLICITLY (not omitted) so a SetInputSettings(overlay=True) heal actually clears
@@ -99,8 +104,9 @@ def test_parse_seed_manifest_drops_empty_and_nonstring_entries():
 
 def test_certified_genlock_settings_is_the_locked_baseline():
     assert _mod.certified_genlock_settings(3) == _CERTIFIED
-    # latency rides the manifest floor, NOT obs_phase2's probe default 0
-    assert _mod.certified_genlock_settings(5)["latency"] == 5
+    # the manifest floor rides the REAL genlock ms knob, never the stock `latency` mode enum
+    assert _mod.certified_genlock_settings(5)["genlock_latency_ms_src"] == 5
+    assert "latency" not in _mod.certified_genlock_settings(5)
     # fresh dict each call (never a shared mutable default)
     a = _mod.certified_genlock_settings(3)
     a["genlock_fifo"] = False
@@ -248,8 +254,9 @@ def test_input_class_for_2me_feedback_is_feedback_regardless_of_prefix():
 def test_input_settings_for_camera_class_is_the_certified_genlock_dict():
     assert _mod.input_settings_for("CAM3 (usb)", 3) == _CAMERA
     assert _mod.input_settings_for("RESOLUME-SNV (cg-obs)", 3) == _CAMERA
-    # camera latency rides the manifest floor
-    assert _mod.input_settings_for("CAM1 (usb)", 5)["latency"] == 5
+    # camera latency rides the manifest floor on the REAL genlock ms knob
+    assert _mod.input_settings_for("CAM1 (usb)", 5)["genlock_latency_ms_src"] == 5
+    assert "latency" not in _mod.input_settings_for("CAM1 (usb)", 5)
     # fresh dict each call (never a shared mutable default)
     a = _mod.input_settings_for("CAM1 (usb)", 3)
     a["genlock_fifo"] = False
@@ -323,7 +330,9 @@ class _FakeObs:
     def req(self, req_type, data=None, ignore_err=False):
         self.calls.append((req_type, data or {}))
         if req_type == "GetInputDefaultSettings":
-            return {"defaultInputSettings": {"ndi_bw_mode": 0, "ndi_sync": 2, "latency": 0}}
+            # the genlock build's ndi_source defaults: latency MODE 0 (NORMAL) + the 3 ms floor pin
+            return {"defaultInputSettings": {"ndi_bw_mode": 0, "ndi_sync": 2, "latency": 0,
+                                             "genlock_latency_ms_src": 3}}
         if req_type == "GetInputSettings":
             name = (data or {}).get("inputName")
             return {"inputSettings": dict(self._existing.get(name, {}))}
@@ -355,12 +364,28 @@ def test_bootstrap_updates_a_mismatched_existing_input():
 def test_bootstrap_emits_no_settings_update_for_a_matching_input():
     plan = _mod.seed_inputs(["CAM3 (usb)"], 3)  # a camera input
     inp = plan[0]["input"]
-    # already correctly seeded to the camera class -> effective matches -> NO settings update emitted
-    existing = {inp: {"ndi_bw_mode": 0, "genlock_fifo": True, "ndi_sync": 2, "latency": 3,
+    # already correctly seeded to the camera class -> effective matches -> NO settings update emitted.
+    # The explicit settings are what a LIVE genlock receiver reads back (strih-lx 19.9.2026): the
+    # certified coercion normalises the stock `latency` mode to 0, and the 3 ms floor sits on
+    # `genlock_latency_ms_src` (the build default, so it may even be ABSENT from the explicit set).
+    existing = {inp: {"ndi_bw_mode": 0, "genlock_fifo": True, "ndi_sync": 2, "latency": 0,
                       "ndi_source_name": "CAM3 (usb)"}}
     obs = _FakeObs(existing)
     _mod.bootstrap(obs, plan, studio=False)
     assert _settings_updates(obs.calls) == [], obs.calls
+
+
+def test_bootstrap_is_a_pure_read_for_a_live_certified_camera_with_explicit_pin():
+    plan = _mod.seed_inputs(["CAM1 (usb)"], 3)
+    inp = plan[0]["input"]
+    # the exact live read-back of a healthy strih-lx camera input after a prior seed: latency mode
+    # coerced to 0, the ms pin explicit at the floor -> a pure read, no re-write, no name re-enforce
+    existing = {inp: {"ndi_bw_mode": 0, "genlock_fifo": True, "ndi_sync": 2, "latency": 0,
+                      "genlock_latency_ms_src": 3, "ndi_source_name": "CAM1 (usb)"}}
+    obs = _FakeObs(existing)
+    _mod.bootstrap(obs, plan, studio=False)
+    assert _settings_updates(obs.calls) == [], obs.calls
+    assert not any(c[0] == "SetInputSettings" for c in obs.calls)
 
 
 def test_settings_update_needed_treats_absent_genlock_fifo_as_false():
