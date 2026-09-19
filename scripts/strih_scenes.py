@@ -217,13 +217,23 @@ def input_parity_problems(actual, expected_plan):
 
 def settings_update_needed(effective, desired):
     """Pure (issue 1317): True iff any key in `desired` differs from `effective` (a key missing from
-    `effective` counts as differing). `desired` = the class settings merged with ndi_source_name;
-    `effective` = the input's defaults-merged effective settings (obs_phase2 _effective_input_settings
-    shape). Drives the --bootstrap UPDATE-only path: an existing input already matching its class emits
-    no SetInputSettings; a mis-seeded one (e.g. a 2ME feedback input left genlock_fifo=True) differs on
-    a class key and is healed."""
+    `effective` counts as differing, EXCEPT genlock_fifo -- see below). `desired` = the class settings
+    merged with ndi_source_name; `effective` = the input's defaults-merged effective settings
+    (obs_phase2 _effective_input_settings shape). Drives the --bootstrap UPDATE-only path: an existing
+    input already matching its class emits no SetInputSettings; a mis-seeded one (e.g. a 2ME feedback
+    input left genlock_fifo=True) differs on a class key and is healed."""
     for k, v in desired.items():
-        if effective.get(k) != v:
+        ev = effective.get(k)
+        if k == "genlock_fifo":
+            # DistroAV's genlock_fifo is NOT in the ndi_source type defaults (obs_phase2 #149), so
+            # obs-websocket OMITS it when it equals its (unregistered zero == False) default. A
+            # correctly-seeded feedback input (genlock_fifo=False) therefore reads back with the key
+            # ABSENT -- compare truthiness so absent == False is a pure read (not a needless re-write
+            # every launch), while a mis-seeded genlock_fifo=True still differs from False and heals.
+            if bool(ev) != bool(v):
+                return True
+            continue
+        if ev != v:
             return True
     return False
 
