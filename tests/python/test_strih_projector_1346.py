@@ -179,6 +179,25 @@ def test_seed_projector_opens_multiview_on_hdmi_when_not_saved(tmp_path, capsys)
     assert status == "opened-multiview"
 
 
+def test_seed_projector_idempotent_via_glob_when_collection_name_slugified(tmp_path, capsys):
+    # OBS slugifies a display-name into a different filename ("My Show" -> My_Show.json). The WS name
+    # ("My Show") has no matching <name>.json, so the resolver globs all collection files and STILL
+    # finds the saved Multiview projector -> skip (no duplicate window). Guards FINDING 4b-1.
+    scenes = tmp_path / "basic" / "scenes"
+    scenes.mkdir(parents=True)
+    (scenes / "My_Show.json").write_text(json.dumps(
+        {"name": "My Show", "saved_projectors": [{"monitor": 1, "type": 4}]}
+    ))
+    obs = _FakeObs([
+        {"monitorName": "eDP-2(0)", "monitorIndex": 0},
+        {"monitorName": "HDMI-A-1(1)", "monitorIndex": 1},
+    ], collection="My Show")  # no "My Show.json" -> exact-name miss -> glob fallback
+    status = _mod.seed_projector(obs, config_path=str(tmp_path / "nope.json"),
+                                 cfg_dir=str(tmp_path))
+    assert obs.opened() == [], "glob fallback must find the slugified collection's saved projector"
+    assert status == "already-saved"
+
+
 def test_seed_projector_idempotent_skips_when_already_saved(tmp_path, capsys):
     # a collection file with a Multiview (type 4) projector already saved on monitor 1
     scenes = tmp_path / "basic" / "scenes"
@@ -216,13 +235,16 @@ def _read(name):
 
 def test_setup_strih_preseeds_saveprojectors_before_the_obs_enable():
     s = _read("setup-strih.sh")
-    save = s.find("SaveProjectors=true")
+    # anchor the FUNCTIONAL heredoc line (the configparser upsert), NOT the prose comment/echo that
+    # also mention "SaveProjectors=true" -- so this proves the actual pre-seed runs before the enable.
+    save = s.find('for kv in ("SaveProjectors=true", "ProjectorAlwaysOnTop=true")')
     enable = s.find("systemctl --user enable strih-obs.service")
-    assert save != -1, "setup-strih.sh must pre-seed SaveProjectors=true in user.ini (issue 1346)"
+    assert save != -1, (
+        "setup-strih.sh step 7 must pre-seed SaveProjectors=true + ProjectorAlwaysOnTop=true in "
+        "user.ini via the `for kv in (\"SaveProjectors=true\", \"ProjectorAlwaysOnTop=true\")` upsert"
+    )
     assert enable != -1, "setup-strih.sh step 8 must enable strih-obs.service"
     assert save < enable, "the SaveProjectors=true pre-seed (step 7) must precede the OBS enable (step 8)"
-    # ProjectorAlwaysOnTop=true is pre-seeded too
-    assert "ProjectorAlwaysOnTop=true" in s, "setup-strih.sh must also pre-seed ProjectorAlwaysOnTop=true"
 
 
 def test_setup_strih_writes_projector_json_default_multiview_without_overwrite():

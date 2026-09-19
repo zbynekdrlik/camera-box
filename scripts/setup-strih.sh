@@ -259,15 +259,17 @@ if command -v python3 >/dev/null 2>&1; then
   python3 - "$USER_INI" <<'PY' || warn "  could not pre-seed SaveProjectors in ${USER_INI} (non-fatal; the OBS UI / strih_scenes.py --projector still work)"
 import configparser, os, sys
 path = sys.argv[1]
-cp = configparser.RawConfigParser()
+# strict=False tolerates duplicate keys/sections OBS may write; RawConfigParser avoids % interpolation.
+cp = configparser.RawConfigParser(strict=False)
 cp.optionxform = str
 if os.path.exists(path):
     try:
         cp.read(path)
     except Exception as e:
-        sys.stderr.write("user.ini parse failed (%s); starting a fresh [BasicWindow]\n" % e)
-        cp = configparser.RawConfigParser()
-        cp.optionxform = str
+        # NEVER clobber an existing user.ini we could not parse -- leave it untouched and let the
+        # caller's `|| warn` fire (a fresh-parser rewrite would DISCARD every other OBS setting).
+        sys.stderr.write("user.ini parse failed (%s) -- leaving it untouched\n" % e)
+        sys.exit(3)
 if not cp.has_section("BasicWindow"):
     cp.add_section("BasicWindow")
 for kv in ("SaveProjectors=true", "ProjectorAlwaysOnTop=true"):

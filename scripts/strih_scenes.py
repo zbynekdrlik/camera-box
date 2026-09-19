@@ -42,6 +42,7 @@ live OBS. obs_phase2 is imported LAZILY (an older box may not carry it -> degrad
 never crash the boot seed).
 """
 import argparse
+import glob
 import json
 import os
 import sys
@@ -363,31 +364,70 @@ def verify_parity(obs, manifest_text):
         sys.exit(1)
 
 
-def _current_collection_saved_projectors(obs, cfg_dir):
-    """Return the CURRENT scene collection's saved_projectors list (from the on-disk collection JSON
-    OBS persists with SaveProjectors=true), or [] when it cannot be resolved/read (first boot: no
-    saved file yet -> seed opens the projector). Resolves the collection name over
-    GetSceneCollectionList (the design's approach) and reads
-    <cfg_dir>/basic/scenes/<name>.json. A WS hiccup / missing / unreadable file -> [] (the seed
-    proceeds and opens; a stacked duplicate is guarded only when a saved entry is genuinely present)."""
-    name = ""
+def _userini_scene_collection_base(cfg_dir):
+    """The authoritative CURRENT scene-collection base filename from user.ini `[Basic]
+    SceneCollectionFile` -- OBS records the exact on-disk base there, robust against display-name
+    slugification (a name with spaces/punctuation maps to a different filename). Returns the base
+    (no .json) or None when user.ini is absent/unreadable/has no such key."""
+    ini = os.path.join(cfg_dir, "user.ini")
     try:
-        name = ((obs.req("GetSceneCollectionList", ignore_err=True) or {})
-                .get("currentSceneCollectionName") or "")
-    except Exception as e:  # noqa: BLE001 -- a WS hiccup -> unresolved, seed proceeds; log it
-        print("projector: could not read GetSceneCollectionList (%s) -- treating as unsaved" % e)
-        return []
-    if not name:
-        return []
-    path = os.path.join(cfg_dir, "basic", "scenes", name + ".json")
+        with open(ini) as fh:
+            in_basic = False
+            for line in fh:
+                s = line.strip()
+                if s.startswith("[") and s.endswith("]"):
+                    in_basic = (s == "[Basic]")
+                    continue
+                if in_basic and s.startswith("SceneCollectionFile="):
+                    return s.split("=", 1)[1].strip() or None
+    except OSError:
+        return None
+    return None
+
+
+def _read_saved_projectors_file(path):
+    """The `saved_projectors` list from a scene collection JSON file, or [] when it is missing/
+    unreadable/non-JSON or has no list (never raises)."""
     try:
         with open(path) as fh:
             d = json.load(fh)
-    except (OSError, ValueError) as e:
-        print("projector: collection file %s not readable (%s) -- treating as unsaved" % (path, e))
+    except (OSError, ValueError):
         return []
     sp = d.get("saved_projectors")
     return sp if isinstance(sp, list) else []
+
+
+def _current_collection_saved_projectors(obs, cfg_dir):
+    """Return the CURRENT scene collection's saved_projectors list (from the on-disk collection JSON
+    OBS persists with SaveProjectors=true), or [] when nothing is saved yet (first boot -> seed opens
+    the projector). Resolution order: the authoritative user.ini `[Basic] SceneCollectionFile` base,
+    then the GetSceneCollectionList name (the design's approach) -> `<cfg>/basic/scenes/<x>.json`.
+    ONLY when NEITHER resolves to an existing file do we glob EVERY collection file -- a last-resort
+    safety net against OBS slugifying the collection name to a different filename, so a saved projector
+    we cannot locate by name never causes a DUPLICATE window (imag #756 class). The named-file case
+    never over-suppresses (it reads that one collection only)."""
+    scenes_dir = os.path.join(cfg_dir, "basic", "scenes")
+    candidates = []
+    base = _userini_scene_collection_base(cfg_dir)
+    if base:
+        candidates.append(os.path.join(scenes_dir, base + ".json"))
+    try:
+        name = ((obs.req("GetSceneCollectionList", ignore_err=True) or {})
+                .get("currentSceneCollectionName") or "")
+    except Exception as e:  # noqa: BLE001 -- a WS hiccup -> fall through to the file candidates; log it
+        print("projector: GetSceneCollectionList read failed (%s) -- using on-disk collection files" % e)
+        name = ""
+    if name:
+        p = os.path.join(scenes_dir, name + ".json")
+        if p not in candidates:
+            candidates.append(p)
+    if not any(os.path.exists(p) for p in candidates):
+        candidates = sorted(glob.glob(os.path.join(scenes_dir, "*.json")))
+    for path in candidates:
+        sp = _read_saved_projectors_file(path)
+        if sp:
+            return sp
+    return []
 
 
 def seed_projector(obs, config_path=PROJECTOR_CONFIG_PATH, cfg_dir=None):

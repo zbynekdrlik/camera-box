@@ -188,7 +188,9 @@ alternative). This is Prístup 1 of the issue-1346 design.
   Projector (Program) / Multiview (Fullscreen) → the operator's monitor. `SaveProjectors=true`
   persists that choice in the scene collection's `saved_projectors` and OBS re-opens it on every
   launch. No window-manager scripting / compositor plugin needed. The **OBS UI projector menu stays
-  the primary operator switch**; `strih_scenes.py --projector program|multiview` is the scripted twin.
+  the primary operator switch**; `strih_scenes.py --projector program|multiview` is the scripted twin
+  — **run it with `sudo`** (it rewrites the root-owned `/opt/camera-box/strih-lx-projector.json`; a
+  non-root invocation fails loud with `PermissionError`).
 - **ProjectorType numbers (OBS `saved_projectors` `type`):** **3 = StudioProgram, 4 = Multiview.**
   strih runs Studio Mode always, so a Program projector persists as StudioProgram (3). The Windows
   strih's current `saved_projectors` is exactly one entry `{"monitor":0,"type":4}` = Multiview → so
