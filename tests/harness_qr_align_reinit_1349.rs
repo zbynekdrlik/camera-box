@@ -51,10 +51,7 @@ fn run_sourced(body: &str, envs: &[(&str, &str)]) -> (i32, String, String) {
 #[test]
 fn pick_laggards_empty_when_spread_zero() {
     let json = r#"{"NDI cam1": 0, "NDI cam3": 0, "spread_frames": 0, "rounds_used": 4}"#;
-    let (code, out, err) = run_sourced(
-        &format!("qr_align_reinit_pick_laggards '{json}' 1"),
-        &[],
-    );
+    let (code, out, err) = run_sourced(&format!("qr_align_reinit_pick_laggards '{json}' 1"), &[]);
     assert_eq!(code, 0, "stderr={err}");
     assert_eq!(out.trim(), "", "no box is behind -> no laggards");
 }
@@ -97,7 +94,10 @@ fn pick_laggards_skips_garbage_field_never_crashes() {
     let (code, out, err) = run_sourced(&format!("qr_align_reinit_pick_laggards '{json}' 1"), &[]);
     assert_eq!(code, 0, "stderr={err}");
     assert!(out.contains("NDI cam3"), "output was {out:?}");
-    assert!(!out.contains("cam5"), "garbage cam5 must be skipped: {out:?}");
+    assert!(
+        !out.contains("cam5"),
+        "garbage cam5 must be skipped: {out:?}"
+    );
 }
 
 #[test]
@@ -170,7 +170,11 @@ fn loop_converges_after_reiniting_the_laggard() {
     );
     let restarts = fs::read_to_string(&rlog).unwrap_or_default();
     let calls: Vec<&str> = restarts.split_whitespace().collect();
-    assert_eq!(calls, vec!["cam3"], "restart must be called EXACTLY for cam3 once: {restarts:?}");
+    assert_eq!(
+        calls,
+        vec!["cam3"],
+        "restart must be called EXACTLY for cam3 once: {restarts:?}"
+    );
 }
 
 #[test]
@@ -184,7 +188,10 @@ fn loop_gives_up_after_max_rounds_and_still_returns_zero() {
 
     // never converges (laggard on every measure).
     let (code, out, err) = run_loop(99, rlog.to_str().unwrap(), cnt.to_str().unwrap());
-    assert_eq!(code, 0, "gave-up path MUST still exit 0 under the caller's set -e. stderr={err}");
+    assert_eq!(
+        code, 0,
+        "gave-up path MUST still exit 0 under the caller's set -e. stderr={err}"
+    );
     assert!(
         out.contains("[qr-align-reinit] gave up after 3 rounds"),
         "gave-up line missing: {out:?}"
@@ -202,7 +209,10 @@ fn recording_e2e_calls_the_reinit_loop_once_immediately_before_4i_align() {
     let text = fs::read_to_string(&script).expect("read recording-e2e.sh");
 
     let n_calls = text.matches("qr_align_reinit_loop").count();
-    assert_eq!(n_calls, 1, "expected EXACTLY one qr_align_reinit_loop call site, found {n_calls}");
+    assert_eq!(
+        n_calls, 1,
+        "expected EXACTLY one qr_align_reinit_loop call site, found {n_calls}"
+    );
 
     let banner = "[4i/8align] #1003 floor-3 camera alignment via simultaneous painter-QR spread";
     let lines: Vec<&str> = text.lines().collect();

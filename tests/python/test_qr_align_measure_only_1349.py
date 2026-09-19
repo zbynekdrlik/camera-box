@@ -72,7 +72,9 @@ def test_measure_only_table_unmeasurable_tail_is_error_not_crash():
 
 
 def test_measure_only_cli_prints_only_json_and_writes_nothing(monkeypatch, capsys):
-    rounds = _rounds({"NDI cam1": 0, "NDI cam2": 0, "NDI cam3": 3, "NDI cam4": 0})
+    # >= DEFAULT_MIN_VALID_ROUNDS clean rounds so the CLI default (no --min-valid-rounds override)
+    # measures rather than reporting the too-few-rounds error dict.
+    rounds = _rounds({"NDI cam1": 0, "NDI cam2": 0, "NDI cam3": 3, "NDI cam4": 0}, n_rounds=6)
     status = qa.TailStatus(True, "converged-stable", 0)
     monkeypatch.setattr(qa, "measure_stable_tail",
                         lambda *a, **k: (rounds, 1_867_252_327, status))
