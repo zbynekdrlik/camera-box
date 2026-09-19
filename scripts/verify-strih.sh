@@ -133,8 +133,12 @@ fi
 SCN_BIN="${STRIH_SCENES_BIN:-/usr/local/bin/strih_scenes.py}"
 if [ -f "$SCN_BIN" ] && command -v python3 >/dev/null 2>&1; then
   SEED_PARITY="$(python3 "$SCN_BIN" --host "$WS_HOST" --verify-parity 2>/dev/null || true)"
+  # issue 1317: surface the per-input CLASS (cameras genlocked, 2ME PGM/PVW feedback non-genlocked) --
+  # REPORT-ONLY, so a mis-classed input is visible in the acceptance output without gating.
+  CLASS_LINE="$(printf '%s\n' "$SEED_PARITY" | grep '^strih ndi input classes:' | head -1 || true)"
+  [ -n "$CLASS_LINE" ] && note "seeded input classes -- ${CLASS_LINE#strih ndi input classes: }"
   if printf '%s\n' "$SEED_PARITY" | grep -qxF "strih ndi inputs: OK"; then
-    ok "all seed NDI inputs present as genlock_fifo sources (strih_scenes.py --verify-parity)"
+    ok "all seed NDI inputs present in their expected class (cameras genlocked, 2ME feedback non-genlocked; strih_scenes.py --verify-parity)"
   else
     PARITY_LINE="$(printf '%s\n' "$SEED_PARITY" | grep '^strih ndi inputs:' | head -1 || true)"
     note "seed-input parity not confirmed over WS (OBS/WS down, or a drift) -- report-only: ${PARITY_LINE:-<no verdict line>}"

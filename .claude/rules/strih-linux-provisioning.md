@@ -177,6 +177,40 @@ importing imag's 70 KB DRM-lease/encoder/picom machinery that strih-lx does not 
   the two static-anchor asserts on the launcher/setup wiring — a python assert over the script text,
   so it runs in Tier-0 with no cargo).
 
+## 2ME feedback inputs are NOT genlocked — per-input settings class (issue 1317, DONE)
+
+The seed is split into TWO settings CLASSES keyed on the input display NAME, not one uniform genlock
+dict:
+
+- **`camera` class** — the certified genlock dict (`genlock_fifo=True, ndi_sync=2, ndi_bw_mode=0,
+  latency=<manifest floor>`), for the `CAMn (usb)` grabbers AND the `RESOLUME-SNV (cg-obs)` sender
+  (a genlocked sender per issue 1300).
+- **`feedback` class** — `ndi_sync=1` (SOURCE_TIMING), `latency=1`, `ndi_bw_mode=0`, and
+  `genlock_fifo=False` (**explicit `False`, not omitted** — so `SetInputSettings(overlay=True)` CLEARS
+  a mis-seeded `genlock_fifo=True` off an already-existing input; an omitted key would leave the stale
+  `True`), for any name ending `(2ME PGM)` / `(2ME PVW)` regardless of the `STRIH-SNV` / future
+  `STRIH-LX` self-loop prefix (issue 1347 inherits it by suffix).
+
+**Why:** the `STRIH-SNV (2ME PGM)` / `(2ME PVW)` inputs are the strih's own POST-RENDER 30 fps
+program/preview outputs received back as monitoring feedback. A post-render output is off the camera
+boundary grid and every program CUT is a timecode discontinuity, so a genlock FIFO underruns and
+relocks on every cut — **110,222 underruns / 899 relocks measured live on strih-lx 19.9.** against 4–73
+underruns total on the genlocked cameras. This mirrors the Windows strih, which receives these
+NON-genlocked (`light.json` `NDI 2ME PGM`/`PVW`: `ndi_sync:1, latency:1`, no `genlock_fifo`).
+
+- **Seams:** `input_class_for(name) → "camera"|"feedback"`; `input_settings_for(name, latency)` returns
+  the class dict; `seed_inputs` applies it per input (the real manifest → exactly **8 camera + 2
+  feedback**). `input_parity_problems` is class-aware (a feedback input left `genlock_fifo=True` is
+  flagged; a camera without genlock is flagged as before).
+- **`--bootstrap` is UPDATE-ONLY.** Per input it reads the effective settings (`_effective_input_settings`,
+  the obs_phase2 defaults-merged shape, reusing the file's own `Obs.req`) and emits
+  `SetInputSettings(overlay=True)` ONLY on a class mismatch (`settings_update_needed`), re-enforcing the
+  `ndi_source_name` only after a real change — so a healthy relaunch is a pure read and a mis-seeded box
+  self-heals on the next `--bootstrap`. Never deletes/recreates an input.
+- **verify-strih.sh item 4b** prints a report-only `seeded input classes -- N camera, M feedback (...)`
+  NOTE from the seeder's `strih ndi input classes:` line; the `strih ndi inputs: OK` verdict line
+  (`grep -qxF` anchor) is unchanged.
+
 ## Fixed HDMI fullscreen projector — the strih_scenes.py projector seed (issue 1346, DONE)
 
 **The owner ROZHODNUTÉ (19.9.2026 11:05):** the strih-lx HDMI output is an **OBS fullscreen

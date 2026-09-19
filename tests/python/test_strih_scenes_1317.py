@@ -287,6 +287,17 @@ def test_seed_inputs_real_manifest_yields_8_camera_2_feedback():
     assert classes.count("feedback") == 2
 
 
+def test_input_classes_summary_reports_counts_and_per_input_class():
+    # the report body verify-strih.sh item 4b surfaces (report-only)
+    s = _mod.input_classes_summary(_TEN_INPUTS)
+    assert s.startswith("8 camera, 2 feedback")
+    assert "STRIH-SNV (2ME PGM)=feedback" in s
+    assert "RESOLUME-SNV (cg-obs)=camera" in s
+    assert "CAM3 (usb)=camera" in s
+    # dedup like scene_order (a repeated name is counted once)
+    assert _mod.input_classes_summary(["CAM1 (usb)", "CAM1 (usb)"]).startswith("1 camera, 0 feedback")
+
+
 def test_input_parity_problems_flags_a_feedback_input_left_genlocked():
     # a 2ME feedback input that is STILL (wrongly) genlock_fifo=True must be flagged by the report
     plan = _mod.seed_inputs(_TEN_INPUTS, 3)
