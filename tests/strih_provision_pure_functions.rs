@@ -836,3 +836,40 @@ fn verify_strih_dantesync_and_sleep_items_are_fixed() {
         "verify-strih must drop the `|| echo masked` double-append (the false-FAIL bug)"
     );
 }
+
+/// issue 1346: `strih_projector_verdict SAVEPROJ EXT SAVED` grades the fixed HDMI projector
+/// acceptance (report-only): SaveProjectors=true pre-seeded, and — when an external monitor is
+/// connected — a saved type-3/4 projector entry exists. Fail-closed order: SaveProjectors first,
+/// then external-monitor presence, then the saved entry. Returns 0 ONLY for the fully-`ok` state;
+/// every other state prints its own token and returns non-zero (the caller renders 0->PASS else
+/// NOTE, since the whole item is report-only). Fixtures: connected/not-connected + present/absent.
+#[test]
+fn projector_verdict_grades_saveprojectors_hdmi_and_saved_entry() {
+    // fully healthy: SaveProjectors on, an external monitor, a saved projector -> ok, rc 0
+    let (c, out, _e) = run_sourced(&[], "strih_projector_verdict 1 1 1");
+    assert_eq!(c, 0, "the fully-configured state must be ok; token={out}");
+    assert_eq!(out, "ok");
+
+    // SaveProjectors not pre-seeded -> saveprojectors-missing (checked FIRST, even with no monitor)
+    let (c2, out2, _e) = run_sourced(&[], "strih_projector_verdict 0 1 1");
+    assert_ne!(c2, 0);
+    assert_eq!(out2, "saveprojectors-missing");
+    let (c2b, out2b, _e) = run_sourced(&[], "strih_projector_verdict 0 0 0");
+    assert_ne!(c2b, 0);
+    assert_eq!(out2b, "saveprojectors-missing", "SaveProjectors is graded before the monitor");
+
+    // SaveProjectors ok but no external monitor connected (today's box) -> hdmi-absent (report-only)
+    let (c3, out3, _e) = run_sourced(&[], "strih_projector_verdict 1 0 0");
+    assert_ne!(c3, 0);
+    assert_eq!(out3, "hdmi-absent");
+
+    // external monitor present but no saved projector yet -> projector-unseeded
+    let (c4, out4, _e) = run_sourced(&[], "strih_projector_verdict 1 1 0");
+    assert_ne!(c4, 0);
+    assert_eq!(out4, "projector-unseeded");
+
+    // fail-closed defaults: missing args behave as 0 (not configured)
+    let (c5, out5, _e) = run_sourced(&[], "strih_projector_verdict");
+    assert_ne!(c5, 0);
+    assert_eq!(out5, "saveprojectors-missing");
+}
