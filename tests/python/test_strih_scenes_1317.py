@@ -361,3 +361,27 @@ def test_bootstrap_emits_no_settings_update_for_a_matching_input():
     obs = _FakeObs(existing)
     _mod.bootstrap(obs, plan, studio=False)
     assert _settings_updates(obs.calls) == [], obs.calls
+
+
+def test_settings_update_needed_treats_absent_genlock_fifo_as_false():
+    # obs-websocket OMITS a key left at its (unregistered zero) default; DistroAV's genlock_fifo is
+    # not in the type defaults, so a healthy seeded FEEDBACK input reads back WITHOUT the key. Absent
+    # must count as False (issue 1317 review) so it is not needlessly re-written every launch.
+    desired = dict(_mod.feedback_settings(), ndi_source_name="X")
+    healthy = {"ndi_bw_mode": 0, "ndi_sync": 1, "latency": 1, "ndi_source_name": "X"}  # no genlock_fifo
+    assert _mod.settings_update_needed(healthy, desired) is False
+    # a mis-seeded feedback input STILL genlocked must be healed
+    assert _mod.settings_update_needed(dict(healthy, genlock_fifo=True), desired) is True
+    # a real non-genlock drift (e.g. wrong ndi_sync) still fires
+    assert _mod.settings_update_needed(dict(healthy, ndi_sync=2), desired) is True
+
+
+def test_bootstrap_no_update_for_healthy_feedback_input_with_genlock_fifo_absent():
+    plan = _mod.seed_inputs(["STRIH-SNV (2ME PGM)"], 3)  # a feedback input
+    inp = plan[0]["input"]
+    # healthy feedback input: GetInputSettings omits genlock_fifo (at default) -> pure read, no update
+    existing = {inp: {"ndi_bw_mode": 0, "ndi_sync": 1, "latency": 1,
+                      "ndi_source_name": "STRIH-SNV (2ME PGM)"}}
+    obs = _FakeObs(existing)
+    _mod.bootstrap(obs, plan, studio=False)
+    assert _settings_updates(obs.calls) == [], obs.calls
