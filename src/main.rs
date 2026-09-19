@@ -9,6 +9,7 @@ use tracing_subscriber::EnvFilter;
 use camera_box::capture::VideoCapture;
 use camera_box::config::{Config, DisplayConfig};
 use camera_box::intercom;
+use camera_box::intercom_target::{resolve_intercom_target, INTERCOM_TARGET_ENV};
 use camera_box::ndi::NdiSender;
 use camera_box::ndi_display::{self, NdiDisplayConfig};
 #[cfg(feature = "probe")]
@@ -348,6 +349,24 @@ async fn main() -> Result<()> {
             limiter_threshold: ic.limiter_threshold,
         })
     };
+
+    // #1345 M1b — env override for the intercom target host (precedence: env > CLI flag >
+    // config.toml). The dev cambox root fs is READ-ONLY, so config.toml can't be edited to repoint
+    // the VBAN intercom at the new Linux strih-lx hub; a `/run` systemd drop-in carrying
+    // CAMERA_BOX_INTERCOM_TARGET (scripts/lib/intercom-target-dropin.sh) is the only appliance-side
+    // seam. Applied AFTER the CLI-vs-config resolution above so the env wins. cam2-7 stay on the
+    // Windows strih until M4.
+    let intercom_config = intercom_config.map(|mut ic| {
+        let (target_host, note) = resolve_intercom_target(
+            std::env::var(INTERCOM_TARGET_ENV).ok().as_deref(),
+            &ic.target_host,
+        );
+        if let Some(note) = note {
+            tracing::info!("{}", note);
+        }
+        ic.target_host = target_host;
+        ic
+    });
 
     // Run the capture loop with optional display and intercom
     run_capture_loop(

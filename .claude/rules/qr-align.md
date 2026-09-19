@@ -539,3 +539,57 @@ inverted mirror of this.)
 Re-arm the equalization to actually add pins ONLY if the owner accepts the added latency for a
 super-frame misalignment the conveyor CAN correct, OR redirect the ~14 ms offset to a grabber-side
 ticket (the physically-correct lever). Raised on issue 1168 (needs-answer).
+
+## Per-open capture-lag draw + the `[4i/8align]` re-init loop (issue 1349)
+
+Each cambox's capture lag `k` (in source frames) is DRAWN when its V4L2 device is opened at
+`recording-e2e.sh`'s `[2/8]`/`[2b/8]` burn deploy and then HOLDS for the run: the frame a grabber
+delivers at time `t` shows the HDMI image from `t − k·16.667 ms`, and `k` is a fresh draw per open
+(UVC isochronous buffering, invisible to V4L2 — `DQBUF` timestamps are on arrival, not exposure).
+With 7 boxes of mixed grabbers that is a **per-open lottery**: the floor-aware plan can absorb at
+most ~1 source frame (`floor 71–88 + delta ≤ 94 ms`, the owner-mandated ceiling that
+`#1168 RE-TIGHTEN` forbids widening), so the gate passes only when all 7 draws land within one
+frame. That is the structural cause of the two red release E2Es on 19.9.2026 and the chronic
+`cam3 +13…20 ms` A/V bias (one frame of `k` on cam3 most of the time). Proof (design 5742993777):
+restarting a box's burn instance re-draws its `k` (17:14 spread 3, cam3 −3 → restart cam3 → cam3 at
+0 but cam7 now −3/−4 → restart cam7 → spread 2 …), while every box's emit path stays clean the whole
+time — the lag is a constant content offset, not a growing queue.
+
+**The fix — a bounded re-init loop before the floor-aware plan (Prístup 1).** One additive line in
+`recording-e2e.sh`, immediately BEFORE the `[4i/8align]` banner (anchor-safe, guarded — a missing
+`lib`/`python3` degrades to a report-only NOTE, never an abort), sources `scripts/lib/qr-align-reinit.sh`
+and runs `qr_align_reinit_loop "$STRIH" "$SOURCES"`:
+
+1. **measure-only** — `python3 scripts/qr_align_pins.py --measure-only --sources …` converges the
+   stable tail EXACTLY as the DRY-RUN path (`measure_stable_tail` → `robust_deltas` over the tail at
+   zero pins = the t_send-compensated painter frame_id table) and prints ONLY a JSON object of
+   per-source lag in SOURCE FRAMES relative to the FASTEST source (`{"NDI cam3": -3, …,
+   "spread_frames": 3, "rounds_used": N}`), exit 0, **writing nothing to OBS** (`measure_only_table`).
+2. **pick laggards** — `qr_align_reinit_pick_laggards <json> <ok_frames>` lists every box more than
+   `REINIT_OK_FRAMES` (default 1) source frames behind the fastest; empty when the spread is within
+   the ceiling. A missing/garbage per-source field is skipped, never a crash.
+3. **re-init** — restart the BURN instance of each laggard box, re-drawing its `k`. This is a
+   `systemctl restart` of the SAME transient burn unit the `[2/8]`/`[2b/8]` step created
+   (source-role: `camera-box-burn-<RUN_ID>`; secondaries: `camera-box-burn-<cam>-<RUN_ID>`), NOT a
+   re-run of the full start block — that block's `systemd-run --unit=<same>` fails on an existing
+   unit and its `pkill -x camera-box` would kill the running burn; restarting the unit re-execs the
+   same binary → reopens `/dev/videoN` → re-draws `k`.
+4. settle `QR_ALIGN_SETTLE_S` (default 15, mirroring qr-align.sh's `QR_ALIGN_RESET_SETTLE_S`),
+   re-measure, repeat — at most `REINIT_MAX_ROUNDS` (default 3). Then fall through to the existing
+   floor-aware plan, whose HARD-FAIL stays the final arbiter. The loop NEVER aborts the run and
+   ALWAYS returns 0.
+
+**Seams (Tier-0):** `QR_ALIGN_REINIT_MEASURE_CMD` (a command called `<cmd> <host> <sources>` → the
+measure-only JSON) and `QR_ALIGN_REINIT_RESTART_CMD` (a command called `<cmd> <camN>` → restart that
+box's burn instance) default to the production helpers and are injected with fakes by
+`tests/harness_qr_align_reinit_1349.rs` / `tests/python/test_qr_align_measure_only_1349.py` so no rig
+is touched. Turn the whole loop off with `QR_ALIGN_REINIT=0`.
+
+**Telemetry (report-only, additive):** each re-init round writes
+`$OUTDIR/qr-align-reinit-<RUN_ID>.json` = `{"qr_align_reinit_rounds": N, "qr_align_reinit_spread_frames": S}`.
+Wiring this INTO the verdict JSON's `all_cambox_continuity` needs a `src/probe/*` Rust change (zero
+local verification path under Tier-0) and is deferred — the file + the `[qr-align-reinit] round N:
+spread=S re-init=camX,camY` run-log lines are the current surface.
+
+**Live acceptance (supervisor):** a release E2E whose `[4i/8align]` logs ≥ 1 re-init round and then
+passes the floor-aware plan. Live evidence + the restart-proof: issue 1349.

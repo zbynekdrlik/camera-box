@@ -111,8 +111,11 @@ else {
 $datedPlan = Get-KindPlan $datedDirs $KeepRuns $KeepDays $now
 $stagePlan = Get-KindPlan $stageDirs $KeepRuns $KeepDays $now
 
-$keepAll = @($datedPlan.Keep) + @($stagePlan.Keep)
-$deleteAll = @($datedPlan.Delete) + @($stagePlan.Delete)
+# Force BOTH sides to object[] before `+`: on RESOLUME-SNV (19.9.2026) the bare `@(list) + @(list)`
+# threw "Argument types do not match" (a typed-array copy under Windows PowerShell 5.1), which killed
+# the DRY-RUN itself -- a report-only tool must never fail on the box it reports on.
+$keepAll = @([object[]]$datedPlan.Keep) + @([object[]]$stagePlan.Keep)
+$deleteAll = @([object[]]$datedPlan.Delete) + @([object[]]$stagePlan.Delete)
 
 # Protected (non-matching) dirs. LIST them for the dedicated BackupRoot (the review step's need);
 # for the shared StageParent (C:\) show only a COUNT so we never dump every top-level system dir.

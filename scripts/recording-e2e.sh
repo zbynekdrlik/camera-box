@@ -4252,6 +4252,7 @@ fi
 # SKIPPED under MEASUREMENT_EQ (that opt-in profile is the OTHER strih-pin writer) and via QR_ALIGN=0.
 QR_ALIGN="${QR_ALIGN:-1}"
 if [ "$QR_ALIGN" = "1" ] && [ "${ALL_CAMBOX:-0}" = "1" ] && ! measurement_eq_enabled; then
+  { [ "${QR_ALIGN_REINIT:-1}" = "1" ] && . "$HERE/lib/qr-align-reinit.sh" && qr_align_reinit_loop "$STRIH" "$(camera_align_ndi_sources_excluding_csv "${PREFLIGHT_EXCLUDED_CAMS:-}")"; } || echo "[qr-align-reinit] NOTE: issue 1349 re-init loop unavailable/off (missing lib or QR_ALIGN_REINIT=0) — proceeding to the floor-aware plan" >&2
   echo "[4i/8align] #1003 floor-3 camera alignment via simultaneous painter-QR spread (strih on-air set incl. cam4)"
   . "$HERE/lib/qr-align.sh"
   qr_align_run "$STRIH" "$STRIH_PW" || {

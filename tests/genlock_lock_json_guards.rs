@@ -72,7 +72,7 @@ fn genlock_lock_recent_event_offender_present_1299_part3() {
     );
     assert_has(
         STATUSBAR_CPP,
-        "genlock_input_phase_events(r.connected ? 1 : 0, r.relocks, r.late_holds,",
+        "genlock_input_phase_events(r.connected ? 1 : 0, r.idle ? 1 : 0, r.relocks,",
     );
     // the enriched human reason (reason=recent_event:<name>) built from the offender name
     assert_has(
@@ -82,7 +82,37 @@ fn genlock_lock_recent_event_offender_present_1299_part3() {
     // the pure rule + its C mirror anchor (kept in lock-step by tests/genlock_lock_state_parity.rs)
     assert_has(
         "vendor/obs-studio/frontend/widgets/GenlockLockState.hpp",
-        "static inline uint64_t genlock_input_phase_events(int connected, uint64_t relocks,",
+        "static inline uint64_t genlock_input_phase_events(int connected, int idle, uint64_t relocks,",
+    );
+}
+
+#[test]
+fn genlock_lock_idle_input_class_present_1341() {
+    // #1341: a CONNECTED-but-IDLE input (a keep-alive-only SongPlayer playlist input) is excluded
+    // from the DEGRADED gate. The widget derives per-input idle from the received-frame delta over
+    // the window, carries n_idle + per-input idle in the v6 JSON, and passes idle to the pure
+    // phase-events rule. A subtree pull that reverts any of these silently re-opens the chronic
+    // idle-sender DEGRADED/recent_event false page. Linux-CI twin of the #1341 pwsh gate in BOTH
+    // windows-genlock{,-fast}.yml — keep all three in lock-step.
+    // the top-level n_idle emitter + per-input idle key the bundle-state parser reads
+    assert_has(STATUSBAR_CPP, "\\\"n_idle\\\":");
+    assert_has(STATUSBAR_CPP, "\\\"idle\\\":");
+    // the widget fills the facet from the post-scan idle classification
+    assert_has(STATUSBAR_CPP, "f.n_idle = scan.n_idle;");
+    // the idle floor + window constants driving the classification
+    assert_has(
+        STATUSBAR_CPP,
+        "static constexpr uint64_t GENLOCK_IDLE_INPUT_MIN_FRAMES = 60;",
+    );
+    // the pure decision's C mirror gains the n_idle facet + the idle phase-events param (kept in
+    // lock-step by tests/genlock_lock_state_parity.rs)
+    assert_has(
+        "vendor/obs-studio/frontend/widgets/GenlockLockState.hpp",
+        "int n_idle;",
+    );
+    assert_has(
+        "vendor/obs-studio/frontend/widgets/GenlockLockState.hpp",
+        "static inline uint64_t genlock_input_phase_events(int connected, int idle, uint64_t relocks,",
     );
 }
 
@@ -122,7 +152,8 @@ fn genlock_lock_qpc_windowed_drift_present_1299_part4() {
     assert_has(STATUSBAR_CPP, "obs_data_get_double(d, \"f_phase_ppm\")");
     // the v5 report-only telemetry keys the bundle-state parser reads
     assert_has(STATUSBAR_CPP, "\\\"qpc_drift_ppm\\\":");
-    assert_has(STATUSBAR_CPP, "{\\\"v\\\":5,\\\"state\\\":");
+    // #1341 bumped the schema literal to v6 (additive n_idle); pin the current version.
+    assert_has(STATUSBAR_CPP, "{\\\"v\\\":6,\\\"state\\\":");
     // the windowed-rate ring member + the bounds
     assert_has(
         STATUSBAR_HPP,
