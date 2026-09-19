@@ -303,6 +303,30 @@ else
   note "intercom-hub.service not installed -- run setup-strih.sh step 13 (issue 1345 M1); report-only"
 fi
 
+# 17) Janus audiobridge audio edge (issue 1345 M3a) -- REPORT-ONLY. Janus is installed ENABLE-ONLY
+#     while the phones leg is not yet cut over (the M4 cut-over starts it with the hub), so an
+#     installed + enabled but INACTIVE unit is CORRECT here, never a FAIL. Reports: package installed,
+#     unit enabled, and the audiobridge room jcfg declares the interkom room (a pure grep -- no janus
+#     binary invocation, per the design).
+if dpkg -s janus >/dev/null 2>&1 || command -v janus >/dev/null 2>&1; then
+  note "janus installed (audiobridge audio edge, issue 1345 M3a) -- report-only"
+else
+  note "janus NOT installed -- run setup-strih.sh step 14 before the M4 cut-over; report-only"
+fi
+JANUS_EN="$(systemctl is-enabled janus 2>/dev/null || echo unknown)"
+JANUS_ACT="$(systemctl is-active janus 2>/dev/null || echo inactive)"
+note "janus.service (enabled=${JANUS_EN}, active=${JANUS_ACT}) -- enable-only until the M4 cut-over (issue 1345 M3a); an inactive unit is correct while parallel, report-only"
+JANUS_AB="${JANUS_AUDIOBRIDGE_JCFG:-/etc/janus/janus.plugin.audiobridge.jcfg}"
+if [ -f "$JANUS_AB" ]; then
+  if strih_janus_room_jcfg_ok "${JANUS_ROOM:-1000}" < "$JANUS_AB"; then
+    note "janus audiobridge room jcfg declares the interkom room (48 kHz, plain-RTP participants) -- report-only"
+  else
+    note "janus audiobridge room jcfg present but does not declare room-${JANUS_ROOM:-1000} 'interkom' at 48 kHz -- re-run setup-strih.sh step 14; report-only"
+  fi
+else
+  note "janus audiobridge jcfg absent (${JANUS_AB}) -- run setup-strih.sh step 14; report-only"
+fi
+
 echo ""
 if [ "$FAILS" -eq 0 ]; then
   echo -e "${GREEN}=== verify-strih.sh: ALL CLEAR ===${NC}"; exit 0

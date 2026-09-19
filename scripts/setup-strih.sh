@@ -27,7 +27,7 @@ OBS_CFG="${USER_HOME}/.config/obs-studio"
 GENLOCK_REPO="${GENLOCK_REPO:-zbynekdrlik/camera-box}"
 GENLOCK_DIR="/opt/obs-genlock"
 REC_DIR="/srv/_REC"
-TOTAL_STEPS=14
+TOTAL_STEPS=15
 
 step() { echo -e "${GREEN}[$1/${TOTAL_STEPS}] $2${NC}"; }
 warn() { echo -e "${YELLOW}$1${NC}"; }
@@ -385,7 +385,47 @@ else
 fi
 
 # ---------------------------------------------------------------------------------------------
-step 14 "Final verification (verify-strih.sh acceptance gate)"
+step 14 "Janus audiobridge audio edge (issue 1345 M3a: apt install janus + jcfg + ENABLE-ONLY)"
+# The phones intercom leg (the VDO.Ninja replacement) runs over a Janus audiobridge room the hub
+# joins as a plain-RTP PCMU participant (issue 1345 M3a). Install Janus (apt), generate the 0600 room
+# secret if absent (NEVER printed), write the audiobridge room jcfg (the secret is injected via a bash
+# var -- no argv exposure) + the WebSocket transport jcfg (ws :8188, NO wss -- TLS terminates on the
+# dev1 front; the HTTP transport stays loopback :8088), and ENABLE the janus unit -- NEVER start it
+# here (the M4 cut-over starts it together with the intercom hub).
+DEBIAN_FRONTEND=noninteractive apt-get install -y janus \
+  || warn "  apt-get install janus failed -- install it before the M4 cut-over (the phones leg needs the audiobridge)"
+JANUS_ROOM="1000"
+JANUS_SECRET_FILE="/etc/intercom-hub/janus-room.secret"
+install -d -m 700 /etc/intercom-hub
+if [ ! -f "$JANUS_SECRET_FILE" ]; then
+  ( umask 077; openssl rand -hex 16 > "$JANUS_SECRET_FILE" ) \
+    || fail "could not generate the Janus room secret at ${JANUS_SECRET_FILE} (openssl present?)"
+  chmod 600 "$JANUS_SECRET_FILE"
+  echo "  generated the Janus room secret (${JANUS_SECRET_FILE}, 0600 -- value never printed)"
+else
+  echo "  Janus room secret already present (${JANUS_SECRET_FILE}) -- leaving it"
+fi
+if [ -d /etc/janus ] || command -v janus >/dev/null 2>&1; then
+  install -d -m 755 /etc/janus
+  # Read the secret into a var and substitute the placeholder with a bash expansion (never an argv,
+  # never an echo) before writing the audiobridge jcfg 0640.
+  JANUS_SECRET_VALUE="$(cat "$JANUS_SECRET_FILE")"
+  JANUS_AB_JCFG="$(strih_janus_audiobridge_jcfg_text "$JANUS_ROOM" "$JANUS_SECRET_FILE")"
+  JANUS_AB_JCFG="${JANUS_AB_JCFG//@JANUS_ROOM_SECRET@/$JANUS_SECRET_VALUE}"
+  printf '%s\n' "$JANUS_AB_JCFG" > /etc/janus/janus.plugin.audiobridge.jcfg
+  chmod 640 /etc/janus/janus.plugin.audiobridge.jcfg
+  unset JANUS_SECRET_VALUE JANUS_AB_JCFG
+  strih_janus_ws_jcfg_text "$STATIC_IP" > /etc/janus/janus.transport.websockets.jcfg
+  chmod 644 /etc/janus/janus.transport.websockets.jcfg
+  echo "  wrote /etc/janus/janus.plugin.audiobridge.jcfg (room ${JANUS_ROOM} 'interkom') + janus.transport.websockets.jcfg (ws :8188, no wss)"
+  systemctl enable janus 2>/dev/null || warn "  could not enable janus.service (install janus first)"
+  echo "  janus.service ENABLED (NOT started -- the M4 cut-over starts it with the hub); HTTP stays loopback :8088"
+else
+  warn "  /etc/janus absent and no janus binary -- install janus, then re-run this step to write the jcfg + enable"
+fi
+
+# ---------------------------------------------------------------------------------------------
+step 15 "Final verification (verify-strih.sh acceptance gate)"
 if [ -x "${HERE}/verify-strih.sh" ]; then
   "${HERE}/verify-strih.sh" || fail "verify-strih.sh acceptance gate did not pass"
 else
