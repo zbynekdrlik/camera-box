@@ -54,6 +54,14 @@ SEED_MANIFEST_PATH = "/opt/camera-box/strih-lx-seed.json"
 # obs_phase2._PROBE_NDI_SETTINGS uses latency 0 (the probe default); strih-lx rides the manifest's
 # floor 3 -- so the certified settings here override ONLY latency, keeping the #63/#149 genlock keys.
 DEFAULT_CAMERA_LATENCY_MS = 3
+# issue 1317: the 2ME PGM/PVW FEEDBACK inputs are NOT genlocked. They are the strih's own post-render
+# 30 fps program/preview outputs received back as monitoring feedback; a post-render output is off the
+# camera boundary grid and every program CUT is a timecode discontinuity, so a genlock FIFO underruns
+# and relocks on every cut (110,222 underruns / 899 relocks measured live on strih-lx 19.9.). The
+# Windows strih receives these NON-genlocked (light.json NDI 2ME PGM/PVW: ndi_sync=1, latency=1, no
+# genlock_fifo); the feedback class mirrors that. latency is FIXED at 1 (a feedback monitor, not a
+# camera on the aligned grid), independent of the camera manifest floor.
+FEEDBACK_LATENCY_MS = 1
 
 # --- issue 1346: fixed HDMI fullscreen projector -------------------------------------------------
 # The owner ROZHODNUTE (19.9.2026): the strih-lx HDMI output is an OBS fullscreen projector on the
@@ -79,6 +87,35 @@ def certified_genlock_settings(latency):
     manifest floor. ndi_source_name is NOT included here -- it is a per-input top-level field the
     seed merges in. Returned fresh each call (never a shared mutable default)."""
     return {"ndi_bw_mode": 0, "genlock_fifo": True, "ndi_sync": 2, "latency": latency}
+
+
+def feedback_settings():
+    """issue 1317: the NON-genlock settings for a 2ME PGM/PVW feedback input, mirroring the Windows
+    strih light.json (ndi_sync=1 SOURCE_TIMING, latency=1, ndi_bw_mode=0). genlock_fifo is EXPLICIT
+    False -- NOT omitted -- so a SetInputSettings(overlay=True) heal actually CLEARS a mis-seeded
+    genlock_fifo=True off an already-existing input (an omitted key would leave the stale True in
+    place, since overlay merges). Returned fresh each call (never a shared mutable default)."""
+    return {"ndi_bw_mode": 0, "genlock_fifo": False, "ndi_sync": 1, "latency": FEEDBACK_LATENCY_MS}
+
+
+def input_class_for(name):
+    """issue 1317: the settings CLASS for an input, keyed by its display name. A name ending in
+    `(2ME PGM)` / `(2ME PVW)` is a post-render FEEDBACK monitor (regardless of the STRIH-SNV / future
+    STRIH-LX self-loop prefix) -> 'feedback'; everything else -- the `CAMn (usb)` grabbers AND the
+    `RESOLUME-SNV (cg-obs)` genlocked sender (issue 1300) -- is a genlocked source -> 'camera'."""
+    n = (name or "").rstrip()
+    if n.endswith("(2ME PGM)") or n.endswith("(2ME PVW)"):
+        return "feedback"
+    return "camera"
+
+
+def input_settings_for(name, latency):
+    """issue 1317: the seed settings for `name` by its class -- the certified genlock dict (latency
+    from the manifest floor) for a camera, the non-genlock feedback dict (fixed latency 1) for a 2ME
+    feedback input. The one seam seed_inputs applies per input."""
+    if input_class_for(name) == "feedback":
+        return feedback_settings()
+    return certified_genlock_settings(latency)
 
 
 def scene_name_for(src):
@@ -115,8 +152,9 @@ def parse_seed_manifest(text):
 
 def seed_inputs(inputs, latency):
     """Pure: the seed PLAN -- one dict per input {scene, input, ndi_source_name, settings}. `settings`
-    is the certified genlock dict (ndi_source_name lives at the top level, not inside settings, so a
-    caller can CreateInput with {**settings, "ndi_source_name": src}). Duplicate/empty names are
+    is the per-CLASS dict from input_settings_for (camera = certified genlock; 2ME feedback =
+    non-genlock, issue 1317) -- ndi_source_name lives at the top level, not inside settings, so a
+    caller can CreateInput with {**settings, "ndi_source_name": src}. Duplicate/empty names are
     dropped so a manifest that repeats a name never double-creates a scene (the idempotency shape)."""
     plan = []
     seen = set()
@@ -128,7 +166,7 @@ def seed_inputs(inputs, latency):
             "scene": scene_name_for(src),
             "input": input_name_for(src),
             "ndi_source_name": src,
-            "settings": certified_genlock_settings(latency),
+            "settings": input_settings_for(src, latency),
         })
     return plan
 
@@ -158,17 +196,56 @@ def input_parity_problems(actual, expected_plan):
         inp = item["input"]
         src = item["ndi_source_name"]
         want_sync = item["settings"]["ndi_sync"]
+        # issue 1317: genlock is now class-derived from the plan -- a camera input WANTS genlock_fifo,
+        # a 2ME feedback input wants it OFF (a feedback input left genlocked is exactly the drift this
+        # ticket fixes, so flag it too).
+        want_genlock = bool(item["settings"].get("genlock_fifo"))
         if inp not in actual:
             problems.append("MISSING %r" % inp)
             continue
         s = actual[inp] or {}
-        if not s.get("genlock_fifo"):
+        if want_genlock and not s.get("genlock_fifo"):
             problems.append("%r not genlock_fifo" % inp)
+        elif not want_genlock and s.get("genlock_fifo"):
+            problems.append("%r unexpectedly genlock_fifo (2ME feedback input must be non-genlock)" % inp)
         if s.get("ndi_source_name") != src:
             problems.append("%r ndi_source_name %r want %r" % (inp, s.get("ndi_source_name"), src))
         if s.get("ndi_sync") != want_sync:
             problems.append("%r ndi_sync %r want %r" % (inp, s.get("ndi_sync"), want_sync))
     return problems
+
+
+def settings_update_needed(effective, desired):
+    """Pure (issue 1317): True iff any key in `desired` differs from `effective` (a key missing from
+    `effective` counts as differing). `desired` = the class settings merged with ndi_source_name;
+    `effective` = the input's defaults-merged effective settings (obs_phase2 _effective_input_settings
+    shape). Drives the --bootstrap UPDATE-only path: an existing input already matching its class emits
+    no SetInputSettings; a mis-seeded one (e.g. a 2ME feedback input left genlock_fifo=True) differs on
+    a class key and is healed."""
+    for k, v in desired.items():
+        if effective.get(k) != v:
+            return True
+    return False
+
+
+def input_classes_summary(inputs):
+    """Pure (issue 1317): a report line body describing each input's class for verify-strih.sh --
+    "N camera, M feedback (name=class, ...)". Report-only; the whole-line verdict `strih ndi inputs:
+    OK` that verify-strih.sh greps with grep -qxF is emitted SEPARATELY and unchanged."""
+    seen = set()
+    pairs = []
+    ncam = nfb = 0
+    for src in inputs:
+        if not src or src in seen:
+            continue
+        seen.add(src)
+        cls = input_class_for(src)
+        pairs.append("%s=%s" % (src, cls))
+        if cls == "feedback":
+            nfb += 1
+        else:
+            ncam += 1
+    return "%d camera, %d feedback (%s)" % (ncam, nfb, ", ".join(pairs))
 
 
 # --- issue 1346: fixed HDMI projector pure helpers (no WS/file dependency -> Tier-0 testable) ------
@@ -313,33 +390,53 @@ def _enforce_ndi_source_name(obs, op, input_name, desired_name):
     return "healed" if back == desired_name else "verify_failed"
 
 
+def _effective_input_settings(obs, input_name):
+    """The input's EFFECTIVE settings = its ndi_source type DEFAULTS overlaid with the explicitly-saved
+    settings (the obs_phase2._effective_input_settings shape, reusing THIS file's own Obs.req -- no
+    second WS client). GetInputSettings returns only explicitly-persisted (non-default) keys, so
+    merging GetInputDefaultSettings underneath lets settings_update_needed compare like-for-like (a
+    key left at its DistroAV default -- e.g. ndi_sync=2 -- is not falsely seen as 'missing')."""
+    explicit = (obs.req("GetInputSettings", {"inputName": input_name}, ignore_err=True)
+                or {}).get("inputSettings", {}) or {}
+    defaults = (obs.req("GetInputDefaultSettings", {"inputKind": "ndi_source"}, ignore_err=True)
+                or {}).get("defaultInputSettings", {}) or {}
+    return {**defaults, **explicit}
+
+
 def bootstrap(obs, plan, studio=True):
-    """Seed the collection from `plan` (seed_inputs output). Idempotent: CreateScene/CreateInput
-    ignore "already exists", and the certified genlock settings are re-applied over the top of an
-    existing input every run so genlock_fifo can never silently drift off across a relaunch (the
-    features-default-on discipline -- genlock is not a forgettable toggle). Then SetStudioModeEnabled.
-    Returns {input: name-status} for the log."""
+    """Seed the collection from `plan` (seed_inputs output). Idempotent: CreateScene/CreateInput ignore
+    "already exists". issue 1317: the per-input settings are applied by CLASS, and the update is
+    CONDITIONAL -- an ALREADY-EXISTING input whose effective settings differ from its class is UPDATED
+    (SetInputSettings overlay:True, so a mis-seeded genlock_fifo=True on a 2ME feedback input is
+    healed), and a matching one emits no SetInputSettings and no re-enforce (never delete/recreate).
+    The ndi_source_name is re-enforced ONLY after a real change (the #795-safe #1158 shape via
+    obs_phase2 when available, else a direct set), so a healthy relaunch is a pure read. Then
+    SetStudioModeEnabled. Returns {input: status} for the log."""
     op = _obs_phase2_module()
     result = {}
     for item in plan:
         scene = item["scene"]
         inp = item["input"]
         src = item["ndi_source_name"]
-        settings = item["settings"]
+        desired = dict(item["settings"], ndi_source_name=src)
         obs.req("CreateScene", {"sceneName": scene}, ignore_err=True)
+        # CreateInput seeds a NEW input with the class settings; on an existing input it fails
+        # "already exists" -> ignored (its current settings are read below and healed only on drift).
         obs.req("CreateInput", {
             "sceneName": scene, "inputName": inp, "inputKind": "ndi_source",
-            "inputSettings": dict(settings, ndi_source_name=src),
+            "inputSettings": desired,
         }, ignore_err=True)
-        # Re-arm the certified genlock settings on an EXISTING input too (CreateInput on an existing
-        # input fails "already exists" -> ignored -> would NOT update settings). overlay:True merges,
-        # leaving unrelated per-source keys (e.g. genlock_latency_ms_src) untouched.
-        obs.req("SetInputSettings", {
-            "inputName": inp,
-            "inputSettings": dict(settings, ndi_source_name=src),
-            "overlay": True,
-        }, ignore_err=True)
-        result[inp] = _enforce_ndi_source_name(obs, op, inp, src)
+        effective = _effective_input_settings(obs, inp)
+        if settings_update_needed(effective, desired):
+            # overlay:True merges the class settings, leaving unrelated per-source keys (e.g.
+            # genlock_latency_ms_src) untouched; genlock_fifo=False in the feedback class CLEARS a
+            # stale True. The ndi_source_name rides `desired`, and is then read-back-verified.
+            obs.req("SetInputSettings", {
+                "inputName": inp, "inputSettings": desired, "overlay": True,
+            }, ignore_err=True)
+            result[inp] = _enforce_ndi_source_name(obs, op, inp, src)
+        else:
+            result[inp] = "matched"
     if studio:
         obs.req("SetStudioModeEnabled", {"studioModeEnabled": True}, ignore_err=True)
     return result
@@ -359,6 +456,9 @@ def verify_parity(obs, manifest_text):
         s = obs.req("GetInputSettings", {"inputName": name}, ignore_err=True)
         actual[name] = s.get("inputSettings", {})
     problems = input_parity_problems(actual, plan)
+    # issue 1317: report the per-input CLASS on its OWN line (report-only; verify-strih.sh notes it).
+    # The verdict line below stays byte-identical ("strih ndi inputs: OK") for the grep -qxF anchor.
+    print("strih ndi input classes: " + input_classes_summary(inputs))
     print("strih ndi inputs: " + ("; ".join(problems) if problems else "OK"))
     if problems:
         sys.exit(1)
