@@ -856,7 +856,10 @@ fn projector_verdict_grades_saveprojectors_hdmi_and_saved_entry() {
     assert_eq!(out2, "saveprojectors-missing");
     let (c2b, out2b, _e) = run_sourced(&[], "strih_projector_verdict 0 0 0");
     assert_ne!(c2b, 0);
-    assert_eq!(out2b, "saveprojectors-missing", "SaveProjectors is graded before the monitor");
+    assert_eq!(
+        out2b, "saveprojectors-missing",
+        "SaveProjectors is graded before the monitor"
+    );
 
     // SaveProjectors ok but no external monitor connected (today's box) -> hdmi-absent (report-only)
     let (c3, out3, _e) = run_sourced(&[], "strih_projector_verdict 1 0 0");

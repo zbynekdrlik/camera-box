@@ -207,6 +207,16 @@ install -d -m 755 /opt/camera-box
   echo "],\"camera_latency_ms\":$(strih_lx_camera_latency_ms)}"
 } > /opt/camera-box/strih-lx-seed.json
 echo "  wrote /opt/camera-box/strih-lx-seed.json ($(strih_lx_ndi_inputs | grep -c .) inputs, floor-3 pins)"
+# issue 1346: default fixed-HDMI-projector config. The owner ROZHODNUTE (19.9.): multiview default
+# (matching the Windows strih saved_projectors {monitor,type:4}); strih_scenes.py --bootstrap reads
+# it and seeds an OBS fullscreen projector on the HDMI monitor. Do NOT overwrite an existing file --
+# once the box is live the operator's OBS UI choice + `strih_scenes.py --projector` own it.
+if [ ! -f /opt/camera-box/strih-lx-projector.json ]; then
+  echo '{"type":"multiview"}' > /opt/camera-box/strih-lx-projector.json
+  echo "  wrote /opt/camera-box/strih-lx-projector.json (default: multiview HDMI projector)"
+else
+  echo "  /opt/camera-box/strih-lx-projector.json already present -- leaving the operator's choice"
+fi
 if [ -n "${GH_TOKEN:-}" ]; then
   curl -fsSL -H "Authorization: token ${GH_TOKEN}" -H 'Accept: application/vnd.github.raw' \
     "https://api.github.com/repos/${GENLOCK_REPO}/contents/scripts/obs_phase2.py?ref=dev" \
@@ -237,6 +247,40 @@ cat > "$OBS_CFG/plugin_config/obs-websocket/config.json" <<'WS'
 WS
 chown -R "$DESKTOP_USER":"$DESKTOP_USER" "$OBS_CFG/plugin_config" 2>/dev/null || true
 echo "  obs-websocket :4455 no-auth pre-seeded; Studio Mode is enforced by the scene seeder (step 6)"
+# issue 1346: pre-seed [BasicWindow] SaveProjectors=true + ProjectorAlwaysOnTop=true in the desktop
+# user's user.ini so OBS PERSISTS the fixed HDMI fullscreen projector and re-opens it on every
+# launch. The OBS default is SaveProjectors=false, so a hand-opened or seeded projector would NEVER
+# come back after strih-obs.service relaunches. Idempotent (RawConfigParser upsert; the literal
+# `SaveProjectors=true` is the verify-strih anchor), owned by the desktop user. NOTE: this is the
+# OPPOSITE of imag (#522 SaveProjectors=false + an openbox-autostart re-open hook) -- strih-lx has no
+# such boot hook, so it relies on OBS's own SaveProjectors restore + the seed_projector idempotency.
+USER_INI="${OBS_CFG}/user.ini"
+if command -v python3 >/dev/null 2>&1; then
+  python3 - "$USER_INI" <<'PY' || warn "  could not pre-seed SaveProjectors in ${USER_INI} (non-fatal; the OBS UI / strih_scenes.py --projector still work)"
+import configparser, os, sys
+path = sys.argv[1]
+cp = configparser.RawConfigParser()
+cp.optionxform = str
+if os.path.exists(path):
+    try:
+        cp.read(path)
+    except Exception as e:
+        sys.stderr.write("user.ini parse failed (%s); starting a fresh [BasicWindow]\n" % e)
+        cp = configparser.RawConfigParser()
+        cp.optionxform = str
+if not cp.has_section("BasicWindow"):
+    cp.add_section("BasicWindow")
+for kv in ("SaveProjectors=true", "ProjectorAlwaysOnTop=true"):
+    k, v = kv.split("=", 1)
+    cp.set("BasicWindow", k, v)
+with open(path, "w") as fh:
+    cp.write(fh, space_around_delimiters=False)
+PY
+  chown "$DESKTOP_USER":"$DESKTOP_USER" "$USER_INI" 2>/dev/null || true
+  echo "  pre-seeded [BasicWindow] SaveProjectors=true + ProjectorAlwaysOnTop=true in ${USER_INI}"
+else
+  warn "  python3 absent -- cannot pre-seed SaveProjectors in ${USER_INI} (set it in the OBS UI, or install python3 and re-run)"
+fi
 
 # ---------------------------------------------------------------------------------------------
 step 8 "OBS supervision unit (strih-obs.service, Restart=on-failure) -- enable-only"

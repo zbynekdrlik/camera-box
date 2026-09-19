@@ -359,3 +359,29 @@ strih_verify_sleep_masked() {
   first="${state%%$'\n'*}"
   [ "$first" = masked ]
 }
+
+# --- issue 1346: fixed HDMI fullscreen projector acceptance (REPORT-ONLY) --------------------------
+# The owner ROZHODNUTE (19.9.): the strih-lx HDMI output is an OBS fullscreen projector (Program or
+# Multiview), PERSISTED via SaveProjectors=true and re-opened on every launch. verify-strih.sh reports
+# (never hard-fails, since the live open needs an HDMI display on the notebook): SaveProjectors=true is
+# pre-seeded in user.ini, and -- when an external monitor is connected -- a saved ProjectorType 3/4
+# entry exists.
+
+# strih_projector_verdict SAVEPROJ_PRESENT EXT_CONNECTED SAVED_ENTRY_PRESENT -> print ONE verdict
+# token and return 0 ONLY for the fully-configured `ok` state; every other state returns non-zero so
+# the caller renders 0->PASS else NOTE (the whole item is report-only -- it never hard-FAILs the gate).
+#   arg1 SAVEPROJ_PRESENT:     1 iff user.ini has SaveProjectors=true
+#   arg2 EXT_CONNECTED:        1 iff an external (HDMI/DP) monitor is connected (a /sys/class/drm status)
+#   arg3 SAVED_ENTRY_PRESENT:  1 iff the current scene collection's saved_projectors has a type-3/4 entry
+# Fail-closed order (missing args default to 0 = not configured):
+#   saveprojectors-missing  -> SaveProjectors not pre-seeded (setup-strih step 7 not applied)
+#   hdmi-absent             -> SaveProjectors ok but no external monitor connected (expected today)
+#   projector-unseeded      -> external monitor present but no saved projector entry yet
+#   ok                      -> SaveProjectors true + external monitor + a saved ProjectorType 3/4
+strih_projector_verdict() {
+  local saveproj="${1:-0}" ext="${2:-0}" saved="${3:-0}"
+  [ "$saveproj" = 1 ] || { printf 'saveprojectors-missing'; return 1; }
+  [ "$ext" = 1 ]      || { printf 'hdmi-absent';            return 1; }
+  [ "$saved" = 1 ]    || { printf 'projector-unseeded';     return 1; }
+  printf 'ok'; return 0
+}

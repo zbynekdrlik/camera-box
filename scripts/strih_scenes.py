@@ -24,10 +24,17 @@ Modes:
   --verify-parity        read-only: report whether the 10 seed inputs exist as genlock_fifo sources
                          (the imag verify_parity grep-qxF whole-line shape; consumed report-only by
                          verify-strih.sh so a not-yet-launched box is never a hard FAIL).
+  --projector T          issue 1346: rewrite /opt/camera-box/strih-lx-projector.json to T
+                         (program|multiview) and (re)seed the fixed HDMI fullscreen projector. The
+                         OBS UI projector menu stays the primary operator switch (SaveProjectors
+                         persists it); this is the scripted twin. --bootstrap ALSO seeds the
+                         projector (via seed_projector) after the input seed.
 
 The pure helpers (parse_seed_manifest / seed_inputs / certified_genlock_settings / scene_order /
-input_parity_problems) carry NO WebSocket/file dependency, so they are Tier-0 testable with no rig
-(tests/python/test_strih_scenes_1317.py).
+input_parity_problems, and for issue 1346 projector_type_to_mix / projector_monitor_index /
+projector_already_saved / read_projector_type / write_projector_type) carry NO WebSocket/file
+dependency, so they are Tier-0 testable with no rig (tests/python/test_strih_scenes_1317.py +
+tests/python/test_strih_projector_1346.py).
 
 #1156: the strih-obs-start.sh launch preflight `import strih_scenes` validates this import chain
 (incl. the top-level `websocket` dep) BEFORE launching OBS, so a broken seed never Restart-loops a
@@ -46,6 +53,23 @@ SEED_MANIFEST_PATH = "/opt/camera-box/strih-lx-seed.json"
 # obs_phase2._PROBE_NDI_SETTINGS uses latency 0 (the probe default); strih-lx rides the manifest's
 # floor 3 -- so the certified settings here override ONLY latency, keeping the #63/#149 genlock keys.
 DEFAULT_CAMERA_LATENCY_MS = 3
+
+# --- issue 1346: fixed HDMI fullscreen projector -------------------------------------------------
+# The owner ROZHODNUTE (19.9.2026): the strih-lx HDMI output is an OBS fullscreen projector on the
+# HDMI display, selectable between Program and Multiview, PERSISTED across relaunches (setup-strih.sh
+# step 7 pre-seeds [BasicWindow] SaveProjectors=true). Default is Multiview -- the owner's current
+# Windows strih setup (saved_projectors {monitor,type:4}). The OBS UI projector menu stays the
+# primary operator switch; the strih_scenes.py --projector CLI is the scripted twin.
+PROJECTOR_CONFIG_PATH = "/opt/camera-box/strih-lx-projector.json"
+DEFAULT_PROJECTOR_TYPE = "multiview"
+# obs-websocket 5 OpenVideoMixProjector videoMixType constants.
+PROJECTOR_MIX_PROGRAM = "OBS_WEBSOCKET_VIDEO_MIX_TYPE_PROGRAM"
+PROJECTOR_MIX_MULTIVIEW = "OBS_WEBSOCKET_VIDEO_MIX_TYPE_MULTIVIEW"
+# OBS ProjectorType saved in a scene collection's saved_projectors: 3 = StudioProgram, 4 = Multiview.
+# strih runs Studio Mode always, so a Program projector persists as StudioProgram (type 3).
+PROJECTOR_TYPE_NUM = {"program": 3, "multiview": 4}
+# The desktop OBS config dir (where user.ini + basic/scenes/<collection>.json live).
+OBS_CONFIG_DIR = os.path.expanduser("~/.config/obs-studio")
 
 
 def certified_genlock_settings(latency):
@@ -144,6 +168,74 @@ def input_parity_problems(actual, expected_plan):
         if s.get("ndi_sync") != want_sync:
             problems.append("%r ndi_sync %r want %r" % (inp, s.get("ndi_sync"), want_sync))
     return problems
+
+
+# --- issue 1346: fixed HDMI projector pure helpers (no WS/file dependency -> Tier-0 testable) ------
+
+def projector_type_to_mix(t):
+    """Pure: map the persisted projector type string to the obs-websocket 5 videoMixType constant.
+    'program' -> PROGRAM, 'multiview' -> MULTIVIEW; anything else raises ValueError (a corrupt
+    strih-lx-projector.json must fail loud, never silently pick a default -- read_projector_type
+    already applies the default; this maps a KNOWN type)."""
+    if t == "program":
+        return PROJECTOR_MIX_PROGRAM
+    if t == "multiview":
+        return PROJECTOR_MIX_MULTIVIEW
+    raise ValueError("unknown projector type %r (want 'program' or 'multiview')" % (t,))
+
+
+def projector_monitor_index(monitors):
+    """Pure: the monitorIndex of the first EXTERNAL monitor -- the first whose monitorName does NOT
+    start with 'eDP' (the internal notebook panel). None when only the eDP panel is present (or the
+    list is empty). GetMonitorList shape: [{monitorName, monitorIndex}, ...]. The fixed HDMI output
+    must NEVER fall back to the eDP panel (that would cover the operator's OBS UI) -- None tells
+    seed_projector to SKIP and re-check on the next launch."""
+    for m in monitors or []:
+        name = ((m or {}).get("monitorName") or "")
+        if not name.startswith("eDP"):
+            return (m or {}).get("monitorIndex")
+    return None
+
+
+def projector_already_saved(saved_projectors, type_num, monitor_index):
+    """Pure: True iff `saved_projectors` (the scene collection's list of {monitor, type} dicts OBS
+    persists with SaveProjectors=true) already has an entry of ProjectorType `type_num` on
+    `monitor_index`. Keeps the boot seed idempotent -- OBS re-opens saved projectors itself, so a
+    second OpenVideoMixProjector would stack a DUPLICATE window (imag #756 class). Empty/None -> False
+    (first boot: nothing saved yet -> the seed opens the projector)."""
+    for p in saved_projectors or []:
+        p = p or {}
+        if p.get("type") == type_num and p.get("monitor") == monitor_index:
+            return True
+    return False
+
+
+def read_projector_type(path=PROJECTOR_CONFIG_PATH):
+    """Read the persisted projector type ('program'|'multiview') from strih-lx-projector.json. A
+    missing / unreadable / non-JSON / unknown-type file -> the default 'multiview' (the owner's
+    current Windows setup); the boot seed must never crash on an absent/garbage config."""
+    try:
+        with open(path) as fh:
+            d = json.load(fh)
+    except (OSError, ValueError) as e:  # absent/garbage config is expected -> log + default, never crash
+        print("projector: config %s unreadable (%s) -- defaulting to %s"
+              % (path, e, DEFAULT_PROJECTOR_TYPE))
+        return DEFAULT_PROJECTOR_TYPE
+    t = (d or {}).get("type")
+    if t in PROJECTOR_TYPE_NUM:
+        return t
+    print("projector: config %s has no known type (%r) -- defaulting to %s"
+          % (path, t, DEFAULT_PROJECTOR_TYPE))
+    return DEFAULT_PROJECTOR_TYPE
+
+
+def write_projector_type(t, path=PROJECTOR_CONFIG_PATH):
+    """Persist the projector type to strih-lx-projector.json (the --projector CLI writer). Rejects an
+    unknown type with ValueError (never writes a value seed_projector could not map)."""
+    if t not in PROJECTOR_TYPE_NUM:
+        raise ValueError("unknown projector type %r (want 'program' or 'multiview')" % (t,))
+    with open(path, "w") as fh:
+        json.dump({"type": t}, fh)
 
 
 def _obs_phase2_module():
@@ -271,6 +363,66 @@ def verify_parity(obs, manifest_text):
         sys.exit(1)
 
 
+def _current_collection_saved_projectors(obs, cfg_dir):
+    """Return the CURRENT scene collection's saved_projectors list (from the on-disk collection JSON
+    OBS persists with SaveProjectors=true), or [] when it cannot be resolved/read (first boot: no
+    saved file yet -> seed opens the projector). Resolves the collection name over
+    GetSceneCollectionList (the design's approach) and reads
+    <cfg_dir>/basic/scenes/<name>.json. A WS hiccup / missing / unreadable file -> [] (the seed
+    proceeds and opens; a stacked duplicate is guarded only when a saved entry is genuinely present)."""
+    name = ""
+    try:
+        name = ((obs.req("GetSceneCollectionList", ignore_err=True) or {})
+                .get("currentSceneCollectionName") or "")
+    except Exception as e:  # noqa: BLE001 -- a WS hiccup -> unresolved, seed proceeds; log it
+        print("projector: could not read GetSceneCollectionList (%s) -- treating as unsaved" % e)
+        return []
+    if not name:
+        return []
+    path = os.path.join(cfg_dir, "basic", "scenes", name + ".json")
+    try:
+        with open(path) as fh:
+            d = json.load(fh)
+    except (OSError, ValueError) as e:
+        print("projector: collection file %s not readable (%s) -- treating as unsaved" % (path, e))
+        return []
+    sp = d.get("saved_projectors")
+    return sp if isinstance(sp, list) else []
+
+
+def seed_projector(obs, config_path=PROJECTOR_CONFIG_PATH, cfg_dir=None):
+    """Seed the fixed HDMI fullscreen projector (issue 1346), run AFTER the input seed inside
+    --bootstrap. Read the persisted type (strih-lx-projector.json, default multiview), resolve the
+    EXTERNAL (non-eDP) HDMI monitor over GetMonitorList, and OpenVideoMixProjector there -- UNLESS the
+    current scene collection already has a saved projector of that type on that monitor (OBS re-opens
+    saved projectors itself with SaveProjectors=true, so a second open would DUPLICATE the window).
+    NO external monitor -> log + SKIP, NEVER fall back to the eDP panel (that would cover the operator
+    UI); the next launch re-checks. Best-effort (ignore_err on the WS calls); returns a short status
+    string for the log."""
+    if cfg_dir is None:
+        cfg_dir = OBS_CONFIG_DIR
+    ptype = read_projector_type(config_path)
+    mons = (obs.req("GetMonitorList", ignore_err=True) or {}).get("monitors", []) or []
+    idx = projector_monitor_index(mons)
+    if idx is None:
+        print("projector: no external monitor, skipping (monitors: %s; SaveProjectors will re-open "
+              "one automatically once a display is plugged into HDMI)"
+              % ([m.get("monitorName") for m in mons],))
+        return "skipped-no-hdmi"
+    type_num = PROJECTOR_TYPE_NUM[ptype]
+    saved = _current_collection_saved_projectors(obs, cfg_dir)
+    if projector_already_saved(saved, type_num, idx):
+        print("projector: %s (ProjectorType %d) already saved on monitor %d -- OBS re-opens it, "
+              "skipping (no duplicate window)" % (ptype, type_num, idx))
+        return "already-saved"
+    obs.req("OpenVideoMixProjector", {
+        "videoMixType": projector_type_to_mix(ptype),
+        "monitorIndex": idx,
+    }, ignore_err=True)
+    print("projector: opened %s fullscreen on monitor %d (SaveProjectors persists it)" % (ptype, idx))
+    return "opened-%s" % ptype
+
+
 def _read_manifest(path):
     with open(path) as fh:
         return fh.read()
@@ -287,12 +439,27 @@ def main():
                     help="seed scenes/inputs with the certified genlock settings + Studio Mode")
     ap.add_argument("--verify-parity", action="store_true",
                     help="read-only: report whether the 10 seed inputs exist as genlock_fifo sources")
+    ap.add_argument("--projector", choices=["program", "multiview"], default=None,
+                    help="issue 1346: rewrite strih-lx-projector.json to program|multiview and "
+                         "(re)seed the fixed HDMI fullscreen projector (the OBS UI projector menu "
+                         "stays the primary operator switch; SaveProjectors persists it)")
     args = ap.parse_args()
 
     # An explicit mode is REQUIRED (issue 1317 review): a bare invocation must never silently connect
-    # and MUTATE OBS. --bootstrap seeds; --verify-parity is read-only.
-    if not args.bootstrap and not args.verify_parity:
-        ap.error("specify a mode: --bootstrap (seed) or --verify-parity (read-only)")
+    # and MUTATE OBS. --bootstrap seeds; --verify-parity is read-only; --projector sets the HDMI
+    # projector (issue 1346).
+    if not args.bootstrap and not args.verify_parity and args.projector is None:
+        ap.error("specify a mode: --bootstrap (seed), --verify-parity (read-only), or "
+                 "--projector program|multiview")
+
+    # --projector (issue 1346): rewrite the persisted type + (re)seed the HDMI projector. Does NOT
+    # read the input seed manifest -- it only touches the projector, not the input/scene seed.
+    if args.projector is not None:
+        write_projector_type(args.projector, PROJECTOR_CONFIG_PATH)
+        obs = Obs(args.host, args.port, args.password)
+        status = seed_projector(obs, PROJECTOR_CONFIG_PATH)
+        print("projector set to %s (%s): %s" % (args.projector, PROJECTOR_CONFIG_PATH, status))
+        return
 
     manifest_text = _read_manifest(args.manifest)
 
@@ -308,6 +475,9 @@ def main():
           % (len(plan), latency,
              ", ".join("%s=%s" % (k, v) for k, v in sorted(statuses.items()))))
     print("scene order: " + " | ".join(scene_order(inputs)))
+    # issue 1346: seed the fixed HDMI fullscreen projector AFTER the input seed (idempotent; SKIPs
+    # cleanly when no external monitor is connected).
+    seed_projector(obs)
 
 
 if __name__ == "__main__":

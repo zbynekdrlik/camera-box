@@ -143,6 +143,50 @@ else
   note "strih_scenes.py / python3 absent -- run setup-strih.sh step 6 first (seed-input parity report skipped)"
 fi
 
+# 4c) issue 1346: fixed HDMI fullscreen projector -- REPORT-ONLY (the live open needs an HDMI display
+#     on the notebook, a supervisor/owner rig step, so this NEVER hard-FAILs). Reports via the pure
+#     strih_projector_verdict: SaveProjectors=true pre-seeded in user.ini; and -- when an external
+#     HDMI/DP monitor is connected -- a saved ProjectorType 3/4 entry in a scene collection.
+OBS_CFG_DIR_V="$(dirname "$OBS_LOG_DIR")"   # OBS_LOG_DIR is <cfg>/logs -> the cfg dir is its parent
+PROJ_USER_INI="${OBS_CFG_DIR_V}/user.ini"
+SAVEPROJ=0
+[ -f "$PROJ_USER_INI" ] && grep -qi '^SaveProjectors=true' "$PROJ_USER_INI" && SAVEPROJ=1
+EXT_CONN=0
+for _st in /sys/class/drm/card*-HDMI*/status /sys/class/drm/card*-DP*/status; do
+  [ -f "$_st" ] || continue
+  if [ "$(cat "$_st" 2>/dev/null)" = connected ]; then EXT_CONN=1; break; fi
+done
+SAVED_ENTRY=0
+if command -v python3 >/dev/null 2>&1; then
+  SAVED_ENTRY="$(python3 - "$OBS_CFG_DIR_V" <<'PY'
+import glob, json, os, sys
+cfg = sys.argv[1]
+found = 0
+for path in glob.glob(os.path.join(cfg, "basic", "scenes", "*.json")):
+    try:
+        with open(path) as fh:
+            d = json.load(fh)
+    except (OSError, ValueError):
+        continue
+    for p in (d.get("saved_projectors") or []):
+        if isinstance(p, dict) and p.get("type") in (3, 4):
+            found = 1
+            break
+    if found:
+        break
+print(found)
+PY
+)"
+fi
+PROJ_VERDICT="$(strih_projector_verdict "$SAVEPROJ" "$EXT_CONN" "${SAVED_ENTRY:-0}" || true)"
+case "$PROJ_VERDICT" in
+  ok)                     ok   "fixed HDMI projector: SaveProjectors + external monitor + a saved ProjectorType 3/4" ;;
+  saveprojectors-missing) note "fixed HDMI projector: SaveProjectors=true NOT pre-seeded in ${PROJ_USER_INI} (re-run setup-strih.sh step 7)" ;;
+  hdmi-absent)            note "fixed HDMI projector: SaveProjectors ok; HDMI display not connected (report-only -- plug a display into HDMI for the live projector)" ;;
+  projector-unseeded)     note "fixed HDMI projector: external monitor present but no saved projector yet (strih_scenes.py --bootstrap opens it on the next launch)" ;;
+  *)                      note "fixed HDMI projector: unknown verdict '${PROJ_VERDICT}'" ;;
+esac
+
 # 5) Certified latency pins vs scripts/latency-pins-baseline.json (strih-lx key) -- REPORT-ONLY.
 BASELINE="${HERE}/latency-pins-baseline.json"
 if command -v python3 >/dev/null 2>&1 && [ -f "$BASELINE" ]; then
