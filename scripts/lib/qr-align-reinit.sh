@@ -151,7 +151,15 @@ qr_align_reinit_loop() {
     spread="$(qr_align_reinit_spread_of "$json")"
     laggards="$(qr_align_reinit_pick_laggards "$json" "$ok")"
     if [ -z "$laggards" ]; then
-      printf '[qr-align-reinit] converged round %s spread=%s\n' "$round" "$spread"
+      # No laggards can mean two DIFFERENT things: a genuine converged spread (a numeric
+      # spread_frames), or an UNMEASURABLE round (spread "?" -- empty/failed measure, e.g. a missing
+      # python3 or an undecodable painter). Both safely proceed to the floor-aware plan, but say so
+      # honestly rather than claim "converged" on a round that measured nothing (review #1349 LOW).
+      if [ "$spread" = "?" ]; then
+        printf '[qr-align-reinit] measure unavailable round %s — report-only, proceeding to the floor-aware plan\n' "$round"
+      else
+        printf '[qr-align-reinit] converged round %s spread=%s\n' "$round" "$spread"
+      fi
       return 0
     fi
     relabel=""
