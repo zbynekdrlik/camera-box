@@ -59,9 +59,10 @@ DEFAULT_CAMERA_LATENCY_MS = 3
 # camera boundary grid and every program CUT is a timecode discontinuity, so a genlock FIFO underruns
 # and relocks on every cut (110,222 underruns / 899 relocks measured live on strih-lx 19.9.). The
 # Windows strih receives these NON-genlocked (light.json NDI 2ME PGM/PVW: ndi_sync=1, latency=1, no
-# genlock_fifo); the feedback class mirrors that. latency is FIXED at 1 (a feedback monitor, not a
-# camera on the aligned grid), independent of the camera manifest floor.
-FEEDBACK_LATENCY_MS = 1
+# genlock_fifo); the feedback class mirrors that. `latency` here is the stock DistroAV receive-buffer
+# MODE enum (1 = LOW), NOT milliseconds -- FIXED at 1 (a feedback monitor, not a camera on the
+# aligned grid), independent of the camera manifest floor (which rides genlock_latency_ms_src).
+FEEDBACK_LATENCY_MODE = 1
 
 # --- issue 1346: fixed HDMI fullscreen projector -------------------------------------------------
 # The owner ROZHODNUTE (19.9.2026): the strih-lx HDMI output is an OBS fullscreen projector on the
@@ -83,10 +84,15 @@ OBS_CONFIG_DIR = os.path.expanduser("~/.config/obs-studio")
 
 def certified_genlock_settings(latency):
     """The certified per-input genlock settings (obs_phase2._PROBE_NDI_SETTINGS / _LOCKED_BASELINE_KEYS:
-    ndi_bw_mode=0 HIGHEST, genlock_fifo=True, ndi_sync=2 SOURCE_TIMECODE) with `latency` from the
-    manifest floor. ndi_source_name is NOT included here -- it is a per-input top-level field the
-    seed merges in. Returned fresh each call (never a shared mutable default)."""
-    return {"ndi_bw_mode": 0, "genlock_fifo": True, "ndi_sync": 2, "latency": latency}
+    ndi_bw_mode=0 HIGHEST, genlock_fifo=True, ndi_sync=2 SOURCE_TIMECODE) with the manifest floor on
+    `genlock_latency_ms_src` -- the REAL per-source genlock ms knob (issue 235 single knob, floor 3,
+    the key latency_pins_verify.py reads). NOT the stock DistroAV `latency` key: that is a
+    receive-buffer MODE enum which the genlock build's certified coercion forces back to 0 (NORMAL) on
+    every genlock_fifo input, so a seeded `latency: 3` read back 0 forever and made --bootstrap
+    re-write + name-re-enforce every camera on every launch (live strih-lx finding, 19.9.2026).
+    ndi_source_name is NOT included here -- it is a per-input top-level field the seed merges in.
+    Returned fresh each call (never a shared mutable default)."""
+    return {"ndi_bw_mode": 0, "genlock_fifo": True, "ndi_sync": 2, "genlock_latency_ms_src": latency}
 
 
 def feedback_settings():
@@ -95,7 +101,7 @@ def feedback_settings():
     False -- NOT omitted -- so a SetInputSettings(overlay=True) heal actually CLEARS a mis-seeded
     genlock_fifo=True off an already-existing input (an omitted key would leave the stale True in
     place, since overlay merges). Returned fresh each call (never a shared mutable default)."""
-    return {"ndi_bw_mode": 0, "genlock_fifo": False, "ndi_sync": 1, "latency": FEEDBACK_LATENCY_MS}
+    return {"ndi_bw_mode": 0, "genlock_fifo": False, "ndi_sync": 1, "latency": FEEDBACK_LATENCY_MODE}
 
 
 def input_class_for(name):
