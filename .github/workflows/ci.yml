@@ -527,9 +527,16 @@ jobs:
         with:
           key: intercom-hub
 
-      # Clippy -D warnings on the codec crate + the hub (all targets incl. the unit tests).
+      # Clippy -D warnings on the codec crate + the hub (all targets incl. the unit tests). Default
+      # features = the Interkom picture `ndi` path (issue 1345 M3c): libloading is a RUNTIME dynamic
+      # load, so this compiles the real NDI FFI (src/ndi_video/ndi_source.rs) with no libndi installed.
       - name: Clippy (intercom members)
         run: cargo clippy -p intercom-vban -p intercom-hub --all-targets -- -D warnings
+
+      # Keep the `--no-default-features` (libndi-free, stub picture source) hub path proven so it can't
+      # bit-rot now that `ndi` is the default build (mirrors the bkshading service's stub step).
+      - name: Clippy (intercom-hub, --no-default-features — stub picture path)
+        run: cargo clippy -p intercom-hub --no-default-features --all-targets -- -D warnings
 
       # The moved VBAN codec tests + the hub's matrix/engine/vban_io/state/http unit tests
       # (incl. the random-port VBAN loopback). This is where the codec tests run now that
@@ -537,6 +544,11 @@ jobs:
       # its tests without -p).
       - name: Test (intercom members)
         run: cargo test -p intercom-vban -p intercom-hub
+
+      # Prove the `--no-default-features` stub picture path still compiles + passes its tests (the
+      # libndi-free build can't silently break now that `ndi` is off the default).
+      - name: Test (intercom-hub, --no-default-features — stub picture path)
+        run: cargo test -p intercom-hub --no-default-features
 
       # Build the deployable hub binary in RELEASE (the enable-only systemd unit + setup-strih
       # step expect /usr/local/bin/intercom-hub), mirroring the bkshading artifact pattern.
