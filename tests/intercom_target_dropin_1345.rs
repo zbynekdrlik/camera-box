@@ -69,13 +69,22 @@ fn set_cmds_emit_environment_reload_restart_readback() {
         out.contains("Environment=CAMERA_BOX_INTERCOM_TARGET=strih-lx.lan"),
         "must set the env var to the host: {out}"
     );
-    assert!(out.contains("systemctl daemon-reload"), "must daemon-reload: {out}");
-    assert!(out.contains("systemctl restart camera-box"), "must restart camera-box: {out}");
+    assert!(
+        out.contains("systemctl daemon-reload"),
+        "must daemon-reload: {out}"
+    );
+    assert!(
+        out.contains("systemctl restart camera-box"),
+        "must restart camera-box: {out}"
+    );
     assert!(
         out.contains("CAMERA_BOX_INTERCOM_TARGET=strih-lx.lan"),
         "must read the effective env back: {out}"
     );
-    assert!(out.contains(PROD_DROPIN), "must write the configured drop-in path: {out}");
+    assert!(
+        out.contains(PROD_DROPIN),
+        "must write the configured drop-in path: {out}"
+    );
     assert_all_statements_semicolon_terminated(&out);
 }
 
@@ -87,9 +96,18 @@ fn clear_cmds_emit_rm_reload_restart() {
     );
     assert_eq!(code, 0, "stderr={err}");
     assert!(out.contains("rm -f"), "must remove the drop-in file: {out}");
-    assert!(out.contains(PROD_DROPIN), "must target the configured drop-in path: {out}");
-    assert!(out.contains("systemctl daemon-reload"), "must daemon-reload: {out}");
-    assert!(out.contains("systemctl restart camera-box"), "must restart camera-box: {out}");
+    assert!(
+        out.contains(PROD_DROPIN),
+        "must target the configured drop-in path: {out}"
+    );
+    assert!(
+        out.contains("systemctl daemon-reload"),
+        "must daemon-reload: {out}"
+    );
+    assert!(
+        out.contains("systemctl restart camera-box"),
+        "must restart camera-box: {out}"
+    );
     assert_all_statements_semicolon_terminated(&out);
 }
 
@@ -98,12 +116,18 @@ fn invalid_host_fails_nonzero_and_emits_nothing() {
     // whitespace in the host
     let (code, out, _err) = run_sourced("intercom_target_dropin_set_cmds 'bad host'", &[]);
     assert_ne!(code, 0, "a host with whitespace must fail loud");
-    assert!(out.trim().is_empty(), "a rejected host must emit no remote text: {out}");
+    assert!(
+        out.trim().is_empty(),
+        "a rejected host must emit no remote text: {out}"
+    );
 
     // empty host
     let (code2, out2, _e2) = run_sourced("intercom_target_dropin_set_cmds ''", &[]);
     assert_ne!(code2, 0, "an empty host must fail loud");
-    assert!(out2.trim().is_empty(), "a rejected host must emit no remote text: {out2}");
+    assert!(
+        out2.trim().is_empty(),
+        "a rejected host must emit no remote text: {out2}"
+    );
 
     // quote in the host
     let (code3, _out3, _e3) = run_sourced("intercom_target_dropin_set_cmds \"strih'lx\"", &[]);
@@ -160,7 +184,16 @@ fn set_then_clear_writes_then_removes_the_dropin_functionally() {
     let _ = fs::remove_dir_all(&base);
 
     assert_eq!(code, 0, "functional run failed. stdout={out}\nstderr={err}");
-    assert!(out.contains("SET_FILE_OK"), "drop-in file not written: {out}");
-    assert!(out.contains("SET_CONTENT_OK"), "drop-in content wrong: {out}");
-    assert!(out.contains("CLEARED_OK"), "drop-in file not removed by clear: {out}");
+    assert!(
+        out.contains("SET_FILE_OK"),
+        "drop-in file not written: {out}"
+    );
+    assert!(
+        out.contains("SET_CONTENT_OK"),
+        "drop-in content wrong: {out}"
+    );
+    assert!(
+        out.contains("CLEARED_OK"),
+        "drop-in file not removed by clear: {out}"
+    );
 }

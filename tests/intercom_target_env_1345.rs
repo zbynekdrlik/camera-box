@@ -30,27 +30,45 @@ fn env_empty_string_keeps_resolved_and_has_no_note() {
 fn env_whitespace_only_keeps_resolved_and_has_no_note() {
     let (target, note) = resolve_intercom_target(Some("   \t "), "strih.lan");
     assert_eq!(target, "strih.lan");
-    assert!(note.is_none(), "a whitespace-only env value is treated as unset");
+    assert!(
+        note.is_none(),
+        "a whitespace-only env value is treated as unset"
+    );
 }
 
 #[test]
 fn env_override_replaces_target_and_notes() {
     let (target, note) = resolve_intercom_target(Some("strih-lx.lan"), "strih.lan");
-    assert_eq!(target, "strih-lx.lan", "the env value overrides the resolved host");
+    assert_eq!(
+        target, "strih-lx.lan",
+        "the env value overrides the resolved host"
+    );
     let note = note.expect("an override must produce a log note");
     assert!(
         note.contains(INTERCOM_TARGET_ENV),
         "note must name the env var: {note}"
     );
-    assert!(note.contains("strih-lx.lan"), "note must name the NEW host: {note}");
-    assert!(note.contains("strih.lan"), "note must name the OLD host: {note}");
+    assert!(
+        note.contains("strih-lx.lan"),
+        "note must name the NEW host: {note}"
+    );
+    assert!(
+        note.contains("strih.lan"),
+        "note must name the OLD host: {note}"
+    );
 }
 
 #[test]
 fn env_override_is_trimmed() {
     let (target, note) = resolve_intercom_target(Some("  strih-lx.lan\n"), "strih.lan");
-    assert_eq!(target, "strih-lx.lan", "surrounding whitespace is trimmed off the override");
-    assert!(note.is_some(), "a (trimmed) non-empty override still produces a note");
+    assert_eq!(
+        target, "strih-lx.lan",
+        "surrounding whitespace is trimmed off the override"
+    );
+    assert!(
+        note.is_some(),
+        "a (trimmed) non-empty override still produces a note"
+    );
 }
 
 #[test]
@@ -60,7 +78,10 @@ fn note_names_both_hosts_distinctly() {
     let note = note.expect("override note");
     assert!(note.contains("newhost"), "note names the new host: {note}");
     assert!(note.contains("oldhost"), "note names the old host: {note}");
-    assert!(note.contains(INTERCOM_TARGET_ENV), "note names the env var: {note}");
+    assert!(
+        note.contains(INTERCOM_TARGET_ENV),
+        "note names the env var: {note}"
+    );
 }
 
 #[test]
