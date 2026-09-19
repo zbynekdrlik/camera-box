@@ -209,7 +209,10 @@ alternative). This is Prístup 1 of the issue-1346 design.
   whose `monitorName` does NOT start with `eDP` — the internal panel) → **no external monitor ⇒ log
   "projector: no external monitor, skipping" and RETURN, NEVER fall back to the eDP panel** (that
   would cover the operator UI; the next launch re-checks) → read the current collection's
-  `saved_projectors` (`GetSceneCollectionList` name → `basic/scenes/<name>.json`) → `projector_already_saved`
+  `saved_projectors` (resolved robustly: the authoritative user.ini `[Basic] SceneCollectionFile`
+  base → the `GetSceneCollectionList` name → a glob of every `basic/scenes/*.json` as a last resort,
+  since OBS slugifies a display-name with spaces into a DIFFERENT filename — an exact-name-only read
+  would fail-open and stack a duplicate window) → `projector_already_saved`
   skips if that type is already saved on that monitor (OBS re-opens saved ones itself; a second
   `OpenVideoMixProjector` opens a DUPLICATE window, imag #756 class) → else `OpenVideoMixProjector`
   with the mapped `videoMixType` (`projector_type_to_mix`: program→PROGRAM, multiview→MULTIVIEW).
