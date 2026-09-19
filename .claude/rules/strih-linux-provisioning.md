@@ -177,6 +177,61 @@ importing imag's 70 KB DRM-lease/encoder/picom machinery that strih-lx does not 
   the two static-anchor asserts on the launcher/setup wiring — a python assert over the script text,
   so it runs in Tier-0 with no cargo).
 
+## Fixed HDMI fullscreen projector — the strih_scenes.py projector seed (issue 1346, DONE)
+
+**The owner ROZHODNUTÉ (19.9.2026 11:05):** the strih-lx HDMI output is an **OBS fullscreen
+projector** on the HDMI display, **selectable in OBS between Program and Multiview**, and **persisted
+across relaunches** — **NOT** Xorg + a DRM-lease scanout (the imag-1152 path was the rejected
+alternative). This is Prístup 1 of the issue-1346 design.
+
+- **Why OBS's own projector.** OBS already has the whole mechanism: right-click preview → Fullscreen
+  Projector (Program) / Multiview (Fullscreen) → the operator's monitor. `SaveProjectors=true`
+  persists that choice in the scene collection's `saved_projectors` and OBS re-opens it on every
+  launch. No window-manager scripting / compositor plugin needed. The **OBS UI projector menu stays
+  the primary operator switch**; `strih_scenes.py --projector program|multiview` is the scripted twin.
+- **ProjectorType numbers (OBS `saved_projectors` `type`):** **3 = StudioProgram, 4 = Multiview.**
+  strih runs Studio Mode always, so a Program projector persists as StudioProgram (3). The Windows
+  strih's current `saved_projectors` is exactly one entry `{"monitor":0,"type":4}` = Multiview → so
+  **Multiview is the default**, Program the alternative. `/opt/camera-box/strih-lx-projector.json`
+  (`{"type":"multiview"|"program"}`) selects it; `setup-strih.sh` step 6 writes it default-multiview
+  **guarded by `[ ! -f ... ]`** so it never overwrites the operator's later choice.
+- **`SaveProjectors=true` is the OPPOSITE of imag.** imag (`setup-imag.sh` #522) uses
+  `SaveProjectors=false` + an openbox-autostart boot hook that RE-OPENS the projectors (re-applying
+  settings). strih-lx has **no such boot hook**, so it relies on OBS's own `SaveProjectors` restore +
+  the `seed_projector` idempotency check. `setup-strih.sh` step 7 pre-seeds `[BasicWindow]
+  SaveProjectors=true` + `ProjectorAlwaysOnTop=true` in the desktop user's `user.ini` (idempotent
+  `RawConfigParser` upsert; the OBS default is `SaveProjectors=false`, so without this a projector
+  would never come back after `strih-obs.service` relaunches).
+- **`seed_projector(obs)` runs AFTER the input seed inside `--bootstrap`** (and standalone via
+  `--projector`): read the type → `GetMonitorList` → `projector_monitor_index` (the first monitor
+  whose `monitorName` does NOT start with `eDP` — the internal panel) → **no external monitor ⇒ log
+  "projector: no external monitor, skipping" and RETURN, NEVER fall back to the eDP panel** (that
+  would cover the operator UI; the next launch re-checks) → read the current collection's
+  `saved_projectors` (`GetSceneCollectionList` name → `basic/scenes/<name>.json`) → `projector_already_saved`
+  skips if that type is already saved on that monitor (OBS re-opens saved ones itself; a second
+  `OpenVideoMixProjector` opens a DUPLICATE window, imag #756 class) → else `OpenVideoMixProjector`
+  with the mapped `videoMixType` (`projector_type_to_mix`: program→PROGRAM, multiview→MULTIVIEW).
+- **Live facts today:** `GetMonitorList` = one monitor `eDP-2(0)` (1920×1080); every HDMI connector
+  disconnected. So the seed SKIPs cleanly until a display is plugged into HDMI (the owner rig step for
+  acceptance). The seed never opens a projector on the live box from CI — the supervisor runs the seed
+  on strih-lx.
+- **verify-strih.sh item 4c — REPORT-ONLY** (pure `strih_projector_verdict` in
+  `scripts/lib/strih-provision.sh`): `SaveProjectors=true` present in `user.ini`; and — when an
+  external HDMI/DP monitor is connected (a `/sys/class/drm/card*-HDMI*/status` or `DP*` = `connected`)
+  — a saved `ProjectorType` 3/4 entry exists → PASS, else NOTE. `hdmi-absent` NOTEs "HDMI display not
+  connected". Never a hard FAIL (the live open needs a display).
+- **Tests:** `tests/python/test_strih_projector_1346.py` (pure helpers + fake-WS `seed_projector` +
+  setup-strih anchors) and the `strih_projector_verdict` case in
+  `tests/strih_provision_pure_functions.rs`.
+
+**Follow-up (MEASURED, its own ticket if it bites): HDMI-Multiview tearing.** The issue-1107
+present-vsync arming covers ONLY the fullscreen **non-multiview Program** projector
+(`OBSProjector.cpp` `savedMonitor > -1 && !isMultiview`, `.claude/rules/obs-projector-vsync.md`). The
+**Multiview** projector is NOT vsync-armed. On the notebook (no compositor) this may tear on the HDMI
+output; **measure it once a display is on the notebook** and, if tearing shows, extend the arming to
+the multiview projector when it is the only fullscreen projector — that is a **vendored OBS change**
+(`vendor/obs-studio`), so its own ticket, never bolted onto this provisioning lane.
+
 ## Runtime packages + the /usr prefix install (issue 1317, DONE)
 
 The genlock bundle is a tarball BUILT for the `/usr` prefix and links release-specific Qt6 /
