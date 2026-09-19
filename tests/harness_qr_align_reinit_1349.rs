@@ -79,7 +79,7 @@ fn pick_laggards_two_boxes_behind() {
         r#"{"NDI cam4": 0, "NDI cam3": -3, "NDI cam7": -2, "spread_frames": 3, "rounds_used": 4}"#;
     let (code, out, err) = run_sourced(&format!("qr_align_reinit_pick_laggards '{json}' 1"), &[]);
     assert_eq!(code, 0, "stderr={err}");
-    let got: Vec<&str> = out.trim().split_whitespace().collect();
+    let got: Vec<&str> = out.split_whitespace().collect();
     assert!(got.contains(&"NDI"), "output was {out:?}");
     // both cam3 and cam7 are > 1 behind the fastest cam4
     assert!(out.contains("NDI cam3"), "output was {out:?}");
