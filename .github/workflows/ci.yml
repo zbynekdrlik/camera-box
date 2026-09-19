@@ -506,6 +506,51 @@ jobs:
           if-no-files-found: error
           path: target/release/bkshading.exe
 
+  intercom-hub:
+    name: intercom-hub (issue 1345)
+    # The strih-lx intercom hub + shared VBAN codec are SEPARATE workspace members
+    # (intercom/vban, intercom/hub). The appliance jobs above run cargo at the ROOT WITHOUT
+    # --workspace, so they never build/test the hub (they DO compile intercom-vban as a path
+    # dep, but its tests only run here); THIS job is the members' first clippy + test + build.
+    # Pure tokio/axum/toml — no libv4l/libasound needed.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: intercom-hub
+
+      # Clippy -D warnings on the codec crate + the hub (all targets incl. the unit tests).
+      - name: Clippy (intercom members)
+        run: cargo clippy -p intercom-vban -p intercom-hub --all-targets -- -D warnings
+
+      # The moved VBAN codec tests + the hub's matrix/engine/vban_io/state/http unit tests
+      # (incl. the random-port VBAN loopback). This is where the codec tests run now that
+      # src/vban.rs is a re-export (the root `cargo test` compiles intercom-vban but never runs
+      # its tests without -p).
+      - name: Test (intercom members)
+        run: cargo test -p intercom-vban -p intercom-hub
+
+      # Build the deployable hub binary in RELEASE (the enable-only systemd unit + setup-strih
+      # step expect /usr/local/bin/intercom-hub), mirroring the bkshading artifact pattern.
+      - name: Build deployable binary (intercom-hub)
+        run: cargo build --release --bins -p intercom-hub
+
+      - name: Upload intercom-hub binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: intercom-hub-linux-amd64
+          # Fail loud on a missing binary (renamed bin / wrong path) — never a green empty artifact.
+          if-no-files-found: error
+          path: target/release/intercom-hub
+
   build:
     name: Build
     runs-on: ubuntu-22.04
@@ -763,7 +808,7 @@ jobs:
     # (#notifications id). NOTE: the older n8n CLAUDE_DISCORD_WEBHOOK_URL relay
     # accepts POSTs (HTTP 200) but no longer DELIVERS to Discord, so the bot REST
     # API is used directly — Discord returns the created message object on success.
-    needs: [lint, test, coverage, mutants, python-tests, bkshading, bkshading-windows, build, windows-probe, security, drift-guard, shellcheck, deploy-fleet]
+    needs: [lint, test, coverage, mutants, python-tests, bkshading, bkshading-windows, intercom-hub, build, windows-probe, security, drift-guard, shellcheck, deploy-fleet]
     if: ${{ failure() }}
     runs-on: ubuntu-latest
     steps:

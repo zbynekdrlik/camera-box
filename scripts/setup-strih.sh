@@ -27,7 +27,7 @@ OBS_CFG="${USER_HOME}/.config/obs-studio"
 GENLOCK_REPO="${GENLOCK_REPO:-zbynekdrlik/camera-box}"
 GENLOCK_DIR="/opt/obs-genlock"
 REC_DIR="/srv/_REC"
-TOTAL_STEPS=13
+TOTAL_STEPS=14
 
 step() { echo -e "${GREEN}[$1/${TOTAL_STEPS}] $2${NC}"; }
 warn() { echo -e "${YELLOW}$1${NC}"; }
@@ -369,7 +369,23 @@ else
 fi
 
 # ---------------------------------------------------------------------------------------------
-step 13 "Final verification (verify-strih.sh acceptance gate)"
+step 13 "Intercom hub unit + matrix (issue 1345 M1: ENABLE-ONLY, NEVER started while parallel)"
+# The strih-lx intercom hub replaces the Windows VB-Matrix's N-1 intercom for the VBAN camboxes.
+# Install the systemd unit + the generated routing TOML and ENABLE it, but NEVER start/restart it
+# here: sending VBAN to the real camboxes is the M4 cut-over (the Windows strih stays their live hub
+# until then). The deployable binary (intercom-hub-linux-amd64 from CI) is placed separately.
+install -Dm644 "${HERE}/../systemd/intercom-hub.service" /etc/systemd/system/intercom-hub.service
+install -Dm644 "${HERE}/../intercom/intercom.strih-lx.toml" /etc/intercom-hub/intercom.toml
+systemctl daemon-reload
+systemctl enable intercom-hub 2>/dev/null || warn "  could not enable intercom-hub.service"
+if [ -x /usr/local/bin/intercom-hub ]; then
+  echo "  intercom-hub.service installed + enabled (NOT started -- M4 cut-over starts it); /etc/intercom-hub/intercom.toml in place; binary present"
+else
+  warn "  intercom-hub.service installed + enabled but /usr/local/bin/intercom-hub is ABSENT -- install the CI binary (intercom-hub-linux-amd64) before the M4 cut-over"
+fi
+
+# ---------------------------------------------------------------------------------------------
+step 14 "Final verification (verify-strih.sh acceptance gate)"
 if [ -x "${HERE}/verify-strih.sh" ]; then
   "${HERE}/verify-strih.sh" || fail "verify-strih.sh acceptance gate did not pass"
 else

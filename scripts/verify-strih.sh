@@ -288,6 +288,17 @@ else
   bad "bundle release parity FAILED: ${FLAGS_FILE} must carry 'TARGET-RELEASE: ubuntu-${BOX_VERSION_ID}' (box VERSION_ID=${BOX_VERSION_ID}); a bundle built for another release must never run here"
 fi
 
+# 16) intercom hub unit (issue 1345 M1): the strih-lx intercom hub is installed ENABLE-ONLY while the
+#     Windows VB-Matrix stays the live intercom (M4 is the cut-over). REPORT-ONLY: an installed +
+#     enabled but NOT active unit is the CORRECT parallel-run state, never a FAIL.
+if [ -f /etc/systemd/system/intercom-hub.service ]; then
+  IH_EN="$(systemctl is-enabled intercom-hub 2>/dev/null || echo unknown)"
+  IH_ACT="$(systemctl is-active intercom-hub 2>/dev/null || echo inactive)"
+  note "intercom-hub.service installed (enabled=${IH_EN}, active=${IH_ACT}); enable-only until the M4 cut-over (issue 1345) -- report-only, an inactive unit is correct while parallel"
+else
+  note "intercom-hub.service not installed -- run setup-strih.sh step 13 (issue 1345 M1); report-only"
+fi
+
 echo ""
 if [ "$FAILS" -eq 0 ]; then
   echo -e "${GREEN}=== verify-strih.sh: ALL CLEAR ===${NC}"; exit 0
