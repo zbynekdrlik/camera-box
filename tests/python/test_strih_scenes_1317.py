@@ -42,6 +42,17 @@ _REAL_MANIFEST = json.dumps(
 )
 
 _CERTIFIED = {"ndi_bw_mode": 0, "genlock_fifo": True, "ndi_sync": 2, "latency": 3}
+# issue 1317: the two per-class settings dicts. camera = the certified genlock baseline; feedback =
+# the Windows strih `light.json` 2ME-input mode (ndi_sync=1 SOURCE_TIMING, latency=1), pinned with
+# genlock_fifo=False EXPLICITLY (not omitted) so a SetInputSettings(overlay=True) heal actually clears
+# a mis-seeded genlock_fifo=True off an already-existing input.
+_CAMERA = _CERTIFIED
+_FEEDBACK = {"ndi_bw_mode": 0, "genlock_fifo": False, "ndi_sync": 1, "latency": 1}
+_CAMERA_INPUTS = [
+    "CAM1 (usb)", "CAM2 (usb)", "CAM3 (usb)", "CAM4 (usb)",
+    "CAM5 (usb)", "CAM6 (usb)", "CAM7 (usb)", "RESOLUME-SNV (cg-obs)",
+]
+_FEEDBACK_INPUTS = ["STRIH-SNV (2ME PGM)", "STRIH-SNV (2ME PVW)"]
 
 
 # --- parse_seed_manifest --------------------------------------------------------------------------
@@ -98,19 +109,18 @@ def test_certified_genlock_settings_is_the_locked_baseline():
 
 # --- seed_inputs ----------------------------------------------------------------------------------
 
-def test_seed_inputs_emits_certified_settings_and_names_per_input():
+def test_seed_inputs_emits_class_settings_and_names_per_input():
+    # issue 1317: the settings dict is now per CLASS (camera vs feedback), not one uniform genlock
+    # dict; the scene/input naming + top-level ndi_source_name shape is unchanged.
     plan = _mod.seed_inputs(_TEN_INPUTS, 3)
     assert len(plan) == 10
     for item, src in zip(plan, _TEN_INPUTS):
         assert item["ndi_source_name"] == src
         assert item["scene"] == src                     # per-input scene = the source display name
         assert item["input"] == "NDI " + src            # input name kept DISTINCT from the scene
-        assert item["settings"] == _CERTIFIED
-        assert item["settings"]["genlock_fifo"] is True
-        assert item["settings"]["ndi_sync"] == 2
-        assert item["settings"]["ndi_bw_mode"] == 0
-        assert item["settings"]["latency"] == 3
-        # ndi_source_name is a TOP-LEVEL field, not inside the certified settings dict
+        want = _FEEDBACK if src in _FEEDBACK_INPUTS else _CAMERA
+        assert item["settings"] == want
+        # ndi_source_name is a TOP-LEVEL field, not inside the settings dict
         assert "ndi_source_name" not in item["settings"]
 
 
@@ -130,11 +140,13 @@ def test_scene_order_is_stable_deduped_manifest_order():
 # --- input_parity_problems ------------------------------------------------------------------------
 
 def _actual_from_plan(plan):
-    """Build a healthy GetInputSettings-shaped {inputName: settings} from a plan."""
+    """Build a healthy GetInputSettings-shaped {inputName: settings} from a plan -- genlock_fifo and
+    ndi_sync taken from each item's OWN class settings (a feedback input is healthy at genlock_fifo
+    False / ndi_sync 1, a camera at True / 2)."""
     return {
         item["input"]: {
             "ndi_source_name": item["ndi_source_name"],
-            "genlock_fifo": True,
+            "genlock_fifo": bool(item["settings"].get("genlock_fifo")),
             "ndi_sync": item["settings"]["ndi_sync"],
         }
         for item in plan
@@ -214,3 +226,127 @@ def test_setup_strih_step6_installs_seeder_to_usr_local_bin():
     assert 'install -m 0755 "${HERE}/strih_scenes.py" /usr/local/bin/strih_scenes.py' in s, (
         "setup-strih.sh step 6 must install strih_scenes.py into /usr/local/bin"
     )
+
+
+# --- issue 1317: per-input settings CLASS (camera vs 2ME feedback) ---------------------------------
+
+def test_input_class_for_cameras_and_cg_obs_are_camera():
+    for name in _CAMERA_INPUTS:
+        assert _mod.input_class_for(name) == "camera", name
+    # RESOLUME-SNV (cg-obs) is a genlocked SENDER (issue 1300) -> camera class, not feedback
+    assert _mod.input_class_for("RESOLUME-SNV (cg-obs)") == "camera"
+
+
+def test_input_class_for_2me_feedback_is_feedback_regardless_of_prefix():
+    assert _mod.input_class_for("STRIH-SNV (2ME PGM)") == "feedback"
+    assert _mod.input_class_for("STRIH-SNV (2ME PVW)") == "feedback"
+    # the future STRIH-LX self-loop feedback (issue 1347) inherits the class by suffix, not prefix
+    assert _mod.input_class_for("STRIH-LX (2ME PGM)") == "feedback"
+    assert _mod.input_class_for("STRIH-LX (2ME PVW)") == "feedback"
+
+
+def test_input_settings_for_camera_class_is_the_certified_genlock_dict():
+    assert _mod.input_settings_for("CAM3 (usb)", 3) == _CAMERA
+    assert _mod.input_settings_for("RESOLUME-SNV (cg-obs)", 3) == _CAMERA
+    # camera latency rides the manifest floor
+    assert _mod.input_settings_for("CAM1 (usb)", 5)["latency"] == 5
+    # fresh dict each call (never a shared mutable default)
+    a = _mod.input_settings_for("CAM1 (usb)", 3)
+    a["genlock_fifo"] = False
+    assert _mod.input_settings_for("CAM1 (usb)", 3)["genlock_fifo"] is True
+
+
+def test_input_settings_for_feedback_class_is_non_genlock():
+    for name in _FEEDBACK_INPUTS + ["STRIH-LX (2ME PVW)"]:
+        s = _mod.input_settings_for(name, 3)
+        assert s["ndi_sync"] == 1                      # SOURCE_TIMING, mirroring the Windows light.json
+        assert s["latency"] == 1                       # feedback latency is FIXED at 1
+        assert s["ndi_bw_mode"] == 0
+        # genlock_fifo is EXPLICIT False (not omitted) so an overlay heal clears a mis-seeded True
+        assert s.get("genlock_fifo") is False
+        assert "genlock_fifo" in s
+    # feedback latency is independent of the camera manifest floor
+    assert _mod.input_settings_for("STRIH-SNV (2ME PGM)", 9)["latency"] == 1
+
+
+def test_seed_inputs_applies_the_class_per_input():
+    plan = _mod.seed_inputs(_TEN_INPUTS, 3)
+    by_src = {p["ndi_source_name"]: p for p in plan}
+    assert by_src["CAM3 (usb)"]["settings"] == _CAMERA
+    assert by_src["RESOLUME-SNV (cg-obs)"]["settings"] == _CAMERA
+    assert by_src["STRIH-SNV (2ME PGM)"]["settings"] == _FEEDBACK
+    assert by_src["STRIH-SNV (2ME PVW)"]["settings"] == _FEEDBACK
+
+
+def test_seed_inputs_real_manifest_yields_8_camera_2_feedback():
+    inputs, _outputs, latency = _mod.parse_seed_manifest(_REAL_MANIFEST)
+    plan = _mod.seed_inputs(inputs, latency)
+    classes = [_mod.input_class_for(p["ndi_source_name"]) for p in plan]
+    assert len(plan) == 10
+    assert classes.count("camera") == 8
+    assert classes.count("feedback") == 2
+
+
+def test_input_parity_problems_flags_a_feedback_input_left_genlocked():
+    # a 2ME feedback input that is STILL (wrongly) genlock_fifo=True must be flagged by the report
+    plan = _mod.seed_inputs(_TEN_INPUTS, 3)
+    actual = _actual_from_plan(plan)
+    actual["NDI STRIH-SNV (2ME PGM)"] = {
+        "ndi_source_name": "STRIH-SNV (2ME PGM)", "genlock_fifo": True, "ndi_sync": 1,
+    }
+    problems = _mod.input_parity_problems(actual, plan)
+    assert any("genlock_fifo" in p and "STRIH-SNV (2ME PGM)" in p for p in problems)
+
+
+# --- issue 1317: --bootstrap UPDATE path (drive with a fake WS client, no network) -----------------
+
+class _FakeObs:
+    """Records every obs.req; answers GetInputSettings / GetInputDefaultSettings from a canned map so
+    bootstrap can compute the effective settings with no network. No `.ws` attribute -> the
+    ndi_source_name re-enforce takes the direct (ungated) path."""
+
+    def __init__(self, existing):
+        self._existing = existing  # {inputName: explicit-settings-dict}
+        self.calls = []
+
+    def req(self, req_type, data=None, ignore_err=False):
+        self.calls.append((req_type, data or {}))
+        if req_type == "GetInputDefaultSettings":
+            return {"defaultInputSettings": {"ndi_bw_mode": 0, "ndi_sync": 2, "latency": 0}}
+        if req_type == "GetInputSettings":
+            name = (data or {}).get("inputName")
+            return {"inputSettings": dict(self._existing.get(name, {}))}
+        return {}
+
+
+def _settings_updates(calls):
+    """The SetInputSettings calls that carry the CLASS settings (an ndi_sync key) -- the update
+    primitive, distinct from the ndi_source_name-only re-enforce SetInputSettings."""
+    return [d for (t, d) in calls
+            if t == "SetInputSettings" and "ndi_sync" in (d.get("inputSettings") or {})]
+
+
+def test_bootstrap_updates_a_mismatched_existing_input():
+    plan = _mod.seed_inputs(["STRIH-SNV (2ME PGM)"], 3)  # a feedback input
+    inp = plan[0]["input"]
+    # existing input MIS-seeded as a genlocked camera (the exact issue-1317 bug)
+    existing = {inp: {"ndi_bw_mode": 0, "genlock_fifo": True, "ndi_sync": 2, "latency": 3,
+                      "ndi_source_name": "STRIH-SNV (2ME PGM)"}}
+    obs = _FakeObs(existing)
+    _mod.bootstrap(obs, plan, studio=False)
+    updates = _settings_updates(obs.calls)
+    assert len(updates) == 1, obs.calls
+    s = updates[0]["inputSettings"]
+    assert s["ndi_sync"] == 1 and s["latency"] == 1 and s["genlock_fifo"] is False
+    assert updates[0].get("overlay") is True
+
+
+def test_bootstrap_emits_no_settings_update_for_a_matching_input():
+    plan = _mod.seed_inputs(["CAM3 (usb)"], 3)  # a camera input
+    inp = plan[0]["input"]
+    # already correctly seeded to the camera class -> effective matches -> NO settings update emitted
+    existing = {inp: {"ndi_bw_mode": 0, "genlock_fifo": True, "ndi_sync": 2, "latency": 3,
+                      "ndi_source_name": "CAM3 (usb)"}}
+    obs = _FakeObs(existing)
+    _mod.bootstrap(obs, plan, studio=False)
+    assert _settings_updates(obs.calls) == [], obs.calls
