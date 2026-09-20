@@ -496,28 +496,43 @@ new framework.
   genlock OBS cutter (`.claude/rules/realtime-isolation.md` + the imag power-envelope precedent).
   **verify-strih.sh item 18 `(perf)`**: `strih_verify_governor_ok` (stdin = all cores' governors,
   fail-closed on empty/unreadable) AND the existing `strih_verify_sleep_masked` — FAILs loud.
-- **Bitfocus Companion Satellite (setup-strih.sh step 16).** The notebook exposes its
-  locally-attached Stream Deck to the VENUE's Companion CONTROLLER (`10.77.9.205`, the
-  strih-autorecord-coupling box) as a headless **SATELLITE** — NOT full Companion (a second
-  controller would fork the venue's button/page state). `strih_companion_satellite_install` (pure
-  emitter): if the `companion-satellite` package is absent, download the **PINNED** `.deb` (never
-  "latest") + `apt-get install` it (fail-loud on fetch/install), then `systemctl enable` the unit —
-  **enable-only, NEVER start mid-provision** (the operator / next boot starts it, like the
-  intercom/janus steps). The controller host is written to `/etc/companion-satellite/host.conf` as
-  `COMPANION_SATELLITE_HOST=<host>` via `strih_companion_satellite_config_text`. The version + asset
-  + host are single-source pins overridable by `COMPANION_SATELLITE_VERSION` /
-  `COMPANION_SATELLITE_DEB_URL` / `COMPANION_SATELLITE_HOST` (default `1.11.0` /
-  `github.com/bitfocus/companion-satellite/releases/.../companion-satellite-x64-<v>.deb` /
-  `10.77.9.205`). **verify-strih.sh item 19 `(companion)`**: `strih_companion_verdict` grades
-  dpkg-installed + unit enabled + `host.conf` host == the controller — FAILs loud.
-  - **SUPERVISOR CONFIRM on the live box (why it is a followup, not a gap):** this lane is
-    code-only (no ssh/deploy). The **pinned version + the exact `.deb` asset URL** must be confirmed
-    against the real Bitfocus release list, and the satellite's **runtime config wiring** (whether
-    its build consumes `COMPANION_SATELLITE_HOST` as an env-file, a JSON, or the `:9999` web UI —
-    `host.conf` is the durable RECORD of the intended controller, which the (companion) gate reads
-    back) must be confirmed once the notebook is in hand. A wrong pin fails LOUD at the live
-    `setup-strih.sh` run (never silently), and `COMPANION_SATELLITE_DEB_URL` lets the supervisor
-    repin with no code change.
+- **Bitfocus Companion Satellite (setup-strih.sh step 16) — DESKTOP TARBALL MODEL (reworked after
+  the integration-review bounce).** The notebook exposes its locally-attached Stream Deck to the
+  VENUE's Companion CONTROLLER (`10.77.9.205`, the strih-autorecord-coupling box) as a headless
+  **SATELLITE** — NOT full Companion (a second controller would fork the venue's button/page state).
+  **The bounce cause:** the first draft pinned version `1.11.0` (does not exist) and a GitHub-release
+  `.deb` — Bitfocus GitHub releases carry **no `.deb` assets**. Linux x64 is an **Electron desktop
+  app shipped as a `.tar.gz` from the Bitfocus CDN**. The corrected flow: `strih_companion_satellite_install`
+  (pure emitter) installs the deps (`libusb-1.0-0-dev libudev-dev libfontconfig1`), then — if
+  `/opt/companion-satellite/companion-satellite` is absent — downloads the **PINNED** `.tar.gz`
+  (`cf-pub.bitfocus.io`, build `722-8bc2f14`), **verifies its sha256 (fail-loud on mismatch)**,
+  extracts, and runs the tarball's OWN `install.sh --system --force` (idempotent; installs to `/opt`
+  + the app-menu entry + the `50-satellite-desktop.rules` uaccess udev rule). **No `.deb`, no
+  `systemctl start`/`enable`** — the desktop build has no system unit. The setup step then:
+  (a) writes the operator-login **autostart** at `~/.config/autostart/companion-satellite.desktop`
+  via `strih_companion_satellite_autostart_text` (owner rule: a needed feature is always-ON, never a
+  forgettable manual launch); (b) **pre-seeds the controller** into the operator's
+  `~/.config/Companion Satellite/config.json` (electron-store, note the literal SPACE in the dir)
+  via `strih_companion_satellite_appconfig_json` — keys **`remoteIp`/`remotePort`** (`remoteProtocol`
+  `tcp`), confirmed from the Satellite v3.4.0 source (`satellite/src/config.ts`), NOT
+  `host`/`companionAddress`; `ensureFieldsPopulated` only fills MISSING keys, so a pre-written
+  `config.json` is respected before first launch; (c) records the intended controller in
+  `/etc/companion-satellite/host.conf` (human-readable paper trail). The version/tarball/sha/host/port
+  are single-source pins overridable by `COMPANION_SATELLITE_VERSION` /
+  `COMPANION_SATELLITE_TARBALL_URL` / `COMPANION_SATELLITE_SHA256` / `COMPANION_SATELLITE_HOST` /
+  `COMPANION_SATELLITE_PORT` (default `3.4.0` / the cf-pub tarball / the pinned sha256 / `10.77.9.205`
+  / `16622`). **verify-strih.sh item 19 `(companion)`**: `strih_companion_verdict` grades `/opt`
+  binary + `50-satellite-desktop.rules` present + operator autostart present + the seeded
+  `config.json` `remoteIp` == the controller — FAILs loud, fail-closed
+  (`not-installed`→`no-udev-rule`→`no-autostart`→`wrong-host`→`ok`).
+  - **SUPERVISOR CONFIRM on the live box (why the LIVE RUN is a followup, not a gap):** this lane is
+    code-only (no ssh/deploy). The pins are verified against the live Bitfocus distribution (the
+    tarball URL + sha256 were downloaded and hashed during the rework — 263 565 407 bytes,
+    sha256 `32b8b443…a2a953`), but the actual `setup-strih.sh` provisioning RUN + `verify-strih.sh`
+    green + the operator's Stream Deck lighting up must be done once the notebook is in hand. A wrong
+    pin fails LOUD at the live run (sha mismatch / 404), never silently; the CDN build hash can rotate,
+    so `COMPANION_SATELLITE_TARBALL_URL` + `COMPANION_SATELLITE_SHA256` let the supervisor repin (in
+    lock-step) with no code change.
 
 Tests: pure fns + wiring anchors in `tests/strih_provision_pure_functions.rs`; the `TOTAL_STEPS=17`
 bump is reflected in both `tests/intercom_hub_provisioning.rs` and the janus test.
@@ -561,10 +576,10 @@ fires.
 
 Recording retention, the NIC self-heal watcher, WoL, and the 4K multiview projector budget are all
 listed in the issue-1317 inventory as NEEDS-WORK but are not part of the initial provisioning
-scaffolding — they follow once the hardware is in hand. (Companion Satellite INSTALL + enable-only +
-controller-host record is now DONE — see the "CPU performance governor + Bitfocus Companion
-Satellite" section above; only the live version/asset/runtime-config CONFIRM remains, a supervisor
-step.)
+scaffolding — they follow once the hardware is in hand. (Companion Satellite INSTALL — desktop
+tarball + sha256 + `install.sh --system --force` + operator autostart + controller-host seed — is now
+DONE — see the "CPU performance governor + Bitfocus Companion Satellite" section above; only the live
+`setup-strih.sh` RUN + `verify-strih.sh` green remains, a supervisor step.)
 
 ### Anchor-test literal vs an expanded path (18.9.2026, CI 35390761239)
 
