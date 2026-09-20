@@ -564,11 +564,30 @@ and runs `qr_align_reinit_loop "$STRIH" "$SOURCES"`:
    stable tail EXACTLY as the DRY-RUN path (`measure_stable_tail` → `robust_deltas` over the tail at
    zero pins = the t_send-compensated painter frame_id table) and prints ONLY a JSON object of
    per-source lag in SOURCE FRAMES relative to the FASTEST source (`{"NDI cam3": -3, …,
-   "spread_frames": 3, "rounds_used": N}`), exit 0, **writing nothing to OBS** (`measure_only_table`).
-2. **pick laggards** — `qr_align_reinit_pick_laggards <json> <ok_frames>` lists every box more than
-   `REINIT_OK_FRAMES` (default 1) source frames behind the fastest; empty when the spread is within
-   the ceiling. A missing/garbage per-source field is skipped, never a crash.
-3. **re-init** — restart the BURN instance of each laggard box, re-drawing its `k`. This is a
+   "spread_frames": 3, "rounds_used": N, "converged": true}`), exit 0, **writing nothing to OBS**
+   (`measure_only_table`). **Always exit 0 (issue 1349, runs 3+5):** when the stable tail never
+   converged within the budget, it prints a best-effort table from the LAST complete round flagged
+   `"converged": false` (the loop treats it as measured-but-flagged, not an abort) instead of a
+   non-zero exit; only when NOT ONE complete round decoded is it the graceful `{"error": …,
+   "spread_frames": null, "converged": false}` dict. The loop calls it via
+   `qr_align_reinit_measure_with_retry`, which on a swallowed failure (no numeric `spread_frames`)
+   LOGS the last-3-line stderr tail (`[qr-align-reinit] measure failed round N: …`, to STDERR — never
+   `/dev/null`, the runs 3+5 gap), settles `QR_ALIGN_REINIT_MEASURE_RETRY_S` (default 5), and RETRIES
+   ONCE; only the SECOND failure prints `measure unavailable round N — report-only` (measured
+   nothing) and proceeds.
+2. **pick the off-modal set** — `qr_align_reinit_pick_off_modal <json> <ok_frames>` computes the
+   MODAL lag (the most frequent `k`; on a tie, the value closest to the fastest = the higher/less-
+   negative one) and lists EVERY box more than `REINIT_OK_FRAMES` (default 1) source frames from it —
+   laggards AND leaders — so ONE round re-draws all off-modal boxes at once. Empty when the whole
+   fleet is within `ok_frames` of the modal. A missing/garbage per-source field is skipped, never a
+   crash. (Run-4 finding: re-initing only the single SLOWEST box every round — the retired
+   `qr_align_reinit_pick_laggards`, kept for its own tests — just moves the laggard; with 7 boxes and
+   k ∈ {0,1,2}, spread 2 is the modal state and one-box re-draws never converge to 0.) **Second
+   lottery lever:** `qr_align_reinit_next_set <prev_set> <new_set> <prev_spread> <new_spread>
+   <fastest>` — when this round's off-modal set is IDENTICAL to the previous round's AND the spread
+   did not improve, re-init the FASTEST box instead (re-draw its k so the modal itself shifts);
+   otherwise re-init the off-modal set.
+3. **re-init** — restart the BURN instance of each chosen box, re-drawing its `k`. This is a
    `systemctl restart` of the SAME transient burn unit the `[2/8]`/`[2b/8]` step created
    (source-role: `camera-box-burn-<RUN_ID>`; secondaries: `camera-box-burn-<cam>-<RUN_ID>`), NOT a
    re-run of the full start block — that block's `systemd-run --unit=<same>` fails on an existing
@@ -586,10 +605,13 @@ box's burn instance) default to the production helpers and are injected with fak
 is touched. Turn the whole loop off with `QR_ALIGN_REINIT=0`.
 
 **Telemetry (report-only, additive):** each re-init round writes
-`$OUTDIR/qr-align-reinit-<RUN_ID>.json` = `{"qr_align_reinit_rounds": N, "qr_align_reinit_spread_frames": S}`.
-Wiring this INTO the verdict JSON's `all_cambox_continuity` needs a `src/probe/*` Rust change (zero
-local verification path under Tier-0) and is deferred — the file + the `[qr-align-reinit] round N:
-spread=S re-init=camX,camY` run-log lines are the current surface.
+`$OUTDIR/qr-align-reinit-<RUN_ID>.json` = `{"qr_align_reinit_rounds": N,
+"qr_align_reinit_spread_frames": S, "rounds_detail": [{"round": N, "spread": S, "reinit":
+["cam3","cam7"], "measure_retries": M}, …]}` (issue 1349 item 3 — `rounds_detail` names the set
+re-inited per round + the measure-retry count). Wiring this INTO the verdict JSON's
+`all_cambox_continuity` needs a `src/probe/*` Rust change (zero local verification path under Tier-0)
+and is deferred — the file + the `[qr-align-reinit] round N: spread=S re-init=camX,camY` run-log
+lines are the current surface.
 
 **Live acceptance (supervisor):** a release E2E whose `[4i/8align]` logs ≥ 1 re-init round and then
 passes the floor-aware plan. Live evidence + the restart-proof: issue 1349.
