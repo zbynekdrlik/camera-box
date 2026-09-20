@@ -1538,7 +1538,13 @@ fn seed_manifest_json_classifies_via_strih_scenes() {
     let (code, out, err) = run_sourced(
         &[("SCN_DIR", scn.as_str())],
         r#"strih_lx_seed_manifest_json | python3 -c '
-import sys, os, json
+import sys, os, json, types
+# The Rust Test/Coverage jobs do NOT install websocket-client, but strih_scenes.py imports it at
+# module load (a DELIBERATE launcher-preflight contract). This cross-check exercises only the PURE
+# helpers, so stub the websocket module so `import strih_scenes` succeeds without the runtime dep.
+_ws = types.ModuleType("websocket")
+_ws.create_connection = lambda *a, **k: None
+sys.modules.setdefault("websocket", _ws)
 sys.path.insert(0, os.environ["SCN_DIR"])
 import strih_scenes as m
 text = sys.stdin.read()
@@ -1766,7 +1772,7 @@ fn nvenc_log_verdict_grades_the_obs_log() {
 fn nvenc_log_verdict_survives_a_large_log_with_an_early_match() {
     let (c, out, err) = run_sourced(
         &[],
-        "{ echo '[obs-nvenc] NVENC version: 12.1 (compiled) / 13.0 (driver)'; yes 'padding line to make the OBS log large enough to SIGPIPE the printf pipe on an early grep match' | head -n 20000; } | strih_nvenc_log_verdict",
+        "awk 'BEGIN{print \"[obs-nvenc] NVENC version: 12.1 (compiled) / 13.0 (driver)\"; for(i=0;i<20000;i++) print \"padding line to make the OBS log large (100s of KB) with an early match\"}' | strih_nvenc_log_verdict",
     );
     assert_eq!(
         c, 0,
@@ -1776,7 +1782,7 @@ fn nvenc_log_verdict_survives_a_large_log_with_an_early_match() {
     // the same for the unsupported signature buried in a large log (must not flip to unknown)
     let (c, out, _e) = run_sourced(
         &[],
-        "{ echo 'NVENC not supported'; yes 'padding line padding line padding line padding' | head -n 20000; } | strih_nvenc_log_verdict",
+        "awk 'BEGIN{print \"NVENC not supported\"; for(i=0;i<20000;i++) print \"padding line padding line padding line padding\"}' | strih_nvenc_log_verdict",
     );
     assert_ne!(c, 0);
     assert_eq!(out.trim(), "nvenc-unsupported");
