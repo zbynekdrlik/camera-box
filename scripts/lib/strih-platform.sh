@@ -90,7 +90,7 @@ strih_linux_visibility_message() {
 strih_linux_visibility_check() {
   local host="$1" user="$2" pw="$3" tmo="$4" here="$5"
   local sysout ws_ok=0
-  sysout="$(timeout "$tmo" sshpass -p "$pw" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 \
+  sysout="$(timeout "$tmo" sshpass -p "$pw" ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 \
     "${user}@${host}" "$(strih_linux_visibility_probe_cmd)" 2>/dev/null || true)"
   python3 "$here/obs_phase2.py" record --host "$host" --action status >/dev/null 2>&1 && ws_ok=1
   strih_linux_visibility_message "$sysout" "$ws_ok"

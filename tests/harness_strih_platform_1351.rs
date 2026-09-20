@@ -472,3 +472,22 @@ fn run_strih_extract_windows_branch_is_byte_identical_to_the_original() {
         "run_strih_extract's Windows branch must be byte-identical to its pre-1351 text."
     );
 }
+
+/// #1351 hotfix (supervisor, live-rig E2E finding): the strih-lx ssh/scp opts MUST carry
+/// `-o UserKnownHostsFile=/dev/null`. The M4 cut-over gave 10.77.9.202 a new host key, and
+/// `StrictHostKeyChecking=no` does NOT override a CHANGED key — without this the [0/8] Linux
+/// visibility probe AND the record extraction fail with an empty read ("strih-lx unreachable"),
+/// aborting the E2E. Matches the fleet-standard ssh shape used everywhere else.
+#[test]
+fn strih_lx_ssh_opts_ignore_stale_known_hosts_1351() {
+    let lib = read("scripts/lib/strih-platform.sh");
+    assert!(
+        lib.contains("-o UserKnownHostsFile=/dev/null"),
+        "strih_linux_visibility_check ssh must set UserKnownHostsFile=/dev/null (M4 .202 host-key change)"
+    );
+    let ext = read("scripts/recording-verdict-on-strih-lx.sh");
+    assert!(
+        ext.contains("-o UserKnownHostsFile=/dev/null"),
+        "recording-verdict-on-strih-lx.sh SSH_OPTS must set UserKnownHostsFile=/dev/null (ssh + scp)"
+    );
+}

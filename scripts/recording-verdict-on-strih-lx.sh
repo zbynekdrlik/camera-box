@@ -111,7 +111,7 @@ main() {
     exit 1
   }
 
-  local -a SSH_OPTS=(-o StrictHostKeyChecking=no -o ConnectTimeout=10)
+  local -a SSH_OPTS=(-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10)
   local TARGET="${STRIH_USER}@${STRIH_LX_BOX}"
 
   # STEP 1: deploy the Linux verdict binary to strih-lx — ONLY if missing/not-executable there,
