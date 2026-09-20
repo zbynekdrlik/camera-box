@@ -371,8 +371,37 @@ def robust_deltas(rounds, current_pins, min_valid_rounds=DEFAULT_MIN_VALID_ROUND
     return {src: statistics.median(vals) for src, vals in per_src.items()}, n_valid
 
 
+def _lag_table_from_deltas(deltas, n_valid, source_frame_ms):
+    """PURE: turn cross-camera present-age deltas (d_i >= 0, fastest = max) into the measure-only
+    frame-lag table {src: lag(int <= 0), 'spread_frames': int, 'rounds_used': int}. Re-anchor to the
+    fastest so it reads 0 and every other reads how many whole SOURCE FRAMES it is BEHIND (<= 0) --
+    the k re-init lever is per-frame."""
+    fastest = max(deltas.values())
+    lag = {src: int(round((deltas[src] - fastest) / source_frame_ms)) for src in deltas}
+    spread = (max(lag.values()) - min(lag.values())) if lag else 0
+    out = dict(lag)
+    out["spread_frames"] = spread
+    out["rounds_used"] = n_valid
+    return out
+
+
+def _last_complete_round_table(rounds_ticks, sources, source_frame_ms):
+    """issue 1349: a best-effort measure-only table from the LAST round in which EVERY source
+    decoded, for the case the stable tail never robustly converged within the budget. Returns None
+    when not one complete round exists (the caller then reports the graceful error dict)."""
+    for rt in reversed(rounds_ticks):
+        if all(rt.get(s) is not None for s in sources):
+            try:
+                deltas, n_valid = robust_deltas([rt], {s: 0 for s in sources}, 1)
+            except AlignmentImpossible:
+                continue
+            return _lag_table_from_deltas(deltas, n_valid, source_frame_ms)
+    return None
+
+
 def measure_only_table(rounds_ticks, tail_start, sources, *,
-                       min_valid_rounds=DEFAULT_MIN_VALID_ROUNDS, source_frame_ms=SOURCE_FRAME_MS):
+                       min_valid_rounds=DEFAULT_MIN_VALID_ROUNDS, source_frame_ms=SOURCE_FRAME_MS,
+                       converged=True):
     """issue 1349 --measure-only: the per-source capture-lag TABLE in SOURCE FRAMES relative to the
     FASTEST source (0 = fastest, negative = frames behind), from a measured (rounds_ticks, tail_start)
     convergence. REUSES robust_deltas over the stable tail (t_send-compensated median present-age
@@ -381,25 +410,30 @@ def measure_only_table(rounds_ticks, tail_start, sources, *,
     re-init loop (scripts/lib/qr-align-reinit.sh) polls this to pick which laggard burn instance to
     re-init (each cambox's `k` is drawn at V4L2 open, so re-opening it re-draws k).
 
-    Returns a FLAT dict {source: lag_frames(int <= 0), 'spread_frames': int, 'rounds_used': int}.
-    An un-measurable tail (too few fully-decoded rounds) returns {'error': str, 'spread_frames':
-    None, 'rounds_used': int} instead of raising -- the loop degrades to report-only, never a
-    crash."""
+    Returns a FLAT dict {source: lag_frames(int <= 0), 'spread_frames': int, 'rounds_used': int,
+    'converged': bool}. `converged` reflects whether the stable tail actually converged
+    (measure_stable_tail's status.done) -- the loop treats an UN-converged table as measured-but-
+    flagged, never an abort.
+
+    issue 1349 unconverged fallback: when the tail is not robustly measurable (too few fully-decoded
+    rounds within the budget), rather than a non-zero abort the re-init loop swallows (runs 3+5), fall
+    back to the LAST complete round flagged converged:false. Only when NOT ONE complete round exists
+    is it a graceful error dict {'error': str, 'spread_frames': None, 'rounds_used': int,
+    'converged': False} -- still never raising."""
     tail = rounds_ticks[tail_start:] if tail_start is not None else rounds_ticks
     try:
         # {s: 0} deltas = the PURE cross-camera present-age spread (the painter frame_id table);
         # d_i >= 0 with the SLOWEST/behind camera anchored at 0 and the FASTEST at max.
         deltas, n_valid = robust_deltas(tail, {s: 0 for s in sources}, min_valid_rounds)
     except AlignmentImpossible as exc:
-        return {"error": str(exc), "spread_frames": None, "rounds_used": len(tail)}
-    fastest = max(deltas.values())
-    # Re-anchor to the fastest so it reads 0 and every other reads how many SOURCE FRAMES it is
-    # BEHIND (<= 0). Round to whole source frames (the k re-init lever is per-frame).
-    lag = {src: int(round((deltas[src] - fastest) / source_frame_ms)) for src in deltas}
-    spread = (max(lag.values()) - min(lag.values())) if lag else 0
-    out = dict(lag)
-    out["spread_frames"] = spread
-    out["rounds_used"] = n_valid
+        fb = _last_complete_round_table(rounds_ticks, sources, source_frame_ms)
+        if fb is None:
+            return {"error": str(exc), "spread_frames": None, "rounds_used": len(tail),
+                    "converged": False}
+        fb["converged"] = False
+        return fb
+    out = _lag_table_from_deltas(deltas, n_valid, source_frame_ms)
+    out["converged"] = bool(converged)
     return out
 
 
@@ -1897,7 +1931,8 @@ def main(argv=None):
             min_parity_rounds=a.min_parity_rounds, min_valid_rounds=a.min_valid_rounds,
             budget_s=a.measure_budget_s, max_rounds=a.max_measure_rounds)
         table = measure_only_table(rounds_ticks, status.tail_start, sources,
-                                   min_valid_rounds=a.min_valid_rounds)
+                                   min_valid_rounds=a.min_valid_rounds,
+                                   converged=status.done)
         print(json.dumps(table, default=str))
         return 0
 

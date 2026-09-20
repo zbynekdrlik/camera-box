@@ -79,6 +79,121 @@ qr_align_reinit_spread_of() {
   printf '%s\n' "${v:-?}"
 }
 
+# qr_align_reinit_modal_value <v1> <v2> ... -> the MODAL lag value (the most frequent). On a TIE,
+# prefer the HIGHER value (= closest to the fastest, the less-negative one). Pure, deterministic
+# regardless of arg order (a numeric sort by count then value, tail = most-frequent + highest).
+# Called only with >= 1 value.
+qr_align_reinit_modal_value() {
+  printf '%s\n' "$@" | sort -n | uniq -c | sort -k1,1n -k2,2n | tail -1 | awk '{print $2}'
+}
+
+# qr_align_reinit_pick_off_modal <measure_json> [ok_frames] -> the "NDI camN" sources whose lag is
+# MORE than ok_frames away from the MODAL lag -- laggards AND leaders -- ONE PER LINE, so one round
+# re-draws every off-modal box at once (issue 1349, run-4 finding: chasing the single slowest never
+# converges with 7 boxes at k in {0,1,2}). Same robust grep/skip-garbage parse as pick_laggards.
+qr_align_reinit_pick_off_modal() {
+  local json="${1:-}" ok="${2:-1}"
+  local -a names=() vals=()
+  local src val modal i d
+  while IFS='|' read -r src val; do
+    [ -n "$src" ] || continue
+    names+=("$src"); vals+=("$val")
+  done < <(printf '%s' "$json" \
+      | grep -oE '"NDI cam[0-9]+"[[:space:]]*:[[:space:]]*-?[0-9]+' \
+      | sed -E 's/^"(NDI cam[0-9]+)"[[:space:]]*:[[:space:]]*(-?[0-9]+)$/\1|\2/' \
+      || true)
+  [ "${#vals[@]}" -gt 0 ] || return 0
+  modal="$(qr_align_reinit_modal_value "${vals[@]}")"
+  for i in "${!names[@]}"; do
+    d=$(( vals[i] - modal )); [ "$d" -lt 0 ] && d=$(( -d ))
+    if [ "$d" -gt "$ok" ]; then
+      printf '%s\n' "${names[$i]}"
+    fi
+  done
+}
+
+# qr_align_reinit_fastest <measure_json> -> the "NDI camN" source with the MAX lag value (0 =
+# fastest). Tie -> the lowest-numbered box (deterministic). Empty when nothing parseable.
+qr_align_reinit_fastest() {
+  local json="${1:-}"
+  printf '%s' "$json" \
+    | grep -oE '"NDI cam[0-9]+"[[:space:]]*:[[:space:]]*-?[0-9]+' \
+    | sed -E 's/^"(NDI cam[0-9]+)"[[:space:]]*:[[:space:]]*(-?[0-9]+)$/\2|\1/' \
+    | sort -t'|' -k1,1n -k2,2r | tail -1 | cut -d'|' -f2 || true
+}
+
+# qr_align_reinit_spread_not_improved <prev_spread> <new_spread> -> exit 0 (TRUE) iff BOTH are
+# integers AND new_spread >= prev_spread (the spread did not get smaller). A non-integer ("?") on
+# either side returns 1 (we cannot conclude it failed to improve -> do not switch to the fastest).
+qr_align_reinit_spread_not_improved() {
+  local prev="${1:-}" new="${2:-}"
+  case "$prev" in ''|*[!0-9-]*) return 1 ;; esac
+  case "$new" in ''|*[!0-9-]*) return 1 ;; esac
+  [ "$new" -ge "$prev" ]
+}
+
+# qr_align_reinit_next_set <prev_set> <new_set> <prev_spread> <new_spread> <fastest> -> the set to
+# ACTUALLY re-init this round (NEWLINE-separated sources). The second lottery lever (issue 1349,
+# run-4 finding): when this round's off-modal set is IDENTICAL to the previous round's AND the spread
+# did not improve, the off-modal lever is stuck -> re-init the FASTEST box instead (re-draw its k so
+# the modal shifts). Otherwise re-init the new off-modal set. Sets compared order-independently.
+qr_align_reinit_next_set() {
+  local prev_set="${1:-}" new_set="${2:-}" prev_spread="${3:-?}" new_spread="${4:-?}" fastest="${5:-}"
+  local prev_norm new_norm
+  prev_norm="$(printf '%s\n' "$prev_set" | grep -v '^[[:space:]]*$' | sort || true)"
+  new_norm="$(printf '%s\n' "$new_set" | grep -v '^[[:space:]]*$' | sort || true)"
+  if [ -n "$new_norm" ] && [ "$prev_norm" = "$new_norm" ] \
+     && qr_align_reinit_spread_not_improved "$prev_spread" "$new_spread"; then
+    printf '%s\n' "$fastest"
+    return 0
+  fi
+  printf '%s' "$new_set"
+}
+
+# qr_align_reinit_measure_with_retry <strih_host> <sources_csv> <round> -> the measure-only JSON on
+# stdout. Issue 1349 (runs 3+5): the measure-only call sometimes FAILS with no numeric spread and
+# its stderr SWALLOWED. On such a failure this LOGS the stderr tail (never swallowed), settles
+# QR_ALIGN_REINIT_MEASURE_RETRY_S (default 5), and retries ONCE. Sets the global
+# _qr_align_reinit_retries (0 or 1). ALWAYS returns 0.
+qr_align_reinit_measure_with_retry() {
+  local strih_host="${1:-}" sources_csv="${2:-}" round="${3:-?}"
+  local measure_cmd="${QR_ALIGN_REINIT_MEASURE_CMD:-qr_align_reinit_default_measure}"
+  local retry_s="${QR_ALIGN_REINIT_MEASURE_RETRY_S:-5}"
+  local json errfile spread tail
+  _qr_align_reinit_retries=0
+  errfile="$(mktemp 2>/dev/null || echo "/tmp/qr-align-reinit-err.$$")"
+  json="$( "$measure_cmd" "$strih_host" "$sources_csv" 2>"$errfile" || true )"
+  spread="$(qr_align_reinit_spread_of "$json")"
+  if [ "$spread" = "?" ]; then
+    # stdout is this function's JSON return channel, so the diagnostic MUST go to STDERR (never
+    # swallowed to /dev/null -- the runs 3+5 gap -- and never polluting the returned JSON).
+    tail="$(printf '%s' "$(tail -n 3 "$errfile" 2>/dev/null || true)")"
+    printf '[qr-align-reinit] measure failed round %s: %s\n' "$round" "${tail:-<no stderr>}" >&2
+    sleep "$retry_s" || true
+    _qr_align_reinit_retries=1
+    json="$( "$measure_cmd" "$strih_host" "$sources_csv" 2>"$errfile" || true )"
+  fi
+  rm -f "$errfile" 2>/dev/null || true
+  printf '%s' "$json"
+}
+
+# qr_align_reinit_detail_obj <round> <spread> <relabel_csv> <retries> -> one JSON object for the
+# report-only rounds_detail array (issue 1349 item 3). spread "?"/non-numeric -> null; relabel_csv
+# ("cam3,cam7") -> a JSON array of cam tokens.
+qr_align_reinit_detail_obj() {
+  local round="${1:-0}" spread="${2:-?}" relabel="${3:-}" retries="${4:-0}"
+  local sp arr cam
+  case "$spread" in ''|*[!0-9-]*) sp="null" ;; *) sp="$spread" ;; esac
+  arr=""
+  local IFS=','
+  for cam in $relabel; do
+    [ -n "$cam" ] || continue
+    arr="${arr:+$arr,}\"$cam\""
+  done
+  printf '{"round": %s, "spread": %s, "reinit": [%s], "measure_retries": %s}' \
+    "$round" "$sp" "$arr" "${retries:-0}"
+}
+
 # qr_align_reinit_burn_unit_name <camN> [run_id] -> the transient burn systemd unit the [2/8]/[2b/8]
 # deploy created for that box: the source-role box (camera_source_box) uses camera-box-burn-<RUN_ID>,
 # every secondary uses camera-box-burn-<camN>-<RUN_ID>. Best-effort source lookup (subshell so it
@@ -134,62 +249,74 @@ qr_align_reinit_default_restart() {
 }
 
 # qr_align_reinit_loop <strih_host> <sources_csv> -> the bounded re-init control loop. Each round:
-# measure (measure-only) -> pick laggards -> if none, log CONVERGED and return 0 -> else restart the
-# burn instance of every laggard box, settle, log the round, repeat -> after REINIT_MAX_ROUNDS log
+# measure (measure-only, with a 1x retry on a swallowed failure) -> pick the OFF-MODAL set (every
+# box more than ok_frames from the most-frequent lag, laggards AND leaders) -> if none, log CONVERGED
+# / measure-unavailable and return 0 -> else pick the set to re-init (the off-modal set, OR the
+# FASTEST box when the same set repeated with no improvement -- the second lottery lever), restart
+# each box's burn instance, settle, log the round + telemetry, repeat -> after REINIT_MAX_ROUNDS log
 # GAVE-UP and return 0 (the existing [4i/8align] floor-aware plan HARD-FAIL is the final arbiter).
-# ALWAYS returns 0.
+# ALWAYS returns 0. (issue 1349, run-4 finding: one-slowest-box re-draws never converge; the modal
+# round + fastest lever do.)
 qr_align_reinit_loop() {
   local strih_host="${1:-}" sources_csv="${2:-}"
   local ok="${REINIT_OK_FRAMES:-1}" maxr="${REINIT_MAX_ROUNDS:-3}"
   local settle="${QR_ALIGN_SETTLE_S:-15}"
-  local measure_cmd="${QR_ALIGN_REINIT_MEASURE_CMD:-qr_align_reinit_default_measure}"
   local restart_cmd="${QR_ALIGN_REINIT_RESTART_CMD:-qr_align_reinit_default_restart}"
-  local round=1 json spread laggards src cam relabel
+  local round=1 json spread off_modal chosen fastest src cam relabel retries
+  local prev_off_modal="" prev_spread="?" details=""
 
   while [ "$round" -le "$maxr" ]; do
-    json="$( "$measure_cmd" "$strih_host" "$sources_csv" 2>/dev/null || true )"
+    json="$(qr_align_reinit_measure_with_retry "$strih_host" "$sources_csv" "$round")"
+    retries="${_qr_align_reinit_retries:-0}"
     spread="$(qr_align_reinit_spread_of "$json")"
-    laggards="$(qr_align_reinit_pick_laggards "$json" "$ok")"
-    if [ -z "$laggards" ]; then
-      # No laggards can mean two DIFFERENT things: a genuine converged spread (a numeric
-      # spread_frames), or an UNMEASURABLE round (spread "?" -- empty/failed measure, e.g. a missing
-      # python3 or an undecodable painter). Both safely proceed to the floor-aware plan, but say so
-      # honestly rather than claim "converged" on a round that measured nothing (review #1349 LOW).
+    off_modal="$(qr_align_reinit_pick_off_modal "$json" "$ok")"
+    if [ -z "$off_modal" ]; then
+      # No off-modal box can mean two DIFFERENT things: a genuine converged spread (a numeric
+      # spread_frames), or an UNMEASURABLE round (spread "?" -- the measure failed twice). Both safely
+      # proceed to the floor-aware plan, but say so honestly rather than claim "converged" on a round
+      # that measured nothing.
       if [ "$spread" = "?" ]; then
         printf '[qr-align-reinit] measure unavailable round %s — report-only, proceeding to the floor-aware plan\n' "$round"
       else
         printf '[qr-align-reinit] converged round %s spread=%s\n' "$round" "$spread"
       fi
+      details="${details:+$details,}$(qr_align_reinit_detail_obj "$round" "$spread" "" "$retries")"
+      qr_align_reinit_write_telemetry "$round" "$spread" "$details" || true
       return 0
     fi
+    fastest="$(qr_align_reinit_fastest "$json")"
+    chosen="$(qr_align_reinit_next_set "$prev_off_modal" "$off_modal" "$prev_spread" "$spread" "$fastest")"
     relabel=""
-    # NEWLINE-separated laggards (a source contains a space) -> read line by line.
+    # NEWLINE-separated set (a source contains a space) -> read line by line.
     while IFS= read -r src; do
       [ -n "$src" ] || continue
       cam="$(qr_align_reinit_cam_of_source "$src")"
       relabel="${relabel:+$relabel,}$cam"
       "$restart_cmd" "$cam" || true
-    done <<< "$laggards"
+    done <<< "$chosen"
     printf '[qr-align-reinit] round %s: spread=%s re-init=%s\n' "$round" "$spread" "$relabel"
-    # Persist the additive report-only telemetry (issue 1349 item 4) — a tiny JSON the verdict merge
-    # can pick up later (wiring it INTO the verdict JSON needs a src/probe Rust change, deferred).
-    qr_align_reinit_write_telemetry "$round" "$spread" || true
+    # Persist the additive report-only telemetry (issue 1349 items 3+4) — a tiny JSON the verdict
+    # merge can pick up later (wiring it INTO the verdict JSON needs a src/probe Rust change, deferred).
+    details="${details:+$details,}$(qr_align_reinit_detail_obj "$round" "$spread" "$relabel" "$retries")"
+    qr_align_reinit_write_telemetry "$round" "$spread" "$details" || true
+    prev_off_modal="$off_modal"; prev_spread="$spread"
     sleep "$settle" || true
     round=$(( round + 1 ))
   done
   printf '[qr-align-reinit] gave up after %s rounds spread=%s (the floor-aware plan decides)\n' \
     "$maxr" "$spread"
-  qr_align_reinit_write_telemetry "$maxr" "$spread" || true
+  qr_align_reinit_write_telemetry "$maxr" "$spread" "$details" || true
   return 0
 }
 
-# qr_align_reinit_write_telemetry <rounds> <spread_frames> -> write the additive report-only
-# telemetry JSON to the run dir (OUTDIR), when present. Silent no-op when OUTDIR is unset (a
-# standalone / test call) or the write fails. NEVER fatal.
+# qr_align_reinit_write_telemetry <rounds> <spread_frames> [rounds_detail_json] -> write the additive
+# report-only telemetry JSON to the run dir (OUTDIR), when present. rounds_detail is the comma-joined
+# object list built by qr_align_reinit_detail_obj (empty -> []). Silent no-op when OUTDIR is unset
+# (a standalone / test call) or the write fails. NEVER fatal.
 qr_align_reinit_write_telemetry() {
-  local rounds="${1:-0}" spread="${2:-?}" dir="${OUTDIR:-}" sp
+  local rounds="${1:-0}" spread="${2:-?}" details="${3:-}" dir="${OUTDIR:-}" sp
   [ -n "$dir" ] && [ -d "$dir" ] || return 0
   case "$spread" in ''|*[!0-9-]*) sp="null" ;; *) sp="$spread" ;; esac
-  printf '{"qr_align_reinit_rounds": %s, "qr_align_reinit_spread_frames": %s}\n' \
-    "$rounds" "$sp" > "$dir/qr-align-reinit-${RUN_ID:-$$}.json" 2>/dev/null || true
+  printf '{"qr_align_reinit_rounds": %s, "qr_align_reinit_spread_frames": %s, "rounds_detail": [%s]}\n' \
+    "$rounds" "$sp" "$details" > "$dir/qr-align-reinit-${RUN_ID:-$$}.json" 2>/dev/null || true
 }
