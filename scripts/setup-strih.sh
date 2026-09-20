@@ -405,9 +405,12 @@ step 14 "Janus audiobridge audio edge (issue 1345 M3a: apt install janus + jcfg 
 # The phones intercom leg (the VDO.Ninja replacement) runs over a Janus audiobridge room the hub
 # joins as a plain-RTP PCMU participant (issue 1345 M3a). Install Janus (apt), generate the 0600 room
 # secret if absent (NEVER printed), write the audiobridge room jcfg (the secret is injected via a bash
-# var -- no argv exposure) + the WebSocket transport jcfg (ws :8188, NO wss -- TLS terminates on the
-# dev1 front; the HTTP transport stays loopback :8088), and ENABLE the janus unit -- NEVER start it
-# here (the M4 cut-over starts it together with the intercom hub).
+# var -- no argv exposure) + the WebSocket transport jcfg (ws BOUND to the LAN IP :8188, NO wss -- TLS
+# terminates on the dev1 front) + the HTTP transport jcfg (bound loopback 127.0.0.1:8088 only), and
+# ENABLE the janus unit. NEVER unconditionally start it (the M4 cut-over starts it with the intercom
+# hub); Ubuntu's package auto-starts janus on install, so if it is ALREADY running we restart it to
+# load the freshly written jcfg (issue 1345 M3 follow-up: the LAN-bound WS + loopback HTTP jcfg + the
+# is-active-guarded restart).
 DEBIAN_FRONTEND=noninteractive apt-get install -y janus \
   || warn "  apt-get install janus failed -- install it before the M4 cut-over (the phones leg needs the audiobridge)"
 JANUS_ROOM="1000"
@@ -435,9 +438,19 @@ if [ -d /etc/janus ] || command -v janus >/dev/null 2>&1; then
   unset JANUS_SECRET_VALUE JANUS_AB_JCFG
   strih_janus_ws_jcfg_text "$STATIC_IP" > /etc/janus/janus.transport.websockets.jcfg
   chmod 644 /etc/janus/janus.transport.websockets.jcfg
-  echo "  wrote /etc/janus/janus.plugin.audiobridge.jcfg (room ${JANUS_ROOM} 'interkom') + janus.transport.websockets.jcfg (ws :8188, no wss)"
+  strih_janus_http_jcfg_text > /etc/janus/janus.transport.http.jcfg
+  chmod 644 /etc/janus/janus.transport.http.jcfg
+  echo "  wrote /etc/janus/janus.plugin.audiobridge.jcfg (room ${JANUS_ROOM} 'interkom') + janus.transport.websockets.jcfg (ws :8188 LAN-bound, no wss) + janus.transport.http.jcfg (loopback 127.0.0.1:8088)"
   systemctl enable janus 2>/dev/null || warn "  could not enable janus.service (install janus first)"
-  echo "  janus.service ENABLED (NOT started -- the M4 cut-over starts it with the hub); HTTP stays loopback :8088"
+  # Ubuntu's janus package auto-STARTS the service on install (before these jcfg existed). If it is
+  # already running, restart it to load the freshly written room/ws/http jcfg; otherwise leave it
+  # enable-only (the M4 cut-over starts it with the hub). Never an UNCONDITIONAL start/restart.
+  if systemctl is-active --quiet janus; then
+    systemctl restart janus 2>/dev/null || warn "  could not restart janus to load the new jcfg"
+    echo "  janus was already running (apt auto-start) -- restarted to load the new jcfg"
+  else
+    echo "  janus.service ENABLED (NOT running -- the M4 cut-over starts it with the hub); HTTP loopback 127.0.0.1:8088"
+  fi
 else
   warn "  /etc/janus absent and no janus binary -- install janus, then re-run this step to write the jcfg + enable"
 fi
