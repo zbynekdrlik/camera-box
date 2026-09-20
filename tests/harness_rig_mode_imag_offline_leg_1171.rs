@@ -100,8 +100,9 @@ fn resolve_imag_offline_leg_is_defined_and_wired_into_both_paths() {
     let body_end = s[def..].find("\n}\n").map(|i| def + i).unwrap_or(s.len());
     let body = &s[def..body_end];
     assert!(
-        body.contains("cambox_offline_ack_reason") && body.contains("ping "),
-        "1171: resolve_imag_offline_leg must read the imag ack + probe reachability. Got:\n{body}"
+        body.contains("cambox_offline_ack_reason") && body.contains("imag_service_reachable"),
+        "1171/1317: resolve_imag_offline_leg must read the imag ack + probe reachability via the \
+         SERVICE predicate imag_service_reachable (never a bare ICMP ping). Got:\n{body}"
     );
     assert!(
         body.contains("imag_genlock_gate_offline_ack_action"),
@@ -240,31 +241,61 @@ fn set_imag_test_program_skips_when_acked_offline() {
 
 #[test]
 fn resolve_imag_offline_leg_decision_matrix() {
-    // acked + UNREACHABLE (ping exit 1) -> ACKED=1 (the legit issue-1013 offline).
+    // issue 1317: reachability is now a SERVICE probe (imag_service_reachable), not a bare ping —
+    // driven hermetically by its Tier-0 seams IMAG_REACH_SSH_PROBE_CMD / IMAG_REACH_HTTP_PROBE_CMD
+    // (a fixture command whose exit code stands in for the real ssh :22 / dantesync :8898 probe).
+    // acked + UNREACHABLE (both services down) -> ACKED=1 (the legit issue-1013 offline). This is
+    // the exact issue-1317 case a bare ICMP ping got wrong (a foreign responder answers .182).
     let (stdout, _) = run_with_fakes(
         "resolve_imag_offline_leg >/dev/null; echo \"ACKED=$IMAG_OFFLINE_ACKED\"",
-        &[("CAMBOX_OFFLINE_ACK", "imag:notebook-replacement")],
-        Some("1"),
+        &[
+            ("CAMBOX_OFFLINE_ACK", "imag:notebook-replacement"),
+            ("IMAG_REACH_SSH_PROBE_CMD", "false"),
+            ("IMAG_REACH_HTTP_PROBE_CMD", "false"),
+        ],
+        None,
     );
     assert!(
         stdout.contains("ACKED=1"),
-        "1171: acked + unreachable -> IMAG_OFFLINE_ACKED=1. stdout:\n{stdout}"
+        "1171/1317: acked + both services down -> IMAG_OFFLINE_ACKED=1. stdout:\n{stdout}"
     );
-    // acked + REACHABLE (ping exit 0) = STALE ack -> ACKED=0 (falls through, still gated).
+    // acked + REACHABLE via ssh :22 = STALE ack -> ACKED=0 (falls through, still gated).
     let (stdout, _) = run_with_fakes(
         "resolve_imag_offline_leg >/dev/null; echo \"ACKED=$IMAG_OFFLINE_ACKED\"",
-        &[("CAMBOX_OFFLINE_ACK", "imag:notebook-replacement")],
-        Some("0"),
+        &[
+            ("CAMBOX_OFFLINE_ACK", "imag:notebook-replacement"),
+            ("IMAG_REACH_SSH_PROBE_CMD", "true"),
+            ("IMAG_REACH_HTTP_PROBE_CMD", "false"),
+        ],
+        None,
     );
     assert!(
         stdout.contains("ACKED=0"),
-        "1171: acked but reachable (stale) -> IMAG_OFFLINE_ACKED=0. stdout:\n{stdout}"
+        "1171/1317: acked but ssh reachable (stale) -> IMAG_OFFLINE_ACKED=0. stdout:\n{stdout}"
     );
-    // NOT acked -> ACKED=0.
+    // acked + REACHABLE via dantesync :8898 alone = STALE ack -> ACKED=0.
     let (stdout, _) = run_with_fakes(
         "resolve_imag_offline_leg >/dev/null; echo \"ACKED=$IMAG_OFFLINE_ACKED\"",
-        &[("CAMBOX_OFFLINE_ACK", "")],
-        Some("1"),
+        &[
+            ("CAMBOX_OFFLINE_ACK", "imag:notebook-replacement"),
+            ("IMAG_REACH_SSH_PROBE_CMD", "false"),
+            ("IMAG_REACH_HTTP_PROBE_CMD", "true"),
+        ],
+        None,
+    );
+    assert!(
+        stdout.contains("ACKED=0"),
+        "1171/1317: acked but dantesync reachable (stale) -> IMAG_OFFLINE_ACKED=0. stdout:\n{stdout}"
+    );
+    // NOT acked -> ACKED=0 (regardless of reachability).
+    let (stdout, _) = run_with_fakes(
+        "resolve_imag_offline_leg >/dev/null; echo \"ACKED=$IMAG_OFFLINE_ACKED\"",
+        &[
+            ("CAMBOX_OFFLINE_ACK", ""),
+            ("IMAG_REACH_SSH_PROBE_CMD", "false"),
+            ("IMAG_REACH_HTTP_PROBE_CMD", "false"),
+        ],
+        None,
     );
     assert!(
         stdout.contains("ACKED=0"),
