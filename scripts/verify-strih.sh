@@ -339,19 +339,23 @@ else
   bad "(perf) CPU not in performance mode on all cores (or sleep.target not masked) -- re-run setup-strih.sh step 15 (governors: ${GOVS//$'\n'/,} ; sleep is-enabled: ${PERF_SLEEP_STATE:-<none>})"
 fi
 
-# 19) Bitfocus Companion Satellite installed + enabled + controller host recorded (issue 1317 -- the
-#     (companion) item). dpkg-installed + unit enabled + /etc/companion-satellite/host.conf points at
-#     the controller (strih_companion_verdict, fail-closed). FAIL loud on any missing part.
-CS_INSTALLED=0; dpkg -s "$(strih_companion_satellite_pkg)" >/dev/null 2>&1 && CS_INSTALLED=1
-CS_ENABLED=0; [ "$(systemctl is-enabled "$(strih_companion_satellite_unit)" 2>/dev/null || true)" = enabled ] && CS_ENABLED=1
+# 19) Bitfocus Companion Satellite installed + desktop udev rule + operator autostart + controller
+#     host seeded (issue 1317 rework -- the (companion) item, DESKTOP tarball model). /opt binary +
+#     /etc/udev/rules.d/50-satellite-desktop.rules + operator autostart .desktop + the seeded app
+#     config.json's remoteIp == the controller (strih_companion_verdict, fail-closed). FAIL loud on
+#     any missing part.
+CS_INSTALLED=0; [ -x "$(strih_companion_satellite_bin)" ] && CS_INSTALLED=1
+CS_UDEV_OK=0; [ -f "$(strih_companion_satellite_udev_rule)" ] && CS_UDEV_OK=1
+CS_AUTOSTART="${USER_HOME}/.config/autostart/companion-satellite.desktop"
+CS_AUTOSTART_OK=0; [ -f "$CS_AUTOSTART" ] && CS_AUTOSTART_OK=1
 CS_HOST_OK=0
-CS_CONF="${COMPANION_SATELLITE_CONF:-/etc/companion-satellite/host.conf}"
-if [ -f "$CS_CONF" ] && grep -qxF "COMPANION_SATELLITE_HOST=$(strih_companion_satellite_host)" "$CS_CONF"; then CS_HOST_OK=1; fi
-CS_VERDICT="$(strih_companion_verdict "$CS_INSTALLED" "$CS_ENABLED" "$CS_HOST_OK" || true)"
+CS_APPCFG="${COMPANION_SATELLITE_CONF:-${USER_HOME}/.config/Companion Satellite/config.json}"
+if [ -f "$CS_APPCFG" ] && grep -q "\"remoteIp\"[[:space:]]*:[[:space:]]*\"$(strih_companion_satellite_host)\"" "$CS_APPCFG"; then CS_HOST_OK=1; fi
+CS_VERDICT="$(strih_companion_verdict "$CS_INSTALLED" "$CS_UDEV_OK" "$CS_AUTOSTART_OK" "$CS_HOST_OK" || true)"
 if [ "$CS_VERDICT" = ok ]; then
-  ok "(companion) Companion Satellite installed + enabled + controller host recorded ($(strih_companion_satellite_host))"
+  ok "(companion) Companion Satellite installed (/opt) + desktop udev rule + operator autostart + controller $(strih_companion_satellite_host) seeded"
 else
-  bad "(companion) Companion Satellite gate: ${CS_VERDICT} (installed=${CS_INSTALLED} enabled=${CS_ENABLED} host_ok=${CS_HOST_OK}) -- re-run setup-strih.sh step 16"
+  bad "(companion) Companion Satellite gate: ${CS_VERDICT} (bin=${CS_INSTALLED} udev=${CS_UDEV_OK} autostart=${CS_AUTOSTART_OK} host=${CS_HOST_OK}) -- re-run setup-strih.sh step 16"
 fi
 
 echo ""

@@ -510,38 +510,57 @@ strih_verify_governor_ok() {
 # (10.77.9.205, the strih-autorecord-coupling box) as a headless SATELLITE -- NOT a second full
 # Bitfocus Companion (a second controller would fork the venue's button/page state and fight the
 # real one). The owner caught the missing step live (no Companion Satellite -> dead Stream Deck).
-# setup-strih.sh evals strih_companion_satellite_install (install the PINNED .deb, enable-only, never
-# start), writes the controller host via strih_companion_satellite_config_text, and verify-strih.sh
-# grades it via strih_companion_verdict. The version is a REPRODUCIBLE pin (like the dantesync/NDI
-# pins), never "latest"; COMPANION_SATELLITE_VERSION / COMPANION_SATELLITE_DEB_URL /
-# COMPANION_SATELLITE_HOST override it so the supervisor can confirm/repin against the live box.
+#
+# DESKTOP TARBALL MODEL (corrected after the integration review bounce): Bitfocus does NOT ship a
+# .deb from GitHub releases -- GitHub releases carry no .deb assets. Linux x64 is an Electron desktop
+# app distributed as a .tar.gz from the Bitfocus CDN. The tarball extracts a `companion-satellite-x64/`
+# dir carrying the binary, its own `install.sh`, and the `50-satellite-desktop.rules` (uaccess) udev
+# rule. setup-strih.sh evals strih_companion_satellite_install (download the PINNED tar.gz, sha256
+# verify, run its own `install.sh --system --force` which installs to /opt + the desktop udev rule),
+# seeds the operator's app config.json (electron-store: remoteIp/remotePort) + writes an operator-
+# login autostart entry (never a mid-provision start), and records the intended controller host in
+# host.conf. verify-strih.sh grades it via strih_companion_verdict. The version + tarball + sha256 are
+# REPRODUCIBLE pins (like the dantesync/NDI pins), never "latest"; COMPANION_SATELLITE_VERSION /
+# COMPANION_SATELLITE_TARBALL_URL / COMPANION_SATELLITE_SHA256 / COMPANION_SATELLITE_HOST /
+# COMPANION_SATELLITE_PORT override them so the supervisor can confirm/repin against the live box.
 
-# strih_companion_satellite_version -> the PINNED Companion Satellite version (reproducible; never
-# "latest"). COMPANION_SATELLITE_VERSION overrides. Supervisor confirms/bumps the pin against the
-# live box (see the LANE-RETURN followup).
-strih_companion_satellite_version() { printf '%s' "${COMPANION_SATELLITE_VERSION:-1.11.0}"; }
+# strih_companion_satellite_version -> the PINNED Companion Satellite stable release (reproducible;
+# never "latest"). COMPANION_SATELLITE_VERSION overrides. Supervisor confirms/bumps the pin against
+# the live box (see the LANE-RETURN followup).
+strih_companion_satellite_version() { printf '%s' "${COMPANION_SATELLITE_VERSION:-3.4.0}"; }
 
-# strih_companion_satellite_pkg / _unit -> the dpkg package name + systemd unit name the .deb ships.
-strih_companion_satellite_pkg()  { printf 'companion-satellite'; }
-strih_companion_satellite_unit() { printf 'companion-satellite'; }
-
-# strih_companion_satellite_deb_url VERSION -> the pinned GitHub-release .deb URL for that version
-# (the single source of the download-URL shape). COMPANION_SATELLITE_DEB_URL overrides the whole URL
-# so the supervisor can pin a different asset without a code change.
-strih_companion_satellite_deb_url() {
-  local version="${1:?version required}"
-  if [ -n "${COMPANION_SATELLITE_DEB_URL:-}" ]; then printf '%s' "$COMPANION_SATELLITE_DEB_URL"; return 0; fi
-  printf 'https://github.com/bitfocus/companion-satellite/releases/download/v%s/companion-satellite-x64-%s.deb' "$version" "$version"
+# strih_companion_satellite_tarball_url -> the pinned Bitfocus CDN x64 .tar.gz URL. The build hash in
+# the filename (722-8bc2f14) is NOT derivable from the version, so the URL is a whole pinned constant
+# (from the Bitfocus packages listing API, branch=stable). COMPANION_SATELLITE_TARBALL_URL overrides
+# the whole URL so the supervisor can repin a new build with no code change.
+strih_companion_satellite_tarball_url() {
+  printf '%s' "${COMPANION_SATELLITE_TARBALL_URL:-https://cf-pub.bitfocus.io/companion/companion-satellite/companion-satellite-x64-722-8bc2f14.tar.gz}"
 }
+
+# strih_companion_satellite_sha256 -> the pinned sha256 of the tarball (the install emitter verifies
+# the download against it, fail-loud on mismatch). COMPANION_SATELLITE_SHA256 overrides (must be
+# repinned in lock-step with COMPANION_SATELLITE_TARBALL_URL).
+strih_companion_satellite_sha256() {
+  printf '%s' "${COMPANION_SATELLITE_SHA256:-32b8b443d1c595e91ee733b929e20cb8abb8c6119975ba7bb98730c925a2a953}"
+}
+
+# strih_companion_satellite_bin -> the launch path install.sh --system installs to (single source).
+strih_companion_satellite_bin() { printf '/opt/companion-satellite/companion-satellite'; }
+
+# strih_companion_satellite_udev_rule -> the desktop (uaccess) udev rule install.sh --system drops in.
+strih_companion_satellite_udev_rule() { printf '/etc/udev/rules.d/50-satellite-desktop.rules'; }
 
 # strih_companion_satellite_host -> the venue Companion CONTROLLER host the satellite connects to.
 # COMPANION_SATELLITE_HOST overrides (default 10.77.9.205).
 strih_companion_satellite_host() { printf '%s' "${COMPANION_SATELLITE_HOST:-10.77.9.205}"; }
 
-# strih_companion_satellite_config_text HOST -> print the config file recording the controller host
-# as the COMPANION_SATELLITE_HOST config value (verify-strih.sh reads it back). The satellite's own
-# runtime config wiring (the exact key/path its build consumes) is confirmed by the supervisor on the
-# live box; this file is the durable record of the INTENDED controller for the (companion) gate.
+# strih_companion_satellite_port -> the controller TCP port (Satellite DEFAULT_TCP_PORT).
+# COMPANION_SATELLITE_PORT overrides (default 16622).
+strih_companion_satellite_port() { printf '%s' "${COMPANION_SATELLITE_PORT:-16622}"; }
+
+# strih_companion_satellite_config_text HOST -> the durable /etc record of the INTENDED controller
+# host, human-readable. This is the operator/supervisor's paper trail; the FUNCTIONAL seed the app
+# actually reads is the JSON below.
 strih_companion_satellite_config_text() {
   local host="${1:?host required}"
   cat <<EOF
@@ -551,34 +570,68 @@ COMPANION_SATELLITE_HOST=${host}
 EOF
 }
 
-# strih_companion_satellite_install -> print the idempotent statements the caller evals to install
-# Companion Satellite ENABLE-ONLY: if the package is absent, download the PINNED .deb and apt-get
-# install it (a fetch/install failure exits 1 so the caller's `|| fail` fires), then `systemctl
-# enable` the unit -- NEVER `systemctl start` (the operator / the next boot starts it, like the
-# intercom/janus enable-only steps). The controller-host config is written separately by the caller
-# from strih_companion_satellite_config_text. Each statement is `;`-terminated (the _cmd-embedding
-# gotcha).
+# strih_companion_satellite_appconfig_json HOST [PORT] -> the electron-store config.json the desktop
+# build reads. Confirmed from the Satellite v3.4.0 source (satellite/src/config.ts): the controller is
+# keyed as `remoteIp` + `remotePort` (NOT host/companionAddress), `remoteProtocol` tcp; ensureFields-
+# Populated only fills MISSING keys, so a pre-written file is respected before first launch. The setup
+# step writes this to the operator's `~/.config/Companion Satellite/config.json`.
+strih_companion_satellite_appconfig_json() {
+  local host="${1:?host required}" port="${2:-16622}"
+  cat <<EOF
+{
+  "remoteProtocol": "tcp",
+  "remoteIp": "${host}",
+  "remotePort": ${port}
+}
+EOF
+}
+
+# strih_companion_satellite_autostart_text -> the operator-login autostart Desktop Entry. Owner rule:
+# a needed feature is always-ON by default, never a forgettable manual launch. The setup step writes
+# this to the operator's `~/.config/autostart/companion-satellite.desktop`.
+strih_companion_satellite_autostart_text() {
+  cat <<EOF
+[Desktop Entry]
+Type=Application
+Name=Companion Satellite
+Comment=Bitfocus Companion Satellite -- exposes the local Stream Deck to the venue controller (issue 1317)
+Exec=$(strih_companion_satellite_bin)
+Terminal=false
+X-GNOME-Autostart-enabled=true
+Hidden=false
+EOF
+}
+
+# strih_companion_satellite_install -> print the idempotent statements the caller evals (in a subshell,
+# `( eval "$(...)" ) || fail`, because it `exit 1`s on failure) to install Companion Satellite the
+# DESKTOP way: install the documented deps, then -- if the /opt binary is absent -- download the
+# PINNED tar.gz, VERIFY its sha256 (fail-loud on mismatch), extract, and run the tarball's OWN
+# `install.sh --system --force` (idempotent; installs to /opt + the desktop udev rule + the app-menu
+# entry). NEVER a .deb, NEVER `systemctl start`/`enable` -- the desktop build has no system unit; the
+# operator-login autostart (written separately by the caller) launches it. Each statement is
+# `;`-terminated (the _cmd-embedding trailing-newline-strip gotcha).
 strih_companion_satellite_install() {
-  local version url pkg unit
-  version="$(strih_companion_satellite_version)"
-  url="$(strih_companion_satellite_deb_url "$version")"
-  pkg="$(strih_companion_satellite_pkg)"
-  unit="$(strih_companion_satellite_unit)"
+  local url sha bin deps
+  url="$(strih_companion_satellite_tarball_url)"
+  sha="$(strih_companion_satellite_sha256)"
+  bin="$(strih_companion_satellite_bin)"
+  deps='libusb-1.0-0-dev libudev-dev libfontconfig1'
   cat <<CMD
-if ! dpkg -s ${pkg} >/dev/null 2>&1; then __cs_deb="\$(mktemp --suffix=.deb)"; if ! curl -fsSL ${url} -o "\$__cs_deb"; then rm -f "\$__cs_deb"; echo "companion-satellite: download failed (${url})" >&2; exit 1; fi; if ! DEBIAN_FRONTEND=noninteractive apt-get install -y "\$__cs_deb"; then rm -f "\$__cs_deb"; echo "companion-satellite: apt-get install failed" >&2; exit 1; fi; rm -f "\$__cs_deb"; fi;
-systemctl enable ${unit} 2>/dev/null || true;
+DEBIAN_FRONTEND=noninteractive apt-get install -y ${deps} || { echo "companion-satellite: dependency install failed (${deps})" >&2; exit 1; };
+if [ ! -x ${bin} ]; then __cs_dir="\$(mktemp -d)"; __cs_tgz="\$__cs_dir/companion-satellite.tar.gz"; if ! curl -fsSL ${url} -o "\$__cs_tgz"; then rm -rf "\$__cs_dir"; echo "companion-satellite: download failed (${url})" >&2; exit 1; fi; if ! echo "${sha}  \$__cs_tgz" | sha256sum -c - >/dev/null 2>&1; then rm -rf "\$__cs_dir"; echo "companion-satellite: sha256 mismatch (expected ${sha}) -- repin COMPANION_SATELLITE_TARBALL_URL/COMPANION_SATELLITE_SHA256" >&2; exit 1; fi; if ! tar -xzf "\$__cs_tgz" -C "\$__cs_dir"; then rm -rf "\$__cs_dir"; echo "companion-satellite: tarball extract failed" >&2; exit 1; fi; __cs_app="\$(dirname "\$(find "\$__cs_dir" -maxdepth 2 -name install.sh -type f | head -1)")"; if [ ! -f "\$__cs_app/install.sh" ]; then rm -rf "\$__cs_dir"; echo "companion-satellite: install.sh not found in tarball" >&2; exit 1; fi; if ! ( cd "\$__cs_app" && bash install.sh --system --force ); then rm -rf "\$__cs_dir"; echo "companion-satellite: install.sh --system --force failed" >&2; exit 1; fi; rm -rf "\$__cs_dir"; fi;
 CMD
 }
 
-# strih_companion_verdict INSTALLED ENABLED HOST_OK -> print ONE verdict token and return 0 iff the
-# fully-configured `ok` state. Fail-closed order (missing args default to 0 = not configured):
-# not-installed -> not-enabled -> wrong-host -> ok. verify-strih.sh feeds the live dpkg / is-enabled /
-# config-host reads and PASSes only on `ok`, FAILing loud otherwise (test-strictness, like the other
-# verify items).
+# strih_companion_verdict INSTALLED UDEV AUTOSTART HOST_OK -> print ONE verdict token and return 0 iff
+# the fully-configured `ok` state. Fail-closed order (missing args default to 0 = not configured):
+# not-installed -> no-udev-rule -> no-autostart -> wrong-host -> ok. verify-strih.sh feeds the live
+# /opt-binary / desktop-udev-rule / operator-autostart / seeded-controller reads and PASSes only on
+# `ok`, FAILing loud otherwise (test-strictness, like the other verify items).
 strih_companion_verdict() {
-  local installed="${1:-0}" enabled="${2:-0}" host_ok="${3:-0}"
+  local installed="${1:-0}" udev="${2:-0}" autostart="${3:-0}" host_ok="${4:-0}"
   [ "$installed" = 1 ] || { printf 'not-installed'; return 1; }
-  [ "$enabled" = 1 ]   || { printf 'not-enabled';   return 1; }
+  [ "$udev" = 1 ]      || { printf 'no-udev-rule';  return 1; }
+  [ "$autostart" = 1 ] || { printf 'no-autostart';  return 1; }
   [ "$host_ok" = 1 ]   || { printf 'wrong-host';    return 1; }
   printf 'ok'; return 0
 }

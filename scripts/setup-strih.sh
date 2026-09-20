@@ -442,25 +442,41 @@ GOV_NOW="$(cat /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor 2>/dev/null
 echo "  CPU governor set to performance (now: ${GOV_NOW:-unreadable}); sleep/suspend masked; cpu-performance.service enabled for persistence"
 
 # ---------------------------------------------------------------------------------------------
-step 16 "Bitfocus Companion Satellite (Stream Deck surface agent) -- enable-only"
+step 16 "Bitfocus Companion Satellite (Stream Deck surface agent) -- desktop, autostart-only"
 # issue 1317: the owner caught this missing live -- the notebook's locally-attached Stream Deck was
 # dead because Companion Satellite was never installed. Install the SATELLITE (NOT full Companion --
 # the venue runs the Companion CONTROLLER at 10.77.9.205, this box only exposes its local surface to
-# it), PINNED (never "latest"), record the controller host, and ENABLE-ONLY (never start mid-provision;
-# the operator / next boot starts it). The exact runtime config-key wiring is confirmed on the live
-# box by the supervisor (see the LANE-RETURN followup); this step makes the one procedure complete.
+# it) the DESKTOP way: a PINNED (never "latest") x64 tar.gz from the Bitfocus CDN, sha256-verified,
+# via its own idempotent `install.sh --system --force` (-> /opt + the desktop uaccess udev rule).
+# Then SEED the controller into the operator's app config.json (electron-store remoteIp/remotePort,
+# confirmed from the v3.4.0 source) + write the operator-login AUTOSTART entry (owner rule: a needed
+# feature is always-ON, never a forgettable manual launch) -- never a mid-provision start.
 CS_HOST="$(strih_companion_satellite_host)"
+CS_PORT="$(strih_companion_satellite_port)"
 CS_VER="$(strih_companion_satellite_version)"
+CS_APPCFG_DIR="${USER_HOME}/.config/Companion Satellite"
 # Run the emitted install in a SUBSHELL (the step-4b NDI-runtime pattern): the emitter `exit 1`s on a
-# fetch/install failure, so a bare `eval "$(...)" || fail` would terminate setup-strih.sh directly and
-# never reach `fail` (the repin hint). The subshell contains the exit, returns non-zero, and `|| fail`
-# fires with the actionable message.
+# fetch/sha/install failure, so a bare `eval "$(...)" || fail` would terminate setup-strih.sh directly
+# and never reach `fail` (the repin hint). The subshell contains the exit, returns non-zero, and
+# `|| fail` fires with the actionable message.
 ( eval "$(strih_companion_satellite_install)" ) \
-  || fail "Companion Satellite install failed (version ${CS_VER}) -- confirm the pinned version/asset (COMPANION_SATELLITE_VERSION / COMPANION_SATELLITE_DEB_URL) and re-run"
+  || fail "Companion Satellite install failed (v${CS_VER}) -- confirm the pinned tarball/sha256 (COMPANION_SATELLITE_TARBALL_URL / COMPANION_SATELLITE_SHA256) and re-run"
+# Durable /etc record of the intended controller (the (companion) gate's human-readable paper trail).
 install -d -m 755 /etc/companion-satellite
 strih_companion_satellite_config_text "$CS_HOST" > /etc/companion-satellite/host.conf \
   || fail "could not write /etc/companion-satellite/host.conf"
-echo "  Companion Satellite ${CS_VER} installed + enabled (NOT started); controller host ${CS_HOST} recorded in /etc/companion-satellite/host.conf"
+# Pre-seed the operator's app config (electron-store; ensureFieldsPopulated only fills MISSING keys,
+# so this is respected before first launch -- the FUNCTIONAL controller pin the (companion) gate reads).
+install -d -o "$DESKTOP_USER" -g "$DESKTOP_USER" -m 755 "$CS_APPCFG_DIR"
+strih_companion_satellite_appconfig_json "$CS_HOST" "$CS_PORT" > "${CS_APPCFG_DIR}/config.json" \
+  || fail "could not seed ${CS_APPCFG_DIR}/config.json"
+chown "$DESKTOP_USER":"$DESKTOP_USER" "${CS_APPCFG_DIR}/config.json"
+# Operator-login autostart (never started mid-provision; the operator / next login launches it).
+install -d -o "$DESKTOP_USER" -g "$DESKTOP_USER" -m 755 "${USER_HOME}/.config/autostart"
+strih_companion_satellite_autostart_text > "${USER_HOME}/.config/autostart/companion-satellite.desktop" \
+  || fail "could not write the Companion Satellite autostart entry"
+chown "$DESKTOP_USER":"$DESKTOP_USER" "${USER_HOME}/.config/autostart/companion-satellite.desktop"
+echo "  Companion Satellite v${CS_VER} installed to /opt (autostart for ${DESKTOP_USER}, NOT started); controller ${CS_HOST}:${CS_PORT} seeded (config.json + host.conf)"
 
 # ---------------------------------------------------------------------------------------------
 step 17 "Final verification (verify-strih.sh acceptance gate)"
