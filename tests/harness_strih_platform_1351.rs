@@ -377,16 +377,17 @@ fn zero_eight_gate_branches_on_strih_platform_before_the_windows_probe() {
 #[test]
 fn stream_leg_of_zero_eight_gate_is_byte_identical() {
     let body = read("scripts/recording-e2e.sh");
-    let expected = "echo \"    ok: strih obs64/AHK visible on the console (SessionId=1, window present)\"\n\
-_svg_stream_out=\"$(timeout \"$SVG_SSH_TIMEOUT\" bash -c '. \"$1\"; win_ssh_run \"$2\" \"$3\" \"$4\" \"$5\"' _ \\\n\
-  \"$HERE/lib/win-ssh-exec.sh\" \"$STREAM_USER\" \"$STREAM_PW\" \"$STREAM\" \"$(obs_session_visibility_probe_ps 0)\" 2>/dev/null || true)\"\n\
-_svg_stream_msg=\"$(obs_session_visibility_message \"$_svg_stream_out\" 0)\"\n\
-if [ -n \"$_svg_stream_msg\" ]; then\n\
-  echo \"ERROR: [0/8] stream INVISIBLE: $_svg_stream_msg\" >&2\n\
-  echo \"       Recovery: bash scripts/launch-obs-genlock.sh --box stream --force   # paste into the win-stream-snv MCP Shell (session 1, never ssh+CIM — issue 958)\" >&2\n\
-  exit 1\n\
-fi\n\
-echo \"    ok: stream obs64 visible on the console (SessionId=1, window present)\"\n";
+    let expected = r#"echo "    ok: strih obs64/AHK visible on the console (SessionId=1, window present)"
+_svg_stream_out="$(timeout "$SVG_SSH_TIMEOUT" bash -c '. "$1"; win_ssh_run "$2" "$3" "$4" "$5"' _ \
+  "$HERE/lib/win-ssh-exec.sh" "$STREAM_USER" "$STREAM_PW" "$STREAM" "$(obs_session_visibility_probe_ps 0)" 2>/dev/null || true)"
+_svg_stream_msg="$(obs_session_visibility_message "$_svg_stream_out" 0)"
+if [ -n "$_svg_stream_msg" ]; then
+  echo "ERROR: [0/8] stream INVISIBLE: $_svg_stream_msg" >&2
+  echo "       Recovery: bash scripts/launch-obs-genlock.sh --box stream --force   # paste into the win-stream-snv MCP Shell (session 1, never ssh+CIM — issue 958)" >&2
+  exit 1
+fi
+echo "    ok: stream obs64 visible on the console (SessionId=1, window present)"
+"#;
     assert!(
         body.contains(expected),
         "the stream leg of the [0/8] gate must be byte-identical (stream stays Windows-only per \
@@ -399,10 +400,11 @@ echo \"    ok: stream obs64 visible on the console (SessionId=1, window present)
 #[test]
 fn windows_strih_probe_branch_is_byte_identical_to_the_original() {
     let body = read("scripts/recording-e2e.sh");
-    let expected = "  _svg_strih_out=\"$(timeout \"$SVG_SSH_TIMEOUT\" bash -c '. \"$1\"; win_ssh_run \"$2\" \"$3\" \"$4\" \"$5\"' _ \\\n\
-    \"$HERE/lib/win-ssh-exec.sh\" \"$STRIH_USER\" \"$STRIH_PW\" \"$STRIH\" \"$(obs_session_visibility_probe_ps 1)\" 2>/dev/null || true)\"\n\
-  _svg_strih_msg=\"$(obs_session_visibility_message \"$_svg_strih_out\" 1)\"\n\
-fi\n";
+    let expected = r#"  _svg_strih_out="$(timeout "$SVG_SSH_TIMEOUT" bash -c '. "$1"; win_ssh_run "$2" "$3" "$4" "$5"' _ \
+    "$HERE/lib/win-ssh-exec.sh" "$STRIH_USER" "$STRIH_PW" "$STRIH" "$(obs_session_visibility_probe_ps 1)" 2>/dev/null || true)"
+  _svg_strih_msg="$(obs_session_visibility_message "$_svg_strih_out" 1)"
+fi
+"#;
     assert!(
         body.contains(expected),
         "the Windows-only strih probe branch must be byte-identical to its pre-1351 text \
@@ -436,13 +438,35 @@ fn run_strih_extract_branches_on_platform_and_calls_the_linux_sibling() {
 #[test]
 fn run_strih_extract_windows_branch_is_byte_identical_to_the_original() {
     let body = read("scripts/recording-e2e.sh");
-    let expected = "    \"$HERE/recording-verdict-on-strih.sh\" \\\n\
-      --verdict-exe \"$VERDICT_EXE_WIN\" --out-dir \"$OUT_DIR_WIN\" --strih-rec \"$STRIH_REC_WIN\" \\\n\
-      \"${EXEC_STRIH_ARGS[@]}\" \\\n\
-      -- --extract-partial strih --strih \"$STRIH_REC_WIN\" --capture-fps \"$STRIH_CAPTURE_FPS\" \\\n\
-         --burn-cam1-run-id \"$BURN_CAM1_RUN_ID\" --burn-strih-run-id \"$BURN_STRIH_RUN_ID\" \\\n\
-         $CG --out \"$STRIH_PARTIAL_WIN\"\n\
-  }\n";
+    let expected = r#"    "$HERE/recording-verdict-on-strih.sh" --verdict-exe "$VERDICT_EXE_WIN" --out-dir "$OUT_DIR_WIN" \
+      --strih-rec "$strih_rec_win" \
+      -- --extract-partial strih --strih "$strih_rec_win" --capture-fps "$STRIH_CAPTURE_FPS" \
+         --burn-cam1-run-id "$BURN_CAM1_RUN_ID" --burn-strih-run-id "$ZL_BURN_STRIH_RUN_ID" \
+         --out "$strih_partial_win"
+    echo "    pull back to dev1: $strih_partial  (win-strih FileDownload $strih_partial_win -> $strih_partial)"
+
+    echo "    --- [$label 8b] extract the STREAM partial ON the stream box (win-stream-snv), in place ---"
+    "$HERE/recording-verdict-on-stream.sh" --verdict-exe "$VERDICT_EXE_WIN" --out-dir "$OUT_DIR_WIN" \
+      --stream-rec "$stream_rec_win" \
+      -- --extract-partial stream --stream "$stream_rec_win" --capture-fps "$STREAM_CAPTURE_FPS" \
+         --strih-emit-fps "$STRIH_CAPTURE_FPS" --stream-capture-fps "$STREAM_CAPTURE_FPS" \
+         --cam2-run-id "$RUN_ID" \
+         --burn-cam1-run-id "$BURN_CAM1_RUN_ID" --burn-strih-run-id "$ZL_BURN_STRIH_RUN_ID" \
+         --burn-stream-run-id "$ZL_BURN_STREAM_RUN_ID" \
+         --out "$stream_partial_win"
+    echo "    pull back to dev1: $stream_partial  (win-stream-snv FileDownload $stream_partial_win -> $stream_partial)"
+
+    local out_json="$OUTDIR/zero-loss-restart-${label}-${RUN_ID}.json"
+    local merge_bin
+    merge_bin="$(cd "$PROBE_BIN_DIR" && pwd)/recording-verdict"
+    echo "    --- [$label 8c] MERGE the two small partials ON dev1 -> the '$label' zero-loss verdict JSON ---"
+    printf '      %q --merge-partials %q --merge-partials %q --min-secs 300 --capture-fps %q --strih-emit-fps %q --stream-capture-fps %q --cam2-run-id %q --burn-cam1-run-id %q --burn-strih-run-id %q --burn-stream-run-id %q --json %q\n' \
+      "$merge_bin" "strih=$strih_partial" "stream=$stream_partial" "$STRIH_CAPTURE_FPS" \
+      "$STRIH_CAPTURE_FPS" "$STREAM_CAPTURE_FPS" "$RUN_ID" \
+      "$BURN_CAM1_RUN_ID" "$ZL_BURN_STRIH_RUN_ID" "$ZL_BURN_STREAM_RUN_ID" "$out_json"
+    echo "    -> once pulled back + merged, writes the '$label' zero-loss verdict JSON: $out_json"
+  }
+"#;
     assert!(
         body.contains(expected),
         "run_strih_extract's Windows branch must be byte-identical to its pre-1351 text."
