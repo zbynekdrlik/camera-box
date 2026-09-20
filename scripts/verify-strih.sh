@@ -350,7 +350,13 @@ CS_AUTOSTART="${USER_HOME}/.config/autostart/companion-satellite.desktop"
 CS_AUTOSTART_OK=0; [ -f "$CS_AUTOSTART" ] && CS_AUTOSTART_OK=1
 CS_HOST_OK=0
 CS_APPCFG="${COMPANION_SATELLITE_CONF:-${USER_HOME}/.config/Companion Satellite/config.json}"
-if [ -f "$CS_APPCFG" ] && grep -q "\"remoteIp\"[[:space:]]*:[[:space:]]*\"$(strih_companion_satellite_host)\"" "$CS_APPCFG"; then CS_HOST_OK=1; fi
+# Exact JSON read-back (never a regex whose dots would wildcard the IP); fail-closed on unreadable.
+if [ -f "$CS_APPCFG" ] && python3 -c 'import json,sys
+try:
+    d=json.load(open(sys.argv[1]))
+    sys.exit(0 if isinstance(d,dict) and d.get("remoteIp")==sys.argv[2] else 1)
+except Exception:
+    sys.exit(1)' "$CS_APPCFG" "$(strih_companion_satellite_host)"; then CS_HOST_OK=1; fi
 CS_VERDICT="$(strih_companion_verdict "$CS_INSTALLED" "$CS_UDEV_OK" "$CS_AUTOSTART_OK" "$CS_HOST_OK" || true)"
 if [ "$CS_VERDICT" = ok ]; then
   ok "(companion) Companion Satellite installed (/opt) + desktop udev rule + operator autostart + controller $(strih_companion_satellite_host) seeded"

@@ -604,10 +604,11 @@ EOF
 
 # strih_companion_satellite_install -> print the idempotent statements the caller evals (in a subshell,
 # `( eval "$(...)" ) || fail`, because it `exit 1`s on failure) to install Companion Satellite the
-# DESKTOP way: install the documented deps, then -- if the /opt binary is absent -- download the
-# PINNED tar.gz, VERIFY its sha256 (fail-loud on mismatch), extract, and run the tarball's OWN
-# `install.sh --system --force` (idempotent; installs to /opt + the desktop udev rule + the app-menu
-# entry). NEVER a .deb, NEVER `systemctl start`/`enable` -- the desktop build has no system unit; the
+# DESKTOP way: if the /opt binary is absent, install the documented deps, download the PINNED tar.gz,
+# VERIFY its sha256 (fail-loud on mismatch), extract, and run the tarball's OWN `install.sh --system
+# --force` (idempotent; installs to /opt + the desktop udev rule + the app-menu entry). A re-run with
+# the binary already present is a pure no-op (deps + download + install.sh all inside the absence
+# guard). NEVER a .deb, NEVER `systemctl start`/`enable` -- the desktop build has no system unit; the
 # operator-login autostart (written separately by the caller) launches it. Each statement is
 # `;`-terminated (the _cmd-embedding trailing-newline-strip gotcha).
 strih_companion_satellite_install() {
@@ -617,8 +618,7 @@ strih_companion_satellite_install() {
   bin="$(strih_companion_satellite_bin)"
   deps='libusb-1.0-0-dev libudev-dev libfontconfig1'
   cat <<CMD
-DEBIAN_FRONTEND=noninteractive apt-get install -y ${deps} || { echo "companion-satellite: dependency install failed (${deps})" >&2; exit 1; };
-if [ ! -x ${bin} ]; then __cs_dir="\$(mktemp -d)"; __cs_tgz="\$__cs_dir/companion-satellite.tar.gz"; if ! curl -fsSL ${url} -o "\$__cs_tgz"; then rm -rf "\$__cs_dir"; echo "companion-satellite: download failed (${url})" >&2; exit 1; fi; if ! echo "${sha}  \$__cs_tgz" | sha256sum -c - >/dev/null 2>&1; then rm -rf "\$__cs_dir"; echo "companion-satellite: sha256 mismatch (expected ${sha}) -- repin COMPANION_SATELLITE_TARBALL_URL/COMPANION_SATELLITE_SHA256" >&2; exit 1; fi; if ! tar -xzf "\$__cs_tgz" -C "\$__cs_dir"; then rm -rf "\$__cs_dir"; echo "companion-satellite: tarball extract failed" >&2; exit 1; fi; __cs_app="\$(dirname "\$(find "\$__cs_dir" -maxdepth 2 -name install.sh -type f | head -1)")"; if [ ! -f "\$__cs_app/install.sh" ]; then rm -rf "\$__cs_dir"; echo "companion-satellite: install.sh not found in tarball" >&2; exit 1; fi; if ! ( cd "\$__cs_app" && bash install.sh --system --force ); then rm -rf "\$__cs_dir"; echo "companion-satellite: install.sh --system --force failed" >&2; exit 1; fi; rm -rf "\$__cs_dir"; fi;
+if [ ! -x ${bin} ]; then DEBIAN_FRONTEND=noninteractive apt-get install -y ${deps} || { echo "companion-satellite: dependency install failed (${deps})" >&2; exit 1; }; __cs_dir="\$(mktemp -d)"; __cs_tgz="\$__cs_dir/companion-satellite.tar.gz"; if ! curl -fsSL ${url} -o "\$__cs_tgz"; then rm -rf "\$__cs_dir"; echo "companion-satellite: download failed (${url})" >&2; exit 1; fi; if ! echo "${sha}  \$__cs_tgz" | sha256sum -c - >/dev/null 2>&1; then rm -rf "\$__cs_dir"; echo "companion-satellite: sha256 mismatch (expected ${sha}) -- repin COMPANION_SATELLITE_TARBALL_URL/COMPANION_SATELLITE_SHA256" >&2; exit 1; fi; if ! tar -xzf "\$__cs_tgz" -C "\$__cs_dir"; then rm -rf "\$__cs_dir"; echo "companion-satellite: tarball extract failed" >&2; exit 1; fi; __cs_ish="\$(find "\$__cs_dir" -maxdepth 2 -name install.sh -type f | head -1)"; if [ -z "\$__cs_ish" ] || [ ! -f "\$__cs_ish" ]; then rm -rf "\$__cs_dir"; echo "companion-satellite: install.sh not found in tarball" >&2; exit 1; fi; if ! ( cd "\$(dirname "\$__cs_ish")" && bash install.sh --system --force ); then rm -rf "\$__cs_dir"; echo "companion-satellite: install.sh --system --force failed" >&2; exit 1; fi; rm -rf "\$__cs_dir"; fi;
 CMD
 }
 

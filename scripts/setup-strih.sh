@@ -465,10 +465,28 @@ CS_APPCFG_DIR="${USER_HOME}/.config/Companion Satellite"
 install -d -m 755 /etc/companion-satellite
 strih_companion_satellite_config_text "$CS_HOST" > /etc/companion-satellite/host.conf \
   || fail "could not write /etc/companion-satellite/host.conf"
-# Pre-seed the operator's app config (electron-store; ensureFieldsPopulated only fills MISSING keys,
-# so this is respected before first launch -- the FUNCTIONAL controller pin the (companion) gate reads).
+# Pre-seed the operator's app config (electron-store; before first launch ensureFieldsPopulated fills
+# the rest -- this is the FUNCTIONAL controller pin the (companion) gate reads). MERGE-in-place rather
+# than clobber: overlay ONLY the controller keys onto any existing config.json (this provisioning run
+# ENFORCES the intended controller, but must NOT drop the device id / app state the running Satellite
+# writes into the same file, nor another key an operator added). A missing/corrupt file starts from {}.
 install -d -o "$DESKTOP_USER" -g "$DESKTOP_USER" -m 755 "$CS_APPCFG_DIR"
-strih_companion_satellite_appconfig_json "$CS_HOST" "$CS_PORT" > "${CS_APPCFG_DIR}/config.json" \
+strih_companion_satellite_appconfig_json "$CS_HOST" "$CS_PORT" | python3 -c '
+import json, sys
+overlay = json.load(sys.stdin)
+path = sys.argv[1]
+try:
+    with open(path) as f:
+        cur = json.load(f)
+    if not isinstance(cur, dict):
+        cur = {}
+except Exception:
+    cur = {}
+cur.update(overlay)
+with open(path, "w") as f:
+    json.dump(cur, f, indent=2)
+    f.write("\n")
+' "${CS_APPCFG_DIR}/config.json" \
   || fail "could not seed ${CS_APPCFG_DIR}/config.json"
 chown "$DESKTOP_USER":"$DESKTOP_USER" "${CS_APPCFG_DIR}/config.json"
 # Operator-login autostart (never started mid-provision; the operator / next login launches it).
