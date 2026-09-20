@@ -448,3 +448,137 @@ strih_janus_room_jcfg_ok() {
   grep -qE 'description[[:space:]]*=[[:space:]]*"interkom"' <<<"$text" || return 1
   return 0
 }
+
+# --- issue 1317 (this lane): CPU performance governor + never-sleep (low-latency cutter) -----------
+# The strih-lx notebook is the fleet's low-latency genlock OBS cutter; a distro-default powersave /
+# schedutil governor is wrong for it (the imag-nb + cam-box fleet pin `performance` explicitly --
+# setup-device.sh STEP-13, .claude/rules/realtime-isolation.md + the imag power-envelope rule). The
+# owner caught the missing step live on the notebook (no performance mode). setup-strih.sh evals
+# strih_performance_mode_apply, then writes+enables strih_cpu_performance_unit_text for persistence.
+
+# strih_performance_mode_apply -> print the idempotent statements the caller evals to put the box in
+# performance mode NOW: PREFER power-profiles-daemon (`powerprofilesctl set performance`) when it is
+# present, ELSE write the `performance` governor to every CPU's scaling_governor (the setup-device.sh
+# STEP-13 fallback); then mask the sleep/suspend targets (the same STEP-13 shape). Each statement is
+# `;`-terminated and fail-soft (`|| true`) so a core/daemon that refuses never aborts the caller's
+# set -euo pipefail; failing LOUD is the verify (perf) gate's job, not this apply.
+strih_performance_mode_apply() {
+  cat <<'CMD'
+if command -v powerprofilesctl >/dev/null 2>&1 && powerprofilesctl list >/dev/null 2>&1; then powerprofilesctl set performance || true; else for __gov in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do [ -w "$__gov" ] && echo performance > "$__gov" 2>/dev/null || true; done; fi;
+systemctl mask sleep.target suspend.target hibernate.target hybrid-sleep.target 2>/dev/null || true;
+CMD
+}
+
+# strih_cpu_performance_unit_text -> print the persistent CPU-performance systemd oneshot unit that
+# re-applies the `performance` governor on every boot (the setup-device.sh cpu-performance.service
+# shape: Type=oneshot, RemainAfterExit=yes, WantedBy=multi-user.target). setup-strih.sh writes it to
+# /etc/systemd/system/cpu-performance.service and enables it as the persistence backstop, so the
+# governor survives a reboot even where power-profiles-daemon is absent.
+strih_cpu_performance_unit_text() {
+  cat <<'EOF'
+[Unit]
+Description=Set CPU to performance mode
+After=multi-user.target
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash -c 'for cpu in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do echo performance > $cpu; done'
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF
+}
+
+# strih_verify_governor_ok  (stdin: each online core's scaling_governor value, one per line -- what
+# `cat /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor` prints) -> 0 iff EVERY line reads
+# `performance` AND there is at least one line. Fail-closed: an empty/unreadable input returns 1 (an
+# unreadable governor is a FAIL, never a silent pass -- test-strictness). Drain-safe (reads the whole
+# stream). verify-strih.sh pairs it with the existing strih_verify_sleep_masked for the (perf) item.
+strih_verify_governor_ok() {
+  local line seen=0
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    seen=1
+    [ "$line" = performance ] || return 1
+  done
+  [ "$seen" = 1 ]
+}
+
+# --- issue 1317 (this lane): Bitfocus Companion Satellite (the Stream Deck surface agent) ----------
+# The strih-lx notebook exposes its locally-attached Stream Deck to the VENUE's Companion CONTROLLER
+# (10.77.9.205, the strih-autorecord-coupling box) as a headless SATELLITE -- NOT a second full
+# Bitfocus Companion (a second controller would fork the venue's button/page state and fight the
+# real one). The owner caught the missing step live (no Companion Satellite -> dead Stream Deck).
+# setup-strih.sh evals strih_companion_satellite_install (install the PINNED .deb, enable-only, never
+# start), writes the controller host via strih_companion_satellite_config_text, and verify-strih.sh
+# grades it via strih_companion_verdict. The version is a REPRODUCIBLE pin (like the dantesync/NDI
+# pins), never "latest"; COMPANION_SATELLITE_VERSION / COMPANION_SATELLITE_DEB_URL /
+# COMPANION_SATELLITE_HOST override it so the supervisor can confirm/repin against the live box.
+
+# strih_companion_satellite_version -> the PINNED Companion Satellite version (reproducible; never
+# "latest"). COMPANION_SATELLITE_VERSION overrides. Supervisor confirms/bumps the pin against the
+# live box (see the LANE-RETURN followup).
+strih_companion_satellite_version() { printf '%s' "${COMPANION_SATELLITE_VERSION:-1.11.0}"; }
+
+# strih_companion_satellite_pkg / _unit -> the dpkg package name + systemd unit name the .deb ships.
+strih_companion_satellite_pkg()  { printf 'companion-satellite'; }
+strih_companion_satellite_unit() { printf 'companion-satellite'; }
+
+# strih_companion_satellite_deb_url VERSION -> the pinned GitHub-release .deb URL for that version
+# (the single source of the download-URL shape). COMPANION_SATELLITE_DEB_URL overrides the whole URL
+# so the supervisor can pin a different asset without a code change.
+strih_companion_satellite_deb_url() {
+  local version="${1:?version required}"
+  if [ -n "${COMPANION_SATELLITE_DEB_URL:-}" ]; then printf '%s' "$COMPANION_SATELLITE_DEB_URL"; return 0; fi
+  printf 'https://github.com/bitfocus/companion-satellite/releases/download/v%s/companion-satellite-x64-%s.deb' "$version" "$version"
+}
+
+# strih_companion_satellite_host -> the venue Companion CONTROLLER host the satellite connects to.
+# COMPANION_SATELLITE_HOST overrides (default 10.77.9.205).
+strih_companion_satellite_host() { printf '%s' "${COMPANION_SATELLITE_HOST:-10.77.9.205}"; }
+
+# strih_companion_satellite_config_text HOST -> print the config file recording the controller host
+# as the COMPANION_SATELLITE_HOST config value (verify-strih.sh reads it back). The satellite's own
+# runtime config wiring (the exact key/path its build consumes) is confirmed by the supervisor on the
+# live box; this file is the durable record of the INTENDED controller for the (companion) gate.
+strih_companion_satellite_config_text() {
+  local host="${1:?host required}"
+  cat <<EOF
+# strih-lx Bitfocus Companion Satellite -- GENERATED by setup-strih.sh (issue 1317). DO NOT EDIT BY HAND.
+# The venue Companion CONTROLLER this satellite exposes its locally-attached Stream Deck to.
+COMPANION_SATELLITE_HOST=${host}
+EOF
+}
+
+# strih_companion_satellite_install -> print the idempotent statements the caller evals to install
+# Companion Satellite ENABLE-ONLY: if the package is absent, download the PINNED .deb and apt-get
+# install it (a fetch/install failure exits 1 so the caller's `|| fail` fires), then `systemctl
+# enable` the unit -- NEVER `systemctl start` (the operator / the next boot starts it, like the
+# intercom/janus enable-only steps). The controller-host config is written separately by the caller
+# from strih_companion_satellite_config_text. Each statement is `;`-terminated (the _cmd-embedding
+# gotcha).
+strih_companion_satellite_install() {
+  local version url pkg unit
+  version="$(strih_companion_satellite_version)"
+  url="$(strih_companion_satellite_deb_url "$version")"
+  pkg="$(strih_companion_satellite_pkg)"
+  unit="$(strih_companion_satellite_unit)"
+  cat <<CMD
+if ! dpkg -s ${pkg} >/dev/null 2>&1; then __cs_deb="\$(mktemp --suffix=.deb)"; if ! curl -fsSL ${url} -o "\$__cs_deb"; then rm -f "\$__cs_deb"; echo "companion-satellite: download failed (${url})" >&2; exit 1; fi; if ! DEBIAN_FRONTEND=noninteractive apt-get install -y "\$__cs_deb"; then rm -f "\$__cs_deb"; echo "companion-satellite: apt-get install failed" >&2; exit 1; fi; rm -f "\$__cs_deb"; fi;
+systemctl enable ${unit} 2>/dev/null || true;
+CMD
+}
+
+# strih_companion_verdict INSTALLED ENABLED HOST_OK -> print ONE verdict token and return 0 iff the
+# fully-configured `ok` state. Fail-closed order (missing args default to 0 = not configured):
+# not-installed -> not-enabled -> wrong-host -> ok. verify-strih.sh feeds the live dpkg / is-enabled /
+# config-host reads and PASSes only on `ok`, FAILing loud otherwise (test-strictness, like the other
+# verify items).
+strih_companion_verdict() {
+  local installed="${1:-0}" enabled="${2:-0}" host_ok="${3:-0}"
+  [ "$installed" = 1 ] || { printf 'not-installed'; return 1; }
+  [ "$enabled" = 1 ]   || { printf 'not-enabled';   return 1; }
+  [ "$host_ok" = 1 ]   || { printf 'wrong-host';    return 1; }
+  printf 'ok'; return 0
+}
