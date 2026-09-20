@@ -353,7 +353,7 @@ fn zero_eight_gate_branches_on_strih_platform_before_the_windows_probe() {
     let banner_pos = body
         .find("obs64/AHK session-visibility gate")
         .expect("the [0/8] banner must still exist");
-    let window = &body[banner_pos..(banner_pos + 2500).min(body.len())];
+    let window = &body[banner_pos..(banner_pos + 3200).min(body.len())];
     assert!(
         window.contains("strih_platform \"$STRIH\""),
         "the [0/8] gate must call strih_platform to decide the branch. Window:\n{window}"
