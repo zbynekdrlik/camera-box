@@ -59,6 +59,13 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE/lib/obs-watchdog-decision.sh"
 # shellcheck source=scripts/lib/ps-encoded.sh
 . "$HERE/lib/ps-encoded.sh"
+# shellcheck source=scripts/lib/rig-mode-state.sh
+# #1203 (c): the 3-state rig EVENT/TEST/UNKNOWN classifier -- the sender-restart arm is WITHHELD in
+# EVENT (a ~3s NDI gap must never hit a live show), proceeds in TEST/UNKNOWN (fail-safe = today's).
+. "$HERE/lib/rig-mode-state.sh"
+# shellcheck source=scripts/lib/camera-box-restart-verify.sh
+# #1203 (c): the cambox `systemctl restart camera-box` + verify text builder for the sender arm.
+. "$HERE/lib/camera-box-restart-verify.sh"
 
 DRY_RUN=0
 case "${1:-}" in
@@ -99,6 +106,22 @@ STALE_AFTER_S="${NDI_HALVING_STALE_AFTER_S:-12.0}"
 # cooldown window per input.
 SELFHEAL="${NDI_HALVING_SELFHEAL:-0}"
 COOLDOWN_S="${NDI_HALVING_COOLDOWN_S:-600}"
+# #1203 (c): the SECOND cure arm. On a confirmed halving that a receiver reattach (arm 1) did NOT
+# clear, cure_plan escalates to a SENDER restart (arm 2) -- proven live 19.9.2026 to heal cases the
+# idle->restore could not. It is a ~3s NDI gap on that camera, so it is EVENT-GATED (WITHHELD in a
+# provable live show, alert only) and shares the same per-input COOLDOWN_S (10 min) as arm 1. arm 3
+# = escalate (page a human). The sender restart is `systemctl restart camera-box` on the SENDER
+# cambox over ssh with the fleet credential; NDI_HALVING_SENDER_RESTART_CMD (<input> <ip>) overrides
+# it for tests. The sender cambox is derived from the input's `camN` token unless NDI_HALVING_SENDER_RESTART_IP
+# pins one; a 2ME-PGM-style input with no camN token cannot be sender-restarted (its sender is a
+# Windows OBS, not a systemd unit) -> that arm fails -> page (fail-safe).
+SENDER_RESTART_IP="${NDI_HALVING_SENDER_RESTART_IP:-}"
+SENDER_SSH_USER="${NDI_HALVING_SENDER_SSH_USER:-root}"
+SENDER_SSH_PW="${NDI_HALVING_SENDER_SSH_PW:-${NDI_HALVING_SSH_PW:-newlevel}}"
+# EVENT-mode probe (cam2 rig-mode-state snapshot). NDI_HALVING_RIGMODE_CMD (stdout=snapshot) overrides
+# the default ssh cam2 probe for tests. UNKNOWN/TEST -> proceed; only a PROVEN EVENT withholds.
+CAM2_IP="${NDI_HALVING_CAM2_IP:-cam2}"
+CAM2_PW="${NDI_HALVING_CAM2_PW:-${NDI_HALVING_SSH_PW:-newlevel}}"
 # OBS WebSocket password for the cure (obs_phase2.py idle-receiver). rig-mode convention: OBS_PASSWORD.
 OBS_WS_PW="${NDI_HALVING_OBS_WS_PW:-${OBS_PASSWORD:-}}"
 # Per obs_phase2 WS call cap so idle + both restores stay INSIDE the unit's TimeoutStartSec (a systemd
@@ -208,6 +231,60 @@ attempt_reattach() {
   done
   log "CURE: FAILED to restore '$input' to '$prev' after idling -- the input is LEFT IDLED (empty name); needs a manual set-ndi-mapping"
   return 2
+}
+
+# rig_mode_now -> EVENT | TEST | UNKNOWN. The EVENT gate for the sender-restart arm. Reads the cam2
+# rig-mode-state snapshot (NDI_HALVING_RIGMODE_CMD override for tests, else an ssh cam2 probe) and
+# classifies via rig_mode_from_painter_snapshot (never a 2nd classifier). An unreadable snapshot ->
+# UNKNOWN, which the caller treats as fail-safe (proceed), never a false EVENT that would silence a
+# real halving cure. #1203 (c).
+rig_mode_now() {
+  local snap
+  if [ -n "${NDI_HALVING_RIGMODE_CMD:-}" ]; then
+    snap="$($NDI_HALVING_RIGMODE_CMD 2>/dev/null)" || snap=""
+  else
+    local snippet
+    snippet="$(rig_mode_state_probe_remote_snippet 2>/dev/null)" || snippet=""
+    if [ -z "$snippet" ]; then
+      printf 'UNKNOWN'
+      return 0
+    fi
+    # shellcheck disable=SC2086
+    snap="$(timeout "$SSH_TIMEOUT" sshpass -p "$CAM2_PW" ssh $SSH_OPTS "root@$CAM2_IP" "$snippet" 2>/dev/null)" || snap=""
+  fi
+  rig_mode_from_painter_snapshot "$snap"
+}
+
+# attempt_sender_restart <input> -> return code: 0 = restart driven, non-zero = could not (no
+# resolvable sender / ssh failure). The SECOND cure arm: a fresh SENDER endpoint clears a per-
+# connection halving the receiver reattach could not. NDI_HALVING_SENDER_RESTART_CMD (<input> <ip>)
+# overrides the whole thing for tests; the default resolves the sender cambox from the input's camN
+# token (or NDI_HALVING_SENDER_RESTART_IP) and ssh-restarts camera-box + verifies it came back.
+attempt_sender_restart() {
+  local input="$1"
+  if [ -n "${NDI_HALVING_SENDER_RESTART_CMD:-}" ]; then
+    $NDI_HALVING_SENDER_RESTART_CMD "$input" "$SENDER_RESTART_IP"
+    return $?
+  fi
+  local target="$SENDER_RESTART_IP"
+  if [ -z "$target" ]; then
+    target="$(printf '%s' "$input" | grep -oE 'cam[0-9]+' | head -1)" || target=""
+  fi
+  if [ -z "$target" ]; then
+    log "CURE(sender): no resolvable sender box for '$input' (no camN token, no NDI_HALVING_SENDER_RESTART_IP) -- cannot sender-restart"
+    return 1
+  fi
+  local verify
+  verify="$(camera_box_verify_active_cmds "$target (sender for '$input')")" || verify=""
+  # shellcheck disable=SC2086
+  if timeout "$SSH_TIMEOUT" sshpass -p "$SENDER_SSH_PW" ssh $SSH_OPTS "$SENDER_SSH_USER@$target" \
+    "systemctl restart camera-box 2>/dev/null; true
+$verify" >&2 2>&1; then
+    log "CURE(sender): restarted camera-box on '$target' for input '$input'"
+    return 0
+  fi
+  log "CURE(sender): FAILED to ssh-restart camera-box on '$target' for input '$input'"
+  return 1
 }
 
 # -- issue-1001 reachability read (never re-probed) ---------------------------------------------
@@ -378,8 +455,10 @@ samples=0"
       fi
       # A genuine HEALTHY recovery ends the episode -> clear the cure cooldown so a NEW halving later
       # can cure immediately rather than page (the cooldown only exists to stop reattach-spam WITHIN a
-      # single ongoing episode) (#1203 review 🔵6).
+      # single ongoing episode) (#1203 review 🔵6), AND reset the two-arm escalation counter so the
+      # NEXT episode's first cure is idle-restore again (#1203 (c) cure_plan reset semantics).
       write_state_field "cure_ts_${k}" ""
+      write_state_field "attempt_${k}" 0
       clear_input_throttle "$k"
       return 0 ;;
     HALVED)
@@ -421,29 +500,88 @@ samples=0"
   fi
 
   if [ "$action" = "cure" ]; then
-    # State bookkeeping (cure_ts / cured) advances in BOTH modes so the cooldown escalation is
-    # faithful under --dry-run; only the actual reattach side effect is dry-run-gated (the family
-    # "--dry-run skips the POST/action, never the bookkeeping" convention).
-    if [ "$DRY_RUN" -eq 1 ]; then
-      log "[dry-run] WOULD cure: reattach '$input' (idle-receiver -> restore); cooldown_ok=$cooldown_ok ($sibling_note)"
-    else
-      local rc=0
-      attempt_reattach "$RECV_IP" "$input" || rc=$?
-      case "$rc" in
-        0) log "'$input' CONFIRMED halved -> reattach attempted; re-measuring next pass ($sibling_note)" ;;
-        2) # IDLED but the restore FAILED = the input is LEFT with an EMPTY name (a stopped receiver
-           # thread, the worst state this script can create) -> page IMMEDIATELY (throttle-guarded),
-           # naming the LEFT-IDLED state + the manual remedy (rig-degradation-alerts-immediately).
-           throttled_notify "$k" "idled:${k}" \
-             "🚨 NDI spojenie ($REPO_SLUG): auto-reattach vstupu **$input** na $RECV_NAME ZLYHAL pri obnove názvu — vstup ostal IDLED (prázdny NDI názov = zastavený receiver). Potrebný manuálny zásah: set-ndi-mapping / re-select zdroja v OBS." \
-             "'$input' LEFT IDLED after a failed reattach ($sibling_note)"
-           log "'$input' CONFIRMED halved -> reattach FAILED, LEFT IDLED -> paged ($sibling_note)" ;;
-        *) log "'$input' CONFIRMED halved -> reattach could NOT start (name untouched, safe) ($sibling_note)" ;;
-      esac
-    fi
-    write_state_field "cure_ts_${k}" "$now"
-    write_state_field "cured_${k}" 1
-    return 0
+    # #1203 (c): TWO-ARM escalation. cure_plan picks the arm from the 1-based attempt count this
+    # episode -- 1 -> idle-restore (receiver reattach), 2 -> sender-restart (a fresh sender endpoint,
+    # EVENT-gated), >=3 -> escalate (page a human). The attempt counter resets on a HEALTHY reading.
+    # State bookkeeping (attempt / cure_ts / cured) advances in BOTH modes so the cooldown+escalation
+    # stay faithful under --dry-run; only the actual side effect is dry-run-gated (the family
+    # "--dry-run skips the action, never the bookkeeping" convention).
+    local prev_attempt new_attempt interval plan
+    prev_attempt="$(read_state_field "attempt_${k}" 0)"
+    case "$prev_attempt" in '' | *[!0-9]*) prev_attempt=0 ;; esac
+    new_attempt=$((prev_attempt + 1))
+    interval="$(LC_ALL=C awk -v e="${exp:-0}" 'BEGIN{ e=e+0; if(e<=0){print "0"} else {printf "%.4f", 1000.0/e} }')"
+    plan="$(python3 "$DECIDE" cure-plan --attempt "$new_attempt" --cap-avg-ms "${cap:-0}" --expected-ms "$interval" 2>/dev/null | sed -n 's/^plan=//p' | tail -1)"
+    [ -n "$plan" ] || plan="escalate"
+    log "'$input' CONFIRMED halved -> cure attempt $new_attempt -> plan=$plan cooldown_ok=$cooldown_ok ($sibling_note)"
+
+    case "$plan" in
+      idle-restore)
+        if [ "$DRY_RUN" -eq 1 ]; then
+          log "[dry-run] WOULD cure: reattach '$input' (idle-receiver -> restore) ($sibling_note)"
+        else
+          local rc=0
+          attempt_reattach "$RECV_IP" "$input" || rc=$?
+          case "$rc" in
+            0) log "'$input' CONFIRMED halved -> reattach attempted; re-measuring next pass ($sibling_note)" ;;
+            2) # IDLED but the restore FAILED = the input is LEFT with an EMPTY name (a stopped
+               # receiver thread, the worst state this script can create) -> page IMMEDIATELY.
+               throttled_notify "$k" "idled:${k}" \
+                 "🚨 NDI spojenie ($REPO_SLUG): auto-reattach vstupu **$input** na $RECV_NAME ZLYHAL pri obnove názvu — vstup ostal IDLED (prázdny NDI názov = zastavený receiver). Potrebný manuálny zásah: set-ndi-mapping / re-select zdroja v OBS." \
+                 "'$input' LEFT IDLED after a failed reattach ($sibling_note)"
+               log "'$input' CONFIRMED halved -> reattach FAILED, LEFT IDLED -> paged ($sibling_note)" ;;
+            *) log "'$input' CONFIRMED halved -> reattach could NOT start (name untouched, safe) ($sibling_note)" ;;
+          esac
+        fi
+        write_state_field "attempt_${k}" "$new_attempt"
+        write_state_field "cure_ts_${k}" "$now"
+        write_state_field "cured_${k}" 1
+        return 0
+        ;;
+      sender-restart)
+        local mode
+        mode="$(rig_mode_now)"
+        [ -n "$mode" ] || mode="UNKNOWN"
+        if [ "$mode" = "EVENT" ]; then
+          # EVENT: the ~3s NDI gap of a sender restart must NEVER hit a live show -> alert only,
+          # never restart. Do NOT advance attempt/cure_ts, so once the rig leaves EVENT (and the
+          # cooldown allows) the sender arm actually runs. #1203 (c): in EVENT it alerts, never restarts.
+          throttled_notify "$k" "event-halved:${k}" \
+            "🚨 NDI spojenie ($REPO_SLUG): vstup **$input** na $RECV_NAME beží na POLOVIČNEJ kadencii; reattach nepomohol a ďalší krok (reštart zdroja) je POZASTAVENÝ — rig je v režime EVENT (živé vysielanie). Rieši sa po skončení vysielania / manuálne." \
+            "'$input' halved, sender-restart WITHHELD in EVENT mode ($sibling_note)"
+          log "'$input' CONFIRMED halved -> plan sender-restart WITHHELD in EVENT mode (alert only, attempt held at $prev_attempt) ($sibling_note)"
+          return 0
+        fi
+        if [ "$DRY_RUN" -eq 1 ]; then
+          log "[dry-run] WOULD cure: sender-restart '$input' (rig mode=$mode) ($sibling_note)"
+        else
+          local src=0
+          attempt_sender_restart "$input" || src=$?
+          if [ "$src" -eq 0 ]; then
+            log "'$input' CONFIRMED halved -> sender-restart attempted (rig mode=$mode); re-measuring next pass ($sibling_note)"
+          else
+            throttled_notify "$k" "sender-fail:${k}" \
+              "🚨 NDI spojenie ($REPO_SLUG): reštart zdroja pre vstup **$input** ZLYHAL (nedosiahnuteľný sender / bez camN tokenu). Vstup ostáva na polovičnej kadencii — potrebný manuálny zásah." \
+              "'$input' sender-restart FAILED (rc=$src) ($sibling_note)"
+            log "'$input' CONFIRMED halved -> sender-restart FAILED rc=$src -> paged ($sibling_note)"
+          fi
+        fi
+        write_state_field "attempt_${k}" "$new_attempt"
+        write_state_field "cure_ts_${k}" "$now"
+        write_state_field "cured_${k}" 1
+        return 0
+        ;;
+      *)
+        # escalate: both cure arms tried, still halved -> page a human. Advance the attempt counter
+        # (stays escalated) but not cure_ts (the alert throttle governs the re-page cadence).
+        write_state_field "attempt_${k}" "$new_attempt"
+        throttled_notify "$k" "escalate:${k}" \
+          "🚨 NDI spojenie ($REPO_SLUG): vstup **$input** na $RECV_NAME ostáva na POLOVIČNEJ kadencii aj po reattach-i AJ po reštarte zdroja — potrebný manuálny zásah (obe automatické liečenia vyčerpané)." \
+          "'$input' CONFIRMED halved -> escalate (both cure arms exhausted) ($sibling_note)"
+        log "'$input' CONFIRMED halved -> escalate (both cure arms exhausted) -> paged ($sibling_note)"
+        return 0
+        ;;
+    esac
   fi
 
   # PAGE (cure disabled, or a cure already ran this episode and it is still halved -> no reattach-spam).
