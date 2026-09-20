@@ -45,6 +45,50 @@ strih_lx_ndi_republishes() {
 # rig floor -- latency-pins-baseline.json strih-lx block; the per-run aligner owns any offset).
 strih_lx_camera_latency_ms() { printf '3'; }
 
+# strih_lx_seed_manifest_json -> the FULL /opt/camera-box/strih-lx-seed.json for the OPERATOR
+# (production) collection (issue 1317, this lane). The notebook now runs the migrated operator
+# collection, whose INPUT names are the canonical strih names the whole E2E tooling addresses
+# (obs_burn_filter / obs_phase2 / recv-timing / genlock-audit all key on `NDI camN`) -- NOT the
+# parallel-phase derived `NDI CAMn (usb)` the old string manifest produced (which made the launch
+# seed CREATE duplicate receivers). So the manifest carries EXPLICIT-name OBJECTS {sender,input,scene}
+# (a DATA name-map, not code) + `"mode":"update-only"` -> strih_scenes.py --bootstrap heals the
+# certified genlock class onto inputs that ALREADY exist and NEVER CreateScene/CreateInput; a missing
+# declared input is REPORTED.
+#   * sender = the NDI source the operator's input receives. The 7 cameras receive the fleet
+#     `CAMn (usb)` senders; the 2ME feedback pair receives the Windows strih's `STRIH-SNV (2ME PGM/PVW)`
+#     outputs during the PARALLEL run (issue 1347 flips these to the STRIH-LX self-loop); the cg pair
+#     receives the `RESOLUME-SNV (cg-obs)` genlocked sender. The 2ME-feedback source + the CG-pair
+#     senders are supervisor-confirmable DATA (the LANE-RETURN followup: re-read the live collection's
+#     input settings) -- a wrong sender is a MANIFEST edit, never a code change, and update-only never
+#     renames the operator's source, so a guessed sender is harmless (it only drives CLASS detection,
+#     which the input NAME already provides).
+#   * The 5 STRIH-LX NDI OUTPUTS stay in `outputs` (issue 1347 owns the rename); the seeder never
+#     touches outputs. Latency rides the manifest floor 3 (genlock_latency_ms_src).
+strih_lx_seed_manifest_json() {
+  local lat
+  lat="$(strih_lx_camera_latency_ms)"
+  printf '{\n'
+  printf '  "mode": "update-only",\n'
+  printf '  "inputs": [\n'
+  printf '    {"sender": "CAM1 (usb)", "input": "NDI cam1", "scene": "Cam 1"},\n'
+  printf '    {"sender": "CAM2 (usb)", "input": "NDI cam2", "scene": "Cam 2"},\n'
+  printf '    {"sender": "CAM3 (usb)", "input": "NDI cam3", "scene": "Cam 3"},\n'
+  printf '    {"sender": "CAM4 (usb)", "input": "NDI cam4", "scene": "Cam 4"},\n'
+  printf '    {"sender": "CAM5 (usb)", "input": "NDI cam5", "scene": "Cam 5"},\n'
+  printf '    {"sender": "CAM6 (usb)", "input": "NDI cam6", "scene": "Cam 6"},\n'
+  printf '    {"sender": "CAM7 (usb)", "input": "NDI cam7", "scene": "Cam 7"},\n'
+  printf '    {"sender": "STRIH-SNV (2ME PVW)", "input": "NDI 2ME PVW", "scene": "2ME PVW"},\n'
+  printf '    {"sender": "STRIH-SNV (2ME PGM)", "input": "NDI 2ME PGM (mv)", "scene": "2ME PGM"},\n'
+  printf '    {"sender": "RESOLUME-SNV (cg-obs)", "input": "cg", "scene": "CG"},\n'
+  printf '    {"sender": "RESOLUME-SNV (cg-obs)", "input": "CG-obs", "scene": "CG-obs"}\n'
+  printf '  ],\n'
+  printf '  "outputs": [\n'
+  { strih_lx_ndi_outputs; strih_lx_ndi_republishes; } | sed 's/.*/    "&",/' | sed '$ s/,$//'
+  printf '  ],\n'
+  printf '  "camera_latency_ms": %s\n' "$lat"
+  printf '}\n'
+}
+
 # strih_lx_bundle_artifact -> the strih FULL-build CI artifact name (linux-genlock.yml strih job).
 strih_lx_bundle_artifact() { printf 'obs-genlock-linux-x86_64-strih'; }
 
@@ -276,15 +320,55 @@ strih_ldd_unresolved() {
   done | sort -u
 }
 
+# strih_bundle_bin_files BUNDLE -> print every REGULAR file under ${bundle}/bin, one path per line,
+# sorted (obs + obs-ffmpeg-mux + obs-nvenc-test + any future helper). OBS resolves its helper
+# processes (obs-ffmpeg-mux the recording muxer, obs-nvenc-test the NVENC probe) NEXT TO ITS OWN
+# EXECUTABLE (`os_get_executable_path`), so a prefix install must copy the WHOLE bin/ dir next to obs
+# -- installing only `obs` left the notebook OBS logging `[NVENC] Failed to launch the NVENC test
+# process` -> `NVENC not supported`, and RECORDING (obs-ffmpeg-mux) would fail outright (issue 1317,
+# live 20.9.2026). This is the ENUMERATION seam (pure, Tier-0-testable against a fake bundle dir); the
+# install itself needs root. The bundle dir on the box is user-private (drwx------), but this runs as
+# root, so `find` traverses it fine.
+strih_bundle_bin_files() {
+  local bundle="${1:?bundle root required}"
+  [ -d "${bundle}/bin" ] || { printf 'strih_bundle_bin_files: %s/bin missing\n' "$bundle" >&2; return 1; }
+  find "${bundle}/bin" -maxdepth 1 -type f | sort
+}
+
+# strih_obs_helpers_verdict MUX NVTEST -> print ONE verdict token, 0 iff `ok`. Fail-closed: both OBS
+# helper binaries (obs-ffmpeg-mux the record muxer + obs-nvenc-test the NVENC probe) must be
+# present+executable beside /usr/bin/obs (recording-critical). MUX/NVTEST are 1/0. verify-strih.sh
+# feeds the live `[ -x /usr/bin/obs-ffmpeg-mux ]` / `[ -x /usr/bin/obs-nvenc-test ]` reads.
+strih_obs_helpers_verdict() {
+  local mux="${1:-0}" nvtest="${2:-0}"
+  [ "$mux" = 1 ]    || { printf 'no-obs-ffmpeg-mux'; return 1; }
+  [ "$nvtest" = 1 ] || { printf 'no-obs-nvenc-test'; return 1; }
+  printf 'ok'; return 0
+}
+
+# strih_nvenc_log_verdict  (stdin: an OBS log's text) -> grade the NVENC state (report-only, needs a
+# RUNNING OBS). `nvenc-ok` (rc 0) when the log carries the healthy `[obs-nvenc] NVENC version:` line;
+# `nvenc-unsupported` (rc 1) when it logged `NVENC not supported` with NO version line (the
+# missing-helper signature); `nvenc-unknown` (rc 2) otherwise (OBS not up yet / no NVENC line). The
+# caller renders unknown as a NOTE (the helper-presence gate above is the HARD FAIL).
+strih_nvenc_log_verdict() {
+  local text
+  text="$(cat)"
+  if printf '%s' "$text" | grep -q '\[obs-nvenc\] NVENC version:'; then printf 'nvenc-ok'; return 0; fi
+  if printf '%s' "$text" | grep -q 'NVENC not supported'; then printf 'nvenc-unsupported'; return 1; fi
+  printf 'nvenc-unknown'; return 2
+}
+
 # strih_install_bundle_prefix BUNDLE LIBDIR BINDIR SHAREDIR -> install the staged genlock bundle into
 # its /usr prefix so the dynamic loader finds it (the imag on-box program shape in
 # scripts/deploy-genlock-fleet.sh -- issue 1236 perms-normalize + ldconfig): copy
-# BUNDLE/lib/x86_64-linux-gnu/. -> LIBDIR (root:root, dirs 0755, files a+rX), BUNDLE/bin/obs ->
-# BINDIR/obs (0755 root), BUNDLE/share/obs -> SHAREDIR/obs, then `ldconfig`. Runs as root in
-# setup-strih.sh step 4 AFTER the /opt staged copy (which stays the marker home). Returns non-zero on
-# a critical copy failure. NOTE: this ~30-line prefix install duplicates the imag on-box program's
-# install block (a templated heredoc inside deploy-genlock-fleet.sh with its own probe-gated anchors);
-# consolidating the two is the deploy-arm follow-up's job (.claude/rules/strih-linux-provisioning.md).
+# BUNDLE/lib/x86_64-linux-gnu/. -> LIBDIR (root:root, dirs 0755, files a+rX), EVERY file in
+# BUNDLE/bin/ -> BINDIR (0755 root -- obs AND its helper processes, issue 1317), BUNDLE/share/obs ->
+# SHAREDIR/obs, then `ldconfig`. Runs as root in setup-strih.sh step 4 AFTER the /opt staged copy
+# (which stays the marker home). Returns non-zero on a critical copy failure. NOTE: this ~30-line
+# prefix install duplicates the imag on-box program's install block (a templated heredoc inside
+# deploy-genlock-fleet.sh with its own probe-gated anchors); consolidating the two is the deploy-arm
+# follow-up's job (.claude/rules/strih-linux-provisioning.md).
 strih_install_bundle_prefix() {
   local bundle="${1:?bundle root required}" libdir="${2:?libdir required}" bindir="${3:?bindir required}" sharedir="${4:?sharedir required}"
   local rel dst
@@ -302,7 +386,14 @@ strih_install_bundle_prefix() {
     chown root:root "$dst" 2>/dev/null || true
     if [ -d "$dst" ]; then chmod 0755 "$dst" 2>/dev/null || true; else chmod a+rX "$dst" 2>/dev/null || true; fi
   done < <(cd "${bundle}/lib/x86_64-linux-gnu" && find . -mindepth 1 -printf '%P\0')
-  install -m 0755 -o root -g root "${bundle}/bin/obs" "${bindir}/obs" || { printf 'strih_install_bundle_prefix: %s/obs install failed\n' "$bindir" >&2; return 1; }
+  # Install EVERY file in bin/ next to obs (obs + obs-ffmpeg-mux + obs-nvenc-test + any future
+  # helper), root:root 0755 -- OBS resolves its helpers relative to its OWN executable (issue 1317).
+  local binf base
+  while IFS= read -r binf; do
+    [ -n "$binf" ] || continue
+    base="$(basename "$binf")"
+    install -m 0755 -o root -g root "$binf" "${bindir}/${base}" || { printf 'strih_install_bundle_prefix: %s install failed\n' "$base" >&2; return 1; }
+  done < <(strih_bundle_bin_files "$bundle")
   if [ -d "${bundle}/share/obs" ]; then
     mkdir -p "${sharedir}/obs"
     cp -a "${bundle}/share/obs/." "${sharedir}/obs/" || { printf 'strih_install_bundle_prefix: share/obs copy failed\n' >&2; return 1; }
@@ -457,16 +548,31 @@ strih_janus_room_jcfg_ok() {
 # strih_performance_mode_apply, then writes+enables strih_cpu_performance_unit_text for persistence.
 
 # strih_performance_mode_apply -> print the idempotent statements the caller evals to put the box in
-# performance mode NOW: PREFER power-profiles-daemon (`powerprofilesctl set performance`) when it is
-# present, ELSE write the `performance` governor to every CPU's scaling_governor (the setup-device.sh
-# STEP-13 fallback); then mask the sleep/suspend targets (the same STEP-13 shape). Each statement is
-# `;`-terminated and fail-soft (`|| true`) so a core/daemon that refuses never aborts the caller's
-# set -euo pipefail; failing LOUD is the verify (perf) gate's job, not this apply.
+# performance mode NOW. It runs BOTH power-profiles-daemon (`powerprofilesctl set performance`, when
+# present) AND writes the `performance` governor to every CPU's scaling_governor -- NOT either/or
+# (issue 1317, live 20.9.2026): on intel_pstate ACTIVE (this Lenovo Raptor Lake) `powerprofilesctl`
+# sets EPP=performance but leaves `scaling_governor=powersave`, so a `; else <governor> ; fi` shape
+# never wrote the governor and `verify (perf)` (governor==performance on all cores) FAILed. The two
+# are complementary -- ppd owns EPP, the governor loop owns the governor -- so both run. Then mask the
+# sleep/suspend targets (the setup-device.sh STEP-13 shape). Each statement is `;`-terminated and
+# fail-soft (`|| true`) so a core/daemon that refuses never aborts the caller's set -euo pipefail;
+# failing LOUD is the verify (perf) gate's job, not this apply.
 strih_performance_mode_apply() {
   cat <<'CMD'
-if command -v powerprofilesctl >/dev/null 2>&1 && powerprofilesctl list >/dev/null 2>&1; then powerprofilesctl set performance || true; else for __gov in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do [ -w "$__gov" ] && echo performance > "$__gov" 2>/dev/null || true; done; fi;
+if command -v powerprofilesctl >/dev/null 2>&1 && powerprofilesctl list >/dev/null 2>&1; then powerprofilesctl set performance || true; fi;
+for __gov in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do [ -w "$__gov" ] && echo performance > "$__gov" 2>/dev/null || true; done;
 systemctl mask sleep.target suspend.target hibernate.target hybrid-sleep.target 2>/dev/null || true;
 CMD
+}
+
+# strih_perf_effective_line GOV EPP PPD -> the effective-state log line for setup-strih.sh step 15,
+# reporting the TRIPLE governor / EPP / ppd profile it actually observed AFTER the apply. This
+# replaces the old self-contradicting "set to performance (now: powersave)" line (issue 1317): the
+# apply now writes the governor unconditionally, so the step reports what stuck on all three facets.
+# Missing/unreadable facets default (never a bare empty triple).
+strih_perf_effective_line() {
+  local gov="${1:-unreadable}" epp="${2:-absent}" ppd="${3:-absent}"
+  printf 'governor=%s / EPP=%s / ppd=%s' "$gov" "$epp" "$ppd"
 }
 
 # strih_cpu_performance_unit_text -> print the persistent CPU-performance systemd oneshot unit that
@@ -616,7 +722,10 @@ strih_companion_satellite_install() {
   url="$(strih_companion_satellite_tarball_url)"
   sha="$(strih_companion_satellite_sha256)"
   bin="$(strih_companion_satellite_bin)"
-  deps='libusb-1.0-0-dev libudev-dev libfontconfig1'
+  # issue 1317 (live 20.9.2026): a fresh strih-lx has NO curl, and this emitter's own download uses
+  # `curl -fsSL` -- so step 16 FAILed on the first live run. Install curl in the SAME dep line (the
+  # setup-device.sh precedent installs curl before any download).
+  deps='curl libusb-1.0-0-dev libudev-dev libfontconfig1'
   cat <<CMD
 if [ ! -x ${bin} ]; then DEBIAN_FRONTEND=noninteractive apt-get install -y ${deps} || { echo "companion-satellite: dependency install failed (${deps})" >&2; exit 1; }; __cs_dir="\$(mktemp -d)"; __cs_tgz="\$__cs_dir/companion-satellite.tar.gz"; if ! curl -fsSL ${url} -o "\$__cs_tgz"; then rm -rf "\$__cs_dir"; echo "companion-satellite: download failed (${url})" >&2; exit 1; fi; if ! echo "${sha}  \$__cs_tgz" | sha256sum -c - >/dev/null 2>&1; then rm -rf "\$__cs_dir"; echo "companion-satellite: sha256 mismatch (expected ${sha}) -- repin COMPANION_SATELLITE_TARBALL_URL/COMPANION_SATELLITE_SHA256" >&2; exit 1; fi; if ! tar -xzf "\$__cs_tgz" -C "\$__cs_dir"; then rm -rf "\$__cs_dir"; echo "companion-satellite: tarball extract failed" >&2; exit 1; fi; __cs_ish="\$(find "\$__cs_dir" -maxdepth 2 -name install.sh -type f | head -1)"; if [ -z "\$__cs_ish" ] || [ ! -f "\$__cs_ish" ]; then rm -rf "\$__cs_dir"; echo "companion-satellite: install.sh not found in tarball" >&2; exit 1; fi; if ! ( cd "\$(dirname "\$__cs_ish")" && bash install.sh --system --force ); then rm -rf "\$__cs_dir"; echo "companion-satellite: install.sh --system --force failed" >&2; exit 1; fi; rm -rf "\$__cs_dir"; fi;
 CMD
@@ -634,4 +743,43 @@ strih_companion_verdict() {
   [ "$autostart" = 1 ] || { printf 'no-autostart';  return 1; }
   [ "$host_ok" = 1 ]   || { printf 'wrong-host';    return 1; }
   printf 'ok'; return 0
+}
+
+# strih_companion_satellite_rest_url -> the Satellite's local REST/web base URL (the desktop build
+# serves its web UI + REST API on :9999). COMPANION_SATELLITE_REST_URL overrides for a non-default
+# port. The setup step POSTs the controller here; the verify item reads .connected here.
+strih_companion_satellite_rest_url() {
+  printf '%s' "${COMPANION_SATELLITE_REST_URL:-http://127.0.0.1:9999}"
+}
+
+# strih_companion_satellite_rest_apply_cmd HOST PORT -> emit the idempotent statements the caller evals
+# AFTER seeding the app config.json (issue 1317, live 20.9.2026). The electron-store file seed alone
+# left the RUNNING Satellite's EFFECTIVE controller host at 127.0.0.1 until this POST -- after
+# `POST /api/config {"host","port","protocol":"tcp"}` on its local REST (:9999) `GET /api/status`
+# read `connected:true`. Best-effort: guarded on the REST answering (a fresh box that seeds but never
+# started the Satellite is a clean no-op), every statement `;`-terminated and `|| true` so it never
+# aborts the caller's set -euo pipefail. Uses the REST keys `host`/`port`/`protocol` (NOT the
+# electron-store remoteIp/remotePort).
+strih_companion_satellite_rest_apply_cmd() {
+  local host="${1:?host required}" port="${2:-16622}" rest
+  rest="$(strih_companion_satellite_rest_url)"
+  cat <<CMD
+if curl -fsS --max-time 2 ${rest}/api/status >/dev/null 2>&1; then curl -fsS --max-time 5 -X POST -H 'Content-Type: application/json' -d '{"host":"${host}","port":${port},"protocol":"tcp"}' ${rest}/api/config >/dev/null 2>&1 || true; fi;
+CMD
+}
+
+# strih_companion_status_verdict FILE_VERDICT RUNNING CONNECTED -> the live-aware (companion) verdict.
+# RUNNING=1 iff the Satellite REST (:9999/api/status) answered; CONNECTED=1 iff that answer's
+# `.connected == true`. When the Satellite is NOT up (RUNNING!=1 -- a fresh box that seeds but never
+# starts it) this is a FILE-ONLY check: echo FILE_VERDICT and pass/fail on whether it is `ok`. When it
+# IS up the live controller link must be established: connected -> `ok-connected` (rc 0), else
+# `not-connected` (rc 1). verify-strih.sh feeds the file verdict + the live reads.
+strih_companion_status_verdict() {
+  local fileverdict="${1:-not-installed}" running="${2:-0}" connected="${3:-0}"
+  if [ "$running" != 1 ]; then
+    printf '%s' "$fileverdict"
+    [ "$fileverdict" = ok ] && return 0 || return 1
+  fi
+  if [ "$connected" = 1 ]; then printf 'ok-connected'; return 0; fi
+  printf 'not-connected'; return 1
 }

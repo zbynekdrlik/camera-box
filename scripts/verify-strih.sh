@@ -357,11 +357,53 @@ try:
     sys.exit(0 if isinstance(d,dict) and d.get("remoteIp")==sys.argv[2] else 1)
 except Exception:
     sys.exit(1)' "$CS_APPCFG" "$(strih_companion_satellite_host)"; then CS_HOST_OK=1; fi
-CS_VERDICT="$(strih_companion_verdict "$CS_INSTALLED" "$CS_UDEV_OK" "$CS_AUTOSTART_OK" "$CS_HOST_OK" || true)"
-if [ "$CS_VERDICT" = ok ]; then
-  ok "(companion) Companion Satellite installed (/opt) + desktop udev rule + operator autostart + controller $(strih_companion_satellite_host) seeded"
+CS_FILE_VERDICT="$(strih_companion_verdict "$CS_INSTALLED" "$CS_UDEV_OK" "$CS_AUTOSTART_OK" "$CS_HOST_OK" || true)"
+# issue 1317: when the Satellite is RUNNING, its local REST (:9999/api/status) reports the LIVE
+# controller link -- require .connected == true (the electron-store file seed alone left the effective
+# host 127.0.0.1 until the step-16 POST). When it is NOT running (a fresh box that seeds but never
+# starts it), this stays a FILE-ONLY check (the file verdict).
+CS_REST_URL="$(strih_companion_satellite_rest_url)"
+CS_RUNNING=0; CS_CONNECTED=0
+CS_STATUS_JSON="$(curl -fsS --max-time 2 "${CS_REST_URL}/api/status" 2>/dev/null || true)"
+if [ -n "$CS_STATUS_JSON" ]; then
+  CS_RUNNING=1
+  printf '%s' "$CS_STATUS_JSON" | python3 -c 'import json,sys
+try:
+    d=json.load(sys.stdin); sys.exit(0 if (isinstance(d,dict) and d.get("connected") is True) else 1)
+except Exception:
+    sys.exit(1)' && CS_CONNECTED=1
+fi
+CS_VERDICT="$(strih_companion_status_verdict "$CS_FILE_VERDICT" "$CS_RUNNING" "$CS_CONNECTED" || true)"
+if strih_companion_status_verdict "$CS_FILE_VERDICT" "$CS_RUNNING" "$CS_CONNECTED" >/dev/null 2>&1; then
+  ok "(companion) Companion Satellite ${CS_VERDICT} -- /opt + desktop udev rule + operator autostart + controller $(strih_companion_satellite_host) (REST running=${CS_RUNNING} connected=${CS_CONNECTED})"
 else
-  bad "(companion) Companion Satellite gate: ${CS_VERDICT} (bin=${CS_INSTALLED} udev=${CS_UDEV_OK} autostart=${CS_AUTOSTART_OK} host=${CS_HOST_OK}) -- re-run setup-strih.sh step 16"
+  bad "(companion) Companion Satellite gate: ${CS_VERDICT} (bin=${CS_INSTALLED} udev=${CS_UDEV_OK} autostart=${CS_AUTOSTART_OK} host=${CS_HOST_OK} running=${CS_RUNNING} connected=${CS_CONNECTED}) -- re-run setup-strih.sh step 16"
+fi
+
+# 20) OBS helper binaries beside /usr/bin/obs (issue 1317, live 20.9.2026): OBS resolves its helper
+#     processes -- obs-ffmpeg-mux (the recording muxer) + obs-nvenc-test (the NVENC probe) -- NEXT TO
+#     ITS OWN EXECUTABLE, so the prefix install must place them in /usr/bin. Missing = a broken record
+#     muxer + `NVENC not supported`. FAIL loud (recording-critical). Additionally, when OBS is running,
+#     grade its newest log's NVENC state (report-only NOTE -- needs a running OBS).
+CS_MUX_OK=0; [ -x /usr/bin/obs-ffmpeg-mux ] && CS_MUX_OK=1
+CS_NVT_OK=0; [ -x /usr/bin/obs-nvenc-test ] && CS_NVT_OK=1
+OBSH_VERDICT="$(strih_obs_helpers_verdict "$CS_MUX_OK" "$CS_NVT_OK" || true)"
+if [ "$OBSH_VERDICT" = ok ]; then
+  ok "(obs-helpers) obs-ffmpeg-mux + obs-nvenc-test present beside /usr/bin/obs (record muxer + NVENC probe)"
+else
+  bad "(obs-helpers) ${OBSH_VERDICT} beside /usr/bin/obs (mux=${CS_MUX_OK} nvenc-test=${CS_NVT_OK}) -- the prefix install must copy the WHOLE bundle bin/ (re-run setup-strih.sh step 4)"
+fi
+OBS_LOG_DIR="${USER_HOME}/.config/obs-studio/logs"
+NEWEST_OBS_LOG="$(ls -1t "${OBS_LOG_DIR}"/*.txt 2>/dev/null | head -1 || true)"
+if [ -n "$NEWEST_OBS_LOG" ] && [ -r "$NEWEST_OBS_LOG" ]; then
+  NVENC_VERDICT="$(strih_nvenc_log_verdict < "$NEWEST_OBS_LOG" || true)"
+  case "$NVENC_VERDICT" in
+    nvenc-ok)          note "(obs-helpers) NVENC live: the newest OBS log carries '[obs-nvenc] NVENC version:'" ;;
+    nvenc-unsupported) bad  "(obs-helpers) the newest OBS log says 'NVENC not supported' with no version line -- obs-nvenc-test missing/broken (re-run setup-strih.sh step 4, then restart OBS)" ;;
+    *)                 note "(obs-helpers) NVENC state unknown from the OBS log (OBS not running or no NVENC line yet)" ;;
+  esac
+else
+  note "(obs-helpers) no OBS log to read the live NVENC state (OBS not running -- report-only)"
 fi
 
 echo ""

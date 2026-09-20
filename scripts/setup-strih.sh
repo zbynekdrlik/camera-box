@@ -199,14 +199,12 @@ mkdir -p "$REC_DIR" && chown "$DESKTOP_USER":"$DESKTOP_USER" "$REC_DIR" 2>/dev/n
 # ---------------------------------------------------------------------------------------------
 step 6 "NDI input/output seed manifest + seeding tooling (obs_phase2.py + strih_scenes.py seeder)"
 install -d -m 755 /opt/camera-box
-{
-  echo '{"inputs":['
-  strih_lx_ndi_inputs | sed 's/.*/  "&",/' | sed '$ s/,$//'
-  echo '],"outputs":['
-  { strih_lx_ndi_outputs; strih_lx_ndi_republishes; } | sed 's/.*/  "&",/' | sed '$ s/,$//'
-  echo "],\"camera_latency_ms\":$(strih_lx_camera_latency_ms)}"
-} > /opt/camera-box/strih-lx-seed.json
-echo "  wrote /opt/camera-box/strih-lx-seed.json ($(strih_lx_ndi_inputs | grep -c .) inputs, floor-3 pins)"
+# issue 1317: the notebook runs the OPERATOR (production) collection, so the manifest carries the
+# canonical strih input names as EXPLICIT-name objects {sender,input,scene} + "mode":"update-only"
+# (heal the certified genlock class onto EXISTING inputs, never CreateScene/CreateInput -> no more
+# duplicate `NDI CAMn (usb)` receivers). The full DATA name-map is strih_lx_seed_manifest_json.
+strih_lx_seed_manifest_json > /opt/camera-box/strih-lx-seed.json
+echo "  wrote /opt/camera-box/strih-lx-seed.json (operator collection: update-only, explicit strih input names NDI camN / NDI 2ME PVW / NDI 2ME PGM (mv) / cg / CG-obs, floor-3 pins)"
 # issue 1346: default fixed-HDMI-projector config. The owner ROZHODNUTE (19.9.): multiview default
 # (matching the Windows strih saved_projectors {monitor,type:4}); strih_scenes.py --bootstrap reads
 # it and seeds an OBS fullscreen projector on the HDMI monitor. Do NOT overwrite an existing file --
@@ -438,8 +436,12 @@ strih_cpu_performance_unit_text > /etc/systemd/system/cpu-performance.service \
   || fail "could not write /etc/systemd/system/cpu-performance.service"
 systemctl daemon-reload
 systemctl enable cpu-performance.service 2>/dev/null || warn "  could not enable cpu-performance.service (governor still set for this boot; enable it by hand)"
+# issue 1317: report the EFFECTIVE governor/EPP/ppd triple (the apply now writes the governor
+# UNCONDITIONALLY, so this never contradicts itself with a "performance (now: powersave)" line).
 GOV_NOW="$(cat /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor 2>/dev/null | sort -u | tr '\n' ',' | sed 's/,$//' || true)"
-echo "  CPU governor set to performance (now: ${GOV_NOW:-unreadable}); sleep/suspend masked; cpu-performance.service enabled for persistence"
+EPP_NOW="$(cat /sys/devices/system/cpu/cpu*/cpufreq/energy_performance_preference 2>/dev/null | sort -u | tr '\n' ',' | sed 's/,$//' || true)"
+PPD_NOW="$(command -v powerprofilesctl >/dev/null 2>&1 && powerprofilesctl get 2>/dev/null || true)"
+echo "  CPU performance mode applied: $(strih_perf_effective_line "${GOV_NOW:-unreadable}" "${EPP_NOW:-absent}" "${PPD_NOW:-absent}"); sleep/suspend masked; cpu-performance.service enabled for persistence"
 
 # ---------------------------------------------------------------------------------------------
 step 16 "Bitfocus Companion Satellite (Stream Deck surface agent) -- desktop, autostart-only"
@@ -489,6 +491,11 @@ with open(path, "w") as f:
 ' "${CS_APPCFG_DIR}/config.json" \
   || fail "could not seed ${CS_APPCFG_DIR}/config.json"
 chown "$DESKTOP_USER":"$DESKTOP_USER" "${CS_APPCFG_DIR}/config.json"
+# issue 1317 (live 20.9.2026): the electron-store file seed alone left a RUNNING Satellite's effective
+# controller host at 127.0.0.1 -- POST the controller to its local REST (:9999/api/config) so a
+# running instance adopts it live (connected:true afterwards). Best-effort: a no-op when the Satellite
+# is not up (a fresh box that seeds but never starts it), so it never aborts the provisioning run.
+eval "$(strih_companion_satellite_rest_apply_cmd "$CS_HOST" "$CS_PORT")" || true
 # Operator-login autostart (never started mid-provision; the operator / next login launches it).
 install -d -o "$DESKTOP_USER" -g "$DESKTOP_USER" -m 755 "${USER_HOME}/.config/autostart"
 strih_companion_satellite_autostart_text > "${USER_HOME}/.config/autostart/companion-satellite.desktop" \

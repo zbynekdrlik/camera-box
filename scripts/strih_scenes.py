@@ -105,12 +105,15 @@ def feedback_settings():
 
 
 def input_class_for(name):
-    """issue 1317: the settings CLASS for an input, keyed by its display name. A name ending in
-    `(2ME PGM)` / `(2ME PVW)` is a post-render FEEDBACK monitor (regardless of the STRIH-SNV / future
-    STRIH-LX self-loop prefix) -> 'feedback'; everything else -- the `CAMn (usb)` grabbers AND the
-    `RESOLUME-SNV (cg-obs)` genlocked sender (issue 1300) -- is a genlocked source -> 'camera'."""
-    n = (name or "").rstrip()
-    if n.endswith("(2ME PGM)") or n.endswith("(2ME PVW)"):
+    """issue 1317: the settings CLASS for an input, keyed by name. Any name CARRYING the 2ME marker
+    `2ME PGM` / `2ME PVW` (as a SUBSTRING) is a post-render FEEDBACK monitor -> 'feedback'. This
+    matches BOTH the parallel-phase sender form `STRIH-SNV (2ME PGM)` AND the OPERATOR collection's
+    explicit input names `NDI 2ME PVW` / `NDI 2ME PGM (mv)` (this lane) -- regardless of the
+    STRIH-SNV/STRIH-LX prefix or the `(mv)` suffix, neither of which ENDS in `(2ME PGM)`. Everything
+    else -- the `CAMn (usb)` / `NDI camN` grabbers AND the `RESOLUME-SNV (cg-obs)` / `cg` / `CG-obs`
+    genlocked sources (issue 1300) -- is a genlocked source -> 'camera'."""
+    n = name or ""
+    if "2ME PGM" in n or "2ME PVW" in n:
         return "feedback"
     return "camera"
 
@@ -136,6 +139,26 @@ def input_name_for(src):
     return "NDI " + src
 
 
+def _entry_fields(entry):
+    """Pure (issue 1317, this lane): normalize ONE manifest `inputs` entry to (sender, input_name,
+    scene). A bare STRING keeps today's derived-name behaviour -- sender = the string, input =
+    `NDI `+string, scene = the string (the parallel/imag shape). An OBJECT `{sender,input,scene}`
+    carries EXPLICIT names (the OPERATOR collection: sender = the NDI source received, input = the OBS
+    input the E2E tooling addresses, scene = the operator's scene). Returns None for an unusable entry
+    (empty string; a non-str/non-dict; an object missing/empty any of the three string fields) so a
+    bad entry is DROPPED, never half-seeded."""
+    if isinstance(entry, str):
+        return (entry, input_name_for(entry), scene_name_for(entry)) if entry else None
+    if isinstance(entry, dict):
+        sender = entry.get("sender")
+        inp = entry.get("input")
+        scene = entry.get("scene")
+        if all(isinstance(x, str) and x for x in (sender, inp, scene)):
+            return (sender, inp, scene)
+        return None
+    return None
+
+
 def parse_seed_manifest(text):
     """Pure: parse /opt/camera-box/strih-lx-seed.json text -> (inputs, outputs, latency).
 
@@ -146,7 +169,11 @@ def parse_seed_manifest(text):
     d = json.loads(text)
     if not isinstance(d, dict):
         raise ValueError("strih-lx seed manifest must be a JSON object, got %r" % type(d).__name__)
-    inputs = [s for s in (d.get("inputs") or []) if isinstance(s, str) and s]
+    # issue 1317 (this lane): an `inputs` entry may be a bare STRING (parallel/imag shape) OR an
+    # explicit-name OBJECT {sender,input,scene} (the OPERATOR collection). Keep every usable entry in
+    # its ORIGINAL shape (seed_inputs normalizes via _entry_fields); drop the junk (int/None/empty/a
+    # malformed object) so a bad entry never half-seeds.
+    inputs = [e for e in (d.get("inputs") or []) if _entry_fields(e) is not None]
     outputs = [s for s in (d.get("outputs") or []) if isinstance(s, str) and s]
     latency = d.get("camera_latency_ms", DEFAULT_CAMERA_LATENCY_MS)
     try:
@@ -156,53 +183,92 @@ def parse_seed_manifest(text):
     return inputs, outputs, latency
 
 
+def parse_seed_mode(text):
+    """Pure (issue 1317, this lane): the seed MODE from the manifest -- 'update-only' | 'create'.
+    'update-only' (the OPERATOR collection) makes --bootstrap heal the certified genlock CLASS onto
+    inputs that ALREADY exist and NEVER CreateScene/CreateInput -- the operator's migrated collection
+    is authoritative, so a missing declared input is REPORTED, not created. Anything else (incl. an
+    absent `mode`) is 'create' (the parallel/imag shape, unchanged). A non-JSON / non-object manifest
+    -> 'create' (never crash: parse_seed_manifest raises loudly on the same text; this is a lenient
+    read of a single key)."""
+    try:
+        d = json.loads(text)
+    except ValueError:
+        return "create"
+    if not isinstance(d, dict):
+        return "create"
+    return "update-only" if d.get("mode") == "update-only" else "create"
+
+
 def seed_inputs(inputs, latency):
-    """Pure: the seed PLAN -- one dict per input {scene, input, ndi_source_name, settings}. `settings`
-    is the per-CLASS dict from input_settings_for (camera = certified genlock; 2ME feedback =
-    non-genlock, issue 1317) -- ndi_source_name lives at the top level, not inside settings, so a
-    caller can CreateInput with {**settings, "ndi_source_name": src}. Duplicate/empty names are
-    dropped so a manifest that repeats a name never double-creates a scene (the idempotency shape)."""
+    """Pure: the seed PLAN -- one dict per input {scene, input, ndi_source_name, settings}. Each
+    manifest entry is normalized via _entry_fields (a bare string = derived names; an object =
+    explicit names, issue 1317 this lane). `settings` is the per-CLASS dict (camera = certified
+    genlock; 2ME feedback = non-genlock) -- ndi_source_name lives at the top level, not inside
+    settings, so a caller can CreateInput with {**settings, "ndi_source_name": sender}. Class is
+    resolved from the SENDER *or* the INPUT name (either carrying the 2ME marker -> feedback), so the
+    operator's `NDI 2ME PVW` / `NDI 2ME PGM (mv)` inputs classify feedback even when the sender is a
+    supervisor-confirmable guess. De-duplicated by INPUT name (the OBS identity) so a repeated input
+    never double-creates."""
     plan = []
     seen = set()
-    for src in inputs:
-        if not src or src in seen:
+    for entry in inputs:
+        fields = _entry_fields(entry)
+        if fields is None:
             continue
-        seen.add(src)
+        sender, input_name, scene = fields
+        if input_name in seen:
+            continue
+        seen.add(input_name)
+        cls = "camera"
+        if input_class_for(sender) == "feedback" or input_class_for(input_name) == "feedback":
+            cls = "feedback"
+        settings = feedback_settings() if cls == "feedback" else certified_genlock_settings(latency)
         plan.append({
-            "scene": scene_name_for(src),
-            "input": input_name_for(src),
-            "ndi_source_name": src,
-            "settings": input_settings_for(src, latency),
+            "scene": scene,
+            "input": input_name,
+            "ndi_source_name": sender,
+            "settings": settings,
         })
     return plan
 
 
 def scene_order(inputs):
-    """Pure: the stable, deterministic scene order (the scene names in manifest order, de-duplicated).
-    strih-lx has no operator-tuned order to preserve; the seed creates scenes in this fixed order."""
+    """Pure: the stable, deterministic scene order (the scene names in manifest order, de-duplicated
+    by INPUT name). strih-lx has no operator-tuned order to preserve; the seed creates scenes in this
+    fixed order. Handles both bare-string and object entries (issue 1317, this lane) via _entry_fields."""
     order = []
     seen = set()
-    for src in inputs:
-        if src and src not in seen:
-            seen.add(src)
-            order.append(scene_name_for(src))
+    for entry in inputs:
+        fields = _entry_fields(entry)
+        if fields is None:
+            continue
+        _sender, input_name, scene = fields
+        if input_name in seen:
+            continue
+        seen.add(input_name)
+        order.append(scene)
     return order
 
 
-def input_parity_problems(actual, expected_plan):
+def input_parity_problems(actual, expected_plan, check_source=True):
     """Pure: given `actual` = {inputName: inputSettings-dict} read over WS and `expected_plan` =
     seed_inputs(...), return a list of human-readable problem strings (empty list = every expected
-    input present, a genlock_fifo source, bound to the right ndi_source_name, with the certified
-    ndi_sync=2 SOURCE_TIMECODE). genlock_fifo and ndi_sync are the two certified genlock keys that
-    define "a genlocked source" (obs_phase2 #149); the DistroAV `latency` mode field is deliberately
-    NOT parity-checked here (a live receiver may normalise/clamp it, which would false-flag this
-    report-only path). Used by --verify-parity and Tier-0-tested directly."""
+    input present, the right genlock class + ndi_sync, bound to the right ndi_source_name). genlock_fifo
+    and ndi_sync are the two certified genlock keys that define "a genlocked source" (obs_phase2 #149);
+    the DistroAV `latency` mode field is deliberately NOT parity-checked here (a live receiver may
+    normalise/clamp it, which would false-flag this report-only path).
+
+    issue 1317 (this lane): `check_source=False` SKIPS the ndi_source_name check -- for the OPERATOR
+    collection (update-only mode) the operator's real senders are authoritative, not the manifest DATA
+    guess, so verify-parity checks only that the declared INPUTS exist with the right genlock class.
+    Used by --verify-parity and Tier-0-tested directly."""
     problems = []
     for item in expected_plan:
         inp = item["input"]
         src = item["ndi_source_name"]
         want_sync = item["settings"]["ndi_sync"]
-        # issue 1317: genlock is now class-derived from the plan -- a camera input WANTS genlock_fifo,
+        # issue 1317: genlock is class-derived from the plan -- a camera input WANTS genlock_fifo,
         # a 2ME feedback input wants it OFF (a feedback input left genlocked is exactly the drift this
         # ticket fixes, so flag it too).
         want_genlock = bool(item["settings"].get("genlock_fifo"))
@@ -214,7 +280,7 @@ def input_parity_problems(actual, expected_plan):
             problems.append("%r not genlock_fifo" % inp)
         elif not want_genlock and s.get("genlock_fifo"):
             problems.append("%r unexpectedly genlock_fifo (2ME feedback input must be non-genlock)" % inp)
-        if s.get("ndi_source_name") != src:
+        if check_source and s.get("ndi_source_name") != src:
             problems.append("%r ndi_source_name %r want %r" % (inp, s.get("ndi_source_name"), src))
         if s.get("ndi_sync") != want_sync:
             problems.append("%r ndi_sync %r want %r" % (inp, s.get("ndi_sync"), want_sync))
@@ -419,21 +485,51 @@ def _effective_input_settings(obs, input_name):
     return {**defaults, **explicit}
 
 
-def bootstrap(obs, plan, studio=True):
-    """Seed the collection from `plan` (seed_inputs output). Idempotent: CreateScene/CreateInput ignore
-    "already exists". issue 1317: the per-input settings are applied by CLASS, and the update is
-    CONDITIONAL -- an ALREADY-EXISTING input whose effective settings differ from its class is UPDATED
-    (SetInputSettings overlay:True, so a mis-seeded genlock_fifo=True on a 2ME feedback input is
-    healed), and a matching one emits no SetInputSettings and no re-enforce (never delete/recreate).
-    The ndi_source_name is re-enforced ONLY after a real change (the #795-safe #1158 shape via
-    obs_phase2 when available, else a direct set), so a healthy relaunch is a pure read. Then
-    SetStudioModeEnabled. Returns {input: status} for the log."""
+def bootstrap(obs, plan, studio=True, update_only=False):
+    """Seed the collection from `plan` (seed_inputs output). Two modes:
+
+    CREATE (default, the parallel/imag shape): idempotent CreateScene/CreateInput (ignore "already
+    exists"), then a CONDITIONAL class UPDATE -- an ALREADY-EXISTING input whose effective settings
+    differ from its class is healed (SetInputSettings overlay:True; a mis-seeded genlock_fifo=True on a
+    2ME feedback input is cleared), re-enforcing the ndi_source_name ONLY after a real change (the
+    #795-safe #1158 shape); a matching input is a pure read.
+
+    UPDATE-ONLY (issue 1317, this lane -- the OPERATOR collection is authoritative): NEVER
+    CreateScene/CreateInput. A declared input that does not exist on the box is REPORTED (never
+    created). An existing input is healed to the certified genlock CLASS ONLY (the class keys, NO
+    ndi_source_name -- the operator's source binding is authoritative, so the seeder never renames it),
+    conditionally on drift. This is the fix for the live duplicate-receiver defect: the launch seed no
+    longer creates `NDI CAMn (usb)` duplicates alongside the operator's `NDI camN` inputs.
+
+    Then SetStudioModeEnabled. Returns {input: status} for the log."""
     op = _obs_phase2_module()
     result = {}
+    existing = None
+    if update_only:
+        existing = {i.get("inputName")
+                    for i in (obs.req("GetInputList", ignore_err=True) or {}).get("inputs", [])
+                    if i.get("inputKind") == "ndi_source"}
     for item in plan:
         scene = item["scene"]
         inp = item["input"]
         src = item["ndi_source_name"]
+        if update_only:
+            if inp not in existing:
+                # the operator collection is authoritative; a missing declared input is REPORTED, never
+                # created (creating it would be a wrong-named duplicate of whatever the operator built).
+                result[inp] = "missing (declared, not created)"
+                continue
+            # class keys ONLY -- never ndi_source_name (never rename the operator's source).
+            desired_class = dict(item["settings"])
+            effective = _effective_input_settings(obs, inp)
+            if settings_update_needed(effective, desired_class):
+                obs.req("SetInputSettings", {
+                    "inputName": inp, "inputSettings": desired_class, "overlay": True,
+                }, ignore_err=True)
+                result[inp] = "healed-class"
+            else:
+                result[inp] = "matched"
+            continue
         desired = dict(item["settings"], ndi_source_name=src)
         obs.req("CreateScene", {"sceneName": scene}, ignore_err=True)
         # CreateInput seeds a NEW input with the class settings; on an existing input it fails
@@ -463,6 +559,7 @@ def verify_parity(obs, manifest_text):
     verify-strih.sh greps with grep -qxF. Exit 1 on any problem, 0 when clean (the imag verify_parity
     exit contract). Never seeds/creates anything."""
     inputs, _outputs, latency = parse_seed_manifest(manifest_text)
+    mode = parse_seed_mode(manifest_text)
     plan = seed_inputs(inputs, latency)
     actual = {}
     for inp in obs.req("GetInputList").get("inputs", []):
@@ -471,7 +568,9 @@ def verify_parity(obs, manifest_text):
         name = inp["inputName"]
         s = obs.req("GetInputSettings", {"inputName": name}, ignore_err=True)
         actual[name] = s.get("inputSettings", {})
-    problems = input_parity_problems(actual, plan)
+    # update-only (the OPERATOR collection) checks the declared inputs + genlock class, NOT the
+    # ndi_source_name (the operator's real senders are authoritative, not the manifest DATA guess).
+    problems = input_parity_problems(actual, plan, check_source=(mode != "update-only"))
     # issue 1317: report the per-input CLASS on its OWN line (report-only; verify-strih.sh notes it).
     # The verdict line below stays byte-identical ("strih ndi inputs: OK") for the grep -qxF anchor.
     print("strih ndi input classes: " + input_classes_summary(inputs))
@@ -623,12 +722,15 @@ def main():
     if args.verify_parity:
         verify_parity(obs, manifest_text)
         return
-    # --bootstrap: seed the collection
+    # --bootstrap: seed the collection. `mode` (issue 1317) selects update-only (the OPERATOR
+    # collection: heal the certified class onto EXISTING inputs, never CreateScene/CreateInput) vs
+    # create (the parallel/imag shape).
     inputs, _outputs, latency = parse_seed_manifest(manifest_text)
+    mode = parse_seed_mode(manifest_text)
     plan = seed_inputs(inputs, latency)
-    statuses = bootstrap(obs, plan, studio=True)
-    print("strih seed: %d inputs, latency %d ms; ndi names: %s"
-          % (len(plan), latency,
+    statuses = bootstrap(obs, plan, studio=True, update_only=(mode == "update-only"))
+    print("strih seed (%s): %d inputs, latency %d ms; ndi names: %s"
+          % (mode, len(plan), latency,
              ", ".join("%s=%s" % (k, v) for k, v in sorted(statuses.items()))))
     print("scene order: " + " | ".join(scene_order(inputs)))
     # issue 1346: seed the fixed HDMI fullscreen projector AFTER the input seed (idempotent; SKIPs
