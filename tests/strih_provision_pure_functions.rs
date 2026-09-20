@@ -1085,8 +1085,9 @@ fn verify_governor_ok_requires_every_core_performance_failclosed_on_empty() {
     assert_ne!(code, 0, "empty (unreadable) governors must fail-closed");
 }
 
-/// The Companion Satellite version is PINNED (never 'latest') and env-overridable, like the
-/// dantesync/NDI version pins.
+/// The Companion Satellite version is PINNED to the real stable release (v3.4.0, never 'latest',
+/// never the nonexistent 1.11.0 the bounced lane pinned) and env-overridable, like the dantesync/NDI
+/// version pins.
 #[test]
 fn companion_satellite_version_is_pinned_never_latest() {
     let (code, out, _e) = run_sourced(&[], "strih_companion_satellite_version");
@@ -1096,6 +1097,11 @@ fn companion_satellite_version_is_pinned_never_latest() {
         !out.to_lowercase().contains("latest"),
         "never 'latest' (reproducible pin): {out}"
     );
+    assert_eq!(
+        out.trim(),
+        "3.4.0",
+        "must pin the real Bitfocus stable v3.4.0, not the bounced nonexistent 1.11.0: {out}"
+    );
     let (_c, out2, _e) = run_sourced(
         &[("COMPANION_SATELLITE_VERSION", "9.9.9")],
         "strih_companion_satellite_version",
@@ -1103,19 +1109,67 @@ fn companion_satellite_version_is_pinned_never_latest() {
     assert_eq!(out2.trim(), "9.9.9", "COMPANION_SATELLITE_VERSION override");
 }
 
-/// The pinned .deb URL carries the pinned version and points at the companion-satellite release.
+/// The download URL is the Bitfocus CDN x64 TAR.GZ (never a GitHub-release .deb — the bounce cause:
+/// GitHub releases carry NO .deb assets), env-overridable via COMPANION_SATELLITE_TARBALL_URL.
 #[test]
-fn companion_satellite_deb_url_pins_the_version() {
-    let (_c, url, _e) = run_sourced(&[], "strih_companion_satellite_deb_url 1.2.3");
+fn companion_satellite_tarball_url_is_the_pinned_cdn_targz_never_a_deb() {
+    let (code, url, _e) = run_sourced(&[], "strih_companion_satellite_tarball_url");
+    assert_eq!(code, 0);
     assert!(
-        url.contains("1.2.3"),
-        "url must carry the pinned version: {url}"
+        url.contains("cf-pub.bitfocus.io"),
+        "url must be the Bitfocus CDN: {url}"
     );
     assert!(
         url.contains("companion-satellite"),
         "url must be the companion-satellite asset: {url}"
     );
-    assert!(url.trim().ends_with(".deb"), "url must be a .deb: {url}");
+    assert!(
+        url.trim().ends_with(".tar.gz"),
+        "url must be a .tar.gz (never a .deb): {url}"
+    );
+    assert!(
+        !url.contains(".deb"),
+        "url must NOT be a .deb (the bounce cause): {url}"
+    );
+    assert!(
+        !url.contains("github.com"),
+        "url must NOT be a GitHub release (no .deb assets there): {url}"
+    );
+    let (_c, url2, _e) = run_sourced(
+        &[(
+            "COMPANION_SATELLITE_TARBALL_URL",
+            "https://example.test/x.tar.gz",
+        )],
+        "strih_companion_satellite_tarball_url",
+    );
+    assert_eq!(
+        url2.trim(),
+        "https://example.test/x.tar.gz",
+        "COMPANION_SATELLITE_TARBALL_URL override"
+    );
+}
+
+/// The tarball sha256 is pinned (64 lowercase hex) + env-overridable via COMPANION_SATELLITE_SHA256.
+#[test]
+fn companion_satellite_sha256_is_pinned() {
+    let (code, sha, _e) = run_sourced(&[], "strih_companion_satellite_sha256");
+    assert_eq!(code, 0);
+    let sha = sha.trim();
+    assert_eq!(sha.len(), 64, "sha256 must be 64 hex chars: {sha}");
+    assert!(
+        sha.chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()),
+        "sha256 must be lowercase hex: {sha}"
+    );
+    let (_c, sha2, _e) = run_sourced(
+        &[("COMPANION_SATELLITE_SHA256", "deadbeef")],
+        "strih_companion_satellite_sha256",
+    );
+    assert_eq!(
+        sha2.trim(),
+        "deadbeef",
+        "COMPANION_SATELLITE_SHA256 override"
+    );
 }
 
 /// The controller host defaults to the venue Companion controller 10.77.9.205, env-overridable.
@@ -1134,7 +1188,20 @@ fn companion_satellite_host_defaults_to_the_venue_controller() {
     );
 }
 
-/// The config text records the controller host as the `COMPANION_SATELLITE_HOST` config value.
+/// The controller port defaults to the Satellite TCP API port 16622, env-overridable.
+#[test]
+fn companion_satellite_port_defaults_to_16622() {
+    let (_c, port, _e) = run_sourced(&[], "strih_companion_satellite_port");
+    assert_eq!(port.trim(), "16622");
+    let (_c, port2, _e) = run_sourced(
+        &[("COMPANION_SATELLITE_PORT", "16623")],
+        "strih_companion_satellite_port",
+    );
+    assert_eq!(port2.trim(), "16623", "COMPANION_SATELLITE_PORT override");
+}
+
+/// The durable host.conf record keeps the controller host as `COMPANION_SATELLITE_HOST` (the
+/// (companion) gate's human-readable record; the FUNCTIONAL seed is the app config.json below).
 #[test]
 fn companion_satellite_config_text_records_the_controller_host() {
     let (_c, cfg, _e) = run_sourced(&[], "strih_companion_satellite_config_text 10.77.9.205");
@@ -1144,27 +1211,93 @@ fn companion_satellite_config_text_records_the_controller_host() {
     );
 }
 
-/// The Companion Satellite install emitter is ENABLE-ONLY (never start) + fetches the PINNED deb,
-/// and the emitted block is valid bash.
+/// The app config.json pre-seed uses the electron-store keys the Satellite v3.4.0 source reads —
+/// `remoteIp` (controller host) + `remotePort` — NOT `host`/`companionAddress`; and it is valid JSON.
 #[test]
-fn companion_satellite_install_is_enable_only_and_fetches_the_pinned_deb() {
+fn companion_satellite_appconfig_json_seeds_remoteip_remoteport() {
+    let (code, cfg, _e) = run_sourced(
+        &[],
+        "strih_companion_satellite_appconfig_json 10.77.9.205 16622",
+    );
+    assert_eq!(code, 0);
+    assert!(
+        cfg.contains("\"remoteIp\""),
+        "must set remoteIp (the source's controller-host key): {cfg}"
+    );
+    assert!(
+        cfg.contains("10.77.9.205"),
+        "must carry the controller host: {cfg}"
+    );
+    assert!(cfg.contains("\"remotePort\""), "must set remotePort: {cfg}");
+    assert!(
+        cfg.contains("16622"),
+        "must carry the controller port: {cfg}"
+    );
+    assert!(
+        !cfg.contains("companionAddress"),
+        "must not use the nonexistent companionAddress key: {cfg}"
+    );
+    let (jcode, _o, jerr) = run_sourced(
+        &[],
+        "strih_companion_satellite_appconfig_json 10.77.9.205 16622 | python3 -c 'import json,sys; json.load(sys.stdin)'",
+    );
+    assert_eq!(jcode, 0, "app config must be valid JSON; stderr={jerr}");
+}
+
+/// The operator-login autostart entry is a Desktop Entry launching the installed /opt binary, armed
+/// on (owner rule: a needed feature is always-ON, never a forgettable manual launch).
+#[test]
+fn companion_satellite_autostart_text_is_a_desktop_entry() {
+    let (code, txt, _e) = run_sourced(&[], "strih_companion_satellite_autostart_text");
+    assert_eq!(code, 0);
+    assert!(
+        txt.contains("[Desktop Entry]"),
+        "must be a Desktop Entry: {txt}"
+    );
+    assert!(
+        txt.contains("Type=Application"),
+        "must be an Application entry: {txt}"
+    );
+    assert!(
+        txt.contains("Exec=/opt/companion-satellite/companion-satellite"),
+        "must launch the installed binary: {txt}"
+    );
+    assert!(
+        txt.contains("X-GNOME-Autostart-enabled=true"),
+        "must be autostart-enabled: {txt}"
+    );
+}
+
+/// The Companion Satellite install emitter downloads the PINNED tar.gz, VERIFIES its sha256
+/// (fail-loud on mismatch), and runs the tarball's own `install.sh --system --force` (idempotent,
+/// desktop model) after installing the deps — NEVER a `.deb`, never a mid-provision start.
+#[test]
+fn companion_satellite_install_downloads_pinned_tarball_verifies_sha_runs_installsh() {
     let (code, out, err) = run_sourced(&[], "strih_companion_satellite_install");
     assert_eq!(code, 0, "install emitter must succeed; stderr={err}");
     assert!(
-        out.contains("apt-get install"),
-        "must apt-get install the .deb: {out}"
+        out.contains("cf-pub.bitfocus.io"),
+        "must fetch the pinned CDN tarball: {out}"
     );
     assert!(
-        out.contains("companion-satellite"),
-        "must reference the companion-satellite package/asset: {out}"
+        out.contains("sha256sum -c"),
+        "must verify the pinned sha256 (fail-loud): {out}"
     );
     assert!(
-        out.contains("systemctl enable"),
-        "must enable the unit: {out}"
+        out.contains("install.sh --system --force"),
+        "must run the tarball's own idempotent install.sh: {out}"
+    );
+    assert!(
+        out.contains("libusb-1.0-0-dev"),
+        "must install the documented Companion Satellite deps: {out}"
+    );
+    assert!(
+        !out.contains(".deb"),
+        "must NOT install a .deb (the bounce cause): {out}"
     );
     assert!(
         !out.contains("systemctl start") && !out.contains("enable --now"),
-        "companion is ENABLE-ONLY, never started mid-provision: {out}"
+        "companion is never started mid-provision: {out}"
     );
     let (code, _o, err) = run_sourced(&[], "strih_companion_satellite_install | bash -n");
     assert_eq!(
@@ -1173,16 +1306,18 @@ fn companion_satellite_install_is_enable_only_and_fetches_the_pinned_deb() {
     );
 }
 
-/// The verify (companion) verdict is fail-closed: `ok` only for installed + enabled + host-ok.
+/// The verify (companion) verdict is fail-closed over the desktop-model signals: `ok` only for
+/// binary-installed + desktop-udev-rule + operator-autostart + controller-host-seeded.
 #[test]
 fn companion_verdict_is_failclosed() {
-    let (code, out, _e) = run_sourced(&[], "strih_companion_verdict 1 1 1");
+    let (code, out, _e) = run_sourced(&[], "strih_companion_verdict 1 1 1 1");
     assert_eq!(code, 0);
     assert_eq!(out.trim(), "ok");
     for (args, tok) in [
-        ("0 1 1", "not-installed"),
-        ("1 0 1", "not-enabled"),
-        ("1 1 0", "wrong-host"),
+        ("0 1 1 1", "not-installed"),
+        ("1 0 1 1", "no-udev-rule"),
+        ("1 1 0 1", "no-autostart"),
+        ("1 1 1 0", "wrong-host"),
     ] {
         let (code, out, _e) = run_sourced(&[], &format!("strih_companion_verdict {args}"));
         assert_ne!(code, 0, "{args} must be non-ok");
@@ -1218,23 +1353,26 @@ fn setup_strih_wires_performance_mode_before_final_verify() {
     );
 }
 
-/// setup-strih.sh must install Companion Satellite (via the install emitter + host config) BEFORE
-/// the final verify.
+/// setup-strih.sh must install Companion Satellite (install emitter), seed the app config.json
+/// (functional controller pin) AND write the operator-login autostart, all BEFORE the final verify.
 #[test]
 fn setup_strih_wires_companion_satellite_before_final_verify() {
     let s = read_script("scripts/setup-strih.sh");
     let install = s
         .find("strih_companion_satellite_install")
         .expect("setup-strih must call strih_companion_satellite_install");
-    let cfg = s
-        .find("strih_companion_satellite_config_text")
-        .expect("setup-strih must write the controller-host config");
+    let appcfg = s
+        .find("strih_companion_satellite_appconfig_json")
+        .expect("setup-strih must seed the app config.json with the controller host");
+    let autostart = s
+        .find("strih_companion_satellite_autostart_text")
+        .expect("setup-strih must write the operator-login autostart entry");
     let verify = s
         .find("verify-strih.sh acceptance gate")
         .expect("final verify present");
     assert!(
-        install < verify && cfg < verify,
-        "the companion step must run before the final verify (install {install}, cfg {cfg}, verify {verify})"
+        install < verify && appcfg < verify && autostart < verify,
+        "the companion step must run before the final verify (install {install}, appcfg {appcfg}, autostart {autostart}, verify {verify})"
     );
 }
 
