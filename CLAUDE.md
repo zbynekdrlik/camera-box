@@ -643,6 +643,16 @@ until the DESIGN marker exists. Three things bite on THIS repo specifically:
   `python3 -c "import sys; sys.path.insert(0,'/home/newlevel/devel/airuleset'); import design_gate as
   dg; b=open('body.md').read(); print(dg.classify_design_comment(b), dg.classify_triage_and_approaches(b),
   dg.classify_architecture_section(b))"` — all three must be `(True, …)`.
+- **The `Architektúra:` section needs BOTH a structure word AND a framework/why-none-fits word —
+  a structure word alone fails silently as `Architektúra: section missing: framework used or
+  why-none-fits` (2026-09-20, #1344).** `classify_architecture_section` requires
+  `\bframework\w*|\br[áa]mec\w*|kni[žz]nic\w*|\blibrar(?:y|ies)\b|nesed[íi]\w*|nehod[íi]\w*|
+  nevhod\w*|no\s+framework|none\s+fit|doesn'?t\s+fit|existuj[uú]c\w*\s+(?:rie[šs]enie|
+  n[áa]stroj|framework)|existing\s+(?:solution|tool|framework)` IN ADDITION to a structure/topology
+  word — writing "no new subsystem" alone (a structure claim) is NOT enough; phrase it as "no new
+  FRAMEWORK needed" or name the existing framework/library reused, or an evidenced
+  why-none-fits, to also hit the framework-or-whynot half. Always run the local one-liner above
+  before posting — it is the only way to catch this before the comment lands.
 - **Post each design/validated/review comment as a STANDALONE `gh issue comment` call — a COMPOUND
   bash call silently registers NO marker (#784, 2026-08-17).** When the `gh issue comment` sits in a
   compound command (`gh api -X DELETE …/comments/<id> ; gh issue comment <N> --body-file … ; sleep 6 ;
