@@ -355,21 +355,7 @@ LG
 echo "  sleep/suspend/hibernate masked; lid + power keys ignored"
 
 # ---------------------------------------------------------------------------------------------
-AUDIO_NAME="$(strih_lx_audio_input_name)"
-step 12 "Program audio: ${AUDIO_NAME} -> PipeWire (VB-Matrix replacement)"
-if arecord -l 2>/dev/null | grep -qi 'MiniFuse'; then
-  echo "  detected the ${AUDIO_NAME} USB interface (arecord -l) -- class-compliant PipeWire node"
-else
-  warn "  ${AUDIO_NAME} not detected (arecord -l) -- plug it in before go-live (it is the program-audio input)"
-fi
-if strih_lx_audio_route_wired; then
-  echo "  VB-Matrix -> PipeWire program-audio route reported WIRED (STRIH_LX_AUDIO_WIRED=1)"
-else
-  fail "TODO(audio): the VB-Matrix -> PipeWire program-audio graph is not wired yet. On Windows the mastered program mix reaches OBS via ${AUDIO_NAME} -> VB-Matrix (VASIO-8) ASIO; on Linux PipeWire replaces VB-Matrix. Wire the PipeWire graph feeding the '${AUDIO_NAME}' capture into OBS, then re-run with STRIH_LX_AUDIO_WIRED=1. (Fail-loud until wired -- issue 1317.)"
-fi
-
-# ---------------------------------------------------------------------------------------------
-step 13 "Intercom hub unit + matrix (issue 1345 M1: ENABLE-ONLY, NEVER started while parallel)"
+step 12 "Intercom hub unit + matrix (issue 1345 M1: ENABLE-ONLY, NEVER started while parallel)"
 # The strih-lx intercom hub replaces the Windows VB-Matrix's N-1 intercom for the VBAN camboxes.
 # Install the systemd unit + the generated routing TOML and ENABLE it, but NEVER start/restart it
 # here: sending VBAN to the real camboxes is the M4 cut-over (the Windows strih stays their live hub
@@ -385,13 +371,16 @@ else
 fi
 
 # ---------------------------------------------------------------------------------------------
-step 14 "Janus audiobridge audio edge (issue 1345 M3a: apt install janus + jcfg + ENABLE-ONLY)"
+step 13 "Janus audiobridge audio edge (issue 1345 M3a: apt install janus + jcfg + ENABLE-ONLY)"
 # The phones intercom leg (the VDO.Ninja replacement) runs over a Janus audiobridge room the hub
 # joins as a plain-RTP PCMU participant (issue 1345 M3a). Install Janus (apt), generate the 0600 room
 # secret if absent (NEVER printed), write the audiobridge room jcfg (the secret is injected via a bash
-# var -- no argv exposure) + the WebSocket transport jcfg (ws :8188, NO wss -- TLS terminates on the
-# dev1 front; the HTTP transport stays loopback :8088), and ENABLE the janus unit -- NEVER start it
-# here (the M4 cut-over starts it together with the intercom hub).
+# var -- no argv exposure) + the WebSocket transport jcfg (ws BOUND to the LAN IP :8188, NO wss -- TLS
+# terminates on the dev1 front) + the HTTP transport jcfg (bound loopback 127.0.0.1:8088 only), and
+# ENABLE the janus unit. NEVER unconditionally start it (the M4 cut-over starts it with the intercom
+# hub); Ubuntu's package auto-starts janus on install, so if it is ALREADY running we restart it to
+# load the freshly written jcfg. This step runs BEFORE the audio TODO gate so the still-unwired
+# MiniFuse audio (issue 1344) no longer blocks the M3 provisioning (issue 1345 M3 follow-up).
 DEBIAN_FRONTEND=noninteractive apt-get install -y janus \
   || warn "  apt-get install janus failed -- install it before the M4 cut-over (the phones leg needs the audiobridge)"
 JANUS_ROOM="1000"
@@ -419,11 +408,35 @@ if [ -d /etc/janus ] || command -v janus >/dev/null 2>&1; then
   unset JANUS_SECRET_VALUE JANUS_AB_JCFG
   strih_janus_ws_jcfg_text "$STATIC_IP" > /etc/janus/janus.transport.websockets.jcfg
   chmod 644 /etc/janus/janus.transport.websockets.jcfg
-  echo "  wrote /etc/janus/janus.plugin.audiobridge.jcfg (room ${JANUS_ROOM} 'interkom') + janus.transport.websockets.jcfg (ws :8188, no wss)"
+  strih_janus_http_jcfg_text > /etc/janus/janus.transport.http.jcfg
+  chmod 644 /etc/janus/janus.transport.http.jcfg
+  echo "  wrote /etc/janus/janus.plugin.audiobridge.jcfg (room ${JANUS_ROOM} 'interkom') + janus.transport.websockets.jcfg (ws :8188 LAN-bound, no wss) + janus.transport.http.jcfg (loopback 127.0.0.1:8088)"
   systemctl enable janus 2>/dev/null || warn "  could not enable janus.service (install janus first)"
-  echo "  janus.service ENABLED (NOT started -- the M4 cut-over starts it with the hub); HTTP stays loopback :8088"
+  # Ubuntu's janus package auto-STARTS the service on install (before these jcfg existed). If it is
+  # already running, restart it to load the freshly written room/ws/http jcfg; otherwise leave it
+  # enable-only (the M4 cut-over starts it with the hub). Never an UNCONDITIONAL start/restart.
+  if systemctl is-active --quiet janus; then
+    systemctl restart janus 2>/dev/null || warn "  could not restart janus to load the new jcfg"
+    echo "  janus was already running (apt auto-start) -- restarted to load the new jcfg"
+  else
+    echo "  janus.service ENABLED (NOT running -- the M4 cut-over starts it with the hub); HTTP loopback 127.0.0.1:8088"
+  fi
 else
   warn "  /etc/janus absent and no janus binary -- install janus, then re-run this step to write the jcfg + enable"
+fi
+
+# ---------------------------------------------------------------------------------------------
+AUDIO_NAME="$(strih_lx_audio_input_name)"
+step 14 "Program audio: ${AUDIO_NAME} -> PipeWire (VB-Matrix replacement)"
+if arecord -l 2>/dev/null | grep -qi 'MiniFuse'; then
+  echo "  detected the ${AUDIO_NAME} USB interface (arecord -l) -- class-compliant PipeWire node"
+else
+  warn "  ${AUDIO_NAME} not detected (arecord -l) -- plug it in before go-live (it is the program-audio input)"
+fi
+if strih_lx_audio_route_wired; then
+  echo "  VB-Matrix -> PipeWire program-audio route reported WIRED (STRIH_LX_AUDIO_WIRED=1)"
+else
+  fail "TODO(audio): the VB-Matrix -> PipeWire program-audio graph is not wired yet. On Windows the mastered program mix reaches OBS via ${AUDIO_NAME} -> VB-Matrix (VASIO-8) ASIO; on Linux PipeWire replaces VB-Matrix. Wire the PipeWire graph feeding the '${AUDIO_NAME}' capture into OBS, then re-run with STRIH_LX_AUDIO_WIRED=1. (Fail-loud until wired -- issue 1317.)"
 fi
 
 # ---------------------------------------------------------------------------------------------
