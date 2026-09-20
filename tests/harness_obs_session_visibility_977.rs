@@ -352,7 +352,7 @@ fn recording_e2e_calls_both_boxes_and_exits_1_on_failure() {
     let window = &body[body
         .find("obs64/AHK session-visibility gate")
         .expect("banner must exist")..];
-    let window = &window[..window.len().min(2500)];
+    let window = &window[..window.len().min(3200)];
     assert!(
         window.contains("obs_session_visibility_probe_ps 1")
             && window.contains("obs_session_visibility_probe_ps 0"),
@@ -386,7 +386,7 @@ fn recording_e2e_bounds_both_win_ssh_run_calls_with_an_outer_timeout() {
     let window = &body[body
         .find("obs64/AHK session-visibility gate")
         .expect("banner must exist")..];
-    let window = &window[..window.len().min(2500)];
+    let window = &window[..window.len().min(3200)];
     // The established AUDIO_PREFLIGHT_SSH_TIMEOUT wrapper shape passes win_ssh_run's real args
     // POSITIONALLY into an inner `bash -c '. "$1"; win_ssh_run "$2" "$3" "$4" "$5"'` (`timeout`
     // execvp()s its command directly and cannot invoke a shell FUNCTION) -- so the literal text
@@ -434,7 +434,7 @@ fn recording_e2e_stream_recovery_message_names_the_correct_mcp_tool() {
     let window = &body[body
         .find("obs64/AHK session-visibility gate")
         .expect("banner must exist")..];
-    let window = &window[..window.len().min(2500)];
+    let window = &window[..window.len().min(3200)];
     assert!(
         window.contains("win-stream-snv MCP Shell"),
         "the stream recovery message must name the real tool, win-stream-snv (not win-stream). \
