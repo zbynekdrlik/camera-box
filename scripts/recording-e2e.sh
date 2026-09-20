@@ -726,7 +726,11 @@ for hp in "$CAMERA_NAME=$CAM1_IP" "cam2(painter)=$PAINTER_IP" "strih=$STRIH" "st
   # (imag:<reason> in CAMBOX_OFFLINE_ACK / rig-fleet.txt) SKIPS the imag leg instead of aborting;
   # source/painter/strih/stream stay unconditionally mandatory (they have no ack path by design).
   if [ "$_name" = "imag" ] && cambox_offline_ack_is_acked "imag"; then
-    if ping -c1 -W2 "$_ip" >/dev/null 2>&1; then
+    # issue 1317: staleness = a SERVICE probe (ssh :22 / dantesync :8898), never a bare ICMP
+    # probe — on the venue LAN a router/proxy-ARP answers ICMP for a vacated .182, which would
+    # reject a legitimate ack as STALE and hard-block the whole run (imag-nb is out ~1 year,
+    # owner 20.9.2026).
+    if imag_service_reachable "$_ip"; then
       # acked but REACHABLE -> STALE ack (the box is back; the ack must be removed) -> fail loud.
       cambox_offline_ack_stale_message "imag" >&2; exit 1
     fi
