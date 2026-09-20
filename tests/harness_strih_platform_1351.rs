@@ -291,6 +291,49 @@ fn build_onstrihlx_command_quotes_safely_and_sets_rust_log() {
     );
 }
 
+/// review finding (issue 1351): onstrihlx_upload_decision must mirror
+/// recording-verdict-on-imag.sh's issue-1118 sha256 VERSION GATE exactly — a present-but-stale
+/// binary (differing sha256) must be re-uploaded, never silently reused.
+#[test]
+fn onstrihlx_upload_decision_mirrors_the_imag_sha256_version_gate() {
+    fn decide(force: &str, present: &str, local_sha: &str, remote_sha: &str) -> String {
+        let out = Command::new("bash")
+            .arg("-c")
+            .arg(". \"$1\"; onstrihlx_upload_decision \"$2\" \"$3\" \"$4\" \"$5\"")
+            .arg("bash")
+            .arg(onstrihlx_script())
+            .arg(force)
+            .arg(present)
+            .arg(local_sha)
+            .arg(remote_sha)
+            .output()
+            .expect("run onstrihlx_upload_decision");
+        assert!(out.status.success());
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+    assert_eq!(
+        decide("1", "1", "abc", "abc"),
+        "upload",
+        "force always wins"
+    );
+    assert_eq!(decide("0", "0", "", ""), "upload", "absent -> upload");
+    assert_eq!(
+        decide("0", "1", "", "abc"),
+        "upload",
+        "present but local sha unknown -> fail-safe upload"
+    );
+    assert_eq!(
+        decide("0", "1", "abc", "def"),
+        "upload",
+        "present but DIFFERING sha256 (stale/schema-drifted binary) -> re-upload"
+    );
+    assert_eq!(
+        decide("0", "1", "abc", "abc"),
+        "skip",
+        "present AND identical sha256 -> skip (fast idempotent path)"
+    );
+}
+
 // ================================================================================================
 // Wiring into scripts/recording-e2e.sh — new lines only; the Windows path stays byte-identical.
 // ================================================================================================

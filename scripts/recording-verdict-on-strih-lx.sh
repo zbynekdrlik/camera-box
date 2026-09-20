@@ -34,6 +34,25 @@
 #      newlevel, the SAME creds recording-e2e.sh's own $STRIH_USER/$STRIH_PW use for strih today).
 set -euo pipefail
 
+# onstrihlx_upload_decision <force> <present> <local_sha> <remote_sha> — issue 1351 (review
+# finding). Pure/testable (no network): mirrors recording-verdict-on-imag.sh's issue-1118
+# onimag_upload_decision EXACTLY — a present-but-DIFFERENT-sha binary on strih-lx must be
+# re-uploaded (a schema bump left stale, or a corrupt partial-transfer), never silently reused
+# just because the path is executable.
+#   force=1                               -> upload
+#   present!=1 (absent / not executable)  -> upload
+#   present=1 but local_sha empty         -> upload (can't verify identity -> fail-safe)
+#   present=1 and local_sha != remote_sha -> upload (VERSION GATE)
+#   present=1 and local_sha == remote_sha (non-empty) -> skip
+onstrihlx_upload_decision() {
+  local force="${1:-0}" present="${2:-0}" local_sha="${3:-}" remote_sha="${4:-}"
+  [ "$force" = "1" ] && { echo "upload"; return 0; }
+  [ "$present" = "1" ] || { echo "upload"; return 0; }
+  [ -n "$local_sha" ] || { echo "upload"; return 0; }
+  [ "$local_sha" = "$remote_sha" ] && { echo "skip"; return 0; }
+  echo "upload"
+}
+
 # Pure-string function so a unit test can source the script and assert the command is well-formed
 # (strih-lx-local paths only, %q-quoted — no dev1 path, no unescaped argument) WITHOUT touching
 # the network. RUST_LOG=info so the decode progress is visible in the ssh output (the agent's
@@ -95,16 +114,27 @@ main() {
   local -a SSH_OPTS=(-o StrictHostKeyChecking=no -o ConnectTimeout=10)
   local TARGET="${STRIH_USER}@${STRIH_LX_BOX}"
 
-  # STEP 1: deploy the Linux verdict binary to strih-lx — ONLY if missing/not-executable there.
-  # (A sha256 version gate, per recording-verdict-on-imag.sh's issue-1118 fix, is a natural
-  # follow-up once strih-lx carries the same schema-drift exposure imag-nb does.)
+  # STEP 1: deploy the Linux verdict binary to strih-lx — ONLY if missing/not-executable there,
+  # its sha256 DIFFERS from the local binary, or --force-upload is given. Mirrors
+  # recording-verdict-on-imag.sh's issue-1118 sha256 VERSION GATE exactly — a stale on-box binary
+  # after a schema bump (e.g. RecordingPartial vN->vN+1) must never be silently reused just
+  # because the path is present+executable (review finding, issue 1351).
   if [ -n "$VERDICT_BIN" ]; then
+    local present=0 local_sha="" remote_sha=""
     if sshpass -p "$STRIH_PW" ssh "${SSH_OPTS[@]}" "$TARGET" "[ -x '$REMOTE_BIN' ]" 2>/dev/null; then
-      echo "[recording-verdict-on-strih-lx] $REMOTE_BIN already present+executable on strih-lx — skipping upload"
-    else
-      echo "[recording-verdict-on-strih-lx] deploying $VERDICT_BIN -> ${TARGET}:${REMOTE_BIN}"
+      present=1
+      local_sha="$(sha256sum "$VERDICT_BIN" 2>/dev/null | cut -d' ' -f1)" || local_sha=""
+      remote_sha="$(sshpass -p "$STRIH_PW" ssh "${SSH_OPTS[@]}" "$TARGET" \
+          "sha256sum '$REMOTE_BIN' 2>/dev/null | cut -d' ' -f1" 2>/dev/null | tr -dc '0-9a-f')" || remote_sha=""
+    fi
+    local decision
+    decision="$(onstrihlx_upload_decision 0 "$present" "$local_sha" "$remote_sha")"
+    if [ "$decision" = "upload" ]; then
+      echo "[recording-verdict-on-strih-lx] deploying $VERDICT_BIN -> ${TARGET}:${REMOTE_BIN} (present=$present local_sha=${local_sha:0:12} remote_sha=${remote_sha:0:12})"
       sshpass -p "$STRIH_PW" scp "${SSH_OPTS[@]}" "$VERDICT_BIN" "${TARGET}:${REMOTE_BIN}"
       sshpass -p "$STRIH_PW" ssh "${SSH_OPTS[@]}" "$TARGET" "chmod +x '$REMOTE_BIN'"
+    else
+      echo "[recording-verdict-on-strih-lx] $REMOTE_BIN already present+executable AND identical sha256 on strih-lx — skipping upload (issue 1118 version gate)"
     fi
   fi
 
