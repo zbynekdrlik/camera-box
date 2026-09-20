@@ -205,7 +205,12 @@ Environment=XDG_RUNTIME_DIR=/run/user/${uid}
 Environment=PIPEWIRE_RUNTIME_DIR=/run/user/${uid}
 # The operator session must exist for /run/user/<uid>/pipewire-0 to be present.
 After=user@${uid}.service
+# ProtectHome=read-only keeps /run/user/<uid> reachable (ProtectHome=tmpfs/yes would HIDE it and
+# break PipeWire); narrow the residual read-only \$HOME exposure by blanking the sensitive dirs
+# (\`-\` = tolerate absence). A DynamicUser gave no home at all, so this is the minimal downgrade
+# that still lets pw-cat reach the operator's PipeWire socket.
 ProtectHome=read-only
+InaccessiblePaths=-/home/${user}/.ssh -/home/${user}/.gnupg -/home/${user}/.config/gh
 DROPIN
 }
 

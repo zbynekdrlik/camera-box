@@ -375,6 +375,10 @@ chown "$DESKTOP_USER":"$DESKTOP_USER" "${USER_HOME}/.config/wireplumber/wireplum
 # the intercom-hub systemd drop-in that runs the hub AS THE OPERATOR (reach the PipeWire session).
 mkdir -p /etc/systemd/system/intercom-hub.service.d
 strih_intercom_audio_dropin "$DESKTOP_USER" "$DESKTOP_UID" > /etc/systemd/system/intercom-hub.service.d/10-local-audio.conf
+# Linger the operator so its user@.service + PipeWire come up at boot even before an interactive
+# login — otherwise a headless start finds no /run/user/<uid>/pipewire-0 (the hub self-heals via the
+# pw-cat restart backoff once the session appears, but linger removes the startup gap).
+loginctl enable-linger "$DESKTOP_USER" 2>/dev/null || warn "  could not enable-linger $DESKTOP_USER (the operator PipeWire session must be up before the hub's audio starts)"
 systemctl daemon-reload 2>/dev/null || true
 echo "  installed strih-program null sink + WirePlumber MiniFuse rule (operator session) + intercom-hub local-audio drop-in (User=${DESKTOP_USER})"
 echo "  the OBS '${AUDIO_NAME}' input (pulse_input_capture on strih-program.monitor) is seeded by scripts/strih_scenes.py --bootstrap; verify-strih derives the audio verdict"
