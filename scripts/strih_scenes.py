@@ -140,7 +140,7 @@ def program_audio_input_kind_from_inputs(inputs):
 
 def audio_input_action(exists, current_kind):
     """Pure: the ONE allowed action for the `ASIO zvuk` program-audio input.
-    - absent -> 'create' (CreateInput pulse_input_capture on strih-program.monitor)
+    - absent -> 'create' (CreateInput pulse_input_capture on strih-program-source)
     - present but asio_input_capture (the un-creatable Windows kind) -> 'replace' (Remove + Create)
     - present as pulse_input_capture -> 'ok' (nothing to do)
     - present as some OTHER kind -> 'replace' (heal it to the pulse capture)."""
@@ -556,7 +556,7 @@ def _current_scene_name(obs):
 
 def seed_program_audio_input(obs):
     """The ONE allowed create/replace (issue 1344): ensure the `ASIO zvuk` program-audio input exists
-    as pulse_input_capture on strih-program.monitor (the OBS program capture). A missing input is
+    as pulse_input_capture on strih-program-source (the OBS program capture). A missing input is
     CREATED; the un-creatable Windows asio_input_capture (or any other kind) is REMOVED + recreated;
     a correct pulse_input_capture is left alone. Returns a short status string for the log."""
     inputs = (obs.req("GetInputList", ignore_err=True) or {}).get("inputs", [])

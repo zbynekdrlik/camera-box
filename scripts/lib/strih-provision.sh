@@ -164,6 +164,48 @@ context.objects = [
 CONF
 }
 
+# strih_pipewire_program_loopback_conf -> the operator-session pipewire.conf.d drop-in that
+# republishes the strih-program null-sink monitor as a REAL pulse-visible Audio/Source node (issue
+# 1344 follow-up, 20.9.2026 live diagnosis).
+#
+# Root cause: the `support.null-audio-sink` created by strih_pipewire_program_sink_conf via
+# context.objects does NOT get a pulse-visible monitor on Ubuntu 26.04 pipewire (`pw-dump` shows
+# `pulse.monitor = None` on it) -- OBS's pulse_input_capture enumeration never lists
+# `strih-program.monitor`, so binding it reads digital silence even though the audio is really
+# there (`pw-cat --target strih-program.monitor` captures it fine; only OBS/libpulse can't see it).
+#
+# Fix (proven live on strih-lx, 20.9.2026): a `libpipewire-module-loopback` that captures the
+# strih-program SINK OUTPUT (never the monitor) and republishes it as its OWN node. The republished
+# node's `media.class` MUST be plain "Audio/Source" -- NOT "Audio/Source/Virtual". With Virtual, OBS
+# enumerates the source in its device list but its capture stream never links (silence); plain
+# Audio/Source captures correctly. scripts/strih_scenes.py's AUDIO_MONITOR_DEVICE binds
+# `strih-program-source` (this node's name), not `strih-program.monitor`.
+strih_pipewire_program_loopback_conf() {
+  cat <<'CONF'
+# strih-lx program-audio loopback source (issue 1344 follow-up) — installed by setup-strih step 12.
+# strih-program.monitor is NOT pulse-visible to OBS on this box; this loopback republishes the
+# strih-program sink as a real Audio/Source node OBS's pulse_input_capture can enumerate + capture.
+# Do NOT edit by hand.
+context.modules = [
+    {   name = libpipewire-module-loopback
+        args = {
+            node.description = "Strih Program (OBS ASIO zvuk)"
+            capture.props = {
+                node.target         = "strih-program"
+                stream.capture.sink = true
+                node.passive        = true
+            }
+            playback.props = {
+                node.name         = "strih-program-source"
+                node.description  = "Strih Program (OBS ASIO zvuk)"
+                media.class       = "Audio/Source"
+            }
+        }
+    }
+]
+CONF
+}
+
 # strih_wireplumber_minifuse_rule -> the WirePlumber rule pinning the MiniFuse 4 to its pro-audio
 # profile at 48 kHz (the operator talkback capture the hub reads; OBS never touches it).
 strih_wireplumber_minifuse_rule() {

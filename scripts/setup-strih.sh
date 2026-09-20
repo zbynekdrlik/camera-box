@@ -355,9 +355,11 @@ echo "  sleep/suspend/hibernate masked; lid + power keys ignored"
 # ---------------------------------------------------------------------------------------------
 AUDIO_NAME="$(strih_lx_audio_input_name)"
 step 12 "Program audio: intercom hub -> PipeWire strih-program sink -> OBS (VB-Matrix replacement, issue 1344)"
-# Root cause (design 20.9.): the OBS program (${AUDIO_NAME}) is a NETWORK stream (fohabl-strih VBAN),
-# NOT the MiniFuse. The hub writes the program mix to a strih-program null sink OBS captures via
-# strih-program.monitor; the MiniFuse carries only the operator TALKBACK mic (the hub reads it).
+# Root cause (design 20.9., follow-up 20.9. live diagnosis issuecomment-5751113173): the OBS
+# program (${AUDIO_NAME}) is a NETWORK stream (fohabl-strih VBAN), NOT the MiniFuse. The hub writes
+# the program mix to a strih-program null sink; OBS captures it via a LOOPBACK republish node
+# strih-program-source (strih-program.monitor itself is NOT pulse-visible to OBS on this box --
+# proven live). The MiniFuse carries only the operator TALKBACK mic (the hub reads it).
 DESKTOP_UID="$(id -u "$DESKTOP_USER" 2>/dev/null || echo 1000)"
 if arecord -l 2>/dev/null | grep -qi 'MiniFuse'; then
   echo "  detected the MiniFuse 4 USB interface (arecord -l) -- the operator talkback capture"
@@ -368,6 +370,10 @@ fi
 install -d -o "$DESKTOP_USER" -g "$DESKTOP_USER" "${USER_HOME}/.config/pipewire/pipewire.conf.d"
 strih_pipewire_program_sink_conf > "${USER_HOME}/.config/pipewire/pipewire.conf.d/strih-program.conf"
 chown "$DESKTOP_USER":"$DESKTOP_USER" "${USER_HOME}/.config/pipewire/pipewire.conf.d/strih-program.conf"
+# (c2, issue 1344 follow-up) the loopback that republishes strih-program's monitor as a real
+# pulse-visible Audio/Source (strih-program.monitor itself is NOT pulse-visible to OBS on this box).
+strih_pipewire_program_loopback_conf > "${USER_HOME}/.config/pipewire/pipewire.conf.d/strih-program-loopback.conf"
+chown "$DESKTOP_USER":"$DESKTOP_USER" "${USER_HOME}/.config/pipewire/pipewire.conf.d/strih-program-loopback.conf"
 # the WirePlumber rule pinning the MiniFuse to its pro-audio profile @48 kHz.
 install -d -o "$DESKTOP_USER" -g "$DESKTOP_USER" "${USER_HOME}/.config/wireplumber/wireplumber.conf.d"
 strih_wireplumber_minifuse_rule > "${USER_HOME}/.config/wireplumber/wireplumber.conf.d/51-strih-minifuse.conf"
@@ -380,9 +386,9 @@ strih_intercom_audio_dropin "$DESKTOP_USER" "$DESKTOP_UID" > /etc/systemd/system
 # pw-cat restart backoff once the session appears, but linger removes the startup gap).
 loginctl enable-linger "$DESKTOP_USER" 2>/dev/null || warn "  could not enable-linger $DESKTOP_USER (the operator PipeWire session must be up before the hub's audio starts)"
 systemctl daemon-reload 2>/dev/null || true
-echo "  installed strih-program null sink + WirePlumber MiniFuse rule (operator session) + intercom-hub local-audio drop-in (User=${DESKTOP_USER})"
-echo "  the OBS '${AUDIO_NAME}' input (pulse_input_capture on strih-program.monitor) is seeded by scripts/strih_scenes.py --bootstrap; verify-strih derives the audio verdict"
-echo "  NOTE: restart the operator PipeWire/WirePlumber (or re-login) for the strih-program sink + MiniFuse pin to take effect; confirm the MiniFuse capture node name against 'wpctl status'"
+echo "  installed strih-program null sink + loopback source (strih-program-source) + WirePlumber MiniFuse rule (operator session) + intercom-hub local-audio drop-in (User=${DESKTOP_USER})"
+echo "  the OBS '${AUDIO_NAME}' input (pulse_input_capture on strih-program-source) is seeded by scripts/strih_scenes.py --bootstrap; verify-strih derives the audio verdict"
+echo "  NOTE: restart OBS after the operator PipeWire/WirePlumber comes up (or re-login) -- OBS enumerates audio devices only at startup, so it must start AFTER strih-program-source exists"
 
 # ---------------------------------------------------------------------------------------------
 step 13 "Intercom hub unit + matrix (issue 1345 M1: ENABLE-ONLY, NEVER started while parallel)"
