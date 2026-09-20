@@ -322,7 +322,7 @@ function joinListenOnly() {
     tracks: [{ type: "audio", recv: true }],
     success: (offerJsep) => {
       bridge.send({ message: { request: "configure", muted: true }, jsep: offerJsep });
-      setListenOnly(true);
+      enterListenOnly();
       startStats();
     },
     error: () => chip(chipJanus, "Janus: spojenie zlyhalo", "bad"),
@@ -343,19 +343,17 @@ function onBridgeMessage(msg, jsep) {
   }
 }
 
-// Enter/leave listen-only: disable the mic toggle + device select (there is no mic to unmute) and
-// show the listening chip. Called from the recv-only join path.
-function setListenOnly(on) {
-  listenOnly = on;
-  if (on) {
-    muted = true;
-    micToggle.disabled = true;
-    micToggle.dataset.muted = "true";
-    micToggle.setAttribute("aria-pressed", "false");
-    micToggle.textContent = "Mikrofón vypnutý";
-    micSelect.disabled = true;
-    chip(chipJanus, "Mikrofón: nedostupný (počúvate)", "warn");
-  }
+// Enter listen-only: disable the mic toggle + device select (there is no mic to unmute) and show
+// the listening chip. Called from the recv-only join path. The LEAVE direction is resetMicControls().
+function enterListenOnly() {
+  listenOnly = true;
+  muted = true;
+  micToggle.disabled = true;
+  micToggle.dataset.muted = "true";
+  micToggle.setAttribute("aria-pressed", "false");
+  micToggle.textContent = "Mikrofón vypnutý";
+  micSelect.disabled = true;
+  chip(chipJanus, "Mikrofón: nedostupný (počúvate)", "warn");
 }
 
 // Re-enable the mic controls for a fresh connect (a re-granted mic then re-negotiates WITH send).
@@ -429,6 +427,7 @@ function teardown() {
   }
   janus = null;
   bridge = null;
+  resetMicControls(); // a disconnected page shows the mic controls enabled (self-corrects a listen-only session)
   setConnectedUi(false);
 }
 
