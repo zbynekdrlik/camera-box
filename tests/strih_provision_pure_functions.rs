@@ -1389,3 +1389,233 @@ fn verify_strih_carries_perf_and_companion_items() {
         "verify-strih must run the companion verdict for the (companion) item"
     );
 }
+
+// =====================================================================================
+// issue 1317 (this lane): post-cut-over fixes -- the seeder targets the OPERATOR collection
+// (strih role: explicit names + update-only) and three step-15/16 live-found defects.
+// =====================================================================================
+
+/// The performance-mode apply now runs BOTH power-profiles-daemon AND the scaling_governor write
+/// (NOT either/or): on intel_pstate active `powerprofilesctl set performance` sets EPP only and
+/// leaves the governor `powersave`, so the governor MUST be written unconditionally (the live defect).
+#[test]
+fn performance_mode_apply_runs_both_ppd_and_governor_not_either_or() {
+    let (code, out, err) = run_sourced(&[], "strih_performance_mode_apply");
+    assert_eq!(code, 0, "emitter must succeed; stderr={err}");
+    assert!(
+        out.contains("powerprofilesctl set performance"),
+        "must still run powerprofilesctl set performance: {out}"
+    );
+    assert!(
+        out.contains("scaling_governor"),
+        "must ALWAYS write the scaling_governor: {out}"
+    );
+    // The bug was `if ppd; then ...; else <governor>; fi` -- the governor gated behind an else, so on
+    // intel_pstate active (ppd present) it never ran. The fix removes the `else`: both run.
+    assert!(
+        !out.contains("else"),
+        "the governor write must NOT be an `else` fallback of ppd (both run unconditionally): {out}"
+    );
+    let (code, _o, err) = run_sourced(&[], "strih_performance_mode_apply | bash -n");
+    assert_eq!(
+        code, 0,
+        "emitted apply block must be valid bash; stderr={err}"
+    );
+}
+
+/// The effective-perf log line reports the triple governor / EPP / ppd profile (never a
+/// self-contradicting "set to performance (now: powersave)"). Defaults fill in when a facet is absent.
+#[test]
+fn perf_effective_line_reports_the_governor_epp_ppd_triple() {
+    let (code, out, _e) = run_sourced(
+        &[],
+        "strih_perf_effective_line performance performance performance",
+    );
+    assert_eq!(code, 0);
+    assert!(out.contains("governor=performance"), "governor term: {out}");
+    assert!(out.contains("EPP=performance"), "EPP term: {out}");
+    assert!(out.contains("ppd=performance"), "ppd term: {out}");
+    // fail-soft defaults when a facet is unreadable/absent (never a bare empty triple)
+    let (_c, out2, _e) = run_sourced(&[], "strih_perf_effective_line");
+    assert!(
+        out2.contains("governor=") && out2.contains("EPP=") && out2.contains("ppd="),
+        "missing facets default rather than vanish: {out2}"
+    );
+}
+
+/// The OPERATOR seed manifest is valid JSON carrying `"mode":"update-only"` + EXPLICIT-name object
+/// entries (NDI camN / NDI 2ME PVW / NDI 2ME PGM (mv) / cg / CG-obs), with the outputs unchanged.
+#[test]
+fn seed_manifest_json_is_update_only_with_the_explicit_operator_names() {
+    let (code, out, err) = run_sourced(&[], "strih_lx_seed_manifest_json");
+    assert_eq!(code, 0, "manifest emitter must succeed; stderr={err}");
+    assert!(
+        out.contains("\"mode\": \"update-only\""),
+        "mode update-only: {out}"
+    );
+    for name in [
+        "\"NDI cam1\"",
+        "\"NDI cam7\"",
+        "\"NDI 2ME PVW\"",
+        "\"NDI 2ME PGM (mv)\"",
+        "\"cg\"",
+        "\"CG-obs\"",
+    ] {
+        assert!(out.contains(name), "manifest must carry {name}: {out}");
+    }
+    // senders (the DATA name-map) + the unchanged namespaced outputs
+    assert!(out.contains("\"CAM1 (usb)\""), "sender name-map: {out}");
+    assert!(
+        out.contains("STRIH-LX (2ME PGM)"),
+        "outputs unchanged: {out}"
+    );
+    assert!(
+        out.contains("\"camera_latency_ms\": 3"),
+        "floor-3 latency: {out}"
+    );
+    // it MUST be valid JSON
+    let (jcode, _o, jerr) = run_sourced(
+        &[],
+        "strih_lx_seed_manifest_json | python3 -c 'import json,sys; json.load(sys.stdin)'",
+    );
+    assert_eq!(jcode, 0, "manifest must be valid JSON; stderr={jerr}");
+}
+
+/// The emitted manifest, parsed by strih_scenes.py, classifies the 2ME pair as feedback (non-genlock)
+/// and every camera + cg as the certified genlock class -- proving the bash DATA + python code agree.
+#[test]
+fn seed_manifest_json_classifies_via_strih_scenes() {
+    let scn_dir = manifest_dir().join("scripts");
+    let scn = scn_dir.to_string_lossy().into_owned();
+    let (code, out, err) = run_sourced(
+        &[("SCN_DIR", scn.as_str())],
+        r#"strih_lx_seed_manifest_json | python3 -c '
+import sys, os, json
+sys.path.insert(0, os.environ["SCN_DIR"])
+import strih_scenes as m
+text = sys.stdin.read()
+inputs, _o, latency = m.parse_seed_manifest(text)
+assert m.parse_seed_mode(text) == "update-only", "mode"
+by = {p["input"]: p for p in m.seed_inputs(inputs, latency)}
+assert by["NDI 2ME PVW"]["settings"]["genlock_fifo"] is False, "2ME PVW must be feedback"
+assert by["NDI 2ME PGM (mv)"]["settings"]["genlock_fifo"] is False, "2ME PGM must be feedback"
+assert by["NDI cam1"]["settings"]["genlock_fifo"] is True, "cam must be genlock"
+assert by["cg"]["settings"]["genlock_fifo"] is True, "cg is a genlocked sender"
+print("OK")
+'"#,
+    );
+    assert_eq!(code, 0, "cross-check must pass; stdout={out} stderr={err}");
+    assert!(out.contains("OK"), "cross-check printed OK: {out}");
+}
+
+/// The Companion Satellite install emitter installs `curl` in the dep line (a fresh strih-lx has NO
+/// curl -- the emitter's own download failed on the first live run without it).
+#[test]
+fn companion_satellite_install_deps_include_curl() {
+    let (code, out, _e) = run_sourced(&[], "strih_companion_satellite_install");
+    assert_eq!(code, 0);
+    assert!(
+        out.contains("apt-get install -y curl") || out.contains(" curl "),
+        "the dep install line must include curl (a fresh box has none): {out}"
+    );
+}
+
+/// The REST-apply emitter: when the Satellite local REST (:9999) answers, POST the controller to
+/// /api/config so the running instance adopts it live (the file seed alone left effective host
+/// 127.0.0.1 until this POST). Best-effort, valid bash, idempotent no-op when the REST is down.
+#[test]
+fn companion_satellite_rest_apply_posts_the_controller_to_9999() {
+    let (code, out, err) = run_sourced(
+        &[],
+        "strih_companion_satellite_rest_apply_cmd 10.77.9.205 16622",
+    );
+    assert_eq!(code, 0, "emitter must succeed; stderr={err}");
+    assert!(
+        out.contains(":9999"),
+        "targets the Satellite local REST :9999: {out}"
+    );
+    assert!(
+        out.contains("/api/status"),
+        "guards on /api/status (no-op when down): {out}"
+    );
+    assert!(out.contains("/api/config"), "POSTs to /api/config: {out}");
+    assert!(
+        out.contains("\"protocol\":\"tcp\"") || out.contains("\"protocol\": \"tcp\""),
+        "the POST body carries protocol tcp: {out}"
+    );
+    assert!(
+        out.contains("10.77.9.205"),
+        "carries the controller host: {out}"
+    );
+    assert!(out.contains("16622"), "carries the controller port: {out}");
+    let (jcode, _o, jerr) = run_sourced(
+        &[],
+        "strih_companion_satellite_rest_apply_cmd 10.77.9.205 16622 | bash -n",
+    );
+    assert_eq!(
+        jcode, 0,
+        "emitted REST-apply block must be valid bash; stderr={jerr}"
+    );
+}
+
+/// The live-aware (companion) status verdict: when the Satellite REST is NOT up it is a FILE-ONLY
+/// check (pass through the file verdict + rc); when it IS up the controller link must be connected.
+#[test]
+fn companion_status_verdict_is_live_aware() {
+    // not running -> file-only: an `ok` file verdict stays ok (rc 0), a bad one stays bad (rc 1)
+    let (c, out, _e) = run_sourced(&[], "strih_companion_status_verdict ok 0 0");
+    assert_eq!(c, 0);
+    assert_eq!(out.trim(), "ok");
+    let (c, out, _e) = run_sourced(&[], "strih_companion_status_verdict not-installed 0 0");
+    assert_ne!(c, 0);
+    assert_eq!(out.trim(), "not-installed");
+    // running + connected -> ok-connected (rc 0)
+    let (c, out, _e) = run_sourced(&[], "strih_companion_status_verdict ok 1 1");
+    assert_eq!(c, 0);
+    assert_eq!(out.trim(), "ok-connected");
+    // running but NOT connected -> not-connected (rc 1), even with an ok file verdict
+    let (c, out, _e) = run_sourced(&[], "strih_companion_status_verdict ok 1 0");
+    assert_ne!(c, 0);
+    assert_eq!(out.trim(), "not-connected");
+}
+
+/// setup-strih.sh step 6 must write the OPERATOR seed manifest via strih_lx_seed_manifest_json
+/// (update-only + explicit names), and step 15 must log the effective governor/EPP/ppd triple.
+#[test]
+fn setup_strih_uses_the_operator_manifest_and_effective_perf_line() {
+    let s = read_script("scripts/setup-strih.sh");
+    assert!(
+        s.contains("strih_lx_seed_manifest_json"),
+        "setup-strih step 6 must write the manifest via strih_lx_seed_manifest_json"
+    );
+    assert!(
+        s.contains("strih_perf_effective_line"),
+        "setup-strih step 15 must log the effective governor/EPP/ppd triple"
+    );
+}
+
+/// setup-strih.sh step 16 must run the REST-apply AFTER seeding the app config.json, and
+/// verify-strih.sh item 19 must grade the live `connected` state via strih_companion_status_verdict.
+#[test]
+fn setup_strih_rest_apply_and_verify_live_connected() {
+    let s = read_script("scripts/setup-strih.sh");
+    let appcfg = s
+        .find("strih_companion_satellite_appconfig_json")
+        .expect("setup-strih must seed the app config.json");
+    let rest = s
+        .find("strih_companion_satellite_rest_apply_cmd")
+        .expect("setup-strih step 16 must run the REST apply");
+    assert!(
+        appcfg < rest,
+        "the REST apply must run AFTER seeding config.json (appcfg {appcfg} vs rest {rest})"
+    );
+    let v = read_script("scripts/verify-strih.sh");
+    assert!(
+        v.contains("strih_companion_status_verdict"),
+        "verify-strih item 19 must grade the live connected state via strih_companion_status_verdict"
+    );
+    assert!(
+        v.contains("/api/status"),
+        "verify-strih item 19 must probe the Satellite REST /api/status for the connected read"
+    );
+}

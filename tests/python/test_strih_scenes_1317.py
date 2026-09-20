@@ -410,3 +410,170 @@ def test_bootstrap_no_update_for_healthy_feedback_input_with_genlock_fifo_absent
     obs = _FakeObs(existing)
     _mod.bootstrap(obs, plan, studio=False)
     assert _settings_updates(obs.calls) == [], obs.calls
+
+
+# --- issue 1317 (this lane): strih ROLE seeder -- explicit-name OBJECT entries + update-only --------
+# The notebook now runs the OPERATOR (production) collection, whose INPUT names are the canonical
+# strih names the whole E2E tooling addresses (NDI camN, NDI 2ME PVW/PGM (mv), cg/CG-obs) -- NOT the
+# parallel-phase derived NDI CAMn (usb). So the manifest carries EXPLICIT-name objects
+# {sender,input,scene} + "mode":"update-only": --bootstrap heals the certified genlock class onto
+# inputs that ALREADY exist and NEVER CreateScene/CreateInput; a missing declared input is REPORTED.
+_OBJ_INPUTS = [
+    {"sender": "CAM1 (usb)", "input": "NDI cam1", "scene": "Cam 1"},
+    {"sender": "CAM2 (usb)", "input": "NDI cam2", "scene": "Cam 2"},
+    {"sender": "STRIH-SNV (2ME PVW)", "input": "NDI 2ME PVW", "scene": "2ME PVW"},
+    {"sender": "STRIH-SNV (2ME PGM)", "input": "NDI 2ME PGM (mv)", "scene": "2ME PGM"},
+    {"sender": "RESOLUME-SNV (cg-obs)", "input": "cg", "scene": "CG"},
+    {"sender": "RESOLUME-SNV (cg-obs)", "input": "CG-obs", "scene": "CG-obs"},
+]
+_OBJ_MANIFEST = json.dumps(
+    {"mode": "update-only", "inputs": _OBJ_INPUTS, "outputs": _FIVE_OUTPUTS, "camera_latency_ms": 3}
+)
+
+
+def test_parse_seed_manifest_keeps_object_entries():
+    # object entries are PRESERVED (not dropped like a non-string int/None); the bare-string entries a
+    # parallel/imag manifest carries still round-trip unchanged.
+    inputs, _outputs, latency = _mod.parse_seed_manifest(_OBJ_MANIFEST)
+    assert latency == 3
+    assert inputs == _OBJ_INPUTS
+    # a mixed manifest keeps valid strings AND valid objects, drops the junk (int / None / empty / a
+    # dict missing a field)
+    mixed = json.dumps({"inputs": [
+        "CAM1 (usb)", 7, None, "",
+        {"sender": "X", "input": "NDI x", "scene": "X"},
+        {"sender": "Y", "input": ""},  # missing/empty fields -> dropped
+    ]})
+    inputs2, _o, _l = _mod.parse_seed_manifest(mixed)
+    assert inputs2 == ["CAM1 (usb)", {"sender": "X", "input": "NDI x", "scene": "X"}]
+
+
+def test_parse_seed_mode_reads_update_only_and_defaults_create():
+    assert _mod.parse_seed_mode(_OBJ_MANIFEST) == "update-only"
+    # absent mode -> the parallel/imag default (create)
+    assert _mod.parse_seed_mode(_REAL_MANIFEST) == "create"
+    assert _mod.parse_seed_mode(json.dumps({"inputs": [], "mode": "create"})) == "create"
+    # garbage / non-object never crashes -> create
+    assert _mod.parse_seed_mode("not json {") == "create"
+    assert _mod.parse_seed_mode(json.dumps([1, 2])) == "create"
+
+
+def test_seed_inputs_object_entries_use_the_explicit_names():
+    plan = _mod.seed_inputs(_OBJ_INPUTS, 3)
+    assert len(plan) == 6
+    by_input = {p["input"]: p for p in plan}
+    # a camera object entry: explicit input/scene, sender as ndi_source_name, certified genlock class
+    cam = by_input["NDI cam1"]
+    assert cam["scene"] == "Cam 1"
+    assert cam["ndi_source_name"] == "CAM1 (usb)"
+    assert cam["settings"] == _CAMERA
+    # the CG sender is a genlocked source (issue 1300) -> camera class
+    assert by_input["cg"]["settings"] == _CAMERA
+    assert by_input["CG-obs"]["ndi_source_name"] == "RESOLUME-SNV (cg-obs)"
+
+
+def test_seed_inputs_object_2me_input_is_feedback_by_input_name():
+    # the operator's 2ME inputs are `NDI 2ME PVW` / `NDI 2ME PGM (mv)` -- neither ENDS in `(2ME PGM)`,
+    # so classification must recognise the 2ME marker as a SUBSTRING of the input (or the sender).
+    plan = _mod.seed_inputs(_OBJ_INPUTS, 3)
+    by_input = {p["input"]: p for p in plan}
+    assert by_input["NDI 2ME PVW"]["settings"] == _FEEDBACK
+    assert by_input["NDI 2ME PGM (mv)"]["settings"] == _FEEDBACK
+
+
+def test_input_class_for_recognises_the_2me_marker_by_substring():
+    # the explicit operator input names carry the marker WITHOUT the `(...)` the parallel senders had
+    assert _mod.input_class_for("NDI 2ME PVW") == "feedback"
+    assert _mod.input_class_for("NDI 2ME PGM (mv)") == "feedback"
+    # cameras + cg are unaffected
+    assert _mod.input_class_for("NDI cam1") == "camera"
+    assert _mod.input_class_for("cg") == "camera"
+    assert _mod.input_class_for("CG-obs") == "camera"
+
+
+class _FakeObsUpdate:
+    """A fake WS client for the update-only path: answers GetInputList from `present` (a list of ndi_source
+    input names) and GetInputSettings from `settings` (a {name: explicit-settings} map). No `.ws`."""
+
+    def __init__(self, present, settings=None):
+        self._present = list(present)
+        self._settings = settings or {}
+        self.calls = []
+
+    def req(self, req_type, data=None, ignore_err=False):
+        self.calls.append((req_type, data or {}))
+        if req_type == "GetInputList":
+            return {"inputs": [{"inputName": n, "inputKind": "ndi_source"} for n in self._present]}
+        if req_type == "GetInputDefaultSettings":
+            return {"defaultInputSettings": {"ndi_bw_mode": 0, "ndi_sync": 2, "latency": 0,
+                                             "genlock_latency_ms_src": 3}}
+        if req_type == "GetInputSettings":
+            return {"inputSettings": dict(self._settings.get((data or {}).get("inputName"), {}))}
+        return {}
+
+
+def test_bootstrap_update_only_never_creates_scenes_or_inputs():
+    plan = _mod.seed_inputs(_OBJ_INPUTS, 3)
+    present = [p["input"] for p in plan]  # every declared input already exists
+    obs = _FakeObsUpdate(present)
+    _mod.bootstrap(obs, plan, studio=True, update_only=True)
+    kinds = [t for (t, _d) in obs.calls]
+    assert "CreateScene" not in kinds, obs.calls
+    assert "CreateInput" not in kinds, obs.calls
+
+
+def test_bootstrap_update_only_reports_a_missing_declared_input_never_creates_it():
+    plan = _mod.seed_inputs(_OBJ_INPUTS, 3)
+    present = [p["input"] for p in plan if p["input"] != "NDI cam2"]  # cam2 missing on the box
+    obs = _FakeObsUpdate(present)
+    result = _mod.bootstrap(obs, plan, studio=False, update_only=True)
+    assert "missing" in result["NDI cam2"].lower()
+    kinds = [t for (t, _d) in obs.calls]
+    assert "CreateInput" not in kinds and "CreateScene" not in kinds
+    # no SetInputSettings on the missing input (never touched)
+    for (t, d) in obs.calls:
+        if t == "SetInputSettings":
+            assert d.get("inputName") != "NDI cam2"
+
+
+def test_bootstrap_update_only_heals_a_class_mismatch_without_renaming_the_source():
+    # a 2ME feedback input mis-seeded as genlocked (the exact drift) -> healed to the feedback class,
+    # but the SetInputSettings must NOT carry ndi_source_name (the operator's binding is authoritative).
+    plan = _mod.seed_inputs(
+        [{"sender": "STRIH-SNV (2ME PGM)", "input": "NDI 2ME PGM (mv)", "scene": "2ME PGM"}], 3)
+    inp = "NDI 2ME PGM (mv)"
+    settings = {inp: {"ndi_bw_mode": 0, "genlock_fifo": True, "ndi_sync": 2, "latency": 3,
+                      "ndi_source_name": "the-operators-own-source"}}
+    obs = _FakeObsUpdate([inp], settings)
+    result = _mod.bootstrap(obs, plan, studio=False, update_only=True)
+    sets = [d for (t, d) in obs.calls if t == "SetInputSettings"]
+    assert len(sets) == 1, obs.calls
+    s = sets[0]["inputSettings"]
+    assert s["genlock_fifo"] is False and s["ndi_sync"] == 1
+    assert "ndi_source_name" not in s, "update-only must never rename the operator's source"
+    assert "healed" in result[inp].lower()
+
+
+def test_bootstrap_update_only_is_a_pure_read_for_a_matching_existing_input():
+    plan = _mod.seed_inputs(
+        [{"sender": "CAM1 (usb)", "input": "NDI cam1", "scene": "Cam 1"}], 3)
+    inp = "NDI cam1"
+    # already the certified camera class (latency coerced to 0, the ms pin at the floor) -> no update
+    settings = {inp: {"ndi_bw_mode": 0, "genlock_fifo": True, "ndi_sync": 2, "latency": 0,
+                      "genlock_latency_ms_src": 3, "ndi_source_name": "CAM1 (usb)"}}
+    obs = _FakeObsUpdate([inp], settings)
+    _mod.bootstrap(obs, plan, studio=False, update_only=True)
+    assert not any(t == "SetInputSettings" for (t, _d) in obs.calls), obs.calls
+
+
+def test_input_parity_problems_check_source_false_skips_the_ndi_source_name_check():
+    # in update-only mode verify-parity checks the declared INPUTS + genlock class, NOT the
+    # ndi_source_name (the operator's real senders are authoritative, not the manifest DATA).
+    plan = _mod.seed_inputs(_OBJ_INPUTS, 3)
+    actual = {p["input"]: {"ndi_source_name": "SOMETHING-ELSE",
+                           "genlock_fifo": bool(p["settings"].get("genlock_fifo")),
+                           "ndi_sync": p["settings"]["ndi_sync"]}
+              for p in plan}
+    assert _mod.input_parity_problems(actual, plan, check_source=False) == []
+    # with the source check on, the mismatch IS flagged (the default behaviour is unchanged)
+    assert _mod.input_parity_problems(actual, plan, check_source=True) != []
