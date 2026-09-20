@@ -1829,6 +1829,44 @@ fn program_sink_conf_declares_the_strih_program_null_sink() {
     );
 }
 
+/// The loopback republish node must NOT itself be present on the null-sink emitter (it lives in a
+/// sibling conf), and must republish `strih-program` as a real Audio/Source (issue 1344 follow-up,
+/// 20.9.2026 live diagnosis: strih-program.monitor is NOT pulse-visible to OBS on this box, so OBS
+/// must capture this loopback's republished node `strih-program-source` instead).
+#[test]
+fn program_loopback_conf_republishes_a_real_audio_source() {
+    let (code, out, err) = run_sourced(&[], "strih_pipewire_program_loopback_conf");
+    assert_eq!(code, 0, "stderr={err}");
+    assert!(
+        out.contains("libpipewire-module-loopback"),
+        "must load the loopback module; got: {out}"
+    );
+    assert!(
+        out.contains("node.target"),
+        "must declare a capture target; got: {out}"
+    );
+    assert!(
+        out.contains("\"strih-program\""),
+        "must capture the strih-program sink; got: {out}"
+    );
+    assert!(
+        out.contains("stream.capture.sink") && out.contains("true"),
+        "must capture the SINK output (stream.capture.sink=true), not a monitor; got: {out}"
+    );
+    assert!(
+        out.contains("strih-program-source"),
+        "the republished node must be named strih-program-source; got: {out}"
+    );
+    assert!(
+        out.contains("\"Audio/Source\""),
+        "the republished node must be a plain Audio/Source; got: {out}"
+    );
+    assert!(
+        !out.contains("Audio/Source/Virtual"),
+        "must NEVER be Audio/Source/Virtual (OBS enumerates it but never links the capture          stream -- proven live silent); got: {out}"
+    );
+}
+
 /// The WirePlumber rule must pin the MiniFuse 4 to its pro-audio profile at 48 kHz (the talkback
 /// capture path OBS never touches — the hub reads it).
 #[test]
@@ -1942,6 +1980,10 @@ fn setup_and_verify_wire_the_pipewire_program_audio() {
     assert!(
         s.contains("strih_pipewire_program_sink_conf"),
         "setup-strih step 12 must install the strih-program sink conf"
+    );
+    assert!(
+        s.contains("strih_pipewire_program_loopback_conf"),
+        "setup-strih step 12 must install the strih-program loopback conf (issue 1344 follow-up)"
     );
     assert!(
         s.contains("strih_wireplumber_minifuse_rule"),
