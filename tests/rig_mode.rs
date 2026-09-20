@@ -1356,8 +1356,9 @@ fn require_imag_genlock_current_consults_offline_ack_1171() {
         "1171: the gate must delegate the skip/proceed decision to the pure function: {gate}"
     );
     assert!(
-        gate.contains("ping "),
-        "1171: the gate must probe imag reachability (stale-ack protection): {gate}"
+        gate.contains("imag_service_reachable"),
+        "1171/1317: the gate must probe imag reachability via the SERVICE predicate \
+         imag_service_reachable (stale-ack protection), never a bare ICMP ping: {gate}"
     );
     assert!(
         gate.contains("1013"),
