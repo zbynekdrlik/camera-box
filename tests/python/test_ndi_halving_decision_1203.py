@@ -338,3 +338,109 @@ class TestAnalyzeStdinNonUtf8Crlf:
         out = p.stdout.decode()
         assert "samples=2" in out, out
         assert "verdict=HEALTHY" in out, out
+
+
+# =================================================================================================
+# cure_plan -- the two-arm escalation (#1203 item a): idle-restore -> sender-restart -> escalate.
+# =================================================================================================
+
+def test_cure_plan_first_attempt_is_idle_restore():
+    # 30 fps -> 33.3 ms interval; a confirmed halving's first cure is the non-disruptive receiver arm.
+    assert d.cure_plan(1, 65.9, 1000.0 / 30) == "idle-restore"
+
+def test_cure_plan_second_attempt_is_sender_restart():
+    # still halved after the receiver arm + settle -> a fresh sender endpoint.
+    assert d.cure_plan(2, 65.9, 1000.0 / 30) == "sender-restart"
+
+def test_cure_plan_third_attempt_escalates():
+    # both arms tried, still halved -> page a human.
+    assert d.cure_plan(3, 65.9, 1000.0 / 30) == "escalate"
+    assert d.cure_plan(4, 65.9, 1000.0 / 30) == "escalate"
+
+def test_cure_plan_attempt_zero_or_negative_is_the_safe_first_arm():
+    # a corrupt/absent counter must NEVER jump straight to the disruptive sender restart.
+    assert d.cure_plan(0, 65.9, 1000.0 / 30) == "idle-restore"
+    assert d.cure_plan(-1, 65.9, 1000.0 / 30) == "idle-restore"
+
+def test_cure_plan_non_integer_attempt_escalates_fail_safe():
+    # unreasonable input -> page, never a blind cure on garbage state.
+    assert d.cure_plan("x", 65.9, 1000.0 / 30) == "escalate"
+    assert d.cure_plan(None, 65.9, 1000.0 / 30) == "escalate"
+
+def test_cure_plan_nonsensical_expected_interval_escalates():
+    # a <=0 / unparseable expected frame interval cannot be reasoned about -> escalate.
+    assert d.cure_plan(1, 65.9, 0) == "escalate"
+    assert d.cure_plan(1, 65.9, -5) == "escalate"
+    assert d.cure_plan(1, 65.9, "nope") == "escalate"
+
+def test_cure_plan_reset_semantics_a_healed_reading_restarts_at_idle():
+    # The caller resets the attempt counter to 0 on a HEALTHY reading, so the NEXT episode's first
+    # cure is idle-restore again -- exercised here as cure_plan(1) after a prior escalate.
+    assert d.cure_plan(3, 65.9, 1000.0 / 30) == "escalate"   # episode 1 exhausted
+    assert d.cure_plan(1, 65.9, 1000.0 / 30) == "idle-restore"  # episode 2 after a heal-reset
+
+
+# =================================================================================================
+# cadence_report -- the ndi-cadence-<RUN>.json telemetry shape written by ndi-cadence-heal.sh.
+# =================================================================================================
+
+def _rec(inp, verdict, fps, cap, exp, arm, result):
+    return {"input": inp, "verdict": verdict, "fps": fps, "cap_avg_ms": cap,
+            "expected_fps": exp, "arm": arm, "result": result}
+
+def test_cadence_report_shape_and_counts():
+    recs = [
+        _rec("NDI cam1", "HALVED", 30.0, 32.6, 60, "idle-restore", "healed"),
+        _rec("NDI cam2", "HALVED", 30.0, 32.9, 60, "sender-restart", "healed"),
+        _rec("NDI cam6", "HALVED", 30.0, 33.1, 60, "escalate", "escalated"),
+        _rec("NDI cam3", "HEALTHY", 60.0, 16.1, 60, "", "ok"),
+    ]
+    rep = d.cadence_report("run-42", "10.77.9.202", recs, generated_utc="2026-09-20T00:00:00Z")
+    assert rep["run_id"] == "run-42"
+    assert rep["strih_host"] == "10.77.9.202"
+    assert rep["generated_utc"] == "2026-09-20T00:00:00Z"
+    assert isinstance(rep["inputs"], list) and len(rep["inputs"]) == 4
+    # summary counts: 3 halved, 2 healed (idle + sender arms), 1 escalated.
+    assert rep["halved"] == 3
+    assert rep["healed"] == 2
+    assert rep["escalated"] == 1
+    # every input record round-trips its fields.
+    cam2 = next(r for r in rep["inputs"] if r["input"] == "NDI cam2")
+    assert cam2["arm"] == "sender-restart" and cam2["result"] == "healed"
+
+def test_cadence_report_all_healthy_is_empty_of_incidents():
+    recs = [_rec("NDI cam1", "HEALTHY", 60.0, 16.0, 60, "", "ok")]
+    rep = d.cadence_report("r", "h", recs)
+    assert rep["halved"] == 0 and rep["healed"] == 0 and rep["escalated"] == 0
+    # generated_utc omitted when not supplied (deterministic serialisation).
+    assert "generated_utc" not in rep
+
+def test_cadence_report_is_json_serialisable():
+    import json
+    recs = [_rec("NDI 2ME PGM", "HALVED", 15.0, 65.9, 30, "idle-restore", "healed")]
+    rep = d.cadence_report("r", "h", recs)
+    round_trip = json.loads(json.dumps(rep))
+    assert round_trip["inputs"][0]["input"] == "NDI 2ME PGM"
+
+
+# =================================================================================================
+# CLI: cure-plan + cadence-report subcommands (the seams ndi-cadence-heal.sh / the watchdog call).
+# =================================================================================================
+
+def test_cli_cure_plan():
+    for attempt, want in ((1, "idle-restore"), (2, "sender-restart"), (3, "escalate")):
+        r = _cli(["cure-plan", "--attempt", str(attempt), "--cap-avg-ms", "65.9",
+                  "--expected-ms", "33.33"])
+        assert r.returncode == 0, r.stderr
+        assert _kv(r.stdout)["plan"] == want
+
+def test_cli_cadence_report_reads_tsv_and_emits_json():
+    import json
+    tsv = "\t".join(["NDI cam1", "HALVED", "30.0", "32.6", "60", "idle-restore", "healed"]) + "\n"
+    tsv += "\t".join(["NDI cam2", "HEALTHY", "60.0", "16.0", "60", "", "ok"]) + "\n"
+    r = _cli(["cadence-report", "--run-id", "run-9", "--host", "10.77.9.202"], stdin=tsv)
+    assert r.returncode == 0, r.stderr
+    obj = json.loads(r.stdout)
+    assert obj["run_id"] == "run-9"
+    assert len(obj["inputs"]) == 2
+    assert obj["halved"] == 1 and obj["healed"] == 1
