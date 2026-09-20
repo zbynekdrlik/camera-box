@@ -85,7 +85,13 @@
 #   the box is back in the fleet") -- a lingering ack on a healthy, in-set box trips the
 #   stale-ack guard (`healthy + acked -> stale`, #758/#827). This is, for the first time, the
 #   FULL seven-camera fleet: cam1/cam2/cam3/cam4/cam5/cam6/cam7 all active, zero acks outstanding.
-# imag-nb RETURNED to the vendor 16.9.2026 (owner: „imag nb som vratil"); the box is dark (ping 100% loss).
-# The IMAG role comes back on a NEW notebook next year — remove both lines when it does (stale-ack guard).
-imag:returned-to-vendor-16.9.2026
-imag-nb:returned-to-vendor-16.9.2026
+# imag-nb is OUT of the rig ~1 year (owner ROZHODNUTE 20.9.2026: „to je jedno ze je to imag dongle
+# teraz ho chcem pouzivat na strih a za rok ked sa bude riesit imag tak jemu sa asi kupi novy") --
+# its USB ethernet dongle now permanently carries the strih-lx notebook at 10.77.9.202, so imag-nb
+# has NO NIC and gets a new one only when the IMAG role is next addressed. NB: 10.77.9.182 still
+# ANSWERS ICMP on the venue LAN (a router/proxy-ARP/foreign responder holds the vacated IP) while
+# imag-nb's own services are dead -- so the stale-ack staleness probe is a SERVICE probe
+# (ssh :22 / dantesync :8898), NOT a bare ping (issue 1317). Remove both lines when the IMAG role
+# returns on a new notebook (a genuinely-back imag would then read reachable -> stale-ack guard).
+imag:owner 20.9.2026 - imag-nb mimo rig ~1 rok (USB NIC nesie strih-lx .202)
+imag-nb:owner 20.9.2026 - imag-nb mimo rig ~1 rok (USB NIC nesie strih-lx .202)
