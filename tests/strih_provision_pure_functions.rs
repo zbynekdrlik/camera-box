@@ -1752,3 +1752,98 @@ fn verify_strih_gates_obs_helpers_and_nvenc() {
         "verify-strih must grade the NVENC log via strih_nvenc_log_verdict"
     );
 }
+
+// --- issue 1344: the local PipeWire program-audio graph (VB-Matrix replacement) -----------------
+
+/// The operator-session PipeWire drop-in must declare a null sink named `strih-program` (the node
+/// OBS captures as `strih-program.monitor` for its `ASIO zvuk` program input).
+#[test]
+fn program_sink_conf_declares_the_strih_program_null_sink() {
+    let (code, out, err) = run_sourced(&[], "strih_pipewire_program_sink_conf");
+    assert_eq!(code, 0, "stderr={err}");
+    assert!(out.contains("support.null-audio-sink"), "must create a null sink; got: {out}");
+    assert!(out.contains("strih-program"), "the sink node name must be strih-program; got: {out}");
+    assert!(out.contains("Audio/Sink"), "the null sink must be an Audio/Sink; got: {out}");
+}
+
+/// The WirePlumber rule must pin the MiniFuse 4 to its pro-audio profile at 48 kHz (the talkback
+/// capture path OBS never touches — the hub reads it).
+#[test]
+fn wireplumber_rule_pins_the_minifuse_pro_audio_at_48k() {
+    let (code, out, err) = run_sourced(&[], "strih_wireplumber_minifuse_rule");
+    assert_eq!(code, 0, "stderr={err}");
+    assert!(out.contains("MiniFuse"), "the rule must match the MiniFuse; got: {out}");
+    assert!(out.contains("pro-audio"), "the rule must select the pro-audio profile; got: {out}");
+    assert!(out.contains("48000"), "the rule must pin 48 kHz; got: {out}");
+}
+
+/// The systemd drop-in must run the hub as the operator (NOT DynamicUser) with the operator's
+/// PipeWire runtime dir, so the pw-cat children reach the operator's audio session.
+#[test]
+fn intercom_audio_dropin_runs_as_the_operator_with_the_pipewire_runtime() {
+    let (code, out, err) = run_sourced(&[], "strih_intercom_audio_dropin newlevel 1000");
+    assert_eq!(code, 0, "stderr={err}");
+    assert!(out.contains("[Service]"), "a systemd [Service] override; got: {out}");
+    assert!(out.contains("DynamicUser=no"), "must disable DynamicUser; got: {out}");
+    assert!(out.contains("User=newlevel"), "must run as the operator; got: {out}");
+    assert!(out.contains("XDG_RUNTIME_DIR=/run/user/1000"), "must set the operator runtime dir; got: {out}");
+    assert!(out.contains("pipewire"), "must join the pipewire group; got: {out}");
+}
+
+/// The derived (audio) verdict: FAIL when the sink / input / hub-rx is absent; NOTE when wired but
+/// FOH idle; PASS only when wired AND FOH-live audio clears the -60 dBFS bar.
+#[test]
+fn program_audio_verdict_matrix() {
+    // sink absent -> FAIL
+    let (c, out, _e) = run_sourced(&[], "strih_lx_program_audio_verdict 0 1 pulse_input_capture 1 1");
+    assert_ne!(c, 0);
+    assert!(out.starts_with("FAIL"), "sink absent must FAIL; got: {out}");
+    // wrong OBS input kind -> FAIL
+    let (c, out, _e) = run_sourced(&[], "strih_lx_program_audio_verdict 1 1 asio_input_capture 1 1");
+    assert_ne!(c, 0);
+    assert!(out.starts_with("FAIL"), "asio input kind must FAIL; got: {out}");
+    // hub not receiving fohabl-strih -> FAIL
+    let (c, out, _e) = run_sourced(&[], "strih_lx_program_audio_verdict 1 0 pulse_input_capture 1 1");
+    assert_ne!(c, 0);
+    assert!(out.starts_with("FAIL"), "no hub rx must FAIL; got: {out}");
+    // wired, FOH idle -> NOTE (level unchecked), exit 0
+    let (c, out, _e) = run_sourced(&[], "strih_lx_program_audio_verdict 1 1 pulse_input_capture 0 na");
+    assert_eq!(c, 0);
+    assert!(out.starts_with("NOTE"), "FOH idle must NOTE; got: {out}");
+    // wired, FOH live, level below bar -> FAIL
+    let (c, out, _e) = run_sourced(&[], "strih_lx_program_audio_verdict 1 1 pulse_input_capture 1 0");
+    assert_ne!(c, 0);
+    assert!(out.starts_with("FAIL"), "FOH live but silent must FAIL; got: {out}");
+    // wired, FOH live, level ok -> PASS
+    let (c, out, _e) = run_sourced(&[], "strih_lx_program_audio_verdict 1 1 pulse_input_capture 1 1");
+    assert_eq!(c, 0);
+    assert!(out.starts_with("PASS"), "wired + live + level must PASS; got: {out}");
+}
+
+/// setup-strih step 12 must INSTALL the pipewire graph (no more fail-loud TODO) and wire the hub
+/// audio drop-in; verify-strih must grade the audio via the pure verdict.
+#[test]
+fn setup_and_verify_wire_the_pipewire_program_audio() {
+    let s = read_script("scripts/setup-strih.sh");
+    assert!(
+        s.contains("strih_pipewire_program_sink_conf"),
+        "setup-strih step 12 must install the strih-program sink conf"
+    );
+    assert!(
+        s.contains("strih_wireplumber_minifuse_rule"),
+        "setup-strih step 12 must install the WirePlumber MiniFuse rule"
+    );
+    assert!(
+        s.contains("strih_intercom_audio_dropin"),
+        "setup-strih step 12 must install the intercom-hub audio drop-in"
+    );
+    assert!(
+        !s.contains("STRIH_LX_AUDIO_WIRED"),
+        "the manual STRIH_LX_AUDIO_WIRED flag must be removed (derived verify replaces it)"
+    );
+    let v = read_script("scripts/verify-strih.sh");
+    assert!(
+        v.contains("strih_lx_program_audio_verdict"),
+        "verify-strih must grade program audio via strih_lx_program_audio_verdict"
+    );
+}
