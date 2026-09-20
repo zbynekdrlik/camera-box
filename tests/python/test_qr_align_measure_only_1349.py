@@ -108,3 +108,55 @@ def test_measure_only_cli_prints_only_json_and_writes_nothing(monkeypatch, capsy
     assert data["spread_frames"] == 3
     assert writes == [], f"measure-only wrote pins: {writes}"
     assert conns == [], f"measure-only opened an OBS connection: {conns}"
+
+
+# ---- issue 1349 lane: --measure-only must NOT exit non-zero on an unconverged tail ------------
+# Runs 3 + 5 (E2E 35465567329) failed with `measure unavailable round N` and the loop never
+# re-inited anything. The measure-only mode must ALWAYS exit 0 and, when the stable tail never
+# converged within the budget, print a best-effort table from the LAST complete round flagged
+# `converged: false` (the loop then treats it as measured-but-flagged, not an abort). Only when NOT
+# ONE complete round exists is it a true error dict.
+
+
+def test_measure_only_table_converged_true_on_normal_measure():
+    rounds = _rounds({"NDI cam1": 0, "NDI cam2": 0, "NDI cam3": 1, "NDI cam4": 0})
+    out = qa.measure_only_table(rounds, tail_start=0, sources=SOURCES, min_valid_rounds=2)
+    assert out["converged"] is True, out
+
+
+def test_measure_only_table_unconverged_falls_back_to_last_complete_round():
+    # tail too short to robustly measure (min_valid_rounds high) but a complete round exists ->
+    # a best-effort table from the last complete round, converged False, NOT the error dict.
+    rounds = _rounds({"NDI cam1": 0, "NDI cam2": 0, "NDI cam3": 2, "NDI cam4": 0}, n_rounds=2)
+    out = qa.measure_only_table(rounds, tail_start=0, sources=SOURCES,
+                                min_valid_rounds=99, converged=False)
+    assert out["converged"] is False, out
+    assert out["NDI cam3"] == -2, out
+    assert out["spread_frames"] == 2, out
+    assert "error" not in out, out
+
+
+def test_measure_only_table_no_complete_round_is_error_converged_false():
+    # NOT one complete round exists -> the graceful error dict, converged False, spread None.
+    rounds = [{s: None for s in SOURCES} for _ in range(4)]
+    out = qa.measure_only_table(rounds, tail_start=0, sources=SOURCES,
+                                min_valid_rounds=2, converged=False)
+    assert out.get("spread_frames") is None, out
+    assert "error" in out, out
+    assert out["converged"] is False, out
+
+
+def test_measure_only_cli_unconverged_exits_zero_with_converged_false(monkeypatch, capsys):
+    # a run whose tail never converged (status.done False) -> the CLI still EXITS 0 and prints a
+    # best-effort table flagged converged:false (never a non-zero exit that the loop swallows).
+    rounds = _rounds({"NDI cam1": 0, "NDI cam2": 0, "NDI cam3": 2, "NDI cam4": 0}, n_rounds=3)
+    status = qa.TailStatus(False, "unstable", None)
+    monkeypatch.setattr(qa, "measure_stable_tail",
+                        lambda *a, **k: (rounds, 1_867_252_327, status))
+    rc = qa.main(["--host", "10.77.9.202", "--sources", ",".join(SOURCES), "--measure-only"])
+    assert rc == 0
+    out = capsys.readouterr().out.strip()
+    data = json.loads(out.splitlines()[-1])
+    assert data["converged"] is False, data
+    assert data["NDI cam3"] == -2, data
+    assert data["spread_frames"] == 2, data
