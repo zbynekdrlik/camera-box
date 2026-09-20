@@ -1710,6 +1710,30 @@ fn nvenc_log_verdict_grades_the_obs_log() {
     assert_eq!(out.trim(), "nvenc-unknown");
 }
 
+/// issue 1317 review (non-blocker): a REAL OBS log is large (100s of KB). A `printf | grep -q` inside
+/// an `if` SIGPIPEs printf on an early match under pipefail -> the pipeline goes non-zero -> the `if`
+/// reads false -> a HEALTHY large log misgrades to nvenc-unknown. Feed a large log with an EARLY
+/// version line and require nvenc-ok (the SIGPIPE-under-pipefail class, drift-guard-log-parsers.md).
+#[test]
+fn nvenc_log_verdict_survives_a_large_log_with_an_early_match() {
+    let (c, out, err) = run_sourced(
+        &[],
+        "{ echo '[obs-nvenc] NVENC version: 12.1 (compiled) / 13.0 (driver)'; yes 'padding line to make the OBS log large enough to SIGPIPE the printf pipe on an early grep match' | head -n 20000; } | strih_nvenc_log_verdict",
+    );
+    assert_eq!(
+        c, 0,
+        "an early match in a large log must still grade nvenc-ok; stderr={err}"
+    );
+    assert_eq!(out.trim(), "nvenc-ok");
+    // the same for the unsupported signature buried in a large log (must not flip to unknown)
+    let (c, out, _e) = run_sourced(
+        &[],
+        "{ echo 'NVENC not supported'; yes 'padding line padding line padding line padding' | head -n 20000; } | strih_nvenc_log_verdict",
+    );
+    assert_ne!(c, 0);
+    assert_eq!(out.trim(), "nvenc-unsupported");
+}
+
 /// verify-strih.sh must gate the OBS helper binaries beside /usr/bin/obs (recording-critical) and
 /// grade the NVENC log via the pure verdicts.
 #[test]

@@ -577,3 +577,30 @@ def test_input_parity_problems_check_source_false_skips_the_ndi_source_name_chec
     assert _mod.input_parity_problems(actual, plan, check_source=False) == []
     # with the source check on, the mismatch IS flagged (the default behaviour is unchanged)
     assert _mod.input_parity_problems(actual, plan, check_source=True) != []
+
+
+# --- issue 1317 review BLOCKER: input_classes_summary / verify_parity must not crash on objects -----
+
+def test_input_classes_summary_handles_object_entries():
+    # the report body must NOT raise on object {sender,input,scene} entries (it iterated raw entries
+    # and hit `TypeError: unhashable type: 'dict'`, which killed verify_parity on the operator
+    # collection -> the genlock-class drift check was permanently dead on the production strih).
+    s = _mod.input_classes_summary(_OBJ_INPUTS)
+    assert s.startswith("4 camera, 2 feedback"), s
+    assert "STRIH-SNV (2ME PVW)=feedback" in s
+    assert "CAM1 (usb)=camera" in s
+    # the legacy bare-string shape is unchanged (dedup + sender label)
+    assert _mod.input_classes_summary(["CAM1 (usb)", "CAM1 (usb)"]).startswith("1 camera, 0 feedback")
+
+
+def test_verify_parity_does_not_crash_on_object_entries():
+    # end-to-end: verify_parity over the operator (object-entry, update-only) manifest must reach its
+    # verdict line, not raise. All inputs present + right class -> no problems -> no SystemExit.
+    plan = _mod.seed_inputs(_OBJ_INPUTS, 3)
+    present = [p["input"] for p in plan]
+    settings = {p["input"]: {"ndi_source_name": "operator-owned",
+                             "genlock_fifo": bool(p["settings"].get("genlock_fifo")),
+                             "ndi_sync": p["settings"]["ndi_sync"]}
+                for p in plan}
+    obs = _FakeObsUpdate(present, settings)
+    _mod.verify_parity(obs, _OBJ_MANIFEST)  # must NOT raise TypeError
