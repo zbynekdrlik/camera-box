@@ -604,3 +604,31 @@ def test_verify_parity_does_not_crash_on_object_entries():
                 for p in plan}
     obs = _FakeObsUpdate(present, settings)
     _mod.verify_parity(obs, _OBJ_MANIFEST)  # must NOT raise TypeError
+
+
+# --- issue 1344: the `ASIO zvuk` program-audio input seeder (the ONE allowed create) -------------
+
+
+def test_audio_input_action_matrix():
+    K = _mod.AUDIO_INPUT_KIND
+    assert _mod.audio_input_action(False, None) == "create"
+    assert _mod.audio_input_action(True, "asio_input_capture") == "replace"
+    assert _mod.audio_input_action(True, K) == "ok"
+    assert _mod.audio_input_action(True, "wasapi_input_capture") == "replace"
+
+
+def test_program_audio_input_kind_from_inputs():
+    inputs = [
+        {"inputName": "NDI cam1", "inputKind": "ndi_source"},
+        {"inputName": _mod.AUDIO_INPUT_NAME, "inputKind": "asio_input_capture"},
+    ]
+    assert _mod.program_audio_input_kind_from_inputs(inputs) == "asio_input_capture"
+    assert _mod.program_audio_input_kind_from_inputs([]) is None
+    assert _mod.program_audio_input_kind_from_inputs(None) is None
+
+
+def test_program_audio_input_settings_binds_the_strih_program_monitor():
+    s = _mod.program_audio_input_settings()
+    assert s == {"device_id": "strih-program.monitor"}
+    assert _mod.AUDIO_INPUT_NAME == "ASIO zvuk"
+    assert _mod.AUDIO_INPUT_KIND == "pulse_input_capture"

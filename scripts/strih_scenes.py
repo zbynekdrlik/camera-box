@@ -104,6 +104,45 @@ def feedback_settings():
     return {"ndi_bw_mode": 0, "genlock_fifo": False, "ndi_sync": 1, "latency": FEEDBACK_LATENCY_MODE}
 
 
+# --- issue 1344: the OBS program-audio input (`ASIO zvuk` on the strih-program PipeWire sink) -----
+# The migrated collection carries the Windows `ASIO zvuk` (asio_input_capture) which `Failed to create
+# source` on Linux. The seeder's ONE allowed create in update-only mode: if `ASIO zvuk` is missing OR
+# is the un-creatable asio_input_capture, create/replace it as pulse_input_capture on the
+# strih-program null sink's monitor — KEEPING the name (scene items / mixer tracks / E2E selectors
+# address it by that name).
+AUDIO_INPUT_NAME = "ASIO zvuk"
+AUDIO_INPUT_KIND = "pulse_input_capture"
+AUDIO_MONITOR_DEVICE = "strih-program.monitor"
+
+
+def program_audio_input_settings():
+    """The pulse_input_capture settings binding `ASIO zvuk` to the strih-program sink monitor.
+    Returned fresh each call (never a shared mutable default)."""
+    return {"device_id": AUDIO_MONITOR_DEVICE}
+
+
+def program_audio_input_kind_from_inputs(inputs):
+    """Pure: the OBS inputKind of the `ASIO zvuk` input from a GetInputList `inputs` list, or None
+    when it is absent. Used by --audio-input-kind + verify-strih's derived audio verdict."""
+    for i in inputs or []:
+        if i.get("inputName") == AUDIO_INPUT_NAME:
+            return i.get("inputKind")
+    return None
+
+
+def audio_input_action(exists, current_kind):
+    """Pure: the ONE allowed action for the `ASIO zvuk` program-audio input.
+    - absent -> 'create' (CreateInput pulse_input_capture on strih-program.monitor)
+    - present but asio_input_capture (the un-creatable Windows kind) -> 'replace' (Remove + Create)
+    - present as pulse_input_capture -> 'ok' (nothing to do)
+    - present as some OTHER kind -> 'replace' (heal it to the pulse capture)."""
+    if not exists:
+        return "create"
+    if current_kind == AUDIO_INPUT_KIND:
+        return "ok"
+    return "replace"
+
+
 def input_class_for(name):
     """issue 1317: the settings CLASS for an input, keyed by name. Any name CARRYING the 2ME marker
     `2ME PGM` / `2ME PVW` (as a SUBSTRING) is a post-render FEEDBACK monitor -> 'feedback'. This
@@ -496,6 +535,42 @@ def _effective_input_settings(obs, input_name):
     return {**defaults, **explicit}
 
 
+def _current_scene_name(obs):
+    """The current program scene name (CreateInput needs a scene to attach the input's scene item),
+    or the first scene, or None when no scene exists."""
+    sl = obs.req("GetSceneList", ignore_err=True) or {}
+    name = sl.get("currentProgramSceneName")
+    if name:
+        return name
+    scenes = sl.get("scenes") or []
+    return scenes[0].get("sceneName") if scenes else None
+
+
+def seed_program_audio_input(obs):
+    """The ONE allowed create/replace (issue 1344): ensure the `ASIO zvuk` program-audio input exists
+    as pulse_input_capture on strih-program.monitor (the OBS program capture). A missing input is
+    CREATED; the un-creatable Windows asio_input_capture (or any other kind) is REMOVED + recreated;
+    a correct pulse_input_capture is left alone. Returns a short status string for the log."""
+    inputs = (obs.req("GetInputList", ignore_err=True) or {}).get("inputs", [])
+    exists = any(i.get("inputName") == AUDIO_INPUT_NAME for i in inputs)
+    kind = program_audio_input_kind_from_inputs(inputs)
+    action = audio_input_action(exists, kind)
+    if action == "ok":
+        return "matched"
+    scene = _current_scene_name(obs)
+    if scene is None:
+        return "no-scene (deferred)"
+    if action == "replace":
+        obs.req("RemoveInput", {"inputName": AUDIO_INPUT_NAME}, ignore_err=True)
+    obs.req("CreateInput", {
+        "sceneName": scene,
+        "inputName": AUDIO_INPUT_NAME,
+        "inputKind": AUDIO_INPUT_KIND,
+        "inputSettings": program_audio_input_settings(),
+    }, ignore_err=True)
+    return "created" if action == "create" else "replaced (was %s)" % (kind or "absent")
+
+
 def bootstrap(obs, plan, studio=True, update_only=False):
     """Seed the collection from `plan` (seed_inputs output). Two modes:
 
@@ -560,6 +635,9 @@ def bootstrap(obs, plan, studio=True, update_only=False):
             result[inp] = _enforce_ndi_source_name(obs, op, inp, src)
         else:
             result[inp] = "matched"
+    # issue 1344: the ONE allowed create/replace — the `ASIO zvuk` program-audio input on the
+    # strih-program PipeWire sink monitor (the OBS program capture that Failed to create on Linux).
+    result[AUDIO_INPUT_NAME] = seed_program_audio_input(obs)
     if studio:
         obs.req("SetStudioModeEnabled", {"studioModeEnabled": True}, ignore_err=True)
     return result
@@ -705,6 +783,9 @@ def main():
                     help="seed scenes/inputs with the certified genlock settings + Studio Mode")
     ap.add_argument("--verify-parity", action="store_true",
                     help="read-only: report whether the 10 seed inputs exist as genlock_fifo sources")
+    ap.add_argument("--audio-input-kind", action="store_true",
+                    help="issue 1344: print the OBS inputKind of the `ASIO zvuk` program-audio input "
+                         "(or `absent`) — read-only, for verify-strih's derived audio verdict")
     ap.add_argument("--projector", choices=["program", "multiview"], default=None,
                     help="issue 1346: rewrite strih-lx-projector.json to program|multiview and "
                          "(re)seed the fixed HDMI fullscreen projector (the OBS UI projector menu "
@@ -714,9 +795,18 @@ def main():
     # An explicit mode is REQUIRED (issue 1317 review): a bare invocation must never silently connect
     # and MUTATE OBS. --bootstrap seeds; --verify-parity is read-only; --projector sets the HDMI
     # projector (issue 1346).
-    if not args.bootstrap and not args.verify_parity and args.projector is None:
-        ap.error("specify a mode: --bootstrap (seed), --verify-parity (read-only), or "
-                 "--projector program|multiview")
+    if (not args.bootstrap and not args.verify_parity and args.projector is None
+            and not args.audio_input_kind):
+        ap.error("specify a mode: --bootstrap (seed), --verify-parity (read-only), "
+                 "--audio-input-kind (read-only), or --projector program|multiview")
+
+    # --audio-input-kind (issue 1344): read-only print of the `ASIO zvuk` input kind. Does NOT read
+    # the seed manifest.
+    if args.audio_input_kind:
+        obs = Obs(args.host, args.port, args.password)
+        inputs = (obs.req("GetInputList", ignore_err=True) or {}).get("inputs", [])
+        print(program_audio_input_kind_from_inputs(inputs) or "absent")
+        return
 
     # --projector (issue 1346): rewrite the persisted type + (re)seed the HDMI projector. Does NOT
     # read the input seed manifest -- it only touches the projector, not the input/scene seed.

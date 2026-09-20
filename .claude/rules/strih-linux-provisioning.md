@@ -401,14 +401,27 @@ with an old inline block that ran its tail unconditionally.
   command line and reports RUNNING forever (run 1 on 18.9. "ran" for 20 min this way while setup had
   actually never started).
 
-## Audio — the one BLOCKER, fail-loud until wired
+## Audio — the local PipeWire graph (issue 1344, WIRED)
 
-There is NO Dante on the strih PC (owner 15.9.): program audio is `MiniFuse 4` USB → VB-Matrix
-(VASIO-8) ASIO on Windows. On Linux the class-compliant MiniFuse 4 is a native PipeWire node and
-**PipeWire replaces VB-Matrix**. The graph that routes the mastered program mix into the MiniFuse 4
-capture is not yet wired — `setup-strih.sh` step 12 **FAILS LOUD** (`strih_lx_audio_route_wired`)
-until an operator wires it and re-runs with `STRIH_LX_AUDIO_WIRED=1`. Arena stays on the Windows PC
-(Spout has no Linux); its cg feed reaches the notebook over NDI (`RESOLUME-SNV (cg-obs)`).
+There is NO Dante on the strih PC (owner 15.9.). **Program audio is a NETWORK stream, NOT the
+MiniFuse** (design 20.9., corrected): the OBS program source `ASIO zvuk` = VB-Matrix slot VASIO8,
+fed by `fohabl-strih` + `lv1-strih` VBAN (the mastered FOH mix). **The MiniFuse 4 carries only the
+operator TALKBACK mic.** On Linux **PipeWire replaces VB-Matrix**: the intercom hub (issue 1345)
+writes the summed program mix to a `strih-program` null sink OBS captures via
+`strih-program.monitor` (the OBS input `ASIO zvuk`, now `pulse_input_capture`), and reads the
+MiniFuse capture as the operator talkback into the N-1 mix. Full design + the DynamicUser decision:
+`.claude/rules/strih-intercom.md` "M2 — the local PipeWire audio bridge".
+
+`setup-strih.sh` step 12 now **INSTALLS** the graph (no more fail-loud TODO / `STRIH_LX_AUDIO_WIRED`):
+the operator-session `strih-program` null sink + a WirePlumber rule pinning the MiniFuse to its
+pro-audio profile @48 kHz + the intercom-hub audio drop-in (runs the hub as the operator so its
+pw-cat children reach the operator PipeWire session). The OBS `ASIO zvuk` input is seeded by
+`strih_scenes.py --bootstrap` (the ONE allowed create in update-only mode). `verify-strih.sh` derives
+the audio verdict (`strih_lx_program_audio_verdict`: sink present + OBS input pulse_input_capture +
+hub program-rx; FOH-live level is a supervisor NOTE). **Supervisor live steps:** confirm the MiniFuse
+capture node name against `wpctl status`, restart the operator PipeWire/WirePlumber for the sink to
+appear, and do the FOH-live level acceptance. Arena stays on the Windows PC (Spout has no Linux); its
+cg feed reaches the notebook over NDI (`RESOLUME-SNV (cg-obs)`).
 
 ## CI — the strih FULL-build variant, with obs-browser + CEF (issue 1317)
 

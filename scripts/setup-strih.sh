@@ -16,7 +16,7 @@ set -euo pipefail
 # remoteos-mcp / bundle-state tooling rather than re-implementing any of it.
 #
 # Usage (on the box):
-#   sudo STRIH_LX_IP=10.77.9.NNN GH_TOKEN=<gh-pat-repo-read> [STRIH_LX_AUDIO_WIRED=1] ./setup-strih.sh [--yes]
+#   sudo STRIH_LX_IP=10.77.9.NNN GH_TOKEN=<gh-pat-repo-read> ./setup-strih.sh [--yes]
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
 
@@ -354,17 +354,31 @@ echo "  sleep/suspend/hibernate masked; lid + power keys ignored"
 
 # ---------------------------------------------------------------------------------------------
 AUDIO_NAME="$(strih_lx_audio_input_name)"
-step 12 "Program audio: ${AUDIO_NAME} -> PipeWire (VB-Matrix replacement)"
+step 12 "Program audio: intercom hub -> PipeWire strih-program sink -> OBS (VB-Matrix replacement, issue 1344)"
+# Root cause (design 20.9.): the OBS program (${AUDIO_NAME}) is a NETWORK stream (fohabl-strih VBAN),
+# NOT the MiniFuse. The hub writes the program mix to a strih-program null sink OBS captures via
+# strih-program.monitor; the MiniFuse carries only the operator TALKBACK mic (the hub reads it).
+DESKTOP_UID="$(id -u "$DESKTOP_USER" 2>/dev/null || echo 1000)"
 if arecord -l 2>/dev/null | grep -qi 'MiniFuse'; then
-  echo "  detected the ${AUDIO_NAME} USB interface (arecord -l) -- class-compliant PipeWire node"
+  echo "  detected the MiniFuse 4 USB interface (arecord -l) -- the operator talkback capture"
 else
-  warn "  ${AUDIO_NAME} not detected (arecord -l) -- plug it in before go-live (it is the program-audio input)"
+  warn "  MiniFuse 4 not detected (arecord -l) -- plug it in before go-live (it is the operator talkback mic)"
 fi
-if strih_lx_audio_route_wired; then
-  echo "  VB-Matrix -> PipeWire program-audio route reported WIRED (STRIH_LX_AUDIO_WIRED=1)"
-else
-  fail "TODO(audio): the VB-Matrix -> PipeWire program-audio graph is not wired yet. On Windows the mastered program mix reaches OBS via ${AUDIO_NAME} -> VB-Matrix (VASIO-8) ASIO; on Linux PipeWire replaces VB-Matrix. Wire the PipeWire graph feeding the '${AUDIO_NAME}' capture into OBS, then re-run with STRIH_LX_AUDIO_WIRED=1. (Fail-loud until wired -- issue 1317.)"
-fi
+# (c) the operator-session PipeWire null sink OBS captures as strih-program.monitor.
+install -d -o "$DESKTOP_USER" -g "$DESKTOP_USER" "${USER_HOME}/.config/pipewire/pipewire.conf.d"
+strih_pipewire_program_sink_conf > "${USER_HOME}/.config/pipewire/pipewire.conf.d/strih-program.conf"
+chown "$DESKTOP_USER":"$DESKTOP_USER" "${USER_HOME}/.config/pipewire/pipewire.conf.d/strih-program.conf"
+# the WirePlumber rule pinning the MiniFuse to its pro-audio profile @48 kHz.
+install -d -o "$DESKTOP_USER" -g "$DESKTOP_USER" "${USER_HOME}/.config/wireplumber/wireplumber.conf.d"
+strih_wireplumber_minifuse_rule > "${USER_HOME}/.config/wireplumber/wireplumber.conf.d/51-strih-minifuse.conf"
+chown "$DESKTOP_USER":"$DESKTOP_USER" "${USER_HOME}/.config/wireplumber/wireplumber.conf.d/51-strih-minifuse.conf"
+# the intercom-hub systemd drop-in that runs the hub AS THE OPERATOR (reach the PipeWire session).
+mkdir -p /etc/systemd/system/intercom-hub.service.d
+strih_intercom_audio_dropin "$DESKTOP_USER" "$DESKTOP_UID" > /etc/systemd/system/intercom-hub.service.d/10-local-audio.conf
+systemctl daemon-reload 2>/dev/null || true
+echo "  installed strih-program null sink + WirePlumber MiniFuse rule (operator session) + intercom-hub local-audio drop-in (User=${DESKTOP_USER})"
+echo "  the OBS '${AUDIO_NAME}' input (pulse_input_capture on strih-program.monitor) is seeded by scripts/strih_scenes.py --bootstrap; verify-strih derives the audio verdict"
+echo "  NOTE: restart the operator PipeWire/WirePlumber (or re-login) for the strih-program sink + MiniFuse pin to take effect; confirm the MiniFuse capture node name against 'wpctl status'"
 
 # ---------------------------------------------------------------------------------------------
 step 13 "Intercom hub unit + matrix (issue 1345 M1: ENABLE-ONLY, NEVER started while parallel)"

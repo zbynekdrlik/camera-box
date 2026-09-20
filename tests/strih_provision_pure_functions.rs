@@ -158,24 +158,18 @@ fn profile_facts_carry_the_windows_light_profile_shape() {
 }
 
 #[test]
-fn audio_route_is_a_fail_loud_todo_until_wired() {
-    // Unwired (default) -> the predicate fails, so setup-strih's audio step FAILS loud.
-    let (code, _o, _e) = run_sourced(&[], "strih_lx_audio_route_wired");
+fn audio_input_name_is_asio_zvuk_and_the_fail_loud_flag_is_gone() {
+    // issue 1344: the program audio is now WIRED (the PipeWire graph), so the old fail-loud TODO
+    // predicate + its STRIH_LX_AUDIO_WIRED flag are REMOVED — a derived verdict replaces them.
+    let (code, _o, _e) = run_sourced(&[], "type strih_lx_audio_route_wired 2>/dev/null");
     assert_ne!(
         code, 0,
-        "audio route must read UNWIRED by default (fail-loud TODO)"
+        "strih_lx_audio_route_wired must no longer be defined"
     );
-    // Explicitly wired -> passes.
-    let (code2, _o2, _e2) = run_sourced(
-        &[("STRIH_LX_AUDIO_WIRED", "1")],
-        "strih_lx_audio_route_wired",
-    );
-    assert_eq!(
-        code2, 0,
-        "audio route must read wired when STRIH_LX_AUDIO_WIRED=1"
-    );
+    // The OBS program-audio input keeps a human name reported by setup/verify — now `ASIO zvuk`
+    // (the OBS input name on strih-program.monitor, kept for the scene/mixer/E2E selectors).
     let (_c, name, _e) = run_sourced(&[], "strih_lx_audio_input_name");
-    assert_eq!(name.trim(), "MiniFuse 4");
+    assert_eq!(name.trim(), "ASIO zvuk");
 }
 
 #[test]
@@ -1761,9 +1755,18 @@ fn verify_strih_gates_obs_helpers_and_nvenc() {
 fn program_sink_conf_declares_the_strih_program_null_sink() {
     let (code, out, err) = run_sourced(&[], "strih_pipewire_program_sink_conf");
     assert_eq!(code, 0, "stderr={err}");
-    assert!(out.contains("support.null-audio-sink"), "must create a null sink; got: {out}");
-    assert!(out.contains("strih-program"), "the sink node name must be strih-program; got: {out}");
-    assert!(out.contains("Audio/Sink"), "the null sink must be an Audio/Sink; got: {out}");
+    assert!(
+        out.contains("support.null-audio-sink"),
+        "must create a null sink; got: {out}"
+    );
+    assert!(
+        out.contains("strih-program"),
+        "the sink node name must be strih-program; got: {out}"
+    );
+    assert!(
+        out.contains("Audio/Sink"),
+        "the null sink must be an Audio/Sink; got: {out}"
+    );
 }
 
 /// The WirePlumber rule must pin the MiniFuse 4 to its pro-audio profile at 48 kHz (the talkback
@@ -1772,9 +1775,18 @@ fn program_sink_conf_declares_the_strih_program_null_sink() {
 fn wireplumber_rule_pins_the_minifuse_pro_audio_at_48k() {
     let (code, out, err) = run_sourced(&[], "strih_wireplumber_minifuse_rule");
     assert_eq!(code, 0, "stderr={err}");
-    assert!(out.contains("MiniFuse"), "the rule must match the MiniFuse; got: {out}");
-    assert!(out.contains("pro-audio"), "the rule must select the pro-audio profile; got: {out}");
-    assert!(out.contains("48000"), "the rule must pin 48 kHz; got: {out}");
+    assert!(
+        out.contains("MiniFuse"),
+        "the rule must match the MiniFuse; got: {out}"
+    );
+    assert!(
+        out.contains("pro-audio"),
+        "the rule must select the pro-audio profile; got: {out}"
+    );
+    assert!(
+        out.contains("48000"),
+        "the rule must pin 48 kHz; got: {out}"
+    );
 }
 
 /// The systemd drop-in must run the hub as the operator (NOT DynamicUser) with the operator's
@@ -1783,11 +1795,26 @@ fn wireplumber_rule_pins_the_minifuse_pro_audio_at_48k() {
 fn intercom_audio_dropin_runs_as_the_operator_with_the_pipewire_runtime() {
     let (code, out, err) = run_sourced(&[], "strih_intercom_audio_dropin newlevel 1000");
     assert_eq!(code, 0, "stderr={err}");
-    assert!(out.contains("[Service]"), "a systemd [Service] override; got: {out}");
-    assert!(out.contains("DynamicUser=no"), "must disable DynamicUser; got: {out}");
-    assert!(out.contains("User=newlevel"), "must run as the operator; got: {out}");
-    assert!(out.contains("XDG_RUNTIME_DIR=/run/user/1000"), "must set the operator runtime dir; got: {out}");
-    assert!(out.contains("pipewire"), "must join the pipewire group; got: {out}");
+    assert!(
+        out.contains("[Service]"),
+        "a systemd [Service] override; got: {out}"
+    );
+    assert!(
+        out.contains("DynamicUser=no"),
+        "must disable DynamicUser; got: {out}"
+    );
+    assert!(
+        out.contains("User=newlevel"),
+        "must run as the operator; got: {out}"
+    );
+    assert!(
+        out.contains("XDG_RUNTIME_DIR=/run/user/1000"),
+        "must set the operator runtime dir; got: {out}"
+    );
+    assert!(
+        out.contains("pipewire"),
+        "must join the pipewire group; got: {out}"
+    );
 }
 
 /// The derived (audio) verdict: FAIL when the sink / input / hub-rx is absent; NOTE when wired but
@@ -1795,29 +1822,56 @@ fn intercom_audio_dropin_runs_as_the_operator_with_the_pipewire_runtime() {
 #[test]
 fn program_audio_verdict_matrix() {
     // sink absent -> FAIL
-    let (c, out, _e) = run_sourced(&[], "strih_lx_program_audio_verdict 0 1 pulse_input_capture 1 1");
+    let (c, out, _e) = run_sourced(
+        &[],
+        "strih_lx_program_audio_verdict 0 1 pulse_input_capture 1 1",
+    );
     assert_ne!(c, 0);
     assert!(out.starts_with("FAIL"), "sink absent must FAIL; got: {out}");
     // wrong OBS input kind -> FAIL
-    let (c, out, _e) = run_sourced(&[], "strih_lx_program_audio_verdict 1 1 asio_input_capture 1 1");
+    let (c, out, _e) = run_sourced(
+        &[],
+        "strih_lx_program_audio_verdict 1 1 asio_input_capture 1 1",
+    );
     assert_ne!(c, 0);
-    assert!(out.starts_with("FAIL"), "asio input kind must FAIL; got: {out}");
+    assert!(
+        out.starts_with("FAIL"),
+        "asio input kind must FAIL; got: {out}"
+    );
     // hub not receiving fohabl-strih -> FAIL
-    let (c, out, _e) = run_sourced(&[], "strih_lx_program_audio_verdict 1 0 pulse_input_capture 1 1");
+    let (c, out, _e) = run_sourced(
+        &[],
+        "strih_lx_program_audio_verdict 1 0 pulse_input_capture 1 1",
+    );
     assert_ne!(c, 0);
     assert!(out.starts_with("FAIL"), "no hub rx must FAIL; got: {out}");
     // wired, FOH idle -> NOTE (level unchecked), exit 0
-    let (c, out, _e) = run_sourced(&[], "strih_lx_program_audio_verdict 1 1 pulse_input_capture 0 na");
+    let (c, out, _e) = run_sourced(
+        &[],
+        "strih_lx_program_audio_verdict 1 1 pulse_input_capture 0 na",
+    );
     assert_eq!(c, 0);
     assert!(out.starts_with("NOTE"), "FOH idle must NOTE; got: {out}");
     // wired, FOH live, level below bar -> FAIL
-    let (c, out, _e) = run_sourced(&[], "strih_lx_program_audio_verdict 1 1 pulse_input_capture 1 0");
+    let (c, out, _e) = run_sourced(
+        &[],
+        "strih_lx_program_audio_verdict 1 1 pulse_input_capture 1 0",
+    );
     assert_ne!(c, 0);
-    assert!(out.starts_with("FAIL"), "FOH live but silent must FAIL; got: {out}");
+    assert!(
+        out.starts_with("FAIL"),
+        "FOH live but silent must FAIL; got: {out}"
+    );
     // wired, FOH live, level ok -> PASS
-    let (c, out, _e) = run_sourced(&[], "strih_lx_program_audio_verdict 1 1 pulse_input_capture 1 1");
+    let (c, out, _e) = run_sourced(
+        &[],
+        "strih_lx_program_audio_verdict 1 1 pulse_input_capture 1 1",
+    );
     assert_eq!(c, 0);
-    assert!(out.starts_with("PASS"), "wired + live + level must PASS; got: {out}");
+    assert!(
+        out.starts_with("PASS"),
+        "wired + live + level must PASS; got: {out}"
+    );
 }
 
 /// setup-strih step 12 must INSTALL the pipewire graph (no more fail-loud TODO) and wire the hub

@@ -232,8 +232,35 @@ tcp_open "$WS_HOST" 8899 && ok "bundle-state :8899 answering" || bad "bundle-sta
 # 8) remoteos-mcp agent.
 systemctl is-active remoteos-mcp >/dev/null 2>&1 && ok "remoteos-mcp active" || note "remoteos-mcp not active (install-linux.sh, step 10)"
 
-# 9) PipeWire program-audio input present.
-if arecord -l 2>/dev/null | grep -qi 'MiniFuse'; then ok "MiniFuse 4 PipeWire input present"; else bad "MiniFuse 4 (program audio) not present"; fi
+# 9) PipeWire program audio (issue 1344): the DERIVED verdict — the strih-program null sink + the OBS
+#    `ASIO zvuk` pulse_input_capture + (when the hub is active) the program-feed rx. The FOH-live
+#    level is a SUPERVISOR live-acceptance step, so verify passes FOH=unknown here (never a level
+#    FAIL); a FAIL means a structural provisioning gap (sink/input absent) or, once the hub is
+#    active, no program rx.
+AUDIO_SINK=0
+if command -v pw-cli >/dev/null 2>&1 && pw-cli ls Node 2>/dev/null | grep -q '"strih-program"'; then AUDIO_SINK=1; fi
+AUDIO_KIND="$(python3 "$SCN_BIN" --host "$WS_HOST" --audio-input-kind 2>/dev/null || echo absent)"
+if systemctl is-active intercom-hub >/dev/null 2>&1; then
+  # hub active (M4+): grade the real program-feed rx off the hub /api/state.
+  if curl -fsS --max-time 3 "http://${WS_HOST}:8790/api/state" 2>/dev/null \
+       | python3 -c 'import sys,json; d=json.load(sys.stdin); sys.exit(0 if any(p.get("name")=="fohabl" and p.get("rx_packets",0)>0 for p in d.get("participants",[])) else 1)'; then
+    AUDIO_RX=1
+  else
+    AUDIO_RX=0
+  fi
+else
+  # enable-only phase (hub enabled-not-started until the M4 cut-over): grade only the structural
+  # sink + OBS input; the rx is verified once the hub runs.
+  AUDIO_RX=1
+fi
+AUDIO_VERDICT="$(strih_lx_program_audio_verdict "$AUDIO_SINK" "$AUDIO_RX" "$AUDIO_KIND" unknown na)"
+case "$AUDIO_VERDICT" in
+  PASS*) ok   "program audio: $AUDIO_VERDICT" ;;
+  NOTE*) note "program audio: $AUDIO_VERDICT" ;;
+  *)     bad  "program audio: $AUDIO_VERDICT" ;;
+esac
+# talkback capture (report-only): the MiniFuse 4 is the operator talkback mic (the hub reads it).
+if arecord -l 2>/dev/null | grep -qi 'MiniFuse'; then note "talkback: MiniFuse 4 present (operator mic)"; else note "talkback: MiniFuse 4 not detected (plug it in before go-live)"; fi
 
 # 10) NVENC encoder available.
 { ffmpeg -hide_banner -encoders 2>/dev/null || cat "$LOG" 2>/dev/null; } | strih_lx_nvenc_available_ok && ok "NVENC encoder available" || bad "NVENC encoder not available"

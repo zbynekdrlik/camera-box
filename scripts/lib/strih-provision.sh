@@ -128,16 +128,114 @@ strih_lx_profile_facts() {
     'rec_split_min=15'
 }
 
-# strih_lx_audio_input_name -> the OBS PipeWire input name for the program-audio interface.
-# The Windows path is MiniFuse 4 USB -> VB-Matrix (VASIO-8) ASIO; on Linux the class-compliant
-# MiniFuse 4 is a native PipeWire node and PipeWire replaces VB-Matrix (owner 15.9.: NO Dante).
-strih_lx_audio_input_name() { printf 'MiniFuse 4'; }
+# strih_lx_audio_input_name -> the OBS PipeWire input name kept for the program-audio input (issue
+# 1344: the OBS input is `ASIO zvuk` on device `strih-program.monitor`; this label is the human name
+# reported by setup/verify, unchanged for continuity).
+strih_lx_audio_input_name() { printf 'ASIO zvuk'; }
 
-# strih_lx_audio_route_wired -> 0 iff the VB-Matrix -> PipeWire program-audio ROUTE (the graph that
-# feeds the mastered program mix into the MiniFuse 4 capture OBS reads) is wired. Fail-loud TODO:
-# returns 1 until an operator wires it and sets STRIH_LX_AUDIO_WIRED=1. setup-strih.sh's audio step
-# FAILS on this so an unwired audio graph never passes silently.
-strih_lx_audio_route_wired() { [ "${STRIH_LX_AUDIO_WIRED:-0}" = "1" ]; }
+# --- issue 1344: the local PipeWire program-audio graph (VB-Matrix replacement) ------------------
+# Root cause (design 20.9.): the OBS program (`ASIO zvuk`) is a NETWORK stream (fohabl-strih VBAN,
+# VASIO8), NOT the MiniFuse. So the hub writes the program mix to a `strih-program` null sink OBS
+# captures via `strih-program.monitor`; the MiniFuse carries only the operator TALKBACK mic (the
+# hub reads it). setup-strih step 12 installs these operator-session PipeWire configs; the old
+# fail-loud STRIH_LX_AUDIO_WIRED flag is REMOVED — verify-strih derives wiredness from live state.
+
+# strih_pipewire_program_sink_conf -> the operator-session pipewire.conf.d drop-in that creates the
+# `strih-program` null Audio/Sink so OBS can capture `strih-program.monitor` even before the hub runs.
+strih_pipewire_program_sink_conf() {
+  cat <<'CONF'
+# strih-lx program-audio null sink (issue 1344) — installed by setup-strih step 12.
+# The intercom hub writes the mastered program mix here; OBS captures strih-program.monitor
+# as its `ASIO zvuk` program input. Do NOT edit by hand.
+context.objects = [
+    {   factory = adapter
+        args = {
+            factory.name       = support.null-audio-sink
+            node.name          = "strih-program"
+            node.description   = "Strih Program (OBS ASIO zvuk)"
+            media.class        = "Audio/Sink"
+            audio.rate         = 48000
+            audio.position     = [ FL FR ]
+            monitor.channel-volumes = true
+            object.linger      = true
+        }
+    }
+]
+CONF
+}
+
+# strih_wireplumber_minifuse_rule -> the WirePlumber rule pinning the MiniFuse 4 to its pro-audio
+# profile at 48 kHz (the operator talkback capture the hub reads; OBS never touches it).
+strih_wireplumber_minifuse_rule() {
+  cat <<'RULE'
+# strih-lx MiniFuse 4 talkback capture (issue 1344) — installed by setup-strih step 12.
+# Pin the class-compliant MiniFuse 4 to its pro-audio profile at 48 kHz so the intercom hub reads
+# the operator talkback mic on a stable node. Do NOT edit by hand.
+monitor.alsa.rules = [
+    {
+        matches = [ { device.name = "~alsa_card.*MiniFuse.*" } ]
+        actions = { update-props = { device.profile = "pro-audio" } }
+    }
+    {
+        matches = [ { node.name = "~alsa_input.*MiniFuse.*" } ]
+        actions = { update-props = { audio.rate = 48000 } }
+    }
+]
+RULE
+}
+
+# strih_intercom_audio_dropin USER UID -> the systemd drop-in that runs intercom-hub AS THE OPERATOR
+# (not DynamicUser) with the operator's PipeWire runtime, so the pw-cat children reach the operator
+# audio session. DynamicUser cannot traverse the operator's 0700 /run/user/<uid> to reach pipewire-0,
+# so the hub runs as the operator uid; the sidecar alternative adds a 2nd process + IPC socket. The
+# other hub resources (unprivileged UDP/TCP, world-readable config) are unaffected.
+strih_intercom_audio_dropin() {
+  local user="${1:?strih_intercom_audio_dropin needs the operator USER}"
+  local uid="${2:?strih_intercom_audio_dropin needs the operator UID}"
+  cat <<DROPIN
+# intercom-hub local-audio override (issue 1344) — installed by setup-strih step 12.
+# Run the hub as the operator so its pw-cat program-sink + talkback-capture children reach the
+# operator's PipeWire session. Do NOT edit by hand.
+[Service]
+DynamicUser=no
+User=${user}
+Group=${user}
+SupplementaryGroups=audio pipewire render
+Environment=XDG_RUNTIME_DIR=/run/user/${uid}
+Environment=PIPEWIRE_RUNTIME_DIR=/run/user/${uid}
+# The operator session must exist for /run/user/<uid>/pipewire-0 to be present.
+After=user@${uid}.service
+ProtectHome=read-only
+DROPIN
+}
+
+# strih_lx_program_audio_verdict SINK RX INPUT_KIND FOH_LIVE LEVEL_OK -> the DERIVED (audio) verdict
+# for verify-strih (replaces the STRIH_LX_AUDIO_WIRED flag). Args:
+#   SINK        1 iff the `strih-program` sink node is present (pw-cli ls Node)
+#   RX          1 iff the hub reports a program source rx > 0 pkt/s
+#   INPUT_KIND  the OBS `ASIO zvuk` input kind (pulse_input_capture | asio_input_capture | absent)
+#   FOH_LIVE    1 iff FOH is playing (a level can be measured) | 0 | unknown
+#   LEVEL_OK    1 iff the measured level clears the -60 dBFS bar | 0 | na
+# Prints `PASS <msg>` / `NOTE <msg>` / `FAIL <msg>`; exits 0 for PASS/NOTE, 1 for FAIL.
+strih_lx_program_audio_verdict() {
+  local sink="${1:-0}" rx="${2:-0}" kind="${3:-absent}" foh="${4:-unknown}" level="${5:-na}"
+  if [ "$sink" != "1" ]; then
+    printf 'FAIL strih-program PipeWire sink missing\n'; return 1
+  fi
+  if [ "$kind" != "pulse_input_capture" ]; then
+    printf 'FAIL OBS "ASIO zvuk" input missing or not pulse_input_capture (got %s)\n' "$kind"; return 1
+  fi
+  if [ "$rx" != "1" ]; then
+    printf 'FAIL hub not receiving the program feed (rx=0)\n'; return 1
+  fi
+  if [ "$foh" = "1" ]; then
+    if [ "$level" = "1" ]; then
+      printf 'PASS program audio present and above the -60 dBFS bar\n'; return 0
+    fi
+    printf 'FAIL program input SILENT while FOH is live (below -60 dBFS)\n'; return 1
+  fi
+  printf 'NOTE program audio wired; FOH idle so level unchecked (report-only)\n'; return 0
+}
 
 # strih_lx_output_name_ok NAME -> 0 iff NAME is a namespaced `STRIH-LX (...)` output and NOT a
 # `STRIH-SNV (...)` one (the never-a-2nd-STRIH-SNV-sender invariant, single output check).
