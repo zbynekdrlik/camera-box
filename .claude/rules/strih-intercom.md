@@ -472,19 +472,27 @@ Bandwidth per phone ≈ 2 Mbit/s at 480p / 10 fps (~25 KB/frame).
   `dev1-shading-https-install.sh --site interkom --hostname interkom-lx.newlevel.media --install`).
   Under `sudo` that installer needs `HOME=/home/newlevel` (it resolves the airuleset Cloudflare
   client and the token file from `$HOME`).
-- **`setup-strih.sh` stops at step 12 (the MiniFuse audio TODO, issue 1344) BEFORE step 14 (Janus)** —
-  until the audio step is wired, run step 14 standalone (the body of the step through its closing
-  `fi`, sourcing `scripts/lib/strih-provision.sh`). Follow-up: move the Janus step ahead of the audio
-  gate. Ubuntu's `janus` package auto-STARTS the service on install (before the jcfg exists) — restart
-  it after the step writes the room config. Janus runs as root there (User= empty), so the 0640
-  root-owned jcfg is readable; the production `intercom-hub.service` has `DynamicUser=yes` and cannot
-  read the 0600 root-owned room-secret file under `/etc/intercom-hub/` — reconcile
-  (`LoadCredential=`/a group) before M4. Janus HTTP is bound on `*:8088` and WS on `0.0.0.0:8188`
-  (the design wanted loopback HTTP) — tighten in the jcfg.
-- **A headless browser without a microphone ends in `Janus: mic chyba` and does NOT join** — the PWA
-  should join LISTEN-ONLY (recv-only offer, mic toggle disabled) when `getUserMedia` fails/denied:
-  exactly the cameraman who refuses the permission. Follow-up for M3b. While the hub is down the page
-  logs one Chromium `502` resource error per poll (network class, not a JS error) — expected.
+- **`setup-strih.sh` step-order + Janus binds + the DynamicUser secret — DONE (this lane).**
+  Originally `setup-strih.sh` stopped at the MiniFuse audio TODO gate (issue 1344) BEFORE the Janus
+  step, so the live box never reached Janus. Now the **Intercom hub (step 12) + Janus (step 13) run
+  BEFORE the audio TODO gate (step 14)** — the still-unwired audio `fail` no longer blocks the M3
+  provisioning. The Janus step writes THREE jcfg: the audiobridge room, `janus.transport.websockets.jcfg`
+  (**`ws_ip` bound to the LAN IP** on :8188, not 0.0.0.0), and a new `janus.transport.http.jcfg`
+  (**HTTP API bound `ip = "127.0.0.1"` loopback-only** on :8088 — closes the design's loopback-HTTP
+  intent). Ubuntu's `janus` package auto-STARTS the service on install (before the jcfg exists); the
+  step now **`systemctl restart janus` ONLY IF it is already active** (`systemctl is-active --quiet
+  janus &&`), else it stays enable-only. The production `intercom-hub.service` keeps `DynamicUser=yes`
+  and reads the root-owned 0600 room secret via **`LoadCredential=janus-room.secret:/etc/intercom-hub/janus-room.secret`**;
+  the hub prefers `$CREDENTIALS_DIRECTORY/janus-room.secret` over the configured `room_secret_file`
+  (`matrix::resolve_secret_path`, never logs the value).
+- **Listen-only join when the microphone is unavailable/denied — DONE (this lane).** The PWA no
+  longer dead-ends at `Janus: mic chyba`: on a `getUserMedia` rejection (NotFoundError/NotAllowedError/…,
+  classified by `isMicError`) `app.js` falls back to a **recv-only offer** (`tracks:[{type:"audio",
+  recv:true}]`, no `capture` → janus.js never calls getUserMedia), keeps the room audio playing,
+  DISABLES the mic toggle + device select, and shows the chip `Mikrofón: nedostupný (počúvate)`. A
+  second "Pripojiť" cycle re-enables the controls (`resetMicControls`) so a re-granted mic re-negotiates
+  WITH send. While the hub is down the page still logs one Chromium `502`/`404` resource error per poll
+  (network class, not a JS error) — expected.
 - **The live M3 test shape that worked:** transient `intercom-hub-m3` unit (NO DynamicUser, so the
   room-secret file is readable) on a cam1 + cutters + phones(janus) matrix with
   `[video].ndi_source_name = "CAM1 (usb)"` (until issue 1347 builds `STRIH-LX (interkom)`); the PWA
