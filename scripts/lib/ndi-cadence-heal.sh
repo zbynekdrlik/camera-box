@@ -99,13 +99,17 @@ ndi_cadence_read() {
   local host="${1:-}" only="${2:-}"
   local raw
   raw="$(_ndi_cadence_fetch "$host")" || raw=""
-  local old_ifs="$IFS" spec name exp out verdict fps cap
+  local old_ifs="$IFS" spec name exp out verdict fps cap had_noglob=0
+  # Snapshot the caller's noglob state so `set -f`/`set +f` here can NEVER silently re-enable
+  # globbing in a caller that had it OFF (#1203 review 🔵3) -- we only restore +f if the caller
+  # did not already have -f set.
+  case $- in *f*) had_noglob=1 ;; esac
   local -a specs=()
   set -f
   IFS=';'
   for spec in $NDI_CADENCE_INPUTS; do specs+=("$spec"); done
   IFS="$old_ifs"
-  set +f
+  [ "$had_noglob" -eq 1 ] || set +f
   for spec in "${specs[@]}"; do
     if [ "${spec%%|*}" = "$spec" ]; then
       name="$spec"
@@ -249,7 +253,10 @@ ndi_cadence_verify_and_heal() {
     if [ "$verdict" = "HALVED" ]; then
       (_ndi_cadence_heal_one "$host" "$name" "$fps" "$cap" "$exp" "$settle" "$max_arms" >"$recfile" 2>>"$workdir/log") &
     else
-      printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$name" "$verdict" "$fps" "$cap" "$exp" "" "ok" >"$recfile" 2>/dev/null || true
+      # A non-HALVED read (HEALTHY/UNKNOWN/BORDERLINE/SKIP) took no action -- record its OWN verdict
+      # as the result rather than a blanket "ok" that would overstate an UNKNOWN/BORDERLINE input's
+      # health in the telemetry (#1203 review 🔵4). It carries no arm; counts stay verdict-driven.
+      printf '%s\t%s\t%s\t%s\t%s\t%s\tno-action:%s\n' "$name" "$verdict" "$fps" "$cap" "$exp" "" "$verdict" >"$recfile" 2>/dev/null || true
     fi
   done <<<"$reads"
   wait || true

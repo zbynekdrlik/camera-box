@@ -382,6 +382,68 @@ fn sender_restart_arm_is_gated_off_in_event_mode() {
 }
 
 // ---------------------------------------------------------------------------------------------
+// (b3) #1203 review 🔵5: the DEFAULT (unseam'd) sender resolver can't restart a source with no
+//      `camN` token (its sender is a Windows OBS, not a systemd unit) -> attempt_sender_restart
+//      returns non-zero -> the arm PAGES (fail-safe), never a hang or a wrong ssh target. Drives
+//      the REAL attempt_sender_restart (NO NDI_HALVING_SENDER_RESTART_CMD) with a TEST rig-mode so
+//      the arm proceeds; "NDI 2ME PGM" has no camN token so the default returns 1 before any ssh.
+// ---------------------------------------------------------------------------------------------
+#[test]
+fn default_sender_restart_without_a_cam_token_pages_never_restarts() {
+    let rig = Rig::new();
+    // A per-pass run that arms the cure but leaves NDI_HALVING_SENDER_RESTART_CMD UNSET, so the real
+    // attempt_sender_restart default runs. rig-mode is TEST (the default fixture) so the arm proceeds.
+    let run = |now: u64| -> String {
+        fs::write(&rig.logfix, halved_only()).unwrap();
+        let out = Command::new("bash")
+            .arg(watchdog())
+            .env(
+                "NDI_HALVING_PROBE_CMD",
+                format!("bash {}", rig.probe.display()),
+            )
+            .env(
+                "NDI_HALVING_CURE_CMD",
+                format!("bash {}", rig.cure.display()),
+            )
+            // NO NDI_HALVING_SENDER_RESTART_CMD -> the real default attempt_sender_restart runs.
+            .env(
+                "NDI_HALVING_RIGMODE_CMD",
+                format!("bash {}", rig.rigmode.display()),
+            )
+            .env("AIRULESET_NOTIFY", &rig.notify)
+            .env("NDI_HALVING_TEST_LOG", &rig.logfix)
+            .env("NDI_HALVING_STATE_FILE", &rig.state)
+            .env("NDI_HALVING_NETREACH_STATE_FILE", &rig.netreach)
+            .env("NDI_HALVING_INPUTS", PGM_ONLY)
+            .env("NDI_HALVING_SELFHEAL", "1")
+            .env("NDI_HALVING_COOLDOWN_S", "600")
+            .env("NDI_HALVING_NOW", now.to_string())
+            .current_dir(manifest_dir())
+            .output()
+            .expect("run");
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        )
+    };
+    run(1000); // hold
+    run(1005); // attempt 1: idle-restore (via the cure seam)
+    run(1305); // within cooldown -> page
+    let p4 = run(1705); // attempt 2: sender-restart -> default resolver, no camN -> fail -> page
+    assert!(
+        p4.contains("no resolvable sender box") || p4.contains("sender-restart FAILED"),
+        "the default sender resolver must fail for a no-camN input, not ssh a wrong target: {p4}"
+    );
+    assert!(
+        rig.notify_bodies().contains("reštart zdroja")
+            && rig.notify_bodies().contains("NDI 2ME PGM"),
+        "a failed sender-restart must PAGE naming the input: {}",
+        rig.notify_bodies()
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
 // (c) no-double-page: receiver (stream) OR sender (strih) down per #1001 -> SKIP every input.
 // ---------------------------------------------------------------------------------------------
 #[test]
