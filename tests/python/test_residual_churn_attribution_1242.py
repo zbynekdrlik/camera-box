@@ -15,6 +15,19 @@ the box's steady floor, or a burst deficit >= ANOMALY_DEFICIT_FLOOR. Everything 
 (A naive classifier that read any deficit or any `corrupted>=1` as SOURCE -- the tool's own first
 draft -- would MIS-attribute the steady cam2 deficit and the steady cam7 `4 corrupted` floor to the
 grabber; `steady_*_is_background_not_source_*` are the RED-catching cases.)
+
+(#1242 reopened) The SECOND source signal these tests pin: the STARVATION-REPEAT burst. The `(#889)
+dupe-preferring decimation: .. <G> starvation last-frame repeats ..` counter is the emit gate finding
+NO new frame at a boundary with capture at 60.0 -- a duplicate produced ON the box in the
+capture->emit hand-off (issue 889 mechanics), NOT on strih. It is INVISIBLE to the capture-deficit
+discriminator (a starvation burst can coincide with a perfectly clean 60/60 capture cadence -- the
+CAM4 6/4 run on 19.9.2026: 697 starvation repeats, 0 capture deficit, filed DOWNSTREAM by
+elimination). So the attribution splits SOURCE-DEFICIT / SOURCE-STARVATION / DOWNSTREAM / UNKNOWN.
+G is PER-INTERVAL (gate.rs drains+resets it each 5-s emit), so deltaG per 5-s bucket == G; the burst
+is judged AGAINST the box's own run baseline (median deltaG per bucket) exactly like the deficit
+signal -- a steady 20/5s background is a COVARIATE, not a burst
+(`steady_starvation_background_is_not_a_burst`), and a capture-deficit burst still WINS the
+attribution when both coincide (`deficit_burst_wins_over_starvation`).
 """
 import json
 import pathlib
@@ -146,7 +159,7 @@ def test_late_dupe_copy_at_event_is_source():
     sig = rca.source_signal_at(tl, t_event, window=10)
     base = rca.burn_baseline(tl)
     attribution, reason = rca.classify_event(sig, base)
-    assert attribution == "SOURCE"
+    assert attribution == "SOURCE-DEFICIT"
     assert "late-dupe" in reason
 
 
@@ -159,7 +172,7 @@ def test_corruption_rise_above_floor_is_source():
     base = rca.burn_baseline(tl)
     assert base["corrupt_floor"] == 1
     attribution, reason = rca.classify_event(sig, base)
-    assert attribution == "SOURCE"
+    assert attribution == "SOURCE-DEFICIT"
     assert "ROSE" in reason
 
 
@@ -170,7 +183,7 @@ def test_burst_deficit_above_floor_is_source():
     sig = rca.source_signal_at(tl, t_event, window=10)
     base = rca.burn_baseline(tl)
     attribution, _ = rca.classify_event(sig, base)
-    assert attribution == "SOURCE"
+    assert attribution == "SOURCE-DEFICIT"
 
 
 def test_no_coverage_is_unknown_never_guessed():
@@ -274,3 +287,144 @@ def test_cli_accepts_bare_run_id_or_skips_missing(tmp_path):
     r = subprocess.run([sys.executable, str(_TOOL), "does-not-exist-run"], capture_output=True, text=True)
     assert r.returncode == 1
     assert "no run dirs" in r.stderr
+
+
+# ================================================= #1242 (reopened): the STARVATION-REPEAT signal ==
+def _clean_capture_with_starvation(secs, starv_by_index, deficit_by_index=None):
+    """Build a burn log with a CLEAN 60/60 capture cadence (zero deficit unless overridden) plus a
+    per-5-s-bucket starvation series -- the exact shape the deficit discriminator is blind to."""
+    deficit_by_index = deficit_by_index or {}
+    lines = []
+    for i, s in enumerate(secs):
+        ts = "2026-09-19T19:00:%02d" % s
+        sent = 300 + deficit_by_index.get(i, 0)          # captured stays 300 -> deficit == override
+        lines.append(_streaming(ts, sent, 300))
+        lines.append(_decim(ts, late_dupe=0, starvation=starv_by_index.get(i, 0)))
+    return "\n".join(lines)
+
+
+def test_parse_starvation_series_per_interval_reuses_decim_regex():
+    """G is PER-INTERVAL (gate.rs drains+resets each emit); parse_starvation_series returns [(t, G)]
+    off the SAME `_DECIM_RE`/`parse_burn_timeline` the base rate uses (never a second regex)."""
+    text = "\n".join([
+        _decim("2026-09-19T19:00:00", late_dupe=0, starvation=0),
+        _decim("2026-09-19T19:00:05", late_dupe=0, starvation=16),
+        _streaming("2026-09-19T19:00:05", 300, 300),   # interleaved -- must be ignored by this parser
+    ])
+    series = rca.parse_starvation_series(text)
+    t0 = rca._epoch("2026-09-19T19:00:00")
+    assert series == [(t0, 0), (t0 + 5, 16)]
+
+
+def test_parse_starvation_series_parses_a_real_captured_cam4_line():
+    """A GENUINE line from /tmp/recording-e2e-1847213264/cam4-cbox-burn-1847213264.log (the CAM4 6/4
+    run, 697 starvation repeats) -- the parser must target the STARVATION field (16), not late-dupe (0)."""
+    real = (
+        "\x1b[2m2026-09-19T19:12:00.089501Z\x1b[0m \x1b[32m INFO\x1b[0m "
+        "\x1b[2mcamera_box\x1b[0m\x1b[2m:\x1b[0m (#889) dupe-preferring decimation: "
+        "0 dupe-victim shed / 16 blind-pacing shed / 0 late-dupe copies emitted (#1111 grid-lock valve) "
+        "/ 0 boundaries retired (#1145 over-rate absorption) / 0 depth-drained (#1145 v2 over-rate absorption) "
+        "/ 0 fast-drained (#1145 v2.1 deep-backlog convergence) / 16 starvation last-frame repeats "
+        "(#1167 v4 empty-queue slot-fill) over the last ~5s"
+    )
+    series = rca.parse_starvation_series(real)
+    assert len(series) == 1
+    t = rca._epoch("2026-09-19T19:12:00")
+    assert series[0] == (t, 16)              # G, targeted by "starvation last-frame repeats" (late-dupe was 0)
+
+
+def test_starvation_burst_at_returns_delta_baseline_and_flag():
+    # 9 buckets, all 0 except a 15-spike at the event bucket -> baseline median 0, burst
+    secs = list(range(0, 45, 5))
+    series = rca.parse_starvation_series(
+        _clean_capture_with_starvation(secs, {4: 15}))
+    t_event = series[4][0]
+    delta_g, base_med, is_burst = rca.starvation_burst_at(series, t_event, window=2)
+    assert delta_g == 15
+    assert base_med == 0
+    assert is_burst is True
+    assert delta_g >= rca.STARVATION_BURST_MIN
+
+
+def test_starvation_burst_at_event_is_source_starvation():
+    """The CAM4 signature: a clean 60/60 capture cadence (ZERO deficit) with a starvation burst at the
+    event -> SOURCE-STARVATION, the exact case the deficit-only discriminator filed DOWNSTREAM."""
+    secs = list(range(0, 45, 5))
+    tl = rca.parse_burn_timeline(_clean_capture_with_starvation(secs, {4: 15}))
+    t_event = tl["stream"][4][0]
+    sig = rca.source_signal_at(tl, t_event, window=2)
+    base = rca.burn_baseline(tl)
+    assert sig["stream_deficit_max"] == 0            # NO capture deficit anywhere -- invisible to the old signal
+    assert sig["starvation_is_burst"] is True
+    attribution, reason = rca.classify_event(sig, base)
+    assert attribution == "SOURCE-STARVATION"
+    assert "starvation" in reason
+
+
+def test_flat_starvation_series_is_downstream():
+    """The SAME clean-capture log but a FLAT (all-zero) starvation series -> no burst -> DOWNSTREAM."""
+    secs = list(range(0, 45, 5))
+    tl = rca.parse_burn_timeline(_clean_capture_with_starvation(secs, {}))
+    t_event = tl["stream"][4][0]
+    sig = rca.source_signal_at(tl, t_event, window=2)
+    base = rca.burn_baseline(tl)
+    assert sig["starvation_is_burst"] is False
+    attribution, _ = rca.classify_event(sig, base)
+    assert attribution == "DOWNSTREAM"
+
+
+def test_deficit_burst_wins_over_starvation():
+    """When BOTH a capture-deficit burst AND a starvation burst coincide, the deficit is checked
+    first and WINS the attribution -> SOURCE-DEFICIT (never masked by the new signal)."""
+    secs = list(range(0, 45, 5))
+    tl = rca.parse_burn_timeline(
+        _clean_capture_with_starvation(secs, {4: 15}, deficit_by_index={4: 3}))
+    t_event = tl["stream"][4][0]
+    sig = rca.source_signal_at(tl, t_event, window=2)
+    base = rca.burn_baseline(tl)
+    assert sig["stream_deficit_max"] == 3
+    assert sig["starvation_is_burst"] is True         # the starvation burst is present too...
+    attribution, _ = rca.classify_event(sig, base)
+    assert attribution == "SOURCE-DEFICIT"            # ...but the deficit burst wins
+
+
+def test_steady_starvation_background_is_not_a_burst():
+    """A steady 20/5s starvation background is a COVARIATE, NOT a burst: median 20, event 20 is not
+    ABOVE it -> is_burst False -> DOWNSTREAM (the rule's baseline-relative mandate)."""
+    secs = list(range(0, 45, 5))
+    steady = {i: 20 for i in range(len(secs))}
+    text = _clean_capture_with_starvation(secs, steady)
+    series = rca.parse_starvation_series(text)
+    t_event = series[4][0]
+    delta_g, base_med, is_burst = rca.starvation_burst_at(series, t_event, window=2)
+    assert delta_g == 20
+    assert base_med == 20
+    assert is_burst is False                          # 20 >= MIN but NOT > baseline median 20
+    tl = rca.parse_burn_timeline(text)
+    attribution, _ = rca.classify_event(
+        rca.source_signal_at(tl, t_event, window=2), rca.burn_baseline(tl))
+    assert attribution == "DOWNSTREAM"
+
+
+def test_aggregate_and_markdown_carry_the_starvation_split():
+    secs = list(range(0, 30, 5))
+    tl = rca.parse_burn_timeline(_clean_capture_with_starvation(secs, {2: 20}))
+    t_event = tl["stream"][2][0]
+    verdict = _verdict([{"cambox": "CAM4", "kind": "copy", "wall_clock_epoch_s": t_event, "frame_index": 1}])
+    res = rca.attribute_run(verdict, {"CAM4": tl}, window=2)
+    assert res["events"][0]["attribution"] == "SOURCE-STARVATION"
+    assert res["events"][0]["signal"]["starvation_delta"] == 20
+    assert res["events"][0]["signal"]["starvation_is_burst"] is True
+    agg = rca.aggregate([res])
+    assert agg["source_starvation_events"] == 1
+    assert agg["source_deficit_events"] == 0
+    assert agg["source_events"] == 1                  # total source = deficit + starvation
+    assert agg["downstream_events"] == 0
+    # the split must survive a JSON round-trip (the --json contract) ...
+    reparsed = json.loads(json.dumps({"runs": [res], "aggregate": agg}))
+    assert reparsed["aggregate"]["source_starvation_events"] == 1
+    assert reparsed["runs"][0]["events"][0]["signal"]["starvation_baseline"] == 0
+    # ... and the markdown must name it
+    md = rca.render_markdown([res], agg)
+    assert "SOURCE-STARVATION" in md
+    assert "starv" in md.lower()
