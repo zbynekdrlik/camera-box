@@ -550,6 +550,86 @@ script with the emitter's terse stderr line BEFORE `|| fail` can print its actio
 block can `exit`, wrap the `eval` in `( … )` so the exit is contained and the caller's `|| fail`
 fires.
 
+## Post-cut-over: the seeder targets the OPERATOR collection (strih role, this lane, 20.9.2026)
+
+The notebook now runs the OWNER's **migrated production ("operator") collection** — the box became
+THE strih. Its OBS inputs are the canonical strih names the WHOLE E2E/rig toolchain addresses
+(`obs_burn_filter` / `obs_phase2` / recv-timing taps / genlock-audit / latency-pins baseline all key
+on `NDI camN`): **`NDI cam1..7`, `NDI 2ME PVW`, `NDI 2ME PGM (mv)`, `cg`, `CG-obs`** — NOT the
+parallel-phase derived `NDI CAMn (usb)` the old bare-string manifest produced. So the seeder gained a
+**strih ROLE**:
+
+- **The manifest carries EXPLICIT-name OBJECT entries** `{sender, input, scene}` (a DATA name-map)
+  alongside the legacy bare-string shape (`_entry_fields` normalizes both). `sender` = the NDI source
+  received; `input` = the OBS input the tooling addresses; `scene` = the operator's scene.
+  `strih_lx_seed_manifest_json` (`scripts/lib/strih-provision.sh`) is the single source of that DATA
+  map; `setup-strih.sh` step 6 writes it. **Why `NDI camN` is canonical on the production strih:**
+  renaming the operator's collection to fit the seeder would break every tool that already addresses
+  `NDI camN` (Prístup 2, rejected) — the seeder conforms to the operator, not the other way round.
+- **`"mode": "update-only"`** makes `--bootstrap` heal the certified genlock CLASS onto inputs that
+  ALREADY exist and **NEVER `CreateScene`/`CreateInput`** — a missing declared input is REPORTED, not
+  created (`bootstrap(..., update_only=True)`; it also NEVER re-enforces `ndi_source_name`, since the
+  operator's source binding is authoritative). `--verify-parity` skips the `ndi_source_name` check in
+  this mode (`input_parity_problems(..., check_source=False)`). The legacy `create` mode (absent
+  `mode`, the parallel/imag shape) is unchanged.
+- **Class by SUBSTRING.** The operator's `NDI 2ME PVW` / `NDI 2ME PGM (mv)` inputs do not END in
+  `(2ME PGM)`/`(2ME PVW)`, so `input_class_for` now matches the `2ME PGM`/`2ME PVW` marker as a
+  SUBSTRING, and `seed_inputs` classifies feedback when EITHER the sender OR the input name carries
+  it — so a supervisor-confirmable sender guess never mis-classifies (the input name already decides).
+- **DATA the supervisor re-confirms live.** The 2ME-feedback source (`STRIH-SNV (2ME PGM/PVW)` during
+  the parallel run; `STRIH-LX` self-loop once issue 1347 lands) and the CG-pair senders are a
+  best-known DATA guess (the notebook's live collection JSON is not reachable from a worktree). Because
+  update-only never renames a source, a wrong sender is harmless (drives only CLASS detection, which
+  the input name provides) and is a MANIFEST edit, never a code change. The supervisor re-reads the
+  live collection's input settings on the notebook and repins the senders if needed.
+
+### The four (five) live gotchas caught bringing the notebook up as strih
+
+1. **Duplicate receivers from the parallel-phase seed.** The old bare-string manifest derived
+   `NDI CAMn (usb)` and `--bootstrap` `CreateInput`'d them alongside the operator's `NDI camN` — TWO
+   DistroAV receivers per camera (both at 60 fps), duplicate CG receivers, and `NDI STRIH-SNV (2ME …)`
+   inputs pulling the OLD strih's feeds (25 scenes / 30 inputs on first launch). The update-only mode
+   fixes it structurally: the launch seed never creates an input again.
+2. **No `curl` on a fresh box.** A fresh strih-lx has NO `curl`, and the Companion Satellite install
+   emitter downloads with `curl -fsSL` → step 16 FAILed on the first run. `curl` is now in the step-16
+   dep line (`deps='curl libusb-1.0-0-dev …'`), the setup-device.sh precedent.
+3. **intel_pstate governor naming under ppd.** On intel_pstate ACTIVE (this Lenovo Raptor Lake)
+   `powerprofilesctl set performance` sets `energy_performance_preference=performance` but leaves
+   `scaling_governor=powersave` — so an `if ppd; then …; else <governor>; fi` shape NEVER wrote the
+   governor and `verify (perf)` (governor==performance on all cores) FAILed while the step logged the
+   self-contradicting "set to performance (now: powersave)". `strih_performance_mode_apply` now runs
+   ppd AND the governor write UNCONDITIONALLY (they are complementary — ppd owns EPP, the loop owns the
+   governor), and step 15 logs the EFFECTIVE triple `governor=… / EPP=… / ppd=…`
+   (`strih_perf_effective_line`). The boot oneshot `cpu-performance.service` already writes the
+   governor, so boot state ≠ first-run state — always check `scaling_governor` on intel_pstate, ppd is
+   not enough.
+4. **Satellite REST apply (:9999).** The electron-store `config.json` file seed (`remoteIp`/
+   `remotePort`/`remoteProtocol:tcp`) alone left a RUNNING Satellite's EFFECTIVE controller host at
+   `127.0.0.1` until a `POST /api/config {"host","port","protocol":"tcp"}` on its local REST
+   (`:9999`) — after which `GET /api/status` = `connected:true`. Step 16 now runs
+   `strih_companion_satellite_rest_apply_cmd` after seeding the file (best-effort: a no-op when the
+   Satellite is not running), and `verify (companion)` grades the LIVE `connected` state via
+   `strih_companion_status_verdict` when the REST answers (file-only when it does not). The POST uses
+   the REST keys `host`/`port`/`protocol`, NOT the electron-store `remoteIp`/`remotePort`.
+
+### GOTCHA — OBS resolves its helper processes relative to its OWN binary; a prefix install must copy the WHOLE bin/ dir
+
+OBS spawns `obs-ffmpeg-mux` (the recording muxer) and `obs-nvenc-test` (the NVENC probe) from the
+directory of its OWN executable (`os_get_executable_path`), NOT from `$PATH`. The prefix install
+(`strih_install_bundle_prefix`) originally copied only `${bundle}/bin/obs` into `/usr/bin`, so those
+helpers were absent beside `/usr/bin/obs`: the notebook OBS logged `[NVENC] Failed to launch the
+NVENC test process` → `NVENC not supported` (while `/opt/obs-genlock/bin/obs-nvenc-test` run by hand
+reported NVENC 13.0 / CUDA 13.20 / Blackwell OK), and RECORDING would fail outright (obs-ffmpeg-mux
+is the muxer). The fix: `strih_install_bundle_prefix` now installs EVERY file in `${bundle}/bin/*`
+(enumerated by the pure `strih_bundle_bin_files`, so a future helper rides along), root-owned 0755,
+next to obs. `verify-strih.sh` item 20 FAILs loud (recording-critical) unless
+`/usr/bin/obs-ffmpeg-mux` AND `/usr/bin/obs-nvenc-test` exist+executable beside `/usr/bin/obs`, and —
+when OBS is running — grades the newest OBS log's NVENC state (`strih_nvenc_log_verdict`:
+`[obs-nvenc] NVENC version:` = healthy, `NVENC not supported` = the missing-helper signature). The
+bundle dir on the box is user-private (`drwx------ newlevel`); the install runs as root, so `find`
+traverses it fine. General rule: a `/usr`-prefix install of a self-contained app bundle copies the
+whole `bin/`, never a single hardcoded main binary — the app's sibling helpers must travel with it.
+
 ## Follow-ups (not done in the preparation lane)
 
 - ~~obs-browser / CEF in the strih CI variant~~ — **DONE (issue 1317, CEF now wired)**, see the CI
