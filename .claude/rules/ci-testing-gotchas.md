@@ -1103,3 +1103,40 @@ list in `.claude/rules/strih-intercom.md`. A grep sweep takes 10 s; a missed lin
 rig time. And do NOT push a docs-only follow-up while the E2E is running on the previous head — the
 push cancels it (the concurrency-group section above) and re-queues another 20-min poll if Lint is
 not yet green on the new head.
+
+## Branching a Windows-only touch-point on a NEW platform resolver: check the anchor's fixed-byte-window headroom BEFORE inlining the new branch (issue 1351)
+
+When a `[0/8]`-style gate is guarded by a FIXED-BYTE-WINDOW static-anchor test (e.g.
+`tests/harness_obs_session_visibility_977.rs`'s `&body[banner_pos..banner_pos+2500]`), inserting a
+new `if [ platform = X ]; then … else … fi` wrapper INLINE around the existing probe grows the
+window's used bytes — every anchor further into the window (a second box's probe call, a recovery
+message) shifts forward, and a naive inline branch can silently push a later anchor PAST the fixed
+budget (confirmed live: a first draft pushed `win-stream-snv MCP Shell` from offset 2319 to beyond
+2500, which would have gone CI-red with no local signal — Tier-0 bans running the actual test).
+**Before inlining a new branch into an anchored region: measure the anchor's used bytes with a
+one-line python `find()` sweep (see the `#1265` entry above's recipe, adapted to a fixed window
+instead of a fixed distance) BEFORE writing the branch, and again AFTER, to confirm every anchor
+this test's window depends on still lands inside the budget.** The fix that reclaims headroom: move
+the branch's LIVE logic (ssh + a WS round-trip, in this case) into ONE orchestrator function in the
+already-sourced lib (`scripts/lib/strih-platform.sh`'s `strih_linux_visibility_check`), so the
+`recording-e2e.sh` call site stays a single line (`_svg_strih_msg="$(strih_linux_visibility_check
+"$STRIH" "$STRIH_USER" "$STRIH_PW" "$SVG_SSH_TIMEOUT" "$HERE")"`) instead of ~7 inlined lines — the
+SAME "push detail into the sourced lib, keep the call site a one-liner" discipline the `#675`
+pattern already establishes, just applied for byte-budget reasons rather than anchor-collision ones.
+
+## A new Linux-box-reached-over-plain-ssh sibling script: `recording-verdict-on-imag.sh` is the reusable TEMPLATE, including its issue-1118 sha256 upload gate — copy the WHOLE pattern, not just the shape
+
+Adding a NEW per-box script for a box reached over plain ssh/scp (imag-nb, strih-lx, any future
+Linux OBS box — as opposed to the win-* MCP-only Windows boxes) should start from
+`scripts/recording-verdict-on-imag.sh` as the template: its "always execute for real, never a
+plan-print mode" shape (ssh/scp to a plain Linux box is always allowed on this rig), its
+`--skip-if-exists` idempotency check, its `<partial>-pixels` pull-back convention — AND its
+**issue-1118 sha256 VERSION GATE** (`onimag_upload_decision`: force wins / absent uploads / unknown
+local sha fails safe to upload / differing sha re-uploads / identical sha skips). A first draft of
+`recording-verdict-on-strih-lx.sh` (issue 1351) copied everything EXCEPT the sha gate — a mere
+`[ -x "$REMOTE_BIN" ]` presence check, which silently reuses a schema-drifted binary exactly the way
+imag-nb's pre-1118 bug did. A fresh-context review agent caught it on the FIRST pass; it would not
+have been caught by any local Tier-0 check (bash -n/shellcheck/fmt are all blind to "missing a
+correctness check", they only catch syntax). **When copying the imag-nb template for a new Linux
+sibling, port the sha256 gate in the SAME commit as the rest of the script — it is not an optional
+follow-up, it is part of the template.**
