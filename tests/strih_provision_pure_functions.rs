@@ -609,8 +609,8 @@ fn install_bundle_prefix_copies_libs_before_ldconfig() {
         "the lib copy must precede ldconfig (cp {cp} vs ldconfig {ldconfig})"
     );
     assert!(
-        lib.contains("install -m 0755 -o root -g root \"${bundle}/bin/obs\" \"${bindir}/obs\""),
-        "strih_install_bundle_prefix must install the frontend to BINDIR/obs (0755 root)"
+        lib.contains("install -m 0755 -o root -g root \"$binf\" \"${bindir}/${base}\""),
+        "strih_install_bundle_prefix must install each bundle bin/* file (incl. obs) to BINDIR/<base> (0755 root) — issue 1317 bundle-helpers: obs + obs-ffmpeg-mux + obs-nvenc-test, a loop over bin/*, not a hardcoded obs"
     );
 }
 
