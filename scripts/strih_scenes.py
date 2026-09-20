@@ -112,11 +112,19 @@ def feedback_settings():
 # address it by that name).
 AUDIO_INPUT_NAME = "ASIO zvuk"
 AUDIO_INPUT_KIND = "pulse_input_capture"
-AUDIO_MONITOR_DEVICE = "strih-program.monitor"
+# issue 1344 follow-up (20.9.2026 live diagnosis, issuecomment-5751113173): the null-sink monitor
+# `strih-program.monitor` is NOT pulse-visible on Ubuntu 26.04 pipewire -- support.null-audio-sink
+# created via context.objects never gets a pulse.monitor mapping there, so OBS's pulse_input_capture
+# enumeration never lists it and binding it reads digital silence (proven live: pw-cat captures real
+# audio off it, OBS shows nothing). strih_pipewire_program_loopback_conf (strih-provision.sh)
+# republishes the sink via a libpipewire-module-loopback as a real Audio/Source node
+# `strih-program-source`, which OBS correctly enumerates and captures.
+AUDIO_MONITOR_DEVICE = "strih-program-source"
 
 
 def program_audio_input_settings():
-    """The pulse_input_capture settings binding `ASIO zvuk` to the strih-program sink monitor.
+    """The pulse_input_capture settings binding `ASIO zvuk` to the strih-program-source loopback
+    node (issue 1344 follow-up -- NOT the null-sink monitor directly, see AUDIO_MONITOR_DEVICE).
     Returned fresh each call (never a shared mutable default)."""
     return {"device_id": AUDIO_MONITOR_DEVICE}
 
@@ -571,6 +579,30 @@ def seed_program_audio_input(obs):
     return "created" if action == "create" else "replaced (was %s)" % (kind or "absent")
 
 
+def ensure_program_audio_in_every_scene(obs, plan):
+    """issue 1344 item 3 (20.9.2026 live diagnosis): the `ASIO zvuk` program-audio input must be a
+    scene item in EVERY declared operator scene, not just the one it happened to be created in --
+    OBS only plays a scene item's audio while its OWNING scene is active, so seeding it into a single
+    scene silences program audio on every camera cut. The original migrated collection carried it in
+    all 7 program scenes (Cam 1/2/3/5/6/7 + Moderatori). Adds a CreateSceneItem for AUDIO_INPUT_NAME
+    to any scene named in `plan` that does not already carry it (scene names de-duplicated). Returns
+    the number of scenes it added to (0 when every scene already has it) -- best-effort
+    (ignore_err=True): a scene that no longer exists or the source not yet created must not abort the
+    whole seed."""
+    scenes = sorted({item["scene"] for item in plan})
+    added = 0
+    for scene in scenes:
+        items = (obs.req("GetSceneItemList", {"sceneName": scene}, ignore_err=True) or {}).get(
+            "sceneItems", [])
+        if any(i.get("sourceName") == AUDIO_INPUT_NAME for i in items):
+            continue
+        obs.req("CreateSceneItem", {
+            "sceneName": scene, "sourceName": AUDIO_INPUT_NAME,
+        }, ignore_err=True)
+        added += 1
+    return added
+
+
 def bootstrap(obs, plan, studio=True, update_only=False):
     """Seed the collection from `plan` (seed_inputs output). Two modes:
 
@@ -636,8 +668,16 @@ def bootstrap(obs, plan, studio=True, update_only=False):
         else:
             result[inp] = "matched"
     # issue 1344: the ONE allowed create/replace — the `ASIO zvuk` program-audio input on the
-    # strih-program PipeWire sink monitor (the OBS program capture that Failed to create on Linux).
-    result[AUDIO_INPUT_NAME] = seed_program_audio_input(obs)
+    # strih-program-source loopback node (the OBS program capture that Failed to create on Linux).
+    audio_status = seed_program_audio_input(obs)
+    # issue 1344 item 3: once the input exists, make sure it is a scene item in EVERY declared
+    # scene (never only the one it happened to be created/matched in) -- skip when the input itself
+    # could not be resolved (no scene existed at all: "no-scene (deferred)"), nothing to attach to.
+    if not audio_status.startswith("no-scene"):
+        added = ensure_program_audio_in_every_scene(obs, plan)
+        if added:
+            audio_status += " (+%d scene items)" % added
+    result[AUDIO_INPUT_NAME] = audio_status
     if studio:
         obs.req("SetStudioModeEnabled", {"studioModeEnabled": True}, ignore_err=True)
     return result
