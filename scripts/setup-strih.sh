@@ -451,7 +451,11 @@ step 16 "Bitfocus Companion Satellite (Stream Deck surface agent) -- enable-only
 # box by the supervisor (see the LANE-RETURN followup); this step makes the one procedure complete.
 CS_HOST="$(strih_companion_satellite_host)"
 CS_VER="$(strih_companion_satellite_version)"
-eval "$(strih_companion_satellite_install)" \
+# Run the emitted install in a SUBSHELL (the step-4b NDI-runtime pattern): the emitter `exit 1`s on a
+# fetch/install failure, so a bare `eval "$(...)" || fail` would terminate setup-strih.sh directly and
+# never reach `fail` (the repin hint). The subshell contains the exit, returns non-zero, and `|| fail`
+# fires with the actionable message.
+( eval "$(strih_companion_satellite_install)" ) \
   || fail "Companion Satellite install failed (version ${CS_VER}) -- confirm the pinned version/asset (COMPANION_SATELLITE_VERSION / COMPANION_SATELLITE_DEB_URL) and re-run"
 install -d -m 755 /etc/companion-satellite
 strih_companion_satellite_config_text "$CS_HOST" > /etc/companion-satellite/host.conf \
