@@ -996,7 +996,258 @@ fn setup_strih_installs_janus_enable_only_before_final_verify() {
         "janus is enable-only (never start/restart) until the M4 cut-over"
     );
     assert!(
-        s.contains("TOTAL_STEPS=15"),
-        "TOTAL_STEPS must be bumped for the janus step"
+        s.contains("TOTAL_STEPS=17"),
+        "TOTAL_STEPS must be bumped for the janus step (17 after the issue-1317 perf + companion steps)"
+    );
+}
+
+// =====================================================================================
+// issue 1317 (this lane): the two provisioning steps the owner caught missing live on the
+// strih-lx notebook -- (1) CPU PERFORMANCE governor, (2) Bitfocus Companion Satellite.
+// The pure emitters/predicates below live in scripts/lib/strih-provision.sh and are wired
+// as two new numbered steps in setup-strih.sh + two acceptance items in verify-strih.sh.
+// =====================================================================================
+
+/// The performance-mode apply block PREFERS power-profiles-daemon (`powerprofilesctl set
+/// performance`) and FALLS BACK to writing the `performance` scaling_governor -- the fleet order
+/// (the setup-device STEP-13 governor precedent + the design). It also masks the sleep targets, and
+/// the whole emitted block must be syntactically valid bash (the caller evals it under set -e).
+#[test]
+fn performance_mode_apply_prefers_powerprofiles_then_governor_and_masks_sleep() {
+    let (code, out, err) = run_sourced(&[], "strih_performance_mode_apply");
+    assert_eq!(code, 0, "emitter must succeed; stderr={err}");
+    assert!(
+        out.contains("powerprofilesctl set performance"),
+        "must prefer power-profiles-daemon: {out}"
+    );
+    assert!(
+        out.contains("scaling_governor"),
+        "must fall back to the scaling_governor write: {out}"
+    );
+    assert!(out.contains("performance"), "must set performance: {out}");
+    assert!(
+        out.contains("sleep.target"),
+        "must mask the sleep/suspend targets (setup-device STEP-13 shape): {out}"
+    );
+    let ppd = out
+        .find("powerprofilesctl")
+        .expect("powerprofilesctl must appear");
+    let gov = out
+        .find("scaling_governor")
+        .expect("scaling_governor must appear");
+    assert!(
+        ppd < gov,
+        "power-profiles-daemon must be PREFERRED (checked before) the governor fallback (ppd {ppd} vs gov {gov})"
+    );
+    // The emitted block is eval'd by setup-strih.sh under `set -euo pipefail` -- it must parse.
+    let (code, _o, err) = run_sourced(&[], "strih_performance_mode_apply | bash -n");
+    assert_eq!(
+        code, 0,
+        "emitted apply block must be valid bash; stderr={err}"
+    );
+}
+
+/// The persistent CPU performance systemd oneshot mirrors setup-device.sh's cpu-performance.service.
+#[test]
+fn cpu_performance_unit_is_the_fleet_oneshot() {
+    let (code, out, _e) = run_sourced(&[], "strih_cpu_performance_unit_text");
+    assert_eq!(code, 0);
+    assert!(out.contains("Type=oneshot"), "oneshot: {out}");
+    assert!(
+        out.contains("RemainAfterExit=yes"),
+        "remain-after-exit: {out}"
+    );
+    assert!(
+        out.contains("scaling_governor") && out.contains("performance"),
+        "ExecStart must write performance to scaling_governor: {out}"
+    );
+    assert!(
+        out.contains("WantedBy=multi-user.target"),
+        "install target: {out}"
+    );
+}
+
+/// The verify (perf) governor predicate: 0 iff EVERY online core reports `performance` and there is
+/// at least one core (fail-closed on empty/unreadable input -- test-strictness).
+#[test]
+fn verify_governor_ok_requires_every_core_performance_failclosed_on_empty() {
+    let (code, _o, _e) = run_sourced(
+        &[],
+        "printf 'performance\\nperformance\\nperformance\\n' | strih_verify_governor_ok",
+    );
+    assert_eq!(code, 0, "all-performance must pass");
+    let (code, _o, _e) = run_sourced(
+        &[],
+        "printf 'performance\\npowersave\\nperformance\\n' | strih_verify_governor_ok",
+    );
+    assert_ne!(code, 0, "one non-performance core must FAIL");
+    let (code, _o, _e) = run_sourced(&[], "printf '' | strih_verify_governor_ok");
+    assert_ne!(code, 0, "empty (unreadable) governors must fail-closed");
+}
+
+/// The Companion Satellite version is PINNED (never 'latest') and env-overridable, like the
+/// dantesync/NDI version pins.
+#[test]
+fn companion_satellite_version_is_pinned_never_latest() {
+    let (code, out, _e) = run_sourced(&[], "strih_companion_satellite_version");
+    assert_eq!(code, 0);
+    assert!(!out.trim().is_empty(), "a version must be pinned");
+    assert!(
+        !out.to_lowercase().contains("latest"),
+        "never 'latest' (reproducible pin): {out}"
+    );
+    let (_c, out2, _e) = run_sourced(
+        &[("COMPANION_SATELLITE_VERSION", "9.9.9")],
+        "strih_companion_satellite_version",
+    );
+    assert_eq!(out2.trim(), "9.9.9", "COMPANION_SATELLITE_VERSION override");
+}
+
+/// The pinned .deb URL carries the pinned version and points at the companion-satellite release.
+#[test]
+fn companion_satellite_deb_url_pins_the_version() {
+    let (_c, url, _e) = run_sourced(&[], "strih_companion_satellite_deb_url 1.2.3");
+    assert!(
+        url.contains("1.2.3"),
+        "url must carry the pinned version: {url}"
+    );
+    assert!(
+        url.contains("companion-satellite"),
+        "url must be the companion-satellite asset: {url}"
+    );
+    assert!(url.trim().ends_with(".deb"), "url must be a .deb: {url}");
+}
+
+/// The controller host defaults to the venue Companion controller 10.77.9.205, env-overridable.
+#[test]
+fn companion_satellite_host_defaults_to_the_venue_controller() {
+    let (_c, host, _e) = run_sourced(&[], "strih_companion_satellite_host");
+    assert_eq!(host.trim(), "10.77.9.205");
+    let (_c, host2, _e) = run_sourced(
+        &[("COMPANION_SATELLITE_HOST", "10.0.0.9")],
+        "strih_companion_satellite_host",
+    );
+    assert_eq!(
+        host2.trim(),
+        "10.0.0.9",
+        "COMPANION_SATELLITE_HOST override"
+    );
+}
+
+/// The config text records the controller host as the `COMPANION_SATELLITE_HOST` config value.
+#[test]
+fn companion_satellite_config_text_records_the_controller_host() {
+    let (_c, cfg, _e) = run_sourced(&[], "strih_companion_satellite_config_text 10.77.9.205");
+    assert!(
+        cfg.contains("COMPANION_SATELLITE_HOST=10.77.9.205"),
+        "config must record the controller host: {cfg}"
+    );
+}
+
+/// The Companion Satellite install emitter is ENABLE-ONLY (never start) + fetches the PINNED deb,
+/// and the emitted block is valid bash.
+#[test]
+fn companion_satellite_install_is_enable_only_and_fetches_the_pinned_deb() {
+    let (code, out, err) = run_sourced(&[], "strih_companion_satellite_install");
+    assert_eq!(code, 0, "install emitter must succeed; stderr={err}");
+    assert!(
+        out.contains("apt-get install"),
+        "must apt-get install the .deb: {out}"
+    );
+    assert!(
+        out.contains("companion-satellite"),
+        "must reference the companion-satellite package/asset: {out}"
+    );
+    assert!(
+        out.contains("systemctl enable"),
+        "must enable the unit: {out}"
+    );
+    assert!(
+        !out.contains("systemctl start") && !out.contains("enable --now"),
+        "companion is ENABLE-ONLY, never started mid-provision: {out}"
+    );
+    let (code, _o, err) = run_sourced(&[], "strih_companion_satellite_install | bash -n");
+    assert_eq!(
+        code, 0,
+        "emitted install block must be valid bash; stderr={err}"
+    );
+}
+
+/// The verify (companion) verdict is fail-closed: `ok` only for installed + enabled + host-ok.
+#[test]
+fn companion_verdict_is_failclosed() {
+    let (code, out, _e) = run_sourced(&[], "strih_companion_verdict 1 1 1");
+    assert_eq!(code, 0);
+    assert_eq!(out.trim(), "ok");
+    for (args, tok) in [
+        ("0 1 1", "not-installed"),
+        ("1 0 1", "not-enabled"),
+        ("1 1 0", "wrong-host"),
+    ] {
+        let (code, out, _e) = run_sourced(&[], &format!("strih_companion_verdict {args}"));
+        assert_ne!(code, 0, "{args} must be non-ok");
+        assert_eq!(out.trim(), tok, "{args} must verdict {tok}");
+    }
+    // Missing args default to 0 (fail-closed).
+    let (code, out, _e) = run_sourced(&[], "strih_companion_verdict");
+    assert_ne!(code, 0, "no args must fail-closed");
+    assert_eq!(out.trim(), "not-installed");
+}
+
+/// setup-strih.sh must wire the perf step (apply + persistence unit) BEFORE the final verify gate,
+/// and TOTAL_STEPS must be bumped to 17 for the two new steps.
+#[test]
+fn setup_strih_wires_performance_mode_before_final_verify() {
+    let s = read_script("scripts/setup-strih.sh");
+    let apply = s
+        .find("strih_performance_mode_apply")
+        .expect("setup-strih must call strih_performance_mode_apply");
+    let unit = s
+        .find("strih_cpu_performance_unit_text")
+        .expect("setup-strih must write the cpu-performance persistence unit");
+    let verify = s
+        .find("verify-strih.sh acceptance gate")
+        .expect("final verify present");
+    assert!(
+        apply < verify && unit < verify,
+        "the perf step must run before the final verify (apply {apply}, unit {unit}, verify {verify})"
+    );
+    assert!(
+        s.contains("TOTAL_STEPS=17"),
+        "TOTAL_STEPS must be bumped to 17 for the perf + companion steps"
+    );
+}
+
+/// setup-strih.sh must install Companion Satellite (via the install emitter + host config) BEFORE
+/// the final verify.
+#[test]
+fn setup_strih_wires_companion_satellite_before_final_verify() {
+    let s = read_script("scripts/setup-strih.sh");
+    let install = s
+        .find("strih_companion_satellite_install")
+        .expect("setup-strih must call strih_companion_satellite_install");
+    let cfg = s
+        .find("strih_companion_satellite_config_text")
+        .expect("setup-strih must write the controller-host config");
+    let verify = s
+        .find("verify-strih.sh acceptance gate")
+        .expect("final verify present");
+    assert!(
+        install < verify && cfg < verify,
+        "the companion step must run before the final verify (install {install}, cfg {cfg}, verify {verify})"
+    );
+}
+
+/// verify-strih.sh must carry the (perf) governor + (companion) acceptance items.
+#[test]
+fn verify_strih_carries_perf_and_companion_items() {
+    let v = read_script("scripts/verify-strih.sh");
+    assert!(
+        v.contains("strih_verify_governor_ok"),
+        "verify-strih must run the governor predicate for the (perf) item"
+    );
+    assert!(
+        v.contains("strih_companion_verdict"),
+        "verify-strih must run the companion verdict for the (companion) item"
     );
 }
