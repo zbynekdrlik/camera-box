@@ -1034,14 +1034,14 @@ fn setup_strih_installs_janus_enable_only_before_final_verify() {
             && s.contains("/etc/janus/janus.transport.http.jcfg"),
         "setup-strih must render + write the HTTP transport jcfg (loopback bind)"
     );
-    // The Janus step runs BEFORE the audio TODO gate (which `fail`s until the MiniFuse graph is
-    // wired, issue 1344) — the live box stopped at the audio step and never reached Janus.
-    let audio_gate = s
-        .find("TODO(audio):")
-        .expect("setup-strih must carry the audio TODO gate");
+    // NOTE (issue 1345 M3 re-integration): the original M3 assertion here — "the janus step runs
+    // BEFORE the audio TODO gate" — is SUPERSEDED by the issue-1344 restructure. The program-audio
+    // step (12) is now the real PipeWire strih-program wiring, no longer a fail-loud `TODO(audio)`
+    // gate that could block provisioning, so there is nothing for the janus step to precede. The
+    // janus step keeps its own place (14) in the 17-step flow (audio 12 -> hub 13 -> janus 14).
     assert!(
-        apt < audio_gate,
-        "the janus step must run BEFORE the audio TODO gate (janus {apt} vs audio {audio_gate})"
+        !s.contains("TODO(audio):"),
+        "the audio step is now the real PipeWire wiring (issue 1344), never a fail-loud TODO gate"
     );
     assert!(
         s.contains("TOTAL_STEPS=17"),
