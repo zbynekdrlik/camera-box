@@ -476,6 +476,52 @@ sandbox!` → the render process dies). `verify-strih.sh` item 13 only checks th
   PASS line reads `chrome-sandbox setuid-root (root:root 4755) -- CEF sandbox launchable`; a regressed
   helper prints e.g. `chrome-sandbox not setuid-root (wrong-owner: owner=newlevel:newlevel mode=700)`.
 
+## CPU performance governor + Bitfocus Companion Satellite (issue 1317, this lane, DONE)
+
+Two provisioning steps the owner caught missing LIVE on the notebook (20.9.2026 — no performance
+mode, dead Stream Deck) so the ONE `setup-strih.sh` procedure brings a fresh strih-lx to full
+parity in a single run (owner: „mas predsa mat jeden postup dany pre setupovanie"). Prístup 1 of
+the issue-1317 design — two additive idempotent steps mirroring the existing fleet mechanism, not a
+new framework.
+
+- **CPU performance governor (setup-strih.sh step 15).** `strih_performance_mode_apply` (pure emitter
+  the step `eval`s): PREFER `powerprofilesctl set performance` when power-profiles-daemon is present
+  (GNOME desktop 26.04 ships it), ELSE write the `performance` governor to every
+  `/sys/devices/system/cpu/cpu*/cpufreq/scaling_governor` — the setup-device.sh STEP-13 fallback —
+  then re-mask the sleep/suspend targets (step 11 already masks them; the re-mask is idempotent and
+  keeps the (perf) item self-contained). `strih_cpu_performance_unit_text` (the fleet
+  `cpu-performance.service` oneshot: `Type=oneshot`, `RemainAfterExit=yes`,
+  `WantedBy=multi-user.target`) is written to `/etc/systemd/system/` + enabled as the reboot
+  persistence backstop. WHY: the distro-default `powersave`/`schedutil` is wrong for the low-latency
+  genlock OBS cutter (`.claude/rules/realtime-isolation.md` + the imag power-envelope precedent).
+  **verify-strih.sh item 18 `(perf)`**: `strih_verify_governor_ok` (stdin = all cores' governors,
+  fail-closed on empty/unreadable) AND the existing `strih_verify_sleep_masked` — FAILs loud.
+- **Bitfocus Companion Satellite (setup-strih.sh step 16).** The notebook exposes its
+  locally-attached Stream Deck to the VENUE's Companion CONTROLLER (`10.77.9.205`, the
+  strih-autorecord-coupling box) as a headless **SATELLITE** — NOT full Companion (a second
+  controller would fork the venue's button/page state). `strih_companion_satellite_install` (pure
+  emitter): if the `companion-satellite` package is absent, download the **PINNED** `.deb` (never
+  "latest") + `apt-get install` it (fail-loud on fetch/install), then `systemctl enable` the unit —
+  **enable-only, NEVER start mid-provision** (the operator / next boot starts it, like the
+  intercom/janus steps). The controller host is written to `/etc/companion-satellite/host.conf` as
+  `COMPANION_SATELLITE_HOST=<host>` via `strih_companion_satellite_config_text`. The version + asset
+  + host are single-source pins overridable by `COMPANION_SATELLITE_VERSION` /
+  `COMPANION_SATELLITE_DEB_URL` / `COMPANION_SATELLITE_HOST` (default `1.11.0` /
+  `github.com/bitfocus/companion-satellite/releases/.../companion-satellite-x64-<v>.deb` /
+  `10.77.9.205`). **verify-strih.sh item 19 `(companion)`**: `strih_companion_verdict` grades
+  dpkg-installed + unit enabled + `host.conf` host == the controller — FAILs loud.
+  - **SUPERVISOR CONFIRM on the live box (why it is a followup, not a gap):** this lane is
+    code-only (no ssh/deploy). The **pinned version + the exact `.deb` asset URL** must be confirmed
+    against the real Bitfocus release list, and the satellite's **runtime config wiring** (whether
+    its build consumes `COMPANION_SATELLITE_HOST` as an env-file, a JSON, or the `:9999` web UI —
+    `host.conf` is the durable RECORD of the intended controller, which the (companion) gate reads
+    back) must be confirmed once the notebook is in hand. A wrong pin fails LOUD at the live
+    `setup-strih.sh` run (never silently), and `COMPANION_SATELLITE_DEB_URL` lets the supervisor
+    repin with no code change.
+
+Tests: pure fns + wiring anchors in `tests/strih_provision_pure_functions.rs`; the `TOTAL_STEPS=17`
+bump is reflected in both `tests/intercom_hub_provisioning.rs` and the janus test.
+
 ## Follow-ups (not done in the preparation lane)
 
 - ~~obs-browser / CEF in the strih CI variant~~ — **DONE (issue 1317, CEF now wired)**, see the CI
@@ -500,9 +546,12 @@ sandbox!` → the render process dies). `verify-strih.sh` item 13 only checks th
 
 ## What is NOT in scope
 
-Recording retention, the NIC self-heal watcher, Companion Satellite re-pairing, WoL, and the 4K
-multiview projector budget are all listed in the issue-1317 inventory as NEEDS-WORK but are not part
-of the initial provisioning scaffolding — they follow once the hardware is in hand.
+Recording retention, the NIC self-heal watcher, WoL, and the 4K multiview projector budget are all
+listed in the issue-1317 inventory as NEEDS-WORK but are not part of the initial provisioning
+scaffolding — they follow once the hardware is in hand. (Companion Satellite INSTALL + enable-only +
+controller-host record is now DONE — see the "CPU performance governor + Bitfocus Companion
+Satellite" section above; only the live version/asset/runtime-config CONFIRM remains, a supervisor
+step.)
 
 ### Anchor-test literal vs an expanded path (18.9.2026, CI 35390761239)
 
