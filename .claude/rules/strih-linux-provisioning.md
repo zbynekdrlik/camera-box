@@ -522,6 +522,19 @@ new framework.
 Tests: pure fns + wiring anchors in `tests/strih_provision_pure_functions.rs`; the `TOTAL_STEPS=17`
 bump is reflected in both `tests/intercom_hub_provisioning.rs` and the janus test.
 
+## GOTCHA — an emit-and-eval `_cmd`/`_install` helper that `exit 1`s needs `( eval … ) || fail`, never a bare `eval … || fail` (issue 1317 review)
+
+When a `strih-provision.sh` emitter's failure path is `exit 1` (as `strih_companion_satellite_install`
+does on a curl/apt failure — short-circuiting the rest of the emitted block), the caller MUST run it
+in a SUBSHELL: `( eval "$(strih_companion_satellite_install)" ) || fail "…"`. A bare
+`eval "$(…)" || fail` runs the emitted `exit 1` in setup-strih.sh's OWN shell, terminating the whole
+script with the emitter's terse stderr line BEFORE `|| fail` can print its actionable message — the
+`|| fail` is dead code. This is the SAME pattern step 4b already uses for `ndi_runtime_install_cmds`
+(`( eval "$(…)" ) || fail`). An emitter whose failure path is instead a NO-OP `if … fi` with no
+`exit` (like `strih_lx_chrome_sandbox_fix_cmd`) does NOT need the subshell. Rule: if the emitted
+block can `exit`, wrap the `eval` in `( … )` so the exit is contained and the caller's `|| fail`
+fires.
+
 ## Follow-ups (not done in the preparation lane)
 
 - ~~obs-browser / CEF in the strih CI variant~~ — **DONE (issue 1317, CEF now wired)**, see the CI
