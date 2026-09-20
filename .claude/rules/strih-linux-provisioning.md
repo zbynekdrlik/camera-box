@@ -630,6 +630,29 @@ bundle dir on the box is user-private (`drwx------ newlevel`); the install runs 
 traverses it fine. General rule: a `/usr`-prefix install of a self-contained app bundle copies the
 whole `bin/`, never a single hardcoded main binary — the app's sibling helpers must travel with it.
 
+### GOTCHA — a pure helper that iterates the manifest `inputs` MUST normalize via `_entry_fields` (object entries are dicts, unhashable)
+
+Once `inputs` entries can be OBJECTS `{sender,input,scene}` (the operator collection) as well as bare
+strings, EVERY helper that walks `inputs` must go through `_entry_fields` — a raw `for src in inputs:
+if src in seen` / `input_class_for(src)` raises `TypeError: unhashable type: 'dict'` on an object
+entry. This bit `input_classes_summary` (fixed): it is called by `verify_parity` BEFORE the verdict
+line, so the crash made `--verify-parity` **always** fail on the operator collection — the genlock-
+class drift check was silently dead on the production strih (report-only, so it degraded to a NOTE
+instead of aborting, which is exactly why the 3040-green suite missed it — no object-entry test hit
+that helper). `seed_inputs`/`scene_order`/`input_classes_summary` all now share `_entry_fields`; any
+NEW `inputs`-walking helper must too, and must carry an object-entry test.
+
+### GOTCHA — a report-only bash verdict that greps a LARGE input must use a here-string, never `printf | grep -q`
+
+`strih_nvenc_log_verdict` graded a real (100s-of-KB) OBS log with `printf '%s' "$text" | grep -q …`
+inside an `if`. On an EARLY match grep closes the pipe, printf takes SIGPIPE, and under the caller's
+`pipefail` the whole pipeline goes non-zero → the `if` reads false → a HEALTHY large log misgraded
+`nvenc-unknown` (and a real `NVENC not supported` buried in a big log could flip to unknown too,
+hiding a fault). This is the SAME SIGPIPE-under-pipefail class `drift-guard-log-parsers.md` documents
+for `printf | consumer`. Fix: `grep -q PATTERN <<<"$text"` (a here-string reads the whole stdin with
+no upstream pipe to break). The lib's small-input test passed while the large-input path was broken —
+any log-grading verdict needs a >64 KB fixture in its test, not just a one-line sample.
+
 ## Follow-ups (not done in the preparation lane)
 
 - ~~obs-browser / CEF in the strih CI variant~~ — **DONE (issue 1317, CEF now wired)**, see the CI
