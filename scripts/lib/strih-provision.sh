@@ -214,3 +214,237 @@ strih_lx_release_parity_ok() {
   [ -n "$version_id" ] || return 1
   printf '%s\n' "$flags" | grep -qxF "TARGET-RELEASE: ubuntu-${version_id}"
 }
+
+# --- issue 1317 (launcher pair): strih-obs-start.sh / strih-obs-stop.sh presence gate -------------
+# strih_launcher_pair_ok BIN_DIR -> 0 iff BOTH launcher scripts the strih-obs.service unit's
+# ExecStart/ExecStop reference (strih-obs-start.sh + strih-obs-stop.sh) exist under BIN_DIR AND are
+# executable. On any failure it PRINTS the offending name(s) (`missing <name>` / `not-executable
+# <name>`), one per line, so a dangling ExecStart names ITSELF in verify-strih.sh (a bare "OBS not
+# running under the supervisor" would otherwise hide WHY the unit never launched). setup-strih.sh
+# step 8 installs the pair mode 0755 BEFORE it enables the unit; this is the acceptance check that
+# the install landed and the unit will not flap 203/EXEC.
+strih_launcher_pair_ok() {
+  local dir="${1:?bin-dir required}" name missing=0
+  for name in strih-obs-start.sh strih-obs-stop.sh; do
+    if [ ! -f "${dir}/${name}" ]; then
+      printf 'missing %s\n' "$name"; missing=1
+    elif [ ! -x "${dir}/${name}" ]; then
+      printf 'not-executable %s\n' "$name"; missing=1
+    fi
+  done
+  [ "$missing" = 0 ]
+}
+
+# --- issue 1317: bundle runtime packages + the /usr prefix install ---------------------------------
+# The genlock bundle is BUILT for the /usr prefix and links release-specific Qt6 / ffmpeg 8 / OpenGL
+# runtime libraries. On a fresh 26.04 box none of that is installed and the bundle is only copied to
+# /opt (no loader path), so `obs` dies at exec with `libavcodec.so.62: cannot open shared object
+# file` (13 unresolved sonames). scripts/genlock-runtime-packages.sh records the exact apt packages
+# the built bundle links against into RUNTIME_PACKAGES.txt; setup-strih.sh installs them and then
+# installs the bundle into its /usr prefix (below), and verify-strih.sh gates both.
+
+# strih_runtime_packages_from_file FILE -> print the apt package names in FILE, one per line, in file
+# order. Skips blank lines and comment lines (first non-whitespace char '#'); trims surrounding
+# whitespace (dpkg package names never contain whitespace). Returns 1 if FILE does not exist.
+strih_runtime_packages_from_file() {
+  local file="${1:?packages file required}" line pkg
+  [ -f "$file" ] || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    pkg="${line#"${line%%[![:space:]]*}"}"   # ltrim leading whitespace
+    pkg="${pkg%"${pkg##*[![:space:]]}"}"       # rtrim trailing whitespace
+    [ -n "$pkg" ] || continue
+    case "$pkg" in '#'*) continue ;; esac
+    printf '%s\n' "$pkg"
+  done < "$file"
+}
+
+# strih_ldd_unresolved  (stdin: `ldd <file>` output, possibly concatenated for several files) -> print
+# each UNRESOLVED soname (an `<soname> => not found` line), one per line, deduped. EMPTY output means
+# every dependency resolved. verify-strih.sh runs it over /usr/bin/obs + libobs.so.30 + distroav.so
+# and FAILS on any non-empty output (a missing runtime lib IS the 13-soname load failure this fixes).
+strih_ldd_unresolved() {
+  local line soname
+  while IFS= read -r line; do
+    case "$line" in
+      *'=> not found'*)
+        soname="${line%%=>*}"
+        soname="${soname#"${soname%%[![:space:]]*}"}"   # ltrim
+        soname="${soname%"${soname##*[![:space:]]}"}"     # rtrim
+        [ -n "$soname" ] && printf '%s\n' "$soname"
+        ;;
+    esac
+  done | sort -u
+}
+
+# strih_install_bundle_prefix BUNDLE LIBDIR BINDIR SHAREDIR -> install the staged genlock bundle into
+# its /usr prefix so the dynamic loader finds it (the imag on-box program shape in
+# scripts/deploy-genlock-fleet.sh -- issue 1236 perms-normalize + ldconfig): copy
+# BUNDLE/lib/x86_64-linux-gnu/. -> LIBDIR (root:root, dirs 0755, files a+rX), BUNDLE/bin/obs ->
+# BINDIR/obs (0755 root), BUNDLE/share/obs -> SHAREDIR/obs, then `ldconfig`. Runs as root in
+# setup-strih.sh step 4 AFTER the /opt staged copy (which stays the marker home). Returns non-zero on
+# a critical copy failure. NOTE: this ~30-line prefix install duplicates the imag on-box program's
+# install block (a templated heredoc inside deploy-genlock-fleet.sh with its own probe-gated anchors);
+# consolidating the two is the deploy-arm follow-up's job (.claude/rules/strih-linux-provisioning.md).
+strih_install_bundle_prefix() {
+  local bundle="${1:?bundle root required}" libdir="${2:?libdir required}" bindir="${3:?bindir required}" sharedir="${4:?sharedir required}"
+  local rel dst
+  [ -d "${bundle}/lib/x86_64-linux-gnu" ] || { printf 'strih_install_bundle_prefix: %s/lib/x86_64-linux-gnu missing\n' "$bundle" >&2; return 1; }
+  [ -f "${bundle}/bin/obs" ] || { printf 'strih_install_bundle_prefix: %s/bin/obs missing\n' "$bundle" >&2; return 1; }
+  mkdir -p "$libdir" || return 1
+  cp -a "${bundle}/lib/x86_64-linux-gnu/." "${libdir}/" || { printf 'strih_install_bundle_prefix: lib copy failed\n' >&2; return 1; }
+  # normalize perms/ownership deterministically (issue 1236): reset LIBDIR root:root 0755, then chown
+  # root:root + dirs 0755 / files a+rX over EVERY just-installed path (scope to the installed set).
+  chown root:root "$libdir" 2>/dev/null || true
+  chmod 0755 "$libdir" 2>/dev/null || true
+  while IFS= read -r -d '' rel; do
+    dst="${libdir}/${rel}"
+    [ -e "$dst" ] || continue
+    chown root:root "$dst" 2>/dev/null || true
+    if [ -d "$dst" ]; then chmod 0755 "$dst" 2>/dev/null || true; else chmod a+rX "$dst" 2>/dev/null || true; fi
+  done < <(cd "${bundle}/lib/x86_64-linux-gnu" && find . -mindepth 1 -printf '%P\0')
+  install -m 0755 -o root -g root "${bundle}/bin/obs" "${bindir}/obs" || { printf 'strih_install_bundle_prefix: %s/obs install failed\n' "$bindir" >&2; return 1; }
+  if [ -d "${bundle}/share/obs" ]; then
+    mkdir -p "${sharedir}/obs"
+    cp -a "${bundle}/share/obs/." "${sharedir}/obs/" || { printf 'strih_install_bundle_prefix: share/obs copy failed\n' >&2; return 1; }
+    chown -R root:root "${sharedir}/obs" 2>/dev/null || true
+    chmod 0755 "${sharedir}/obs" 2>/dev/null || true
+    find "${sharedir}/obs" -type d -exec chmod 0755 {} + 2>/dev/null || true
+    find "${sharedir}/obs" -type f -exec chmod a+rX {} + 2>/dev/null || true
+  fi
+  ldconfig
+}
+
+# --- issue 1317 (this lane): dantesync CLIENT systemd unit + the verify sleep-mask predicate -------
+# The strih notebook joins the cluster clock as a dantesync CLIENT (the Windows PC stays the one NTP
+# master). setup-strih.sh step 2 installs the unit; verify-strih.sh asserts it is active + a fresh
+# offset. These pure helpers are unit-tested in tests/strih_provision_pure_functions.rs.
+
+# strih_dantesync_unit_text [ARGS] -> print the systemd unit text for the strih-lx dantesync CLIENT
+# daemon (the EXACT cambox unit shape: Type=simple, Restart=always, RestartSec=5,
+# WantedBy=multi-user.target). ARGS is the dantesync invocation (default the client args); ExecStart
+# is `/usr/local/bin/dantesync <ARGS>`. `--service` is NOT an installer flag -- it is a run mode, so
+# it never appears here; the daemon IS `dantesync --ntp-server <host>`. Fail-closed: if ARGS classify
+# as a server/master invocation, emit NOTHING and return 1 (a strih-lx unit must never spawn a 2nd
+# NTP master while running in parallel with the Windows PC).
+strih_dantesync_unit_text() {
+  local args="${1:-$(strih_lx_dantesync_client_args)}"
+  strih_lx_dantesync_is_client_not_master "$args" || return 1
+  cat <<EOF
+[Unit]
+Description=Dante Time Sync (PTP/NTP Synchronization)
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/dantesync ${args}
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+EOF
+}
+
+# strih_verify_sleep_masked STATE -> 0 iff STATE reports sleep.target masked. `systemctl is-enabled
+# sleep.target` prints "masked" to stdout AND exits 1 for a masked unit, so a caller's `|| echo
+# masked` fallback DOUBLE-appends -> the captured value is "masked\nmasked" and a naive `= masked`
+# comparison FALSE-FAILS on a correctly-masked box (the issue-1317 verify bug). Grade the FIRST line
+# only, so both the clean "masked" and the defensive "masked\nmasked" pass; "enabled"/"static"/""
+# (or anything whose first line is not exactly "masked") -> not masked (return 1, fail-closed).
+strih_verify_sleep_masked() {
+  local state="${1:-}" first
+  first="${state%%$'\n'*}"
+  [ "$first" = masked ]
+}
+
+# --- issue 1346: fixed HDMI fullscreen projector acceptance (REPORT-ONLY) --------------------------
+# The owner ROZHODNUTE (19.9.): the strih-lx HDMI output is an OBS fullscreen projector (Program or
+# Multiview), PERSISTED via SaveProjectors=true and re-opened on every launch. verify-strih.sh reports
+# (never hard-fails, since the live open needs an HDMI display on the notebook): SaveProjectors=true is
+# pre-seeded in user.ini, and -- when an external monitor is connected -- a saved ProjectorType 3/4
+# entry exists.
+
+# strih_projector_verdict SAVEPROJ_PRESENT EXT_CONNECTED SAVED_ENTRY_PRESENT -> print ONE verdict
+# token and return 0 ONLY for the fully-configured `ok` state; every other state returns non-zero so
+# the caller renders 0->PASS else NOTE (the whole item is report-only -- it never hard-FAILs the gate).
+#   arg1 SAVEPROJ_PRESENT:     1 iff user.ini has SaveProjectors=true
+#   arg2 EXT_CONNECTED:        1 iff an external (HDMI/DP) monitor is connected (a /sys/class/drm status)
+#   arg3 SAVED_ENTRY_PRESENT:  1 iff the current scene collection's saved_projectors has a type-3/4 entry
+# Fail-closed order (missing args default to 0 = not configured):
+#   saveprojectors-missing  -> SaveProjectors not pre-seeded (setup-strih step 7 not applied)
+#   hdmi-absent             -> SaveProjectors ok but no external monitor connected (expected today)
+#   projector-unseeded      -> external monitor present but no saved projector entry yet
+#   ok                      -> SaveProjectors true + external monitor + a saved ProjectorType 3/4
+strih_projector_verdict() {
+  local saveproj="${1:-0}" ext="${2:-0}" saved="${3:-0}"
+  [ "$saveproj" = 1 ] || { printf 'saveprojectors-missing'; return 1; }
+  [ "$ext" = 1 ]      || { printf 'hdmi-absent';            return 1; }
+  [ "$saved" = 1 ]    || { printf 'projector-unseeded';     return 1; }
+  printf 'ok'; return 0
+}
+
+# --- issue 1345 M3a: Janus audiobridge audio edge (enable-only) ------------------------------------
+# The phones intercom leg moves off VDO.Ninja onto a Janus audiobridge room the hub joins as a
+# plain-RTP PCMU participant. setup-strih.sh installs Janus (apt), writes these two jcfg files, and
+# `systemctl enable janus` (NEVER start -- the M4 cut-over starts it with the hub). These are the PURE
+# config renderers (unit-tested in tests/strih_provision_pure_functions.rs); the room SECRET is NEVER
+# an argument here -- it is a placeholder the caller substitutes from the 0600 file with a bash var
+# (no argv exposure, never logged).
+
+# strih_janus_audiobridge_jcfg_text ROOM SECRET_PATH -> print the audiobridge plugin jcfg for room
+# ROOM named "interkom" (48 kHz, record off, plain-RTP participants allowed). The `secret` line is a
+# `@JANUS_ROOM_SECRET@` PLACEHOLDER the caller replaces with the value read from SECRET_PATH (named in
+# a provenance comment only) -- so this pure text never carries the secret.
+strih_janus_audiobridge_jcfg_text() {
+  local room="${1:?room id required}" secret_path="${2:?secret path required}"
+  cat <<EOF
+# strih-lx intercom audiobridge -- GENERATED by setup-strih.sh (issue 1345 M3a). DO NOT EDIT BY HAND.
+# The room secret is injected from ${secret_path} at provisioning (never in git, never logged).
+general: {
+}
+
+room-${room}: {
+    description = "interkom"
+    secret = "@JANUS_ROOM_SECRET@"
+    sampling_rate = 48000
+    record = false
+    allow_rtp_participants = true
+}
+EOF
+}
+
+# strih_janus_ws_jcfg_text LAN_IP -> print the Janus WebSocket transport jcfg: ws on :8188 (all
+# interfaces = 127.0.0.1 + the LAN address), NO wss (TLS terminates on the dev1 front), admin API off.
+# LAN_IP is documented in the reachability comment.
+strih_janus_ws_jcfg_text() {
+  local lan_ip="${1:-}"
+  cat <<EOF
+# strih-lx intercom Janus WebSocket transport -- GENERATED by setup-strih.sh (issue 1345 M3a).
+# ws on 127.0.0.1 + ${lan_ip} :8188, NO wss (TLS terminates on the dev1 front); no admin API exposed.
+general: {
+    json = "indented"
+    ws = true
+    ws_port = 8188
+    wss = false
+    admin_ws = false
+    admin_wss = false
+}
+EOF
+}
+
+# strih_janus_room_jcfg_ok ROOM  (stdin: audiobridge jcfg text) -> 0 iff it declares room-<ROOM> as
+# the "interkom" room at 48 kHz with plain-RTP participants allowed. A pure grep check (no janus
+# binary invocation), used report-only by verify-strih.sh. Here-strings (not `printf | grep`) so an
+# early `grep -q` match never SIGPIPEs under the caller's `set -euo pipefail` (the drift-guard gotcha).
+strih_janus_room_jcfg_ok() {
+  local room="${1:?room id required}" text
+  text="$(cat)"
+  grep -qE "^room-${room}:" <<<"$text" || return 1
+  grep -qE 'sampling_rate[[:space:]]*=[[:space:]]*48000' <<<"$text" || return 1
+  grep -qE 'allow_rtp_participants[[:space:]]*=[[:space:]]*true' <<<"$text" || return 1
+  grep -qE 'description[[:space:]]*=[[:space:]]*"interkom"' <<<"$text" || return 1
+  return 0
+}

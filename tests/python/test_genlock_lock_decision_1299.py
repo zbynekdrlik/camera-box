@@ -288,3 +288,71 @@ def test_analyze_n_absent_none_for_a_v1_facet():
                                         "n_inputs": 7, "n_locked": 7}})
     res = d.analyze(body, box_reachable=1)
     assert res["n_absent"] is None
+
+
+# ================================================================================================
+# #1341 — a CONNECTED-but-IDLE input (a keep-alive-only SongPlayer playlist input) must NEVER grade
+# the box DEGRADED. The Python `decide()` mirror gains an `n_idle` param; the input decisions judge
+# only CONNECTED-non-idle inputs (n_connected = n_inputs - n_absent - n_idle). Mirrors the
+# src/genlock_lock_state.rs tests + the C parity gate's new n_idle axis. These FAIL on the pre-#1341
+# decide() (no n_idle kwarg -> TypeError) and pass once the idle term lands.
+# ================================================================================================
+def test_idle_sender_only_unlocked_is_still_locked():
+    # The cg-OBS scenario: 12 inputs, 2 live+locked, 10 idle SongPlayer keep-alive inputs. The idle
+    # ones are excluded from n_connected AND n_locked -> 2/2 live-locked -> LOCKED, never the chronic
+    # DEGRADED/recent_event the idle relock churn produced.
+    f = healthy()
+    f["n_inputs"] = 12
+    f["n_locked"] = 2
+    assert d.decide(n_idle=10, **f) == (d.ST_LOCKED, d.R_NONE)
+
+
+def test_all_idle_is_healthy_idle_locked():
+    # Every input present but idle (keep-alive only) -> HEALTHY-idle LOCKED, never UNLOCKED.
+    f = healthy()
+    f["n_inputs"] = 4
+    f["n_locked"] = 0
+    assert d.decide(n_idle=4, **f) == (d.ST_LOCKED, d.R_NONE)
+
+
+def test_idle_plus_a_live_unlocked_still_degrades():
+    # 12 inputs: 10 idle, 2 live of which only 1 locked -> a LIVE input is genuinely unlocked ->
+    # DEGRADED. Idle inputs excluded, but a real fault on a live input still pages.
+    f = healthy()
+    f["n_inputs"] = 12
+    f["n_locked"] = 1
+    assert d.decide(n_idle=10, **f) == (d.ST_DEGRADED, d.R_INPUT_UNLOCKED)
+
+
+def test_n_idle_and_n_absent_together_saturate_n_connected():
+    # n_absent + n_idle > n_inputs (a transient over-count) -> n_connected saturates to 0 -> the
+    # decision stays total and reads HEALTHY-idle, never a wrapped huge denominator.
+    f = healthy()
+    f["n_inputs"] = 3
+    f["n_locked"] = 0
+    assert d.decide(n_absent=2, n_idle=3, **f) == (d.ST_LOCKED, d.R_NONE)
+
+
+def test_idle_default_zero_reproduces_pre_1341_verdict():
+    # n_idle defaults 0 (a pre-#1341 caller) -> the old behaviour: 5 of 7 -> DEGRADED.
+    f = healthy()
+    f["n_locked"] = 5
+    assert d.decide(**f) == (d.ST_DEGRADED, d.R_INPUT_UNLOCKED)
+
+
+def test_analyze_carries_n_idle_from_a_v6_facet():
+    # analyze() surfaces n_idle for the watchdog's observability log / card text (the widget already
+    # decided `state`, so this never changes the verdict).
+    body = json.dumps({"genlock_lock": {"state": "LOCKED", "reason": "none",
+                                        "n_inputs": 12, "n_locked": 2, "n_absent": 0, "n_idle": 10}})
+    res = d.analyze(body, box_reachable=1)
+    assert res["verdict"] == "HEALTHY"
+    assert res["n_idle"] == 10
+
+
+def test_analyze_n_idle_none_for_a_pre_v6_facet():
+    # A pre-v6 facet (no n_idle) -> analyze surfaces None (the pre-#1341 no-idle reading).
+    body = json.dumps({"genlock_lock": {"state": "LOCKED", "reason": "none",
+                                        "n_inputs": 7, "n_locked": 7}})
+    res = d.analyze(body, box_reachable=1)
+    assert res["n_idle"] is None

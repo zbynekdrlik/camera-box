@@ -45,6 +45,7 @@ typedef struct genlock_lock_facets {
 	int n_inputs;               /* genlock-FIFO inputs present */
 	int n_locked;               /* of those, currently locked */
 	int n_absent;               /* #1299: of n_inputs, how many have NO live NDI receiver connection (sender not running); n_connected = n_inputs - n_absent is the DEGRADED-gate denominator */
+	int n_idle;                 /* #1341: of n_inputs, how many are CONNECTED but IDLE (keep-alive-only, received-frame rate below the idle floor over the window); excluded from n_locked + n_connected = n_inputs - n_absent - n_idle */
 	int recent_event;           /* bool: relock/underrun/late-hold/backward-step in last 60 s */
 	int qpc_drift_beyond_bound; /* bool */
 	int clock_present;          /* bool: dantesync :8898/status answered */
@@ -60,9 +61,10 @@ typedef struct genlock_lock_facets {
  * both in lock-step. UNLOCKED precedence: clock > output > no-input-locked. DEGRADED
  * precedence: some-input-unlocked > recent-event > ntp-failed > qpc-drift > audio-pairing >
  * audio-unexpected. Else LOCKED.
- * #1299: the input decisions judge only CONNECTED inputs (n_connected = n_inputs - n_absent); a
- * senderless input is idle (never DEGRADES), and inputs-present-but-ALL-senderless is HEALTHY-idle
- * (LOCKED), not UNLOCKED. n_inputs<=0 stays UNLOCKED/no_genlock.
+ * #1299/#1341: the input decisions judge only CONNECTED-non-idle inputs (n_connected = n_inputs -
+ * n_absent - n_idle); a senderless (n_absent) OR a keep-alive-only idle (n_idle) input is excluded
+ * (never DEGRADES), and inputs-present-but-ALL-absent/idle is HEALTHY-idle (LOCKED), not UNLOCKED.
+ * n_inputs<=0 stays UNLOCKED/no_genlock.
  * Writes the dominant reason to *reason_out (if non-NULL) and returns the state. */
 static inline genlock_lock_state_t genlock_decide_lock_state(const genlock_lock_facets_t *f,
 							     genlock_lock_reason_t *reason_out)
@@ -70,9 +72,9 @@ static inline genlock_lock_state_t genlock_decide_lock_state(const genlock_lock_
 	genlock_lock_reason_t reason = GENLOCK_LOCK_REASON_NONE;
 	genlock_lock_state_t state;
 
-	/* #1299: connected inputs only (saturating at 0 keeps the decision total under a transient
-	 * n_absent > n_inputs). */
-	int n_connected = f->n_inputs - f->n_absent;
+	/* #1299/#1341: connected-non-idle inputs only (saturating at 0 keeps the decision total under a
+	 * transient n_absent + n_idle > n_inputs). */
+	int n_connected = f->n_inputs - f->n_absent - f->n_idle;
 	if (n_connected < 0)
 		n_connected = 0;
 
@@ -128,12 +130,13 @@ static inline genlock_lock_state_t genlock_decide_lock_state(const genlock_lock_
  * Byte-for-byte mirror of camera_box::genlock_lock_state::input_phase_events — the parity gate
  * tests/genlock_lock_state_parity.rs lifts THIS function too. Saturating so a pathological count can
  * never wrap (matches the Rust saturating_add). Placed AFTER genlock_decide_lock_state so the
- * decision-block lift is unaffected. */
-static inline uint64_t genlock_input_phase_events(int connected, uint64_t relocks,
+ * decision-block lift is unaffected. #1341: a connected-but-IDLE input (keep-alive-only) also
+ * contributes 0 — its relock churn on each keep-alive frame is not a phase-discipline event. */
+static inline uint64_t genlock_input_phase_events(int connected, int idle, uint64_t relocks,
 						  uint64_t late_holds, uint64_t backward_steps)
 {
 	uint64_t sum;
-	if (!connected)
+	if (!connected || idle)
 		return 0;
 	sum = relocks;
 	if (sum > UINT64_MAX - late_holds)

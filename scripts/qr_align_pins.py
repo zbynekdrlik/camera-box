@@ -371,6 +371,38 @@ def robust_deltas(rounds, current_pins, min_valid_rounds=DEFAULT_MIN_VALID_ROUND
     return {src: statistics.median(vals) for src, vals in per_src.items()}, n_valid
 
 
+def measure_only_table(rounds_ticks, tail_start, sources, *,
+                       min_valid_rounds=DEFAULT_MIN_VALID_ROUNDS, source_frame_ms=SOURCE_FRAME_MS):
+    """issue 1349 --measure-only: the per-source capture-lag TABLE in SOURCE FRAMES relative to the
+    FASTEST source (0 = fastest, negative = frames behind), from a measured (rounds_ticks, tail_start)
+    convergence. REUSES robust_deltas over the stable tail (t_send-compensated median present-age
+    deltas at ZERO pins -- the SAME painter frame_id table the dry-run/quantum path reads), so
+    measure-only converges EXACTLY as the dry-run does and forks no measurement code. The [4i/8align]
+    re-init loop (scripts/lib/qr-align-reinit.sh) polls this to pick which laggard burn instance to
+    re-init (each cambox's `k` is drawn at V4L2 open, so re-opening it re-draws k).
+
+    Returns a FLAT dict {source: lag_frames(int <= 0), 'spread_frames': int, 'rounds_used': int}.
+    An un-measurable tail (too few fully-decoded rounds) returns {'error': str, 'spread_frames':
+    None, 'rounds_used': int} instead of raising -- the loop degrades to report-only, never a
+    crash."""
+    tail = rounds_ticks[tail_start:] if tail_start is not None else rounds_ticks
+    try:
+        # {s: 0} deltas = the PURE cross-camera present-age spread (the painter frame_id table);
+        # d_i >= 0 with the SLOWEST/behind camera anchored at 0 and the FASTEST at max.
+        deltas, n_valid = robust_deltas(tail, {s: 0 for s in sources}, min_valid_rounds)
+    except AlignmentImpossible as exc:
+        return {"error": str(exc), "spread_frames": None, "rounds_used": len(tail)}
+    fastest = max(deltas.values())
+    # Re-anchor to the fastest so it reads 0 and every other reads how many SOURCE FRAMES it is
+    # BEHIND (<= 0). Round to whole source frames (the k re-init lever is per-frame).
+    lag = {src: int(round((deltas[src] - fastest) / source_frame_ms)) for src in deltas}
+    spread = (max(lag.values()) - min(lag.values())) if lag else 0
+    out = dict(lag)
+    out["spread_frames"] = spread
+    out["rounds_used"] = n_valid
+    return out
+
+
 def floor3_pins(deltas, floor_ms=DEFAULT_FLOOR_MS):
     """The floor-3 pin plan from per-camera relative deltas: new_pin_i = round(floor + (d_i -
     min(d))). The min-delta (max-transport / slowest) camera floors to `floor`, every other gets
@@ -1831,6 +1863,13 @@ def main(argv=None):
                          "sub-frame data this is floor-3 (a documented no-op).")
     ap.add_argument("--execute", action="store_true",
                     help="APPLY the floor-aware pins (default: DRY-RUN -- measure + plan, write nothing)")
+    ap.add_argument("--measure-only", action="store_true",
+                    help="issue 1349: converge the stable tail EXACTLY as the dry-run does, then "
+                         "print ONLY a JSON object of per-source capture-lag in SOURCE FRAMES "
+                         "relative to the fastest (0 = fastest, negative = frames behind) + "
+                         "spread_frames + rounds_used, and EXIT 0 writing NOTHING to OBS. The "
+                         "[4i/8align] re-init loop polls this. Read-only; mutually exclusive with "
+                         "the plan/--execute flow.")
     a = ap.parse_args(argv)
 
     sources = [s.strip() for s in a.sources.split(",") if s.strip()]
@@ -1845,6 +1884,22 @@ def main(argv=None):
             f"WARNING: [qr-align] #1168 --align-retighten-budget-ms {a.align_retighten_budget_ms:.0f} >= "
             f"--max-delta-ms {a.max_delta_ms:.0f}: the re-tighten hard-fail is DISARMED (the spread sanity "
             "gate aborts a wider spread first, so no budget-bound residual can exceed this budget).\n")
+
+    if a.measure_only:
+        # issue 1349: measure-only -- converge the stable tail with the SAME measurement path the
+        # dry-run uses, then print the per-source frame-lag table. Write NOTHING (no pins): only the
+        # read-only barrier screenshots inside measure_stable_tail touch the WS. saver=None (a bare
+        # measure persists no screenshots). Mutually exclusive with the measure/plan/--execute flow.
+        rounds_ticks, _run_id, status = measure_stable_tail(
+            sources, a.host, a.password, width=a.width, height=a.height, run_id=None,
+            stable_tail_rounds=a.stable_tail_rounds, stable_tol_ids=a.stable_tol_ids,
+            stable_outlier_tol_ids=a.stable_outlier_tol_ids, parity_tol_ids=a.parity_tol_ids,
+            min_parity_rounds=a.min_parity_rounds, min_valid_rounds=a.min_valid_rounds,
+            budget_s=a.measure_budget_s, max_rounds=a.max_measure_rounds)
+        table = measure_only_table(rounds_ticks, status.tail_start, sources,
+                                   min_valid_rounds=a.min_valid_rounds)
+        print(json.dumps(table, default=str))
+        return 0
 
     if a.reset_to_floor:
         n = reset_pins_to_floor(sources, a.host, a.password, a.floor_ms)

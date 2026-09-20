@@ -61,8 +61,9 @@ def test_locked_line_parses_to_facet():
     assert set(f["inputs"]) == {"NDI cam1", "NDI cam2"}
     assert f["inputs"]["NDI cam1"] == {
         # #1299 v2: `connected` defaults True for this v1 fixture (no `connected` key in the line).
-        "locked": True, "connected": True, "latency_ms": 3, "underruns": 0, "relocks": 1,
-        "late_holds": 0, "depth": 2
+        # #1341 v6: `idle` defaults False for this pre-v6 fixture (no `idle` key in the line).
+        "locked": True, "connected": True, "idle": False, "latency_ms": 3, "underruns": 0,
+        "relocks": 1, "late_holds": 0, "depth": 2
     }
 
 
@@ -132,3 +133,39 @@ def test_v1_line_defaults_n_absent_none_and_connected_true():
     assert f["n_absent"] is None
     assert f["inputs"]["NDI cam1"]["connected"] is True
     assert f["inputs"]["NDI cam2"]["connected"] is True
+
+
+# ---- #1341 v6: n_idle (connected-but-idle input count) + per-input idle --------------------------
+
+# A v6 LOCKED line: the cg-OBS scenario — 12 genlock inputs, 2 live+locked, 10 idle SongPlayer
+# keep-alive inputs (connected:true, idle:true). The widget already decided LOCKED (not DEGRADED)
+# because n_connected = 12 - 0 - 10 = 2 == n_locked; the facet must carry n_idle + per-input idle.
+V6_IDLE_LINE = (
+    '10:48:06.003: genlock-lock-json: {"v":6,"state":"LOCKED","reason":"none","n_inputs":12,'
+    '"n_locked":2,"n_absent":0,"n_idle":10,"latency_ms":3,"clock":"locked","output":"stamping",'
+    '"recent_event":false,"qpc_drift_ms":0,"inputs":['
+    '{"name":"NDI 2ME PGM","locked":true,"connected":true,"idle":false,"latency_ms":3,"underruns":0,"relocks":0,"late_holds":0,"depth":2},'
+    '{"name":"sp-slow_video","locked":false,"connected":true,"idle":true,"latency_ms":3,"underruns":0,"relocks":60,"late_holds":5,"depth":0}'
+    ']} (#1299)\n'
+)
+
+
+def test_v6_line_carries_n_idle_and_per_input_idle():
+    f = bsg.genlock_lock_facet_from_log(V6_IDLE_LINE)
+    assert f is not None
+    assert f["state"] == "LOCKED" and f["reason"] == "none"
+    assert f["n_inputs"] == 12 and f["n_locked"] == 2 and f["n_idle"] == 10
+    assert f["inputs"]["NDI 2ME PGM"]["idle"] is False
+    # the idle keep-alive input is visible (report-only) with idle=true — never dropped or blamed
+    assert f["inputs"]["sp-slow_video"]["idle"] is True
+    assert f["inputs"]["sp-slow_video"]["connected"] is True
+
+
+def test_pre_v6_line_defaults_n_idle_none_and_idle_false():
+    # A pre-v6 line (no n_idle / no per-input idle) must degrade gracefully: n_idle -> None (decision
+    # treats idle as 0, the pre-#1341 reading) and every input -> idle False. V2_ABSENT_LINE has no
+    # idle keys.
+    f = bsg.genlock_lock_facet_from_log(V2_ABSENT_LINE)
+    assert f["n_idle"] is None
+    assert f["inputs"]["NDI cam1"]["idle"] is False
+    assert f["inputs"]["NDIA cg stream"]["idle"] is False

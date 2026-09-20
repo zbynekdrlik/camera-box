@@ -11,8 +11,11 @@
 #include <QTimer>
 #include <QUrl>
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
+#include <map>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -58,6 +61,17 @@ static constexpr int64_t GENLOCK_AUDIO_PAIRING_BOUND_MS = 33;
  * always holds a fresh one even on a box whose state has not changed since startup. */
 static constexpr int GENLOCK_JSON_HEARTBEAT_TICKS = 30;
 
+/* camera-box #1341: a CONNECTED genlock input whose received-frame DELTA over the idle window is
+ * below this floor is IDLE (keep-alive-only) — excluded from n_locked/n_connected and contributing 0
+ * phase events, so an idle SongPlayer playlist input (~1 frame / 11 s -> ~5 frames / 60 s) never
+ * flaps the box DEGRADED/recent_event, while a live source (>= 23.98 fps -> >= 1400 frames / 60 s)
+ * clears it by a wide margin. */
+static constexpr uint64_t GENLOCK_IDLE_INPUT_MIN_FRAMES = 60;
+/* The window (ms) the received-frame delta is measured over — the SAME 60 s window recent_event
+ * uses; an input is classified idle only once its per-input sample ring spans >= 90 % of it (the
+ * qpc rate_ready precedent), so a live source is never mislabelled idle during the first ~54 s. */
+static constexpr qint64 GENLOCK_IDLE_WINDOW_MS = 60000;
+
 namespace {
 /* camera-box #1299: the structured per-input record the genlock-lock-json: line carries (the
  * tooltip `rows` above are pre-formatted human strings; this is the machine-readable sibling). */
@@ -65,7 +79,9 @@ struct GenlockInputRow {
 	std::string name;
 	bool locked = false;
 	bool connected = true; /* #1299: DistroAV receiver has a live NDI connection (sender running) */
+	bool idle = false;     /* #1341: connected but keep-alive-only (received-frame rate below the idle floor over the window) */
 	uint32_t latency_ms = 0;
+	uint64_t frames_received = 0; /* #1341: cumulative video frames queued onto the FIFO (obs_genlock_stats.frames_received) — the idle received-rate signal */
 	uint64_t underruns = 0;
 	uint64_t relocks = 0;
 	uint64_t late_holds = 0;
@@ -76,6 +92,7 @@ struct GenlockScan {
 	int n_inputs = 0;
 	int n_locked = 0;
 	int n_absent = 0; /* #1299: of n_inputs, how many have NO live NDI receiver connection */
+	int n_idle = 0;   /* #1341: of n_inputs, how many are CONNECTED but IDLE (keep-alive-only) — computed post-scan from the received-frame delta */
 	quint64 event_sum = 0;
 	int64_t max_abs_qpc_drift_ms = 0;
 	int64_t qpc_signed_ms = 0; /* #1299 Part 4: the SIGNED cumulative wall-vs-QPC drift (process-global, so every input reports the same value; last wins) — feeds the windowed-rate ring */
@@ -164,6 +181,7 @@ bool genlock_scan_source(void *param, obs_source_t *source)
 	rec.name = nm;
 	rec.locked = st.locked;
 	rec.connected = connected;
+	rec.frames_received = st.frames_received; /* #1341: the idle received-rate signal */
 	rec.latency_ms = st.latency_ms;
 	rec.underruns = st.underruns;
 	rec.relocks = st.relocks;
@@ -276,7 +294,8 @@ void genlock_json_append_escaped(std::string &out, const char *s)
  * with the statusbar). clock_str/output_str are the SAME tokens the #1298 key=value line uses
  * (absent|locked|unlocked / absent|stamping|not-stamping). Pure — no Qt, no obs_data. */
 std::string genlock_build_lock_json(const char *state_name, const char *reason_key, int n_inputs,
-				    int n_locked, int n_absent, uint32_t latency_ms, const char *clock_str,
+				    int n_locked, int n_absent, int n_idle, uint32_t latency_ms,
+				    const char *clock_str,
 				    const char *output_str, bool recent_event,
 				    const char *recent_event_input_name, uint64_t recent_event_input_events,
 				    int64_t qpc_drift_ms, double qpc_drift_ppm, double qpc_expected_ppm,
@@ -287,16 +306,19 @@ std::string genlock_build_lock_json(const char *state_name, const char *reason_k
 	 * recent_event_inputs (the top recent-event offender name+count). #1303 (v4) adds
 	 * audio_unexpected_inputs (a silent-by-contract source found audible). Part 4 (v5) adds the
 	 * report-only windowed-drift telemetry qpc_drift_ppm / qpc_expected_ppm / qpc_step at the END.
-	 * All additive: the bundle-state parser defaults n_absent->None, connected->true, the qpc_*_ppm
-	 * trio->None, and OMITS recent_event_inputs / audio_unexpected_inputs when absent/empty, so a
-	 * v1/v2/v3/v4 line from an older build reads cleanly. */
-	std::string j = "{\"v\":5,\"state\":";
+	 * #1341 (v6) adds top-level n_idle + per-input idle (a connected-but-keep-alive-only input,
+	 * excluded from the DEGRADED gate). All additive: the bundle-state parser defaults n_absent->None,
+	 * n_idle->None, connected->true, idle->false, the qpc_*_ppm trio->None, and OMITS
+	 * recent_event_inputs / audio_unexpected_inputs when absent/empty, so a v1..v5 line from an older
+	 * build reads cleanly. */
+	std::string j = "{\"v\":6,\"state\":";
 	genlock_json_append_escaped(j, state_name);
 	j += ",\"reason\":";
 	genlock_json_append_escaped(j, reason_key);
 	char num[128];
-	snprintf(num, sizeof(num), ",\"n_inputs\":%d,\"n_locked\":%d,\"n_absent\":%d,\"latency_ms\":%u,",
-		 n_inputs, n_locked, n_absent, latency_ms);
+	snprintf(num, sizeof(num),
+		 ",\"n_inputs\":%d,\"n_locked\":%d,\"n_absent\":%d,\"n_idle\":%d,\"latency_ms\":%u,", n_inputs,
+		 n_locked, n_absent, n_idle, latency_ms);
 	j += num;
 	j += "\"clock\":";
 	genlock_json_append_escaped(j, clock_str);
@@ -333,8 +355,9 @@ std::string genlock_build_lock_json(const char *state_name, const char *reason_k
 		first = false;
 		j += "{\"name\":";
 		genlock_json_append_escaped(j, r.name.c_str());
-		snprintf(num, sizeof(num), ",\"locked\":%s,\"connected\":%s,\"latency_ms\":%u,",
-			 r.locked ? "true" : "false", r.connected ? "true" : "false", r.latency_ms);
+		snprintf(num, sizeof(num), ",\"locked\":%s,\"connected\":%s,\"idle\":%s,\"latency_ms\":%u,",
+			 r.locked ? "true" : "false", r.connected ? "true" : "false", r.idle ? "true" : "false",
+			 r.latency_ms);
 		j += num;
 		snprintf(num, sizeof(num),
 			 "\"underruns\":%llu,\"relocks\":%llu,\"late_holds\":%llu,\"depth\":%u}",
@@ -1027,6 +1050,61 @@ void OBSBasicStatusBar::UpdateGenlockLabel()
 	GenlockOutScan out;
 	obs_enum_outputs(genlock_scan_output, &out);
 
+	const qint64 now_ms = genlockClock.elapsed();
+
+	/* #1341: classify each CONNECTED input as IDLE (keep-alive-only) from its received-frame DELTA
+	 * over the same 60 s window recent_event uses. An idle SongPlayer playlist input keeps a live
+	 * NDI connection but sends ~1 frame / 11 s, so its FIFO re-acquires a boundary on each keep-alive
+	 * frame (a relock) — which would falsely feed recent_event and DEGRADE the box. An idle input is
+	 * excluded from n_locked + n_connected and contributes 0 phase events. A per-input sample ring
+	 * (name -> (monotonic ms, cumulative frames_received)) is pruned to the window; a counter DECREASE
+	 * re-baselines (reconnect); classification waits until the ring spans ~the full window so a live
+	 * source is never mislabelled idle at startup. */
+	{
+		std::set<std::string> present;
+		scan.n_idle = 0;
+		for (GenlockInputRow &r : scan.inputs) {
+			if (!r.connected)
+				continue; /* an absent input is n_absent, never idle (no live connection) */
+			present.insert(r.name);
+			auto &ring = genlockRxHistory[r.name];
+			if (!ring.empty() && r.frames_received < ring.back().second)
+				ring.clear(); /* received counter went backward -> reconnect reset, re-baseline */
+			ring.emplace_back(now_ms, r.frames_received);
+			while (ring.size() > 1 && now_ms - ring.front().first > GENLOCK_IDLE_WINDOW_MS)
+				ring.pop_front();
+			const qint64 span = ring.back().first - ring.front().first;
+			if (span >= GENLOCK_IDLE_WINDOW_MS * 9 / 10) {
+				const uint64_t delta = ring.back().second - ring.front().second;
+				r.idle = delta < GENLOCK_IDLE_INPUT_MIN_FRAMES;
+			}
+			if (r.idle) {
+				scan.n_idle++;
+				if (r.locked)
+					scan.n_locked--; /* idle inputs are excluded from n_locked */
+			}
+		}
+		/* bound the remembered state: drop ring entries for inputs no longer present this tick. */
+		for (auto it = genlockRxHistory.begin(); it != genlockRxHistory.end();) {
+			if (present.count(it->first) == 0)
+				it = genlockRxHistory.erase(it);
+			else
+				++it;
+		}
+		/* an idle input must never be BLAMED as the unlocked offender: drop idle names from the
+		 * unlocked list (the scan built it over all connected-!locked inputs, idle-unaware). */
+		if (scan.n_idle > 0) {
+			std::set<std::string> idle_names;
+			for (const GenlockInputRow &r : scan.inputs)
+				if (r.idle)
+					idle_names.insert(r.name);
+			scan.unlocked_names.erase(
+				std::remove_if(scan.unlocked_names.begin(), scan.unlocked_names.end(),
+					       [&](const std::string &nm) { return idle_names.count(nm) != 0; }),
+				scan.unlocked_names.end());
+		}
+	}
+
 	/* #1299 Part 3: recompute the recent-event driver as the CONNECTED-only, PHASE-only aggregate
 	 * (relocks + late_holds + backward_steps). UNDERRUNS are DROPPED — a latency-budget miss owned
 	 * by the genlock-fifo audit + cg-chain-verify (issue 1302), and bursty, so counting it latched
@@ -1038,16 +1116,14 @@ void OBSBasicStatusBar::UpdateGenlockLabel()
 	std::string recent_event_input_name;
 	uint64_t recent_event_input_events = 0;
 	for (const GenlockInputRow &r : scan.inputs) {
-		const uint64_t pe = genlock_input_phase_events(r.connected ? 1 : 0, r.relocks, r.late_holds,
-							       r.backward_steps);
+		const uint64_t pe = genlock_input_phase_events(r.connected ? 1 : 0, r.idle ? 1 : 0, r.relocks,
+							       r.late_holds, r.backward_steps);
 		scan.event_sum += pe;
 		if (pe > recent_event_input_events) {
 			recent_event_input_events = pe;
 			recent_event_input_name = r.name;
 		}
 	}
-
-	const qint64 now_ms = genlockClock.elapsed();
 
 	/* recent-event (relock/late-hold/backward-step on a CONNECTED input in the last 60 s): detect an
 	 * INCREASE of the aggregate cumulative counter across ticks. A decrease (a reconnect reset
@@ -1106,6 +1182,7 @@ void OBSBasicStatusBar::UpdateGenlockLabel()
 	f.n_inputs = scan.n_inputs;
 	f.n_locked = scan.n_locked;
 	f.n_absent = scan.n_absent;
+	f.n_idle = scan.n_idle;
 	f.recent_event = recent_event ? 1 : 0;
 	f.qpc_drift_beyond_bound = qpc_beyond;
 	f.clock_present = clock_present ? 1 : 0;
@@ -1200,12 +1277,14 @@ void OBSBasicStatusBar::UpdateGenlockLabel()
 	QString text;
 	QString color;
 	if (state == GENLOCK_LOCK_LOCKED) {
-		/* #1299: show locked/CONNECTED (not /n_inputs), and surface any senderless idle inputs
-		 * separately so "LOCKED 3/3 (+1 idle)" reads honestly instead of an alarming "LOCKED 3/4". */
-		const int n_connected = f.n_inputs - f.n_absent > 0 ? f.n_inputs - f.n_absent : 0;
+		/* #1299/#1341: show locked/CONNECTED-live (not /n_inputs), and surface any senderless
+		 * (n_absent) OR keep-alive-only (n_idle) inputs together as idle so "LOCKED 2/2 (+10 idle)"
+		 * reads honestly instead of an alarming "LOCKED 2/12". */
+		const int n_idle_shown = f.n_absent + f.n_idle;
+		const int n_connected = f.n_inputs - n_idle_shown > 0 ? f.n_inputs - n_idle_shown : 0;
 		text = QString("GENLOCK ● LOCKED %1/%2 @ %3").arg(f.n_locked).arg(n_connected).arg(latencyText);
-		if (f.n_absent > 0)
-			text += QString(" (+%1 idle)").arg(f.n_absent);
+		if (n_idle_shown > 0)
+			text += QString(" (+%1 idle)").arg(n_idle_shown);
 		color = "#2ecc71"; /* green */
 	} else if (state == GENLOCK_LOCK_DEGRADED) {
 		text = QString("GENLOCK ● DEGRADED %1").arg(reasonText);
@@ -1223,6 +1302,10 @@ void OBSBasicStatusBar::UpdateGenlockLabel()
 			      .arg(genlock_state_name(state))
 			      .arg(!clock_present ? "absent" : (f.clock_locked ? "locked" : "not locked"))
 			      .arg(!out.present ? "n/a" : (out.stamping ? "stamping wall clock" : "NOT stamping"));
+	/* #1341: surface the idle/absent input counts (excluded from the DEGRADED gate) so an operator
+	 * sees why "LOCKED 2/2" rather than "LOCKED 2/12". */
+	if (f.n_idle > 0 || f.n_absent > 0)
+		tip += QString("Idle: %1 (absent %2, low-rate %3)\n").arg(f.n_idle + f.n_absent).arg(f.n_absent).arg(f.n_idle);
 	for (const std::string &row : scan.rows)
 		tip += "  " + QString::fromStdString(row) + "\n";
 	genlockLabel->setToolTip(tip.trimmed());
@@ -1266,7 +1349,7 @@ void OBSBasicStatusBar::UpdateGenlockLabel()
 		const bool has_offender = recent_event && !recent_event_input_name.empty();
 		const std::string gl_json = genlock_build_lock_json(
 			genlock_state_name(state), genlock_reason_key(reason), f.n_inputs, f.n_locked,
-			f.n_absent, scan.any_input ? scan.min_latency_ms : 0u,
+			f.n_absent, f.n_idle, scan.any_input ? scan.min_latency_ms : 0u,
 			!clock_present ? "absent" : (f.clock_locked ? "locked" : "unlocked"),
 			!out.present ? "absent" : (out.stamping ? "stamping" : "not-stamping"), recent_event,
 			has_offender ? recent_event_input_name.c_str() : nullptr, recent_event_input_events,

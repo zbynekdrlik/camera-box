@@ -16,8 +16,15 @@ repository = "https://github.com/zbynekdrlik/camera-box"
 # resolver = "2" pins the SAME feature resolution the root edition-2021 package
 # already used standalone. A dedicated `bkshading` CI job builds/tests the members
 # (see .github/workflows/ci.yml); `cargo fmt --all` already covers them.
+# The strih-lx intercom hub (issue 1345) adds TWO more members: `intercom/vban` (the shared VBAN
+# codec, moved OUT of src/vban.rs which is now a `pub use intercom_vban::*;` re-export — pure, only
+# `anyhow`, so the appliance dep tree is untouched) and `intercom/hub` (the mix-minus N-1 hub, its
+# OWN heavier deps: tokio/axum/toml). Like the bkshading members they have their OWN CI job
+# (`intercom-hub` in .github/workflows/ci.yml); the appliance jobs still run cargo at the root
+# WITHOUT --workspace, so they never build the hub. `intercom-vban` IS a path dependency of the
+# appliance (below), so the root build compiles it — that is intended (it carries the codec now).
 [workspace]
-members = ["bkshading/proto", "bkshading/relay", "bkshading/service"]
+members = ["bkshading/proto", "bkshading/relay", "bkshading/service", "intercom/vban", "intercom/hub"]
 resolver = "2"
 
 # Single source of truth for the version across the appliance + the three bkshading
@@ -26,7 +33,7 @@ resolver = "2"
 # values. The `^version = "X"` readers (camera-box-version-gate.sh, recording-e2e.sh,
 # rig-status.py) still match: this stays the only column-0 `version = "X"` line.
 [workspace.package]
-version = "1.7.0-dev.642"
+version = "1.7.0-dev.643"
 
 [lib]
 name = "camera_box"
@@ -37,6 +44,11 @@ name = "camera-box"
 path = "src/main.rs"
 
 [dependencies]
+# Shared VBAN codec (issue 1345 M1): the appliance's `src/vban.rs` re-exports this crate, so the
+# codec + its tests live in ONE place shared with the strih-lx intercom hub. Pure (only `anyhow`,
+# already a root dep), cross-platform — adds NO new transitive deps to the appliance.
+intercom-vban = { path = "intercom/vban" }
+
 # Dynamic library loading (for NDI SDK at runtime)
 libloading = "0.8"
 

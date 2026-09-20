@@ -298,6 +298,13 @@ jobs:
           # PR-triggered runs use the 300s acceptance-floor profile (no `inputs.duration_secs`
           # on a pull_request event); workflow_dispatch keeps its own default/operator override.
           DURATION: ${{ inputs.duration_secs || '300' }}
+          # issue 1349: the [4i/8align] re-init loop tolerated a 1-frame residual by default; the
+          # first live run (19.9.2026) converged at spread 1 and the verdict STILL failed on that
+          # camera's A/V (one 16.7 ms frame of capture-lag draw on top of the fleet-common offset
+          # crossed the +/-30 ms gate). Require spread 0 and allow one extra re-draw round; the
+          # loop never aborts a run, so the only cost is <= ~1 min per extra round.
+          REINIT_OK_FRAMES: "0"
+          REINIT_MAX_ROUNDS: "4"
           # #406 — the EPIC's own acceptance bar: the required pull_request job never exercised
           # the fused multi-camera sweep, so a real cross-camera delivery-latency spread
           # regression (#624/#286) or an A/V-offset regression (#641) could merge with this gate
