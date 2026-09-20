@@ -313,16 +313,27 @@ def settings_update_needed(effective, desired):
 def input_classes_summary(inputs):
     """Pure (issue 1317): a report line body describing each input's class for verify-strih.sh --
     "N camera, M feedback (name=class, ...)". Report-only; the whole-line verdict `strih ndi inputs:
-    OK` that verify-strih.sh greps with grep -qxF is emitted SEPARATELY and unchanged."""
+    OK` that verify-strih.sh greps with grep -qxF is emitted SEPARATELY and unchanged. Entries are
+    normalized via _entry_fields (a bare string OR an object {sender,input,scene}, this lane) -- it
+    must NOT iterate raw entries (a dict is unhashable, which crashed verify_parity on the OPERATOR
+    collection and killed its drift check). De-duplicated by INPUT name; class resolved from the
+    SENDER *or* the input name (either carrying the 2ME marker -> feedback), matching seed_inputs. The
+    per-input label keeps the SENDER name (the bare-string report shape)."""
     seen = set()
     pairs = []
     ncam = nfb = 0
-    for src in inputs:
-        if not src or src in seen:
+    for entry in inputs:
+        fields = _entry_fields(entry)
+        if fields is None:
             continue
-        seen.add(src)
-        cls = input_class_for(src)
-        pairs.append("%s=%s" % (src, cls))
+        sender, input_name, _scene = fields
+        if input_name in seen:
+            continue
+        seen.add(input_name)
+        cls = "camera"
+        if input_class_for(sender) == "feedback" or input_class_for(input_name) == "feedback":
+            cls = "feedback"
+        pairs.append("%s=%s" % (sender, cls))
         if cls == "feedback":
             nfb += 1
         else:

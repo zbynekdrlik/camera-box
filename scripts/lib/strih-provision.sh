@@ -354,8 +354,12 @@ strih_obs_helpers_verdict() {
 strih_nvenc_log_verdict() {
   local text
   text="$(cat)"
-  if printf '%s' "$text" | grep -q '\[obs-nvenc\] NVENC version:'; then printf 'nvenc-ok'; return 0; fi
-  if printf '%s' "$text" | grep -q 'NVENC not supported'; then printf 'nvenc-unsupported'; return 1; fi
+  # here-strings (NOT `printf | grep`): a real OBS log is 100s of KB, and `printf "$text" | grep -q`
+  # SIGPIPEs printf the instant grep matches early -> under the caller's pipefail the pipeline goes
+  # non-zero, the `if` reads false, and a HEALTHY large log misgrades (the drift-guard-log-parsers.md
+  # SIGPIPE class). `grep -q <<<"$text"` reads the whole stdin with no upstream pipe to break.
+  if grep -q '\[obs-nvenc\] NVENC version:' <<<"$text"; then printf 'nvenc-ok'; return 0; fi
+  if grep -q 'NVENC not supported' <<<"$text"; then printf 'nvenc-unsupported'; return 1; fi
   printf 'nvenc-unknown'; return 2
 }
 
