@@ -932,6 +932,33 @@ fn janus_ws_jcfg_renders_ws_no_wss() {
     assert!(out.contains("wss = false"), "no wss (TLS on the front)");
     assert!(out.contains("admin_ws = false"), "admin API off");
     assert!(out.contains("10.77.9.203"), "the LAN IP is documented");
+    // issue 1345 M3 follow-up (d): WS is BOUND to the LAN IP (not 0.0.0.0 / all interfaces). The
+    // dev1 front reaches it over the LAN; the loopback probe/hub session use the HTTP transport.
+    assert!(
+        out.contains("ws_ip = \"10.77.9.203\""),
+        "WS must bind the LAN IP (ws_ip), never all interfaces; got:\n{out}"
+    );
+}
+
+/// issue 1345 M3 follow-up (d): `strih_janus_http_jcfg_text` renders the Janus HTTP transport jcfg
+/// bound to LOOPBACK 127.0.0.1 only (`ip = "127.0.0.1"`) — the hub's plain-RTP session + local
+/// probes use it; the phone never touches HTTP. NO https, admin API off, never a 0.0.0.0 bind.
+#[test]
+fn janus_http_jcfg_binds_loopback_only() {
+    let (code, out, err) = run_sourced(&[], "strih_janus_http_jcfg_text");
+    assert_eq!(code, 0, "renderer must succeed; stderr={err}");
+    assert!(out.contains("http = true"), "http enabled; got:\n{out}");
+    assert!(out.contains("port = 8088"), "http on :8088");
+    assert!(
+        out.contains("ip = \"127.0.0.1\""),
+        "HTTP API MUST bind loopback 127.0.0.1 only; got:\n{out}"
+    );
+    assert!(out.contains("https = false"), "no https (no TLS here)");
+    assert!(out.contains("admin_http = false"), "admin HTTP API off");
+    assert!(
+        !out.contains("0.0.0.0"),
+        "the HTTP API must never bind all interfaces; got:\n{out}"
+    );
 }
 
 /// issue 1345 M3a: `strih_janus_room_jcfg_ok ROOM` (stdin: jcfg) grades whether the interkom room is
@@ -969,20 +996,22 @@ fn janus_room_jcfg_ok_grades_the_rendered_room() {
     );
 }
 
-/// issue 1345 M3a: `setup-strih.sh` step 14 must apt-install janus + enable-only (never start) and
-/// run BEFORE the final verify (step 15). Mirrors the dantesync/NDI ordering anchors.
+/// issue 1345 M3a: `setup-strih.sh` must apt-install janus + enable-only + write all three jcfg files
+/// (audiobridge room, WS transport, HTTP transport) and run BEFORE the final verify. The Janus step
+/// must run BEFORE the audio TODO gate so the audio `fail` (issue 1344) no longer blocks it (issue
+/// 1345 M3 follow-ups b/c/d). Mirrors the dantesync/NDI ordering anchors.
 #[test]
 fn setup_strih_installs_janus_enable_only_before_final_verify() {
     let s = read_script("scripts/setup-strih.sh");
     let apt = s
         .find("apt-get install -y janus")
-        .expect("setup-strih step 14 must apt-get install janus");
+        .expect("setup-strih must apt-get install janus");
     let enable = s
         .find("systemctl enable janus")
-        .expect("setup-strih step 14 must enable janus");
+        .expect("setup-strih must enable janus");
     let verify = s
         .find("verify-strih.sh acceptance gate")
-        .expect("setup-strih step 15 must run the verify gate");
+        .expect("setup-strih must run the verify gate");
     assert!(
         apt < enable,
         "install before enable (apt {apt} vs enable {enable})"
@@ -991,9 +1020,34 @@ fn setup_strih_installs_janus_enable_only_before_final_verify() {
         enable < verify,
         "janus enable must precede the final verify (enable {enable} vs verify {verify})"
     );
+    // Never an UNCONDITIONAL start; a restart is allowed ONLY guarded by is-active (Ubuntu auto-
+    // starts janus on install before the jcfg exists — restart to load the fresh jcfg if running).
     assert!(
-        !s.contains("systemctl start janus") && !s.contains("systemctl restart janus"),
-        "janus is enable-only (never start/restart) until the M4 cut-over"
+        !s.contains("systemctl start janus"),
+        "janus is never unconditionally started until the M4 cut-over"
+    );
+    if s.contains("systemctl restart janus") {
+        let restart = s.find("systemctl restart janus").unwrap();
+        let guard = s.find("systemctl is-active --quiet janus");
+        assert!(
+            guard.is_some_and(|g| g < restart && restart - g < 300),
+            "any `systemctl restart janus` must be guarded by a nearby `systemctl is-active --quiet janus`"
+        );
+    }
+    // The HTTP transport jcfg is written (loopback bind) alongside the audiobridge + WS jcfg.
+    assert!(
+        s.contains("strih_janus_http_jcfg_text")
+            && s.contains("/etc/janus/janus.transport.http.jcfg"),
+        "setup-strih must render + write the HTTP transport jcfg (loopback bind)"
+    );
+    // The Janus step runs BEFORE the audio TODO gate (which `fail`s until the MiniFuse graph is
+    // wired, issue 1344) — the live box stopped at the audio step and never reached Janus.
+    let audio_gate = s
+        .find("TODO(audio):")
+        .expect("setup-strih must carry the audio TODO gate");
+    assert!(
+        apt < audio_gate,
+        "the janus step must run BEFORE the audio TODO gate (janus {apt} vs audio {audio_gate})"
     );
     assert!(
         s.contains("TOTAL_STEPS=15"),
