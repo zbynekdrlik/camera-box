@@ -806,6 +806,7 @@ SVG_SSH_TIMEOUT="${SVG_SSH_TIMEOUT:-30}"
 # resolves the branch; the Windows probe below is UNCHANGED (byte-identical) for the old
 # STRIH-SNV box / any other target. strih_linux_visibility_check lives in the sourced lib.
 if [ "$(strih_platform "$STRIH")" = "linux" ]; then
+  _svg_strih_out=""  # #1351: a Linux strih has no Windows obs64 zombie object; keep the downstream znote read (set -u) safe
   _svg_strih_msg="$(strih_linux_visibility_check "$STRIH" "$STRIH_USER" "$STRIH_PW" "$SVG_SSH_TIMEOUT" "$HERE")"
 else
   _svg_strih_out="$(timeout "$SVG_SSH_TIMEOUT" bash -c '. "$1"; win_ssh_run "$2" "$3" "$4" "$5"' _ \

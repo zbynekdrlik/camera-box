@@ -491,3 +491,20 @@ fn strih_lx_ssh_opts_ignore_stale_known_hosts_1351() {
         "recording-verdict-on-strih-lx.sh SSH_OPTS must set UserKnownHostsFile=/dev/null (ssh + scp)"
     );
 }
+
+/// #1351 hotfix (live-rig E2E finding): the linux visibility branch MUST initialize
+/// `_svg_strih_out` (empty). The downstream #1295 zombie-note read references it unconditionally,
+/// and `set -u` aborts ("unbound variable") on a Linux strih otherwise (the Windows branch sets it,
+/// the linux branch previously did not).
+#[test]
+fn linux_visibility_branch_inits_svg_strih_out_for_set_u_1351() {
+    let body = read("scripts/recording-e2e.sh");
+    let pos = body
+        .find("_svg_strih_msg=\"$(strih_linux_visibility_check")
+        .expect("the linux visibility branch must exist");
+    let window = &body[pos.saturating_sub(220)..pos];
+    assert!(
+        window.contains("_svg_strih_out=\"\""),
+        "the linux visibility branch must init _svg_strih_out=\"\" (set -u safety for the #1295 znote read)"
+    );
+}
