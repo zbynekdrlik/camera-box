@@ -327,6 +327,33 @@ else
   note "janus audiobridge jcfg absent (${JANUS_AB}) -- run setup-strih.sh step 14; report-only"
 fi
 
+# 18) CPU performance governor on every online core + sleep masked (issue 1317 -- low-latency
+#     genlock cutter). The (perf) item: `cat` all cores' scaling_governor -> every line must be
+#     `performance` (strih_verify_governor_ok, fail-closed on an empty/unreadable read), AND
+#     sleep.target masked (the existing strih_verify_sleep_masked). FAIL loud, like the other items.
+GOVS="$(cat /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor 2>/dev/null || true)"
+PERF_SLEEP_STATE="$(systemctl is-enabled sleep.target 2>/dev/null || true)"
+if printf '%s\n' "$GOVS" | strih_verify_governor_ok && strih_verify_sleep_masked "$PERF_SLEEP_STATE"; then
+  ok "(perf) CPU governor performance on all online cores + sleep.target masked"
+else
+  bad "(perf) CPU not in performance mode on all cores (or sleep.target not masked) -- re-run setup-strih.sh step 15 (governors: ${GOVS//$'\n'/,} ; sleep is-enabled: ${PERF_SLEEP_STATE:-<none>})"
+fi
+
+# 19) Bitfocus Companion Satellite installed + enabled + controller host recorded (issue 1317 -- the
+#     (companion) item). dpkg-installed + unit enabled + /etc/companion-satellite/host.conf points at
+#     the controller (strih_companion_verdict, fail-closed). FAIL loud on any missing part.
+CS_INSTALLED=0; dpkg -s "$(strih_companion_satellite_pkg)" >/dev/null 2>&1 && CS_INSTALLED=1
+CS_ENABLED=0; [ "$(systemctl is-enabled "$(strih_companion_satellite_unit)" 2>/dev/null || true)" = enabled ] && CS_ENABLED=1
+CS_HOST_OK=0
+CS_CONF="${COMPANION_SATELLITE_CONF:-/etc/companion-satellite/host.conf}"
+if [ -f "$CS_CONF" ] && grep -qxF "COMPANION_SATELLITE_HOST=$(strih_companion_satellite_host)" "$CS_CONF"; then CS_HOST_OK=1; fi
+CS_VERDICT="$(strih_companion_verdict "$CS_INSTALLED" "$CS_ENABLED" "$CS_HOST_OK" || true)"
+if [ "$CS_VERDICT" = ok ]; then
+  ok "(companion) Companion Satellite installed + enabled + controller host recorded ($(strih_companion_satellite_host))"
+else
+  bad "(companion) Companion Satellite gate: ${CS_VERDICT} (installed=${CS_INSTALLED} enabled=${CS_ENABLED} host_ok=${CS_HOST_OK}) -- re-run setup-strih.sh step 16"
+fi
+
 echo ""
 if [ "$FAILS" -eq 0 ]; then
   echo -e "${GREEN}=== verify-strih.sh: ALL CLEAR ===${NC}"; exit 0

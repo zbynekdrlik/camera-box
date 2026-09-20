@@ -27,7 +27,7 @@ OBS_CFG="${USER_HOME}/.config/obs-studio"
 GENLOCK_REPO="${GENLOCK_REPO:-zbynekdrlik/camera-box}"
 GENLOCK_DIR="/opt/obs-genlock"
 REC_DIR="/srv/_REC"
-TOTAL_STEPS=15
+TOTAL_STEPS=17
 
 step() { echo -e "${GREEN}[$1/${TOTAL_STEPS}] $2${NC}"; }
 warn() { echo -e "${YELLOW}$1${NC}"; }
@@ -427,7 +427,39 @@ else
 fi
 
 # ---------------------------------------------------------------------------------------------
-step 15 "Final verification (verify-strih.sh acceptance gate)"
+step 15 "CPU performance governor + never-sleep (low-latency genlock cutter)"
+# issue 1317: the owner caught this missing live -- a fresh strih-lx booted on the distro-default
+# powersave/schedutil governor, wrong for the low-latency genlock OBS cutter (the imag-nb + cam-box
+# fleet pin `performance` explicitly, setup-device.sh STEP-13 + .claude/rules/realtime-isolation.md).
+# Apply it NOW (power-profiles-daemon preferred, else the scaling_governor write) + re-mask sleep,
+# then install the persistence oneshot so it survives a reboot.
+eval "$(strih_performance_mode_apply)" || warn "  performance-mode apply hit a soft error (per-core write refused?) -- verify-strih (perf) gates the live state"
+strih_cpu_performance_unit_text > /etc/systemd/system/cpu-performance.service \
+  || fail "could not write /etc/systemd/system/cpu-performance.service"
+systemctl daemon-reload
+systemctl enable cpu-performance.service 2>/dev/null || warn "  could not enable cpu-performance.service (governor still set for this boot; enable it by hand)"
+GOV_NOW="$(cat /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor 2>/dev/null | sort -u | tr '\n' ',' | sed 's/,$//' || true)"
+echo "  CPU governor set to performance (now: ${GOV_NOW:-unreadable}); sleep/suspend masked; cpu-performance.service enabled for persistence"
+
+# ---------------------------------------------------------------------------------------------
+step 16 "Bitfocus Companion Satellite (Stream Deck surface agent) -- enable-only"
+# issue 1317: the owner caught this missing live -- the notebook's locally-attached Stream Deck was
+# dead because Companion Satellite was never installed. Install the SATELLITE (NOT full Companion --
+# the venue runs the Companion CONTROLLER at 10.77.9.205, this box only exposes its local surface to
+# it), PINNED (never "latest"), record the controller host, and ENABLE-ONLY (never start mid-provision;
+# the operator / next boot starts it). The exact runtime config-key wiring is confirmed on the live
+# box by the supervisor (see the LANE-RETURN followup); this step makes the one procedure complete.
+CS_HOST="$(strih_companion_satellite_host)"
+CS_VER="$(strih_companion_satellite_version)"
+eval "$(strih_companion_satellite_install)" \
+  || fail "Companion Satellite install failed (version ${CS_VER}) -- confirm the pinned version/asset (COMPANION_SATELLITE_VERSION / COMPANION_SATELLITE_DEB_URL) and re-run"
+install -d -m 755 /etc/companion-satellite
+strih_companion_satellite_config_text "$CS_HOST" > /etc/companion-satellite/host.conf \
+  || fail "could not write /etc/companion-satellite/host.conf"
+echo "  Companion Satellite ${CS_VER} installed + enabled (NOT started); controller host ${CS_HOST} recorded in /etc/companion-satellite/host.conf"
+
+# ---------------------------------------------------------------------------------------------
+step 17 "Final verification (verify-strih.sh acceptance gate)"
 if [ -x "${HERE}/verify-strih.sh" ]; then
   "${HERE}/verify-strih.sh" || fail "verify-strih.sh acceptance gate did not pass"
 else
