@@ -627,8 +627,67 @@ def test_program_audio_input_kind_from_inputs():
     assert _mod.program_audio_input_kind_from_inputs(None) is None
 
 
-def test_program_audio_input_settings_binds_the_strih_program_monitor():
+def test_program_audio_input_settings_binds_the_strih_program_loopback_source():
+    # issue 1344 follow-up (20.9. live diagnosis, issuecomment-5751113173): the null-sink monitor
+    # `strih-program.monitor` is NOT pulse-visible on Ubuntu 26.04 pipewire (support.null-audio-sink
+    # via context.objects never gets a pulse.monitor mapping there) -- OBS's pulse_input_capture
+    # never lists it and binding it reads digital silence, proven live. The loopback module
+    # (strih_pipewire_program_loopback_conf) republishes the sink as a real Audio/Source node
+    # `strih-program-source`, which OBS DOES enumerate and capture correctly.
     s = _mod.program_audio_input_settings()
-    assert s == {"device_id": "strih-program.monitor"}
+    assert s == {"device_id": "strih-program-source"}
+    assert _mod.AUDIO_MONITOR_DEVICE == "strih-program-source"
     assert _mod.AUDIO_INPUT_NAME == "ASIO zvuk"
     assert _mod.AUDIO_INPUT_KIND == "pulse_input_capture"
+
+
+class _FakeObsSceneItems:
+    """Records CreateSceneItem calls; answers GetSceneItemList from a canned per-scene map
+    {sceneName: [sourceName, ...]}. A scene absent from the map behaves as if it has zero items."""
+
+    def __init__(self, items_by_scene):
+        self._items = items_by_scene
+        self.calls = []
+
+    def req(self, req_type, data=None, ignore_err=False):
+        self.calls.append((req_type, data or {}))
+        if req_type == "GetSceneItemList":
+            scene = (data or {}).get("sceneName")
+            return {"sceneItems": [{"sourceName": n} for n in self._items.get(scene, [])]}
+        return {}
+
+
+def test_ensure_program_audio_in_every_scene_adds_only_where_missing():
+    # issue 1344 item 3 (live diagnosis): the ASIO zvuk program-audio input must be a scene item in
+    # EVERY declared operator scene, not just the one it was created in -- OBS scene-item audio only
+    # plays while the owning scene item is active, so a single-scene seed silences program audio on
+    # every camera cut. The original migrated collection carried it in all 7 program scenes.
+    plan = [{"scene": "Cam 1"}, {"scene": "Cam 2"}, {"scene": "Cam 2"}, {"scene": "Cam 3"}]
+    obs = _FakeObsSceneItems({"Cam 1": [_mod.AUDIO_INPUT_NAME], "Cam 2": ["something else"]})
+    added = _mod.ensure_program_audio_in_every_scene(obs, plan)
+    assert added == 2, obs.calls  # Cam 2 (missing) + Cam 3 (never seen)
+    creates = [d for (t, d) in obs.calls if t == "CreateSceneItem"]
+    assert creates == [
+        {"sceneName": "Cam 2", "sourceName": _mod.AUDIO_INPUT_NAME},
+        {"sceneName": "Cam 3", "sourceName": _mod.AUDIO_INPUT_NAME},
+    ], creates
+
+
+def test_ensure_program_audio_in_every_scene_no_op_when_every_scene_already_has_it():
+    plan = [{"scene": "Cam 1"}, {"scene": "Moderatori"}]
+    obs = _FakeObsSceneItems({
+        "Cam 1": [_mod.AUDIO_INPUT_NAME],
+        "Moderatori": [_mod.AUDIO_INPUT_NAME],
+    })
+    added = _mod.ensure_program_audio_in_every_scene(obs, plan)
+    assert added == 0
+    assert not any(t == "CreateSceneItem" for (t, _d) in obs.calls)
+
+
+def test_ensure_program_audio_in_every_scene_dedupes_scene_names():
+    plan = [{"scene": "Cam 3"}, {"scene": "Cam 3"}, {"scene": "Cam 3"}]
+    obs = _FakeObsSceneItems({})
+    added = _mod.ensure_program_audio_in_every_scene(obs, plan)
+    assert added == 1
+    creates = [d for (t, d) in obs.calls if t == "CreateSceneItem"]
+    assert len(creates) == 1
