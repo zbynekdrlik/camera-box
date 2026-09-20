@@ -125,6 +125,11 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shared with the #979 dev1 watchdog, never a second detector for the same signal.
 # shellcheck source=scripts/lib/obs-session-visibility.sh
 . "$HERE/lib/obs-session-visibility.sh"
+# issue 1351: strih PLATFORM resolver (windows|linux) after the M4 cut-over to strih-lx, plus the
+# Linux operator-session-visibility predicate that replaces the obs64/AHK CIM probe above for a
+# Linux strih -- never a second host-detection mechanism, one resolver both [0/8] and [8/8a] use.
+# shellcheck source=scripts/lib/strih-platform.sh
+. "$HERE/lib/strih-platform.sh"
 # #863: WARN-only (never `exit`) verification that the PERMANENT cam2-painter.service genuinely
 # came back active + painting after cleanup() restarts it below -- a fire-and-forget restart call
 # that used to be a silent no-op (the permanent painter unit was never installed, see #863).
@@ -797,9 +802,16 @@ echo "[0/8] obs64/AHK session-visibility gate — fail when strih/stream OBS (or
 # precedent below (`timeout` execvp()s its command directly, so it cannot invoke a shell FUNCTION
 # like win_ssh_run -- route through `bash -c`, re-sourcing the lib inside that subshell).
 SVG_SSH_TIMEOUT="${SVG_SSH_TIMEOUT:-30}"
-_svg_strih_out="$(timeout "$SVG_SSH_TIMEOUT" bash -c '. "$1"; win_ssh_run "$2" "$3" "$4" "$5"' _ \
-  "$HERE/lib/win-ssh-exec.sh" "$STRIH_USER" "$STRIH_PW" "$STRIH" "$(obs_session_visibility_probe_ps 1)" 2>/dev/null || true)"
-_svg_strih_msg="$(obs_session_visibility_message "$_svg_strih_out" 1)"
+# issue 1351: strih-lx (Linux) never runs the Windows obs64/AHK CIM probe -- strih_platform
+# resolves the branch; the Windows probe below is UNCHANGED (byte-identical) for the old
+# STRIH-SNV box / any other target. strih_linux_visibility_check lives in the sourced lib.
+if [ "$(strih_platform "$STRIH")" = "linux" ]; then
+  _svg_strih_msg="$(strih_linux_visibility_check "$STRIH" "$STRIH_USER" "$STRIH_PW" "$SVG_SSH_TIMEOUT" "$HERE")"
+else
+  _svg_strih_out="$(timeout "$SVG_SSH_TIMEOUT" bash -c '. "$1"; win_ssh_run "$2" "$3" "$4" "$5"' _ \
+    "$HERE/lib/win-ssh-exec.sh" "$STRIH_USER" "$STRIH_PW" "$STRIH" "$(obs_session_visibility_probe_ps 1)" 2>/dev/null || true)"
+  _svg_strih_msg="$(obs_session_visibility_message "$_svg_strih_out" 1)"
+fi
 if [ -n "$_svg_strih_msg" ]; then
   echo "ERROR: [0/8] strih INVISIBLE: $_svg_strih_msg" >&2
   echo "       Recovery: bash scripts/launch-obs-genlock.sh --box strih --force   # paste into the win-strih MCP Shell (session 1, never ssh+CIM — issue 958)" >&2
@@ -5135,7 +5147,21 @@ if [ "$VERDICT_ON_STREAM" = "1" ]; then
   # stream extract below, and with imag's own extract further down) while default plan-print
   # mode still calls it in the FOREGROUND exactly as before (EXEC_STRIH_ARGS is empty there, so
   # the invocation text/behavior is unchanged from the pre-#703 call).
+  # issue 1351: strih-lx (Linux) has no win-* MCP path -- decode-in-place goes over plain
+  # ssh/scp via recording-verdict-on-strih-lx.sh (the imag-nb precedent), always executing for
+  # real (no plan-print mode, matching recording-verdict-on-imag.sh -- ssh/scp to a plain Linux
+  # box is always allowed on this rig). STRIH_LX_REMOTE_OUT_DIR mirrors IMAG_REMOTE_OUT_DIR.
+  STRIH_LX_REMOTE_OUT_DIR="${STRIH_LX_REMOTE_OUT_DIR:-/home/newlevel/verdict-out}"
   run_strih_extract() {
+    if [ "$(strih_platform "$STRIH")" = "linux" ]; then
+      STRIH_LX_BOX="$STRIH" "$HERE/recording-verdict-on-strih-lx.sh" \
+        --verdict-bin "$VERDICT_BIN" --out-dir "$STRIH_LX_REMOTE_OUT_DIR" --local-out-dir "$OUTDIR" \
+        --strih-rec "$STRIH_HOST_PATH" \
+        -- --extract-partial strih --strih "$STRIH_HOST_PATH" --capture-fps "$STRIH_CAPTURE_FPS" \
+           --burn-cam1-run-id "$BURN_CAM1_RUN_ID" --burn-strih-run-id "$BURN_STRIH_RUN_ID" \
+           $CG --out "$STRIH_LX_REMOTE_OUT_DIR/strih-partial-${RUN_ID}.json"
+      return
+    fi
     "$HERE/recording-verdict-on-strih.sh" \
       --verdict-exe "$VERDICT_EXE_WIN" --out-dir "$OUT_DIR_WIN" --strih-rec "$STRIH_REC_WIN" \
       "${EXEC_STRIH_ARGS[@]}" \
