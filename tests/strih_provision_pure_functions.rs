@@ -1619,3 +1619,112 @@ fn setup_strih_rest_apply_and_verify_live_connected() {
         "verify-strih item 19 must probe the Satellite REST /api/status for the connected read"
     );
 }
+
+/// issue 1317 (5th live root cause): OBS resolves its helper processes (obs-ffmpeg-mux the record
+/// muxer, obs-nvenc-test the NVENC probe) NEXT TO ITS OWN EXECUTABLE, so the prefix install must
+/// enumerate the WHOLE bin/ dir -- installing only `obs` left the notebook with `NVENC not supported`
+/// plus a broken record muxer. strih_bundle_bin_files enumerates every regular file under bin/.
+#[test]
+fn bundle_bin_files_enumerates_every_helper_not_just_obs() {
+    let tmp = std::env::temp_dir().join(format!("strih_bin_1317_{}", std::process::id()));
+    let bindir = tmp.join("bin");
+    std::fs::create_dir_all(&bindir).unwrap();
+    for f in ["obs", "obs-ffmpeg-mux", "obs-nvenc-test"] {
+        std::fs::write(bindir.join(f), b"#!/bin/sh\n").unwrap();
+    }
+    let bundle = tmp.to_string_lossy().into_owned();
+    let (code, out, err) = run_sourced(
+        &[("BUNDLE", bundle.as_str())],
+        "strih_bundle_bin_files \"$BUNDLE\"",
+    );
+    let _ = std::fs::remove_dir_all(&tmp);
+    assert_eq!(code, 0, "enumeration must succeed; stderr={err}");
+    for name in ["obs", "obs-ffmpeg-mux", "obs-nvenc-test"] {
+        assert!(
+            out.lines().any(|l| l.ends_with(&format!("/bin/{name}"))),
+            "must enumerate bin/{name} (not just obs): {out}"
+        );
+    }
+    assert_eq!(
+        out.lines().filter(|l| !l.trim().is_empty()).count(),
+        3,
+        "must enumerate all three bin files: {out}"
+    );
+}
+
+/// strih_install_bundle_prefix must install the WHOLE bin/ dir via strih_bundle_bin_files, not a
+/// single hardcoded `bin/obs` (the pre-fix shape). Guarded by the source text since the actual
+/// install needs root (`install -o root`), which a CI test never has.
+#[test]
+fn install_bundle_prefix_installs_all_bin_helpers_via_enumeration() {
+    let lib = read_script("scripts/lib/strih-provision.sh");
+    let body = lib
+        .split("strih_install_bundle_prefix()")
+        .nth(1)
+        .expect("strih_install_bundle_prefix must exist");
+    assert!(
+        body.contains("strih_bundle_bin_files"),
+        "the install must enumerate every bin helper via strih_bundle_bin_files, not a single obs"
+    );
+}
+
+/// The OBS-helper acceptance verdict: fail-closed -- `ok` only when BOTH obs-ffmpeg-mux (record
+/// muxer) AND obs-nvenc-test (NVENC probe) are present+executable beside obs (recording-critical).
+#[test]
+fn obs_helpers_verdict_is_failclosed() {
+    let (c, out, _e) = run_sourced(&[], "strih_obs_helpers_verdict 1 1");
+    assert_eq!(c, 0);
+    assert_eq!(out.trim(), "ok");
+    let (c, out, _e) = run_sourced(&[], "strih_obs_helpers_verdict 0 1");
+    assert_ne!(c, 0);
+    assert_eq!(out.trim(), "no-obs-ffmpeg-mux");
+    let (c, out, _e) = run_sourced(&[], "strih_obs_helpers_verdict 1 0");
+    assert_ne!(c, 0);
+    assert_eq!(out.trim(), "no-obs-nvenc-test");
+    // fail-closed on missing args
+    let (c, _o, _e) = run_sourced(&[], "strih_obs_helpers_verdict");
+    assert_ne!(c, 0);
+}
+
+/// The NVENC-log verdict (report-only, needs a running OBS): a healthy log carries
+/// `[obs-nvenc] NVENC version:`; the missing-helper signature is `NVENC not supported` with no
+/// version line; anything else (OBS not up yet) is unknown.
+#[test]
+fn nvenc_log_verdict_grades_the_obs_log() {
+    let (c, out, _e) = run_sourced(
+        &[],
+        "printf '[obs-nvenc] NVENC version: 12.1 (compiled) / 13.0 (driver)\\n' | strih_nvenc_log_verdict",
+    );
+    assert_eq!(c, 0);
+    assert_eq!(out.trim(), "nvenc-ok");
+    let (c, out, _e) = run_sourced(
+        &[],
+        "printf '[NVENC] Failed to launch the NVENC test process\\nNVENC not supported\\n' | strih_nvenc_log_verdict",
+    );
+    assert_ne!(c, 0);
+    assert_eq!(out.trim(), "nvenc-unsupported");
+    let (_c, out, _e) = run_sourced(
+        &[],
+        "printf 'some other log line\\n' | strih_nvenc_log_verdict",
+    );
+    assert_eq!(out.trim(), "nvenc-unknown");
+}
+
+/// verify-strih.sh must gate the OBS helper binaries beside /usr/bin/obs (recording-critical) and
+/// grade the NVENC log via the pure verdicts.
+#[test]
+fn verify_strih_gates_obs_helpers_and_nvenc() {
+    let v = read_script("scripts/verify-strih.sh");
+    assert!(
+        v.contains("strih_obs_helpers_verdict"),
+        "verify-strih must gate the OBS helper binaries via strih_obs_helpers_verdict"
+    );
+    assert!(
+        v.contains("/usr/bin/obs-ffmpeg-mux") && v.contains("/usr/bin/obs-nvenc-test"),
+        "verify-strih must check obs-ffmpeg-mux + obs-nvenc-test beside /usr/bin/obs"
+    );
+    assert!(
+        v.contains("strih_nvenc_log_verdict"),
+        "verify-strih must grade the NVENC log via strih_nvenc_log_verdict"
+    );
+}
