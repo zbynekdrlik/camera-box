@@ -704,3 +704,24 @@ DONE — see the "CPU performance governor + Bitfocus Companion Satellite" secti
 at runtime but never matches the source-text anchor. Keep the file name literal in the message and put
 the expanded path in parentheses after it — the same rule for every future fail-closed marker a
 static-anchor test pins.
+
+## GOTCHA — the genlock OBS on strih-lx (Ubuntu 26.04) needs `qt6-svg-plugins` + a setuid `chrome-sandbox`, or the operator UI is half-broken (M4, 21.9.2026)
+
+Two hand-patches applied live to the strih-lx notebook OBS during the M4 cut-over that must be
+BAKED INTO `setup-strih.sh` (currently NOT provisioned — both were discovered only because the
+owner reported symptoms on the production box days before a service):
+
+1. **Missing Qt6 SVG plugins → "half the OBS icons are gone".** OBS 32's default **Yami** theme is
+   SVG-based. On a fresh Ubuntu 26.04 `libqt6svg6` (the library) is installed but the Qt PLUGINS
+   are split into a SEPARATE package `qt6-svg-plugins` (provides
+   `/usr/lib/x86_64-linux-gnu/qt6/plugins/iconengines/libqsvgicon.so` +
+   `imageformats/libqsvg.so`). Without them the SVG toolbar/dock/settings icons render BLANK while
+   PNG bits (checkboxes) still show — the exact "polku ikoniek nevidim" symptom. Fix:
+   `apt-get install -y qt6-svg-plugins`, then restart OBS. Diagnose: `ls
+   /usr/lib/x86_64-linux-gnu/qt6/plugins/iconengines/` — an EMPTY dir is the tell.
+2. **`chrome-sandbox` not setuid → CEF browser sources' sandbox broken.** The /usr-prefix genlock
+   OBS uses `/usr/lib/x86_64-linux-gnu/obs-plugins/chrome-sandbox`, which shipped `0755`; CEF needs
+   it `root:root 4755`. Fix: `chmod 4755` that path (standalone `sudo`, not a compound call).
+
+Both are `setup-strih.sh` provisioning steps to add. Until then a re-flashed strih-lx OBS will
+show broken icons + broken browser sources again.
