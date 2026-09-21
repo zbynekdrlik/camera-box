@@ -541,7 +541,9 @@ fn zero_eight_version_integrity_gate_threads_strih_linux_flag_conditionally_1351
     // The flag must be threaded via the established conditional-arg convention, never a bare
     // unconditional literal -- count exactly TWO occurrences (one per invocation shape: the
     // imag-acked branch and the non-acked branch).
-    let occurrences = window.matches("${STRIH_LINUX_GATE_ARG:+--strih-linux}").count();
+    let occurrences = window
+        .matches("${STRIH_LINUX_GATE_ARG:+--strih-linux}")
+        .count();
     assert_eq!(
         occurrences, 2,
         "--strih-linux must be threaded conditionally into BOTH version-integrity-gate.sh \

@@ -2347,8 +2347,7 @@ const STRIH_LX_PLATFORM_AGNOSTIC: &str = "{\
 fn gate_passes_a_linux_strih_under_strih_linux_with_only_platform_agnostic_facets_1351() {
     const SHA: &str = "26de1c3c23980488a110dbf02e5e472f15cb001d";
     const OBS_SHA: &str = "1111111111111111111111111111111111111111111111111111111111111111";
-    const DISTROAV_SHA: &str =
-        "2222222222222222222222222222222222222222222222222222222222222222";
+    const DISTROAV_SHA: &str = "2222222222222222222222222222222222222222222222222222222222222222";
     let manifest = write_manifest("strih_lx_1351_pass", OBS_SHA, DISTROAV_SHA);
     let s = write_state(
         "strih_lx_1351_pass",
@@ -2362,7 +2361,12 @@ fn gate_passes_a_linux_strih_under_strih_linux_with_only_platform_agnostic_facet
     let t = write_state(
         "stream_1351_pass",
         &with_obs_identity_ok(
-            &with_manifest_facet(&with_sha(STREAM_PINNED, SHA), OBS_SHA, DISTROAV_SHA, GENLOCK_CAP_770),
+            &with_manifest_facet(
+                &with_sha(STREAM_PINNED, SHA),
+                OBS_SHA,
+                DISTROAV_SHA,
+                GENLOCK_CAP_770,
+            ),
             false,
         ),
     );
@@ -2471,8 +2475,7 @@ fn gate_still_fails_a_linux_strih_when_genlock_build_sha_drifts_under_strih_linu
     const SHA_STRIH: &str = "26de1c3c23980488a110dbf02e5e472f15cb001d";
     const SHA_STREAM: &str = "8e2817e5aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const OBS_SHA: &str = "1111111111111111111111111111111111111111111111111111111111111111";
-    const DISTROAV_SHA: &str =
-        "2222222222222222222222222222222222222222222222222222222222222222";
+    const DISTROAV_SHA: &str = "2222222222222222222222222222222222222222222222222222222222222222";
     let manifest = write_manifest("strih_lx_1351_drift", OBS_SHA, DISTROAV_SHA);
     let s = write_state(
         "strih_lx_1351_drift",
@@ -2528,13 +2531,17 @@ fn gate_still_fails_a_linux_strih_when_genlock_build_sha_drifts_under_strih_linu
 fn windows_strih_path_is_byte_identical_without_strih_linux_1351() {
     const SHA: &str = "26de1c3c23980488a110dbf02e5e472f15cb001d";
     const OBS_SHA: &str = "1111111111111111111111111111111111111111111111111111111111111111";
-    const DISTROAV_SHA: &str =
-        "2222222222222222222222222222222222222222222222222222222222222222";
+    const DISTROAV_SHA: &str = "2222222222222222222222222222222222222222222222222222222222222222";
     let manifest = write_manifest("strih_win_1351_unaffected", OBS_SHA, DISTROAV_SHA);
     let s = write_state(
         "strih_win_1351_unaffected",
         &with_obs_identity_ok(
-            &with_manifest_facet(&with_sha(STRIH_PINNED, SHA), OBS_SHA, DISTROAV_SHA, GENLOCK_CAP_770),
+            &with_manifest_facet(
+                &with_sha(STRIH_PINNED, SHA),
+                OBS_SHA,
+                DISTROAV_SHA,
+                GENLOCK_CAP_770,
+            ),
             true,
         ),
     );
@@ -2542,7 +2549,12 @@ fn windows_strih_path_is_byte_identical_without_strih_linux_1351() {
     let t = write_state(
         "stream_win_1351_unaffected",
         &with_obs_identity_ok(
-            &with_manifest_facet(&with_sha(STREAM_PINNED, SHA), OBS_SHA, DISTROAV_SHA, GENLOCK_CAP_770),
+            &with_manifest_facet(
+                &with_sha(STREAM_PINNED, SHA),
+                OBS_SHA,
+                DISTROAV_SHA,
+                GENLOCK_CAP_770,
+            ),
             false,
         ),
     );
