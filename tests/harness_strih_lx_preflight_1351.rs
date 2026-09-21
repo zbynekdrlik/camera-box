@@ -245,9 +245,14 @@ fn dantesync_version_parity_gate_is_bounded_on_the_linux_strih_path_1351() {
         "the dantesync version-parity gate must emit the named strih-lx banner on a timeout kill. \
          Window:\n{window}"
     );
+    // #1351: the argv now routes --win through the computed DV_WIN_NODES variable (strih is
+    // platform-branched -- a Windows strih keeps strih+stream under --win via DV_WIN_NODES, a Linux
+    // strih moves strih into the --linux arm). The bound (prefix + banner tail) still composes with
+    // the single invocation unchanged; only the --win argument became a variable.
     assert!(
-        window.contains("dantesync-version-gate.sh") && window.contains("--win \"strih="),
-        "the dantesync version-parity gate's argv must be unchanged. Window:\n{window}"
+        window.contains("dantesync-version-gate.sh") && window.contains("--win \"$DV_WIN_NODES\""),
+        "the dantesync version-parity gate must keep the bound intact and pass --win via the \
+         computed DV_WIN_NODES arg (#1351). Window:\n{window}"
     );
 }
 
@@ -266,7 +271,7 @@ fn the_bound_never_duplicates_a_gate_invocation_anchor_1351() {
     for anchor in [
         "--win-http \"stream=$STREAM\"", // only in the MAIN DanteSync gate this fix prefixed
         "\"$HERE/dantesync-version-gate.sh\"", // the version-parity gate this fix prefixed
-        "--win \"strih=",                // only in the version-parity gate's --win arg
+        "--win \"$DV_WIN_NODES\"",       // #1351: the version-parity gate's computed --win arg
     ] {
         assert_eq!(
             body.matches(anchor).count(),
