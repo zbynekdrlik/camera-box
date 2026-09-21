@@ -109,3 +109,15 @@ HH:MM:SS.mmm: [distroav] recv-timing #797 '<obs input name>': n=<N> cap_avg=<X>m
 
 No ssh/MCP to rig boxes from this lane — the actual reattach cure and the on-rig detection are
 verified by the supervisor after enabling per `systemd/ndi-halving-watchdog.README.md`.
+
+## Seen live 19.9.2026: strih receivers halve AFTER an E2E's reattach/cleanup restarts — check `recv-timing cap_avg` before a production hand-over
+
+After Full-path E2E runs whose cleanup restarted every cambox, strih's `NDI cam5` and `NDI cam6`
+receivers came back at 30 fps (`recv-timing #797 … cap_avg=32.7ms`, `received` delta 30/s) while the
+camboxes emitted 60/60 — the exact HALVED signature this rule describes, and the run's own
+frozen-camera preflight had already flagged cam5/6/7 mid-reset. The sanctioned cure worked on cam6
+(`obs_phase2.py idle-receiver --input "NDI cam6"` → `--restore "CAM6 (usb)"`); cam5 stayed halved
+after one idle→restore and healed only after a SENDER restart (`systemctl restart camera-box` on
+cam5), which froze the receiver (`received` flat) until the in-loop #767 watchdog ran its own
+`reset_ndi_receiver` (~30 s) and it came back at 60 fps. Before handing the rig to production, read
+all seven `cap_avg` values (≈16.2 ms = 60 fps) — a 32-33 ms input is halved even though `locked=1`.

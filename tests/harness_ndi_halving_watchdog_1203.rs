@@ -81,6 +81,10 @@ struct Rig {
     probe: PathBuf,
     cure: PathBuf,
     cure_calls: PathBuf,
+    sender: PathBuf,
+    sender_calls: PathBuf,
+    rigmode: PathBuf,
+    rigmode_fix: PathBuf,
     notify: PathBuf,
     notify_calls: PathBuf,
     logfix: PathBuf,
@@ -118,10 +122,43 @@ impl Rig {
             ),
         )
         .unwrap();
+        // NDI_HALVING_SENDER_RESTART_CMD stub: invoked as `<input> <sender_ip>`; records `<input>`
+        // per invocation and succeeds (exit 0) — a stand-in for the real ssh systemctl restart
+        // camera-box + verify, so the harness proves the SENDER arm was DRIVEN without touching a box.
+        let sender = dir.path().join("sender.sh");
+        let sender_calls = dir.path().join("sender-calls.txt");
+        write_exec(
+            &sender,
+            &format!(
+                "#!/usr/bin/env bash\nprintf '%s\\n' \"$1\" >> {}\n",
+                sender_calls.display()
+            ),
+        );
+        // NDI_HALVING_RIGMODE_CMD stub: prints the cam2 rig-mode snapshot fixture the test rewrites
+        // per scenario (default = a TEST snapshot so the sender arm may proceed).
+        let rigmode = dir.path().join("rigmode.sh");
+        let rigmode_fix = dir.path().join("rigmode.txt");
+        fs::write(
+            &rigmode_fix,
+            // TEST: sentinel present + painter alive (SVC_ACTIVE|1) -> rig_mode_from_painter_snapshot=TEST.
+            "RIG_MODE_PROBE_OK\nPID_PRESENT|0\nPID_ALIVE|0\nSVC_ENABLED|1\nSVC_ACTIVE|1\n",
+        )
+        .unwrap();
+        write_exec(
+            &rigmode,
+            &format!(
+                "#!/usr/bin/env bash\ncat {} 2>/dev/null || true\n",
+                rigmode_fix.display()
+            ),
+        );
         Rig {
             probe,
             cure,
             cure_calls,
+            sender,
+            sender_calls,
+            rigmode,
+            rigmode_fix,
             notify,
             notify_calls,
             logfix: dir.path().join("obslog.txt"),
@@ -129,6 +166,21 @@ impl Rig {
             netreach: dir.path().join("netreach.state"),
             _dir: dir,
         }
+    }
+
+    fn set_rigmode_event(&self) {
+        // EVENT: sentinel present + painter NEITHER expected NOR alive (all four 0) -> EVENT.
+        fs::write(
+            &self.rigmode_fix,
+            "RIG_MODE_PROBE_OK\nPID_PRESENT|0\nPID_ALIVE|0\nSVC_ENABLED|0\nSVC_ACTIVE|0\n",
+        )
+        .unwrap();
+    }
+
+    fn sender_call_count(&self) -> usize {
+        fs::read_to_string(&self.sender_calls)
+            .map(|s| s.lines().filter(|l| !l.trim().is_empty()).count())
+            .unwrap_or(0)
     }
 
     fn seed_receiver_down(&self) {
@@ -166,6 +218,14 @@ impl Rig {
             .env(
                 "NDI_HALVING_CURE_CMD",
                 format!("bash {}", self.cure.display()),
+            )
+            .env(
+                "NDI_HALVING_SENDER_RESTART_CMD",
+                format!("bash {}", self.sender.display()),
+            )
+            .env(
+                "NDI_HALVING_RIGMODE_CMD",
+                format!("bash {}", self.rigmode.display()),
             )
             .env("AIRULESET_NOTIFY", &self.notify)
             .env("NDI_HALVING_TEST_LOG", &self.logfix)
@@ -228,50 +288,158 @@ fn halved_with_healthy_sibling_holds_then_pages_report_only() {
 }
 
 // ---------------------------------------------------------------------------------------------
-// (b) cure arm ARMED (LIVE, non-dry so the reattach is genuinely driven through the seam): pass 2
-//     CURES instead of paging; a still-halved pass WITHIN the cooldown PAGES (no reattach-spam,
-//     records the alert body); a pass PAST the cooldown cures again.
+// (b) #1203 TWO-ARM escalation, ARMED (LIVE): pass2 runs the FIRST arm (idle-restore); a still-
+//     halved pass WITHIN the cooldown PAGES (no cure-spam); the next past-cooldown pass runs the
+//     SECOND arm (sender-restart), NOT another idle-restore — the cure_plan escalation.
 // ---------------------------------------------------------------------------------------------
 #[test]
-fn armed_cure_reattaches_then_cooldown_gates_reattach_spam() {
+fn armed_cure_escalates_idle_restore_then_sender_restart() {
     let rig = Rig::new();
     rig.pass(&halved_only(), PGM_ONLY, true, 1000, false); // pass1 holds
     let p2 = rig.pass(&halved_only(), PGM_ONLY, true, 1005, false);
     assert!(
         p2.contains("reattach attempted"),
-        "armed pass2 must drive the reattach, not page: {p2}"
+        "armed pass2 must drive the idle-restore arm, not page: {p2}"
     );
-    assert_eq!(rig.cure_call_count(), 1, "exactly one reattach so far");
+    assert_eq!(rig.cure_call_count(), 1, "exactly one idle-restore so far");
+    assert_eq!(rig.sender_call_count(), 0, "the sender arm has NOT run yet");
     assert!(
         rig.notify_bodies().is_empty(),
         "a cure pass must not page: {}",
         rig.notify_bodies()
     );
 
-    // Still halved, only 300 s later (< 600 s cooldown) -> PAGE, do NOT re-cure.
+    // Still halved, only 300 s later (< 600 s cooldown) -> PAGE, do NOT cure at all (anti-spam).
     let p3 = rig.pass(&halved_only(), PGM_ONLY, true, 1305, false);
     assert!(
-        !p3.contains("reattach attempted"),
-        "within cooldown must NOT re-cure: {p3}"
+        !p3.contains("reattach attempted") && !p3.contains("sender-restart attempted"),
+        "within cooldown must NOT cure (either arm): {p3}"
     );
     assert_eq!(
         rig.cure_call_count(),
         1,
-        "no second reattach within the cooldown"
+        "no second idle-restore within the cooldown"
+    );
+    assert_eq!(
+        rig.sender_call_count(),
+        0,
+        "no sender restart within the cooldown"
     );
     assert!(
         rig.notify_bodies().contains("POLOVIČNEJ kadencii")
             && rig.notify_bodies().contains("NDI 2ME PGM"),
-        "within cooldown a persistent halving must PAGE (recorded alert body): {}",
+        "within cooldown a persistent halving must PAGE: {}",
         rig.notify_bodies()
     );
 
-    // 700 s after the cure (>= 600 s cooldown) -> cure again.
-    rig.pass(&halved_only(), PGM_ONLY, true, 1705, false);
+    // 700 s after the idle-restore (>= 600 s cooldown) -> the SECOND arm (sender-restart), not idle.
+    let p4 = rig.pass(&halved_only(), PGM_ONLY, true, 1705, false);
+    assert!(
+        p4.contains("sender-restart attempted"),
+        "the escalation's second arm past the cooldown must be sender-restart: {p4}"
+    );
     assert_eq!(
         rig.cure_call_count(),
-        2,
-        "a second reattach past the cooldown"
+        1,
+        "the idle-restore arm is NOT re-run on the 2nd attempt"
+    );
+    assert_eq!(
+        rig.sender_call_count(),
+        1,
+        "the sender-restart arm runs exactly once"
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// (b2) #1203 EVENT-mode gate: the sender-restart arm is WITHHELD in provable EVENT mode (the ~3s
+//      NDI gap must never hit a live show) — it alerts instead, never restarts. UNKNOWN/TEST
+//      proceed (fail-safe = today's behaviour).
+// ---------------------------------------------------------------------------------------------
+#[test]
+fn sender_restart_arm_is_gated_off_in_event_mode() {
+    let rig = Rig::new();
+    rig.set_rigmode_event();
+    rig.pass(&halved_only(), PGM_ONLY, true, 1000, false); // hold
+    rig.pass(&halved_only(), PGM_ONLY, true, 1005, false); // attempt1: idle-restore
+    assert_eq!(
+        rig.cure_call_count(),
+        1,
+        "idle-restore still runs (non-disruptive)"
+    );
+    rig.pass(&halved_only(), PGM_ONLY, true, 1305, false); // within cooldown -> page
+                                                           // Past the cooldown, the plan is sender-restart — but rig is EVENT -> withhold + page.
+    let p4 = rig.pass(&halved_only(), PGM_ONLY, true, 1705, false);
+    assert_eq!(
+        rig.sender_call_count(),
+        0,
+        "the sender arm must NEVER restart in EVENT mode: {p4}"
+    );
+    assert!(
+        p4.contains("EVENT") && rig.notify_bodies().contains("NDI 2ME PGM"),
+        "EVENT-withheld sender restart must PAGE instead: {p4} / {}",
+        rig.notify_bodies()
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// (b3) #1203 review 🔵5: the DEFAULT (unseam'd) sender resolver can't restart a source with no
+//      `camN` token (its sender is a Windows OBS, not a systemd unit) -> attempt_sender_restart
+//      returns non-zero -> the arm PAGES (fail-safe), never a hang or a wrong ssh target. Drives
+//      the REAL attempt_sender_restart (NO NDI_HALVING_SENDER_RESTART_CMD) with a TEST rig-mode so
+//      the arm proceeds; "NDI 2ME PGM" has no camN token so the default returns 1 before any ssh.
+// ---------------------------------------------------------------------------------------------
+#[test]
+fn default_sender_restart_without_a_cam_token_pages_never_restarts() {
+    let rig = Rig::new();
+    // A per-pass run that arms the cure but leaves NDI_HALVING_SENDER_RESTART_CMD UNSET, so the real
+    // attempt_sender_restart default runs. rig-mode is TEST (the default fixture) so the arm proceeds.
+    let run = |now: u64| -> String {
+        fs::write(&rig.logfix, halved_only()).unwrap();
+        let out = Command::new("bash")
+            .arg(watchdog())
+            .env(
+                "NDI_HALVING_PROBE_CMD",
+                format!("bash {}", rig.probe.display()),
+            )
+            .env(
+                "NDI_HALVING_CURE_CMD",
+                format!("bash {}", rig.cure.display()),
+            )
+            // NO NDI_HALVING_SENDER_RESTART_CMD -> the real default attempt_sender_restart runs.
+            .env(
+                "NDI_HALVING_RIGMODE_CMD",
+                format!("bash {}", rig.rigmode.display()),
+            )
+            .env("AIRULESET_NOTIFY", &rig.notify)
+            .env("NDI_HALVING_TEST_LOG", &rig.logfix)
+            .env("NDI_HALVING_STATE_FILE", &rig.state)
+            .env("NDI_HALVING_NETREACH_STATE_FILE", &rig.netreach)
+            .env("NDI_HALVING_INPUTS", PGM_ONLY)
+            .env("NDI_HALVING_SELFHEAL", "1")
+            .env("NDI_HALVING_COOLDOWN_S", "600")
+            .env("NDI_HALVING_NOW", now.to_string())
+            .current_dir(manifest_dir())
+            .output()
+            .expect("run");
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        )
+    };
+    run(1000); // hold
+    run(1005); // attempt 1: idle-restore (via the cure seam)
+    run(1305); // within cooldown -> page
+    let p4 = run(1705); // attempt 2: sender-restart -> default resolver, no camN -> fail -> page
+    assert!(
+        p4.contains("no resolvable sender box") || p4.contains("sender-restart FAILED"),
+        "the default sender resolver must fail for a no-camN input, not ssh a wrong target: {p4}"
+    );
+    assert!(
+        rig.notify_bodies().contains("reštart zdroja")
+            && rig.notify_bodies().contains("NDI 2ME PGM"),
+        "a failed sender-restart must PAGE naming the input: {}",
+        rig.notify_bodies()
     );
 }
 

@@ -490,6 +490,8 @@ _RG_HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # below carries the RESOLVED IPv4 until zbynekdrlik/dantesync#113 lets it carry the hostname.
 # shellcheck source=scripts/lib/rig-grandmaster.sh
 . "$_RG_HERE/lib/rig-grandmaster.sh"
+# shellcheck source=scripts/lib/ndi-runtime.sh
+. "$_RG_HERE/lib/ndi-runtime.sh"   # issue 1317: shared NDI 6.3.2 runtime install recipe (with setup-strih.sh)
 RIG_GRANDMASTER_IP="$(rig_grandmaster_ip)" || {
   echo "FAIL: setup-imag: cannot resolve the PTP grandmaster host -- refusing to write an empty gm_allowlist (#1307)" >&2
   exit 1
@@ -987,25 +989,16 @@ fi
 # =============================================================================
 step 10 "NDI runtime 6.3.2 from ${NDI_PEER} -> ${NDI_DIR} (fleet-identical)"
 # =============================================================================
-if [ ! -e "${NDI_DIR}/libndi.so.6" ]; then
-    [ -n "${CAM_PW:-}" ] || fail "CAM_PW env required to fetch NDI runtime from cam1"
-    command -v sshpass >/dev/null 2>&1 || apt-get install -y sshpass >/dev/null
-    mkdir -p "$NDI_DIR"
-    sshpass -p "$CAM_PW" scp -O -o StrictHostKeyChecking=no \
-        "${DESKTOP_USER}@${NDI_PEER}:/usr/lib/ndi/libndi.so.*.*.*" "$NDI_DIR/" \
-        || fail "NDI copy from cam1 failed"
-    ( cd "$NDI_DIR" && REAL=$(ls libndi.so.*.*.* | head -1) && ln -sf "$REAL" libndi.so.6 && ln -sf libndi.so.6 libndi.so )
-fi
-echo "$NDI_DIR" > /etc/ld.so.conf.d/ndi.conf
-ldconfig
-# no `grep -q` on a pipe under pipefail — -q's early close SIGPIPEs ldconfig and fails the pipeline
-ldconfig -p | grep libndi >/dev/null || fail "libndi not in linker cache"
-# DistroAV's Linux loader (plugin-main.cpp load_ndilib) scans ONLY /usr/lib, /usr/lib64,
-# /usr/local/lib (non-recursive — NOT the multiarch dir, NOT the ld cache) for libndi.so.<N>.
-# Live-proven on imag-nb: without this symlink DistroAV logs ERR-404 despite a valid ld cache.
-ln -sf "$(readlink -f "$NDI_DIR"/libndi.so.6)" /usr/local/lib/libndi.so.6
-apt-get install -y avahi-daemon >/dev/null 2>&1 || true
-systemctl enable --now avahi-daemon >/dev/null 2>&1
+# issue 1317: the NDI 6.3.2 runtime install recipe now lives in the SHARED scripts/lib/ndi-runtime.sh
+# (`ndi_runtime_install_cmds`) so setup-imag + setup-strih install the SAME runtime from ONE source of
+# truth. Behaviour is unchanged: idempotent copy from a cam box (only when absent) + the libndi.so.6 /
+# libndi.so symlinks, the /etc/ld.so.conf.d/ndi.conf + ldconfig (no `grep -q` SIGPIPE), the
+# /usr/local/lib/libndi.so.6 symlink DistroAV's Linux loader scans, and avahi-daemon -- PLUS an
+# unconditional root:root a+rX perms-normalize (a no-op on imag's already-readable copy, a fix for the
+# strih 0600-dlopen case). The eval runs in a subshell so the recipe's fail-loud `exit 1` is caught here.
+[ -e "${NDI_DIR}/libndi.so.6" ] || [ -n "${CAM_PW:-}" ] || fail "CAM_PW env required to fetch NDI runtime from cam1"
+( eval "$(ndi_runtime_install_cmds "$NDI_PEER" "${CAM_PW:-}" "$DESKTOP_USER" "$NDI_DIR")" ) \
+    || fail "NDI runtime install failed (see above)"
 
 # =============================================================================
 step 11 "OBS Studio (official PPA, 32.x) — base install; libobs.so.30 gets genlock hot-swapped next"

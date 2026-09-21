@@ -7,6 +7,8 @@ paths:
   - "scripts/lib/cambox-offline-ack.sh"
   - "rig-fleet.txt"
   - "tests/harness_imag_offline_ack_1013.rs"
+  - "tests/harness_imag_offline_ack_probe_1317.rs"
+  - "tests/harness_rig_mode_imag_offline_leg_1171.rs"
   - "tests/rig_mode.rs"
 ---
 
@@ -83,8 +85,9 @@ fail-closing:
   stay clean): `cambox_offline_ack_effective "${CAMBOX_OFFLINE_ACK:-}" "$RIG_MODE_DIR/../rig-fleet.txt"`
   (explicit env wins, same precedence as recording-e2e.sh).
 - The skip/proceed decision is a PURE `imag_genlock_gate_offline_ack_action REASON REACHABLE` (I/O —
-  the `ping -c1 -W2 "$IMAG_IP"` — stays in the caller; the decision is pure + Tier-0 testable, the
-  same seam pattern as `imag_genlock_gate_verdict`). acked+UNREACHABLE → `skip` (loud named skip
+  `imag_service_reachable "$IMAG_IP"` (ssh :22 / dantesync :8898, never a bare ping; issue 1317) —
+  stays in the caller; the decision is pure + Tier-0 testable, the same seam pattern as
+  `imag_genlock_gate_verdict`). acked+UNREACHABLE → `skip` (loud named skip
   citing issue 1013 + reason, `return 0`, no drift-guard); acked+REACHABLE = STALE ack → `proceed`
   (falls through to the byte-unchanged gate — NOT exempted, mirrors the [0/8] stale-ack protection);
   not-acked → `proceed`.
@@ -103,8 +106,9 @@ host` under `set -euo pipefail`, live 2026-08-23). Since #1171 they all consult 
 - **`resolve_imag_offline_leg`** (a NEW fn, beside the #789 gate helpers) computes the (ack +
   reachability) decision ONCE and publishes `IMAG_OFFLINE_ACKED` (0/1) + `IMAG_OFFLINE_ACK_REASON`.
   It reuses the effective-ack read (`cambox_offline_ack_effective` over `rig-fleet.txt`) + a single
-  `ping` + the **already-tested pure `imag_genlock_gate_offline_ack_action`** for the skip/proceed
-  verdict — no re-implemented logic, ONE ping per switch. `do_test` and `do_event` call it up front.
+  `imag_service_reachable` service probe + the **already-tested pure
+  `imag_genlock_gate_offline_ack_action`** for the skip/proceed verdict — no re-implemented logic,
+  ONE service probe per switch. `do_test` and `do_event` call it up front.
 - The two flag defaults (`IMAG_OFFLINE_ACKED=0`, `IMAG_OFFLINE_ACK_REASON=""`) are pinned at top
   level so every consumer reads them under `set -u` even if `resolve_imag_offline_leg` never ran.
 - Consumers guard with `[ "${IMAG_OFFLINE_ACKED:-0}" = 1 ]` → a loud named SKIP (citing issue 1013):
@@ -127,21 +131,53 @@ makes it emit `IMAG-LEG-NOT-VERIFIED: imag acked offline (<reason>)` instead of 
 recording path". The 2-arg #798 calls are byte-unchanged. WoL (remote wake) for imag is SEPARATE
 hardware work (issue 1053 is the strih/stream counterpart), never bundled into this gate change.
 
-## PERMANENT-RETIRED ack (issue 1316, 16.9.2026) — the box is GONE, not "taken after an event"
+## ICMP IS NOT LIVENESS — the stale-ack probe tests a SERVICE, never a bare ping (issue 1317)
 
-imag-nb was RETURNED to the owner 16.9.2026 (10.77.9.182 dark), and the IMAG role re-provisions on
-a NEW notebook next year. The ack shape is the SAME box-name mechanism as the temporary case above,
+imag-nb is OUT of the rig ~1 year (owner ROZHODNUTE 20.9.2026: „to je jedno ze je to imag dongle
+teraz ho chcem pouzivat na strih …") — its USB ethernet dongle now permanently carries the
+strih-lx notebook at 10.77.9.202, so imag-nb has NO NIC. **But 10.77.9.182 still ANSWERS ICMP on
+the venue LAN** (a router / proxy-ARP / foreign responder holds the vacated IP — `ip neigh`
+INCOMPLETE, `+1 duplicates`, erratic 0.15–526 ms RTT), while imag-nb's own services are dead
+(ssh:22 refused, remoteos MCP down, mDNS silent). A bare `ping` therefore proves only "some
+responder holds the IP", NOT "imag-nb is back" — so the OLD ping-based staleness probe read the
+acked-absent box as REACHABLE, rejected the legitimate ack as `STALE ACK … is REACHABLE`, returned
+all-UNKNOWN from drift-guard, and the issue-789 gate HARD-BLOCKED every `rig-mode.sh test` and E2E
+`[0/8]`.
+
+The fix (issue 1317) is ONE shared predicate `imag_service_reachable HOST` in
+`scripts/lib/imag-offline-ack.sh`: reachable **iff** a TCP connect to ssh `:22` succeeds OR
+dantesync `:8898/status` answers (2 s timeout each), NEVER a bare ICMP ping. All THREE stale-ack
+sites call it — `resolve_imag_offline_leg` + `require_imag_genlock_current` in `scripts/rig-mode.sh`
+(`imag_service_reachable "$IMAG_IP"`) and the `[0/8]` imag-acked branch in
+`scripts/recording-e2e.sh` (`imag_service_reachable "$_ip"`). Tier-0 seams
+`IMAG_REACH_SSH_PROBE_CMD` / `IMAG_REACH_HTTP_PROBE_CMD` (a fixture command whose EXIT CODE stands
+in for the probe) keep it hermetically testable with no rig. **Trade-off (accepted):** a box whose
+sshd AND dantesync are both down but which is genuinely present reads "unreachable" and lets a
+stale ack stand — such a box cannot pass the genlock gate anyway, and the ack is an explicit
+operator statement with a reason. **The general (non-acked) reachability check in the `[0/8]` loop
+is UNCHANGED** — it still uses `ping` for the mandatory hosts; only the imag STALE-ACK decision
+(reached only when imag is acked) switched to the service probe. The shared-benefit: every gate
+that asks "is an acked box back?" now has a liveness signal a proxy-ARP/foreign responder cannot
+fool, so the venue-LAN DHCP-drift class stops producing false STALE verdicts.
+
+## PERMANENT-RETIRED ack (issue 1316, 16.9.2026 → refined 20.9.2026) — the box is GONE, not "taken after an event"
+
+imag-nb was RETURNED to the owner 16.9.2026 (10.77.9.182 physically dark), and the owner ruled
+20.9.2026 that the IMAG role stays out ~1 year (its dongle now serves strih-lx; a new NIC only when
+the role is addressed). The ack shape is the SAME box-name mechanism as the temporary case above,
 BOTH names present in `rig-fleet.txt` (the naming trap: `imag` for the reachability/leg/parity
-sites, `imag-nb` for the dantesync-version-gate node):
+sites, `imag-nb` for the dantesync-version-gate node); the reason carries the owner-decision date
+and stays comma-free (the parser splits `CAMBOX_OFFLINE_ACK` on commas):
 
 ```
-imag:returned-to-vendor-16.9.2026
-imag-nb:returned-to-vendor-16.9.2026
+imag:owner 20.9.2026 - imag-nb mimo rig ~1 rok (USB NIC nesie strih-lx .202)
+imag-nb:owner 20.9.2026 - imag-nb mimo rig ~1 rok (USB NIC nesie strih-lx .202)
 ```
 
 - **Stale-ack implication:** the stale-ack guard (`lib/cambox-offline-ack.sh`) still fires if the
-  box is acked AND reachable — but a permanently-returned box stays dark, so the ack never goes
-  stale on its own. When the role returns on a NEW notebook, REMOVE both lines (and flip
+  box is acked AND reachable — but "reachable" is now a SERVICE probe (issue 1317, above), so the
+  proxy-ARP responder on .182 no longer trips it; a genuinely-back imag (ssh/dantesync answering)
+  DOES. When the role returns on a NEW notebook, REMOVE both lines (and flip
   `scripts/lib/obs-fleet.sh`'s imag row `retired`→`always`) BEFORE the new box is on the wire, or
   the first reachable-and-acked run fails loudly as a stale ack — that is the intended signal.
 - **The CODE + DOCS half of the decommission (issue 1316)** — separate from this E2E-ack half —

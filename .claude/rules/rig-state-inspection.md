@@ -355,7 +355,15 @@ even after someone re-enables the server. Checklist additions:
    add this file to the same `Copy-Item` block).
 5. AFTER the relaunch, assert `Get-NetTCPConnection -LocalPort 4455 -State Listen` is non-empty and
    grep the new OBS log for `[obs-websocket] [Config::Load] Existing configuration not found` — a hit
-   means the config was regenerated: restore the backed-up file (or rebuild it on dev1 with the fleet
-   password from `~/.config/environment.d/obs-burn-reconcile-watchdog.conf`, scp it, NEVER print the
-   password) and relaunch again. Enabling the server through the OBS UI is not enough — the password
-   is also new.
+   means the config was regenerated: restore the backed-up file and relaunch again. Enabling the
+   server through the OBS UI is not enough — the regenerated config also flips `auth_required` on
+   with a random password.
+6. **Both broadcast boxes run obs-websocket with `auth_required: false`** (strih AND stream — the
+   E2E runner has no `OBS_PASSWORD` in its environment, `rig-busy-gate.sh`/`recording-e2e.sh`
+   default it to `""`, and the Bitfocus Companion controller at 10.77.9.205 connects to strih
+   password-less; the `OBS_PASSWORD` in dev1's `obs-burn-reconcile-watchdog.conf` is never sent
+   when the Hello carries no challenge). Rebuilding strih's config with `auth_required: true` + that
+   env-file password (18.9.2026 15:36) "worked" from dev1 tools and BROKE the E2E `[rig-busy-gate]`
+   (`Expecting value: line 1 column 1` = the auth-failure close read as JSON) and Companion (740 ×
+   close code 4009 in an hour). The restored contract is the file
+   `{"alerts_enabled":false,"auth_required":false,"first_load":false,"server_enabled":true,"server_password":"","server_port":4455}`.

@@ -61,33 +61,45 @@ fn lift_decision() -> String {
 /// #1299 n_absent axis exercises: none absent (old behaviour), some absent with a real connected
 /// unlocked (DEGRADED), some absent with all connected locked (LOCKED), and ALL absent (HEALTHY-idle).
 fn vectors() -> Vec<GenlockFacets> {
+    // (n_inputs, n_locked, n_absent, n_idle) — #1341 added the n_idle axis (a connected-but-idle
+    // input excluded from n_connected AND n_locked). Includes some-idle-all-live-locked -> LOCKED,
+    // some-idle-with-a-live-unlocked -> DEGRADED, all-idle -> HEALTHY-idle, and the impossible
+    // n_absent + n_idle > n_inputs (both ports saturate n_connected to 0).
     let counts = [
-        (0u32, 0u32, 0u32),
-        (1, 0, 0),
-        (1, 1, 0),
-        (3, 0, 0),
-        (3, 2, 0),
-        (3, 3, 0),
-        (7, 0, 0),
-        (7, 6, 0),
-        (7, 7, 0),
-        (2, 7, 0),
+        (0u32, 0u32, 0u32, 0u32),
+        (1, 0, 0, 0),
+        (1, 1, 0, 0),
+        (3, 0, 0, 0),
+        (3, 2, 0, 0),
+        (3, 3, 0, 0),
+        (7, 0, 0, 0),
+        (7, 6, 0, 0),
+        (7, 7, 0, 0),
+        (2, 7, 0, 0),
         // #1299 — absent-sender axis
-        (4, 3, 1), // 3 connected+locked of 4, 1 absent -> LOCKED (the reopen scenario)
-        (4, 2, 1), // 3 connected, only 2 locked -> DEGRADED
-        (4, 0, 4), // all senders absent -> HEALTHY-idle LOCKED
-        (3, 0, 1), // 2 connected, none locked -> UNLOCKED no_input_locked
-        (7, 5, 2), // 5 connected+locked of 5 connected -> LOCKED
-        (7, 4, 2), // 5 connected, 4 locked -> DEGRADED
-        (2, 3, 5), // n_absent > n_inputs (impossible) -> both ports saturate n_connected to 0
+        (4, 3, 1, 0), // 3 connected+locked of 4, 1 absent -> LOCKED (the reopen scenario)
+        (4, 2, 1, 0), // 3 connected, only 2 locked -> DEGRADED
+        (4, 0, 4, 0), // all senders absent -> HEALTHY-idle LOCKED
+        (3, 0, 1, 0), // 2 connected, none locked -> UNLOCKED no_input_locked
+        (7, 5, 2, 0), // 5 connected+locked of 5 connected -> LOCKED
+        (7, 4, 2, 0), // 5 connected, 4 locked -> DEGRADED
+        (2, 3, 5, 0), // n_absent > n_inputs (impossible) -> both ports saturate n_connected to 0
+        // #1341 — idle-input axis
+        (12, 2, 0, 10), // 2 live+locked, 10 idle -> LOCKED (the cg-OBS SongPlayer scenario)
+        (12, 1, 0, 10), // 2 live, 1 locked -> DEGRADED (a live input genuinely unlocked)
+        (4, 0, 0, 4),   // all idle -> HEALTHY-idle LOCKED
+        (7, 3, 1, 3),   // 3 live+locked of 3 connected (1 absent, 3 idle) -> LOCKED
+        (7, 2, 1, 3),   // 3 connected-live, only 2 locked -> DEGRADED
+        (3, 0, 2, 3),   // n_absent + n_idle > n_inputs (impossible) -> saturate n_connected to 0
     ];
     let mut v = Vec::new();
-    for &(n_inputs, n_locked, n_absent) in &counts {
+    for &(n_inputs, n_locked, n_absent, n_idle) in &counts {
         for bits in 0u32..(1 << 9) {
             v.push(GenlockFacets {
                 n_inputs,
                 n_locked,
                 n_absent,
+                n_idle,
                 recent_event: bits & 1 != 0,
                 qpc_drift_beyond_bound: bits & 2 != 0,
                 clock_present: bits & 4 != 0,
@@ -114,12 +126,13 @@ fn c_lock_state_decision_matches_the_rust_authority_1298() {
     c.push_str("int main(void){\n    genlock_lock_facets_t f; genlock_lock_reason_t r; genlock_lock_state_t s;\n");
     for g in &vs {
         c.push_str(&format!(
-            "    f.n_inputs={}; f.n_locked={}; f.n_absent={}; f.recent_event={}; f.qpc_drift_beyond_bound={}; \
+            "    f.n_inputs={}; f.n_locked={}; f.n_absent={}; f.n_idle={}; f.recent_event={}; f.qpc_drift_beyond_bound={}; \
              f.clock_present={}; f.clock_locked={}; f.clock_ntp_failed={}; f.output_present={}; f.output_stamping={}; f.audio_unpaired={}; f.audio_unexpected={};\n\
              \x20   s=genlock_decide_lock_state(&f,&r); printf(\"%d %d\\n\",(int)s,(int)r);\n",
             g.n_inputs,
             g.n_locked,
             g.n_absent,
+            g.n_idle,
             g.recent_event as i32,
             g.qpc_drift_beyond_bound as i32,
             g.clock_present as i32,
@@ -196,8 +209,8 @@ fn c_lock_state_decision_matches_the_rust_authority_1298() {
         let got_rs = (state.code(), reason.code());
         if got_rs != *got_c {
             diffs.push(format!(
-                "  n_inputs={} n_locked={} n_absent={} recent={} qpc={} clk_present={} clk_locked={} ntp={} out_present={} out_stamp={} audio_unpaired={} audio_unexpected={} -> C {:?}, Rust {:?}",
-                g.n_inputs, g.n_locked, g.n_absent, g.recent_event as i32, g.qpc_drift_beyond_bound as i32,
+                "  n_inputs={} n_locked={} n_absent={} n_idle={} recent={} qpc={} clk_present={} clk_locked={} ntp={} out_present={} out_stamp={} audio_unpaired={} audio_unexpected={} -> C {:?}, Rust {:?}",
+                g.n_inputs, g.n_locked, g.n_absent, g.n_idle, g.recent_event as i32, g.qpc_drift_beyond_bound as i32,
                 g.clock_present as i32, g.clock_locked as i32, g.clock_ntp_failed as i32,
                 g.output_present as i32, g.output_stamping as i32, g.audio_unpaired as i32, g.audio_unexpected as i32, got_c, got_rs
             ));
@@ -237,20 +250,24 @@ fn lift_phase_events() -> String {
 fn c_input_phase_events_matches_the_rust_authority_1299() {
     let block = lift_phase_events();
 
-    // The grid both sides must agree on: the connected flag crossed with a spread of per-class
-    // counts including 0, small, and a saturating extreme (UINT64_MAX) to exercise the clamp.
+    // The grid both sides must agree on: the connected + #1341 idle flags crossed with a spread of
+    // per-class counts including 0, small, and a saturating extreme (UINT64_MAX) to exercise the
+    // clamp. An idle input (connected && idle) must contribute 0 exactly like a disconnected one.
     let big = u64::MAX;
     let counts = [0u64, 1, 2, 7, 25, 500, big];
     let mut vs: Vec<InputEventCounts> = Vec::new();
     for &connected in &[false, true] {
-        for &r in &counts {
-            for &(l, b) in &[(0u64, 0u64), (3, 0), (0, 4), (2, 5), (big, 0), (0, big)] {
-                vs.push(InputEventCounts {
-                    connected,
-                    relocks: r,
-                    late_holds: l,
-                    backward_steps: b,
-                });
+        for &idle in &[false, true] {
+            for &r in &counts {
+                for &(l, b) in &[(0u64, 0u64), (3, 0), (0, 4), (2, 5), (big, 0), (0, big)] {
+                    vs.push(InputEventCounts {
+                        connected,
+                        idle,
+                        relocks: r,
+                        late_holds: l,
+                        backward_steps: b,
+                    });
+                }
             }
         }
     }
@@ -261,8 +278,8 @@ fn c_input_phase_events_matches_the_rust_authority_1299() {
     c.push_str("int main(void){\n");
     for v in &vs {
         c.push_str(&format!(
-            "    printf(\"%\" PRIu64 \"\\n\", genlock_input_phase_events({},{}ULL,{}ULL,{}ULL));\n",
-            v.connected as i32, v.relocks, v.late_holds, v.backward_steps
+            "    printf(\"%\" PRIu64 \"\\n\", genlock_input_phase_events({},{},{}ULL,{}ULL,{}ULL));\n",
+            v.connected as i32, v.idle as i32, v.relocks, v.late_holds, v.backward_steps
         ));
     }
     c.push_str("    return 0;\n}\n");
@@ -320,8 +337,14 @@ fn c_input_phase_events_matches_the_rust_authority_1299() {
         let got_rs = input_phase_events(v);
         if got_rs != got_c {
             diffs.push(format!(
-                "  connected={} relocks={} late={} backward={} -> C {}, Rust {}",
-                v.connected as i32, v.relocks, v.late_holds, v.backward_steps, got_c, got_rs
+                "  connected={} idle={} relocks={} late={} backward={} -> C {}, Rust {}",
+                v.connected as i32,
+                v.idle as i32,
+                v.relocks,
+                v.late_holds,
+                v.backward_steps,
+                got_c,
+                got_rs
             ));
         }
     }

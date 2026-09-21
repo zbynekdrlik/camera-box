@@ -203,6 +203,89 @@ def cure_decision(cure_enabled, cooldown_ok):
     return "page"
 
 
+def cure_plan(attempt, cap_avg_ms, expected_ms):
+    """#1203 -- which cure ARM to run for a CONFIRMED-halved input, from the 1-based count of the
+    cure attempt about to run THIS episode (the caller resets the counter to 0 on a HEALTHY reading,
+    so the next episode's first cure is idle-restore again):
+
+      attempt 1   -> "idle-restore"   -- the non-disruptive RECEIVER reattach (overlay keeps the pin)
+      attempt 2   -> "sender-restart" -- still halved after the receiver arm + settle; a fresh sender
+                     endpoint (a ~3s NDI gap -- the caller EVENT-gates it, never during a live show)
+      attempt >=3 -> "escalate"       -- both arms tried, still halved -> page a human
+
+    cap_avg_ms / expected_ms are the confirmed reading, carried for the telemetry record; a
+    non-integer attempt or a <=0/unparseable expected frame interval cannot be reasoned about
+    -> escalate (never a blind cure on garbage state, never a jump straight to the disruptive
+    sender restart). attempt <=1 (incl. 0 / negative from a corrupt counter) -> the SAFE first arm."""
+    try:
+        a = int(attempt)
+    except (TypeError, ValueError):
+        return "escalate"
+    try:
+        exp = float(expected_ms)
+    except (TypeError, ValueError):
+        return "escalate"
+    if exp <= 0:
+        return "escalate"
+    if a >= 3:
+        return "escalate"
+    if a == 2:
+        return "sender-restart"
+    return "idle-restore"
+
+
+def cadence_report(run_id, strih_host, records, generated_utc=None):
+    """#1203 -- the ndi-cadence-<RUN>.json telemetry object written by ndi-cadence-heal.sh's
+    verify-and-heal orchestrator. `records` is a list of per-input dicts (input / verdict / fps /
+    cap_avg_ms / expected_fps / arm / result). Returns a JSON-serialisable dict with the per-input
+    list plus summary counts (halved inputs, ones the two-arm cure HEALED, ones it ESCALATED).
+    generated_utc is OMITTED when not supplied so the serialisation stays deterministic for tests."""
+    inputs = []
+    halved = healed = escalated = 0
+    for r in records:
+        rec = {
+            "input": r.get("input", ""),
+            "verdict": r.get("verdict", ""),
+            "fps": r.get("fps"),
+            "cap_avg_ms": r.get("cap_avg_ms"),
+            "expected_fps": r.get("expected_fps"),
+            "arm": r.get("arm", ""),
+            "result": r.get("result", ""),
+        }
+        inputs.append(rec)
+        if rec["verdict"] == "HALVED":
+            halved += 1
+        if rec["result"] == "healed":
+            healed += 1
+        elif rec["result"] == "escalated":
+            escalated += 1
+    out = {
+        "run_id": run_id,
+        "strih_host": strih_host,
+        "inputs": inputs,
+        "halved": halved,
+        "healed": healed,
+        "escalated": escalated,
+    }
+    if generated_utc is not None:
+        out["generated_utc"] = generated_utc
+    return out
+
+
+def _num_or_none(s):
+    try:
+        return float(s)
+    except (TypeError, ValueError):
+        return None
+
+
+def _int_or_none(s):
+    try:
+        return int(s)
+    except (TypeError, ValueError):
+        return None
+
+
 def _fmt(v):
     return "" if v is None else (f"{v:.3f}" if isinstance(v, float) else str(v))
 
@@ -230,6 +313,16 @@ def _main(argv):
     c.add_argument("--now", required=True)
     c.add_argument("--cooldown-s", required=True)
 
+    p = sub.add_parser("cure-plan", help="#1203 which cure ARM (idle-restore/sender-restart/escalate)")
+    p.add_argument("--attempt", required=True)
+    p.add_argument("--cap-avg-ms", required=True)
+    p.add_argument("--expected-ms", required=True)
+
+    r = sub.add_parser("cadence-report", help="#1203 build ndi-cadence-<RUN>.json from TSV records on stdin")
+    r.add_argument("--run-id", required=True)
+    r.add_argument("--host", required=True)
+    r.add_argument("--generated-utc", default="")
+
     ns = ap.parse_args(argv)
 
     if ns.cmd == "analyze":
@@ -252,6 +345,34 @@ def _main(argv):
         ok = cooldown_elapsed(ns.last_cure_ts, ns.now, ns.cooldown_s)
         print(f"cooldown_ok={1 if ok else 0}")
         print(f"action={cure_decision(bool(ns.cure_enabled), ok)}")
+        return 0
+
+    if ns.cmd == "cure-plan":
+        print(f"plan={cure_plan(ns.attempt, ns.cap_avg_ms, ns.expected_ms)}")
+        return 0
+
+    if ns.cmd == "cadence-report":
+        import json
+
+        records = []
+        for ln in sys.stdin.read().splitlines():
+            if not ln.strip():
+                continue
+            parts = ln.split("\t")
+            while len(parts) < 7:
+                parts.append("")
+            records.append({
+                "input": parts[0],
+                "verdict": parts[1],
+                "fps": _num_or_none(parts[2]),
+                "cap_avg_ms": _num_or_none(parts[3]),
+                "expected_fps": _int_or_none(parts[4]),
+                "arm": parts[5],
+                "result": parts[6],
+            })
+        rep = cadence_report(ns.run_id, ns.host, records,
+                             generated_utc=(ns.generated_utc or None))
+        print(json.dumps(rep, indent=2, ensure_ascii=False))
         return 0
 
     return 2

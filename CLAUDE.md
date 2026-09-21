@@ -9,6 +9,7 @@ Rust app for embedded NDI cameras (CAM1-4): multi-camera NDI streaming with soft
 
 - Rig ops (DanteSync clock, device deploy, recovery) → load `.claude/skills/ops`
 - bkshading remote camera shading control (service + cambox/SBC relay, gphoto2 transport, USB/USB-Eth only never BT, workspace/CI wiring that leaves the appliance untouched, Tier-0 verify path, #808 M1) → `.claude/rules/bkshading.md` (auto-loads on its `paths:`)
+- strih-lx intercom hub (issue 1345: the `intercom/vban` shared codec extraction + `intercom/hub` N-1 mix-minus daemon replacing VB-Matrix for the VBAN camboxes; the cambox `camN` both-ways wire contract kept byte-identical; the structurally-enforced N-1 invariant; `scripts/vbmatrix_to_intercom_toml.py` + the byte-for-byte `intercom.strih-lx.toml` parity pin; the enable-only systemd unit + the "never send VBAN to a real cambox while Windows strih is live" rule; the M1/M2/M3/M4 map + the Tier-0 verify path) → `.claude/rules/strih-intercom.md` (auto-loads on its `paths:`)
 - Deploying a HISTORICAL camera-box build (bisect/rollback: run-id lookup, deploy-fleet `--run`, the mixed-fleet version-parity gate refusal + neutralization seams, local E2E, the ci.yml auto-deploy clobber) → `.claude/rules/historical-build-bisect.md` (auto-loads on its `paths:`)
 - camera-box version-parity treadmill + the pre-[0/8] auto-align (`camera-box-parity-align.sh`: the main-lags-dev candidate-pin-only-path treadmill; align only a uniform-stale fleet; the BUILD-ORDER trap — a [0/8] step must source the CLEAN `camera-box-linux-amd64` ci.yml artifact, NOT `$PROBE_BIN_DIR` which is built at [1/8]; version-guard against a stale deploy; acked-exclusion from the deploy scope; the Tier-0 seams; #1202) → `.claude/rules/version-parity-treadmill-align.md` (auto-loads on its `paths:`)
 - Provisioning / new cam box (build USB → setup-device.sh → verify-device.sh acceptance gate, #448-#454) → load `.claude/skills/provision`
@@ -642,6 +643,16 @@ until the DESIGN marker exists. Three things bite on THIS repo specifically:
   `python3 -c "import sys; sys.path.insert(0,'/home/newlevel/devel/airuleset'); import design_gate as
   dg; b=open('body.md').read(); print(dg.classify_design_comment(b), dg.classify_triage_and_approaches(b),
   dg.classify_architecture_section(b))"` — all three must be `(True, …)`.
+- **The `Architektúra:` section needs BOTH a structure word AND a framework/why-none-fits word —
+  a structure word alone fails silently as `Architektúra: section missing: framework used or
+  why-none-fits` (2026-09-20, #1344).** `classify_architecture_section` requires
+  `\bframework\w*|\br[áa]mec\w*|kni[žz]nic\w*|\blibrar(?:y|ies)\b|nesed[íi]\w*|nehod[íi]\w*|
+  nevhod\w*|no\s+framework|none\s+fit|doesn'?t\s+fit|existuj[uú]c\w*\s+(?:rie[šs]enie|
+  n[áa]stroj|framework)|existing\s+(?:solution|tool|framework)` IN ADDITION to a structure/topology
+  word — writing "no new subsystem" alone (a structure claim) is NOT enough; phrase it as "no new
+  FRAMEWORK needed" or name the existing framework/library reused, or an evidenced
+  why-none-fits, to also hit the framework-or-whynot half. Always run the local one-liner above
+  before posting — it is the only way to catch this before the comment lands.
 - **Post each design/validated/review comment as a STANDALONE `gh issue comment` call — a COMPOUND
   bash call silently registers NO marker (#784, 2026-08-17).** When the `gh issue comment` sits in a
   compound command (`gh api -X DELETE …/comments/<id> ; gh issue comment <N> --body-file … ; sleep 6 ;

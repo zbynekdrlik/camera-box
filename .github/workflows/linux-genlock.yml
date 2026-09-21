@@ -255,6 +255,14 @@ jobs:
           echo "staged distroav.so from: $distroav_so -> $plugin_lib_dir/"
           echo "staged OBS rundir from: $rundir"
 
+      # issue 1317: record the apt packages the built bundle links against (Qt6 / ffmpeg / libOpenGL
+      # runtime) so setup-strih.sh installs them on a fresh box. Written INTO stage/ BEFORE the
+      # manifest step so genlock-manifest.sh --check accounts for it (an unlisted stage file fails the
+      # self-consistency check). The runner that built the binary is the only authority on what it
+      # links. Informative parity here (a re-provisioned imag-nb hits the same runtime gap).
+      - name: Record runtime packages (#1317)
+        run: scripts/genlock-runtime-packages.sh --stage stage --out stage/RUNTIME_PACKAGES.txt
+
       # #120: the per-component SHA manifest generator — reused UNCHANGED (cross-platform bash,
       # already unit-proven on the Linux `test` job via tests/genlock_manifest.rs).
       - name: Generate per-component SHA manifest (#120)
@@ -428,6 +436,16 @@ jobs:
           printf 'variant=strih\nENABLE_BROWSER=%s\n%s\nTARGET-RELEASE: %s\n' \
             "$STRIH_ENABLE_BROWSER" "$marker" "$STRIH_TARGET_RELEASE" > stage/STRIH_BUILD_FLAGS.txt
           echo "staged strih variant (ENABLE_BROWSER=$STRIH_ENABLE_BROWSER, TARGET-RELEASE=$STRIH_TARGET_RELEASE)"
+
+      # issue 1317: record the apt packages the built strih bundle links against (Qt6 / ffmpeg /
+      # libOpenGL runtime) into RUNTIME_PACKAGES.txt so setup-strih.sh installs them on the fresh
+      # 26.04 box BEFORE the bundle -- the fix for the 13-soname `libavcodec.so.62` load failure.
+      # Written INTO stage/ BEFORE the manifest step so genlock-manifest.sh --check accounts for it.
+      # `--extra qt6-wayland`: OBS DLOPENS its Qt Wayland platform plugin at runtime (ldd cannot see
+      # it), so it is FORCED into the list -- without it OBS aborts on 26.04 GNOME with
+      # `Could not find the Qt platform plugin "wayland"` (the strih box is Wayland, unlike imag).
+      - name: Record runtime packages (#1317)
+        run: scripts/genlock-runtime-packages.sh --stage stage --out stage/RUNTIME_PACKAGES.txt --extra qt6-wayland
 
       - name: Generate per-component SHA manifest (#120)
         run: scripts/genlock-manifest.sh --stage stage --out stage/BUNDLE_MANIFEST.json
