@@ -2476,7 +2476,11 @@ fn gate_still_fails_a_linux_strih_when_genlock_build_sha_drifts_under_strih_linu
     const SHA_STREAM: &str = "8e2817e5aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const OBS_SHA: &str = "1111111111111111111111111111111111111111111111111111111111111111";
     const DISTROAV_SHA: &str = "2222222222222222222222222222222222222222222222222222222222222222";
-    let manifest = write_manifest("strih_lx_1351_drift", OBS_SHA, DISTROAV_SHA);
+    // issue 1351: distinct manifest name (NOT the strih state name below) — a shared name lets the
+    // strih state clobber the manifest file, masking the intended genlock-parity SKEW behind an
+    // obs_dll_sha256 UNKNOWN. This test currently passes either way (it asserts a REFUSAL), but the
+    // masked facet would hide the parity signal the moment the skew were removed.
+    let manifest = write_manifest("bundle_lx_1351_drift", OBS_SHA, DISTROAV_SHA);
     let s = write_state(
         "strih_lx_1351_drift",
         &with_manifest_facet(
@@ -2532,7 +2536,13 @@ fn windows_strih_path_is_byte_identical_without_strih_linux_1351() {
     const SHA: &str = "26de1c3c23980488a110dbf02e5e472f15cb001d";
     const OBS_SHA: &str = "1111111111111111111111111111111111111111111111111111111111111111";
     const DISTROAV_SHA: &str = "2222222222222222222222222222222222222222222222222222222222222222";
-    let manifest = write_manifest("strih_win_1351_unaffected", OBS_SHA, DISTROAV_SHA);
+    // issue 1351: the BUNDLE MANIFEST needs a name DISTINCT from the strih state below — both
+    // write_manifest() and write_state() route through write_state(name,…), keyed on `name`, so a
+    // shared name makes the strih state OVERWRITE the manifest file. The gate then reads a state-json
+    // (no files[]) as its --manifest -> manifest_sha_for_component returns "" -> obs_dll_sha256
+    // UNKNOWN (exit 11), the dev-CI-RED regression this test now guards. (#770's passing baseline
+    // uses distinct names bundle_770_ok vs strih_bytes_ok_770 — this restores that separation.)
+    let manifest = write_manifest("bundle_win_1351_unaffected", OBS_SHA, DISTROAV_SHA);
     let s = write_state(
         "strih_win_1351_unaffected",
         &with_obs_identity_ok(
@@ -2581,6 +2591,86 @@ fn windows_strih_path_is_byte_identical_without_strih_linux_1351() {
     assert!(
         !stdout.contains("SKIPPED  (Windows-only"),
         "a Windows strih must never see the issue-1351 SKIPPED lines: {stdout}"
+    );
+    let _ = std::fs::remove_file(&s);
+    let _ = std::fs::remove_file(&t);
+    let _ = std::fs::remove_file(&manifest);
+    let _ = std::fs::remove_file(&imag_m);
+}
+
+/// #1351 REGRESSION GUARD for the #758 ENFORCED invariant + the true root cause the dev-CI-RED
+/// failure exposed. The actual regression was a TEST filename collision (a manifest and the strih
+/// state sharing one write_state() name) that clobbered the manifest with a state-json carrying no
+/// files[], so the gate read "no obs.dll" and UNKNOWN-blocked. That grading is CORRECT and must stay:
+/// a supplied Windows bundle manifest that OMITS the obs.dll entry drives obs_dll_sha256 to UNKNOWN
+/// (gate-blocking), NEVER a silent pass -- obs.dll is the genlock-bearing core (mandatory-verify),
+/// while distroav is optional (SKIPPED on an obs.dll-only manifest). This pins that the divergence
+/// obs=UNKNOWN vs distroav=SKIPPED is intended, and that the rejected Approach 2 ("just skip
+/// obs_dll_sha256 when the manifest omits it", which would blind a real obs.dll drift) can never land.
+#[test]
+fn gate_unknown_blocks_when_the_windows_manifest_omits_obs_dll_1351() {
+    const SHA: &str = "26de1c3c23980488a110dbf02e5e472f15cb001d";
+    const OBS_SHA: &str = "1111111111111111111111111111111111111111111111111111111111111111";
+    const DISTROAV_SHA: &str = "2222222222222222222222222222222222222222222222222222222222222222";
+    // A bundle manifest that lists ONLY distroav.dll -- no obs.dll entry at all (the "unusable for
+    // the obs.dll compare" shape). manifest_sha_for_component(_, obs) returns "" -> obs UNKNOWN.
+    // NOTE: a name DISTINCT from every state file below -- the very collision this ticket fixed.
+    let manifest = write_state(
+        "bundle_win_1351_no_obs",
+        &format!(
+            "{{\n  \"schema\": \"camera-box/genlock-bundle-manifest@1\",\n  \"build_sha\": \"deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\",\n  \"files\": [\n    {{ \"path\": \"obs-plugins/64bit/distroav.dll\", \"sha256\": \"{DISTROAV_SHA}\", \"size\": 200 }}\n  ]\n}}\n"
+        ),
+    );
+    let s = write_state(
+        "strih_win_1351_no_obs",
+        &with_obs_identity_ok(
+            &with_manifest_facet(
+                &with_sha(STRIH_PINNED, SHA),
+                OBS_SHA,
+                DISTROAV_SHA,
+                GENLOCK_CAP_770,
+            ),
+            true,
+        ),
+    );
+    let t = write_state(
+        "stream_win_1351_no_obs",
+        &with_obs_identity_ok(
+            &with_manifest_facet(
+                &with_sha(STREAM_PINNED, SHA),
+                OBS_SHA,
+                DISTROAV_SHA,
+                GENLOCK_CAP_770,
+            ),
+            false,
+        ),
+    );
+    let (imag_m, imag_b) = clean_imag_bytes_1100("noobs1351");
+    let (code, stdout, stderr) = run_gate(&[
+        "--manifest",
+        manifest.to_str().unwrap(),
+        "--win-state",
+        &format!("strih={}", s.display()),
+        "--win-state",
+        &format!("stream={}", t.display()),
+        "--genlock-sha",
+        &format!("imag={SHA}"),
+        "--imag-manifest",
+        imag_m.to_str().unwrap(),
+        "--imag-bytes",
+        &imag_b,
+    ]);
+    let all = format!("{stdout}{stderr}");
+    assert_ne!(
+        code, 0,
+        "a manifest that omits obs.dll must NOT pass -- obs_dll_sha256 is mandatory-verify (#758). \
+         code={code} stdout={stdout} stderr={stderr}"
+    );
+    assert!(
+        all.contains("obs_dll_sha256")
+            && all.contains("UNKNOWN")
+            && all.contains("lists no obs.dll"),
+        "obs_dll_sha256 must UNKNOWN-block naming the missing obs.dll sha, never a silent skip: {all}"
     );
     let _ = std::fs::remove_file(&s);
     let _ = std::fs::remove_file(&t);
