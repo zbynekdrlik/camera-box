@@ -1140,3 +1140,49 @@ have been caught by any local Tier-0 check (bash -n/shellcheck/fmt are all blind
 correctness check", they only catch syntax). **When copying the imag-nb template for a new Linux
 sibling, port the sha256 gate in the SAME commit as the rest of the script — it is not an optional
 follow-up, it is part of the template.**
+
+## Bounding an ANCHORED gate invocation that an executed-region test RUNS: an unconditional `${VAR:-}` prefix + inline `|| { fn; }` tail, NEVER an if/else (issue 1351)
+
+To wrap an existing `recording-e2e.sh` gate invocation in a `timeout` (issue 1351 bounded the
+DanteSync NTP+PTP and dantesync version-parity gates on the Linux-strih path so a wedged strih call
+fails FAST with a named banner instead of a ~23-min silent `[0/8]` hang that swallows RUN_ID), the
+obvious `if [ platform = linux ]; then WRAP; else ORIGINAL; fi` is DOUBLY wrong here:
+
+1. **It DUPLICATES every anchor string in the invocation (1→2).** `harness_recording_e2e_gm_enforce_1073`
+   / `phase_slew_enforce_1130` / `harness_recording_e2e_paths` (14/9/8 files) `.find()`/`.split()`/
+   `.contains()` the gate literals — a 1→2 count breaks a `.find()`/`.split()` anchor and the
+   occurrence-count sweep flags it.
+2. **The executed-region tests would then hit an UNDEFINED lib function.** `gm_enforce_1073` runs the
+   gate region slice under `set -euo pipefail` WITHOUT sourcing the lib, against a fake `dantesync-gate.sh`.
+   A slice that reaches `strih_lx_preflight_run …` (or any sourced-lib fn) → `command not found` →
+   `set -e` abort → the test fails.
+
+The anchor-safe + test-safe shape is an UNCONDITIONAL command-PREFIX threaded through a `${VAR:-}`
+expansion, plus a NAMED banner in an inline `|| { … }` tail:
+- Resolve the prefix ONCE, in a neutral zone BEFORE any executed-region slice (issue 1351 put it
+  right after `STREAM_PW=…`, well before the `[0/8]` gate banners the tests slice from):
+  `STRIH_LX_GATE_PREFIX="$(strih_lx_gate_prefix "${STRIH_LX_GATE_TIMEOUT:-300}" "$STRIH")"` — a lib
+  fn that echoes `timeout <secs>` on the linux strih, else EMPTY (Windows stays behaviorally
+  byte-identical).
+- Prepend `${STRIH_LX_GATE_PREFIX:-}` UNQUOTED to the invocation (before the script path, AFTER any
+  `VAR=1 VAR2=1` env prefixes — `timeout` inherits its environment and passes it to the child): it
+  word-splits `timeout 300` on linux and VANISHES when empty. The `:-` default is load-bearing:
+  the executed-region slice never sets the var, so `${VAR:-}` reads empty under `set -u` (a bare
+  `$VAR` would `set -u`-abort the test).
+- Append a `|| { _rc=$?; strih_lx_preflight_timeout_banner "$_rc" "<call name>" "${…:-300}"; exit "$_rc"; }`
+  tail. It's test-safe because the fake gate exits 0 → the `||` block (which references the
+  otherwise-undefined banner fn) is NEVER entered. The banner fn keys on rc 124/137 ONLY, so a
+  genuine gate failure (rc 20) exits 20 with NO banner — never mislabeling a real failure as a hang.
+
+**Anchor-count traps confirmed on this exact edit:** `"$HERE/dantesync-gate.sh"` and
+`--win-http "strih=$STRIH"` are legitimately count-2 (the MAIN gate + the #947 secondary
+freshest-offset gate) — a no-duplication test must assert count-1 only on literals UNIQUE to the
+one call you wrapped (`--win-http "stream=$STREAM"`, `"$HERE/dantesync-version-gate.sh"`,
+`--win "strih=`), never on the count-2 shared ones. And a WS-bound anchor test must byte-match the
+FULL bounded call (`timeout "${STRIH_LX_WS_TIMEOUT:-20}" python3 "$here/obs_phase2.py"`), not the
+bare `obs_phase2.py` literal that also appears in the lib's own doc comments (the #832 self-collision).
+
+The SSoT lib is `scripts/lib/strih-lx-preflight.sh` (`strih_lx_gate_prefix` / `strih_lx_preflight_timeout_banner`).
+Verify locally under Tier-0 with a `bash <file>` sourced-lib harness (the gm_enforce slice shape with
+a fake gate + a real `timeout 2` hang→124→banner path) + the python occurrence-count sweep — a
+worktree worker's `bash -c` is refused, but `bash <written-file>` runs (see the #1265/#1308 refinement).
