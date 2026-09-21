@@ -1107,10 +1107,23 @@ if [ "$IMAG_OFFLINE_ACKED" = 1 ]; then
 else
   DANTESYNC_VERSION_LINUX="$DANTESYNC_VERSION_LINUX imag-nb=${IMAG_USER:-newlevel}@$IMAG_IP"
 fi
+# issue 1351: on the M4 Linux strih (strih-lx, 10.77.9.202) the --win arm reads dantesync via the
+# Windows quoted-exe-path ssh call, which returns nothing on Linux -> strih UNKNOWN -> the gate
+# refuses (exit 11). strih-lx answers `dantesync --version` on the bare command line (the --linux
+# arm's read, .claude/rules/dantesync-version-reading.md), so route strih through the --linux node
+# list there and pass only stream via --win. A Windows strih keeps strih+stream BOTH under --win
+# (byte-identical to the pre-1351 argv). Computed into DV_WIN_NODES so the SINGLE gate invocation is
+# unchanged (no if/else invocation duplication -- the recording-e2e.sh anchor discipline), mirroring
+# the STRIH_LINUX_GATE_ARG platform branch used for the version-integrity gate above.
+DV_WIN_NODES="strih=${WIN_SSH_USER:-newlevel}@$STRIH stream=${WIN_SSH_USER:-newlevel}@$STREAM"
+if [ "$(strih_platform "$STRIH")" = "linux" ]; then
+  DANTESYNC_VERSION_LINUX="$DANTESYNC_VERSION_LINUX strih=${WIN_SSH_USER:-newlevel}@$STRIH"
+  DV_WIN_NODES="stream=${WIN_SSH_USER:-newlevel}@$STREAM"
+fi
 ${STRIH_LX_GATE_PREFIX:-} "$HERE/dantesync-version-gate.sh" \
   --linux "$DANTESYNC_VERSION_LINUX" \
   --local dev1 \
-  --win "strih=${WIN_SSH_USER:-newlevel}@$STRIH stream=${WIN_SSH_USER:-newlevel}@$STREAM" \
+  --win "$DV_WIN_NODES" \
   || { _slx_rc=$?; strih_lx_preflight_timeout_banner "$_slx_rc" "dantesync version-parity gate (strih/stream ssh)" "${STRIH_LX_GATE_TIMEOUT:-300}"; exit "$_slx_rc"; }
 
 # camera-box binary CROSS-BOX version-parity gate (issue 875) — the follow-up split from the
