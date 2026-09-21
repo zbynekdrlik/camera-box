@@ -117,3 +117,29 @@ your OWN thin ssh/local transport and pipe its raw output through the reused `da
 from_version_output` parser — do NOT try to call `read_dantesync_version_output`, it is undefined
 in a sourced context. This is the intended split (pure/reusable above the guard, network/mutating
 below it), the same shape `upgrade-fleet-ndi.sh` uses.
+
+## The `[0/8]` version-parity CALLER must ROUTE strih to the right arm by platform — the `--win` exe-path read returns nothing on a Linux strih (#1351)
+
+The gate itself is uniform, but its two read arms are NOT: `--linux "name=user@ip …"` reads
+`dantesync --version` on the bare command line (works on every Linux node); `--win "name=user@ip …"`
+reads the Windows quoted-exe-path (`"$DANTESYNC_VERSION_GATE_WIN_EXE" --version`), which returns
+**nothing on Linux** → that node reads UNKNOWN → `GATE INCOMPLETE` → exit 11. After the M4 cut-over
+strih is the Linux notebook strih-lx (10.77.9.202), so `scripts/recording-e2e.sh`'s `[0/8]`
+version-parity call must ROUTE strih by `strih_platform "$STRIH"` (the resolver in
+`scripts/lib/strih-platform.sh`): a **linux** strih is appended to the `--linux` list
+(`strih=${WIN_SSH_USER:-newlevel}@$STRIH` — strih-lx ssh user `newlevel`, the gate's default
+`DANTESYNC_VERSION_GATE_SSH_PASS=newlevel` matches) and only stream goes via `--win`; a **windows**
+strih keeps strih+stream both under `--win`, byte-identical. NEVER leave a node in BOTH lists — the
+`--win` UNKNOWN read would still fail the gate even though `--linux` read it OK.
+
+**Anchor-safe implementation (recording-e2e.sh is the static-anchor minefield):** compute the
+`--win` argument into a `DV_WIN_NODES` variable so the SINGLE `"$HERE/dantesync-version-gate.sh"`
+invocation stays count-1 (an `if/else` around the whole invocation would duplicate it 1→2 and break
+`the_bound_never_duplicates_a_gate_invocation_anchor_1351`). This INTENTIONALLY makes `--win "strih=`
+go 1→0 — that is not an anchor violation to avoid, it is the signal that the three existing tests
+pinning "strih is ALWAYS under --win" (`harness_recording_e2e_paths.rs`'s #862 window test +
+`harness_strih_lx_preflight_1351.rs`'s bounded-gate + negative-anchor tests) now encode an OBSOLETE
+invariant. Update them in their OWN commit (read-only-during-GREEN discipline): the window/argv
+asserts move to `--win "$DV_WIN_NODES"`, and the negative-anchor count-1 list SWAPS `--win "strih=`
+for `--win "$DV_WIN_NODES"` (still count-1, still proves no invocation duplication). Same
+`strih_platform` per-box-branch pattern as the version-integrity gate's `STRIH_LINUX_GATE_ARG`.
