@@ -283,3 +283,27 @@ leaving every other facet in the function (including the manifest-gated byte fac
 own `main()` loop or are baked into `drift-guard.sh`'s `compare_observed()` — the latter needs an
 additive, backward-compatible extension of the shared engine, not just a wrapper `if` in the
 caller.**
+
+## GOTCHA — a test's bundle manifest and a win-state sharing one `write_state` name silently clobber each other → `obs_dll_sha256 UNKNOWN` (exit 11)
+
+In `tests/version_integrity_gate.rs`, BOTH `write_state(name, json)` AND `write_manifest(name, …)`
+(and `write_linux_manifest`) route through `write_state`, which writes to
+`<tmpdir>/vig-test-<pid>/<name>.json` keyed SOLELY on `name`. So a test that passes the SAME `name`
+to `write_manifest(…)` and to a `write_state(…)` (the strih/stream box state) makes the state json
+— written LAST — OVERWRITE the bundle-manifest file. The gate then reads a win-state (no `files[]`)
+as its `--manifest`; `manifest_sha_for_component "$manifest" obs` returns `""` →
+`obs_dll_sha256 UNKNOWN (manifest <state>.json lists no obs.dll sha256)` → the box UNKNOWNs → gate
+exit 11. The `distroav_dll_sha256` sibling then reads `SKIPPED (… not in this obs.dll-only
+manifest)`. This is NOT a gate regression — the obs=UNKNOWN vs distroav=SKIPPED asymmetry is the
+intended #758 invariant (obs.dll is the genlock-bearing core = mandatory-verify; distroav is
+optional on an obs.dll-only manifest). The FIX is always in the test: give the bundle manifest a
+name DISTINCT from every state file in the SAME test function (the passing `_770` baselines already
+do this — `bundle_770_ok` vs `strih_bytes_ok_770`). Convention: prefix bundle-manifest names with
+`bundle_` (e.g. `bundle_win_1351_unaffected`, `bundle_lx_1351_pass`), never a `strih_`/`stream_`
+prefix a state also uses. **Incident (issue 1351, 2026-09-21):** THREE `_1351` tests
+(`windows_strih_path_is_byte_identical…`, `gate_still_fails_a_linux_strih…drifts…`,
+`gate_passes_a_linux_strih…platform_agnostic_facets…`) each shared a `strih_*_1351_*` name between
+`write_manifest` and `write_state` → two were RED on dev CI (blocking the PR-1348 release cut), one
+passed only because it expected a REFUSAL and a different facet caught it. A whole-file sweep to
+catch this: compare the set of `write_(linux_)?manifest("NAME"` names against the set of
+`write_state("NAME"` names — any intersection is a live clobber.
