@@ -433,6 +433,34 @@ else
   note "(obs-helpers) no OBS log to read the live NVENC state (OBS not running -- report-only)"
 fi
 
+# 21) OBS UI provisioning fixes (issue 1317 slice): the Qt6 SVG icon-engine plugin MUST be present
+#     (OBS 32's SVG Yami theme renders its toolbar/dock/settings icons via it -- Ubuntu 26.04 ships it
+#     in the SEPARATE qt6-svg-plugins package), AND -- when BROWSER-ON -- chrome-sandbox MUST be setuid
+#     root:root 4755 at the /usr-prefix path the running OBS actually loads (item 14 only grades the
+#     /opt bundle copy; the /usr copy was 0755 and broke CEF live). Placed before the final summary.
+UI_LIBDIR="${STRIH_USR_LIBDIR:-/usr/lib/x86_64-linux-gnu}"
+UI_SVG_PATH="$(strih_lx_qt6_svg_iconengine_path "$UI_LIBDIR")"
+UI_SVG_PRESENT=0; [ -e "$UI_SVG_PATH" ] && UI_SVG_PRESENT=1
+if [ -f "$FLAGS_FILE" ] && strih_lx_browser_bundle_required "$(cat "$FLAGS_FILE")"; then
+  UI_CS_PATH="$(strih_lx_chrome_sandbox_usr_path "$UI_LIBDIR")"
+  UI_CS_OWNER="$(stat -c '%U:%G' "$UI_CS_PATH" 2>/dev/null || echo '?')"
+  UI_CS_MODE="$(stat -c '%a' "$UI_CS_PATH" 2>/dev/null || echo '?')"
+  UI_VERDICT="$(strih_lx_obs_ui_fix_verdict "$UI_SVG_PRESENT" "$UI_CS_OWNER" "$UI_CS_MODE" || true)"
+  if [ "$UI_VERDICT" = ok ]; then
+    ok "(obs-ui) qt6-svg iconengine present + chrome-sandbox setuid root:root 4755 at ${UI_CS_PATH}"
+  else
+    if [ "$UI_SVG_PRESENT" = 1 ]; then _svg_state=present; else _svg_state=MISSING; fi
+    bad "(obs-ui) ${UI_VERDICT}: qt6-svg iconengine ${_svg_state} at ${UI_SVG_PATH} / chrome-sandbox owner=${UI_CS_OWNER} mode=${UI_CS_MODE} at ${UI_CS_PATH}; expected the SVG plugin present + root:root 4755 -- re-run setup-strih.sh (qt6-svg-plugins install + F6 setuid)"
+  fi
+else
+  # BROWSER-OFF/absent: no CEF sandbox to grade -- only the SVG theme icons matter.
+  if [ "$UI_SVG_PRESENT" = 1 ]; then
+    ok "(obs-ui) qt6-svg iconengine present at ${UI_SVG_PATH} (BROWSER-OFF -- chrome-sandbox not graded)"
+  else
+    bad "(obs-ui) qt6-svg iconengine MISSING at ${UI_SVG_PATH} -- OBS 32's SVG theme icons render blank; install qt6-svg-plugins (re-run setup-strih.sh)"
+  fi
+fi
+
 echo ""
 if [ "$FAILS" -eq 0 ]; then
   echo -e "${GREEN}=== verify-strih.sh: ALL CLEAR ===${NC}"; exit 0

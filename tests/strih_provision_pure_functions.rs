@@ -2003,3 +2003,164 @@ fn setup_and_verify_wire_the_pipewire_program_audio() {
         "verify-strih must grade program audio via strih_lx_program_audio_verdict"
     );
 }
+
+// --- issue 1317 slice: bake qt6-svg-plugins + /usr-prefix chrome-sandbox setuid ------------------
+// The strih-lx OBS UI needs (1) the Qt6 SVG icon-engine/imageformat plugins (Ubuntu 26.04 ships them
+// in the SEPARATE `qt6-svg-plugins` package, NOT libqt6svg6) so OBS 32's SVG Yami theme renders its
+// icons, and (2) the CEF chrome-sandbox setuid at EVERY path the running OBS could load it from --
+// including the /usr-prefix obs-plugins copy the /usr-install OBS actually loads (the /opt bundle
+// copy alone is not enough). These pure helpers are the ONE source of truth for the setuid target
+// set + the verify assertions.
+
+#[test]
+fn chrome_sandbox_setuid_roots_include_both_bundle_and_usr_obs_plugins() {
+    // ONE source of truth for the setuid target set: the /opt bundle root AND the resolved
+    // /usr-prefix obs-plugins dir the /usr-install OBS loads chrome-sandbox from.
+    let (code, out, _e) = run_sourced(
+        &[],
+        "strih_lx_chrome_sandbox_setuid_roots /opt/obs-genlock /usr/lib/x86_64-linux-gnu",
+    );
+    assert_eq!(code, 0, "setuid-roots helper must succeed");
+    let lines: Vec<&str> = out.lines().filter(|l| !l.trim().is_empty()).collect();
+    assert!(
+        lines.iter().any(|l| l.trim() == "/opt/obs-genlock"),
+        "must include the bundle root: {out}"
+    );
+    assert!(
+        lines
+            .iter()
+            .any(|l| l.trim() == "/usr/lib/x86_64-linux-gnu/obs-plugins"),
+        "must include the resolved /usr-prefix obs-plugins dir: {out}"
+    );
+    assert_eq!(lines.len(), 2, "exactly the two setuid roots: {out}");
+}
+
+#[test]
+fn chrome_sandbox_fix_cmd_covers_multiple_roots_including_usr() {
+    // Variadic over the resolved roots: every emitted statement setuids chrome-sandbox by NAME under
+    // its root, chown root:root + chmod 4755, ;-terminated, never --no-sandbox, and the /usr obs-plugins
+    // root the running OBS loads is covered (the gap this slice closes).
+    let (code, out, _e) = run_sourced(
+        &[],
+        "strih_lx_chrome_sandbox_fix_cmd /opt/obs-genlock /usr/lib/x86_64-linux-gnu/obs-plugins",
+    );
+    assert_eq!(code, 0, "variadic builder must succeed");
+    assert!(
+        out.contains("/opt/obs-genlock"),
+        "covers the bundle root: {out}"
+    );
+    assert!(
+        out.contains("/usr/lib/x86_64-linux-gnu/obs-plugins"),
+        "covers the /usr-prefix obs-plugins root (the live-broken 0755 path): {out}"
+    );
+    assert_eq!(
+        out.matches("-name chrome-sandbox").count(),
+        2,
+        "one find per root: {out}"
+    );
+    assert_eq!(
+        out.matches("chmod 4755").count(),
+        2,
+        "chmod 4755 per root: {out}"
+    );
+    assert!(out.contains("chown root:root"), "chown root:root: {out}");
+    assert!(
+        !out.contains("--no-sandbox"),
+        "never weakens the sandbox: {out}"
+    );
+    // Every emitted statement is ;-terminated (the v4l2-neutral.sh mid-string embedding gotcha).
+    for l in out.lines().filter(|l| !l.trim().is_empty()) {
+        assert!(
+            l.trim_end().ends_with(';'),
+            "each emitted statement must end with ';': {l}"
+        );
+    }
+}
+
+#[test]
+fn chrome_sandbox_fix_cmd_still_single_root_backward_compatible() {
+    // The existing single-root call site (setup-strih.sh) keeps working: one find/chown/chmod.
+    let (code, out, _e) = run_sourced(&[], "strih_lx_chrome_sandbox_fix_cmd /opt/obs-genlock");
+    assert_eq!(code, 0);
+    assert_eq!(out.matches("-name chrome-sandbox").count(), 1, "{out}");
+    assert_eq!(out.matches("chmod 4755").count(), 1, "{out}");
+}
+
+#[test]
+fn chrome_sandbox_usr_path_is_the_obs_plugins_copy() {
+    let (code, out, _e) = run_sourced(
+        &[],
+        "strih_lx_chrome_sandbox_usr_path /usr/lib/x86_64-linux-gnu",
+    );
+    assert_eq!(code, 0);
+    assert_eq!(
+        out.trim(),
+        "/usr/lib/x86_64-linux-gnu/obs-plugins/chrome-sandbox"
+    );
+}
+
+#[test]
+fn qt6_svg_iconengine_path_is_the_libqsvgicon_plugin() {
+    let (code, out, _e) = run_sourced(
+        &[],
+        "strih_lx_qt6_svg_iconengine_path /usr/lib/x86_64-linux-gnu",
+    );
+    assert_eq!(code, 0);
+    assert_eq!(
+        out.trim(),
+        "/usr/lib/x86_64-linux-gnu/qt6/plugins/iconengines/libqsvgicon.so"
+    );
+}
+
+#[test]
+fn obs_ui_fix_verdict_tokens_ok_svg_missing_wrong_owner_wrong_mode() {
+    // Combined verdict for the verify item: SVG iconengine present (1) AND the /usr chrome-sandbox is
+    // root:root 4755. Fail-closed order: svg first, then owner, then mode.
+    let (c, out, _e) = run_sourced(&[], "strih_lx_obs_ui_fix_verdict 1 root:root 4755");
+    assert_eq!(c, 0, "svg present + root:root/4755 must be ok");
+    assert_eq!(out.trim(), "ok");
+    let (c, out, _e) = run_sourced(&[], "strih_lx_obs_ui_fix_verdict 0 root:root 4755");
+    assert_ne!(c, 0);
+    assert_eq!(out.trim(), "svg-missing");
+    let (c, out, _e) = run_sourced(&[], "strih_lx_obs_ui_fix_verdict 1 newlevel:newlevel 4755");
+    assert_ne!(c, 0);
+    assert_eq!(out.trim(), "sandbox-wrong-owner");
+    let (c, out, _e) = run_sourced(&[], "strih_lx_obs_ui_fix_verdict 1 root:root 0755");
+    assert_ne!(c, 0);
+    assert_eq!(out.trim(), "sandbox-wrong-mode");
+}
+
+/// Wiring: `setup-strih.sh` installs `qt6-svg-plugins` (idempotent apt-get) so the SVG theme icons
+/// render, and the F6 chrome-sandbox step resolves its setuid target set via the ONE-source-of-truth
+/// helper (covering the /usr-prefix obs-plugins copy, not just $GENLOCK_DIR).
+#[test]
+fn setup_strih_installs_qt6_svg_and_setuids_both_chrome_sandbox_roots() {
+    let s = read_script("scripts/setup-strih.sh");
+    assert!(
+        s.contains("apt-get install -y qt6-svg-plugins"),
+        "setup-strih must idempotently install qt6-svg-plugins (OBS 32 SVG theme icons)"
+    );
+    assert!(
+        s.contains("strih_lx_chrome_sandbox_setuid_roots"),
+        "setup-strih F6 must resolve the setuid target roots via the ONE-source-of-truth helper"
+    );
+}
+
+/// Wiring: `verify-strih.sh` gains ONE report item asserting BOTH the qt6-svg iconengine plugin is
+/// present AND chrome-sandbox is setuid 4755 at the /usr path the running OBS loads.
+#[test]
+fn verify_strih_asserts_qt6_svg_and_usr_chrome_sandbox() {
+    let v = read_script("scripts/verify-strih.sh");
+    assert!(
+        v.contains("strih_lx_qt6_svg_iconengine_path"),
+        "verify-strih must assert the qt6-svg iconengine plugin path"
+    );
+    assert!(
+        v.contains("strih_lx_obs_ui_fix_verdict"),
+        "verify-strih must grade the combined OBS-UI fix via the pure verdict"
+    );
+    assert!(
+        v.contains("strih_lx_chrome_sandbox_usr_path"),
+        "verify-strih must read chrome-sandbox at the resolved /usr path"
+    );
+}
