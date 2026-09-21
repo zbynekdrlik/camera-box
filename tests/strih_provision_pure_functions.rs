@@ -2045,7 +2045,10 @@ fn chrome_sandbox_fix_cmd_covers_multiple_roots_including_usr() {
         "strih_lx_chrome_sandbox_fix_cmd /opt/obs-genlock /usr/lib/x86_64-linux-gnu/obs-plugins",
     );
     assert_eq!(code, 0, "variadic builder must succeed");
-    assert!(out.contains("/opt/obs-genlock"), "covers the bundle root: {out}");
+    assert!(
+        out.contains("/opt/obs-genlock"),
+        "covers the bundle root: {out}"
+    );
     assert!(
         out.contains("/usr/lib/x86_64-linux-gnu/obs-plugins"),
         "covers the /usr-prefix obs-plugins root (the live-broken 0755 path): {out}"
@@ -2055,9 +2058,16 @@ fn chrome_sandbox_fix_cmd_covers_multiple_roots_including_usr() {
         2,
         "one find per root: {out}"
     );
-    assert_eq!(out.matches("chmod 4755").count(), 2, "chmod 4755 per root: {out}");
+    assert_eq!(
+        out.matches("chmod 4755").count(),
+        2,
+        "chmod 4755 per root: {out}"
+    );
     assert!(out.contains("chown root:root"), "chown root:root: {out}");
-    assert!(!out.contains("--no-sandbox"), "never weakens the sandbox: {out}");
+    assert!(
+        !out.contains("--no-sandbox"),
+        "never weakens the sandbox: {out}"
+    );
     // Every emitted statement is ;-terminated (the v4l2-neutral.sh mid-string embedding gotcha).
     for l in out.lines().filter(|l| !l.trim().is_empty()) {
         assert!(
@@ -2078,8 +2088,10 @@ fn chrome_sandbox_fix_cmd_still_single_root_backward_compatible() {
 
 #[test]
 fn chrome_sandbox_usr_path_is_the_obs_plugins_copy() {
-    let (code, out, _e) =
-        run_sourced(&[], "strih_lx_chrome_sandbox_usr_path /usr/lib/x86_64-linux-gnu");
+    let (code, out, _e) = run_sourced(
+        &[],
+        "strih_lx_chrome_sandbox_usr_path /usr/lib/x86_64-linux-gnu",
+    );
     assert_eq!(code, 0);
     assert_eq!(
         out.trim(),
@@ -2089,8 +2101,10 @@ fn chrome_sandbox_usr_path_is_the_obs_plugins_copy() {
 
 #[test]
 fn qt6_svg_iconengine_path_is_the_libqsvgicon_plugin() {
-    let (code, out, _e) =
-        run_sourced(&[], "strih_lx_qt6_svg_iconengine_path /usr/lib/x86_64-linux-gnu");
+    let (code, out, _e) = run_sourced(
+        &[],
+        "strih_lx_qt6_svg_iconengine_path /usr/lib/x86_64-linux-gnu",
+    );
     assert_eq!(code, 0);
     assert_eq!(
         out.trim(),
@@ -2102,16 +2116,13 @@ fn qt6_svg_iconengine_path_is_the_libqsvgicon_plugin() {
 fn obs_ui_fix_verdict_tokens_ok_svg_missing_wrong_owner_wrong_mode() {
     // Combined verdict for the verify item: SVG iconengine present (1) AND the /usr chrome-sandbox is
     // root:root 4755. Fail-closed order: svg first, then owner, then mode.
-    let (c, out, _e) =
-        run_sourced(&[], "strih_lx_obs_ui_fix_verdict 1 root:root 4755");
+    let (c, out, _e) = run_sourced(&[], "strih_lx_obs_ui_fix_verdict 1 root:root 4755");
     assert_eq!(c, 0, "svg present + root:root/4755 must be ok");
     assert_eq!(out.trim(), "ok");
-    let (c, out, _e) =
-        run_sourced(&[], "strih_lx_obs_ui_fix_verdict 0 root:root 4755");
+    let (c, out, _e) = run_sourced(&[], "strih_lx_obs_ui_fix_verdict 0 root:root 4755");
     assert_ne!(c, 0);
     assert_eq!(out.trim(), "svg-missing");
-    let (c, out, _e) =
-        run_sourced(&[], "strih_lx_obs_ui_fix_verdict 1 newlevel:newlevel 4755");
+    let (c, out, _e) = run_sourced(&[], "strih_lx_obs_ui_fix_verdict 1 newlevel:newlevel 4755");
     assert_ne!(c, 0);
     assert_eq!(out.trim(), "sandbox-wrong-owner");
     let (c, out, _e) = run_sourced(&[], "strih_lx_obs_ui_fix_verdict 1 root:root 0755");
