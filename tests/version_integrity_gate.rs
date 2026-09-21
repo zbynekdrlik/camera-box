@@ -2348,7 +2348,10 @@ fn gate_passes_a_linux_strih_under_strih_linux_with_only_platform_agnostic_facet
     const SHA: &str = "26de1c3c23980488a110dbf02e5e472f15cb001d";
     const OBS_SHA: &str = "1111111111111111111111111111111111111111111111111111111111111111";
     const DISTROAV_SHA: &str = "2222222222222222222222222222222222222222222222222222222222222222";
-    let manifest = write_manifest("strih_lx_1351_pass", OBS_SHA, DISTROAV_SHA);
+    // issue 1351: distinct manifest name (NOT the strih state name below) so the strih state does
+    // not clobber the bundle manifest -- otherwise obs_dll_sha256 reads a state-json with no files[]
+    // and UNKNOWN-blocks (exit 11), failing the GATE-PASS + "obs_dll_sha256 OK" assertions here.
+    let manifest = write_manifest("bundle_lx_1351_pass", OBS_SHA, DISTROAV_SHA);
     let s = write_state(
         "strih_lx_1351_pass",
         &with_manifest_facet(
