@@ -131,6 +131,15 @@ if [ -d "${STRIH_LX_BUNDLE_SRC:-}" ]; then
   else
     warn "  RUNTIME_PACKAGES.txt is empty -- no runtime packages to install (unexpected for a strih bundle)"
   fi
+  # issue 1317 slice: the Qt6 SVG icon-engine + image-format plugins live in the SEPARATE
+  # qt6-svg-plugins package -- Ubuntu 26.04 split them out of libqt6svg6 (which carries only the
+  # library). OBS 32's default Yami theme is SVG-based, so WITHOUT these plugins half the
+  # toolbar/dock/settings icons render BLANK (live-verified on strih-lx 10.77.9.202, 21.9.). Install
+  # it alongside the recorded OBS-runtime deps. Idempotent (apt-get is a no-op if already present);
+  # fail-loud so a re-flash reproduces a working operator UI instead of silently blank icons.
+  echo "  installing qt6-svg-plugins (OBS 32 SVG theme icon-engine + image-format plugins)"
+  DEBIAN_FRONTEND=noninteractive apt-get install -y qt6-svg-plugins \
+    || fail "qt6-svg-plugins install failed -- OBS 32's SVG theme icons would render blank; fix the box's apt sources and re-run"
   # A pre-staged bundle dir (deploy-genlock-fleet.sh scp'd it, or an operator did) -- install it.
   cp -a "${STRIH_LX_BUNDLE_SRC%/}/." "$GENLOCK_DIR/" || fail "genlock bundle copy failed"
   GSHA="$(cat "$GENLOCK_DIR/GENLOCK_BUILD_SHA.txt" 2>/dev/null || echo unknown)"
@@ -157,16 +166,27 @@ fi
 # STRIH_BUILD_FLAGS.txt declares BROWSER-ON; a BROWSER-OFF/absent marker is a loud SKIP. setup-strih
 # already runs as root, so the chown/chmod take effect.
 CS_FLAGS_FILE="${GENLOCK_DIR}/STRIH_BUILD_FLAGS.txt"
+CS_USR_LIBDIR="/usr/lib/x86_64-linux-gnu"   # the /usr-prefix strih_install_bundle_prefix installs into
 if [ -f "$CS_FLAGS_FILE" ] && strih_lx_browser_bundle_required "$(cat "$CS_FLAGS_FILE")"; then
   CS_PATH="$(find "$GENLOCK_DIR" -type f -name chrome-sandbox 2>/dev/null | head -n1 || true)"
   [ -n "$CS_PATH" ] || fail "BROWSER-ON bundle but chrome-sandbox is absent under ${GENLOCK_DIR} -- the CEF sandbox helper is missing; the browser sources cannot launch"
-  eval "$(strih_lx_chrome_sandbox_fix_cmd "$GENLOCK_DIR")" \
-    || fail "chrome-sandbox chown root:root / chmod 4755 failed at ${CS_PATH}"
-  CS_OWNER="$(stat -c '%U:%G' "$CS_PATH" 2>/dev/null || echo '?')"
-  CS_MODE="$(stat -c '%a' "$CS_PATH" 2>/dev/null || echo '?')"
-  CS_VERDICT="$(strih_lx_chrome_sandbox_verdict "$CS_OWNER" "$CS_MODE" 1)" \
-    || fail "chrome-sandbox setuid fix did not take (${CS_VERDICT}: owner=${CS_OWNER} mode=${CS_MODE}); expected root:root 4755"
-  echo "  chrome-sandbox setuid-root (root:root 4755) applied at ${CS_PATH} -- CEF sandbox launchable"
+  # issue 1317 slice: setuid EVERY chrome-sandbox the running OBS could load -- the /opt bundle home
+  # AND the /usr-prefix obs-plugins copy the /usr-install OBS actually loads (that copy was 0755 and
+  # broke CEF browser sources live, 21.9.). The setuid target roots come from ONE source of truth
+  # (strih_lx_chrome_sandbox_setuid_roots) shared with verify-strih.sh's /usr-path assertion.
+  mapfile -t CS_ROOTS < <(strih_lx_chrome_sandbox_setuid_roots "$GENLOCK_DIR" "$CS_USR_LIBDIR")
+  eval "$(strih_lx_chrome_sandbox_fix_cmd "${CS_ROOTS[@]}")" \
+    || fail "chrome-sandbox chown root:root / chmod 4755 failed (roots: ${CS_ROOTS[*]})"
+  # Re-verify BOTH the bundle copy AND the /usr-prefix copy the running OBS loads took the setuid.
+  CS_USR_PATH="$(strih_lx_chrome_sandbox_usr_path "$CS_USR_LIBDIR")"
+  for __csp in "$CS_PATH" "$CS_USR_PATH"; do
+    [ -e "$__csp" ] || continue
+    __cso="$(stat -c '%U:%G' "$__csp" 2>/dev/null || echo '?')"
+    __csm="$(stat -c '%a' "$__csp" 2>/dev/null || echo '?')"
+    __csv="$(strih_lx_chrome_sandbox_verdict "$__cso" "$__csm" 1)" \
+      || fail "chrome-sandbox setuid fix did not take (${__csv}: owner=${__cso} mode=${__csm}) at ${__csp}; expected root:root 4755"
+  done
+  echo "  chrome-sandbox setuid-root (root:root 4755) applied at ${CS_ROOTS[*]} -- CEF sandbox launchable"
 else
   warn "  chrome-sandbox setuid fix SKIPPED (STRIH_BUILD_FLAGS.txt absent or BROWSER-OFF at ${GENLOCK_DIR}) -- browser sources not built"
 fi

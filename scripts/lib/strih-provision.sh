@@ -364,15 +364,59 @@ strih_lx_browser_bundle_ok() {
 # that weakens every browser source's isolation session-wide). The proper fix is the setuid helper,
 # applied once at provisioning and gated in verify-strih.
 
-# strih_lx_chrome_sandbox_fix_cmd BUNDLE_ROOT -> prints the idempotent remote statements that make
-# the installed CEF chrome-sandbox launchable: locate it by NAME under BUNDLE_ROOT (never guessing
-# the multiarch obs-plugins path) then `chown root:root` + `chmod 4755` it. The emitted statement
-# ends with `;` so a mid-string $(...) embedding never glues the following command (the
-# scripts/lib/v4l2-neutral.sh _cmd-helper gotcha). It runs as an `if` so a missing chrome-sandbox is
-# a no-op (set -e safe); the CALLER (setup-strih.sh) enforces the BROWSER-ON fail-loud presence gate.
+# strih_lx_chrome_sandbox_fix_cmd ROOT [ROOT...] -> prints the idempotent remote statements that make
+# EVERY installed CEF chrome-sandbox launchable: for each ROOT, locate chrome-sandbox by NAME under it
+# (never guessing the multiarch obs-plugins path) then `chown root:root` + `chmod 4755` it. Variadic
+# since issue 1317 slice: the running /usr-install OBS loads chrome-sandbox from the /usr-prefix
+# obs-plugins dir, NOT only the /opt bundle root, so the setuid must cover EVERY root the running OBS
+# could load it from (resolved by strih_lx_chrome_sandbox_setuid_roots, the ONE source of truth). A
+# single ROOT keeps the pre-slice behaviour. Each emitted statement ends with `;` so a mid-string
+# $(...) embedding never glues the following command (the scripts/lib/v4l2-neutral.sh _cmd-helper
+# gotcha). Each runs as an `if` so a missing chrome-sandbox under a root is a no-op (set -e safe); the
+# CALLER (setup-strih.sh) enforces the BROWSER-ON fail-loud presence gate.
 strih_lx_chrome_sandbox_fix_cmd() {
-  local root="${1:?bundle-root required}"
-  printf 'if __csb="$(find %q -type f -name chrome-sandbox 2>/dev/null | head -n1 || true)"; [ -n "$__csb" ]; then chown root:root "$__csb"; chmod 4755 "$__csb"; fi;\n' "$root"
+  [ "$#" -ge 1 ] || { echo "strih_lx_chrome_sandbox_fix_cmd: at least one root required" >&2; return 2; }
+  local root
+  for root in "$@"; do
+    printf 'if __csb="$(find %q -type f -name chrome-sandbox 2>/dev/null | head -n1 || true)"; [ -n "$__csb" ]; then chown root:root "$__csb"; chmod 4755 "$__csb"; fi;\n' "$root"
+  done
+}
+
+# strih_lx_chrome_sandbox_setuid_roots BUNDLE_ROOT USR_LIBDIR -> print (one per line) the roots under
+# which chrome-sandbox must be setuid: the /opt bundle root AND the resolved /usr-prefix obs-plugins
+# dir the /usr-install OBS actually loads it from. ONE source of truth shared by the setup-strih.sh
+# F6 setuid step and verify-strih.sh's /usr-path assertion (issue 1317 slice: the F6 step used to
+# setuid only the bundle copy, leaving /usr/lib/.../obs-plugins/chrome-sandbox at 0755 -> CEF broke).
+strih_lx_chrome_sandbox_setuid_roots() {
+  local bundle="${1:?bundle-root required}" libdir="${2:?usr libdir required}"
+  printf '%s\n' "$bundle" "${libdir%/}/obs-plugins"
+}
+
+# strih_lx_chrome_sandbox_usr_path USR_LIBDIR -> the /usr-prefix chrome-sandbox path the running OBS
+# loads (issue 1317 slice). The multiarch obs-plugins copy, distinct from the /opt bundle copy.
+strih_lx_chrome_sandbox_usr_path() {
+  local libdir="${1:?usr libdir required}"
+  printf '%s\n' "${libdir%/}/obs-plugins/chrome-sandbox"
+}
+
+# strih_lx_qt6_svg_iconengine_path USR_LIBDIR -> the Qt6 SVG icon-engine plugin path (issue 1317
+# slice). Ubuntu 26.04 ships it in the SEPARATE `qt6-svg-plugins` package (NOT libqt6svg6, which
+# carries only the library); without it OBS 32's default SVG Yami theme renders its icons blank.
+strih_lx_qt6_svg_iconengine_path() {
+  local libdir="${1:?usr libdir required}"
+  printf '%s\n' "${libdir%/}/qt6/plugins/iconengines/libqsvgicon.so"
+}
+
+# strih_lx_obs_ui_fix_verdict SVG_PRESENT CS_OWNER CS_MODE -> print ONE verdict token, return 0 iff
+# `ok` (issue 1317 slice: the combined verify item). SVG_PRESENT is 1 when the qt6-svg iconengine
+# plugin exists, else 0. Fail-closed order: svg missing -> `svg-missing`; owner not root:root ->
+# `sandbox-wrong-owner`; mode not 4755 (setuid rwxr-xr-x) -> `sandbox-wrong-mode`; else -> `ok`.
+strih_lx_obs_ui_fix_verdict() {
+  local svg="${1:-}" owner="${2:-}" mode="${3:-}"
+  [ "$svg" = 1 ]            || { printf 'svg-missing';         return 1; }
+  [ "$owner" = 'root:root' ] || { printf 'sandbox-wrong-owner'; return 1; }
+  [ "$mode" = '4755' ]      || { printf 'sandbox-wrong-mode';  return 1; }
+  printf 'ok'; return 0
 }
 
 # strih_lx_chrome_sandbox_verdict OWNER MODE PRESENT -> prints one verdict token and returns 0 iff
