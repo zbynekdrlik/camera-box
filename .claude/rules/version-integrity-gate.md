@@ -260,3 +260,26 @@ inventory (`imag-offline-ack.md`) had missed.
   stream=… --genlock-sha imag= --imag-acked-offline "<reason>"` → exit 0 + `GATE PASS` +
   `imag_so_bytes SKIPPED`; drop the flag → exit 11. This is the same offline gate-subprocess path
   the byte-facet tests use.
+
+## #1351 — `--strih-linux`: mirroring `--imag-acked-offline` sometimes means editing `drift-guard.sh` too, not just `version-integrity-gate.sh`
+
+`--imag-acked-offline` never needed to touch `drift-guard.sh` because every imag facet it skips
+(the `.so` byte facet, the cross-box parity entry) is a SEPARATE function call in
+`version-integrity-gate.sh`'s own `main()` — easy to wrap in an `if`. `--strih-linux` (skip strih's
+Windows-only facets on a Linux strih-lx) hit a DIFFERENT shape: two of the facets to skip
+(`ndi_runtime`, `distroav_dll_paths`) are baked INSIDE `drift-guard.sh`'s single monolithic
+`compare_observed()` call — the mandatory `checks[]` array and `drift_check_plugin_paths` — which
+also runs the KEPT platform-agnostic facets (obs_version/output_fps/… and the manifest-gated byte
+facets) in the SAME subprocess invocation. There is no way to skip just 2 of `compare_observed()`'s
+mandatory checks from the OUTSIDE without either (a) faking observed values to force a false "OK"
+(banned — never fabricate a value), or (b) extending `compare_observed()` itself with a new opt-in
+observed key. Went with (b): a `strih_linux=1` key threaded through the `--compare` arg-parse case
+statement + a NEW trailing positional arg (currently `${31:-}` — recount the existing
+`compare_observed "$host" ...` call's arg list before adding a new one; it grows every few
+features) that gates exactly the two Windows-only mandatory checks with a loud SKIPPED line,
+leaving every other facet in the function (including the manifest-gated byte facets) untouched.
+**The lesson: before assuming a new per-box skip flag stays scoped to `version-integrity-gate.sh`
+(the `--imag-acked-offline` precedent), check whether the facets to skip are separate calls in its
+own `main()` loop or are baked into `drift-guard.sh`'s `compare_observed()` — the latter needs an
+additive, backward-compatible extension of the shared engine, not just a wrapper `if` in the
+caller.**
