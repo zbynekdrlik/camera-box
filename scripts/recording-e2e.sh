@@ -1027,6 +1027,17 @@ if [ -n "$IMAG_GENLOCK_SHA" ]; then
   [ -n "$IMAG_SO_CSV" ] && AUTO_IMAG_MANIFEST="$(manifest_autosource_fetch "$VERSION_GATE_REPO" linux-genlock.yml obs-genlock-linux-x86_64 \
     "$IMAG_GENLOCK_SHA" "$OUTDIR/imag-linux-manifest.json")"
 fi
+# issue 1351 follow-up: strih-lx (the Linux notebook) serves none of the Windows-only version-
+# integrity facets (the #826 OBS-identity set + distroav_dll_paths + ndi_runtime) -- pass
+# --strih-linux so the gate SKIPS them (loud SKIPPED, counted ok) instead of UNKNOWN-refusing,
+# while still verifying strih's genlock build via the platform-agnostic byte/capability/parity
+# facets its Linux bundle-state DOES serve. Windows strih (the default, byte-identical) leaves
+# this flag empty so it is never appended (the `${VAR:+--flag}` convention already used for
+# AUTO_WIN_MANIFEST/IMAG_SO_CSV above).
+STRIH_LINUX_GATE_ARG=""
+if [ "$(strih_platform "$STRIH")" = "linux" ]; then
+  STRIH_LINUX_GATE_ARG="1"
+fi
 # ALWAYS pass --win-state for strih AND stream (NOT conditional on the file existing): an absent file
 # is UNKNOWN -> the gate REFUSES, never a silent pass with a box's build unverified.
 # issue 1164: when imag is acked offline, invoke the gate WITHOUT the imag SHA / manifest / bytes
@@ -1038,7 +1049,8 @@ if [ "$IMAG_OFFLINE_ACKED" = 1 ]; then
     ${AUTO_WIN_MANIFEST:+--manifest "$AUTO_WIN_MANIFEST"} \
     --win-state "strih=$VERSION_STRIH_STATE" \
     --win-state "stream=$VERSION_STREAM_STATE" \
-    --imag-acked-offline "$IMAG_OFFLINE_ACK_REASON"
+    --imag-acked-offline "$IMAG_OFFLINE_ACK_REASON" \
+    ${STRIH_LINUX_GATE_ARG:+--strih-linux}
 else
 "$HERE/version-integrity-gate.sh" \
   ${AUTO_WIN_MANIFEST:+--manifest "$AUTO_WIN_MANIFEST"} \
@@ -1046,7 +1058,8 @@ else
   --win-state "stream=$VERSION_STREAM_STATE" \
   --genlock-sha "imag=$IMAG_GENLOCK_SHA" \
   ${AUTO_IMAG_MANIFEST:+--imag-manifest "$AUTO_IMAG_MANIFEST"} \
-  ${IMAG_SO_CSV:+--imag-bytes "imag=$IMAG_SO_CSV"}
+  ${IMAG_SO_CSV:+--imag-bytes "imag=$IMAG_SO_CSV"} \
+  ${STRIH_LINUX_GATE_ARG:+--strih-linux}
 fi
 
 # dantesync fleet-wide VERSION-PARITY gate (#862) — alongside the DanteSync NTP+PTP gate (#7) and
