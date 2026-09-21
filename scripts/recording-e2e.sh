@@ -130,6 +130,12 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Linux strih -- never a second host-detection mechanism, one resolver both [0/8] and [8/8a] use.
 # shellcheck source=scripts/lib/strih-platform.sh
 . "$HERE/lib/strih-platform.sh"
+# issue 1351: the ONE source of truth for BOUNDING every strih-touching [0/8] call on the
+# Linux-strih path with a timeout + a named [0/8] strih-lx banner (strih_lx_gate_prefix /
+# strih_lx_preflight_timeout_banner) -- so a silent hang can never swallow RUN_ID. Depends on
+# strih_platform() above; the Windows path stays byte-identical (an empty prefix, no banner).
+# shellcheck source=scripts/lib/strih-lx-preflight.sh
+. "$HERE/lib/strih-lx-preflight.sh"
 # #863: WARN-only (never `exit`) verification that the PERMANENT cam2-painter.service genuinely
 # came back active + painting after cleanup() restarts it below -- a fire-and-forget restart call
 # that used to be a silent no-op (the permanent painter unit was never installed, see #863).
@@ -474,6 +480,15 @@ STRIH_USER="${STRIH_USER:-newlevel}"
 STRIH_PW="${STRIH_PW:-newlevel}"
 STREAM_USER="${STREAM_USER:-newlevel}"
 STREAM_PW="${STREAM_PW:-newlevel}"
+# issue 1351: bound every strih-touching [0/8] gate on the Linux-strih path (strih-lx = the M4
+# notebook, 10.77.9.202) with `timeout`, so a wedged strih call fails FAST with a named
+# [0/8] strih-lx banner instead of a ~23-min silent [0/8] hang that aborts before RUN_ID is exported
+# below (the #703 fail-closed guard then reporting "no verdict" with NO named stage). Resolved ONCE
+# here (before any [0/8] gate the static-anchor tests slice) via the strih-lx-preflight lib; a
+# Windows / other strih yields an EMPTY prefix so that path stays behaviorally byte-identical. It is
+# threaded via ${STRIH_LX_GATE_PREFIX:-} into the DanteSync NTP+PTP and dantesync version-parity gate
+# invocations below (the two heaviest strih-touching [0/8] gate calls).
+STRIH_LX_GATE_PREFIX="$(strih_lx_gate_prefix "${STRIH_LX_GATE_TIMEOUT:-300}" "$STRIH")"
 RUN_ID="${RUN_ID:-$(( (RANDOM << 16) | RANDOM ))}"
 # #703: surface RUN_ID to the CI workflow (when running under GH Actions) so a downstream
 # workflow step (the fail-closed structural guard) can locate THIS run's verdict JSON
@@ -874,12 +889,13 @@ echo "[0/8] DanteSync NTP+PTP gate — $CAMERA_NAME, cam2, strih, stream must AL
 # serves phase_slew_enabled=true (the fleet-wide cure for the chronic NTP step storm, verified
 # 2026-09-02 including cam5/cam6/cam7), so a box that silently reverts to phase_slew=off now
 # HARD-fails here (DISABLED->20, UNKNOWN->11) instead of only being reported.
-DANTESYNC_GATE_GM_ENFORCE=1 DANTESYNC_GATE_PHASE_SLEW_ENFORCE=1 "$HERE/dantesync-gate.sh" \
+DANTESYNC_GATE_GM_ENFORCE=1 DANTESYNC_GATE_PHASE_SLEW_ENFORCE=1 ${STRIH_LX_GATE_PREFIX:-} "$HERE/dantesync-gate.sh" \
   --bound-us "${CLOCK_GUARD_BOUND_US:-2000}" \
   --win-http-port "${WIN_DANTE_PORT:-8898}" \
   --linux "$CAMERA_NAME=$CAM1_IP cam2=$PAINTER_IP" \
   --win-http "strih=$STRIH" \
-  --win-http "stream=$STREAM"
+  --win-http "stream=$STREAM" \
+  || { _slx_rc=$?; strih_lx_preflight_timeout_banner "$_slx_rc" "DanteSync NTP+PTP gate (strih/stream)" "${STRIH_LX_GATE_TIMEOUT:-300}"; exit "$_slx_rc"; }
 
 # Version-integrity precondition gate (#123) — THE OTHER hard step, alongside DanteSync. The whole
 # test is worthless unless the LIVE strih+stream OBS stack is the PINNED build (a randomly-deployed /
@@ -1091,10 +1107,11 @@ if [ "$IMAG_OFFLINE_ACKED" = 1 ]; then
 else
   DANTESYNC_VERSION_LINUX="$DANTESYNC_VERSION_LINUX imag-nb=${IMAG_USER:-newlevel}@$IMAG_IP"
 fi
-"$HERE/dantesync-version-gate.sh" \
+${STRIH_LX_GATE_PREFIX:-} "$HERE/dantesync-version-gate.sh" \
   --linux "$DANTESYNC_VERSION_LINUX" \
   --local dev1 \
-  --win "strih=${WIN_SSH_USER:-newlevel}@$STRIH stream=${WIN_SSH_USER:-newlevel}@$STREAM"
+  --win "strih=${WIN_SSH_USER:-newlevel}@$STRIH stream=${WIN_SSH_USER:-newlevel}@$STREAM" \
+  || { _slx_rc=$?; strih_lx_preflight_timeout_banner "$_slx_rc" "dantesync version-parity gate (strih/stream ssh)" "${STRIH_LX_GATE_TIMEOUT:-300}"; exit "$_slx_rc"; }
 
 # camera-box binary CROSS-BOX version-parity gate (issue 875) — the follow-up split from the
 # dantesync version-parity gate above. Where that gate checks the dantesync DAEMON against a fixed

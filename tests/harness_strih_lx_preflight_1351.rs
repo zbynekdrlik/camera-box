@@ -161,17 +161,15 @@ fn banner_is_silent_for_a_normal_gate_failure() {
 #[test]
 fn visibility_ws_roundtrip_is_timeout_bounded_1351() {
     let lib = read("scripts/lib/strih-platform.sh");
-    let ws_pos = lib
-        .find("obs_phase2.py")
-        .expect("strih_linux_visibility_check must still do the obs_phase2 WS round-trip");
-    // The obs_phase2 WS status read must be wrapped in `timeout` (the ssh probe already was; the WS
-    // call was the un-bounded strih-touching call the whole issue is about).
-    let line_start = lib[..ws_pos].rfind('\n').map(|i| i + 1).unwrap_or(0);
-    let line = &lib[line_start..ws_pos];
+    // Byte-match the ACTUAL bounded call, never `.find("obs_phase2.py")` — that literal also occurs
+    // in this lib's own doc comments (the #832 self-collision class), so an anchor on the bare name
+    // would latch onto a comment line, not the real invocation. The WS status read (the ssh probe
+    // above was already `timeout`-bounded; this WS call was the un-bounded strih-touching call the
+    // whole issue is about) must be wrapped in `timeout`.
     assert!(
-        line.contains("timeout "),
+        lib.contains("timeout \"${STRIH_LX_WS_TIMEOUT:-20}\" python3 \"$here/obs_phase2.py\""),
         "the obs_phase2 WS status round-trip in strih_linux_visibility_check must be `timeout`-bounded \
-         (issue 1351 — this was the un-timeout-bounded strih call that hung [0/8] ~23 min). line={line:?}"
+         (issue 1351 — this was the un-timeout-bounded strih call that hung [0/8] ~23 min)."
     );
 }
 
@@ -259,17 +257,22 @@ fn dantesync_version_parity_gate_is_bounded_on_the_linux_strih_path_1351() {
 #[test]
 fn the_bound_never_duplicates_a_gate_invocation_anchor_1351() {
     let body = read("scripts/recording-e2e.sh");
+    // These three literals live ONLY in the two gate invocations this fix wraps (the MAIN DanteSync
+    // NTP+PTP gate's own stream leg, and the dantesync version-parity gate) — each is count-1 today.
+    // An `if [platform]; then WRAP; else ORIGINAL; fi` duplication (the anchor-hostile shape this fix
+    // deliberately AVOIDS) would flip any of them to 2 and break the many `.find()`/`.split()` gate
+    // anchors (14/9/8 test files). The `${STRIH_LX_GATE_PREFIX:-}` prefix + a `|| { ... }` tail
+    // duplicate nothing, so they stay 1.
     for anchor in [
-        "\"$HERE/dantesync-gate.sh\"",
-        "\"$HERE/dantesync-version-gate.sh\"",
-        "--win-http \"strih=$STRIH\"",
-        "--win-http \"stream=$STREAM\"",
+        "--win-http \"stream=$STREAM\"", // only in the MAIN DanteSync gate this fix prefixed
+        "\"$HERE/dantesync-version-gate.sh\"", // the version-parity gate this fix prefixed
+        "--win \"strih=", // only in the version-parity gate's --win arg
     ] {
         assert_eq!(
             body.matches(anchor).count(),
             1,
             "issue 1351: the timeout bound must not duplicate the gate anchor {anchor:?} \
-             (it is a ${{VAR:-}} prefix, not a copied invocation)"
+             (it is a ${{VAR:-}} prefix + a `|| {{...}}` tail, never a copied if/else invocation)"
         );
     }
 }
