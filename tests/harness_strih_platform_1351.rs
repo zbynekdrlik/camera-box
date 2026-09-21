@@ -508,3 +508,65 @@ fn linux_visibility_branch_inits_svg_strih_out_for_set_u_1351() {
         "the linux visibility branch must init _svg_strih_out=\"\" (set -u safety for the #1295 znote read)"
     );
 }
+
+// ================================================================================================
+// issue 1351 follow-up — the `[0/8]` version-integrity gate invocation passes `--strih-linux` iff
+// strih_platform resolves linux; the Windows path stays byte-identical.
+// ================================================================================================
+
+/// The `[0/8]` version-integrity gate region resolves `strih_platform "$STRIH"` into a flag
+/// variable and threads it into BOTH the imag-acked and non-acked `version-integrity-gate.sh`
+/// invocation shapes via the SAME `${VAR:+--flag}` convention `AUTO_WIN_MANIFEST`/`IMAG_SO_CSV`
+/// already use elsewhere in this exact block -- never a bare unconditional literal.
+#[test]
+fn zero_eight_version_integrity_gate_threads_strih_linux_flag_conditionally_1351() {
+    let body = read("scripts/recording-e2e.sh");
+    let banner_pos = body
+        .find("[0/8] version-integrity gate")
+        .expect("the [0/8] version-integrity banner must still exist");
+    let end_pos = body[banner_pos..]
+        .find("dantesync fleet-wide VERSION-PARITY gate")
+        .map(|p| banner_pos + p)
+        .expect("the following dantesync fleet-wide banner must still exist");
+    let window = &body[banner_pos..end_pos];
+    assert!(
+        window.contains("strih_platform \"$STRIH\""),
+        "the [0/8] version-integrity region must resolve strih_platform to decide the flag. \
+         Window:\n{window}"
+    );
+    assert!(
+        window.contains("STRIH_LINUX_GATE_ARG=\"1\""),
+        "a linux strih must set the flag var to a non-empty value. Window:\n{window}"
+    );
+    // The flag must be threaded via the established conditional-arg convention, never a bare
+    // unconditional literal -- count exactly TWO occurrences (one per invocation shape: the
+    // imag-acked branch and the non-acked branch).
+    let occurrences = window.matches("${STRIH_LINUX_GATE_ARG:+--strih-linux}").count();
+    assert_eq!(
+        occurrences, 2,
+        "--strih-linux must be threaded conditionally into BOTH version-integrity-gate.sh \
+         invocation shapes (imag-acked + non-acked), never a bare literal. Window:\n{window}"
+    );
+}
+
+/// NEGATIVE ANCHOR: the Windows `--win-state` invocation lines (both shapes) stay byte-identical
+/// to their pre-1351 text -- the new flag is APPENDED, never inserted between/replacing existing
+/// args.
+#[test]
+fn zero_eight_version_integrity_gate_windows_invocation_args_are_byte_identical_1351() {
+    let body = read("scripts/recording-e2e.sh");
+    assert!(
+        body.contains(
+            "--win-state \"strih=$VERSION_STRIH_STATE\" \\\n    --win-state \"stream=$VERSION_STREAM_STATE\" \\\n    --imag-acked-offline \"$IMAG_OFFLINE_ACK_REASON\""
+        ),
+        "the imag-acked version-integrity-gate.sh invocation's core args must be byte-identical \
+         to their pre-1351 text (the new flag is appended after, never inserted inside)"
+    );
+    assert!(
+        body.contains(
+            "--win-state \"strih=$VERSION_STRIH_STATE\" \\\n  --win-state \"stream=$VERSION_STREAM_STATE\" \\\n  --genlock-sha \"imag=$IMAG_GENLOCK_SHA\""
+        ),
+        "the non-acked version-integrity-gate.sh invocation's core args must be byte-identical to \
+         their pre-1351 text (the new flag is appended after, never inserted inside)"
+    );
+}
