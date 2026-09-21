@@ -266,7 +266,7 @@ fn the_bound_never_duplicates_a_gate_invocation_anchor_1351() {
     for anchor in [
         "--win-http \"stream=$STREAM\"", // only in the MAIN DanteSync gate this fix prefixed
         "\"$HERE/dantesync-version-gate.sh\"", // the version-parity gate this fix prefixed
-        "--win \"strih=", // only in the version-parity gate's --win arg
+        "--win \"strih=",                // only in the version-parity gate's --win arg
     ] {
         assert_eq!(
             body.matches(anchor).count(),
