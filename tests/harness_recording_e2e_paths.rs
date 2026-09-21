@@ -1933,10 +1933,16 @@ fn recording_e2e_runs_the_dantesync_version_gate() {
         .find("dantesync-version-gate.sh")
         .expect("#862: recording-e2e.sh must invoke dantesync-version-gate.sh");
     let window = &s[gate_idx..(gate_idx + 400).min(s.len())];
+    // #1351: strih is now the Linux notebook strih-lx, read via the gate's --linux arm on a Linux
+    // strih (with --win carrying only stream there) and via --win on a Windows strih -- both are
+    // the ssh arms (DANTESYNC_VERSION_LINUX + the computed DV_WIN_NODES), never the removed
+    // --win-state bundle-state path. The gate's --win arg is now the computed DV_WIN_NODES variable
+    // (the pre-1351 hard-coded `--win "strih=…"` was the Windows-only read that broke on strih-lx).
     assert!(
-        window.contains("--win \"strih=") && window.contains("stream="),
-        "#862 follow-up: the dantesync version gate must read strih/stream via --win (ssh), \
-         never the removed --win-state (bundle-state) path. window={window:?}"
+        window.contains("--win \"$DV_WIN_NODES\"") && window.contains("--linux"),
+        "#862 follow-up (#1351): the dantesync version gate must read strih/stream via the ssh \
+         arms -- --win \"$DV_WIN_NODES\" (computed, strih platform-branched) + --linux -- never \
+         the removed --win-state (bundle-state) path. window={window:?}"
     );
     assert!(
         !window.contains("--win-state"),
