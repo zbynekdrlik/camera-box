@@ -118,6 +118,30 @@ both rig sender grids are EVEN (33,333,300 ns and 16,666,600 ns), so `i*grid + g
 exact integer nanosecond a wall instant can land on. Construct the tie directly:
 `wall = BASE + i*grid + grid/2 + age`.
 
+**A mutation that targets a bare expression can hit the DOC COMMENT, not the code, and read as a
+false "gate blind" (#1355).** The scratch mutation you run to prove a NEW parity gate bites must
+mutate the HELPER'S ACTUAL STATEMENT, not a substring that also appears in prose. Live: verifying
+the sustained-excess drain gate, a `src.replace("depth > target + GENLOCK_DRAIN_SUSTAIN_HYSTERESIS_FRAMES",
+"depth >= …", 1)` flipped the `#define`'s own doc-comment line (which quoted the trigger
+expression verbatim, `count == 2`) and left the real `return` unchanged → 0 diffs, misread as the
+gate being blind to the compare. The real committed gate was fine (`lift_*_helper` extracts ONLY
+the `static inline …(` → first `\n}\n` body, so a comment is never compiled), but the MUTATION
+PROOF was lying. Anchor the mutation on the unique `return …` (or `if (…` wired-call) text, and
+`grep -c` the needle first — `> 1` means it also lives in a comment. Corollary: dropping a
+conjunct that is a parameter's ONLY use (e.g. removing the `ticks_since_drain >= …` throttle
+clause) is caught by the gate's own `-Werror` compile step as `unused-parameter`, not a value
+diff — a compile FAIL is still the gate biting, count it as RED.
+
+**Adding an audit-line-ONLY observability field (no API consumer) is the minimal choice — do NOT
+grow `obs_genlock_stats` for it (#1355).** A new `genlock-fifo audit '<src>':` key that only the
+post-deploy log read / `src/jitter_audit.rs` parser consumes (never the statusbar / bundle-state /
+LOCK-indicator) is printed straight from `source->genlock_<field>` at the `blog()` call, NOT routed
+through the shared `gs` snapshot and NOT added to `struct obs_genlock_stats`. The #1298 shared-fill
+rationale ("the line and `obs_source_get_genlock_stats` cannot disagree") applies ONLY to fields
+present in BOTH — a line-only field has nothing in the API to disagree with, so it needs no
+`OBS_GENLOCK_STATS_VERSION` bump and touches none of the struct's consumers. (`converge_sheds`
+IS in the struct because the LOCK indicator reads it; `sustain_sheds` is not.)
+
 ## Adding REMEMBERED STATE: enumerate the invalidation seams before writing the tests
 
 A per-source field that survives across ticks (`genlock_phase_anchor_ns`,
