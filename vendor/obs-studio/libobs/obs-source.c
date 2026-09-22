@@ -5037,6 +5037,20 @@ static inline uint64_t genlock_phase_pin_deadline(uint64_t deadline_ns, uint64_t
  * this quantizes. Mirror: src/genlock_backlog.rs PHASE_PIN_HYSTERESIS_NS. */
 #define GENLOCK_PHASE_PIN_HYSTERESIS_NS 5000000ULL /* 5 ms */
 
+/* camera-box #1354: the N>=2 conveyor's ARRIVAL-JITTER BUDGET. genlock_phase_converge_due parks the
+ * N>=2 conveyor quantum + budget above its arrival floor, where budget =
+ * max(GENLOCK_PHASE_PIN_HYSTERESIS_NS, GENLOCK_N2_JITTER_BUDGET_NS). Before #1354 the budget was the
+ * 5 ms grid hysteresis alone, so a late-arriving second frame of a 60->30 pair had only 5 ms of
+ * headroom right after a shed pulled the conveyor toward its floor. strih-lx's receive path emits
+ * #797 slow output_video events of 5-17 ms ~30/min on EVERY input even idle, so an input near the
+ * mature deadline took single-mature ticks (a permanent +one-source-interval phase step each) faster
+ * than the shed drains -> a 100-250 ms per-camera delivery ladder (issue 1354, cam4 15:31-15:37 on
+ * strih-lx). 15 ms = one 30 fps canvas half-interval minus the 5 ms slew allowance, covering every
+ * measured slow-output event; the conveyor sits ~10 ms deeper per input, uniform across inputs. The
+ * max keeps the sub-frame flapping floor honoured. Mirror: src/genlock_backlog.rs
+ * GENLOCK_N2_JITTER_BUDGET_NS. */
+#define GENLOCK_N2_JITTER_BUDGET_NS 15000000ULL /* 15 ms */
+
 /* camera-box #1003: PHASE-CONTINUITY RELOCK (history-anchored selection).
  *
  * #940 piece 3 (the grid pin above) removed the deadline's dependence on the exact sub-ms
@@ -5598,7 +5612,12 @@ static inline bool genlock_phase_converge_due(uint64_t wall_now_ns, uint64_t bou
 	const uint64_t floor_ns = wall_now_ns > newest_stamp_ns ? wall_now_ns - newest_stamp_ns : 0;
 	const uint64_t target = reserve_ns > floor_ns ? reserve_ns : floor_ns;
 	const uint64_t quantum = interval_ns / nn;
-	const uint64_t threshold = target + quantum + GENLOCK_PHASE_PIN_HYSTERESIS_NS;
+	/* camera-box #1354: dead-band = quantum + max(hysteresis, jitter budget) -- the arrival-jitter
+	 * tolerance, so a late second frame within the budget never costs a phase step. */
+	const uint64_t budget = GENLOCK_PHASE_PIN_HYSTERESIS_NS > GENLOCK_N2_JITTER_BUDGET_NS
+					? GENLOCK_PHASE_PIN_HYSTERESIS_NS
+					: GENLOCK_N2_JITTER_BUDGET_NS;
+	const uint64_t threshold = target + quantum + budget;
 	const uint64_t age = wall_now_ns > boundary_ns ? wall_now_ns - boundary_ns : 0;
 	return age > threshold && ticks_since_drain >= GENLOCK_DRAIN_MIN_TICK_INTERVAL;
 }
