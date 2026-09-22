@@ -368,6 +368,22 @@ fn irq_fixture(iface: &str) -> tempfile::TempDir {
     let netdir = root.join("sys/class/net").join(iface);
     std::fs::create_dir_all(&netdir).unwrap();
     symlink(&devdir, netdir.join("device")).unwrap();
+    // the USB NIC's driver is r8152 (RTL815x USB-ethernet); add sibling NICs with DIFFERENT drivers
+    // (onboard enp7s0/r8169, wifi wlp0s20f3/iwlwifi) + a bare `lo`, so a driver scan must discriminate.
+    let r8152 = root.join("sys/bus/usb/drivers/r8152");
+    std::fs::create_dir_all(&r8152).unwrap();
+    symlink(&r8152, devdir.join("driver")).unwrap();
+    for (nic, drv, bus) in [("enp7s0", "r8169", "pci"), ("wlp0s20f3", "iwlwifi", "pci")] {
+        let sib = root.join("sys/devices").join(format!("{nic}-dev"));
+        let drvdir = root.join("sys/bus").join(bus).join("drivers").join(drv);
+        std::fs::create_dir_all(&sib).unwrap();
+        std::fs::create_dir_all(&drvdir).unwrap();
+        let nd = root.join("sys/class/net").join(nic);
+        std::fs::create_dir_all(&nd).unwrap();
+        symlink(&sib, nd.join("device")).unwrap();
+        symlink(&drvdir, sib.join("driver")).unwrap();
+    }
+    std::fs::create_dir_all(root.join("sys/class/net/lo")).unwrap();
     // the real xhci row (125, with the PCI function in its IR-PCI-MSI chip column), a DECOY second
     // xhci controller (0000:00:0d.0 / IRQ 200) that must NOT be selected, and a non-xhci row.
     let interrupts = "            CPU0       CPU1\n \
@@ -636,6 +652,85 @@ fn emitted_irq_script_and_lib_agree_on_a_multi_cluster_cpu_atom() {
 }
 
 #[test]
+fn nic_iface_by_driver_resolves_r8152_and_fails_loud_on_multiple() {
+    // The USB NIC is r8152; the onboard NIC is r8169; wifi is iwlwifi. Driver-first resolution must
+    // pick ONLY the r8152 iface, fall back (rc 1, empty) when none matches, and fail loud
+    // (rc 2, MULTI:) when more than one r8152 exists.
+    let dir = irq_fixture("enx6c1ff766154b");
+    let root = dir.path().to_str().unwrap().to_string();
+    let (c1, o1, _e) = run_sourced(
+        &[("FX", root.as_str())],
+        "strih_nic_iface_by_driver \"$FX/sys\" r8152",
+    );
+    assert_eq!(
+        (c1, o1.trim()),
+        (0, "enx6c1ff766154b"),
+        "r8152 -> the USB NIC"
+    );
+    let (c2, o2, _e) = run_sourced(
+        &[("FX", root.as_str())],
+        "strih_nic_iface_by_driver \"$FX/sys\" r8169",
+    );
+    assert_eq!((c2, o2.trim()), (0, "enp7s0"), "r8169 -> the onboard NIC");
+    let (c3, o3, _e) = run_sourced(
+        &[("FX", root.as_str())],
+        "strih_nic_iface_by_driver \"$FX/sys\" no_such_driver",
+    );
+    assert_ne!(c3, 0, "no match must return non-zero (caller falls back)");
+    assert!(o3.trim().is_empty(), "no match prints nothing");
+    // add a SECOND r8152 iface -> MULTI: + rc 2 (fail loud).
+    let dev2 = dir
+        .path()
+        .join("sys/devices/pci0000:00/0000:00:14.0/usb2/2-3/2-3:1.0");
+    std::fs::create_dir_all(&dev2).unwrap();
+    let nd2 = dir.path().join("sys/class/net/enx000000000002");
+    std::fs::create_dir_all(&nd2).unwrap();
+    std::os::unix::fs::symlink(&dev2, nd2.join("device")).unwrap();
+    std::os::unix::fs::symlink(
+        dir.path().join("sys/bus/usb/drivers/r8152"),
+        dev2.join("driver"),
+    )
+    .unwrap();
+    let (c4, o4, _e) = run_sourced(
+        &[("FX", root.as_str())],
+        "strih_nic_iface_by_driver \"$FX/sys\" r8152",
+    );
+    assert_eq!(c4, 2, "two r8152 NICs must fail loud (rc 2)");
+    assert!(
+        o4.starts_with("MULTI:")
+            && o4.contains("enx6c1ff766154b")
+            && o4.contains("enx000000000002"),
+        "MULTI must name every colliding iface; got {o4}"
+    );
+}
+
+#[test]
+fn emitted_irq_script_resolves_iface_by_driver_without_the_address() {
+    // With NO STRIH_NIC_IFACE and NO matching address in the fixture, the boot script must STILL
+    // resolve the iface via the r8152 driver (the whole point of the boot-safe path) and pin cpu 15.
+    let dir = irq_fixture("enx6c1ff766154b");
+    let root = dir.path().to_str().unwrap().to_string();
+    let body = "strih_nic_irq_affinity_script_text > \"$FX/affinity.sh\"; \
+                SYS_ROOT=\"$FX/sys\" PROC_INTERRUPTS=\"$FX/interrupts\" CPU_ATOM_FILE=\"$FX/cpu_atom\" \
+                IRQ_DIR=\"$FX/irq\" bash \"$FX/affinity.sh\"";
+    let (code, out, err) = run_sourced(&[("FX", root.as_str())], body);
+    assert_eq!(
+        code, 0,
+        "boot script must resolve by driver with no address; stderr={err} stdout={out}"
+    );
+    assert!(
+        out.contains("iface enx6c1ff766154b"),
+        "must log the driver-resolved USB NIC iface; got {out}"
+    );
+    let got = std::fs::read_to_string(dir.path().join("irq/125/smp_affinity_list")).unwrap();
+    assert_eq!(
+        got.trim(),
+        "15",
+        "driver-resolved run must pin cpu 15; wrote {got}"
+    );
+}
+
+#[test]
 fn nic_irq_affinity_unit_is_enable_only_and_byte_parity_with_committed_file() {
     let (_c, unit, _e) = run_sourced(&[], "strih_nic_irq_affinity_unit_text");
     let committed = read_script("systemd/strih-nic-irq-affinity.service");
@@ -646,8 +741,9 @@ fn nic_irq_affinity_unit_is_enable_only_and_byte_parity_with_committed_file() {
     assert!(unit.contains("Type=oneshot"), "must be a oneshot");
     assert!(unit.contains("RemainAfterExit=yes"), "must RemainAfterExit");
     assert!(
-        unit.contains("After=network-pre.target"),
-        "must order after network-pre.target"
+        unit.contains("After=network-online.target")
+            && unit.contains("Wants=network-online.target"),
+        "must order + want network-online.target (the NIC is up when it fires)"
     );
     assert!(
         unit.contains("WantedBy=multi-user.target"),
@@ -703,5 +799,9 @@ fn verify_strih_checks_nic_irq_affinity_with_a_live_advancing_read() {
     assert!(
         v.contains("strih_nic_irq_affinity_verdict"),
         "verify must use the single-E-core placement verdict"
+    );
+    assert!(
+        v.contains("strih_nic_iface_by_driver") && v.contains("r8152"),
+        "verify must resolve the NIC iface driver-first (r8152), same as the boot script"
     );
 }
