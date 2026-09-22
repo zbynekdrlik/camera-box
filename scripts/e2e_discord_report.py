@@ -616,6 +616,64 @@ def _section_mv_skew(verdict, meta):
     return "\n".join(lines)
 
 
+def _section_genlock_conveyor(verdict, meta):
+    """#1354 -- per-input genlock conveyor DELTA over the recording window (holds / relocks /
+    converge_sheds), from scripts/genlock_audit_snapshot.py's before/after audit-tail parse.
+
+    `meta["genlock_audit"]` (optional -- this whole section is skipped, never fabricated, when
+    absent) is that snapshot's JSON: {"inputs": {"<name>": {"holds", "relocks", "converge_sheds",
+    "dropped_due"}}, "victim": "<name>"|null, "partial"?: [...], "restarted"?: [...], "error"?: "..."}.
+    REPORT-ONLY: it never changes any verdict. It NAMES the ladder victim so a delivery-spread
+    failure is diagnosable from the report instead of a bare spread number (scope 3 of issue 1354).
+    A receive-side arrival-jitter ladder shows as a high `holds`/`relocks` delta on one input; the
+    N>=2 arrival-jitter budget (scope 2) should keep every input's holds delta low."""
+    audit = meta.get("genlock_audit") if meta else None
+    if not audit:
+        return None  # never fabricated -- this run didn't persist a genlock-audit snapshot
+
+    lines = ["**Genlock dopravník — okno nahrávania (#1354, len informatívne)**"]
+    if audit.get("error"):
+        lines.append(f"  ⚠️ nemeralo sa: {audit['error']}")
+        return "\n".join(lines)
+
+    inputs = audit.get("inputs") or {}
+    if not inputs:
+        lines.append("  (žiadny genlock vstup nemal audit riadok pre okno nahrávania)")
+        return "\n".join(lines)
+
+    victim = audit.get("victim")
+    for name in sorted(inputs):
+        row = inputs.get(name) or {}
+        holds = row.get("holds", 0)
+        relocks = row.get("relocks", 0)
+        sheds = row.get("converge_sheds", 0)
+        glyph = "⚠️" if name == victim else "•"
+        lines.append(
+            f"  {glyph} {name}: holds +{holds}, relocks +{relocks}, converge_sheds +{sheds}"
+        )
+
+    if victim:
+        vrow = inputs.get(victim) or {}
+        lines.append(
+            f"  Najviac postihnutý vstup: {victim} (+{vrow.get('holds', 0)} holds / "
+            f"+{vrow.get('relocks', 0)} relocks) — kandidát na doručovací rebrík (#1354)."
+        )
+    else:
+        lines.append("  Žiadny vstup nenazbieral holds — dopravník bez rebríka v tomto behu.")
+
+    partial = audit.get("partial") or []
+    if partial:
+        lines.append(
+            "  (bez základu pre okno, vynechané: " + ", ".join(sorted(partial)) + ")"
+        )
+    restarted = audit.get("restarted") or []
+    if restarted:
+        lines.append(
+            "  (OBS sa reštartoval počas okna, delta orezaná na 0: " + ", ".join(sorted(restarted)) + ")"
+        )
+    return "\n".join(lines)
+
+
 def _section_residual_events(verdict):
     """#707 EVENT-FORENSICS -- the per-event residual copy/gap breakdown (src/residual_events.rs),
     surfaced per the user's binding #707 decision ("every residual deviation must have its own
@@ -1172,6 +1230,9 @@ def compose_report(verdict: dict, meta: dict | None = None) -> str:
     mv_skew_section = _section_mv_skew(verdict, meta)
     if mv_skew_section is not None:
         sections.append(mv_skew_section)
+    genlock_conveyor_section = _section_genlock_conveyor(verdict, meta)
+    if genlock_conveyor_section is not None:
+        sections.append(genlock_conveyor_section)
     residual_section = _section_residual_events(verdict)
     if residual_section is not None:
         sections.append(residual_section)
@@ -1221,6 +1282,14 @@ def main(argv=None):
         "supplied",
     )
     ap.add_argument(
+        "--genlock-audit-json",
+        default=None,
+        help="#1354: path to the JSON scripts/genlock_audit_snapshot.py wrote (per-input "
+        "holds/relocks/converge_sheds delta over the recording window) -- optional, REPORT-ONLY; "
+        "the genlock-conveyor section is skipped entirely (and appears in the FULL report only, "
+        "never the Discord summary) when not supplied",
+    )
+    ap.add_argument(
         "--run-url",
         default=None,
         help="#1127: the CI run / artifact URL for the summary's link line (Discord path). When "
@@ -1249,6 +1318,11 @@ def main(argv=None):
         with open(args.mv_skew_json, encoding="utf-8") as f:
             mv_skew = json.load(f)
 
+    genlock_audit = None
+    if args.genlock_audit_json:
+        with open(args.genlock_audit_json, encoding="utf-8") as f:
+            genlock_audit = json.load(f)
+
     meta = {
         "run_id": args.run_id,
         "event": args.event,
@@ -1256,6 +1330,7 @@ def main(argv=None):
         "gate_exit": args.gate_exit,
         "pins": pins,
         "mv_skew": mv_skew,
+        "genlock_audit": genlock_audit,
         "run_url": args.run_url or _ci_run_url(),
     }
     if args.json_chunks:

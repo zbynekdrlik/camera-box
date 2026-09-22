@@ -439,6 +439,25 @@ jobs:
             target/release/bkshading-relay
             target/release/bkshading
 
+      # issue 1353: a SERVICE-dedicated deploy artifact (the service binary + the panel web assets)
+      # for provisioning the bkshading SERVICE on strih-lx (systemd/bkshading-service.service via
+      # setup-strih.sh step 16c). Separate from the relay's bkshading-linux-amd64 above, mirroring the
+      # Windows bkshading-windows-amd64 / relay split. The artifact NAME is single-sourced in
+      # scripts/lib/strih-provision.sh (strih_bkshading_artifact_name) — KEEP IN SYNC. The web assets
+      # are also embedded in the binary, so the service is self-contained; web/ ships as a panel-source
+      # copy. Staged into one flat dir so the artifact root carries `bkshading` + `web/`.
+      - name: Stage bkshading service artifact (binary + panel web assets)
+        run: |
+          mkdir -p dist/bkshading-service/web
+          cp target/release/bkshading dist/bkshading-service/bkshading
+          cp -a bkshading/service/web/. dist/bkshading-service/web/
+      - name: Upload bkshading service (linux, panel)
+        uses: actions/upload-artifact@v4
+        with:
+          name: bkshading-service-linux-amd64
+          if-no-files-found: error
+          path: dist/bkshading-service
+
       # Cross-build the relay for aarch64 (issue 808 SBC/handheld milestone): the handheld runs on a
       # zero-class arm64 SBC (Pi Zero 2 W / Radxa ZERO 3W / Orange Pi Zero 2W) which is ARM and
       # CANNOT run the amd64 binary. The relay is pure Rust (axum/tokio/serde/clap; no C link deps —
@@ -505,6 +524,63 @@ jobs:
           # Fail loud on a missing binary (see the Linux upload) — never a green empty artifact.
           if-no-files-found: error
           path: target/release/bkshading.exe
+
+  intercom-hub:
+    name: intercom-hub (issue 1345)
+    # The strih-lx intercom hub + shared VBAN codec are SEPARATE workspace members
+    # (intercom/vban, intercom/hub). The appliance jobs above run cargo at the ROOT WITHOUT
+    # --workspace, so they never build/test the hub (they DO compile intercom-vban as a path
+    # dep, but its tests only run here); THIS job is the members' first clippy + test + build.
+    # Pure tokio/axum/toml — no libv4l/libasound needed.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: intercom-hub
+
+      # Clippy -D warnings on the codec crate + the hub (all targets incl. the unit tests). Default
+      # features = the Interkom picture `ndi` path (issue 1345 M3c): libloading is a RUNTIME dynamic
+      # load, so this compiles the real NDI FFI (src/ndi_video/ndi_source.rs) with no libndi installed.
+      - name: Clippy (intercom members)
+        run: cargo clippy -p intercom-vban -p intercom-hub --all-targets -- -D warnings
+
+      # Keep the `--no-default-features` (libndi-free, stub picture source) hub path proven so it can't
+      # bit-rot now that `ndi` is the default build (mirrors the bkshading service's stub step).
+      - name: Clippy (intercom-hub, --no-default-features — stub picture path)
+        run: cargo clippy -p intercom-hub --no-default-features --all-targets -- -D warnings
+
+      # The moved VBAN codec tests + the hub's matrix/engine/vban_io/state/http unit tests
+      # (incl. the random-port VBAN loopback). This is where the codec tests run now that
+      # src/vban.rs is a re-export (the root `cargo test` compiles intercom-vban but never runs
+      # its tests without -p).
+      - name: Test (intercom members)
+        run: cargo test -p intercom-vban -p intercom-hub
+
+      # Prove the `--no-default-features` stub picture path still compiles + passes its tests (the
+      # libndi-free build can't silently break now that `ndi` is off the default).
+      - name: Test (intercom-hub, --no-default-features — stub picture path)
+        run: cargo test -p intercom-hub --no-default-features
+
+      # Build the deployable hub binary in RELEASE (the enable-only systemd unit + setup-strih
+      # step expect /usr/local/bin/intercom-hub), mirroring the bkshading artifact pattern.
+      - name: Build deployable binary (intercom-hub)
+        run: cargo build --release --bins -p intercom-hub
+
+      - name: Upload intercom-hub binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: intercom-hub-linux-amd64
+          # Fail loud on a missing binary (renamed bin / wrong path) — never a green empty artifact.
+          if-no-files-found: error
+          path: target/release/intercom-hub
 
   build:
     name: Build
@@ -763,7 +839,7 @@ jobs:
     # (#notifications id). NOTE: the older n8n CLAUDE_DISCORD_WEBHOOK_URL relay
     # accepts POSTs (HTTP 200) but no longer DELIVERS to Discord, so the bot REST
     # API is used directly — Discord returns the created message object on success.
-    needs: [lint, test, coverage, mutants, python-tests, bkshading, bkshading-windows, build, windows-probe, security, drift-guard, shellcheck, deploy-fleet]
+    needs: [lint, test, coverage, mutants, python-tests, bkshading, bkshading-windows, intercom-hub, build, windows-probe, security, drift-guard, shellcheck, deploy-fleet]
     if: ${{ failure() }}
     runs-on: ubuntu-latest
     steps:

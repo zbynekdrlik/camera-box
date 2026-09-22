@@ -114,6 +114,40 @@ imag_kernel_meta_package() {
     fi
 }
 
+# imag_apt_drop_cdrom_sources ETC_APT_DIR -> remove the live-ISO apt sources from a target's
+# /etc/apt so the chroot's apt can reach the archive. issue 1317: the 26.04 live layers ship
+# sources.list.d/cdrom.sources (deb822, URIs: file:///cdrom) and copy_rootfs copies it into the
+# target; inside the chroot /cdrom is not mounted, so apt aborts with "does not have a Release file"
+# and the whole chroot configuration dies. This deletes every *.sources whose URIs: line points at
+# file:///cdrom (or cdrom:) and strips deb cdrom: / deb-src cdrom: lines from a classic sources.list,
+# leaving the archive sources untouched. Prints "dropped <path>" for each removed file; idempotent
+# (exits 0 when nothing matched, so it is safe to run every install); non-zero ONLY when the dir is
+# missing (a broken target — fail loud, never a silent default). An installed system must never carry
+# a live-ISO source anyway: it also breaks apt for the operator after every boot.
+imag_apt_drop_cdrom_sources() {
+    local etc_apt="${1:-}"
+    [ -n "$etc_apt" ] && [ -d "$etc_apt" ] || {
+        echo "imag_apt_drop_cdrom_sources: an existing apt dir is required" >&2
+        return 2
+    }
+    local f
+    if [ -d "$etc_apt/sources.list.d" ]; then
+        for f in "$etc_apt/sources.list.d"/*.sources; do
+            [ -e "$f" ] || continue
+            if grep -Eiq '^[[:space:]]*URIs:.*(file:///cdrom|cdrom:)' "$f"; then
+                rm -f "$f"
+                echo "dropped $f"
+            fi
+        done
+    fi
+    local list="$etc_apt/sources.list"
+    if [ -f "$list" ] && grep -Eq '^[[:space:]]*deb(-src)?[[:space:]]+cdrom:' "$list"; then
+        sed -i -E '/^[[:space:]]*deb(-src)?[[:space:]]+cdrom:/d' "$list"
+        echo "dropped cdrom lines from $list"
+    fi
+    return 0
+}
+
 # imag_part_name DISK INDEX -> the partition device node. NVMe/mmc need a `p` infix
 # (/dev/nvme0n1 -> /dev/nvme0n1p1), SATA/USB do not (/dev/sda -> /dev/sda1). Getting this wrong
 # formats the wrong node.
@@ -336,18 +370,25 @@ configure_in_chroot() {
     # using the SAME single source of truth the unit tests exercise (no duplicated inline logic). A
     # ${kernel_meta_fn} expansion in an unquoted heredoc inserts the function text verbatim; bash does
     # not re-scan a substituted value, so the function body's own $1/$version_id stay literal.
-    local kernel_meta_fn
+    # issue 1317: the live ISO's apt source pins /cdrom, which is unmounted inside the chroot — the
+    # target's apt would abort on it. Serialize the pure drop-helper the SAME way (declare -f) and run
+    # it on /etc/apt as the first apt-touching step, so the archive update below has a clean set.
+    local kernel_meta_fn cdrom_fn
     kernel_meta_fn="$(declare -f imag_kernel_meta_package)"
+    cdrom_fn="$(declare -f imag_apt_drop_cdrom_sources)"
     cat > "$MOUNT_ROOT/tmp/imag-chroot.sh" <<CHROOT
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
 
 ${kernel_meta_fn}
 
+${cdrom_fn}
+
 id -u "${DESKTOP_USER}" >/dev/null 2>&1 || useradd -m -s /bin/bash -G sudo,adm,video,audio,plugdev "${DESKTOP_USER}"
 echo "${DESKTOP_USER}:${DESKTOP_PW}" | chpasswd
 echo "root:${DESKTOP_PW}" | chpasswd
 
+imag_apt_drop_cdrom_sources /etc/apt
 apt-get update -qq
 apt-get install -y --no-install-recommends openssh-server network-manager grub-efi-amd64 grub-efi-amd64-signed shim-signed >/dev/null
 

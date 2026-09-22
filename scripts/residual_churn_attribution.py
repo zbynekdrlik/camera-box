@@ -25,10 +25,18 @@ residual. The three source signals mined per cambox burn log:
 The DISCRIMINATOR (the physical hypothesis test the ticket asks for): a capture DEFICIT is a HIGH
 base-rate background on the under-cadence grabbers (cam1/cam2 carry ~90-110 emit-fills EVERY run,
 including the fully-clean 0/0 runs), so its mere presence at an event proves nothing. An event is
-SOURCE-attributed ONLY when an ANOMALOUS source signal above that box's own steady background
-coincides (a burst deficit >= ANOMALY_DEFICIT_FLOOR, a corrupted frame, or -- decisively -- a
-`late-dupe copies emitted >= 1`). Otherwise the event is DOWNSTREAM. The tool also reports the
-per-box counterfactual (emit-fills vs residuals, the survival ratio) so a reader sees the base rate.
+source-attributed ONLY when an ANOMALOUS source signal above that box's own steady background
+coincides. There are TWO source signals, and the attribution splits accordingly:
+  * SOURCE-DEFICIT -- the CAPTURE side: a burst deficit >= ANOMALY_DEFICIT_FLOOR, a corrupted frame
+    above the box floor, or -- decisively -- a `late-dupe copies emitted >= 1`.
+  * SOURCE-STARVATION -- (#1242 reopened) the EMIT side: a `<G> starvation last-frame repeats` BURST
+    above the box's own baseline (median ΔG per 5-s bucket). A starvation repeat is the emit gate
+    finding NO new frame at a boundary with a CLEAN capture cadence (issue 889 / #1167) -- a copy
+    produced ON the box, INVISIBLE to the capture-deficit checks. The CAM4 6/4 run (19.9.2026, 697
+    starvation repeats, 0 capture deficit) was filed DOWNSTREAM by elimination before this signal.
+Otherwise the event is DOWNSTREAM (a capture-deficit anomaly is checked FIRST, so it WINS when both
+coincide). The tool also reports the per-box counterfactual (emit-fills vs residuals, the survival
+ratio) so a reader sees the base rate.
 
 Pure decision core (no I/O below the CLI, no ssh, no OBS, no rig) -- fixture-driven under Tier-0
 #557, the window_gate_walkdown.py / arrival_floor_decompose.py / audio_lag_decision.py python-mirror
@@ -72,6 +80,13 @@ _DECIM_RE = re.compile(
 # `corrupted >= 1` is anomalous at any magnitude (a genuine on-box copy / capture corruption).
 ANOMALY_DEFICIT_FLOOR = 3
 DEFAULT_WINDOW_S = 10
+
+# (#1242 reopened, design comment 5748205555 Prístup 1) The SECOND source signal: a per-5-s-bucket
+# starvation-repeat count (`<G> starvation last-frame repeats`) at/above this bar AND above the box's
+# OWN run baseline (median ΔG per bucket) is an ANOMALOUS on-box emit-path burst -- the emit gate
+# finding NO new frame at a boundary with a clean capture cadence (issue 889 mechanics), a duplicate
+# produced ON the box, INVISIBLE to the capture-deficit discriminator. Same bar as the deficit burst.
+STARVATION_BURST_MIN = 3
 
 
 # ======================================================================== pure core (no I/O) =====
@@ -122,6 +137,53 @@ def parse_burn_timeline(text):
     return {"stream": stream, "sec": sec, "decim": decim}
 
 
+def parse_starvation_series(text):
+    """Pure: ONE cambox burn log -> the per-window starvation-repeat series `[(epoch, G)]`.
+
+    REUSES `parse_burn_timeline`'s `_DECIM_RE` (never a second regex for the `(#889) dupe-preferring
+    decimation` line the base rate already parses) -- just projects its `decim` timeline onto the
+    starvation field.
+
+    G is PER-INTERVAL, not cumulative: `src/dupe_decimation/gate.rs` emits this line on every ~5 s
+    Streaming window and DRAINS+RESETS the accumulator each emit (`DupeShedLog::take_starvation_repeats`
+    sets `self.starvation_repeats = 0`; the line's own suffix reads "over the last ~5s"), so each `G`
+    already IS that 5-s bucket's increment -> ΔG per bucket == G (no differencing)."""
+    return [(t, g) for (t, _l, g) in parse_burn_timeline(text)["decim"]]
+
+
+def _median(xs):
+    """Pure: median of a list (0.0 on empty; the mean of the two middle values on an even count)."""
+    s = sorted(xs)
+    n = len(s)
+    if n == 0:
+        return 0.0
+    mid = n // 2
+    if n % 2:
+        return float(s[mid])
+    return (s[mid - 1] + s[mid]) / 2.0
+
+
+def starvation_burst_at(series, t_event, window=DEFAULT_WINDOW_S):
+    """Pure: is there a starvation-repeat BURST on this box at the event, above its OWN baseline?
+
+    `series` = `parse_starvation_series` output ([(epoch, G)], G per-interval). Returns
+    `(delta_G, baseline_median, is_burst)` where:
+      * `delta_G`        = the PEAK per-5-s-bucket ΔG within ±window of the event (parallels the
+                           deficit signal's `stream_deficit_max`);
+      * `baseline_median` = the box's OWN run baseline = median ΔG per bucket over the whole run;
+      * `is_burst`        = `delta_G >= STARVATION_BURST_MIN AND delta_G > baseline_median`.
+    The `> baseline_median` clause is what makes a STEADY background (e.g. a box carrying ~20 emit-fill
+    repeats every 5-s bucket) a COVARIATE, not a burst: when every bucket is 20 the median is 20 and
+    the event's 20 is not ABOVE it -- the baseline-relative rule the residual-churn-attribution
+    playbook mandates (never an absolute floor)."""
+    deltas = [g for (_t, g) in series]
+    window_deltas = [g for (bt, g) in series if abs(bt - t_event) <= window]
+    delta_g = max(window_deltas, default=0)
+    baseline_median = _median(deltas)
+    is_burst = delta_g >= STARVATION_BURST_MIN and delta_g > baseline_median
+    return delta_g, baseline_median, is_burst
+
+
 def burn_baseline(timeline):
     """Pure: the run-wide per-box source base rate from a parsed timeline.
 
@@ -144,6 +206,9 @@ def burn_baseline(timeline):
         "max_corrupted": max(corrupts, default=0),
         "max_capture_dropped": max((d for (_t, _s, _c, d, _r) in stream), default=0),
         "total_starvation": sum(g for (_t, _l, g) in timeline["decim"]),
+        # (#1242 reopened) the box's OWN starvation baseline: median ΔG per 5-s bucket (G is
+        # per-interval, so ΔG == G). A per-event burst is judged ABOVE this, never an absolute floor.
+        "starvation_baseline_median": _median([g for (_t, _l, g) in timeline["decim"]]),
         "total_late_dupe": sum(l for (_t, l, _g) in timeline["decim"]),
         "sec_deficit_secs": sum(1 for (e, c) in timeline["sec"].values() if e - c >= 1),
         "sec_total": len(timeline["sec"]),
@@ -161,6 +226,10 @@ def source_signal_at(timeline, t_event, window=DEFAULT_WINDOW_S):
     secd = [e - c for (sec, (e, c)) in timeline["sec"].items() if abs(sec - t_event) <= window]
     ldup = [l for (t, l, _g) in timeline["decim"] if abs(t - t_event) <= window]
     starv = [g for (t, _l, g) in timeline["decim"] if abs(t - t_event) <= window]
+    # (#1242 reopened) the second source signal: the starvation-repeat burst, judged against the box's
+    # OWN run baseline (starvation_burst_at). Built from the SAME decim timeline (no new parse).
+    star_series = [(t, g) for (t, _l, g) in timeline["decim"]]
+    star_delta, star_baseline, star_is_burst = starvation_burst_at(star_series, t_event, window)
     stream_deficit_max = max(sdef, default=0)
     corrupt_max = max(scor, default=0)
     late_dupe_max = max(ldup, default=0)
@@ -171,33 +240,51 @@ def source_signal_at(timeline, t_event, window=DEFAULT_WINDOW_S):
         "sec_deficit_max": max(secd, default=0),
         "late_dupe_max": late_dupe_max,
         "starvation_max": max(starv, default=0),
-        "window_covered": bool(sdef or secd),
+        "starvation_delta": star_delta,
+        "starvation_baseline": star_baseline,
+        "starvation_is_burst": star_is_burst,
+        # coverage = ANY source line kind present at the event (a bare decim line at the event, even
+        # G=0, still proves the box was alive + reporting, so the event is covered -> not UNKNOWN).
+        "window_covered": bool(sdef or secd or starv),
     }
     sig["has_any_deficit"] = stream_deficit_max >= 1 or sig["sec_deficit_max"] >= 1
     return sig
 
 
 def classify_event(signal, baseline=None):
-    """Pure: SOURCE iff an ANOMALOUS source signal coincides; else DOWNSTREAM.
+    """Pure: SOURCE-DEFICIT / SOURCE-STARVATION iff an ANOMALOUS source signal coincides; else DOWNSTREAM.
 
     Anomaly is judged AGAINST the box's own run-wide baseline, never an absolute floor, because
     the under-cadence grabbers carry a steady emit-fill deficit AND (e.g. cam7) a steady persistent
     `corrupted` FLOOR run-wide -- both present in the fully-clean 0/0 runs too, so neither is
-    event-specific. An event is SOURCE only when the source shows something the run's own background
-    does NOT: a `late-dupe copies emitted` (baseline is always 0), corruption that ROSE above the
-    box's steady floor, or a burst deficit >= ANOMALY_DEFICIT_FLOOR (the steady background is 1-2).
-    Otherwise DOWNSTREAM. `window_covered=False` -> UNKNOWN (kept honest, never guessed)."""
+    event-specific. An event is source-attributed only when the source shows something the run's own
+    background does NOT:
+      * SOURCE-DEFICIT -- the CAPTURE-side signal: a `late-dupe copies emitted` (baseline is always
+        0), corruption that ROSE above the box's steady floor, or a burst capture deficit
+        >= ANOMALY_DEFICIT_FLOOR (the steady background is 1-2);
+      * SOURCE-STARVATION -- (#1242 reopened) the EMIT-side signal: a starvation-repeat BURST above
+        the box's own baseline (`signal["starvation_is_burst"]`, from `starvation_burst_at`). This is
+        the emit gate finding NO new frame at a boundary with a CLEAN capture cadence (issue 889 /
+        #1167), a duplicate produced ON the box that the capture-deficit checks are blind to.
+    A capture-deficit anomaly is checked FIRST, so it WINS when both coincide. Otherwise DOWNSTREAM.
+    `window_covered=False` -> UNKNOWN (kept honest, never guessed)."""
     base = baseline or {}
     corrupt_floor = base.get("corrupt_floor", 0)
     if not signal["window_covered"]:
         return "UNKNOWN", "no source coverage at the event time (burn log absent/short)"
     if signal["late_dupe_max"] >= 1:
-        return "SOURCE", "cambox emitted a late-dupe copy into NDI (#889/#1111)"
+        return "SOURCE-DEFICIT", "cambox emitted a late-dupe copy into NDI (#889/#1111)"
     if signal["stream_corrupt_max"] > corrupt_floor:
-        return "SOURCE", "capture corruption ROSE above the box's steady floor (%d>%d)" % (
+        return "SOURCE-DEFICIT", "capture corruption ROSE above the box's steady floor (%d>%d)" % (
             signal["stream_corrupt_max"], corrupt_floor)
     if signal["stream_deficit_max"] >= ANOMALY_DEFICIT_FLOOR:
-        return "SOURCE", "anomalous burst capture deficit >= %d in a 5-s bucket" % ANOMALY_DEFICIT_FLOOR
+        return "SOURCE-DEFICIT", "anomalous burst capture deficit >= %d in a 5-s bucket" % ANOMALY_DEFICIT_FLOOR
+    if signal.get("starvation_is_burst"):
+        return "SOURCE-STARVATION", (
+            "anomalous starvation last-frame repeat burst (deltaG=%s >= %d, above the box's baseline "
+            "median %s) -- an on-box capture->emit valve (issue 889/#1167), NOT the FIFO"
+            % (signal.get("starvation_delta", 0), STARVATION_BURST_MIN, signal.get("starvation_baseline", 0))
+        )
     if signal["has_any_deficit"]:
         return "DOWNSTREAM", "only the steady background emit-fill deficit at the event (covariate)"
     return "DOWNSTREAM", "source clean at the event (no deficit)"
@@ -265,7 +352,8 @@ def attribute_run(verdict, timelines_by_cam, window=DEFAULT_WINDOW_S):
         if tl is None or t is None:
             sig = {"window_covered": False, "has_any_deficit": False,
                    "stream_deficit_max": 0, "stream_corrupt_max": 0, "stream_dropped_max": 0,
-                   "sec_deficit_max": 0, "late_dupe_max": 0, "starvation_max": 0}
+                   "sec_deficit_max": 0, "late_dupe_max": 0, "starvation_max": 0,
+                   "starvation_delta": 0, "starvation_baseline": 0, "starvation_is_burst": False}
         else:
             sig = source_signal_at(tl, t, window)
         attribution, reason = classify_event(sig, baselines.get(e["cambox"]))
@@ -296,7 +384,11 @@ def aggregate(run_results):
     n_runs = len(run_results)
     events = [e for r in run_results for e in r["events"]]
     n_events = len(events)
-    src = sum(1 for e in events if e["attribution"] == "SOURCE")
+    # (#1242 reopened) the source side now splits into the capture-deficit and the emit-starvation
+    # signals; `src` (their sum) stays the source-vs-downstream comparison the verdict logic uses.
+    src_def = sum(1 for e in events if e["attribution"] == "SOURCE-DEFICIT")
+    src_starv = sum(1 for e in events if e["attribution"] == "SOURCE-STARVATION")
+    src = src_def + src_starv
     dwn = sum(1 for e in events if e["attribution"] == "DOWNSTREAM")
     unk = sum(1 for e in events if e["attribution"] == "UNKNOWN")
     # counterfactual: total emit-fill material vs residual survivors, run-wide
@@ -334,7 +426,8 @@ def aggregate(run_results):
     if n_events == 0:
         verdict = "no residual events in the sampled runs"
     elif src > dwn:
-        verdict = "SOURCE / grabber-owned (majority of events carry an anomalous source signal)"
+        verdict = ("SOURCE / grabber-owned (majority of events carry an anomalous source signal: "
+                   "%d capture-deficit + %d emit-starvation)" % (src_def, src_starv))
     elif dwn > 0 and src == 0:
         verdict = (
             "DOWNSTREAM (genlock-FIFO / 60->30 decimation-phase / optical-beat): NO event carries an "
@@ -346,6 +439,8 @@ def aggregate(run_results):
         "n_runs": n_runs,
         "n_events": n_events,
         "source_events": src,
+        "source_deficit_events": src_def,
+        "source_starvation_events": src_starv,
         "downstream_events": dwn,
         "unknown_events": unk,
         "total_source_emitfill": total_emitfill,
@@ -404,21 +499,24 @@ def render_markdown(run_results, agg):
     lines = []
     lines.append("## issue 1242 (task 1) -- residual copy/gap churn source-attribution\n")
     lines.append("### Per-event attribution\n")
-    lines.append("| run | genlock | box | kind | src_deficit(bg/anom) | late-dupe | corrupt | attribution | reason |")
-    lines.append("|---|---|---|---|---|---|---|---|---|")
+    lines.append("| run | genlock | box | kind | src_deficit(bg/anom) | late-dupe | corrupt | starv(ΔG/base) | attribution | reason |")
+    lines.append("|---|---|---|---|---|---|---|---|---|---|")
     for r in run_results:
         if not r["events"]:
-            lines.append("| %s | %s | -- | (none) | -- | -- | -- | -- | clean run |"
-                         % (r["run_id"], r["genlock_sha"]))
+            lines.append("| %s | %s | -- | (none) | -- | -- | -- | -- | -- | clean run |"
+                         % (r.get("run_id", "?"), r.get("genlock_sha", "?")))
         for e in r["events"]:
             s = e["signal"]
             bg = "yes" if s.get("has_any_deficit") else "no"
-            an = "YES" if e["attribution"] == "SOURCE" else "no"
+            an = "YES" if e["attribution"].startswith("SOURCE") else "no"
+            starv = "%s%s/%s" % (s.get("starvation_delta", 0),
+                                 "!" if s.get("starvation_is_burst") else "",
+                                 s.get("starvation_baseline", 0))
             lines.append(
-                "| %s | %s | %s | %s | %s/%s (max5s=%s) | %s | %s | %s | %s |"
-                % (r["run_id"], r["genlock_sha"], e["cambox"], e["kind"], bg, an,
+                "| %s | %s | %s | %s | %s/%s (max5s=%s) | %s | %s | %s | %s | %s |"
+                % (r.get("run_id", "?"), r.get("genlock_sha", "?"), e["cambox"], e["kind"], bg, an,
                    s.get("stream_deficit_max"), s.get("late_dupe_max"), s.get("stream_corrupt_max"),
-                   e["attribution"], e["reason"])
+                   starv, e["attribution"], e["reason"])
             )
     lines.append("\n### Per-box base rate (the counterfactual denominator)\n")
     lines.append("| run | box | mean_cap_fps | emit-fills (starvation) | deficit 5-s lines | residuals |")
@@ -429,13 +527,13 @@ def render_markdown(run_results, agg):
             res = r["per_box"][cam]["residuals"]
             lines.append(
                 "| %s | %s | %s | %d (%d) | %d/%d | %dc %dg |"
-                % (r["run_id"], cam, b["mean_cap_fps"], b["total_emitfill"], b["total_starvation"],
+                % (r.get("run_id", "?"), cam, b["mean_cap_fps"], b["total_emitfill"], b["total_starvation"],
                    b["deficit_lines"], b["stream_lines"], res["copy"], res["gap"])
             )
     lines.append("\n### Aggregate verdict\n")
-    lines.append("- runs sampled: **%d**, residual events: **%d** (SOURCE %d / DOWNSTREAM %d / UNKNOWN %d)"
-                 % (agg["n_runs"], agg["n_events"], agg["source_events"],
-                    agg["downstream_events"], agg["unknown_events"]))
+    lines.append("- runs sampled: **%d**, residual events: **%d** (SOURCE-DEFICIT %d / SOURCE-STARVATION %d / DOWNSTREAM %d / UNKNOWN %d)"
+                 % (agg["n_runs"], agg["n_events"], agg["source_deficit_events"],
+                    agg["source_starvation_events"], agg["downstream_events"], agg["unknown_events"]))
     sr = agg["survival_ratio"]
     lines.append("- source emit-fill material: **%d** frames -> residual copies: **%d**, gaps: **%d** (copy survival ratio **%s**)"
                  % (agg["total_source_emitfill"], agg["total_residual_copies"],

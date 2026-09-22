@@ -50,6 +50,13 @@ pub mod ndi_display;
 pub mod publish_30p;
 pub mod vban;
 
+// #1345 M1b — the pure appliance-side intercom-target env override (`resolve_intercom_target`).
+// The dev cambox root fs is read-only, so `config.toml` can't be edited to repoint the VBAN
+// intercom at the Linux strih-lx hub; a `CAMERA_BOX_INTERCOM_TARGET` env override (carried by a
+// /run systemd drop-in) is the only seam. No I/O — the caller passes the raw env value in — so it
+// unit-tests Tier-0; cross-platform (un-gated) like `vban`.
+pub mod intercom_target;
+
 // #464 — the pure Auto-fallback PRESENTER decision (`resolve_presenter_kind`), extracted out of
 // `probe::presenter::open_presenter`'s hardware I/O. No probe deps, so it unit-tests Tier-0;
 // `probe::presenter` re-exports `PresenterKind` from here so every existing

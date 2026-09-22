@@ -284,6 +284,23 @@ pub fn phase_pinned_deadline(raw_deadline_ns: u64, interval_ns: u64) -> u64 {
 /// Mirror of the C `GENLOCK_PHASE_PIN_HYSTERESIS_NS` (obs-source.c).
 pub const PHASE_PIN_HYSTERESIS_NS: u64 = 5_000_000; // 5 ms
 
+/// #1354 — the N>=2 conveyor's ARRIVAL-JITTER BUDGET. [`should_converge_phase`] parks the N>=2
+/// conveyor `quantum + budget` above its arrival floor, where `budget` is
+/// `max(PHASE_PIN_HYSTERESIS_NS, GENLOCK_N2_JITTER_BUDGET_NS)`. Before #1354 the budget was only the
+/// 5 ms grid hysteresis, so a late-arriving second frame of a 60->30 pair had just 5 ms of headroom
+/// right after a shed pulled the conveyor toward its floor. strih-lx's receive path emits
+/// `#797 slow output_video` events of 5-17 ms ~30/min on EVERY input even idle, so an input whose
+/// arrival phase sat near the mature deadline took SINGLE-MATURE ticks (a permanent
+/// +one-source-interval phase step each) faster than the shed's 1-per-`DRAIN_MIN_TICK_INTERVAL`
+/// drain -> a 100-250 ms per-camera delivery ladder (issue 1354, cam4 window 15:31-15:37 on
+/// strih-lx, 22.9.2026). 15 ms = one 30 fps canvas half-interval minus the 5 ms slew allowance,
+/// covering every measured slow-output event <=17 ms. The conveyor then sits ~10 ms deeper per
+/// input — uniform across inputs, invisible to the E2E aligner which pins RELATIVE offsets. Taking
+/// the `max` with the grid hysteresis keeps the sub-frame flapping floor honoured even if this
+/// constant were ever set below it. Mirror of the C `GENLOCK_N2_JITTER_BUDGET_NS` (obs-source.c) —
+/// keep byte-parallel, the #1201-style single-source discipline.
+pub const GENLOCK_N2_JITTER_BUDGET_NS: u64 = 15_000_000; // 15 ms
+
 /// Is `frame_ts_ns` due against the phase-pinned `deadline_ns` (already
 /// [`phase_pinned_deadline`]'s output), with [`PHASE_PIN_HYSTERESIS_NS`] slack? The
 /// comparison is inclusive at the hysteresis boundary (`<=`), matching every other due/not-due
@@ -382,9 +399,11 @@ pub fn should_converge_phase(
     let floor_ns = wall_now_ns.saturating_sub(newest_stamp_ns);
     let target = reserve_ns.max(floor_ns);
     let quantum = interval_ns / n;
-    let threshold = target
-        .saturating_add(quantum)
-        .saturating_add(PHASE_PIN_HYSTERESIS_NS);
+    // #1354 — the shed parks the N>=2 conveyor `quantum + budget` above the arrival floor. The
+    // budget is the arrival-jitter tolerance: the MAX of the grid hysteresis and the #1354 jitter
+    // budget, so the sub-frame flapping floor is never lost even if the jitter budget were smaller.
+    let budget = PHASE_PIN_HYSTERESIS_NS.max(GENLOCK_N2_JITTER_BUDGET_NS);
+    let threshold = target.saturating_add(quantum).saturating_add(budget);
     let age = wall_now_ns.saturating_sub(locked_boundary_ns);
     age > threshold && ticks_since_last_drain >= DRAIN_MIN_TICK_INTERVAL
 }
@@ -2614,16 +2633,18 @@ mod tests {
     // #1049 — bounded PHASE CONVERGENCE on the steady conveyor.
     // ------------------------------------------------------------------------------------
 
-    /// The comparator is `wall_now - locked_boundary` against `reserve + interval/n + hysteresis`
-    /// AND the shared drain throttle. Below the threshold: inert. Above it, once the throttle has
-    /// elapsed: fires.
+    /// The comparator is `wall_now - locked_boundary` against `reserve + interval/n + budget` AND
+    /// the shared drain throttle, where `budget = max(hysteresis, #1354 jitter budget)`. Below the
+    /// threshold: inert. Above it, once the throttle has elapsed: fires.
     #[test]
-    fn converge_fires_only_above_reserve_plus_quantum_plus_hysteresis_1049() {
+    fn converge_fires_only_above_reserve_plus_quantum_plus_budget_1049() {
         let latency_ms = 20u32;
         let reserve = latency_ms as u64 * 1_000_000;
         let n = 2u32;
         let quantum = I30 / n as u64; // one SOURCE interval
-        let threshold = reserve + quantum + PHASE_PIN_HYSTERESIS_NS;
+                                      // #1354: the shed dead-band is quantum + budget, budget = max(hysteresis, jitter budget).
+        let budget = PHASE_PIN_HYSTERESIS_NS.max(GENLOCK_N2_JITTER_BUDGET_NS);
+        let threshold = reserve + quantum + budget;
         let wall = 1_000_000_000_000u64;
         // A fresh arrival (floor 0) so the target is the configured latency — this test is about
         // the reserve-based threshold; the floor path has its own test below.
@@ -2748,13 +2769,15 @@ mod tests {
         let wall = 1_000_000_000_000u64;
         let newest = wall; // floor 0 -> target = reserve
         let reserve = 20u64 * 1_000_000;
-        // n=2: quantum = I30/2 = I60. An age of reserve + I60 + hysteresis is the boundary.
-        let just_over = wall - (reserve + I30 / 2 + PHASE_PIN_HYSTERESIS_NS + 1);
+        // #1354: the dead-band above the target is quantum + budget, budget = max(hyst, jitter).
+        let budget = PHASE_PIN_HYSTERESIS_NS.max(GENLOCK_N2_JITTER_BUDGET_NS);
+        // n=2: quantum = I30/2 = I60. An age of reserve + I60 + budget is the boundary.
+        let just_over = wall - (reserve + I30 / 2 + budget + 1);
         assert!(
             should_converge_phase(wall, just_over, newest, 20, I30, 2, 100),
-            "n=2 threshold is reserve + I30/2 + hysteresis"
+            "n=2 threshold is reserve + I30/2 + budget"
         );
-        let just_under = wall - (reserve + I30 / 2 + PHASE_PIN_HYSTERESIS_NS);
+        let just_under = wall - (reserve + I30 / 2 + budget);
         assert!(
             !should_converge_phase(wall, just_under, newest, 20, I30, 2, 100),
             "one ns below the n=2 threshold is inert"
@@ -3179,6 +3202,117 @@ mod tests {
         assert_eq!(
             drops, 0,
             "the deep 1000 ms hold must never converge (S == configured) — no #1003 regression"
+        );
+    }
+
+    // ---------------------------------------------------------------------------------------------
+    // #1354 — the N>=2 conveyor's ARRIVAL-JITTER BUDGET. The phase shed parks the N>=2 conveyor
+    // `quantum + budget` above its arrival floor; the budget was only PHASE_PIN_HYSTERESIS_NS (5 ms),
+    // so a late-arriving second frame of a 60->30 pair had just 5 ms of headroom right after a shed.
+    // strih-lx's receive path emits `#797 slow output_video` events of 5-17 ms ~30/min on every
+    // input even idle, so an input near the mature deadline took SINGLE-MATURE ticks (a permanent
+    // +one-source-interval phase step each) faster than the shed drains -> the 100-250 ms per-camera
+    // delivery ladder measured live (cam4, 22.9.2026). Raising the budget to 15 ms covers every
+    // measured slow-output event. The FAITHFUL, budget-dependent proof is this DIRECT threshold test;
+    // the simplified SimConveyor1049's re-anchoring follower washes a sub-frame phase error out each
+    // tick, so it cannot reproduce the live boundary-keying ladder (finding on the ticket, 22.9.).
+    // ---------------------------------------------------------------------------------------------
+
+    /// The shed dead-band widens from the 5 ms grid hysteresis to the 15 ms arrival-jitter budget on
+    /// the N>=2 path: a held age between 5 ms and 15 ms above `reserve + quantum` is now INSIDE the
+    /// band (no shed), where the old 5 ms margin would have shed a healthy late arrival. Below 5 ms:
+    /// always inert; above 15 ms: still fires; N==1: inert throughout. Written with LITERAL offsets
+    /// so it FAILS against the old 5 ms threshold (RED) and PASSES against the 15 ms budget (GREEN).
+    #[test]
+    fn jitter_budget_widens_the_n2_shed_deadband_1354() {
+        let wall = 1_000_000_000_000u64;
+        let newest = wall; // floor 0 -> target = reserve
+        let reserve_ms = 20u32;
+        let reserve = reserve_ms as u64 * 1_000_000;
+        let quantum = I30 / 2; // n=2 source interval
+        let base = reserve + quantum;
+        // 4 ms over: below even the 5 ms grid-hysteresis floor -> inert.
+        assert!(
+            !should_converge_phase(
+                wall,
+                wall - (base + 4_000_000),
+                newest,
+                reserve_ms,
+                I30,
+                2,
+                100
+            ),
+            "#1354: 4 ms over reserve+quantum is inside even the 5 ms floor -> never sheds"
+        );
+        // 10 ms over: inside the 15 ms budget -> inert (the OLD 5 ms margin would have shed here).
+        assert!(
+            !should_converge_phase(
+                wall,
+                wall - (base + 10_000_000),
+                newest,
+                reserve_ms,
+                I30,
+                2,
+                100
+            ),
+            "#1354: 10 ms over reserve+quantum must be INSIDE the 15 ms jitter budget (no shed) — \
+             the old 5 ms margin would have shed a healthy <=15 ms-late arrival here"
+        );
+        // 16 ms over: above the 15 ms budget -> a genuine phase error still sheds.
+        assert!(
+            should_converge_phase(
+                wall,
+                wall - (base + 16_000_000),
+                newest,
+                reserve_ms,
+                I30,
+                2,
+                100
+            ),
+            "#1354: a genuine phase error 16 ms over reserve+quantum (> the 15 ms budget) still sheds"
+        );
+        // N==1 stays inert regardless (the N>=2 gate) even at a large held age.
+        assert!(
+            !should_converge_phase(
+                wall,
+                wall - (base + 30_000_000),
+                newest,
+                reserve_ms,
+                I30,
+                1,
+                100
+            ),
+            "#1354: N==1 is below the N>=2 gate — the budget change never touches the inert N==1 path"
+        );
+    }
+
+    /// #1354 — the effective budget is `max(PHASE_PIN_HYSTERESIS_NS, GENLOCK_N2_JITTER_BUDGET_NS)`:
+    /// the shipped constant is 15 ms (strictly above the 5 ms grid hysteresis, so the budget IS the
+    /// jitter budget), and the `max` keeps the sub-frame flapping floor honoured — if the jitter
+    /// budget were ever set BELOW the hysteresis, the hysteresis would still be the floor. The
+    /// budget also stays well under one canvas frame so it can never pull in an extra matured frame.
+    #[test]
+    #[allow(clippy::assertions_on_constants)] // the budget IS a constant; the bound is the contract
+    fn jitter_budget_honours_the_hysteresis_floor_and_is_15ms_1354() {
+        assert_eq!(
+            GENLOCK_N2_JITTER_BUDGET_NS, 15_000_000,
+            "#1354: the shipped arrival-jitter budget is 15 ms"
+        );
+        let budget = PHASE_PIN_HYSTERESIS_NS.max(GENLOCK_N2_JITTER_BUDGET_NS);
+        assert_eq!(
+            budget, GENLOCK_N2_JITTER_BUDGET_NS,
+            "#1354: with the shipped 15 ms > 5 ms hysteresis, the effective budget is the jitter budget"
+        );
+        // The max keeps the hysteresis as the floor if the jitter budget were ever set smaller.
+        assert_eq!(
+            PHASE_PIN_HYSTERESIS_NS.max(1),
+            PHASE_PIN_HYSTERESIS_NS,
+            "#1354: a jitter budget below the hysteresis floor -> the hysteresis is still the floor"
+        );
+        // Sized below one canvas frame at 30 fps so it can never pull in an extra matured frame.
+        assert!(
+            GENLOCK_N2_JITTER_BUDGET_NS < 33_333_333,
+            "#1354: the budget must stay under one 30 fps canvas frame (never over-hold a frame)"
         );
     }
 

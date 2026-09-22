@@ -288,31 +288,32 @@ fn converge_vectors() -> Vec<(u64, u64, u64, u32, u64, u32, u64)> {
         (w, w - (20 * 1_000_000 + 2 * i30), w, 20, i30, 2, 30),  // throttle exactly met
         (
             w,
-            w - (20 * 1_000_000 + i30 / 2 + 5_000_000 + 1),
+            // #1354: the dead-band is quantum + the 15 ms jitter budget (was + 5 ms hysteresis).
+            w - (20 * 1_000_000 + i30 / 2 + 15_000_000 + 1),
             w,
             20,
             i30,
             2,
             100,
-        ), // n=2 quantum edge, over
+        ), // n=2 budget edge, one ns OVER -> fires
         (
             w,
-            w - (20 * 1_000_000 + i30 / 2 + 5_000_000),
+            w - (20 * 1_000_000 + i30 / 2 + 15_000_000),
             w,
             20,
             i30,
             2,
             100,
-        ), // n=2 quantum edge, at (inert)
+        ), // n=2 budget edge, exactly AT -> inert (strict >)
         (
             w,
-            w - (20 * 1_000_000 + i30 / 2 + 5_000_000 + 1),
+            w - (20 * 1_000_000 + i30 / 2 + 15_000_000 + 1),
             w,
             20,
             i30,
             1,
             100,
-        ), // same age, n=1 -> inert
+        ), // same age, n=1 -> inert (N>=2 gate)
         (
             w,
             w - (1000 * 1_000_000 + 8_000_000),
@@ -387,11 +388,14 @@ fn c_phase_convergence_matches_the_rust_authority_1049() {
     let helper = lift_converge_helper();
     let vs = converge_vectors();
 
-    // Lift the two constants from the SHIPPED C, never hard-code them (review 🟡2).
+    // Lift the constants from the SHIPPED C, never hard-code them (review 🟡2). #1354 added
+    // GENLOCK_N2_JITTER_BUDGET_NS — genlock_phase_converge_due now references it, so it MUST be
+    // lifted too or the standalone C fails -Werror on the undefined symbol.
     let mut c = format!(
-        "#include <stdint.h>\n#include <stddef.h>\n#include <stdbool.h>\n#include <stdio.h>\n{}\n{}\n",
+        "#include <stdint.h>\n#include <stddef.h>\n#include <stdbool.h>\n#include <stdio.h>\n{}\n{}\n{}\n",
         lift_define("GENLOCK_PHASE_PIN_HYSTERESIS_NS"),
         lift_define("GENLOCK_DRAIN_MIN_TICK_INTERVAL"),
+        lift_define("GENLOCK_N2_JITTER_BUDGET_NS"),
     );
     c.push_str(&helper);
     c.push_str("int main(void){\n");

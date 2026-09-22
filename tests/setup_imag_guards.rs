@@ -82,14 +82,18 @@ fn setup_imag_masks_sleep_and_lid() {
 /// DistroAV's Linux NDI loader scans ONLY /usr/lib, /usr/lib64 and /usr/local/lib
 /// (non-recursive; NOT the multiarch dir, NOT the ld.so cache — vendor/distroav
 /// src/plugin-main.cpp load_ndilib). Live-proven on imag-nb: without a libndi.so.<N>
-/// symlink in a scanned dir the plugin loads UI-only with ERR-404.
+/// symlink in a scanned dir the plugin loads UI-only with ERR-404. issue 1317: the
+/// /usr/local/lib/libndi.so.6 symlink now comes from the SHARED scripts/lib/ndi-runtime.sh recipe
+/// (`ndi_runtime_install_cmds`, emission proven by tests/ndi_runtime_lib.rs), so assert setup-imag
+/// installs the runtime through that ONE source of truth rather than an inline copy.
 #[test]
 fn setup_imag_symlinks_ndi_into_distroav_scan_path() {
     let body = read(SETUP);
     assert!(
-        body.contains("/usr/local/lib/libndi.so.6"),
-        "{SETUP} must symlink libndi.so.6 into /usr/local/lib — the only fleet-convention dir \
-         DistroAV's own Linux loader actually scans (ERR-404 otherwise, hit live on imag-nb)"
+        body.contains("ndi_runtime_install_cmds"),
+        "{SETUP} must install the NDI runtime via the shared ndi_runtime_install_cmds — its recipe \
+         symlinks libndi.so.6 into /usr/local/lib (the only fleet-convention dir DistroAV's Linux \
+         loader scans; ERR-404 otherwise, hit live on imag-nb)"
     );
 }
 
@@ -720,14 +724,15 @@ fn setup_imag_backs_up_stock_files_before_swap() {
     );
 }
 
-/// The NDI runtime symlink from step 4 (the ERR-404 fix) must survive the step 5/6 rework
-/// untouched — it is a DIFFERENT plugin-scan-path concern from the genlock hot-swap.
+/// The NDI runtime install from step 4/10 (the ERR-404 fix) must survive the step 5/6 rework
+/// untouched — it is a DIFFERENT plugin-scan-path concern from the genlock hot-swap. issue 1317:
+/// the runtime is now installed via the shared `ndi_runtime_install_cmds` recipe.
 #[test]
 fn setup_imag_still_keeps_ndi_symlink_after_genlock_rework() {
     let body = read(SETUP);
     let ndi_symlink = body
-        .find("/usr/local/lib/libndi.so.6")
-        .expect("the step-4 NDI symlink must still be present after the step 5/6 rework");
+        .find("ndi_runtime_install_cmds")
+        .expect("the NDI runtime install (shared ndi_runtime_install_cmds) must still be present after the step 5/6 rework");
     let genlock_step = body
         .find("Genlock hot-swap (#460)")
         .expect("step 6 must be reworked into the genlock hot-swap");

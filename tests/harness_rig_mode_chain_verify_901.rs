@@ -142,20 +142,37 @@ fn verify_stream_program_phase2_establishes_the_probe_input_before_asserting_988
     );
 
     // The setup call must target the SAME stream box, mark it terminal (stream has no downstream
-    // OBS hop for setup's own-output self-resolution to protect), and use the canonical strih
-    // Main Output upstream name (the SAME upstream the certified prod input already ingests).
+    // OBS hop for setup's own-output self-resolution to protect), and use the strih program
+    // sender name via the env-overridable $STREAM_PROBE_UPSTREAM (post-M4 default STRIH-LX
+    // (2ME PGM); the pre-M4 Windows STRIH-SNV literal binds phase2-probe-src to a dead sender).
     assert!(
         fn_body.contains(r#"--host "$STREAM_IP""#),
         "the setup call must target STREAM_IP: {fn_body}"
     );
     assert!(
-        fn_body.contains("--upstream 'STRIH-SNV (2ME PGM)'"),
-        "the setup call must use strih's Main Output name as --upstream: {fn_body}"
+        fn_body.contains(r#"--upstream "$STREAM_PROBE_UPSTREAM""#),
+        "the setup call must use the env-overridable $STREAM_PROBE_UPSTREAM as --upstream: {fn_body}"
     );
     assert!(
         fn_body.contains("--terminal"),
         "the setup call must pass --terminal (stream is a terminal box, no next OBS hop): \
          {fn_body}"
+    );
+}
+
+/// issue 1351 item — the STREAM_PROBE_UPSTREAM default must be the POST-M4 strih program sender
+/// name. A revert to the pre-M4 Windows 'STRIH-SNV (2ME PGM)' binds phase2-probe-src to a dead
+/// sender and PHASE2-PROBE renders BLACK, so pin the live default value (not just the indirection).
+#[test]
+fn stream_probe_upstream_defaults_to_the_post_m4_strih_sender_name() {
+    let s = read();
+    assert!(
+        s.contains(r#"STREAM_PROBE_UPSTREAM="${STREAM_PROBE_UPSTREAM:-STRIH-LX (2ME PGM)}""#),
+        "rig-mode.sh must default STREAM_PROBE_UPSTREAM to the post-M4 sender 'STRIH-LX (2ME PGM)'"
+    );
+    assert!(
+        !s.contains("--upstream 'STRIH-SNV (2ME PGM)'"),
+        "rig-mode.sh must not hard-code the pre-M4 Windows 'STRIH-SNV (2ME PGM)' at any call site"
     );
 }
 

@@ -3,6 +3,8 @@ paths:
   - "scripts/lib/camera-box-deadman.sh"
   - "scripts/lib/camera-box-free-device.sh"
   - "scripts/lib/cam2-painter-deadman.sh"
+  - "scripts/deploy-fleet.sh"
+  - "tests/harness_deploy_fleet_frame_probe_swap_1351.rs"
   - "tests/harness_camera_box_deadman_772.rs"
   - "tests/harness_camera_box_free_device_772.rs"
   - "tests/harness_recording_e2e_cam2_painter_deadman_872.rs"
@@ -165,3 +167,57 @@ check the anchor-collision class after editing recording-e2e.sh, `cargo test --n
 binaries, Tier-0 allowed) then EXECUTE the built binaries directly from `target/debug/deps/`
 (running an ELF is not a `cargo` invocation, so the #477 block does not apply) — the static-anchor
 tests read the scripts at RUNTIME, so a directly-run binary reflects the current script text.
+
+## Swapping a RUNNING binary on a read-only appliance: rename over it + park the deadman (issue 1351)
+
+`deploy-fleet.sh`'s `--frame-probe` painter step swaps `/usr/local/bin/frame-probe` — the binary the
+PERMANENT, `Restart=always` `cam2-painter.service` is actively executing. A plain `scp <new>
+/usr/local/bin/frame-probe` opens the LIVE path for writing while that inode is still running, which
+the kernel refuses with `ETXTBSY` (`Text file busy` / `dest open "…/frame-probe": Failure`). The
+`[1/8]` sha-pin (issue 1235) then REFUSED the whole E2E run because the painter still ran the old
+build (live: release E2E 35770453666). Two swap-safety primitives, reusable for ANY running-binary
+swap on the ro-rootfs cam boxes:
+
+1. **Sidecar + atomic rename, never a direct overwrite.** `scp <new> /usr/local/bin/frame-probe.new`
+   → `ssh "chmod 0755 …/frame-probe.new && mv -f …/frame-probe.new …/frame-probe && sync"`. A rename
+   replaces the directory ENTRY while the running process keeps its OLD inode open, so ETXTBSY cannot
+   occur by construction (the running painter finishes on the old inode; the next start picks the
+   new one). Keep the byte-verify reading the FINAL path — it is the real gate (a failed rename
+   leaves stale/absent bytes there → sha-mismatch). Guard the swap `ssh_box … || true`: byte-verify
+   is the gate, matching the existing best-effort `chmod` pattern, and it keeps the pre-existing
+   PATH-stub real-run test (`frame_probe_parity_align_1138.rs`, which does NOT stub chmod/mv/sync)
+   green — the swap's `|| true` swallows the stub's chmod-on-nonexistent-`.new` failure, and the
+   stubbed `sha256sum` still reports byte-verify OK.
+
+2. **Park the transient `cam2-painter-deadman.timer` across the swap, and RESTORE it via
+   `systemd-run` — never `systemctl start`.** The `--on-unit-active` deadman (this rule's own
+   subject) re-fires every ~5 min and re-arms `cam2-painter`; a re-arm inside the ~2 s swap window is
+   a SECOND way the old inode stays busy. Park with `systemctl stop cam2-painter-deadman.timer`
+   (best-effort `|| true`) BEFORE the painter stop. **RESTORE it with the canonical
+   `$(cam2_painter_deadman_arm_cmds)` builder (`systemd-run --unit=cam2-painter-deadman …`), NOT a
+   bare `systemctl start …timer`** — the deadman is a TRANSIENT `systemd-run` unit, and a transient
+   unit is garbage-collected the moment it is stopped, so `systemctl start …timer` fails
+   "Unit not found" and silently leaves the deadman DISARMED (the exact bug a fresh-context review
+   caught on the first #1351 cut). The re-arm is CONDITIONAL: only when the deadman was armed BEFORE
+   the park (capture `systemctl is-active …timer` up front) **AND** the #892 restore decision is
+   `enable-now`. An UNCONDITIONAL re-arm is WRONG twice: it would arm a deadman a standalone
+   `deploy-fleet.sh --frame-probe` never had, and — because the deadman's action runs
+   `systemctl start cam2-painter` guarded ONLY by frame-probe/burn presence, not by enabled-state —
+   it would RESURRECT a deliberately-dark event-mode painter (a #892 HARD-rule violation). Gating on
+   prior-armed + `enable-now` restores the deadman exactly when the painter is being kept alive,
+   never arms an absent one, and never lights a dark painter. Do this on EVERY terminal path (the
+   scp-failure branch, the enable-now-fail branch, and the normal end) via one small helper
+   (`rearm_deadman_if_prior "$ip" "$was_deadman_armed" "$restore_action"`). The #892
+   enable-state-preserving restore (`frame_probe_restore_enable_decision`) stays UNCHANGED; the
+   `enable --now` restart is what makes the painter pick the new inode.
+
+Tier-0 verify (a worktree worker's `bash -c` is refused, but `bash <written-file>` runs): a PATH-stub
+replica that runs the REAL `deploy-fleet.sh --frame-probe` (frame-probe-only mode) under stub
+`sshpass`/`scp`/`mount`/`systemctl`/`systemd-run`/`chmod`/`mv`/`sync`/`sha256sum` (the `systemctl`
+stub reports the deadman `is-active` + painter `is-enabled` so the conditional re-arm fires), LOGGING each remote call in
+order, then asserts the scp dest ends `.new`, the `mv -f …new …frame-probe` follows the scp, the
+byte-verify reads the FINAL path, `stop …-deadman.timer` precedes the painter stop, `start
+…-deadman.timer` follows the restore, and the scp-failure branch still re-arms + remounts ro. The
+Rust twin is `tests/harness_deploy_fleet_frame_probe_swap_1351.rs`. The `[0/8]` parity auto-align
+(`frame-probe-parity-align.sh`) inherits the fix for free — it invokes `deploy-fleet.sh
+--frame-probe`, so nothing there changes.

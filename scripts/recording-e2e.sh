@@ -125,6 +125,17 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shared with the #979 dev1 watchdog, never a second detector for the same signal.
 # shellcheck source=scripts/lib/obs-session-visibility.sh
 . "$HERE/lib/obs-session-visibility.sh"
+# issue 1351: strih PLATFORM resolver (windows|linux) after the M4 cut-over to strih-lx, plus the
+# Linux operator-session-visibility predicate that replaces the obs64/AHK CIM probe above for a
+# Linux strih -- never a second host-detection mechanism, one resolver both [0/8] and [8/8a] use.
+# shellcheck source=scripts/lib/strih-platform.sh
+. "$HERE/lib/strih-platform.sh"
+# issue 1351: the ONE source of truth for BOUNDING every strih-touching [0/8] call on the
+# Linux-strih path with a timeout + a named [0/8] strih-lx banner (strih_lx_gate_prefix /
+# strih_lx_preflight_timeout_banner) -- so a silent hang can never swallow RUN_ID. Depends on
+# strih_platform() above; the Windows path stays byte-identical (an empty prefix, no banner).
+# shellcheck source=scripts/lib/strih-lx-preflight.sh
+. "$HERE/lib/strih-lx-preflight.sh"
 # #863: WARN-only (never `exit`) verification that the PERMANENT cam2-painter.service genuinely
 # came back active + painting after cleanup() restarts it below -- a fire-and-forget restart call
 # that used to be a silent no-op (the permanent painter unit was never installed, see #863).
@@ -469,6 +480,15 @@ STRIH_USER="${STRIH_USER:-newlevel}"
 STRIH_PW="${STRIH_PW:-newlevel}"
 STREAM_USER="${STREAM_USER:-newlevel}"
 STREAM_PW="${STREAM_PW:-newlevel}"
+# issue 1351: bound every strih-touching [0/8] gate on the Linux-strih path (strih-lx = the M4
+# notebook, 10.77.9.202) with `timeout`, so a wedged strih call fails FAST with a named
+# [0/8] strih-lx banner instead of a ~23-min silent [0/8] hang that aborts before RUN_ID is exported
+# below (the #703 fail-closed guard then reporting "no verdict" with NO named stage). Resolved ONCE
+# here (before any [0/8] gate the static-anchor tests slice) via the strih-lx-preflight lib; a
+# Windows / other strih yields an EMPTY prefix so that path stays behaviorally byte-identical. It is
+# threaded via ${STRIH_LX_GATE_PREFIX:-} into the DanteSync NTP+PTP and dantesync version-parity gate
+# invocations below (the two heaviest strih-touching [0/8] gate calls).
+STRIH_LX_GATE_PREFIX="$(strih_lx_gate_prefix "${STRIH_LX_GATE_TIMEOUT:-300}" "$STRIH")"
 RUN_ID="${RUN_ID:-$(( (RANDOM << 16) | RANDOM ))}"
 # #703: surface RUN_ID to the CI workflow (when running under GH Actions) so a downstream
 # workflow step (the fail-closed structural guard) can locate THIS run's verdict JSON
@@ -726,7 +746,11 @@ for hp in "$CAMERA_NAME=$CAM1_IP" "cam2(painter)=$PAINTER_IP" "strih=$STRIH" "st
   # (imag:<reason> in CAMBOX_OFFLINE_ACK / rig-fleet.txt) SKIPS the imag leg instead of aborting;
   # source/painter/strih/stream stay unconditionally mandatory (they have no ack path by design).
   if [ "$_name" = "imag" ] && cambox_offline_ack_is_acked "imag"; then
-    if ping -c1 -W2 "$_ip" >/dev/null 2>&1; then
+    # issue 1317: staleness = a SERVICE probe (ssh :22 / dantesync :8898), never a bare ICMP
+    # probe — on the venue LAN a router/proxy-ARP answers ICMP for a vacated .182, which would
+    # reject a legitimate ack as STALE and hard-block the whole run (imag-nb is out ~1 year,
+    # owner 20.9.2026).
+    if imag_service_reachable "$_ip"; then
       # acked but REACHABLE -> STALE ack (the box is back; the ack must be removed) -> fail loud.
       cambox_offline_ack_stale_message "imag" >&2; exit 1
     fi
@@ -793,9 +817,17 @@ echo "[0/8] obs64/AHK session-visibility gate — fail when strih/stream OBS (or
 # precedent below (`timeout` execvp()s its command directly, so it cannot invoke a shell FUNCTION
 # like win_ssh_run -- route through `bash -c`, re-sourcing the lib inside that subshell).
 SVG_SSH_TIMEOUT="${SVG_SSH_TIMEOUT:-30}"
-_svg_strih_out="$(timeout "$SVG_SSH_TIMEOUT" bash -c '. "$1"; win_ssh_run "$2" "$3" "$4" "$5"' _ \
-  "$HERE/lib/win-ssh-exec.sh" "$STRIH_USER" "$STRIH_PW" "$STRIH" "$(obs_session_visibility_probe_ps 1)" 2>/dev/null || true)"
-_svg_strih_msg="$(obs_session_visibility_message "$_svg_strih_out" 1)"
+# issue 1351: strih-lx (Linux) never runs the Windows obs64/AHK CIM probe -- strih_platform
+# resolves the branch; the Windows probe below is UNCHANGED (byte-identical) for the old
+# STRIH-SNV box / any other target. strih_linux_visibility_check lives in the sourced lib.
+if [ "$(strih_platform "$STRIH")" = "linux" ]; then
+  _svg_strih_out=""  # #1351: a Linux strih has no Windows obs64 zombie object; keep the downstream znote read (set -u) safe
+  _svg_strih_msg="$(strih_linux_visibility_check "$STRIH" "$STRIH_USER" "$STRIH_PW" "$SVG_SSH_TIMEOUT" "$HERE")"
+else
+  _svg_strih_out="$(timeout "$SVG_SSH_TIMEOUT" bash -c '. "$1"; win_ssh_run "$2" "$3" "$4" "$5"' _ \
+    "$HERE/lib/win-ssh-exec.sh" "$STRIH_USER" "$STRIH_PW" "$STRIH" "$(obs_session_visibility_probe_ps 1)" 2>/dev/null || true)"
+  _svg_strih_msg="$(obs_session_visibility_message "$_svg_strih_out" 1)"
+fi
 if [ -n "$_svg_strih_msg" ]; then
   echo "ERROR: [0/8] strih INVISIBLE: $_svg_strih_msg" >&2
   echo "       Recovery: bash scripts/launch-obs-genlock.sh --box strih --force   # paste into the win-strih MCP Shell (session 1, never ssh+CIM — issue 958)" >&2
@@ -857,12 +889,13 @@ echo "[0/8] DanteSync NTP+PTP gate — $CAMERA_NAME, cam2, strih, stream must AL
 # serves phase_slew_enabled=true (the fleet-wide cure for the chronic NTP step storm, verified
 # 2026-09-02 including cam5/cam6/cam7), so a box that silently reverts to phase_slew=off now
 # HARD-fails here (DISABLED->20, UNKNOWN->11) instead of only being reported.
-DANTESYNC_GATE_GM_ENFORCE=1 DANTESYNC_GATE_PHASE_SLEW_ENFORCE=1 "$HERE/dantesync-gate.sh" \
+DANTESYNC_GATE_GM_ENFORCE=1 DANTESYNC_GATE_PHASE_SLEW_ENFORCE=1 ${STRIH_LX_GATE_PREFIX:-} "$HERE/dantesync-gate.sh" \
   --bound-us "${CLOCK_GUARD_BOUND_US:-2000}" \
   --win-http-port "${WIN_DANTE_PORT:-8898}" \
   --linux "$CAMERA_NAME=$CAM1_IP cam2=$PAINTER_IP" \
   --win-http "strih=$STRIH" \
-  --win-http "stream=$STREAM"
+  --win-http "stream=$STREAM" \
+  || { _slx_rc=$?; strih_lx_preflight_timeout_banner "$_slx_rc" "DanteSync NTP+PTP gate (strih/stream)" "${STRIH_LX_GATE_TIMEOUT:-300}"; exit "$_slx_rc"; }
 
 # Version-integrity precondition gate (#123) — THE OTHER hard step, alongside DanteSync. The whole
 # test is worthless unless the LIVE strih+stream OBS stack is the PINNED build (a randomly-deployed /
@@ -1010,6 +1043,17 @@ if [ -n "$IMAG_GENLOCK_SHA" ]; then
   [ -n "$IMAG_SO_CSV" ] && AUTO_IMAG_MANIFEST="$(manifest_autosource_fetch "$VERSION_GATE_REPO" linux-genlock.yml obs-genlock-linux-x86_64 \
     "$IMAG_GENLOCK_SHA" "$OUTDIR/imag-linux-manifest.json")"
 fi
+# issue 1351 follow-up: strih-lx (the Linux notebook) serves none of the Windows-only version-
+# integrity facets (the #826 OBS-identity set + distroav_dll_paths + ndi_runtime) -- pass
+# --strih-linux so the gate SKIPS them (loud SKIPPED, counted ok) instead of UNKNOWN-refusing,
+# while still verifying strih's genlock build via the platform-agnostic byte/capability/parity
+# facets its Linux bundle-state DOES serve. Windows strih (the default, byte-identical) leaves
+# this flag empty so it is never appended (the `${VAR:+--flag}` convention already used for
+# AUTO_WIN_MANIFEST/IMAG_SO_CSV above).
+STRIH_LINUX_GATE_ARG=""
+if [ "$(strih_platform "$STRIH")" = "linux" ]; then
+  STRIH_LINUX_GATE_ARG="1"
+fi
 # ALWAYS pass --win-state for strih AND stream (NOT conditional on the file existing): an absent file
 # is UNKNOWN -> the gate REFUSES, never a silent pass with a box's build unverified.
 # issue 1164: when imag is acked offline, invoke the gate WITHOUT the imag SHA / manifest / bytes
@@ -1021,7 +1065,8 @@ if [ "$IMAG_OFFLINE_ACKED" = 1 ]; then
     ${AUTO_WIN_MANIFEST:+--manifest "$AUTO_WIN_MANIFEST"} \
     --win-state "strih=$VERSION_STRIH_STATE" \
     --win-state "stream=$VERSION_STREAM_STATE" \
-    --imag-acked-offline "$IMAG_OFFLINE_ACK_REASON"
+    --imag-acked-offline "$IMAG_OFFLINE_ACK_REASON" \
+    ${STRIH_LINUX_GATE_ARG:+--strih-linux}
 else
 "$HERE/version-integrity-gate.sh" \
   ${AUTO_WIN_MANIFEST:+--manifest "$AUTO_WIN_MANIFEST"} \
@@ -1029,7 +1074,8 @@ else
   --win-state "stream=$VERSION_STREAM_STATE" \
   --genlock-sha "imag=$IMAG_GENLOCK_SHA" \
   ${AUTO_IMAG_MANIFEST:+--imag-manifest "$AUTO_IMAG_MANIFEST"} \
-  ${IMAG_SO_CSV:+--imag-bytes "imag=$IMAG_SO_CSV"}
+  ${IMAG_SO_CSV:+--imag-bytes "imag=$IMAG_SO_CSV"} \
+  ${STRIH_LINUX_GATE_ARG:+--strih-linux}
 fi
 
 # dantesync fleet-wide VERSION-PARITY gate (#862) — alongside the DanteSync NTP+PTP gate (#7) and
@@ -1061,10 +1107,24 @@ if [ "$IMAG_OFFLINE_ACKED" = 1 ]; then
 else
   DANTESYNC_VERSION_LINUX="$DANTESYNC_VERSION_LINUX imag-nb=${IMAG_USER:-newlevel}@$IMAG_IP"
 fi
-"$HERE/dantesync-version-gate.sh" \
+# issue 1351: on the M4 Linux strih (strih-lx, 10.77.9.202) the --win arm reads dantesync via the
+# Windows quoted-exe-path ssh call, which returns nothing on Linux -> strih UNKNOWN -> the gate
+# refuses (exit 11). strih-lx answers `dantesync --version` on the bare command line (the --linux
+# arm's read, .claude/rules/dantesync-version-reading.md), so route strih through the --linux node
+# list there and pass only stream via --win. A Windows strih keeps strih+stream BOTH under --win
+# (byte-identical to the pre-1351 argv). Computed into DV_WIN_NODES so the SINGLE gate invocation is
+# unchanged (no if/else invocation duplication -- the recording-e2e.sh anchor discipline), mirroring
+# the STRIH_LINUX_GATE_ARG platform branch used for the version-integrity gate above.
+DV_WIN_NODES="strih=${WIN_SSH_USER:-newlevel}@$STRIH stream=${WIN_SSH_USER:-newlevel}@$STREAM"
+if [ "$(strih_platform "$STRIH")" = "linux" ]; then
+  DANTESYNC_VERSION_LINUX="$DANTESYNC_VERSION_LINUX strih=${WIN_SSH_USER:-newlevel}@$STRIH"
+  DV_WIN_NODES="stream=${WIN_SSH_USER:-newlevel}@$STREAM"
+fi
+${STRIH_LX_GATE_PREFIX:-} "$HERE/dantesync-version-gate.sh" \
   --linux "$DANTESYNC_VERSION_LINUX" \
   --local dev1 \
-  --win "strih=${WIN_SSH_USER:-newlevel}@$STRIH stream=${WIN_SSH_USER:-newlevel}@$STREAM"
+  --win "$DV_WIN_NODES" \
+  || { _slx_rc=$?; strih_lx_preflight_timeout_banner "$_slx_rc" "dantesync version-parity gate (strih/stream ssh)" "${STRIH_LX_GATE_TIMEOUT:-300}"; exit "$_slx_rc"; }
 
 # camera-box binary CROSS-BOX version-parity gate (issue 875) — the follow-up split from the
 # dantesync version-parity gate above. Where that gate checks the dantesync DAEMON against a fixed
@@ -4252,6 +4312,7 @@ fi
 # SKIPPED under MEASUREMENT_EQ (that opt-in profile is the OTHER strih-pin writer) and via QR_ALIGN=0.
 QR_ALIGN="${QR_ALIGN:-1}"
 if [ "$QR_ALIGN" = "1" ] && [ "${ALL_CAMBOX:-0}" = "1" ] && ! measurement_eq_enabled; then
+  { [ "${QR_ALIGN_REINIT:-1}" = "1" ] && . "$HERE/lib/qr-align-reinit.sh" && qr_align_reinit_loop "$STRIH" "$(camera_align_ndi_sources_excluding_csv "${PREFLIGHT_EXCLUDED_CAMS:-}")"; } || echo "[qr-align-reinit] NOTE: issue 1349 re-init loop unavailable/off (missing lib or QR_ALIGN_REINIT=0) — proceeding to the floor-aware plan" >&2
   echo "[4i/8align] #1003 floor-3 camera alignment via simultaneous painter-QR spread (strih on-air set incl. cam4)"
   . "$HERE/lib/qr-align.sh"
   qr_align_run "$STRIH" "$STRIH_PW" || {
@@ -5130,7 +5191,21 @@ if [ "$VERDICT_ON_STREAM" = "1" ]; then
   # stream extract below, and with imag's own extract further down) while default plan-print
   # mode still calls it in the FOREGROUND exactly as before (EXEC_STRIH_ARGS is empty there, so
   # the invocation text/behavior is unchanged from the pre-#703 call).
+  # issue 1351: strih-lx (Linux) has no win-* MCP path -- decode-in-place goes over plain
+  # ssh/scp via recording-verdict-on-strih-lx.sh (the imag-nb precedent), always executing for
+  # real (no plan-print mode, matching recording-verdict-on-imag.sh -- ssh/scp to a plain Linux
+  # box is always allowed on this rig). STRIH_LX_REMOTE_OUT_DIR mirrors IMAG_REMOTE_OUT_DIR.
+  STRIH_LX_REMOTE_OUT_DIR="${STRIH_LX_REMOTE_OUT_DIR:-/home/newlevel/verdict-out}"
   run_strih_extract() {
+    if [ "$(strih_platform "$STRIH")" = "linux" ]; then
+      STRIH_LX_BOX="$STRIH" "$HERE/recording-verdict-on-strih-lx.sh" \
+        --verdict-bin "$VERDICT_BIN" --out-dir "$STRIH_LX_REMOTE_OUT_DIR" --local-out-dir "$OUTDIR" \
+        --strih-rec "$STRIH_HOST_PATH" \
+        -- --extract-partial strih --strih "$STRIH_HOST_PATH" --capture-fps "$STRIH_CAPTURE_FPS" \
+           --burn-cam1-run-id "$BURN_CAM1_RUN_ID" --burn-strih-run-id "$BURN_STRIH_RUN_ID" \
+           $CG --out "$STRIH_LX_REMOTE_OUT_DIR/strih-partial-${RUN_ID}.json"
+      return
+    fi
     "$HERE/recording-verdict-on-strih.sh" \
       --verdict-exe "$VERDICT_EXE_WIN" --out-dir "$OUT_DIR_WIN" --strih-rec "$STRIH_REC_WIN" \
       "${EXEC_STRIH_ARGS[@]}" \

@@ -494,6 +494,16 @@ Options:
                     loud SKIPPED line, counted OK, never UNKNOWN) and drops any \`imag\`-labelled
                     --genlock-sha entry from the cross-box parity (which then certifies strih+stream).
                     WITHOUT this flag an absent imag is still fail-closed UNKNOWN (the #1100 default).
+  --strih-linux  issue 1351 follow-up -- strih is the Linux notebook (strih-lx) after the M4
+                    cut-over, so it reports none of the Windows-only version-integrity facets (the
+                    #826 OBS-identity set: obs_installs/startup_chain/port4455_identity/
+                    obs_process_count, plus the Windows distroav_dll_paths scan + the Windows
+                    ndi_runtime facet). SKIPS all of them on the box named \`strih\` (a loud
+                    SKIPPED line each, counted OK, never UNKNOWN) while KEEPING the
+                    platform-agnostic facets a Linux strih's bundle-state DOES serve
+                    (obs_dll_sha256 / distroav_dll_sha256 / genlock_capability / genlock_build_sha
+                    parity), so strih's actual genlock build stays verified. WITHOUT this flag
+                    strih is graded exactly as before (Windows-shaped, byte-identical).
 
 Exit: 0 = every box matches the pinned set (proceed), 20 = a box DRIFTED (REFUSED),
 11 = a box UNKNOWN/unread (INCOMPLETE, not clean), 1 = usage error.
@@ -518,6 +528,11 @@ main() {
   # (which then certifies the remaining fleet strih+stream). WITHOUT this flag the gate is
   # byte-identical to before -- an absent imag is still fail-closed UNKNOWN(11) (the #1100 contract).
   local imag_acked_offline=""
+  # issue 1351 follow-up -- --strih-linux: strih is the Linux notebook (strih-lx); skip its
+  # Windows-only facets (the #826 OBS-identity set + distroav_dll_paths + ndi_runtime) as a loud
+  # SKIPPED (counted ok), keep the platform-agnostic byte/capability/parity facets. Mirrors the
+  # --imag-acked-offline shape above. WITHOUT this flag strih is graded byte-identical to before.
+  local strih_linux=0
   # #1296 -- REPORT-ONLY boxes (NAME=FILE, same state-JSON shape as --win-state): a box whose
   # observed stack is PRINTED as an informational row but NEVER enters the bad/unknown/ok roll-up,
   # so it can never block the run. RESOLUME-SNV uses this: it is a TRAVELING CG box, NOT a measured
@@ -536,6 +551,7 @@ main() {
       --imag-manifest)      shift; imag_manifest="${1:-}" ;;
       --imag-bytes)         shift; imag_bytes="${1:-}" ;;
       --imag-acked-offline) shift; imag_acked_offline="${1:-}" ;;
+      --strih-linux)        strih_linux=1 ;;
       -h|--help)    usage; exit 0 ;;
       --*)          echo "unknown option: $1" >&2; usage >&2; exit 1 ;;
       *)            echo "unexpected argument: $1" >&2; usage >&2; exit 1 ;;
@@ -561,6 +577,12 @@ main() {
   local -a unknown_boxes=()
   for entry in "${win_state[@]}"; do
     name="${entry%%=*}"; file="${entry#*=}"
+    # issue 1351 follow-up: --strih-linux only ever applies to the box literally named "strih" --
+    # a future box also passed the flag by mistake stays Windows-graded (no other box is affected).
+    local is_strih_linux=0
+    if [ "$strih_linux" = 1 ] && [ "$name" = "strih" ]; then
+      is_strih_linux=1
+    fi
     if [ -z "$file" ] || [ ! -s "$file" ]; then
       printf '  %-14s UNKNOWN  (no state file %s — win-* MCP fetch missing)\n' "$name" "${file:-<none>}"
       unknown=$((unknown + 1)); unknown_boxes+=("$name"); continue
@@ -578,6 +600,13 @@ main() {
     # BUILD-SHA / whole-bundle facet runs on every box uniformly.
     if [ "$has_manifest" -eq 0 ] && [ -n "$manifest" ]; then
       compare_args+=("manifest=${manifest}")
+    fi
+    # issue 1351 follow-up: tell drift-guard's engine to SKIP the Windows-only ndi_runtime +
+    # distroav_dll_paths mandatory facets for a Linux strih (loud SKIPPED, counted ok) while every
+    # other compare_observed facet (incl. the manifest-gated obs_dll_sha256/distroav_dll_sha256/
+    # genlock_capability byte facets) runs exactly as it would for any other box.
+    if [ "$is_strih_linux" = 1 ]; then
+      compare_args+=("strih_linux=1")
     fi
     rc=0
     # Capture the engine's exit code DIRECTLY (no pipe between drift-guard and the status read), THEN
@@ -610,6 +639,14 @@ main() {
     obs_proc_count="$(state_json_value "$file" obs_process_count)"
     local frc=0
 
+    # issue 1351 follow-up: on a Linux strih (--strih-linux, box named "strih") every #826
+    # OBS-identity facet below is a Windows-only machine check (install-path scan, :4455 owner
+    # exe, process count via tasklist, NL_STARTUP.ahk) -- SKIP each one loudly (counted ok, never
+    # UNKNOWN) instead of running it. Windows strih/stream are byte-identical (unaffected).
+    if [ "$is_strih_linux" = 1 ]; then
+      printf '  %-22s SKIPPED  (strih is the Linux notebook -- #826 Windows OBS-identity facet not applicable, issue 1351)\n' "obs_installs"
+      ok=$((ok + 1))
+    else
     engine_out="$(obs_installs_verdict "$DEFAULT_OBS_INSTALL_EXE" "$obs_installs_csv")" || frc=$?
     printf '%s\n' "$engine_out" | sed 's/^/    /'
     case "$frc" in
@@ -617,6 +654,7 @@ main() {
       20) bad=$((bad + 1)) ;;
       11) unknown=$((unknown + 1)); unknown_boxes+=("${name}:obs_installs") ;;
     esac
+    fi
 
     # port4455_identity: ENFORCED fleet-wide (#1067, the 758-style second step) -- runs
     # UNCONDITIONALLY on every box now, exactly like obs_installs / obs_process_count above. Its
@@ -626,6 +664,10 @@ main() {
     local pinned_obs_ver=""
     pinned_obs_ver="$(pinned_obs_version "$readme" 2>/dev/null)" || pinned_obs_ver=""
     frc=0
+    if [ "$is_strih_linux" = 1 ]; then
+      printf '  %-22s SKIPPED  (strih is the Linux notebook -- #826 Windows OBS-identity facet not applicable, issue 1351)\n' "port4455_identity"
+      ok=$((ok + 1))
+    else
     engine_out="$(port_identity_verdict "$DEFAULT_OBS_INSTALL_EXE" "$pinned_obs_ver" "$port4455_owner_path" "$port4455_owner_ver")" || frc=$?
     printf '%s\n' "$engine_out" | sed 's/^/    /'
     case "$frc" in
@@ -633,8 +675,13 @@ main() {
       20) bad=$((bad + 1)) ;;
       11) unknown=$((unknown + 1)); unknown_boxes+=("${name}:port4455_identity") ;;
     esac
+    fi
 
     frc=0
+    if [ "$is_strih_linux" = 1 ]; then
+      printf '  %-22s SKIPPED  (strih is the Linux notebook -- #826 Windows OBS-identity facet not applicable, issue 1351)\n' "obs_process_count"
+      ok=$((ok + 1))
+    else
     engine_out="$(obs_process_count_verdict "$obs_proc_count")" || frc=$?
     printf '%s\n' "$engine_out" | sed 's/^/    /'
     case "$frc" in
@@ -642,6 +689,7 @@ main() {
       20) bad=$((bad + 1)) ;;
       11) unknown=$((unknown + 1)); unknown_boxes+=("${name}:obs_process_count") ;;
     esac
+    fi
 
     # #826 — startup-chain facet, ENFORCED but strih-scoped (#829): strih MUST run NL_STARTUP.ahk,
     # so it now runs UNCONDITIONALLY on strih -- an unreported chain is a gate-blocking UNKNOWN
@@ -650,6 +698,10 @@ main() {
     # NL_STARTUP.ahk (per .claude/skills/obs-ops), so it NEVER engages here -- absent ahk on stream
     # stays OK, not UNKNOWN.
     if [ "$name" = "strih" ]; then
+      if [ "$is_strih_linux" = 1 ]; then
+        printf '  %-22s SKIPPED  (strih is the Linux notebook -- no NL_STARTUP.ahk startup chain, issue 1351)\n' "startup_chain"
+        ok=$((ok + 1))
+      else
       local ahk_shortcut ahk_run ahk_dead shortcut_target shortcut_workdir
       ahk_shortcut="$(state_json_value "$file" ahk_app1_shortcut_path)"
       ahk_run="$(state_json_value "$file" ahk_app1_run)"
@@ -665,6 +717,7 @@ main() {
         20) bad=$((bad + 1)) ;;
         11) unknown=$((unknown + 1)); unknown_boxes+=("${name}:startup_chain") ;;
       esac
+      fi
     fi
   done
 

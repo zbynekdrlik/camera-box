@@ -192,6 +192,11 @@ RIG_MODE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # source time.
 # shellcheck source=scripts/lib/cambox-offline-ack.sh
 . "$RIG_MODE_DIR/lib/cambox-offline-ack.sh"
+# issue 1317: imag_service_reachable — the SERVICE-level stale-ack liveness probe (ssh :22 /
+# dantesync :8898, never a bare ping, which a venue router/proxy-ARP answers for a vacated .182).
+# Both stale-ack sites below (resolve_imag_offline_leg / require_imag_genlock_current) use it.
+# shellcheck source=scripts/lib/imag-offline-ack.sh
+. "$RIG_MODE_DIR/lib/imag-offline-ack.sh"
 
 # issue 1311 (Finding 2 -> Mitigations 2b): the bkshading-relay runs ONLY in EVENT mode. TEST mode
 # stops+disables it, EVENT mode enables+starts it -- via the sourced helper below (an additive
@@ -577,6 +582,7 @@ REMOTE
 # Overridable; defaults mirror the recording-e2e BURN_TARGETS (the prod program inputs).
 STRIH_IP="${STRIH_IP:-10.77.9.202}"
 STREAM_IP="${STREAM_IP:-10.77.9.204}"
+STREAM_PROBE_UPSTREAM="${STREAM_PROBE_UPSTREAM:-STRIH-LX (2ME PGM)}"
 STRIH_PROG_SOURCE="${STRIH_PROG_SOURCE:-$RIG_SOURCE_STRIH_SOURCE}" # strih program input for the
                                                           # SOURCE camera (#246 burn target). #1135:
                                                           # DERIVED off the resolved source box
@@ -780,7 +786,7 @@ imag_genlock_gate_verdict() {
 # decision for whether the #789 TEST-entry gate is SKIPPED because imag is legitimately acked offline
 # (issue 1013 / rig-fleet.txt). Pure (no I/O), ALWAYS returns 0 (verdict on stdout) so tests/rig_mode.rs
 # can source rig-mode.sh and exercise every branch Tier-0 (#477) — same seam pattern as
-# imag_genlock_gate_verdict; the reachability PROBE (ping) stays in the caller, only the yes/no is here.
+# imag_genlock_gate_verdict; the reachability PROBE (imag_service_reachable) stays in the caller, only the yes/no is here.
 #   REASON empty              -> proceed (imag not acked; run the #789 gate normally)
 #   REASON set + REACHABLE=1  -> proceed (acked BUT reachable = STALE ack, NOT exempted -> the real
 #                                gate runs against the now-reachable imag; mirrors recording-e2e.sh
@@ -804,14 +810,15 @@ imag_genlock_gate_offline_ack_action() {
 # rig-fleet.txt) and DELEGATES the skip/proceed verdict to the already-tested pure
 # imag_genlock_gate_offline_ack_action -- so a legitimately-absent (acked + UNREACHABLE) imag is
 # skipped, while an acked-but-REACHABLE (stale ack) or not-acked imag runs the leg fail-closed as
-# today. The reachability PROBE (ping) is the only I/O and lives here in the caller; the decision is
-# the tested pure function. ONE ping per switch keeps every leg's decision consistent.
+# today. The reachability PROBE (imag_service_reachable — ssh :22 / dantesync :8898, never a bare
+# ping; issue 1317) is the only I/O and lives here in the caller; the decision is the tested pure
+# function. ONE service probe per switch keeps every leg's decision consistent.
 resolve_imag_offline_leg() {
   local ack_file eff_ack reachable=0
   ack_file="${RIG_FLEET_ACK_FILE:-$RIG_MODE_DIR/../rig-fleet.txt}"
   eff_ack="$(cambox_offline_ack_effective "${CAMBOX_OFFLINE_ACK:-}" "$ack_file")"
   IMAG_OFFLINE_ACK_REASON="$(CAMBOX_OFFLINE_ACK="$eff_ack" cambox_offline_ack_reason imag)"
-  if [ -n "$IMAG_OFFLINE_ACK_REASON" ] && ping -c1 -W2 "$IMAG_IP" >/dev/null 2>&1; then reachable=1; fi
+  if [ -n "$IMAG_OFFLINE_ACK_REASON" ] && imag_service_reachable "$IMAG_IP"; then reachable=1; fi
   if [ "$(imag_genlock_gate_offline_ack_action "$IMAG_OFFLINE_ACK_REASON" "$reachable")" = skip ]; then
     IMAG_OFFLINE_ACKED=1
     echo "[#1171] imag je operator-acknowledged offline (issue 1013: ${IMAG_OFFLINE_ACK_REASON}) a nedosiahnutelny z dev1 (${IMAG_IP}) -- vsetky imag OBS legy (burn toggle/sweep, program routing, event-assert) sa preskocia s hlasnou poznamkou (rovnaka vynimka ako recording-e2e.sh [0/8] preflight)."
@@ -837,7 +844,7 @@ require_imag_genlock_current() {
   ack_file="${RIG_FLEET_ACK_FILE:-$RIG_MODE_DIR/../rig-fleet.txt}"
   eff_ack="$(cambox_offline_ack_effective "${CAMBOX_OFFLINE_ACK:-}" "$ack_file")"
   ack_reason="$(CAMBOX_OFFLINE_ACK="$eff_ack" cambox_offline_ack_reason imag)"
-  if [ -n "$ack_reason" ] && ping -c1 -W2 "$IMAG_IP" >/dev/null 2>&1; then reachable=1; fi
+  if [ -n "$ack_reason" ] && imag_service_reachable "$IMAG_IP"; then reachable=1; fi
   action="$(imag_genlock_gate_offline_ack_action "$ack_reason" "$reachable")"
   if [ "$action" = "skip" ]; then
     echo "[#789/#1171] SKIP imag genlock HARD-BLOCK: imag je operator-acknowledged offline (issue 1013: ${ack_reason}) a nedosiahnutelny z dev1 (${IMAG_IP}) — gate sa PRESKAKUJE, TEST rezim pokracuje bez imag legu (rovnaka vynimka ako recording-e2e.sh [0/8] preflight)."
@@ -1014,7 +1021,7 @@ verify_stream_program_phase2() {
   local here rc=0 setup_rc=0 switch_rc=0
   here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" || here=""
   echo "[obs stream ${STREAM_IP}] #988 establishing the probe input first (teardown leaves it unbound between E2E runs, otherwise the assert below false-fails a healthy rig)"
-  python3 "$here/obs_phase2.py" setup --host "$STREAM_IP" --upstream 'STRIH-SNV (2ME PGM)' \
+  python3 "$here/obs_phase2.py" setup --host "$STREAM_IP" --upstream "$STREAM_PROBE_UPSTREAM" \
     --terminal --password "$OBS_WS_PASSWORD" 2>&1 | sed 's/^/    [stream probe setup] /' || setup_rc=$?
   echo "[obs stream ${STREAM_IP}] #901 assert+set PROGRAM = 'PHASE2-PROBE' (was: a printed hint, never enforced)"
   python3 "$here/obs_phase2.py" switch --host "$STREAM_IP" --program-scene "PHASE2-PROBE" \

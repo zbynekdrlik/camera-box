@@ -1,0 +1,13 @@
+[Unit]
+Description=strih-lx: pin the USB-NIC xhci IRQ off the OBS cores (issue 1317 item H)
+Documentation=https://github.com/zbynekdrlik/camera-box
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/strih-nic-irq-affinity.sh
+
+[Install]
+WantedBy=multi-user.target

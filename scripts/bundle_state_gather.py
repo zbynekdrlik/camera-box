@@ -116,11 +116,16 @@ def genlock_lock_facet_from_log(text):
     yet — UNKNOWN downstream, NEVER a fabricated UNLOCKED).
 
     Shape:
-      {state, reason, n_inputs, n_locked, n_absent, latency_ms, recent_event, qpc_drift_ms,
+      {state, reason, n_inputs, n_locked, n_absent, n_idle, latency_ms, recent_event, qpc_drift_ms,
        qpc_drift_ppm, qpc_expected_ppm, qpc_step,
        clock:{state}, output:{present, stamping_wallclock},
-       inputs:{<name>:{locked, connected, latency_ms, underruns, relocks, late_holds, depth}},
+       inputs:{<name>:{locked, connected, idle, latency_ms, underruns, relocks, late_holds, depth}},
        [recent_event_inputs:[{name, events}]], [audio_unexpected_inputs:[{name}]], source:"log"}
+
+    #1341 (schema v6): `n_idle` (connected-but-keep-alive-only input count) and per-input `idle`
+    distinguish an idle SongPlayer playlist input from a live one so the fleet indicator never
+    false-flaps DEGRADED/recent_event on it. Both degrade gracefully for a pre-v6 line
+    (`n_idle`->None, per-input `idle`->False).
 
     #1299 (schema v5, Part 4): `qpc_drift_ppm` (measured windowed drift rate), `qpc_expected_ppm` (the
     dantesync-reported slew the verdict compares against) and `qpc_step` (a single-sample wall STEP
@@ -185,6 +190,9 @@ def genlock_lock_facet_from_log(text):
                 # True for a v1 line from an older build (no `connected` key) so a senderless-but-
                 # unreported input reads connected, exactly as the pre-#1299 behaviour.
                 "connected": bool(row.get("connected", True)),
+                # #1341 (schema v6): whether this CONNECTED input is IDLE (keep-alive-only). Default
+                # False for a pre-v6 line (no `idle` key) so an older line reads exactly as pre-#1341.
+                "idle": bool(row.get("idle", False)),
                 "latency_ms": row.get("latency_ms"),
                 "underruns": row.get("underruns"),
                 "relocks": row.get("relocks"),
@@ -200,6 +208,9 @@ def genlock_lock_facet_from_log(text):
         # #1299 (schema v2): senderless (no-NDI-connection) input count. None for a v1 line from an
         # older build -> the decision treats absent as 0, i.e. the pre-#1299 all-connected reading.
         "n_absent": payload.get("n_absent"),
+        # #1341 (schema v6): CONNECTED-but-IDLE (keep-alive-only) input count. None for a pre-v6 line
+        # -> the decision treats idle as 0 (the pre-#1341 reading); the widget already decided `state`.
+        "n_idle": payload.get("n_idle"),
         "latency_ms": payload.get("latency_ms"),
         "recent_event": bool(payload.get("recent_event")),
         "qpc_drift_ms": payload.get("qpc_drift_ms"),
