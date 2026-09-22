@@ -67,7 +67,7 @@ OBSProjector::OBSProjector(QWidget *widget, obs_source_t *source_, int monitor, 
 
 	type = type_;
 #ifndef __APPLE__
-	setWindowIcon(QIcon::fromTheme("obs", QIcon(":/res/images/obs.png")));
+	Toplevel()->setWindowIcon(QIcon::fromTheme("obs", QIcon(":/res/images/obs.png")));
 #endif
 
 	if (monitor == -1) {
@@ -575,7 +575,10 @@ void OBSProjector::SetIsAlwaysOnTop(bool isAlwaysOnTop, bool isOverridden)
 	this->isAlwaysOnTop = isAlwaysOnTop;
 	this->isAlwaysOnTopOverridden = isOverridden;
 
-	SetAlwaysOnTop(this, isAlwaysOnTop);
+	// camera-box #1352: apply the stays-on-top flag to the host TOPLEVEL, not the hosted
+	// child (SetAlwaysOnTop does setWindowFlags + show, which on a child would try to make
+	// it a toplevel again). Toplevel() == this when unhosted (byte-identical on Windows).
+	SetAlwaysOnTop(Toplevel(), isAlwaysOnTop);
 }
 
 void OBSProjector::ScreenRemoved(QScreen *screen)

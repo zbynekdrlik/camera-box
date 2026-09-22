@@ -41,6 +41,7 @@ fn count(hay: &str, needle: &str) -> usize {
 const PROJECTOR: &str = "vendor/obs-studio/frontend/widgets/OBSProjector.cpp";
 const PROJECTOR_HPP: &str = "vendor/obs-studio/frontend/widgets/OBSProjector.hpp";
 const CREATION_SITE: &str = "vendor/obs-studio/frontend/widgets/OBSBasic_Projectors.cpp";
+const PREVIEW: &str = "vendor/obs-studio/frontend/widgets/OBSBasic_Preview.cpp";
 
 // ---------------------------------------------------------------------------
 // 1. The single creation site hosts the projector in a child window on Linux.
@@ -256,6 +257,42 @@ fn every_toplevel_only_call_is_routed_through_the_accessor() {
         s.contains("Toplevel()->windowHandle()") && s.contains("isOBSProjectorWindow"),
         "{PROJECTOR}: the `isOBSProjectorWindow` property must be set on \
          `Toplevel()->windowHandle()`."
+    );
+}
+
+#[test]
+fn runtime_always_on_top_and_icon_route_to_the_host_toplevel() {
+    // #1352 review Finding 1 (major): the RUNTIME always-on-top toggle must target the host
+    // toplevel, not the hosted GL child (SetAlwaysOnTop does setWindowFlags + show, which on a
+    // child would try to make it a toplevel again — re-introducing the present stall).
+    let cpp = squish(&repo_file(PROJECTOR));
+    assert!(
+        cpp.contains("SetAlwaysOnTop(Toplevel(), isAlwaysOnTop)"),
+        "{PROJECTOR}: SetIsAlwaysOnTop must apply the stays-on-top flag to the host toplevel \
+         (`SetAlwaysOnTop(Toplevel(), isAlwaysOnTop)`), not the hosted child."
+    );
+    assert!(
+        !cpp.contains("SetAlwaysOnTop(this, isAlwaysOnTop)"),
+        "{PROJECTOR}: `SetAlwaysOnTop(this, isAlwaysOnTop)` still targets the child projector."
+    );
+    // #1352 review Finding 2 (minor): the window icon is a toplevel property too.
+    assert!(
+        cpp.contains("Toplevel()->setWindowIcon("),
+        "{PROJECTOR}: setWindowIcon must be routed through `Toplevel()->setWindowIcon(` so the \
+         host window carries the OBS icon (symmetry with the routed title)."
+    );
+
+    // The fleet-wide always-on-top update (OBSBasic::UpdateProjectorAlwaysOnTop) must target
+    // each projector's host toplevel (`projector->window()`), not the child.
+    let prev = squish(&repo_file(PREVIEW));
+    assert!(
+        prev.contains("SetAlwaysOnTop(projectors[i]->window(), top)"),
+        "{PREVIEW}: UpdateProjectorAlwaysOnTop must apply the flag to each projector's host \
+         toplevel (`SetAlwaysOnTop(projectors[i]->window(), top)`)."
+    );
+    assert!(
+        !prev.contains("SetAlwaysOnTop(projectors[i], top)"),
+        "{PREVIEW}: `SetAlwaysOnTop(projectors[i], top)` still targets the child projector."
     );
 }
 
