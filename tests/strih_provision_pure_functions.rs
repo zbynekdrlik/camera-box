@@ -2482,3 +2482,27 @@ fn verify_strih_reads_the_janus_jcfg_via_sudo_n_fallback() {
         "verify-strih must read the root-only janus audiobridge jcfg via a `sudo -n cat` fallback"
     );
 }
+
+/// issue 1352 acceptance run (22.9.2026), the second half of the NVENC gate bug: once the gate fed
+/// the (large) OBS log into `strih_lx_nvenc_available_ok`, the predicate's `grep -q` exited on the
+/// first match, the producer took SIGPIPE, and under `pipefail` the pipeline returned 141 -> the gate
+/// still FAILED with NVENC provably live. The predicate must read its input to EOF (exit 0 iff a
+/// match) so a large early-match input passes under `set -o pipefail` -- the drain-safe parser class
+/// of `.claude/rules/drift-guard-log-parsers.md`.
+#[test]
+fn nvenc_predicate_is_drain_safe_under_pipefail_with_a_large_early_match() {
+    let body = r#"{ printf 'x [obs-nvenc] NVENC version: 12\n'; head -c 3000000 /dev/zero | tr '\0' 'a'; } | strih_lx_nvenc_available_ok; echo "rc=$?""#;
+    let (_, out, err) = run_sourced(&[], body);
+    assert!(
+        out.contains("rc=0"),
+        "a large early-match input must pass under pipefail (rc=0), got stdout={out:?} stderr={err:?}"
+    );
+    let (_, out2, _) = run_sourced(
+        &[],
+        r#"printf 'no hardware encoder here\n' | strih_lx_nvenc_available_ok; echo "rc=$?""#,
+    );
+    assert!(
+        out2.contains("rc=1"),
+        "no nvenc evidence must still fail: {out2:?}"
+    );
+}
