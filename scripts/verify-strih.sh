@@ -672,6 +672,33 @@ else
   bad "(ffmpeg) missing:${FFMPEG_MISSING} -- the on-box recording-verdict E2E cannot demux the recording; re-run setup-strih.sh step 4b (apt install ffmpeg)"
 fi
 
+# 31) bkshading shading-control service (issue 1353): the panel backend, provisioned ENABLE-ONLY by
+#     setup-strih.sh step 16c (the SUPERVISOR deploys the running service; the Windows service is the
+#     fallback until the owner accepts). Grade like intercom-hub/janus: an installed + enabled but
+#     INACTIVE unit is the CORRECT enable-only state (report-only); an ACTIVE unit is asserted HARD --
+#     the :8770 listener OWNER must be the bkshading binary (the rule's "confirm the listener's owner"
+#     check via ss -tlnp) AND /api/state must answer, else the running service is broken (FAIL loud).
+BKSH_PORT="${BKSHADING_SERVICE_PORT:-8770}"
+if [ -f /etc/systemd/system/bkshading-service.service ]; then
+  BKSH_EN="$(systemctl is-enabled bkshading-service 2>/dev/null || echo unknown)"
+  BKSH_ACT="$(systemctl is-active bkshading-service 2>/dev/null || echo inactive)"
+  if [ "$BKSH_ACT" = active ]; then
+    # Capture ss output first, then grep a here-string (no upstream pipe to SIGPIPE under pipefail).
+    BKSH_SS="$(ss -tlnp 2>/dev/null | grep -E ":${BKSH_PORT} " || true)"
+    BKSH_OWNER="$(printf '%s\n' "$BKSH_SS" | grep -oE 'users:\(\("[^"]+"' | head -1 | sed -E 's/.*\("//' || true)"
+    BKSH_API="$(curl -fsS --max-time 3 "http://127.0.0.1:${BKSH_PORT}/api/state" 2>/dev/null || true)"
+    if [ "$BKSH_OWNER" = bkshading ] && [ -n "$BKSH_API" ]; then
+      ok "(bkshading-service) active: :${BKSH_PORT} listener owned by bkshading + /api/state answers"
+    else
+      bad "(bkshading-service) active but unhealthy (:${BKSH_PORT} owner='${BKSH_OWNER:-none}', /api/state=$([ -n "$BKSH_API" ] && echo answered || echo silent)) -- the running service is broken; check journalctl -u bkshading-service"
+    fi
+  else
+    note "(bkshading-service) installed (enabled=${BKSH_EN}, active=${BKSH_ACT}); enable-only until the supervisor deploys the running service (issue 1353) -- report-only, an inactive unit is correct"
+  fi
+else
+  bad "(bkshading-service) unit /etc/systemd/system/bkshading-service.service not installed -- re-run setup-strih.sh step 16c (issue 1353)"
+fi
+
 echo ""
 if [ "$FAILS" -eq 0 ]; then
   echo -e "${GREEN}=== verify-strih.sh: ALL CLEAR ===${NC}"; exit 0

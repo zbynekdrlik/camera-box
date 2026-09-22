@@ -439,6 +439,25 @@ jobs:
             target/release/bkshading-relay
             target/release/bkshading
 
+      # issue 1353: a SERVICE-dedicated deploy artifact (the service binary + the panel web assets)
+      # for provisioning the bkshading SERVICE on strih-lx (systemd/bkshading-service.service via
+      # setup-strih.sh step 16c). Separate from the relay's bkshading-linux-amd64 above, mirroring the
+      # Windows bkshading-windows-amd64 / relay split. The artifact NAME is single-sourced in
+      # scripts/lib/strih-provision.sh (strih_bkshading_artifact_name) — KEEP IN SYNC. The web assets
+      # are also embedded in the binary, so the service is self-contained; web/ ships as a panel-source
+      # copy. Staged into one flat dir so the artifact root carries `bkshading` + `web/`.
+      - name: Stage bkshading service artifact (binary + panel web assets)
+        run: |
+          mkdir -p dist/bkshading-service/web
+          cp target/release/bkshading dist/bkshading-service/bkshading
+          cp -a bkshading/service/web/. dist/bkshading-service/web/
+      - name: Upload bkshading service (linux, panel)
+        uses: actions/upload-artifact@v4
+        with:
+          name: bkshading-service-linux-amd64
+          if-no-files-found: error
+          path: dist/bkshading-service
+
       # Cross-build the relay for aarch64 (issue 808 SBC/handheld milestone): the handheld runs on a
       # zero-class arm64 SBC (Pi Zero 2 W / Radxa ZERO 3W / Orange Pi Zero 2W) which is ARM and
       # CANNOT run the amd64 binary. The relay is pure Rust (axum/tokio/serde/clap; no C link deps —

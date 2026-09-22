@@ -705,6 +705,84 @@ else
 fi
 
 # ---------------------------------------------------------------------------------------------
+# A lettered sub-step so TOTAL_STEPS stays 17 (test-pinned).
+step "16c" "bkshading shading-control service (issue 1353) -- CI artifact -> /opt/bkshading, seed config + unit, enable-only"
+# issue 1353: the shading panel BACKEND (bkshading/service) ran only on the Windows strih PC; post-M4
+# the notebook is the strih, so it is provisioned here as a systemd unit fed the CI-built Linux
+# artifact. The panel web assets are EMBEDDED in the binary (bkshading/service/src/http.rs), so the
+# unit needs only the self-contained binary; web/ is installed beside it (design) as a panel-source
+# copy. ENABLE-ONLY: the SUPERVISOR deploys the running service; the Windows service stays the
+# fallback until the owner accepts it.
+BKSH_ART="$(strih_bkshading_artifact_name)"
+BKSH_SRC=""
+if [ -d "${STRIH_LX_BKSHADING_SRC:-}" ]; then
+  # Supervisor pre-staged the extracted artifact (the step-4 STRIH_LX_BUNDLE_SRC precedent).
+  BKSH_SRC="${STRIH_LX_BKSHADING_SRC%/}"
+  echo "  using pre-staged bkshading artifact from ${BKSH_SRC}"
+elif [ -n "${GH_TOKEN:-}" ]; then
+  # Fetch the CI artifact via the curl+GH_TOKEN pattern (the bundle-state step-9 precedent, extended
+  # to the GitHub artifacts API for the zip). A token WITHOUT actions:read -> empty URL -> the warn
+  # branch below (the supervisor then pre-stages via STRIH_LX_BKSHADING_SRC or places the binary).
+  BKSH_TMP="$(mktemp -d)"
+  BKSH_DL="$(curl -fsSL -H "Authorization: token ${GH_TOKEN}" -H 'Accept: application/vnd.github+json' \
+    "https://api.github.com/repos/${STRIH_LX_GH_REPO:-zbynekdrlik/camera-box}/actions/artifacts?name=${BKSH_ART}&per_page=20" 2>/dev/null \
+    | python3 -c 'import json,sys
+try:
+    arts=[a for a in json.load(sys.stdin).get("artifacts", []) if not a.get("expired")]
+    print(arts[0]["archive_download_url"] if arts else "")
+except Exception:
+    print("")' || true)"
+  if [ -n "$BKSH_DL" ] && curl -fsSL -H "Authorization: token ${GH_TOKEN}" -L "$BKSH_DL" -o "${BKSH_TMP}/art.zip" 2>/dev/null; then
+    if python3 -c 'import sys,zipfile; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])' "${BKSH_TMP}/art.zip" "${BKSH_TMP}/x" 2>/dev/null; then
+      BKSH_SRC="${BKSH_TMP}/x"
+      echo "  fetched the ${BKSH_ART} CI artifact"
+    else
+      warn "  could not extract the ${BKSH_ART} artifact zip"
+    fi
+  else
+    warn "  could not fetch the ${BKSH_ART} CI artifact (GH_TOKEN lacks actions:read, or no successful run yet)"
+  fi
+else
+  warn "  GH_TOKEN unset and STRIH_LX_BKSHADING_SRC not a dir -- fetch the ${BKSH_ART} artifact and install /opt/bkshading/bkshading (+ web/) before enabling"
+fi
+# Install the binary (+ web/ beside it) when a source resolved (robust to any nesting in the zip).
+if [ -n "$BKSH_SRC" ]; then
+  BKSH_BIN="$(find "$BKSH_SRC" -type f -name bkshading 2>/dev/null | head -1 || true)"
+  BKSH_WEB="$(find "$BKSH_SRC" -type d -name web 2>/dev/null | head -1 || true)"
+  [ -n "$BKSH_BIN" ] || fail "issue 1353: bkshading binary not found in the ${BKSH_ART} artifact"
+  install -d -m 0755 -o root -g root /opt/bkshading
+  install -m 0755 -o root -g root "$BKSH_BIN" /opt/bkshading/bkshading
+  if [ -n "$BKSH_WEB" ]; then
+    rm -rf /opt/bkshading/web
+    cp -a "$BKSH_WEB" /opt/bkshading/web
+    chown -R root:root /opt/bkshading/web
+    find /opt/bkshading/web -type d -exec chmod 0755 {} + 2>/dev/null || true
+    find /opt/bkshading/web -type f -exec chmod 0644 {} + 2>/dev/null || true
+  fi
+  echo "  installed bkshading service binary -> /opt/bkshading/bkshading (panel assets embedded; web/ copied beside it)"
+fi
+# Seed the operator config ONLY IF absent (the projector.json / bkshading.example.toml precedent).
+install -d -m 0755 /etc/bkshading
+if [ ! -f /etc/bkshading/bkshading.toml ]; then
+  strih_bkshading_config_text > /etc/bkshading/bkshading.toml \
+    || fail "could not seed /etc/bkshading/bkshading.toml"
+  echo "  seeded /etc/bkshading/bkshading.toml (cam1 + handhelds; edit for the live camera set)"
+else
+  echo "  /etc/bkshading/bkshading.toml already present -- leaving the operator's config"
+fi
+# Install the SYSTEM unit from the printer (source of truth) + ENABLE (NEVER start -- the supervisor
+# deploys the running service; the Windows service stays the fallback until the owner accepts).
+strih_bkshading_unit_text > /etc/systemd/system/bkshading-service.service \
+  || fail "could not write /etc/systemd/system/bkshading-service.service"
+systemctl daemon-reload
+systemctl enable bkshading-service.service 2>/dev/null || warn "  could not enable bkshading-service.service"
+if [ -x /opt/bkshading/bkshading ]; then
+  echo "  bkshading-service.service installed + enabled (NOT started -- supervisor deploys the running service); binary present"
+else
+  warn "  bkshading-service.service installed + enabled but /opt/bkshading/bkshading is ABSENT -- install the CI ${BKSH_ART} binary before go-live"
+fi
+
+# ---------------------------------------------------------------------------------------------
 step 17 "Final verification (verify-strih.sh acceptance gate)"
 if [ -x "${HERE}/verify-strih.sh" ]; then
   "${HERE}/verify-strih.sh" || fail "verify-strih.sh acceptance gate did not pass"
