@@ -170,6 +170,46 @@ echo OK
     assert!(out.contains("OK"), "stdout={out} stderr={err}");
 }
 
+/// The LIVE ssh read path `genlock_audit_snapshot_linux_read` (the `'\''`-escaped remote command +
+/// the numeric-`$tail_n` fallback — the most error-prone lines, and the only path the reader-seam
+/// tests above bypass) reconstructs the EXACT intended remote command, and a non-numeric tail
+/// override falls back to 400 with NO injection. A PATH-stub `sshpass` (a real executable, NOT a
+/// bash function — `timeout` execs the binary name, so a function stub would be bypassed, the #1290
+/// class) captures the argv `timeout sshpass -p PW ssh … user@host <remote-cmd>` was invoked with.
+#[test]
+fn linux_read_reconstructs_the_remote_command_and_sanitizes_tail() {
+    let body = r#"
+d="$(mktemp -d)"
+export SSHPASS_ARGV_FILE="$d/argv.txt"
+cat > "$d/sshpass" <<'STUB'
+#!/usr/bin/env bash
+printf '%s\n' "$@" > "$SSHPASS_ARGV_FILE"
+exit 0
+STUB
+chmod +x "$d/sshpass"
+export PATH="$d:$PATH"
+export STRIH_USER=opuser STRIH_PW=secretpw GENLOCK_AUDIT_SNAPSHOT_SSH_TIMEOUT=5
+genlock_audit_snapshot_linux_read 10.77.9.202 >/dev/null 2>&1 || true
+remote="$(tail -n1 "$SSHPASS_ARGV_FILE")"
+case "$remote" in *"genlock-fifo audit '"*) ;; *) echo "NO_MARKER: $remote"; exit 20;; esac
+case "$remote" in *'ls -t "$HOME"/.config/obs-studio/logs/*.txt'*) ;; *) echo "NO_LOGGLOB: $remote"; exit 21;; esac
+case "$remote" in *"tail -n 400"*) ;; *) echo "NO_TAIL400: $remote"; exit 22;; esac
+grep -q "opuser@10.77.9.202" "$SSHPASS_ARGV_FILE" || { echo "NO_USERHOST"; exit 23; }
+: > "$SSHPASS_ARGV_FILE"
+GENLOCK_AUDIT_SNAPSHOT_TAIL='notanumber; rm -rf /' genlock_audit_snapshot_linux_read 10.77.9.202 >/dev/null 2>&1 || true
+remote2="$(tail -n1 "$SSHPASS_ARGV_FILE")"
+case "$remote2" in *"tail -n 400"*) ;; *) echo "NO_FALLBACK: $remote2"; exit 24;; esac
+case "$remote2" in *"rm -rf"*) echo "INJECTION_LEAK: $remote2"; exit 25;; *) ;; esac
+echo OK
+"#;
+    let (rc, out, err) = run_sourced(body);
+    assert_eq!(
+        rc, 0,
+        "linux_read reconstruction (rc={rc}) stderr={err}\n{out}"
+    );
+    assert!(out.contains("OK"), "stdout={out} stderr={err}");
+}
+
 // ---------------------------------------------------------------------------------------------
 // STATIC ANCHORS — the recording-e2e.sh wiring (#675 anchor-safe: only NEW call lines added)
 // ---------------------------------------------------------------------------------------------
