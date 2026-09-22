@@ -288,31 +288,32 @@ fn converge_vectors() -> Vec<(u64, u64, u64, u32, u64, u32, u64)> {
         (w, w - (20 * 1_000_000 + 2 * i30), w, 20, i30, 2, 30),  // throttle exactly met
         (
             w,
-            w - (20 * 1_000_000 + i30 / 2 + 5_000_000 + 1),
+            // #1354: the dead-band is quantum + the 15 ms jitter budget (was + 5 ms hysteresis).
+            w - (20 * 1_000_000 + i30 / 2 + 15_000_000 + 1),
             w,
             20,
             i30,
             2,
             100,
-        ), // n=2 quantum edge, over
+        ), // n=2 budget edge, one ns OVER -> fires
         (
             w,
-            w - (20 * 1_000_000 + i30 / 2 + 5_000_000),
+            w - (20 * 1_000_000 + i30 / 2 + 15_000_000),
             w,
             20,
             i30,
             2,
             100,
-        ), // n=2 quantum edge, at (inert)
+        ), // n=2 budget edge, exactly AT -> inert (strict >)
         (
             w,
-            w - (20 * 1_000_000 + i30 / 2 + 5_000_000 + 1),
+            w - (20 * 1_000_000 + i30 / 2 + 15_000_000 + 1),
             w,
             20,
             i30,
             1,
             100,
-        ), // same age, n=1 -> inert
+        ), // same age, n=1 -> inert (N>=2 gate)
         (
             w,
             w - (1000 * 1_000_000 + 8_000_000),
