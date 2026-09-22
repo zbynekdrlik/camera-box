@@ -728,11 +728,11 @@ fn dantesync_unit_text_renders_the_role_and_fail_closes_on_ambiguous_shapes() {
         "the default client ExecStart must carry the client args: {out2b}"
     );
 
-    // Ambiguous shapes emit NOTHING and return non-zero.
+    // Ambiguous shapes emit NOTHING and return non-zero. (`client ''` is NOT ambiguous: the
+    // printer defaults an empty client args to the client helper -- asserted above.)
     for (role, args) in [
         ("server", "--ntp-server strih.lan"),
         ("client", "ntp_server_mode"),
-        ("client", ""),
         ("bogus", ""),
     ] {
         let (c3, out3, _e3) =

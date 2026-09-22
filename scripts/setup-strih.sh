@@ -260,6 +260,15 @@ if DEBIAN_FRONTEND=noninteractive apt-get install -y avahi-utils; then
 else
   warn "  avahi-utils install failed -- avahi-browse (NDI/mDNS discovery) will be absent; fix the box's apt sources and re-run"
 fi
+# issue 1317 item H (ffprobe): the on-box recording-verdict E2E ([8/8a], recording-verdict-on-strih-lx.sh)
+# spawns `ffprobe`, which Ubuntu 26.04 ships in the `ffmpeg` package -- a TOOL dependency of the E2E
+# verdict, NOT a bundle soname (never in RUNTIME_PACKAGES.txt). Same idempotent apt family as
+# avahi-utils above; warn not fail (OBS runs without it, only the on-box verdict would be missing it).
+if DEBIAN_FRONTEND=noninteractive apt-get install -y ffmpeg; then
+  echo "  ffmpeg installed (ffprobe for the on-box recording-verdict E2E)"
+else
+  warn "  ffmpeg install failed -- ffprobe (on-box E2E verdict) will be absent; fix the box's apt sources and re-run"
+fi
 
 # ---------------------------------------------------------------------------------------------
 step 5 "OBS profile facts (strih-lx: seeded from the Windows 'light' profile)"
