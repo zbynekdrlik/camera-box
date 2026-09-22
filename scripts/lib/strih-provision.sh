@@ -369,7 +369,7 @@ strih_lx_render_tick_ok() { grep -qiE 'render tick.*(enabled|on)|genlock[^\n]*re
 strih_lx_distroav_loaded_ok() { grep -qi 'distroav'; }
 
 # strih_lx_nvenc_available_ok  (stdin: `ffmpeg -encoders` output OR the OBS log) -> 0 iff NVENC present.
-strih_lx_nvenc_available_ok() { grep -qi 'nvenc'; }
+strih_lx_nvenc_available_ok() { grep -i 'nvenc' >/dev/null 2>&1; }  # reads to EOF: drain-safe under pipefail (issue 1352)
 
 # strih_lx_single_timesync_authority_ok  (stdin: enabled/active timesync unit names, one per line) ->
 # 0 iff dantesync is present AND no competing timesync daemon is (the ops single-authority rule).
