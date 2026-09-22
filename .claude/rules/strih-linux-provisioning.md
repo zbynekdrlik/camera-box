@@ -167,6 +167,61 @@ sandbox!` → the render process dies). `verify-strih.sh` item 13 only checks th
   PASS line reads `chrome-sandbox setuid-root (root:root 4755) -- CEF sandbox launchable`; a regressed
   helper prints e.g. `chrome-sandbox not setuid-root (wrong-owner: owner=newlevel:newlevel mode=700)`.
 
+## NIC xhci IRQ placement — the NET_RX softirq off the OBS cores (issue 1317 item H, DONE)
+
+The strih-lx notebook's NIC is a **USB 2.5GbE adapter** (RTL8156B), so its interrupt is an
+**xhci host-controller** IRQ, not a native PCIe NIC IRQ. With `irqbalance` NOT installed the kernel
+parks that IRQ on ONE core; on the live box (issue 1354, 22.9.2026) IRQ 125 (`xhci_hcd`, PCI
+function `0000:00:14.0`, iface `enx6c1ff766154b` carrying 10.77.9.202) was serviced only by CPU 6,
+where **~1.1 Gb/s of NDI NET_RX softirq** (28 % of the core) collided with OBS's
+`ndir:video`/`libobs` threads (unpinned across all 16 cpus, so they land on cpu6 routinely).
+
+**The gotcha — a NIC IRQ sharing an OBS core is receive-side jitter that folds straight into the
+genlock ladder.** Moving IRQ 125 to CPU 15 (the last `cpu_atom` E-core) — `echo 8000 >
+/proc/irq/125/smp_affinity_list` — cut `genlock #797 slow output_video` from **~35/min to 5–10/min**
+and the idle cam6/cam7 HOLD rate from 1–2/min to ~0.15/min. The softirq that decodes incoming NDI
+frames must live on a core OBS never renders on; the reverse (pinning OBS away from the NIC core)
+was measured INERT (`taskset 0-11` on OBS changed nothing while the IRQ move did), because the
+kernel scheduler still floats OBS threads onto whichever core the softirq is starving.
+
+**A live `smp_affinity` write does NOT survive a reboot / re-flash** — so it is baked into
+provisioning, fact-resolved (never a hard-coded IRQ number, which would break after a kernel/
+firmware change or a different USB port):
+
+- **`scripts/lib/strih-provision.sh`** pure resolvers, all Tier-0 testable over `/proc`-shaped
+  fixtures (`SYS_ROOT` / `PROC_INTERRUPTS` / `CPU_ATOM_FILE` seams): `strih_nic_xhci_pci_function`
+  (walk `readlink -f /sys/class/net/<iface>/device` up to the `usbN` root → the parent PCI
+  function), `strih_nic_xhci_irqs` (the `/proc/interrupts` rows naming BOTH `xhci_hcd` AND that PCI
+  function — the `IR-PCI-MSI-<pcifn>` chip column, which disambiguates a box with several xhci
+  controllers), `strih_nic_irq_target_cpu` (the LAST cpu in `/sys/devices/cpu_atom/cpus`, an E-core;
+  fallback = the highest online cpu on a non-hybrid box), `strih_nic_irq_affinity_verdict`
+  (single-cpu AND ≥ first cpu_atom), `strih_irq_total_count` + `strih_counter_advanced` (the live
+  advancing-counter half), `strih_cpulist_min`/`_max`.
+- **`strih_nic_irq_affinity_script_text`** emits the self-contained `/usr/local/bin/strih-nic-irq-affinity.sh`
+  boot script (iface via `STRIH_NIC_IFACE` override or the 10.77.9.202-address match → xhci PCI
+  function → IRQ(s) → last cpu_atom E-core → write `smp_affinity_list` + read back; **fail LOUD**
+  on any unresolved step or read-back mismatch). Its resolution is parity-locked to the lib helpers
+  by a test (`emitted_irq_script_resolution_matches_the_lib_helpers`) so the boot-write and the
+  verify-read never drift.
+- **`strih_nic_irq_affinity_unit_text`** ↔ the committed **`systemd/strih-nic-irq-affinity.service`**
+  (byte-parity test): a **system oneshot**, `Type=oneshot` / `RemainAfterExit=yes` /
+  `After=network-pre.target` / `WantedBy=multi-user.target`. `setup-strih.sh` installs the script
+  (0755) + unit as a **lettered sub-step `11b`** (TOTAL_STEPS stays 13 — the issue 1352/1353
+  lettered-sub-step precedent) and `systemctl enable`s it ONLY (enable-only; the supervisor applies
+  it live, the unit re-applies at every boot).
+- **`verify-strih.sh` item 16** (read-only, on the box): resolves the same xhci IRQ the same way,
+  asserts its `smp_affinity_list` is a SINGLE cpu ≥ the first `cpu_atom` cpu AND that its
+  `/proc/interrupts` counter is **ADVANCING** over a live 2-s window — never a static file check
+  (the "three ways a gate lies" discipline: a placement that reads right but on a dead IRQ is still
+  a fault). FAIL loud, drain-safe.
+
+**Boot-timing caveat (UNVERIFIED until the live apply):** `After=network-pre.target` orders the
+oneshot early; the iface's 10.77.9.202 address may not be assigned yet at that sync point on a
+slow-configuring boot. The script's primary path is the address match, so if the address is not up
+it fails LOUD (a diagnosable journal line, never a silent wrong placement) and the next boot / the
+supervisor's live run re-applies it. `STRIH_NIC_IFACE` pins the iface deterministically if the
+boot race ever proves real. Re-confirm on the first live boot that the oneshot resolved cleanly.
+
 ## Follow-ups (not done in the preparation lane)
 
 - ~~obs-browser / CEF in the strih CI variant~~ — **DONE (issue 1317, CEF now wired)**, see the CI
