@@ -197,15 +197,22 @@ firmware change or a different USB port):
   fallback = the highest online cpu on a non-hybrid box), `strih_nic_irq_affinity_verdict`
   (single-cpu AND ≥ first cpu_atom), `strih_irq_total_count` + `strih_counter_advanced` (the live
   advancing-counter half), `strih_cpulist_min`/`_max`.
+- **`strih_nic_iface_by_driver SYSROOT DRIVER`** resolves the NIC iface by its kernel DRIVER — the
+  USB NIC is `r8152` (RTL815x USB-ethernet), the onboard PCIe NIC is `r8169`, so `r8152` uniquely
+  names it — and it works AT BOOT before any IP is assigned. Result is encoded in the output: one
+  match → the iface (rc 0); none → `''` (rc 1, fall back to the address); more than one →
+  `MULTI:<names>` (rc 2, fail loud — `STRIH_NIC_IFACE` disambiguates).
 - **`strih_nic_irq_affinity_script_text`** emits the self-contained `/usr/local/bin/strih-nic-irq-affinity.sh`
-  boot script (iface via `STRIH_NIC_IFACE` override or the 10.77.9.202-address match → xhci PCI
-  function → IRQ(s) → last cpu_atom E-core → write `smp_affinity_list` + read back; **fail LOUD**
-  on any unresolved step or read-back mismatch). Its resolution is parity-locked to the lib helpers
-  by a test (`emitted_irq_script_resolution_matches_the_lib_helpers`) so the boot-write and the
-  verify-read never drift.
+  boot script: iface = `STRIH_NIC_IFACE` override → else the `r8152` DRIVER match (boot-safe, no IP
+  needed) → else the 10.77.9.202 address match → xhci PCI function → IRQ(s) → last cpu_atom E-core →
+  write `smp_affinity_list` + read back; **fail LOUD** on any unresolved step or read-back mismatch.
+  Its resolution is parity-locked to the lib helpers by a test
+  (`emitted_irq_script_resolution_matches_the_lib_helpers`) so the boot-write and the verify-read
+  never drift.
 - **`strih_nic_irq_affinity_unit_text`** ↔ the committed **`systemd/strih-nic-irq-affinity.service`**
   (byte-parity test): a **system oneshot**, `Type=oneshot` / `RemainAfterExit=yes` /
-  `After=network-pre.target` / `WantedBy=multi-user.target`. `setup-strih.sh` installs the script
+  `After=network-online.target` + `Wants=network-online.target` / `WantedBy=multi-user.target` — it
+  runs after NetworkManager-wait-online, so the NIC is up when it fires. `setup-strih.sh` installs the script
   (0755) + unit as a **lettered sub-step `11b`** (TOTAL_STEPS stays 13 — the issue 1352/1353
   lettered-sub-step precedent) and `systemctl enable`s it ONLY (enable-only; the supervisor applies
   it live, the unit re-applies at every boot).
@@ -215,12 +222,14 @@ firmware change or a different USB port):
   (the "three ways a gate lies" discipline: a placement that reads right but on a dead IRQ is still
   a fault). FAIL loud, drain-safe.
 
-**Boot-timing caveat (UNVERIFIED until the live apply):** `After=network-pre.target` orders the
-oneshot early; the iface's 10.77.9.202 address may not be assigned yet at that sync point on a
-slow-configuring boot. The script's primary path is the address match, so if the address is not up
-it fails LOUD (a diagnosable journal line, never a silent wrong placement) and the next boot / the
-supervisor's live run re-applies it. `STRIH_NIC_IFACE` pins the iface deterministically if the
-boot race ever proves real. Re-confirm on the first live boot that the oneshot resolved cleanly.
+**Boot ordering (main design decision 22.9.2026):** the oneshot orders `After=network-online.target`
++ `Wants=network-online.target` so it fires only after NetworkManager-wait-online (the box runs
+NetworkManager), i.e. after the NIC is up. The iface is resolved DRIVER-first (`r8152`), which does
+not depend on the IP at all — so placement no longer races the address assignment. The address match
+remains only as a fall-back, and any unresolved step still fails LOUD (a diagnosable journal line,
+never a silent wrong placement). `STRIH_NIC_IFACE` still overrides everything. UNVERIFIED until the
+first live boot on strih-lx: re-confirm the oneshot resolved cleanly (the supervisor's live apply +
+`verify-strih.sh` item 16).
 
 ## Follow-ups (not done in the preparation lane)
 
