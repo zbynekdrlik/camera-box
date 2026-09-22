@@ -3182,6 +3182,87 @@ mod tests {
         );
     }
 
+    // ---------------------------------------------------------------------------------------------
+    // #1354 — the N>=2 conveyor's ARRIVAL-JITTER BUDGET. The phase shed parks the N>=2 conveyor
+    // `quantum + budget` above its arrival floor; the budget was only PHASE_PIN_HYSTERESIS_NS (5 ms),
+    // so a late-arriving second frame of a 60->30 pair had just 5 ms of headroom right after a shed.
+    // strih-lx's receive path emits `#797 slow output_video` events of 5-17 ms ~30/min on every
+    // input even idle, so an input near the mature deadline took SINGLE-MATURE ticks (a permanent
+    // +one-source-interval phase step each) faster than the shed drains -> the 100-250 ms per-camera
+    // delivery ladder measured live (cam4, 22.9.2026). Raising the budget to 15 ms covers every
+    // measured slow-output event. The FAITHFUL, budget-dependent proof is this DIRECT threshold test;
+    // the simplified SimConveyor1049's re-anchoring follower washes a sub-frame phase error out each
+    // tick, so it cannot reproduce the live boundary-keying ladder (finding on the ticket, 22.9.).
+    // ---------------------------------------------------------------------------------------------
+
+    /// The shed dead-band widens from the 5 ms grid hysteresis to the 15 ms arrival-jitter budget on
+    /// the N>=2 path: a held age between 5 ms and 15 ms above `reserve + quantum` is now INSIDE the
+    /// band (no shed), where the old 5 ms margin would have shed a healthy late arrival. Below 5 ms:
+    /// always inert; above 15 ms: still fires; N==1: inert throughout. Written with LITERAL offsets
+    /// so it FAILS against the old 5 ms threshold (RED) and PASSES against the 15 ms budget (GREEN).
+    #[test]
+    fn jitter_budget_widens_the_n2_shed_deadband_1354() {
+        let wall = 1_000_000_000_000u64;
+        let newest = wall; // floor 0 -> target = reserve
+        let reserve_ms = 20u32;
+        let reserve = reserve_ms as u64 * 1_000_000;
+        let quantum = I30 / 2; // n=2 source interval
+        let base = reserve + quantum;
+        // 4 ms over: below even the 5 ms grid-hysteresis floor -> inert.
+        assert!(
+            !should_converge_phase(
+                wall,
+                wall - (base + 4_000_000),
+                newest,
+                reserve_ms,
+                I30,
+                2,
+                100
+            ),
+            "#1354: 4 ms over reserve+quantum is inside even the 5 ms floor -> never sheds"
+        );
+        // 10 ms over: inside the 15 ms budget -> inert (the OLD 5 ms margin would have shed here).
+        assert!(
+            !should_converge_phase(
+                wall,
+                wall - (base + 10_000_000),
+                newest,
+                reserve_ms,
+                I30,
+                2,
+                100
+            ),
+            "#1354: 10 ms over reserve+quantum must be INSIDE the 15 ms jitter budget (no shed) — \
+             the old 5 ms margin would have shed a healthy <=15 ms-late arrival here"
+        );
+        // 16 ms over: above the 15 ms budget -> a genuine phase error still sheds.
+        assert!(
+            should_converge_phase(
+                wall,
+                wall - (base + 16_000_000),
+                newest,
+                reserve_ms,
+                I30,
+                2,
+                100
+            ),
+            "#1354: a genuine phase error 16 ms over reserve+quantum (> the 15 ms budget) still sheds"
+        );
+        // N==1 stays inert regardless (the N>=2 gate) even at a large held age.
+        assert!(
+            !should_converge_phase(
+                wall,
+                wall - (base + 30_000_000),
+                newest,
+                reserve_ms,
+                I30,
+                1,
+                100
+            ),
+            "#1354: N==1 is below the N>=2 gate — the budget change never touches the inert N==1 path"
+        );
+    }
+
     // -----------------------------------------------------------------------------------------
     // #1161 — the STAGE-2 ACQUIRE BRACKETING GATE (relock_acquire_should_hold).
     // -----------------------------------------------------------------------------------------
