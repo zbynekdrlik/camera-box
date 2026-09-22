@@ -70,7 +70,10 @@ fn run_swap(scp_fail: bool) -> SwapRun {
     // byte-verify passes (a stubbed no-op mv leaves no real file — the hash is what the gate reads).
     stub("sha256sum", "#!/usr/bin/env bash\necho 'aaaa  '\"$1\"\n");
     // gh MUST NOT be called in frame-probe-only mode.
-    stub("gh", "#!/usr/bin/env bash\necho 'GH-CALLED-UNEXPECTEDLY' >&2\nexit 1\n");
+    stub(
+        "gh",
+        "#!/usr/bin/env bash\necho 'GH-CALLED-UNEXPECTEDLY' >&2\nexit 1\n",
+    );
 
     // sshpass: drop `-p <pass>`; log + honor scp (fail when SCP_FAIL); log + EXECUTE ssh remote
     // commands through bash so the mount/systemctl/chmod/mv/sync/sha256sum stubs run.
@@ -127,7 +130,12 @@ bash -c "$cmd"
 fn idx(log: &[String], needle: &str) -> usize {
     log.iter()
         .position(|l| l.contains(needle))
-        .unwrap_or_else(|| panic!("no remote entry contains {needle:?}; log:\n{}", log.join("\n")))
+        .unwrap_or_else(|| {
+            panic!(
+                "no remote entry contains {needle:?}; log:\n{}",
+                log.join("\n")
+            )
+        })
 }
 
 #[test]

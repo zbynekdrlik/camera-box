@@ -107,18 +107,28 @@ deploy_frame_probe_to_painter() {
   restore_action="$(frame_probe_restore_enable_decision "$was_enabled")"
   info "[$painter] cam2-painter.service is-enabled='${was_enabled:-<none>}' -> restore: $restore_action"
 
-  # stop the painter (best-effort — it may be inactive / not-installed) + remount rw for the swap.
-  if ! ssh_box "$ip" "mount -o remount,rw / && (systemctl stop cam2-painter.service 2>/dev/null || true)"; then
+  # #1351: park the transient cam2-painter-deadman re-armer BEFORE stopping the painter, then
+  # remount rw for the swap. The deadman (scripts/lib/cam2-painter-deadman.sh) re-fires every ~5 min
+  # and would resurrect the OLD binary mid-swap; a re-arm inside the ~2 s swap window is a second way
+  # the old inode stays busy (→ ETXTBSY). It is a transient systemd-run unit, so a stop when it was
+  # never armed (a bare deploy-fleet run outside E2E) is a harmless no-op (|| true).
+  if ! ssh_box "$ip" "mount -o remount,rw / && (systemctl stop cam2-painter-deadman.timer 2>/dev/null || true) && (systemctl stop cam2-painter.service 2>/dev/null || true)"; then
     err "[$painter] remount-rw / painter stop failed"; FAILED+=("$painter-painter(stop-failed)"); return 0
   fi
-  if ! scp_box "$ip" "$FRAME_PROBE_BIN" "/usr/local/bin/frame-probe"; then
+  # #1351: ETXTBSY-proof swap — scp to a SIDECAR, then go live via ONE atomic rename. The painter
+  # binary may still be executing (Restart=always) when scp opens the destination for writing, which
+  # gives `Text file busy` on the live path; a rename replaces the directory entry while the running
+  # process keeps its old inode, so ETXTBSY cannot occur by construction. byte-verify (below) reads
+  # the FINAL path and is the real gate — a failed rename leaves stale/absent bytes there.
+  if ! scp_box "$ip" "$FRAME_PROBE_BIN" "/usr/local/bin/frame-probe.new"; then
     err "[$painter] frame-probe scp failed"; FAILED+=("$painter-painter(scp-failed)")
-    # best-effort restore of the unit + read-only root even on a failed swap.
+    # best-effort restore of the unit + re-arm the parked deadman + read-only root even on a failed swap.
     [ "$restore_action" = "enable-now" ] && ssh_box "$ip" "systemctl enable --now cam2-painter.service 2>/dev/null || true" || true
-    ssh_box "$ip" "(mount -o remount,ro / 2>/dev/null; true)" || true
+    ssh_box "$ip" "(systemctl start cam2-painter-deadman.timer 2>/dev/null || true); (mount -o remount,ro / 2>/dev/null; true)" || true
     return 0
   fi
-  ssh_box "$ip" "chmod +x /usr/local/bin/frame-probe 2>/dev/null || true" || true
+  # chmod the sidecar, then atomically rename it over the (possibly running) live binary + fsync.
+  ssh_box "$ip" "chmod 0755 /usr/local/bin/frame-probe.new && mv -f /usr/local/bin/frame-probe.new /usr/local/bin/frame-probe && sync" || true
 
   # Byte-verify (deploy-from-clean-tree.md Layer 3 — a partial scp / stale same-name binary would
   # pass a mere presence check but fail this).
@@ -137,8 +147,9 @@ deploy_frame_probe_to_painter() {
     if ! ssh_box "$ip" "systemctl enable --now cam2-painter.service && (mount -o remount,ro / 2>/dev/null; true)"; then
       err "[$painter] cam2-painter.service enable --now failed"; FAILED+=("$painter-painter(restart-failed)")
       # #1138 (review): the && short-circuits the remount-ro when enable --now fails, leaving root
-      # rw. Re-assert read-only root unconditionally before returning (best-effort).
-      ssh_box "$ip" "(mount -o remount,ro / 2>/dev/null; true)" || true
+      # rw. Re-assert read-only root unconditionally before returning (best-effort). #1351: re-arm
+      # the parked deadman here too.
+      ssh_box "$ip" "(systemctl start cam2-painter-deadman.timer 2>/dev/null || true); (mount -o remount,ro / 2>/dev/null; true)" || true
       return 0
     fi
     local active
@@ -152,6 +163,9 @@ deploy_frame_probe_to_painter() {
     ssh_box "$ip" "(mount -o remount,ro / 2>/dev/null; true)" || true
     log "[$painter] frame-probe swapped; cam2-painter.service left in its prior state ('${was_enabled:-<none>}') — not re-armed (#892: an event-mode/dark painter must not return onto a live broadcast)"
   fi
+  # #1351: re-arm the transient deadman timer we parked before the swap, AFTER the #892 restore so it
+  # never races the painter restart (best-effort; a no-op when it was never armed).
+  ssh_box "$ip" "systemctl start cam2-painter-deadman.timer 2>/dev/null || true" || true
   echo ""
 }
 
