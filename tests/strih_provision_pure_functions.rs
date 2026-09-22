@@ -674,61 +674,147 @@ fn start_script_default_obs_bin_is_the_usr_prefix() {
     );
 }
 
-// --- issue 1317 (this lane): dantesync CLIENT unit + the verify sleep-mask predicate --------------
+// --- issue 1317 (this lane): dantesync ROLE-aware unit + the verify sleep-mask predicate -----------
 
-/// `strih_dantesync_unit_text` emits a systemd unit whose ExecStart is a dantesync CLIENT
-/// invocation (`/usr/local/bin/dantesync --ntp-server …`) — never `--service`, never a master mode —
-/// in the EXACT cambox unit shape (Type=simple, Restart=always, WantedBy=multi-user.target).
+/// issue 1317: `strih_dantesync_unit_text ROLE [ARGS]` renders the systemd unit for the given ROLE.
+/// Post-M4 the strih notebook IS the fleet's NTP master, so `server` (the default) renders the BARE
+/// NTP-master ExecStart (folding the live 10-ntp-master.conf drop-in into the unit); `client` renders
+/// `--ntp-server <host>`. Fail-closed via strih_lx_dantesync_role_ok on an ambiguous shape (server
+/// WITH args, client with a master/empty arg, an unknown role) -- but a plain server role is CORRECT
+/// and NEVER refused (the reversal of the pre-M4 "always fail-closed on server mode" behaviour).
 #[test]
-fn dantesync_unit_text_is_a_client_ntp_server_invocation_never_service_or_master() {
-    let (code, out, _e) = run_sourced(&[], "strih_dantesync_unit_text '--ntp-server strih.lan'");
-    assert_eq!(code, 0, "a client invocation must emit a unit");
-    assert!(
-        out.contains("ExecStart=/usr/local/bin/dantesync --ntp-server strih.lan"),
-        "ExecStart must be the dantesync CLIENT daemon at /usr/local/bin/dantesync: {out}"
+fn dantesync_unit_text_renders_the_role_and_fail_closes_on_ambiguous_shapes() {
+    // server role: the BARE NTP-master ExecStart, correct cambox unit shape, no client args.
+    let (code, out, _e) = run_sourced(&[], "strih_dantesync_unit_text server ''");
+    assert_eq!(
+        code, 0,
+        "a server role must emit a unit (the post-M4 NTP master)"
     );
     assert!(
-        out.contains("Type=simple"),
-        "unit must be Type=simple: {out}"
+        out.contains("ExecStart=/usr/local/bin/dantesync\n"),
+        "server ExecStart must be the BARE NTP-master daemon: {out}"
     );
     assert!(
-        out.contains("Restart=always"),
-        "unit must Restart=always: {out}"
+        !out.contains("--ntp-server"),
+        "the server role must NOT carry the client --ntp-server args: {out}"
     );
     assert!(
-        out.contains("RestartSec=5"),
-        "unit must set RestartSec=5: {out}"
-    );
-    assert!(
-        out.contains("WantedBy=multi-user.target"),
-        "unit must be WantedBy=multi-user.target: {out}"
+        out.contains("Type=simple")
+            && out.contains("Restart=always")
+            && out.contains("RestartSec=5")
+            && out.contains("WantedBy=multi-user.target"),
+        "server unit must keep the cambox shape: {out}"
     );
     assert!(
         !out.contains("--service"),
         "`--service` is a run mode, not an installer flag — it must never appear: {out}"
     );
+
+    // client role: the --ntp-server ExecStart.
+    let (c2, out2, _e2) = run_sourced(
+        &[],
+        "strih_dantesync_unit_text client '--ntp-server strih.lan'",
+    );
+    assert_eq!(c2, 0, "a client role with client args must emit a unit");
     assert!(
-        !out.to_lowercase().contains("server_mode") && !out.to_lowercase().contains("master"),
-        "the unit must never carry a server/master mode: {out}"
+        out2.contains("ExecStart=/usr/local/bin/dantesync --ntp-server strih.lan"),
+        "client ExecStart must be the CLIENT daemon: {out2}"
+    );
+    // client with no ARGS defaults to the client args helper.
+    let (c2b, out2b, _e) = run_sourced(&[], "strih_dantesync_unit_text client ''");
+    assert_eq!(c2b, 0);
+    assert!(
+        out2b.contains("ExecStart=/usr/local/bin/dantesync --ntp-server"),
+        "the default client ExecStart must carry the client args: {out2b}"
     );
 
-    // With no arg it defaults to the client args helper (still a client unit).
-    let (c2, out2, _e2) = run_sourced(&[], "strih_dantesync_unit_text");
-    assert_eq!(c2, 0);
-    assert!(
-        out2.contains("ExecStart=/usr/local/bin/dantesync --ntp-server"),
-        "the default ExecStart must be the client args: {out2}"
-    );
+    // Ambiguous shapes emit NOTHING and return non-zero.
+    for (role, args) in [
+        ("server", "--ntp-server strih.lan"),
+        ("client", "ntp_server_mode"),
+        ("client", ""),
+        ("bogus", ""),
+    ] {
+        let (c3, out3, _e3) =
+            run_sourced(&[], &format!("strih_dantesync_unit_text '{role}' '{args}'"));
+        assert_ne!(
+            c3, 0,
+            "ambiguous role='{role}' args='{args}' must be refused"
+        );
+        assert!(
+            out3.trim().is_empty(),
+            "a refused invocation must emit NOTHING (role='{role}' args='{args}'): {out3}"
+        );
+    }
+}
 
-    // Fail-closed: a master invocation emits NOTHING and returns non-zero. (`--master` matches the
-    // classifier's `*master*` master pattern; note `--ntp-server-mode` would NOT — it matches the
-    // client `*ntp-server*` pattern, so the master token here must be a genuine one.)
-    let (c3, out3, _e3) = run_sourced(&[], "strih_dantesync_unit_text '--master'");
-    assert_ne!(c3, 0, "a master invocation must be refused");
-    assert!(
-        out3.trim().is_empty(),
-        "a refused (master) invocation must emit NOTHING: {out3}"
+/// issue 1317: `strih_lx_dantesync_role_ok ROLE ARGS` is the ROLE-AWARE public gate that REPLACES
+/// strih_lx_dantesync_is_client_not_master as the caller-facing predicate. server + empty -> ok (the
+/// NTP master; never fail-closed on server mode itself), server + args -> ambiguous -> fail, client +
+/// a real client arg -> ok, client + master/empty -> fail, unknown/empty role -> fail.
+#[test]
+fn dantesync_role_ok_is_role_aware_and_fail_closed_on_ambiguity() {
+    let (c, _o, _e) = run_sourced(&[], "strih_lx_dantesync_role_ok server ''");
+    assert_eq!(
+        c, 0,
+        "server role with no args must pass (the fleet NTP master)"
     );
+    let (c2, _o, _e) = run_sourced(
+        &[],
+        "strih_lx_dantesync_role_ok server '--ntp-server strih.lan'",
+    );
+    assert_ne!(c2, 0, "server + args is an ambiguous shape -> fail-closed");
+    let (c3, _o, _e) = run_sourced(
+        &[],
+        "strih_lx_dantesync_role_ok client '--ntp-server strih.lan'",
+    );
+    assert_eq!(c3, 0, "client + a real client arg must pass");
+    for args in ["ntp_server_mode", "master", ""] {
+        let (cx, _o, _e) = run_sourced(&[], &format!("strih_lx_dantesync_role_ok client '{args}'"));
+        assert_ne!(cx, 0, "client + '{args}' must fail-closed");
+    }
+    for role in ["", "bogus"] {
+        let (cx, _o, _e) = run_sourced(&[], &format!("strih_lx_dantesync_role_ok '{role}' ''"));
+        assert_ne!(cx, 0, "role '{role}' must fail-closed");
+    }
+}
+
+/// issue 1317: `strih_lx_dantesync_status_role_verdict ROLE REACHABLE MODE UDP123` grades the live
+/// :8898/status + :123 read. ok ONLY for reachable + a locked mode (+ for server, a :123 listener);
+/// every other state prints its own token + returns non-zero (verify-strih renders each token).
+#[test]
+fn dantesync_status_role_verdict_grades_reachable_locked_and_server_listener() {
+    let (c, o, _e) = run_sourced(
+        &[],
+        "strih_lx_dantesync_status_role_verdict server 1 LOCK 1",
+    );
+    assert_eq!(c, 0, "server reachable+LOCK+listener -> ok");
+    assert_eq!(o.trim(), "ok");
+    let (_c, o, _e) = run_sourced(
+        &[],
+        "strih_lx_dantesync_status_role_verdict server 1 LOCK 0",
+    );
+    assert_eq!(
+        o.trim(),
+        "no-ntp-listener",
+        "server without :123 -> no-ntp-listener"
+    );
+    let (c, o, _e) = run_sourced(
+        &[],
+        "strih_lx_dantesync_status_role_verdict client 1 NANO 0",
+    );
+    assert_eq!(c, 0, "client does not require a :123 listener");
+    assert_eq!(o.trim(), "ok");
+    let (_c, o, _e) = run_sourced(
+        &[],
+        "strih_lx_dantesync_status_role_verdict server 0 absent 0",
+    );
+    assert_eq!(o.trim(), "unreachable");
+    let (_c, o, _e) = run_sourced(
+        &[],
+        "strih_lx_dantesync_status_role_verdict server 1 FREE 1",
+    );
+    assert_eq!(o.trim(), "mode:FREE", "a non-locked mode is reported");
 }
 
 /// `strih_verify_sleep_masked` grades the FIRST line only, so a correctly-masked box passes even
@@ -756,18 +842,31 @@ fn verify_sleep_masked_grades_first_line_and_survives_the_double_masked_bug() {
     assert_ne!(c5, 0, "an empty state must fail-closed");
 }
 
-/// issue 1317: `setup-strih.sh` step 2 must INSTALL the dantesync unit (write it via
-/// `strih_dantesync_unit_text` into /etc/systemd/system/dantesync.service), not merely validate the
-/// client args — and this must precede the OBS unit enable (step 8).
+/// issue 1317: `setup-strih.sh` step 2 must INSTALL the dantesync unit with the ROLE folded in (write
+/// it via `strih_dantesync_unit_text "$DS_ROLE" "$DS_ARGS"` into /etc/systemd/system/dantesync.service),
+/// default the role to `server` (the post-M4 NTP master), remove any stale dantesync.service.d/*.conf
+/// drop-in, and this must precede the OBS unit enable (step 8).
 #[test]
 fn setup_strih_installs_the_dantesync_unit_in_step_2() {
     let s = read_script("scripts/setup-strih.sh");
     let emit = s
-        .find("strih_dantesync_unit_text \"$DS_ARGS\"")
-        .expect("setup-strih step 2 must emit the dantesync unit via strih_dantesync_unit_text");
+        .find("strih_dantesync_unit_text \"$DS_ROLE\" \"$DS_ARGS\"")
+        .expect("setup-strih step 2 must emit the dantesync unit via strih_dantesync_unit_text ROLE ARGS");
     assert!(
         s.contains("/etc/systemd/system/dantesync.service"),
         "setup-strih must write the dantesync unit to /etc/systemd/system/dantesync.service"
+    );
+    assert!(
+        s.contains("STRIH_LX_DANTESYNC_ROLE:-server"),
+        "setup-strih step 2 must default the dantesync role to `server` (the post-M4 NTP master)"
+    );
+    assert!(
+        s.contains("strih_lx_dantesync_role_ok \"$DS_ROLE\" \"$DS_ARGS\""),
+        "setup-strih step 2 must guard the role+args via strih_lx_dantesync_role_ok"
+    );
+    assert!(
+        s.contains("rm -f /etc/systemd/system/dantesync.service.d/*.conf"),
+        "setup-strih step 2 must remove any stale dantesync.service.d/*.conf drop-in (role now in the unit)"
     );
     assert!(
         s.contains("rm -f /var/run/dantesync.lock"),
@@ -2504,5 +2603,326 @@ fn nvenc_predicate_is_drain_safe_under_pipefail_with_a_large_early_match() {
     assert!(
         out2.contains("rc=1"),
         "no nvenc evidence must still fail: {out2:?}"
+    );
+}
+
+// --- issue 1317 (this lane): the 5 hand-patch bake-ins (A BrowserHWAccel seed, B plugin prune, C
+// collection hygiene, D RustDesk) + their setup/verify wiring --------------------------------------
+
+/// (A) `strih_lx_obs_global_ini_cmds OBS_CFG_DIR` seeds [General] BrowserHWAccel=false into
+/// global.ini via an idempotent RawConfigParser upsert, preserving other keys/sections; exactly one
+/// BrowserHWAccel key results.
+#[test]
+fn obs_global_ini_cmds_seeds_browserhwaccel_false_idempotently() {
+    let body = r#"
+d="$(mktemp -d)"; mkdir -p "$d/obs"
+eval "$(strih_lx_obs_global_ini_cmds "$d/obs")"
+grep -q '^\[General\]' "$d/obs/global.ini" && grep -q '^BrowserHWAccel=false' "$d/obs/global.ini" && echo FIRST_OK
+printf '[General]\nMaxLogs=10\nBrowserHWAccel=true\n[Video]\nFPSCommon=30\n' > "$d/obs/global.ini"
+eval "$(strih_lx_obs_global_ini_cmds "$d/obs")"
+grep -q '^BrowserHWAccel=false' "$d/obs/global.ini" && grep -q '^MaxLogs=10' "$d/obs/global.ini" && grep -q '^FPSCommon=30' "$d/obs/global.ini" && echo UPSERT_OK
+n="$(grep -c '^BrowserHWAccel' "$d/obs/global.ini")"; echo "count=$n"
+rm -rf "$d"
+"#;
+    let (code, out, err) = run_sourced(&[], body);
+    assert_eq!(code, 0, "harness failed: {err}");
+    assert!(
+        out.contains("FIRST_OK"),
+        "fresh global.ini must gain [General] BrowserHWAccel=false: {out}"
+    );
+    assert!(
+        out.contains("UPSERT_OK"),
+        "upsert must flip true->false + preserve other keys/sections: {out}"
+    );
+    assert!(
+        out.contains("count=1"),
+        "exactly one BrowserHWAccel key: {out}"
+    );
+}
+
+/// (A wiring) setup-strih step 7 seeds global.ini via the printer (OBS stopped); verify-strih asserts
+/// BrowserHWAccel=false.
+#[test]
+fn setup_strih_seeds_browserhwaccel_in_step_7_and_verify_checks_it() {
+    let s = read_script("scripts/setup-strih.sh");
+    assert!(
+        s.contains("strih_lx_obs_global_ini_cmds \"$OBS_CFG\""),
+        "step 7 must seed global.ini via strih_lx_obs_global_ini_cmds"
+    );
+    let v = read_script("scripts/verify-strih.sh");
+    assert!(
+        v.contains("BrowserHWAccel=false"),
+        "verify-strih must assert BrowserHWAccel=false"
+    );
+}
+
+/// (B) the prune LIST (3 basenames, never distroav/browser) + the two obs-plugins DIRS are the ONE
+/// source of truth used by BOTH the setup prune loop and the verify absence check.
+#[test]
+fn plugin_prune_list_and_dirs_are_the_one_source_of_truth() {
+    let (_c, out, _e) = run_sourced(&[], "strih_lx_obs_plugin_prune_list");
+    let lines: Vec<&str> = out.lines().filter(|l| !l.is_empty()).collect();
+    assert_eq!(lines.len(), 3, "exactly 3 prune basenames: {out}");
+    for want in ["decklink*.so", "obs-qsv11.so", "obs-vst.so"] {
+        assert!(
+            lines.contains(&want),
+            "prune list must contain {want}: {out}"
+        );
+    }
+    assert!(
+        !out.to_lowercase().contains("distroav") && !out.to_lowercase().contains("browser"),
+        "the prune list must NEVER carry distroav/browser: {out}"
+    );
+    let (_c, dirs, _e) = run_sourced(
+        &[],
+        "strih_lx_obs_plugin_dirs /opt/obs-genlock /usr/lib/x86_64-linux-gnu",
+    );
+    assert!(
+        dirs.contains("/opt/obs-genlock/lib/x86_64-linux-gnu/obs-plugins"),
+        "bundle plugin dir: {dirs}"
+    );
+    assert!(
+        dirs.contains("/usr/lib/x86_64-linux-gnu/obs-plugins"),
+        "usr plugin dir: {dirs}"
+    );
+}
+
+/// (B functional) the prune expands globs against a fake plugin tree, removes ONLY the 3 kinds from
+/// BOTH dirs, keeps distroav/browser, and is idempotent (a 2nd pass removes nothing).
+#[test]
+fn plugin_prune_removes_only_dead_plugins_from_both_dirs() {
+    let body = r#"
+root="$(mktemp -d)"
+B="$root/opt/lib/x86_64-linux-gnu/obs-plugins"; U="$root/usr/obs-plugins"
+mkdir -p "$B" "$U"
+for d in "$B" "$U"; do
+  : > "$d/decklink-output-ui.so"; : > "$d/decklink-captions.so"; : > "$d/obs-qsv11.so"; : > "$d/obs-vst.so"
+  : > "$d/distroav.so"; : > "$d/obs-browser.so"; : > "$d/libcef.so"
+done
+prune() {
+  while IFS= read -r pd; do
+    [ -d "$pd" ] || continue
+    while IFS= read -r pat; do
+      [ -n "$pat" ] || continue
+      for pf in "$pd"/$pat; do [ -e "$pf" ] && rm -f "$pf" && echo "rm $(basename "$pf")"; done
+    done < <(strih_lx_obs_plugin_prune_list)
+  done < <(printf '%s\n' "$B" "$U")
+}
+prune
+echo "SECOND:"; prune
+for d in "$B" "$U"; do
+  for g in decklink-output-ui.so decklink-captions.so obs-qsv11.so obs-vst.so; do [ -e "$d/$g" ] && echo "SURVIVED $g"; done
+  for k in distroav.so obs-browser.so libcef.so; do [ -e "$d/$k" ] || echo "MISSING $k"; done
+done
+rm -rf "$root"
+"#;
+    let (code, out, err) = run_sourced(&[], body);
+    assert_eq!(code, 0, "harness failed: {err}");
+    assert!(
+        !out.contains("SURVIVED"),
+        "a dead plugin survived the prune: {out}"
+    );
+    assert!(
+        !out.contains("MISSING"),
+        "a keeper was wrongly pruned: {out}"
+    );
+    // 4 kinds x 2 dirs = 8 removals in the first pass; nothing after SECOND:.
+    let (_pre, post) = out
+        .split_once("SECOND:")
+        .expect("harness must print SECOND:");
+    assert!(
+        !post.contains("rm "),
+        "the 2nd prune pass must remove nothing (idempotent): {post}"
+    );
+}
+
+/// (B wiring) setup-strih step 4 prunes via the shared list+dirs; verify-strih asserts absence via
+/// the SAME source of truth.
+#[test]
+fn setup_and_verify_prune_via_the_same_source_of_truth() {
+    let s = read_script("scripts/setup-strih.sh");
+    assert!(
+        s.contains("strih_lx_obs_plugin_prune_list"),
+        "step 4 must prune via strih_lx_obs_plugin_prune_list"
+    );
+    assert!(
+        s.contains("strih_lx_obs_plugin_dirs"),
+        "step 4 must iterate the shared plugin dirs"
+    );
+    let v = read_script("scripts/verify-strih.sh");
+    assert!(
+        v.contains("strih_lx_obs_plugin_prune_list") && v.contains("strih_lx_obs_plugin_dirs"),
+        "verify-strih must assert prune absence via the SAME source of truth"
+    );
+}
+
+/// (C) collection hygiene verdict is REPORT-ONLY: ok iff both counts 0, else the token; verify-strih
+/// renders it as a NOTE (never a hard FAIL), and setup-strih NEVER touches the collection.
+#[test]
+fn collection_hygiene_verdict_is_report_only_and_counts_both() {
+    let (c, o, _e) = run_sourced(&[], "strih_collection_hygiene_verdict 0 0");
+    assert_eq!(c, 0);
+    assert_eq!(o.trim(), "ok");
+    let (_c, o, _e) = run_sourced(&[], "strih_collection_hygiene_verdict 10 0");
+    assert_eq!(o.trim(), "shader_filter:10");
+    let (_c, o, _e) = run_sourced(&[], "strih_collection_hygiene_verdict 0 1");
+    assert_eq!(o.trim(), "lua:1");
+    let (_c, o, _e) = run_sourced(&[], "strih_collection_hygiene_verdict 10 1");
+    assert_eq!(o.trim(), "shader_filter:10,lua:1");
+    let (c, o, _e) = run_sourced(&[], "strih_collection_hygiene_verdict");
+    assert_eq!(c, 0);
+    assert_eq!(o.trim(), "ok", "omitted args default to clean");
+    let v = read_script("scripts/verify-strih.sh");
+    assert!(
+        v.contains("strih_collection_hygiene_verdict"),
+        "verify-strih must grade collection hygiene"
+    );
+    assert!(
+        v.contains("note \"(collection-hygiene)"),
+        "the hygiene item must be a NOTE (report-only)"
+    );
+    assert!(
+        !v.contains("bad \"(collection-hygiene)"),
+        "the hygiene item must NEVER be a hard FAIL"
+    );
+    let s = read_script("scripts/setup-strih.sh");
+    assert!(
+        !s.contains("strih_collection_hygiene_verdict"),
+        "setup-strih must NEVER rewrite the collection (hygiene is report-only, in verify-strih)"
+    );
+}
+
+/// (D) RustDesk pinned facts + the install emitter: pinned version/url/sha, a fail-loud sha256 verify,
+/// enable --now, the permanent password read from a 0600 FILE inside the block (never a literal), and
+/// the emitted block bash-parses.
+#[test]
+fn rustdesk_facts_are_pinned_and_the_emitter_verifies_sha_and_hides_the_password() {
+    assert_eq!(run_sourced(&[], "strih_rustdesk_version").1.trim(), "1.4.9");
+    assert_eq!(
+        run_sourced(&[], "strih_rustdesk_deb_sha256").1.trim(),
+        "7244ba47c40e804172044bfbe659467c54ce46554c98e78c8c0406f1d612fda3"
+    );
+    let url = run_sourced(&[], "strih_rustdesk_deb_url").1;
+    assert!(
+        url.contains("rustdesk-1.4.9-x86_64.deb"),
+        "url must name the pinned deb: {url}"
+    );
+    let body =
+        r#"strih_rustdesk_install_cmds 1.4.9 http://example/rd.deb DEADBEEFCAFE /etc/rd/pw.secret"#;
+    let (code, blk, err) = run_sourced(&[], body);
+    assert_eq!(code, 0, "emitter failed: {err}");
+    assert!(blk.contains("sha256sum"), "must verify the sha256: {blk}");
+    assert!(
+        blk.contains("DEADBEEFCAFE"),
+        "must compare against the pinned sha: {blk}"
+    );
+    assert!(
+        blk.contains("systemctl enable --now rustdesk"),
+        "must enable --now: {blk}"
+    );
+    assert!(
+        blk.contains("rustdesk --password"),
+        "must set the permanent password: {blk}"
+    );
+    assert!(
+        blk.contains("/etc/rd/pw.secret"),
+        "must read the pw FILE path: {blk}"
+    );
+    // never any literal password (a fleet-like literal must not appear in the emitted text).
+    assert!(
+        !blk.to_lowercase().contains("newlevel"),
+        "the password value must never be in the emitted block: {blk}"
+    );
+    // the emitted block must bash-parse (bash -n reads it from stdin).
+    let (nc, _o, ne) = run_sourced(
+        &[],
+        "strih_rustdesk_install_cmds 1.4.9 http://example/rd.deb DEADBEEFCAFE /etc/rd/pw.secret | bash -n",
+    );
+    assert_eq!(nc, 0, "the emitted rustdesk block must bash-parse: {ne}");
+}
+
+/// (D wiring) setup-strih installs RustDesk in a lettered sub-step 16b (TOTAL_STEPS stays 17), reads
+/// the pw file path from a provisioning-input env var, and verify-strih checks `rustdesk --get-id`.
+#[test]
+fn setup_strih_installs_rustdesk_in_step_16b_and_keeps_total_steps_17() {
+    let s = read_script("scripts/setup-strih.sh");
+    assert!(
+        s.contains("TOTAL_STEPS=17"),
+        "TOTAL_STEPS must stay 17 (lettered sub-steps)"
+    );
+    assert!(
+        s.contains("step \"16b\""),
+        "RustDesk must be a lettered sub-step 16b so TOTAL_STEPS stays 17"
+    );
+    assert!(
+        s.contains("strih_rustdesk_install_cmds"),
+        "step 16b must install via strih_rustdesk_install_cmds"
+    );
+    assert!(
+        s.contains("STRIH_LX_RUSTDESK_PW_FILE"),
+        "step 16b must read the pw file path from a provisioning-input env var"
+    );
+    let v = read_script("scripts/verify-strih.sh");
+    assert!(
+        v.contains("rustdesk --get-id"),
+        "verify-strih must check rustdesk --get-id"
+    );
+    assert!(
+        v.contains("(rustdesk)"),
+        "the rustdesk item must be labelled"
+    );
+}
+
+/// (G wiring) verify-strih has the dantesync-role live item: it reads :8898/status, grades via the
+/// pure verdict, and checks the ntp :123 listener for the server role.
+#[test]
+fn verify_strih_has_the_dantesync_role_live_item() {
+    let v = read_script("scripts/verify-strih.sh");
+    assert!(
+        v.contains("strih_lx_dantesync_status_role_verdict"),
+        "verify-strih must grade the role via the pure verdict"
+    );
+    assert!(
+        v.contains("(dantesync-role)"),
+        "the role item must be labelled"
+    );
+    assert!(
+        v.contains("8898/status"),
+        "verify-strih must read :8898/status"
+    );
+    assert!(
+        v.contains(":123"),
+        "verify-strih must check the ntp :123 listener for the server role"
+    );
+    assert!(
+        v.contains("STRIH_LX_DANTESYNC_ROLE:-server"),
+        "verify-strih must default the role to `server` (matching setup-strih)"
+    );
+}
+
+/// (H) setup-strih installs ffmpeg (which provides ffprobe) via the same idempotent apt family as
+/// avahi-utils; verify-strih asserts ffprobe + ffmpeg present (the on-box recording-verdict E2E
+/// spawns ffprobe). A TOOL dependency of the E2E verdict, NOT a bundle soname (never in
+/// RUNTIME_PACKAGES.txt).
+#[test]
+fn setup_strih_installs_ffmpeg_and_verify_checks_ffprobe() {
+    let s = read_script("scripts/setup-strih.sh");
+    assert!(
+        s.contains("apt-get install -y ffmpeg"),
+        "setup-strih must apt-install ffmpeg (provides ffprobe for the on-box E2E)"
+    );
+    // it must NOT be smuggled into the bundle runtime-packages contract.
+    assert!(
+        !s.contains("RUNTIME_PACKAGES.txt") || !s.contains("ffmpeg RUNTIME_PACKAGES"),
+        "ffmpeg is a tool dep, not a bundle soname -- never in RUNTIME_PACKAGES.txt"
+    );
+    let v = read_script("scripts/verify-strih.sh");
+    assert!(
+        v.contains("(ffmpeg)"),
+        "verify-strih must have an ffmpeg item"
+    );
+    assert!(
+        v.contains("command -v \"$_t\"") && v.contains("ffprobe") && v.contains("ffmpeg"),
+        "verify-strih must assert ffprobe + ffmpeg present"
     );
 }
