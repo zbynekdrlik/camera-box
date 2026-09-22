@@ -1383,5 +1383,5 @@ EOF
 # 1353). Report-only: always returns 0 (a no-match prints nothing), so the caller's `[ owner = ... ]`
 # grade is the gate, never this function's exit.
 strih_bkshading_listener_owner() {
-  grep -oE 'users:\(\("[^"]+"' | head -1 | sed -E 's/.*\("//' || true
+  grep -oE 'users:\(\("[^"]+"' | head -1 | sed -E 's/.*\("([^"]+)".*/\1/' || true
 }
