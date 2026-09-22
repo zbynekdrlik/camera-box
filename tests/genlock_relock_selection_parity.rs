@@ -22,6 +22,7 @@
 
 use camera_box::genlock_backlog::{
     relock_acquire_should_hold, relock_anchor_age_ns, relock_select_nearest, should_converge_phase,
+    should_sustain_drain,
 };
 use std::fs;
 use std::path::PathBuf;
@@ -605,6 +606,145 @@ fn c_acquire_bracketing_gate_matches_the_rust_authority_1161() {
         diffs.is_empty(),
         "#1161: the vendored C ACQUIRE bracketing gate DIVERGED from the Tier-0 Rust authority on \
          {} of {} vectors — the deployed re-acquire is not the behaviour the unit tests cover:\n{}",
+        diffs.len(),
+        vs.len(),
+        diffs.join("\n")
+    );
+}
+
+/// #1355 — the SAME executable-parity discipline for the SUSTAINED-EXCESS one-frame drain decision.
+/// Lifts the self-contained `genlock_sustain_drain_due` helper VERBATIM from obs-source.c, compiles
+/// it standalone under `-Werror` against its three `#define`s, and requires byte-identical booleans
+/// from [`camera_box::genlock_backlog::should_sustain_drain`] over a spread of vectors — a flipped
+/// comparison, a widened window/hysteresis, or a dropped throttle term fails here in seconds rather
+/// than surviving to the stream box's deep N==1 NDI 2ME PGM FIFO.
+fn lift_sustain_helper() -> String {
+    let path = repo(OBS_SOURCE);
+    let src = fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+    let start = src
+        .find("static inline bool genlock_sustain_drain_due(")
+        .unwrap_or_else(|| {
+            panic!(
+                "#1355: {OBS_SOURCE} no longer defines genlock_sustain_drain_due — the sustained- \
+                 excess drain decision is gone, so there is nothing to check parity against."
+            )
+        });
+    let end = src[start..]
+        .find("\n}\n")
+        .map(|i| start + i + 3)
+        .expect("#1355: genlock_sustain_drain_due has no closing brace");
+    src[start..end].to_string()
+}
+
+/// `(depth, target, run_ticks, ticks_since_drain)`.
+fn sustain_vectors() -> Vec<(u64, u64, u32, u64)> {
+    // Hand-picked boundary vectors around each of the three guards (depth/hysteresis, sustain
+    // window, shared throttle), at the live stream pin's CEIL target (963 ms @ 30 fps -> 29).
+    let mut v: Vec<(u64, u64, u32, u64)> = vec![
+        (31, 29, 300, 30),     // sustained one-frame excess, window + throttle met -> fires
+        (30, 29, 300, 30),     // the pin's natural target+1 hold -> never sheds
+        (29, 29, 300, 30),     // at target -> never sheds
+        (31, 29, 299, 30),     // one tick short of the sustain window -> inert
+        (31, 29, 300, 29),     // one tick short of the shared throttle -> inert
+        (31, 29, 300, 30),     // exactly at both boundaries -> fires
+        (34, 29, 1000, 100),   // a deeper excess, well past both -> fires
+        (30, 29, 100000, 100), // natural hold held forever -> still never sheds (depth guard)
+        (2, 0, 300, 30), // a different target (0) with depth 2 -> fires (guards a hardcoded 29)
+        (1, 0, 300, 30), // target 0, depth 1 == target+1 -> inert
+        (500, 400, 300, 30), // large-magnitude target/depth -> fires
+        (401, 400, 300, 30), // large target, depth == target+1 -> inert
+    ];
+    // A deterministic LCG spread across the whole argument space, so the gate covers more than the
+    // cases someone thought of AND so a helper that hardcoded a constant instead of a parameter
+    // diverges on some vector.
+    let mut x: u64 = 0x0BAD_C0DE_1355_0001;
+    for _ in 0..120 {
+        x = x
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        let target = (x >> 20) % 64;
+        let depth = target.wrapping_add((x >> 8) % 6); // target-0 .. target+5
+        let run_ticks = ((x >> 34) % 400) as u32; // 0..399 straddles the 300 window
+        let ticks = (x >> 45) % 40; // 0..39 straddles the 30 throttle
+        v.push((depth, target, run_ticks, ticks));
+    }
+    v
+}
+
+#[test]
+fn c_sustain_drain_matches_the_rust_authority_1355() {
+    let helper = lift_sustain_helper();
+    let vs = sustain_vectors();
+
+    // Lift the constants from the SHIPPED C, never hard-code them (the #1049/#1354 review lesson).
+    let mut c = format!(
+        "#include <stdint.h>\n#include <stddef.h>\n#include <stdbool.h>\n#include <stdio.h>\n{}\n{}\n{}\n",
+        lift_define("GENLOCK_DRAIN_MIN_TICK_INTERVAL"),
+        lift_define("GENLOCK_DRAIN_SUSTAIN_TICKS"),
+        lift_define("GENLOCK_DRAIN_SUSTAIN_HYSTERESIS_FRAMES"),
+    );
+    c.push_str(&helper);
+    c.push_str("int main(void){\n");
+    for (depth, target, run_ticks, ticks) in &vs {
+        c.push_str(&format!(
+            "    printf(\"%d\\n\", genlock_sustain_drain_due({depth}ULL, {target}ULL, {run_ticks}, {ticks}ULL));\n"
+        ));
+    }
+    c.push_str("    return 0;\n}\n");
+
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("genlock_sustain_parity_1355");
+    fs::create_dir_all(&dir).expect("create the parity scratch dir");
+    let cfile = dir.join("sustain.c");
+    let bin = dir.join("sustain.bin");
+    fs::write(&cfile, &c).expect("write the parity harness");
+
+    let cc = std::env::var("CC").unwrap_or_else(|_| "cc".to_string());
+    let out = Command::new(&cc)
+        .args(["-std=gnu99", "-Wall", "-Wextra", "-Werror", "-O1"])
+        .arg(&cfile)
+        .arg("-o")
+        .arg(&bin)
+        .output()
+        .unwrap_or_else(|e| {
+            panic!(
+                "#1355: could not run the C compiler `{cc}` ({e}). This gate compiles the vendored \
+                 genlock_sustain_drain_due to prove the C and the Rust authority agree; it must \
+                 FAIL rather than skip when the toolchain is absent. Install a C compiler or set CC."
+            )
+        });
+    assert!(
+        out.status.success(),
+        "#1355: genlock_sustain_drain_due lifted from {OBS_SOURCE} does NOT COMPILE standalone \
+         under -Wall -Wextra -Werror:\n--- cc stderr ---\n{}\n--- harness ---\n{c}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let run = Command::new(&bin)
+        .output()
+        .expect("#1355: the compiled parity harness failed to execute");
+    let stdout = String::from_utf8(run.stdout).expect("harness stdout is utf-8");
+    let c_out: Vec<bool> = stdout.lines().map(|l| l.trim() == "1").collect();
+    assert_eq!(
+        c_out.len(),
+        vs.len(),
+        "#1355: harness printed the wrong count"
+    );
+
+    let mut diffs = Vec::new();
+    for (i, ((depth, target, run_ticks, ticks), got_c)) in vs.iter().zip(&c_out).enumerate() {
+        let got_rs = should_sustain_drain(*depth, *target, *run_ticks, *ticks);
+        if got_rs != *got_c {
+            diffs.push(format!(
+                "  vector {i}: depth={depth} target={target} run_ticks={run_ticks} ticks={ticks} \
+                 -> C {got_c}, Rust {got_rs}"
+            ));
+        }
+    }
+    assert!(
+        diffs.is_empty(),
+        "#1355: the vendored C sustained-excess drain decision DIVERGED from the Tier-0 Rust \
+         authority on {} of {} vectors — the deployed shed is not the behaviour the unit tests \
+         cover:\n{}",
         diffs.len(),
         vs.len(),
         diffs.join("\n")
