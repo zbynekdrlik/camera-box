@@ -32,8 +32,10 @@ exactly the failure a bulk job on the strih notebook would cause during a produc
   E-core range must be resolved ON the box (a replacement notebook has its own core map; dev1 has no
   `cpu_atom`). So `LOWPRIO_SNIPPET` is **single-quoted on the dev1 side** (`LP="nice -n 19"; if [ -s
   /sys/devices/cpu_atom/cpus ]; then LP="$LP taskset -c $(cat …)"; fi;`), so dev1 never expands the
-  `$(cat …)` — the strih-lx shell does — and `\$LP` (escaped) prefixes the on-box command:
-  `ssh … "mkdir -p '$OUT_DIR' && $LOWPRIO_SNIPPET \$LP $ONSTRIHLX_CMD"`.
+  `$(cat …)` — the strih-lx shell does — and `\$LP` (escaped) prefixes the on-box command inside a
+  brace group so `mkdir -p` still gates the decode (the `&&` binds the whole group, not just the
+  `LP=` assignment the snippet starts with):
+  `ssh … "mkdir -p '$OUT_DIR' && { $LOWPRIO_SNIPPET \$LP $ONSTRIHLX_CMD; }"`.
 - This is the repo's usual "pure decision + shell replica pinned by a test" pattern: the helper is
   what `tests/recording_verdict_on_strih_lx_lowprio.rs` pins (fixture roots), and a static anchor
   pins that STEP 2's ssh line launches `$ONSTRIHLX_CMD` through the prefix. Keep the two in parity.
@@ -43,7 +45,11 @@ exactly the failure a bulk job on the strih notebook would cause during a produc
 - The binary `scp` and the partial/pixels pull-back stay **byte-identical** — the change is confined
   to STEP 2's launch prefix.
 - `$(cat …)` strips the sysfs file's trailing newline (design note); the helper also `tr -d`s
-  whitespace so a whitespace-only file falls back to `nice`-only.
+  whitespace so a whitespace-only file falls back to `nice`-only. The remote replica guards on
+  `[ -s … ]` instead, so helper and replica agree on the only two states kernel sysfs actually
+  emits — absent (non-hybrid → `nice -n 19`) and a clean range (hybrid → `nice -n 19 taskset -c
+  <range>`, verified live 12-15) — and diverge only on a whitespace-only `cpus` file, which sysfs
+  never produces (the helper's whitespace fallback is a unit-test-only defensive path).
 - The only test that touches this script is `harness_strih_platform_1351.rs` (all `.contains()`
   substring anchors — a new helper/comment cannot break a `.find()`/`.split()` slice here), plus the
   new lowprio test. Run the occurrence-count anchor sweep after any edit anyway.

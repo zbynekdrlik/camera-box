@@ -176,7 +176,9 @@ main() {
   ONSTRIHLX_CMD="$(build_onstrihlx_command "$REMOTE_BIN" "${PASS_ARGS[@]}")"
   LOWPRIO_SNIPPET='LP="nice -n 19"; if [ -s /sys/devices/cpu_atom/cpus ]; then LP="$LP taskset -c $(cat /sys/devices/cpu_atom/cpus)"; fi;'
   echo "[recording-verdict-on-strih-lx] running on strih-lx (${STRIH_LX_BOX}) at idle priority (E-cores): $ONSTRIHLX_CMD"
-  sshpass -p "$STRIH_PW" ssh "${SSH_OPTS[@]}" "$TARGET" "mkdir -p '$OUT_DIR' && $LOWPRIO_SNIPPET \$LP $ONSTRIHLX_CMD"
+  # The brace group keeps the decode gated on `mkdir -p` (the && short-circuits the WHOLE group, not
+  # just the LP assignment the snippet begins with) — same failure semantics as before this change.
+  sshpass -p "$STRIH_PW" ssh "${SSH_OPTS[@]}" "$TARGET" "mkdir -p '$OUT_DIR' && { $LOWPRIO_SNIPPET \$LP $ONSTRIHLX_CMD; }"
 
   # #186/#208: the on-box --extract-partial writes the pixel-proof PNGs of every flagged /
   # undecodable frame into the SIBLING `<partial>-pixels` dir (beside the --out partial JSON) — so
