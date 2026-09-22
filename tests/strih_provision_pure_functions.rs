@@ -3156,7 +3156,9 @@ fn bkshading_listener_owner_extracts_the_bare_process_name() {
     assert!(
         out2.trim().is_empty(),
         "a non-matching listener line must yield an empty owner: {out2:?}"
-=======
+    );
+}
+
 // =============================================================================
 // issue 1317 item H: strih-lx USB-NIC xhci IRQ placement (NET_RX softirq off the OBS cores).
 // The pure resolvers + the emitted boot script + the systemd unit are driven over /proc-shaped

@@ -697,6 +697,8 @@ if [ -f /etc/systemd/system/bkshading-service.service ]; then
   fi
 else
   bad "(bkshading-service) unit /etc/systemd/system/bkshading-service.service not installed -- re-run setup-strih.sh step 16c (issue 1353)"
+fi
+
 # 16) NIC xhci IRQ affinity (issue 1317 item H): the USB-NIC's xhci interrupt must be pinned to a
 #     SINGLE E-core (>= the first cpu_atom cpu) so its NET_RX softirq never shares an OBS core, AND
 #     that IRQ's /proc/interrupts counter must be ADVANCING over a live 2-s window (NEVER a static

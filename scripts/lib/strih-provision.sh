@@ -1384,6 +1384,8 @@ EOF
 # grade is the gate, never this function's exit.
 strih_bkshading_listener_owner() {
   grep -oE 'users:\(\("[^"]+"' | head -1 | sed -E 's/.*\("([^"]+)".*/\1/' || true
+}
+
 # --- issue 1317 item H: strih-lx USB-NIC xhci IRQ placement (NET_RX softirq off the OBS cores) ----
 # The RTL8156B USB 2.5GbE NIC's xhci interrupt lands on ONE core (irqbalance is not installed, so
 # the kernel parks it) where ~1.1 Gb/s of NDI NET_RX softirq collides with OBS's ndir:video/libobs
