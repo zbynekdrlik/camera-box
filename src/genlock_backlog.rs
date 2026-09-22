@@ -2637,7 +2637,7 @@ mod tests {
     /// the shared drain throttle, where `budget = max(hysteresis, #1354 jitter budget)`. Below the
     /// threshold: inert. Above it, once the throttle has elapsed: fires.
     #[test]
-    fn converge_fires_only_above_reserve_plus_quantum_plus_hysteresis_1049() {
+    fn converge_fires_only_above_reserve_plus_quantum_plus_budget_1049() {
         let latency_ms = 20u32;
         let reserve = latency_ms as u64 * 1_000_000;
         let n = 2u32;
