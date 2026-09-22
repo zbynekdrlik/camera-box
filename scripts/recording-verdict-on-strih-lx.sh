@@ -67,6 +67,33 @@ build_onstrihlx_command() {
   printf '\n'
 }
 
+# strih_lx_lowprio_prefix <sysfs_root> — issue 1351. The canonical (pure, network-free) encoding of
+# the low-priority launch prefix for the on-box recording-verdict decode ([8/8a] in
+# recording-e2e.sh): always `nice -n 19`, plus `taskset -c <range>` onto the Intel hybrid E-cores
+# when this box exposes <sysfs_root>/devices/cpu_atom/cpus as a non-empty range. A multi-core
+# QR/pixel sweep over a 1080p60 5-min recording at nice 0 on the P-cores starves OBS's live NDI
+# receiver decode threads (the post-run relock storms of issue 1354); the E-cores + idle priority
+# keep it off the P-cores OBS runs on. A non-hybrid box (no cpu_atom) just runs deprioritised.
+#   <root>/devices/cpu_atom/cpus present + non-empty range -> `nice -n 19 taskset -c <range>`
+#   absent / empty / whitespace / unreadable               -> `nice -n 19`  (never `taskset -c ""`)
+# Fixture-driven so a unit test can point <sysfs_root> at a fake tree. STEP 2 in main() is the
+# remote-shell REPLICA of this same contract (the range is read on the BOX so a replacement
+# notebook resolves its own cores); this pure function is what
+# tests/recording_verdict_on_strih_lx_lowprio.rs pins.
+strih_lx_lowprio_prefix() {
+  local sysfs_root="${1:-/sys}"
+  local cpus_file="${sysfs_root%/}/devices/cpu_atom/cpus"
+  local cpus=""
+  if [ -r "$cpus_file" ]; then
+    cpus="$(tr -d '[:space:]' < "$cpus_file" 2>/dev/null || true)"
+  fi
+  if [ -n "$cpus" ]; then
+    printf 'nice -n 19 taskset -c %s' "$cpus"
+  else
+    printf 'nice -n 19'
+  fi
+}
+
 # Parse flags + run the plan for real. Wrapped in a function so SOURCING the script (a unit test
 # calling build_onstrihlx_command) does NOT trigger arg-parsing / ssh against the sourcing shell's
 # $@.
@@ -138,11 +165,18 @@ main() {
     fi
   fi
 
-  # STEP 2: run the verdict ON strih-lx against the LOCAL recording (NEVER copied off-box).
-  local ONSTRIHLX_CMD
+  # STEP 2: run the verdict ON strih-lx against the LOCAL recording (NEVER copied off-box), at IDLE
+  # priority pinned to the E-cores (issue 1351). Unpinned at nice 0 the multi-core QR/pixel sweep
+  # competes with OBS's ndir:video decode threads on the P-cores and the live receivers relock-storm
+  # for minutes after the run (issue 1354). LOWPRIO_SNIPPET is the remote-shell replica of
+  # strih_lx_lowprio_prefix (the unit-tested pure contract): SINGLE-QUOTED on the dev1 side so the
+  # $(cat …) is evaluated by the strih-lx shell — a replacement notebook resolves its OWN E-cores —
+  # then `$LP` prefixes the on-box command. The scp of the binary and the partial pull are unchanged.
+  local ONSTRIHLX_CMD LOWPRIO_SNIPPET
   ONSTRIHLX_CMD="$(build_onstrihlx_command "$REMOTE_BIN" "${PASS_ARGS[@]}")"
-  echo "[recording-verdict-on-strih-lx] running on strih-lx (${STRIH_LX_BOX}): $ONSTRIHLX_CMD"
-  sshpass -p "$STRIH_PW" ssh "${SSH_OPTS[@]}" "$TARGET" "mkdir -p '$OUT_DIR' && $ONSTRIHLX_CMD"
+  LOWPRIO_SNIPPET='LP="nice -n 19"; if [ -s /sys/devices/cpu_atom/cpus ]; then LP="$LP taskset -c $(cat /sys/devices/cpu_atom/cpus)"; fi;'
+  echo "[recording-verdict-on-strih-lx] running on strih-lx (${STRIH_LX_BOX}) at idle priority (E-cores): $ONSTRIHLX_CMD"
+  sshpass -p "$STRIH_PW" ssh "${SSH_OPTS[@]}" "$TARGET" "mkdir -p '$OUT_DIR' && $LOWPRIO_SNIPPET \$LP $ONSTRIHLX_CMD"
 
   # #186/#208: the on-box --extract-partial writes the pixel-proof PNGs of every flagged /
   # undecodable frame into the SIBLING `<partial>-pixels` dir (beside the --out partial JSON) — so
