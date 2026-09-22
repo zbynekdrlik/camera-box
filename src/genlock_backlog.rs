@@ -241,6 +241,68 @@ pub fn should_drain_one(
         && ticks_since_last_drain >= DRAIN_MIN_TICK_INTERVAL
 }
 
+/// #1355 — how many CONSECUTIVE steady N==1 render ticks the queue must sit a
+/// [`DRAIN_SUSTAIN_HYSTERESIS_FRAMES`]-frame excess above [`drain_target_frames`] before the
+/// SUSTAINED-EXCESS one-frame drain sheds. 300 ticks = 10 s at 30 fps.
+///
+/// The stream box's N==1 deep `NDI 2ME PGM` FIFO gains one frame every ~40 min from the +13 ppm
+/// wall-vs-QPC clock drift (issue-1355 root cause, comment 5784916723): the video release keys on
+/// the DanteSync-disciplined WALL clock, the render tick consumes on the free-running QPC. The
+/// #859 depth drain only fires at `depth > target + DRAIN_HYSTERESIS_FRAMES` (target + 2), and the
+/// #1049 phase converge is N>=2-only, so a persistent ONE-frame excess (the drift-gained frame)
+/// has no corrective — the held depth saws over two frames and the on-air A/V offset walks ~66 ms.
+///
+/// This window is the discriminator between a genuine drift backlog (persists for tens of minutes
+/// — sheds) and ordinary arrival jitter (a late frame lasts one or two ticks — never sheds). It
+/// must stay well ABOVE the worst-case arrival-jitter run and well BELOW the ~40-min drift period.
+///
+/// Mirror of the C `#define GENLOCK_DRAIN_SUSTAIN_TICKS` (obs-source.c) — keep both in lock-step;
+/// the C↔Rust parity gate `tests/genlock_relock_selection_parity.rs` lifts the shipped `#define`.
+pub const DRAIN_SUSTAIN_TICKS: u32 = 300;
+
+/// #1355 — the excess (in frames, above [`drain_target_frames`]) the SUSTAINED-EXCESS drain
+/// corrects. `1`: the persistent drift-gained frame that sits one above the pin's natural steady
+/// depth (`target + 1`). The trigger is `depth > target + DRAIN_SUSTAIN_HYSTERESIS_FRAMES`
+/// (i.e. `depth >= target + 2`), so the pin's own natural `target + 1` hold is left alone and only
+/// the drifted `target + 2` state sheds — back to `target + 1`, within one frame of the pin.
+/// Deliberately TIGHTER than [`DRAIN_HYSTERESIS_FRAMES`] (2): the #859 drain still catches a fast
+/// setpoint overshoot at `> target + 2`; this slow, sustain-gated drain removes the residual
+/// one-frame drift saw the 2-frame hysteresis structurally cannot. Mirror of the C
+/// `#define GENLOCK_DRAIN_SUSTAIN_HYSTERESIS_FRAMES` (obs-source.c).
+pub const DRAIN_SUSTAIN_HYSTERESIS_FRAMES: u64 = 1;
+
+/// #1355 — should this tick shed exactly ONE frame to correct a SUSTAINED one-frame excess on the
+/// plain N==1 STEADY release path? `depth` is the queue depth observed THIS tick (before release);
+/// `target` is [`drain_target_frames`] (the CEIL target, computed by the caller exactly as
+/// [`should_drain_one`] does); `run_ticks` is how many CONSECUTIVE ticks `depth` has sat above
+/// `target + DRAIN_SUSTAIN_HYSTERESIS_FRAMES` (the caller maintains it: increment while the excess
+/// holds, reset to 0 the moment it does not, and reset on a shed); `ticks_since_last_drain` is the
+/// SHARED #859 throttle counter, so the #859 drain / #1049 converge / this sustain drain can never
+/// double-fire on one tick.
+///
+/// Fires only when the excess has held for a full [`DRAIN_SUSTAIN_TICKS`] window (filters arrival
+/// jitter, which lasts one or two ticks) AND the shared throttle allows it. The explicit `depth`
+/// re-check is belt-and-suspenders: `run_ticks` already encodes the sustained excess, but a shed
+/// on the SAME tick by the #859 drain would drop `depth` — the throttle reset prevents that here,
+/// and the depth guard makes the predicate self-consistent regardless.
+///
+/// Mirror of the C `genlock_sustain_drain_due(depth, target, run_ticks, ticks_since_drain)`
+/// (obs-source.c) — keep both in lock-step; the parity gate compiles the C predicate standalone
+/// and requires byte-identical booleans from this authority over a spread of vectors. The
+/// `src/probe/genlock.rs` `ReleaseCadence` reference sim is left UNCHANGED (per the #1354 finding
+/// that the bounded cadence sim cannot reproduce this multi-minute drift class; the faithful proof
+/// is this pure predicate + the parity gate + the direct arithmetic tests, not a sim scenario).
+pub fn should_sustain_drain(
+    depth: u64,
+    target: u64,
+    run_ticks: u32,
+    ticks_since_last_drain: u64,
+) -> bool {
+    // #1355 RED stub — the GREEN commit fills in the real decision.
+    let _ = (depth, target, run_ticks, ticks_since_last_drain);
+    false
+}
+
 /// #940 piece 3 — the STRUCTURAL fix for the deep-latency A/V-offset step. Quantizes an
 /// already-computed ts-align RESERVE deadline (the Rust `genlock_present_ts_reserve()`, the
 /// C `genlock_present_ts_reserve()`) to the canvas frame GRID:
@@ -1366,6 +1428,190 @@ mod tests {
             should_drain_one(30, 891, 30, 1, DRAIN_MIN_TICK_INTERVAL),
             "#998 no-regression: depth=30 at latency_ms=891 MUST drain (one past the boundary) \
              — unchanged from the pre-#998 round-based behavior since ceil==round here"
+        );
+    }
+
+    // ---- #1355: sustained-excess one-frame drain for N==1 (wall-vs-QPC drift saw) -----------
+
+    /// #1355 — the constants are the calibration knobs the design fixed; pin them so a "tidy"
+    /// edit that widens the window or the hysteresis is a RED, not a silent behaviour change.
+    #[test]
+    fn sustain_drain_constants_pinned_1355() {
+        assert_eq!(
+            DRAIN_SUSTAIN_TICKS, 300,
+            "#1355: the sustain window is 10 s at 30 fps — a shorter window would shed on an \
+             arrival-jitter run, a longer one leaves the drift saw visible for longer"
+        );
+        assert_eq!(
+            DRAIN_SUSTAIN_HYSTERESIS_FRAMES, 1,
+            "#1355: the sustain drain corrects the ONE drift-gained frame above the pin's natural \
+             target+1 hold; > 1 would let it re-widen to the #859 2-frame band"
+        );
+    }
+
+    /// #1355 — the primary case: a sustained one-frame excess (depth = target+2) that has held for
+    /// the full window, with the shared throttle available, MUST shed.
+    #[test]
+    fn sustain_drain_fires_on_a_sustained_one_frame_excess_1355() {
+        let target = drain_target_frames(963, 30, 1); // the live stream 2ME PGM pin
+        assert!(
+            should_sustain_drain(
+                target + 2,
+                target,
+                DRAIN_SUSTAIN_TICKS,
+                DRAIN_MIN_TICK_INTERVAL
+            ),
+            "#1355: depth one frame above the pin's natural target+1 hold, sustained a full \
+             window, with the throttle met, must shed exactly one frame"
+        );
+    }
+
+    /// #1355 — the SUSTAIN WINDOW boundary: at `run_ticks == DRAIN_SUSTAIN_TICKS - 1` it must NOT
+    /// fire (jitter is still possible), at exactly `DRAIN_SUSTAIN_TICKS` it must.
+    #[test]
+    fn sustain_drain_window_boundary_1355() {
+        let target = drain_target_frames(963, 30, 1);
+        assert!(
+            !should_sustain_drain(
+                target + 2,
+                target,
+                DRAIN_SUSTAIN_TICKS - 1,
+                DRAIN_MIN_TICK_INTERVAL
+            ),
+            "#1355: one tick short of the window must NOT shed — the excess is not yet proven \
+             to be drift rather than jitter"
+        );
+        assert!(
+            should_sustain_drain(
+                target + 2,
+                target,
+                DRAIN_SUSTAIN_TICKS,
+                DRAIN_MIN_TICK_INTERVAL
+            ),
+            "#1355: at exactly the sustain window, a still-present excess MUST shed"
+        );
+    }
+
+    /// #1355 — the HYSTERESIS boundary: the pin's own natural steady hold is `target + 1`; that
+    /// depth must NEVER shed (or the drain would fight the pin every window), while `target + 2`
+    /// (the drift-gained frame) does.
+    #[test]
+    fn sustain_drain_ignores_the_natural_plus_one_hold_1355() {
+        let target = drain_target_frames(963, 30, 1);
+        assert!(
+            !should_sustain_drain(
+                target + 1,
+                target,
+                DRAIN_SUSTAIN_TICKS,
+                DRAIN_MIN_TICK_INTERVAL
+            ),
+            "#1355: depth == target + 1 is the pin's NATURAL steady hold — never shed it, even \
+             sustained forever, or the hold would saw below the pin"
+        );
+        assert!(
+            !should_sustain_drain(target, target, DRAIN_SUSTAIN_TICKS, DRAIN_MIN_TICK_INTERVAL),
+            "#1355: depth == target must never shed"
+        );
+        assert!(
+            should_sustain_drain(
+                target + 2,
+                target,
+                DRAIN_SUSTAIN_TICKS,
+                DRAIN_MIN_TICK_INTERVAL
+            ),
+            "#1355: depth == target + 2 (one above the natural hold) is the drift frame — sheds"
+        );
+    }
+
+    /// #1355 — the throttle is SHARED with the #859 drain (`DRAIN_MIN_TICK_INTERVAL`): a sustained
+    /// excess that has NOT yet cleared the throttle since the last shed must wait, so at most one
+    /// frame leaves the queue per `DRAIN_MIN_TICK_INTERVAL` ticks and drain/converge/sustain can
+    /// never double-fire on one tick.
+    #[test]
+    fn sustain_drain_shares_the_throttle_1355() {
+        let target = drain_target_frames(963, 30, 1);
+        assert!(
+            !should_sustain_drain(
+                target + 2,
+                target,
+                DRAIN_SUSTAIN_TICKS,
+                DRAIN_MIN_TICK_INTERVAL - 1
+            ),
+            "#1355: one tick short of the shared throttle, the sustain drain must wait"
+        );
+        assert!(
+            should_sustain_drain(
+                target + 2,
+                target,
+                DRAIN_SUSTAIN_TICKS,
+                DRAIN_MIN_TICK_INTERVAL
+            ),
+            "#1355: at exactly the shared throttle, the sustained excess sheds"
+        );
+    }
+
+    /// #1355 — drive the pure predicate with the SAME per-source state maintenance the C present
+    /// tail applies (increment the excess run while `depth > target + hysteresis`, reset it and the
+    /// throttle on a shed, drop the depth by one on a shed), and prove the two design intents:
+    /// an arrival-jitter BLIP is filtered (0 sheds), and a persistent drift-gained frame is shed
+    /// EXACTLY ONCE, settling the hold to the pin's natural `target + 1` where it goes quiet.
+    fn simulate_sustain(target: u64, mut depth: u64, ticks: u32, hold_excess: bool) -> (u32, u64) {
+        let mut run_ticks: u32 = 0;
+        // Start with the throttle already available (matches a long-idle steady source).
+        let mut ticks_since_drain: u64 = DRAIN_MIN_TICK_INTERVAL;
+        let mut sheds: u32 = 0;
+        for tick in 0..ticks {
+            // A jitter blip lifts the depth for the first few ticks only, unless hold_excess.
+            let this_depth = if hold_excess || tick < 5 {
+                depth
+            } else {
+                target + 1
+            };
+            if this_depth > target + DRAIN_SUSTAIN_HYSTERESIS_FRAMES {
+                run_ticks = run_ticks.saturating_add(1);
+            } else {
+                run_ticks = 0;
+            }
+            if should_sustain_drain(this_depth, target, run_ticks, ticks_since_drain) {
+                sheds += 1;
+                depth = depth.saturating_sub(1); // the shed removes one frame from the queue
+                run_ticks = 0;
+                ticks_since_drain = 0;
+            } else {
+                ticks_since_drain = ticks_since_drain.saturating_add(1);
+            }
+        }
+        (sheds, depth)
+    }
+
+    #[test]
+    fn sustain_drain_filters_an_arrival_jitter_blip_1355() {
+        let target = drain_target_frames(963, 30, 1);
+        // A 5-tick blip to target+2 then back to the natural hold: never reaches the window.
+        let (sheds, _final) = simulate_sustain(target, target + 2, 1000, false);
+        assert_eq!(
+            sheds, 0,
+            "#1355: a short arrival-jitter excursion above the pin must NOT trigger a shed"
+        );
+    }
+
+    #[test]
+    fn sustain_drain_sheds_a_persistent_drift_frame_exactly_once_1355() {
+        let target = drain_target_frames(963, 30, 1);
+        // The drift has gained one frame: depth sits at target+2 and holds. Run well past two
+        // sustain windows to prove it sheds ONCE (to target+1) and then stays quiet forever.
+        let (sheds, final_depth) =
+            simulate_sustain(target, target + 2, 3 * DRAIN_SUSTAIN_TICKS, true);
+        assert_eq!(
+            sheds, 1,
+            "#1355: a persistent one-frame drift excess must be shed EXACTLY once — one planned \
+             frame drop per drift frame, never a per-window saw"
+        );
+        assert_eq!(
+            final_depth,
+            target + 1,
+            "#1355: after the single shed the hold sits at the pin's natural target+1 and goes \
+             quiet — within one frame of the pin"
         );
     }
 
