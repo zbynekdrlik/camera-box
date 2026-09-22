@@ -153,6 +153,11 @@ fn scp_targets_the_sidecar_not_the_live_path() {
     // ETXTBSY-proof: the scp DESTINATION must be the sidecar `/usr/local/bin/frame-probe.new`,
     // never the live `/usr/local/bin/frame-probe` (which the running painter holds open).
     let r = run_swap(false);
+    assert!(
+        r.success,
+        "issue 1351: a clean sidecar swap must exit 0; out:\n{}",
+        r.output
+    );
     let scp = r
         .log
         .iter()
@@ -285,6 +290,11 @@ fn scp_failure_still_rearms_the_deadman_and_remounts_ro() {
     // On a failed swap the deadman must be re-armed and the rootfs returned to read-only (never
     // left rw with a dark deadman).
     let r = run_swap(true);
+    assert!(
+        !r.success,
+        "issue 1351: a failed sidecar scp must exit non-zero (FRAME-PROBE DEPLOY FAILED); out:\n{}",
+        r.output
+    );
     assert!(
         r.log.iter().any(|l| l.contains("SCP ")),
         "the scp must have been attempted; log:\n{}",
