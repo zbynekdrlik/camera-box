@@ -3292,6 +3292,7 @@ mod tests {
     /// budget were ever set BELOW the hysteresis, the hysteresis would still be the floor. The
     /// budget also stays well under one canvas frame so it can never pull in an extra matured frame.
     #[test]
+    #[allow(clippy::assertions_on_constants)] // the budget IS a constant; the bound is the contract
     fn jitter_budget_honours_the_hysteresis_floor_and_is_15ms_1354() {
         assert_eq!(
             GENLOCK_N2_JITTER_BUDGET_NS, 15_000_000,
