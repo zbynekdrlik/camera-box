@@ -2430,3 +2430,23 @@ fn verify_strih_asserts_the_1352_provisioning_items() {
         "verify must grep the janus local_ip pin"
     );
 }
+
+/// issue 1352 acceptance run (22.9.2026): `verify-strih.sh` aborted SILENTLY (exit 1, no line) right
+/// after the remoteos item on strih-lx, because `strih_lx_program_audio_verdict` returns non-zero on a
+/// FAIL verdict and its `$(...)` assignment ran WITHOUT the `|| true` every sibling verdict assignment
+/// carries -- under `set -e` a failing command substitution in an assignment terminates the script, so
+/// the ~10 items after it (mv-host, gpu-env, avahi, ndi-outputs, ...) never ran. The verdict text is
+/// printed on stdout regardless of the return code; the `case` below it grades it. Pin the guard.
+#[test]
+fn verify_strih_audio_verdict_assignment_survives_set_e() {
+    let v = read_script("scripts/verify-strih.sh");
+    let line = v
+        .lines()
+        .find(|l| l.contains("AUDIO_VERDICT=\"$(strih_lx_program_audio_verdict"))
+        .expect("verify-strih must assign AUDIO_VERDICT from strih_lx_program_audio_verdict");
+    assert!(
+        line.contains("|| true)\""),
+        "the AUDIO_VERDICT command substitution must carry `|| true` so a FAIL verdict (non-zero \
+         return) cannot abort the whole gate under set -e: {line}"
+    );
+}
