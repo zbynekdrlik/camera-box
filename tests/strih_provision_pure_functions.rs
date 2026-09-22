@@ -1154,7 +1154,7 @@ fn setup_strih_installs_janus_enable_only_before_final_verify() {
     );
 }
 
-// =====================================================================================
+// ==============================================================================
 // issue 1317 (this lane): the two provisioning steps the owner caught missing live on the
 // strih-lx notebook -- (1) CPU PERFORMANCE governor, (2) Bitfocus Companion Satellite.
 // The pure emitters/predicates below live in scripts/lib/strih-provision.sh and are wired
@@ -3156,5 +3156,327 @@ fn bkshading_listener_owner_extracts_the_bare_process_name() {
     assert!(
         out2.trim().is_empty(),
         "a non-matching listener line must yield an empty owner: {out2:?}"
+=======
+// =============================================================================
+// issue 1317 item H: strih-lx USB-NIC xhci IRQ placement (NET_RX softirq off the OBS cores).
+// The pure resolvers + the emitted boot script + the systemd unit are driven over /proc-shaped
+// fixtures matching the real box (issue 1354: iface enx6c1ff766154b -> xhci PCI function
+// 0000:00:14.0 -> IRQ 125, cpu_atom 12-15 -> target E-core 15).
+// =============================================================================
+
+/// Build a /sys + /proc/interrupts + cpu_atom + /proc/irq fixture shaped like the real strih-lx box
+/// and return the TempDir (keep it alive; $FX = its path in the harness bodies below).
+fn irq_fixture(iface: &str) -> tempfile::TempDir {
+    use std::os::unix::fs::symlink;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    // the USB NIC device path: .../pci0000:00/0000:00:14.0/usb2/2-2/2-2:1.0
+    let devdir = root.join("sys/devices/pci0000:00/0000:00:14.0/usb2/2-2/2-2:1.0");
+    std::fs::create_dir_all(&devdir).unwrap();
+    let netdir = root.join("sys/class/net").join(iface);
+    std::fs::create_dir_all(&netdir).unwrap();
+    symlink(&devdir, netdir.join("device")).unwrap();
+    // the real xhci row (125, with the PCI function in its IR-PCI-MSI chip column), a DECOY second
+    // xhci controller (0000:00:0d.0 / IRQ 200) that must NOT be selected, and a non-xhci row.
+    let interrupts = "            CPU0       CPU1\n \
+        1:  9  0  IO-APIC  1-edge  i8042\n \
+        125:  0 3946905142  IR-PCI-MSI-0000:00:14.0  0-edge  xhci_hcd\n \
+        200:  12  3  IR-PCI-MSI-0000:00:0d.0  0-edge  xhci_hcd\n \
+        300:  5  0  IR-PCI-MSI-0000:00:1f.6  0-edge  eno1\n";
+    std::fs::write(root.join("interrupts"), interrupts).unwrap();
+    std::fs::write(root.join("cpu_atom"), "12-15\n").unwrap();
+    std::fs::create_dir_all(root.join("irq/125")).unwrap();
+    std::fs::write(root.join("irq/125/smp_affinity_list"), "6\n").unwrap();
+    dir
+}
+
+#[test]
+fn nic_xhci_resolves_iface_to_pci_function_irq_and_target_cpu() {
+    let dir = irq_fixture("enx6c1ff766154b");
+    let root = dir.path().to_str().unwrap().to_string();
+    let (c1, pci, _e) = run_sourced(
+        &[("FX", root.as_str())],
+        "strih_nic_xhci_pci_function \"$FX/sys\" enx6c1ff766154b",
+    );
+    assert_eq!(c1, 0);
+    assert_eq!(pci.trim(), "0000:00:14.0", "pci function; got {pci}");
+    let (c2, irqs, _e) = run_sourced(
+        &[("FX", root.as_str())],
+        "strih_nic_xhci_irqs \"$FX/interrupts\" 0000:00:14.0",
+    );
+    assert_eq!(c2, 0);
+    assert_eq!(irqs.trim(), "125", "xhci irqs; got {irqs}");
+    let (c3, cpu, _e) = run_sourced(
+        &[("FX", root.as_str())],
+        "strih_nic_irq_target_cpu \"$FX/cpu_atom\"",
+    );
+    assert_eq!(c3, 0);
+    assert_eq!(
+        cpu.trim(),
+        "15",
+        "target cpu (last cpu_atom E-core); got {cpu}"
+    );
+}
+
+#[test]
+fn nic_xhci_irqs_selects_only_the_matching_controller() {
+    let dir = irq_fixture("enx6c1ff766154b");
+    let root = dir.path().to_str().unwrap().to_string();
+    let (_c, irqs, _e) = run_sourced(
+        &[("FX", root.as_str())],
+        "strih_nic_xhci_irqs \"$FX/interrupts\" 0000:00:14.0",
+    );
+    let lines: Vec<&str> = irqs.lines().filter(|l| !l.is_empty()).collect();
+    assert_eq!(
+        lines,
+        vec!["125"],
+        "must select ONLY 0000:00:14.0's IRQ (never the decoy 0000:00:0d.0 / 200); got {irqs}"
+    );
+    // a controller with no matching row fails-closed (no IRQ, non-zero).
+    let (c2, out2, _e) = run_sourced(
+        &[("FX", root.as_str())],
+        "strih_nic_xhci_irqs \"$FX/interrupts\" 0000:00:99.9",
+    );
+    assert_ne!(c2, 0, "a non-present controller must fail-closed");
+    assert!(out2.trim().is_empty());
+}
+
+#[test]
+fn nic_xhci_pci_function_fails_loud_on_missing_iface() {
+    let dir = irq_fixture("enx6c1ff766154b");
+    let root = dir.path().to_str().unwrap().to_string();
+    let (code, out, _e) = run_sourced(
+        &[("FX", root.as_str())],
+        "strih_nic_xhci_pci_function \"$FX/sys\" ghost0",
+    );
+    assert_ne!(code, 0, "a missing iface must fail-closed");
+    assert!(
+        out.trim().is_empty(),
+        "no PCI function printed for a missing iface"
+    );
+}
+
+#[test]
+fn nic_irq_target_cpu_last_atom_and_online_fallback() {
+    let dir = irq_fixture("enx6c1ff766154b");
+    let root = dir.path().to_str().unwrap().to_string();
+    let (_c, cpu, _e) = run_sourced(
+        &[("FX", root.as_str())],
+        "strih_nic_irq_target_cpu \"$FX/cpu_atom\"",
+    );
+    assert_eq!(cpu.trim(), "15");
+    // non-hybrid: cpu_atom absent -> highest online cpu.
+    std::fs::write(dir.path().join("online"), "0-7\n").unwrap();
+    let (_c2, cpu2, _e) = run_sourced(
+        &[("FX", root.as_str())],
+        "strih_nic_irq_target_cpu \"$FX/no-such-atom\" \"$FX/online\"",
+    );
+    assert_eq!(
+        cpu2.trim(),
+        "7",
+        "fallback = highest online cpu; got {cpu2}"
+    );
+}
+
+#[test]
+fn nic_irq_affinity_verdict_ok_multi_below() {
+    let cases: &[(&str, &str, &str, i32)] = &[
+        ("15", "12", "ok", 0),
+        ("12-15", "12", "multi", 1),
+        ("6,15", "12", "multi", 1),
+        ("6", "12", "below-atom", 1),
+        ("3", "", "ok", 0), // non-hybrid: no floor check
+    ];
+    for (aff, atom, want_tok, want_code) in cases {
+        let (code, out, _e) = run_sourced(
+            &[],
+            &format!("strih_nic_irq_affinity_verdict '{aff}' '{atom}'"),
+        );
+        assert_eq!(code, *want_code, "verdict code for aff={aff} atom={atom}");
+        assert_eq!(
+            out.trim(),
+            *want_tok,
+            "verdict token for aff={aff} atom={atom}"
+        );
+    }
+}
+
+#[test]
+fn irq_total_count_sums_the_row_and_counter_advanced_is_liveness() {
+    let dir = irq_fixture("enx6c1ff766154b");
+    let root = dir.path().to_str().unwrap().to_string();
+    let (_c, tot, _e) = run_sourced(
+        &[("FX", root.as_str())],
+        "strih_irq_total_count \"$FX/interrupts\" 125",
+    );
+    assert_eq!(
+        tot.trim(),
+        "3946905142",
+        "sum of the IRQ row's per-cpu counts; got {tot}"
+    );
+    // advancing predicate: > is advancing, == is a frozen IRQ, garbage fail-closed.
+    let (ca, _o, _e) = run_sourced(&[], "strih_counter_advanced 100 200");
+    assert_eq!(ca, 0, "200 > 100 must read as advancing");
+    let (cb, _o, _e) = run_sourced(&[], "strih_counter_advanced 200 200");
+    assert_ne!(
+        cb, 0,
+        "equal counters must NOT read as advancing (a frozen IRQ)"
+    );
+    let (cc, _o, _e) = run_sourced(&[], "strih_counter_advanced x 200");
+    assert_ne!(cc, 0, "garbage must fail-closed");
+}
+
+#[test]
+fn cpulist_min_and_max() {
+    for (list, minv, maxv) in [("12-15", "12", "15"), ("3,1,2", "1", "3"), ("5", "5", "5")] {
+        let (_c, mn, _e) = run_sourced(&[], &format!("strih_cpulist_min '{list}'"));
+        assert_eq!(mn.trim(), minv, "min of {list}");
+        let (_c, mx, _e) = run_sourced(&[], &format!("strih_cpulist_max '{list}'"));
+        assert_eq!(mx.trim(), maxv, "max of {list}");
+    }
+}
+
+#[test]
+fn emitted_irq_script_resolves_and_writes_the_target_cpu() {
+    let dir = irq_fixture("enx6c1ff766154b");
+    let root = dir.path().to_str().unwrap().to_string();
+    let body = "strih_nic_irq_affinity_script_text > \"$FX/affinity.sh\"; \
+                SYS_ROOT=\"$FX/sys\" PROC_INTERRUPTS=\"$FX/interrupts\" CPU_ATOM_FILE=\"$FX/cpu_atom\" \
+                IRQ_DIR=\"$FX/irq\" STRIH_NIC_IFACE=enx6c1ff766154b bash \"$FX/affinity.sh\"";
+    let (code, out, err) = run_sourced(&[("FX", root.as_str())], body);
+    assert_eq!(
+        code, 0,
+        "emitted script must succeed over the fixture; stderr={err} stdout={out}"
+    );
+    assert!(
+        out.contains("IRQ 125"),
+        "emitted script must log IRQ 125; got {out}"
+    );
+    let got = std::fs::read_to_string(dir.path().join("irq/125/smp_affinity_list")).unwrap();
+    assert_eq!(
+        got.trim(),
+        "15",
+        "emitted script must pin IRQ 125 to cpu 15; wrote {got}"
+    );
+}
+
+#[test]
+fn emitted_irq_script_fails_loud_when_iface_unresolvable() {
+    let dir = irq_fixture("enx6c1ff766154b");
+    let root = dir.path().to_str().unwrap().to_string();
+    let body = "strih_nic_irq_affinity_script_text > \"$FX/affinity.sh\"; \
+                SYS_ROOT=\"$FX/sys\" PROC_INTERRUPTS=\"$FX/interrupts\" CPU_ATOM_FILE=\"$FX/cpu_atom\" \
+                IRQ_DIR=\"$FX/irq\" STRIH_NIC_IFACE=ghost0 bash \"$FX/affinity.sh\"";
+    let (code, out, err) = run_sourced(&[("FX", root.as_str())], body);
+    assert_ne!(
+        code, 0,
+        "a ghost iface must make the emitted script exit non-zero"
+    );
+    assert!(
+        format!("{out}{err}").contains("FATAL"),
+        "must print a FATAL journal line; out={out} err={err}"
+    );
+    // a failed resolution must NOT have written any affinity (the fixture's original "6" stands).
+    let got = std::fs::read_to_string(dir.path().join("irq/125/smp_affinity_list")).unwrap();
+    assert_eq!(
+        got.trim(),
+        "6",
+        "a failed resolution must not write an affinity"
+    );
+}
+
+#[test]
+fn emitted_irq_script_resolution_matches_the_lib_helpers() {
+    // The emitted boot script and the verify-side lib helpers MUST resolve the same IRQ + cpu over
+    // the same fixture (they are two consumers of one behaviour -- a drift would fail here).
+    let dir = irq_fixture("enx6c1ff766154b");
+    let root = dir.path().to_str().unwrap().to_string();
+    let (_c, pci, _e) = run_sourced(
+        &[("FX", root.as_str())],
+        "strih_nic_xhci_pci_function \"$FX/sys\" enx6c1ff766154b",
+    );
+    let (_c, irqs, _e) = run_sourced(
+        &[("FX", root.as_str())],
+        &format!("strih_nic_xhci_irqs \"$FX/interrupts\" {}", pci.trim()),
+    );
+    let (_c, cpu, _e) = run_sourced(
+        &[("FX", root.as_str())],
+        "strih_nic_irq_target_cpu \"$FX/cpu_atom\"",
+    );
+    assert_eq!(
+        (pci.trim(), irqs.trim(), cpu.trim()),
+        ("0000:00:14.0", "125", "15"),
+        "lib helpers must resolve the same IRQ 125 -> cpu 15 the emitted script writes"
+    );
+}
+
+#[test]
+fn nic_irq_affinity_unit_is_enable_only_and_byte_parity_with_committed_file() {
+    let (_c, unit, _e) = run_sourced(&[], "strih_nic_irq_affinity_unit_text");
+    let committed = read_script("systemd/strih-nic-irq-affinity.service");
+    assert_eq!(
+        unit, committed,
+        "the printer must equal the committed unit byte-for-byte"
+    );
+    assert!(unit.contains("Type=oneshot"), "must be a oneshot");
+    assert!(unit.contains("RemainAfterExit=yes"), "must RemainAfterExit");
+    assert!(
+        unit.contains("After=network-pre.target"),
+        "must order after network-pre.target"
+    );
+    assert!(
+        unit.contains("WantedBy=multi-user.target"),
+        "must be a system unit (multi-user)"
+    );
+    assert!(
+        unit.contains("ExecStart=/usr/local/bin/strih-nic-irq-affinity.sh"),
+        "must run the emitted script"
+    );
+    assert!(
+        !unit.to_lowercase().contains("--now") && !unit.contains("ExecStartPre"),
+        "the unit is enable-only: no live start / no ExecStartPre"
+    );
+}
+
+#[test]
+fn setup_strih_installs_the_irq_affinity_script_and_enables_the_unit_enable_only() {
+    let s = read_script("scripts/setup-strih.sh");
+    assert!(
+        s.contains("strih_nic_irq_affinity_script_text > /usr/local/bin/strih-nic-irq-affinity.sh"),
+        "setup-strih must emit the affinity script to /usr/local/bin"
+    );
+    assert!(
+        s.contains("systemctl enable strih-nic-irq-affinity.service"),
+        "setup-strih must enable the unit"
+    );
+    assert!(
+        !s.contains("systemctl start strih-nic-irq-affinity")
+            && !s.contains("--now strih-nic-irq-affinity"),
+        "the affinity unit must be enable-only (never a live start)"
+    );
+    assert!(
+        !s.contains("/proc/irq/") && !s.contains("> \"/proc/irq"),
+        "setup-strih must not hard-code an IRQ number nor write affinity itself (the emitted script does)"
+    );
+}
+
+#[test]
+fn verify_strih_checks_nic_irq_affinity_with_a_live_advancing_read() {
+    let v = read_script("scripts/verify-strih.sh");
+    assert!(
+        v.contains("strih_nic_xhci_irqs"),
+        "verify must resolve the xhci IRQ via the lib"
+    );
+    assert!(
+        v.contains("smp_affinity_list"),
+        "verify must read the IRQ smp_affinity_list"
+    );
+    assert!(
+        v.contains("strih_counter_advanced") && v.contains("sleep 2"),
+        "verify must assert the IRQ counter ADVANCES over a live 2-s window (never a static file check)"
+    );
+    assert!(
+        v.contains("strih_nic_irq_affinity_verdict"),
+        "verify must use the single-E-core placement verdict"
     );
 }
