@@ -2450,3 +2450,21 @@ fn verify_strih_audio_verdict_assignment_survives_set_e() {
          return) cannot abort the whole gate under set -e: {line}"
     );
 }
+
+/// issue 1352 acceptance run (22.9.2026): the NVENC gate line piped `ffmpeg -encoders || cat "$LOG"`
+/// into `strih_lx_nvenc_available_ok` -- on strih-lx the distro ffmpeg exits 0 WITHOUT any nvenc
+/// encoder, so the `||` fallback never reached the OBS log even though the very next report-only line
+/// proved `[obs-nvenc] NVENC version:` live in OBS. Both evidence sources must be concatenated (`;`),
+/// so either the ffmpeg encoder list or the OBS log satisfies the predicate.
+#[test]
+fn verify_strih_nvenc_gate_feeds_both_ffmpeg_and_the_obs_log() {
+    let v = read_script("scripts/verify-strih.sh");
+    let line = v
+        .lines()
+        .find(|l| l.contains("strih_lx_nvenc_available_ok && ok"))
+        .expect("verify-strih must grade NVENC via strih_lx_nvenc_available_ok");
+    assert!(
+        line.contains("2>/dev/null; cat \"$LOG\"") && !line.contains("|| cat \"$LOG\""),
+        "the NVENC gate must feed BOTH `ffmpeg -encoders` and the OBS log (`;`, not `||`): {line}"
+    );
+}
