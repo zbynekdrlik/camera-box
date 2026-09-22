@@ -2468,3 +2468,17 @@ fn verify_strih_nvenc_gate_feeds_both_ffmpeg_and_the_obs_log() {
         "the NVENC gate must feed BOTH `ffmpeg -encoders` and the OBS log (`;`, not `||`): {line}"
     );
 }
+
+/// issue 1352 acceptance run (22.9.2026): the janus audiobridge jcfg is root:root 0640 on the box, so
+/// verify-strih.sh run as the operator user could not read it (`Permission denied`) and reported
+/// `general.local_ip NOT pinned (or jcfg unreadable)` right after the pin was installed. The reads
+/// must fall back to `sudo -n cat` (non-interactive; a box without a cached sudo ticket still degrades
+/// to the honest "unreadable" note, never a false PASS) so a provisioned pin grades as pinned.
+#[test]
+fn verify_strih_reads_the_janus_jcfg_via_sudo_n_fallback() {
+    let v = read_script("scripts/verify-strih.sh");
+    assert!(
+        v.contains("sudo -n cat \"$JANUS_AB\""),
+        "verify-strih must read the root-only janus audiobridge jcfg via a `sudo -n cat` fallback"
+    );
+}
