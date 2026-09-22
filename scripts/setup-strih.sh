@@ -444,9 +444,19 @@ install -m 0755 "${HERE}/strih-mv-host.py" /usr/local/bin/strih-mv-host.py
 install -m 0644 "${HERE}/../systemd/strih-mv-host.service" "${USER_HOME}/.config/systemd/user/strih-mv-host.service"
 chown -R "$DESKTOP_USER":"$DESKTOP_USER" "${USER_HOME}/.config/systemd/user" 2>/dev/null || true
 sudo -u "$DESKTOP_USER" XDG_RUNTIME_DIR="/run/user/$(id -u "$DESKTOP_USER")" systemctl --user daemon-reload 2>/dev/null || true
-sudo -u "$DESKTOP_USER" XDG_RUNTIME_DIR="/run/user/$(id -u "$DESKTOP_USER")" systemctl --user enable strih-mv-host.service 2>/dev/null \
-  || warn "  enable strih-mv-host.service by hand once the user session bus is up"
-echo "  strih-mv-host.service installed + enabled (helper /usr/local/bin/strih-mv-host.py hosts OBS projectors in child windows)"
+# issue 1352 acceptance (22.9.2026): the VENDORED child-host projector is live in the strih bundle and
+# the runtime helper CONFLICTS with it -- both mechanisms active = MV 0.6 fps / 505 ms presents,
+# helper stopped = MV 30 fps / 5 ms. Default = installed but DISABLED (and stopped, the one live
+# action here: a running helper actively breaks the render path); STRIH_MV_HOST_ENABLED=1 restores
+# the enable-only fallback for a bundle WITHOUT the vendored fix.
+if [ "${STRIH_MV_HOST_ENABLED:-0}" = 1 ]; then
+  sudo -u "$DESKTOP_USER" XDG_RUNTIME_DIR="/run/user/$(id -u "$DESKTOP_USER")" systemctl --user enable strih-mv-host.service 2>/dev/null \
+    || warn "  enable strih-mv-host.service by hand once the user session bus is up"
+  echo "  strih-mv-host.service installed + enabled (STRIH_MV_HOST_ENABLED=1: runtime fallback for a bundle without the vendored child-host projector)"
+else
+  sudo -u "$DESKTOP_USER" XDG_RUNTIME_DIR="/run/user/$(id -u "$DESKTOP_USER")" systemctl --user disable --now strih-mv-host.service 2>/dev/null || true
+  echo "  strih-mv-host.service installed but DISABLED (default: the vendored child-host projector is the live mechanism; set STRIH_MV_HOST_ENABLED=1 only for a bundle without it)"
+fi
 
 # ---------------------------------------------------------------------------------------------
 step 9 ":8899 bundle-state server (strih-bundle-state-server.service) -- enable-only"

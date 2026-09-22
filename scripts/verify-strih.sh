@@ -483,8 +483,16 @@ MVH_UNIT="${USER_HOME}/.config/systemd/user/strih-mv-host.service"
 MVH_WANTS="${USER_HOME}/.config/systemd/user/default.target.wants/strih-mv-host.service"
 MVH_HELPER="/usr/local/bin/strih-mv-host.py"
 MVH_XLIB=MISSING; python3 -c "import Xlib" 2>/dev/null && MVH_XLIB=ok
-if [ -f "$MVH_UNIT" ] && [ -L "$MVH_WANTS" ] && [ -x "$MVH_HELPER" ] && [ "$MVH_XLIB" = ok ]; then
-  ok "(mv-host) strih-mv-host.service installed + enabled + helper present + python3-xlib importable"
+# issue 1352 acceptance (22.9.2026): the vendored child-host projector is the live mechanism and the
+# helper CONFLICTS with it (both active = MV 0.6 fps), so the expected enablement follows
+# STRIH_MV_HOST_ENABLED (default 0 = installed but DISABLED); a mismatch either way is a FAIL.
+MVH_WANT="${STRIH_MV_HOST_ENABLED:-0}"
+if [ -f "$MVH_UNIT" ] && [ -x "$MVH_HELPER" ] && [ "$MVH_XLIB" = ok ] && [ "$MVH_WANT" = 1 ] && [ -L "$MVH_WANTS" ]; then
+  ok "(mv-host) strih-mv-host.service installed + enabled (STRIH_MV_HOST_ENABLED=1 fallback) + helper present + python3-xlib importable"
+elif [ -f "$MVH_UNIT" ] && [ -x "$MVH_HELPER" ] && [ "$MVH_XLIB" = ok ] && [ "$MVH_WANT" != 1 ] && [ ! -L "$MVH_WANTS" ]; then
+  ok "(mv-host) strih-mv-host.service installed but DISABLED (vendored child-host projector is the live mechanism) + helper present + python3-xlib importable"
+elif [ -f "$MVH_UNIT" ] && [ -x "$MVH_HELPER" ] && [ "$MVH_XLIB" = ok ]; then
+  bad "(mv-host) enablement mismatch: STRIH_MV_HOST_ENABLED=${MVH_WANT} but the WantedBy symlink is $( [ -L "$MVH_WANTS" ] && echo present || echo absent ) -- both hosting mechanisms active = MV 0.6 fps (22.9.2026); disable the helper unless the bundle lacks the vendored child-host"
 else
   bad "(mv-host) strih-mv-host gate: unit=$( [ -f "$MVH_UNIT" ] && echo present || echo MISSING ) enabled=$( [ -L "$MVH_WANTS" ] && echo yes || echo no ) helper=$( [ -x "$MVH_HELPER" ] && echo present || echo MISSING ) xlib=${MVH_XLIB} -- re-run setup-strih.sh step 8b"
 fi
