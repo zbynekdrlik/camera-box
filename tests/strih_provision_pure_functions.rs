@@ -419,9 +419,15 @@ fn launcher_pair_ok_fails_and_names_a_non_executable_script() {
 #[test]
 fn setup_strih_installs_both_launchers_before_enabling_the_unit() {
     let s = read_script("scripts/setup-strih.sh");
-    let start_install = s
-        .find("install -m 0755 \"${HERE}/strih-obs-start.sh\"")
-        .expect("setup-strih must install strih-obs-start.sh mode 0755");
+    // issue 1352: strih-obs-start.sh is no longer a verbatim `install` -- setup-strih substitutes the
+    // @STRIH_LX_OBS_GPU_ENV@ marker with strih_lx_obs_gpu_env, WRITES the result to /usr/local/bin,
+    // then chmod 0755. Assert the deployed write + the strih-obs-stop.sh install both precede enable.
+    let start_write = s.find("> /usr/local/bin/strih-obs-start.sh").expect(
+        "setup-strih must write the (GPU-env-substituted) strih-obs-start.sh to /usr/local/bin",
+    );
+    let start_chmod = s
+        .find("chmod 0755 /usr/local/bin/strih-obs-start.sh")
+        .expect("the substituted strih-obs-start.sh must be chmod 0755");
     let stop_install = s
         .find("install -m 0755 \"${HERE}/strih-obs-stop.sh\"")
         .expect("setup-strih must install strih-obs-stop.sh mode 0755");
@@ -429,8 +435,8 @@ fn setup_strih_installs_both_launchers_before_enabling_the_unit() {
         .find("systemctl --user enable strih-obs.service")
         .expect("setup-strih step 8 must enable strih-obs.service");
     assert!(
-        start_install < enable && stop_install < enable,
-        "both launcher installs must precede the unit enable (starts {start_install} / stops {stop_install} vs enable {enable})"
+        start_write < enable && start_chmod < enable && stop_install < enable,
+        "both launcher installs must precede the unit enable (start_write {start_write} / chmod {start_chmod} / stop {stop_install} vs enable {enable})"
     );
 }
 
@@ -2162,5 +2168,265 @@ fn verify_strih_asserts_qt6_svg_and_usr_chrome_sandbox() {
     assert!(
         v.contains("strih_lx_chrome_sandbox_usr_path"),
         "verify-strih must read chrome-sandbox at the resolved /usr path"
+    );
+}
+
+// =====================================================================================
+// issue 1352: strih-lx OBS on the RTX 5050 via XWayland PRIME -- provisioning bake
+// (helper + unit + GPU env printer + Janus local_ip + DistroAV output names + self-loop seed)
+// =====================================================================================
+
+/// issue 1352 (b): `strih_lx_obs_gpu_env` prints the 4 XWayland-PRIME exports on ONE line (no
+/// trailing newline) so a `$(...)` embedding never glues the following statement.
+#[test]
+fn gpu_env_prints_the_four_xwayland_prime_exports_on_one_line() {
+    let (code, out, err) = run_sourced(&[], "strih_lx_obs_gpu_env");
+    assert_eq!(code, 0, "printer must succeed; stderr={err}");
+    for ex in [
+        "export QT_QPA_PLATFORM=xcb",
+        "export __NV_PRIME_RENDER_OFFLOAD=1",
+        "export __GLX_VENDOR_LIBRARY_NAME=nvidia",
+        "export __EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/10_nvidia.json",
+    ] {
+        assert!(out.contains(ex), "gpu env must carry {ex}: {out}");
+    }
+    assert!(
+        !out.contains('\n'),
+        "the exports must be a single line: {out:?}"
+    );
+    assert_eq!(
+        out.matches("export ").count(),
+        4,
+        "exactly 4 exports: {out}"
+    );
+}
+
+/// issue 1352 (e): `strih_lx_ndi_output_ini_cmds USER_INI` carries the BARE DistroAV output names +
+/// enabled flags, and functionally upserts them into [NDIPlugin] idempotently, preserving other
+/// sections and never clobbering an unparseable ini.
+#[test]
+fn ndi_output_ini_cmds_upserts_the_bare_distroav_output_names_idempotently() {
+    let (code, out, err) =
+        run_sourced(&[], "strih_lx_ndi_output_ini_cmds /tmp/does-not-matter.ini");
+    assert_eq!(code, 0, "printer must succeed; stderr={err}");
+    for kv in [
+        "MainOutputName=2ME PGM",
+        "PreviewOutputName=2ME PVW",
+        "MainOutputEnabled=true",
+        "PreviewOutputEnabled=true",
+    ] {
+        assert!(out.contains(kv), "printer must carry {kv}: {out}");
+    }
+    let body = r#"
+tmp="$(mktemp)"
+printf '[General]\nFoo=bar\n' > "$tmp"
+eval "$(strih_lx_ndi_output_ini_cmds "$tmp")"
+eval "$(strih_lx_ndi_output_ini_cmds "$tmp")"
+echo "MAIN=$(grep -c 'MainOutputName=2ME PGM' "$tmp")"
+echo "PREVN=$(grep -c 'PreviewOutputName=2ME PVW' "$tmp")"
+echo "MAINEN=$(grep -c 'MainOutputEnabled=true' "$tmp")"
+echo "PREVEN=$(grep -c 'PreviewOutputEnabled=true' "$tmp")"
+echo "KEPT=$(grep -c 'Foo=bar' "$tmp")"
+rm -f "$tmp"
+"#;
+    let (c, o, e) = run_sourced(&[], body);
+    assert_eq!(c, 0, "functional upsert must succeed; stderr={e}");
+    assert!(
+        o.contains("MAIN=1"),
+        "one MainOutputName after idempotent upsert: {o}"
+    );
+    assert!(o.contains("PREVN=1"), "one PreviewOutputName: {o}");
+    assert!(o.contains("MAINEN=1"), "MainOutputEnabled=true: {o}");
+    assert!(o.contains("PREVEN=1"), "PreviewOutputEnabled=true: {o}");
+    assert!(
+        o.contains("KEPT=1"),
+        "other sections preserved (never clobbered): {o}"
+    );
+}
+
+/// issue 1352 (d): `strih_janus_audiobridge_jcfg_text ROOM SECRET LOCAL_IP` pins `local_ip` inside
+/// `general` (before the room block); a blank/omitted LOCAL_IP omits the assignment (the ws_ip idiom).
+#[test]
+fn janus_audiobridge_jcfg_pins_local_ip_in_general_when_given() {
+    let (code, out, err) =
+        run_sourced(&[], "strih_janus_audiobridge_jcfg_text 1000 /x 10.77.9.202");
+    assert_eq!(code, 0, "renderer must succeed; stderr={err}");
+    let ip_at = out
+        .find("local_ip = \"10.77.9.202\"")
+        .expect("3-arg must pin local_ip in general");
+    let room_at = out.find("room-1000:").expect("must still render the room");
+    assert!(
+        ip_at < room_at,
+        "local_ip must be inside general (before the room block): {out}"
+    );
+    // 2-arg (blank): no local_ip ASSIGNMENT line (the doc comment mentions local_ip, the block does not).
+    let (c2, out2, _e) = run_sourced(&[], "strih_janus_audiobridge_jcfg_text 1000 /x");
+    assert_eq!(c2, 0);
+    assert!(
+        !out2.contains("local_ip = \""),
+        "a blank local_ip must omit the assignment: {out2}"
+    );
+}
+
+/// issue 1352 (f): the 2ME feedback pair receives strih-lx's OWN `STRIH-LX (2ME …)` outputs (the M4
+/// self-loop); the dead parallel-phase `STRIH-SNV (2ME …)` senders are gone.
+#[test]
+fn seed_manifest_2me_feedback_senders_are_the_strih_lx_self_loop() {
+    let (code, out, err) = run_sourced(&[], "strih_lx_seed_manifest_json");
+    assert_eq!(code, 0, "manifest must succeed; stderr={err}");
+    assert!(
+        out.contains(r#"{"sender": "STRIH-LX (2ME PVW)", "input": "NDI 2ME PVW""#),
+        "2ME PVW must receive the STRIH-LX self-loop sender: {out}"
+    );
+    assert!(
+        out.contains(r#"{"sender": "STRIH-LX (2ME PGM)", "input": "NDI 2ME PGM (mv)""#),
+        "2ME PGM must receive the STRIH-LX self-loop sender: {out}"
+    );
+    assert!(
+        !out.contains("STRIH-SNV (2ME PVW)"),
+        "no dead STRIH-SNV (2ME PVW) sender: {out}"
+    );
+    assert!(
+        !out.contains("STRIH-SNV (2ME PGM)"),
+        "no dead STRIH-SNV (2ME PGM) sender: {out}"
+    );
+}
+
+/// issue 1352 (b): setup-strih substitutes the `@STRIH_LX_OBS_GPU_ENV@` marker with the printer output
+/// (the `@JANUS_ROOM_SECRET@` idiom), so the printer is the ONE source of truth and the wrapper does
+/// not hardcode the exports.
+#[test]
+fn setup_strih_substitutes_the_gpu_env_marker_via_the_printer() {
+    let setup = read_script("scripts/setup-strih.sh");
+    assert!(
+        setup.contains("strih_lx_obs_gpu_env"),
+        "setup must consume the gpu-env printer"
+    );
+    assert!(
+        setup.contains("//#@STRIH_LX_OBS_GPU_ENV@/"),
+        "setup must substitute the @STRIH_LX_OBS_GPU_ENV@ marker (the @JANUS_ROOM_SECRET@ idiom)"
+    );
+    let wrapper = read_script("scripts/strih-obs-start.sh");
+    assert!(
+        wrapper.contains("#@STRIH_LX_OBS_GPU_ENV@"),
+        "the repo wrapper must carry the marker line (a bash comment)"
+    );
+    assert!(
+        !wrapper.contains("__NV_PRIME_RENDER_OFFLOAD=1"),
+        "the wrapper must NOT hardcode the PRIME exports (single source of truth = the printer)"
+    );
+}
+
+/// issue 1352 (e): setup-strih step 7 seeds [NDIPlugin] via the pure printer (eval-consumed).
+#[test]
+fn setup_strih_seeds_ndi_output_names_via_the_printer() {
+    let setup = read_script("scripts/setup-strih.sh");
+    assert!(
+        setup.contains("eval \"$(strih_lx_ndi_output_ini_cmds"),
+        "setup step 7 must seed [NDIPlugin] via strih_lx_ndi_output_ini_cmds (eval-consumed)"
+    );
+}
+
+/// issue 1352 (d): the audiobridge jcfg call passes STATIC_IP (= strih_lx_ip, the ONE IP source of
+/// truth) as the LOCAL_IP arg so a renumber cannot strand the plain-RTP bind.
+#[test]
+fn setup_strih_pins_janus_local_ip_from_the_static_ip_source_of_truth() {
+    let setup = read_script("scripts/setup-strih.sh");
+    assert!(
+        setup.contains("strih_janus_audiobridge_jcfg_text \"$JANUS_ROOM\" \"$JANUS_SECRET_FILE\" \"$STATIC_IP\""),
+        "setup must pass STATIC_IP to the audiobridge jcfg (the renumber-proof local_ip pin)"
+    );
+    assert!(
+        setup.contains("STATIC_IP=\"$(strih_lx_ip)\""),
+        "STATIC_IP must be the single IP source of truth (strih_lx_ip)"
+    );
+}
+
+/// issue 1352 (a): the mv-host helper + `--user` unit exist in the repo; setup installs python3-xlib,
+/// the helper (0755) + the unit, and ENABLE-ONLY registers it (never a live start). The unit's
+/// ExecStart references the installed helper.
+#[test]
+fn setup_strih_installs_and_enables_the_mv_host_helper() {
+    assert!(
+        manifest_dir().join("scripts/strih-mv-host.py").exists(),
+        "scripts/strih-mv-host.py must exist"
+    );
+    assert!(
+        manifest_dir()
+            .join("systemd/strih-mv-host.service")
+            .exists(),
+        "systemd/strih-mv-host.service must exist"
+    );
+    let unit = read_script("systemd/strih-mv-host.service");
+    assert!(
+        unit.contains("/usr/local/bin/strih-mv-host.py"),
+        "the unit ExecStart must reference the installed helper"
+    );
+    let setup = read_script("scripts/setup-strih.sh");
+    assert!(
+        setup.contains("apt-get install -y python3-xlib"),
+        "setup must install python3-xlib (the helper's only dep)"
+    );
+    assert!(
+        setup.contains("install -m 0755 \"${HERE}/strih-mv-host.py\""),
+        "setup must install the helper mode 0755"
+    );
+    assert!(
+        setup.contains("install -m 0644 \"${HERE}/../systemd/strih-mv-host.service\""),
+        "setup must install the --user unit"
+    );
+    assert!(
+        setup.contains("systemctl --user enable strih-mv-host.service"),
+        "setup must enable the mv-host unit"
+    );
+    assert!(
+        !setup.contains("systemctl --user start strih-mv-host"),
+        "mv-host must be enable-only (never a live start -- the provisioning convention)"
+    );
+}
+
+/// issue 1352 (c): setup installs avahi-utils (avahi-browse) and verify greps for it.
+#[test]
+fn setup_strih_installs_avahi_utils_and_verify_greps_avahi_browse() {
+    let setup = read_script("scripts/setup-strih.sh");
+    assert!(
+        setup.contains("apt-get install -y avahi-utils"),
+        "setup must install avahi-utils (avahi-browse for NDI/mDNS discovery)"
+    );
+    let verify = read_script("scripts/verify-strih.sh");
+    assert!(
+        verify.contains("command -v avahi-browse"),
+        "verify must assert avahi-browse is present"
+    );
+}
+
+/// issue 1352: verify-strih.sh gates every provisioned item (mv-host, gpu-env, avahi, DistroAV output
+/// names, janus local_ip).
+#[test]
+fn verify_strih_asserts_the_1352_provisioning_items() {
+    let v = read_script("scripts/verify-strih.sh");
+    assert!(
+        v.contains("strih-mv-host.service"),
+        "verify must gate the mv-host unit"
+    );
+    assert!(
+        v.contains("import Xlib"),
+        "verify must assert python3-xlib importable"
+    );
+    assert!(
+        v.contains("QT_QPA_PLATFORM=xcb"),
+        "verify must grep the deployed wrapper for the RTX exports"
+    );
+    assert!(
+        v.contains("#@STRIH_LX_OBS_GPU_ENV@"),
+        "verify must detect an un-substituted gpu-env marker"
+    );
+    assert!(
+        v.contains("MainOutputName=2ME PGM"),
+        "verify must assert the DistroAV output names in user.ini"
+    );
+    assert!(
+        v.contains("local_ip = \""),
+        "verify must grep the janus local_ip pin"
     );
 }
