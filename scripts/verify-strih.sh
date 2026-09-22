@@ -253,7 +253,7 @@ else
   # sink + OBS input; the rx is verified once the hub runs.
   AUDIO_RX=1
 fi
-AUDIO_VERDICT="$(strih_lx_program_audio_verdict "$AUDIO_SINK" "$AUDIO_RX" "$AUDIO_KIND" unknown na)"
+AUDIO_VERDICT="$(strih_lx_program_audio_verdict "$AUDIO_SINK" "$AUDIO_RX" "$AUDIO_KIND" unknown na || true)"
 case "$AUDIO_VERDICT" in
   PASS*) ok   "program audio: $AUDIO_VERDICT" ;;
   NOTE*) note "program audio: $AUDIO_VERDICT" ;;
