@@ -142,15 +142,16 @@ fn verify_stream_program_phase2_establishes_the_probe_input_before_asserting_988
     );
 
     // The setup call must target the SAME stream box, mark it terminal (stream has no downstream
-    // OBS hop for setup's own-output self-resolution to protect), and use the canonical strih
-    // Main Output upstream name (the SAME upstream the certified prod input already ingests).
+    // OBS hop for setup's own-output self-resolution to protect), and use the strih program
+    // sender name via the env-overridable $STREAM_PROBE_UPSTREAM (post-M4 default STRIH-LX
+    // (2ME PGM); the pre-M4 Windows STRIH-SNV literal binds phase2-probe-src to a dead sender).
     assert!(
         fn_body.contains(r#"--host "$STREAM_IP""#),
         "the setup call must target STREAM_IP: {fn_body}"
     );
     assert!(
-        fn_body.contains("--upstream 'STRIH-SNV (2ME PGM)'"),
-        "the setup call must use strih's Main Output name as --upstream: {fn_body}"
+        fn_body.contains(r#"--upstream "$STREAM_PROBE_UPSTREAM""#),
+        "the setup call must use the env-overridable $STREAM_PROBE_UPSTREAM as --upstream: {fn_body}"
     );
     assert!(
         fn_body.contains("--terminal"),
