@@ -3130,9 +3130,12 @@ fn verify_strih_has_the_bkshading_service_item() {
         v.contains("ss -tlnp"),
         "verify-strih must confirm the listener's OWNER via ss -tlnp"
     );
+    // The service's health probe is `/api/version` -- `/api/state` is the RELAY's (cambox :8771)
+    // and the intercom hub's endpoint, never the service's (live 23.9.2026: :8770/api/state = 404,
+    // so a healthy running service graded FAIL "silent").
     assert!(
-        v.contains("/api/state"),
-        "verify-strih must curl /api/state"
+        v.contains("/api/version"),
+        "verify-strih must curl the service's /api/version"
     );
     assert!(
         v.contains("8770"),
@@ -3646,5 +3649,42 @@ fn verify_strih_checks_nic_irq_affinity_with_a_live_advancing_read() {
     assert!(
         v.contains("strih_nic_iface_by_driver") && v.contains("r8152"),
         "verify must resolve the NIC iface driver-first (r8152), same as the boot script"
+    );
+}
+
+/// The bkshading-service item's health probe must hit a route the SERVICE actually serves. Live
+/// 23.9.2026: the item curled `:8770/api/state` (the relay's / intercom hub's endpoint), the service
+/// answers 404 there, so a healthy running service (listener owned by `bkshading`, panel 200,
+/// `/api/version` 200) graded FAIL "silent". Parse the routes from the service's own router and
+/// require the probed path to be one of them.
+#[test]
+fn verify_strih_bkshading_probe_hits_a_real_service_route() {
+    let v = read_script("scripts/verify-strih.sh");
+    let start = v
+        .find("BKSH_PORT=\"${BKSHADING_SERVICE_PORT:-8770}\"")
+        .expect("the bkshading-service item's port line");
+    let end = start
+        + v[start..]
+            .find("(bkshading-service) installed (enabled=")
+            .expect("the item's report-only branch");
+    let item = &v[start..end];
+    let marker = ":${BKSH_PORT}/";
+    let at = item
+        .find(marker)
+        .expect("the item must curl the service on :${BKSH_PORT}");
+    let path: String = item[at + marker.len() - 1..]
+        .chars()
+        .take_while(|c| *c != '"' && !c.is_whitespace())
+        .collect();
+    let router = read_script("bkshading/service/src/http.rs");
+    let routes: Vec<String> = router
+        .split(".route(\"")
+        .skip(1)
+        .filter_map(|r| r.split('"').next().map(str::to_string))
+        .collect();
+    assert!(
+        routes.iter().any(|r| r == &path),
+        "verify-strih probes the service at `{path}`, which is not a route the service serves \
+         (routes: {routes:?})"
     );
 }
