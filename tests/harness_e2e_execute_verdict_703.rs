@@ -554,7 +554,11 @@ fn recording_e2e_execute_mode_runs_the_merge_and_propagates_its_exit_code() {
     // damping term; a fail-open sourced-helper call + its report line, $GATE-untouched) legitimately
     // added ~1150 bytes between the merge call and the exit, same justified-growth pattern as above
     // (measured distance 10106).
-    let window = &s[exec_merge_block..(exec_merge_block + 10800).min(s.len())];
+    // issue 1354: widened from 10800 to 12000 bytes -- the [8/8f] genlock-audit compute step (the
+    // scope-3 producer: genlock_audit_snapshot_compute invocation + its fail-open comment block,
+    // report-only, $GATE-untouched) legitimately added ~620 bytes between the merge call and the
+    // exit, same justified-growth pattern as above (measured distance 10729).
+    let window = &s[exec_merge_block..(exec_merge_block + 12000).min(s.len())];
     assert!(
         window.contains(r#"exit "$GATE""#),
         "#703: after running the real merge, the branch must `exit \"$GATE\"` (the merge's own \

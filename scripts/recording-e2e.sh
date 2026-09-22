@@ -130,6 +130,12 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Linux strih -- never a second host-detection mechanism, one resolver both [0/8] and [8/8a] use.
 # shellcheck source=scripts/lib/strih-platform.sh
 . "$HERE/lib/strih-platform.sh"
+# issue 1354 scope 3: capture strih's per-input genlock-fifo audit tail BEFORE the record step +
+# AFTER the stop step so scripts/genlock_audit_snapshot.py can NAME the conveyor-ladder victim input
+# in the E2E report (report-only, fail-open). Depends on strih_platform() above; #675 anchor-safe --
+# only NEW single call lines are added below, every existing anchored line stays byte-identical.
+# shellcheck source=scripts/lib/genlock-audit-snapshot.sh
+. "$HERE/lib/genlock-audit-snapshot.sh"
 # issue 1351: the ONE source of truth for BOUNDING every strih-touching [0/8] call on the
 # Linux-strih path with a timeout + a named [0/8] strih-lx banner (strih_lx_gate_prefix /
 # strih_lx_preflight_timeout_banner) -- so a silent hang can never swallow RUN_ID. Depends on
@@ -4390,6 +4396,13 @@ else
   echo "[5/8 pre] in-run freeze watch — SKIPPED (LIVE_FREEZE_WATCH=$LIVE_FREEZE_WATCH, ALL_CAMBOX=${ALL_CAMBOX:-0})"
 fi
 
+# issue 1354 scope 3: BEFORE-window snapshot of strih's per-input genlock-fifo audit counters
+# (holds/relocks/converge_sheds), paired with the AFTER snapshot in [7/8]. Report-only + fail-open
+# (the helper returns 0 on every input; a trailing `|| true` is belt-and-suspenders): an
+# unreadable/absent tail leaves no file and the report simply omits the genlock-conveyor section.
+# Placed here so the delta spans EXACTLY the recording window -- the [4i/8align] + [4j/8settle]
+# transients are already over (design Prístup 3 rejection).
+genlock_audit_snapshot_capture before "$OUTDIR/genlock-audit-before-${RUN_ID}.txt" || true
 echo "[5/8] StartRecord on strih + stream (program = certified prod scene) + imag (#462 — program routed to the camera under test by [4a/8], #682)"
 # #627: `record --action start` now polls GetRecordStatus itself right after StartRecord and
 # raises (nonzero exit) if the output isn't genuinely active + writing growing bytes — a
@@ -4648,6 +4661,11 @@ CAPTURE_RATE_WINDOW_END_EPOCH="$(date +%s)"
 echo "    strih host file:  ${STRIH_HOST_PATH:-<unknown>}"
 echo "    stream host file: ${STREAM_HOST_PATH:-<unknown>}"
 echo "    imag host file:   ${IMAG_HOST_PATH:-<unknown>}  (#462 — stays ON imag, decoded in place below)"
+
+# issue 1354 scope 3: AFTER-window snapshot of strih's per-input genlock-fifo audit counters --
+# pairs with the BEFORE snapshot in [5/8] so genlock_audit_snapshot.py's window deltas span EXACTLY
+# the recording. Report-only + fail-open (in this [7/8] `set +e` region + a trailing `|| true`).
+genlock_audit_snapshot_capture after "$OUTDIR/genlock-audit-after-${RUN_ID}.txt" || true
 
 # #1124 item 3 — POST-record stomp re-check (profile mode only, report-only). Runs HERE, right
 # after StopRecord while the measurement pins/hold are STILL in force (cleanup()'s teardown
@@ -5578,8 +5596,14 @@ continuing WITHOUT the imag partial; the merge below will omit --merge-partials 
       echo "WARNING: #761 mv_skew_snapshot.py failed — Discord report will omit the MV-skew section (fail-open, gate unaffected)." >&2
       MV_SKEW_JSON=""
     fi
+    # issue 1354 scope 3: per-input genlock-fifo audit window deltas (from the [5/8] BEFORE + [7/8]
+    # AFTER tails) -- lets the report NAME the conveyor-ladder victim input. Report-only + fail-open
+    # like the pins/MV-skew snapshots above: a missing/empty tail (or a python error) leaves no JSON
+    # and the composer's `[ -s ]` guard omits the section; it NEVER touches $GATE.
+    GENLOCK_AUDIT_JSON="$OUTDIR/genlock-audit-${RUN_ID}.json"
+    genlock_audit_snapshot_compute "$OUTDIR/genlock-audit-before-${RUN_ID}.txt" "$OUTDIR/genlock-audit-after-${RUN_ID}.txt" "$GENLOCK_AUDIT_JSON" || true
     echo "    [8/8f] #711: Discord full-report (fail-open — never affects \$GATE below)"
-    e2e_discord_report_send "$REPORT_JSON" "$RUN_ID" "$GATE" "$DURATION" "$PINS_JSON" "$MV_SKEW_JSON"
+    e2e_discord_report_send "$REPORT_JSON" "$RUN_ID" "$GATE" "$DURATION" "$PINS_JSON" "$MV_SKEW_JSON" "$GENLOCK_AUDIT_JSON"
     echo "    --- [8/8e] cleanup plan (JSON secured at $REPORT_JSON) ---"
     if [ "${KEEP_RECORDINGS:-0}" = "1" ]; then
       echo "    KEEP_RECORDINGS=1 — skipping the recording-cleanup plan (debugging opt-out, #652)."
