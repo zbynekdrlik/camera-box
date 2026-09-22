@@ -211,9 +211,11 @@ fi
 # enumerate senders. Ubuntu 26.04 does NOT install it with the avahi daemon, so without it those
 # gates read blind. Idempotent (apt no-op if present); warn not fail -- OBS runs without it, only the
 # discovery tooling is affected.
-DEBIAN_FRONTEND=noninteractive apt-get install -y avahi-utils \
-  || warn "  avahi-utils install failed -- avahi-browse (NDI/mDNS discovery) will be absent; fix the box's apt sources and re-run"
-echo "  avahi-utils installed (avahi-browse for NDI/mDNS discovery)"
+if DEBIAN_FRONTEND=noninteractive apt-get install -y avahi-utils; then
+  echo "  avahi-utils installed (avahi-browse for NDI/mDNS discovery)"
+else
+  warn "  avahi-utils install failed -- avahi-browse (NDI/mDNS discovery) will be absent; fix the box's apt sources and re-run"
+fi
 
 # ---------------------------------------------------------------------------------------------
 step 5 "OBS profile facts (strih-lx: seeded from the Windows 'light' profile)"
@@ -316,10 +318,12 @@ fi
 # before any launch; OBS rewrites user.ini on exit). Idempotent RawConfigParser upsert via the ONE
 # source of truth strih_lx_ndi_output_ini_cmds (scripts/lib/strih-provision.sh).
 if command -v python3 >/dev/null 2>&1; then
-  eval "$(strih_lx_ndi_output_ini_cmds "$USER_INI")" \
-    || warn "  could not seed [NDIPlugin] output names in ${USER_INI} (non-fatal; set them in OBS Tools > DistroAV Settings, or re-run)"
-  chown "$DESKTOP_USER":"$DESKTOP_USER" "$USER_INI" 2>/dev/null || true
-  echo "  seeded [NDIPlugin] MainOutputName=2ME PGM / PreviewOutputName=2ME PVW + Enabled=true in ${USER_INI}"
+  if eval "$(strih_lx_ndi_output_ini_cmds "$USER_INI")"; then
+    chown "$DESKTOP_USER":"$DESKTOP_USER" "$USER_INI" 2>/dev/null || true
+    echo "  seeded [NDIPlugin] MainOutputName=2ME PGM / PreviewOutputName=2ME PVW + Enabled=true in ${USER_INI}"
+  else
+    warn "  could not seed [NDIPlugin] output names in ${USER_INI} (non-fatal; set them in OBS Tools > DistroAV Settings, or re-run)"
+  fi
 else
   warn "  python3 absent -- cannot seed [NDIPlugin] output names in ${USER_INI} (set them in OBS Tools > DistroAV Settings, or install python3 and re-run)"
 fi

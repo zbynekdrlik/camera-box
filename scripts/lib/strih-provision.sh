@@ -24,8 +24,13 @@ strih_lx_host() { printf '%s' "${STRIH_LX_HOST:-strih-lx.lan}"; }
 strih_lx_ip() { printf '%s' "${STRIH_LX_IP:-}"; }
 
 # strih_lx_ndi_inputs -> the 10 NDI input names the strih role receives, one per line (issue 1317
-# spec; the 2ME feedback inputs are the task's explicit STRIH-SNV names -- the self-feedback
-# STRIH-LX nuance is a live-tuning follow-up documented in .claude/rules/strih-linux-provisioning.md).
+# spec; the 2ME feedback inputs are the task's explicit STRIH-SNV names). NOTE (issue 1352): the
+# actual box seed (strih_lx_seed_manifest_json) now points the 2ME feedback pair at strih-lx's OWN
+# STRIH-LX (2ME PGM/PVW) outputs (the M4 self-loop, Windows strih retired). This facts list KEEPS the
+# STRIH-SNV names DELIBERATELY -- it is unconsumed by setup-strih.sh (defined + unit-tested only), and
+# the canonical self-feedback INPUT name is confirmed on the live box in the live-tuning follow-up
+# documented in .claude/rules/strih-linux-provisioning.md ("Follow-ups: the 2ME self-feedback INPUT
+# names"); flipping these two here is deferred to that follow-up, not this provisioning lane.
 strih_lx_ndi_inputs() {
   printf '%s\n' \
     'CAM1 (usb)' 'CAM2 (usb)' 'CAM3 (usb)' 'CAM4 (usb)' \
