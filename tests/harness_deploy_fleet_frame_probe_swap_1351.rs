@@ -62,7 +62,17 @@ fn run_swap(scp_fail: bool) -> SwapRun {
     };
     // Non-remote local helpers the script + the remote commands resolve via PATH.
     stub("mount", "#!/usr/bin/env bash\nexit 0\n");
-    stub("systemctl", "#!/usr/bin/env bash\nexit 0\n");
+    // systemctl: report the deadman timer ARMED (`is-active`) and the painter ENABLED (`is-enabled`)
+    // so the #892 restore is enable-now AND the conditional deadman re-arm path is genuinely
+    // exercised; every other subcommand is a no-op exit 0.
+    stub(
+        "systemctl",
+        "#!/usr/bin/env bash\ncase \"$1\" in\n  is-active) echo active ;;\n  is-enabled) echo enabled ;;\nesac\nexit 0\n",
+    );
+    // systemd-run: the transient deadman timer is RE-CREATED here (a stopped systemd-run unit is GC'd
+    // and cannot be `systemctl start`ed). Stub it so the arm builder's `systemd-run … && echo armed`
+    // path runs hermetically — no real transient unit on the CI box.
+    stub("systemd-run", "#!/usr/bin/env bash\nexit 0\n");
     stub("chmod", "#!/usr/bin/env bash\nexit 0\n");
     stub("mv", "#!/usr/bin/env bash\nexit 0\n");
     stub("sync", "#!/usr/bin/env bash\nexit 0\n");
@@ -237,18 +247,35 @@ fn deadman_timer_is_parked_before_the_painter_stop() {
 }
 
 #[test]
-fn deadman_timer_is_rearmed_after_the_restore() {
-    // Symmetric re-arm AFTER the #892 restore so it never races the painter restart.
+fn deadman_timer_is_rearmed_via_systemd_run_after_the_restore() {
+    // A stopped TRANSIENT systemd-run unit is GC'd, so the re-arm must RE-CREATE it via
+    // `systemd-run … --unit=cam2-painter-deadman`, never a bare `systemctl start …timer` (which
+    // fails "Unit not found" and silently leaves the deadman disarmed). It must come AFTER the swap.
     let r = run_swap(false);
-    let start_i = idx(&r.log, "systemctl start cam2-painter-deadman.timer");
+    let arm_i = idx(&r.log, "systemd-run");
     let mv_i = idx(
         &r.log,
         "mv -f /usr/local/bin/frame-probe.new /usr/local/bin/frame-probe",
     );
     assert!(
-        start_i > mv_i,
-        "issue 1351: `systemctl start cam2-painter-deadman.timer` must come AFTER the swap+restore; \
-         log:\n{}",
+        r.log
+            .iter()
+            .any(|l| l.contains("systemd-run") && l.contains("--unit=cam2-painter-deadman")),
+        "issue 1351: the re-arm must re-create the transient timer via \
+         `systemd-run … --unit=cam2-painter-deadman`; log:\n{}",
+        r.log.join("\n")
+    );
+    assert!(
+        arm_i > mv_i,
+        "issue 1351: the deadman re-arm must come AFTER the swap+restore; log:\n{}",
+        r.log.join("\n")
+    );
+    // And NEVER the broken bare `systemctl start …timer` re-arm (a transient unit can't be started).
+    assert!(
+        !r.log
+            .iter()
+            .any(|l| l.contains("systemctl start cam2-painter-deadman.timer")),
+        "issue 1351: must not use the broken `systemctl start cam2-painter-deadman.timer` re-arm; log:\n{}",
         r.log.join("\n")
     );
 }
@@ -266,8 +293,8 @@ fn scp_failure_still_rearms_the_deadman_and_remounts_ro() {
     assert!(
         r.log
             .iter()
-            .any(|l| l.contains("systemctl start cam2-painter-deadman.timer")),
-        "issue 1351: the scp-failure branch must re-arm the deadman timer; log:\n{}",
+            .any(|l| l.contains("systemd-run") && l.contains("--unit=cam2-painter-deadman")),
+        "issue 1351: the scp-failure branch must re-arm the deadman via systemd-run; log:\n{}",
         r.log.join("\n")
     );
     assert!(
