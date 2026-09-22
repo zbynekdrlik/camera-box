@@ -877,8 +877,13 @@ strih_rustdesk_deb_sha256() { printf '7244ba47c40e804172044bfbe659467c54ce46554c
 # Steps: download URL -> a temp .deb, VERIFY its sha256 == SHA256 (fail-loud + remove on mismatch --
 # never install an unverified binary), `apt-get install -y <deb>` (pulls libxdo3 etc.), remove the
 # temp deb, `systemctl enable --now rustdesk`, then read the password from PW_FILE into a shell var
-# and `rustdesk --password` it (the value never appears in this source, in the emitter's argv, or in a
-# log -- only PW_FILE's PATH is an argument; the supervisor places the 0600 file). The block can
+# and `rustdesk --password` it (the value never appears in this source, in THIS helper's argv, or in a
+# log -- only PW_FILE's PATH is an argument to the helper; the supervisor places the 0600 file). One
+# unavoidable residue: RustDesk 1.4.x has no stdin/config path for the permanent password, so the
+# `rustdesk --password "$__rd_pw"` CALL momentarily exposes the value in the `rustdesk` process argv
+# (/proc/<pid>/cmdline) on the box during the brief run -- a CLI limitation, local-only, on a
+# single-operator provisioning box; the value is still never in git, in this helper's argv, or logged.
+# The block can
 # `exit` on any failure, so the caller consumes it as `( eval "$(strih_rustdesk_install_cmds ...)" ) ||
 # fail`. Every URL/SHA/PW_FILE arg is %q-quoted; the final statement ends with `;` so a `$(...)`
 # embedding never glues a following command (the v4l2-neutral.sh _cmd-helper gotcha). VERSION is used
