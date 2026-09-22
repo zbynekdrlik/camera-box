@@ -1279,3 +1279,99 @@ strih_companion_status_verdict() {
   if [ "$connected" = 1 ]; then printf 'ok-connected'; return 0; fi
   printf 'not-connected'; return 1
 }
+
+# --- issue 1353: bkshading SERVICE (shading panel backend) provisioning on strih-lx ----------------
+# The shading-control panel backend (bkshading/service) ran only on the Windows strih PC; post-M4 the
+# notebook is the strih, so it is provisioned here as a systemd unit fed the CI-built Linux artifact.
+# The panel web assets are EMBEDDED in the binary (bkshading/service/src/http.rs include_str!), so the
+# unit needs only the self-contained binary; web/ ships beside it per the design as a panel-source copy.
+
+# strih_bkshading_artifact_name -> the CI artifact NAME the ci.yml Linux job uploads and setup-strih
+# fetches. SINGLE SOURCE OF TRUTH (KEEP IN SYNC with .github/workflows/ci.yml's
+# `Upload bkshading service (linux, panel)` step) -- the strih sibling of the Windows
+# `bkshading-windows-amd64` canon in scripts/lib/bkshading-deploy-service-runtime.sh.
+strih_bkshading_artifact_name() { printf '%s\n' bkshading-service-linux-amd64; }
+
+# strih_bkshading_unit_text -> the systemd SYSTEM unit for the bkshading panel service on strih-lx.
+# User=newlevel (the operator session owns libndi/PipeWire parity for the M2 live NDI preview),
+# ExecStart the installed self-contained binary + --config, Restart=on-failure (a genuine crash
+# restarts; a clean operator/deploy stop does not loop), multi-user target. NO drop-ins, NO self-start
+# -- enable-only is the installer's job (setup-strih step 16c); the SUPERVISOR starts the running
+# service. The committed systemd/bkshading-service.service is byte-identical to this (parity-tested).
+strih_bkshading_unit_text() {
+  cat <<'EOF'
+[Unit]
+Description=bkshading shading-control panel service (issue 808 / issue 1353)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=newlevel
+ExecStart=/opt/bkshading/bkshading --config /etc/bkshading/bkshading.toml
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+EOF
+}
+
+# strih_bkshading_config_text [BIND] -> the operator config seed for /etc/bkshading/bkshading.toml.
+# BIND defaults to the service's own default_bind (bkshading/service/src/config.rs "0.0.0.0:8770").
+# The camera/relay/preview DATA is pinned from the canonical bkshading/service/bkshading.example.toml
+# (the SAME schema the Windows install was seeded from -- the live Windows C:\bkshading\bkshading.toml
+# was unreadable, the PC being off). Development = one camera on cam1; the handheld blocks are the
+# params-only placeholders for the issue-808 SBC milestone. Relay addresses are host-independent
+# (<cambox>.lan:8771 -- the service connects OUT to each cambox relay, so no cambox repoint is needed).
+# Seeded ONLY IF absent (setup-strih step 16c [ ! -f ] guard) so the operator's live edits are kept.
+strih_bkshading_config_text() {
+  local bind="${1:-0.0.0.0:8770}"
+  cat <<EOF
+# bkshading service config -- strih-lx (issue 1353). Seeded from the canonical
+# bkshading/service/bkshading.example.toml (the schema the Windows install used); edit the live
+# camera/relay set on the box. Development = one camera on cam1; the handheld blocks are the
+# params-only placeholders for the issue-808 SBC milestone.
+
+# Web panel bind address (the operator opens http://strih.lan:8770/).
+bind = "${bind}"
+
+# Live-preview tuning (M2). Optional -- every field defaults sensibly.
+[preview]
+fps = 3.0
+jpeg_quality = 55
+capture_timeout_ms = 1000
+reconnect_backoff_ms = 2000
+
+# cam1: camera USB -> cambox cam1, controlled by bkshading-relay on cam1.
+[[camera]]
+id = "cam1"
+label = "Cam 1"
+transport = "cambox-relay"
+address = "cam1.lan:8771"
+ndi_preview = "CAM1 (usb)"
+grab_fps = 60
+
+# Handheld cameras (x3) on a separately powered arm64 SBC running the SAME relay -- no video feed,
+# so a params-only block (no ndi_preview, no grab_fps). Placeholders for the issue-808 SBC milestone.
+[[camera]]
+id = "handheld-1"
+label = "Handheld 1"
+transport = "sbc-relay"
+address = "handheld-1.lan:8771"
+
+[[camera]]
+id = "handheld-2"
+label = "Handheld 2"
+transport = "sbc-relay"
+address = "handheld-2.lan:8771"
+
+[[camera]]
+id = "handheld-3"
+label = "Handheld 3"
+transport = "sbc-relay"
+address = "handheld-3.lan:8771"
+EOF
+}
