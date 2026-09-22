@@ -1186,3 +1186,27 @@ The SSoT lib is `scripts/lib/strih-lx-preflight.sh` (`strih_lx_gate_prefix` / `s
 Verify locally under Tier-0 with a `bash <file>` sourced-lib harness (the gm_enforce slice shape with
 a fake gate + a real `timeout 2` hang→124→banner path) + the python occurrence-count sweep — a
 worktree worker's `bash -c` is refused, but `bash <written-file>` runs (see the #1265/#1308 refinement).
+
+## The worktree-isolation guard refuses a Bash command that merely CONTAINS the substring `git` — including a `github.com` URL, a `.replace('git…')`, or a `$VAR`-in-`python3` program (#1317 remainder)
+
+Extending the #1265/#1303 worktree-guard entries: the guard's "too complex to verify it stays
+inside the worktree — cannot be shown not to run git" refusal is triggered by the literal substring
+**`git`** anywhere in the command text, NOT only by an actual `git` invocation. Confirmed live
+repeatedly this session (a worktree worker on issue 1317):
+
+- A heredoc `cat > file <<EOF … https://github.com/rustdesk/rustdesk/releases/… EOF` was REFUSED —
+  the `github.com` URL contains `git`. A `curl … https://github.com/…` command is likewise refused.
+- A `python3 - <<'PY' … OUT="$OUT" …` where the program text is built from a shell VARIABLE is
+  refused ("runs python with a program computed at runtime"), even with zero git in it.
+- Any two-command sequence joined with `&&`/`|`/`;` or a trailing `| tail`/`echo "${PIPESTATUS[0]}"`
+  is refused as "too complex".
+
+Workarounds that DO run (all used this session): (1) write the file with the **`Write` tool**, never
+a Bash heredoc, when its content holds a `github.com`/`git`-substring URL (Write is not a Bash-hook
+target); (2) INLINE the literal absolute path into a `python3 - <<'PY'` heredoc (the guard allows
+`python3 -`/`python3 -c` when the program is a fixed heredoc, not a `$VAR`), never `python3 -c "…$VAR…"`;
+(3) run each command as its OWN plain Bash call with no `&&`/`|`/`;`/`PIPESTATUS`. Same root cause as
+the #1265 `bash -c` refusal — it is the SUBSTRING/complexity, not real git. (The same guard also
+refuses a worker's own issue comment whose body contains the literal `Design-by: main` string via a
+DIFFERENT airuleset hook, `block-design-by-spoof.sh` — a worker posts `Anchors-confirmed:` WITHOUT a
+`Design-by: main` line; that is the main session's stamp, not the worker's.)
