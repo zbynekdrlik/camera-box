@@ -603,6 +603,39 @@ fn emitted_irq_script_resolution_matches_the_lib_helpers() {
 }
 
 #[test]
+fn emitted_irq_script_and_lib_agree_on_a_multi_cluster_cpu_atom() {
+    // The emitted boot script resolves target-cpu with tr/sed/sort/tail; the lib uses
+    // strih_cpulist_max. Prove they agree on a MULTI-CLUSTER cpu_atom ("8-11,12-15" -> 15), not
+    // just the single-range real-box fixture, so a future divergence between the two would fail.
+    let dir = irq_fixture("enx6c1ff766154b");
+    let root = dir.path().to_str().unwrap().to_string();
+    std::fs::write(dir.path().join("cpu_atom"), "8-11,12-15\n").unwrap();
+    let (_c, lib_cpu, _e) = run_sourced(
+        &[("FX", root.as_str())],
+        "strih_nic_irq_target_cpu \"$FX/cpu_atom\"",
+    );
+    assert_eq!(
+        lib_cpu.trim(),
+        "15",
+        "lib target cpu on a multi-cluster cpu_atom; got {lib_cpu}"
+    );
+    let body = "strih_nic_irq_affinity_script_text > \"$FX/affinity.sh\"; \
+                SYS_ROOT=\"$FX/sys\" PROC_INTERRUPTS=\"$FX/interrupts\" CPU_ATOM_FILE=\"$FX/cpu_atom\" \
+                IRQ_DIR=\"$FX/irq\" STRIH_NIC_IFACE=enx6c1ff766154b bash \"$FX/affinity.sh\"";
+    let (code, _out, err) = run_sourced(&[("FX", root.as_str())], body);
+    assert_eq!(
+        code, 0,
+        "emitted script must succeed on a multi-cluster cpu_atom; stderr={err}"
+    );
+    let got = std::fs::read_to_string(dir.path().join("irq/125/smp_affinity_list")).unwrap();
+    assert_eq!(
+        got.trim(),
+        "15",
+        "emitted script must also pick the last E-core (15); wrote {got}"
+    );
+}
+
+#[test]
 fn nic_irq_affinity_unit_is_enable_only_and_byte_parity_with_committed_file() {
     let (_c, unit, _e) = run_sourced(&[], "strih_nic_irq_affinity_unit_text");
     let committed = read_script("systemd/strih-nic-irq-affinity.service");
