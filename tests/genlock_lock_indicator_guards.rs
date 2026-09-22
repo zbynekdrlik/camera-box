@@ -97,7 +97,11 @@ fn audit_routes_through_the_shared_fill() {
     // CLOSES on it — it now closes on the audio pairing offset. Pin both: wall_qpc_drift_ms is
     // still routed through the shared fill, and the audio facet rides the SAME line.
     assert_has(OBS_SOURCE, "(long long)gs.wall_qpc_drift_ms,");
-    assert_has(OBS_SOURCE, "(long long)gs.audio_pairing_offset_ms);");
+    // issue 1355 appended the LINE-ONLY `sustain_sheds` counter after the audio facet, so the
+    // audit line now CLOSES on it (read straight from the source, not via gs — it is not part of
+    // obs_genlock_stats). The audio facet still rides the same line through the shared fill.
+    assert_has(OBS_SOURCE, "(long long)gs.audio_pairing_offset_ms,");
+    assert_has(OBS_SOURCE, "source->genlock_sustain_sheds);");
 }
 
 #[test]
