@@ -641,7 +641,11 @@ DS_STATUS="$(curl -s --max-time 4 http://127.0.0.1:8898/status 2>/dev/null || tr
 [ -n "$DS_STATUS" ] && DS_REACH=1 || DS_REACH=0
 DS_MODE="$(printf '%s' "$DS_STATUS" | grep -oE '"mode":"[A-Za-z]+"' | head -1 | sed 's/.*:"//; s/"//' || true)"
 [ -n "$DS_MODE" ] || DS_MODE=absent
-if ss -uln 2>/dev/null | grep -qE ':123([^0-9]|$)'; then DS_UDP123=1; else DS_UDP123=0; fi
+# Match the PORT column only (field 4 = Local-Address:Port), not the whole line -- an IPv6 address
+# containing the hextet `123` (e.g. fe80::123:abcd) would false-match a whole-line grep. Capture then
+# grep a here-string (no upstream pipe to SIGPIPE the `ss|awk` under pipefail); `|| true` is drain-safe.
+DS_UDP_PORTS="$(ss -uln 2>/dev/null | awk 'NR>1{print $4}' || true)"
+if grep -qE ':123$' <<<"$DS_UDP_PORTS"; then DS_UDP123=1; else DS_UDP123=0; fi
 DS_ROLE_VERDICT="$(strih_lx_dantesync_status_role_verdict "$DS_ROLE_V" "$DS_REACH" "$DS_MODE" "$DS_UDP123" || true)"
 case "$DS_ROLE_VERDICT" in
   ok)
@@ -655,6 +659,18 @@ case "$DS_ROLE_VERDICT" in
   mode:*)          bad "(dantesync-role) :8898/status ${DS_ROLE_VERDICT} (not LOCK/NANO) -- clock not disciplined" ;;
   *)               bad "(dantesync-role) unknown verdict '${DS_ROLE_VERDICT}'" ;;
 esac
+
+# 30) ffmpeg/ffprobe present (issue 1317): the on-box recording-verdict E2E spawns ffprobe to demux
+#     the strih recording; without ffmpeg the [8/8] on-box verdict fails. FAIL loud (release gate).
+FFMPEG_MISSING=""
+for _t in ffprobe ffmpeg; do
+  command -v "$_t" >/dev/null 2>&1 || FFMPEG_MISSING="${FFMPEG_MISSING} ${_t}"
+done
+if [ -z "$FFMPEG_MISSING" ]; then
+  ok "(ffmpeg) ffprobe + ffmpeg present (on-box recording-verdict E2E)"
+else
+  bad "(ffmpeg) missing:${FFMPEG_MISSING} -- the on-box recording-verdict E2E cannot demux the recording; re-run setup-strih.sh step 4b (apt install ffmpeg)"
+fi
 
 echo ""
 if [ "$FAILS" -eq 0 ]; then
