@@ -1595,7 +1595,7 @@ die() { printf 'strih-nic-irq-affinity: FATAL: %s\n' "$*" >&2; exit 1; }
 # (1) NIC iface = the interface carrying the strih-lx address (STRIH_NIC_IFACE overrides).
 iface="${STRIH_NIC_IFACE:-}"
 if [ -z "$iface" ]; then
-  iface="$(ip -o -4 addr show 2>/dev/null | awk -v ip="$TARGET_IP" '$4 ~ ("^" ip "/") { print $2; exit }' || true)"
+  iface="$(ip -o -4 addr show 2>/dev/null | awk -v ip="$TARGET_IP" 'BEGIN { gsub(/\./, "\\.", ip) } $4 ~ ("^" ip "/") { print $2; exit }' || true)"
 fi
 [ -n "$iface" ] || die "could not resolve the NIC iface carrying ${TARGET_IP} (set STRIH_NIC_IFACE)"
 

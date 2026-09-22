@@ -704,7 +704,7 @@ else
 IRQ_TARGET_IP="${STRIH_LX_TARGET_IP:-10.77.9.202}"
 IRQ_IFACE="${STRIH_NIC_IFACE:-}"
 if [ -z "$IRQ_IFACE" ]; then
-  IRQ_IFACE="$(ip -o -4 addr show 2>/dev/null | awk -v ip="$IRQ_TARGET_IP" '$4 ~ ("^" ip "/") { print $2; exit }' || true)"
+  IRQ_IFACE="$(ip -o -4 addr show 2>/dev/null | awk -v ip="$IRQ_TARGET_IP" 'BEGIN { gsub(/\./, "\\.", ip) } $4 ~ ("^" ip "/") { print $2; exit }' || true)"
 fi
 IRQ_PCIFN=""; [ -n "$IRQ_IFACE" ] && IRQ_PCIFN="$(strih_nic_xhci_pci_function /sys "$IRQ_IFACE" 2>/dev/null || true)"
 IRQ_NUMS="";  [ -n "$IRQ_PCIFN" ] && IRQ_NUMS="$(strih_nic_xhci_irqs /proc/interrupts "$IRQ_PCIFN" 2>/dev/null || true)"
@@ -712,6 +712,10 @@ if [ -z "$IRQ_IFACE" ] || [ -z "$IRQ_PCIFN" ] || [ -z "$IRQ_NUMS" ]; then
   bad "NIC xhci IRQ affinity: could not resolve the xhci IRQ (iface='${IRQ_IFACE}' pcifn='${IRQ_PCIFN}' irqs='${IRQ_NUMS}')"
 else
   ATOM_FIRST="$(strih_cpulist_min "$(cat /sys/devices/cpu_atom/cpus 2>/dev/null || true)" 2>/dev/null || true)"
+  # On this hybrid box cpu_atom is a stable kernel file; if it is unreadable the verdict skips the
+  # E-core floor (>= first cpu_atom) and enforces only single-cpu placement -- surface that so a
+  # low-P-core pin can't read "ok" silently on a transient cpu_atom read failure.
+  [ -n "$ATOM_FIRST" ] || note "  cpu_atom unreadable -- E-core floor check skipped (single-cpu placement still enforced)"
   irq_all_ok=1
   for irqn in $IRQ_NUMS; do
     AFF="$(cat "/proc/irq/${irqn}/smp_affinity_list" 2>/dev/null || true)"
