@@ -189,21 +189,32 @@ swap on the ro-rootfs cam boxes:
    green — the swap's `|| true` swallows the stub's chmod-on-nonexistent-`.new` failure, and the
    stubbed `sha256sum` still reports byte-verify OK.
 
-2. **Park the transient `cam2-painter-deadman.timer` across the swap.** The `--on-unit-active` deadman
-   (this rule's own subject) re-fires every ~5 min and re-arms `cam2-painter`; a re-arm inside the
-   ~2 s swap window is a SECOND way the old inode stays busy. `systemctl stop
-   cam2-painter-deadman.timer` (best-effort `|| true`) BEFORE the painter stop, and `systemctl start
-   cam2-painter-deadman.timer` (best-effort `|| true`) AFTER the #892 restore, on EVERY terminal path
-   (the scp-failure branch, the enable-now-fail branch, and the normal end). It is a transient
-   `systemd-run` unit, so a stop/start when it was never armed (a bare deploy-fleet run outside an
-   E2E) is a harmless no-op — that is why both are `|| true`. The #892 enable-state-preserving
-   restore (`frame_probe_restore_enable_decision`) stays UNCHANGED; the `enable --now` restart is
-   what makes the painter pick the new inode, and a deliberately-dark (event-mode) painter is left
-   dark (the deadman `start` then no-ops because event mode already disarmed the transient unit).
+2. **Park the transient `cam2-painter-deadman.timer` across the swap, and RESTORE it via
+   `systemd-run` — never `systemctl start`.** The `--on-unit-active` deadman (this rule's own
+   subject) re-fires every ~5 min and re-arms `cam2-painter`; a re-arm inside the ~2 s swap window is
+   a SECOND way the old inode stays busy. Park with `systemctl stop cam2-painter-deadman.timer`
+   (best-effort `|| true`) BEFORE the painter stop. **RESTORE it with the canonical
+   `$(cam2_painter_deadman_arm_cmds)` builder (`systemd-run --unit=cam2-painter-deadman …`), NOT a
+   bare `systemctl start …timer`** — the deadman is a TRANSIENT `systemd-run` unit, and a transient
+   unit is garbage-collected the moment it is stopped, so `systemctl start …timer` fails
+   "Unit not found" and silently leaves the deadman DISARMED (the exact bug a fresh-context review
+   caught on the first #1351 cut). The re-arm is CONDITIONAL: only when the deadman was armed BEFORE
+   the park (capture `systemctl is-active …timer` up front) **AND** the #892 restore decision is
+   `enable-now`. An UNCONDITIONAL re-arm is WRONG twice: it would arm a deadman a standalone
+   `deploy-fleet.sh --frame-probe` never had, and — because the deadman's action runs
+   `systemctl start cam2-painter` guarded ONLY by frame-probe/burn presence, not by enabled-state —
+   it would RESURRECT a deliberately-dark event-mode painter (a #892 HARD-rule violation). Gating on
+   prior-armed + `enable-now` restores the deadman exactly when the painter is being kept alive,
+   never arms an absent one, and never lights a dark painter. Do this on EVERY terminal path (the
+   scp-failure branch, the enable-now-fail branch, and the normal end) via one small helper
+   (`rearm_deadman_if_prior "$ip" "$was_deadman_armed" "$restore_action"`). The #892
+   enable-state-preserving restore (`frame_probe_restore_enable_decision`) stays UNCHANGED; the
+   `enable --now` restart is what makes the painter pick the new inode.
 
 Tier-0 verify (a worktree worker's `bash -c` is refused, but `bash <written-file>` runs): a PATH-stub
 replica that runs the REAL `deploy-fleet.sh --frame-probe` (frame-probe-only mode) under stub
-`sshpass`/`scp`/`mount`/`systemctl`/`chmod`/`mv`/`sync`/`sha256sum`, LOGGING each remote call in
+`sshpass`/`scp`/`mount`/`systemctl`/`systemd-run`/`chmod`/`mv`/`sync`/`sha256sum` (the `systemctl`
+stub reports the deadman `is-active` + painter `is-enabled` so the conditional re-arm fires), LOGGING each remote call in
 order, then asserts the scp dest ends `.new`, the `mv -f …new …frame-probe` follows the scp, the
 byte-verify reads the FINAL path, `stop …-deadman.timer` precedes the painter stop, `start
 …-deadman.timer` follows the restore, and the scp-failure branch still re-arms + remounts ro. The
