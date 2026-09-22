@@ -2553,6 +2553,22 @@ fn verify_strih_asserts_the_1352_provisioning_items() {
 /// carries -- under `set -e` a failing command substitution in an assignment terminates the script, so
 /// the ~10 items after it (mv-host, gpu-env, avahi, ndi-outputs, ...) never ran. The verdict text is
 /// printed on stdout regardless of the return code; the `case` below it grades it. Pin the guard.
+/// 22.9.2026: setup-strih step 17 runs verify-strih.sh as ROOT, whose pw-cli cannot see the
+/// operator's PipeWire session, so item 9 read "strih-program sink missing" on a healthy box (the
+/// sink was there for the user). The probe must target the operator session when EUID is 0.
+#[test]
+fn verify_strih_program_audio_probe_targets_the_operator_session_when_root() {
+    let v = read_script("scripts/verify-strih.sh");
+    assert!(
+        v.contains("sudo -u \"${STRIH_LX_USER:-newlevel}\" XDG_RUNTIME_DIR=\"/run/user/$(id -u \"${STRIH_LX_USER:-newlevel}\")\" pw-cli ls Node"),
+        "verify item 9 must run pw-cli as the operator with the operator's XDG_RUNTIME_DIR when root"
+    );
+    assert!(
+        v.contains("if [ \"$(id -u)\" = 0 ]; then") && v.contains("PW_LS=\"$(pw-cli ls Node 2>/dev/null || true)\""),
+        "verify item 9 must branch on EUID: operator-session probe as root, inline pw-cli otherwise"
+    );
+}
+
 #[test]
 fn verify_strih_audio_verdict_assignment_survives_set_e() {
     let v = read_script("scripts/verify-strih.sh");

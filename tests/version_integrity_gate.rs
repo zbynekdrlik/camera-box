@@ -2415,9 +2415,13 @@ fn gate_passes_a_linux_strih_under_strih_linux_with_only_platform_agnostic_facet
         "the #826 startup_chain facet must be loudly SKIPPED on a Linux strih: {stdout}"
     );
     // The genlock build IS still verified: the byte/capability facets engaged OK.
+    // 22.9.2026 (release run 35767684040): the Windows obs.dll byte facet is SKIPPED on a Linux
+    // strih -- the box has no obs.dll, so the row read UNKNOWN and refused a healthy rig; the
+    // bundle is graded by genlock_build_sha parity + the vendor pin instead.
     assert!(
-        stdout.contains("obs_dll_sha256") && stdout.contains("OK"),
-        "the byte facet must still verify strih's genlock build: {stdout}"
+        stdout.contains("obs_dll_sha256")
+            && stdout.contains("Windows-only obs.dll byte facet skipped on a Linux strih"),
+        "a Linux strih must SKIP the Windows obs.dll byte facet (never UNKNOWN): {stdout}"
     );
     let _ = std::fs::remove_file(&s);
     let _ = std::fs::remove_file(&t);
