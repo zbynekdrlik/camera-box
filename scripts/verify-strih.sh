@@ -345,15 +345,21 @@ JANUS_ACT="$(systemctl is-active janus 2>/dev/null || echo inactive)"
 note "janus.service (enabled=${JANUS_EN}, active=${JANUS_ACT}) -- enable-only until the M4 cut-over (issue 1345 M3a); an inactive unit is correct while parallel, report-only"
 JANUS_AB="${JANUS_AUDIOBRIDGE_JCFG:-/etc/janus/janus.plugin.audiobridge.jcfg}"
 if [ -f "$JANUS_AB" ]; then
-  if strih_janus_room_jcfg_ok "${JANUS_ROOM:-1000}" < "$JANUS_AB"; then
+  # The jcfg is root:root 0640 (it carries the room secret): read it as the operator user when
+  # possible, else through a NON-interactive sudo (a cached ticket / NOPASSWD); with neither the text
+  # is empty and the items below degrade to the honest "unreadable" note, never a false PASS
+  # (issue 1352 acceptance run: the pin was live and the gate said "NOT pinned (or unreadable)").
+  JANUS_AB_TEXT="$({ cat "$JANUS_AB" 2>/dev/null || sudo -n cat "$JANUS_AB" 2>/dev/null; } || true)"
+  if printf '%s\n' "$JANUS_AB_TEXT" | strih_janus_room_jcfg_ok "${JANUS_ROOM:-1000}"; then
     note "janus audiobridge room jcfg declares the interkom room (48 kHz, plain-RTP participants) -- report-only"
   else
-    note "janus audiobridge room jcfg present but does not declare room-${JANUS_ROOM:-1000} 'interkom' at 48 kHz -- re-run setup-strih.sh step 14; report-only"
+    note "janus audiobridge room jcfg present but does not declare room-${JANUS_ROOM:-1000} 'interkom' at 48 kHz (or unreadable) -- re-run setup-strih.sh step 14; report-only"
   fi
   # issue 1352: general.local_ip must pin the plain-RTP bind to the box's static IP (a renumber
   # otherwise strands it EADDRNOTAVAIL and the hub cannot join the room). Report-only, like item 17.
-  if grep -qE '^[[:space:]]*local_ip = "' "$JANUS_AB" 2>/dev/null; then
-    note "janus audiobridge general.local_ip pinned ($(grep -oE 'local_ip = "[^"]*"' "$JANUS_AB" 2>/dev/null | head -1)) -- renumber-proof RTP bind (issue 1352); report-only"
+  JANUS_LOCAL_IP_LINE="$(printf '%s\n' "$JANUS_AB_TEXT" | grep -oE '^[[:space:]]*local_ip = "[^"]*"' | head -1 | sed -E 's/^[[:space:]]+//' || true)"
+  if [ -n "$JANUS_LOCAL_IP_LINE" ]; then
+    note "janus audiobridge general.local_ip pinned (${JANUS_LOCAL_IP_LINE}) -- renumber-proof RTP bind (issue 1352); report-only"
   else
     note "janus audiobridge general.local_ip NOT pinned (or jcfg unreadable) -- a renumber can strand the RTP bind (issue 1352); re-run setup-strih.sh step 14; report-only"
   fi
