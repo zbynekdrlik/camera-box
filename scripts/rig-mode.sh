@@ -582,6 +582,7 @@ REMOTE
 # Overridable; defaults mirror the recording-e2e BURN_TARGETS (the prod program inputs).
 STRIH_IP="${STRIH_IP:-10.77.9.202}"
 STREAM_IP="${STREAM_IP:-10.77.9.204}"
+STREAM_PROBE_UPSTREAM="${STREAM_PROBE_UPSTREAM:-STRIH-LX (2ME PGM)}"
 STRIH_PROG_SOURCE="${STRIH_PROG_SOURCE:-$RIG_SOURCE_STRIH_SOURCE}" # strih program input for the
                                                           # SOURCE camera (#246 burn target). #1135:
                                                           # DERIVED off the resolved source box
@@ -1020,7 +1021,7 @@ verify_stream_program_phase2() {
   local here rc=0 setup_rc=0 switch_rc=0
   here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" || here=""
   echo "[obs stream ${STREAM_IP}] #988 establishing the probe input first (teardown leaves it unbound between E2E runs, otherwise the assert below false-fails a healthy rig)"
-  python3 "$here/obs_phase2.py" setup --host "$STREAM_IP" --upstream 'STRIH-SNV (2ME PGM)' \
+  python3 "$here/obs_phase2.py" setup --host "$STREAM_IP" --upstream "$STREAM_PROBE_UPSTREAM" \
     --terminal --password "$OBS_WS_PASSWORD" 2>&1 | sed 's/^/    [stream probe setup] /' || setup_rc=$?
   echo "[obs stream ${STREAM_IP}] #901 assert+set PROGRAM = 'PHASE2-PROBE' (was: a printed hint, never enforced)"
   python3 "$here/obs_phase2.py" switch --host "$STREAM_IP" --program-scene "PHASE2-PROBE" \
