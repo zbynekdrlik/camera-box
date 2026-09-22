@@ -695,7 +695,8 @@ fi
 #     fallback until the owner accepts). Grade like intercom-hub/janus: an installed + enabled but
 #     INACTIVE unit is the CORRECT enable-only state (report-only); an ACTIVE unit is asserted HARD --
 #     the :8770 listener OWNER must be the bkshading binary (the rule's "confirm the listener's owner"
-#     check via ss -tlnp) AND /api/state must answer, else the running service is broken (FAIL loud).
+#     check via ss -tlnp) AND /api/version must answer (the SERVICE's route -- /api/state is the
+#     relay's / intercom hub's endpoint, :8770/api/state is 404), else the service is broken (FAIL loud).
 BKSH_PORT="${BKSHADING_SERVICE_PORT:-8770}"
 if [ -f /etc/systemd/system/bkshading-service.service ]; then
   BKSH_EN="$(systemctl is-enabled bkshading-service 2>/dev/null || echo unknown)"
@@ -704,11 +705,11 @@ if [ -f /etc/systemd/system/bkshading-service.service ]; then
     # Capture ss output first, then grep a here-string (no upstream pipe to SIGPIPE under pipefail).
     BKSH_SS="$(ss -tlnp 2>/dev/null | grep -E ":${BKSH_PORT} " || true)"
     BKSH_OWNER="$(printf '%s\n' "$BKSH_SS" | strih_bkshading_listener_owner || true)"
-    BKSH_API="$(curl -fsS --max-time 3 "http://127.0.0.1:${BKSH_PORT}/api/state" 2>/dev/null || true)"
+    BKSH_API="$(curl -fsS --max-time 3 "http://127.0.0.1:${BKSH_PORT}/api/version" 2>/dev/null || true)"
     if [ "$BKSH_OWNER" = bkshading ] && [ -n "$BKSH_API" ]; then
-      ok "(bkshading-service) active: :${BKSH_PORT} listener owned by bkshading + /api/state answers"
+      ok "(bkshading-service) active: :${BKSH_PORT} listener owned by bkshading + /api/version answers"
     else
-      bad "(bkshading-service) active but unhealthy (:${BKSH_PORT} owner='${BKSH_OWNER:-none}', /api/state=$([ -n "$BKSH_API" ] && echo answered || echo silent)) -- the running service is broken; check journalctl -u bkshading-service"
+      bad "(bkshading-service) active but unhealthy (:${BKSH_PORT} owner='${BKSH_OWNER:-none}', /api/version=$([ -n "$BKSH_API" ] && echo answered || echo silent)) -- the running service is broken; check journalctl -u bkshading-service"
     fi
   else
     note "(bkshading-service) installed (enabled=${BKSH_EN}, active=${BKSH_ACT}); enable-only until the supervisor deploys the running service (issue 1353) -- report-only, an inactive unit is correct"
