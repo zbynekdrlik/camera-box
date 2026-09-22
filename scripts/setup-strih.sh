@@ -761,6 +761,8 @@ if [ -n "$BKSH_SRC" ]; then
   fi
   echo "  installed bkshading service binary -> /opt/bkshading/bkshading (panel assets embedded; web/ copied beside it)"
 fi
+# Remove the artifact-fetch temp dir (only created in the GH_TOKEN branch).
+[ -n "${BKSH_TMP:-}" ] && rm -rf "$BKSH_TMP" 2>/dev/null || true
 # Seed the operator config ONLY IF absent (the projector.json / bkshading.example.toml precedent).
 install -d -m 0755 /etc/bkshading
 if [ ! -f /etc/bkshading/bkshading.toml ]; then
