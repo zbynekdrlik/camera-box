@@ -238,7 +238,17 @@ systemctl is-active remoteos-mcp >/dev/null 2>&1 && ok "remoteos-mcp active" || 
 #    FAIL); a FAIL means a structural provisioning gap (sink/input absent) or, once the hub is
 #    active, no program rx.
 AUDIO_SINK=0
-if command -v pw-cli >/dev/null 2>&1 && pw-cli ls Node 2>/dev/null | grep -q '"strih-program"'; then AUDIO_SINK=1; fi
+# 22.9.2026: setup-strih step 17 runs this gate as ROOT, whose pw-cli cannot see the OPERATOR's
+# PipeWire session (the null sink lives there) -> a false "sink missing" FAIL on a healthy box. Probe
+# the operator session explicitly when running as root (sudo -u + its XDG_RUNTIME_DIR), else inline.
+if command -v pw-cli >/dev/null 2>&1; then
+  if [ "$(id -u)" = 0 ]; then
+    PW_LS="$(sudo -u "${STRIH_LX_USER:-newlevel}" XDG_RUNTIME_DIR="/run/user/$(id -u "${STRIH_LX_USER:-newlevel}")" pw-cli ls Node 2>/dev/null || true)"
+  else
+    PW_LS="$(pw-cli ls Node 2>/dev/null || true)"
+  fi
+  printf '%s\n' "$PW_LS" | grep -q '"strih-program"' && AUDIO_SINK=1
+fi
 AUDIO_KIND="$(python3 "$SCN_BIN" --host "$WS_HOST" --audio-input-kind 2>/dev/null || echo absent)"
 if systemctl is-active intercom-hub >/dev/null 2>&1; then
   # hub active (M4+): grade the real program-feed rx off the hub /api/state.
