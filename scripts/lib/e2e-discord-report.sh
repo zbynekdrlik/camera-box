@@ -57,7 +57,7 @@ e2e_discord_report_send() {
 }
 
 _e2e_discord_report_send_inner() {
-  local verdict_json="$1" run_id="$2" gate_exit="$3" duration_secs="$4" pins_json="${5:-}" mv_skew_json="${6:-}"
+  local verdict_json="$1" run_id="$2" gate_exit="$3" duration_secs="$4" pins_json="${5:-}" mv_skew_json="${6:-}" genlock_audit_json="${7:-}"
   local here
   here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -121,10 +121,19 @@ _e2e_discord_report_send_inner() {
     mv_skew_arg=(--mv-skew-json "$mv_skew_json")
   fi
 
+  # #1354: forward the per-input genlock-conveyor audit-delta snapshot the SAME fail-open way --
+  # only for a non-empty existing file. REPORT-ONLY; the section appears in the FULL report only
+  # (never the --json-chunks Discord summary), so the summary is byte-identical whether or not the
+  # snapshot is supplied.
+  local genlock_audit_arg=()
+  if [ -n "$genlock_audit_json" ] && [ -s "$genlock_audit_json" ]; then
+    genlock_audit_arg=(--genlock-audit-json "$genlock_audit_json")
+  fi
+
   local chunks_json
   chunks_json="$(python3 "$here/../e2e_discord_report.py" \
     --json "$verdict_json" --run-id "$run_id" --event "$event" \
-    --duration "$duration_secs" --gate-exit "$gate_exit" "${pins_arg[@]}" "${mv_skew_arg[@]}" --json-chunks 2>&1)"
+    --duration "$duration_secs" --gate-exit "$gate_exit" "${pins_arg[@]}" "${mv_skew_arg[@]}" "${genlock_audit_arg[@]}" --json-chunks 2>&1)"
   if [ $? -ne 0 ]; then
     echo "WARNING: #711 e2e_discord_report_send: report composer failed — skipping Discord report (fail-open). Output:" >&2
     echo "$chunks_json" >&2
