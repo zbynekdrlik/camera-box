@@ -3128,3 +3128,33 @@ fn ci_uploads_the_bkshading_service_linux_artifact() {
         "the service artifact must carry the service binary"
     );
 }
+
+/// The :8770 listener-owner extraction (verify-strih's hard active-health check, deliverable #4) must
+/// return the BARE process name from real `ss -tlnp` output (`users:(("bkshading",pid=...,fd=...))`),
+/// NEVER with a trailing quote -- a trailing-quote parse bug graded a HEALTHY active service as
+/// unhealthy (owner="bkshading\"" never equals "bkshading"), making the go-live acceptance signal
+/// permanently unpassable. A no-match line prints nothing and returns 0 (the report path never aborts).
+#[test]
+fn bkshading_listener_owner_extracts_the_bare_process_name() {
+    let ss = "LISTEN 0 4096 0.0.0.0:8770 0.0.0.0:* users:((\\\"bkshading\\\",pid=1234,fd=8))";
+    let (code, out, _e) = run_sourced(
+        &[],
+        &format!("printf '%s\\n' \"{ss}\" | strih_bkshading_listener_owner"),
+    );
+    assert_eq!(code, 0, "the owner extraction must not abort (report-only)");
+    assert_eq!(
+        out.trim(),
+        "bkshading",
+        "must extract the bare owner name with NO trailing quote: {out:?}"
+    );
+    // A listener with no `users:((...))` field (or a non-matching line) -> empty, exit 0.
+    let (c2, out2, _e) = run_sourced(
+        &[],
+        "printf '%s\\n' 'LISTEN 0 128 1.2.3.4:22 *:*' | strih_bkshading_listener_owner",
+    );
+    assert_eq!(c2, 0);
+    assert!(
+        out2.trim().is_empty(),
+        "a non-matching listener line must yield an empty owner: {out2:?}"
+    );
+}

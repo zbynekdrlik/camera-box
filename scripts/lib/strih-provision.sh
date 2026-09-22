@@ -1375,3 +1375,13 @@ transport = "sbc-relay"
 address = "handheld-3.lan:8771"
 EOF
 }
+
+# strih_bkshading_listener_owner reads `ss -tlnp` output on stdin and prints the process NAME that
+# OWNS the first matching listener -- the `users:(("<name>",pid=...,fd=...))` field's <name>, with no
+# surrounding quotes -- else nothing. verify-strih feeds it the :8770 listener line to confirm the
+# owner is the bkshading binary (the bkshading rule's "confirm the listener's owner" check, issue
+# 1353). Report-only: always returns 0 (a no-match prints nothing), so the caller's `[ owner = ... ]`
+# grade is the gate, never this function's exit.
+strih_bkshading_listener_owner() {
+  grep -oE 'users:\(\("[^"]+"' | head -1 | sed -E 's/.*\("//' || true
+}

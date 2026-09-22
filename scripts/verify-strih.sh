@@ -685,7 +685,7 @@ if [ -f /etc/systemd/system/bkshading-service.service ]; then
   if [ "$BKSH_ACT" = active ]; then
     # Capture ss output first, then grep a here-string (no upstream pipe to SIGPIPE under pipefail).
     BKSH_SS="$(ss -tlnp 2>/dev/null | grep -E ":${BKSH_PORT} " || true)"
-    BKSH_OWNER="$(printf '%s\n' "$BKSH_SS" | grep -oE 'users:\(\("[^"]+"' | head -1 | sed -E 's/.*\("//' || true)"
+    BKSH_OWNER="$(printf '%s\n' "$BKSH_SS" | strih_bkshading_listener_owner || true)"
     BKSH_API="$(curl -fsS --max-time 3 "http://127.0.0.1:${BKSH_PORT}/api/state" 2>/dev/null || true)"
     if [ "$BKSH_OWNER" = bkshading ] && [ -n "$BKSH_API" ]; then
       ok "(bkshading-service) active: :${BKSH_PORT} listener owned by bkshading + /api/state answers"
