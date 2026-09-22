@@ -490,6 +490,28 @@ LG
 echo "  sleep/suspend/hibernate masked; lid + power keys ignored"
 
 # ---------------------------------------------------------------------------------------------
+# Lettered sub-step (TOTAL_STEPS unchanged -- the issue 1352/1353 precedent): the NIC-IRQ placement
+# is the biggest de-jitter win, so it rides alongside the never-sleep/de-jitter masks above.
+step "11b" "NIC xhci IRQ off the OBS cores (issue 1317 item H: NET_RX softirq must not share an OBS core)"
+# The USB 2.5GbE NIC's xhci interrupt lands on ONE core (irqbalance is not installed, so the kernel
+# parks it) where ~1.1 Gb/s of NDI NET_RX softirq collides with OBS's ndir:video/libobs threads
+# (issue 1354, 22.9.2026: measured on strih-lx -- moving the IRQ to an idle E-core cut the genlock
+# "slow output_video" rate from ~35/min to 5-10/min). This installs a boot oneshot that RESOLVES the
+# placement FROM FACTS (iface -> xhci -> IRQ -> last cpu_atom E-core) and writes smp_affinity_list --
+# never a hard-coded IRQ number, so it survives a different IRQ after a kernel/firmware/USB-port
+# change. ENABLE-ONLY: the supervisor applies it live; the unit re-applies it at every boot.
+install -d -m 755 /usr/local/bin
+strih_nic_irq_affinity_script_text > /usr/local/bin/strih-nic-irq-affinity.sh \
+  || fail "could not write /usr/local/bin/strih-nic-irq-affinity.sh"
+chmod 0755 /usr/local/bin/strih-nic-irq-affinity.sh
+[ -f "${HERE}/../systemd/strih-nic-irq-affinity.service" ] || fail "systemd/strih-nic-irq-affinity.service not found next to this script"
+install -m 0644 "${HERE}/../systemd/strih-nic-irq-affinity.service" /etc/systemd/system/strih-nic-irq-affinity.service
+systemctl daemon-reload 2>/dev/null || true
+systemctl enable strih-nic-irq-affinity.service 2>/dev/null \
+  || warn "  enable strih-nic-irq-affinity.service by hand (systemctl enable)"
+echo "  strih-nic-irq-affinity.service installed + enabled (applies at next boot / supervisor runs it live)"
+
+# ---------------------------------------------------------------------------------------------
 AUDIO_NAME="$(strih_lx_audio_input_name)"
 step 12 "Program audio: intercom hub -> PipeWire strih-program sink -> OBS (VB-Matrix replacement, issue 1344)"
 # Root cause (design 20.9., follow-up 20.9. live diagnosis issuecomment-5751113173): the OBS

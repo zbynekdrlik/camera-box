@@ -697,6 +697,41 @@ if [ -f /etc/systemd/system/bkshading-service.service ]; then
   fi
 else
   bad "(bkshading-service) unit /etc/systemd/system/bkshading-service.service not installed -- re-run setup-strih.sh step 16c (issue 1353)"
+# 16) NIC xhci IRQ affinity (issue 1317 item H): the USB-NIC's xhci interrupt must be pinned to a
+#     SINGLE E-core (>= the first cpu_atom cpu) so its NET_RX softirq never shares an OBS core, AND
+#     that IRQ's /proc/interrupts counter must be ADVANCING over a live 2-s window (NEVER a static
+#     file check -- a smp_affinity_list read alone is a lying gate). Read-only, drain-safe, fail loud.
+IRQ_TARGET_IP="${STRIH_LX_TARGET_IP:-10.77.9.202}"
+IRQ_IFACE="${STRIH_NIC_IFACE:-}"
+if [ -z "$IRQ_IFACE" ]; then
+  IRQ_IFACE="$(ip -o -4 addr show 2>/dev/null | awk -v ip="$IRQ_TARGET_IP" '$4 ~ ("^" ip "/") { print $2; exit }' || true)"
+fi
+IRQ_PCIFN=""; [ -n "$IRQ_IFACE" ] && IRQ_PCIFN="$(strih_nic_xhci_pci_function /sys "$IRQ_IFACE" 2>/dev/null || true)"
+IRQ_NUMS="";  [ -n "$IRQ_PCIFN" ] && IRQ_NUMS="$(strih_nic_xhci_irqs /proc/interrupts "$IRQ_PCIFN" 2>/dev/null || true)"
+if [ -z "$IRQ_IFACE" ] || [ -z "$IRQ_PCIFN" ] || [ -z "$IRQ_NUMS" ]; then
+  bad "NIC xhci IRQ affinity: could not resolve the xhci IRQ (iface='${IRQ_IFACE}' pcifn='${IRQ_PCIFN}' irqs='${IRQ_NUMS}')"
+else
+  ATOM_FIRST="$(strih_cpulist_min "$(cat /sys/devices/cpu_atom/cpus 2>/dev/null || true)" 2>/dev/null || true)"
+  irq_all_ok=1
+  for irqn in $IRQ_NUMS; do
+    AFF="$(cat "/proc/irq/${irqn}/smp_affinity_list" 2>/dev/null || true)"
+    VERD="$(strih_nic_irq_affinity_verdict "$AFF" "$ATOM_FIRST" 2>/dev/null || true)"
+    C1="$(strih_irq_total_count /proc/interrupts "$irqn" 2>/dev/null || true)"
+    sleep 2
+    C2="$(strih_irq_total_count /proc/interrupts "$irqn" 2>/dev/null || true)"
+    ADV=no; strih_counter_advanced "$C1" "$C2" && ADV=yes || true
+    if [ "$VERD" = ok ] && [ "$ADV" = yes ]; then
+      : # this IRQ passes both the single-E-core placement and the advancing-counter liveness
+    else
+      irq_all_ok=0
+      note "  IRQ ${irqn}: affinity='${AFF}' verdict=${VERD} advancing=${ADV} (want a single cpu >= ${ATOM_FIRST}, advancing)"
+    fi
+  done
+  if [ "$irq_all_ok" = 1 ]; then
+    ok "NIC xhci IRQ(s) [${IRQ_NUMS}] pinned to a single E-core (>= cpu ${ATOM_FIRST}) and advancing (iface ${IRQ_IFACE})"
+  else
+    bad "NIC xhci IRQ affinity FAILED (iface ${IRQ_IFACE}, irqs ${IRQ_NUMS}): each must be a single cpu >= first cpu_atom (${ATOM_FIRST}) AND advancing over 2 s"
+  fi
 fi
 
 echo ""
