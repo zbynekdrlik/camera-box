@@ -2926,3 +2926,205 @@ fn setup_strih_installs_ffmpeg_and_verify_checks_ffprobe() {
         "verify-strih must assert ffprobe + ffmpeg present"
     );
 }
+
+// ===========================================================================================
+// issue 1353: strih-lx bkshading SERVICE provisioning -- the shading panel backend moved off the
+// Windows PC to the notebook as a systemd unit. Three pure printers (artifact name / system unit /
+// config seed) + setup-strih step 16c (enable-only) + verify-strih item + the ci.yml service
+// artifact. The panel web assets are EMBEDDED in the binary (bkshading/service/src/http.rs), so the
+// unit needs only the self-contained binary; web/ ships beside it per the design as a panel-source
+// copy. Development = one camera on cam1.
+// ===========================================================================================
+
+/// The Linux service artifact NAME is single-sourced here (the ci.yml upload + the setup-strih fetch
+/// both key on it) -- the strih variant of the Windows `bkshading-windows-amd64` canon.
+#[test]
+fn bkshading_artifact_name_is_the_linux_service_variant() {
+    let (code, out, _e) = run_sourced(&[], "strih_bkshading_artifact_name");
+    assert_eq!(code, 0);
+    assert_eq!(out.trim(), "bkshading-service-linux-amd64");
+}
+
+/// The systemd unit is a SYSTEM unit run as the operator (User=newlevel for libndi/PipeWire parity),
+/// ExecStart the installed binary with --config, Restart=on-failure, multi-user target, and it never
+/// self-starts (enable-only is the installer's job).
+#[test]
+fn bkshading_unit_text_is_the_system_service_unit() {
+    let (code, out, _e) = run_sourced(&[], "strih_bkshading_unit_text");
+    assert_eq!(code, 0, "the unit printer must succeed");
+    assert!(
+        out.contains("User=newlevel"),
+        "must run as the operator: {out}"
+    );
+    assert!(
+        out.contains("ExecStart=/opt/bkshading/bkshading --config /etc/bkshading/bkshading.toml"),
+        "ExecStart must be the installed binary + --config: {out}"
+    );
+    assert!(
+        out.contains("Restart=on-failure"),
+        "must restart on-failure: {out}"
+    );
+    assert!(
+        out.contains("WantedBy=multi-user.target"),
+        "system-unit install target: {out}"
+    );
+    assert!(
+        out.contains("Type=simple"),
+        "simple long-running service: {out}"
+    );
+    assert!(
+        !out.contains("ExecStartPre") && !out.contains("systemctl start"),
+        "the unit must not self-start (enable-only): {out}"
+    );
+}
+
+/// The committed systemd/bkshading-service.service is byte-identical to the printer output (ONE
+/// source of truth, no drift) -- setup-strih writes the live unit FROM the printer.
+#[test]
+fn committed_bkshading_unit_matches_the_printer() {
+    let (code, printed, _e) = run_sourced(&[], "strih_bkshading_unit_text");
+    assert_eq!(code, 0);
+    let committed = read_script("systemd/bkshading-service.service");
+    assert_eq!(
+        printed.trim_end(),
+        committed.trim_end(),
+        "systemd/bkshading-service.service must equal strih_bkshading_unit_text output (source of truth)"
+    );
+}
+
+/// The config seed carries the operator bind + the cam1 cambox-relay camera (development = one camera
+/// on cam1) and is valid TOML; the bind defaults to :8770 and an arg overrides it.
+#[test]
+fn bkshading_config_text_seeds_cam1_and_is_valid_toml() {
+    let (code, cfg, _e) = run_sourced(&[], "strih_bkshading_config_text");
+    assert_eq!(code, 0);
+    assert!(
+        cfg.contains("bind = \"0.0.0.0:8770\""),
+        "default operator bind :8770: {cfg}"
+    );
+    assert!(
+        cfg.contains("id = \"cam1\""),
+        "must carry the cam1 camera: {cfg}"
+    );
+    assert!(
+        cfg.contains("transport = \"cambox-relay\""),
+        "cam1 is reached through the cambox relay: {cfg}"
+    );
+    assert!(
+        cfg.contains("address = \"cam1.lan:8771\""),
+        "cam1 relay address (host-independent of the service): {cfg}"
+    );
+    assert!(
+        cfg.contains("ndi_preview = \"CAM1 (usb)\""),
+        "cam1 NDI preview name: {cfg}"
+    );
+    assert!(cfg.contains("grab_fps = 60"), "cam1 grab fps: {cfg}");
+    let (jc, _o, je) = run_sourced(
+        &[],
+        "strih_bkshading_config_text | python3 -c 'import tomllib,sys; tomllib.load(sys.stdin.buffer)'",
+    );
+    assert_eq!(jc, 0, "config seed must be valid TOML; stderr={je}");
+    let (c2, cfg2, _e) = run_sourced(&[], "strih_bkshading_config_text 127.0.0.1:9999");
+    assert_eq!(c2, 0);
+    assert!(
+        cfg2.contains("bind = \"127.0.0.1:9999\""),
+        "an explicit bind arg overrides the default: {cfg2}"
+    );
+}
+
+/// setup-strih.sh wires the bkshading service as lettered sub-step 16c (TOTAL_STEPS stays 17): fetch
+/// the artifact, install to /opt/bkshading, seed the config only-if-absent, write the unit from the
+/// printer, and ENABLE it -- never START it (the supervisor deploys the running service; the Windows
+/// service is the fallback until the owner accepts).
+#[test]
+fn setup_strih_installs_bkshading_service_in_step_16c_enable_only() {
+    let s = read_script("scripts/setup-strih.sh");
+    assert!(s.contains("TOTAL_STEPS=17"), "TOTAL_STEPS must stay 17");
+    assert!(
+        s.contains("step \"16c\""),
+        "bkshading service must be lettered sub-step 16c so TOTAL_STEPS stays 17"
+    );
+    assert!(
+        s.contains("strih_bkshading_artifact_name"),
+        "the fetch keys on the single-sourced artifact name"
+    );
+    assert!(
+        s.contains("/opt/bkshading"),
+        "installs the binary to /opt/bkshading"
+    );
+    assert!(
+        s.contains("[ ! -f /etc/bkshading/bkshading.toml ]"),
+        "the config is seeded ONLY if absent (never clobbered)"
+    );
+    assert!(
+        s.contains("strih_bkshading_config_text"),
+        "the config is seeded from the pure printer"
+    );
+    assert!(
+        s.contains("strih_bkshading_unit_text"),
+        "the unit is written from the pure printer"
+    );
+    assert!(
+        s.contains("systemctl enable bkshading-service"),
+        "the unit is enabled"
+    );
+    assert!(
+        !s.contains("systemctl start bkshading-service"),
+        "the installer must NEVER start the service (enable-only)"
+    );
+    assert!(
+        !s.contains("enable --now bkshading-service"),
+        "the installer must NEVER enable --now the service (enable-only)"
+    );
+}
+
+/// verify-strih.sh has the bkshading-service acceptance item: an enabled-but-inactive unit is the
+/// CORRECT enable-only state (report-only, like intercom-hub/janus); an ACTIVE unit is asserted HARD
+/// -- the :8770 listener OWNER must be the bkshading binary (the rule's "confirm the listener's
+/// owner" check via ss -tlnp) and /api/state must answer.
+#[test]
+fn verify_strih_has_the_bkshading_service_item() {
+    let v = read_script("scripts/verify-strih.sh");
+    assert!(
+        v.contains("(bkshading-service)"),
+        "the item must be labelled"
+    );
+    assert!(
+        v.contains("bkshading-service.service"),
+        "verify-strih must check the bkshading-service unit"
+    );
+    assert!(
+        v.contains("ss -tlnp"),
+        "verify-strih must confirm the listener's OWNER via ss -tlnp"
+    );
+    assert!(
+        v.contains("/api/state"),
+        "verify-strih must curl /api/state"
+    );
+    assert!(
+        v.contains("8770"),
+        "verify-strih must reference the service port :8770"
+    );
+}
+
+/// The ci.yml Linux bkshading job uploads the service artifact under the SAME name the printer
+/// single-sources, staging the service binary + the panel web assets.
+#[test]
+fn ci_uploads_the_bkshading_service_linux_artifact() {
+    let (code, name, _e) = run_sourced(&[], "strih_bkshading_artifact_name");
+    assert_eq!(code, 0);
+    let ci = read_script(".github/workflows/ci.yml");
+    assert!(
+        ci.contains(&format!("name: {}", name.trim())),
+        "ci.yml must upload the artifact named by strih_bkshading_artifact_name ({})",
+        name.trim()
+    );
+    assert!(
+        ci.contains("bkshading/service/web"),
+        "the service artifact must stage the panel web assets"
+    );
+    assert!(
+        ci.contains("target/release/bkshading"),
+        "the service artifact must carry the service binary"
+    );
+}
