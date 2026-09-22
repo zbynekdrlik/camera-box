@@ -2474,13 +2474,30 @@ fn setup_strih_installs_and_enables_the_mv_host_helper() {
         setup.contains("install -m 0644 \"${HERE}/../systemd/strih-mv-host.service\""),
         "setup must install the --user unit"
     );
+    // issue 1352 acceptance (22.9.2026): the vendored child-host projector is LIVE, and the runtime
+    // helper CONFLICTS with it (both hosting mechanisms active = MV 0.6 fps / 505 ms presents;
+    // helper stopped = 30 fps / 5 ms). Provisioning therefore installs the helper but leaves it
+    // DISABLED unless STRIH_MV_HOST_ENABLED=1 (a bundle without the vendored fix).
+    assert!(
+        setup.contains("STRIH_MV_HOST_ENABLED:-0"),
+        "setup must gate the mv-host enablement on STRIH_MV_HOST_ENABLED (default 0)"
+    );
     assert!(
         setup.contains("systemctl --user enable strih-mv-host.service"),
-        "setup must enable the mv-host unit"
+        "setup must still be able to enable the mv-host unit (the STRIH_MV_HOST_ENABLED=1 fallback)"
+    );
+    assert!(
+        setup.contains("systemctl --user disable --now strih-mv-host.service"),
+        "setup must disable (and stop) the conflicting helper by default"
     );
     assert!(
         !setup.contains("systemctl --user start strih-mv-host"),
-        "mv-host must be enable-only (never a live start -- the provisioning convention)"
+        "mv-host must never be live-started by provisioning (the provisioning convention)"
+    );
+    let verify = read_script("scripts/verify-strih.sh");
+    assert!(
+        verify.contains("STRIH_MV_HOST_ENABLED:-0") && verify.contains("enablement mismatch"),
+        "verify-strih must grade the mv-host enablement against STRIH_MV_HOST_ENABLED (default DISABLED)"
     );
 }
 
