@@ -1542,15 +1542,43 @@ strih_counter_advanced() {
   [ "$b" -gt "$a" ]
 }
 
+# strih_nic_iface_by_driver SYSROOT DRIVER -> resolve the NIC iface by its kernel DRIVER (the
+# strih-lx USB NIC is r8152 = the RTL815x USB-ethernet driver; the onboard PCIe NIC is r8169). Scans
+# <SYSROOT>/class/net/*/device/driver (readlink basename) for ifaces whose driver == DRIVER, skipping
+# `lo`. Encodes the result in the OUTPUT string so a set -e caller can branch on it without an rc
+# dance: EXACTLY ONE match -> prints the iface, returns 0; NONE -> prints '' , returns 1 (the caller
+# falls back to the address match); MORE THAN ONE -> prints 'MULTI:<iface> <iface> ...', returns 2
+# (fail loud -- STRIH_NIC_IFACE must disambiguate). issue 1317 item H.
+strih_nic_iface_by_driver() {
+  local sysroot="${1:?sysroot required}" driver="${2:?driver required}"
+  local net ifc dl drv matches=''
+  for net in "${sysroot}/class/net/"*; do
+    [ -e "$net" ] || continue
+    ifc="$(basename "$net")"
+    [ "$ifc" = lo ] && continue
+    dl="$(readlink -f "${net}/device/driver" 2>/dev/null || true)"
+    drv=''
+    [ -n "$dl" ] && drv="$(basename "$dl")"
+    [ "$drv" = "$driver" ] && matches="${matches:+$matches }$ifc"
+  done
+  case "$matches" in
+    '')    printf '';                 return 1 ;;
+    *' '*) printf 'MULTI:%s' "$matches"; return 2 ;;
+    *)     printf '%s' "$matches";     return 0 ;;
+  esac
+}
+
 # strih_nic_irq_affinity_unit_text -> the systemd unit body of
 # systemd/strih-nic-irq-affinity.service (a system oneshot, RemainAfterExit, enable-only, ordered
-# After network-pre.target). Kept byte-identical to the committed file by a parity test. issue 1317.
+# After+Wants network-online.target so the NIC is up when it runs). Kept byte-identical to the
+# committed file by a parity test. issue 1317.
 strih_nic_irq_affinity_unit_text() {
   cat <<'UNIT'
 [Unit]
 Description=strih-lx: pin the USB-NIC xhci IRQ off the OBS cores (issue 1317 item H)
 Documentation=https://github.com/zbynekdrlik/camera-box
-After=network-pre.target
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=oneshot
@@ -1592,12 +1620,28 @@ TARGET_IP="${STRIH_LX_TARGET_IP:-10.77.9.202}"
 log() { printf 'strih-nic-irq-affinity: %s\n' "$*"; }
 die() { printf 'strih-nic-irq-affinity: FATAL: %s\n' "$*" >&2; exit 1; }
 
-# (1) NIC iface = the interface carrying the strih-lx address (STRIH_NIC_IFACE overrides).
+# (1) NIC iface -- STRIH_NIC_IFACE override wins; else resolve by DRIVER (the r8152 USB NIC), which
+# works at boot BEFORE any address is assigned; else fall back to the address match. Exactly one
+# r8152 iface is expected -- more than one fails LOUD (set STRIH_NIC_IFACE to disambiguate).
 iface="${STRIH_NIC_IFACE:-}"
 if [ -z "$iface" ]; then
-  iface="$(ip -o -4 addr show 2>/dev/null | awk -v ip="$TARGET_IP" 'BEGIN { gsub(/\./, "\\.", ip) } $4 ~ ("^" ip "/") { print $2; exit }' || true)"
+  matches=""
+  for _net in "${SYS_ROOT}/class/net/"*; do
+    [ -e "$_net" ] || continue
+    _ifc="$(basename "$_net")"
+    [ "$_ifc" = lo ] && continue
+    _dl="$(readlink -f "${_net}/device/driver" 2>/dev/null || true)"
+    _drv=""
+    [ -n "$_dl" ] && _drv="$(basename "$_dl")"
+    [ "$_drv" = r8152 ] && matches="${matches:+$matches }$_ifc"
+  done
+  case "$matches" in
+    *" "*) die "multiple r8152 NICs (${matches}) -- set STRIH_NIC_IFACE" ;;
+    "")    iface="$(ip -o -4 addr show 2>/dev/null | awk -v ip="$TARGET_IP" 'BEGIN { gsub(/\./, "\\.", ip) } $4 ~ ("^" ip "/") { print $2; exit }' || true)" ;;
+    *)     iface="$matches" ;;
+  esac
 fi
-[ -n "$iface" ] || die "could not resolve the NIC iface carrying ${TARGET_IP} (set STRIH_NIC_IFACE)"
+[ -n "$iface" ] || die "could not resolve the NIC iface (no r8152, no ${TARGET_IP} address; set STRIH_NIC_IFACE)"
 
 # (2) xhci host controller PCI function = walk the device symlink up to the usbN root.
 dev="$(readlink -f "${SYS_ROOT}/class/net/${iface}/device" 2>/dev/null || true)"

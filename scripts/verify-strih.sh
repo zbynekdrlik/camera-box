@@ -704,7 +704,13 @@ else
 IRQ_TARGET_IP="${STRIH_LX_TARGET_IP:-10.77.9.202}"
 IRQ_IFACE="${STRIH_NIC_IFACE:-}"
 if [ -z "$IRQ_IFACE" ]; then
-  IRQ_IFACE="$(ip -o -4 addr show 2>/dev/null | awk -v ip="$IRQ_TARGET_IP" 'BEGIN { gsub(/\./, "\\.", ip) } $4 ~ ("^" ip "/") { print $2; exit }' || true)"
+  # driver-first (the r8152 USB NIC), then fall back to the address match; MULTI -> NOTE + no iface.
+  IRQ_DRV="$(strih_nic_iface_by_driver /sys r8152 2>/dev/null || true)"
+  case "$IRQ_DRV" in
+    MULTI:*) note "  multiple r8152 NICs (${IRQ_DRV#MULTI:}) -- set STRIH_NIC_IFACE"; IRQ_IFACE="" ;;
+    "")      IRQ_IFACE="$(ip -o -4 addr show 2>/dev/null | awk -v ip="$IRQ_TARGET_IP" 'BEGIN { gsub(/\./, "\\.", ip) } $4 ~ ("^" ip "/") { print $2; exit }' || true)" ;;
+    *)       IRQ_IFACE="$IRQ_DRV" ;;
+  esac
 fi
 IRQ_PCIFN=""; [ -n "$IRQ_IFACE" ] && IRQ_PCIFN="$(strih_nic_xhci_pci_function /sys "$IRQ_IFACE" 2>/dev/null || true)"
 IRQ_NUMS="";  [ -n "$IRQ_PCIFN" ] && IRQ_NUMS="$(strih_nic_xhci_irqs /proc/interrupts "$IRQ_PCIFN" 2>/dev/null || true)"
