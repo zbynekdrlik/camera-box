@@ -99,6 +99,65 @@ PYNDI
 EOF
 }
 
+# strih_lx_obs_global_ini_cmds OBS_CFG_DIR -> print the idempotent bash command that seeds
+# `[General] BrowserHWAccel=false` into OBS's `global.ini` (issue 1317). This is the ONLY thing that
+# stops the CEF int3 crash-loop (exit 133 every ~60 s) of the browser sources on this RTX 5050 /
+# GNOME-Wayland stack -- the GPU-accelerated CEF path crashes; false makes CEF software-render via
+# libvk_swiftshader (0 crashes, verified live 22.9.2026). It is a hand edit today, not seeded. Same
+# RawConfigParser upsert shape as strih_lx_ndi_output_ini_cmds (the step-7/#1352 [NDIPlugin] printer),
+# but the FILE is `global.ini` (OBS's cross-collection settings), NOT `user.ini`, and the section is
+# `[General]`. MUST run with OBS STOPPED (OBS rewrites global.ini on exit) -- setup-strih is
+# enable-only, so step 7 runs before any launch. python3 RawConfigParser upsert (optionxform=str,
+# strict=False): idempotent, and NEVER clobbers an unparseable ini. Emitted via an UNQUOTED heredoc
+# that interpolates ONLY ${ini}; the inner `<<'PYBHW'` python body carries no `$` / backtick.
+# `eval`-consumed as a standalone command (no `$(...)` embedding).
+strih_lx_obs_global_ini_cmds() {
+  local dir="${1:?obs config dir required}"
+  local ini="${dir%/}/global.ini"
+  cat <<EOF
+python3 - "${ini}" <<'PYBHW'
+import configparser, os, sys
+path = sys.argv[1]
+cp = configparser.RawConfigParser(strict=False)
+cp.optionxform = str
+if os.path.exists(path):
+    try:
+        cp.read(path)
+    except Exception as e:
+        sys.stderr.write("global.ini parse failed (%s) -- leaving it untouched\n" % e)
+        sys.exit(3)
+if not cp.has_section("General"):
+    cp.add_section("General")
+cp.set("General", "BrowserHWAccel", "false")
+with open(path, "w") as fh:
+    cp.write(fh, space_around_delimiters=False)
+PYBHW
+EOF
+}
+
+# strih_lx_obs_plugin_prune_list -> print (one per line) the ONE source of truth for the obs-plugins
+# the strih genlock bundle ships that must be PRUNED on strih-lx (issue 1317, owner request 22.9.):
+# each logs errors at every boot and is unusable on this box. `decklink*.so` = the DeckLink family
+# (no DeckLink hardware); `obs-qsv11.so` = Intel QSV (the box is NVIDIA -> nvenc); `obs-vst.so` =
+# unused. KEEP everything else, especially distroav.so (NDI) + obs-browser.so/libcef.so (browser
+# sources). Entries may be globs -- callers expand them against each plugin dir (setup-strih step 4
+# tail rm loop; verify-strih absence check), so both the setup PRUNE and the verify ABSENCE assertion
+# share this list. The next bundle install re-copies the whole tree, so the prune must re-run each
+# provisioning (it is idempotent).
+strih_lx_obs_plugin_prune_list() {
+  printf '%s\n' 'decklink*.so' 'obs-qsv11.so' 'obs-vst.so'
+}
+
+# strih_lx_obs_plugin_dirs BUNDLE_ROOT USR_LIBDIR -> print (one per line) the two obs-plugins dirs a
+# prune/absence check must cover: the /opt staged bundle copy AND the /usr-prefix copy the running
+# OBS loads from (mirrors strih_lx_chrome_sandbox_setuid_roots' two-root reasoning -- pruning only the
+# bundle copy would leave the dead plugins in /usr where OBS actually loads them). ONE source of truth
+# shared by setup-strih.sh's step-4 tail prune loop and verify-strih.sh's absence assertion.
+strih_lx_obs_plugin_dirs() {
+  local bundle="${1:?bundle-root required}" libdir="${2:?usr libdir required}"
+  printf '%s\n' "${bundle%/}/lib/x86_64-linux-gnu/obs-plugins" "${libdir%/}/obs-plugins"
+}
+
 # strih_lx_seed_manifest_json -> the FULL /opt/camera-box/strih-lx-seed.json for the OPERATOR
 # (production) collection (issue 1317, this lane). The notebook now runs the migrated operator
 # collection, whose INPUT names are the canonical strih names the whole E2E tooling addresses
@@ -152,8 +211,12 @@ strih_lx_bundle_artifact() { printf 'obs-genlock-linux-x86_64-strih'; }
 strih_lx_dantesync_client_args() { printf -- '--ntp-server %s' "${STRIH_LX_NTP_SERVER:-strih.lan}"; }
 
 # strih_lx_dantesync_is_client_not_master MODE -> 0 iff MODE is a CLIENT mode (never server/master).
-# Fail-closed: an empty/unknown mode returns 1 (a strih-lx that cannot prove it is a client must not
-# be trusted to not steal the master role).
+# INTERNAL helper (issue 1317, this lane): retained as the pure CLIENT-args classifier that the
+# role-aware public predicate strih_lx_dantesync_role_ok delegates to for the `client` branch. It is
+# NO LONGER the caller-facing gate (step 2 + strih_dantesync_unit_text now call role_ok) -- because
+# post-M4 (20.9.2026) the strih notebook IS the fleet NTP master (server role), and this predicate
+# fail-closes on server mode, which is CORRECT for a client invocation but wrong to use as the sole
+# gate for the box. Fail-closed: an empty/unknown mode returns 1.
 strih_lx_dantesync_is_client_not_master() {
   # master flags checked first, but NARROWLY: `*server_mode*` (covers dantesync's `ntp_server_mode`)
   # + `*master*`/`*grandmaster*` -- NEVER a bare `*server*`, which would also swallow the CLIENT
@@ -165,6 +228,52 @@ strih_lx_dantesync_is_client_not_master() {
     *client*|*slave*|*ntp-server*|*ntp_server=*) return 0 ;;
     *) return 1 ;;
   esac
+}
+
+# strih_lx_dantesync_role_ok ROLE ARGS -> the ROLE-AWARE public predicate (issue 1317, this lane):
+# 0 iff ROLE + ARGS name a coherent, non-ambiguous dantesync invocation for the strih-lx box.
+# REPLACES strih_lx_dantesync_is_client_not_master as the caller-facing gate. Post-M4 the notebook is
+# the fleet's ONE NTP master, so a `server` role is CORRECT (never fail-closed on server mode itself);
+# fail-closed only on an AMBIGUOUS shape:
+#   * ROLE=server -> the bare `dantesync` daemon (NTP master, ntp_server_mode in config.json); it
+#     carries NO extra args. server + any ARGS is contradictory (e.g. a stray `--ntp-server` that
+#     would point the master at a host) -> AMBIGUOUS -> fail-closed. server + empty ARGS -> 0.
+#   * ROLE=client -> ARGS must be a genuine CLIENT invocation (never server/master), delegated to
+#     strih_lx_dantesync_is_client_not_master (which fail-closes on empty/master).
+#   * any other/empty ROLE -> fail-closed.
+strih_lx_dantesync_role_ok() {
+  local role="${1:-}" args="${2-}"
+  case "$role" in
+    server) [ -z "$args" ] && return 0 || return 1 ;;
+    client) strih_lx_dantesync_is_client_not_master "$args" ;;
+    *) return 1 ;;
+  esac
+}
+
+# strih_lx_dantesync_status_role_verdict ROLE REACHABLE MODE UDP123 -> the LIVE-read verdict for
+# verify-strih's dantesync-role acceptance item (issue 1317). Prints ONE token and returns 0 only for
+# the fully-`ok` state; every other state prints its own token + returns non-zero. Args (verify-strih
+# feeds live reads):
+#   ROLE       client|server (the provisioned STRIH_LX_DANTESYNC_ROLE, default server post-M4)
+#   REACHABLE  1 iff :8898/status answered
+#   MODE       the status `mode` field value (LOCK / NANO / ... / absent)
+#   UDP123     1 iff an ntp UDP :123 listener is present (ss -ulnp) -- REQUIRED for the server role only
+# Fail-closed order (missing args default to the not-configured value):
+#   unreachable       -> :8898/status did not answer (dantesync down / no HTTP status)
+#   mode:<x>          -> reachable but mode is not a locked mode (LOCK/NANO)
+#   no-ntp-listener   -> server role but no UDP :123 listener (the master is not serving NTP)
+#   ok                -> reachable + locked mode (+ for server, a :123 listener)
+strih_lx_dantesync_status_role_verdict() {
+  local role="${1:-}" reachable="${2:-0}" mode="${3:-absent}" udp123="${4:-0}"
+  [ "$reachable" = 1 ] || { printf 'unreachable'; return 1; }
+  case "$mode" in
+    LOCK|NANO) : ;;
+    *) printf 'mode:%s' "$mode"; return 1 ;;
+  esac
+  if [ "$role" = server ] && [ "$udp123" != 1 ]; then
+    printf 'no-ntp-listener'; return 1
+  fi
+  printf 'ok'; return 0
 }
 
 # strih_lx_profile_facts -> the OBS profile facts (from the Windows `light` profile inventory,
@@ -653,21 +762,40 @@ strih_install_bundle_prefix() {
   ldconfig
 }
 
-# --- issue 1317 (this lane): dantesync CLIENT systemd unit + the verify sleep-mask predicate -------
-# The strih notebook joins the cluster clock as a dantesync CLIENT (the Windows PC stays the one NTP
-# master). setup-strih.sh step 2 installs the unit; verify-strih.sh asserts it is active + a fresh
-# offset. These pure helpers are unit-tested in tests/strih_provision_pure_functions.rs.
+# --- issue 1317 (this lane): dantesync ROLE-aware systemd unit + the verify sleep-mask predicate ----
+# Post-M4 (20.9.2026) the strih notebook IS the fleet's ONE NTP master (`strih.lan` -> 10.77.9.202),
+# so the unit now carries a ROLE: `server` (the M4 default) renders the bare NTP-master daemon; the
+# historical `client` role (the dead parallel-run shape) renders `--ntp-server <host>`. setup-strih.sh
+# step 2 installs the unit + removes any stale `dantesync.service.d/*.conf` drop-in (the live box had a
+# hand `10-ntp-master.conf` overriding the client ExecStart -- now folded INTO the unit); verify-strih
+# asserts the unit is active, a fresh offset, and (server) an NTP :123 listener. These pure helpers are
+# unit-tested in tests/strih_provision_pure_functions.rs.
 
-# strih_dantesync_unit_text [ARGS] -> print the systemd unit text for the strih-lx dantesync CLIENT
+# strih_dantesync_unit_text ROLE [ARGS] -> print the systemd unit text for the strih-lx dantesync
 # daemon (the EXACT cambox unit shape: Type=simple, Restart=always, RestartSec=5,
-# WantedBy=multi-user.target). ARGS is the dantesync invocation (default the client args); ExecStart
-# is `/usr/local/bin/dantesync <ARGS>`. `--service` is NOT an installer flag -- it is a run mode, so
-# it never appears here; the daemon IS `dantesync --ntp-server <host>`. Fail-closed: if ARGS classify
-# as a server/master invocation, emit NOTHING and return 1 (a strih-lx unit must never spawn a 2nd
-# NTP master while running in parallel with the Windows PC).
+# WantedBy=multi-user.target). ROLE is `server` (NTP master, the M4 default -- ExecStart is the BARE
+# `/usr/local/bin/dantesync`, folding the live 10-ntp-master.conf drop-in into the unit) or `client`
+# (ExecStart `/usr/local/bin/dantesync <ARGS>`, ARGS defaulting to the client args). `--service` is
+# NOT an installer flag -- it is a run mode, so it never appears here. Fail-closed via
+# strih_lx_dantesync_role_ok: an ambiguous shape (server WITH args, client with master/empty args, an
+# unknown role) emits NOTHING and returns 1 -- but a plain server role is CORRECT and NEVER refused
+# (the post-M4 fact), reversing the pre-M4 "always fail-closed on server mode" behaviour.
 strih_dantesync_unit_text() {
-  local args="${1:-$(strih_lx_dantesync_client_args)}"
-  strih_lx_dantesync_is_client_not_master "$args" || return 1
+  local role="${1:?dantesync role (client|server) required}"
+  local args="${2-}"
+  local execargs=""
+  case "$role" in
+    server)
+      # NTP master: the bare daemon, no client args (ntp_server_mode lives in config.json).
+      strih_lx_dantesync_role_ok "$role" "$args" || return 1
+      ;;
+    client)
+      [ -n "$args" ] || args="$(strih_lx_dantesync_client_args)"
+      strih_lx_dantesync_role_ok "$role" "$args" || return 1
+      execargs=" ${args}"
+      ;;
+    *) return 1 ;;
+  esac
   cat <<EOF
 [Unit]
 Description=Dante Time Sync (PTP/NTP Synchronization)
@@ -676,7 +804,7 @@ Wants=network.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/dantesync ${args}
+ExecStart=/usr/local/bin/dantesync${execargs}
 Restart=always
 RestartSec=5
 StandardOutput=journal
@@ -697,6 +825,80 @@ strih_verify_sleep_masked() {
   local state="${1:-}" first
   first="${state%%$'\n'*}"
   [ "$first" = masked ]
+}
+
+# --- issue 1317 (this lane): scene-collection hygiene (REPORT-ONLY) + RustDesk install --------------
+
+# strih_collection_hygiene_verdict SHADER_COUNT LUA_COUNT -> the REPORT-ONLY verdict grading the
+# active OBS scene collection for boot-noise carriers (issue 1317). The migrated strih-lx collection
+# carried 10 `shader_filter` ("User-defined shader") filters (obs-shaderfilter, not shipped in the
+# Linux genlock build -> a "Failed to create source" popup at every start) + a dead `scripts-tool`
+# Lua (`D:/_APPS/vban-output.lua`); both were stripped LIVE by the owner, but a RE-IMPORTED collection
+# would silently re-introduce them. The collection is the OWNER's data -- provisioning NEVER rewrites
+# it, this only REPORTS. Prints ONE token; returns 0 ONLY for the clean `ok` state (both counts 0), so
+# the caller renders 0->PASS/NOTE else NOTE (the whole item is report-only, never a hard FAIL). Args
+# default to 0 (missing = clean). Non-numeric counts fail-closed to the dirty branch. Tokens:
+#   ok                        both counts 0
+#   shader_filter:N           N shader_filter filters, 0 scripts-tool
+#   lua:M                     0 shader_filter, M scripts-tool
+#   shader_filter:N,lua:M     both present
+strih_collection_hygiene_verdict() {
+  local shader="${1:-0}" lua="${2:-0}"
+  case "$shader" in ''|*[!0-9]*) shader=1 ;; esac   # non-numeric -> treat as dirty (fail-closed)
+  case "$lua" in    ''|*[!0-9]*) lua=1 ;; esac
+  if [ "$shader" -eq 0 ] && [ "$lua" -eq 0 ]; then
+    printf 'ok'; return 0
+  fi
+  local msg=""
+  [ "$shader" -gt 0 ] && msg="shader_filter:${shader}"
+  if [ "$lua" -gt 0 ]; then
+    [ -n "$msg" ] && msg="${msg},lua:${lua}" || msg="lua:${lua}"
+  fi
+  printf '%s' "$msg"; return 1
+}
+
+# --- RustDesk remote-desktop (owner request 22.9.2026): PINNED .deb install ------------------------
+# The permanent password is NEVER an argument to any of these functions (the @JANUS_ROOM_SECRET@
+# discipline): it lives in a 0600 file the supervisor places, and strih_rustdesk_install_cmds reads it
+# INSIDE the emitted block. The .deb URL + sha256 are PINNED (confirmed live: the release asset's
+# sha256 == the box's installed deb, byte-for-byte).
+
+# strih_rustdesk_version -> the pinned RustDesk version (as live on strih-lx 22.9.2026).
+strih_rustdesk_version() { printf '1.4.9'; }
+
+# strih_rustdesk_deb_url -> the pinned RustDesk .deb download URL (the upstream release asset).
+strih_rustdesk_deb_url() { printf 'https://github.com/rustdesk/rustdesk/releases/download/1.4.9/rustdesk-1.4.9-x86_64.deb'; }
+
+# strih_rustdesk_deb_sha256 -> the pinned sha256 of that .deb (confirmed == the box's installed deb).
+strih_rustdesk_deb_sha256() { printf '7244ba47c40e804172044bfbe659467c54ce46554c98e78c8c0406f1d612fda3'; }
+
+# strih_rustdesk_install_cmds VERSION URL SHA256 PW_FILE -> print the idempotent bash block that
+# installs RustDesk from the PINNED .deb and applies the permanent password from PW_FILE (issue 1317).
+# Steps: download URL -> a temp .deb, VERIFY its sha256 == SHA256 (fail-loud + remove on mismatch --
+# never install an unverified binary), `apt-get install -y <deb>` (pulls libxdo3 etc.), remove the
+# temp deb, `systemctl enable --now rustdesk`, then read the password from PW_FILE into a shell var
+# and `rustdesk --password` it (the value never appears in this source, in the emitter's argv, or in a
+# log -- only PW_FILE's PATH is an argument; the supervisor places the 0600 file). The block can
+# `exit` on any failure, so the caller consumes it as `( eval "$(strih_rustdesk_install_cmds ...)" ) ||
+# fail`. Every URL/SHA/PW_FILE arg is %q-quoted; the final statement ends with `;` so a `$(...)`
+# embedding never glues a following command (the v4l2-neutral.sh _cmd-helper gotcha). VERSION is used
+# only to name the temp file (provenance).
+strih_rustdesk_install_cmds() {
+  local version="${1:?rustdesk version required}" url="${2:?rustdesk .deb url required}"
+  local sha="${3:?rustdesk .deb sha256 required}" pwfile="${4:?rustdesk password-file path required}"
+  cat <<EOF
+__rd_deb="\$(mktemp "/tmp/rustdesk-${version}.XXXXXX.deb")" || { echo "rustdesk: mktemp failed" >&2; exit 1; };
+curl -fsSL -o "\$__rd_deb" $(printf '%q' "$url") || { echo "rustdesk: download failed ($url)" >&2; rm -f "\$__rd_deb"; exit 1; };
+__rd_got="\$(sha256sum "\$__rd_deb" | awk '{print \$1}')";
+if [ "\$__rd_got" != $(printf '%q' "$sha") ]; then echo "rustdesk: sha256 mismatch (want ${sha}, got \$__rd_got) -- refusing to install" >&2; rm -f "\$__rd_deb"; exit 1; fi;
+DEBIAN_FRONTEND=noninteractive apt-get install -y "\$__rd_deb" || { echo "rustdesk: apt install failed" >&2; rm -f "\$__rd_deb"; exit 1; };
+rm -f "\$__rd_deb";
+systemctl enable --now rustdesk || { echo "rustdesk: enable --now failed" >&2; exit 1; };
+__rd_pw="\$(cat $(printf '%q' "$pwfile"))" || { echo "rustdesk: cannot read password file ${pwfile}" >&2; exit 1; };
+if [ -z "\$__rd_pw" ]; then echo "rustdesk: password file ${pwfile} is empty" >&2; unset __rd_pw; exit 1; fi;
+rustdesk --password "\$__rd_pw" || { echo "rustdesk: setting the permanent password failed" >&2; unset __rd_pw; exit 1; };
+unset __rd_pw;
+EOF
 }
 
 # --- issue 1346: fixed HDMI fullscreen projector acceptance (REPORT-ONLY) --------------------------
