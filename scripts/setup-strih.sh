@@ -207,6 +207,13 @@ if [ -e "${NDI_RUNTIME_DIR_STRIH}/libndi.so.6" ] || [ -n "${CAM_PW:-}" ]; then
 else
   fail "NDI runtime absent and CAM_PW unset -- DistroAV would load UI-only (ERR-404). Re-run with CAM_PW=<cam ssh pw> (peer ${NDI_PEER}; override with STRIH_NDI_PEER=<ip>)."
 fi
+# issue 1352: avahi-utils provides `avahi-browse` -- the NDI/mDNS discovery CLI the rig gates use to
+# enumerate senders. Ubuntu 26.04 does NOT install it with the avahi daemon, so without it those
+# gates read blind. Idempotent (apt no-op if present); warn not fail -- OBS runs without it, only the
+# discovery tooling is affected.
+DEBIAN_FRONTEND=noninteractive apt-get install -y avahi-utils \
+  || warn "  avahi-utils install failed -- avahi-browse (NDI/mDNS discovery) will be absent; fix the box's apt sources and re-run"
+echo "  avahi-utils installed (avahi-browse for NDI/mDNS discovery)"
 
 # ---------------------------------------------------------------------------------------------
 step 5 "OBS profile facts (strih-lx: seeded from the Windows 'light' profile)"
@@ -302,6 +309,21 @@ else
   warn "  python3 absent -- cannot pre-seed SaveProjectors in ${USER_INI} (set it in the OBS UI, or install python3 and re-run)"
 fi
 
+# issue 1352: seed DistroAV's [NDIPlugin] program/preview OUTPUT identity -- the BARE names
+# MainOutputName=2ME PGM / PreviewOutputName=2ME PVW + both Enabled=true. DistroAV PREPENDS the box
+# hostname -> announced STRIH-LX (2ME PGM) / (2ME PVW); a name that already carried STRIH-LX here
+# doubles it (the STRIH-LX (STRIH-LX (2ME PGM)) bug). Runs with OBS STOPPED (this is enable-only,
+# before any launch; OBS rewrites user.ini on exit). Idempotent RawConfigParser upsert via the ONE
+# source of truth strih_lx_ndi_output_ini_cmds (scripts/lib/strih-provision.sh).
+if command -v python3 >/dev/null 2>&1; then
+  eval "$(strih_lx_ndi_output_ini_cmds "$USER_INI")" \
+    || warn "  could not seed [NDIPlugin] output names in ${USER_INI} (non-fatal; set them in OBS Tools > DistroAV Settings, or re-run)"
+  chown "$DESKTOP_USER":"$DESKTOP_USER" "$USER_INI" 2>/dev/null || true
+  echo "  seeded [NDIPlugin] MainOutputName=2ME PGM / PreviewOutputName=2ME PVW + Enabled=true in ${USER_INI}"
+else
+  warn "  python3 absent -- cannot seed [NDIPlugin] output names in ${USER_INI} (set them in OBS Tools > DistroAV Settings, or install python3 and re-run)"
+fi
+
 # ---------------------------------------------------------------------------------------------
 step 8 "OBS supervision unit (strih-obs.service, Restart=on-failure) -- enable-only"
 [ -f "${HERE}/../systemd/strih-obs.service" ] || fail "systemd/strih-obs.service not found next to this script"
@@ -315,12 +337,41 @@ chown -R "$DESKTOP_USER":"$DESKTOP_USER" "${USER_HOME}/.config/systemd/user" 2>/
 for _launcher in strih-obs-start.sh strih-obs-stop.sh; do
   [ -f "${HERE}/${_launcher}" ] || fail "launcher scripts/${_launcher} not found next to this script (it is the strih-obs.service ExecStart/ExecStop target)"
 done
-install -m 0755 "${HERE}/strih-obs-start.sh" /usr/local/bin/strih-obs-start.sh
+# issue 1352: strih-obs-start.sh carries a @STRIH_LX_OBS_GPU_ENV@ marker for the RTX 5050 XWayland-
+# PRIME export block; strih_lx_obs_gpu_env (scripts/lib/strih-provision.sh) is the ONE source of
+# truth for those 4 exports. SUBSTITUTE the marker into the DEPLOYED wrapper (the @JANUS_ROOM_SECRET@
+# idiom) so the box renders on the RTX -- a verbatim install would leave it on the saturated iGPU.
+# strih-obs-stop.sh has no marker -> plain install.
+STRIH_OBS_START_TEXT="$(cat "${HERE}/strih-obs-start.sh")"
+STRIH_OBS_START_TEXT="${STRIH_OBS_START_TEXT//#@STRIH_LX_OBS_GPU_ENV@/$(strih_lx_obs_gpu_env)}"
+printf '%s\n' "$STRIH_OBS_START_TEXT" > /usr/local/bin/strih-obs-start.sh
+chmod 0755 /usr/local/bin/strih-obs-start.sh
 install -m 0755 "${HERE}/strih-obs-stop.sh"  /usr/local/bin/strih-obs-stop.sh
-echo "  installed launcher pair -> /usr/local/bin/strih-obs-start.sh + strih-obs-stop.sh (mode 0755)"
+echo "  installed launcher pair -> /usr/local/bin/strih-obs-start.sh (RTX GPU env substituted) + strih-obs-stop.sh (mode 0755)"
 sudo -u "$DESKTOP_USER" XDG_RUNTIME_DIR="/run/user/$(id -u "$DESKTOP_USER")" systemctl --user enable strih-obs.service 2>/dev/null \
   || warn "  enable strih-obs.service by hand once the user session bus is up"
 echo "  strih-obs.service installed + enabled (starts on the next graphical session)"
+
+# ---------------------------------------------------------------------------------------------
+step "8b" "strih-mv-host projector-host helper (issue 1352, XWayland+PRIME present-stall workaround) -- enable-only"
+# issue 1352: on the RTX-via-XWayland-PRIME render path an OBS projector whose GL surface is the X
+# toplevel stalls the graphics thread ~0.5 s per present (program lag 93 %, MV 1.8 fps). strih-mv-host.py
+# re-hosts every OBS projector into a plain child window at runtime (lag 93 % -> 0 %, MV 29.8 fps
+# proven). Supervised --user unit BESIDE strih-obs.service, independent of OBS's lifecycle (it adopts
+# any projector toplevel whenever one appears). Install python3-xlib (its only dep), the helper (0755)
+# + the --user unit, daemon-reload + ENABLE-ONLY (never live-start -- the provisioning convention; the
+# unit comes up on the next graphical session). A lettered sub-step so TOTAL_STEPS is unchanged.
+DEBIAN_FRONTEND=noninteractive apt-get install -y python3-xlib \
+  || fail "python3-xlib install failed -- strih-mv-host.py imports Xlib; fix the box's apt sources and re-run"
+[ -f "${HERE}/strih-mv-host.py" ] || fail "scripts/strih-mv-host.py not found next to this script (issue 1352 projector-host helper)"
+[ -f "${HERE}/../systemd/strih-mv-host.service" ] || fail "systemd/strih-mv-host.service not found next to this script (issue 1352)"
+install -m 0755 "${HERE}/strih-mv-host.py" /usr/local/bin/strih-mv-host.py
+install -m 0644 "${HERE}/../systemd/strih-mv-host.service" "${USER_HOME}/.config/systemd/user/strih-mv-host.service"
+chown -R "$DESKTOP_USER":"$DESKTOP_USER" "${USER_HOME}/.config/systemd/user" 2>/dev/null || true
+sudo -u "$DESKTOP_USER" XDG_RUNTIME_DIR="/run/user/$(id -u "$DESKTOP_USER")" systemctl --user daemon-reload 2>/dev/null || true
+sudo -u "$DESKTOP_USER" XDG_RUNTIME_DIR="/run/user/$(id -u "$DESKTOP_USER")" systemctl --user enable strih-mv-host.service 2>/dev/null \
+  || warn "  enable strih-mv-host.service by hand once the user session bus is up"
+echo "  strih-mv-host.service installed + enabled (helper /usr/local/bin/strih-mv-host.py hosts OBS projectors in child windows)"
 
 # ---------------------------------------------------------------------------------------------
 step 9 ":8899 bundle-state server (strih-bundle-state-server.service) -- enable-only"
@@ -455,7 +506,10 @@ if [ -d /etc/janus ] || command -v janus >/dev/null 2>&1; then
   # Read the secret into a var and substitute the placeholder with a bash expansion (never an argv,
   # never an echo) before writing the audiobridge jcfg 0640.
   JANUS_SECRET_VALUE="$(cat "$JANUS_SECRET_FILE")"
-  JANUS_AB_JCFG="$(strih_janus_audiobridge_jcfg_text "$JANUS_ROOM" "$JANUS_SECRET_FILE")"
+  # issue 1352: pin the audiobridge plain-RTP bind to the box's static IP (STATIC_IP=$(strih_lx_ip),
+  # the same source of truth the netplan step uses) via `local_ip` in `general` -- so the .203->.202
+  # renumber can never strand the bind (EADDRNOTAVAIL) and block the hub from joining the room.
+  JANUS_AB_JCFG="$(strih_janus_audiobridge_jcfg_text "$JANUS_ROOM" "$JANUS_SECRET_FILE" "$STATIC_IP")"
   JANUS_AB_JCFG="${JANUS_AB_JCFG//@JANUS_ROOM_SECRET@/$JANUS_SECRET_VALUE}"
   # Create it 0640 FROM BIRTH (umask 027 in a subshell) so the secret-bearing file is never briefly
   # world-readable between the write and a later chmod (F5); the chmod is belt-and-suspenders.

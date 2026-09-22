@@ -350,6 +350,13 @@ if [ -f "$JANUS_AB" ]; then
   else
     note "janus audiobridge room jcfg present but does not declare room-${JANUS_ROOM:-1000} 'interkom' at 48 kHz -- re-run setup-strih.sh step 14; report-only"
   fi
+  # issue 1352: general.local_ip must pin the plain-RTP bind to the box's static IP (a renumber
+  # otherwise strands it EADDRNOTAVAIL and the hub cannot join the room). Report-only, like item 17.
+  if grep -qE '^[[:space:]]*local_ip = "' "$JANUS_AB" 2>/dev/null; then
+    note "janus audiobridge general.local_ip pinned ($(grep -oE 'local_ip = "[^"]*"' "$JANUS_AB" 2>/dev/null | head -1)) -- renumber-proof RTP bind (issue 1352); report-only"
+  else
+    note "janus audiobridge general.local_ip NOT pinned (or jcfg unreadable) -- a renumber can strand the RTP bind (issue 1352); re-run setup-strih.sh step 14; report-only"
+  fi
 else
   note "janus audiobridge jcfg absent (${JANUS_AB}) -- run setup-strih.sh step 14; report-only"
 fi
@@ -459,6 +466,58 @@ else
   else
     bad "(obs-ui) qt6-svg iconengine MISSING at ${UI_SVG_PATH} -- OBS 32's SVG theme icons render blank; install qt6-svg-plugins (re-run setup-strih.sh)"
   fi
+fi
+
+# 22) strih-mv-host projector-host helper (issue 1352): the --user unit must be installed + ENABLED
+#     (it re-hosts every OBS projector as a child window so the RTX render path does not stall
+#     0.5 s/present), the helper present + executable, and python3-xlib importable. FAIL loud -- the
+#     RTX render path depends on it until the vendored child-display projector fix lands. Enablement
+#     is read from the WantedBy=default.target symlink (no --user session bus needed at verify time).
+MVH_UNIT="${USER_HOME}/.config/systemd/user/strih-mv-host.service"
+MVH_WANTS="${USER_HOME}/.config/systemd/user/default.target.wants/strih-mv-host.service"
+MVH_HELPER="/usr/local/bin/strih-mv-host.py"
+MVH_XLIB=MISSING; python3 -c "import Xlib" 2>/dev/null && MVH_XLIB=ok
+if [ -f "$MVH_UNIT" ] && [ -L "$MVH_WANTS" ] && [ -x "$MVH_HELPER" ] && [ "$MVH_XLIB" = ok ]; then
+  ok "(mv-host) strih-mv-host.service installed + enabled + helper present + python3-xlib importable"
+else
+  bad "(mv-host) strih-mv-host gate: unit=$( [ -f "$MVH_UNIT" ] && echo present || echo MISSING ) enabled=$( [ -L "$MVH_WANTS" ] && echo yes || echo no ) helper=$( [ -x "$MVH_HELPER" ] && echo present || echo MISSING ) xlib=${MVH_XLIB} -- re-run setup-strih.sh step 8b"
+fi
+
+# 23) strih-obs-start.sh RTX GPU env (issue 1352): the DEPLOYED wrapper must carry all 4 XWayland-PRIME
+#     exports (setup-strih step 8 substitutes strih_lx_obs_gpu_env into the @STRIH_LX_OBS_GPU_ENV@
+#     marker). Without them OBS renders on the saturated iGPU. FAIL loud; also FAIL if the marker
+#     survived un-substituted (a verbatim install).
+DEPLOYED_WRAPPER="${STRIH_LAUNCHER_BIN_DIR:-/usr/local/bin}/strih-obs-start.sh"
+GPU_MISSING=""
+for _ex in 'QT_QPA_PLATFORM=xcb' '__NV_PRIME_RENDER_OFFLOAD=1' '__GLX_VENDOR_LIBRARY_NAME=nvidia' '__EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/10_nvidia.json'; do
+  grep -qF "$_ex" "$DEPLOYED_WRAPPER" 2>/dev/null || GPU_MISSING="${GPU_MISSING} ${_ex}"
+done
+if [ -z "$GPU_MISSING" ] && ! grep -qF '#@STRIH_LX_OBS_GPU_ENV@' "$DEPLOYED_WRAPPER" 2>/dev/null; then
+  ok "(gpu-env) strih-obs-start.sh carries the 4 RTX XWayland-PRIME exports (marker substituted)"
+else
+  _mk=""; grep -qF '#@STRIH_LX_OBS_GPU_ENV@' "$DEPLOYED_WRAPPER" 2>/dev/null && _mk=" (marker NOT substituted)"
+  bad "(gpu-env) ${DEPLOYED_WRAPPER} missing RTX exports:${GPU_MISSING:- none}${_mk} -- re-run setup-strih.sh step 8"
+fi
+
+# 24) avahi-browse present (issue 1352): the NDI/mDNS discovery CLI (avahi-utils) -- Ubuntu 26.04 omits
+#     it with the avahi daemon, and the rig discovery gates read blind without it. FAIL loud.
+command -v avahi-browse >/dev/null 2>&1 \
+  && ok "(avahi) avahi-browse present (NDI/mDNS discovery)" \
+  || bad "(avahi) avahi-browse MISSING -- install avahi-utils (re-run setup-strih.sh step 4b)"
+
+# 25) DistroAV [NDIPlugin] output identity in user.ini (issue 1352): the BARE names
+#     MainOutputName=2ME PGM / PreviewOutputName=2ME PVW + both Enabled=true (DistroAV prepends the
+#     hostname -> announced STRIH-LX (2ME PGM)/(2ME PVW); a namespaced name here would double it).
+#     FAIL loud.
+NDI_USER_INI="${USER_HOME}/.config/obs-studio/user.ini"
+NDI_INI_MISSING=""
+for _kv in 'MainOutputName=2ME PGM' 'PreviewOutputName=2ME PVW' 'MainOutputEnabled=true' 'PreviewOutputEnabled=true'; do
+  grep -qF "$_kv" "$NDI_USER_INI" 2>/dev/null || NDI_INI_MISSING="${NDI_INI_MISSING} [${_kv}]"
+done
+if [ -z "$NDI_INI_MISSING" ]; then
+  ok "(ndi-outputs) user.ini [NDIPlugin] MainOutputName=2ME PGM / PreviewOutputName=2ME PVW + Enabled=true"
+else
+  bad "(ndi-outputs) ${NDI_USER_INI} missing DistroAV output identity:${NDI_INI_MISSING} -- re-run setup-strih.sh step 7"
 fi
 
 echo ""

@@ -45,6 +45,55 @@ strih_lx_ndi_republishes() {
 # rig floor -- latency-pins-baseline.json strih-lx block; the per-run aligner owns any offset).
 strih_lx_camera_latency_ms() { printf '3'; }
 
+# strih_lx_obs_gpu_env -> print the strih-lx OBS GPU-render env block: the 4 exports that make OBS
+# render on the RTX 5050 dGPU via XWayland PRIME render-offload (issue 1352). ONE source of truth for
+# strih-obs-start.sh's `@STRIH_LX_OBS_GPU_ENV@` marker (setup-strih.sh step 8 substitutes it at
+# install -- the `@JANUS_ROOM_SECRET@` idiom). QT_QPA_PLATFORM=xcb forces the Qt XWayland path
+# (native-Wayland NVIDIA EGL crash-loops with `eglSwapBuffers failed`); the 3 __NV_/__GLX_/__EGL_
+# PRIME vars route GL onto the NVIDIA vendor lib (the Intel iGPU saturates at 85 % -> program lag
+# 7-20 %, MV 6-7 fps). Printed as ONE `;`-joined line (no trailing newline) so a `$(...)` embedding
+# never glues the following statement (the CLAUDE.md newline-strip gotcha). NOTE: on the RTX a
+# projector's toplevel GL surface still stalls ~0.5 s/present under PRIME -> strih-mv-host.service
+# re-hosts every OBS projector as a CHILD window (lag 93 % -> 0 %, MV 1.8 -> 29.8 fps proven).
+strih_lx_obs_gpu_env() {
+  printf '%s' 'export QT_QPA_PLATFORM=xcb; export __NV_PRIME_RENDER_OFFLOAD=1; export __GLX_VENDOR_LIBRARY_NAME=nvidia; export __EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/10_nvidia.json'
+}
+
+# strih_lx_ndi_output_ini_cmds USER_INI -> print the idempotent bash command that seeds DistroAV's
+# `[NDIPlugin]` program/preview OUTPUT identity into USER_INI (issue 1352): the BARE names
+# `MainOutputName=2ME PGM` / `PreviewOutputName=2ME PVW` + `MainOutputEnabled`/`PreviewOutputEnabled`
+# =true. DistroAV PREPENDS the box hostname -> announced `STRIH-LX (2ME PGM)` / `(2ME PVW)`; a name
+# that ALREADY carried `STRIH-LX ` here would double it (the `STRIH-LX (STRIH-LX (2ME PGM))` bug).
+# MUST run with OBS STOPPED (OBS rewrites user.ini on exit) -- setup-strih is enable-only, so step 7
+# runs before any launch. python3 RawConfigParser upsert (optionxform=str, strict=False): idempotent,
+# and NEVER clobbers an unparseable ini (mirrors the step-7 SaveProjectors upsert). Emitted via an
+# UNQUOTED heredoc that interpolates ONLY ${ini}; the inner `<<'PYNDI'` python body carries no `$` /
+# backtick, so nothing else expands. `eval`-consumed as a standalone command (no `$(...)` embedding).
+strih_lx_ndi_output_ini_cmds() {
+  local ini="${1:?user.ini path required}"
+  cat <<EOF
+python3 - "${ini}" <<'PYNDI'
+import configparser, os, sys
+path = sys.argv[1]
+cp = configparser.RawConfigParser(strict=False)
+cp.optionxform = str
+if os.path.exists(path):
+    try:
+        cp.read(path)
+    except Exception as e:
+        sys.stderr.write("user.ini parse failed (%s) -- leaving it untouched\n" % e)
+        sys.exit(3)
+if not cp.has_section("NDIPlugin"):
+    cp.add_section("NDIPlugin")
+for kv in ("MainOutputName=2ME PGM", "PreviewOutputName=2ME PVW", "MainOutputEnabled=true", "PreviewOutputEnabled=true"):
+    k, v = kv.split("=", 1)
+    cp.set("NDIPlugin", k, v)
+with open(path, "w") as fh:
+    cp.write(fh, space_around_delimiters=False)
+PYNDI
+EOF
+}
+
 # strih_lx_seed_manifest_json -> the FULL /opt/camera-box/strih-lx-seed.json for the OPERATOR
 # (production) collection (issue 1317, this lane). The notebook now runs the migrated operator
 # collection, whose INPUT names are the canonical strih names the whole E2E tooling addresses
@@ -55,8 +104,9 @@ strih_lx_camera_latency_ms() { printf '3'; }
 # certified genlock class onto inputs that ALREADY exist and NEVER CreateScene/CreateInput; a missing
 # declared input is REPORTED.
 #   * sender = the NDI source the operator's input receives. The 7 cameras receive the fleet
-#     `CAMn (usb)` senders; the 2ME feedback pair receives the Windows strih's `STRIH-SNV (2ME PGM/PVW)`
-#     outputs during the PARALLEL run (issue 1347 flips these to the STRIH-LX self-loop); the cg pair
+#     `CAMn (usb)` senders; the 2ME feedback pair receives strih-lx's OWN `STRIH-LX (2ME PGM/PVW)`
+#     outputs -- the M4 self-loop (issue 1352; the dead-parallel-phase `STRIH-SNV (2ME PGM/PVW)`
+#     senders are gone now the Windows strih is retired); the cg pair
 #     receives the `RESOLUME-SNV (cg-obs)` genlocked sender. The 2ME-feedback source + the CG-pair
 #     senders are supervisor-confirmable DATA (the LANE-RETURN followup: re-read the live collection's
 #     input settings) -- a wrong sender is a MANIFEST edit, never a code change, and update-only never
@@ -77,8 +127,8 @@ strih_lx_seed_manifest_json() {
   printf '    {"sender": "CAM5 (usb)", "input": "NDI cam5", "scene": "Cam 5"},\n'
   printf '    {"sender": "CAM6 (usb)", "input": "NDI cam6", "scene": "Cam 6"},\n'
   printf '    {"sender": "CAM7 (usb)", "input": "NDI cam7", "scene": "Cam 7"},\n'
-  printf '    {"sender": "STRIH-SNV (2ME PVW)", "input": "NDI 2ME PVW", "scene": "2ME PVW"},\n'
-  printf '    {"sender": "STRIH-SNV (2ME PGM)", "input": "NDI 2ME PGM (mv)", "scene": "2ME PGM"},\n'
+  printf '    {"sender": "STRIH-LX (2ME PVW)", "input": "NDI 2ME PVW", "scene": "2ME PVW"},\n'
+  printf '    {"sender": "STRIH-LX (2ME PGM)", "input": "NDI 2ME PGM (mv)", "scene": "2ME PGM"},\n'
   printf '    {"sender": "RESOLUME-SNV (cg-obs)", "input": "cg", "scene": "CG"},\n'
   printf '    {"sender": "RESOLUME-SNV (cg-obs)", "input": "CG-obs", "scene": "CG-obs"}\n'
   printf '  ],\n'
@@ -678,16 +728,26 @@ strih_projector_verdict() {
 # an argument here -- it is a placeholder the caller substitutes from the 0600 file with a bash var
 # (no argv exposure, never logged).
 
-# strih_janus_audiobridge_jcfg_text ROOM SECRET_PATH -> print the audiobridge plugin jcfg for room
-# ROOM named "interkom" (48 kHz, record off, plain-RTP participants allowed). The `secret` line is a
-# `@JANUS_ROOM_SECRET@` PLACEHOLDER the caller replaces with the value read from SECRET_PATH (named in
-# a provenance comment only) -- so this pure text never carries the secret.
+# strih_janus_audiobridge_jcfg_text ROOM SECRET_PATH [LOCAL_IP] -> print the audiobridge plugin jcfg
+# for room ROOM named "interkom" (48 kHz, record off, plain-RTP participants allowed). The `secret`
+# line is a `@JANUS_ROOM_SECRET@` PLACEHOLDER the caller replaces with the value read from SECRET_PATH
+# (named in a provenance comment only) -- so this pure text never carries the secret.
+# issue 1352: LOCAL_IP (the box's static IP, from the same source of truth as the netplan step --
+# strih_lx_ip) PINS the audiobridge's plain-RTP bind via `local_ip` in `general`. Without it Janus
+# binds RTP to whatever IP it auto-detected at start, so the .203->.202 renumber left every bind
+# EADDRNOTAVAIL and the intercom hub could never join room ROOM. A blank/omitted LOCAL_IP leaves
+# `general` empty (Janus default all-interfaces) -- the caller passes it (the `ws_ip` blank-omits idiom).
 strih_janus_audiobridge_jcfg_text() {
-  local room="${1:?room id required}" secret_path="${2:?secret path required}"
+  local room="${1:?room id required}" secret_path="${2:?secret path required}" local_ip="${3:-}"
+  local ip_line=""
+  if [ -n "$local_ip" ]; then
+    ip_line="    local_ip = \"${local_ip}\""
+  fi
   cat <<EOF
-# strih-lx intercom audiobridge -- GENERATED by setup-strih.sh (issue 1345 M3a). DO NOT EDIT BY HAND.
+# strih-lx intercom audiobridge -- GENERATED by setup-strih.sh (issue 1345 M3a; issue 1352 pins local_ip). DO NOT EDIT BY HAND.
 # The room secret is injected from ${secret_path} at provisioning (never in git, never logged).
 general: {
+${ip_line}
 }
 
 room-${room}: {

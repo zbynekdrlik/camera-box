@@ -108,6 +108,16 @@ fi
 
 [ -x "$OBS_BIN" ] || { echo "FAIL: OBS binary '${OBS_BIN}' not found/executable -- install the genlock bundle (setup-strih.sh step 4) first"; exit 1; }
 
+# issue 1352: render OBS on the RTX 5050 via XWayland PRIME render-offload. setup-strih.sh step 8
+# SUBSTITUTES the @STRIH_LX_OBS_GPU_ENV@ marker line below with strih_lx_obs_gpu_env's 4 exports (the
+# ONE source of truth in scripts/lib/strih-provision.sh) at install time -- the DEPLOYED wrapper
+# carries the real exports, this repo copy carries only the marker (kept a bash comment so sourcing/
+# running this file is harmless). WHY: native-Wayland NVIDIA EGL crash-loops (eglSwapBuffers failed)
+# and the Intel iGPU saturates at 85 % (program lag 7-20 %, MV 6-7 fps); the RTX via XWayland PRIME
+# renders the program at 9-23 ms / lagged=0. A projector's toplevel GL surface still stalls
+# 0.5 s/present under PRIME -> strih-mv-host.service re-hosts every OBS projector as a CHILD window.
+#@STRIH_LX_OBS_GPU_ENV@
+
 # issue 1317 (imag issue 1156 pattern): PREFLIGHT the seed's Python import chain BEFORE launching
 # OBS. This wrapper launches OBS and only AFTERWARD runs the seeder; if a module
 # the seed imports is missing on the box (e.g. python3-websocket -- strih_scenes imports it at module
