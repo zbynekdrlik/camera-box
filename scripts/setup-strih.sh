@@ -63,24 +63,41 @@ fi
 hostnamectl set-hostname "${STRIH_HOST%%.*}" 2>/dev/null || warn "  could not set hostname (non-fatal)"
 
 # ---------------------------------------------------------------------------------------------
-step 2 "DanteSync CLIENT (single timesync authority; NEVER server/master while parallel)"
-# The Windows strih PC stays the ONE NTP master. Purge any competing timesync daemon (ops hard
-# rule: dantesync OWNS the clock -- never timesyncd/chrony/ptp4l alongside it).
+# issue 1317 (post-M4, 20.9.2026): the strih notebook IS the fleet's ONE NTP master (`strih.lan` ->
+# 10.77.9.202; the cam boxes take NTP from it), so the DEFAULT dantesync ROLE is `server` (a bare
+# `dantesync` daemon = NTP-master mode, ntp_server_mode in /etc/dantesync/config.json). The dead
+# parallel-run CLIENT shape is still available via STRIH_LX_DANTESYNC_ROLE=client. The live box had a
+# hand `dantesync.service.d/10-ntp-master.conf` drop-in overriding the provisioned CLIENT ExecStart --
+# now the role is folded INTO the unit and the stale drop-in is removed.
+DS_ROLE="${STRIH_LX_DANTESYNC_ROLE:-server}"
+step 2 "DanteSync ${DS_ROLE} (single timesync authority; post-M4 the notebook is the fleet NTP master)"
+# Purge any competing timesync daemon (ops hard rule: dantesync OWNS the clock -- never
+# timesyncd/chrony/ptp4l alongside it).
 for svc in systemd-timesyncd chrony chronyd ntp ntpsec; do
   systemctl disable --now "$svc" 2>/dev/null || true
 done
 [ -x /usr/local/bin/dantesync ] || warn "  dantesync binary absent -- install it (see setup-imag.sh step 3 / dantesync-fleet-upgrade.md) before go-live"
-DS_ARGS="$(strih_lx_dantesync_client_args)"
-# Fail-closed self-check (the guard BEFORE install): the args we will run must be a CLIENT
-# invocation, never a master one.
-strih_lx_dantesync_is_client_not_master "$DS_ARGS" \
-  || fail "dantesync args '$DS_ARGS' are not a CLIENT invocation -- refuse to risk a 2nd NTP master"
-echo "  dantesync client args: ${DS_ARGS}  (the Windows PC remains the master)"
-# issue 1317: install dantesync as a systemd SERVICE (was only VALIDATED before -- so the box had NO
-# timesync). The unit is the EXACT cambox shape (Type=simple, Restart=always, ExecStart=
-# /usr/local/bin/dantesync ${DS_ARGS}); strih_dantesync_unit_text fail-closes on a master invocation.
-strih_dantesync_unit_text "$DS_ARGS" > /etc/systemd/system/dantesync.service \
-  || fail "strih_dantesync_unit_text refused to emit a unit for args '$DS_ARGS' (not a CLIENT invocation)"
+# role -> args: server = bare (NTP master), client = --ntp-server <host>.
+if [ "$DS_ROLE" = client ]; then
+  DS_ARGS="$(strih_lx_dantesync_client_args)"
+else
+  DS_ARGS=""
+fi
+# Fail-closed self-check (the guard BEFORE install): the role+args must be a COHERENT invocation --
+# server with no args, or client with a genuine --ntp-server. An ambiguous shape refuses.
+strih_lx_dantesync_role_ok "$DS_ROLE" "$DS_ARGS" \
+  || fail "dantesync role '$DS_ROLE' args '$DS_ARGS' are an ambiguous invocation -- refuse to write an undefined dantesync unit"
+echo "  dantesync role: ${DS_ROLE}  (args: '${DS_ARGS:-<bare NTP master>}')"
+# issue 1317: install dantesync as a systemd SERVICE, role folded INTO the unit (the EXACT cambox
+# shape: Type=simple, Restart=always). strih_dantesync_unit_text fail-closes on an ambiguous shape.
+strih_dantesync_unit_text "$DS_ROLE" "$DS_ARGS" > /etc/systemd/system/dantesync.service \
+  || fail "strih_dantesync_unit_text refused to emit a unit for role '$DS_ROLE' args '$DS_ARGS'"
+# Remove any stale dantesync.service.d/*.conf drop-in: the live box had a hand 10-ntp-master.conf
+# resetting ExecStart to the bare NTP-master daemon. The role is now IN the unit, so a lingering
+# drop-in would hide the provisioned role (two files describing one role -- the exact undocumented
+# state this bake-in eliminates).
+rm -f /etc/systemd/system/dantesync.service.d/*.conf 2>/dev/null || true
+rmdir /etc/systemd/system/dantesync.service.d 2>/dev/null || true
 systemctl daemon-reload
 # Clear a stale lock a previously-crashed dantesync may have left, or the fresh daemon refuses to start.
 rm -f /var/run/dantesync.lock 2>/dev/null || true
@@ -88,7 +105,7 @@ systemctl enable dantesync 2>/dev/null || true
 if [ -x /usr/local/bin/dantesync ]; then
   systemctl restart dantesync 2>/dev/null \
     || warn "  dantesync.service failed to (re)start -- check journalctl -u dantesync"
-  echo "  dantesync.service installed + enabled + started (client: ${DS_ARGS})"
+  echo "  dantesync.service installed + enabled + started (role: ${DS_ROLE})"
 else
   warn "  dantesync.service installed + enabled but NOT started (binary absent) -- install /usr/local/bin/dantesync then: systemctl restart dantesync"
 fi
@@ -189,6 +206,33 @@ if [ -f "$CS_FLAGS_FILE" ] && strih_lx_browser_bundle_required "$(cat "$CS_FLAGS
   echo "  chrome-sandbox setuid-root (root:root 4755) applied at ${CS_ROOTS[*]} -- CEF sandbox launchable"
 else
   warn "  chrome-sandbox setuid fix SKIPPED (STRIH_BUILD_FLAGS.txt absent or BROWSER-OFF at ${GENLOCK_DIR}) -- browser sources not built"
+fi
+
+# issue 1317 (owner request 22.9.2026): PRUNE the obs-plugins the genlock bundle ships that are
+# unusable on strih-lx and log errors at every boot -- decklink*.so (no DeckLink hardware),
+# obs-qsv11.so (Intel QSV, the box is NVIDIA -> nvenc), obs-vst.so (unused). KEEP everything else,
+# especially distroav.so (NDI) + obs-browser.so/libcef.so. Runs as a step-4 tail AFTER the /opt +
+# /usr installs, so it removes the freshly-copied dead plugins from BOTH the staged copy AND the
+# /usr-prefix copy the running OBS loads. Idempotent (rm -f); MUST re-run every provisioning because
+# the bundle install re-copies the whole tree. The prune LIST + the two obs-plugins DIRS are the ONE
+# source of truth (strih_lx_obs_plugin_prune_list / strih_lx_obs_plugin_dirs) shared with verify-strih.
+PRUNE_USR_LIBDIR="/usr/lib/x86_64-linux-gnu"
+PRUNED_PLUGINS=""
+while IFS= read -r _pdir; do
+  [ -d "$_pdir" ] || continue
+  while IFS= read -r _pat; do
+    [ -n "$_pat" ] || continue
+    # $_pat may be a glob (decklink*.so) -- leave it UNQUOTED so it expands against the plugin dir.
+    for _pf in "$_pdir"/$_pat; do
+      [ -e "$_pf" ] || continue
+      rm -f "$_pf" && PRUNED_PLUGINS="${PRUNED_PLUGINS} $(basename "$_pf")"
+    done
+  done < <(strih_lx_obs_plugin_prune_list)
+done < <(strih_lx_obs_plugin_dirs "$GENLOCK_DIR" "$PRUNE_USR_LIBDIR")
+if [ -n "$PRUNED_PLUGINS" ]; then
+  echo "  pruned unused obs-plugins:${PRUNED_PLUGINS}"
+else
+  echo "  obs-plugin prune: none of $(strih_lx_obs_plugin_prune_list | tr '\n' ' ')present (already clean)"
 fi
 
 # ---------------------------------------------------------------------------------------------
@@ -326,6 +370,24 @@ if command -v python3 >/dev/null 2>&1; then
   fi
 else
   warn "  python3 absent -- cannot seed [NDIPlugin] output names in ${USER_INI} (set them in OBS Tools > DistroAV Settings, or install python3 and re-run)"
+fi
+
+# issue 1317 (owner "stále crashuje" 22.9.2026): seed [General] BrowserHWAccel=false into OBS's
+# global.ini. The GPU-accelerated CEF path (libcef.so) int3-traps -> exit 133 every ~60 s on this RTX
+# 5050 / GNOME-Wayland stack (the whole interkom scene black); BrowserHWAccel=false makes CEF
+# software-render via libvk_swiftshader (0 crashes, verified live). This is a global.ini setting (OBS's
+# cross-collection settings), NOT user.ini. Runs with OBS STOPPED (enable-only, before any launch; OBS
+# rewrites global.ini on exit). Idempotent RawConfigParser upsert via the ONE source of truth
+# strih_lx_obs_global_ini_cmds (scripts/lib/strih-provision.sh).
+if command -v python3 >/dev/null 2>&1; then
+  if eval "$(strih_lx_obs_global_ini_cmds "$OBS_CFG")"; then
+    chown "$DESKTOP_USER":"$DESKTOP_USER" "${OBS_CFG}/global.ini" 2>/dev/null || true
+    echo "  seeded [General] BrowserHWAccel=false in ${OBS_CFG}/global.ini (CEF crash-loop guard)"
+  else
+    warn "  could not seed [General] BrowserHWAccel=false in ${OBS_CFG}/global.ini (non-fatal; set it in OBS Settings > Advanced > Browser Source Hardware Acceleration OFF, or re-run)"
+  fi
+else
+  warn "  python3 absent -- cannot seed [General] BrowserHWAccel=false in ${OBS_CFG}/global.ini (turn OFF Browser Source Hardware Acceleration in OBS, or install python3 and re-run)"
 fi
 
 # ---------------------------------------------------------------------------------------------
@@ -617,6 +679,30 @@ strih_companion_satellite_autostart_text > "${USER_HOME}/.config/autostart/compa
   || fail "could not write the Companion Satellite autostart entry"
 chown "$DESKTOP_USER":"$DESKTOP_USER" "${USER_HOME}/.config/autostart/companion-satellite.desktop"
 echo "  Companion Satellite v${CS_VER} installed to /opt (autostart for ${DESKTOP_USER}, NOT started); controller ${CS_HOST}:${CS_PORT} seeded (config.json + host.conf)"
+
+# ---------------------------------------------------------------------------------------------
+# A lettered sub-step so TOTAL_STEPS stays 17 (test-pinned).
+step "16b" "RustDesk remote desktop (owner request 22.9.2026) -- pinned .deb, permanent password from a 0600 file"
+# issue 1317: install RustDesk from the PINNED .deb (sha256-verified, fail-loud on mismatch), enable
+# --now the service, and apply the permanent password read INSIDE the emitted block from a 0600 file
+# the SUPERVISOR places (a provisioning input) -- the @JANUS_ROOM_SECRET@ discipline: the password
+# value never appears in git, in an argv here, or in a log. Gated on the password file's presence:
+# without it a permanent password cannot be set, so we SKIP + warn (never invent one, never abort the
+# whole provisioning run for a not-yet-placed supervisor secret). Run in a SUBSHELL (the step-4b/-16
+# pattern): the emitter `exit 1`s on a fetch/sha/install failure, so `( eval "$(...)" ) || fail` fires
+# with the actionable message instead of terminating setup-strih.sh directly.
+RD_VER="$(strih_rustdesk_version)"
+RD_URL="$(strih_rustdesk_deb_url)"
+RD_SHA="$(strih_rustdesk_deb_sha256)"
+RD_PW_FILE="${STRIH_LX_RUSTDESK_PW_FILE:-/etc/rustdesk/permanent-password.secret}"
+if [ -s "$RD_PW_FILE" ]; then
+  ( eval "$(strih_rustdesk_install_cmds "$RD_VER" "$RD_URL" "$RD_SHA" "$RD_PW_FILE")" ) \
+    || fail "RustDesk install failed (v${RD_VER}) -- confirm the pinned .deb URL/sha256 and the 0600 password file ${RD_PW_FILE}, then re-run"
+  RD_ID="$(rustdesk --get-id 2>/dev/null | head -1 || true)"
+  echo "  RustDesk v${RD_VER} installed + enabled --now (permanent password applied from ${RD_PW_FILE}); connect ID: ${RD_ID:-<run: rustdesk --get-id>}"
+else
+  warn "  RustDesk NOT installed -- place the 0600 permanent-password file at ${RD_PW_FILE} (a provisioning input the supervisor sets; never in git) and re-run this step"
+fi
 
 # ---------------------------------------------------------------------------------------------
 step 17 "Final verification (verify-strih.sh acceptance gate)"

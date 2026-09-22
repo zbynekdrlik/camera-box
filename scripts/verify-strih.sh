@@ -526,6 +526,136 @@ else
   bad "(ndi-outputs) ${NDI_USER_INI} missing DistroAV output identity:${NDI_INI_MISSING} -- re-run setup-strih.sh step 7"
 fi
 
+# 26) BrowserHWAccel=false in global.ini (issue 1317): the ONLY guard against the CEF int3 crash-loop
+#     (exit 133 every ~60 s) of the browser sources on this RTX/GNOME-Wayland stack. FAIL loud.
+GLOBAL_INI="${USER_HOME}/.config/obs-studio/global.ini"
+if grep -qE '^BrowserHWAccel=false' "$GLOBAL_INI" 2>/dev/null; then
+  ok "(browser-hwaccel) global.ini [General] BrowserHWAccel=false (CEF crash-loop guard)"
+else
+  bad "(browser-hwaccel) ${GLOBAL_INI} missing BrowserHWAccel=false -- CEF browser sources int3 crash-loop; re-run setup-strih.sh step 7"
+fi
+
+# 27) unused obs-plugins pruned (issue 1317): decklink*.so / obs-qsv11.so / obs-vst.so must be ABSENT
+#     in BOTH the /opt bundle copy AND the /usr-prefix copy the running OBS loads. The prune LIST +
+#     the two DIRS are the SAME source of truth setup-strih.sh step 4 prunes with. FAIL loud.
+PLUGIN_PRESENT=""
+while IFS= read -r _pdir; do
+  [ -d "$_pdir" ] || continue
+  while IFS= read -r _pat; do
+    [ -n "$_pat" ] || continue
+    # $_pat may be a glob (decklink*.so) -- UNQUOTED so it expands against the plugin dir.
+    for _pf in "$_pdir"/$_pat; do
+      [ -e "$_pf" ] && PLUGIN_PRESENT="${PLUGIN_PRESENT} ${_pf}"
+    done
+  done < <(strih_lx_obs_plugin_prune_list)
+done < <(strih_lx_obs_plugin_dirs "$GENLOCK_DIR" /usr/lib/x86_64-linux-gnu)
+if [ -z "$PLUGIN_PRESENT" ]; then
+  ok "(plugin-prune) unused obs-plugins absent ($(strih_lx_obs_plugin_prune_list | tr '\n' ' '))"
+else
+  bad "(plugin-prune) dead obs-plugins still present:${PLUGIN_PRESENT} -- re-run setup-strih.sh step 4"
+fi
+
+# 28) scene-collection hygiene (issue 1317, REPORT-ONLY): count shader_filter filters + scripts-tool
+#     entries in the ACTIVE collection JSON via the pure strih_collection_hygiene_verdict; NOTE only --
+#     provisioning NEVER rewrites the owner's collection, it only reports (a re-import re-introduces the
+#     boot popups this bake-in warns about).
+OBS_BASE="${USER_HOME}/.config/obs-studio"
+COLL_NAME="$(sed -n 's/^SceneCollectionFile=//p' "${OBS_BASE}/global.ini" 2>/dev/null | head -1 || true)"
+COLL_JSON=""
+if [ -n "$COLL_NAME" ] && [ -f "${OBS_BASE}/basic/scenes/${COLL_NAME}.json" ]; then
+  COLL_JSON="${OBS_BASE}/basic/scenes/${COLL_NAME}.json"
+else
+  # Fallback: newest *.json (the `*.json` glob already excludes the `*.json.bak*` backups). No ls|grep.
+  for _cj in "${OBS_BASE}/basic/scenes/"*.json; do
+    [ -e "$_cj" ] || continue
+    if [ -z "$COLL_JSON" ] || [ "$_cj" -nt "$COLL_JSON" ]; then COLL_JSON="$_cj"; fi
+  done
+fi
+if [ -n "$COLL_JSON" ] && command -v python3 >/dev/null 2>&1; then
+  HYG_COUNTS="$(python3 - "$COLL_JSON" <<'PYHY' 2>/dev/null || true
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+except Exception:
+    sys.exit(0)   # print nothing -> caller NOTEs "could not parse"
+def count_id(o, val):
+    n = 0
+    if isinstance(o, dict):
+        if o.get("id") == val:
+            n += 1
+        for v in o.values():
+            n += count_id(v, val)
+    elif isinstance(o, list):
+        for v in o:
+            n += count_id(v, val)
+    return n
+shader = count_id(d, "shader_filter")
+lua = 0
+mods = d.get("modules", {}) if isinstance(d, dict) else {}
+st = mods.get("scripts-tool") if isinstance(mods, dict) else None
+if isinstance(st, list):
+    lua = len(st)
+elif isinstance(st, dict):
+    inner = st.get("scripts")
+    lua = len(inner) if isinstance(inner, list) else (1 if st else 0)
+print("%d %d" % (shader, lua))
+PYHY
+)"
+  if [ -n "$HYG_COUNTS" ]; then
+    # HYG_COUNTS is "SHADER LUA" -- word-split into the two args on purpose.
+    # shellcheck disable=SC2086
+    HYG_VERDICT="$(strih_collection_hygiene_verdict $HYG_COUNTS || true)"
+    if [ "$HYG_VERDICT" = ok ]; then
+      note "(collection-hygiene) active collection clean (0 shader_filter, 0 scripts-tool) -- report-only"
+    else
+      note "(collection-hygiene) active collection carries ${HYG_VERDICT} (a re-import re-introduces the boot popups; owner-reversible in the UI) -- report-only, provisioning never rewrites the collection"
+    fi
+  else
+    note "(collection-hygiene) could not parse ${COLL_JSON} -- report-only"
+  fi
+else
+  note "(collection-hygiene) active collection JSON / python3 absent -- report-only"
+fi
+
+# 29) RustDesk remote desktop (issue 1317, owner request 22.9.): the service is active + a connect ID
+#     is readable. FAIL loud when installed-but-broken; NOTE when not installed (the pw file was not
+#     placed, so setup-strih step 16b skipped it -- report-only until installed).
+if command -v rustdesk >/dev/null 2>&1; then
+  RD_ACTIVE="$(systemctl is-active rustdesk 2>/dev/null || true)"
+  RD_ID="$(rustdesk --get-id 2>/dev/null | head -1 || true)"
+  if [ "$RD_ACTIVE" = active ] && [ -n "$RD_ID" ]; then
+    ok "(rustdesk) service active + connect ID present"
+  else
+    bad "(rustdesk) installed but not ready (active='${RD_ACTIVE:-<none>}', id='${RD_ID:-<empty>}') -- systemctl enable --now rustdesk; re-run setup-strih.sh step 16b"
+  fi
+else
+  note "(rustdesk) not installed -- place the 0600 password file + re-run setup-strih.sh step 16b (report-only until installed)"
+fi
+
+# 6b) dantesync ROLE live check (issue 1317): :8898/status reachable AND mode LOCK/NANO AND -- for the
+#     server role (the post-M4 default: the notebook IS the fleet NTP master) -- an ntp UDP :123
+#     listener. Complements item 6 (unit active + fresh offset) with the role/serving-state proof via
+#     the pure strih_lx_dantesync_status_role_verdict.
+DS_ROLE_V="${STRIH_LX_DANTESYNC_ROLE:-server}"
+DS_STATUS="$(curl -s --max-time 4 http://127.0.0.1:8898/status 2>/dev/null || true)"
+[ -n "$DS_STATUS" ] && DS_REACH=1 || DS_REACH=0
+DS_MODE="$(printf '%s' "$DS_STATUS" | grep -oE '"mode":"[A-Za-z]+"' | head -1 | sed 's/.*:"//; s/"//' || true)"
+[ -n "$DS_MODE" ] || DS_MODE=absent
+if ss -uln 2>/dev/null | grep -qE ':123([^0-9]|$)'; then DS_UDP123=1; else DS_UDP123=0; fi
+DS_ROLE_VERDICT="$(strih_lx_dantesync_status_role_verdict "$DS_ROLE_V" "$DS_REACH" "$DS_MODE" "$DS_UDP123" || true)"
+case "$DS_ROLE_VERDICT" in
+  ok)
+    if [ "$DS_ROLE_V" = server ]; then
+      ok "(dantesync-role) server: :8898/status mode=${DS_MODE} + NTP :123 listener (fleet NTP master)"
+    else
+      ok "(dantesync-role) client: :8898/status mode=${DS_MODE}"
+    fi ;;
+  unreachable)     bad "(dantesync-role) :8898/status not answering -- dantesync down / no HTTP status" ;;
+  no-ntp-listener) bad "(dantesync-role) server role but NO UDP :123 listener -- the fleet's NTP master is not serving NTP; re-run setup-strih.sh step 2" ;;
+  mode:*)          bad "(dantesync-role) :8898/status ${DS_ROLE_VERDICT} (not LOCK/NANO) -- clock not disciplined" ;;
+  *)               bad "(dantesync-role) unknown verdict '${DS_ROLE_VERDICT}'" ;;
+esac
+
 echo ""
 if [ "$FAILS" -eq 0 ]; then
   echo -e "${GREEN}=== verify-strih.sh: ALL CLEAR ===${NC}"; exit 0
