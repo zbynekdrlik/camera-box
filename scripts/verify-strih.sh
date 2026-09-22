@@ -263,7 +263,7 @@ esac
 if arecord -l 2>/dev/null | grep -qi 'MiniFuse'; then note "talkback: MiniFuse 4 present (operator mic)"; else note "talkback: MiniFuse 4 not detected (plug it in before go-live)"; fi
 
 # 10) NVENC encoder available.
-{ ffmpeg -hide_banner -encoders 2>/dev/null || cat "$LOG" 2>/dev/null; } | strih_lx_nvenc_available_ok && ok "NVENC encoder available" || bad "NVENC encoder not available"
+{ ffmpeg -hide_banner -encoders 2>/dev/null; cat "$LOG" 2>/dev/null; } | strih_lx_nvenc_available_ok && ok "NVENC encoder available" || bad "NVENC encoder not available"
 
 # 11) never-sleep (sleep.target masked). issue 1317: `systemctl is-enabled` prints "masked" AND exits
 #     1 for a masked unit, so the old echo-masked-on-failure fallback DOUBLE-appended ("masked" twice) and
