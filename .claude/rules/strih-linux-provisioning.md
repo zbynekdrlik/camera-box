@@ -26,10 +26,23 @@ While both boxes run, TWO strih senders coexist on the NDI wire and must never c
   `STRIH-LX (2ME PVW)` + the `STRIH-LX (interkom|MULTIVIEW|Grading)` republishes. The stream box +
   the receivers must **never** see a second `STRIH-SNV (...)` sender. `verify-strih.sh` fail-closes
   on any live output that is a `STRIH-SNV (...)` name (`strih_lx_no_second_strihsnv_sender`).
-- **strih-lx joins the cluster clock as a dantesync CLIENT** (`--ntp-server strih.lan`), never a
-  server/master — the Windows PC keeps the single NTP-master role. `setup-strih.sh` self-checks the
-  invocation with `strih_lx_dantesync_is_client_not_master` (fail-closed: an empty/ambiguous mode
-  refuses) so a mis-provision can never spawn a second master.
+- **The clock role is now a PARAMETER, and post-M4 the notebook IS the fleet NTP master (updated
+  #1317 remainder, 22.9.2026 — the parallel run ENDED with the M4 cut-over on 20.9.).** The old
+  "dantesync CLIENT only, the Windows PC keeps the single NTP-master role" contract was true ONLY
+  during the parallel run; it is STALE. Since M4, `strih.lan` = the notebook (10.77.9.202) and the
+  cam boxes take NTP from it, so `setup-strih.sh` step 2 provisions dantesync with a ROLE
+  (`STRIH_LX_DANTESYNC_ROLE`, default **`server`**): `strih_dantesync_unit_text ROLE [ARGS]` renders
+  the bare NTP-master ExecStart for `server` (folding the live hand `dantesync.service.d/10-ntp-master.conf`
+  drop-in INTO the unit, and removing any stale drop-in), or `--ntp-server <host>` for the historical
+  `client` role. The self-check is now the role-aware `strih_lx_dantesync_role_ok ROLE ARGS`
+  (fail-closed on an AMBIGUOUS shape — server WITH args, client with a master/empty arg, an unknown
+  role — but NEVER on a plain server role, which is correct post-M4); the internal
+  `strih_lx_dantesync_is_client_not_master` is retained as the client-branch classifier. `verify-strih`
+  adds a role live-check: `:8898/status` reachable + `mode` LOCK/NANO + (server role) an ntp UDP :123
+  listener. To run a future box as a client again: `STRIH_LX_DANTESYNC_ROLE=client`.
+
+  The NDI-output `STRIH-LX (...)` namespacing above is a SEPARATE matter (issue 1347 owns the rename
+  back to non-namespaced production names now the Windows strih is retired); it is untouched here.
 
 ## Ubuntu 26.04 (owner ROZHODNUTÉ 18.9.2026)
 
@@ -729,13 +742,30 @@ show broken icons + broken browser sources again.
 3. **obs-shaderfilter plugin missing → every OBS start pops "Failed to create source 'User-defined shader'"** (the operator's "errory vyskakujú", 22.9.2026). The strih-lx collection carries 10 `shader_filter` ("User-defined shader") filters from exeldro's obs-shaderfilter, which the Linux genlock build does not ship. The prebuilt `obs-shaderfilter-<ver>-ubuntu-22.04.tar.gz` release LOADS on OBS 32.2.0 / Ubuntu 26.04 (2.6.0 verified live: `[obs-shaderfilter] loaded version 2.6.0`, all filters created) — install `bin/64bit/obs-shaderfilter.so` → `/usr/lib/x86_64-linux-gnu/obs-plugins/` and `data/` → `/usr/share/obs/obs-plugins/obs-shaderfilter/`. No libobs headers on the box, so a local build is not an option; the prebuilt tarball is the path.
 4. **A migrated Windows collection carries a dead `scripts-tool` Lua** (`D:/_APPS/vban-output.lua`, VBAN→stream.lan — the VB-Matrix era). It logs `[Lua: vban-output.lua] Error opening file: (null)` every start; VBAN is the intercom hub's job now, so drop it from `modules.scripts-tool` in the collection JSON (OBS stopped, backup kept).
 
-All four (qt6-svg-plugins, chrome-sandbox /usr path, obs-shaderfilter, the dead Lua) are `setup-strih.sh` provisioning items; 1+2 are baked (#1317 slice), 3+4 are still hand-patches.
+All four (qt6-svg-plugins, chrome-sandbox /usr path, obs-shaderfilter, the dead Lua) are `setup-strih.sh` provisioning items; 1+2 are baked (#1317 slice). 3+4 are COLLECTION concerns the owner's data owns — provisioning never rewrites the collection, so they are now covered REPORT-ONLY by verify item 28 (`strih_collection_hygiene_verdict` counts the `shader_filter` filters + the dead `scripts-tool` Lua so a re-import that re-introduces the boot popups is visible), #1317 remainder.
 
-5. **CEF browser sources crash-loop OBS on Wayland+NVIDIA (`libcef.so` int3 trap → exit 133 every ~60s) — the cause is `BrowserHWAccel=true`, NOT the sandbox or shaderfilter** (22.9.2026, operator "stále crashuje", whole interkom scene black). CEF is already launched `--no-sandbox` (so chrome-sandbox setuid + the apparmor userns knob are red herrings — reverted). The GPU-accelerated CEF path crashes on the RTX 5050 / GNOME-Wayland stack. Fix: `BrowserHWAccel=false` in `~/.config/obs-studio/global.ini [General]` (OBS down, edit, restart) → CEF software-renders via libvk_swiftshader, 0 crashes. This is a `setup-strih.sh` provisioning item (bake `BrowserHWAccel=false` into the seeded global.ini).
-6. **obs-shaderfilter was a RED HERRING for the crash** — it only silenced the "User-defined shader" start popup; removing it (owner OK 22.9.) does NOT affect stability. With it removed the 10 `shader_filter` filters in the collection re-log the popup; strip them from the collection JSON if the popup should stay gone, or leave shaderfilter installed — cosmetic either way.
-7. **Prune-safe plugins on strih-lx** (errors/unused every boot): `decklink*.so` (no DeckLink hardware — removed 22.9.), `obs-qsv11.so` (Intel QSV, box is NVIDIA → nvenc), `obs-vst.so` (unused). KEEP everything else, especially `distroav.so` (NDI) + `obs-browser.so`/`libcef.so`/`libvk_swiftshader.so` (browser sources, now software-rendered).
+## The #1317 remainder — baking the last live-applied strih-lx hand-patches into provisioning (22.9.2026)
 
-8. **RustDesk remote-desktop on strih-lx** (owner request 22.9.2026): install `rustdesk-<ver>-x86_64.deb` (from github.com/rustdesk/rustdesk releases) via `apt-get install -y ./rustdesk.deb` (pulls libxdo3 etc.), then `systemctl enable --now rustdesk.service`, set the permanent password (`rustdesk --password <fleet-pw>`), read the connect ID with `rustdesk --get-id`. GNOME/Wayland caveat: screen capture goes through the xdg-desktop-portal (pipewire) — the FIRST inbound connection may raise a one-time screen-share approval on the box's own session. A `setup-strih.sh` provisioning item.
+The five hand-patches that survived ONLY on the live box (a re-flash would revert each) + the E2E ffprobe gap are now provisioned (design comment 5778538537, Prístup 1 — five idempotent enable-only items + a report-only verify + a tool-dep install, no `vendor/`, no `recording-e2e.sh`/`rig-mode.sh`, the collection never rewritten):
+
+| Item | setup-strih | verify-strih | pure helper(s) |
+|---|---|---|---|
+| (A) `[General] BrowserHWAccel=false` in global.ini (CEF crash-loop guard, OBS stopped) | step 7 | item 26 (FAIL) | `strih_lx_obs_global_ini_cmds` |
+| (B) prune `decklink*.so`/`obs-qsv11.so`/`obs-vst.so` from both plugin dirs | step 4 tail | item 27 (FAIL) | `strih_lx_obs_plugin_prune_list` + `strih_lx_obs_plugin_dirs` |
+| (C) collection hygiene (never rewrites) | — | item 28 (REPORT-ONLY) | `strih_collection_hygiene_verdict` |
+| (D) RustDesk pinned .deb + sha256 + enable --now + 0600-file password | step 16b (gated on the pw file) | item 29 (FAIL / NOTE) | `strih_rustdesk_version`/`_deb_url`/`_deb_sha256`/`_install_cmds` |
+| (G) dantesync ROLE (`server` default post-M4) | step 2 | item 6b (FAIL) | `strih_dantesync_unit_text ROLE`, `strih_lx_dantesync_role_ok`, `strih_lx_dantesync_status_role_verdict` |
+| (H) ffmpeg/ffprobe for the on-box E2E verdict | step 4b | item 30 (FAIL) | (apt install, no pure helper) |
+
+`TOTAL_STEPS=17` unchanged (RustDesk is the lettered sub-step 16b). Tests: `tests/strih_provision_pure_functions.rs` (source-and-call for every pure helper + static-anchor wiring). Supervisor: place the 0600 RustDesk password file at `STRIH_LX_RUSTDESK_PW_FILE`, then run `setup-strih.sh` + `verify-strih.sh` on the notebook.
+
+5. **CEF browser sources crash-loop OBS on Wayland+NVIDIA (`libcef.so` int3 trap → exit 133 every ~60s) — the cause is `BrowserHWAccel=true`, NOT the sandbox or shaderfilter** (22.9.2026, operator "stále crashuje", whole interkom scene black). CEF is already launched `--no-sandbox` (so chrome-sandbox setuid + the apparmor userns knob are red herrings — reverted). The GPU-accelerated CEF path crashes on the RTX 5050 / GNOME-Wayland stack. Fix: `BrowserHWAccel=false` in `~/.config/obs-studio/global.ini [General]` (OBS down, edit, restart) → CEF software-renders via libvk_swiftshader, 0 crashes. **BAKED (#1317 remainder)** — `setup-strih.sh` step 7 seeds `[General] BrowserHWAccel=false` into `global.ini` (OBS stopped) via `strih_lx_obs_global_ini_cmds`; verify item 26 asserts it.
+6. **obs-shaderfilter was a RED HERRING for the crash** — it only silenced the "User-defined shader" start popup; removing it (owner OK 22.9.) does NOT affect stability. With it removed the 10 `shader_filter` filters in the collection re-log the popup; strip them from the collection JSON if the popup should stay gone, or leave shaderfilter installed — cosmetic either way. **The collection is the owner's data — provisioning REPORTS, never rewrites it:** verify item 28 (REPORT-ONLY, `strih_collection_hygiene_verdict`) counts `shader_filter` filters + `scripts-tool` entries in the active collection so a re-import that re-introduces the boot popups is visible (#1317 remainder).
+7. **Prune-safe plugins on strih-lx** (errors/unused every boot): `decklink*.so` (no DeckLink hardware — removed 22.9.), `obs-qsv11.so` (Intel QSV, box is NVIDIA → nvenc), `obs-vst.so` (unused). KEEP everything else, especially `distroav.so` (NDI) + `obs-browser.so`/`libcef.so`/`libvk_swiftshader.so` (browser sources, now software-rendered). **BAKED (#1317 remainder)** — `setup-strih.sh` step 4 tail prunes the three basenames (`strih_lx_obs_plugin_prune_list`) from BOTH the /opt bundle copy AND the /usr load path (`strih_lx_obs_plugin_dirs`), idempotent, re-runs each install (the bundle install re-copies the whole tree); verify item 27 asserts absence via the SAME source of truth.
+
+8. **RustDesk remote-desktop on strih-lx** (owner request 22.9.2026): install the pinned `rustdesk-1.4.9-x86_64.deb` via `apt-get install -y ./rustdesk.deb` (pulls libxdo3 etc.), then `systemctl enable --now rustdesk.service`, set the permanent password (`rustdesk --password <fleet-pw>`), read the connect ID with `rustdesk --get-id`. GNOME/Wayland caveat: screen capture goes through the xdg-desktop-portal (pipewire) — the FIRST inbound connection may raise a one-time screen-share approval on the box's own session. **BAKED (#1317 remainder)** — `setup-strih.sh` step 16b installs from the PINNED .deb (URL + sha256 in `strih_rustdesk_deb_url`/`_deb_sha256`, confirmed == the box's installed deb byte-for-byte), fail-loud on a sha256 mismatch, `systemctl enable --now rustdesk`, and applies the permanent password read INSIDE the emitted block from a 0600 file the supervisor places at `STRIH_LX_RUSTDESK_PW_FILE` (default `/etc/rustdesk/permanent-password.secret`) — the `@JANUS_ROOM_SECRET@` discipline: the password value is never in git, in an argv, or in a log. Step 16b is GATED on the pw file's presence (SKIP + warn if absent — the supervisor must place the secret file). Verify item 29: unit active + `rustdesk --get-id` non-empty.
+
+9. **ffmpeg (provides `ffprobe`) NOT installed by default on 26.04** (22.9.2026 15:06): the on-box release-E2E verdict (`recording-verdict-on-strih-lx.sh` runs `recording-verdict --extract-partial strih` ON the notebook) spawns `ffprobe` to demux the strih recording; a fresh box has no ffmpeg, so the `[8/8]` on-box verdict died `spawn ffprobe (install ffmpeg: apt install ffmpeg)`. **BAKED (#1317 remainder)** — `setup-strih.sh` step 4b apt-installs `ffmpeg` (a TOOL dependency of the E2E verdict, same idempotent apt family as `avahi-utils`; NOT the bundle's RUNTIME_PACKAGES.txt); verify item 30 fails loud unless `ffprobe` + `ffmpeg` are both present.
 
 ## 22.9.2026 live session — GPU, projector, Janus, NDI naming (issue 1352 + the #1317 findings comment)
 
