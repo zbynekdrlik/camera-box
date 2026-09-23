@@ -388,7 +388,7 @@ pub fn run_bench(cfg: &BenchConfig) -> BenchReport {
         }
         let wall = nominal + late;
         // Produce every frame that has arrived by this tick (keep one frame of look-ahead).
-        while pending.back().map_or(true, |&(arrival, _)| arrival <= wall) {
+        while pending.back().is_none_or(|&(arrival, _)| arrival <= wall) {
             let (arrival, stamp, dup, gap) = sender.next_frame(cfg);
             if arrival >= warm {
                 report.stamp_dups += dup;
@@ -418,7 +418,7 @@ pub fn run_bench(cfg: &BenchConfig) -> BenchReport {
                 if last_tick_state.is_some_and(|s| s != state) {
                     report.tick_state_changes += 1;
                 }
-                if tick_no % SAMPLE_EVERY_TICKS == 0 {
+                if tick_no.is_multiple_of(SAMPLE_EVERY_TICKS) {
                     *report.state_samples.entry(state).or_insert(0) += 1;
                     if last_sample.is_some_and(|s| s != state) {
                         report.flips += 1;

@@ -883,7 +883,11 @@ fn stamp_sequences() -> Vec<Vec<u64>> {
                 6 => 40,                    // > 1 s jump at 30 fps
                 _ => 1,
             };
-            seq.push(if (x >> 20) % 97 == 0 { 0 } else { s30(k) });
+            seq.push(if (x >> 20).is_multiple_of(97) {
+                0
+            } else {
+                s30(k)
+            });
         }
         v.push(seq);
     }
