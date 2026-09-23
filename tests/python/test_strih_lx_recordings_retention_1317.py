@@ -342,3 +342,166 @@ def test_host_still_refuses_the_linux_strih_and_points_at_box():
         assert r.returncode == 2, r.stdout + r.stderr
         assert "linux-genlock" in r.stderr and "--box strih-lx" in r.stderr, r.stderr
         assert _calls(log) == ""
+
+
+# --- review round 1 -----------------------------------------------------------------------------
+
+def test_out_of_range_policy_is_refused_never_a_silent_delete():
+    # An over-range number used to break a `[ -lt ]` test INSIDE the plan's command substitution,
+    # where bash drops -e: the row fell through to DELETE and the run still exited 0.
+    now = 1800000000
+    with tempfile.TemporaryDirectory() as d:
+        _mk(d, "2026-01-01 10-00-00.mkv", 10, 400 * 86400, now)
+        for args in (["--keep-days", "1000000000000000"], ["--keep-days", "36501"],
+                     ["--keep-runs", "18446744073709551617"], ["--keep-runs", "1234567890"]):
+            r = _run(["--local-sweep", "--record-dir", d] + args,
+                     env=_env({"RETENTION_NOW_EPOCH": str(now)}))
+            assert r.returncode == 2, (args, r.stdout + r.stderr)
+            assert "DELETE" not in r.stdout, (args, r.stdout)
+        r = _run(["--local-sweep", "--record-dir", d, "--keep-runs", "0", "--keep-days", "36500",
+                  "--plan-tsv"], env=_env({"RETENTION_NOW_EPOCH": str(now)}))
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert _plan_rows(r.stdout) == ([("within-days", "2026-01-01 10-00-00.mkv")], []), r.stdout
+
+
+def test_bad_now_seam_fails_loud():
+    with tempfile.TemporaryDirectory() as d:
+        r = _run(["--local-sweep", "--record-dir", d],
+                 env=_env({"RETENTION_NOW_EPOCH": "99999999999999999999999"}))
+        assert r.returncode == 2, r.stdout + r.stderr
+
+
+def _exec_sshpass(tmp):
+    """A fake sshpass that RUNS the remote command the way the box would: the argument after
+    user@host is the remote command string, evaluated by bash with the forwarded stdin as the
+    program -- so the real `bash -s -- <printf %q args>` path executes end to end."""
+    bindir = os.path.join(tmp, "bin")
+    work = os.path.join(tmp, "remote-home")
+    os.makedirs(bindir)
+    os.makedirs(work)
+    log = os.path.join(tmp, "calls.log")
+    path = os.path.join(bindir, "sshpass")
+    with open(path, "w") as f:
+        f.write(
+            "#!/usr/bin/env bash\n"
+            'printf "ARGV %s\\n" "$*" >> "' + log + '"\n'
+            'seen=0; remote=""\n'
+            'for a in "$@"; do if [ "$seen" = 1 ]; then remote="$a"; fi; '
+            'case "$a" in *@*) seen=1 ;; esac; done\n'
+            'cat > "' + work + '/prog.sh"\n'
+            'printf "STDIN_BYTES %s\\n" "$(wc -c < "' + work + '/prog.sh")" >> "' + log + '"\n'
+            'cd "' + work + '"\n'
+            'eval "$remote" < "' + work + '/prog.sh"\n'
+        )
+    os.chmod(path, os.stat(path).st_mode | stat.S_IEXEC)
+    env = _env({"HOME": work})
+    env["PATH"] = bindir + os.pathsep + env.get("PATH", "")
+    return env, log
+
+
+def test_box_strih_lx_end_to_end_through_the_real_bash_s_path():
+    now = 1800000000
+    with tempfile.TemporaryDirectory() as tmp:
+        env, log = _exec_sshpass(tmp)
+        env["RETENTION_NOW_EPOCH"] = str(now)
+        rec = os.path.join(tmp, "srv _REC")  # a space in the path: the %q round trip must hold
+        os.mkdir(rec)
+        _mk(rec, "2026-01-01 10-00-00.mkv", 10, 30 * 86400, now)
+        _mk(rec, "2026-01-02 10-00-00.mkv", 10, 1 * 86400, now)
+        _mk(rec, "strih700105.mkv", 10, 900 * 86400, now)
+        r = _run(["--box", "strih-lx", "--record-dir", rec, "--keep-runs", "1", "--keep-days", "0"],
+                 env=env)
+        assert r.returncode == 0, r.stdout + r.stderr
+        calls = _calls(log)
+        assert "STDIN_BYTES %d" % os.path.getsize(REC) in calls, calls
+        assert "DRY-RUN" in r.stdout and rec in r.stdout, r.stdout
+        assert re.search(r"DELETE .*2026-01-01 10-00-00\.mkv", r.stdout), r.stdout
+        assert len(os.listdir(rec)) == 3
+        r = _run(["--box", "strih-lx", "--record-dir", rec, "--keep-runs", "1", "--keep-days", "0",
+                  "--execute"], env=env)
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert sorted(os.listdir(rec)) == ["2026-01-02 10-00-00.mkv", "strih700105.mkv"]
+
+
+def test_box_strih_lx_forwards_obs_config_dir_and_user():
+    now = 1800000000
+    with tempfile.TemporaryDirectory() as tmp:
+        env, log = _exec_sshpass(tmp)
+        env["RETENTION_NOW_EPOCH"] = str(now)
+        rec = os.path.join(tmp, "rec")
+        os.mkdir(rec)
+        _mk(rec, "2026-01-01 10-00-00.mkv", 10, 30 * 86400, now)
+        cfg = _obs_cfg(tmp, "strih-lx", "[Output]\nMode=Advanced\n\n[AdvOut]\nRecFilePath=%s\n" % rec)
+        r = _run(["--box", "strih-lx", "--obs-config-dir", cfg, "--user", "opuser"], env=env)
+        assert r.returncode == 0, r.stdout + r.stderr
+        calls = _calls(log)
+        assert "opuser@10.77.9.202" in calls and "--obs-config-dir" in calls, calls
+        assert rec in r.stdout and "OBS profile" in r.stdout, r.stdout
+
+
+def test_linux_leg_ssh_is_hardened_and_bounded():
+    with tempfile.TemporaryDirectory() as tmp:
+        env, log = _fake_sshpass(tmp)
+        r = _run(["--box", "strih-lx"], env=env)
+        assert r.returncode == 0, r.stdout + r.stderr
+        calls = _calls(log)
+        # 10.77.9.202 used to be the Windows strih: a stale known_hosts key must not block the leg.
+        assert "UserKnownHostsFile=/dev/null" in calls and "LogLevel=ERROR" in calls, calls
+        # timeout sits INSIDE sshpass (sshpass stays the outer, stubbable command).
+        assert re.search(r"ARGV -p \S+ timeout [0-9]+ ssh ", calls), calls
+
+
+def test_linux_leg_refuses_windows_only_flags():
+    with tempfile.TemporaryDirectory() as tmp:
+        env, log = _fake_sshpass(tmp)
+        for args in (["--budget-gb", "10"], ["--remote-path", "C:\\x.ps1"]):
+            r = _run(["--box", "strih-lx"] + args, env=env)
+            assert r.returncode == 2, (args, r.stdout + r.stderr)
+            assert "Windows" in r.stderr, r.stderr
+        assert _calls(log) == ""
+
+
+def test_non_regular_entries_are_reported_and_never_touched():
+    now = 1800000000
+    with tempfile.TemporaryDirectory() as t:
+        d = os.path.join(t, "rec")
+        os.mkdir(d)
+        _mk(d, "2026-01-01 10-00-00.mkv", 10, 30 * 86400, now)
+        _mk(d, "2026-01-02 10-00-00.mkv", 10, 1 * 86400, now)
+        os.mkdir(os.path.join(d, "2026-01-03 10-00-00.mkv"))
+        target = _mk(t, "outside.mkv", 10, 30 * 86400, now)
+        os.symlink(target, os.path.join(d, "2026-01-04 10-00-00.mkv"))
+        r = _run(["--local-sweep", "--record-dir", d, "--keep-runs", "1", "--keep-days", "0"],
+                 env=_env({"RETENTION_NOW_EPOCH": str(now)}))
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert r.stdout.count("not a regular file") == 2, r.stdout
+        r = _run(["--local-sweep", "--record-dir", d, "--keep-runs", "1", "--keep-days", "0",
+                  "--plan-tsv"], env=_env({"RETENTION_NOW_EPOCH": str(now)}))
+        others = sorted(ln.split("\t")[-1] for ln in r.stdout.splitlines() if ln.startswith("OTHER\t"))
+        assert others == ["2026-01-03 10-00-00.mkv", "2026-01-04 10-00-00.mkv"], r.stdout
+        r = _run(["--local-sweep", "--record-dir", d, "--keep-runs", "1", "--keep-days", "0",
+                  "--execute"], env=_env({"RETENTION_NOW_EPOCH": str(now)}))
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert sorted(os.listdir(d)) == ["2026-01-02 10-00-00.mkv", "2026-01-03 10-00-00.mkv",
+                                         "2026-01-04 10-00-00.mkv"]
+        assert os.path.exists(target)
+
+
+def test_unreadable_record_dir_fails_loud_not_an_empty_sweep():
+    with tempfile.TemporaryDirectory() as t:
+        d = os.path.join(t, "rec")
+        os.mkdir(d)
+        _mk(d, "2026-01-01 10-00-00.mkv", 10, 30 * 86400, 1800000000)
+        os.chmod(d, 0)
+        try:
+            r = _run(["--local-sweep", "--record-dir", d])
+        finally:
+            os.chmod(d, 0o755)
+        assert r.returncode == 1, r.stdout + r.stderr
+        assert "not readable" in r.stderr, r.stderr
+
+
+def test_help_prints_the_whole_header_including_env():
+    r = _run(["--help"])
+    assert r.returncode == 0
+    assert "LINUX_BOX_USER" in r.stdout and "STRIH_SSH_PW" in r.stdout, r.stdout

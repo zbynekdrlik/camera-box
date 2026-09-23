@@ -126,10 +126,13 @@ keep	newest-run	2026-01-02 10-00-00.mkv
 delete	2026-01-01 10-00-00.mkv
 end
 
+# Distinct sizes on purpose: a sort that dropped the NAME key would fall back to the whole
+# line and order these by the size TEXT (1000 < 200 < 30), keeping the wrong file.
+
 case	equal_mtime_tie_breaks_by_name_ascending	1800000000	1	0
-file	777600	10	2026-01-02 10-00-00.mkv
-file	777600	10	2026-01-01 10-00-00.mkv
-file	777600	10	2026-01-03 10-00-00.mkv
+file	777600	200	2026-01-02 10-00-00.mkv
+file	777600	30	2026-01-01 10-00-00.mkv
+file	777600	1000	2026-01-03 10-00-00.mkv
 keep	newest-run	2026-01-01 10-00-00.mkv
 delete	2026-01-02 10-00-00.mkv
 delete	2026-01-03 10-00-00.mkv
