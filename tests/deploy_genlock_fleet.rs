@@ -1270,3 +1270,14 @@ fn ahk_restart_failure_message_does_not_falsely_claim_no_watcher_1295() {
         );
     }
 }
+
+// issue 1317 (M4): strih-lx.lan has NO DNS entry on dev1, so the strih-lx dial default is the ONE
+// fleet list's host for strih-lx (scripts/lib/obs-fleet.sh), never the unresolvable name.
+// STRIH_LX_IP stays the explicit override.
+#[test]
+fn fleet_box_ip_strih_lx_defaults_to_the_fleet_list_host_1317() {
+    let out = run_sourced(&script(), "unset STRIH_LX_IP; fleet_box_ip strih-lx");
+    assert_eq!(out.trim(), "10.77.9.202");
+    let out = run_sourced(&script(), "STRIH_LX_IP=10.1.2.3 fleet_box_ip strih-lx");
+    assert_eq!(out.trim(), "10.1.2.3");
+}

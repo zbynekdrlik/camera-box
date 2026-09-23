@@ -290,7 +290,7 @@ fn dantesync_clock_default_obs_nodes_name_the_production_strih_1317() {
     );
 }
 
-const ALL_FACETS: [&str; 9] = [
+const ALL_FACETS: [&str; 12] = [
     "audio-lag",
     "av-step",
     "vb-matrix",
@@ -300,7 +300,76 @@ const ALL_FACETS: [&str; 9] = [
     "genlock-lock",
     "render-freeze",
     "ndi-portmap",
+    "obs-session",
+    "burn-reconcile",
+    "rig-restore",
 ];
+
+// ---------------------------------------------------------------------------------------------
+// issue 1317 part 2 -- the dev1 watchdogs that used to dial a LITERAL `strih` at .202 now derive
+// their rosters from the fleet list too, each facet by its own premise.
+// ---------------------------------------------------------------------------------------------
+#[test]
+fn fleet_obs_session_facet_is_windows_genlock_only_1317() {
+    // obs-session = the Windows session-0 / AHK visibility probe (a PowerShell probe over
+    // win_ssh_run). It has no meaning on a Linux box, so the facet carries ONLY windows-genlock
+    // boxes: stream + resolume (the latter gated on is_home by the consumer).
+    assert_eq!(
+        boxes("obs-session"),
+        "stream|10.77.9.204 resolume|resolume.lan"
+    );
+    for m in fleet_stdout("obs_fleet_facet_members obs-session").split_whitespace() {
+        assert_eq!(
+            fleet_stdout(&format!("obs_fleet_class {m}")),
+            "windows-genlock",
+            "obs-session member {m} is not a Windows box -- it would be probed with PowerShell"
+        );
+    }
+}
+
+#[test]
+fn fleet_burn_reconcile_and_rig_restore_facets_watch_strih_lx_1317() {
+    // Both are OBS-WebSocket-only (GetStats renderTotalFrames + obs_burn_filter sweeps; the
+    // obs_phase2 program-scene read + teardown) -- platform-neutral, so the production strih-lx
+    // keeps the coverage the Windows strih had.
+    for facet in ["burn-reconcile", "rig-restore"] {
+        assert_eq!(
+            boxes(facet),
+            "strih-lx|10.77.9.202 stream|10.77.9.204",
+            "facet {facet}"
+        );
+    }
+}
+
+/// `obs_fleet_poll_now <name>` -> 0 when a consumer should poll NAME this pass: an `always` box, or
+/// a `traveling` box that is home. A traveling box that is away and a `retired` box return 1. A name
+/// with NO row (an ops override naming a box the table does not know yet) returns 0, because the
+/// override is authoritative.
+fn poll_now(name: &str, env: &[(&str, &str)]) -> bool {
+    let (rc, _out, _err) = run_fleet(&format!("obs_fleet_poll_now {name}"), env);
+    rc == 0
+}
+
+#[test]
+fn fleet_poll_now_gates_traveling_and_retired_boxes_only_1317() {
+    let force = [("OBS_FLEET_HOME", "resolume")];
+    assert!(
+        poll_now("strih-lx", &force),
+        "an always box is polled even when not in the force-list"
+    );
+    assert!(poll_now("stream", &force));
+    assert!(poll_now("resolume", &force), "traveling + home -> poll");
+    let away = [("OBS_FLEET_HOME", "nobody")];
+    assert!(
+        !poll_now("resolume", &away),
+        "traveling + away -> never poll"
+    );
+    assert!(!poll_now("imag", &[]), "a retired box is never polled");
+    assert!(
+        poll_now("strih-pp", &away),
+        "an unknown override name is polled as given"
+    );
+}
 
 #[test]
 fn fleet_boxes_unknown_facet_fails_closed_1296() {

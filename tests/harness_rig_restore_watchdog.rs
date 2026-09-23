@@ -1673,7 +1673,7 @@ printf 'BEGIN\n%s\nEND\n' "$RIG_OBS"
         format!("cam cam1 down=0 probe=0 pid={main_pid}"),
         format!("cam cam2 down=0 probe=0 pid={main_pid}"),
         format!("cam cam4 down=0 probe=0 pid={main_pid}"),
-        format!("obs strih scene=STUB pid={main_pid}"),
+        format!("obs strih-lx scene=STUB pid={main_pid}"),
         format!("obs stream scene=STUB pid={main_pid}"),
     ];
     assert_eq!(
@@ -1683,4 +1683,116 @@ printf 'BEGIN\n%s\nEND\n' "$RIG_OBS"
          MAIN shell (pid == main BASHPID; a $() subshell would fork)\nstderr:{stderr}"
     );
     let _ = fs::remove_dir_all(&dir);
+}
+
+// ─── issue 1317 (M4): the OBS roster derives from the ONE fleet list (`rig-restore` facet) ─────
+// The production strih is the Linux strih-lx at .202 (the Windows strih PC is retired). The OBS
+// probe + teardown are OBS-WebSocket only (obs_phase2.py program-scene / teardown), so strih-lx
+// keeps the coverage -- under its own fleet NAME, never the retired `strih`.
+
+/// Source the watchdog (main is guarded) with scratch state + unroutable cams and run `body`.
+fn rig_sourced(env: &[(&str, &str)], body: &str) -> (i32, String, String) {
+    let dir = scratch("roster-1317");
+    let script = format!(
+        r#"set -u
+export RIG_WATCHDOG_STATE_DIR="{d}"
+export CAMERA_BOX_RIG_HEARTBEAT="{d}/hb"
+export CAMERA_BOX_RIG_E2E_MARKER="{d}/marker"
+export CAM1_IP=192.0.2.1 CAM2_IP=192.0.2.2 CAM4_IP=192.0.2.4
+export RIG_WATCHDOG_SSH_TIMEOUT=1 RIG_WATCHDOG_OBS_TIMEOUT=1
+. "{w}" --dry-run
+{body}
+"#,
+        d = dir.display(),
+        w = watchdog().display()
+    );
+    let mut cmd = Command::new("bash");
+    cmd.arg("-c")
+        .arg(&script)
+        .env_remove("STRIH_HOST")
+        .env_remove("STREAM_HOST")
+        .env_remove("RIG_WATCHDOG_OBS_BOXES")
+        .env_remove("OBS_FLEET")
+        .env_remove("OBS_FLEET_HOME");
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+    let out = cmd.output().expect("run bash harness");
+    let _ = fs::remove_dir_all(&dir);
+    (
+        out.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    )
+}
+
+#[test]
+fn watchdog_obs_roster_derives_from_the_rig_restore_fleet_facet_1317() {
+    let src = fs::read_to_string(watchdog()).expect("read watchdog");
+    assert!(
+        src.contains("lib/obs-fleet.sh") && src.contains("obs_fleet_boxes rig-restore"),
+        "the OBS roster must derive from the obs-fleet `rig-restore` facet"
+    );
+    for gone in [
+        "probe_obs strih",
+        "for _box_name in strih stream",
+        "strih) host=",
+    ] {
+        assert!(
+            !src.contains(gone),
+            "the literal Windows strih roster `{gone}` must be gone"
+        );
+    }
+    let (code, out, err) = rig_sourced(&[], "rig_obs_targets");
+    assert_eq!(code, 0, "stderr={err}");
+    assert_eq!(
+        out.trim(),
+        "strih-lx 10.77.9.202\nstream 10.77.9.204",
+        "the default OBS roster is the production strih-lx + stream"
+    );
+}
+
+#[test]
+fn watchdog_obs_roster_keeps_the_host_and_roster_env_overrides_1317() {
+    let (_c, out, err) = rig_sourced(
+        &[("STRIH_HOST", "192.0.2.11"), ("STREAM_HOST", "192.0.2.12")],
+        "rig_obs_targets",
+    );
+    assert_eq!(
+        out.trim(),
+        "strih-lx 192.0.2.11\nstream 192.0.2.12",
+        "stderr={err}"
+    );
+    let (_c, out, err) = rig_sourced(
+        &[("RIG_WATCHDOG_OBS_BOXES", "stream|10.77.9.204")],
+        "rig_obs_targets",
+    );
+    assert_eq!(out.trim(), "stream 10.77.9.204", "stderr={err}");
+}
+
+#[test]
+fn watchdog_restore_obs_resolves_the_host_from_the_roster_1317() {
+    // restore_obs must tear down the SAME host the probe read (STRIH_HOST repoints strih-lx), and
+    // an unknown box name is skipped, never torn down blindly.
+    let (_c, out, err) = rig_sourced(
+        &[("STRIH_HOST", "192.0.2.11")],
+        "rig_obs_host strih-lx; echo; rig_obs_host bogus && echo FOUND || echo NOHOST",
+    );
+    assert_eq!(out.trim(), "192.0.2.11\nNOHOST", "stderr={err}");
+}
+
+#[test]
+fn watchdog_unreadable_obs_names_follow_the_roster_1317() {
+    // The marker-clear / partial-alert accounting counts UNREADABLE boxes against the roster --
+    // a strih-lx with no `obs` record is unreadable; never a hardcoded `strih stream` pair.
+    let (_c, out, err) = rig_sourced(
+        &[],
+        "RIG_OBS='obs stream scene=PRO'\nrig_obs_unreadable_names",
+    );
+    assert_eq!(out.trim(), "strih-lx", "stderr={err}");
+    let (_c, out, err) = rig_sourced(
+        &[],
+        "RIG_OBS=$'obs strih-lx scene=Cam 3\\nobs stream scene=PRO'\nprintf '[%s]' \"$(rig_obs_unreadable_names)\"",
+    );
+    assert_eq!(out.trim(), "[]", "stderr={err}");
 }
