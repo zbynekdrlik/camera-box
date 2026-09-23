@@ -70,12 +70,11 @@ esac
 # issue 1317 part 2: the roster is the fleet `obs-session` facet (stream + resolume), `name|host`
 # pairs; OBS_SESSION_WATCHDOG_BOXES overrides it byte-compatibly (the fleet <X>_BOXES convention).
 BOXES="${OBS_SESSION_WATCHDOG_BOXES:-$(obs_fleet_boxes obs-session)}"
-# Per-box host + ssh credential overrides (host default = the roster's host). targets.md: both boxes
-# take newlevel/newlevel over Win32-OpenSSH.
-STREAM_USER="${STREAM_USER:-newlevel}"
-STREAM_PW="${STREAM_PW:-newlevel}"
-RESOLUME_USER="${RESOLUME_USER:-newlevel}"
-RESOLUME_PW="${RESOLUME_PW:-newlevel}"
+# Per-box host + ssh credential overrides are GENERIC per fleet name (obs_session_box_env below):
+# <NAME>_HOST / <NAME>_USER / <NAME>_PW (STREAM_HOST, RESOLUME_PW, ...), so a new Windows fleet box
+# needs no edit here. Defaults: the roster's host, and targets.md's fleet-wide Win32-OpenSSH login.
+OBS_SESSION_DEFAULT_USER="${OBS_SESSION_DEFAULT_USER:-newlevel}"
+OBS_SESSION_DEFAULT_PW="${OBS_SESSION_DEFAULT_PW:-newlevel}"
 CONFIRM_THRESHOLD="${OBS_SESSION_WATCHDOG_CONFIRM_THRESHOLD:-2}"
 ALERT_THROTTLE_PASSES="${OBS_SESSION_WATCHDOG_ALERT_THROTTLE_PASSES:-10}"
 
@@ -179,14 +178,18 @@ process_box() {
 }
 
 # ── roster (issue 1317 part 2) ───────────────────────────────────────────────
-# obs_session_box_has_ahk <name> -> 1 when the box runs an NL_STARTUP.ahk AutoHotkey auto-respawn
-# watcher whose session the probe must also check (resolume's AHK v2 safe-loop, issue 1295 -- the
-# same fact deploy-genlock-fleet.sh's fleet_box_has_ahk / launch-obs-genlock.sh carry), else 0.
-obs_session_box_has_ahk() {
-  case "${1:-}" in
-    resolume) printf '1' ;;
-    *) printf '0' ;;
+# obs_session_box_env <name> <SUFFIX> <default> -> the value of the env var <NAME>_<SUFFIX> (the box
+# name upper-cased, every non-alphanumeric byte turned into `_`: stream -> STREAM_HOST, resolume ->
+# RESOLUME_PW), or <default> when that var is unset/empty. The derived name is validated before the
+# indirect expansion, so a hostile roster name can never expand anything else.
+obs_session_box_env() {
+  local name="${1:-}" suffix="${2:-}" default="${3:-}" var
+  var="$(printf '%s_%s' "$name" "$suffix" | LC_ALL=C tr '[:lower:]' '[:upper:]' | LC_ALL=C tr -c 'A-Z0-9_\n' '_')"
+  case "$var" in
+    [A-Z_]*) ;;
+    *) printf '%s' "$default"; return 0 ;;
   esac
+  printf '%s' "${!var:-$default}"
 }
 
 # obs_session_targets -> one `name host has_ahk` line per box to probe THIS pass, in roster order.
@@ -196,7 +199,16 @@ obs_session_box_has_ahk() {
 #     an OBS_SESSION_WATCHDOG_BOXES override names it (defense in depth beyond the facet policy);
 #   * obs_fleet_poll_now says so -- a traveling box (resolume) only while home, never a false
 #     "invisible" verdict on a box that is simply away.
-# STREAM_HOST / RESOLUME_HOST repoint a box; otherwise the roster's host is dialled.
+# COLLISION RESIDUAL (resolume, the .201 DHCP collision with `bridge` in targets.md): this watchdog
+# is ENABLED on dev1, and its promotion signal (is_home = OBS-WS :4455 answers at resolume.lan)
+# differs from its page condition (obs64/AHK in session 0 over ssh). If resolume.lan ever resolved to
+# a DIFFERENT Windows box running OBS in session 0, it could page "resolume INVISIBLE" for that box.
+# Identity read 23.9.2026: resolume.lan -> 10.77.9.201 = `resolume-snv.lan`, the ssh `hostname` reads
+# `resolume-snv`, and the probe sees its AHK watcher in session 1 -- so today the address IS
+# RESOLUME-SNV. Narrow (needs a foreign Windows OBS at the address AND a session-0 fault), same
+# residual obs-liveness documents; confirm identity again if the event-LAN DHCP lease moves.
+# <NAME>_HOST (STREAM_HOST, RESOLUME_HOST, ...) repoints a box; otherwise the roster's host is
+# dialled. has_ahk is the shared obs-fleet fact (obs_fleet_has_ahk), never a per-script table.
 obs_session_targets() {
   local pair name host class
   for pair in $BOXES; do
@@ -211,11 +223,8 @@ obs_session_targets() {
       log "$name: skipped -- traveling box is away (obs_fleet_poll_now), nothing to probe this pass"
       continue
     fi
-    case "$name" in
-      stream) host="${STREAM_HOST:-$host}" ;;
-      resolume) host="${RESOLUME_HOST:-$host}" ;;
-    esac
-    printf '%s %s %s\n' "$name" "$host" "$(obs_session_box_has_ahk "$name")"
+    host="$(obs_session_box_env "$name" HOST "$host")"
+    printf '%s %s %s\n' "$name" "$host" "$(obs_fleet_has_ahk "$name")"
   done
 }
 
@@ -232,14 +241,8 @@ main() {
   obs_session_targets >"$targets_file"
   while read -r name host has_ahk; do
     [ -n "$name" ] || continue
-    case "$name" in
-      stream) user="$STREAM_USER"; pw="$STREAM_PW" ;;
-      resolume) user="$RESOLUME_USER"; pw="$RESOLUME_PW" ;;
-      *)
-        log "$name: skipped -- no ssh credentials configured for this Windows box (add a <BOX>_USER/_PW pair here)"
-        continue
-        ;;
-    esac
+    user="$(obs_session_box_env "$name" USER "$OBS_SESSION_DEFAULT_USER")"
+    pw="$(obs_session_box_env "$name" PW "$OBS_SESSION_DEFAULT_PW")"
     # stdin from /dev/null: ssh inside win_ssh_run would otherwise swallow the rest of the list.
     process_box "$name" "$user" "$pw" "$host" "$has_ahk" </dev/null
   done <"$targets_file"

@@ -59,9 +59,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # ONE verified relaunch helper launch itself uses, never a fork.
 . "$HERE/lib/ahk-watchdog.sh"
 # shellcheck source=scripts/lib/obs-fleet.sh
-# issue 1317 part 2: the strih-lx dial address is the ONE fleet list's host (strih-lx.lan does not
-# resolve on dev1), read through obs_fleet_host in fleet_box_ip below.
-. "$HERE/lib/obs-fleet.sh"
+. "$HERE/lib/obs-fleet.sh"   # issue 1317: the strih-lx host + the AHK fact (fleet_box_ip/_has_ahk)
 
 GENLOCK_REPO="zbynekdrlik/camera-box"
 FLEET_LOG_DEFAULT="${HOME}/.camera-box/genlock-fleet-deploy.log"
@@ -157,8 +155,10 @@ fleet_pick_run_at_sha() {
 # currently collides with `bridge` at .201 (targets.md), so the plan resolves + identity-confirms it
 # live (emit_windows_plan prints that step for resolume; the planner emits it, never runs it).
 fleet_box_mcp()     { case "${1:-}" in strih) echo "win-strih" ;; stream) echo "win-stream-snv" ;; resolume) echo "win-resolume" ;; *) return 2 ;; esac; }
-fleet_box_ip()      { case "${1:-}" in strih) echo "10.77.9.202" ;; stream) echo "10.77.9.204" ;; imag) echo "imag" ;; resolume) echo "resolume.lan" ;; strih-lx) echo "${STRIH_LX_IP:-$(obs_fleet_host strih-lx)}" ;; *) return 2 ;; esac; }
-fleet_box_has_ahk() { case "${1:-}" in strih|resolume) echo "1" ;; *) echo "0" ;; esac; }
+fleet_box_ip()      { case "${1:-}" in strih) echo "10.77.9.202" ;; stream) echo "10.77.9.204" ;; imag) echo "imag" ;; resolume) echo "resolume.lan" ;; strih-lx) fleet_strih_lx_ip ;; *) return 2 ;; esac; }
+# strih-lx: STRIH_LX_IP, else the obs-fleet host (strih-lx.lan does not resolve on dev1); no row = rc 2.
+fleet_strih_lx_ip() { local h="${STRIH_LX_IP:-}"; [ -n "$h" ] || h="$(obs_fleet_host strih-lx)" || return 2; [ -n "$h" ] && echo "$h" || return 2; }
+fleet_box_has_ahk() { obs_fleet_has_ahk "${1:-}"; echo; }   # the ONE obs-fleet AHK fact
 
 # fleet_box_ahk_script / fleet_box_ahk_prefer -- the PER-BOX AHK relaunch identity passed into the
 # shared scripts/lib/ahk-watchdog.sh primitive (issue 1295). strih keeps its current values

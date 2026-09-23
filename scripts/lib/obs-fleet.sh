@@ -222,13 +222,29 @@ obs_fleet_status_probe() {
   fi
 }
 
+# obs_fleet_has_ahk <name> -> 1 when NAME's OBS is guarded by an NL_STARTUP.ahk AutoHotkey
+# auto-respawn watcher (whose session a Windows probe must also check and a deploy must stop +
+# restart), else 0. A pure FACT keyed on the name (issue 1317 review): resolume runs the AHK v2
+# safe-loop (issue 1295); `strih` is the RETIRED Windows strih -- no fleet row any more, but the
+# legacy deploy/launch planner arms still name it until they are retired. The ONE source both the
+# obs-session watchdog and deploy-genlock-fleet.sh read (launch-obs-genlock.sh still carries its own
+# per-box case table next to the MCP/ahk-script facts).
+obs_fleet_has_ahk() {
+  case "${1:-}" in
+    strih|resolume) printf '1' ;;
+    *) printf '0' ;;
+  esac
+}
+
 # obs_fleet_poll_now <name> -> returns 0 when a per-box consumer loop should poll NAME this pass, 1
-# when it must skip it (issue 1317 part 2 -- the ONE traveling/retired gate the per-box watchdog
-# loops share, instead of each re-deciding it). An `always` box is polled WITHOUT consulting
-# obs_fleet_is_home, so the OBS_FLEET_HOME force-list (a traveling-box test seam) never drops a fixed
-# box; a `traveling` box only while obs_fleet_is_home holds; a `retired` box never. A name with NO row
-# (an ops `<X>_BOXES` override naming a box the table does not know yet) is polled as given -- the
-# override is authoritative, exactly as it already bypasses the facet derivation.
+# when it must skip it (issue 1317 part 2 -- the traveling/retired gate the issue-1317 per-box
+# consumers share: the obs-session, burn-reconcile and rig-restore watchdogs; obs-liveness and
+# network-reach predate it and gate resolume with obs_fleet_is_home themselves). An `always` box is
+# polled WITHOUT consulting obs_fleet_is_home, so the OBS_FLEET_HOME force-list (a traveling-box
+# test seam) never drops a fixed box; a `traveling` box only while obs_fleet_is_home holds; a
+# `retired` box never. A name with NO row (an ops `<X>_BOXES` override naming a box the table does
+# not know yet) is polled as given -- the override is authoritative, exactly as it already bypasses
+# the facet derivation.
 obs_fleet_poll_now() {
   local name="${1:-}" check
   check="$(obs_fleet_home_check "$name")" || return 0
