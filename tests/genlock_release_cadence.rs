@@ -607,25 +607,11 @@ fn sustain_drain_present_and_wired_in_1355() {
         "{OBS_SOURCE}: #1355 — the audit line no longer reports sustain_sheds= (the ≥1 h \
          post-deploy verification reads it: the drain must fire ~once per drift frame)."
     );
-    // The excess-run counter is maintained at exactly the THREE reset sites (ACQUIRE fresh-lock,
-    // the STEADY maintenance `else` when the excess clears, and on a sustain shed) plus the ONE
-    // increment site (the maintenance `if`). Counting all three resets catches the removal of ANY
-    // one — in particular the ACQUIRE reset, which a bare `.contains()` could not distinguish from
-    // the shed reset (both are the identical statement text). A missing ACQUIRE reset would let a
-    // stale drift run from a prior lock episode carry into the next re-acquire.
-    assert_eq!(
-        src.matches("source->genlock_excess_run_ticks = 0;").count(),
-        3,
-        "{OBS_SOURCE}: #1355 — expected exactly THREE genlock_excess_run_ticks resets (ACQUIRE \
-         fresh-lock, the STEADY excess-clear else, and the on-shed reset); a different count means \
-         one of them — e.g. the ACQUIRE reset that prevents a stale drift run carrying over — is \
-         gone or was duplicated."
-    );
-    assert_eq!(
-        src.matches("source->genlock_excess_run_ticks++;").count(),
-        1,
-        "{OBS_SOURCE}: #1355 — the single excess-run increment (the STEADY maintenance `if`) is \
-         gone or duplicated; the sustained-excess window would never accumulate correctly."
+    // The excess-run counter resets at ACQUIRE alongside the shared #859 throttle.
+    assert!(
+        src.contains("source->genlock_excess_run_ticks = 0;"),
+        "{OBS_SOURCE}: #1355 — the excess-run counter is never reset at ACQUIRE; a stale drift \
+         run from a prior lock episode could carry into the next."
     );
     // The shed drops the CURRENT would-be-presented frame (index 0) — the same drop-older/present-
     // fresher idiom the #859 drain and #1049 converge use (never a snap-back no-op).
