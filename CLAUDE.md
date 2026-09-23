@@ -20,6 +20,7 @@ Rust app for embedded NDI cameras (CAM1-4): multi-camera NDI streaming with soft
 - OBS launch/recovery on strih/stream → load `.claude/skills/obs-ops`
 - OBS launch-path contract (.lnk primary + per-box params test-pinned; obs-guarded-launch.ps1 bare-no-args = correct for stream; strih AHK versioned at scripts/strih/NL_STARTUP.ahk, #774/#775) → `.claude/rules/obs-launch-paths.md` (auto-loads on its `paths:`)
 - `--display` HDMI path (connector/phantom-fb detect, upscale cap, capture-dropped counter) → load `.claude/skills/display`
+- Cameraman HDMI preview SOURCE resolution (issue 1362: the pure `src/preview_source.rs` resolver — preferred `STRIH-LX (interkom)` on sight, else the ONE `STRIH-<box> (interkom)` only after the full find window, 2+ = pick nothing, never a per-box config/env knob; `NdiReceiver::connect_with` finder-loop `pick` seam, `connect` keeps substring semantics for the probes; once-per-change resolution log) → `.claude/rules/cameraman-preview-source.md` (auto-loads on its `paths:`)
 - CI artifacts, Discord notify, probe binary flow → load `.claude/skills/ci`
 - E2E zero-loss testing (acceptance criteria, QR harness, reporting scope, active fleet size / `CAMERA_ACTIVE_SET` reactivation) → load `.claude/skills/e2e`
 - Rig TEST/EVENT mode switch (#247 `scripts/rig-mode.sh`: pinned QR/burns/genlock per mode, the #246 burn-leak guard) → load `.claude/skills/e2e`

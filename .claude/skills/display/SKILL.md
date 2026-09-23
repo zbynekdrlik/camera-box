@@ -13,14 +13,12 @@ description: >
 (`/dev/fb0`) on a low-priority decoupled thread (`main.rs` spawns it; `apply_low_priority`
 sets nice 19 + core-0 affinity). It is SECONDARY — it must NEVER degrade capture/NDI-emit.
 
-**Display is enabled PURELY via the `--display` CLI flag on the deployed unit** — the cam2 unit
-(`scripts/setup-device.sh:222`) is `ExecStart=/usr/local/bin/camera-box --display "STRIH-SNV (interkom)"`
-and the generated `/etc/camera-box/config.toml` has NO `[display]` section (so `config.display = None`).
-`main.rs:191` builds `display_config` = `Some` only when `--display` is passed OR `config.display`
-exists; `run_capture_loop` spawns the display thread only when it's `Some`. So **running camera-box
-WITHOUT `--display` cleanly disables ONLY display** (no fb0 grab) while capture (`/dev/video0`) + NDI
-emit keep running — this is exactly what rig-mode TEST mode (#291) exploits via a transient ExecStart
-drop-in, and what `loopback-e2e.sh` does via a manual no-display launch. "display output ≠ capture input."
+**The display is UNCONDITIONAL since the #528 ruling.** Every cambox previews the fleet-wide default with a plain
+`ExecStart` (no `--display` flag, no `[display]` section). `CAMERA_BOX_NO_DISPLAY` is the ONE opt-out, used by the
+rig-mode TEST mode and `loopback-e2e.sh` to free `/dev/fb0` for the QR painter; capture + NDI emit keep running.
+"display output ≠ capture input." Since issue 1362 the SOURCE is resolved from the LAN: the preferred
+`STRIH-LX (interkom)` is taken on sight, else the one `STRIH-<box> (interkom)` after the find window. See
+`.claude/rules/cameraman-preview-source.md`.
 
 ## Phantom / latched framebuffer — the core gotcha (#135)
 
