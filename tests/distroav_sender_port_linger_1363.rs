@@ -545,6 +545,7 @@ fn pure_helpers_compute_the_spec_truth_table() {
         &dir.join("pure.bin"),
     );
 
+    let _ = fs::remove_dir_all(&dir);
     let (nums, texts): (Vec<&str>, Vec<&str>) = stdout
         .lines()
         .filter(|l| !l.is_empty())
@@ -742,6 +743,7 @@ fn real_module_aborts_the_connection_so_no_time_wait_survives() {
         &[dir.join("ndi-sender-port.cpp"), dir.join("harness.cpp")],
         &dir.join("real.bin"),
     );
+    let _ = fs::remove_dir_all(&dir);
     let get = |key: &str| -> String {
         stdout
             .lines()

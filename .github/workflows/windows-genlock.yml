@@ -997,14 +997,17 @@ jobs:
           # first, every create records its port. Windows compiles none of it, but the tokens live
           # in the same shared sources a subtree pull would overwrite, so gate them here too
           # (lock-step with tests/distroav_sender_port_linger_1363.rs).
-          if ($out -notmatch [regex]::Escape('#ifdef __linux__ ndi_sender_abort_connections_before_destroy(o->ndi_sender_port, name);')) {
-            Write-Error "ndi-output.cpp: issue 1363 ndi_output stop/destroy no longer aborts the sender's connections before send_destroy (Linux TIME_WAIT shifts the PGM pin)"; exit 1
+          # Call-site COUNTS, not presence: the output token sits at the stop AND the
+          # begin_data_capture-failed destroy, the filter token at destroy AND rename-recreate.
+          # (The canonical per-site check is the Rust guard, run on Linux by ci.yml.)
+          if (([regex]::Matches($out, [regex]::Escape('#ifdef __linux__ ndi_sender_abort_connections_before_destroy(o->ndi_sender_port, name);'))).Count -ne 2) {
+            Write-Error "ndi-output.cpp: issue 1363 ndi_output stop/destroy no longer aborts the sender's connections before send_destroy at both sites (Linux TIME_WAIT shifts the PGM pin)"; exit 1
           }
           if ($out -notmatch [regex]::Escape('g_reserved_main_sender = ndi_sender_create_tracked(&send_desc, &g_reserved_main_port);')) {
             Write-Error "ndi-output.cpp: issue 1363 the :5961 reserve no longer records its port (ndi_sender_create_tracked)"; exit 1
           }
           $ndiflt = (Get-Content "vendor/distroav/src/ndi-filter.cpp" -Raw) -replace '\s+', ' '
-          if ($ndiflt -notmatch [regex]::Escape('#ifdef __linux__ ndi_sender_abort_connections_before_destroy(filter->ndi_sender_port,')) {
+          if (([regex]::Matches($ndiflt, [regex]::Escape('#ifdef __linux__ ndi_sender_abort_connections_before_destroy(filter->ndi_sender_port,'))).Count -ne 2) {
             Write-Error "ndi-filter.cpp: issue 1363 the ndi_filter sender destroy no longer aborts its connections before send_destroy (Linux TIME_WAIT shifts its port)"; exit 1
           }
           Write-Output "DistroAV PGM-first-NDI-port reservation present (reserve at obs_module_post_load + adopt in ndi_output_start, #1185; Linux linger-0 before every sender destroy, issue 1363) — OK"

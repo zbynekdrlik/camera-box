@@ -533,7 +533,7 @@ void ndi_sender_create(ndi_filter_t *filter, obs_data_t *settings)
 	// so libndi rebinds the freed port) and record the new sender's port.
 #ifdef __linux__
 	ndi_sender_abort_connections_before_destroy(filter->ndi_sender_port,
-						    send_desc.p_ndi_name);
+						    obs_source_get_name(filter->obs_source));
 	filter->ndi_sender_port = 0;
 #endif
 	ndiLib->send_destroy(filter->ndi_sender);

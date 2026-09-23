@@ -9,6 +9,12 @@
 	thread closes an fd and the number is reused between our getsockname() and
 	setsockopt(), the worst case is one unrelated socket closing with RST
 	instead of FIN. Every syscall failure is logged and skipped.
+
+	Not covered (a TIME_WAIT can still form, harmful only on a relaunch within
+	60 s): a connection libndi itself closes DURING the session (not at
+	destroy), and a connection libndi half-closes (shutdown) before destroy
+	whose peer FIN already arrived. A crash/kill never runs the abort at all;
+	the :5961 reserve reports that case as WARN-1363.
 ******************************************************************************/
 
 #ifdef __linux__
@@ -30,7 +36,8 @@
 
 // Serializes every tracked send_create, so the listen-port diff of one create
 // is never polluted by another sender being created on a different thread.
-// Always the innermost lock (nothing else is taken while it is held).
+// Held only around the two snapshots and libndi's send_create (no plugin lock
+// and no obs_log inside), so it is always the innermost plugin lock.
 static std::mutex g_ndi_sender_create_mutex;
 
 // Local TCP port of a socket fd, or 0 when it is not an IPv4/IPv6 socket.
@@ -107,14 +114,20 @@ NDIlib_send_instance_t ndi_sender_create_tracked(const NDIlib_send_create_t *des
 		*out_port = 0;
 	const char *name = (desc && desc->p_ndi_name) ? desc->p_ndi_name : "";
 
-	std::lock_guard<std::mutex> lock(g_ndi_sender_create_mutex);
 	std::vector<int> before;
 	std::vector<int> after;
-	const bool have_before = ndi_listen_ports_snapshot(before);
-	NDIlib_send_instance_t sender = ndiLib->send_create(desc);
+	bool have_before = false;
+	bool have_after = false;
+	NDIlib_send_instance_t sender = nullptr;
+	{
+		std::lock_guard<std::mutex> lock(g_ndi_sender_create_mutex);
+		have_before = ndi_listen_ports_snapshot(before);
+		sender = ndiLib->send_create(desc);
+		if (sender)
+			have_after = ndi_listen_ports_snapshot(after);
+	}
 	if (!sender)
 		return sender; // the caller logs the create failure
-	const bool have_after = ndi_listen_ports_snapshot(after);
 
 	int port = 0;
 	if (have_before && have_after)

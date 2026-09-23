@@ -93,7 +93,13 @@ listening on TCP :5961. The cause is in libndi, not in the reserve/adopt path:
   TIME_WAIT (kernel FIN-close).
 - Probe sources (`alloc.c`, `pinprobe.c`, `linger.c`) are described on the ticket.
 
-## SHIPPED (issue 1363, option C): Linux linger-0 before every sender destroy — `ndi-sender-port.{h,cpp}`
+## IMPLEMENTED (issue 1363, option C): Linux linger-0 before every sender destroy — `ndi-sender-port.{h,cpp}`
+
+Live on strih-lx only after the FULL strih bundle deploy + an OBS relaunch within 60 s of the
+previous stop shows `STRIH-LX (2ME PGM)` on :5961 in avahi AND the OBS log carries the
+`ndi-sender-port: NDI sender '…' TCP :5961: N connection(s) set to close with RST` INFO line from
+the previous session's stop (proof the real OBS SIGTERM shutdown runs the stop/filter-destroy hooks
+while libndi's sockets are still open — the dev1 repro used a libndi harness, not OBS).
 
 - **Every** DistroAV sender create goes through `ndi_sender_create_tracked()` and **every** sender
   `send_destroy` is preceded by `ndi_sender_abort_connections_before_destroy(port, name)` — the
@@ -124,6 +130,11 @@ listening on TCP :5961. The cause is in libndi, not in the reserve/adopt path:
 - Side effects are best-effort: every syscall failure is logged and skipped (shutdown must never
   crash OBS). Known accepted race: libndi owns the fds, so an fd closed+reused between the scan and
   `setsockopt` could close one unrelated socket with RST instead of FIN.
+- NOT covered (a TIME_WAIT can still form; harmful only on a relaunch within 60 s): a connection
+  libndi closes by itself DURING the session (not at destroy), and a connection libndi half-closes
+  before destroy whose peer FIN already arrived. A linger-0 close from ESTABLISHED / CLOSE_WAIT /
+  FIN_WAIT goes through `tcp_disconnect` (TCP_CLOSE, RST, no TIME_WAIT); a socket already IN
+  TIME_WAIT is past reach.
 - Tier-0 verify recipe (no OBS build): the gate test's Facet C compiles the REAL
   `ndi-sender-port.cpp` with g++ against a stub `plugin-main.h` + a fake libndi (a real 0.0.0.0
   listener) — control reproduces the TIME_WAIT, the abort frees the port. For the real libndi, compile

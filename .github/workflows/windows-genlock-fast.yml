@@ -385,10 +385,11 @@ jobs:
           # camera-box issue 1363: Linux-only linger-0 before every sender destroy + tracked creates
           # (lock-step with tests/distroav_sender_port_linger_1363.rs); Windows compiles none of it,
           # the tokens guard the shared sources against a subtree pull.
-          if ($out -notmatch [regex]::Escape('#ifdef __linux__ ndi_sender_abort_connections_before_destroy(o->ndi_sender_port, name);')) { Write-Error "ndi-output.cpp: issue 1363 ndi_output no longer aborts the sender's connections before send_destroy -- Linux TIME_WAIT shifts the PGM pin"; exit 1 }
+          # call-site COUNTS (stop + begin_data_capture-failed; filter destroy + rename-recreate) -- the per-site check is the Rust guard in ci.yml
+          if (([regex]::Matches($out, [regex]::Escape('#ifdef __linux__ ndi_sender_abort_connections_before_destroy(o->ndi_sender_port, name);'))).Count -ne 2) { Write-Error "ndi-output.cpp: issue 1363 ndi_output no longer aborts the sender's connections before send_destroy at both sites -- Linux TIME_WAIT shifts the PGM pin"; exit 1 }
           if ($out -notmatch [regex]::Escape('g_reserved_main_sender = ndi_sender_create_tracked(&send_desc, &g_reserved_main_port);')) { Write-Error "ndi-output.cpp: issue 1363 the :5961 reserve no longer records its port"; exit 1 }
           $ndiflt = (Get-Content "vendor/distroav/src/ndi-filter.cpp" -Raw) -replace '\s+', ' '
-          if ($ndiflt -notmatch [regex]::Escape('#ifdef __linux__ ndi_sender_abort_connections_before_destroy(filter->ndi_sender_port,')) { Write-Error "ndi-filter.cpp: issue 1363 the ndi_filter sender destroy no longer aborts its connections -- Linux TIME_WAIT shifts its port"; exit 1 }
+          if (([regex]::Matches($ndiflt, [regex]::Escape('#ifdef __linux__ ndi_sender_abort_connections_before_destroy(filter->ndi_sender_port,'))).Count -ne 2) { Write-Error "ndi-filter.cpp: issue 1363 the ndi_filter sender destroy no longer aborts its connections -- Linux TIME_WAIT shifts its port"; exit 1 }
           Write-Output "per-source genlock latency (ms) override + #257 floor 3 + genlock default-ON + whitelist UI + runtime burn + #1009 floor emit stamp + #1185 PGM-first-port reservation + issue 1363 Linux sender linger-0 — OK"
 
       # #912: ASRC (issue 803's per-source clock-drift servo) must be a BUILD DEFAULT, mirroring
