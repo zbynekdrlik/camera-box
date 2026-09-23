@@ -123,7 +123,13 @@ multiview projector measured `program-render-audit lagged=80/150`. Now `resizeEv
 `DisplayResized` (so the preview layout and the swap-chain size change together). The first resize
 after `CreateDisplay` stays immediate (`resizeImmediate`). The `visibleChanged`/`screenChanged`
 lambdas in the ctor keep their direct resize (create/visibility paths, not a drag storm). Same code
-on every platform. Guard: `tests/obs_display_resize_debounce_1358.rs` (incl. the invariant "exactly
+on every platform. The timer is created FIRST in the ctor (before `WA_NativeWindow` makes the
+native window); `ApplyDisplayResize` returns when `destroying`, and the inline `DestroyDisplay()`
+stops a pending apply (hence the header `#include <QTimer>` — a forward declaration does not compile
+there). `resizeImmediate` stays set when the display was created from `paintEvent`/`visibleChanged`
+with no resize after it, so the FIRST step of the first drag is applied at once — one extra
+swap-chain reallocation per window lifetime, by design; do not "optimise" it into a per-drag one.
+Guard: `tests/obs_display_resize_debounce_1358.rs` (incl. the invariant "exactly
 3 `obs_display_resize(` call sites in the file" — keep the token out of comment prose there).
 
 ## Local type-check of a vendored frontend `.cpp` against the REAL Qt6 headers (Tier-0, no cmake)

@@ -891,6 +891,11 @@ no toggle. Item 14b (REPORT-ONLY, never FAIL; pure helpers in the source-only
   greps the LOADED `${STRIH_LIBDIR}/obs-plugins/obs-browser.so` for the compiled-in `password-store`
   literal (`ok-built`). A plugin without it = a pre-1359 bundle (NOTE). `libcef.so` always contains
   the Chromium switch constant, so never grep libcef for this — only obs-browser.so.
+- `basic` replaces keyring protection of the CEF profile (cookies, saved logins) with Chromium's
+  fixed built-in key. Cookies already encrypted with the keyring key become unreadable ONCE, so a
+  browser source that was logged in must log in again after the first deploy — expected, not a
+  regression. The PASS lines state what was checked (an argv / the compiled-in switch name); the
+  behaviour proof is the reboot acceptance below.
 - Live acceptance (supervisor, after the full strih bundle deploy): two consecutive reboots of
   strih-lx with no keyring dialog; which of `ok-live`/`ok-built` the box reads is itself a finding
   worth recording here.
