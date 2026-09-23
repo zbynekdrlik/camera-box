@@ -1298,3 +1298,15 @@ Files that need the camera_box crate or serde stay CI-only.
 It also catches the truth-table shape std-only vendored-C gates love: a row slice typed
 `&[((i32, i32, i32, i32), i32)]` is a `clippy::type_complexity` error under `-D warnings` (issue
 1363 — plain `rustc -D warnings` passed it). Name the row type (`type FourIntVector = …;`).
+
+## Pinning a PRINTED shell command: parse it with BASH, never python `shlex` (issue 1317 part 4)
+
+A test that pins a plan line an operator pastes (e.g. the strih-lx `ssh host "rm -f -- '<path>'"`
+cleanup line) must prove it survives BOTH parses — the local paste AND ssh's remote shell (ssh joins
+its args into one string the remote shell re-parses, so a single-level `'…'` quote around a spaced
+OBS filename silently becomes two `rm` args, hidden by `-f`). Python `shlex.split` is NOT a bash
+model: inside double quotes it keeps the backslash before `$` and a backtick, so it mis-reads a
+correctly escaped line (and would pass a wrong one). The faithful pin runs the line through bash
+twice: a fake `ssh` function records `$#` + its args (must be exactly `user@host` + ONE remote
+string), then that string runs under `bash -c` with a fake `rm` that prints its argv NUL-separated.
+Fixture paths: a space, `'`, `"`, `$`, a backtick and `\` (`tests/python/test_strih_windows_remnants_1317.py`).
