@@ -99,6 +99,34 @@ ndi_portmap_select() {
   ' <<<"$block" | sort -u
 }
 
+# ndi_portmap_anchor_ip <tsv-block> <anchor_fullname> -> stdout: the ONE IP the anchor sender is
+#   advertised at, or NOTHING (issue 1363). The audit's default scope takes the watched box's IP from
+#   the anchor's OWN mDNS record -- the address every NDI receiver actually dials -- instead of a
+#   fleet host that may not resolve on dev1 (strih-lx.lan has no DNS entry). Distinct IPs only, so a
+#   multi-homed doubled resolve of the same IP is still one. Anchor absent -> nothing (gather error);
+#   anchor at >1 IP (two boxes announcing the same program name, e.g. a cloned profile) -> nothing too:
+#   fail safe, never pick one of them silently. IPv4 dotted-quad records only: dev1's avahi runs with
+#   use-ipv6=yes, and a dual-stack announce of the SAME anchor must stay one box, never "two addresses"
+#   (the selection below is keyed on the IPv4 address anyway).
+ndi_portmap_anchor_ip() {
+  local block="${1:-}" anchor="${2:-}"
+  awk -F'\t' -v anc="$anchor" '
+    $1 == anc && $2 ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ { if (!($2 in seen)) { seen[$2] = 1; n++; ip = $2 } }
+    END { if (n == 1) print ip }
+  ' <<<"$block"
+}
+
+# ndi_portmap_baseline_scope <baseline_anchor> <live_anchor> -> stdout: MATCH | MISMATCH (issue 1363)
+#   A baseline captured on a DIFFERENT strih box (the retired Windows STRIH-SNV baseline read against
+#   the Linux strih-lx map) would classify every baseline name ABSENT and report STABLE forever -- a
+#   silently blind watchdog. So --check compares the anchor the baseline recorded with the one it
+#   resolved live; only an exact match is diffed. An empty/missing baseline anchor -> MISMATCH
+#   (fail closed: re-capture, never guess).
+ndi_portmap_baseline_scope() {
+  local base="${1:-}" live="${2:-}"
+  if [ -n "$base" ] && [ "$base" = "$live" ]; then printf 'MATCH\n'; else printf 'MISMATCH\n'; fi
+}
+
 # ndi_portmap_classify_port <live_port> <baseline_port> -> stdout: OK | MOVED | ABSENT | UNSET
 #   Per-name port drift (mirrors netcfg_classify_match's shape). Empty baseline -> UNSET (nothing
 #   pinned for this name); empty live but pinned baseline -> ABSENT (the sender vanished this pass);

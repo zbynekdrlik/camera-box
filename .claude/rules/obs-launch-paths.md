@@ -10,6 +10,17 @@ paths:
 
 # OBS launch-path contract (.lnk primary, per-box params) — #774/#775
 
+**Box set (issue 1317 part 3):** the Windows STRIH-SNV PC is RETIRED (M4 cut-over 20.9.2026; its
+address is the Linux strih-lx). `launch-obs-genlock.sh` accepts `stream|resolume` and
+`obs-self-heal-install.sh` accepts `stream`; `--box strih` is REFUSED by name (pointing at the
+strih-lx `strih-obs.service` user unit) and `--box strih-lx` is refused as a non-Windows box. Both read
+the MCP / address / AHK identity from `scripts/lib/genlock-fleet-boxes.sh`; the self-heal builder
+keys its AHK path on `obs_fleet_has_ahk` + that identity, never the literal name. The `strih`
+material below (the `.lnk` params, `scripts/strih/NL_STARTUP.ahk`) is the retired box's history,
+kept for a future Windows strih; `build_launch_program`'s pure default `AHK_SCRIPT` is still the
+retired strih's `D:\_APPS` path (only the pure-builder unit tests rely on it — every box-facing
+caller passes its own identity).
+
 Every automated OBS (re)launch on strih/stream goes through the box's **Start-Menu shortcut**
 `OBS Studio.lnk`, NOT a bare `obs64.exe` — the shortcut carries the box's per-box params (strih:
 `--enable-media-stream --verbose`, needed by the interkom VDO.ninja Browser source; a bare launch

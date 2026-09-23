@@ -10,7 +10,7 @@ paths:
 
 # NDI sender port-map stability watchdog (#1181)
 
-The dev1-side watchdog that alerts when a STRIH-SNV OBS NDI **sender** changes port (which silently
+The dev1-side watchdog that alerts when the strih OBS NDI **sender** changes port (which silently
 hands stock NDI Studio Monitor / building TVs the WRONG sender under a cached port). The operator
 doctrine + the reshuffle root cause live in `.claude/rules/distroav-receiver-lifecycle.md`'s #1181
 section; THIS file is the implementation gotchas for the three scripts.
@@ -21,7 +21,8 @@ Same shape as `scripts/netcfg-audit.sh` + `scripts/netcfg-drift-alert-watchdog.s
 `scripts/lib/netcfg-audit.sh`:
 - `scripts/lib/ndi-portmap-health.sh` — PURE map-diff (no I/O), source-only, Tier-0-testable.
 - `scripts/ndi-portmap-audit.sh` — the avahi read + OBS-instance isolation + baseline JSON;
-  `--capture`/`--check`/`--json`; exit **0=STABLE / 3=CHANGED (a moved port) / 2=gather error**.
+  `--capture`/`--check`/`--json`; exit **0=STABLE / 3=CHANGED (a moved port) / 2=gather error / 4=baseline captured on another strih
+  box**.
 - `scripts/ndi-portmap-alert-watchdog.sh` — dev1 timer, reuses `scripts/lib/obs-watchdog-decision.sh`
   confirm/throttle, ONE Slovak Discord alert, ships DISABLED.
 
@@ -56,6 +57,36 @@ Same shape as `scripts/netcfg-audit.sh` + `scripts/netcfg-drift-alert-watchdog.s
 avahi). Offline: set `NDI_PORTMAP_AVAHI_FIXTURE=<file>` on the audit to feed captured `avahi-browse
 -rtp _ndi._tcp` output instead of running avahi. Re-capture the checked-in baseline from a LIVE read
 only (`scripts/ndi-portmap-audit.sh --capture`), never hand-type it.
+
+## The watched strih is RESOLVED, never a baked box name (issue 1363)
+
+The audit used to default to `STRIH-SNV` / `10.77.9.202` / anchor `STRIH-SNV (2ME PGM)`. After the
+M4 cut-over to the Linux strih-lx every pass was a gather error (the anchor was gone), so the
+watchdog was blind for days without paging. The scope is now derived:
+
+- **Box** = the ONE member of the obs-fleet `ndi-portmap` facet (`scripts/lib/obs-fleet.sh`,
+  currently `strih-lx`). Zero or 2+ members = a loud gather error (exit 2), never a guessed box. A
+  strih swap (the Poprad box next) is that one policy edit.
+- **Sender prefix** = the uppercased box hostname. libndi on Linux announces every sender as
+  `<HOSTNAME-UPPERCASED> (<output>)`, and a Linux OBS box's fleet name is its hostname.
+- **Anchor** = `<prefix> (2ME PGM)` (`NDI_PORTMAP_PROGRAM_OUTPUT`, the profile's main output name).
+- **IP** = read from the anchor's OWN mDNS record (`ndi_portmap_anchor_ip`: one distinct IP, else
+  nothing = gather error; IPv4 dotted-quad records only, since dev1's avahi runs `use-ipv6=yes` and a
+  dual-stack announce of the same anchor must stay one box), NOT from the fleet host. `strih-lx.lan` has no DNS entry on dev1
+  (`getent ahosts strih-lx.lan` is empty; `strih-lx.local` resolves via mDNS to .202), and the mDNS
+  record is the address every NDI receiver dials anyway.
+- **Baseline scope guard** (`ndi_portmap_baseline_scope`): `--check` compares the baseline's
+  recorded `anchor` with the resolved one BEFORE reading avahi. A mismatch is its OWN exit code **4**
+  with a message naming both anchors and `--capture`; the watchdog logs it as `BASELINE SCOPE STALE`
+  (machine channel, never a page) so it is not read as a passing box outage. Without it, a baseline
+  from another box reads every old name ABSENT and reports STABLE forever. An unresolved box (empty
+  anchor) is checked first and is exit 2 (a re-capture would fail the same way).
+- Every piece stays env-overridable (`NDI_PORTMAP_BOX` / `_NAME_PREFIX` / `_ANCHOR` / `_BOX_IP`, and
+  `NDI_PORTMAP_FLEET_FACET` for the facet seam). The
+  Windows-shaped sample fixture in the tests (the OBS + Arena/CG-Spout two-instance case) runs with an
+  explicit `_SNV_SCOPE`; the default-resolution tests use a strih-lx-shaped fixture (`_AVAHI_LX`).
+  On Linux strih-lx there is ONE NDI instance, avahi host `strih-lx.local` (no Arena Spout).
+- A test fails on any non-comment `STRIH-SNV`/`STRIH-LX` literal in the audit or watchdog scripts.
 
 ## Baseline goes stale after every genlock relaunch batch (16.9.2026)
 

@@ -220,11 +220,18 @@ build_cam_linux_spec() {
 CAM_LINUX_SPEC="$(build_cam_linux_spec "$CAMSET_LIB")"
 
 # --- item 12: dantesync version pin (read-only gate; cams + imag-nb + dev1 + OBS boxes) ----------
+# issue 1317 part 4: strih-lx (the Linux strih) answers `dantesync --version` on the bare command
+# line, so it rides the --linux arm; the --win arm's quoted-exe read returns nothing on Linux (strih
+# UNKNOWN). strih_dantesync_nodes routes strih by the ONE fleet-backed platform resolver.
+# shellcheck source=scripts/lib/strih-platform.sh
+. "$HERE/lib/strih-platform.sh"
+DV_STRIH_LINUX="$(strih_dantesync_nodes linux "$STRIH_HOST" "$WIN_SSH_USER" "$STREAM_HOST")"
+DV_WIN_NODES="$(strih_dantesync_nodes win "$STRIH_HOST" "$WIN_SSH_USER" "$STREAM_HOST")"
 if [ -n "$CAM_LINUX_SPEC" ]; then
   run_probe dantesync bash "$DANTESYNC_PROBE" \
-    --linux "$CAM_LINUX_SPEC imag-nb=${IMAG_USER}@${IMAG_HOST}" \
+    --linux "$CAM_LINUX_SPEC imag-nb=${IMAG_USER}@${IMAG_HOST}${DV_STRIH_LINUX:+ $DV_STRIH_LINUX}" \
     --local dev1 \
-    --win "strih=${WIN_SSH_USER}@${STRIH_HOST} stream=${WIN_SSH_USER}@${STREAM_HOST}"
+    --win "$DV_WIN_NODES"
 else
   printf 'roster lib %s unreadable -- no nodes to gate\n' "$CAMSET_LIB" >"$WORKDIR/dantesync.out"
   printf '%s\n' "$RC_MISSING" >"$WORKDIR/dantesync.rc"

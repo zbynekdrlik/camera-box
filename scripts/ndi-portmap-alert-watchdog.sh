@@ -3,7 +3,7 @@
 # tick -- same convention as scripts/netcfg-drift-alert-watchdog.sh / network-reach-alert-watchdog.sh
 # (set -uo pipefail, not -e).
 #
-# scripts/ndi-portmap-alert-watchdog.sh -- #1181: DEV1-SIDE, REPORT-ONLY alert for a STRIH-SNV OBS
+# scripts/ndi-portmap-alert-watchdog.sh -- #1181: DEV1-SIDE, REPORT-ONLY alert for a strih OBS
 # NDI SENDER port-map change. Runs `scripts/ndi-portmap-audit.sh --check` (read-only avahi mDNS read,
 # no rig writes), and once a CHANGED map is CONFIRMED across N consecutive passes fires ONE Slovak
 # Discord alert -- exactly the dev1-side alert-watchdog topology + confirm/throttle framework the
@@ -87,8 +87,9 @@ main() {
   log "pass start (dry_run=$DRY_RUN, audit=$AUDIT)"
 
   # Run the read-only audit. stdout carries the one-line summary (NDI-PORTMAP-STABLE / -CHANGED ...);
-  # exit 0 = STABLE, 3 = CHANGED, anything else = gather/usage error (OBS down / avahi unreachable /
-  # anchor absent -> "nothing to decide", never a change page -- box reachability is #1001's job).
+  # exit 0 = STABLE, 3 = CHANGED, 4 = baseline captured on ANOTHER strih box (logged by name, no page,
+  # issue 1363), anything else = gather/usage error (OBS down / avahi unreachable / anchor absent ->
+  # "nothing to decide", never a change page -- box reachability is #1001's job).
   # Capture the audit's STDERR (not >/dev/null it) so a require_tools FATAL (a missing avahi-browse /
   # python3 / timeout on dev1) still reaches the journal on the error branch below -- the audit is
   # built to "fail LOUD by name", and swallowing its stderr would defeat that (a permanently-blind
@@ -115,6 +116,12 @@ main() {
     return 0
   fi
 
+  if [ "$rc" -eq 4 ]; then
+    # issue 1363: the baseline was captured on ANOTHER strih box -- a lasting config error, not a box
+    # outage. Log it by name (machine channel only, never a phone page) so it is not read as transient.
+    log "BASELINE SCOPE STALE (rc=4): the checked-in baseline belongs to another strih box -- re-capture it from a live read (scripts/ndi-portmap-audit.sh --capture) and commit it in a PR. No page.${auderr:+ audit stderr: ${auderr}}"
+    return 0
+  fi
   if [ "$rc" -ne 3 ]; then
     log "audit error (rc=$rc) -- nothing to decide this pass (OBS down / avahi unreachable is not this watchdog's job).${auderr:+ audit stderr (may carry a require_tools FATAL): ${auderr}}"
     return 0
@@ -154,7 +161,7 @@ main() {
   if [ "${alert_now:-0}" = "1" ]; then
     log "ALERT: firing Discord notification for NDI port-map change"
     python3 "$NOTIFY" notify --body \
-      "🚨 #1181 NDI port-map: sender-porty STRIH-SNV OBS sa ZMENILI oproti baseline ($REPO_SLUG) — stock NDI prijímače (TV / NDI Studio Monitor) môžu teraz ukazovať NESPRÁVNY zdroj pod pôvodným menom (pripojené na zapamätaný port). ${summary}. Akcia: na TV/Studio Monitor prijímačoch znovu otvoriť zdroj; ak je zmena zámerná (pridaný/odobraný výstup + reštart OBS), obnoviť baseline \`scripts/ndi-portmap-audit.sh --capture\` a commitnúť v PR." \
+      "🚨 #1181 NDI port-map: sender-porty strih OBS sa ZMENILI oproti baseline ($REPO_SLUG) — stock NDI prijímače (TV / NDI Studio Monitor) môžu teraz ukazovať NESPRÁVNY zdroj pod pôvodným menom (pripojené na zapamätaný port). ${summary}. Akcia: na TV/Studio Monitor prijímačoch znovu otvoriť zdroj; ak je zmena zámerná (pridaný/odobraný výstup + reštart OBS), obnoviť baseline \`scripts/ndi-portmap-audit.sh --capture\` a commitnúť v PR." \
       --dedup-key "$(watchdog_notify_key "ndi-portmap" "$(date +%s)")" \
       >/dev/null 2>&1 || log "ALERT: airuleset.py notify failed (non-fatal)"
   else

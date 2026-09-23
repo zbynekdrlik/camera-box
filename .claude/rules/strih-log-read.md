@@ -42,8 +42,11 @@ measured arrival floor). **Never add a new inline strih-log read — call `scrip
   audio-buffering burst is in the head); no bash consumer calls it, it is the ONE pinned source of the
   audit's python twin (below).
 
-The platform comes from `strih-platform.sh` `strih_platform` (env `STRIH_PLATFORM` override, else the
-strih-lx address → linux, else windows). The Windows strings are the pre-existing ones, verbatim; the
+The platform comes from `strih-platform.sh` `strih_platform` (env `STRIH_PLATFORM` override, else an
+address the obs-fleet list maps to its `strih-lx` row → linux, else windows — issue 1317 part 4: the
+fleet list's alias-aware `obs_fleet_name_for_host` is the ONE authority, so `strih.lan` /
+`strih-lx.lan` also read linux; `.claude/rules/obs-fleet-list.md`; the python twin reads the same
+table via `scripts/obs_fleet_table.py`). The Windows strings are the pre-existing ones, verbatim; the
 tail is the `gc (gci …).FullName -Tail N` form sent as `-EncodedCommand` (the issue-1258 cmd.exe rule).
 
 ## Transport rules baked in (keep them when extending)

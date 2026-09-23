@@ -16,7 +16,7 @@
 # the env override (`X_BOXES=`) stays byte-compatible, so a new box is one table edit here.
 #
 # THE TABLE (`OBS_FLEET`): one `name|host-or-ip|class|home-check` row per managed OBS box.
-#   * name        -- the stable box name the watchdogs log + key state on (strih/stream/imag/resolume).
+#   * name        -- the stable box name the watchdogs log + key state on (strih-lx/stream/imag/resolume).
 #   * host-or-ip  -- the address probes dial. A literal IP for a fixed box; a HOSTNAME for a box whose
 #                    DHCP lease drifts (resolume.lan), so `getent`/ping/`/dev/tcp` resolve it live.
 #   * class       -- windows-genlock | linux-genlock (the genlock-build platform; used by the
@@ -30,22 +30,48 @@
 #
 # FACET POLICY (`obs_fleet_boxes <facet>`): which boxes carry each dev1-side facet, decided honestly
 # per each watchdog's own header, NOT per-entry -- so the entry row stays the fixed 4-field shape:
-#   audio-lag     = strih stream      (resolume EXCLUDED: no mbc audio chain on the CG box)
+#   The production strih is strih-lx (issue 1317, M4 cut-over 20.9.2026 -- the Windows strih PC is
+#   RETIRED and its row is gone, see the table below). strih-lx joins every facet whose premise is a
+#   PLATFORM-NEUTRAL read (ping / OBS-WS :4455 / the box's own :8899 bundle-state JSON / dantesync
+#   :8898), and stays OUT of the Windows-only ones:
+#   audio-lag     = strih-lx stream   (the vendored OBS `audio-telemetry #800` lines, read off each box's
+#                   own :8899 -- identical on Linux; resolume EXCLUDED: no program-audio chain on the CG box)
 #   av-step       = stream            (the av-sync dock lives on the stream box only, #1267)
-#   vb-matrix     = strih stream      (resolume EXCLUDED: no VB-Matrix install on the CG box)
-#   bundle-state  = strih stream resolume strih-lx   (issue 1317: strih-lx joins here)
-#   network-reach = strih stream resolume   (resolume report-only unless obs_fleet_is_home -- below)
-#   obs-liveness  = strih stream resolume strih-lx   (issue 1317: strih-lx joins here)
-#   genlock-lock  = strih stream imag resolume strih-lx  (#1299: the genlock LOCKED/DEGRADED/UNLOCKED
+#   vb-matrix     = stream            (a Windows VB-Audio Matrix process check; strih-lx has NO VB-Matrix --
+#                   PipeWire replaced it, issue 1344 -- and resolume has no install either)
+#   bundle-state  = strih-lx stream resolume   (the :8899 server; the watchdog's auto-restart is
+#                   CLASS-resolved: systemctl --user on a linux-genlock box, schtasks on windows-genlock)
+#   network-reach = strih-lx stream resolume   (resolume report-only unless obs_fleet_is_home -- below)
+#   obs-liveness  = strih-lx stream resolume   (OBS-WS GetStats render liveness)
+#   genlock-lock  = strih-lx stream imag resolume  (#1299: the genlock LOCKED/DEGRADED/UNLOCKED
 #                   facet is fleet-wide -- imag is a pure receiver that still locks every input to the
-#                   fleet clock, so it IS in scope; resolume is paged only while obs_fleet_is_home;
-#                   issue 1317: the Linux strih-lx box joins too, appended after resolume)
-#   render-freeze = strih stream resolume strih-lx   (#1320: a PROGRAM render-thread freeze
+#                   fleet clock, so it IS in scope; resolume is paged only while obs_fleet_is_home)
+#   render-freeze = strih-lx stream resolume   (#1320: a PROGRAM render-thread freeze
 #                   (program_render_lagged) can strike ANY genlock OBS box, and a receiver relock
 #                   storm (relock_bursts) any receiving box -- resolume runs the cg-obs PROGRAM
 #                   render + receives, so it IS in scope. Traveling-safe with NO is_home gate: the
 #                   only page condition is a SUCCESSFULLY-FETCHED positive reading, so a dark
 #                   resolume just SKIPs -> #732/#1001, exactly like audio-lag/bundle-state.)
+#   ndi-portmap   = strih-lx          (issue 1363: the ONE strih box whose NDI SENDER port map the
+#                   dev1 port-map watchdog (scripts/ndi-portmap-audit.sh) watches -- the box that
+#                   owns the 2ME PGM program the building TVs cache by port. EXACTLY one member: the
+#                   audit refuses any other count. It consumes the member NAME only (the NDI machine
+#                   name = the uppercased hostname, the anchor IP = the anchor's own mDNS record), so
+#                   a strih swap (the Poprad strih-pp next) is this one policy edit.)
+#   obs-session   = stream resolume   (issue 1317 part 2: the #979 obs64/AHK Windows SESSION-0
+#                   visibility probe -- a PowerShell probe over win_ssh_run, meaningless on a Linux
+#                   box, so windows-genlock members ONLY. The consumer ALSO class-gates each box, so
+#                   even an override naming strih-lx never gets the PowerShell probe; resolume is
+#                   probed only while home, via obs_fleet_poll_now.)
+#   burn-reconcile = strih-lx stream  (issue 1317 part 2: the #1060 fresh-OBS-start burn reconcile
+#                   -- OBS-WS GetStats renderTotalFrames + obs_burn_filter sweeps, platform-neutral.
+#                   The unattended-start premise holds on strih-lx too: a boot autostart or a
+#                   strih-obs.service restart reloads a saved burn exactly like the Windows AHK
+#                   respawn did. resolume stays OUT: its cg-OBS burn node is the opt-in CG_CHAIN
+#                   profile, never a leaked measurement burn on a camera program.)
+#   rig-restore   = strih-lx stream   (issue 1317 part 2: the #281 stranded-rig restore -- the
+#                   recording-e2e harness's two OBS program boxes, read + torn down over OBS-WS via
+#                   obs_phase2.py; platform-neutral.)
 #
 # TRAVELING-BOX SAFETY (resolume is home only sometimes): a naive add to the PAGING watchdogs would
 # false-page whenever resolume is away (the owner's hardest sensitivity -- the #739 5x false-page
@@ -78,20 +104,23 @@
 
 # OBS_FLEET -- the table (env-overridable as a whole for tests/ops). One row per line,
 # `name|host-or-ip|class|home-check`. Blank lines are ignored by the parser below.
+# issue 1317 (M4 cut-over 20.9.2026): strih-lx IS the production strih -- the Linux notebook that
+# took the strih cutter/mix role -- at its real address 10.77.9.202 and permanently home (`always`).
+# It dials the IP, never `strih-lx.lan`: that name has no DNS entry on dev1, and the old `traveling`
+# row therefore read the production strih as AWAY, leaving every dev1 watchdog blind to it.
+# The Windows strih PC (`strih|10.77.9.202|windows-genlock|always`) is RETIRED and its row REMOVED,
+# not flipped to `retired`: its address now belongs to strih-lx, so keeping the row would hand a
+# Linux box to any Windows-class caller naming `strih` (`obs_fleet_host strih` now fails closed like
+# any unknown name). Its history lives in targets.md. strih-lx keeps its own NAME (state files and
+# alert dedup keys are name-keyed, so the new machine never inherits the Windows box's state).
 # imag is `retired` (issue 1316): imag-nb was RETURNED to the owner 16.9.2026 (10.77.9.182 dark),
 # so its home-check is `retired` -- obs_fleet_is_home imag is FALSE and obs_fleet_boxes drops it
 # from genlock-lock (and any future facet) automatically. The row + its history are KEPT because the
 # IMAG role returns on a NEW notebook next year; re-provisioning re-flips this ONE word to `always`.
-OBS_FLEET="${OBS_FLEET:-strih|10.77.9.202|windows-genlock|always
+OBS_FLEET="${OBS_FLEET:-strih-lx|10.77.9.202|linux-genlock|always
 stream|10.77.9.204|windows-genlock|always
 imag|10.77.9.182|linux-genlock|retired
-resolume|resolume.lan|windows-genlock|traveling
-strih-lx|strih-lx.lan|linux-genlock|traveling}"
-# issue 1317: strih-lx is the Linux notebook replacing the Windows strih PC, running IN PARALLEL
-# until tuned. home-check=traveling (home only when strih-lx.lan resolves AND its OBS-WS :4455
-# answers) so a not-yet-arrived / not-yet-provisioned box never pages. It joins the bundle-state,
-# obs-liveness and genlock-lock facets below (NOT audio-lag/av-step/vb-matrix -- those are the
-# Windows program-audio / av-sync-dock / VB-Matrix facets that do not apply to it yet).
+resolume|resolume.lan|windows-genlock|traveling}"
 
 # _obs_fleet_entry <name> -> prints the whole `name|host|class|home-check` row for NAME on stdout and
 # returns 0; returns 1 (no output) for an unknown name. Word-exact on the leading `name|` so a
@@ -132,16 +161,20 @@ obs_fleet_home_check() {
 obs_fleet_facet_members() {
   local facet="${1:-}"
   case "$facet" in
-    audio-lag)     printf 'strih stream' ;;
+    audio-lag)     printf 'strih-lx stream' ;;
     av-step)       printf 'stream' ;;
-    vb-matrix)     printf 'strih stream' ;;
-    bundle-state)  printf 'strih stream resolume strih-lx' ;;
-    network-reach) printf 'strih stream resolume' ;;
-    obs-liveness)  printf 'strih stream resolume strih-lx' ;;
-    genlock-lock)  printf 'strih stream imag resolume strih-lx' ;;
-    render-freeze) printf 'strih stream resolume strih-lx' ;;
+    vb-matrix)     printf 'stream' ;;
+    bundle-state)  printf 'strih-lx stream resolume' ;;
+    network-reach) printf 'strih-lx stream resolume' ;;
+    obs-liveness)  printf 'strih-lx stream resolume' ;;
+    genlock-lock)  printf 'strih-lx stream imag resolume' ;;
+    render-freeze) printf 'strih-lx stream resolume' ;;
+    ndi-portmap)   printf 'strih-lx' ;;
+    obs-session)   printf 'stream resolume' ;;
+    burn-reconcile) printf 'strih-lx stream' ;;
+    rig-restore)   printf 'strih-lx stream' ;;
     *)
-      echo "obs-fleet: unknown facet '${facet}' (expected one of: audio-lag av-step vb-matrix bundle-state network-reach obs-liveness genlock-lock render-freeze)" >&2
+      echo "obs-fleet: unknown facet '${facet}' (expected one of: audio-lag av-step vb-matrix bundle-state network-reach obs-liveness genlock-lock render-freeze ndi-portmap obs-session burn-reconcile rig-restore)" >&2
       return 1
       ;;
   esac
@@ -175,7 +208,9 @@ obs_fleet_boxes() {
 # `getent ahosts` (no early `exit` in awk -> no SIGPIPE) covers a hostname AND a literal IP (which
 # resolves to itself). Override in a test to stub resolution. `|| true` keeps it drain-safe.
 obs_fleet_resolve_host() {
-  getent ahosts "${1:-}" 2>/dev/null | awk 'NR==1{print $1}' || true
+  # issue 1317 part 4 review: time-bounded -- strih_platform / the class gate now resolve an unknown
+  # NAME through this seam, so a stalled DNS resolver must never stall every caller.
+  timeout "${OBS_FLEET_RESOLVE_TIMEOUT:-2}" getent ahosts "${1:-}" 2>/dev/null | awk 'NR==1{print $1}' || true
 }
 # obs_fleet_status_probe <host> <port> -> 1 (a TCP connect to host:port succeeded) | 0. The OBS-WS
 # port answering is the "box is home + serving" signal. Bash /dev/tcp so no nc/curl dependency; a
@@ -187,6 +222,117 @@ obs_fleet_status_probe() {
   else
     printf '0'
   fi
+}
+
+# obs_fleet_has_ahk <name> -> 1 when NAME's OBS is guarded by an NL_STARTUP.ahk AutoHotkey
+# auto-respawn watcher (whose session a Windows probe must also check and a deploy must stop +
+# restart), else 0. A pure FACT keyed on the name (issue 1317 review): resolume runs the AHK v2
+# safe-loop (issue 1295). The retired Windows strih ran one too; its planner arms were retired in
+# issue 1317 part 3, so no name maps to it any more. The ONE source the obs-session watchdog and
+# every Windows planner (deploy-genlock-fleet.sh, launch-obs-genlock.sh, obs-self-heal-install.sh,
+# via scripts/lib/genlock-fleet-boxes.sh) read.
+obs_fleet_has_ahk() {
+  case "${1:-}" in
+    resolume) printf '1' ;;
+    *) printf '0' ;;
+  esac
+}
+
+# _obs_fleet_is_ipv4 <s> -> 0 iff S is a dotted-quad IPv4 literal (4 all-digit fields). Pure.
+_obs_fleet_is_ipv4() {
+  [[ "${1:-}" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]
+}
+
+# _obs_fleet_row_match <mode> <key> -> the NAME of the first OBS_FLEET row matching KEY (stdout),
+# return 1 when none does. mode `exact`: KEY equals the row's name or host field (case-folded, so
+# `RESOLUME.lan` == `resolume.lan`); mode `name`: KEY equals the row's NAME; mode `host`: KEY equals
+# the row's HOST field. Reads the WHOLE here-doc (no early exit -> SIGPIPE-safe).
+_obs_fleet_row_match() {
+  local mode="${1:-}" key="${2:-}" line name rest host found=""
+  [ -n "$key" ] || return 1
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    name="${line%%|*}"; rest="${line#*|}"; host="${rest%%|*}"
+    [ -z "$found" ] || continue
+    case "$mode" in
+      exact) { [ "${name,,}" = "${key,,}" ] || [ "${host,,}" = "${key,,}" ]; } && found="$name" ;;
+      name) [ "${name,,}" = "${key,,}" ] && found="$name" ;;
+      host) [ "$host" = "$key" ] && found="$name" ;;
+    esac
+  done <<EOF
+${OBS_FLEET}
+EOF
+  [ -n "$found" ] || return 1
+  printf '%s' "$found"
+}
+
+# obs_fleet_name_for_host <host-or-ip> -> the fleet NAME that HOST addresses (stdout), or return 1
+# when no row does. The ONE alias-aware "which managed OBS box is this address" lookup (issue 1317
+# part 4) -- the authority both obs_fleet_class_for_host (the Windows-tool class gate) and
+# scripts/lib/strih-platform.sh `strih_platform` consult, so the two can never disagree. In order:
+#   1. exact: the row's name or host field, case-folded (`10.77.9.202`, `strih-lx`, `STRIH-LX`).
+#   2. short name: a DNS-style name's first label vs the row NAME (`strih-lx.lan` -> `strih-lx`);
+#      never applied to an IPv4 literal.
+#   3. resolved: a non-IP name is resolved through the obs_fleet_resolve_host seam and its address
+#      compared with the row HOST fields -- this is what catches the retired Windows PC's own name
+#      `strih.lan`, which the rig DNS still points at 10.77.9.202 (the Linux strih-lx). An IPv4
+#      literal is NEVER sent to the resolver.
+# An unknown name that does not resolve to a fleet address returns 1 (callers treat it as an
+# explicit, authoritative ops target -- the pre-existing contract).
+obs_fleet_name_for_host() {
+  local want="${1:-}" ip
+  [ -n "$want" ] || return 1
+  _obs_fleet_row_match exact "$want" && return 0
+  _obs_fleet_is_ipv4 "$want" && return 1
+  case "$want" in
+    *.*) _obs_fleet_row_match name "${want%%.*}" && return 0 ;;
+  esac
+  ip="$(obs_fleet_resolve_host "$want")"
+  [ -n "$ip" ] || return 1
+  _obs_fleet_row_match host "$ip"
+}
+
+# obs_fleet_class_for_host <host-or-ip> -> the CLASS (windows-genlock | linux-genlock) of the fleet
+# row HOST addresses (stdout), or return 1 when no row matches. The class gate a Windows-only planner
+# consults BEFORE emitting a Windows action against an address (issue 1317 part 3): 10.77.9.202 is
+# the Linux strih-lx now, so a PowerShell/schtasks/C:\ tool aimed at it must refuse. Alias-aware via
+# obs_fleet_name_for_host (issue 1317 part 4), so `strih.lan` / `strih-lx.lan` / `STRIH-LX` cannot
+# slip a Windows action past the gate.
+obs_fleet_class_for_host() {
+  local name
+  name="$(obs_fleet_name_for_host "${1:-}")" || return 1
+  obs_fleet_class "$name"
+}
+
+# obs_fleet_refuse_linux_target <host-or-ip> <tool> -> returns 0 (and prints nothing) when HOST is
+# NOT a linux-genlock fleet box; returns 1 with a named error on stderr when it IS -- the one-line
+# class gate every Windows-only dev1 tool (a .ps1 driver, a schtasks install, a PowerShell planner)
+# calls before touching HOST, so a Windows action can never be emitted for a Linux box (issue 1317
+# part 3). An address the fleet list does not know passes (an explicit ops target is authoritative).
+obs_fleet_refuse_linux_target() {
+  local host="${1:-}" tool="${2:-this tool}" cls
+  cls="$(obs_fleet_class_for_host "$host")" || return 0
+  [ "$cls" = "linux-genlock" ] || return 0
+  echo "ERROR: ${tool} is Windows-only, but ${host} is a linux-genlock fleet box (scripts/lib/obs-fleet.sh) -- refusing to emit a Windows action for a Linux box (issue 1317)" >&2
+  return 1
+}
+
+# obs_fleet_poll_now <name> -> returns 0 when a per-box consumer loop should poll NAME this pass, 1
+# when it must skip it (issue 1317 part 2 -- the traveling/retired gate the issue-1317 per-box
+# consumers share: the obs-session, burn-reconcile and rig-restore watchdogs; obs-liveness and
+# network-reach predate it and gate resolume with obs_fleet_is_home themselves). An `always` box is
+# polled WITHOUT consulting obs_fleet_is_home, so the OBS_FLEET_HOME force-list (a traveling-box
+# test seam) never drops a fixed box; a `traveling` box only while obs_fleet_is_home holds; a
+# `retired` box never. A name with NO row (an ops `<X>_BOXES` override naming a box the table does
+# not know yet) is polled as given -- the override is authoritative, exactly as it already bypasses
+# the facet derivation.
+obs_fleet_poll_now() {
+  local name="${1:-}" check
+  check="$(obs_fleet_home_check "$name")" || return 0
+  case "$check" in
+    always) return 0 ;;
+    *) obs_fleet_is_home "$name" ;;
+  esac
 }
 
 # obs_fleet_is_home <name> -> returns 0 iff NAME is currently "home" (reachable + serving), 1 if away

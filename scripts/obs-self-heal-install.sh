@@ -33,9 +33,9 @@
 #     script sources that file) — there is ONE idempotent, self-verifying obs64 launch path in this
 #     whole repo, never a second hand-rolled one.
 #   - this script is the PURE PLANNER an agent/supervisor pastes (#701 proved plain scp/ssh
-#     reaches strih/stream, but WRITING a recovery script + REGISTERING a Task Scheduler job is
-#     exactly what the win-* MCP Shell is for here, not a ssh workaround)
-#     into the box's `win-strih` / `win-stream-snv` MCP `Shell` to WRITE the recovery script +
+#     reaches the Windows OBS boxes, but WRITING a recovery script + REGISTERING a Task Scheduler
+#     job is exactly what the win-* MCP Shell is for here, not a ssh workaround)
+#     into the box's `win-stream-snv` MCP `Shell` to WRITE the recovery script +
 #     REGISTER the Task Scheduler job. It runs NO PowerShell itself and needs no Windows access —
 #     `tests/obs_self_heal_install.rs` sources it and asserts the emitted PowerShell/XML is well
 #     formed, exactly like `tests/launch_obs_genlock.rs` does for `launch-obs-genlock.sh`.
@@ -45,10 +45,12 @@
 # healthy box never false-force-kills; AHK never double-launches), and only then enables the task.
 #
 # Usage (planner mode — prints the full install plan for the box):
-#   scripts/obs-self-heal-install.sh --box strih
 #   scripts/obs-self-heal-install.sh --box stream
-#   scripts/obs-self-heal-install.sh --box strih --obs-dir 'C:\Program Files\obs-studio' \
+#   scripts/obs-self-heal-install.sh --box stream --obs-dir 'C:\Program Files\obs-studio' \
 #       --confirm-threshold 2 --min-interval-s 600 --stale-lock-s 900 --interval-min 2
+# The Windows STRIH PC is RETIRED (M4 cut-over 20.9.2026, issue 1317): the strih is strih-lx, a Linux
+# box whose OBS is supervised by its strih-obs.service user unit (Restart=on-failure) -- this
+# Windows Task-Scheduler installer refuses it by name.
 #
 # Exit codes: 0 = plan printed, 2 = usage error.
 set -euo pipefail
@@ -58,6 +60,10 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Sourcing (not executing) launch-obs-genlock.sh: its own source-guard stops right after defining
 # build_launch_program, so this ONLY pulls in that pure function — nothing runs.
 . "$HERE/launch-obs-genlock.sh"
+# shellcheck source=scripts/lib/genlock-fleet-boxes.sh
+# issue 1317 part 3: the per-box MCP / address / AHK facts (explicit even though launch-obs-genlock.sh
+# above already sources it -- never rely on a transitive path staying wired).
+. "$HERE/lib/genlock-fleet-boxes.sh"
 # shellcheck source=scripts/lib/ahk-watchdog.sh
 # Explicit even though launch-obs-genlock.sh above already sources this transitively — never rely
 # on a transitive path staying wired.
@@ -96,17 +102,22 @@ build_recovery_script() {
 
   # REUSE launch-obs-genlock.sh's own planner for the kill+relaunch+log-verify step — force=1
   # (self-heal only ever acts on a CONFIRMED wedge, so it always force-kills). This is the ONE
-  # launch path; nothing here re-derives it. has_ahk mirrors the block below: only strih runs the
-  # AHK watcher, so only strih's embedded program may carry a real AutoHotkey64 command (#786).
-  local kill_relaunch_program launch_has_ahk
-  if [ "$box" = "strih" ]; then launch_has_ahk=1; else launch_has_ahk=0; fi
-  kill_relaunch_program="$(build_launch_program "$obs_dir" "1" "$launch_has_ahk")"
+  # launch path; nothing here re-derives it. has_ahk + the relaunch identity come from the ONE fleet
+  # AHK fact (obs_fleet_has_ahk via scripts/lib/genlock-fleet-boxes.sh, issue 1317 part 3 -- never a
+  # literal box name): only an AHK box's embedded program may carry a real AutoHotkey64 command (#786).
+  local kill_relaunch_program launch_has_ahk ahk_script="" ahk_prefer=""
+  launch_has_ahk="$(fleet_box_has_ahk "$box")"
+  if [ "$launch_has_ahk" = "1" ]; then
+    ahk_script="$(fleet_box_ahk_script "$box")" && ahk_prefer="$(fleet_box_ahk_prefer "$box")" \
+      || { echo "build_recovery_script: box '$box' runs AHK but has no relaunch identity (scripts/lib/genlock-fleet-boxes.sh)" >&2; return 2; }
+  fi
+  kill_relaunch_program="$(build_launch_program "$obs_dir" "1" "$launch_has_ahk" "$ahk_script" "$ahk_prefer")"
 
-  # AHK auto-respawn only exists on strih (.claude/skills/obs-ops "AHK on strih") — stream has no
-  # second watcher to race.
+  # AHK auto-respawn exists only on an AHK box (resolume today; the retired Windows strih before it,
+  # .claude/skills/obs-ops "AHK on strih") — stream has no second watcher to race.
   #
   # issue 1273 — SINGLE OWNER of the AutoHotkey64 stop/restart bracket. The embedded launch program
-  # ($kill_relaunch_program, built with has_ahk=1 on strih) already owns the WHOLE bracket: it stops
+  # ($kill_relaunch_program, built with has_ahk=1 on an AHK box) already owns the WHOLE bracket: it stops
   # AutoHotkey64 BEFORE killing obs64 (its own --force kill_block prepends the stop, so it covers the
   # wedge-kill race), restarts + VERIFIES it AFTER the launch+audio-verify sequence, then runs its own
   # #978 session-visibility gate. So the outer self-heal script must NOT ALSO pre-stop AHK: that ran
@@ -121,21 +132,21 @@ build_recovery_script() {
   # Idempotent AHK-present: never double-launches what the embedded program already restored on a
   # clean recovery. stream (has_ahk=0) has no watcher, so its backstop is a documented no-op.
   local ahk_backstop_block
-  if [ "$box" = "strih" ]; then
+  if [ "$launch_has_ahk" = "1" ]; then
     local ahk_relaunch_ps
-    ahk_relaunch_ps="$(ahk_resolve_and_relaunch_ps)"
+    ahk_relaunch_ps="$(ahk_resolve_and_relaunch_ps "$ahk_script" "$ahk_prefer")"
     # #867: the backstop restart is VERIFIED ($ahkRelaunchVerified) and logs an explicit FATAL line
     # when it does not come back — never a blind success claim. It is log-only, not a hard exit (a
     # scheduled task retries ~every 2 min regardless).
     ahk_backstop_block=$(cat <<PS1
 if (\$relaunchExit -ne 0) {
   if (-not (Get-Process AutoHotkey64 -ErrorAction SilentlyContinue)) {
-    Write-SelfHealLog "RestartAhk backstop: embedded launch program exited \$relaunchExit and AutoHotkey64 is down -- best-effort relaunch so strih keeps a respawn watcher"
+    Write-SelfHealLog "RestartAhk backstop: embedded launch program exited \$relaunchExit and AutoHotkey64 is down -- best-effort relaunch so ${box} keeps a respawn watcher"
 ${ahk_relaunch_ps}
     if (\$ahkRelaunchVerified) {
       Write-SelfHealLog "RestartAhk backstop: AutoHotkey64 relaunched via \$ahkRelaunchTarget (crash/reboot auto-respawn restored)"
     } else {
-      Write-SelfHealLog "FATAL: RestartAhk backstop failed -- AutoHotkey64 did not come back after relaunch (target=\$ahkRelaunchTarget) -- strih has NO respawn watcher until this is fixed"
+      Write-SelfHealLog "FATAL: RestartAhk backstop failed -- AutoHotkey64 did not come back after relaunch (target=\$ahkRelaunchTarget) -- ${box} has NO respawn watcher until this is fixed"
     }
   } else {
     Write-SelfHealLog "RestartAhk backstop: embedded launch program exited \$relaunchExit but AutoHotkey64 is already running -- no action (embedded program restored it)"
@@ -361,7 +372,7 @@ switch (\$decision.decision) {
     Write-SelfHealLog "RECOVER: obs-self-heal-gate.exe says ACT — running the recovery plan (\$(\$decision.steps -join ' -> ')). The embedded launch-obs-genlock program OWNS the AutoHotkey64 stop/restart bracket (issue 1273); the outer script only backstops AHK on a failure exit."
 
     # --- KillAndRelaunchObs — the SAME launch-obs-genlock.sh program, --force. Built with has_ahk=1
-    # ---   on strih, so it OWNS the whole AutoHotkey64 bracket: it stops AHK BEFORE killing obs64
+    # ---   on an AHK box, so it OWNS the whole AutoHotkey64 bracket: it stops AHK BEFORE killing obs64
     # ---   (its own --force kill covers the wedge-kill race), restarts + verifies it AFTER the
     # ---   launch, then runs its own #978 session gate. The outer script must NOT pre-stop AHK —
     # ---   that ran in a SEPARATE child process, leaving this embedded program's own \$ahkStopped
@@ -499,7 +510,7 @@ opt this box's job into actually rebooting the host when that happens (still gat
 overall task's own <Enabled>false</Enabled> until the supervisor live-verifies + enables it).
 
 Usage:
-  scripts/obs-self-heal-install.sh --box strih|stream
+  scripts/obs-self-heal-install.sh --box stream
       [--obs-dir 'C:\Program Files\obs-studio']
       [--confirm-threshold 2] [--min-interval-s 600] [--stale-lock-s 900] [--interval-min 2]
       [--enable-reboot]
@@ -534,12 +545,16 @@ main() {
 
   # Topology v2 (#459, EPIC #466, was 60 pre-#459): strih is now cut-to-stream only at 30fps --
   # the 60fps LED-wall IMAG role moved to the new imag-nb box (#458/#463).
+  # issue 1317 part 3: the Windows strih PC is RETIRED -- strih-lx (Linux) is supervised by its
+  # strih-obs.service user unit (Restart=on-failure), never this Windows Task-Scheduler installer. The
+  # box facts come from the ONE per-box table (scripts/lib/genlock-fleet-boxes.sh).
   local mcp box_ip target_fps
   case "$box" in
-    strih)  mcp="win-strih";      box_ip="10.77.9.202"; target_fps=30 ;;
-    stream) mcp="win-stream-snv"; box_ip="10.77.9.204"; target_fps=30 ;;
-    *) echo "ERROR: --box must be 'strih' or 'stream' (got '${box}')" >&2; usage >&2; exit 2 ;;
+    stream) target_fps=30 ;;
+    strih) echo "ERROR: --box strih is the RETIRED Windows strih PC (issue 1317) -- strih-lx is a Linux box supervised by its strih-obs.service user unit, never this Windows Task-Scheduler installer" >&2; usage >&2; exit 2 ;;
+    *) echo "ERROR: --box must be 'stream' (got '${box}')" >&2; usage >&2; exit 2 ;;
   esac
+  mcp="$(fleet_box_mcp "$box")"; box_ip="$(fleet_box_ip "$box")"
 
   local task_name="camera-box-obs-self-heal-${box}"
   local ps1_path="C:\\ProgramData\\camera-box\\obs-self-heal.ps1"

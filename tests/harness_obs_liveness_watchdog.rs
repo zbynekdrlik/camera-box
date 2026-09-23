@@ -347,6 +347,38 @@ fn other_verdicts_still_get_the_generic_obs_restart_command() {
 }
 
 #[test]
+fn linux_strih_lx_gets_the_systemd_obs_restart_not_the_windows_launch_plan_1317() {
+    // issue 1317 (M4): strih-lx is the production strih and a linux-genlock box. Its OBS is the
+    // supervised systemd --user unit strih-obs.service; launch-obs-genlock.sh refuses a Linux box
+    // name and there is no win-* MCP Shell for it, so the embedded recovery must be the plain-ssh
+    // unit restart at the box's fleet address.
+    for label in ["WEDGED-RENDER-LAG", "WS-DEAD", "FPS-ZERO"] {
+        let text = run_recovery_plan_for("strih-lx", label);
+        assert!(
+            text.contains("systemctl --user restart") && text.contains("10.77.9.202"),
+            "strih-lx {label}: recovery must restart its OBS unit over ssh at .202. got: {text}"
+        );
+        assert!(
+            !text.contains("launch-obs-genlock") && !text.contains("win-"),
+            "strih-lx {label}: the Windows launch plan must not be offered. got: {text}"
+        );
+        // A zero-match `systemctl --user restart '<pattern>'` exits 0, so the hint must check the
+        // unit exists before restarting it.
+        assert!(
+            text.contains("list-units"),
+            "strih-lx {label}: the restart hint must guard against a zero-match pattern. got: {text}"
+        );
+    }
+    // The Windows DXGI device-removed / PC-reboot guidance is Windows-specific: a Linux box gets its
+    // own OBS unit restart for every verdict.
+    let gpu = run_recovery_plan_for("strih-lx", "GPU-DEVICE-REMOVED");
+    assert!(
+        gpu.contains("systemctl --user restart") && !gpu.contains("DXGI"),
+        "strih-lx GPU-DEVICE-REMOVED must not get the Windows DXGI text. got: {gpu}"
+    );
+}
+
+#[test]
 fn watchdog_never_alerts_in_dry_run_mode() {
     let src = fs::read_to_string(watchdog()).unwrap();
     assert!(src.contains("--dry-run"));

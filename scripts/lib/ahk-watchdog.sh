@@ -47,20 +47,30 @@
 # it (a scheduled task retries every ~2 min regardless); launch-obs-genlock.sh's one-shot relaunch
 # treats it as fatal (Write-Error + a distinct non-zero exit), matching how that script already
 # fails loud on its other post-launch verifications (obs64 not started, #786 audio buffering).
-# Per-box AHK identity (issue 1295): two OPTIONAL args keep EVERY existing caller byte-identical.
-#   $1 AHK_SCRIPT  -- the NL_STARTUP.ahk path to pass to the resolved exe (default: strih's
-#                     D:\_APPS\NL_STARTUP.ahk). The CG box (RESOLUME-SNV) passes its own v2 path
+# Per-box AHK identity (issue 1295):
+#   $1 AHK_SCRIPT  -- REQUIRED (issue 1317 part 4): the box's NL_STARTUP.ahk path to pass to the
+#                     resolved exe. The retired Windows strih's D:\_APPS default was REMOVED; with no
+#                     path the function writes a named error to stderr and returns 2 (nothing on
+#                     stdout). The CG box (RESOLUME-SNV) passes its own v2 path
 #                     'C:\Users\Resolume\Documents\_NLMEDIA resolume\_APPS\NL_STARTUP.ahk' -- it has
 #                     a SPACE, which is why the ArgumentList wraps $ahkScriptPath in double quotes.
-#   $2 PREFER      -- 'exe' (default, strih) resolves the exe FIRST then the Startup .lnk; 'lnk'
+#   $2 PREFER      -- 'exe' (default) resolves the exe FIRST then the Startup .lnk; 'lnk'
 #                     (resolume) tries the Startup shortcut FIRST. resolume prefers the .lnk because
 #                     it is a TRAVELING box whose install path can move -- the Startup shortcut
 #                     always resolves the running watcher, so it is the more durable relaunch target
-#                     (the exe candidates still back it up). Called with no args -> strih's exact
-#                     pre-1295 output (obs-self-heal-install.sh + the strih deploy/launch arms).
+#                     (the exe candidates still back it up). Every caller (launch-obs-genlock.sh,
+#                     obs-self-heal-install.sh, deploy-genlock-fleet.sh) passes the box's identity
+#                     from scripts/lib/genlock-fleet-boxes.sh.
 ahk_resolve_and_relaunch_ps() {
-  local ahk_script="${1:-D:\\_APPS\\NL_STARTUP.ahk}"
+  # issue 1317 part 4: NO default script -- the retired Windows strih's D:\_APPS path exists on no
+  # managed box, so a call without the box's own .ahk (genlock-fleet-boxes.sh fleet_box_ahk_script)
+  # fails closed instead of emitting a relaunch that can never resolve.
+  local ahk_script="${1:-}"
   local prefer="${2:-exe}"
+  if [ -z "$ahk_script" ]; then
+    echo "ahk_resolve_and_relaunch_ps: no NL_STARTUP.ahk path given -- pass the box's own (scripts/lib/genlock-fleet-boxes.sh fleet_box_ahk_script); the retired Windows strih's default was removed (issue 1317)" >&2
+    return 2
+  fi
   local ahk_script_ps="${ahk_script//\'/\'\'}"  # double any ' for the PS single-quoted literal
   printf "%s\n" "\$ahkScriptPath = '${ahk_script_ps}'"
   cat <<'PS'

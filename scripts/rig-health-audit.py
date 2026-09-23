@@ -517,18 +517,28 @@ def _windows_obs_count_cmd() -> str:
 #   strih_platform            == strih-platform.sh `strih_platform`
 #   _linux_obs_log_tail_cmd   == strih-log-read.sh `strih_log_remote_cmd linux headtail N`
 # (and the Windows `headtail` op there is _windows_obs_log_tail_cmd verbatim).
-STRIH_LX_HOST_DEFAULT = "10.77.9.202"
+#
+# issue 1317 part 4: "is this the Linux strih" is decided by the obs-fleet list (the ONE authority,
+# alias-aware), read through scripts/obs_fleet_table.py -- the python reader of the SAME table.
+_SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
+if _SCRIPTS_DIR not in sys.path:
+    sys.path.insert(0, _SCRIPTS_DIR)
+import obs_fleet_table  # noqa: E402
 
 
 def strih_platform(host: str) -> str:
     """'linux' | 'windows' for an OBS box address: STRIH_PLATFORM env (windows|linux only; any
-    other value is ignored) wins, else the strih-lx address (STRIH_LX_HOST, default 10.77.9.202)
-    is linux, else windows -- the stream box and every other address keep the Windows reads."""
+    other value is ignored) wins, then an explicit STRIH_LX_HOST match, then an address the
+    obs-fleet list maps (alias-aware: 10.77.9.202, strih-lx(.lan), strih.lan) to a linux-genlock
+    row is linux, else windows -- the stream box and every other address keep the Windows reads.
+    Keyed on the row CLASS, never a literal name, so the next Linux strih is one table row."""
     forced = os.environ.get("STRIH_PLATFORM", "")
     if forced in ("windows", "linux"):
         return forced
-    lx_host = os.environ.get("STRIH_LX_HOST") or STRIH_LX_HOST_DEFAULT
-    return "linux" if host and host == lx_host else "windows"
+    lx_host = os.environ.get("STRIH_LX_HOST")
+    if host and lx_host and host == lx_host:
+        return "linux"
+    return "linux" if obs_fleet_table.fleet_class_for_host(host) == "linux-genlock" else "windows"
 
 
 def _linux_obs_log_tail_cmd(tail: int | str = 500) -> str:

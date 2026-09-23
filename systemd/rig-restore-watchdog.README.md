@@ -63,4 +63,5 @@ systemctl --user disable --now rig-restore-watchdog.timer
 | `RIG_KNOWN_TEST_SCENES` | `PHASE2-PROBE` | space-separated program scenes that prove a TEST state |
 | `CAM_PW` | `newlevel` | dev-rig root pw (same default as `recording-e2e.sh`) |
 | `OBS_WS_PASSWORD` | (empty) | strih OBS WS pw; stream is no-auth |
+| `RIG_WATCHDOG_OBS_BOXES` | the obs-fleet `rig-restore` facet (`strih-lx\|10.77.9.202 stream\|10.77.9.204`) | OBS roster override (`name\|host` pairs); `STRIH_HOST` / `STREAM_HOST` repoint strih-lx / stream |
 | `RIG_WATCHDOG_STATE_FILE` | `$XDG_RUNTIME_DIR/camera-box-rig-watchdog.state` | confirm-counter persistence |

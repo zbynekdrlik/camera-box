@@ -4026,3 +4026,32 @@ fn setup_strih_final_verify_reports_pending_items_before_the_reboot() {
         "pending branch first, the hard gate in the else"
     );
 }
+
+// issue 1317 (M4): strih-lx is the production strih at 10.77.9.202 and `strih-lx.lan` does not
+// resolve on dev1, so the dial default is the ONE fleet list's host (scripts/lib/obs-fleet.sh).
+// STRIH_LX_HOST stays the explicit override.
+#[test]
+fn strih_lx_host_defaults_to_the_fleet_list_address_1317() {
+    let (c, out, err) = run_sourced(&[], "unset STRIH_LX_HOST; strih_lx_host");
+    assert_eq!(c, 0, "stderr={err}");
+    assert_eq!(out.trim(), "10.77.9.202");
+    let (_c, out, _e) = run_sourced(&[("STRIH_LX_HOST", "10.9.9.9")], "strih_lx_host");
+    assert_eq!(out.trim(), "10.9.9.9");
+}
+
+// The box's OWN hostname is the fleet NAME, never derived from the dial address: with the dial
+// default now an IP, the old `${STRIH_HOST%%.*}` would have renamed the box to `10`.
+#[test]
+fn strih_lx_hostname_is_the_fleet_name_not_the_dial_address_1317() {
+    let (_c, out, _e) = run_sourced(&[("STRIH_LX_HOST", "10.77.9.202")], "strih_lx_hostname");
+    assert_eq!(out.trim(), "strih-lx");
+    let setup = read_script("scripts/setup-strih.sh");
+    assert!(
+        setup.contains("hostnamectl set-hostname \"$(strih_lx_hostname)\""),
+        "setup-strih.sh must set the hostname from strih_lx_hostname"
+    );
+    assert!(
+        !setup.contains("${STRIH_HOST%%.*}"),
+        "the hostname must never be cut from the dial address"
+    );
+}

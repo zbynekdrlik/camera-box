@@ -1247,6 +1247,13 @@ catches this before CI (`subprocess.run` raises `OSError: [Errno 7]` on the same
 
 ## A whole `tests/*.rs` integration file RUNS locally with plain `rustc --test` + a stub `tempfile` rlib — no cargo (issue 1357)
 
+> **LIMIT (owner order 23.9.2026 — dev1 is Tier-0, 7.5 GB RAM):** use this for the ONE or TWO test files
+> that directly cover your change, one compile at a time — NEVER "every test file that reads the
+> touched script" and never in several lanes at once. The same day a lane's
+> `shellcheck -S warning -x scripts/recording-e2e.sh` reached 2.9 GB RSS and, with parallel lanes'
+> rustc/g++ lifts, swapped dev1 to a halt (load 33). Never `shellcheck -x` on recording-e2e.sh /
+> rig-mode.sh locally — CI's Shellcheck job runs it; the push → CI run is the full proof.
+
 The script-reading harnesses (`setup_imag_guards.rs`, `strih_provision_pure_functions.rs`,
 `verify_imag_pure_functions.rs`, `drift_guard.rs`, ~40 more) use only `std` plus `tempfile`, so the
 REAL test file (not a replica) compiles and runs under Tier-0 without any cargo shape:
@@ -1260,6 +1267,18 @@ REAL test file (not a replica) compiles and runs under Tier-0 without any cargo 
 3. RED proof against the pre-fix scripts: export HEAD's `scripts/` + `systemd/` into a scratch tree
    (the version-control `archive -o head.tar HEAD scripts systemd` subcommand), copy the NEW test files
    in, and compile with `CARGO_MANIFEST_DIR=<that tree>`.
+
+Two extensions that widen this net (issue 1317 part 3):
+- **A file using `env!("CARGO_BIN_EXE_<bin>")`** (the `harness_*_gate.rs` family) fails to compile
+  with "not defined at compile time". Pass a dummy at compile time — the name has hyphens, so go
+  through `env`: `env CARGO_MANIFEST_DIR=<wt> "CARGO_BIN_EXE_<bin>=/nonexistent" rustc … --test …`.
+  Every static-anchor test then runs for real; only the `gate_binary_*` tests that exec the binary
+  fail (expected — they stay CI-only). Grep the names with `grep -oE 'CARGO_BIN_EXE_[A-Za-z0-9_-]+'`.
+- **A file that `use camera_box::<module>::…` only for PURE std-only items** (e.g.
+  `tests/obs_self_heal_install.rs` → `obs_self_heal::DEFAULT_*`): build a one-module stub crate
+  from the REAL source — copy `src/<module>.rs`, write `lib.rs` = `pub mod <module>;`,
+  `rustc --crate-type rlib --crate-name camera_box lib.rs -o libcamera_box.rlib`, then
+  `--extern camera_box=<that rlib>`. It only works while the module has no `crate::`/dep imports.
 
 Put the loop in a script FILE and `bash` it (the worktree guard refuses `$VAR`-computed paths in a
 direct rustc call). A file needing another crate (serde, the camera_box lib) fails to compile this
@@ -1276,3 +1295,18 @@ pure crate-root module, a std-only `tests/*.rs` harness (set `CARGO_MANIFEST_DIR
 cross-module `const _: () = assert!(...)`. It caught a `double_comparisons` error
 (`a <= b && a >= b` -> write `a == b`) in a lib.rs const pin that plain `rustc -D warnings` passed.
 Files that need the camera_box crate or serde stay CI-only.
+It also catches the truth-table shape std-only vendored-C gates love: a row slice typed
+`&[((i32, i32, i32, i32), i32)]` is a `clippy::type_complexity` error under `-D warnings` (issue
+1363 — plain `rustc -D warnings` passed it). Name the row type (`type FourIntVector = …;`).
+
+## Pinning a PRINTED shell command: parse it with BASH, never python `shlex` (issue 1317 part 4)
+
+A test that pins a plan line an operator pastes (e.g. the strih-lx `ssh host "rm -f -- '<path>'"`
+cleanup line) must prove it survives BOTH parses — the local paste AND ssh's remote shell (ssh joins
+its args into one string the remote shell re-parses, so a single-level `'…'` quote around a spaced
+OBS filename silently becomes two `rm` args, hidden by `-f`). Python `shlex.split` is NOT a bash
+model: inside double quotes it keeps the backslash before `$` and a backtick, so it mis-reads a
+correctly escaped line (and would pass a wrong one). The faithful pin runs the line through bash
+twice: a fake `ssh` function records `$#` + its args (must be exactly `user@host` + ONE remote
+string), then that string runs under `bash -c` with a fake `rm` that prints its argv NUL-separated.
+Fixture paths: a space, `'`, `"`, `$`, a backtick and `\` (`tests/python/test_strih_windows_remnants_1317.py`).

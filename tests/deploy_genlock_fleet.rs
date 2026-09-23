@@ -1,5 +1,7 @@
-//! issue 789 (bod 4 + bod 5) — one deploy path for the OBS genlock build across strih + stream +
-//! imag from ONE CI run id, plus deploy-*/obs-backup-* retention.
+//! issue 789 (bod 4 + bod 5) — one deploy path for the OBS genlock build across strih-lx + stream
+//! (+ imag / resolume when named) from ONE CI run id, plus deploy-*/obs-backup-* retention. issue
+//! 1317 part 3 RETIRED the Windows `strih` arm (the STRIH-SNV PC is gone; 10.77.9.202 is the Linux
+//! strih-lx) and moved the per-box constant table into `scripts/lib/genlock-fleet-boxes.sh`.
 //!
 //! `scripts/deploy-genlock-fleet.sh` is a PLANNER + bounded ssh-executor in the exact shape of
 //! `scripts/launch-obs-genlock.sh`: pure builder functions (no network, no MCP, no Windows) that
@@ -18,6 +20,12 @@ fn manifest_dir() -> PathBuf {
 
 fn script() -> PathBuf {
     let s = manifest_dir().join("scripts/deploy-genlock-fleet.sh");
+    assert!(s.exists(), "{} not found", s.display());
+    s
+}
+
+fn boxes_lib() -> PathBuf {
+    let s = manifest_dir().join("scripts/lib/genlock-fleet-boxes.sh");
     assert!(s.exists(), "{} not found", s.display());
     s
 }
@@ -206,15 +214,15 @@ fn inline_genlock_write_markers_matches_the_shared_lib() {
 #[test]
 fn normalize_boxes_dedups_and_validates() {
     assert_eq!(
-        run_sourced(&script(), "fleet_normalize_boxes imag,strih,imag").trim(),
-        "strih,imag",
+        run_sourced(&script(), "fleet_normalize_boxes imag,strih-lx,imag").trim(),
+        "strih-lx,imag",
         "canonical order with dedup; imag stays a VALID explicit target (issue 1316)"
     );
     assert_eq!(
         run_sourced(&script(), "fleet_normalize_boxes ''").trim(),
-        "strih,stream",
-        "issue 1316: empty selection defaults to strih,stream — imag RETIRED (returned to owner), \
-         dropped from the empty-default (still valid when named explicitly)"
+        "strih-lx,stream",
+        "issue 1317 part 3: empty selection defaults to strih-lx,stream — the Windows strih PC is \
+         RETIRED; imag RETIRED too (issue 1316), dropped from the empty-default"
     );
     let (code, _o, err) = run_sourced_status(&script(), "fleet_normalize_boxes bogus");
     assert!(
@@ -333,12 +341,12 @@ fn retention_with_fewer_than_keep_lists_nothing() {
 }
 
 // ============================================================================================
-// build_windows_deploy_program — the emitted PowerShell for strih / stream.
+// build_windows_deploy_program — the emitted PowerShell for the Windows boxes (stream / resolume).
 // ============================================================================================
 
 #[test]
 fn windows_program_is_a_fail_loud_powershell_deploy() {
-    let p = win_program("strih", "full", "1");
+    let p = win_program("resolume", "full", "1");
     assert!(
         p.contains("$ErrorActionPreference = 'Stop'"),
         "must set Stop:\n{p}"
@@ -391,7 +399,7 @@ fn windows_program_is_a_fail_loud_powershell_deploy() {
 
 #[test]
 fn windows_full_program_does_the_three_surgical_robocopies() {
-    let p = win_program("strih", "full", "1");
+    let p = win_program("resolume", "full", "1");
     assert!(p.contains("robocopy"), "full deploy uses robocopy:\n{p}");
     assert!(p.contains("bin\\64bit"), "copies bin\\64bit:\n{p}");
     assert!(p.contains("/XF *.pdb"), "PDBs are never deployed:\n{p}");
@@ -428,7 +436,7 @@ fn windows_fast_program_is_obs_dll_only() {
 /// canonical build and the byte-parity gather/compare against the manifest becomes real.
 #[test]
 fn windows_full_deploys_distroav_to_programdata_load_path_1115() {
-    let p = win_program("strih", "full", "1");
+    let p = win_program("resolume", "full", "1");
     // OBS loads DistroAV ONLY from the ProgramData bin\64bit path — the deploy must write THERE.
     assert!(
         p.contains(r"C:\ProgramData\obs-studio\plugins\distroav\bin\64bit\distroav.dll"),
@@ -481,22 +489,22 @@ fn windows_fast_does_not_touch_programdata_distroav_1115() {
     );
 }
 
-// issue 1295: the AHK stop/restart bracket is emitted for any has_ahk=1 box (strih AND now
-// resolume), never for stream (has_ahk=0). This test pins the strih-vs-stream split; the resolume
-// arm is pinned by resolume_windows_program_carries_ahk_and_no_keepalive_1295.
+// issue 1295: the AHK stop/restart bracket is emitted for any has_ahk=1 box (resolume — the
+// retired Windows strih was the other one, issue 1317), never for stream (has_ahk=0). This test
+// pins the AHK-box-vs-stream split.
 #[test]
 fn windows_ahk_bracket_on_ahk_box_not_stream() {
-    let strih = win_program("strih", "full", "1");
+    let ahk_box = win_program("resolume", "full", "1");
     let stream = win_program("stream", "full", "0");
     assert!(
-        strih.contains("Stop-Process -Name AutoHotkey64"),
-        "strih runs the AHK watchdog — must be stopped before the copy:\n{strih}"
+        ahk_box.contains("Stop-Process -Name AutoHotkey64"),
+        "an AHK box runs the AHK watchdog — must be stopped before the copy:\n{ahk_box}"
     );
-    // #789 review #1: strih MUST restart AHK verified before exiting (leaving it running so the
+    // #789 review #1: an AHK box MUST restart AHK verified before exiting (leaving it running so the
     // STEP-2 launch-obs-genlock.sh session gate passes) — launch only restarts AHK it stopped itself.
     assert!(
-        strih.contains("ahkRelaunchVerified") && strih.contains("exit 9"),
-        "strih must restart AHK VERIFIED and fail loud if it doesn't come back (#789 review #1):\n{strih}"
+        ahk_box.contains("ahkRelaunchVerified") && ahk_box.contains("exit 9"),
+        "an AHK box must restart AHK VERIFIED and fail loud if it doesn't come back (#789 review #1):\n{ahk_box}"
     );
     assert!(
         !stream.contains("Stop-Process -Name AutoHotkey64"),
@@ -514,13 +522,13 @@ fn windows_confirm_wires_retention_deletion() {
     // 10th arg = confirm=1
     let confirmed = run_sourced(
         &script(),
-        "build_windows_deploy_program strih full 'C:\\st' 'C:\\Program Files\\obs-studio' 1 'C:\\obs-backup' 3 SHA DSHA 1",
+        "build_windows_deploy_program resolume full 'C:\\st' 'C:\\Program Files\\obs-studio' 1 'C:\\obs-backup' 3 SHA DSHA 1",
     );
     assert!(
         confirmed.contains("$fleetConfirmRetention = $true"),
         "confirm=1 must set $fleetConfirmRetention = $true:\n{confirmed}"
     );
-    let default = win_program("strih", "full", "1"); // confirm defaults to 0
+    let default = win_program("resolume", "full", "1"); // confirm defaults to 0
     assert!(
         default.contains("$fleetConfirmRetention = $false"),
         "default (no --yes) must keep retention print-only ($false):\n{default}"
@@ -529,7 +537,7 @@ fn windows_confirm_wires_retention_deletion() {
 
 #[test]
 fn windows_program_prints_retention_plan_never_silent_delete() {
-    let p = win_program("strih", "full", "1");
+    let p = win_program("resolume", "full", "1");
     assert!(
         p.to_uppercase().contains("RETENTION PLAN"),
         "prints a retention plan:\n{p}"
@@ -551,7 +559,7 @@ fn windows_program_prints_retention_plan_never_silent_delete() {
 
 /// #1140 — the per-box source of the OBS keep-alive SCHEDULED-TASK names a deploy must disable so
 /// none respawns obs64 mid-copy. stream runs the #812 avsync-keepalive (~10 min) AND the #411
-/// obs-self-heal (~2 min, the actual obs64 respawner), so BOTH are listed; strih's keep-alive is
+/// obs-self-heal (~2 min, the actual obs64 respawner), so BOTH are listed; resolume's keep-alive is
 /// the AHK watcher (the has_ahk path), so it lists none. Curated per box — never all of a box's
 /// scheduled tasks.
 #[test]
@@ -565,10 +573,10 @@ fn fleet_box_keepalive_tasks_lists_stream_obs_keepalives_1140() {
         stream.contains("camera-box-obs-self-heal-stream"),
         "stream must list the #411 obs-self-heal task (the 2-min obs64 respawner):\n{stream}"
     );
-    let strih = run_sourced(&script(), "fleet_box_keepalive_tasks strih");
+    let ahk_box = run_sourced(&script(), "fleet_box_keepalive_tasks resolume");
     assert!(
-        strih.trim().is_empty(),
-        "strih lists NO keep-alive scheduled task (its keep-alive is the AHK watcher):\n{strih:?}"
+        ahk_box.trim().is_empty(),
+        "resolume lists NO keep-alive scheduled task (its keep-alive is the AHK watcher):\n{ahk_box:?}"
     );
     let unknown = run_sourced(&script(), "fleet_box_keepalive_tasks nope");
     assert!(
@@ -637,11 +645,11 @@ fn windows_stream_disables_and_restores_obs_keepalive_tasks_1140() {
         restore_at > ahk_restart_at,
         "keep-alive restore (8b) comes at the tail, after the AHK restart step (8):\n{stream}"
     );
-    // strih carries NO scheduled-task keep-alive block (its keep-alive is the AHK watcher).
-    let strih = win_program("strih", "full", "1");
+    // an AHK box carries NO scheduled-task keep-alive block (its keep-alive is the AHK watcher).
+    let ahk_box = win_program("resolume", "full", "1");
     assert!(
-        !strih.contains("avsync-keepalive") && !strih.contains("$disabledKeepAlive"),
-        "strih must carry no scheduled-task keep-alive handling (AHK watcher path only):\n{strih}"
+        !ahk_box.contains("avsync-keepalive") && !ahk_box.contains("$disabledKeepAlive"),
+        "an AHK box must carry no scheduled-task keep-alive handling (AHK watcher path only):\n{ahk_box}"
     );
 }
 
@@ -884,11 +892,11 @@ fn imag_program_confirm_deletes_stale_backups() {
 fn fleet_log_line_is_one_tab_separated_record() {
     let line = run_sourced(
         &script(),
-        "fleet_log_line RUN123 abcdef1 strih,stream,imag full",
+        "fleet_log_line RUN123 abcdef1 strih-lx,stream,imag full",
     );
     let line = line.trim();
     assert!(line.contains('\t'), "tab-separated:\n{line}");
-    for tok in ["RUN123", "abcdef1", "strih,stream,imag", "full"] {
+    for tok in ["RUN123", "abcdef1", "strih-lx,stream,imag", "full"] {
         assert!(line.contains(tok), "log line must carry {tok}:\n{line}");
     }
     assert_eq!(line.lines().count(), 1, "exactly one line:\n{line}");
@@ -907,18 +915,18 @@ fn plan_mode_emits_all_box_programs_without_network() {
         "--stage",
         stage.to_str().unwrap(),
         "--boxes",
-        "strih,imag",
+        "stream,imag",
         "--full",
     ]);
     assert_eq!(code, 0, "--plan must succeed.\nstdout={out}\nstderr={err}");
-    // Windows (strih) program present
+    // Windows (stream) program present
     assert!(
         out.contains("$ErrorActionPreference = 'Stop'"),
-        "emits the strih PS program:\n{out}"
+        "emits the stream PS program:\n{out}"
     );
     assert!(
-        out.contains("win-strih"),
-        "names the strih MCP for the paste step:\n{out}"
+        out.contains("win-stream-snv"),
+        "names the stream MCP for the paste step:\n{out}"
     );
     // imag program present
     assert!(
@@ -930,10 +938,10 @@ fn plan_mode_emits_all_box_programs_without_network() {
         out.contains("RUN123") && out.contains("abcdef1234"),
         "emits the fleet log line with run id + sha:\n{out}"
     );
-    // stream was NOT requested -> its MCP must not appear
+    // resolume was NOT requested -> its MCP must not appear
     assert!(
-        !out.contains("win-stream-snv"),
-        "stream not selected -> not in the plan:\n{out}"
+        !out.contains("win-resolume"),
+        "resolume not selected -> not in the plan:\n{out}"
     );
 }
 
@@ -943,7 +951,7 @@ fn plan_mode_emits_all_box_programs_without_network() {
 fn plan_emits_forced_table_audit_preflight_before_step0_1303() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let stage = tmp.path();
-    for boxes in ["resolume", "strih,imag"] {
+    for boxes in ["resolume", "stream,imag"] {
         let (code, out, err) = run_script(&[
             "--plan",
             "--run-id",
@@ -985,7 +993,7 @@ fn plan_emits_forced_table_audit_preflight_before_step0_1303() {
             "preflight must precede the deploy program for {boxes}:\n{out}"
         );
     }
-    // one preflight per requested box (2 for strih,imag).
+    // one preflight per requested box (2 for stream,imag).
     let (_c, out2, _e) = run_script(&[
         "--plan",
         "--run-id",
@@ -995,7 +1003,7 @@ fn plan_emits_forced_table_audit_preflight_before_step0_1303() {
         "--stage",
         stage.to_str().unwrap(),
         "--boxes",
-        "strih,imag",
+        "stream,imag",
         "--full",
     ]);
     assert_eq!(
@@ -1013,7 +1021,8 @@ fn plan_emits_forced_table_audit_preflight_before_step0_1303() {
 fn plan_last_nonempty_line_is_exit_0_and_no_bare_log_record_1295() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let stage = tmp.path();
-    for boxes in ["resolume", "strih,imag"] {
+    // issue 1317 part 3: the strih-lx plan (all #-comment guidance) rides along the Windows boxes.
+    for boxes in ["resolume", "strih-lx,stream,imag"] {
         let (code, out, err) = run_script(&[
             "--plan",
             "--run-id",
@@ -1089,10 +1098,10 @@ fn normalize_accepts_resolume_explicit_only_not_default_1295() {
     assert_eq!(
         run_sourced(
             &script(),
-            "fleet_normalize_boxes strih,stream,imag,resolume"
+            "fleet_normalize_boxes strih-lx,stream,imag,resolume"
         )
         .trim(),
-        "strih,stream,imag,resolume"
+        "strih-lx,stream,imag,resolume"
     );
     assert_eq!(
         run_sourced(&script(), "fleet_normalize_boxes resolume").trim(),
@@ -1100,15 +1109,19 @@ fn normalize_accepts_resolume_explicit_only_not_default_1295() {
     );
     // dedup
     assert_eq!(
-        run_sourced(&script(), "fleet_normalize_boxes resolume,strih,resolume").trim(),
-        "strih,resolume"
+        run_sourced(
+            &script(),
+            "fleet_normalize_boxes resolume,strih-lx,resolume"
+        )
+        .trim(),
+        "strih-lx,resolume"
     );
-    // the empty default is strih,stream ONLY -- resolume (traveling maintenance box) is never
+    // the empty default is strih-lx,stream ONLY -- resolume (traveling maintenance box) is never
     // pulled into the whole-fleet default, and imag left it when imag-nb was RETIRED (issue 1316,
     // 16.9.2026); both deploy only when explicitly named.
     assert_eq!(
         run_sourced(&script(), "fleet_normalize_boxes ''").trim(),
-        "strih,stream"
+        "strih-lx,stream"
     );
 }
 
@@ -1125,7 +1138,8 @@ fn resolume_box_constants_mcp_hostname_with_ahk_1295() {
         "resolume.lan"
     );
     // issue 1295 correction (supervisor pre-deploy inventory): RESOLUME-SNV RUNS an AutoHotkey v2
-    // safe-loop (NL_STARTUP.ahk, SafeLoop:=1) that respawns OBS -- the SAME pattern as strih -- so
+    // safe-loop (NL_STARTUP.ahk, SafeLoop:=1) that respawns OBS -- the SAME pattern the retired
+    // Windows strih had -- so
     // has_ahk MUST be 1, or a deploy/relaunch that does not stop it first races a SECOND obs64.
     assert_eq!(
         run_sourced(&script(), "fleet_box_has_ahk resolume").trim(),
@@ -1141,17 +1155,25 @@ fn resolume_box_constants_mcp_hostname_with_ahk_1295() {
         run_sourced(&script(), "fleet_box_ahk_prefer resolume").trim(),
         "lnk"
     );
-    // strih keeps its current identity (byte-neutral): the D:\_APPS path + the exe-first order.
-    assert_eq!(
-        run_sourced(&script(), "fleet_box_ahk_script strih").trim(),
-        "D:\\_APPS\\NL_STARTUP.ahk"
-    );
-    assert_eq!(
-        run_sourced(&script(), "fleet_box_ahk_prefer strih").trim(),
-        "exe"
-    );
+    // issue 1317 part 3: the retired Windows strih has NO AHK identity any more, and a no-AHK box
+    // (stream) never had one -- asking fails loud (rc 2, no output), never another box's script.
+    for no_ahk in ["strih", "stream", "strih-lx"] {
+        let (rc, out, _e) =
+            run_sourced_status(&script(), &format!("fleet_box_ahk_script {no_ahk}"));
+        assert_eq!(
+            rc, 2,
+            "fleet_box_ahk_script {no_ahk} must fail closed: {out:?}"
+        );
+        assert!(out.trim().is_empty(), "no AHK path for {no_ahk}: {out:?}");
+        let (rc, out, _e) =
+            run_sourced_status(&script(), &format!("fleet_box_ahk_prefer {no_ahk}"));
+        assert_eq!(
+            rc, 2,
+            "fleet_box_ahk_prefer {no_ahk} must fail closed: {out:?}"
+        );
+    }
     // no OBS keep-alive SCHEDULED-TASK respawner on the CG box -- its respawner IS the AHK watcher
-    // (handled by the has_ahk stop/restart path), exactly like strih, so it lists no keepalive task.
+    // (handled by the has_ahk stop/restart path), so it lists no keepalive task.
     assert_eq!(
         run_sourced(&script(), "fleet_box_keepalive_tasks resolume").trim(),
         ""
@@ -1162,7 +1184,7 @@ fn resolume_box_constants_mcp_hostname_with_ahk_1295() {
 fn resolume_windows_program_carries_ahk_and_no_keepalive_1295() {
     let p = win_program("resolume", "full", "1");
     // issue 1295: the AHK watcher MUST be stopped before the byte copy (it respawns obs64), and
-    // restarted + VERIFIED afterward (the issue-789 restart guard), exactly like strih.
+    // restarted + VERIFIED afterward (the issue-789 restart guard).
     assert!(
         p.contains("Stop-Process -Name AutoHotkey64"),
         "resolume runs the AHK watcher -- its program must stop AutoHotkey64 before the copy:\n{p}"
@@ -1171,12 +1193,12 @@ fn resolume_windows_program_carries_ahk_and_no_keepalive_1295() {
         p.contains("ahkRelaunchVerified") && p.contains("exit 9"),
         "resolume must restart AHK VERIFIED + fail loud if it doesn't come back (issue 789):\n{p}"
     );
-    // the relaunch target is resolume's OWN .ahk path (never strih's D:\_APPS path).
+    // the relaunch target is resolume's OWN .ahk path (never the retired strih's D:\_APPS path).
     assert!(
         p.contains(
             "$ahkScriptPath = 'C:\\Users\\Resolume\\Documents\\_NLMEDIA resolume\\_APPS\\NL_STARTUP.ahk'"
         ) && !p.contains("$ahkScriptPath = 'D:\\_APPS\\NL_STARTUP.ahk'"),
-        "resolume's deploy program must relaunch via its OWN .ahk path, not strih's:\n{p}"
+        "resolume's deploy program must relaunch via its OWN .ahk path, not the retired strih's:\n{p}"
     );
     assert!(
         !p.contains("schtasks /Change"),
@@ -1226,7 +1248,7 @@ fn resolume_plan_emits_identity_confirm_and_win_resolume_mcp_1295() {
 
 #[test]
 fn non_resolume_plan_has_no_identity_confirm_preamble_1295() {
-    // the identity-confirm STEP -1 is resolume-only -- strih/stream plans must not carry it.
+    // the identity-confirm STEP -1 is resolume-only -- the stream / strih-lx plans must not carry it.
     let tmp = tempfile::tempdir().expect("tempdir");
     let (_c, out, _e) = run_script(&[
         "--plan",
@@ -1237,23 +1259,28 @@ fn non_resolume_plan_has_no_identity_confirm_preamble_1295() {
         "--stage",
         tmp.path().to_str().unwrap(),
         "--boxes",
-        "strih",
+        "strih-lx,stream",
         "--full",
     ]);
     assert!(
+        out.contains("FLEET PLAN: box=stream") && out.contains("FLEET PLAN: box=strih-lx"),
+        "the plan must actually carry the stream + strih-lx plans:\n{out}"
+    );
+    assert!(
         !out.contains("box IDENTITY confirm"),
-        "strih plan must NOT carry the resolume-only identity-confirm preamble:\n{out}"
+        "stream / strih-lx plans must NOT carry the resolume-only identity-confirm preamble:\n{out}"
     );
 }
 
 /// #1295 follow-up C -- the #789 AHK-restart-failure Write-Error is emitted ONLY for has_ahk=1
-/// boxes (strih AND resolume), which DO run an AHK respawn watcher; the failure means the watcher
-/// did not come BACK after the deploy, not that the box lacks one. The inherited strih text
-/// "<box> has NO respawn watcher" was wrong for every such box. It must now say the watcher failed
-/// to restart, for BOTH strih and resolume.
+/// boxes (resolume; the retired Windows strih was the other), which DO run an AHK respawn watcher;
+/// the failure means the watcher did not come BACK after the deploy, not that the box lacks one.
+/// The inherited text "<box> has NO respawn watcher" was wrong for every such box. It must say the
+/// watcher failed to restart.
 #[test]
 fn ahk_restart_failure_message_does_not_falsely_claim_no_watcher_1295() {
-    for box_name in ["strih", "resolume"] {
+    {
+        let box_name = "resolume";
         let p = win_program(box_name, "full", "1");
         assert!(
             !p.contains("has NO respawn watcher"),
@@ -1269,4 +1296,296 @@ fn ahk_restart_failure_message_does_not_falsely_claim_no_watcher_1295() {
             "{box_name}: the #789 AHK-restart failure must stay fail-loud (exit 9):\n{p}"
         );
     }
+}
+
+// issue 1317 (M4): strih-lx.lan has NO DNS entry on dev1, so the strih-lx dial default is the ONE
+// fleet list's host for strih-lx (scripts/lib/obs-fleet.sh), never the unresolvable name.
+// STRIH_LX_IP stays the explicit override.
+#[test]
+fn fleet_box_ip_strih_lx_defaults_to_the_fleet_list_host_1317() {
+    let out = run_sourced(&script(), "unset STRIH_LX_IP; fleet_box_ip strih-lx");
+    assert_eq!(out.trim(), "10.77.9.202");
+    let out = run_sourced(&script(), "STRIH_LX_IP=10.1.2.3 fleet_box_ip strih-lx");
+    assert_eq!(out.trim(), "10.1.2.3");
+}
+
+// issue 1317 review round 1: an unresolvable strih-lx fleet host fails CLOSED (rc 2, no output),
+// never an empty dial address; the AHK fact is the shared obs-fleet one.
+#[test]
+fn fleet_box_ip_strih_lx_fails_closed_without_a_fleet_row_1317() {
+    let (rc, out, _err) = run_sourced_status(
+        &script(),
+        "unset STRIH_LX_IP; OBS_FLEET='stream|10.77.9.204|windows-genlock|always'; fleet_box_ip strih-lx",
+    );
+    assert_eq!(rc, 2, "no strih-lx row must fail closed: out={out:?}");
+    assert!(out.trim().is_empty(), "no empty dial address: {out:?}");
+    let src = std::fs::read_to_string(boxes_lib()).unwrap();
+    assert!(
+        src.contains("obs_fleet_has_ahk"),
+        "fleet_box_has_ahk must delegate to the shared obs_fleet_has_ahk fact"
+    );
+}
+
+// ============================================================================================
+// issue 1317 part 3 -- the Windows strih PC is RETIRED (M4 cut-over 20.9.2026; 10.77.9.202 is the
+// Linux strih-lx). The deploy planner's box set comes from the fleet list, the Windows `strih` arm
+// is gone, and the strih-lx plan is the provisioning recipe, never a Windows program.
+// ============================================================================================
+
+/// The retired Windows `strih` is refused BY NAME everywhere a Windows action could be emitted for
+/// it: the box list, the per-box constants, the Windows builder, and the --plan CLI.
+#[test]
+fn retired_windows_strih_is_refused_everywhere_1317() {
+    let (rc, out, err) = run_sourced_status(&script(), "fleet_normalize_boxes strih");
+    assert_eq!(
+        rc, 2,
+        "a `strih` request must be a usage error: out={out:?}"
+    );
+    assert!(
+        err.contains("RETIRED") && err.contains("strih-lx"),
+        "the refusal must name the retirement + the replacement strih-lx: {err:?}"
+    );
+    for f in ["fleet_box_mcp", "fleet_box_ip"] {
+        let (rc, out, _e) = run_sourced_status(&script(), &format!("{f} strih"));
+        assert_eq!(
+            rc, 2,
+            "{f} strih must fail closed (no Windows strih row): {out:?}"
+        );
+        assert!(out.trim().is_empty(), "{f} strih prints nothing: {out:?}");
+    }
+    assert_eq!(
+        run_sourced(&script(), "fleet_box_has_ahk strih").trim(),
+        "0",
+        "the retired strih carries no AHK fact any more"
+    );
+    // HAS_AHK=1 for a box with no AHK identity is a loud error, never a relaunch of another box's
+    // script (the old builder silently fell back to the retired strih's D:\_APPS path).
+    let (rc, out, err) = run_sourced_status(
+        &script(),
+        "build_windows_deploy_program stream full 'C:\\st' 'C:\\obs' 1 'C:\\obs-backup' 3 S D",
+    );
+    assert_eq!(rc, 2, "HAS_AHK=1 on a no-AHK box must fail: out={out:?}");
+    assert!(
+        err.contains("no AHK relaunch identity"),
+        "the refusal names the missing identity: {err:?}"
+    );
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (code, out, err) = run_script(&[
+        "--plan",
+        "--run-id",
+        "R1",
+        "--sha",
+        "deadbeef",
+        "--stage",
+        tmp.path().to_str().unwrap(),
+        "--boxes",
+        "strih",
+    ]);
+    assert_eq!(
+        code, 2,
+        "--boxes strih must exit 2.\nstdout={out}\nstderr={err}"
+    );
+    assert!(!out.contains("win-strih"), "no Windows strih plan: {out}");
+}
+
+/// The DEFAULT deploy (no --boxes) is the production strih-lx + stream, and it never emits a
+/// Windows program for 10.77.9.202 (the defect: the old default printed a win-strih robocopy/AHK
+/// plan for the Linux notebook).
+#[test]
+fn default_plan_is_strih_lx_and_stream_never_a_windows_strih_1317() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (code, out, err) = run_script(&[
+        "--plan",
+        "--run-id",
+        "R1",
+        "--sha",
+        "deadbeef",
+        "--stage",
+        tmp.path().to_str().unwrap(),
+    ]);
+    assert_eq!(
+        code, 0,
+        "default --plan must succeed.\nstdout={out}\nstderr={err}"
+    );
+    assert!(
+        out.contains("boxes=strih-lx,stream"),
+        "the default box set is strih-lx,stream:\n{out}"
+    );
+    assert!(
+        out.contains("FLEET PLAN: box=strih-lx (ssh newlevel@10.77.9.202, linux-genlock)"),
+        "the strih plan dials strih-lx at its fleet address:\n{out}"
+    );
+    assert!(
+        out.contains("FLEET PLAN: box=stream (win-stream-snv, 10.77.9.204)"),
+        "stream keeps its Windows plan:\n{out}"
+    );
+    assert!(
+        !out.contains("win-strih") && !out.contains("box=strih ("),
+        "no Windows strih plan in the default deploy:\n{out}"
+    );
+    // exactly ONE Windows deploy program (stream's) -- strih-lx gets none.
+    assert_eq!(
+        out.matches("$ErrorActionPreference = 'Stop'").count(),
+        1,
+        "only stream carries a Windows deploy program:\n{out}"
+    );
+}
+
+/// The strih-lx plan is the sanctioned provisioning recipe (prune stale stages, stage the strih
+/// FULL artifact + scripts/ + systemd/, setup-strih.sh with STRIH_LX_BUNDLE_SRC, a supervised
+/// strih-obs.service restart) -- never the imag on-box program, which restarts imag-obs.service (a
+/// unit strih-lx does not have) and was printed under a `box=imag` header before issue 1317 part 3.
+/// Every line is a #-comment so a saved whole-plan .ps1 still parses (the issue-1295 rule).
+#[test]
+fn strih_lx_plan_is_the_setup_strih_recipe_not_the_imag_program_1317() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (code, out, err) = run_script(&[
+        "--plan",
+        "--run-id",
+        "R1",
+        "--sha",
+        "deadbeef",
+        "--stage",
+        tmp.path().to_str().unwrap(),
+        "--boxes",
+        "strih-lx",
+    ]);
+    assert_eq!(
+        code, 0,
+        "--plan strih-lx must succeed.\nstdout={out}\nstderr={err}"
+    );
+    for want in [
+        "obs-backup-retention.sh --box strih-lx",
+        "obs-genlock-linux-x86_64-strih",
+        // review round 1: the repo tree goes to ONE fixed, overwritten path (a per-sha `-repo` dir
+        // matches no retention allowlist and would never be swept).
+        "rsync -a --delete scripts systemd newlevel@10.77.9.202:/tmp/strih-lx-deploy-repo/",
+        "STRIH_LX_BUNDLE_SRC=/tmp/genlock-stage-deadbeef",
+        // review round 1: $PW expands on dev1 (outer double quotes) and reaches sudo via printf, and
+        // the script runs DIRECTLY so `pgrep -x setup-strih.sh` can actually see it.
+        "sshpass -p \"$PW\" ssh newlevel@10.77.9.202 \"printf '%s\\n' '$PW' | sudo -S -p ''",
+        "nohup /tmp/strih-lx-deploy-repo/scripts/setup-strih.sh",
+        "pgrep -x setup-strih.sh",
+        "systemctl --user restart strih-obs.service",
+        "verify-strih.sh",
+        "PREFLIGHT (report-only, #1303 part 4)",
+    ] {
+        assert!(
+            out.contains(want),
+            "the strih-lx plan must carry `{want}`:\n{out}"
+        );
+    }
+    assert!(
+        !out.contains("imag-obs.service") && !out.contains("box=imag"),
+        "the strih-lx plan must never be the imag program:\n{out}"
+    );
+    assert!(
+        !out.contains("nohup bash ") && !out.contains("'echo \"$PW\""),
+        "no `nohup bash` wrapper (pgrep -x would never match) and no remote-expanded $PW:\n{out}"
+    );
+    for line in out.lines() {
+        let t = line.trim();
+        if t.is_empty() || t == "exit 0" {
+            continue;
+        }
+        assert!(
+            t.starts_with('#'),
+            "every strih-lx plan line is #-comment guidance (file-mode PS parse), got: {line:?}"
+        );
+    }
+    // STRIH_LX_IP stays the explicit dial override.
+    let o = Command::new(script())
+        .args([
+            "--plan", "--run-id", "R1", "--sha", "deadbeef", "--stage", "/stage", "--boxes",
+            "strih-lx",
+        ])
+        .env("STRIH_LX_IP", "10.9.9.9")
+        .current_dir(manifest_dir())
+        .output()
+        .expect("run deploy-genlock-fleet.sh");
+    let out2 = String::from_utf8_lossy(&o.stdout).into_owned();
+    assert!(
+        out2.contains("ssh newlevel@10.9.9.9"),
+        "the plan dials the STRIH_LX_IP override:\n{out2}"
+    );
+}
+
+/// The per-box constant table lives in ONE sourced lib shared by the three Windows planners, so a
+/// box is registered once (the deploy script was at 999 lines with the table inline).
+#[test]
+fn per_box_table_lives_in_the_shared_lib_1317() {
+    let deploy = std::fs::read_to_string(script()).unwrap();
+    let lib = std::fs::read_to_string(boxes_lib()).unwrap();
+    for f in [
+        "fleet_box_mcp()",
+        "fleet_box_ip()",
+        "fleet_strih_lx_ip()",
+        "fleet_box_has_ahk()",
+        "fleet_box_ahk_script()",
+        "fleet_box_ahk_prefer()",
+        "fleet_resolume_identity_confirm_note()",
+        "fleet_box_keepalive_tasks()",
+    ] {
+        assert!(lib.contains(f), "the shared lib defines {f}");
+        assert!(
+            !deploy.contains(f),
+            "deploy-genlock-fleet.sh must not redefine {f} inline"
+        );
+    }
+    assert!(
+        deploy.contains(". \"$HERE/lib/genlock-fleet-boxes.sh\""),
+        "deploy-genlock-fleet.sh sources the shared per-box lib"
+    );
+    for other in [
+        "scripts/launch-obs-genlock.sh",
+        "scripts/obs-self-heal-install.sh",
+    ] {
+        let src = std::fs::read_to_string(manifest_dir().join(other)).unwrap();
+        assert!(
+            src.contains(". \"$HERE/lib/genlock-fleet-boxes.sh\""),
+            "{other} reads the same per-box table"
+        );
+    }
+    assert!(
+        !lib.contains("win-strih") && !lib.contains("10.77.9.202"),
+        "the shared table has no Windows strih entry and no literal .202"
+    );
+    assert!(
+        deploy.lines().count() < 1000,
+        "deploy-genlock-fleet.sh stays under the 1000-line budget"
+    );
+}
+
+/// review round 1: EXECUTE mode has no strih-lx arm yet, so with the new `strih-lx,stream` default
+/// it must neither record strih-lx in the durable fleet log ("strih-lx deployed at <sha>" would be
+/// false) nor "succeed" when strih-lx is the ONLY box. The executed/logged set drops strih-lx; an
+/// empty executed set is a usage error BEFORE any gh/ssh call.
+#[test]
+fn execute_mode_never_logs_or_claims_the_unexecuted_strih_lx_1317() {
+    for (input, want) in [
+        ("strih-lx,stream", "stream"),
+        ("strih-lx,stream,imag,resolume", "stream,imag,resolume"),
+        ("stream,imag", "stream,imag"),
+        ("strih-lx", ""),
+    ] {
+        assert_eq!(
+            run_sourced(&script(), &format!("fleet_execute_boxes {input}")),
+            want,
+            "fleet_execute_boxes {input}"
+        );
+    }
+    let (code, out, err) = run_script(&["--run-id", "R1", "--boxes", "strih-lx"]);
+    assert_eq!(
+        code, 2,
+        "an execute run with nothing executable must be a usage error.\nstdout={out}\nstderr={err}"
+    );
+    assert!(
+        err.contains("nothing to deploy") && !out.contains("fleet-deploy log appended"),
+        "no log line, a named refusal: out={out} err={err}"
+    );
+    let src = std::fs::read_to_string(script()).unwrap();
+    assert!(
+        src.contains("fleet_log_line \"$run_id\" \"$sha\" \"$exec_boxes\" \"$mode\" >>"),
+        "the durable execute-mode log records the EXECUTED boxes only"
+    );
 }

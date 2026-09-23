@@ -45,7 +45,8 @@ set -uo pipefail
 #
 # NODE ROSTER: cam1-7 (all powered + running dantesync today, incl. cam5-7 retired from
 # CAMERA_ACTIVE_SET) resolved via scripts/camera-set.sh's camera_resolve (single IP source of truth)
-# + strih/stream/imag/resolume resolved via scripts/lib/obs-fleet.sh's obs_fleet_host. resolume is a
+# + strih-lx/stream/resolume resolved via scripts/lib/obs-fleet.sh's obs_fleet_host (issue 1317:
+# strih-lx is the production strih since M4; imag is retired). resolume is a
 # TRAVELING CG box: paged only while obs_fleet_is_home resolume holds (the #1296 condition); away ->
 # skipped (never a false page against a box that is simply not here). An OFF cam reads UNREACHABLE ->
 # SKIP (deferred to the #1001 network-reach watchdog), never a page.
@@ -89,7 +90,10 @@ DANTE_CLOCK_CAM_NODES="${DANTE_CLOCK_CAM_NODES-cam1 cam2 cam3 cam4 cam5 cam6 cam
 # issue 1316: `imag` DROPPED from the default — imag-nb was returned to the owner (dark), so it is
 # no longer a dantesync node. (obs_fleet_is_home imag is also `retired`/false now, so even if named
 # it would SKIP; dropping it from the default removes the dead ssh/probe entirely.)
-DANTE_CLOCK_OBS_NODES="${DANTE_CLOCK_OBS_NODES-strih stream resolume}"
+# issue 1317 (M4 cut-over 20.9.2026): the production strih is `strih-lx` (the Linux notebook at
+# 10.77.9.202, the NTP master since M4); the Windows `strih` row is retired from obs-fleet.sh, so the
+# old `strih` name would resolve to nothing and silently drop the strih from clock paging.
+DANTE_CLOCK_OBS_NODES="${DANTE_CLOCK_OBS_NODES-strih-lx stream resolume}"
 # #1313: the LOCAL node(s) -- dev1 itself. dev1 runs dantesync too (its clock feeds every dev1-hosted
 # gate: clock-offset-painter-gate.sh, the recording-verdict wall references, every date-stamped gate
 # window), yet it is NOT a probed cam/obs node -- so on 14.9.2026 it silently sat NTP-only for ~a day
@@ -151,7 +155,7 @@ log() { printf '%s [dantesync-clock-alert-watchdog] %s\n' "$(date '+%Y-%m-%dT%H:
 
 # -- roster: NAME|IP|HOMEGATE triples ----------------------------------------------------------
 # HOMEGATE ∈ always (cams: probe unconditionally; an OFF box -> UNREACHABLE -> SKIP) |
-# obsfleet (obs_fleet_is_home decides -- always-true for strih/stream/imag, the traveling gate for
+# obsfleet (obs_fleet_is_home decides -- always-true for strih-lx/stream, false for a retired box, the traveling gate for
 # resolume) | local (#1313: dev1 itself -- loopback :8898, NO ssh/TCP reach probe, box up by
 # definition so a dead :8898 is NO_DANTESYNC not SKIP). DANTE_CLOCK_NODES (space-separated
 # NAME|IP[|HOMEGATE]) overrides the whole roster.

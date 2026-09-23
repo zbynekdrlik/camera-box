@@ -6,6 +6,18 @@ paths:
 
 # strih-lx in-place decode runs at idle priority on the E-cores (issue 1351 item / issue 1354)
 
+**The Windows sibling refuses the Linux strih (issue 1317 part 3).** `recording-verdict-on-strih.sh`
+(the Windows PowerShell planner) no longer defaults `STRIH_BOX` to 10.77.9.202: `STRIH_BOX` is
+required and a target `strih_platform` resolves to `linux` is refused via the shared
+`strih_platform_refuse_windows_only_mode` (scripts/lib/strih-platform.sh), pointing here.
+`recording-e2e.sh` exports `STRIH_BOX="$STRIH"` so its Windows branch (reached only under
+`STRIH_PLATFORM=windows`) names the box explicitly. The opt-in `ZERO_LOSS_RESTART_GATE` mode — the
+only caller that still plans the Windows decode unconditionally — is refused on a Linux strih by
+`strih_zero_loss_restart_preflight "$STRIH" || exit 2`, called right where recording-e2e.sh resolves
+the strih, BEFORE the first rig-mutation guard (never after the preflight + a 360 s capture). Porting
+that mode to strih-lx is not ticketed yet — it was returned to the supervisor as a follow-up candidate
+in the issue-1317 part-3 LANE-RETURN.
+
 `scripts/recording-verdict-on-strih-lx.sh` is the Linux sibling of `recording-verdict-on-strih.sh`:
 at `[8/8a]` it ssh-runs `recording-verdict --extract-partial strih …` ON strih-lx (10.77.9.202)
 against the recording where it already lives, then scps back only the small partial JSON (+ the

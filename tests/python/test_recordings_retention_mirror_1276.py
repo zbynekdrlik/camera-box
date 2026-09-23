@@ -4,8 +4,8 @@ The production-size PROTECT floor (owner ruling 15.9.2026, issue 1276) lives in 
 must stay byte-identical: the canonical pure decision src/recordings_retention.rs
 (``PRODUCTION_SIZE_FLOOR_BYTES``) and its PowerShell delete-gate mirror
 scripts/strih-recordings-retention.ps1 (``$ProductionSizeFloorBytes``). There is no pwsh on dev1
-CI, so this test validates the .ps1 STRUCTURALLY (same pattern as
-tests/python/test_strih_nic_selfheal_1199.py): the two constants are numerically identical, the
+CI, so this test validates the .ps1 STRUCTURALLY (the pattern the issue-1199 NIC watcher test
+introduced; that test was removed with the retired Windows strih PC): the two constants are numerically identical, the
 mirror has the ``-ge`` PROTECT branch, tags the reason ``production-sized``, and prints the floor
 in the header block so a reviewer sees it in every dry-run.
 """

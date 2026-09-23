@@ -60,11 +60,13 @@ case "${1:-}" in
 esac
 
 # -- config (all env-overridable) ---------------------------------------------------------------
-# The boxes to watch, as "name|ip" pairs (space-separated). Both strih and stream run VB-Matrix;
-# a box with no install (imag) simply omits the facet -> UNKNOWN -> never a page. Default DERIVED
-# from the ONE declared fleet list (scripts/lib/obs-fleet.sh, #1296) — resolume is NOT a vb-matrix
-# box (no VB-Matrix install on the CG box), so obs_fleet_boxes vb-matrix yields exactly strih+stream,
-# byte-identical to the pre-#1296 literal. The VB_MATRIX_BOXES env override still wins unchanged.
+# The boxes to watch, as "name|ip" pairs (space-separated). VB-Matrix is a WINDOWS VB-Audio Matrix
+# process; only the stream box runs it now. Issue 1317 (M4): the Windows strih PC is retired and the
+# Linux strih-lx has NO VB-Matrix (PipeWire replaced it, issue 1344), so it is not a member; a box
+# with no install simply omits the facet -> UNKNOWN -> never a page. Default DERIVED from the ONE
+# declared fleet list (scripts/lib/obs-fleet.sh, #1296) — resolume is NOT a vb-matrix box either (no
+# install on the CG box), so obs_fleet_boxes vb-matrix yields exactly the stream box. The
+# VB_MATRIX_BOXES env override still wins unchanged.
 BOXES="${VB_MATRIX_BOXES:-$(obs_fleet_boxes vb-matrix)}"
 BUNDLE_PORT="${VB_MATRIX_BUNDLE_PORT:-8899}"          # the bundle-state HTTP service (#650) carrying the facet
 BUNDLE_PATH="${VB_MATRIX_BUNDLE_PATH:-/bundle-state.json}"

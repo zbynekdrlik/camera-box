@@ -2,6 +2,7 @@
 paths:
   - "scripts/bundle-state-alert-watchdog.sh"
   - "scripts/lib/bundle-state-health.sh"
+  - "scripts/lib/bundle-state-selfheal.sh"
   - "systemd/bundle-state-alert-watchdog.*"
   - "tests/harness_bundle_state_*.rs"
 ---
@@ -37,6 +38,40 @@ session-agnostic op**:
   the server is pure infra that is NEVER deliberately stopped, so auto-restart can never fight the
   operator. So it DOES auto-restart, then alerts (throttled) so a restart that doesn't take still
   surfaces.
+
+## The restart is CLASS-resolved — a Linux box never gets `schtasks` (issue 1317)
+
+Since the M4 cut-over the production strih is the Linux **strih-lx** (obs-fleet class
+`linux-genlock`), whose `:8899` server is the systemd `--user` unit `strih-bundle-state-server.service`
+(imag's twin is `imag-bundle-state-server.service`). `bundle_state_restart_remote_cmd [class]`
+(`scripts/lib/bundle-state-health.sh`) resolves the remedy from the box's obs-fleet class, which the
+watchdog reads via `box_fleet_class` → `obs_fleet_class`:
+
+- `linux-genlock` → `systemctl --user list-units --all --no-legend --plain '*-bundle-state-server.service'
+  | grep -q . || exit 3; systemctl --user reset-failed '<pattern>' 2>/dev/null; systemctl --user
+  restart '<pattern>'` over plain ssh. The pattern is single-quoted so the REMOTE shell never globs
+  it; systemctl matches it against LOADED units (an enabled unit stays loaded, failed or not).
+  `reset-failed` first so a unit that hit its start limit restarts. **The list-units guard is
+  load-bearing: `systemctl --user restart '<pattern>'` exits 0 when the pattern matches NOTHING**
+  (systemd 255, confirmed by the review), so without it an unloaded/disabled/renamed unit would be
+  logged "auto-restart issued OK". Verified read-only 23.9.2026: an ssh login to strih-lx reaches the
+  user manager (`XDG_RUNTIME_DIR=/run/user/1000`, `Linger=yes`) and the pattern lists exactly the one
+  unit. Tested with a `systemctl` stand-in whose call log goes to a FILE — a stdout echo would itself
+  feed the `grep -q` and hide the zero-match.
+- anything else (`windows-genlock`, empty, a box absent from `OBS_FLEET`) → the byte-identical
+  `schtasks /run /tn "BundleStateServer"`.
+- `bundle_state_restart_label [class]` (same lib) is the ONE human label for logs/alerts.
+- **The E2E `[0/8]` self-heal uses the same resolution:** `bundle_state_selfheal_fetch … [class]`
+  (`scripts/lib/bundle-state-selfheal.sh`) forwards the class to the restart command and to
+  `bundle_state_down_message`, and `recording-e2e.sh`'s `fetch_box_state` takes the class from the
+  lib's pure `bundle_state_selfheal_class <host> <strih_host>`: `linux-genlock` ONLY when the host IS
+  the strih AND `strih_platform` (the ONE strih platform resolver) says Linux. The host check comes
+  first because the `STRIH_PLATFORM` override describes the strih only — without it a forced
+  `STRIH_PLATFORM=linux` would send the Windows stream box a systemctl restart (review round 2).
+  Omitted class = the Windows form, so the stream box is unchanged.
+
+The Linux unit ALSO has `Restart=on-failure`, so the dev1 restart matters for the two cases systemd
+cannot see: a clean exit (`Restart=on-failure` ignores exit 0) and a wedged-but-listening server.
 
 ## Non-obvious build/test gotchas hit here
 

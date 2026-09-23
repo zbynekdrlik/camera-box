@@ -444,8 +444,10 @@ class TestMcpNameForHost:
     def test_stream_host_resolves_to_win_stream_snv(self):
         assert phase_sync_calibrate.mcp_name_for_host("10.77.9.204") == "win-stream-snv"
 
-    def test_strih_host_resolves_to_win_strih(self):
-        assert phase_sync_calibrate.mcp_name_for_host("10.77.9.202") == "win-strih"
+    def test_strih_host_resolves_to_linux_strih_lx_1317(self):
+        # issue 1317 part 4: 10.77.9.202 is the Linux strih-lx since the M4 cut-over (the Windows
+        # strih PC is retired) -- its MCP is linux-strih-lx, never the retired win-strih.
+        assert phase_sync_calibrate.mcp_name_for_host("10.77.9.202") == "linux-strih-lx"
 
     def test_unknown_host_returns_none(self):
         assert phase_sync_calibrate.mcp_name_for_host("10.0.0.99") is None
@@ -458,11 +460,21 @@ class TestRemotePushPlan:
                          "applied_latency_ms": 3}],
             "ts": 1720000000.0,
         }
-        plan = phase_sync_calibrate.remote_push_plan("10.77.9.202", payload)
+        plan = phase_sync_calibrate.remote_push_plan("10.77.9.204", payload)
         assert r"C:\ProgramData\camera-box\phase-sync-last.json" in plan
-        assert "win-strih" in plan
-        assert "10.77.9.202" in plan
+        assert "win-stream-snv" in plan
+        assert "10.77.9.204" in plan
         assert "FileWrite" in plan
+
+    def test_plan_for_the_linux_strih_names_the_linux_destination_1317(self):
+        # issue 1317 part 4: the destination follows the host's obs-fleet CLASS -- a linux-genlock
+        # box (strih-lx) gets the ~/.camera-box path its own default_last_json_path() uses when the
+        # script runs ON it, and the linux-strih-lx MCP; never the Windows ProgramData path.
+        payload = {"cameras": [], "ts": 1.0}
+        plan = phase_sync_calibrate.remote_push_plan("10.77.9.202", payload)
+        assert "/home/newlevel/.camera-box/phase-sync-last.json" in plan
+        assert "linux-strih-lx" in plan
+        assert "ProgramData" not in plan and "win-strih" not in plan
 
     def test_plan_includes_the_exact_json_content(self):
         payload = {
@@ -603,8 +615,9 @@ class TestCLI:
         phase_sync_calibrate.main()
         out = capsys.readouterr().out
         assert "REMOTE PUSH REQUIRED" in out
-        assert r"C:\ProgramData\camera-box\phase-sync-last.json" in out
-        assert "win-strih" in out
+        # issue 1317 part 4: --host 10.77.9.202 is the Linux strih-lx -> the Linux destination.
+        assert "/home/newlevel/.camera-box/phase-sync-last.json" in out
+        assert "linux-strih-lx" in out and "win-strih" not in out
 
     def test_printed_plan_json_matches_what_was_actually_persisted(
         self, monkeypatch, tmp_path, capsys,

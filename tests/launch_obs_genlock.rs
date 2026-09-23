@@ -56,14 +56,21 @@ fn run_script(args: &[&str]) -> (i32, String, String) {
     )
 }
 
-/// The launch program built for a normal (no-force) launch with the default OBS dir.
+/// The launch program built for a normal (no-force) launch with the default OBS dir, for a box that
+/// RUNS the AHK respawn watcher (has_ahk=1 + a fixture .ahk path). Issue 1317 part 4 removed the
+/// retired Windows strih's has_ahk=1 + `D:\_APPS\NL_STARTUP.ahk` defaults, so the AHK identity is
+/// passed explicitly here (every box-facing caller passes its own from genlock-fleet-boxes.sh).
 fn program_default() -> String {
-    run_sourced("build_launch_program 'C:\\Program Files\\obs-studio' 0")
+    run_sourced(
+        "build_launch_program 'C:\\Program Files\\obs-studio' 0 1 'C:\\fixture\\NL_STARTUP.ahk'",
+    )
 }
 
-/// The launch program built with --force (a wedged-OBS recovery launch).
+/// The launch program built with --force (a wedged-OBS recovery launch), AHK box as above.
 fn program_force() -> String {
-    run_sourced("build_launch_program 'C:\\Program Files\\obs-studio' 1")
+    run_sourced(
+        "build_launch_program 'C:\\Program Files\\obs-studio' 1 1 'C:\\fixture\\NL_STARTUP.ahk'",
+    )
 }
 
 /// #257: the wrapper must carry NO OBS_GENLOCK_* / OBS_BURN_* env — the genlock build is env-free
@@ -206,8 +213,38 @@ fn program_without_ahk_watcher_carries_no_ahk_commands_786() {
         !p.contains("$ahkScriptPath"),
         "has_ahk=0 must not embed the #867 ahk_resolve_and_relaunch_ps machinery. Program:\n{p}"
     );
-    // Default (2-arg) stays the strih behavior — the AHK bracket present (pinned above in
-    // program_gates_on_audio_buffering_and_redraws_786).
+    // The AHK bracket for an AHK box is pinned above in program_gates_on_audio_buffering_and_
+    // redraws_786 (built with has_ahk=1 + an explicit .ahk path).
+}
+
+/// issue 1317 part 4 — the retired Windows strih's defaults are gone: a 2-arg call is a NO-AHK box
+/// (no real AutoHotkey64 command, no `D:\_APPS` path), and has_ahk=1 WITHOUT a script fails closed
+/// instead of aiming a relaunch at the retired PC's path.
+#[test]
+fn two_arg_default_is_a_no_ahk_box_and_ahk_needs_a_script_1317() {
+    let p = run_sourced("build_launch_program 'C:\\Program Files\\obs-studio' 0");
+    assert!(
+        !p.contains("Stop-Process -Name AutoHotkey64") && !p.contains("_APPS"),
+        "a 2-arg call must carry no AHK command and no retired-strih path. Program:\n{p}"
+    );
+    let harness =
+        "set -uo pipefail\n. \"$SCRIPT\"\nbuild_launch_program 'C:\\Program Files\\obs-studio' 0 1";
+    let out = Command::new("bash")
+        .arg("-c")
+        .arg(harness)
+        .env("SCRIPT", script())
+        .output()
+        .expect("failed to run bash harness");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success() && !stdout.contains("_APPS"),
+        "has_ahk=1 with no .ahk script must fail closed. stdout={stdout:?} stderr={stderr:?}"
+    );
+    assert!(
+        stderr.contains("1317"),
+        "the refusal must name the issue: {stderr:?}"
+    );
 }
 
 /// #867: the strih AHK restart must NEVER rely on a bare `-FilePath 'AutoHotkey64.exe'` launch —
@@ -411,11 +448,11 @@ fn force_inserts_kill_and_noforce_refuses_double_launch() {
 /// The CLI selects the correct win-* MCP per box and emits the program in the plan.
 #[test]
 fn cli_box_selects_correct_mcp_and_emits_program() {
-    let (code, out, _err) = run_script(&["--box", "strih"]);
-    assert_eq!(code, 0, "--box strih must print the plan (exit 0)");
+    let (code, out, _err) = run_script(&["--box", "resolume"]);
+    assert_eq!(code, 0, "--box resolume must print the plan (exit 0)");
     assert!(
-        out.contains("win-strih") && out.contains("10.77.9.202"),
-        "strih -> win-strih plan"
+        out.contains("win-resolume") && out.contains("resolume.lan"),
+        "resolume -> win-resolume plan"
     );
     assert!(
         out.contains("render tick ENABLED"),
@@ -501,11 +538,12 @@ fn cli_box_resolume_selects_win_resolume_with_ahk_1295() {
     );
 }
 
-/// #1295 review (YELLOW): the identity-confirm caveat is resolume-ONLY -- the strih/stream launch
-/// plans (fixed IPs, no bridge collision) must NOT carry it.
+/// #1295 review (YELLOW): the identity-confirm caveat is resolume-ONLY -- the stream launch plan
+/// (fixed IP, no bridge collision) must NOT carry it.
 #[test]
 fn non_resolume_launch_plan_has_no_identity_confirm_1295() {
-    for box_name in ["strih", "stream"] {
+    {
+        let box_name = "stream";
         let (_c, out, _e) = run_script(&["--box", box_name]);
         assert!(
             !out.contains("box IDENTITY confirm"),
@@ -522,8 +560,42 @@ fn trailing_flag_without_value_is_usage_error_exit_2() {
         code, 2,
         "--box with no value must exit 2 (usage error). stderr={err}"
     );
-    let (code, _out, err) = run_script(&["--box", "strih", "--obs-dir"]);
+    let (code, _out, err) = run_script(&["--box", "stream", "--obs-dir"]);
     assert_eq!(code, 2, "--obs-dir with no value must exit 2. stderr={err}");
+}
+
+/// issue 1317 part 3: the Windows strih PC is RETIRED (M4 cut-over; 10.77.9.202 is the Linux
+/// strih-lx). `--box strih` is refused BY NAME (pointing at the strih-obs.service user unit), and the
+/// Linux strih-lx is refused as a non-Windows box -- this planner can never emit a Windows program
+/// for the Linux strih. The box facts come from the shared per-box table, not a local case list.
+#[test]
+fn retired_windows_strih_and_linux_strih_lx_are_refused_1317() {
+    let (code, out, err) = run_script(&["--box", "strih"]);
+    assert_eq!(
+        code, 2,
+        "--box strih must exit 2. stdout={out} stderr={err}"
+    );
+    assert!(
+        err.contains("RETIRED") && err.contains("strih-obs.service"),
+        "the refusal names the retirement + the strih-lx user unit: {err}"
+    );
+    assert!(!out.contains("win-strih"), "no Windows strih plan: {out}");
+    let (code, out, err) = run_script(&["--box", "strih-lx"]);
+    assert_eq!(
+        code, 2,
+        "--box strih-lx (Linux) must exit 2. stdout={out} stderr={err}"
+    );
+    assert!(
+        !out.contains("$ErrorActionPreference"),
+        "no Windows program for the Linux strih-lx: {out}"
+    );
+    let src = std::fs::read_to_string(script()).unwrap();
+    assert!(
+        src.contains(". \"$HERE/lib/genlock-fleet-boxes.sh\"")
+            && src.contains("fleet_box_mcp \"$box\"")
+            && !src.contains("mcp=\"win-strih\""),
+        "launch-obs-genlock.sh reads its box facts from the shared per-box table"
+    );
 }
 
 /// An unknown --box is a usage error (exit 2).
@@ -571,7 +643,7 @@ fn script_is_source_safe() {
 /// ndi_source input's burn OFF and reports LOUDLY -- positioned AFTER the on-box launch verify.
 #[test]
 fn plan_emits_verify_at_start_burn_sweep_off_1057() {
-    for (box_arg, ip) in [("strih", "10.77.9.202"), ("stream", "10.77.9.204")] {
+    for (box_arg, ip) in [("resolume", "resolume.lan"), ("stream", "10.77.9.204")] {
         let (code, out, _err) = run_script(&["--box", box_arg]);
         assert_eq!(code, 0, "--box {box_arg} must print the plan (exit 0)");
         assert!(
@@ -611,7 +683,7 @@ fn plan_emits_verify_at_start_burn_sweep_off_1057() {
 /// launch verify.
 #[test]
 fn plan_emits_verify_at_start_latency_pins_1061() {
-    for (box_arg, ip) in [("strih", "10.77.9.202"), ("stream", "10.77.9.204")] {
+    for (box_arg, ip) in [("resolume", "resolume.lan"), ("stream", "10.77.9.204")] {
         let (code, out, _err) = run_script(&["--box", box_arg]);
         assert_eq!(code, 0, "--box {box_arg} must print the plan (exit 0)");
         assert!(
