@@ -375,15 +375,6 @@ pub mod painter_pacing;
 // `probe::genlock::ReleaseCadence` and the C `GENLOCK_QDEPTH_RELOCK` both derive from here.
 pub mod genlock_backlog;
 
-// #1355 — a Tier-0 two-clock-domain N==1 genlock bench. Simulates a wall-clock 30 fps sender + a
-// QPC render tick running `drift_ppm` slower, REUSING `genlock_backlog`'s release decisions
-// (`phase_pinned_deadline`, `should_drain_one`, `backlog_relock_threshold`, `n1_release_phase_step`)
-// — never a re-derivation. Reproduces the measured A/V-level walk (the deep N==1 conveyor gains a
-// frame of on-air age per ~40 min of wall-vs-render drift, sawing ~2 frames on the #859 drain's
-// 2-frame hysteresis) and proves the N==1 release-phase hysteresis fix holds the band within one
-// frame. Pure + std-only (the `src/asrc_bench.rs` two-clock-domain precedent).
-pub mod genlock_n1_bench;
-
 // #1298 — the pure LOCKED/DEGRADED/UNLOCKED decision for the in-OBS genlock statusbar
 // indicator. Crate-root + std-only so it is Tier-0 verifiable; the C port in
 // `vendor/obs-studio/frontend/widgets/GenlockLockState.hpp` is held identical by the
