@@ -38,6 +38,27 @@ session-agnostic op**:
   operator. So it DOES auto-restart, then alerts (throttled) so a restart that doesn't take still
   surfaces.
 
+## The restart is CLASS-resolved — a Linux box never gets `schtasks` (issue 1317)
+
+Since the M4 cut-over the production strih is the Linux **strih-lx** (obs-fleet class
+`linux-genlock`), whose `:8899` server is the systemd `--user` unit `strih-bundle-state-server.service`
+(imag's twin is `imag-bundle-state-server.service`). `bundle_state_restart_remote_cmd [class]`
+(`scripts/lib/bundle-state-health.sh`) resolves the remedy from the box's obs-fleet class, which the
+watchdog reads via `box_fleet_class` → `obs_fleet_class`:
+
+- `linux-genlock` → `systemctl --user reset-failed '*-bundle-state-server.service' 2>/dev/null;
+  systemctl --user restart '*-bundle-state-server.service'` over plain ssh. The pattern is
+  single-quoted so the REMOTE shell never globs it; systemctl matches it against LOADED units (an
+  enabled unit stays loaded, failed or not). `reset-failed` first so a unit that hit its start limit
+  restarts. Verified read-only 23.9.2026: an ssh login to strih-lx reaches the user manager
+  (`XDG_RUNTIME_DIR=/run/user/1000`, `Linger=yes`) and the pattern matches exactly the one unit.
+- anything else (`windows-genlock`, empty, a box absent from `OBS_FLEET`) → the byte-identical
+  `schtasks /run /tn "BundleStateServer"`. The no-arg call (the E2E `[0/8]` self-heal in
+  `scripts/lib/bundle-state-selfheal.sh`) keeps the Windows form unchanged.
+
+The Linux unit ALSO has `Restart=on-failure`, so the dev1 restart matters for the two cases systemd
+cannot see: a clean exit (`Restart=on-failure` ignores exit 0) and a wedged-but-listening server.
+
 ## Non-obvious build/test gotchas hit here
 
 - **Health probe MUST be `curl` FROM dev1** (HTTP 200 + a JSON body), never a bare `:8899` TCP

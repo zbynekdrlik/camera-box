@@ -81,7 +81,8 @@ log() { printf '%s [obs-liveness-watchdog] %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')
 # measure_boxes -> sets $VERDICT_LINES to one "<VERDICT> <box>: <reasons>" line per box (the
 # obs-watchdog-gate stdout, one line per box regardless of exit code — see its own doc comment).
 # #1296: the box SET is DERIVED from the ONE declared fleet list (scripts/lib/obs-fleet.sh) —
-# obs_fleet_boxes obs-liveness = strih, stream, resolume. strih/stream keep their own
+# obs_fleet_boxes obs-liveness = strih-lx, stream, resolume (issue 1317: strih-lx is the production
+# strih since M4). strih-lx/stream keep their own
 # STRIH_HOST/STREAM_HOST (+ per-box target fps) exactly as before; resolume (a genlock cg-obs box)
 # is added ONLY while obs_fleet_is_home resolume holds, so a traveling box that is away is never
 # polled and never produces a false wedge verdict (the #391 "no probe output = nothing to decide"
@@ -93,7 +94,10 @@ measure_boxes() {
     name="${pair%%|*}"
     host="${pair##*|}"
     case "$name" in
-      strih)  host="$STRIH_HOST";  fps="$STRIH_TARGET_FPS" ;;
+      # issue 1317 (M4): the production strih is the Linux strih-lx (the Windows `strih` row is
+      # retired from the fleet list). It keeps the strih knobs: STRIH_HOST (default = its .202
+      # address) + the 30 fps cut-to-stream target. GetStats over OBS-WS is platform-neutral.
+      strih-lx) host="$STRIH_HOST"; fps="$STRIH_TARGET_FPS" ;;
       stream) host="$STREAM_HOST"; fps="$STREAM_TARGET_FPS" ;;
       resolume)
         obs_fleet_is_home resolume || continue   # away -> do not poll a traveling box

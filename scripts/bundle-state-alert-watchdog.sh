@@ -60,7 +60,9 @@ esac
 
 # -- config (all env-overridable) ---------------------------------------------------------------
 # The OBS boxes to watch, as "name|ip" pairs (space-separated). Default DERIVED from the ONE
-# declared fleet list (scripts/lib/obs-fleet.sh, #1296): strih, stream AND resolume (RESOLUME-SNV,
+# declared fleet list (scripts/lib/obs-fleet.sh, #1296): strih-lx (the production strih since the
+# issue-1317 M4 cut-over -- a linux-genlock box, so its auto-restart is `systemctl --user`, see
+# box_fleet_class), stream AND resolume (RESOLUME-SNV,
 # a genlock cg-obs box). resolume is TRAVELING-SAFE here with no is-home gate — a fully-unreachable
 # box (ping + :4455 + :8899 all down) is deferred to the #1001 reach watchdog below (no page, no
 # pointless restart against a dark box), which is exactly the normal away state. The
@@ -167,7 +169,24 @@ restart_bundle_state_task() {
   user="$(box_ssh_user "$box")"; pw="$(box_ssh_pw "$box")"
   timeout "$SSH_TIMEOUT" sshpass -p "$pw" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 \
     -o ServerAliveInterval=10 -o ServerAliveCountMax=3 \
-    "${user}@${ip}" "$(bundle_state_restart_remote_cmd)" >/dev/null 2>&1
+    "${user}@${ip}" "$(bundle_state_restart_remote_cmd "$(box_fleet_class "$box")")" >/dev/null 2>&1
+}
+
+# box_fleet_class <box> -> stdout: the box's obs-fleet class (issue 1317). The restart is PLATFORM-
+# resolved: a linux-genlock box (strih-lx, the production strih since M4) restarts its systemd
+# --user unit; a windows-genlock box keeps `schtasks /run`. A box absent from OBS_FLEET (an explicit
+# BUNDLE_STATE_BOXES override naming an unlisted host) falls back to windows-genlock -- the pre-1317
+# behaviour, byte-compatible.
+box_fleet_class() {
+  obs_fleet_class "$1" 2>/dev/null || printf 'windows-genlock'
+}
+
+# restart_how <box> -> stdout: a short human label for BOX's restart mechanism (logs + alert text).
+restart_how() {
+  case "$(box_fleet_class "$1")" in
+    linux-genlock) printf 'systemctl --user restart' ;;
+    *) printf 'schtasks /run' ;;
+  esac
 }
 
 # -- persisted per-box state (key=value lines) --------------------------------------------------
@@ -255,15 +274,17 @@ handle_box() {
 
   local restart_note="auto-restart disabled"
   if [ "$AUTO_RESTART" = "1" ]; then
+    local how
+    how="$(restart_how "$box")"
     if [ "$DRY_RUN" -eq 1 ]; then
-      restart_note="[dry-run] WOULD run: $(bundle_state_restart_remote_cmd) on $box"
-      log "[dry-run] WOULD auto-restart BundleStateServer on $box via ssh"
+      restart_note="[dry-run] WOULD run: $(bundle_state_restart_remote_cmd "$(box_fleet_class "$box")") on $box"
+      log "[dry-run] WOULD auto-restart BundleStateServer on $box via ssh ($how)"
     elif restart_bundle_state_task "$box" "$ip"; then
-      restart_note="auto-restart (schtasks /run) issued OK"
-      log "AUTO-RESTART: schtasks /run BundleStateServer issued OK on $box (recovery confirmed next pass)"
+      restart_note="auto-restart ($how) issued OK"
+      log "AUTO-RESTART: $how BundleStateServer issued OK on $box (recovery confirmed next pass)"
     else
-      restart_note="auto-restart (schtasks /run) FAILED (ssh/creds?) -- alert still firing"
-      log "AUTO-RESTART: schtasks /run FAILED on $box (ssh/creds?) -- alerting anyway"
+      restart_note="auto-restart ($how) FAILED (ssh/creds?) -- alert still firing"
+      log "AUTO-RESTART: $how FAILED on $box (ssh/creds?) -- alerting anyway"
     fi
   fi
 
@@ -287,7 +308,7 @@ handle_box() {
   if [ "${alert_now:-0}" = "1" ]; then
     log "ALERT: firing Discord notification for $box :$BUNDLE_PORT down"
     python3 "$NOTIFY" notify --body \
-      "🚨 BundleStateServer ($REPO_SLUG): **$box** ($ip) :$BUNDLE_PORT je DOLE, hoci box beží. ${detail}. Potvrdené počas ${CONFIRM_THRESHOLD} po sebe idúcich kontrol — Task Scheduler ukončenú úlohu sám nereštartuje. Rieši Claude automaticky (${restart_note}), ty nemusíš nič robiť." \
+      "🚨 BundleStateServer ($REPO_SLUG): **$box** ($ip) :$BUNDLE_PORT je DOLE, hoci box beží. ${detail}. Potvrdené počas ${CONFIRM_THRESHOLD} po sebe idúcich kontrol — box ho sám neobnovil. Rieši Claude automaticky (${restart_note}), ty nemusíš nič robiť." \
       --dedup-key "$(watchdog_notify_key "bundle-state-$box" "$(date +%s)")" \
       >/dev/null 2>&1 || log "ALERT: airuleset.py notify failed (non-fatal)"
   else

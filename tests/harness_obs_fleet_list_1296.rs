@@ -550,7 +550,7 @@ fn obs_liveness_keeps_strih_stream_ip_literals_1296() {
 #[test]
 fn obs_liveness_polls_resolume_only_when_home_1296() {
     // Stub the python probe to echo one verdict line per --box it receives, so VERDICT_LINES names
-    // exactly the polled boxes. AWAY -> strih+stream only; HOME -> + resolume.
+    // exactly the polled boxes. AWAY -> strih-lx+stream only; HOME -> + resolume.
     let stub = manifest_dir().join("tests/fixtures/obs_liveness_echo_probe_1296.py");
     let stub = stub.to_string_lossy().to_string();
     let away = watchdog_measure(&[("OBS_FLEET_HOME", "stream"), ("OBS_LIVENESS_PROBE", &stub)]);

@@ -65,8 +65,10 @@ esac
 # -- config (all env-overridable) ---------------------------------------------------------------
 # The OBS boxes to watch, as "name|ip" pairs (space-separated). Default DERIVED from the ONE
 # declared fleet list (scripts/lib/obs-fleet.sh, #1296) — resolume is NOT an audio-lag box (no mbc
-# audio chain on the CG box), so obs_fleet_boxes audio-lag yields exactly strih+stream, byte-
-# identical to the pre-#1296 literal. The AUDIO_LAG_BOXES env override still wins unchanged.
+# audio chain on the CG box), so obs_fleet_boxes audio-lag yields the strih + stream. Issue 1317
+# (M4): the strih is now the Linux strih-lx at 10.77.9.202 -- its vendored OBS writes the same
+# `audio-telemetry #800` lines and its own :8899 server exposes the same facet, so the read is
+# platform-neutral. The AUDIO_LAG_BOXES env override still wins unchanged.
 BOXES="${AUDIO_LAG_BOXES:-$(obs_fleet_boxes audio-lag)}"
 BUNDLE_PORT="${AUDIO_LAG_BUNDLE_PORT:-8899}"          # the bundle-state HTTP service (#650) carrying the facet
 BUNDLE_PATH="${AUDIO_LAG_BUNDLE_PATH:-/bundle-state.json}"
