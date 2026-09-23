@@ -43,6 +43,37 @@ ONE-SHOT at initial load; a later profile-change `main_output_init` finds nothin
 creates fresh (acceptable — the pin only has to hold across the initial load↔restart cycle). Only
 PGM is pinned; PVW + filters still reshuffle (mitigated by the issue-1181 dev1 port-map watchdog).
 
+## Linux: a TIME_WAIT on :5961 from the previous OBS walks the pin to :5962 (issue 1363)
+
+On strih-lx the reserve AND the adopt both ran (`reserved the first NDI port …` / `adopted the
+port-reserved main NDI sender …` in the OBS log) and the program still landed on :5962, with nothing
+listening on TCP :5961. The cause is in libndi, not in the reserve/adopt path:
+
+- libndi binds each sender listener **without `SO_REUSEADDR`**. It sets `SO_REUSEADDR`+`SO_REUSEPORT`
+  only on the :5960 messaging socket. `strace` of a sender process started right after another
+  sender with a connected receiver had exited: `bind(…5961) = -1 EADDRINUSE`, then `bind(…5962) = 0`.
+- On **Linux** a connection left in TIME_WAIT on local port :5961 (60 s, fixed) blocks a plain
+  `bind()`. So an OBS started within 60 s of the previous instance closing its PGM sender can lose
+  :5961, and every sender shifts up by one. On **Windows** a plain `bind()` succeeds over TIME_WAIT
+  connections, which is why the pin held on the Windows strih.
+- Whether a TIME_WAIT is left depends on which side of each :5961 connection closed first at
+  shutdown (timing-dependent). strih-lx history 23.9.2026: gaps of 35 s and 45 s kept :5961, 36.8 s
+  and 59.0 s shifted to :5962. A shift only ever happens inside the 60 s window.
+- libndi 6.3.2 has no config key for a sender port (the full `ndi.*` key list: groups, networks,
+  rudp/tcp/unicast/multicast send+recv enable, codec, log, machinename, vendor, sourcefilter). A
+  second NDI process on the box (bkshading-service, receiver-only: UDP 5960 bank + TCP/UDP 6981) does
+  NOT shift OBS senders; a connected receiver process before a sender process gave :5961 five times
+  out of five on dev1.
+- Reproduce offline on dev1 (`/usr/lib/ndi/libndi.so.6.3.2`): a small C program that dlopens
+  `NDIlib_v6_load`, creates a sender in a private group (e.g. `t1363-private`, so nothing appears on
+  public viewers) with a receiver connected to it via its URL, exits, then starts a new sender process
+  → `ss -lntp` shows the new one on :5962 while `ss -tan` shows `TIME-WAIT …:5961`.
+- Read the live port from the RECEIVER side when the strih log has no URL line: the stream OBS log's
+  `reset_ndi_receiver … BY-URL '10.77.9.202:59xx'` for `NDI 2ME PGM` gives the program's port per
+  session.
+- The fix shape (a bounded wait before the reserve vs a late re-pin vs documenting) is a design
+  decision recorded on issue 1363 — check the ticket before changing the reserve path.
+
 ## Trap: a start-path bail after the sender exists LEAKS it — and post-#1185 the leak is the pin-holder
 
 `ndi_output_stop` only `send_destroy`s the sender when `o->started` is true, and

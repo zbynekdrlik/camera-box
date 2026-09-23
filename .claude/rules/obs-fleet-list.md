@@ -77,6 +77,18 @@ tests/ops). Three helpers consume it:
   (`obs_fleet_resolve_host` / `obs_fleet_status_probe`) + the `OBS_FLEET_HOME` force-list, so the
   whole thing is Tier-0 testable offline.
 
+## The `ndi-portmap` facet (issue 1363) and the stale strih-lx host
+
+- `obs_fleet_facet_members ndi-portmap` = `strih-lx`: the ONE strih box whose NDI sender port map the
+  dev1 port-map watchdog watches. `scripts/ndi-portmap-audit.sh` consumes the member NAME only and
+  refuses any member count other than one. It derives the sender prefix from the name and reads the
+  IP from the anchor's own mDNS record. Details: `.claude/rules/ndi-portmap-watchdog.md`.
+- **Known staleness (23.9.2026):** the `strih-lx` row's host `strih-lx.lan` does NOT resolve on dev1
+  (no MikroTik static entry; `strih-lx.local` resolves via mDNS to 10.77.9.202), and the `strih` row
+  still says `10.77.9.202|windows-genlock|always` although .202 is now strih-lx and the Windows PC is
+  gone. Any facet that dials the strih-lx host therefore sees it as "away". Fixing the table is a
+  cross-watchdog change; do not rely on `obs_fleet_host strih-lx` resolving until it is fixed.
+
 ## Scope beyond the watchdogs
 
 - `scripts/version-integrity-gate.sh` — `--win-state-report-only NAME=FILE` surfaces RESOLUME-SNV as
