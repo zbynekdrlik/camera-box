@@ -101,9 +101,15 @@ pub fn slot_interval_us(
     capture_fps_num: u32,
     capture_fps_den: u32,
 ) -> u64 {
-    // #1242 review RED stub.
-    let _ = (genlock_fps, capture_fps_num, capture_fps_den);
-    0
+    let send_us = match genlock_fps {
+        Some(f) if f > 0 => 1_000_000 / u64::from(f),
+        _ => return 0,
+    };
+    if capture_fps_num == 0 || capture_fps_den == 0 {
+        return send_us;
+    }
+    let capture_us = 1_000_000 * u64::from(capture_fps_den) / u64::from(capture_fps_num);
+    send_us.min(capture_us)
 }
 
 /// The send offset (µs) for camera `camera_number` inside a slot of `slot_us` ([`slot_interval_us`]).
@@ -144,25 +150,24 @@ pub fn plan(
     capture_fps_num: u32,
     capture_fps_den: u32,
 ) -> StaggerPlan {
-    // #1242 review RED stub.
-    let _ = (hostname, genlock_fps, capture_fps_num, capture_fps_den);
-    StaggerPlan {
-        camera: None,
-        offset: Duration::ZERO,
-        log_line: String::new(),
-        warn: false,
-    }
-}
-
-/// The pre-review startup line builder, still called by the capture-loop wiring until the
-/// GREEN step switches it to [`plan`].
-pub fn startup_log_line(hostname: &str, camera_number: Option<u32>, offset_us: u64) -> String {
-    match camera_number {
+    let camera = camera_number_from_hostname(hostname);
+    let slot_us = slot_interval_us(genlock_fps, capture_fps_num, capture_fps_den);
+    let offset_us = send_offset_us(camera, slot_us);
+    let log_line = match camera {
+        Some(n) if slot_us == 0 => format!(
+            "NDI send stagger: cam{n} offset={offset_us} us (#1242) — genlock off, no emit grid to stagger"
+        ),
         Some(n) => format!("NDI send stagger: cam{n} offset={offset_us} us (#1242)"),
         None => format!(
             "NDI send stagger: hostname '{}' is not a CAM<N> box — offset={offset_us} us (#1242)",
             hostname.trim()
         ),
+    };
+    StaggerPlan {
+        camera,
+        offset: Duration::from_micros(offset_us),
+        log_line,
+        warn: camera.is_none(),
     }
 }
 
@@ -171,9 +176,7 @@ pub fn startup_log_line(hostname: &str, camera_number: Option<u32>, offset_us: u
 /// loop is behind, and sleeping would push it further behind (the capture budget beats the
 /// network optimisation). The caller counts the skip.
 pub fn should_sleep(offset: Duration, frame_backlogged: bool) -> bool {
-    // #1242 review RED stub: the backlog is ignored (the pre-review behaviour).
-    let _ = frame_backlogged;
-    !offset.is_zero()
+    !offset.is_zero() && !frame_backlogged
 }
 
 /// How long to still sleep before the NDI hand-off: `offset` measured from the emit-gate anchor,
@@ -211,17 +214,18 @@ pub struct StaggerWindow {
 
 impl StaggerWindow {
     pub fn note_slept(&mut self) {
-        // #1242 review RED stub.
+        self.slept = self.slept.saturating_add(1);
     }
 
     pub fn note_skipped(&mut self) {
-        // #1242 review RED stub.
+        self.skipped_backlogged = self.skipped_backlogged.saturating_add(1);
     }
 
     /// Record one emitted iteration's work. A non-finite or negative reading is ignored.
     pub fn note_work(&mut self, work_ms: f64) {
-        // #1242 review RED stub.
-        let _ = work_ms;
+        if work_ms.is_finite() && work_ms >= 0.0 && work_ms > self.max_work_ms {
+            self.max_work_ms = work_ms;
+        }
     }
 
     /// Drain the window (returns it and resets to empty).
@@ -239,9 +243,23 @@ pub fn window_summary(
     offset_us: u64,
     capture_interval_ms: f64,
 ) -> (String, bool) {
-    // #1242 review RED stub.
-    let _ = (w, offset_us, capture_interval_ms);
-    (String::new(), false)
+    let offset_ms = offset_us as f64 / 1000.0;
+    let over_budget = capture_interval_ms > 0.0 && w.max_work_ms + offset_ms >= capture_interval_ms;
+    let warn = w.skipped_backlogged > 0 || over_budget;
+    let line = format!(
+        "#1242 send stagger: offset={offset_us} us, {} slept / {} skipped (frame already backlogged) this window, max per-frame work {:.1} ms + offset {:.1} ms vs capture interval {:.1} ms{}",
+        w.slept,
+        w.skipped_backlogged,
+        w.max_work_ms,
+        offset_ms,
+        capture_interval_ms,
+        if over_budget {
+            " — OVER BUDGET: the capture loop has no margin left"
+        } else {
+            ""
+        }
+    );
+    (line, warn)
 }
 
 #[cfg(test)]

@@ -424,6 +424,13 @@ pub mod send_stall;
 // own OS hostname (CAM<N>), clamped inside the slot; the emit grid and the FLOOR-boundary timecode
 // are untouched. No probe deps, so it unit-tests Tier-0; `main.rs`'s capture loop applies it.
 pub mod send_stagger;
+// The send-stagger clamp must stay strictly below the buffered-dequeue fraction its idle-wait
+// add-back relies on (a genuinely buffered frame must still read as buffered after the sleep is
+// added back) — checked here against the REAL constant, so changing either one breaks the build.
+const _: () = assert!(
+    (send_stagger::MAX_OFFSET_SLOT_PERCENT as f64)
+        < capture_stall::BUFFERED_DEQUEUE_FRACTION * 100.0
+);
 
 // #707 — V4L2 capture DEQUEUE stall diagnostic (pure decision). Given how long a SINGLE blocking
 // `process_frame` dequeue (`self.stream.next()`, a VIDIOC_DQBUF under the hood) took and the
