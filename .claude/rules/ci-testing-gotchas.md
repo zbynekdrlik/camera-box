@@ -1210,3 +1210,21 @@ the #1265 `bash -c` refusal — it is the SUBSTRING/complexity, not real git. (T
 refuses a worker's own issue comment whose body contains the literal `Design-by: main` string via a
 DIFFERENT airuleset hook, `block-design-by-spoof.sh` — a worker posts `Anchors-confirmed:` WITHOUT a
 `Design-by: main` line; that is the main session's stamp, not the worker's.)
+
+## Wiring a NEW `. "$HERE/lib/*.sh"` source into recording-e2e.sh: the shellcheck directive doubles the basename, so a "sourced once" anchor test must count the STATEMENT (issue 1203 item b)
+
+The sibling sources in `scripts/recording-e2e.sh` follow the convention of a
+`# shellcheck source=scripts/lib/<name>.sh` directive on the line ABOVE the actual
+`. "$HERE/lib/<name>.sh"` statement (`cambox-parallel-restore.sh`,
+`imag-presented-frame-check.sh`, ...). So the lib BASENAME (`lib/<name>.sh`) appears TWICE per
+source — once in the directive comment, once in the source statement. A static-anchor test that
+asserts "this lib is sourced exactly once" by counting the bare basename
+(`s.matches("lib/<name>.sh").count() == 1`) therefore reads **2**, not 1, and fails on a perfectly
+correct wiring. Anchor on the source STATEMENT instead —
+`s.matches(". \"$HERE/lib/<name>.sh\"").count() == 1` — which is the unambiguous single occurrence
+(the directive uses the `scripts/lib/...` form, no `$HERE`). Confirmed live wiring
+`ndi_cadence_verify_and_heal` into cleanup() (issue 1203 item b): the first RED draft counted the
+basename and would have stayed RED after correct wiring; the fix was to pin the `. "$HERE/..."`
+statement. Also: the FUNCTION name (`ndi_cadence_verify_and_heal`) is the clean single-call-site
+anchor precisely BECAUSE the source line names the FILE, never the function — keep it that way (no
+function name in the source-block comment) so a `match_indices(fn_name).count() == 1` stays true.
