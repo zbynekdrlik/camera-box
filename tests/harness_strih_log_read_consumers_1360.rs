@@ -506,7 +506,7 @@ fn genlock_audit_snapshot_reads_the_linux_strih_log_through_the_shared_reader_13
     let out = out_block(&o);
     assert_eq!(
         non_empty_lines(&out),
-        vec![AUDIT_100, AUDIT_160],
+        [AUDIT_100, AUDIT_160],
         "the persisted file must hold ONLY the newest log's genlock-fifo audit lines, verbatim \
          (the asrc / recv-timing / other lines filtered locally), got: {out}"
     );
@@ -532,7 +532,7 @@ fn genlock_audit_snapshot_reads_a_windows_strih_instead_of_skipping_1360() {
     let out = out_block(&o);
     assert_eq!(
         non_empty_lines(&out),
-        vec!["09:00:00.000: genlock-fifo audit 'NDI cam1': received=77 holds=1"],
+        ["09:00:00.000: genlock-fifo audit 'NDI cam1': received=77 holds=1"],
         "the Windows read must persist only the audit line, CR-stripped: {out:?}"
     );
 }
@@ -549,7 +549,7 @@ fn genlock_audit_snapshot_knobs_stay_local_and_injection_safe_1360() {
     let out = out_block(&o);
     assert_eq!(
         non_empty_lines(&out),
-        vec![AUDIT_160],
+        [AUDIT_160],
         "TAIL=1 keeps only the newest audit line: {out}"
     );
     // Non-numeric overrides fall back to the defaults and never reach the remote command.
@@ -570,7 +570,7 @@ fn genlock_audit_snapshot_knobs_stay_local_and_injection_safe_1360() {
     let out = out_block(&o);
     assert_eq!(
         non_empty_lines(&out),
-        vec![AUDIT_100, AUDIT_160],
+        [AUDIT_100, AUDIT_160],
         "a non-numeric TAIL falls back to 400 (both audit lines kept): {out}"
     );
 }
