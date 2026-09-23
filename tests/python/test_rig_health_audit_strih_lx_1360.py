@@ -138,12 +138,36 @@ def test_linux_log_tail_cmd_reads_head_600_and_tail_of_the_newest_log_1360(tmp_p
     assert "OLD-LOG-LINE" not in out
 
 
-def test_linux_obs_count_cmd_prints_a_number_1360(monkeypatch):
+def _run_count_with_ps_stub(tmp_path: Path, ps_body: str) -> subprocess.CompletedProcess:
+    """Run the Linux count command with a PATH-stubbed `ps` that logs its argv and prints the given
+    `stat` column (one process per line)."""
+    stub_dir = tmp_path / "bin"
+    stub_dir.mkdir()
+    (stub_dir / "ps").write_text(
+        "#!/usr/bin/env bash\n"
+        f'printf "%s\\n" "$*" > "{tmp_path}/ps.argv"\n'
+        f"printf '{ps_body}'\n")
+    (stub_dir / "ps").chmod(0o755)
+    env = {**os.environ, "PATH": f"{stub_dir}:{os.environ['PATH']}"}
+    return subprocess.run(["bash", "-c", _mod._obs_count_cmd(_mod.STRIH)],
+                          capture_output=True, text=True, env=env, timeout=20)
+
+
+def test_linux_obs_count_cmd_counts_live_obs_only_1360(tmp_path, monkeypatch):
     monkeypatch.delenv("STRIH_PLATFORM", raising=False)
-    out = subprocess.run(["bash", "-c", _mod._obs_count_cmd(_mod.STRIH)],
-                         capture_output=True, text=True, timeout=20)
-    assert out.returncode == 0 and out.stdout.strip().isdigit(), (
-        f"the Linux count must always print a bare integer and exit 0 (0 when OBS is down): {out!r}")
+    out = _run_count_with_ps_stub(tmp_path, "S\\nZ\\nSl\\n")
+    assert out.returncode == 0 and out.stdout.strip() == "2", (
+        f"two live obs processes + one zombie must count 2: {out!r}")
+    argv = (tmp_path / "ps.argv").read_text().split()
+    assert argv[:2] == ["-C", "obs"], (
+        f"the count must match the exact `obs` comm (never obs-browser-pag): {argv}")
+
+
+def test_linux_obs_count_cmd_prints_zero_when_obs_is_down_1360(tmp_path, monkeypatch):
+    monkeypatch.delenv("STRIH_PLATFORM", raising=False)
+    out = _run_count_with_ps_stub(tmp_path, "")
+    assert out.returncode == 0 and out.stdout.strip() == "0", (
+        f"OBS down must read 0 and exit 0 (never an ssh failure): {out!r}")
 
 
 # --- the strih row + the CG-chain row use the platform-resolved commands --------------------------

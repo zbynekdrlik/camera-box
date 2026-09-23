@@ -377,7 +377,7 @@ fn prerecord_calibration_reads_strih_through_the_shared_reader_1360() {
     );
     assert!(
         b.contains(r#". "$HERE/lib/strih-log-read.sh""#),
-        "[4g/8] runs BEFORE qr-align.sh is sourced, so it must source the shared reader itself"
+        "[4g/8] must source the shared reader itself, never rely on a transitive source"
     );
     assert!(
         b.contains(r#"strih_log_line_count "$STRIH" "$STRIH_USER" "$STRIH_PW""#),
@@ -393,8 +393,8 @@ fn prerecord_calibration_reads_strih_through_the_shared_reader_1360() {
 
 #[test]
 fn prerecord_calibration_mark_and_fetch_scope_the_linux_log_1360() {
-    // Run the [4g/8] mark + fetch lines exactly as extracted from recording-e2e.sh (the only two
-    // strih-touching statements besides the python calls) against the fixture strih-lx.
+    // Run the [4g/8] mark + fetch statements EXACTLY as extracted from recording-e2e.sh (the only
+    // two strih-touching statements besides the python calls) against the fixture strih-lx.
     let b = calib_block();
     let mark = b
         .lines()
@@ -403,10 +403,26 @@ fn prerecord_calibration_mark_and_fetch_scope_the_linux_log_1360() {
         .collect::<Vec<_>>()
         .join("\n");
     assert!(!mark.is_empty(), "[4g/8] mark statement not found");
+    // The fetch is the `if <fetch> ... && [ -s "$CALIB_LOG" ]; then` condition: take it from its
+    // `if strih_log_since_line` line through the `; then` line, and run it as a plain command.
+    let fetch_lines: Vec<&str> = b
+        .lines()
+        .skip_while(|l| !l.trim_start().starts_with("if strih_log_since_line"))
+        .collect();
+    let end = fetch_lines
+        .iter()
+        .position(|l| l.trim_end().ends_with("; then"))
+        .expect("[4g/8] fetch condition end");
+    let fetch = fetch_lines[..=end]
+        .join("\n")
+        .trim()
+        .trim_start_matches("if ")
+        .trim_end_matches("; then")
+        .to_string();
     let o = run_case(&format!(
         ". \"$R/scripts/lib/strih-log-read.sh\"\nSTRIH=10.77.9.202 STRIH_USER=newlevel STRIH_PW=pw\n\
-         {mark}\necho \"MARK=$CALIB_LOG_START_LINES\"\n\
-         echo 'OUT<<'\nstrih_log_since_line \"$STRIH\" \"$STRIH_USER\" \"$STRIH_PW\" 3\necho '>>OUT'"
+         {mark}\necho \"MARK=$CALIB_LOG_START_LINES\"\nCALIB_LOG_START_LINES=3\nCALIB_LOG=\"$T/calib.log\"\n\
+         if {fetch}; then echo FETCH_OK; fi\necho 'OUT<<'\ncat \"$CALIB_LOG\"\necho '>>OUT'"
     ));
     assert_done(&o, "[4g/8] mark");
     assert!(
@@ -415,9 +431,15 @@ fn prerecord_calibration_mark_and_fetch_scope_the_linux_log_1360() {
         o.stdout,
         o.log
     );
+    assert!(
+        has_line(&o.stdout, "FETCH_OK"),
+        "the extracted [4g/8] fetch statement must succeed on strih-lx: {}\n{}",
+        o.stdout,
+        o.log
+    );
     let out = out_block(&o);
     assert!(
         out.contains("received=160") && !out.contains("received=100"),
-        "the post-mark fetch must return only lines after the mark: {out}"
+        "the post-mark fetch must write only lines after the mark into CALIB_LOG: {out}"
     );
 }
