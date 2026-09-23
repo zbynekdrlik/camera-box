@@ -10,14 +10,19 @@ set -euo pipefail
 # the deploy's OWN naming allowlist -- NEVER a generic sweep (the imag 'previous' rollback dir and
 # any operator folder are always protected).
 #
-# Three modes:
-#   (default, --host <win-ip>)   DRIVER for a Windows box (strih/stream): scp -O obs-backup-retention.ps1
+# Modes (issue 1317 part 3: there is NO default box -- name one; the old default was the Windows
+# strih PC at 10.77.9.202, RETIRED at the M4 cut-over, whose address is the Linux strih-lx now):
+#   --box <fleet-name>           the fleet-list way (scripts/lib/obs-fleet.sh): the box's host + CLASS
+#                                pick the driver -- windows-genlock -> the .ps1 driver below;
+#                                linux-genlock (strih-lx, imag) -> ssh + --local-sweep, like --imag.
+#   --host <win-ip>              DRIVER for a Windows box (stream/resolume): scp -O obs-backup-retention.ps1
 #                                to the box and run it via `powershell -File` (dry-run leg read-only),
-#                                NEVER a nested `powershell -Command` over ssh.
+#                                NEVER a nested `powershell -Command` over ssh. A linux-genlock fleet
+#                                address is REFUSED (the class gate) -- use --box <name> for it.
 #   --imag                       ssh to imag and run THIS script there in --local-sweep mode over
 #                                /opt/obs-backup + /tmp (imag has no PowerShell).
-#   --local-sweep                run the bash decision on THE CURRENT machine (used by --imag; also
-#                                for local testing against --backup-root/--stage-parent fixtures).
+#   --local-sweep                run the bash decision on THE CURRENT machine (used by --imag / a
+#                                linux --box; also for local testing against fixture dirs).
 #
 # ** The first real --execute run is the SUPERVISOR's explicit, reviewed step (#789). ** Run the
 # dry-run first, read the printed plan, and only then re-run with --execute.
@@ -27,18 +32,21 @@ set -euo pipefail
 # allowlist shapes). That Rust module + tests/obs_backup_retention.rs are the canonical spec.
 #
 # Usage:
-#   scripts/obs-backup-retention.sh --host 10.77.9.202                 # dry-run on strih (win)
-#   scripts/obs-backup-retention.sh --host 10.77.9.204                 # dry-run on stream (win)
+#   scripts/obs-backup-retention.sh --box strih-lx                     # dry-run on strih-lx (linux, bash)
+#   scripts/obs-backup-retention.sh --box stream                       # dry-run on stream (win .ps1)
+#   scripts/obs-backup-retention.sh --host 10.77.9.204                 # dry-run on stream (win), by address
 #   scripts/obs-backup-retention.sh --imag                             # dry-run on imag (bash)
-#   scripts/obs-backup-retention.sh --host 10.77.9.202 --execute       # SUPERVISOR only
+#   scripts/obs-backup-retention.sh --box strih-lx --execute           # SUPERVISOR only
 #   scripts/obs-backup-retention.sh --imag --execute                   # SUPERVISOR only
 #   scripts/obs-backup-retention.sh --local-sweep --backup-root <dir> --stage-parent <dir>  # test
 #
 # Env: STRIH_SSH_PW (win boxes, default "newlevel"); IMAG_IP (default 10.77.9.182),
-#      IMAG_USER (default newlevel), IMAG_PW (default newlevel).
+#      IMAG_USER (default newlevel), IMAG_PW (default newlevel); LINUX_BOX_USER / LINUX_BOX_PW
+#      (a linux --box, default newlevel / newlevel -- the rig's shared Linux-box creds, targets.md).
 
-MODE="win"                      # win | imag | local-sweep
-HOST="10.77.9.202"
+MODE=""                         # win | imag | linux | local-sweep (no default -- issue 1317)
+HOST=""
+BOX=""
 USER="newlevel"
 WIN_BACKUP_ROOT='C:\obs-backup'
 WIN_STAGE_PARENT='C:\'
@@ -52,6 +60,7 @@ REMOTE_PS1='C:\Users\newlevel\obs-backup-retention.ps1'
 while [ $# -gt 0 ]; do
   case "$1" in
     --host)          HOST="$2"; MODE="win"; shift 2 ;;
+    --box)           BOX="$2"; MODE="box"; shift 2 ;;
     --user)          USER="$2"; shift 2 ;;
     --imag)          MODE="imag"; shift ;;
     --local-sweep)   MODE="local-sweep"; shift ;;
@@ -71,6 +80,27 @@ done
 # ${BASH_SOURCE[0]:-$0}: BASH_SOURCE is unset when this script is fed to `bash -s` (the --imag leg),
 # which would trip `set -u`. HERE is only used by the win/imag driver legs, not --local-sweep.
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
+
+# issue 1317 part 3: resolve the target from the fleet list and class-gate it. The --local-sweep leg
+# runs ON the box (fed via `bash -s`, no lib beside it), so the fleet lib is sourced only by the dev1
+# driver modes that need it.
+if [ "$MODE" = "box" ] || [ "$MODE" = "win" ]; then
+  # shellcheck source=scripts/lib/obs-fleet.sh
+  . "$HERE/lib/obs-fleet.sh"
+fi
+if [ "$MODE" = "box" ]; then
+  BOX_CLASS="$(obs_fleet_class "$BOX")" || { echo "ERROR: --box '$BOX' is not in the fleet list (scripts/lib/obs-fleet.sh)" >&2; exit 2; }
+  HOST="$(obs_fleet_host "$BOX")"
+  case "$BOX_CLASS" in
+    windows-genlock) MODE="win" ;;
+    linux-genlock)   MODE="linux" ;;
+    *) echo "ERROR: --box '$BOX' has an unknown fleet class '$BOX_CLASS'" >&2; exit 2 ;;
+  esac
+elif [ "$MODE" = "win" ]; then
+  obs_fleet_refuse_linux_target "$HOST" "obs-backup-retention.sh --host (the Windows .ps1 driver)" \
+    || { echo "       use --box <fleet-name> for a Linux box (it runs the bash --local-sweep over ssh)" >&2; exit 2; }
+fi
+[ -n "$MODE" ] || { echo "ERROR: name a target: --box <fleet-name> | --host <win-ip> | --imag | --local-sweep (no default box -- the Windows strih PC is RETIRED, issue 1317)" >&2; exit 2; }
 
 # EXPLICIT allowlists -- byte-mirror of is_dated_backup()/is_stage_dir() in
 # src/obs_backup_retention.rs. `[0-9]` (never a locale digit class); lowercase-hex sha only.
@@ -157,11 +187,17 @@ case "$MODE" in
     obs_backup_sweep
     ;;
 
-  imag)
-    IMAG_IP="${IMAG_IP:-10.77.9.182}"; IMAG_USER="${IMAG_USER:-newlevel}"; IMAG_PW="${IMAG_PW:-newlevel}"
+  imag|linux)
+    if [ "$MODE" = "imag" ]; then
+      IMAG_IP="${IMAG_IP:-10.77.9.182}"; IMAG_USER="${IMAG_USER:-newlevel}"; IMAG_PW="${IMAG_PW:-newlevel}"
+    else
+      # a linux-genlock fleet --box (strih-lx): the same bash --local-sweep over ssh as imag, at the
+      # fleet host. The IMAG_* names are this leg's transport variables (shared, not imag-specific).
+      IMAG_IP="$HOST"; IMAG_USER="${LINUX_BOX_USER:-newlevel}"; IMAG_PW="${LINUX_BOX_PW:-newlevel}"
+    fi
     command -v sshpass >/dev/null || { echo "sshpass not installed (sudo apt-get install -y sshpass)" >&2; exit 1; }
     MODE_ARG=""; [ "$EXECUTE" = 1 ] && MODE_ARG="--execute"
-    echo "[imag] ssh ${IMAG_USER}@${IMAG_IP} -> --local-sweep (${BACKUP_ROOT} + ${STAGE_PARENT}) $([ "$EXECUTE" = 1 ] && echo EXECUTE || echo DRY-RUN)"
+    echo "[${BOX:-imag}] ssh ${IMAG_USER}@${IMAG_IP} -> --local-sweep (${BACKUP_ROOT} + ${STAGE_PARENT}) $([ "$EXECUTE" = 1 ] && echo EXECUTE || echo DRY-RUN)"
     # Feed ONE stdin stream to the remote `sudo -S bash -s`: the sudo password line FIRST, then THIS
     # script as the program. `sudo -S` consumes the first line (password), the child `bash -s`
     # inherits the same stdin and reads the rest (the program). A `printf|sudo` remote pipeline would

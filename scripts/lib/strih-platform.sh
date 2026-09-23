@@ -38,6 +38,18 @@ strih_platform() {
   fi
 }
 
+# strih_platform_refuse_windows_only_mode HOST WHAT -> returns 0 (silent) when HOST's strih platform
+# is windows; returns 1 with a named error on stderr when it is linux. The ONE guard a Windows-only
+# strih code path (a win-* MCP / PowerShell plan with no strih-lx port yet) calls BEFORE doing
+# anything, so the Linux strih is refused loudly instead of receiving a Windows plan (issue 1317
+# part 3). Pure (only strih_platform above), no network.
+strih_platform_refuse_windows_only_mode() {
+  local host="${1:-}" what="${2:-this step}"
+  [ "$(strih_platform "$host")" = "linux" ] || return 0
+  echo "ERROR: ${what} is Windows-strih-only (win-* MCP / PowerShell), but strih ${host} is the Linux strih-lx (strih_platform=linux) -- it has no strih-lx port yet (issue 1317); refusing instead of emitting a Windows plan" >&2
+  return 1
+}
+
 # strih_linux_visibility_probe_cmd -> REMOTE bash TEXT (embed via $(...) into an ssh command
 # string, plain ssh -- NEVER win_ssh_run/CIM for a Linux strih). Checks whether strih-obs.service
 # is active under the OPERATOR's own user session (systemd --user), the Linux analogue of "visible

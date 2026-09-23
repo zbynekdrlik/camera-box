@@ -2,11 +2,17 @@
 # strih-recordings-retention.sh (#1122) — scp the dry-run-first retention .ps1 to a rig OBS box and run it.
 set -euo pipefail
 #
-# Deploys scripts/strih-recordings-retention.ps1 to a Windows OBS box (strih by default) and runs
-# it, DRY-RUN by default. This is the deploy-genlock-fleet.sh emission style: the .ps1 goes over
+# Deploys scripts/strih-recordings-retention.ps1 to a Windows OBS box (named with the REQUIRED --host)
+# and runs it, DRY-RUN by default. This is the deploy-genlock-fleet.sh emission style: the .ps1 goes over
 # `scp -O` and is invoked with `powershell -NoProfile -ExecutionPolicy Bypass -File <remote.ps1>` —
 # NEVER a nested `powershell -Command` over ssh (which fails silently on this rig, per
 # .claude/rules/rig-state-inspection.md).
+#
+# issue 1317 part 3: there is NO default box any more. The default used to be the Windows strih PC at
+# 10.77.9.202, which was RETIRED at the M4 cut-over (20.9.2026) -- that address is the Linux strih-lx
+# now, which records to /srv/_REC (its OBS profile RecFilePath, read live 23.9.2026) and has no
+# PowerShell. This tool is Windows-only, so a linux-genlock fleet address is REFUSED by the ONE class
+# gate (obs_fleet_refuse_linux_target, scripts/lib/obs-fleet.sh) instead of scp'ing a .ps1 at it.
 #
 # The E2E harness (scripts/recording-e2e.sh) records one OBS program capture per run into the box's
 # live OBS record directory (strih: C:\_REC since 17.9.2026 — the D: NVMe dropped off the bus and the
@@ -22,14 +28,13 @@ set -euo pipefail
 # leg is READ-ONLY (it lists a plan and deletes nothing).
 #
 # Usage:
-#   scripts/strih-recordings-retention.sh                         # dry-run on strih (C:\_REC, keep 20 runs / 3 days)
-#   scripts/strih-recordings-retention.sh --keep-runs 20 --keep-days 3
-#   scripts/strih-recordings-retention.sh --host 10.77.9.204 --record-dir 'C:\Users\newlevel\Videos'  # stream box
-#   scripts/strih-recordings-retention.sh --execute              # SUPERVISOR only — actually deletes
+#   scripts/strih-recordings-retention.sh --host 10.77.9.204 --record-dir 'C:\Users\newlevel\Videos'  # stream box, dry-run
+#   scripts/strih-recordings-retention.sh --host <win-ip> --keep-runs 20 --keep-days 3   # a Windows box recording to C:\_REC
+#   scripts/strih-recordings-retention.sh --host <win-ip> --execute                      # SUPERVISOR only — actually deletes
 #
 # Env: STRIH_SSH_PW (default "newlevel") — the box's ssh password (newlevel/newlevel).
 
-HOST="10.77.9.202"
+HOST=""
 USER="newlevel"
 RECORD_DIR="C:\\_REC"
 KEEP_RUNS="20"
@@ -54,6 +59,12 @@ while [ $# -gt 0 ]; do
 done
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/lib/obs-fleet.sh
+. "$HERE/lib/obs-fleet.sh"
+
+[ -n "$HOST" ] || { echo "ERROR: --host <windows-obs-box> is required -- the Windows strih PC this tool defaulted to is RETIRED (issue 1317); strih-lx records to /srv/_REC on Linux and has no .ps1 executor" >&2; exit 2; }
+obs_fleet_refuse_linux_target "$HOST" "strih-recordings-retention.sh" || exit 2
+
 PS1_LOCAL="$HERE/strih-recordings-retention.ps1"
 PW="${STRIH_SSH_PW:-newlevel}"
 

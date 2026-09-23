@@ -468,6 +468,10 @@ camera_secondary_ip() {
   esac
 }
 STRIH=10.77.9.202
+# issue 1317 part 3: the Windows strih verdict planner has NO default box any more (its old default
+# was this same address, now the Linux strih-lx), so hand it the harness's own strih explicitly --
+# it then refuses a Linux strih by platform, and only a STRIH_PLATFORM=windows run reaches it.
+export STRIH_BOX="$STRIH"
 STREAM=10.77.9.204
 # #462 (EPIC #466 Topology v2): imag-nb — the NEW 60fps low-latency IMAG cutter of all 6 NDI
 # cameras (Linux, own recorded program). A THIRD recorded+decoded node alongside strih+stream —
@@ -843,7 +847,13 @@ else
 fi
 if [ -n "$_svg_strih_msg" ]; then
   echo "ERROR: [0/8] strih INVISIBLE: $_svg_strih_msg" >&2
-  echo "       Recovery: bash scripts/launch-obs-genlock.sh --box strih --force   # paste into the win-strih MCP Shell (session 1, never ssh+CIM — issue 958)" >&2
+  # issue 1317 part 3: the Windows strih relaunch planner arm is retired -- name the recovery that
+  # matches the strih's platform (the Linux strih-lx restarts its supervised user unit).
+  if [ "$(strih_platform "$STRIH")" = "linux" ]; then
+    echo "       Recovery: ssh ${STRIH_USER}@${STRIH} 'systemctl --user restart strih-obs.service'   # strih-lx supervised user unit (issue 1317)" >&2
+  else
+    echo "       Recovery: relaunch OBS in the strih box's operator session via its win-* MCP Shell (session 1, never ssh+CIM — issue 958)" >&2
+  fi
   exit 1
 fi
 echo "    ok: strih obs64/AHK visible on the console (SessionId=1, window present)"
@@ -3949,6 +3959,10 @@ if [ "${ZERO_LOSS_RESTART_GATE:-0}" = "1" ]; then
       exit 2
       ;;
   esac
+  # issue 1317 part 3: this restart-survival mode plans the WINDOWS per-box decode (win-* MCP
+  # paste steps) for strih; the Linux strih-lx has no port of it yet, so refuse BEFORE recording
+  # anything instead of emitting a Windows plan for the Linux box after a 360 s capture.
+  strih_platform_refuse_windows_only_mode "$STRIH" "the restart-survival measurement mode" || exit 2
   # 360s clears recording-verdict's --min-secs 300 analyzed-span floor (#373) with margin for
   # start/stop settling — the SAME floor the normal [8/8c] merge uses below.
   ZERO_LOSS_RESTART_GATE_BIN="${ZERO_LOSS_RESTART_GATE_BIN:-$PROBE_BIN_DIR/zero-loss-restart-gate}"
