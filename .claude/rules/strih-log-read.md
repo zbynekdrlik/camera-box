@@ -9,7 +9,14 @@ paths:
   - "scripts/lib/ndi-cadence-heal.sh"
   - "scripts/lib/mv-fps-preflight.sh"
   - "scripts/mv-fps-alert-watchdog.sh"
+  - "scripts/cadence-alert-watchdog.sh"
+  - "scripts/frozen-input-alert-watchdog.sh"
+  - "scripts/ndi-halving-watchdog.sh"
+  - "scripts/asio-starve-alert-watchdog.sh"
+  - "scripts/rig-health-audit.py"
   - "tests/harness_strih_log_read_1360.rs"
+  - "tests/harness_strih_log_read_consumers_1360.rs"
+  - "tests/python/test_rig_health_audit_strih_lx_1360.py"
 ---
 
 # Reading the strih OBS log — ONE platform-resolved reader (issue 1360)
@@ -29,7 +36,10 @@ measured arrival floor). **Never add a new inline strih-log read — call `scrip
   whole-log (regime-mixed) fetch.
 - `strih_log_os <host>` → `linux|win` — for a consumer that owns its own two-platform reader keyed on
   an `os` token (the MV-fps pair); give that consumer the `strih` token and resolve it through this.
-- `strih_log_remote_cmd <linux|windows> <count|since|tail> [arg]` — the PURE builder (unit-testable).
+- `strih_log_remote_cmd <linux|windows> <count|since|tail|headtail> [arg]` — the PURE builder
+  (unit-testable). `headtail N` = first 600 + last N lines (the rig-health-audit read: the launch-time
+  audio-buffering burst is in the head); no bash consumer calls it, it is the ONE pinned source of the
+  audit's python twin (below).
 
 The platform comes from `strih-platform.sh` `strih_platform` (env `STRIH_PLATFORM` override, else the
 strih-lx address → linux, else windows). The Windows strings are the pre-existing ones, verbatim; the
@@ -44,15 +54,48 @@ tail is the `gc (gci …).FullName -Tail N` form sent as `-EncodedCommand` (the 
 - The lib never sources `win-ssh-exec.sh` (its top-level `set -euo pipefail` would leak into the
   non-strict watchdog callers); it sources only `strih-platform.sh` + `ps-encoded.sh`, both set-e-free.
 
-## Not yet migrated (still Windows-only strih-log reads — follow-ups, not this reader's bugs)
+## Consumers that watch several boxes (the dev1 watchdogs, issue 1360 part 2)
 
-The dormant `PRERECORD_PHASE_CALIBRATE=1` `[4g/8]` block in `recording-e2e.sh`, and the dev1 watchdogs
-`ndi-halving` / `cadence-alert` / `asio-starve` / `frozen-input` `probe_received`, plus
-`rig-health-audit.py`. `frozen-input`'s ENUMERATION read already goes through `mv_reverify_probe_raw`
-and so through this reader. `scripts/lib/genlock-audit-snapshot.sh` (issue 1354 scope 3) carries its
-OWN inline `strih_platform` if-linux branch with a REMOTE grep and a logged SKIP on Windows — exactly
-the per-helper-branch shape this reader replaces; migrating it needs a local grep over
-`strih_log_tail` (or a grep-capable reader op, added only when a consumer needs it).
+`cadence-alert` / `ndi-halving` / `asio-starve` `fetch_box_log` and `frozen-input` `probe_received`
+watch a configurable box (`*_BOX` / `*_RECEIVER`, stream by default for three of them). The shape:
+source this reader, and right after the tail count is clamped,
+`if [ "$(strih_log_os "$ip")" = linux ]; then strih_log_tail "$ip" "$SSH_USER" "$SSH_PW" "$_tail" "$SSH_TIMEOUT"; return 0; fi`
+— the Windows boxes keep their own `-EncodedCommand` read BYTE-IDENTICAL (the issue-1259
+`harness_ps_encoded_fleet_1259` payload tests keep pinning it) and the `*_PROBE_CMD` seam stays the
+FIRST branch, so every `--dry-run`/fixture test is unaffected. `frozen-input`'s enumeration read was
+already on the reader via `mv_reverify_probe_raw`. The Linux branch takes the watchdog's
+`*_SSH_USER` / `*_SSH_PW` / `*_SSH_TIMEOUT`, but NOT its `*_SSH_OPTS` override — the reader builds its
+own ssh options (the stale-key rule above); threading options through the shared reader is not worth
+it for a knob nobody sets.
+
+Live proof recipe (read-only, allowed while an E2E holds the rig lease — log reads never mutate):
+run each watchdog `--dry-run` with `*_STATE_DIR=<scratch>` (NEVER the real dev1 state dir) and the
+box pointed at strih-lx (`FROZEN_INPUT_RECEIVER='strih|10.77.9.202'`, `NDI_HALVING_RECEIVER=…`
++ `NDI_HALVING_RIGMODE_CMD=true`), twice — pass 1 is UNKNOWN by design (no prev sample), pass 2 must
+read OK / ADVANCING / HEALTHY. strih-lx carries NO `asrc: source … starved_blocks` lines (the ASIO
+sources live on stream), so asio-starve pointed at strih-lx is honestly UNKNOWN.
+
+## The python twin (`rig-health-audit.py`, the status-page feeder)
+
+Python cannot source bash, so the audit carries `strih_platform(host)` + `_linux_obs_log_tail_cmd`
+(head 600 + tail N) + `_linux_obs_count_cmd` (`ps -C obs`, zombies excluded — the comm is `obs`, the
+CEF children are `obs-browser-pag`, never matched), dispatched per box by `_obs_log_tail_cmd` /
+`_obs_count_cmd`. `tests/python/test_rig_health_audit_strih_lx_1360.py` RUNS the bash
+`strih_platform` + `strih_log_remote_cmd <platform> headtail N` and asserts byte equality on BOTH
+platforms — change the command in `strih-log-read.sh` first, the pytest then forces the twin to follow.
+The audit's `ssh()` carries `UserKnownHostsFile=/dev/null` too — deliberately for EVERY row (cams,
+imag), not only strih: boxes get re-imaged/re-addressed and a read-only audit must never go blind on
+a stale key. The strih row keeps the `obs64=` key
+(the status page's generic key=value renderer) even though the Linux process is `obs`.
+
+## Not yet migrated
+
+`scripts/lib/genlock-audit-snapshot.sh` (issue 1354 scope 3) carries its OWN inline `strih_platform`
+if-linux branch with a REMOTE grep and a logged SKIP on Windows — the per-helper-branch shape this
+reader replaces; migrating it needs a local grep over `strih_log_tail` (or a grep-capable reader op,
+added only when a consumer needs it). The remaining `APPDATA\obs-studio` hits under `scripts/` are
+NOT strih log readers (launch/deploy/self-heal programs that only ever target a Windows box, the
+on-box `bundle-state-server.py` with its own `--obs-log-dir`, and comments).
 
 The MV-fps pair's OWN Linux ssh carries the same `UserKnownHostsFile=/dev/null -o LogLevel=ERROR`
 options as this reader (a strih-lx read through them hits the same stale-key hazard).
@@ -66,3 +109,11 @@ mtimes set with `touch -d`) and answers a `powershell …` one with a canned rep
 branch actually taken, the newest-file choice and the spaced-name quoting are all observable. A
 worktree worker can run the same case files locally with plain `bash <file> <dir>` (the isolation
 guard refuses `bash -c`, not a file).
+
+Sourcing a WATCHDOG into such a case: `set --` first (each watchdog parses `$@` at source time and
+rejects the case's own argv), and `set +e` right after the source — the watchdogs run under
+`set -uo pipefail` (NO `-e`), so a probe whose parse pipeline ends in a `grep` no-match (frozen-input
+`probe_received` on an empty read) returns non-zero there by design; under the case's `-e` that
+would abort the case before the sentinel. The whole `tests/*.rs` file runs locally with plain
+`rustc --test` + a stub `tempfile` rlib (ci-testing-gotchas.md) — the stub needs `TempDir::new()`
+too for some sibling files (harness_mv_fps_asio_byte_safety_1262).

@@ -62,6 +62,9 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE/lib/asio-starve-health.sh"
 # shellcheck source=scripts/lib/ps-encoded.sh
 . "$HERE/lib/ps-encoded.sh"
+# shellcheck source=scripts/lib/strih-log-read.sh
+# issue 1360: a Linux strih (strih-lx) is read through the ONE shared strih OBS-log reader.
+. "$HERE/lib/strih-log-read.sh"
 
 DRY_RUN=0
 case "${1:-}" in
@@ -160,6 +163,14 @@ fetch_box_log() {
   # an empty encode -> empty read -> UNKNOWN, never an abort. Sourcing the whole tail; grep on dev1.
   local _enc _tail
   _tail="$(ps_clamp_numeric "$OBS_LOG_TAIL" 1200)" # #1259: guard the env count before the payload
+  # issue 1360: a Linux strih (strih-lx, the production strih since the M4 cut-over) is read
+  # through the ONE shared reader (newest ~/.config/obs-studio/logs/*.txt over plain ssh, the
+  # spaced filename quoted) -- the PowerShell read below would come back EMPTY there (UNKNOWN
+  # forever, never a page). Every other box (stream, resolume) keeps the PowerShell read.
+  if [ "$(strih_log_os "$ip")" = linux ]; then
+    strih_log_tail "$ip" "$SSH_USER" "$SSH_PW" "$_tail" "$SSH_TIMEOUT"
+    return 0
+  fi
   _enc="$(ps_encoded_command "gc (gci \$env:APPDATA\\obs-studio\\logs\\*.txt | sort LastWriteTime | select -last 1).FullName -Tail $_tail")"
   # shellcheck disable=SC2086
   timeout "$SSH_TIMEOUT" sshpass -p "$SSH_PW" ssh $SSH_OPTS "$SSH_USER@$ip" \

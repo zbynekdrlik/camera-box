@@ -4187,10 +4187,15 @@ if [ "$PRERECORD_PHASE_CALIBRATE" = "1" ] && [ "${ALL_CAMBOX:-0}" = "1" ]; then
   # #757 Correction 2 (time-scoping): capture the CURRENT line count of strih's latest OBS log
   # BEFORE the preview cycle starts, so the fetch below can skip straight past everything
   # older than this calibration window — never a blind `-Tail N` that can silently include
-  # many minutes of unrelated prior activity.
-  CALIB_LOG_START_LINES="$(win_ssh_run "$STRIH_USER" "$STRIH_PW" "$STRIH" \
-    '(Get-Content (Get-ChildItem "$env:APPDATA\obs-studio\logs\*.txt" | Sort-Object LastWriteTime -Descending | Select-Object -First 1)).Count' \
-    2>/dev/null | tr -d '[:space:]')"
+  # many minutes of unrelated prior activity. Issue 1360: both reads go through the ONE
+  # platform-resolved strih OBS-log reader (plain ssh on the Linux strih-lx, the verbatim
+  # PowerShell on a Windows strih). Sourced explicitly here for locality: it is already loaded
+  # transitively (mv-reverify-escalate.sh near the top sources it), but this step must not depend
+  # on that indirection.
+  # shellcheck source=scripts/lib/strih-log-read.sh
+  . "$HERE/lib/strih-log-read.sh"
+  CALIB_LOG_START_LINES="$(strih_log_line_count "$STRIH" "$STRIH_USER" "$STRIH_PW" 60 2>/dev/null \
+    | tr -d '[:space:]')"
   case "$CALIB_LOG_START_LINES" in ''|*[!0-9]*) CALIB_LOG_START_LINES=0 ;; esac
 
   echo "    [calib] cycling every strih camera onto PREVIEW for ${CALIB_DWELL_SECS}s each (program output untouched)"
@@ -4198,8 +4203,7 @@ if [ "$PRERECORD_PHASE_CALIBRATE" = "1" ] && [ "${ALL_CAMBOX:-0}" = "1" ]; then
     | sed 's/^/    [calib] /'
 
   CALIB_LOG="$OUTDIR/prerecord-calib-strih-${RUN_ID}.log"
-  _calib_fetch_ps='Get-Content (Get-ChildItem "$env:APPDATA\obs-studio\logs\*.txt" | Sort-Object LastWriteTime -Descending | Select-Object -First 1) | Select-Object -Skip '"$CALIB_LOG_START_LINES"
-  if win_ssh_run "$STRIH_USER" "$STRIH_PW" "$STRIH" "$_calib_fetch_ps" \
+  if strih_log_since_line "$STRIH" "$STRIH_USER" "$STRIH_PW" "$CALIB_LOG_START_LINES" 120 \
       > "$CALIB_LOG" 2>/dev/null && [ -s "$CALIB_LOG" ]; then
     CALIB_JITTER_JSON="$OUTDIR/prerecord-calib-jitter-${RUN_ID}.json"
     if "$PROBE_BIN_DIR/genlock-jitter-report" --file "$CALIB_LOG" --json > "$CALIB_JITTER_JSON" 2>"$OUTDIR/prerecord-calib-jitter-err-${RUN_ID}.log"; then

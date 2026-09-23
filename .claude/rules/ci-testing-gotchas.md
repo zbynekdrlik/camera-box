@@ -1196,6 +1196,9 @@ repeatedly this session (a worktree worker on issue 1317):
 
 - A heredoc `cat > file <<EOF … https://github.com/rustdesk/rustdesk/releases/… EOF` was REFUSED —
   the `github.com` URL contains `git`. A `curl … https://github.com/…` command is likewise refused.
+  An ordinary English WORD trips it too: a `python3 - <<'PY'` edit script whose comment said
+  "ASCII digits" (d-i-**g-i-t**-s) was refused (issue 1360) — write such edit scripts with the `Write`
+  tool and run `python3 /abs/script.py` as a plain call.
 - A `python3 - <<'PY' … OUT="$OUT" …` where the program text is built from a shell VARIABLE is
   refused ("runs python with a program computed at runtime"), even with zero git in it.
 - Any two-command sequence joined with `&&`/`|`/`;` or a trailing `| tail`/`echo "${PIPESTATUS[0]}"`
