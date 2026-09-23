@@ -16,12 +16,15 @@
 # Items (the obs-box-baseline.sh functions they grade): net (network tuning), perf (governor +
 # <BOX>-maxperf persistence), nosleep, boot (boot safety net), kernel (preempt=full low-latency),
 # affinity (AFFINITY-ONLY core reservation, no kernel isolcpus/nohz_full), gpu (PRIME nvidia-primary on
-# a dGPU box), dejitter, crash (no operator crash popup), kiosk (lightdm autologin -> openbox, no GNOME),
+# a dGPU box, the iGPU max-frequency pin otherwise), dejitter (oomd + off-hours + OBS ProcessPriority=High
+# + the user-unit masks), crash (no operator crash popup), kiosk (lightdm + openbox installed, autologin
+# -> openbox, no GNOME),
 # autostart (the openbox autostart contract), power (thermald purged + PL1 envelope units), touchpad.
 # Fail-closed: a fact the gather could not read grades FAIL ("unreadable"), never a silent pass.
 
+# (the directory is a pure parameter expansion -- no dirname/cd -- like obs-box-baseline.sh's own)
 # shellcheck source=scripts/lib/obs-box-baseline.sh
-. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/obs-box-baseline.sh"
+if [ "${BASH_SOURCE[0]%/*}" != "${BASH_SOURCE[0]}" ]; then . "${BASH_SOURCE[0]%/*}/obs-box-baseline.sh"; else . ./obs-box-baseline.sh; fi
 
 # obs_box_crash_popup_unit_ok ENABLED_STATE ACTIVE_STATE -> 0 iff one crash unit is quiet: its
 # `systemctl is-enabled` FIRST line is masked / masked-runtime / disabled / not-found / empty (unit file
@@ -101,6 +104,19 @@ obs_box_cmdline_has_word() {
     return 1
 }
 
+# obs_box_holds_generic_kernel HOLDS -> 0 iff the space-separated `apt-mark showhold` list HOLDS carries
+# at least one generic kernel package (linux-image-* / linux-headers-* / linux-generic-hwe-*) -- the
+# boot-safety-net pin. An empty list (nothing held, or an unreadable read) returns 1.
+obs_box_holds_generic_kernel() {
+    local h
+    for h in ${1-}; do
+        case "$h" in
+            linux-image-*|linux-headers-*|linux-generic-hwe-*) return 0 ;;
+        esac
+    done
+    return 1
+}
+
 # obs_box_baseline_gather_snippet BOX DESKTOP_USER OBS_UNIT -> read-only bash text that, run ON the box
 # as any user (no root needed), prints one `key=value` fact per line for obs_box_baseline_verdict. The
 # detectors it needs (obs_box_has_discrete_nvidia, obs_box_crash_popup_units) are embedded from THIS lib
@@ -113,7 +129,7 @@ obs_box_baseline_gather_snippet() {
         return 1
     fi
     printf 'BOX=%q\nU=%q\nUNIT=%q\n' "$box" "$user" "$unit"
-    declare -f obs_box_has_discrete_nvidia obs_box_crash_popup_units
+    declare -f obs_box_has_discrete_nvidia obs_box_crash_popup_units obs_box_dejitter_user_units
     cat <<'GATHER_EOF'
 set +e
 HOMEDIR="$(getent passwd "$U" 2>/dev/null | cut -d: -f6)"; [ -n "$HOMEDIR" ] || HOMEDIR="/home/$U"
@@ -124,6 +140,7 @@ echo "sysctl_conf=$(fexists /etc/sysctl.d/99-network-performance.conf)"
 echo "rmem_max=$(sysctl -n net.core.rmem_max 2>/dev/null | first)"
 echo "nic_hook=$(if [ -x /etc/networkd-dispatcher/routable.d/optimize-nic ]; then echo 1; else echo 0; fi)"
 echo "cpu_perf_unit=$(systemctl is-enabled cpu-performance.service 2>/dev/null | first)"
+echo "rc_local_eee=$(if [ -x /etc/rc.local ] && grep -qF 'ethtool --set-eee' /etc/rc.local 2>/dev/null; then echo 1; else echo 0; fi)"
 echo "governors=$(cat /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor 2>/dev/null | sort -u | tr '\n' ' ' | sed 's/ $//')"
 echo "maxperf_active=$(systemctl is-active "${BOX}-maxperf.service" 2>/dev/null | first)"
 echo "maxperf_udev=$(fexists "/etc/udev/rules.d/99-${BOX}-maxperf-pm.rules")"
@@ -132,18 +149,30 @@ echo "logind_nosleep=$(fexists "/etc/systemd/logind.conf.d/99-${BOX}-no-sleep.co
 echo "logind_powerkey=$(fexists /etc/systemd/logind.conf.d/99-production-no-powerkey.conf)"
 echo "kernel_lockdown=$(fexists "/etc/apt/apt.conf.d/51${BOX}-kernel-lockdown")"
 echo "initrd_hook=$(if [ -x /etc/kernel/postinst.d/zz-camera-box-initrd-guarantee ]; then echo 1; else echo 0; fi)"
+echo "holds=$(apt-mark showhold 2>/dev/null | tr '\n' ' ' | sed 's/ $//')"
 echo "cmdline=$( { first < /proc/cmdline; } 2>/dev/null)"
 echo "lowlatency_cfg=$(if grep -qw 'preempt=full' /etc/default/grub.d/99-lowlatency.cfg 2>/dev/null; then echo 1; else echo 0; fi)"
 echo "isolated_cpus=$( { first < "/etc/${BOX}-isolated-cpus.conf"; } 2>/dev/null)"
 echo "dgpu=$(if lspci -nn 2>/dev/null | obs_box_has_discrete_nvidia; then echo 1; else echo 0; fi)"
 echo "prime=$(prime-select query 2>/dev/null | first)"
+echo "igpu_unit=$(systemctl is-enabled "${BOX}-igpu-maxperf.service" 2>/dev/null | first)"
 echo "oomd=$(systemctl is-enabled systemd-oomd.service 2>/dev/null | first)"
 echo "offhours=$(fexists "/etc/systemd/system/apt-daily-upgrade.timer.d/${BOX}-offhours.conf")"
+echo "process_priority=$(if grep -qx 'ProcessPriority=High' "${HOMEDIR}/.config/obs-studio/global.ini" 2>/dev/null; then echo 1; else echo 0; fi)"
+_um=0; _ut=0
+while IFS= read -r _uu; do
+    [ -n "$_uu" ] || continue
+    _ut=$((_ut + 1))
+    if [ "$(readlink "${HOMEDIR}/.config/systemd/user/${_uu}" 2>/dev/null)" = /dev/null ]; then _um=$((_um + 1)); fi
+done < <(obs_box_dejitter_user_units)
+echo "user_masked=${_um}/${_ut}"
 while IFS= read -r _cu; do
     [ -n "$_cu" ] || continue
     echo "crash_unit=${_cu}|$(systemctl is-enabled "$_cu" 2>/dev/null | first)|$(systemctl is-active "$_cu" 2>/dev/null | first)"
 done < <(obs_box_crash_popup_units)
 echo "coredump=$(pkg systemd-coredump)"
+echo "lightdm=$(pkg lightdm)"
+echo "openbox=$(pkg openbox)"
 echo "dm=$(readlink -f /etc/systemd/system/display-manager.service 2>/dev/null)"
 echo "dm_lightdm=$(readlink -f /lib/systemd/system/lightdm.service 2>/dev/null)"
 _al="/etc/lightdm/lightdm.conf.d/50-${BOX}-autologin.conf"
@@ -201,19 +230,23 @@ obs_box_baseline_verdict() {
     # net -- sysctl drop-in present AND live, EEE/flow-control dispatcher hook installed
     ok=0; [ "$(_obs_box_f sysctl_conf)" = 1 ] && [ "$(_obs_box_f rmem_max)" = 134217728 ] && [ "$(_obs_box_f nic_hook)" = 1 ] && ok=1
     _obs_box_item net "$ok" "sysctl_conf=$(_obs_box_f sysctl_conf) rmem_max=$(_obs_box_f rmem_max) nic_hook=$(_obs_box_f nic_hook)"
-    # perf -- cpu-performance.service enabled, every core performance, maxperf unit active + udev rule
+    # perf -- cpu-performance.service enabled, every core performance, the rc.local boot hook (NIC EEE off),
+    # maxperf unit active + udev rule
     ok=0; [ "$(_obs_box_f cpu_perf_unit)" = enabled ] && obs_box_governor_ok "$(_obs_box_f governors)" \
+        && [ "$(_obs_box_f rc_local_eee)" = 1 ] \
         && [ "$(_obs_box_f maxperf_active)" = active ] && [ "$(_obs_box_f maxperf_udev)" = 1 ] && ok=1
-    _obs_box_item perf "$ok" "cpu-performance=$(_obs_box_f cpu_perf_unit) governors=[$(_obs_box_f governors)] maxperf=$(_obs_box_f maxperf_active) udev=$(_obs_box_f maxperf_udev)"
+    _obs_box_item perf "$ok" "cpu-performance=$(_obs_box_f cpu_perf_unit) governors=[$(_obs_box_f governors)] rc.local-eee=$(_obs_box_f rc_local_eee) maxperf=$(_obs_box_f maxperf_active) udev=$(_obs_box_f maxperf_udev)"
     # nosleep -- sleep.target masked + both logind drop-ins
     ok=0; [ "$(_obs_box_f sleep_target)" = masked ] && [ "$(_obs_box_f logind_nosleep)" = 1 ] && [ "$(_obs_box_f logind_powerkey)" = 1 ] && ok=1
     _obs_box_item nosleep "$ok" "sleep.target=$(_obs_box_f sleep_target) no-sleep.conf=$(_obs_box_f logind_nosleep) no-powerkey.conf=$(_obs_box_f logind_powerkey)"
-    # boot -- kernel lockdown + initrd-guarantee hook
-    ok=0; [ "$(_obs_box_f kernel_lockdown)" = 1 ] && [ "$(_obs_box_f initrd_hook)" = 1 ] && ok=1
-    _obs_box_item boot "$ok" "kernel-lockdown=$(_obs_box_f kernel_lockdown) initrd-hook=$(_obs_box_f initrd_hook)"
-    # kernel -- preempt=full on the RUNNING cmdline + the lowlatency config drop-in
-    ok=0; obs_box_cmdline_has_word "$(_obs_box_f cmdline)" preempt=full && [ "$(_obs_box_f lowlatency_cfg)" = 1 ] && ok=1
-    _obs_box_item kernel "$ok" "preempt=full running=$(obs_box_cmdline_has_word "$(_obs_box_f cmdline)" preempt=full && echo yes || echo no) lowlatency.cfg=$(_obs_box_f lowlatency_cfg)"
+    # boot -- kernel lockdown + initrd-guarantee hook + at least one generic kernel package apt-held
+    ok=0; [ "$(_obs_box_f kernel_lockdown)" = 1 ] && [ "$(_obs_box_f initrd_hook)" = 1 ] \
+        && obs_box_holds_generic_kernel "$(_obs_box_f holds)" && ok=1
+    _obs_box_item boot "$ok" "kernel-lockdown=$(_obs_box_f kernel_lockdown) initrd-hook=$(_obs_box_f initrd_hook) kernel-held=$(obs_box_holds_generic_kernel "$(_obs_box_f holds)" && echo yes || echo no)"
+    # kernel -- preempt=full on the RUNNING cmdline + the lowlatency config drop-in + its package held
+    ok=0; obs_box_cmdline_has_word "$(_obs_box_f cmdline)" preempt=full && [ "$(_obs_box_f lowlatency_cfg)" = 1 ] \
+        && obs_box_cmdline_has_word "$(_obs_box_f holds)" lowlatency-kernel && ok=1
+    _obs_box_item kernel "$ok" "preempt=full running=$(obs_box_cmdline_has_word "$(_obs_box_f cmdline)" preempt=full && echo yes || echo no) lowlatency.cfg=$(_obs_box_f lowlatency_cfg) lowlatency-kernel held=$(obs_box_cmdline_has_word "$(_obs_box_f holds)" lowlatency-kernel && echo yes || echo no)"
     # affinity -- a persisted OBS cpulist AND no kernel isolation (#842: isolcpus/nohz_full is the regression)
     ok=0; [[ "$(_obs_box_f isolated_cpus)" =~ ^[0-9][0-9,-]*$ ]] && ! obs_box_cmdline_has_word "$(_obs_box_f cmdline)" isolcpus \
         && ! obs_box_cmdline_has_word "$(_obs_box_f cmdline)" nohz_full && ok=1
@@ -223,11 +256,16 @@ obs_box_baseline_verdict() {
         ok=0; [ "$(_obs_box_f prime)" = nvidia ] && ok=1
         _obs_box_item gpu "$ok" "discrete NVIDIA present, prime-select=$(_obs_box_f prime)"
     else
-        _obs_box_item gpu 1 "no discrete NVIDIA GPU (iGPU drives the outputs; nothing to select)"
+        ok=0; [ "$(_obs_box_f igpu_unit)" = enabled ] && ok=1
+        _obs_box_item gpu "$ok" "no discrete NVIDIA GPU: the iGPU max-frequency pin unit=$(_obs_box_f igpu_unit)"
     fi
-    # dejitter -- systemd-oomd masked + the apt-daily-upgrade off-hours pin
-    ok=0; [ "$(_obs_box_f oomd)" = masked ] && [ "$(_obs_box_f offhours)" = 1 ] && ok=1
-    _obs_box_item dejitter "$ok" "systemd-oomd=$(_obs_box_f oomd) apt-daily off-hours=$(_obs_box_f offhours)"
+    # dejitter -- systemd-oomd masked, the apt-daily-upgrade off-hours pin, OBS ProcessPriority=High and
+    # every obs_box_dejitter_user_units member masked for the desktop user
+    local um
+    um="$(_obs_box_f user_masked)"
+    ok=0; [ "$(_obs_box_f oomd)" = masked ] && [ "$(_obs_box_f offhours)" = 1 ] && [ "$(_obs_box_f process_priority)" = 1 ] \
+        && [[ "$um" =~ ^([1-9][0-9]*)/([0-9]+)$ ]] && [ "${BASH_REMATCH[1]}" = "${BASH_REMATCH[2]}" ] && ok=1
+    _obs_box_item dejitter "$ok" "systemd-oomd=$(_obs_box_f oomd) apt-daily off-hours=$(_obs_box_f offhours) ProcessPriority=High:$(_obs_box_f process_priority) user units masked=${um:-?}"
     # crash -- every crash-popup unit quiet + systemd-coredump installed
     local line unit en act bad="" seen=0
     while IFS= read -r line; do
@@ -239,10 +277,12 @@ obs_box_baseline_verdict() {
     done <<<"$facts"
     ok=0; [ "$seen" -ge 3 ] && [ -z "$bad" ] && [ "$(_obs_box_f coredump)" = "install ok installed" ] && ok=1
     _obs_box_item crash "$ok" "live crash units: ${bad:-none} (graded ${seen}); systemd-coredump='$(_obs_box_f coredump)'"
-    # kiosk -- DM is lightdm, autologin -> openbox for the desktop user, no gdm3 / gnome-shell
-    ok=0; [ -n "$(_obs_box_f dm)" ] && [ "$(_obs_box_f dm)" = "$(_obs_box_f dm_lightdm)" ] && [ "$(_obs_box_f autologin)" = 1 ] \
+    # kiosk -- lightdm + openbox installed, DM is lightdm, autologin -> openbox for the desktop user,
+    # no gdm3 / gnome-shell
+    ok=0; [ "$(_obs_box_f lightdm)" = "install ok installed" ] && [ "$(_obs_box_f openbox)" = "install ok installed" ] \
+        && [ -n "$(_obs_box_f dm)" ] && [ "$(_obs_box_f dm)" = "$(_obs_box_f dm_lightdm)" ] && [ "$(_obs_box_f autologin)" = 1 ] \
         && [ "$(_obs_box_f gdm3)" != "install ok installed" ] && [ "$(_obs_box_f gnome_shell)" != "install ok installed" ] && ok=1
-    _obs_box_item kiosk "$ok" "display-manager=$(_obs_box_f dm) autologin->openbox=$(_obs_box_f autologin) gdm3='$(_obs_box_f gdm3)' gnome-shell='$(_obs_box_f gnome_shell)'"
+    _obs_box_item kiosk "$ok" "lightdm='$(_obs_box_f lightdm)' openbox='$(_obs_box_f openbox)' display-manager=$(_obs_box_f dm) autologin->openbox=$(_obs_box_f autologin) gdm3='$(_obs_box_f gdm3)' gnome-shell='$(_obs_box_f gnome_shell)'"
     # autostart -- the openbox autostart contract: executable, never-blank, sentinel clear, starts the OBS unit
     ok=0; [ "$(_obs_box_f autostart_exec)" = 1 ] && [ "$(_obs_box_f autostart_xset)" = 1 ] && [ "$(_obs_box_f autostart_sentinel)" = 1 ] \
         && [ "$(_obs_box_f autostart_unit)" = 1 ] && ok=1

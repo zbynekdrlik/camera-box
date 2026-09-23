@@ -1616,11 +1616,32 @@ strih_lx_rig_nic() {
   return 1
 }
 
-# strih_lx_pl1_watts -> the strih-lx CPU's sustainable RAPL PL1 wattage for the baseline power envelope:
-# the i5-13450HX's Intel-specified Processor Base Power (55 W; box fact in
-# .claude/rules/strih-linux-provisioning.md), NOT imag's i7-13620H re-baseline. STRIH_LX_PL1_W overrides
-# it once a thermal soak says otherwise; the envelope's own guard steps PL1 down on a hot TCPU.
-strih_lx_pl1_watts() { printf '%s' "${STRIH_LX_PL1_W:-55}"; }
+# strih_lx_pl1_watts [FIRMWARE_PL1_UW] -> the RAPL PL1 wattage the baseline power envelope pins on strih-lx:
+# max(55, FIRMWARE_PL1_UW / 1e6). 55 W is the i5-13450HX's Intel-specified Processor Base Power (box fact
+# in .claude/rules/strih-linux-provisioning.md), NOT imag's i7-13620H re-baseline -- but the pin must
+# NEVER sit below what the firmware already runs: the issue-1357 review read the package-0 long_term
+# constraint at 80 W live on strih-lx (23.9.2026), and pinning the spec base under it would cut the
+# NDI-decoding cutter's sustained power by a third (imag's 25 W-clamp starvation class). The firmware value
+# is the package-0 long_term power_limit_uw read at provisioning time (imag_power_zone_select); empty /
+# non-numeric = the 55 W floor. STRIH_LX_PL1_W overrides it outright once a thermal soak says otherwise;
+# the envelope guard steps PL1 down to strih_lx_pl1_stepdown_watts on a hot TCPU.
+strih_lx_pl1_watts() {
+  local fw_uw="${1-}" fw_w=0 spec=55
+  if [ -n "${STRIH_LX_PL1_W:-}" ]; then
+    printf '%s' "$STRIH_LX_PL1_W"
+    return 0
+  fi
+  if [[ "$fw_uw" =~ ^[0-9]+$ ]]; then
+    fw_w=$((10#$fw_uw / 1000000))
+  fi
+  if [ "$fw_w" -gt "$spec" ]; then printf '%s' "$fw_w"; else printf '%s' "$spec"; fi
+}
+
+# strih_lx_pl1_stepdown_watts -> the power-envelope guard's thermal STEP-DOWN wattage on strih-lx (the
+# guard drops PL1 to it after TCPU >= 93 C twice): imag's proven sustainable 45 W -- below the 55 W
+# spec base and the ~80 W firmware PL1, far above imag's 25 W iGPU clamp that would starve the cutter.
+# STRIH_LX_PL1_STEPDOWN_W overrides it.
+strih_lx_pl1_stepdown_watts() { printf '%s' "${STRIH_LX_PL1_STEPDOWN_W:-45}"; }
 
 # strih_rtprio_leftover_path -> the realtime-priority grant the retired setup-strih sub-step wrote
 # (issue 1357: rtprio stays OFF -- the render-tick SCHED_FIFO pin assumed a reserved core and leaked
@@ -1653,8 +1674,8 @@ strih_companion_satellite_openbox_line() {
 }
 
 # strih_openbox_autostart_text -> the strih-lx kiosk ~/.config/openbox/autostart (lightdm autologin ->
-# openbox on plain Xorg, the imag appliance). It extends the display (the notebook panel = the primary
-# operator screen with the OBS UI + Multiview, the HDMI output right of it for the fixed fullscreen
+# openbox on plain Xorg, the imag appliance). It extends the display at 1920x1080@60 (the notebook panel
+# = the primary operator screen with the OBS UI + Multiview, the HDMI output right of it for the fixed fullscreen
 # projector OBS restores via SaveProjectors, issue 1346), carries the shared kiosk preamble (never-blank
 # + OBS crash-sentinel clear, obs_box_openbox_autostart_preamble -- graded by the baseline verify), then
 # STARTS the supervised --user units (openbox never reaches graphical-session.target, so their WantedBy
@@ -1667,9 +1688,15 @@ strih_openbox_autostart_text() {
 sleep 1
 PANEL=$(xrandr | awk '/ connected/ && $1 !~ /^HDMI/ {print $1; exit}')
 PROJ=$(xrandr  | awk '/ connected/ && $1 ~  /^HDMI/ {print $1; exit}')
-[ -n "$PANEL" ] && xrandr --output "$PANEL" --primary --auto 2>/dev/null || true
+# Both outputs PINNED to 1920x1080@60 (a notebook panel's --auto can pick 144/165 Hz, an HDMI sink's
+# --auto its preferred 4K/50) -- --auto only as the fallback when that mode is not offered.
+if [ -n "$PANEL" ]; then
+  xrandr --output "$PANEL" --primary --mode 1920x1080 --rate 60 2>/dev/null \
+    || xrandr --output "$PANEL" --primary --auto 2>/dev/null || true
+fi
 if [ -n "$PROJ" ] && [ -n "$PANEL" ]; then
-  xrandr --output "$PROJ" --auto --right-of "$PANEL" 2>/dev/null || true
+  xrandr --output "$PROJ" --mode 1920x1080 --rate 60 --right-of "$PANEL" 2>/dev/null \
+    || xrandr --output "$PROJ" --auto --right-of "$PANEL" 2>/dev/null || true
 fi
 AUTOSTART_EOF
   obs_box_openbox_autostart_preamble

@@ -520,7 +520,14 @@ STRIH_KERNEL_SERIES="$(obs_box_kernel_series)" \
   || fail "cannot derive the Ubuntu release series from /etc/os-release -- refusing to hold/install kernel packages by a guessed name"
 STRIH_NIC="$(strih_lx_rig_nic /sys "$(ip -o -4 addr show 2>/dev/null || true)" "$STATIC_IP")" \
   || fail "cannot resolve the rig NDI NIC for the network tuning -- set STRIH_NIC_IFACE=<iface> and re-run"
-echo "  box facts: series=${STRIH_KERNEL_SERIES} nic=${STRIH_NIC} user=${DESKTOP_USER} pl1=$(strih_lx_pl1_watts)W"
+# PL1: never below what the firmware already runs (the review read 80 W live on strih-lx) -- read the
+# package-0 long_term constraint through the SAME identity-based gather the envelope verify uses.
+# shellcheck source=scripts/lib/imag-power-envelope.sh
+. "${HERE}/lib/imag-power-envelope.sh"
+STRIH_FW_PL1_UW="$(imag_power_zone_select "$(bash -c "$(imag_power_envelope_gather_remote_snippet)" 2>/dev/null || true)" || true)"
+STRIH_PL1_W="$(strih_lx_pl1_watts "$STRIH_FW_PL1_UW")"
+STRIH_PL1_STEPDOWN_W="$(strih_lx_pl1_stepdown_watts)"
+echo "  box facts: series=${STRIH_KERNEL_SERIES} nic=${STRIH_NIC} user=${DESKTOP_USER} pl1=${STRIH_PL1_W}W (firmware ${STRIH_FW_PL1_UW:-unread} uW) stepdown=${STRIH_PL1_STEPDOWN_W}W"
 # the power envelope's on-box tools come from THIS checkout (setup-strih runs from the repo; imag fetches
 # the same files over gh api).
 strih_fetch_repo_file() {  # strih_fetch_repo_file REPO_RELPATH DEST
@@ -535,9 +542,15 @@ obs_box_cpu_affinity strih        # -> /etc/strih-isolated-cpus.conf, strih-obs-
 obs_box_nvidia_prime strih        # nvidia-driver-595-open + PRIME nvidia-PRIMARY (the RTX 5050)
 obs_box_dejitter "$DESKTOP_USER" strih "$OBS_CFG"
 obs_box_kiosk "$DESKTOP_USER" strih
-obs_box_power_envelope "$(strih_lx_pl1_watts)" strih_fetch_repo_file
+obs_box_power_envelope "$STRIH_PL1_W" strih_fetch_repo_file "$STRIH_PL1_STEPDOWN_W"
 obs_box_touchpad strih
 obs_box_maxperf_persistence strih
+# Self-heal: the retired strih never-sleep logind drop-in -- obs_box_never_sleep's 99-strih-no-sleep.conf
+# + 99-production-no-powerkey.conf now own the lid/suspend/power-key policy, one source of truth.
+if [ -e /etc/systemd/logind.conf.d/90-strih-lx.conf ]; then
+  rm -f /etc/systemd/logind.conf.d/90-strih-lx.conf || fail "could not remove the retired logind drop-in 90-strih-lx.conf"
+  echo "  removed the retired logind drop-in 90-strih-lx.conf (superseded by the baseline never-sleep item)"
+fi
 # rtprio stays OFF (issue 1357 design): the retired 11c grant pinned the render tick SCHED_FIFO on cores
 # strih-lx never reserved and the FIFO + affinity leaked to 28 NDI threads (issue comment 5793075833).
 # Self-heal: remove a grant a previous run (or a hand fix) left behind -- verify-strih FAILs while it exists.

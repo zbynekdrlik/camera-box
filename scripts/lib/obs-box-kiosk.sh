@@ -23,6 +23,28 @@ obs_box_crash_popup_units() {
     printf '%s\n' apport.service apport-coredump-hook@.service whoopsie.service
 }
 
+# obs_box_dejitter_user_units -> the desktop user's --user units obs_box_dejitter MASKS (the tracker
+# file indexer + the evolution groupware factories). The ONE list the verify gather grades (a masked
+# --user unit is a ~/.config/systemd/user/<unit> -> /dev/null link); a test pins it to the mask lines.
+obs_box_dejitter_user_units() {
+    printf '%s\n' tracker-miner-fs-3.service tracker-miner-fs-control-3.service \
+        tracker-writeback-3.service tracker-xdg-portal-3.service \
+        evolution-source-registry.service evolution-calendar-factory.service \
+        evolution-addressbook-factory.service evolution-user-prompter.service evolution-alarm-notify.service
+}
+
+# u_systemctl ARGS... -- `systemctl --user ARGS` as the CALLER's DESKTOP_USER (obs_box_dejitter's local,
+# visible here by bash's dynamic scope) on that user's own bus. Best-effort (|| true), like every
+# per-user desktop tweak here; the baseline verify grades the masks it leaves.
+u_systemctl() {
+    local uid
+    uid="$(id -u "$DESKTOP_USER")"
+    sudo -u "$DESKTOP_USER" \
+        XDG_RUNTIME_DIR="/run/user/${uid}" \
+        DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/${uid}/bus" \
+        systemctl --user "$@" >/dev/null 2>&1 || true
+}
+
 # obs_box_crash_popups_off -- the crash-popup baseline item (issue 1357, moved from setup-strih.sh
 # sub-step 11c, which generalised imag's #485 apport/whoopsie mask): per unit, so an absent whoopsie
 # never skips apport; a plain unit is also disabled + STOPPED (a unit masked earlier by hand can still
@@ -179,12 +201,6 @@ local DESKTOP_UID
 DESKTOP_UID="$(id -u "$DESKTOP_USER")"
 # gs (below) needs the user bus address; obs_box_never_sleep exports it, but never depend on the call order.
 : "${UBUS:=unix:path=/run/user/${DESKTOP_UID}/bus}"
-u_systemctl() {
-    sudo -u "$DESKTOP_USER" \
-        XDG_RUNTIME_DIR="/run/user/${DESKTOP_UID}" \
-        DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/${DESKTOP_UID}/bus" \
-        systemctl --user "$@" >/dev/null 2>&1 || true
-}
 u_systemctl mask tracker-miner-fs-3.service tracker-miner-fs-control-3.service \
     tracker-writeback-3.service tracker-xdg-portal-3.service
 sudo -u "$DESKTOP_USER" tracker3 reset -s >/dev/null 2>&1 || true
@@ -288,6 +304,7 @@ echo "  #504: display-manager.service → lightdm (openbox autologin for ${DESKT
 #     avahi (NDI mDNS — CRITICAL), sshd, dantesync, remoteos-mcp (the MCP agent), NetworkManager,
 #     lightdm. `disable --now` also stops each; the per-service `|| true` keeps this idempotent and
 #     robust to a static/alias/absent unit (colord is `static`).
+local GNOME_PURGE_PKGS GNOME_TO_PURGE p svc
 for svc in cups cups-browsed bluetooth ModemManager colord switcheroo-control gnome-remote-desktop; do
     systemctl disable --now "$svc" >/dev/null 2>&1 || true
 done
@@ -311,7 +328,6 @@ echo "  #504: disabled cups/cups-browsed/bluetooth/ModemManager/colord/switchero
 #     remoteos-mcp). Scope the purge to packages ACTUALLY installed so the command is idempotent and
 #     never aborts on an absent package (`firefox` may be a snap-only stub, `libreoffice` isn't on
 #     this box, a re-run has nothing left) — the explicit owner set stays literal in GNOME_PURGE_PKGS.
-local GNOME_PURGE_PKGS GNOME_TO_PURGE p svc
 GNOME_PURGE_PKGS="gnome-shell gdm3 nautilus firefox gnome-remote-desktop \
     gnome-shell-extension-ubuntu-dock gnome-shell-extension-ubuntu-tiling-assistant \
     gnome-shell-extension-appindicator libreoffice-core"

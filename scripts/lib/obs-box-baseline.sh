@@ -20,6 +20,7 @@
 #   SERIES        the Ubuntu release (obs_box_kernel_series: 24.04 imag, 26.04 strih-lx)
 #   OBS_CFG       the OBS config dir (ProcessPriority=High)
 #   PL1_W         the CPU's sustainable RAPL PL1 wattage (power envelope)
+#   STEPDOWN_W    the power-envelope guard's thermal step-down wattage (optional; imag's 25 W default)
 #   FETCH         the caller's `FETCH REPO_RELPATH DEST` installer (gh api on imag, the checkout on strih)
 #
 # The items, in the order both callers run them (imag's step numbers in brackets):
@@ -44,8 +45,10 @@
 # boot safety, kernel, CPU affinity, GPU, power envelope) + the pure helpers; the kiosk-session half
 # (never-sleep, de-jitter + crash popups, kiosk, touchpad, openbox autostart preamble + menu) is
 # obs-box-kiosk.sh, sourced right here so callers source ONE entry point.
+# The directory is a pure parameter expansion (no dirname/cd), so sourcing works even with an empty
+# PATH (setup-imag.sh is sourced that way by its missing-tool tests).
 # shellcheck source=scripts/lib/obs-box-kiosk.sh
-. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/obs-box-kiosk.sh"
+if [ "${BASH_SOURCE[0]%/*}" != "${BASH_SOURCE[0]}" ]; then . "${BASH_SOURCE[0]%/*}/obs-box-kiosk.sh"; else . ./obs-box-kiosk.sh; fi
 
 # obs_box_cpu_isolation_plan  (stdin: one "CPU SIBLINGS_LIST" line per logical CPU, numerically
 # ordered — i.e. cpuN + the contents of its topology/thread_siblings_list) -> THREE lines:
@@ -324,8 +327,12 @@ fi
 }
 
 # obs_box_lowlatency_kernel SERIES -- the imag step 7 (#482) preempt=full via the lowlatency-kernel
-# CONFIG package pulled by linux-lowlatency-hwe-<SERIES> (zero kernel downgrade); fails loud when the
-# config drop-in is missing or lacks preempt=full. Takes effect on the next boot.
+# CONFIG package pulled by linux-lowlatency-hwe-<SERIES> (never a lowlatency-IMAGE downgrade); fails loud
+# when the config drop-in is missing or lacks preempt=full. Takes effect on the next boot.
+# Release-dependent (issue 1357 review): on imag (24.04) the meta added only the config package; on a
+# newer series the meta may ALSO pull that series' newest HWE generic image (strih-lx 26.04: candidate
+# 7.0.0-34 over the running -31), so the next boot runs a NEWER kernel and the NVIDIA DKMS module
+# rebuilds for it -- verify nvidia-smi + the PRIME session after that boot.
 obs_box_lowlatency_kernel() {
     local SERIES="${1:?obs_box_lowlatency_kernel: release series required}"
 # LIVE-VERIFIED FINDING (#482): there is NO lowlatency kernel IMAGE at the 6.17 line (the newest
@@ -354,7 +361,7 @@ grep -q 'preempt=full' /etc/default/grub.d/99-lowlatency.cfg \
 # as the generic kernel packages held in step 6, so an upgrade can't silently swap this config out.
 apt-mark hold lowlatency-kernel "linux-lowlatency-hwe-${SERIES}" >/dev/null 2>&1 \
     || echo "  WARNING: apt-mark hold of the lowlatency-kernel config packages failed"
-echo "  #482: lowlatency-kernel config installed (preempt=full on the 6.17 generic kernel, no downgrade)"
+echo "  #482: lowlatency-kernel config installed (preempt=full on the ${SERIES} HWE generic kernel -- never a lowlatency-image downgrade)"
 echo "  NOTE: preempt=full takes effect on the NEXT boot — this script does not reboot the box"
 }
 
@@ -563,14 +570,18 @@ if lspci -nn | obs_box_has_discrete_nvidia; then
 fi
 }
 
-# obs_box_power_envelope PL1_W FETCH -- the imag step 22 (#1040) power/thermal envelope: purge thermald,
-# pin the MMIO RAPL PL1 long-term constraint to PL1_W watts at boot (imag-power-envelope.service) and
-# supervise it with the ~45 s guard timer. PL1_W is a per-box fact (the CPU's sustainable wattage);
+# obs_box_power_envelope PL1_W FETCH [STEPDOWN_W] -- the imag step 22 (#1040) power/thermal envelope: purge
+# thermald, pin the MMIO RAPL PL1 long-term constraint to PL1_W watts at boot (imag-power-envelope.service)
+# and supervise it with the ~45 s guard timer, which steps PL1 down to STEPDOWN_W on a hot TCPU (default:
+# the caller's IMAG_PL1_STEPDOWN_W, else imag's 25 W). PL1_W is a per-box fact (the CPU's sustainable wattage);
 # FETCH is the caller's `FETCH REPO_RELPATH DEST` installer function. The on-box tool + unit names stay
 # imag-power-envelope* on every box: the shared gather/verdict lib (scripts/lib/imag-power-envelope.sh)
 # grades exactly those names.
 obs_box_power_envelope() {
     local IMAG_PL1_W="${1:?obs_box_power_envelope: PL1 watts required}" FETCH="${2:?obs_box_power_envelope: fetch function required}"
+    # The guard's thermal STEP-DOWN wattage is a per-box fact too (issue 1357): the optional 3rd arg,
+    # else the caller's env / imag's 25 W -- so an 80 W HX part never falls to imag's 25 W clamp.
+    local IMAG_PL1_STEPDOWN_W="${3:-${IMAG_PL1_STEPDOWN_W:-25}}"
 # The imag render regression (issues 799/880/1029/1030) was a HARDWARE power clamp: thermald's
 # DPTF policy programmed the MMIO RAPL PL1 long-term constraint to 25 W, starving the iGPU to
 # gt_act_freq 600-850 MHz while every software freq knob sat at 1400. The durable fix pins PL1 to a

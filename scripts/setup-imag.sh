@@ -66,9 +66,13 @@ fail() { echo -e "${RED}FAIL: $1${NC}" >&2; exit 1; }
 
 # issue 1357: the shared OBS-box appliance baseline (the box-level steps below call it; setup-strih.sh
 # sources the same lib). Sourced BEFORE the source guard so the imag_* helper wrappers resolve when
-# this file is sourced by the unit tests, verify-imag.sh and recording-e2e.sh too.
+# this file is sourced by the unit tests, verify-imag.sh and recording-e2e.sh too. The directory is a
+# pure parameter expansion (no dirname/cd): a caller may source this file with an empty PATH (the
+# missing-tool tests do), and an external command here would break the source itself.
+_OBS_BOX_HERE="${BASH_SOURCE[0]%/*}"
+[ "$_OBS_BOX_HERE" != "${BASH_SOURCE[0]}" ] || _OBS_BOX_HERE=.
 # shellcheck source=scripts/lib/obs-box-baseline.sh
-. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/obs-box-baseline.sh"
+. "${_OBS_BOX_HERE}/lib/obs-box-baseline.sh"
 
 # --- PURE functions (no network, no root, no side effects — sourced + unit-tested from
 # tests/setup_imag_pure_functions.rs against synthetic fixtures; the BASH_SOURCE guard below
