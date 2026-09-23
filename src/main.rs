@@ -1459,8 +1459,14 @@ async fn run_capture_loop(
                         let slept_from = std::time::Instant::now();
                         std::thread::sleep(remaining);
                         stagger_slept_now_ms = slept_from.elapsed().as_secs_f64() * 1000.0;
+                        stagger_window.note_slept(
+                            remaining.as_secs_f64() * 1000.0,
+                            stagger_slept_now_ms,
+                        );
+                    } else {
+                        // The work before the send already ate the whole offset — no sleep needed.
+                        stagger_window.note_past_offset();
                     }
-                    stagger_window.note_slept(0.0, 0.0);
                 } else if !send_stagger_offset.is_zero() {
                     stagger_window.note_skipped();
                 }

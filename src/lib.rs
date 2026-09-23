@@ -431,6 +431,10 @@ const _: () = assert!(
     (send_stagger::MAX_OFFSET_SLOT_PERCENT as f64)
         < capture_stall::BUFFERED_DEQUEUE_FRACTION * 100.0
 );
+// The 5 s OVERSLEEP warning's fraction is the same buffered-dequeue fraction (kept std-only in
+// `send_stagger`, pinned equal here).
+const _: () =
+    assert!(send_stagger::ADDBACK_SOUND_FRACTION == capture_stall::BUFFERED_DEQUEUE_FRACTION);
 
 // #707 — V4L2 capture DEQUEUE stall diagnostic (pure decision). Given how long a SINGLE blocking
 // `process_frame` dequeue (`self.stream.next()`, a VIDIOC_DQBUF under the hood) took and the

@@ -230,14 +230,15 @@ impl StaggerWindow {
     /// Record one real sleep: the requested and the measured duration (ms). The oversleep is what
     /// the scheduler added; a non-finite reading is ignored for the oversleep.
     pub fn note_slept(&mut self, requested_ms: f64, actual_ms: f64) {
-        // #1242 round-3 RED stub: no oversleep tracking yet.
-        let _ = (requested_ms, actual_ms);
         self.slept = self.slept.saturating_add(1);
+        let over = actual_ms - requested_ms;
+        if over.is_finite() && over > self.max_oversleep_ms {
+            self.max_oversleep_ms = over;
+        }
     }
 
     pub fn note_past_offset(&mut self) {
-        // #1242 round-3 RED stub: counted as a sleep, like the pre-review wiring.
-        self.slept = self.slept.saturating_add(1);
+        self.past_offset = self.past_offset.saturating_add(1);
     }
 
     pub fn note_skipped(&mut self) {
@@ -301,9 +302,7 @@ pub fn window_summary(
         capture_interval_ms,
         w.max_oversleep_ms,
     );
-    // #1242 round-3 RED stub: the pre-review rule (any skip WARNs, oversleep ignored).
-    let _ = (oversleep, many_skips);
-    (line, over_budget || w.skipped_backlogged > 0)
+    (line, over_budget || oversleep || many_skips)
 }
 
 #[cfg(test)]
