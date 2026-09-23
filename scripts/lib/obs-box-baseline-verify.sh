@@ -141,6 +141,7 @@ echo "rmem_max=$(sysctl -n net.core.rmem_max 2>/dev/null | first)"
 echo "nic_hook=$(if [ -x /etc/networkd-dispatcher/routable.d/optimize-nic ]; then echo 1; else echo 0; fi)"
 echo "cpu_perf_unit=$(systemctl is-enabled cpu-performance.service 2>/dev/null | first)"
 echo "rc_local_eee=$(if [ -x /etc/rc.local ] && grep -qF 'ethtool --set-eee' /etc/rc.local 2>/dev/null; then echo 1; else echo 0; fi)"
+echo "rc_local_active=$(systemctl is-active rc-local.service 2>/dev/null | first)"
 echo "governors=$(cat /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor 2>/dev/null | sort -u | tr '\n' ' ' | sed 's/ $//')"
 echo "maxperf_active=$(systemctl is-active "${BOX}-maxperf.service" 2>/dev/null | first)"
 echo "maxperf_udev=$(fexists "/etc/udev/rules.d/99-${BOX}-maxperf-pm.rules")"
@@ -231,11 +232,12 @@ obs_box_baseline_verdict() {
     ok=0; [ "$(_obs_box_f sysctl_conf)" = 1 ] && [ "$(_obs_box_f rmem_max)" = 134217728 ] && [ "$(_obs_box_f nic_hook)" = 1 ] && ok=1
     _obs_box_item net "$ok" "sysctl_conf=$(_obs_box_f sysctl_conf) rmem_max=$(_obs_box_f rmem_max) nic_hook=$(_obs_box_f nic_hook)"
     # perf -- cpu-performance.service enabled, every core performance, the rc.local boot hook (NIC EEE off),
-    # maxperf unit active + udev rule
+    # maxperf unit active + udev rule. Whether rc-local.service ran it this boot is REPORTED (a release
+    # without the rc-local generator never runs it; the networkd-dispatcher hook still covers EEE).
     ok=0; [ "$(_obs_box_f cpu_perf_unit)" = enabled ] && obs_box_governor_ok "$(_obs_box_f governors)" \
         && [ "$(_obs_box_f rc_local_eee)" = 1 ] \
         && [ "$(_obs_box_f maxperf_active)" = active ] && [ "$(_obs_box_f maxperf_udev)" = 1 ] && ok=1
-    _obs_box_item perf "$ok" "cpu-performance=$(_obs_box_f cpu_perf_unit) governors=[$(_obs_box_f governors)] rc.local-eee=$(_obs_box_f rc_local_eee) maxperf=$(_obs_box_f maxperf_active) udev=$(_obs_box_f maxperf_udev)"
+    _obs_box_item perf "$ok" "cpu-performance=$(_obs_box_f cpu_perf_unit) governors=[$(_obs_box_f governors)] rc.local-eee=$(_obs_box_f rc_local_eee) rc-local.service=$(_obs_box_f rc_local_active) maxperf=$(_obs_box_f maxperf_active) udev=$(_obs_box_f maxperf_udev)"
     # nosleep -- sleep.target masked + both logind drop-ins
     ok=0; [ "$(_obs_box_f sleep_target)" = masked ] && [ "$(_obs_box_f logind_nosleep)" = 1 ] && [ "$(_obs_box_f logind_powerkey)" = 1 ] && ok=1
     _obs_box_item nosleep "$ok" "sleep.target=$(_obs_box_f sleep_target) no-sleep.conf=$(_obs_box_f logind_nosleep) no-powerkey.conf=$(_obs_box_f logind_powerkey)"

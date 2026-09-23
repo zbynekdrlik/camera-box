@@ -24,8 +24,8 @@ obs_box_crash_popup_units() {
 }
 
 # obs_box_dejitter_user_units -> the desktop user's --user units obs_box_dejitter MASKS (the tracker
-# file indexer + the evolution groupware factories). The ONE list the verify gather grades (a masked
-# --user unit is a ~/.config/systemd/user/<unit> -> /dev/null link); a test pins it to the mask lines.
+# file indexer + the evolution groupware factories). The ONE list both the de-jitter mask and the verify
+# gather use (a masked --user unit is a ~/.config/systemd/user/<unit> -> /dev/null link).
 obs_box_dejitter_user_units() {
     printf '%s\n' tracker-miner-fs-3.service tracker-miner-fs-control-3.service \
         tracker-writeback-3.service tracker-xdg-portal-3.service \
@@ -201,11 +201,9 @@ local DESKTOP_UID
 DESKTOP_UID="$(id -u "$DESKTOP_USER")"
 # gs (below) needs the user bus address; obs_box_never_sleep exports it, but never depend on the call order.
 : "${UBUS:=unix:path=/run/user/${DESKTOP_UID}/bus}"
-u_systemctl mask tracker-miner-fs-3.service tracker-miner-fs-control-3.service \
-    tracker-writeback-3.service tracker-xdg-portal-3.service
+# shellcheck disable=SC2046  # word-split on purpose: one unit name per word, one source of truth
+u_systemctl mask $(obs_box_dejitter_user_units)
 sudo -u "$DESKTOP_USER" tracker3 reset -s >/dev/null 2>&1 || true
-u_systemctl mask evolution-source-registry.service evolution-calendar-factory.service \
-    evolution-addressbook-factory.service evolution-user-prompter.service evolution-alarm-notify.service
 
 # apport/whoopsie (+ the 26.04 apport coredump hook): apport writes multi-GB core dumps right when OBS
 # already crashed (worst-time disk spike) and raises the operator crash popup; whoopsie phones crash

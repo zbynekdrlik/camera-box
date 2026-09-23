@@ -525,9 +525,15 @@ STRIH_NIC="$(strih_lx_rig_nic /sys "$(ip -o -4 addr show 2>/dev/null || true)" "
 # shellcheck source=scripts/lib/imag-power-envelope.sh
 . "${HERE}/lib/imag-power-envelope.sh"
 STRIH_FW_PL1_UW="$(imag_power_zone_select "$(bash -c "$(imag_power_envelope_gather_remote_snippet)" 2>/dev/null || true)" || true)"
-STRIH_PL1_W="$(strih_lx_pl1_watts "$STRIH_FW_PL1_UW")"
+# A re-run reads OUR pin back -- or the guard's thermal step-down while the box is hot -- so a stepped-down
+# read is never taken as the firmware's, and the PL1 a previous run baked into the unit is a floor too.
+if [ "$(imag_power_guard_stepped_from_state "$(cat "$IMAG_POWER_GUARD_STATE_FILE" 2>/dev/null || true)")" = stepped ]; then
+  STRIH_FW_PL1_UW=""
+fi
+STRIH_BAKED_PL1_W="$(strih_lx_baked_pl1_watts "$(systemctl show -p Environment --value imag-power-envelope.service 2>/dev/null || true)")"
+STRIH_PL1_W="$(strih_lx_pl1_watts "$STRIH_FW_PL1_UW" "$STRIH_BAKED_PL1_W")"
 STRIH_PL1_STEPDOWN_W="$(strih_lx_pl1_stepdown_watts)"
-echo "  box facts: series=${STRIH_KERNEL_SERIES} nic=${STRIH_NIC} user=${DESKTOP_USER} pl1=${STRIH_PL1_W}W (firmware ${STRIH_FW_PL1_UW:-unread} uW) stepdown=${STRIH_PL1_STEPDOWN_W}W"
+echo "  box facts: series=${STRIH_KERNEL_SERIES} nic=${STRIH_NIC} user=${DESKTOP_USER} pl1=${STRIH_PL1_W}W (firmware ${STRIH_FW_PL1_UW:-unread} uW, baked ${STRIH_BAKED_PL1_W:-none} W) stepdown=${STRIH_PL1_STEPDOWN_W}W"
 # the power envelope's on-box tools come from THIS checkout (setup-strih runs from the repo; imag fetches
 # the same files over gh api).
 strih_fetch_repo_file() {  # strih_fetch_repo_file REPO_RELPATH DEST

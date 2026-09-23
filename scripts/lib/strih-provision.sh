@@ -1616,25 +1616,49 @@ strih_lx_rig_nic() {
   return 1
 }
 
-# strih_lx_pl1_watts [FIRMWARE_PL1_UW] -> the RAPL PL1 wattage the baseline power envelope pins on strih-lx:
-# max(55, FIRMWARE_PL1_UW / 1e6). 55 W is the i5-13450HX's Intel-specified Processor Base Power (box fact
+# strih_lx_pl1_watts [FIRMWARE_PL1_UW [BAKED_W]] -> the RAPL PL1 wattage the baseline power envelope pins on
+# strih-lx: max(55, FIRMWARE_PL1_UW / 1e6, BAKED_W). 55 W is the i5-13450HX's Intel-specified Processor Base Power (box fact
 # in .claude/rules/strih-linux-provisioning.md), NOT imag's i7-13620H re-baseline -- but the pin must
 # NEVER sit below what the firmware already runs: the issue-1357 review read the package-0 long_term
 # constraint at 80 W live on strih-lx (23.9.2026), and pinning the spec base under it would cut the
 # NDI-decoding cutter's sustained power by a third (imag's 25 W-clamp starvation class). The firmware value
 # is the package-0 long_term power_limit_uw read at provisioning time (imag_power_zone_select); empty /
-# non-numeric = the 55 W floor. STRIH_LX_PL1_W overrides it outright once a thermal soak says otherwise;
-# the envelope guard steps PL1 down to strih_lx_pl1_stepdown_watts on a hot TCPU.
+# non-numeric = the 55 W floor. BAKED_W is the PL1 a previous run already baked into the envelope unit
+# (strih_lx_baked_pl1_watts): on a RE-RUN the live read is our own pin -- or the guard's thermal step-down
+# on a hot box -- so the baked value keeps a re-run from ever lowering the provisioned wattage.
+# STRIH_LX_PL1_W overrides it outright once a thermal soak says otherwise; the envelope guard steps PL1
+# down to strih_lx_pl1_stepdown_watts on a hot TCPU.
 strih_lx_pl1_watts() {
-  local fw_uw="${1-}" fw_w=0 spec=55
+  local fw_uw="${1-}" baked="${2-}" best=55 fw_w
   if [ -n "${STRIH_LX_PL1_W:-}" ]; then
     printf '%s' "$STRIH_LX_PL1_W"
     return 0
   fi
   if [[ "$fw_uw" =~ ^[0-9]+$ ]]; then
     fw_w=$((10#$fw_uw / 1000000))
+    [ "$fw_w" -gt "$best" ] && best="$fw_w"
   fi
-  if [ "$fw_w" -gt "$spec" ]; then printf '%s' "$fw_w"; else printf '%s' "$spec"; fi
+  if [[ "$baked" =~ ^[0-9]+$ ]] && [ "$((10#$baked))" -gt "$best" ]; then
+    best="$((10#$baked))"
+  fi
+  printf '%s' "$best"
+}
+
+# strih_lx_baked_pl1_watts UNIT_ENVIRONMENT -> the IMAG_PL1_W watts a previous run baked into
+# imag-power-envelope.service, parsed from `systemctl show -p Environment --value` (space-separated
+# VAR=value pairs); empty when absent or non-numeric. Always rc 0 (a bare assignment under set -e).
+strih_lx_baked_pl1_watts() {
+  local kv
+  for kv in ${1-}; do
+    case "$kv" in
+      IMAG_PL1_W=*)
+        kv="${kv#IMAG_PL1_W=}"
+        [[ "$kv" =~ ^[0-9]+$ ]] && printf '%s' "$kv"
+        return 0
+        ;;
+    esac
+  done
+  return 0
 }
 
 # strih_lx_pl1_stepdown_watts -> the power-envelope guard's thermal STEP-DOWN wattage on strih-lx (the

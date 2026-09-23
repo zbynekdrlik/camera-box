@@ -84,10 +84,16 @@ graded), and lightdm + openbox installed.
 - imag: PL1 `${IMAG_PL1_W:-45}`, guard step-down 25 W (the historic iGPU values).
 - strih-lx: PL1 = `strih_lx_pl1_watts <firmware µW>` = max(55 W spec base, the firmware's own
   package-0 long_term constraint read at provisioning through the envelope's identity gather). The
-  issue-1357 review read **80 W** live on strih-lx (23.9.2026), so strih keeps 80 W: pinning the
-  55 W spec base under the firmware would cut the cutter's sustained power by a third (the imag
-  25 W-clamp starvation class). The guard step-down is `strih_lx_pl1_stepdown_watts` (45 W), passed
-  as `obs_box_power_envelope`'s third argument. Overrides: `STRIH_LX_PL1_W`, `STRIH_LX_PL1_STEPDOWN_W`.
+  issue-1357 review read **80 W** live on strih-lx (23.9.2026). The envelope reads and pins the
+  **MMIO** zone only (`intel-rapl-mmio:*`; the MSR zone is ALSO named `package-0` and can differ), so
+  strih keeps whatever the MMIO package-0 long_term reads -- 80 W if that is where the review's number
+  came from; the step-11 echo prints `firmware <uW>`, confirm it at the conversion. Pinning the 55 W
+  spec base under the firmware would cut the cutter's sustained power by a third (the imag 25 W-clamp
+  starvation class). A RE-RUN reads back our own pin, or the guard's step-down on a hot box, so a
+  stepped-down read (guard state `stepped`) is discarded and the `IMAG_PL1_W` already baked into
+  `imag-power-envelope.service` (`strih_lx_baked_pl1_watts`) is a floor too. The guard step-down is
+  `strih_lx_pl1_stepdown_watts` (45 W), passed as `obs_box_power_envelope`'s third argument.
+  Overrides: `STRIH_LX_PL1_W`, `STRIH_LX_PL1_STEPDOWN_W`.
 
 ## strih-lx conversion (supervisor runbook)
 
@@ -106,7 +112,7 @@ graded), and lightdm + openbox installed.
    (setup-strih removed the leftover grant; the reviewer found it still present on the box).
 
 Unverified on the live 26.04 box when this landed (check during the conversion): lightdm/Xorg on
-26.04, the kernel 7.0.0-34 boot + DKMS rebuild, the 80 W PL1 under a thermal soak (the guard steps
+26.04, whether rc-local.service exists and runs /etc/rc.local on 26.04 (the perf row reports it), the kernel 7.0.0-34 boot + DKMS rebuild, the 80 W PL1 under a thermal soak (the guard steps
 down to 45 W on a hot TCPU), the 1920x1080@60 panel-primary + HDMI-right-of layout, the new OBS CPU
 pin (`/etc/strih-isolated-cpus.conf`, 2-11 on the i5-13450HX — `strih-obs-start.sh` now taskset-pins
 OBS where it ran unpinned before; re-measure the render/genlock ladder against the 11b NIC-IRQ E-core),
