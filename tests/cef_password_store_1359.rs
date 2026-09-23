@@ -255,6 +255,16 @@ fn verify_strih_item_is_report_only_and_drain_safe() {
             "{VERIFY}: the `# 14b)` item is missing `{needle}`. Item:\n{item}"
         );
     }
+    // No overstatement: the item checks an argv / a compiled-in string, not the dialog itself.
+    assert!(
+        !item.contains("no keyring unlock dialog"),
+        "{VERIFY}: the PASS lines must say what was checked, not claim the dialog is gone \
+         (behaviour proof = the two-reboot acceptance). Item:\n{item}"
+    );
+    assert!(
+        item.contains("two-reboot acceptance"),
+        "{VERIFY}: the PASS lines must point at the two-reboot acceptance. Item:\n{item}"
+    );
     assert!(
         !item.contains("bad \""),
         "{VERIFY}: the CEF keyring item is REPORT-ONLY (design issuecomment-5793018939) — it must \

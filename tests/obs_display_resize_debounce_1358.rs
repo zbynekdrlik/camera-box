@@ -103,6 +103,16 @@ fn ctor_builds_a_single_shot_timer_wired_to_the_apply_slot() {
             "{DISPLAY}: the OBSQTDisplay ctor is missing `{needle}` — {why} (#1358)."
         );
     }
+    // setAttribute(Qt::WA_NativeWindow) creates the native window; the timer must already exist
+    // then, so a resize delivered during construction never dereferences a null timer.
+    let timer = ctor.find("resizeDebounce = new QTimer(this);").unwrap();
+    let native = ctor
+        .find("setAttribute(Qt::WA_NativeWindow);")
+        .expect("the ctor still sets WA_NativeWindow");
+    assert!(
+        timer < native,
+        "{DISPLAY}: create the debounce timer BEFORE setAttribute(Qt::WA_NativeWindow) (#1358 review)."
+    );
 }
 
 #[test]
@@ -185,6 +195,28 @@ fn apply_slot_resizes_the_live_display_and_emits_display_resized() {
             "{DISPLAY}: ApplyDisplayResize is missing `{needle}` (#1358). Body:\n{body}"
         );
     }
+    // A pending apply that fires after DestroyDisplay() must not touch the torn-down display
+    // nor emit DisplayResized into the preview/program layout code (#1358 review).
+    let guard = s.find("if (destroying) return;").unwrap_or_else(|| {
+        panic!("{DISPLAY}: ApplyDisplayResize must bail out when destroying (#1358). Body:\n{body}")
+    });
+    assert!(
+        guard < s.find("emit DisplayResized();").unwrap(),
+        "{DISPLAY}: the destroying guard must come before `emit DisplayResized()` (#1358)."
+    );
+}
+
+#[test]
+fn destroy_display_cancels_a_pending_resize() {
+    let h = squish(&repo_file(DISPLAY_HPP));
+    let at = h
+        .find("void DestroyDisplay() {")
+        .unwrap_or_else(|| panic!("{DISPLAY_HPP}: DestroyDisplay() not found"));
+    let body = &h[at..at + h[at..].find('}').expect("DestroyDisplay body end")];
+    assert!(
+        body.contains("if (resizeDebounce) resizeDebounce->stop();"),
+        "{DISPLAY_HPP}: DestroyDisplay must stop the #1358 debounce timer. Body: {body}"
+    );
 }
 
 #[test]
