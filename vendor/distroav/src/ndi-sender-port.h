@@ -34,8 +34,11 @@
 
 #include <stddef.h>
 
-// The first TCP port libndi hands a sender (its messaging socket is 5960).
+// The first TCP port libndi hands a sender.
 #define NDI_SENDER_FIRST_TCP_PORT 5961
+// libndi's messaging listener (SO_REUSEADDR, never a sender). It is opened by the
+// FIRST send_create of a process, so it appears in that create's listen diff.
+#define NDI_MESSAGING_TCP_PORT 5960
 
 // Who holds the first sender port right before the program reservation.
 enum ndi_first_port_state {
@@ -105,14 +108,16 @@ static inline int ndi_socket_is_sender_connection(int is_listener, int has_peer,
 }
 
 // The sender's port: the ONE port listening after its send_create that was not
-// listening before. 0 when there is none or when two different ports appeared
-// (ambiguous; a port seen twice, e.g. on IPv4 and IPv6, counts once).
+// listening before, ignoring libndi's :5960 messaging listener (the first
+// send_create of a process opens it too). 0 when there is none or when two
+// different ports appeared (ambiguous; a port seen twice, e.g. on IPv4 and IPv6,
+// counts once).
 static inline int ndi_new_listen_port(const int *before, size_t n_before, const int *after, size_t n_after)
 {
 	int found = 0;
 	for (size_t i = 0; i < n_after; i++) {
 		const int p = after[i];
-		if (p <= 0)
+		if (p <= 0 || p == NDI_MESSAGING_TCP_PORT)
 			continue;
 		int seen = 0;
 		for (size_t j = 0; j < n_before; j++) {
