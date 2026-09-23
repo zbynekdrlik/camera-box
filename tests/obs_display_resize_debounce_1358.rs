@@ -50,8 +50,8 @@ fn header_declares_the_debounce_timer_the_immediate_flag_and_the_apply_method() 
     let h = squish(&repo_file(DISPLAY_HPP));
     for (needle, why) in [
         (
-            "class QTimer;",
-            "the QTimer forward declaration (the header stays light; OBSQTDisplay.cpp includes <QTimer>)",
+            "#include <QTimer>",
+            "the complete QTimer type (the inline DestroyDisplay stops the timer, so a forward declaration is not enough)",
         ),
         (
             "QTimer *resizeDebounce = nullptr;",
