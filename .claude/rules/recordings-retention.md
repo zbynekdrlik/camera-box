@@ -34,8 +34,8 @@ allowlisted, below-floor file. Dirs, symlinks and other non-regular entries are 
 rows ("PROTECT (not a regular file)") and never touched. The plan is **fail-safe** (review round 1):
 `rr_plan` runs as `plan="$(rr_plan ...)" || ...`, where bash IGNORES `set -e` (`inherit_errexit` does NOT
 change that -- proven in review round 2), so its safety comes ONLY from explicit checks: every command
-in it that can fail is checked and `return 1`s (never add an unchecked one); `--keep-runs` is bounded to 9 digits and `--keep-days` to 0..36500 (an over-range value used to break
-a `[ -lt ]` test inside the plan and fall through to DELETE with exit 0); a row becomes DELETE only on
+in it that can fail is checked and `return 1`s (never add an unchecked one); `--keep-runs` is
+bounded to 9 digits and `--keep-days` to 0..36500 (an over-range value used to break a `[ -lt ]` test inside the plan and fall through to DELETE with exit 0); a row becomes DELETE only on
 a POSITIVE proof (index >= keep-runs AND (keep-days = 0 OR age >= horizon)) and an unevaluable
 comparison aborts the whole run before any `rm`. An unreadable record dir fails loud instead of
 globbing to a silent 0-file sweep. The ssh leg carries `UserKnownHostsFile=/dev/null` +
@@ -44,7 +44,9 @@ globbing to a silent 0-file sweep. The ssh leg carries `UserKnownHostsFile=/dev/
 forwarded, the `.ps1`-only `--budget-gb` / `--remote-path` are refused for a Linux box. Every mode
 REFUSES a flag that does not apply to it (never silently ignores it): `--local-sweep` refuses `--user` /
 `--budget-gb` / `--remote-path`, the Windows driver refuses `--obs-config-dir` / `--plan-tsv`; a zero
-`RETENTION_SSH_TIMEOUT` is refused (GNU `timeout 0` disables the bound).
+`RETENTION_SSH_TIMEOUT` is refused (GNU `timeout 0` disables the bound); `--plan-tsv --execute` is
+refused on dev1 before any ssh. The linux leg's dev1 banner goes to stderr, so `--box strih-lx
+--plan-tsv` stdout is pure TSV (`OTHER`/`PROTECT`/`KEEP`/`DELETE` rows) for a supervisor script.
 
 Profile resolution reads `[Basic] ProfileDir` (user.ini, then global.ini) and only then the display
 name `Profile`. `scripts/strih-obs-start.sh` launches OBS with `--profile "${STRIH_OBS_PROFILE:-strih-lx}"`;

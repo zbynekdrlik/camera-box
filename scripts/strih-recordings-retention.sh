@@ -407,6 +407,11 @@ elif [ "$MODE" = "win" ]; then
 fi
 [ -n "$MODE" ] || { echo "ERROR: name a target: --box <fleet-name> | --host <windows-obs-box> | --local-sweep -- there is no default box (the Windows strih PC this tool defaulted to is RETIRED, issue 1317; the strih is --box strih-lx)" >&2; exit 2; }
 
+if [ "$EXECUTE" = 1 ] && [ "$PLAN_TSV" = 1 ]; then
+  echo "ERROR: --plan-tsv is a print-only view; it cannot be combined with --execute" >&2
+  exit 2
+fi
+
 case "$MODE" in
   local-sweep)
     rr_local_sweep
@@ -428,7 +433,8 @@ case "$MODE" in
     [ "$PLAN_TSV" = 0 ] || REMOTE_ARGS+=(--plan-tsv)
     [ "$EXECUTE" = 0 ] || REMOTE_ARGS+=(--execute)
     REMOTE_CMD="bash -s --$(printf ' %q' "${REMOTE_ARGS[@]}")"
-    echo "[$BOX] ssh ${LB_USER}@${HOST} -> $REMOTE_CMD  ($([ "$EXECUTE" = 1 ] && echo 'EXECUTE -- DELETING' || echo 'DRY-RUN -- no deletion'))"
+    # The dev1 banner goes to stderr so stdout is ONLY the box's report (pure TSV under --plan-tsv).
+    echo "[$BOX] ssh ${LB_USER}@${HOST} -> $REMOTE_CMD  ($([ "$EXECUTE" = 1 ] && echo 'EXECUTE -- DELETING' || echo 'DRY-RUN -- no deletion'))" >&2
     # THIS script is the program `bash -s` reads from stdin; no sudo -- the OBS record dir is owned by
     # the OBS user (strih-lx /srv/_REC = newlevel:newlevel 775). The address was the Windows strih PC
     # until M4, so a stale known_hosts key must not block the leg (UserKnownHostsFile=/dev/null, the
