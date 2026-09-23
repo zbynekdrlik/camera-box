@@ -187,12 +187,20 @@ def fmt_rates(rates: dict[str, float]) -> str:
 # generic `genlock_lock=<state>` chip (rig-status-page.md: the facet lives in the FEEDER, not the
 # renderer). "" when no such line is in the fetched log window (a stock OBS, or startup state not in
 # the tail) -> the caller OMITS the token (UNKNOWN, never a fabricated state).
-_GENLOCK_LOCK_STATE_RE = re.compile(r"genlock-lock: state=(\w+)")
+# issue 1360: the log window is head 600 + tail N of a long session, and the change-driven line can
+# fall between the two windows (only the head's startup state survives). The widget's 30 s
+# `genlock-lock-json:` heartbeat carries the same decided state and is always in the tail, so the
+# LAST line of EITHER kind (by position in the text) wins.
+_GENLOCK_LOCK_STATE_RE = re.compile(
+    r'genlock-lock: state=(\w+)|genlock-lock-json: \{[^\n]*?"state":"(\w+)"')
 
 
 def genlock_lock_state_from_log(log_text: str) -> str:
     matches = _GENLOCK_LOCK_STATE_RE.findall(log_text or "")
-    return matches[-1] if matches else ""
+    if not matches:
+        return ""
+    change, heartbeat = matches[-1]
+    return change or heartbeat
 
 
 def audit_samples(log_text: str) -> dict[str, list[tuple[str, int]]]:
