@@ -416,23 +416,28 @@ fn dejitter_user_units_are_the_units_the_dejitter_masks() {
     assert_eq!(c, 0);
     let units: Vec<&str> = out.lines().filter(|l| !l.is_empty()).collect();
     assert_eq!(units.len(), 9, "{units:?}");
+    for want in [
+        "tracker-miner-fs-3.service",
+        "tracker-xdg-portal-3.service",
+        "evolution-source-registry.service",
+        "evolution-alarm-notify.service",
+    ] {
+        assert!(
+            units.contains(&want),
+            "the list must carry {want}: {units:?}"
+        );
+    }
     let body = baseline_fn("obs_box_dejitter");
-    let mask_text: String = body
-        .split("u_systemctl mask ")
-        .skip(1)
-        .map(|s| s.split("\n\n").next().unwrap_or_default())
-        .collect::<Vec<_>>()
-        .join(" ");
-    let mut masked: Vec<&str> = mask_text
-        .split_whitespace()
-        .filter(|w| w.ends_with(".service"))
-        .collect();
-    masked.sort_unstable();
-    let mut listed = units;
-    listed.sort_unstable();
-    assert_eq!(
-        listed, masked,
-        "the list must equal the de-jitter mask lines"
+    assert!(
+        body.contains("u_systemctl mask $(obs_box_dejitter_user_units)"),
+        "the de-jitter masks exactly the listed units (one source of truth):\n{body}"
+    );
+    let literal = body
+        .lines()
+        .find(|l| !l.trim_start().starts_with('#') && l.contains("evolution-source-registry"));
+    assert!(
+        literal.is_none(),
+        "no second literal copy of the list: {literal:?}"
     );
 }
 
@@ -593,6 +598,7 @@ rmem_max=134217728
 nic_hook=1
 cpu_perf_unit=enabled
 rc_local_eee=1
+rc_local_active=active
 governors=performance
 maxperf_active=active
 maxperf_udev=1

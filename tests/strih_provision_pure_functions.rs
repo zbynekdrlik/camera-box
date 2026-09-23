@@ -3635,8 +3635,42 @@ fn pl1_watts_never_undercuts_the_firmware_pl1() {
         (0, "55"),
         "no firmware read = the spec base"
     );
+    // a RE-RUN: the value already baked into the envelope unit is a floor too, so a live read the
+    // guard stepped down (45 W on a hot box) can never lower the provisioned 80 W
+    for (fw, baked, want) in [
+        ("45000000", "80", "80"),
+        ("", "80", "80"),
+        ("90000000", "80", "90"),
+        ("", "", "55"),
+        ("", "junk", "55"),
+    ] {
+        let (c, out, err) = run_sourced(
+            &[("FW", fw), ("BK", baked)],
+            "strih_lx_pl1_watts \"$FW\" \"$BK\"",
+        );
+        assert_eq!(
+            (c, out.as_str()),
+            (0, want),
+            "firmware `{fw}` baked `{baked}`: stderr={err}"
+        );
+    }
     let (c, out, _e) = run_sourced(&[("STRIH_LX_PL1_W", "40")], "strih_lx_pl1_watts 80000000");
     assert_eq!((c, out.as_str()), (0, "40"), "the override wins");
+}
+
+/// The PL1 already baked into imag-power-envelope.service (`systemctl show -p Environment --value`).
+#[test]
+fn baked_pl1_watts_reads_the_envelope_unit_environment() {
+    for (env, want) in [
+        ("IMAG_PL1_W=80", "80"),
+        ("FOO=1 IMAG_PL1_W=55 BAR=2", "55"),
+        ("IMAG_PL1_STEPDOWN_W=45", ""),
+        ("IMAG_PL1_W=abc", ""),
+        ("", ""),
+    ] {
+        let (c, out, _e) = run_sourced(&[("E", env)], "strih_lx_baked_pl1_watts \"$E\"");
+        assert_eq!((c, out.as_str()), (0, want), "env `{env}`");
+    }
 }
 
 /// The guard's thermal step-down is strih's own value, never imag's 25 W iGPU clamp.
@@ -3775,9 +3809,19 @@ fn setup_strih_step_11_runs_the_shared_baseline_in_imag_order() {
     let fw_read = step11
         .find("STRIH_FW_PL1_UW=\"$(imag_power_zone_select \"$(bash -c \"$(imag_power_envelope_gather_remote_snippet)\"")
         .expect("step 11 reads the firmware package-0 long_term PL1");
+    let stepped = step11
+        .find("imag_power_guard_stepped_from_state")
+        .expect("a PL1 the guard stepped down is never read as the firmware's");
+    let baked = step11
+        .find("STRIH_BAKED_PL1_W=\"$(strih_lx_baked_pl1_watts \"$(systemctl show -p Environment --value imag-power-envelope.service")
+        .expect("step 11 reads the PL1 a previous run baked into the unit");
     let pl1 = step11
-        .find("STRIH_PL1_W=\"$(strih_lx_pl1_watts \"$STRIH_FW_PL1_UW\")\"")
-        .expect("step 11 derives PL1 from the firmware value");
+        .find("STRIH_PL1_W=\"$(strih_lx_pl1_watts \"$STRIH_FW_PL1_UW\" \"$STRIH_BAKED_PL1_W\")\"")
+        .expect("step 11 derives PL1 from the firmware + baked values");
+    assert!(
+        fw_read < stepped && stepped < pl1 && baked < pl1,
+        "read -> discard a stepped read -> derive"
+    );
     let envelope = step11.find("obs_box_power_envelope ").unwrap();
     assert!(
         fw_read < pl1 && pl1 < envelope,
