@@ -507,19 +507,52 @@ mod tests {
         );
     }
 
-    /// The date-walk: on the 1970 grid the result depends on where the calendar date puts the stamp
-    /// offset; on the production grid it does not.
+    /// The date-walk, stated for what it is. The production grid never sees the 1970-grid offset
+    /// (its grid is a pure function of the whole second), so two dates give byte-identical runs BY
+    /// CONSTRUCTION — asserted as equality, not re-proven by re-running a flip bound per date. The
+    /// 1970 grid on the same two dates is NOT identical: that difference is the date-walk.
     #[test]
-    fn production_grid_is_independent_of_the_date_1355() {
-        for off in [300_000u64, 11_000_000, 22_000_000, 32_000_000] {
-            let mut cfg = BenchConfig::live_2026_09_24(GridModel::Production);
+    fn production_grid_does_not_see_the_1970_offset_but_the_1970_grid_does_1355() {
+        let run = |grid, off| {
+            let mut cfg = BenchConfig::live_2026_09_24(grid);
             cfg.start_offset_ns = off;
+            cfg.duration_s = 3600;
+            run_bench(&cfg)
+        };
+        assert_eq!(
+            run(GridModel::Production, 300_000),
+            run(GridModel::Production, 22_000_000)
+        );
+        assert_ne!(
+            run(GridModel::Legacy1970, 300_000),
+            run(GridModel::Legacy1970, 22_000_000)
+        );
+    }
+
+    /// What the production grid DOES see: the pin. Across one whole frame of pins (and one each
+    /// side) the FIFO keeps ONE depth state with no settle-back drain — the state follows the pin
+    /// (30 / 31 / 32 frames), never the date or a sender hiccup. On the 1970 grid every one of these
+    /// pins flips (~20/h over 2 h in the live statistics).
+    #[test]
+    fn production_grid_holds_one_state_at_every_pin_phase_1355() {
+        for pin in [950u32, 963, 967, 975, 987, 999, 1010] {
+            let mut cfg = BenchConfig::live_2026_09_24(GridModel::Production);
+            cfg.latency_ms = pin;
             cfg.duration_s = 2 * 3600;
             let r = run_bench(&cfg);
             assert!(
-                r.flips_per_hour <= 1.0 && r.drains == 0,
-                "offset {off}: production flips/h {:.2}: {r:?}",
+                r.flips_per_hour <= 1.0 && r.drains == 0 && r.late_holds == 0,
+                "pin {pin}: production flips/h {:.2}: {r:?}",
                 r.flips_per_hour
+            );
+            let mut legacy = cfg.clone();
+            legacy.grid = GridModel::Legacy1970;
+            let l = run_bench(&legacy);
+            assert!(
+                l.flips_per_hour >= 10.0,
+                "pin {pin}: the 1970-grid control stopped flipping ({:.2}/h) — the bench no longer \
+                 reproduces the defect, so this test would prove nothing: {l:?}",
+                l.flips_per_hour
             );
         }
     }

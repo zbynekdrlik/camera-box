@@ -616,7 +616,7 @@ fn relock_events_log_phase_evidence_940() {
 /// render-tick boundary on the 1970 grid, which loses 10 ns per second against it (0.864 ms per
 /// day) — the deep `NDI 2ME PGM` FIFO depth walked with the calendar date. Both call sites must
 /// go through the shared header, and the old 1970 tick formula must be gone. The ARITHMETIC is
-/// proven by the compiled C-vs-Rust gate in tests/genlock_relock_selection_parity.rs; this
+/// proven by the compiled C-vs-Rust gate in tests/genlock_grid_parity_1355.rs; this
 /// guards the wiring.
 #[test]
 fn deadline_and_render_tick_share_the_per_second_grid_1355() {
@@ -655,7 +655,7 @@ fn deadline_and_render_tick_share_the_per_second_grid_1355() {
 /// producer push site (arrival order, after the received counter), reset with the timeline at the
 /// explicit flush, and printed on the `genlock-fifo audit` line as `stamp_dup=` / `stamp_gap=`
 /// (parsed by src/jitter_audit.rs). The counting rules are proven by the C-vs-Rust gate in
-/// tests/genlock_relock_selection_parity.rs; this guards the wiring.
+/// tests/genlock_grid_parity_1355.rs; this guards the wiring.
 #[test]
 fn stamp_dup_and_gap_are_tracked_on_arrival_and_printed_1355() {
     let internal = squish(&vendor_file(OBS_INTERNAL));

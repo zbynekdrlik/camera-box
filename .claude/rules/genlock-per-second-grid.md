@@ -37,7 +37,7 @@ phase_pinned_deadline` delegates). Rules for anyone touching it:
   second; a separate `slot + 1 >= fps` branch is an equivalent mutation the gate cannot (and need
   not) see — found while mutation-proving it, removed.
 - **Parity gate:** `c_genlock_grid_matches_the_rust_authority_and_the_sender_grid_1355`
-  (`tests/genlock_relock_selection_parity.rs`) `#include`s the REAL header (no lift) and lifts the
+  (`tests/genlock_grid_parity_1355.rs`) `#include`s the REAL header (no lift) and lifts the
   DistroAV sender floor verbatim. Mutation-proven: promotion `<=`→`<` (108/3757 vectors), floor on
   the 1970 grid (2495), next slot off by one (31), fractional rate accepted (412).
 - **Anchors:** `deadline_and_render_tick_share_the_per_second_grid_1355` +
@@ -60,8 +60,9 @@ phase_pinned_deadline` delegates). Rules for anyone touching it:
   none) and never drains. The presented age can therefore end one frame different from the
   pre-deploy mix of 31/32 — re-run the A/V align (the E2E split correction) after the deploy.
 - **An EXTERNAL sender that follows an old reading of the sender contract** (`k · interval` from
-  1970) would now walk 10 ns/s against the receiver. The contract (§3/§4) was corrected to the
-  per-second formula in the same change; SongPlayer / the cg OBS must stamp per-second.
+  1970, in 100 ns units) walks 1 µs/s at 30 fps (4 µs/s at 60) — a whole frame in ~0.4 days —
+  against every per-second sender and the receiver. The contract (§3/§4) was corrected to the
+  per-second formula in the same change; SongPlayer / the cg OBS must be checked against §4.
 
 ## The bench (`src/genlock_grid_bench.rs`)
 
@@ -77,8 +78,12 @@ failed on today's arithmetic and the GREEN one passes.
 - Numbers (6 h, seed 0x1355_2026_0924): **1970 grid 27.5 flips/h** (states 31/32, 91 late holds,
   91 drains); **production 0.34 flips/h** (one sampled one-tick blip, 0 drains, 0 late holds).
   Date sweep on the 1970 grid: 29.2 (0.3 ms) / 27.5 (2 ms) / 19.8 (5 ms) / 3.7 (11 ms) / 5.4 but
-  522 stamp dups/h (16 ms) / **245 flips/h and 18 493 dups/h (22 ms)** / calm at 28–32 ms;
-  production identical at every offset. Four more seeds: 1970 22.6–30.3/h, production 0.34–0.67/h.
+  522 stamp dups/h (16 ms) / **245 flips/h and 18 493 dups/h (22 ms)** / calm at 28–32 ms.
+  The production grid gives byte-identical runs at every offset BY CONSTRUCTION (it never sees
+  the 1970 offset — the test asserts equality, it does not re-prove a bound per date). What it
+  does see is the pin: over pins 950–1024 ms (2 h each) production holds ONE state per pin
+  (30 / 31 / 32 frames, 0 flips, 0 drains) while the 1970 grid flips ~20/h at every one. Four
+  more seeds: 1970 22.6–30.3/h, production 0.34–0.67/h.
 - **The two tail rates are the only calibrated knobs** (sender late-render 300 ppm/frame,
   receiver late ticks 1000 ppm/tick): the design measured the correlation, not a per-frame rate.
   Do not tune them to make a new change pass — change them only from new rig measurements.
@@ -97,14 +102,18 @@ failed on today's arithmetic and the GREEN one passes.
 Per-input, on ARRIVAL, under `async_mutex` at the producer push site (AFTER the #99 peak update —
 `tests/genlock_preload.rs` pins the peak update within 1400 bytes of `genlock_frames_received++`),
 via `genlock_stamp_track_observe` (header) / `StampTrack::observe` (Rust): an equal stamp = dup;
-a positive interval < 1 s updates the source's own step (min-delta, #1042) and above 1.5 steps
-counts `round(interval / step) − 1` missing intervals; backward / ≥ 1 s jumps count nothing; the
+a positive interval in [4 ms, 1 s) updates the source's own step (min-delta, #1042) and above
+1.5 steps counts `round(interval / step) − 1` missing intervals; a positive interval below 4 ms
+(an off-grid hiccup — review finding: one such interval would otherwise shrink the step until
+the next flush and turn every normal interval into ~32 false gaps), backward and ≥ 1 s jumps
+count nothing; the
 explicit flush resets `genlock_rx_last_ts` + `genlock_rx_min_delta_ns` (counters survive).
 Audit-line-only (not in `obs_genlock_stats`), printed right after `wall_qpc_drift_ms=` so the
 `(long long)gs.audio_pairing_offset_ms);` last-argument anchor stays; parsed by
 `src/jitter_audit.rs` (0 on older lines, `delta_stamp_dup` / `delta_stamp_gap` in the summary,
-never in the #757 `--json`). A rate-halved NDI connection (#1203) reads as one gap per frame —
-that is honest (the sender's stamps really are missing), not a false positive.
+never in the #757 `--json`). A connection that HALVES while tracked (#1203) reads as one gap per
+frame — honest, the sender's stamps really are missing; one that is already halved when the
+tracking starts (or after a flush) learns the halved step and counts nothing.
 
 ## Post-deploy audit (≥ 30 min on the stream box, before any E2E)
 

@@ -384,7 +384,7 @@ pub mod genlock_backlog;
 // and the render tick all floor on the same per-second grid, so the receiver no longer walks
 // 10 ns/s (0.864 ms/day) against the senders. Crate-root + std-only (Tier-0 verifiable); the C
 // port `vendor/obs-studio/libobs/obs-genlock-grid.h` is held identical by the committed parity
-// gate in `tests/genlock_relock_selection_parity.rs`.
+// gate in `tests/genlock_grid_parity_1355.rs`.
 pub mod genlock_grid;
 
 // #1355 part 2 — the grid-drift bench: the deep N==1 stream `NDI 2ME PGM` FIFO fed by the

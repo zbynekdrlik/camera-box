@@ -19,7 +19,7 @@
 //!
 //! This module is the Tier-0 authority for the ONE grid. The C port is
 //! `vendor/obs-studio/libobs/obs-genlock-grid.h` (included by both obs-source.c and
-//! obs-video.c); `tests/genlock_relock_selection_parity.rs` compiles that header and requires
+//! obs-video.c); `tests/genlock_grid_parity_1355.rs` compiles that header and requires
 //! byte-identical results from the functions here over vectors spanning a whole day.
 //!
 //! ## Units
@@ -143,6 +143,12 @@ pub fn grid_next_boundary_ns(t_ns: u64, interval_ns: u64) -> u64 {
 /// not a run of missing stamps, and is not counted.
 pub const STAMP_TRACK_MAX_DELTA_NS: u64 = NS_PER_SECOND;
 
+/// A positive stamp interval below this (a 250 fps step; no rig source runs faster than 60) is a
+/// sub-slot hiccup of an off-grid stamp, never the source's step: it is ignored, so one short
+/// interval cannot shrink the learned step and turn every later normal interval into a run of
+/// false gaps.
+pub const STAMP_TRACK_MIN_STEP_NS: u64 = 4_000_000;
+
 /// #1355 part 3 — per-input DUPLICATE / MISSING stamp-interval counters on ARRIVAL, the evidence
 /// behind the `stamp_dup=` / `stamp_gap=` tokens on the `genlock-fifo audit` line.
 ///
@@ -154,10 +160,15 @@ pub const STAMP_TRACK_MAX_DELTA_NS: u64 = NS_PER_SECOND;
 ///
 /// Rules, applied to each received stamp in arrival order:
 /// - equal to the previous stamp → one duplicate;
-/// - a positive interval below [`STAMP_TRACK_MAX_DELTA_NS`] updates the source's own step (the
-///   SMALLEST positive interval seen, the #1042 min-delta rule — a gap or a duplicate never shrinks
-///   it) and, when it exceeds 1.5 steps, counts `round(interval / step) − 1` missing intervals;
-/// - a backward stamp or a jump of a second or more is a discontinuity: nothing is counted.
+/// - a positive interval in [`STAMP_TRACK_MIN_STEP_NS`, [`STAMP_TRACK_MAX_DELTA_NS`]) updates the
+///   source's own step (the SMALLEST such interval seen, the #1042 min-delta rule — a gap or a
+///   duplicate never shrinks it) and, when it exceeds 1.5 steps, counts
+///   `round(interval / step) − 1` missing intervals;
+/// - a shorter positive interval, a backward stamp or a jump of a second or more counts nothing.
+///
+/// The step is learned from the stream itself, so a connection that is ALREADY rate-halved when
+/// tracking starts (or after a flush) learns the halved step and counts nothing; a halving that
+/// starts later reads as one gap per frame.
 ///
 /// [`StampTrack::reset_timeline`] forgets the previous stamp and the step (the receiver's flush
 /// seam — the source went inactive); the cumulative counters survive, like every audit counter.
@@ -178,7 +189,7 @@ impl StampTrack {
             let delta = ts - self.last_ts;
             if delta == 0 {
                 self.dups += 1;
-            } else if delta < STAMP_TRACK_MAX_DELTA_NS {
+            } else if (STAMP_TRACK_MIN_STEP_NS..STAMP_TRACK_MAX_DELTA_NS).contains(&delta) {
                 if self.min_delta_ns == 0 || delta < self.min_delta_ns {
                     self.min_delta_ns = delta;
                 }
@@ -400,6 +411,24 @@ mod tests {
         assert_eq!(t.gaps, 2, "2..5 misses slots 3 and 4: {t:?}");
         assert_eq!(t.dups, 2, "{t:?}");
         assert_eq!(t.min_delta_ns, step);
+    }
+
+    /// One sub-4 ms positive interval (an off-grid hiccup) must not shrink the learned step —
+    /// otherwise every later normal 33 ms interval would count ~32 false gaps.
+    #[test]
+    fn stamp_track_ignores_a_sub_step_hiccup_1355() {
+        let s = sender_stream(8);
+        let mut t = StampTrack::default();
+        for &x in &s[..4] {
+            t.observe(x);
+        }
+        t.observe(s[3] + 1_000_000); // a 1 ms hiccup
+        for &x in &s[5..] {
+            t.observe(x);
+        }
+        assert_eq!(t.min_delta_ns, 33_333_300, "{t:?}");
+        // s[3]+1 ms -> s[5] is ~65.7 ms = one missing slot (slot 4); nothing else.
+        assert_eq!((t.dups, t.gaps), (0, 1), "{t:?}");
     }
 
     #[test]

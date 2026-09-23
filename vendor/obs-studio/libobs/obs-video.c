@@ -833,7 +833,9 @@ void add_ready_encoder_group(obs_encoder_t *encoder)
  *
  * Genlock mode (env OBS_GENLOCK_WALL_CLOCK=1) instead derives every tick
  * deadline from the DanteSync-disciplined WALL clock, aligned to ABSOLUTE
- * frame boundaries (wall_ns % interval == 0). All genlocked machines tick at
+ * frame boundaries -- since camera-box #1355 the ONE per-second grid the senders
+ * stamp on (obs-genlock-grid.h: slot k of second S = S + floor(k * 1 s / fps)),
+ * no longer wall_ns % interval == 0 counted from 1970. All genlocked machines tick at
  * the same disciplined frequency AND phase, so a chained camera->OBS->OBS
  * pipeline has zero rate mismatch end to end. Wall-clock steps (the NTP
  * fallback regime) are absorbed by clamping the per-tick correction to

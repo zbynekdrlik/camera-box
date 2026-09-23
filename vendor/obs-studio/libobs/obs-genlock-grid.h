@@ -18,7 +18,7 @@
  * point of its own slot and never after it. A non-integer rate (29.97) has no per-second grid
  * and keeps the pre-#1355 arithmetic; interval 0 (unknown video info) returns t unchanged.
  *
- * Pure: stdint only, no libobs types -- tests/genlock_relock_selection_parity.rs compiles this
+ * Pure: stdint only, no libobs types -- tests/genlock_grid_parity_1355.rs compiles this
  * header as-is and requires byte-identical results from the Tier-0 Rust authority
  * src/genlock_grid.rs over vectors spanning a whole day. Keep both in lock-step. */
 #pragma once
@@ -81,15 +81,21 @@ static inline uint64_t genlock_grid_next_boundary_ns(uint64_t t_ns, uint64_t int
 /* camera-box #1355 part 3: a stamp interval of a second or more is a timeline discontinuity
  * (sender restart, clock step), not a run of missing stamps. */
 #define GENLOCK_STAMP_TRACK_MAX_DELTA_NS 1000000000ULL
+/* camera-box #1355 part 3: a positive interval below this (a 250 fps step; no rig source runs
+ * faster than 60) is a sub-slot hiccup of an off-grid stamp, never the source's step: it is
+ * ignored, so one short interval cannot shrink the learned step and turn every later normal
+ * interval into a run of false gaps. */
+#define GENLOCK_STAMP_TRACK_MIN_STEP_NS 4000000ULL
 
 /* camera-box #1355 part 3: account one RECEIVED stamp (arrival order) into the per-input
  * duplicate / missing stamp-interval counters printed as stamp_dup= / stamp_gap= on the
  * 'genlock-fifo audit' line. A sender that stamps at SEND time puts a slow frame into the NEXT
  * 1/30 s cell -- the receiver sees a stamp that skips a slot (a gap) followed by an equal one (a
- * duplicate). Rules: equal to the previous stamp -> one duplicate; a positive interval below
- * GENLOCK_STAMP_TRACK_MAX_DELTA_NS updates the source's own step (the SMALLEST positive interval
- * seen -- the #1042 min-delta rule) and, when it exceeds 1.5 steps, counts round(interval / step)
- * - 1 missing intervals; a backward stamp or a jump of a second or more counts nothing.
+ * duplicate). Rules: equal to the previous stamp -> one duplicate; a positive interval in
+ * [GENLOCK_STAMP_TRACK_MIN_STEP_NS, GENLOCK_STAMP_TRACK_MAX_DELTA_NS) updates the source's own
+ * step (the SMALLEST such interval seen -- the #1042 min-delta rule) and, when it exceeds 1.5
+ * steps, counts round(interval / step) - 1 missing intervals; a shorter positive interval, a
+ * backward stamp or a jump of a second or more counts nothing.
  * *last_ts == 0 means "no previous stamp" (the flush seam clears it together with *min_delta_ns).
  * Mirror of src/genlock_grid.rs StampTrack::observe -- keep both in lock-step. */
 static inline void genlock_stamp_track_observe(uint64_t *last_ts, uint64_t *min_delta_ns, uint64_t *dups,
@@ -99,7 +105,7 @@ static inline void genlock_stamp_track_observe(uint64_t *last_ts, uint64_t *min_
 		const uint64_t delta = ts - *last_ts;
 		if (delta == 0) {
 			(*dups)++;
-		} else if (delta < GENLOCK_STAMP_TRACK_MAX_DELTA_NS) {
+		} else if (delta >= GENLOCK_STAMP_TRACK_MIN_STEP_NS && delta < GENLOCK_STAMP_TRACK_MAX_DELTA_NS) {
 			if (*min_delta_ns == 0 || delta < *min_delta_ns)
 				*min_delta_ns = delta;
 			const uint64_t step = *min_delta_ns;

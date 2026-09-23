@@ -108,9 +108,11 @@ Each output **MUST** define a nominal grid rate equal to the receiving canvas ra
 the `cg` OBS) or an integer multiple of it. The grid is the **per-second Unix-epoch grid**:
 boundary *k* of whole second *S* (Unix epoch) is `S + floor(k · 1 s / fps)`, *k* = 0 … fps−1 —
 the slot count restarts at every whole second (not a per-stream or session-relative grid, and
-NOT `k · interval` counted from 1970). The two differ: `30 × 33_333_333 ns = 999_999_990 ns`,
-so a grid of `k · interval` from 1970 loses 10 ns every second (0.864 ms per day) against the
-per-second grid — exactly the date-walk issue 1355 removed from the receiver, whose release
+NOT `k · interval` counted from 1970). The two differ: in the receiver's ns units
+`30 × 33_333_333 ns = 999_999_990 ns`, so a 1970 grid loses 10 ns every second (0.864 ms per
+day) — exactly the date-walk issue 1355 removed from the receiver; in a sender's 100 ns units
+`30 × 333_333 = 9_999_990`, so a sender stamping `k · interval_100ns` from 1970 walks **1 µs
+per second at 30 fps (4 µs at 60)** — a whole frame in about 0.4 days. The receiver's release
 deadline and render tick now floor on this same per-second grid
 (`vendor/obs-studio/libobs/obs-genlock-grid.h`, Rust authority `src/genlock_grid.rs`). Content
 that arrives at a different rate (a 23.976 or 29.97 file) **MUST** be presented at the first
@@ -128,8 +130,8 @@ timecode = S + floor(k · 10_000_000 / fps)
 ```
 
 in **100 ns units since the Unix epoch** — the per-second grid of §3 (never
-`floor(t / interval) · interval` counted from 1970, which walks 10 ns/s against every other
-sender and against the receiver). Exactly on a boundary the slot recovery `(offset · fps) /
+`floor(t / interval_100ns) · interval_100ns` counted from 1970, which walks 1 µs/s at 30 fps
+(4 µs/s at 60) against every other sender and against the receiver). Exactly on a boundary the slot recovery `(offset · fps) /
 10_000_000` can under-count by one (`floor(k · 10_000_000 / fps)` sits up to one unit below the
 exact rational), so promote once when slot *k*+1's boundary is still at or before the instant —
 see `floor_boundary_100ns`. It **MUST** be the FLOOR boundary (the boundary at or before the emit
