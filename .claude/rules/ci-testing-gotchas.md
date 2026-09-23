@@ -1276,3 +1276,6 @@ pure crate-root module, a std-only `tests/*.rs` harness (set `CARGO_MANIFEST_DIR
 cross-module `const _: () = assert!(...)`. It caught a `double_comparisons` error
 (`a <= b && a >= b` -> write `a == b`) in a lib.rs const pin that plain `rustc -D warnings` passed.
 Files that need the camera_box crate or serde stay CI-only.
+It also catches the truth-table shape std-only vendored-C gates love: a row slice typed
+`&[((i32, i32, i32, i32), i32)]` is a `clippy::type_complexity` error under `-D warnings` (issue
+1363 — plain `rustc -D warnings` passed it). Name the row type (`type FourIntVector = …;`).
