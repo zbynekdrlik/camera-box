@@ -2,6 +2,7 @@
 paths:
   - "scripts/deploy-genlock-fleet.sh"
   - "scripts/lib/genlock-markers.sh"
+  - "scripts/lib/genlock-fleet-boxes.sh"
 ---
 
 # One canonical genlock deploy path across the whole rig (#789 bod 4 + bod 5)
@@ -21,6 +22,34 @@ Full-path E2E at the `genlock_parity` preflight (the recurring #923/#932 pain).
 - `--plan --run-id <id> --sha <headSha> --stage <dir> [--full|--fast] [--boxes …]` prints the whole
   plan offline (no network) — this is the Tier-0-tested surface. Execute mode (`--run-id …`) resolves
   + downloads + deploys live (supervisor-driven; the download/scp/ssh glue is untestable offline).
+
+## The strih is strih-lx; the Windows `strih` arm is RETIRED (issue 1317 part 3, M4 cut-over 20.9.2026)
+
+The STRIH-SNV Windows PC is gone and 10.77.9.202 is the Linux strih-lx. So:
+
+- **Default fleet = `strih-lx,stream`** (canonical order `strih-lx,stream,imag,resolume`). `--boxes
+  strih` is REFUSED by name ("RETIRED … the strih is strih-lx"), and every per-box Windows function
+  (`fleet_box_mcp` / `fleet_box_ip` / `fleet_box_ahk_script` / `fleet_box_ahk_prefer`) returns 2 for
+  it. `build_windows_deploy_program BOX … HAS_AHK=1` for a box with no AHK identity is a loud rc 2 —
+  it used to fall back silently to the retired strih's `D:\_APPS` path.
+- **The per-box constant table lives in `scripts/lib/genlock-fleet-boxes.sh`**, sourced by this
+  script AND `launch-obs-genlock.sh` + `obs-self-heal-install.sh` (three copies of the MCP/IP/AHK
+  facts before). Addresses + the AHK fact come from `scripts/lib/obs-fleet.sh` (`obs_fleet_host`,
+  `obs_fleet_has_ahk`); imag keeps its `imag` ssh alias. Registering a box = one lib edit + its fleet
+  row. The move was byte-neutral for stream / resolume / imag (plan output diffed identical, full +
+  fast); keep `tests/deploy_genlock_fleet.rs`'s `per_box_table_lives_in_the_shared_lib_1317` green
+  (no inline redefinition, no `win-strih` / `.202` in the lib, deploy script < 1000 lines).
+- **The strih-lx plan is `emit_strih_lx_plan`, NOT `emit_imag_plan`.** The old arm printed the imag
+  program under a `box=imag` header — it restarts `imag-obs.service`, a unit strih-lx does not have,
+  so it would have failed AFTER installing bytes. strih-lx installs the strih FULL artifact
+  (`obs-genlock-linux-x86_64-strih`) into `/usr` through `setup-strih.sh STRIH_LX_BUNDLE_SRC=…`
+  (release-parity gate, runtime packages, /usr prefix, chrome-sandbox) and is supervised by
+  `strih-obs.service`. The plan prints the sanctioned recipe from `strih-linux-provisioning.md`
+  ("Staging + ssh gotchas"): prune stale stages with `obs-backup-retention.sh --box strih-lx`, rsync
+  the artifact + `scripts/` + `systemd/`, `sudo -S … nohup setup-strih.sh`, `pgrep -x`, a
+  `systemctl --user restart strih-obs.service`, `verify-strih.sh`. **Every line is a `#` comment**
+  (the issue-1295 saved-.ps1 parse rule holds for a mixed plan). Execute mode for strih-lx is still
+  the loud no-op note — automating the recipe is its own follow-up.
 
 ## Same-SHA cross-workflow resolution — the heart of "one canonical version"
 
