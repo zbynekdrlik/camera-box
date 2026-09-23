@@ -22,6 +22,9 @@
 #include <media-io/video-frame.h>
 #include <chrono>
 #include <cstdint>
+#ifdef __linux__
+#include "ndi-sender-port.h"
+#endif
 
 #include <QDesktopServices>
 #include <QUrl>
@@ -34,6 +37,11 @@ typedef struct {
 	obs_source_t *obs_source;
 
 	NDIlib_send_instance_t ndi_sender;
+#ifdef __linux__
+	// camera-box issue 1363: the sender's TCP listen port (0 = unknown), so its
+	// connections can be aborted (SO_LINGER 0) right before send_destroy.
+	int ndi_sender_port;
+#endif
 
 	pthread_mutex_t ndi_sender_video_mutex;
 	pthread_mutex_t ndi_sender_audio_mutex;
@@ -433,6 +441,13 @@ void ndi_sender_destroy(ndi_filter_t *filter)
 	}
 
 	pthread_mutex_lock(&filter->ndi_sender_audio_mutex);
+	// camera-box issue 1363 (Linux): close this sender's connections with RST so no
+	// TIME_WAIT survives on its port and the next OBS gets the same port.
+#ifdef __linux__
+	ndi_sender_abort_connections_before_destroy(filter->ndi_sender_port,
+						    obs_source_get_name(filter->obs_source));
+	filter->ndi_sender_port = 0;
+#endif
 	ndiLib->send_destroy(filter->ndi_sender);
 	filter->ndi_sender = nullptr;
 	pthread_mutex_unlock(&filter->ndi_sender_audio_mutex);
@@ -514,8 +529,19 @@ void ndi_sender_create(ndi_filter_t *filter, obs_data_t *settings)
 	}
 
 	pthread_mutex_lock(&filter->ndi_sender_audio_mutex);
+	// camera-box issue 1363 (Linux): abort the old sender's connections (no TIME_WAIT,
+	// so libndi rebinds the freed port) and record the new sender's port.
+#ifdef __linux__
+	ndi_sender_abort_connections_before_destroy(filter->ndi_sender_port,
+						    send_desc.p_ndi_name);
+	filter->ndi_sender_port = 0;
+#endif
 	ndiLib->send_destroy(filter->ndi_sender);
+#ifdef __linux__
+	filter->ndi_sender = ndi_sender_create_tracked(&send_desc, &filter->ndi_sender_port);
+#else
 	filter->ndi_sender = ndiLib->send_create(&send_desc);
+#endif
 
 	if (filter->ndi_sender) {
 		obs_log(LOG_INFO, "Dedicated NDI Output sender created: '%s'", send_desc.p_ndi_name);

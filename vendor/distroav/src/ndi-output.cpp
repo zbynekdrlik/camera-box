@@ -22,6 +22,10 @@
 #include <cstdint>
 #include <mutex>
 #include <string>
+#ifdef __linux__
+#include "ndi-sender-port.h"
+#include <cstdio>
+#endif
 
 // #include "plugin-support.h"
 
@@ -144,6 +148,11 @@ typedef struct {
 
 	NDIlib_send_instance_t ndi_sender;
 	pthread_mutex_t ndi_sender_mutex;
+#ifdef __linux__
+	// camera-box issue 1363: the sender's TCP listen port (0 = unknown), so its
+	// connections can be aborted (SO_LINGER 0) right before send_destroy.
+	int ndi_sender_port;
+#endif
 
 	uint32_t frame_width;
 	uint32_t frame_height;
@@ -282,6 +291,13 @@ static NDIlib_send_instance_t g_reserved_main_sender = nullptr;
 static std::string g_reserved_main_name;
 static std::string g_reserved_main_groups;
 static std::mutex g_reserved_main_mutex;
+#ifdef __linux__
+// camera-box issue 1363: the reserved sender's TCP port, and the port of the
+// reservation just handed to ndi_output_start (consumed by
+// ndi_output_take_adopted_port), both guarded by g_reserved_main_mutex.
+static int g_reserved_main_port = 0;
+static int g_taken_main_port = 0;
+#endif
 
 // Create the main output's NDI send instance NOW so it reserves the first free
 // NDI port (:5961). Called from obs_module_post_load with the configured main
@@ -304,13 +320,36 @@ void ndi_output_reserve_main_sender(const char *name, const char *groups)
 	send_desc.clock_video = false;
 	send_desc.clock_audio = false;
 
+	// camera-box issue 1363 (Linux): probe :5961 BEFORE the reserving send_create
+	// (after it, the reserved sender itself holds the port). libndi only ever
+	// tries :5961 on this first create, so a TIME_WAIT there loses the pin for
+	// the whole session; never wait here (it would delay OBS start in exactly
+	// the crash-recovery moment), just say so loudly below.
+#ifdef __linux__
+	const int first_port_state = ndi_sender_port_hold_state(NDI_SENDER_FIRST_TCP_PORT);
+	g_reserved_main_sender = ndi_sender_create_tracked(&send_desc, &g_reserved_main_port);
+#else
 	g_reserved_main_sender = ndiLib->send_create(&send_desc);
+#endif
 	if (g_reserved_main_sender) {
 		g_reserved_main_name = name;
 		g_reserved_main_groups = (groups && groups[0]) ? groups : "";
 		obs_log(LOG_INFO,
 			"ndi_output_reserve_main_sender: reserved the first NDI port for main output '%s' at module post-load (#1185)",
 			name);
+#ifdef __linux__
+		if (ndi_reserve_should_warn(first_port_state, g_reserved_main_port)) {
+			char landed[16];
+			if (g_reserved_main_port > 0)
+				snprintf(landed, sizeof(landed), ":%d", g_reserved_main_port);
+			else
+				snprintf(landed, sizeof(landed), "(unknown)");
+			obs_log(LOG_WARNING,
+				"WARN-1363 - ndi_output_reserve_main_sender: the first NDI port TCP :%d was %s at module post-load, so main output '%s' landed on TCP %s for this whole session (libndi never retries a port it failed to bind); viewers that cached :%d get the wrong source until the next clean OBS restart",
+				NDI_SENDER_FIRST_TCP_PORT, ndi_first_port_hold_state_text(first_port_state), name,
+				landed, NDI_SENDER_FIRST_TCP_PORT);
+		}
+#endif
 	} else {
 		obs_log(LOG_WARNING,
 			"WARN-1185 - ndi_output_reserve_main_sender: failed to reserve NDI send instance for '%s'",
@@ -326,6 +365,9 @@ void ndi_output_release_reserved_main_sender()
 {
 	std::lock_guard<std::mutex> lock(g_reserved_main_mutex);
 	if (g_reserved_main_sender && ndiLib) {
+#ifdef __linux__
+		ndi_sender_abort_connections_before_destroy(g_reserved_main_port, g_reserved_main_name.c_str());
+#endif
 		ndiLib->send_destroy(g_reserved_main_sender);
 		obs_log(LOG_DEBUG,
 			"ndi_output_release_reserved_main_sender: destroyed the unadopted reserved main sender '%s' (#1185)",
@@ -334,6 +376,9 @@ void ndi_output_release_reserved_main_sender()
 	g_reserved_main_sender = nullptr;
 	g_reserved_main_name.clear();
 	g_reserved_main_groups.clear();
+#ifdef __linux__
+	g_reserved_main_port = 0;
+#endif
 }
 
 // If a reserved main sender matches (name+groups) the output about to start,
@@ -353,8 +398,24 @@ static NDIlib_send_instance_t ndi_output_take_reserved_sender(const char *name, 
 	g_reserved_main_sender = nullptr;
 	g_reserved_main_name.clear();
 	g_reserved_main_groups.clear();
+#ifdef __linux__
+	g_taken_main_port = g_reserved_main_port;
+	g_reserved_main_port = 0;
+#endif
 	return s;
 }
+
+#ifdef __linux__
+// camera-box issue 1363: the TCP port of the reservation ndi_output_take_reserved_sender
+// just handed over (0 = unknown), consumed once.
+static int ndi_output_take_adopted_port()
+{
+	std::lock_guard<std::mutex> lock(g_reserved_main_mutex);
+	const int port = g_taken_main_port;
+	g_taken_main_port = 0;
+	return port;
+}
+#endif
 
 bool ndi_output_start(void *data)
 {
@@ -453,8 +514,15 @@ bool ndi_output_start(void *data)
 	if (o->ndi_sender) {
 		obs_log(LOG_INFO, "ndi_output_start: adopted the port-reserved main NDI sender for '%s' (#1185)",
 			name);
+#ifdef __linux__
+		o->ndi_sender_port = ndi_output_take_adopted_port();
+#endif
 	} else {
+#ifdef __linux__
+		o->ndi_sender = ndi_sender_create_tracked(&send_desc, &o->ndi_sender_port);
+#else
 		o->ndi_sender = ndiLib->send_create(&send_desc);
+#endif
 	}
 
 	if (o->ndi_sender) {
@@ -476,6 +544,10 @@ bool ndi_output_start(void *data)
 			// leaving it alive advertises the production PGM name FRAMELESS for the whole
 			// session and the next start creates a second same-named sender on a high port --
 			// silently defeating the pin. Destroy it here (safe: capture never began).
+#ifdef __linux__
+			ndi_sender_abort_connections_before_destroy(o->ndi_sender_port, name);
+			o->ndi_sender_port = 0;
+#endif
 			ndiLib->send_destroy(o->ndi_sender);
 			o->ndi_sender = nullptr;
 		}
@@ -525,6 +597,12 @@ void ndi_output_stop(void *data, uint64_t)
 		if (o->ndi_sender) {
 			obs_log(LOG_DEBUG, "ndi_output_stop: +ndiLib->send_destroy(o->ndi_sender)");
 			pthread_mutex_lock(&o->ndi_sender_mutex);
+			// camera-box issue 1363 (Linux): close this sender's connections with RST
+			// so no TIME_WAIT survives on its port and the next OBS gets the same port.
+#ifdef __linux__
+			ndi_sender_abort_connections_before_destroy(o->ndi_sender_port, name);
+			o->ndi_sender_port = 0;
+#endif
 			ndiLib->send_destroy(o->ndi_sender);
 			obs_log(LOG_DEBUG, "ndi_output_stop: -ndiLib->send_destroy(o->ndi_sender)");
 			o->ndi_sender = nullptr;

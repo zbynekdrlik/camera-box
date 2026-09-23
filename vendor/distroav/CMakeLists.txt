@@ -93,6 +93,18 @@ target_sources(
     src/preview-output.h
 )
 
+# camera-box issue 1363: Linux-only NDI sender-port hygiene (SO_LINGER 0 on a
+# sender's connections before it is destroyed, so no TIME_WAIT shifts the next
+# OBS's sender ports). Windows binds over a TIME_WAIT; its source list is unchanged.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  target_sources(
+    ${CMAKE_PROJECT_NAME}
+    PRIVATE
+      src/ndi-sender-port.cpp
+      src/ndi-sender-port.h
+  )
+endif()
+
 set(valid_uuid FALSE)
 check_uuid(${WINDOWS_APP_UUID} valid_uuid)
 if(NOT valid_uuid)
