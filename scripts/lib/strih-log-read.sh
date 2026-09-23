@@ -39,7 +39,11 @@
 #   strih_log_line_count <host> <user> <pw> [t]        -> the newest log's line count
 #   strih_log_since_line <host> <user> <pw> <start> [t] -> every line AFTER the first <start> lines
 #   strih_log_tail <host> <user> <pw> <n> [t]          -> the newest log's last <n> lines
-# Pure builder (no network, unit-testable): strih_log_remote_cmd <linux|windows> <count|since|tail> [arg]
+# Pure builder (no network, unit-testable): strih_log_remote_cmd <linux|windows> <count|since|tail|headtail> [arg]
+#   headtail N = the first 600 lines + the last N lines (the rig-health-audit.py read: the launch-time
+#   audio-buffering burst lives in the head, the live audit lines in the tail). No bash consumer calls
+#   it through strih_log_tail; it exists so the audit's python twin (_obs_log_tail_cmd) is pinned
+#   byte-for-byte to ONE command source (tests/python/test_rig_health_audit_strih_lx_1360.py).
 
 _STRIH_LOG_READ_DIR="${BASH_SOURCE[0]%/*}"
 command -v strih_platform >/dev/null 2>&1 || . "$_STRIH_LOG_READ_DIR/strih-platform.sh"
@@ -56,11 +60,13 @@ strih_log_os() {
 
 # strih_log_remote_cmd <platform> <op> [arg] -> stdout: the REMOTE command string for one read, or
 # nothing (return 0) for an unknown platform/op or a non-numeric `since` mark. `tail` clamps a
-# non-numeric count to 400 (never spliced into a remote shell/PS payload unvalidated).
+# non-numeric count to 400, `headtail` to 500 (the audit's default) -- never spliced into a remote
+# shell/PS payload unvalidated.
 strih_log_remote_cmd() {
   local platform="${1:-}" op="${2:-}" arg="${3:-}" n ps
   case "$op" in
     tail) n="$(ps_clamp_numeric "$arg" 400)" ;;
+    headtail) n="$(ps_clamp_numeric "$arg" 500)" ;;
     since)
       case "$arg" in '' | *[!0-9]*) return 0 ;; esac
       n="$arg"
@@ -73,16 +79,19 @@ strih_log_remote_cmd() {
       local newest='F=$(ls -t ~/.config/obs-studio/logs/*.txt 2>/dev/null | head -1); [ -n "$F" ] && '
       case "$op" in
         tail) printf '%s' "${newest}tail -n ${n} \"\$F\"" ;;
+        headtail) printf '%s' "${newest}{ head -n 600 \"\$F\"; tail -n ${n} \"\$F\"; }" ;;
         since) printf '%s' "${newest}tail -n +$((10#$n + 1)) \"\$F\"" ;; # 10#: a zero-padded mark is decimal
         count) printf '%s' "${newest}wc -l < \"\$F\"" ;;
       esac
       ;;
     windows)
       # Verbatim from the consumers that owned them: count/since = qr-align.sh's Get-ChildItem form;
-      # tail = the gc/gci form mv-reverify-escalate.sh + ndi-cadence-heal.sh used.
+      # tail = the gc/gci form mv-reverify-escalate.sh + ndi-cadence-heal.sh used; headtail =
+      # rig-health-audit.py's _windows_obs_log_tail_cmd PowerShell.
       local newest='Get-ChildItem "$env:APPDATA\obs-studio\logs\*.txt" | Sort-Object LastWriteTime -Descending | Select-Object -First 1'
       case "$op" in
         tail) ps="gc (gci \$env:APPDATA\\obs-studio\\logs\\*.txt | sort LastWriteTime | select -last 1).FullName -Tail $n" ;;
+        headtail) ps="\$l = Get-ChildItem \$env:APPDATA\\obs-studio\\logs\\*.txt | Sort-Object LastWriteTime -Descending | Select-Object -First 1; Get-Content \$l.FullName -TotalCount 600; Get-Content \$l.FullName -Tail $n" ;;
         since) ps="Get-Content ($newest) | Select-Object -Skip $n" ;;
         count) ps="(Get-Content ($newest)).Count" ;;
       esac
