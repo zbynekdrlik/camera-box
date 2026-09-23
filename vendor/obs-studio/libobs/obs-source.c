@@ -5640,6 +5640,61 @@ static bool genlock_should_converge_phase(const obs_source_t *source, uint32_t r
 					  reserve_ms, interval, n, source->genlock_ticks_since_drain);
 }
 
+/* camera-box #1355: the N==1 RELEASE-PHASE HYSTERESIS shed decision, N==1 ONLY. Should this N==1
+ * STEADY tick shed one extra frame to step the release phase back onto the configured latency
+ * after the wall-vs-render clock drift has walked it a full frame?
+ *
+ * The video release deadline keys on the WALL clock while the render tick rides the free-running
+ * monotonic/QPC clock; on the stream box they drift ~+13 ppm, so the boundary-locked N==1 conveyor
+ * gains one frame of on-air age every ~40 min and the A/V level saws over a ~2-frame band on the
+ * #859 depth drain's 2-frame hysteresis (issue 1355, measured on NDI 2ME PGM). This decision fires
+ * one clean whole-frame step instead: the comparator is the same on-air age S = wall_now - boundary
+ * genlock_phase_converge_due uses, but the threshold is reserve + interval - budget (a WHOLE frame,
+ * minus the arrival-jitter budget). After a shed S drops a full interval, landing a budget-width
+ * BELOW the configured hold -- an entire frame below the threshold -- so it cannot re-fire until the
+ * drift re-accumulates a whole frame. That whole-frame hysteresis is why the N==1 shed is
+ * sustainable here where genlock_phase_converge_due's tight target+quantum+budget band limit-cycles
+ * (and is gated off for N==1): the drift genuinely creates a one-frame surplus to shed. N>=2 stays
+ * with genlock_phase_converge_due, unchanged (#1049). Inert at 0 ppm drift (S never climbs to the
+ * threshold), so every settled source is byte-identical. Mirror of src/genlock_backlog.rs
+ * n1_release_phase_step (Tier-0 unit-tested + genlock_n1_bench) -- keep both in lock-step; held
+ * identical by tests/genlock_relock_selection_parity.rs. */
+static inline bool genlock_n1_release_phase_step(uint64_t wall_now_ns, uint64_t boundary_ns,
+						 uint32_t latency_ms, uint64_t interval_ns, uint32_t n,
+						 uint64_t ticks_since_drain)
+{
+	if (interval_ns == 0 || boundary_ns == 0)
+		return false;
+	/* N==1 ONLY -- N>=2 is handled by genlock_phase_converge_due (unchanged). */
+	if (n != 1)
+		return false;
+	const uint64_t reserve_ns = (uint64_t)latency_ms * 1000000ULL;
+	/* The same arrival-jitter tolerance the N>=2 shed uses. */
+	const uint64_t budget = GENLOCK_PHASE_PIN_HYSTERESIS_NS > GENLOCK_N2_JITTER_BUDGET_NS
+					? GENLOCK_PHASE_PIN_HYSTERESIS_NS
+					: GENLOCK_N2_JITTER_BUDGET_NS;
+	/* Whole-frame threshold (minus the jitter budget) -- see the block comment for why this, not
+	 * genlock_phase_converge_due's tight band, is what makes the N==1 shed sustainable. */
+	const uint64_t threshold = reserve_ns + interval_ns > budget ? reserve_ns + interval_ns - budget : 0;
+	const uint64_t age = wall_now_ns > boundary_ns ? wall_now_ns - boundary_ns : 0;
+	return age > threshold && ticks_since_drain >= GENLOCK_DRAIN_MIN_TICK_INTERVAL;
+}
+
+/* camera-box #1355: the source-bound wrapper -- reads the live n (READ-ONLY, same as
+ * genlock_should_converge_phase), the locked boundary + shared throttle, and delegates the
+ * arithmetic to genlock_n1_release_phase_step above. */
+static bool genlock_should_n1_release_phase_step(const obs_source_t *source, uint32_t reserve_ms,
+						 uint64_t interval, uint64_t wall_now)
+{
+	if (interval == 0 || source->async_frames.num == 0)
+		return false;
+	const uint32_t measured = genlock_measure_source_multiple(source, interval);
+	const uint32_t n = measured >= 1 ? measured
+					 : (source->genlock_last_known_n >= 1 ? source->genlock_last_known_n : 1);
+	return genlock_n1_release_phase_step(wall_now, source->genlock_locked_next_boundary_ns, reserve_ms,
+					     interval, n, source->genlock_ticks_since_drain);
+}
+
 /* camera-box #1161: the fail-open MARGIN (ticks) the ACQUIRE bracketing gate
  * (genlock_relock_acquire_should_hold) adds on top of ceil(reserve/interval) before it
  * force-acquires regardless of queue depth. Mirror of src/genlock_backlog.rs
@@ -6116,6 +6171,33 @@ static bool genlock_release_tick(obs_source_t *source, uint64_t wall_now, uint64
 			source->genlock_ticks_since_drain = 0;
 		} else if (!drain_eligible) {
 			source->genlock_ticks_since_drain++;
+		}
+	}
+	/* camera-box #1355: the N==1 RELEASE-PHASE HYSTERESIS step. genlock_should_converge_phase above
+	 * is gated OFF for N==1 (its tight target+quantum+budget band limit-cycles there), so the deep
+	 * N==1 conveyor's only shed was the #859 depth drain with its 2-frame hysteresis -- which lets
+	 * the wall-vs-render clock drift walk the on-air age (and the A/V level) over ~2 frames every
+	 * ~40 min (issue 1355, NDI 2ME PGM). This SEPARATE block sheds ONE clean whole-frame step per
+	 * crossing on the N==1 STEADY path, with the SAME drop-array[0]/present-next idiom and the SAME
+	 * distinct genlock_converge_sheds observability counter. It shares the #859 drain throttle: the
+	 * drain block above ran first (drain_eligible is set on the N==1 STEADY path) and, when it did
+	 * NOT shed, incremented genlock_ticks_since_drain; if it DID shed, ticks==0 and
+	 * genlock_should_n1_release_phase_step returns false -- so the drain and this step can never
+	 * both fire, at most one extra frame leaves the queue per tick, and the drain block above stays
+	 * byte-identical. No `else if (!drain_eligible)` increment here: on the N>=2 path the converge
+	 * block above already maintains the counter, and this step never fires there (n != 1). Mirror of
+	 * src/genlock_backlog.rs n1_release_phase_step / genlock_n1_bench (Tier-0 verified) -- the C and
+	 * the Rust authority are held identical by tests/genlock_relock_selection_parity.rs. */
+	if (converge_eligible) {
+		if (genlock_should_n1_release_phase_step(source, reserve_ms, interval, wall_now) &&
+		    source->async_frames.num > 1) {
+			struct obs_source_frame *n1_shed =
+				source->async_frames.array[0];
+			da_erase(source->async_frames, 0);
+			remove_async_frame(source, n1_shed);
+			source->genlock_dropped_due++;
+			source->genlock_converge_sheds++; /* #1355: shares the #1049 shed counter */
+			source->genlock_ticks_since_drain = 0;
 		}
 	}
 	struct obs_source_frame *next_frame = source->async_frames.array[0];

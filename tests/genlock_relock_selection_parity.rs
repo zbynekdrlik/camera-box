@@ -21,7 +21,8 @@
 //! that silently passes when it never ran is worse than no test.
 
 use camera_box::genlock_backlog::{
-    relock_acquire_should_hold, relock_anchor_age_ns, relock_select_nearest, should_converge_phase,
+    n1_release_phase_step, relock_acquire_should_hold, relock_anchor_age_ns, relock_select_nearest,
+    should_converge_phase,
 };
 use std::fs;
 use std::path::PathBuf;
@@ -605,6 +606,173 @@ fn c_acquire_bracketing_gate_matches_the_rust_authority_1161() {
         diffs.is_empty(),
         "#1161: the vendored C ACQUIRE bracketing gate DIVERGED from the Tier-0 Rust authority on \
          {} of {} vectors — the deployed re-acquire is not the behaviour the unit tests cover:\n{}",
+        diffs.len(),
+        vs.len(),
+        diffs.join("\n")
+    );
+}
+
+/// #1355 — the SAME executable-parity discipline for the N==1 release-phase hysteresis step. Lifts
+/// the self-contained `genlock_n1_release_phase_step` helper VERBATIM from obs-source.c, compiles
+/// it standalone under `-Werror`, and requires byte-identical booleans from
+/// [`camera_box::genlock_backlog::n1_release_phase_step`] over a spread of vectors — a flipped
+/// comparison, a wrong `reserve + interval − budget` threshold, or a lost N==1 gate fails here in
+/// seconds rather than surviving to the rig.
+fn lift_n1_phase_step_helper() -> String {
+    let path = repo(OBS_SOURCE);
+    let src = fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+    let start = src
+        .find("static inline bool genlock_n1_release_phase_step(")
+        .unwrap_or_else(|| {
+            panic!(
+                "#1355: {OBS_SOURCE} no longer defines genlock_n1_release_phase_step — the N==1 \
+                 release-phase hysteresis helper is gone, so there is nothing to check parity against."
+            )
+        });
+    let end = src[start..]
+        .find("\n}\n")
+        .map(|i| start + i + 3)
+        .expect("#1355: genlock_n1_release_phase_step has no closing brace");
+    src[start..end].to_string()
+}
+
+/// `(wall_now, boundary, latency_ms, interval, n, ticks_since_drain)`.
+fn n1_phase_step_vectors() -> Vec<(u64, u64, u32, u64, u32, u64)> {
+    let i30 = 33_333_333u64;
+    let i60 = 16_666_667u64;
+    let w = 1_000_000_000_000u64;
+    // budget = max(5 ms hysteresis, 15 ms jitter) = 15 ms; threshold = reserve + interval − budget.
+    let budget = 15_000_000u64;
+    let mut v: Vec<(u64, u64, u32, u64, u32, u64)> = vec![
+        // Held AT the configured latency (age == reserve) → inert (well below the whole-frame threshold).
+        (w, w - 963 * 1_000_000, 963, i30, 1, 100),
+        // Walked a full frame past the hold, throttle met → FIRES.
+        (w, w - (963 * 1_000_000 + i30), 963, i30, 1, 100),
+        // One ns OVER the threshold (reserve + interval − budget) → fires.
+        (
+            w,
+            w - (963 * 1_000_000 + i30 - budget + 1),
+            963,
+            i30,
+            1,
+            100,
+        ),
+        // Exactly AT the threshold → inert (strict >).
+        (w, w - (963 * 1_000_000 + i30 - budget), 963, i30, 1, 100),
+        // Throttle NOT met (29 < 30) at a firing age → inert.
+        (w, w - (963 * 1_000_000 + i30), 963, i30, 1, 29),
+        // Throttle exactly met (30).
+        (w, w - (963 * 1_000_000 + i30), 963, i30, 1, 30),
+        // Same firing age but N>=2 → inert (N>=2 is genlock_phase_converge_due's job).
+        (w, w - (963 * 1_000_000 + i30), 963, i30, 2, 100),
+        (w, w - (963 * 1_000_000 + i30), 963, i30, 3, 100),
+        // source_multiple 0 (never happens; must not fire — n != 1).
+        (w, w - (963 * 1_000_000 + i30), 963, i30, 0, 100),
+        // Degenerate interval → false.
+        (w, w - 500_000_000, 963, 0, 1, 100),
+        // Unlocked boundary → false.
+        (w, 0, 963, i30, 1, 100),
+        // Boundary ahead of wall (age saturates to 0) → inert.
+        (w, w + i30, 963, i30, 1, 100),
+        // A 60fps-interval source at N==1 (unusual but must not panic / must be threshold-consistent).
+        (w, w - (20 * 1_000_000 + i60), 20, i60, 1, 100),
+        // A shallow prod pin (3 ms) walked a frame → fires; held → inert.
+        (w, w - (3 * 1_000_000 + i30), 3, i30, 1, 100),
+        (w, w - (3 * 1_000_000), 3, i30, 1, 100),
+    ];
+    // A deterministic LCG spread over the argument space.
+    let mut x: u64 = 0x0abc_def0_1234_5678;
+    for _ in 0..120 {
+        x = x
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        let latency = ((x >> 20) % 1200) as u32;
+        let interval = if x & 1 == 0 { i30 } else { i60 };
+        let n = ((x >> 3) % 4) as u32; // 0..3 (exercises the N==1 gate both ways)
+        let ticks = (x >> 7) % 60;
+        let over = (x >> 40) % 3 * interval; // 0, 1 or 2 frames over the hold
+        let boundary = w.saturating_sub(latency as u64 * 1_000_000 + over + (x >> 50) % 4_000_000);
+        v.push((w, boundary, latency, interval, n, ticks));
+    }
+    v
+}
+
+#[test]
+fn c_n1_release_phase_step_matches_the_rust_authority_1355() {
+    let helper = lift_n1_phase_step_helper();
+    let vs = n1_phase_step_vectors();
+
+    // Lift the constants from the SHIPPED C, never hard-code them.
+    let mut c = format!(
+        "#include <stdint.h>\n#include <stddef.h>\n#include <stdbool.h>\n#include <stdio.h>\n{}\n{}\n{}\n",
+        lift_define("GENLOCK_PHASE_PIN_HYSTERESIS_NS"),
+        lift_define("GENLOCK_DRAIN_MIN_TICK_INTERVAL"),
+        lift_define("GENLOCK_N2_JITTER_BUDGET_NS"),
+    );
+    c.push_str(&helper);
+    c.push_str("int main(void){\n");
+    for (wall, boundary, latency, interval, n, ticks) in &vs {
+        c.push_str(&format!(
+            "    printf(\"%d\\n\", genlock_n1_release_phase_step({wall}ULL, {boundary}ULL, \
+             {latency}, {interval}ULL, {n}, {ticks}ULL));\n"
+        ));
+    }
+    c.push_str("    return 0;\n}\n");
+
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("genlock_n1_phase_step_parity_1355");
+    fs::create_dir_all(&dir).expect("create the parity scratch dir");
+    let cfile = dir.join("n1_step.c");
+    let bin = dir.join("n1_step.bin");
+    fs::write(&cfile, &c).expect("write the parity harness");
+
+    let cc = std::env::var("CC").unwrap_or_else(|_| "cc".to_string());
+    let out = Command::new(&cc)
+        .args(["-std=gnu99", "-Wall", "-Wextra", "-Werror", "-O1"])
+        .arg(&cfile)
+        .arg("-o")
+        .arg(&bin)
+        .output()
+        .unwrap_or_else(|e| {
+            panic!(
+                "#1355: could not run the C compiler `{cc}` ({e}). This gate compiles the vendored \
+                 genlock_n1_release_phase_step to prove the C and the Rust authority agree; it must \
+                 FAIL rather than skip when the toolchain is absent. Install a C compiler or set CC."
+            )
+        });
+    assert!(
+        out.status.success(),
+        "#1355: genlock_n1_release_phase_step lifted from {OBS_SOURCE} does NOT COMPILE standalone \
+         under -Wall -Wextra -Werror:\n--- cc stderr ---\n{}\n--- harness ---\n{c}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let run = Command::new(&bin)
+        .output()
+        .expect("#1355: the compiled parity harness failed to execute");
+    let stdout = String::from_utf8(run.stdout).expect("harness stdout is utf-8");
+    let c_out: Vec<bool> = stdout.lines().map(|l| l.trim() == "1").collect();
+    assert_eq!(
+        c_out.len(),
+        vs.len(),
+        "#1355: harness printed the wrong count"
+    );
+
+    let mut diffs = Vec::new();
+    for (i, ((wall, boundary, latency, interval, n, ticks), got_c)) in
+        vs.iter().zip(&c_out).enumerate()
+    {
+        let got_rs = n1_release_phase_step(*wall, *boundary, *latency, *interval, *n, *ticks);
+        if got_rs != *got_c {
+            diffs.push(format!(
+                "  vector {i}: wall={wall} boundary={boundary} latency={latency} interval={interval} \
+                 n={n} ticks={ticks} -> C {got_c}, Rust {got_rs}"
+            ));
+        }
+    }
+    assert!(
+        diffs.is_empty(),
+        "#1355: the vendored C N==1 release-phase step DIVERGED from the Tier-0 Rust authority on \
+         {} of {} vectors — the deployed shed is not the behaviour the unit tests cover:\n{}",
         diffs.len(),
         vs.len(),
         diffs.join("\n")

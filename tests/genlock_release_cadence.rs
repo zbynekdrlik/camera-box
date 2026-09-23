@@ -536,6 +536,32 @@ fn phase_convergence_present_and_wired_in_1049() {
     );
 }
 
+/// #1355 — the N==1 RELEASE-PHASE HYSTERESIS step must be PRESENT (the pure decision + its source
+/// wrapper) and WIRED into the release tail, or the deep N==1 A/V walk (issue 1355, `NDI 2ME PGM`)
+/// returns: the deep N==1 conveyor's only shed becomes the #859 depth drain with its 2-frame
+/// hysteresis again. Numeric C↔Rust correctness is proven by
+/// `tests/genlock_relock_selection_parity.rs::c_n1_release_phase_step_matches_the_rust_authority_1355`;
+/// this guards that a subtree pull / refactor cannot silently drop or un-CALL it (dead code).
+#[test]
+fn n1_release_phase_step_present_and_wired_1355() {
+    let src = squish(&vendor_file(OBS_SOURCE));
+    assert!(
+        src.contains("static inline bool genlock_n1_release_phase_step("),
+        "{OBS_SOURCE}: #1355 — the pure N==1 release-phase step genlock_n1_release_phase_step is \
+         gone; the deep N==1 conveyor's only shed is the #859 depth drain again and the A/V level \
+         walks. Mirror: src/genlock_backlog.rs n1_release_phase_step."
+    );
+    assert!(
+        src.contains("static bool genlock_should_n1_release_phase_step("),
+        "{OBS_SOURCE}: #1355 — the source wrapper genlock_should_n1_release_phase_step is gone."
+    );
+    assert!(
+        src.contains("genlock_should_n1_release_phase_step(source, reserve_ms, interval, wall_now)"),
+        "{OBS_SOURCE}: #1355 — genlock_should_n1_release_phase_step is defined but no longer CALLED \
+         from the release tail; the N==1 phase step would be dead code and the A/V level would walk."
+    );
+}
+
 /// Structural check: within the #1049 converge block, the FIRST `da_erase` erases index 0.
 fn raw_converge_erases_index_zero(raw: &str) -> bool {
     let Some(pos) =

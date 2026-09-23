@@ -190,6 +190,9 @@ jobs:
           if ($src -notmatch [regex]::Escape('if (n < 2) return false;')) { Write-Error "the N>=2-only gate (if (n < 2) return false;) is gone — convergence would limit-cycle on a deep N==1 source (stream NDI 2ME PGM) (#1049)"; exit 1 }
           if ($src -notmatch [regex]::Escape('static bool genlock_should_converge_phase(')) { Write-Error "the source wrapper genlock_should_converge_phase is gone (#1049)"; exit 1 }
           if ($src -notmatch [regex]::Escape('genlock_should_converge_phase(source, reserve_ms, interval, wall_now)')) { Write-Error "genlock_should_converge_phase is defined but no longer CALLED from the release tail — dead code, the phase never converges (#1049)"; exit 1 }
+          if ($src -notmatch [regex]::Escape('static inline bool genlock_n1_release_phase_step(')) { Write-Error "the pure N==1 release-phase step genlock_n1_release_phase_step is gone — the deep N==1 A/V level walks again (#1355)"; exit 1 }
+          if ($src -notmatch [regex]::Escape('static bool genlock_should_n1_release_phase_step(')) { Write-Error "the source wrapper genlock_should_n1_release_phase_step is gone (#1355)"; exit 1 }
+          if ($src -notmatch [regex]::Escape('genlock_should_n1_release_phase_step(source, reserve_ms, interval, wall_now)')) { Write-Error "genlock_should_n1_release_phase_step is defined but no longer CALLED from the release tail — dead code, the deep N==1 A/V level walks (#1355)"; exit 1 }
           if ($src -notmatch [regex]::Escape('bool converge_eligible = false;')) { Write-Error "the converge_eligible gate is gone from genlock_release_tick (#1049)"; exit 1 }
           $elig = ([regex]::Matches($src, [regex]::Escape('converge_eligible = true;'))).Count
           if ($elig -ne 2) { Write-Error "expected BOTH STEADY branches (N==1 and N>=2) to set converge_eligible, found $elig (#1049)"; exit 1 }
