@@ -64,6 +64,12 @@ COMPANION_HOST_IP="${COMPANION_HOST_IP:-}"
 step() { echo -e "${GREEN}[$1/${TOTAL_STEPS}] $2${NC}"; }
 fail() { echo -e "${RED}FAIL: $1${NC}" >&2; exit 1; }
 
+# issue 1357: the shared OBS-box appliance baseline (the box-level steps below call it; setup-strih.sh
+# sources the same lib). Sourced BEFORE the source guard so the imag_* helper wrappers resolve when
+# this file is sourced by the unit tests, verify-imag.sh and recording-e2e.sh too.
+# shellcheck source=scripts/lib/obs-box-baseline.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/obs-box-baseline.sh"
+
 # --- PURE functions (no network, no root, no side effects — sourced + unit-tested from
 # tests/setup_imag_pure_functions.rs against synthetic fixtures; the BASH_SOURCE guard below
 # skips the destructive provisioning flow when sourced) ---------------------------------------
@@ -129,63 +135,14 @@ genlock_write_markers() {
     return 0
 }
 
-# imag_cpu_isolation_plan  (stdin: one "CPU SIBLINGS_LIST" line per logical CPU, numerically
-# ordered — i.e. cpuN + the contents of its topology/thread_siblings_list) -> THREE lines:
-#   1. the CPUs to ISOLATE for the OBS thread pool   (isolcpus=)
-#   2. the CPUs to run tickless                      (nohz_full=)
-#   3. the CPUs left for housekeeping                (irqaffinity=)
-#
-# #483 tuned these by hand on the original 16-thread notebook (6 SMT P-cores + 4 E-cores) and
-# BAKED THE RESULT IN AS LITERALS. #816 derives the same decision from the topology instead, so a
-# replacement notebook with a different core count is provisioned correctly rather than being
-# handed CPU numbers it does not have. The decision itself is UNCHANGED and reproduces the old
-# box's values byte-for-byte:
-#   - an SMT-PAIRED CPU is a P-core thread, an UNPAIRED one is an E-core (verified live on both
-#     boxes via thread_siblings_list, never lscpu's flat count);
-#   - P-core0 stays for openbox/Xorg + sshd/MCP, together with EVERY E-core -> housekeeping/IRQs;
-#   - every other P-core thread is isolated for OBS (~106 threads, ~3 cores of real work);
-#   - nohz_full covers ONLY the LAST isolated P-core pair — the one that hosts the SCHED_FIFO
-#     genlock render tick (#484). Spreading it over the whole block would remove load-balancing
-#     signal (#303).
-imag_cpu_isolation_plan() {
-    local cpu sibs i found
-    local -a pair_key=() pair_cpus=() ecores=()
-    while read -r cpu sibs; do
-        [ -n "$cpu" ] || continue
-        case "$sibs" in
-            *,*|*-*)                      # SMT-paired -> a P-core thread
-                found=-1
-                for i in "${!pair_key[@]}"; do
-                    if [ "${pair_key[$i]}" = "$sibs" ]; then found="$i"; break; fi
-                done
-                if [ "$found" -lt 0 ]; then
-                    pair_key+=("$sibs"); pair_cpus+=("$cpu")
-                else
-                    pair_cpus[$found]="${pair_cpus[$found]},$cpu"
-                fi
-                ;;
-            *) ecores+=("$cpu") ;;        # unpaired -> an E-core
-        esac
-    done
-    local n="${#pair_key[@]}"
-    [ "$n" -ge 3 ] || fail "imag_cpu_isolation_plan: found only $n SMT-paired P-core(s) — an imag box needs one for housekeeping plus at least two to isolate for the OBS thread pool"
-    local isolated=""
-    for ((i = 1; i < n; i++)); do
-        isolated="${isolated:+$isolated,}${pair_cpus[$i]}"
-    done
-    local house="${pair_cpus[0]}"
-    for i in "${ecores[@]+"${ecores[@]}"}"; do house="${house},${i}"; done
-    printf '%s\n%s\n%s\n' "$isolated" "${pair_cpus[$((n - 1))]}" "$house"
-}
+# imag_cpu_isolation_plan / imag_has_discrete_nvidia / imag_same_unit -- issue 1357: the
+# implementations moved VERBATIM into scripts/lib/obs-box-baseline.sh (as obs_box_cpu_isolation_plan /
+# obs_box_has_discrete_nvidia / obs_box_same_unit) so setup-strih.sh derives the SAME facts. These
+# imag_* names stay as the stable entry points verify-imag.sh / recording-e2e.sh / the unit tests call
+# (they source this file); see the lib for the decisions themselves (#483/#816/#823).
+imag_cpu_isolation_plan() { obs_box_cpu_isolation_plan "$@"; }
 
-# imag_has_discrete_nvidia  (stdin: `lspci -nn` output) -> exit 0 when a DISCRETE NVIDIA display
-# adapter is present, non-zero otherwise. #816: the NVIDIA driver step (#500) was mandatory and
-# fail-hard, which aborts provisioning on a perfectly good box that simply has no dGPU (the
-# replacement notebook is Intel-UHD-only). Match only real display-class devices so an NVIDIA
-# audio/USB function on the same card can never masquerade as a GPU.
-imag_has_discrete_nvidia() {
-    grep -Eiq '(vga compatible controller|3d controller|display controller).*nvidia'
-}
+imag_has_discrete_nvidia() { obs_box_has_discrete_nvidia "$@"; }
 
 # imag_pick_ndi_peer  (stdin: one "HOST STATUS" line per candidate, in preference order) -> the
 # first host whose STATUS is "up". Fails loud when none is reachable — provisioning cannot fetch
@@ -246,17 +203,7 @@ imag_require_tools() {
     [ -z "$missing" ] || fail "#822: required verification tool(s) not installed: ${missing} (apt-get install binutils) — refusing to run a check that cannot execute"
 }
 
-# imag_same_unit LINK UNIT -> exit 0 when LINK resolves to the SAME systemd unit file as UNIT.
-# #823: the old check compared `readlink -f <link>` against the LITERAL "/lib/systemd/system/
-# lightdm.service". On usrmerge Ubuntu /lib IS a symlink to /usr/lib, so readlink -f always answers
-# /usr/lib/... and the compare could never pass — a perfectly correct kiosk DM aborted provisioning
-# on its last assertion (.187, 2026-07-27). Canonicalise BOTH sides.
-imag_same_unit() {
-    local a b
-    a="$(readlink -f "$1" 2>/dev/null)" || return 1
-    b="$(readlink -f "$2" 2>/dev/null)" || return 1
-    [ -n "$a" ] && [ "$a" = "$b" ]
-}
+imag_same_unit() { obs_box_same_unit "$@"; }
 
 # imag_obs_base_plan CANDIDATE WANTED -> "apt" when the PPA still offers the wanted version,
 # "deb" when it has moved on (the superseded binary is still downloadable from Launchpad). Never
@@ -351,54 +298,11 @@ fi
 # =============================================================================
 step 2 "Network performance tuning (#486): sysctl + EEE off, flow-control advertised on the NDI NIC"
 # =============================================================================
-# imag aggregates 6x concurrent NDI 1080p60 streams over a single USB-ethernet NIC on stock
-# buffers/EEE — exactly the jitter the cam fleet already tuned away (setup-device.sh STEP 14).
-# Scoped to the ONE $NIC resolved in step 1 above — NOT a for-every-interface loop (imag also
-# carries Wi-Fi/other adapters that must stay untouched).
-cat > /etc/sysctl.d/99-network-performance.conf <<'EOF'
-# Network performance optimizations for low-latency streaming (mirrors setup-device.sh STEP 14)
-
-# Increase network buffer sizes
-net.core.rmem_max = 134217728
-net.core.wmem_max = 134217728
-net.core.rmem_default = 1048576
-net.core.wmem_default = 1048576
-net.core.netdev_max_backlog = 5000
-
-# TCP optimizations
-net.ipv4.tcp_rmem = 4096 1048576 134217728
-net.ipv4.tcp_wmem = 4096 1048576 134217728
-net.ipv4.tcp_congestion_control = bbr
-net.ipv4.tcp_fastopen = 3
-
-# Reduce latency
-net.ipv4.tcp_low_latency = 1
-net.ipv4.tcp_nodelay = 1
-
-# Disable IPv6 if not needed
-net.ipv6.conf.all.disable_ipv6 = 1
-net.ipv6.conf.default.disable_ipv6 = 1
-EOF
-sysctl -p /etc/sysctl.d/99-network-performance.conf 2>/dev/null || true
-
-# EEE (Green Ethernet) off + flow-control ADVERTISED (issue 1234), scoped to $NIC only. Two
-# mechanisms, belt-and-suspenders (some USB-ethernet chipsets don't implement these ioctls at
-# all — `|| true` throughout): (1) a networkd-dispatcher hook for interface-routable/hotplug
-# events, and (2) an immediate one-time apply now (re-applied at every boot via the governor
-# step's rc.local).
-mkdir -p /etc/networkd-dispatcher/routable.d
-cat > /etc/networkd-dispatcher/routable.d/optimize-nic <<NICEOF
-#!/bin/bash
-# Disable EEE (Green Ethernet); advertise flow control for low latency (issue 1234) — scoped to imag's NDI NIC only.
-if [ "\$IFACE" = "${NIC}" ]; then
-    ethtool --set-eee "${NIC}" eee off 2>/dev/null || true
-    ethtool -A "${NIC}" rx on tx on 2>/dev/null || true
-fi
-NICEOF
-chmod +x /etc/networkd-dispatcher/routable.d/optimize-nic
-ethtool --set-eee "$NIC" eee off 2>/dev/null || true
-ethtool -A "$NIC" rx on tx on 2>/dev/null || true
-echo "  sysctl: buffers+BBR+nodelay+IPv6-off applied; EEE off, flow-control advertised on $NIC"
+# issue 1357: this step's body moved VERBATIM into the shared OBS-box appliance baseline
+# (scripts/lib/obs-box-baseline.sh) -- setup-strih.sh runs the SAME function, so the two boxes can
+# never diverge again. Box facts are its arguments; with these imag values it writes exactly what
+# this step always wrote.
+obs_box_network_tuning "$NIC" imag
 
 # =============================================================================
 step 3 "DanteSync (#479): pin imag's system clock to the cluster master (genlock needs it)"
@@ -575,271 +479,56 @@ echo "  dantesync locked to strih.lan via $NIC (timesyncd masked)"
 # =============================================================================
 step 4 "Max performance: governor + no USB/NIC powersave (USB-ethernet feeds the NDI!)"
 # =============================================================================
-cat > /etc/systemd/system/cpu-performance.service <<'EOF'
-[Unit]
-Description=Set CPU governor to performance
-After=multi-user.target
-[Service]
-Type=oneshot
-ExecStart=/bin/sh -c 'for g in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do echo performance > "$g"; done'
-[Install]
-WantedBy=multi-user.target
-EOF
-cat > /etc/rc.local <<EOF
-#!/bin/bash
-# imag-nb boot tuning (fleet parity): governor + USB autosuspend off (USB NIC!) + NIC powersave off
-for g in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do echo performance > "\$g"; done
-for u in /sys/bus/usb/devices/*/power/control; do echo on > "\$u" 2>/dev/null; done
-for n in /sys/class/net/*/device/power/control; do echo on > "\$n" 2>/dev/null; done
-# #486/#1234: EEE off, flow-control advertised on the rig NDI NIC — reapplied every boot
-# (belt-and-suspenders alongside step 2's networkd-dispatcher hook; some USB-ethernet
-# chipsets reset EEE/pause state on power cycle).
-ethtool --set-eee ${NIC} eee off 2>/dev/null || true
-ethtool -A ${NIC} rx on tx on 2>/dev/null || true
-exit 0
-EOF
-chmod +x /etc/rc.local
-systemctl daemon-reload
-systemctl enable --now cpu-performance.service >/dev/null 2>&1
-bash /etc/rc.local
-grep -q performance /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor || fail "governor not performance"
+# issue 1357: this step's body moved VERBATIM into the shared OBS-box appliance baseline
+# (scripts/lib/obs-box-baseline.sh) -- setup-strih.sh runs the SAME function, so the two boxes can
+# never diverge again. Box facts are its arguments; with these imag values it writes exactly what
+# this step always wrote.
+obs_box_max_performance "$NIC" imag
 
 # =============================================================================
 step 5 "Never sleep: lid ignore + power/suspend/hibernate key ignore (#727) + sleep masked + idle/blank/lock off (openbox: xset in the step-16 autostart; the gsettings below apply while GNOME is still installed on THIS run — they become no-ops once step 15 purges it later in the same run, and on any subsequent re-run)"
 # =============================================================================
-mkdir -p /etc/systemd/logind.conf.d
-cat > /etc/systemd/logind.conf.d/99-imag-no-sleep.conf <<'EOF'
-[Login]
-HandleLidSwitch=ignore
-HandleLidSwitchExternalPower=ignore
-HandleLidSwitchDocked=ignore
-IdleAction=ignore
-EOF
-# #727: imag-nb is a PRODUCTION device — a short accidental power-button press
-# suspended/shut it down during the 2026-07-12 live event. Mirrors setup-device.sh's
-# STEP 12 fleet convention (HandlePowerKey/HandleSuspendKey/HandleHibernateKey=ignore)
-# in a separate drop-in, matching the file already hand-applied live on the box.
-cat > /etc/systemd/logind.conf.d/99-production-no-powerkey.conf <<'EOF'
-[Login]
-HandlePowerKey=ignore
-HandleSuspendKey=ignore
-HandleHibernateKey=ignore
-HandleLidSwitch=ignore
-HandleLidSwitchExternalPower=ignore
-EOF
-systemctl mask sleep.target suspend.target hibernate.target hybrid-sleep.target >/dev/null 2>&1 || true
-systemctl restart systemd-logind
-UBUS="unix:path=/run/user/$(id -u $DESKTOP_USER)/bus"
-# #1182: is the desktop user's systemd USER MANAGER bus up? It lives at /run/user/<uid>/bus and
-# exists only once that user has a live login session (the kiosk lightdm autologin) or lingering.
-# On a from-scratch box provisioned detached, BEFORE the first kiosk boot, it does NOT exist yet,
-# so any `sudo -u "$DESKTOP_USER" ... systemctl --user ...` dies "Failed to connect to bus:
-# Connection refused". Steps 21/27 gate their `systemctl --user` half on this and DEFER to the
-# first kiosk boot when it is absent -- the direct structural analogue of step 17's dead-:0 gate
-# ([ -S /tmp/.X11-unix/X0 ] -> defer the OBS launch to the next boot).
-user_bus_alive() { [ -S "/run/user/$(id -u "$DESKTOP_USER")/bus" ]; }
-gs() { sudo -u "$DESKTOP_USER" DBUS_SESSION_BUS_ADDRESS="$UBUS" gsettings set "$@" 2>/dev/null || true; }
-gs org.gnome.desktop.session idle-delay 0
-gs org.gnome.settings-daemon.plugins.power sleep-inactive-ac-type "'nothing'"
-gs org.gnome.settings-daemon.plugins.power sleep-inactive-battery-type "'nothing'"
-gs org.gnome.desktop.screensaver lock-enabled false
-gs org.gnome.desktop.screensaver idle-activation-enabled false
+# issue 1357: this step's body moved VERBATIM into the shared OBS-box appliance baseline
+# (scripts/lib/obs-box-baseline.sh) -- setup-strih.sh runs the SAME function, so the two boxes can
+# never diverge again. Box facts are its arguments; with these imag values it writes exactly what
+# this step always wrote.
+# It also exports UBUS (the desktop user's session bus) that steps 16/17/21/27 below reuse.
+obs_box_never_sleep "$DESKTOP_USER" imag
 
 # =============================================================================
 step 6 "Boot safety net (#487): kernel apt-hold + initrd-guarantee hook + unattended-upgrade lockdown"
 # =============================================================================
-# Ports setup-device.sh's #295 brick-prevention stack onto imag-nb, run BEFORE the lowlatency
-# kernel (#482) and CPU-isolation (#483) grub.d drops below so both are safe to apply: a kernel
-# that silently gains a new image via unattended-upgrades, or one whose initrd never got generated
-# before grub picked it as the default, is exactly what bricked CAM3/CAM4 (#295). Unlike the cam
-# fleet's appliance policy (setup-device.sh STEP 15 fully disables unattended-upgrades), imag does
-# NOT disable it wholesale — step 14 below deliberately keeps security updates flowing (only their
-# schedule is pinned, #485). So here we pin the KERNEL specifically (apt-mark hold + an
-# Unattended-Upgrade package-blacklist entry) and lock Automatic-Reboot to false, rather than
-# masking the whole service.
-# Found in review: a bare `cmd || echo WARNING` is correctly non-fatal, but the step's closing
-# summary echo below must NOT unconditionally claim "kernel pinned" when the hold actually
-# failed -- track the real outcome so the summary line reflects reality instead of asserting
-# success next to (or instead of) the WARNING.
-KERNEL_HOLD_OK=1
-# #820: hold ONLY packages this box actually has installed. Holding a NOT-installed name is not a
-# no-op — apt then refuses any later install that would pull it in, and step 7's
-# linux-lowlatency-hwe-24.04 depends on exactly these HWE packages ("E: Held packages were changed
-# and -y was used without --allow-change-held-packages"). Provisioning held itself out of its own
-# next step on the replacement notebook (.187, 2026-07-27).
-KERNEL_HOLD_PKGS=()
-for p in linux-image-generic-hwe-24.04 linux-headers-generic-hwe-24.04 linux-generic-hwe-24.04 \
-    "linux-headers-$(uname -r)" "linux-image-$(uname -r)"; do
-    dpkg -s "$p" >/dev/null 2>&1 && KERNEL_HOLD_PKGS+=("$p")
-done
-if [ "${#KERNEL_HOLD_PKGS[@]}" -eq 0 ]; then
-    KERNEL_HOLD_OK=0
-    echo "  WARNING: no installed generic-kernel package found to hold — kernel NOT pinned"
-else
-    apt-mark hold "${KERNEL_HOLD_PKGS[@]}" >/dev/null 2>&1 \
-        || { KERNEL_HOLD_OK=0; echo "  WARNING: apt-mark hold of the generic kernel packages failed"; }
-fi
-cat > /etc/apt/apt.conf.d/51imag-kernel-lockdown <<'EOF'
-// #487: the kernel is pinned (apt-mark hold) -- never let unattended-upgrades touch it, and never
-// let it reboot the box unattended. Automatic-Reboot is already Ubuntu's default (false); pinning
-// it here explicitly means a future distro/package default change can never silently flip it.
-Unattended-Upgrade::Package-Blacklist {
-    "linux-image";
-    "linux-headers";
-    "linux-generic";
-    "linux-lowlatency";
-    "lowlatency-kernel";
-};
-Unattended-Upgrade::Automatic-Reboot "false";
-EOF
-# #295: any FUTURE kernel install must always get an initrd. This /etc/kernel/postinst.d hook sorts
-# before grub's own `zz-update-grub` hook, so a missing initrd is regenerated BEFORE grub is
-# updated -- identical mechanism to setup-device.sh STEP 15/16, ported here verbatim.
-mkdir -p /etc/kernel/postinst.d
-cat > /etc/kernel/postinst.d/zz-camera-box-initrd-guarantee << 'EOF'
-#!/bin/sh
-# #295/#487: guarantee every installed kernel has an initrd (a kernel without one bricked
-# CAM3/CAM4 on the fleet -- the same class of failure this hook prevents on imag-nb).
-set -e
-version="$1"
-[ -n "$version" ] || exit 0
-if [ ! -e "/boot/initrd.img-${version}" ]; then
-    update-initramfs -c -k "${version}"
-fi
-EOF
-chmod +x /etc/kernel/postinst.d/zz-camera-box-initrd-guarantee
-if [ "$KERNEL_HOLD_OK" -eq 1 ]; then
-    echo "  #487: kernel pinned (apt-mark hold), unattended-upgrades kernel-blacklisted + Automatic-Reboot=false, initrd hook installed"
-else
-    echo "  #487: unattended-upgrades kernel-blacklisted + Automatic-Reboot=false, initrd hook installed -- kernel apt-mark hold FAILED, see WARNING above"
-fi
-
-# safe_grub_regen -- the #295 safe-grub mechanism (side-effecting: root + filesystem, so this
-# does NOT belong in the pure-functions section at the top of this file). GUARANTEES every
-# installed kernel has an initrd BEFORE update-grub runs (a kernel without one bricked CAM3/CAM4,
-# #295), then refuses to trust the regenerated grub.cfg if its default menu entry lacks a kernel
-# image or an initrd -- never a raw ad-hoc grub edit. Reused by BOTH the #482 (lowlatency/
-# preempt=full) and #483 (CPU isolation) grub.d drops below, called ONCE after both are written so
-# update-grub only runs a single time for this pair of changes. Mirrors setup-device.sh STEP 10's
-# initrd-guarantee + post-update-grub validation.
-safe_grub_regen() {
-    for vmlinuz in /boot/vmlinuz-*; do
-        [ -e "$vmlinuz" ] || continue
-        kver="${vmlinuz#/boot/vmlinuz-}"
-        if [ ! -e "/boot/initrd.img-${kver}" ]; then
-            echo -e "  ${YELLOW}#295: kernel ${kver} has no initrd — generating before grub${NC}"
-            update-initramfs -c -k "${kver}"
-        fi
-    done
-    update-grub
-    local grub_cfg="/boot/grub/grub.cfg"
-    if [ -f "$grub_cfg" ]; then
-        local default_entry
-        default_entry="$(awk '/^[[:space:]]*menuentry /{c++} c==1{print} c==2{exit}' "$grub_cfg")"
-        if ! echo "$default_entry" | grep -qE '(vmlinuz|[[:space:]]linux )' \
-            || ! echo "$default_entry" | grep -q 'initrd'; then
-            fail "#295: grub default entry lacks a kernel image or initrd — aborting to avoid a brick"
-        fi
-    fi
-}
+# issue 1357: this step's body moved VERBATIM into the shared OBS-box appliance baseline
+# (scripts/lib/obs-box-baseline.sh) -- setup-strih.sh runs the SAME function, so the two boxes can
+# never diverge again. Box facts are its arguments; with these imag values it writes exactly what
+# this step always wrote.
+# The kernel SERIES (24.04 on imag) is derived from /etc/os-release, not hard-coded -- the boot-safety
+# hold and step 7's lowlatency meta package are named by it. safe_grub_regen (#295) moved with it.
+IMAG_KERNEL_SERIES="$(obs_box_kernel_series)" \
+    || fail "#487: cannot derive the Ubuntu release series from /etc/os-release -- refusing to hold/install kernel packages by a guessed name"
+obs_box_boot_safety_net "$IMAG_KERNEL_SERIES" imag
 
 # =============================================================================
 step 7 "Low-latency kernel (#482): preempt=full via lowlatency-kernel config — zero downgrade"
 # =============================================================================
-# LIVE-VERIFIED FINDING (#482): there is NO lowlatency kernel IMAGE at the 6.17 line (the newest
-# lowlatency images are 6.8/6.11 -- installing one would be a DOWNGRADE, losing 13th-gen
-# CPU/iGPU/USB-NIC support). But the 6.17 generic kernel already IS PREEMPT_DYNAMIC, so
-# linux-lowlatency-hwe-24.04 on 24.04 is a META package: it keeps the generic kernel image and
-# only pulls in the `lowlatency-kernel` CONFIG package, which drops
-# /etc/default/grub.d/99-lowlatency.cfg = GRUB_CMDLINE_LINUX_DEFAULT="... preempt=full
-# rcu_nocbs=all" -- full preemption on the NEWEST kernel, zero downgrade. This is a plain apt
-# install (not a hand-authored grub.d file), so it needs no idempotent-append logic of its own --
-# `apt-get install` on an already-installed package is already a no-op.
-if ! dpkg -s lowlatency-kernel >/dev/null 2>&1; then
-    apt-get update -qq
-    # #820: --allow-change-held-packages so step 6's own kernel hold can never block this install
-    # (the lowlatency meta depends on the very HWE packages step 6 pins). Step 6 re-holds nothing
-    # here; the hold is restored on the next provisioning pass, and the lowlatency packages get
-    # their own hold right below.
-    DEBIAN_FRONTEND=noninteractive apt-get install -y --allow-change-held-packages linux-lowlatency-hwe-24.04 >/dev/null \
-        || fail "linux-lowlatency-hwe-24.04 install failed"
-fi
-[ -f /etc/default/grub.d/99-lowlatency.cfg ] \
-    || fail "#482: lowlatency-kernel config package installed but /etc/default/grub.d/99-lowlatency.cfg is missing"
-grep -q 'preempt=full' /etc/default/grub.d/99-lowlatency.cfg \
-    || fail "#482: 99-lowlatency.cfg does not carry preempt=full — refuse to trust the config package"
-# #487: never a raw ad-hoc grub edit -- hold the newly-installed kernel-config packages too, same
-# as the generic kernel packages held in step 6, so an upgrade can't silently swap this config out.
-apt-mark hold lowlatency-kernel linux-lowlatency-hwe-24.04 >/dev/null 2>&1 \
-    || echo "  WARNING: apt-mark hold of the lowlatency-kernel config packages failed"
-echo "  #482: lowlatency-kernel config installed (preempt=full on the 6.17 generic kernel, no downgrade)"
-echo "  NOTE: preempt=full takes effect on the NEXT boot — this script does not reboot the box"
+# issue 1357: this step's body moved VERBATIM into the shared OBS-box appliance baseline
+# (scripts/lib/obs-box-baseline.sh) -- setup-strih.sh runs the SAME function, so the two boxes can
+# never diverge again. Box facts are its arguments; with these imag values it writes exactly what
+# this step always wrote.
+obs_box_lowlatency_kernel "$IMAG_KERNEL_SERIES"
 
 # =============================================================================
 step 8 "CPU affinity (#483/#842): P-core block reserved for OBS -- AFFINITY-ONLY, no kernel isolcpus"
 # =============================================================================
-# #842 (recurrence of #784, live-diagnosed 2026-07-28): isolcpus= REMOVES the listed CPUs from the
-# kernel scheduler's load-balancing DOMAINS -- it exists for explicit PER-THREAD pinning, never
-# for handing a whole range mask to a many-threaded process. imag's OBS is a ~106-119-thread
-# consumer (6x NDI decode + render + genlock + audio); under the OLD isolcpus=<block> cmdline the
-# scheduler placed 114 of those 119 threads on ONE core while the other isolated cores sat at 0%
-# busy -- NDI receive dropped from 60fps to ~53fps with 7-10 underruns/s (measured on 10.77.9.187;
-# identical signature to #784's original 2026-07-15 finding on the incumbent .182 box, hand-fixed
-# there by deleting this exact grub.d drop-in -- a fix that was never ported to THIS script, so
-# #816's topology-derived rewrite reproduced the defect verbatim on the replacement notebook).
-#
-# FIX: stop writing isolcpus=/nohz_full=/irqaffinity= to the kernel cmdline AT ALL. The taskset
-# AFFINITY pin below (the persisted-config file consumed by imag-obs-start.sh's
-# `taskset -c "$IMAG_ISOLATED_CPUS"`) is UNCHANGED and stays -- a plain CPU affinity mask
-# restricts WHICH cores a process may run on but does NOT remove those cores from the scheduler's
-# load-balancing domain, so threads still migrate freely WITHIN the mask. Live-verified after a
-# real reboot with a clean cmdline: threads spread 19/16/24/26/12/17 across cpu2-7, receive back
-# to 60.15-60.20fps / 0-2 underruns -- identical to .182. Restricting OBS to 6 cores is harmless;
-# *isolating* them is what broke it.
-#
-# nohz_full/irqaffinity are DROPPED TOO, not kept as a partial config -- deliberate decision (see
-# the #842 design comment on the issue for the full reasoning): both existed ONLY in service of
-# the isolation scheme. nohz_full was scoped to the one core pair meant to host a FUTURE SCHED_FIFO
-# genlock render-tick thread (#483/#484); irqaffinity pushed default IRQ affinity off the isolated
-# block. That render-tick thread does not exist today (its pin, when it ships, requests SCHED_FIFO
-# via sched_setscheduler() + an rtprio ulimit grant below -- neither needs a kernel-cmdline flag).
-# Keeping either as a stray, unpaired cmdline token once isolcpus is gone would be exactly the
-# "half-finished polotovar" #784 already called out ("izolácia... LEN s explicitným per-thread
-# pinningom") -- if/when the SCHED_FIFO pin needs kernel-level tick support, that is its OWN new,
-# explicit, tested design, not a leftover flag surviving this fix.
-#
-# `imag_cpu_isolation_plan` is UNCHANGED -- its ISOLATED output is still the affinity mask; its
-# nohz_full/housekeeping outputs go unused now (no cmdline write consumes them). HT pairs verified
-# LIVE via thread_siblings_list (not lscpu's flat count): cpu0=0-1, cpu2=2-3, cpu4=4-5, cpu6=6-7,
-# cpu8=8-9, cpu10=10-11 (all P-core HT pairs), cpu12-15 = E-cores (no HT pairing).
-IMAG_ISOLATION_PLAN="$(
-    for f in /sys/devices/system/cpu/cpu[0-9]*/topology/thread_siblings_list; do
-        [ -r "$f" ] || continue
-        c="${f#/sys/devices/system/cpu/cpu}"; c="${c%%/*}"
-        printf '%s %s\n' "$c" "$(cat "$f")"
-    done | sort -n -k1,1 | imag_cpu_isolation_plan
-)" || exit 1
-IMAG_ISOLATED_CPUS="$(printf '%s\n' "$IMAG_ISOLATION_PLAN" | sed -n 1p)"
-[ -n "$IMAG_ISOLATED_CPUS" ] \
-    || fail "#816: could not derive the CPU affinity plan from this box's topology"
-# #841: persist the SAME derived value imag-obs-start.sh falls back to for a manual "Spustit OBS"
-# invocation (no IMAG_ISOLATED_CPUS env set) -- ONE source of truth for the taskset affinity pin,
-# the boot autostart's env export (step 16), and the wrapper's own fallback. Never a second
-# hardcoded literal in the wrapper.
-printf '%s\n' "$IMAG_ISOLATED_CPUS" > /etc/imag-isolated-cpus.conf
-# #842 self-heal: a leftover kernel-isolation grub.d drop-in from a previous provisioning run (or
-# a hand-applied #483/#816-era config) must be removed and grub regenerated -- the same self-heal
-# discipline every other drift-prone config in this script already applies. This also covers the
-# case where a box is being RE-provisioned after previously carrying the #842 defect.
-if [ -f /etc/default/grub.d/98-imag-isolation.cfg ]; then
-    echo -e "  ${YELLOW}#842: removing leftover /etc/default/grub.d/98-imag-isolation.cfg -- kernel isolcpus/nohz_full is the #784/#842 regression, affinity-only pin stays${NC}"
-    rm -f /etc/default/grub.d/98-imag-isolation.cfg
-    # #295/#487: never a raw ad-hoc grub edit -- guarantee every kernel has an initrd, regenerate
-    # grub.cfg, then refuse to trust it if the default entry lacks a kernel image or an initrd.
-    safe_grub_regen
-    echo "  #842: leftover kernel-isolation drop-in removed + grub regenerated"
-fi
-echo "  #483/#842: OBS core reservation is AFFINITY-ONLY (taskset ${IMAG_ISOLATED_CPUS} via /etc/imag-isolated-cpus.conf) -- no kernel isolcpus/nohz_full/irqaffinity written"
+# issue 1357: this step's body moved VERBATIM into the shared OBS-box appliance baseline
+# (scripts/lib/obs-box-baseline.sh) -- setup-strih.sh runs the SAME function, so the two boxes can
+# never diverge again. Box facts are its arguments; with these imag values it writes exactly what
+# this step always wrote.
+# obs_box_cpu_affinity derives the AFFINITY-ONLY P-core block from this box's topology (#483/#842),
+# persists it to /etc/imag-isolated-cpus.conf and self-heals a leftover 98-imag-isolation.cfg.
+obs_box_cpu_affinity imag
+# #841: the SAME derived value feeds the boot autostart's env export (step 16) and step 17's launch.
+IMAG_ISOLATED_CPUS="$OBS_BOX_ISOLATED_CPUS"
 
 # camera-box #484: grant the desktop user rtprio so OBS's genlock render-tick pin can go SCHED_FIFO.
 # The #484 pin (vendor/obs-studio/libobs/obs-video.c) calls sched_setscheduler(SCHED_FIFO) on the ONE
@@ -861,130 +550,11 @@ echo "  NOTE: the rtprio grant applies at the next login session (next boot's au
 # =============================================================================
 step 9 "NVIDIA dGPU driver (#500): nvidia-driver-595-open + PRIME nvidia-primary"
 # =============================================================================
-# imag-nb's HDMI program-projector output is physically wired through the NVIDIA dGPU (an RTX
-# 5050 Laptop / Blackwell, PCI 10de:2dd8), NOT the Intel iGPU -- live-verified: the HDMI connector
-# showed `disconnected` on every output until the dGPU was actually initialized. The PLAIN
-# proprietary `nvidia-driver-595` package does NOT init Blackwell (`NVRM: RmInitAdapter failed!
-# (0x22:0x56:1017)`, live-reproduced on imag-nb) -- it needs the OPEN kernel-modules flavor.
-# `ubuntu-drivers devices` (live-checked on imag-nb) recommends plain `nvidia-driver-595` for this
-# PCI id -- that recommendation is WRONG for this GPU; the `-open` variant is the deliberate,
-# verified-working choice. `apt-cache search nvidia-driver` (live-checked) lists nothing newer
-# than the 595 line as of this writing. Driver-upgrade freedom is explicitly wanted by the user
-# ("pravdaze drivere musia byt upgradovane... nikto netvrdi ze musis pouzivat nejake stare lts") --
-# re-check `ubuntu-drivers devices` / `apt-cache search nvidia-driver` for a newer `-open` release
-# before reusing this pin verbatim; prefer the newest available `-open` flavor over 595 if one has
-# since shipped.
-# Found in review: a bare `dpkg -s <pkg> >/dev/null 2>&1` exit code alone is NOT a reliable
-# "is it installed" check — dpkg -s exits 0 even for a package that was `apt remove`d (not purged)
-# and now sits in "deinstall ok config-files" state (live-verified on this box: `dpkg -s
-# alsa-base` exits 0 with `Status: deinstall ok config-files`). If the driver package were ever
-# removed-not-purged between provisioning runs, that bare exit-code check would wrongly conclude
-# "already installed", skip the apt-get install, and still run prime-select + safe_grub_regen on a
-# box with no actual driver files. Check the Status field content instead (no `-q` on the piped
-# grep — dpkg -s output is tiny, but this matches the same safe-read convention used elsewhere in
-# this script rather than mixing conventions).
-# #816: the whole step is GATED on a discrete NVIDIA GPU actually being present. It was
-# mandatory + fail-hard, which aborts provisioning on a replacement notebook that simply has no
-# dGPU (live: the i5-13420H box is Intel-UHD-only). On such a box the HDMI program output is
-# driven by the iGPU directly — there is no PRIME to select and no driver to install.
-if ! lspci -nn | imag_has_discrete_nvidia; then
-    echo "  #816: no discrete NVIDIA GPU on this box — skipping the driver + PRIME step (iGPU drives HDMI directly)"
-    # #841: the incumbent box's anti-stutter display tuning (nvidia-settings
-    # ForceFullCompositionPipeline=On + GPUPowerMizerMode=1) is NVIDIA-only and has no direct
-    # counterpart here -- but "TearFree" (the naive intel-DDX-style analog) does NOT apply on
-    # THIS driver stack, confirmed LIVE on 10.77.9.187 rather than assumed: `Option "TearFree"
-    # "true"` under `Driver "modesetting"` produced the Xorg.0.log line
-    # `(WW) modeset(0): Option "TearFree" is not used`, and `strings modesetting_drv.so` contains
-    # no "TearFree"/"Tear" text at all -- TearFree is a feature of the LEGACY xf86-video-intel DDX
-    # (installed here but never
-    # matched -- Xorg autoconfigures the built-in `modesetting` driver for this PCI id, confirmed
-    # `(==) Matched modesetting as autoconfigured driver 0`), not of `modesetting`+glamor. Shipping
-    # a dead option would be exactly the cargo-culted-NVIDIA-semantics-onto-Intel mistake this
-    # ticket warns against, so it is NOT written. What this stack actually already provides
-    # tear-free, verified live in the SAME log: `Present`+`DRI3` init cleanly and
-    # `modeset(0): glamor X acceleration enabled`, with `PageFlip`/`Atomic` compiled into the
-    # driver (`strings` confirms) -- a full-screen client (the OBS Program projector, no
-    # compositor running) gets direct page-flipped scanout via Present by default, which is the
-    # real tear-free mechanism on this stack, not an xorg.conf.d option. VRR (`Option
-    # "VariableRefresh"`, also `strings`-confirmed real and X-property-visible as `VariableRefresh:
-    # disabled` in the log) was considered too, but the HDMI-1 projector output itself reports
-    # `vrr_capable: 0` (only the eDP-1 laptop panel does) -- not applicable to the affected output.
-    #
-    # The genuinely-applicable Intel/i915 equivalent to GPUPowerMizerMode=1 IS real: the iGPU
-    # actively DVFS-scales (gt_cur_freq_mhz observed cycling well below its own gt_RP0_freq_mhz
-    # ceiling under live 6-camera render load) -- the same ramp-hitch class of stutter
-    # GPUPowerMizerMode=1 avoids on NVIDIA. i915 has no PowerMizer; pin the frequency FLOOR to the
-    # hardware's own reported ceiling (gt_RP0_freq_mhz, never a hardcoded MHz literal -- a future
-    # Intel notebook's ceiling will differ) instead, so it stops idling down and ramping back up
-    # under load. Sysfs values reset on reboot, so this is reapplied every boot via a dedicated
-    # systemd oneshot unit, mirroring the existing cpu-performance.service convention (step 4)
-    # rather than a provisioning-time-only write.
-    cat > /usr/local/bin/imag-igpu-maxperf.sh <<'IGPU_EOF'
-#!/usr/bin/env bash
-# camera-box #841: pin the Intel iGPU's frequency floor to its own reported max (gt_RP0_freq_mhz)
-# so it never idles down and ramps back up under load -- the DVFS ramp-up is what caused the
-# intermittent stutter on fast motion in the fullscreen OBS Program projector (the same problem
-# GPUPowerMizerMode=1 solves on the NVIDIA box; i915 has no PowerMizer, but raising gt_min_freq to
-# the hardware's own real max gets the same "always at max clock" outcome). Runs at every boot
-# (systemd, root) because sysfs values reset on reboot -- never a hardcoded MHz literal, a future
-# Intel notebook's ceiling will differ.
-set -euo pipefail
-for card in /sys/class/drm/card[0-9]; do
-    [ -w "$card/gt_min_freq_mhz" ] || continue
-    max="$(cat "$card/gt_RP0_freq_mhz" 2>/dev/null)"
-    [ -n "$max" ] || continue
-    echo "$max" > "$card/gt_min_freq_mhz"
-    echo "$max" > "$card/gt_boost_freq_mhz" 2>/dev/null || true
-    echo "imag-igpu-maxperf: pinned $card gt_min_freq_mhz -> ${max}MHz (was DVFS-scaled down at idle)"
-    exit 0
-done
-echo "imag-igpu-maxperf: no writable i915 gt_min_freq_mhz sysfs node found -- nothing to pin" >&2
-exit 0
-IGPU_EOF
-    chmod 755 /usr/local/bin/imag-igpu-maxperf.sh
-    cat > /etc/systemd/system/imag-igpu-maxperf.service <<'SVC_EOF'
-[Unit]
-Description=camera-box #841: pin Intel iGPU to max frequency (avoid DVFS ramp stutter, imag HDMI program projector)
-After=multi-user.target
-
-[Service]
-Type=oneshot
-ExecStart=/usr/local/bin/imag-igpu-maxperf.sh
-RemainAfterExit=yes
-
-[Install]
-WantedBy=multi-user.target
-SVC_EOF
-    systemctl daemon-reload
-    systemctl enable --now imag-igpu-maxperf.service >/dev/null 2>&1 \
-        || echo "  WARNING: could not enable imag-igpu-maxperf.service"
-    echo "  #841: iGPU max-frequency-pin service provisioned (no xorg.conf.d change -- TearFree does not exist on this driver, live-verified; Present+PageFlip already gives tear-free full-screen scanout without a compositor)"
-elif ! dpkg -s nvidia-driver-595-open 2>/dev/null | grep '^Status: install ok installed' >/dev/null; then
-    apt-get update -qq
-    DEBIAN_FRONTEND=noninteractive apt-get install -y nvidia-driver-595-open >/dev/null \
-        || fail "nvidia-driver-595-open install failed"
-fi
-# PRIME nvidia-primary: on-demand PRIME mode left the HDMI dGPU output dead (live-verified) --
-# nvidia must be the PRIMARY renderer so BOTH the HDMI output and the laptop's own eDP panel run
-# on the RTX 5050.
-if lspci -nn | imag_has_discrete_nvidia; then
-    command -v prime-select >/dev/null 2>&1 || fail "prime-select missing after nvidia-driver-595-open install"
-    prime-select nvidia || fail "prime-select nvidia failed"
-fi
-# #295/#487: a DKMS driver install regenerates initramfs for the running kernel -- never trust
-# that blindly. Reuse the SAME safe_grub_regen helper the #482/#483 grub.d drops call above
-# (defined earlier in step 6): guarantee every kernel has an initrd, regenerate grub.cfg, and
-# refuse to trust it if the default entry lacks a kernel image or an initrd.
-safe_grub_regen
-if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L >/dev/null 2>&1; then
-    echo "  #500: nvidia-smi already enumerates: $(nvidia-smi -L | head -1)"
-else
-    echo "  #500: nvidia-smi not yet enumerating the GPU (expected pre-reboot on a fresh driver install)"
-fi
-if lspci -nn | imag_has_discrete_nvidia; then
-    echo "  #500: nvidia-driver-595-open installed, prime-select nvidia set, grub/initrd re-verified"
-    echo "  NOTE: the PRIME GPU mode + the new DKMS module take full effect on the NEXT boot — this script does not reboot the box"
-fi
+# issue 1357: this step's body moved VERBATIM into the shared OBS-box appliance baseline
+# (scripts/lib/obs-box-baseline.sh) -- setup-strih.sh runs the SAME function, so the two boxes can
+# never diverge again. Box facts are its arguments; with these imag values it writes exactly what
+# this step always wrote.
+obs_box_nvidia_prime imag
 
 # =============================================================================
 step 10 "NDI runtime 6.3.2 from ${NDI_PEER} -> ${NDI_DIR} (fleet-identical)"
@@ -1493,172 +1063,23 @@ fi
 # =============================================================================
 step 14 "Desktop de-jitter (#485): mask background jitter sources + OBS ProcessPriority=High"
 # =============================================================================
-# imag is a single-app OBS kiosk — no human ever browses, mails, or searches files on it. All
-# masks below are low-risk + reversible; security updates stay ON (only their SCHEDULE is
-# pinned, Automatic-Reboot is already false by Ubuntu default and is deliberately left untouched).
-
-# systemd-oomd: known to kill WHOLE GNOME sessions (incl. OBS) on transient PSI memory-pressure
-# spikes even with GB of RAM free — kernel OOM remains the real backstop.
-systemctl disable --now systemd-oomd.service systemd-oomd.socket >/dev/null 2>&1 || true
-systemctl mask systemd-oomd.service systemd-oomd.socket >/dev/null 2>&1 || true
-
-# File indexer + groupware factories: no files worth indexing, no mail/calendar account, ever.
-DESKTOP_UID="$(id -u "$DESKTOP_USER")"
-u_systemctl() {
-    sudo -u "$DESKTOP_USER" \
-        XDG_RUNTIME_DIR="/run/user/${DESKTOP_UID}" \
-        DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/${DESKTOP_UID}/bus" \
-        systemctl --user "$@" >/dev/null 2>&1 || true
-}
-u_systemctl mask tracker-miner-fs-3.service tracker-miner-fs-control-3.service \
-    tracker-writeback-3.service tracker-xdg-portal-3.service
-sudo -u "$DESKTOP_USER" tracker3 reset -s >/dev/null 2>&1 || true
-u_systemctl mask evolution-source-registry.service evolution-calendar-factory.service \
-    evolution-addressbook-factory.service evolution-user-prompter.service evolution-alarm-notify.service
-
-# apport/whoopsie: apport writes multi-GB core dumps right when OBS already crashed (worst-time
-# disk spike); whoopsie phones crash reports home — neither has value on a kiosk appliance.
-systemctl disable --now apport.service whoopsie.service >/dev/null 2>&1 || true
-systemctl mask apport.service whoopsie.service >/dev/null 2>&1 || true
-
-# snapd: hold auto-refresh forever (unused firefox/snap-store snaps) — a mid-service "restart to
-# update" banner popping over the fullscreen program output is the failure mode this avoids.
-snap refresh --hold=forever >/dev/null 2>&1 || true
-
-# apt-daily-upgrade.timer: pin the SCHEDULE to a fixed off-hours time via a drop-in — security
-# updates themselves stay fully enabled, never disabled here.
-mkdir -p /etc/systemd/system/apt-daily-upgrade.timer.d
-cat > /etc/systemd/system/apt-daily-upgrade.timer.d/imag-offhours.conf <<'EOF'
-[Timer]
-OnCalendar=
-OnCalendar=*-*-* 04:00
-RandomizedDelaySec=30min
-EOF
-systemctl daemon-reload
-systemctl restart apt-daily-upgrade.timer >/dev/null 2>&1 || true
-
-# GNOME animations off — one less compositor cost on the fullscreen program output.
-gs org.gnome.desktop.interface enable-animations false
-
-# OBS-native: ProcessPriority=High is OBS's own render-starvation knob (zero cost; ships Normal
-# by default). global.ini was just seeded above — flip the value in place if present, else
-# append a [General] section (same duplicate-section convention seed_ini already uses for
-# LastVersion; Qt's ini backend merges duplicate group headers).
-if grep -q '^ProcessPriority=' "$OBS_CFG/global.ini" 2>/dev/null; then
-    sed -i 's/^ProcessPriority=.*/ProcessPriority=High/' "$OBS_CFG/global.ini"
-else
-    printf '\n[General]\nProcessPriority=High\n' >> "$OBS_CFG/global.ini"
-fi
-chown "$DESKTOP_USER:$DESKTOP_USER" "$OBS_CFG/global.ini"
-echo "  de-jitter: oomd/tracker/evolution/apport/whoopsie masked, snapd held, apt-daily pinned 04:00, animations off, OBS ProcessPriority=High"
+# issue 1357: this step's body moved VERBATIM into the shared OBS-box appliance baseline
+# (scripts/lib/obs-box-baseline.sh) -- setup-strih.sh runs the SAME function, so the two boxes can
+# never diverge again. Box facts are its arguments; with these imag values it writes exactly what
+# this step always wrote.
+# issue 1357: the crash-popup item (apport + whoopsie + the 26.04 apport coredump-hook template masked,
+# systemd-coredump installed) rides with it -- on imag's 24.04 the hook template does not exist, so its
+# mask is a harmless /dev/null link.
+obs_box_dejitter "$DESKTOP_USER" imag "$OBS_CFG"
 
 # =============================================================================
 step 15 "Kiosk environment (#504): openbox+lightdm autologin, DM→lightdm, disable+purge GNOME"
 # =============================================================================
-# imag-nb is a single-purpose OBS cutting appliance — it must boot straight into a bare,
-# non-compositing openbox kiosk (fullscreen OBS projectors on the full panel+HDMI), NOT the full
-# GNOME user desktop (owner directive #504, 2026-07-04): GNOME's dock/top-bar steal OBS's screen,
-# mutter's "application not responding / force quit?" modal pops over the live output, and the
-# desktop bloat/services waste resources on a production box. This step CODIFIES the hand-driven
-# live conversion so a from-scratch provision lands in the kiosk, not GNOME.
-#
-# HARD ORDER (owner incident 2026-07-04): install openbox+lightdm AND switch the display-manager to
-# lightdm BEFORE any GNOME purge, so the box ALWAYS has a working DM — purging gdm3 first with no
-# lightdm yet left the box with NO display manager on the next boot → black wall + an extra reboot.
-# The purge only takes over the SESSION on the NEXT boot; on the live box (already an openbox
-# session) it removes dormant packages without touching the running OBS/openbox.
-
-# (a) Install the light WM + display manager. Idempotent (apt-get install on an already-installed
-#     package is a no-op). lightdm's default-Recommends greeter (lightdm-gtk-greeter) comes along;
-#     the owner's list names no specific greeter, so none is pinned here.
-#     #833: wmctrl rides along here too — recording-e2e.sh's [0/8] projector-count preflight (and
-#     the #769 windowed-stray heal) shell out to it over SSH; a freshly provisioned box without it
-#     made that preflight misread "tool absent" as "0 projectors" (three wasted gate re-runs).
-#     #791: btop rides along too — the generated openbox menu (step 16, #785) "Systémový monitor"
-#     item runs `x-terminal-emulator -e btop`; the live box has it hand-installed, so a fresh box
-#     without it would carry a menu item pointing at a missing binary.
-apt-get update -qq
-DEBIAN_FRONTEND=noninteractive apt-get install -y openbox lightdm feh wmctrl btop \
-    || fail "#504: openbox+lightdm install failed — cannot convert imag-nb to the kiosk WM"
-
-# (b) lightdm autologin → openbox. Idempotent full-file write of a fixed drop-in (always the same
-#     content). ${DESKTOP_USER} logs in headless and openbox launches the OBS kiosk (step 16
-#     autostart). autologin-user-timeout=0 + user-session=openbox mirror the live-proven config.
-mkdir -p /etc/lightdm/lightdm.conf.d
-cat > /etc/lightdm/lightdm.conf.d/50-imag-autologin.conf <<EOF
-[Seat:*]
-autologin-user=${DESKTOP_USER}
-autologin-user-timeout=0
-autologin-session=openbox
-user-session=openbox
-EOF
-
-# (c) Switch the display-manager to lightdm EXPLICITLY via the symlink — NOT `systemctl enable
-#     lightdm`, which fails "Failed to enable unit: Invalid unit name ... instance name specified"
-#     and, critically, does NOT (re)create /etc/systemd/system/display-manager.service (owner
-#     incident 2026-07-04: the missing symlink brought the box up with no DM → black wall). Guard:
-#     only after lightdm's unit file actually exists on disk (it was just installed in (a)).
-[ -f /lib/systemd/system/lightdm.service ] \
-    || fail "#504: lightdm.service unit missing after install — refuse to switch the DM symlink"
-ln -sf /lib/systemd/system/lightdm.service /etc/systemd/system/display-manager.service
-echo "  #504: display-manager.service → lightdm (openbox autologin for ${DESKTOP_USER})"
-
-# (d) Disable the desktop-bloat services still running on the appliance. KEEP, NEVER touched:
-#     avahi (NDI mDNS — CRITICAL), sshd, dantesync, remoteos-mcp (the MCP agent), NetworkManager,
-#     lightdm. `disable --now` also stops each; the per-service `|| true` keeps this idempotent and
-#     robust to a static/alias/absent unit (colord is `static`).
-for svc in cups cups-browsed bluetooth ModemManager colord switcheroo-control gnome-remote-desktop; do
-    systemctl disable --now "$svc" >/dev/null 2>&1 || true
-done
-# gdm3 is handled SEPARATELY and deliberately WITHOUT `--now` (review finding, 2026-07-05): on a
-# genuine from-scratch GNOME box (not this already-openbox live box) gdm3 still OWNS the current
-# :0 session that step 17 below launches OBS into (DISPLAY=:0, $UBUS captured back in step 5) —
-# stopping it immediately would kill that X server + D-Bus session mid-provision and fail step 17's
-# launch against a now-dead :0. `disable` alone (no `--now`) only stops gdm3 from starting again on
-# the NEXT boot, the same "takes effect on the next boot" convention already used by the kernel
-# (step 7) / CPU-isolation (step 8) / NVIDIA (step 9) changes above — the actual handover to
-# lightdm+openbox happens at the reboot this script deliberately does not perform.
-systemctl disable gdm3 >/dev/null 2>&1 || true
-echo "  #504: disabled cups/cups-browsed/bluetooth/ModemManager/colord/switcheroo-control/gnome-remote-desktop now; gdm3 disabled for next boot (avahi/sshd/dantesync/remoteos-mcp/NetworkManager/lightdm kept)"
-
-# (e) Purge the GNOME desktop bloat — the owner's EXPLICIT package list (#504). NEVER a bare
-#     `apt-get autoremove`: that would sweep every now-orphaned FORWARD dependency (an unbounded
-#     cascade — the exact hazard the owner called out; it could reach ssh/NetworkManager helpers).
-#     apt's own purge cascade removes only the REVERSE-deps that DEPEND on these listed packages
-#     (ubuntu-session, ubuntu-desktop-minimal, the desktop-icons-ng extension) — bounded and safe
-#     (SIMULATED 2026-07-05: 11 pkgs removed, NONE of sshd/NetworkManager/lightdm/avahi/dantesync/
-#     remoteos-mcp). Scope the purge to packages ACTUALLY installed so the command is idempotent and
-#     never aborts on an absent package (`firefox` may be a snap-only stub, `libreoffice` isn't on
-#     this box, a re-run has nothing left) — the explicit owner set stays literal in GNOME_PURGE_PKGS.
-GNOME_PURGE_PKGS="gnome-shell gdm3 nautilus firefox gnome-remote-desktop \
-    gnome-shell-extension-ubuntu-dock gnome-shell-extension-ubuntu-tiling-assistant \
-    gnome-shell-extension-appindicator libreoffice-core"
-GNOME_TO_PURGE=""
-for p in $GNOME_PURGE_PKGS; do
-    # Same install-status idiom as step 9's driver check: a bare `dpkg -s` exit code is NOT enough
-    # (it exits 0 for a removed-not-purged package in "deinstall ok config-files" state) — match the
-    # Status field content. `>/dev/null` (not `-q`) mirrors that step's convention.
-    if dpkg -s "$p" 2>/dev/null | grep '^Status: install ok installed' >/dev/null; then
-        GNOME_TO_PURGE="$GNOME_TO_PURGE $p"
-    fi
-done
-if [ -n "$GNOME_TO_PURGE" ]; then
-    DEBIAN_FRONTEND=noninteractive apt-get purge -y $GNOME_TO_PURGE \
-        || fail "#504: GNOME desktop purge failed —$GNOME_TO_PURGE"
-    echo "  #504: purged GNOME desktop packages —$GNOME_TO_PURGE"
-else
-    echo "  #504: no GNOME desktop packages left to purge (already a clean kiosk)"
-fi
-
-# Defense-in-depth re-assert (review finding, 2026-07-05): gdm3's dpkg postrm runs AFTER the DM
-# symlink switch in (c) above — re-verify it still points at lightdm rather than trusting the
-# earlier switch blindly. A postrm that silently re-pointed display-manager.service back is exactly
-# the black-wall failure mode this whole step exists to prevent; refuse to leave the box in an
-# uncertain DM state rather than discover it only on the next reboot.
-imag_same_unit /etc/systemd/system/display-manager.service /lib/systemd/system/lightdm.service \
-    || fail "#504: display-manager.service no longer points at lightdm after the GNOME purge — refuse to leave the box with an uncertain display manager"
-
-echo "  NOTE: the kiosk (lightdm+openbox) takes over the SESSION on the NEXT boot — this script does not reboot the box"
+# issue 1357: this step's body moved VERBATIM into the shared OBS-box appliance baseline
+# (scripts/lib/obs-box-baseline.sh) -- setup-strih.sh runs the SAME function, so the two boxes can
+# never diverge again. Box facts are its arguments; with these imag values it writes exactly what
+# this step always wrote.
+obs_box_kiosk "$DESKTOP_USER" imag
 
 # =============================================================================
 step 16 "Reboot-durable openbox autostart (#522/#488) + Desktop icon"
@@ -1838,46 +1259,12 @@ chown "$DESKTOP_USER:$DESKTOP_USER" "$USER_HOME/.config/openbox/autostart"
 # restart/shutdown entries let the operator power the box off cleanly FROM THE DESKTOP -- the
 # hardware power key deliberately stays HandlePowerKey=ignore (#727: an accidental short press once
 # shut the box down mid-event), so a desktop menu entry is the intended clean-poweroff path.
-# QUOTED heredoc: the whole menu.xml is literal (no shell expansion of the <command> lines).
+# issue 1357: the menu body is the SHARED kiosk menu (obs_box_openbox_menu_xml, the same printer
+# setup-strih.sh uses) -- imag passes its label, its supervised unit and its graceful stop helper.
 mkdir -p "$USER_HOME/.config/openbox"
-cat > "$USER_HOME/.config/openbox/menu.xml" <<'MENU_EOF'
-<?xml version="1.0" encoding="UTF-8"?>
-<openbox_menu xmlns="http://openbox.org/3.4/menu">
-  <menu id="root-menu" label="imag-nb">
-    <item label="Spustiť OBS">
-      <action name="Execute">
-        <command>systemctl --user start imag-obs.service</command>
-      </action>
-    </item>
-    <item label="Zastav OBS (korektne)">
-      <action name="Execute">
-        <command>/usr/local/bin/imag-obs-stop.sh</command>
-      </action>
-    </item>
-    <item label="Systémový monitor (CPU+GPU)">
-      <action name="Execute">
-        <command>x-terminal-emulator -e btop</command>
-      </action>
-    </item>
-    <item label="Terminál">
-      <action name="Execute">
-        <command>x-terminal-emulator</command>
-      </action>
-    </item>
-    <separator />
-    <item label="Reštartovať počítač">
-      <action name="Execute">
-        <command>systemctl reboot</command>
-      </action>
-    </item>
-    <item label="Vypnúť počítač">
-      <action name="Execute">
-        <command>systemctl poweroff</command>
-      </action>
-    </item>
-  </menu>
-</openbox_menu>
-MENU_EOF
+obs_box_openbox_menu_xml "imag-nb" "systemctl --user start imag-obs.service" "/usr/local/bin/imag-obs-stop.sh" \
+    > "$USER_HOME/.config/openbox/menu.xml" \
+    || fail "#785: could not generate $USER_HOME/.config/openbox/menu.xml"
 chown "$DESKTOP_USER:$DESKTOP_USER" "$USER_HOME/.config/openbox/menu.xml"
 
 # =============================================================================
@@ -2134,110 +1521,17 @@ fi
 # =============================================================================
 step 22 "Power/thermal envelope (#1040): purge thermald + pin MMIO RAPL PL1 + slpc, supervised by a loud guard"
 # =============================================================================
-# The imag render regression (issues 799/880/1029/1030) was a HARDWARE power clamp: thermald's
-# DPTF policy programmed the MMIO RAPL PL1 long-term constraint to 25 W, starving the iGPU to
-# gt_act_freq 600-850 MHz while every software freq knob sat at 1400. The durable fix pins PL1 to a
-# sustainable 45 W (#1162 re-baseline for the replacement i7-13620H — 29 W starved it; 29 W was the
-# original i5 unit's value) + slpc_ignore_eff_freq=1 at boot, PURGES thermald (the actor that programmed
-# 25 W -- a minimalist appliance purges a competing policy engine, same discipline the sole-
-# timesync-authority gate enforces; PROCHOT stays as the hardware backstop), and supervises the
-# envelope with a LOUD root guard that alerts dev1-side instead of silently degrading. Env knobs
-# below are baked into the units so a re-provision keeps the same envelope.
-
-# thermald PURGED (not masked) -- its adaptive DPTF surface is opaque and moves across upgrades.
-DEBIAN_FRONTEND=noninteractive apt-get purge -y thermald >/dev/null 2>&1 || true
-# Self-heal any leftover HAND-PLACED temporary guard from a prior live hotfix -- the source-script
-# fix here supersedes it (a hand-fix must never linger past its source-script fix). Best-effort by
-# the conventional temp names; the live removal on the incumbent box is done at integration.
-systemctl disable --now imag-power-envelope-temp-guard.timer imag-power-envelope-temp-guard.service >/dev/null 2>&1 || true
-rm -f /etc/systemd/system/imag-power-envelope-temp-guard.* /usr/local/bin/imag-power-envelope-temp-guard.sh 2>/dev/null || true
-
-# The shared verdict/decision lib (source-only) -- installed so the on-box scripts source it, the
-# SAME gh-api fetch path as imag-obs-start.sh above (a from-scratch reprovision is never missing it).
-mkdir -p /usr/local/lib
-gh api -H "Accept: application/vnd.github.raw" \
-    "repos/${GENLOCK_REPO}/contents/scripts/lib/imag-power-envelope.sh?ref=dev" \
-    > /usr/local/lib/imag-power-envelope.sh \
-    || fail "could not fetch scripts/lib/imag-power-envelope.sh from ${GENLOCK_REPO} (dev) via gh api"
-chmod 644 /usr/local/lib/imag-power-envelope.sh
-
-gh api -H "Accept: application/vnd.github.raw" \
-    "repos/${GENLOCK_REPO}/contents/scripts/imag-power-envelope.sh?ref=dev" \
-    > /usr/local/bin/imag-power-envelope.sh \
-    || fail "could not fetch scripts/imag-power-envelope.sh from ${GENLOCK_REPO} (dev) via gh api"
-chmod 755 /usr/local/bin/imag-power-envelope.sh
-
-gh api -H "Accept: application/vnd.github.raw" \
-    "repos/${GENLOCK_REPO}/contents/scripts/imag-power-envelope-guard.sh?ref=dev" \
-    > /usr/local/bin/imag-power-envelope-guard.sh \
-    || fail "could not fetch scripts/imag-power-envelope-guard.sh from ${GENLOCK_REPO} (dev) via gh api"
-chmod 755 /usr/local/bin/imag-power-envelope-guard.sh
-
-# ROOT system units (sysfs writes need root, unlike the user-level imag-obs.service). Env knobs
-# baked in at provisioning time (overridable: IMAG_PL1_W=30 sudo -E ./setup-imag.sh ...).
-cat > /etc/systemd/system/imag-power-envelope.service <<PE_SVC_EOF
-[Unit]
-Description=camera-box #1040: pin imag-nb MMIO RAPL PL1 + slpc power envelope (sustainable 60fps render)
-After=multi-user.target
-
-[Service]
-Type=oneshot
-Environment=IMAG_PL1_W=${IMAG_PL1_W:-45}
-ExecStart=/usr/local/bin/imag-power-envelope.sh
-RemainAfterExit=yes
-
-[Install]
-WantedBy=multi-user.target
-PE_SVC_EOF
-
-cat > /etc/systemd/system/imag-power-envelope-guard.service <<PE_GUARD_EOF
-[Unit]
-Description=camera-box #1040: imag-nb power-envelope runtime guard (thermal step-down + foreign re-assert)
-After=imag-power-envelope.service
-
-[Service]
-Type=oneshot
-Environment=IMAG_PL1_W=${IMAG_PL1_W:-45}
-Environment=IMAG_PL1_STEPDOWN_W=${IMAG_PL1_STEPDOWN_W:-25}
-Environment=IMAG_TCPU_STEPDOWN_C=${IMAG_TCPU_STEPDOWN_C:-93}
-Environment=IMAG_TCPU_RESTORE_C=${IMAG_TCPU_RESTORE_C:-85}
-ExecStart=/usr/local/bin/imag-power-envelope-guard.sh
-PE_GUARD_EOF
-
-cat > /etc/systemd/system/imag-power-envelope-guard.timer <<'PE_TMR_EOF'
-[Unit]
-Description=camera-box #1040: run the imag-nb power-envelope guard every ~45s
-
-[Timer]
-OnBootSec=60
-OnUnitActiveSec=45
-AccuracySec=5s
-
-[Install]
-WantedBy=timers.target
-PE_TMR_EOF
-
-# #1162/#784 self-heal: remove any leftover hand-applied PL1 override drop-in from the live
-# re-baseline. The sustainable wattage is now source-controlled (each unit's Environment= above +
-# the shared lib default), so a lingering .service.d/override.conf hand-fix must NOT persist to MASK
-# a future source re-pin (the #784 lesson, mirroring the #842 grub.d self-heal). Idempotent: absent
-# -> no-op. Runs BEFORE daemon-reload so the base unit's Environment wins on reload.
-for _pe_dropin in \
-    /etc/systemd/system/imag-power-envelope.service.d/override.conf \
-    /etc/systemd/system/imag-power-envelope-guard.service.d/override.conf; do
-    if [ -f "$_pe_dropin" ]; then
-        echo -e "  ${YELLOW}#1162: removing leftover hand-applied PL1 drop-in ${_pe_dropin} — PL1 wattage is source-controlled now (unit Environment= + shared lib default)${NC}"
-        rm -f "$_pe_dropin"
-        rmdir "$(dirname "$_pe_dropin")" 2>/dev/null || true
-    fi
-done
-
-systemctl daemon-reload
-systemctl enable --now imag-power-envelope.service >/dev/null 2>&1 \
-    || fail "could not enable imag-power-envelope.service -- the boot power envelope would not be pinned"
-systemctl enable --now imag-power-envelope-guard.timer >/dev/null 2>&1 \
-    || fail "could not enable imag-power-envelope-guard.timer -- the envelope would be unsupervised"
-echo "  #1040: thermald purged, PL1=${IMAG_PL1_W:-45}W envelope pinned at boot + supervised by the ~45s guard timer"
+# issue 1357: this step's body moved VERBATIM into the shared OBS-box appliance baseline
+# (scripts/lib/obs-box-baseline.sh) -- setup-strih.sh runs the SAME function, so the two boxes can
+# never diverge again. Box facts are its arguments; with these imag values it writes exactly what
+# this step always wrote.
+# imag installs the on-box envelope scripts the same gh-api way as every other file this script fetches.
+imag_fetch_repo_file() {  # imag_fetch_repo_file REPO_RELPATH DEST
+    gh api -H "Accept: application/vnd.github.raw" "repos/${GENLOCK_REPO}/contents/$1?ref=dev" > "$2"
+}
+# PL1 is overridable per run (IMAG_PL1_W=30 sudo -E ./setup-imag.sh ...); 45 W = the #1162 re-baseline
+# for the i7-13620H replacement notebook.
+obs_box_power_envelope "${IMAG_PL1_W:-45}" imag_fetch_repo_file
 
 step 23 "RemoteOS MCP control-channel agent (#858): provision via the canonical zbynekdrlik/remoteos-mcp installer"
 # The linux-imag-nb MCP surface (:8092) is served by the SEPARATE zbynekdrlik/remoteos-mcp project
@@ -2327,93 +1621,20 @@ echo "  #764: imag-obs-watchdog installed (script + unit) and LEFT DISABLED (ala
 # =============================================================================
 step 25 "Touchpad usability (#779): tap-to-click + natural scroll + gentler scroll (reprovision-durable)"
 # =============================================================================
-# imag-nb is a NOTEBOOK; the operator drives its touchpad directly. tap-to-click + natural scrolling
-# + a gentler scroll step were set LIVE (2026-07-15) as /etc/X11/xorg.conf.d/30-touchpad-tap.conf but
-# NEVER provisioned here -- so a reimage silently dropped them (the same "provisioning gap hidden by a
-# hand patch" class issue 840 documented for imag-obs-start.sh). Bake the file in so a reprovision
-# reproduces the live-verified libinput InputClass byte-for-byte. The four Option values match what
-# is live on the box; ScrollPixelDistance 50 is the user's final tuning (the libinput default 15 is
-# far too sensitive). verify-imag.sh check (w) reads this file back and fails loud if it is dropped.
-mkdir -p /etc/X11/xorg.conf.d
-cat > /etc/X11/xorg.conf.d/30-touchpad-tap.conf <<'EOF'
-# imag touchpad usability (#779) -- tap-to-click + natural scroll + gentler scroll,
-# reprovision-durable (matches the live-verified 30-touchpad-tap.conf on the box).
-Section "InputClass"
-    Identifier "touchpad tap-to-click"
-    MatchIsTouchpad "on"
-    Driver "libinput"
-    Option "Tapping" "on"
-    Option "TappingDrag" "on"
-    Option "NaturalScrolling" "on"
-    Option "ScrollPixelDistance" "50"
-EndSection
-EOF
-echo "  #779: /etc/X11/xorg.conf.d/30-touchpad-tap.conf provisioned (tap-to-click + natural scroll + ScrollPixelDistance 50)"
+# issue 1357: this step's body moved VERBATIM into the shared OBS-box appliance baseline
+# (scripts/lib/obs-box-baseline.sh) -- setup-strih.sh runs the SAME function, so the two boxes can
+# never diverge again. Box facts are its arguments; with these imag values it writes exactly what
+# this step always wrote.
+obs_box_touchpad imag
 
 # =============================================================================
 step 26 "Full max-performance persistence (issue 756/#791): EPP/turbo/platform-profile/runtime-PM via imag-maxperf.service + hotplug udev rule"
 # =============================================================================
-# The incumbent's full performance persistence lived in imag-maxperf.service (issue 756) ->
-# /usr/local/sbin/imag-maxperf.sh, plus a hotplug-persistent udev rule -- NEVER tracked in the repo
-# (a live audit's `grep -rn imag-maxperf scripts/ tests/` returned nothing), hand-placed and never
-# ported to this generator (the same "provisioning gap hidden by a hand patch" class issue 840
-# documented for imag-obs-start.sh, issue 841 for the NVIDIA tuning, issue 858 for remoteos-mcp).
-# Step 4 (cpu-performance.service + rc.local) persists ONLY the governor + per-device USB/NET
-# power/control; EPP / intel_pstate no_turbo=0 / platform_profile / usbcore autosuspend / all-PCI
-# runtime-PM off / the hotplug udev rule were absent entirely -- exactly the EPP-persistence gap the
-# 2026-07-18 audit on this ticket demanded be folded in. Reproduce the live trio so a fresh box is
-# IDENTICAL to today's imag (the ticket mandate). The governor is set redundantly with
-# cpu-performance.service; that redundancy exists on the live box today and reproducing it is the
-# correct parity choice -- NOT a defect and NOT deferred work: consolidating the two units was the
-# explicitly REJECTED alternative (it would change the live box's own unit topology, so it is out of
-# scope for a parity fix). Every knob is [ -f ]/command -v guarded so it stays hardware-agnostic
-# (#816): a box lacking intel_pstate/
-# platform_profile simply skips those writes. verify-imag.sh check (y) reads the service/script/udev
-# presence AND the runtime STATE back and fails loud on any drift.
-mkdir -p /usr/local/sbin
-cat > /usr/local/sbin/imag-maxperf.sh <<'MAXPERF_EOF'
-#!/usr/bin/env bash
-# airuleset:script-ok boot enforcement must continue past missing knobs; every failure is logged loudly
-# imag max-perf boot enforcement (idempotent) -- issue 756 / #791 reprovision parity.
-set -u
-log(){ echo "imag-maxperf: $*"; }
-for g in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do echo performance > "$g" 2>/dev/null || log "governor write FAILED: $g"; done
-for e in /sys/devices/system/cpu/cpu*/cpufreq/energy_performance_preference; do [ -f "$e" ] && { echo performance > "$e" 2>/dev/null || log "EPP write FAILED: $e"; }; done
-[ -f /sys/devices/system/cpu/intel_pstate/no_turbo ] && { echo 0 > /sys/devices/system/cpu/intel_pstate/no_turbo 2>/dev/null || log "no_turbo write FAILED"; }
-[ -f /sys/firmware/acpi/platform_profile ] && { echo performance > /sys/firmware/acpi/platform_profile 2>/dev/null || log "platform_profile write FAILED"; }
-command -v powerprofilesctl >/dev/null && { powerprofilesctl set performance 2>/dev/null || log "powerprofilesctl FAILED (daemon not up yet?)"; }
-[ -f /sys/module/usbcore/parameters/autosuspend ] && { echo -1 > /sys/module/usbcore/parameters/autosuspend 2>/dev/null || log "usb autosuspend write FAILED"; }
-for p in /sys/bus/pci/devices/*/power/control; do echo on > "$p" 2>/dev/null || log "pci runtime-pm write FAILED: $p"; done
-log "applied: governor=$(sort -u /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor | tr '\n' ' ') profile=$(cat /sys/firmware/acpi/platform_profile 2>/dev/null)"
-MAXPERF_EOF
-chmod 755 /usr/local/sbin/imag-maxperf.sh
-cat > /etc/systemd/system/imag-maxperf.service <<'MAXPERF_SVC_EOF'
-[Unit]
-Description=Force full max-performance (CPU/platform/USB/PCI) -- imag issue 756
-After=multi-user.target power-profiles-daemon.service
-[Service]
-Type=oneshot
-ExecStart=/usr/local/sbin/imag-maxperf.sh
-RemainAfterExit=yes
-[Install]
-WantedBy=multi-user.target
-MAXPERF_SVC_EOF
-cat > /etc/udev/rules.d/99-imag-maxperf-pm.rules <<'MAXPERF_UDEV_EOF'
-# imag max-perf (issue 756 / #791): force runtime PM OFF (power/control=on) on device add -- NDI
-# NICs/peripherals must never power-dip; makes the boot-time write survive USB/PCI hotplug.
-ACTION=="add", SUBSYSTEM=="pci", ATTR{power/control}="on"
-ACTION=="add", SUBSYSTEM=="usb", TEST=="power/control", ATTR{power/control}="on"
-MAXPERF_UDEV_EOF
-udevadm control --reload-rules 2>/dev/null || true
-systemctl daemon-reload
-systemctl enable --now imag-maxperf.service \
-    || fail "issue 756/#791: could not enable+start imag-maxperf.service — the full max-performance persistence (EPP/turbo/PCI-PM) would not survive a reboot"
-# Type=oneshot + RemainAfterExit=yes: an ACTIVE unit proves ExecStart (the enforcement script) ran
-# to completion -- a stronger proof than re-checking the governor, which step 4's own
-# cpu-performance.service already set (so a governor grep would pass even if imag-maxperf never ran).
-systemctl is-active --quiet imag-maxperf.service \
-    || fail "issue 756/#791: imag-maxperf.service is not active after enable --now — the boot-enforcement script did not run"
-echo "  issue 756/#791: full max-performance persistence provisioned (imag-maxperf.service active + udev rule)"
+# issue 1357: this step's body moved VERBATIM into the shared OBS-box appliance baseline
+# (scripts/lib/obs-box-baseline.sh) -- setup-strih.sh runs the SAME function, so the two boxes can
+# never diverge again. Box facts are its arguments; with these imag values it writes exactly what
+# this step always wrote.
+obs_box_maxperf_persistence imag
 
 # =============================================================================
 step 27 "picom vsync compositor (issue 1146): tear-free HDMI-projector present + enable"

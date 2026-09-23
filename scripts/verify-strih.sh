@@ -17,6 +17,9 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # issue 1359: the REPORT-ONLY CEF keyring item (14b) grades the OBS CEF password-store switch.
 # shellcheck source=scripts/lib/strih-cef-keyring.sh
 . "${HERE}/lib/strih-cef-keyring.sh"
+# issue 1357: the ONE grader for the shared OBS-box appliance baseline (verify-imag.sh runs it too).
+# shellcheck source=scripts/lib/obs-box-baseline-verify.sh
+. "${HERE}/lib/obs-box-baseline-verify.sh"
 # issue 1317: the dantesync item grades a FRESH offset via the SHARED freshness-aware verdict (the
 # cambox verify-device (d) shape) instead of reading a Windows/imag dantesync JSON config file a
 # flag-based Linux client never creates. clock-offset-guard.sh has its own source-guard, so sourcing
@@ -40,7 +43,7 @@ USER_HOME="/home/${STRIH_LX_USER:-newlevel}"
 OBS_LOG_DIR="${OBS_LOG_DIR:-${USER_HOME}/.config/obs-studio/logs}"
 newest_log() { ls -1t "${OBS_LOG_DIR}"/*.txt 2>/dev/null | head -1; }
 tcp_open()   { timeout 4 bash -c "exec 3<>/dev/tcp/${1}/${2}" 2>/dev/null; }
-# The ONE "is OBS running" predicate (items 1 and 32 share it): the supervisor unit OR an obs process.
+# The ONE "is OBS running" predicate (item 1): the supervisor unit OR an obs process.
 obs_running() {
   systemctl --user is-active strih-obs.service >/dev/null 2>&1 \
     || pgrep -x obs >/dev/null 2>&1 \
@@ -284,12 +287,6 @@ if arecord -l 2>/dev/null | grep -qi 'MiniFuse'; then note "talkback: MiniFuse 4
 # 10) NVENC encoder available.
 { ffmpeg -hide_banner -encoders 2>/dev/null; cat "$LOG" 2>/dev/null; } | strih_lx_nvenc_available_ok && ok "NVENC encoder available" || bad "NVENC encoder not available"
 
-# 11) never-sleep (sleep.target masked). issue 1317: `systemctl is-enabled` prints "masked" AND exits
-#     1 for a masked unit, so the old echo-masked-on-failure fallback DOUBLE-appended ("masked" twice) and
-#     FALSE-FAILED a correctly-masked box. strih_verify_sleep_masked grades the FIRST line only.
-SLEEP_STATE="$(systemctl is-enabled sleep.target 2>/dev/null || true)"
-strih_verify_sleep_masked "$SLEEP_STATE" && ok "sleep.target masked (never-sleep)" || bad "sleep.target not masked (is-enabled='${SLEEP_STATE//$'\n'/|}')"
-
 # 12) single timesync authority (dantesync only).
 UNITS="$(systemctl list-units --type=service --state=active --no-legend 2>/dev/null | awk '{print $1}')"
 printf '%s\n' "$UNITS" | strih_lx_single_timesync_authority_ok && ok "single timesync authority (dantesync only)" || bad "timesync authority not single (dantesync missing or a competitor active)"
@@ -411,27 +408,16 @@ else
   note "janus audiobridge jcfg absent (${JANUS_AB}) -- run setup-strih.sh step 14; report-only"
 fi
 
-# 18) CPU performance governor on every online core + sleep masked (issue 1317 -- low-latency
-#     genlock cutter). The (perf) item: `cat` all cores' scaling_governor -> every line must be
-#     `performance` (strih_verify_governor_ok, fail-closed on an empty/unreadable read), AND
-#     sleep.target masked (the existing strih_verify_sleep_masked). FAIL loud, like the other items.
-GOVS="$(cat /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor 2>/dev/null || true)"
-PERF_SLEEP_STATE="$(systemctl is-enabled sleep.target 2>/dev/null || true)"
-if printf '%s\n' "$GOVS" | strih_verify_governor_ok && strih_verify_sleep_masked "$PERF_SLEEP_STATE"; then
-  ok "(perf) CPU governor performance on all online cores + sleep.target masked"
-else
-  bad "(perf) CPU not in performance mode on all cores (or sleep.target not masked) -- re-run setup-strih.sh step 15 (governors: ${GOVS//$'\n'/,} ; sleep is-enabled: ${PERF_SLEEP_STATE:-<none>})"
-fi
-
-# 19) Bitfocus Companion Satellite installed + desktop udev rule + operator autostart + controller
+# 19) Bitfocus Companion Satellite installed + desktop udev rule + kiosk launch + controller
 #     host seeded (issue 1317 rework -- the (companion) item, DESKTOP tarball model). /opt binary +
-#     /etc/udev/rules.d/50-satellite-desktop.rules + operator autostart .desktop + the seeded app
+#     /etc/udev/rules.d/50-satellite-desktop.rules + the openbox autostart launch line (issue 1357:
+#     the kiosk launches it; openbox runs no XDG ~/.config/autostart) + the seeded app
 #     config.json's remoteIp == the controller (strih_companion_verdict, fail-closed). FAIL loud on
 #     any missing part.
 CS_INSTALLED=0; [ -x "$(strih_companion_satellite_bin)" ] && CS_INSTALLED=1
 CS_UDEV_OK=0; [ -f "$(strih_companion_satellite_udev_rule)" ] && CS_UDEV_OK=1
-CS_AUTOSTART="${USER_HOME}/.config/autostart/companion-satellite.desktop"
-CS_AUTOSTART_OK=0; [ -f "$CS_AUTOSTART" ] && CS_AUTOSTART_OK=1
+CS_AUTOSTART="${USER_HOME}/.config/openbox/autostart"
+CS_AUTOSTART_OK=0; grep -qxF "$(strih_companion_satellite_openbox_line)" "$CS_AUTOSTART" 2>/dev/null && CS_AUTOSTART_OK=1
 CS_HOST_OK=0
 CS_APPCFG="${COMPANION_SATELLITE_CONF:-${USER_HOME}/.config/Companion Satellite/config.json}"
 # Exact JSON read-back (never a regex whose dots would wildcard the IP); fail-closed on unreadable.
@@ -459,7 +445,7 @@ except Exception:
 fi
 CS_VERDICT="$(strih_companion_status_verdict "$CS_FILE_VERDICT" "$CS_RUNNING" "$CS_CONNECTED" || true)"
 if strih_companion_status_verdict "$CS_FILE_VERDICT" "$CS_RUNNING" "$CS_CONNECTED" >/dev/null 2>&1; then
-  ok "(companion) Companion Satellite ${CS_VERDICT} -- /opt + desktop udev rule + operator autostart + controller $(strih_companion_satellite_host) (REST running=${CS_RUNNING} connected=${CS_CONNECTED})"
+  ok "(companion) Companion Satellite ${CS_VERDICT} -- /opt + desktop udev rule + openbox autostart launch + controller $(strih_companion_satellite_host) (REST running=${CS_RUNNING} connected=${CS_CONNECTED})"
 else
   bad "(companion) Companion Satellite gate: ${CS_VERDICT} (bin=${CS_INSTALLED} udev=${CS_UDEV_OK} autostart=${CS_AUTOSTART_OK} host=${CS_HOST_OK} running=${CS_RUNNING} connected=${CS_CONNECTED}) -- re-run setup-strih.sh step 16"
 fi
@@ -539,22 +525,6 @@ elif [ -f "$MVH_UNIT" ] && [ -x "$MVH_HELPER" ] && [ "$MVH_XLIB" = ok ]; then
   bad "(mv-host) enablement mismatch: STRIH_MV_HOST_ENABLED=${MVH_WANT} but the WantedBy symlink is $( [ -L "$MVH_WANTS" ] && echo present || echo absent ) -- both hosting mechanisms active = MV 0.6 fps (22.9.2026); disable the helper unless the bundle lacks the vendored child-host"
 else
   bad "(mv-host) strih-mv-host gate: unit=$( [ -f "$MVH_UNIT" ] && echo present || echo MISSING ) enabled=$( [ -L "$MVH_WANTS" ] && echo yes || echo no ) helper=$( [ -x "$MVH_HELPER" ] && echo present || echo MISSING ) xlib=${MVH_XLIB} -- re-run setup-strih.sh step 8b"
-fi
-
-# 23) strih-obs-start.sh RTX GPU env (issue 1352): the DEPLOYED wrapper must carry all 4 XWayland-PRIME
-#     exports (setup-strih step 8 substitutes strih_lx_obs_gpu_env into the @STRIH_LX_OBS_GPU_ENV@
-#     marker). Without them OBS renders on the saturated iGPU. FAIL loud; also FAIL if the marker
-#     survived un-substituted (a verbatim install).
-DEPLOYED_WRAPPER="${STRIH_LAUNCHER_BIN_DIR:-/usr/local/bin}/strih-obs-start.sh"
-GPU_MISSING=""
-for _ex in 'QT_QPA_PLATFORM=xcb' '__NV_PRIME_RENDER_OFFLOAD=1' '__GLX_VENDOR_LIBRARY_NAME=nvidia' '__EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/10_nvidia.json'; do
-  grep -qF "$_ex" "$DEPLOYED_WRAPPER" 2>/dev/null || GPU_MISSING="${GPU_MISSING} ${_ex}"
-done
-if [ -z "$GPU_MISSING" ] && ! grep -qF '#@STRIH_LX_OBS_GPU_ENV@' "$DEPLOYED_WRAPPER" 2>/dev/null; then
-  ok "(gpu-env) strih-obs-start.sh carries the 4 RTX XWayland-PRIME exports (marker substituted)"
-else
-  _mk=""; grep -qF '#@STRIH_LX_OBS_GPU_ENV@' "$DEPLOYED_WRAPPER" 2>/dev/null && _mk=" (marker NOT substituted)"
-  bad "(gpu-env) ${DEPLOYED_WRAPPER} missing RTX exports:${GPU_MISSING:- none}${_mk} -- re-run setup-strih.sh step 8"
 fi
 
 # 24) avahi-browse present (issue 1352): the NDI/mDNS discovery CLI (avahi-utils) -- Ubuntu 26.04 omits
@@ -799,70 +769,37 @@ else
   fi
 fi
 
-# 32) genlock render-tick rtprio grant (issue 1317 remainder, imag issue-484 parity): the limits.d
-#     drop-in setup-strih.sh step 11c writes must grant the desktop user rtprio >= the vendored render
-#     tick's SCHED_FIFO priority -- FAIL without it (the tick runs SCHED_OTHER). When OBS is running and
-#     its newest log still carries the "could NOT set render-tick thread SCHED_FIFO" EPERM line, the
-#     grant exists but OBS's lingering user manager started before it (pam_limits applies when that
-#     manager starts) -> it takes effect at the next reboot -> NOTE, never FAIL.
-RTPRIO_FILE_V="$(strih_rtprio_limits_path)"
-RTPRIO_USER_V="${STRIH_LX_USER:-newlevel}"
-RTPRIO_GRANT_V=0
-if [ -r "$RTPRIO_FILE_V" ] && strih_rtprio_grant_ok "$RTPRIO_USER_V" < "$RTPRIO_FILE_V"; then
-  RTPRIO_GRANT_V=1
-fi
-RTPRIO_OBS_UP=0
-if obs_running; then
-  RTPRIO_OBS_UP=1
-fi
-RTPRIO_LOG_V="$(newest_log || true)"
-RTPRIO_LOG_TEXT=""
-if [ -n "$RTPRIO_LOG_V" ] && [ -r "$RTPRIO_LOG_V" ]; then
-  RTPRIO_LOG_TEXT="$(cat "$RTPRIO_LOG_V" 2>/dev/null || true)"
-fi
-RTPRIO_VERDICT="$(strih_rtprio_session_verdict "$RTPRIO_GRANT_V" "$RTPRIO_OBS_UP" <<<"$RTPRIO_LOG_TEXT" || true)"
-case "$RTPRIO_VERDICT" in
-  ok-sched-fifo)
-    ok "(rtprio) ${RTPRIO_FILE_V} grants ${RTPRIO_USER_V} rtprio; the running OBS render tick is SCHED_FIFO" ;;
-  ok)
-    ok "(rtprio) ${RTPRIO_FILE_V} grants ${RTPRIO_USER_V} rtprio (OBS not running or no render-tick priority line in its log)" ;;
-  grant-pending-reboot)
-    note "(rtprio) grant present, but the running OBS still logs 'could NOT set render-tick thread SCHED_FIFO' -- its lingering systemd --user manager started before the grant; it takes effect at the next reboot of strih-lx (if it persists AFTER a reboot, compare 'Max realtime priority' in /proc/<user@UID MainPID>/limits: 0 there = pam_limits not applied by /usr/lib/pam.d/systemd-user)" ;;
-  *)
-    bad "(rtprio) no rtprio grant for ${RTPRIO_USER_V} in ${RTPRIO_FILE_V} -- the genlock render tick runs SCHED_OTHER (re-run setup-strih.sh step 11c)" ;;
-esac
-
-# 33) no operator crash popups (issue 1317 remainder, imag parity + the 26.04 apport coredump hook):
-#     apport + whoopsie must be masked/disabled AND not running, and the apport-coredump-hook@
-#     TEMPLATE masked (systemd-coredump's OnSuccess= runs it and it writes /var/crash even with
-#     apport.service masked) -- apport's /var/crash reports raise the update-notifier-crash desktop
-#     popup the operator had to close. systemd-coredump must be installed so a crash still lands in
-#     coredumpctl. FAIL on any live member or a missing collector; leftover *.crash reports (which
-#     re-raise the popup at login) are a NOTE -- deleting them is a supervisor data action.
-CRASH_BAD_V=""
-while IFS= read -r _cu; do
-  [ -n "$_cu" ] || continue
-  _cu_en="$(systemctl is-enabled "$_cu" 2>/dev/null || true)"
-  _cu_act="$(systemctl is-active "$_cu" 2>/dev/null || true)"
-  if ! strih_crash_popup_member_ok "$_cu" "$_cu_en" "$_cu_act"; then
-    CRASH_BAD_V="${CRASH_BAD_V}${CRASH_BAD_V:+ }${_cu}"
+# 32) the shared OBS-box appliance baseline (issue 1357) -- the ONE grader verify-imag.sh runs too
+#     (scripts/lib/obs-box-baseline-verify.sh): network tuning, governor + strih-maxperf persistence,
+#     never-sleep, boot safety net, preempt=full low-latency kernel, AFFINITY-ONLY core reservation,
+#     PRIME nvidia-primary, de-jitter, no operator crash popups, the lightdm -> openbox Xorg kiosk with
+#     GNOME purged, the openbox autostart contract, the power envelope, the touchpad InputClass. One
+#     PASS/FAIL line per item; a box missing ANY item FAILS (it supersedes the old never-sleep,
+#     governor and crash-popup items).
+BASELINE_FACTS="$(bash -c "$(obs_box_baseline_gather_snippet strih "${STRIH_LX_USER:-newlevel}" strih-obs.service)" 2>/dev/null || true)"
+while IFS='|' read -r _bl_item _bl_state _bl_detail; do
+  [ -n "$_bl_item" ] || continue
+  if [ "$_bl_state" = OK ]; then
+    ok "(baseline:${_bl_item}) ${_bl_detail}"
+  else
+    bad "(baseline:${_bl_item}) ${_bl_detail} -- re-run setup-strih.sh step 11 (the shared OBS-box baseline) and reboot"
   fi
-done < <(strih_crash_popup_units)
-CRASH_CORE_V=0
-# shellcheck disable=SC2016  # ${Status} is a dpkg-query format field, not a shell expansion
-if [ "$(dpkg-query -W -f='${Status}' systemd-coredump 2>/dev/null || true)" = "install ok installed" ]; then
-  CRASH_CORE_V=1
-fi
-CRASH_VERDICT_V="$(strih_crash_popup_verdict "$CRASH_BAD_V" "$CRASH_CORE_V" || true)"
-if [ "$CRASH_VERDICT_V" = ok ]; then
-  ok "(crash-popup) apport + its coredump hook + whoopsie masked/quiet, systemd-coredump installed -- no operator crash popup, crashes land in coredumpctl"
-else
-  bad "(crash-popup) ${CRASH_VERDICT_V} (systemd-coredump installed=${CRASH_CORE_V}) -- re-run setup-strih.sh step 11c"
-fi
+done < <(obs_box_baseline_verdict <<<"$BASELINE_FACTS" || true)
 CRASH_DIR_V="${STRIH_CRASH_DIR:-/var/crash}"
-CRASH_REPORTS_V="$(strih_crash_reports_count "$CRASH_DIR_V")"
+CRASH_REPORTS_V="$(obs_box_crash_reports_count "$CRASH_DIR_V")"
 if [ "$CRASH_REPORTS_V" != 0 ]; then
   note "(crash-popup) ${CRASH_REPORTS_V} stale crash report(s) in ${CRASH_DIR_V} -- update-notifier re-raises the popup for them at login; inspect (coredumpctl list) and clear them (supervisor data action)"
+fi
+
+# 33) NO realtime-priority grant (issue 1357 design): the render-tick SCHED_FIFO pin assumed a reserved
+#     core and its FIFO + affinity leaked to 28 NDI threads on strih-lx (issue comment 5793075833), so
+#     the baseline keeps rtprio OFF. FAIL while the retired grant file still exists (setup-strih.sh step
+#     11 removes it; it only takes effect for OBS after a reboot, so reboot once after removing it).
+RTPRIO_LEFTOVER_V="$(strih_rtprio_leftover_path)"
+if [ -e "$RTPRIO_LEFTOVER_V" ]; then
+  bad "(rtprio-off) ${RTPRIO_LEFTOVER_V} still grants realtime priority -- rtprio must stay OFF (issue 1357); re-run setup-strih.sh step 11 (it removes it) and reboot"
+else
+  ok "(rtprio-off) no realtime-priority grant (${RTPRIO_LEFTOVER_V} absent)"
 fi
 
 echo ""

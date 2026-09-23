@@ -50,20 +50,6 @@ strih_lx_ndi_republishes() {
 # rig floor -- latency-pins-baseline.json strih-lx block; the per-run aligner owns any offset).
 strih_lx_camera_latency_ms() { printf '3'; }
 
-# strih_lx_obs_gpu_env -> print the strih-lx OBS GPU-render env block: the 4 exports that make OBS
-# render on the RTX 5050 dGPU via XWayland PRIME render-offload (issue 1352). ONE source of truth for
-# strih-obs-start.sh's `@STRIH_LX_OBS_GPU_ENV@` marker (setup-strih.sh step 8 substitutes it at
-# install -- the `@JANUS_ROOM_SECRET@` idiom). QT_QPA_PLATFORM=xcb forces the Qt XWayland path
-# (native-Wayland NVIDIA EGL crash-loops with `eglSwapBuffers failed`); the 3 __NV_/__GLX_/__EGL_
-# PRIME vars route GL onto the NVIDIA vendor lib (the Intel iGPU saturates at 85 % -> program lag
-# 7-20 %, MV 6-7 fps). Printed as ONE `;`-joined line (no trailing newline) so a `$(...)` embedding
-# never glues the following statement (the CLAUDE.md newline-strip gotcha). NOTE: on the RTX a
-# projector's toplevel GL surface still stalls ~0.5 s/present under PRIME -> strih-mv-host.service
-# re-hosts every OBS projector as a CHILD window (lag 93 % -> 0 %, MV 1.8 -> 29.8 fps proven).
-strih_lx_obs_gpu_env() {
-  printf '%s' 'export QT_QPA_PLATFORM=xcb; export __NV_PRIME_RENDER_OFFLOAD=1; export __GLX_VENDOR_LIBRARY_NAME=nvidia; export __EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/10_nvidia.json'
-}
-
 # strih_lx_ndi_output_ini_cmds USER_INI -> print the idempotent bash command that seeds DistroAV's
 # `[NDIPlugin]` program/preview OUTPUT identity into USER_INI (issue 1352): the BARE names
 # `MainOutputName=2ME PGM` / `PreviewOutputName=2ME PVW` + `MainOutputEnabled`/`PreviewOutputEnabled`
@@ -762,7 +748,7 @@ strih_install_bundle_prefix() {
   ldconfig
 }
 
-# --- issue 1317 (this lane): dantesync ROLE-aware systemd unit + the verify sleep-mask predicate ----
+# --- issue 1317 (this lane): dantesync ROLE-aware systemd unit ----------------------------------------
 # Post-M4 (20.9.2026) the strih notebook IS the fleet's ONE NTP master (`strih.lan` -> 10.77.9.202),
 # so the unit now carries a ROLE: `server` (the M4 default) renders the bare NTP-master daemon; the
 # historical `client` role (the dead parallel-run shape) renders `--ntp-server <host>`. setup-strih.sh
@@ -813,18 +799,6 @@ StandardError=journal
 [Install]
 WantedBy=multi-user.target
 EOF
-}
-
-# strih_verify_sleep_masked STATE -> 0 iff STATE reports sleep.target masked. `systemctl is-enabled
-# sleep.target` prints "masked" to stdout AND exits 1 for a masked unit, so a caller's `|| echo
-# masked` fallback DOUBLE-appends -> the captured value is "masked\nmasked" and a naive `= masked`
-# comparison FALSE-FAILS on a correctly-masked box (the issue-1317 verify bug). Grade the FIRST line
-# only, so both the clean "masked" and the defensive "masked\nmasked" pass; "enabled"/"static"/""
-# (or anything whose first line is not exactly "masked") -> not masked (return 1, fail-closed).
-strih_verify_sleep_masked() {
-  local state="${1:-}" first
-  first="${state%%$'\n'*}"
-  [ "$first" = masked ]
 }
 
 # --- issue 1317 (this lane): scene-collection hygiene (REPORT-ONLY) + RustDesk install --------------
@@ -1036,77 +1010,6 @@ strih_janus_room_jcfg_ok() {
   return 0
 }
 
-# --- issue 1317 (this lane): CPU performance governor + never-sleep (low-latency cutter) -----------
-# The strih-lx notebook is the fleet's low-latency genlock OBS cutter; a distro-default powersave /
-# schedutil governor is wrong for it (the imag-nb + cam-box fleet pin `performance` explicitly --
-# setup-device.sh STEP-13, .claude/rules/realtime-isolation.md + the imag power-envelope rule). The
-# owner caught the missing step live on the notebook (no performance mode). setup-strih.sh evals
-# strih_performance_mode_apply, then writes+enables strih_cpu_performance_unit_text for persistence.
-
-# strih_performance_mode_apply -> print the idempotent statements the caller evals to put the box in
-# performance mode NOW. It runs BOTH power-profiles-daemon (`powerprofilesctl set performance`, when
-# present) AND writes the `performance` governor to every CPU's scaling_governor -- NOT either/or
-# (issue 1317, live 20.9.2026): on intel_pstate ACTIVE (this Lenovo Raptor Lake) `powerprofilesctl`
-# sets EPP=performance but leaves `scaling_governor=powersave`, so a `; else <governor> ; fi` shape
-# never wrote the governor and `verify (perf)` (governor==performance on all cores) FAILed. The two
-# are complementary -- ppd owns EPP, the governor loop owns the governor -- so both run. Then mask the
-# sleep/suspend targets (the setup-device.sh STEP-13 shape). Each statement is `;`-terminated and
-# fail-soft (`|| true`) so a core/daemon that refuses never aborts the caller's set -euo pipefail;
-# failing LOUD is the verify (perf) gate's job, not this apply.
-strih_performance_mode_apply() {
-  cat <<'CMD'
-if command -v powerprofilesctl >/dev/null 2>&1 && powerprofilesctl list >/dev/null 2>&1; then powerprofilesctl set performance || true; fi;
-for __gov in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do [ -w "$__gov" ] && echo performance > "$__gov" 2>/dev/null || true; done;
-systemctl mask sleep.target suspend.target hibernate.target hybrid-sleep.target 2>/dev/null || true;
-CMD
-}
-
-# strih_perf_effective_line GOV EPP PPD -> the effective-state log line for setup-strih.sh step 15,
-# reporting the TRIPLE governor / EPP / ppd profile it actually observed AFTER the apply. This
-# replaces the old self-contradicting "set to performance (now: powersave)" line (issue 1317): the
-# apply now writes the governor unconditionally, so the step reports what stuck on all three facets.
-# Missing/unreadable facets default (never a bare empty triple).
-strih_perf_effective_line() {
-  local gov="${1:-unreadable}" epp="${2:-absent}" ppd="${3:-absent}"
-  printf 'governor=%s / EPP=%s / ppd=%s' "$gov" "$epp" "$ppd"
-}
-
-# strih_cpu_performance_unit_text -> print the persistent CPU-performance systemd oneshot unit that
-# re-applies the `performance` governor on every boot (the setup-device.sh cpu-performance.service
-# shape: Type=oneshot, RemainAfterExit=yes, WantedBy=multi-user.target). setup-strih.sh writes it to
-# /etc/systemd/system/cpu-performance.service and enables it as the persistence backstop, so the
-# governor survives a reboot even where power-profiles-daemon is absent.
-strih_cpu_performance_unit_text() {
-  cat <<'EOF'
-[Unit]
-Description=Set CPU to performance mode
-After=multi-user.target power-profiles-daemon.service
-
-[Service]
-Type=oneshot
-ExecStart=/bin/bash -c 'for cpu in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do echo performance > $cpu; done'
-RemainAfterExit=yes
-
-[Install]
-WantedBy=multi-user.target
-EOF
-}
-
-# strih_verify_governor_ok  (stdin: each online core's scaling_governor value, one per line -- what
-# `cat /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor` prints) -> 0 iff EVERY line reads
-# `performance` AND there is at least one line. Fail-closed: an empty/unreadable input returns 1 (an
-# unreadable governor is a FAIL, never a silent pass -- test-strictness). Drain-safe (reads the whole
-# stream). verify-strih.sh pairs it with the existing strih_verify_sleep_masked for the (perf) item.
-strih_verify_governor_ok() {
-  local line seen=0
-  while IFS= read -r line; do
-    [ -n "$line" ] || continue
-    seen=1
-    [ "$line" = performance ] || return 1
-  done
-  [ "$seen" = 1 ]
-}
-
 # --- issue 1317 (this lane): Bitfocus Companion Satellite (the Stream Deck surface agent) ----------
 # The strih-lx notebook exposes its locally-attached Stream Deck to the VENUE's Companion CONTROLLER
 # (10.77.9.205, the strih-autorecord-coupling box) as a headless SATELLITE -- NOT a second full
@@ -1119,9 +1022,11 @@ strih_verify_governor_ok() {
 # dir carrying the binary, its own `install.sh`, and the `50-satellite-desktop.rules` (uaccess) udev
 # rule. setup-strih.sh evals strih_companion_satellite_install (download the PINNED tar.gz, sha256
 # verify, run its own `install.sh --system --force` which installs to /opt + the desktop udev rule),
-# seeds the operator's app config.json (electron-store: remoteIp/remotePort) + writes an operator-
-# login autostart entry (never a mid-provision start), and records the intended controller host in
-# host.conf. verify-strih.sh grades it via strih_companion_verdict. The version + tarball + sha256 are
+# seeds the operator's app config.json (electron-store: remoteIp/remotePort), and records the
+# intended controller host in
+# host.conf. It is LAUNCHED by the kiosk openbox autostart (strih_openbox_autostart_text, issue 1357 --
+# openbox does not run XDG ~/.config/autostart), never mid-provision. verify-strih.sh grades it via
+# strih_companion_verdict. The version + tarball + sha256 are
 # REPRODUCIBLE pins (like the dantesync/NDI pins), never "latest"; COMPANION_SATELLITE_VERSION /
 # COMPANION_SATELLITE_TARBALL_URL / COMPANION_SATELLITE_SHA256 / COMPANION_SATELLITE_HOST /
 # COMPANION_SATELLITE_PORT override them so the supervisor can confirm/repin against the live box.
@@ -1188,22 +1093,6 @@ strih_companion_satellite_appconfig_json() {
 EOF
 }
 
-# strih_companion_satellite_autostart_text -> the operator-login autostart Desktop Entry. Owner rule:
-# a needed feature is always-ON by default, never a forgettable manual launch. The setup step writes
-# this to the operator's `~/.config/autostart/companion-satellite.desktop`.
-strih_companion_satellite_autostart_text() {
-  cat <<EOF
-[Desktop Entry]
-Type=Application
-Name=Companion Satellite
-Comment=Bitfocus Companion Satellite -- exposes the local Stream Deck to the venue controller (issue 1317)
-Exec=$(strih_companion_satellite_bin)
-Terminal=false
-X-GNOME-Autostart-enabled=true
-Hidden=false
-EOF
-}
-
 # strih_companion_satellite_install -> print the idempotent statements the caller evals (in a subshell,
 # `( eval "$(...)" ) || fail`, because it `exit 1`s on failure) to install Companion Satellite the
 # DESKTOP way: if the /opt binary is absent, install the documented deps, download the PINNED tar.gz,
@@ -1211,7 +1100,7 @@ EOF
 # --force` (idempotent; installs to /opt + the desktop udev rule + the app-menu entry). A re-run with
 # the binary already present is a pure no-op (deps + download + install.sh all inside the absence
 # guard). NEVER a .deb, NEVER `systemctl start`/`enable` -- the desktop build has no system unit; the
-# operator-login autostart (written separately by the caller) launches it. Each statement is
+# kiosk openbox autostart (strih_openbox_autostart_text, issue 1357) launches it. Each statement is
 # `;`-terminated (the _cmd-embedding trailing-newline-strip gotcha).
 strih_companion_satellite_install() {
   local url sha bin deps
@@ -1230,7 +1119,7 @@ CMD
 # strih_companion_verdict INSTALLED UDEV AUTOSTART HOST_OK -> print ONE verdict token and return 0 iff
 # the fully-configured `ok` state. Fail-closed order (missing args default to 0 = not configured):
 # not-installed -> no-udev-rule -> no-autostart -> wrong-host -> ok. verify-strih.sh feeds the live
-# /opt-binary / desktop-udev-rule / operator-autostart / seeded-controller reads and PASSes only on
+# /opt-binary / desktop-udev-rule / openbox-autostart-launch / seeded-controller reads and PASSes only on
 # `ok`, FAILing loud otherwise (test-strictness, like the other verify items).
 strih_companion_verdict() {
   local installed="${1:-0}" udev="${2:-0}" autostart="${3:-0}" host_ok="${4:-0}"
@@ -1694,180 +1583,98 @@ log "done: xhci NIC IRQ(s) [${irqs}] pinned to cpu ${target}"
 SCRIPT
 }
 
-# --- issue 1317 remainder: imag-parity genlock rtprio grant + no operator crash popups -------------
-# Owner report 23.9.2026: a crash popup the operator had to close in the morning (Ubuntu apport ->
-# update-notifier-crash.service, raised for a report left in /var/crash) and every strih-lx OBS
-# session logging `genlock: could NOT set render-tick thread SCHED_FIFO prio 10 (errno 1 — missing
-# rtprio ulimit grant?)`. imag provisions both (setup-imag.sh: the issue-484 limits.d grant, the
-# apport/whoopsie disable+mask, systemd-coredump); these helpers carry the SAME values for strih-lx
-# (setup-strih.sh step 11c writes them, verify-strih.sh items 32/33 grade them).
+# --- issue 1357: strih-lx as the OBS-box appliance (the shared baseline's per-box facts) ------------
+# setup-strih.sh now runs the SAME appliance baseline as imag (scripts/lib/obs-box-baseline.sh: plain
+# Xorg openbox kiosk, low-latency kernel, de-jitter, max-performance persistence, power envelope, ...).
+# The baseline takes box FACTS as arguments; these helpers derive strih-lx's -- never an imag value.
 
-# strih_genlock_rt_priority -> the SCHED_FIFO priority the vendored genlock render tick requests
-# (vendor/obs-studio/libobs/obs-video.c GENLOCK_RT_PRIORITY; test-pinned against that define). A
-# grant below it still EPERMs.
-strih_genlock_rt_priority() { printf '10'; }
+# strih_lx_rig_nic SYSROOT IP_ADDR_TEXT STATIC_IP -> print the ONE rig NDI interface the baseline's
+# network tuning (sysctl + EEE/flow-control) is scoped to, rc 0; rc 1 + a stderr reason when it cannot
+# be resolved (never a guessed interface -- the Wi-Fi/onboard NIC must stay untouched). Order (the same
+# as the boot-time NIC-IRQ script, issue 1317 item H): STRIH_NIC_IFACE override -> the ONE r8152 USB NIC
+# (strih_nic_iface_by_driver) -> the interface carrying STATIC_IP in IP_ADDR_TEXT (`ip -o -4 addr show`
+# output). Two r8152 NICs and no STATIC_IP match fail loud (set STRIH_NIC_IFACE to disambiguate).
+strih_lx_rig_nic() {
+  local sysroot="${1:?sysroot required}" addrs="${2-}" ip="${3-}" nic rc=0 by_ip=""
+  if [ -n "${STRIH_NIC_IFACE:-}" ]; then
+    printf '%s' "$STRIH_NIC_IFACE"
+    return 0
+  fi
+  nic="$(strih_nic_iface_by_driver "$sysroot" r8152)" || rc=$?
+  if [ "$rc" = 0 ] && [ -n "$nic" ]; then
+    printf '%s' "$nic"
+    return 0
+  fi
+  if [ -n "$ip" ]; then
+    by_ip="$(awk -v ip="$ip" '$3 == "inet" { split($4, a, "/"); if (a[1] == ip) { print $2; exit } }' <<<"$addrs" || true)"
+  fi
+  if [ -n "$by_ip" ]; then
+    printf '%s' "$by_ip"
+    return 0
+  fi
+  echo "strih_lx_rig_nic: cannot resolve the rig NDI NIC (r8152 lookup: ${nic:-none}; no interface carries '${ip:-<no STRIH_LX_IP>}') -- set STRIH_NIC_IFACE" >&2
+  return 1
+}
 
-# strih_rtprio_limits_path -> the limits.d drop-in carrying the grant. STRIH_RTPRIO_LIMITS_FILE
-# overrides (the test seam; the live box value is the default).
-strih_rtprio_limits_path() {
+# strih_lx_pl1_watts -> the strih-lx CPU's sustainable RAPL PL1 wattage for the baseline power envelope:
+# the i5-13450HX's Intel-specified Processor Base Power (55 W; box fact in
+# .claude/rules/strih-linux-provisioning.md), NOT imag's i7-13620H re-baseline. STRIH_LX_PL1_W overrides
+# it once a thermal soak says otherwise; the envelope's own guard steps PL1 down on a hot TCPU.
+strih_lx_pl1_watts() { printf '%s' "${STRIH_LX_PL1_W:-55}"; }
+
+# strih_rtprio_leftover_path -> the realtime-priority grant the retired setup-strih sub-step wrote
+# (issue 1357: rtprio stays OFF -- the render-tick SCHED_FIFO pin assumed a reserved core and leaked
+# FIFO + affinity to 28 NDI threads on strih-lx). setup-strih.sh removes it (self-heal) and
+# verify-strih.sh FAILs while it exists. STRIH_RTPRIO_LIMITS_FILE overrides it (the test seam).
+strih_rtprio_leftover_path() {
   printf '%s' "${STRIH_RTPRIO_LIMITS_FILE:-/etc/security/limits.d/95-strih-genlock-rtprio.conf}"
 }
 
-# strih_rtprio_limits_text USER -> the limits.d body granting USER `rtprio 20` (the imag issue-484
-# value, headroom above the 10 the render tick requests; `-` sets soft AND hard, the soft limit is
-# what sched_setscheduler checks). An empty USER is refused (rc 1, no output) -- never a grant for
-# nobody. WHEN it applies differs from imag: strih-obs.service is a --user unit, so OBS inherits its
-# limits from the LINGERING user@UID manager (setup-strih.sh step 13 enables linger), which gets
-# pam_limits (/usr/lib/pam.d/systemd-user) only when it STARTS -- i.e. at the next reboot of the box
-# (or a restart of user@UID, which ends the operator session), never at a mere login.
-strih_rtprio_limits_text() {
-  local user="${1-}"
-  if [ -z "$user" ]; then
-    echo "strih_rtprio_limits_text: desktop user required" >&2
-    return 1
-  fi
-  cat <<EOF
-# camera-box issue 1317 (imag issue-484 parity): allow ${user} to set SCHED_FIFO (rtprio) so the
-# genlock OBS render-tick thread goes realtime instead of logging "could NOT set render-tick thread
-# SCHED_FIFO" and continuing SCHED_OTHER. Value 20 = headroom above the 10 the thread requests
-# (vendor/obs-studio/libobs/obs-video.c GENLOCK_RT_PRIORITY). OBS runs under the lingering
-# systemd --user manager, which applies this (via pam_limits) when it starts: at the next reboot.
-# Written by setup-strih.sh step 11c -- re-run it instead of hand-editing.
-${user}   -   rtprio   20
-EOF
-}
-
-# strih_rtprio_grant_ok USER  (stdin: a limits.conf-format text) -> 0 iff the text grants USER an
-# rtprio SOFT and HARD limit >= strih_genlock_rt_priority (or `unlimited`). `-` sets both; an
-# explicit `soft`+`hard` pair counts too; a hard-only line leaves the soft limit at 0 (still EPERM).
-# Comments are stripped; a later matching line overrides an earlier one (pam_limits last-wins).
-# Reads the whole stdin (drain-safe). Fail-closed: an empty USER/input returns 1. Scope: grades the
-# strih drop-in setup-strih.sh writes (an exact USER domain) -- NOT a general limits.conf evaluator
-# (`*` / `@group` domains and other limits.d files are deliberately not considered).
-strih_rtprio_grant_ok() {
-  local user="${1-}" min line domain type item value rest ok soft=0 hard=0
-  min="$(strih_genlock_rt_priority)"
-  while IFS= read -r line || [ -n "$line" ]; do
-    line="${line%%#*}"
-    domain="" type="" item="" value="" rest=""
-    read -r domain type item value rest <<<"$line" || true
-    if [ -z "$user" ] || [ "$domain" != "$user" ] || [ "$item" != rtprio ]; then continue; fi
-    ok=0
-    if [ "$value" = unlimited ]; then
-      ok=1
-    elif [[ "$value" =~ ^[0-9]+$ ]] && [ "$value" -ge "$min" ]; then
-      ok=1
-    fi
-    case "$type" in
-      -)    soft="$ok"; hard="$ok" ;;
-      soft) soft="$ok" ;;
-      hard) hard="$ok" ;;
-    esac
+# strih_lx_reboot_pending CMDLINE [LOWLATENCY_CFG] -> 0 iff the shared baseline's BOOT-time changes are
+# provisioned but not running yet: the lowlatency config drop-in exists while the running kernel
+# cmdline (CMDLINE = /proc/cmdline) carries no `preempt=full` token. The kernel, PRIME nvidia-primary
+# and the lightdm -> openbox kiosk all take effect at the same next boot, so this one fact tells
+# setup-strih.sh's final step that the acceptance gate will report those items as pending (expected)
+# rather than failed. Returns 1 when nothing is pending (or the drop-in is absent: nothing provisioned).
+strih_lx_reboot_pending() {
+  local cmdline="${1-}" cfg="${2:-/etc/default/grub.d/99-lowlatency.cfg}" tok
+  [ -f "$cfg" ] || return 1
+  for tok in $cmdline; do
+    [ "$tok" = preempt=full ] && return 1
   done
-  [ "$soft" = 1 ] && [ "$hard" = 1 ]
+  return 0
 }
 
-# strih_rtprio_session_verdict GRANT OBS_RUNNING  (stdin: the newest OBS log text, may be empty) ->
-# ONE verdict token for verify-strih item 32. GRANT/OBS_RUNNING are 1/0.
-#   no-grant               (rc 1) -- the limits.d grant is missing/insufficient: FAIL
-#   grant-pending-reboot   (rc 2) -- grant present, but the RUNNING OBS still logs the EPERM line:
-#                                    its lingering user manager started before the grant, so it
-#                                    applies at the next reboot -> NOTE, not FAIL
-#   ok-sched-fifo          (rc 0) -- grant present + the running OBS logged the SCHED_FIFO success
-#   ok                     (rc 0) -- grant present, no contrary evidence (OBS down = the newest log
-#                                    is a PAST session, never graded)
-# here-strings, never `printf | grep -q` (a 100s-of-KB log SIGPIPEs printf under pipefail).
-strih_rtprio_session_verdict() {
-  local grant="${1:-0}" running="${2:-0}" text
-  text="$(cat)"
-  if [ "$grant" != 1 ]; then printf 'no-grant'; return 1; fi
-  if [ "$running" = 1 ]; then
-    if grep -q 'could NOT set render-tick thread SCHED_FIFO' <<<"$text"; then
-      printf 'grant-pending-reboot'; return 2
-    fi
-    if grep -q 'render-tick thread set SCHED_FIFO' <<<"$text"; then
-      printf 'ok-sched-fifo'; return 0
-    fi
-  fi
-  printf 'ok'; return 0
+# strih_companion_satellite_openbox_line -> the kiosk openbox autostart line that launches Companion
+# Satellite in the operator session (backgrounded; the Electron app keeps running). The ONE string both
+# strih_openbox_autostart_text writes and verify-strih's (companion) item greps for.
+strih_companion_satellite_openbox_line() {
+  printf '%s >/dev/null 2>&1 &' "$(strih_companion_satellite_bin)"
 }
 
-# strih_crash_popup_units -> the system units setup-strih.sh masks, one per line: the imag list
-# (setup-imag.sh `systemctl mask apport.service whoopsie.service`) PLUS the 26.04 apport coredump
-# hook. apport writes the /var/crash reports that raise the update-notifier-crash desktop popup (and
-# multi-GB cores right when OBS already crashed); whoopsie phones crash reports home. On 26.04 apport
-# ALSO ships a systemd-coredump drop-in (`OnSuccess=apport-coredump-hook@%i.service`) that runs
-# `apport --from-systemd-coredump` and writes /var/crash regardless of apport.service's mask -- so
-# with systemd-coredump installed the popup survives unless the hook TEMPLATE is masked too (masking
-# a template blocks every instance; systemd-coredump itself keeps collecting cores for coredumpctl).
-strih_crash_popup_units() {
-  printf '%s\n' apport.service apport-coredump-hook@.service whoopsie.service
-}
-
-# strih_crash_popup_unit_ok ENABLED_STATE ACTIVE_STATE -> 0 iff one crash unit is quiet: its
-# `systemctl is-enabled` FIRST line is masked / masked-runtime / disabled / not-found / empty
-# (unit file absent) AND its `systemctl is-active` first line is inactive / failed. Anything else
-# (enabled, static, an unreadable active state, an unknown token) returns 1 -- fail-closed.
-strih_crash_popup_unit_ok() {
-  local en="${1-}" act="${2-}"
-  en="${en%%$'\n'*}"
-  act="${act%%$'\n'*}"
-  case "$en" in
-    masked|masked-runtime|disabled|not-found|'') ;;
-    *) return 1 ;;
-  esac
-  case "$act" in
-    inactive|failed) return 0 ;;
-    *) return 1 ;;
-  esac
-}
-
-# strih_crash_popup_template_ok ENABLED_STATE -> 0 iff a TEMPLATE crash unit (`name@.service`) is
-# blocked: its `systemctl is-enabled` first line is masked / masked-runtime, or not-found / empty
-# (the package is absent). `static` (the 26.04 default -- pulled by systemd-coredump's OnSuccess=),
-# `disabled` (disable does not stop an OnSuccess= pull) or anything else returns 1. The active state
-# of a template name is not meaningful, so it is never graded.
-strih_crash_popup_template_ok() {
-  local en="${1-}"
-  en="${en%%$'\n'*}"
-  case "$en" in
-    masked|masked-runtime|not-found|'') return 0 ;;
-    *) return 1 ;;
-  esac
-}
-
-# strih_crash_popup_member_ok UNIT ENABLED_STATE ACTIVE_STATE -> grade one strih_crash_popup_units
-# member: a template (`*@.service`) by strih_crash_popup_template_ok (is-enabled only), any other
-# unit by strih_crash_popup_unit_ok (is-enabled AND is-active). The one dispatch verify-strih uses.
-strih_crash_popup_member_ok() {
-  local unit="${1-}"
-  case "$unit" in
-    *@.service) strih_crash_popup_template_ok "${2-}" ;;
-    *)          strih_crash_popup_unit_ok "${2-}" "${3-}" ;;
-  esac
-}
-
-# strih_crash_reports_count [DIR] -> print the number of regular `*.crash` files in DIR (default
-# /var/crash). update-notifier re-raises the popup at login for reports ALREADY there, so
-# verify-strih REPORTS them; deleting them is a supervisor data action, never provisioning. A
-# missing/unreadable DIR prints 0. Always rc 0 (safe as a bare assignment under set -e).
-strih_crash_reports_count() {
-  local dir="${1:-/var/crash}" n=0 f
-  for f in "$dir"/*.crash; do
-    if [ -f "$f" ]; then n=$((n + 1)); fi
-  done
-  printf '%s' "$n"
-}
-
-# strih_crash_popup_verdict "BAD_UNITS" COREDUMP -> ONE token for verify-strih item 33, 0 iff `ok`.
-# BAD_UNITS = the space-separated crash units that failed strih_crash_popup_member_ok (empty = none);
-# COREDUMP = 1 when systemd-coredump is installed. Units are graded first (the popup is the operator
-# symptom), then the coredump collector.
-strih_crash_popup_verdict() {
-  local words=() bad core="${2-}"
-  read -r -a words <<<"${1-}" || true
-  bad="${words[*]-}"
-  if [ -n "$bad" ]; then printf 'units-live: %s' "$bad"; return 1; fi
-  if [ "$core" != 1 ]; then printf 'no-systemd-coredump'; return 1; fi
-  printf 'ok'; return 0
+# strih_openbox_autostart_text -> the strih-lx kiosk ~/.config/openbox/autostart (lightdm autologin ->
+# openbox on plain Xorg, the imag appliance). It extends the display (the notebook panel = the primary
+# operator screen with the OBS UI + Multiview, the HDMI output right of it for the fixed fullscreen
+# projector OBS restores via SaveProjectors, issue 1346), carries the shared kiosk preamble (never-blank
+# + OBS crash-sentinel clear, obs_box_openbox_autostart_preamble -- graded by the baseline verify), then
+# STARTS the supervised --user units (openbox never reaches graphical-session.target, so their WantedBy
+# alone would never fire -- imag's step-16 pattern) and launches Companion Satellite. RustDesk needs no
+# line: its system rustdesk.service serves the Xorg session itself. Needs obs-box-baseline.sh sourced.
+strih_openbox_autostart_text() {
+  cat <<'AUTOSTART_EOF'
+#!/bin/bash
+# strih-lx OBS kiosk boot -- WRITTEN BY setup-strih.sh (issue 1357, the shared OBS-box baseline). Do not hand-edit.
+sleep 1
+PANEL=$(xrandr | awk '/ connected/ && $1 !~ /^HDMI/ {print $1; exit}')
+PROJ=$(xrandr  | awk '/ connected/ && $1 ~  /^HDMI/ {print $1; exit}')
+[ -n "$PANEL" ] && xrandr --output "$PANEL" --primary --auto 2>/dev/null || true
+if [ -n "$PROJ" ] && [ -n "$PANEL" ]; then
+  xrandr --output "$PROJ" --auto --right-of "$PANEL" 2>/dev/null || true
+fi
+AUTOSTART_EOF
+  obs_box_openbox_autostart_preamble
+  # one start per unit: a not-yet-installed bundle-state server must never block the OBS start.
+  printf '%s\n' 'systemctl --user start strih-obs.service || true' \
+    'systemctl --user start strih-bundle-state-server.service || true'
+  printf '%s\n' "$(strih_companion_satellite_openbox_line)"
 }

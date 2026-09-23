@@ -10,6 +10,13 @@ set -euo pipefail
 #   * joins the cluster clock as a dantesync CLIENT (`--ntp-server strih.lan`) -- the Windows PC
 #     stays the ONE NTP master while both run.
 #
+# issue 1357 (owner rulings): the box itself is the SAME OBS-only appliance imag was -- every box-level
+# item (lightdm autologin -> openbox on plain Xorg with GNOME purged, low-latency kernel, boot safety
+# net, AFFINITY-ONLY core reservation, NVIDIA PRIME nvidia-primary, de-jitter + no crash popups,
+# network tuning, max-performance persistence, power envelope, touchpad) comes from the shared
+# scripts/lib/obs-box-baseline.sh that setup-imag.sh runs too (step 11 below), graded by the shared
+# scripts/lib/obs-box-baseline-verify.sh. This script keeps only the strih ROLE steps.
+#
 # The strih role FACTS + pure decisions live in scripts/lib/strih-provision.sh (sourced below +
 # unit-tested from tests/strih_provision_pure_functions.rs). This orchestrator is the enable-only,
 # fail-loud flow around them; it reuses the shared genlock-markers.sh helper and the canonical
@@ -39,6 +46,8 @@ fail() { echo -e "${RED}FAIL: $1${NC}" >&2; exit 1; }
 . "${HERE}/lib/genlock-markers.sh"
 # shellcheck source=scripts/lib/ndi-runtime.sh
 . "${HERE}/lib/ndi-runtime.sh"   # issue 1317: shared NDI 6.3.2 runtime install recipe (with setup-imag.sh)
+# shellcheck source=scripts/lib/obs-box-baseline.sh
+. "${HERE}/lib/obs-box-baseline.sh"   # issue 1357: the ONE OBS-box appliance baseline (the SAME lib setup-imag.sh runs)
 
 # --- source-guard: when sourced (the unit tests), stop here -- never run the destructive flow ----
 if [ "${BASH_SOURCE[0]}" != "${0}" ]; then
@@ -112,11 +121,15 @@ fi
 
 # ---------------------------------------------------------------------------------------------
 REC_ENC="$(strih_lx_profile_facts | grep '^rec_encoder=' | cut -d= -f2)"
-step 3 "NVIDIA driver / NVENC check (record encoder ${REC_ENC})"
+step 3 "NVIDIA driver / NVENC pre-check (record encoder ${REC_ENC}; the driver + PRIME install is baseline step 11)"
+# issue 1357: the NVIDIA driver + PRIME nvidia-primary are a BASELINE item now (obs_box_nvidia_prime,
+# step 11, run in imag's order AFTER the boot safety net so the DKMS/grub change is guarded). On a box
+# that already has the driver this reports NVENC; on a fresh box it only warns -- step 11 installs the
+# driver, and verify-strih item 10 is the hard NVENC gate after the reboot.
 if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi >/dev/null 2>&1; then
   echo "  nvidia-smi OK -- NVENC HEVC available for ${REC_ENC}"
 else
-  fail "nvidia-smi missing/failing -- the strih role records with NVENC HEVC; install the NVIDIA dGPU driver first"
+  warn "  nvidia-smi missing/failing -- step 11 (baseline) installs nvidia-driver-595-open + PRIME; NVENC for ${REC_ENC} after the next boot (verify-strih item 10 gates it)"
 fi
 
 # ---------------------------------------------------------------------------------------------
@@ -412,20 +425,15 @@ chown -R "$DESKTOP_USER":"$DESKTOP_USER" "${USER_HOME}/.config/systemd/user" 2>/
 for _launcher in strih-obs-start.sh strih-obs-stop.sh; do
   [ -f "${HERE}/${_launcher}" ] || fail "launcher scripts/${_launcher} not found next to this script (it is the strih-obs.service ExecStart/ExecStop target)"
 done
-# issue 1352: strih-obs-start.sh carries a @STRIH_LX_OBS_GPU_ENV@ marker for the RTX 5050 XWayland-
-# PRIME export block; strih_lx_obs_gpu_env (scripts/lib/strih-provision.sh) is the ONE source of
-# truth for those 4 exports. SUBSTITUTE the marker into the DEPLOYED wrapper (the @JANUS_ROOM_SECRET@
-# idiom) so the box renders on the RTX -- a verbatim install would leave it on the saturated iGPU.
-# strih-obs-stop.sh has no marker -> plain install.
-STRIH_OBS_START_TEXT="$(cat "${HERE}/strih-obs-start.sh")"
-STRIH_OBS_START_TEXT="${STRIH_OBS_START_TEXT//#@STRIH_LX_OBS_GPU_ENV@/$(strih_lx_obs_gpu_env)}"
-printf '%s\n' "$STRIH_OBS_START_TEXT" > /usr/local/bin/strih-obs-start.sh
-chmod 0755 /usr/local/bin/strih-obs-start.sh
+# issue 1357: both launchers install VERBATIM. The issue-1352 XWayland-PRIME GPU-env substitution is
+# gone: OBS runs in the plain Xorg openbox kiosk (baseline step 11) on the PRIME nvidia-PRIMARY X server,
+# so it renders on the RTX with no offload env -- exactly like imag.
+install -m 0755 "${HERE}/strih-obs-start.sh" /usr/local/bin/strih-obs-start.sh
 install -m 0755 "${HERE}/strih-obs-stop.sh"  /usr/local/bin/strih-obs-stop.sh
-echo "  installed launcher pair -> /usr/local/bin/strih-obs-start.sh (RTX GPU env substituted) + strih-obs-stop.sh (mode 0755)"
+echo "  installed launcher pair -> /usr/local/bin/strih-obs-start.sh + strih-obs-stop.sh (mode 0755)"
 sudo -u "$DESKTOP_USER" XDG_RUNTIME_DIR="/run/user/$(id -u "$DESKTOP_USER")" systemctl --user enable strih-obs.service 2>/dev/null \
   || warn "  enable strih-obs.service by hand once the user session bus is up"
-echo "  strih-obs.service installed + enabled (starts on the next graphical session)"
+echo "  strih-obs.service installed + enabled (the kiosk openbox autostart, step 15, starts it at every boot)"
 
 # ---------------------------------------------------------------------------------------------
 step "8b" "strih-mv-host projector-host helper (issue 1352, XWayland+PRIME present-stall workaround) -- enable-only"
@@ -436,6 +444,10 @@ step "8b" "strih-mv-host projector-host helper (issue 1352, XWayland+PRIME prese
 # any projector toplevel whenever one appears). Install python3-xlib (its only dep), the helper (0755)
 # + the --user unit, daemon-reload + ENABLE-ONLY (never live-start -- the provisioning convention; the
 # unit comes up on the next graphical session). A lettered sub-step so TOTAL_STEPS is unchanged.
+# issue 1357: kept in place, but the stall it works around is an XWayland+PRIME-offload artefact --
+# on the plain Xorg openbox kiosk (NVIDIA-primary, baseline step 11) both this helper and the vendored
+# child-host projector must be RE-MEASURED by the supervisor and removed if the stall is gone. Its unit
+# still reads the GNOME mutter Xwayland auth file, so it stays DISABLED (the default below) on Xorg.
 DEBIAN_FRONTEND=noninteractive apt-get install -y python3-xlib \
   || fail "python3-xlib install failed -- strih-mv-host.py imports Xlib; fix the box's apt sources and re-run"
 [ -f "${HERE}/strih-mv-host.py" ] || fail "scripts/strih-mv-host.py not found next to this script (issue 1352 projector-host helper)"
@@ -496,17 +508,44 @@ fi
 rm -f "$TMP_INST"
 
 # ---------------------------------------------------------------------------------------------
-step 11 "Never-sleep + de-jitter masks (parallel-box steady state)"
-systemctl mask sleep.target suspend.target hibernate.target hybrid-sleep.target 2>/dev/null || true
-mkdir -p /etc/systemd/logind.conf.d
-cat > /etc/systemd/logind.conf.d/90-strih-lx.conf <<'LG'
-[Login]
-HandleLidSwitch=ignore
-HandleSuspendKey=ignore
-HandleHibernateKey=ignore
-HandlePowerKey=ignore
-LG
-echo "  sleep/suspend/hibernate masked; lid + power keys ignored"
+step 11 "OBS-box appliance baseline (issue 1357: the SAME lib as imag -- Xorg openbox kiosk, low-latency kernel, de-jitter, max-performance, power envelope)"
+# issue 1357 (owner rulings on the ticket): imag's provisioning is the reference starting position and
+# strih-lx must be the same OBS-only appliance -- a lightweight openbox kiosk on plain Xorg, NOT a GNOME
+# Wayland desktop. Every box-level item is the SHARED scripts/lib/obs-box-baseline.sh (moved verbatim
+# out of setup-imag.sh), run here in imag's order with strih-lx's own FACTS as the arguments. This
+# supersedes the old strih never-sleep (logind drop-in), the de-jitter-less GNOME session, the step-15
+# governor oneshot and the 11c crash-popup sub-step. Kernel, PRIME and session changes take effect at
+# the next boot (the supervisor reboots strih-lx once after this run).
+STRIH_KERNEL_SERIES="$(obs_box_kernel_series)" \
+  || fail "cannot derive the Ubuntu release series from /etc/os-release -- refusing to hold/install kernel packages by a guessed name"
+STRIH_NIC="$(strih_lx_rig_nic /sys "$(ip -o -4 addr show 2>/dev/null || true)" "$STATIC_IP")" \
+  || fail "cannot resolve the rig NDI NIC for the network tuning -- set STRIH_NIC_IFACE=<iface> and re-run"
+echo "  box facts: series=${STRIH_KERNEL_SERIES} nic=${STRIH_NIC} user=${DESKTOP_USER} pl1=$(strih_lx_pl1_watts)W"
+# the power envelope's on-box tools come from THIS checkout (setup-strih runs from the repo; imag fetches
+# the same files over gh api).
+strih_fetch_repo_file() {  # strih_fetch_repo_file REPO_RELPATH DEST
+  cp -f "${HERE}/../$1" "$2"
+}
+obs_box_network_tuning "$STRIH_NIC" strih
+obs_box_max_performance "$STRIH_NIC" strih
+obs_box_never_sleep "$DESKTOP_USER" strih
+obs_box_boot_safety_net "$STRIH_KERNEL_SERIES" strih
+obs_box_lowlatency_kernel "$STRIH_KERNEL_SERIES"
+obs_box_cpu_affinity strih        # -> /etc/strih-isolated-cpus.conf, strih-obs-start.sh's taskset pin
+obs_box_nvidia_prime strih        # nvidia-driver-595-open + PRIME nvidia-PRIMARY (the RTX 5050)
+obs_box_dejitter "$DESKTOP_USER" strih "$OBS_CFG"
+obs_box_kiosk "$DESKTOP_USER" strih
+obs_box_power_envelope "$(strih_lx_pl1_watts)" strih_fetch_repo_file
+obs_box_touchpad strih
+obs_box_maxperf_persistence strih
+# rtprio stays OFF (issue 1357 design): the retired 11c grant pinned the render tick SCHED_FIFO on cores
+# strih-lx never reserved and the FIFO + affinity leaked to 28 NDI threads (issue comment 5793075833).
+# Self-heal: remove a grant a previous run (or a hand fix) left behind -- verify-strih FAILs while it exists.
+RTPRIO_LEFTOVER="$(strih_rtprio_leftover_path)"
+if [ -e "$RTPRIO_LEFTOVER" ]; then
+  rm -f "$RTPRIO_LEFTOVER" || fail "could not remove the leftover rtprio grant ${RTPRIO_LEFTOVER}"
+  echo -e "  ${YELLOW}removed the leftover rtprio grant ${RTPRIO_LEFTOVER} (rtprio stays OFF, issue 1357)${NC}"
+fi
 
 # ---------------------------------------------------------------------------------------------
 # Lettered sub-step (TOTAL_STEPS unchanged -- the issue 1352/1353 precedent): the NIC-IRQ placement
@@ -529,48 +568,6 @@ systemctl daemon-reload 2>/dev/null || true
 systemctl enable strih-nic-irq-affinity.service 2>/dev/null \
   || warn "  enable strih-nic-irq-affinity.service by hand (systemctl enable)"
 echo "  strih-nic-irq-affinity.service installed + enabled (applies at next boot / supervisor runs it live)"
-
-# ---------------------------------------------------------------------------------------------
-# Lettered sub-step (TOTAL_STEPS stays 17, test-pinned): two imag-parity appliance items that ride
-# with the de-jitter steps above (issue 1317 remainder, owner report 23.9.2026).
-step "11c" "Genlock render-tick rtprio grant + no crash popups (apport/whoopsie masked, systemd-coredump) -- imag parity"
-# (a) rtprio: the vendored genlock render tick asks for SCHED_FIFO; OBS runs as the UNPRIVILEGED
-#     desktop user, so without an rtprio ulimit grant sched_setscheduler fails EPERM and every OBS
-#     session logs "could NOT set render-tick thread SCHED_FIFO ... continuing SCHED_OTHER" (more
-#     tick jitter -> more relock/late_hold -> the in-OBS LOCK indicator shows DEGRADED more often).
-#     The imag issue-484 limits.d drop-in, value for value (rtprio 20). UNLIKE imag, OBS here runs
-#     as the --user unit strih-obs.service under the LINGERING user manager (step 13 enables
-#     linger), which applies pam_limits only when it starts -- so the grant takes effect at the next
-#     REBOOT of strih-lx (the supervisor reboots once after this step; strih-lx is not a cambox).
-RTPRIO_FILE="$(strih_rtprio_limits_path)"
-install -d -m 755 "$(dirname "$RTPRIO_FILE")"
-strih_rtprio_limits_text "$DESKTOP_USER" > "$RTPRIO_FILE" \
-  || fail "could not write ${RTPRIO_FILE} (the genlock render-tick rtprio grant for ${DESKTOP_USER})"
-chmod 0644 "$RTPRIO_FILE"
-echo "  ${RTPRIO_FILE} grants ${DESKTOP_USER} rtprio 20 (takes effect at the next reboot: OBS inherits its limits from the lingering systemd --user manager)"
-# (b) no operator crash popups: apport writes /var/crash reports that raise the
-#     update-notifier-crash desktop popup the operator had to close, and multi-GB cores right when
-#     OBS already crashed; whoopsie phones reports home. MASK them (the imag list) PLUS the 26.04
-#     apport coredump hook TEMPLATE -- systemd-coredump's OnSuccess= drop-in runs it and it writes
-#     /var/crash even with apport.service masked. Per unit, so an absent whoopsie never skips
-#     apport; a plain unit is also disabled + STOPPED (a unit masked earlier by hand can still be
-#     active); a template has no instance to stop. systemd-coredump stays the core collector, so a
-#     crash is diagnosable via coredumpctl instead of a GUI popup (fail loud, like imag).
-while IFS= read -r CRASH_UNIT; do
-  [ -n "$CRASH_UNIT" ] || continue
-  case "$CRASH_UNIT" in
-    *@.service) ;;
-    *)
-      systemctl disable --now "$CRASH_UNIT" >/dev/null 2>&1 || true
-      systemctl stop "$CRASH_UNIT" >/dev/null 2>&1 || true
-      ;;
-  esac
-  systemctl mask "$CRASH_UNIT" >/dev/null 2>&1 \
-    || fail "could not mask ${CRASH_UNIT} -- the operator crash popup would return (systemctl mask ${CRASH_UNIT} by hand, then re-run)"
-done < <(strih_crash_popup_units)
-DEBIAN_FRONTEND=noninteractive apt-get install -y systemd-coredump >/dev/null \
-  || fail "systemd-coredump install failed -- needed so a crash lands in coredumpctl once apport is masked"
-echo "  apport + its coredump hook + whoopsie masked (no operator crash popup); systemd-coredump installed (crashes -> coredumpctl)"
 
 # ---------------------------------------------------------------------------------------------
 AUDIO_NAME="$(strih_lx_audio_input_name)"
@@ -685,26 +682,29 @@ else
 fi
 
 # ---------------------------------------------------------------------------------------------
-step 15 "CPU performance governor + never-sleep (low-latency genlock cutter)"
-# issue 1317: the owner caught this missing live -- a fresh strih-lx booted on the distro-default
-# powersave/schedutil governor, wrong for the low-latency genlock OBS cutter (the imag-nb + cam-box
-# fleet pin `performance` explicitly, setup-device.sh STEP-13 + .claude/rules/realtime-isolation.md).
-# Apply it NOW (power-profiles-daemon preferred, else the scaling_governor write) + re-mask sleep,
-# then install the persistence oneshot so it survives a reboot.
-eval "$(strih_performance_mode_apply)" || warn "  performance-mode apply hit a soft error (per-core write refused?) -- verify-strih (perf) gates the live state"
-strih_cpu_performance_unit_text > /etc/systemd/system/cpu-performance.service \
-  || fail "could not write /etc/systemd/system/cpu-performance.service"
-systemctl daemon-reload
-systemctl enable cpu-performance.service 2>/dev/null || warn "  could not enable cpu-performance.service (governor still set for this boot; enable it by hand)"
-# issue 1317: report the EFFECTIVE governor/EPP/ppd triple (the apply now writes the governor
-# UNCONDITIONALLY, so this never contradicts itself with a "performance (now: powersave)" line).
-GOV_NOW="$(cat /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor 2>/dev/null | sort -u | tr '\n' ',' | sed 's/,$//' || true)"
-EPP_NOW="$(cat /sys/devices/system/cpu/cpu*/cpufreq/energy_performance_preference 2>/dev/null | sort -u | tr '\n' ',' | sed 's/,$//' || true)"
-PPD_NOW="$(command -v powerprofilesctl >/dev/null 2>&1 && powerprofilesctl get 2>/dev/null || true)"
-echo "  CPU performance mode applied: $(strih_perf_effective_line "${GOV_NOW:-unreadable}" "${EPP_NOW:-absent}" "${PPD_NOW:-absent}"); sleep/suspend masked; cpu-performance.service enabled for persistence"
+step 15 "Kiosk openbox autostart + root menu (issue 1357: OBS + Companion Satellite start in the Xorg openbox session)"
+# issue 1357: the lightdm autologin -> openbox kiosk (baseline step 11) runs ~/.config/openbox/autostart
+# at every boot -- the imag step-16 pattern. openbox never reaches graphical-session.target, so the
+# --user units' WantedBy alone would never fire: the autostart STARTS strih-obs.service + the bundle-
+# state server itself and launches Companion Satellite (openbox does not run XDG ~/.config/autostart,
+# which is why the GNOME-era .desktop entries are removed below -- an XDG autostart that DID fire via
+# systemd --user would double-launch). It carries the shared kiosk preamble (never-blank + OBS crash-
+# sentinel clear) the baseline verify grades. The root menu is the SAME printer imag uses.
+install -d -o "$DESKTOP_USER" -g "$DESKTOP_USER" -m 755 "${USER_HOME}/.config/openbox"
+strih_openbox_autostart_text > "${USER_HOME}/.config/openbox/autostart" \
+  || fail "could not write ${USER_HOME}/.config/openbox/autostart"
+chmod +x "${USER_HOME}/.config/openbox/autostart"
+chown "$DESKTOP_USER":"$DESKTOP_USER" "${USER_HOME}/.config/openbox/autostart"
+obs_box_openbox_menu_xml "strih-lx" "systemctl --user start strih-obs.service" "/usr/local/bin/strih-obs-stop.sh" \
+  > "${USER_HOME}/.config/openbox/menu.xml" \
+  || fail "could not write ${USER_HOME}/.config/openbox/menu.xml"
+chown "$DESKTOP_USER":"$DESKTOP_USER" "${USER_HOME}/.config/openbox/menu.xml"
+rm -f "${USER_HOME}/.config/autostart/companion-satellite.desktop" "${USER_HOME}/.config/autostart/obs.desktop"
+rmdir "${USER_HOME}/.config/autostart" 2>/dev/null || true
+echo "  ~/.config/openbox/autostart (display layout + kiosk preamble + strih-obs/bundle-state start + Companion Satellite) + menu.xml written for ${DESKTOP_USER}; GNOME-era XDG autostarts removed"
 
 # ---------------------------------------------------------------------------------------------
-step 16 "Bitfocus Companion Satellite (Stream Deck surface agent) -- desktop, autostart-only"
+step 16 "Bitfocus Companion Satellite (Stream Deck surface agent) -- desktop, launched by the openbox autostart"
 # issue 1317: the owner caught this missing live -- the notebook's locally-attached Stream Deck was
 # dead because Companion Satellite was never installed. Install the SATELLITE (NOT full Companion --
 # the venue runs the Companion CONTROLLER at 10.77.9.205, this box only exposes its local surface to
@@ -756,12 +756,9 @@ chown "$DESKTOP_USER":"$DESKTOP_USER" "${CS_APPCFG_DIR}/config.json"
 # running instance adopts it live (connected:true afterwards). Best-effort: a no-op when the Satellite
 # is not up (a fresh box that seeds but never starts it), so it never aborts the provisioning run.
 eval "$(strih_companion_satellite_rest_apply_cmd "$CS_HOST" "$CS_PORT")" || true
-# Operator-login autostart (never started mid-provision; the operator / next login launches it).
-install -d -o "$DESKTOP_USER" -g "$DESKTOP_USER" -m 755 "${USER_HOME}/.config/autostart"
-strih_companion_satellite_autostart_text > "${USER_HOME}/.config/autostart/companion-satellite.desktop" \
-  || fail "could not write the Companion Satellite autostart entry"
-chown "$DESKTOP_USER":"$DESKTOP_USER" "${USER_HOME}/.config/autostart/companion-satellite.desktop"
-echo "  Companion Satellite v${CS_VER} installed to /opt (autostart for ${DESKTOP_USER}, NOT started); controller ${CS_HOST}:${CS_PORT} seeded (config.json + host.conf)"
+# issue 1357: launched by the kiosk openbox autostart (step 15, strih_companion_satellite_openbox_line) --
+# never started mid-provision, and no XDG ~/.config/autostart entry (openbox does not run those).
+echo "  Companion Satellite v${CS_VER} installed to /opt (launched by the openbox autostart for ${DESKTOP_USER}, NOT started now); controller ${CS_HOST}:${CS_PORT} seeded (config.json + host.conf)"
 
 # ---------------------------------------------------------------------------------------------
 # A lettered sub-step so TOTAL_STEPS stays 17 (test-pinned).
@@ -870,7 +867,15 @@ fi
 # ---------------------------------------------------------------------------------------------
 step 17 "Final verification (verify-strih.sh acceptance gate)"
 if [ -x "${HERE}/verify-strih.sh" ]; then
-  "${HERE}/verify-strih.sh" || fail "verify-strih.sh acceptance gate did not pass"
+  if strih_lx_reboot_pending "$(cat /proc/cmdline 2>/dev/null || true)"; then
+    # issue 1357: the baseline's kernel / PRIME / Xorg-kiosk changes only run after the next boot, so
+    # the gate's baseline items are EXPECTED to report them pending on this run -- report, never fail
+    # provisioning here; the post-reboot verify-strih.sh run is the acceptance gate.
+    warn "  the shared OBS-box baseline takes effect at the NEXT boot -- reboot strih-lx, then run verify-strih.sh (the run below only reports what is still pending)"
+    "${HERE}/verify-strih.sh" || warn "  verify-strih.sh reports pending items -- expected before the reboot"
+  else
+    "${HERE}/verify-strih.sh" || fail "verify-strih.sh acceptance gate did not pass"
+  fi
 else
   warn "  verify-strih.sh not found/executable next to this script -- run it manually"
 fi
