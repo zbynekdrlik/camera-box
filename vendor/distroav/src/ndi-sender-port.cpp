@@ -6,11 +6,13 @@
 	adds it on Linux only).
 
 	Known, accepted race: the fd scan runs on sockets libndi owns. If a libndi
-	thread closes an fd and the number is reused between our getsockname() and
-	the abort (setsockopt + disconnect), the worst case is one unrelated socket
-	reset instead of closed with a FIN. Every syscall failure is logged and
-	skipped. A libndi thread that writes to a connection after the abort gets
-	EPIPE, never a signal: the OBS frontend blocks SIGPIPE in every thread.
+	thread closes an fd and the number is reused by another socket of this
+	process between the re-check and the reset (one syscall apart), that socket
+	is reset at once: the worst case is one unrelated LIVE connection (e.g. an
+	in-process receiver's) dropped and reconnected. Every syscall failure is
+	logged and skipped. A libndi thread that writes to a connection after the
+	abort gets EPIPE, never a signal: the OBS frontend blocks SIGPIPE in every
+	thread.
 
 	Not covered (a TIME_WAIT can still form, harmful only on a relaunch within
 	60 s): a connection libndi itself closes DURING the session (not at
@@ -166,8 +168,7 @@ void ndi_sender_abort_connections_before_destroy(int port, const char *name)
 		struct linger lg;
 		lg.l_onoff = 1;
 		lg.l_linger = 0;
-		const bool lingered = setsockopt(fd, SOL_SOCKET, SO_LINGER, &lg, sizeof(lg)) == 0;
-		if (lingered)
+		if (setsockopt(fd, SOL_SOCKET, SO_LINGER, &lg, sizeof(lg)) == 0)
 			aborted++;
 		// Reset NOW, not at libndi's close(): libndi's send_destroy calls
 		// shutdown(SHUT_RDWR) first, which sends a graceful FIN whatever SO_LINGER
@@ -175,14 +176,19 @@ void ndi_sender_abort_connections_before_destroy(int port, const char *name)
 		// socket is then already in TIME_WAIT). A connect() with AF_UNSPEC is the
 		// kernel's tcp_disconnect: RST now, socket to CLOSE, fd left open for libndi,
 		// whose shutdown()/close() then send nothing. SO_LINGER 0 stays as the
-		// fallback when the disconnect fails.
+		// fallback when the disconnect fails (e.g. EBUSY on a kernel that denies
+		// tcp_disconnect() while a libndi thread waits on the socket).
+		// Re-check the fd right before the reset: an immediate reset hits a live
+		// connection at once, so the fd-reuse window is kept to one syscall.
+		if (!ndi_socket_is_sender_connection(ndi_socket_is_listening(fd), ndi_socket_has_peer(fd),
+						     ndi_socket_local_port(fd), port))
+			return;
 		struct sockaddr unspec;
 		memset(&unspec, 0, sizeof(unspec));
 		unspec.sa_family = AF_UNSPEC;
-		const bool disconnected = connect(fd, &unspec, sizeof(unspec)) == 0;
-		if (disconnected)
+		if (connect(fd, &unspec, sizeof(unspec)) == 0)
 			reset++;
-		if (!lingered || !disconnected)
+		else
 			failed++;
 	});
 	if (!scanned) {
@@ -195,7 +201,7 @@ void ndi_sender_abort_connections_before_destroy(int port, const char *name)
 	}
 	obs_log(failed ? LOG_WARNING : LOG_INFO,
 		"ndi-sender-port: TCP :%d ('%s'): %d connection(s) set to close with RST (SO_LINGER 0), %d reset at "
-		"once (AF_UNSPEC disconnect), %d failed (#1363)",
+		"once (AF_UNSPEC disconnect), %d reset failed (#1363)",
 		port, who, aborted, reset, failed);
 }
 

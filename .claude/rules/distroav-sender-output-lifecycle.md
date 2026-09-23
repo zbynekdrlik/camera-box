@@ -7,6 +7,7 @@ paths:
   - "vendor/distroav/src/ndi-sender-port.cpp"
   - "vendor/distroav/src/ndi-sender-port.h"
   - "tests/distroav_sender_port_linger_1363.rs"
+  - "tests/fixtures/distroav_sender_port_linger_1363/**"
 ---
 
 # DistroAV SENDER-output lifecycle + NDI port ordering (#1185)
@@ -88,12 +89,15 @@ listening on TCP :5961. The cause is in libndi, not in the reserve/adopt path:
   `127.0.0.2:5961` DOES discriminate: it succeeds over a TIME_WAIT on `127.0.0.1`/the LAN IP and
   fails over libndi's live `0.0.0.0:5961` listener.
 - `SO_LINGER {1,0}` on the sender's CONNECTED :5961 sockets (found via `/proc/self/fd` +
-  `getsockname`/`getpeername`) right before `send_destroy` closes them with RST → no TIME_WAIT → the
-  next process gets :5961 again (measured: control 5962, linger 5961). A crash / kill still leaves a
-  TIME_WAIT (kernel FIN-close).
+  `getsockname`/`getpeername`) right before `send_destroy` closed them with RST → no TIME_WAIT → the
+  next process got :5961 again (measured with the `linger.c` probe: control 5962, linger 5961). That
+  probe closed its sockets directly. **Real libndi `shutdown()`s a connection before it closes it,
+  and then linger alone is often too late**: see the part-3 bullet in the IMPLEMENTED section. The
+  shipped abort also resets the connection at once. A crash / kill still leaves a TIME_WAIT
+  (kernel FIN-close).
 - Probe sources (`alloc.c`, `pinprobe.c`, `linger.c`) are described on the ticket.
 
-## IMPLEMENTED (issue 1363, option C): Linux linger-0 before every sender destroy — `ndi-sender-port.{h,cpp}`
+## IMPLEMENTED (issue 1363, option C): Linux linger-0 + immediate AF_UNSPEC reset before every sender destroy — `ndi-sender-port.{h,cpp}`
 
 Live on strih-lx only after the FULL strih bundle deploy + an OBS relaunch within 60 s of the
 previous stop shows `STRIH-LX (2ME PGM)` on :5961 in avahi AND the OBS log carries the
@@ -140,8 +144,10 @@ while libndi's sockets are still open — the dev1 repro used a libndi harness, 
   the crash-recovery moment). A crash/kill still leaves the TIME_WAIT; that session's port map is then
   shifted and the dev1 port-map watchdog pages.
 - Side effects are best-effort: every syscall failure is logged and skipped (shutdown must never
-  crash OBS). Known accepted race: libndi owns the fds, so an fd closed+reused between the scan and
-  abort (`setsockopt` + disconnect) could reset one unrelated socket instead of closing it with a FIN.
+  crash OBS). Known accepted race: libndi owns the fds. The abort re-checks each fd (listener? peer?
+  local port = the sender's?) right before the reset, so the window is one syscall. An fd that a
+  libndi thread closes and the process reuses inside that window is still reset AT ONCE. The worst
+  case is one unrelated LIVE connection (e.g. an in-process receiver's) dropped and reconnected.
 - **SO_LINGER 0 alone is TOO LATE — libndi shuts down before it closes (measured, part 3).**
   `strace -f` of a real libndi 6.3.2 stop: our `setsockopt(SO_LINGER {1,0})`, then libndi's
   `shutdown(fd, SHUT_RDWR)`, then `close(fd)` 0.16 ms later. The shutdown sends a GRACEFUL FIN
@@ -152,15 +158,19 @@ while libndi's sockets are still open — the dev1 repro used a libndi harness, 
   left open for libndi, whose shutdown/close then send nothing. After that, 6 of 6 runs were clean.
   A libndi thread that writes to the reset socket gets EPIPE, never a signal: the OBS frontend blocks
   SIGPIPE in every thread (`frontend/obs-main.cpp`). The INFO line keeps
-  `N connection(s) set to close with RST` and adds `M reset at once (AF_UNSPEC disconnect)`.
+  `N connection(s) set to close with RST` and adds `M reset at once (AF_UNSPEC disconnect), K reset
+  failed`. K > 0 raises it to a WARNING, and then linger-0 is the only guard. One possible cause:
+  a kernel that carries "tcp: deny tcp_disconnect() when threads are waiting" without the later
+  "allow again" fix returns EBUSY while a libndi thread waits on the socket. dev1's kernel 7.0 reset
+  every connection in the repro. Check the strih-lx log for `reset failed` after a deploy.
 - NOT covered (a TIME_WAIT can still form; harmful only on a relaunch within 60 s): a connection
   libndi closes by itself DURING the session (not at destroy). A socket already IN TIME_WAIT is past
   reach.
 - Tier-0 verify recipe (no OBS build): the gate test's Facet C compiles the REAL
-  `ndi-sender-port.cpp` with g++ against a stub `plugin-main.h` + a fake libndi (a real 0.0.0.0
-  sender-band listener; its destroy does libndi's `shutdown(SHUT_RDWR)`, then the viewer closes on
+  `ndi-sender-port.cpp` with g++ against a stub `plugin-main.h` + a fake libndi (both C++ sources in
+  `tests/fixtures/distroav_sender_port_linger_1363/`, `include_str!`-ed; a real 0.0.0.0 sender-band listener; its destroy does libndi's `shutdown(SHUT_RDWR)`, then the viewer closes on
   EOF, then `close()`). The control reproduces the TIME_WAIT and the abort frees the port. A "race"
-  scenario opens an extra out-of-band listener during the create (still identified), and an
+  scenario opens a receiver-band listener (:6961 when free) during the create (still identified), and an
   "ambiguous" one opens two band listeners (PORTID-1363, port 0). Run it with plain
   `rustc --test` + `clippy-driver --test -D warnings`, no cargo. For the real libndi, compile
   the same `.cpp` against a stub `plugin-main.h` that includes `Processing.NDI.Lib.h` and dlopens
