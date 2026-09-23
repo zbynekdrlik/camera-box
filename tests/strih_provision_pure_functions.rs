@@ -3688,3 +3688,522 @@ fn verify_strih_bkshading_probe_hits_a_real_service_route() {
          (routes: {routes:?})"
     );
 }
+
+// ---- issue 1317 remainder: the imag-parity genlock rtprio grant + no crash popups ----------------
+//
+// Owner report 23.9.2026: a crash popup (apport / update-notifier-crash) the operator had to close
+// in the morning, and every strih-lx OBS session logging `genlock: could NOT set render-tick thread
+// SCHED_FIFO prio 10 (errno 1 — missing rtprio ulimit grant?)`. imag provisions both (setup-imag.sh:
+// the issue-484 limits.d grant, the apport/whoopsie mask, systemd-coredump); strih-lx now does too.
+
+/// The render-tick SCHED_FIFO priority the vendored OBS requests (obs-video.c
+/// `#define GENLOCK_RT_PRIORITY`). A grant below it would still EPERM.
+fn vendored_genlock_rt_priority() -> u32 {
+    let src = read_script("vendor/obs-studio/libobs/obs-video.c");
+    let line = src
+        .lines()
+        .find(|l| l.trim_start().starts_with("#define GENLOCK_RT_PRIORITY"))
+        .expect("obs-video.c must define GENLOCK_RT_PRIORITY");
+    line.split_whitespace()
+        .nth(2)
+        .and_then(|v| v.parse().ok())
+        .expect("GENLOCK_RT_PRIORITY value")
+}
+
+/// The rtprio value imag grants (setup-imag.sh `${DESKTOP_USER}   -   rtprio   N`).
+fn imag_rtprio_value() -> u32 {
+    let s = read_script("scripts/setup-imag.sh");
+    let line = s
+        .lines()
+        .find(|l| l.starts_with("${DESKTOP_USER}") && l.contains("rtprio"))
+        .expect("setup-imag.sh must carry the issue-484 rtprio grant line");
+    line.split_whitespace()
+        .nth(3)
+        .and_then(|v| v.parse().ok())
+        .expect("imag rtprio value")
+}
+
+#[test]
+fn rtprio_limits_text_grants_the_desktop_user_the_imag_rtprio_value() {
+    let (code, out, err) = run_sourced(&[], "strih_rtprio_limits_text alice");
+    assert_eq!(code, 0, "stderr={err}");
+    let want = format!("alice   -   rtprio   {}", imag_rtprio_value());
+    assert!(
+        out.lines().any(|l| l == want),
+        "the limits.d body must carry `{want}` (imag parity), got:\n{out}"
+    );
+    for l in out.lines().filter(|l| !l.trim().is_empty() && *l != want) {
+        assert!(
+            l.starts_with('#'),
+            "every other line must be a comment, got: {l}"
+        );
+    }
+    assert!(
+        imag_rtprio_value() >= vendored_genlock_rt_priority(),
+        "the granted rtprio must cover the vendored render-tick priority"
+    );
+}
+
+#[test]
+fn rtprio_limits_text_refuses_an_empty_user() {
+    let (code, out, _e) = run_sourced(&[], "strih_rtprio_limits_text ''");
+    assert_ne!(
+        code, 0,
+        "an empty user must be refused (never a grant for nobody)"
+    );
+    assert!(out.trim().is_empty(), "no body on refusal, got: {out}");
+}
+
+#[test]
+fn rtprio_limits_path_is_the_strih_limits_d_file_with_an_env_seam() {
+    let (_c, out, _e) = run_sourced(&[], "strih_rtprio_limits_path");
+    assert_eq!(out, "/etc/security/limits.d/95-strih-genlock-rtprio.conf");
+    let (_c, out, _e) = run_sourced(
+        &[("STRIH_RTPRIO_LIMITS_FILE", "/tmp/x/95.conf")],
+        "strih_rtprio_limits_path",
+    );
+    assert_eq!(out, "/tmp/x/95.conf");
+}
+
+#[test]
+fn rtprio_grant_ok_requires_the_user_line_at_or_above_the_vendored_priority() {
+    let prio = vendored_genlock_rt_priority();
+    // Round trip: the rendered body satisfies the grader for the same user only.
+    let (c, _o, e) = run_sourced(
+        &[],
+        "strih_rtprio_limits_text alice | strih_rtprio_grant_ok alice",
+    );
+    assert_eq!(c, 0, "own body must grade as a grant; stderr={e}");
+    let (c, _o, _e) = run_sourced(
+        &[],
+        "strih_rtprio_limits_text alice | strih_rtprio_grant_ok bob",
+    );
+    assert_ne!(c, 0, "a grant for another user is not a grant");
+    let cases = [
+        (format!("alice - rtprio {prio}"), true),
+        (format!("alice\t-\trtprio\t{}", prio + 10), true),
+        // an explicit soft+hard pair is the same grant as `-`
+        (
+            format!("alice soft rtprio {prio}\nalice hard rtprio {prio}"),
+            true,
+        ),
+        ("alice - rtprio unlimited".to_string(), true),
+        // a hard-only grant leaves the SOFT limit at 0 -> sched_setscheduler still EPERMs
+        (format!("alice hard rtprio {prio}"), false),
+        (format!("alice soft rtprio {prio}"), false),
+        (format!("alice - rtprio {}", prio - 1), false),
+        (format!("# alice - rtprio {prio}"), false),
+        (format!("alice - nice {prio}"), false),
+        (String::new(), false),
+    ];
+    for (body, want) in cases {
+        let (c, _o, _e) = run_sourced(
+            &[("BODY", &body)],
+            "printf '%s\\n' \"$BODY\" | strih_rtprio_grant_ok alice",
+        );
+        assert_eq!(c == 0, want, "grant_ok on `{body}` must be {want}");
+    }
+}
+
+const FIFO_FAIL_LINE: &str = "info: genlock: could NOT set render-tick thread SCHED_FIFO prio 10 \
+     (errno 1 — missing rtprio ulimit grant?) — continuing SCHED_OTHER (#484)";
+const FIFO_OK_LINE: &str =
+    "info: genlock: render-tick thread set SCHED_FIFO prio 10 on the isolated core (#484)";
+
+fn session_verdict(grant: &str, running: &str, log: &str) -> (i32, String) {
+    let (c, o, _e) = run_sourced(
+        &[("LOGTEXT", log)],
+        &format!("strih_rtprio_session_verdict {grant} {running} <<<\"$LOGTEXT\""),
+    );
+    (c, o)
+}
+
+#[test]
+fn rtprio_session_verdict_grades_grant_and_the_live_obs_log() {
+    assert_eq!(
+        session_verdict("0", "1", FIFO_OK_LINE),
+        (1, "no-grant".into())
+    );
+    assert_eq!(session_verdict("0", "0", ""), (1, "no-grant".into()));
+    // grant present, running OBS still logs the EPERM line -> the session predates the next login.
+    assert_eq!(
+        session_verdict("1", "1", FIFO_FAIL_LINE),
+        (2, "grant-pending-relogin".into())
+    );
+    assert_eq!(
+        session_verdict("1", "1", FIFO_OK_LINE),
+        (0, "ok-sched-fifo".into())
+    );
+    assert_eq!(
+        session_verdict("1", "1", "no genlock line"),
+        (0, "ok".into())
+    );
+    // OBS not running: the newest log is a PAST session -- never graded.
+    assert_eq!(session_verdict("1", "0", FIFO_FAIL_LINE), (0, "ok".into()));
+}
+
+#[test]
+fn rtprio_session_verdict_survives_a_large_log_under_pipefail() {
+    // The drift-guard-log-parsers SIGPIPE class: a real OBS log is 100s of KB and the matching line
+    // is EARLY -- a `printf | grep -q` shape misgrades under pipefail. >64 KB fixture.
+    let mut log = String::from(FIFO_FAIL_LINE);
+    log.push('\n');
+    for i in 0..4000 {
+        log.push_str(&format!(
+            "info: filler line {i} ..........................................\n"
+        ));
+    }
+    assert!(log.len() > 64 * 1024);
+    assert_eq!(
+        session_verdict("1", "1", &log),
+        (2, "grant-pending-relogin".into())
+    );
+}
+
+#[test]
+fn crash_popup_units_are_the_imag_masked_units() {
+    let (c, out, _e) = run_sourced(&[], "strih_crash_popup_units");
+    assert_eq!(c, 0);
+    let units: Vec<&str> = out.lines().filter(|l| !l.is_empty()).collect();
+    assert_eq!(units, ["apport.service", "whoopsie.service"]);
+    let imag = read_script("scripts/setup-imag.sh");
+    assert!(
+        imag.contains(&format!("systemctl mask {}", units.join(" "))),
+        "the strih unit list must stay in parity with imag's apport/whoopsie mask"
+    );
+}
+
+#[test]
+fn crash_popup_unit_ok_passes_only_masked_or_absent_and_not_running() {
+    let cases = [
+        ("masked", "inactive", true),
+        ("masked\nmasked", "inactive", true), // the is-enabled || echo double-append shape
+        ("masked-runtime", "inactive", true),
+        ("disabled", "inactive", true),
+        ("not-found", "inactive", true),
+        ("", "inactive", true), // unit file absent (older systemd prints nothing)
+        ("masked", "failed", true),
+        ("enabled", "inactive", false),
+        ("static", "inactive", false),
+        ("masked", "active", false), // masked but still running (oneshot RemainAfterExit)
+        ("disabled", "activating", false),
+        ("masked", "", false), // unreadable active state -> fail closed
+        ("weird", "inactive", false),
+    ];
+    for (en, act, want) in cases {
+        let (c, _o, _e) = run_sourced(
+            &[("EN", en), ("ACT", act)],
+            "strih_crash_popup_unit_ok \"$EN\" \"$ACT\"",
+        );
+        assert_eq!(
+            c == 0,
+            want,
+            "unit_ok(enabled={en:?}, active={act:?}) must be {want}"
+        );
+    }
+}
+
+#[test]
+fn crash_popup_verdict_orders_units_then_coredump() {
+    let v = |bad: &str, core: &str| {
+        let (c, o, _e) = run_sourced(
+            &[("BAD", bad), ("CORE", core)],
+            "strih_crash_popup_verdict \"$BAD\" \"$CORE\"",
+        );
+        (c, o)
+    };
+    assert_eq!(v("", "1"), (0, "ok".into()));
+    assert_eq!(
+        v("apport.service", "1"),
+        (1, "units-live: apport.service".into())
+    );
+    assert_eq!(
+        v("apport.service whoopsie.service", "0"),
+        (1, "units-live: apport.service whoopsie.service".into())
+    );
+    assert_eq!(v("", "0"), (1, "no-systemd-coredump".into()));
+    assert_eq!(v("", ""), (1, "no-systemd-coredump".into()));
+}
+
+#[test]
+fn setup_strih_step_11c_is_a_lettered_substep_between_11b_and_12() {
+    let s = read_script("scripts/setup-strih.sh");
+    assert!(
+        s.contains("TOTAL_STEPS=17"),
+        "a lettered sub-step keeps TOTAL_STEPS at 17"
+    );
+    let b = s.find("step \"11b\"").expect("step 11b");
+    let c = s
+        .find("step \"11c\"")
+        .expect("setup-strih must carry step \"11c\"");
+    let twelve = s.find("step 12 ").expect("step 12");
+    assert!(b < c && c < twelve, "step 11c must sit between 11b and 12");
+}
+
+/// Extract `[start, end)` from `text` by literal anchors (end searched after start).
+fn block_between<'a>(text: &'a str, start: &str, end: &str) -> &'a str {
+    let s = text
+        .find(start)
+        .unwrap_or_else(|| panic!("anchor `{start}` not found"));
+    let e = s + text[s..]
+        .find(end)
+        .unwrap_or_else(|| panic!("end anchor `{end}` not found after `{start}`"));
+    &text[s..e]
+}
+
+/// Write an executable fake tool into `bin`.
+fn fake_tool(bin: &std::path::Path, name: &str, body: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    let p = bin.join(name);
+    std::fs::write(&p, format!("#!/bin/bash\n{body}\n")).unwrap();
+    std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+/// Run an extracted script block under the callers' real `set -euo pipefail` with the lib
+/// sourced, a fake-tool dir first on PATH, and the caller's prelude. Returns (exit, out, err).
+fn run_block(
+    bin: &std::path::Path,
+    env: &[(&str, &str)],
+    prelude: &str,
+    block: &str,
+) -> (i32, String, String) {
+    let harness = format!("set -euo pipefail\n. \"$SCRIPT\"\n{prelude}\n{block}\n");
+    let path = format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let mut cmd = Command::new("bash");
+    cmd.arg("-c")
+        .arg(&harness)
+        .env("SCRIPT", lib())
+        .env("PATH", path);
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+    let out = cmd.output().expect("run block");
+    (
+        out.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    )
+}
+
+const SETUP_PRELUDE: &str = "step() { echo \"STEP $1\"; }\nwarn() { echo \"WARN $1\"; }\n\
+     fail() { echo \"FAIL: $1\" >&2; exit 1; }\nDESKTOP_USER=alice";
+
+fn setup_11c_block() -> String {
+    let s = read_script("scripts/setup-strih.sh");
+    block_between(&s, "step \"11c\"", "\n# -----------").to_string()
+}
+
+#[test]
+fn setup_strih_step_11c_writes_grant_masks_units_and_installs_coredump() {
+    let dir = tempfile::tempdir().unwrap();
+    let bin = dir.path().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let calls = dir.path().join("calls.log");
+    fake_tool(&bin, "systemctl", "echo \"systemctl $*\" >> \"$CALLS\"");
+    fake_tool(&bin, "apt-get", "echo \"apt-get $*\" >> \"$CALLS\"");
+    let limits = dir.path().join("limits.d/95-strih-genlock-rtprio.conf");
+    let (code, out, err) = run_block(
+        &bin,
+        &[
+            ("CALLS", calls.to_str().unwrap()),
+            ("STRIH_RTPRIO_LIMITS_FILE", limits.to_str().unwrap()),
+        ],
+        SETUP_PRELUDE,
+        &setup_11c_block(),
+    );
+    assert_eq!(code, 0, "step 11c must succeed; stdout={out} stderr={err}");
+    let body = std::fs::read_to_string(&limits).expect("the limits.d grant must be written");
+    let want = format!("alice   -   rtprio   {}", imag_rtprio_value());
+    assert!(body.lines().any(|l| l == want), "grant body: {body}");
+    let log = std::fs::read_to_string(&calls).unwrap();
+    for u in ["apport.service", "whoopsie.service"] {
+        assert!(
+            log.contains(&format!("systemctl mask {u}")),
+            "{u} must be masked; calls:\n{log}"
+        );
+        assert!(
+            log.contains(&format!("systemctl disable --now {u}")),
+            "{u} must be disabled+stopped; calls:\n{log}"
+        );
+    }
+    assert!(
+        log.lines()
+            .any(|l| l.starts_with("apt-get install") && l.contains("systemd-coredump")),
+        "systemd-coredump must be installed; calls:\n{log}"
+    );
+}
+
+#[test]
+fn setup_strih_step_11c_fails_loud_when_coredump_install_or_mask_fails() {
+    for (tool, body) in [
+        ("apt-get", "exit 100"),
+        ("systemctl", "[ \"$1\" = mask ] && exit 1; exit 0"),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        fake_tool(&bin, "systemctl", "exit 0");
+        fake_tool(&bin, "apt-get", "exit 0");
+        fake_tool(&bin, tool, body);
+        let limits = dir.path().join("limits.d/95.conf");
+        let (code, _out, err) = run_block(
+            &bin,
+            &[("STRIH_RTPRIO_LIMITS_FILE", limits.to_str().unwrap())],
+            SETUP_PRELUDE,
+            &setup_11c_block(),
+        );
+        assert_ne!(code, 0, "a failing {tool} must fail step 11c loudly");
+        assert!(
+            err.contains("FAIL:"),
+            "the failure must go through fail(); stderr={err}"
+        );
+    }
+}
+
+const VERIFY_PRELUDE: &str = "FAILS=0\nok() { echo \"PASS $1\"; }\n\
+     bad() { echo \"FAIL $1\"; FAILS=$((FAILS+1)); }\nnote() { echo \"NOTE $1\"; }\n\
+     newest_log() { ls -1t \"${OBS_LOG_DIR}\"/*.txt 2>/dev/null | head -1; }\nSTRIH_LX_USER=alice";
+
+/// Run verify-strih items 32 + 33 against fake live state. `units` rows are
+/// `(unit, is-enabled output, is-active output)`; `obs_running` drives the supervisor check.
+fn run_verify_items(
+    grant: Option<&str>,
+    obs_running: bool,
+    log: Option<&str>,
+    units: &[(&str, &str, &str)],
+    coredump_status: &str,
+) -> (i32, String, String) {
+    let dir = tempfile::tempdir().unwrap();
+    let bin = dir.path().join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let state = dir.path().join("units.state");
+    let rows: String = units
+        .iter()
+        .map(|(u, en, act)| format!("{u}|{en}|{act}\n"))
+        .collect();
+    std::fs::write(&state, rows).unwrap();
+    fake_tool(
+        &bin,
+        "systemctl",
+        r#"if [ "$1" = --user ]; then [ "$FAKE_OBS" = 1 ]; exit $?; fi
+row="$(grep -F -- "$2|" "$FAKE_STATE" | head -1 || true)"
+if [ -z "$row" ]; then [ "$1" = is-active ] && echo inactive; exit 3; fi
+if [ "$1" = is-enabled ]; then out="$(echo "$row" | cut -d'|' -f2)"; else out="$(echo "$row" | cut -d'|' -f3)"; fi
+[ -n "$out" ] && echo "$out"
+case "$out" in enabled|active|static) exit 0;; *) exit 1;; esac"#,
+    );
+    fake_tool(&bin, "pgrep", "exit 1");
+    fake_tool(
+        &bin,
+        "dpkg-query",
+        r#"[ -n "$FAKE_CORE" ] || exit 1; printf '%s' "$FAKE_CORE""#,
+    );
+    let logs = dir.path().join("logs");
+    std::fs::create_dir_all(&logs).unwrap();
+    if let Some(text) = log {
+        std::fs::write(logs.join("2026-09-23 08-00-00.txt"), text).unwrap();
+    }
+    let limits = dir.path().join("95-strih-genlock-rtprio.conf");
+    if let Some(g) = grant {
+        std::fs::write(&limits, g).unwrap();
+    }
+    let v = read_script("scripts/verify-strih.sh");
+    let block = block_between(&v, "# 32)", "\necho \"\"\nif [ \"$FAILS\" -eq 0 ]");
+    run_block(
+        &bin,
+        &[
+            ("FAKE_STATE", state.to_str().unwrap()),
+            ("FAKE_OBS", if obs_running { "1" } else { "0" }),
+            ("FAKE_CORE", coredump_status),
+            ("OBS_LOG_DIR", logs.to_str().unwrap()),
+            ("STRIH_RTPRIO_LIMITS_FILE", limits.to_str().unwrap()),
+        ],
+        VERIFY_PRELUDE,
+        &format!("{block}\necho \"FAILS=$FAILS\""),
+    )
+}
+
+const MASKED_UNITS: [(&str, &str, &str); 2] = [
+    ("apport.service", "masked", "inactive"),
+    ("whoopsie.service", "masked", "inactive"),
+];
+const CORE_OK: &str = "install ok installed";
+
+#[test]
+fn verify_strih_rtprio_and_crash_popup_items_pass_on_a_provisioned_box() {
+    let grant = "# c\nalice   -   rtprio   20\n";
+    let (c, out, err) = run_verify_items(
+        Some(grant),
+        true,
+        Some(FIFO_OK_LINE),
+        &MASKED_UNITS,
+        CORE_OK,
+    );
+    assert_eq!(
+        c, 0,
+        "the items must not abort the gate; stderr={err}\n{out}"
+    );
+    assert!(out.contains("FAILS=0"), "{out}");
+    assert!(out.contains("PASS (rtprio)"), "{out}");
+    assert!(out.contains("PASS (crash-popup)"), "{out}");
+    // No OBS log at all + OBS down: still a pass on the grant (never aborts on a missing log).
+    let (c, out, err) = run_verify_items(Some(grant), false, None, &MASKED_UNITS, CORE_OK);
+    assert_eq!(c, 0, "stderr={err}\n{out}");
+    assert!(
+        out.contains("FAILS=0") && out.contains("PASS (rtprio)"),
+        "{out}"
+    );
+}
+
+#[test]
+fn verify_strih_rtprio_item_fails_without_grant_and_notes_a_pending_relogin() {
+    let (_c, out, _e) = run_verify_items(None, true, Some(FIFO_FAIL_LINE), &MASKED_UNITS, CORE_OK);
+    assert!(
+        out.contains("FAIL (rtprio)") && out.contains("FAILS=1"),
+        "{out}"
+    );
+    let grant = "alice - rtprio 20\n";
+    let (_c, out, _e) = run_verify_items(
+        Some(grant),
+        true,
+        Some(FIFO_FAIL_LINE),
+        &MASKED_UNITS,
+        CORE_OK,
+    );
+    assert!(
+        out.contains("NOTE (rtprio)") && out.contains("FAILS=0"),
+        "{out}"
+    );
+}
+
+#[test]
+fn verify_strih_crash_popup_item_fails_on_a_live_unit_or_missing_coredump() {
+    let grant = "alice - rtprio 20\n";
+    let live = [
+        ("apport.service", "enabled", "active"),
+        ("whoopsie.service", "masked", "inactive"),
+    ];
+    let (_c, out, _e) = run_verify_items(Some(grant), false, None, &live, CORE_OK);
+    assert!(
+        out.contains("FAIL (crash-popup)")
+            && out.contains("apport.service")
+            && out.contains("FAILS=1"),
+        "{out}"
+    );
+    let (_c, out, _e) = run_verify_items(Some(grant), false, None, &MASKED_UNITS, "");
+    assert!(
+        out.contains("FAIL (crash-popup)") && out.contains("no-systemd-coredump"),
+        "{out}"
+    );
+    // Units absent entirely (a box without whoopsie): not-found passes.
+    let absent: [(&str, &str, &str); 0] = [];
+    let (_c, out, _e) = run_verify_items(Some(grant), false, None, &absent, CORE_OK);
+    assert!(
+        out.contains("PASS (crash-popup)") && out.contains("FAILS=0"),
+        "{out}"
+    );
+}
