@@ -292,6 +292,10 @@ fn strih_and_stream_scripts_accept_execute_mode_flags() {
 fn strih_execute_without_local_out_dir_or_out_is_a_usage_error() {
     let out = Command::new("bash")
         .arg(strih_script())
+        // issue 1317 part 3: the Windows strih planner has no default box (its old default is the
+        // Linux strih-lx now) -- name a hypothetical Windows strih on a TEST-NET address.
+        .env("STRIH_BOX", "192.0.2.10")
+        .env_remove("STRIH_PLATFORM")
         .arg("--execute")
         .arg("--strih-rec")
         .arg(r"D:\_REC\test.mkv")
@@ -345,6 +349,10 @@ fn skip_if_exists_wins_over_execute_mode() {
 
     let out = Command::new("bash")
         .arg(strih_script())
+        // issue 1317 part 3: the Windows strih planner has no default box (its old default is the
+        // Linux strih-lx now) -- name a hypothetical Windows strih on a TEST-NET address.
+        .env("STRIH_BOX", "192.0.2.10")
+        .env_remove("STRIH_PLATFORM")
         .arg("--skip-if-exists")
         .arg(&partial)
         .arg("--execute") // would otherwise require --local-out-dir/--out — must never be reached
@@ -369,6 +377,10 @@ fn skip_if_exists_wins_over_execute_mode() {
 fn strih_default_mode_still_prints_the_plan_not_execute() {
     let out = Command::new("bash")
         .arg(strih_script())
+        // issue 1317 part 3: the Windows strih planner has no default box (its old default is the
+        // Linux strih-lx now) -- name a hypothetical Windows strih on a TEST-NET address.
+        .env("STRIH_BOX", "192.0.2.10")
+        .env_remove("STRIH_PLATFORM")
         .arg("--strih-rec")
         .arg(r"C:\rec\strih.mkv")
         .arg("--")

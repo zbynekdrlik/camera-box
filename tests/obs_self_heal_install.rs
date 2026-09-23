@@ -18,7 +18,7 @@
 //! - an OMITTED threshold/interval/stale-lock override becomes a JSON `null` in the generated
 //!   script, so `obs-self-heal-gate.exe`'s own `camera_box::obs_self_heal::DEFAULT_*` Rust
 //!   constants are the single actual source of default truth — verified both at the
-//!   `build_recovery_script` level AND through `main()`'s real `--box strih` CLI invocation (the
+//!   `build_recovery_script` level AND through `main()`'s real `--box stream` CLI invocation (the
 //!   path an operator actually runs), closing the "bash default silently drifts from the Rust
 //!   kernel" gap a prior review found.
 //! - unexpected exit codes from EITHER gate binary fail loud (never silently read as healthy),
@@ -81,10 +81,12 @@ fn run_script(args: &[&str]) -> (i32, String, String) {
 const OBS_DIR: &str = "C:\\Program Files\\obs-studio";
 
 /// `build_recovery_script` with NO threshold/interval/stale-lock override args — the default,
-/// mirroring what `main()`'s own (unset-by-default) CLI flags now produce. `30` is strih's real
-/// target fps since Topology v2 (#459, was 60 pre-#459 -- the 60fps IMAG role moved to imag-nb).
-fn recovery_script_strih() -> String {
-    run_sourced(&format!("build_recovery_script strih '{OBS_DIR}' 30"))
+/// mirroring what `main()`'s own (unset-by-default) CLI flags now produce, for an AHK box. issue
+/// 1317 part 3: the builder keys the AHK path on the shared fleet fact (obs_fleet_has_ahk) + the
+/// box's own relaunch identity, never the literal `strih` -- the retired Windows strih was the AHK
+/// box these tests used; resolume (AHK v2 safe-loop, issue 1295) is the AHK box now.
+fn recovery_script_ahk_box() -> String {
+    run_sourced(&format!("build_recovery_script resolume '{OBS_DIR}' 30"))
 }
 
 fn recovery_script_stream() -> String {
@@ -94,7 +96,10 @@ fn recovery_script_stream() -> String {
 /// The launch-obs-genlock.sh planner's OWN force=1 program (the ground truth this module must
 /// reuse verbatim for the KillAndRelaunchObs step).
 fn expected_kill_relaunch_program() -> String {
-    let harness = format!("set -uo pipefail\n. \"$SCRIPT\"\nbuild_launch_program '{OBS_DIR}' 1");
+    // the AHK box's OWN relaunch identity (resolume: its v2 .ahk path + Startup-.lnk-first).
+    let harness = format!(
+        "set -uo pipefail\n. \"$SCRIPT\"\nbuild_launch_program '{OBS_DIR}' 1 1 'C:\\Users\\Resolume\\Documents\\_NLMEDIA resolume\\_APPS\\NL_STARTUP.ahk' lnk"
+    );
     let out = Command::new("bash")
         .arg("-c")
         .arg(&harness)
@@ -122,7 +127,7 @@ fn script_is_source_safe() {
 /// 2x render-time budget multiplier) — those constants exist in exactly ONE place.
 #[test]
 fn recovery_script_reuses_classify_via_gate_binary_never_reinvents_thresholds() {
-    let p = recovery_script_strih();
+    let p = recovery_script_ahk_box();
     assert!(
         p.contains("obs-watchdog-gate.exe"),
         "#411: the local wedge check MUST pipe through obs-watchdog-gate.exe (the classify \
@@ -155,7 +160,7 @@ fn recovery_script_reuses_classify_via_gate_binary_never_reinvents_thresholds() 
 /// the confirm/throttle/lock policy was the ONE piece still being re-implemented inline.
 #[test]
 fn recovery_decision_reuses_self_heal_gate_binary_never_reimplements_state_machine() {
-    let p = recovery_script_strih();
+    let p = recovery_script_ahk_box();
     assert!(
         p.contains("obs-self-heal-gate.exe"),
         "#411: the recovery decision MUST pipe through obs-self-heal-gate.exe. Program:\n{p}"
@@ -185,8 +190,8 @@ fn recovery_decision_reuses_self_heal_gate_binary_never_reimplements_state_machi
 /// obs64 is ever killed, and the outer failure-path AHK backstop comes only AFTER the
 /// post-recovery verify.
 #[test]
-fn strih_recovery_script_stops_ahk_before_kill_and_restarts_after_verify() {
-    let p = recovery_script_strih();
+fn ahk_box_recovery_script_stops_ahk_before_kill_and_restarts_after_verify() {
+    let p = recovery_script_ahk_box();
 
     // The ONLY AutoHotkey64 stop is now the embedded launch program's own (single-owner, issue
     // 1273); it still sits before the obs64 force-kill within that program.
@@ -195,16 +200,16 @@ fn strih_recovery_script_stops_ahk_before_kill_and_restarts_after_verify() {
         .expect("script must contain the embedded launch program's AutoHotkey64 stop");
     let kill_obs_pos = p
         .find("Stop-Process -Id $_.Id -Force")
-        .expect("strih script must contain the obs64 force-kill (from build_launch_program)");
+        .expect("the AHK-box script must contain the obs64 force-kill (from build_launch_program)");
     let verify_pos = p
         .find("VerifyRecovered:")
-        .expect("strih script must contain the explicit VerifyRecovered step");
+        .expect("the AHK-box script must contain the explicit VerifyRecovered step");
     // Anchor on the unique OUTER `RestartAhk backstop` marker rather than the raw relaunch text —
     // the same ahk_resolve_and_relaunch_ps() block is ALSO embedded earlier (inside the reused
     // launch-obs-genlock.sh program), so a bare text anchor would be ambiguous (#867/#1272).
     let backstop_pos = p
         .find("RestartAhk backstop")
-        .expect("strih script must contain the outer failure-path RestartAhk backstop");
+        .expect("the AHK-box script must contain the outer failure-path RestartAhk backstop");
 
     assert!(
         stop_ahk_pos < kill_obs_pos,
@@ -222,9 +227,10 @@ fn strih_recovery_script_stops_ahk_before_kill_and_restarts_after_verify() {
     );
 }
 
-/// stream has no AutoHotkey64 auto-respawn watcher (per `.claude/skills/obs-ops` "AHK on
-/// strih" — only strih runs it) — the generated script must document that as a no-op, never
-/// guess at an AHK script path that doesn't exist on stream.
+/// stream has no AutoHotkey64 auto-respawn watcher (only an AHK box -- resolume; the retired
+/// Windows strih before it, `.claude/skills/obs-ops` "AHK on strih" -- runs one) — the generated
+/// script must document that as a no-op, never guess at an AHK script path that doesn't exist on
+/// stream.
 #[test]
 fn stream_recovery_script_never_touches_ahk() {
     let p = recovery_script_stream();
@@ -249,7 +255,7 @@ fn stream_recovery_script_never_touches_ahk() {
 /// never a second hand-rolled kill+relaunch.
 #[test]
 fn kill_and_relaunch_step_reuses_launch_obs_genlock_program_verbatim() {
-    let p = recovery_script_strih();
+    let p = recovery_script_ahk_box();
     let expected = expected_kill_relaunch_program();
     assert!(
         !expected.is_empty(),
@@ -273,7 +279,7 @@ fn kill_and_relaunch_step_reuses_launch_obs_genlock_program_verbatim() {
 /// the reused launch program's own exit code (which gates on render-tick-ENABLED).
 #[test]
 fn verify_step_checks_exactly_one_obs64_and_relaunch_exit_code() {
-    let p = recovery_script_strih();
+    let p = recovery_script_ahk_box();
     assert!(
         p.contains("$postCount -eq 1") && p.contains("$relaunchExit -eq 0"),
         "#411: VerifyRecovered must check exactly-one-obs64 AND the relaunch program's exit \
@@ -287,7 +293,7 @@ fn verify_step_checks_exactly_one_obs64_and_relaunch_exit_code() {
 /// does — gated on `$relaunchExit`, never on `$verified`.
 #[test]
 fn restart_ahk_runs_regardless_of_verify_outcome() {
-    let p = recovery_script_strih();
+    let p = recovery_script_ahk_box();
     let verify_pos = p
         .find("$verified  = ")
         .expect("verify assignment must exist");
@@ -320,8 +326,8 @@ fn restart_ahk_runs_regardless_of_verify_outcome() {
 /// PATH (confirmed live on strih via comment #5121884098 on #867), so a bare exe-name launch can
 /// never resolve. This is the exact shape that root-caused a real strih outage.
 #[test]
-fn strih_ahk_restart_never_uses_bare_exe_name_867() {
-    let p = recovery_script_strih();
+fn ahk_box_ahk_restart_never_uses_bare_exe_name_867() {
+    let p = recovery_script_ahk_box();
     assert!(
         !p.contains("-FilePath 'AutoHotkey64.exe'")
             && !p.contains("-FilePath \"AutoHotkey64.exe\""),
@@ -339,8 +345,8 @@ fn strih_ahk_restart_never_uses_bare_exe_name_867() {
 /// and log an explicit FATAL line — never a blind success claim — when AutoHotkey64 does not come
 /// back.
 #[test]
-fn strih_ahk_restart_is_verified_and_logs_fatal_on_failure_867() {
-    let p = recovery_script_strih();
+fn ahk_box_ahk_restart_is_verified_and_logs_fatal_on_failure_867() {
+    let p = recovery_script_ahk_box();
     assert!(
         p.contains("Get-Process AutoHotkey64") && p.contains("$ahkRelaunchVerified"),
         "#867: the AHK restart must poll Get-Process AutoHotkey64 and record whether it \
@@ -369,7 +375,7 @@ fn strih_ahk_restart_is_verified_and_logs_fatal_on_failure_867() {
 /// DEFAULT_*` Rust constant — never a second hardcoded bash/PowerShell literal that could drift.
 #[test]
 fn omitted_overrides_become_powershell_null_so_the_rust_kernel_defaults_apply() {
-    let p = recovery_script_strih();
+    let p = recovery_script_ahk_box();
     assert!(
         p.contains("$ConfirmThresholdOverride = $null"),
         "#411: an omitted --confirm-threshold must emit $null (not a hardcoded number), so \
@@ -397,7 +403,7 @@ fn omitted_overrides_become_powershell_null_so_the_rust_kernel_defaults_apply() 
 #[test]
 fn explicit_overrides_flow_through_as_numbers() {
     let p = run_sourced(&format!(
-        "build_recovery_script strih '{OBS_DIR}' 30 {DEFAULT_CONFIRM_THRESHOLD} {DEFAULT_MIN_RECOVERY_INTERVAL_S} {DEFAULT_STALE_LOCK_S}"
+        "build_recovery_script resolume '{OBS_DIR}' 30 {DEFAULT_CONFIRM_THRESHOLD} {DEFAULT_MIN_RECOVERY_INTERVAL_S} {DEFAULT_STALE_LOCK_S}"
     ));
     assert!(
         p.contains(&format!(
@@ -425,7 +431,7 @@ fn explicit_overrides_flow_through_as_numbers() {
 /// the EXPLICIT clear only happens AFTER the full plan completes.
 #[test]
 fn recovery_lock_merge_precedes_steps_and_explicit_clear_follows_them() {
-    let p = recovery_script_strih();
+    let p = recovery_script_ahk_box();
     let merge_pos = p
         .find("$state.recovery_in_progress = $decision.next_state.recovery_in_progress")
         .expect("the next_state merge must exist");
@@ -457,7 +463,7 @@ fn recovery_lock_merge_precedes_steps_and_explicit_clear_follows_them() {
 /// path skipped saving, which could strand an in-memory stale-lock clear unpersisted).
 #[test]
 fn missing_gate_binary_fails_loud_and_saves_state_first() {
-    let p = recovery_script_strih();
+    let p = recovery_script_ahk_box();
     let missing_check_pos = p
         .find("if (-not (Test-Path $GateBin))")
         .expect("missing-binary check must exist");
@@ -479,7 +485,7 @@ fn missing_gate_binary_fails_loud_and_saves_state_first() {
 /// gate: never guess, always persist state first.
 #[test]
 fn missing_self_heal_gate_binary_fails_loud_and_saves_state_first() {
-    let p = recovery_script_strih();
+    let p = recovery_script_ahk_box();
     let missing_check_pos = p
         .find("if (-not (Test-Path $SelfHealGateBin))")
         .expect("missing self-heal-gate-binary check must exist");
@@ -503,7 +509,7 @@ fn missing_self_heal_gate_binary_fails_loud_and_saves_state_first() {
 /// our OWN bug). Exit 1 (a real classify verdict) is the ONLY input that sets `$wedged = $true`.
 #[test]
 fn gate_exit_two_is_a_tooling_error_never_treated_as_wedged() {
-    let p = recovery_script_strih();
+    let p = recovery_script_ahk_box();
     assert!(
         p.contains("$wedged = ($gateExit -eq 1)"),
         "#411: wedged must be derived ONLY from gate exit == 1, never from \"!= 0\" (which would \
@@ -521,7 +527,7 @@ fn gate_exit_two_is_a_tooling_error_never_treated_as_wedged() {
 /// `$wedged = $false` (which would stop detecting a real wedge). It must fail loud instead.
 #[test]
 fn unexpected_watchdog_gate_exit_code_fails_loud_never_reads_as_healthy() {
-    let p = recovery_script_strih();
+    let p = recovery_script_ahk_box();
     assert!(
         p.contains("if ($gateExit -ne 0 -and $gateExit -ne 1)") && p.contains("exit 8"),
         "#411: an obs-watchdog-gate.exe exit code outside {{0,1,2}} (e.g. a panic) must be \
@@ -535,7 +541,7 @@ fn unexpected_watchdog_gate_exit_code_fails_loud_never_reads_as_healthy() {
 /// action needed".
 #[test]
 fn unexpected_self_heal_gate_exit_code_fails_loud() {
-    let p = recovery_script_strih();
+    let p = recovery_script_ahk_box();
     assert!(
         p.contains("if ($decisionExit -ne 0 -and $decisionExit -ne 1)") && p.contains("exit 10"),
         "#411: an obs-self-heal-gate.exe exit code outside {{0,1,2}} must fail loud, never be \
@@ -549,7 +555,7 @@ fn unexpected_self_heal_gate_exit_code_fails_loud() {
 /// "our own JSON was malformed" instead of the generic "possible crash" message.
 #[test]
 fn self_heal_gate_exit_two_is_a_distinct_tooling_error_path() {
-    let p = recovery_script_strih();
+    let p = recovery_script_ahk_box();
     let exit2_pos = p
         .find("if ($decisionExit -eq 2)")
         .expect("obs-self-heal-gate.exe exit 2 must have its own distinct check");
@@ -572,7 +578,7 @@ fn self_heal_gate_exit_two_is_a_distinct_tooling_error_path() {
 /// abandoned lock", a diagnostic signal a prior refactor silently dropped.
 #[test]
 fn stale_lock_cleared_is_logged_distinctly() {
-    let p = recovery_script_strih();
+    let p = recovery_script_ahk_box();
     assert!(
         p.contains("$decision.stale_lock_cleared") && p.contains("STALE LOCK CLEARED"),
         "#411: the recovery script must check obs-self-heal-gate.exe's stale_lock_cleared field \
@@ -585,7 +591,7 @@ fn stale_lock_cleared_is_logged_distinctly() {
 /// design otherwise eliminates.
 #[test]
 fn confirm_threshold_display_never_hardcodes_a_bare_default_number() {
-    let (_, out, _) = run_script(&["--box", "strih"]);
+    let (_, out, _) = run_script(&["--box", "stream"]);
     assert!(
         !out.contains("confirm-threshold=obs-self-heal-gate.exe default (2)"),
         "#411: the STEP 3 display text must not hardcode a bare default number — it must \
@@ -602,7 +608,7 @@ fn confirm_threshold_display_never_hardcodes_a_bare_default_number() {
 /// (NaN/Infinity are not valid JSON and could poison the parse) — it degrades to "not sampled".
 #[test]
 fn non_finite_or_negative_cpu_percent_is_never_sent_as_a_number() {
-    let p = recovery_script_strih();
+    let p = recovery_script_ahk_box();
     assert!(
         p.contains("[double]::IsFinite($computed)") && p.contains("$computed -ge 0"),
         "#411: the CPU% computation must be guarded finite+non-negative before being kept — a \
@@ -615,7 +621,7 @@ fn non_finite_or_negative_cpu_percent_is_never_sent_as_a_number() {
 /// never silently assume a value that could suppress detection.
 #[test]
 fn corrupt_state_file_falls_back_to_safe_defaults() {
-    let p = recovery_script_strih();
+    let p = recovery_script_ahk_box();
     assert!(
         p.contains("catch") && p.contains("starting fresh"),
         "#411: a corrupt state file must be caught and reset to safe defaults, not crash the \
@@ -625,7 +631,7 @@ fn corrupt_state_file_falls_back_to_safe_defaults() {
 
 // ─── issue 1273: single-owner AHK bracket + failure-path backstop ─────────────────────────────
 
-/// issue 1273: the embedded launch-obs-genlock program (built with has_ahk=1 on strih) is the
+/// issue 1273: the embedded launch-obs-genlock program (built with has_ahk=1 on an AHK box) is the
 /// SINGLE OWNER of the AutoHotkey64 stop/restart bracket — it stops AHK before killing obs64,
 /// restarts + verifies it after the launch, then runs its own #978 session gate. Because that
 /// embedded program runs in a SEPARATE `powershell.exe -File` child, an OUTER pre-stop left its
@@ -634,7 +640,7 @@ fn corrupt_state_file_falls_back_to_safe_defaults() {
 /// stop in the whole emitted program is the ONE inside the embedded launch program itself.
 #[test]
 fn outer_self_heal_never_pre_stops_ahk_embedded_program_owns_the_bracket_1273() {
-    let p = recovery_script_strih();
+    let p = recovery_script_ahk_box();
     let embedded = expected_kill_relaunch_program();
     assert!(
         p.contains(embedded.trim()),
@@ -658,8 +664,8 @@ fn outer_self_heal_never_pre_stops_ahk_embedded_program_owns_the_bracket_1273() 
 /// `$relaunchExit -ne 0` (never on `$verified`, never unconditional) and idempotent AHK-present
 /// (only acts when AutoHotkey64 is down, never double-launching what the embedded program restored).
 #[test]
-fn strih_failure_path_ahk_backstop_is_gated_and_idempotent_1273() {
-    let p = recovery_script_strih();
+fn ahk_box_failure_path_ahk_backstop_is_gated_and_idempotent_1273() {
+    let p = recovery_script_ahk_box();
     // Strip the embedded launch program (which carries its OWN ahk_resolve_and_relaunch_ps copies)
     // so the assertions below concern ONLY the outer script's own backstop, not the embedded one —
     // otherwise a whole-program `.contains` could be satisfied by the embedded relaunch machinery
@@ -705,7 +711,7 @@ fn strih_failure_path_ahk_backstop_is_gated_and_idempotent_1273() {
 // ─── build_task_xml ──────────────────────────────────────────────────────────────────────────
 
 fn task_xml() -> String {
-    run_sourced("build_task_xml camera-box-obs-self-heal-strih 'C:\\ProgramData\\camera-box\\obs-self-heal.ps1' 2")
+    run_sourced("build_task_xml camera-box-obs-self-heal-stream 'C:\\ProgramData\\camera-box\\obs-self-heal.ps1' 2")
 }
 
 /// #411: ships DISABLED. Never auto-enable — the supervisor enables only after live-verify.
@@ -768,20 +774,11 @@ fn task_xml_repetition_interval_matches_requested_cadence() {
 /// The CLI selects the correct win-* MCP + target fps per box and emits a full plan.
 #[test]
 fn cli_box_selects_correct_mcp_and_target_fps() {
-    let (code, out, _err) = run_script(&["--box", "strih"]);
-    assert_eq!(code, 0, "--box strih must print the plan (exit 0)");
-    assert!(out.contains("win-strih") && out.contains("10.77.9.202"));
-    assert!(
-        out.contains("$TargetFps       = 30"),
-        "strih targets 30fps (Topology v2, #459 -- cut-to-stream only; the 60fps IMAG role \
-         moved to imag-nb, #458/#463). out=\n{out}"
-    );
+    let (code, out, _err) = run_script(&["--box", "stream"]);
     assert!(
         out.contains("schtasks /Create"),
         "the plan must include the schtasks registration command"
     );
-
-    let (code, out, _err) = run_script(&["--box", "stream"]);
     assert_eq!(code, 0, "--box stream must print the plan (exit 0)");
     assert!(out.contains("win-stream-snv") && out.contains("10.77.9.204"));
     assert!(
@@ -792,17 +789,17 @@ fn cli_box_selects_correct_mcp_and_target_fps() {
 
 /// #411 (closes the top review finding, verified via the REAL `main()` invocation path — not
 /// just `build_recovery_script` called directly): with NO override flags, the plan an operator
-/// actually runs (`--box strih`, no `--confirm-threshold`/etc) must install `$null` overrides —
+/// actually runs (`--box stream`, no `--confirm-threshold`/etc) must install `$null` overrides —
 /// i.e. obs-self-heal-gate.exe's own DEFAULT_* Rust constants apply, never a stale bash literal.
 #[test]
 fn main_cli_default_omits_overrides_so_rust_kernel_defaults_apply() {
-    let (code, out, _err) = run_script(&["--box", "strih"]);
+    let (code, out, _err) = run_script(&["--box", "stream"]);
     assert_eq!(code, 0);
     assert!(
         out.contains("$ConfirmThresholdOverride = $null")
             && out.contains("$MinIntervalSOverride     = $null")
             && out.contains("$StaleLockSOverride       = $null"),
-        "#411: `scripts/obs-self-heal-install.sh --box strih` with NO override flags — the exact \
+        "#411: `scripts/obs-self-heal-install.sh --box stream` with NO override flags — the exact \
          command the install plan tells the supervisor to run — must emit $null overrides so the \
          Rust kernel's DEFAULT_* constants are authoritative. A stale hardcoded bash literal here \
          would silently diverge from src/obs_self_heal.rs if the Rust consts are ever retuned. \
@@ -816,7 +813,7 @@ fn main_cli_default_omits_overrides_so_rust_kernel_defaults_apply() {
 fn main_cli_explicit_override_flows_through_the_real_invocation() {
     let (code, out, _err) = run_script(&[
         "--box",
-        "strih",
+        "stream",
         "--confirm-threshold",
         "5",
         "--min-interval-s",
@@ -831,6 +828,29 @@ fn main_cli_explicit_override_flows_through_the_real_invocation() {
             && out.contains("$StaleLockSOverride       = 600"),
         "#411: explicit override flags on the real CLI invocation must flow through as literal \
          numbers, not silently drop back to $null. out=\n{out}"
+    );
+}
+
+/// issue 1317 part 3: the Windows strih PC is RETIRED (M4 cut-over; its address is the Linux
+/// strih-lx, supervised by its strih-obs.service user unit). This Windows Task-Scheduler installer
+/// refuses `strih` by name and the Linux strih-lx as an unknown box -- it can never emit a Windows
+/// recovery script for the Linux strih.
+#[test]
+fn retired_windows_strih_and_linux_strih_lx_are_refused_1317() {
+    let (code, out, err) = run_script(&["--box", "strih"]);
+    assert_eq!(code, 2, "--box strih must exit 2. stdout={out} stderr={err}");
+    assert!(
+        err.contains("RETIRED") && err.contains("strih-obs.service"),
+        "the refusal names the retirement + the strih-lx user unit: {err}"
+    );
+    assert!(!out.contains("win-strih"), "no Windows strih plan: {out}");
+    let (code, out, _err) = run_script(&["--box", "strih-lx"]);
+    assert_eq!(code, 2, "--box strih-lx (Linux) must exit 2. stdout={out}");
+    // the builder no longer keys on the literal strih: an unknown / no-AHK name gets NO AHK machinery.
+    let p = run_sourced(&format!("build_recovery_script strih '{OBS_DIR}' 30"));
+    assert!(
+        !p.contains("Stop-Process -Name AutoHotkey64") && !p.contains("$ahkScriptPath"),
+        "the retired strih name carries no AHK fact any more -- no AHK machinery:\n{p}"
     );
 }
 
@@ -855,7 +875,7 @@ fn trailing_flag_without_value_is_usage_error_exit_2() {
 /// enable.
 #[test]
 fn plan_documents_mandatory_live_verify_before_enable() {
-    let (_, out, _) = run_script(&["--box", "strih"]);
+    let (_, out, _) = run_script(&["--box", "stream"]);
     assert!(
         out.contains("LIVE-VERIFY") && out.contains("Healthy-box dry run"),
         "the plan must document the mandatory live-verify sequence. out=\n{out}"
@@ -871,7 +891,7 @@ fn plan_documents_mandatory_live_verify_before_enable() {
 /// leaving the recovery decision unable to run (fail-loud exit 9, per the missing-binary test).
 #[test]
 fn plan_step_zero_mentions_both_gate_binaries() {
-    let (_, out, _) = run_script(&["--box", "strih"]);
+    let (_, out, _) = run_script(&["--box", "stream"]);
     assert!(
         out.contains("obs-watchdog-gate.exe") && out.contains("obs-self-heal-gate.exe"),
         "STEP 0 must instruct the supervisor to deploy BOTH gate binaries. out=\n{out}"
@@ -887,7 +907,7 @@ fn plan_step_zero_mentions_both_gate_binaries() {
 /// `camera_box::dxgi_device_lost::DXGI_DEVICE_LOST_CODES` uses).
 #[test]
 fn recovery_script_performs_local_obs_log_dxgi_audit() {
-    let p = recovery_script_strih();
+    let p = recovery_script_ahk_box();
     assert!(
         p.contains("887A0005") && p.contains("887A0006") && p.contains("887A0007"),
         "#89: the recovery script must check the OBS log for all three DXGI device-lost codes. \
@@ -908,7 +928,7 @@ fn recovery_script_performs_local_obs_log_dxgi_audit() {
 /// "ProcessWedge") must flow into the decision JSON sent to obs-self-heal-gate.exe.
 #[test]
 fn recovery_script_computes_cause_and_sends_it_to_the_self_heal_gate() {
-    let p = recovery_script_strih();
+    let p = recovery_script_ahk_box();
     assert!(
         p.contains("GpuDeviceRemoved") && p.contains("ProcessWedge"),
         "#89: the script must select between the two WedgeCause values. Program:\n{p}"
@@ -924,7 +944,7 @@ fn recovery_script_computes_cause_and_sends_it_to_the_self_heal_gate() {
 /// reboot is a destructive, approval-gated action per no-destructive-remote-actions.md).
 #[test]
 fn enable_reboot_defaults_to_false_when_omitted() {
-    let (code, out, _err) = run_script(&["--box", "strih"]);
+    let (code, out, _err) = run_script(&["--box", "stream"]);
     assert_eq!(code, 0);
     assert!(
         out.contains("$RebootEnabledOverride    = $false"),
@@ -936,7 +956,7 @@ fn enable_reboot_defaults_to_false_when_omitted() {
 /// An explicit `--enable-reboot` flag must flow through as `$true`.
 #[test]
 fn enable_reboot_flag_flows_through_as_true() {
-    let (code, out, _err) = run_script(&["--box", "strih", "--enable-reboot"]);
+    let (code, out, _err) = run_script(&["--box", "stream", "--enable-reboot"]);
     assert_eq!(code, 0);
     assert!(
         out.contains("$RebootEnabledOverride    = $true"),
@@ -949,7 +969,7 @@ fn enable_reboot_flag_flows_through_as_true() {
 /// distinct from the original 4-step process-wedge branch, which must still be present verbatim.
 #[test]
 fn recover_arm_handles_reboot_pc_and_empty_plan_branches() {
-    let p = recovery_script_strih();
+    let p = recovery_script_ahk_box();
     assert!(
         p.contains("RebootPc") && p.contains("Restart-Computer"),
         "#89: a RebootPc-only plan must actually execute a reboot. Program:\n{p}"
@@ -1064,7 +1084,7 @@ fn obs64_sample_and_verify_count_only_live_instances_1295() {
     );
     // The exactly-one-LIVE gate shape must survive the filter (the reused obs_self_heal::
     // recovery_verified contract).
-    let p = recovery_script_strih();
+    let p = recovery_script_ahk_box();
     assert!(
         p.contains("$postCount -eq 1"),
         "#1295: VerifyRecovered's exactly-one gate shape must be preserved. Program:\n{p}"
