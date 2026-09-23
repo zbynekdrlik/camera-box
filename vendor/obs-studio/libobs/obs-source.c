@@ -37,6 +37,7 @@
 
 #include "obs.h"
 #include "obs-internal.h"
+#include "obs-genlock-grid.h" /* camera-box #1355: the ONE per-second genlock grid */
 
 #define get_weak(source) ((obs_weak_source_t *)source->context.control)
 
@@ -3763,6 +3764,10 @@ static void obs_source_output_video_internal(obs_source_t *source, const struct 
 		source->genlock_phase_anchor_ns = 0;
 		free_async_cache(source);
 		source->genlock_acquire_bracket_ticks = 0; /* #1161: the delay line is gone -> a new ACQUIRE episode; the bracket-hold counter must not carry a stale count into it (fail-open cap seam). */
+		/* camera-box #1355: the source went inactive — its next stamp starts a new timeline
+		 * (never a bogus gap against the pre-flush stamp); the cumulative counters survive. */
+		source->genlock_rx_last_ts = 0;
+		source->genlock_rx_min_delta_ns = 0;
 		pthread_mutex_unlock(&source->async_mutex);
 		return;
 	}
@@ -3808,6 +3813,13 @@ static void obs_source_output_video_internal(obs_source_t *source, const struct 
 				const uint32_t depth = (uint32_t)source->async_frames.num;
 				if (depth > source->genlock_peak_depth)
 					source->genlock_peak_depth = depth;
+				/* camera-box #1355: per-input duplicate / missing stamp-interval counters, in
+				 * ARRIVAL order (stamp_dup= / stamp_gap= on the audit line) -- the measured
+				 * evidence of a sender stamping at send time (a slow frame -> gap + dup). Placed
+				 * after the #99 peak update so that update stays next to the received count. */
+				genlock_stamp_track_observe(&source->genlock_rx_last_ts, &source->genlock_rx_min_delta_ns,
+							    &source->genlock_stamp_dups, &source->genlock_stamp_gaps,
+							    output->timestamp);
 			}
 		}
 	}
@@ -5057,12 +5069,14 @@ static inline uint64_t genlock_present_ts_reserve(uint64_t wall_now_ns, uint32_t
  * genlock_present_ts_reserve() itself stays byte-identical (its own pre-#940 tests pin its
  * exact arithmetic). A degenerate interval_ns (0 -- unknown video info) returns the
  * deadline unchanged rather than dividing by zero. Mirror of camera-box
- * src/genlock_backlog.rs phase_pinned_deadline (Tier-0 unit-tested). */
+ * src/genlock_backlog.rs phase_pinned_deadline (Tier-0 unit-tested).
+ * camera-box #1355: the grid is the ONE per-second grid the senders stamp on
+ * (obs-genlock-grid.h), no longer floor(deadline / interval) * interval counted from 1970,
+ * which lost 10 ns per second against the stamps and walked the deep FIFO depth with the
+ * calendar date. */
 static inline uint64_t genlock_phase_pin_deadline(uint64_t deadline_ns, uint64_t interval_ns)
 {
-	if (interval_ns == 0)
-		return deadline_ns;
-	return (deadline_ns / interval_ns) * interval_ns;
+	return genlock_grid_floor_ns(deadline_ns, interval_ns);
 }
 
 /* camera-box #940 piece 3: the grid-comparison HYSTERESIS slack -- a frame captured
@@ -5375,6 +5389,11 @@ static void genlock_audit_log(obs_source_t *source, uint64_t now_ns)
 	      * = wall ran faster than QPC (video deadline ahead of audio). Parsed by the input-side
 	      * AuditSample.wall_qpc_drift_ms in src/jitter_audit.rs. */
 	     "wall_qpc_drift_ms=%lld "
+	     /* camera-box #1355: cumulative received stamps equal to their predecessor
+	      * (stamp_dup=) and missing stamp intervals (stamp_gap=) -- the sender's stamp
+	      * irregularity, counted on arrival by genlock_stamp_track_observe. Audit-line-only
+	      * (not in obs_genlock_stats); parsed by src/jitter_audit.rs. */
+	     "stamp_dup=%llu stamp_gap=%llu "
 	     /* camera-box #1303: receiver-side AUDIO genlock parity facet. audio_enabled= the
 	      * source's NDI audio is active; audio_delay_ms= the hold applied at ingest so the
 	      * audio pairs with the video FIFO (= latency_ms for a genlock_fifo source, 0 = not
@@ -5382,7 +5401,7 @@ static void genlock_audit_log(obs_source_t *source, uint64_t now_ns)
 	      * paired). Appended AFTER the existing fields (scripts parse by field name). Parsed by
 	      * src/jitter_audit.rs; the values come from the shared snapshot `gs`. */
 	     "audio_enabled=%d audio_delay_ms=%u audio_pairing_offset_ms=%lld "
-	     "(#70/#97/#126/#147/#148/#184/#235/#245/#401/#1049/#800/#1303)",
+	     "(#70/#97/#126/#147/#148/#184/#235/#245/#401/#1049/#800/#1303/#1355)",
 	     source->context.name ? source->context.name : "?",
 	     /* camera-box #1298: the health counters now come from the shared snapshot `gs`
 	      * (genlock_fill_stats) so this line and obs_source_get_genlock_stats cannot
@@ -5418,6 +5437,8 @@ static void genlock_audit_log(obs_source_t *source, uint64_t now_ns)
 	     (unsigned long long)gs.backward_regime_ticks,
 	     gs.converge_sheds,
 	     (long long)gs.wall_qpc_drift_ms,
+	     (unsigned long long)source->genlock_stamp_dups,
+	     (unsigned long long)source->genlock_stamp_gaps,
 	     /* camera-box #1303: the audio parity facet, also from the shared snapshot `gs`. */
 	     gs.audio_enabled ? 1 : 0,
 	     gs.audio_delay_ms,
@@ -5982,7 +6003,10 @@ static bool genlock_release_tick(obs_source_t *source, uint64_t wall_now, uint64
 			     due, sel_1003,
 			     (long long)(source->genlock_last_head_skew_ns /
 					 1000000),
-			     (unsigned long long)(interval != 0 ? wall_now % interval : 0),
+			     /* #1355: the phase within the ONE per-second grid the deadline floors on. */
+			     (unsigned long long)(interval != 0
+							  ? wall_now - genlock_grid_floor_ns(wall_now, interval)
+							  : 0),
 			     (unsigned long long)source->genlock_phase_anchor_ns,
 			     (long long)((long long)sel_1003 - (long long)(due - 1)),
 			     (unsigned long long)interval, reserve_ms);

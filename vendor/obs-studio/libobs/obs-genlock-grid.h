@@ -1,0 +1,117 @@
+/* camera-box #1355: ONE per-second genlock frame grid.
+ *
+ * Every genlocked sender stamps its frames on a PER-SECOND grid: slot k of second S is
+ * S + floor(k * 1 s / fps) -- the camera sender (camera-box src/ndi.rs floor_boundary_100ns)
+ * and the OBS sender (DistroAV ndi-output.cpp genlock_floor_boundary_100ns) restart the slot
+ * count every whole second. Until #1355 this receiver floored its ts-align release deadline
+ * (obs-source.c genlock_phase_pin_deadline) and its render tick (obs-video.c
+ * genlock_next_deadline) on the grid counted from 1970 instead -- (t / interval) * interval.
+ * At 30 fps the interval is 33_333_333 ns and 30 of them are 999_999_990 ns, so that grid
+ * loses 10 ns per second (0.864 ms per day) against the senders' grid: the deep 'NDI 2ME PGM'
+ * FIFO depth walked 31 <-> 32 frames with the calendar date (the stamps sat ~2 ms past the
+ * floored deadline on 24.9.2026, due under the 5 ms hysteresis but not for the GAP-RESYNC
+ * check). Both call sites now use the helpers below, so stamps, deadlines and ticks coincide
+ * on every box on every date.
+ *
+ * Nanosecond units; the multiply-then-divide order and the at-most-one-slot promotion (#1009)
+ * are the sender's, so a sender stamp (100 ns units) is at most 99 ns before the receiver grid
+ * point of its own slot and never after it. A non-integer rate (29.97) has no per-second grid
+ * and keeps the pre-#1355 arithmetic; interval 0 (unknown video info) returns t unchanged.
+ *
+ * Pure: stdint only, no libobs types -- tests/genlock_grid_parity_1355.rs compiles this
+ * header as-is and requires byte-identical results from the Tier-0 Rust authority
+ * src/genlock_grid.rs over vectors spanning a whole day. Keep both in lock-step. */
+#pragma once
+
+#include <stdint.h>
+
+#define GENLOCK_GRID_NS_PER_SECOND 1000000000ULL
+
+/* The integer frame rate interval_ns belongs to, or 0 when it is not an integer rate.
+ * Mirror of src/genlock_grid.rs integer_fps (None == 0). */
+static inline uint64_t genlock_grid_integer_fps(uint64_t interval_ns)
+{
+	if (interval_ns == 0)
+		return 0;
+	const uint64_t fps = (GENLOCK_GRID_NS_PER_SECOND + interval_ns / 2) / interval_ns;
+	if (fps == 0)
+		return 0;
+	const uint64_t prod = fps * interval_ns;
+	const uint64_t diff = prod > GENLOCK_GRID_NS_PER_SECOND ? prod - GENLOCK_GRID_NS_PER_SECOND
+								: GENLOCK_GRID_NS_PER_SECOND - prod;
+	return diff < fps ? fps : 0;
+}
+
+/* The slot (0..fps-1) an offset into its second falls in, at or before the offset, with the
+ * #1009 promotion for an offset exactly ON a boundary. fps > 0 is the caller's guard. */
+static inline uint64_t genlock_grid_slot(uint64_t offset_ns, uint64_t fps)
+{
+	uint64_t slot = offset_ns * fps / GENLOCK_GRID_NS_PER_SECOND;
+	if ((slot + 1) * GENLOCK_GRID_NS_PER_SECOND / fps <= offset_ns)
+		slot++;
+	return slot;
+}
+
+/* The grid point AT OR BEFORE t_ns. Mirror of src/genlock_grid.rs grid_floor_ns. */
+static inline uint64_t genlock_grid_floor_ns(uint64_t t_ns, uint64_t interval_ns)
+{
+	if (interval_ns == 0)
+		return t_ns;
+	const uint64_t fps = genlock_grid_integer_fps(interval_ns);
+	if (fps == 0)
+		return (t_ns / interval_ns) * interval_ns;
+	const uint64_t sec = (t_ns / GENLOCK_GRID_NS_PER_SECOND) * GENLOCK_GRID_NS_PER_SECOND;
+	return sec + genlock_grid_slot(t_ns - sec, fps) * GENLOCK_GRID_NS_PER_SECOND / fps;
+}
+
+/* The grid point STRICTLY AFTER t_ns. For the last slot of a second (slot + 1 == fps) the
+ * expression is exactly the next whole second, so the roll-over needs no branch.
+ * Mirror of src/genlock_grid.rs grid_next_boundary_ns. */
+static inline uint64_t genlock_grid_next_boundary_ns(uint64_t t_ns, uint64_t interval_ns)
+{
+	if (interval_ns == 0)
+		return t_ns;
+	const uint64_t fps = genlock_grid_integer_fps(interval_ns);
+	if (fps == 0)
+		return t_ns - (t_ns % interval_ns) + interval_ns;
+	const uint64_t sec = (t_ns / GENLOCK_GRID_NS_PER_SECOND) * GENLOCK_GRID_NS_PER_SECOND;
+	return sec + (genlock_grid_slot(t_ns - sec, fps) + 1) * GENLOCK_GRID_NS_PER_SECOND / fps;
+}
+
+/* camera-box #1355 part 3: a stamp interval of a second or more is a timeline discontinuity
+ * (sender restart, clock step), not a run of missing stamps. */
+#define GENLOCK_STAMP_TRACK_MAX_DELTA_NS 1000000000ULL
+/* camera-box #1355 part 3: a positive interval below this (a 250 fps step; no rig source runs
+ * faster than 60) is a sub-slot hiccup of an off-grid stamp, never the source's step: it is
+ * ignored, so one short interval cannot shrink the learned step and turn every later normal
+ * interval into a run of false gaps. */
+#define GENLOCK_STAMP_TRACK_MIN_STEP_NS 4000000ULL
+
+/* camera-box #1355 part 3: account one RECEIVED stamp (arrival order) into the per-input
+ * duplicate / missing stamp-interval counters printed as stamp_dup= / stamp_gap= on the
+ * 'genlock-fifo audit' line. A sender that stamps at SEND time puts a slow frame into the NEXT
+ * 1/30 s cell -- the receiver sees a stamp that skips a slot (a gap) followed by an equal one (a
+ * duplicate). Rules: equal to the previous stamp -> one duplicate; a positive interval in
+ * [GENLOCK_STAMP_TRACK_MIN_STEP_NS, GENLOCK_STAMP_TRACK_MAX_DELTA_NS) updates the source's own
+ * step (the SMALLEST such interval seen -- the #1042 min-delta rule) and, when it exceeds 1.5
+ * steps, counts round(interval / step) - 1 missing intervals; a shorter positive interval, a
+ * backward stamp or a jump of a second or more counts nothing.
+ * *last_ts == 0 means "no previous stamp" (the flush seam clears it together with *min_delta_ns).
+ * Mirror of src/genlock_grid.rs StampTrack::observe -- keep both in lock-step. */
+static inline void genlock_stamp_track_observe(uint64_t *last_ts, uint64_t *min_delta_ns, uint64_t *dups,
+					       uint64_t *gaps, uint64_t ts)
+{
+	if (*last_ts != 0 && ts >= *last_ts) {
+		const uint64_t delta = ts - *last_ts;
+		if (delta == 0) {
+			(*dups)++;
+		} else if (delta >= GENLOCK_STAMP_TRACK_MIN_STEP_NS && delta < GENLOCK_STAMP_TRACK_MAX_DELTA_NS) {
+			if (*min_delta_ns == 0 || delta < *min_delta_ns)
+				*min_delta_ns = delta;
+			const uint64_t step = *min_delta_ns;
+			if (delta * 2 > step * 3)
+				*gaps += (delta + step / 2) / step - 1;
+		}
+	}
+	*last_ts = ts;
+}

@@ -105,21 +105,37 @@ with stable source names and groups.
 ### 3. Grid
 
 Each output **MUST** define a nominal grid rate equal to the receiving canvas rate (30 fps for
-the `cg` OBS) or an integer multiple of it. Frame boundary *k* is `k · interval` on the
-**Unix-epoch grid** (not a per-stream or session-relative grid). Content that arrives at a
-different rate (a 23.976 or 29.97 file) **MUST** be presented at the first boundary at or after
-its PTS (repeat or drop as needed) and **MUST NOT** be emitted at its free-running file rate.
+the `cg` OBS) or an integer multiple of it. The grid is the **per-second Unix-epoch grid**:
+boundary *k* of whole second *S* (Unix epoch) is `S + floor(k · 1 s / fps)`, *k* = 0 … fps−1 —
+the slot count restarts at every whole second (not a per-stream or session-relative grid, and
+NOT `k · interval` counted from 1970). The two differ: in the receiver's ns units
+`30 × 33_333_333 ns = 999_999_990 ns`, so a 1970 grid loses 10 ns every second (0.864 ms per
+day) — exactly the date-walk issue 1355 removed from the receiver; in a sender's 100 ns units
+`30 × 333_333 = 9_999_990`, so a sender stamping `k · interval_100ns` from 1970 walks **1 µs
+per second at 30 fps (4 µs at 60)** — a whole frame in about 0.4 days. The receiver's release
+deadline and render tick now floor on this same per-second grid
+(`vendor/obs-studio/libobs/obs-genlock-grid.h`, Rust authority `src/genlock_grid.rs`). Content
+that arrives at a different rate (a 23.976 or 29.97 file) **MUST** be presented at the first
+boundary at or after its PTS (repeat or drop as needed) and **MUST NOT** be emitted at its
+free-running file rate.
 
 ### 4. Video timecode
 
 The `NDIlib_video_frame_v2_t.timecode` of every emitted video frame **MUST** be:
 
 ```
-timecode = floor(present_wall_100ns / interval_100ns) · interval_100ns
+S        = floor(present_wall_100ns / 10_000_000) · 10_000_000     # the whole second
+k        = the slot of (present_wall_100ns − S) on the §3 per-second grid
+timecode = S + floor(k · 10_000_000 / fps)
 ```
 
-in **100 ns units since the Unix epoch**. It **MUST** be the FLOOR boundary (the boundary at or
-before the emit instant) and **MUST NOT** be the strictly-next/ceil boundary. It **MUST NOT** be
+in **100 ns units since the Unix epoch** — the per-second grid of §3 (never
+`floor(t / interval_100ns) · interval_100ns` counted from 1970, which walks 1 µs/s at 30 fps
+(4 µs/s at 60) against every other sender and against the receiver). Exactly on a boundary the slot recovery `(offset · fps) /
+10_000_000` can under-count by one (`floor(k · 10_000_000 / fps)` sits up to one unit below the
+exact rational), so promote once when slot *k*+1's boundary is still at or before the instant —
+see `floor_boundary_100ns`. It **MUST** be the FLOOR boundary (the boundary at or before the emit
+instant) and **MUST NOT** be the strictly-next/ceil boundary. It **MUST NOT** be
 `NDIlib_send_timecode_synthesize`, **MUST NOT** be `0`, and **MUST NOT** be a monotonic counter.
 
 The floor is not a detail: a ceil stamp dates every frame 0..1 interval into the receiver's

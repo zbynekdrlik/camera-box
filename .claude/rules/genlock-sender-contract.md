@@ -23,6 +23,12 @@ The load-bearing invariants the contract pins to this code (keep them honest):
   (`src/genlock_stamp.rs`); the OBS-as-sender twin `genlock_emit_timecode_100ns` /
   `genlock_floor_boundary_100ns` (`vendor/distroav/src/ndi-output.cpp`). A ceil/future stamp
   trips the receiver's issue-147 backward-step guard (the 2026-08-07 −900 ms collapse, #1009).
+- **The grid is the PER-SECOND grid** — slot `k` of whole second `S` is `S + floor(k·1 s/fps)`
+  (contract §3/§4, corrected in #1355 from a `k · interval`-from-1970 wording that contradicted
+  this very reference code). The receiver deadline + render tick use the same grid since #1355
+  (`src/genlock_grid.rs` ↔ `obs-genlock-grid.h`); `src/ndi.rs` tests pin `floor_boundary_100ns`
+  == `genlock_grid::per_second_floor` over a day. A sender stamping `k · interval_100ns` from 1970 walks 1 µs/s at 30 fps (4 µs/s at 60 — a
+  whole frame in ~0.4 days); check SongPlayer + the cg OBS against contract §4.
 - **Sender create `clock_video=false, clock_audio=false`** (`src/ndi.rs`) — the app owns cadence,
   never the NDI SDK's free-running clock.
 - **Pacing on the epoch grid** — one frame per boundary, catch-up `GENLOCK_MAX_CATCHUP_INTERVALS`

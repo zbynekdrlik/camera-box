@@ -28,7 +28,7 @@ use std::collections::HashMap;
 /// Field names mirror the log's `key=value` tokens exactly (see [`parse_audit_line`]).
 /// The counters (`received`, `consumed`, `underruns`, `holds`, `overruns`,
 /// `backward_steps`, `backward_regime_ticks`, `dropped_due`, `relocks`, `late_holds`,
-/// `empty_run`) are CUMULATIVE
+/// `stamp_dup`, `stamp_gap`, `empty_run`) are CUMULATIVE
 /// since the source was created — they only ever increase — so a per-run answer needs the
 /// DELTA between the first and last sample of a captured window ([`summarize`]), never the
 /// raw value alone. `ts_head_skew_ms` is an instantaneous per-tick value, not cumulative.
@@ -92,6 +92,14 @@ pub struct AuditSample {
     /// paired; `-latency_ms` = audio never held (the wiring did not fire). An instantaneous
     /// per-tick value, NOT summarized. Absent on pre-#1303 logs — parses as 0.
     pub audio_pairing_offset_ms: i64,
+    /// #1355 — CUMULATIVE received stamps equal to their predecessor (`stamp_dup=`): the second
+    /// half of a sender's gap-then-duplicate pair (a slow frame stamped into the next 1/30 s
+    /// cell). Counted on ARRIVAL by the vendored `genlock_stamp_track_observe`
+    /// (`crate::genlock_grid::StampTrack`). Absent on pre-#1355 logs — parses as 0.
+    pub stamp_dup: u64,
+    /// #1355 — CUMULATIVE missing stamp intervals (`stamp_gap=`) against the source's own
+    /// smallest stamp step. Absent on pre-#1355 logs — parses as 0.
+    pub stamp_gap: u64,
 }
 
 /// Parse ONE `genlock-fifo audit` log line into an [`AuditSample`].
@@ -173,6 +181,8 @@ pub fn parse_audit_line(line: &str) -> Option<AuditSample> {
             }
             "audio_delay_ms" => set!(audio_delay_ms),
             "audio_pairing_offset_ms" => set!(audio_pairing_offset_ms),
+            "stamp_dup" => set!(stamp_dup),
+            "stamp_gap" => set!(stamp_gap),
             _ => {}
         }
     }
@@ -229,6 +239,9 @@ pub struct AuditSummary {
     pub delta_dropped_due: u64,
     pub delta_relocks: u64,
     pub delta_late_holds: u64,
+    /// #1355 — window deltas of the sender stamp-irregularity counters (0 on pre-#1355 logs).
+    pub delta_stamp_dup: u64,
+    pub delta_stamp_gap: u64,
     /// Largest `|ts_head_skew_ms|` observed across the window — the worst-case arrival
     /// jitter this reserve had to absorb.
     pub max_abs_head_skew_ms: i64,
@@ -280,6 +293,8 @@ pub fn summarize(samples: &[AuditSample]) -> Option<AuditSummary> {
         delta_dropped_due: last.dropped_due.saturating_sub(first.dropped_due),
         delta_relocks: last.relocks.saturating_sub(first.relocks),
         delta_late_holds: last.late_holds.saturating_sub(first.late_holds),
+        delta_stamp_dup: last.stamp_dup.saturating_sub(first.stamp_dup),
+        delta_stamp_gap: last.stamp_gap.saturating_sub(first.stamp_gap),
         max_abs_head_skew_ms,
         mean_abs_head_skew_ms,
         mean_head_skew_ms,
@@ -820,6 +835,72 @@ mod tests {
         assert!(!s.audio_enabled);
         assert_eq!(s.audio_delay_ms, 0);
         assert_eq!(s.audio_pairing_offset_ms, -3);
+    }
+
+    /// #1355 — the sender stamp-irregularity counters: parsed from their tokens (appended after
+    /// `wall_qpc_drift_ms=` by the vendored audit line), 0 on a pre-#1355 line, window-delta'd.
+    #[test]
+    fn stamp_dup_and_gap_parse_default_and_delta_1355() {
+        let line = SAMPLE_LINE_CAM1.replace(
+            "wall_qpc_drift_ms=-252 ",
+            "wall_qpc_drift_ms=-252 stamp_dup=7 stamp_gap=9 ",
+        );
+        let s = parse_audit_line(&line).expect("a #1355 line parses");
+        assert_eq!((s.stamp_dup, s.stamp_gap), (7, 9));
+        // Neighbouring tokens are untouched by the two new keys.
+        assert_eq!(s.wall_qpc_drift_ms, -252);
+        assert!(s.audio_enabled);
+        let old = parse_audit_line(SAMPLE_LINE_CAM1).expect("a pre-#1355 line still parses");
+        assert_eq!((old.stamp_dup, old.stamp_gap), (0, 0));
+        let later =
+            parse_audit_line(&line.replace("stamp_dup=7 stamp_gap=9", "stamp_dup=10 stamp_gap=14"))
+                .unwrap();
+        let sum = summarize(&[s, later]).unwrap();
+        assert_eq!((sum.delta_stamp_dup, sum.delta_stamp_gap), (3, 5));
+    }
+
+    /// #1355 — the two new keys are mutually non-substring with every key the input-side parser
+    /// already matches, so no existing token can be mis-read as one of them or vice versa.
+    #[test]
+    fn stamp_keys_are_mutually_non_substring_with_existing_keys_1355() {
+        let existing = [
+            "received",
+            "consumed",
+            "underruns",
+            "holds",
+            "overruns",
+            "backward_steps",
+            "dropped_due",
+            "relocks",
+            "late_holds",
+            "locked",
+            "depth",
+            "peak",
+            "latency_ms",
+            "src_latency_ms",
+            "global_latency_ms",
+            "preload",
+            "reserve_ms",
+            "cap",
+            "empty_run",
+            "ts_present",
+            "ts_due",
+            "ts_head_skew_ms",
+            "backward_regime_ticks",
+            "converge_sheds",
+            "wall_qpc_drift_ms",
+            "audio_enabled",
+            "audio_delay_ms",
+            "audio_pairing_offset_ms",
+        ];
+        for new in ["stamp_dup", "stamp_gap"] {
+            for old in existing {
+                assert!(
+                    !old.contains(new) && !new.contains(old),
+                    "{new} vs {old} overlap"
+                );
+            }
+        }
     }
 
     #[test]

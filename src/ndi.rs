@@ -1611,6 +1611,37 @@ mod tests {
         );
     }
 
+    /// #1355 — the sender stamp IS the shared per-second grid (`crate::genlock_grid`) in 100 ns
+    /// units: the receiver deadline + render tick floor on that same grid in ns, so they can only
+    /// coincide with the stamps if this function and `per_second_floor` never disagree. Swept
+    /// over a whole day of epoch instants plus every slot boundary of a second (ON / ±1).
+    #[test]
+    fn floor_boundary_is_the_shared_per_second_grid_1355() {
+        use crate::genlock_grid::{per_second_floor, UNITS_100NS_PER_SECOND};
+        let day0: i64 = 17_901_765_930_000_000; // 2026-09-23 17:16:33 UTC in 100 ns units
+        for fps in [24i64, 25, 30, 60] {
+            let mut t = day0;
+            while t < day0 + 864_000_000_000 {
+                assert_eq!(
+                    floor_boundary_100ns(t, fps) as u64,
+                    per_second_floor(t as u64, fps as u64, UNITS_100NS_PER_SECOND),
+                    "fps {fps} t {t}"
+                );
+                t += 4_320_000_123; // ~7.2 min, drifting sub-second phase
+            }
+            for k in 0..=fps {
+                let b = day0 + k * UNITS_PER_SECOND / fps;
+                for x in [b - 1, b, b + 1] {
+                    assert_eq!(
+                        floor_boundary_100ns(x, fps) as u64,
+                        per_second_floor(x as u64, fps as u64, UNITS_100NS_PER_SECOND),
+                        "fps {fps} slot {k} x {x}"
+                    );
+                }
+            }
+        }
+    }
+
     /// #1009 — floor guards degenerate fps and never stamps the future or falls a full
     /// interval behind, at both rig rates.
     #[test]
