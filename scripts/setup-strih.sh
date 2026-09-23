@@ -340,13 +340,15 @@ cat > "$OBS_CFG/plugin_config/obs-websocket/config.json" <<'WS'
 WS
 chown -R "$DESKTOP_USER":"$DESKTOP_USER" "$OBS_CFG/plugin_config" 2>/dev/null || true
 echo "  obs-websocket :4455 no-auth pre-seeded; Studio Mode is enforced by the scene seeder (step 6)"
-# issue 1346: pre-seed [BasicWindow] SaveProjectors=true + ProjectorAlwaysOnTop=true in the desktop
+# issue 1346: pre-seed [BasicWindow] SaveProjectors=true + ProjectorAlwaysOnTop=false in the desktop
 # user's user.ini so OBS PERSISTS the fixed HDMI fullscreen projector and re-opens it on every
 # launch. The OBS default is SaveProjectors=false, so a hand-opened or seeded projector would NEVER
 # come back after strih-obs.service relaunches. Idempotent (RawConfigParser upsert; the literal
 # `SaveProjectors=true` is the verify-strih anchor), owned by the desktop user. NOTE: this is the
 # OPPOSITE of imag (#522 SaveProjectors=false + an openbox-autostart re-open hook) -- strih-lx has no
 # such boot hook, so it relies on OBS's own SaveProjectors restore + the seed_projector idempotency.
+# ProjectorAlwaysOnTop=false: owner ruling 23.9.2026 -- the multiview must not stay on top of the
+# operator's other windows (the seed rewrote a hand-set OFF back to ON on every provisioning run).
 USER_INI="${OBS_CFG}/user.ini"
 if command -v python3 >/dev/null 2>&1; then
   python3 - "$USER_INI" <<'PY' || warn "  could not pre-seed SaveProjectors in ${USER_INI} (non-fatal; the OBS UI / strih_scenes.py --projector still work)"
@@ -365,14 +367,14 @@ if os.path.exists(path):
         sys.exit(3)
 if not cp.has_section("BasicWindow"):
     cp.add_section("BasicWindow")
-for kv in ("SaveProjectors=true", "ProjectorAlwaysOnTop=true"):
+for kv in ("SaveProjectors=true", "ProjectorAlwaysOnTop=false"):
     k, v = kv.split("=", 1)
     cp.set("BasicWindow", k, v)
 with open(path, "w") as fh:
     cp.write(fh, space_around_delimiters=False)
 PY
   chown "$DESKTOP_USER":"$DESKTOP_USER" "$USER_INI" 2>/dev/null || true
-  echo "  pre-seeded [BasicWindow] SaveProjectors=true + ProjectorAlwaysOnTop=true in ${USER_INI}"
+  echo "  pre-seeded [BasicWindow] SaveProjectors=true + ProjectorAlwaysOnTop=false in ${USER_INI}"
 else
   warn "  python3 absent -- cannot pre-seed SaveProjectors in ${USER_INI} (set it in the OBS UI, or install python3 and re-run)"
 fi

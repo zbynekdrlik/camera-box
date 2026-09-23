@@ -56,10 +56,13 @@ NETCFG_DROP_THRESHOLD="${NETCFG_DROP_THRESHOLD:-1}"
 # Designated drop-sampler ALWAYS-probe set (#1110): "node|port" tokens (space-separated) that get the
 # live two-read rate probe on EVERY --check regardless of cumulative-counter growth -- so a starvation
 # episode on a suspect uplink always yields a fresh drop DELTA (the growth-gate below would otherwise
-# never sample a HEALTHY port whose dq1 is flat at 0). Default = the strih PC's direct-DAC uplink
-# (foh2_video egress port sfp-sfpplus2, per issue 1110 live-verified 2026-08-25). Set empty to restore
-# the pre-#1110 growth-gated-only behaviour.
-NETCFG_DROP_PROBE_PORTS="${NETCFG_DROP_PROBE_PORTS:-foh2_video|sfp-sfpplus2}"
+# never sample a HEALTHY port whose dq1 is flat at 0). Default = strih's egress port. Since the M4
+# cut-over (20.9.2026) strih is the Linux notebook strih-lx on a USB 2.5 GbE adapter plugged into
+# foh1_video_switch ether2 (issue 1242, live-verified 2026-09-23 via the bridge host table); the old
+# Windows strih PC's 10 G DAC port foh2_video sfp-sfpplus2 (issue 1110) has no link any more. A
+# designated port with no link reports `designated-down` (stale designation) -- re-point this default
+# whenever strih is re-cabled. Set empty to restore the pre-#1110 growth-gated-only behaviour.
+NETCFG_DROP_PROBE_PORTS="${NETCFG_DROP_PROBE_PORTS:-foh1_video|ether2}"
 
 log() { printf '%s [netcfg-audit] %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$*" >&2; }
 
@@ -295,15 +298,29 @@ case "$MODE" in
       netcfg_port_is_designated "$node" "$port" "$NETCFG_DROP_PROBE_PORTS" && designated=1
       if [ "$designated" != 1 ]; then
         [ "$dq1" -gt "$bdq1" ] || continue   # only actively-growing ports are worth the live rate probe
+      else
+        # issue 1242: a designated port with NO link carries no traffic, so a live probe would read
+        # a flat counter as "strih uplink clean" -- the false-clean a stale designation printed after
+        # strih moved ports. Surface the stale designation and DEMOTE the port to the ordinary
+        # growth-gate (the same treatment as any non-designated port), so the always-probe bypass
+        # never fires on it.
+        running="$(_nc_live_field "$live" "${node}.port.${port}.running")"
+        if ! netcfg_designated_port_linked "$running"; then
+          report+=("  [report-only designated-down] $node $port: designated strih-uplink drop-sampler port has no link (running='$running') -- the designation is stale; re-point NETCFG_DROP_PROBE_PORTS at the port strih is plugged into")
+          designated=0
+          [ "$dq1" -gt "$bdq1" ] || continue
+        fi
       fi
       ip="$(_nc_live_field "$live" "${node}.ip")"
       [ -n "$ip" ] || continue
       dv="$(_nc_drop_rate_verdict "$ip" "$port")"
       statuses+=("$dv")
       # A designated port bypasses the growth-gate, so its dq1 may be FLAT vs baseline while the live
-      # two-read window still catches a burst -- cite the live window (not a "$bdq1->$dq1 since
-      # baseline" delta that would misleadingly read "0->0"). Growth-gated ports keep the delta text
-      # (their growth-gate guaranteed dq1 > bdq1).
+      # two-read window still catches a burst -- its DROPPING / UNKNOWN lines cite the live window (not
+      # a "$bdq1->$dq1 since baseline" delta that could read "0->0"). Growth-gated ports keep the delta
+      # text (their growth-gate guaranteed dq1 > bdq1). The designated OK/`sampled` line DELIBERATELY
+      # carries the cumulative delta too (issue 1242): the strih-uplink tail-drop is bursty, so one
+      # clean 6 s window alone would read as a clean uplink while millions of drops accrued.
       case "$dv" in
         DROPPING) if [ "$designated" = 1 ]; then
                     report+=("  [DROPPING] $node $port: tx-drop-queue1 climbing >${NETCFG_DROP_THRESHOLD}/s over the live ${NETCFG_DROP_WINDOW}s window (designated drop-sampler; cumulative dq1=$dq1) -- microburst tail-drop; check shared-buffers / uplink step-down")
@@ -316,7 +333,7 @@ case "$MODE" in
                   else
                     report+=("  [report-only UNKNOWN] $node $port: drop-rate probe unreadable (dq1 grew $bdq1->$dq1 but a live re-read failed)")
                   fi ;;
-        OK)       [ "$designated" = 1 ] && report+=("  [report-only sampled] $node $port: designated drop-sampler probe clean (rate <=${NETCFG_DROP_THRESHOLD}/s over ${NETCFG_DROP_WINDOW}s) -- strih uplink #1110") ;;
+        OK)       [ "$designated" = 1 ] && report+=("  [report-only sampled] $node $port: designated drop-sampler probe clean (rate <=${NETCFG_DROP_THRESHOLD}/s over ${NETCFG_DROP_WINDOW}s; cumulative dq1 $bdq1->$dq1 since baseline -- the tail-drop is BURSTY, one clean window is not a clean uplink) -- strih uplink #1110") ;;
       esac
     done <<< "$live"
 

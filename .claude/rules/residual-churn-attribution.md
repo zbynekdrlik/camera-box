@@ -72,3 +72,17 @@ The strih genlock-FIFO time-series (`received=`/`late_hold`/relock) is NOT persi
 dirs (only aggregate head-skew jitter + decode-progress), so DOWNSTREAM is by ELIMINATION (source
 clean + painter clean + the counterfactual), not a positive downstream read. To make it positive, a
 future run must extract the strih `genlock-fifo audit` counters into the run dir.
+
+## Receiver repeat vs source content repeat: read the burn id, not only the tick (issue 1242, 23.9.2026)
+For each copy in a window, join the painted `tick` with the cambox's OWN digital burn id
+(`911001` cam1 · `911009` cam2 · `911008` cam3 · `911007` cam4 · `911010` cam5 · `911011` cam6 ·
+`911012` cam7) on consecutive recorded frames. Do it in BOTH `strih-partial-*.json` and
+`stream-partial-*.json`:
+- **tick Δ0 AND burn Δ0** means strih re-presented the SAME NDI frame: a receiver-side FIFO repeat. A
+  run of them (CAM7 11/11, CAM4 10/10 on 23.9.) is the strih-lx 2.5 G uplink tail-drop blackout. See
+  `.claude/rules/netcfg-audit.md` for the finding and the discriminator recipe.
+- **tick Δ0 while burn Δ≥1** means consecutive cambox emits carried identical content: a SOURCE
+  capture/emit repeat that strih's 60→30 phase flip (burn Δ1/Δ3) happened to pick. CAM2 6/6 in run
+  1390609404 was this, not a receiver burst.
+- **strih clean, stream shows the defect** means the stream-hop (2ME PGM) FIFO.
+Over 80 windows (22–23.9): 30 receiver repeats, 9 source content repeats, 2 stream-only.

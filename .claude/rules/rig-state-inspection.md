@@ -296,8 +296,10 @@ rig looked half-alive):
    fleet pw) or the box's own scene/profile names — never from "the password worked".
    L2 truth for a dead box: router `/ip arp print` `incomplete`, MAC absent from every switch's
    `/interface bridge host print`, and the box's switch port (`/interface ethernet monitor <port>
-   once`) showing `no-link` = power/cable/NIC, not software. strih = MAC 5C:6A:80:F6:6C:F7 on
-   foh2_video (10.77.9.5) `sfp-sfpplus2::basic`.
+   once`) showing `no-link` = power/cable/NIC, not software. strih (since the 20.9.2026 M4
+   cut-over) = strih-lx, USB RTL8156 MAC 6C:1F:F7:66:15:4B on foh1_video (10.77.9.4) `ether2`
+   (2.5 G, verified 23.9.2026 for issue 1242). The old Windows strih PC was MAC 5C:6A:80:F6:6C:F7 on
+   foh2_video (10.77.9.5) `sfp-sfpplus2::basic` (10 G DAC); that port has no link now.
 
 3. **Windows DistroAV lives in `C:\ProgramData\obs-studio\plugins\distroav\bin\64bit\distroav.dll`
    on strih AND stream — NOT in `C:\Program Files\obs-studio\obs-plugins\64bit`.** A DLL deploy

@@ -10,6 +10,10 @@ use std::sync::Arc;
 
 use crate::display::{any_connector_connected, FramebufferDisplay};
 use crate::ndi::NdiReceiver;
+use crate::preview_source::{
+    pick_preview_source, preview_log_level, preview_log_line, resolve_preview_source,
+    PreviewLogLevel, PreviewResolution,
+};
 
 /// DRM sysfs class dir whose connector `status` files report monitor presence (#135).
 const DRM_CLASS_DIR: &str = "/sys/class/drm";
@@ -20,7 +24,9 @@ const CONNECTOR_RECHECK_FRAMES: u64 = 30;
 
 /// NDI display configuration
 pub struct NdiDisplayConfig {
-    /// NDI source name to search for (partial match)
+    /// PREFERRED NDI source name, matched EXACTLY (no longer a substring). When it is not on the
+    /// LAN the display falls back to the one discovered `STRIH-<box> (interkom)` output, but only
+    /// after the whole find window (#1362, `crate::preview_source`).
     pub source_name: String,
     /// Framebuffer device path
     pub fb_device: String,
@@ -158,6 +164,10 @@ pub fn run_display_loop(config: NdiDisplayConfig, running: Arc<AtomicBool>) -> R
     let mut logged_connector_state: Option<bool> = None;
     log_connector_state(connector_present, &mut logged_connector_state);
 
+    // #1362: the last preview-source resolution LOGGED — persists across reconnects so the
+    // "resolved to" / ambiguity line is logged once per change, not once per retry.
+    let mut last_resolution: Option<PreviewResolution> = None;
+
     // Outer reconnection loop - keeps trying to connect/reconnect
     while running.load(Ordering::Relaxed) {
         // #528: poll connector presence BEFORE connecting the NDI receiver — a monitor-less
@@ -175,17 +185,44 @@ pub fn run_display_loop(config: NdiDisplayConfig, running: Arc<AtomicBool>) -> R
             continue;
         }
 
-        // Try to connect to NDI source
+        // #1362: resolve the preview source from the LAN on EVERY (re)connect — the preferred
+        // name when it is announced, else the ONE `STRIH-<box> (interkom)` output (after the
+        // whole find window), never a pick between two strih boxes. A strih swap/rename is
+        // therefore picked up on the next reconnect without a new binary.
+        let preferred = config.source_name.as_str();
         tracing::info!(
-            "NDI display: connecting to source '{}'...",
-            config.source_name
+            "NDI display: connecting to preview source (preferred '{}')...",
+            preferred
         );
-        let mut receiver = match NdiReceiver::connect(&config.source_name, config.find_timeout_secs)
-        {
+        let search_label = format!("{preferred} or the one STRIH-<box> (interkom) output");
+        let mut receiver = match NdiReceiver::connect_with(
+            config.find_timeout_secs,
+            &search_label,
+            |names, window_elapsed| {
+                let resolution = resolve_preview_source(names, preferred);
+                let pick = pick_preview_source(&resolution, window_elapsed);
+                // Log only a FINAL decision (a pick, or the end of the find window), and only
+                // when it differs from the last one logged — never once per 1 s finder pass.
+                if let Some(level) = preview_log_level(
+                    last_resolution.as_ref(),
+                    &resolution,
+                    pick.is_some(),
+                    window_elapsed,
+                ) {
+                    let line = preview_log_line(&resolution, preferred);
+                    match level {
+                        PreviewLogLevel::Info => tracing::info!("{}", line),
+                        PreviewLogLevel::Warn => tracing::warn!("{}", line),
+                    }
+                    last_resolution = Some(resolution);
+                }
+                pick
+            },
+        ) {
             Ok(r) => {
                 tracing::info!(
-                    "NDI display ready: {} -> framebuffer {}x{}",
-                    config.source_name,
+                    "NDI display: connected to '{}' -> framebuffer {}x{}",
+                    r.source_name(),
                     fb_width,
                     fb_height
                 );
@@ -373,11 +410,11 @@ mod tests {
     #[test]
     fn test_ndi_display_config_custom() {
         let config = NdiDisplayConfig {
-            source_name: "STRIH-SNV (interkom)".to_string(),
+            source_name: "STRIH-LX (interkom)".to_string(),
             fb_device: "/dev/fb1".to_string(),
             find_timeout_secs: 60,
         };
-        assert_eq!(config.source_name, "STRIH-SNV (interkom)");
+        assert_eq!(config.source_name, "STRIH-LX (interkom)");
         assert_eq!(config.fb_device, "/dev/fb1");
         assert_eq!(config.find_timeout_secs, 60);
     }

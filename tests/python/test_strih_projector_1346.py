@@ -237,11 +237,12 @@ def test_setup_strih_preseeds_saveprojectors_before_the_obs_enable():
     s = _read("setup-strih.sh")
     # anchor the FUNCTIONAL heredoc line (the configparser upsert), NOT the prose comment/echo that
     # also mention "SaveProjectors=true" -- so this proves the actual pre-seed runs before the enable.
-    save = s.find('for kv in ("SaveProjectors=true", "ProjectorAlwaysOnTop=true")')
+    # issue 1346 owner ruling 23.9.2026: the multiview projector must NOT stay on top.
+    save = s.find('for kv in ("SaveProjectors=true", "ProjectorAlwaysOnTop=false")')
     enable = s.find("systemctl --user enable strih-obs.service")
     assert save != -1, (
-        "setup-strih.sh step 7 must pre-seed SaveProjectors=true + ProjectorAlwaysOnTop=true in "
-        "user.ini via the `for kv in (\"SaveProjectors=true\", \"ProjectorAlwaysOnTop=true\")` upsert"
+        "setup-strih.sh step 7 must pre-seed SaveProjectors=true + ProjectorAlwaysOnTop=false in "
+        "user.ini via the `for kv in (\"SaveProjectors=true\", \"ProjectorAlwaysOnTop=false\")` upsert"
     )
     assert enable != -1, "setup-strih.sh step 8 must enable strih-obs.service"
     assert save < enable, "the SaveProjectors=true pre-seed (step 7) must precede the OBS enable (step 8)"

@@ -162,7 +162,11 @@ fn apply_cpu_affinity() {
 /// delivers "plug in -> shows preview, unplug -> stops, move the monitor to another box -> that
 /// box shows it" for free. This is the interkom/return/talkback monitor cam1/cam2 already
 /// showed before #556 — NOT the cameraman Multiview camera grid (owner correction, 2026-07-08).
-const DEFAULT_DISPLAY_SOURCE: &str = "STRIH-SNV (interkom)";
+/// #1362: this is only the PREFERRED name (the current strih, `STRIH-LX (interkom)`); when it is
+/// not on the LAN the display loop falls back to the one discovered `STRIH-<box> (interkom)`
+/// output, so a strih swap never blackens every cameraman monitor again. Single-sourced in the
+/// pure `camera_box::preview_source` module.
+const DEFAULT_DISPLAY_SOURCE: &str = camera_box::preview_source::DEFAULT_PREVIEW_SOURCE;
 
 /// #528: E2E-harness opt-out. When this env var is set (to any value), the display thread does
 /// not start at all, freeing `/dev/fb0` for the QR painter (`scripts/rig-mode.sh test`). This
@@ -221,7 +225,7 @@ struct Args {
     #[arg(short, long)]
     device: Option<String>,
 
-    /// NDI source to display on HDMI (e.g., "STRIH-SNV (interkom)")
+    /// NDI source to display on HDMI (e.g., "STRIH-LX (interkom)")
     #[arg(long = "display")]
     display_source: Option<String>,
 
@@ -544,6 +548,27 @@ async fn run_capture_loop(
         }
         None => frame_rate,
     };
+
+    // #1242 — per-camera NDI SEND stagger inside the genlock frame slot. All camboxes emit on
+    // the same grid and (on the splitter rig) capture the same HDMI signal, so their ~300 KB
+    // frames used to leave within ~1 ms of each other and overflow the strih-lx 2.5 GbE switch
+    // port. Camera N now hands its frame to the NDI SDK (N-1) x STAGGER_US after its emit-gate
+    // decision (see `send_stagger`'s module doc for the arithmetic, the clamp to the shorter of
+    // the send and capture intervals, and the capture-loop budget guard). The emit grid and the
+    // FLOOR-boundary timecode are untouched. One rule for every box: the number comes from the OS
+    // hostname (CAM<N>); an unknown hostname or genlock off -> offset 0.
+    let send_stagger = camera_box::send_stagger::plan(
+        &resolved_hostname,
+        genlock_fps,
+        frame_rate.numerator,
+        frame_rate.denominator,
+    );
+    if send_stagger.warn {
+        tracing::warn!("{}", send_stagger.log_line);
+    } else {
+        tracing::info!("{}", send_stagger.log_line);
+    }
+    let send_stagger_offset = send_stagger.offset;
 
     // #174 cam1-capture render-time QR burn — TEST MODE ONLY. Gated behind
     // CAMERA_BOX_BURN_RUN_ID (mirrors the strih/stream DistroAV burn run_id env): when
@@ -1073,6 +1098,12 @@ async fn run_capture_loop(
         // grabber's own internal-buffer repeat is preferentially shed over the genuine unique
         // tick next to it. See `camera_box::dupe_decimation`'s module doc for the full mechanism.
         let mut decimation_gate = camera_box::dupe_decimation::DecimationGate::new();
+        // #1242 — how long the PREVIOUS emitted iteration slept for its send stagger (ms). The
+        // sleep shortens the next V4L2 dequeue wait, so the #1131 buffered-queue signal adds it
+        // back (`send_stagger::idle_wait_ms`); taken (reset) once per loop iteration, BEFORE the
+        // dequeue it shortened. `stagger_window` is the per-5 s slept/skipped/work accounting.
+        let mut last_stagger_sleep_ms: f64 = 0.0;
+        let mut stagger_window = camera_box::send_stagger::StaggerWindow::default();
 
         while running_capture.load(Ordering::Relaxed) {
             // #707 B1 — snapshot the emit counter before the frame closure so the per-second ring
@@ -1093,8 +1124,18 @@ async fn run_capture_loop(
             // A delta after the call means this iteration dropped one; we register a bounded make-up
             // so the gate reclaims exactly that slot with the nearest good frame on its next shed.
             let corrupted_before = capture.corrupted_frames();
+            // #1242 — the previous emitted iteration's send-stagger sleep ran just before THIS
+            // dequeue and shortened it by exactly that much. Taken (reset to 0) here, before the
+            // dequeue, so it always pairs with the very next dequeue — even when that buffer is a
+            // corrupted one that never reaches the callback below.
+            let stagger_slept_ms = std::mem::take(&mut last_stagger_sleep_ms);
             // ZERO-COPY: Process frame directly from mmap buffer without copying
             let result = capture.process_frame(|data, info| {
+                // #1242 — this callback's start (per-frame work = callback time minus the stagger
+                // sleep) and whether the frame came from an already non-empty queue (the loop is
+                // behind → skip the stagger sleep for it).
+                let cb_started = std::time::Instant::now();
+                let mut frame_backlogged = false;
                 // #286 — periodically re-sample the monotonic->realtime clock offset. Counts
                 // EVERY captured frame toward the cadence (regardless of emit/decimate
                 // decisions below), so the offset stays fresh even during a long decimated
@@ -1193,14 +1234,20 @@ async fn run_capture_loop(
                     // frame from an empty queue (the loop genuinely waited — a device/clock gap)
                     // keeps the pre-existing #131 forward-resync. Same `dequeue_duration_ms` signal
                     // the #707 capture-stall WARN reads, thresholded the other way.
+                    // #1242 — add back the previous stagger sleep (taken before the dequeue) so a
+                    // healthy empty-queue frame on a later camera never reads as "already buffered".
                     let queue_had_frame = if configured_capture_fps > 0.0 {
                         camera_box::capture_stall::frame_from_nonempty_queue(
-                            info.dequeue_duration_ms,
+                            camera_box::send_stagger::idle_wait_ms(
+                                info.dequeue_duration_ms,
+                                stagger_slept_ms,
+                            ),
                             1000.0 / configured_capture_fps,
                         )
                     } else {
                         false
                     };
+                    frame_backlogged = queue_had_frame;
                     // #1145 v2 — the MONOTONIC clocks the queue-depth drain needs: `now_mono` is
                     // read once here, `capture_mono` is the V4L2 buffer's own CLOCK_MONOTONIC
                     // capture instant (`FrameInfo::capture_monotonic_100ns`, 100ns units; 0 = no
@@ -1248,6 +1295,10 @@ async fn run_capture_loop(
                         return; // decimated -- either blind pacing or a preferred dupe shed
                     }
                 }
+                // #1242 — the send-stagger anchor: the instant this frame passed the emit gate.
+                // The per-camera offset below is measured from HERE, so the small per-frame work
+                // between the gate and the send never adds to (or drifts) the stagger.
+                let stagger_anchor = std::time::Instant::now();
                 // #275b — ONE cam1 emit-instant wall-clock stamp (CLOCK_REALTIME, the DanteSync
                 // clock), shared by the burned QR's gen_ts AND the grab-recording tee, so both
                 // describe the SAME instant even when the async submit below back-pressures (the
@@ -1393,6 +1444,37 @@ async fn run_capture_loop(
                     emit_wall_ns / 100,
                     send_fps as i64,
                 );
+                // #1242 — the per-camera NDI send stagger, ONCE per emitted iteration: after the
+                // genlock timecode above is fixed (it never moves) and before the first send (the
+                // starvation repeats and the current frame leave back-to-back behind one delay).
+                // The emit grid is untouched — the gate already polled the wall clock above and
+                // never reads the send instant. Covers the production zero-copy send AND the burn
+                // ring hand-off, so the send timing matches production in an E2E run. The measured
+                // sleep feeds the next frame's #1131 buffered-queue signal (`idle_wait_ms`). A frame
+                // that already came from a non-empty queue skips the sleep: the capture loop is
+                // behind, and captured frames beat the network optimisation (counted per 5 s).
+                let mut stagger_slept_now_ms = 0.0;
+                if camera_box::send_stagger::should_sleep(send_stagger_offset, frame_backlogged) {
+                    let remaining = camera_box::send_stagger::remaining_sleep(
+                        send_stagger_offset,
+                        stagger_anchor.elapsed(),
+                    );
+                    if !remaining.is_zero() {
+                        let slept_from = std::time::Instant::now();
+                        std::thread::sleep(remaining);
+                        stagger_slept_now_ms = slept_from.elapsed().as_secs_f64() * 1000.0;
+                        stagger_window.note_slept(
+                            remaining.as_secs_f64() * 1000.0,
+                            stagger_slept_now_ms,
+                        );
+                    } else {
+                        // The work before the send already ate the whole offset — no sleep needed.
+                        stagger_window.note_past_offset();
+                    }
+                } else if !send_stagger_offset.is_zero() {
+                    stagger_window.note_skipped();
+                }
+                last_stagger_sleep_ms = stagger_slept_now_ms;
                 // (#1167 v4) An UNDER-rate dip left `starvation_repeats` empty-queue 60fps boundaries
                 // unfilled (poll reported them, capped + gated on a measured sustained under-rate). Fill
                 // each by re-emitting the CURRENT good frame (it passed process_frame's corruption
@@ -1408,6 +1490,13 @@ async fn run_capture_loop(
                     ));
                 }
                 emit_one(capture_timecode_100ns);
+                // #1242 — this emitted iteration's work (everything in the callback except the
+                // stagger sleep): the capture-loop margin the 5 s summary reports per box.
+                if !send_stagger_offset.is_zero() {
+                    stagger_window.note_work(
+                        cb_started.elapsed().as_secs_f64() * 1000.0 - stagger_slept_now_ms,
+                    );
+                }
             });
 
             // #945 — heartbeat: `capture.process_frame(...)` above just RETURNED (Ok or Err,
@@ -1543,6 +1632,26 @@ async fn run_capture_loop(
                                     5
                                 )
                             );
+                            // #1242 — the send-stagger window: slept / skipped (backlogged) frames and
+                            // the worst per-frame work vs the capture interval. WARN when a frame
+                            // skipped its stagger or no margin was left; a box with offset 0 (CAM1,
+                            // unknown hostname) prints nothing.
+                            if !send_stagger_offset.is_zero() {
+                                let stagger_summary = camera_box::send_stagger::window_summary(
+                                    &stagger_window.take(),
+                                    send_stagger_offset.as_micros() as u64,
+                                    if configured_capture_fps > 0.0 {
+                                        1000.0 / configured_capture_fps
+                                    } else {
+                                        0.0
+                                    },
+                                );
+                                if stagger_summary.1 {
+                                    tracing::warn!("{}", stagger_summary.0);
+                                } else {
+                                    tracing::info!("{}", stagger_summary.0);
+                                }
+                            }
 
                             // #666 — emit-vs-capture health: WARN when the EMITTED fps has
                             // sustained a deviation from the box's configured genlock SEND rate
@@ -2126,11 +2235,8 @@ mod tests {
     #[test]
     fn test_args_parse_with_display() {
         let args =
-            Args::try_parse_from(["camera-box", "--display", "STRIH-SNV (interkom)"]).unwrap();
-        assert_eq!(
-            args.display_source,
-            Some("STRIH-SNV (interkom)".to_string())
-        );
+            Args::try_parse_from(["camera-box", "--display", "STRIH-LX (interkom)"]).unwrap();
+        assert_eq!(args.display_source, Some("STRIH-LX (interkom)".to_string()));
     }
 
     #[test]
@@ -2233,6 +2339,9 @@ mod tests {
              no [display] config section (#528: this was the exact cam1 bug)",
         );
         assert_eq!(cfg.source_name, DEFAULT_DISPLAY_SOURCE);
+        // #1362: the preferred preview source is the CURRENT strih (strih-lx), not the retired
+        // Windows STRIH-SNV box.
+        assert_eq!(cfg.source_name, "STRIH-LX (interkom)");
         assert_eq!(cfg.fb_device, "/dev/fb0");
         assert_eq!(cfg.find_timeout_secs, 30);
     }

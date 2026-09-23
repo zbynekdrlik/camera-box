@@ -73,6 +73,11 @@ pub mod painter_mode;
 // lives in `ndi`.
 pub mod reannounce;
 
+// #1362 — cameraman HDMI preview source resolution (the preferred name, else the ONE discovered
+// `STRIH-<box> (interkom)` output). Pure + cross-platform so it unit-tests Tier-0; the NDI finder
+// loop that feeds it lives in `ndi` and the display loop that drives it in `ndi_display`.
+pub mod preview_source;
+
 // #367 — colour-scale reference layout (pure geometry + colour table). Cross-platform, no
 // probe deps, so it unit-tests Tier-0; the probe-gated framebuffer blit lives in `probe::qr`.
 pub mod colour_scale;
@@ -417,6 +422,24 @@ pub mod shutdown;
 // was ever measured). No probe deps, so it unit-tests Tier-0; `ndi::NdiSender::
 // send_frame_data_with_timecode` times the real call and WARNs via this decision.
 pub mod send_stall;
+
+// #1242 — per-camera NDI SEND stagger inside the genlock frame slot (pure decision): camera N hands
+// its frame to the NDI SDK (N-1) x STAGGER_US after its emit-gate decision so the seven per-tick
+// bursts no longer land on the strih-lx 2.5 GbE switch port at once. Camera number from the box's
+// own OS hostname (CAM<N>), clamped inside the slot; the emit grid and the FLOOR-boundary timecode
+// are untouched. No probe deps, so it unit-tests Tier-0; `main.rs`'s capture loop applies it.
+pub mod send_stagger;
+// The send-stagger clamp must stay strictly below the buffered-dequeue fraction its idle-wait
+// add-back relies on (a genuinely buffered frame must still read as buffered after the sleep is
+// added back) — checked here against the REAL constant, so changing either one breaks the build.
+const _: () = assert!(
+    (send_stagger::MAX_OFFSET_SLOT_PERCENT as f64)
+        < capture_stall::BUFFERED_DEQUEUE_FRACTION * 100.0
+);
+// The 5 s OVERSLEEP warning's fraction is the same buffered-dequeue fraction (kept std-only in
+// `send_stagger`, pinned equal here).
+const _: () =
+    assert!(send_stagger::ADDBACK_SOUND_FRACTION == capture_stall::BUFFERED_DEQUEUE_FRACTION);
 
 // #707 — V4L2 capture DEQUEUE stall diagnostic (pure decision). Given how long a SINGLE blocking
 // `process_frame` dequeue (`self.stream.next()`, a VIDIOC_DQBUF under the hood) took and the
