@@ -362,9 +362,12 @@ fn recording_e2e_cleanup_wires_cadence_verify_once_after_parallel_restore() {
     );
     let call = calls[0];
 
-    // The lib is sourced exactly once (a `. "$HERE/lib/ndi-cadence-heal.sh"` line).
+    // The lib is sourced exactly once. Anchor on the source STATEMENT, not the bare basename — the
+    // sibling `. "$HERE/lib/..."` sources in this file each carry a `# shellcheck source=...`
+    // directive too, so the basename appears twice per source; the `. "$HERE/..."` statement is the
+    // unambiguous single occurrence.
     assert_eq!(
-        s.matches("lib/ndi-cadence-heal.sh").count(),
+        s.matches(". \"$HERE/lib/ndi-cadence-heal.sh\"").count(),
         1,
         "the ndi-cadence-heal.sh lib must be sourced exactly once in recording-e2e.sh"
     );
