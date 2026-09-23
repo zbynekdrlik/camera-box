@@ -1693,3 +1693,131 @@ done
 log "done: xhci NIC IRQ(s) [${irqs}] pinned to cpu ${target}"
 SCRIPT
 }
+
+# --- issue 1317 remainder: imag-parity genlock rtprio grant + no operator crash popups -------------
+# Owner report 23.9.2026: a crash popup the operator had to close in the morning (Ubuntu apport ->
+# update-notifier-crash.service, raised for a report left in /var/crash) and every strih-lx OBS
+# session logging `genlock: could NOT set render-tick thread SCHED_FIFO prio 10 (errno 1 — missing
+# rtprio ulimit grant?)`. imag provisions both (setup-imag.sh: the issue-484 limits.d grant, the
+# apport/whoopsie disable+mask, systemd-coredump); these helpers carry the SAME values for strih-lx
+# (setup-strih.sh step 11c writes them, verify-strih.sh items 32/33 grade them).
+
+# strih_genlock_rt_priority -> the SCHED_FIFO priority the vendored genlock render tick requests
+# (vendor/obs-studio/libobs/obs-video.c GENLOCK_RT_PRIORITY; test-pinned against that define). A
+# grant below it still EPERMs.
+strih_genlock_rt_priority() { printf '10'; }
+
+# strih_rtprio_limits_path -> the limits.d drop-in carrying the grant. STRIH_RTPRIO_LIMITS_FILE
+# overrides (the test seam; the live box value is the default).
+strih_rtprio_limits_path() {
+  printf '%s' "${STRIH_RTPRIO_LIMITS_FILE:-/etc/security/limits.d/95-strih-genlock-rtprio.conf}"
+}
+
+# strih_rtprio_limits_text USER -> the limits.d body granting USER `rtprio 20` (the imag issue-484
+# value, headroom above the 10 the render tick requests; `-` sets soft AND hard, the soft limit is
+# what sched_setscheduler checks). An empty USER is refused (rc 1, no output) -- never a grant for
+# nobody. PAM applies it at the user's next login session.
+strih_rtprio_limits_text() {
+  local user="${1-}"
+  if [ -z "$user" ]; then
+    echo "strih_rtprio_limits_text: desktop user required" >&2
+    return 1
+  fi
+  cat <<EOF
+# camera-box issue 1317 (imag issue-484 parity): allow ${user} to set SCHED_FIFO (rtprio) so the
+# genlock OBS render-tick thread goes realtime instead of logging "could NOT set render-tick thread
+# SCHED_FIFO" and continuing SCHED_OTHER. Value 20 = headroom above the 10 the thread requests
+# (vendor/obs-studio/libobs/obs-video.c GENLOCK_RT_PRIORITY). Applied by PAM at the next login
+# session. Written by setup-strih.sh step 11c -- re-run it instead of hand-editing.
+${user}   -   rtprio   20
+EOF
+}
+
+# strih_rtprio_grant_ok USER  (stdin: a limits.conf-format text) -> 0 iff the text grants USER an
+# rtprio SOFT and HARD limit >= strih_genlock_rt_priority (or `unlimited`). `-` sets both; an
+# explicit `soft`+`hard` pair counts too; a hard-only line leaves the soft limit at 0 (still EPERM).
+# Comments are stripped; a later matching line overrides an earlier one (pam_limits last-wins).
+# Reads the whole stdin (drain-safe). Fail-closed: an empty USER/input returns 1.
+strih_rtprio_grant_ok() {
+  local user="${1-}" min line domain type item value rest ok soft=0 hard=0
+  min="$(strih_genlock_rt_priority)"
+  while IFS= read -r line || [ -n "$line" ]; do
+    line="${line%%#*}"
+    domain="" type="" item="" value="" rest=""
+    read -r domain type item value rest <<<"$line" || true
+    if [ -z "$user" ] || [ "$domain" != "$user" ] || [ "$item" != rtprio ]; then continue; fi
+    ok=0
+    if [ "$value" = unlimited ]; then
+      ok=1
+    elif [[ "$value" =~ ^[0-9]+$ ]] && [ "$value" -ge "$min" ]; then
+      ok=1
+    fi
+    case "$type" in
+      -)    soft="$ok"; hard="$ok" ;;
+      soft) soft="$ok" ;;
+      hard) hard="$ok" ;;
+    esac
+  done
+  [ "$soft" = 1 ] && [ "$hard" = 1 ]
+}
+
+# strih_rtprio_session_verdict GRANT OBS_RUNNING  (stdin: the newest OBS log text, may be empty) ->
+# ONE verdict token for verify-strih item 32. GRANT/OBS_RUNNING are 1/0.
+#   no-grant               (rc 1) -- the limits.d grant is missing/insufficient: FAIL
+#   grant-pending-relogin  (rc 2) -- grant present, but the RUNNING OBS still logs the EPERM line:
+#                                    the session predates the next login -> NOTE, not FAIL
+#   ok-sched-fifo          (rc 0) -- grant present + the running OBS logged the SCHED_FIFO success
+#   ok                     (rc 0) -- grant present, no contrary evidence (OBS down = the newest log
+#                                    is a PAST session, never graded)
+# here-strings, never `printf | grep -q` (a 100s-of-KB log SIGPIPEs printf under pipefail).
+strih_rtprio_session_verdict() {
+  local grant="${1:-0}" running="${2:-0}" text
+  text="$(cat)"
+  if [ "$grant" != 1 ]; then printf 'no-grant'; return 1; fi
+  if [ "$running" = 1 ]; then
+    if grep -q 'could NOT set render-tick thread SCHED_FIFO' <<<"$text"; then
+      printf 'grant-pending-relogin'; return 2
+    fi
+    if grep -q 'render-tick thread set SCHED_FIFO' <<<"$text"; then
+      printf 'ok-sched-fifo'; return 0
+    fi
+  fi
+  printf 'ok'; return 0
+}
+
+# strih_crash_popup_units -> the system units setup-strih.sh disables+stops+masks, one per line --
+# value-for-value the imag list (setup-imag.sh `systemctl mask apport.service whoopsie.service`):
+# apport writes the /var/crash reports that raise the update-notifier-crash desktop popup (and
+# multi-GB cores right when OBS already crashed); whoopsie phones crash reports home.
+strih_crash_popup_units() { printf '%s\n' apport.service whoopsie.service; }
+
+# strih_crash_popup_unit_ok ENABLED_STATE ACTIVE_STATE -> 0 iff one crash unit is quiet: its
+# `systemctl is-enabled` FIRST line is masked / masked-runtime / disabled / not-found / empty
+# (unit file absent) AND its `systemctl is-active` first line is inactive / failed. Anything else
+# (enabled, static, an unreadable active state, an unknown token) returns 1 -- fail-closed.
+strih_crash_popup_unit_ok() {
+  local en="${1-}" act="${2-}"
+  en="${en%%$'\n'*}"
+  act="${act%%$'\n'*}"
+  case "$en" in
+    masked|masked-runtime|disabled|not-found|'') ;;
+    *) return 1 ;;
+  esac
+  case "$act" in
+    inactive|failed) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# strih_crash_popup_verdict "BAD_UNITS" COREDUMP -> ONE token for verify-strih item 33, 0 iff `ok`.
+# BAD_UNITS = the space-separated crash units that failed strih_crash_popup_unit_ok (empty = none);
+# COREDUMP = 1 when systemd-coredump is installed. Units are graded first (the popup is the operator
+# symptom), then the coredump collector.
+strih_crash_popup_verdict() {
+  local words=() bad core="${2-}"
+  read -r -a words <<<"${1-}" || true
+  bad="${words[*]-}"
+  if [ -n "$bad" ]; then printf 'units-live: %s' "$bad"; return 1; fi
+  if [ "$core" != 1 ]; then printf 'no-systemd-coredump'; return 1; fi
+  printf 'ok'; return 0
+}

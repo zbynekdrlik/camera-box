@@ -765,6 +765,63 @@ else
   fi
 fi
 
+# 32) genlock render-tick rtprio grant (issue 1317 remainder, imag issue-484 parity): the limits.d
+#     drop-in setup-strih.sh step 11c writes must grant the desktop user rtprio >= the vendored render
+#     tick's SCHED_FIFO priority -- FAIL without it (the tick runs SCHED_OTHER). When OBS is running and
+#     its newest log still carries the "could NOT set render-tick thread SCHED_FIFO" EPERM line, the
+#     grant exists but that session predates the next login -> NOTE, never FAIL.
+RTPRIO_FILE_V="$(strih_rtprio_limits_path)"
+RTPRIO_USER_V="${STRIH_LX_USER:-newlevel}"
+RTPRIO_GRANT_V=0
+if [ -r "$RTPRIO_FILE_V" ] && strih_rtprio_grant_ok "$RTPRIO_USER_V" < "$RTPRIO_FILE_V"; then
+  RTPRIO_GRANT_V=1
+fi
+RTPRIO_OBS_UP=0
+if systemctl --user is-active strih-obs.service >/dev/null 2>&1 || pgrep -x obs >/dev/null 2>&1; then
+  RTPRIO_OBS_UP=1
+fi
+RTPRIO_LOG_V="$(newest_log || true)"
+RTPRIO_LOG_TEXT=""
+if [ -n "$RTPRIO_LOG_V" ] && [ -r "$RTPRIO_LOG_V" ]; then
+  RTPRIO_LOG_TEXT="$(cat "$RTPRIO_LOG_V" 2>/dev/null || true)"
+fi
+RTPRIO_VERDICT="$(strih_rtprio_session_verdict "$RTPRIO_GRANT_V" "$RTPRIO_OBS_UP" <<<"$RTPRIO_LOG_TEXT" || true)"
+case "$RTPRIO_VERDICT" in
+  ok-sched-fifo)
+    ok "(rtprio) ${RTPRIO_FILE_V} grants ${RTPRIO_USER_V} rtprio; the running OBS render tick is SCHED_FIFO" ;;
+  ok)
+    ok "(rtprio) ${RTPRIO_FILE_V} grants ${RTPRIO_USER_V} rtprio (OBS not running or no render-tick priority line in its log)" ;;
+  grant-pending-relogin)
+    note "(rtprio) grant present, but the running OBS session still logs 'could NOT set render-tick thread SCHED_FIFO' -- it predates the grant; effective after the next login + OBS start (if it persists after a re-login, the systemd --user manager is not applying pam_limits)" ;;
+  *)
+    bad "(rtprio) no rtprio grant for ${RTPRIO_USER_V} in ${RTPRIO_FILE_V} -- the genlock render tick runs SCHED_OTHER (re-run setup-strih.sh step 11c)" ;;
+esac
+
+# 33) no operator crash popups (issue 1317 remainder, imag parity): apport + whoopsie must be
+#     masked/disabled AND not running (apport's /var/crash reports raise the update-notifier-crash
+#     desktop popup the operator had to close), and systemd-coredump must be installed so a crash
+#     still lands in coredumpctl. FAIL on any live unit or a missing collector.
+CRASH_BAD_V=""
+while IFS= read -r _cu; do
+  [ -n "$_cu" ] || continue
+  _cu_en="$(systemctl is-enabled "$_cu" 2>/dev/null || true)"
+  _cu_act="$(systemctl is-active "$_cu" 2>/dev/null || true)"
+  if ! strih_crash_popup_unit_ok "$_cu_en" "$_cu_act"; then
+    CRASH_BAD_V="${CRASH_BAD_V}${CRASH_BAD_V:+ }${_cu}"
+  fi
+done < <(strih_crash_popup_units)
+CRASH_CORE_V=0
+# shellcheck disable=SC2016  # ${Status} is a dpkg-query format field, not a shell expansion
+if [ "$(dpkg-query -W -f='${Status}' systemd-coredump 2>/dev/null || true)" = "install ok installed" ]; then
+  CRASH_CORE_V=1
+fi
+CRASH_VERDICT_V="$(strih_crash_popup_verdict "$CRASH_BAD_V" "$CRASH_CORE_V" || true)"
+if [ "$CRASH_VERDICT_V" = ok ]; then
+  ok "(crash-popup) apport + whoopsie masked + inactive, systemd-coredump installed -- no operator crash popup, crashes land in coredumpctl"
+else
+  bad "(crash-popup) ${CRASH_VERDICT_V} (systemd-coredump installed=${CRASH_CORE_V}) -- re-run setup-strih.sh step 11c"
+fi
+
 echo ""
 if [ "$FAILS" -eq 0 ]; then
   echo -e "${GREEN}=== verify-strih.sh: ALL CLEAR ===${NC}"; exit 0

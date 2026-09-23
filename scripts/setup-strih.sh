@@ -531,6 +531,39 @@ systemctl enable strih-nic-irq-affinity.service 2>/dev/null \
 echo "  strih-nic-irq-affinity.service installed + enabled (applies at next boot / supervisor runs it live)"
 
 # ---------------------------------------------------------------------------------------------
+# Lettered sub-step (TOTAL_STEPS stays 17, test-pinned): two imag-parity appliance items that ride
+# with the de-jitter steps above (issue 1317 remainder, owner report 23.9.2026).
+step "11c" "Genlock render-tick rtprio grant + no crash popups (apport/whoopsie masked, systemd-coredump) -- imag parity"
+# (a) rtprio: the vendored genlock render tick asks for SCHED_FIFO; OBS runs as the UNPRIVILEGED
+#     desktop user, so without an rtprio ulimit grant sched_setscheduler fails EPERM and every OBS
+#     session logs "could NOT set render-tick thread SCHED_FIFO ... continuing SCHED_OTHER" (more
+#     tick jitter -> more relock/late_hold -> the in-OBS LOCK indicator shows DEGRADED more often).
+#     The imag issue-484 limits.d drop-in, value for value (rtprio 20); PAM applies it at the next
+#     login session, so the render tick goes SCHED_FIFO from the next OBS start after that login.
+RTPRIO_FILE="$(strih_rtprio_limits_path)"
+install -d -m 755 "$(dirname "$RTPRIO_FILE")"
+strih_rtprio_limits_text "$DESKTOP_USER" > "$RTPRIO_FILE" \
+  || fail "could not write ${RTPRIO_FILE} (the genlock render-tick rtprio grant for ${DESKTOP_USER})"
+chmod 0644 "$RTPRIO_FILE"
+echo "  ${RTPRIO_FILE} grants ${DESKTOP_USER} rtprio 20 (applies at the next login session)"
+# (b) no operator crash popups: apport writes /var/crash reports that raise the
+#     update-notifier-crash desktop popup the operator had to close, and multi-GB cores right when
+#     OBS already crashed; whoopsie phones reports home. Disable + stop + MASK them (the imag list);
+#     per unit, so an absent whoopsie never skips apport. Stop explicitly too: a unit masked earlier
+#     by hand can still be active. systemd-coredump replaces apport as the core collector, so a
+#     crash stays diagnosable via coredumpctl instead of a GUI popup (fail loud, like imag).
+while IFS= read -r CRASH_UNIT; do
+  [ -n "$CRASH_UNIT" ] || continue
+  systemctl disable --now "$CRASH_UNIT" >/dev/null 2>&1 || true
+  systemctl stop "$CRASH_UNIT" >/dev/null 2>&1 || true
+  systemctl mask "$CRASH_UNIT" >/dev/null 2>&1 \
+    || fail "could not mask ${CRASH_UNIT} -- the operator crash popup would return (systemctl mask ${CRASH_UNIT} by hand, then re-run)"
+done < <(strih_crash_popup_units)
+DEBIAN_FRONTEND=noninteractive apt-get install -y systemd-coredump >/dev/null \
+  || fail "systemd-coredump install failed -- needed so a crash lands in coredumpctl once apport is masked"
+echo "  apport + whoopsie disabled + masked (no operator crash popup); systemd-coredump installed (crashes -> coredumpctl)"
+
+# ---------------------------------------------------------------------------------------------
 AUDIO_NAME="$(strih_lx_audio_input_name)"
 step 12 "Program audio: intercom hub -> PipeWire strih-program sink -> OBS (VB-Matrix replacement, issue 1344)"
 # Root cause (design 20.9., follow-up 20.9. live diagnosis issuecomment-5751113173): the OBS
