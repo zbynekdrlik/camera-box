@@ -96,6 +96,9 @@ fn titlebar_carries_newlevel_media_build_marker_and_sha() {
 fn titlebar_reads_the_linux_marker_home_after_the_exe_relative_candidates_1357() {
     let src = squish(&vendor_file(OBS_BASIC));
     const LINUX_MARKER: &str = r#""/opt/obs-genlock/GENLOCK_BUILD_SHA.txt""#;
+    // Anchor on the actual READ call, not the bare path literal, so a path left behind in a
+    // comment inside the `#ifdef` block can never satisfy the guard on its own.
+    const LINUX_READ: &str = r#"NewlevelReadShaMarker("/opt/obs-genlock/GENLOCK_BUILD_SHA.txt")"#;
 
     // Slice the NewlevelBuildSha() body: from its definition to the UpdateTitleBar() that
     // follows it (the helper is defined directly above its only caller).
@@ -114,17 +117,17 @@ fn titlebar_reads_the_linux_marker_home_after_the_exe_relative_candidates_1357()
     let exe_call = body.find("os_get_executable_path_ptr(").unwrap_or_else(|| {
         panic!("{OBS_BASIC}: NewlevelBuildSha() no longer resolves candidates via os_get_executable_path_ptr")
     });
-    let linux = body.find(LINUX_MARKER).unwrap_or_else(|| {
+    let linux = body.find(LINUX_READ).unwrap_or_else(|| {
         panic!(
             "{OBS_BASIC}: NewlevelBuildSha() does not read the Linux marker home \
-             {LINUX_MARKER} — every Linux OBS box (/usr/bin/obs) titles itself \
+             via {LINUX_READ} — every Linux OBS box (/usr/bin/obs) titles itself \
              'newlevel.media build unknown' (issue 1357). Re-add the __linux__ candidate."
         )
     });
     assert_eq!(
-        body.matches(LINUX_MARKER).count(),
+        body.matches(LINUX_READ).count(),
         1,
-        "{OBS_BASIC}: the Linux marker path must appear exactly once in NewlevelBuildSha()"
+        "{OBS_BASIC}: the Linux marker read must appear exactly once in NewlevelBuildSha()"
     );
 
     // Tried AFTER the exe-relative candidates (Windows order unchanged, Linux falls back).
