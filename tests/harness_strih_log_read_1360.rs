@@ -32,7 +32,7 @@ fn read(rel: &str) -> String {
 
 /// The common bash prelude: stubs + the fixture HOME. `$1` = the per-case temp dir. Run with the
 /// repo root as cwd, so `$R` (= `$PWD`) is the checkout.
-const PRELUDE: &str = r##"set -euo pipefail
+const PRELUDE: &str = r#"set -euo pipefail
 T="$1"
 shift
 R="$PWD"
@@ -78,7 +78,7 @@ printf 'OLD-LOG-LINE\n' > "$L/2026-09-22 08-00-00.txt"
 } > "$L/2026-09-23 09-23-36.txt"
 touch -d '2026-09-22 08:00:00' "$L/2026-09-22 08-00-00.txt"
 touch -d '2026-09-23 09:23:40' "$L/2026-09-23 09-23-36.txt"
-"##;
+"#;
 
 struct CaseOut {
     code: i32,
