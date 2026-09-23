@@ -301,11 +301,14 @@ case "$MODE" in
       else
         # issue 1242: a designated port with NO link carries no traffic, so a live probe would read
         # a flat counter as "strih uplink clean" -- the false-clean a stale designation printed after
-        # strih moved ports. Surface the stale designation instead and skip the probe.
+        # strih moved ports. Surface the stale designation and DEMOTE the port to the ordinary
+        # growth-gate (the same treatment as any non-designated port), so the always-probe bypass
+        # never fires on it.
         running="$(_nc_live_field "$live" "${node}.port.${port}.running")"
         if ! netcfg_designated_port_linked "$running"; then
           report+=("  [report-only designated-down] $node $port: designated strih-uplink drop-sampler port has no link (running='$running') -- the designation is stale; re-point NETCFG_DROP_PROBE_PORTS at the port strih is plugged into")
-          continue
+          designated=0
+          [ "$dq1" -gt "$bdq1" ] || continue
         fi
       fi
       ip="$(_nc_live_field "$live" "${node}.ip")"
@@ -313,9 +316,11 @@ case "$MODE" in
       dv="$(_nc_drop_rate_verdict "$ip" "$port")"
       statuses+=("$dv")
       # A designated port bypasses the growth-gate, so its dq1 may be FLAT vs baseline while the live
-      # two-read window still catches a burst -- cite the live window (not a "$bdq1->$dq1 since
-      # baseline" delta that would misleadingly read "0->0"). Growth-gated ports keep the delta text
-      # (their growth-gate guaranteed dq1 > bdq1).
+      # two-read window still catches a burst -- its DROPPING / UNKNOWN lines cite the live window (not
+      # a "$bdq1->$dq1 since baseline" delta that could read "0->0"). Growth-gated ports keep the delta
+      # text (their growth-gate guaranteed dq1 > bdq1). The designated OK/`sampled` line DELIBERATELY
+      # carries the cumulative delta too (issue 1242): the strih-uplink tail-drop is bursty, so one
+      # clean 6 s window alone would read as a clean uplink while millions of drops accrued.
       case "$dv" in
         DROPPING) if [ "$designated" = 1 ]; then
                     report+=("  [DROPPING] $node $port: tx-drop-queue1 climbing >${NETCFG_DROP_THRESHOLD}/s over the live ${NETCFG_DROP_WINDOW}s window (designated drop-sampler; cumulative dq1=$dq1) -- microburst tail-drop; check shared-buffers / uplink step-down")

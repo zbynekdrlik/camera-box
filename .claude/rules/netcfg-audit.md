@@ -136,7 +136,9 @@ Discriminator recipe for the next "late-arrival burst on strih" question:
 1. One recv-timing shortfall on ≥2 inputs in the SAME 5-s interval, with no sender-side emit deficit
    (burn log `Streaming:` 300 sent) = transport. One input only, with low cap_max = that sender
    restarting/stalling.
-2. Sample `:put [/interface ethernet get ether2 tx-drop-packet]` on 10.77.9.4 at ~1 Hz alongside the
-   strih-lx OBS log. The shortfall second should hold the big drop burst.
+2. Sample `:put [/interface ethernet get ether2 tx-drop-queue1-packet]` (dq1, the counter the audit
+   uses) on 10.77.9.4 at ~1 Hz alongside the strih-lx OBS log. The shortfall second should hold the
+   big drop burst. On 23.9. every ether2 drop was in queue1, so the total `tx-drop-packet` counter read
+   the same.
 3. On strih-lx (read-only): `/proc/net/snmp` Udp `RcvbufErrors` and `/proc/net/softnet_stat` col 2.
    Nonzero would mean the receive side itself is too slow. Zero means the loss is upstream.
