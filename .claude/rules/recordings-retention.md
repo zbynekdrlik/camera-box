@@ -30,7 +30,23 @@ profile `strih-lx`, `[Output] Mode=Advanced` → `[AdvOut] RecFilePath`; read li
 
 The Linux executor refuses `--execute` with `--keep-runs 0` (the newest file may be the recording OBS
 is writing right now) and, before each `rm`, re-checks the file is still a regular non-symlink,
-allowlisted, below-floor file. Dirs and symlinks are never planned or touched.
+allowlisted, below-floor file. Dirs, symlinks and other non-regular entries are reported as `OTHER`
+rows ("PROTECT (not a regular file)") and never touched. The plan is **fail-safe** (review round 1):
+the script sets `inherit_errexit` (the plan runs inside a `$(...)`, where bash otherwise drops `-e`);
+`--keep-runs` is bounded to 9 digits and `--keep-days` to 0..36500 (an over-range value used to break
+a `[ -lt ]` test inside the plan and fall through to DELETE with exit 0); a row becomes DELETE only on
+a POSITIVE proof (index >= keep-runs AND (keep-days = 0 OR age >= horizon)) and an unevaluable
+comparison aborts the whole run before any `rm`. An unreadable record dir fails loud instead of
+globbing to a silent 0-file sweep. The ssh leg carries `UserKnownHostsFile=/dev/null` +
+`LogLevel=ERROR` (the address was the Windows strih until M4 — a stale key must not block it) and a
+`timeout` INSIDE `sshpass` (`RETENTION_SSH_TIMEOUT`, default 900 s); `--user` / `--obs-config-dir` are
+forwarded, the `.ps1`-only `--budget-gb` / `--remote-path` are refused for a Linux box.
+
+Profile resolution reads `[Basic] ProfileDir` (user.ini, then global.ini) and only then the display
+name `Profile`; OBS launched with `--profile X` (`scripts/strih-obs-start.sh`) writes X back to
+`user.ini`, so a running box reads its live profile. The executor reads whole-second mtimes, so at the
+exact horizon a file can read up to 1 s older than the Rust `f64` view and same-second files order by
+name — negligible, and the shared table uses integer ages for exactly that reason.
 
 ## Why
 
@@ -112,7 +128,9 @@ against `plan()`) and `tests/python/test_strih_lx_recordings_retention_1317.py` 
 over a REAL fixture dir — sparse files via `truncate`, mtimes via `utime`). Add a case to the TABLE,
 never to one side only. The bash floor `RR_PRODUCTION_SIZE_FLOOR_BYTES` is pinned equal to the Rust
 constant. Mirror traps the table covers: the allowlist regex uses an EXPLICIT `[0123456789]` list
-under `LC_ALL=C` (a fullwidth/Arabic-Indic digit never matches — the `.ps1` `\d` lesson again);
+under `LC_ALL=C` (the table's fullwidth/Arabic-Indic digit names pin that no Unicode-digit class —
+a `.ps1`-style `\d` — ever leaks in; under glibc `[[:digit:]]` would also reject them, so they do not
+distinguish the explicit list from `[[:digit:]]`);
 the within-days rule `age < days*86400` on integer ages is `age < ceil(days*86400)` (computed in awk
 with `%.0f` — strih-lx's awk is **mawk**, whose `%d` clamps at 2^31-1); the newest-first sort is
 `LC_ALL=C sort -k1,1nr -k3` (bytewise name tie-break = Rust `String` order); the production floor
@@ -191,7 +209,8 @@ PATH for the `--box` legs).
   non-UTF-8 codepage, so a non-ASCII char in a STRING (an em-dash `—`, `∪`, `≈`) is mangled and
   BREAKS parsing (the first live run failed with `Unexpected token ')'` where an `—` sat inside a
   `Write-Output` string). Keep every scp'd `.ps1` ASCII-only (`grep -nP '[^\x00-\x7F]'` before
-  deploying); em-dashes are fine in the sibling `.sh` (it never leaves dev1).
+  deploying). The sibling `.sh` is bash: an em-dash is harmless there even now that the linux leg
+  pipes it to strih-lx over `bash -s` (a UTF-8 box).
 - **Use `[0-9]`, never `\d`, in the `.ps1` allowlist regex.** .NET regex `\d` (without
   `RegexOptions.ECMAScript`, which `-cmatch`/`-cnotmatch` do not set) also matches Unicode decimal
   digits (fullwidth `２`, Arabic-Indic, Devanagari), so `\d` makes the on-box executor MORE

@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # strih-recordings-retention.sh (#1122, issue 1317 part 5) — dry-run-first E2E recordings retention on a rig OBS box.
 set -euo pipefail
+# A failing command inside a $(...) (the plan is computed in one) must abort that substitution too,
+# never be silently skipped -- the plan feeds a DELETE step.
+shopt -s inherit_errexit
 #
 # The E2E harness (scripts/recording-e2e.sh) records one OBS program capture per run into the box's
 # live OBS record directory; [8/8e] only deletes each run's OWN file, so aborted / skipped /
@@ -49,18 +52,22 @@ set -euo pipefail
 #   scripts/strih-recordings-retention.sh --local-sweep --record-dir <dir>               # this machine, dry-run
 #
 # Env: STRIH_SSH_PW (Windows boxes, default "newlevel"); LINUX_BOX_USER / LINUX_BOX_PW (a linux --box,
-#      default newlevel / newlevel -- the rig's shared Linux-box creds, targets.md).
+#      default newlevel / newlevel -- the rig's shared Linux-box creds, targets.md; --user overrides
+#      the user); RETENTION_SSH_TIMEOUT (the linux leg's ssh bound, default 900 s).
 
 MODE=""                          # win | box | linux | local-sweep (no default -- issue 1317)
 HOST=""
 BOX=""
 USER="newlevel"
+USER_SET=0
 RECORD_DIR="C:\\_REC"
 RECORD_DIR_SET=0                 # 1 = --record-dir given (a linux sweep otherwise reads the OBS profile)
 OBS_CONFIG_DIR="${HOME:-}/.config/obs-studio"
+OBS_CONFIG_DIR_SET=0
 KEEP_RUNS="20"
 KEEP_DAYS="3"
 BUDGET_GB="50"
+WIN_ONLY_FLAGS=""                # .ps1-only flags given explicitly (refused on a linux box)
 EXECUTE=0
 PLAN_TSV=0
 REMOTE_PATH='C:\Users\newlevel\strih-recordings-retention.ps1'
@@ -78,16 +85,16 @@ while [ $# -gt 0 ]; do
     --host)           HOST="$2"; MODE="win"; shift 2 ;;
     --box)            BOX="$2"; MODE="box"; shift 2 ;;
     --local-sweep)    MODE="local-sweep"; shift ;;
-    --user)           USER="$2"; shift 2 ;;
+    --user)           USER="$2"; USER_SET=1; shift 2 ;;
     --record-dir)     RECORD_DIR="$2"; RECORD_DIR_SET=1; shift 2 ;;
-    --obs-config-dir) OBS_CONFIG_DIR="$2"; shift 2 ;;
+    --obs-config-dir) OBS_CONFIG_DIR="$2"; OBS_CONFIG_DIR_SET=1; shift 2 ;;
     --keep-runs)      KEEP_RUNS="$2"; shift 2 ;;
     --keep-days)      KEEP_DAYS="$2"; shift 2 ;;
-    --budget-gb)      BUDGET_GB="$2"; shift 2 ;;
-    --remote-path)    REMOTE_PATH="$2"; shift 2 ;;
+    --budget-gb)      BUDGET_GB="$2"; WIN_ONLY_FLAGS+=" --budget-gb"; shift 2 ;;
+    --remote-path)    REMOTE_PATH="$2"; WIN_ONLY_FLAGS+=" --remote-path"; shift 2 ;;
     --plan-tsv)       PLAN_TSV=1; shift ;;
     --execute)        EXECUTE=1; shift ;;
-    -h|--help)        sed -n '2,50p' "${BASH_SOURCE[0]:-$0}"; exit 0 ;;
+    -h|--help)        awk 'NR == 1 { next } /^$/ { exit } { print }' "${BASH_SOURCE[0]:-$0}"; exit 0 ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
 done
@@ -108,28 +115,46 @@ rr_horizon_ceil() {
 }
 
 # rr_plan <dir> <now_epoch> <keep_runs> <keep_days> -> the machine plan on stdout, one row per
-# top-level REGULAR file (a dir or a symlink is never a recording and is never touched), tab-separated,
-# name LAST:
+# top-level entry, tab-separated, name LAST:
+#   OTHER 0 <mtime> <name>                  not a regular file (a dir, a symlink, a fifo): never a
+#                                           recording, reported and never touched
 #   PROTECT <size> <mtime> <name>           non-matching name (never deleted)
 #   KEEP <reason> <size> <mtime> <name>     reason = production-sized | newest-run | within-days
 #   DELETE <size> <mtime> <name>            in plan order: newest first, name ascending on a tie
 # Mirrors plan(): non-matching -> PROTECT; size >= floor -> production-sized (pulled OUT of the newest-N
 # pool); the remaining below-floor files newest-first: index < keep_runs -> newest-run, else
-# keep_days > 0 AND age < horizon -> within-days, else DELETE.
+# keep_days > 0 AND age < horizon -> within-days, else DELETE. FAIL-SAFE: a row becomes DELETE only
+# on a positive proof (index >= keep_runs AND (keep_days == 0 OR age >= horizon)); any comparison that
+# cannot be evaluated returns 1 so the caller aborts before deleting anything. Inputs are bounded by
+# rr_local_sweep, so this is a second line of defence, never the only one.
 rr_plan() {
   local dir="$1" now="$2" keep_runs="$3" keep_days="$4"
   local tab=$'\t' horizon days_on=0 p name st size mtime shown
-  local rows="" protect="" prod=""
+  local rows="" protect="" prod="" other=""
   horizon="$(rr_horizon_ceil "$keep_days")"
+  if ! [[ "$horizon" =~ ^[0123456789]+$ ]]; then
+    echo "ERROR: cannot compute the keep-days horizon from '$keep_days' (got '$horizon')" >&2
+    return 1
+  fi
   # keep_days is validated `[0-9]+(.[0-9]+)?`: it is > 0 iff it carries a non-zero digit.
   if [[ "$keep_days" =~ [123456789] ]]; then days_on=1; fi
   shopt -s nullglob dotglob
   for p in "$dir"/*; do
-    if [ ! -f "$p" ] || [ -L "$p" ]; then continue; fi
     name="${p##*/}"
+    # A protected / other name is display-only; keep the row one line even for a tab/newline name.
+    shown="${name//[$'\t\n\r']/?}"
+    if [ ! -f "$p" ] || [ -L "$p" ]; then
+      mtime="$(stat -c '%Y' -- "$p" 2>/dev/null || echo 0)"
+      other+="OTHER${tab}0${tab}${mtime}${tab}${shown}"$'\n'
+      continue
+    fi
     st="$(stat -c '%s %Y' -- "$p" 2>/dev/null)" || continue   # vanished mid-scan: not ours to plan
     size="${st%% *}"
     mtime="${st##* }"
+    if ! [[ "$size" =~ ^[0123456789]+$ && "$mtime" =~ ^-?[0123456789]+$ ]]; then
+      other+="OTHER${tab}0${tab}0${tab}${shown}"$'\n'   # unreadable stat: never planned for DELETE
+      continue
+    fi
     if rr_is_harness_recording "$name"; then
       if [ "$size" -ge "$RR_PRODUCTION_SIZE_FLOOR_BYTES" ]; then
         prod+="KEEP${tab}production-sized${tab}${size}${tab}${mtime}${tab}${name}"$'\n'
@@ -137,12 +162,11 @@ rr_plan() {
         rows+="${mtime}${tab}${size}${tab}${name}"$'\n'
       fi
     else
-      # A protected name is display-only; keep the row one line even for a name with a tab/newline.
-      shown="${name//[$'\t\n\r']/?}"
       protect+="PROTECT${tab}${size}${tab}${mtime}${tab}${shown}"$'\n'
     fi
   done
   shopt -u nullglob dotglob
+  printf '%s' "$other" | LC_ALL=C sort -t "$tab" -k4
   printf '%s' "$protect" | LC_ALL=C sort -t "$tab" -k4
   printf '%s' "$prod"
   # Newest first (mtime numeric-descending), name ascending (bytewise) on an exact tie -- plan()'s
@@ -152,11 +176,18 @@ rr_plan() {
   while IFS="$tab" read -r mtime size name; do
     [ -n "$name" ] || continue
     age=$(( now - mtime ))
-    reason=""
     if [ "$i" -lt "$keep_runs" ]; then
       reason="newest-run"
+    elif ! [ "$i" -ge "$keep_runs" ]; then
+      echo "ERROR: cannot rank '$name' (index $i vs keep-runs '$keep_runs')" >&2
+      return 1
     elif [ "$days_on" = 1 ] && [ "$age" -lt "$horizon" ]; then
       reason="within-days"
+    elif [ "$days_on" = 0 ] || [ "$age" -ge "$horizon" ]; then
+      reason=""
+    else
+      echo "ERROR: cannot age '$name' (age '$age' vs horizon '$horizon')" >&2
+      return 1
     fi
     i=$(( i + 1 ))
     if [ -n "$reason" ]; then
@@ -178,13 +209,17 @@ rr_ini_get() {
 }
 
 # rr_obs_profile_record_dir <obs_config_dir> -> the ACTIVE OBS profile's record path, or a named
-# error + return 1 (never a guessed default -- a wrong dir would sweep the wrong files).
+# error + return 1 (never a guessed default -- a wrong dir would sweep the wrong files). The profile
+# is the one OBS last used ([Basic] ProfileDir, the directory name; the display name Profile only as
+# a fallback). OBS launched with an explicit --profile X (scripts/strih-obs-start.sh) writes X back
+# here, so a running box reads its live profile.
 rr_obs_profile_record_dir() {
-  local cfg="$1" pdir="" ini mode rectype key dir
-  for ini in "$cfg/user.ini" "$cfg/global.ini"; do
-    pdir="$(rr_ini_get "$ini" Basic ProfileDir)"
-    if [ -z "$pdir" ]; then pdir="$(rr_ini_get "$ini" Basic Profile)"; fi
-    if [ -n "$pdir" ]; then break; fi
+  local cfg="$1" pdir="" ini mode rectype key dir k
+  for k in ProfileDir Profile; do
+    for ini in "$cfg/user.ini" "$cfg/global.ini"; do
+      pdir="$(rr_ini_get "$ini" Basic "$k")"
+      if [ -n "$pdir" ]; then break 2; fi
+    done
   done
   if [ -z "$pdir" ]; then
     echo "ERROR: cannot resolve the active OBS profile (no [Basic] ProfileDir in $cfg/user.ini or global.ini) -- pass --record-dir" >&2
@@ -218,8 +253,14 @@ rr_day() { date -d "@$1" +%F 2>/dev/null || echo "?"; }
 
 # rr_local_sweep -- validate, resolve the record dir, plan, render, and (only with --execute) delete.
 rr_local_sweep() {
-  [[ "$KEEP_RUNS" =~ ^[0123456789]+$ ]] || { echo "ERROR: --keep-runs must be a non-negative integer, got '$KEEP_RUNS'" >&2; exit 2; }
-  [[ "$KEEP_DAYS" =~ ^[0123456789]+(\.[0123456789]+)?$ ]] || { echo "ERROR: --keep-days must be a non-negative decimal (e.g. 3 or 0.5), got '$KEEP_DAYS'" >&2; exit 2; }
+  # BOUNDED inputs: an over-range number would overflow bash arithmetic / a `[ -lt ]` test inside the
+  # plan and must never reach it (the plan feeds a DELETE step).
+  [[ "$KEEP_RUNS" =~ ^[0123456789]{1,9}$ ]] || { echo "ERROR: --keep-runs must be an integer 0..999999999, got '$KEEP_RUNS'" >&2; exit 2; }
+  if ! [[ "$KEEP_DAYS" =~ ^[0123456789]{1,5}(\.[0123456789]{1,9})?$ ]] \
+    || ! awk -v d="$KEEP_DAYS" 'BEGIN { exit !(d + 0 <= 36500) }'; then
+    echo "ERROR: --keep-days must be a decimal 0..36500 (e.g. 3 or 0.5), got '$KEEP_DAYS'" >&2
+    exit 2
+  fi
   local runs=$(( 10#$KEEP_RUNS ))
   if [ "$EXECUTE" = 1 ] && [ "$runs" -lt 1 ]; then
     echo "ERROR: --execute with --keep-runs 0 is refused -- it could delete the recording OBS is writing right now; keep at least the newest run" >&2
@@ -237,19 +278,25 @@ rr_local_sweep() {
     src="the active OBS profile in $OBS_CONFIG_DIR"
   fi
   [ -d "$dir" ] || { echo "ERROR: record directory not found: $dir" >&2; exit 1; }
+  # An unreadable dir would glob to nothing and report a silent 0-file sweep -- fail loud instead.
+  if [ ! -r "$dir" ] || [ ! -x "$dir" ]; then
+    echo "ERROR: record directory not readable by $(id -un 2>/dev/null || echo this user): $dir" >&2
+    exit 1
+  fi
   local now="${RETENTION_NOW_EPOCH:-}"
   if [ -z "$now" ]; then now="$(date +%s)"; fi
-  [[ "$now" =~ ^-?[0123456789]+$ ]] || { echo "ERROR: RETENTION_NOW_EPOCH must be an integer epoch, got '$now'" >&2; exit 2; }
+  [[ "$now" =~ ^-?[0123456789]{1,12}$ ]] || { echo "ERROR: RETENTION_NOW_EPOCH must be an integer epoch, got '$now'" >&2; exit 2; }
 
   local plan
-  plan="$(rr_plan "$dir" "$now" "$runs" "$KEEP_DAYS")"
+  plan="$(rr_plan "$dir" "$now" "$runs" "$KEEP_DAYS")" \
+    || { echo "ERROR: the retention plan could not be computed -- nothing deleted" >&2; exit 1; }
   if [ "$PLAN_TSV" = 1 ]; then
     [ -z "$plan" ] || printf '%s\n' "$plan"
     return 0
   fi
 
   local tab=$'\t' kind a b c d
-  local n_prot=0 b_prot=0 n_keep=0 b_keep=0 n_del=0 b_del=0
+  local n_prot=0 b_prot=0 n_keep=0 b_keep=0 n_del=0 b_del=0 n_other=0
   echo "=== strih-recordings-retention (#1122, issue 1317 -- Linux local sweep) ==="
   echo "Host      : $(uname -n)"
   echo "RecordDir : $dir  (from $src)"
@@ -258,6 +305,11 @@ rr_local_sweep() {
   echo "Mode      : $([ "$EXECUTE" = 1 ] && echo 'EXECUTE (deleting)' || echo 'DRY-RUN (no deletion)')"
   echo ""
   echo "--- PROTECT (non-matching names -- never deleted) ---"
+  while IFS="$tab" read -r kind a b c; do
+    [ "$kind" = "OTHER" ] || continue
+    printf '  PROTECT  (not a regular file)  %s\n' "$c"
+    n_other=$(( n_other + 1 ))
+  done <<< "$plan"
   while IFS="$tab" read -r kind a b c; do
     [ "$kind" = "PROTECT" ] || continue
     printf '  PROTECT  %6s GB  %s  %s\n' "$(rr_gb "$a")" "$(rr_day "$b")" "$c"
@@ -280,6 +332,7 @@ rr_local_sweep() {
   echo ""
   echo "--- SUMMARY ---"
   echo "  files total   : $(( n_prot + n_keep + n_del ))  ($(rr_gb $(( b_prot + b_keep + b_del ))) GB)"
+  if [ "$n_other" -gt 0 ]; then echo "  not regular   : $n_other  (dirs/symlinks/other -- never touched)"; fi
   echo "  PROTECT       : $n_prot  ($(rr_gb "$b_prot") GB)"
   echo "  KEEP          : $n_keep  ($(rr_gb "$b_keep") GB)"
   echo "  DELETE        : $n_del  ($(rr_gb "$b_del") GB)  ($([ "$EXECUTE" = 1 ] && echo 'deleting' || echo 'would free'))"
@@ -357,19 +410,29 @@ case "$MODE" in
     ;;
 
   linux)
+    if [ -n "$WIN_ONLY_FLAGS" ]; then
+      echo "ERROR:${WIN_ONLY_FLAGS} only apply to the Windows .ps1 driver -- refused for the linux box '$BOX'" >&2
+      exit 2
+    fi
     command -v sshpass >/dev/null || { echo "sshpass not installed (sudo apt-get install -y sshpass)" >&2; exit 1; }
-    LB_USER="${LINUX_BOX_USER:-newlevel}"
+    if [ "$USER_SET" = 1 ]; then LB_USER="$USER"; else LB_USER="${LINUX_BOX_USER:-newlevel}"; fi
     LB_PW="${LINUX_BOX_PW:-newlevel}"
+    LB_TIMEOUT="${RETENTION_SSH_TIMEOUT:-900}"
+    [[ "$LB_TIMEOUT" =~ ^[0123456789]{1,6}$ ]] || { echo "ERROR: RETENTION_SSH_TIMEOUT must be whole seconds, got '$LB_TIMEOUT'" >&2; exit 2; }
     REMOTE_ARGS=(--local-sweep --keep-runs "$KEEP_RUNS" --keep-days "$KEEP_DAYS")
     [ "$RECORD_DIR_SET" = 0 ] || REMOTE_ARGS+=(--record-dir "$RECORD_DIR")
+    [ "$OBS_CONFIG_DIR_SET" = 0 ] || REMOTE_ARGS+=(--obs-config-dir "$OBS_CONFIG_DIR")
     [ "$PLAN_TSV" = 0 ] || REMOTE_ARGS+=(--plan-tsv)
     [ "$EXECUTE" = 0 ] || REMOTE_ARGS+=(--execute)
     REMOTE_CMD="bash -s --$(printf ' %q' "${REMOTE_ARGS[@]}")"
     echo "[$BOX] ssh ${LB_USER}@${HOST} -> $REMOTE_CMD  ($([ "$EXECUTE" = 1 ] && echo 'EXECUTE -- DELETING' || echo 'DRY-RUN -- no deletion'))"
     # THIS script is the program `bash -s` reads from stdin; no sudo -- the OBS record dir is owned by
-    # the OBS user (strih-lx /srv/_REC = newlevel:newlevel 775).
+    # the OBS user (strih-lx /srv/_REC = newlevel:newlevel 775). The address was the Windows strih PC
+    # until M4, so a stale known_hosts key must not block the leg (UserKnownHostsFile=/dev/null, the
+    # strih-lx ssh convention); timeout sits INSIDE sshpass so sshpass stays the outer command.
     # shellcheck disable=SC2029  # REMOTE_CMD is built with printf %q for the remote shell on purpose.
-    sshpass -p "$LB_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=15 "${LB_USER}@${HOST}" \
+    sshpass -p "$LB_PW" timeout "$LB_TIMEOUT" ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+      -o LogLevel=ERROR -o ConnectTimeout=15 "${LB_USER}@${HOST}" \
       "$REMOTE_CMD" < "$HERE/strih-recordings-retention.sh"
     ;;
 
