@@ -49,3 +49,24 @@ def test_rig_status_renders_genlock_lock_chip_generically():
     assert len(recs) == 1
     chips = {f["key"]: f["value"] for f in recs[0]["facets"] if "key" in f}
     assert chips.get("genlock_lock") == "LOCKED", chips
+
+
+def test_state_helper_prefers_the_newer_heartbeat_json_over_a_stale_change_line():
+    # issue 1360: the audit fetches head 600 + tail N of a long strih-lx log. The change-driven
+    # `genlock-lock: state=` line can sit between the two windows, so the only one in the text is
+    # the startup UNLOCKED from the head. The 30 s `genlock-lock-json:` heartbeat is always in the
+    # tail and carries the current decided state -- the LAST line of either kind wins.
+    log = (
+        "12:37:01.000: genlock-lock: state=UNLOCKED inputs=0/9 latency_ms=3 clock=absent output=not-stamping reason=clock (#1298)\n"
+        "13:27:00.503: genlock-lock-json: {\"v\":6,\"state\":\"LOCKED\",\"reason\":\"none\",\"n_inputs\":9}\n"
+        "13:27:30.503: genlock-lock-json: {\"v\":6,\"state\":\"LOCKED\",\"reason\":\"none\",\"n_inputs\":9}\n"
+    )
+    assert _audit.genlock_lock_state_from_log(log) == "LOCKED"
+
+
+def test_state_helper_newer_change_line_beats_an_older_heartbeat():
+    log = (
+        "13:27:00.503: genlock-lock-json: {\"v\":6,\"state\":\"LOCKED\",\"reason\":\"none\"}\n"
+        "13:27:10.000: genlock-lock: state=DEGRADED inputs=9/9 latency_ms=3 clock=locked output=stamping reason=recent_event (#1298)\n"
+    )
+    assert _audit.genlock_lock_state_from_log(log) == "DEGRADED"
