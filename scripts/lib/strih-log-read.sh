@@ -73,7 +73,7 @@ strih_log_remote_cmd() {
       local newest='F=$(ls -t ~/.config/obs-studio/logs/*.txt 2>/dev/null | head -1); [ -n "$F" ] && '
       case "$op" in
         tail) printf '%s' "${newest}tail -n ${n} \"\$F\"" ;;
-        since) printf '%s' "${newest}tail -n +$((n + 1)) \"\$F\"" ;;
+        since) printf '%s' "${newest}tail -n +$((10#$n + 1)) \"\$F\"" ;; # 10#: a zero-padded mark is decimal
         count) printf '%s' "${newest}wc -l < \"\$F\"" ;;
       esac
       ;;

@@ -81,7 +81,10 @@ MV_FPS_BOXES="${MV_FPS_BOXES:-strih|10.77.9.202|strih}"
 SSH_USER="${MV_FPS_SSH_USER:-newlevel}"
 SSH_PW="${MV_FPS_SSH_PW:-newlevel}"
 SSH_TIMEOUT="${MV_FPS_SSH_TIMEOUT:-20}"
-SSH_OPTS="${MV_FPS_SSH_OPTS:--o BatchMode=no -o StrictHostKeyChecking=no -o ConnectTimeout=8}"
+# issue 1360: UserKnownHostsFile=/dev/null -- the strih-lx address was the Windows box before the
+# cut-over; a stale known_hosts key with StrictHostKeyChecking=no disables password auth (a silent
+# empty read). Same options as scripts/lib/strih-log-read.sh.
+SSH_OPTS="${MV_FPS_SSH_OPTS:--o BatchMode=no -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=8}"
 OBS_LOG_TAIL="${MV_FPS_OBS_LOG_TAIL:-2000}"
 
 # The `mv-fps-gate` bin (default features) -- the SAME decision engine #771's E2E preflight /

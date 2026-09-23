@@ -67,6 +67,8 @@ NDI_CADENCE_RECV_SSH_PW="${NDI_CADENCE_RECV_SSH_PW:-newlevel}"
 NDI_CADENCE_SENDER_SSH_USER="${NDI_CADENCE_SENDER_SSH_USER:-root}"
 NDI_CADENCE_SENDER_SSH_PW="${NDI_CADENCE_SENDER_SSH_PW:-newlevel}"
 NDI_CADENCE_SSH_TIMEOUT="${NDI_CADENCE_SSH_TIMEOUT:-30}"
+# Applies to the SENDER (cambox) ssh only; the receiver (strih) log read uses the shared
+# strih-log-read.sh transport options (issue 1360).
 NDI_CADENCE_SSH_OPTS="${NDI_CADENCE_SSH_OPTS:--o BatchMode=no -o StrictHostKeyChecking=no -o ConnectTimeout=8}"
 
 # -- helpers ------------------------------------------------------------------------------------

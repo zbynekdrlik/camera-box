@@ -98,8 +98,12 @@ mv_fps_preflight_probe() {
       os="$(strih_log_os "$ip")"
     fi
     rcmd="$(mv_fps_preflight_read_cmd "$os" "$tail_n")" || return 0
+    # issue 1360: UserKnownHostsFile=/dev/null -- the strih-lx address was the Windows box before
+    # the cut-over, and a stale known_hosts key with StrictHostKeyChecking=no makes OpenSSH disable
+    # password auth (a silent empty read); same options as scripts/lib/strih-log-read.sh.
     raw="$(timeout "${MV_FPS_PREFLIGHT_SSH_TIMEOUT:-20}" sshpass -p "$pw" \
-      ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 "${user}@${ip}" "$rcmd" 2>/dev/null || true)"
+      ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR \
+      -o ConnectTimeout=8 "${user}@${ip}" "$rcmd" 2>/dev/null || true)"
   fi
   # #1262: byte-safe extraction (mv_fps_extract_audit_lines, mv-fps-health.sh, sourced above) --
   # see its own doc comment for the transport-chunk-glue hazard this guards against.
