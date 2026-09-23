@@ -23,7 +23,7 @@
 # its NDI machine name (the sender-name prefix) is the uppercased box hostname libndi announces under;
 # the anchor is "<prefix> (2ME PGM)"; the IP is read from the anchor's OWN mDNS record (the address
 # every receiver dials). Every piece stays env-overridable (NDI_PORTMAP_BOX / _NAME_PREFIX / _ANCHOR /
-# _BOX_IP). --check refuses a baseline captured for a DIFFERENT anchor (exit 2, re-capture) instead of
+# _BOX_IP). --check refuses a baseline captured for a DIFFERENT anchor (exit 4, re-capture) instead of
 # reading every old name ABSENT and reporting STABLE forever.
 #
 # A Windows strih advertised TWO NDI machine instances at the same IP: the OBS instance (2ME PGM/PVW/
@@ -34,7 +34,8 @@
 #
 # Modes:
 #   scripts/ndi-portmap-audit.sh --check      # DEFAULT: read live map -> diff vs baseline -> report;
-#                                             #   exit 0 = STABLE, 3 = CHANGED, 2 = gather/usage error
+#                                             #   exit 0 = STABLE, 3 = CHANGED, 2 = gather/usage error,
+#                                             #   4 = baseline captured for ANOTHER strih (re-capture)
 #   scripts/ndi-portmap-audit.sh --capture    # read live map -> (over)write scripts/ndi-portmap-baseline.json
 #   scripts/ndi-portmap-audit.sh --json       # read live map -> print the OBS instance map as JSON
 #   scripts/ndi-portmap-audit.sh --help
@@ -54,7 +55,7 @@ case "${1:-}" in
   --check | "") MODE="check" ;;
   --capture) MODE="capture" ;;
   --json) MODE="json" ;;
-  --help | -h) sed -n '4,43p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+  --help | -h) sed -n '6,44p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
   *) echo "ndi-portmap-audit: unknown arg '$1' (try --help)" >&2; exit 2 ;;
 esac
 
@@ -66,12 +67,12 @@ log() { printf '%s [ndi-portmap-audit] %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$
 #   means nothing to watch -- both are a gather error, never a silently-picked box.
 _np_fleet_box() {
   local members n
-  members="$(obs_fleet_facet_members ndi-portmap)" || return 1
+  members="$(obs_fleet_facet_members "$NDI_PORTMAP_FLEET_FACET")" || return 1
   # shellcheck disable=SC2086  # word-split the space-separated member list on purpose
   set -- $members
   n=$#
   if [ "$n" -ne 1 ]; then
-    log "obs-fleet facet 'ndi-portmap' must name exactly ONE strih box, got $n: '${members}'"
+    log "obs-fleet facet '${NDI_PORTMAP_FLEET_FACET}' must name exactly ONE strih box, got $n: '${members}'"
     return 1
   fi
   printf '%s' "$1"
@@ -79,6 +80,8 @@ _np_fleet_box() {
 # The program output DistroAV announces (the profile's main OutputName) -- an OUTPUT name, the same on
 # every strih; the box part of the sender name is the machine prefix below.
 NDI_PORTMAP_PROGRAM_OUTPUT="${NDI_PORTMAP_PROGRAM_OUTPUT:-2ME PGM}"
+# The fleet facet naming the watched strih (a seam for tests/ops; the policy lives in obs-fleet.sh).
+NDI_PORTMAP_FLEET_FACET="${NDI_PORTMAP_FLEET_FACET:-ndi-portmap}"
 if [ -z "${NDI_PORTMAP_BOX:-}" ]; then
   NDI_PORTMAP_BOX="$(_np_fleet_box)" || NDI_PORTMAP_BOX=""
 fi
@@ -286,12 +289,19 @@ case "$MODE" in
     log "checking live OBS-instance port map vs baseline $NDI_PORTMAP_BASELINE"
     base="$(_np_baseline_senders_flat)" || { log "no readable baseline at $NDI_PORTMAP_BASELINE -- run --capture first"; exit 2; }
     if [ -z "$base" ]; then log "baseline has no senders -- run --capture first"; exit 2; fi
+    # issue 1363: nothing resolved (fleet facet / NDI_PORTMAP_BOX) -> a gather error, NOT a re-capture
+    # hint (--capture would fail the same way).
+    if [ -z "$NDI_PORTMAP_ANCHOR" ]; then
+      log "no watched strih box resolved -- fix the obs-fleet '${NDI_PORTMAP_FLEET_FACET}' facet or set NDI_PORTMAP_BOX"
+      exit 2
+    fi
     # issue 1363: a baseline captured on ANOTHER strih box would read every old name ABSENT and
-    # report STABLE forever (a silently blind watchdog) -- refuse it loudly instead.
+    # report STABLE forever (a silently blind watchdog) -- refuse it loudly, with its OWN exit code 4
+    # (a lasting config error the watchdog names, never confused with a passing box outage).
     base_anchor="$(_np_baseline_field anchor)"
     if [ "$(ndi_portmap_baseline_scope "$base_anchor" "$NDI_PORTMAP_ANCHOR")" != "MATCH" ]; then
       log "baseline $NDI_PORTMAP_BASELINE was captured for anchor '${base_anchor}', but the watched strih is '${NDI_PORTMAP_ANCHOR}' (box '${NDI_PORTMAP_BOX}') -- re-capture it from a live read: scripts/ndi-portmap-audit.sh --capture"
-      exit 2
+      exit 4
     fi
     _np_gather || exit 2
     live="$LIVE"

@@ -105,11 +105,13 @@ ndi_portmap_select() {
 #   fleet host that may not resolve on dev1 (strih-lx.lan has no DNS entry). Distinct IPs only, so a
 #   multi-homed doubled resolve of the same IP is still one. Anchor absent -> nothing (gather error);
 #   anchor at >1 IP (two boxes announcing the same program name, e.g. a cloned profile) -> nothing too:
-#   fail safe, never pick one of them silently.
+#   fail safe, never pick one of them silently. IPv4 dotted-quad records only: dev1's avahi runs with
+#   use-ipv6=yes, and a dual-stack announce of the SAME anchor must stay one box, never "two addresses"
+#   (the selection below is keyed on the IPv4 address anyway).
 ndi_portmap_anchor_ip() {
   local block="${1:-}" anchor="${2:-}"
   awk -F'\t' -v anc="$anchor" '
-    $1 == anc && $2 != "" { if (!($2 in seen)) { seen[$2] = 1; n++; ip = $2 } }
+    $1 == anc && $2 ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/ { if (!($2 in seen)) { seen[$2] = 1; n++; ip = $2 } }
     END { if (n == 1) print ip }
   ' <<<"$block"
 }

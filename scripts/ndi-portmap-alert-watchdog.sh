@@ -87,8 +87,9 @@ main() {
   log "pass start (dry_run=$DRY_RUN, audit=$AUDIT)"
 
   # Run the read-only audit. stdout carries the one-line summary (NDI-PORTMAP-STABLE / -CHANGED ...);
-  # exit 0 = STABLE, 3 = CHANGED, anything else = gather/usage error (OBS down / avahi unreachable /
-  # anchor absent -> "nothing to decide", never a change page -- box reachability is #1001's job).
+  # exit 0 = STABLE, 3 = CHANGED, 4 = baseline captured on ANOTHER strih box (logged by name, no page,
+  # issue 1363), anything else = gather/usage error (OBS down / avahi unreachable / anchor absent ->
+  # "nothing to decide", never a change page -- box reachability is #1001's job).
   # Capture the audit's STDERR (not >/dev/null it) so a require_tools FATAL (a missing avahi-browse /
   # python3 / timeout on dev1) still reaches the journal on the error branch below -- the audit is
   # built to "fail LOUD by name", and swallowing its stderr would defeat that (a permanently-blind
@@ -115,6 +116,12 @@ main() {
     return 0
   fi
 
+  if [ "$rc" -eq 4 ]; then
+    # issue 1363: the baseline was captured on ANOTHER strih box -- a lasting config error, not a box
+    # outage. Log it by name (machine channel only, never a phone page) so it is not read as transient.
+    log "BASELINE SCOPE STALE (rc=4): the checked-in baseline belongs to another strih box -- re-capture it from a live read (scripts/ndi-portmap-audit.sh --capture) and commit it in a PR. No page.${auderr:+ audit stderr: ${auderr}}"
+    return 0
+  fi
   if [ "$rc" -ne 3 ]; then
     log "audit error (rc=$rc) -- nothing to decide this pass (OBS down / avahi unreachable is not this watchdog's job).${auderr:+ audit stderr (may carry a require_tools FATAL): ${auderr}}"
     return 0
