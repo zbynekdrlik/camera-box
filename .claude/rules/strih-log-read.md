@@ -103,6 +103,9 @@ If a future consumer needs lines sparser than that (a once-per-run event), size 
 live count first — `wc -l` plus a `grep -c` of the marker on the newest log is a read-only one-liner.
 Both knobs are numeric-clamped locally BEFORE the reader (the reader's own clamp would silently
 turn a bad READ_LINES into 400). A Windows strih is now snapshotted too (no more SKIP line).
+Testing a CR strip from Rust: `str::lines()` already drops a `\r` before `\n`, so comparing
+`lines()` output can never catch a missing `tr -d '\r'` — assert `!out.contains('\r')` on the raw
+text (the review found this; the raw-byte assert was proven to fail with the strip removed).
 
 The remaining `APPDATA\obs-studio` hits under `scripts/` are NOT strih log readers
 (launch/deploy/self-heal programs that only ever target a Windows box, the on-box
