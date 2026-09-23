@@ -1,6 +1,7 @@
-//! Issue 1363 (option C) — on LINUX, every DistroAV NDI sender closes its connected sockets with
-//! RST (`SO_LINGER {1,0}`) right before it is destroyed, so no TIME_WAIT survives on its port and
-//! the next OBS keeps the whole captured sender port map (2ME PGM on :5961 …).
+//! Issue 1363 (option C) — on LINUX, every DistroAV NDI sender resets its connected sockets right
+//! before it is destroyed (`SO_LINGER {1,0}` plus an immediate `connect(AF_UNSPEC)` reset, because
+//! libndi shuts a connection down gracefully before it closes it), so no TIME_WAIT survives on its
+//! port and the next OBS keeps the whole captured sender port map (2ME PGM on :5961 …).
 //!
 //! Root cause (measured on strih-lx + dev1, libndi 6.3.2): libndi binds each sender listener
 //! WITHOUT `SO_REUSEADDR`. On Linux a connection left in TIME_WAIT on :5961 by the previous OBS
@@ -8,13 +9,20 @@
 //! never retries a port it failed to bind — so the reserved program sender (the port-1185 pin)
 //! lands on :5962 for the whole session and every sender shifts up by one. Windows binds over a
 //! TIME_WAIT, which is why the pin always held there. The chosen fix (ROZHODNUTÉ on the ticket):
-//! prevent the TIME_WAIT at stop time (linger-0 on the sender's CONNECTED sockets), and at the
+//! prevent the TIME_WAIT at stop time (reset the sender's CONNECTED sockets), and at the
 //! :5961 reserve, if a TIME_WAIT still holds it (crash/kill), log one loud `WARN-1363` line and
 //! continue — never wait on the loading thread. Windows compiles byte-identical code.
 //!
 //! libndi has no API for a sender's port (`send_get_source_name()->p_url_address` is NULL for a
 //! local sender, measured), so the new `vendor/distroav/src/ndi-sender-port.cpp` learns it as the
-//! single new TCP LISTENING socket in `/proc/self/fd` across the (serialized) `send_create`.
+//! single new TCP LISTENING socket in `/proc/self/fd` across the (serialized) `send_create`,
+//! counting ONLY libndi's sender port band `:5961..:6959`. Part 3 of the ticket: a libndi RECEIVER
+//! pulling a remote source opens its own listener on `:6960+` from a libndi thread while it
+//! connects (measured dev1 <- dev2 source: :6961, :6962, a transient :6960, :6963 ...; live
+//! strih-lx `:6961..:6973`), so on strih-lx the
+//! back-to-back `MULTIVIEW` / `Grading` creates saw two new listeners and were never identified.
+//! An unidentified sender logs its OWN `PORTID-1363` label — `WARN-1363` stays reserved for the
+//! TIME_WAIT/live listener on :5961 at the reserve.
 //!
 //! Std-only, runs offline (the #1026 `rustc --test` recipe) — three facets:
 //! - Facet A: source anchors (revert protection against a `git subtree pull`), incl. a structural
@@ -23,9 +31,12 @@
 //! - Facet B: lift the pure `static inline` decision helpers VERBATIM, compile them under
 //!   `-Werror -Wconversion -Wformat=2`, run a hand-written truth table (the table IS the spec).
 //! - Facet C: compile the REAL `ndi-sender-port.cpp` with g++ against a stub `plugin-main.h`
-//!   (a fake libndi whose `send_create` opens a real 0.0.0.0 listener) and prove on real loopback
-//!   sockets: the tracked create finds the port; a live listener reads LIVE; without the abort the
-//!   server-first close leaves a TIME_WAIT (the bug); with the abort the port is FREE again.
+//!   (a fake libndi whose `send_create` opens a real 0.0.0.0 listener and whose `send_destroy`
+//!   does what strace shows libndi 6.3.2 doing: `shutdown(SHUT_RDWR)`, then `close()` after the
+//!   viewer's own FIN is back) and prove on real loopback sockets: the tracked create finds the
+//!   port; a live listener reads LIVE; without the abort the stop leaves a TIME_WAIT (the bug);
+//!   with the abort the port is FREE again. `SO_LINGER {1,0}` alone cannot pass this: libndi's
+//!   `shutdown()` sends a graceful FIN first, so the abort must also disconnect the socket at once.
 //!
 //! The compilers are REQUIRED: a missing cc/g++ FAILS the gate, never skips (test strictness).
 
@@ -88,12 +99,16 @@ fn sender_port_module_present_and_linux_only() {
     for sig in [
         "#define NDI_SENDER_FIRST_TCP_PORT 5961",
         "#define NDI_MESSAGING_TCP_PORT 5960",
+        "#define NDI_RECEIVER_FIRST_TCP_PORT 6960",
+        "#define NDI_LISTEN_PORT_AMBIGUOUS (-1)",
         "enum ndi_first_port_state {",
         "static inline int ndi_first_port_hold_state(",
         "static inline const char *ndi_first_port_hold_state_text(",
         "static inline int ndi_reserve_should_warn(",
         "static inline int ndi_socket_is_sender_connection(",
+        "static inline int ndi_is_sender_band_port(",
         "static inline int ndi_new_listen_port(",
+        "static inline const char *ndi_listen_port_failure_text(",
         "NDIlib_send_instance_t ndi_sender_create_tracked(const NDIlib_send_create_t *desc, int *out_port);",
         "void ndi_sender_abort_connections_before_destroy(int port, const char *name);",
         "int ndi_sender_port_hold_state(int port);",
@@ -129,6 +144,8 @@ fn sender_port_module_present_and_linux_only() {
         "SO_LINGER",
         "lg.l_onoff = 1;",
         "lg.l_linger = 0;",
+        "unspec.sa_family = AF_UNSPEC;",
+        "connect(fd, &unspec, sizeof(unspec))",
         "std::lock_guard<std::mutex> lock(g_ndi_sender_create_mutex);",
         "ndi_new_listen_port(before.data(), before.size(), after.data(), after.size())",
         "ndi_socket_is_sender_connection(is_listener, has_peer, local_port, port)",
@@ -337,6 +354,44 @@ fn every_1363_line_is_linux_only_so_windows_stays_byte_identical() {
 }
 
 #[test]
+fn port_identification_failure_has_its_own_label_never_warn_1363() {
+    // `WARN-1363` is RESERVED for "TIME_WAIT / live listener on :5961 at the reserve" (the one
+    // line the port-map incident triage greps for). An unidentified sender port and an unreadable
+    // /proc/self/fd at stop are different conditions with their own labels.
+    let cpp = squish(&vendor_file(PORT_CPP));
+    for tok in [
+        "\"PORTID-1363 - ndi-sender-port: could not identify the TCP port of NDI sender '%s' (%s)",
+        "ndi_listen_port_failure_text(have_before && have_after, found)",
+        "\"LINGER-1363 - ndi-sender-port: cannot read /proc/self/fd",
+    ] {
+        assert!(
+            cpp.contains(tok),
+            "{PORT_CPP}: issue 1363 — `{tok}` is missing; the sender-port failures need their own \
+             log labels"
+        );
+    }
+    let mut warn_sites = Vec::new();
+    for file in [PORT_H, PORT_CPP, NDI_OUTPUT, NDI_FILTER] {
+        let text = vendor_file(file);
+        for (n, line) in text.lines().enumerate() {
+            if line.contains("\"WARN-1363") {
+                warn_sites.push(format!("{file}:{}", n + 1));
+            }
+        }
+    }
+    assert_eq!(
+        warn_sites.len(),
+        1,
+        "issue 1363: exactly ONE log string may carry the `WARN-1363` label (the :5961 reserve in \
+         {NDI_OUTPUT}); found {warn_sites:?}"
+    );
+    assert!(
+        warn_sites[0].starts_with(NDI_OUTPUT),
+        "issue 1363: the only `WARN-1363` log string must be the :5961 reserve line: {warn_sites:?}"
+    );
+}
+
+#[test]
 fn windows_genlock_workflows_gate_on_the_1363_linger_patch() {
     for wf in [WINDOWS_GENLOCK_WF, WINDOWS_GENLOCK_FAST_WF] {
         let w = squish(&vendor_file(wf));
@@ -387,13 +442,17 @@ fn lifted_pure_helpers() -> String {
     let mut c = String::new();
     c.push_str(&lift(&h, "#define NDI_SENDER_FIRST_TCP_PORT", "\n"));
     c.push_str(&lift(&h, "#define NDI_MESSAGING_TCP_PORT", "\n"));
+    c.push_str(&lift(&h, "#define NDI_RECEIVER_FIRST_TCP_PORT", "\n"));
+    c.push_str(&lift(&h, "#define NDI_LISTEN_PORT_AMBIGUOUS", "\n"));
     c.push_str(&lift(&h, "enum ndi_first_port_state {", "\n};\n"));
     for sig in [
         "static inline int ndi_first_port_hold_state(",
         "static inline const char *ndi_first_port_hold_state_text(",
         "static inline int ndi_reserve_should_warn(",
         "static inline int ndi_socket_is_sender_connection(",
+        "static inline int ndi_is_sender_band_port(",
         "static inline int ndi_new_listen_port(",
+        "static inline const char *ndi_listen_port_failure_text(",
     ] {
         c.push_str(&lift(&h, sig, "\n}\n"));
     }
@@ -493,11 +552,11 @@ fn pure_helpers_compute_the_spec_truth_table() {
         ((0, 1, 0, 0), 0),        // sender port unknown: touch nothing
         ((0, 1, 45000, 5961), 0), // the client side of an in-process receiver
     ];
-    // (before, after) -> the sender's new listening port (0 = none / ambiguous)
+    // (before, after) -> the sender's new listening port (0 = none, -1 = ambiguous)
     let diff: &[(&[i32], &[i32], i32)] = &[
         (&[5960], &[5960, 5961], 5961),
         (&[5960, 5961], &[5960, 5961, 5962, 5962], 5962), // same port on v4 + v6
-        (&[5960], &[5960, 5961, 5962], 0),                // two new listeners: ambiguous
+        (&[5960], &[5960, 5961, 5962], -1),               // two new sender ports: ambiguous
         (&[5960, 5961], &[5960, 5961], 0),                // nothing new
         (&[], &[5961], 5961),
         // The FIRST send_create of a process (the :5961 program reservation) also opens
@@ -507,6 +566,36 @@ fn pure_helpers_compute_the_spec_truth_table() {
         (&[], &[5960, 5963], 5963),
         (&[5960], &[0, 5960, 5963], 5963), // a 0 entry is ignored
         (&[5960, 5961], &[5960, 5962], 5962), // a listener that vanished does not matter
+        // Part 3 — the live strih-lx failure: a libndi RECEIVER pulling a remote camera opens its
+        // own :6960+ listener from a libndi thread while the MULTIVIEW/Grading create runs (not
+        // serialized by the create mutex). It is never a sender port, so the sender is identified.
+        (
+            &[4455, 5960, 5961, 5962],
+            &[4455, 5960, 5961, 5962, 5963, 6961],
+            5963,
+        ),
+        (&[5960, 5961], &[5960, 5961, 5962, 6961, 6962], 5962),
+        (&[5960, 5961], &[5960, 5961, 6961], 0), // only a receiver listener appeared: none
+        (&[], &[4455, 5961], 5961),              // obs-websocket (:4455) is never a sender
+        (&[5960], &[5960, 5961, 45000], 5961),   // an ephemeral listener is never a sender
+        (&[5960], &[5960, 6959], 6959),          // top of the sender band
+        (&[5960], &[5960, 6960], 0),             // a receiver's (transient) :6960 listener
+        (&[5960], &[5960, 6961], 0),             // a receiver's :6961 listener
+        (&[5960], &[5960, 5961, 6962, 5962], -1), // two sender-band ports + a receiver: ambiguous
+    ];
+    // port -> inside libndi's sender port band [5961, 6960)?
+    let band: &[(i32, i32)] = &[
+        (5960, 0),
+        (5961, 1),
+        (6000, 1),
+        (6959, 1),
+        (6960, 0),
+        (6961, 0),
+        (6973, 0),
+        (4455, 0),
+        (45000, 0),
+        (0, 0),
+        (-1, 0),
     ];
 
     let mut c = String::from("#include <stddef.h>\n#include <stdio.h>\n");
@@ -550,6 +639,17 @@ fn pure_helpers_compute_the_spec_truth_table() {
             after.len()
         ));
     }
+    for (p, _) in band {
+        c.push_str(&format!(
+            "  printf(\"%d\\n\", ndi_is_sender_band_port({p}));\n"
+        ));
+    }
+    // The failure-reason text: unreadable / ambiguous / none, each distinct.
+    c.push_str("  printf(\"F0=%s\\n\", ndi_listen_port_failure_text(0, 0));\n");
+    c.push_str(
+        "  printf(\"F1=%s\\n\", ndi_listen_port_failure_text(1, NDI_LISTEN_PORT_AMBIGUOUS));\n",
+    );
+    c.push_str("  printf(\"F2=%s\\n\", ndi_listen_port_failure_text(1, 0));\n");
     // The text helper: every state maps to a distinct non-empty text; out-of-range is handled.
     c.push_str(
         "  for (int s = 0; s < 5; s++) printf(\"T%d=%s\\n\", s, ndi_first_port_hold_state_text(s));\n",
@@ -578,13 +678,14 @@ fn pure_helpers_compute_the_spec_truth_table() {
     let (nums, texts): (Vec<&str>, Vec<&str>) = stdout
         .lines()
         .filter(|l| !l.is_empty())
-        .partition(|l| !l.starts_with('T'));
+        .partition(|l| !l.starts_with('T') && !l.starts_with('F'));
     let want: Vec<i32> = hold
         .iter()
         .map(|(_, w)| *w)
         .chain(warn.iter().map(|(_, w)| *w))
         .chain(conn.iter().map(|(_, w)| *w))
         .chain(diff.iter().map(|(_, _, w)| *w))
+        .chain(band.iter().map(|(_, w)| *w))
         .collect();
     let got: Vec<i32> = nums
         .iter()
@@ -593,10 +694,28 @@ fn pure_helpers_compute_the_spec_truth_table() {
     assert_eq!(
         got, want,
         "issue 1363: the vendored pure sender-port helpers DIVERGED from the spec truth table \
-         (order: hold_state, should_warn, is_sender_connection, new_listen_port)\n--- harness ---\n{c}"
+         (order: hold_state, should_warn, is_sender_connection, new_listen_port, \
+         is_sender_band_port)\n--- harness ---\n{c}"
     );
 
-    let t: Vec<&str> = texts.iter().map(|l| l.split_once('=').unwrap().1).collect();
+    let fail: Vec<&str> = texts
+        .iter()
+        .filter(|l| l.starts_with('F'))
+        .map(|l| l.split_once('=').unwrap().1)
+        .collect();
+    assert_eq!(fail.len(), 3, "issue 1363: failure-text lines: {texts:?}");
+    assert!(
+        fail[0].contains("/proc/self/fd")
+            && fail[1].contains("more than one")
+            && fail[2].contains("no new listener"),
+        "issue 1363: the PORTID-1363 reason must name the case (unreadable / ambiguous / none): \
+         {fail:?}"
+    );
+    let t: Vec<&str> = texts
+        .iter()
+        .filter(|l| l.starts_with('T'))
+        .map(|l| l.split_once('=').unwrap().1)
+        .collect();
     assert_eq!(t.len(), 6, "issue 1363: text helper lines: {texts:?}");
     for (i, a) in t.iter().enumerate().take(4) {
         assert!(
@@ -624,130 +743,10 @@ fn pure_helpers_compute_the_spec_truth_table() {
 // Facet C — the REAL impure module on real loopback sockets (fake libndi, no NDI SDK needed)
 // ----------------------------------------------------------------------------------------------
 
-const STUB_PLUGIN_MAIN: &str = r#"// issue 1363 gate stub: only what ndi-sender-port.cpp uses from the real plugin-main.h.
-#pragma once
-#include <cstdarg>
-#include <cstdio>
-#define LOG_ERROR 100
-#define LOG_WARNING 200
-#define LOG_INFO 300
-#define LOG_DEBUG 400
-typedef struct NDIlib_send_instance_type *NDIlib_send_instance_t;
-typedef struct {
-	const char *p_ndi_name;
-	const char *p_groups;
-	bool clock_video;
-	bool clock_audio;
-} NDIlib_send_create_t;
-typedef struct {
-	NDIlib_send_instance_t (*send_create)(const NDIlib_send_create_t *p_create_settings);
-	void (*send_destroy)(NDIlib_send_instance_t p_instance);
-} NDIlib_v6;
-extern const NDIlib_v6 *ndiLib;
-static inline void obs_log(int level, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
-static inline void obs_log(int level, const char *fmt, ...)
-{
-	va_list ap;
-	va_start(ap, fmt);
-	printf("LOG%d: ", level);
-	vprintf(fmt, ap);
-	printf("\n");
-	va_end(ap);
-}
-"#;
+const STUB_PLUGIN_MAIN: &str =
+    include_str!("fixtures/distroav_sender_port_linger_1363/plugin-main.h");
 
-const HARNESS: &str = r#"// issue 1363 gate: the real ndi-sender-port.cpp over real loopback sockets.
-#include "plugin-main.h"
-#include "ndi-sender-port.h"
-#include <arpa/inet.h>
-#include <cstdio>
-#include <netinet/in.h>
-#include <sys/socket.h>
-#include <unistd.h>
-
-struct fake_sender {
-	int listen_fd;
-	int conn_fd;
-};
-
-// Like libndi: a 0.0.0.0 listener WITHOUT SO_REUSEADDR (here on an ephemeral port).
-static NDIlib_send_instance_t fake_send_create(const NDIlib_send_create_t *)
-{
-	int fd = socket(AF_INET, SOCK_STREAM, 0);
-	if (fd < 0)
-		return nullptr;
-	sockaddr_in a{};
-	a.sin_family = AF_INET;
-	a.sin_port = 0;
-	a.sin_addr.s_addr = htonl(INADDR_ANY);
-	if (bind(fd, (sockaddr *)&a, sizeof a) != 0 || listen(fd, 4) != 0) {
-		close(fd);
-		return nullptr;
-	}
-	return (NDIlib_send_instance_t) new fake_sender{fd, -1};
-}
-
-static void fake_send_destroy(NDIlib_send_instance_t p)
-{
-	auto *s = (fake_sender *)p;
-	if (!s)
-		return;
-	if (s->conn_fd >= 0)
-		close(s->conn_fd);
-	close(s->listen_fd);
-	delete s;
-}
-
-static const NDIlib_v6 fake_lib = {fake_send_create, fake_send_destroy};
-const NDIlib_v6 *ndiLib = &fake_lib;
-
-static int scenario(const char *label, bool abort_first)
-{
-	NDIlib_send_create_t desc{};
-	desc.p_ndi_name = label;
-	int port = -1;
-	NDIlib_send_instance_t s = ndi_sender_create_tracked(&desc, &port);
-	if (!s || port <= 0) {
-		printf("%s.port_found=0\n", label);
-		return 1;
-	}
-	printf("%s.port_found=1\n", label);
-	auto *fs = (fake_sender *)s;
-	int c = socket(AF_INET, SOCK_STREAM, 0);
-	sockaddr_in a{};
-	a.sin_family = AF_INET;
-	a.sin_port = htons((uint16_t)port);
-	a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-	if (c < 0 || connect(c, (sockaddr *)&a, sizeof a) != 0)
-		return 2;
-	fs->conn_fd = accept(fs->listen_fd, nullptr, nullptr);
-	if (fs->conn_fd < 0)
-		return 3;
-	char b = 'x';
-	if (write(c, &b, 1) != 1 || read(fs->conn_fd, &b, 1) != 1)
-		return 4;
-	printf("%s.live_state=%d\n", label, ndi_sender_port_hold_state(port));
-	if (abort_first)
-		ndi_sender_abort_connections_before_destroy(port, label);
-	ndiLib->send_destroy(s); // the sender closes FIRST (active close), as OBS does at stop
-	usleep(100000);
-	close(c);
-	usleep(100000);
-	printf("%s.after_state=%d\n", label, ndi_sender_port_hold_state(port));
-	return 0;
-}
-
-int main()
-{
-	// An unknown port must be a harmless no-op, never a crash.
-	ndi_sender_abort_connections_before_destroy(0, "unknown");
-	int rc = scenario("control", false);
-	if (rc == 0)
-		rc = scenario("linger", true);
-	fflush(stdout);
-	return rc;
-}
-"#;
+const HARNESS: &str = include_str!("fixtures/distroav_sender_port_linger_1363/harness.cpp");
 
 #[test]
 fn real_module_aborts_the_connection_so_no_time_wait_survives() {
@@ -779,7 +778,7 @@ fn real_module_aborts_the_connection_so_no_time_wait_survives() {
             .unwrap_or_else(|| panic!("issue 1363: harness printed no `{key}`:\n{stdout}"))
             .to_string()
     };
-    for label in ["control", "linger"] {
+    for label in ["control", "linger", "race"] {
         assert_eq!(
             get(&format!("{label}.port_found")),
             "1",
@@ -803,6 +802,38 @@ fn real_module_aborts_the_connection_so_no_time_wait_survives() {
         "0",
         "issue 1363: with the abort-before-destroy the port must be FREE again right after the \
          stop (no TIME_WAIT), so the next OBS binds it:\n{stdout}"
+    );
+    assert_eq!(
+        get("race.after_state"),
+        "0",
+        "issue 1363 part 3: with a libndi RECEIVER listener opening during the create (the live \
+         strih-lx MULTIVIEW/Grading case) the sender must still be identified and its connection \
+         aborted, so the port is FREE right after the stop:\n{stdout}"
+    );
+    assert_eq!(
+        (get("ambiguous.created"), get("ambiguous.port")),
+        ("1".to_string(), "0".to_string()),
+        "issue 1363 part 3: two new sender-band listeners in one create must stay UNIDENTIFIED \
+         (port 0), never a guess:\n{stdout}"
+    );
+    assert!(
+        stdout.contains(
+            "PORTID-1363 - ndi-sender-port: could not identify the TCP port of NDI sender \
+             'ambiguous' (more than one new listener"
+        ),
+        "issue 1363 part 3: an unidentified sender logs its OWN `PORTID-1363` label naming the \
+         reason:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("WARN-1363"),
+        "issue 1363 part 3: nothing in the sender-port module may log `WARN-1363` (reserved for \
+         the :5961 reserve):\n{stdout}"
+    );
+    assert!(
+        stdout.contains("1 reset at once"),
+        "issue 1363 part 3: the abort must DISCONNECT the connection at once (AF_UNSPEC connect = \
+         RST now): libndi shuts the socket down gracefully before it closes it, so SO_LINGER 0 on \
+         its own is too late:\n{stdout}"
     );
     assert!(
         stdout.contains("1 connection(s) set to close with RST"),
