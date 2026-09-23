@@ -914,3 +914,21 @@ fn setup_strih_consumes_the_same_baseline() {
         "strih-obs-start.sh runs on the Xorg kiosk: no Wayland path, no PRIME-offload env"
     );
 }
+
+/// Live 23.9.2026 on strih-lx (26.04): step 6 had just held the kernel at 7.0.0-31, and the unpinned
+/// `apt-get install linux-lowlatency-hwe-26.04` picked the NEWER meta 7.0.0-34, which depends on
+/// `linux-image-generic-hwe-26.04 (= 7.0.0-34)` — apt refused ("Reached two conflicting assignments")
+/// and the conversion failed. The meta is config-only by design (never a new image): install it at
+/// the SAME version as the installed generic-hwe kernel meta.
+#[test]
+fn lowlatency_meta_is_pinned_to_the_installed_generic_hwe_version() {
+    let f = baseline_fn("obs_box_lowlatency_kernel");
+    assert!(
+        f.contains("dpkg-query -W -f='${Version}' \"linux-image-generic-hwe-${SERIES}\""),
+        "must read the installed generic-hwe version: {f}"
+    );
+    assert!(
+        f.contains("\"linux-lowlatency-hwe-${SERIES}=${_ll_ver}\""),
+        "must install the lowlatency meta pinned to that version: {f}"
+    );
+}
