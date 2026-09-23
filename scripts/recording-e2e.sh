@@ -255,6 +255,13 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # restores at once, bounding the loop's wall-clock by the slowest single box.
 # shellcheck source=scripts/lib/cambox-parallel-restore.sh
 . "$HERE/lib/cambox-parallel-restore.sh"
+# #1203: the post-restore receiver-cadence verify/heal lib. After the cleanup parallel-restore
+# group bounces every active sender, 2-3 strih NDI receivers can re-attach at HALF cadence (a
+# per-connection DistroAV state); this lib reads each input's recv-timing and drives the bounded,
+# report-only idle-restore/sender-restart cure. Sourced here; invoked ONCE in cleanup() right after
+# the parallel-restore group (the additive #675-pattern call site below).
+# shellcheck source=scripts/lib/ndi-cadence-heal.sh
+. "$HERE/lib/ndi-cadence-heal.sh"
 # #744: reset a capture card's saturation/contrast to ITS OWN --list-ctrls default (never a
 # foreign literal calibrated for a different card, and never a hardcoded /dev/videoN -- USB
 # grabber nodes renumber, #728). Used by the [0/8] preflight and the [2/8]/[2b/8] deploy sites
@@ -2043,6 +2050,18 @@ fi"
   # not — WARN-only, so a restart-left-unlocked leg never poisons the NEXT run's [0/8] preflight.
   # Bounded (attempts=1 per box) + guarded so it can never abort this trap; see the function above.
   cleanup_mv_reverify_active_boxes
+  # #1203 item (b): post-restore receiver-cadence verify/heal. The cleanup parallel-restore group
+  # above bounced every active sender; 2-3 strih NDI receivers can re-attach at HALF the sender
+  # cadence (recv-timing #797 cap_avg ~33ms at a 60fps sender) even while locked=1 and the cambox
+  # emits 60/60 -- a per-connection DistroAV state the #759 re-lock nudge above does not clear.
+  # Runs AFTER that re-lock so each leg is locked before its cadence is read; reads every strih NDI
+  # input's cadence (reusing the #797 tap parser via ndi_halving_decision.py, never a 2nd parser)
+  # and drives the bounded, report-only two-arm cure (idle-restore -> sender-restart -> escalate),
+  # writing the ndi-cadence-<RUN_ID>.json telemetry into this run's OUTDIR. The orchestrator ALWAYS
+  # exits 0 (the #1133 bare-statement class); the trailing `|| true` is belt-and-suspenders so this
+  # verify can never abort the cleanup trap.
+  NDI_CADENCE_RUN_ID="$RUN_ID" NDI_CADENCE_RUN_DIR="$OUTDIR" \
+    ndi_cadence_verify_and_heal "$STRIH" || true
   # The cam devices are now freed regardless of what the OBS restore does. #328: bound every OBS
   # call by `timeout` so a hung obs-websocket op (#328) can't block the trap even if it runs.
   # #649: StopRecord itself already ran, FIRST, at the top of this function (harness-started boxes
