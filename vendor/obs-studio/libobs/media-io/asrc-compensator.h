@@ -225,8 +225,8 @@ extern "C" {
 #define ASRC_LEVEL_EMA_TAU_S 10.0
 
 /* camera-box #1355: the ABSOLUTE buffer-LEVEL setpoint, in ms of mix-buffer depth EXCLUDING the
- * source's deliberate placement offset (its audio sync offset + any #1303 genlock audio hold, passed
- * in via asrc_compensator_set_level_offset_ms()). On capture (first lock, and every relock after a
+ * source's deliberate placement offset (its audio sync offset, the one the buffered samples were
+ * placed with, passed in via asrc_compensator_set_level_offset_ms()). On capture (first lock, and every relock after a
  * flush) the setpoint becomes ASRC_LEVEL_TARGET_MS + level_offset_ms instead of whatever depth the
  * mixer happened to have. Before, each stream-OBS launch froze a random `mbc` depth (captured
  * 58.9 ... 126.1 ms over 10 launches, 18.-23.9.) and the loop then HELD it, so every launch had its
@@ -235,16 +235,21 @@ extern "C" {
  * stream-box data: OBS's own audio buffering is 64 or 85 ms per launch (random), the offset-free depth
  * sat at ~70-102 ms; 100 ms is above the 85 ms buffering maximum with a margin wider than the
  * +/-8-10 ms 1-s level scatter, inside the observed 64-126 ms band, and near the level median
- * (~91 ms). A target the mixer cannot reach is bounded by ASRC_LEVEL_TARGET_UNREACHABLE_WINDOWS.
- * Mirror of src/asrc_bench.rs LEVEL_TARGET_MS -- keep numerically identical. */
+ * (~91 ms). A target the mixer cannot reach is bounded by ASRC_LEVEL_TARGET_UNREACHABLE_WINDOWS. Only
+ * for a source whose depth has that direct-timestamp base: a genlock_fifo source (depth = the #1303
+ * video-paired hold + a ~0-25 ms transport base; stream's `fallback repro` sat at 967/1001 ms under a
+ * ~976 ms hold) and a MONITOR_ONLY source (never feeds the mix, depth 0) keep the pre-#1355
+ * depth-at-lock capture (asrc_compensator_set_level_absolute()). Mirror of src/asrc_bench.rs
+ * LEVEL_TARGET_MS -- keep numerically identical. */
 #define ASRC_LEVEL_TARGET_MS 100.0
 
 /* camera-box #1355: how many CONSECUTIVE accepted windows the SMOOTHED level error
  * (|level_err_ema_ms|) may stay at or above ASRC_LEVEL_RESTORE_ARM_MS (the restore's own exit band)
- * before the setpoint is declared UNREACHABLE. At that point the loop FALLS BACK to the live depth
- * (the pre-#1355 capture for this lock): the target becomes the current buffered_ms, the restore
- * burst stops and the P error is zeroed, so the restore burst and the P term can never push against a
- * buffer that will not move. A telemetry counter + a one-shot pending flag are raised, and
+ * before the setpoint is declared UNREACHABLE. At that point the loop FALLS BACK to the SMOOTHED live
+ * depth (target + level_err_ema_ms, never one noisy reading): the restore burst stops and the P error
+ * is zeroed, so the restore burst and the P term can never push against a buffer that will not move.
+ * At most ONE fallback per capture (a steady residual the P+I terms hold at >= 5 ms would otherwise
+ * re-trip it every 40 min and ratchet the target away). A telemetry counter + a one-shot pending flag are raised, and
  * obs-source.c logs it LOUDLY (LOG_WARNING). The EMA (not the raw level) is counted so the +/-10 ms
  * tick noise cannot reset it. 2400 windows (40 min) is ~2x the slowest legitimate walk the bench
  * measures: a 98 ms walk from the lowest depth ever logged (26 ms) to a +24 ms-offset target (124 ms)
@@ -371,8 +376,8 @@ struct asrc_compensator {
 	 * RealtimeAsrcCompensator::level_err_ema_seeded. */
 	bool level_err_ema_seeded;
 	/* camera-box #1355: the source's deliberate placement offset, in ms, that is ALREADY reflected in
-	 * the buffered samples (obs-source.c passes last_sync_offset / 1e6 + genlock_audio_delay_ms every
-	 * callback via asrc_compensator_set_level_offset_ms()). The capture sets level_target_ms =
+	 * the buffered samples (obs-source.c passes last_sync_offset / 1e6 every callback via
+	 * asrc_compensator_set_level_offset_ms()). The capture sets level_target_ms =
 	 * ASRC_LEVEL_TARGET_MS + level_offset_ms. NOT reset by a flush -- it is caller state, not servo
 	 * state. Mirror of src/asrc_bench.rs RealtimeAsrcCompensator::level_offset_ms. */
 	double level_offset_ms;
@@ -393,6 +398,18 @@ struct asrc_compensator {
 	 * it (same audio thread, single writer). Mirror of src/asrc_bench.rs
 	 * RealtimeAsrcCompensator::level_fallback_pending. */
 	bool level_fallback_pending;
+	/* camera-box #1355: whether this capture already fell back once -- at most ONE fallback per
+	 * capture (cleared by a flush and by a re-capture forced through
+	 * asrc_compensator_set_level_absolute()). Mirror of src/asrc_bench.rs
+	 * RealtimeAsrcCompensator::level_fallback_done. */
+	bool level_fallback_done;
+	/* camera-box #1355: whether the capture uses the ABSOLUTE target (ASRC_LEVEL_TARGET_MS +
+	 * level_offset_ms, true after init) or the pre-#1355 depth at lock (false). obs-source.c sets it
+	 * every callback: false for a genlock_fifo source (its depth is the #1303 video-paired hold plus a
+	 * ~0-25 ms transport base, not the ~90 ms `mbc` base the 100 ms target is calibrated on) and for a
+	 * MONITOR_ONLY source (never feeds the mix buffer, depth 0). Mirror of src/asrc_bench.rs
+	 * RealtimeAsrcCompensator::level_absolute. */
+	bool level_absolute;
 };
 
 /* Reset a servo to its just-constructed state: 0 ppm estimated/applied (assume
@@ -477,13 +494,20 @@ EXPORT double asrc_compensator_get_outer_bias_ppm(const struct asrc_compensator 
 EXPORT void asrc_compensator_shift_level_target(struct asrc_compensator *c, double delta_ms);
 
 /* camera-box #1355: tell the servo the source's deliberate placement offset, in ms, that the
- * buffered samples ALREADY carry (obs-source.c: last_sync_offset / 1e6 + genlock_audio_delay_ms,
- * every callback). A pure store: it never moves an already-captured setpoint (a later deliberate
+ * buffered samples ALREADY carry (obs-source.c: last_sync_offset / 1e6, every callback). A pure store: it never moves an already-captured setpoint (a later deliberate
  * sync-offset change still goes through asrc_compensator_shift_level_target(), so the target stays
  * ASRC_LEVEL_TARGET_MS + offset 1:1). It only decides the NEXT capture: level_target_ms =
  * ASRC_LEVEL_TARGET_MS + level_offset_ms. Mirror of src/asrc_bench.rs
  * RealtimeAsrcCompensator::set_level_offset_ms. */
 EXPORT void asrc_compensator_set_level_offset_ms(struct asrc_compensator *c, double offset_ms);
+
+/* camera-box #1355: choose the capture rule -- ABSOLUTE (ASRC_LEVEL_TARGET_MS + level_offset_ms) or
+ * the pre-#1355 depth at lock. obs-source.c passes !genlock_fifo && monitoring_type !=
+ * OBS_MONITORING_TYPE_MONITOR_ONLY every callback. A CHANGE while captured drops the capture (like a
+ * flush for the level loop only -- the rate regression, its lock and the integral are kept), so the
+ * next accepted window re-captures under the new rule. Mirror of src/asrc_bench.rs
+ * RealtimeAsrcCompensator::set_level_absolute. */
+EXPORT void asrc_compensator_set_level_absolute(struct asrc_compensator *c, bool absolute);
 
 #ifdef __cplusplus
 }

@@ -137,9 +137,10 @@ in BEFORE both the level integral and the #1325 negation — re-derive its sign 
 
 Before #1355, the `asrc: source 'mbc' … level=… target=…` line's `target=` was whatever depth the
 mixer had at the first lock (58.9 … 126.1 ms across 10 launches), and every launch held its own A/V
-level. On a #1355 build, `target=` is `ASRC_LEVEL_TARGET_MS` (100 ms) + the source's placement
-offset, where the offset is the `mbc` sync offset (+24 ms on 23.9. ⇒ `target=124.0`) plus a genlock
-audio hold on a `genlock_fifo` source. It must read IDENTICAL across relaunches with the same offset.
+level. On a #1355 build, `target=` is `ASRC_LEVEL_TARGET_MS` (100 ms) + the source's sync offset
+(+24 ms on 23.9. ⇒ `mbc` `target=124.0`). It must read IDENTICAL across relaunches with the same
+offset. This holds only for a mixed, non-genlock source: a `genlock_fifo` source (e.g. `fallback
+repro`, depth ≈ its ~976 ms hold) and a MONITOR_ONLY source keep the old depth-at-lock `target=`.
 After a launch, `level=` walks to it in minutes (P term + restore; a 30 ms walk ≈ 10 min) and then
 holds it within a few ms.
 

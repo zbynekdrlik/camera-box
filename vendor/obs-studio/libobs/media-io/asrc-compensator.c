@@ -53,8 +53,10 @@ static void asrc_regression_flush(struct asrc_compensator *c)
 	c->level_err_ema_ms = 0.0;
 	c->level_err_ema_seeded = false;
 	/* camera-box #1355: a flush re-captures the (absolute) setpoint, so the unreachable-walk count
-	 * restarts with it. level_offset_ms is caller state and survives. */
+	 * and the one-fallback-per-capture latch restart with it. level_offset_ms / level_absolute are
+	 * caller state and survive. */
 	c->level_unconverged_windows = 0;
+	c->level_fallback_done = false;
 }
 
 void asrc_compensator_init(struct asrc_compensator *c)
@@ -81,6 +83,8 @@ void asrc_compensator_init(struct asrc_compensator *c)
 	c->level_fallback_count = 0; /* camera-box #1355 */
 	c->level_fallback_from_ms = 0.0; /* camera-box #1355 */
 	c->level_fallback_pending = false; /* camera-box #1355 */
+	c->level_fallback_done = false; /* camera-box #1355 */
+	c->level_absolute = true; /* camera-box #1355 */
 	asrc_regression_flush(c); /* camera-box #1084/#1335: empty buffer, 0 cumulatives, 0 integral, unlocked */
 }
 
@@ -252,7 +256,8 @@ double asrc_compensator_compensate(struct asrc_compensator *c, double raw_advanc
 						 * happened to have at lock (that froze a random per-launch A/V level).
 						 * Re-captured (to the same absolute value) after every flush/relock; the P term
 						 * plus the restore burst the sustained-error arm fires walk the buffer there. */
-						c->level_target_ms = ASRC_LEVEL_TARGET_MS + c->level_offset_ms;
+						c->level_target_ms = c->level_absolute ? ASRC_LEVEL_TARGET_MS + c->level_offset_ms
+										       : buffered_ms;
 						c->level_captured = true;
 					}
 					/* camera-box #1335 follow-up 5: SMOOTH the per-window level error with an EMA (tau
@@ -313,19 +318,23 @@ double asrc_compensator_compensate(struct asrc_compensator *c, double raw_advanc
 					 * that cannot reach it (a buffer pinned by OBS's own buffering, a source whose
 					 * placement does not follow the stretch) would keep the restore burst and the P
 					 * term pushing forever. Count consecutive accepted windows whose SMOOTHED error
-					 * stays outside the restore's exit band; at the bound FALL BACK to the live depth
-					 * (the pre-#1355 capture for this lock): stop the restore, zero the P error, count
-					 * it and raise the one-shot flag obs-source.c logs LOUDLY. Mirror of
-					 * src/asrc_bench.rs compensate_with_level. */
-					if (fabs(c->level_err_ema_ms) >= ASRC_LEVEL_RESTORE_ARM_MS) {
+					 * stays outside the restore's exit band; at the bound FALL BACK to the SMOOTHED live
+					 * depth (target + ema, not one noisy reading): stop the restore, zero the P error,
+					 * count it and raise the one-shot flag obs-source.c logs LOUDLY. At most ONE fallback
+					 * per capture (level_fallback_done, cleared only by a re-capture): a steady residual
+					 * the P+I terms hold at >= 5 ms would otherwise re-trip the bound every 40 min and
+					 * ratchet the target away. Mirror of src/asrc_bench.rs compensate_with_level. */
+					if (!c->level_fallback_done && fabs(c->level_err_ema_ms) >= ASRC_LEVEL_RESTORE_ARM_MS) {
 						if (++c->level_unconverged_windows >= ASRC_LEVEL_TARGET_UNREACHABLE_WINDOWS) {
 							c->level_fallback_from_ms = c->level_target_ms;
-							c->level_target_ms = buffered_ms;
+							c->level_target_ms += c->level_err_ema_ms;
+							c->level_fallback_done = true;
 							c->level_restore = false;
 							c->level_err_windows = 0;
 							c->level_err_ema_ms = 0.0;
 							c->level_unconverged_windows = 0;
-							c->level_fallback_count++;
+							if (c->level_fallback_count < UINT32_MAX)
+								c->level_fallback_count++;
 							c->level_fallback_pending = true;
 						}
 					} else {
@@ -477,4 +486,22 @@ void asrc_compensator_shift_level_target(struct asrc_compensator *c, double delt
 void asrc_compensator_set_level_offset_ms(struct asrc_compensator *c, double offset_ms)
 {
 	c->level_offset_ms = offset_ms;
+}
+
+/* camera-box #1355: choose the capture rule (ABSOLUTE target + offset, or the pre-#1355 depth at
+ * lock). A change while captured drops the capture for the level loop only -- the rate regression,
+ * its lock and the integral are kept -- so the next accepted window re-captures under the new rule.
+ * Mirror of src/asrc_bench.rs RealtimeAsrcCompensator::set_level_absolute -- keep identical. */
+void asrc_compensator_set_level_absolute(struct asrc_compensator *c, bool absolute)
+{
+	if (absolute != c->level_absolute) {
+		c->level_absolute = absolute;
+		c->level_captured = false;
+		c->level_restore = false;
+		c->level_err_windows = 0;
+		c->level_err_ema_ms = 0.0;
+		c->level_err_ema_seeded = false;
+		c->level_unconverged_windows = 0;
+		c->level_fallback_done = false;
+	}
 }

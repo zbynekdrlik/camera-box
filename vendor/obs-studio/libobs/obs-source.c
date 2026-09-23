@@ -1742,6 +1742,7 @@ static void source_output_audio_data(obs_source_t *source, const struct audio_da
 	 * obs_source_set_genlock_latency_ms), so the effective value is the field itself; the >0
 	 * guard is a defensive no-op-delay default. The store feeds the audit line's audio facet
 	 * (genlock_fill_stats). */
+	const uint32_t prev_genlock_audio_delay_ms = source->genlock_audio_delay_ms;
 	if (source->genlock_fifo && source->genlock_latency_ms > 0) {
 		in.timestamp += (int64_t)genlock_audio_present_delay_ns(source->genlock_latency_ms);
 		source->genlock_audio_delay_ms = source->genlock_latency_ms;
@@ -1751,6 +1752,14 @@ static void source_output_audio_data(obs_source_t *source, const struct audio_da
 		 * runtime never reports a STALE audio_delay_ms on the audit facet. */
 		source->genlock_audio_delay_ms = 0;
 	}
+	/* camera-box #1355: a CHANGE of the applied audio hold (a pin write, genlock toggled) moves this
+	 * source's placement -- and therefore its ASRC mix-buffer depth -- by exactly the delta, like a
+	 * sync-offset change. Move the captured level setpoint by the same delta (the #1335 shift below is
+	 * the sync-offset twin) so the level loop does not walk the depth back and undo the hold (which
+	 * would break the #1303 A/V pairing until the next flush). No-op until captured. */
+	if (source->genlock_audio_delay_ms != prev_genlock_audio_delay_ms)
+		asrc_compensator_shift_level_target(&source->asrc, (double)source->genlock_audio_delay_ms -
+									   (double)prev_genlock_audio_delay_ms);
 
 	source->next_audio_sys_ts_min = source->next_audio_ts_min + source->timing_adjust;
 
@@ -4304,12 +4313,15 @@ static inline void asrc_process_audio(obs_source_t *source, uint32_t frames, uin
 	/* camera-box #1355: the level setpoint is ABSOLUTE (ASRC_LEVEL_TARGET_MS) plus this source's
 	 * deliberate placement offset -- the one the samples ALREADY in the buffer were placed with:
 	 * last_sync_offset (source_output_audio_data's in.timestamp += sync_offset, recorded there after
-	 * the placement; the pending sync_offset reaches the setpoint through the shift below it) plus the
-	 * #1303 genlock audio hold actually applied (genlock_audio_delay_ms, 0 for a non-genlock source).
-	 * A pure store, read only at the next capture. Audio thread, same writer as the rest of
-	 * source->asrc. */
-	asrc_compensator_set_level_offset_ms(&source->asrc, (double)source->last_sync_offset / 1e6 +
-								   (double)source->genlock_audio_delay_ms);
+	 * the placement; a pending sync_offset change reaches the setpoint through the shift there). Only
+	 * for a source whose depth has the direct-timestamp base the 100 ms target is calibrated on: a
+	 * genlock_fifo source (depth = the #1303 video-paired hold + a ~0-25 ms transport base) and a
+	 * MONITOR_ONLY source (never placed into the mix buffer, depth 0) keep the pre-#1355 depth-at-lock
+	 * capture. Pure stores, read only at the next capture (a rule CHANGE drops the capture). Audio
+	 * thread, same writer as the rest of source->asrc. */
+	asrc_compensator_set_level_absolute(&source->asrc, !source->genlock_fifo && source->monitoring_type !=
+									       OBS_MONITORING_TYPE_MONITOR_ONLY);
+	asrc_compensator_set_level_offset_ms(&source->asrc, (double)source->last_sync_offset / 1e6);
 	asrc_compensator_compensate(&source->asrc, raw_advance_s, master_block_s, buffered_ms, &applied_ppm);
 	/* camera-box #1355: an ABSOLUTE setpoint the mixer cannot reach is bounded inside the
 	 * compensator (ASRC_LEVEL_TARGET_UNREACHABLE_WINDOWS of smoothed error outside the restore's exit
