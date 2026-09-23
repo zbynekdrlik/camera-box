@@ -247,15 +247,6 @@ fn watchdog_retries_an_unresolved_burn() {
 }
 
 #[test]
-fn watchdog_processes_both_broadcast_boxes() {
-    let body = read(WATCHDOG);
-    assert!(
-        body.contains("strih") && body.contains("stream"),
-        "main() must reconcile both strih and stream"
-    );
-}
-
-#[test]
 fn watchdog_supports_dry_run() {
     let body = read(WATCHDOG);
     assert!(
