@@ -2,9 +2,13 @@
 //!
 //! Every cambox previews the strih box's `interkom` NDI output on its HDMI monitor (the #528
 //! fleet-wide default — no per-box config, no env knob). That source used to be one baked box
-//! name (`STRIH-SNV (interkom)`), and `NdiReceiver::connect` finds sources by name, so every strih
-//! hardware swap (Windows STRIH-SNV -> Linux STRIH-LX on 20.9.2026, strih PP at the Poprad venue)
-//! turned every cameraman monitor black until a new binary shipped.
+//! name (`STRIH-SNV (interkom)`), and `NdiReceiver::connect` finds sources by name, so the strih
+//! hardware swap (Windows STRIH-SNV -> Linux STRIH-LX on 20.9.2026) turned every cameraman monitor
+//! black until a new binary shipped — and any future strih box (e.g. a `STRIH-PP`) would again.
+//!
+//! The preferred name is matched EXACTLY (an explicit `--display`/`[display]` value included —
+//! the old receiver matched a substring); a non-exact strih value still reaches the single
+//! `STRIH-<box> (interkom)` fallback, but only after the whole find window (30 s).
 //!
 //! The PURE decision lives here (no NDI, no I/O — Tier-0 unit-tested); the finder loop that feeds
 //! it the discovered names and connects to the chosen exact name is `crate::ndi::NdiReceiver::
@@ -82,6 +86,35 @@ pub fn pick_preview_source(resolution: &PreviewResolution, window_elapsed: bool)
         | PreviewResolution::Ambiguous(_)
         | PreviewResolution::NotFound => None,
     }
+}
+
+/// Journal level for a preview-source resolution line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PreviewLogLevel {
+    /// A source was picked (preferred or the single fallback).
+    Info,
+    /// The find window ended with nothing picked (ambiguous or not found).
+    Warn,
+}
+
+/// Should the display loop log this resolution NOW, and at which level? Only a FINAL decision is
+/// logged (a pick, or the end of the find window — never a mid-window 1 s finder pass), and only
+/// when it differs from `last_logged` (which persists across reconnects), so an unchanged state is
+/// never re-logged per retry.
+pub fn preview_log_level(
+    last_logged: Option<&PreviewResolution>,
+    resolution: &PreviewResolution,
+    picked: bool,
+    window_elapsed: bool,
+) -> Option<PreviewLogLevel> {
+    if !(picked || window_elapsed) || last_logged == Some(resolution) {
+        return None;
+    }
+    Some(if picked {
+        PreviewLogLevel::Info
+    } else {
+        PreviewLogLevel::Warn
+    })
 }
 
 /// The one journal line describing a resolution (logged once per change by the display loop).
@@ -224,6 +257,49 @@ mod tests {
         assert!(!is_strih_interkom("STRIH- (interkom)"));
         assert!(!is_strih_interkom("STRIH-LX(interkom)"));
         assert!(!is_strih_interkom(""));
+        // a parenthesised host part is not a strih box name:
+        assert!(!is_strih_interkom("STRIH-A (x) (interkom)"));
+        assert!(!is_strih_interkom("STRIH-A) (interkom)"));
+    }
+
+    #[test]
+    fn a_decision_is_logged_once_per_change_and_only_when_final() {
+        let preferred = PreviewResolution::Preferred("STRIH-LX (interkom)".to_string());
+        let fallback = PreviewResolution::Fallback("STRIH-PP (interkom)".to_string());
+        let none = PreviewResolution::NotFound;
+        // first pick is logged at INFO, a repeat of it (next reconnect) is not
+        assert_eq!(
+            preview_log_level(None, &preferred, true, false),
+            Some(PreviewLogLevel::Info)
+        );
+        assert_eq!(
+            preview_log_level(Some(&preferred), &preferred, true, false),
+            None
+        );
+        // a mid-window pass that did not pick is never logged (no per-second spam)
+        assert_eq!(preview_log_level(None, &fallback, false, false), None);
+        assert_eq!(preview_log_level(None, &none, false, false), None);
+        // the end of the window without a pick is logged at WARN, once
+        assert_eq!(
+            preview_log_level(None, &none, false, true),
+            Some(PreviewLogLevel::Warn)
+        );
+        assert_eq!(preview_log_level(Some(&none), &none, false, true), None);
+        // a change (not-found -> preferred appeared) is logged again
+        assert_eq!(
+            preview_log_level(Some(&none), &preferred, true, false),
+            Some(PreviewLogLevel::Info)
+        );
+        // a changed ambiguity set is a change too
+        let amb_a =
+            PreviewResolution::Ambiguous(names(&["STRIH-A (interkom)", "STRIH-B (interkom)"]));
+        let amb_b =
+            PreviewResolution::Ambiguous(names(&["STRIH-A (interkom)", "STRIH-C (interkom)"]));
+        assert_eq!(
+            preview_log_level(Some(&amb_a), &amb_b, false, true),
+            Some(PreviewLogLevel::Warn)
+        );
+        assert_eq!(preview_log_level(Some(&amb_b), &amb_b, false, true), None);
     }
 
     #[test]

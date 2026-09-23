@@ -1394,8 +1394,7 @@ impl NdiReceiver {
         Ok(Some(frame))
     }
 
-    /// Get source name
-    #[allow(dead_code)]
+    /// The exact name of the NDI source this receiver connected to.
     pub fn source_name(&self) -> &str {
         &self.source_name
     }

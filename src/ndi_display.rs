@@ -11,7 +11,8 @@ use std::sync::Arc;
 use crate::display::{any_connector_connected, FramebufferDisplay};
 use crate::ndi::NdiReceiver;
 use crate::preview_source::{
-    pick_preview_source, preview_log_line, resolve_preview_source, PreviewResolution,
+    pick_preview_source, preview_log_level, preview_log_line, resolve_preview_source,
+    PreviewLogLevel, PreviewResolution,
 };
 
 /// DRM sysfs class dir whose connector `status` files report monitor presence (#135).
@@ -23,8 +24,9 @@ const CONNECTOR_RECHECK_FRAMES: u64 = 30;
 
 /// NDI display configuration
 pub struct NdiDisplayConfig {
-    /// PREFERRED NDI source name (exact). When it is not on the LAN the display falls back to the
-    /// one discovered `STRIH-<box> (interkom)` output (#1362, `crate::preview_source`).
+    /// PREFERRED NDI source name, matched EXACTLY (no longer a substring). When it is not on the
+    /// LAN the display falls back to the one discovered `STRIH-<box> (interkom)` output, but only
+    /// after the whole find window (#1362, `crate::preview_source`).
     pub source_name: String,
     /// Framebuffer device path
     pub fb_device: String,
@@ -192,7 +194,7 @@ pub fn run_display_loop(config: NdiDisplayConfig, running: Arc<AtomicBool>) -> R
             "NDI display: connecting to preview source (preferred '{}')...",
             preferred
         );
-        let search_label = format!("'{preferred}' or the one STRIH-<box> (interkom) output");
+        let search_label = format!("{preferred} or the one STRIH-<box> (interkom) output");
         let mut receiver = match NdiReceiver::connect_with(
             config.find_timeout_secs,
             &search_label,
@@ -201,13 +203,16 @@ pub fn run_display_loop(config: NdiDisplayConfig, running: Arc<AtomicBool>) -> R
                 let pick = pick_preview_source(&resolution, window_elapsed);
                 // Log only a FINAL decision (a pick, or the end of the find window), and only
                 // when it differs from the last one logged — never once per 1 s finder pass.
-                let decided = pick.is_some() || window_elapsed;
-                if decided && last_resolution.as_ref() != Some(&resolution) {
+                if let Some(level) = preview_log_level(
+                    last_resolution.as_ref(),
+                    &resolution,
+                    pick.is_some(),
+                    window_elapsed,
+                ) {
                     let line = preview_log_line(&resolution, preferred);
-                    if pick.is_some() {
-                        tracing::info!("{}", line);
-                    } else {
-                        tracing::warn!("{}", line);
+                    match level {
+                        PreviewLogLevel::Info => tracing::info!("{}", line),
+                        PreviewLogLevel::Warn => tracing::warn!("{}", line),
                     }
                     last_resolution = Some(resolution);
                 }
