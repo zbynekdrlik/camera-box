@@ -26,6 +26,8 @@
 # strih_cef_so_password_store_state SO_PATH -> prints `carries` when the file contains the
 # `password-store` switch literal, `missing` when it is readable but does not, `absent` when the
 # path is empty / not a readable regular file. Always rc 0 (safe as a bare assignment under set -e).
+# Limitation: the switch NAME is graded, not its value (a C string literal `basic` is not reliably
+# adjacent in .rodata); the vendored source anchor (tests/cef_password_store_1359.rs) pins the value.
 strih_cef_so_password_store_state() {
   local so="${1-}"
   if [ -z "$so" ] || [ ! -f "$so" ] || [ ! -r "$so" ]; then

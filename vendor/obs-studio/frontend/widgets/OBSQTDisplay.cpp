@@ -73,19 +73,20 @@ static bool QTToGSWindow(QWindow *window, gs_window &gswindow)
 
 OBSQTDisplay::OBSQTDisplay(QWidget *parent, Qt::WindowFlags flags) : QWidget(parent, flags)
 {
+	/* camera-box #1358: coalesce the resize burst of an interactive window drag
+	 * into ONE display resize once the size has been stable for 150 ms. Created
+	 * before WA_NativeWindow makes the native window, so resizeEvent always has it. */
+	resizeDebounce = new QTimer(this);
+	resizeDebounce->setSingleShot(true);
+	resizeDebounce->setInterval(150);
+	connect(resizeDebounce, &QTimer::timeout, this, &OBSQTDisplay::ApplyDisplayResize);
+
 	setAttribute(Qt::WA_PaintOnScreen);
 	setAttribute(Qt::WA_StaticContents);
 	setAttribute(Qt::WA_NoSystemBackground);
 	setAttribute(Qt::WA_OpaquePaintEvent);
 	setAttribute(Qt::WA_DontCreateNativeAncestors);
 	setAttribute(Qt::WA_NativeWindow);
-
-	/* camera-box #1358: coalesce the resize burst of an interactive window drag
-	 * into ONE display resize once the size has been stable for 150 ms. */
-	resizeDebounce = new QTimer(this);
-	resizeDebounce->setSingleShot(true);
-	resizeDebounce->setInterval(150);
-	connect(resizeDebounce, &QTimer::timeout, this, &OBSQTDisplay::ApplyDisplayResize);
 
 	auto windowVisible = [this](bool visible) {
 		if (!visible) {
@@ -221,6 +222,12 @@ void OBSQTDisplay::resizeEvent(QResizeEvent *event)
 
 void OBSQTDisplay::ApplyDisplayResize()
 {
+	/* A pending apply that fires after DestroyDisplay() leaves the torn-down
+	 * display and the preview/program layout alone. */
+	if (destroying) {
+		return;
+	}
+
 	if (isVisible() && display) {
 		QSize size = GetPixelSize(this);
 		obs_display_resize(display, size.width(), size.height());

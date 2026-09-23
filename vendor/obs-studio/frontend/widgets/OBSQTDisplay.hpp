@@ -2,9 +2,8 @@
 
 #include <obs.hpp>
 
+#include <QTimer>
 #include <QWidget>
-
-class QTimer;
 
 #define GREY_COLOR_BACKGROUND 0xFF4C4C4C
 
@@ -50,6 +49,9 @@ public:
 	void CreateDisplay();
 	void DestroyDisplay()
 	{
+		if (resizeDebounce) {
+			resizeDebounce->stop();
+		}
 		display = nullptr;
 		destroying = true;
 	};

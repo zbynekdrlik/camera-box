@@ -340,9 +340,9 @@ if [ -f "$FLAGS_FILE" ] && strih_lx_browser_bundle_required "$(cat "$FLAGS_FILE"
   CEF_VERDICT_V="$(strih_cef_password_store_verdict "$CEF_SO_STATE_V" <<<"$CEF_PAGES_V" || true)"
   case "$CEF_VERDICT_V" in
     ok-live)
-      ok "(cef-keyring) a running obs-browser-page carries --password-store=basic -- the OBS CEF never asks the GNOME keyring (no unlock dialog after an auto-login reboot)" ;;
+      ok "(cef-keyring) a running obs-browser-page argv carries --password-store=basic (behaviour proof = the two-reboot acceptance: no keyring dialog after an auto-login reboot)" ;;
     ok-built)
-      ok "(cef-keyring) ${CEF_SO_V} carries the password-store=basic switch (applied in-process; no running obs-browser-page shows it) -- no keyring unlock dialog after an auto-login reboot" ;;
+      ok "(cef-keyring) ${CEF_SO_V} carries the compiled-in password-store switch (applied in-process; no running obs-browser-page argv shows it; behaviour proof = the two-reboot acceptance)" ;;
     missing)
       note "(cef-keyring) ${CEF_SO_V} lacks the password-store=basic switch -- the deployed bundle predates issue 1359; the OBS CEF can raise the GNOME keyring unlock dialog after a reboot (deploy the current strih bundle)" ;;
     *)
