@@ -201,19 +201,42 @@ pub fn idle_wait_ms(dequeue_ms: f64, stagger_slept_ms: f64) -> f64 {
     dequeue_ms + stagger_slept_ms
 }
 
+/// The fraction of a capture interval the stagger sleep must stay below for the [`idle_wait_ms`]
+/// add-back to stay sound. It mirrors `capture_stall::BUFFERED_DEQUEUE_FRACTION`; `lib.rs` pins the
+/// two equal at compile time.
+pub const ADDBACK_SOUND_FRACTION: f64 = 0.5;
+
+/// A window WARNs on skips only when at least this percentage of its emitted frames skipped the
+/// stagger. An occasional skip is normal: a bursty grabber hands over back-to-back frames even
+/// when the loop has plenty of margin.
+pub const SKIP_WARN_PERCENT: u64 = 10;
+
 /// Per-5 s-window stagger accounting, drained by the capture loop's routine report.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct StaggerWindow {
-    /// Emitted iterations that slept for their stagger.
+    /// Emitted iterations that actually slept for their stagger.
     pub slept: u64,
+    /// Emitted iterations whose work before the send already ate the whole offset (no sleep).
+    pub past_offset: u64,
     /// Emitted iterations that skipped the stagger because the frame was already backlogged.
     pub skipped_backlogged: u64,
     /// The worst emitted iteration's work (callback time minus the stagger sleep), in ms.
     pub max_work_ms: f64,
+    /// The worst oversleep (measured sleep minus the requested sleep), in ms.
+    pub max_oversleep_ms: f64,
 }
 
 impl StaggerWindow {
-    pub fn note_slept(&mut self) {
+    /// Record one real sleep: the requested and the measured duration (ms). The oversleep is what
+    /// the scheduler added; a non-finite reading is ignored for the oversleep.
+    pub fn note_slept(&mut self, requested_ms: f64, actual_ms: f64) {
+        // #1242 round-3 RED stub: no oversleep tracking yet.
+        let _ = (requested_ms, actual_ms);
+        self.slept = self.slept.saturating_add(1);
+    }
+
+    pub fn note_past_offset(&mut self) {
+        // #1242 round-3 RED stub: counted as a sleep, like the pre-review wiring.
         self.slept = self.slept.saturating_add(1);
     }
 
@@ -234,32 +257,53 @@ impl StaggerWindow {
     }
 }
 
-/// The 5 s summary line for a drained window, and whether it is a WARN. It WARNs when any frame
-/// skipped its stagger (the loop was behind) or when the worst frame's work plus the offset
-/// reached a full capture interval (no margin left). `capture_interval_ms <= 0` never WARNs on the
-/// budget term.
+/// The 5 s summary line for a drained window, and whether it is a WARN. It WARNs on:
+///
+/// - `OVER BUDGET`: the worst frame's work plus the offset reached a full capture interval;
+/// - `OVERSLEEP`: the offset plus the worst oversleep reached [`ADDBACK_SOUND_FRACTION`] of a
+///   capture interval, so the [`idle_wait_ms`] add-back may misread a buffered frame;
+/// - `MANY SKIPS`: at least [`SKIP_WARN_PERCENT`] % of the emitted frames skipped the stagger.
+///
+/// `capture_interval_ms <= 0` never WARNs on the two interval terms.
 pub fn window_summary(
     w: &StaggerWindow,
     offset_us: u64,
     capture_interval_ms: f64,
 ) -> (String, bool) {
     let offset_ms = offset_us as f64 / 1000.0;
-    let over_budget = capture_interval_ms > 0.0 && w.max_work_ms + offset_ms >= capture_interval_ms;
-    let warn = w.skipped_backlogged > 0 || over_budget;
+    let known = capture_interval_ms > 0.0;
+    let over_budget = known && w.max_work_ms + offset_ms >= capture_interval_ms;
+    let oversleep =
+        known && offset_ms + w.max_oversleep_ms >= capture_interval_ms * ADDBACK_SOUND_FRACTION;
+    let total = w
+        .slept
+        .saturating_add(w.past_offset)
+        .saturating_add(w.skipped_backlogged);
+    let many_skips = w.skipped_backlogged > 0
+        && w.skipped_backlogged.saturating_mul(100) >= total.saturating_mul(SKIP_WARN_PERCENT);
+    let mut flags = String::new();
+    if over_budget {
+        flags.push_str(" — OVER BUDGET: the capture loop has no margin left");
+    }
+    if oversleep {
+        flags.push_str(" — OVERSLEEP: offset + oversleep reached half a capture interval");
+    }
+    if many_skips {
+        flags.push_str(" — MANY SKIPS: these frames were not staggered");
+    }
     let line = format!(
-        "#1242 send stagger: offset={offset_us} us, {} slept / {} skipped (frame already backlogged) this window, max per-frame work {:.1} ms + offset {:.1} ms vs capture interval {:.1} ms{}",
+        "#1242 send stagger: offset={offset_us} us, {} slept / {} past the offset / {} skipped (frame already backlogged) this window, max per-frame work {:.1} ms + offset {:.1} ms vs capture interval {:.1} ms, max oversleep {:.2} ms{flags}",
         w.slept,
+        w.past_offset,
         w.skipped_backlogged,
         w.max_work_ms,
         offset_ms,
         capture_interval_ms,
-        if over_budget {
-            " — OVER BUDGET: the capture loop has no margin left"
-        } else {
-            ""
-        }
+        w.max_oversleep_ms,
     );
-    (line, warn)
+    // #1242 round-3 RED stub: the pre-review rule (any skip WARNs, oversleep ignored).
+    let _ = (oversleep, many_skips);
+    (line, over_budget || w.skipped_backlogged > 0)
 }
 
 #[cfg(test)]
@@ -471,8 +515,10 @@ mod tests {
     #[test]
     fn window_counts_and_drains_1242() {
         let mut w = StaggerWindow::default();
-        w.note_slept();
-        w.note_slept();
+        w.note_slept(7.0, 7.05);
+        w.note_slept(6.0, 6.4);
+        w.note_slept(6.0, f64::NAN);
+        w.note_past_offset();
         w.note_skipped();
         w.note_work(3.0);
         w.note_work(5.5);
@@ -480,42 +526,46 @@ mod tests {
         w.note_work(f64::NAN);
         w.note_work(-1.0);
         let d = w.take();
-        assert_eq!(d.slept, 2);
+        assert_eq!(d.slept, 3);
+        assert_eq!(d.past_offset, 1);
         assert_eq!(d.skipped_backlogged, 1);
         assert_eq!(d.max_work_ms, 5.5);
+        assert!(
+            (d.max_oversleep_ms - 0.4).abs() < 1e-9,
+            "{}",
+            d.max_oversleep_ms
+        );
         assert_eq!(w, StaggerWindow::default());
     }
 
     #[test]
     fn window_summary_is_info_with_margin_left_1242() {
         let w = StaggerWindow {
-            slept: 300,
-            skipped_backlogged: 0,
+            slept: 290,
+            past_offset: 8,
+            skipped_backlogged: 2,
             max_work_ms: 3.1,
+            max_oversleep_ms: 0.08,
         };
         let (line, warn) = window_summary(&w, 7200, 16.667);
+        // Two skips out of 300 is a bursty grabber, not a budget problem: INFO.
         assert!(!warn, "{line}");
-        assert!(line.starts_with("#1242 send stagger: offset=7200 us, 300 slept / 0 skipped"));
+        assert!(line.starts_with(
+            "#1242 send stagger: offset=7200 us, 290 slept / 8 past the offset / 2 skipped"
+        ));
         assert!(
             line.contains("max per-frame work 3.1 ms + offset 7.2 ms vs capture interval 16.7 ms")
         );
-        assert!(!line.contains("OVER BUDGET"), "{line}");
+        assert!(line.contains("max oversleep 0.08 ms"), "{line}");
+        assert!(!line.contains(" — "), "{line}");
     }
 
     #[test]
-    fn window_summary_warns_on_skips_or_no_margin_1242() {
-        let skipped = StaggerWindow {
-            slept: 290,
-            skipped_backlogged: 10,
-            max_work_ms: 3.0,
-        };
-        let (_, warn) = window_summary(&skipped, 7200, 16.667);
-        assert!(warn);
-
+    fn window_summary_warns_on_no_margin_1242() {
         let tight = StaggerWindow {
             slept: 300,
-            skipped_backlogged: 0,
             max_work_ms: 9.5,
+            ..StaggerWindow::default()
         };
         let (line, warn) = window_summary(&tight, 7200, 16.667);
         assert!(warn);
@@ -524,5 +574,48 @@ mod tests {
         // No capture interval known → never a budget WARN.
         let (_, warn) = window_summary(&tight, 7200, 0.0);
         assert!(!warn);
+    }
+
+    #[test]
+    fn window_summary_warns_when_oversleep_breaks_the_add_back_1242() {
+        // 7.2 ms offset + 1.2 ms oversleep = 8.4 ms ≥ half of 16.667 ms.
+        let w = StaggerWindow {
+            slept: 300,
+            max_work_ms: 3.0,
+            max_oversleep_ms: 1.2,
+            ..StaggerWindow::default()
+        };
+        let (line, warn) = window_summary(&w, 7200, 16.667);
+        assert!(warn);
+        assert!(line.contains("OVERSLEEP"), "{line}");
+
+        // 0.9 ms oversleep leaves the sum at 8.1 ms: sound, INFO.
+        let ok = StaggerWindow {
+            max_oversleep_ms: 0.9,
+            ..w
+        };
+        let (line, warn) = window_summary(&ok, 7200, 16.667);
+        assert!(!warn, "{line}");
+    }
+
+    #[test]
+    fn window_summary_warns_only_on_many_skips_1242() {
+        let many = StaggerWindow {
+            slept: 270,
+            skipped_backlogged: 30,
+            max_work_ms: 3.0,
+            ..StaggerWindow::default()
+        };
+        let (line, warn) = window_summary(&many, 7200, 16.667);
+        assert!(warn);
+        assert!(line.contains("MANY SKIPS"), "{line}");
+
+        let few = StaggerWindow {
+            slept: 280,
+            skipped_backlogged: 20,
+            ..many
+        };
+        let (line, warn) = window_summary(&few, 7200, 16.667);
+        assert!(!warn, "{line}");
     }
 }

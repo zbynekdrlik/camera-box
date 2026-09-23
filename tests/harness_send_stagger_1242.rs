@@ -105,6 +105,25 @@ fn a_backlogged_frame_skips_the_sleep_1242() {
 }
 
 #[test]
+fn only_a_real_sleep_counts_as_slept_1242() {
+    let s = main_rs();
+    let sleep_call = unique(&s, "std::thread::sleep(remaining);");
+    let slept = unique(&s, "stagger_window.note_slept(");
+    let past = unique(&s, "stagger_window.note_past_offset();");
+    let skipped = unique(&s, "stagger_window.note_skipped();");
+    assert!(
+        sleep_call < slept && slept < past && past < skipped,
+        "a sleep is counted right after it happens (with its requested + measured ms); \
+         a frame whose work already ate the offset counts as past-offset, a backlogged one as skipped"
+    );
+    let call = &s[slept..(slept + 160).min(s.len())];
+    assert!(
+        call.contains("remaining") && call.contains("stagger_slept_now_ms"),
+        "note_slept() needs the requested and the measured sleep: {call}"
+    );
+}
+
+#[test]
 fn buffered_queue_signal_adds_the_stagger_back_1242() {
     let s = main_rs();
     let take = unique(
