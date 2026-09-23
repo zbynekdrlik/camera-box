@@ -8,7 +8,8 @@
 # scripts/lib/strih-log-read.sh -- issue 1360: the ONE platform-resolved reader of the strih OBS
 # log, shared by every helper that reads it: qr-align.sh (the floor-aware arrival audit),
 # genlock-settle.sh ([4j/8settle]), mv-reverify-escalate.sh (the received= tap, also read by
-# frozen-cam-received.sh's [4c/8] gate) and ndi-cadence-heal.sh (the cleanup cadence verify);
+# frozen-cam-received.sh's [4c/8] gate), ndi-cadence-heal.sh (the cleanup cadence verify) and
+# genlock-audit-snapshot.sh (the BEFORE/AFTER genlock-fifo audit tail, filtered locally);
 # the MV-fps pair (mv-fps-preflight.sh + mv-fps-alert-watchdog.sh) own a two-platform reader keyed
 # on an `os` token and take ONLY the platform decision from here (strih_log_os).
 #

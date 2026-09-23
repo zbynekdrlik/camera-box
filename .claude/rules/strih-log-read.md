@@ -8,6 +8,7 @@ paths:
   - "scripts/lib/frozen-cam-received.sh"
   - "scripts/lib/ndi-cadence-heal.sh"
   - "scripts/lib/mv-fps-preflight.sh"
+  - "scripts/lib/genlock-audit-snapshot.sh"
   - "scripts/mv-fps-alert-watchdog.sh"
   - "scripts/cadence-alert-watchdog.sh"
   - "scripts/frozen-input-alert-watchdog.sh"
@@ -88,14 +89,24 @@ imag), not only strih: boxes get re-imaged/re-addressed and a read-only audit mu
 a stale key. The strih row keeps the `obs64=` key
 (the status page's generic key=value renderer) even though the Linux process is `obs`.
 
-## Not yet migrated
+## A consumer that needs only SOME lines: raw tail + LOCAL filter (the audit snapshot, part 3)
 
-`scripts/lib/genlock-audit-snapshot.sh` (issue 1354 scope 3) carries its OWN inline `strih_platform`
-if-linux branch with a REMOTE grep and a logged SKIP on Windows — the per-helper-branch shape this
-reader replaces; migrating it needs a local grep over `strih_log_tail` (or a grep-capable reader op,
-added only when a consumer needs it). The remaining `APPDATA\obs-studio` hits under `scripts/` are
-NOT strih log readers (launch/deploy/self-heal programs that only ever target a Windows box, the
-on-box `bundle-state-server.py` with its own `--obs-log-dir`, and comments).
+`scripts/lib/genlock-audit-snapshot.sh` (the issue-1354 scope-3 BEFORE/AFTER producer) used to run
+its own ssh with a REMOTE `grep` over the whole log and SKIP a Windows strih. It now reads
+`strih_log_tail` of a RAW window (`GENLOCK_AUDIT_SNAPSHOT_READ_LINES`, default 3000) and filters
+LOCALLY: `tr -d '\r'` (a Windows PowerShell tail carries CRLF) → `LC_ALL=C grep -aF "genlock-fifo
+audit '"` → `tail -n GENLOCK_AUDIT_SNAPSHOT_TAIL` (400). No grep-capable reader op was added: a
+remote grep only saves bytes, and the raw window is sized from live data instead — strih-lx logs
+~370 lines/min with the audit line ≈26 % of it (every input once per ~5 s), so 3000 lines ≈ 8 min
+carry every input many times, and `genlock_audit_snapshot.py` parses only the LAST line per input.
+If a future consumer needs lines sparser than that (a once-per-run event), size the window from a
+live count first — `wc -l` plus a `grep -c` of the marker on the newest log is a read-only one-liner.
+Both knobs are numeric-clamped locally BEFORE the reader (the reader's own clamp would silently
+turn a bad READ_LINES into 400). A Windows strih is now snapshotted too (no more SKIP line).
+
+The remaining `APPDATA\obs-studio` hits under `scripts/` are NOT strih log readers
+(launch/deploy/self-heal programs that only ever target a Windows box, the on-box
+`bundle-state-server.py` with its own `--obs-log-dir`, and comments).
 
 The MV-fps pair's OWN Linux ssh carries the same `UserKnownHostsFile=/dev/null -o LogLevel=ERROR`
 options as this reader (a strih-lx read through them hits the same stale-key hazard).
