@@ -352,6 +352,17 @@ fn windows_genlock_workflows_gate_on_the_1363_linger_patch() {
                  pwsh source-patch gate (lock-step with this Rust guard)."
             );
         }
+        // Presence alone would pass on ONE surviving site; the gates must COUNT both sites.
+        for tok in [
+            "#ifdef __linux__ ndi_sender_abort_connections_before_destroy(o->ndi_sender_port, name);'))).Count -ne 2",
+            "#ifdef __linux__ ndi_sender_abort_connections_before_destroy(filter->ndi_sender_port,'))).Count -ne 2",
+        ] {
+            assert!(
+                w.contains(tok),
+                "{wf}: issue 1363 — the pwsh gate must COUNT both call sites of the abort token \
+                 (`[regex]::Matches(...).Count -ne 2`), not merely check presence: `{tok}`"
+            );
+        }
     }
 }
 
@@ -389,13 +400,29 @@ fn lifted_pure_helpers() -> String {
     c
 }
 
-fn scratch(name: &str) -> PathBuf {
+/// A scratch directory removed when dropped — on success AND when an assertion panics.
+struct Scratch(PathBuf);
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+impl std::ops::Deref for Scratch {
+    type Target = PathBuf;
+    fn deref(&self) -> &PathBuf {
+        &self.0
+    }
+}
+
+fn scratch(name: &str) -> Scratch {
     let dir = std::env::temp_dir().join(format!(
         "distroav_sender_port_linger_1363-{}-{name}",
         std::process::id()
     ));
     fs::create_dir_all(&dir).expect("create the scratch dir");
-    dir
+    Scratch(dir)
 }
 
 fn compile_and_run(compiler: &str, args: &[&str], sources: &[PathBuf], bin: &PathBuf) -> String {
@@ -429,11 +456,14 @@ fn compile_and_run(compiler: &str, args: &[&str], sources: &[PathBuf], bin: &Pat
     stdout
 }
 
+/// One truth-table row: four C int arguments and the expected result.
+type FourIntVector = ((i32, i32, i32, i32), i32);
+
 #[test]
 fn pure_helpers_compute_the_spec_truth_table() {
     // (plain_ok, plain_in_use, alias_ok, alias_in_use) -> state
     // 0 FREE, 1 TIME_WAIT (only closing connections hold it), 2 LIVE_LISTENER, 3 UNKNOWN
-    let hold: &[((i32, i32, i32, i32), i32)] = &[
+    let hold: &[FourIntVector] = &[
         ((1, 0, 0, 0), 0), // plain bind works: free
         ((1, 1, 1, 1), 0), // plain ok wins regardless of the (unused) alias args
         ((0, 1, 1, 0), 1), // in use on the wildcard, loopback alias binds: TIME_WAIT only
@@ -455,7 +485,7 @@ fn pure_helpers_compute_the_spec_truth_table() {
         ((3, 0), 1),
     ];
     // (is_listener, has_peer, local_port, sender_port) -> abort this socket
-    let conn: &[((i32, i32, i32, i32), i32)] = &[
+    let conn: &[FourIntVector] = &[
         ((0, 1, 5961, 5961), 1),  // an accepted connection on the sender's port
         ((1, 0, 5961, 5961), 0),  // the listener itself (no TIME_WAIT on a listener)
         ((0, 0, 5961, 5961), 0),  // bound, not connected
@@ -545,7 +575,6 @@ fn pure_helpers_compute_the_spec_truth_table() {
         &dir.join("pure.bin"),
     );
 
-    let _ = fs::remove_dir_all(&dir);
     let (nums, texts): (Vec<&str>, Vec<&str>) = stdout
         .lines()
         .filter(|l| !l.is_empty())
@@ -743,7 +772,6 @@ fn real_module_aborts_the_connection_so_no_time_wait_survives() {
         &[dir.join("ndi-sender-port.cpp"), dir.join("harness.cpp")],
         &dir.join("real.bin"),
     );
-    let _ = fs::remove_dir_all(&dir);
     let get = |key: &str| -> String {
         stdout
             .lines()

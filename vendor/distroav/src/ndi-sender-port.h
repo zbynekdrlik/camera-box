@@ -145,7 +145,9 @@ NDIlib_send_instance_t ndi_sender_create_tracked(const NDIlib_send_create_t *des
 
 // Right before send_destroy: SO_LINGER {1,0} on every connected socket whose
 // local port is `port`, so they close with RST and leave no TIME_WAIT.
-// port <= 0 is a no-op. Best-effort: every failure is logged, never fatal.
+// `name` is only a log label (an output's NDI name, a filter's source name;
+// the port ties it to the create line). port <= 0 is a no-op. Best-effort:
+// every failure is logged, never fatal.
 void ndi_sender_abort_connections_before_destroy(int port, const char *name);
 
 // Probe who holds TCP `port` right now (one of enum ndi_first_port_state).

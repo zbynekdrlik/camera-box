@@ -168,15 +168,16 @@ void ndi_sender_abort_connections_before_destroy(int port, const char *name)
 	});
 	if (!scanned) {
 		obs_log(LOG_WARNING,
-			"WARN-1363 - ndi-sender-port: cannot read /proc/self/fd (errno %d) before destroying NDI sender "
-			"'%s' (TCP :%d); its connections close normally, so a relaunch within 60 s may shift its port",
-			errno, who, port);
+			"WARN-1363 - ndi-sender-port: cannot read /proc/self/fd (errno %d) before destroying the NDI "
+			"sender on TCP :%d ('%s'); its connections close normally, so a relaunch within 60 s may shift "
+			"its port",
+			errno, port, who);
 		return;
 	}
 	obs_log(failed ? LOG_WARNING : LOG_INFO,
-		"ndi-sender-port: NDI sender '%s' TCP :%d: %d connection(s) set to close with RST (SO_LINGER 0), "
+		"ndi-sender-port: TCP :%d ('%s'): %d connection(s) set to close with RST (SO_LINGER 0), "
 		"%d failed (#1363)",
-		who, port, aborted, failed);
+		port, who, aborted, failed);
 }
 
 // errno of a plain (no SO_REUSEADDR) bind on addr:port, 0 when it binds. The

@@ -97,7 +97,7 @@ listening on TCP :5961. The cause is in libndi, not in the reserve/adopt path:
 
 Live on strih-lx only after the FULL strih bundle deploy + an OBS relaunch within 60 s of the
 previous stop shows `STRIH-LX (2ME PGM)` on :5961 in avahi AND the OBS log carries the
-`ndi-sender-port: NDI sender '…' TCP :5961: N connection(s) set to close with RST` INFO line from
+`ndi-sender-port: TCP :5961 ('2ME PGM'): N connection(s) set to close with RST` INFO line from
 the previous session's stop (proof the real OBS SIGTERM shutdown runs the stop/filter-destroy hooks
 while libndi's sockets are still open — the dev1 repro used a libndi harness, not OBS).
 
