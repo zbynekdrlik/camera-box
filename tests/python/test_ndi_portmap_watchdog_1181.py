@@ -322,6 +322,9 @@ def test_baseline_json_checked_in_and_captured_from_live():
     # (2026-08-24, after a strih OBS restart reshuffle) broke the old exact-map assertion.
     senders = j["senders"]
     assert j["anchor"] in senders
+    # issue 1363 / the 1185 pin: the program sender owns :5961 in any legitimately captured map
+    # (a capture taken while the program sat on :5962 records the TIME_WAIT defect as healthy).
+    assert senders[j["anchor"]] == 5961
     assert len(senders) >= 3
     assert all(isinstance(p, int) and 5961 <= p <= 6010 for p in senders.values())
     assert len(set(senders.values())) == len(senders)  # one distinct port per sender
