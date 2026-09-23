@@ -1,0 +1,187 @@
+# issue 1317 part 5 -- the ONE shared parity table for the recordings-retention decision.
+#
+# Read by BOTH tests/recordings_retention.rs (against the canonical pure Rust plan()) and
+# tests/python/test_strih_lx_recordings_retention_1317.py (against the bash --local-sweep
+# decision in scripts/strih-recordings-retention.sh, run over a real fixture dir). Both assert
+# the SAME expected keep/delete sets below, so the Linux executor is pinned to the Rust authority
+# on identical inputs. Edit a case here and BOTH sides must still agree.
+#
+# TAB-separated. Lines:
+#   case <id> <now_epoch> <keep_runs> <keep_days>
+#   file <age_seconds> <size_bytes> <name>     (mtime = now - age; a negative age = future mtime)
+#   keep <reason> <name>                       (reason: protected | production-sized | newest-run | within-days)
+#   delete <name>                              (in plan order: newest first, name asc on a tie)
+#   end
+# Integer ages only (the Linux executor reads whole-second mtimes).
+
+case	newest_n_runs_are_kept_rest_deleted	1800000000	2	0
+file	3456000	10	2026-01-01 10-00-00.mkv
+file	2592000	10	2026-01-02 10-00-00.mkv
+file	1728000	10	2026-01-03 10-00-00.mkv
+file	864000	10	2026-01-04 10-00-00.mkv
+keep	newest-run	2026-01-04 10-00-00.mkv
+keep	newest-run	2026-01-03 10-00-00.mkv
+delete	2026-01-02 10-00-00.mkv
+delete	2026-01-01 10-00-00.mkv
+end
+
+case	within_days_kept_even_beyond_newest_n	1800000000	1	25
+file	3456000	10	2026-01-01 10-00-00.mkv
+file	1728000	10	2026-01-02 10-00-00.mkv
+file	432000	10	2026-01-03 10-00-00.mkv
+file	86400	10	2026-01-04 10-00-00.mkv
+keep	newest-run	2026-01-04 10-00-00.mkv
+keep	within-days	2026-01-03 10-00-00.mkv
+keep	within-days	2026-01-02 10-00-00.mkv
+delete	2026-01-01 10-00-00.mkv
+end
+
+case	age_exactly_keep_within_days_is_deleted	1800000000	0	3
+file	259200	10	2026-01-01 10-00-00.mkv
+delete	2026-01-01 10-00-00.mkv
+end
+
+case	one_second_younger_than_the_horizon_is_kept	1800000000	0	3
+file	259199	10	2026-01-01 10-00-00.mkv
+keep	within-days	2026-01-01 10-00-00.mkv
+end
+
+case	fractional_horizon_below_one_second	1800000000	0	0.00001
+file	0	10	2026-01-03 10-00-00.mkv
+file	1	10	2026-01-02 10-00-00.mkv
+file	-100	10	2026-01-04 10-00-00.mkv
+keep	within-days	2026-01-04 10-00-00.mkv
+keep	within-days	2026-01-03 10-00-00.mkv
+delete	2026-01-02 10-00-00.mkv
+end
+
+case	zero_days_never_keeps_by_age_even_a_future_mtime	1800000000	0	0
+file	-100	10	2026-01-04 10-00-00.mkv
+file	0	10	2026-01-03 10-00-00.mkv
+delete	2026-01-04 10-00-00.mkv
+delete	2026-01-03 10-00-00.mkv
+end
+
+case	within_newest_but_old_is_still_kept	1800000000	5	3
+file	34560000	10	2026-01-01 10-00-00.mkv
+file	25920000	10	2026-01-02 10-00-00.mkv
+keep	newest-run	2026-01-02 10-00-00.mkv
+keep	newest-run	2026-01-01 10-00-00.mkv
+end
+
+case	foreign_file_never_deleted_even_when_ancient_and_huge	1800000000	0	0
+file	60480000	5368709120	strih700105.mkv
+file	60480000	10	2026-01-01 10-00-00.mkv
+keep	protected	strih700105.mkv
+delete	2026-01-01 10-00-00.mkv
+end
+
+case	zero_n_zero_d_deletes_all_matching_keeps_foreign	1800000000	0	0
+file	1	100	2026-01-01 10-00-00.mkv
+file	2	200	2026-01-02 10-00-00.mp4
+file	3	5	Screenshot 2026-01-01 10-00-00.png
+keep	protected	Screenshot 2026-01-01 10-00-00.png
+delete	2026-01-01 10-00-00.mkv
+delete	2026-01-02 10-00-00.mp4
+end
+
+case	realistic_strih_scenario_protects_production_and_frees_old_e2e_runs	1800000000	3	2
+file	25920000	5368709120	strih700105.mkv
+file	17280000	18253611008	2026-02-01 10-00-00.mkv
+file	12960000	8589934592	2026-02-02 10-00-00.mkv
+file	3456000	209715200	2026-01-01 10-00-00.mkv
+file	3024000	209715200	2026-01-02 10-00-00.mkv
+file	2592000	209715200	2026-01-03 10-00-00.mkv
+file	2160000	209715200	2026-01-04 10-00-00.mkv
+file	1728000	209715200	2026-01-05 10-00-00.mkv
+file	1296000	209715200	2026-01-06 10-00-00.mkv
+file	864000	209715200	2026-01-07 10-00-00.mkv
+file	432000	209715200	2026-01-08 10-00-00.mkv
+keep	protected	strih700105.mkv
+keep	production-sized	2026-02-01 10-00-00.mkv
+keep	production-sized	2026-02-02 10-00-00.mkv
+keep	newest-run	2026-01-08 10-00-00.mkv
+keep	newest-run	2026-01-07 10-00-00.mkv
+keep	newest-run	2026-01-06 10-00-00.mkv
+delete	2026-01-05 10-00-00.mkv
+delete	2026-01-04 10-00-00.mkv
+delete	2026-01-03 10-00-00.mkv
+delete	2026-01-02 10-00-00.mkv
+delete	2026-01-01 10-00-00.mkv
+end
+
+case	file_exactly_at_the_floor_is_protected_one_byte_below_is_not	1800000000	0	0
+file	43200000	1073741824	2026-01-01 10-00-00.mkv
+file	43200000	1073741823	2026-01-02 10-00-00.mkv
+keep	production-sized	2026-01-01 10-00-00.mkv
+delete	2026-01-02 10-00-00.mkv
+end
+
+case	production_sized_never_consumes_a_newest_run_slot	1800000000	1	0
+file	86400	2147483648	2026-01-03 10-00-00.mkv
+file	172800	10	2026-01-02 10-00-00.mkv
+file	259200	10	2026-01-01 10-00-00.mkv
+keep	production-sized	2026-01-03 10-00-00.mkv
+keep	newest-run	2026-01-02 10-00-00.mkv
+delete	2026-01-01 10-00-00.mkv
+end
+
+case	equal_mtime_tie_breaks_by_name_ascending	1800000000	1	0
+file	777600	10	2026-01-02 10-00-00.mkv
+file	777600	10	2026-01-01 10-00-00.mkv
+file	777600	10	2026-01-03 10-00-00.mkv
+keep	newest-run	2026-01-01 10-00-00.mkv
+delete	2026-01-02 10-00-00.mkv
+delete	2026-01-03 10-00-00.mkv
+end
+
+case	explicit_allowlist_only_obs_timestamp_names_are_deletable	1800000000	0	0
+file	86400000	1	2026-08-19 02-23-06.mkv
+file	86400000	1	2026-08-19 02-23-06.mp4
+file	86400000	1	2025-10-27 12-44-37.mkv
+file	86400000	1	2026-08-19 02-23-06 (2).mkv
+file	86400000	1	2026-08-19 02-23-06 (10).mp4
+file	86400000	1	strih700105.mkv
+file	86400000	1	Screenshot 2025-10-27 12-44-37.png
+file	86400000	1	verdict-700105.json
+file	86400000	1	2026-08-19.mkv
+file	86400000	1	2026-8-9 2-3-6.mkv
+file	86400000	1	2026-08-19 02-23-06.txt
+file	86400000	1	2026-08-19 02-23-06 (x).mkv
+file	86400000	1	2026-08-19 02-23-06(2).mkv
+file	86400000	1	random.mkv
+file	86400000	1	2026-08-19 02-23-06.MKV
+file	86400000	1	2026-08-19 02-23-06 ().mkv
+file	86400000	1	2026-08-19 02-23-06 (2) (3).mkv
+file	86400000	1	x2026-08-19 02-23-06.mkv
+file	86400000	1	2026-08-19 02-23-06.mkv.part
+file	86400000	1	2026-08-19T02-23-06.mkv
+file	86400000	1	.2026-08-19 02-23-06.mkv
+file	86400000	1	２０２６-08-19 02-23-06.mkv
+file	86400000	1	٢٠٢٦-08-19 02-23-06.mkv
+file	86400000	1	2026-08-19 02-23-06 (２).mkv
+keep	protected	strih700105.mkv
+keep	protected	Screenshot 2025-10-27 12-44-37.png
+keep	protected	verdict-700105.json
+keep	protected	2026-08-19.mkv
+keep	protected	2026-8-9 2-3-6.mkv
+keep	protected	2026-08-19 02-23-06.txt
+keep	protected	2026-08-19 02-23-06 (x).mkv
+keep	protected	2026-08-19 02-23-06(2).mkv
+keep	protected	random.mkv
+keep	protected	2026-08-19 02-23-06.MKV
+keep	protected	2026-08-19 02-23-06 ().mkv
+keep	protected	2026-08-19 02-23-06 (2) (3).mkv
+keep	protected	x2026-08-19 02-23-06.mkv
+keep	protected	2026-08-19 02-23-06.mkv.part
+keep	protected	2026-08-19T02-23-06.mkv
+keep	protected	.2026-08-19 02-23-06.mkv
+keep	protected	２０２６-08-19 02-23-06.mkv
+keep	protected	٢٠٢٦-08-19 02-23-06.mkv
+keep	protected	2026-08-19 02-23-06 (２).mkv
+delete	2025-10-27 12-44-37.mkv
+delete	2026-08-19 02-23-06 (10).mp4
+delete	2026-08-19 02-23-06 (2).mkv
+delete	2026-08-19 02-23-06.mkv
+delete	2026-08-19 02-23-06.mp4
+end

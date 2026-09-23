@@ -543,3 +543,133 @@ fn production_sized_never_deletable_takes_precedence_over_delete_eligibility() {
         |k| k.file.name == "2026-01-01 10-00-00.mkv" && k.reason == KeepReason::ProductionSized
     ));
 }
+
+// ---- issue 1317 part 5: ONE shared fixture table pins the Linux (bash) executor to plan() ---------
+//
+// strih-lx (Linux) records E2E runs to `/srv/_REC`, and its retention executor is a bash port of
+// this decision (`scripts/strih-recordings-retention.sh --local-sweep`). The parity is pinned on ONE
+// table, `tests/fixtures/recordings_retention_parity.tsv`, read by THIS test against the canonical
+// `plan()` AND by `tests/python/test_strih_lx_recordings_retention_1317.py` against the bash
+// decision over a real fixture directory. Both sides assert the SAME expected keep/delete sets, so
+// any drift in either implementation fails its own side against the shared table.
+
+const PARITY_TABLE_1317: &str = include_str!("fixtures/recordings_retention_parity.tsv");
+
+struct ParityCase1317 {
+    id: String,
+    now: f64,
+    policy: RetentionPolicy,
+    files: Vec<RecordingFile>,
+    keep: Vec<(String, String)>,
+    delete: Vec<String>,
+}
+
+fn bad_1317(lineno: usize, line: &str) -> ! {
+    panic!("parity table line {}: malformed: {line:?}", lineno + 1)
+}
+
+fn parse_parity_table_1317() -> Vec<ParityCase1317> {
+    let mut cases = Vec::new();
+    let mut cur: Option<ParityCase1317> = None;
+    for (lineno, line) in PARITY_TABLE_1317.lines().enumerate() {
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let fields: Vec<&str> = line.split('\t').collect();
+        match fields[0] {
+            "case" => {
+                assert!(cur.is_none(), "line {}: case inside a case", lineno + 1);
+                if fields.len() != 5 {
+                    bad_1317(lineno, line);
+                }
+                cur = Some(ParityCase1317 {
+                    id: fields[1].to_string(),
+                    now: fields[2].parse().unwrap_or_else(|_| bad_1317(lineno, line)),
+                    policy: RetentionPolicy {
+                        keep_newest_runs: fields[3]
+                            .parse()
+                            .unwrap_or_else(|_| bad_1317(lineno, line)),
+                        keep_within_days: fields[4]
+                            .parse()
+                            .unwrap_or_else(|_| bad_1317(lineno, line)),
+                    },
+                    files: Vec::new(),
+                    keep: Vec::new(),
+                    delete: Vec::new(),
+                });
+            }
+            "file" => {
+                let c = cur.as_mut().unwrap_or_else(|| bad_1317(lineno, line));
+                if fields.len() != 4 {
+                    bad_1317(lineno, line);
+                }
+                let age: f64 = fields[1].parse().unwrap_or_else(|_| bad_1317(lineno, line));
+                let size: u64 = fields[2].parse().unwrap_or_else(|_| bad_1317(lineno, line));
+                c.files.push(f(fields[3], size, c.now - age));
+            }
+            "keep" => {
+                let c = cur.as_mut().unwrap_or_else(|| bad_1317(lineno, line));
+                if fields.len() != 3 {
+                    bad_1317(lineno, line);
+                }
+                c.keep.push((fields[1].to_string(), fields[2].to_string()));
+            }
+            "delete" => {
+                let c = cur.as_mut().unwrap_or_else(|| bad_1317(lineno, line));
+                if fields.len() != 2 {
+                    bad_1317(lineno, line);
+                }
+                c.delete.push(fields[1].to_string());
+            }
+            "end" => cases.push(cur.take().unwrap_or_else(|| bad_1317(lineno, line))),
+            _ => bad_1317(lineno, line),
+        }
+    }
+    assert!(cur.is_none(), "parity table ends inside a case");
+    cases
+}
+
+/// The reason token the bash executor (and the `.ps1`) print for each `KeepReason`.
+fn reason_token_1317(r: KeepReason) -> &'static str {
+    match r {
+        KeepReason::ProtectedNonMatching => "protected",
+        KeepReason::ProductionSized => "production-sized",
+        KeepReason::NewestRuns => "newest-run",
+        KeepReason::WithinDays => "within-days",
+    }
+}
+
+#[test]
+fn shared_parity_table_matches_the_canonical_plan_1317() {
+    let cases = parse_parity_table_1317();
+    assert!(
+        cases.len() >= 10,
+        "the shared parity table lost cases ({})",
+        cases.len()
+    );
+    for c in &cases {
+        let p = plan(&c.files, &c.policy, c.now);
+        let mut got_keep: Vec<(String, String)> = p
+            .keep
+            .iter()
+            .map(|k| (reason_token_1317(k.reason).to_string(), k.file.name.clone()))
+            .collect();
+        got_keep.sort();
+        let mut want_keep = c.keep.clone();
+        want_keep.sort();
+        assert_eq!(got_keep, want_keep, "case {}: KEEP set", c.id);
+        let got_delete: Vec<String> = p.delete.iter().map(|d| d.name.clone()).collect();
+        assert_eq!(
+            got_delete, c.delete,
+            "case {}: DELETE list (plan order)",
+            c.id
+        );
+        // Every input file lands in exactly one of the two sets.
+        assert_eq!(
+            p.keep.len() + p.delete.len(),
+            c.files.len(),
+            "case {}: a file was dropped or duplicated",
+            c.id
+        );
+    }
+}
