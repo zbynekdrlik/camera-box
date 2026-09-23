@@ -1261,6 +1261,18 @@ REAL test file (not a replica) compiles and runs under Tier-0 without any cargo 
    (the version-control `archive -o head.tar HEAD scripts systemd` subcommand), copy the NEW test files
    in, and compile with `CARGO_MANIFEST_DIR=<that tree>`.
 
+Two extensions that widen this net (issue 1317 part 3):
+- **A file using `env!("CARGO_BIN_EXE_<bin>")`** (the `harness_*_gate.rs` family) fails to compile
+  with "not defined at compile time". Pass a dummy at compile time — the name has hyphens, so go
+  through `env`: `env CARGO_MANIFEST_DIR=<wt> "CARGO_BIN_EXE_<bin>=/nonexistent" rustc … --test …`.
+  Every static-anchor test then runs for real; only the `gate_binary_*` tests that exec the binary
+  fail (expected — they stay CI-only). Grep the names with `grep -oE 'CARGO_BIN_EXE_[A-Za-z0-9_-]+'`.
+- **A file that `use camera_box::<module>::…` only for PURE std-only items** (e.g.
+  `tests/obs_self_heal_install.rs` → `obs_self_heal::DEFAULT_*`): build a one-module stub crate
+  from the REAL source — copy `src/<module>.rs`, write `lib.rs` = `pub mod <module>;`,
+  `rustc --crate-type rlib --crate-name camera_box lib.rs -o libcamera_box.rlib`, then
+  `--extern camera_box=<that rlib>`. It only works while the module has no `crate::`/dep imports.
+
 Put the loop in a script FILE and `bash` it (the worktree guard refuses `$VAR`-computed paths in a
 direct rustc call). A file needing another crate (serde, the camera_box lib) fails to compile this
 way and stays CI-only. This catches borrow/type errors (an E0716 was caught this way) and failing
