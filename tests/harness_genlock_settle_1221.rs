@@ -332,17 +332,25 @@ fn default_reader_chains_through_bash_c_resource_not_timeout_of_a_function() {
     );
 }
 
-/// 🔴-1 static guard: the lib source carries the re-source form and NOT the broken direct form.
+/// 🔴-1 static guard: the reader never `timeout`s a shell FUNCTION (rc 127). Issue 1360 moved the
+/// read into the shared platform-resolved `scripts/lib/strih-log-read.sh`, so the guard now pins
+/// the delegation here plus the lib's real-binary bound (`sshpass … timeout T ssh …`) there.
 #[test]
 fn lib_source_uses_the_resource_reader_form() {
     let src = std::fs::read_to_string(lib()).unwrap();
     assert!(
-        src.contains(r#"win_ssh_run "$2" "$3" "$4" "$5""#),
-        "the reader must re-source win-ssh-exec.sh inside bash -c and call win_ssh_run with positional args"
+        src.contains(r#"strih_log_tail "$host" "$user" "$pw""#),
+        "the reader must delegate to the shared strih_log_tail (issue 1360)"
     );
     assert!(
-        !src.contains(r#"SSH_TIMEOUT:-20}" win_ssh_run"#),
-        "the reader must NOT `timeout … win_ssh_run` a shell function directly (rc 127)"
+        !src.contains(r#"SSH_TIMEOUT:-20}" win_ssh_run"#)
+            && !src.contains(r#"SSH_TIMEOUT:-20}" strih_log_tail"#),
+        "the reader must NOT `timeout …` a shell function directly (rc 127)"
+    );
+    let shared = read("scripts/lib/strih-log-read.sh");
+    assert!(
+        shared.contains(r#"sshpass -p "$pw" timeout "#),
+        "the shared reader must bound the ssh with a real `timeout` binary INSIDE sshpass"
     );
 }
 
