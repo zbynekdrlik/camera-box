@@ -233,3 +233,14 @@ OBS-WS (reusing `latency_pins_verify.py`'s `_conn` + `GetInputList` + `GetInputS
 The airuleset `post-push-ci-cleanup` hook cancels every run whose commit is an ancestor of the new dev HEAD, regardless of workflow — including the three manually dispatched genlock builds (`gh workflow run "Windows genlock build …"/"… FAST …"/"Linux genlock build …" --ref dev`) that a harness-only follow-up push does NOT re-trigger (the `paths:` filters skip it). 15.9.2026: ~45 min of bundle builds on cfb59a9cf died to a scripts-only push. Batch rule: integrate + push every ready lane FIRST, then dispatch the builds ONCE, then HOLD further dev pushes (cherry-pick returned lanes locally, push after the bundle is downloaded). A push to `dev` never cancels `main` runs (main's merge commits are not ancestors of dev).
 
 After every fleet relaunch, re-run `scripts/ndi-portmap-audit.sh --check`: the sender-output pin (issue 1185) re-orders strih's NDI ports on relaunch, so the checked-in baseline goes stale and the dev1 port-map watchdog pages (14 pages 15./16.9.) — `--capture` + commit the baseline as part of the deploy sitting.
+
+## GOTCHA — a FAST/full deploy's OBS stop DROPS live WS-applied values that OBS never saved (23.9.2026)
+
+The Windows deploy program stops OBS hard to swap the bytes, so any input setting written over
+OBS-WS since OBS last saved its scene collection is lost at the relaunch. Live: the `[8/8g]` apply
+had set stream `NDI 2ME PGM genlock_latency_ms_src` 987 + `mbc` audio sync offset +2 (recorded in
+`~/.camera-box/av-sync-last.json`), and after the next FAST deploy + relaunch the box came back at
+976 / +29 (the values last saved). The #1265 swing guard then compares the next run against a pin
+the box is not actually running. After EVERY stream deploy/relaunch: read the live pin + `mbc`
+offset over WS and, if they differ from `av-sync-last.json`'s `applied_latency_ms` /
+`audio_offset_ms`, re-apply those (read-back verified) before the next E2E.
