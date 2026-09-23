@@ -15,10 +15,27 @@
 # `STRIH-LX (...)` and it joins the clock as a dantesync CLIENT (the Windows PC stays the one NTP
 # master). The stream box + receivers must NEVER see a second `STRIH-SNV (...)` sender.
 
-# strih_lx_host -> the hostname the fleet dials. Default strih-lx.lan; STRIH_LX_HOST overrides.
-# The literal IP is TBD (assigned 17.9. on arrival, STRIH_LX_IP) -- resolution is by hostname,
-# exactly as the imag leg dials "imag" (deploy-genlock-fleet.sh / obs-fleet.sh).
-strih_lx_host() { printf '%s' "${STRIH_LX_HOST:-strih-lx.lan}"; }
+# strih_lx_host -> the address the fleet dials for strih-lx. STRIH_LX_HOST overrides; the default is
+# the ONE fleet list's host for strih-lx (issue 1317 part 2: `obs_fleet_host strih-lx`, 10.77.9.202
+# since the M4 cut-over). The old `strih-lx.lan` default has NO DNS entry on dev1. obs-fleet.sh is
+# sourced lazily from this lib's own dir (keeps this lib free of top-level statements); a missing or
+# unknown fleet row fails loud (non-zero, no output), never a silent guess.
+strih_lx_host() {
+  if [ -n "${STRIH_LX_HOST:-}" ]; then
+    printf '%s' "$STRIH_LX_HOST"
+    return 0
+  fi
+  if ! declare -F obs_fleet_host >/dev/null; then
+    # shellcheck source=scripts/lib/obs-fleet.sh
+    . "$(dirname "${BASH_SOURCE[0]}")/obs-fleet.sh" || return 1
+  fi
+  obs_fleet_host strih-lx
+}
+
+# strih_lx_hostname -> the box's OWN hostname = its fleet NAME (`strih-lx`, the name mDNS announces
+# as strih-lx.local). Never derived from strih_lx_host: that is a DIAL address (an IP by default
+# since issue 1317 part 2), and cutting it at the first dot would rename the box to `10`.
+strih_lx_hostname() { printf '%s' 'strih-lx'; }
 
 # strih_lx_ip -> the assigned static IP, or empty until it is assigned on arrival. STRIH_LX_IP wins.
 strih_lx_ip() { printf '%s' "${STRIH_LX_IP:-}"; }

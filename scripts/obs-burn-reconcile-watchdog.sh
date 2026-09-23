@@ -6,6 +6,16 @@
 # scripts/obs-burn-reconcile-watchdog.sh -- #1060 dev1-side fresh-OBS-start burn reconciliation for
 # the UNATTENDED strih/stream OBS start paths.
 #
+# ROSTER (issue 1317 part 2, M4 cut-over): the boxes come from the ONE fleet list
+# (scripts/lib/obs-fleet.sh, facet `burn-reconcile` = strih-lx + stream), overridable byte-compatibly
+# via OBS_BURN_RECONCILE_BOXES="name|host ...". Everything here is OBS-WebSocket (GetStats +
+# obs_burn_filter sweeps), so it is platform-neutral: the production Linux strih-lx keeps the coverage
+# the retired Windows strih had (its unattended starts are the boot autostart and the
+# strih-obs.service restart). STRIH_HOST still repoints the strih (now strih-lx) and STREAM_HOST the
+# stream box. State keys are the fleet NAME (`strih-lx_rtf`), so the first pass after this change
+# only SEEDS the strih-lx baseline -- never a false restart. A traveling member is probed only while
+# home (obs_fleet_poll_now).
+#
 # WHY (#1060, a 1057 follow-up): issue 1057 closed the burn-resurrection window for the DELIBERATE
 # dev1-driven relaunch (launch-obs-genlock.sh's PLAN now directs a post-launch obs_burn_filter.py
 # sweep-off). Still open -- the UNATTENDED starts: box boot autostart, NL_STARTUP.ahk obs64
@@ -58,12 +68,14 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE/lib/rig-heartbeat.sh"
 # shellcheck source=scripts/lib/rig-lease.sh
 . "$HERE/lib/rig-lease.sh"
+# shellcheck source=scripts/lib/obs-fleet.sh
+. "$HERE/lib/obs-fleet.sh"
 
 DRY_RUN=0
 case "${1:-}" in
   --dry-run) DRY_RUN=1 ;;
   --help|-h)
-    sed -n '6,33p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+    sed -n '6,43p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
     exit 0
     ;;
   "") : ;;
@@ -71,8 +83,10 @@ case "${1:-}" in
 esac
 
 # ── config (all env-overridable) ─────────────────────────────────────────────
-STRIH_HOST="${STRIH_HOST:-10.77.9.202}"
-STREAM_HOST="${STREAM_HOST:-10.77.9.204}"
+# issue 1317 part 2: the roster is the fleet `burn-reconcile` facet (`name|host` pairs);
+# OBS_BURN_RECONCILE_BOXES overrides it byte-compatibly (the fleet <X>_BOXES convention). STRIH_HOST /
+# STREAM_HOST keep repointing a box (applied per name in main, left empty = the roster's host).
+BOXES="${OBS_BURN_RECONCILE_BOXES:-$(obs_fleet_boxes burn-reconcile)}"
 OBS_PASSWORD="${OBS_PASSWORD:-}"
 
 BURN_FILTER_PY="${OBS_BURN_FILTER_PY:-$HERE/obs_burn_filter.py}"
@@ -255,9 +269,21 @@ process_box() {
 
 # ── main pass ────────────────────────────────────────────────────────────────
 main() {
-  log "pass start (dry_run=$DRY_RUN)"
-  process_box strih "$STRIH_HOST"
-  process_box stream "$STREAM_HOST"
+  log "pass start (dry_run=$DRY_RUN, roster='$BOXES')"
+  local pair name host
+  for pair in $BOXES; do
+    name="${pair%%|*}"
+    host="${pair##*|}"
+    if ! obs_fleet_poll_now "$name"; then
+      log "$name: skipped -- traveling box is away (obs_fleet_poll_now), nothing to reconcile this pass"
+      continue
+    fi
+    case "$name" in
+      strih-lx) host="${STRIH_HOST:-$host}" ;;
+      stream) host="${STREAM_HOST:-$host}" ;;
+    esac
+    process_box "$name" "$host"
+  done
   log "pass end"
 }
 

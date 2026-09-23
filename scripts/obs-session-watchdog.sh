@@ -4,15 +4,23 @@
 # watchdog.sh (set -uo pipefail, not -e).
 #
 # scripts/obs-session-watchdog.sh — #979 dev1-side CONTINUOUS obs64/AHK session-visibility
-# watchdog (strih + stream), the always-on sibling of #977's per-PR E2E gate preflight.
+# watchdog for the WINDOWS genlock OBS boxes, the always-on sibling of #977's per-PR E2E gate
+# preflight.
+#
+# ROSTER (issue 1317 part 2, M4 cut-over): the boxes come from the ONE fleet list
+# (scripts/lib/obs-fleet.sh, facet `obs-session` = stream + resolume), overridable byte-compatibly via
+# OBS_SESSION_WATCHDOG_BOXES="name|host ...". The session-0 / AHK premise is Windows-only, so each
+# box is ALSO class-gated here (windows-genlock only): the Linux production strih-lx at .202 is never
+# handed the PowerShell probe (the old literal `strih` arm failed there every pass with "no probe
+# output"). The traveling resolume is probed only while home (obs_fleet_poll_now).
 #
 # WHY (issue 958 + #977): #977's E2E gate only runs on a push -- the rig can degrade BETWEEN CI
 # runs (the real incident: obs64 sat in Windows session 0, invisible to the operator, for ~3.5h
 # before the user found it manually). This watchdog is the #391/#882 dev1-timer topology applied
 # to the SAME session-visibility probe #977/#978 use (scripts/lib/obs-session-visibility.sh,
-# reused VERBATIM -- never a second detector) -- polls both broadcast boxes over win_ssh_run
+# reused VERBATIM -- never a second detector) -- polls each Windows OBS box over win_ssh_run
 # (scripts/lib/win-ssh-exec.sh, #703) every few minutes and fires ONE deduped Discord alert the
-# moment either box goes invisible, embedding the exact win-* MCP recovery command.
+# moment any box goes invisible, embedding the exact win-* MCP recovery command.
 #
 # Detection-and-alert only, NO auto-recovery -- same "agent-mediated recovery" precedent as
 # #391/#882 (a dev1 timer has no win-* MCP session to drive a GUI relaunch itself).
@@ -32,7 +40,7 @@
 # merging this PR.
 #
 # Usage:
-#   scripts/obs-session-watchdog.sh            # one pass: measure -> decide -> alert (both boxes)
+#   scripts/obs-session-watchdog.sh            # one pass: measure -> decide -> alert (each Windows OBS box)
 #   scripts/obs-session-watchdog.sh --dry-run  # measure + decide + LOG only; never alert
 #   scripts/obs-session-watchdog.sh --help
 set -uo pipefail
@@ -44,12 +52,14 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE/lib/obs-session-visibility.sh"
 # shellcheck source=scripts/lib/win-ssh-exec.sh
 . "$HERE/lib/win-ssh-exec.sh"
+# shellcheck source=scripts/lib/obs-fleet.sh
+. "$HERE/lib/obs-fleet.sh"
 
 DRY_RUN=0
 case "${1:-}" in
   --dry-run) DRY_RUN=1 ;;
   --help|-h)
-    sed -n '5,30p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+    sed -n '5,45p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
     exit 0
     ;;
   "") : ;;
@@ -57,12 +67,15 @@ case "${1:-}" in
 esac
 
 # ── config (all env-overridable) ─────────────────────────────────────────────
-STRIH_HOST="${STRIH_HOST:-10.77.9.202}"
-STREAM_HOST="${STREAM_HOST:-10.77.9.204}"
-STRIH_USER="${STRIH_USER:-newlevel}"
-STRIH_PW="${STRIH_PW:-newlevel}"
+# issue 1317 part 2: the roster is the fleet `obs-session` facet (stream + resolume), `name|host`
+# pairs; OBS_SESSION_WATCHDOG_BOXES overrides it byte-compatibly (the fleet <X>_BOXES convention).
+BOXES="${OBS_SESSION_WATCHDOG_BOXES:-$(obs_fleet_boxes obs-session)}"
+# Per-box host + ssh credential overrides (host default = the roster's host). targets.md: both boxes
+# take newlevel/newlevel over Win32-OpenSSH.
 STREAM_USER="${STREAM_USER:-newlevel}"
 STREAM_PW="${STREAM_PW:-newlevel}"
+RESOLUME_USER="${RESOLUME_USER:-newlevel}"
+RESOLUME_PW="${RESOLUME_PW:-newlevel}"
 CONFIRM_THRESHOLD="${OBS_SESSION_WATCHDOG_CONFIRM_THRESHOLD:-2}"
 ALERT_THROTTLE_PASSES="${OBS_SESSION_WATCHDOG_ALERT_THROTTLE_PASSES:-10}"
 
@@ -71,7 +84,7 @@ REPO_SLUG="${OBS_SESSION_WATCHDOG_REPO:-zbynekdrlik/camera-box}"
 
 STATE_DIR="${OBS_SESSION_WATCHDOG_STATE_DIR:-${XDG_RUNTIME_DIR:-/tmp}}"
 # A DIFFERENT default state file than #391's own obs-liveness-watchdog.sh -- both scripts key
-# per-box state on the SAME box names ("strih"/"stream"), so sharing one file would corrupt each
+# per-box state on the SAME box names ("stream", "resolume", ...), so sharing one file would corrupt each
 # other's confirm/throttle counters.
 STATE_FILE="${OBS_SESSION_WATCHDOG_STATE_FILE:-$STATE_DIR/camera-box-obs-session-watchdog.state}"
 
@@ -165,11 +178,72 @@ process_box() {
   fi
 }
 
+# ── roster (issue 1317 part 2) ───────────────────────────────────────────────
+# obs_session_box_has_ahk <name> -> 1 when the box runs an NL_STARTUP.ahk AutoHotkey auto-respawn
+# watcher whose session the probe must also check (resolume's AHK v2 safe-loop, issue 1295 -- the
+# same fact deploy-genlock-fleet.sh's fleet_box_has_ahk / launch-obs-genlock.sh carry), else 0.
+obs_session_box_has_ahk() {
+  case "${1:-}" in
+    resolume) printf '1' ;;
+    *) printf '0' ;;
+  esac
+}
+
+# obs_session_targets -> one `name host has_ahk` line per box to probe THIS pass, in roster order.
+# A box is probed only when BOTH hold:
+#   * its fleet class is windows-genlock -- the session-0/AHK probe is PowerShell over win_ssh_run,
+#     so a Linux box (strih-lx) or a name the fleet list does not know is SKIPPED (logged), even when
+#     an OBS_SESSION_WATCHDOG_BOXES override names it (defense in depth beyond the facet policy);
+#   * obs_fleet_poll_now says so -- a traveling box (resolume) only while home, never a false
+#     "invisible" verdict on a box that is simply away.
+# STREAM_HOST / RESOLUME_HOST repoint a box; otherwise the roster's host is dialled.
+obs_session_targets() {
+  local pair name host class
+  for pair in $BOXES; do
+    name="${pair%%|*}"
+    host="${pair##*|}"
+    class="$(obs_fleet_class "$name" 2>/dev/null || true)"
+    if [ "$class" != "windows-genlock" ]; then
+      log "$name: skipped -- fleet class '${class:-unknown}' is not windows-genlock (the session-0/AHK probe is Windows-only; a Linux box is never handed PowerShell)"
+      continue
+    fi
+    if ! obs_fleet_poll_now "$name"; then
+      log "$name: skipped -- traveling box is away (obs_fleet_poll_now), nothing to probe this pass"
+      continue
+    fi
+    case "$name" in
+      stream) host="${STREAM_HOST:-$host}" ;;
+      resolume) host="${RESOLUME_HOST:-$host}" ;;
+    esac
+    printf '%s %s %s\n' "$name" "$host" "$(obs_session_box_has_ahk "$name")"
+  done
+}
+
 # ── main pass ────────────────────────────────────────────────────────────────
 main() {
-  log "pass start (dry_run=$DRY_RUN, threshold=$CONFIRM_THRESHOLD)"
-  process_box strih "$STRIH_USER" "$STRIH_PW" "$STRIH_HOST" 1
-  process_box stream "$STREAM_USER" "$STREAM_PW" "$STREAM_HOST" 0
+  log "pass start (dry_run=$DRY_RUN, threshold=$CONFIRM_THRESHOLD, roster='$BOXES')"
+  # The target list is written by a plain redirect (no $(...) fork), so its skip log lines come from
+  # this long-lived shell and reliably reach the journal (the #394 subshell-log-loss lesson).
+  local targets_file name host has_ahk user pw
+  targets_file="$(mktemp "${TMPDIR:-/tmp}/camera-box-obs-session-targets.XXXXXX")" || {
+    log "ERROR: mktemp failed -- nothing probed this pass"
+    return 0
+  }
+  obs_session_targets >"$targets_file"
+  while read -r name host has_ahk; do
+    [ -n "$name" ] || continue
+    case "$name" in
+      stream) user="$STREAM_USER"; pw="$STREAM_PW" ;;
+      resolume) user="$RESOLUME_USER"; pw="$RESOLUME_PW" ;;
+      *)
+        log "$name: skipped -- no ssh credentials configured for this Windows box (add a <BOX>_USER/_PW pair here)"
+        continue
+        ;;
+    esac
+    # stdin from /dev/null: ssh inside win_ssh_run would otherwise swallow the rest of the list.
+    process_box "$name" "$user" "$pw" "$host" "$has_ahk" </dev/null
+  done <"$targets_file"
+  rm -f "$targets_file"
   log "pass end"
 }
 

@@ -1,6 +1,6 @@
 [Unit]
 # obs64/AHK Windows-session-visibility watchdog (#979/#977/#958). ONE measure -> decide -> alert
-# pass, both broadcast boxes (strih + stream).
+# pass over the Windows genlock OBS boxes (the obs-fleet `obs-session` facet: stream + resolume when home).
 # SHIPS DISABLED -- installed/enabled/live-verified by the supervisor only. See the README.
 Description=camera-box obs64/AHK session-visibility watchdog (#979) -- one measure/decide/alert pass
 Documentation=https://github.com/zbynekdrlik/camera-box
@@ -9,8 +9,8 @@ Documentation=https://github.com/zbynekdrlik/camera-box
 Type=oneshot
 # %h = the installing user's home. Adjust if the checkout lives elsewhere on dev1.
 ExecStart=%h/devel/camera-box/scripts/obs-session-watchdog.sh
-# Two win_ssh_run round trips to strih+stream; give it room but never hang the timer.
+# One win_ssh_run round trip per Windows box (stream, resolume); give it room but never hang the timer.
 TimeoutStartSec=60
-# strih/stream ssh creds (targets.md "SSH: newlevel/newlevel") default in-script; override via:
-#   Environment=STRIH_PW=...
+# stream/resolume ssh creds (targets.md "SSH: newlevel/newlevel") default in-script; override via:
+#   Environment=RESOLUME_PW=...
 #   Environment=STREAM_PW=...

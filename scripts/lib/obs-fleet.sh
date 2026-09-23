@@ -58,6 +58,20 @@
 #                   audit refuses any other count. It consumes the member NAME only (the NDI machine
 #                   name = the uppercased hostname, the anchor IP = the anchor's own mDNS record), so
 #                   a strih swap (the Poprad strih-pp next) is this one policy edit.)
+#   obs-session   = stream resolume   (issue 1317 part 2: the #979 obs64/AHK Windows SESSION-0
+#                   visibility probe -- a PowerShell probe over win_ssh_run, meaningless on a Linux
+#                   box, so windows-genlock members ONLY. The consumer ALSO class-gates each box, so
+#                   even an override naming strih-lx never gets the PowerShell probe; resolume is
+#                   probed only while home, via obs_fleet_poll_now.)
+#   burn-reconcile = strih-lx stream  (issue 1317 part 2: the #1060 fresh-OBS-start burn reconcile
+#                   -- OBS-WS GetStats renderTotalFrames + obs_burn_filter sweeps, platform-neutral.
+#                   The unattended-start premise holds on strih-lx too: a boot autostart or a
+#                   strih-obs.service restart reloads a saved burn exactly like the Windows AHK
+#                   respawn did. resolume stays OUT: its cg-OBS burn node is the opt-in CG_CHAIN
+#                   profile, never a leaked measurement burn on a camera program.)
+#   rig-restore   = strih-lx stream   (issue 1317 part 2: the #281 stranded-rig restore -- the
+#                   recording-e2e harness's two OBS program boxes, read + torn down over OBS-WS via
+#                   obs_phase2.py; platform-neutral.)
 #
 # TRAVELING-BOX SAFETY (resolume is home only sometimes): a naive add to the PAGING watchdogs would
 # false-page whenever resolume is away (the owner's hardest sensitivity -- the #739 5x false-page
@@ -156,8 +170,11 @@ obs_fleet_facet_members() {
     genlock-lock)  printf 'strih-lx stream imag resolume' ;;
     render-freeze) printf 'strih-lx stream resolume' ;;
     ndi-portmap)   printf 'strih-lx' ;;
+    obs-session)   printf 'stream resolume' ;;
+    burn-reconcile) printf 'strih-lx stream' ;;
+    rig-restore)   printf 'strih-lx stream' ;;
     *)
-      echo "obs-fleet: unknown facet '${facet}' (expected one of: audio-lag av-step vb-matrix bundle-state network-reach obs-liveness genlock-lock render-freeze ndi-portmap)" >&2
+      echo "obs-fleet: unknown facet '${facet}' (expected one of: audio-lag av-step vb-matrix bundle-state network-reach obs-liveness genlock-lock render-freeze ndi-portmap obs-session burn-reconcile rig-restore)" >&2
       return 1
       ;;
   esac
@@ -203,6 +220,22 @@ obs_fleet_status_probe() {
   else
     printf '0'
   fi
+}
+
+# obs_fleet_poll_now <name> -> returns 0 when a per-box consumer loop should poll NAME this pass, 1
+# when it must skip it (issue 1317 part 2 -- the ONE traveling/retired gate the per-box watchdog
+# loops share, instead of each re-deciding it). An `always` box is polled WITHOUT consulting
+# obs_fleet_is_home, so the OBS_FLEET_HOME force-list (a traveling-box test seam) never drops a fixed
+# box; a `traveling` box only while obs_fleet_is_home holds; a `retired` box never. A name with NO row
+# (an ops `<X>_BOXES` override naming a box the table does not know yet) is polled as given -- the
+# override is authoritative, exactly as it already bypasses the facet derivation.
+obs_fleet_poll_now() {
+  local name="${1:-}" check
+  check="$(obs_fleet_home_check "$name")" || return 0
+  case "$check" in
+    always) return 0 ;;
+    *) obs_fleet_is_home "$name" ;;
+  esac
 }
 
 # obs_fleet_is_home <name> -> returns 0 iff NAME is currently "home" (reachable + serving), 1 if away

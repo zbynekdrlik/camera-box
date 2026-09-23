@@ -58,6 +58,10 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # stopped it itself and its #978 session gate then hard-fails (exit 8) on AHK count != 1. Reuse the
 # ONE verified relaunch helper launch itself uses, never a fork.
 . "$HERE/lib/ahk-watchdog.sh"
+# shellcheck source=scripts/lib/obs-fleet.sh
+# issue 1317 part 2: the strih-lx dial address is the ONE fleet list's host (strih-lx.lan does not
+# resolve on dev1), read through obs_fleet_host in fleet_box_ip below.
+. "$HERE/lib/obs-fleet.sh"
 
 GENLOCK_REPO="zbynekdrlik/camera-box"
 FLEET_LOG_DEFAULT="${HOME}/.camera-box/genlock-fleet-deploy.log"
@@ -153,7 +157,7 @@ fleet_pick_run_at_sha() {
 # currently collides with `bridge` at .201 (targets.md), so the plan resolves + identity-confirms it
 # live (emit_windows_plan prints that step for resolume; the planner emits it, never runs it).
 fleet_box_mcp()     { case "${1:-}" in strih) echo "win-strih" ;; stream) echo "win-stream-snv" ;; resolume) echo "win-resolume" ;; *) return 2 ;; esac; }
-fleet_box_ip()      { case "${1:-}" in strih) echo "10.77.9.202" ;; stream) echo "10.77.9.204" ;; imag) echo "imag" ;; resolume) echo "resolume.lan" ;; strih-lx) echo "${STRIH_LX_IP:-strih-lx.lan}" ;; *) return 2 ;; esac; }
+fleet_box_ip()      { case "${1:-}" in strih) echo "10.77.9.202" ;; stream) echo "10.77.9.204" ;; imag) echo "imag" ;; resolume) echo "resolume.lan" ;; strih-lx) echo "${STRIH_LX_IP:-$(obs_fleet_host strih-lx)}" ;; *) return 2 ;; esac; }
 fleet_box_has_ahk() { case "${1:-}" in strih|resolume) echo "1" ;; *) echo "0" ;; esac; }
 
 # fleet_box_ahk_script / fleet_box_ahk_prefer -- the PER-BOX AHK relaunch identity passed into the
