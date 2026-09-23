@@ -534,4 +534,31 @@ def test_flags_that_do_not_apply_to_a_mode_are_refused_never_ignored():
         env, log = _fake_sshpass(tmp)
         r = _run(["--host", "10.77.9.204", "--obs-config-dir", "/x"], env=env)
         assert r.returncode == 2, r.stdout + r.stderr
+        r = _run(["--host", "10.77.9.204", "--plan-tsv"], env=env)
+        assert r.returncode == 2, r.stdout + r.stderr
+        # print-only view + delete is refused on dev1, before any ssh.
+        r = _run(["--box", "strih-lx", "--plan-tsv", "--execute"], env=env)
+        assert r.returncode == 2, r.stdout + r.stderr
         assert _calls(log) == ""
+
+
+# --- review round 3 -----------------------------------------------------------------------------
+
+def test_box_linux_plan_tsv_stdout_is_pure_tsv():
+    now = 1800000000
+    with tempfile.TemporaryDirectory() as tmp:
+        env, _log = _exec_sshpass(tmp)
+        env["RETENTION_NOW_EPOCH"] = str(now)
+        rec = os.path.join(tmp, "rec")
+        os.mkdir(rec)
+        _mk(rec, "2026-01-01 10-00-00.mkv", 10, 30 * 86400, now)
+        _mk(rec, "2026-01-02 10-00-00.mkv", 10, 1 * 86400, now)
+        r = _run(["--box", "strih-lx", "--record-dir", rec, "--keep-runs", "1", "--keep-days", "0",
+                  "--plan-tsv"], env=env)
+        assert r.returncode == 0, r.stdout + r.stderr
+        lines = r.stdout.splitlines()
+        assert lines and all(ln.split("\t")[0] in ("OTHER", "PROTECT", "KEEP", "DELETE")
+                             for ln in lines), r.stdout
+        assert _plan_rows(r.stdout) == ([("newest-run", "2026-01-02 10-00-00.mkv")],
+                                        ["2026-01-01 10-00-00.mkv"]), r.stdout
+        assert "[strih-lx] ssh" in r.stderr, r.stderr
