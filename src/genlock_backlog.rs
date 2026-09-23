@@ -245,7 +245,8 @@ pub fn should_drain_one(
 /// already-computed ts-align RESERVE deadline (the Rust `genlock_present_ts_reserve()`, the
 /// C `genlock_present_ts_reserve()`) to the canvas frame GRID:
 ///
-/// `phase_pinned_deadline(raw_deadline_ns, interval_ns) = floor(raw_deadline_ns / interval_ns) * interval_ns`
+/// `phase_pinned_deadline(raw_deadline_ns, interval_ns)` = the per-second grid point at or before
+/// `raw_deadline_ns` (#1355; `floor(raw / interval) * interval` before it — see the #1355 note below)
 ///
 /// WHY: the pre-#940 deadline was a raw continuous quantity (`wall_now - latency`), so
 /// "which frame is due right now" depended on the EXACT sub-ms instant a lock/relock
@@ -264,11 +265,16 @@ pub fn should_drain_one(
 /// quantization requires (the design's own documented risk: a frame arriving essentially
 /// exactly on a grid line must not flap due/not-due from ordinary render-tick jitter on
 /// this floor division).
+///
+/// #1355 — "the grid" is the ONE per-second grid the senders stamp on
+/// ([`crate::genlock_grid::grid_floor_ns`], the C `genlock_grid_floor_ns` in
+/// obs-genlock-grid.h), no longer `floor(raw / interval) * interval` counted from 1970: at
+/// 30 fps that grid lost 10 ns per second against the stamps (`30 × 33_333_333 =
+/// 999_999_990`), so the stamp-vs-deadline phase — and with it the deep `NDI 2ME PGM` FIFO
+/// depth — walked with the calendar date. A fractional rate (no per-second grid) keeps the
+/// old arithmetic; `interval_ns == 0` still returns the raw deadline.
 pub fn phase_pinned_deadline(raw_deadline_ns: u64, interval_ns: u64) -> u64 {
-    if interval_ns == 0 {
-        return raw_deadline_ns;
-    }
-    (raw_deadline_ns / interval_ns) * interval_ns
+    crate::genlock_grid::grid_floor_ns(raw_deadline_ns, interval_ns)
 }
 
 /// #940 piece 3 — the hysteresis SLACK added to [`phase_pinned_deadline`]'s output before

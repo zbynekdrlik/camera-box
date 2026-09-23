@@ -37,6 +37,7 @@
 
 #include "obs.h"
 #include "obs-internal.h"
+#include "obs-genlock-grid.h" /* camera-box #1355: the ONE per-second genlock grid */
 
 #define get_weak(source) ((obs_weak_source_t *)source->context.control)
 
@@ -5057,12 +5058,14 @@ static inline uint64_t genlock_present_ts_reserve(uint64_t wall_now_ns, uint32_t
  * genlock_present_ts_reserve() itself stays byte-identical (its own pre-#940 tests pin its
  * exact arithmetic). A degenerate interval_ns (0 -- unknown video info) returns the
  * deadline unchanged rather than dividing by zero. Mirror of camera-box
- * src/genlock_backlog.rs phase_pinned_deadline (Tier-0 unit-tested). */
+ * src/genlock_backlog.rs phase_pinned_deadline (Tier-0 unit-tested).
+ * camera-box #1355: the grid is the ONE per-second grid the senders stamp on
+ * (obs-genlock-grid.h), no longer floor(deadline / interval) * interval counted from 1970,
+ * which lost 10 ns per second against the stamps and walked the deep FIFO depth with the
+ * calendar date. */
 static inline uint64_t genlock_phase_pin_deadline(uint64_t deadline_ns, uint64_t interval_ns)
 {
-	if (interval_ns == 0)
-		return deadline_ns;
-	return (deadline_ns / interval_ns) * interval_ns;
+	return genlock_grid_floor_ns(deadline_ns, interval_ns);
 }
 
 /* camera-box #940 piece 3: the grid-comparison HYSTERESIS slack -- a frame captured
@@ -5982,7 +5985,10 @@ static bool genlock_release_tick(obs_source_t *source, uint64_t wall_now, uint64
 			     due, sel_1003,
 			     (long long)(source->genlock_last_head_skew_ns /
 					 1000000),
-			     (unsigned long long)(interval != 0 ? wall_now % interval : 0),
+			     /* #1355: the phase within the ONE per-second grid the deadline floors on. */
+			     (unsigned long long)(interval != 0
+							  ? wall_now - genlock_grid_floor_ns(wall_now, interval)
+							  : 0),
 			     (unsigned long long)source->genlock_phase_anchor_ns,
 			     (long long)((long long)sel_1003 - (long long)(due - 1)),
 			     (unsigned long long)interval, reserve_ms);

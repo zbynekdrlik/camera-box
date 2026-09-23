@@ -93,19 +93,15 @@ pub fn per_second_floor(t: u64, fps: u64, units: u64) -> u64 {
     sec + slot_in_second(t - sec, fps, units) * units / fps
 }
 
-/// The per-second grid boundary STRICTLY AFTER `t`, in any unit; the last slot of a second
-/// rolls over to the next whole second. `fps == 0` returns `t`.
+/// The per-second grid boundary STRICTLY AFTER `t`, in any unit. For the last slot of a second
+/// (`slot + 1 == fps`) the expression is exactly the next whole second, so the roll-over needs no
+/// branch. `fps == 0` returns `t`.
 pub fn per_second_next(t: u64, fps: u64, units: u64) -> u64 {
     if fps == 0 || units == 0 {
         return t;
     }
     let sec = (t / units) * units;
-    let slot = slot_in_second(t - sec, fps, units);
-    if slot + 1 >= fps {
-        sec + units
-    } else {
-        sec + (slot + 1) * units / fps
-    }
+    sec + (slot_in_second(t - sec, fps, units) + 1) * units / fps
 }
 
 /// The receiver grid point AT OR BEFORE `t_ns` for a canvas of frame interval `interval_ns`.
@@ -119,9 +115,10 @@ pub fn grid_floor_ns(t_ns: u64, interval_ns: u64) -> u64 {
     if interval_ns == 0 {
         return t_ns;
     }
-    // [red] pre-#1355 arithmetic: the 1970 grid for every rate (the GREEN commit switches an
-    // integer rate to the per-second grid).
-    (t_ns / interval_ns) * interval_ns
+    match integer_fps(interval_ns) {
+        Some(fps) => per_second_floor(t_ns, fps, NS_PER_SECOND),
+        None => (t_ns / interval_ns) * interval_ns,
+    }
 }
 
 /// The receiver grid point STRICTLY AFTER `t_ns` — the render tick's next boundary.
@@ -136,8 +133,10 @@ pub fn grid_next_boundary_ns(t_ns: u64, interval_ns: u64) -> u64 {
     if interval_ns == 0 {
         return t_ns;
     }
-    // [red] pre-#1355 arithmetic (see grid_floor_ns).
-    t_ns - (t_ns % interval_ns) + interval_ns
+    match integer_fps(interval_ns) {
+        Some(fps) => per_second_next(t_ns, fps, NS_PER_SECOND),
+        None => t_ns - (t_ns % interval_ns) + interval_ns,
+    }
 }
 
 #[cfg(test)]
