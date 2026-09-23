@@ -1247,6 +1247,13 @@ catches this before CI (`subprocess.run` raises `OSError: [Errno 7]` on the same
 
 ## A whole `tests/*.rs` integration file RUNS locally with plain `rustc --test` + a stub `tempfile` rlib — no cargo (issue 1357)
 
+> **LIMIT (owner order 23.9.2026 — dev1 is Tier-0, 7.5 GB RAM):** use this for the ONE or TWO test files
+> that directly cover your change, one compile at a time — NEVER "every test file that reads the
+> touched script" and never in several lanes at once. The same day a lane's
+> `shellcheck -S warning -x scripts/recording-e2e.sh` reached 2.9 GB RSS and, with parallel lanes'
+> rustc/g++ lifts, swapped dev1 to a halt (load 33). Never `shellcheck -x` on recording-e2e.sh /
+> rig-mode.sh locally — CI's Shellcheck job runs it; the push → CI run is the full proof.
+
 The script-reading harnesses (`setup_imag_guards.rs`, `strih_provision_pure_functions.rs`,
 `verify_imag_pure_functions.rs`, `drift_guard.rs`, ~40 more) use only `std` plus `tempfile`, so the
 REAL test file (not a replica) compiles and runs under Tier-0 without any cargo shape:
