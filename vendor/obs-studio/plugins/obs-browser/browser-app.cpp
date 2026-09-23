@@ -96,6 +96,11 @@ void BrowserApp::OnBeforeCommandLineProcessing(const CefString &, CefRefPtr<CefC
 	command_line->AppendSwitch("use-mock-keychain");
 #elif !defined(_WIN32)
 	command_line->AppendSwitchWithValue("ozone-platform", wayland ? "wayland" : "x11");
+	/* camera-box #1359: never ask the GNOME keyring for os_crypt's storage key. An
+	 * auto-login does not unlock the login keyring, so the browser sources starting with
+	 * OBS raised a keyring unlock dialog on the operator screen after every reboot. The
+	 * Linux counterpart of the macOS use-mock-keychain switch above. */
+	command_line->AppendSwitchWithValue("password-store", "basic");
 #endif
 }
 

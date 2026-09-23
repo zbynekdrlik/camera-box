@@ -14,6 +14,9 @@ RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/strih-provision.sh
 . "${HERE}/lib/strih-provision.sh"
+# issue 1359: the REPORT-ONLY CEF keyring item (14b) grades the OBS CEF password-store switch.
+# shellcheck source=scripts/lib/strih-cef-keyring.sh
+. "${HERE}/lib/strih-cef-keyring.sh"
 # issue 1317: the dantesync item grades a FRESH offset via the SHARED freshness-aware verdict (the
 # cambox verify-device (d) shape) instead of reading a Windows/imag dantesync JSON config file a
 # flag-based Linux client never creates. clock-offset-guard.sh has its own source-guard, so sourcing
@@ -322,6 +325,31 @@ if [ -f "$FLAGS_FILE" ] && strih_lx_browser_bundle_required "$(cat "$FLAGS_FILE"
   fi
 else
   note "chrome-sandbox setuid check skipped (STRIH_BUILD_FLAGS.txt absent or BROWSER-OFF at ${GENLOCK_DIR})"
+fi
+
+# 14b) CEF keyring prompt (issue 1359) -- REPORT-ONLY. GNOME auto-login leaves the login keyring
+#      locked, so an OBS CEF without Chromium's --password-store=basic raises a keyring unlock
+#      dialog on the operator screen after every reboot. PASS when a running obs-browser-page
+#      command line carries the switch, else when the LOADED obs-browser.so has it compiled in (the
+#      CEF browser process is OBS itself; the switch is applied in-process, so a child argv need not
+#      show it). A plugin without it = a pre-fix bundle -> NOTE. Never FAILs. BROWSER-OFF -> skip.
+if [ -f "$FLAGS_FILE" ] && strih_lx_browser_bundle_required "$(cat "$FLAGS_FILE")"; then
+  CEF_SO_V="${STRIH_LIBDIR}/obs-plugins/obs-browser.so"
+  CEF_SO_STATE_V="$(strih_cef_so_password_store_state "$CEF_SO_V")"
+  CEF_PAGES_V="$(pgrep -af obs-browser-page 2>/dev/null || true)"
+  CEF_VERDICT_V="$(strih_cef_password_store_verdict "$CEF_SO_STATE_V" <<<"$CEF_PAGES_V" || true)"
+  case "$CEF_VERDICT_V" in
+    ok-live)
+      ok "(cef-keyring) a running obs-browser-page carries --password-store=basic -- the OBS CEF never asks the GNOME keyring (no unlock dialog after an auto-login reboot)" ;;
+    ok-built)
+      ok "(cef-keyring) ${CEF_SO_V} carries the password-store=basic switch (applied in-process; no running obs-browser-page shows it) -- no keyring unlock dialog after an auto-login reboot" ;;
+    missing)
+      note "(cef-keyring) ${CEF_SO_V} lacks the password-store=basic switch -- the deployed bundle predates issue 1359; the OBS CEF can raise the GNOME keyring unlock dialog after a reboot (deploy the current strih bundle)" ;;
+    *)
+      note "(cef-keyring) ${CEF_SO_V} not found -- cannot grade the OBS CEF password-store switch" ;;
+  esac
+else
+  note "(cef-keyring) skipped (STRIH_BUILD_FLAGS.txt absent or BROWSER-OFF at ${GENLOCK_DIR})"
 fi
 
 # 15) bundle-vs-box release parity (issue 1317): the installed bundle's TARGET-RELEASE marker must
