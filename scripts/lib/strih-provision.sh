@@ -1716,7 +1716,10 @@ strih_rtprio_limits_path() {
 # strih_rtprio_limits_text USER -> the limits.d body granting USER `rtprio 20` (the imag issue-484
 # value, headroom above the 10 the render tick requests; `-` sets soft AND hard, the soft limit is
 # what sched_setscheduler checks). An empty USER is refused (rc 1, no output) -- never a grant for
-# nobody. PAM applies it at the user's next login session.
+# nobody. WHEN it applies differs from imag: strih-obs.service is a --user unit, so OBS inherits its
+# limits from the LINGERING user@UID manager (setup-strih.sh step 13 enables linger), which gets
+# pam_limits (/usr/lib/pam.d/systemd-user) only when it STARTS -- i.e. at the next reboot of the box
+# (or a restart of user@UID, which ends the operator session), never at a mere login.
 strih_rtprio_limits_text() {
   local user="${1-}"
   if [ -z "$user" ]; then
@@ -1727,8 +1730,9 @@ strih_rtprio_limits_text() {
 # camera-box issue 1317 (imag issue-484 parity): allow ${user} to set SCHED_FIFO (rtprio) so the
 # genlock OBS render-tick thread goes realtime instead of logging "could NOT set render-tick thread
 # SCHED_FIFO" and continuing SCHED_OTHER. Value 20 = headroom above the 10 the thread requests
-# (vendor/obs-studio/libobs/obs-video.c GENLOCK_RT_PRIORITY). Applied by PAM at the next login
-# session. Written by setup-strih.sh step 11c -- re-run it instead of hand-editing.
+# (vendor/obs-studio/libobs/obs-video.c GENLOCK_RT_PRIORITY). OBS runs under the lingering
+# systemd --user manager, which applies this (via pam_limits) when it starts: at the next reboot.
+# Written by setup-strih.sh step 11c -- re-run it instead of hand-editing.
 ${user}   -   rtprio   20
 EOF
 }
@@ -1737,7 +1741,9 @@ EOF
 # rtprio SOFT and HARD limit >= strih_genlock_rt_priority (or `unlimited`). `-` sets both; an
 # explicit `soft`+`hard` pair counts too; a hard-only line leaves the soft limit at 0 (still EPERM).
 # Comments are stripped; a later matching line overrides an earlier one (pam_limits last-wins).
-# Reads the whole stdin (drain-safe). Fail-closed: an empty USER/input returns 1.
+# Reads the whole stdin (drain-safe). Fail-closed: an empty USER/input returns 1. Scope: grades the
+# strih drop-in setup-strih.sh writes (an exact USER domain) -- NOT a general limits.conf evaluator
+# (`*` / `@group` domains and other limits.d files are deliberately not considered).
 strih_rtprio_grant_ok() {
   local user="${1-}" min line domain type item value rest ok soft=0 hard=0
   min="$(strih_genlock_rt_priority)"
@@ -1764,8 +1770,9 @@ strih_rtprio_grant_ok() {
 # strih_rtprio_session_verdict GRANT OBS_RUNNING  (stdin: the newest OBS log text, may be empty) ->
 # ONE verdict token for verify-strih item 32. GRANT/OBS_RUNNING are 1/0.
 #   no-grant               (rc 1) -- the limits.d grant is missing/insufficient: FAIL
-#   grant-pending-relogin  (rc 2) -- grant present, but the RUNNING OBS still logs the EPERM line:
-#                                    the session predates the next login -> NOTE, not FAIL
+#   grant-pending-reboot   (rc 2) -- grant present, but the RUNNING OBS still logs the EPERM line:
+#                                    its lingering user manager started before the grant, so it
+#                                    applies at the next reboot -> NOTE, not FAIL
 #   ok-sched-fifo          (rc 0) -- grant present + the running OBS logged the SCHED_FIFO success
 #   ok                     (rc 0) -- grant present, no contrary evidence (OBS down = the newest log
 #                                    is a PAST session, never graded)
@@ -1776,7 +1783,7 @@ strih_rtprio_session_verdict() {
   if [ "$grant" != 1 ]; then printf 'no-grant'; return 1; fi
   if [ "$running" = 1 ]; then
     if grep -q 'could NOT set render-tick thread SCHED_FIFO' <<<"$text"; then
-      printf 'grant-pending-relogin'; return 2
+      printf 'grant-pending-reboot'; return 2
     fi
     if grep -q 'render-tick thread set SCHED_FIFO' <<<"$text"; then
       printf 'ok-sched-fifo'; return 0
@@ -1785,11 +1792,17 @@ strih_rtprio_session_verdict() {
   printf 'ok'; return 0
 }
 
-# strih_crash_popup_units -> the system units setup-strih.sh disables+stops+masks, one per line --
-# value-for-value the imag list (setup-imag.sh `systemctl mask apport.service whoopsie.service`):
-# apport writes the /var/crash reports that raise the update-notifier-crash desktop popup (and
-# multi-GB cores right when OBS already crashed); whoopsie phones crash reports home.
-strih_crash_popup_units() { printf '%s\n' apport.service whoopsie.service; }
+# strih_crash_popup_units -> the system units setup-strih.sh masks, one per line: the imag list
+# (setup-imag.sh `systemctl mask apport.service whoopsie.service`) PLUS the 26.04 apport coredump
+# hook. apport writes the /var/crash reports that raise the update-notifier-crash desktop popup (and
+# multi-GB cores right when OBS already crashed); whoopsie phones crash reports home. On 26.04 apport
+# ALSO ships a systemd-coredump drop-in (`OnSuccess=apport-coredump-hook@%i.service`) that runs
+# `apport --from-systemd-coredump` and writes /var/crash regardless of apport.service's mask -- so
+# with systemd-coredump installed the popup survives unless the hook TEMPLATE is masked too (masking
+# a template blocks every instance; systemd-coredump itself keeps collecting cores for coredumpctl).
+strih_crash_popup_units() {
+  printf '%s\n' apport.service apport-coredump-hook@.service whoopsie.service
+}
 
 # strih_crash_popup_unit_ok ENABLED_STATE ACTIVE_STATE -> 0 iff one crash unit is quiet: its
 # `systemctl is-enabled` FIRST line is masked / masked-runtime / disabled / not-found / empty
@@ -1809,8 +1822,45 @@ strih_crash_popup_unit_ok() {
   esac
 }
 
+# strih_crash_popup_template_ok ENABLED_STATE -> 0 iff a TEMPLATE crash unit (`name@.service`) is
+# blocked: its `systemctl is-enabled` first line is masked / masked-runtime, or not-found / empty
+# (the package is absent). `static` (the 26.04 default -- pulled by systemd-coredump's OnSuccess=),
+# `disabled` (disable does not stop an OnSuccess= pull) or anything else returns 1. The active state
+# of a template name is not meaningful, so it is never graded.
+strih_crash_popup_template_ok() {
+  local en="${1-}"
+  en="${en%%$'\n'*}"
+  case "$en" in
+    masked|masked-runtime|not-found|'') return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# strih_crash_popup_member_ok UNIT ENABLED_STATE ACTIVE_STATE -> grade one strih_crash_popup_units
+# member: a template (`*@.service`) by strih_crash_popup_template_ok (is-enabled only), any other
+# unit by strih_crash_popup_unit_ok (is-enabled AND is-active). The one dispatch verify-strih uses.
+strih_crash_popup_member_ok() {
+  local unit="${1-}"
+  case "$unit" in
+    *@.service) strih_crash_popup_template_ok "${2-}" ;;
+    *)          strih_crash_popup_unit_ok "${2-}" "${3-}" ;;
+  esac
+}
+
+# strih_crash_reports_count [DIR] -> print the number of regular `*.crash` files in DIR (default
+# /var/crash). update-notifier re-raises the popup at login for reports ALREADY there, so
+# verify-strih REPORTS them; deleting them is a supervisor data action, never provisioning. A
+# missing/unreadable DIR prints 0. Always rc 0 (safe as a bare assignment under set -e).
+strih_crash_reports_count() {
+  local dir="${1:-/var/crash}" n=0 f
+  for f in "$dir"/*.crash; do
+    if [ -f "$f" ]; then n=$((n + 1)); fi
+  done
+  printf '%s' "$n"
+}
+
 # strih_crash_popup_verdict "BAD_UNITS" COREDUMP -> ONE token for verify-strih item 33, 0 iff `ok`.
-# BAD_UNITS = the space-separated crash units that failed strih_crash_popup_unit_ok (empty = none);
+# BAD_UNITS = the space-separated crash units that failed strih_crash_popup_member_ok (empty = none);
 # COREDUMP = 1 when systemd-coredump is installed. Units are graded first (the popup is the operator
 # symptom), then the coredump collector.
 strih_crash_popup_verdict() {

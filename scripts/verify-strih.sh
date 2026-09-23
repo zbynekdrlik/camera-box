@@ -37,6 +37,12 @@ USER_HOME="/home/${STRIH_LX_USER:-newlevel}"
 OBS_LOG_DIR="${OBS_LOG_DIR:-${USER_HOME}/.config/obs-studio/logs}"
 newest_log() { ls -1t "${OBS_LOG_DIR}"/*.txt 2>/dev/null | head -1; }
 tcp_open()   { timeout 4 bash -c "exec 3<>/dev/tcp/${1}/${2}" 2>/dev/null; }
+# The ONE "is OBS running" predicate (items 1 and 32 share it): the supervisor unit OR an obs process.
+obs_running() {
+  systemctl --user is-active strih-obs.service >/dev/null 2>&1 \
+    || pgrep -x obs >/dev/null 2>&1 \
+    || pgrep -f 'bin/64bit/obs\|/obs$' >/dev/null 2>&1
+}
 
 echo -e "${GREEN}=== verify-strih.sh (issue 1317) acceptance gate ===${NC}"
 
@@ -91,7 +97,7 @@ else
 fi
 
 # 1) OBS running under the supervisor.
-if systemctl --user is-active strih-obs.service >/dev/null 2>&1 || pgrep -x obs >/dev/null 2>&1 || pgrep -f 'bin/64bit/obs\|/obs$' >/dev/null 2>&1; then
+if obs_running; then
   ok "OBS running (strih-obs.service / obs process)"
 else
   bad "OBS not running under the strih-obs.service supervisor"
@@ -769,7 +775,8 @@ fi
 #     drop-in setup-strih.sh step 11c writes must grant the desktop user rtprio >= the vendored render
 #     tick's SCHED_FIFO priority -- FAIL without it (the tick runs SCHED_OTHER). When OBS is running and
 #     its newest log still carries the "could NOT set render-tick thread SCHED_FIFO" EPERM line, the
-#     grant exists but that session predates the next login -> NOTE, never FAIL.
+#     grant exists but OBS's lingering user manager started before it (pam_limits applies when that
+#     manager starts) -> it takes effect at the next reboot -> NOTE, never FAIL.
 RTPRIO_FILE_V="$(strih_rtprio_limits_path)"
 RTPRIO_USER_V="${STRIH_LX_USER:-newlevel}"
 RTPRIO_GRANT_V=0
@@ -777,7 +784,7 @@ if [ -r "$RTPRIO_FILE_V" ] && strih_rtprio_grant_ok "$RTPRIO_USER_V" < "$RTPRIO_
   RTPRIO_GRANT_V=1
 fi
 RTPRIO_OBS_UP=0
-if systemctl --user is-active strih-obs.service >/dev/null 2>&1 || pgrep -x obs >/dev/null 2>&1; then
+if obs_running; then
   RTPRIO_OBS_UP=1
 fi
 RTPRIO_LOG_V="$(newest_log || true)"
@@ -791,22 +798,25 @@ case "$RTPRIO_VERDICT" in
     ok "(rtprio) ${RTPRIO_FILE_V} grants ${RTPRIO_USER_V} rtprio; the running OBS render tick is SCHED_FIFO" ;;
   ok)
     ok "(rtprio) ${RTPRIO_FILE_V} grants ${RTPRIO_USER_V} rtprio (OBS not running or no render-tick priority line in its log)" ;;
-  grant-pending-relogin)
-    note "(rtprio) grant present, but the running OBS session still logs 'could NOT set render-tick thread SCHED_FIFO' -- it predates the grant; effective after the next login + OBS start (if it persists after a re-login, the systemd --user manager is not applying pam_limits)" ;;
+  grant-pending-reboot)
+    note "(rtprio) grant present, but the running OBS still logs 'could NOT set render-tick thread SCHED_FIFO' -- its lingering systemd --user manager started before the grant; it takes effect at the next reboot of strih-lx (if it persists AFTER a reboot, compare 'Max realtime priority' in /proc/<user@UID MainPID>/limits: 0 there = pam_limits not applied by /usr/lib/pam.d/systemd-user)" ;;
   *)
     bad "(rtprio) no rtprio grant for ${RTPRIO_USER_V} in ${RTPRIO_FILE_V} -- the genlock render tick runs SCHED_OTHER (re-run setup-strih.sh step 11c)" ;;
 esac
 
-# 33) no operator crash popups (issue 1317 remainder, imag parity): apport + whoopsie must be
-#     masked/disabled AND not running (apport's /var/crash reports raise the update-notifier-crash
-#     desktop popup the operator had to close), and systemd-coredump must be installed so a crash
-#     still lands in coredumpctl. FAIL on any live unit or a missing collector.
+# 33) no operator crash popups (issue 1317 remainder, imag parity + the 26.04 apport coredump hook):
+#     apport + whoopsie must be masked/disabled AND not running, and the apport-coredump-hook@
+#     TEMPLATE masked (systemd-coredump's OnSuccess= runs it and it writes /var/crash even with
+#     apport.service masked) -- apport's /var/crash reports raise the update-notifier-crash desktop
+#     popup the operator had to close. systemd-coredump must be installed so a crash still lands in
+#     coredumpctl. FAIL on any live member or a missing collector; leftover *.crash reports (which
+#     re-raise the popup at login) are a NOTE -- deleting them is a supervisor data action.
 CRASH_BAD_V=""
 while IFS= read -r _cu; do
   [ -n "$_cu" ] || continue
   _cu_en="$(systemctl is-enabled "$_cu" 2>/dev/null || true)"
   _cu_act="$(systemctl is-active "$_cu" 2>/dev/null || true)"
-  if ! strih_crash_popup_unit_ok "$_cu_en" "$_cu_act"; then
+  if ! strih_crash_popup_member_ok "$_cu" "$_cu_en" "$_cu_act"; then
     CRASH_BAD_V="${CRASH_BAD_V}${CRASH_BAD_V:+ }${_cu}"
   fi
 done < <(strih_crash_popup_units)
@@ -817,9 +827,14 @@ if [ "$(dpkg-query -W -f='${Status}' systemd-coredump 2>/dev/null || true)" = "i
 fi
 CRASH_VERDICT_V="$(strih_crash_popup_verdict "$CRASH_BAD_V" "$CRASH_CORE_V" || true)"
 if [ "$CRASH_VERDICT_V" = ok ]; then
-  ok "(crash-popup) apport + whoopsie masked + inactive, systemd-coredump installed -- no operator crash popup, crashes land in coredumpctl"
+  ok "(crash-popup) apport + its coredump hook + whoopsie masked/quiet, systemd-coredump installed -- no operator crash popup, crashes land in coredumpctl"
 else
   bad "(crash-popup) ${CRASH_VERDICT_V} (systemd-coredump installed=${CRASH_CORE_V}) -- re-run setup-strih.sh step 11c"
+fi
+CRASH_DIR_V="${STRIH_CRASH_DIR:-/var/crash}"
+CRASH_REPORTS_V="$(strih_crash_reports_count "$CRASH_DIR_V")"
+if [ "$CRASH_REPORTS_V" != 0 ]; then
+  note "(crash-popup) ${CRASH_REPORTS_V} stale crash report(s) in ${CRASH_DIR_V} -- update-notifier re-raises the popup for them at login; inspect (coredumpctl list) and clear them (supervisor data action)"
 fi
 
 echo ""

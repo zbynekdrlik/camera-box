@@ -538,30 +538,39 @@ step "11c" "Genlock render-tick rtprio grant + no crash popups (apport/whoopsie 
 #     desktop user, so without an rtprio ulimit grant sched_setscheduler fails EPERM and every OBS
 #     session logs "could NOT set render-tick thread SCHED_FIFO ... continuing SCHED_OTHER" (more
 #     tick jitter -> more relock/late_hold -> the in-OBS LOCK indicator shows DEGRADED more often).
-#     The imag issue-484 limits.d drop-in, value for value (rtprio 20); PAM applies it at the next
-#     login session, so the render tick goes SCHED_FIFO from the next OBS start after that login.
+#     The imag issue-484 limits.d drop-in, value for value (rtprio 20). UNLIKE imag, OBS here runs
+#     as the --user unit strih-obs.service under the LINGERING user manager (step 13 enables
+#     linger), which applies pam_limits only when it starts -- so the grant takes effect at the next
+#     REBOOT of strih-lx (the supervisor reboots once after this step; strih-lx is not a cambox).
 RTPRIO_FILE="$(strih_rtprio_limits_path)"
 install -d -m 755 "$(dirname "$RTPRIO_FILE")"
 strih_rtprio_limits_text "$DESKTOP_USER" > "$RTPRIO_FILE" \
   || fail "could not write ${RTPRIO_FILE} (the genlock render-tick rtprio grant for ${DESKTOP_USER})"
 chmod 0644 "$RTPRIO_FILE"
-echo "  ${RTPRIO_FILE} grants ${DESKTOP_USER} rtprio 20 (applies at the next login session)"
+echo "  ${RTPRIO_FILE} grants ${DESKTOP_USER} rtprio 20 (takes effect at the next reboot: OBS inherits its limits from the lingering systemd --user manager)"
 # (b) no operator crash popups: apport writes /var/crash reports that raise the
 #     update-notifier-crash desktop popup the operator had to close, and multi-GB cores right when
-#     OBS already crashed; whoopsie phones reports home. Disable + stop + MASK them (the imag list);
-#     per unit, so an absent whoopsie never skips apport. Stop explicitly too: a unit masked earlier
-#     by hand can still be active. systemd-coredump replaces apport as the core collector, so a
-#     crash stays diagnosable via coredumpctl instead of a GUI popup (fail loud, like imag).
+#     OBS already crashed; whoopsie phones reports home. MASK them (the imag list) PLUS the 26.04
+#     apport coredump hook TEMPLATE -- systemd-coredump's OnSuccess= drop-in runs it and it writes
+#     /var/crash even with apport.service masked. Per unit, so an absent whoopsie never skips
+#     apport; a plain unit is also disabled + STOPPED (a unit masked earlier by hand can still be
+#     active); a template has no instance to stop. systemd-coredump stays the core collector, so a
+#     crash is diagnosable via coredumpctl instead of a GUI popup (fail loud, like imag).
 while IFS= read -r CRASH_UNIT; do
   [ -n "$CRASH_UNIT" ] || continue
-  systemctl disable --now "$CRASH_UNIT" >/dev/null 2>&1 || true
-  systemctl stop "$CRASH_UNIT" >/dev/null 2>&1 || true
+  case "$CRASH_UNIT" in
+    *@.service) ;;
+    *)
+      systemctl disable --now "$CRASH_UNIT" >/dev/null 2>&1 || true
+      systemctl stop "$CRASH_UNIT" >/dev/null 2>&1 || true
+      ;;
+  esac
   systemctl mask "$CRASH_UNIT" >/dev/null 2>&1 \
     || fail "could not mask ${CRASH_UNIT} -- the operator crash popup would return (systemctl mask ${CRASH_UNIT} by hand, then re-run)"
 done < <(strih_crash_popup_units)
 DEBIAN_FRONTEND=noninteractive apt-get install -y systemd-coredump >/dev/null \
   || fail "systemd-coredump install failed -- needed so a crash lands in coredumpctl once apport is masked"
-echo "  apport + whoopsie disabled + masked (no operator crash popup); systemd-coredump installed (crashes -> coredumpctl)"
+echo "  apport + its coredump hook + whoopsie masked (no operator crash popup); systemd-coredump installed (crashes -> coredumpctl)"
 
 # ---------------------------------------------------------------------------------------------
 AUDIO_NAME="$(strih_lx_audio_input_name)"
