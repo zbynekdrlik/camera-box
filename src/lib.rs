@@ -73,6 +73,11 @@ pub mod painter_mode;
 // lives in `ndi`.
 pub mod reannounce;
 
+// #1362 — cameraman HDMI preview source resolution (the preferred name, else the ONE discovered
+// `STRIH-<box> (interkom)` output). Pure + cross-platform so it unit-tests Tier-0; the NDI finder
+// loop that feeds it lives in `ndi` and the display loop that drives it in `ndi_display`.
+pub mod preview_source;
+
 // #367 — colour-scale reference layout (pure geometry + colour table). Cross-platform, no
 // probe deps, so it unit-tests Tier-0; the probe-gated framebuffer blit lives in `probe::qr`.
 pub mod colour_scale;
