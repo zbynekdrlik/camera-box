@@ -200,8 +200,13 @@ PS
 # Linux restart is the unit's own restart, never a kill + AHK respawn (strih-lx has no AHK). The unit
 # is proven INSTALLED first (the bundle-state self-heal's unit-exists-first discipline): no unit ->
 # report MV_REVERIFY_NO_UNIT + exit 2 WITHOUT touching OBS (nothing would relaunch it). reset-failed
-# clears a start-limit-hit latch; --no-block returns at once -- mv_reverify_wait_obs_ws then polls
-# :4455 exactly as it does for the Windows AHK respawn (the launcher's own :4455 wait is up to 90 s).
+# clears a start-limit-hit latch. The restart BLOCKS on purpose (review round 1): the unit is
+# Type=simple, so `restart` returns once ExecStop (strih-obs-stop.sh, a <=15 s TERM->KILL ladder)
+# has finished and the new ExecStart has forked -- it never waits on the launcher's own :4455 loop.
+# A --no-block restart returned while the OLD OBS still answered :4455, so the dev1-side
+# mv_reverify_wait_obs_ws accepted the dying instance and the burn sweep-off / multiview reopen /
+# finder heal-wait hit it instead of the fresh OBS. After a blocking restart the old OBS is gone, so
+# the next :4455 answer is the fresh one.
 mv_reverify_obs_restart_linux_cmd() {
   cat <<'CMD'
 if ! systemctl --user list-unit-files --no-legend strih-obs.service 2>/dev/null | grep -q .; then
@@ -209,8 +214,8 @@ if ! systemctl --user list-unit-files --no-legend strih-obs.service 2>/dev/null 
   exit 2
 fi
 systemctl --user reset-failed strih-obs.service 2>/dev/null || true
-if systemctl --user restart --no-block strih-obs.service; then
-  echo "MV_REVERIFY_OBS_RESTART: strih-obs.service restart queued (its launcher clears the crash sentinels, then relaunches the genlock OBS)"
+if systemctl --user restart strih-obs.service; then
+  echo "MV_REVERIFY_OBS_RESTART: strih-obs.service restarted (old OBS stopped; its launcher clears the crash sentinels, then relaunches the genlock OBS)"
 else
   echo "MV_REVERIFY_RESTART_FAILED: systemctl --user restart strih-obs.service failed"
   exit 3
@@ -224,14 +229,17 @@ CMD
 # EncodedCommand, AHK respawns). Override with MV_REVERIFY_OBS_RESTART_CMD (run with "<ip>") for
 # offline tests. Returns 2 (restart NOT performed -- the Windows AHK respawn watcher absent or the
 # strih-lx unit not installed; OBS untouched, #1093 review finding 2) on MV_REVERIFY_NO_AHK /
-# MV_REVERIFY_NO_UNIT; 3 when the strih-lx restart itself failed (MV_REVERIFY_RESTART_FAILED);
-# 0 otherwise.
+# MV_REVERIFY_NO_UNIT; 3 when the strih-lx restart did not verifiably happen (MV_REVERIFY_RESTART_
+# FAILED, OR -- review round 1 -- no positive MV_REVERIFY_OBS_RESTART marker at all on the Linux
+# path: an ssh/auth/timeout failure must never count as a performed restart); 0 otherwise.
 mv_reverify_obs_restart_run() {
-  local ip="$1" out
+  local ip="$1" out lx=0
   if [ -n "${MV_REVERIFY_OBS_RESTART_CMD:-}" ]; then
     out="$($MV_REVERIFY_OBS_RESTART_CMD "$ip" 2>&1 || true)"
   elif [ "$(strih_platform "$ip")" = "linux" ]; then
-    out="$(timeout "${MV_REVERIFY_OBS_RESTART_SSH_TIMEOUT:-30}" sshpass -p "${STRIH_PW:-newlevel}" ssh \
+    lx=1
+    # bound: the stop ladder is <=15 s + the fork; 45 s leaves headroom for a slow ssh handshake.
+    out="$(timeout "${MV_REVERIFY_OBS_RESTART_SSH_TIMEOUT:-45}" sshpass -p "${STRIH_PW:-newlevel}" ssh \
       -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 \
       "${STRIH_USER:-newlevel}@${ip}" "$(mv_reverify_obs_restart_linux_cmd)" 2>&1 || true)"
   else
@@ -246,6 +254,15 @@ mv_reverify_obs_restart_run() {
     *MV_REVERIFY_NO_AHK* | *MV_REVERIFY_NO_UNIT*) return 2 ;;
     *MV_REVERIFY_RESTART_FAILED*) return 3 ;;
   esac
+  if [ "$lx" = 1 ]; then
+    case "$out" in
+      *MV_REVERIFY_OBS_RESTART:*) ;;
+      *)
+        echo "    [#1093 obs-restart] no MV_REVERIFY_OBS_RESTART marker from strih-lx ${ip} (ssh/auth/timeout failure?) -- treating the restart as NOT performed" >&2
+        return 3
+        ;;
+    esac
+  fi
   return 0
 }
 
@@ -254,7 +271,7 @@ mv_reverify_obs_restart_run() {
 # bounded. WARN-and-return-0 on timeout (the single re-check decides whether the leg recovered).
 mv_reverify_wait_obs_ws() {
   local ip="$1" iters="${MV_REVERIFY_OBS_WS_WAIT_ITERS:-40}" i=0
-  echo "    [#1093 escalate] waiting for strih OBS WebSocket :4455 to return after the AHK respawn" >&2
+  echo "    [#1093 escalate] waiting for strih OBS WebSocket :4455 to return after the restart (AHK respawn on Windows, strih-obs.service on strih-lx)" >&2
   while [ "$i" -lt "$iters" ]; do
     if timeout 3 bash -c "exec 3<>/dev/tcp/$ip/4455" 2>/dev/null; then
       echo "    [#1093 escalate] strih OBS :4455 reachable again" >&2
@@ -394,8 +411,12 @@ mv_reverify_or_escalate() {
     echo "    [#1093 escalate] ${box}: strih's AutoHotkey64 respawn watcher is ABSENT -- restart skipped (obs64 left running). Cannot recover this wedge safely from the harness; failing loud." >&2
     return 1
   fi
+  if [ "$_rr" != "0" ] && [ "$_lx" = 1 ]; then
+    echo "    [#1093 escalate] ${box}: the strih-lx strih-obs.service restart FAILED or was not confirmed (rc ${_rr}) -- failing loud; check 'systemctl --user status strih-obs.service' on strih-lx." >&2
+    return 1
+  fi
   if [ "$_rr" != "0" ]; then
-    echo "    [#1093 escalate] ${box}: the strih-lx strih-obs.service restart FAILED (systemctl rc) -- failing loud; check 'systemctl --user status strih-obs.service' on strih-lx." >&2
+    echo "    [#1093 escalate] ${box}: the strih OBS restart did not complete (rc ${_rr}) -- failing loud." >&2
     return 1
   fi
   MV_REVERIFY_OBS_RESTARTS=$((${MV_REVERIFY_OBS_RESTARTS:-0} + 1))

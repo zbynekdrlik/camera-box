@@ -208,7 +208,9 @@ obs_fleet_boxes() {
 # `getent ahosts` (no early `exit` in awk -> no SIGPIPE) covers a hostname AND a literal IP (which
 # resolves to itself). Override in a test to stub resolution. `|| true` keeps it drain-safe.
 obs_fleet_resolve_host() {
-  getent ahosts "${1:-}" 2>/dev/null | awk 'NR==1{print $1}' || true
+  # issue 1317 part 4 review: time-bounded -- strih_platform / the class gate now resolve an unknown
+  # NAME through this seam, so a stalled DNS resolver must never stall every caller.
+  timeout "${OBS_FLEET_RESOLVE_TIMEOUT:-2}" getent ahosts "${1:-}" 2>/dev/null | awk 'NR==1{print $1}' || true
 }
 # obs_fleet_status_probe <host> <port> -> 1 (a TCP connect to host:port succeeded) | 0. The OBS-WS
 # port answering is the "box is home + serving" signal. Bash /dev/tcp so no nc/curl dependency; a

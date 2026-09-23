@@ -47,10 +47,16 @@ heavy OBS restart ONLY for the receiver case — never a dead painter.
 Linux strih-lx it runs `mv_reverify_obs_restart_linux_cmd` over PLAIN ssh (never win_ssh_run /
 PowerShell): prove the unit is installed (`systemctl --user list-unit-files strih-obs.service`) —
 absent → `MV_REVERIFY_NO_UNIT` + rc 2, OBS untouched (the Linux analogue of the no-AHK guard below) —
-then `reset-failed` (clears a start-limit latch) and `restart --no-block` (returns at once; the unit's
-launcher `strih-obs-start.sh` clears `.sentinel/*` itself and waits ≤90 s for :4455, so the harness's
-own `mv_reverify_wait_obs_ws` poll owns the wait exactly as for the AHK respawn). A failed restart →
-`MV_REVERIFY_RESTART_FAILED` + rc 3 → the orchestrator fails loud. The orchestrator's messages name
+then `reset-failed` (clears a start-limit latch) and a **BLOCKING** `restart` (the unit's launcher
+`strih-obs-start.sh` clears `.sentinel/*` itself). **Never `--no-block`** (review round 1): the unit
+is `Type=simple`, so a blocking restart returns once ExecStop (`strih-obs-stop.sh`, a ≤15 s
+TERM→KILL ladder) finished and the new ExecStart forked — it never waits on the launcher's own :4455
+loop. With `--no-block` the OLD OBS still answered :4455 during its stop ladder, so the dev1-side
+`mv_reverify_wait_obs_ws` accepted the dying instance and the burn sweep-off / multiview reopen /
+finder heal-wait hit it (a burn-leak on the fresh OBS). The ssh bound is 45 s. A failed restart
+(`MV_REVERIFY_RESTART_FAILED`) OR **no positive `MV_REVERIFY_OBS_RESTART:` marker at all** (an
+ssh/auth/timeout failure) → rc 3 → the orchestrator fails loud and never counts it against the
+restart budget as performed. The orchestrator's messages name
 `strih-obs.service` on Linux and AutoHotkey64 on Windows. There is NO AHK on strih-lx — never port the
 AHK guard/kill there. Tier-0: `tests/python/test_strih_windows_remnants_1317.py` runs the router with
 a fake `sshpass` on PATH (argv capture) for both platforms. The live restart itself stays

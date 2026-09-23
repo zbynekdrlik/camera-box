@@ -196,8 +196,11 @@ Per-facet decision (by each facet's PREMISE — a platform-neutral read joins, a
   fields — this is what catches **`strih.lan`, the retired Windows PC's own name, which the rig DNS
   STILL points at 10.77.9.202** (verified `getent ahosts strih.lan` on dev1, 23.9.2026). An IPv4
   literal is never sent to the resolver (no DNS in the hot path; tests stub `obs_fleet_resolve_host`
-  after sourcing). `strih_platform` keeps its env overrides (`STRIH_PLATFORM`, and `STRIH_LX_HOST`
-  now only as an explicit extra match — no default). The python twin is `scripts/obs_fleet_table.py`
+  after sourcing; the seam is `timeout`-bounded, `OBS_FLEET_RESOLVE_TIMEOUT`, default 2 s).
+  `strih_platform` = linux iff the addressed row's **CLASS** is `linux-genlock` — keyed on the class,
+  never the literal name `strih-lx`, so the next Linux strih (strih-pp) is ONE table row with no code
+  edit in bash or python. It keeps its env overrides (`STRIH_PLATFORM`, and `STRIH_LX_HOST` now only
+  as an explicit extra match — no default). The python twin is `scripts/obs_fleet_table.py`
   (parses the SAME `OBS_FLEET` default block, or the `OBS_FLEET` env) used by rig-health-audit's
   `strih_platform` and the phase/av-sync calibrate push plans; parity pinned by
   `tests/python/test_strih_windows_remnants_1317.py` (runs both sides). Never add a third hand-kept
@@ -213,8 +216,8 @@ Per-facet decision (by each facet's PREMISE — a platform-neutral read joins, a
 Each routes on the ONE resolver above; the Windows branch is kept (a future Windows strih / the
 `STRIH_PLATFORM=windows` override) but no longer the default for .202:
 
-- **mv-reverify escalation restart** (`scripts/lib/mv-reverify-escalate.sh`): strih-lx gets
-  `systemctl --user restart --no-block strih-obs.service` over plain ssh — see
+- **mv-reverify escalation restart** (`scripts/lib/mv-reverify-escalate.sh`): strih-lx gets a
+  BLOCKING `systemctl --user restart strih-obs.service` over plain ssh — see
   `.claude/rules/mv-reverify-escalate.md`.
 - **phase/av-sync calibrate push plans**: `.202` → MCP `linux-strih-lx`, destination by fleet class
   (`/home/newlevel/.camera-box/<file>` on a linux-genlock box, `C:\ProgramData\camera-box\…` else).
@@ -224,7 +227,9 @@ Each routes on the ONE resolver above; the Windows branch is kept (a future Wind
 - **recording-e2e.sh `[8/8]` text**: banner via `strih_access_label`, planner hand-off via
   `strih_planner_holder_note`, and the pull-back note + all three #652 cleanup plans are a
   `strih_platform` split whose linux branch calls a `strih_lx_*` helper (exact-path `rm -f --` over
-  ssh, never a glob). **The Windows literals stay INLINE in the else-branch** — Rust static-anchor
+  ssh, never a glob; the remote command is ONE double-quoted argument with the path single-quoted
+  inside, because the printed line is parsed TWICE — the local paste and ssh's remote shell — and an
+  OBS default filename carries a space). **The Windows literals stay INLINE in the else-branch** — Rust static-anchor
   tests pin `FileDownload $STRIH_PIXELS_WIN` and `Remove-Item -Force -LiteralPath '${STRIH_HOST_PATH`
   inside recording-e2e.sh itself, so moving them into a helper would break those pins.
 - **AHK defaults**: `ahk_resolve_and_relaunch_ps` has NO default script (rc 2 + named stderr

@@ -26,11 +26,13 @@ command -v obs_fleet_name_for_host >/dev/null 2>&1 \
 #      a bad env value).
 #   2. HOST equal to STRIH_LX_HOST (when the operator sets it -- an explicit ops/test override for
 #      a strih-lx at another address) -> "linux".
-#   3. HOST addressing the fleet list's `strih-lx` row (issue 1317 part 4: `obs_fleet_name_for_host`
-#      -- 10.77.9.202, `strih-lx`, `STRIH-LX`, `strih-lx.lan`, and `strih.lan`, the retired Windows
-#      PC's own name that the rig DNS points at 10.77.9.202) -> "linux". The SAME lookup the
-#      Windows-tool class gate (obs_fleet_class_for_host) uses, so the two resolvers cannot disagree.
-#      A non-IP name is resolved through the fleet lib's getent seam; an IP literal never is.
+#   3. HOST addressing a fleet row whose CLASS is linux-genlock (issue 1317 part 4:
+#      `obs_fleet_class_for_host` -- 10.77.9.202, `strih-lx`, `STRIH-LX`, `strih-lx.lan`, and
+#      `strih.lan`, the retired Windows PC's own name that the rig DNS points at 10.77.9.202) ->
+#      "linux". The SAME alias-aware lookup the Windows-tool class gate uses, so the two resolvers
+#      cannot disagree; keyed on the row's CLASS, never a literal box name, so the next strih (a Linux
+#      strih-pp) is one OBS_FLEET row with no code edit. A non-IP name is resolved through the fleet
+#      lib's time-bounded getent seam; an IP literal never is.
 #   4. otherwise -> "windows" (any other address -- a future Windows strih, parallel-run tolerant).
 strih_platform() {
   local host="${1:-}"
@@ -44,7 +46,7 @@ strih_platform() {
     printf 'linux'
     return 0
   fi
-  if [ -n "$host" ] && [ "$(obs_fleet_name_for_host "$host" 2>/dev/null || true)" = "strih-lx" ]; then
+  if [ -n "$host" ] && [ "$(obs_fleet_class_for_host "$host" 2>/dev/null || true)" = "linux-genlock" ]; then
     printf 'linux'
   else
     printf 'windows'
@@ -96,12 +98,20 @@ strih_lx_partial_pullback_note() {
 }
 
 # strih_lx_recording_cleanup_note INDENT HOST PATH [USER] -> the strih-lx #652 cleanup PLAN line: an
-# `rm -f --` of the EXACT StopRecord path over plain ssh (never a glob, never a directory sweep). The
-# path is single-quoted with any embedded ' escaped, so a spaced OBS filename stays one argument.
+# `rm -f --` of the EXACT StopRecord path over plain ssh (never a glob, never a directory sweep).
+# The line is pasted into a LOCAL shell and ssh then hands the joined command to the REMOTE shell, so
+# the path is quoted for BOTH parses (review round 1): single-quoted for the remote shell (an embedded
+# ' becomes '\''), and that remote command is one double-quoted argument for the local shell (\ " $ `
+# escaped). An OBS default filename carries a space -- it stays exactly one argument remotely.
 strih_lx_recording_cleanup_note() {
   local indent="${1:-}" host="${2:-}" path="${3:-<unknown>}" user="${4:-${STRIH_USER:-newlevel}}"
-  local q="${path//\'/\'\\\'\'}"
-  printf "%sstrih-lx ssh:         ssh %s@%s rm -f -- '%s'\n" "$indent" "$user" "$host" "$q"
+  local remote dq
+  remote="rm -f -- '${path//\'/\'\\\'\'}'"
+  dq="${remote//\\/\\\\}"
+  dq="${dq//\"/\\\"}"
+  dq="${dq//\$/\\\$}"
+  dq="${dq//\`/\\\`}"
+  printf '%sstrih-lx ssh:         ssh %s@%s "%s"\n' "$indent" "$user" "$host" "$dq"
 }
 
 # strih_planner_holder_note HOST -> the first two lines of the per-box PLANNER hand-off note. On

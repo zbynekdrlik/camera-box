@@ -37,10 +37,12 @@ def _table_text() -> str:
 
 
 def fleet_rows() -> list[tuple[str, str, str, str]]:
-    """Every `name|host|class|home-check` row, in table order (blank lines skipped)."""
+    """Every `name|host|class|home-check` row, in table order. Blank / whitespace-only lines are
+    skipped (bash treats such a line as a row that can never match -- the same outcome); a
+    MALFORMED row raises on purpose, so a broken table is a loud error, never a silent mis-route."""
     rows = []
     for line in _table_text().splitlines():
-        if not line:
+        if not line.strip():
             continue
         parts = line.split("|")
         if len(parts) != 4:

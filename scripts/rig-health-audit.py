@@ -528,16 +528,17 @@ import obs_fleet_table  # noqa: E402
 
 def strih_platform(host: str) -> str:
     """'linux' | 'windows' for an OBS box address: STRIH_PLATFORM env (windows|linux only; any
-    other value is ignored) wins, then an explicit STRIH_LX_HOST match, then the obs-fleet list's
-    `strih-lx` row (alias-aware: 10.77.9.202, strih-lx(.lan), strih.lan) is linux, else windows --
-    the stream box and every other address keep the Windows reads."""
+    other value is ignored) wins, then an explicit STRIH_LX_HOST match, then an address the
+    obs-fleet list maps (alias-aware: 10.77.9.202, strih-lx(.lan), strih.lan) to a linux-genlock
+    row is linux, else windows -- the stream box and every other address keep the Windows reads.
+    Keyed on the row CLASS, never a literal name, so the next Linux strih is one table row."""
     forced = os.environ.get("STRIH_PLATFORM", "")
     if forced in ("windows", "linux"):
         return forced
     lx_host = os.environ.get("STRIH_LX_HOST")
     if host and lx_host and host == lx_host:
         return "linux"
-    return "linux" if obs_fleet_table.fleet_name_for_host(host) == "strih-lx" else "windows"
+    return "linux" if obs_fleet_table.fleet_class_for_host(host) == "linux-genlock" else "windows"
 
 
 def _linux_obs_log_tail_cmd(tail: int | str = 500) -> str:
