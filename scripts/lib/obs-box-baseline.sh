@@ -248,6 +248,13 @@ ethtool -A ${NIC} rx on tx on 2>/dev/null || true
 exit 0
 EOF
 chmod +x /etc/rc.local
+# power-profiles-daemon (0.30 on Ubuntu 26.04) rewrites every core's scaling_governor to powersave when
+# it starts, undoing the governor pin above -- strih-lx came back powersave after its kiosk reboot
+# (issue 1357, 23.9.2026). The appliance has one power policy (this item + <BOX>-maxperf), so the
+# daemon is stopped and masked; <BOX>-maxperf.sh writes platform_profile itself.
+systemctl disable --now power-profiles-daemon.service >/dev/null 2>&1 || true
+systemctl mask power-profiles-daemon.service >/dev/null 2>&1 \
+    || fail "could not mask power-profiles-daemon.service -- it would reset the governor to powersave at boot"
 systemctl daemon-reload
 systemctl enable --now cpu-performance.service >/dev/null 2>&1
 bash /etc/rc.local
@@ -728,7 +735,7 @@ for g in /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor; do echo performa
 for e in /sys/devices/system/cpu/cpu*/cpufreq/energy_performance_preference; do [ -f "$e" ] && { echo performance > "$e" 2>/dev/null || log "EPP write FAILED: $e"; }; done
 [ -f /sys/devices/system/cpu/intel_pstate/no_turbo ] && { echo 0 > /sys/devices/system/cpu/intel_pstate/no_turbo 2>/dev/null || log "no_turbo write FAILED"; }
 [ -f /sys/firmware/acpi/platform_profile ] && { echo performance > /sys/firmware/acpi/platform_profile 2>/dev/null || log "platform_profile write FAILED"; }
-command -v powerprofilesctl >/dev/null && { powerprofilesctl set performance 2>/dev/null || log "powerprofilesctl FAILED (daemon not up yet?)"; }
+command -v powerprofilesctl >/dev/null && systemctl is-active --quiet power-profiles-daemon.service && { powerprofilesctl set performance 2>/dev/null || log "powerprofilesctl FAILED (daemon not up yet?)"; }
 [ -f /sys/module/usbcore/parameters/autosuspend ] && { echo -1 > /sys/module/usbcore/parameters/autosuspend 2>/dev/null || log "usb autosuspend write FAILED"; }
 for p in /sys/bus/pci/devices/*/power/control; do echo on > "$p" 2>/dev/null || log "pci runtime-pm write FAILED: $p"; done
 log "applied: governor=$(sort -u /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor | tr '\n' ' ') profile=$(cat /sys/firmware/acpi/platform_profile 2>/dev/null)"

@@ -247,6 +247,9 @@ echo "  de-jitter: oomd/tracker/evolution/apport(+coredump hook)/whoopsie masked
 # desktop-bloat services disabled, gdm3 disabled for the next boot, the owner's explicit GNOME purge list.
 obs_box_kiosk() {
     local DESKTOP_USER="${1:?obs_box_kiosk: desktop user required}" BOX="${2:?obs_box_kiosk: BOX required}"
+    # Optional box fact: `keep-bluetooth` leaves bluetooth enabled (strih-lx is operated with a Bluetooth
+    # mouse); every other box gets the plain disable list below.
+    local KEEP_BT="${3:-}"
 # imag-nb is a single-purpose OBS cutting appliance — it must boot straight into a bare,
 # non-compositing openbox kiosk (fullscreen OBS projectors on the full panel+HDMI), NOT the full
 # GNOME user desktop (owner directive #504, 2026-07-04): GNOME's dock/top-bar steal OBS's screen,
@@ -304,6 +307,7 @@ echo "  #504: display-manager.service → lightdm (openbox autologin for ${DESKT
 #     robust to a static/alias/absent unit (colord is `static`).
 local GNOME_PURGE_PKGS GNOME_TO_PURGE p svc
 for svc in cups cups-browsed bluetooth ModemManager colord switcheroo-control gnome-remote-desktop; do
+    [ "$svc" = bluetooth ] && [ "$KEEP_BT" = keep-bluetooth ] && continue
     systemctl disable --now "$svc" >/dev/null 2>&1 || true
 done
 # gdm3 is handled SEPARATELY and deliberately WITHOUT `--now` (review finding, 2026-07-05): on a
@@ -315,6 +319,11 @@ done
 # (step 7) / CPU-isolation (step 8) / NVIDIA (step 9) changes above — the actual handover to
 # lightdm+openbox happens at the reboot this script deliberately does not perform.
 systemctl disable gdm3 >/dev/null 2>&1 || true
+if [ "$KEEP_BT" = keep-bluetooth ]; then
+    systemctl enable --now bluetooth >/dev/null 2>&1 \
+        || fail "keep-bluetooth: could not enable bluetooth -- the operator's Bluetooth mouse would not reconnect"
+    echo "  kiosk: bluetooth kept enabled (box fact keep-bluetooth)"
+fi
 echo "  #504: disabled cups/cups-browsed/bluetooth/ModemManager/colord/switcheroo-control/gnome-remote-desktop now; gdm3 disabled for next boot (avahi/sshd/dantesync/remoteos-mcp/NetworkManager/lightdm kept)"
 
 # (e) Purge the GNOME desktop bloat — the owner's EXPLICIT package list (#504). NEVER a bare
