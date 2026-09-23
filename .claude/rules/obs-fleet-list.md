@@ -10,6 +10,9 @@ paths:
   - "scripts/genlock-lock-alert-watchdog.sh"
   - "scripts/render-freeze-alert-watchdog.sh"
   - "scripts/dantesync-clock-alert-watchdog.sh"
+  - "scripts/obs-session-watchdog.sh"
+  - "scripts/obs-burn-reconcile-watchdog.sh"
+  - "scripts/rig-restore-watchdog.sh"
 ---
 
 # OBS_FLEET — the ONE declared list of managed broadcast-OBS boxes (#1296)
@@ -114,16 +117,65 @@ Per-facet decision (by each facet's PREMISE — a platform-neutral read joins, a
 | vb-matrix | stream | a Windows VB-Audio Matrix process check; strih-lx has none (PipeWire replaced it, issue 1344) |
 | av-step | stream | the av-sync dock is on the stream box only |
 | ndi-portmap | strih-lx | the ONE strih whose NDI sender port map is watched (issue 1363) |
+| obs-session | stream resolume | the #979 obs64/AHK Windows SESSION-0 visibility probe (PowerShell over `win_ssh_run`) — Windows-only, so strih-lx is OUT; the consumer ALSO class-gates (below) |
+| burn-reconcile | strih-lx stream | the #1060 fresh-OBS-start burn reconcile — OBS-WS GetStats + `obs_burn_filter` sweeps, neutral; resolume OUT (its cg-OBS burn is the opt-in CG_CHAIN profile) |
+| rig-restore | strih-lx stream | the #281 stranded-rig restore — the E2E harness's two program boxes, `obs_phase2.py` program-scene/teardown over OBS-WS, neutral |
 
 - `obs_fleet_facet_members ndi-portmap` = `strih-lx`: `scripts/ndi-portmap-audit.sh` consumes the
   member NAME only and refuses any member count other than one. It derives the sender prefix from the
   name and reads the IP from the anchor's own mDNS record. Details: `.claude/rules/ndi-portmap-watchdog.md`.
-- **Outside the fleet list (the issue-1317 edit does NOT reach them):** dev1 watchdogs that do NOT
-  derive from `obs_fleet_boxes` still dial a literal `strih` at .202 with Windows-shaped probes
-  (`obs-session-watchdog.sh` via `win_ssh_run`, `obs-burn-reconcile-watchdog.sh`,
-  `rig-restore-watchdog.sh`). Moving them onto the fleet list + a class-resolved probe is a separate
-  change (recorded on issue 1317 for the supervisor to file); do not assume a fleet-row edit fixes
-  them.
+- **The per-box watchdogs that used to dial a literal `strih` now derive from the list too (issue
+  1317 part 2).** `obs-session-watchdog.sh` (ENABLED on dev1), `obs-burn-reconcile-watchdog.sh`
+  (ENABLED) and `rig-restore-watchdog.sh` each read `<X>_BOXES="${OVERRIDE:-$(obs_fleet_boxes
+  <facet>)}"` (overrides `OBS_SESSION_WATCHDOG_BOXES` / `OBS_BURN_RECONCILE_BOXES` /
+  `RIG_WATCHDOG_OBS_BOXES`) and loop the `name|host` pairs; the old per-box host knobs stay
+  per-NAME overrides (`STRIH_HOST` now repoints strih-lx, `STREAM_HOST` the stream box). The session
+  watchdog's host/ssh-credential overrides are GENERIC per fleet name (`<NAME>_HOST` / `<NAME>_USER`
+  / `<NAME>_PW`, default the roster host + targets.md `newlevel/newlevel`), so a new windows-genlock
+  fleet row is watched with no code edit; its AHK flag is the ONE fact `obs_fleet_has_ahk` (also
+  read by `deploy-genlock-fleet.sh`'s `fleet_box_has_ahk`). The old literal `strih` arm of the
+  session watchdog handed the Linux strih-lx the Windows PowerShell probe and logged `strih: ERROR:
+  no probe output` on every 5-min pass.
+- **rig-restore's UNREADABLE count is roster-relative and FAIL-CLOSED** (`rig_obs_unreadable_count`):
+  an EMPTY OBS roster (a mis-set `OBS_FLEET`, a failed roster mktemp) counts 1, so a pass that saw
+  no OBS box never clears the E2E marker — the #353 masking-bug class the old fixed `2 - seen`
+  arithmetic guarded. `fleet_box_ip strih-lx` likewise fails closed (rc 2, no output) with no row.
+- **The obs-session watchdog is ENABLED and now pages resolume while home** — the #1296 `.201`
+  `bridge` collision residual applies to it exactly as to obs-liveness (promotion = :4455 answers,
+  page = obs64/AHK in session 0 over ssh). Identity read 23.9.2026: `resolume.lan` → 10.77.9.201 =
+  `resolume-snv.lan`, ssh `hostname` = `resolume-snv`, AHK watcher seen in session 1. Re-confirm when
+  the event-LAN DHCP lease moves.
+- **A Windows-only probe is CLASS-gated in the consumer, not only by facet policy.**
+  `obs_session_targets` skips (and logs) any roster member whose `obs_fleet_class` is not
+  `windows-genlock` — including an unknown name and an override that names strih-lx — so a Linux box
+  can never be handed PowerShell even if someone widens the facet. Same shape for any future
+  Windows-only consumer: facet policy decides membership, the class gate is the backstop.
+- **`obs_fleet_poll_now <name>` is the traveling/retired gate for a NEW per-box loop** (the three
+  issue-1317 part-2 consumers use it; obs-liveness / network-reach predate it and still call
+  `obs_fleet_is_home` for resolume themselves). `always` →
+  poll WITHOUT consulting `obs_fleet_is_home` (so the `OBS_FLEET_HOME` force-list test seam never
+  drops a fixed box), `traveling` → only while home, `retired` → never, a name with no row (an ops
+  override) → polled as given. Use it instead of re-deciding per watchdog. In rig-restore an away
+  member is not probed and so is never counted UNREADABLE (which would hold the E2E marker).
+- **State keys follow the fleet NAME.** The burn-reconcile baseline moved from `strih_rtf` to
+  `strih-lx_rtf`; its "unknown previous baseline is NOT a restart" rule makes the first pass a
+  seed-only NOOP, never a false sweep. The session watchdog's alert dedup is `obs-session-<name>`.
+- **Live proof (23.9.2026, read-only `--dry-run`, scratch state files, cams blackholed):** session
+  roster `stream|10.77.9.204 resolume|resolume.lan` — stream + resolume `OBS_SESSION=1 AHK_SESSION=1
+  wedged=0`, no probe aimed at .202; burn-reconcile `strih-lx: renderTotalFrames … cur=430270`;
+  rig-restore `obs strih-lx (10.77.9.202): program scene='Cam 3'`.
+- **The strih-lx DIAL default elsewhere is the fleet host too.** `fleet_box_ip strih-lx`
+  (`deploy-genlock-fleet.sh`, `STRIH_LX_IP` override) and `strih_lx_host` (`strih-provision.sh`,
+  `STRIH_LX_HOST` override, lazy-sources this lib) return `obs_fleet_host strih-lx`, never the
+  unresolvable `strih-lx.lan`. The box's OWN hostname is `strih_lx_hostname` (`strih-lx`) —
+  setup-strih no longer cuts it out of the dial address (an IP would have renamed the box `10`).
+- **Still a literal Windows `strih` at .202 (followups, not fleet-derived yet):** the
+  `deploy-genlock-fleet.sh` / `launch-obs-genlock.sh` / `obs-self-heal-install.sh` `strih` arms
+  (win-strih MCP planners; the deploy's empty default fleet is still `strih,stream`),
+  `strih-recordings-retention.sh` + `obs-backup-retention.sh` (Windows `C:\` defaults at .202),
+  `recording-verdict-on-strih.sh` (Windows planner, `STRIH_BOX` .202) and
+  `bkshading-deploy-service.sh` (Windows install at .202). Retiring those arms is a planner change
+  with many pinned tests, not a roster edit.
 - **Live proof (23.9.2026, read-only `--dry-run` sweep):** network-reach `strih-lx (10.77.9.202):
   ping=1 ws:4455=1 bundle:8899=1 -> REACHABLE`; bundle-state `-> HEALTHY`; obs-liveness
   `strih-lx activeFps=30.00 renderAdvanced=True`; genlock-lock / render-freeze / audio-lag /
