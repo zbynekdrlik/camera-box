@@ -1080,7 +1080,7 @@ strih_cpu_performance_unit_text() {
   cat <<'EOF'
 [Unit]
 Description=Set CPU to performance mode
-After=multi-user.target
+After=multi-user.target power-profiles-daemon.service
 
 [Service]
 Type=oneshot
