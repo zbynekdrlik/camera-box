@@ -1204,12 +1204,30 @@ pub struct NdiReceiver {
 unsafe impl Send for NdiReceiver {}
 
 impl NdiReceiver {
-    /// Find and connect to an NDI source by name
-    /// Blocks until the source is found (with timeout)
+    /// Find and connect to an NDI source by name (the first discovered name CONTAINING
+    /// `source_name`). Blocks until the source is found (with timeout).
     pub fn connect(source_name: &str, timeout_secs: u32) -> Result<Self> {
+        Self::connect_with(timeout_secs, source_name, |names, _window_elapsed| {
+            names
+                .iter()
+                .find(|name| name.contains(source_name))
+                .cloned()
+        })
+    }
+
+    /// Run the NDI finder for up to `timeout_secs`, and on every ~1 s pass hand the currently
+    /// discovered source names to `pick(names, window_elapsed)`; connect to the EXACT name it
+    /// returns. `window_elapsed` is `true` on the final pass (the whole find window has run),
+    /// which is guaranteed to happen once before giving up — so a caller can defer a fallback
+    /// choice until discovery had its full window (#1362 cameraman preview resolution).
+    /// `label` names what is being searched for in the log/error lines.
+    pub fn connect_with<F>(timeout_secs: u32, label: &str, mut pick: F) -> Result<Self>
+    where
+        F: FnMut(&[String], bool) -> Option<String>,
+    {
         let lib = Arc::new(NdiLib::load()?);
 
-        tracing::info!("Searching for NDI source: {}", source_name);
+        tracing::info!("Searching for NDI source: {}", label);
 
         // Create finder
         let find_create = NDIlib_find_create_t {
@@ -1226,16 +1244,20 @@ impl NdiReceiver {
         // Search for source with timeout
         let start = std::time::Instant::now();
         let timeout = std::time::Duration::from_secs(timeout_secs as u64);
-        let mut found_source: Option<NDIlib_source_t> = None;
+        let mut found: Option<(String, NDIlib_source_t)> = None;
 
-        while start.elapsed() < timeout {
+        loop {
             // Wait for sources (1 second intervals)
             unsafe { (lib.find_wait_for_sources)(finder, 1000) };
+            let window_elapsed = start.elapsed() >= timeout;
 
-            // Get current sources
+            // Get current sources. The returned array (and its name pointers) is owned by the
+            // finder and stays valid until the next get_current_sources / find_destroy call, so
+            // a chosen entry is used (recv_create below) before either happens.
             let mut num_sources: u32 = 0;
             let sources = unsafe { (lib.find_get_current_sources)(finder, &mut num_sources) };
 
+            let mut discovered: Vec<(String, NDIlib_source_t)> = Vec::new();
             if num_sources > 0 && !sources.is_null() {
                 for i in 0..num_sources {
                     let source = unsafe { *sources.add(i as usize) };
@@ -1244,26 +1266,31 @@ impl NdiReceiver {
                             .to_string_lossy()
                             .to_string();
                         tracing::debug!("Found NDI source: {}", name);
-
-                        if name.contains(source_name) {
-                            tracing::info!("Found matching source: {}", name);
-                            found_source = Some(source);
-                            break;
-                        }
+                        discovered.push((name, source));
                     }
                 }
             }
 
-            if found_source.is_some() {
+            let names: Vec<String> = discovered.iter().map(|(name, _)| name.clone()).collect();
+            if let Some(target) = pick(&names, window_elapsed) {
+                // Connect to the EXACT picked name (never a substring of it).
+                found = discovered.into_iter().find(|(name, _)| *name == target);
+                if let Some((name, _)) = &found {
+                    tracing::info!("Found matching source: {}", name);
+                    break;
+                }
+            }
+
+            if window_elapsed {
                 break;
             }
         }
 
-        let source = match found_source {
-            Some(s) => s,
+        let (found_name, source) = match found {
+            Some(f) => f,
             None => {
                 unsafe { (lib.find_destroy)(finder) };
-                anyhow::bail!("NDI source '{}' not found within timeout", source_name);
+                anyhow::bail!("NDI source '{}' not found within timeout", label);
             }
         };
 
@@ -1292,7 +1319,7 @@ impl NdiReceiver {
         Ok(Self {
             lib,
             receiver,
-            source_name: source_name.to_string(),
+            source_name: found_name,
         })
     }
 

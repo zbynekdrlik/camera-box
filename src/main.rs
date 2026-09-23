@@ -162,7 +162,11 @@ fn apply_cpu_affinity() {
 /// delivers "plug in -> shows preview, unplug -> stops, move the monitor to another box -> that
 /// box shows it" for free. This is the interkom/return/talkback monitor cam1/cam2 already
 /// showed before #556 — NOT the cameraman Multiview camera grid (owner correction, 2026-07-08).
-const DEFAULT_DISPLAY_SOURCE: &str = "STRIH-SNV (interkom)";
+/// #1362: this is only the PREFERRED name (the current strih, `STRIH-LX (interkom)`); when it is
+/// not on the LAN the display loop falls back to the one discovered `STRIH-<box> (interkom)`
+/// output, so a strih swap never blackens every cameraman monitor again. Single-sourced in the
+/// pure `camera_box::preview_source` module.
+const DEFAULT_DISPLAY_SOURCE: &str = camera_box::preview_source::DEFAULT_PREVIEW_SOURCE;
 
 /// #528: E2E-harness opt-out. When this env var is set (to any value), the display thread does
 /// not start at all, freeing `/dev/fb0` for the QR painter (`scripts/rig-mode.sh test`). This
@@ -221,7 +225,7 @@ struct Args {
     #[arg(short, long)]
     device: Option<String>,
 
-    /// NDI source to display on HDMI (e.g., "STRIH-SNV (interkom)")
+    /// NDI source to display on HDMI (e.g., "STRIH-LX (interkom)")
     #[arg(long = "display")]
     display_source: Option<String>,
 
@@ -2231,11 +2235,8 @@ mod tests {
     #[test]
     fn test_args_parse_with_display() {
         let args =
-            Args::try_parse_from(["camera-box", "--display", "STRIH-SNV (interkom)"]).unwrap();
-        assert_eq!(
-            args.display_source,
-            Some("STRIH-SNV (interkom)".to_string())
-        );
+            Args::try_parse_from(["camera-box", "--display", "STRIH-LX (interkom)"]).unwrap();
+        assert_eq!(args.display_source, Some("STRIH-LX (interkom)".to_string()));
     }
 
     #[test]
@@ -2338,6 +2339,9 @@ mod tests {
              no [display] config section (#528: this was the exact cam1 bug)",
         );
         assert_eq!(cfg.source_name, DEFAULT_DISPLAY_SOURCE);
+        // #1362: the preferred preview source is the CURRENT strih (strih-lx), not the retired
+        // Windows STRIH-SNV box.
+        assert_eq!(cfg.source_name, "STRIH-LX (interkom)");
         assert_eq!(cfg.fb_device, "/dev/fb0");
         assert_eq!(cfg.find_timeout_secs, 30);
     }

@@ -22,7 +22,7 @@
 /// The preferred preview source every cambox asks for: the CURRENT strih box's interkom output
 /// (strih-lx since the M4 cut-over, 20.9.2026). Any other `STRIH-<box> (interkom)` is still found
 /// by the fallback in [`resolve_preview_source`], so this only has to name the usual strih.
-pub const DEFAULT_PREVIEW_SOURCE: &str = "STRIH-SNV (interkom)";
+pub const DEFAULT_PREVIEW_SOURCE: &str = "STRIH-LX (interkom)";
 
 /// NDI host prefix every strih box publishes under (`STRIH-SNV`, `STRIH-LX`, `STRIH-PP`, ...).
 pub const STRIH_HOST_PREFIX: &str = "STRIH-";
@@ -45,27 +45,68 @@ pub enum PreviewResolution {
 
 /// `true` when `name` is a strih interkom output: `STRIH-<box> (interkom)` with a non-empty box
 /// part, case exactly as NDI publishes it.
-pub fn is_strih_interkom(_name: &str) -> bool {
-    false
+pub fn is_strih_interkom(name: &str) -> bool {
+    name.strip_prefix(STRIH_HOST_PREFIX)
+        .and_then(|rest| rest.strip_suffix(INTERKOM_OUTPUT_SUFFIX))
+        .is_some_and(|host| !host.is_empty() && !host.contains(['(', ')']))
 }
 
 /// Resolve the preview source from the currently discovered NDI source names.
-pub fn resolve_preview_source(_discovered: &[String], _preferred: &str) -> PreviewResolution {
-    PreviewResolution::NotFound
+pub fn resolve_preview_source(discovered: &[String], preferred: &str) -> PreviewResolution {
+    if discovered.iter().any(|name| name == preferred) {
+        return PreviewResolution::Preferred(preferred.to_string());
+    }
+    let mut candidates: Vec<String> = discovered
+        .iter()
+        .filter(|name| is_strih_interkom(name))
+        .cloned()
+        .collect();
+    candidates.sort();
+    candidates.dedup();
+    match candidates.len() {
+        0 => PreviewResolution::NotFound,
+        1 => PreviewResolution::Fallback(candidates.remove(0)),
+        _ => PreviewResolution::Ambiguous(candidates),
+    }
 }
 
 /// Decide which exact name (if any) to connect to NOW. `window_elapsed` is `true` on the final
-/// pass of the find window.
-pub fn pick_preview_source(
-    _resolution: &PreviewResolution,
-    _window_elapsed: bool,
-) -> Option<String> {
-    None
+/// pass of the find window: the preferred name is taken on sight, the single fallback only once
+/// the window elapsed (a late mDNS announce of the preferred box must win), ambiguity and
+/// nothing-found never pick.
+pub fn pick_preview_source(resolution: &PreviewResolution, window_elapsed: bool) -> Option<String> {
+    match resolution {
+        PreviewResolution::Preferred(name) => Some(name.clone()),
+        PreviewResolution::Fallback(name) if window_elapsed => Some(name.clone()),
+        PreviewResolution::Fallback(_)
+        | PreviewResolution::Ambiguous(_)
+        | PreviewResolution::NotFound => None,
+    }
 }
 
 /// The one journal line describing a resolution (logged once per change by the display loop).
-pub fn preview_log_line(_resolution: &PreviewResolution, _preferred: &str) -> String {
-    String::new()
+pub fn preview_log_line(resolution: &PreviewResolution, preferred: &str) -> String {
+    match resolution {
+        PreviewResolution::Preferred(name) | PreviewResolution::Fallback(name) => {
+            format!("NDI display: preview source resolved to '{name}' (#1362)")
+        }
+        PreviewResolution::Ambiguous(candidates) => {
+            let list = candidates
+                .iter()
+                .map(|c| format!("'{c}'"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!(
+                "NDI display: preview source '{preferred}' not on the LAN and {} strih interkom \
+                 outputs are ({list}) -- not picking one, waiting for '{preferred}' (#1362)",
+                candidates.len()
+            )
+        }
+        PreviewResolution::NotFound => format!(
+            "NDI display: preview source '{preferred}' not on the LAN and no \
+             STRIH-<box> (interkom) output found -- retrying (#1362)"
+        ),
+    }
 }
 
 #[cfg(test)]
