@@ -236,27 +236,70 @@ obs_fleet_has_ahk() {
   esac
 }
 
-# obs_fleet_class_for_host <host-or-ip> -> the CLASS (windows-genlock | linux-genlock) of the fleet
-# row whose host field OR name equals HOST (stdout), or return 1 when no row matches. The class gate
-# a Windows-only planner consults BEFORE emitting a Windows action against an address (issue 1317
-# part 3): 10.77.9.202 is the Linux strih-lx now, so a PowerShell/schtasks/C:\ tool aimed at it must
-# refuse. Word-exact on the whole field; reads the WHOLE here-doc (no early exit -> SIGPIPE-safe).
-obs_fleet_class_for_host() {
-  local want="${1:-}" line name rest host class found=""
-  [ -n "$want" ] || return 1
+# _obs_fleet_is_ipv4 <s> -> 0 iff S is a dotted-quad IPv4 literal (4 all-digit fields). Pure.
+_obs_fleet_is_ipv4() {
+  [[ "${1:-}" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]
+}
+
+# _obs_fleet_row_match <mode> <key> -> the NAME of the first OBS_FLEET row matching KEY (stdout),
+# return 1 when none does. mode `exact`: KEY equals the row's name or host field (case-folded, so
+# `RESOLUME.lan` == `resolume.lan`); mode `name`: KEY equals the row's NAME; mode `host`: KEY equals
+# the row's HOST field. Reads the WHOLE here-doc (no early exit -> SIGPIPE-safe).
+_obs_fleet_row_match() {
+  local mode="${1:-}" key="${2:-}" line name rest host found=""
+  [ -n "$key" ] || return 1
   while IFS= read -r line; do
     [ -n "$line" ] || continue
-    name="${line%%|*}"; rest="${line#*|}"
-    host="${rest%%|*}"; rest="${rest#*|}"
-    class="${rest%%|*}"
-    if [ -z "$found" ] && { [ "$host" = "$want" ] || [ "$name" = "$want" ]; }; then
-      found="$class"
-    fi
+    name="${line%%|*}"; rest="${line#*|}"; host="${rest%%|*}"
+    [ -z "$found" ] || continue
+    case "$mode" in
+      exact) { [ "${name,,}" = "${key,,}" ] || [ "${host,,}" = "${key,,}" ]; } && found="$name" ;;
+      name) [ "${name,,}" = "${key,,}" ] && found="$name" ;;
+      host) [ "$host" = "$key" ] && found="$name" ;;
+    esac
   done <<EOF
 ${OBS_FLEET}
 EOF
   [ -n "$found" ] || return 1
   printf '%s' "$found"
+}
+
+# obs_fleet_name_for_host <host-or-ip> -> the fleet NAME that HOST addresses (stdout), or return 1
+# when no row does. The ONE alias-aware "which managed OBS box is this address" lookup (issue 1317
+# part 4) -- the authority both obs_fleet_class_for_host (the Windows-tool class gate) and
+# scripts/lib/strih-platform.sh `strih_platform` consult, so the two can never disagree. In order:
+#   1. exact: the row's name or host field, case-folded (`10.77.9.202`, `strih-lx`, `STRIH-LX`).
+#   2. short name: a DNS-style name's first label vs the row NAME (`strih-lx.lan` -> `strih-lx`);
+#      never applied to an IPv4 literal.
+#   3. resolved: a non-IP name is resolved through the obs_fleet_resolve_host seam and its address
+#      compared with the row HOST fields -- this is what catches the retired Windows PC's own name
+#      `strih.lan`, which the rig DNS still points at 10.77.9.202 (the Linux strih-lx). An IPv4
+#      literal is NEVER sent to the resolver.
+# An unknown name that does not resolve to a fleet address returns 1 (callers treat it as an
+# explicit, authoritative ops target -- the pre-existing contract).
+obs_fleet_name_for_host() {
+  local want="${1:-}" ip
+  [ -n "$want" ] || return 1
+  _obs_fleet_row_match exact "$want" && return 0
+  _obs_fleet_is_ipv4 "$want" && return 1
+  case "$want" in
+    *.*) _obs_fleet_row_match name "${want%%.*}" && return 0 ;;
+  esac
+  ip="$(obs_fleet_resolve_host "$want")"
+  [ -n "$ip" ] || return 1
+  _obs_fleet_row_match host "$ip"
+}
+
+# obs_fleet_class_for_host <host-or-ip> -> the CLASS (windows-genlock | linux-genlock) of the fleet
+# row HOST addresses (stdout), or return 1 when no row matches. The class gate a Windows-only planner
+# consults BEFORE emitting a Windows action against an address (issue 1317 part 3): 10.77.9.202 is
+# the Linux strih-lx now, so a PowerShell/schtasks/C:\ tool aimed at it must refuse. Alias-aware via
+# obs_fleet_name_for_host (issue 1317 part 4), so `strih.lan` / `strih-lx.lan` / `STRIH-LX` cannot
+# slip a Windows action past the gate.
+obs_fleet_class_for_host() {
+  local name
+  name="$(obs_fleet_name_for_host "${1:-}")" || return 1
+  obs_fleet_class "$name"
 }
 
 # obs_fleet_refuse_linux_target <host-or-ip> <tool> -> returns 0 (and prints nothing) when HOST is

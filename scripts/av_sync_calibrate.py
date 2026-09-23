@@ -54,6 +54,9 @@ from av_sync_measure import CONF_MIN, FRAME_MS  # noqa: E402
 # the STREAM 'NDI 2ME PGM' pin, which was never snapped (Nález 1-4).
 from e2e_measurement_pins import FRAME_PERIOD_MS, phase_snap_pin  # noqa: E402
 
+# issue 1317 part 4: the ONE fleet list (scripts/lib/obs-fleet.sh) decides the push destination.
+import obs_fleet_table  # noqa: E402
+
 # OBS property name for the per-source genlock latency (PROP_GENLOCK_LATENCY_MS_SRC in
 # ndi-source.cpp, DistroAV fork — the "Latency (ms)" slider per source).
 GENLOCK_SRC_LATENCY_KEY = "genlock_latency_ms_src"
@@ -98,18 +101,32 @@ AUDIO_OFFSET_CLAMP_MS = 500
 # `.claude/commands/drift-guard.md` step 1e / `vendor/README.md`'s genlock_source_latency row).
 REMOTE_PROGRAMDATA_JSON_PATH = r"C:\ProgramData\camera-box\av-sync-last.json"
 
-# Known rig hosts -> their win-* MCP tool name (obs-self-heal-install.sh's --box mapping).
-# Only used to make the printed push plan concrete/copy-pasteable; an unrecognized host still
-# gets a usable plan (destination + content), just without a resolved MCP tool name.
+# issue 1317 part 4: the Linux destination of the SAME payload -- where default_last_json_path()
+# lands when this script runs ON a Linux OBS box (strih-lx). A linux-genlock host gets this path.
+REMOTE_LINUX_JSON_PATH = "/home/newlevel/.camera-box/av-sync-last.json"
+
+# Known rig hosts -> their MCP tool name. Only used to make the printed push plan
+# concrete/copy-pasteable; an unrecognized host still gets a usable plan (destination + content),
+# just without a resolved MCP tool name. 10.77.9.202 is the Linux strih-lx (issue 1317 part 4) --
+# the Windows strih PC and its win-strih MCP are retired.
 _KNOWN_MCP_HOSTS = {
-    "10.77.9.202": "win-strih",
+    "10.77.9.202": "linux-strih-lx",
     "10.77.9.204": "win-stream-snv",
 }
 
 
 def mcp_name_for_host(host: str) -> "str | None":
-    """Resolve a rig host IP to its win-* MCP tool name, or None if not a known rig box."""
+    """Resolve a rig host IP to its MCP tool name, or None if not a known rig box."""
     return _KNOWN_MCP_HOSTS.get(host)
+
+
+def remote_dest_for_host(host: str) -> str:
+    """issue 1317 part 4 -- the push destination by the host's obs-fleet CLASS (the ONE fleet list,
+    scripts/lib/obs-fleet.sh, read via obs_fleet_table): a linux-genlock box gets the ~/.camera-box
+    path, anything else (the Windows OBS boxes, an unknown host) the canonical ProgramData path."""
+    if obs_fleet_table.fleet_class_for_host(host) == "linux-genlock":
+        return REMOTE_LINUX_JSON_PATH
+    return REMOTE_PROGRAMDATA_JSON_PATH
 
 
 def remote_push_plan(host: str, payload: dict) -> str:
@@ -130,13 +147,13 @@ def remote_push_plan(host: str, payload: dict) -> str:
     can paste it straight into a FileWrite call.
     """
     mcp = mcp_name_for_host(host)
-    mcp_line = mcp if mcp else "<unknown host -- resolve the win-* MCP tool manually>"
+    mcp_line = mcp if mcp else "<unknown host -- resolve the box's MCP tool manually>"
     content = json.dumps(payload, indent=2)
     return (
         "[av-sync] REMOTE PUSH REQUIRED -- this file was persisted LOCALLY, not on the OBS box.\n"
-        "[av-sync]   this script has no MCP/ssh access -- push it via the win-* MCP FileWrite tool:\n"
+        "[av-sync]   this script has no MCP/ssh access -- push it via the box's MCP FileWrite tool:\n"
         f"[av-sync]   host={host}  mcp={mcp_line}\n"
-        f"[av-sync]   dest={REMOTE_PROGRAMDATA_JSON_PATH}\n"
+        f"[av-sync]   dest={remote_dest_for_host(host)}\n"
         f"[av-sync]   content:\n{content}"
     )
 

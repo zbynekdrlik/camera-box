@@ -5243,7 +5243,7 @@ if [ "$VERDICT_ON_STREAM" = "1" ]; then
   STRIH_PIXELS="$OUTDIR/strih-partial-${RUN_ID}-pixels"   # #186 pixel proofs pulled back to dev1
   STREAM_PIXELS="$OUTDIR/stream-partial-${RUN_ID}-pixels"  # #186 pixel proofs pulled back to dev1
 
-  echo "    --- [8/8a] extract the STRIH partial ON the strih box (win-strih), in place ---"
+  echo "    --- [8/8a] extract the STRIH partial ON the strih box ($(strih_access_label "$STRIH")), in place ---"
   # The strih recording carries cam1 (forwarded) + strih burns; --extract-partial strih decodes
   # it IN PLACE on the strih box and writes the small partial JSON. It is NEVER copied off-box.
   # #703: wrapped in a function so EXECUTE mode can launch it BACKGROUNDED (parallel with the
@@ -5281,9 +5281,15 @@ if [ "$VERDICT_ON_STREAM" = "1" ]; then
   else
     run_strih_extract
   fi
-  echo "    pull back to dev1: $STRIH_PARTIAL  AND the #186 pixel-proof dir $STRIH_PIXELS"
-  echo "      (win-strih FileDownload $STRIH_PARTIAL_WIN -> $STRIH_PARTIAL;"
-  echo "       win-strih FileDownload $STRIH_PIXELS_WIN -> $STRIH_PIXELS  [absent on a clean run])"
+  # issue 1317 part 4: strih-lx pulls the partial + pixel proofs back over scp itself
+  # (recording-verdict-on-strih-lx.sh) -- only a Windows strih gets the MCP download plan.
+  if [ "$(strih_platform "$STRIH")" = "linux" ]; then
+    strih_lx_partial_pullback_note "$STRIH_PARTIAL" "$STRIH_PIXELS"
+  else
+    echo "    pull back to dev1: $STRIH_PARTIAL  AND the #186 pixel-proof dir $STRIH_PIXELS"
+    echo "      (win-strih FileDownload $STRIH_PARTIAL_WIN -> $STRIH_PARTIAL;"
+    echo "       win-strih FileDownload $STRIH_PIXELS_WIN -> $STRIH_PIXELS  [absent on a clean run])"
+  fi
 
   # #312 item 2 (PR A): the cam2 continuous A/V-sync marker log lives on dev1 (pulled from cam2
   # above, a plain Linux scp) but the stream recording — the ONLY recording that co-locates the
@@ -5653,7 +5659,12 @@ continuing WITHOUT the imag partial; the merge below will omit --merge-partials 
       echo "    verdict + partials + pixel-proofs above are the evidence that is KEPT; the source"
       echo "    recordings are re-derivable by re-running). NEVER a directory sweep — the EXACT"
       echo "    paths StopRecord returned for THIS run only:"
-      echo "      win-strih Shell:      Remove-Item -Force -LiteralPath '${STRIH_HOST_PATH:-<unknown>}'"
+      # issue 1317 part 4: strih-lx gets an exact-path rm over plain ssh, never a win-strih Remove-Item.
+      if [ "$(strih_platform "$STRIH")" = "linux" ]; then
+        strih_lx_recording_cleanup_note "      " "$STRIH" "${STRIH_HOST_PATH:-<unknown>}"
+      else
+        echo "      win-strih Shell:      Remove-Item -Force -LiteralPath '${STRIH_HOST_PATH:-<unknown>}'"
+      fi
       echo "      win-stream-snv Shell: Remove-Item -Force -LiteralPath '${STREAM_HOST_PATH:-<unknown>}'"
       echo "    Set KEEP_RECORDINGS=1 to skip this (debugging)."
     fi
@@ -5670,8 +5681,7 @@ continuing WITHOUT the imag partial; the merge below will omit --merge-partials 
     exit "$GATE"
   fi
 
-  echo "    The win-* MCP holder runs 8/8a + 8/8b on strih+stream (imag's 8/8c ALREADY ran above —"
-  echo "    #462, plain ssh, no MCP needed), pulls the strih+stream partials (+ their <partial>-pixels"
+  strih_planner_holder_note "$STRIH"   # issue 1317 part 4: on strih-lx only 8/8b is the holder's
   echo "    #186 proof dirs) to dev1, then runs the 8/8d merge above on dev1. A recording is NEVER"
   echo "    copied box-to-box nor to dev1 — only the small partial JSONs (+ the painter CSV + the"
   echo "    handful of flagged-frame PNGs) move (#208/#186/#462)."
@@ -5690,7 +5700,12 @@ continuing WITHOUT the imag partial; the merge below will omit --merge-partials 
     echo "    verdict + partials + pixel-proofs above are the evidence that is KEPT; the source"
     echo "    recordings are re-derivable by re-running). NEVER a directory sweep — the EXACT"
     echo "    paths StopRecord returned for THIS run only:"
-    echo "      win-strih Shell:      Remove-Item -Force -LiteralPath '${STRIH_HOST_PATH:-<unknown>}'"
+    # issue 1317 part 4: strih-lx gets an exact-path rm over plain ssh, never a win-strih Remove-Item.
+    if [ "$(strih_platform "$STRIH")" = "linux" ]; then
+      strih_lx_recording_cleanup_note "      " "$STRIH" "${STRIH_HOST_PATH:-<unknown>}"
+    else
+      echo "      win-strih Shell:      Remove-Item -Force -LiteralPath '${STRIH_HOST_PATH:-<unknown>}'"
+    fi
     echo "      win-stream-snv Shell: Remove-Item -Force -LiteralPath '${STREAM_HOST_PATH:-<unknown>}'"
     echo "    Set KEEP_RECORDINGS=1 to skip this (debugging)."
   fi
@@ -5773,7 +5788,12 @@ if [ -s "$REPORT_JSON" ]; then
   else
     echo "#652: verdict JSON secured at $REPORT_JSON — free rig disk by deleting ONLY this run's"
     echo "own strih+stream recordings (never a sweep — the EXACT StopRecord paths for THIS run):"
-    echo "  win-strih Shell:      Remove-Item -Force -LiteralPath '${STRIH_HOST_PATH:-<unknown>}'"
+    # issue 1317 part 4: strih-lx gets an exact-path rm over plain ssh, never a win-strih Remove-Item.
+    if [ "$(strih_platform "$STRIH")" = "linux" ]; then
+      strih_lx_recording_cleanup_note "  " "$STRIH" "${STRIH_HOST_PATH:-<unknown>}"
+    else
+      echo "  win-strih Shell:      Remove-Item -Force -LiteralPath '${STRIH_HOST_PATH:-<unknown>}'"
+    fi
     echo "  win-stream-snv Shell: Remove-Item -Force -LiteralPath '${STREAM_HOST_PATH:-<unknown>}'"
   fi
 fi

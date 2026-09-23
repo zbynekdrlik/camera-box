@@ -57,22 +57,24 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # env-free and then log-verifies + fails-loud. OBS_DIR is the OBS install root (its bin\64bit is the
 # mandatory cwd). FORCE="1" inserts a documented force-kill of a wedged obs64 first (obs-ops recovery
 # — this is a DEV rig, "kludne ho killni"); FORCE="0" aborts if obs64 is already running (relaunch
-# deliberately, never double-launch). HAS_AHK (default "1") emits the #786 AHK stop-first/restart-last
-# bracket around the redraw loop — pass "0" for a box with NO AutoHotkey64 auto-respawn watcher
-# (stream; resolume runs NL_STARTUP.ahk, issue 1295 -- as the retired Windows strih did, per
-# .claude/skills/obs-ops "AHK on strih") so its program never carries a real AutoHotkey64 command (the
-# #411 self-heal stream guard pins this). AHK_SCRIPT ($4, default the retired strih's path) / AHK_PREFER ($5, 'exe' default | 'lnk') are the
-# PER-BOX relaunch identity (issue 1295) passed to scripts/lib/ahk-watchdog.sh. Pure string builder
+# deliberately, never double-launch). HAS_AHK="1" emits the #786 AHK stop-first/restart-last bracket
+# around the redraw loop (resolume runs NL_STARTUP.ahk, issue 1295); the DEFAULT "0" (issue 1317
+# part 4 -- the retired Windows strih was the only other AHK box) is a box with NO AutoHotkey64
+# auto-respawn watcher (stream), so its program never carries a real AutoHotkey64 command (the #411
+# self-heal stream guard pins this). AHK_SCRIPT ($4, REQUIRED when HAS_AHK=1 -- no default, a missing
+# path fails closed with rc 2) / AHK_PREFER ($5, 'exe' default | 'lnk') are the PER-BOX relaunch
+# identity (issue 1295) passed to scripts/lib/ahk-watchdog.sh. Pure string builder
 # so a unit test can assert the program is well-formed without a Windows host. Heredoc body is a
 # literal PowerShell here-string — bash-level interpolation is ONLY $OBS_DIR / the FORCE branch /
 # the AHK bracket; everything else (PowerShell $vars) is literal.
 build_launch_program() {
   # issue 1295: $4 AHK_SCRIPT / $5 AHK_PREFER = the PER-BOX AHK relaunch identity passed to the
-  # shared scripts/lib/ahk-watchdog.sh primitive. The defaults are the RETIRED Windows strih's values
-  # (kept so the pure-builder unit tests stay byte-identical); every box-facing caller (this script's
-  # main, obs-self-heal-install.sh) passes the box's own identity from scripts/lib/genlock-fleet-boxes.sh
-  # -- resolume its v2 .ahk path + 'lnk' (prefer the Startup shortcut), a no-AHK box nothing.
-  local obs_dir="$1" force="$2" has_ahk="${3:-1}" ahk_script="${4:-D:\\_APPS\\NL_STARTUP.ahk}" ahk_prefer="${5:-exe}"
+  # shared scripts/lib/ahk-watchdog.sh primitive. issue 1317 part 4: the RETIRED Windows strih's
+  # defaults (has_ahk=1 + D:\_APPS) are gone -- a bare call is a NO-AHK box (has_ahk=0), and has_ahk=1
+  # with no AHK_SCRIPT fails closed (the primitive refuses, rc 2). Every box-facing caller (this
+  # script's main, obs-self-heal-install.sh) passes the box's own identity from
+  # scripts/lib/genlock-fleet-boxes.sh -- resolume its v2 .ahk path + 'lnk', a no-AHK box nothing.
+  local obs_dir="$1" force="$2" has_ahk="${3:-0}" ahk_script="${4:-}" ahk_prefer="${5:-exe}"
 
   # #786/#411 — the AHK bracket is emitted ONLY for a box that actually runs the AHK watcher.
   local ahk_decl ahk_stop_ps ahk_restart_ps ahk_best_effort_restart_ps
@@ -93,7 +95,7 @@ build_launch_program() {
 PSAHK
 )
     local ahk_relaunch_ps
-    ahk_relaunch_ps="$(ahk_resolve_and_relaunch_ps "$ahk_script" "$ahk_prefer")"
+    ahk_relaunch_ps="$(ahk_resolve_and_relaunch_ps "$ahk_script" "$ahk_prefer")" || return 2
     # #867: the restart must be VERIFIED (Get-Process AutoHotkey64), never just "shortcut file
     # exists -> assume success" — a resolved-but-failed relaunch here means the redraw loop leaves
     # strih with NO respawn watcher, so this is fail-loud (Write-Error + a distinct exit), matching

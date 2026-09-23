@@ -28,11 +28,9 @@
 # Per-box state, so strih and stream page independently. A recovery ("reachable again") ping fires
 # once when a box we paged for returns.
 #
-# NOTE (issue 1199): strih ALSO carries an ON-BOX NIC-fail self-heal watcher
-# (scripts/strih-nic-selfheal.ps1, a SYSTEM scheduled task) that, until the flaky card is physically
-# replaced, restarts the NIC and then gracefully reboots strih on a confirmed total LAN outage. This
-# dev1-side alert is unchanged and complementary: it still pages so a human knows, while the on-box
-# watcher attempts recovery -- do NOT wait for a manual fix on a strih outage.
+# NOTE: the retired Windows strih PC carried an on-box NIC-fail self-heal watcher (issue 1199); it was
+# removed with the PC (issue 1317 part 4). The production strih is the Linux strih-lx, which has no
+# on-box self-heal -- this dev1-side alert is the only signal of a strih outage.
 #
 # DEV1-SIDE-OUTAGE GUARD: before deciding, probe a set of REFERENCE rig nodes (cam1/cam2/imag-nb --
 # nodes that share the rig's network fate). If NONE answer, dev1's own path to the rig subnet is down

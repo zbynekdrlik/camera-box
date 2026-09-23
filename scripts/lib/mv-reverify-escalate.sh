@@ -24,7 +24,9 @@
 #       force-kill obs64 + clear .sentinel over ssh (session-agnostic, win-ssh-vs-mcp Context B) and
 #       let strih's session-1 NL_STARTUP.ahk respawn one clean genlock obs64 -- NEVER an ssh GUI
 #       launch (obs-ops "AHK on strih"; the launch-obs-genlock.sh --force PLANNER prints a
-#       session-1 program the harness cannot run headlessly).
+#       session-1 program the harness cannot run headlessly). On the Linux strih-lx (the production
+#       strih since the M4 cut-over, issue 1317 part 4) the restart is routed by strih_platform to
+#       `systemctl --user restart strih-obs.service` over plain ssh instead (no AHK, no PowerShell).
 #
 # Reuses (never reinvents): the presenter-aware painting signal of cam2-painter-restore-verify.sh
 # (#863/#464); the `received=` flat-ssh OBS-log-tail read + the frozen/advancing decision of
@@ -54,6 +56,10 @@ command -v cam2_paint_signal_remote_fn >/dev/null 2>&1 \
 # (Windows STRIH-SNV or Linux strih-lx); lazy-sourced the same way.
 command -v strih_log_tail >/dev/null 2>&1 \
   || . "${BASH_SOURCE[0]%/*}/strih-log-read.sh"
+# issue 1317 part 4: the headless strih-OBS restart routes by the strih's platform (the ONE
+# fleet-backed resolver); lazy-sourced the same way.
+command -v strih_platform >/dev/null 2>&1 \
+  || . "${BASH_SOURCE[0]%/*}/strih-platform.sh"
 mv_reverify_wedge_verdict() {
   local prev="${1:-}" curr="${2:-}"
   case "$curr" in '' | *[!0-9]*) printf 'WEDGE\n'; return 0 ;; esac
@@ -188,14 +194,46 @@ Write-Host "MV_REVERIFY_OBS_RESTART: obs64 force-killed + .sentinel cleared; Aut
 PS
 }
 
-# mv_reverify_obs_restart_run <strih_ip> -- LOCAL runner. Runs the headless restart PowerShell on
-# strih over ssh (win_ssh_run EncodedCommand). Override with MV_REVERIFY_OBS_RESTART_CMD (run with
-# "<ip>") for offline tests. Returns 2 (restart NOT performed -- AHK respawn watcher absent, obs64
-# untouched, #1093 review finding 2) when the program reported MV_REVERIFY_NO_AHK; 0 otherwise.
+# mv_reverify_obs_restart_linux_cmd -> REMOTE bash TEXT (issue 1317 part 4): the strih-lx headless
+# restart. strih-lx runs OBS as the `strih-obs.service` systemd --user unit (Restart=on-failure),
+# whose launcher (strih-obs-start.sh) itself clears the crash sentinels before every launch -- so the
+# Linux restart is the unit's own restart, never a kill + AHK respawn (strih-lx has no AHK). The unit
+# is proven INSTALLED first (the bundle-state self-heal's unit-exists-first discipline): no unit ->
+# report MV_REVERIFY_NO_UNIT + exit 2 WITHOUT touching OBS (nothing would relaunch it). reset-failed
+# clears a start-limit-hit latch; --no-block returns at once -- mv_reverify_wait_obs_ws then polls
+# :4455 exactly as it does for the Windows AHK respawn (the launcher's own :4455 wait is up to 90 s).
+mv_reverify_obs_restart_linux_cmd() {
+  cat <<'CMD'
+if ! systemctl --user list-unit-files --no-legend strih-obs.service 2>/dev/null | grep -q .; then
+  echo "MV_REVERIFY_NO_UNIT: strih-obs.service is not installed on strih-lx -- NOT touching OBS (nothing would relaunch it)"
+  exit 2
+fi
+systemctl --user reset-failed strih-obs.service 2>/dev/null || true
+if systemctl --user restart --no-block strih-obs.service; then
+  echo "MV_REVERIFY_OBS_RESTART: strih-obs.service restart queued (its launcher clears the crash sentinels, then relaunches the genlock OBS)"
+else
+  echo "MV_REVERIFY_RESTART_FAILED: systemctl --user restart strih-obs.service failed"
+  exit 3
+fi
+CMD
+}
+
+# mv_reverify_obs_restart_run <strih_ip> -- LOCAL runner. Runs the headless restart on strih over
+# ssh, routed by strih_platform (issue 1317 part 4): the Linux strih-lx gets the systemd --user
+# restart over plain ssh; a Windows strih gets the PowerShell kill+sentinel-clear (win_ssh_run
+# EncodedCommand, AHK respawns). Override with MV_REVERIFY_OBS_RESTART_CMD (run with "<ip>") for
+# offline tests. Returns 2 (restart NOT performed -- the Windows AHK respawn watcher absent or the
+# strih-lx unit not installed; OBS untouched, #1093 review finding 2) on MV_REVERIFY_NO_AHK /
+# MV_REVERIFY_NO_UNIT; 3 when the strih-lx restart itself failed (MV_REVERIFY_RESTART_FAILED);
+# 0 otherwise.
 mv_reverify_obs_restart_run() {
   local ip="$1" out
   if [ -n "${MV_REVERIFY_OBS_RESTART_CMD:-}" ]; then
     out="$($MV_REVERIFY_OBS_RESTART_CMD "$ip" 2>&1 || true)"
+  elif [ "$(strih_platform "$ip")" = "linux" ]; then
+    out="$(timeout "${MV_REVERIFY_OBS_RESTART_SSH_TIMEOUT:-30}" sshpass -p "${STRIH_PW:-newlevel}" ssh \
+      -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 \
+      "${STRIH_USER:-newlevel}@${ip}" "$(mv_reverify_obs_restart_linux_cmd)" 2>&1 || true)"
   else
     # win_ssh_run BLOCKS; bound it. timeout execvp()s directly so it cannot invoke a shell FUNCTION --
     # route through `bash -c` re-sourcing the lib, the SAME shape recording-e2e.sh's other win_ssh_run
@@ -204,7 +242,10 @@ mv_reverify_obs_restart_run() {
       "$HERE/lib/win-ssh-exec.sh" "${STRIH_USER:-newlevel}" "${STRIH_PW:-newlevel}" "$ip" "$(mv_reverify_obs_restart_ps)" 2>&1 || true)"
   fi
   printf '%s\n' "$out" | sed 's/^/    [#1093 obs-restart] /' >&2
-  case "$out" in *MV_REVERIFY_NO_AHK*) return 2 ;; esac
+  case "$out" in
+    *MV_REVERIFY_NO_AHK* | *MV_REVERIFY_NO_UNIT*) return 2 ;;
+    *MV_REVERIFY_RESTART_FAILED*) return 3 ;;
+  esac
   return 0
 }
 
@@ -333,13 +374,28 @@ mv_reverify_or_escalate() {
     echo "    [#1093 escalate] ${box}: still wedged AFTER a prior strih-OBS restart this run and the restart budget (${MV_REVERIFY_OBS_RESTARTS:-0}/${MV_REVERIFY_OBS_RESTART_MAX:-3}) is spent -- not restarting again (issue 1096: a fresh OBS can re-wedge on the next bounce). Failing loud." >&2
     return 1
   fi
-  echo "    [#1093 escalate] ${box}: receiver WEDGE confirmed (issue 1096) -- restarting strih OBS once (force-kill+sentinel-clear; AutoHotkey64 respawns one clean genlock obs64), then re-checking once." >&2
-  local _rr=0
+  local _rr=0 _lx=0
+  [ "$(strih_platform "$STRIH")" = "linux" ] && _lx=1
+  if [ "$_lx" = 1 ]; then
+    echo "    [#1093 escalate] ${box}: receiver WEDGE confirmed (issue 1096) -- restarting strih OBS once (strih-lx: systemctl --user restart strih-obs.service, its launcher clears the crash sentinels), then re-checking once." >&2
+  else
+    echo "    [#1093 escalate] ${box}: receiver WEDGE confirmed (issue 1096) -- restarting strih OBS once (force-kill+sentinel-clear; AutoHotkey64 respawns one clean genlock obs64), then re-checking once." >&2
+  fi
   mv_reverify_obs_restart_run "$STRIH" || _rr=$?
+  if [ "$_rr" = "2" ] && [ "$_lx" = 1 ]; then
+    # issue 1317 part 4: strih-obs.service is not installed on strih-lx -> the restart was NOT
+    # performed (OBS untouched: nothing would relaunch it). Fail loud, never leave strih OBS down.
+    echo "    [#1093 escalate] ${box}: strih-obs.service is NOT installed on strih-lx -- restart skipped (OBS left running). Cannot recover this wedge safely from the harness; failing loud." >&2
+    return 1
+  fi
   if [ "$_rr" = "2" ]; then
     # AHK respawn watcher absent -> the restart was NOT performed (obs64 untouched). We cannot cure
     # the wedge from the harness without risking a dead strih; fail loud instead of leaving OBS down.
     echo "    [#1093 escalate] ${box}: strih's AutoHotkey64 respawn watcher is ABSENT -- restart skipped (obs64 left running). Cannot recover this wedge safely from the harness; failing loud." >&2
+    return 1
+  fi
+  if [ "$_rr" != "0" ]; then
+    echo "    [#1093 escalate] ${box}: the strih-lx strih-obs.service restart FAILED (systemctl rc) -- failing loud; check 'systemctl --user status strih-obs.service' on strih-lx." >&2
     return 1
   fi
   MV_REVERIFY_OBS_RESTARTS=$((${MV_REVERIFY_OBS_RESTARTS:-0} + 1))

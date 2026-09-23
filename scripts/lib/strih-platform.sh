@@ -14,14 +14,24 @@
 # (#675 sourced-helper pattern -- every existing anchored line in recording-e2e.sh is unchanged;
 # only NEW branching lines call into this lib).
 #
-# strih_platform HOST -> "windows" (default) | "linux". Pure, no network:
+# issue 1317 part 4: the ONE authority for "is this address the Linux strih" is the obs-fleet list
+# (scripts/lib/obs-fleet.sh `obs_fleet_name_for_host`, alias-aware). Lazy-sourced so every caller of
+# this lib (recording-e2e.sh, the strih log reader, the handover check, the tests) gets it.
+command -v obs_fleet_name_for_host >/dev/null 2>&1 \
+  || . "${BASH_SOURCE[0]%/*}/obs-fleet.sh"
+
+# strih_platform HOST -> "windows" (default) | "linux". No network for an IP literal:
 #   1. STRIH_PLATFORM env override wins outright (windows|linux only; any other/typo'd value is
 #      IGNORED and falls through to the host-based resolution below -- never abort a live run on
 #      a bad env value).
-#   2. HOST matching the known strih-lx address (STRIH_LX_HOST, default 10.77.9.202 -- the M4
-#      cut-over target; also recording-e2e.sh's own $STRIH default post-cutover) -> "linux".
-#   3. otherwise -> "windows" (the old STRIH-SNV box on any other address, or any future/other
-#      target -- unaffected, parallel-run tolerant).
+#   2. HOST equal to STRIH_LX_HOST (when the operator sets it -- an explicit ops/test override for
+#      a strih-lx at another address) -> "linux".
+#   3. HOST addressing the fleet list's `strih-lx` row (issue 1317 part 4: `obs_fleet_name_for_host`
+#      -- 10.77.9.202, `strih-lx`, `STRIH-LX`, `strih-lx.lan`, and `strih.lan`, the retired Windows
+#      PC's own name that the rig DNS points at 10.77.9.202) -> "linux". The SAME lookup the
+#      Windows-tool class gate (obs_fleet_class_for_host) uses, so the two resolvers cannot disagree.
+#      A non-IP name is resolved through the fleet lib's getent seam; an IP literal never is.
+#   4. otherwise -> "windows" (any other address -- a future Windows strih, parallel-run tolerant).
 strih_platform() {
   local host="${1:-}"
   case "${STRIH_PLATFORM:-}" in
@@ -30,12 +40,80 @@ strih_platform() {
       return 0
       ;;
   esac
-  local lx_host="${STRIH_LX_HOST:-10.77.9.202}"
-  if [ -n "$host" ] && [ "$host" = "$lx_host" ]; then
+  if [ -n "$host" ] && [ -n "${STRIH_LX_HOST:-}" ] && [ "$host" = "$STRIH_LX_HOST" ]; then
+    printf 'linux'
+    return 0
+  fi
+  if [ -n "$host" ] && [ "$(obs_fleet_name_for_host "$host" 2>/dev/null || true)" = "strih-lx" ]; then
     printf 'linux'
   else
     printf 'windows'
   fi
+}
+
+# strih_dantesync_nodes <linux|win> <strih_host> <user> <stream_host> -> the node spec for ONE arm of
+# scripts/dantesync-version-gate.sh (issue 1317 part 4). strih-lx answers `dantesync --version` on the
+# bare command line, so on a linux strih the strih node goes to the --linux arm and --win carries only
+# stream; a Windows strih keeps strih+stream both under --win. The SAME routing recording-e2e.sh's
+# [0/8] version gate does inline (issue 1351), as one helper the handover check calls. Pure.
+strih_dantesync_nodes() {
+  local arm="${1:-}" strih="${2:-}" user="${3:-newlevel}" stream="${4:-}"
+  if [ "$(strih_platform "$strih")" = "linux" ]; then
+    case "$arm" in
+      linux) printf 'strih=%s@%s' "$user" "$strih" ;;
+      win) printf 'stream=%s@%s' "$user" "$stream" ;;
+    esac
+  else
+    case "$arm" in
+      win) printf 'strih=%s@%s stream=%s@%s' "$user" "$strih" "$user" "$stream" ;;
+    esac
+  fi
+}
+
+# ---- recording-e2e.sh [8/8] plan TEXT (issue 1317 part 4) -------------------------------------------
+# The [8/8a] strih decode runs over plain ssh/scp on strih-lx (recording-verdict-on-strih-lx.sh, which
+# also pulls the partial + pixel proofs back itself); the Windows strih ran it via the win-strih MCP.
+# These print the platform-correct lines so the harness never tells an operator to run a win-strih
+# FileDownload / Remove-Item against the Linux box. Kept here (not inline) per the recording-e2e.sh
+# anchor discipline: new behavior in a sourced helper, the call site a single line.
+
+# strih_access_label HOST -> how the strih box is reached in the [8/8a] banner.
+strih_access_label() {
+  if [ "$(strih_platform "${1:-}")" = "linux" ]; then
+    printf 'strih-lx, plain ssh/scp'
+  else
+    printf 'win-strih'
+  fi
+}
+
+# strih_lx_partial_pullback_note PARTIAL PIXELS -> the strih-lx [8/8a] pull-back lines (the Linux
+# decode sibling already pulled both back over scp). The Windows win-strih FileDownload text stays
+# INLINE in recording-e2e.sh's else-branch: tests/harness_recording_e2e_paths.rs pins it there.
+strih_lx_partial_pullback_note() {
+  printf '    pull back to dev1: %s  AND the #186 pixel-proof dir %s\n' "${1:-}" "${2:-}"
+  printf '      (strih-lx: already pulled back over scp by recording-verdict-on-strih-lx.sh;\n'
+  printf '       the pixel-proof dir is absent on a clean run)\n'
+}
+
+# strih_lx_recording_cleanup_note INDENT HOST PATH [USER] -> the strih-lx #652 cleanup PLAN line: an
+# `rm -f --` of the EXACT StopRecord path over plain ssh (never a glob, never a directory sweep). The
+# path is single-quoted with any embedded ' escaped, so a spaced OBS filename stays one argument.
+strih_lx_recording_cleanup_note() {
+  local indent="${1:-}" host="${2:-}" path="${3:-<unknown>}" user="${4:-${STRIH_USER:-newlevel}}"
+  local q="${path//\'/\'\\\'\'}"
+  printf "%sstrih-lx ssh:         ssh %s@%s rm -f -- '%s'\n" "$indent" "$user" "$host" "$q"
+}
+
+# strih_planner_holder_note HOST -> the first two lines of the per-box PLANNER hand-off note. On
+# strih-lx the [8/8a] decode already ran over ssh/scp, so only 8/8b is left for the win-* MCP holder.
+strih_planner_holder_note() {
+  if [ "$(strih_platform "${1:-}")" = "linux" ]; then
+    printf '    The win-* MCP holder runs 8/8b on stream (strih-lx 8/8a and imag 8/8c ALREADY ran above --\n'
+    printf '    plain ssh/scp, no MCP needed), pulls the stream partial (+ its <partial>-pixels\n'
+    return 0
+  fi
+  printf '    The win-* MCP holder runs 8/8a + 8/8b on strih+stream (imag'"'"'s 8/8c ALREADY ran above —\n'
+  printf '    #462, plain ssh, no MCP needed), pulls the strih+stream partials (+ their <partial>-pixels\n'
 }
 
 # strih_platform_refuse_windows_only_mode HOST WHAT -> returns 0 (silent) when HOST's strih platform
