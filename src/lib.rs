@@ -380,6 +380,13 @@ pub mod painter_pacing;
 // `probe::genlock::ReleaseCadence` and the C `GENLOCK_QDEPTH_RELOCK` both derive from here.
 pub mod genlock_backlog;
 
+// #1355 — ONE per-second genlock frame grid: the sender stamps, the receiver ts-align deadline
+// and the render tick all floor on the same per-second grid, so the receiver no longer walks
+// 10 ns/s (0.864 ms/day) against the senders. Crate-root + std-only (Tier-0 verifiable); the C
+// port `vendor/obs-studio/libobs/obs-genlock-grid.h` is held identical by the committed parity
+// gate in `tests/genlock_relock_selection_parity.rs`.
+pub mod genlock_grid;
+
 // #1298 — the pure LOCKED/DEGRADED/UNLOCKED decision for the in-OBS genlock statusbar
 // indicator. Crate-root + std-only so it is Tier-0 verifiable; the C port in
 // `vendor/obs-studio/frontend/widgets/GenlockLockState.hpp` is held identical by the

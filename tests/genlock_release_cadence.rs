@@ -611,6 +611,46 @@ fn relock_events_log_phase_evidence_940() {
     );
 }
 
+/// #1355 — ONE per-second grid for the receiver deadline AND the render tick. The senders stamp
+/// on a grid that restarts every second; the receiver floored both its release deadline and its
+/// render-tick boundary on the 1970 grid, which loses 10 ns per second against it (0.864 ms per
+/// day) — the deep `NDI 2ME PGM` FIFO depth walked with the calendar date. Both call sites must
+/// go through the shared header, and the old 1970 tick formula must be gone. The ARITHMETIC is
+/// proven by the compiled C-vs-Rust gate in tests/genlock_relock_selection_parity.rs; this
+/// guards the wiring.
+#[test]
+fn deadline_and_render_tick_share_the_per_second_grid_1355() {
+    let src = squish(&vendor_file(OBS_SOURCE));
+    assert!(
+        src.contains("#include \"obs-genlock-grid.h\""),
+        "{OBS_SOURCE}: #1355 — obs-source.c no longer includes the shared per-second grid \
+         header obs-genlock-grid.h."
+    );
+    let video = squish(&vendor_file("vendor/obs-studio/libobs/obs-video.c"));
+    assert!(
+        video.contains("#include \"obs-genlock-grid.h\""),
+        "obs-video.c: #1355 — the render tick no longer includes obs-genlock-grid.h."
+    );
+    assert!(
+        video.contains(
+            "const uint64_t next_wall = genlock_grid_next_boundary_ns(wall, interval_ns);"
+        ),
+        "obs-video.c: #1355 — genlock_next_deadline no longer ticks on the shared per-second \
+         grid (genlock_grid_next_boundary_ns); the render tick would drift 10 ns/s against the \
+         senders' stamps again."
+    );
+    assert!(
+        !video.contains("wall - (wall % interval_ns) + interval_ns"),
+        "obs-video.c: #1355 — the 1970-grid render-tick formula is back."
+    );
+    let header = vendor_file("vendor/obs-studio/libobs/obs-genlock-grid.h");
+    assert!(
+        header.contains("static inline uint64_t genlock_grid_floor_ns(")
+            && header.contains("static inline uint64_t genlock_grid_next_boundary_ns("),
+        "obs-genlock-grid.h: #1355 — the shared floor / next-boundary helpers are gone."
+    );
+}
+
 #[test]
 fn ts_align_deadline_is_phase_pinned_to_the_wall_grid_940() {
     // #940 piece 3 — the structural fix. The pre-#940 ts-align reserve deadline was a raw
@@ -630,11 +670,14 @@ fn ts_align_deadline_is_phase_pinned_to_the_wall_grid_940() {
          src/genlock_backlog.rs phase_pinned_deadline (Tier-0 unit-tested)."
     );
     // The floor-to-grid ARITHMETIC itself (not just the helper's existence) — a subtree
-    // pull or a "simplify this" edit could keep the helper but neuter its body.
+    // pull or a "simplify this" edit could keep the helper but neuter its body. #1355: the
+    // floor is the ONE per-second grid the senders stamp on (obs-genlock-grid.h), no longer
+    // the 1970 grid `(deadline_ns / interval_ns) * interval_ns` that walked 10 ns/s against
+    // the stamps.
     assert!(
-        src.contains("(deadline_ns / interval_ns) * interval_ns"),
-        "{OBS_SOURCE}: #940 piece 3 — genlock_phase_pin_deadline no longer computes the \
-         floor-to-grid quotient (deadline_ns / interval_ns) * interval_ns; re-apply."
+        src.contains("return genlock_grid_floor_ns(deadline_ns, interval_ns);"),
+        "{OBS_SOURCE}: #940 piece 3 / #1355 — genlock_phase_pin_deadline no longer floors to \
+         the shared per-second grid (genlock_grid_floor_ns); re-apply."
     );
     // Wired IN at the ts-align call site for the reserve_ms>0 (deep-latency, ms-granular)
     // path — only defining the helper without calling it is dead code (same "assert the
