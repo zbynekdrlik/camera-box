@@ -38,9 +38,11 @@
 _NDI_CADENCE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/camera-box-restart-verify.sh
 . "$_NDI_CADENCE_DIR/camera-box-restart-verify.sh"
-# shellcheck source=scripts/lib/ps-encoded.sh
-if [ -f "$_NDI_CADENCE_DIR/ps-encoded.sh" ]; then
-  . "$_NDI_CADENCE_DIR/ps-encoded.sh"
+# issue 1360: the strih OBS-log read goes through the ONE platform-resolved reader (Windows STRIH-SNV
+# or Linux strih-lx).
+# shellcheck source=scripts/lib/strih-log-read.sh
+if [ -f "$_NDI_CADENCE_DIR/strih-log-read.sh" ]; then
+  . "$_NDI_CADENCE_DIR/strih-log-read.sh"
 fi
 
 # -- config (all env-overridable) ---------------------------------------------------------------
@@ -65,6 +67,8 @@ NDI_CADENCE_RECV_SSH_PW="${NDI_CADENCE_RECV_SSH_PW:-newlevel}"
 NDI_CADENCE_SENDER_SSH_USER="${NDI_CADENCE_SENDER_SSH_USER:-root}"
 NDI_CADENCE_SENDER_SSH_PW="${NDI_CADENCE_SENDER_SSH_PW:-newlevel}"
 NDI_CADENCE_SSH_TIMEOUT="${NDI_CADENCE_SSH_TIMEOUT:-30}"
+# Applies to the SENDER (cambox) ssh only; the receiver (strih) log read uses the shared
+# strih-log-read.sh transport options (issue 1360).
 NDI_CADENCE_SSH_OPTS="${NDI_CADENCE_SSH_OPTS:--o BatchMode=no -o StrictHostKeyChecking=no -o ConnectTimeout=8}"
 
 # -- helpers ------------------------------------------------------------------------------------
@@ -82,16 +86,14 @@ _ndi_cadence_fetch() {
     $NDI_CADENCE_FETCH_CMD "$host" 2>/dev/null || true
     return 0
   fi
-  # default: a flat ssh OBS-log -Tail (session-agnostic file read, per win-ssh-vs-mcp), -EncodedCommand
-  # so cmd.exe never sees the `|` pipes (the #1259 root cause). An empty encode -> empty read.
-  command -v ps_encoded_command >/dev/null 2>&1 || { return 0; }
-  local enc tail
+  # default: a flat ssh OBS-log tail (session-agnostic file read, per win-ssh-vs-mcp) through the
+  # shared platform-resolved reader (issue 1360): plain `tail` on a Linux strih, the cmd.exe-proof
+  # -EncodedCommand PowerShell `-Tail` on a Windows one (the #1259 root cause). Any failure -> empty.
+  command -v strih_log_tail >/dev/null 2>&1 || { return 0; }
+  local tail
   tail="$(ps_clamp_numeric "$NDI_CADENCE_OBS_LOG_TAIL" 800 2>/dev/null || echo 800)"
-  enc="$(ps_encoded_command "gc (gci \$env:APPDATA\\obs-studio\\logs\\*.txt | sort LastWriteTime | select -last 1).FullName -Tail $tail" 2>/dev/null || echo "")"
-  [ -n "$enc" ] || return 0
-  # shellcheck disable=SC2086
-  timeout "$NDI_CADENCE_SSH_TIMEOUT" sshpass -p "$NDI_CADENCE_RECV_SSH_PW" ssh $NDI_CADENCE_SSH_OPTS "$NDI_CADENCE_RECV_SSH_USER@$host" \
-    "powershell -NoProfile -NonInteractive -EncodedCommand $enc" 2>/dev/null || true
+  strih_log_tail "$host" "$NDI_CADENCE_RECV_SSH_USER" "$NDI_CADENCE_RECV_SSH_PW" "$tail" \
+    "$NDI_CADENCE_SSH_TIMEOUT" 2>/dev/null || true
 }
 
 # ndi_cadence_read <host> [only_input] -> per-input TSV verdicts (see the header).

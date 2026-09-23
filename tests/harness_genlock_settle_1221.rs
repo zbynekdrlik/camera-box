@@ -284,12 +284,13 @@ fn runner_skips_gracefully_with_no_watched_inputs() {
 // issue 1221 review fixes (Fable adversarial pass) — reader exec, env sanitize, bounds, stale streak
 // ---------------------------------------------------------------------------------------------
 
-/// 🔴-1: the DEFAULT reader must chain `timeout bash -c '. win-ssh-exec.sh; win_ssh_run …'` —
-/// `timeout win_ssh_run` directly can never work (`timeout` execvp()s a real binary, not a shell
-/// function). Prove the whole default chain end-to-end with a PATH-stubbed `sshpass` (the leaf
-/// win_ssh_run calls); RED on the old `timeout <fn>` form (empty output), GREEN on the fix.
+/// 🔴-1: the DEFAULT reader must reach a real `sshpass` binary — a `timeout <shell function>` can
+/// never work (`timeout` execvp()s a real binary). Since issue 1360 the chain is the shared
+/// `strih_log_tail` → `sshpass -p … timeout T ssh …` (scripts/lib/strih-log-read.sh; host `h` is a
+/// Windows strih, so the -EncodedCommand branch runs). Prove it end-to-end with a PATH-stubbed
+/// `sshpass`; RED on the historical `timeout <fn>` form (empty output).
 #[test]
-fn default_reader_chains_through_bash_c_resource_not_timeout_of_a_function() {
+fn default_reader_reaches_a_real_sshpass_never_timeout_of_a_function() {
     let stub = std::env::temp_dir().join(format!(
         "genlock-settle-sshpass-stub-{}",
         std::process::id()
@@ -332,17 +333,25 @@ fn default_reader_chains_through_bash_c_resource_not_timeout_of_a_function() {
     );
 }
 
-/// 🔴-1 static guard: the lib source carries the re-source form and NOT the broken direct form.
+/// 🔴-1 static guard: the reader never `timeout`s a shell FUNCTION (rc 127). Issue 1360 moved the
+/// read into the shared platform-resolved `scripts/lib/strih-log-read.sh`, so the guard now pins
+/// the delegation here plus the lib's real-binary bound (`sshpass … timeout T ssh …`) there.
 #[test]
 fn lib_source_uses_the_resource_reader_form() {
     let src = std::fs::read_to_string(lib()).unwrap();
     assert!(
-        src.contains(r#"win_ssh_run "$2" "$3" "$4" "$5""#),
-        "the reader must re-source win-ssh-exec.sh inside bash -c and call win_ssh_run with positional args"
+        src.contains(r#"strih_log_tail "$host" "$user" "$pw""#),
+        "the reader must delegate to the shared strih_log_tail (issue 1360)"
     );
     assert!(
-        !src.contains(r#"SSH_TIMEOUT:-20}" win_ssh_run"#),
-        "the reader must NOT `timeout … win_ssh_run` a shell function directly (rc 127)"
+        !src.contains(r#"SSH_TIMEOUT:-20}" win_ssh_run"#)
+            && !src.contains(r#"SSH_TIMEOUT:-20}" strih_log_tail"#),
+        "the reader must NOT `timeout …` a shell function directly (rc 127)"
+    );
+    let shared = read("scripts/lib/strih-log-read.sh");
+    assert!(
+        shared.contains(r#"sshpass -p "$pw" timeout "#),
+        "the shared reader must bound the ssh with a real `timeout` binary INSIDE sshpass"
     );
 }
 

@@ -15,8 +15,8 @@
 # recent-window MEDIAN `multiview-audit:` cadence, #1212), and pages Discord on a sustained
 # below-floor collapse -- imag + strih.
 #
-# TAP: the newest `~/.config/obs-studio/logs/*.txt` (imag) / `%APPDATA%\obs-studio\logs\*.txt`
-# (strih) OBS log, read via one flat `ssh` (linux `tail` / windows `powershell gc -Tail`). Reading
+# TAP: the newest `~/.config/obs-studio/logs/*.txt` (imag, strih-lx) / `%APPDATA%\obs-studio\logs\*.txt`
+# (Windows strih) OBS log, read via one flat `ssh` (linux `tail` / windows `powershell gc -Tail`). Reading
 # an OBS LOG FILE is a session-agnostic FILE read, allowed for a headless dev1 watchdog per
 # win-ssh-vs-mcp (never a GUI atom over ssh). The confirm-counter + alert throttle are the SAME
 # shared obs_watchdog_confirm / obs_watchdog_alert_throttle (scripts/lib/obs-watchdog-decision.sh)
@@ -53,6 +53,8 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE/lib/mv-fps-health.sh"
 # shellcheck source=scripts/lib/ps-encoded.sh
 . "$HERE/lib/ps-encoded.sh"
+# shellcheck source=scripts/lib/strih-log-read.sh
+. "$HERE/lib/strih-log-read.sh"
 
 DRY_RUN=0
 case "${1:-}" in
@@ -66,18 +68,23 @@ case "${1:-}" in
 esac
 
 # -- config (all env-overridable) ---------------------------------------------------------------
-# The OBS boxes to watch, space-separated "name|ip|os" (os = linux | win). Default: imag + strih --
+# The OBS boxes to watch, space-separated "name|ip|os" (os = linux | win | strih -- issue 1360: `strih`
+# resolves the strih box's platform, Linux strih-lx or Windows STRIH-SNV, via the shared
+# strih_log_os instead of hard-coding it). Default: imag + strih --
 # the two boxes whose Multiview render cadence #771 emits. (stream also runs OBS but has no operator
 # Multiview projector; add it here only if it grows one.)
 # issue 1316: `imag` DROPPED from the default — imag-nb was returned to the owner (dark). This
 # timer has no dev1 unit installed today, but the default must not name a dead box before it is ever
 # timer-installed. Re-add `imag|<ip>|linux` when the IMAG role returns on a new notebook.
-MV_FPS_BOXES="${MV_FPS_BOXES:-strih|10.77.9.202|win}"
+MV_FPS_BOXES="${MV_FPS_BOXES:-strih|10.77.9.202|strih}"
 
 SSH_USER="${MV_FPS_SSH_USER:-newlevel}"
 SSH_PW="${MV_FPS_SSH_PW:-newlevel}"
 SSH_TIMEOUT="${MV_FPS_SSH_TIMEOUT:-20}"
-SSH_OPTS="${MV_FPS_SSH_OPTS:--o BatchMode=no -o StrictHostKeyChecking=no -o ConnectTimeout=8}"
+# issue 1360: UserKnownHostsFile=/dev/null -- the strih-lx address was the Windows box before the
+# cut-over; a stale known_hosts key with StrictHostKeyChecking=no disables password auth (a silent
+# empty read). Same options as scripts/lib/strih-log-read.sh.
+SSH_OPTS="${MV_FPS_SSH_OPTS:--o BatchMode=no -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=8}"
 OBS_LOG_TAIL="${MV_FPS_OBS_LOG_TAIL:-2000}"
 
 # The `mv-fps-gate` bin (default features) -- the SAME decision engine #771's E2E preflight /
@@ -122,6 +129,11 @@ probe_mv_log() {
     # shellcheck disable=SC2086
     $MV_FPS_PROBE_CMD "$ip" "$os" 2>/dev/null || true
     return 0
+  fi
+  # issue 1360: `strih` = resolve the strih box's platform via the shared resolver, then read it
+  # through the matching branch below (unchanged).
+  if [ "$os" = strih ]; then
+    os="$(strih_log_os "$ip")"
   fi
   case "$os" in
     linux)
