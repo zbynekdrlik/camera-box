@@ -443,3 +443,164 @@ fn prerecord_calibration_mark_and_fetch_scope_the_linux_log_1360() {
         "the post-mark fetch must write only lines after the mark into CALIB_LOG: {out}"
     );
 }
+
+// ---------------------------------------------------------------------------------------------
+// (d) part 3 — the genlock-fifo audit BEFORE/AFTER snapshot (`scripts/lib/genlock-audit-snapshot.sh`,
+// the issue-1354 scope-3 producer) reads strih through the SAME shared reader: its own inline Linux
+// ssh + remote grep and its Windows SKIP are gone; the audit-line filter + the 400-line cap stay
+// local, the `GENLOCK_AUDIT_SNAPSHOT_READER_CMD` seam and the persisted file format are unchanged.
+// ---------------------------------------------------------------------------------------------
+
+/// Source the shared reader (so `strih_log_remote_cmd` can compute the expected remote command
+/// even before the snapshot lib sources it itself) and the snapshot lib, clear the knobs, run `body`.
+fn snapshot_case(body: &str) -> CaseOut {
+    run_case(&format!(
+        ". \"$R/scripts/lib/strih-log-read.sh\"\n. \"$R/scripts/lib/genlock-audit-snapshot.sh\"\n\
+         unset GENLOCK_AUDIT_SNAPSHOT_READER_CMD GENLOCK_AUDIT_SNAPSHOT_TAIL \
+         GENLOCK_AUDIT_SNAPSHOT_READ_LINES GENLOCK_AUDIT_SNAPSHOT_SSH_TIMEOUT STRIH_USER STRIH_PW\n\
+         {body}"
+    ))
+}
+
+/// The expected remote command the case printed as `WANT=<cmd>`.
+fn want_line(o: &CaseOut) -> String {
+    o.stdout
+        .lines()
+        .find_map(|l| l.strip_prefix("WANT="))
+        .expect("WANT line")
+        .to_string()
+}
+
+fn non_empty_lines(text: &str) -> Vec<&str> {
+    text.lines().filter(|l| !l.is_empty()).collect()
+}
+
+const AUDIT_100: &str = "09:23:36.001: genlock-fifo audit 'NDI cam1': received=100 relocks=0 underruns=0 dropped_due=0 late_holds=0";
+const AUDIT_160: &str = "09:23:39.004: genlock-fifo audit 'NDI cam1': received=160 relocks=0 underruns=0 dropped_due=0 late_holds=0";
+
+#[test]
+fn genlock_audit_snapshot_reads_the_linux_strih_log_through_the_shared_reader_1360() {
+    let o = snapshot_case(
+        "export STRIH=10.77.9.202 STRIH_USER=opuser STRIH_PW=secretpw \
+         GENLOCK_AUDIT_SNAPSHOT_SSH_TIMEOUT=5\n\
+         genlock_audit_snapshot_capture before \"$T/before.txt\"\n\
+         echo \"WANT=$(strih_log_remote_cmd linux tail 3000)\"\n\
+         echo 'OUT<<'\ncat \"$T/before.txt\"\necho '>>OUT'",
+    );
+    assert_done(&o, "genlock-audit snapshot (strih-lx)");
+    let want = want_line(&o);
+    assert!(
+        !want.is_empty() && has_line(&o.log, &format!("REMOTE:{want}")),
+        "the snapshot must read strih-lx with the shared reader's raw tail (default 3000 lines), \
+         never its own remote grep; want REMOTE:{want}\nstub log:\n{}",
+        o.log
+    );
+    assert!(
+        o.log.contains("-p secretpw timeout 5 ssh ")
+            && o.log.contains("-o UserKnownHostsFile=/dev/null")
+            && o.log.contains("opuser@10.77.9.202"),
+        "STRIH_USER / STRIH_PW / GENLOCK_AUDIT_SNAPSHOT_SSH_TIMEOUT must reach the shared \
+         reader's transport: {}",
+        o.log
+    );
+    let out = out_block(&o);
+    assert_eq!(
+        non_empty_lines(&out),
+        vec![AUDIT_100, AUDIT_160],
+        "the persisted file must hold ONLY the newest log's genlock-fifo audit lines, verbatim \
+         (the asrc / recv-timing / other lines filtered locally), got: {out}"
+    );
+}
+
+#[test]
+fn genlock_audit_snapshot_reads_a_windows_strih_instead_of_skipping_1360() {
+    let o = snapshot_case(
+        "export STRIH=10.77.9.204 STRIH_PLATFORM=windows\n\
+         export STUB_WIN_OUT=$'09:00:00.000: genlock-fifo audit \\'NDI cam1\\': received=77 holds=1\\r\\n09:00:01.000: other-line\\r'\n\
+         genlock_audit_snapshot_capture after \"$T/after.txt\"\n\
+         echo 'OUT<<'\ncat \"$T/after.txt\" 2>/dev/null || echo NO-FILE\necho '>>OUT'",
+    );
+    assert_done(&o, "genlock-audit snapshot (windows strih)");
+    assert!(
+        o.log
+            .contains("REMOTE:powershell -NoProfile -NonInteractive -EncodedCommand "),
+        "a Windows strih must be read through the shared reader's -EncodedCommand tail, not \
+         skipped: {}\n{}",
+        o.log,
+        o.stderr
+    );
+    let out = out_block(&o);
+    assert_eq!(
+        non_empty_lines(&out),
+        vec!["09:00:00.000: genlock-fifo audit 'NDI cam1': received=77 holds=1"],
+        "the Windows read must persist only the audit line, CR-stripped: {out:?}"
+    );
+}
+
+#[test]
+fn genlock_audit_snapshot_knobs_stay_local_and_injection_safe_1360() {
+    // The audit-line cap is applied LOCALLY to the filtered lines (TAIL=1 -> only the newest).
+    let o = snapshot_case(
+        "export STRIH=10.77.9.202 GENLOCK_AUDIT_SNAPSHOT_TAIL=1\n\
+         genlock_audit_snapshot_capture before \"$T/b.txt\"\n\
+         echo 'OUT<<'\ncat \"$T/b.txt\"\necho '>>OUT'",
+    );
+    assert_done(&o, "TAIL=1");
+    let out = out_block(&o);
+    assert_eq!(
+        non_empty_lines(&out),
+        vec![AUDIT_160],
+        "TAIL=1 keeps only the newest audit line: {out}"
+    );
+    // Non-numeric overrides fall back to the defaults and never reach the remote command.
+    let o = snapshot_case(
+        "export STRIH=10.77.9.202 GENLOCK_AUDIT_SNAPSHOT_TAIL='x; rm -rf /' \
+         GENLOCK_AUDIT_SNAPSHOT_READ_LINES='y; rm -rf /'\n\
+         genlock_audit_snapshot_capture before \"$T/b.txt\"\n\
+         echo \"WANT=$(strih_log_remote_cmd linux tail 3000)\"\n\
+         echo 'OUT<<'\ncat \"$T/b.txt\"\necho '>>OUT'",
+    );
+    assert_done(&o, "non-numeric knobs");
+    let want = want_line(&o);
+    assert!(
+        has_line(&o.log, &format!("REMOTE:{want}")) && !o.log.contains("rm -rf"),
+        "a non-numeric READ_LINES falls back to 3000 with no injection: {}",
+        o.log
+    );
+    let out = out_block(&o);
+    assert_eq!(
+        non_empty_lines(&out),
+        vec![AUDIT_100, AUDIT_160],
+        "a non-numeric TAIL falls back to 400 (both audit lines kept): {out}"
+    );
+}
+
+#[test]
+fn genlock_audit_snapshot_failed_strih_read_writes_no_file_1360() {
+    let o = snapshot_case(
+        "export STRIH=10.77.9.202 STUB_SSH_FAIL=1\n\
+         genlock_audit_snapshot_capture before \"$T/b.txt\"\n\
+         if [ -e \"$T/b.txt\" ]; then echo FILE-EXISTS; else echo NO-FILE; fi",
+    );
+    assert_done(&o, "failed read");
+    assert!(
+        has_line(&o.stdout, "NO-FILE"),
+        "a failed strih read must leave no file (the report omits the section): {}",
+        o.stdout
+    );
+}
+
+#[test]
+fn genlock_audit_snapshot_sources_the_shared_reader_and_owns_no_read_1360() {
+    let s = read("scripts/lib/genlock-audit-snapshot.sh");
+    assert!(
+        s.contains(r#"/strih-log-read.sh""#) && s.contains("strih_log_tail "),
+        "the snapshot lib must source and read through the ONE shared strih OBS-log reader"
+    );
+    for banned in ["obs-studio/logs", "sshpass", "APPDATA"] {
+        assert!(
+            !s.contains(banned),
+            "the snapshot lib must not build its own strih-log read (found `{banned}`)"
+        );
+    }
+}
