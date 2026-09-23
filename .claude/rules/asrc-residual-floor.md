@@ -36,6 +36,14 @@ absorbing. Two facts about reading `<X>` (established live 2026-09-03, dantesync
 `f_phase=` DC) + `Get-NetUDPEndpoint -LocalPort 319,320`. Compare the two ppm magnitudes; a MISMATCH
 between them (or a value far outside ±10) is the thing worth chasing, not the non-zero itself.
 
+**Per-launch level history in one call (issue 1355):** plain ssh `cd /d "%APPDATA%\obs-studio\logs" &&
+findstr /c:"source 'mbc' estimated" *.txt` (and `/c:"audio buffering"`) returns every session's lines
+prefixed by the log file name, so each launch's captured `target=`, level median and OBS audio
+buffering (64 or 85 ms, random per launch) come out of one read — no PowerShell. Quote the command
+in bash DOUBLE quotes: inside a single-quoted bash string the `''` around `mbc` collapses and findstr
+matches nothing. The `mbc` sync offset in force lives in `basic\scenes\Stream_Obs.json` (`sync`, ns),
+readable with a `.ps1` via `-EncodedCommand`. Password via `$PW`, never literal.
+
 **Related, distinct axes:** `audio_ts_lag_ms` (#1226, audio timeline lag = health) and the av-sync
 dock `measured offset` STEP (#1265/#1267, A/V latency step) are different signals — the dock is
 `state=STALE` in EVENT mode (no QPSK marker), so A/V-offset evidence only accrues in TEST mode.
