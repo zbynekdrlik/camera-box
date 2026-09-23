@@ -21,6 +21,7 @@ Tier-0: every check here runs bash functions directly or reads files -- no cargo
 """
 import os
 import pathlib
+import shlex
 import stat
 import subprocess
 import sys
@@ -108,6 +109,37 @@ def test_strih_platform_delegates_to_the_fleet_list(host, want):
         f"issue 1317: strih_platform must agree with the obs-fleet class for {host!r}: {r!r}")
 
 
+def test_strih_platform_follows_the_fleet_class_not_a_hardcoded_name(monkeypatch):
+    # review round 1: the next strih (a Linux strih-pp) must be ONE table row, no code edit in either
+    # language -- strih_platform reads the addressed row's CLASS, never the literal name strih-lx.
+    table = ("strih-lx|10.77.9.202|linux-genlock|always\nstrih-pp|10.9.8.7|linux-genlock|always\n"
+             "stream|10.77.9.204|windows-genlock|always")
+    assert _platform("strih_platform 10.9.8.7", {"OBS_FLEET": table}).stdout == "linux"
+    assert _platform("strih_platform strih-pp.lan", {"OBS_FLEET": table}).stdout == "linux"
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("rha_1317", SCRIPTS / "rig-health-audit.py")
+    rha = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(rha)
+    monkeypatch.delenv("STRIH_PLATFORM", raising=False)
+    monkeypatch.delenv("STRIH_LX_HOST", raising=False)
+    monkeypatch.setenv("OBS_FLEET", table)
+    assert rha.strih_platform("10.9.8.7") == "linux" and rha.strih_platform("10.77.9.204") == "windows"
+
+
+def test_python_reader_skips_whitespace_only_rows_like_bash(monkeypatch):
+    import obs_fleet_table as t
+    monkeypatch.setenv("OBS_FLEET", "strih-lx|10.77.9.202|linux-genlock|always\n   \n"
+                                     "stream|10.77.9.204|windows-genlock|always")
+    assert [r[0] for r in t.fleet_rows()] == ["strih-lx", "stream"]
+
+
+def test_resolver_seam_is_time_bounded():
+    text = (LIB / "obs-fleet.sh").read_text()
+    seam = text[text.index("obs_fleet_resolve_host() {"):]
+    seam = seam[:seam.index("\n}\n")]
+    assert "timeout" in seam, "a stalled DNS resolver must never stall every strih_platform caller"
+
+
 def test_strih_platform_keeps_its_env_overrides():
     assert _platform("strih_platform strih-lx.lan", {"STRIH_PLATFORM": "windows"}).stdout == "windows"
     assert _platform("strih_platform 192.0.2.10", {"STRIH_PLATFORM": "linux"}).stdout == "linux"
@@ -145,9 +177,12 @@ def test_linux_restart_cmd_checks_the_unit_then_restarts_it():
     cmd = r.stdout
     assert r.returncode == 0 and cmd, r
     assert "systemctl --user" in cmd and "strih-obs.service" in cmd
-    assert "restart --no-block strih-obs.service" in cmd, (
-        "the restart must not block on the launcher's own :4455 wait -- mv_reverify_wait_obs_ws owns it")
-    assert cmd.index("list-unit-files") < cmd.index("restart --no-block"), (
+    # review round 1: the restart must BLOCK. strih-obs.service is Type=simple, so a blocking restart
+    # returns once ExecStop (strih-obs-stop.sh, <=15 s) finished and the new ExecStart forked -- it
+    # never waits on the launcher's own :4455 loop. --no-block returned while the OLD OBS still
+    # answered :4455, so the dev1 wait accepted the dying instance and the burn sweep-off hit it.
+    assert "restart strih-obs.service" in cmd and "--no-block" not in cmd, cmd
+    assert cmd.index("list-unit-files") < cmd.index("restart strih-obs.service"), (
         "the unit must be proven installed BEFORE anything restarts OBS")
     assert "MV_REVERIFY_NO_UNIT" in cmd
     for win in ("powershell", "Stop-Process", "AutoHotkey", "EncodedCommand"):
@@ -182,6 +217,27 @@ def test_restart_run_reports_a_missing_unit_as_not_performed(tmp_path):
                   env={"FAKE_ARGV": str(argv), "FAKE_OUT": "MV_REVERIFY_NO_UNIT: missing"},
                   extra_path=_fake_sshpass(tmp_path))
     assert "rc=2" in r.stdout, f"a missing strih-obs.service means the restart was NOT performed: {r!r}"
+
+
+@pytest.mark.parametrize("fake_out", ["", "ssh: connect to host 10.77.9.202 port 22: No route to host",
+                                      "Permission denied, please try again."])
+def test_restart_run_without_the_positive_marker_is_a_failed_restart(tmp_path, fake_out):
+    # review round 1: an ssh/auth failure on the Linux path prints no marker; it must NOT count as a
+    # performed restart (the orchestrator would burn the restart budget and wait on nothing).
+    argv = tmp_path / "argv"
+    r = _escalate('mv_reverify_obs_restart_run 10.77.9.202; echo "rc=$?"',
+                  env={"FAKE_ARGV": str(argv), "FAKE_OUT": fake_out},
+                  extra_path=_fake_sshpass(tmp_path))
+    assert "rc=3" in r.stdout, f"no MV_REVERIFY_OBS_RESTART marker must read as a failed restart: {r!r}"
+
+
+def test_wait_and_failure_messages_are_platform_correct():
+    text = (LIB / "mv-reverify-escalate.sh").read_text()
+    wait = text[text.index("mv_reverify_wait_obs_ws() {"):text.index("mv_reverify_reopen_multiview_run() {")]
+    assert "after the AHK respawn" not in wait, "the :4455 wait runs on strih-lx too (no AHK there)"
+    orch = text[text.index("mv_reverify_or_escalate() {"):text.index("mv_reverify_resolve_wait() {")]
+    i = orch.index("restart FAILED")
+    assert "_lx" in orch[max(0, i - 400):i], "the strih-lx restart-FAILED text must be gated on the platform"
 
 
 def test_restart_run_on_a_windows_strih_keeps_the_powershell_program(tmp_path):
@@ -240,10 +296,19 @@ def test_linux_cleanup_note_is_an_exact_path_rm_never_a_sweep():
     r = _platform("strih_lx_recording_cleanup_note '  ' 10.77.9.202 \"/srv/_REC/2026-09-23 20-00-07.mkv\"")
     out = r.stdout
     assert out.startswith("  strih-lx ssh:"), out
-    assert "rm -f -- '/srv/_REC/2026-09-23 20-00-07.mkv'" in out and "newlevel@10.77.9.202" in out
-    assert "Remove-Item" not in out and "*" not in out and "-r" not in out.split("rm -f")[1]
-    r = _platform("strih_lx_recording_cleanup_note '' 10.77.9.202 \"/srv/a'b.mkv\"")
-    assert "rm -f -- '/srv/a'\\''b.mkv'" in r.stdout, r
+    assert "Remove-Item" not in out and "*" not in out
+    # review round 1: the printed line is pasted into a LOCAL shell and ssh re-parses the joined
+    # remote command in the REMOTE shell -- so parse it BOTH times and require ONE exact path arg.
+    for path in ["/srv/_REC/2026-09-23 20-00-07.mkv", "/srv/a'b.mkv", '/srv/q"$x`y\\z.mkv']:
+        esc = path.replace("'", "'\\''")
+        r = _platform(f"strih_lx_recording_cleanup_note '' 10.77.9.202 '{esc}'")
+        line = r.stdout.strip()
+        cmd = line.split("ssh:", 1)[1].strip()
+        local_argv = shlex.split(cmd)
+        assert local_argv[:2] == ["ssh", "newlevel@10.77.9.202"] and len(local_argv) == 3, local_argv
+        remote_argv = shlex.split(local_argv[2])
+        assert remote_argv == ["rm", "-f", "--", path], (
+            f"the remote shell must see exactly one path argument for {path!r}: {remote_argv}")
 
 
 def test_planner_holder_note_is_platform_correct():
