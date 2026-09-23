@@ -4,6 +4,8 @@
 
 #include <QWidget>
 
+class QTimer;
+
 #define GREY_COLOR_BACKGROUND 0xFF4C4C4C
 
 class OBSQTDisplay : public QWidget {
@@ -13,6 +15,14 @@ class OBSQTDisplay : public QWidget {
 
 	OBSDisplay display;
 	bool destroying = false;
+	/* camera-box #1358: a window drag emits a resize per step; applying each one
+	 * (obs_display_resize -> gs_resize on the shared graphics thread) stalled the
+	 * PROGRAM render. resizeEvent (re)starts this single-shot timer and
+	 * ApplyDisplayResize applies the final size once. The first resize after the
+	 * display is created stays immediate (resizeImmediate). */
+	QTimer *resizeDebounce = nullptr;
+	bool resizeImmediate = false;
+	void ApplyDisplayResize();
 
 protected:
 	virtual void paintEvent(QPaintEvent *event) override;

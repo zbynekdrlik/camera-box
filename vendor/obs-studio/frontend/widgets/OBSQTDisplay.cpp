@@ -7,6 +7,7 @@
 #include <obs-nix-platform.h>
 #endif
 
+#include <QTimer>
 #include <QWindow>
 #ifdef ENABLE_WAYLAND
 #include <QApplication>
@@ -78,6 +79,13 @@ OBSQTDisplay::OBSQTDisplay(QWidget *parent, Qt::WindowFlags flags) : QWidget(par
 	setAttribute(Qt::WA_OpaquePaintEvent);
 	setAttribute(Qt::WA_DontCreateNativeAncestors);
 	setAttribute(Qt::WA_NativeWindow);
+
+	/* camera-box #1358: coalesce the resize burst of an interactive window drag
+	 * into ONE display resize once the size has been stable for 150 ms. */
+	resizeDebounce = new QTimer(this);
+	resizeDebounce->setSingleShot(true);
+	resizeDebounce->setInterval(150);
+	connect(resizeDebounce, &QTimer::timeout, this, &OBSQTDisplay::ApplyDisplayResize);
 
 	auto windowVisible = [this](bool visible) {
 		if (!visible) {
@@ -155,6 +163,8 @@ void OBSQTDisplay::CreateDisplay()
 	}
 
 	display = obs_display_create(&info, backgroundColor);
+	/* camera-box #1358: the first resize after creation is applied at once. */
+	resizeImmediate = true;
 
 	emit DisplayCreated(this);
 }
@@ -194,6 +204,23 @@ void OBSQTDisplay::resizeEvent(QResizeEvent *event)
 
 	CreateDisplay();
 
+	/* camera-box #1358: never resize the display per event. A drag emits a resize
+	 * per step and each applied one reallocates the swap chain on the graphics
+	 * thread the PROGRAM render shares. Restart the debounce timer instead; its
+	 * timeout applies the final size once. A just-created display gets its first
+	 * resize immediately so a new window never renders at a stale size. */
+	if (resizeImmediate) {
+		resizeImmediate = false;
+		resizeDebounce->stop();
+		ApplyDisplayResize();
+		return;
+	}
+
+	resizeDebounce->start();
+}
+
+void OBSQTDisplay::ApplyDisplayResize()
+{
 	if (isVisible() && display) {
 		QSize size = GetPixelSize(this);
 		obs_display_resize(display, size.width(), size.height());
