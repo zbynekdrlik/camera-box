@@ -407,6 +407,20 @@ def test_watchdog_gather_error_never_pages():
         assert "WOULD alert" not in r.stderr
 
 
+def test_watchdog_stale_baseline_scope_is_named_and_never_pages_1363():
+    # exit 4 = the baseline was captured on ANOTHER strih box: a lasting config error that must be
+    # logged as such (re-capture), never mistaken for a passing box outage, and never a phone page.
+    with tempfile.TemporaryDirectory() as d:
+        audit = _stub_audit(d, 4, "")
+        r, _ = _run_watchdog(d, audit, dry_run=True)
+        assert r.returncode == 0
+        assert "BASELINE SCOPE STALE" in r.stderr and "--capture" in r.stderr
+        assert "WOULD alert" not in r.stderr
+        r, _ = _run_watchdog(d, audit, dry_run=False)
+        assert r.returncode == 0
+        assert "ALERT" not in r.stderr
+
+
 def test_watchdog_stable_clears_and_recovers():
     with tempfile.TemporaryDirectory() as d:
         audit = _stub_audit(d, 0, "NDI-PORTMAP-STABLE: OBS instance port map matches baseline (5 senders)")
@@ -467,6 +481,17 @@ def test_anchor_ip_fails_safe_on_two_ips_or_none_1363():
     assert _bash(_block_of(doubled) + 'ndi_portmap_anchor_ip "$block" "STRIH-LX (2ME PGM)"').strip() == "10.77.9.202"
 
 
+def test_anchor_ip_ignores_an_ipv6_record_of_the_same_anchor_1363():
+    # dev1 avahi runs with use-ipv6=yes: a dual-stack announce of the SAME anchor must stay ONE box
+    # (IPv4), never "two addresses -> ambiguous -> permanently blind".
+    v6 = _AVAHI_LX + (
+        f'=;enp2s0;IPv6;STRIH-LX\\032\\0402ME\\032PGM\\041;_ndi._tcp;local;{_H_LX};fe80::1234:5678;5962;"g=P"\n')
+    assert _bash(_block_of(v6) + 'ndi_portmap_anchor_ip "$block" "STRIH-LX (2ME PGM)"').strip() == "10.77.9.202"
+    r = _audit("--json", v6, "/nonexistent/baseline.json", scope=None)
+    assert r.returncode == 0, r.stderr
+    assert json.loads(r.stdout)["senders"] == _LX_SENDERS
+
+
 def test_baseline_scope_match_is_exact_and_fails_closed_1363():
     assert _bash('ndi_portmap_baseline_scope "STRIH-LX (2ME PGM)" "STRIH-LX (2ME PGM)"').strip() == "MATCH"
     assert _bash('ndi_portmap_baseline_scope "STRIH-SNV (2ME PGM)" "STRIH-LX (2ME PGM)"').strip() == "MISMATCH"
@@ -514,15 +539,31 @@ def test_audit_box_override_derives_prefix_and_anchor_from_the_box_name_1363():
 def test_audit_check_refuses_a_baseline_captured_for_another_box_1363():
     # the checked-in baseline still records the retired Windows STRIH-SNV: diffing it against the
     # live strih-lx map would read every baseline name ABSENT and report STABLE forever (a silently
-    # blind watchdog). It must be a LOUD gather error that names the re-capture instead.
+    # blind watchdog). It must be a LOUD, DISTINCT exit (4 = baseline scope stale, not a transient
+    # gather error) that names the re-capture instead.
     with tempfile.TemporaryDirectory() as d:
         base = str(pathlib.Path(d) / "baseline.json")
         assert _audit("--capture", _AVAHI_LIVE, base).returncode == 0  # an SNV-scoped baseline
         r = _audit("--check", _AVAHI_LX, base, scope=None)
-        assert r.returncode == 2, (r.stdout, r.stderr)
+        assert r.returncode == 4, (r.stdout, r.stderr)
         assert "NDI-PORTMAP-STABLE" not in r.stdout
         assert "--capture" in r.stderr
         assert "STRIH-SNV (2ME PGM)" in r.stderr and "STRIH-LX (2ME PGM)" in r.stderr
+
+
+def test_audit_unresolved_box_is_a_gather_error_not_a_recapture_hint_1363():
+    # an empty box (facet lookup failed / NDI_PORTMAP_BOX empty with no prefix) must fail as
+    # "nothing resolved" BEFORE the baseline-scope check -- a re-capture hint would be useless there.
+    # NDI_PORTMAP_FLEET_FACET is the facet seam; an unknown facet makes the fleet lookup fail.
+    with tempfile.TemporaryDirectory() as d:
+        base = str(pathlib.Path(d) / "baseline.json")
+        assert _audit("--capture", _AVAHI_LX, base, scope=None).returncode == 0
+        r = _audit("--check", _AVAHI_LX, base, scope=None,
+                   extra_env={"NDI_PORTMAP_FLEET_FACET": "no-such-facet"})
+        assert r.returncode == 2, (r.stdout, r.stderr)
+        assert "no watched strih" in r.stderr
+        assert "--capture" not in r.stderr
+        assert "NDI-PORTMAP-STABLE" not in r.stdout
 
 
 def test_audit_anchor_at_two_ips_is_a_gather_error_1363():
