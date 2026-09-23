@@ -284,12 +284,13 @@ fn runner_skips_gracefully_with_no_watched_inputs() {
 // issue 1221 review fixes (Fable adversarial pass) — reader exec, env sanitize, bounds, stale streak
 // ---------------------------------------------------------------------------------------------
 
-/// 🔴-1: the DEFAULT reader must chain `timeout bash -c '. win-ssh-exec.sh; win_ssh_run …'` —
-/// `timeout win_ssh_run` directly can never work (`timeout` execvp()s a real binary, not a shell
-/// function). Prove the whole default chain end-to-end with a PATH-stubbed `sshpass` (the leaf
-/// win_ssh_run calls); RED on the old `timeout <fn>` form (empty output), GREEN on the fix.
+/// 🔴-1: the DEFAULT reader must reach a real `sshpass` binary — a `timeout <shell function>` can
+/// never work (`timeout` execvp()s a real binary). Since issue 1360 the chain is the shared
+/// `strih_log_tail` → `sshpass -p … timeout T ssh …` (scripts/lib/strih-log-read.sh; host `h` is a
+/// Windows strih, so the -EncodedCommand branch runs). Prove it end-to-end with a PATH-stubbed
+/// `sshpass`; RED on the historical `timeout <fn>` form (empty output).
 #[test]
-fn default_reader_chains_through_bash_c_resource_not_timeout_of_a_function() {
+fn default_reader_reaches_a_real_sshpass_never_timeout_of_a_function() {
     let stub = std::env::temp_dir().join(format!(
         "genlock-settle-sshpass-stub-{}",
         std::process::id()
