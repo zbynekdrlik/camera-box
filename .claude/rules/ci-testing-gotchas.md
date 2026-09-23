@@ -1228,3 +1228,16 @@ basename and would have stayed RED after correct wiring; the fix was to pin the 
 statement. Also: the FUNCTION name (`ndi_cadence_verify_and_heal`) is the clean single-call-site
 anchor precisely BECAUSE the source line names the FILE, never the function — keep it that way (no
 function name in the source-block comment) so a `match_indices(fn_name).count() == 1` stays true.
+
+## A >128 KB "large log" fixture passed as ONE env var makes bash never start (E2BIG) — feed it from a file (issue 1317 remainder)
+
+The SIGPIPE-under-pipefail tests in this repo need a LARGE log (>64 KB, early match) to be
+meaningful. Passing that fixture to a `run_sourced`-style harness as an ENVIRONMENT VARIABLE
+(`&[("LOGTEXT", &big_log)]` + `<<<"$LOGTEXT"`) fails for a harness reason, not the behavior under
+test: Linux caps a SINGLE argv/env string at `MAX_ARG_STRLEN` = 128 KB (32 pages), so `execve` of
+bash returns `E2BIG` ("Argument list too long") and the test dies before the script runs — a
+~260 KB fixture hit it on the first local replica run. Write the fixture to a
+`tempfile::tempdir()` file and redirect it (`fn < "$LOGFILE"`); keep env vars for small values.
+The existing >1 MB drain-safety tests already stream their input from inside the shell
+(`head -c … /dev/zero | tr`) for the same reason. A local python/bash replica of the Rust harness
+catches this before CI (`subprocess.run` raises `OSError: [Errno 7]` on the same limit).
