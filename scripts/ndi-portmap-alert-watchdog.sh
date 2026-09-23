@@ -3,7 +3,7 @@
 # tick -- same convention as scripts/netcfg-drift-alert-watchdog.sh / network-reach-alert-watchdog.sh
 # (set -uo pipefail, not -e).
 #
-# scripts/ndi-portmap-alert-watchdog.sh -- #1181: DEV1-SIDE, REPORT-ONLY alert for a STRIH-SNV OBS
+# scripts/ndi-portmap-alert-watchdog.sh -- #1181: DEV1-SIDE, REPORT-ONLY alert for a strih OBS
 # NDI SENDER port-map change. Runs `scripts/ndi-portmap-audit.sh --check` (read-only avahi mDNS read,
 # no rig writes), and once a CHANGED map is CONFIRMED across N consecutive passes fires ONE Slovak
 # Discord alert -- exactly the dev1-side alert-watchdog topology + confirm/throttle framework the
@@ -154,7 +154,7 @@ main() {
   if [ "${alert_now:-0}" = "1" ]; then
     log "ALERT: firing Discord notification for NDI port-map change"
     python3 "$NOTIFY" notify --body \
-      "🚨 #1181 NDI port-map: sender-porty STRIH-SNV OBS sa ZMENILI oproti baseline ($REPO_SLUG) — stock NDI prijímače (TV / NDI Studio Monitor) môžu teraz ukazovať NESPRÁVNY zdroj pod pôvodným menom (pripojené na zapamätaný port). ${summary}. Akcia: na TV/Studio Monitor prijímačoch znovu otvoriť zdroj; ak je zmena zámerná (pridaný/odobraný výstup + reštart OBS), obnoviť baseline \`scripts/ndi-portmap-audit.sh --capture\` a commitnúť v PR." \
+      "🚨 #1181 NDI port-map: sender-porty strih OBS sa ZMENILI oproti baseline ($REPO_SLUG) — stock NDI prijímače (TV / NDI Studio Monitor) môžu teraz ukazovať NESPRÁVNY zdroj pod pôvodným menom (pripojené na zapamätaný port). ${summary}. Akcia: na TV/Studio Monitor prijímačoch znovu otvoriť zdroj; ak je zmena zámerná (pridaný/odobraný výstup + reštart OBS), obnoviť baseline \`scripts/ndi-portmap-audit.sh --capture\` a commitnúť v PR." \
       --dedup-key "$(watchdog_notify_key "ndi-portmap" "$(date +%s)")" \
       >/dev/null 2>&1 || log "ALERT: airuleset.py notify failed (non-fatal)"
   else

@@ -46,6 +46,12 @@
 #                   render + receives, so it IS in scope. Traveling-safe with NO is_home gate: the
 #                   only page condition is a SUCCESSFULLY-FETCHED positive reading, so a dark
 #                   resolume just SKIPs -> #732/#1001, exactly like audio-lag/bundle-state.)
+#   ndi-portmap   = strih-lx          (issue 1363: the ONE strih box whose NDI SENDER port map the
+#                   dev1 port-map watchdog (scripts/ndi-portmap-audit.sh) watches -- the box that
+#                   owns the 2ME PGM program the building TVs cache by port. EXACTLY one member: the
+#                   audit refuses any other count. It consumes the member NAME only (the NDI machine
+#                   name = the uppercased hostname, the anchor IP = the anchor's own mDNS record), so
+#                   a strih swap (the Poprad strih-pp next) is this one policy edit.)
 #
 # TRAVELING-BOX SAFETY (resolume is home only sometimes): a naive add to the PAGING watchdogs would
 # false-page whenever resolume is away (the owner's hardest sensitivity -- the #739 5x false-page
@@ -140,8 +146,9 @@ obs_fleet_facet_members() {
     obs-liveness)  printf 'strih stream resolume strih-lx' ;;
     genlock-lock)  printf 'strih stream imag resolume strih-lx' ;;
     render-freeze) printf 'strih stream resolume strih-lx' ;;
+    ndi-portmap)   printf 'strih-lx' ;;
     *)
-      echo "obs-fleet: unknown facet '${facet}' (expected one of: audio-lag av-step vb-matrix bundle-state network-reach obs-liveness genlock-lock render-freeze)" >&2
+      echo "obs-fleet: unknown facet '${facet}' (expected one of: audio-lag av-step vb-matrix bundle-state network-reach obs-liveness genlock-lock render-freeze ndi-portmap)" >&2
       return 1
       ;;
   esac

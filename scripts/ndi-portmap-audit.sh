@@ -3,7 +3,7 @@
 # unreadable avahi line / missing baseline never aborts the whole audit mid-pass -- an error is
 # reported and returned, never fatal (same survive-per-pass discipline as scripts/netcfg-audit.sh).
 #
-# scripts/ndi-portmap-audit.sh -- #1181: durable, READ-ONLY audit of the STRIH-SNV OBS instance's NDI
+# scripts/ndi-portmap-audit.sh -- #1181: durable, READ-ONLY audit of the strih OBS instance's NDI
 # SENDER port map. Captures a checked-in baseline of the OBS instance's healthy name->port map (from
 # mDNS via `avahi-browse -rtp _ndi._tcp`) and REPORTS drift against it -- so a reshuffled sender port
 # (which silently hands a stock NDI Studio Monitor / building TV the WRONG sender under a cached port)
@@ -17,11 +17,20 @@
 # at scene-collection load), so the map is deterministic across CLEAN restarts but reshuffles when an
 # output was added/removed live (the saved-state creation order then differs from the running order).
 #
-# The strih box advertises TWO NDI machine instances at the same IP: the OBS instance (2ME PGM/PVW/
+# WHICH box (issue 1363): the watched strih is RESOLVED, never a baked box name -- the old literal
+# default (the retired Windows box) left this watchdog blind after the M4 cut-over to the Linux
+# strih-lx. The box is the ONE member of the obs-fleet `ndi-portmap` facet (scripts/lib/obs-fleet.sh);
+# its NDI machine name (the sender-name prefix) is the uppercased box hostname libndi announces under;
+# the anchor is "<prefix> (2ME PGM)"; the IP is read from the anchor's OWN mDNS record (the address
+# every receiver dials). Every piece stays env-overridable (NDI_PORTMAP_BOX / _NAME_PREFIX / _ANCHOR /
+# _BOX_IP). --check refuses a baseline captured for a DIFFERENT anchor (exit 2, re-capture) instead of
+# reading every old name ABSENT and reporting STABLE forever.
+#
+# A Windows strih advertised TWO NDI machine instances at the same IP: the OBS instance (2ME PGM/PVW/
 # Grading/MULTIVIEW/interkom) and a SEPARATE Arena/CG-bridge Spout ("Arena - bible"). This tool
-# isolates the OBS instance by the mDNS-hostname GROUP that contains the anchor program sender
-# (NDI_PORTMAP_ANCHOR, default "STRIH-SNV (2ME PGM)") and ignores everything else -- the CG source's
-# port is a different process's independent assignment that never participates in the OBS reshuffle.
+# isolates the OBS instance by the mDNS-hostname GROUP that contains the anchor program sender and
+# ignores everything else -- the CG source's port is a different process's independent assignment that
+# never participates in the OBS reshuffle.
 #
 # Modes:
 #   scripts/ndi-portmap-audit.sh --check      # DEFAULT: read live map -> diff vs baseline -> report;
@@ -37,27 +46,52 @@ set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/ndi-portmap-health.sh
 . "$HERE/lib/ndi-portmap-health.sh"
+# shellcheck source=scripts/lib/obs-fleet.sh
+. "$HERE/lib/obs-fleet.sh"
 
 MODE="check"
 case "${1:-}" in
   --check | "") MODE="check" ;;
   --capture) MODE="capture" ;;
   --json) MODE="json" ;;
-  --help | -h) sed -n '4,34p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
+  --help | -h) sed -n '4,43p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 0 ;;
   *) echo "ndi-portmap-audit: unknown arg '$1' (try --help)" >&2; exit 2 ;;
 esac
 
-# -- scope (all env-overridable) -------------------------------------------------------------------
-NDI_PORTMAP_BOX="${NDI_PORTMAP_BOX:-STRIH-SNV}"
-NDI_PORTMAP_BOX_IP="${NDI_PORTMAP_BOX_IP:-10.77.9.202}"
-NDI_PORTMAP_NAME_PREFIX="${NDI_PORTMAP_NAME_PREFIX:-STRIH-SNV}"
-NDI_PORTMAP_ANCHOR="${NDI_PORTMAP_ANCHOR:-STRIH-SNV (2ME PGM)}"
+log() { printf '%s [ndi-portmap-audit] %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$*" >&2; }
+
+# -- scope: RESOLVED, never a baked box name (issue 1363); every piece env-overridable --------------
+# _np_fleet_box -> the ONE obs-fleet `ndi-portmap` member (stdout), else a loud error + return 1.
+#   Exactly one: two strih boxes in the facet would make "the program's port map" ambiguous, and zero
+#   means nothing to watch -- both are a gather error, never a silently-picked box.
+_np_fleet_box() {
+  local members n
+  members="$(obs_fleet_facet_members ndi-portmap)" || return 1
+  # shellcheck disable=SC2086  # word-split the space-separated member list on purpose
+  set -- $members
+  n=$#
+  if [ "$n" -ne 1 ]; then
+    log "obs-fleet facet 'ndi-portmap' must name exactly ONE strih box, got $n: '${members}'"
+    return 1
+  fi
+  printf '%s' "$1"
+}
+# The program output DistroAV announces (the profile's main OutputName) -- an OUTPUT name, the same on
+# every strih; the box part of the sender name is the machine prefix below.
+NDI_PORTMAP_PROGRAM_OUTPUT="${NDI_PORTMAP_PROGRAM_OUTPUT:-2ME PGM}"
+if [ -z "${NDI_PORTMAP_BOX:-}" ]; then
+  NDI_PORTMAP_BOX="$(_np_fleet_box)" || NDI_PORTMAP_BOX=""
+fi
+# libndi announces every sender as "<MACHINE> (<output>)" with MACHINE = the uppercased hostname
+# (strih-lx -> STRIH-LX); the fleet name of a Linux OBS box IS its hostname.
+NDI_PORTMAP_NAME_PREFIX="${NDI_PORTMAP_NAME_PREFIX:-$(printf '%s' "$NDI_PORTMAP_BOX" | tr '[:lower:]' '[:upper:]')}"
+NDI_PORTMAP_ANCHOR="${NDI_PORTMAP_ANCHOR:-${NDI_PORTMAP_NAME_PREFIX:+$NDI_PORTMAP_NAME_PREFIX ($NDI_PORTMAP_PROGRAM_OUTPUT)}}"
+# Empty = read from the anchor's own mDNS record each pass (_np_gather); set = pinned (tests/ops).
+NDI_PORTMAP_BOX_IP="${NDI_PORTMAP_BOX_IP:-}"
 NDI_PORTMAP_BASELINE="${NDI_PORTMAP_BASELINE:-$HERE/ndi-portmap-baseline.json}"
 NDI_PORTMAP_AVAHI_CMD="${NDI_PORTMAP_AVAHI_CMD:-avahi-browse -rtp _ndi._tcp}"
 NDI_PORTMAP_AVAHI_FIXTURE="${NDI_PORTMAP_AVAHI_FIXTURE:-}"
 NDI_PORTMAP_AVAHI_TIMEOUT="${NDI_PORTMAP_AVAHI_TIMEOUT:-15}"
-
-log() { printf '%s [ndi-portmap-audit] %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$*" >&2; }
 
 # require_tools -> non-zero (loud) if a REQUIRED external tool is missing on dev1. `awk`/`python3` are
 # always needed (the pure lib parses with awk; the baseline JSON is built/read with python3).
@@ -92,14 +126,28 @@ _np_avahi_read() {
 }
 
 # -- build the OBS instance's live name=port map (parse every resolved line -> select the group) -----
-_np_live_map() {
+# _np_gather -> sets the globals LIVE (the "name=port" lines of the OBS instance, empty on any gather
+#   problem) and LIVE_IP (the box IP the map was selected at). Called directly (never in a $(...)
+#   subshell) so both globals reach the mode handlers. The IP is NDI_PORTMAP_BOX_IP when pinned, else
+#   the anchor's own mDNS record (ndi_portmap_anchor_ip: absent or at >1 IP -> empty -> gather error).
+LIVE=""
+LIVE_IP=""
+_np_gather() {
   local raw line parsed block=""
+  LIVE=""; LIVE_IP=""
+  if [ -z "$NDI_PORTMAP_ANCHOR" ]; then
+    log "no watched strih box resolved (obs-fleet 'ndi-portmap' facet / NDI_PORTMAP_BOX) -- nothing to read"
+    return 1
+  fi
   raw="$(_np_avahi_read)" || return 1
   while IFS= read -r line; do
     parsed="$(ndi_avahi_parse_resolved "$line")"
     [ -n "$parsed" ] && block="${block}${parsed}"$'\n'
   done <<<"$raw"
-  ndi_portmap_select "$block" "$NDI_PORTMAP_BOX_IP" "$NDI_PORTMAP_NAME_PREFIX" "$NDI_PORTMAP_ANCHOR"
+  LIVE_IP="${NDI_PORTMAP_BOX_IP:-$(ndi_portmap_anchor_ip "$block" "$NDI_PORTMAP_ANCHOR")}"
+  [ -n "$LIVE_IP" ] || return 0
+  LIVE="$(ndi_portmap_select "$block" "$LIVE_IP" "$NDI_PORTMAP_NAME_PREFIX" "$NDI_PORTMAP_ANCHOR")"
+  return 0
 }
 
 # _np_port_of <name> <map-block> -> the port for an EXACT name (split on the LAST '=', so a name that
@@ -128,6 +176,20 @@ for name, port in (data.get("senders", {}) or {}).items():
 PY
 }
 
+# _np_baseline_field <key> -> one top-level string field of the baseline JSON (empty if absent/unreadable).
+_np_baseline_field() {
+  [ -f "$NDI_PORTMAP_BASELINE" ] || return 0
+  python3 - "$NDI_PORTMAP_BASELINE" "$1" <<'PY'
+import sys, json
+try:
+    data = json.load(open(sys.argv[1]))
+except Exception:
+    sys.exit(0)
+value = data.get(sys.argv[2], "")
+print(value if isinstance(value, str) else "")
+PY
+}
+
 # _np_write_baseline <live-map-block> -> build the baseline JSON atomically (a python failure must
 #   never leave the committed baseline truncated -- build into a temp, then mv over it).
 _np_write_baseline() {
@@ -136,7 +198,7 @@ _np_write_baseline() {
   # shellcheck disable=SC2064
   trap "rm -f '$jtmp'" RETURN
   NDI_PM_CAPTURED="$(date '+%Y-%m-%d')" \
-  NDI_PM_BOX="$NDI_PORTMAP_BOX" NDI_PM_IP="$NDI_PORTMAP_BOX_IP" \
+  NDI_PM_BOX="$NDI_PORTMAP_BOX" NDI_PM_IP="$LIVE_IP" \
   NDI_PM_PREFIX="$NDI_PORTMAP_NAME_PREFIX" NDI_PM_ANCHOR="$NDI_PORTMAP_ANCHOR" \
   python3 - "$live" > "$jtmp" <<'PY'
 import sys, os, json
@@ -151,7 +213,9 @@ for line in sys.argv[1].splitlines():
     except ValueError:
         continue
 out = {
-    "_comment": ("#1181 STRIH-SNV OBS-instance NDI sender port-map baseline. REPORT-ONLY source of "
+    "_comment": ("#1181 strih OBS-instance NDI sender port-map baseline (the box/anchor below were "
+                 "RESOLVED at capture time from the obs-fleet ndi-portmap facet, issue 1363). "
+                 "REPORT-ONLY source of "
                  "truth: scripts/ndi-portmap-audit.sh --check diffs the live map vs this and reports a "
                  "moved sender port LOUD; it NEVER overwrites (a deliberate re-capture is recorded by "
                  "re-running --capture and committing the change in a PR, exactly like "
@@ -177,7 +241,7 @@ PY
 
 # _np_json <live-map-block> -> print the OBS instance map as JSON (no baseline; --json mode).
 _np_json() {
-  python3 - "$1" "$NDI_PORTMAP_BOX" "$NDI_PORTMAP_BOX_IP" "$NDI_PORTMAP_ANCHOR" <<'PY'
+  python3 - "$1" "$NDI_PORTMAP_BOX" "$LIVE_IP" "$NDI_PORTMAP_ANCHOR" <<'PY'
 import sys, json
 senders = {}
 for line in sys.argv[1].splitlines():
@@ -199,7 +263,8 @@ require_tools || exit 2
 case "$MODE" in
   capture)
     log "capturing live OBS-instance port map -> $NDI_PORTMAP_BASELINE"
-    live="$(_np_live_map)"
+    _np_gather || exit 2
+    live="$LIVE"
     if [ -z "$live" ]; then
       log "capture found NO OBS-instance senders (is strih OBS up + avahi reachable? anchor='$NDI_PORTMAP_ANCHOR')"
       exit 2
@@ -212,7 +277,8 @@ case "$MODE" in
     ;;
 
   json)
-    live="$(_np_live_map)"
+    _np_gather || exit 2
+    live="$LIVE"
     _np_json "$live"
     ;;
 
@@ -220,7 +286,15 @@ case "$MODE" in
     log "checking live OBS-instance port map vs baseline $NDI_PORTMAP_BASELINE"
     base="$(_np_baseline_senders_flat)" || { log "no readable baseline at $NDI_PORTMAP_BASELINE -- run --capture first"; exit 2; }
     if [ -z "$base" ]; then log "baseline has no senders -- run --capture first"; exit 2; fi
-    live="$(_np_live_map)"
+    # issue 1363: a baseline captured on ANOTHER strih box would read every old name ABSENT and
+    # report STABLE forever (a silently blind watchdog) -- refuse it loudly instead.
+    base_anchor="$(_np_baseline_field anchor)"
+    if [ "$(ndi_portmap_baseline_scope "$base_anchor" "$NDI_PORTMAP_ANCHOR")" != "MATCH" ]; then
+      log "baseline $NDI_PORTMAP_BASELINE was captured for anchor '${base_anchor}', but the watched strih is '${NDI_PORTMAP_ANCHOR}' (box '${NDI_PORTMAP_BOX}') -- re-capture it from a live read: scripts/ndi-portmap-audit.sh --capture"
+      exit 2
+    fi
+    _np_gather || exit 2
+    live="$LIVE"
     if [ -z "$live" ]; then
       # An empty live map is a GATHER ERROR (OBS down / avahi unreachable / anchor renamed), NOT a port
       # change -- box reachability is #1001's job. Never page CHANGED off an unreadable map.
