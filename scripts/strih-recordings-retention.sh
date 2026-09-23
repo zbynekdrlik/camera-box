@@ -1,9 +1,6 @@
 #!/usr/bin/env bash
 # strih-recordings-retention.sh (#1122, issue 1317 part 5) — dry-run-first E2E recordings retention on a rig OBS box.
 set -euo pipefail
-# A failing command inside a $(...) (the plan is computed in one) must abort that substitution too,
-# never be silently skipped -- the plan feeds a DELETE step.
-shopt -s inherit_errexit
 #
 # The E2E harness (scripts/recording-e2e.sh) records one OBS program capture per run into the box's
 # live OBS record directory; [8/8e] only deletes each run's OWN file, so aborted / skipped /
@@ -94,7 +91,7 @@ while [ $# -gt 0 ]; do
     --remote-path)    REMOTE_PATH="$2"; WIN_ONLY_FLAGS+=" --remote-path"; shift 2 ;;
     --plan-tsv)       PLAN_TSV=1; shift ;;
     --execute)        EXECUTE=1; shift ;;
-    -h|--help)        awk 'NR == 1 { next } /^$/ { exit } { print }' "${BASH_SOURCE[0]:-$0}"; exit 0 ;;
+    -h|--help)        awk 'NR == 1 { next } /^$/ { exit } /^#/ { sub(/^# ?/, ""); print }' "${BASH_SOURCE[0]:-$0}"; exit 0 ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
 done
@@ -125,8 +122,10 @@ rr_horizon_ceil() {
 # pool); the remaining below-floor files newest-first: index < keep_runs -> newest-run, else
 # keep_days > 0 AND age < horizon -> within-days, else DELETE. FAIL-SAFE: a row becomes DELETE only
 # on a positive proof (index >= keep_runs AND (keep_days == 0 OR age >= horizon)); any comparison that
-# cannot be evaluated returns 1 so the caller aborts before deleting anything. Inputs are bounded by
-# rr_local_sweep, so this is a second line of defence, never the only one.
+# cannot be evaluated returns 1 so the caller aborts before deleting anything. The caller runs this
+# as `plan="$(rr_plan ...)" || ...`, a context where bash IGNORES `set -e` (inherit_errexit does not
+# change that) -- so every command in here that can fail MUST be checked explicitly and `return 1`;
+# never rely on -e. Inputs are bounded by rr_local_sweep, so this is a second line of defence.
 rr_plan() {
   local dir="$1" now="$2" keep_runs="$3" keep_days="$4"
   local tab=$'\t' horizon days_on=0 p name st size mtime shown
@@ -253,6 +252,10 @@ rr_day() { date -d "@$1" +%F 2>/dev/null || echo "?"; }
 
 # rr_local_sweep -- validate, resolve the record dir, plan, render, and (only with --execute) delete.
 rr_local_sweep() {
+  if [ "$USER_SET" = 1 ] || [ -n "$WIN_ONLY_FLAGS" ]; then
+    echo "ERROR: --local-sweep runs on this machine -- --user${WIN_ONLY_FLAGS} do not apply to it (refused, never ignored)" >&2
+    exit 2
+  fi
   # BOUNDED inputs: an over-range number would overflow bash arithmetic / a `[ -lt ]` test inside the
   # plan and must never reach it (the plan feeds a DELETE step).
   [[ "$KEEP_RUNS" =~ ^[0123456789]{1,9}$ ]] || { echo "ERROR: --keep-runs must be an integer 0..999999999, got '$KEEP_RUNS'" >&2; exit 2; }
@@ -418,7 +421,7 @@ case "$MODE" in
     if [ "$USER_SET" = 1 ]; then LB_USER="$USER"; else LB_USER="${LINUX_BOX_USER:-newlevel}"; fi
     LB_PW="${LINUX_BOX_PW:-newlevel}"
     LB_TIMEOUT="${RETENTION_SSH_TIMEOUT:-900}"
-    [[ "$LB_TIMEOUT" =~ ^[0123456789]{1,6}$ ]] || { echo "ERROR: RETENTION_SSH_TIMEOUT must be whole seconds, got '$LB_TIMEOUT'" >&2; exit 2; }
+    [[ "$LB_TIMEOUT" =~ ^[123456789][0123456789]{0,5}$ ]] || { echo "ERROR: RETENTION_SSH_TIMEOUT must be 1..999999 whole seconds (0 would disable the bound), got '$LB_TIMEOUT'" >&2; exit 2; }
     REMOTE_ARGS=(--local-sweep --keep-runs "$KEEP_RUNS" --keep-days "$KEEP_DAYS")
     [ "$RECORD_DIR_SET" = 0 ] || REMOTE_ARGS+=(--record-dir "$RECORD_DIR")
     [ "$OBS_CONFIG_DIR_SET" = 0 ] || REMOTE_ARGS+=(--obs-config-dir "$OBS_CONFIG_DIR")
@@ -437,6 +440,10 @@ case "$MODE" in
     ;;
 
   win)
+    if [ "$OBS_CONFIG_DIR_SET" = 1 ] || [ "$PLAN_TSV" = 1 ]; then
+      echo "ERROR: --obs-config-dir / --plan-tsv belong to the Linux bash executor -- the Windows .ps1 driver on $HOST does not take them (refused, never ignored)" >&2
+      exit 2
+    fi
     PS1_LOCAL="$HERE/strih-recordings-retention.ps1"
     PW="${STRIH_SSH_PW:-newlevel}"
     [ -f "$PS1_LOCAL" ] || { echo "missing $PS1_LOCAL" >&2; exit 1; }

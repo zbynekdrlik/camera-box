@@ -32,19 +32,25 @@ The Linux executor refuses `--execute` with `--keep-runs 0` (the newest file may
 is writing right now) and, before each `rm`, re-checks the file is still a regular non-symlink,
 allowlisted, below-floor file. Dirs, symlinks and other non-regular entries are reported as `OTHER`
 rows ("PROTECT (not a regular file)") and never touched. The plan is **fail-safe** (review round 1):
-the script sets `inherit_errexit` (the plan runs inside a `$(...)`, where bash otherwise drops `-e`);
-`--keep-runs` is bounded to 9 digits and `--keep-days` to 0..36500 (an over-range value used to break
+`rr_plan` runs as `plan="$(rr_plan ...)" || ...`, where bash IGNORES `set -e` (`inherit_errexit` does NOT
+change that -- proven in review round 2), so its safety comes ONLY from explicit checks: every command
+in it that can fail is checked and `return 1`s (never add an unchecked one); `--keep-runs` is bounded to 9 digits and `--keep-days` to 0..36500 (an over-range value used to break
 a `[ -lt ]` test inside the plan and fall through to DELETE with exit 0); a row becomes DELETE only on
 a POSITIVE proof (index >= keep-runs AND (keep-days = 0 OR age >= horizon)) and an unevaluable
 comparison aborts the whole run before any `rm`. An unreadable record dir fails loud instead of
 globbing to a silent 0-file sweep. The ssh leg carries `UserKnownHostsFile=/dev/null` +
 `LogLevel=ERROR` (the address was the Windows strih until M4 — a stale key must not block it) and a
 `timeout` INSIDE `sshpass` (`RETENTION_SSH_TIMEOUT`, default 900 s); `--user` / `--obs-config-dir` are
-forwarded, the `.ps1`-only `--budget-gb` / `--remote-path` are refused for a Linux box.
+forwarded, the `.ps1`-only `--budget-gb` / `--remote-path` are refused for a Linux box. Every mode
+REFUSES a flag that does not apply to it (never silently ignores it): `--local-sweep` refuses `--user` /
+`--budget-gb` / `--remote-path`, the Windows driver refuses `--obs-config-dir` / `--plan-tsv`; a zero
+`RETENTION_SSH_TIMEOUT` is refused (GNU `timeout 0` disables the bound).
 
 Profile resolution reads `[Basic] ProfileDir` (user.ini, then global.ini) and only then the display
-name `Profile`; OBS launched with `--profile X` (`scripts/strih-obs-start.sh`) writes X back to
-`user.ini`, so a running box reads its live profile. The executor reads whole-second mtimes, so at the
+name `Profile`. `scripts/strih-obs-start.sh` launches OBS with `--profile "${STRIH_OBS_PROFILE:-strih-lx}"`;
+observed live 24.9.2026 on the running strih-lx: `user.ini` `ProfileDir=strih-lx`, matching the launch
+profile. If an operator ever launches a different profile without OBS recording it in `user.ini`, pass
+`--record-dir` explicitly. The executor reads whole-second mtimes, so at the
 exact horizon a file can read up to 1 s older than the Rust `f64` view and same-second files order by
 name — negligible, and the shared table uses integer ages for exactly that reason.
 
