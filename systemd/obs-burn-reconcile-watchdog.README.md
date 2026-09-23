@@ -99,7 +99,8 @@ systemctl --user disable --now obs-burn-reconcile-watchdog.timer
 
 | Var | Default | Meaning |
 |---|---|---|
-| `STRIH_HOST` / `STREAM_HOST` | `10.77.9.202` / `10.77.9.204` | broadcast box OBS-WS addresses |
+| `OBS_BURN_RECONCILE_BOXES` | the obs-fleet `burn-reconcile` facet (`strih-lx\|10.77.9.202 stream\|10.77.9.204`) | roster override (`name\|host` pairs) |
+| `STRIH_HOST` / `STREAM_HOST` | the roster's host | per-box OBS-WS address override (`STRIH_HOST` repoints strih-lx) |
 | `OBS_PASSWORD` | `""` | OBS WebSocket password for both boxes |
 | `RIG_LEASE_STALE_SECS` | `5400` | age beyond which a held rig lease is treated as dead (so a genuinely-running gate is never mistaken for stale and its deliberate burn wrongly swept) |
 | `OBS_BURN_RECONCILE_WATCHDOG_STATE_FILE` | `$HOME/.camera-box/camera-box-obs-burn-reconcile-watchdog.state` | per-box `renderTotalFrames` baseline + `unresolved`-burn flag — in a DURABLE dir (not tmpfs), so a dev1 reboot doesn't wipe the baseline; deliberately DIFFERENT from #391's and #979's state files |

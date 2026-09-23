@@ -5,7 +5,9 @@ CONTINUOUS sibling of #977's per-PR E2E gate preflight, and closes issue 958's r
 session-0 `obs64` (launched via ssh+`Invoke-CimMethod`) is fully healthy on OBS WebSocket, NDI, and
 the OBS log — completely invisible to the operator on the console — yet #977's gate only fires on
 a push. The real incident sat like this for **~3.5 hours** before the user found it manually. This
-watchdog polls both broadcast boxes (strih 10.77.9.202, stream 10.77.9.204) over `win_ssh_run`
+watchdog polls each Windows genlock OBS box over `win_ssh_run` (issue 1317: the roster is the
+`scripts/lib/obs-fleet.sh` `obs-session` facet = stream 10.77.9.204 + resolume `resolume.lan`
+while home; a Linux box such as strih-lx is class-gated out and never gets the PowerShell probe)
 (`scripts/lib/win-ssh-exec.sh`, #703) on a **dev1 systemd --user timer**, reusing the SAME
 session-visibility probe #977/#978 use (`scripts/lib/obs-session-visibility.sh`) and the SAME
 `#391 obs_watchdog_confirm`/`obs_watchdog_alert_throttle` decision logic
@@ -51,9 +53,9 @@ scripts/obs-session-watchdog.sh --dry-run        # inspect the per-box probe + d
 mkdir -p ~/.config/systemd/user
 cp systemd/obs-session-watchdog.service ~/.config/systemd/user/
 cp systemd/obs-session-watchdog.timer   ~/.config/systemd/user/
-# strih/stream ssh creds default to targets.md's "SSH: newlevel/newlevel"; override if needed:
+# stream/resolume ssh creds default to targets.md's "SSH: newlevel/newlevel"; override if needed:
 #   mkdir -p ~/.config/environment.d
-#   printf 'STRIH_PW=...\nSTREAM_PW=...\n' > ~/.config/environment.d/obs-session-watchdog.conf
+#   printf 'RESOLUME_PW=...\nSTREAM_PW=...\n' > ~/.config/environment.d/obs-session-watchdog.conf
 systemctl --user daemon-reload
 
 # 3. Live-verify BEFORE enabling the timer:
@@ -77,6 +79,8 @@ systemctl --user disable --now obs-session-watchdog.timer
 |---|---|---|
 | `OBS_SESSION_WATCHDOG_CONFIRM_THRESHOLD` | `2` | consecutive invisible readings before alerting |
 | `OBS_SESSION_WATCHDOG_ALERT_THROTTLE_PASSES` | `10` | passes between repeat alerts for the same condition |
-| `STRIH_HOST` / `STREAM_HOST` | `10.77.9.202` / `10.77.9.204` | broadcast box addresses |
-| `STRIH_USER` / `STRIH_PW` / `STREAM_USER` / `STREAM_PW` | `newlevel` / `newlevel` | ssh creds (targets.md) |
+| `OBS_SESSION_WATCHDOG_BOXES` | the obs-fleet `obs-session` facet (`stream\|10.77.9.204 resolume\|resolume.lan`) | roster override (`name\|host` pairs; non-Windows names are skipped) |
+| `<NAME>_HOST` (e.g. `STREAM_HOST`, `RESOLUME_HOST`) | the roster's host | per-box address override; `<NAME>` = the fleet name upper-cased, every non-alphanumeric turned into `_` |
+| `<NAME>_USER` / `<NAME>_PW` (e.g. `STREAM_PW`, `RESOLUME_PW`) | `OBS_SESSION_DEFAULT_USER` / `OBS_SESSION_DEFAULT_PW` | per-box ssh creds (same `<NAME>` rule) |
+| `OBS_SESSION_DEFAULT_USER` / `OBS_SESSION_DEFAULT_PW` | `newlevel` / `newlevel` | fleet-wide ssh login (targets.md) for a box with no per-box override |
 | `OBS_SESSION_WATCHDOG_STATE_FILE` | `$XDG_RUNTIME_DIR/camera-box-obs-session-watchdog.state` | per-box confirm/throttle state — deliberately DIFFERENT from #391's own state file, since both key on the same box names |

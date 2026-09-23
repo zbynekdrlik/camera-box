@@ -40,6 +40,8 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE/lib/rig-heartbeat.sh"
 # shellcheck source=scripts/lib/rig-restore-decision.sh
 . "$HERE/lib/rig-restore-decision.sh"
+# shellcheck source=scripts/lib/obs-fleet.sh
+. "$HERE/lib/obs-fleet.sh"
 
 # ── config (all env-overridable) ─────────────────────────────────────────────
 DRY_RUN=0
@@ -58,9 +60,12 @@ CAM1_IP="${CAM1_IP:-10.77.9.61}"
 CAM2_IP="${CAM2_IP:-10.77.9.62}"
 CAM4_IP="${CAM4_IP:-10.77.9.64}"
 CAM_PW="${CAM_PW:-newlevel}"           # dev-rig root pw (same default convention as recording-e2e.sh)
-# OBS program boxes.
-STRIH_HOST="${STRIH_HOST:-10.77.9.202}"
-STREAM_HOST="${STREAM_HOST:-10.77.9.204}"
+# OBS program boxes (issue 1317 part 2, M4 cut-over): the ONE fleet list's `rig-restore` facet
+# (scripts/lib/obs-fleet.sh = strih-lx + stream, `name|host` pairs), overridable byte-compatibly via
+# RIG_WATCHDOG_OBS_BOXES. The probe + teardown are OBS-WebSocket only (obs_phase2.py), so the
+# production Linux strih-lx keeps the coverage the retired Windows strih had. STRIH_HOST still
+# repoints the strih (now strih-lx) and STREAM_HOST the stream box (empty = the roster's host).
+OBS_BOXES="${RIG_WATCHDOG_OBS_BOXES:-$(obs_fleet_boxes rig-restore)}"
 OBS_WS_PASSWORD="${OBS_WS_PASSWORD:-}" # strih may require it; stream is no-auth (empty is fine)
 
 SSH_TIMEOUT="${RIG_WATCHDOG_SSH_TIMEOUT:-8}"
@@ -132,6 +137,76 @@ probe_obs() {
   printf 'obs %s scene=%s\n' "$name" "$scene"
 }
 
+# ── OBS roster (issue 1317 part 2) ───────────────────────────────────────────
+# _rig_obs_resolve_host <name> <roster-host> -> the host to dial: STRIH_HOST repoints the strih
+# (strih-lx), STREAM_HOST the stream box; any other member dials its roster host.
+_rig_obs_resolve_host() {
+  case "${1:-}" in
+    strih-lx) printf '%s' "${STRIH_HOST:-${2:-}}" ;;
+    stream) printf '%s' "${STREAM_HOST:-${2:-}}" ;;
+    *) printf '%s' "${2:-}" ;;
+  esac
+}
+
+# rig_obs_targets -> one `name host` line per OBS box to probe THIS pass, in roster order. A
+# traveling member is skipped (logged) while away (obs_fleet_poll_now), so an away box never counts
+# as UNREADABLE and never holds the E2E marker hostage -- UNLESS every member is away (only possible
+# via a RIG_WATCHDOG_OBS_BOXES override): then nothing is observed, the pass counts unreadable and
+# the marker is kept (fail-closed, rig_obs_unreadable_count).
+rig_obs_targets() {
+  local pair name
+  for pair in $OBS_BOXES; do
+    name="${pair%%|*}"
+    if ! obs_fleet_poll_now "$name"; then
+      log "obs $name: skipped — traveling box is away (obs_fleet_poll_now)"
+      continue
+    fi
+    printf '%s %s\n' "$name" "$(_rig_obs_resolve_host "$name" "${pair##*|}")"
+  done
+}
+
+# rig_obs_host <name> -> the host restore_obs tears down (the SAME resolution the probe used); returns
+# 1 (no output) for a name not in the roster, so an unknown box is never torn down blindly.
+rig_obs_host() {
+  local want="${1:-}" pair
+  for pair in $OBS_BOXES; do
+    [ "${pair%%|*}" = "$want" ] || continue
+    _rig_obs_resolve_host "$want" "${pair##*|}"
+    return 0
+  done
+  return 1
+}
+
+# rig_obs_unreadable_names -> the space-separated roster names with NO `obs <name> ...` record in
+# $RIG_OBS (their probe failed this pass). Uses this pass's $RIG_OBS_TARGETS (set by
+# collect_observations, possibly EMPTY) so the traveling-box probe is not repeated; computes it only
+# when the variable is UNSET (tests).
+rig_obs_unreadable_names() {
+  local targets name host out=""
+  if [ -n "${RIG_OBS_TARGETS+x}" ]; then targets="$RIG_OBS_TARGETS"; else targets="$(rig_obs_targets 2>/dev/null)"; fi
+  while read -r name host; do
+    [ -n "$name" ] || continue
+    grep -q "^obs $name " <<<"${RIG_OBS:-}" || out="${out:+$out }$name"
+  done <<<"$targets"
+  printf '%s' "$out"
+}
+
+# rig_obs_unreadable_count -> how many of this pass's OBS roster boxes were UNREADABLE (no record).
+# FAIL-CLOSED on an EMPTY roster (a mis-set OBS_FLEET, a failed targets mktemp): nothing was observed,
+# so the count reads 1 -- a pass that saw no OBS box can never be a positive full restore, and the
+# #353 E2E marker is KEPT (the old fixed `2 - seen` arithmetic kept it the same way).
+rig_obs_unreadable_count() {
+  local targets names n=0
+  if [ -n "${RIG_OBS_TARGETS+x}" ]; then targets="$RIG_OBS_TARGETS"; else targets="$(rig_obs_targets 2>/dev/null)"; fi
+  if ! grep -q . <<<"$targets"; then
+    printf '1'
+    return 0
+  fi
+  names="$(RIG_OBS_TARGETS="$targets" rig_obs_unreadable_names)"
+  for _ in $names; do n=$(( n + 1 )); done
+  printf '%s' "$n"
+}
+
 # ── restore actions ──────────────────────────────────────────────────────────
 restore_cam() {
   local name="$1" ip
@@ -168,11 +243,8 @@ restore_cam() {
 
 restore_obs() {
   local name="$1" host
-  case "$name" in
-    strih) host="$STRIH_HOST" ;;
-    stream) host="$STREAM_HOST" ;;
-    *) log "restore_obs: unknown obs '$name' — skipping"; return 0 ;;
-  esac
+  # issue 1317 part 2: the SAME roster + host resolution the probe used, never a literal box table.
+  host="$(rig_obs_host "$name")" || { log "restore_obs: unknown obs '$name' — skipping"; return 0; }
   log "RESTORE obs $name ($host): obs_phase2.py teardown (restore prod scene) + burns OFF"
   # #353 (review): preserve the teardown's REAL exit status (return it) so the caller can tell whether
   # the box was actually restored — the marker is cleared only after EVERY OBS restore succeeded.
@@ -188,20 +260,34 @@ restore_obs() {
 }
 
 # ── observe: collect all records in the MAIN shell (#394 — journald-reliable) ─
-# Sets RIG_OBS to the newline-separated records of all five probes. The probes MUST run in this
+# Sets RIG_OBS to the newline-separated records of every probe (3 cams + the OBS roster). The probes MUST run in this
 # long-lived shell with their record lines redirected to a temp file — NOT via per-call $(…)
 # command substitution: each $(…) forks a short-lived subshell, and journald intermittently LOSES
 # the log() stderr lines of those fast-exiting children under the systemd unit (0/5 strih, 2/5
 # stream across 5 timer-style passes). A redirection does not fork, so the observation log is
 # emitted by the main process and reliably reaches the journal.
 collect_observations() {
-  local obs_file
+  local obs_file targets_file name host
   obs_file="$(mktemp "${TMPDIR:-/tmp}/camera-box-rig-watchdog-obs.XXXXXX")"
   probe_cam cam1 "$CAM1_IP" >>"$obs_file"
   probe_cam cam2 "$CAM2_IP" >>"$obs_file"
   probe_cam cam4 "$CAM4_IP" >>"$obs_file"
-  probe_obs strih "$STRIH_HOST" >>"$obs_file"
-  probe_obs stream "$STREAM_HOST" >>"$obs_file"
+  # issue 1317 part 2: the OBS boxes are the fleet `rig-restore` roster (written by a redirect, and
+  # read by a while-loop over a file redirect -- both stay in THIS shell, never a $(...) fork).
+  # A failed mktemp leaves RIG_OBS_TARGETS EMPTY, which rig_obs_unreadable_count treats fail-closed.
+  RIG_OBS_TARGETS=""
+  if targets_file="$(mktemp "${TMPDIR:-/tmp}/camera-box-rig-watchdog-targets.XXXXXX")"; then
+    rig_obs_targets >"$targets_file"
+    RIG_OBS_TARGETS="$(cat "$targets_file")"
+    while read -r name host; do
+      [ -n "$name" ] || continue
+      probe_obs "$name" "$host" </dev/null >>"$obs_file"
+    done <"$targets_file"
+    rm -f "$targets_file"
+  else
+    log "obs: ERROR: mktemp for the OBS roster failed — no OBS box probed this pass (counted unreadable)"
+  fi
+  [ -n "$RIG_OBS_TARGETS" ] || log "obs: ERROR: no OBS box probed this pass (roster OBS_BOXES='$OBS_BOXES' empty or every member away) — counted unreadable, the E2E marker is kept"
   RIG_OBS="$(cat "$obs_file")"
   rm -f "$obs_file"
 }
@@ -270,13 +356,13 @@ main() {
   collect_observations
   export RIG_OBS
 
-  # #353 (review): how many of the 2 OBS boxes (strih, stream) were UNREADABLE this pass. probe_obs
-  # emits an `obs ...` record only for a readable box, so unreadable = 2 - seen. An unreadable box may
-  # hide a stranded scene, so the marker must NOT be cleared while any OBS probe failed (below).
-  local obs_seen obs_unreadable
-  obs_seen="$(printf '%s\n' "$RIG_OBS" | grep -c '^obs ')"
-  obs_unreadable=$(( 2 - obs_seen ))
-  [ "$obs_unreadable" -lt 0 ] && obs_unreadable=0
+  # #353 (review): how many of this pass's OBS roster boxes (issue 1317: the fleet `rig-restore`
+  # facet, strih-lx + stream) were UNREADABLE. probe_obs emits an `obs ...` record only for a readable
+  # box, so a roster name with no record is unreadable; an EMPTY roster counts 1 (fail-closed). An
+  # unreadable box may hide a stranded scene, so the marker must NOT be cleared while any OBS probe
+  # failed (below).
+  local obs_unreadable
+  obs_unreadable="$(rig_obs_unreadable_count)"
 
   # Read ALL persisted state: confirm counter + #370 alert throttle state.
   local state_out prev prior_alert_sig prior_alert_passes
@@ -338,12 +424,12 @@ main() {
 
   # #370: Classify this restore (positive full / partial-KEPT) and apply the alert rate-limit.
   # Names of OBS boxes that were unreadable this pass (missing from obs records → probe failed).
-  local obs_unreadable_names=""
-  for _box_name in strih stream; do
-    if ! grep -q "^obs $_box_name " <<<"$RIG_OBS"; then
-      obs_unreadable_names="${obs_unreadable_names:+$obs_unreadable_names }$_box_name"
-    fi
-  done
+  local obs_unreadable_names
+  obs_unreadable_names="$(rig_obs_unreadable_names)"
+  # An empty roster is unreadable with no box to name -- say so in the alert instead of "none".
+  if [ -z "$obs_unreadable_names" ] && [ "${obs_unreadable:-0}" -gt 0 ]; then
+    obs_unreadable_names="empty-obs-roster"
+  fi
 
   # Pure classification: positive (full restore) or partial (KEPT — some OBS box unreadable/failed,
   # or (#396) a cam restore failed — a failed restore is never a positive "AUTO-RECOVERED").

@@ -62,14 +62,14 @@ STRIH_HOST="$(strih_lx_host)"
 echo -e "${GREEN}=== strih-lx setup (issue 1317): parallel Linux strih cutter, host ${STRIH_HOST} ===${NC}"
 
 # ---------------------------------------------------------------------------------------------
-step 1 "Static IP (NetworkManager) + hostname ${STRIH_HOST}"
+step 1 "Static IP (NetworkManager) + hostname $(strih_lx_hostname)"
 if [ -z "$STATIC_IP" ]; then
   warn "  STRIH_LX_IP unset -- the notebook's static IP is assigned on arrival (17.9.); leaving DHCP for now"
 else
   command -v nmcli >/dev/null 2>&1 || fail "nmcli required (desktop Ubuntu NetworkManager)"
   echo "  (operator: assign ${STATIC_IP}/23 to the rig NIC via nmcli; recorded here as the target)"
 fi
-hostnamectl set-hostname "${STRIH_HOST%%.*}" 2>/dev/null || warn "  could not set hostname (non-fatal)"
+hostnamectl set-hostname "$(strih_lx_hostname)" 2>/dev/null || warn "  could not set hostname (non-fatal)"
 
 # ---------------------------------------------------------------------------------------------
 # issue 1317 (post-M4, 20.9.2026): the strih notebook IS the fleet's ONE NTP master (`strih.lan` ->
