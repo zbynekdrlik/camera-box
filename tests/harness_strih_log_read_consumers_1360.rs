@@ -533,7 +533,12 @@ fn genlock_audit_snapshot_reads_a_windows_strih_instead_of_skipping_1360() {
     assert_eq!(
         non_empty_lines(&out),
         ["09:00:00.000: genlock-fifo audit 'NDI cam1': received=77 holds=1"],
-        "the Windows read must persist only the audit line, CR-stripped: {out:?}"
+        "the Windows read must persist only the audit line: {out:?}"
+    );
+    // `str::lines()` already drops a `\r` before `\n`, so assert on the raw bytes too.
+    assert!(
+        !out.contains('\r'),
+        "the persisted Windows audit line must be CR-stripped: {out:?}"
     );
 }
 
