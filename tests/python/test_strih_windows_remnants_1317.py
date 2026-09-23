@@ -227,14 +227,13 @@ def test_access_label_is_platform_correct():
     assert _platform("strih_access_label 192.0.2.10").stdout == "win-strih"
 
 
-def test_pullback_note_linux_names_scp_and_windows_is_the_original_text():
-    args = "'/o/p.json' '/o/p-pixels' 'C:\\o\\p.json' 'C:\\o\\p-pixels'"
-    lx = _platform(f"strih_partial_pullback_note 10.77.9.202 {args}").stdout
-    assert "win-strih" not in lx and "FileDownload" not in lx and "scp" in lx and "/o/p.json" in lx
-    win = _platform(f"strih_partial_pullback_note 192.0.2.10 {args}").stdout
-    assert win == ("    pull back to dev1: /o/p.json  AND the #186 pixel-proof dir /o/p-pixels\n"
-                   "      (win-strih FileDownload C:\\o\\p.json -> /o/p.json;\n"
-                   "       win-strih FileDownload C:\\o\\p-pixels -> /o/p-pixels  [absent on a clean run])\n"), win
+def test_linux_pullback_note_names_scp_not_a_win_strih_download():
+    # The Windows FileDownload text stays INLINE in recording-e2e.sh (its else-branch) because
+    # tests/harness_recording_e2e_paths.rs pins `FileDownload $STRIH_PIXELS_WIN` in that file; the
+    # helper owns only the strih-lx text.
+    lx = _platform("strih_lx_partial_pullback_note '/o/p.json' '/o/p-pixels'").stdout
+    assert "win-strih" not in lx and "FileDownload" not in lx and "scp" in lx, lx
+    assert "/o/p.json" in lx and "/o/p-pixels" in lx, lx
 
 
 def test_linux_cleanup_note_is_an_exact_path_rm_never_a_sweep():
@@ -256,20 +255,21 @@ def test_planner_holder_note_is_platform_correct():
 
 def test_recording_e2e_routes_every_strih_plan_line_through_the_platform():
     s = (SCRIPTS / "recording-e2e.sh").read_text()
-    region = s[s.index("  run_strih_extract() {"):s.index("[8/8b-pre] PUSH")]
-    assert "win-strih" not in region, (
-        "issue 1317: the [8/8a] region must print no unconditional win-strih text")
-    assert 'strih_partial_pullback_note "$STRIH"' in region
     assert 'strih_access_label "$STRIH"' in s
     assert 'strih_planner_holder_note "$STRIH"' in s
     assert "The win-* MCP holder runs 8/8a" not in s
     lines = s.splitlines()
-    sites = [i for i, ln in enumerate(lines) if "win-strih Shell:" in ln]
-    assert len(sites) == 3, sites
+    start = next(i for i, ln in enumerate(lines) if ln.startswith("  run_strih_extract() {"))
+    end = next(i for i, ln in enumerate(lines) if "[8/8b-pre] PUSH" in ln)
+    # Every win-strih plan line in the [8/8a] region and at each #652 cleanup site must be the
+    # WINDOWS branch of a strih_platform split whose linux branch calls the strih-lx helper.
+    sites = [i for i, ln in enumerate(lines)
+             if ("win-strih FileDownload" in ln and start < i < end) or "win-strih Shell:" in ln]
+    assert len(sites) == 5, sites
     for i in sites:
-        window = "\n".join(lines[max(0, i - 4):i])
-        assert "strih_lx_recording_cleanup_note" in window and "else" in window, (
-            f"the win-strih cleanup line at {i + 1} must be the Windows branch of a platform split")
+        window = "\n".join(lines[max(0, i - 5):i])
+        assert "strih_platform" in window and "else" in window and "strih_lx_" in window, (
+            f"the win-strih plan line at {i + 1} must be the Windows branch of a platform split")
 
 
 # --- item 5: the retired strih's AHK defaults are gone -----------------------------------------------
