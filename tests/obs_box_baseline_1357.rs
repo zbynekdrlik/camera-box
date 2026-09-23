@@ -602,6 +602,7 @@ rc_local_active=active
 governors=performance
 maxperf_active=active
 maxperf_udev=1
+ppd=masked
 sleep_target=masked
 logind_nosleep=1
 logind_powerkey=1
@@ -703,6 +704,7 @@ fn verdict_fails_each_item_on_its_own_broken_fact() {
         ),
         ("perf", "maxperf_active=active", "maxperf_active=inactive"),
         ("perf", "rc_local_eee=1", "rc_local_eee=0"),
+        ("perf", "ppd=masked", "ppd=enabled"),
         ("nosleep", "sleep_target=masked", "sleep_target=static"),
         ("boot", "initrd_hook=1", "initrd_hook=0"),
         (
@@ -930,5 +932,68 @@ fn lowlatency_meta_is_pinned_to_the_installed_generic_hwe_version() {
     assert!(
         f.contains("\"linux-lowlatency-hwe-${SERIES}=${_ll_ver}\""),
         "must install the lowlatency meta pinned to that version: {f}"
+    );
+}
+
+/// power-profiles-daemon (0.30 on 26.04) resets every core's scaling_governor to `powersave` when it
+/// starts, so a box whose governor the baseline pinned to `performance` came back `powersave` after
+/// the strih-lx conversion reboot (23.9.2026). The max-performance item masks the daemon BEFORE it
+/// checks the governor; the maxperf boot script writes platform_profile itself and only asks the
+/// daemon when it actually runs.
+#[test]
+fn max_performance_masks_power_profiles_daemon_before_the_governor_check() {
+    let f = baseline_fn("obs_box_max_performance");
+    let mask = f
+        .find("systemctl mask power-profiles-daemon.service")
+        .expect("the max-performance item must mask power-profiles-daemon");
+    let check = f
+        .find("grep -q performance /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor")
+        .expect("the governor check");
+    assert!(mask < check, "mask the daemon before the governor check");
+    assert!(
+        f.contains("systemctl disable --now power-profiles-daemon.service"),
+        "stop the running daemon too, not only the next boot"
+    );
+}
+
+#[test]
+fn maxperf_script_only_calls_powerprofilesctl_when_the_daemon_runs() {
+    let f = baseline_fn("obs_box_maxperf_persistence");
+    assert!(
+        f.contains("systemctl is-active --quiet power-profiles-daemon.service && { powerprofilesctl set performance"),
+        "powerprofilesctl only when the daemon is active (it is masked by the baseline): {f}"
+    );
+}
+
+/// An absent daemon (not installed) is as good as masked; an enabled one fails the perf row.
+#[test]
+fn verdict_accepts_an_absent_power_profiles_daemon() {
+    let (c, rows) = verdict(&GOOD_FACTS.replacen("ppd=masked", "ppd=", 1));
+    assert_eq!(c, 0, "{rows:?}");
+}
+
+/// The kiosk disables bluetooth on a box with no Bluetooth input (imag). strih-lx is operated with a
+/// Bluetooth mouse (MX Anywhere 2S), so it passes `keep-bluetooth` and the service stays enabled --
+/// a box fact, the same disable list otherwise.
+#[test]
+fn kiosk_keeps_bluetooth_only_when_the_box_asks() {
+    let k = baseline_fn("obs_box_kiosk");
+    assert!(
+        k.contains("[ \"$svc\" = bluetooth ] && [ \"$KEEP_BT\" = keep-bluetooth ] && continue"),
+        "the disable loop must skip bluetooth for a keep-bluetooth box: {k}"
+    );
+    assert!(
+        k.contains("KEEP_BT=\"${3:-}\""),
+        "keep-bluetooth is the optional third argument"
+    );
+    let strih = read(SETUP_STRIH);
+    assert!(
+        strih.contains("obs_box_kiosk \"$DESKTOP_USER\" strih keep-bluetooth"),
+        "setup-strih keeps bluetooth (the operator mouse)"
+    );
+    let imag = read(SETUP_IMAG);
+    assert!(
+        imag.contains("obs_box_kiosk \"$DESKTOP_USER\" imag\n"),
+        "setup-imag keeps the plain call (bluetooth disabled)"
     );
 }
