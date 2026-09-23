@@ -197,20 +197,6 @@ jobs:
           if ($src -notmatch [regex]::Escape('source->genlock_converge_sheds++;') -or $src -notmatch [regex]::Escape('converge_sheds=%u')) { Write-Error "the distinct converge-shed observability counter / audit field is gone (#1049)"; exit 1 }
           Write-Output "#1049 steady-conveyor phase convergence present — OK"
 
-      - name: Assert #1355 sustained-excess N==1 drain present
-        shell: pwsh
-        run: |
-          $src = (Get-Content "vendor/obs-studio/libobs/obs-source.c" -Raw) -replace '\s+', ' '
-          $internal = (Get-Content "vendor/obs-studio/libobs/obs-internal.h" -Raw) -replace '\s+', ' '
-          if ($internal -notmatch [regex]::Escape('uint32_t genlock_excess_run_ticks;') -or $internal -notmatch [regex]::Escape('uint32_t genlock_sustain_sheds;')) { Write-Error "the #1355 per-source sustained-excess run / sustain-shed counters are gone from obs_source"; exit 1 }
-          if ($src -notmatch [regex]::Escape('#define GENLOCK_DRAIN_SUSTAIN_TICKS 300')) { Write-Error "the #1355 sustain-window constant (GENLOCK_DRAIN_SUSTAIN_TICKS, 10 s at 30 fps) is missing/changed — a shorter window sheds on arrival jitter"; exit 1 }
-          if ($src -notmatch [regex]::Escape('#define GENLOCK_DRAIN_SUSTAIN_HYSTERESIS_FRAMES 1')) { Write-Error "the #1355 sustain hysteresis constant (must stay 1) is missing/changed — > 1 re-widens the hold to the #859 2-frame band"; exit 1 }
-          if ($src -notmatch [regex]::Escape('static inline bool genlock_sustain_drain_due(')) { Write-Error "the pure sustained-excess decision genlock_sustain_drain_due is gone — the drift frame would never be shed (#1355)"; exit 1 }
-          if ($src -notmatch [regex]::Escape('genlock_sustain_drain_due(sustain_depth, sustain_target, source->genlock_excess_run_ticks,')) { Write-Error "genlock_sustain_drain_due is defined but no longer CALLED from the N==1 steady release tail — dead code, the FIFO keeps sawing over two frames (#1355)"; exit 1 }
-          if ($src -notmatch [regex]::Escape('source->genlock_sustain_sheds++;') -or $src -notmatch [regex]::Escape('sustain_sheds=%u')) { Write-Error "the distinct sustain-shed observability counter / audit field is gone (#1355)"; exit 1 }
-          if ($src -notmatch [regex]::Escape('source->genlock_excess_run_ticks = 0;')) { Write-Error "the #1355 excess-run counter is never reset at ACQUIRE — a stale drift run could carry into the next lock episode"; exit 1 }
-          Write-Output "#1355 sustained-excess N==1 drain present — OK"
-
       - name: Assert #1161 Stage-2 ACQUIRE bracketing gate present
         shell: pwsh
         run: |

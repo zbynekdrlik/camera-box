@@ -4552,28 +4552,6 @@ static uint32_t genlock_clamp_preload_u32(uint32_t v)
  * backlog-relock branch used to cause as a side effect of trimming the queue on every tick.
  * Mirror: src/genlock_backlog.rs DRAIN_MIN_TICK_INTERVAL. */
 #define GENLOCK_DRAIN_MIN_TICK_INTERVAL 30
-/* camera-box #1355: how many CONSECUTIVE steady N==1 render ticks the queue must sit a
- * GENLOCK_DRAIN_SUSTAIN_HYSTERESIS_FRAMES-frame excess above the CEIL drain target before the
- * SUSTAINED-EXCESS one-frame drain sheds. 300 = 10 s at 30 fps. The stream box's N==1 deep
- * NDI 2ME PGM FIFO gains one frame every ~40 min from the +13 ppm wall-vs-QPC clock drift
- * (WALL-slaved release vs QPC-slaved render tick); the #859 depth drain fires only at
- * depth > target + GENLOCK_DRAIN_HYSTERESIS_FRAMES (target + 2) and the #1049 phase converge
- * is N>=2-only, so this ONE-frame persistent excess has no other corrective. The window is the
- * discriminator between a genuine drift backlog (persists tens of minutes -> sheds) and ordinary
- * arrival jitter (a late frame lasts one or two ticks -> never sheds). Mirror of
- * src/genlock_backlog.rs DRAIN_SUSTAIN_TICKS (Tier-0 unit-tested); the C-vs-Rust parity gate
- * tests/genlock_relock_selection_parity.rs lifts this #define via lift_define. */
-#define GENLOCK_DRAIN_SUSTAIN_TICKS 300
-/* camera-box #1355: the excess (in frames, above the CEIL drain target) the SUSTAINED-EXCESS
- * drain corrects — 1, the persistent drift-gained frame that sits one above the pin's natural
- * steady depth (target + 1). The trigger is depth > target + GENLOCK_DRAIN_SUSTAIN_HYSTERESIS_FRAMES
- * (i.e. depth >= target + 2), so the pin's own natural target+1 hold is left alone and only the
- * drifted target+2 state sheds — back to target+1, within one frame of the pin. Deliberately
- * TIGHTER than GENLOCK_DRAIN_HYSTERESIS_FRAMES (2): the #859 drain still catches a fast setpoint
- * overshoot at > target + 2; this slow, sustain-gated drain removes the residual one-frame drift
- * saw the 2-frame hysteresis structurally cannot. Mirror of src/genlock_backlog.rs
- * DRAIN_SUSTAIN_HYSTERESIS_FRAMES; lifted into the parity gate via lift_define. */
-#define GENLOCK_DRAIN_SUSTAIN_HYSTERESIS_FRAMES 1
 /* genlock_latency_ms() is declared further down (after the #184 ms-knob block); forward
  * declare it so genlock_preload_default() can branch on whether the ms knob is set. */
 static uint32_t genlock_latency_ms(void);
@@ -5366,17 +5344,7 @@ static void genlock_audit_log(obs_source_t *source, uint64_t now_ns)
 	      * paired). Appended AFTER the existing fields (scripts parse by field name). Parsed by
 	      * src/jitter_audit.rs; the values come from the shared snapshot `gs`. */
 	     "audio_enabled=%d audio_delay_ms=%u audio_pairing_offset_ms=%lld "
-	     /* camera-box #1355: cumulative SUSTAINED-EXCESS one-frame drains — genlock_sustain_drain_due
-	      * fired to shed the wall-vs-QPC-drift-gained frame on the N==1 deep FIFO. A sustain shed
-	      * ALSO counts into dropped_due like every other drop; this distinguishes it so the ≥1 h
-	      * post-deploy audit can see the drain fire ~once per drift frame (~40 min) and correlate it
-	      * with wall_qpc_drift_ms. Appended at the END (mutually non-substring with converge_sheds);
-	      * a LINE-ONLY counter read straight from source->genlock_sustain_sheds (it is not in
-	      * obs_genlock_stats, so it has nothing in the API to disagree with — the #1298 shared-fill
-	      * rationale applies only to fields present in BOTH the line and the stats). Parsed by
-	      * src/jitter_audit.rs AuditSample.sustain_sheds. */
-	     "sustain_sheds=%u "
-	     "(#70/#97/#126/#147/#148/#184/#235/#245/#401/#1049/#800/#1303/#1355)",
+	     "(#70/#97/#126/#147/#148/#184/#235/#245/#401/#1049/#800/#1303)",
 	     source->context.name ? source->context.name : "?",
 	     /* camera-box #1298: the health counters now come from the shared snapshot `gs`
 	      * (genlock_fill_stats) so this line and obs_source_get_genlock_stats cannot
@@ -5415,10 +5383,7 @@ static void genlock_audit_log(obs_source_t *source, uint64_t now_ns)
 	     /* camera-box #1303: the audio parity facet, also from the shared snapshot `gs`. */
 	     gs.audio_enabled ? 1 : 0,
 	     gs.audio_delay_ms,
-	     (long long)gs.audio_pairing_offset_ms,
-	     /* camera-box #1355: LINE-ONLY sustain-shed counter, read straight from the source (not
-	      * routed through gs — it is not part of obs_genlock_stats). */
-	     source->genlock_sustain_sheds);
+	     (long long)gs.audio_pairing_offset_ms);
 }
 /* ---- end genlock FIFO preload + audit ------------------------------------ */
 
@@ -5596,32 +5561,6 @@ static bool genlock_should_drain_one(const obs_source_t *source, uint32_t reserv
 	const uint64_t depth = (uint64_t)source->async_frames.num;
 	return depth > target + GENLOCK_DRAIN_HYSTERESIS_FRAMES &&
 	       source->genlock_ticks_since_drain >= GENLOCK_DRAIN_MIN_TICK_INTERVAL;
-}
-
-/* camera-box #1355: the SUSTAINED-EXCESS one-frame drain decision, PURE part.
- * Self-contained (only stdint + the scalars + the #defines) so
- * tests/genlock_relock_selection_parity.rs can lift it standalone and prove it byte-identical to
- * the Rust authority src/genlock_backlog.rs should_sustain_drain.
- *
- * `depth` is the queue depth THIS tick (before release); `target` is the CEIL drain target the
- * caller computes exactly as genlock_should_drain_one does; `run_ticks` is how many CONSECUTIVE
- * ticks depth has sat above target + GENLOCK_DRAIN_SUSTAIN_HYSTERESIS_FRAMES (the caller maintains
- * source->genlock_excess_run_ticks -- increment while the excess holds, reset the moment it does
- * not AND on a shed); `ticks_since_drain` is the SHARED #859 throttle, so the #859 drain / the
- * #1049 converge / this sustain drain can never double-fire on one tick.
- *
- * Fires only when the excess has held a full GENLOCK_DRAIN_SUSTAIN_TICKS window (filtering arrival
- * jitter, which lasts one or two ticks) AND the shared throttle allows it. The explicit depth
- * re-check is belt-and-suspenders -- run_ticks already encodes the sustained excess, but a #859
- * drain on the SAME tick would drop depth; the shared throttle reset already prevents that here,
- * and the depth guard makes the predicate self-consistent regardless. Mirror of
- * src/genlock_backlog.rs should_sustain_drain (Tier-0 unit-tested) -- keep both in lock-step. */
-static inline bool genlock_sustain_drain_due(uint64_t depth, uint64_t target, uint32_t run_ticks,
-					     uint64_t ticks_since_drain)
-{
-	return depth > target + GENLOCK_DRAIN_SUSTAIN_HYSTERESIS_FRAMES &&
-	       run_ticks >= GENLOCK_DRAIN_SUSTAIN_TICKS &&
-	       ticks_since_drain >= GENLOCK_DRAIN_MIN_TICK_INTERVAL;
 }
 
 /* camera-box #1049: the STEADY-conveyor PHASE-CONVERGENCE shed decision, PURE part.
@@ -5823,9 +5762,6 @@ static bool genlock_release_tick(obs_source_t *source, uint64_t wall_now, uint64
 		/* #859 follow-up: a fresh lock starts the settle clock over —
 		 * nothing has overshot yet immediately after acquiring. */
 		source->genlock_ticks_since_drain = 0;
-		/* camera-box #1355: a fresh lock also restarts the SUSTAINED-EXCESS run — the queue is
-		 * rebuilding to the configured hold, so no drift excess has accrued yet. */
-		source->genlock_excess_run_ticks = 0;
 		/* camera-box #1161: ACQUIRE BRACKETING GATE (N>=2 only) -- the PRECISION half of the
 		 * frame-mover (the primary half is obs_source_set_genlock_latency_ms zeroing the boundary
 		 * on a pin RISE, which forces THIS re-acquire and rebuilds the FIFO to the raised depth).
@@ -6180,49 +6116,6 @@ static bool genlock_release_tick(obs_source_t *source, uint64_t wall_now, uint64
 			source->genlock_ticks_since_drain = 0;
 		} else if (!drain_eligible) {
 			source->genlock_ticks_since_drain++;
-		}
-	}
-	/* camera-box #1355: SUSTAINED-EXCESS ONE-FRAME DRAIN. Only on the plain N==1 steady path
-	 * (drain_eligible). The +13 ppm wall-vs-QPC clock drift gains one frame every ~40 min on the
-	 * deep N==1 NDI 2ME PGM FIFO (WALL-slaved release vs QPC-slaved render tick); the #859 drain's
-	 * 2-frame hysteresis and the N>=2-only #1049 converge both structurally MISS a persistent
-	 * one-frame excess, so the held depth saws over two frames and the on-air A/V walks ~66 ms.
-	 * Track how many CONSECUTIVE ticks depth has sat one frame above the pin's natural target+1
-	 * hold (genlock_excess_run_ticks), and once it has held a full GENLOCK_DRAIN_SUSTAIN_TICKS
-	 * window shed exactly ONE frame with the SAME drop-older/present-fresher idiom the #859 drain
-	 * uses (drop the would-be-presented array[0], present the next, re-anchor below). The throttle
-	 * is SHARED with the #859 drain (genlock_ticks_since_drain): after a #859 drain reset it to 0,
-	 * genlock_sustain_drain_due reads ticks < the interval and returns false, so at most ONE extra
-	 * frame ever leaves the queue per tick (drain / converge / sustain can never both fire) and the
-	 * #859 drain block above stays byte-identical. The window (10 s at 30 fps) filters arrival
-	 * jitter (one or two ticks); only a persistent drift excess sheds -- one planned drop per
-	 * ~40 min, so the hold sits within one frame of the pin. Mirror of src/genlock_backlog.rs
-	 * should_sustain_drain (Tier-0 tested) + the C-vs-Rust parity gate. The src/probe/genlock.rs
-	 * ReleaseCadence reference sim is deliberately NOT changed: per the #1354 finding the bounded
-	 * cadence sim cannot reproduce this multi-minute wall-QPC drift class, so the faithful proof is
-	 * the pure predicate + the parity gate + the direct arithmetic tests, not a sim scenario. */
-	if (drain_eligible && interval != 0) {
-		const uint32_t sustain_measured = genlock_measure_source_multiple(source, interval);
-		const uint32_t sustain_n = sustain_measured >= 1
-						   ? sustain_measured
-						   : (source->genlock_last_known_n >= 1 ? source->genlock_last_known_n : 1);
-		const uint64_t sustain_held_ns = (uint64_t)reserve_ms * 1000000ULL * (uint64_t)sustain_n;
-		const uint64_t sustain_target = (sustain_held_ns + interval - 1) / interval; /* #998: CEIL */
-		const uint64_t sustain_depth = (uint64_t)source->async_frames.num;
-		if (sustain_depth > sustain_target + GENLOCK_DRAIN_SUSTAIN_HYSTERESIS_FRAMES)
-			source->genlock_excess_run_ticks++;
-		else
-			source->genlock_excess_run_ticks = 0;
-		if (genlock_sustain_drain_due(sustain_depth, sustain_target, source->genlock_excess_run_ticks,
-					      source->genlock_ticks_since_drain) &&
-		    source->async_frames.num > 1) {
-			struct obs_source_frame *shed = source->async_frames.array[0];
-			da_erase(source->async_frames, 0);
-			remove_async_frame(source, shed);
-			source->genlock_dropped_due++;
-			source->genlock_sustain_sheds++; /* #1355: distinct observability */
-			source->genlock_ticks_since_drain = 0;
-			source->genlock_excess_run_ticks = 0;
 		}
 	}
 	struct obs_source_frame *next_frame = source->async_frames.array[0];

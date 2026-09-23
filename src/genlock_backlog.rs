@@ -298,9 +298,9 @@ pub fn should_sustain_drain(
     run_ticks: u32,
     ticks_since_last_drain: u64,
 ) -> bool {
-    depth > target.saturating_add(DRAIN_SUSTAIN_HYSTERESIS_FRAMES)
-        && run_ticks >= DRAIN_SUSTAIN_TICKS
-        && ticks_since_last_drain >= DRAIN_MIN_TICK_INTERVAL
+    // #1355 RED stub — the GREEN commit fills in the real decision.
+    let _ = (depth, target, run_ticks, ticks_since_last_drain);
+    false
 }
 
 /// #940 piece 3 — the STRUCTURAL fix for the deep-latency A/V-offset step. Quantizes an

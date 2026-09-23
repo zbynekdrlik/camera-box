@@ -180,7 +180,6 @@ pub fn parse_audit_line(line: &str) -> Option<AuditSample> {
             }
             "audio_delay_ms" => set!(audio_delay_ms),
             "audio_pairing_offset_ms" => set!(audio_pairing_offset_ms),
-            "sustain_sheds" => set!(sustain_sheds),
             _ => {}
         }
     }
