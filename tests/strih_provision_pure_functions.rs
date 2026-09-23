@@ -1220,6 +1220,24 @@ fn cpu_performance_unit_is_the_fleet_oneshot() {
     );
 }
 
+/// Live 23.9.2026: after a strih-lx reboot every core read `powersave`. The oneshot ran in the SAME
+/// second power-profiles-daemon started (09:23:39); on intel_pstate ppd applies its profile and resets
+/// scaling_governor to `powersave` AFTER the oneshot wrote `performance`. The oneshot must be ordered
+/// after ppd so its governor write is the last one.
+#[test]
+fn cpu_performance_unit_runs_after_power_profiles_daemon() {
+    let (code, out, _e) = run_sourced(&[], "strih_cpu_performance_unit_text");
+    assert_eq!(code, 0);
+    let after = out
+        .lines()
+        .find(|l| l.starts_with("After="))
+        .unwrap_or_default();
+    assert!(
+        after.contains("power-profiles-daemon.service"),
+        "the oneshot must order After=power-profiles-daemon.service, or ppd resets the governor at boot: {out}"
+    );
+}
+
 /// The verify (perf) governor predicate: 0 iff EVERY online core reports `performance` and there is
 /// at least one core (fail-closed on empty/unreadable input -- test-strictness).
 #[test]
