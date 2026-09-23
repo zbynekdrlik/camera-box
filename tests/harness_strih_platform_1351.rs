@@ -572,3 +572,68 @@ fn zero_eight_version_integrity_gate_windows_invocation_args_are_byte_identical_
          their pre-1351 text (the new flag is appended after, never inserted inside)"
     );
 }
+
+// ================================================================================================
+// issue 1317 part 3 — the Windows-only strih paths refuse the Linux strih-lx, BEFORE any rig mutation.
+// ================================================================================================
+
+/// The shared refusal gate + the restart-survival preflight: a Linux strih is refused (rc 1, named
+/// stderr), a Windows strih (or the STRIH_PLATFORM=windows override) passes, and the preflight is a
+/// no-op unless ZERO_LOSS_RESTART_GATE=1.
+#[test]
+fn windows_only_strih_modes_refuse_the_linux_strih_1317() {
+    let rc = |body: &str| {
+        let o = run_sourced_env(
+            &format!("unset STRIH_PLATFORM STRIH_LX_HOST ZERO_LOSS_RESTART_GATE; {body}"),
+            &[],
+        );
+        (
+            o.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&o.stderr).into_owned(),
+        )
+    };
+    let (c, err) = rc("strih_platform_refuse_windows_only_mode 10.77.9.202 'X mode'");
+    assert_eq!(c, 1, "a Linux strih must be refused: {err}");
+    assert!(err.contains("X mode") && err.contains("strih-lx"), "{err}");
+    let (c, err) = rc("strih_platform_refuse_windows_only_mode 192.0.2.10 'X mode'");
+    assert_eq!(c, 0, "a Windows strih passes: {err}");
+    assert!(err.is_empty(), "silent pass: {err}");
+    let (c, _e) =
+        rc("STRIH_PLATFORM=windows strih_platform_refuse_windows_only_mode 10.77.9.202 'X mode'");
+    assert_eq!(
+        c, 0,
+        "the explicit STRIH_PLATFORM=windows override is honored"
+    );
+    // the preflight: a no-op without the opt-in, a refusal of the opt-in on a Linux strih.
+    let (c, _e) = rc("strih_zero_loss_restart_preflight 10.77.9.202");
+    assert_eq!(c, 0, "no opt-in -> no-op");
+    let (c, err) = rc("ZERO_LOSS_RESTART_GATE=1 strih_zero_loss_restart_preflight 10.77.9.202");
+    assert_eq!(
+        c, 1,
+        "the Windows-only restart mode is refused on strih-lx: {err}"
+    );
+    let (c, _e) = rc("ZERO_LOSS_RESTART_GATE=1 strih_zero_loss_restart_preflight 192.0.2.10");
+    assert_eq!(c, 0, "a Windows strih keeps the mode");
+}
+
+/// recording-e2e.sh runs the restart-survival refusal right where it resolves the strih -- BEFORE
+/// the first rig mutation (the first stray-session-guarded step) -- never after the whole preflight,
+/// and it hands the Windows verdict planner its strih explicitly (STRIH_BOX, no default any more).
+#[test]
+fn recording_e2e_refuses_the_restart_mode_before_any_rig_mutation_1317() {
+    let s = read("scripts/recording-e2e.sh");
+    let pre = s
+        .find("strih_zero_loss_restart_preflight \"$STRIH\" || exit 2")
+        .expect("recording-e2e.sh must call the restart-survival preflight");
+    let first_mutation = s
+        .find("stray_session_check_assert \"$HERE\"")
+        .expect("the first rig-mutation guard");
+    assert!(
+        pre < first_mutation,
+        "the refusal must run before the first rig mutation"
+    );
+    assert!(
+        s.contains("export STRIH_BOX=\"$STRIH\""),
+        "recording-e2e.sh hands the Windows planner its strih explicitly"
+    );
+}

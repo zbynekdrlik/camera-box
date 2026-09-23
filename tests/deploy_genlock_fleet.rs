@@ -1457,9 +1457,14 @@ fn strih_lx_plan_is_the_setup_strih_recipe_not_the_imag_program_1317() {
     for want in [
         "obs-backup-retention.sh --box strih-lx",
         "obs-genlock-linux-x86_64-strih",
-        "rsync -a scripts systemd",
+        // review round 1: the repo tree goes to ONE fixed, overwritten path (a per-sha `-repo` dir
+        // matches no retention allowlist and would never be swept).
+        "rsync -a --delete scripts systemd newlevel@10.77.9.202:/tmp/strih-lx-deploy-repo/",
         "STRIH_LX_BUNDLE_SRC=/tmp/genlock-stage-deadbeef",
-        "setup-strih.sh",
+        // review round 1: $PW expands on dev1 (outer double quotes) and reaches sudo via printf, and
+        // the script runs DIRECTLY so `pgrep -x setup-strih.sh` can actually see it.
+        "sshpass -p \"$PW\" ssh newlevel@10.77.9.202 \"printf '%s\\n' '$PW' | sudo -S -p ''",
+        "nohup /tmp/strih-lx-deploy-repo/scripts/setup-strih.sh",
         "pgrep -x setup-strih.sh",
         "systemctl --user restart strih-obs.service",
         "verify-strih.sh",
@@ -1473,6 +1478,10 @@ fn strih_lx_plan_is_the_setup_strih_recipe_not_the_imag_program_1317() {
     assert!(
         !out.contains("imag-obs.service") && !out.contains("box=imag"),
         "the strih-lx plan must never be the imag program:\n{out}"
+    );
+    assert!(
+        !out.contains("nohup bash ") && !out.contains("'echo \"$PW\""),
+        "no `nohup bash` wrapper (pgrep -x would never match) and no remote-expanded $PW:\n{out}"
     );
     for line in out.lines() {
         let t = line.trim();
@@ -1544,5 +1553,39 @@ fn per_box_table_lives_in_the_shared_lib_1317() {
     assert!(
         deploy.lines().count() < 1000,
         "deploy-genlock-fleet.sh stays under the 1000-line budget"
+    );
+}
+
+/// review round 1: EXECUTE mode has no strih-lx arm yet, so with the new `strih-lx,stream` default
+/// it must neither record strih-lx in the durable fleet log ("strih-lx deployed at <sha>" would be
+/// false) nor "succeed" when strih-lx is the ONLY box. The executed/logged set drops strih-lx; an
+/// empty executed set is a usage error BEFORE any gh/ssh call.
+#[test]
+fn execute_mode_never_logs_or_claims_the_unexecuted_strih_lx_1317() {
+    for (input, want) in [
+        ("strih-lx,stream", "stream"),
+        ("strih-lx,stream,imag,resolume", "stream,imag,resolume"),
+        ("stream,imag", "stream,imag"),
+        ("strih-lx", ""),
+    ] {
+        assert_eq!(
+            run_sourced(&script(), &format!("fleet_execute_boxes {input}")),
+            want,
+            "fleet_execute_boxes {input}"
+        );
+    }
+    let (code, out, err) = run_script(&["--run-id", "R1", "--boxes", "strih-lx"]);
+    assert_eq!(
+        code, 2,
+        "an execute run with nothing executable must be a usage error.\nstdout={out}\nstderr={err}"
+    );
+    assert!(
+        err.contains("nothing to deploy") && !out.contains("fleet-deploy log appended"),
+        "no log line, a named refusal: out={out} err={err}"
+    );
+    let src = std::fs::read_to_string(script()).unwrap();
+    assert!(
+        src.contains("fleet_log_line \"$run_id\" \"$sha\" \"$exec_boxes\" \"$mode\" >>"),
+        "the durable execute-mode log records the EXECUTED boxes only"
     );
 }

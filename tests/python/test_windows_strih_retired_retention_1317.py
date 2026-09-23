@@ -132,9 +132,13 @@ def test_backup_retention_box_stream_uses_the_windows_driver():
 def test_backup_retention_unknown_box_is_a_usage_error():
     with tempfile.TemporaryDirectory() as tmp:
         env, log = _fake_sshpass(tmp)
-        r = _run(BAK, ["--box", "strih"], env)
+        r = _run(BAK, ["--box", "nosuchbox"], env)
         assert r.returncode == 2, r.stdout + r.stderr
         assert "not in the fleet list" in r.stderr, r.stderr
+        # review round 1: the retired name gets the same retirement pointer the other tools give.
+        r = _run(BAK, ["--box", "strih"], env)
+        assert r.returncode == 2, r.stdout + r.stderr
+        assert "RETIRED" in r.stderr and "--box strih-lx" in r.stderr, r.stderr
         assert _calls(log) == ""
 
 
