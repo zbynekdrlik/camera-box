@@ -3829,7 +3829,8 @@ fn rtprio_session_verdict_grades_grant_and_the_live_obs_log() {
         (1, "no-grant".into())
     );
     assert_eq!(session_verdict("0", "0", ""), (1, "no-grant".into()));
-    // grant present, running OBS still logs the EPERM line -> the session predates the next login.
+    // grant present, running OBS still logs the EPERM line -> its lingering user manager predates
+    // the grant; it applies at the next reboot.
     assert_eq!(
         session_verdict("1", "1", FIFO_FAIL_LINE),
         (2, "grant-pending-reboot".into())
