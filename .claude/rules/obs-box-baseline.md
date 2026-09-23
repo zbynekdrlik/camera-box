@@ -104,8 +104,7 @@ graded), and lightdm + openbox installed.
    verify while `strih_lx_reboot_pending` (lowlatency drop-in present, no running `preempt=full`).
 2. Reboot once: the kernel, PRIME nvidia-primary and the lightdm -> openbox Xorg session all take
    effect together. The lowlatency config meta is pinned to the installed generic-hwe version, so
-   the boot stays on the running HWE kernel;
-   it: confirm `nvidia-smi` and `prime-select query` = nvidia after the boot. OBS starts from
+   the boot stays on the running HWE kernel. Confirm `nvidia-smi` and `prime-select query` = nvidia after the boot. OBS starts from
    `~/.config/openbox/autostart` via `strih-obs.service`; the autostart pins both outputs to
    1920x1080@60 (`--auto` only as a fallback).
 3. Run `verify-strih.sh`: every `(baseline:*)` row must be PASS, and item 33 (rtprio-off) must PASS
