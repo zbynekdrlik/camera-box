@@ -687,11 +687,12 @@ fn watchdog_measure(env: &[(&str, &str)]) -> String {
 
 #[test]
 fn fleet_has_ahk_is_the_one_ahk_watcher_fact_1317() {
-    // The NL_STARTUP.ahk auto-respawn watcher runs on resolume (and ran on the retired Windows strih,
-    // still named by the legacy deploy/launch planner arms); stream and the Linux boxes have none.
+    // The NL_STARTUP.ahk auto-respawn watcher runs on resolume; stream and the Linux boxes have none.
+    // issue 1317 part 3: the retired Windows strih's planner arms are gone, so the name `strih` no
+    // longer carries the AHK fact either (it used to, for those legacy arms).
     for (name, want) in [
         ("resolume", "1"),
-        ("strih", "1"),
+        ("strih", "0"),
         ("stream", "0"),
         ("strih-lx", "0"),
         ("imag", "0"),
@@ -701,5 +702,48 @@ fn fleet_has_ahk_is_the_one_ahk_watcher_fact_1317() {
             want,
             "obs_fleet_has_ahk {name}"
         );
+    }
+}
+
+/// issue 1317 part 3: the ONE class gate a Windows-only dev1 tool calls before touching an address.
+/// 10.77.9.202 (and the name strih-lx) resolve to the linux-genlock class, so a PowerShell/schtasks/
+/// C:\ tool aimed at the production strih refuses; a Windows fleet box passes; an address the list
+/// does not know passes (an explicit ops target stays authoritative).
+#[test]
+fn fleet_class_for_host_and_the_linux_refusal_gate_1317() {
+    for (host, want) in [
+        ("10.77.9.202", "linux-genlock"),
+        ("strih-lx", "linux-genlock"),
+        ("10.77.9.204", "windows-genlock"),
+        ("resolume.lan", "windows-genlock"),
+        ("resolume", "windows-genlock"),
+    ] {
+        assert_eq!(
+            fleet_stdout(&format!("obs_fleet_class_for_host {host}")),
+            want,
+            "obs_fleet_class_for_host {host}"
+        );
+    }
+    let (rc, out, _e) = run_fleet("obs_fleet_class_for_host 10.1.2.3", &[]);
+    assert_eq!(rc, 1, "an unknown address has no class: {out:?}");
+    // the refusal gate: rc 1 + a named error for a Linux fleet box, rc 0 + silent otherwise.
+    let (rc, _o, err) = run_fleet(
+        "obs_fleet_refuse_linux_target 10.77.9.202 some-tool.sh",
+        &[],
+    );
+    assert_eq!(
+        rc, 1,
+        "a Windows action at the Linux strih-lx must be refused"
+    );
+    assert!(
+        err.contains("some-tool.sh")
+            && err.contains("linux-genlock")
+            && err.contains("10.77.9.202"),
+        "the refusal names the tool, the class and the address: {err:?}"
+    );
+    for ok_host in ["10.77.9.204", "resolume.lan", "10.1.2.3"] {
+        let (rc, _o, err) = run_fleet(&format!("obs_fleet_refuse_linux_target {ok_host} t"), &[]);
+        assert_eq!(rc, 0, "{ok_host} is not a Linux fleet box: {err:?}");
+        assert!(err.is_empty(), "silent pass for {ok_host}: {err:?}");
     }
 }

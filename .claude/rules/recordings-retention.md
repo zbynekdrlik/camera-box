@@ -8,6 +8,18 @@ paths:
 
 # E2E recordings retention — dry-run-first sweep (#1122)
 
+**No default box (issue 1317 part 3).** `strih-recordings-retention.sh` used to default
+`HOST=10.77.9.202` — the Windows strih PC RETIRED at the M4 cut-over; that address is the Linux
+strih-lx, which records to **`/srv/_REC`** (its OBS profile `RecFilePath`, read live 23.9.2026: 17
+`.mkv`, 12 GB, 405 GB free) and has no PowerShell. The tool is Windows-only (a scp'd `.ps1`), so
+`--host` is now REQUIRED and a linux-genlock fleet address is refused by
+`obs_fleet_refuse_linux_target`. **There is no Linux recordings executor yet** — a bash port of
+`src/recordings_retention.rs` for strih-lx `/srv/_REC` (same allowlist + size floor, parity-pinned) is
+not ticketed yet (returned to the supervisor as a follow-up candidate in the issue-1317 part-3
+LANE-RETURN); until then strih-lx recordings have NO sweep — only the E2E free-space WARN (read over
+`:8899`, platform-neutral) guards the disk.
+The `C:\_REC` default record dir stays for an explicit Windows `--host`.
+
 ## Why
 
 The E2E harness (`scripts/recording-e2e.sh`) records ONE OBS program capture per run into each

@@ -28,20 +28,21 @@ set -euo pipefail
 #
 # Usage (planner mode -- print the whole fleet deploy plan, no network, from a pre-staged bundle):
 #   scripts/deploy-genlock-fleet.sh --plan --run-id <id> --sha <headSha> --stage <dir> \
-#       [--full|--fast] [--boxes strih,stream,imag,resolume]
+#       [--full|--fast] [--boxes strih-lx,stream,imag,resolume]
 #
 # Usage (execute mode -- resolve + download the same-SHA artifacts, emit the Windows plan, ssh-deploy
 # imag, append the fleet log; drive Windows via the printed win-* MCP program):
-#   scripts/deploy-genlock-fleet.sh --run-id <id> [--full|--fast] [--boxes strih,stream,imag,resolume] [--yes]
+#   scripts/deploy-genlock-fleet.sh --run-id <id> [--full|--fast] [--boxes strih-lx,stream,imag,resolume] [--yes]
 #
 #   --run-id   the ANCHOR CI run id (any of the three genlock workflows) -- its headSha is the ONE
 #              canonical version every box converges to.
 #   --full     deploy the full windows-genlock bundle (obs.dll + data + obs-plugins) -- the default;
 #              required for any vendor/<plugin>/** or frontend change (fast has no deploy path for it).
 #   --fast     deploy only the libobs hot-swap dll (obs.dll) -- a libobs-only change (§5b).
-#   --boxes    comma list of strih,stream,imag,resolume (default: strih,stream -- resolume is a
-#              TRAVELING maintenance box, issue 1295, deployed ONLY when explicitly named; imag was
-#              RETIRED, issue 1316 -- dropped from the default, still a valid explicit target).
+#   --boxes    comma list of strih-lx,stream,imag,resolume (default: strih-lx,stream -- strih-lx is
+#              the Linux strih since the M4 cut-over; the Windows `strih` arm is RETIRED, issue 1317;
+#              resolume is a TRAVELING maintenance box, issue 1295, deployed ONLY when explicitly
+#              named; imag was RETIRED, issue 1316 -- dropped from the default, still valid explicitly).
 #   --plan     print the plan only; no gh/ssh/scp. Requires --stage + --sha (no network).
 #   --stage    local dir holding the (pre-)downloaded artifact bytes (plan mode / test seam).
 #   --sha      the canonical build SHA to stamp into the markers (plan mode override).
@@ -53,13 +54,16 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/genlock-markers.sh
 . "$HERE/lib/genlock-markers.sh"
 # shellcheck source=scripts/lib/ahk-watchdog.sh
-# The strih AHK watchdog restart (#789 issue-review #1): the deploy program stops AHK to copy, then
+# The AHK watchdog restart (#789 issue-review #1): the deploy program stops AHK to copy, then
 # MUST restart it before handing off to launch-obs-genlock.sh -- launch only restarts AHK IF IT
 # stopped it itself and its #978 session gate then hard-fails (exit 8) on AHK count != 1. Reuse the
 # ONE verified relaunch helper launch itself uses, never a fork.
 . "$HERE/lib/ahk-watchdog.sh"
-# shellcheck source=scripts/lib/obs-fleet.sh
-. "$HERE/lib/obs-fleet.sh"   # issue 1317: the strih-lx host + the AHK fact (fleet_box_ip/_has_ahk)
+# shellcheck source=scripts/lib/genlock-fleet-boxes.sh
+# issue 1317 part 3: the per-box constant table (fleet_box_mcp/_ip/_has_ahk/_ahk_script/_ahk_prefer/
+# _keepalive_tasks + the resolume identity note) lives in ONE sourced lib shared with
+# launch-obs-genlock.sh + obs-self-heal-install.sh; it sources scripts/lib/obs-fleet.sh itself.
+. "$HERE/lib/genlock-fleet-boxes.sh"
 
 GENLOCK_REPO="zbynekdrlik/camera-box"
 FLEET_LOG_DEFAULT="${HOME}/.camera-box/genlock-fleet-deploy.log"
@@ -69,39 +73,38 @@ RETENTION_KEEP=3
 # PURE functions (no network / MCP / Windows -- unit-tested by sourcing this file).
 # ============================================================================================
 
-# fleet_normalize_boxes CSV -> the requested boxes in canonical order (strih,stream,imag,resolume),
-# deduped and validated. Empty -> the DEFAULT fleet strih,stream ONLY. An unknown box is a
-# fail-loud usage error (return 2). resolume = RESOLUME-SNV, the traveling CG box (issue 1295): a
-# windows-genlock box like strih/stream, so it rides the SAME Windows emit-only plan path -- but it
-# is a traveling maintenance target (often off/away, NOT a measured E2E source, targets.md), so it
-# is deployed ONLY when explicitly named (`--boxes resolume`), never pulled into the empty-default
-# "whole fleet". issue 1316: `imag` DROPPED from the empty-default too -- imag-nb was returned to the
-# owner (dark), so a default deploy would fail on it; it stays a VALID explicit target (`--boxes
-# imag`) so the IMAG role's re-provisioning next year needs no code change here.
+# fleet_normalize_boxes CSV -> the requested boxes in canonical order (strih-lx,stream,imag,resolume),
+# deduped and validated. Empty -> the DEFAULT fleet strih-lx,stream ONLY. An unknown box is a
+# fail-loud usage error (return 2).
+#   * strih-lx = the production strih since the M4 cut-over (20.9.2026): the Linux notebook at
+#     10.77.9.202, a linux-genlock box. issue 1317 part 3 made it the default strih and RETIRED the
+#     Windows `strih` arm -- the STRIH-SNV PC is gone and its address is strih-lx's now, so a `strih`
+#     request is refused by name (never a Windows robocopy/AHK program for the Linux box).
+#   * resolume = RESOLUME-SNV, the traveling CG box (issue 1295): a windows-genlock box on the
+#     Windows emit-only plan path, deployed ONLY when explicitly named (`--boxes resolume`) -- often
+#     off/away and not a measured E2E source (targets.md), so never in the empty default.
+#   * imag was dropped from the empty default (issue 1316, imag-nb returned to the owner); it stays
+#     a VALID explicit target (`--boxes imag`) so the IMAG role's re-provisioning needs no code change.
 fleet_normalize_boxes() {
-  local csv="${1:-}" b out="" has_strih=0 has_stream=0 has_imag=0 has_resolume=0 has_strihlx=0
-  [ -n "$csv" ] || csv="strih,stream"
+  local csv="${1:-}" b out="" has_strihlx=0 has_stream=0 has_imag=0 has_resolume=0
+  [ -n "$csv" ] || csv="strih-lx,stream"
   local IFS=','
   for b in $csv; do
     b="${b//[[:space:]]/}"
     [ -z "$b" ] && continue
     case "$b" in
-      strih)    has_strih=1 ;;
+      strih-lx) has_strihlx=1 ;;
       stream)   has_stream=1 ;;
       imag)     has_imag=1 ;;
       resolume) has_resolume=1 ;;
-      # issue 1317: strih-lx is the Linux strih notebook (a linux-genlock box like imag). Like
-      # resolume it is NOT in the empty-default fleet (deployed only when explicitly named), since
-      # it runs in parallel and is a manual bring-up target, not part of the routine whole-fleet roll.
-      strih-lx) has_strihlx=1 ;;
-      *) echo "fleet_normalize_boxes: unknown box '$b' (valid: strih, stream, imag, resolume, strih-lx)" >&2; return 2 ;;
+      strih) echo "fleet_normalize_boxes: box 'strih' is the RETIRED Windows strih PC -- the strih is 'strih-lx' (Linux, 10.77.9.202) since the M4 cut-over (issue 1317)" >&2; return 2 ;;
+      *) echo "fleet_normalize_boxes: unknown box '$b' (valid: strih-lx, stream, imag, resolume)" >&2; return 2 ;;
     esac
   done
-  [ "$has_strih" = 1 ]    && out="strih"
+  [ "$has_strihlx" = 1 ]  && out="strih-lx"
   [ "$has_stream" = 1 ]   && out="${out:+$out,}stream"
   [ "$has_imag" = 1 ]     && out="${out:+$out,}imag"
   [ "$has_resolume" = 1 ] && out="${out:+$out,}resolume"
-  [ "$has_strihlx" = 1 ]  && out="${out:+$out,}strih-lx"
   [ -n "$out" ] || { echo "fleet_normalize_boxes: empty box set" >&2; return 2; }
   printf '%s\n' "$out"
 }
@@ -148,73 +151,9 @@ fleet_pick_run_at_sha() {
   jq -r --arg s "$sha" '[.[] | select(.headSha == $s and .conclusion == "success")][0].databaseId // empty'
 }
 
-# fleet_box_mcp / fleet_box_ip / fleet_box_has_ahk -- per-box constants. BOTH strih AND resolume
-# run an NL_STARTUP.ahk AutoHotkey auto-respawn watcher (SafeLoop), so both programs stop+restart
-# AutoHotkey64 around the copy; stream/imag have none. resolume (issue 1295) = win-resolume, and its
-# "ip" is the HOSTNAME resolume.lan -- NEVER a pinned literal IP: resolume.lan is DHCP-drifting and
-# currently collides with `bridge` at .201 (targets.md), so the plan resolves + identity-confirms it
-# live (emit_windows_plan prints that step for resolume; the planner emits it, never runs it).
-fleet_box_mcp()     { case "${1:-}" in strih) echo "win-strih" ;; stream) echo "win-stream-snv" ;; resolume) echo "win-resolume" ;; *) return 2 ;; esac; }
-fleet_box_ip()      { case "${1:-}" in strih) echo "10.77.9.202" ;; stream) echo "10.77.9.204" ;; imag) echo "imag" ;; resolume) echo "resolume.lan" ;; strih-lx) fleet_strih_lx_ip ;; *) return 2 ;; esac; }
-# strih-lx: STRIH_LX_IP, else the obs-fleet host (strih-lx.lan does not resolve on dev1); no row = rc 2.
-fleet_strih_lx_ip() { local h="${STRIH_LX_IP:-}"; [ -n "$h" ] || h="$(obs_fleet_host strih-lx)" || return 2; [ -n "$h" ] && echo "$h" || return 2; }
-fleet_box_has_ahk() { obs_fleet_has_ahk "${1:-}"; echo; }   # the ONE obs-fleet AHK fact
-
-# fleet_box_ahk_script / fleet_box_ahk_prefer -- the PER-BOX AHK relaunch identity passed into the
-# shared scripts/lib/ahk-watchdog.sh primitive (issue 1295). strih keeps its current values
-# (D:\_APPS\NL_STARTUP.ahk + exe-first, byte-identical to before). resolume (RESOLUME-SNV) is a
-# TRAVELING box whose AHK is AutoHotkey v2 running its OWN NL_STARTUP.ahk (the path has a SPACE --
-# the relaunch PS wraps it in double quotes), and it PREFERS the Startup .lnk as the relaunch
-# target ('lnk') so a future path move on the box cannot break the relaunch (the exe candidates
-# still back it up). Only meaningful when fleet_box_has_ahk <box> = 1.
-fleet_box_ahk_script() { case "${1:-}" in resolume) echo 'C:\Users\Resolume\Documents\_NLMEDIA resolume\_APPS\NL_STARTUP.ahk' ;; *) echo 'D:\_APPS\NL_STARTUP.ahk' ;; esac; }
-fleet_box_ahk_prefer() { case "${1:-}" in resolume) echo "lnk" ;; *) echo "exe" ;; esac; }
-
-# fleet_resolume_identity_confirm_note -> the IDENTITY-CONFIRM preamble the resolume plan prints
-# (issue 1295). RESOLUME-SNV is a TRAVELING box addressed by HOSTNAME, and resolume.lan currently
-# resolves to 10.77.9.201 -- the SAME IP `bridge` lists in targets.md (an event-LAN DHCP collision)
-# -- so before uploading/deploying to it the supervisor MUST resolve it live AND confirm the box
-# IDENTITY (its cg OBS profile), never "the shared OBS-WS password worked" (targets.md /
-# rig-state-inspection.md §2). The PLANNER only EMITS this step (it runs no network/MCP itself); the
-# supervisor runs it in the win-resolume MCP before STEP 0. PURE (no I/O) so it is unit-tested by
-# sourcing this file.
-fleet_resolume_identity_confirm_note() {
-  cat <<'NOTE'
-# STEP -1 (resolume ONLY -- box IDENTITY confirm, issue 1295): resolume.lan is a TRAVELING box on a
-#         DHCP lease that currently resolves to 10.77.9.201 -- the SAME IP `bridge` lists in
-#         targets.md (event-LAN collision). Resolve it LIVE and confirm it is REALLY the CG box
-#         before touching it (never a pinned IP, never "the OBS-WS password worked" -- targets.md /
-#         rig-state-inspection.md §2):
-#           1. on dev1:           getent hosts resolume.lan      # the live address
-#           2. in win-resolume MCP Shell, confirm the cg OBS identity (ONE of):
-#                (gci "$env:APPDATA\obs-studio\basic\profiles" -Directory).Name   # expect 'cg'
-#                # or over OBS-WS: GetVersion + the 'cg' profile / cg_scenes collection
-#         Proceed to STEP 0 ONLY once the resolved address is confirmed to be RESOLUME-SNV.
-NOTE
-}
-
-# fleet_box_keepalive_tasks BOX -> the OBS keep-alive SCHEDULED-TASK names the deploy must disable so
-# NONE of them respawns obs64 while the bytes are being copied (#1140). Per-box + CURATED, never all
-# of a box's ~nine scheduled tasks: the stream box runs the #812 avsync-keepalive (~10 min) AND the
-# #411 obs-self-heal (~2 min) -- avsync-keepalive is the named minimum, but the actual obs64 respawner
-# is obs-self-heal (avsync-keepalive only relaunches the two avsync monitor scripts), so both must be
-# named. strih's keep-alive is the AHK watcher (handled by the has_ahk stop/restart path), so it
-# lists none. The emitted program disables+restores ONLY a task that is PRESENT and ENABLED, so a
-# name absent (or deliberately disabled) on the box is a harmless skip -- adding another box's
-# keep-alive here later is a one-line change, not a hardcoded pile inline at the call site.
-# resolume (issue 1295) is like strih: its respawner IS the AHK watcher (has_ahk path), so it
-# lists no keep-alive scheduled task either.
-# Task names MUST be whitespace-free: the emitter word-splits this space-separated list.
-fleet_box_keepalive_tasks() {
-  case "${1:-}" in
-    stream) echo 'avsync-keepalive camera-box-obs-self-heal-stream' ;;
-    *)      echo '' ;;
-  esac
-}
-
 # build_windows_deploy_program BOX MODE STAGE OBS_DIR HAS_AHK BACKUP_ROOT KEEP GSHA DSHA
 #   Emit the PowerShell program the agent pastes into the box's win-* MCP Shell. It stops the AHK
-#   watchdog (strih only) + obs64, clears crash sentinels, backs up the components it overwrites,
+#   watchdog (an AHK box only -- resolume) + obs64, clears crash sentinels, backs up the components it overwrites,
 #   copies the new bytes from STAGE (full = 3 surgical robocopies; fast = obs.dll only), writes BOTH
 #   markers + DEPLOYED_AT temp-then-rename, sha256-verifies the deployed obs.dll against the bundle
 #   manifest (fail-closed), and prints a box-backup RETENTION PLAN (keep newest KEEP; delete only
@@ -242,9 +181,13 @@ PSAHK
 )
     # #789 review #1: restart AHK VERIFIED via the ONE shared helper launch-obs-genlock.sh uses
     # (scripts/lib/ahk-watchdog.sh) -- never a fork. Fail loud if it does not come back. issue 1295:
-    # the relaunch identity (script path + prefer order) is PER-BOX -- strih keeps D:\_APPS +
-    # exe-first (byte-identical), resolume passes its own v2 .ahk path + lnk-first.
-    local ahk_relaunch_ps; ahk_relaunch_ps="$(ahk_resolve_and_relaunch_ps "$(fleet_box_ahk_script "$box")" "$(fleet_box_ahk_prefer "$box")")"
+    # the relaunch identity (script path + prefer order) is PER-BOX (resolume: its own v2 .ahk path +
+    # lnk-first). issue 1317 part 3: a box with NO AHK identity in scripts/lib/genlock-fleet-boxes.sh
+    # (the retired Windows strih was the only other one) is a loud error, never another box's script.
+    local ahk_script ahk_prefer ahk_relaunch_ps
+    ahk_script="$(fleet_box_ahk_script "$box")" && ahk_prefer="$(fleet_box_ahk_prefer "$box")" \
+      || { echo "build_windows_deploy_program: box '$box' has no AHK relaunch identity (scripts/lib/genlock-fleet-boxes.sh) -- refusing HAS_AHK=1" >&2; return 2; }
+    ahk_relaunch_ps="$(ahk_resolve_and_relaunch_ps "$ahk_script" "$ahk_prefer")"
     ahk_restart=$(cat <<PSAHKR
 # (8) Restart the ${box} AHK watchdog we stopped in step (1), VERIFIED (leaves AHK running so the
 #     STEP-2 launch-obs-genlock.sh session gate passes). AHK's app1_run then keeps obs64 alive via
@@ -740,24 +683,25 @@ fi
 
 usage() {
   cat <<'EOF'
-deploy-genlock-fleet.sh -- ONE deploy path for the OBS genlock build across strih + stream + imag
-(+ resolume, the traveling CG box, when explicitly named -- issue 1295) from ONE anchor CI run id
+deploy-genlock-fleet.sh -- ONE deploy path for the OBS genlock build across strih-lx + stream (+ imag
+and resolume, the traveling CG box, when explicitly named -- issues 1316/1295) from ONE anchor CI run id
 (issue 789 bod 4 + bod 5). Resolves the same-SHA artifacts, emits the Windows deploy program for the
 win-* MCP Shell, ssh-deploys imag, applies box-backup retention, and writes one durable fleet-deploy
 log line.
 
 Usage (plan -- print the whole fleet plan, no network, from a pre-staged bundle):
   scripts/deploy-genlock-fleet.sh --plan --run-id <id> --sha <headSha> --stage <dir> \
-      [--full|--fast] [--boxes strih,stream,imag,resolume]
+      [--full|--fast] [--boxes strih-lx,stream,imag,resolume]
 
 Usage (execute -- resolve + download the same-SHA artifacts, emit the Windows plan, ssh-deploy imag):
-  scripts/deploy-genlock-fleet.sh --run-id <id> [--full|--fast] [--boxes strih,stream,imag,resolume] [--yes]
+  scripts/deploy-genlock-fleet.sh --run-id <id> [--full|--fast] [--boxes strih-lx,stream,imag,resolume] [--yes]
 
   --run-id   the ANCHOR CI run id -- its headSha is the ONE canonical version every box converges to.
   --full     full windows-genlock bundle (default; required for any plugin/frontend change).
   --fast     libobs-only obs.dll hot-swap.
-  --boxes    comma list of strih,stream,imag,resolume (default: strih,stream,imag -- resolume
-             (RESOLUME-SNV, the traveling CG box) deploys ONLY when explicitly named).
+  --boxes    comma list of strih-lx,stream,imag,resolume (default: strih-lx,stream -- the Windows
+             `strih` PC is RETIRED (issue 1317); imag + resolume (RESOLUME-SNV, the traveling CG
+             box) deploy ONLY when explicitly named).
   --plan     print the plan only; no gh/ssh/scp. Requires --stage + --sha.
   --stage    local dir holding the (pre-)downloaded artifact bytes.
   --sha      the canonical build SHA to stamp into the markers (plan mode).
@@ -842,6 +786,50 @@ ${program}
 PLAN
 }
 
+# emit the strih-lx plan (issue 1317 part 3). strih-lx is the production strih (a linux-genlock box),
+# but its install is NOT imag's: it runs the strih FULL-build variant into /usr through the
+# provisioning machinery (release-parity gate, runtime packages, /usr prefix, chrome-sandbox) and is
+# supervised by the strih-obs.service user unit, not imag-obs.service. So the plan directs the
+# sanctioned recipe (.claude/rules/strih-linux-provisioning.md "Staging + ssh gotchas") instead of
+# the imag on-box program. Every line is a #-comment, so a saved whole-plan .ps1 still parses (the
+# issue-1295 file-mode rule) and the supervisor runs each step deliberately.
+emit_strih_lx_plan() {
+  local stage="$1" gsha="$2"
+  # The repo tree (scripts/ + systemd/) goes to ONE fixed path that every deploy overwrites
+  # (rsync --delete), never a per-sha dir: a `<stage>-repo` name matches no obs-backup-retention
+  # allowlist, so it would never be swept, and nesting it inside the stage dir would ship it into
+  # the bundle (setup-strih copies STAGE/. wholesale).
+  local host art lx_stage="/tmp/genlock-stage-${gsha}" lx_repo="/tmp/strih-lx-deploy-repo"
+  host="$(fleet_box_ip strih-lx)" || { echo "emit_strih_lx_plan: no strih-lx host (STRIH_LX_IP / obs-fleet row)" >&2; return 2; }
+  art="$(fleet_linux_bundle_artifact_for strih-lx)"
+  echo "# ================= FLEET PLAN: box=strih-lx (ssh newlevel@${host}, linux-genlock) ================="
+  # #1303 part 4: report-only forced-table AUDIO/yuv audit BEFORE the swap (never a write, never a gate).
+  emit_forced_table_audit_preflight strih-lx "$host"
+  cat <<PLAN
+# STEP 0a: prune the stale stage copies FIRST -- each staged bundle is ~2.2 GB of /tmp under a
+#          per-user quota, and the third one fails mid-rsync (Disk quota exceeded). From dev1
+#          (it sweeps the obs-fleet strih-lx host; under a STRIH_LX_IP override run the same script
+#          ON that box with --local-sweep instead):
+#            bash scripts/obs-backup-retention.sh --box strih-lx                       # dry-run, read it
+#            bash scripts/obs-backup-retention.sh --box strih-lx --keep-runs 1 --keep-days 0 --execute
+# STEP 0b: stage the '${art}' artifact (downloaded to ${stage}) AND the repo scripts/ + systemd/
+#          dirs (setup-strih.sh reads ../systemd/*.service) on the box:
+#            rsync -a ${stage}/ newlevel@${host}:${lx_stage}/
+#            rsync -a --delete scripts systemd newlevel@${host}:${lx_repo}/
+# STEP 1:  install through the provisioning path (never a hand cp over /usr). sudo needs the
+#          password on stdin over a tty-less ssh -- expand \$PW on dev1 (outer double quotes), and run
+#          the script DIRECTLY (rsync -a keeps its exec bit) so its process name is setup-strih.sh:
+#            sshpass -p "\$PW" ssh newlevel@${host} "printf '%s\\n' '\$PW' | sudo -S -p '' bash -c 'STRIH_LX_BUNDLE_SRC=${lx_stage} nohup ${lx_repo}/scripts/setup-strih.sh > /tmp/setup-strih-${gsha}.log 2>&1 &'"
+#          then poll 'pgrep -x setup-strih.sh' (never pgrep -f -- it matches its own command line)
+#          and read the log's tail for the step-4 'installed genlock bundle' line.
+# STEP 2:  relaunch through the supervised user unit, never a raw launch:
+#            ssh newlevel@${host} 'systemctl --user restart strih-obs.service && systemctl --user is-active strih-obs.service'
+#          then confirm 'render tick ENABLED' in the newest ~/.config/obs-studio/logs/*.txt.
+# STEP 3:  acceptance -- 'bash ${lx_repo}/scripts/verify-strih.sh' ON the box, and from dev1
+#          'python3 scripts/obs_burn_filter.py check --host ${host}' (the WS filter-enum survives).
+PLAN
+}
+
 main() {
   local plan=0 run_id="" mode="" boxes_csv="" stage="" sha_override="" yes=0
   local mode_full=0 mode_fast=0
@@ -878,12 +866,11 @@ main() {
     # subshell so the comma-split IFS never leaks past the loop (the loop only prints).
     ( IFS=','; for b in $boxes; do
       case "$b" in
-        strih|stream|resolume) emit_windows_plan "$b" "$mode" "$stage" "$sha" "$sha" ;;
-        imag)                  emit_imag_plan "$stage" "$sha" "$sha" ;;
-        # issue 1317: strih-lx is a linux-genlock box -- the on-box deploy program is byte-identical
-        # to imag's (same /opt/obs-genlock target, same genlock_write_markers), only the CI artifact
-        # (fleet_linux_bundle_artifact_for strih-lx) + the box IP differ, both resolved at execute.
-        strih-lx)              emit_imag_plan "$stage" "$sha" "$sha" ;;
+        stream|resolume) emit_windows_plan "$b" "$mode" "$stage" "$sha" "$sha" ;;
+        imag)            emit_imag_plan "$stage" "$sha" "$sha" ;;
+        # issue 1317 part 3: strih-lx gets its OWN plan (setup-strih.sh + strih-obs.service), never
+        # the imag on-box program (which restarts imag-obs.service, a unit strih-lx does not have).
+        strih-lx)        emit_strih_lx_plan "$stage" "$sha" ;;
       esac
     done )
     # issue 1295: emit the fleet-deploy log record as a COMMENT and end the printed plan on `exit 0`.
@@ -902,12 +889,17 @@ main() {
   # windows/linux workflows, emit the Windows plan (agent uploads + pastes into the win-* MCP Shell),
   # ssh-deploy imag, and append one fleet-deploy log line. The worker never runs this; the supervisor
   # drives it live (the ticket stays OPEN until then).
+  # issue 1317 part 3: execute mode has no strih-lx arm yet (see the NOTE below), so the boxes it
+  # really deploys -- and records in the durable fleet log -- exclude strih-lx. A run that would
+  # deploy NOTHING is a usage error, never a green "deployed" log line for a box it never touched.
+  local exec_boxes; exec_boxes="$(fleet_execute_boxes "$boxes")"
+  [ -n "$exec_boxes" ] || { echo "ERROR: execute mode has nothing to deploy for '$boxes' -- the strih-lx execute arm is a follow-up; use --plan for its recipe" >&2; exit 2; }
   command -v gh >/dev/null 2>&1 || { echo "ERROR: gh CLI required for execute mode" >&2; exit 3; }
   command -v jq >/dev/null 2>&1 || { echo "ERROR: jq required for execute mode" >&2; exit 3; }
   local sha; sha="$(gh run view "$run_id" --repo "$GENLOCK_REPO" --json headSha -q .headSha 2>/dev/null)" \
     || { echo "ERROR: could not resolve headSha for anchor run $run_id" >&2; exit 3; }
   [ -n "$sha" ] || { echo "ERROR: empty headSha for anchor run $run_id" >&2; exit 3; }
-  echo "# anchor run $run_id -> canonical SHA $sha; boxes: $boxes (mode $mode; retention --yes=$yes)"
+  echo "# anchor run $run_id -> canonical SHA $sha; deploying: $exec_boxes (requested: $boxes; mode $mode; retention --yes=$yes)"
 
   local workdir; workdir="$(mktemp -d)"
   # shellcheck disable=SC2064
@@ -916,16 +908,15 @@ main() {
   # detect requested box classes without a `local IFS=','` that would leak past a brace group
   # (a { …; } group is not a new scope) -- match the comma-list directly.
   local want_win=0 want_imag=0 want_strihlx=0
-  case ",$boxes," in *,strih,*|*,stream,*|*,resolume,*) want_win=1 ;; esac
+  case ",$boxes," in *,stream,*|*,resolume,*) want_win=1 ;; esac
   case ",$boxes," in *,imag,*) want_imag=1 ;; esac
   case ",$boxes," in *,strih-lx,*) want_strihlx=1 ;; esac
-  # issue 1317: the strih-lx EXECUTE deploy (scp the strih artifact + ssh-run the on-box program)
-  # reuses the imag transport with fleet_linux_bundle_artifact_for strih-lx + STRIH_LX_IP; it is a
-  # follow-up (the notebook does not exist yet, so it cannot be exercised). The PLAN arm above
-  # already previews the identical on-box program. Until then, execute against strih-lx is a no-op
-  # with a loud note rather than a silent success, so an operator is never misled.
+  # issue 1317: the strih-lx EXECUTE deploy (download the strih artifact + drive the setup-strih.sh
+  # recipe over ssh) is a follow-up; the PLAN arm prints that exact recipe (emit_strih_lx_plan).
+  # Until then, execute against strih-lx is a no-op with a loud note rather than a silent success,
+  # so an operator is never misled.
   if [ "$want_strihlx" = 1 ]; then
-    echo "# NOTE(issue 1317): strih-lx EXECUTE deploy is a follow-up -- use --plan for the preview, or run" >&2
+    echo "# NOTE(issue 1317): strih-lx EXECUTE deploy is a follow-up -- use --plan for the recipe, or run" >&2
     echo "#   setup-strih.sh with STRIH_LX_BUNDLE_SRC=<dir of the $(fleet_linux_bundle_artifact_for strih-lx) artifact> ON the box." >&2
   fi
 
@@ -940,7 +931,7 @@ main() {
     echo "# Windows artifact $win_art (run $win_run) downloaded to $workdir/win"
     echo "# Upload it to each box at C:\\stage-genlock-$sha (win-* MCP FileUpload / scp), then paste each program:"
     # subshell so the comma-split IFS never leaks into the rest of main (the loop only prints).
-    ( IFS=','; for b in $boxes; do case "$b" in strih|stream|resolume) emit_windows_plan "$b" "$mode" "$workdir/win" "$sha" "$sha" "$yes" ;; esac; done )
+    ( IFS=','; for b in $boxes; do case "$b" in stream|resolume) emit_windows_plan "$b" "$mode" "$workdir/win" "$sha" "$sha" "$yes" ;; esac; done )
   fi
 
   # --- imag: download the same-SHA linux artifacts, scp the WHOLE bundle + ssh-run (issue 1026) -----
@@ -989,7 +980,7 @@ main() {
 
   # --- durable fleet-deploy log line ---------------------------------------------------------------
   mkdir -p "$(dirname "$FLEET_LOG_DEFAULT")"
-  fleet_log_line "$run_id" "$sha" "$boxes" "$mode" >> "$FLEET_LOG_DEFAULT"
+  fleet_log_line "$run_id" "$sha" "$exec_boxes" "$mode" >> "$FLEET_LOG_DEFAULT"
   echo "# fleet-deploy log appended: $FLEET_LOG_DEFAULT"
   exit 0
 }

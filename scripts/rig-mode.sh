@@ -1183,20 +1183,21 @@ restore_stream_program_pro() {
   return $rc
 }
 
-# print_genlock_relaunch_note MODE -> the genlock RELAUNCH step (printed, not run — a GUI OBS
-# launch goes via the win-* MCP; #701 proved plain scp/ssh reaches strih/stream, but that doesn't
-# drive/verify a GUI app). #257: env-free; the wrapper just verifies the genlock
+# print_genlock_relaunch_note MODE -> the genlock RELAUNCH step (printed, not run — a Windows GUI
+# OBS launch goes via the win-* MCP; #701 proved plain scp/ssh reaches stream, but that doesn't
+# drive/verify a GUI app; the Linux strih-lx restarts its supervised user unit, issue 1317). #257: env-free; the wrapper just verifies the genlock
 # render tick is ENABLED (build default). Only needed if OBS is not already running on a box.
 print_genlock_relaunch_note() {
   local mode="$1"
   cat <<EOF
-# ---- Windows OBS genlock relaunch (only if OBS is not already running; via win-* MCP) ----
+# ---- OBS genlock relaunch (only if OBS is not already running) ----
 # The measurement burn for ${mode} mode was just toggled over WebSocket above (no relaunch). The
 # genlock build is hard-locked (render tick + ts-align always ON, latency 3 ms — NO env), so a
-# relaunch is only needed to (re)start a stopped/wedged OBS. Per box, paste the printed program into
-# that box's win-* MCP Shell:
-#   strih  : scripts/launch-obs-genlock.sh --box strih  --force
-#   stream : scripts/launch-obs-genlock.sh --box stream --force
+# relaunch is only needed to (re)start a stopped/wedged OBS. The strih is the Linux strih-lx
+# (issue 1317): restart its supervised user unit. The Windows stream box: paste the printed program
+# into its win-* MCP Shell:
+#   strih-lx : ssh newlevel@${STRIH_IP} 'systemctl --user restart strih-obs.service'
+#   stream   : scripts/launch-obs-genlock.sh --box stream --force
 # Then confirm (per the e2e / obs-ops playbook skills): the right scene (PHASE2-PROBE for test, prod
 # for event), recording NATIVE 1080p (#225), DanteSync locked. The wrapper EXITS 0 only when the OBS
 # log shows the genlock render tick ENABLED.

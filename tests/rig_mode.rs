@@ -1059,9 +1059,13 @@ fn burn_action_maps_mode_to_add_or_remove() {
 fn genlock_relaunch_note_is_env_free_no_mode() {
     for mode in ["test", "event"] {
         let note = run_sourced(&format!("print_genlock_relaunch_note {mode}"));
+        // issue 1317 part 3: the strih is the Linux strih-lx (its supervised user unit), never the
+        // retired Windows `--box strih` planner arm (which now refuses).
         assert!(
-            note.contains("--box strih") && note.contains("--box stream"),
-            "#257: the relaunch note must cover strih AND stream. mode={mode} note=\n{note}"
+            note.contains("systemctl --user restart strih-obs.service")
+                && note.contains("--box stream")
+                && !note.contains("--box strih"),
+            "#257: the relaunch note must cover strih-lx AND stream. mode={mode} note=\n{note}"
         );
         // #257: env-free relaunch — NO --mode and NO OBS_GENLOCK_*/OBS_BURN_* env.
         assert!(

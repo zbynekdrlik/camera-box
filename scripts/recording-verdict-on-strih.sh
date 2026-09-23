@@ -46,13 +46,20 @@
 #       -- --extract-partial strih --strih 'D:\_REC\...\strih-REC.mkv' ... --out 'C:\camera-box\verdict-out\strih-partial-12345.json'
 #
 # Env:
-#   STRIH_BOX (default 10.77.9.202) — ssh/MCP target.
+#   STRIH_BOX (REQUIRED, no default — issue 1317 part 3) — the WINDOWS strih ssh/MCP target. The
+#     default used to be 10.77.9.202, the Windows STRIH-SNV PC RETIRED at the M4 cut-over; that
+#     address is the Linux strih-lx now, whose in-place decode is scripts/recording-verdict-on-strih-lx.sh
+#     (recording-e2e.sh routes it there via strih_platform). A target that strih_platform resolves to
+#     `linux` is REFUSED here, so this Windows PowerShell planner can never be aimed at the Linux box.
 #   STRIH_USER / STRIH_PW (default newlevel / newlevel, per targets.md) — --execute only.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/win-ssh-exec.sh
 . "$HERE/lib/win-ssh-exec.sh"
+# shellcheck source=scripts/lib/strih-platform.sh
+# issue 1317 part 3: the ONE strih platform resolver recording-e2e.sh already routes [8/8a] with.
+. "$HERE/lib/strih-platform.sh"
 
 # Build the PowerShell command line that runs the verdict ON the strih box. RUST_LOG=info so the
 # per-recording decode progress is visible (the agent's liveness signal). The verdict writes its
@@ -85,7 +92,7 @@ build_onbox_command() {
 # Parse flags + emit the full plan. Wrapped in a function so SOURCING the script (a unit test
 # calling build_onbox_command) does NOT trigger arg-parsing against the sourcing shell's $@.
 main() {
-  local STRIH_BOX="${STRIH_BOX:-10.77.9.202}"
+  local STRIH_BOX="${STRIH_BOX:-}"
   local STRIH_USER="${STRIH_USER:-newlevel}"
   local STRIH_PW="${STRIH_PW:-newlevel}"
   local VERDICT_EXE='C:\camera-box\recording-verdict.exe'
@@ -116,6 +123,17 @@ main() {
       *) echo "unknown arg: $1" >&2; exit 2 ;;
     esac
   done
+
+  # issue 1317 part 3: no default Windows strih, and never a Windows plan for a Linux strih. After the
+  # arg loop so the #281 --skip-if-exists early return (touches no box) still wins.
+  if [ -z "$STRIH_BOX" ]; then
+    echo "ERROR: STRIH_BOX is required -- the Windows strih PC (the old 10.77.9.202 default) is RETIRED (issue 1317); a Linux strih decodes via scripts/recording-verdict-on-strih-lx.sh" >&2
+    exit 2
+  fi
+  if ! strih_platform_refuse_windows_only_mode "$STRIH_BOX" "the Windows strih verdict planner"; then
+    echo "       the Linux strih decodes in place via scripts/recording-verdict-on-strih-lx.sh" >&2
+    exit 2
+  fi
 
   local ONBOX_CMD
   ONBOX_CMD="$(build_onbox_command "$VERDICT_EXE" "${PASS_ARGS[@]}")"

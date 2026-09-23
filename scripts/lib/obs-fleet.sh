@@ -225,15 +225,51 @@ obs_fleet_status_probe() {
 # obs_fleet_has_ahk <name> -> 1 when NAME's OBS is guarded by an NL_STARTUP.ahk AutoHotkey
 # auto-respawn watcher (whose session a Windows probe must also check and a deploy must stop +
 # restart), else 0. A pure FACT keyed on the name (issue 1317 review): resolume runs the AHK v2
-# safe-loop (issue 1295); `strih` is the RETIRED Windows strih -- no fleet row any more, but the
-# legacy deploy/launch planner arms still name it until they are retired. The ONE source both the
-# obs-session watchdog and deploy-genlock-fleet.sh read (launch-obs-genlock.sh still carries its own
-# per-box case table next to the MCP/ahk-script facts).
+# safe-loop (issue 1295). The retired Windows strih ran one too; its planner arms were retired in
+# issue 1317 part 3, so no name maps to it any more. The ONE source the obs-session watchdog and
+# every Windows planner (deploy-genlock-fleet.sh, launch-obs-genlock.sh, obs-self-heal-install.sh,
+# via scripts/lib/genlock-fleet-boxes.sh) read.
 obs_fleet_has_ahk() {
   case "${1:-}" in
-    strih|resolume) printf '1' ;;
+    resolume) printf '1' ;;
     *) printf '0' ;;
   esac
+}
+
+# obs_fleet_class_for_host <host-or-ip> -> the CLASS (windows-genlock | linux-genlock) of the fleet
+# row whose host field OR name equals HOST (stdout), or return 1 when no row matches. The class gate
+# a Windows-only planner consults BEFORE emitting a Windows action against an address (issue 1317
+# part 3): 10.77.9.202 is the Linux strih-lx now, so a PowerShell/schtasks/C:\ tool aimed at it must
+# refuse. Word-exact on the whole field; reads the WHOLE here-doc (no early exit -> SIGPIPE-safe).
+obs_fleet_class_for_host() {
+  local want="${1:-}" line name rest host class found=""
+  [ -n "$want" ] || return 1
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    name="${line%%|*}"; rest="${line#*|}"
+    host="${rest%%|*}"; rest="${rest#*|}"
+    class="${rest%%|*}"
+    if [ -z "$found" ] && { [ "$host" = "$want" ] || [ "$name" = "$want" ]; }; then
+      found="$class"
+    fi
+  done <<EOF
+${OBS_FLEET}
+EOF
+  [ -n "$found" ] || return 1
+  printf '%s' "$found"
+}
+
+# obs_fleet_refuse_linux_target <host-or-ip> <tool> -> returns 0 (and prints nothing) when HOST is
+# NOT a linux-genlock fleet box; returns 1 with a named error on stderr when it IS -- the one-line
+# class gate every Windows-only dev1 tool (a .ps1 driver, a schtasks install, a PowerShell planner)
+# calls before touching HOST, so a Windows action can never be emitted for a Linux box (issue 1317
+# part 3). An address the fleet list does not know passes (an explicit ops target is authoritative).
+obs_fleet_refuse_linux_target() {
+  local host="${1:-}" tool="${2:-this tool}" cls
+  cls="$(obs_fleet_class_for_host "$host")" || return 0
+  [ "$cls" = "linux-genlock" ] || return 0
+  echo "ERROR: ${tool} is Windows-only, but ${host} is a linux-genlock fleet box (scripts/lib/obs-fleet.sh) -- refusing to emit a Windows action for a Linux box (issue 1317)" >&2
+  return 1
 }
 
 # obs_fleet_poll_now <name> -> returns 0 when a per-box consumer loop should poll NAME this pass, 1

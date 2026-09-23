@@ -411,11 +411,11 @@ fn force_inserts_kill_and_noforce_refuses_double_launch() {
 /// The CLI selects the correct win-* MCP per box and emits the program in the plan.
 #[test]
 fn cli_box_selects_correct_mcp_and_emits_program() {
-    let (code, out, _err) = run_script(&["--box", "strih"]);
-    assert_eq!(code, 0, "--box strih must print the plan (exit 0)");
+    let (code, out, _err) = run_script(&["--box", "resolume"]);
+    assert_eq!(code, 0, "--box resolume must print the plan (exit 0)");
     assert!(
-        out.contains("win-strih") && out.contains("10.77.9.202"),
-        "strih -> win-strih plan"
+        out.contains("win-resolume") && out.contains("resolume.lan"),
+        "resolume -> win-resolume plan"
     );
     assert!(
         out.contains("render tick ENABLED"),
@@ -501,11 +501,12 @@ fn cli_box_resolume_selects_win_resolume_with_ahk_1295() {
     );
 }
 
-/// #1295 review (YELLOW): the identity-confirm caveat is resolume-ONLY -- the strih/stream launch
-/// plans (fixed IPs, no bridge collision) must NOT carry it.
+/// #1295 review (YELLOW): the identity-confirm caveat is resolume-ONLY -- the stream launch plan
+/// (fixed IP, no bridge collision) must NOT carry it.
 #[test]
 fn non_resolume_launch_plan_has_no_identity_confirm_1295() {
-    for box_name in ["strih", "stream"] {
+    {
+        let box_name = "stream";
         let (_c, out, _e) = run_script(&["--box", box_name]);
         assert!(
             !out.contains("box IDENTITY confirm"),
@@ -522,8 +523,42 @@ fn trailing_flag_without_value_is_usage_error_exit_2() {
         code, 2,
         "--box with no value must exit 2 (usage error). stderr={err}"
     );
-    let (code, _out, err) = run_script(&["--box", "strih", "--obs-dir"]);
+    let (code, _out, err) = run_script(&["--box", "stream", "--obs-dir"]);
     assert_eq!(code, 2, "--obs-dir with no value must exit 2. stderr={err}");
+}
+
+/// issue 1317 part 3: the Windows strih PC is RETIRED (M4 cut-over; 10.77.9.202 is the Linux
+/// strih-lx). `--box strih` is refused BY NAME (pointing at the strih-obs.service user unit), and the
+/// Linux strih-lx is refused as a non-Windows box -- this planner can never emit a Windows program
+/// for the Linux strih. The box facts come from the shared per-box table, not a local case list.
+#[test]
+fn retired_windows_strih_and_linux_strih_lx_are_refused_1317() {
+    let (code, out, err) = run_script(&["--box", "strih"]);
+    assert_eq!(
+        code, 2,
+        "--box strih must exit 2. stdout={out} stderr={err}"
+    );
+    assert!(
+        err.contains("RETIRED") && err.contains("strih-obs.service"),
+        "the refusal names the retirement + the strih-lx user unit: {err}"
+    );
+    assert!(!out.contains("win-strih"), "no Windows strih plan: {out}");
+    let (code, out, err) = run_script(&["--box", "strih-lx"]);
+    assert_eq!(
+        code, 2,
+        "--box strih-lx (Linux) must exit 2. stdout={out} stderr={err}"
+    );
+    assert!(
+        !out.contains("$ErrorActionPreference"),
+        "no Windows program for the Linux strih-lx: {out}"
+    );
+    let src = std::fs::read_to_string(script()).unwrap();
+    assert!(
+        src.contains(". \"$HERE/lib/genlock-fleet-boxes.sh\"")
+            && src.contains("fleet_box_mcp \"$box\"")
+            && !src.contains("mcp=\"win-strih\""),
+        "launch-obs-genlock.sh reads its box facts from the shared per-box table"
+    );
 }
 
 /// An unknown --box is a usage error (exit 2).
@@ -571,7 +606,7 @@ fn script_is_source_safe() {
 /// ndi_source input's burn OFF and reports LOUDLY -- positioned AFTER the on-box launch verify.
 #[test]
 fn plan_emits_verify_at_start_burn_sweep_off_1057() {
-    for (box_arg, ip) in [("strih", "10.77.9.202"), ("stream", "10.77.9.204")] {
+    for (box_arg, ip) in [("resolume", "resolume.lan"), ("stream", "10.77.9.204")] {
         let (code, out, _err) = run_script(&["--box", box_arg]);
         assert_eq!(code, 0, "--box {box_arg} must print the plan (exit 0)");
         assert!(
@@ -611,7 +646,7 @@ fn plan_emits_verify_at_start_burn_sweep_off_1057() {
 /// launch verify.
 #[test]
 fn plan_emits_verify_at_start_latency_pins_1061() {
-    for (box_arg, ip) in [("strih", "10.77.9.202"), ("stream", "10.77.9.204")] {
+    for (box_arg, ip) in [("resolume", "resolume.lan"), ("stream", "10.77.9.204")] {
         let (code, out, _err) = run_script(&["--box", box_arg]);
         assert_eq!(code, 0, "--box {box_arg} must print the plan (exit 0)");
         assert!(

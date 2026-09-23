@@ -19,23 +19,25 @@
 #
 # HOW THE PIECES FIT (same model as scripts/recording-verdict-on-stream.sh — historically "scp/ssh
 # to Windows is DENIED on this rig, so the agent drives the win-* MCP"; #701 proved plain
-# OpenSSH+password scp/ssh actually WORKS against strih (10.77.9.202) and stream (10.77.9.204)
+# OpenSSH+password scp/ssh actually WORKS against the Windows OBS boxes (stream 10.77.9.204)
 # specifically with the targets.md creds, but this script stays a planner because launching a GUI
 # app and reading its on-screen log state is exactly what the win-* MCP is FOR, not a workaround):
 # this script is the PURE, testable PLANNER.
 # Given the box + obs install dir, it PRINTS the exact PowerShell program to paste into the box's
-# `win-strih` / `win-stream-snv` MCP `Shell`. It runs NO PowerShell itself and needs no Windows
+# `win-stream-snv` / `win-resolume` MCP `Shell`. It runs NO PowerShell itself and needs no Windows
 # access — the Rust unit tests (tests/launch_obs_genlock.rs) source it and assert the emitted program
 # is well-formed (clears sentinels, cwd=bin\64bit, log-verifies render tick ENABLED + DistroAV, fails
 # loud, carries NO OBS_GENLOCK_*/OBS_BURN_* env). The emitted program is idempotent + self-verifying.
 #
 # Usage (planner mode — prints the PowerShell launch+verify program + the MCP plan):
-#   scripts/launch-obs-genlock.sh --box strih            # uses the strih defaults
 #   scripts/launch-obs-genlock.sh --box stream           # uses the stream defaults
 #   scripts/launch-obs-genlock.sh --box resolume         # RESOLUME-SNV cg OBS (win-resolume, AHK v2 safe-loop) -- issue 1295
-#   scripts/launch-obs-genlock.sh --box strih --force    # force-kill a wedged obs64 first (obs-ops recovery)
-#   scripts/launch-obs-genlock.sh --box strih \
+#   scripts/launch-obs-genlock.sh --box stream --force   # force-kill a wedged obs64 first (obs-ops recovery)
+#   scripts/launch-obs-genlock.sh --box stream \
 #       --obs-dir 'C:\Program Files\obs-studio'          # override the OBS install dir
+# The Windows STRIH PC is RETIRED (M4 cut-over 20.9.2026, issue 1317): the strih is strih-lx, a Linux
+# box launched by its strih-obs.service systemd user unit -- this Windows planner refuses it by name.
+# The per-box MCP/address/AHK facts come from the ONE shared table scripts/lib/genlock-fleet-boxes.sh.
 #
 # Exit codes: 0 = plan printed, 2 = usage error. (The on-box PowerShell program's own exit code —
 # 0 healthy genlock / non-zero fail-loud — is reported by the MCP Shell when the agent runs it.)
@@ -45,6 +47,9 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/ahk-watchdog.sh
 # Sourcing (not executing) ahk-watchdog.sh: it defines ONE pure function, no top-level statements.
 . "$HERE/lib/ahk-watchdog.sh"
+# shellcheck source=scripts/lib/genlock-fleet-boxes.sh
+# issue 1317 part 3: the per-box MCP / address / AHK-identity table shared with deploy-genlock-fleet.sh.
+. "$HERE/lib/genlock-fleet-boxes.sh"
 
 # --- PURE functions (no network, no MCP, no Windows — unit-tested by sourcing this script) --------
 
@@ -54,18 +59,19 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # — this is a DEV rig, "kludne ho killni"); FORCE="0" aborts if obs64 is already running (relaunch
 # deliberately, never double-launch). HAS_AHK (default "1") emits the #786 AHK stop-first/restart-last
 # bracket around the redraw loop — pass "0" for a box with NO AutoHotkey64 auto-respawn watcher
-# (stream; strih AND resolume run NL_STARTUP.ahk, per .claude/skills/obs-ops "AHK on strih" + issue
-# 1295) so its program never carries a real AutoHotkey64 command (the #411 self-heal stream guard
-# pins this). AHK_SCRIPT ($4, default strih's path) / AHK_PREFER ($5, 'exe' default | 'lnk') are the
+# (stream; resolume runs NL_STARTUP.ahk, issue 1295 -- as the retired Windows strih did, per
+# .claude/skills/obs-ops "AHK on strih") so its program never carries a real AutoHotkey64 command (the
+# #411 self-heal stream guard pins this). AHK_SCRIPT ($4, default the retired strih's path) / AHK_PREFER ($5, 'exe' default | 'lnk') are the
 # PER-BOX relaunch identity (issue 1295) passed to scripts/lib/ahk-watchdog.sh. Pure string builder
 # so a unit test can assert the program is well-formed without a Windows host. Heredoc body is a
 # literal PowerShell here-string — bash-level interpolation is ONLY $OBS_DIR / the FORCE branch /
 # the AHK bracket; everything else (PowerShell $vars) is literal.
 build_launch_program() {
   # issue 1295: $4 AHK_SCRIPT / $5 AHK_PREFER = the PER-BOX AHK relaunch identity passed to the
-  # shared scripts/lib/ahk-watchdog.sh primitive. Defaults = strih's values so every existing
-  # caller (obs-self-heal-install.sh, the strih arm, the unit tests) is byte-identical; resolume
-  # passes its own v2 .ahk path + 'lnk' (prefer the Startup shortcut on the traveling CG box).
+  # shared scripts/lib/ahk-watchdog.sh primitive. The defaults are the RETIRED Windows strih's values
+  # (kept so the pure-builder unit tests stay byte-identical); every box-facing caller (this script's
+  # main, obs-self-heal-install.sh) passes the box's own identity from scripts/lib/genlock-fleet-boxes.sh
+  # -- resolume its v2 .ahk path + 'lnk' (prefer the Startup shortcut), a no-AHK box nothing.
   local obs_dir="$1" force="$2" has_ahk="${3:-1}" ahk_script="${4:-D:\\_APPS\\NL_STARTUP.ahk}" ahk_prefer="${5:-exe}"
 
   # #786/#411 — the AHK bracket is emitted ONLY for a box that actually runs the AHK watcher.
@@ -440,11 +446,12 @@ Toggling the measurement burn does NOT relaunch OBS — it is a per-source genlo
 OBS WebSocket: scripts/obs_burn_filter.py add|remove (driven by rig-mode.sh test|event).
 
 Usage:
-  scripts/launch-obs-genlock.sh --box strih|stream|resolume [--force] [--obs-dir 'C:\Program Files\obs-studio']
+  scripts/launch-obs-genlock.sh --box stream|resolume [--force] [--obs-dir 'C:\Program Files\obs-studio']
   scripts/launch-obs-genlock.sh --help
 
-  --box     strih (win-strih, 10.77.9.202), stream (win-stream-snv, 10.77.9.204), or resolume
-            (win-resolume, resolume.lan — the traveling cg OBS box, issue 1295) — selects the MCP.
+  --box     stream (win-stream-snv, 10.77.9.204) or resolume (win-resolume, resolume.lan — the
+            traveling cg OBS box, issue 1295) — selects the MCP. The Windows strih PC is RETIRED
+            (issue 1317): strih-lx is a Linux box launched by its strih-obs.service user unit.
   --force   force-kill a wedged obs64 first (documented obs-ops recovery; DEV rig).
   --obs-dir override the OBS install root (default 'C:\Program Files\obs-studio'; its bin\64bit is cwd).
 
@@ -468,22 +475,29 @@ main() {
     esac
   done
 
-  # has_ahk: strih AND resolume (issue 1295) run an NL_STARTUP.ahk AutoHotkey auto-respawn watcher
-  # (obs-ops "AHK on strih"; RESOLUME-SNV confirmed live by the supervisor pre-deploy inventory) so
-  # their programs stop+restart-VERIFY AutoHotkey64 around the launch; stream has none (has_ahk=0,
-  # no real AutoHotkey64 command -- the #411 self-heal guard pins this). The relaunch IDENTITY is
-  # PER-BOX: strih keeps D:\_APPS\NL_STARTUP.ahk + exe-first; resolume (the TRAVELING CG box) passes
-  # its own v2 .ahk path and prefers the Startup .lnk ('lnk') so a path move can't break the
-  # relaunch. resolume's host is the HOSTNAME resolume.lan, NEVER a pinned IP -- resolume.lan
-  # DHCP-drifts and currently collides with `bridge` at .201 (targets.md), so the emitted STEP-3/3b
-  # WS ops resolve it live via `--host resolume.lan`; confirm the box identity before trusting it.
-  local mcp box_ip has_ahk ahk_script ahk_prefer
+  # issue 1317 part 3: the box facts come from the ONE per-box table (scripts/lib/genlock-fleet-boxes.sh)
+  # + the fleet list -- never a literal Windows strih at .202. has_ahk: resolume runs an NL_STARTUP.ahk
+  # AutoHotkey v2 auto-respawn watcher (issue 1295) so its program stops+restart-VERIFIES
+  # AutoHotkey64 around the launch with its OWN .ahk path + Startup-.lnk-first relaunch identity;
+  # stream has none (has_ahk=0, no real AutoHotkey64 command -- the #411 self-heal guard pins this).
+  # resolume's host is the HOSTNAME resolume.lan, NEVER a pinned IP -- it DHCP-drifts and currently
+  # collides with `bridge` at .201 (targets.md), so the emitted STEP-3/3b WS ops resolve it live via
+  # `--host resolume.lan`; confirm the box identity before trusting it. A Linux box (strih-lx) is
+  # refused: it has no win-* MCP and is launched by its strih-obs.service systemd user unit.
+  local mcp box_ip has_ahk ahk_script="" ahk_prefer=""
   case "$box" in
-    strih)    mcp="win-strih";       box_ip="10.77.9.202"; has_ahk=1; ahk_script='D:\_APPS\NL_STARTUP.ahk'; ahk_prefer="exe" ;;
-    stream)   mcp="win-stream-snv";  box_ip="10.77.9.204"; has_ahk=0; ahk_script='D:\_APPS\NL_STARTUP.ahk'; ahk_prefer="exe" ;;
-    resolume) mcp="win-resolume";    box_ip="resolume.lan"; has_ahk=1; ahk_script='C:\Users\Resolume\Documents\_NLMEDIA resolume\_APPS\NL_STARTUP.ahk'; ahk_prefer="lnk" ;;
-    *) echo "ERROR: --box must be 'strih', 'stream' or 'resolume' (got '${box}')" >&2; usage >&2; exit 2 ;;
+    strih)
+      echo "ERROR: --box strih is the RETIRED Windows strih PC (issue 1317) -- the strih is strih-lx, a Linux box launched by its strih-obs.service user unit, never this Windows planner" >&2
+      usage >&2; exit 2 ;;
   esac
+  if ! mcp="$(fleet_box_mcp "$box")" || ! box_ip="$(fleet_box_ip "$box")"; then
+    echo "ERROR: --box must be a Windows genlock box: 'stream' or 'resolume' (got '${box}')" >&2; usage >&2; exit 2
+  fi
+  has_ahk="$(fleet_box_has_ahk "$box")"
+  if [ "$has_ahk" = "1" ]; then
+    ahk_script="$(fleet_box_ahk_script "$box")" && ahk_prefer="$(fleet_box_ahk_prefer "$box")" \
+      || { echo "ERROR: box '${box}' runs AHK but has no relaunch identity in scripts/lib/genlock-fleet-boxes.sh" >&2; exit 2; }
+  fi
 
   local PROGRAM
   PROGRAM="$(build_launch_program "$obs_dir" "$force" "$has_ahk" "$ahk_script" "$ahk_prefer")"

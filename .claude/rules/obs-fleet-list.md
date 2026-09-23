@@ -133,7 +133,7 @@ Per-facet decision (by each facet's PREMISE — a platform-neutral read joins, a
   watchdog's host/ssh-credential overrides are GENERIC per fleet name (`<NAME>_HOST` / `<NAME>_USER`
   / `<NAME>_PW`, default the roster host + targets.md `newlevel/newlevel`), so a new windows-genlock
   fleet row is watched with no code edit; its AHK flag is the ONE fact `obs_fleet_has_ahk` (also
-  read by `deploy-genlock-fleet.sh`'s `fleet_box_has_ahk`). The old literal `strih` arm of the
+  read by `scripts/lib/genlock-fleet-boxes.sh`'s `fleet_box_has_ahk`). The old literal `strih` arm of the
   session watchdog handed the Linux strih-lx the Windows PowerShell probe and logged `strih: ERROR:
   no probe output` on every 5-min pass.
 - **rig-restore's UNREADABLE count is roster-relative and FAIL-CLOSED** (`rig_obs_unreadable_count`):
@@ -171,13 +171,24 @@ Per-facet decision (by each facet's PREMISE — a platform-neutral read joins, a
   `STRIH_LX_HOST` override, lazy-sources this lib) return `obs_fleet_host strih-lx`, never the
   unresolvable `strih-lx.lan`. The box's OWN hostname is `strih_lx_hostname` (`strih-lx`) —
   setup-strih no longer cuts it out of the dial address (an IP would have renamed the box `10`).
-- **Still a literal Windows `strih` at .202 (followups, not fleet-derived yet):** the
-  `deploy-genlock-fleet.sh` / `launch-obs-genlock.sh` / `obs-self-heal-install.sh` `strih` arms
-  (win-strih MCP planners; the deploy's empty default fleet is still `strih,stream`),
-  `strih-recordings-retention.sh` + `obs-backup-retention.sh` (Windows `C:\` defaults at .202),
-  `recording-verdict-on-strih.sh` (Windows planner, `STRIH_BOX` .202) and
-  `bkshading-deploy-service.sh` (Windows install at .202). Retiring those arms is a planner change
-  with many pinned tests, not a roster edit.
+- **The Windows-strih planner arms are RETIRED too (issue 1317 part 3).** `deploy-genlock-fleet.sh`
+  (default fleet `strih-lx,stream`; its strih-lx plan is the setup-strih.sh recipe, never the imag
+  program), `launch-obs-genlock.sh` + `obs-self-heal-install.sh` (`--box strih` refused by name,
+  pointing at `strih-obs.service`) read ONE per-box table, `scripts/lib/genlock-fleet-boxes.sh`
+  (MCP / address / AHK identity / keep-alive tasks; addresses + the AHK fact from THIS list).
+  `obs_fleet_has_ahk strih` is now `0`. The retention drivers + `bkshading-deploy-service.sh` have NO
+  default box and refuse a linux-genlock address; `recording-verdict-on-strih.sh` requires
+  `STRIH_BOX` and refuses a `strih_platform=linux` target.
+- **`obs_fleet_class_for_host <host-or-ip>` + `obs_fleet_refuse_linux_target <host> <tool>` are the
+  ONE class gate a Windows-only dev1 tool calls before touching an ADDRESS** (issue 1317 part 3).
+  The host field OR the name matches (`10.77.9.202` and `strih-lx` → `linux-genlock`); the refusal
+  is rc 1 + a named stderr line; an address the list does not know PASSES (an explicit ops target
+  stays authoritative). Any new PowerShell / schtasks / `C:\` tool that takes a `--host` calls it
+  first -- never a hard-coded "not .202" check. **Known gap:** it matches only the literal fleet
+  host or name, so an unlisted alias (`strih-lx.lan`) passes; and the E2E flow's own resolver,
+  `strih_platform` (scripts/lib/strih-platform.sh, `STRIH_LX_HOST` default .202), is a SECOND
+  source of "is this the Linux strih" -- unifying the two is a follow-up candidate (issue 1317
+  part 3 LANE-RETURN), not done here.
 - **Live proof (23.9.2026, read-only `--dry-run` sweep):** network-reach `strih-lx (10.77.9.202):
   ping=1 ws:4455=1 bundle:8899=1 -> REACHABLE`; bundle-state `-> HEALTHY`; obs-liveness
   `strih-lx activeFps=30.00 renderAdvanced=True`; genlock-lock / render-freeze / audio-lag /
