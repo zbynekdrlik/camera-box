@@ -727,10 +727,18 @@ fn fleet_class_for_host_and_the_linux_refusal_gate_1317() {
     let (rc, out, _e) = run_fleet("obs_fleet_class_for_host 10.1.2.3", &[]);
     assert_eq!(rc, 1, "an unknown address has no class: {out:?}");
     // the refusal gate: rc 1 + a named error for a Linux fleet box, rc 0 + silent otherwise.
-    let (rc, _o, err) = run_fleet("obs_fleet_refuse_linux_target 10.77.9.202 some-tool.sh", &[]);
-    assert_eq!(rc, 1, "a Windows action at the Linux strih-lx must be refused");
+    let (rc, _o, err) = run_fleet(
+        "obs_fleet_refuse_linux_target 10.77.9.202 some-tool.sh",
+        &[],
+    );
+    assert_eq!(
+        rc, 1,
+        "a Windows action at the Linux strih-lx must be refused"
+    );
     assert!(
-        err.contains("some-tool.sh") && err.contains("linux-genlock") && err.contains("10.77.9.202"),
+        err.contains("some-tool.sh")
+            && err.contains("linux-genlock")
+            && err.contains("10.77.9.202"),
         "the refusal names the tool, the class and the address: {err:?}"
     );
     for ok_host in ["10.77.9.204", "resolume.lan", "10.1.2.3"] {

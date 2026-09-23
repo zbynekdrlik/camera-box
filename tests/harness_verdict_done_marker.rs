@@ -242,16 +242,28 @@ fn strih_planner_has_no_default_box_and_refuses_the_linux_strih_1317() {
     };
     let (code, out, err) = run(&[]);
     assert_eq!(code, 2, "no STRIH_BOX must be refused: out={out} err={err}");
-    assert!(err.contains("STRIH_BOX is required"), "names the missing box: {err}");
+    assert!(
+        err.contains("STRIH_BOX is required"),
+        "names the missing box: {err}"
+    );
     let (code, out, err) = run(&[("STRIH_BOX", "10.77.9.202")]);
-    assert_eq!(code, 2, "the Linux strih-lx must be refused: out={out} err={err}");
+    assert_eq!(
+        code, 2,
+        "the Linux strih-lx must be refused: out={out} err={err}"
+    );
     assert!(
         err.contains("recording-verdict-on-strih-lx.sh") && !out.contains("win-strih Shell"),
         "the refusal points at the Linux sibling and emits no Windows plan: out={out} err={err}"
     );
     let (code, out, _err) = run(&[("STRIH_BOX", "10.77.9.202"), ("STRIH_PLATFORM", "windows")]);
-    assert_eq!(code, 0, "the explicit STRIH_PLATFORM=windows override is honored: {out}");
+    assert_eq!(
+        code, 0,
+        "the explicit STRIH_PLATFORM=windows override is honored: {out}"
+    );
     let (code, out, _err) = run(&[("STRIH_BOX", WIN_STRIH_TEST_BOX)]);
     assert_eq!(code, 0, "an explicit Windows strih still gets its plan");
-    assert!(out.contains(WIN_STRIH_TEST_BOX), "the plan names the box: {out}");
+    assert!(
+        out.contains(WIN_STRIH_TEST_BOX),
+        "the plan names the box: {out}"
+    );
 }

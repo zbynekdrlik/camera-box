@@ -1109,7 +1109,11 @@ fn normalize_accepts_resolume_explicit_only_not_default_1295() {
     );
     // dedup
     assert_eq!(
-        run_sourced(&script(), "fleet_normalize_boxes resolume,strih-lx,resolume").trim(),
+        run_sourced(
+            &script(),
+            "fleet_normalize_boxes resolume,strih-lx,resolume"
+        )
+        .trim(),
         "strih-lx,resolume"
     );
     // the empty default is strih-lx,stream ONLY -- resolume (traveling maintenance box) is never
@@ -1154,11 +1158,19 @@ fn resolume_box_constants_mcp_hostname_with_ahk_1295() {
     // issue 1317 part 3: the retired Windows strih has NO AHK identity any more, and a no-AHK box
     // (stream) never had one -- asking fails loud (rc 2, no output), never another box's script.
     for no_ahk in ["strih", "stream", "strih-lx"] {
-        let (rc, out, _e) = run_sourced_status(&script(), &format!("fleet_box_ahk_script {no_ahk}"));
-        assert_eq!(rc, 2, "fleet_box_ahk_script {no_ahk} must fail closed: {out:?}");
+        let (rc, out, _e) =
+            run_sourced_status(&script(), &format!("fleet_box_ahk_script {no_ahk}"));
+        assert_eq!(
+            rc, 2,
+            "fleet_box_ahk_script {no_ahk} must fail closed: {out:?}"
+        );
         assert!(out.trim().is_empty(), "no AHK path for {no_ahk}: {out:?}");
-        let (rc, out, _e) = run_sourced_status(&script(), &format!("fleet_box_ahk_prefer {no_ahk}"));
-        assert_eq!(rc, 2, "fleet_box_ahk_prefer {no_ahk} must fail closed: {out:?}");
+        let (rc, out, _e) =
+            run_sourced_status(&script(), &format!("fleet_box_ahk_prefer {no_ahk}"));
+        assert_eq!(
+            rc, 2,
+            "fleet_box_ahk_prefer {no_ahk} must fail closed: {out:?}"
+        );
     }
     // no OBS keep-alive SCHEDULED-TASK respawner on the CG box -- its respawner IS the AHK watcher
     // (handled by the has_ahk stop/restart path), so it lists no keepalive task.
@@ -1324,14 +1336,20 @@ fn fleet_box_ip_strih_lx_fails_closed_without_a_fleet_row_1317() {
 #[test]
 fn retired_windows_strih_is_refused_everywhere_1317() {
     let (rc, out, err) = run_sourced_status(&script(), "fleet_normalize_boxes strih");
-    assert_eq!(rc, 2, "a `strih` request must be a usage error: out={out:?}");
+    assert_eq!(
+        rc, 2,
+        "a `strih` request must be a usage error: out={out:?}"
+    );
     assert!(
         err.contains("RETIRED") && err.contains("strih-lx"),
         "the refusal must name the retirement + the replacement strih-lx: {err:?}"
     );
     for f in ["fleet_box_mcp", "fleet_box_ip"] {
         let (rc, out, _e) = run_sourced_status(&script(), &format!("{f} strih"));
-        assert_eq!(rc, 2, "{f} strih must fail closed (no Windows strih row): {out:?}");
+        assert_eq!(
+            rc, 2,
+            "{f} strih must fail closed (no Windows strih row): {out:?}"
+        );
         assert!(out.trim().is_empty(), "{f} strih prints nothing: {out:?}");
     }
     assert_eq!(
@@ -1362,7 +1380,10 @@ fn retired_windows_strih_is_refused_everywhere_1317() {
         "--boxes",
         "strih",
     ]);
-    assert_eq!(code, 2, "--boxes strih must exit 2.\nstdout={out}\nstderr={err}");
+    assert_eq!(
+        code, 2,
+        "--boxes strih must exit 2.\nstdout={out}\nstderr={err}"
+    );
     assert!(!out.contains("win-strih"), "no Windows strih plan: {out}");
 }
 
@@ -1381,7 +1402,10 @@ fn default_plan_is_strih_lx_and_stream_never_a_windows_strih_1317() {
         "--stage",
         tmp.path().to_str().unwrap(),
     ]);
-    assert_eq!(code, 0, "default --plan must succeed.\nstdout={out}\nstderr={err}");
+    assert_eq!(
+        code, 0,
+        "default --plan must succeed.\nstdout={out}\nstderr={err}"
+    );
     assert!(
         out.contains("boxes=strih-lx,stream"),
         "the default box set is strih-lx,stream:\n{out}"
@@ -1425,7 +1449,10 @@ fn strih_lx_plan_is_the_setup_strih_recipe_not_the_imag_program_1317() {
         "--boxes",
         "strih-lx",
     ]);
-    assert_eq!(code, 0, "--plan strih-lx must succeed.\nstdout={out}\nstderr={err}");
+    assert_eq!(
+        code, 0,
+        "--plan strih-lx must succeed.\nstdout={out}\nstderr={err}"
+    );
     for want in [
         "obs-backup-retention.sh --box strih-lx",
         "obs-genlock-linux-x86_64-strih",
@@ -1437,7 +1464,10 @@ fn strih_lx_plan_is_the_setup_strih_recipe_not_the_imag_program_1317() {
         "verify-strih.sh",
         "PREFLIGHT (report-only, #1303 part 4)",
     ] {
-        assert!(out.contains(want), "the strih-lx plan must carry `{want}`:\n{out}");
+        assert!(
+            out.contains(want),
+            "the strih-lx plan must carry `{want}`:\n{out}"
+        );
     }
     assert!(
         !out.contains("imag-obs.service") && !out.contains("box=imag"),
@@ -1456,14 +1486,7 @@ fn strih_lx_plan_is_the_setup_strih_recipe_not_the_imag_program_1317() {
     // STRIH_LX_IP stays the explicit dial override.
     let o = Command::new(script())
         .args([
-            "--plan",
-            "--run-id",
-            "R1",
-            "--sha",
-            "deadbeef",
-            "--stage",
-            "/stage",
-            "--boxes",
+            "--plan", "--run-id", "R1", "--sha", "deadbeef", "--stage", "/stage", "--boxes",
             "strih-lx",
         ])
         .env("STRIH_LX_IP", "10.9.9.9")
@@ -1494,13 +1517,19 @@ fn per_box_table_lives_in_the_shared_lib_1317() {
         "fleet_box_keepalive_tasks()",
     ] {
         assert!(lib.contains(f), "the shared lib defines {f}");
-        assert!(!deploy.contains(f), "deploy-genlock-fleet.sh must not redefine {f} inline");
+        assert!(
+            !deploy.contains(f),
+            "deploy-genlock-fleet.sh must not redefine {f} inline"
+        );
     }
     assert!(
         deploy.contains(". \"$HERE/lib/genlock-fleet-boxes.sh\""),
         "deploy-genlock-fleet.sh sources the shared per-box lib"
     );
-    for other in ["scripts/launch-obs-genlock.sh", "scripts/obs-self-heal-install.sh"] {
+    for other in [
+        "scripts/launch-obs-genlock.sh",
+        "scripts/obs-self-heal-install.sh",
+    ] {
         let src = std::fs::read_to_string(manifest_dir().join(other)).unwrap();
         assert!(
             src.contains(". \"$HERE/lib/genlock-fleet-boxes.sh\""),

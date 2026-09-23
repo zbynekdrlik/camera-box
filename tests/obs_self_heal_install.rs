@@ -838,7 +838,10 @@ fn main_cli_explicit_override_flows_through_the_real_invocation() {
 #[test]
 fn retired_windows_strih_and_linux_strih_lx_are_refused_1317() {
     let (code, out, err) = run_script(&["--box", "strih"]);
-    assert_eq!(code, 2, "--box strih must exit 2. stdout={out} stderr={err}");
+    assert_eq!(
+        code, 2,
+        "--box strih must exit 2. stdout={out} stderr={err}"
+    );
     assert!(
         err.contains("RETIRED") && err.contains("strih-obs.service"),
         "the refusal names the retirement + the strih-lx user unit: {err}"

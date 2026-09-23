@@ -533,14 +533,20 @@ fn trailing_flag_without_value_is_usage_error_exit_2() {
 #[test]
 fn retired_windows_strih_and_linux_strih_lx_are_refused_1317() {
     let (code, out, err) = run_script(&["--box", "strih"]);
-    assert_eq!(code, 2, "--box strih must exit 2. stdout={out} stderr={err}");
+    assert_eq!(
+        code, 2,
+        "--box strih must exit 2. stdout={out} stderr={err}"
+    );
     assert!(
         err.contains("RETIRED") && err.contains("strih-obs.service"),
         "the refusal names the retirement + the strih-lx user unit: {err}"
     );
     assert!(!out.contains("win-strih"), "no Windows strih plan: {out}");
     let (code, out, err) = run_script(&["--box", "strih-lx"]);
-    assert_eq!(code, 2, "--box strih-lx (Linux) must exit 2. stdout={out} stderr={err}");
+    assert_eq!(
+        code, 2,
+        "--box strih-lx (Linux) must exit 2. stdout={out} stderr={err}"
+    );
     assert!(
         !out.contains("$ErrorActionPreference"),
         "no Windows program for the Linux strih-lx: {out}"
