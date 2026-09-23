@@ -52,6 +52,9 @@ static void asrc_regression_flush(struct asrc_compensator *c)
 	 * the smoothed level error re-seeds from the first post-relock window. */
 	c->level_err_ema_ms = 0.0;
 	c->level_err_ema_seeded = false;
+	/* camera-box #1355: a flush re-captures the (absolute) setpoint, so the unreachable-walk count
+	 * restarts with it. level_offset_ms is caller state and survives. */
+	c->level_unconverged_windows = 0;
 }
 
 void asrc_compensator_init(struct asrc_compensator *c)
@@ -73,6 +76,11 @@ void asrc_compensator_init(struct asrc_compensator *c)
 	c->level_err_windows = 0; /* camera-box #1335 follow-up 4 */
 	c->level_err_ema_ms = 0.0; /* camera-box #1335 follow-up 5 */
 	c->level_err_ema_seeded = false; /* camera-box #1335 follow-up 5 */
+	c->level_offset_ms = 0.0; /* camera-box #1355 */
+	c->level_unconverged_windows = 0; /* camera-box #1355 */
+	c->level_fallback_count = 0; /* camera-box #1355 */
+	c->level_fallback_from_ms = 0.0; /* camera-box #1355 */
+	c->level_fallback_pending = false; /* camera-box #1355 */
 	asrc_regression_flush(c); /* camera-box #1084/#1335: empty buffer, 0 cumulatives, 0 integral, unlocked */
 }
 
@@ -239,9 +247,12 @@ double asrc_compensator_compensate(struct asrc_compensator *c, double raw_advanc
 				c->level_last_ms = buffered_ms;
 				if (c->reg_locked) {
 					if (!c->level_captured) {
-						/* setpoint = the buffer depth the mixer had settled at when the rate loop
-						 * first locked; re-captured after every flush/relock. */
-						c->level_target_ms = buffered_ms;
+						/* camera-box #1355: setpoint = the ABSOLUTE target plus the deliberate
+						 * placement offset the buffered samples carry -- NOT whatever depth the mixer
+						 * happened to have at lock (that froze a random per-launch A/V level).
+						 * Re-captured (to the same absolute value) after every flush/relock; the P term
+						 * plus the restore burst the sustained-error arm fires walk the buffer there. */
+						c->level_target_ms = ASRC_LEVEL_TARGET_MS + c->level_offset_ms;
 						c->level_captured = true;
 					}
 					/* camera-box #1335 follow-up 5: SMOOTH the per-window level error with an EMA (tau
@@ -297,6 +308,28 @@ double asrc_compensator_compensate(struct asrc_compensator *c, double raw_advanc
 						} else {
 							c->level_err_windows = 0;
 						}
+					}
+					/* camera-box #1355: BOUND an unreachable setpoint. With an absolute target a mixer
+					 * that cannot reach it (a buffer pinned by OBS's own buffering, a source whose
+					 * placement does not follow the stretch) would keep the restore burst and the P
+					 * term pushing forever. Count consecutive accepted windows whose SMOOTHED error
+					 * stays outside the restore's exit band; at the bound FALL BACK to the live depth
+					 * (the pre-#1355 capture for this lock): stop the restore, zero the P error, count
+					 * it and raise the one-shot flag obs-source.c logs LOUDLY. Mirror of
+					 * src/asrc_bench.rs compensate_with_level. */
+					if (fabs(c->level_err_ema_ms) >= ASRC_LEVEL_RESTORE_ARM_MS) {
+						if (++c->level_unconverged_windows >= ASRC_LEVEL_TARGET_UNREACHABLE_WINDOWS) {
+							c->level_fallback_from_ms = c->level_target_ms;
+							c->level_target_ms = buffered_ms;
+							c->level_restore = false;
+							c->level_err_windows = 0;
+							c->level_err_ema_ms = 0.0;
+							c->level_unconverged_windows = 0;
+							c->level_fallback_count++;
+							c->level_fallback_pending = true;
+						}
+					} else {
+						c->level_unconverged_windows = 0;
 					}
 				}
 			}
@@ -434,4 +467,14 @@ void asrc_compensator_shift_level_target(struct asrc_compensator *c, double delt
 		if (fabs(delta_ms) >= ASRC_LEVEL_RESTORE_ARM_MS)
 			c->level_restore = true;
 	}
+}
+
+/* camera-box #1355: store the source's deliberate placement offset (ms) the buffered samples
+ * already carry; it only decides the NEXT capture (level_target_ms = ASRC_LEVEL_TARGET_MS +
+ * level_offset_ms). A captured setpoint follows a later deliberate change through
+ * asrc_compensator_shift_level_target(), never through this store. Mirror of src/asrc_bench.rs
+ * RealtimeAsrcCompensator::set_level_offset_ms -- keep identical. */
+void asrc_compensator_set_level_offset_ms(struct asrc_compensator *c, double offset_ms)
+{
+	c->level_offset_ms = offset_ms;
 }

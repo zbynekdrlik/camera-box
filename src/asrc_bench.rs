@@ -1010,9 +1010,7 @@ impl RealtimeAsrcCompensator {
                             // to have at lock (that froze a random per-launch A/V level). Re-captured
                             // (to the same absolute value) after every flush/relock; the P term plus the
                             // restore burst the sustained-error arm fires walk the buffer there.
-                            // issue #1355 [red]: still the pre-#1355 capture (the depth at lock).
-                            let _ = (self.level_offset_ms, self.level_unconverged_windows);
-                            self.level_target_ms = buf_ms;
+                            self.level_target_ms = LEVEL_TARGET_MS + self.level_offset_ms;
                             self.level_captured = true;
                         }
                         // issue #1335 follow-up 5: SMOOTH the per-window level error with an EMA (time
@@ -1070,7 +1068,29 @@ impl RealtimeAsrcCompensator {
                                 self.level_err_windows = 0;
                             }
                         }
-                        // issue #1355 [red]: no unreachable bound yet.
+                        // issue #1355: BOUND an unreachable setpoint. With an absolute target a mixer
+                        // that cannot reach it (a buffer pinned by OBS's own buffering, a source whose
+                        // placement does not follow the stretch) would keep the restore burst and the
+                        // P term pushing forever. Count consecutive accepted windows whose SMOOTHED
+                        // error stays outside the restore's exit band; at the bound FALL BACK to the
+                        // live depth (the pre-#1355 capture for this lock): stop the restore, zero the
+                        // P error, count it and raise the one-shot flag the C caller logs LOUDLY.
+                        if self.level_err_ema_ms.abs() >= LEVEL_RESTORE_ARM_MS {
+                            self.level_unconverged_windows += 1;
+                            if self.level_unconverged_windows >= LEVEL_TARGET_UNREACHABLE_WINDOWS {
+                                self.level_fallback_from_ms = self.level_target_ms;
+                                self.level_target_ms = buf_ms;
+                                self.level_restore = false;
+                                self.level_err_windows = 0;
+                                self.level_err_ema_ms = 0.0;
+                                self.level_unconverged_windows = 0;
+                                self.level_fallback_count =
+                                    self.level_fallback_count.saturating_add(1);
+                                self.level_fallback_pending = true;
+                            }
+                        } else {
+                            self.level_unconverged_windows = 0;
+                        }
                     }
                 }
             }
