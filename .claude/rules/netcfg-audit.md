@@ -132,6 +132,13 @@ CAM4 10/10). Smaller bursts (≤~650 pkts) cost no frames. The cure is uplink ca
 into a 10 G port), not a receiver/FIFO parameter. The strih-lx host itself drops nothing
 (UDP `RcvbufErrors`=0, softnet drops 0).
 
+**Sender-side mitigation (the chosen fix, issue 1242):** each cambox now hands its frame to the NDI
+SDK `(N-1) × 1.2 ms` after its emit gate, so the seven trains no longer arrive together. The emit
+grid and the timecode are unchanged. The mechanism, arithmetic and live acceptance are in
+`.claude/rules/ndi-send-stagger.md`. This dq1 sampler is the acceptance instrument: compare the 30-min
+delta against the 31 bursts / 9.3 min baseline above. A faster uplink stays the fallback if the
+stagger is not enough.
+
 Discriminator recipe for the next "late-arrival burst on strih" question:
 1. One recv-timing shortfall on ≥2 inputs in the SAME 5-s interval, with no sender-side emit deficit
    (burn log `Streaming:` 300 sent) = transport. One input only, with low cap_max = that sender

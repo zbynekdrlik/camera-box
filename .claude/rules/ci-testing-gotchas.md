@@ -1265,3 +1265,14 @@ Put the loop in a script FILE and `bash` it (the worktree guard refuses `$VAR`-c
 direct rustc call). A file needing another crate (serde, the camera_box lib) fails to compile this
 way and stays CI-only. This catches borrow/type errors (an E0716 was caught this way) and failing
 asserts before CI; it does NOT run clippy, so the test-lint hand sweep is still needed.
+
+## `clippy-driver` gives CI's `clippy -D warnings` verdict locally with NO cargo (issue 1242)
+
+Tier-0 bans every compiling cargo shape, so clippy used to be "CI-only". It is not: `clippy-driver`
+is a rustc wrapper, and `clippy-driver --edition 2021 --test -D warnings <copy.rs> -o <out>` (or
+`--crate-type lib`) lints a std-only file with the default clippy lint set. That covers a copy of a
+pure crate-root module, a std-only `tests/*.rs` harness (set `CARGO_MANIFEST_DIR=<worktree>` so
+`env!` resolves; put the call in a script FILE in a worktree), or a small two-module replica of a
+cross-module `const _: () = assert!(...)`. It caught a `double_comparisons` error
+(`a <= b && a >= b` -> write `a == b`) in a lib.rs const pin that plain `rustc -D warnings` passed.
+Files that need the camera_box crate or serde stay CI-only.
