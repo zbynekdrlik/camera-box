@@ -679,6 +679,9 @@ fn stamp_dup_and_gap_are_tracked_on_arrival_and_printed_1355() {
         1,
         "{OBS_SOURCE}: #1355 — the arrival-side stamp tracking call must exist exactly once."
     );
+    // At the producer push site: after the received count and the #99 producer-side peak update
+    // (kept right after the count — tests/genlock_preload.rs pins that distance), before the
+    // push path releases async_mutex. That is ARRIVAL order, under the same lock.
     let received = src
         .find("source->genlock_frames_received++;")
         .expect("the producer push site (genlock_frames_received++) is gone");
@@ -686,11 +689,16 @@ fn stamp_dup_and_gap_are_tracked_on_arrival_and_printed_1355() {
         .find("source->genlock_peak_depth = depth;")
         .map(|i| received + i)
         .expect("the producer-side peak update is gone");
+    let unlock = src[peak..]
+        .find("pthread_mutex_unlock(&source->async_mutex);")
+        .map(|i| peak + i)
+        .expect("the push path's async_mutex unlock is gone");
     let at = src.find(call).expect("checked above");
     assert!(
-        received < at && at < peak,
+        peak < at && at < unlock,
         "{OBS_SOURCE}: #1355 — the stamp tracking must run at the producer push site (after \
-         genlock_frames_received++, inside the genlock_fifo block), i.e. in ARRIVAL order."
+         genlock_frames_received++ and the peak update, before async_mutex is released), i.e. \
+         in ARRIVAL order under the lock."
     );
     assert!(
         src.contains("\"stamp_dup=%llu stamp_gap=%llu \""),
