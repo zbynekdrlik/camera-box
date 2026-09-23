@@ -387,3 +387,71 @@ fn nc_ssh_is_stdin_safe_for_while_read_loops() {
         "_nc_ssh's ssh call must carry -n (stdin-safe inside while-read loops); body:\n{body}"
     );
 }
+
+// ------------------------------------------------------------------------------------------------
+// issue 1242 — the designated strih-uplink drop-sampler moved with the M4 cut-over (20.9.2026).
+// strih is now the Linux notebook strih-lx on a USB 2.5 GbE adapter plugged into foh1_video_switch
+// `ether2`; the old Windows strih's 10 G DAC port (`foh2_video sfp-sfpplus2`) has NO link any more,
+// so the #1110 designated probe kept printing "probe clean -- strih uplink" for a dead port while the
+// REAL strih egress (`foh1_video ether2`) was tail-dropping millions of packets. Two guards:
+// the default designation names the real uplink, and a designated port with no link reports
+// `designated-down` (the designation is stale) instead of a false "probe clean".
+// ------------------------------------------------------------------------------------------------
+
+#[test]
+fn designated_default_is_the_strih_lx_uplink_1242() {
+    let orch = std::fs::read_to_string(manifest_dir().join("scripts/netcfg-audit.sh")).unwrap();
+    assert!(
+        orch.contains(r#"NETCFG_DROP_PROBE_PORTS="${NETCFG_DROP_PROBE_PORTS:-foh1_video|ether2}""#),
+        "the designated drop-sampler default must name strih-lx's uplink foh1_video|ether2"
+    );
+    assert!(
+        !orch.contains(
+            r#"NETCFG_DROP_PROBE_PORTS="${NETCFG_DROP_PROBE_PORTS:-foh2_video|sfp-sfpplus2}""#
+        ),
+        "the retired Windows-strih DAC port must no longer be the designated default"
+    );
+}
+
+#[test]
+fn designated_port_linked_truth_table_1242() {
+    // RouterOS `[/interface ethernet get $i running]` prints `true` / `false`.
+    assert_eq!(
+        rc_line("netcfg_designated_port_linked true; echo RC=$?"),
+        "RC=0"
+    );
+    assert_eq!(
+        rc_line("netcfg_designated_port_linked false; echo RC=$?"),
+        "RC=1"
+    );
+    // an unreadable / absent running field is NOT linked (never a false "probe clean")
+    assert_eq!(
+        rc_line("netcfg_designated_port_linked ''; echo RC=$?"),
+        "RC=1"
+    );
+    assert_eq!(
+        rc_line("netcfg_designated_port_linked yes; echo RC=$?"),
+        "RC=1"
+    );
+}
+
+#[test]
+fn designated_probe_reports_a_down_port_instead_of_probing_it_1242() {
+    let orch = std::fs::read_to_string(manifest_dir().join("scripts/netcfg-audit.sh")).unwrap();
+    let branch = orch
+        .split("netcfg_port_is_designated \"$node\" \"$port\" \"$NETCFG_DROP_PROBE_PORTS\" && designated=1")
+        .nth(1)
+        .expect("designated-probe branch present in scripts/netcfg-audit.sh")
+        .split("dv=\"$(_nc_drop_rate_verdict")
+        .next()
+        .expect("the live rate probe follows the designated branch")
+        .to_string();
+    assert!(
+        branch.contains("netcfg_designated_port_linked"),
+        "a designated port must be link-checked BEFORE the live rate probe; branch:\n{branch}"
+    );
+    assert!(
+        branch.contains("[report-only designated-down]"),
+        "a designated port with no link must surface a report-only designated-down line; branch:\n{branch}"
+    );
+}
