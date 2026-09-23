@@ -136,6 +136,99 @@ fn the_baseline_never_grants_rtprio() {
     }
 }
 
+/// setup-imag.sh's missing-tool tests source it with an EMPTY PATH, so every lib must locate its
+/// sibling by pure parameter expansion -- a `dirname`/`cd` subshell dies there (review finding).
+#[test]
+fn the_libs_source_with_an_empty_path() {
+    for lib in [VERIFY_LIB, BASELINE, KIOSK, SETUP_IMAG] {
+        let out = Command::new("/usr/bin/bash")
+            .arg("-c")
+            .arg("PATH=; . \"$LIB\" && type -t obs_box_openbox_menu_xml")
+            .env("LIB", manifest_dir().join(lib))
+            .output()
+            .expect("run bash");
+        assert!(
+            out.status.success(),
+            "{lib} must source with PATH empty: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "function\n", "{lib}");
+    }
+    for lib in [VERIFY_LIB, BASELINE, SETUP_IMAG] {
+        let text = read(lib);
+        let code: Vec<&str> = text
+            .lines()
+            .filter(|l| !l.trim_start().starts_with('#'))
+            .filter(|l| l.contains("obs-box-") && l.contains("dirname"))
+            .collect();
+        assert!(
+            code.is_empty(),
+            "{lib}: no dirname in a lib source line: {code:?}"
+        );
+    }
+}
+
+/// The de-jitter's per-user helper is a FILE-level function (a nested definition leaks globally in
+/// bash anyway) and it reads the desktop user's uid itself.
+#[test]
+fn u_systemctl_is_file_level_and_resolves_its_own_uid() {
+    assert!(
+        !baseline_fn("obs_box_dejitter").contains("u_systemctl() {"),
+        "no nested function inside obs_box_dejitter"
+    );
+    let helper = baseline_fn("u_systemctl");
+    assert!(
+        helper.contains("uid=\"$(id -u \"$DESKTOP_USER\")\"")
+            && helper.contains("DBUS_SESSION_BUS_ADDRESS=\"unix:path=/run/user/${uid}/bus\""),
+        "u_systemctl resolves the uid + bus itself:\n{helper}"
+    );
+    let kiosk = baseline_fn("obs_box_kiosk");
+    let local = kiosk
+        .find("local GNOME_PURGE_PKGS GNOME_TO_PURGE p svc")
+        .expect("the kiosk declares its locals");
+    let first_loop = kiosk.find("for svc in ").expect("the service loop");
+    assert!(
+        local < first_loop,
+        "the locals are declared before the first loop that uses them"
+    );
+}
+
+/// The lowlatency item prints the release it ran on, never the 24.04-era "6.17" kernel line.
+#[test]
+fn the_lowlatency_item_is_release_neutral() {
+    let body = baseline_fn("obs_box_lowlatency_kernel");
+    let echo = body
+        .lines()
+        .find(|l| l.contains("lowlatency-kernel config installed"))
+        .expect("the install echo");
+    assert!(
+        echo.contains("${SERIES}") && !echo.contains("6.17"),
+        "release-neutral message: {echo}"
+    );
+    let lib = read(BASELINE);
+    let def = lib.find("\nobs_box_lowlatency_kernel() {").unwrap();
+    let doc = &lib[lib[..def].rfind("\n\n").unwrap()..def];
+    assert!(
+        doc.contains("NVIDIA DKMS module") && doc.contains("NEWER kernel"),
+        "the item's doc comment names the newer-series image + DKMS rebuild:\n{doc}"
+    );
+}
+
+/// The power envelope's thermal step-down wattage is a per-box argument (strih-lx must never fall to
+/// imag's 25 W iGPU clamp), defaulting to the caller's env / imag's 25 W.
+#[test]
+fn the_power_envelope_takes_a_per_box_stepdown() {
+    let body = baseline_fn("obs_box_power_envelope");
+    assert!(
+        body.contains("local IMAG_PL1_STEPDOWN_W=\"${3:-${IMAG_PL1_STEPDOWN_W:-25}}\""),
+        "the optional third argument sets the step-down:\n{body}"
+    );
+    assert!(
+        body.contains("Environment=IMAG_PL1_STEPDOWN_W=${IMAG_PL1_STEPDOWN_W:-25}"),
+        "the guard unit bakes the step-down in"
+    );
+}
+
 // ------------------------------------------------------------------------------------------------
 // equivalence anchors: setup-imag.sh runs every item, in the step that used to hold its body,
 // with the imag box facts (so it writes what it always wrote)
@@ -178,7 +271,7 @@ fn setup_imag_runs_every_baseline_item_in_its_original_step() {
 fn setup_imag_sources_the_baseline_and_delegates_its_helpers() {
     let s = read(SETUP_IMAG);
     let source = s
-        .find(". \"$(cd \"$(dirname \"${BASH_SOURCE[0]}\")\" && pwd)/lib/obs-box-baseline.sh\"")
+        .find(". \"${_OBS_BOX_HERE}/lib/obs-box-baseline.sh\"")
         .expect("setup-imag.sh must source the shared baseline");
     let guard = s
         .find("if [ \"${BASH_SOURCE[0]}\" != \"${0}\" ]; then")
@@ -316,6 +409,54 @@ fn crash_popup_units_cover_apport_whoopsie_and_the_coredump_hook_template() {
     );
 }
 
+/// The --user units the verify grades are exactly the ones the de-jitter masks.
+#[test]
+fn dejitter_user_units_are_the_units_the_dejitter_masks() {
+    let (c, out, _e) = run(KIOSK, &[], "obs_box_dejitter_user_units");
+    assert_eq!(c, 0);
+    let units: Vec<&str> = out.lines().filter(|l| !l.is_empty()).collect();
+    assert_eq!(units.len(), 9, "{units:?}");
+    let body = baseline_fn("obs_box_dejitter");
+    let mask_text: String = body
+        .split("u_systemctl mask ")
+        .skip(1)
+        .map(|s| s.split("\n\n").next().unwrap_or_default())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let mut masked: Vec<&str> = mask_text
+        .split_whitespace()
+        .filter(|w| w.ends_with(".service"))
+        .collect();
+    masked.sort_unstable();
+    let mut listed = units;
+    listed.sort_unstable();
+    assert_eq!(
+        listed, masked,
+        "the list must equal the de-jitter mask lines"
+    );
+}
+
+#[test]
+fn holds_generic_kernel_needs_a_generic_kernel_package() {
+    for (holds, want) in [
+        ("linux-generic-hwe-26.04 lowlatency-kernel", true),
+        ("linux-image-7.0.0-31-generic", true),
+        ("linux-headers-6.17.0-19-generic obs-studio", true),
+        (
+            "lowlatency-kernel linux-lowlatency-hwe-26.04 obs-studio",
+            false,
+        ),
+        ("", false),
+    ] {
+        let (c, _o, _e) = run(
+            VERIFY_LIB,
+            &[("H", holds)],
+            "obs_box_holds_generic_kernel \"$H\"",
+        );
+        assert_eq!(c == 0, want, "holds `{holds}` must be {want}");
+    }
+}
+
 #[test]
 fn crash_popup_member_ok_grades_templates_by_is_enabled_and_units_by_both_states() {
     let hook = "apport-coredump-hook@.service";
@@ -451,6 +592,7 @@ const GOOD_FACTS: &str = "sysctl_conf=1
 rmem_max=134217728
 nic_hook=1
 cpu_perf_unit=enabled
+rc_local_eee=1
 governors=performance
 maxperf_active=active
 maxperf_udev=1
@@ -459,17 +601,23 @@ logind_nosleep=1
 logind_powerkey=1
 kernel_lockdown=1
 initrd_hook=1
+holds=linux-generic-hwe-26.04 linux-image-generic-hwe-26.04 lowlatency-kernel linux-lowlatency-hwe-26.04
 cmdline=BOOT_IMAGE=/vmlinuz ro quiet splash preempt=full rcu_nocbs=all
 lowlatency_cfg=1
 isolated_cpus=2,3,4,5,6,7,8,9,10,11
 dgpu=1
 prime=nvidia
+igpu_unit=
 oomd=masked
 offhours=1
+process_priority=1
+user_masked=9/9
 crash_unit=apport.service|masked|inactive
 crash_unit=apport-coredump-hook@.service|masked|inactive
 crash_unit=whoopsie.service|not-found|inactive
 coredump=install ok installed
+lightdm=install ok installed
+openbox=install ok installed
 dm=/usr/lib/systemd/system/lightdm.service
 dm_lightdm=/usr/lib/systemd/system/lightdm.service
 autologin=1
@@ -548,8 +696,15 @@ fn verdict_fails_each_item_on_its_own_broken_fact() {
             "governors=performance powersave",
         ),
         ("perf", "maxperf_active=active", "maxperf_active=inactive"),
+        ("perf", "rc_local_eee=1", "rc_local_eee=0"),
         ("nosleep", "sleep_target=masked", "sleep_target=static"),
         ("boot", "initrd_hook=1", "initrd_hook=0"),
+        (
+            "boot",
+            "holds=linux-generic-hwe-26.04 linux-image-generic-hwe-26.04 ",
+            "holds=",
+        ),
+        ("kernel", " lowlatency-kernel ", " "),
         ("kernel", "preempt=full rcu", "preempt=full_debug rcu"),
         (
             "affinity",
@@ -563,6 +718,9 @@ fn verdict_fails_each_item_on_its_own_broken_fact() {
         ),
         ("gpu", "prime=nvidia", "prime=on-demand"),
         ("dejitter", "oomd=masked", "oomd=enabled"),
+        ("dejitter", "process_priority=1", "process_priority=0"),
+        ("dejitter", "user_masked=9/9", "user_masked=7/9"),
+        ("dejitter", "user_masked=9/9", "user_masked=0/0"),
         (
             "crash",
             "crash_unit=apport-coredump-hook@.service|masked|inactive",
@@ -575,6 +733,12 @@ fn verdict_fails_each_item_on_its_own_broken_fact() {
             "dm=/usr/lib/systemd/system/gdm3.service",
         ),
         ("kiosk", "gnome_shell=", "gnome_shell=install ok installed"),
+        ("kiosk", "lightdm=install ok installed", "lightdm="),
+        (
+            "kiosk",
+            "openbox=install ok installed",
+            "openbox=deinstall ok config-files",
+        ),
         ("autostart", "autostart_unit=1", "autostart_unit=0"),
         ("power", "thermald=", "thermald=install ok installed"),
         ("touchpad", "touchpad=1", "touchpad=0"),
@@ -590,12 +754,23 @@ fn verdict_fails_each_item_on_its_own_broken_fact() {
 }
 
 #[test]
-fn verdict_treats_an_igpu_only_box_as_nothing_to_select() {
+fn verdict_grades_an_igpu_only_box_by_its_max_frequency_pin() {
     let facts = GOOD_FACTS
         .replacen("dgpu=1", "dgpu=0", 1)
-        .replacen("prime=nvidia", "prime=", 1);
+        .replacen("prime=nvidia", "prime=", 1)
+        .replacen("igpu_unit=\n", "igpu_unit=enabled\n", 1);
     let (c, rows) = verdict(&facts);
     assert_eq!(c, 0, "{rows:?}");
+    let unpinned = facts.replacen("igpu_unit=enabled\n", "igpu_unit=disabled\n", 1);
+    let (c, rows) = verdict(&unpinned);
+    assert_eq!(
+        c, 1,
+        "an iGPU box without its frequency pin fails: {rows:?}"
+    );
+    for (name, st) in &rows {
+        let want = if name == "gpu" { "FAIL" } else { "OK" };
+        assert_eq!(st, want, "item {name} must be {want}: {rows:?}");
+    }
 }
 
 /// A gather that never completed (ssh died, snippet aborted) FAILs every item -- never a pass.

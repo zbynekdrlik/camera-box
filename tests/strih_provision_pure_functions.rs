@@ -3609,16 +3609,46 @@ fn rig_nic_prefers_the_override_then_the_one_r8152_then_the_static_ip() {
     );
 }
 
+/// PL1 is never pinned BELOW what the firmware already runs (the issue-1357 review read 80 W live on
+/// strih-lx; pinning the 55 W spec base under it would starve the cutter): max(55, firmware), with
+/// STRIH_LX_PL1_W winning outright.
 #[test]
-fn pl1_watts_is_the_strih_cpu_base_power_with_an_env_override() {
+fn pl1_watts_never_undercuts_the_firmware_pl1() {
+    for (fw, want) in [
+        ("", "55"),
+        ("80000000", "80"),
+        ("080000000", "80"),
+        ("45000000", "55"),
+        ("55000000", "55"),
+        ("garbage", "55"),
+    ] {
+        let (c, out, err) = run_sourced(&[("FW", fw)], "strih_lx_pl1_watts \"$FW\"");
+        assert_eq!(
+            (c, out.as_str()),
+            (0, want),
+            "firmware `{fw}`: stderr={err}"
+        );
+    }
     let (c, out, _e) = run_sourced(&[], "strih_lx_pl1_watts");
     assert_eq!(
         (c, out.as_str()),
         (0, "55"),
-        "i5-13450HX Processor Base Power, not imag's 45 W"
+        "no firmware read = the spec base"
     );
-    let (c, out, _e) = run_sourced(&[("STRIH_LX_PL1_W", "40")], "strih_lx_pl1_watts");
-    assert_eq!((c, out.as_str()), (0, "40"));
+    let (c, out, _e) = run_sourced(&[("STRIH_LX_PL1_W", "40")], "strih_lx_pl1_watts 80000000");
+    assert_eq!((c, out.as_str()), (0, "40"), "the override wins");
+}
+
+/// The guard's thermal step-down is strih's own value, never imag's 25 W iGPU clamp.
+#[test]
+fn pl1_stepdown_watts_is_strih_specific_with_an_override() {
+    let (c, out, _e) = run_sourced(&[], "strih_lx_pl1_stepdown_watts");
+    assert_eq!((c, out.as_str()), (0, "45"));
+    let (c, out, _e) = run_sourced(
+        &[("STRIH_LX_PL1_STEPDOWN_W", "50")],
+        "strih_lx_pl1_stepdown_watts",
+    );
+    assert_eq!((c, out.as_str()), (0, "50"));
 }
 
 /// The kiosk openbox autostart: the shared preamble lines VERBATIM (the baseline verify greps them),
@@ -3660,6 +3690,27 @@ fn openbox_autostart_text_carries_the_preamble_units_and_satellite() {
         !out.contains("WAYLAND") && !out.contains("__NV_PRIME"),
         "no Wayland / PRIME-offload leftovers in the kiosk autostart"
     );
+    for (pinned, fallback) in [
+        (
+            "xrandr --output \"$PANEL\" --primary --mode 1920x1080 --rate 60",
+            "xrandr --output \"$PANEL\" --primary --auto",
+        ),
+        (
+            "xrandr --output \"$PROJ\" --mode 1920x1080 --rate 60 --right-of \"$PANEL\"",
+            "xrandr --output \"$PROJ\" --auto --right-of \"$PANEL\"",
+        ),
+    ] {
+        let p = out
+            .find(pinned)
+            .unwrap_or_else(|| panic!("the autostart pins `{pinned}`:\n{out}"));
+        let f = out
+            .find(fallback)
+            .unwrap_or_else(|| panic!("--auto stays the fallback `{fallback}`"));
+        assert!(
+            p < f,
+            "the pinned mode is tried first, --auto only after it fails"
+        );
+    }
 }
 
 /// setup-strih.sh sources the shared baseline and runs EVERY baseline item in step 11, in imag's
@@ -3683,7 +3734,7 @@ fn setup_strih_step_11_runs_the_shared_baseline_in_imag_order() {
         "obs_box_nvidia_prime strih",
         "obs_box_dejitter \"$DESKTOP_USER\" strih \"$OBS_CFG\"",
         "obs_box_kiosk \"$DESKTOP_USER\" strih",
-        "obs_box_power_envelope \"$(strih_lx_pl1_watts)\" strih_fetch_repo_file",
+        "obs_box_power_envelope \"$STRIH_PL1_W\" strih_fetch_repo_file \"$STRIH_PL1_STEPDOWN_W\"",
         "obs_box_touchpad strih",
         "obs_box_maxperf_persistence strih",
     ];
@@ -3719,6 +3770,35 @@ fn setup_strih_step_11_runs_the_shared_baseline_in_imag_order() {
     assert!(
         !s.contains("step \"11c\""),
         "the retired rtprio + crash-popup sub-step 11c is gone (crash popups are a baseline item)"
+    );
+    // PL1 from the box's OWN firmware limit, read through the envelope's identity-based gather
+    let fw_read = step11
+        .find("STRIH_FW_PL1_UW=\"$(imag_power_zone_select \"$(bash -c \"$(imag_power_envelope_gather_remote_snippet)\"")
+        .expect("step 11 reads the firmware package-0 long_term PL1");
+    let pl1 = step11
+        .find("STRIH_PL1_W=\"$(strih_lx_pl1_watts \"$STRIH_FW_PL1_UW\")\"")
+        .expect("step 11 derives PL1 from the firmware value");
+    let envelope = step11.find("obs_box_power_envelope ").unwrap();
+    assert!(
+        fw_read < pl1 && pl1 < envelope,
+        "read firmware -> derive PL1 -> pin it"
+    );
+    assert!(
+        s.contains(". \"${HERE}/lib/imag-power-envelope.sh\""),
+        "step 11 sources the envelope lib for the firmware read"
+    );
+    assert!(
+        step11.contains("STRIH_PL1_STEPDOWN_W=\"$(strih_lx_pl1_stepdown_watts)\""),
+        "the step-down is strih's own"
+    );
+    // the retired strih logind drop-in is self-healed away (the baseline never-sleep owns the policy)
+    assert!(
+        step11.contains("rm -f /etc/systemd/logind.conf.d/90-strih-lx.conf"),
+        "setup-strih removes the retired 90-strih-lx.conf logind drop-in"
+    );
+    assert!(
+        !s.contains("cat > /etc/systemd/logind.conf.d/90-strih-lx.conf"),
+        "and never writes it again"
     );
 }
 

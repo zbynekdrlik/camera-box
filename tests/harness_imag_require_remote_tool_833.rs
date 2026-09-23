@@ -27,7 +27,18 @@ fn lib_script() -> PathBuf {
 
 fn read(rel: &str) -> String {
     let p = manifest_dir().join(rel);
-    fs::read_to_string(&p).unwrap_or_else(|e| panic!("read {}: {e}", p.display()))
+    let s = fs::read_to_string(&p).unwrap_or_else(|e| panic!("read {}: {e}", p.display()));
+    if rel == SETUP {
+        // issue 1357: setup-imag.sh's kiosk step (the openbox/lightdm/wmctrl install) moved VERBATIM
+        // into the shared OBS-box baseline libs it sources and calls, so the imag provisioning text
+        // is setup-imag.sh PLUS those libs.
+        return format!(
+            "{s}\n{}\n{}",
+            read("scripts/lib/obs-box-baseline.sh"),
+            read("scripts/lib/obs-box-kiosk.sh")
+        );
+    }
+    s
 }
 
 const RECORDING_E2E: &str = "scripts/recording-e2e.sh";

@@ -35,9 +35,9 @@ const KIOSK: &str = "scripts/lib/obs-box-kiosk.sh";
 /// issue 1357: the body of one shared baseline function (`NAME() {` .. its column-0 `}`), read from
 /// whichever baseline lib defines it -- for pins that must stay scoped to ONE baseline item.
 fn baseline_fn(name: &str) -> String {
-    // Each baseline function ends with a column-0 `}` followed by a blank line (a nested helper such
-    // as the de-jitter's u_systemctl closes with a `}` directly followed by code, so it never ends
-    // the slice early).
+    // Each baseline function ends with a column-0 `}` followed by a blank line (a nested helper would
+    // close with a `}` directly followed by code, so it could never end the slice early -- the
+    // de-jitter's u_systemctl is a file-level function since the issue-1357 review).
     let libs = format!("{}\n{}\n", read(BASELINE), read(KIOSK));
     let head = format!("\n{name}() {{\n");
     let start = libs
