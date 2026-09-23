@@ -3,6 +3,10 @@ paths:
   - "vendor/distroav/src/ndi-output.cpp"
   - "vendor/distroav/src/main-output.cpp"
   - "vendor/distroav/src/plugin-main.cpp"
+  - "vendor/distroav/src/ndi-filter.cpp"
+  - "vendor/distroav/src/ndi-sender-port.cpp"
+  - "vendor/distroav/src/ndi-sender-port.h"
+  - "tests/distroav_sender_port_linger_1363.rs"
 ---
 
 # DistroAV SENDER-output lifecycle + NDI port ordering (#1185)
@@ -87,9 +91,49 @@ listening on TCP :5961. The cause is in libndi, not in the reserve/adopt path:
   `getsockname`/`getpeername`) right before `send_destroy` closes them with RST → no TIME_WAIT → the
   next process gets :5961 again (measured: control 5962, linger 5961). A crash / kill still leaves a
   TIME_WAIT (kernel FIN-close).
-- Which of these ships (prevent-at-stop, bounded wait, detect-and-log) is a design decision on issue
-  1363 — read the newest `Design-question:` / `ROZHODNUTÉ` there before changing the reserve path.
-  Probe sources (`alloc.c`, `pinprobe.c`, `linger.c`) are described on the ticket.
+- Probe sources (`alloc.c`, `pinprobe.c`, `linger.c`) are described on the ticket.
+
+## SHIPPED (issue 1363, option C): Linux linger-0 before every sender destroy — `ndi-sender-port.{h,cpp}`
+
+- **Every** DistroAV sender create goes through `ndi_sender_create_tracked()` and **every** sender
+  `send_destroy` is preceded by `ndi_sender_abort_connections_before_destroy(port, name)` — the
+  program/preview `ndi_output` (stop, the begin_data_capture failure, the unadopted reservation)
+  AND the per-source `ndi_filter` (destroy + the destroy-then-recreate on rename). All of it sits in
+  `#ifdef __linux__` (the TU is added in CMake only on Linux), so Windows compiles byte-identical
+  code. A NEW sender create/destroy site must get the same pair, or
+  `tests/distroav_sender_port_linger_1363.rs` fails (it counts the real `send_create(`/
+  `send_destroy(` sites; a `+`/`-` prefix marks the DEBUG log strings it skips).
+- **libndi has no API for a sender's port**: `send_get_source_name(s)->p_url_address` is NULL for a
+  local sender (measured). The port is the ONE new TCP LISTENING socket in `/proc/self/fd` across the
+  `send_create` (`SO_ACCEPTCONN` + `getsockname`), creates serialized under one mutex (always the
+  innermost lock). The FIRST `send_create` of a process ALSO opens libndi's `:5960` messaging
+  listener — `ndi_new_listen_port` skips 5960, else the :5961 program reservation (the one that
+  matters) reads as ambiguous (measured live, the second RED→GREEN pair on the ticket). An
+  unidentified port logs `WARN-1363 … could not identify the TCP port` and that sender simply closes
+  normally.
+- The reserved instance carries its port into the output via `g_reserved_main_port` →
+  `ndi_output_take_reserved_sender` → `ndi_output_take_adopted_port()` (all under
+  `g_reserved_main_mutex`).
+- The :5961 reserve probes BEFORE its `send_create` (after it, the reserved sender itself holds the
+  port and the probe reads LIVE): plain bind `0.0.0.0:5961`, then `127.0.0.2:5961` →
+  FREE / TIME_WAIT / LIVE_LISTENER / UNKNOWN (`ndi_first_port_hold_state`). One loud
+  `WARN-1363 - ndi_output_reserve_main_sender: …` line when the pin is lost (landed elsewhere, or port
+  unknown while :5961 was held). It NEVER waits — a wait was rejected (it delays OBS start exactly in
+  the crash-recovery moment). A crash/kill still leaves the TIME_WAIT; that session's port map is then
+  shifted and the dev1 port-map watchdog pages.
+- Side effects are best-effort: every syscall failure is logged and skipped (shutdown must never
+  crash OBS). Known accepted race: libndi owns the fds, so an fd closed+reused between the scan and
+  `setsockopt` could close one unrelated socket with RST instead of FIN.
+- Tier-0 verify recipe (no OBS build): the gate test's Facet C compiles the REAL
+  `ndi-sender-port.cpp` with g++ against a stub `plugin-main.h` + a fake libndi (a real 0.0.0.0
+  listener) — control reproduces the TIME_WAIT, the abort frees the port. For the real libndi, compile
+  the same `.cpp` against a stub `plugin-main.h` that includes `Processing.NDI.Lib.h` and dlopens
+  `/usr/lib/ndi/libndi.so.6.3.2`, private group `t1363-private`, two processes back to back with a
+  receiver connected (the lane's `obs_sim.cpp`): control PGM 5963 / OTHER 5964, fix 5961 / 5962; a
+  same-process destroy+recreate keeps its port with the abort, walks up without it. Wait for
+  `ss -tan | grep :596` to drain (60 s) between runs. A `-fsyntax-only` g++ pass of the touched TUs
+  against `vendor/obs-studio/libobs` + the frontend-api dir + `/usr/include/x86_64-linux-gnu/qt6`
+  (plus a stub `obsconfig.h`) catches a real compile error before CI.
 
 ## Trap: a start-path bail after the sender exists LEAKS it — and post-#1185 the leak is the pin-holder
 
