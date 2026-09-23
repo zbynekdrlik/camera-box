@@ -899,7 +899,7 @@ main() {
   local sha; sha="$(gh run view "$run_id" --repo "$GENLOCK_REPO" --json headSha -q .headSha 2>/dev/null)" \
     || { echo "ERROR: could not resolve headSha for anchor run $run_id" >&2; exit 3; }
   [ -n "$sha" ] || { echo "ERROR: empty headSha for anchor run $run_id" >&2; exit 3; }
-  echo "# anchor run $run_id -> canonical SHA $sha; boxes: $boxes (mode $mode; retention --yes=$yes)"
+  echo "# anchor run $run_id -> canonical SHA $sha; deploying: $exec_boxes (requested: $boxes; mode $mode; retention --yes=$yes)"
 
   local workdir; workdir="$(mktemp -d)"
   # shellcheck disable=SC2064
