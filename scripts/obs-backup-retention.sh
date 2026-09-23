@@ -89,6 +89,7 @@ if [ "$MODE" = "box" ] || [ "$MODE" = "win" ]; then
   . "$HERE/lib/obs-fleet.sh"
 fi
 if [ "$MODE" = "box" ]; then
+  [ "$BOX" != "strih" ] || { echo "ERROR: --box strih is the RETIRED Windows strih PC (issue 1317) -- the strih is 'strih-lx' (Linux): use --box strih-lx" >&2; exit 2; }
   BOX_CLASS="$(obs_fleet_class "$BOX")" || { echo "ERROR: --box '$BOX' is not in the fleet list (scripts/lib/obs-fleet.sh)" >&2; exit 2; }
   HOST="$(obs_fleet_host "$BOX")"
   case "$BOX_CLASS" in

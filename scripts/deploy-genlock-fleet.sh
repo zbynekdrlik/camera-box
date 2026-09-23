@@ -795,7 +795,11 @@ PLAN
 # issue-1295 file-mode rule) and the supervisor runs each step deliberately.
 emit_strih_lx_plan() {
   local stage="$1" gsha="$2"
-  local host art lx_stage="/tmp/genlock-stage-${gsha}" lx_repo="/tmp/genlock-stage-${gsha}-repo"
+  # The repo tree (scripts/ + systemd/) goes to ONE fixed path that every deploy overwrites
+  # (rsync --delete), never a per-sha dir: a `<stage>-repo` name matches no obs-backup-retention
+  # allowlist, so it would never be swept, and nesting it inside the stage dir would ship it into
+  # the bundle (setup-strih copies STAGE/. wholesale).
+  local host art lx_stage="/tmp/genlock-stage-${gsha}" lx_repo="/tmp/strih-lx-deploy-repo"
   host="$(fleet_box_ip strih-lx)" || { echo "emit_strih_lx_plan: no strih-lx host (STRIH_LX_IP / obs-fleet row)" >&2; return 2; }
   art="$(fleet_linux_bundle_artifact_for strih-lx)"
   echo "# ================= FLEET PLAN: box=strih-lx (ssh newlevel@${host}, linux-genlock) ================="
@@ -803,16 +807,19 @@ emit_strih_lx_plan() {
   emit_forced_table_audit_preflight strih-lx "$host"
   cat <<PLAN
 # STEP 0a: prune the stale stage copies FIRST -- each staged bundle is ~2.2 GB of /tmp under a
-#          per-user quota, and the third one fails mid-rsync (Disk quota exceeded). From dev1:
+#          per-user quota, and the third one fails mid-rsync (Disk quota exceeded). From dev1
+#          (it sweeps the obs-fleet strih-lx host; under a STRIH_LX_IP override run the same script
+#          ON that box with --local-sweep instead):
 #            bash scripts/obs-backup-retention.sh --box strih-lx                       # dry-run, read it
 #            bash scripts/obs-backup-retention.sh --box strih-lx --keep-runs 1 --keep-days 0 --execute
 # STEP 0b: stage the '${art}' artifact (downloaded to ${stage}) AND the repo scripts/ + systemd/
 #          dirs (setup-strih.sh reads ../systemd/*.service) on the box:
 #            rsync -a ${stage}/ newlevel@${host}:${lx_stage}/
-#            rsync -a scripts systemd newlevel@${host}:${lx_repo}/
-# STEP 1:  install through the provisioning path (never a hand cp over /usr) -- sudo needs the
-#          password on stdin over a tty-less ssh:
-#            ssh newlevel@${host} 'echo "\$PW" | sudo -S -p "" bash -c "STRIH_LX_BUNDLE_SRC=${lx_stage} nohup bash ${lx_repo}/scripts/setup-strih.sh > /tmp/setup-strih-${gsha}.log 2>&1 &"'
+#            rsync -a --delete scripts systemd newlevel@${host}:${lx_repo}/
+# STEP 1:  install through the provisioning path (never a hand cp over /usr). sudo needs the
+#          password on stdin over a tty-less ssh -- expand \$PW on dev1 (outer double quotes), and run
+#          the script DIRECTLY (rsync -a keeps its exec bit) so its process name is setup-strih.sh:
+#            sshpass -p "\$PW" ssh newlevel@${host} "printf '%s\\n' '\$PW' | sudo -S -p '' bash -c 'STRIH_LX_BUNDLE_SRC=${lx_stage} nohup ${lx_repo}/scripts/setup-strih.sh > /tmp/setup-strih-${gsha}.log 2>&1 &'"
 #          then poll 'pgrep -x setup-strih.sh' (never pgrep -f -- it matches its own command line)
 #          and read the log's tail for the step-4 'installed genlock bundle' line.
 # STEP 2:  relaunch through the supervised user unit, never a raw launch:
@@ -882,6 +889,11 @@ main() {
   # windows/linux workflows, emit the Windows plan (agent uploads + pastes into the win-* MCP Shell),
   # ssh-deploy imag, and append one fleet-deploy log line. The worker never runs this; the supervisor
   # drives it live (the ticket stays OPEN until then).
+  # issue 1317 part 3: execute mode has no strih-lx arm yet (see the NOTE below), so the boxes it
+  # really deploys -- and records in the durable fleet log -- exclude strih-lx. A run that would
+  # deploy NOTHING is a usage error, never a green "deployed" log line for a box it never touched.
+  local exec_boxes; exec_boxes="$(fleet_execute_boxes "$boxes")"
+  [ -n "$exec_boxes" ] || { echo "ERROR: execute mode has nothing to deploy for '$boxes' -- the strih-lx execute arm is a follow-up; use --plan for its recipe" >&2; exit 2; }
   command -v gh >/dev/null 2>&1 || { echo "ERROR: gh CLI required for execute mode" >&2; exit 3; }
   command -v jq >/dev/null 2>&1 || { echo "ERROR: jq required for execute mode" >&2; exit 3; }
   local sha; sha="$(gh run view "$run_id" --repo "$GENLOCK_REPO" --json headSha -q .headSha 2>/dev/null)" \
@@ -968,7 +980,7 @@ main() {
 
   # --- durable fleet-deploy log line ---------------------------------------------------------------
   mkdir -p "$(dirname "$FLEET_LOG_DEFAULT")"
-  fleet_log_line "$run_id" "$sha" "$boxes" "$mode" >> "$FLEET_LOG_DEFAULT"
+  fleet_log_line "$run_id" "$sha" "$exec_boxes" "$mode" >> "$FLEET_LOG_DEFAULT"
   echo "# fleet-deploy log appended: $FLEET_LOG_DEFAULT"
   exit 0
 }

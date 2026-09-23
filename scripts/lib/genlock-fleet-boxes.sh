@@ -74,6 +74,19 @@ fleet_resolume_identity_confirm_note() {
 NOTE
 }
 
+# fleet_execute_boxes CSV -> the boxes deploy-genlock-fleet.sh EXECUTE mode actually deploys (and so
+# the ONLY ones its durable fleet log may record): the normalized list minus strih-lx, whose execute
+# arm is still a follow-up (issue 1317 part 3 -- the default fleet is strih-lx,stream, so a raw
+# default run must never log "strih-lx deployed at <sha>"). Empty output = nothing to execute. Pure.
+fleet_execute_boxes() {
+  local csv="${1:-}" b out=""
+  local IFS=','
+  for b in $csv; do
+    if [ -n "$b" ] && [ "$b" != "strih-lx" ]; then out="${out:+$out,}$b"; fi
+  done
+  printf '%s' "$out"
+}
+
 # fleet_box_keepalive_tasks BOX -> the OBS keep-alive SCHEDULED-TASK names the deploy must disable so
 # NONE of them respawns obs64 while the bytes are being copied (#1140). Per-box + CURATED, never all
 # of a box's ~nine scheduled tasks: the stream box runs the #812 avsync-keepalive (~10 min) AND the

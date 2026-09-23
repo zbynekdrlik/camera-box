@@ -50,6 +50,17 @@ strih_platform_refuse_windows_only_mode() {
   return 1
 }
 
+# strih_zero_loss_restart_preflight HOST -> returns 0 unless the opt-in #109 restart-survival mode
+# (ZERO_LOSS_RESTART_GATE=1) is requested against a strih whose platform is linux, in which case it
+# refuses (rc 1, named stderr). That mode plans the WINDOWS per-box decode (win-* MCP paste steps)
+# and has no strih-lx port yet (issue 1317 part 3), so recording-e2e.sh calls this right after it
+# resolves the strih -- BEFORE any rig mutation (the cambox burn deploys, the painter step) -- instead
+# of failing after the whole preflight and a 360 s capture. Pure (env + strih_platform), no network.
+strih_zero_loss_restart_preflight() {
+  [ "${ZERO_LOSS_RESTART_GATE:-0}" = "1" ] || return 0
+  strih_platform_refuse_windows_only_mode "${1:-}" "the restart-survival measurement mode (ZERO_LOSS_RESTART_GATE=1)"
+}
+
 # strih_linux_visibility_probe_cmd -> REMOTE bash TEXT (embed via $(...) into an ssh command
 # string, plain ssh -- NEVER win_ssh_run/CIM for a Linux strih). Checks whether strih-obs.service
 # is active under the OPERATOR's own user session (systemd --user), the Linux analogue of "visible
