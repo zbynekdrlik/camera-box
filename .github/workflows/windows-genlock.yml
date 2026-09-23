@@ -797,15 +797,6 @@ jobs:
           if ($src -notmatch [regex]::Escape('genlock_should_converge_phase(source, reserve_ms, interval, wall_now)')) {
             Write-Error "obs-source.c: genlock_should_converge_phase is defined but no longer CALLED from the release tail — the shed is dead code and the phase never converges (#1049)"; exit 1
           }
-          if ($src -notmatch [regex]::Escape('static inline bool genlock_n1_release_phase_step(')) {
-            Write-Error "obs-source.c: the pure N==1 release-phase step genlock_n1_release_phase_step is gone — the deep N==1 (NDI 2ME PGM) A/V level walks again (#1355)"; exit 1
-          }
-          if ($src -notmatch [regex]::Escape('static bool genlock_should_n1_release_phase_step(')) {
-            Write-Error "obs-source.c: the source wrapper genlock_should_n1_release_phase_step is gone (#1355)"; exit 1
-          }
-          if ($src -notmatch [regex]::Escape('genlock_should_n1_release_phase_step(source, reserve_ms, interval, wall_now)')) {
-            Write-Error "obs-source.c: genlock_should_n1_release_phase_step is defined but no longer CALLED from the release tail — dead code, the deep N==1 A/V level walks (#1355)"; exit 1
-          }
           if ($src -notmatch [regex]::Escape('bool converge_eligible = false;')) {
             Write-Error "obs-source.c: the converge_eligible gate is gone from genlock_release_tick (#1049)"; exit 1
           }

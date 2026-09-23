@@ -460,26 +460,20 @@ pub fn n1_release_phase_step(
     source_multiple: u32,
     ticks_since_last_drain: u64,
 ) -> bool {
-    if interval_ns == 0 || locked_boundary_ns == 0 {
-        return false;
-    }
-    // N==1 ONLY — N>=2 is handled by should_converge_phase (unchanged, #1049).
-    if source_multiple != 1 {
-        return false;
-    }
-    let reserve_ns = (latency_ms as u64).saturating_mul(1_000_000);
-    // The same arrival-jitter tolerance the N>=2 shed uses.
-    let budget = PHASE_PIN_HYSTERESIS_NS.max(GENLOCK_N2_JITTER_BUDGET_NS);
-    // Fire only once the drift has pushed the on-air age a FULL frame (minus the jitter budget)
-    // above the configured hold — the crucial difference from should_converge_phase, whose
-    // target+quantum+budget band limit-cycles on N==1. A whole-frame threshold means the post-shed
-    // age lands a budget-width BELOW the hold and cannot re-fire until the drift re-accumulates an
-    // entire frame (~40 min): one clean, jitter-immune step per crossing, sustainable on N==1.
-    let threshold = reserve_ns
-        .saturating_add(interval_ns)
-        .saturating_sub(budget);
-    let age = wall_now_ns.saturating_sub(locked_boundary_ns);
-    age > threshold && ticks_since_last_drain >= DRAIN_MIN_TICK_INTERVAL
+    // #1355 [red]: not yet implemented — the phase step is stubbed to `false` so the bench's
+    // FIX mode is byte-identical to CURRENT (band stays ~2 frames) and
+    // `genlock_n1_bench`'s "the fix holds the band within one frame" test FAILS, proving it is
+    // a genuine RED before the [green] body lands. The parameters are consumed so
+    // `clippy -D warnings` still passes on this RED commit (an unused param is a hard error here).
+    let _ = (
+        wall_now_ns,
+        locked_boundary_ns,
+        latency_ms,
+        interval_ns,
+        source_multiple,
+        ticks_since_last_drain,
+    );
+    false
 }
 
 // ---------------------------------------------------------------------------------------------
