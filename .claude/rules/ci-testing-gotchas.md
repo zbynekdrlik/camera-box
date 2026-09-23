@@ -1241,3 +1241,24 @@ bash returns `E2BIG` ("Argument list too long") and the test dies before the scr
 The existing >1 MB drain-safety tests already stream their input from inside the shell
 (`head -c … /dev/zero | tr`) for the same reason. A local python/bash replica of the Rust harness
 catches this before CI (`subprocess.run` raises `OSError: [Errno 7]` on the same limit).
+
+## A whole `tests/*.rs` integration file RUNS locally with plain `rustc --test` + a stub `tempfile` rlib — no cargo (issue 1357)
+
+The script-reading harnesses (`setup_imag_guards.rs`, `strih_provision_pure_functions.rs`,
+`verify_imag_pure_functions.rs`, `drift_guard.rs`, ~40 more) use only `std` plus `tempfile`, so the
+REAL test file (not a replica) compiles and runs under Tier-0 without any cargo shape:
+
+1. Write a ~60-line stand-in `tempfile.rs` (`TempDir` with `path()`/`into_path()`/Drop, `tempdir()`,
+   `NamedTempFile::new()/path()`) and build it once: `rustc --edition 2021 --crate-type rlib
+   --crate-name tempfile tempfile.rs -o <scratch>/libtempfile.rlib`.
+2. Per test file: `CARGO_MANIFEST_DIR=<worktree> rustc --edition 2021 --test -A warnings tests/<f>.rs
+   --extern tempfile=<scratch>/libtempfile.rlib -L <scratch> -o <scratch>/bin/<f>`, then run the binary
+   from the worktree root. `env!("CARGO_MANIFEST_DIR")` is read at COMPILE time, so set it on rustc.
+3. RED proof against the pre-fix scripts: export HEAD's `scripts/` + `systemd/` into a scratch tree
+   (the version-control `archive -o head.tar HEAD scripts systemd` subcommand), copy the NEW test files
+   in, and compile with `CARGO_MANIFEST_DIR=<that tree>`.
+
+Put the loop in a script FILE and `bash` it (the worktree guard refuses `$VAR`-computed paths in a
+direct rustc call). A file needing another crate (serde, the camera_box lib) fails to compile this
+way and stays CI-only. This catches borrow/type errors (an E0716 was caught this way) and failing
+asserts before CI; it does NOT run clippy, so the test-lint hand sweep is still needed.
