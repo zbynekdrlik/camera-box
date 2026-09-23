@@ -129,17 +129,20 @@ NDIlib_send_instance_t ndi_sender_create_tracked(const NDIlib_send_create_t *des
 	if (!sender)
 		return sender; // the caller logs the create failure
 
-	int port = 0;
+	int found = 0;
 	if (have_before && have_after)
-		port = ndi_new_listen_port(before.data(), before.size(), after.data(), after.size());
+		found = ndi_new_listen_port(before.data(), before.size(), after.data(), after.size());
+	const int port = found > 0 ? found : 0;
 	if (port > 0) {
 		obs_log(LOG_INFO, "ndi-sender-port: NDI sender '%s' listens on TCP :%d (#1363)", name, port);
 	} else {
+		// Its own label: WARN-1363 is reserved for the :5961 reserve line.
 		obs_log(LOG_WARNING,
-			"WARN-1363 - ndi-sender-port: could not identify the TCP port of NDI sender '%s' "
-			"(/proc/self/fd %s); its connections will close normally at stop, so a relaunch within 60 s "
-			"may shift its port",
-			name, (have_before && have_after) ? "readable, no single new listener" : "unreadable");
+			"PORTID-1363 - ndi-sender-port: could not identify the TCP port of NDI sender '%s' (%s) - "
+			"libndi sender port band :%d-:%d; its connections will close normally at stop, so a relaunch "
+			"within 60 s may shift its port",
+			name, ndi_listen_port_failure_text(have_before && have_after, found), NDI_SENDER_FIRST_TCP_PORT,
+			NDI_RECEIVER_FIRST_TCP_PORT - 1);
 	}
 	if (out_port)
 		*out_port = port;
@@ -168,7 +171,7 @@ void ndi_sender_abort_connections_before_destroy(int port, const char *name)
 	});
 	if (!scanned) {
 		obs_log(LOG_WARNING,
-			"WARN-1363 - ndi-sender-port: cannot read /proc/self/fd (errno %d) before destroying the NDI "
+			"LINGER-1363 - ndi-sender-port: cannot read /proc/self/fd (errno %d) before destroying the NDI "
 			"sender on TCP :%d ('%s'); its connections close normally, so a relaunch within 60 s may shift "
 			"its port",
 			errno, port, who);
