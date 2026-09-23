@@ -63,7 +63,10 @@ source this reader, and right after the tail count is clamped,
 — the Windows boxes keep their own `-EncodedCommand` read BYTE-IDENTICAL (the issue-1259
 `harness_ps_encoded_fleet_1259` payload tests keep pinning it) and the `*_PROBE_CMD` seam stays the
 FIRST branch, so every `--dry-run`/fixture test is unaffected. `frozen-input`'s enumeration read was
-already on the reader via `mv_reverify_probe_raw`.
+already on the reader via `mv_reverify_probe_raw`. The Linux branch takes the watchdog's
+`*_SSH_USER` / `*_SSH_PW` / `*_SSH_TIMEOUT`, but NOT its `*_SSH_OPTS` override — the reader builds its
+own ssh options (the stale-key rule above); threading options through the shared reader is not worth
+it for a knob nobody sets.
 
 Live proof recipe (read-only, allowed while an E2E holds the rig lease — log reads never mutate):
 run each watchdog `--dry-run` with `*_STATE_DIR=<scratch>` (NEVER the real dev1 state dir) and the
@@ -80,7 +83,9 @@ CEF children are `obs-browser-pag`, never matched), dispatched per box by `_obs_
 `_obs_count_cmd`. `tests/python/test_rig_health_audit_strih_lx_1360.py` RUNS the bash
 `strih_platform` + `strih_log_remote_cmd <platform> headtail N` and asserts byte equality on BOTH
 platforms — change the command in `strih-log-read.sh` first, the pytest then forces the twin to follow.
-The audit's `ssh()` carries `UserKnownHostsFile=/dev/null` too. The strih row keeps the `obs64=` key
+The audit's `ssh()` carries `UserKnownHostsFile=/dev/null` too — deliberately for EVERY row (cams,
+imag), not only strih: boxes get re-imaged/re-addressed and a read-only audit must never go blind on
+a stale key. The strih row keeps the `obs64=` key
 (the status page's generic key=value renderer) even though the Linux process is `obs`.
 
 ## Not yet migrated

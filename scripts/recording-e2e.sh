@@ -4189,7 +4189,9 @@ if [ "$PRERECORD_PHASE_CALIBRATE" = "1" ] && [ "${ALL_CAMBOX:-0}" = "1" ]; then
   # older than this calibration window — never a blind `-Tail N` that can silently include
   # many minutes of unrelated prior activity. Issue 1360: both reads go through the ONE
   # platform-resolved strih OBS-log reader (plain ssh on the Linux strih-lx, the verbatim
-  # PowerShell on a Windows strih) — this step runs before the floor-aware align sources it.
+  # PowerShell on a Windows strih). Sourced explicitly here for locality: it is already loaded
+  # transitively (mv-reverify-escalate.sh near the top sources it), but this step must not depend
+  # on that indirection.
   # shellcheck source=scripts/lib/strih-log-read.sh
   . "$HERE/lib/strih-log-read.sh"
   CALIB_LOG_START_LINES="$(strih_log_line_count "$STRIH" "$STRIH_USER" "$STRIH_PW" 60 2>/dev/null \

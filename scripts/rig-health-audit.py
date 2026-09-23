@@ -116,6 +116,9 @@ def ssh(host: str, cmd: str, user: str = "root", timeout: int = 20, pw: str = SS
             # issue 1360: UserKnownHostsFile=/dev/null -- 10.77.9.202 was the Windows STRIH-SNV
             # address before M4; a stale known_hosts key with StrictHostKeyChecking=no makes OpenSSH
             # DISABLE password auth (the same transport rule scripts/lib/strih-log-read.sh carries).
+            # Deliberately for EVERY row (cams/imag too): the rig's boxes are re-imaged/re-addressed
+            # (issue-1316 imag swap, the M4 strih swap) and this read-only audit must never go blind
+            # on a stale key -- the same option set 11 other rig scripts already use.
             ["sshpass", "-p", pw, "ssh", "-o", "StrictHostKeyChecking=no",
              "-o", "UserKnownHostsFile=/dev/null", "-o", "LogLevel=ERROR",
              "-o", "ConnectTimeout=6", f"{user}@{host}", cmd],
