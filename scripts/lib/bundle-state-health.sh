@@ -98,13 +98,28 @@ bundle_state_alert_detail() {
 #   this string is passed as the FINAL ssh argument (never embedded mid-command), so the
 #   $()-newline-strip gotcha does not apply -- and `;` is NOT a cmd.exe statement terminator, so a
 #   trailing one could reach schtasks as a stray token.
+#   ZERO-MATCH GUARD (linux): `systemctl --user restart '<pattern>'` exits 0 when the pattern matches
+#   NO loaded unit (verified on systemd 255), so an unloaded/disabled/renamed unit would read as a
+#   successful restart. The command therefore first lists the matching units and exits 3 when there
+#   are none, so the caller's ssh returns non-zero and it logs the restart as FAILED, never "issued OK".
 bundle_state_restart_remote_cmd() {
   case "${1:-}" in
     linux-genlock)
-      printf '%s\n' "systemctl --user reset-failed '*-bundle-state-server.service' 2>/dev/null; systemctl --user restart '*-bundle-state-server.service'"
+      printf '%s\n' "systemctl --user list-units --all --no-legend --plain '*-bundle-state-server.service' | grep -q . || exit 3; systemctl --user reset-failed '*-bundle-state-server.service' 2>/dev/null; systemctl --user restart '*-bundle-state-server.service'"
       ;;
     *)
       printf 'schtasks /run /tn "BundleStateServer"\n'
       ;;
+  esac
+}
+
+# bundle_state_restart_label [class] -> stdout: a short human label for the restart mechanism of
+#   CLASS (logs + alert text). It lives right next to bundle_state_restart_remote_cmd with the same
+#   class cases, so a class change edits both in one place and every caller (the dev1 watchdog and the
+#   E2E self-heal) shares one label (issue 1317).
+bundle_state_restart_label() {
+  case "${1:-}" in
+    linux-genlock) printf 'systemctl --user restart' ;;
+    *) printf 'schtasks /run' ;;
   esac
 }

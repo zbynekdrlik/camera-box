@@ -107,14 +107,14 @@ log() { printf '%s [bundle-state-alert-watchdog] %s\n' "$(date '+%Y-%m-%dT%H:%M:
 # -- per-box ssh creds (same convention as obs-session-watchdog.sh; targets.md "SSH: newlevel/newlevel")
 box_ssh_user() {
   case "$1" in
-    strih) printf '%s' "${STRIH_USER:-newlevel}" ;;
+    strih-lx) printf '%s' "${STRIH_USER:-newlevel}" ;;   # issue 1317: the production strih since M4
     stream) printf '%s' "${STREAM_USER:-newlevel}" ;;
     *) printf '%s' "${BUNDLE_STATE_SSH_USER:-newlevel}" ;;
   esac
 }
 box_ssh_pw() {
   case "$1" in
-    strih) printf '%s' "${STRIH_PW:-newlevel}" ;;
+    strih-lx) printf '%s' "${STRIH_PW:-newlevel}" ;;
     stream) printf '%s' "${STREAM_PW:-newlevel}" ;;
     *) printf '%s' "${BUNDLE_STATE_SSH_PW:-newlevel}" ;;
   esac
@@ -159,7 +159,9 @@ probe_http_bundle() {
   esac
 }
 
-# restart_bundle_state_task <box> <ip> -> exit 0 iff the ssh `schtasks /run` returned 0. Session-
+# restart_bundle_state_task <box> <ip> -> exit 0 iff the ssh'd class-resolved restart returned 0
+# (issue 1317: `schtasks /run` on a windows-genlock box, the guarded `systemctl --user restart` on a
+# linux-genlock box -- which exits non-zero when no bundle-state unit is loaded). Session-
 # agnostic (starts the HIDDEN headless task; never `/it`). Self-contained sshpass -- deliberately does
 # NOT source win-ssh-exec.sh (that sets `set -euo pipefail`, which would leak -e into this watchdog).
 # Best-effort: a failure is logged by the caller, never fatal (the alert still fires). `timeout`
@@ -181,12 +183,10 @@ box_fleet_class() {
   obs_fleet_class "$1" 2>/dev/null || printf 'windows-genlock'
 }
 
-# restart_how <box> -> stdout: a short human label for BOX's restart mechanism (logs + alert text).
+# restart_how <box> -> stdout: a short human label for BOX's restart mechanism (logs + alert text),
+# from the shared lib's bundle_state_restart_label (one label source for the watchdog + E2E self-heal).
 restart_how() {
-  case "$(box_fleet_class "$1")" in
-    linux-genlock) printf 'systemctl --user restart' ;;
-    *) printf 'schtasks /run' ;;
-  esac
+  bundle_state_restart_label "$(box_fleet_class "$1")"
 }
 
 # -- persisted per-box state (key=value lines) --------------------------------------------------

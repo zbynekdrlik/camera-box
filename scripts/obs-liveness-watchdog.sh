@@ -4,8 +4,9 @@
 # WHY (#391): stream OBS (10.77.9.204) was hung "(Not Responding)" for ~25 HOURS — obs64 pegged
 # ~168% CPU, Responding=False, 16.0% frames-missed-due-to-render-lag — and NOTHING detected it. The
 # user found it manually a day later. This watchdog is the Windows-OBS sibling of the #281/#350
-# rig-restore-watchdog: it runs on a **dev1 systemd --user timer**, polls BOTH broadcast OBS boxes
-# (strih 10.77.9.202, stream 10.77.9.204) over OBS WebSocket `GetStats` (always network-reachable,
+# rig-restore-watchdog: it runs on a **dev1 systemd --user timer**, polls the broadcast OBS boxes
+# (the obs-fleet `obs-liveness` facet: strih-lx 10.77.9.202 -- the Linux production strih since the
+# issue-1317 M4 cut-over --, stream 10.77.9.204, resolume while home) over OBS WebSocket `GetStats` (always network-reachable,
 # no ssh/MCP needed), runs the strict `obs_watchdog::classify` verdict (via `obs-watchdog-gate`),
 # and — once a wedge is CONFIRMED across 2 consecutive passes — fires a Discord alert IMMEDIATELY.
 #
@@ -20,6 +21,9 @@
 # NOT built here — it would be the first unattended-control mechanism on these boxes and interacts
 # with the existing AHK auto-respawn watcher on strih (see .claude/skills/obs-ops "AHK on strih");
 # that is a bigger, riskier, precedent-setting change filed separately for the user's decision.
+# issue 1317: the Windows-box reasoning above covers stream/resolume; the Linux strih-lx runs OBS as
+# a supervised systemd --user unit (strih-obs.service, Restart=on-failure), so its embedded recovery
+# is a plain-ssh `systemctl --user restart` (recovery_plan_for picks it by the box's fleet class).
 #
 # ALL "should we alert?" logic lives in the PURE scripts/lib/obs-watchdog-decision.sh (unit-tested);
 # this script only GATHERS the verdict (via obs-liveness-probe.py) and fires the alert.
@@ -184,6 +188,14 @@ recovery_plan_for() {
     printf '#89: GPU device removed (DXGI TDR/driver-internal-error) on %s — an OBS-only restart typically does NOT clear this; a full PC reboot of the box is required (agent/human-driven, see .claude/skills/obs-ops "GPU wedge on stream box")' "$box"
     return
   fi
+  # issue 1317: the recovery is CLASS-resolved from the fleet list. A linux-genlock box (strih-lx,
+  # the production strih since M4) runs OBS as a supervised systemd --user unit (`<role>-obs.service`,
+  # e.g. strih-obs.service) reached over plain ssh -- the Windows launch program + win-* MCP Shell
+  # below do not apply to it (launch-obs-genlock.sh refuses a Linux box name).
+  if [ "$(obs_fleet_class "$box" 2>/dev/null || true)" = "linux-genlock" ]; then
+    printf "ssh newlevel@%s \"systemctl --user restart '*-obs.service'\"   # Linux genlock box: restarts its supervised OBS unit (strih-obs.service on strih-lx); verify :4455 + renderAdvanced after" "$(obs_fleet_host "$box" 2>/dev/null || printf '%s' "$box")"
+    return
+  fi
   printf 'bash scripts/launch-obs-genlock.sh --box %s --force   # paste the printed PowerShell program into the win-%s MCP Shell' "$box" "$box"
 }
 
@@ -240,7 +252,7 @@ main() {
 
     if [ "${alert_now:-0}" = "1" ]; then
       local msg
-      msg="🚨 OBS zamrznuté ($REPO_SLUG): OBS na **$box** je **$label**. Dôvod: ${reasons:-none}. Potvrdené počas ${CONFIRM_THRESHOLD} po sebe idúcich kontrol (nie je to jednorazový výkyv). Rieši Claude automaticky (win-* MCP plán: \`$(recovery_plan_for "$box" "$label")\`), ty nemusíš nič robiť."
+      msg="🚨 OBS zamrznuté ($REPO_SLUG): OBS na **$box** je **$label**. Dôvod: ${reasons:-none}. Potvrdené počas ${CONFIRM_THRESHOLD} po sebe idúcich kontrol (nie je to jednorazový výkyv). Rieši Claude automaticky (plán obnovy: \`$(recovery_plan_for "$box" "$label")\`), ty nemusíš nič robiť."
       log "ALERT: firing Discord notification for $box ($label)"
       python3 "$NOTIFY" notify --body "$msg" --dedup-key "$(watchdog_notify_key "obs-liveness-$box-$label" "$(date +%s)")" >/dev/null 2>&1 \
         || log "ALERT: airuleset.py notify failed (non-fatal)"

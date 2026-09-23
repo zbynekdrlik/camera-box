@@ -106,8 +106,8 @@ Per-facet decision (by each facet's PREMISE — a platform-neutral read joins, a
 | Facet | Members | Why strih-lx is in or out |
 |---|---|---|
 | network-reach | strih-lx stream resolume | ping / OBS-WS :4455 / :8899 — platform-neutral |
-| bundle-state | strih-lx stream resolume | curl :8899 is neutral; the AUTO-RESTART is class-resolved (`systemctl --user` on linux-genlock, `schtasks` on windows-genlock — `.claude/rules/bundle-state-watchdog.md`) |
-| obs-liveness | strih-lx stream resolume | OBS-WS GetStats — neutral |
+| bundle-state | strih-lx stream resolume | curl :8899 is neutral; the AUTO-RESTART is class-resolved (guarded `systemctl --user` on linux-genlock, `schtasks` on windows-genlock — the dev1 watchdog AND the E2E `[0/8]` self-heal, `.claude/rules/bundle-state-watchdog.md`) |
+| obs-liveness | strih-lx stream resolume | OBS-WS GetStats — neutral; the strih-lx arm keeps `STRIH_HOST`/`STRIH_TARGET_FPS`, and the alert's recovery is class-resolved (`recovery_plan_for`: plain-ssh `systemctl --user restart '*-obs.service'` = strih-obs.service on a linux-genlock box, the `launch-obs-genlock.sh` + win-* MCP plan only on windows-genlock — that planner refuses a Linux box name) |
 | genlock-lock | strih-lx stream imag resolume | the box's own :8899 `genlock_lock` facet; imag `retired` → dropped |
 | render-freeze | strih-lx stream resolume | :8899 `program_render_lagged` / `relock_bursts` |
 | audio-lag | strih-lx stream | :8899 `audio_ts_lag_*` from the vendored OBS `audio-telemetry #800` lines — the same on Linux (reads UNKNOWN while no source carries audio, never a page) |
@@ -118,6 +118,11 @@ Per-facet decision (by each facet's PREMISE — a platform-neutral read joins, a
 - `obs_fleet_facet_members ndi-portmap` = `strih-lx`: `scripts/ndi-portmap-audit.sh` consumes the
   member NAME only and refuses any member count other than one. It derives the sender prefix from the
   name and reads the IP from the anchor's own mDNS record. Details: `.claude/rules/ndi-portmap-watchdog.md`.
+- **Not covered by the fleet list (separate follow-up):** dev1 watchdogs that do NOT derive from
+  `obs_fleet_boxes` still dial a literal `strih` at .202 with Windows-shaped probes
+  (`obs-session-watchdog.sh` via `win_ssh_run`, `obs-burn-reconcile-watchdog.sh`,
+  `rig-restore-watchdog.sh`); moving them onto the fleet list + a class-resolved probe is their own
+  change, not a fleet-row edit.
 - **Live proof (23.9.2026, read-only `--dry-run` sweep):** network-reach `strih-lx (10.77.9.202):
   ping=1 ws:4455=1 bundle:8899=1 -> REACHABLE`; bundle-state `-> HEALTHY`; obs-liveness
   `strih-lx activeFps=30.00 renderAdvanced=True`; genlock-lock / render-freeze / audio-lag /
