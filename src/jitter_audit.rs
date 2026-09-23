@@ -92,13 +92,6 @@ pub struct AuditSample {
     /// paired; `-latency_ms` = audio never held (the wiring did not fire). An instantaneous
     /// per-tick value, NOT summarized. Absent on pre-#1303 logs — parses as 0.
     pub audio_pairing_offset_ms: i64,
-    /// #1355 — cumulative SUSTAINED-EXCESS one-frame drains (`genlock_sustain_drain_due` fired to
-    /// shed the drift-gained frame on the N==1 deep FIFO). A sustain shed ALSO counts into
-    /// `dropped_due` like every other drop; this distinguishes it so the post-deploy ≥1 h audit can
-    /// see the drain fire ~once per drift-frame (~40 min) and correlate it with `wall_qpc_drift_ms`.
-    /// Appended at the END of the audit line (mutually non-substring with `converge_sheds`). Absent
-    /// on pre-#1355 logs — parses as 0.
-    pub sustain_sheds: u32,
 }
 
 /// Parse ONE `genlock-fifo audit` log line into an [`AuditSample`].
@@ -827,26 +820,6 @@ mod tests {
         assert!(!s.audio_enabled);
         assert_eq!(s.audio_delay_ms, 0);
         assert_eq!(s.audio_pairing_offset_ms, -3);
-    }
-
-    #[test]
-    fn sustain_sheds_parses_and_defaults_zero_1355() {
-        // Forward-compat: a pre-#1355 line has no sustain_sheds= token — parses as 0, never fails.
-        let s = parse_audit_line(SAMPLE_LINE_CAM1).expect("must parse a real audit line");
-        assert_eq!(
-            s.sustain_sheds, 0,
-            "#1355: a pre-#1355 line without the sustain_sheds= token must default to 0"
-        );
-        // A #1355 line carries the new key appended at the END, before the (#...) tag.
-        let line = SAMPLE_LINE_CAM1.replace(
-            "audio_pairing_offset_ms=0 ",
-            "audio_pairing_offset_ms=0 sustain_sheds=7 ",
-        );
-        let s = parse_audit_line(&line).expect("a #1355 line must parse");
-        assert_eq!(
-            s.sustain_sheds, 7,
-            "#1355: the sustain_sheds= key must parse into AuditSample.sustain_sheds"
-        );
     }
 
     #[test]
