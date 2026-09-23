@@ -512,8 +512,17 @@ mod tests {
         // No behaviour change when the clocks are in step: the phase-step threshold
         // (reserve + interval − budget) is never reached at 0 ppm, so CURRENT and the fix produce
         // identical traces. (Holds in BOTH the [red] stub and the [green] body — a real invariant.)
+        //
+        // `sender_grid_ns == interval_ns` here ISOLATES the wall-vs-render drift under test from the
+        // separate 33 ns/frame sender-grid beat: with the beat the on-air age creeps ~13 ms over a
+        // 3.7 h run (leaving only a ~5 ms margin under the ~18 ms threshold — a real but tight,
+        // deterministic margin). Removing the beat makes the age sit at exactly `reserve` forever, so
+        // the invariant "the drift fix is INERT at 0 drift" has a full-frame margin and cannot become
+        // margin-dependent if the run length or grid is ever tuned. The beat is not what this fix
+        // targets; the 13 ppm reproduction test keeps it (the realistic sender grid).
         let cfg = BenchConfig {
             drift_ppm: 0.0,
+            sender_grid_ns: INTERVAL_30_NS,
             ..BenchConfig::stream_2me_pgm()
         };
         let cur = current_release_rule(&cfg);
