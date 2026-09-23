@@ -545,6 +545,33 @@ async fn run_capture_loop(
         None => frame_rate,
     };
 
+    // #1242 — per-camera NDI SEND stagger inside the genlock frame slot. All camboxes emit on
+    // the same grid and (on the splitter rig) capture the same HDMI signal, so their ~300 KB
+    // frames used to leave within ~1 ms of each other and overflow the strih-lx 2.5 GbE switch
+    // port. Camera N now hands its frame to the NDI SDK (N-1) x STAGGER_US after its emit-gate
+    // decision (see `send_stagger`'s module doc for the arithmetic + the clamp). The emit grid
+    // and the FLOOR-boundary timecode are untouched. One rule for every box: the number comes
+    // from the OS hostname (CAM<N>); an unknown hostname or genlock off -> offset 0.
+    let send_stagger_camera =
+        camera_box::send_stagger::camera_number_from_hostname(&resolved_hostname);
+    let send_stagger_offset_us = camera_box::send_stagger::send_offset_us(
+        send_stagger_camera,
+        genlock_fps
+            .map(|f| 1_000_000u64 / u64::from(f))
+            .unwrap_or(0),
+    );
+    let send_stagger_line = camera_box::send_stagger::startup_log_line(
+        &resolved_hostname,
+        send_stagger_camera,
+        send_stagger_offset_us,
+    );
+    if send_stagger_camera.is_some() {
+        tracing::info!("{}", send_stagger_line);
+    } else {
+        tracing::warn!("{}", send_stagger_line);
+    }
+    let send_stagger_offset = std::time::Duration::from_micros(send_stagger_offset_us);
+
     // #174 cam1-capture render-time QR burn — TEST MODE ONLY. Gated behind
     // CAMERA_BOX_BURN_RUN_ID (mirrors the strih/stream DistroAV burn run_id env): when
     // UNSET the burn is OFF and the live NDI feed stays completely CLEAN (zero-copy send
@@ -1073,6 +1100,10 @@ async fn run_capture_loop(
         // grabber's own internal-buffer repeat is preferentially shed over the genuine unique
         // tick next to it. See `camera_box::dupe_decimation`'s module doc for the full mechanism.
         let mut decimation_gate = camera_box::dupe_decimation::DecimationGate::new();
+        // #1242 — how long the PREVIOUS emitted iteration slept for its send stagger (ms). The
+        // sleep shortens the next V4L2 dequeue wait, so the #1131 buffered-queue signal adds it
+        // back (`send_stagger::idle_wait_ms`); read + reset once per captured frame.
+        let mut last_stagger_sleep_ms: f64 = 0.0;
 
         while running_capture.load(Ordering::Relaxed) {
             // #707 B1 — snapshot the emit counter before the frame closure so the per-second ring
@@ -1193,9 +1224,17 @@ async fn run_capture_loop(
                     // frame from an empty queue (the loop genuinely waited — a device/clock gap)
                     // keeps the pre-existing #131 forward-resync. Same `dequeue_duration_ms` signal
                     // the #707 capture-stall WARN reads, thresholded the other way.
+                    // #1242 — the previous emitted iteration's send-stagger sleep ran just before
+                    // this dequeue and shortened it by exactly that much; add it back so a healthy
+                    // empty-queue frame on a later camera never reads as "already buffered".
+                    // Taken (reset to 0) here so it applies to this one frame only.
+                    let stagger_slept_ms = std::mem::take(&mut last_stagger_sleep_ms);
                     let queue_had_frame = if configured_capture_fps > 0.0 {
                         camera_box::capture_stall::frame_from_nonempty_queue(
-                            info.dequeue_duration_ms,
+                            camera_box::send_stagger::idle_wait_ms(
+                                info.dequeue_duration_ms,
+                                stagger_slept_ms,
+                            ),
                             1000.0 / configured_capture_fps,
                         )
                     } else {
@@ -1248,6 +1287,10 @@ async fn run_capture_loop(
                         return; // decimated -- either blind pacing or a preferred dupe shed
                     }
                 }
+                // #1242 — the send-stagger anchor: the instant this frame passed the emit gate.
+                // The per-camera offset below is measured from HERE, so the small per-frame work
+                // between the gate and the send never adds to (or drifts) the stagger.
+                let stagger_anchor = std::time::Instant::now();
                 // #275b — ONE cam1 emit-instant wall-clock stamp (CLOCK_REALTIME, the DanteSync
                 // clock), shared by the burned QR's gen_ts AND the grab-recording tee, so both
                 // describe the SAME instant even when the async submit below back-pressures (the
@@ -1393,6 +1436,24 @@ async fn run_capture_loop(
                     emit_wall_ns / 100,
                     send_fps as i64,
                 );
+                // #1242 — the per-camera NDI send stagger, ONCE per emitted iteration: after the
+                // genlock timecode above is fixed (it never moves) and before the first send (the
+                // starvation repeats and the current frame leave back-to-back behind one delay).
+                // The emit grid is untouched — the gate already polled the wall clock above and
+                // never reads the send instant. Covers the production zero-copy send AND the burn
+                // ring hand-off, so an E2E run measures the real production timing. The measured
+                // sleep feeds the next frame's #1131 buffered-queue signal (`idle_wait_ms`).
+                if !send_stagger_offset.is_zero() {
+                    let remaining = camera_box::send_stagger::remaining_sleep(
+                        send_stagger_offset,
+                        stagger_anchor.elapsed(),
+                    );
+                    if !remaining.is_zero() {
+                        let slept_from = std::time::Instant::now();
+                        std::thread::sleep(remaining);
+                        last_stagger_sleep_ms = slept_from.elapsed().as_secs_f64() * 1000.0;
+                    }
+                }
                 // (#1167 v4) An UNDER-rate dip left `starvation_repeats` empty-queue 60fps boundaries
                 // unfilled (poll reported them, capped + gated on a measured sustained under-rate). Fill
                 // each by re-emitting the CURRENT good frame (it passed process_frame's corruption

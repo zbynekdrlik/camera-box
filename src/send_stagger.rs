@@ -64,9 +64,19 @@ pub const MAX_CAMERA_NUMBER: u32 = 99;
 /// Parse the camera number from a box hostname: `CAM7` / `cam7` / ` Cam3 ` → `Some(n)`.
 /// Anything else (`camera-box`, `CAM`, `CAM0`, `CAM1-lx`, `strih-lx`, empty) → `None`.
 pub fn camera_number_from_hostname(hostname: &str) -> Option<u32> {
-    // #1242 RED stub: the parser is not written yet.
-    let _ = hostname;
-    None
+    let h = hostname.trim();
+    if h.len() < 4 || !h.is_char_boundary(3) || !h[..3].eq_ignore_ascii_case("cam") {
+        return None;
+    }
+    let digits = &h[3..];
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let n: u32 = digits.parse().ok()?;
+    if !(1..=MAX_CAMERA_NUMBER).contains(&n) {
+        return None;
+    }
+    Some(n)
 }
 
 /// The send offset (µs) for camera `camera_number` at a send interval of `interval_us`.
@@ -75,9 +85,16 @@ pub fn camera_number_from_hostname(hostname: &str) -> Option<u32> {
 /// identity) or `interval_us == 0` (genlock off — no emit grid to stagger inside) → 0. Monotonic
 /// non-decreasing in `n`.
 pub fn send_offset_us(camera_number: Option<u32>, interval_us: u64) -> u64 {
-    // #1242 RED stub: no stagger yet.
-    let _ = (camera_number, interval_us);
-    0
+    let n = match camera_number {
+        Some(n) if n >= 1 => n,
+        _ => return 0,
+    };
+    if interval_us == 0 {
+        return 0;
+    }
+    let raw = u64::from(n - 1).saturating_mul(STAGGER_US);
+    let cap = interval_us.saturating_mul(MAX_OFFSET_SLOT_PERCENT) / 100;
+    raw.min(cap)
 }
 
 /// How long to still sleep before the NDI hand-off: `offset` measured from the emit-gate anchor,
@@ -85,9 +102,7 @@ pub fn send_offset_us(camera_number: Option<u32>, interval_us: u64) -> u64 {
 /// instant keeps the delay precise regardless of the small per-frame work between the gate and
 /// the send.
 pub fn remaining_sleep(offset: Duration, elapsed: Duration) -> Duration {
-    // #1242 RED stub.
-    let _ = (offset, elapsed);
-    Duration::ZERO
+    offset.saturating_sub(elapsed)
 }
 
 /// The capture loop's idle wait before this frame, for the #1131 buffered-queue signal: the
@@ -97,17 +112,22 @@ pub fn remaining_sleep(offset: Duration, elapsed: Duration) -> Duration {
 /// slept first. Non-finite or negative inputs count as 0 for the stagger term, and the dequeue term
 /// passes through unchanged so `frame_from_nonempty_queue`'s own fail-safe guards still see it.
 pub fn idle_wait_ms(dequeue_ms: f64, stagger_slept_ms: f64) -> f64 {
-    // #1242 RED stub: the stagger sleep is not added back yet.
-    let _ = stagger_slept_ms;
-    dequeue_ms
+    if !stagger_slept_ms.is_finite() || stagger_slept_ms <= 0.0 {
+        return dequeue_ms;
+    }
+    dequeue_ms + stagger_slept_ms
 }
 
 /// The ONE startup log line (logged once). `Some(n)` → `NDI send stagger: camN offset=<us> us
 /// (#1242)`; `None` → names the hostname and says the offset is 0.
 pub fn startup_log_line(hostname: &str, camera_number: Option<u32>, offset_us: u64) -> String {
-    // #1242 RED stub.
-    let _ = (hostname, camera_number, offset_us);
-    String::new()
+    match camera_number {
+        Some(n) => format!("NDI send stagger: cam{n} offset={offset_us} us (#1242)"),
+        None => format!(
+            "NDI send stagger: hostname '{}' is not a CAM<N> box — offset={offset_us} us (#1242)",
+            hostname.trim()
+        ),
+    }
 }
 
 #[cfg(test)]
