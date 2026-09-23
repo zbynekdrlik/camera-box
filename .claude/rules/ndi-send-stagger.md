@@ -36,8 +36,14 @@ costs 2–5 cameras ~380 ms of video at once: strih `recv-timing` n≈277, genlo
 - `should_sleep(offset, frame_backlogged)` returns false when the frame came from an already
   non-empty V4L2 queue.
 - `StaggerWindow` + `window_summary` give the per-5 s
-  `#1242 send stagger: offset=… us, N slept / K skipped (frame already backlogged) …, max per-frame work W ms + offset O ms vs capture interval C ms`
-  line. It is a WARN on any skip, or when `W + O ≥ C` (`OVER BUDGET`).
+  `#1242 send stagger: offset=… us, N slept / P past the offset / K skipped (frame already backlogged) …, max per-frame work W ms + offset O ms vs capture interval C ms, max oversleep X ms`
+  line. `slept` counts only REAL sleeps; `past the offset` is a frame whose work already ate the
+  whole offset. It is a WARN on:
+  - `OVER BUDGET`: `W + O ≥ C`;
+  - `OVERSLEEP`: `O + X ≥ ADDBACK_SOUND_FRACTION × C`, where the add-back stops being sound;
+  - `MANY SKIPS`: at least `SKIP_WARN_PERCENT` (10 %) of the window skipped.
+  An occasional skip is INFO: a bursty grabber hands over back-to-back frames even with plenty of
+  margin.
 
 `src/main.rs` `run_capture_loop` wires it in:
 
@@ -52,7 +58,9 @@ costs 2–5 cameras ~380 ms of video at once: strih `recv-timing` n≈277, genlo
    `should_sleep`, it sleeps `remaining_sleep(offset, anchor.elapsed())`; otherwise it counts a skip.
    This is ONE delay per iteration, and the same site covers the production zero-copy send and the
    probe burn ring hand-off.
-6. After the last `emit_one`, it records the per-frame work (callback time minus the sleep).
+6. A real sleep is recorded with its requested and measured ms (`note_slept`). A zero remaining
+   sleep counts as `note_past_offset`.
+7. After the last `emit_one`, it records the per-frame work (callback time minus the sleep).
    `window_summary` rides the 5 s Streaming report (only when the offset is non-zero).
 
 ## The arithmetic (re-check before changing STAGGER_US)
@@ -65,13 +73,18 @@ costs 2–5 cameras ~380 ms of video at once: strih `recv-timing` n≈277, genlo
 - **Upper bound:** the send is synchronous on the capture thread, which is also the only V4L2
   drainer. The sleep shortens the next dequeue, and the `idle_wait_ms` add-back only stays sound
   while the sleep is under `BUFFERED_DEQUEUE_FRACTION` (0.5) of a CAPTURE interval. That is why the
-  clamp uses the shorter interval. `src/lib.rs` has a `const _: () = assert!(...)` against the REAL
-  fraction.
+  clamp uses the shorter interval. `src/lib.rs` has `const _: () = assert!(...)` pins against the
+  REAL fraction (the clamp below it, `ADDBACK_SOUND_FRACTION` equal to it; write the equality as
+  `==`, since a `<= && >=` pair trips clippy `double_comparisons`). The measured sleep includes
+  scheduler OVERSLEEP. CAM7's margin is 8.33 − 7.2 ≈ 1.1 ms, and the capture thread is SCHED_FIFO,
+  so oversleep should be tens of µs. The 5 s line reports the worst one, and `OVERSLEEP` WARNs
+  before the add-back breaks.
 - **Fleet size:** seven cameras need `6 × s ≤ 7.5 ms`, so `s ≤ 1.25 ms`. More cameras on the same
   port would need a smaller `s`; otherwise the clamp makes the last cameras share the 7.5 ms slot.
 - **Budget:** CAM7 must fit its per-frame work (hashes + conversion + the synchronous send) in
-  16.67 − 7.2 ≈ 9.5 ms. The backlog skip guarantees the stagger never costs captured frames: a
-  behind loop sends immediately and the skip is counted. The 5 s line shows the margin on every box.
+  16.67 − 7.2 ≈ 9.5 ms. The backlog skip keeps the stagger from pushing a behind loop further
+  behind: a backlogged frame sends immediately and the skip is counted. The 5 s line shows the
+  margin on every box; `OVER BUDGET` is the budget signal.
 
 ## Invariants — do not break
 
@@ -88,8 +101,9 @@ costs 2–5 cameras ~380 ms of video at once: strih `recv-timing` n≈277, genlo
   Read the production journal's 5 s stagger line for that.
 - **Unaffected while the budget holds:** #944 emit-freeze (15 s), #945 capture wedge, #707 emit-1s
   buckets, the capture-stall WARN (the raw dequeue only gets shorter), and the self-heal triggers.
-  A later camera with new capture-dropped / `#1145` drains / stagger skips is the budget, not the
-  grabber.
+  A later camera showing `OVER BUDGET` plus new capture-dropped / `#1145` drains is the budget.
+  Skips ALONE can also be grabber burstiness (back-to-back frames), so read them together with
+  `OVER BUDGET` and the camera's own capture cadence.
 
 ## Verifying a change (Tier-0)
 
@@ -100,15 +114,20 @@ costs 2–5 cameras ~380 ms of video at once: strih `recv-timing` n≈277, genlo
   then run it from the worktree root. Put this in a script FILE (the worktree guard refuses the
   env-prefixed form inline).
 - The lib.rs float const-assert shape compiles standalone (float compares are legal in a `const`
-  item).
+  item). Check it with a two-module replica file.
+- **`clippy-driver` runs clippy with NO cargo** (Tier-0 legal): `clippy-driver --edition 2021 --test
+  -D warnings <copy.rs> -o <out>` (and `--crate-type lib`). It is the only local way to see CI's
+  `clippy -D warnings` verdict on a std-only module, a test file or a const-assert replica. On this
+  ticket it caught a `double_comparisons` error in the first draft of the lib.rs equality pin.
 - `main.rs` itself compiles first on CI.
 
 ## Live acceptance (supervisor)
 
 1. Deploy the camera-box binary to the fleet (never a cambox reboot).
 2. Read each box's startup line: `journalctl -u camera-box | grep 'NDI send stagger'`.
-3. Read CAM7's 5 s `#1242 send stagger:` line: 0 skipped and no `OVER BUDGET`. Check that its
-   `Streaming:` captured fps / capture-dropped are unchanged.
+3. Read CAM7's 5 s `#1242 send stagger:` line: no `OVER BUDGET` / `OVERSLEEP` / `MANY SKIPS`, and
+   note the margin (`W + O` vs `C`) and the worst oversleep. Check that its `Streaming:` captured
+   fps / capture-dropped are unchanged.
 4. Compare the `foh1_video ether2` `tx-drop-queue1-packet` delta over 30 min against the pre-change
    rate (31 bursts / 9.3 min, max +2552). It should be near zero.
 5. Run two release E2E runs with no multi-frame copies/gaps burst.
