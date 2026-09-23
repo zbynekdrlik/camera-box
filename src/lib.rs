@@ -387,6 +387,12 @@ pub mod genlock_backlog;
 // gate in `tests/genlock_relock_selection_parity.rs`.
 pub mod genlock_grid;
 
+// #1355 part 2 — the grid-drift bench: the deep N==1 stream `NDI 2ME PGM` FIFO fed by the
+// strih-lx sender, simulated tick by tick with the production decision functions under the
+// measured rig statistics; reproduces the live 31/32 depth flip on the 1970 grid and proves the
+// per-second grid removes it. Crate-root + default features (Tier-0), no OBS.
+pub mod genlock_grid_bench;
+
 // #1298 — the pure LOCKED/DEGRADED/UNLOCKED decision for the in-OBS genlock statusbar
 // indicator. Crate-root + std-only so it is Tier-0 verifiable; the C port in
 // `vendor/obs-studio/frontend/widgets/GenlockLockState.hpp` is held identical by the
