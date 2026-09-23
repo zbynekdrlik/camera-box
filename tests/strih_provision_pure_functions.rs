@@ -3832,7 +3832,7 @@ fn rtprio_session_verdict_grades_grant_and_the_live_obs_log() {
     // grant present, running OBS still logs the EPERM line -> the session predates the next login.
     assert_eq!(
         session_verdict("1", "1", FIFO_FAIL_LINE),
-        (2, "grant-pending-relogin".into())
+        (2, "grant-pending-reboot".into())
     );
     assert_eq!(
         session_verdict("1", "1", FIFO_OK_LINE),
@@ -3860,7 +3860,7 @@ fn rtprio_session_verdict_survives_a_large_log_under_pipefail() {
     assert!(log.len() > 64 * 1024);
     assert_eq!(
         session_verdict("1", "1", &log),
-        (2, "grant-pending-relogin".into())
+        (2, "grant-pending-reboot".into())
     );
 }
 
