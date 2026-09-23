@@ -4,21 +4,33 @@ paths:
   - "scripts/strih-recordings-retention.sh"
   - "src/recordings_retention.rs"
   - "tests/recordings_retention.rs"
+  - "tests/fixtures/recordings_retention_parity.tsv"
+  - "tests/python/test_strih_lx_recordings_retention_1317.py"
 ---
 
 # E2E recordings retention — dry-run-first sweep (#1122)
 
-**No default box (issue 1317 part 3).** `strih-recordings-retention.sh` used to default
-`HOST=10.77.9.202` — the Windows strih PC RETIRED at the M4 cut-over; that address is the Linux
-strih-lx, which records to **`/srv/_REC`** (its OBS profile `RecFilePath`, read live 23.9.2026: 17
-`.mkv`, 12 GB, 405 GB free) and has no PowerShell. The tool is Windows-only (a scp'd `.ps1`), so
-`--host` is now REQUIRED and a linux-genlock fleet address is refused by
-`obs_fleet_refuse_linux_target`. **There is no Linux recordings executor yet** — a bash port of
-`src/recordings_retention.rs` for strih-lx `/srv/_REC` (same allowlist + size floor, parity-pinned) is
-not ticketed yet (returned to the supervisor as a follow-up candidate in the issue-1317 part-3
-LANE-RETURN); until then strih-lx recordings have NO sweep — only the E2E free-space WARN (read over
-`:8899`, platform-neutral) guards the disk.
-The `C:\_REC` default record dir stays for an explicit Windows `--host`.
+**strih-lx (Linux) has its own executor (issue 1317 part 5).** The Windows strih PC was RETIRED at
+the M4 cut-over; `10.77.9.202` is the Linux strih-lx, which records to **`/srv/_REC`** (its active OBS
+profile `strih-lx`, `[Output] Mode=Advanced` → `[AdvOut] RecFilePath`; read live 24.9.2026: 18
+`.mkv`, 12.9 GB, all OBS-timestamp names, all below the 1 GiB floor, dir `newlevel:newlevel 775`,
+433 GB free). `strih-recordings-retention.sh` now carries THREE modes and still has **no default box**:
+
+- `--box <fleet-name>` — class dispatch through `scripts/lib/obs-fleet.sh` (the
+  `obs-backup-retention.sh --box` precedent): `linux-genlock` → ssh + THIS script fed to
+  `bash -s -- --local-sweep …` (no sudo; creds `LINUX_BOX_USER`/`LINUX_BOX_PW`, default newlevel);
+  `windows-genlock` → the unchanged `.ps1` driver. `--box strih` → the RETIRED pointer.
+- `--host <win-ip>` — the Windows `.ps1` driver by address; a linux-genlock address is refused by
+  `obs_fleet_refuse_linux_target` with a `--box strih-lx` pointer.
+- `--local-sweep` — the bash decision `rr_plan()` on the current machine. Record dir = `--record-dir`,
+  else resolved from the active OBS profile (`user.ini` `[Basic] ProfileDir` → `basic.ini`:
+  Advanced → `[AdvOut] RecFilePath` (`FFFilePath` when `RecType=FFmpeg`), Simple →
+  `[SimpleOutput] FilePath`); an unresolvable profile FAILS LOUD, never a guessed default.
+  `--plan-tsv` prints the raw machine plan; `RETENTION_NOW_EPOCH` is the "now" test seam.
+
+The Linux executor refuses `--execute` with `--keep-runs 0` (the newest file may be the recording OBS
+is writing right now) and, before each `rm`, re-checks the file is still a regular non-symlink,
+allowlisted, below-floor file. Dirs and symlinks are never planned or touched.
 
 ## Why
 
@@ -89,7 +101,24 @@ No archive step, no age-based deletion of production files.
 ## The decision (keep newest-N runs UNION younger-than-D-days)
 
 Canonical spec: **`src/recordings_retention.rs`** (pure, Tier-0, `tests/recordings_retention.rs`).
-`scripts/strih-recordings-retention.ps1` is a FAITHFUL PORT of it — keep the two in sync.
+`scripts/strih-recordings-retention.ps1` (Windows) and `rr_plan()` in
+`scripts/strih-recordings-retention.sh` (Linux, `--local-sweep`) are FAITHFUL PORTS of it — keep all
+three in sync.
+
+**Parity = ONE shared case table** (issue 1317 part 5): `tests/fixtures/recordings_retention_parity.tsv`
+(tab-separated `case`/`file`/`keep`/`delete`/`end` rows, integer ages relative to a fixed `now`) is
+read by BOTH `tests/recordings_retention.rs` (`shared_parity_table_matches_the_canonical_plan_1317`,
+against `plan()`) and `tests/python/test_strih_lx_recordings_retention_1317.py` (against `rr_plan()`
+over a REAL fixture dir — sparse files via `truncate`, mtimes via `utime`). Add a case to the TABLE,
+never to one side only. The bash floor `RR_PRODUCTION_SIZE_FLOOR_BYTES` is pinned equal to the Rust
+constant. Mirror traps the table covers: the allowlist regex uses an EXPLICIT `[0123456789]` list
+under `LC_ALL=C` (a fullwidth/Arabic-Indic digit never matches — the `.ps1` `\d` lesson again);
+the within-days rule `age < days*86400` on integer ages is `age < ceil(days*86400)` (computed in awk
+with `%.0f` — strih-lx's awk is **mawk**, whose `%d` clamps at 2^31-1); the newest-first sort is
+`LC_ALL=C sort -k1,1nr -k3` (bytewise name tie-break = Rust `String` order); the production floor
+pulls big files OUT of the newest-N pool before ranking; enumeration uses `dotglob` so a dotfile is
+listed (and protected). Mutation-checked: flipping `-ge`→`-gt`, `-lt`→`-le`, the tie-break direction,
+the dedup-suffix space, or the newest-N bound each fails the parity test.
 
 - The EXPLICIT allowlist matches ONLY OBS-timestamp names: `YYYY-MM-DD HH-MM-SS[ (n)].mkv|.mp4`
   (case-sensitive). It is **NEVER a generic `*.mkv` sweep**: a differently-named operator/debug
@@ -101,20 +130,35 @@ Canonical spec: **`src/recordings_retention.rs`** (pure, Tier-0, `tests/recordin
 - Defaults `KeepRuns=20 / KeepDays=3` on live strih → 691.3 GB down to **38.4 GB** (under budget),
   652.9 GB freed across 323 runs, all 54 non-recording/foreign files protected.
 
-## Runbook — DRY-RUN first, then the SUPERVISOR's reviewed -Execute
+## Runbook — strih-lx (Linux): DRY-RUN first, then the SUPERVISOR's reviewed --execute
+
+```bash
+# 1) DRY-RUN (read-only: ssh + bash -s, resolves /srv/_REC from the OBS profile, deletes nothing)
+scripts/strih-recordings-retention.sh --box strih-lx --keep-runs 20 --keep-days 3
+
+# 2) Review the plan: DELETE must hold only OBS-timestamp runs below 1 GiB.
+
+# 3) SUPERVISOR ONLY -- the first real deletion on strih-lx:
+scripts/strih-recordings-retention.sh --box strih-lx --keep-runs 20 --keep-days 3 --execute
+```
+
+Live 24.9.2026 at the defaults (20 runs / 3 days): 18 files, 12.90 GB, DELETE set EMPTY (18 < 20).
+With `--keep-runs 5 --keep-days 1` the dry-run planned 9 deletions (5.71 GB), keeping 7.19 GB.
+
+## Runbook (Windows boxes) — DRY-RUN first, then the SUPERVISOR's reviewed -Execute
 
 Deploy-genlock-fleet.sh emission style: `scp -O` the `.ps1`, run it via `powershell -File` — NEVER
 a nested `powershell -Command` over ssh (fails silently, see `rig-state-inspection.md`).
 
 ```bash
 # 1) DRY-RUN (read-only — deploys the tool, prints the full keep/protect/delete plan, deletes nothing)
-scripts/strih-recordings-retention.sh --keep-runs 20 --keep-days 3
+scripts/strih-recordings-retention.sh --box stream --record-dir 'C:\Users\newlevel\Videos' --keep-runs 20 --keep-days 3
 
 # 2) Review the printed plan (PROTECT / KEEP / DELETE + SUMMARY). Confirm the DELETE set is only
 #    timestamp-named runs and the "after cleanup" total is at/under the budget.
 
 # 3) SUPERVISOR ONLY — the first real deletion (irreversible bulk delete of prod-box files):
-scripts/strih-recordings-retention.sh --execute
+scripts/strih-recordings-retention.sh --box stream --record-dir 'C:\Users\newlevel\Videos' --execute
 ```
 
 `--execute` maps to the `.ps1` `-Execute` switch. Everything else is dry-run. For the stream box:
@@ -132,6 +176,14 @@ the test file (strip its leading `//!` header) and compiling standalone with `ru
 pure logic RED→GREEN with zero repo `target/`. Also run `cargo fmt --all --check` (allowed,
 non-compiling — it parses the Rust). The `.ps1`/`.sh` are verified with `bash -n` + `shellcheck` and
 a live DRY-RUN against strih (read-only, deletes nothing).
+
+Faster than the scratch-module copy: build a one-module `camera_box` stub rlib from the REAL
+`src/recordings_retention.rs` (`lib.rs` = `pub mod recordings_retention;`, `rustc --crate-type rlib
+--crate-name camera_box`) and compile the REAL `tests/recordings_retention.rs` against it with
+`--extern camera_box=<rlib>` (plain `rustc --test`, and `clippy-driver --test -D warnings` for CI's
+lint verdict) — the `include_str!` of the parity table resolves relative to the test file. The bash
+side is pure pytest (`tests/python/test_strih_lx_recordings_retention_1317.py`, fake `sshpass` on
+PATH for the `--box` legs).
 
 ## Two gotchas when a `.ps1` mirrors a Rust decision AND travels over scp (both proven live, #1122)
 

@@ -522,7 +522,8 @@ pub mod cg_chain_gate;
 pub mod burn_tick_cache;
 // #1122 — PURE, dependency-free E2E recordings retention decision (keep newest-N runs UNION
 // younger-than-D-days; delete ONLY files matching the harness's OWN OBS-timestamp allowlist, never
-// a generic *.mkv sweep). The canonical spec that scripts/strih-recordings-retention.ps1 mirrors.
+// a generic *.mkv sweep). The canonical spec that scripts/strih-recordings-retention.ps1 (Windows) and
+// the --local-sweep bash decision in scripts/strih-recordings-retention.sh (strih-lx) mirror.
 pub mod recordings_retention;
 // #789 (residual B / criterion 5) — standalone retention decision for the deploy/backup DIRECTORIES
 // the fleet deploy leaves behind (dated `<stamp>-789` box-backups + per-sha stage dirs); keep newest

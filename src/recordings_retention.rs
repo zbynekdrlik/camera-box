@@ -20,9 +20,12 @@
 //! -- any recording at or above `PRODUCTION_SIZE_FLOOR_BYTES` (~1 GiB) is kept regardless of age or
 //! newest-N rank; only the small E2E-run files stay eligible for the DELETE set.
 //!
-//! PARITY: `scripts/strih-recordings-retention.ps1` is a faithful port of THIS decision (same
-//! allowlist shape + newest-N ∪ younger-than-D rule). This module + `tests/recordings_retention.rs`
-//! are the canonical spec — keep the PowerShell mirror in sync with them.
+//! PARITY: `scripts/strih-recordings-retention.ps1` (the Windows executor) and the `--local-sweep`
+//! bash decision in `scripts/strih-recordings-retention.sh` (the Linux strih-lx executor, issue 1317)
+//! are faithful ports of THIS decision (same allowlist shape + size floor + newest-N ∪ younger-than-D
+//! rule). This module + `tests/recordings_retention.rs` are the canonical spec. The bash port is pinned
+//! to it by ONE shared case table, `tests/fixtures/recordings_retention_parity.tsv`, that both the Rust
+//! test and `tests/python/test_strih_lx_recordings_retention_1317.py` assert against.
 
 /// One top-level file in the record directory: name plus size and mtime (epoch seconds).
 #[derive(Debug, Clone, PartialEq)]
