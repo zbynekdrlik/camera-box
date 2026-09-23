@@ -14,55 +14,55 @@
 # Design-by: the main session (issue 1354, comment 5784872333) -- Prístup 1: a NEW sourced helper
 # called as single lines from scripts/recording-e2e.sh (#675 anchor-safe pattern -- every existing
 # anchored line in recording-e2e.sh stays byte-identical; only NEW `. lib` + call lines are added).
-# Depends on the already-sourced scripts/lib/strih-platform.sh `strih_platform` resolver.
+# Reads strih ONLY through the ONE shared platform-resolved reader scripts/lib/strih-log-read.sh
+# (issue 1360 part 3: `strih_log_tail`, sourced below when the caller has not already done so).
 #
 # #1133 discipline (a report-only helper called as a BARE statement under the caller's
 # `set -euo pipefail` MUST return 0 on every input): an early `[ -n ... ] || return 0`, a `|| true`
-# on every ssh/grep/tail pipeline (a `grep -aF` no-match exits 1; a `tail` early-close SIGPIPEs the
-# upstream), and the `timeout` bounds the ssh so a wedged strih can never hang the run.
+# on every grep/tail pipeline (a `grep -aF` no-match exits 1; a `tail` early-close SIGPIPEs the
+# upstream); the shared reader bounds the remote read with its own timeout and ALWAYS returns 0.
 
-# genlock_audit_snapshot_linux_read HOST -> stdout: the newest strih-lx OBS log's LAST
-# GENLOCK_AUDIT_SNAPSHOT_TAIL (default 400) `genlock-fifo audit '` lines, via ONE bounded flat ssh
-# (a session-agnostic FILE read -- Context B of win-ssh-vs-mcp.md; strih-lx is a Linux box reached
-# over plain ssh, NEVER win_ssh_run/CIM). LC_ALL=C + grep -aF keep the read byte-agnostic: the audit
-# line carries a non-ASCII glyph (the approx-sign in "(approx F frames @ ...)"), the same
-# byte-safety mv-reverify-escalate.sh #1258 documents. Empty output = the read itself failed
-# (unreachable / no log / no audit line yet) -- the caller treats that as fail-open, never a fault.
-genlock_audit_snapshot_linux_read() {
+_GENLOCK_AUDIT_SNAPSHOT_DIR="${BASH_SOURCE[0]%/*}"
+# shellcheck source=scripts/lib/strih-log-read.sh
+command -v strih_log_tail >/dev/null 2>&1 || . "$_GENLOCK_AUDIT_SNAPSHOT_DIR/strih-log-read.sh"
+
+# genlock_audit_snapshot_read HOST -> stdout: the newest strih OBS log's LAST
+# GENLOCK_AUDIT_SNAPSHOT_TAIL (default 400) `genlock-fifo audit '` lines. The raw read is the shared
+# reader's `strih_log_tail` of the last GENLOCK_AUDIT_SNAPSHOT_READ_LINES (default 3000) log lines --
+# on strih-lx ~8 min of log, which carries every input's audit line (one per input per ~5 s, ~26 %
+# of the log, measured live 23.9.2026); genlock_audit_snapshot.py parses only the LAST line per
+# input. The filter is LOCAL: CRs stripped (a Windows strih's PowerShell tail), then LC_ALL=C
+# grep -aF (the audit line carries a non-ASCII glyph, the approx-sign in "(approx F frames @ ...)",
+# the mv-reverify-escalate.sh #1258 byte-safety). Both knobs are numeric-only, so an override can
+# never reach the remote command or the local tail. STRIH_USER / STRIH_PW /
+# GENLOCK_AUDIT_SNAPSHOT_SSH_TIMEOUT feed the reader's transport. Empty output = the read itself
+# failed (unreachable / no log / no audit line in the window) -- the caller treats that as
+# fail-open, never a fault.
+genlock_audit_snapshot_read() {
   local host="$1"
   local user="${STRIH_USER:-newlevel}" pw="${STRIH_PW:-newlevel}"
   local tmo="${GENLOCK_AUDIT_SNAPSHOT_SSH_TIMEOUT:-20}" tail_n="${GENLOCK_AUDIT_SNAPSHOT_TAIL:-400}"
-  # numeric-only tail -> the override can never inject shell metachars into the remote command.
+  local read_n="${GENLOCK_AUDIT_SNAPSHOT_READ_LINES:-3000}"
   case "$tail_n" in '' | *[!0-9]*) tail_n=400 ;; esac
-  timeout "$tmo" sshpass -p "$pw" \
-    ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 \
-    "${user}@${host}" \
-    'f="$(ls -t "$HOME"/.config/obs-studio/logs/*.txt 2>/dev/null | head -1)"; [ -n "$f" ] && LC_ALL=C grep -aF "genlock-fifo audit '\''" "$f" 2>/dev/null | tail -n '"$tail_n"' || true' \
-    2>/dev/null || true
+  case "$read_n" in '' | *[!0-9]*) read_n=3000 ;; esac
+  strih_log_tail "$host" "$user" "$pw" "$read_n" "$tmo" |
+    tr -d '\r' | LC_ALL=C grep -aF "genlock-fifo audit '" | tail -n "$tail_n" || true
 }
 
 # genlock_audit_snapshot_capture LABEL OUTFILE -> write the strih genlock-fifo audit tail to OUTFILE.
 # LABEL (before|after) is for logging only. Fail-open, returns 0 on every path:
 #   * GENLOCK_AUDIT_SNAPSHOT_READER_CMD (a shell command "HOST LABEL" -> raw audit text on stdout) is
 #     the Tier-0 / alternate-tap seam -- a test overrides it so the whole capture runs with no ssh.
-#   * else, on a Linux strih (strih_platform == linux), the plain-ssh read above.
-#   * else (a Windows strih, or any other platform) a LOGGED SKIP -- no file, the report omits the
-#     section (a Windows-strih tail is a follow-up; the strih role is the Linux strih-lx post-M4).
+#   * else the shared-reader read above (either strih platform -- strih-lx or a Windows strih).
 # A non-empty read is persisted verbatim to OUTFILE; an empty/timed-out read writes nothing.
 genlock_audit_snapshot_capture() {
   local label="${1:-}" outfile="${2:-}"
   [ -n "$outfile" ] || return 0
-  local host="${STRIH:-10.77.9.202}" raw="" plat
+  local host="${STRIH:-10.77.9.202}" raw=""
   if [ -n "${GENLOCK_AUDIT_SNAPSHOT_READER_CMD:-}" ]; then
     raw="$($GENLOCK_AUDIT_SNAPSHOT_READER_CMD "$host" "$label" 2>/dev/null || true)"
   else
-    plat="$(strih_platform "$host" 2>/dev/null || echo windows)"
-    if [ "$plat" = "linux" ]; then
-      raw="$(genlock_audit_snapshot_linux_read "$host" 2>/dev/null || true)"
-    else
-      echo "    [genlock-audit/$label] #1354 strih platform '$plat' (not linux) -- SKIP; the E2E report omits the genlock-conveyor section (a Windows-strih tail is a follow-up)." >&2
-      return 0
-    fi
+    raw="$(genlock_audit_snapshot_read "$host" 2>/dev/null || true)"
   fi
   if [ -n "$raw" ]; then
     printf '%s\n' "$raw" >"$outfile" 2>/dev/null || true
