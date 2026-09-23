@@ -413,6 +413,13 @@ with an old inline block that ran its tail unconditionally.
 - **Poll with `pgrep -x setup-strih.sh`, never `pgrep -f`.** `pgrep -f setup-strih.sh` matches its OWN
   command line and reports RUNNING forever (run 1 on 18.9. "ran" for 20 min this way while setup had
   actually never started).
+- **Each staged bundle is ~2.2 GB in `/tmp` (tmpfs, per-user quota) — the THIRD deploy fails
+  `Disk quota exceeded` mid-rsync** (live 23.9.2026: two leftover `/tmp/genlock-stage-<sha>` dirs
+  filled the operator's quota while `df` still showed 2.3 GB free). Before staging a new bundle,
+  prune the old stage copies with the sanctioned sweep, never a hand `rm -rf`: copy
+  `scripts/obs-backup-retention.sh` to the box and run `--local-sweep --keep-runs 1 --keep-days 0
+  --backup-root /opt/obs-backup --stage-parent /tmp` (dry-run, read the plan), then the same with
+  `--execute`. The installed copy lives in `/opt/obs-genlock`; stage dirs are transient.
 
 ## Audio — the local PipeWire graph (issue 1344, WIRED)
 
