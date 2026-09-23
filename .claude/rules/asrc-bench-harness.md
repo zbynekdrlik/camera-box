@@ -589,3 +589,69 @@ law:
   rides the existing genlock build; the existing `level=/target=/integral= (#1335)` substring is
   preserved intact). C<->Rust parity is a NUMERICAL contract; re-run a standalone lift for any future
   change to this pair (per `vendored-libobs-change-safety.md`).
+
+## #1355 — the level setpoint is ABSOLUTE (`LEVEL_TARGET_MS` + the placement offset), bounded when unreachable
+
+Everything above that says "capture `level_target_ms = buffered_ms` at first lock" is PRE-#1355
+HISTORY. The depth-at-lock capture froze a random `mbc` depth per stream-OBS launch (captured 58.9 …
+126.1 ms over 10 launches, 18.–23.9.) and the loop then held it, so every launch had its own A/V
+level (dock + `mbc` level ≈ 135 ± 6 ms in every launch). Now:
+
+- **Capture = `LEVEL_TARGET_MS` (100.0) + `level_offset_ms`** (Rust `src/asrc_bench.rs` ↔ C
+  `ASRC_LEVEL_TARGET_MS`, numerically identical). `level_offset_ms` is CALLER state, set every audio
+  callback through the pure store `set_level_offset_ms` / `asrc_compensator_set_level_offset_ms`:
+  obs-source.c `asrc_process_audio` passes `last_sync_offset / 1e6 + genlock_audio_delay_ms`, the
+  offset the samples ALREADY in the buffer were placed with. It must be `last_sync_offset`, not the
+  pending `sync_offset`: `asrc_process_audio` runs BEFORE `source_output_audio_data` places the same
+  block, and a change in that same callback still reaches the target through the existing shift
+  (`sync_offset - last_sync_offset`). Using `sync_offset` would count a same-callback change twice.
+  A flush never clears `level_offset_ms`, so a relock re-captures the SAME absolute level.
+- **The setter never moves a captured target.** After capture the target keeps following deliberate
+  trims 1:1 only through `shift_level_target` (unchanged), so the invariant `target ==
+  LEVEL_TARGET_MS + offset` holds as long as the caller keeps both calls in place. A genlock latency
+  change on a `genlock_fifo` source (a pin write) shifts the depth but NOT a captured target. The
+  #1355 design comment observed that a pin write re-captures through a flush/relock (the 2ME PGM
+  `ndi_source_update`), which then re-captures correctly. A pin change WITHOUT a flush would leave
+  the target stale, a gap the live audit should check (the `asrc:` line of a genlock source after a
+  pin write).
+- **No new arm.** The walk to the target uses the existing law. The smoothed P term (Kp 2, clamp 50)
+  starts at once. The sustained-error arm (≥ 12 ms for 10 windows) fires the restore burst (≤ 100
+  ppm). A < 12 ms offset is walked by P alone (10 ms: ~410 s). Arming the restore at capture was
+  rejected: a capture on a noisy reading (±8–10 ms) would arm on noise, which breaks the #1335
+  `level_scatter_never_arms…` / `…does_not_chatter…` guarantees.
+- **Unreachable bound:** `LEVEL_TARGET_UNREACHABLE_WINDOWS` (2400) CONSECUTIVE accepted windows with
+  the SMOOTHED `|level_err_ema_ms| >= LEVEL_RESTORE_ARM_MS` (the restore's own exit band) trigger a
+  fallback: target = the live depth (the pre-#1355 capture), restore off, EMA error zeroed, counter
+  `level_fallback_count` + one-shot `level_fallback_pending` (C: obs-source.c logs a
+  `LOG_WARNING … UNREACHABLE … (#1355)` line and clears it; Rust: `take_level_fallback_pending`). The
+  EMA, not the raw level, is counted, so ±10 ms tick noise at target never counts (bench: 3 h, 0
+  fallbacks). 2400 ≈ 2× the slowest legitimate walk measured (98 ms, 26 → 124 ms under ±10 ms noise:
+  ~1180 s to within 5 ms).
+- **Bench** (three `*_1355` tests, run by `rustc --test`): start 64 / 90 / 126 ms
+  (± 10 ms noise) all hold at 100 ± 3 ms (RED: 63.70 / 89.70 / 125.70), max per-window rate step
+  = the existing 5 ppm slew limit, max `|applied − estimated|` inside restore+P+integral clamps. The
+  +24 ms pre-lock offset is captured and held as 124. A −14 ms trim moves the hold 1:1 against a
+  no-trim control and leaves the integral within 0.05 ppm of that control. A flush+relock
+  re-captures 110. For an unreachable target, a 60 ms mixer floor under a 40 ms target falls back
+  exactly once at window 2459, is one-shot, and `applied` returns to the estimate.
+- **Bench-harness trap (not a live defect):** the harness feeds ONE level reading per 1 s window. An
+  alternating ±10 ms reading around an error of ~0 therefore never lands inside the restore's RAW
+  ±5 ms exit band. A shift-armed restore then never exits and slowly drags the level (~5 ms/h).
+  Live, `compensate` runs every audio callback and the buffer sweeps its whole ±10 ms tick sawtooth
+  within one mixer tick, so the raw exit fires at once. Model a shift/trim scenario with zero tick
+  noise, or with per-callback readings, never with a one-reading-per-window alternating ±10.
+  Switching the exit to the EMA was tried and rejected: a re-based step window skips the EMA update,
+  so an EMA exit would cancel a step-armed restore on its first call.
+- **C↔Rust parity:** a `gcc -std=gnu11 -Wall -Wextra -Werror` lift of the REAL
+  `asrc-compensator.c` (include dir `vendor/obs-studio/libobs/media-io`, `-lm`) with a `main` running
+  64/90/126 walks, a ±10 ms walk, the +24 ms offset and the unreachable floor prints the same
+  9-decimal numbers as a Rust probe that `#[path]`-includes `src/asrc_bench.rs` (e.g. `unreach
+  buf=60.000000000 … fallbacks=1 fb_at=2459 fb_from=40.000000000`). The obs-source.c wiring is
+  checked with `gcc -fsyntax-only -Wformat=2` against the real headers plus a scratch `obsconfig.h`
+  (the `obs-drm-output.md` net).
+- **Lock-step anchor:** `tests/genlock_preload.rs::vendored_source::asrc_absolute_level_setpoint_1355`.
+  It pins the constants, the fields, the setter decl, the capture line, the ABSENCE of the old
+  `c->level_target_ms = buffered_ms; c->level_captured = true;`, the bound, the obs-source.c setter
+  call and the `UNREACHABLE` + `fallbacks=%u (#1355)` strings. No new pwsh gate is needed: every
+  existing windows-genlock*.yml asrc substring keeps its presence (checked mechanically). The
+  telemetry `fallbacks=%u (#1355)` is appended AFTER the byte-identical `restore=%d (#1335)`.
