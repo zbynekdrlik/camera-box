@@ -41,7 +41,22 @@ heavy OBS restart ONLY for the receiver case — never a dead painter.
   painter-up proof and the `received=` delta are complementary, not redundant: the proof avoids a
   false OBS restart during a transient painter restart (HDMI drops → no recv → looks like a wedge).
 
-## Headless strih-OBS restart — force-kill over ssh, AHK respawns (NEVER an ssh GUI launch)
+## strih-lx (the production strih since M4): `systemctl --user restart strih-obs.service` (issue 1317 part 4)
+
+`mv_reverify_obs_restart_run` routes by `strih_platform "$ip"` (the fleet-backed resolver). On the
+Linux strih-lx it runs `mv_reverify_obs_restart_linux_cmd` over PLAIN ssh (never win_ssh_run /
+PowerShell): prove the unit is installed (`systemctl --user list-unit-files strih-obs.service`) —
+absent → `MV_REVERIFY_NO_UNIT` + rc 2, OBS untouched (the Linux analogue of the no-AHK guard below) —
+then `reset-failed` (clears a start-limit latch) and `restart --no-block` (returns at once; the unit's
+launcher `strih-obs-start.sh` clears `.sentinel/*` itself and waits ≤90 s for :4455, so the harness's
+own `mv_reverify_wait_obs_ws` poll owns the wait exactly as for the AHK respawn). A failed restart →
+`MV_REVERIFY_RESTART_FAILED` + rc 3 → the orchestrator fails loud. The orchestrator's messages name
+`strih-obs.service` on Linux and AutoHotkey64 on Windows. There is NO AHK on strih-lx — never port the
+AHK guard/kill there. Tier-0: `tests/python/test_strih_windows_remnants_1317.py` runs the router with
+a fake `sshpass` on PATH (argv capture) for both platforms. The live restart itself stays
+UNVERIFIED at Tier-0 (never restart the rig's OBS from a lane).
+
+## Headless strih-OBS restart (WINDOWS strih) — force-kill over ssh, AHK respawns (NEVER an ssh GUI launch)
 
 The E2E harness is HEADLESS (no win-* MCP). To restart strih OBS: **clear `.sentinel` + `Stop-Process
 obs64` over ssh** (session-agnostic file-delete + process-kill, allowed per `win-ssh-vs-mcp.md`

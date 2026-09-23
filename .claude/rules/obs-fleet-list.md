@@ -1,6 +1,9 @@
 ---
 paths:
   - "scripts/lib/obs-fleet.sh"
+  - "scripts/lib/strih-platform.sh"
+  - "scripts/obs_fleet_table.py"
+  - "tests/python/test_strih_windows_remnants_1317.py"
   - "scripts/audio-lag-alert-watchdog.sh"
   - "scripts/av-step-alert-watchdog.sh"
   - "scripts/bundle-state-alert-watchdog.sh"
@@ -184,16 +187,56 @@ Per-facet decision (by each facet's PREMISE — a platform-neutral read joins, a
   The host field OR the name matches (`10.77.9.202` and `strih-lx` → `linux-genlock`); the refusal
   is rc 1 + a named stderr line; an address the list does not know PASSES (an explicit ops target
   stays authoritative). Any new PowerShell / schtasks / `C:\` tool that takes a `--host` calls it
-  first -- never a hard-coded "not .202" check. **Known gap:** it matches only the literal fleet
-  host or name, so an unlisted alias (`strih-lx.lan`) passes; and the E2E flow's own resolver,
-  `strih_platform` (scripts/lib/strih-platform.sh, `STRIH_LX_HOST` default .202), is a SECOND
-  source of "is this the Linux strih" -- unifying the two is a follow-up candidate (issue 1317
-  part 3 LANE-RETURN), not done here.
+  first -- never a hard-coded "not .202" check.
+- **ONE alias-aware authority (issue 1317 part 4): `obs_fleet_name_for_host`.** Both the class gate
+  above AND `strih_platform` (scripts/lib/strih-platform.sh, which lazy-sources this lib) resolve an
+  address through it, so they can never disagree. Order: (1) exact name/host, case-folded
+  (`STRIH-LX`, `RESOLUME.lan`); (2) a DNS name's first label vs the row NAME (`strih-lx.lan` →
+  `strih-lx`); (3) the resolved address (the `obs_fleet_resolve_host` getent seam) vs the row HOST
+  fields — this is what catches **`strih.lan`, the retired Windows PC's own name, which the rig DNS
+  STILL points at 10.77.9.202** (verified `getent ahosts strih.lan` on dev1, 23.9.2026). An IPv4
+  literal is never sent to the resolver (no DNS in the hot path; tests stub `obs_fleet_resolve_host`
+  after sourcing). `strih_platform` keeps its env overrides (`STRIH_PLATFORM`, and `STRIH_LX_HOST`
+  now only as an explicit extra match — no default). The python twin is `scripts/obs_fleet_table.py`
+  (parses the SAME `OBS_FLEET` default block, or the `OBS_FLEET` env) used by rig-health-audit's
+  `strih_platform` and the phase/av-sync calibrate push plans; parity pinned by
+  `tests/python/test_strih_windows_remnants_1317.py` (runs both sides). Never add a third hand-kept
+  "which box is .202" map — extend the table.
 - **Live proof (23.9.2026, read-only `--dry-run` sweep):** network-reach `strih-lx (10.77.9.202):
   ping=1 ws:4455=1 bundle:8899=1 -> REACHABLE`; bundle-state `-> HEALTHY`; obs-liveness
   `strih-lx activeFps=30.00 renderAdvanced=True`; genlock-lock / render-freeze / audio-lag /
   dantesync-clock all `reachable=1`. A strih swap (the Poprad strih-pp next) is again a table +
   facet-policy edit here.
+
+## The last Windows-strih remnants — retired in issue 1317 part 4 (23.9.2026)
+
+Each routes on the ONE resolver above; the Windows branch is kept (a future Windows strih / the
+`STRIH_PLATFORM=windows` override) but no longer the default for .202:
+
+- **mv-reverify escalation restart** (`scripts/lib/mv-reverify-escalate.sh`): strih-lx gets
+  `systemctl --user restart --no-block strih-obs.service` over plain ssh — see
+  `.claude/rules/mv-reverify-escalate.md`.
+- **phase/av-sync calibrate push plans**: `.202` → MCP `linux-strih-lx`, destination by fleet class
+  (`/home/newlevel/.camera-box/<file>` on a linux-genlock box, `C:\ProgramData\camera-box\…` else).
+- **rig-dev-handover-check.sh**: the dantesync version item routes strih through the gate's
+  `--linux` arm on strih-lx via `strih_dantesync_nodes` (the same routing recording-e2e.sh's `[0/8]`
+  gate does inline since issue 1351).
+- **recording-e2e.sh `[8/8]` text**: banner via `strih_access_label`, planner hand-off via
+  `strih_planner_holder_note`, and the pull-back note + all three #652 cleanup plans are a
+  `strih_platform` split whose linux branch calls a `strih_lx_*` helper (exact-path `rm -f --` over
+  ssh, never a glob). **The Windows literals stay INLINE in the else-branch** — Rust static-anchor
+  tests pin `FileDownload $STRIH_PIXELS_WIN` and `Remove-Item -Force -LiteralPath '${STRIH_HOST_PATH`
+  inside recording-e2e.sh itself, so moving them into a helper would break those pins.
+- **AHK defaults**: `ahk_resolve_and_relaunch_ps` has NO default script (rc 2 + named stderr
+  without one) and `build_launch_program` defaults to `has_ahk=0`; every box-facing caller passes the
+  box's identity from `scripts/lib/genlock-fleet-boxes.sh`.
+- **NIC self-heal watcher** (issue 1199: installer, watcher `.ps1`, decision mirror, its pytest, its
+  rule): REMOVED with the PC — history only. strih-lx has no on-box self-heal; the dev1 reach
+  watchdog is the only outage signal.
+- **Still open (followup candidates, not done):** a Linux recordings-retention executor for strih-lx
+  `/srv/_REC`; the strih-lx port of the zero-loss restart mode (its `[$label 8a]` region still prints
+  win-strih text, but the mode is refused on Linux up front by `strih_zero_loss_restart_preflight`);
+  the strih-lx execute arm of deploy-genlock-fleet.
 
 ## Scope beyond the watchdogs
 
