@@ -20,6 +20,15 @@ The strih cutter/mix role is migrating from the Windows STRIH-SNV PC to a Linux 
 until everything is tuned on it — the Windows PC stays the production cutter meanwhile. This rule
 covers the provisioning scaffolding built during that preparation.
 
+> **Issue 1357 supersedes the desktop session described in older sections below.** strih-lx is now
+> the SAME OBS-only appliance as imag: the shared `scripts/lib/obs-box-baseline.sh` (setup-strih step
+> 11) gives it lightdm autologin -> openbox on plain **Xorg** (GNOME purged), NVIDIA **PRIME
+> nvidia-primary**, preempt=full, de-jitter + no crash popups, maxperf, the power envelope. So the
+> GNOME **Wayland** session, `WAYLAND_DISPLAY`, the XWayland-PRIME GPU env (`@STRIH_LX_OBS_GPU_ENV@`,
+> removed), the step-15 governor oneshot and the 11c rtprio grant (removed; rtprio stays OFF) are
+> history. strih-obs-start.sh resolves `DISPLAY=:0` only; Companion Satellite starts from the openbox
+> autostart. See `.claude/rules/obs-box-baseline.md` for the conversion runbook.
+
 ## The parallel-run contract (why the namespacing + the client-clock matter)
 
 While both boxes run, TWO strih senders coexist on the NDI wire and must never collide:

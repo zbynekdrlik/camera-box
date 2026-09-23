@@ -21,6 +21,11 @@ paths:
 
 # Replacing the imag notebook — install the OS, provision it, then VERIFY it (#791 / #815 / #816 / #821)
 
+> **Issue 1357:** setup-imag.sh's box-level steps (2, 4-9, 14, 15, 22, 25, 26) now call the shared
+> `scripts/lib/obs-box-baseline.sh` (moved there verbatim, run by setup-strih.sh too), and verify-imag
+> check `(bb)` runs the shared grader. Edit those steps in the lib, not in setup-imag.sh — see
+> `.claude/rules/obs-box-baseline.md`.
+
 > **Addresses — read this before chasing any IP in this file.** Since the **2026-07-29 IP swap**
 > (user directive) the imag ROLE permanently owns **`10.77.9.182`**: the replacement notebook was
 > moved ONTO that address and the retired original was moved OFF it to `10.77.9.189` (OBS stopped,
