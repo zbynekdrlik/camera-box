@@ -69,18 +69,47 @@ occurrence-count sweep (old vs new) AND an order-preservation check over each te
 (a first-occurrence anchor can move into a lib and flip an ordering assertion — the two issue-504
 kiosk tests are scoped to `obs_box_kiosk` for exactly that reason).
 
+## The grader is the shared contract
+
+verify-imag check `(bb)` and verify-strih item 32 run the SAME `obs_box_baseline_verdict`, so a
+row that passes on one box means the same thing on the other. It grades what the baseline WRITES,
+not only what it says it did: the rc.local EEE hook, the apt kernel holds (a generic kernel package
++ `lowlatency-kernel`), the iGPU max-frequency pin unit on an iGPU-only box, OBS
+`ProcessPriority=High` in global.ini, every `obs_box_dejitter_user_units` member masked for the
+desktop user (a `--user` mask silently no-ops when the user bus is down, which is exactly why it is
+graded), and lightdm + openbox installed.
+
+## Per-box power facts
+
+- imag: PL1 `${IMAG_PL1_W:-45}`, guard step-down 25 W (the historic iGPU values).
+- strih-lx: PL1 = `strih_lx_pl1_watts <firmware µW>` = max(55 W spec base, the firmware's own
+  package-0 long_term constraint read at provisioning through the envelope's identity gather). The
+  issue-1357 review read **80 W** live on strih-lx (23.9.2026), so strih keeps 80 W: pinning the
+  55 W spec base under the firmware would cut the cutter's sustained power by a third (the imag
+  25 W-clamp starvation class). The guard step-down is `strih_lx_pl1_stepdown_watts` (45 W), passed
+  as `obs_box_power_envelope`'s third argument. Overrides: `STRIH_LX_PL1_W`, `STRIH_LX_PL1_STEPDOWN_W`.
+
 ## strih-lx conversion (supervisor runbook)
 
-1. Run `setup-strih.sh` from a checkout (it copies the power-envelope tools from the repo). Its
-   final step only REPORTS the verify while `strih_lx_reboot_pending` (lowlatency drop-in present,
-   no running `preempt=full`).
+1. Stop OBS (`strih-obs-stop.sh`), then run `setup-strih.sh` from a checkout (it copies the
+   power-envelope tools from the repo). The kiosk item purges GNOME and switches the display manager
+   to lightdm, so the running GNOME session will not survive it — never re-run it expecting the
+   GNOME desktop to keep working; reboot right after it finishes. Its final step only REPORTS the
+   verify while `strih_lx_reboot_pending` (lowlatency drop-in present, no running `preempt=full`).
 2. Reboot once: the kernel, PRIME nvidia-primary and the lightdm -> openbox Xorg session all take
-   effect together. OBS starts from `~/.config/openbox/autostart` via `strih-obs.service`.
-3. Run `verify-strih.sh`: every `(baseline:*)` row must be PASS.
+   effect together. On 26.04 the lowlatency meta also pulls the series' newest HWE image (7.0.0-34
+   over the running -31), so the boot runs a NEWER kernel and the NVIDIA DKMS module rebuilds for
+   it: confirm `nvidia-smi` and `prime-select query` = nvidia after the boot. OBS starts from
+   `~/.config/openbox/autostart` via `strih-obs.service`; the autostart pins both outputs to
+   1920x1080@60 (`--auto` only as a fallback).
+3. Run `verify-strih.sh`: every `(baseline:*)` row must be PASS, and item 33 (rtprio-off) must PASS
+   (setup-strih removed the leftover grant; the reviewer found it still present on the box).
 
-Unverified on the live 26.04 box when this landed (check during the conversion): the
-`linux-lowlatency-hwe-26.04` meta name (the step fails loud naming it), lightdm/Xorg on 26.04, the
-55 W PL1 under a thermal soak (the guard steps down on a hot TCPU), the panel-primary +
-HDMI-right-of xrandr layout, and whether `strih-mv-host` + the vendored child-host projector are
-still needed on NVIDIA-primary Xorg (the XWayland-PRIME present stall they work around should be
-gone — re-measure, then remove them if so).
+Unverified on the live 26.04 box when this landed (check during the conversion): lightdm/Xorg on
+26.04, the kernel 7.0.0-34 boot + DKMS rebuild, the 80 W PL1 under a thermal soak (the guard steps
+down to 45 W on a hot TCPU), the 1920x1080@60 panel-primary + HDMI-right-of layout, the new OBS CPU
+pin (`/etc/strih-isolated-cpus.conf`, 2-11 on the i5-13450HX — `strih-obs-start.sh` now taskset-pins
+OBS where it ran unpinned before; re-measure the render/genlock ladder against the 11b NIC-IRQ E-core),
+and whether `strih-mv-host` + the vendored child-host projector are still needed on NVIDIA-primary
+Xorg (the XWayland-PRIME present stall they work around should be gone — re-measure, then remove
+them if so).
