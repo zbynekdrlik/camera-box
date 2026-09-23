@@ -21,7 +21,6 @@ Tier-0: every check here runs bash functions directly or reads files -- no cargo
 """
 import os
 import pathlib
-import shlex
 import stat
 import subprocess
 import sys
@@ -298,17 +297,21 @@ def test_linux_cleanup_note_is_an_exact_path_rm_never_a_sweep():
     assert out.startswith("  strih-lx ssh:"), out
     assert "Remove-Item" not in out and "*" not in out
     # review round 1: the printed line is pasted into a LOCAL shell and ssh re-parses the joined
-    # remote command in the REMOTE shell -- so parse it BOTH times and require ONE exact path arg.
+    # remote command in the REMOTE shell -- so run it through BASH both times (python's shlex does
+    # not model bash's double-quote \$ / \` escapes) and require ONE exact path argument.
     for path in ["/srv/_REC/2026-09-23 20-00-07.mkv", "/srv/a'b.mkv", '/srv/q"$x`y\\z.mkv']:
         esc = path.replace("'", "'\\''")
         r = _platform(f"strih_lx_recording_cleanup_note '' 10.77.9.202 '{esc}'")
-        line = r.stdout.strip()
-        cmd = line.split("ssh:", 1)[1].strip()
-        local_argv = shlex.split(cmd)
-        assert local_argv[:2] == ["ssh", "newlevel@10.77.9.202"] and len(local_argv) == 3, local_argv
-        remote_argv = shlex.split(local_argv[2])
-        assert remote_argv == ["rm", "-f", "--", path], (
-            f"the remote shell must see exactly one path argument for {path!r}: {remote_argv}")
+        cmd = r.stdout.strip().split("ssh:", 1)[1].strip()
+        assert cmd.startswith("ssh newlevel@10.77.9.202 "), cmd
+        # local parse: a fake `ssh` records how many args it got and the remote command string.
+        local = _bash('ssh() { printf "%s" "$#"; printf "\\0%s" "$@"; }\n' + cmd)
+        parts = local.stdout.split("\0")
+        assert parts[0] == "2" and parts[1] == "newlevel@10.77.9.202", parts
+        # remote parse: the remote shell runs that string with a fake `rm` that prints its argv.
+        remote = _bash('rm() { printf "%s\\0" "$@"; }\n' + parts[2])
+        assert remote.stdout.split("\0")[:-1] == ["-f", "--", path], (
+            f"the remote shell must see exactly one path argument for {path!r}: {remote.stdout!r}")
 
 
 def test_planner_holder_note_is_platform_correct():
