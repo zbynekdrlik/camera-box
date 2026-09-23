@@ -15,9 +15,10 @@
 //! libndi has no API for a sender's port (`send_get_source_name()->p_url_address` is NULL for a
 //! local sender, measured), so the new `vendor/distroav/src/ndi-sender-port.cpp` learns it as the
 //! single new TCP LISTENING socket in `/proc/self/fd` across the (serialized) `send_create`,
-//! counting ONLY libndi's sender port band `:5961..:6960`. Part 3 of the ticket: a libndi RECEIVER
-//! pulling a remote source opens its own listener on `:6961+` from a libndi thread while it
-//! connects (measured dev1 <- dev2 source; live strih-lx `:6961..:6973`), so on strih-lx the
+//! counting ONLY libndi's sender port band `:5961..:6959`. Part 3 of the ticket: a libndi RECEIVER
+//! pulling a remote source opens its own listener on `:6960+` from a libndi thread while it
+//! connects (measured dev1 <- dev2 source: :6961, :6962, a transient :6960, :6963 ...; live
+//! strih-lx `:6961..:6973`), so on strih-lx the
 //! back-to-back `MULTIVIEW` / `Grading` creates saw two new listeners and were never identified.
 //! An unidentified sender logs its OWN `PORTID-1363` label — `WARN-1363` stays reserved for the
 //! TIME_WAIT/live listener on :5961 at the reserve.
@@ -94,7 +95,7 @@ fn sender_port_module_present_and_linux_only() {
     for sig in [
         "#define NDI_SENDER_FIRST_TCP_PORT 5961",
         "#define NDI_MESSAGING_TCP_PORT 5960",
-        "#define NDI_RECEIVER_FIRST_TCP_PORT 6961",
+        "#define NDI_RECEIVER_FIRST_TCP_PORT 6960",
         "#define NDI_LISTEN_PORT_AMBIGUOUS (-1)",
         "enum ndi_first_port_state {",
         "static inline int ndi_first_port_hold_state(",
@@ -560,7 +561,7 @@ fn pure_helpers_compute_the_spec_truth_table() {
         (&[5960], &[0, 5960, 5963], 5963), // a 0 entry is ignored
         (&[5960, 5961], &[5960, 5962], 5962), // a listener that vanished does not matter
         // Part 3 — the live strih-lx failure: a libndi RECEIVER pulling a remote camera opens its
-        // own :6961+ listener from a libndi thread while the MULTIVIEW/Grading create runs (not
+        // own :6960+ listener from a libndi thread while the MULTIVIEW/Grading create runs (not
         // serialized by the create mutex). It is never a sender port, so the sender is identified.
         (
             &[4455, 5960, 5961, 5962],
@@ -571,16 +572,18 @@ fn pure_helpers_compute_the_spec_truth_table() {
         (&[5960, 5961], &[5960, 5961, 6961], 0), // only a receiver listener appeared: none
         (&[], &[4455, 5961], 5961),              // obs-websocket (:4455) is never a sender
         (&[5960], &[5960, 5961, 45000], 5961),   // an ephemeral listener is never a sender
-        (&[5960], &[5960, 6960], 6960),          // top of the sender band
-        (&[5960], &[5960, 6961], 0),             // first receiver port: outside the band
+        (&[5960], &[5960, 6959], 6959),          // top of the sender band
+        (&[5960], &[5960, 6960], 0),             // a receiver's (transient) :6960 listener
+        (&[5960], &[5960, 6961], 0),             // a receiver's :6961 listener
         (&[5960], &[5960, 5961, 6962, 5962], -1), // two sender-band ports + a receiver: ambiguous
     ];
-    // port -> inside libndi's sender port band [5961, 6961)?
+    // port -> inside libndi's sender port band [5961, 6960)?
     let band: &[(i32, i32)] = &[
         (5960, 0),
         (5961, 1),
         (6000, 1),
-        (6960, 1),
+        (6959, 1),
+        (6960, 0),
         (6961, 0),
         (6973, 0),
         (4455, 0),
@@ -806,7 +809,7 @@ static int plain_listener(int port)
 // Like libndi: the first free port of the sender band, walking up from 5961 on a failed bind.
 static int band_listener(void)
 {
-	for (int p = 5961; p < 6961; p++) {
+	for (int p = 5961; p < 6960; p++) {
 		const int fd = plain_listener(p);
 		if (fd >= 0)
 			return fd;
