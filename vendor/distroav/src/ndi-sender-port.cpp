@@ -7,14 +7,15 @@
 
 	Known, accepted race: the fd scan runs on sockets libndi owns. If a libndi
 	thread closes an fd and the number is reused between our getsockname() and
-	setsockopt(), the worst case is one unrelated socket closing with RST
-	instead of FIN. Every syscall failure is logged and skipped.
+	the abort (setsockopt + disconnect), the worst case is one unrelated socket
+	reset instead of closed with a FIN. Every syscall failure is logged and
+	skipped. A libndi thread that writes to a connection after the abort gets
+	EPIPE, never a signal: the OBS frontend blocks SIGPIPE in every thread.
 
 	Not covered (a TIME_WAIT can still form, harmful only on a relaunch within
 	60 s): a connection libndi itself closes DURING the session (not at
-	destroy), and a connection libndi half-closes (shutdown) before destroy
-	whose peer FIN already arrived. A crash/kill never runs the abort at all;
-	the :5961 reserve reports that case as WARN-1363.
+	destroy). A crash/kill never runs the abort at all; the :5961 reserve
+	reports that case as WARN-1363.
 ******************************************************************************/
 
 #ifdef __linux__
@@ -155,6 +156,7 @@ void ndi_sender_abort_connections_before_destroy(int port, const char *name)
 		return; // unknown port: nothing to target (the create already warned)
 	const char *who = name ? name : "";
 	int aborted = 0;
+	int reset = 0;
 	int failed = 0;
 	const bool scanned = ndi_for_each_tcp_socket([&](int fd, int local_port) {
 		const int is_listener = ndi_socket_is_listening(fd);
@@ -164,9 +166,23 @@ void ndi_sender_abort_connections_before_destroy(int port, const char *name)
 		struct linger lg;
 		lg.l_onoff = 1;
 		lg.l_linger = 0;
-		if (setsockopt(fd, SOL_SOCKET, SO_LINGER, &lg, sizeof(lg)) == 0)
+		const bool lingered = setsockopt(fd, SOL_SOCKET, SO_LINGER, &lg, sizeof(lg)) == 0;
+		if (lingered)
 			aborted++;
-		else
+		// Reset NOW, not at libndi's close(): libndi's send_destroy calls
+		// shutdown(SHUT_RDWR) first, which sends a graceful FIN whatever SO_LINGER
+		// says, and a viewer's answering FIN can arrive before the close() (the
+		// socket is then already in TIME_WAIT). A connect() with AF_UNSPEC is the
+		// kernel's tcp_disconnect: RST now, socket to CLOSE, fd left open for libndi,
+		// whose shutdown()/close() then send nothing. SO_LINGER 0 stays as the
+		// fallback when the disconnect fails.
+		struct sockaddr unspec;
+		memset(&unspec, 0, sizeof(unspec));
+		unspec.sa_family = AF_UNSPEC;
+		const bool disconnected = connect(fd, &unspec, sizeof(unspec)) == 0;
+		if (disconnected)
+			reset++;
+		if (!lingered || !disconnected)
 			failed++;
 	});
 	if (!scanned) {
@@ -178,9 +194,9 @@ void ndi_sender_abort_connections_before_destroy(int port, const char *name)
 		return;
 	}
 	obs_log(failed ? LOG_WARNING : LOG_INFO,
-		"ndi-sender-port: TCP :%d ('%s'): %d connection(s) set to close with RST (SO_LINGER 0), "
-		"%d failed (#1363)",
-		port, who, aborted, failed);
+		"ndi-sender-port: TCP :%d ('%s'): %d connection(s) set to close with RST (SO_LINGER 0), %d reset at "
+		"once (AF_UNSPEC disconnect), %d failed (#1363)",
+		port, who, aborted, reset, failed);
 }
 
 // errno of a plain (no SO_REUSEADDR) bind on addr:port, 0 when it binds. The

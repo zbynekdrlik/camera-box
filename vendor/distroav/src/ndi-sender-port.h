@@ -18,8 +18,10 @@
 	    band (a receiver's own listener opened concurrently is not a sender);
 	  - every sender destroy is preceded by
 	    ndi_sender_abort_connections_before_destroy(), which sets
-	    SO_LINGER {1,0} on that port's CONNECTED sockets, so they close with
-	    RST and no TIME_WAIT survives;
+	    SO_LINGER {1,0} on that port's CONNECTED sockets AND resets them at
+	    once (connect AF_UNSPEC: libndi's destroy shuts a connection down
+	    gracefully before it closes it, so linger alone comes too late), so
+	    no TIME_WAIT survives;
 	  - the :5961 reserve probes the port first and logs one loud WARN-1363
 	    line when a TIME_WAIT (a crash/kill skipped the abort) or a live
 	    listener holds it. It never waits.
@@ -176,8 +178,9 @@ static inline const char *ndi_listen_port_failure_text(int snapshots_ok, int res
 // cannot be identified; logged). All tracked creates are serialized.
 NDIlib_send_instance_t ndi_sender_create_tracked(const NDIlib_send_create_t *desc, int *out_port);
 
-// Right before send_destroy: SO_LINGER {1,0} on every connected socket whose
-// local port is `port`, so they close with RST and leave no TIME_WAIT.
+// Right before send_destroy: on every connected socket whose local port is
+// `port`, SO_LINGER {1,0} plus an immediate reset (connect AF_UNSPEC), so no
+// TIME_WAIT is left even though libndi shuts the socket down before closing it.
 // `name` is only a log label (an output's NDI name, a filter's source name;
 // the port ties it to the create line). port <= 0 is a no-op. Best-effort:
 // every failure is logged, never fatal.
