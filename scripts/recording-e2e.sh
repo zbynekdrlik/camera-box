@@ -931,20 +931,25 @@ VERSION_STREAM_STATE="${VERSION_STREAM_STATE:-$OUTDIR/version-stream.json}"
 # shellcheck source=scripts/lib/bundle-state-selfheal.sh
 . "$HERE/lib/bundle-state-selfheal.sh"   # #817: gate-time self-heal for a dead :8899 BundleStateServer
 fetch_box_state() {
-  local host="$1" dest="$2" _bs_user _bs_pw
+  local host="$1" dest="$2" _bs_user _bs_pw _bs_class
   # #817: resolve per-box ssh creds so a fetch failure can trigger the SAME session-agnostic restart
-  # the dev1 issue-732 watchdog uses (schtasks /run), then re-fetch — before refusing the whole run.
+  # the dev1 issue-732 watchdog uses, then re-fetch — before refusing the whole run.
   case "$host" in
     "$STREAM") _bs_user="$STREAM_USER"; _bs_pw="$STREAM_PW" ;;
     *)         _bs_user="$STRIH_USER";  _bs_pw="$STRIH_PW" ;;
   esac
+  # issue 1317: the restart is class-resolved -- the Linux strih-lx runs a systemd --user unit, never
+  # a Windows Scheduled Task, so it must not be sent the Windows restart line (the stream box stays
+  # Windows even under a forced strih-platform override -- the lib resolver checks the strih host first).
+  _bs_class="$(bundle_state_selfheal_class "$host" "$STRIH")"
   [ -s "$dest" ] && { echo "    using pre-fetched version-integrity state: $dest"; return 0; }
   if curl -fsS --max-time 30 -o "$dest" "http://${host}:${WIN_BUNDLE_STATE_PORT}/bundle-state.json" 2>/dev/null; then
     echo "    fetched version-integrity state from ${host}:${WIN_BUNDLE_STATE_PORT} -> $dest"
   else
-    # #817: :8899 is not answering — self-heal (schtasks /run over ssh) + a bounded re-fetch, then an
-    # HONEST one-line fault if it stays down, instead of the pre-#817 misleading version-drift note.
-    bundle_state_selfheal_fetch "$host" "$dest" "$WIN_BUNDLE_STATE_PORT" "$_bs_user" "$_bs_pw" \
+    # #817: :8899 is not answering — self-heal (a class-resolved restart over ssh) + a bounded
+    # re-fetch, then an HONEST one-line fault if it stays down, instead of the pre-#817 misleading
+    # version-drift note.
+    bundle_state_selfheal_fetch "$host" "$dest" "$WIN_BUNDLE_STATE_PORT" "$_bs_user" "$_bs_pw" "$_bs_class" \
       && echo "    self-healed bundle-state-server on ${host}: re-fetched -> $dest"
   fi
 }

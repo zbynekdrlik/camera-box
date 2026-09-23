@@ -68,12 +68,21 @@ impl Rig {
     /// the curl shim's HEALTHY(true)/DOWN(false) mode. Returns combined stdout+stderr (the watchdog
     /// logs to stderr).
     fn pass(&self, ping_up: &str, curl_up: bool) -> String {
+        self.pass_with(ping_up, curl_up, &[])
+    }
+
+    /// `pass` plus extra env (issue 1317: an `OBS_FLEET` override that declares the box's class).
+    fn pass_with(&self, ping_up: &str, curl_up: bool, extra: &[(&str, &str)]) -> String {
         let path_env = format!(
             "{}:{}",
             self.bin.display(),
             std::env::var("PATH").unwrap_or_default()
         );
-        let out = Command::new("bash")
+        let mut cmd = Command::new("bash");
+        for (k, v) in extra {
+            cmd.env(k, v);
+        }
+        let out = cmd
             .arg(watchdog())
             .arg("--dry-run")
             .env("PATH", path_env)
@@ -139,6 +148,48 @@ fn down_path_holds_one_pass_then_restarts_and_alerts() {
     assert!(
         p2.contains("WOULD alert") && p2.contains("alert_now=1"),
         "pass2 (confirmed) must fire the (throttled) alert: {p2}"
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// issue 1317: a LINUX genlock box (the production strih-lx since M4) that is confirmed DOWN gets
+// its systemd --user unit restarted — the Windows `schtasks /run` must never be aimed at it. The
+// box's class comes from the ONE fleet list (OBS_FLEET, overridden here for a hermetic fixture).
+// ---------------------------------------------------------------------------------------------
+#[test]
+fn linux_class_box_restarts_via_systemctl_never_schtasks_1317() {
+    let rig = Rig::new();
+    let fleet = [("OBS_FLEET", "fakebox|127.0.0.1|linux-genlock|always")];
+    let p1 = rig.pass_with("127.0.0.1 127.0.0.9", false, &fleet);
+    assert!(p1.contains("holding"), "pass1 must HOLD: {p1}");
+    let p2 = rig.pass_with("127.0.0.1 127.0.0.9", false, &fleet);
+    assert!(
+        p2.contains("WOULD auto-restart"),
+        "pass2 (confirmed) must attempt the auto-restart: {p2}"
+    );
+    assert!(
+        p2.contains("systemctl --user restart"),
+        "a Linux box restarts its systemd --user unit: {p2}"
+    );
+    assert!(
+        !p2.contains("schtasks"),
+        "a Linux box must never get the Windows schtasks restart: {p2}"
+    );
+}
+
+#[test]
+fn windows_class_box_keeps_the_schtasks_restart_1317() {
+    let rig = Rig::new();
+    let fleet = [("OBS_FLEET", "fakebox|127.0.0.1|windows-genlock|always")];
+    rig.pass_with("127.0.0.1 127.0.0.9", false, &fleet);
+    let p2 = rig.pass_with("127.0.0.1 127.0.0.9", false, &fleet);
+    assert!(
+        p2.contains("schtasks /run /tn \"BundleStateServer\""),
+        "a Windows box keeps the schtasks /run restart: {p2}"
+    );
+    assert!(
+        !p2.contains("systemctl"),
+        "a Windows box must never get a systemctl restart: {p2}"
     );
 }
 

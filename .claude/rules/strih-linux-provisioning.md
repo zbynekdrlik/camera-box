@@ -98,8 +98,11 @@ What this decision changed (issue 1317, owner 18.9.):
    meta — so the ONE installer serves both a 24.04 and a 26.04 live stick, never a hardcoded noble
    literal. The `ls /boot/vmlinuz-*` fail-loud checks are unchanged.
 
-Static IP **10.77.9.203** (free; .202 strih, .204 stream); `strih-lx.lan` DNS is a MikroTik static
-entry = owner step (the router is read-only for me), scripts dial the IP / hostname.
+Static IP: provisioned at **10.77.9.203** during the parallel run; since the M4 cut-over (20.9.2026)
+strih-lx is the production strih at **10.77.9.202** (the Windows strih PC is retired). `strih-lx.lan`
+has NO DNS entry on dev1 (a MikroTik static entry = owner step, the router is read-only for me), so
+every dev1 consumer dials the IP — the obs-fleet row is `strih-lx|10.77.9.202|linux-genlock|always`
+(`.claude/rules/obs-fleet-list.md`).
 
 ## Module structure (the source-of-truth split)
 

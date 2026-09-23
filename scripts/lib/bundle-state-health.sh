@@ -77,7 +77,18 @@ bundle_state_alert_detail() {
   printf '%s (%s): ping %s, OBS-WS:4455 %s, bundle-state:8899 %s\n' "$box" "$ip" "$p" "$w" "$b"
 }
 
-# bundle_state_restart_remote_cmd -> stdout: the exact remote command to (re)start the task.
+# bundle_state_restart_remote_cmd [class] -> stdout: the exact remote command to (re)start the
+#   box's :8899 bundle-state server, resolved from the box's obs-fleet CLASS (issue 1317):
+#   * `linux-genlock` (strih-lx, the production strih since M4; imag): the server is a systemd
+#     `--user` unit named `<role>-bundle-state-server.service` (strih-/imag-), reached over a plain
+#     ssh login (pam_systemd sets XDG_RUNTIME_DIR; the boxes run with Linger=yes). The unit name is
+#     matched by the shared `*-bundle-state-server.service` pattern -- single-quoted so the REMOTE
+#     shell never globs it against the cwd; systemctl itself matches it against LOADED units (an
+#     enabled unit stays loaded, failed or not). `reset-failed` first, so a unit that exhausted its
+#     start limit restarts instead of refusing. The ssh login shell there is bash, so `;` is a plain
+#     statement separator; the string stays the FINAL ssh argument (never embedded mid-command).
+#   * anything else (`windows-genlock`, empty, an unknown/unlisted box -- the no-arg default the E2E
+#     self-heal caller uses): the Windows form below, byte-identical to its pre-1317 text.
 #   Pure string (no network) so the session-agnostic-safety property is pinned by a Tier-0 test:
 #   `schtasks /run` starts the HIDDEN, headless bundle-state supervisor task (verified live: the task
 #   action is `powershell ... -WindowStyle Hidden -File run-bundle-state-server.ps1`) -- session-
@@ -87,6 +98,28 @@ bundle_state_alert_detail() {
 #   this string is passed as the FINAL ssh argument (never embedded mid-command), so the
 #   $()-newline-strip gotcha does not apply -- and `;` is NOT a cmd.exe statement terminator, so a
 #   trailing one could reach schtasks as a stray token.
+#   ZERO-MATCH GUARD (linux): `systemctl --user restart '<pattern>'` exits 0 when the pattern matches
+#   NO loaded unit (verified on systemd 255), so an unloaded/disabled/renamed unit would read as a
+#   successful restart. The command therefore first lists the matching units and exits 3 when there
+#   are none, so the caller's ssh returns non-zero and it logs the restart as FAILED, never "issued OK".
 bundle_state_restart_remote_cmd() {
-  printf 'schtasks /run /tn "BundleStateServer"\n'
+  case "${1:-}" in
+    linux-genlock)
+      printf '%s\n' "systemctl --user list-units --all --no-legend --plain '*-bundle-state-server.service' | grep -q . || exit 3; systemctl --user reset-failed '*-bundle-state-server.service' 2>/dev/null; systemctl --user restart '*-bundle-state-server.service'"
+      ;;
+    *)
+      printf 'schtasks /run /tn "BundleStateServer"\n'
+      ;;
+  esac
+}
+
+# bundle_state_restart_label [class] -> stdout: a short human label for the restart mechanism of
+#   CLASS (logs + alert text). It lives right next to bundle_state_restart_remote_cmd with the same
+#   class cases, so a class change edits both in one place and every caller (the dev1 watchdog and the
+#   E2E self-heal) shares one label (issue 1317).
+bundle_state_restart_label() {
+  case "${1:-}" in
+    linux-genlock) printf 'systemctl --user restart' ;;
+    *) printf 'schtasks /run' ;;
+  esac
 }

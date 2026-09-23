@@ -203,3 +203,100 @@ fn restart_cmd_never_uses_the_interactive_it_form() {
         "restart command must NOT use the interactive /it form: {c}"
     );
 }
+
+// ---------------------------------------------------------------------------------------------
+// issue 1317 — bundle_state_restart_remote_cmd <class>: the restart is PLATFORM-resolved from the
+// fleet class. A Windows genlock box keeps the byte-identical `schtasks /run` line (the no-arg
+// default too — the E2E self-heal caller passes none); a Linux genlock box (strih-lx, the
+// production strih since M4) gets its systemd --user unit restarted, never a Windows schtasks.
+// ---------------------------------------------------------------------------------------------
+#[test]
+fn restart_cmd_windows_class_is_byte_identical_to_the_default_1317() {
+    let default = stdout_of("bundle_state_restart_remote_cmd");
+    let win = stdout_of("bundle_state_restart_remote_cmd windows-genlock");
+    assert_eq!(
+        win, default,
+        "the windows-genlock form must equal the no-arg default"
+    );
+    assert_eq!(win, "schtasks /run /tn \"BundleStateServer\"");
+}
+
+#[test]
+fn restart_cmd_linux_class_restarts_the_systemd_user_unit_1317() {
+    let c = stdout_of("bundle_state_restart_remote_cmd linux-genlock");
+    assert!(
+        !c.contains("schtasks"),
+        "a Linux box must never get the Windows schtasks restart: {c}"
+    );
+    assert!(
+        c.contains("systemctl --user restart"),
+        "a Linux box restarts its --user bundle-state unit: {c}"
+    );
+    assert!(
+        c.contains("'*-bundle-state-server.service'"),
+        "the unit is matched by the shared *-bundle-state-server.service name, quoted so the remote shell never globs it: {c}"
+    );
+    assert!(
+        c.contains("systemctl --user reset-failed"),
+        "a unit stopped by its start limit must be reset-failed before the restart: {c}"
+    );
+}
+
+/// Run the linux-genlock restart command against a stand-in `systemctl` FUNCTION (no real systemd)
+/// in a subshell, the way the remote login shell runs it. `units` = what `list-units` prints.
+/// Returns (the subshell's exit code, the recorded systemctl calls).
+fn run_linux_restart(units: &str) -> (i32, String) {
+    // The call log goes to a FILE, never stdout: the command pipes `list-units` into `grep -q`, so a
+    // stdout echo from the stand-in would itself satisfy the grep and hide a zero-match.
+    let body = format!(
+        "CALLS=\"$(mktemp)\"\n\
+         systemctl() {{ echo \"CALL $*\" >> \"$CALLS\"; case \"$*\" in *list-units*) printf '%s' '{units}' ;; esac; return 0; }}\n\
+         cmd=\"$(bundle_state_restart_remote_cmd linux-genlock)\"\n\
+         ( eval \"$cmd\" ); echo \"RC=$?\"\n\
+         cat \"$CALLS\"; rm -f \"$CALLS\"\n"
+    );
+    let out = stdout_of(&body);
+    let rc = out
+        .lines()
+        .find_map(|l| l.strip_prefix("RC="))
+        .and_then(|v| v.trim().parse::<i32>().ok())
+        .unwrap_or(-1);
+    (rc, out)
+}
+
+#[test]
+fn restart_cmd_linux_fails_when_no_bundle_state_unit_is_loaded_1317() {
+    // `systemctl --user restart '<pattern>'` exits 0 when the pattern matches NO loaded unit, so a
+    // missing/disabled unit would read as "restart issued OK". The command must fail instead.
+    let (rc, out) = run_linux_restart("");
+    assert_ne!(rc, 0, "no matching unit must make the restart FAIL: {out}");
+    assert!(
+        !out.contains("CALL --user restart"),
+        "with no unit loaded the restart must not even be attempted: {out}"
+    );
+}
+
+#[test]
+fn restart_cmd_linux_restarts_when_the_unit_is_loaded_1317() {
+    let (rc, out) = run_linux_restart(
+        "strih-bundle-state-server.service loaded active running strih-lx bundle-state",
+    );
+    assert_eq!(rc, 0, "a loaded unit must restart cleanly: {out}");
+    assert!(
+        out.contains("CALL --user restart *-bundle-state-server.service"),
+        "the restart must run against the unit pattern: {out}"
+    );
+}
+
+#[test]
+fn restart_label_follows_the_class_1317() {
+    assert_eq!(
+        stdout_of("bundle_state_restart_label linux-genlock"),
+        "systemctl --user restart"
+    );
+    assert_eq!(
+        stdout_of("bundle_state_restart_label windows-genlock"),
+        "schtasks /run"
+    );
+    assert_eq!(stdout_of("bundle_state_restart_label"), "schtasks /run");
+}
