@@ -34,10 +34,28 @@
 bundle_state_down_message() {
   local box="${1:-?}" port="${2:-8899}" class="${3:-}"
   if [ "$class" = "linux-genlock" ]; then
-    printf 'bundle-state-server DOWN on %s (nothing on :%s) -- automatic self-heal did not restore it; the version-integrity gate will refuse (exit 11). Recover: ssh to %s and run `systemctl --user restart strih-bundle-state-server.service` (the *-bundle-state-server.service user unit; check its journal).\n' "$box" "$port" "$box"
+    printf "bundle-state-server DOWN on %s (nothing on :%s) -- automatic self-heal did not restore it; the version-integrity gate will refuse (exit 11). Recover: ssh to %s and run \`systemctl --user restart '*-bundle-state-server.service'\` (strih-bundle-state-server.service on strih-lx; confirm it is listed by \`systemctl --user list-units --all '*-bundle-state-server.service'\` and check its journal).\n" "$box" "$port" "$box"
     return 0
   fi
   printf 'bundle-state-server DOWN on %s (nothing on :%s) -- automatic self-heal did not restore it; the version-integrity gate will refuse (exit 11). Recover: run `schtasks /run /tn "BundleStateServer"` on %s (or check scripts/run-bundle-state-server.ps1).\n' "$box" "$port" "$box"
+}
+
+# bundle_state_selfheal_class <host> <strih_host> -> stdout: the obs-fleet class to restart HOST as
+#   (issue 1317). `linux-genlock` ONLY when HOST is the strih AND the ONE strih platform resolver
+#   (scripts/lib/strih-platform.sh `strih_platform`) says that strih is Linux; everything else
+#   (the stream box, a Windows strih) is `windows-genlock`. The host check comes FIRST because the
+#   `STRIH_PLATFORM` override describes the STRIH only -- without it, `STRIH_PLATFORM=linux` would
+#   route the Windows stream box to a systemctl restart and silently break its self-heal. Pure
+#   (lazy-sources strih-platform.sh when the caller has not); always exits 0.
+bundle_state_selfheal_class() {
+  local host="${1:-}" strih_host="${2:-}"
+  command -v strih_platform >/dev/null 2>&1 \
+    || . "${BASH_SOURCE[0]%/*}/strih-platform.sh"
+  if [ -n "$host" ] && [ "$host" = "$strih_host" ] && [ "$(strih_platform "$host")" = "linux" ]; then
+    printf 'linux-genlock'
+  else
+    printf 'windows-genlock'
+  fi
 }
 
 # bundle_state_selfheal_fetch <host> <dest> <port> <ssh_user> <ssh_pw> [class] -> exit 0 iff, after

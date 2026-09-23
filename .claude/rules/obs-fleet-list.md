@@ -118,11 +118,12 @@ Per-facet decision (by each facet's PREMISE — a platform-neutral read joins, a
 - `obs_fleet_facet_members ndi-portmap` = `strih-lx`: `scripts/ndi-portmap-audit.sh` consumes the
   member NAME only and refuses any member count other than one. It derives the sender prefix from the
   name and reads the IP from the anchor's own mDNS record. Details: `.claude/rules/ndi-portmap-watchdog.md`.
-- **Not covered by the fleet list (separate follow-up):** dev1 watchdogs that do NOT derive from
-  `obs_fleet_boxes` still dial a literal `strih` at .202 with Windows-shaped probes
+- **Outside the fleet list (the issue-1317 edit does NOT reach them):** dev1 watchdogs that do NOT
+  derive from `obs_fleet_boxes` still dial a literal `strih` at .202 with Windows-shaped probes
   (`obs-session-watchdog.sh` via `win_ssh_run`, `obs-burn-reconcile-watchdog.sh`,
-  `rig-restore-watchdog.sh`); moving them onto the fleet list + a class-resolved probe is their own
-  change, not a fleet-row edit.
+  `rig-restore-watchdog.sh`). Moving them onto the fleet list + a class-resolved probe is a separate
+  change (recorded on issue 1317 for the supervisor to file); do not assume a fleet-row edit fixes
+  them.
 - **Live proof (23.9.2026, read-only `--dry-run` sweep):** network-reach `strih-lx (10.77.9.202):
   ping=1 ws:4455=1 bundle:8899=1 -> REACHABLE`; bundle-state `-> HEALTHY`; obs-liveness
   `strih-lx activeFps=30.00 renderAdvanced=True`; genlock-lock / render-freeze / audio-lag /

@@ -184,16 +184,18 @@ write_state_field() {
 # is REPLACED for this one verdict; every other verdict keeps the original #391 command.
 recovery_plan_for() {
   local box="$1" label="$2"
-  if [ "$label" = "GPU-DEVICE-REMOVED" ]; then
-    printf '#89: GPU device removed (DXGI TDR/driver-internal-error) on %s — an OBS-only restart typically does NOT clear this; a full PC reboot of the box is required (agent/human-driven, see .claude/skills/obs-ops "GPU wedge on stream box")' "$box"
-    return
-  fi
-  # issue 1317: the recovery is CLASS-resolved from the fleet list. A linux-genlock box (strih-lx,
+  # issue 1317: the recovery is CLASS-resolved from the fleet list, BEFORE any verdict-specific
+  # text (the #89 DXGI / PC-reboot guidance below is Windows-only). A linux-genlock box (strih-lx,
   # the production strih since M4) runs OBS as a supervised systemd --user unit (`<role>-obs.service`,
   # e.g. strih-obs.service) reached over plain ssh -- the Windows launch program + win-* MCP Shell
-  # below do not apply to it (launch-obs-genlock.sh refuses a Linux box name).
+  # below do not apply to it (launch-obs-genlock.sh refuses a Linux box name). The list-units check
+  # comes first because `systemctl --user restart '<pattern>'` exits 0 when NOTHING matches.
   if [ "$(obs_fleet_class "$box" 2>/dev/null || true)" = "linux-genlock" ]; then
-    printf "ssh newlevel@%s \"systemctl --user restart '*-obs.service'\"   # Linux genlock box: restarts its supervised OBS unit (strih-obs.service on strih-lx); verify :4455 + renderAdvanced after" "$(obs_fleet_host "$box" 2>/dev/null || printf '%s' "$box")"
+    printf "ssh newlevel@%s \"systemctl --user list-units --all --no-legend --plain '*-obs.service' | grep -q . && systemctl --user restart '*-obs.service'\"   # Linux genlock box (%s verdict): restarts its supervised OBS unit (strih-obs.service on strih-lx); a non-zero exit = no OBS unit loaded; verify :4455 + renderAdvanced after" "$(obs_fleet_host "$box" 2>/dev/null || printf '%s' "$box")" "$label"
+    return
+  fi
+  if [ "$label" = "GPU-DEVICE-REMOVED" ]; then
+    printf '#89: GPU device removed (DXGI TDR/driver-internal-error) on %s — an OBS-only restart typically does NOT clear this; a full PC reboot of the box is required (agent/human-driven, see .claude/skills/obs-ops "GPU wedge on stream box")' "$box"
     return
   fi
   printf 'bash scripts/launch-obs-genlock.sh --box %s --force   # paste the printed PowerShell program into the win-%s MCP Shell' "$box" "$box"

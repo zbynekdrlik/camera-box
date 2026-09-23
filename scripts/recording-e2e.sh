@@ -931,7 +931,7 @@ VERSION_STREAM_STATE="${VERSION_STREAM_STATE:-$OUTDIR/version-stream.json}"
 # shellcheck source=scripts/lib/bundle-state-selfheal.sh
 . "$HERE/lib/bundle-state-selfheal.sh"   # #817: gate-time self-heal for a dead :8899 BundleStateServer
 fetch_box_state() {
-  local host="$1" dest="$2" _bs_user _bs_pw _bs_class=windows-genlock
+  local host="$1" dest="$2" _bs_user _bs_pw _bs_class
   # #817: resolve per-box ssh creds so a fetch failure can trigger the SAME session-agnostic restart
   # the dev1 issue-732 watchdog uses, then re-fetch — before refusing the whole run.
   case "$host" in
@@ -939,8 +939,9 @@ fetch_box_state() {
     *)         _bs_user="$STRIH_USER";  _bs_pw="$STRIH_PW" ;;
   esac
   # issue 1317: the restart is class-resolved -- the Linux strih-lx runs a systemd --user unit, never
-  # a Windows Scheduled Task, so it must not be sent the Windows restart line.
-  if [ "$(strih_platform "$host")" = "linux" ]; then _bs_class=linux-genlock; fi
+  # a Windows Scheduled Task, so it must not be sent the Windows restart line (the stream box stays
+  # Windows even under a forced strih-platform override -- the lib resolver checks the strih host first).
+  _bs_class="$(bundle_state_selfheal_class "$host" "$STRIH")"
   [ -s "$dest" ] && { echo "    using pre-fetched version-integrity state: $dest"; return 0; }
   if curl -fsS --max-time 30 -o "$dest" "http://${host}:${WIN_BUNDLE_STATE_PORT}/bundle-state.json" 2>/dev/null; then
     echo "    fetched version-integrity state from ${host}:${WIN_BUNDLE_STATE_PORT} -> $dest"

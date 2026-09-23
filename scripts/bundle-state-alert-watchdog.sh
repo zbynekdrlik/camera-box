@@ -20,7 +20,8 @@
 # otherwise fully up classifies the box REACHABLE and never pages. THIS watchdog closes that gap: a
 # box that is UP (ping OR OBS-WS :4455) but whose `:8899/bundle-state.json` does NOT serve 200+JSON
 # is CONFIRMED across 2 passes, then (a) auto-restarted via `schtasks /run /tn BundleStateServer`
-# over ssh -- session-agnostic (a HIDDEN, headless supervisor task; never the `/it` form) per
+# over ssh (a linux-genlock box such as strih-lx: the guarded `systemctl --user restart` of its unit,
+# issue 1317) -- session-agnostic (a HIDDEN, headless supervisor task; never the `/it` form) per
 # .claude/rules/win-ssh-vs-mcp.md -- and (b) a throttled Discord alert fires. A box that is FULLY
 # unreachable (ping + :4455 + :8899 all down) is deferred to the #1001 watchdog (no double-page, no
 # pointless restart against a dark box).
@@ -283,8 +284,8 @@ handle_box() {
       restart_note="auto-restart ($how) issued OK"
       log "AUTO-RESTART: $how BundleStateServer issued OK on $box (recovery confirmed next pass)"
     else
-      restart_note="auto-restart ($how) FAILED (ssh/creds?) -- alert still firing"
-      log "AUTO-RESTART: $how FAILED on $box (ssh/creds?) -- alerting anyway"
+      restart_note="auto-restart ($how) FAILED (ssh/creds/no unit?) -- alert still firing"
+      log "AUTO-RESTART: $how FAILED on $box (ssh/creds/no unit?) -- alerting anyway"
     fi
   fi
 
