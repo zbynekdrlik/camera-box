@@ -30,8 +30,19 @@ fn script() -> PathBuf {
     s
 }
 
+/// setup-imag.sh's provisioning text. issue 1357: its box-level steps moved VERBATIM into the shared
+/// OBS-box baseline libs it sources and calls (setup-strih.sh runs the same functions), so the text
+/// these call-site pins guard is setup-imag.sh PLUS those libs.
 fn body() -> String {
-    fs::read_to_string(script()).expect("read setup-imag.sh")
+    let lib = |rel: &str| {
+        fs::read_to_string(manifest_dir().join(rel)).unwrap_or_else(|e| panic!("read {rel}: {e}"))
+    };
+    format!(
+        "{}\n{}\n{}",
+        fs::read_to_string(script()).expect("read setup-imag.sh"),
+        lib("scripts/lib/obs-box-baseline.sh"),
+        lib("scripts/lib/obs-box-kiosk.sh")
+    )
 }
 
 /// Source the REAL script and run `body` against its pure functions.
@@ -196,9 +207,14 @@ fn the_provisioning_flow_uses_the_derived_values_not_literals() {
         b.contains("imag_has_discrete_nvidia"),
         "the NVIDIA step must be gated on a real discrete GPU"
     );
-    // the driver install itself must sit INSIDE the gate, not run unconditionally
+    // the driver install itself must sit INSIDE the gate, not run unconditionally (issue 1357: the
+    // gate is the shared GPU item's obs_box_has_discrete_nvidia, which the imag_* name delegates to)
+    assert!(
+        b.contains("imag_has_discrete_nvidia() { obs_box_has_discrete_nvidia \"$@\"; }"),
+        "setup-imag.sh's imag_has_discrete_nvidia must delegate to the shared detector"
+    );
     let gate = b
-        .find("imag_has_discrete_nvidia")
+        .find("if ! lspci -nn | obs_box_has_discrete_nvidia; then")
         .expect("gate call must exist");
     let install = b
         .find("nvidia-driver-595-open install failed")
@@ -401,8 +417,9 @@ fn the_kernel_hold_never_blocks_the_lowlatency_install() {
     let hold = b
         .find("KERNEL_HOLD_PKGS")
         .expect("step 6 kernel hold must exist");
+    // issue 1357: the lowlatency meta is named by the box's release series (24.04 on imag).
     let step7 = b
-        .find("linux-lowlatency-hwe-24.04 >/dev/null")
+        .find("\"linux-lowlatency-hwe-${SERIES}\" >/dev/null")
         .expect("step 7 lowlatency install must exist");
     assert!(
         hold < step7,
@@ -541,8 +558,9 @@ fn the_display_manager_call_sites_compare_canonical_paths() {
         "the literal-vs-canonical compare must be gone (#823)"
     );
     assert!(
-        b.contains("imag_same_unit"),
-        "the DM assertions must compare canonicalised units"
+        b.contains("obs_box_same_unit /etc/systemd/system/display-manager.service"),
+        "the DM assertions must compare canonicalised units (issue 1357: the shared \
+         obs_box_same_unit, which imag_same_unit delegates to)"
     );
 }
 

@@ -45,7 +45,18 @@ fn manifest_dir() -> PathBuf {
 
 fn read(rel: &str) -> String {
     let p = manifest_dir().join(rel);
-    std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("read {}: {e}", p.display()))
+    let s = std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("read {}: {e}", p.display()));
+    if rel == SETUP {
+        // issue 1357: the imag box-level steps (incl. the #841 GPU + CPU-affinity items) moved
+        // VERBATIM into the shared OBS-box baseline libs setup-imag.sh sources and calls, so the
+        // imag provisioning text is setup-imag.sh PLUS those libs.
+        return format!(
+            "{s}\n{}\n{}",
+            read("scripts/lib/obs-box-baseline.sh"),
+            read("scripts/lib/obs-box-kiosk.sh")
+        );
+    }
+    s
 }
 
 const SETUP: &str = "scripts/setup-imag.sh";
@@ -122,13 +133,16 @@ fn setup_imag_pins_igpu_min_freq_from_its_own_rp0_never_a_literal_841() {
 #[test]
 fn setup_imag_igpu_maxperf_service_is_enabled_every_boot_841() {
     let body = read(SETUP);
+    // issue 1357: the unit name carries the box prefix (setup-imag.sh passes `imag` ->
+    // imag-igpu-maxperf.service).
     assert!(
-        body.contains("imag-igpu-maxperf.service"),
+        body.contains("\"/etc/systemd/system/${BOX}-igpu-maxperf.service\"")
+            && body.contains("obs_box_nvidia_prime imag"),
         "{SETUP}: must install a dedicated systemd oneshot unit for the iGPU frequency pin, \
          mirroring the existing cpu-performance.service convention"
     );
     assert!(
-        body.contains("systemctl enable --now imag-igpu-maxperf.service"),
+        body.contains("systemctl enable --now \"${BOX}-igpu-maxperf.service\""),
         "{SETUP}: the iGPU max-perf unit must be enabled (boot-durable) AND started now \
          (sysfs values reset on reboot, so re-application every boot is mandatory)"
     );
@@ -199,10 +213,17 @@ fn imag_obs_start_fails_loud_when_no_derived_cpu_set_is_available_841() {
 #[test]
 fn setup_imag_persists_the_derived_isolated_cpus_for_the_wrapper_841() {
     let body = read(SETUP);
+    // issue 1357: the derivation + persistence live in the shared affinity item (obs_box_cpu_affinity,
+    // box prefix `imag` -> /etc/imag-isolated-cpus.conf); setup-imag.sh re-exports the result.
+    assert!(
+        body.contains("obs_box_cpu_affinity imag")
+            && body.contains("IMAG_ISOLATED_CPUS=\"$OBS_BOX_ISOLATED_CPUS\""),
+        "{SETUP}: step 8 must run the shared affinity item and re-export its derived set"
+    );
     let derive = body
-        .find("IMAG_ISOLATED_CPUS=\"$(printf")
-        .expect("the #816 IMAG_ISOLATED_CPUS derivation must still exist");
-    let persist = body.find("/etc/imag-isolated-cpus.conf").expect(
+        .find("OBS_BOX_ISOLATED_CPUS=\"$(printf")
+        .expect("the #816 isolated-CPU derivation must still exist");
+    let persist = body.find("> \"/etc/${BOX}-isolated-cpus.conf\"").expect(
         "setup-imag.sh must persist the derived IMAG_ISOLATED_CPUS value to \
              /etc/imag-isolated-cpus.conf for the wrapper to read as its fallback",
     );

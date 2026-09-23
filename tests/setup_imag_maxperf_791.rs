@@ -19,7 +19,19 @@ use std::path::PathBuf;
 
 fn read(rel: &str) -> String {
     let p = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(rel);
-    std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("cannot read {}: {e}", p.display()))
+    let s =
+        std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("cannot read {}: {e}", p.display()));
+    if rel == SETUP {
+        // issue 1357: the step-26 maxperf persistence (and the step-15/16 kiosk + menu) moved
+        // VERBATIM into the shared OBS-box baseline libs setup-imag.sh sources and calls; the generated
+        // file NAMES carry the box prefix (`imag` -> imag-maxperf.*) via an @BOX@ placeholder.
+        return format!(
+            "{s}\n{}\n{}",
+            read("scripts/lib/obs-box-baseline.sh"),
+            read("scripts/lib/obs-box-kiosk.sh")
+        );
+    }
+    s
 }
 
 const SETUP: &str = "scripts/setup-imag.sh";
@@ -32,11 +44,12 @@ const VERIFY: &str = "scripts/verify-imag.sh";
 fn setup_imag_provisions_the_maxperf_service_791() {
     let body = read(SETUP);
     assert!(
-        body.contains("cat > /etc/systemd/system/imag-maxperf.service"),
+        body.contains("> \"/etc/systemd/system/${BOX}-maxperf.service\"")
+            && body.contains("obs_box_maxperf_persistence imag"),
         "{SETUP} must WRITE /etc/systemd/system/imag-maxperf.service (issue 756 perf persistence, #791 parity)"
     );
     assert!(
-        body.contains("ExecStart=/usr/local/sbin/imag-maxperf.sh"),
+        body.contains("ExecStart=/usr/local/sbin/@BOX@-maxperf.sh"),
         "{SETUP}: imag-maxperf.service must ExecStart /usr/local/sbin/imag-maxperf.sh (matches the live box)"
     );
     assert!(
@@ -56,7 +69,7 @@ fn setup_imag_provisions_the_maxperf_service_791() {
 fn setup_imag_provisions_the_maxperf_script_791() {
     let body = read(SETUP);
     assert!(
-        body.contains("cat > /usr/local/sbin/imag-maxperf.sh"),
+        body.contains("sed \"s/@BOX@/${BOX}/g\" > \"/usr/local/sbin/${BOX}-maxperf.sh\""),
         "{SETUP} must WRITE /usr/local/sbin/imag-maxperf.sh (the boot enforcement script, #791)"
     );
     for needle in [
@@ -82,7 +95,7 @@ fn setup_imag_provisions_the_maxperf_script_791() {
 fn setup_imag_provisions_the_maxperf_udev_rule_791() {
     let body = read(SETUP);
     assert!(
-        body.contains("99-imag-maxperf-pm.rules"),
+        body.contains("\"/etc/udev/rules.d/99-${BOX}-maxperf-pm.rules\""),
         "{SETUP} must WRITE /etc/udev/rules.d/99-imag-maxperf-pm.rules (hotplug runtime-PM persistence, #791)"
     );
     assert!(
@@ -97,7 +110,7 @@ fn setup_imag_provisions_the_maxperf_udev_rule_791() {
 fn setup_imag_enables_the_maxperf_service_791() {
     let body = read(SETUP);
     assert!(
-        body.contains("systemctl enable --now imag-maxperf.service"),
+        body.contains("systemctl enable --now \"${BOX}-maxperf.service\""),
         "{SETUP} must `systemctl enable --now imag-maxperf.service` (a written-but-disabled unit is the #840 trap)"
     );
 }

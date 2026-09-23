@@ -14,9 +14,20 @@
 
 use std::path::PathBuf;
 
+/// setup-imag.sh's provisioning text. issue 1357: the step-25 touchpad item moved VERBATIM into the
+/// shared OBS-box baseline (scripts/lib/obs-box-kiosk.sh, obs_box_touchpad) that setup-imag.sh calls
+/// and setup-strih.sh runs too, so the text is setup-imag.sh PLUS the baseline libs.
 fn setup_body() -> String {
-    let p = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scripts/setup-imag.sh");
-    std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("read {}: {e}", p.display()))
+    let read = |rel: &str| {
+        let p = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(rel);
+        std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("read {}: {e}", p.display()))
+    };
+    format!(
+        "{}\n{}\n{}",
+        read("scripts/setup-imag.sh"),
+        read("scripts/lib/obs-box-baseline.sh"),
+        read("scripts/lib/obs-box-kiosk.sh")
+    )
 }
 
 /// The provisioner must WRITE the xorg.conf.d InputClass file — presence of the literal path proves

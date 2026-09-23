@@ -419,15 +419,11 @@ fn launcher_pair_ok_fails_and_names_a_non_executable_script() {
 #[test]
 fn setup_strih_installs_both_launchers_before_enabling_the_unit() {
     let s = read_script("scripts/setup-strih.sh");
-    // issue 1352: strih-obs-start.sh is no longer a verbatim `install` -- setup-strih substitutes the
-    // @STRIH_LX_OBS_GPU_ENV@ marker with strih_lx_obs_gpu_env, WRITES the result to /usr/local/bin,
-    // then chmod 0755. Assert the deployed write + the strih-obs-stop.sh install both precede enable.
-    let start_write = s.find("> /usr/local/bin/strih-obs-start.sh").expect(
-        "setup-strih must write the (GPU-env-substituted) strih-obs-start.sh to /usr/local/bin",
-    );
-    let start_chmod = s
-        .find("chmod 0755 /usr/local/bin/strih-obs-start.sh")
-        .expect("the substituted strih-obs-start.sh must be chmod 0755");
+    // issue 1357: both launchers install VERBATIM again (mode 0755) -- the issue-1352 GPU-env marker
+    // substitution is gone with the XWayland session. Both installs must precede the unit enable.
+    let start_install = s
+        .find("install -m 0755 \"${HERE}/strih-obs-start.sh\" /usr/local/bin/strih-obs-start.sh")
+        .expect("setup-strih must install strih-obs-start.sh mode 0755");
     let stop_install = s
         .find("install -m 0755 \"${HERE}/strih-obs-stop.sh\"")
         .expect("setup-strih must install strih-obs-stop.sh mode 0755");
@@ -435,8 +431,8 @@ fn setup_strih_installs_both_launchers_before_enabling_the_unit() {
         .find("systemctl --user enable strih-obs.service")
         .expect("setup-strih step 8 must enable strih-obs.service");
     assert!(
-        start_write < enable && start_chmod < enable && stop_install < enable,
-        "both launcher installs must precede the unit enable (start_write {start_write} / chmod {start_chmod} / stop {stop_install} vs enable {enable})"
+        start_install < enable && stop_install < enable,
+        "both launcher installs must precede the unit enable (start {start_install} / stop {stop_install} vs enable {enable})"
     );
 }
 
@@ -479,37 +475,47 @@ fn unit_execstart_execstop_basenames_match_the_installed_launchers() {
     );
 }
 
-/// issue 1317: strih-obs-start.sh's session-display resolver (Wayland-first, X11 fallback, else fail
-/// loud) is a pure sourced function -- a wayland-* socket under XDG_RUNTIME_DIR resolves to
-/// WAYLAND_DISPLAY=<sock> (its sibling .lock is ignored); neither a wayland nor an X socket -> a
-/// non-zero return (the unit is After=graphical-session.target, so no display is a hard fail).
+/// issue 1357: strih-obs-start.sh's session-display resolver is X11 ONLY -- OBS runs on the plain Xorg
+/// `:0` openbox kiosk (the imag appliance), never Wayland/XWayland. An X0 socket resolves to
+/// DISPLAY=:0; a wayland-* socket alone must NOT resolve (non-zero, fail loud) -- the purged GNOME
+/// Wayland session must never be picked up again.
 #[test]
-fn start_script_session_env_resolves_wayland_and_fails_loud_when_absent() {
+fn start_script_session_env_is_x11_only_and_fails_loud_when_absent() {
     let (code, out, _e) = run_sourced_arb(
         "scripts/strih-obs-start.sh",
         &[],
-        "rt=$(mktemp -d)\n\
-         : > \"$rt/wayland-0\"; : > \"$rt/wayland-0.lock\"\n\
+        "rt=$(mktemp -d); mkdir -p \"$rt/x\"; : > \"$rt/x/X0\"; : > \"$rt/wayland-0\"\n\
+         rc=0\n\
+         out=$(XDG_RUNTIME_DIR=\"$rt\" STRIH_X11_SOCKET_DIR=\"$rt/x\" strih_resolve_session_env) || rc=$?\n\
+         printf '%s' \"$out\"\n\
+         rm -rf \"$rt\"; exit $rc",
+    );
+    assert_eq!(code, 0, "an X0 socket must resolve");
+    assert_eq!(
+        out.trim(),
+        "DISPLAY=:0",
+        "X11 only, even with a wayland socket present: {out}"
+    );
+
+    let (code2, out2, _e2) = run_sourced_arb(
+        "scripts/strih-obs-start.sh",
+        &[],
+        "rt=$(mktemp -d); : > \"$rt/wayland-0\"\n\
          rc=0\n\
          out=$(XDG_RUNTIME_DIR=\"$rt\" STRIH_X11_SOCKET_DIR=\"$rt/nox\" strih_resolve_session_env) || rc=$?\n\
          printf '%s' \"$out\"\n\
          rm -rf \"$rt\"; exit $rc",
     );
-    assert_eq!(code, 0, "a wayland-0 socket must resolve");
+    assert_ne!(code2, 0, "a wayland socket alone (no X0) must fail loud");
     assert!(
-        out.contains("WAYLAND_DISPLAY=wayland-0"),
-        "a wayland socket must resolve to WAYLAND_DISPLAY=wayland-0: {out}"
+        out2.is_empty(),
+        "nothing must be printed on failure: {out2:?}"
     );
-
-    let (code2, _o2, _e2) = run_sourced_arb(
-        "scripts/strih-obs-start.sh",
-        &[],
-        "rt=$(mktemp -d)\n\
-         rc=0\n\
-         out=$(XDG_RUNTIME_DIR=\"$rt\" STRIH_X11_SOCKET_DIR=\"$rt/nox\" strih_resolve_session_env) || rc=$?\n\
-         rm -rf \"$rt\"; exit $rc",
+    let wrapper = read_script("scripts/strih-obs-start.sh");
+    assert!(
+        !wrapper.contains("WAYLAND_DISPLAY=%s"),
+        "the WAYLAND_DISPLAY resolution path must be gone (issue 1357)"
     );
-    assert_ne!(code2, 0, "no wayland + no X socket must fail loud");
 }
 
 // --- issue 1317 (this lane): runtime packages + the /usr prefix install --------------------------
@@ -817,31 +823,6 @@ fn dantesync_status_role_verdict_grades_reachable_locked_and_server_listener() {
     assert_eq!(o.trim(), "mode:FREE", "a non-locked mode is reported");
 }
 
-/// `strih_verify_sleep_masked` grades the FIRST line only, so a correctly-masked box passes even
-/// when `systemctl is-enabled`'s "masked"-to-stdout-AND-exit-1 makes a `|| echo masked` fallback
-/// DOUBLE-append ("masked\nmasked") — the exact issue-1317 false-FAIL. "enabled"/"static" fail.
-#[test]
-fn verify_sleep_masked_grades_first_line_and_survives_the_double_masked_bug() {
-    let (c1, _o, _e) = run_sourced(&[], "strih_verify_sleep_masked masked");
-    assert_eq!(c1, 0, "a plain 'masked' must pass");
-
-    let (c2, _o, _e) = run_sourced(
-        &[],
-        "s=\"$(printf 'masked\\nmasked')\"; strih_verify_sleep_masked \"$s\"",
-    );
-    assert_eq!(
-        c2, 0,
-        "the double-appended 'masked\\nmasked' must still pass (the false-FAIL bug)"
-    );
-
-    let (c3, _o, _e) = run_sourced(&[], "strih_verify_sleep_masked enabled");
-    assert_ne!(c3, 0, "'enabled' must fail");
-    let (c4, _o, _e) = run_sourced(&[], "strih_verify_sleep_masked static");
-    assert_ne!(c4, 0, "'static' must fail");
-    let (c5, _o, _e) = run_sourced(&[], "strih_verify_sleep_masked ''");
-    assert_ne!(c5, 0, "an empty state must fail-closed");
-}
-
 /// issue 1317: `setup-strih.sh` step 2 must INSTALL the dantesync unit with the ROLE folded in (write
 /// it via `strih_dantesync_unit_text "$DS_ROLE" "$DS_ARGS"` into /etc/systemd/system/dantesync.service),
 /// default the role to `server` (the post-M4 NTP master), remove any stale dantesync.service.d/*.conf
@@ -909,8 +890,8 @@ fn setup_strih_installs_the_ndi_runtime_before_the_obs_enable() {
 
 /// issue 1317: `verify-strih.sh` item 6 must assert the dantesync UNIT is active + a FRESH offset
 /// (the shared `dantesync_offset_verdict`), NOT read /etc/dantesync/config.json (a Windows/imag
-/// artifact a flag-based Linux client never creates); item 11 must grade sleep via
-/// `strih_verify_sleep_masked` (no `|| echo masked` double-append).
+/// artifact a flag-based Linux client never creates). issue 1357: never-sleep is graded by the SHARED
+/// baseline grader (its `nosleep` item), so the old strih-only sleep item is gone.
 #[test]
 fn verify_strih_dantesync_and_sleep_items_are_fixed() {
     let v = read_script("scripts/verify-strih.sh");
@@ -927,8 +908,8 @@ fn verify_strih_dantesync_and_sleep_items_are_fixed() {
         "verify-strih must NOT read /etc/dantesync/config.json (a flag-based Linux client has none)"
     );
     assert!(
-        v.contains("strih_verify_sleep_masked"),
-        "verify-strih item 11 must grade sleep via strih_verify_sleep_masked"
+        v.contains("obs_box_baseline_verdict"),
+        "never-sleep is graded by the shared baseline verdict (its nosleep item)"
     );
     assert!(
         !v.contains("|| echo masked"),
@@ -1161,101 +1142,6 @@ fn setup_strih_installs_janus_enable_only_before_final_verify() {
 // as two new numbered steps in setup-strih.sh + two acceptance items in verify-strih.sh.
 // =====================================================================================
 
-/// The performance-mode apply block PREFERS power-profiles-daemon (`powerprofilesctl set
-/// performance`) and FALLS BACK to writing the `performance` scaling_governor -- the fleet order
-/// (the setup-device STEP-13 governor precedent + the design). It also masks the sleep targets, and
-/// the whole emitted block must be syntactically valid bash (the caller evals it under set -e).
-#[test]
-fn performance_mode_apply_prefers_powerprofiles_then_governor_and_masks_sleep() {
-    let (code, out, err) = run_sourced(&[], "strih_performance_mode_apply");
-    assert_eq!(code, 0, "emitter must succeed; stderr={err}");
-    assert!(
-        out.contains("powerprofilesctl set performance"),
-        "must prefer power-profiles-daemon: {out}"
-    );
-    assert!(
-        out.contains("scaling_governor"),
-        "must fall back to the scaling_governor write: {out}"
-    );
-    assert!(out.contains("performance"), "must set performance: {out}");
-    assert!(
-        out.contains("sleep.target"),
-        "must mask the sleep/suspend targets (setup-device STEP-13 shape): {out}"
-    );
-    let ppd = out
-        .find("powerprofilesctl")
-        .expect("powerprofilesctl must appear");
-    let gov = out
-        .find("scaling_governor")
-        .expect("scaling_governor must appear");
-    assert!(
-        ppd < gov,
-        "power-profiles-daemon must be PREFERRED (checked before) the governor fallback (ppd {ppd} vs gov {gov})"
-    );
-    // The emitted block is eval'd by setup-strih.sh under `set -euo pipefail` -- it must parse.
-    let (code, _o, err) = run_sourced(&[], "strih_performance_mode_apply | bash -n");
-    assert_eq!(
-        code, 0,
-        "emitted apply block must be valid bash; stderr={err}"
-    );
-}
-
-/// The persistent CPU performance systemd oneshot mirrors setup-device.sh's cpu-performance.service.
-#[test]
-fn cpu_performance_unit_is_the_fleet_oneshot() {
-    let (code, out, _e) = run_sourced(&[], "strih_cpu_performance_unit_text");
-    assert_eq!(code, 0);
-    assert!(out.contains("Type=oneshot"), "oneshot: {out}");
-    assert!(
-        out.contains("RemainAfterExit=yes"),
-        "remain-after-exit: {out}"
-    );
-    assert!(
-        out.contains("scaling_governor") && out.contains("performance"),
-        "ExecStart must write performance to scaling_governor: {out}"
-    );
-    assert!(
-        out.contains("WantedBy=multi-user.target"),
-        "install target: {out}"
-    );
-}
-
-/// Live 23.9.2026: after a strih-lx reboot every core read `powersave`. The oneshot ran in the SAME
-/// second power-profiles-daemon started (09:23:39); on intel_pstate ppd applies its profile and resets
-/// scaling_governor to `powersave` AFTER the oneshot wrote `performance`. The oneshot must be ordered
-/// after ppd so its governor write is the last one.
-#[test]
-fn cpu_performance_unit_runs_after_power_profiles_daemon() {
-    let (code, out, _e) = run_sourced(&[], "strih_cpu_performance_unit_text");
-    assert_eq!(code, 0);
-    let after = out
-        .lines()
-        .find(|l| l.starts_with("After="))
-        .unwrap_or_default();
-    assert!(
-        after.contains("power-profiles-daemon.service"),
-        "the oneshot must order After=power-profiles-daemon.service, or ppd resets the governor at boot: {out}"
-    );
-}
-
-/// The verify (perf) governor predicate: 0 iff EVERY online core reports `performance` and there is
-/// at least one core (fail-closed on empty/unreadable input -- test-strictness).
-#[test]
-fn verify_governor_ok_requires_every_core_performance_failclosed_on_empty() {
-    let (code, _o, _e) = run_sourced(
-        &[],
-        "printf 'performance\\nperformance\\nperformance\\n' | strih_verify_governor_ok",
-    );
-    assert_eq!(code, 0, "all-performance must pass");
-    let (code, _o, _e) = run_sourced(
-        &[],
-        "printf 'performance\\npowersave\\nperformance\\n' | strih_verify_governor_ok",
-    );
-    assert_ne!(code, 0, "one non-performance core must FAIL");
-    let (code, _o, _e) = run_sourced(&[], "printf '' | strih_verify_governor_ok");
-    assert_ne!(code, 0, "empty (unreadable) governors must fail-closed");
-}
-
 /// The Companion Satellite version is PINNED to the real stable release (v3.4.0, never 'latest',
 /// never the nonexistent 1.11.0 the bounced lane pinned) and env-overridable, like the dantesync/NDI
 /// version pins.
@@ -1415,27 +1301,16 @@ fn companion_satellite_appconfig_json_seeds_remoteip_remoteport() {
     assert_eq!(jcode, 0, "app config must be valid JSON; stderr={jerr}");
 }
 
-/// The operator-login autostart entry is a Desktop Entry launching the installed /opt binary, armed
-/// on (owner rule: a needed feature is always-ON, never a forgettable manual launch).
+/// issue 1357: Companion Satellite is launched by the kiosk OPENBOX autostart (openbox runs no XDG
+/// ~/.config/autostart): ONE backgrounded line launching the installed /opt binary -- the SAME string
+/// setup-strih writes and verify-strih greps (owner rule: a needed feature is always-ON by default).
 #[test]
-fn companion_satellite_autostart_text_is_a_desktop_entry() {
-    let (code, txt, _e) = run_sourced(&[], "strih_companion_satellite_autostart_text");
+fn companion_satellite_openbox_line_launches_the_opt_binary_backgrounded() {
+    let (code, line, _e) = run_sourced(&[], "strih_companion_satellite_openbox_line");
     assert_eq!(code, 0);
-    assert!(
-        txt.contains("[Desktop Entry]"),
-        "must be a Desktop Entry: {txt}"
-    );
-    assert!(
-        txt.contains("Type=Application"),
-        "must be an Application entry: {txt}"
-    );
-    assert!(
-        txt.contains("Exec=/opt/companion-satellite/companion-satellite"),
-        "must launch the installed binary: {txt}"
-    );
-    assert!(
-        txt.contains("X-GNOME-Autostart-enabled=true"),
-        "must be autostart-enabled: {txt}"
+    assert_eq!(
+        line, "/opt/companion-satellite/companion-satellite >/dev/null 2>&1 &",
+        "one backgrounded launch of the installed binary, no trailing newline"
     );
 }
 
@@ -1478,7 +1353,7 @@ fn companion_satellite_install_downloads_pinned_tarball_verifies_sha_runs_instal
 }
 
 /// The verify (companion) verdict is fail-closed over the desktop-model signals: `ok` only for
-/// binary-installed + desktop-udev-rule + operator-autostart + controller-host-seeded.
+/// binary-installed + desktop-udev-rule + openbox-autostart-launch + controller-host-seeded.
 #[test]
 fn companion_verdict_is_failclosed() {
     let (code, out, _e) = run_sourced(&[], "strih_companion_verdict 1 1 1 1");
@@ -1500,32 +1375,9 @@ fn companion_verdict_is_failclosed() {
     assert_eq!(out.trim(), "not-installed");
 }
 
-/// setup-strih.sh must wire the perf step (apply + persistence unit) BEFORE the final verify gate,
-/// and TOTAL_STEPS must be bumped to 17 for the two new steps.
-#[test]
-fn setup_strih_wires_performance_mode_before_final_verify() {
-    let s = read_script("scripts/setup-strih.sh");
-    let apply = s
-        .find("strih_performance_mode_apply")
-        .expect("setup-strih must call strih_performance_mode_apply");
-    let unit = s
-        .find("strih_cpu_performance_unit_text")
-        .expect("setup-strih must write the cpu-performance persistence unit");
-    let verify = s
-        .find("verify-strih.sh acceptance gate")
-        .expect("final verify present");
-    assert!(
-        apply < verify && unit < verify,
-        "the perf step must run before the final verify (apply {apply}, unit {unit}, verify {verify})"
-    );
-    assert!(
-        s.contains("TOTAL_STEPS=17"),
-        "TOTAL_STEPS must be bumped to 17 for the perf + companion steps"
-    );
-}
-
-/// setup-strih.sh must install Companion Satellite (install emitter), seed the app config.json
-/// (functional controller pin) AND write the operator-login autostart, all BEFORE the final verify.
+/// setup-strih.sh must install Companion Satellite (install emitter) and seed the app config.json
+/// (functional controller pin) BEFORE the final verify; issue 1357: its launch is the kiosk openbox
+/// autostart (step 15), never an XDG ~/.config/autostart .desktop entry.
 #[test]
 fn setup_strih_wires_companion_satellite_before_final_verify() {
     let s = read_script("scripts/setup-strih.sh");
@@ -1536,28 +1388,40 @@ fn setup_strih_wires_companion_satellite_before_final_verify() {
         .find("strih_companion_satellite_appconfig_json")
         .expect("setup-strih must seed the app config.json with the controller host");
     let autostart = s
-        .find("strih_companion_satellite_autostart_text")
-        .expect("setup-strih must write the operator-login autostart entry");
+        .find("strih_openbox_autostart_text > \"${USER_HOME}/.config/openbox/autostart\"")
+        .expect(
+            "setup-strih must write the kiosk openbox autostart (it launches Companion Satellite)",
+        );
     let verify = s
         .find("verify-strih.sh acceptance gate")
         .expect("final verify present");
     assert!(
         install < verify && appcfg < verify && autostart < verify,
-        "the companion step must run before the final verify (install {install}, appcfg {appcfg}, autostart {autostart}, verify {verify})"
+        "the companion install + kiosk launch must precede the final verify (install {install}, appcfg {appcfg}, autostart {autostart}, verify {verify})"
+    );
+    assert!(
+        !s.contains("> \"${USER_HOME}/.config/autostart/companion-satellite.desktop\""),
+        "no XDG autostart .desktop for Companion Satellite -- openbox never runs it (issue 1357)"
     );
 }
 
-/// verify-strih.sh must carry the (perf) governor + (companion) acceptance items.
+/// verify-strih.sh grades performance through the SHARED baseline grader (issue 1357: its `perf` item
+/// = governor + strih-maxperf persistence) and carries the (companion) item, which now reads the
+/// openbox autostart launch line.
 #[test]
 fn verify_strih_carries_perf_and_companion_items() {
     let v = read_script("scripts/verify-strih.sh");
     assert!(
-        v.contains("strih_verify_governor_ok"),
-        "verify-strih must run the governor predicate for the (perf) item"
+        v.contains("obs_box_baseline_verdict"),
+        "verify-strih must run the shared baseline verdict (its perf item grades the governor)"
     );
     assert!(
         v.contains("strih_companion_verdict"),
         "verify-strih must run the companion verdict for the (companion) item"
+    );
+    assert!(
+        v.contains("grep -qxF \"$(strih_companion_satellite_openbox_line)\" \"$CS_AUTOSTART\""),
+        "the (companion) autostart signal is the openbox autostart launch line (issue 1357)"
     );
 }
 
@@ -1565,54 +1429,6 @@ fn verify_strih_carries_perf_and_companion_items() {
 // issue 1317 (this lane): post-cut-over fixes -- the seeder targets the OPERATOR collection
 // (strih role: explicit names + update-only) and three step-15/16 live-found defects.
 // =====================================================================================
-
-/// The performance-mode apply now runs BOTH power-profiles-daemon AND the scaling_governor write
-/// (NOT either/or): on intel_pstate active `powerprofilesctl set performance` sets EPP only and
-/// leaves the governor `powersave`, so the governor MUST be written unconditionally (the live defect).
-#[test]
-fn performance_mode_apply_runs_both_ppd_and_governor_not_either_or() {
-    let (code, out, err) = run_sourced(&[], "strih_performance_mode_apply");
-    assert_eq!(code, 0, "emitter must succeed; stderr={err}");
-    assert!(
-        out.contains("powerprofilesctl set performance"),
-        "must still run powerprofilesctl set performance: {out}"
-    );
-    assert!(
-        out.contains("scaling_governor"),
-        "must ALWAYS write the scaling_governor: {out}"
-    );
-    // The bug was `if ppd; then ...; else <governor>; fi` -- the governor gated behind an else, so on
-    // intel_pstate active (ppd present) it never ran. The fix removes the `else`: both run.
-    assert!(
-        !out.contains("else"),
-        "the governor write must NOT be an `else` fallback of ppd (both run unconditionally): {out}"
-    );
-    let (code, _o, err) = run_sourced(&[], "strih_performance_mode_apply | bash -n");
-    assert_eq!(
-        code, 0,
-        "emitted apply block must be valid bash; stderr={err}"
-    );
-}
-
-/// The effective-perf log line reports the triple governor / EPP / ppd profile (never a
-/// self-contradicting "set to performance (now: powersave)"). Defaults fill in when a facet is absent.
-#[test]
-fn perf_effective_line_reports_the_governor_epp_ppd_triple() {
-    let (code, out, _e) = run_sourced(
-        &[],
-        "strih_perf_effective_line performance performance performance",
-    );
-    assert_eq!(code, 0);
-    assert!(out.contains("governor=performance"), "governor term: {out}");
-    assert!(out.contains("EPP=performance"), "EPP term: {out}");
-    assert!(out.contains("ppd=performance"), "ppd term: {out}");
-    // fail-soft defaults when a facet is unreadable/absent (never a bare empty triple)
-    let (_c, out2, _e) = run_sourced(&[], "strih_perf_effective_line");
-    assert!(
-        out2.contains("governor=") && out2.contains("EPP=") && out2.contains("ppd="),
-        "missing facets default rather than vanish: {out2}"
-    );
-}
 
 /// The OPERATOR seed manifest is valid JSON carrying `"mode":"update-only"` + EXPLICIT-name object
 /// entries (NDI camN / NDI 2ME PVW / NDI 2ME PGM (mv) / cg / CG-obs), with the outputs unchanged.
@@ -1757,17 +1573,23 @@ fn companion_status_verdict_is_live_aware() {
 }
 
 /// setup-strih.sh step 6 must write the OPERATOR seed manifest via strih_lx_seed_manifest_json
-/// (update-only + explicit names), and step 15 must log the effective governor/EPP/ppd triple.
+/// (update-only + explicit names). issue 1357: the old step-15 governor apply (and its effective-triple
+/// log line) is superseded by the shared baseline's max-performance items.
 #[test]
-fn setup_strih_uses_the_operator_manifest_and_effective_perf_line() {
+fn setup_strih_uses_the_operator_manifest_and_the_baseline_performance_items() {
     let s = read_script("scripts/setup-strih.sh");
     assert!(
         s.contains("strih_lx_seed_manifest_json"),
         "setup-strih step 6 must write the manifest via strih_lx_seed_manifest_json"
     );
     assert!(
-        s.contains("strih_perf_effective_line"),
-        "setup-strih step 15 must log the effective governor/EPP/ppd triple"
+        s.contains("obs_box_max_performance \"$STRIH_NIC\" strih")
+            && s.contains("obs_box_maxperf_persistence strih"),
+        "setup-strih must run the shared baseline's max-performance items"
+    );
+    assert!(
+        !s.contains("strih_performance_mode_apply"),
+        "the superseded strih-only governor apply must be gone"
     );
 }
 
@@ -2290,33 +2112,9 @@ fn verify_strih_asserts_qt6_svg_and_usr_chrome_sandbox() {
 
 // =====================================================================================
 // issue 1352: strih-lx OBS on the RTX 5050 via XWayland PRIME -- provisioning bake
-// (helper + unit + GPU env printer + Janus local_ip + DistroAV output names + self-loop seed)
+// (helper + unit + Janus local_ip + DistroAV output names + self-loop seed; the GPU env printer went
+// away with the XWayland session, issue 1357)
 // =====================================================================================
-
-/// issue 1352 (b): `strih_lx_obs_gpu_env` prints the 4 XWayland-PRIME exports on ONE line (no
-/// trailing newline) so a `$(...)` embedding never glues the following statement.
-#[test]
-fn gpu_env_prints_the_four_xwayland_prime_exports_on_one_line() {
-    let (code, out, err) = run_sourced(&[], "strih_lx_obs_gpu_env");
-    assert_eq!(code, 0, "printer must succeed; stderr={err}");
-    for ex in [
-        "export QT_QPA_PLATFORM=xcb",
-        "export __NV_PRIME_RENDER_OFFLOAD=1",
-        "export __GLX_VENDOR_LIBRARY_NAME=nvidia",
-        "export __EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/10_nvidia.json",
-    ] {
-        assert!(out.contains(ex), "gpu env must carry {ex}: {out}");
-    }
-    assert!(
-        !out.contains('\n'),
-        "the exports must be a single line: {out:?}"
-    );
-    assert_eq!(
-        out.matches("export ").count(),
-        4,
-        "exactly 4 exports: {out}"
-    );
-}
 
 /// issue 1352 (e): `strih_lx_ndi_output_ini_cmds USER_INI` carries the BARE DistroAV output names +
 /// enabled flags, and functionally upserts them into [NDIPlugin] idempotently, preserving other
@@ -2409,29 +2207,23 @@ fn seed_manifest_2me_feedback_senders_are_the_strih_lx_self_loop() {
     );
 }
 
-/// issue 1352 (b): setup-strih substitutes the `@STRIH_LX_OBS_GPU_ENV@` marker with the printer output
-/// (the `@JANUS_ROOM_SECRET@` idiom), so the printer is the ONE source of truth and the wrapper does
-/// not hardcode the exports.
+/// issue 1357: the issue-1352 XWayland-PRIME GPU env is GONE -- OBS runs on the PRIME nvidia-PRIMARY Xorg
+/// server of the openbox kiosk, so neither the wrapper nor setup carries the offload exports/marker.
 #[test]
-fn setup_strih_substitutes_the_gpu_env_marker_via_the_printer() {
+fn strih_obs_start_carries_no_xwayland_prime_gpu_env() {
     let setup = read_script("scripts/setup-strih.sh");
-    assert!(
-        setup.contains("strih_lx_obs_gpu_env"),
-        "setup must consume the gpu-env printer"
-    );
-    assert!(
-        setup.contains("//#@STRIH_LX_OBS_GPU_ENV@/"),
-        "setup must substitute the @STRIH_LX_OBS_GPU_ENV@ marker (the @JANUS_ROOM_SECRET@ idiom)"
-    );
     let wrapper = read_script("scripts/strih-obs-start.sh");
-    assert!(
-        wrapper.contains("#@STRIH_LX_OBS_GPU_ENV@"),
-        "the repo wrapper must carry the marker line (a bash comment)"
-    );
-    assert!(
-        !wrapper.contains("__NV_PRIME_RENDER_OFFLOAD=1"),
-        "the wrapper must NOT hardcode the PRIME exports (single source of truth = the printer)"
-    );
+    let lib = read_script("scripts/lib/strih-provision.sh");
+    for (what, text) in [
+        ("setup-strih.sh", &setup),
+        ("strih-obs-start.sh", &wrapper),
+        ("strih-provision.sh", &lib),
+    ] {
+        assert!(
+            !text.contains("__NV_PRIME_RENDER_OFFLOAD") && !text.contains("STRIH_LX_OBS_GPU_ENV"),
+            "{what} must carry no XWayland PRIME offload env or its marker"
+        );
+    }
 }
 
 /// issue 1352 (e): setup-strih step 7 seeds [NDIPlugin] via the pure printer (eval-consumed).
@@ -2534,8 +2326,8 @@ fn setup_strih_installs_avahi_utils_and_verify_greps_avahi_browse() {
     );
 }
 
-/// issue 1352: verify-strih.sh gates every provisioned item (mv-host, gpu-env, avahi, DistroAV output
-/// names, janus local_ip).
+/// issue 1352: verify-strih.sh gates the provisioned items that survive the issue-1357 Xorg kiosk
+/// (mv-host enablement, avahi, DistroAV output names, janus local_ip); the gpu-env item is gone.
 #[test]
 fn verify_strih_asserts_the_1352_provisioning_items() {
     let v = read_script("scripts/verify-strih.sh");
@@ -2548,12 +2340,8 @@ fn verify_strih_asserts_the_1352_provisioning_items() {
         "verify must assert python3-xlib importable"
     );
     assert!(
-        v.contains("QT_QPA_PLATFORM=xcb"),
-        "verify must grep the deployed wrapper for the RTX exports"
-    );
-    assert!(
-        v.contains("#@STRIH_LX_OBS_GPU_ENV@"),
-        "verify must detect an un-substituted gpu-env marker"
+        !v.contains("QT_QPA_PLATFORM=xcb") && !v.contains("STRIH_LX_OBS_GPU_ENV"),
+        "the gpu-env item must be gone (issue 1357: no XWayland PRIME env on the Xorg kiosk)"
     );
     assert!(
         v.contains("MainOutputName=2ME PGM"),
@@ -3707,342 +3495,13 @@ fn verify_strih_bkshading_probe_hits_a_real_service_route() {
     );
 }
 
-// ---- issue 1317 remainder: the imag-parity genlock rtprio grant + no crash popups ----------------
+// ---- issue 1357: strih-lx as the shared OBS-box appliance (the baseline's strih facts) -------------
 //
-// Owner report 23.9.2026: a crash popup (apport / update-notifier-crash) the operator had to close
-// in the morning, and every strih-lx OBS session logging `genlock: could NOT set render-tick thread
-// SCHED_FIFO prio 10 (errno 1 — missing rtprio ulimit grant?)`. imag provisions both (setup-imag.sh:
-// the issue-484 limits.d grant, the apport/whoopsie mask, systemd-coredump); strih-lx now does too.
-
-/// The render-tick SCHED_FIFO priority the vendored OBS requests (obs-video.c
-/// `#define GENLOCK_RT_PRIORITY`). A grant below it would still EPERM.
-fn vendored_genlock_rt_priority() -> u32 {
-    let src = read_script("vendor/obs-studio/libobs/obs-video.c");
-    let line = src
-        .lines()
-        .find(|l| l.trim_start().starts_with("#define GENLOCK_RT_PRIORITY"))
-        .expect("obs-video.c must define GENLOCK_RT_PRIORITY");
-    line.split_whitespace()
-        .nth(2)
-        .and_then(|v| v.parse().ok())
-        .expect("GENLOCK_RT_PRIORITY value")
-}
-
-/// The rtprio value imag grants (setup-imag.sh `${DESKTOP_USER}   -   rtprio   N`).
-fn imag_rtprio_value() -> u32 {
-    let s = read_script("scripts/setup-imag.sh");
-    let line = s
-        .lines()
-        .find(|l| l.starts_with("${DESKTOP_USER}") && l.contains("rtprio"))
-        .expect("setup-imag.sh must carry the issue-484 rtprio grant line");
-    line.split_whitespace()
-        .nth(3)
-        .and_then(|v| v.parse().ok())
-        .expect("imag rtprio value")
-}
-
-#[test]
-fn rtprio_limits_text_grants_the_desktop_user_the_imag_rtprio_value() {
-    let (code, out, err) = run_sourced(&[], "strih_rtprio_limits_text alice");
-    assert_eq!(code, 0, "stderr={err}");
-    let want = format!("alice   -   rtprio   {}", imag_rtprio_value());
-    assert!(
-        out.lines().any(|l| l == want),
-        "the limits.d body must carry `{want}` (imag parity), got:\n{out}"
-    );
-    for l in out.lines().filter(|l| !l.trim().is_empty() && *l != want) {
-        assert!(
-            l.starts_with('#'),
-            "every other line must be a comment, got: {l}"
-        );
-    }
-    assert!(
-        imag_rtprio_value() >= vendored_genlock_rt_priority(),
-        "the granted rtprio must cover the vendored render-tick priority"
-    );
-}
-
-#[test]
-fn rtprio_limits_text_refuses_an_empty_user() {
-    let (code, out, _e) = run_sourced(&[], "strih_rtprio_limits_text ''");
-    assert_ne!(
-        code, 0,
-        "an empty user must be refused (never a grant for nobody)"
-    );
-    assert!(out.trim().is_empty(), "no body on refusal, got: {out}");
-}
-
-#[test]
-fn rtprio_limits_path_is_the_strih_limits_d_file_with_an_env_seam() {
-    let (_c, out, _e) = run_sourced(&[], "strih_rtprio_limits_path");
-    assert_eq!(out, "/etc/security/limits.d/95-strih-genlock-rtprio.conf");
-    let (_c, out, _e) = run_sourced(
-        &[("STRIH_RTPRIO_LIMITS_FILE", "/tmp/x/95.conf")],
-        "strih_rtprio_limits_path",
-    );
-    assert_eq!(out, "/tmp/x/95.conf");
-}
-
-#[test]
-fn rtprio_grant_ok_requires_the_user_line_at_or_above_the_vendored_priority() {
-    let prio = vendored_genlock_rt_priority();
-    // Round trip: the rendered body satisfies the grader for the same user only.
-    let (c, _o, e) = run_sourced(
-        &[],
-        "strih_rtprio_limits_text alice | strih_rtprio_grant_ok alice",
-    );
-    assert_eq!(c, 0, "own body must grade as a grant; stderr={e}");
-    let (c, _o, _e) = run_sourced(
-        &[],
-        "strih_rtprio_limits_text alice | strih_rtprio_grant_ok bob",
-    );
-    assert_ne!(c, 0, "a grant for another user is not a grant");
-    let cases = [
-        (format!("alice - rtprio {prio}"), true),
-        (format!("alice\t-\trtprio\t{}", prio + 10), true),
-        // an explicit soft+hard pair is the same grant as `-`
-        (
-            format!("alice soft rtprio {prio}\nalice hard rtprio {prio}"),
-            true,
-        ),
-        ("alice - rtprio unlimited".to_string(), true),
-        // a hard-only grant leaves the SOFT limit at 0 -> sched_setscheduler still EPERMs
-        (format!("alice hard rtprio {prio}"), false),
-        (format!("alice soft rtprio {prio}"), false),
-        (format!("alice - rtprio {}", prio - 1), false),
-        (format!("# alice - rtprio {prio}"), false),
-        (format!("alice - nice {prio}"), false),
-        (String::new(), false),
-    ];
-    for (body, want) in cases {
-        let (c, _o, _e) = run_sourced(
-            &[("BODY", &body)],
-            "printf '%s\\n' \"$BODY\" | strih_rtprio_grant_ok alice",
-        );
-        assert_eq!(c == 0, want, "grant_ok on `{body}` must be {want}");
-    }
-}
-
-const FIFO_FAIL_LINE: &str = "info: genlock: could NOT set render-tick thread SCHED_FIFO prio 10 \
-     (errno 1 — missing rtprio ulimit grant?) — continuing SCHED_OTHER (#484)";
-const FIFO_OK_LINE: &str =
-    "info: genlock: render-tick thread set SCHED_FIFO prio 10 on the isolated core (#484)";
-
-/// Feed `log` from a FILE (a >128 KB env var would hit the kernel's per-argument E2BIG limit).
-fn session_verdict(grant: &str, running: &str, log: &str) -> (i32, String) {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("obs.txt");
-    std::fs::write(&path, log).unwrap();
-    let (c, o, _e) = run_sourced(
-        &[("LOGFILE", path.to_str().unwrap())],
-        &format!("strih_rtprio_session_verdict {grant} {running} < \"$LOGFILE\""),
-    );
-    (c, o)
-}
-
-#[test]
-fn rtprio_session_verdict_grades_grant_and_the_live_obs_log() {
-    assert_eq!(
-        session_verdict("0", "1", FIFO_OK_LINE),
-        (1, "no-grant".into())
-    );
-    assert_eq!(session_verdict("0", "0", ""), (1, "no-grant".into()));
-    // grant present, running OBS still logs the EPERM line -> its lingering user manager predates
-    // the grant; it applies at the next reboot.
-    assert_eq!(
-        session_verdict("1", "1", FIFO_FAIL_LINE),
-        (2, "grant-pending-reboot".into())
-    );
-    assert_eq!(
-        session_verdict("1", "1", FIFO_OK_LINE),
-        (0, "ok-sched-fifo".into())
-    );
-    assert_eq!(
-        session_verdict("1", "1", "no genlock line"),
-        (0, "ok".into())
-    );
-    // OBS not running: the newest log is a PAST session -- never graded.
-    assert_eq!(session_verdict("1", "0", FIFO_FAIL_LINE), (0, "ok".into()));
-}
-
-#[test]
-fn rtprio_session_verdict_survives_a_large_log_under_pipefail() {
-    // The drift-guard-log-parsers SIGPIPE class: a real OBS log is 100s of KB and the matching line
-    // is EARLY -- a `printf | grep -q` shape misgrades under pipefail. >64 KB fixture.
-    let mut log = String::from(FIFO_FAIL_LINE);
-    log.push('\n');
-    for i in 0..4000 {
-        log.push_str(&format!(
-            "info: filler line {i} ..........................................\n"
-        ));
-    }
-    assert!(log.len() > 64 * 1024);
-    assert_eq!(
-        session_verdict("1", "1", &log),
-        (2, "grant-pending-reboot".into())
-    );
-}
-
-#[test]
-fn crash_popup_units_cover_imags_mask_plus_the_apport_coredump_hook() {
-    let (c, out, _e) = run_sourced(&[], "strih_crash_popup_units");
-    assert_eq!(c, 0);
-    let units: Vec<&str> = out.lines().filter(|l| !l.is_empty()).collect();
-    // Superset of imag's mask (setup-imag.sh `systemctl mask apport.service whoopsie.service`).
-    let imag = read_script("scripts/setup-imag.sh");
-    let imag_line = imag
-        .lines()
-        .find(|l| l.trim_start().starts_with("systemctl mask apport.service"))
-        .expect("setup-imag.sh apport/whoopsie mask line");
-    for u in imag_line
-        .split_whitespace()
-        .filter(|w| w.ends_with(".service"))
-    {
-        assert!(
-            units.contains(&u),
-            "imag masks {u}; strih must too: {units:?}"
-        );
-    }
-    // 26.04: apport's systemd-coredump OnSuccess hook writes /var/crash (-> the popup) even with
-    // apport.service masked; masking the TEMPLATE blocks every instance.
-    assert!(
-        units.contains(&"apport-coredump-hook@.service"),
-        "the apport coredump hook template must be masked too: {units:?}"
-    );
-}
-
-#[test]
-fn crash_popup_member_ok_grades_a_template_by_is_enabled_only() {
-    let hook = "apport-coredump-hook@.service";
-    let cases = [
-        (hook, "masked", "", true),
-        (hook, "masked-runtime", "", true),
-        (hook, "not-found", "inactive", true),
-        (hook, "", "", true),                // apport not installed at all
-        (hook, "static", "inactive", false), // the 26.04 default: pulled by OnSuccess
-        (hook, "enabled", "", false),
-        (hook, "disabled", "", false), // disable does not stop an OnSuccess= pull
-        ("apport.service", "masked", "inactive", true),
-        ("apport.service", "masked", "active", false),
-        ("whoopsie.service", "enabled", "inactive", false),
-    ];
-    for (unit, en, act, want) in cases {
-        let (c, _o, _e) = run_sourced(
-            &[("U", unit), ("EN", en), ("ACT", act)],
-            "strih_crash_popup_member_ok \"$U\" \"$EN\" \"$ACT\"",
-        );
-        assert_eq!(
-            c == 0,
-            want,
-            "member_ok({unit}, enabled={en:?}, active={act:?}) must be {want}"
-        );
-    }
-}
-
-#[test]
-fn crash_reports_count_counts_only_crash_files_and_tolerates_a_missing_dir() {
-    let dir = tempfile::tempdir().unwrap();
-    for f in ["_usr_bin_obs.1000.crash", "_usr_bin_x.0.crash", "notes.txt"] {
-        std::fs::write(dir.path().join(f), "x").unwrap();
-    }
-    std::fs::create_dir(dir.path().join("sub.crash")).unwrap(); // a DIR is not a report
-    let (c, out, _e) = run_sourced(
-        &[("D", dir.path().to_str().unwrap())],
-        "strih_crash_reports_count \"$D\"",
-    );
-    assert_eq!((c, out.as_str()), (0, "2"));
-    let (c, out, _e) = run_sourced(&[], "strih_crash_reports_count /nonexistent/crash-dir");
-    assert_eq!((c, out.as_str()), (0, "0"));
-}
-
-#[test]
-fn rtprio_wording_names_the_reboot_not_a_relogin() {
-    // strih-obs.service inherits its limits from the LINGERING user@UID manager (setup-strih
-    // step 13 enables linger), which applies pam_limits only when it starts -- i.e. at boot. A
-    // "next login" claim sends the supervisor down a false diagnosis.
-    let (_c, body, _e) = run_sourced(&[], "strih_rtprio_limits_text alice");
-    let setup = setup_11c_block();
-    let v = read_script("scripts/verify-strih.sh");
-    let item32 = block_between(&v, "# 32)", "# 33)");
-    for (what, text) in [
-        ("limits body", body.as_str()),
-        ("setup 11c", setup.as_str()),
-        ("verify 32", item32),
-    ] {
-        assert!(
-            !text.contains("next login"),
-            "{what} must not claim the grant applies at the next login"
-        );
-        assert!(text.contains("reboot"), "{what} must name the reboot");
-    }
-}
-
-#[test]
-fn crash_popup_unit_ok_passes_only_masked_or_absent_and_not_running() {
-    let cases = [
-        ("masked", "inactive", true),
-        ("masked\nmasked", "inactive", true), // the is-enabled || echo double-append shape
-        ("masked-runtime", "inactive", true),
-        ("disabled", "inactive", true),
-        ("not-found", "inactive", true),
-        ("", "inactive", true), // unit file absent (older systemd prints nothing)
-        ("masked", "failed", true),
-        ("enabled", "inactive", false),
-        ("static", "inactive", false),
-        ("masked", "active", false), // masked but still running (oneshot RemainAfterExit)
-        ("disabled", "activating", false),
-        ("masked", "", false), // unreadable active state -> fail closed
-        ("weird", "inactive", false),
-    ];
-    for (en, act, want) in cases {
-        let (c, _o, _e) = run_sourced(
-            &[("EN", en), ("ACT", act)],
-            "strih_crash_popup_unit_ok \"$EN\" \"$ACT\"",
-        );
-        assert_eq!(
-            c == 0,
-            want,
-            "unit_ok(enabled={en:?}, active={act:?}) must be {want}"
-        );
-    }
-}
-
-#[test]
-fn crash_popup_verdict_orders_units_then_coredump() {
-    let v = |bad: &str, core: &str| {
-        let (c, o, _e) = run_sourced(
-            &[("BAD", bad), ("CORE", core)],
-            "strih_crash_popup_verdict \"$BAD\" \"$CORE\"",
-        );
-        (c, o)
-    };
-    assert_eq!(v("", "1"), (0, "ok".into()));
-    assert_eq!(
-        v("apport.service", "1"),
-        (1, "units-live: apport.service".into())
-    );
-    assert_eq!(
-        v("apport.service whoopsie.service", "0"),
-        (1, "units-live: apport.service whoopsie.service".into())
-    );
-    assert_eq!(v("", "0"), (1, "no-systemd-coredump".into()));
-    assert_eq!(v("", ""), (1, "no-systemd-coredump".into()));
-}
-
-#[test]
-fn setup_strih_step_11c_is_a_lettered_substep_between_11b_and_12() {
-    let s = read_script("scripts/setup-strih.sh");
-    assert!(
-        s.contains("TOTAL_STEPS=17"),
-        "a lettered sub-step keeps TOTAL_STEPS at 17"
-    );
-    let b = s.find("step \"11b\"").expect("step 11b");
-    let c = s
-        .find("step \"11c\"")
-        .expect("setup-strih must carry step \"11c\"");
-    let twelve = s.find("step 12 ").expect("step 12");
-    assert!(b < c && c < twelve, "step 11c must sit between 11b and 12");
-}
+// setup-strih.sh now runs the SAME appliance baseline as imag (scripts/lib/obs-box-baseline.sh) and
+// verify-strih.sh the SAME grader (scripts/lib/obs-box-baseline-verify.sh). These pin the strih side:
+// the box facts it passes, the kiosk openbox autostart, rtprio OFF (the retired 11c grant), and that
+// the superseded strih-only pieces are gone. The baseline lib itself is tested in
+// tests/obs_box_baseline_1357.rs.
 
 /// Extract `[start, end)` from `text` by literal anchors (end searched after start).
 fn block_between<'a>(text: &'a str, start: &str, end: &str) -> &'a str {
@@ -4055,33 +3514,12 @@ fn block_between<'a>(text: &'a str, start: &str, end: &str) -> &'a str {
     &text[s..e]
 }
 
-/// Write an executable fake tool into `bin`.
-fn fake_tool(bin: &std::path::Path, name: &str, body: &str) {
-    use std::os::unix::fs::PermissionsExt;
-    let p = bin.join(name);
-    std::fs::write(&p, format!("#!/bin/bash\n{body}\n")).unwrap();
-    std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
-}
-
-/// Run an extracted script block under the callers' real `set -euo pipefail` with the lib
-/// sourced, a fake-tool dir first on PATH, and the caller's prelude. Returns (exit, out, err).
-fn run_block(
-    bin: &std::path::Path,
-    env: &[(&str, &str)],
-    prelude: &str,
-    block: &str,
-) -> (i32, String, String) {
+/// Run an extracted script block under the callers' real `set -euo pipefail` with the lib sourced
+/// and the caller's prelude. Returns (exit, out, err).
+fn run_block(env: &[(&str, &str)], prelude: &str, block: &str) -> (i32, String, String) {
     let harness = format!("set -euo pipefail\n. \"$SCRIPT\"\n{prelude}\n{block}\n");
-    let path = format!(
-        "{}:{}",
-        bin.display(),
-        std::env::var("PATH").unwrap_or_default()
-    );
     let mut cmd = Command::new("bash");
-    cmd.arg("-c")
-        .arg(&harness)
-        .env("SCRIPT", lib())
-        .env("PATH", path);
+    cmd.arg("-c").arg(&harness).env("SCRIPT", lib());
     for (k, v) in env {
         cmd.env(k, v);
     }
@@ -4093,277 +3531,374 @@ fn run_block(
     )
 }
 
-const SETUP_PRELUDE: &str = "step() { echo \"STEP $1\"; }\nwarn() { echo \"WARN $1\"; }\n\
-     fail() { echo \"FAIL: $1\" >&2; exit 1; }\nDESKTOP_USER=alice";
-
-fn setup_11c_block() -> String {
-    let s = read_script("scripts/setup-strih.sh");
-    block_between(&s, "step \"11c\"", "\n# -----------").to_string()
+/// A fake /sys with `class/net/<iface>/device/driver -> .../<driver>` links.
+fn fake_sysroot(nics: &[(&str, &str)]) -> tempfile::TempDir {
+    let root = tempfile::tempdir().unwrap();
+    for (iface, driver) in nics {
+        let dev = root.path().join(format!("devices/{iface}"));
+        std::fs::create_dir_all(&dev).unwrap();
+        let drv = root.path().join(format!("bus/drivers/{driver}"));
+        std::fs::create_dir_all(&drv).unwrap();
+        std::os::unix::fs::symlink(&drv, dev.join("driver")).unwrap();
+        let net = root.path().join(format!("class/net/{iface}"));
+        std::fs::create_dir_all(&net).unwrap();
+        std::os::unix::fs::symlink(&dev, net.join("device")).unwrap();
+    }
+    std::fs::create_dir_all(root.path().join("class/net/lo")).unwrap();
+    root
 }
+
+const IP_ADDR: &str = "1: lo    inet 127.0.0.1/8 scope host lo\n\
+                       2: enp3s0    inet 192.168.1.5/24 brd 192.168.1.255 scope global enp3s0\n\
+                       3: enx00e04c680001    inet 10.77.9.202/23 brd 10.77.9.255 scope global enx00e04c680001\n";
 
 #[test]
-fn setup_strih_step_11c_writes_grant_masks_units_and_installs_coredump() {
-    let dir = tempfile::tempdir().unwrap();
-    let bin = dir.path().join("bin");
-    std::fs::create_dir_all(&bin).unwrap();
-    let calls = dir.path().join("calls.log");
-    fake_tool(&bin, "systemctl", "echo \"systemctl $*\" >> \"$CALLS\"");
-    fake_tool(&bin, "apt-get", "echo \"apt-get $*\" >> \"$CALLS\"");
-    let limits = dir.path().join("limits.d/95-strih-genlock-rtprio.conf");
-    let (code, out, err) = run_block(
-        &bin,
-        &[
-            ("CALLS", calls.to_str().unwrap()),
-            ("STRIH_RTPRIO_LIMITS_FILE", limits.to_str().unwrap()),
-        ],
-        SETUP_PRELUDE,
-        &setup_11c_block(),
-    );
-    assert_eq!(code, 0, "step 11c must succeed; stdout={out} stderr={err}");
-    let body = std::fs::read_to_string(&limits).expect("the limits.d grant must be written");
-    let want = format!("alice   -   rtprio   {}", imag_rtprio_value());
-    assert!(body.lines().any(|l| l == want), "grant body: {body}");
-    let log = std::fs::read_to_string(&calls).unwrap();
-    for u in ["apport.service", "whoopsie.service"] {
-        assert!(
-            log.contains(&format!("systemctl disable --now {u}")),
-            "{u} must be disabled+stopped; calls:\n{log}"
-        );
-    }
-    for u in [
-        "apport.service",
-        "apport-coredump-hook@.service",
-        "whoopsie.service",
-    ] {
-        assert!(
-            log.contains(&format!("systemctl mask {u}")),
-            "{u} must be masked; calls:\n{log}"
-        );
-    }
-    assert!(
-        !out.contains("next login"),
-        "the grant applies at the next reboot (lingering user manager), not a login: {out}"
-    );
-    assert!(
-        log.lines()
-            .any(|l| l.starts_with("apt-get install") && l.contains("systemd-coredump")),
-        "systemd-coredump must be installed; calls:\n{log}"
-    );
-}
-
-#[test]
-fn setup_strih_step_11c_fails_loud_when_coredump_install_or_mask_fails() {
-    for (tool, body) in [
-        ("apt-get", "exit 100"),
-        ("systemctl", "[ \"$1\" = mask ] && exit 1; exit 0"),
-    ] {
-        let dir = tempfile::tempdir().unwrap();
-        let bin = dir.path().join("bin");
-        std::fs::create_dir_all(&bin).unwrap();
-        fake_tool(&bin, "systemctl", "exit 0");
-        fake_tool(&bin, "apt-get", "exit 0");
-        fake_tool(&bin, tool, body);
-        let limits = dir.path().join("limits.d/95.conf");
-        let (code, _out, err) = run_block(
-            &bin,
-            &[("STRIH_RTPRIO_LIMITS_FILE", limits.to_str().unwrap())],
-            SETUP_PRELUDE,
-            &setup_11c_block(),
-        );
-        assert_ne!(code, 0, "a failing {tool} must fail step 11c loudly");
-        assert!(
-            err.contains("FAIL:"),
-            "the failure must go through fail(); stderr={err}"
-        );
-    }
-}
-
-const VERIFY_PRELUDE: &str = "FAILS=0\nok() { echo \"PASS $1\"; }\n\
-     bad() { echo \"FAIL $1\"; FAILS=$((FAILS+1)); }\nnote() { echo \"NOTE $1\"; }\n\
-     newest_log() { ls -1t \"${OBS_LOG_DIR}\"/*.txt 2>/dev/null | head -1; }\nSTRIH_LX_USER=alice";
-
-/// Run verify-strih items 32 + 33 against fake live state. `units` rows are
-/// `(unit, is-enabled output, is-active output)`; `obs_running` drives the supervisor check;
-/// `crash_reports` stale `*.crash` files are placed in the (seamed) crash dir.
-fn run_verify_items(
-    grant: Option<&str>,
-    obs_running: bool,
-    log: Option<&str>,
-    units: &[(&str, &str, &str)],
-    coredump_status: &str,
-    crash_reports: usize,
-) -> (i32, String, String) {
-    let dir = tempfile::tempdir().unwrap();
-    let bin = dir.path().join("bin");
-    std::fs::create_dir_all(&bin).unwrap();
-    let state = dir.path().join("units.state");
-    let rows: String = units
-        .iter()
-        .map(|(u, en, act)| format!("{u}|{en}|{act}\n"))
-        .collect();
-    std::fs::write(&state, rows).unwrap();
-    fake_tool(
-        &bin,
-        "systemctl",
-        r#"if [ "$1" = --user ]; then [ "$FAKE_OBS" = 1 ]; exit $?; fi
-row="$(grep -F -- "$2|" "$FAKE_STATE" | head -1 || true)"
-if [ -z "$row" ]; then [ "$1" = is-active ] && echo inactive; exit 3; fi
-if [ "$1" = is-enabled ]; then out="$(echo "$row" | cut -d'|' -f2)"; else out="$(echo "$row" | cut -d'|' -f3)"; fi
-[ -n "$out" ] && echo "$out"
-case "$out" in enabled|active|static) exit 0;; *) exit 1;; esac"#,
-    );
-    fake_tool(&bin, "pgrep", "exit 1");
-    fake_tool(
-        &bin,
-        "dpkg-query",
-        r#"[ -n "$FAKE_CORE" ] || exit 1; printf '%s' "$FAKE_CORE""#,
-    );
-    let logs = dir.path().join("logs");
-    std::fs::create_dir_all(&logs).unwrap();
-    if let Some(text) = log {
-        std::fs::write(logs.join("2026-09-23 08-00-00.txt"), text).unwrap();
-    }
-    let limits = dir.path().join("95-strih-genlock-rtprio.conf");
-    if let Some(g) = grant {
-        std::fs::write(&limits, g).unwrap();
-    }
-    let crash_dir = dir.path().join("crash");
-    std::fs::create_dir_all(&crash_dir).unwrap();
-    for i in 0..crash_reports {
-        std::fs::write(crash_dir.join(format!("_usr_bin_obs.{i}.crash")), "x").unwrap();
-    }
-    let v = read_script("scripts/verify-strih.sh");
-    let block = block_between(&v, "# 32)", "\necho \"\"\nif [ \"$FAILS\" -eq 0 ]");
-    // the REAL shared OBS-running predicate verify-strih defines at its top (items 1 and 32)
-    let obs_running_fn = block_between(&v, "obs_running() {", "\n}\n");
-    let prelude = format!("{VERIFY_PRELUDE}\n{obs_running_fn}\n}}");
-    run_block(
-        &bin,
-        &[
-            ("FAKE_STATE", state.to_str().unwrap()),
-            ("FAKE_OBS", if obs_running { "1" } else { "0" }),
-            ("FAKE_CORE", coredump_status),
-            ("OBS_LOG_DIR", logs.to_str().unwrap()),
-            ("STRIH_RTPRIO_LIMITS_FILE", limits.to_str().unwrap()),
-            ("STRIH_CRASH_DIR", crash_dir.to_str().unwrap()),
-        ],
-        &prelude,
-        &format!("{block}\necho \"FAILS=$FAILS\""),
-    )
-}
-
-const MASKED_UNITS: [(&str, &str, &str); 3] = [
-    ("apport.service", "masked", "inactive"),
-    ("apport-coredump-hook@.service", "masked", ""),
-    ("whoopsie.service", "masked", "inactive"),
-];
-const CORE_OK: &str = "install ok installed";
-
-#[test]
-fn verify_strih_rtprio_and_crash_popup_items_pass_on_a_provisioned_box() {
-    let grant = "# c\nalice   -   rtprio   20\n";
-    let (c, out, err) = run_verify_items(
-        Some(grant),
-        true,
-        Some(FIFO_OK_LINE),
-        &MASKED_UNITS,
-        CORE_OK,
-        0,
+fn rig_nic_prefers_the_override_then_the_one_r8152_then_the_static_ip() {
+    let one = fake_sysroot(&[("enx00e04c680001", "r8152"), ("enp3s0", "r8169")]);
+    let root = one.path().to_str().unwrap();
+    let (c, out, err) = run_sourced(
+        &[("R", root), ("A", IP_ADDR)],
+        "strih_lx_rig_nic \"$R\" \"$A\" 10.77.9.202",
     );
     assert_eq!(
-        c, 0,
-        "the items must not abort the gate; stderr={err}\n{out}"
+        (c, out.as_str()),
+        (0, "enx00e04c680001"),
+        "the ONE r8152 NIC wins; stderr={err}"
     );
-    assert!(out.contains("FAILS=0"), "{out}");
-    assert!(out.contains("PASS (rtprio)"), "{out}");
-    assert!(out.contains("PASS (crash-popup)"), "{out}");
-    assert!(!out.contains("NOTE"), "a clean box prints no NOTE: {out}");
-    // No OBS log at all + OBS down: still a pass on the grant (never aborts on a missing log).
-    let (c, out, err) = run_verify_items(Some(grant), false, None, &MASKED_UNITS, CORE_OK, 0);
-    assert_eq!(c, 0, "stderr={err}\n{out}");
+
+    let (c, out, _e) = run_sourced(
+        &[("R", root), ("A", IP_ADDR), ("STRIH_NIC_IFACE", "enpX")],
+        "strih_lx_rig_nic \"$R\" \"$A\" 10.77.9.202",
+    );
+    assert_eq!(
+        (c, out.as_str()),
+        (0, "enpX"),
+        "STRIH_NIC_IFACE overrides everything"
+    );
+
+    // no r8152 -> the interface carrying the static IP
+    let none = fake_sysroot(&[("enp3s0", "r8169"), ("enx00e04c680001", "cdc_ncm")]);
+    let (c, out, _e) = run_sourced(
+        &[("R", none.path().to_str().unwrap()), ("A", IP_ADDR)],
+        "strih_lx_rig_nic \"$R\" \"$A\" 10.77.9.202",
+    );
+    assert_eq!(
+        (c, out.as_str()),
+        (0, "enx00e04c680001"),
+        "falls back to the STATIC_IP interface"
+    );
+
+    // two r8152 NICs -> ambiguous by driver -> the static-IP interface decides
+    let two = fake_sysroot(&[("enx00e04c680001", "r8152"), ("enx00e04c680002", "r8152")]);
+    let (c, out, _e) = run_sourced(
+        &[("R", two.path().to_str().unwrap()), ("A", IP_ADDR)],
+        "strih_lx_rig_nic \"$R\" \"$A\" 10.77.9.202",
+    );
+    assert_eq!((c, out.as_str()), (0, "enx00e04c680001"));
+
+    // nothing resolves -> rc 1, nothing on stdout, a reason on stderr (never a guessed Wi-Fi/onboard NIC)
+    let (c, out, err) = run_sourced(
+        &[("R", none.path().to_str().unwrap()), ("A", IP_ADDR)],
+        "strih_lx_rig_nic \"$R\" \"$A\" 10.77.9.250",
+    );
+    assert_eq!(c, 1);
+    assert!(out.is_empty(), "no guessed interface on failure: {out:?}");
     assert!(
-        out.contains("FAILS=0") && out.contains("PASS (rtprio)"),
-        "{out}"
+        err.contains("STRIH_NIC_IFACE"),
+        "the error must name the override: {err}"
     );
 }
 
 #[test]
-fn verify_strih_rtprio_item_fails_without_grant_and_notes_a_pending_reboot() {
-    let (_c, out, _e) =
-        run_verify_items(None, true, Some(FIFO_FAIL_LINE), &MASKED_UNITS, CORE_OK, 0);
-    assert!(
-        out.contains("FAIL (rtprio)") && out.contains("FAILS=1"),
-        "{out}"
+fn pl1_watts_is_the_strih_cpu_base_power_with_an_env_override() {
+    let (c, out, _e) = run_sourced(&[], "strih_lx_pl1_watts");
+    assert_eq!(
+        (c, out.as_str()),
+        (0, "55"),
+        "i5-13450HX Processor Base Power, not imag's 45 W"
     );
-    let grant = "alice - rtprio 20\n";
-    let (_c, out, _e) = run_verify_items(
-        Some(grant),
-        true,
-        Some(FIFO_FAIL_LINE),
-        &MASKED_UNITS,
-        CORE_OK,
-        0,
+    let (c, out, _e) = run_sourced(&[("STRIH_LX_PL1_W", "40")], "strih_lx_pl1_watts");
+    assert_eq!((c, out.as_str()), (0, "40"));
+}
+
+/// The kiosk openbox autostart: the shared preamble lines VERBATIM (the baseline verify greps them),
+/// ONE start per supervised --user unit, the Companion Satellite launch line, and valid bash.
+#[test]
+fn openbox_autostart_text_carries_the_preamble_units_and_satellite() {
+    let baseline = manifest_dir().join("scripts/lib/obs-box-baseline.sh");
+    let (c, out, err) = run_sourced(
+        &[("BL", baseline.to_str().unwrap())],
+        ". \"$BL\"; strih_openbox_autostart_text",
+    );
+    assert_eq!(c, 0, "stderr={err}");
+    assert!(out.starts_with("#!/bin/bash\n"), "a runnable script: {out}");
+    let lines: Vec<&str> = out.lines().collect();
+    for want in [
+        "xset s off -dpms s noblank 2>/dev/null || true",
+        "rm -rf \"$HOME/.config/obs-studio/.sentinel\"/* 2>/dev/null || true",
+        "systemctl --user start strih-obs.service || true",
+        "systemctl --user start strih-bundle-state-server.service || true",
+        "/opt/companion-satellite/companion-satellite >/dev/null 2>&1 &",
+    ] {
+        assert!(
+            lines.contains(&want),
+            "autostart must carry the line `{want}`:\n{out}"
+        );
+    }
+    let syntax = Command::new("bash")
+        .arg("-n")
+        .arg("-c")
+        .arg(&out)
+        .output()
+        .unwrap();
+    assert!(
+        syntax.status.success(),
+        "the generated autostart must parse: {:?}",
+        syntax
     );
     assert!(
-        out.contains("NOTE (rtprio)") && out.contains("reboot") && out.contains("FAILS=0"),
-        "{out}"
+        !out.contains("WAYLAND") && !out.contains("__NV_PRIME"),
+        "no Wayland / PRIME-offload leftovers in the kiosk autostart"
     );
 }
 
+/// setup-strih.sh sources the shared baseline and runs EVERY baseline item in step 11, in imag's
+/// order, with strih's own facts (the `strih` box prefix, the resolved rig NIC, the derived release
+/// series, the strih PL1).
 #[test]
-fn verify_strih_crash_popup_item_fails_on_a_live_unit_or_missing_coredump() {
-    let grant = "alice - rtprio 20\n";
-    let live = [
-        ("apport.service", "enabled", "active"),
-        ("apport-coredump-hook@.service", "masked", ""),
-        ("whoopsie.service", "masked", "inactive"),
+fn setup_strih_step_11_runs_the_shared_baseline_in_imag_order() {
+    let s = read_script("scripts/setup-strih.sh");
+    assert!(
+        s.contains(". \"${HERE}/lib/obs-box-baseline.sh\""),
+        "setup-strih must source the shared baseline lib"
+    );
+    let step11 = block_between(&s, "step 11 \"OBS-box appliance baseline", "step \"11b\"");
+    let calls = [
+        "obs_box_network_tuning \"$STRIH_NIC\" strih",
+        "obs_box_max_performance \"$STRIH_NIC\" strih",
+        "obs_box_never_sleep \"$DESKTOP_USER\" strih",
+        "obs_box_boot_safety_net \"$STRIH_KERNEL_SERIES\" strih",
+        "obs_box_lowlatency_kernel \"$STRIH_KERNEL_SERIES\"",
+        "obs_box_cpu_affinity strih",
+        "obs_box_nvidia_prime strih",
+        "obs_box_dejitter \"$DESKTOP_USER\" strih \"$OBS_CFG\"",
+        "obs_box_kiosk \"$DESKTOP_USER\" strih",
+        "obs_box_power_envelope \"$(strih_lx_pl1_watts)\" strih_fetch_repo_file",
+        "obs_box_touchpad strih",
+        "obs_box_maxperf_persistence strih",
     ];
-    let (_c, out, _e) = run_verify_items(Some(grant), false, None, &live, CORE_OK, 0);
+    let mut last = 0;
+    for call in calls {
+        let at = step11
+            .find(call)
+            .unwrap_or_else(|| panic!("step 11 must call `{call}`"));
+        assert!(
+            at >= last,
+            "step 11 must run `{call}` in imag's baseline order"
+        );
+        last = at;
+    }
     assert!(
-        out.contains("FAIL (crash-popup)")
-            && out.contains("apport.service")
-            && out.contains("FAILS=1"),
+        step11.contains("STRIH_KERNEL_SERIES=\"$(obs_box_kernel_series)\"")
+            && step11.contains("STRIH_NIC=\"$(strih_lx_rig_nic /sys"),
+        "the kernel series + rig NIC are DERIVED on the box, never imag literals"
+    );
+    // the step must come after step 7 (the OBS config dir the de-jitter's ProcessPriority edits exists)
+    let seven = s.find("step 7 \"OBS pre-seed").expect("step 7");
+    let eleven = s
+        .find("step 11 \"OBS-box appliance baseline")
+        .expect("step 11");
+    assert!(
+        seven < eleven,
+        "the baseline runs after step 7 seeds the OBS config"
+    );
+    assert!(
+        s.contains("TOTAL_STEPS=17"),
+        "TOTAL_STEPS stays 17 (step 11 was re-purposed)"
+    );
+    assert!(
+        !s.contains("step \"11c\""),
+        "the retired rtprio + crash-popup sub-step 11c is gone (crash popups are a baseline item)"
+    );
+}
+
+/// rtprio stays OFF: setup-strih writes NO limits.d grant any more and SELF-HEALS a leftover one.
+#[test]
+fn setup_strih_never_grants_rtprio_and_removes_a_leftover_grant() {
+    let s = read_script("scripts/setup-strih.sh");
+    assert!(
+        !s.contains("rtprio   20") && !s.contains("strih_rtprio_limits_text"),
+        "setup-strih must never write an rtprio grant (issue 1357 design)"
+    );
+    let fragment = block_between(
+        &s,
+        "RTPRIO_LEFTOVER=\"$(strih_rtprio_leftover_path)\"",
+        "\n# -----------",
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let f = dir.path().join("95-strih-genlock-rtprio.conf");
+    std::fs::write(&f, "alice   -   rtprio   20\n").unwrap();
+    let prelude = "YELLOW=''; NC=''\nfail() { echo \"FAIL: $1\" >&2; exit 1; }";
+    let (c, out, err) = run_block(
+        &[("STRIH_RTPRIO_LIMITS_FILE", f.to_str().unwrap())],
+        prelude,
+        fragment,
+    );
+    assert_eq!(c, 0, "stderr={err}");
+    assert!(!f.exists(), "the leftover grant must be removed");
+    assert!(out.contains("removed the leftover rtprio grant"), "{out}");
+    // absent -> a quiet no-op
+    let (c, out, _e) = run_block(
+        &[("STRIH_RTPRIO_LIMITS_FILE", f.to_str().unwrap())],
+        prelude,
+        fragment,
+    );
+    assert_eq!(c, 0);
+    assert!(
+        out.trim().is_empty(),
+        "no leftover -> nothing to report: {out}"
+    );
+}
+
+/// verify-strih FAILs while the retired grant exists, PASSes without it (item 33).
+#[test]
+fn verify_strih_fails_while_an_rtprio_grant_exists() {
+    let v = read_script("scripts/verify-strih.sh");
+    let item = block_between(&v, "# 33) NO realtime-priority grant", "\necho \"\"");
+    let prelude =
+        "FAILS=0\nok() { echo \"PASS $1\"; }\nbad() { echo \"FAIL $1\"; FAILS=$((FAILS+1)); }\n\
+                   note() { echo \"NOTE $1\"; }";
+    let dir = tempfile::tempdir().unwrap();
+    let f = dir.path().join("95-strih-genlock-rtprio.conf");
+    let run = || {
+        run_block(
+            &[("STRIH_RTPRIO_LIMITS_FILE", f.to_str().unwrap())],
+            prelude,
+            &format!("{item}\necho \"FAILS=$FAILS\""),
+        )
+    };
+    let (c, out, err) = run();
+    assert_eq!(c, 0, "stderr={err}");
+    assert!(
+        out.contains("PASS (rtprio-off)") && out.contains("FAILS=0"),
         "{out}"
     );
-    // The 26.04 default: apport.service + whoopsie masked, but the coredump hook template is still
-    // `static` (pulled by systemd-coredump's OnSuccess=) -> the popup returns -> FAIL.
-    let hook_live = [
-        ("apport.service", "masked", "inactive"),
-        ("apport-coredump-hook@.service", "static", ""),
-        ("whoopsie.service", "masked", "inactive"),
-    ];
-    let (_c, out, _e) = run_verify_items(Some(grant), false, None, &hook_live, CORE_OK, 0);
+    std::fs::write(&f, "alice   -   rtprio   20\n").unwrap();
+    let (c, out, err) = run();
+    assert_eq!(c, 0, "stderr={err}");
     assert!(
-        out.contains("FAIL (crash-popup)")
-            && out.contains("apport-coredump-hook@.service")
-            && out.contains("FAILS=1"),
-        "{out}"
-    );
-    let (_c, out, _e) = run_verify_items(Some(grant), false, None, &MASKED_UNITS, "", 0);
-    assert!(
-        out.contains("FAIL (crash-popup)") && out.contains("no-systemd-coredump"),
-        "{out}"
-    );
-    // Units absent entirely (a box without apport/whoopsie): not-found passes.
-    let absent: [(&str, &str, &str); 0] = [];
-    let (_c, out, _e) = run_verify_items(Some(grant), false, None, &absent, CORE_OK, 0);
-    assert!(
-        out.contains("PASS (crash-popup)") && out.contains("FAILS=0"),
+        out.contains("FAIL (rtprio-off)") && out.contains("FAILS=1"),
         "{out}"
     );
 }
 
+/// verify-strih runs the SHARED baseline grader (item 32) with strih's box prefix + OBS unit, one
+/// PASS/FAIL line per item, and the superseded strih-only items are gone.
 #[test]
-fn verify_strih_crash_popup_item_notes_stale_crash_reports_without_failing() {
-    // update-notifier re-raises the popup at login for reports ALREADY in /var/crash; deleting
-    // them is a supervisor data action, so provisioning REPORTS them (NOTE) and never fails on it.
-    let grant = "alice - rtprio 20\n";
-    let (c, out, err) = run_verify_items(Some(grant), false, None, &MASKED_UNITS, CORE_OK, 2);
-    assert_eq!(c, 0, "stderr={err}\n{out}");
+fn verify_strih_runs_the_shared_baseline_grader() {
+    let v = read_script("scripts/verify-strih.sh");
     assert!(
-        out.contains("PASS (crash-popup)")
-            && out.contains("NOTE (crash-popup) 2 stale crash report")
-            && out.contains("FAILS=0"),
-        "{out}"
+        v.contains(". \"${HERE}/lib/obs-box-baseline-verify.sh\""),
+        "verify-strih must source the shared grader"
+    );
+    assert!(
+        v.contains("obs_box_baseline_gather_snippet strih \"${STRIH_LX_USER:-newlevel}\" strih-obs.service")
+            && v.contains("obs_box_baseline_verdict <<<\"$BASELINE_FACTS\""),
+        "item 32 must gather + grade the baseline for the strih box"
+    );
+    for gone in [
+        "strih_verify_sleep_masked",
+        "strih_verify_governor_ok",
+        "strih_rtprio_session_verdict",
+        "strih_crash_popup_member_ok",
+        "(gpu-env)",
+    ] {
+        assert!(
+            !v.contains(gone),
+            "the superseded `{gone}` item must be gone"
+        );
+    }
+    assert!(
+        v.contains("obs_box_crash_reports_count"),
+        "stale /var/crash reports are still REPORTED (the shared counter)"
+    );
+}
+
+/// Step 15 writes the kiosk openbox autostart + the shared root menu and removes the GNOME-era XDG
+/// autostarts (an XDG entry fired by systemd --user would double-launch).
+#[test]
+fn setup_strih_step_15_writes_the_kiosk_autostart_and_menu() {
+    let s = read_script("scripts/setup-strih.sh");
+    let step15 = block_between(&s, "step 15 \"Kiosk openbox autostart", "step 16 ");
+    for want in [
+        "strih_openbox_autostart_text > \"${USER_HOME}/.config/openbox/autostart\"",
+        "chmod +x \"${USER_HOME}/.config/openbox/autostart\"",
+        "obs_box_openbox_menu_xml \"strih-lx\" \"systemctl --user start strih-obs.service\" \"/usr/local/bin/strih-obs-stop.sh\"",
+        "rm -f \"${USER_HOME}/.config/autostart/companion-satellite.desktop\"",
+    ] {
+        assert!(step15.contains(want), "step 15 must carry `{want}`");
+    }
+    assert!(
+        !s.contains("strih_cpu_performance_unit_text") && !s.contains("strih_perf_effective_line"),
+        "the superseded step-15 governor oneshot is gone (baseline max-performance items replace it)"
+    );
+}
+
+/// The baseline's kernel / PRIME / Xorg-kiosk changes only run after the next boot: pending iff the
+/// lowlatency drop-in exists while the running cmdline has no `preempt=full` token (a whole token --
+/// `preempt=full_debug` is not it); no drop-in = nothing provisioned = not pending.
+#[test]
+fn reboot_pending_is_the_lowlatency_dropin_without_a_running_preempt_full() {
+    let dir = tempfile::tempdir().unwrap();
+    let cfg = dir.path().join("99-lowlatency.cfg");
+    std::fs::write(
+        &cfg,
+        "GRUB_CMDLINE_LINUX_DEFAULT=\"$GRUB_CMDLINE_LINUX_DEFAULT preempt=full\"\n",
+    )
+    .unwrap();
+    let pending = |cmdline: &str, cfg: &str| {
+        run_sourced(
+            &[("CL", cmdline), ("CFG", cfg)],
+            "strih_lx_reboot_pending \"$CL\" \"$CFG\"",
+        )
+        .0 == 0
+    };
+    let cfg = cfg.to_str().unwrap();
+    assert!(pending("BOOT_IMAGE=/vmlinuz ro quiet splash", cfg));
+    assert!(pending("ro preempt=full_debug", cfg));
+    assert!(!pending(
+        "BOOT_IMAGE=/vmlinuz ro preempt=full rcu_nocbs=all",
+        cfg
+    ));
+    assert!(!pending(
+        "BOOT_IMAGE=/vmlinuz ro quiet",
+        "/nonexistent/99-lowlatency.cfg"
+    ));
+}
+
+/// setup-strih's final step reports (never fails) the acceptance gate while that reboot is pending,
+/// and keeps the hard gate once the baseline is running.
+#[test]
+fn setup_strih_final_verify_reports_pending_items_before_the_reboot() {
+    let s = read_script("scripts/setup-strih.sh");
+    let step17 = block_between(
+        &s,
+        "step 17 \"Final verification",
+        "=== strih-lx setup complete",
+    );
+    let pending = step17
+        .find("if strih_lx_reboot_pending \"$(cat /proc/cmdline 2>/dev/null || true)\"; then")
+        .expect("step 17 must branch on the pending reboot");
+    let soft = step17
+        .find("\"${HERE}/verify-strih.sh\" || warn")
+        .expect("pending: verify reports, never fails provisioning");
+    let hard = step17
+        .find(
+            "\"${HERE}/verify-strih.sh\" || fail \"verify-strih.sh acceptance gate did not pass\"",
+        )
+        .expect("running baseline: the hard gate stays");
+    assert!(
+        pending < soft && soft < hard,
+        "pending branch first, the hard gate in the else"
     );
 }

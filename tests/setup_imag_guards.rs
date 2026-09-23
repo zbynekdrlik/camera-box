@@ -18,7 +18,37 @@ fn manifest_dir() -> PathBuf {
 
 fn read(rel: &str) -> String {
     let p = manifest_dir().join(rel);
-    std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("read {}: {e}", p.display()))
+    let s = std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("read {}: {e}", p.display()));
+    if rel == SETUP {
+        // issue 1357: the imag box-level steps moved VERBATIM into the shared OBS-box appliance
+        // baseline (scripts/lib/obs-box-baseline.sh + its kiosk half obs-box-kiosk.sh), which
+        // setup-imag.sh sources and calls -- setup-strih.sh runs the SAME functions. The imag
+        // provisioning TEXT these content pins guard is therefore setup-imag.sh PLUS those libs.
+        return format!("{s}\n{}\n{}", read(BASELINE), read(KIOSK));
+    }
+    s
+}
+
+const BASELINE: &str = "scripts/lib/obs-box-baseline.sh";
+const KIOSK: &str = "scripts/lib/obs-box-kiosk.sh";
+
+/// issue 1357: the body of one shared baseline function (`NAME() {` .. its column-0 `}`), read from
+/// whichever baseline lib defines it -- for pins that must stay scoped to ONE baseline item.
+fn baseline_fn(name: &str) -> String {
+    // Each baseline function ends with a column-0 `}` followed by a blank line (a nested helper such
+    // as the de-jitter's u_systemctl closes with a `}` directly followed by code, so it never ends
+    // the slice early).
+    let libs = format!("{}\n{}\n", read(BASELINE), read(KIOSK));
+    let head = format!("\n{name}() {{\n");
+    let start = libs
+        .find(&head)
+        .unwrap_or_else(|| panic!("the baseline must define {name}()"));
+    let end = start
+        + 1
+        + libs[start + 1..]
+            .find("\n}\n\n")
+            .unwrap_or_else(|| panic!("{name}() must close with a column-0 `}}` + a blank line"));
+    libs[start..end].to_string()
 }
 
 const SETUP: &str = "scripts/setup-imag.sh";
@@ -1165,7 +1195,6 @@ fn setup_imag_masks_oomd_tracker_evolution_apport_whoopsie() {
         "tracker-miner-fs-3.service",
         "tracker3 reset -s",
         "evolution-source-registry.service",
-        "systemctl mask apport.service whoopsie.service",
     ] {
         assert!(
             body.contains(needle),
@@ -1174,6 +1203,19 @@ fn setup_imag_masks_oomd_tracker_evolution_apport_whoopsie() {
              whole GNOME sessions (incl. OBS) on transient PSI memory-pressure spikes"
         );
     }
+    // issue 1357: apport/whoopsie (+ the 26.04 apport coredump-hook template) are masked by the
+    // shared crash-popup item the de-jitter step calls, per unit and fail-loud.
+    let dejitter = baseline_fn("obs_box_dejitter");
+    assert!(
+        dejitter.contains("\nobs_box_crash_popups_off\n"),
+        "the de-jitter item must run the shared crash-popup item"
+    );
+    let crash = baseline_fn("obs_box_crash_popups_off");
+    assert!(
+        crash.contains("systemctl mask \"$CRASH_UNIT\"")
+            && crash.contains("obs_box_crash_popup_units"),
+        "the crash-popup item must mask every obs_box_crash_popup_units member"
+    );
 }
 
 /// snapd auto-refresh must be held forever (unused firefox/snap-store snaps) — a mid-service
@@ -1195,9 +1237,11 @@ fn setup_imag_holds_snap_refresh_forever() {
 #[test]
 fn setup_imag_pins_apt_daily_upgrade_offhours_without_disabling_security_updates() {
     let body = read(SETUP);
+    // issue 1357: the drop-in name carries the box prefix (imag passes `imag` -> imag-offhours.conf).
     for needle in [
-        "/etc/systemd/system/apt-daily-upgrade.timer.d/imag-offhours.conf",
+        "\"/etc/systemd/system/apt-daily-upgrade.timer.d/${BOX}-offhours.conf\"",
         "OnCalendar=*-*-* 04:00",
+        "obs_box_dejitter \"$DESKTOP_USER\" imag \"$OBS_CFG\"",
     ] {
         assert!(
             body.contains(needle),
@@ -1393,12 +1437,13 @@ fn setup_imag_boot_safety_net_precedes_lowlatency_and_isolation_steps() {
 #[test]
 fn setup_imag_holds_generic_kernel_packages_487() {
     let body = read(SETUP);
-    // #820: the hold is now built from the packages that are actually INSTALLED — holding a
-    // not-installed HWE name blocked step 7's own lowlatency install. Same pin, gated by dpkg.
+    // #820: the hold is built from the packages that are actually INSTALLED — holding a
+    // not-installed HWE name blocked step 7's own lowlatency install. issue 1357: the HWE names
+    // carry the box's release SERIES (derived from /etc/os-release -- 24.04 on imag), not a literal.
     for pkg in [
-        "linux-image-generic-hwe-24.04",
-        "linux-headers-generic-hwe-24.04",
-        "linux-generic-hwe-24.04",
+        "\"linux-image-generic-hwe-${SERIES}\"",
+        "\"linux-headers-generic-hwe-${SERIES}\"",
+        "\"linux-generic-hwe-${SERIES}\"",
     ] {
         assert!(
             body.contains(pkg),
@@ -1408,13 +1453,18 @@ fn setup_imag_holds_generic_kernel_packages_487() {
         );
     }
     assert!(
+        body.contains("IMAG_KERNEL_SERIES=\"$(obs_box_kernel_series)\"")
+            && body.contains("obs_box_boot_safety_net \"$IMAG_KERNEL_SERIES\" imag"),
+        "{SETUP} must derive the series and pass it (+ the imag box prefix) to the boot safety net"
+    );
+    assert!(
         body.contains("apt-mark hold \"${KERNEL_HOLD_PKGS[@]}\""),
         "{SETUP} must apt-mark hold the collected kernel package list (#487/#820)"
     );
     assert!(
         body.contains("dpkg -s \"$p\" >/dev/null 2>&1 && KERNEL_HOLD_PKGS+=(\"$p\")"),
         "{SETUP} must hold ONLY installed kernel packages — a hold on a not-installed name makes \
-         apt refuse step 7's linux-lowlatency-hwe-24.04 install (#820, live on .187)"
+         apt refuse step 7's linux-lowlatency-hwe-<series> install (#820, live on .187)"
     );
 }
 
@@ -1450,9 +1500,10 @@ fn setup_imag_kernel_hold_summary_reflects_real_outcome_487() {
 #[test]
 fn setup_imag_kernel_lockdown_487_does_not_disable_unattended_upgrades_wholesale() {
     let body = read(SETUP);
+    // issue 1357: the drop-in name carries the box prefix (imag -> 51imag-kernel-lockdown).
     assert!(
-        body.contains("/etc/apt/apt.conf.d/51imag-kernel-lockdown"),
-        "{SETUP} must write /etc/apt/apt.conf.d/51imag-kernel-lockdown (#487)"
+        body.contains("cat > \"/etc/apt/apt.conf.d/51${BOX}-kernel-lockdown\""),
+        "{SETUP} must write /etc/apt/apt.conf.d/51<box>-kernel-lockdown (#487)"
     );
     for needle in [
         "Unattended-Upgrade::Package-Blacklist",
@@ -1544,9 +1595,12 @@ fn setup_imag_safe_grub_regen_helper_defined_with_full_295_contract() {
 #[test]
 fn setup_imag_installs_lowlatency_config_not_a_kernel_downgrade_482() {
     let body = read(SETUP);
+    // issue 1357: the meta/config package is named by the box's release series (24.04 on imag).
     assert!(
-        body.contains("apt-get install -y --allow-change-held-packages linux-lowlatency-hwe-24.04"),
-        "{SETUP} must install linux-lowlatency-hwe-24.04 (#482) — the meta/config package that \
+        body.contains(
+            "apt-get install -y --allow-change-held-packages \"linux-lowlatency-hwe-${SERIES}\""
+        ) && body.contains("obs_box_lowlatency_kernel \"$IMAG_KERNEL_SERIES\""),
+        "{SETUP} must install linux-lowlatency-hwe-<series> (#482) — the meta/config package that \
          pulls in `lowlatency-kernel` without swapping the kernel image"
     );
     assert!(
@@ -1555,7 +1609,7 @@ fn setup_imag_installs_lowlatency_config_not_a_kernel_downgrade_482() {
          re-running apt-get on every re-provision)"
     );
     // No `apt-get install` line may target a BARE lowlatency kernel IMAGE package (e.g.
-    // `linux-image-lowlatency` or a bare `linux-lowlatency` metapackage without the `-hwe-24.04`
+    // `linux-image-lowlatency` or a bare `linux-lowlatency` metapackage without the `-hwe-<series>`
     // config-package suffix) — that would be the live-verified DOWNGRADE (newest lowlatency
     // images are 6.8/6.11 vs the 6.17 generic kernel already running). Scoped to install COMMAND
     // lines only, so this does not false-trip on the unrelated `"linux-lowlatency";`
@@ -1566,7 +1620,7 @@ fn setup_imag_installs_lowlatency_config_not_a_kernel_downgrade_482() {
             && (t.contains("linux-image-lowlatency")
                 || t.contains(" linux-lowlatency ")
                 || t.contains(" linux-lowlatency\""))
-            && !t.contains("linux-lowlatency-hwe-24.04")
+            && !t.contains("linux-lowlatency-hwe-")
     });
     assert!(
         !bad_install,
@@ -1611,8 +1665,8 @@ fn setup_imag_verifies_preempt_full_present_after_lowlatency_install_482() {
 fn setup_imag_holds_lowlatency_config_packages_after_install_482() {
     let body = read(SETUP);
     assert!(
-        body.contains("apt-mark hold lowlatency-kernel linux-lowlatency-hwe-24.04"),
-        "{SETUP} must `apt-mark hold lowlatency-kernel linux-lowlatency-hwe-24.04` right after \
+        body.contains("apt-mark hold lowlatency-kernel \"linux-lowlatency-hwe-${SERIES}\""),
+        "{SETUP} must `apt-mark hold lowlatency-kernel linux-lowlatency-hwe-<series>` right after \
          installing them (#482/#487) — otherwise an unattended upgrade could silently revert the \
          preempt=full config"
     );
@@ -1631,13 +1685,17 @@ fn setup_imag_never_writes_kernel_isolcpus_dropin_842() {
     let body = read(SETUP);
     assert!(
         !body.contains("isolcpus=${IMAG_ISOLATED_CPUS}")
-            && !body.contains("nohz_full=${IMAG_NOHZ_CPUS}"),
+            && !body.contains("nohz_full=${IMAG_NOHZ_CPUS}")
+            && !body.contains("isolcpus=${OBS_BOX_ISOLATED_CPUS}"),
         "{SETUP}: must NEVER write isolcpus=/nohz_full= to a GRUB_CMDLINE_LINUX_DEFAULT drop-in \
          (#784/#842 regression -- disables scheduler load balancing for a many-threaded OBS \
          process, piling threads onto a single core)"
     );
+    // issue 1357: the affinity item persists to /etc/<box>-isolated-cpus.conf (imag passes `imag`).
     assert!(
-        body.contains("printf '%s\\n' \"$IMAG_ISOLATED_CPUS\" > /etc/imag-isolated-cpus.conf"),
+        body.contains(
+            "printf '%s\\n' \"$OBS_BOX_ISOLATED_CPUS\" > \"/etc/${BOX}-isolated-cpus.conf\""
+        ) && body.contains("obs_box_cpu_affinity imag"),
         "{SETUP}: the AFFINITY-only persisted config (/etc/imag-isolated-cpus.conf, feeding \
          imag-obs-start.sh's taskset pin) must still be written -- restricting OBS to a core mask \
          is fine, only kernel-level *isolation* of those cores was the #842 regression"
@@ -1651,21 +1709,21 @@ fn setup_imag_never_writes_kernel_isolcpus_dropin_842() {
 fn setup_imag_self_heals_leftover_isolation_dropin_and_regens_grub_842() {
     let body = read(SETUP);
     let removal_check = body
-        .find("if [ -f /etc/default/grub.d/98-imag-isolation.cfg ]")
+        .find("if [ -f \"/etc/default/grub.d/98-${BOX}-isolation.cfg\" ]")
         .expect(
-            "{SETUP} must check for a leftover /etc/default/grub.d/98-imag-isolation.cfg (#842 \
+            "{SETUP} must check for a leftover /etc/default/grub.d/98-<box>-isolation.cfg (#842 \
              self-heal, the same discipline every other drift-prone config in this script uses)",
         );
     let rm_call = body
-        .find("rm -f /etc/default/grub.d/98-imag-isolation.cfg")
+        .find("rm -f \"/etc/default/grub.d/98-${BOX}-isolation.cfg\"")
         .expect("{SETUP} must `rm -f` the leftover isolation drop-in when found (#842)");
     assert!(
         removal_check < rm_call,
         "{SETUP}: the existence check must come BEFORE the rm -f (#842 self-heal ordering)"
     );
-    // The LAST occurrence of "safe_grub_regen" in the file must be a bare CALL (not the `() {`
-    // definition), and it must come AFTER the self-heal removal — grub.cfg is only correctly
-    // regenerated once the stale drop-in is actually gone.
+    // The LAST occurrence of "safe_grub_regen" in the provisioning text must be a bare CALL (not
+    // the `() {` definition), and it must come AFTER the self-heal removal — grub.cfg is only
+    // correctly regenerated once the stale drop-in is actually gone.
     let last_mention = body
         .rfind("safe_grub_regen")
         .expect("safe_grub_regen must be mentioned (defined + called)");
@@ -2466,8 +2524,10 @@ fn setup_imag_504_installs_openbox_and_lightdm() {
 #[test]
 fn setup_imag_504_writes_lightdm_autologin_openbox_session() {
     let body = read(SETUP);
+    // issue 1357: the drop-in name carries the box prefix (imag -> 50-imag-autologin.conf).
     assert!(
-        body.contains("/etc/lightdm/lightdm.conf.d/50-imag-autologin.conf"),
+        body.contains("cat > \"/etc/lightdm/lightdm.conf.d/50-${BOX}-autologin.conf\" <<EOF")
+            && body.contains("obs_box_kiosk \"$DESKTOP_USER\" imag"),
         "{SETUP} (#504) must write the lightdm autologin drop-in \
          /etc/lightdm/lightdm.conf.d/50-imag-autologin.conf"
     );
@@ -2660,7 +2720,8 @@ fn setup_imag_504_never_disables_or_purges_the_keep_set() {
 /// NO display manager (black wall). #504.
 #[test]
 fn setup_imag_504_installs_and_switches_dm_before_purge() {
-    let body = read(SETUP);
+    // issue 1357: scoped to the shared kiosk item, where the install/switch/purge sequence lives.
+    let body = baseline_fn("obs_box_kiosk");
     let install_idx = body
         .find("apt-get install -y openbox lightdm")
         .expect("openbox+lightdm install present");
@@ -2692,16 +2753,17 @@ fn setup_imag_504_installs_and_switches_dm_before_purge() {
 /// failure mode this step exists to prevent. #504.
 #[test]
 fn setup_imag_504_reasserts_dm_symlink_after_purge() {
-    let body = read(SETUP);
+    // issue 1357: scoped to the shared kiosk item, where the switch/purge/re-assert sequence lives.
+    let body = baseline_fn("obs_box_kiosk");
     let symlink_idx = body
         .find("ln -sf /lib/systemd/system/lightdm.service /etc/systemd/system/display-manager.service")
         .expect("DM symlink switch present");
     let purge_idx = body.find("apt-get purge").expect("GNOME purge present");
-    // #823: the compare is now canonical-vs-canonical (imag_same_unit) — the old literal
-    // `/lib/...` string could never match on a usrmerge box. Same assertion, same fail-loud, same
-    // position after the purge.
+    // #823: the compare is canonical-vs-canonical (obs_box_same_unit, was imag_same_unit) — the old
+    // literal `/lib/...` string could never match on a usrmerge box. Same assertion, same
+    // fail-loud, same position after the purge.
     let reassert_idx = body
-        .find("imag_same_unit /etc/systemd/system/display-manager.service /lib/systemd/system/lightdm.service")
+        .find("obs_box_same_unit /etc/systemd/system/display-manager.service /lib/systemd/system/lightdm.service")
         .expect(
             "{SETUP} (#504) must re-verify the display-manager symlink AFTER the GNOME purge — a \
              package postrm (gdm3) running after the initial switch could silently re-point it back",
@@ -2903,14 +2965,12 @@ fn setup_imag_grants_rtprio_for_genlock_rt_pin_484() {
          ~10 the #484 render-tick thread requests) — the ulimit that lets a non-root user request \
          SCHED_FIFO"
     );
-    // It must be reserved together with the #483/#842 CPU-affinity reservation those cores exist
-    // for: the drop-in is written after step 8's IMAG_ISOLATED_CPUS derivation (they are one
-    // concern — reserve + grant). #842 removed the kernel-cmdline isolcpus/nohz_full literal this
-    // anchored on before; anchor on the persisted affinity config write instead, which #842 keeps
-    // unchanged.
+    // It is written right after step 8's CPU-affinity reservation (reserve + grant are one imag
+    // concern). issue 1357: the affinity item is the shared baseline call; the grant itself stays an
+    // imag-only line in setup-imag.sh -- the baseline keeps rtprio OFF (never in the libs).
     let iso_idx = body
-        .find("printf '%s\\n' \"$IMAG_ISOLATED_CPUS\" > /etc/imag-isolated-cpus.conf")
-        .expect("the #483/#816/#842 CPU-affinity persistence must still be present");
+        .find("obs_box_cpu_affinity imag")
+        .expect("the #483/#816/#842 CPU-affinity reservation must still be present");
     let rtprio_idx = body
         .find("/etc/security/limits.d/95-imag-genlock-rtprio.conf")
         .expect("the #484 rtprio drop-in must be present");
@@ -2919,6 +2979,12 @@ fn setup_imag_grants_rtprio_for_genlock_rt_pin_484() {
         "{SETUP}: the #484 rtprio grant must be written alongside/after the #483/#842 CPU-affinity \
          reservation (the reserved cores + the rtprio grant are one appliance-hardening concern)"
     );
+    for lib in [BASELINE, KIOSK] {
+        assert!(
+            !read(lib).contains("rtprio   20"),
+            "{lib}: the shared baseline must NEVER grant rtprio (issue 1357 design)"
+        );
+    }
 }
 
 // ============================================================================================
@@ -3572,16 +3638,34 @@ fn setup_imag_purges_thermald_1040() {
 #[test]
 fn setup_imag_installs_the_power_envelope_scripts_and_lib_1040() {
     let body = read(SETUP);
-    for needle in [
-        "contents/scripts/lib/imag-power-envelope.sh?ref=dev",
-        "contents/scripts/imag-power-envelope.sh?ref=dev",
-        "contents/scripts/imag-power-envelope-guard.sh?ref=dev",
+    // issue 1357: the power-envelope item installs through the caller's FETCH function; imag's is
+    // the same gh-api raw fetch every other setup-imag.sh install uses.
+    for (rel, dest) in [
+        (
+            "scripts/lib/imag-power-envelope.sh",
+            "/usr/local/lib/imag-power-envelope.sh",
+        ),
+        (
+            "scripts/imag-power-envelope.sh",
+            "/usr/local/bin/imag-power-envelope.sh",
+        ),
+        (
+            "scripts/imag-power-envelope-guard.sh",
+            "/usr/local/bin/imag-power-envelope-guard.sh",
+        ),
     ] {
+        let call = format!("\"$FETCH\" {rel} {dest}");
         assert!(
-            body.contains(needle),
-            "{SETUP} must fetch {needle} to the box via gh api (#1040)"
+            body.contains(&call),
+            "{SETUP} must install {rel} -> {dest} via the fetch function (#1040)"
         );
     }
+    assert!(
+        body.contains(
+            "gh api -H \"Accept: application/vnd.github.raw\" \"repos/${GENLOCK_REPO}/contents/$1?ref=dev\" > \"$2\""
+        ) && body.contains("obs_box_power_envelope \"${IMAG_PL1_W:-45}\" imag_fetch_repo_file"),
+        "{SETUP} must hand the power-envelope item its gh-api fetch function + the 45 W PL1 (#1040/#1162)"
+    );
 }
 
 /// The oneshot + the guard timer are ROOT system units (sysfs writes need root) and both are
@@ -3688,23 +3772,24 @@ fn setup_imag_swap_kill_attempts_graceful_stop_before_sigkill_785() {
 #[test]
 fn setup_imag_provisions_openbox_menu_with_graceful_stop_785() {
     let body = read(SETUP);
+    // issue 1357: the menu body is the shared kiosk printer; imag passes its label, its supervised
+    // unit and its graceful stop helper.
+    let menu_write = body
+        .find("obs_box_openbox_menu_xml \"imag-nb\" \"systemctl --user start imag-obs.service\" \"/usr/local/bin/imag-obs-stop.sh\"")
+        .expect("{SETUP} must generate ~/.config/openbox/menu.xml via the shared printer (#785)");
     assert!(
-        body.contains(r#"cat > "$USER_HOME/.config/openbox/menu.xml""#),
-        "{SETUP} must generate ~/.config/openbox/menu.xml (#785 provisioning parity — it was \
-         hand-placed only before)"
+        body[menu_write..].contains("> \"$USER_HOME/.config/openbox/menu.xml\""),
+        "{SETUP} must write the printed menu to ~/.config/openbox/menu.xml (#785 provisioning parity)"
     );
     // Graceful stop entry — the operator's state-preserving quit routes through imag-obs-stop.sh.
+    let menu = baseline_fn("obs_box_openbox_menu_xml");
     assert!(
-        body.contains("<command>/usr/local/bin/imag-obs-stop.sh</command>"),
-        "{SETUP}: the openbox menu must have a graceful stop entry calling imag-obs-stop.sh (#785)"
-    );
-    assert!(
-        body.contains("Zastav OBS"),
-        "{SETUP}: the openbox menu must label the graceful stop entry 'Zastav OBS' (#785)"
+        menu.contains("<item label=\"Zastav OBS (korektne)\">") && menu.contains("<command>${stop}</command>"),
+        "{SETUP}: the openbox menu must have a graceful 'Zastav OBS' entry calling the stop helper (#785)"
     );
     // Clean shutdown/restart entries — operator powers the box off cleanly from the desktop.
     assert!(
-        body.contains("systemctl poweroff") && body.contains("systemctl reboot"),
+        menu.contains("systemctl poweroff") && menu.contains("systemctl reboot"),
         "{SETUP}: the openbox menu must provide clean shutdown/restart entries (#785 — operator \
          shuts the box cleanly from the desktop instead of the ignored hardware power key)"
     );
@@ -3712,9 +3797,6 @@ fn setup_imag_provisions_openbox_menu_with_graceful_stop_785() {
     let stop_install = body
         .find(r#"chmod 755 "$OBS_STOP_SH""#)
         .expect("{SETUP}: imag-obs-stop.sh must be installed (#840)");
-    let menu_write = body
-        .find(r#"cat > "$USER_HOME/.config/openbox/menu.xml""#)
-        .expect("{SETUP}: menu.xml write must exist (#785)");
     assert!(
         stop_install < menu_write,
         "{SETUP}: menu.xml (which references imag-obs-stop.sh) must be written AFTER the stop \
