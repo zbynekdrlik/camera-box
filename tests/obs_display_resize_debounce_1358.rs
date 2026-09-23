@@ -197,7 +197,7 @@ fn apply_slot_resizes_the_live_display_and_emits_display_resized() {
     }
     // A pending apply that fires after DestroyDisplay() must not touch the torn-down display
     // nor emit DisplayResized into the preview/program layout code (#1358 review).
-    let guard = s.find("if (destroying) return;").unwrap_or_else(|| {
+    let guard = s.find("if (destroying) { return; }").unwrap_or_else(|| {
         panic!("{DISPLAY}: ApplyDisplayResize must bail out when destroying (#1358). Body:\n{body}")
     });
     assert!(
@@ -212,9 +212,9 @@ fn destroy_display_cancels_a_pending_resize() {
     let at = h
         .find("void DestroyDisplay() {")
         .unwrap_or_else(|| panic!("{DISPLAY_HPP}: DestroyDisplay() not found"));
-    let body = &h[at..at + h[at..].find('}').expect("DestroyDisplay body end")];
+    let body = &h[at..at + h[at..].find("};").expect("DestroyDisplay body end")];
     assert!(
-        body.contains("if (resizeDebounce) resizeDebounce->stop();"),
+        body.contains("if (resizeDebounce) { resizeDebounce->stop(); }"),
         "{DISPLAY_HPP}: DestroyDisplay must stop the #1358 debounce timer. Body: {body}"
     );
 }
