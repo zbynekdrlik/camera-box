@@ -505,3 +505,33 @@ def test_help_prints_the_whole_header_including_env():
     r = _run(["--help"])
     assert r.returncode == 0
     assert "LINUX_BOX_USER" in r.stdout and "STRIH_SSH_PW" in r.stdout, r.stdout
+
+
+# --- review round 2 -----------------------------------------------------------------------------
+
+def test_help_prints_only_the_comment_header():
+    r = _run(["--help"])
+    assert r.returncode == 0
+    assert "set -euo pipefail" not in r.stdout and "shopt" not in r.stdout, r.stdout
+    assert not any(ln.startswith("#") for ln in r.stdout.splitlines()), r.stdout
+
+
+def test_zero_ssh_timeout_is_refused_it_would_disable_the_bound():
+    with tempfile.TemporaryDirectory() as tmp:
+        env, log = _fake_sshpass(tmp)
+        env["RETENTION_SSH_TIMEOUT"] = "0"
+        r = _run(["--box", "strih-lx"], env=env)
+        assert r.returncode == 2, r.stdout + r.stderr
+        assert _calls(log) == ""
+
+
+def test_flags_that_do_not_apply_to_a_mode_are_refused_never_ignored():
+    with tempfile.TemporaryDirectory() as d:
+        for args in (["--user", "x"], ["--budget-gb", "10"], ["--remote-path", "C:\\x.ps1"]):
+            r = _run(["--local-sweep", "--record-dir", d] + args)
+            assert r.returncode == 2, (args, r.stdout + r.stderr)
+    with tempfile.TemporaryDirectory() as tmp:
+        env, log = _fake_sshpass(tmp)
+        r = _run(["--host", "10.77.9.204", "--obs-config-dir", "/x"], env=env)
+        assert r.returncode == 2, r.stdout + r.stderr
+        assert _calls(log) == ""
