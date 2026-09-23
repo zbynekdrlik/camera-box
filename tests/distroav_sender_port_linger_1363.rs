@@ -87,6 +87,7 @@ fn sender_port_module_present_and_linux_only() {
     let h = squish(&vendor_file(PORT_H));
     for sig in [
         "#define NDI_SENDER_FIRST_TCP_PORT 5961",
+        "#define NDI_MESSAGING_TCP_PORT 5960",
         "enum ndi_first_port_state {",
         "static inline int ndi_first_port_hold_state(",
         "static inline const char *ndi_first_port_hold_state_text(",
@@ -374,6 +375,7 @@ fn lifted_pure_helpers() -> String {
     let h = vendor_file(PORT_H);
     let mut c = String::new();
     c.push_str(&lift(&h, "#define NDI_SENDER_FIRST_TCP_PORT", "\n"));
+    c.push_str(&lift(&h, "#define NDI_MESSAGING_TCP_PORT", "\n"));
     c.push_str(&lift(&h, "enum ndi_first_port_state {", "\n};\n"));
     for sig in [
         "static inline int ndi_first_port_hold_state(",
@@ -468,6 +470,11 @@ fn pure_helpers_compute_the_spec_truth_table() {
         (&[5960], &[5960, 5961, 5962], 0),                // two new listeners: ambiguous
         (&[5960, 5961], &[5960, 5961], 0),                // nothing new
         (&[], &[5961], 5961),
+        // The FIRST send_create of a process (the :5961 program reservation) also opens
+        // libndi's :5960 messaging listener — measured live on dev1 with libndi 6.3.2. The
+        // messaging port is never a sender port, so the program's port is still identified.
+        (&[], &[5960, 5961], 5961),
+        (&[], &[5960, 5963], 5963),
         (&[5960], &[0, 5960, 5963], 5963), // a 0 entry is ignored
         (&[5960, 5961], &[5960, 5962], 5962), // a listener that vanished does not matter
     ];
