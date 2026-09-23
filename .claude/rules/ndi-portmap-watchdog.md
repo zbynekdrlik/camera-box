@@ -21,7 +21,8 @@ Same shape as `scripts/netcfg-audit.sh` + `scripts/netcfg-drift-alert-watchdog.s
 `scripts/lib/netcfg-audit.sh`:
 - `scripts/lib/ndi-portmap-health.sh` — PURE map-diff (no I/O), source-only, Tier-0-testable.
 - `scripts/ndi-portmap-audit.sh` — the avahi read + OBS-instance isolation + baseline JSON;
-  `--capture`/`--check`/`--json`; exit **0=STABLE / 3=CHANGED (a moved port) / 2=gather error**.
+  `--capture`/`--check`/`--json`; exit **0=STABLE / 3=CHANGED (a moved port) / 2=gather error / 4=baseline captured on another strih
+  box**.
 - `scripts/ndi-portmap-alert-watchdog.sh` — dev1 timer, reuses `scripts/lib/obs-watchdog-decision.sh`
   confirm/throttle, ONE Slovak Discord alert, ships DISABLED.
 
@@ -70,14 +71,18 @@ watchdog was blind for days without paging. The scope is now derived:
   `<HOSTNAME-UPPERCASED> (<output>)`, and a Linux OBS box's fleet name is its hostname.
 - **Anchor** = `<prefix> (2ME PGM)` (`NDI_PORTMAP_PROGRAM_OUTPUT`, the profile's main output name).
 - **IP** = read from the anchor's OWN mDNS record (`ndi_portmap_anchor_ip`: one distinct IP, else
-  nothing = gather error), NOT from the fleet host. `strih-lx.lan` has no DNS entry on dev1
+  nothing = gather error; IPv4 dotted-quad records only, since dev1's avahi runs `use-ipv6=yes` and a
+  dual-stack announce of the same anchor must stay one box), NOT from the fleet host. `strih-lx.lan` has no DNS entry on dev1
   (`getent ahosts strih-lx.lan` is empty; `strih-lx.local` resolves via mDNS to .202), and the mDNS
   record is the address every NDI receiver dials anyway.
 - **Baseline scope guard** (`ndi_portmap_baseline_scope`): `--check` compares the baseline's
-  recorded `anchor` with the resolved one BEFORE reading avahi. A mismatch is exit 2 with a message
-  naming both anchors and `--capture`. Without it, a baseline from another box reads every old name
-  ABSENT and reports STABLE forever.
-- Every piece stays env-overridable (`NDI_PORTMAP_BOX` / `_NAME_PREFIX` / `_ANCHOR` / `_BOX_IP`). The
+  recorded `anchor` with the resolved one BEFORE reading avahi. A mismatch is its OWN exit code **4**
+  with a message naming both anchors and `--capture`; the watchdog logs it as `BASELINE SCOPE STALE`
+  (machine channel, never a page) so it is not read as a passing box outage. Without it, a baseline
+  from another box reads every old name ABSENT and reports STABLE forever. An unresolved box (empty
+  anchor) is checked first and is exit 2 (a re-capture would fail the same way).
+- Every piece stays env-overridable (`NDI_PORTMAP_BOX` / `_NAME_PREFIX` / `_ANCHOR` / `_BOX_IP`, and
+  `NDI_PORTMAP_FLEET_FACET` for the facet seam). The
   Windows-shaped sample fixture in the tests (the OBS + Arena/CG-Spout two-instance case) runs with an
   explicit `_SNV_SCOPE`; the default-resolution tests use a strih-lx-shaped fixture (`_AVAHI_LX`).
   On Linux strih-lx there is ONE NDI instance, avahi host `strih-lx.local` (no Arena Spout).

@@ -86,8 +86,9 @@ tests/ops). Three helpers consume it:
 - **Known staleness (23.9.2026):** the `strih-lx` row's host `strih-lx.lan` does NOT resolve on dev1
   (no MikroTik static entry; `strih-lx.local` resolves via mDNS to 10.77.9.202), and the `strih` row
   still says `10.77.9.202|windows-genlock|always` although .202 is now strih-lx and the Windows PC is
-  gone. Any facet that dials the strih-lx host therefore sees it as "away". Fixing the table is a
-  cross-watchdog change; do not rely on `obs_fleet_host strih-lx` resolving until it is fixed.
+  gone. Any facet that dials the strih-lx host therefore sees it as "away" (bundle-state,
+  obs-liveness, genlock-lock, render-freeze). Fixing the table is a cross-watchdog change, reported as
+  a follow-up from the issue-1363 lane; do not rely on `obs_fleet_host strih-lx` resolving until then.
 
 ## Scope beyond the watchdogs
 
