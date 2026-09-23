@@ -15,7 +15,9 @@ strih-lx, which records to **`/srv/_REC`** (its OBS profile `RecFilePath`, read 
 `--host` is now REQUIRED and a linux-genlock fleet address is refused by
 `obs_fleet_refuse_linux_target`. **There is no Linux recordings executor yet** — a bash port of
 `src/recordings_retention.rs` for strih-lx `/srv/_REC` (same allowlist + size floor, parity-pinned) is
-a follow-up; until then the E2E free-space WARN (read over `:8899`, platform-neutral) is the guard.
+not ticketed yet (returned to the supervisor as a follow-up candidate in the issue-1317 part-3
+LANE-RETURN); until then strih-lx recordings have NO sweep — only the E2E free-space WARN (read over
+`:8899`, platform-neutral) guards the disk.
 The `C:\_REC` default record dir stays for an explicit Windows `--host`.
 
 ## Why

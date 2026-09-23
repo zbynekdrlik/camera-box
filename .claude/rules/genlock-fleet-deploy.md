@@ -46,10 +46,17 @@ The STRIH-SNV Windows PC is gone and 10.77.9.202 is the Linux strih-lx. So:
   (release-parity gate, runtime packages, /usr prefix, chrome-sandbox) and is supervised by
   `strih-obs.service`. The plan prints the sanctioned recipe from `strih-linux-provisioning.md`
   ("Staging + ssh gotchas"): prune stale stages with `obs-backup-retention.sh --box strih-lx`, rsync
-  the artifact + `scripts/` + `systemd/`, `sudo -S … nohup setup-strih.sh`, `pgrep -x`, a
+  the artifact + `scripts/` + `systemd/` (the repo tree to the FIXED `/tmp/strih-lx-deploy-repo`,
+  `rsync --delete` — a per-sha `-repo` dir matches no retention allowlist and would never be swept),
+  `sshpass … "printf '%s\n' '$PW' | sudo -S … nohup <repo>/scripts/setup-strih.sh …"` (`$PW` expands
+  on dev1; the script runs DIRECTLY, never via `bash`, or `pgrep -x setup-strih.sh` never matches), a
   `systemctl --user restart strih-obs.service`, `verify-strih.sh`. **Every line is a `#` comment**
-  (the issue-1295 saved-.ps1 parse rule holds for a mixed plan). Execute mode for strih-lx is still
-  the loud no-op note — automating the recipe is its own follow-up.
+  (the issue-1295 saved-.ps1 parse rule holds for a mixed plan).
+- **Execute mode has no strih-lx arm yet** (a loud stderr note; automating the recipe is not ticketed
+  yet — returned to the supervisor as a follow-up candidate in the issue-1317 part-3 LANE-RETURN). So
+  `fleet_execute_boxes` (in the shared lib) drops strih-lx from what execute mode deploys AND logs —
+  the durable fleet log never claims "strih-lx at <sha>" — and a run with nothing executable (e.g.
+  `--boxes strih-lx` without `--plan`) is exit 2 before any gh call.
 
 ## Same-SHA cross-workflow resolution — the heart of "one canonical version"
 

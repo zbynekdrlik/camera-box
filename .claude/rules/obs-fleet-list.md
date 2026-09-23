@@ -184,7 +184,11 @@ Per-facet decision (by each facet's PREMISE — a platform-neutral read joins, a
   The host field OR the name matches (`10.77.9.202` and `strih-lx` → `linux-genlock`); the refusal
   is rc 1 + a named stderr line; an address the list does not know PASSES (an explicit ops target
   stays authoritative). Any new PowerShell / schtasks / `C:\` tool that takes a `--host` calls it
-  first -- never a hard-coded "not .202" check.
+  first -- never a hard-coded "not .202" check. **Known gap:** it matches only the literal fleet
+  host or name, so an unlisted alias (`strih-lx.lan`) passes; and the E2E flow's own resolver,
+  `strih_platform` (scripts/lib/strih-platform.sh, `STRIH_LX_HOST` default .202), is a SECOND
+  source of "is this the Linux strih" -- unifying the two is a follow-up candidate (issue 1317
+  part 3 LANE-RETURN), not done here.
 - **Live proof (23.9.2026, read-only `--dry-run` sweep):** network-reach `strih-lx (10.77.9.202):
   ping=1 ws:4455=1 bundle:8899=1 -> REACHABLE`; bundle-state `-> HEALTHY`; obs-liveness
   `strih-lx activeFps=30.00 renderAdvanced=True`; genlock-lock / render-freeze / audio-lag /
