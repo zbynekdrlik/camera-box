@@ -3810,10 +3810,14 @@ const FIFO_FAIL_LINE: &str = "info: genlock: could NOT set render-tick thread SC
 const FIFO_OK_LINE: &str =
     "info: genlock: render-tick thread set SCHED_FIFO prio 10 on the isolated core (#484)";
 
+/// Feed `log` from a FILE (a >128 KB env var would hit the kernel's per-argument E2BIG limit).
 fn session_verdict(grant: &str, running: &str, log: &str) -> (i32, String) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("obs.txt");
+    std::fs::write(&path, log).unwrap();
     let (c, o, _e) = run_sourced(
-        &[("LOGTEXT", log)],
-        &format!("strih_rtprio_session_verdict {grant} {running} <<<\"$LOGTEXT\""),
+        &[("LOGFILE", path.to_str().unwrap())],
+        &format!("strih_rtprio_session_verdict {grant} {running} < \"$LOGFILE\""),
     );
     (c, o)
 }
