@@ -103,19 +103,31 @@ graded), and lightdm + openbox installed.
    GNOME desktop to keep working; reboot right after it finishes. Its final step only REPORTS the
    verify while `strih_lx_reboot_pending` (lowlatency drop-in present, no running `preempt=full`).
 2. Reboot once: the kernel, PRIME nvidia-primary and the lightdm -> openbox Xorg session all take
-   effect together. On 26.04 the lowlatency meta also pulls the series' newest HWE image (7.0.0-34
-   over the running -31), so the boot runs a NEWER kernel and the NVIDIA DKMS module rebuilds for
+   effect together. The lowlatency config meta is pinned to the installed generic-hwe version, so
+   the boot stays on the running HWE kernel;
    it: confirm `nvidia-smi` and `prime-select query` = nvidia after the boot. OBS starts from
    `~/.config/openbox/autostart` via `strih-obs.service`; the autostart pins both outputs to
    1920x1080@60 (`--auto` only as a fallback).
 3. Run `verify-strih.sh`: every `(baseline:*)` row must be PASS, and item 33 (rtprio-off) must PASS
    (setup-strih removed the leftover grant; the reviewer found it still present on the box).
 
-Unverified on the live 26.04 box when this landed (check during the conversion): lightdm/Xorg on
-26.04, whether rc-local.service exists and runs /etc/rc.local on 26.04 (the perf row reports it), the kernel 7.0.0-34 boot + DKMS rebuild, the 80 W PL1 under a thermal soak (the guard steps
-down to 45 W on a hot TCPU), the 1920x1080@60 panel-primary + HDMI-right-of layout, the new OBS CPU
-pin (`/etc/strih-isolated-cpus.conf`, 2-11 on the i5-13450HX — `strih-obs-start.sh` now taskset-pins
-OBS where it ran unpinned before; re-measure the render/genlock ladder against the 11b NIC-IRQ E-core),
-and whether `strih-mv-host` + the vendored child-host projector are still needed on NVIDIA-primary
-Xorg (the XWayland-PRIME present stall they work around should be gone — re-measure, then remove
-them if so).
+Live conversion results (strih-lx, 23.9.2026, first kiosk boot on 7.0.0-31 + `preempt=full`):
+
+- Every `(baseline:*)` row and item 33 (rtprio-off) PASS; OBS on the RTX via NVIDIA-primary Xorg,
+  program `avg_frame_ms` ~19-20 `lagged=0`, MV 30 fps.
+- **power-profiles-daemon 0.30 resets every core's governor to `powersave` when it starts** -- the
+  first kiosk boot came up powersave. The max-performance item now stops + masks it and the perf row
+  FAILs while it is enabled; `<BOX>-maxperf.sh` writes `platform_profile` itself.
+- The kiosk's service-disable list turned **bluetooth** off, which dropped the operator's Bluetooth
+  mouse. `obs_box_kiosk ... keep-bluetooth` is the strih-lx box fact (imag keeps the plain call). A
+  paired + trusted mouse that stays `Connected: no` with the adapter powered is asleep / on another
+  Easy-Switch channel -- a click reconnects it; nothing on the box side to fix.
+- The lowlatency config meta must be installed at the INSTALLED generic-hwe version (an unpinned
+  install pulled a newer HWE image and conflicted); `obs_box_lowlatency_kernel` pins it.
+- MV projector on Xorg: iconified (`WM_STATE Iconic`) keeps `rendered_fps=30` (GNOME/XWayland fell to
+  7 fps), and a 40-step drag-resize keeps program `lagged=0`. `strih-mv-host` stays disabled; the
+  vendored child-host projector is harmless here and its removal is a separate vendored change.
+- verify item 6 (dantesync offset) can FAIL `unstable` on the fleet NTP master: its upstream is an
+  internet NTP server (`ntp_server` 162.159.200.1), so the spread tracks WAN jitter (dev1 saw ping
+  mdev 1.6 ms to the same server at the same time). The PTP lock (`mode=LOCK`) is the fleet signal;
+  compare against dev1's ping jitter to the upstream before treating it as a box regression.
