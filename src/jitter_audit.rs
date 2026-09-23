@@ -181,6 +181,8 @@ pub fn parse_audit_line(line: &str) -> Option<AuditSample> {
             }
             "audio_delay_ms" => set!(audio_delay_ms),
             "audio_pairing_offset_ms" => set!(audio_pairing_offset_ms),
+            "stamp_dup" => set!(stamp_dup),
+            "stamp_gap" => set!(stamp_gap),
             _ => {}
         }
     }

@@ -50,7 +50,7 @@ use crate::genlock_backlog::{
     relock_anchor_age_ns, relock_select_nearest, should_drain_one, PHASE_PIN_HYSTERESIS_NS,
 };
 use crate::genlock_grid::{
-    grid_next_boundary_ns, per_second_floor, NS_PER_SECOND, UNITS_100NS_PER_SECOND,
+    grid_next_boundary_ns, per_second_floor, StampTrack, NS_PER_SECOND, UNITS_100NS_PER_SECOND,
 };
 use std::collections::{BTreeMap, VecDeque};
 
@@ -159,8 +159,9 @@ pub struct BenchReport {
     pub drains: u64,
     pub dropped_due: u64,
     pub underruns: u64,
-    /// Ground truth of the sender's stamp irregularity: a stamp equal to its predecessor, and a
-    /// stamp more than one grid slot after it.
+    /// The sender's stamp irregularity as the receiver's `stamp_dup=` / `stamp_gap=` audit tokens
+    /// would count it ([`StampTrack`], the production arrival-side tracker): stamps equal to their
+    /// predecessor, and missing stamp intervals.
     pub stamp_dups: u64,
     pub stamp_gaps: u64,
 }
@@ -212,13 +213,13 @@ struct Sender {
     grid: GridModel,
     tick: u64,
     last_send: u64,
-    last_stamp: u64,
+    track: StampTrack,
     rng: Rng,
 }
 
 impl Sender {
-    /// The next frame as `(arrival_wall_ns, stamp_ns)`, plus whether it duplicated / skipped a slot.
-    fn next_frame(&mut self, cfg: &BenchConfig) -> (u64, u64, bool, bool) {
+    /// The next frame as `(arrival_wall_ns, stamp_ns, new_dups, new_missing_intervals)`.
+    fn next_frame(&mut self, cfg: &BenchConfig) -> (u64, u64, u64, u64) {
         self.tick = self.grid.next_tick(self.tick);
         let core =
             cfg.send_delay_median_ns as f64 + cfg.send_delay_sigma_ns as f64 * self.rng.normal();
@@ -229,11 +230,16 @@ impl Sender {
         let send = (self.tick + delay).max(self.last_send + 1);
         self.last_send = send;
         let stamp = per_second_floor(send / 100, FPS, UNITS_100NS_PER_SECOND) * 100;
-        let dup = self.last_stamp != 0 && stamp == self.last_stamp;
-        let gap = self.last_stamp != 0
-            && stamp > self.last_stamp + CANVAS_INTERVAL_NS + CANVAS_INTERVAL_NS / 2;
-        self.last_stamp = stamp;
-        (send + cfg.network_ns, stamp, dup, gap)
+        // The production arrival-side tracker (the C genlock_stamp_track_observe) counts the
+        // irregularity the receiver's stamp_dup= / stamp_gap= audit tokens would show.
+        let (dups, gaps) = (self.track.dups, self.track.gaps);
+        self.track.observe(stamp);
+        (
+            send + cfg.network_ns,
+            stamp,
+            self.track.dups - dups,
+            self.track.gaps - gaps,
+        )
     }
 }
 
@@ -364,7 +370,7 @@ pub fn run_bench(cfg: &BenchConfig) -> BenchReport {
         grid: cfg.grid,
         tick: t0,
         last_send: 0,
-        last_stamp: 0,
+        track: StampTrack::default(),
         rng: Rng(rng.next()),
     };
     let mut fifo = Fifo::default();
@@ -385,8 +391,8 @@ pub fn run_bench(cfg: &BenchConfig) -> BenchReport {
         while pending.back().map_or(true, |&(arrival, _)| arrival <= wall) {
             let (arrival, stamp, dup, gap) = sender.next_frame(cfg);
             if arrival >= warm {
-                report.stamp_dups += dup as u64;
-                report.stamp_gaps += gap as u64;
+                report.stamp_dups += dup;
+                report.stamp_gaps += gap;
             }
             pending.push_back((arrival, stamp));
         }

@@ -174,7 +174,20 @@ pub struct StampTrack {
 impl StampTrack {
     /// Account one received stamp.
     pub fn observe(&mut self, ts: u64) {
-        // [red] stub: remembers the stamp, counts nothing (the GREEN commit implements the rules).
+        if self.last_ts != 0 && ts >= self.last_ts {
+            let delta = ts - self.last_ts;
+            if delta == 0 {
+                self.dups += 1;
+            } else if delta < STAMP_TRACK_MAX_DELTA_NS {
+                if self.min_delta_ns == 0 || delta < self.min_delta_ns {
+                    self.min_delta_ns = delta;
+                }
+                let step = self.min_delta_ns;
+                if delta * 2 > step * 3 {
+                    self.gaps += (delta + step / 2) / step - 1;
+                }
+            }
+        }
         self.last_ts = ts;
     }
 

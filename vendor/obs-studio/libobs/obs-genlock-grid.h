@@ -77,3 +77,35 @@ static inline uint64_t genlock_grid_next_boundary_ns(uint64_t t_ns, uint64_t int
 	const uint64_t sec = (t_ns / GENLOCK_GRID_NS_PER_SECOND) * GENLOCK_GRID_NS_PER_SECOND;
 	return sec + (genlock_grid_slot(t_ns - sec, fps) + 1) * GENLOCK_GRID_NS_PER_SECOND / fps;
 }
+
+/* camera-box #1355 part 3: a stamp interval of a second or more is a timeline discontinuity
+ * (sender restart, clock step), not a run of missing stamps. */
+#define GENLOCK_STAMP_TRACK_MAX_DELTA_NS 1000000000ULL
+
+/* camera-box #1355 part 3: account one RECEIVED stamp (arrival order) into the per-input
+ * duplicate / missing stamp-interval counters printed as stamp_dup= / stamp_gap= on the
+ * 'genlock-fifo audit' line. A sender that stamps at SEND time puts a slow frame into the NEXT
+ * 1/30 s cell -- the receiver sees a stamp that skips a slot (a gap) followed by an equal one (a
+ * duplicate). Rules: equal to the previous stamp -> one duplicate; a positive interval below
+ * GENLOCK_STAMP_TRACK_MAX_DELTA_NS updates the source's own step (the SMALLEST positive interval
+ * seen -- the #1042 min-delta rule) and, when it exceeds 1.5 steps, counts round(interval / step)
+ * - 1 missing intervals; a backward stamp or a jump of a second or more counts nothing.
+ * *last_ts == 0 means "no previous stamp" (the flush seam clears it together with *min_delta_ns).
+ * Mirror of src/genlock_grid.rs StampTrack::observe -- keep both in lock-step. */
+static inline void genlock_stamp_track_observe(uint64_t *last_ts, uint64_t *min_delta_ns, uint64_t *dups,
+					       uint64_t *gaps, uint64_t ts)
+{
+	if (*last_ts != 0 && ts >= *last_ts) {
+		const uint64_t delta = ts - *last_ts;
+		if (delta == 0) {
+			(*dups)++;
+		} else if (delta < GENLOCK_STAMP_TRACK_MAX_DELTA_NS) {
+			if (*min_delta_ns == 0 || delta < *min_delta_ns)
+				*min_delta_ns = delta;
+			const uint64_t step = *min_delta_ns;
+			if (delta * 2 > step * 3)
+				*gaps += (delta + step / 2) / step - 1;
+		}
+	}
+	*last_ts = ts;
+}
