@@ -118,7 +118,7 @@ fn decide_holds_an_unstable_run() {
     let (out, ok) = run_under_set_e(
         d.path(),
         &format!(
-            "r=\"$(av_sync_apply_guard_decide '{v}' '' '-283.0' \"$GUARD\" /nope/last.json)\"\n\
+            "r=\"$(av_sync_apply_guard_decide '{v}' '' '-283.0' \"$GUARD\" /nope/last.json /nope/residual.json)\"\n\
              echo \"hold=[$r]\"\necho END"
         ),
     );
@@ -139,7 +139,7 @@ fn decide_proceeds_a_stable_run() {
     let (out, ok) = run_under_set_e(
         d.path(),
         &format!(
-            "r=\"$(av_sync_apply_guard_decide '{v}' 'HEALTHY' '-283.0' \"$GUARD\" '{last}')\"\n\
+            "r=\"$(av_sync_apply_guard_decide '{v}' 'HEALTHY' '-283.0' \"$GUARD\" '{last}' /nope/residual.json)\"\n\
              echo \"hold=[$r]\"\necho END"
         ),
     );
@@ -158,7 +158,7 @@ fn decide_holds_a_drifting_band() {
     let (out, ok) = run_under_set_e(
         d.path(),
         &format!(
-            "r=\"$(av_sync_apply_guard_decide '{v}' 'DRIFTING' '-283.0' \"$GUARD\" /nope/last.json)\"\n\
+            "r=\"$(av_sync_apply_guard_decide '{v}' 'DRIFTING' '-283.0' \"$GUARD\" /nope/last.json /nope/residual.json)\"\n\
              echo \"hold=[$r]\"\necho END"
         ),
     );
@@ -191,7 +191,7 @@ fn persist_copies_the_full_schema_and_feeds_the_jump_condition() {
             "av_sync_persist_applied_offset '{src}' '{last}'\n\
              echo \"lb=$(av_sync_read_last_applied_offset '{last}')\"\n\
              echo \"al=$(python3 -c \"import json;print(json.load(open('{last}')).get('applied_latency_ms'))\")\"\n\
-             r=\"$(av_sync_apply_guard_decide '{v}' 'HEALTHY' '-83.0' \"$GUARD\" '{last}')\"\n\
+             r=\"$(av_sync_apply_guard_decide '{v}' 'HEALTHY' '-83.0' \"$GUARD\" '{last}' /nope/residual.json)\"\n\
              echo \"hold=[$r]\"\necho END"
         ),
     );
