@@ -30,9 +30,12 @@
 //! - Facet B: lift the pure `static inline` decision helpers VERBATIM, compile them under
 //!   `-Werror -Wconversion -Wformat=2`, run a hand-written truth table (the table IS the spec).
 //! - Facet C: compile the REAL `ndi-sender-port.cpp` with g++ against a stub `plugin-main.h`
-//!   (a fake libndi whose `send_create` opens a real 0.0.0.0 listener) and prove on real loopback
-//!   sockets: the tracked create finds the port; a live listener reads LIVE; without the abort the
-//!   server-first close leaves a TIME_WAIT (the bug); with the abort the port is FREE again.
+//!   (a fake libndi whose `send_create` opens a real 0.0.0.0 listener and whose `send_destroy`
+//!   does what strace shows libndi 6.3.2 doing: `shutdown(SHUT_RDWR)`, then `close()` after the
+//!   viewer's own FIN is back) and prove on real loopback sockets: the tracked create finds the
+//!   port; a live listener reads LIVE; without the abort the stop leaves a TIME_WAIT (the bug);
+//!   with the abort the port is FREE again. `SO_LINGER {1,0}` alone cannot pass this: libndi's
+//!   `shutdown()` sends a graceful FIN first, so the abort must also disconnect the socket at once.
 //!
 //! The compilers are REQUIRED: a missing cc/g++ FAILS the gate, never skips (test strictness).
 
@@ -140,6 +143,8 @@ fn sender_port_module_present_and_linux_only() {
         "SO_LINGER",
         "lg.l_onoff = 1;",
         "lg.l_linger = 0;",
+        "unspec.sa_family = AF_UNSPEC;",
+        "connect(fd, &unspec, sizeof(unspec))",
         "std::lock_guard<std::mutex> lock(g_ndi_sender_create_mutex);",
         "ndi_new_listen_port(before.data(), before.size(), after.data(), after.size())",
         "ndi_socket_is_sender_connection(is_listener, has_peer, local_port, port)",
@@ -783,6 +788,7 @@ struct fake_sender {
 	int conn_fd;
 	int extra_fd;  // a concurrent libndi RECEIVER listener (ephemeral port), or -1
 	int extra2_fd; // a second sender-band listener (the ambiguous case), or -1
+	int peer_fd;   // the viewer's end of conn_fd (it closes as soon as it sees EOF), or -1
 };
 
 // What else opens a listener while this create runs: 0 nothing, 1 a receiver listener outside
@@ -824,16 +830,24 @@ static NDIlib_send_instance_t fake_send_create(const NDIlib_send_create_t *)
 		return nullptr;
 	const int extra = g_extra_mode == 1 ? plain_listener(0) : -1;
 	const int extra2 = g_extra_mode == 2 ? band_listener() : -1;
-	return (NDIlib_send_instance_t) new fake_sender{fd, -1, extra, extra2};
+	return (NDIlib_send_instance_t) new fake_sender{fd, -1, extra, extra2, -1};
 }
 
+// Like libndi 6.3.2 (strace of a real stop): shutdown(SHUT_RDWR) on the accepted connection,
+// then close() it. A viewer answers the FIN with its own at once, so by the time of the close()
+// the socket is already in TIME_WAIT unless it was reset before the shutdown.
 static void fake_send_destroy(NDIlib_send_instance_t p)
 {
 	auto *s = (fake_sender *)p;
 	if (!s)
 		return;
-	if (s->conn_fd >= 0)
+	if (s->conn_fd >= 0) {
+		shutdown(s->conn_fd, SHUT_RDWR);
+		if (s->peer_fd >= 0)
+			close(s->peer_fd); // the viewer closes on EOF -> its FIN comes back
+		usleep(100000);
 		close(s->conn_fd);
+	}
 	if (s->extra_fd >= 0)
 		close(s->extra_fd);
 	if (s->extra2_fd >= 0)
@@ -870,12 +884,11 @@ static int scenario(const char *label, bool abort_first)
 	char b = 'x';
 	if (write(c, &b, 1) != 1 || read(fs->conn_fd, &b, 1) != 1)
 		return 4;
+	fs->peer_fd = c; // the fake destroy closes it, like a viewer reacting to the FIN
 	printf("%s.live_state=%d\n", label, ndi_sender_port_hold_state(port));
 	if (abort_first)
 		ndi_sender_abort_connections_before_destroy(port, label);
-	ndiLib->send_destroy(s); // the sender closes FIRST (active close), as OBS does at stop
-	usleep(100000);
-	close(c);
+	ndiLib->send_destroy(s); // the sender shuts down FIRST (active close), as OBS does at stop
 	usleep(100000);
 	printf("%s.after_state=%d\n", label, ndi_sender_port_hold_state(port));
 	return 0;
@@ -990,6 +1003,12 @@ fn real_module_aborts_the_connection_so_no_time_wait_survives() {
         !stdout.contains("WARN-1363"),
         "issue 1363 part 3: nothing in the sender-port module may log `WARN-1363` (reserved for \
          the :5961 reserve):\n{stdout}"
+    );
+    assert!(
+        stdout.contains("1 reset at once"),
+        "issue 1363 part 3: the abort must DISCONNECT the connection at once (AF_UNSPEC connect = \
+         RST now): libndi shuts the socket down gracefully before it closes it, so SO_LINGER 0 on \
+         its own is too late:\n{stdout}"
     );
     assert!(
         stdout.contains("1 connection(s) set to close with RST"),
