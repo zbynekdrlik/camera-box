@@ -36,6 +36,14 @@ absorbing. Two facts about reading `<X>` (established live 2026-09-03, dantesync
 `f_phase=` DC) + `Get-NetUDPEndpoint -LocalPort 319,320`. Compare the two ppm magnitudes; a MISMATCH
 between them (or a value far outside ±10) is the thing worth chasing, not the non-zero itself.
 
+**Per-launch level history in one call (issue 1355):** plain ssh `cd /d "%APPDATA%\obs-studio\logs" &&
+findstr /c:"source 'mbc' estimated" *.txt` (and `/c:"audio buffering"`) returns every session's lines
+prefixed by the log file name, so each launch's captured `target=`, level median and OBS audio
+buffering (64 or 85 ms, random per launch) come out of one read — no PowerShell. Quote the command
+in bash DOUBLE quotes: inside a single-quoted bash string the `''` around `mbc` collapses and findstr
+matches nothing. The `mbc` sync offset in force lives in `basic\scenes\Stream_Obs.json` (`sync`, ns),
+readable with a `.ps1` via `-EncodedCommand`. Password via `$PW`, never literal.
+
 **Related, distinct axes:** `audio_ts_lag_ms` (#1226, audio timeline lag = health) and the av-sync
 dock `measured offset` STEP (#1265/#1267, A/V latency step) are different signals — the dock is
 `state=STALE` in EVENT mode (no QPSK marker), so A/V-offset evidence only accrues in TEST mode.
@@ -132,3 +140,23 @@ from #1325 (the true source-vs-MIXER residual, ≈ −5…−7 ppm); `level=`/`t
 a few ms. A MONOTONICALLY draining `buffered_ms` (the pre-#1335 symptom) on a deployed #1335 build
 means the level integral regressed or isn't reaching the buffer. The `#806` outer-loop bias is folded
 in BEFORE both the level integral and the #1325 negation — re-derive its sign before re-enabling it.
+
+## Addendum (issue 1355, 23.9.2026): `target=` is now ABSOLUTE — the same value every launch
+
+Before #1355, the `asrc: source 'mbc' … level=… target=…` line's `target=` was whatever depth the
+mixer had at the first lock (58.9 … 126.1 ms across 10 launches), and every launch held its own A/V
+level. On a #1355 build, `target=` is `ASRC_LEVEL_TARGET_MS` (100 ms) + the source's sync offset
+(+24 ms on 23.9. ⇒ `mbc` `target=124.0`). It must read IDENTICAL across relaunches with the same
+offset. This holds only for a mixed, non-genlock source: a `genlock_fifo` source (e.g. `fallback
+repro`, depth ≈ its ~976 ms hold) and a MONITOR_ONLY source keep the old depth-at-lock `target=`.
+After a launch, `level=` walks to it in minutes (P term + restore; a 30 ms walk ≈ 10 min) and then
+holds it within a few ms.
+
+Reading a POST-#1355-deploy healthy source: `target=` = 100 + offset, `level=` within ~±5 ms of it
+after ~15 min, `restore=0`, `fallbacks=0 (#1355)` at the end of the line. A `LOG_WARNING … level
+target … UNREACHABLE … fell back to the live depth … (#1355)` line (and `fallbacks=` > 0) means this
+source's buffer did NOT follow the stretch for 40 min. Its A/V level is then the per-launch value
+again. Chase why the depth cannot move there, for example OBS audio buffering or a source whose
+placement is not contiguous. Do not raise the bound. The one-time A/V shift at the first #1355
+deploy is `(100 + offset) − the level that launch had`, and the E2E calibrated pin/audio offset
+absorbs it once.

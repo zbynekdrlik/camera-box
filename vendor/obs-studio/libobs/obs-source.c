@@ -1742,6 +1742,7 @@ static void source_output_audio_data(obs_source_t *source, const struct audio_da
 	 * obs_source_set_genlock_latency_ms), so the effective value is the field itself; the >0
 	 * guard is a defensive no-op-delay default. The store feeds the audit line's audio facet
 	 * (genlock_fill_stats). */
+	const uint32_t prev_genlock_audio_delay_ms = source->genlock_audio_delay_ms;
 	if (source->genlock_fifo && source->genlock_latency_ms > 0) {
 		in.timestamp += (int64_t)genlock_audio_present_delay_ns(source->genlock_latency_ms);
 		source->genlock_audio_delay_ms = source->genlock_latency_ms;
@@ -1751,6 +1752,14 @@ static void source_output_audio_data(obs_source_t *source, const struct audio_da
 		 * runtime never reports a STALE audio_delay_ms on the audit facet. */
 		source->genlock_audio_delay_ms = 0;
 	}
+	/* camera-box #1355: a CHANGE of the applied audio hold (a pin write, genlock toggled) moves this
+	 * source's placement -- and therefore its ASRC mix-buffer depth -- by exactly the delta, like a
+	 * sync-offset change. Move the captured level setpoint by the same delta (the #1335 shift below is
+	 * the sync-offset twin) so the level loop does not walk the depth back and undo the hold (which
+	 * would break the #1303 A/V pairing until the next flush). No-op until captured. */
+	if (source->genlock_audio_delay_ms != prev_genlock_audio_delay_ms)
+		asrc_compensator_shift_level_target(&source->asrc, (double)source->genlock_audio_delay_ms -
+									   (double)prev_genlock_audio_delay_ms);
 
 	source->next_audio_sys_ts_min = source->next_audio_ts_min + source->timing_adjust;
 
@@ -4301,7 +4310,32 @@ static inline void asrc_process_audio(obs_source_t *source, uint32_t frames, uin
 	const uint32_t out_sample_rate = audio_output_get_sample_rate(obs->audio.audio);
 	const double buffered_ms = obs_source_input_buf_ms(source->audio_input_buf[0].size, out_sample_rate);
 	double applied_ppm = 0.0;
+	/* camera-box #1355: the level setpoint is ABSOLUTE (ASRC_LEVEL_TARGET_MS) plus this source's
+	 * deliberate placement offset -- the one the samples ALREADY in the buffer were placed with:
+	 * last_sync_offset (source_output_audio_data's in.timestamp += sync_offset, recorded there after
+	 * the placement; a pending sync_offset change reaches the setpoint through the shift there). Only
+	 * for a source whose depth has the direct-timestamp base the 100 ms target is calibrated on: a
+	 * genlock_fifo source (depth = the #1303 video-paired hold + a ~0-25 ms transport base) and a
+	 * MONITOR_ONLY source (never placed into the mix buffer, depth 0) keep the pre-#1355 depth-at-lock
+	 * capture. Pure stores, read only at the next capture (a rule CHANGE drops the capture). Audio
+	 * thread, same writer as the rest of source->asrc. */
+	asrc_compensator_set_level_absolute(&source->asrc, !source->genlock_fifo && source->monitoring_type !=
+									       OBS_MONITORING_TYPE_MONITOR_ONLY);
+	asrc_compensator_set_level_offset_ms(&source->asrc, (double)source->last_sync_offset / 1e6);
 	asrc_compensator_compensate(&source->asrc, raw_advance_s, master_block_s, buffered_ms, &applied_ppm);
+	/* camera-box #1355: an ABSOLUTE setpoint the mixer cannot reach is bounded inside the
+	 * compensator (ASRC_LEVEL_TARGET_UNREACHABLE_WINDOWS of smoothed error outside the restore's exit
+	 * band -> fall back to the live depth). Say so LOUDLY, once per event -- it means this source's
+	 * buffer does not follow the stretch, and its A/V level is again the per-launch value. */
+	if (source->asrc.level_fallback_pending) {
+		source->asrc.level_fallback_pending = false;
+		blog(LOG_WARNING,
+		     "asrc: source '%s' level target %.1fms UNREACHABLE after %d windows outside +/-%.0fms -- "
+		     "fell back to the live depth %.1fms (fallbacks=%u) (#1355)",
+		     obs_source_get_name(source), source->asrc.level_fallback_from_ms,
+		     ASRC_LEVEL_TARGET_UNREACHABLE_WINDOWS, ASRC_LEVEL_RESTORE_ARM_MS, source->asrc.level_target_ms,
+		     source->asrc.level_fallback_count);
+	}
 
 	/* Refresh the compensation over an ASRC_COMPENSATION_DISTANCE_MS window every callback --
 	 * swr_set_compensation() replaces any still-pending ramp, so re-issuing it each callback
@@ -4337,16 +4371,20 @@ static inline void asrc_process_audio(obs_source_t *source, uint32_t frames, uin
 		 * byte-identical '(#1335)' suffix so every dev1 asrc:-line parser (asio-starve-health,
 		 * cg-chain-verify -- both extract by name with .*) is unaffected. steps=cumulative STEP
 		 * re-base count, last_step_ms=the last step's residual, restore=fast-restore active 0|1. */
+		/* camera-box #1355: fallbacks= appended AFTER the byte-identical 'restore=%d (#1335)' suffix
+		 * (parsers extract by name): the running count of unreachable-setpoint fallbacks, 0 on a
+		 * healthy source. target= is now the ABSOLUTE setpoint (ASRC_LEVEL_TARGET_MS + the source's
+		 * placement offset), identical across launches. */
 		blog(LOG_INFO,
 		     "asrc: source '%s' estimated=%.2fppm applied=%.2fppm outer_bias=%.2fppm "
 		     "cumulative_correction=%.3fms/%.0fs starved_blocks=%u (#803/#806/#960) "
 		     "level=%.1fms target=%.1fms integral=%.3fppm (#1335) "
-		     "steps=%u last_step_ms=%.1f restore=%d (#1335)",
+		     "steps=%u last_step_ms=%.1f restore=%d (#1335) fallbacks=%u (#1355)",
 		     obs_source_get_name(source), source->asrc.estimated_ppm, applied_ppm,
 		     source->asrc.outer_bias_ppm, cumulative_correction_ms, ASRC_LOG_INTERVAL_S,
 		     starved_block_count, source->asrc.level_last_ms, source->asrc.level_target_ms,
 		     source->asrc.level_integral_ppm, source->asrc.step_count, source->asrc.last_step_ms,
-		     (int)source->asrc.level_restore);
+		     (int)source->asrc.level_restore, source->asrc.level_fallback_count);
 	}
 }
 

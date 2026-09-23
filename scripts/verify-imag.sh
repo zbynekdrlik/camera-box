@@ -207,6 +207,9 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # functions only).
 # shellcheck source=scripts/setup-imag.sh
 . "$HERE/setup-imag.sh"              # imag_cpu_isolation_plan/imag_has_discrete_nvidia (#816)
+# issue 1357: the ONE grader for the shared OBS-box appliance baseline (verify-strih.sh runs it too).
+# shellcheck source=scripts/lib/obs-box-baseline-verify.sh
+. "$HERE/lib/obs-box-baseline-verify.sh"
 # scripts/verify-device.sh is likewise sourced ONLY for its pure NDI-symlink functions -- the
 # fleet's (g)/(o) checks are the identical decision imag needs for its OWN NDI runtime pin, and
 # duplicating that awk logic here would be exactly the "second, driftable copy" #596/#595 exist to
@@ -1563,6 +1566,26 @@ else
     fail ":8899 /bundle-state.json served but carries NO genlock_build_sha -- the server is up but not exposing imag's deployed genlock build (issue 1299)"
   fi
 fi
+
+# (bb) the shared OBS-box appliance baseline (issue 1357) ---------------------------------------
+# The ONE grader verify-strih.sh runs too (scripts/lib/obs-box-baseline-verify.sh): every item the
+# shared scripts/lib/obs-box-baseline.sh provisions -- network tuning, governor + imag-maxperf
+# persistence, never-sleep, boot safety net, preempt=full, AFFINITY-ONLY core reservation, PRIME,
+# de-jitter, no crash popups (incl. the 26.04 apport coredump-hook template), the lightdm -> openbox
+# kiosk, the openbox autostart contract, the power envelope, the touchpad. One [OK]/[FAIL] line per
+# item; the per-item checks above keep imag's deeper reads (PL1 value, maxperf state, ...). A pure
+# read-only gather over one bounded ssh call, so it runs BEFORE check (o)'s OBS restart.
+rc=0
+BASELINE_FACTS="$(ssh_box_timeout "$IMAG_SLOW_READ_TIMEOUT" "$(obs_box_baseline_gather_cmd imag "$IMAG_USER" imag-obs.service)")" || rc=$?
+[ "$rc" -eq 0 ] || warn "(bb) the baseline gather exited rc=$rc -- every item it could not read grades FAIL below"
+while IFS='|' read -r _bl_item _bl_state _bl_detail; do
+  [ -n "$_bl_item" ] || continue
+  if [ "$_bl_state" = OK ]; then
+    ok "(bb) baseline:${_bl_item} -- ${_bl_detail}"
+  else
+    fail "(bb) baseline:${_bl_item} -- ${_bl_detail} (re-run setup-imag.sh, reboot)"
+  fi
+done < <(obs_box_baseline_verdict <<<"${BASELINE_FACTS:-}" || true)
 
 # (o) both projectors PRESENT (never self-established) + PERSIST across a real restart (#756/#840)
 # ---------------------------------------------------------------------------------------------

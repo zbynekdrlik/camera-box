@@ -9,6 +9,8 @@ paths:
   - "systemd/strih-bundle-state-server.service"
   - "tests/strih_provision_pure_functions.rs"
   - "tests/ndi_runtime_lib.rs"
+  - "scripts/lib/strih-cef-keyring.sh"
+  - "tests/cef_password_store_1359.rs"
 ---
 
 # strih-lx — the Linux notebook replacing the Windows strih PC (issue 1317)
@@ -17,6 +19,15 @@ The strih cutter/mix role is migrating from the Windows STRIH-SNV PC to a Linux 
 (`strih-lx`). The owner ruling (16.9.2026): the notebook **runs IN PARALLEL** with the Windows PC
 until everything is tuned on it — the Windows PC stays the production cutter meanwhile. This rule
 covers the provisioning scaffolding built during that preparation.
+
+> **Issue 1357 supersedes the desktop session described in older sections below.** strih-lx is now
+> the SAME OBS-only appliance as imag: the shared `scripts/lib/obs-box-baseline.sh` (setup-strih step
+> 11) gives it lightdm autologin -> openbox on plain **Xorg** (GNOME purged), NVIDIA **PRIME
+> nvidia-primary**, preempt=full, de-jitter + no crash popups, maxperf, the power envelope. So the
+> GNOME **Wayland** session, `WAYLAND_DISPLAY`, the XWayland-PRIME GPU env (`@STRIH_LX_OBS_GPU_ENV@`,
+> removed), the step-15 governor oneshot and the 11c rtprio grant (removed; rtprio stays OFF) are
+> history. strih-obs-start.sh resolves `DISPLAY=:0` only; Companion Satellite starts from the openbox
+> autostart. See `.claude/rules/obs-box-baseline.md` for the conversion runbook.
 
 ## The parallel-run contract (why the namespacing + the client-clock matter)
 
@@ -413,6 +424,13 @@ with an old inline block that ran its tail unconditionally.
 - **Poll with `pgrep -x setup-strih.sh`, never `pgrep -f`.** `pgrep -f setup-strih.sh` matches its OWN
   command line and reports RUNNING forever (run 1 on 18.9. "ran" for 20 min this way while setup had
   actually never started).
+- **Each staged bundle is ~2.2 GB in `/tmp` (tmpfs, per-user quota) — the THIRD deploy fails
+  `Disk quota exceeded` mid-rsync** (live 23.9.2026: two leftover `/tmp/genlock-stage-<sha>` dirs
+  filled the operator's quota while `df` still showed 2.3 GB free). Before staging a new bundle,
+  prune the old stage copies with the sanctioned sweep, never a hand `rm -rf`: copy
+  `scripts/obs-backup-retention.sh` to the box and run `--local-sweep --keep-runs 1 --keep-days 0
+  --backup-root /opt/obs-backup --stage-parent /tmp` (dry-run, read the plan), then the same with
+  `--execute`. The installed copy lives in `/opt/obs-genlock`; stage dirs are transient.
 
 ## Audio — the local PipeWire graph (issue 1344, WIRED)
 
@@ -819,6 +837,7 @@ The five hand-patches that survived ONLY on the live box (a re-flash would rever
 | (D) RustDesk pinned .deb + sha256 + enable --now + 0600-file password | step 16b (gated on the pw file) | item 29 (FAIL / NOTE) | `strih_rustdesk_version`/`_deb_url`/`_deb_sha256`/`_install_cmds` |
 | (G) dantesync ROLE (`server` default post-M4) | step 2 | item 6b (FAIL) | `strih_dantesync_unit_text ROLE`, `strih_lx_dantesync_role_ok`, `strih_lx_dantesync_status_role_verdict` |
 | (H) ffmpeg/ffprobe for the on-box E2E verdict | step 4b | item 30 (FAIL) | (apt install, no pure helper) |
+| (I) **SUPERSEDED by issue 1357** — the rtprio grant is REMOVED (rtprio stays OFF; setup-strih self-heals a leftover, verify item 33 FAILs while one exists) and the crash-popup masks are the shared baseline item (verify item 32). Historical row: genlock render-tick rtprio grant + no crash popups (23.9.2026, imag parity) | step 11c (retired) | items 32 (FAIL / NOTE) + 33 (FAIL / NOTE) | `strih_rtprio_limits_path`/`_text`/`_grant_ok`/`strih_rtprio_session_verdict`, `strih_crash_popup_units`/`_unit_ok`/`_template_ok`/`_member_ok`/`_verdict`, `strih_crash_reports_count` |
 
 `TOTAL_STEPS=17` unchanged (RustDesk is the lettered sub-step 16b). Tests: `tests/strih_provision_pure_functions.rs` (source-and-call for every pure helper + static-anchor wiring). Supervisor: place the 0600 RustDesk password file at `STRIH_LX_RUSTDESK_PW_FILE`, then run `setup-strih.sh` + `verify-strih.sh` on the notebook.
 
@@ -829,6 +848,12 @@ The five hand-patches that survived ONLY on the live box (a re-flash would rever
 8. **RustDesk remote-desktop on strih-lx** (owner request 22.9.2026): install the pinned `rustdesk-1.4.9-x86_64.deb` via `apt-get install -y ./rustdesk.deb` (pulls libxdo3 etc.), then `systemctl enable --now rustdesk.service`, set the permanent password (`rustdesk --password <fleet-pw>`), read the connect ID with `rustdesk --get-id`. GNOME/Wayland caveat: screen capture goes through the xdg-desktop-portal (pipewire) — the FIRST inbound connection may raise a one-time screen-share approval on the box's own session. **BAKED (#1317 remainder)** — `setup-strih.sh` step 16b installs from the PINNED .deb (URL + sha256 in `strih_rustdesk_deb_url`/`_deb_sha256`, confirmed == the box's installed deb byte-for-byte), fail-loud on a sha256 mismatch, `systemctl enable --now rustdesk`, and applies the permanent password read INSIDE the emitted block from a 0600 file the supervisor places at `STRIH_LX_RUSTDESK_PW_FILE` (default `/etc/rustdesk/permanent-password.secret`) — the `@JANUS_ROOM_SECRET@` discipline: the password value is never in git, in an argv, or in a log. Step 16b is GATED on the pw file's presence (SKIP + warn if absent — the supervisor must place the secret file). Verify item 29: unit active + `rustdesk --get-id` non-empty.
 
 9. **ffmpeg (provides `ffprobe`) NOT installed by default on 26.04** (22.9.2026 15:06): the on-box release-E2E verdict (`recording-verdict-on-strih-lx.sh` runs `recording-verdict --extract-partial strih` ON the notebook) spawns `ffprobe` to demux the strih recording; a fresh box has no ffmpeg, so the `[8/8]` on-box verdict died `spawn ffprobe (install ffmpeg: apt install ffmpeg)`. **BAKED (#1317 remainder)** — `setup-strih.sh` step 4b apt-installs `ffmpeg` (a TOOL dependency of the E2E verdict, same idempotent apt family as `avahi-utils`; NOT the bundle's RUNTIME_PACKAGES.txt); verify item 30 fails loud unless `ffprobe` + `ffmpeg` are both present.
+
+10. **(SUPERSEDED by issue 1357: sub-step 11c is retired — rtprio stays OFF because the render-tick SCHED_FIFO pin assumed a reserved core and leaked FIFO + affinity to 28 NDI threads; the crash-popup half is now `obs_box_crash_popups_off` in the shared baseline, graded by verify item 32. The text below is the history.)** **The genlock render tick ran SCHED_OTHER + an operator crash popup every morning** (owner 23.9.2026: „preco tam su stale rozne fail dialogy ze nieco spadlo?" + „preco na linux strih obs nie je genlock zeleny"). Every strih-lx OBS session logged `genlock: could NOT set render-tick thread SCHED_FIFO prio 10 (errno 1 — missing rtprio ulimit grant?)` (OBS runs as the unprivileged operator; the vendored `obs-video.c` pin needs an rtprio ulimit), and Ubuntu's apport → `update-notifier-crash.service` raised a desktop popup for a stale `/var/crash` report. imag had both covered since issue 484 (`setup-imag.sh`: limits.d grant, apport/whoopsie disable+mask, systemd-coredump); strih-lx had neither. **BAKED (#1317 remainder, item I)** — `setup-strih.sh` lettered sub-step **11c** writes `/etc/security/limits.d/95-strih-genlock-rtprio.conf` = `<user>   -   rtprio   20` (imag value; `-` sets soft AND hard — the SOFT limit is what `sched_setscheduler` checks, a hard-only line still EPERMs), MASKS `apport.service` + `apport-coredump-hook@.service` + `whoopsie.service` PER UNIT (plain units are also disabled + STOPPED — a unit masked earlier by hand can still be `active (exited)`; mask failure = `fail`), and `apt-get install systemd-coredump` (fail loud) so crashes land in `coredumpctl`. **verify item 32 `(rtprio)`** FAILs without a grant ≥ the vendored `GENLOCK_RT_PRIORITY` (10, test-pinned against the `#define`), and NOTEs (never FAILs, token `grant-pending-reboot`) when the grant exists but the RUNNING OBS still logs the EPERM line. **verify item 33 `(crash-popup)`** FAILs on a live member (plain unit: only masked/disabled/not-found/absent AND inactive/failed pass; the hook TEMPLATE graded by `is-enabled` only — `static` = live) or a missing systemd-coredump, and NOTEs leftover `/var/crash/*.crash` reports (deleting them is a supervisor data action, never provisioning).
+
+    **GOTCHA 1 — masking apport.service does NOT stop the popup on 26.04.** apport 2.34 ships `/usr/lib/systemd/system/systemd-coredump@.service.d/apport-coredump-hook.conf` = `OnSuccess=apport-coredump-hook@%i.service`, which runs `apport --from-systemd-coredump` and writes `/var/crash` regardless of `enabled=` or the apport.service mask — and installing systemd-coredump (the imag recipe) GUARANTEES that route. Mask the TEMPLATE (`systemctl mask apport-coredump-hook@.service` blocks every instance). The imag recipe (`setup-imag.sh` step 8) has the same gap — moot while imag-nb is returned to the owner (16.9.2026); port this template mask into setup-imag.sh if imag-nb is ever re-provisioned. Found by the lane review reading the live box, 23.9.2026.
+
+    **GOTCHA 2 — the grant applies at the next REBOOT, not the next login.** OBS runs as the `--user` unit `strih-obs.service`, so it inherits its limits from `user@UID.service`, which LINGERS (step 13 enables linger) and got `pam_limits` (`/usr/lib/pam.d/systemd-user`) when it started at boot. Live 23.9.: grant file present, yet `user@1000` / OBS / `strih-obs.service` all at `Max realtime priority 0`. A logout/login does NOT restart a lingering manager; a reboot (allowed — strih-lx is not a cambox) or a restart of `user@UID` (ends the operator session) does. imag differs: it launches OBS in the autologin graphical session, whose own PAM applies. After the reboot confirm `genlock: render-tick thread set SCHED_FIFO` in the new OBS log (verify item 32 PASSes `ok-sched-fifo`); if it still EPERMs, read `Max realtime priority` in `/proc/<user@UID MainPID>/limits` — 0 there means pam_limits is not applied by the systemd-user PAM stack.
 
 ## 22.9.2026 live session — GPU, projector, Janus, NDI naming (issue 1352 + the #1317 findings comment)
 
@@ -859,3 +884,28 @@ Two reusable patterns from wiring findings 9–14 above into `setup-strih.sh` / 
 3. **A `grep -q` predicate fed a LARGE log SIGPIPEs the producer under `pipefail` (141) → the gate reads "no match"** — the same class as the `strih_nvenc_log_verdict` here-string gotcha above, hit AGAIN in `strih_lx_nvenc_available_ok`. A lib predicate consumed by `{ …; cat "$LOG"; } | predicate` must read to EOF (`grep -i … >/dev/null`, never `grep -q`), and its test must feed a >1 MB early-match input under `set -o pipefail` (`nvenc_predicate_is_drain_safe_under_pipefail_with_a_large_early_match`). Local RED/GREEN proof needs no cargo: `bash -c 'set -uo pipefail; . scripts/lib/strih-provision.sh; { printf "…nvenc…\n"; head -c 3000000 /dev/zero | tr "\0" a; } | strih_lx_nvenc_available_ok; echo $?'` → 141 before, 0 after.
 
 Also: the janus items read the root:root 0640 jcfg via a `sudo -n cat` fallback — a non-interactive sudo ticket does NOT propagate into a tty-less child process tree, so run as the operator without NOPASSWD they honestly print `(or jcfg unreadable)`; grade the pin with a valid ticket or as root. And the on-box `/usr/local/bin/strih_scenes.py` had gone STALE behind dev (no `--audio-input-kind`) — `verify-strih.sh` cannot see that by itself; compare `sha256sum` against the repo before trusting the seeder-driven items.
+
+## CEF keyring prompt (issue 1359) — verify-strih item 14b, and why it cannot grade the child argv alone
+
+GNOME auto-login leaves the login keyring LOCKED; Chromium's os_crypt inside the OBS CEF asked it for
+the storage key at every login → an unlock dialog on the operator screen. The vendored
+`plugins/obs-browser/browser-app.cpp` `OnBeforeCommandLineProcessing` now appends
+`password-store=basic` in the Linux branch (the macOS `use-mock-keychain` sibling). Build default,
+no toggle. Item 14b (REPORT-ONLY, never FAIL; pure helpers in the source-only
+`scripts/lib/strih-cef-keyring.sh`, kept out of the ~1870-line strih-provision.sh):
+- On Linux the CEF BROWSER process is OBS itself (`/usr/bin/obs`, `CefInitialize` in
+  obs-browser-plugin.cpp) and the switch lands in CEF's IN-PROCESS command line, which Chromium does
+  not necessarily copy onto the `obs-browser-page` child argv. So `pgrep -af obs-browser-page`
+  showing `--password-store=basic` is PASS (`ok-live`), but its absence is NOT a fail: the item then
+  greps the LOADED `${STRIH_LIBDIR}/obs-plugins/obs-browser.so` for the compiled-in `password-store`
+  literal (`ok-built`). A plugin without it = a pre-1359 bundle (NOTE). `libcef.so` always contains
+  the Chromium switch constant, so never grep libcef for this — only obs-browser.so.
+- `basic` replaces keyring protection of the CEF profile (cookies, saved logins) with Chromium's
+  fixed built-in key. Cookies already encrypted with the keyring key become unreadable ONCE, so a
+  browser source that was logged in must log in again after the first deploy — expected, not a
+  regression. The PASS lines state what was checked (an argv / the compiled-in switch name); the
+  behaviour proof is the reboot acceptance below.
+- Live acceptance (supervisor, after the full strih bundle deploy): two consecutive reboots of
+  strih-lx with no keyring dialog; which of `ok-live`/`ok-built` the box reads is itself a finding
+  worth recording here.
+

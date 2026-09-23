@@ -5,13 +5,15 @@ set -euo pipefail
 # WHY: systemd/strih-obs.service (ExecStart=/usr/local/bin/strih-obs-start.sh) supervises OBS on the
 # Linux strih notebook, Restart=on-failure. This is the sibling of imag-obs-start.sh (issue 882) but
 # for the strih-lx box, whose facts differ (see the Design comment on issue 1317):
-#   * a GNOME WAYLAND session on Ubuntu 26.04 -- DISPLAY is UNSET in the user session, so we resolve
-#     WAYLAND_DISPLAY from the wayland-* socket under XDG_RUNTIME_DIR (XWayland DISPLAY=:0 fallback,
-#     else FAIL LOUD -- the unit is After=graphical-session.target so no display is a hard error);
+#   * the plain Xorg `:0` session of the lightdm-autologin openbox kiosk (issue 1357 -- the SAME
+#     appliance session imag runs; the GNOME Wayland session and its WAYLAND_DISPLAY path are gone):
+#     DISPLAY=:0 when the X0 socket exists, else FAIL LOUD (OBS is started by the openbox autostart, so
+#     no X server is a hard error);
 #   * the OBS binary is installed into the /usr prefix at /usr/bin/obs (setup-strih.sh step 4 --
 #     issue 1317; /opt/obs-genlock stays the staged copy + marker home). STRIH_OBS_BIN overrides it;
 #   * NO taskset CPU pin unless STRIH_ISOLATED_CPUS / /etc/strih-isolated-cpus.conf exists (never a
-#     guessed pin -- the imag #841 lesson);
+#     guessed pin -- the imag #841 lesson); since issue 1357 the shared baseline's obs_box_cpu_affinity
+#     persists the TOPOLOGY-DERIVED P-core block there (AFFINITY-ONLY, like imag's taskset pin);
 #   * NO DRM lease and NO scene-seeder preflight (the strih scene seeder is a separate follow-up --
 #     the launcher must not depend on a seeder that does not exist yet).
 #
@@ -30,21 +32,12 @@ OBS_CFG="$HOME/.config/obs-studio"
 SCN="${STRIH_SCENES_BIN:-/usr/local/bin/strih_scenes.py}"   # issue 1317: the input/scene/Studio seeder
 
 # strih_resolve_session_env -> print the resolved graphical-session display env assignment (one
-# KEY=VALUE line) to stdout and return 0; return non-zero (printing nothing) when neither a Wayland
-# nor an X socket exists. Wayland first (26.04 GNOME default), XWayland/X11 DISPLAY=:0 fallback, else
-# FAIL. Test seams: XDG_RUNTIME_DIR (where the wayland-* sockets live) and STRIH_X11_SOCKET_DIR
-# (default /tmp/.X11-unix) for the X-socket probe. A wayland-*.lock sibling is ignored.
+# KEY=VALUE line) to stdout and return 0; return non-zero (printing nothing) when no X socket exists.
+# issue 1357: X11 ONLY -- the kiosk is plain Xorg (openbox), exactly like imag; a Wayland socket is
+# deliberately ignored (the GNOME Wayland session is purged, and OBS must never land on XWayland again).
+# Test seam: STRIH_X11_SOCKET_DIR (default /tmp/.X11-unix) for the X-socket probe.
 strih_resolve_session_env() {
-  local rt="${XDG_RUNTIME_DIR:-}" xdir="${STRIH_X11_SOCKET_DIR:-/tmp/.X11-unix}" s base
-  if [ -n "$rt" ]; then
-    for s in "$rt"/wayland-*; do
-      case "$s" in *.lock) continue ;; esac
-      [ -e "$s" ] || continue
-      base="$(basename "$s")"
-      printf 'WAYLAND_DISPLAY=%s\n' "$base"
-      return 0
-    done
-  fi
+  local xdir="${STRIH_X11_SOCKET_DIR:-/tmp/.X11-unix}"
   if [ -e "${xdir}/X0" ]; then
     printf 'DISPLAY=:0\n'
     return 0
@@ -67,9 +60,9 @@ if pgrep -x obs >/dev/null; then
   exit 0
 fi
 
-# Resolve + export the graphical-session display (Wayland-first, X11 fallback, else FAIL LOUD).
+# Resolve + export the Xorg display (DISPLAY=:0, else FAIL LOUD).
 if ! SESSION_ENV="$(strih_resolve_session_env)"; then
-  echo "FAIL: no graphical session display found (no wayland-* socket under XDG_RUNTIME_DIR='${XDG_RUNTIME_DIR:-<unset>}' and no X socket under '${STRIH_X11_SOCKET_DIR:-/tmp/.X11-unix}'). The unit is After=graphical-session.target -- refusing to launch OBS with no display."
+  echo "FAIL: no X display found (no X0 socket under '${STRIH_X11_SOCKET_DIR:-/tmp/.X11-unix}'). OBS runs on the Xorg :0 openbox kiosk session -- refusing to launch OBS with no display."
   exit 1
 fi
 while IFS= read -r _kv; do
@@ -108,15 +101,9 @@ fi
 
 [ -x "$OBS_BIN" ] || { echo "FAIL: OBS binary '${OBS_BIN}' not found/executable -- install the genlock bundle (setup-strih.sh step 4) first"; exit 1; }
 
-# issue 1352: render OBS on the RTX 5050 via XWayland PRIME render-offload. setup-strih.sh step 8
-# SUBSTITUTES the @STRIH_LX_OBS_GPU_ENV@ marker line below with strih_lx_obs_gpu_env's 4 exports (the
-# ONE source of truth in scripts/lib/strih-provision.sh) at install time -- the DEPLOYED wrapper
-# carries the real exports, this repo copy carries only the marker (kept a bash comment so sourcing/
-# running this file is harmless). WHY: native-Wayland NVIDIA EGL crash-loops (eglSwapBuffers failed)
-# and the Intel iGPU saturates at 85 % (program lag 7-20 %, MV 6-7 fps); the RTX via XWayland PRIME
-# renders the program at 9-23 ms / lagged=0. A projector's toplevel GL surface still stalls
-# 0.5 s/present under PRIME -> strih-mv-host.service re-hosts every OBS projector as a CHILD window.
-#@STRIH_LX_OBS_GPU_ENV@
+# issue 1357: no GPU env here. The Xorg server runs PRIME nvidia-PRIMARY (the shared baseline's
+# obs_box_nvidia_prime), so OBS renders on the RTX 5050 directly -- the issue-1352 XWayland PRIME
+# render-offload exports are gone with the GNOME Wayland session they worked around.
 
 # issue 1317 (imag issue 1156 pattern): PREFLIGHT the seed's Python import chain BEFORE launching
 # OBS. This wrapper launches OBS and only AFTERWARD runs the seeder; if a module

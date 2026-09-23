@@ -207,7 +207,9 @@ UTF-16LE; both bash `iconv` and Python `utf-16-le` emit NO BOM → byte-identica
 LIST-form `subprocess.run(["powershell","-NoProfile","-NonInteractive","-Command",cmd])` runs LOCALLY
 on the box (no ssh, no cmd.exe — argv goes straight to powershell.exe); Task Scheduler XML
 `<Command>powershell</Command>` (a local scheduled task); `-File`-based invocations; and the doc
-comments. `mv_reverify_probe_raw`'s OWN inline encode stays (test-locked, out of #1259's scope).
+comments. `mv_reverify_probe_raw`'s OWN inline encode was retired by issue 1360: it now reads through
+the shared platform-resolved `strih_log_tail` (`scripts/lib/strih-log-read.sh`, same `-EncodedCommand`
+payload byte-for-byte on a Windows strih, plain ssh `tail` on strih-lx — `.claude/rules/strih-log-read.md`).
 
 **Tier-0 test the migrated sites the same fake-sshpass way** (`tests/harness_ps_encoded_fleet_1259.rs`):
 source the watchdog (its `[[ "${BASH_SOURCE[0]}" == "$0" ]] && main` guard means sourcing only defines

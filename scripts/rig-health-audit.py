@@ -11,8 +11,9 @@ mutates anything (pure ssh/WS reads):
   imag        OBS GetStats over local WS (activeFps, avg render ms, skip%), per-source NDI
               arrival rate from the genlock-fifo audit log lines, isolcpus absence (#784),
               watchdog service, dantesync, load
-  strih       obs64 process, OBS GetStats over LAN WS (auth), per-source arrival rates +
-              audio-buffering peak from the newest OBS log (#786)
+  strih       OBS process count, OBS GetStats over LAN WS (auth), per-source arrival rates +
+              audio-buffering peak from the newest OBS log (#786) -- read the platform-resolved
+              way (issue 1360: the Linux strih-lx notebook since the M4 cut-over, see strih_platform)
   stream      same as strih (no WS auth) + genlock latency_ms + guarded-launch log presence
 
 Exit code: 0 = every line PASS, 1 = any WARN, 2 = any FAIL. Output is line-oriented on purpose:
@@ -112,7 +113,14 @@ def emit(verdict: str, node: str, detail: str) -> None:
 def ssh(host: str, cmd: str, user: str = "root", timeout: int = 20, pw: str = SSH_PW) -> str | None:
     try:
         out = subprocess.run(
+            # issue 1360: UserKnownHostsFile=/dev/null -- 10.77.9.202 was the Windows STRIH-SNV
+            # address before M4; a stale known_hosts key with StrictHostKeyChecking=no makes OpenSSH
+            # DISABLE password auth (the same transport rule scripts/lib/strih-log-read.sh carries).
+            # Deliberately for EVERY row (cams/imag too): the rig's boxes are re-imaged/re-addressed
+            # (issue-1316 imag swap, the M4 strih swap) and this read-only audit must never go blind
+            # on a stale key -- the same option set 11 other rig scripts already use.
             ["sshpass", "-p", pw, "ssh", "-o", "StrictHostKeyChecking=no",
+             "-o", "UserKnownHostsFile=/dev/null", "-o", "LogLevel=ERROR",
              "-o", "ConnectTimeout=6", f"{user}@{host}", cmd],
             capture_output=True, timeout=timeout)
     except subprocess.TimeoutExpired:
@@ -179,12 +187,20 @@ def fmt_rates(rates: dict[str, float]) -> str:
 # generic `genlock_lock=<state>` chip (rig-status-page.md: the facet lives in the FEEDER, not the
 # renderer). "" when no such line is in the fetched log window (a stock OBS, or startup state not in
 # the tail) -> the caller OMITS the token (UNKNOWN, never a fabricated state).
-_GENLOCK_LOCK_STATE_RE = re.compile(r"genlock-lock: state=(\w+)")
+# issue 1360: the log window is head 600 + tail N of a long session, and the change-driven line can
+# fall between the two windows (only the head's startup state survives). The widget's 30 s
+# `genlock-lock-json:` heartbeat carries the same decided state and is always in the tail, so the
+# LAST line of EITHER kind (by position in the text) wins.
+_GENLOCK_LOCK_STATE_RE = re.compile(
+    r'genlock-lock: state=(\w+)|genlock-lock-json: \{[^\n]*?"state":"(\w+)"')
 
 
 def genlock_lock_state_from_log(log_text: str) -> str:
     matches = _GENLOCK_LOCK_STATE_RE.findall(log_text or "")
-    return matches[-1] if matches else ""
+    if not matches:
+        return ""
+    change, heartbeat = matches[-1]
+    return change or heartbeat
 
 
 def audit_samples(log_text: str) -> dict[str, list[tuple[str, int]]]:
@@ -494,8 +510,58 @@ def _windows_obs_count_cmd() -> str:
         "@(Get-Process obs64 -ErrorAction SilentlyContinue | Where-Object { -not $_.HasExited -and $_.Threads.Count -gt 0 }).Count")
 
 
-def windows_obs_log_tail(ip: str, tail: int = 500) -> str | None:
-    return ssh(ip, _windows_obs_log_tail_cmd(tail), user="newlevel", timeout=30)
+# issue 1360: the strih role moved to the Linux notebook strih-lx (M4 cut-over). Python cannot
+# source scripts/lib/strih-platform.sh / strih-log-read.sh, so these are TWINS of the two decisions
+# the audit needs, pinned byte-for-byte to the bash originals by
+# tests/python/test_rig_health_audit_strih_lx_1360.py (which runs the bash functions):
+#   strih_platform            == strih-platform.sh `strih_platform`
+#   _linux_obs_log_tail_cmd   == strih-log-read.sh `strih_log_remote_cmd linux headtail N`
+# (and the Windows `headtail` op there is _windows_obs_log_tail_cmd verbatim).
+STRIH_LX_HOST_DEFAULT = "10.77.9.202"
+
+
+def strih_platform(host: str) -> str:
+    """'linux' | 'windows' for an OBS box address: STRIH_PLATFORM env (windows|linux only; any
+    other value is ignored) wins, else the strih-lx address (STRIH_LX_HOST, default 10.77.9.202)
+    is linux, else windows -- the stream box and every other address keep the Windows reads."""
+    forced = os.environ.get("STRIH_PLATFORM", "")
+    if forced in ("windows", "linux"):
+        return forced
+    lx_host = os.environ.get("STRIH_LX_HOST") or STRIH_LX_HOST_DEFAULT
+    return "linux" if host and host == lx_host else "windows"
+
+
+def _linux_obs_log_tail_cmd(tail: int | str = 500) -> str:
+    # the ps_clamp_numeric rule the bash builder applies: anything but plain ASCII digits -> 500,
+    # so a caller value can never splice shell metachars into the remote command.
+    n = str(tail)
+    if not (n.isascii() and n.isdigit()):
+        n = "500"
+    # HEAD + TAIL of the NEWEST log, same read shape as the Windows command (the launch-time
+    # audio-buffering burst lives in the head). The filename carries SPACES -> always "$F".
+    return ('F=$(ls -t ~/.config/obs-studio/logs/*.txt 2>/dev/null | head -1); [ -n "$F" ] && '
+            f'{{ head -n 600 "$F"; tail -n {n} "$F"; }}')
+
+
+def _linux_obs_count_cmd() -> str:
+    # LIVE `obs` processes only (a zombie is excluded -- the Linux twin of the issue-1295 live-only
+    # obs64 count). `ps -C obs` matches the exact comm, never the `obs-browser-pag` CEF children.
+    # awk always prints a bare integer and exits 0, so OBS-down reads `0`, never an ssh failure.
+    return "ps -C obs -o stat= | awk '$1 !~ /^Z/{c++} END{print c+0}'"
+
+
+def _obs_log_tail_cmd(ip: str, tail: int | str = 500) -> str:
+    if strih_platform(ip) == "linux":
+        return _linux_obs_log_tail_cmd(tail)
+    return _windows_obs_log_tail_cmd(tail)
+
+
+def _obs_count_cmd(ip: str) -> str:
+    return _linux_obs_count_cmd() if strih_platform(ip) == "linux" else _windows_obs_count_cmd()
+
+
+def obs_log_tail(ip: str, tail: int = 500) -> str | None:
+    return ssh(ip, _obs_log_tail_cmd(ip, tail), user="newlevel", timeout=30)
 
 
 def cg_chain_detail_from_output(stdout: str) -> str:
@@ -530,7 +596,7 @@ def check_cg_chain() -> None:
 
     logs: dict[str, str] = {}
     for hop, ip in (("strih", STRIH), ("stream", STREAM)):
-        tail = windows_obs_log_tail(ip)
+        tail = obs_log_tail(ip)
         if tail is None:
             emit(CG_CHAIN_REPORT_VERDICT, "cg-chain",
                  f"{hop} OBS log unreadable -- CG-chain verdict skipped (report-only #1300)")
@@ -565,12 +631,12 @@ def check_cg_chain() -> None:
 
 def check_windows_box(name: str, ip: str, ws_password: str | None, program_fps: float,
                       expect_latency: bool, check_camera_cadence: bool = False) -> None:
-    procs = ssh(ip, _windows_obs_count_cmd(), user="newlevel", timeout=20)
+    procs = ssh(ip, _obs_count_cmd(ip), user="newlevel", timeout=20)
     if procs is None:
         emit("FAIL", name, "unreachable over ssh")
         return
     obs_count = int(procs.strip() or 0)
-    log = windows_obs_log_tail(ip) or ""
+    log = obs_log_tail(ip) or ""
     stats = obs_ws_stats(ip, ws_password)
     rates = arrival_rates(log)
     buf_peak = max((int(m.group(1)) for m in BUF_RE.finditer(log)), default=0)

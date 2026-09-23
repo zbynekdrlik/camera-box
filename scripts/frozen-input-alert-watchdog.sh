@@ -55,6 +55,9 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE/lib/mv-reverify-escalate.sh"
 # shellcheck source=scripts/lib/ps-encoded.sh
 . "$HERE/lib/ps-encoded.sh"
+# shellcheck source=scripts/lib/strih-log-read.sh
+# issue 1360: a Linux strih (strih-lx) is read through the ONE shared strih OBS-log reader.
+. "$HERE/lib/strih-log-read.sh"
 
 DRY_RUN=0
 case "${1:-}" in
@@ -152,11 +155,19 @@ probe_received() {
     # to a pure-ASCII blob cmd.exe cannot touch; an empty encode -> empty read -> UNKNOWN, never an abort.
     local _enc _tail
     _tail="$(ps_clamp_numeric "$OBS_LOG_TAIL" 800)" # #1259: guard the env count before the payload
-    _enc="$(ps_encoded_command "gc (gci \$env:APPDATA\\obs-studio\\logs\\*.txt | sort LastWriteTime | select -last 1).FullName -Tail $_tail")"
-    # shellcheck disable=SC2086
-    raw="$(timeout "$SSH_TIMEOUT" sshpass -p "$SSH_PW" ssh $SSH_OPTS "$SSH_USER@$ip" \
-      "powershell -NoProfile -NonInteractive -EncodedCommand $_enc" \
-      2>/dev/null || true)"
+    # issue 1360: a Linux strih (strih-lx, the production strih since the M4 cut-over) is read
+    # through the ONE shared reader (newest ~/.config/obs-studio/logs/*.txt over plain ssh, the
+    # spaced filename quoted) -- the PowerShell read below would come back EMPTY there (UNKNOWN
+    # forever, never a page). Every other box (stream, resolume) keeps the PowerShell read.
+    if [ "$(strih_log_os "$ip")" = linux ]; then
+      raw="$(strih_log_tail "$ip" "$SSH_USER" "$SSH_PW" "$_tail" "$SSH_TIMEOUT")"
+    else
+      _enc="$(ps_encoded_command "gc (gci \$env:APPDATA\\obs-studio\\logs\\*.txt | sort LastWriteTime | select -last 1).FullName -Tail $_tail")"
+      # shellcheck disable=SC2086
+      raw="$(timeout "$SSH_TIMEOUT" sshpass -p "$SSH_PW" ssh $SSH_OPTS "$SSH_USER@$ip" \
+        "powershell -NoProfile -NonInteractive -EncodedCommand $_enc" \
+        2>/dev/null || true)"
+    fi
   fi
   # Newest audit line for THIS source -> the received= integer. Empty if none found.
   # #1258 layer 2: LC_ALL=C + grep -a -- PowerShell 5.1 `gc` (no -Encoding) reads the UTF-8

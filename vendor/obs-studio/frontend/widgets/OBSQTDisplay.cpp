@@ -7,6 +7,7 @@
 #include <obs-nix-platform.h>
 #endif
 
+#include <QTimer>
 #include <QWindow>
 #ifdef ENABLE_WAYLAND
 #include <QApplication>
@@ -72,6 +73,14 @@ static bool QTToGSWindow(QWindow *window, gs_window &gswindow)
 
 OBSQTDisplay::OBSQTDisplay(QWidget *parent, Qt::WindowFlags flags) : QWidget(parent, flags)
 {
+	/* camera-box #1358: coalesce the resize burst of an interactive window drag
+	 * into ONE display resize once the size has been stable for 150 ms. Created
+	 * before WA_NativeWindow makes the native window, so resizeEvent always has it. */
+	resizeDebounce = new QTimer(this);
+	resizeDebounce->setSingleShot(true);
+	resizeDebounce->setInterval(150);
+	connect(resizeDebounce, &QTimer::timeout, this, &OBSQTDisplay::ApplyDisplayResize);
+
 	setAttribute(Qt::WA_PaintOnScreen);
 	setAttribute(Qt::WA_StaticContents);
 	setAttribute(Qt::WA_NoSystemBackground);
@@ -155,6 +164,8 @@ void OBSQTDisplay::CreateDisplay()
 	}
 
 	display = obs_display_create(&info, backgroundColor);
+	/* camera-box #1358: the first resize after creation is applied at once. */
+	resizeImmediate = true;
 
 	emit DisplayCreated(this);
 }
@@ -193,6 +204,29 @@ void OBSQTDisplay::resizeEvent(QResizeEvent *event)
 	QWidget::resizeEvent(event);
 
 	CreateDisplay();
+
+	/* camera-box #1358: never resize the display per event. A drag emits a resize
+	 * per step and each applied one reallocates the swap chain on the graphics
+	 * thread the PROGRAM render shares. Restart the debounce timer instead; its
+	 * timeout applies the final size once. A just-created display gets its first
+	 * resize immediately so a new window never renders at a stale size. */
+	if (resizeImmediate) {
+		resizeImmediate = false;
+		resizeDebounce->stop();
+		ApplyDisplayResize();
+		return;
+	}
+
+	resizeDebounce->start();
+}
+
+void OBSQTDisplay::ApplyDisplayResize()
+{
+	/* A pending apply that fires after DestroyDisplay() leaves the torn-down
+	 * display and the preview/program layout alone. */
+	if (destroying) {
+		return;
+	}
 
 	if (isVisible() && display) {
 		QSize size = GetPixelSize(this);

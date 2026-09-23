@@ -2,6 +2,7 @@
 paths:
   - "src/genlock_backlog.rs"
   - "scripts/genlock_audit_snapshot.py"
+  - "scripts/lib/genlock-audit-snapshot.sh"
   - "vendor/obs-studio/libobs/obs-source.c"
 ---
 
@@ -78,10 +79,11 @@ fix keeps every input's holds delta low.
 - `dropped_due` STRUCTURALLY advances on a 60→30 strih input (issue 1221) — it is context, never a
   ladder signal by itself. Watch `holds`/`relocks`/`converge_sheds`.
 
-**Supervisor wiring (not done in the #1354 worktree lane — `recording-e2e.sh` is a static-anchor
-minefield the lane must not edit):** capture the strih OBS-log audit tail into a per-run file just
-before `[5/8] StartRecord` and just after `StopRecord` (reuse the `[4c/8]` received= tap /
-`genlock-settle.sh` read), run `genlock_audit_snapshot.py --before-log … --after-log … --out
-$GENLOCK_AUDIT_JSON`, and pass `$GENLOCK_AUDIT_JSON` as the 7th arg to `e2e_discord_report_send`
-(mirroring the pins/mv-skew snapshot invocations at recording-e2e.sh ~5562/5575). Until then the
-7th-arg default keeps the section a safe no-op.
+**Producer wiring (landed):** `scripts/lib/genlock-audit-snapshot.sh`, sourced once by
+`recording-e2e.sh` — `genlock_audit_snapshot_capture before` just before `[5/8] StartRecord`,
+`… after` just after the strih StopRecord, `genlock_audit_snapshot_compute` after the merge, the JSON
+passed as `e2e_discord_report_send`'s 7th arg (anchors pinned in
+`tests/harness_genlock_audit_snapshot_wiring_1354.rs`). Report-only and fail-open end to end. The
+strih read goes through the shared `strih_log_tail` reader (a raw 3000-line window + a LOCAL audit
+filter, both strih platforms) — `.claude/rules/strih-log-read.md`; the `GENLOCK_AUDIT_SNAPSHOT_READER_CMD`
+seam replaces the whole read in tests.

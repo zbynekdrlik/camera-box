@@ -84,6 +84,90 @@ fn titlebar_carries_newlevel_media_build_marker_and_sha() {
     );
 }
 
+/// Issue 1357: the Linux OBS boxes (strih-lx, imag) install the bundle into the `/usr`
+/// prefix (`/usr/bin/obs`), so the two exe-relative Windows-layout candidates resolve to
+/// `/GENLOCK_BUILD_SHA.txt` / `/usr/bin/GENLOCK_BUILD_SHA.txt` — neither exists, and the
+/// title read `newlevel.media build unknown` on every Linux box. The deploy writes the
+/// marker at the canonical Linux marker home `/opt/obs-genlock/GENLOCK_BUILD_SHA.txt`
+/// (`genlock_write_markers`, `GENLOCK_MARKER_DIR`), so `NewlevelBuildSha()` must try that
+/// absolute path — compiled ONLY under `__linux__` and tried AFTER the exe-relative
+/// candidates, so the Windows build is byte-identical in behaviour.
+#[test]
+fn titlebar_reads_the_linux_marker_home_after_the_exe_relative_candidates_1357() {
+    let src = squish(&vendor_file(OBS_BASIC));
+    const LINUX_MARKER: &str = r#""/opt/obs-genlock/GENLOCK_BUILD_SHA.txt""#;
+    // Anchor on the actual READ call, not the bare path literal, so a path left behind in a
+    // comment inside the `#ifdef` block can never satisfy the guard on its own.
+    const LINUX_READ: &str = r#"NewlevelReadShaMarker("/opt/obs-genlock/GENLOCK_BUILD_SHA.txt")"#;
+
+    // Slice the NewlevelBuildSha() body: from its definition to the UpdateTitleBar() that
+    // follows it (the helper is defined directly above its only caller).
+    let start = src
+        .find("static std::string NewlevelBuildSha()")
+        .unwrap_or_else(|| panic!("{OBS_BASIC}: NewlevelBuildSha() definition missing"));
+    let rest = &src[start..];
+    let end = rest
+        .find("void OBSBasic::UpdateTitleBar()")
+        .unwrap_or_else(|| panic!("{OBS_BASIC}: UpdateTitleBar() not found after the helper"));
+    let body = &rest[..end];
+
+    let exe_rel = body.find(r#""../../GENLOCK_BUILD_SHA.txt""#).unwrap_or_else(|| {
+        panic!("{OBS_BASIC}: the exe-relative install-root candidate is gone from NewlevelBuildSha()")
+    });
+    let exe_call = body.find("os_get_executable_path_ptr(").unwrap_or_else(|| {
+        panic!("{OBS_BASIC}: NewlevelBuildSha() no longer resolves candidates via os_get_executable_path_ptr")
+    });
+    let linux = body.find(LINUX_READ).unwrap_or_else(|| {
+        panic!(
+            "{OBS_BASIC}: NewlevelBuildSha() does not read the Linux marker home \
+             via {LINUX_READ} — every Linux OBS box (/usr/bin/obs) titles itself \
+             'newlevel.media build unknown' (issue 1357). Re-add the __linux__ candidate."
+        )
+    });
+    assert_eq!(
+        body.matches(LINUX_READ).count(),
+        1,
+        "{OBS_BASIC}: the Linux marker read must appear exactly once in NewlevelBuildSha()"
+    );
+
+    // Tried AFTER the exe-relative candidates (Windows order unchanged, Linux falls back).
+    assert!(
+        linux > exe_rel && linux > exe_call,
+        "{OBS_BASIC}: the Linux marker candidate must be tried AFTER the exe-relative \
+         candidates so the Windows lookup order is byte-identical (issue 1357)"
+    );
+
+    // Compiled ONLY under __linux__: the path sits between an `#ifdef __linux__` that comes
+    // after the exe-relative lookup and the next `#endif`.
+    let ifdef = body[..linux].rfind("#ifdef __linux__").unwrap_or_else(|| {
+        panic!(
+            "{OBS_BASIC}: the Linux marker candidate is not guarded by `#ifdef __linux__` — \
+             it must never be compiled into the Windows obs64.exe (issue 1357)"
+        )
+    });
+    assert!(
+        ifdef > exe_call,
+        "{OBS_BASIC}: the `#ifdef __linux__` guarding the Linux marker candidate must come \
+         after the exe-relative candidate lookup (issue 1357)"
+    );
+    assert!(
+        !body[ifdef..linux].contains("#endif"),
+        "{OBS_BASIC}: the Linux marker candidate lies outside its `#ifdef __linux__` block"
+    );
+    assert!(
+        body[linux..].contains("#endif"),
+        "{OBS_BASIC}: the `#ifdef __linux__` block around the Linux marker is not closed"
+    );
+
+    // An ABSOLUTE path read directly — never fed through os_get_executable_path_ptr, which
+    // would re-root it under the exe dir.
+    assert!(
+        !body.contains(&format!("os_get_executable_path_ptr({LINUX_MARKER}")),
+        "{OBS_BASIC}: the Linux marker home is absolute — it must be read directly, not \
+         resolved relative to the executable (issue 1357)"
+    );
+}
+
 #[test]
 fn windows_genlock_workflows_gate_on_the_titlebar_marker() {
     // The canonical guard is the test above, but this crate is Linux-only

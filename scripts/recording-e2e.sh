@@ -130,6 +130,12 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Linux strih -- never a second host-detection mechanism, one resolver both [0/8] and [8/8a] use.
 # shellcheck source=scripts/lib/strih-platform.sh
 . "$HERE/lib/strih-platform.sh"
+# issue 1354 scope 3: capture strih's per-input genlock-fifo audit tail BEFORE the record step +
+# AFTER the stop step so scripts/genlock_audit_snapshot.py can NAME the conveyor-ladder victim input
+# in the E2E report (report-only, fail-open). Depends on strih_platform() above; #675 anchor-safe --
+# only NEW single call lines are added below, every existing anchored line stays byte-identical.
+# shellcheck source=scripts/lib/genlock-audit-snapshot.sh
+. "$HERE/lib/genlock-audit-snapshot.sh"
 # issue 1351: the ONE source of truth for BOUNDING every strih-touching [0/8] call on the
 # Linux-strih path with a timeout + a named [0/8] strih-lx banner (strih_lx_gate_prefix /
 # strih_lx_preflight_timeout_banner) -- so a silent hang can never swallow RUN_ID. Depends on
@@ -249,6 +255,13 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # restores at once, bounding the loop's wall-clock by the slowest single box.
 # shellcheck source=scripts/lib/cambox-parallel-restore.sh
 . "$HERE/lib/cambox-parallel-restore.sh"
+# #1203: the post-restore receiver-cadence verify/heal lib. After the cleanup parallel-restore
+# group bounces every active sender, 2-3 strih NDI receivers can re-attach at HALF cadence (a
+# per-connection DistroAV state); this lib reads each input's recv-timing and drives the bounded,
+# report-only idle-restore/sender-restart cure. Sourced here; invoked ONCE in cleanup() right after
+# the parallel-restore group (the additive #675-pattern call site below).
+# shellcheck source=scripts/lib/ndi-cadence-heal.sh
+. "$HERE/lib/ndi-cadence-heal.sh"
 # #744: reset a capture card's saturation/contrast to ITS OWN --list-ctrls default (never a
 # foreign literal calibrated for a different card, and never a hardcoded /dev/videoN -- USB
 # grabber nodes renumber, #728). Used by the [0/8] preflight and the [2/8]/[2b/8] deploy sites
@@ -2037,6 +2050,18 @@ fi"
   # not — WARN-only, so a restart-left-unlocked leg never poisons the NEXT run's [0/8] preflight.
   # Bounded (attempts=1 per box) + guarded so it can never abort this trap; see the function above.
   cleanup_mv_reverify_active_boxes
+  # #1203 item (b): post-restore receiver-cadence verify/heal. The cleanup parallel-restore group
+  # above bounced every active sender; 2-3 strih NDI receivers can re-attach at HALF the sender
+  # cadence (recv-timing #797 cap_avg ~33ms at a 60fps sender) even while locked=1 and the cambox
+  # emits 60/60 -- a per-connection DistroAV state the #759 re-lock nudge above does not clear.
+  # Runs AFTER that re-lock so each leg is locked before its cadence is read; reads every strih NDI
+  # input's cadence (reusing the #797 tap parser via ndi_halving_decision.py, never a 2nd parser)
+  # and drives the bounded, report-only two-arm cure (idle-restore -> sender-restart -> escalate),
+  # writing the ndi-cadence-<RUN_ID>.json telemetry into this run's OUTDIR. The orchestrator ALWAYS
+  # exits 0 (the #1133 bare-statement class); the trailing `|| true` is belt-and-suspenders so this
+  # verify can never abort the cleanup trap.
+  NDI_CADENCE_RUN_ID="$RUN_ID" NDI_CADENCE_RUN_DIR="$OUTDIR" \
+    ndi_cadence_verify_and_heal "$STRIH" || true
   # The cam devices are now freed regardless of what the OBS restore does. #328: bound every OBS
   # call by `timeout` so a hung obs-websocket op (#328) can't block the trap even if it runs.
   # #649: StopRecord itself already ran, FIRST, at the top of this function (harness-started boxes
@@ -3139,10 +3164,10 @@ echo "[4d1/8] #771 MV-fps floor preflight — strih + imag Multiview projectors 
 if [ "$IMAG_OFFLINE_ACKED" = 1 ]; then
   imag_leg_skip_note "[4d1/8] imag MV-fps floor preflight (#771) — strih still checked" "$IMAG_OFFLINE_ACK_REASON"
   mv_fps_preflight_assert "$PROBE_BIN_DIR/mv-fps-gate" \
-    "strih|$STRIH|win|$STRIH_USER|$STRIH_PW"
+    "strih|$STRIH|strih|$STRIH_USER|$STRIH_PW"
 else
 mv_fps_preflight_assert "$PROBE_BIN_DIR/mv-fps-gate" \
-  "strih|$STRIH|win|$STRIH_USER|$STRIH_PW" \
+  "strih|$STRIH|strih|$STRIH_USER|$STRIH_PW" \
   "imag|$IMAG_IP|linux|${IMAG_USER:-newlevel}|${IMAG_PW:-newlevel}"
 fi
 
@@ -4162,10 +4187,15 @@ if [ "$PRERECORD_PHASE_CALIBRATE" = "1" ] && [ "${ALL_CAMBOX:-0}" = "1" ]; then
   # #757 Correction 2 (time-scoping): capture the CURRENT line count of strih's latest OBS log
   # BEFORE the preview cycle starts, so the fetch below can skip straight past everything
   # older than this calibration window — never a blind `-Tail N` that can silently include
-  # many minutes of unrelated prior activity.
-  CALIB_LOG_START_LINES="$(win_ssh_run "$STRIH_USER" "$STRIH_PW" "$STRIH" \
-    '(Get-Content (Get-ChildItem "$env:APPDATA\obs-studio\logs\*.txt" | Sort-Object LastWriteTime -Descending | Select-Object -First 1)).Count' \
-    2>/dev/null | tr -d '[:space:]')"
+  # many minutes of unrelated prior activity. Issue 1360: both reads go through the ONE
+  # platform-resolved strih OBS-log reader (plain ssh on the Linux strih-lx, the verbatim
+  # PowerShell on a Windows strih). Sourced explicitly here for locality: it is already loaded
+  # transitively (mv-reverify-escalate.sh near the top sources it), but this step must not depend
+  # on that indirection.
+  # shellcheck source=scripts/lib/strih-log-read.sh
+  . "$HERE/lib/strih-log-read.sh"
+  CALIB_LOG_START_LINES="$(strih_log_line_count "$STRIH" "$STRIH_USER" "$STRIH_PW" 60 2>/dev/null \
+    | tr -d '[:space:]')"
   case "$CALIB_LOG_START_LINES" in ''|*[!0-9]*) CALIB_LOG_START_LINES=0 ;; esac
 
   echo "    [calib] cycling every strih camera onto PREVIEW for ${CALIB_DWELL_SECS}s each (program output untouched)"
@@ -4173,8 +4203,7 @@ if [ "$PRERECORD_PHASE_CALIBRATE" = "1" ] && [ "${ALL_CAMBOX:-0}" = "1" ]; then
     | sed 's/^/    [calib] /'
 
   CALIB_LOG="$OUTDIR/prerecord-calib-strih-${RUN_ID}.log"
-  _calib_fetch_ps='Get-Content (Get-ChildItem "$env:APPDATA\obs-studio\logs\*.txt" | Sort-Object LastWriteTime -Descending | Select-Object -First 1) | Select-Object -Skip '"$CALIB_LOG_START_LINES"
-  if win_ssh_run "$STRIH_USER" "$STRIH_PW" "$STRIH" "$_calib_fetch_ps" \
+  if strih_log_since_line "$STRIH" "$STRIH_USER" "$STRIH_PW" "$CALIB_LOG_START_LINES" 120 \
       > "$CALIB_LOG" 2>/dev/null && [ -s "$CALIB_LOG" ]; then
     CALIB_JITTER_JSON="$OUTDIR/prerecord-calib-jitter-${RUN_ID}.json"
     if "$PROBE_BIN_DIR/genlock-jitter-report" --file "$CALIB_LOG" --json > "$CALIB_JITTER_JSON" 2>"$OUTDIR/prerecord-calib-jitter-err-${RUN_ID}.log"; then
@@ -4390,6 +4419,13 @@ else
   echo "[5/8 pre] in-run freeze watch — SKIPPED (LIVE_FREEZE_WATCH=$LIVE_FREEZE_WATCH, ALL_CAMBOX=${ALL_CAMBOX:-0})"
 fi
 
+# issue 1354 scope 3: BEFORE-window snapshot of strih's per-input genlock-fifo audit counters
+# (holds/relocks/converge_sheds), paired with the AFTER snapshot in [7/8]. Report-only + fail-open
+# (the helper returns 0 on every input; a trailing `|| true` is belt-and-suspenders): an
+# unreadable/absent tail leaves no file and the report simply omits the genlock-conveyor section.
+# Placed here so the delta spans EXACTLY the recording window -- the [4i/8align] + [4j/8settle]
+# transients are already over (design Prístup 3 rejection).
+genlock_audit_snapshot_capture before "$OUTDIR/genlock-audit-before-${RUN_ID}.txt" || true
 echo "[5/8] StartRecord on strih + stream (program = certified prod scene) + imag (#462 — program routed to the camera under test by [4a/8], #682)"
 # #627: `record --action start` now polls GetRecordStatus itself right after StartRecord and
 # raises (nonzero exit) if the output isn't genuinely active + writing growing bytes — a
@@ -4648,6 +4684,11 @@ CAPTURE_RATE_WINDOW_END_EPOCH="$(date +%s)"
 echo "    strih host file:  ${STRIH_HOST_PATH:-<unknown>}"
 echo "    stream host file: ${STREAM_HOST_PATH:-<unknown>}"
 echo "    imag host file:   ${IMAG_HOST_PATH:-<unknown>}  (#462 — stays ON imag, decoded in place below)"
+
+# issue 1354 scope 3: AFTER-window snapshot of strih's per-input genlock-fifo audit counters --
+# pairs with the BEFORE snapshot in [5/8] so genlock_audit_snapshot.py's window deltas span EXACTLY
+# the recording. Report-only + fail-open (in this [7/8] `set +e` region + a trailing `|| true`).
+genlock_audit_snapshot_capture after "$OUTDIR/genlock-audit-after-${RUN_ID}.txt" || true
 
 # #1124 item 3 — POST-record stomp re-check (profile mode only, report-only). Runs HERE, right
 # after StopRecord while the measurement pins/hold are STILL in force (cleanup()'s teardown
@@ -5578,8 +5619,14 @@ continuing WITHOUT the imag partial; the merge below will omit --merge-partials 
       echo "WARNING: #761 mv_skew_snapshot.py failed — Discord report will omit the MV-skew section (fail-open, gate unaffected)." >&2
       MV_SKEW_JSON=""
     fi
+    # issue 1354 scope 3: per-input genlock-fifo audit window deltas (from the [5/8] BEFORE + [7/8]
+    # AFTER tails) -- lets the report NAME the conveyor-ladder victim input. Report-only + fail-open
+    # like the pins/MV-skew snapshots above: a missing/empty tail (or a python error) leaves no JSON
+    # and the composer's `[ -s ]` guard omits the section; it NEVER touches $GATE.
+    GENLOCK_AUDIT_JSON="$OUTDIR/genlock-audit-${RUN_ID}.json"
+    genlock_audit_snapshot_compute "$OUTDIR/genlock-audit-before-${RUN_ID}.txt" "$OUTDIR/genlock-audit-after-${RUN_ID}.txt" "$GENLOCK_AUDIT_JSON" || true
     echo "    [8/8f] #711: Discord full-report (fail-open — never affects \$GATE below)"
-    e2e_discord_report_send "$REPORT_JSON" "$RUN_ID" "$GATE" "$DURATION" "$PINS_JSON" "$MV_SKEW_JSON"
+    e2e_discord_report_send "$REPORT_JSON" "$RUN_ID" "$GATE" "$DURATION" "$PINS_JSON" "$MV_SKEW_JSON" "$GENLOCK_AUDIT_JSON"
     echo "    --- [8/8e] cleanup plan (JSON secured at $REPORT_JSON) ---"
     if [ "${KEEP_RECORDINGS:-0}" = "1" ]; then
       echo "    KEEP_RECORDINGS=1 — skipping the recording-cleanup plan (debugging opt-out, #652)."

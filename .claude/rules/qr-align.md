@@ -223,8 +223,9 @@ ONLY when the reserve sits ABOVE the arrival floor — so the aligner MUST compu
   transport, then RE-FETCH the audit (scoped to ONLY the post-settle log lines — the [4g/8]
   Correction-2 line-count discipline, never a blind `-Tail` that averages `latency_ms` across two pin
   regimes) so the floors are TRUE transports and the SLOWEST returns to pin 3 EVERY run (the owner's
-  floor-3 doctrine, preserved). The `win_ssh_run` fetches are `timeout`-bounded (win-ssh-exec.sh's own
-  doc: the caller must bound it). `QR_ALIGN_RESET_SETTLE_S` / `QR_ALIGN_AUDIT_WINDOW_S` tune the waits.
+  floor-3 doctrine, preserved). The count + since-line fetches go through the shared platform-resolved
+  `strih_log_line_count` / `strih_log_since_line` (`scripts/lib/strih-log-read.sh`, issue 1360 — before
+  it, a Linux strih-lx read empty and the audit was skipped every run), `timeout`-bounded inside it. `QR_ALIGN_RESET_SETTLE_S` / `QR_ALIGN_AUDIT_WINDOW_S` tune the waits.
 - **`floor_aware_pins(arrival_floors, deltas, floor_ms, max_abs_latency_ms, current_pins)`:** the slowest
   (min-delta) camera → `floor_ms` (inert, stays at its natural floor); every faster camera →
   `max(floor_ms, round(arrival_floor_i + pure_delta_i))` (its floor + the PURE present-age hold it must
@@ -253,7 +254,7 @@ ONLY when the reserve sits ABOVE the arrival floor — so the aligner MUST compu
   Either way parity tolerance is NEVER widened — the run FAILS the owner's same-frame bar. The verify
   re-measure is the live acceptance instrument; a wrong computed pin still FAILS it.
 - **Best-effort reset+fetch → graceful fallback.** When `qr-align.sh` cannot run the reset+audit
-  (standalone call with no `win_ssh_run`/`PROBE_BIN_DIR`/`OUTDIR`, a reset failure, an unreachable log,
+  (standalone call with no `strih_log_line_count`/`PROBE_BIN_DIR`/`OUTDIR`, a reset failure, an unreachable log,
   no audit lines), the aligner falls back to the (inert-prone) floor+delta plan with a loud WARNING
   rather than aborting — so a missing audit degrades to the pre-fix behavior, never a hard stop. The
   normal E2E path runs the reset+fetch for the actual floor-aware fix.

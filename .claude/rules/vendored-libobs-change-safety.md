@@ -118,6 +118,30 @@ both rig sender grids are EVEN (33,333,300 ns and 16,666,600 ns), so `i*grid + g
 exact integer nanosecond a wall instant can land on. Construct the tie directly:
 `wall = BASE + i*grid + grid/2 + age`.
 
+**A mutation that targets a bare expression can hit the DOC COMMENT, not the code, and read as a
+false "gate blind" (#1355).** The scratch mutation you run to prove a NEW parity gate bites must
+mutate the HELPER'S ACTUAL STATEMENT, not a substring that also appears in prose. Live: verifying
+the sustained-excess drain gate, a `src.replace("depth > target + GENLOCK_DRAIN_SUSTAIN_HYSTERESIS_FRAMES",
+"depth >= …", 1)` flipped the `#define`'s own doc-comment line (which quoted the trigger
+expression verbatim, `count == 2`) and left the real `return` unchanged → 0 diffs, misread as the
+gate being blind to the compare. The real committed gate was fine (`lift_*_helper` extracts ONLY
+the `static inline …(` → first `\n}\n` body, so a comment is never compiled), but the MUTATION
+PROOF was lying. Anchor the mutation on the unique `return …` (or `if (…` wired-call) text, and
+`grep -c` the needle first — `> 1` means it also lives in a comment. Corollary: dropping a
+conjunct that is a parameter's ONLY use (e.g. removing the `ticks_since_drain >= …` throttle
+clause) is caught by the gate's own `-Werror` compile step as `unused-parameter`, not a value
+diff — a compile FAIL is still the gate biting, count it as RED.
+
+**Adding an audit-line-ONLY observability field (no API consumer) is the minimal choice — do NOT
+grow `obs_genlock_stats` for it (#1355).** A new `genlock-fifo audit '<src>':` key that only the
+post-deploy log read / `src/jitter_audit.rs` parser consumes (never the statusbar / bundle-state /
+LOCK-indicator) is printed straight from `source->genlock_<field>` at the `blog()` call, NOT routed
+through the shared `gs` snapshot and NOT added to `struct obs_genlock_stats`. The #1298 shared-fill
+rationale ("the line and `obs_source_get_genlock_stats` cannot disagree") applies ONLY to fields
+present in BOTH — a line-only field has nothing in the API to disagree with, so it needs no
+`OBS_GENLOCK_STATS_VERSION` bump and touches none of the struct's consumers. (`converge_sheds`
+IS in the struct because the LOCK indicator reads it; `sustain_sheds` is not.)
+
 ## Adding REMEMBERED STATE: enumerate the invalidation seams before writing the tests
 
 A per-source field that survives across ticks (`genlock_phase_anchor_ns`,
@@ -179,6 +203,28 @@ And whatever you anchor in `tests/genlock_release_cadence.rs`, mirror it into **
 whitespace the same way (`-replace '\s+', ' '` vs Rust's `split_whitespace().join(" ")`), so the
 same literal works in both — verify each one against the real squished C before committing,
 since `pwsh` is not installed on dev1 and a wrong literal fails only on a Windows runner.
+
+### Adding a SIBLING shed to the N==1 STEADY converge path: a SEPARATE `if (converge_eligible)` block, never an OR into the existing condition (#1355)
+
+`raw_converge_erases_index_zero` (in `tests/genlock_release_cadence.rs`) reads the RAW (un-squished)
+file, `find()`s the exact string `genlock_should_converge_phase(source, reserve_ms, interval,
+wall_now) &&` — **with the trailing ` &&`** — and checks a 600-char window after it contains
+`da_erase(source->async_frames, 0);` and not `array[1]`. So the #1049 converge block's own
+`if (genlock_should_converge_phase(...) &&\n    source->async_frames.num > 1) {` shape is
+LOAD-BEARING TEXT. Adding another shed on the SAME STEADY path (issue 1355 added the N==1
+`genlock_should_n1_release_phase_step`, which the N>=2-gated converge leaves un-served) by OR-ing it
+into that condition (`if (converge_or_n1_step(...) && num > 1)`) DELETES the ` &&`-adjacent call
+substring and fails that test — even though the logic is fine. Add the new shed as a WHOLLY SEPARATE
+`if (converge_eligible) { if (genlock_should_<new>(...) && num > 1) { …erase array[0]… } }` block
+AFTER the #1049 one, leaving the #1049 block byte-identical (so `raw_converge_erases_index_zero`, the
+`} else if (!drain_eligible) { source->genlock_ticks_since_drain++;` throttle anchor, and the
+`converge_eligible = true;` count==2 all still hold). Throttle sharing is automatic: on the N==1
+STEADY path `drain_eligible` is true, so the #859 drain block runs FIRST and either sheds
+(`ticks_since_drain = 0` → the new step reads ticks < the interval → returns false) or increments the
+counter; the new block therefore needs NO `else if (!drain_eligible)` increment of its own (the
+#1049 block owns the N>=2 counter, and the new step never fires there). Verify offline before push
+with the same `python3` recipe the yml-anchor rule uses: `find()` the `… &&` anchor in the RAW file
+and assert the 600-char window still has `da_erase(…, 0);` and no `array[1]`.
 
 ## The source-rate multiple is measured from the STAMP GRID — and that can lie about arrival rate (#1042)
 

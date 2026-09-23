@@ -2027,6 +2027,99 @@ mod vendored_source {
     }
 
     #[test]
+    fn asrc_absolute_level_setpoint_1355() {
+        // issue #1355: the ASRC level setpoint is ABSOLUTE — ASRC_LEVEL_TARGET_MS plus the source's
+        // deliberate placement offset (last_sync_offset + the #1303 genlock audio hold) — instead of
+        // the depth the mixer happened to have at the first lock (a random per-launch A/V level), and
+        // an unreachable target is BOUNDED (fall back to the live depth after
+        // ASRC_LEVEL_TARGET_UNREACHABLE_WINDOWS of smoothed error, logged at LOG_WARNING). Src
+        // authority + Tier-0 gate: src/asrc_bench.rs (LEVEL_TARGET_MS /
+        // LEVEL_TARGET_UNREACHABLE_WINDOWS + the three *_1355 benches). This static guard keeps the
+        // vendored C mirror in lock-step (a subtree pull / hand-edit restoring the depth-at-lock
+        // capture would ship an obs.dll whose A/V level is random per launch again). Keep byte-exact
+        // with the shipped lines.
+        let h = squish(&vendor_file(ASRC_COMPENSATOR_H));
+        assert!(
+            h.contains("#define ASRC_LEVEL_TARGET_MS 100.0")
+                && h.contains("#define ASRC_LEVEL_TARGET_UNREACHABLE_WINDOWS 2400"),
+            "{ASRC_COMPENSATOR_H}: #1355 — the ASRC_LEVEL_TARGET_MS = 100.0 absolute setpoint and/or the \
+             ASRC_LEVEL_TARGET_UNREACHABLE_WINDOWS = 2400 bound are no longer defined; re-sync with \
+             src/asrc_bench.rs LEVEL_TARGET_MS / LEVEL_TARGET_UNREACHABLE_WINDOWS."
+        );
+        assert!(
+            h.contains("double level_offset_ms;")
+                && h.contains("uint32_t level_unconverged_windows;")
+                && h.contains("uint32_t level_fallback_count;")
+                && h.contains("bool level_fallback_pending;")
+                && h.contains("bool level_fallback_done;")
+                && h.contains("bool level_absolute;")
+                && h.contains(
+                    "EXPORT void asrc_compensator_set_level_offset_ms(struct asrc_compensator *c, double offset_ms);"
+                )
+                && h.contains(
+                    "EXPORT void asrc_compensator_set_level_absolute(struct asrc_compensator *c, bool absolute);"
+                ),
+            "{ASRC_COMPENSATOR_H}: #1355 — the placement-offset / absolute-rule / unreachable-bound \
+             state fields or the asrc_compensator_set_level_offset_ms / _set_level_absolute \
+             declarations are gone."
+        );
+
+        let c = squish(&vendor_file(ASRC_COMPENSATOR_C));
+        assert!(
+            c.contains(
+                "c->level_target_ms = c->level_absolute ? ASRC_LEVEL_TARGET_MS + c->level_offset_ms : buffered_ms;"
+            ),
+            "{ASRC_COMPENSATOR_C}: #1355 — the level capture is no longer the ABSOLUTE target plus the \
+             placement offset (depth at lock only for a non-absolute source); keep numerically \
+             identical to src/asrc_bench.rs compensate_with_level."
+        );
+        assert!(
+            !c.contains("c->level_target_ms = buffered_ms; c->level_captured = true;"),
+            "{ASRC_COMPENSATOR_C}: #1355 — the pre-#1355 depth-at-lock capture is BACK; every stream \
+             launch would freeze a random mix-buffer depth (a random A/V level) again."
+        );
+        assert!(
+            c.contains(
+                "if (!c->level_fallback_done && fabs(c->level_err_ema_ms) >= ASRC_LEVEL_RESTORE_ARM_MS) {"
+            ) && c.contains(
+                "if (++c->level_unconverged_windows >= ASRC_LEVEL_TARGET_UNREACHABLE_WINDOWS) {"
+            ) && c.contains("c->level_target_ms += c->level_err_ema_ms; c->level_fallback_done = true;")
+                && c.contains("c->level_fallback_pending = true;"),
+            "{ASRC_COMPENSATOR_C}: #1355 — the unreachable-setpoint bound (smoothed error outside the \
+             restore exit band for ASRC_LEVEL_TARGET_UNREACHABLE_WINDOWS -> ONE fallback per capture \
+             to the SMOOTHED depth + flag) is gone; an unreachable target would push the restore \
+             burst and the P term forever, or ratchet."
+        );
+
+        let src = squish(&vendor_file(OBS_SOURCE));
+        assert!(
+            src.contains(
+                "asrc_compensator_set_level_absolute(&source->asrc, !source->genlock_fifo && source->monitoring_type != OBS_MONITORING_TYPE_MONITOR_ONLY);"
+            ) && src.contains(
+                "asrc_compensator_set_level_offset_ms(&source->asrc, (double)source->last_sync_offset / 1e6);"
+            ),
+            "{OBS_SOURCE}: #1355 — asrc_process_audio no longer hands the compensator the capture rule \
+             (absolute only for a mixed, non-genlock source) and the placement offset the buffered \
+             samples carry (last_sync_offset); the absolute capture would hit a genlock hold or a \
+             MONITOR_ONLY depth of 0, or ignore the sync offset."
+        );
+        assert!(
+            src.contains(
+                "if (source->genlock_audio_delay_ms != prev_genlock_audio_delay_ms) asrc_compensator_shift_level_target(&source->asrc, (double)source->genlock_audio_delay_ms - (double)prev_genlock_audio_delay_ms);"
+            ),
+            "{OBS_SOURCE}: #1355 — a change of the applied genlock audio hold no longer moves the ASRC \
+             level setpoint; the level loop would walk the depth back and undo a pin write's audio \
+             hold (breaking the #1303 A/V pairing) until the next flush."
+        );
+        assert!(
+            src.contains("UNREACHABLE after %d windows outside +/-%.0fms")
+                && src.contains("restore=%d (#1335) fallbacks=%u (#1355)"),
+            "{OBS_SOURCE}: #1355 — the LOG_WARNING unreachable-fallback line and/or the asrc: \
+             telemetry fallbacks= field are gone; a fallback would be silent."
+        );
+    }
+
+    #[test]
     fn asrc_step_tolerant_regression_and_p_term_1335() {
         // issue #1335 follow-up 2: the ASRC servo must (1) RE-BASE a permanent input sample-loss/dup
         // or wall-clock STEP out of the 600 s regression (a step point biased the slope by ~83 ppm,

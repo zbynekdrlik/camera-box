@@ -40,6 +40,19 @@ a cwd-relative read is unreliable. Resolve relative to obs64.exe's OWN directory
 runs during OBSBasic construction — it must NEVER throw (#313); every path returns "unknown"
 on failure.
 
+**Linux marker home (issue 1357).** The Linux OBS boxes (strih-lx, imag) install the bundle
+into the `/usr` prefix (`/usr/bin/obs`), so both exe-relative candidates miss
+(`/GENLOCK_BUILD_SHA.txt`, `/usr/bin/GENLOCK_BUILD_SHA.txt`) and the title read `build
+unknown`. The Linux deploy writes the marker at the absolute marker home
+`/opt/obs-genlock/GENLOCK_BUILD_SHA.txt` (`genlock_write_markers`, `GENLOCK_MARKER_DIR`), so
+`NewlevelBuildSha()` tries that path last, read DIRECTLY (never through
+`os_get_executable_path_ptr`), inside `#ifdef __linux__` after the exe-relative loop — the
+Windows obs64.exe lookup is byte-identical. The shared read lives in `NewlevelReadShaMarker()`.
+`tests/obs_titlebar_newlevel.rs` pins the order + the guard. Verify off-rig by lifting both
+helpers with stubbed `os_get_executable_path_ptr`/`bfree` into a `g++` harness (with and
+without `-U__linux__`); rig acceptance = strih-lx title shows the short SHA of
+`/opt/obs-genlock/GENLOCK_BUILD_SHA.txt` after a FULL-bundle deploy.
+
 ## Lock-step guards — three copies of the anchor tokens, keep in sync
 
 A `git subtree pull` upstream bump (#44 `/update-av-stack`) can silently restore the stock

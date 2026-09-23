@@ -589,3 +589,102 @@ law:
   rides the existing genlock build; the existing `level=/target=/integral= (#1335)` substring is
   preserved intact). C<->Rust parity is a NUMERICAL contract; re-run a standalone lift for any future
   change to this pair (per `vendored-libobs-change-safety.md`).
+
+## #1355 — the level setpoint is ABSOLUTE (`LEVEL_TARGET_MS` + the placement offset), bounded when unreachable
+
+Everything above that says "capture `level_target_ms = buffered_ms` at first lock" is PRE-#1355
+HISTORY for a mixed, non-genlock source. The depth-at-lock capture froze a random `mbc` depth per
+stream-OBS launch (captured 58.9 … 126.1 ms over 10 launches, 18.–23.9.) and the loop then held it,
+so every launch had its own A/V level (dock + `mbc` level ≈ 135 ± 6 ms in every launch). Now:
+
+- **Capture = `LEVEL_TARGET_MS` (100.0) + `level_offset_ms`** (Rust `src/asrc_bench.rs` ↔ C
+  `ASRC_LEVEL_TARGET_MS`, numerically identical). `level_offset_ms` is CALLER state, set every audio
+  callback through the pure store `set_level_offset_ms` / `asrc_compensator_set_level_offset_ms`.
+  obs-source.c `asrc_process_audio` passes `last_sync_offset / 1e6`, the offset the samples ALREADY
+  in the buffer were placed with. It must be `last_sync_offset`, not the pending `sync_offset`.
+  `asrc_process_audio` runs BEFORE `source_output_audio_data` places the same block, and a change in
+  that same callback still reaches the target through the existing shift
+  (`sync_offset - last_sync_offset`). Using `sync_offset` would count a same-callback change twice.
+  A flush never clears `level_offset_ms`, so a relock re-captures the SAME absolute level.
+- **Absolute ONLY for a mixed, non-genlock source** (`set_level_absolute` /
+  `asrc_compensator_set_level_absolute`, obs-source.c passes `!genlock_fifo && monitoring_type !=
+  OBS_MONITORING_TYPE_MONITOR_ONLY` every callback; default true). A `genlock_fifo` source's depth
+  is the #1303 video-paired hold plus a ~0–25 ms transport base. On 23.9. stream's `fallback repro`
+  sat at 967 and 1001 ms under a ~976 ms hold. Forcing it to hold + 100 would add ~80 ms of audio
+  delay against its video. A MONITOR_ONLY source never places into the mix buffer (depth 0), so
+  100 is unreachable for it. Both keep the pre-#1355 depth-at-lock capture. The 100 ms base is
+  calibrated on `mbc` (ASIO, direct timestamps) only, so any OTHER non-genlock mixed source (none
+  on stream today besides silent never-locking ASIO/test inputs) gets it on trust; audit its
+  `asrc:` line after deploy. A rule CHANGE while captured drops the capture for the level loop only
+  (the rate lock and the integral are kept), so the next window re-captures under the new rule.
+- **The offset setter never moves a captured target.** After capture the target follows deliberate
+  changes 1:1 through `shift_level_target` from TWO call sites in `source_output_audio_data`. The
+  first is the existing sync-offset branch. The second is (#1355) a change of the applied genlock
+  audio hold (`genlock_audio_delay_ms` vs its previous value: a pin write, genlock toggled). Before
+  the second call site, a pin write without a flush left a genlock source's captured target stale,
+  so the level loop walked the depth back and undid the pin's audio hold (a pre-#1335-follow-up gap).
+- **No new arm.** The walk to the target uses the existing law. The smoothed P term (Kp 2, clamp 50)
+  starts at once. The sustained-error arm (≥ 12 ms for 10 windows) fires the restore burst (≤ 100
+  ppm). A < 12 ms offset is walked by P alone (10 ms: ~410 s). Arming the restore at capture was
+  rejected: a capture on a noisy reading (±8–10 ms) would arm on noise, which breaks the #1335
+  `level_scatter_never_arms…` / `…does_not_chatter…` guarantees.
+- **Unreachable bound:** `LEVEL_TARGET_UNREACHABLE_WINDOWS` (2400) CONSECUTIVE accepted windows with
+  the SMOOTHED `|level_err_ema_ms| >= LEVEL_RESTORE_ARM_MS` (the restore's own exit band) trigger a
+  fallback. The fallback sets target = the SMOOTHED live depth (`target + level_err_ema_ms`, never
+  one noisy reading), turns the restore off, zeroes the EMA error, bumps the saturating counter
+  `level_fallback_count` and raises the one-shot `level_fallback_pending`. In C, obs-source.c logs a
+  `LOG_WARNING … UNREACHABLE … (#1355)` line and clears it; in Rust, `take_level_fallback_pending`
+  reads and clears it. **At most ONE fallback per capture** (`level_fallback_done`, cleared by a
+  flush or a rule-change re-capture). Without that latch, a residual the rate loop cannot see and
+  the P+I terms hold at ≥ 5 ms (above ~13 ppm) re-trips every 40 min and ratchets the target (review
+  bench: 8 fallbacks, target 100 → 136 ms in 6 h at 14 ppm). The EMA, not the raw level, is counted,
+  so ±10 ms tick noise at target never counts (bench: 3 h, 0 fallbacks). 2400 ≈ 2× the slowest
+  legitimate walk measured (98 ms, 26 → 124 ms under ±10 ms noise: ~1180 s to within 5 ms).
+- **Bench** (six `*_1355` tests, run by `rustc --test`):
+  - Walks: start 64 / 90 / 126 ms (± 10 ms noise) all hold at 100 ± 3 ms (RED: 63.70 / 89.70 /
+    125.70). Max per-window rate step = the existing 5 ppm slew limit, and max
+    `|applied − estimated|` stays inside the restore + P + integral clamps.
+  - Offset and trims: a +24 ms pre-lock offset is captured and held as 124. A −14 ms trim moves the
+    hold 1:1 against a no-trim control and leaves the integral within 0.05 ppm of that control. A
+    flush + relock re-captures 110.
+  - Unreachable target: a 60 ms mixer floor under a 40 ms target falls back exactly once (window
+    2459, noise-free) and the flag is one-shot.
+  - Synthetic-reading bookkeeping: an in-band dip restarts the CONSECUTIVE count, a flush restarts
+    it, and on the exact fallback window under ±7 ms noise the restore is off, the EMA is 0 and the
+    target is the smoothed depth.
+  - A 14/20/30 ppm unseen residual over 6 h gives ≤ 1 fallback.
+  - Non-absolute sources: a depth-0 source captures 0 and is never pushed, a 64 ms source holds 64,
+    and a rule change re-captures and walks to 100.
+  - Eight hand mutants of the bound/rule bookkeeping (consecutive reset, fallback-restore,
+    fallback-EMA, flush-reset, latch, raw-reading fallback target, absolute rule, raw-error bound)
+    are ALL killed.
+- **Bench-harness trap (not a live defect):** the harness feeds ONE level reading per 1 s window. An
+  alternating ±10 ms reading around an error of ~0 therefore never lands inside the restore's RAW
+  ±5 ms exit band. A shift-armed restore then never exits and slowly drags the level (~5 ms/h).
+  Live, `compensate` runs every audio callback and the buffer sweeps its whole ±10 ms tick sawtooth
+  within one mixer tick, so the raw exit fires at once. Model a shift/trim scenario with zero tick
+  noise, or with per-callback readings, never with a one-reading-per-window alternating ±10.
+  Switching the exit to the EMA was tried and rejected: a re-based step window skips the EMA update,
+  so an EMA exit would cancel a step-armed restore on its first call. The same trap makes a
+  synthetic "restore active at the fallback" scenario need readings that stay ≥ 12 ms off (so the
+  sustained arm fires) AND ≥ 5 ms off the smoothed depth: ±7 around +20, not ±10.
+- **C↔Rust parity:** a `gcc -std=gnu11 -Wall -Wextra -Werror` lift of the REAL
+  `asrc-compensator.c` (include dir `vendor/obs-studio/libobs/media-io`, `-lm`) with a `main` runs
+  eight scenarios: walks, a ±10 ms walk, the +24 ms offset, the unreachable floor, a non-absolute
+  source, a 20 ppm ratchet and a synthetic ±7 ms fallback. It prints the same 9-decimal numbers as
+  a Rust probe that `#[path]`-includes `src/asrc_bench.rs` (e.g.
+  `ratchet20 … target=91.914315223 … fallbacks=1 fb_at=2768`). The obs-source.c wiring is checked
+  with `gcc -fsyntax-only -Wformat=2` against the real headers plus a scratch `obsconfig.h` (the
+  `obs-drm-output.md` net).
+- **Lock-step anchor:** `tests/genlock_preload.rs::vendored_source::asrc_absolute_level_setpoint_1355`
+  pins:
+  - the constants, the fields and both setter declarations;
+  - the capture ternary, plus the ABSENCE of the old
+    `c->level_target_ms = buffered_ms; c->level_captured = true;`;
+  - the latched bound and the smoothed fallback line;
+  - both obs-source.c setter calls and the genlock-hold shift;
+  - the `UNREACHABLE` and `fallbacks=%u (#1355)` strings.
+
+  No new pwsh gate is needed: every existing windows-genlock*.yml asrc substring keeps its presence
+  (checked mechanically). The telemetry `fallbacks=%u (#1355)` is appended AFTER the
+  byte-identical `restore=%d (#1335)`.

@@ -2138,7 +2138,23 @@ void OBSBasic::UpdateEditMenu()
  * malformed/absent marker returns the safe "unknown" fallback and NEVER throws (#313: a
  * title helper must not crash OBS at startup via UpdateTitleBar). Guarded by
  * tests/obs_titlebar_newlevel.rs + the windows-genlock{,-fast}.yml source-anchor gates
- * (which pin the GENLOCK_BUILD_SHA.txt read below); keep all in lock-step. */
+ * (which pin the GENLOCK_BUILD_SHA.txt read below); keep all in lock-step.
+ *
+ * Issue 1357: the Linux OBS boxes (strih-lx, imag) install the bundle into the /usr prefix
+ * (/usr/bin/obs), so both exe-relative candidates resolve to /GENLOCK_BUILD_SHA.txt and
+ * /usr/bin/GENLOCK_BUILD_SHA.txt — neither exists and the title read "build unknown". The
+ * Linux deploy writes the marker at the canonical marker home /opt/obs-genlock
+ * (genlock_write_markers, GENLOCK_MARKER_DIR), so on Linux ONLY that absolute path is tried
+ * as a last candidate, after the exe-relative ones — the Windows lookup is unchanged. */
+static std::string NewlevelReadShaMarker(const char *path)
+{
+	std::ifstream f(path);
+	if (!f)
+		return "unknown";
+	const std::string contents((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+	return newlevel_short_sha(contents);
+}
+
 static std::string NewlevelBuildSha()
 {
 	static const char *const candidates[] = {
@@ -2149,16 +2165,20 @@ static std::string NewlevelBuildSha()
 		char *path = os_get_executable_path_ptr(rel);
 		if (!path)
 			continue;
-		std::ifstream f(path);
+		const std::string sha = NewlevelReadShaMarker(path);
 		bfree(path);
-		if (!f)
-			continue;
-		const std::string contents((std::istreambuf_iterator<char>(f)),
-					   std::istreambuf_iterator<char>());
-		const std::string sha = newlevel_short_sha(contents);
 		if (sha != "unknown")
 			return sha;
 	}
+#ifdef __linux__
+	/* Issue 1357: the /usr-prefix Linux install keeps the marker at the absolute marker
+	 * home, never next to /usr/bin/obs — read it directly (not exe-relative). */
+	{
+		const std::string sha = NewlevelReadShaMarker("/opt/obs-genlock/GENLOCK_BUILD_SHA.txt");
+		if (sha != "unknown")
+			return sha;
+	}
+#endif
 	return "unknown";
 }
 

@@ -330,3 +330,81 @@ fn multiple_inputs_each_get_their_own_escalation() {
 fn _rig_dir_kept_alive(r: &Rig) -> &Path {
     r.dir.path()
 }
+
+// ---------------------------------------------------------------------------------------------
+// (f) #1203 item (b): the E2E cleanup() wires the orchestrator EXACTLY ONCE, AFTER the cambox
+//     parallel-restore group and BEFORE the OBS program-scene teardown, pinning the run-scoped
+//     telemetry (RUN_ID + OUTDIR) and targeting the strih host. This is the additive #675-pattern
+//     call that hands the rig back with verified 60fps receivers — a static-anchor guard (the
+//     orchestrator's own behavior is covered by (a)-(e) above; here we pin only the wiring).
+// ---------------------------------------------------------------------------------------------
+fn recording_e2e_text() -> String {
+    let p = manifest_dir().join("scripts/recording-e2e.sh");
+    fs::read_to_string(&p).unwrap_or_else(|e| panic!("read {}: {e}", p.display()))
+}
+
+#[test]
+fn recording_e2e_cleanup_wires_cadence_verify_once_after_parallel_restore() {
+    let s = recording_e2e_text();
+
+    // Single call site: the orchestrator is CALLED exactly once (the source line below names the
+    // FILE `ndi-cadence-heal.sh`, never the function, so this count is the call alone).
+    let calls: Vec<usize> = s
+        .match_indices("ndi_cadence_verify_and_heal")
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(
+        calls.len(),
+        1,
+        "recording-e2e.sh must call ndi_cadence_verify_and_heal EXACTLY once (found {}): {:?}",
+        calls.len(),
+        calls
+    );
+    let call = calls[0];
+
+    // The lib is sourced exactly once. Anchor on the source STATEMENT, not the bare basename — the
+    // sibling `. "$HERE/lib/..."` sources in this file each carry a `# shellcheck source=...`
+    // directive too, so the basename appears twice per source; the `. "$HERE/..."` statement is the
+    // unambiguous single occurrence.
+    assert_eq!(
+        s.matches(". \"$HERE/lib/ndi-cadence-heal.sh\"").count(),
+        1,
+        "the ndi-cadence-heal.sh lib must be sourced exactly once in recording-e2e.sh"
+    );
+
+    // AFTER the cambox parallel-restore/retry group — anchored on its terminal surface-failure step
+    // (a single-occurrence literal in recording-e2e.sh).
+    let group_end = s
+        .find("cambox_parallel_surface_painter_failure")
+        .expect("the cambox parallel-restore group's surface-painter-failure step must exist");
+    assert!(
+        group_end < call,
+        "the cadence verify must be placed AFTER the cambox parallel-restore group \
+         (surface-painter-failure @ {group_end}, call @ {call})"
+    );
+
+    // BEFORE the OBS program-scene teardown region begins.
+    let teardown = s
+        .find("restore OBS program scenes")
+        .expect("the OBS program-scene teardown banner must exist");
+    assert!(
+        call < teardown,
+        "the cadence verify must run BEFORE the OBS program-scene teardown \
+         (call @ {call}, teardown @ {teardown})"
+    );
+
+    // The call pins the run-scoped telemetry so ndi-cadence-<RUN_ID>.json lands in THIS run's dir,
+    // and it targets the strih host.
+    let pre = &s[call.saturating_sub(140)..call];
+    assert!(
+        pre.contains("NDI_CADENCE_RUN_ID=\"$RUN_ID\"")
+            && pre.contains("NDI_CADENCE_RUN_DIR=\"$OUTDIR\""),
+        "the call must pin NDI_CADENCE_RUN_ID/RUN_DIR so the telemetry lands in this run's dir: \
+         {pre:?}"
+    );
+    let post = &s[call..(call + 60).min(s.len())];
+    assert!(
+        post.contains("\"$STRIH\""),
+        "the cadence verify must target the strih host ($STRIH): {post:?}"
+    );
+}
