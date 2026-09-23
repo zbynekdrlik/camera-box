@@ -418,6 +418,13 @@ pub mod shutdown;
 // send_frame_data_with_timecode` times the real call and WARNs via this decision.
 pub mod send_stall;
 
+// #1242 — per-camera NDI SEND stagger inside the genlock frame slot (pure decision): camera N hands
+// its frame to the NDI SDK (N-1) x STAGGER_US after its emit-gate decision so the seven per-tick
+// bursts no longer land on the strih-lx 2.5 GbE switch port at once. Camera number from the box's
+// own OS hostname (CAM<N>), clamped inside the slot; the emit grid and the FLOOR-boundary timecode
+// are untouched. No probe deps, so it unit-tests Tier-0; `main.rs`'s capture loop applies it.
+pub mod send_stagger;
+
 // #707 — V4L2 capture DEQUEUE stall diagnostic (pure decision). Given how long a SINGLE blocking
 // `process_frame` dequeue (`self.stream.next()`, a VIDIOC_DQBUF under the hood) took and the
 // capture device's own configured frame interval, decides whether THIS dequeue stalled — the
