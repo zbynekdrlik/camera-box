@@ -169,6 +169,25 @@ fn linux_tail_reads_the_newest_log_with_spaces_in_its_name_1360() {
         "`timeout` must sit INSIDE sshpass (the stub-bypass rule): {}",
         o.log
     );
+    assert!(
+        o.log.contains("-o UserKnownHostsFile=/dev/null"),
+        "a stale known_hosts key for the ex-Windows strih address must not disable password auth: {}",
+        o.log
+    );
+}
+
+#[test]
+fn since_line_mark_with_a_leading_zero_is_decimal_1360() {
+    let o = run_case(&format!(
+        "{LIB}\nrc=0\ncmd=\"$(strih_log_remote_cmd linux since 08)\" || rc=$?\necho \"RC=$rc CMD=$cmd\""
+    ));
+    assert_done(&o, "since leading zero");
+    assert!(
+        o.stdout.contains("RC=0 ") && o.stdout.contains(r#"tail -n +9 "$F""#),
+        "a zero-padded mark must be read as DECIMAL (08 -> tail -n +9), never an octal error: {}\n{}",
+        o.stdout,
+        o.stderr
+    );
 }
 
 #[test]
@@ -405,7 +424,6 @@ fn mv_fps_preflight_strih_token_resolves_the_platform_1360() {
     let o = run_case(
         ". \"$R/scripts/lib/mv-fps-preflight.sh\"\necho 'MV<<'\n\
          mv_fps_preflight_probe 10.77.9.202 strih newlevel pw 50\necho '>>MV'\n\
-         : > \"$STUB_LOG\"\n\
          export STUB_WIN_OUT='09:23:37.002: multiview-audit: monitor=1 divisor=1 rendered_fps=30.00 target=30 floor=28 cx=1920 cy=1080'\n\
          echo \"WINMV=$(mv_fps_preflight_probe 10.0.0.1 strih newlevel pw 800)\"\n\
          w=\"$(mv_fps_preflight_read_cmd win 800)\"\n\
@@ -422,6 +440,13 @@ fn mv_fps_preflight_strih_token_resolves_the_platform_1360() {
         linux.contains("rendered_fps=29.97"),
         "[4d1/8] must read the strih-lx multiview-audit line when strih is Linux: {}",
         o.stdout
+    );
+    assert!(
+        o.log.lines().any(|l| l.starts_with("SSHPASS:")
+            && l.contains("@10.77.9.202 ")
+            && l.contains("-o UserKnownHostsFile=/dev/null")),
+        "[4d1/8]'s strih-lx read must not trust a stale known_hosts key (password auth): {}",
+        o.log
     );
     assert!(
         o.stdout.contains("WINMV=09:23:37.002: multiview-audit:")
@@ -449,6 +474,11 @@ fn mv_fps_watchdog_strih_token_resolves_the_platform_1360() {
             && o.stdout.contains("rendered_fps=29.97"),
         "the watchdog must read the strih-lx log (identity line + tail) on a Linux strih: {}",
         o.stdout
+    );
+    assert!(
+        o.log.contains("-o UserKnownHostsFile=/dev/null"),
+        "the watchdog's strih-lx read must not trust a stale known_hosts key (password auth): {}",
+        o.log
     );
     assert!(
         !o.log.contains("EncodedCommand"),
