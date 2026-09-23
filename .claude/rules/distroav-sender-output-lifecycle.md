@@ -71,8 +71,25 @@ listening on TCP :5961. The cause is in libndi, not in the reserve/adopt path:
 - Read the live port from the RECEIVER side when the strih log has no URL line: the stream OBS log's
   `reset_ndi_receiver … BY-URL '10.77.9.202:59xx'` for `NDI 2ME PGM` gives the program's port per
   session.
-- The fix shape (a bounded wait before the reserve vs a late re-pin vs documenting) is a design
-  decision recorded on issue 1363 — check the ticket before changing the reserve path.
+- **libndi's sender port allocator is an in-process CURSOR, not a walk from 5961 per create**
+  (measured on dev1, libndi 6.3.2): try the cursor, step up on a failed bind, cursor = bound+1 after
+  success; `send_destroy` sets cursor = the freed port (last destroyed wins). A port the process
+  never bound (a :5961 busy at the FIRST attempt) is NEVER retried — a sender created after :5961
+  frees lands on the HIGHEST port (strace: it binds cursor directly, no 5961 attempt). So inside one
+  OBS process only libndi's FIRST bind attempt can take :5961: deferring or re-creating the PGM
+  sender later can never reclaim it. Any fix must either delay the first `send_create` or keep the
+  TIME_WAIT from existing.
+- A `SO_REUSEADDR` bind probe does NOT succeed over libndi's TIME_WAIT on Linux (the tw socket
+  carries libndi's no-reuse flag; the kernel needs it on both). A plain bind on the loopback alias
+  `127.0.0.2:5961` DOES discriminate: it succeeds over a TIME_WAIT on `127.0.0.1`/the LAN IP and
+  fails over libndi's live `0.0.0.0:5961` listener.
+- `SO_LINGER {1,0}` on the sender's CONNECTED :5961 sockets (found via `/proc/self/fd` +
+  `getsockname`/`getpeername`) right before `send_destroy` closes them with RST → no TIME_WAIT → the
+  next process gets :5961 again (measured: control 5962, linger 5961). A crash / kill still leaves a
+  TIME_WAIT (kernel FIN-close).
+- Which of these ships (prevent-at-stop, bounded wait, detect-and-log) is a design decision on issue
+  1363 — read the newest `Design-question:` / `ROZHODNUTÉ` there before changing the reserve path.
+  Probe sources (`alloc.c`, `pinprobe.c`, `linger.c`) are described on the ticket.
 
 ## Trap: a start-path bail after the sender exists LEAKS it — and post-#1185 the leak is the pin-holder
 
