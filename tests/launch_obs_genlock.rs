@@ -505,7 +505,8 @@ fn cli_box_resolume_selects_win_resolume_with_ahk_1295() {
 /// (fixed IP, no bridge collision) must NOT carry it.
 #[test]
 fn non_resolume_launch_plan_has_no_identity_confirm_1295() {
-    for box_name in ["stream"] {
+    {
+        let box_name = "stream";
         let (_c, out, _e) = run_script(&["--box", box_name]);
         assert!(
             !out.contains("box IDENTITY confirm"),

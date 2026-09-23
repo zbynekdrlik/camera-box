@@ -1279,7 +1279,8 @@ fn non_resolume_plan_has_no_identity_confirm_preamble_1295() {
 /// watcher failed to restart.
 #[test]
 fn ahk_restart_failure_message_does_not_falsely_claim_no_watcher_1295() {
-    for box_name in ["resolume"] {
+    {
+        let box_name = "resolume";
         let p = win_program(box_name, "full", "1");
         assert!(
             !p.contains("has NO respawn watcher"),
