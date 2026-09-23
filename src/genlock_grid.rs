@@ -139,6 +139,52 @@ pub fn grid_next_boundary_ns(t_ns: u64, interval_ns: u64) -> u64 {
     }
 }
 
+/// A stamp interval longer than this is a timeline discontinuity (sender restart, clock step),
+/// not a run of missing stamps, and is not counted.
+pub const STAMP_TRACK_MAX_DELTA_NS: u64 = NS_PER_SECOND;
+
+/// #1355 part 3 — per-input DUPLICATE / MISSING stamp-interval counters on ARRIVAL, the evidence
+/// behind the `stamp_dup=` / `stamp_gap=` tokens on the `genlock-fifo audit` line.
+///
+/// A sender that stamps at SEND time (strih-lx's OBS program output) puts a slow frame into the
+/// NEXT 1/30 s cell: the receiver then sees a stamp that skips a slot (a gap) followed by a stamp
+/// equal to it (a duplicate). Before #1355 that pair moved the deep FIFO one frame; after it the
+/// FIFO absorbs it, but the irregularity is still a sender defect worth measuring — this tracker
+/// makes it countable per input instead of inferred.
+///
+/// Rules, applied to each received stamp in arrival order:
+/// - equal to the previous stamp → one duplicate;
+/// - a positive interval below [`STAMP_TRACK_MAX_DELTA_NS`] updates the source's own step (the
+///   SMALLEST positive interval seen, the #1042 min-delta rule — a gap or a duplicate never shrinks
+///   it) and, when it exceeds 1.5 steps, counts `round(interval / step) − 1` missing intervals;
+/// - a backward stamp or a jump of a second or more is a discontinuity: nothing is counted.
+///
+/// [`StampTrack::reset_timeline`] forgets the previous stamp and the step (the receiver's flush
+/// seam — the source went inactive); the cumulative counters survive, like every audit counter.
+///
+/// Mirror of the C `genlock_stamp_track_observe()` (obs-genlock-grid.h) — keep both in lock-step.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct StampTrack {
+    pub last_ts: u64,
+    pub min_delta_ns: u64,
+    pub dups: u64,
+    pub gaps: u64,
+}
+
+impl StampTrack {
+    /// Account one received stamp.
+    pub fn observe(&mut self, ts: u64) {
+        // [red] stub: remembers the stamp, counts nothing (the GREEN commit implements the rules).
+        self.last_ts = ts;
+    }
+
+    /// The source went inactive: the next stamp starts a new timeline.
+    pub fn reset_timeline(&mut self) {
+        self.last_ts = 0;
+        self.min_delta_ns = 0;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -292,5 +338,82 @@ mod tests {
         assert_eq!(per_second_floor(u - 1, 30, u), 9_666_666);
         assert_eq!(per_second_floor(5, 0, u), 5, "fps 0 = no alignment");
         assert_eq!(per_second_next(9_666_666, 30, u), u);
+    }
+
+    /// The real 30 fps sender stamps (a day in, per-second 100 ns grid: steps of 33_333_300 and
+    /// 33_333_400 ns) — a clean stream counts nothing.
+    fn sender_stream(n: u64) -> Vec<u64> {
+        let t0 = SEC_2309 * NS_PER_SECOND + 5 * NS_PER_SECOND;
+        (0..n)
+            .map(|k| sender_stamp_ns(t0 + k * NS_PER_SECOND / 30, 30))
+            .collect()
+    }
+
+    #[test]
+    fn stamp_track_counts_nothing_on_a_clean_sender_stream_1355() {
+        let mut t = StampTrack::default();
+        for s in sender_stream(300) {
+            t.observe(s);
+        }
+        assert_eq!((t.dups, t.gaps), (0, 0), "{t:?}");
+        assert_eq!(t.min_delta_ns, 33_333_300);
+    }
+
+    /// The strih-lx slow-frame signature: frame k lands in slot k+1 (a gap), frame k+1 stamps the
+    /// same slot (a duplicate).
+    #[test]
+    fn stamp_track_counts_the_gap_then_duplicate_pair_1355() {
+        let s = sender_stream(10);
+        let mut t = StampTrack::default();
+        for &x in &s[..4] {
+            t.observe(x);
+        }
+        t.observe(s[5]); // frame 4 slow -> stamped slot 5
+        t.observe(s[5]); // frame 5 on time -> slot 5 again
+        for &x in &s[6..] {
+            t.observe(x);
+        }
+        assert_eq!((t.dups, t.gaps), (1, 1), "{t:?}");
+    }
+
+    #[test]
+    fn stamp_track_counts_every_missing_interval_and_60fps_steps_1355() {
+        let mut t = StampTrack::default();
+        let step = 16_666_600u64;
+        let t0 = SEC_2309 * NS_PER_SECOND;
+        for k in [0u64, 1, 2, 5, 6, 6, 6, 7] {
+            t.observe(t0 + k * step);
+        }
+        assert_eq!(t.gaps, 2, "2..5 misses slots 3 and 4: {t:?}");
+        assert_eq!(t.dups, 2, "{t:?}");
+        assert_eq!(t.min_delta_ns, step);
+    }
+
+    #[test]
+    fn stamp_track_ignores_discontinuities_and_resets_the_timeline_1355() {
+        let mut t = StampTrack::default();
+        let s = sender_stream(4);
+        for &x in &s {
+            t.observe(x);
+        }
+        t.observe(s[3] - 10 * 33_333_300); // backward step
+        t.observe(s[3] + 2 * NS_PER_SECOND); // forward jump >= 1 s
+        assert_eq!((t.dups, t.gaps), (0, 0), "{t:?}");
+        // The step is learned from positive in-range intervals only.
+        assert_eq!(t.min_delta_ns, 33_333_300);
+        t.reset_timeline();
+        assert_eq!((t.last_ts, t.min_delta_ns), (0, 0));
+        t.observe(s[0]);
+        t.observe(s[0]);
+        assert_eq!(
+            t.dups, 1,
+            "a duplicate right after a reset still counts: {t:?}"
+        );
+        // The first stamp after a reset is never compared against the pre-reset timeline.
+        let mut u = StampTrack::default();
+        u.observe(s[0]);
+        u.reset_timeline();
+        u.observe(s[0] + 5 * 33_333_300);
+        assert_eq!((u.dups, u.gaps), (0, 0), "{u:?}");
     }
 }

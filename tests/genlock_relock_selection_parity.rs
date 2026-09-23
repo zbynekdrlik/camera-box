@@ -841,3 +841,192 @@ fn c_genlock_grid_matches_the_rust_authority_and_the_sender_grid_1355() {
         coincide.join("\n")
     );
 }
+
+/// #1355 part 3 — the arrival-side stamp tracker. Stamp sequences (0 = the flush seam's timeline
+/// reset) driven through the C `genlock_stamp_track_observe` (obs-genlock-grid.h, #included) and
+/// the Rust `StampTrack` must end with byte-identical (last_ts, min_delta, dups, gaps).
+fn stamp_sequences() -> Vec<Vec<u64>> {
+    const NS: u64 = 1_000_000_000;
+    let t0 = SEC_1355 * NS;
+    let s30 = |k: u64| t0 + (k * 10_000_000 / 30) * 100; // the real 30 fps 100 ns sender grid
+    let s60 = |k: u64| t0 + (k * 10_000_000 / 60) * 100;
+    let mut v: Vec<Vec<u64>> = vec![
+        (0..300).map(s30).collect(), // clean 30 fps
+        (0..300).map(s60).collect(), // clean 60 fps
+        [0u64, 1, 2, 3, 5, 5, 6, 7]
+            .iter()
+            .map(|&k| s30(k))
+            .collect(), // gap-then-duplicate
+        [0u64, 1, 2, 5, 6, 6, 6, 7]
+            .iter()
+            .map(|&k| s60(k))
+            .collect(), // multi-slot gap + dups
+        vec![t0, t0 + 10, t0 + 25, t0 + 40], // 1.5-step boundary: 15 = 1.5 x 10
+        vec![t0, t0 + 10, t0 + 26],  // just over 1.5 steps
+        vec![t0, t0 + 33_333_300, t0 + 33_333_300 + NS], // exactly 1 s: discontinuity
+        vec![t0, t0 + 33_333_300, t0 + 33_333_300 + NS - 1], // 1 s - 1: counted gap run
+        vec![s30(10), s30(11), s30(3), s30(4), s30(4)], // backward step, then a dup
+        vec![s30(0), s30(1), 0, s30(9), s30(9), s30(11)], // flush reset mid-stream
+        vec![s30(0), s30(2), s30(3), s30(4)], // first positive delta is a gap
+    ];
+    let mut x: u64 = 0x5eed_1355;
+    for _ in 0..40 {
+        let mut seq = Vec::new();
+        let mut k = 0u64;
+        for _ in 0..200 {
+            x = x
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            k += match (x >> 33) % 100 {
+                0..=2 => 0,                 // duplicate
+                3..=5 => 2 + (x >> 40) % 3, // gap of 1..3
+                6 => 40,                    // > 1 s jump at 30 fps
+                _ => 1,
+            };
+            seq.push(if (x >> 20) % 97 == 0 { 0 } else { s30(k) });
+        }
+        v.push(seq);
+    }
+    v
+}
+
+#[test]
+fn c_stamp_tracker_matches_the_rust_authority_1355() {
+    use camera_box::genlock_grid::StampTrack;
+
+    let header = repo(GENLOCK_GRID_H);
+    let seqs = stamp_sequences();
+    let mut c = String::new();
+    c.push_str("#include <stdint.h>\n#include <stdio.h>\n");
+    c.push_str(&format!("#include \"{}\"\n", header.display()));
+    c.push_str("int main(void){\n");
+    for seq in &seqs {
+        c.push_str("    { uint64_t last = 0, min = 0, dups = 0, gaps = 0;\n");
+        for ts in seq {
+            if *ts == 0 {
+                c.push_str("      last = 0; min = 0;\n");
+            } else {
+                c.push_str(&format!(
+                    "      genlock_stamp_track_observe(&last, &min, &dups, &gaps, {ts}ULL);\n"
+                ));
+            }
+        }
+        c.push_str(
+            "      printf(\"%llu %llu %llu %llu\\n\", (unsigned long long)last, \
+             (unsigned long long)min, (unsigned long long)dups, (unsigned long long)gaps); }\n",
+        );
+    }
+    c.push_str("    return 0;\n}\n");
+
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("genlock_parity_1355_stamp");
+    fs::create_dir_all(&dir).expect("create the parity scratch dir");
+    let cfile = dir.join("stamp.c");
+    let bin = dir.join("stamp.bin");
+    fs::write(&cfile, &c).expect("write the stamp harness");
+    let cc = std::env::var("CC").unwrap_or_else(|_| "cc".to_string());
+    let out = Command::new(&cc)
+        .args([
+            "-std=gnu99",
+            "-Wall",
+            "-Wextra",
+            "-Wconversion",
+            "-Werror",
+            "-O1",
+        ])
+        .arg(&cfile)
+        .arg("-o")
+        .arg(&bin)
+        .output()
+        .unwrap_or_else(|e| {
+            panic!(
+                "#1355: could not run the C compiler `{cc}` ({e}). This gate must FAIL rather \
+                 than skip when the toolchain is absent. Install a C compiler or set CC."
+            )
+        });
+    assert!(
+        out.status.success(),
+        "#1355: genlock_stamp_track_observe ({GENLOCK_GRID_H}) does NOT COMPILE standalone \
+         under -Wall -Wextra -Wconversion -Werror:\n--- cc stderr ---\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let run = Command::new(&bin)
+        .output()
+        .expect("#1355: the compiled stamp harness failed to execute");
+    let stdout = String::from_utf8(run.stdout).expect("harness stdout is utf-8");
+    let rows: Vec<Vec<u64>> = stdout
+        .lines()
+        .map(|l| {
+            l.split_whitespace()
+                .map(|f| f.parse().expect("u64"))
+                .collect()
+        })
+        .collect();
+    assert_eq!(
+        rows.len(),
+        seqs.len(),
+        "#1355: harness printed the wrong count"
+    );
+
+    let mut diffs = Vec::new();
+    for (i, (seq, c_row)) in seqs.iter().zip(&rows).enumerate() {
+        let mut t = StampTrack::default();
+        for ts in seq {
+            if *ts == 0 {
+                t.reset_timeline();
+            } else {
+                t.observe(*ts);
+            }
+        }
+        let rs_row = vec![t.last_ts, t.min_delta_ns, t.dups, t.gaps];
+        if rs_row != *c_row {
+            diffs.push(format!("  sequence {i}: C {c_row:?}, Rust {rs_row:?}"));
+        }
+    }
+    assert!(
+        diffs.is_empty(),
+        "#1355: the vendored C stamp tracker DIVERGED from the Tier-0 Rust StampTrack on {} of {} \
+         sequences:\n{}",
+        diffs.len(),
+        seqs.len(),
+        diffs.join("\n")
+    );
+    // The hand-written sequences pin the rules themselves (not just C == Rust).
+    let expect = |i: usize| (rows[i][2], rows[i][3]);
+    assert_eq!(expect(0), (0, 0), "clean 30 fps");
+    assert_eq!(expect(1), (0, 0), "clean 60 fps");
+    assert_eq!(expect(2), (1, 1), "gap-then-duplicate");
+    assert_eq!(expect(3), (2, 2), "multi-slot gap + dups");
+    assert_eq!(expect(4), (0, 0), "exactly 1.5 steps is not a gap");
+    assert_eq!(expect(5), (0, 1), "just over 1.5 steps is one gap");
+    assert_eq!(expect(6), (0, 0), "a 1 s jump is a discontinuity");
+}
+
+#[test]
+fn stamp_tracker_rules_are_pinned_on_the_rust_side_1355() {
+    // The same pins without a C compiler, so a Rust-only regression is named precisely.
+    use camera_box::genlock_grid::StampTrack;
+    let seqs = stamp_sequences();
+    let run = |seq: &Vec<u64>| {
+        let mut t = StampTrack::default();
+        for &ts in seq {
+            if ts == 0 {
+                t.reset_timeline();
+            } else {
+                t.observe(ts);
+            }
+        }
+        (t.dups, t.gaps)
+    };
+    assert_eq!(run(&seqs[2]), (1, 1));
+    assert_eq!(run(&seqs[4]), (0, 0));
+    assert_eq!(run(&seqs[5]), (0, 1));
+    assert_eq!(run(&seqs[7]).0, 0);
+    assert_eq!(
+        run(&seqs[8]),
+        (1, 0),
+        "backward step not counted, the dup after it is"
+    );
+    // Reset: 9 is not compared with 1; 9->9 is a dup; the step is re-learned after the reset, so
+    // the first positive interval (9->11) sets it and cannot itself be judged a gap.
+    assert_eq!(run(&seqs[9]), (1, 0));
+}

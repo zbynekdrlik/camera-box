@@ -651,6 +651,71 @@ fn deadline_and_render_tick_share_the_per_second_grid_1355() {
     );
 }
 
+/// #1355 part 3 — per-input DUPLICATE / MISSING stamp-interval counters: tracked on ARRIVAL at the
+/// producer push site (arrival order, after the received counter), reset with the timeline at the
+/// explicit flush, and printed on the `genlock-fifo audit` line as `stamp_dup=` / `stamp_gap=`
+/// (parsed by src/jitter_audit.rs). The counting rules are proven by the C-vs-Rust gate in
+/// tests/genlock_relock_selection_parity.rs; this guards the wiring.
+#[test]
+fn stamp_dup_and_gap_are_tracked_on_arrival_and_printed_1355() {
+    let internal = squish(&vendor_file(OBS_INTERNAL));
+    for field in [
+        "uint64_t genlock_rx_last_ts;",
+        "uint64_t genlock_rx_min_delta_ns;",
+        "uint64_t genlock_stamp_dups;",
+        "uint64_t genlock_stamp_gaps;",
+    ] {
+        assert!(
+            internal.contains(field),
+            "{OBS_INTERNAL}: #1355 — the stamp-tracking field `{field}` is missing."
+        );
+    }
+    let src = squish(&vendor_file(OBS_SOURCE));
+    let call = "genlock_stamp_track_observe(&source->genlock_rx_last_ts, \
+                &source->genlock_rx_min_delta_ns, &source->genlock_stamp_dups, \
+                &source->genlock_stamp_gaps, output->timestamp);";
+    assert_eq!(
+        src.matches(call).count(),
+        1,
+        "{OBS_SOURCE}: #1355 — the arrival-side stamp tracking call must exist exactly once."
+    );
+    let received = src
+        .find("source->genlock_frames_received++;")
+        .expect("the producer push site (genlock_frames_received++) is gone");
+    let peak = src[received..]
+        .find("source->genlock_peak_depth = depth;")
+        .map(|i| received + i)
+        .expect("the producer-side peak update is gone");
+    let at = src.find(call).expect("checked above");
+    assert!(
+        received < at && at < peak,
+        "{OBS_SOURCE}: #1355 — the stamp tracking must run at the producer push site (after \
+         genlock_frames_received++, inside the genlock_fifo block), i.e. in ARRIVAL order."
+    );
+    assert!(
+        src.contains("\"stamp_dup=%llu stamp_gap=%llu \""),
+        "{OBS_SOURCE}: #1355 — the audit line no longer prints stamp_dup= / stamp_gap=."
+    );
+    assert!(
+        src.contains(
+            "(long long)gs.wall_qpc_drift_ms, (unsigned long long)source->genlock_stamp_dups, \
+             (unsigned long long)source->genlock_stamp_gaps,"
+        ),
+        "{OBS_SOURCE}: #1355 — the stamp_dup / stamp_gap arguments are not in the audit blog() \
+         right after wall_qpc_drift_ms (format order)."
+    );
+    assert!(
+        src.contains("source->genlock_rx_last_ts = 0; source->genlock_rx_min_delta_ns = 0;"),
+        "{OBS_SOURCE}: #1355 — the explicit flush no longer resets the stamp timeline; the \
+         first frame after a source restart would count a bogus gap."
+    );
+    let header = vendor_file("vendor/obs-studio/libobs/obs-genlock-grid.h");
+    assert!(
+        header.contains("static inline void genlock_stamp_track_observe("),
+        "obs-genlock-grid.h: #1355 — the shared stamp tracker is gone."
+    );
+}
+
 #[test]
 fn ts_align_deadline_is_phase_pinned_to_the_wall_grid_940() {
     // #940 piece 3 — the structural fix. The pre-#940 ts-align reserve deadline was a raw

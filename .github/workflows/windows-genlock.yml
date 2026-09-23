@@ -615,6 +615,10 @@ jobs:
           if ($src -notmatch [regex]::Escape('wall_qpc_drift_ms=%lld') -or $src -notmatch [regex]::Escape('static long long genlock_wall_qpc_drift_ms(void)') -or $src -notmatch [regex]::Escape('genlock_wall_qpc_drift_ms());')) {
             Write-Error "obs-source.c: #800 wall-vs-QPC clock-drift audit term/helper gone — the leading remaining A/V-shift candidate (WALL-slaved video vs QPC-slaved audio) would be invisible in the OBS log — re-apply"; exit 1
           }
+          # #1355: per-input duplicate / missing stamp-interval counters tracked on arrival + printed on the audit line. Mirror of tests/genlock_release_cadence.rs::stamp_dup_and_gap_are_tracked_on_arrival_and_printed_1355.
+          if ($src -notmatch [regex]::Escape('genlock_stamp_track_observe(&source->genlock_rx_last_ts, &source->genlock_rx_min_delta_ns, &source->genlock_stamp_dups, &source->genlock_stamp_gaps, output->timestamp);') -or $src -notmatch [regex]::Escape('"stamp_dup=%llu stamp_gap=%llu "') -or $src -notmatch [regex]::Escape('source->genlock_rx_last_ts = 0; source->genlock_rx_min_delta_ns = 0;')) {
+            Write-Error "obs-source.c: #1355 stamp_dup / stamp_gap arrival counters gone — the sender's irregular stamps would be invisible again — re-apply"; exit 1
+          }
           # #1303: receiver-side AUDIO genlock parity — the audio HOLD wired at the source_output_audio_data ingest seam + the audit facet. Mirror of tests/genlock_preload.rs::audio_genlock_parity_present_1303 + the C-vs-Rust parity gate tests/genlock_audio_pairing_parity.rs.
           if ($src -notmatch [regex]::Escape('static inline uint64_t genlock_audio_present_delay_ns(uint32_t latency_ms)') -or $src -notmatch [regex]::Escape('in.timestamp += (int64_t)genlock_audio_present_delay_ns(source->genlock_latency_ms);') -or $src -notmatch [regex]::Escape('audio_enabled=%d audio_delay_ms=%u audio_pairing_offset_ms=%lld')) {
             Write-Error "obs-source.c: #1303 receiver-side audio genlock parity gone — the audio HOLD is not wired at source_output_audio_data and/or the audit line dropped the audio facet; audio would no longer be genlocked to the video FIFO — re-apply"; exit 1
