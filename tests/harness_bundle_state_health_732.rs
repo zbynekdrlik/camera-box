@@ -203,3 +203,41 @@ fn restart_cmd_never_uses_the_interactive_it_form() {
         "restart command must NOT use the interactive /it form: {c}"
     );
 }
+
+// ---------------------------------------------------------------------------------------------
+// issue 1317 — bundle_state_restart_remote_cmd <class>: the restart is PLATFORM-resolved from the
+// fleet class. A Windows genlock box keeps the byte-identical `schtasks /run` line (the no-arg
+// default too — the E2E self-heal caller passes none); a Linux genlock box (strih-lx, the
+// production strih since M4) gets its systemd --user unit restarted, never a Windows schtasks.
+// ---------------------------------------------------------------------------------------------
+#[test]
+fn restart_cmd_windows_class_is_byte_identical_to_the_default_1317() {
+    let default = stdout_of("bundle_state_restart_remote_cmd");
+    let win = stdout_of("bundle_state_restart_remote_cmd windows-genlock");
+    assert_eq!(
+        win, default,
+        "the windows-genlock form must equal the no-arg default"
+    );
+    assert_eq!(win, "schtasks /run /tn \"BundleStateServer\"");
+}
+
+#[test]
+fn restart_cmd_linux_class_restarts_the_systemd_user_unit_1317() {
+    let c = stdout_of("bundle_state_restart_remote_cmd linux-genlock");
+    assert!(
+        !c.contains("schtasks"),
+        "a Linux box must never get the Windows schtasks restart: {c}"
+    );
+    assert!(
+        c.contains("systemctl --user restart"),
+        "a Linux box restarts its --user bundle-state unit: {c}"
+    );
+    assert!(
+        c.contains("'*-bundle-state-server.service'"),
+        "the unit is matched by the shared *-bundle-state-server.service name, quoted so the remote shell never globs it: {c}"
+    );
+    assert!(
+        c.contains("systemctl --user reset-failed"),
+        "a unit stopped by its start limit must be reset-failed before the restart: {c}"
+    );
+}
