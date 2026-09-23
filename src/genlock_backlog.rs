@@ -2160,9 +2160,20 @@ mod tests {
     /// distinguishes one real deployment (or one lock episode hours later, after the grids
     /// have beaten past each other) from another, which is why the live evidence sees the
     /// step across episodes rather than within one run.
+    ///
+    /// #1355: the step point is wherever the PRODUCTION deadline grid puts it — so the shift
+    /// is measured with that grid ([`phase_pinned_deadline`] / the shared
+    /// `crate::genlock_grid::grid_next_boundary_ns`), never re-derived with a hard-coded
+    /// `w % interval` (that is the 1970 grid, which the deadline no longer uses). On the 1970
+    /// grid this is byte-identical to the old `(interval - w % interval) % interval`.
     fn step_aligned_base_1003() -> u64 {
         let w = BASE_1009 + RELOCK_TICK_1003 * I30 - RESERVE_NS_1003;
-        BASE_1009 + (I30 - (w % I30)) % I30
+        let shift = if phase_pinned_deadline(w, I30) == w {
+            0
+        } else {
+            crate::genlock_grid::grid_next_boundary_ns(w, I30) - w
+        };
+        BASE_1009 + shift
     }
 
     struct Episode1003 {
