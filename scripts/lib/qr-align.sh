@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# airuleset:script-ok source-only lib (defines one function, no top-level statements) — matches the
+# airuleset:script-ok source-only lib (defines one function + a guarded sibling-lib source) — matches the
 # sibling scripts/lib/*.sh convention (camera-box-restart-verify.sh, cold-cut-step.sh) of
 # deliberately NOT setting `set -euo pipefail` here: sourcing runs in the CALLER's shell, and
 # recording-e2e.sh (the only caller) already sets it.
@@ -23,6 +23,11 @@
 #
 # DOMAINS: strih per-source pins ONLY. The stream `NDI 2ME PGM` hold (operator A/V domain) and imag
 # 3ms floor are never in the align set, so they are never written.
+
+# issue 1360: the strih OBS-log reads (the post-settle line count + the post-reset audit fetch) go
+# through the ONE platform-resolved reader, so a Linux strih (strih-lx) is read over plain ssh.
+command -v strih_log_line_count >/dev/null 2>&1 \
+  || . "${BASH_SOURCE[0]%/*}/strih-log-read.sh"
 
 # qr_align_run <host> <password>
 #   Runs the floor-3 aligner against strih. Sources default to camera_align_ndi_sources_csv (the
@@ -56,9 +61,10 @@ qr_align_run() {
   # and a naive audit would read pin-HELD ages, not transports (review 🔴). PHASE 0: reset every align
   # pin to the floor; settle so the genlock sheds DOWN to the transport; then fetch the audit scoped
   # to ONLY the post-settle log lines (the [4g/8] Correction-2 line-count discipline — never a blind
-  # -Tail that averages latency_ms across two pin regimes, review 🟡). The win_ssh_run calls are
-  # `timeout`-bounded (win-ssh-exec.sh's own doc: the caller must bound it; review 🔵). Best-effort
-  # throughout: any hiccup (standalone call with no win_ssh_run/PROBE_BIN_DIR/OUTDIR, reset failure,
+  # -Tail that averages latency_ms across two pin regimes, review 🟡). The log reads go through the
+  # shared platform-resolved reader (scripts/lib/strih-log-read.sh, issue 1360 -- Windows STRIH-SNV
+  # or Linux strih-lx), each `timeout`-bounded inside it (review 🔵). Best-effort
+  # throughout: any hiccup (standalone call with no reader/PROBE_BIN_DIR/OUTDIR, reset failure,
   # unreachable log, no audit lines) skips --jitter-json and qr_align_pins.py falls back to the
   # inert-prone floor+delta plan with its own loud warning. All on-air strih inputs sit on the
   # always-active Multiview grid, so the audit fires for them continuously — no preview cycling.
@@ -66,11 +72,10 @@ qr_align_run() {
   # QR_ALIGN_RESET_SETTLE_S (shed) / QR_ALIGN_AUDIT_WINDOW_S (clean-sample accrual) tune the waits.
   local jitter_json="${QR_ALIGN_JITTER_JSON:-}"
   if [ -z "$jitter_json" ] && [ -n "${STRIH_USER:-}" ] && [ -n "${PROBE_BIN_DIR:-}" ] \
-      && [ -n "${OUTDIR:-}" ] && command -v win_ssh_run >/dev/null 2>&1; then
+      && [ -n "${OUTDIR:-}" ] && command -v strih_log_line_count >/dev/null 2>&1; then
     local _log="$OUTDIR/qr-align-strih-${RUN_ID:-$$}.log"
     local _jj="$OUTDIR/qr-align-jitter-${RUN_ID:-$$}.json"
     local _settle="${QR_ALIGN_RESET_SETTLE_S:-15}" _window="${QR_ALIGN_AUDIT_WINDOW_S:-12}"
-    local _newest='Get-ChildItem "$env:APPDATA\obs-studio\logs\*.txt" | Sort-Object LastWriteTime -Descending | Select-Object -First 1'
     local _rrc=0
     # PHASE 0: reset every align pin to the floor (so the audit reads TRUE transports), then settle.
     timeout 120 python3 "$here/qr_align_pins.py" --host "$host" --password "$password" \
@@ -78,14 +83,12 @@ qr_align_run() {
     if [ "$_rrc" -eq 0 ]; then
       sleep "$_settle"
       # Mark the log length AFTER the shed, then let clean post-settle audit lines accrue, then fetch
-      # ONLY those lines (win_ssh_run re-sourced in a timeout-bounded subshell; the PS command rides
-      # an env var to avoid nested-quoting hazards).
+      # ONLY those lines (the shared reader, 60 s / 120 s bounds as before).
       local _start
       # `|| true` guards the substitution (review 🔵) -- a bare invocation under set -e would
       # otherwise abort mid-function on an ssh/pipefail failure.
-      _start="$(_qa_ps="(Get-Content ($_newest)).Count" timeout 60 bash -c \
-        '. "$0/lib/win-ssh-exec.sh"; win_ssh_run "$1" "$2" "$3" "$_qa_ps"' \
-        "$here" "$STRIH_USER" "$password" "$host" 2>/dev/null | tr -d '[:space:]' || true)"
+      _start="$(strih_log_line_count "$host" "$STRIH_USER" "$password" 60 2>/dev/null \
+        | tr -d '[:space:]' || true)"
       case "$_start" in
         ''|*[!0-9]*)
           # A failed/garbled count read must NOT degrade to `-Skip 0` = the WHOLE OBS log: that
@@ -104,9 +107,8 @@ qr_align_run() {
           # floor. Best-effort throughout: any hiccup keeps whatever fetch succeeded.
           local _try
           for _try in 1 2; do
-            if _qa_ps="Get-Content ($_newest) | Select-Object -Skip $_start" timeout 120 bash -c \
-                '. "$0/lib/win-ssh-exec.sh"; win_ssh_run "$1" "$2" "$3" "$_qa_ps"' \
-                "$here" "$STRIH_USER" "$password" "$host" > "$_log" 2>/dev/null && [ -s "$_log" ] \
+            if strih_log_since_line "$host" "$STRIH_USER" "$password" "$_start" 120 \
+                > "$_log" 2>/dev/null && [ -s "$_log" ] \
                 && "$PROBE_BIN_DIR/genlock-jitter-report" --file "$_log" --json > "$_jj" 2>/dev/null \
                 && [ -s "$_jj" ]; then
               jitter_json="$_jj"

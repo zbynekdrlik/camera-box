@@ -37,8 +37,11 @@
 # not a disturbance signal. Only relocks/underruns/late_holds gate quiet -- see
 # genlock_settle_pass_verdict's own doc comment for the full detail.
 #
-# Source-only: pure functions, no side effects at source time. The runner reuses win_ssh_run
-# (scripts/lib/win-ssh-exec.sh, sourced by the caller) for the default OBS-log tail read.
+# Source-only: pure functions, no side effects at source time (beyond the guarded sibling-lib source
+# below). The runner's default OBS-log tail read goes through the ONE platform-resolved strih-log
+# reader (scripts/lib/strih-log-read.sh, issue 1360), so a Linux strih (strih-lx) is read over plain
+# ssh and a Windows one through the same -EncodedCommand PowerShell path as before.
+command -v strih_log_tail >/dev/null 2>&1 || . "${BASH_SOURCE[0]%/*}/strih-log-read.sh"
 
 # genlock_settle_latest_counters <log_text> <source> -> stdout: the LAST audit line's four counters
 #   for <source> as `<relocks> <underruns> <dropped_due> <late_holds>`, or EMPTY when the source has
@@ -154,16 +157,11 @@ _genlock_settle_now() {
 # _genlock_settle_read_snapshot <user> <pw> <host> -> stdout: the newest strih OBS log tail (the
 #   text genlock_settle_latest_counters parses). Overridable via GENLOCK_SETTLE_READER_CMD (a shell
 #   command whose stdout is one snapshot) so a Tier-0 replica can feed a scripted snapshot sequence
-#   with zero ssh. Default: one flat ssh + a single (non-nested) PowerShell Get-Content tail of the
-#   newest OBS log, via win_ssh_run (-EncodedCommand handles the quoting) -- the SAME read the
-#   [4g/8] calibration block does (recording-e2e.sh:~3630, which calls win_ssh_run BARE).
-#   CRITICAL: `timeout` execvp()s its command directly and CANNOT invoke a shell FUNCTION like
-#   win_ssh_run (`timeout: failed to run command 'win_ssh_run'`, rc 127) -- so to bound the read we
-#   must re-source win-ssh-exec.sh inside a `timeout bash -c '...'` (bash IS a real binary), exactly
-#   the sibling pattern at recording-e2e.sh:755 / :2853. Sourcing genlock-settle.sh alone does NOT
-#   put win_ssh_run in the timeout'd subshell, hence the explicit re-source of its own sibling lib
-#   (both live in scripts/lib/). Best-effort: any read failure yields an empty snapshot (that pass
-#   simply measures nothing -> the budget still bounds the wait, fail-open).
+#   with zero ssh. Default: the shared platform-resolved reader `strih_log_tail` (issue 1360 --
+#   plain ssh `tail` on a Linux strih, the -EncodedCommand PowerShell `-Tail` on a Windows one),
+#   bounded by GENLOCK_SETTLE_SSH_TIMEOUT via a real `timeout` binary INSIDE sshpass (never a
+#   `timeout <shell function>`, which fails rc 127). Best-effort: any read failure yields an empty
+#   snapshot (that pass simply measures nothing -> the budget still bounds the wait, fail-open).
 _genlock_settle_read_snapshot() {
   local user="${1:-}" pw="${2:-}" host="${3:-}"
   if [ -n "${GENLOCK_SETTLE_READER_CMD:-}" ]; then
@@ -172,14 +170,7 @@ _genlock_settle_read_snapshot() {
     return 0
   fi
   local tail_n="${GENLOCK_SETTLE_OBS_LOG_TAIL:-400}"
-  local ps
-  ps='Get-Content (Get-ChildItem "$env:APPDATA\obs-studio\logs\*.txt" | Sort-Object LastWriteTime -Descending | Select-Object -First 1) -Tail '"$tail_n"
-  local libdir
-  libdir="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd)" || libdir=""
-  # timeout bash -c re-sources win-ssh-exec.sh (a sibling in scripts/lib/) so win_ssh_run is a real
-  # command inside the bounded subshell -- `timeout win_ssh_run` directly would fail rc 127 (below).
-  timeout "${GENLOCK_SETTLE_SSH_TIMEOUT:-20}" bash -c '. "$1"; win_ssh_run "$2" "$3" "$4" "$5"' _ \
-    "$libdir/win-ssh-exec.sh" "$user" "$pw" "$host" "$ps" 2>/dev/null || true
+  strih_log_tail "$host" "$user" "$pw" "$tail_n" "${GENLOCK_SETTLE_SSH_TIMEOUT:-20}" 2>/dev/null || true
 }
 
 # genlock_settle_wait <user> <pw> <host> <watched_csv> [n_required] [budget_s] [poll_s]

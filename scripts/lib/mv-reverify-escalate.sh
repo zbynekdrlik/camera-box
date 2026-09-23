@@ -50,6 +50,10 @@
 # definition and pipe the journal into it (the frame-probe/fb0 fallback below stays site-local).
 command -v cam2_paint_signal_remote_fn >/dev/null 2>&1 \
   || . "${BASH_SOURCE[0]%/*}/cam2-paint-signal.sh"
+# issue 1360: the received= tap reads the strih OBS log through the ONE platform-resolved reader
+# (Windows STRIH-SNV or Linux strih-lx); lazy-sourced the same way.
+command -v strih_log_tail >/dev/null 2>&1 \
+  || . "${BASH_SOURCE[0]%/*}/strih-log-read.sh"
 mv_reverify_wedge_verdict() {
   local prev="${1:-}" curr="${2:-}"
   case "$curr" in '' | *[!0-9]*) printf 'WEDGE\n'; return 0 ;; esac
@@ -110,43 +114,27 @@ mv_reverify_painter_up_wait() {
 
 # ---- (b) received= reader (env-overridable) ----------------------------------------------------
 # mv_reverify_probe_raw <strih_ip> <source> -> stdout: the RAW newest-tail of strih's OBS log. One
-# flat ssh + single (non-nested) powershell OBS-log tail -- a session-agnostic FILE read (win-ssh-
-# vs-mcp Context B), mirroring frozen-input-alert-watchdog.sh's probe_received. Override the WHOLE
-# read with MV_REVERIFY_RECEIVED_CMD (run with "<ip> <source>", stdout = raw log text) for offline
-# tests / a future alternate tap. EMPTY output => the READ ITSELF failed (a healthy tail is never
-# empty) -- the orchestrator treats that as READ_FAIL, NOT as "no recv" (#1093 review finding 3, the
-# frozen_input_classify UNKNOWN discipline: never act on absence-of-evidence).
+# flat ssh OBS-log tail -- a session-agnostic FILE read (win-ssh-vs-mcp Context B) -- through the
+# shared platform-resolved reader `strih_log_tail` (scripts/lib/strih-log-read.sh, issue 1360):
+# plain `tail` on a Linux strih (strih-lx), the cmd.exe-proof -EncodedCommand PowerShell `-Tail` on
+# a Windows one (the issue-1258 fix: a naive -Command leaked its `|` pipes to cmd.exe, so every read
+# returned noise and every [4c/8] attempt read `received=none`). Override the WHOLE read with
+# MV_REVERIFY_RECEIVED_CMD (run with "<ip> <source>", stdout = raw log text) for offline tests / a
+# future alternate tap. EMPTY output => the READ ITSELF failed (a healthy tail is never empty) --
+# the orchestrator treats that as READ_FAIL, NOT as "no recv" (#1093 review finding 3, the
+# frozen_input_classify UNKNOWN discipline: never act on absence-of-evidence). The shared reader
+# never sources win-ssh-exec.sh, so no strict mode leaks into this lib's non-strict callers (the
+# frozen-input watchdog + the Tier-0 harness).
 mv_reverify_probe_raw() {
   local ip="$1" source="$2"
   if [ -n "${MV_REVERIFY_RECEIVED_CMD:-}" ]; then
     $MV_REVERIFY_RECEIVED_CMD "$ip" "$source" 2>/dev/null || true
   else
-    # #1258: invoke PowerShell via -EncodedCommand (base64 UTF-16LE), NEVER the naive
-    # `-Command "gc (gci ... | sort ... | select ...)..."` string. Win32-OpenSSH's default cmd.exe
-    # shell MANGLES the naive triple-quoted form (the bash -> ssh -> cmd.exe -> powershell three-layer
-    # quoting hazard win-ssh-exec.sh documents + live-verified): the unescaped `|` pipes leak to
-    # cmd.exe, so the read returned non-tail noise and EVERY source read `received=none` on EVERY
-    # [4c/8] frozen-camera-gate attempt of EVERY run since #1233 (run 33513175938 + the 4 prior green
-    # runs all 4/4 INCONCLUSIVE) -> the abort gate silently never bit; only the QR sweep protected.
-    # The base64 blob is pure ASCII with no shell-special chars, so cmd.exe cannot mangle it and
-    # PowerShell decodes it back to the exact command -- the same mechanism win_ssh_run already uses.
-    # Inlined (rather than sourcing win-ssh-exec.sh) so this source-only lib never imports that
-    # helper's own top-level `set -euo pipefail`, which would leak strict mode into non-strict
-    # callers (the frozen-input watchdog + the Tier-0 harness). iconv + base64 are required (present
-    # fleet-wide -- win_ssh_ps_encoded_command uses the same pair); if either is somehow absent the
-    # encode yields "" -> an empty -EncodedCommand -> an empty read -> INCONCLUSIVE, NEVER an abort
-    # (the `|| _enc=""` guard keeps this line self-contained under a future set -e caller, the #266
-    # never-abort discipline this lib documents).
-    local _ps _enc _tail
-    # numeric-only tail -> the override can never inject shell/PS metachars into the encoded payload.
-    _tail="${MV_REVERIFY_RECEIVED_TAIL:-400}"
+    # numeric-only tail -> the override can never inject shell/PS metachars into the remote command.
+    local _tail="${MV_REVERIFY_RECEIVED_TAIL:-400}"
     case "$_tail" in '' | *[!0-9]*) _tail=400 ;; esac
-    _ps="gc (gci \$env:APPDATA\\obs-studio\\logs\\*.txt | sort LastWriteTime | select -last 1).FullName -Tail $_tail"
-    _enc="$(printf '%s' "$_ps" | iconv -f UTF-8 -t UTF-16LE | base64 -w0 2>/dev/null)" || _enc=""
-    timeout "${MV_REVERIFY_RECEIVED_SSH_TIMEOUT:-20}" sshpass -p "${STRIH_PW:-newlevel}" \
-      ssh -o StrictHostKeyChecking=no -o ConnectTimeout=8 "${STRIH_USER:-newlevel}@$ip" \
-      "powershell -NoProfile -NonInteractive -EncodedCommand $_enc" \
-      2>/dev/null || true
+    strih_log_tail "$ip" "${STRIH_USER:-newlevel}" "${STRIH_PW:-newlevel}" "$_tail" \
+      "${MV_REVERIFY_RECEIVED_SSH_TIMEOUT:-20}" 2>/dev/null || true
   fi
 }
 

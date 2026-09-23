@@ -108,7 +108,7 @@ systemctl --user disable --now mv-fps-alert-watchdog.timer
 
 | Var | Default | Meaning |
 |---|---|---|
-| `MV_FPS_BOXES` | `imag\|10.77.9.182\|linux strih\|10.77.9.202\|win` | boxes to watch: `name\|ip\|os` (os = linux\|win) |
+| `MV_FPS_BOXES` | `strih\|10.77.9.202\|strih` | boxes to watch: `name\|ip\|os` (os = linux\|win\|strih; `strih` = platform resolved by `scripts/lib/strih-log-read.sh` `strih_log_os`, issue 1360) |
 | `MV_FPS_GATE_BIN` | `<repo>/target/release/mv-fps-gate` | the `mv-fps-gate` decision-engine binary |
 | `MV_FPS_ALERT_CONFIRM_THRESHOLD` | `2` | consecutive below-floor reads before paging |
 | `MV_FPS_ALERT_THROTTLE_PASSES` | `12` | passes between repeat alerts for the same collapse (~1h) |

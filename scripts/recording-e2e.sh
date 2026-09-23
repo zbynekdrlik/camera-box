@@ -3164,10 +3164,10 @@ echo "[4d1/8] #771 MV-fps floor preflight — strih + imag Multiview projectors 
 if [ "$IMAG_OFFLINE_ACKED" = 1 ]; then
   imag_leg_skip_note "[4d1/8] imag MV-fps floor preflight (#771) — strih still checked" "$IMAG_OFFLINE_ACK_REASON"
   mv_fps_preflight_assert "$PROBE_BIN_DIR/mv-fps-gate" \
-    "strih|$STRIH|win|$STRIH_USER|$STRIH_PW"
+    "strih|$STRIH|strih|$STRIH_USER|$STRIH_PW"
 else
 mv_fps_preflight_assert "$PROBE_BIN_DIR/mv-fps-gate" \
-  "strih|$STRIH|win|$STRIH_USER|$STRIH_PW" \
+  "strih|$STRIH|strih|$STRIH_USER|$STRIH_PW" \
   "imag|$IMAG_IP|linux|${IMAG_USER:-newlevel}|${IMAG_PW:-newlevel}"
 fi
 
