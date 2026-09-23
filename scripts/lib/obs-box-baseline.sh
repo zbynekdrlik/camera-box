@@ -350,8 +350,19 @@ if ! dpkg -s lowlatency-kernel >/dev/null 2>&1; then
     # (the lowlatency meta depends on the very HWE packages step 6 pins). Step 6 re-holds nothing
     # here; the hold is restored on the next provisioning pass, and the lowlatency packages get
     # their own hold right below.
-    DEBIAN_FRONTEND=noninteractive apt-get install -y --allow-change-held-packages "linux-lowlatency-hwe-${SERIES}" >/dev/null \
-        || fail "linux-lowlatency-hwe-${SERIES} install failed"
+    # issue 1357 (live 23.9.2026, strih-lx 26.04): pin the config meta to the INSTALLED generic-hwe
+    # kernel meta version. Unpinned, apt picked the newer 7.0.0-34 meta whose generic-image dependency
+    # conflicts with the kernel step 6 just held at 7.0.0-31 ("Reached two conflicting assignments") --
+    # and it would pull a NEW image anyway, which this step must never do (config-only, zero downgrade).
+    local _ll_ver
+    _ll_ver="$(dpkg-query -W -f='${Version}' "linux-image-generic-hwe-${SERIES}" 2>/dev/null || true)"
+    if [ -n "$_ll_ver" ] && apt-cache madison "linux-lowlatency-hwe-${SERIES}" 2>/dev/null | grep -qF "| ${_ll_ver} |"; then
+        DEBIAN_FRONTEND=noninteractive apt-get install -y --allow-change-held-packages "linux-lowlatency-hwe-${SERIES}=${_ll_ver}" >/dev/null \
+            || fail "linux-lowlatency-hwe-${SERIES}=${_ll_ver} install failed"
+    else
+        DEBIAN_FRONTEND=noninteractive apt-get install -y --allow-change-held-packages "linux-lowlatency-hwe-${SERIES}" >/dev/null \
+            || fail "linux-lowlatency-hwe-${SERIES} install failed (no matching ${_ll_ver:-<unknown>} meta in the archive)"
+    fi
 fi
 [ -f /etc/default/grub.d/99-lowlatency.cfg ] \
     || fail "#482: lowlatency-kernel config package installed but /etc/default/grub.d/99-lowlatency.cfg is missing"
