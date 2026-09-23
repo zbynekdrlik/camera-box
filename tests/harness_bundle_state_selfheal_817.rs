@@ -309,9 +309,17 @@ fn selfheal_linux_class_down_message_names_the_linux_recovery_1317() {
         "the honest DOWN line stays: {}",
         r.out
     );
+    // Pin the DOWN HINT itself (the `issuing ... (systemctl --user restart, #817)` log line alone
+    // would already satisfy a bare substring check).
     assert!(
-        r.out.contains("systemctl --user restart") && !r.out.contains("schtasks"),
-        "the Linux DOWN hint must name systemctl, never schtasks: {}",
+        r.out
+            .contains("Recover: ssh to strih and run `systemctl --user restart"),
+        "the Linux DOWN hint must name the systemctl recovery: {}",
+        r.out
+    );
+    assert!(
+        !r.out.contains("schtasks"),
+        "the Linux path must never mention schtasks: {}",
         r.out
     );
 }
@@ -324,9 +332,63 @@ fn recording_e2e_passes_the_class_resolved_from_the_strih_platform_1317() {
         "issue 1317: fetch_box_state must pass the box class to the self-heal"
     );
     assert!(
-        s.contains(
-            "if [ \"$(strih_platform \"$host\")\" = \"linux\" ]; then _bs_class=linux-genlock; fi"
+        s.contains("_bs_class=\"$(bundle_state_selfheal_class \"$host\" \"$STRIH\")\""),
+        "issue 1317: the class must come from the lib's pure resolver, keyed on the strih host"
+    );
+}
+
+/// Source the self-heal lib and print `bundle_state_selfheal_class <host> <strih_host>` under `env`.
+fn selfheal_class(host: &str, strih_host: &str, env: &[(&str, &str)]) -> String {
+    let snippet = format!(
+        ". '{lib}'\nbundle_state_selfheal_class '{host}' '{strih_host}'\n",
+        lib = lib().display()
+    );
+    let mut cmd = Command::new("bash");
+    cmd.arg("-c").arg(&snippet).current_dir(manifest_dir());
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+    let out = cmd.output().unwrap();
+    assert!(
+        out.status.success(),
+        "bundle_state_selfheal_class failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+#[test]
+fn selfheal_class_is_linux_only_for_the_linux_strih_host_1317() {
+    // The strih host on the Linux strih platform -> linux-genlock.
+    assert_eq!(
+        selfheal_class("10.77.9.202", "10.77.9.202", &[]),
+        "linux-genlock"
+    );
+    assert_eq!(
+        selfheal_class("10.77.9.99", "10.77.9.99", &[("STRIH_PLATFORM", "linux")]),
+        "linux-genlock"
+    );
+    // A forced Windows strih platform -> the Windows path.
+    assert_eq!(
+        selfheal_class(
+            "10.77.9.202",
+            "10.77.9.202",
+            &[("STRIH_PLATFORM", "windows")]
         ),
-        "issue 1317: the class must come from the ONE strih platform resolver"
+        "windows-genlock"
+    );
+}
+
+#[test]
+fn selfheal_class_never_routes_the_stream_box_to_linux_1317() {
+    // STRIH_PLATFORM describes the STRIH only: even when it forces `linux`, the stream box (any host
+    // that is not the strih) keeps the Windows restart path.
+    assert_eq!(
+        selfheal_class("10.77.9.204", "10.77.9.202", &[("STRIH_PLATFORM", "linux")]),
+        "windows-genlock"
+    );
+    assert_eq!(
+        selfheal_class("10.77.9.204", "10.77.9.202", &[]),
+        "windows-genlock"
     );
 }
