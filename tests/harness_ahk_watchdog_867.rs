@@ -49,9 +49,14 @@ fn relaunch_ps_with(arg_str: &str) -> String {
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
-/// Source the lib and call `ahk_resolve_and_relaunch_ps` with NO args (the strih default). Returns stdout.
+/// A neutral fixture .ahk path. Issue 1317 part 4 removed the retired Windows strih's
+/// `D:\_APPS\NL_STARTUP.ahk` default, so every call now names its box's script explicitly.
+const FIXTURE_AHK: &str = "C:\\fixture\\NL_STARTUP.ahk";
+
+/// Source the lib and call `ahk_resolve_and_relaunch_ps` with the fixture script and NO prefer arg
+/// (the exe-first default). Returns stdout.
 fn relaunch_ps() -> String {
-    relaunch_ps_with("")
+    relaunch_ps_with(&format!("'{FIXTURE_AHK}'"))
 }
 
 #[test]
@@ -110,15 +115,14 @@ fn polls_get_process_and_sets_verified_and_target_vars() {
     );
 }
 
-/// issue 1295 — the no-args default stays strih's identity: the strih .ahk path and the EXE-first
-/// resolution order, byte-for-byte as before (obs-self-heal-install.sh + the strih deploy/launch
-/// arms call it with no args, so this MUST not drift).
+/// issue 1295 — with no PREFER arg the resolution order is EXE-first, and the script path is the
+/// one the caller passed (issue 1317 part 4: there is no per-box default any more).
 #[test]
-fn no_args_default_is_strih_identity_exe_first_1295() {
+fn explicit_script_without_prefer_is_exe_first_1295() {
     let p = relaunch_ps();
     assert!(
-        p.contains("$ahkScriptPath = 'D:\\_APPS\\NL_STARTUP.ahk'"),
-        "no-args default must keep strih's NL_STARTUP.ahk path. Program:\n{p}"
+        p.contains(&format!("$ahkScriptPath = '{FIXTURE_AHK}'")),
+        "the emitted path must be the caller's script. Program:\n{p}"
     );
     // exe-first: the $ahkExe branch comes before the $ahkLnk branch in the relaunch if/elseif.
     let exe_branch = p
@@ -129,7 +133,35 @@ fn no_args_default_is_strih_identity_exe_first_1295() {
         .expect("exe-first default must fall back to $ahkLnk");
     assert!(
         exe_branch < lnk_branch,
-        "strih default must prefer the EXE (exe branch before lnk branch). Program:\n{p}"
+        "no PREFER arg must prefer the EXE (exe branch before lnk branch). Program:\n{p}"
+    );
+}
+
+/// issue 1317 part 4 — the retired Windows strih's `D:\_APPS\NL_STARTUP.ahk` is no longer a silent
+/// default: a call with NO script fails closed (non-zero, nothing on stdout, a named error) instead
+/// of aiming a relaunch at a path that exists on no managed box.
+#[test]
+fn no_args_fails_closed_without_the_retired_strih_default_1317() {
+    let harness = "set -uo pipefail\n. \"$SCRIPT\"\nahk_resolve_and_relaunch_ps";
+    let out = Command::new("bash")
+        .arg("-c")
+        .arg(harness)
+        .env("SCRIPT", lib_script())
+        .output()
+        .expect("failed to run bash harness");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success(),
+        "no script must fail closed. stdout={stdout:?} stderr={stderr:?}"
+    );
+    assert!(
+        stdout.is_empty() && !stdout.contains("_APPS"),
+        "no program may be emitted without a script: {stdout:?}"
+    );
+    assert!(
+        stderr.contains("1317"),
+        "the refusal must name the issue: {stderr:?}"
     );
 }
 

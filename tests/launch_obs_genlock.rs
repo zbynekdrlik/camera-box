@@ -56,14 +56,21 @@ fn run_script(args: &[&str]) -> (i32, String, String) {
     )
 }
 
-/// The launch program built for a normal (no-force) launch with the default OBS dir.
+/// The launch program built for a normal (no-force) launch with the default OBS dir, for a box that
+/// RUNS the AHK respawn watcher (has_ahk=1 + a fixture .ahk path). Issue 1317 part 4 removed the
+/// retired Windows strih's has_ahk=1 + `D:\_APPS\NL_STARTUP.ahk` defaults, so the AHK identity is
+/// passed explicitly here (every box-facing caller passes its own from genlock-fleet-boxes.sh).
 fn program_default() -> String {
-    run_sourced("build_launch_program 'C:\\Program Files\\obs-studio' 0")
+    run_sourced(
+        "build_launch_program 'C:\\Program Files\\obs-studio' 0 1 'C:\\fixture\\NL_STARTUP.ahk'",
+    )
 }
 
-/// The launch program built with --force (a wedged-OBS recovery launch).
+/// The launch program built with --force (a wedged-OBS recovery launch), AHK box as above.
 fn program_force() -> String {
-    run_sourced("build_launch_program 'C:\\Program Files\\obs-studio' 1")
+    run_sourced(
+        "build_launch_program 'C:\\Program Files\\obs-studio' 1 1 'C:\\fixture\\NL_STARTUP.ahk'",
+    )
 }
 
 /// #257: the wrapper must carry NO OBS_GENLOCK_* / OBS_BURN_* env — the genlock build is env-free
@@ -206,8 +213,38 @@ fn program_without_ahk_watcher_carries_no_ahk_commands_786() {
         !p.contains("$ahkScriptPath"),
         "has_ahk=0 must not embed the #867 ahk_resolve_and_relaunch_ps machinery. Program:\n{p}"
     );
-    // Default (2-arg) stays the strih behavior — the AHK bracket present (pinned above in
-    // program_gates_on_audio_buffering_and_redraws_786).
+    // The AHK bracket for an AHK box is pinned above in program_gates_on_audio_buffering_and_
+    // redraws_786 (built with has_ahk=1 + an explicit .ahk path).
+}
+
+/// issue 1317 part 4 — the retired Windows strih's defaults are gone: a 2-arg call is a NO-AHK box
+/// (no real AutoHotkey64 command, no `D:\_APPS` path), and has_ahk=1 WITHOUT a script fails closed
+/// instead of aiming a relaunch at the retired PC's path.
+#[test]
+fn two_arg_default_is_a_no_ahk_box_and_ahk_needs_a_script_1317() {
+    let p = run_sourced("build_launch_program 'C:\\Program Files\\obs-studio' 0");
+    assert!(
+        !p.contains("Stop-Process -Name AutoHotkey64") && !p.contains("_APPS"),
+        "a 2-arg call must carry no AHK command and no retired-strih path. Program:\n{p}"
+    );
+    let harness =
+        "set -uo pipefail\n. \"$SCRIPT\"\nbuild_launch_program 'C:\\Program Files\\obs-studio' 0 1";
+    let out = Command::new("bash")
+        .arg("-c")
+        .arg(harness)
+        .env("SCRIPT", script())
+        .output()
+        .expect("failed to run bash harness");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success() && !stdout.contains("_APPS"),
+        "has_ahk=1 with no .ahk script must fail closed. stdout={stdout:?} stderr={stderr:?}"
+    );
+    assert!(
+        stderr.contains("1317"),
+        "the refusal must name the issue: {stderr:?}"
+    );
 }
 
 /// #867: the strih AHK restart must NEVER rely on a bare `-FilePath 'AutoHotkey64.exe'` launch —

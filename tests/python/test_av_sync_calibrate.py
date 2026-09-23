@@ -322,8 +322,16 @@ class TestMcpNameForHost:
     def test_stream_host_resolves_to_win_stream_snv(self):
         assert av_sync_calibrate.mcp_name_for_host("10.77.9.204") == "win-stream-snv"
 
-    def test_strih_host_resolves_to_win_strih(self):
-        assert av_sync_calibrate.mcp_name_for_host("10.77.9.202") == "win-strih"
+    def test_strih_host_resolves_to_linux_strih_lx_1317(self):
+        # issue 1317 part 4: 10.77.9.202 is the Linux strih-lx (the Windows strih PC is retired).
+        assert av_sync_calibrate.mcp_name_for_host("10.77.9.202") == "linux-strih-lx"
+
+    def test_plan_for_the_linux_strih_names_the_linux_destination_1317(self):
+        payload = {"source": "NDI 2ME PGM", "offset_ms": 1.0, "applied_latency_ms": 3, "ts": 1.0}
+        plan = av_sync_calibrate.remote_push_plan("10.77.9.202", payload)
+        assert "/home/newlevel/.camera-box/av-sync-last.json" in plan
+        assert "linux-strih-lx" in plan
+        assert "ProgramData" not in plan and "win-strih" not in plan
 
     def test_unknown_host_returns_none(self):
         assert av_sync_calibrate.mcp_name_for_host("10.0.0.99") is None
