@@ -569,6 +569,32 @@ fn obs_liveness_polls_resolume_only_when_home_1296() {
     assert!(home.contains("resolume"), "home must poll resolume: {home}");
 }
 
+#[test]
+fn obs_liveness_strih_lx_arm_keeps_the_strih_knobs_1317() {
+    // issue 1317: strih-lx is polled through its OWN arm, which keeps the strih knobs
+    // (STRIH_HOST + STRIH_TARGET_FPS) -- not the generic default-fps fallback. The echo stub prints
+    // the full `--box name=host:fps` value, so the chosen host/fps are observable.
+    let stub = manifest_dir().join("tests/fixtures/obs_liveness_echo_probe_1296.py");
+    let stub = stub.to_string_lossy().to_string();
+    let out = watchdog_measure(&[
+        ("OBS_FLEET_HOME", "stream"),
+        ("OBS_LIVENESS_PROBE", &stub),
+        ("STRIH_HOST", "1.2.3.4"),
+        ("STRIH_TARGET_FPS", "29"),
+        ("OBS_LIVENESS_DEFAULT_FPS", "17"),
+    ]);
+    assert!(
+        out.contains("box=strih-lx=1.2.3.4:29"),
+        "strih-lx must use STRIH_HOST + STRIH_TARGET_FPS: {out}"
+    );
+    // Default: the knob-free STRIH_HOST default is strih-lx's fleet address .202.
+    let dflt = watchdog_measure(&[("OBS_FLEET_HOME", "stream"), ("OBS_LIVENESS_PROBE", &stub)]);
+    assert!(
+        dflt.contains("box=strih-lx=10.77.9.202:30"),
+        "strih-lx default must be .202 at 30 fps: {dflt}"
+    );
+}
+
 /// Source obs-liveness-watchdog.sh under `env`, run measure_boxes, echo VERDICT_LINES.
 fn watchdog_measure(env: &[(&str, &str)]) -> String {
     let wd = scripts_dir().join("obs-liveness-watchdog.sh");

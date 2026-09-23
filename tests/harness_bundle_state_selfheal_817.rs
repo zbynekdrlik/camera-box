@@ -60,6 +60,11 @@ struct Run {
 /// at or above the retry count means "always down". Returns exit-ok, combined stdout+stderr, the
 /// recorded sshpass argv, and the dest file contents.
 fn run_selfheal(curl_fail_first: i64) -> Run {
+    run_selfheal_class(curl_fail_first, "")
+}
+
+/// `run_selfheal` with the optional 6th `class` argument (issue 1317); "" = omitted.
+fn run_selfheal_class(curl_fail_first: i64, class: &str) -> Run {
     let dir = tempfile::tempdir().unwrap();
     let bin = dir.path().join("bin");
     fs::create_dir_all(&bin).unwrap();
@@ -101,9 +106,10 @@ exit 0\n",
         std::env::var("PATH").unwrap_or_default()
     );
     let snippet = format!(
-        ". '{lib}'\nbundle_state_selfheal_fetch strih '{dest}' 8899 newlevel secret\n",
+        ". '{lib}'\nbundle_state_selfheal_fetch strih '{dest}' 8899 newlevel secret {class}\n",
         lib = lib().display(),
-        dest = dest.display()
+        dest = dest.display(),
+        class = class
     );
     let out = Command::new("bash")
         .arg("-c")
@@ -265,5 +271,62 @@ fn recording_e2e_wires_selfheal_and_drops_the_misleading_note_817() {
     assert!(
         !s.contains("win-* MCP holder must write the drift-guard observed values"),
         "#817: the pre-#817 misleading version-drift note must be gone"
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// issue 1317: since M4 the strih at 10.77.9.202 is the Linux strih-lx, whose :8899 server is a
+// systemd --user unit. The E2E self-heal must send it the class-resolved Linux restart, never the
+// Windows schtasks line, and its DOWN hint must name the Linux recovery.
+// ---------------------------------------------------------------------------------------------
+#[test]
+fn selfheal_linux_class_restarts_via_systemctl_never_schtasks_1317() {
+    let r = run_selfheal_class(1, "linux-genlock");
+    assert!(
+        r.ok,
+        "the Linux self-heal must recover like the Windows one: {}",
+        r.out
+    );
+    assert!(
+        r.sshpass_argv.contains("systemctl --user restart"),
+        "a Linux box gets its systemd --user unit restarted: {:?}",
+        r.sshpass_argv
+    );
+    assert!(
+        !r.sshpass_argv.contains("schtasks"),
+        "a Linux box must never be sent the Windows schtasks restart: {:?}",
+        r.sshpass_argv
+    );
+}
+
+#[test]
+fn selfheal_linux_class_down_message_names_the_linux_recovery_1317() {
+    let r = run_selfheal_class(99, "linux-genlock");
+    assert!(!r.ok, "a still-down Linux box must fail the self-heal");
+    assert!(
+        r.out
+            .contains("bundle-state-server DOWN on strih (nothing on :8899)"),
+        "the honest DOWN line stays: {}",
+        r.out
+    );
+    assert!(
+        r.out.contains("systemctl --user restart") && !r.out.contains("schtasks"),
+        "the Linux DOWN hint must name systemctl, never schtasks: {}",
+        r.out
+    );
+}
+
+#[test]
+fn recording_e2e_passes_the_class_resolved_from_the_strih_platform_1317() {
+    let s = read("scripts/recording-e2e.sh");
+    assert!(
+        s.contains("\"$_bs_user\" \"$_bs_pw\" \"$_bs_class\""),
+        "issue 1317: fetch_box_state must pass the box class to the self-heal"
+    );
+    assert!(
+        s.contains(
+            "if [ \"$(strih_platform \"$host\")\" = \"linux\" ]; then _bs_class=linux-genlock; fi"
+        ),
+        "issue 1317: the class must come from the ONE strih platform resolver"
     );
 }
