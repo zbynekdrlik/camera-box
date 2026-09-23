@@ -204,6 +204,28 @@ whitespace the same way (`-replace '\s+', ' '` vs Rust's `split_whitespace().joi
 same literal works in both — verify each one against the real squished C before committing,
 since `pwsh` is not installed on dev1 and a wrong literal fails only on a Windows runner.
 
+### Adding a SIBLING shed to the N==1 STEADY converge path: a SEPARATE `if (converge_eligible)` block, never an OR into the existing condition (#1355)
+
+`raw_converge_erases_index_zero` (in `tests/genlock_release_cadence.rs`) reads the RAW (un-squished)
+file, `find()`s the exact string `genlock_should_converge_phase(source, reserve_ms, interval,
+wall_now) &&` — **with the trailing ` &&`** — and checks a 600-char window after it contains
+`da_erase(source->async_frames, 0);` and not `array[1]`. So the #1049 converge block's own
+`if (genlock_should_converge_phase(...) &&\n    source->async_frames.num > 1) {` shape is
+LOAD-BEARING TEXT. Adding another shed on the SAME STEADY path (issue 1355 added the N==1
+`genlock_should_n1_release_phase_step`, which the N>=2-gated converge leaves un-served) by OR-ing it
+into that condition (`if (converge_or_n1_step(...) && num > 1)`) DELETES the ` &&`-adjacent call
+substring and fails that test — even though the logic is fine. Add the new shed as a WHOLLY SEPARATE
+`if (converge_eligible) { if (genlock_should_<new>(...) && num > 1) { …erase array[0]… } }` block
+AFTER the #1049 one, leaving the #1049 block byte-identical (so `raw_converge_erases_index_zero`, the
+`} else if (!drain_eligible) { source->genlock_ticks_since_drain++;` throttle anchor, and the
+`converge_eligible = true;` count==2 all still hold). Throttle sharing is automatic: on the N==1
+STEADY path `drain_eligible` is true, so the #859 drain block runs FIRST and either sheds
+(`ticks_since_drain = 0` → the new step reads ticks < the interval → returns false) or increments the
+counter; the new block therefore needs NO `else if (!drain_eligible)` increment of its own (the
+#1049 block owns the N>=2 counter, and the new step never fires there). Verify offline before push
+with the same `python3` recipe the yml-anchor rule uses: `find()` the `… &&` anchor in the RAW file
+and assert the 600-char window still has `da_erase(…, 0);` and no `array[1]`.
+
 ## The source-rate multiple is measured from the STAMP GRID — and that can lie about arrival rate (#1042)
 
 `genlock_measure_source_multiple()` derives `n = round(canvas_interval / source_interval)` where
