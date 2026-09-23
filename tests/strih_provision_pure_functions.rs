@@ -3865,16 +3865,97 @@ fn rtprio_session_verdict_survives_a_large_log_under_pipefail() {
 }
 
 #[test]
-fn crash_popup_units_are_the_imag_masked_units() {
+fn crash_popup_units_cover_imags_mask_plus_the_apport_coredump_hook() {
     let (c, out, _e) = run_sourced(&[], "strih_crash_popup_units");
     assert_eq!(c, 0);
     let units: Vec<&str> = out.lines().filter(|l| !l.is_empty()).collect();
-    assert_eq!(units, ["apport.service", "whoopsie.service"]);
+    // Superset of imag's mask (setup-imag.sh `systemctl mask apport.service whoopsie.service`).
     let imag = read_script("scripts/setup-imag.sh");
+    let imag_line = imag
+        .lines()
+        .find(|l| l.trim_start().starts_with("systemctl mask apport.service"))
+        .expect("setup-imag.sh apport/whoopsie mask line");
+    for u in imag_line
+        .split_whitespace()
+        .filter(|w| w.ends_with(".service"))
+    {
+        assert!(
+            units.contains(&u),
+            "imag masks {u}; strih must too: {units:?}"
+        );
+    }
+    // 26.04: apport's systemd-coredump OnSuccess hook writes /var/crash (-> the popup) even with
+    // apport.service masked; masking the TEMPLATE blocks every instance.
     assert!(
-        imag.contains(&format!("systemctl mask {}", units.join(" "))),
-        "the strih unit list must stay in parity with imag's apport/whoopsie mask"
+        units.contains(&"apport-coredump-hook@.service"),
+        "the apport coredump hook template must be masked too: {units:?}"
     );
+}
+
+#[test]
+fn crash_popup_member_ok_grades_a_template_by_is_enabled_only() {
+    let hook = "apport-coredump-hook@.service";
+    let cases = [
+        (hook, "masked", "", true),
+        (hook, "masked-runtime", "", true),
+        (hook, "not-found", "inactive", true),
+        (hook, "", "", true),                // apport not installed at all
+        (hook, "static", "inactive", false), // the 26.04 default: pulled by OnSuccess
+        (hook, "enabled", "", false),
+        (hook, "disabled", "", false), // disable does not stop an OnSuccess= pull
+        ("apport.service", "masked", "inactive", true),
+        ("apport.service", "masked", "active", false),
+        ("whoopsie.service", "enabled", "inactive", false),
+    ];
+    for (unit, en, act, want) in cases {
+        let (c, _o, _e) = run_sourced(
+            &[("U", unit), ("EN", en), ("ACT", act)],
+            "strih_crash_popup_member_ok \"$U\" \"$EN\" \"$ACT\"",
+        );
+        assert_eq!(
+            c == 0,
+            want,
+            "member_ok({unit}, enabled={en:?}, active={act:?}) must be {want}"
+        );
+    }
+}
+
+#[test]
+fn crash_reports_count_counts_only_crash_files_and_tolerates_a_missing_dir() {
+    let dir = tempfile::tempdir().unwrap();
+    for f in ["_usr_bin_obs.1000.crash", "_usr_bin_x.0.crash", "notes.txt"] {
+        std::fs::write(dir.path().join(f), "x").unwrap();
+    }
+    std::fs::create_dir(dir.path().join("sub.crash")).unwrap(); // a DIR is not a report
+    let (c, out, _e) = run_sourced(
+        &[("D", dir.path().to_str().unwrap())],
+        "strih_crash_reports_count \"$D\"",
+    );
+    assert_eq!((c, out.as_str()), (0, "2"));
+    let (c, out, _e) = run_sourced(&[], "strih_crash_reports_count /nonexistent/crash-dir");
+    assert_eq!((c, out.as_str()), (0, "0"));
+}
+
+#[test]
+fn rtprio_wording_names_the_reboot_not_a_relogin() {
+    // strih-obs.service inherits its limits from the LINGERING user@UID manager (setup-strih
+    // step 13 enables linger), which applies pam_limits only when it starts -- i.e. at boot. A
+    // "next login" claim sends the supervisor down a false diagnosis.
+    let (_c, body, _e) = run_sourced(&[], "strih_rtprio_limits_text alice");
+    let setup = setup_11c_block();
+    let v = read_script("scripts/verify-strih.sh");
+    let item32 = block_between(&v, "# 32)", "# 33)");
+    for (what, text) in [
+        ("limits body", body.as_str()),
+        ("setup 11c", setup.as_str()),
+        ("verify 32", item32),
+    ] {
+        assert!(
+            !text.contains("next login"),
+            "{what} must not claim the grant applies at the next login"
+        );
+        assert!(text.contains("reboot"), "{what} must name the reboot");
+    }
 }
 
 #[test]
@@ -4026,14 +4107,24 @@ fn setup_strih_step_11c_writes_grant_masks_units_and_installs_coredump() {
     let log = std::fs::read_to_string(&calls).unwrap();
     for u in ["apport.service", "whoopsie.service"] {
         assert!(
-            log.contains(&format!("systemctl mask {u}")),
-            "{u} must be masked; calls:\n{log}"
-        );
-        assert!(
             log.contains(&format!("systemctl disable --now {u}")),
             "{u} must be disabled+stopped; calls:\n{log}"
         );
     }
+    for u in [
+        "apport.service",
+        "apport-coredump-hook@.service",
+        "whoopsie.service",
+    ] {
+        assert!(
+            log.contains(&format!("systemctl mask {u}")),
+            "{u} must be masked; calls:\n{log}"
+        );
+    }
+    assert!(
+        !out.contains("next login"),
+        "the grant applies at the next reboot (lingering user manager), not a login: {out}"
+    );
     assert!(
         log.lines()
             .any(|l| l.starts_with("apt-get install") && l.contains("systemd-coredump")),
@@ -4073,13 +4164,15 @@ const VERIFY_PRELUDE: &str = "FAILS=0\nok() { echo \"PASS $1\"; }\n\
      newest_log() { ls -1t \"${OBS_LOG_DIR}\"/*.txt 2>/dev/null | head -1; }\nSTRIH_LX_USER=alice";
 
 /// Run verify-strih items 32 + 33 against fake live state. `units` rows are
-/// `(unit, is-enabled output, is-active output)`; `obs_running` drives the supervisor check.
+/// `(unit, is-enabled output, is-active output)`; `obs_running` drives the supervisor check;
+/// `crash_reports` stale `*.crash` files are placed in the (seamed) crash dir.
 fn run_verify_items(
     grant: Option<&str>,
     obs_running: bool,
     log: Option<&str>,
     units: &[(&str, &str, &str)],
     coredump_status: &str,
+    crash_reports: usize,
 ) -> (i32, String, String) {
     let dir = tempfile::tempdir().unwrap();
     let bin = dir.path().join("bin");
@@ -4115,8 +4208,16 @@ case "$out" in enabled|active|static) exit 0;; *) exit 1;; esac"#,
     if let Some(g) = grant {
         std::fs::write(&limits, g).unwrap();
     }
+    let crash_dir = dir.path().join("crash");
+    std::fs::create_dir_all(&crash_dir).unwrap();
+    for i in 0..crash_reports {
+        std::fs::write(crash_dir.join(format!("_usr_bin_obs.{i}.crash")), "x").unwrap();
+    }
     let v = read_script("scripts/verify-strih.sh");
     let block = block_between(&v, "# 32)", "\necho \"\"\nif [ \"$FAILS\" -eq 0 ]");
+    // the REAL shared OBS-running predicate verify-strih defines at its top (items 1 and 32)
+    let obs_running_fn = block_between(&v, "obs_running() {", "\n}\n");
+    let prelude = format!("{VERIFY_PRELUDE}\n{obs_running_fn}\n}}");
     run_block(
         &bin,
         &[
@@ -4125,14 +4226,16 @@ case "$out" in enabled|active|static) exit 0;; *) exit 1;; esac"#,
             ("FAKE_CORE", coredump_status),
             ("OBS_LOG_DIR", logs.to_str().unwrap()),
             ("STRIH_RTPRIO_LIMITS_FILE", limits.to_str().unwrap()),
+            ("STRIH_CRASH_DIR", crash_dir.to_str().unwrap()),
         ],
-        VERIFY_PRELUDE,
+        &prelude,
         &format!("{block}\necho \"FAILS=$FAILS\""),
     )
 }
 
-const MASKED_UNITS: [(&str, &str, &str); 2] = [
+const MASKED_UNITS: [(&str, &str, &str); 3] = [
     ("apport.service", "masked", "inactive"),
+    ("apport-coredump-hook@.service", "masked", ""),
     ("whoopsie.service", "masked", "inactive"),
 ];
 const CORE_OK: &str = "install ok installed";
@@ -4146,6 +4249,7 @@ fn verify_strih_rtprio_and_crash_popup_items_pass_on_a_provisioned_box() {
         Some(FIFO_OK_LINE),
         &MASKED_UNITS,
         CORE_OK,
+        0,
     );
     assert_eq!(
         c, 0,
@@ -4154,8 +4258,9 @@ fn verify_strih_rtprio_and_crash_popup_items_pass_on_a_provisioned_box() {
     assert!(out.contains("FAILS=0"), "{out}");
     assert!(out.contains("PASS (rtprio)"), "{out}");
     assert!(out.contains("PASS (crash-popup)"), "{out}");
+    assert!(!out.contains("NOTE"), "a clean box prints no NOTE: {out}");
     // No OBS log at all + OBS down: still a pass on the grant (never aborts on a missing log).
-    let (c, out, err) = run_verify_items(Some(grant), false, None, &MASKED_UNITS, CORE_OK);
+    let (c, out, err) = run_verify_items(Some(grant), false, None, &MASKED_UNITS, CORE_OK, 0);
     assert_eq!(c, 0, "stderr={err}\n{out}");
     assert!(
         out.contains("FAILS=0") && out.contains("PASS (rtprio)"),
@@ -4164,8 +4269,9 @@ fn verify_strih_rtprio_and_crash_popup_items_pass_on_a_provisioned_box() {
 }
 
 #[test]
-fn verify_strih_rtprio_item_fails_without_grant_and_notes_a_pending_relogin() {
-    let (_c, out, _e) = run_verify_items(None, true, Some(FIFO_FAIL_LINE), &MASKED_UNITS, CORE_OK);
+fn verify_strih_rtprio_item_fails_without_grant_and_notes_a_pending_reboot() {
+    let (_c, out, _e) =
+        run_verify_items(None, true, Some(FIFO_FAIL_LINE), &MASKED_UNITS, CORE_OK, 0);
     assert!(
         out.contains("FAIL (rtprio)") && out.contains("FAILS=1"),
         "{out}"
@@ -4177,9 +4283,10 @@ fn verify_strih_rtprio_item_fails_without_grant_and_notes_a_pending_relogin() {
         Some(FIFO_FAIL_LINE),
         &MASKED_UNITS,
         CORE_OK,
+        0,
     );
     assert!(
-        out.contains("NOTE (rtprio)") && out.contains("FAILS=0"),
+        out.contains("NOTE (rtprio)") && out.contains("reboot") && out.contains("FAILS=0"),
         "{out}"
     );
 }
@@ -4189,25 +4296,55 @@ fn verify_strih_crash_popup_item_fails_on_a_live_unit_or_missing_coredump() {
     let grant = "alice - rtprio 20\n";
     let live = [
         ("apport.service", "enabled", "active"),
+        ("apport-coredump-hook@.service", "masked", ""),
         ("whoopsie.service", "masked", "inactive"),
     ];
-    let (_c, out, _e) = run_verify_items(Some(grant), false, None, &live, CORE_OK);
+    let (_c, out, _e) = run_verify_items(Some(grant), false, None, &live, CORE_OK, 0);
     assert!(
         out.contains("FAIL (crash-popup)")
             && out.contains("apport.service")
             && out.contains("FAILS=1"),
         "{out}"
     );
-    let (_c, out, _e) = run_verify_items(Some(grant), false, None, &MASKED_UNITS, "");
+    // The 26.04 default: apport.service + whoopsie masked, but the coredump hook template is still
+    // `static` (pulled by systemd-coredump's OnSuccess=) -> the popup returns -> FAIL.
+    let hook_live = [
+        ("apport.service", "masked", "inactive"),
+        ("apport-coredump-hook@.service", "static", ""),
+        ("whoopsie.service", "masked", "inactive"),
+    ];
+    let (_c, out, _e) = run_verify_items(Some(grant), false, None, &hook_live, CORE_OK, 0);
+    assert!(
+        out.contains("FAIL (crash-popup)")
+            && out.contains("apport-coredump-hook@.service")
+            && out.contains("FAILS=1"),
+        "{out}"
+    );
+    let (_c, out, _e) = run_verify_items(Some(grant), false, None, &MASKED_UNITS, "", 0);
     assert!(
         out.contains("FAIL (crash-popup)") && out.contains("no-systemd-coredump"),
         "{out}"
     );
-    // Units absent entirely (a box without whoopsie): not-found passes.
+    // Units absent entirely (a box without apport/whoopsie): not-found passes.
     let absent: [(&str, &str, &str); 0] = [];
-    let (_c, out, _e) = run_verify_items(Some(grant), false, None, &absent, CORE_OK);
+    let (_c, out, _e) = run_verify_items(Some(grant), false, None, &absent, CORE_OK, 0);
     assert!(
         out.contains("PASS (crash-popup)") && out.contains("FAILS=0"),
+        "{out}"
+    );
+}
+
+#[test]
+fn verify_strih_crash_popup_item_notes_stale_crash_reports_without_failing() {
+    // update-notifier re-raises the popup at login for reports ALREADY in /var/crash; deleting
+    // them is a supervisor data action, so provisioning REPORTS them (NOTE) and never fails on it.
+    let grant = "alice - rtprio 20\n";
+    let (c, out, err) = run_verify_items(Some(grant), false, None, &MASKED_UNITS, CORE_OK, 2);
+    assert_eq!(c, 0, "stderr={err}\n{out}");
+    assert!(
+        out.contains("PASS (crash-popup)")
+            && out.contains("NOTE (crash-popup) 2 stale crash report")
+            && out.contains("FAILS=0"),
         "{out}"
     );
 }
