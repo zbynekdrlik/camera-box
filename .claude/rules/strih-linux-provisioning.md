@@ -9,6 +9,8 @@ paths:
   - "systemd/strih-bundle-state-server.service"
   - "tests/strih_provision_pure_functions.rs"
   - "tests/ndi_runtime_lib.rs"
+  - "scripts/lib/strih-cef-keyring.sh"
+  - "tests/cef_password_store_1359.rs"
 ---
 
 # strih-lx — the Linux notebook replacing the Windows strih PC (issue 1317)
@@ -873,3 +875,23 @@ Two reusable patterns from wiring findings 9–14 above into `setup-strih.sh` / 
 3. **A `grep -q` predicate fed a LARGE log SIGPIPEs the producer under `pipefail` (141) → the gate reads "no match"** — the same class as the `strih_nvenc_log_verdict` here-string gotcha above, hit AGAIN in `strih_lx_nvenc_available_ok`. A lib predicate consumed by `{ …; cat "$LOG"; } | predicate` must read to EOF (`grep -i … >/dev/null`, never `grep -q`), and its test must feed a >1 MB early-match input under `set -o pipefail` (`nvenc_predicate_is_drain_safe_under_pipefail_with_a_large_early_match`). Local RED/GREEN proof needs no cargo: `bash -c 'set -uo pipefail; . scripts/lib/strih-provision.sh; { printf "…nvenc…\n"; head -c 3000000 /dev/zero | tr "\0" a; } | strih_lx_nvenc_available_ok; echo $?'` → 141 before, 0 after.
 
 Also: the janus items read the root:root 0640 jcfg via a `sudo -n cat` fallback — a non-interactive sudo ticket does NOT propagate into a tty-less child process tree, so run as the operator without NOPASSWD they honestly print `(or jcfg unreadable)`; grade the pin with a valid ticket or as root. And the on-box `/usr/local/bin/strih_scenes.py` had gone STALE behind dev (no `--audio-input-kind`) — `verify-strih.sh` cannot see that by itself; compare `sha256sum` against the repo before trusting the seeder-driven items.
+
+## CEF keyring prompt (issue 1359) — verify-strih item 14b, and why it cannot grade the child argv alone
+
+GNOME auto-login leaves the login keyring LOCKED; Chromium's os_crypt inside the OBS CEF asked it for
+the storage key at every login → an unlock dialog on the operator screen. The vendored
+`plugins/obs-browser/browser-app.cpp` `OnBeforeCommandLineProcessing` now appends
+`password-store=basic` in the Linux branch (the macOS `use-mock-keychain` sibling). Build default,
+no toggle. Item 14b (REPORT-ONLY, never FAIL; pure helpers in the source-only
+`scripts/lib/strih-cef-keyring.sh`, kept out of the ~1870-line strih-provision.sh):
+- On Linux the CEF BROWSER process is OBS itself (`/usr/bin/obs`, `CefInitialize` in
+  obs-browser-plugin.cpp) and the switch lands in CEF's IN-PROCESS command line, which Chromium does
+  not necessarily copy onto the `obs-browser-page` child argv. So `pgrep -af obs-browser-page`
+  showing `--password-store=basic` is PASS (`ok-live`), but its absence is NOT a fail: the item then
+  greps the LOADED `${STRIH_LIBDIR}/obs-plugins/obs-browser.so` for the compiled-in `password-store`
+  literal (`ok-built`). A plugin without it = a pre-1359 bundle (NOTE). `libcef.so` always contains
+  the Chromium switch constant, so never grep libcef for this — only obs-browser.so.
+- Live acceptance (supervisor, after the full strih bundle deploy): two consecutive reboots of
+  strih-lx with no keyring dialog; which of `ok-live`/`ok-built` the box reads is itself a finding
+  worth recording here.
+

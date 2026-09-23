@@ -6,6 +6,8 @@ paths:
   - "vendor/obs-studio/frontend/widgets/OBSBasic_Preview.cpp"
   - "vendor/obs-studio/frontend/widgets/OBSQTDisplay.cpp"
   - "tests/obs_projector_child_host_1352.rs"
+  - "vendor/obs-studio/frontend/widgets/OBSQTDisplay.hpp"
+  - "tests/obs_display_resize_debounce_1358.rs"
 ---
 
 # Linux OBS projector hosted in a CHILD window (#1352) — the present-stall class + how to change it safely
@@ -109,3 +111,31 @@ This lands in `obs64`/the frontend, not `obs.dll` — see `obs-titlebar-build-id
 `systemctl --user stop strih-mv-host.service`, open the multiview projector windowed AND fullscreen,
 5 min: `program-render-audit lagged=0`, GetStats render lag < 0.5 %, `multiview-audit rendered_fps
 >= 28`, 0 restarts; then provisioning flips the belt-and-braces helper unit to disabled-by-default.
+
+## Display resize is DEBOUNCED (#1358) — never resize the display per Qt event
+
+`OBSQTDisplay::resizeEvent` (the base of every preview AND projector window) no longer calls
+`obs_display_resize` itself. A window drag emits a resize per step; `obs_display_resize` only stores
+`next_cx/next_cy`, but the graphics thread then runs `gs_resize` (swap-chain reallocation) on its
+next render of that display, and the PROGRAM render shares that thread — dragging the strih-lx
+multiview projector measured `program-render-audit lagged=80/150`. Now `resizeEvent` restarts a
+150 ms single-shot `QTimer` and `ApplyDisplayResize()` applies the final pixel size once + emits
+`DisplayResized` (so the preview layout and the swap-chain size change together). The first resize
+after `CreateDisplay` stays immediate (`resizeImmediate`). The `visibleChanged`/`screenChanged`
+lambdas in the ctor keep their direct resize (create/visibility paths, not a drag storm). Same code
+on every platform. Guard: `tests/obs_display_resize_debounce_1358.rs` (incl. the invariant "exactly
+3 `obs_display_resize(` call sites in the file" — keep the token out of comment prose there).
+
+## Local type-check of a vendored frontend `.cpp` against the REAL Qt6 headers (Tier-0, no cmake)
+
+dev1 has the Qt6 dev headers (`/usr/include/x86_64-linux-gnu/qt6`), so a frontend widget can be
+`g++ -fsyntax-only` checked with tiny scratch stubs for the OBS side (`obs.hpp` with an `OBSDisplay`
+wrapper + the `obs_display_*` prototypes, `obs-nix-platform.h`, `utility/display-helpers.hpp`,
+`utility/SurfaceEventFilter.hpp`, an empty `moc_<File>.cpp`) — the real `.cpp` and its real `.hpp`
+compile against real Qt, so a wrong Qt signature (a `connect` overload, a missing include) fails
+locally instead of at CI:
+`g++ -std=c++17 -fsyntax-only -fPIC -Wall -Wextra -include <qt6>/QtGui/QScreen -I<stubs> -I<qt6> -I<qt6>/QtCore -I<qt6>/QtGui -I<qt6>/QtWidgets vendor/obs-studio/frontend/widgets/OBSQTDisplay.cpp`.
+Two traps: `-include QScreen` is needed (the `screenChanged` connect instantiates
+`QMetaTypeId<QScreen*>`, which in the real build comes in transitively), and `-DENABLE_WAYLAND`
+cannot be used (dev1's Qt is < 6.9 and has no `qpa/qplatformnativeinterface.h` private header).
+
