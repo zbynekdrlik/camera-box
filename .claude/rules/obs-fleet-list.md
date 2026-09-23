@@ -156,7 +156,9 @@ Per-facet decision (by each facet's PREMISE — a platform-neutral read joins, a
   poll WITHOUT consulting `obs_fleet_is_home` (so the `OBS_FLEET_HOME` force-list test seam never
   drops a fixed box), `traveling` → only while home, `retired` → never, a name with no row (an ops
   override) → polled as given. Use it instead of re-deciding per watchdog. In rig-restore an away
-  member is not probed and so is never counted UNREADABLE (which would hold the E2E marker).
+  member is not probed and so is never counted UNREADABLE (which would hold the E2E marker) --
+  unless EVERY member is away (only via an override): nothing observed = counted unreadable, the
+  marker is kept (fail-closed).
 - **State keys follow the fleet NAME.** The burn-reconcile baseline moved from `strih_rtf` to
   `strih-lx_rtf`; its "unknown previous baseline is NOT a restart" rule makes the first pass a
   seed-only NOOP, never a false sweep. The session watchdog's alert dedup is `obs-session-<name>`.

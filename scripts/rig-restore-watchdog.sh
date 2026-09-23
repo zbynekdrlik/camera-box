@@ -150,7 +150,9 @@ _rig_obs_resolve_host() {
 
 # rig_obs_targets -> one `name host` line per OBS box to probe THIS pass, in roster order. A
 # traveling member is skipped (logged) while away (obs_fleet_poll_now), so an away box never counts
-# as UNREADABLE and never holds the E2E marker hostage.
+# as UNREADABLE and never holds the E2E marker hostage -- UNLESS every member is away (only possible
+# via a RIG_WATCHDOG_OBS_BOXES override): then nothing is observed, the pass counts unreadable and
+# the marker is kept (fail-closed, rig_obs_unreadable_count).
 rig_obs_targets() {
   local pair name
   for pair in $OBS_BOXES; do
@@ -285,7 +287,7 @@ collect_observations() {
   else
     log "obs: ERROR: mktemp for the OBS roster failed — no OBS box probed this pass (counted unreadable)"
   fi
-  [ -n "$RIG_OBS_TARGETS" ] || log "obs: ERROR: empty OBS roster (OBS_BOXES='$OBS_BOXES') — counted unreadable, the E2E marker is kept"
+  [ -n "$RIG_OBS_TARGETS" ] || log "obs: ERROR: no OBS box probed this pass (roster OBS_BOXES='$OBS_BOXES' empty or every member away) — counted unreadable, the E2E marker is kept"
   RIG_OBS="$(cat "$obs_file")"
   rm -f "$obs_file"
 }

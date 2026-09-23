@@ -80,6 +80,7 @@ systemctl --user disable --now obs-session-watchdog.timer
 | `OBS_SESSION_WATCHDOG_CONFIRM_THRESHOLD` | `2` | consecutive invisible readings before alerting |
 | `OBS_SESSION_WATCHDOG_ALERT_THROTTLE_PASSES` | `10` | passes between repeat alerts for the same condition |
 | `OBS_SESSION_WATCHDOG_BOXES` | the obs-fleet `obs-session` facet (`stream\|10.77.9.204 resolume\|resolume.lan`) | roster override (`name\|host` pairs; non-Windows names are skipped) |
-| `STREAM_HOST` / `RESOLUME_HOST` | the roster's host | per-box address override |
-| `STREAM_USER` / `STREAM_PW` / `RESOLUME_USER` / `RESOLUME_PW` | `newlevel` / `newlevel` | ssh creds (targets.md) |
+| `<NAME>_HOST` (e.g. `STREAM_HOST`, `RESOLUME_HOST`) | the roster's host | per-box address override; `<NAME>` = the fleet name upper-cased, every non-alphanumeric turned into `_` |
+| `<NAME>_USER` / `<NAME>_PW` (e.g. `STREAM_PW`, `RESOLUME_PW`) | `OBS_SESSION_DEFAULT_USER` / `OBS_SESSION_DEFAULT_PW` | per-box ssh creds (same `<NAME>` rule) |
+| `OBS_SESSION_DEFAULT_USER` / `OBS_SESSION_DEFAULT_PW` | `newlevel` / `newlevel` | fleet-wide ssh login (targets.md) for a box with no per-box override |
 | `OBS_SESSION_WATCHDOG_STATE_FILE` | `$XDG_RUNTIME_DIR/camera-box-obs-session-watchdog.state` | per-box confirm/throttle state — deliberately DIFFERENT from #391's own state file, since both key on the same box names |
