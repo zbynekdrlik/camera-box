@@ -1281,3 +1281,20 @@ fn fleet_box_ip_strih_lx_defaults_to_the_fleet_list_host_1317() {
     let out = run_sourced(&script(), "STRIH_LX_IP=10.1.2.3 fleet_box_ip strih-lx");
     assert_eq!(out.trim(), "10.1.2.3");
 }
+
+// issue 1317 review round 1: an unresolvable strih-lx fleet host fails CLOSED (rc 2, no output),
+// never an empty dial address; the AHK fact is the shared obs-fleet one.
+#[test]
+fn fleet_box_ip_strih_lx_fails_closed_without_a_fleet_row_1317() {
+    let (rc, out, _err) = run_sourced_status(
+        &script(),
+        "unset STRIH_LX_IP; OBS_FLEET='stream|10.77.9.204|windows-genlock|always'; fleet_box_ip strih-lx",
+    );
+    assert_eq!(rc, 2, "no strih-lx row must fail closed: out={out:?}");
+    assert!(out.trim().is_empty(), "no empty dial address: {out:?}");
+    let src = std::fs::read_to_string(script()).unwrap();
+    assert!(
+        src.contains("obs_fleet_has_ahk"),
+        "fleet_box_has_ahk must delegate to the shared obs_fleet_has_ahk fact"
+    );
+}

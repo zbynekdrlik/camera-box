@@ -1796,3 +1796,43 @@ fn watchdog_unreadable_obs_names_follow_the_roster_1317() {
     );
     assert_eq!(out.trim(), "[]", "stderr={err}");
 }
+
+// ─── issue 1317 review round 1: the UNREADABLE count is roster-relative AND fail-closed ─────────
+// An EMPTY OBS roster (a mis-set OBS_FLEET, a failed targets mktemp) observed NO OBS box, so it can
+// never be a positive full restore: the count reads >= 1 and the E2E marker is KEPT (the #353
+// masking-bug class the old fixed `2 - seen` arithmetic guarded).
+
+#[test]
+fn unreadable_count_is_roster_relative_and_fail_closed_on_an_empty_roster_1317() {
+    let cases = [
+        (
+            "RIG_OBS_TARGETS=$'strih-lx 10.77.9.202\\nstream 10.77.9.204'\nRIG_OBS='obs stream scene=PRO'",
+            "1",
+        ),
+        (
+            "RIG_OBS_TARGETS=$'strih-lx 10.77.9.202\\nstream 10.77.9.204'\nRIG_OBS=$'obs strih-lx scene=Cam 3\\nobs stream scene=PRO'",
+            "0",
+        ),
+        ("RIG_OBS_TARGETS=''\nRIG_OBS=''", "1"),
+    ];
+    for (setup, want) in cases {
+        let (code, out, err) = rig_sourced(&[], &format!("{setup}\nrig_obs_unreadable_count"));
+        assert_eq!(code, 0, "stderr={err}");
+        assert_eq!(out.trim(), want, "setup={setup:?} stderr={err}");
+    }
+}
+
+#[test]
+fn empty_obs_roster_keeps_the_e2e_marker_1317() {
+    // marker=1, act=1, no failed teardown: an empty roster must still KEEP the marker.
+    let (_c, out, err) = rig_sourced(
+        &[],
+        "RIG_OBS_TARGETS=''\nRIG_OBS=''\nif rig_marker_should_clear 1 1 \"$(rig_obs_unreadable_count)\" 0; then echo CLEAR; else echo KEPT; fi",
+    );
+    assert_eq!(out.trim(), "KEPT", "stderr={err}");
+    let src = fs::read_to_string(watchdog()).expect("read watchdog");
+    assert!(
+        src.contains("obs_unreadable=\"$(rig_obs_unreadable_count)\""),
+        "main() must take the unreadable count from rig_obs_unreadable_count"
+    );
+}

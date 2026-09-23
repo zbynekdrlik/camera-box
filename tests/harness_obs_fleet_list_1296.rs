@@ -684,3 +684,22 @@ fn watchdog_measure(env: &[(&str, &str)]) -> String {
     );
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
+
+#[test]
+fn fleet_has_ahk_is_the_one_ahk_watcher_fact_1317() {
+    // The NL_STARTUP.ahk auto-respawn watcher runs on resolume (and ran on the retired Windows strih,
+    // still named by the legacy deploy/launch planner arms); stream and the Linux boxes have none.
+    for (name, want) in [
+        ("resolume", "1"),
+        ("strih", "1"),
+        ("stream", "0"),
+        ("strih-lx", "0"),
+        ("imag", "0"),
+    ] {
+        assert_eq!(
+            fleet_stdout(&format!("obs_fleet_has_ahk {name}")),
+            want,
+            "obs_fleet_has_ahk {name}"
+        );
+    }
+}

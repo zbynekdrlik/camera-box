@@ -467,3 +467,91 @@ fn readme_documents_ships_disabled_and_install_procedure() {
         "README must document the supervisor install procedure"
     );
 }
+
+// ─── issue 1317 review round 1: a NEW Windows fleet box is watched with no code edit ───────────
+// "one row + facet edit -> every consumer": a windows-genlock member the watchdog has never heard of
+// gets default credentials + a generic <NAME>_HOST/_USER/_PW override, never a silent skip.
+
+#[test]
+fn targets_accept_a_new_windows_box_from_the_fleet_list_1317() {
+    let fleet = "stream|10.77.9.204|windows-genlock|always\npp|10.9.9.9|windows-genlock|always";
+    assert_eq!(
+        targets(&[
+            ("OBS_FLEET", fleet),
+            ("OBS_SESSION_WATCHDOG_BOXES", "pp|10.9.9.9"),
+        ]),
+        "pp 10.9.9.9 0"
+    );
+    assert_eq!(
+        targets(&[
+            ("OBS_FLEET", fleet),
+            ("OBS_SESSION_WATCHDOG_BOXES", "pp|10.9.9.9"),
+            ("PP_HOST", "192.0.2.5"),
+        ]),
+        "pp 192.0.2.5 0",
+        "the generic <NAME>_HOST override repoints any Windows box"
+    );
+}
+
+#[test]
+fn main_probes_a_new_windows_box_with_default_credentials_1317() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let calls = tmp.path().join("sshpass-calls.log");
+    let sshpass = tmp.path().join("sshpass");
+    fs::write(
+        &sshpass,
+        format!(
+            "#!/bin/sh\necho \"$*\" >> {}\nprintf '%b' '{HEALTHY}'\nexit 0\n",
+            calls.display()
+        ),
+    )
+    .expect("write sshpass stub");
+    let mut perm = fs::metadata(&sshpass).unwrap().permissions();
+    std::os::unix::fs::PermissionsExt::set_mode(&mut perm, 0o755);
+    fs::set_permissions(&sshpass, perm).unwrap();
+    let path = format!(
+        "{}:{}",
+        tmp.path().display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let out = Command::new("bash")
+        .arg("-c")
+        .arg(". \"$SCRIPT\"\nDRY_RUN=1\nmain")
+        .env("SCRIPT", script())
+        .env("OBS_SESSION_WATCHDOG_STATE_FILE", tmp.path().join("state"))
+        .env(
+            "OBS_FLEET",
+            "stream|10.77.9.204|windows-genlock|always\npp|10.9.9.9|windows-genlock|always",
+        )
+        .env("OBS_SESSION_WATCHDOG_BOXES", "pp|10.9.9.9")
+        .env("AIRULESET_NOTIFY", "/dev/null/does-not-matter")
+        .env("PATH", path)
+        .output()
+        .expect("run bash harness");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "stderr={err}");
+    let log = fs::read_to_string(&calls).unwrap_or_default();
+    assert!(
+        log.contains("newlevel@10.9.9.9"),
+        "a new Windows box is probed with the default ssh user: {log}\nstderr={err}"
+    );
+    assert!(
+        !err.contains("no ssh credentials"),
+        "a new Windows box must never be silently skipped: {err}"
+    );
+}
+
+#[test]
+fn has_ahk_comes_from_the_shared_fleet_fact_1317() {
+    // ONE AHK-watcher fact (obs-fleet.sh obs_fleet_has_ahk) read by this watchdog AND the deploy
+    // planner, never a second per-script case table.
+    let body = read("scripts/obs-session-watchdog.sh");
+    assert!(
+        body.contains("obs_fleet_has_ahk"),
+        "the watchdog must read the shared obs_fleet_has_ahk fact"
+    );
+    assert!(
+        !body.contains("obs_session_box_has_ahk"),
+        "the per-script has_ahk case table must be gone"
+    );
+}
