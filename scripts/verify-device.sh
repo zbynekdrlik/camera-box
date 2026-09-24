@@ -896,8 +896,11 @@ fail() { printf "  ${RED}[FAIL]${NC} %s\n" "$1"; FAILS=$((FAILS + 1)); }
 # fails the acceptance gate (#453's ".bak cruft is drift to surface, not a functional defect").
 warn() { printf "  ${YELLOW}[WARN]${NC} %s\n" "$1"; }
 
+# UserKnownHostsFile=/dev/null (issue 1311): a REFLASHED box has a new host key. With dev1's real
+# known_hosts, ssh refuses password auth for the mismatched key even under StrictHostKeyChecking=no,
+# so every check read `ssh rc=255` (37 false FAILs on cam4). Match every other rig tool here.
 ssh_box() {
-  sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout="$SSH_TIMEOUT" \
+  sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout="$SSH_TIMEOUT" \
     "${SSH_USER}@${IP}" "$1"
 }
 
