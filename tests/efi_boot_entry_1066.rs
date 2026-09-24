@@ -277,7 +277,7 @@ fn setup_device_step17d_creates_named_entry_on_box_1066() {
     // `efi_cam_box_ensure` (scripts/lib/efi-boot-entry.sh), which create-usb-linux.sh also calls
     // -- so STEP 17d must call it, and the lib function must carry the create + reorder.
     assert!(
-        block.contains("efi_cam_box_ensure") && block.contains("$EFI_CAM_BOX_LABEL"),
+        block.contains("efi_cam_box_ensure \"$EFI_ROOT_DISK\""),
         "STEP 17d must create/repair the named entry via the shared efi_cam_box_ensure (#1066 D6, issue 1311)"
     );
     let lib = read("scripts/lib/efi-boot-entry.sh");
