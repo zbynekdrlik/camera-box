@@ -318,7 +318,7 @@ _strih_lx_broadcast_guard() {
   { guard_err="$( ( stray_session_check_assert "$STRIH_LX_PREP_OBS_PHASE2_DIR" "$STRIH_LX_PREP_HOST" "$STRIH_LX_PREP_STREAM_HOST" "the strih-lx OBS deploy (stop + setup-strih.sh)" ) 2>&1 1>&3 3>&- )"; grc=$?; } 3>&1
   [ -n "$guard_err" ] && printf '%s\n' "$guard_err" >&2
   [ "$grc" = 0 ] && return 0
-  _strih_lx_fail "$step" "$grc" 4 "a broadcast is LIVE on strih/stream: $(stray_session_busy_summary "$guard_err") -- refusing to stop the strih OBS; ${kept} (a leftover recording: stop it over OBS-WS, see the hint above, and re-run)"
+  _strih_lx_fail "$step" "$grc" 4 "a broadcast is LIVE on strih/stream: $(stray_session_busy_summary "$guard_err") -- refusing to stop the strih OBS; ${kept} (ONLY if the hint above names our own leftover recording -- recording ON, streaming OFF -- stop it over OBS-WS and re-run; never a live production)"
 }
 
 _strih_lx_start_best_effort() {
@@ -354,7 +354,7 @@ strih_lx_prepare() {
   STRIH_LX_PREP_OBS_PHASE2_DIR="$(strih_lx_obs_phase2_dir)" && [ -f "$STRIH_LX_PREP_OBS_PHASE2_DIR/obs_phase2.py" ] \
     || { _strih_lx_fail resolve 2 3 "no obs_phase2.py in '${STRIH_LX_PREP_OBS_PHASE2_DIR:-}' -- the rig-busy guard could not read strih/stream"; return; }
   declare -F stray_session_check_assert >/dev/null && declare -F stray_session_busy_summary >/dev/null \
-    || { _strih_lx_fail resolve 2 3 "stray_session_check_assert is not loaded (source scripts/lib/stray-session-check.sh) -- the deploy never stops OBS unguarded"; return; }
+    || { _strih_lx_fail resolve 2 3 "stray_session_check_assert / stray_session_busy_summary are not loaded (source scripts/lib/stray-session-check.sh) -- the deploy never stops OBS unguarded"; return; }
   STRIH_LX_PREP_STAGE="$(strih_lx_stage_dir "$sha")" || { _strih_lx_fail resolve 2 3 "canonical SHA '$sha' is not a hex commit id"; return; }
   local vp="${STRIH_LX_VERIFY_POLLS:-24}" vs="${STRIH_LX_VERIFY_POLL_SECS:-10}" st="${STRIH_LX_VERIFY_SETTLE_SECS:-90}"
   # the first poll has no sleep before it, so the observable window is (polls - 1) x secs.

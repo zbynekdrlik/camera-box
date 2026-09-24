@@ -321,8 +321,9 @@ fn stray_check_refuses_on_a_partial_outage_when_a_readable_box_is_busy_1271() {
 }
 
 /// The fail-OPEN semantics claim: a fully-unreadable rig (busy=None, NO readable busy box) must
-/// proceed (exit 0) with a WARNING — the job-start rig-busy-gate.sh already fail-closed a live
-/// broadcast; a momentary WS blip here must not newly abort a healthy run (issue 1271 review 🔵3).
+/// proceed (exit 0) with a WARNING — for the E2E harness the job-start rig-busy-gate.sh already
+/// fail-closed a live broadcast (other callers accept this risk); a momentary WS blip here must not
+/// newly abort a healthy run (issue 1271 review 🔵3).
 #[test]
 fn stray_check_fails_open_when_the_rig_state_is_unreadable_1271() {
     let d = scratch("unreach");
