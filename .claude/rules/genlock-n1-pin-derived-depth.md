@@ -89,7 +89,7 @@ Plus the 1 µs pin tolerance (a whole-frame pin like 1000 ms must not count one 
 - Parity gate: build a stub `camera_box` rlib from those three modules, compile
   `tests/genlock_relock_selection_parity.rs` with `--extern camera_box=…`, `CARGO_MANIFEST_DIR` +
   `CARGO_TARGET_TMPDIR` set. Mutation-proof it by pointing `CARGO_MANIFEST_DIR` at a scratch repo
-  with a mutated obs-source.c (17 mutations, all RED at landing). The source-side
+  with a mutated obs-source.c AND a copy of `obs-genlock-grid.h` (the on-grid case `#include`s it via `CARGO_MANIFEST_DIR`; without it every mutation reads RED for the wrong reason) (17 mutations, all RED at landing). The source-side
   `genlock_n1_tick_is_on_grid` has its own parity case against the REAL `obs-genlock-grid.h`.
 - The C wrappers (`genlock_n1_tick_wall_now`, `genlock_n1_tick_is_on_grid`, the routing, the hold
   call site) are not in the parity lift: lift them with stub `obs` / `os_gettime_ns` /
