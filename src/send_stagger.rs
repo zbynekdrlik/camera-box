@@ -465,30 +465,15 @@ mod tests {
     }
 
     #[test]
-    fn the_stagger_is_on_in_production_1242() {
-        // The wait now lives on the send thread (`send_handoff`), so the capture loop never pays
-        // for the offset and the shipped plan() staggers again: CAM7 = 6 x 1.2 ms.
+    fn the_stagger_is_off_in_production_1242() {
+        // 24.9.2026: the 7.2 ms CAM7 offset did not fit the slot (per-frame work spikes to 15 ms
+        // -> OVER BUDGET -> a 112-relock burst on strih-lx), and the switch drops did not clearly
+        // improve, so the shipped plan() hands every frame over at once again.
         let p = plan("CAM7", Some(60), 60, 1);
-        assert_eq!(p.offset, Duration::from_micros(7200));
-        assert_eq!(p.log_line, "NDI send stagger: cam7 offset=7200 us (#1242)");
-        assert!(!p.warn);
-    }
-
-    #[test]
-    fn the_rollback_switch_still_words_the_disabled_line_1242() {
-        // `STAGGER_ACTIVE` stays as a one-constant rollback: switched off, every box hands its
-        // frame over at once and says so.
-        let p = plan_gated(false, "CAM7", Some(60), 60, 1);
         assert_eq!(p.offset, Duration::ZERO);
-        assert_eq!(
-            p.log_line,
-            "NDI send stagger: cam7 offset=0 us (#1242) — stagger disabled (STAGGER_ACTIVE=false)"
-        );
+        assert!(p.log_line.contains("offset=0 us (#1242)"), "{}", p.log_line);
+        assert!(p.log_line.contains("stagger disabled"), "{}", p.log_line);
         assert!(!p.warn);
-        assert_eq!(
-            plan_gated(true, "CAM7", Some(60), 60, 1),
-            plan_with("CAM7", Some(60), 60, 1)
-        );
     }
 
     #[test]

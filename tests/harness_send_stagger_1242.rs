@@ -1,22 +1,20 @@
-//! #1242 — static anchors for the per-camera NDI SEND stagger wiring in `src/main.rs` and the
-//! production send thread (`src/ndi_send_thread.rs`).
+//! #1242 — static anchors for the per-camera NDI SEND stagger wiring in `src/main.rs`.
 //!
-//! The pure pieces (`camera_box::send_stagger`, `camera_box::send_handoff`) are unit-tested in
-//! their own modules. This file pins the WIRING those tests cannot see:
+//! The pure decision (`camera_box::send_stagger`) is unit-tested in its own module. This file pins
+//! the WIRING the pure tests cannot see:
 //!
 //! * the stagger is resolved ONCE from the box's resolved OS hostname plus the genlock and capture
 //!   rates (`send_stagger::plan`), and its one startup line is logged;
-//! * the capture callback NEVER sleeps: the wait for the offset lives on the send thread;
-//! * the send deadline is anchored at the emit-gate decision, AFTER the gate polled the wall clock;
-//! * the frame is handed off AFTER every timecode of the iteration is fixed (the starvation repeats
-//!   and the current frame travel in ONE job, so they share one deadline);
-//! * a job replaced unsent in the single slot is counted;
-//! * the send thread owns the sender, the synchronous send, the #944 heartbeat and the #297
-//!   re-announce, and runs pinned + SCHED_FIFO like the burn thread;
-//! * the E2E burn thread waits for the SAME deadline before its send;
-//! * the #1131 buffered-queue signal reads the raw dequeue again (no capture sleep to add back);
-//! * the window accounting is reported on the routine 5 s cadence (`send_handoff::window_summary`);
-//! * shutdown closes the hand-off and joins the send thread;
+//! * the sleep runs AFTER the frame's genlock timecode is computed (so the FLOOR-boundary timecode
+//!   never moves) and BEFORE the first send of the iteration (the starvation repeats and the
+//!   current frame share ONE delay, never one each);
+//! * the emit-gate poll that grids the next boundary runs BEFORE the sleep (the grid is computed
+//!   from the wall clock, never from the send instant);
+//! * a frame that already came from a non-empty queue skips the sleep (`should_sleep`);
+//! * the previous sleep is taken BEFORE the dequeue, so it always pairs with the very next dequeue
+//!   (a corrupted buffer never reaches the callback), and the #1131 buffered-queue signal adds it
+//!   back (`idle_wait_ms`);
+//! * the window accounting is reported on the routine 5 s cadence (`window_summary`);
 //! * `src/ndi.rs` (the timecode stamp + the SDK call) is untouched by the stagger.
 
 use std::path::PathBuf;
@@ -33,7 +31,10 @@ fn main_rs() -> String {
 /// The byte offset of the ONE occurrence of `needle` in `hay` (fails on 0 or 2+).
 fn unique(hay: &str, needle: &str) -> usize {
     let n = hay.matches(needle).count();
-    assert_eq!(n, 1, "expected exactly one {needle:?}, found {n}");
+    assert_eq!(
+        n, 1,
+        "expected exactly one {needle:?} in src/main.rs, found {n}"
+    );
     hay.find(needle).unwrap()
 }
 
@@ -54,131 +55,95 @@ fn stagger_is_planned_once_from_the_resolved_os_hostname_1242() {
 }
 
 #[test]
-fn the_capture_callback_never_sleeps_1242() {
-    let s = main_rs();
-    let start = unique(&s, "let result = capture.process_frame(|data, info| {");
-    let end = unique(&s, "wedge_heartbeat_ns.store(");
-    assert!(start < end);
-    let callback = &s[start..end];
-    assert!(
-        !callback.contains("thread::sleep"),
-        "the capture callback must not sleep: the stagger wait belongs to the send thread"
-    );
-    for gone in [
-        "send_stagger::remaining_sleep(",
-        "send_stagger::should_sleep(",
-        "send_stagger::idle_wait_ms(",
-        "last_stagger_sleep_ms",
-    ] {
-        assert!(
-            !s.contains(gone),
-            "{gone:?} is the retired capture-loop sleep and must be gone"
-        );
-    }
-}
-
-#[test]
-fn the_deadline_is_anchored_at_the_emit_gate_decision_1242() {
-    let s = main_rs();
-    let poll = unique(&s, "let emit = decimation_gate.poll(");
-    let anchor = unique(&s, "let stagger_anchor = std::time::Instant::now();");
-    let deadline = unique(
-        &s,
-        "camera_box::send_handoff::send_deadline(stagger_anchor, send_stagger_offset)",
-    );
-    assert!(
-        poll < anchor && anchor < deadline,
-        "the gate grids the boundary from the wall clock BEFORE the anchor; the deadline is anchor + offset"
-    );
-}
-
-#[test]
-fn the_frame_is_handed_off_after_every_timecode_is_fixed_1242() {
+fn stagger_sleep_sits_between_the_timecode_and_the_first_send_1242() {
     let s = main_rs();
     let timecode = unique(
         &s,
         "let capture_timecode_100ns = camera_box::genlock_stamp::genlock_emit_timecode_100ns(",
     );
-    let repeats = unique(
+    let sleep = unique(&s, "camera_box::send_stagger::remaining_sleep(");
+    let first_send = unique(
         &s,
         "let starvation_repeats = decimation_gate.last_poll_starvation_repeats();",
     );
-    let last_emit = unique(&s, "emit_one(capture_timecode_100ns);");
-    let hand_off = unique(&s, "send_thread.hand_off(");
     assert!(
-        timecode < repeats && repeats < last_emit && last_emit < hand_off,
-        "the hand-off comes after the timecode, the starvation repeats and the current frame"
+        timecode < sleep,
+        "the stagger must run AFTER the genlock timecode is computed (the timecode must not move)"
     );
-    let call = &s[hand_off..(hand_off + 240).min(s.len())];
     assert!(
-        call.contains("std::mem::take(&mut production_timecodes)")
-            && call.contains("send_deadline"),
-        "ONE job carries every timecode of the iteration and the deadline: {call}"
+        sleep < first_send,
+        "the stagger must run BEFORE the first send of the iteration (one delay per iteration)"
     );
-    unique(&s, "production_timecodes.push(emit_timecode_100ns);");
 }
 
 #[test]
-fn a_replaced_frame_is_counted_1242() {
+fn the_emit_grid_is_polled_before_the_stagger_1242() {
     let s = main_rs();
-    let hand_off = unique(&s, "send_thread.hand_off(");
-    let counted = unique(&s, "capture_window.note_replaced(replaced);");
-    assert!(hand_off < counted);
+    let poll = unique(&s, "let emit = decimation_gate.poll(");
+    let anchor = unique(&s, "let stagger_anchor = std::time::Instant::now();");
+    let sleep = unique(&s, "camera_box::send_stagger::remaining_sleep(");
+    assert!(
+        poll < anchor && anchor < sleep,
+        "the decimation gate grids the boundary from the wall clock BEFORE the stagger anchor"
+    );
 }
 
 #[test]
-fn the_send_thread_owns_the_sender_the_wait_and_the_heartbeat_1242() {
+fn a_backlogged_frame_skips_the_sleep_1242() {
     let s = main_rs();
-    unique(&s, "camera_box::ndi_send_thread::NdiSendThread::spawn(");
-    assert!(
-        !s.contains("send_frame_zero_copy("),
-        "the production send moved off the capture thread"
-    );
-    assert!(
-        !s.contains("maybe_reannounce("),
-        "the #297 re-announce runs on the send thread, which owns the sender"
-    );
-    let t = read("src/ndi_send_thread.rs");
-    for needle in [
-        "send_frame_zero_copy(",
-        "maybe_reannounce(",
-        "crate::send_handoff::run_send_loop(",
-        "crate::affinity::pin_capture_thread();",
-        "crate::affinity::set_current_thread_realtime(",
-        "if any_ok {",
-        "\"Failed to send frame: {}\"",
-        "std::thread::yield_now();",
-    ] {
-        assert!(
-            t.contains(needle),
-            "src/ndi_send_thread.rs must contain {needle:?}"
-        );
-    }
-}
-
-#[test]
-fn the_burn_thread_waits_for_the_same_deadline_1242() {
-    let s = main_rs();
-    unique(&s, "send_deadline: std::time::Instant,");
-    let wait = unique(
+    let q = unique(
         &s,
-        "camera_box::send_handoff::sleep_until(job.send_deadline)",
+        "let queue_had_frame = if configured_capture_fps > 0.0 {",
     );
-    let send = unique(&s, "burn_sender.send_frame_data_with_timecode(");
+    let backlog = unique(&s, "frame_backlogged = queue_had_frame;");
+    let decide = unique(&s, "camera_box::send_stagger::should_sleep(");
+    let sleep = unique(&s, "camera_box::send_stagger::remaining_sleep(");
     assert!(
-        wait < send,
-        "the burn thread waits for the frame's deadline before its send"
+        q < backlog && backlog < decide && decide < sleep,
+        "the backlog signal must feed should_sleep() before any sleep"
     );
 }
 
 #[test]
-fn the_buffered_queue_signal_reads_the_raw_dequeue_1242() {
+fn only_a_real_sleep_counts_as_slept_1242() {
     let s = main_rs();
-    let at = unique(&s, "camera_box::capture_stall::frame_from_nonempty_queue(");
-    let call = &s[at..(at + 160).min(s.len())];
+    let sleep_call = unique(&s, "std::thread::sleep(remaining);");
+    let slept = unique(&s, "stagger_window.note_slept(");
+    let past = unique(&s, "stagger_window.note_past_offset();");
+    let skipped = unique(&s, "stagger_window.note_skipped();");
     assert!(
-        call.contains("info.dequeue_duration_ms,"),
-        "no capture sleep to add back any more: {call}"
+        sleep_call < slept && slept < past && past < skipped,
+        "a sleep is counted right after it happens (with its requested + measured ms); \
+         a frame whose work already ate the offset counts as past-offset, a backlogged one as skipped"
+    );
+    let call = &s[slept..(slept + 160).min(s.len())];
+    assert!(
+        call.contains("remaining") && call.contains("stagger_slept_now_ms"),
+        "note_slept() needs the requested and the measured sleep: {call}"
+    );
+}
+
+#[test]
+fn buffered_queue_signal_adds_the_stagger_back_1242() {
+    let s = main_rs();
+    let take = unique(
+        &s,
+        "let stagger_slept_ms = std::mem::take(&mut last_stagger_sleep_ms);",
+    );
+    let dequeue = unique(&s, "let result = capture.process_frame(");
+    let q = unique(
+        &s,
+        "let queue_had_frame = if configured_capture_fps > 0.0 {",
+    );
+    let idle = unique(&s, "camera_box::send_stagger::idle_wait_ms(");
+    let poll = unique(&s, "let emit = decimation_gate.poll(");
+    assert!(
+        take < dequeue,
+        "the previous sleep must be taken BEFORE the dequeue it shortened"
+    );
+    assert!(
+        q < idle && idle < poll,
+        "queue_had_frame must be computed from idle_wait_ms before the gate poll"
     );
 }
 
@@ -189,31 +154,20 @@ fn the_window_accounting_is_reported_every_5s_1242() {
         &s,
         "\"Streaming: {:.1} fps emitted / {:.1} fps captured ({} sent, {} captured, {} capture-dropped, {} corrupted)\",",
     );
-    let summary = unique(&s, "camera_box::send_handoff::window_summary(");
+    let summary = unique(&s, "camera_box::send_stagger::window_summary(");
     assert!(
         streaming < summary,
         "the stagger summary rides the routine 5 s Streaming report"
     );
-    unique(&s, "capture_window.note_work(");
-}
-
-#[test]
-fn shutdown_joins_the_send_thread_1242() {
-    let s = main_rs();
-    let loop_start = unique(&s, "while running_capture.load(Ordering::Relaxed) {");
-    let join = unique(&s, "send_thread.shutdown();");
-    assert!(
-        loop_start < join,
-        "the send thread is joined after the capture loop ends"
-    );
+    unique(&s, "stagger_window.note_work(");
 }
 
 #[test]
 fn ndi_send_path_and_timecode_are_untouched_1242() {
     let ndi = read("src/ndi.rs");
     assert!(
-        !ndi.contains("send_stagger") && !ndi.contains("send_handoff"),
-        "the stagger lives in the hand-off, never in the NDI timecode/send path"
+        !ndi.contains("send_stagger"),
+        "the stagger lives in the capture loop, never in the NDI timecode/send path"
     );
     assert!(ndi.contains("timecode: timecode_100ns,"));
 }

@@ -453,9 +453,6 @@ const _: () = assert!(
 // `send_stagger`, pinned equal here).
 const _: () =
     assert!(send_stagger::ADDBACK_SOUND_FRACTION == capture_stall::BUFFERED_DEQUEUE_FRACTION);
-// #1242 — the capture → send-thread hand-off that owns the stagger WAIT (pure, std-only, generic
-// over the frame): a single newest-wins slot, the absolute-deadline send loop and the 5 s window.
-pub mod send_handoff;
 
 // #707 — V4L2 capture DEQUEUE stall diagnostic (pure decision). Given how long a SINGLE blocking
 // `process_frame` dequeue (`self.stream.next()`, a VIDIOC_DQBUF under the hood) took and the
