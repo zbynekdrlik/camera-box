@@ -120,9 +120,10 @@ strih_lx_remote_setup_log_cmd() {
 }
 
 # setup-strih.sh exits 0 with a reboot-pending warning (the baseline lands at the next boot): pass
-# those lines on instead of letting VERIFIED swallow them.
+# THAT line on instead of letting VERIFIED swallow it. Keyed on the warning's own text (setup-strih.sh
+# step 17; a test pins the coupling) -- the baseline prints many routine "next boot" lines earlier.
 strih_lx_remote_setup_notes_cmd() {
-  printf "grep -i -m 3 -e 'next boot' '%s/setup-strih.log' 2>/dev/null || true\n" "$1"
+  printf "grep -F -e 'reboot strih-lx, then run verify-strih' '%s/setup-strih.log' 2>/dev/null || true\n" "$1"
 }
 
 # touch the start marker (the read-back only trusts an OBS log written after it), then start.
@@ -250,10 +251,14 @@ _strih_lx_start_best_effort() {
   _strih_lx_ssh "$(strih_lx_remote_start_cmd "$STRIH_LX_PREP_STAGE")" || true
 }
 
-_strih_lx_installer_alive() {  # -> rc 0 when a setup-strih.sh is (or may be) running on the box
+_strih_lx_installer_state() {  # -> alive | idle | unreachable (the ssh itself failed)
   local out
-  out="$(_strih_lx_ssh "$(strih_lx_remote_installer_cmd)" 2>/dev/null | tr -d '[:space:]')"
-  [ "$out" != "idle" ]
+  out="$(_strih_lx_ssh "$(strih_lx_remote_installer_cmd)" 2>/dev/null)" || { echo unreachable; return 0; }
+  case "$(printf '%s' "$out" | tr -d '[:space:]')" in
+    idle) echo idle ;;
+    alive) echo alive ;;
+    *) echo unreachable ;;
+  esac
 }
 
 # strih_lx_prepare SHA WORKDIR REPO GENLOCK_REPO -> everything that needs no box: resolve, download,
@@ -268,6 +273,10 @@ strih_lx_prepare() {
   strih_lx_is_ipv4 "$STRIH_LX_PREP_HOST" \
     || { _strih_lx_fail resolve 2 3 "strih-lx host '$STRIH_LX_PREP_HOST' must be the box's dotted IPv4 -- setup-strih.sh pins STRIH_LX_IP as the box's own static address"; return; }
   STRIH_LX_PREP_STAGE="$(strih_lx_stage_dir "$sha")" || { _strih_lx_fail resolve 2 3 "canonical SHA '$sha' is not a hex commit id"; return; }
+  local vp="${STRIH_LX_VERIFY_POLLS:-24}" vs="${STRIH_LX_VERIFY_POLL_SECS:-10}" st="${STRIH_LX_VERIFY_SETTLE_SECS:-90}"
+  if [ "$st" -gt 0 ] && [ $((vp * vs)) -le "$st" ]; then
+    _strih_lx_fail resolve 2 3 "STRIH_LX_VERIFY_SETTLE_SECS=$st cannot fit the read-back budget ${vp} x ${vs} s -- the deploy would always be refused"; return
+  fi
   for tool in sshpass rsync curl tar jq timeout; do
     command -v "$tool" >/dev/null 2>&1 || { _strih_lx_fail resolve 127 3 "$tool is required for the strih-lx deploy"; return; }
   done
@@ -341,11 +350,14 @@ strih_lx_apply() {
   if [ "$rc" != 0 ]; then
     # The preflight saw no installer, so one running now is THIS deploy's (the ssh dropped after the
     # detach -- exactly what the detach is for): follow it through the rc poll below.
-    if ! _strih_lx_installer_alive; then
-      _strih_lx_start_best_effort
-      _strih_lx_fail setup "$rc" 4 "launching setup-strih.sh failed (sudo / run-setup.sh) -- nothing installed"; return
-    fi
-    echo "WARNING: [strih-lx setup] the launch ssh returned rc=$rc but setup-strih.sh is running (or the box is unreachable) -- following it through the rc poll" >&2
+    case "$(_strih_lx_installer_state)" in
+      idle)
+        _strih_lx_start_best_effort
+        _strih_lx_fail setup "$rc" 4 "launching setup-strih.sh failed (sudo / run-setup.sh) -- nothing installed"; return ;;
+      unreachable)
+        _strih_lx_fail setup "$rc" 4 "the launch ssh returned rc=$rc and the box is unreachable -- the installer state is unknown; NOT starting OBS: check $stage/setup-strih.rc once the box answers"; return ;;
+    esac
+    echo "WARNING: [strih-lx setup] the launch ssh returned rc=$rc but setup-strih.sh is running -- following it through the rc poll" >&2
   fi
   local polls="${STRIH_LX_SETUP_POLLS:-270}" secs="${STRIH_LX_SETUP_POLL_SECS:-10}" i=0 src=""
   while [ "$i" -lt "$polls" ]; do
@@ -354,7 +366,7 @@ strih_lx_apply() {
     i=$((i + 1)); sleep "$secs"
   done
   if [ -z "$src" ]; then
-    if _strih_lx_installer_alive; then
+    if [ "$(_strih_lx_installer_state)" != idle ]; then
       _strih_lx_fail setup 124 4 "setup-strih.sh wrote no rc after $polls polls x ${secs} s and is still running (or the box is unreachable) -- NOT starting OBS over it; wait for $stage/setup-strih.rc"; return
     fi
     echo "# strih-lx: setup-strih.log tail:"; _strih_lx_ssh "$(strih_lx_remote_setup_log_cmd "$stage")" || true
@@ -382,6 +394,9 @@ strih_lx_apply() {
 # [verify] fail-closed: every field must pass, and the SAME non-zero MainPID + NRestarts must hold from
 # the first good poll for STRIH_LX_VERIFY_SETTLE_SECS (default 90 -- a crash loop can be slower than
 # one poll interval: the CEF trap on this box fired every ~60 s). A bad poll restarts the window.
+# Bash SECONDS follows the wall clock: dev1 is dantesync-disciplined (slews, a step is itself an
+# alarm), and the settle is a lower bound on observed stability, so a step can only shift it by the
+# step size -- accepted rather than a /proc/uptime dependency.
 _strih_lx_verify() {
   local sha="$1" vpolls="${STRIH_LX_VERIFY_POLLS:-24}" vsecs="${STRIH_LX_VERIFY_POLL_SECS:-10}"
   local settle="${STRIH_LX_VERIFY_SETTLE_SECS:-90}"
