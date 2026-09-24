@@ -5,17 +5,21 @@
 //! `/tmp` quota was full, rsync died with `Disk quota exceeded` (rc 11), and the old build simply
 //! kept running with nothing refusing. The arm (in `scripts/lib/strih-lx-deploy.sh`) now:
 //!
-//! * resolves the strih FULL artifact from the linux-genlock run at the anchor's SAME SHA and refuses
-//!   an artifact whose own `GENLOCK_BUILD_SHA.txt` is another commit;
+//! * resolves AND downloads every requested box's same-SHA artifact before any box is changed, and
+//!   refuses a strih artifact whose own `GENLOCK_BUILD_SHA.txt` is another commit;
+//! * refuses to start while a previous `setup-strih.sh` is still running on the box;
 //! * sweeps the stale `/tmp/genlock-stage-*` dirs FIRST through the existing
-//!   `obs-backup-retention.sh --local-sweep` decision, with the stage being deployed touched newest
-//!   so the sweep can never delete it;
+//!   `obs-backup-retention.sh --local-sweep` decision (stage dirs only, as the operator, never sudo),
+//!   with the stage being deployed touched newest so the sweep can never delete it;
 //! * stages the whole tree while the old OBS keeps running — an rsync failure exits 4 naming the
 //!   step BEFORE anything is stopped;
-//! * stops OBS only through the sanctioned stop code (`strih-obs-stop.sh`), never `kill -9`;
+//! * stops OBS only through the sanctioned stop code (`strih-obs-stop.sh`); the deploy itself never
+//!   sends a kill;
 //! * runs `setup-strih.sh` as root with the GH token on STDIN only (never an argv, never a file);
-//! * reads back and REFUSES (exit 4) unless the installed marker == the canonical SHA,
-//!   `strih-obs.service` is active, and `:8899` reports that SHA.
+//! * reads back and REFUSES (exit 4) unless the installed marker == the canonical SHA, the installed
+//!   libobs bytes match the bundle manifest, `strih-obs.service` is active with the SAME MainPID and
+//!   restart count on two consecutive polls, the new OBS log shows `render tick ENABLED`, and `:8899`
+//!   reports the canonical SHA.
 //!
 //! These tests drive the real script with `gh`/`sshpass`/`ssh`/`rsync`/`curl` stubbed on PATH, so
 //! no rig and no network is touched.
@@ -23,10 +27,12 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{Duration, Instant};
 
 const SHA: &str = "abc123def4567890";
 const OTHER: &str = "000000000000bad0";
 const TOKEN: &str = "tok-SECRET-123";
+const LIBSHA: &str = "libobs-bytes-good";
 
 fn manifest_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -53,7 +59,8 @@ fn write_exec(path: &Path, body: &str) {
 
 /// A stub bin dir: every external command the execute arm uses, configured by STUB_* env vars and
 /// logging each call (argv only) to $STUB_DIR/calls.log. stdin handed to the sweep / the setup
-/// launch is captured to $STUB_DIR/sweep.stdin / setup.stdin.
+/// launch is captured to $STUB_DIR/sweep.stdin / setup.stdin. The ssh stub dispatches on the remote
+/// command text, so the step commands keep distinguishing substrings.
 fn stub_bin(dir: &Path) -> PathBuf {
     let bin = dir.join("bin");
     fs::create_dir_all(&bin).unwrap();
@@ -64,13 +71,21 @@ printf 'gh %s\n' "$*" >> "$STUB_DIR/calls.log"
 case "$1 $2" in
   "run view") echo "$STUB_SHA" ;;
   "run list")
-    if [ -n "${STUB_NO_LINUX_RUN:-}" ]; then echo '[]'
-    else printf '[{"databaseId":777,"headSha":"%s","conclusion":"success"}]\n' "$STUB_SHA"; fi ;;
+    case "$*" in
+      *windows-genlock*) [ -n "${STUB_NO_WIN_RUN:-}" ] && { echo '[]'; exit 0; } ;;
+      *linux-genlock*) [ -n "${STUB_NO_LINUX_RUN:-}" ] && { echo '[]'; exit 0; } ;;
+    esac
+    printf '[{"databaseId":777,"headSha":"%s","conclusion":"success"}]\n' "$STUB_SHA" ;;
   "run download")
     d=""; while [ "$#" -gt 0 ]; do [ "$1" = "-D" ] && d="$2"; shift; done
     mkdir -p "$d/bin" "$d/lib/x86_64-linux-gnu/obs-plugins"
     : > "$d/bin/obs"
-    echo "${STUB_ARTIFACT_SHA:-$STUB_SHA}" > "$d/GENLOCK_BUILD_SHA.txt" ;;
+    echo "${STUB_ARTIFACT_SHA:-$STUB_SHA}" > "$d/GENLOCK_BUILD_SHA.txt"
+    if [ -n "${STUB_MANIFEST_NO_LIB:-}" ]; then
+      printf '{"files":[{"path":"bin/obs","sha256":"x"}]}\n' > "$d/BUNDLE_MANIFEST.json"
+    else
+      printf '{"files":[{"path":"lib/x86_64-linux-gnu/libobs.so.30","sha256":"%s"}]}\n' "$STUB_LIBSHA" > "$d/BUNDLE_MANIFEST.json"
+    fi ;;
   "auth token") echo "$STUB_TOKEN" ;;
   *) echo "gh stub: unhandled $*" >&2; exit 9 ;;
 esac
@@ -90,12 +105,20 @@ exec "$@"
 printf 'ssh %s\n' "$*" >> "$STUB_DIR/calls.log"
 cmd="${@: -1}"
 case "$cmd" in
+  *"pgrep -x setup-strih.sh"*)
+    if [ -f "$STUB_DIR/setup.stdin" ]; then echo "${STUB_INSTALLER_AFTER:-idle}"; else echo "${STUB_INSTALLER:-idle}"; fi ;;
   *--local-sweep*) cat > "$STUB_DIR/sweep.stdin"; echo "SWEEP"; exit "${STUB_SWEEP_RC:-0}" ;;
+  *LEFTOVER*) [ -n "${STUB_LEFTOVER:-}" ] && echo "LEFTOVER $STUB_LEFTOVER"; exit "${STUB_STAGECHECK_RC:-0}" ;;
   *setup-strih.rc*) [ -n "${STUB_SETUP_NO_RC:-}" ] || echo "${STUB_SETUP_RC:-0}"; exit 0 ;;
   *run-setup.sh*) cat > "$STUB_DIR/setup.stdin"; exit "${STUB_LAUNCH_RC:-0}" ;;
+  *"grep -i -m 3"*) [ -n "${STUB_REBOOT_LINE:-}" ] && echo "$STUB_REBOOT_LINE"; exit 0 ;;
   *setup-strih.log*) echo "setup log tail"; exit 0 ;;
   *strih-obs-stop.sh*) exit "${STUB_STOP_RC:-0}" ;;
-  *GENLOCK_BUILD_SHA.txt*) printf 'installed=%s active=%s\n' "${STUB_INSTALLED:-$STUB_SHA}" "${STUB_ACTIVE:-active}"; exit 0 ;;
+  *GENLOCK_BUILD_SHA.txt*)
+    n=0; [ -f "$STUB_DIR/readback.n" ] && n="$(cat "$STUB_DIR/readback.n")"; n=$((n + 1)); echo "$n" > "$STUB_DIR/readback.n"
+    pid=4242; restarts=0
+    if [ -n "${STUB_CRASHLOOP:-}" ]; then pid=$((4242 + n)); restarts="$n"; fi
+    printf 'installed=%s active=%s pid=%s restarts=%s lib=%s tick=%s\n' "${STUB_INSTALLED:-$STUB_SHA}" "${STUB_ACTIVE:-active}" "$pid" "$restarts" "${STUB_LIB:-$STUB_LIBSHA}" "${STUB_TICK:-1}"; exit 0 ;;
   *"--user start"*) exit "${STUB_START_RC:-0}" ;;
   *) exit "${STUB_SSH_RC:-0}" ;;
 esac
@@ -148,9 +171,18 @@ impl Run {
             .position(|l| l.contains(needle))
             .unwrap_or_else(|| panic!("no call containing `{needle}`:\n{}", self.calls))
     }
+    /// index of the LAST calls.log line containing `needle`, or None.
+    fn last(&self, needle: &str) -> Option<usize> {
+        self.calls
+            .lines()
+            .enumerate()
+            .filter(|(_, l)| l.contains(needle))
+            .map(|(i, _)| i)
+            .last()
+    }
 }
 
-fn run_exec(extra_env: &[(&str, &str)]) -> Run {
+fn run_exec_boxes(boxes: &str, extra_env: &[(&str, &str)]) -> Run {
     let dir = tempfile::tempdir().expect("tempdir");
     let bin = stub_bin(dir.path());
     let home = dir.path().join("home");
@@ -161,18 +193,22 @@ fn run_exec(extra_env: &[(&str, &str)]) -> Run {
         std::env::var("PATH").unwrap_or_default()
     );
     let mut cmd = Command::new(script());
-    cmd.args(["--run-id", "R1", "--boxes", "strih-lx"])
+    cmd.args(["--run-id", "R1", "--boxes", boxes])
         .current_dir(manifest_dir())
         .env("PATH", path)
         .env("HOME", &home)
         .env("STUB_DIR", dir.path())
         .env("STUB_SHA", SHA)
         .env("STUB_TOKEN", TOKEN)
+        .env("STUB_LIBSHA", LIBSHA)
         .env("STRIH_LX_SETUP_POLLS", "3")
         .env("STRIH_LX_SETUP_POLL_SECS", "0")
-        .env("STRIH_LX_VERIFY_POLLS", "2")
+        .env("STRIH_LX_VERIFY_POLLS", "3")
         .env("STRIH_LX_VERIFY_POLL_SECS", "0")
-        .env_remove("STRIH_LX_IP");
+        .env_remove("STRIH_LX_IP")
+        .env_remove("STRIH_LX_USER")
+        .env_remove("STRIH_LX_PW")
+        .env_remove("STRIH_LX_GH_TOKEN");
     for (k, v) in extra_env {
         cmd.env(k, v);
     }
@@ -187,9 +223,13 @@ fn run_exec(extra_env: &[(&str, &str)]) -> Run {
     }
 }
 
+fn run_exec(extra_env: &[(&str, &str)]) -> Run {
+    run_exec_boxes("strih-lx", extra_env)
+}
+
 /// The happy path: every step in order, the stage fully staged BEFORE the graceful stop, the token
-/// only on the setup launch's stdin, a fail-closed read-back that passes, and the durable fleet log
-/// now records strih-lx (it is really deployed).
+/// only on the setup launch's stdin, a fail-closed read-back that passes on two stable polls, and
+/// the durable fleet log now records strih-lx (it is really deployed).
 #[test]
 fn strih_lx_execute_stages_first_then_stops_sets_up_starts_and_verifies_1317() {
     let r = run_exec(&[]);
@@ -212,9 +252,12 @@ fn strih_lx_execute_stages_first_then_stops_sets_up_starts_and_verifies_1317() {
         "downloads the strih FULL artifact from the same-SHA run:\n{}",
         r.calls
     );
-    // order: prep(touch) < sweep < rsync bundle < rsync repo < stop < launch < rc poll < start < readback < :8899
+    // order: installer preflight < prep(touch) < sweep < stage check < rsync bundle/repo < stop
+    //        < launch < rc poll < start < read-back < :8899
+    let pre = r.at("pgrep -x setup-strih.sh");
     let prep = r.at(&format!("touch '{stage}'"));
     let sweep = r.at("--local-sweep");
+    let check = r.at("LEFTOVER");
     let rs_bundle = r.at(&format!("{stage}/bundle/"));
     let rs_repo = r.at(&format!("{stage}/repo/"));
     let stop = r.at("strih-obs-stop.sh");
@@ -224,7 +267,12 @@ fn strih_lx_execute_stages_first_then_stops_sets_up_starts_and_verifies_1317() {
     let readback = r.at("GENLOCK_BUILD_SHA.txt");
     let bs = r.at("curl ");
     assert!(
-        prep < sweep && sweep < rs_bundle && rs_bundle < stop && rs_repo < stop,
+        pre < prep
+            && prep < sweep
+            && sweep < check
+            && check < rs_bundle
+            && rs_bundle < stop
+            && rs_repo < stop,
         "the stage is complete BEFORE the stop:\n{}",
         r.calls
     );
@@ -233,18 +281,25 @@ fn strih_lx_execute_stages_first_then_stops_sets_up_starts_and_verifies_1317() {
         "stop -> setup -> start -> read-back:\n{}",
         r.calls
     );
-    // the sweep reuses obs-backup-retention.sh's own --local-sweep decision (password line, then
-    // the script itself on stdin), keeps only the newest stage (the just-touched one).
+    // the read-back needs TWO consecutive good polls (MainPID + NRestarts stable).
     assert!(
+        r.calls.matches("GENLOCK_BUILD_SHA.txt").count() >= 2,
+        "a single momentary `active` is never enough:\n{}",
         r.calls
-            .contains("--stage-parent /tmp --keep-runs 1 --keep-days 0 --execute"),
-        "{}",
-        r.calls
+    );
+    // the sweep reuses obs-backup-retention.sh's own --local-sweep decision, stage dirs only, as
+    // the operator (no sudo, no password line), from the COMMITTED tree.
+    let sweep_line = r.calls.lines().nth(sweep).unwrap();
+    assert!(
+        sweep_line.contains("--stages-only")
+            && sweep_line.contains("--stage-parent /tmp --keep-runs 1 --keep-days 0 --execute")
+            && !sweep_line.contains("sudo"),
+        "{sweep_line}"
     );
     let sweep_stdin = r.file("sweep.stdin");
     assert!(
-        sweep_stdin.starts_with("newlevel\n") && sweep_stdin.contains("obs_backup_sweep()"),
-        "the sweep program is obs-backup-retention.sh fed after the sudo password line:\n{sweep_stdin}"
+        !sweep_stdin.starts_with("newlevel") && sweep_stdin.contains("obs_backup_sweep()"),
+        "the sweep program is obs-backup-retention.sh itself, no password line:\n{sweep_stdin}"
     );
     // the GH token travels ONLY on the setup launch's stdin.
     assert!(
@@ -256,14 +311,25 @@ fn strih_lx_execute_stages_first_then_stops_sets_up_starts_and_verifies_1317() {
         "the GH token never appears in any argv or output:\n{}",
         r.calls
     );
-    // never a hard kill from the deploy.
-    assert!(
-        !r.calls.contains("kill -9")
-            && !r.calls.contains("pkill -KILL")
-            && !r.calls.contains("-KILL"),
-        "the deploy never force-kills OBS:\n{}",
-        r.calls
-    );
+    // the deploy itself sends no kill (the stop is delegated to strih-obs-stop.sh).
+    for k in ["kill -9", "-KILL", "SIGKILL", "killall", "kill -s"] {
+        assert!(
+            !r.calls.contains(k),
+            "the deploy never sends `{k}`:\n{}",
+            r.calls
+        );
+    }
+    // every remote command is time-bounded.
+    for l in r.calls.lines().filter(|l| l.starts_with("sshpass ")) {
+        if l.contains(" rsync ") {
+            assert!(
+                l.contains("--timeout="),
+                "rsync without an I/O timeout: {l}"
+            );
+        } else if l.contains(" ssh ") {
+            assert!(l.contains(" timeout "), "unbounded ssh call: {l}");
+        }
+    }
     assert!(
         r.fleet_log().contains(SHA) && r.fleet_log().contains("strih-lx"),
         "the durable fleet log records the deployed strih-lx:\n{}",
@@ -293,27 +359,66 @@ fn strih_lx_rsync_failure_is_loud_and_never_stops_obs_1317() {
     );
 }
 
-/// A failed sweep (the quota cannot be freed) is loud too, before any byte is staged.
+/// A failed sweep (the quota cannot be freed), a failed stage prep, or a stage that vanished are
+/// loud too, before any byte is staged. A stage dir the sweep could not remove is a loud WARNING.
 #[test]
-fn strih_lx_sweep_failure_is_loud_before_staging_1317() {
-    let r = run_exec(&[("STUB_SWEEP_RC", "1")]);
-    assert_eq!(r.code, 4, "err={}", r.err);
-    assert!(r.err.contains("[strih-lx sweep]"), "{}", r.err);
+fn strih_lx_sweep_failures_are_loud_before_staging_1317() {
+    for env in [
+        ("STUB_SWEEP_RC", "1"),
+        ("STUB_SSH_RC", "1"),
+        ("STUB_STAGECHECK_RC", "3"),
+    ] {
+        let r = run_exec(&[env]);
+        assert_eq!(r.code, 4, "{env:?}: err={}", r.err);
+        assert!(r.err.contains("[strih-lx sweep]"), "{env:?}: {}", r.err);
+        assert!(
+            !r.calls.contains("rsync "),
+            "{env:?}: no staging after a failed sweep:\n{}",
+            r.calls
+        );
+    }
+    let r = run_exec(&[("STUB_LEFTOVER", "/tmp/genlock-stage-0ld")]);
+    assert_eq!(r.code, 0, "a leftover only warns.\nerr={}", r.err);
     assert!(
-        !r.calls.contains("rsync "),
-        "no staging after a failed sweep:\n{}",
-        r.calls
+        r.err.contains("WARNING") && r.err.contains("/tmp/genlock-stage-0ld"),
+        "{}",
+        r.err
     );
 }
 
-/// The SHA read-back is a REFUSAL, not a printout: installed marker, unit state and :8899 must
-/// all agree with the canonical SHA.
+/// A previous setup-strih.sh still running on the box: refuse before the sweep could delete the
+/// stage it is reading, and never start a second concurrent installer.
 #[test]
-fn strih_lx_readback_refuses_a_wrong_sha_or_dead_unit_1317() {
+fn strih_lx_refuses_while_a_previous_installer_runs_1317() {
+    let r = run_exec(&[("STUB_INSTALLER", "alive")]);
+    assert_eq!(r.code, 4, "err={}", r.err);
+    assert!(
+        r.err.contains("[strih-lx preflight]") && r.err.contains("setup-strih.sh"),
+        "{}",
+        r.err
+    );
+    for c in [
+        "--local-sweep",
+        "rsync ",
+        "strih-obs-stop.sh",
+        "run-setup.sh",
+    ] {
+        assert!(!r.calls.contains(c), "`{c}` must not run:\n{}", r.calls);
+    }
+}
+
+/// The read-back is a REFUSAL, not a printout: marker, installed libobs bytes, unit state, a stable
+/// MainPID/NRestarts across two polls (a crash-looping Type=simple unit reads `active` between
+/// restarts), the new log's render tick, and :8899 must all agree.
+#[test]
+fn strih_lx_readback_refuses_a_wrong_sha_dead_or_crashlooping_obs_1317() {
     for (env, want) in [
         (("STUB_INSTALLED", OTHER), "GENLOCK_BUILD_SHA.txt"),
         (("STUB_ACTIVE", "failed"), "strih-obs.service"),
         (("STUB_BS_SHA", OTHER), ":8899"),
+        (("STUB_LIB", "libobs-bytes-stale"), "libobs.so.30"),
+        (("STUB_TICK", "0"), "render tick ENABLED"),
+        (("STUB_CRASHLOOP", "1"), "MainPID"),
     ] {
         let r = run_exec(&[env]);
         assert_eq!(r.code, 4, "{env:?} must refuse.\nerr={}", r.err);
@@ -327,9 +432,11 @@ fn strih_lx_readback_refuses_a_wrong_sha_or_dead_unit_1317() {
 }
 
 /// setup-strih.sh failing (non-zero rc file) is loud, shows the log tail, and still brings OBS back
-/// up best-effort so the box is not left dark — but the deploy is FAILED (exit 4, no log line).
+/// up best-effort so the box is not left dark — but the deploy is FAILED (exit 4, no log line). A
+/// setup that is still running (no rc in the budget, or a launch whose ssh dropped after the detach)
+/// never gets OBS started over it.
 #[test]
-fn strih_lx_setup_failure_is_loud_and_restarts_obs_best_effort_1317() {
+fn strih_lx_setup_failure_is_loud_and_never_starts_obs_over_a_running_installer_1317() {
     let r = run_exec(&[("STUB_SETUP_RC", "1")]);
     assert_eq!(r.code, 4, "err={}", r.err);
     assert!(
@@ -351,19 +458,41 @@ fn strih_lx_setup_failure_is_loud_and_restarts_obs_best_effort_1317() {
         r.fleet_log().is_empty(),
         "no fleet-log line for a failed deploy"
     );
-    // a setup that never writes its rc within the poll budget is a named timeout, not a hang.
-    let r = run_exec(&[("STUB_SETUP_NO_RC", "1")]);
+
+    // no rc within the budget, installer still alive -> named timeout, OBS NOT started.
+    let r = run_exec(&[("STUB_SETUP_NO_RC", "1"), ("STUB_INSTALLER_AFTER", "alive")]);
     assert_eq!(r.code, 4, "err={}", r.err);
     assert!(
         r.err.contains("[strih-lx setup]") && r.err.contains("no rc"),
         "{}",
         r.err
     );
+    assert!(
+        !r.calls.contains("--user start"),
+        "never start OBS over a running installer:\n{}",
+        r.calls
+    );
+
+    // launch ssh failed (e.g. dropped after the detach) while the installer runs -> no start.
+    let r = run_exec(&[("STUB_LAUNCH_RC", "255"), ("STUB_INSTALLER_AFTER", "alive")]);
+    assert_eq!(r.code, 4, "err={}", r.err);
+    assert!(r.err.contains("[strih-lx setup]"), "{}", r.err);
+    assert!(!r.calls.contains("--user start"), "{}", r.calls);
+
+    // launch failed and no installer is running -> the previous OBS is started best-effort.
+    let r = run_exec(&[("STUB_LAUNCH_RC", "1")]);
+    assert_eq!(r.code, 4, "err={}", r.err);
+    assert!(
+        r.at("run-setup.sh") < r.last("--user start").expect("best-effort start"),
+        "{}",
+        r.calls
+    );
 }
 
-/// A graceful stop that does not complete is a refusal, never an escalation to a hard kill.
+/// A graceful stop that does not complete is a refusal (nothing installed) followed by a
+/// best-effort start; the deploy itself never escalates to a kill. A failed start is loud.
 #[test]
-fn strih_lx_stop_failure_refuses_without_a_hard_kill_1317() {
+fn strih_lx_stop_or_start_failure_is_loud_1317() {
     let r = run_exec(&[("STUB_STOP_RC", "5")]);
     assert_eq!(r.code, 4, "err={}", r.err);
     assert!(r.err.contains("[strih-lx stop]"), "{}", r.err);
@@ -372,60 +501,132 @@ fn strih_lx_stop_failure_refuses_without_a_hard_kill_1317() {
         "no install over a still-running OBS:\n{}",
         r.calls
     );
+    assert!(
+        r.at("strih-obs-stop.sh") < r.at("--user start"),
+        "best-effort start after a failed stop:\n{}",
+        r.calls
+    );
+
+    let r = run_exec(&[("STUB_START_RC", "1")]);
+    assert_eq!(r.code, 4, "err={}", r.err);
+    assert!(r.err.contains("[strih-lx start]"), "{}", r.err);
+    assert!(r.fleet_log().is_empty(), "no fleet-log line");
 }
 
-/// The same-SHA contract: an artifact whose own marker is another commit, or no linux-genlock run
-/// at the SHA, is a resolution failure (exit 3) before the box is touched.
+/// The same-SHA contract and the local preparation: a foreign artifact, a manifest with no libobs
+/// entry, no linux-genlock run, an empty GH token, or a non-IPv4 dial override are all exit 3
+/// before the box is touched.
 #[test]
-fn strih_lx_resolution_refuses_a_foreign_artifact_or_missing_run_1317() {
-    let r = run_exec(&[("STUB_ARTIFACT_SHA", OTHER)]);
+fn strih_lx_preparation_failures_never_touch_the_box_1317() {
+    for (env, step, want) in [
+        (("STUB_ARTIFACT_SHA", OTHER), "[strih-lx download]", OTHER),
+        (
+            ("STUB_MANIFEST_NO_LIB", "1"),
+            "[strih-lx download]",
+            "libobs.so.30",
+        ),
+        (
+            ("STUB_NO_LINUX_RUN", "1"),
+            "[strih-lx resolve]",
+            "linux-genlock",
+        ),
+        (("STUB_TOKEN", ""), "[strih-lx tree]", "GH_TOKEN"),
+        (
+            ("STRIH_LX_IP", "strih-lx.lan"),
+            "[strih-lx resolve]",
+            "IPv4",
+        ),
+    ] {
+        let r = run_exec(&[env]);
+        assert_eq!(r.code, 3, "{env:?}: err={}", r.err);
+        assert!(
+            r.err.contains(step) && r.err.contains(want),
+            "{env:?}: `{step}` + `{want}`:\n{}",
+            r.err
+        );
+        assert!(
+            !r.calls.contains("ssh ") && !r.calls.contains("rsync "),
+            "{env:?}: the box is never touched:\n{}",
+            r.calls
+        );
+    }
+}
+
+/// Every requested box's artifact is resolved BEFORE the production strih is changed: a default
+/// `strih-lx,stream` run with no Windows build at the SHA fails without touching strih-lx.
+#[test]
+fn strih_lx_is_not_changed_when_another_box_cannot_be_resolved_1317() {
+    let r = run_exec_boxes("strih-lx,stream", &[("STUB_NO_WIN_RUN", "1")]);
     assert_eq!(r.code, 3, "err={}", r.err);
     assert!(
-        r.err.contains("[strih-lx download]") && r.err.contains(OTHER),
+        !r.calls.contains("ssh ") && !r.calls.contains("rsync "),
+        "strih-lx untouched:\n{}",
+        r.calls
+    );
+}
+
+/// A read-only GH token override replaces the operator's full-scope `gh auth token`, and a
+/// reboot-pending note from setup-strih.sh is passed on, not swallowed by `VERIFIED`.
+#[test]
+fn strih_lx_token_override_and_reboot_note_1317() {
+    let r = run_exec(&[
+        ("STRIH_LX_GH_TOKEN", "ro-token-xyz"),
+        (
+            "STUB_REBOOT_LINE",
+            "the shared OBS-box baseline takes effect at the NEXT boot -- reboot strih-lx",
+        ),
+    ]);
+    assert_eq!(r.code, 0, "err={}", r.err);
+    assert!(r.file("setup.stdin").contains("ghtoken:ro-token-xyz"));
+    assert!(
+        !r.calls.contains("gh auth token"),
+        "the override is used, gh auth token is not called:\n{}",
+        r.calls
+    );
+    assert!(
+        r.out.contains("NOTE") && r.out.contains("reboot strih-lx"),
         "{}",
-        r.err
-    );
-    assert!(
-        !r.calls.contains("ssh "),
-        "the box is never touched:\n{}",
-        r.calls
-    );
-
-    let r = run_exec(&[("STUB_NO_LINUX_RUN", "1")]);
-    assert_eq!(r.code, 3, "err={}", r.err);
-    assert!(r.err.contains("[strih-lx resolve]"), "{}", r.err);
-    assert!(
-        !r.calls.contains("ssh "),
-        "the box is never touched:\n{}",
-        r.calls
+        r.out
     );
 }
 
-/// The pure verdict the read-back uses.
+/// The pure verdicts the read-back uses.
 #[test]
-fn strih_lx_deploy_verdict_is_pure_and_fail_closed_1317() {
-    let run = |args: &str| {
+fn strih_lx_deploy_verdicts_are_pure_and_fail_closed_1317() {
+    let run = |call: &str| {
         let o = Command::new("bash")
             .arg("-c")
             .arg(format!(
-                "set -uo pipefail\n. \"$LIB\"\nstrih_lx_deploy_verdict {args}; echo \"rc=$?\""
+                "set -uo pipefail\n. \"$LIB\"\n{call}; echo \"rc=$?\""
             ))
             .env("LIB", lib())
             .output()
             .expect("bash");
         String::from_utf8_lossy(&o.stdout).into_owned()
     };
-    let ok = run(&format!("{SHA} {SHA} active {SHA}"));
+    let v = |args: &str| run(&format!("strih_lx_deploy_verdict {args}"));
+    let ok = v(&format!("{SHA} {SHA} active {SHA} L L 1"));
     assert!(ok.contains("OK") && ok.contains("rc=0"), "{ok}");
     for args in [
-        format!("{SHA} {OTHER} active {SHA}"),
-        format!("{SHA} '' active {SHA}"),
-        format!("{SHA} {SHA} activating {SHA}"),
-        format!("{SHA} {SHA} active ''"),
-        format!("{SHA} {SHA} active {OTHER}"),
-        "'' '' active ''".to_string(),
+        format!("{SHA} {OTHER} active {SHA} L L 1"),
+        format!("{SHA} '' active {SHA} L L 1"),
+        format!("{SHA} {SHA} activating {SHA} L L 1"),
+        format!("{SHA} {SHA} active '' L L 1"),
+        format!("{SHA} {SHA} active {OTHER} L L 1"),
+        format!("{SHA} {SHA} active {SHA} L M 1"),
+        format!("{SHA} {SHA} active {SHA} L '' 1"),
+        format!("{SHA} {SHA} active {SHA} '' '' 1"),
+        format!("{SHA} {SHA} active {SHA} L L 0"),
+        "'' '' active '' L L 1".to_string(),
     ] {
-        let o = run(&args);
+        let o = v(&args);
+        assert!(o.contains("FAIL") && o.contains("rc=1"), "{args}: {o}");
+    }
+    let s = |args: &str| run(&format!("strih_lx_stable_verdict {args}"));
+    let ok = s("4242 0 4242 0");
+    assert!(ok.contains("OK") && ok.contains("rc=0"), "{ok}");
+    for args in ["4242 0 4243 1", "4242 0 4242 1", "0 0 0 0", "'' 0 '' 0"] {
+        let o = s(args);
         assert!(o.contains("FAIL") && o.contains("rc=1"), "{args}: {o}");
     }
 }
@@ -448,4 +649,126 @@ fn strih_lx_stage_dir_matches_the_retention_allowlist_1317() {
         "{out}"
     );
     assert!(out.trim_end().ends_with("rc=2"), "{out}");
+}
+
+/// `obs-backup-retention.sh --local-sweep --stages-only` prunes the stale stage dirs and NEVER the
+/// dated rollback backups (the deploy only needs the /tmp quota back).
+#[test]
+fn retention_stages_only_never_touches_dated_backups_1317() {
+    let t = tempfile::tempdir().unwrap();
+    let backups = t.path().join("backup");
+    let stages = t.path().join("tmp");
+    let dated = backups.join("2026-09-01T10-00-00-789");
+    let old_stage = stages.join("genlock-stage-0a0a");
+    let new_stage = stages.join("genlock-stage-0b0b");
+    for d in [&dated, &old_stage, &new_stage] {
+        fs::create_dir_all(d).unwrap();
+    }
+    // make the new stage strictly newer.
+    let o = Command::new("touch")
+        .args(["-d", "2020-01-01", old_stage.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(o.status.success());
+    let o = Command::new("bash")
+        .arg(manifest_dir().join("scripts/obs-backup-retention.sh"))
+        .args([
+            "--local-sweep",
+            "--stages-only",
+            "--backup-root",
+            backups.to_str().unwrap(),
+            "--stage-parent",
+            stages.to_str().unwrap(),
+            "--keep-runs",
+            "1",
+            "--keep-days",
+            "0",
+            "--execute",
+        ])
+        .output()
+        .unwrap();
+    let out = String::from_utf8_lossy(&o.stdout);
+    assert!(o.status.success(), "{out}");
+    assert!(dated.exists(), "dated backups untouched:\n{out}");
+    assert!(new_stage.exists(), "newest stage kept:\n{out}");
+    assert!(!old_stage.exists(), "stale stage removed:\n{out}");
+    assert!(out.contains("--stages-only"), "{out}");
+}
+
+/// The generated on-box runner: it takes the token from the `ghtoken:` line (also when a NOPASSWD
+/// sudo left the password line unread), exports it with the bundle dir and IP, runs setup-strih.sh
+/// DETACHED and writes its rc. The root check is removed for the test only.
+#[test]
+fn strih_lx_setup_runner_reads_the_token_from_stdin_and_writes_the_rc_1317() {
+    for stdin in ["pw\nghtoken:tok42\n", "ghtoken:tok42\n"] {
+        let t = tempfile::tempdir().unwrap();
+        let s = t.path().join("stage");
+        fs::create_dir_all(s.join("repo/scripts")).unwrap();
+        fs::create_dir_all(s.join("bundle")).unwrap();
+        write_exec(
+            &s.join("repo/scripts/setup-strih.sh"),
+            "#!/bin/bash\necho \"B=$STRIH_LX_BUNDLE_SRC IP=$STRIH_LX_IP T=$GH_TOKEN\"\nexit 6\n",
+        );
+        let gen = Command::new("bash")
+            .arg("-c")
+            .arg(". \"$LIB\"; strih_lx_setup_runner \"$S\" 10.9.9.9")
+            .env("LIB", lib())
+            .env("S", &s)
+            .output()
+            .unwrap();
+        assert!(gen.status.success());
+        let runner = String::from_utf8_lossy(&gen.stdout).replace(
+            "[ \"$(id -u)\" = 0 ] || { echo \"run-setup: must run as root\" >&2; exit 2; }",
+            "",
+        );
+        assert!(
+            !runner.contains("must run as root"),
+            "the root check line moved -- update this test:\n{runner}"
+        );
+        write_exec(&s.join("repo/run-setup.sh"), &runner);
+        let mut child = Command::new("bash")
+            .arg(s.join("repo/run-setup.sh"))
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        {
+            use std::io::Write;
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(stdin.as_bytes())
+                .unwrap();
+        }
+        let o = child.wait_with_output().unwrap();
+        assert!(o.status.success(), "{stdin:?}");
+        let rc = s.join("setup-strih.rc");
+        let t0 = Instant::now();
+        while !rc.exists() && t0.elapsed() < Duration::from_secs(20) {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        std::thread::sleep(Duration::from_millis(100));
+        assert_eq!(fs::read_to_string(&rc).unwrap().trim(), "6", "{stdin:?}");
+        let log = fs::read_to_string(s.join("setup-strih.log")).unwrap();
+        assert!(
+            log.contains(&format!("B={}/bundle", s.display()))
+                && log.contains("IP=10.9.9.9")
+                && log.contains("T=tok42"),
+            "{stdin:?}: {log}"
+        );
+        // no token line at all -> refuse.
+        let mut child = Command::new("bash")
+            .arg(s.join("repo/run-setup.sh"))
+            .stdin(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        {
+            use std::io::Write;
+            child.stdin.take().unwrap().write_all(b"pw\n").unwrap();
+        }
+        let o = child.wait_with_output().unwrap();
+        assert_eq!(o.status.code(), Some(2), "{stdin:?}");
+    }
 }

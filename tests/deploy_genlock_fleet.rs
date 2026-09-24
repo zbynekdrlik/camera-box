@@ -1461,7 +1461,13 @@ fn strih_lx_plan_is_the_setup_strih_recipe_not_the_imag_program_1317() {
         "scripts/deploy-genlock-fleet.sh --run-id R1 --boxes strih-lx",
         "obs-genlock-linux-x86_64-strih",
         "obs-backup-retention.sh",
-        "--local-sweep --backup-root /opt/obs-backup --stage-parent /tmp --keep-runs 1 --keep-days 0 --execute",
+        // review round 1: stage dirs only, as the operator (never sudo), the running installer
+        // refused first, and a read-back that proves the new OBS runs (bytes, stable PID, tick).
+        "--local-sweep --stages-only --stage-parent /tmp --keep-runs 1 --keep-days 0 --execute",
+        "pgrep -x setup-strih.sh",
+        "libobs.so.30",
+        "render tick ENABLED",
+        "NRestarts",
         "touch '/tmp/genlock-stage-deadbeef'",
         "newlevel@10.77.9.202:/tmp/genlock-stage-deadbeef/bundle/",
         "newlevel@10.77.9.202:/tmp/genlock-stage-deadbeef/repo/",
@@ -1487,8 +1493,9 @@ fn strih_lx_plan_is_the_setup_strih_recipe_not_the_imag_program_1317() {
     assert!(
         !out.contains("nohup bash ")
             && !out.contains("kill -9")
-            && !out.contains("strih-lx-deploy-repo"),
-        "no `nohup bash` wrapper, no hard kill, no unswept fixed repo dir:\n{out}"
+            && !out.contains("strih-lx-deploy-repo")
+            && !out.contains("sudo -k -S -p '' bash -s"),
+        "no `nohup bash` wrapper, no hard kill, no unswept fixed repo dir, no sudo sweep:\n{out}"
     );
     for line in out.lines() {
         let t = line.trim();
