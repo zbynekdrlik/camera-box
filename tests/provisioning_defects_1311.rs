@@ -962,7 +962,10 @@ fn setup_device_runs_clock_sanity_before_the_first_apt_and_curl_1311() {
         body.lines()
             .position(|l| !l.trim_start().starts_with('#') && l.trim_start().starts_with(needle))
     };
-    let call = noncomment_idx("clock_sanity_fix_from_archive")
+    // The bare call line (the function DEFINITION also starts with the name, so match exactly).
+    let call = body
+        .lines()
+        .position(|l| l.trim() == "clock_sanity_fix_from_archive")
         .expect("the live flow must call clock_sanity_fix_from_archive (issue 1311)");
     let confirm = body
         .lines()
