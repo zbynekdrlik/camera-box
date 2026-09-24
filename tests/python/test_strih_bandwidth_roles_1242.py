@@ -156,8 +156,42 @@ def test_custom_multiview_swap_plan():
 
 
 def test_membership_on_create():
-    assert roles.membership_on_create(True) == (False, True)    # the twin takes over the cell
-    assert roles.membership_on_create(False) == (False, False)  # a nested-only twin is never shown
+    # the twin takes over the cell the original OR an already-shown twin held
+    assert roles.membership_on_create(True, False) == (False, True)
+    assert roles.membership_on_create(False, True) == (False, True)   # the migrated #501/#761 layout
+    assert roles.membership_on_create(True, True) == (False, True)
+    assert roles.membership_on_create(False, False) == (False, False)  # a nested-only twin never shown
+
+
+def test_twin_transform_of_a_parked_main_uses_the_nominal_camera_size_and_drops_crop():
+    # a parked / not-yet-delivering main reports width/height/sourceWidth 0 (async_active off); the
+    # twin must still get the SAME footprint as when it is live, or the twin rebuilds every launch
+    parked_half = {"positionX": 960.0, "positionY": 0.0, "scaleX": 0.5, "scaleY": 0.5,
+                   "boundsType": "OBS_BOUNDS_NONE", "width": 0.0, "height": 0.0,
+                   "sourceWidth": 0.0, "sourceHeight": 0.0, "cropLeft": 480, "cropRight": 0}
+    live_half = dict(parked_half, width=960.0, height=540.0, sourceWidth=1920.0, sourceHeight=1080.0)
+    a = roles.twin_transform(parked_half, CANVAS)
+    b = roles.twin_transform(live_half, CANVAS)
+    assert (a["boundsWidth"], a["boundsHeight"]) == (960.0, 540.0) == (b["boundsWidth"], b["boundsHeight"])
+    # main-pixel crop values would over-crop the lower-resolution proxy: never mirrored
+    assert "cropLeft" not in a and "cropRight" not in a
+
+
+def test_e2e_hold_marker_keeps_the_mains_connected(tmp_path):
+    marker = tmp_path / "connect-on-show-e2e-hold"
+    marker.write_text("")
+    now = marker.stat().st_mtime
+    assert roles.e2e_hold_active(str(marker), now + 60, 4 * 3600)
+    assert not roles.e2e_hold_active(str(marker), now + 5 * 3600, 4 * 3600)  # a stale marker expires
+    assert not roles.e2e_hold_active(str(tmp_path / "absent"), now, 4 * 3600)
+    obs = FakeObs()
+    summary = roles.apply_bandwidth_roles(obs, PLAN, hold_marker=str(marker), now=now + 60)
+    assert summary["e2e_hold"] is True
+    # an OBS relaunch DURING an E2E run must not re-park the held mains
+    assert obs.inputs["NDI cam1"]["settings"]["genlock_connect_on_show"] is False
+    assert obs.inputs["NDI cam3"]["settings"]["genlock_connect_on_show"] is False
+    # ... while the twins, twin scenes and multiview membership are still applied
+    assert "MV NDI cam3" in obs.inputs and _mv(obs, "MV Cam 3") is True
 
 
 def test_bandwidth_role_problems_is_a_report():
@@ -352,6 +386,25 @@ def test_a_twin_whose_original_lost_its_camera_is_retired():
     roles.apply_bandwidth_roles(obs, PLAN)
     assert _mv(obs, "Moderatori") is True and _mv(obs, "MV Moderatori") is False
     assert "MV Moderatori" in obs.scenes, "a retired twin scene is left in place, never deleted"
+    assert not _target(obs, "MV Moderatori"), "a retired twin releases its adoption"
+    # the camera comes back -> the twin takes the cell over again
+    obs.scenes["Moderatori"] = [_item(1, "NDI cam3"), _item(2, "Image", kind="image_source")]
+    roles.apply_bandwidth_roles(obs, PLAN)
+    assert _mv(obs, "Moderatori") is False and _mv(obs, "MV Moderatori") is True
+    assert _target(obs, "MV Moderatori") == "Moderatori"
+
+
+def test_a_migrated_windows_twin_layout_keeps_its_camera_cells():
+    # the #501/#761 Windows collection: `MV Cam 3` already shown, `Cam 3` hidden, the twin scene
+    # holding the MAIN input (the same-source pivot) -- adoption must keep the cell, never hide both
+    obs = FakeObs()
+    obs.scenes["MV Cam 3"] = [_item(50, "NDI cam3")]
+    obs.private["MV Cam 3"] = {"show_in_multiview": True}
+    obs.private["Cam 3"] = {"show_in_multiview": False}
+    roles.apply_bandwidth_roles(obs, PLAN)
+    assert _mv(obs, "MV Cam 3") is True and _mv(obs, "Cam 3") is False
+    assert _target(obs, "MV Cam 3") == "Cam 3"
+    assert [i["sourceName"] for i in obs.scenes["MV Cam 3"]] == ["MV NDI cam3"]
 
 
 def test_a_scene_that_nests_a_camera_scene_gets_a_twin_nesting_the_twin():
@@ -472,6 +525,16 @@ def test_connect_on_show_hold_and_restore(tmp_path, monkeypatch):
     assert op.connect_on_show_restore(FakeWs(), str(sf)) == ([], [])
 
 
+def test_connect_on_show_restore_treats_a_vanished_input_as_done(tmp_path, monkeypatch):
+    state = {"calls": [], "showing": {}, "inputs": {"NDI cam1": {"genlock_connect_on_show": False}}}
+    monkeypatch.setattr(op, "_rpc", _fake_rpc(state))
+    sf = tmp_path / "hold.json"
+    sf.write_text(json.dumps(["NDI cam1", "NDI cam9"]))  # cam9 was deleted/renamed since the hold
+    restored, failed = op.connect_on_show_restore(FakeWs(), str(sf))
+    assert restored == ["NDI cam1"] and failed == []
+    assert not sf.exists(), "a vanished input must never keep the state file (and its WARN) alive"
+
+
 def test_connect_on_show_subcommand_parses(monkeypatch):
     got = {}
     monkeypatch.setattr(op, "connect_on_show", lambda a: got.update(vars(a)))
@@ -538,8 +601,9 @@ def test_e2e_cleanup_restores_connect_on_show():
 
 
 def _bash_lib(body, env=None, extra=""):
+    # bounded: a wait loop that never terminates must FAIL the test, never hang the suite
     return subprocess.run(["bash", "-c", f"set -euo pipefail; . '{PARK_LIB}'; . '{LIB}'; {extra}{body}"],
-                          capture_output=True, text=True, check=False,
+                          capture_output=True, text=True, check=False, timeout=60,
                           env=env or {"PATH": "/usr/bin:/bin", "HOME": "/tmp"})
 
 
@@ -598,6 +662,43 @@ def test_wait_live_is_bounded_and_fail_open(tmp_path):
     out = _bash_lib(f"connect_on_show_e2e_wait_live /x 10.0.0.1 '{state}'; echo RC=$?", env=env)
     assert out.returncode == 0 and "RC=0" in out.stdout
     assert "not yet delivering after 2s: NDI cam3" in out.stderr
+    # the budget is WALL time: a zero poll interval must still terminate
+    env.update({"CONNECT_ON_SHOW_LIVE_POLL_S": "0", "CONNECT_ON_SHOW_LIVE_WAIT_S": "1"})
+    out = _bash_lib(f"connect_on_show_e2e_wait_live /x 10.0.0.1 '{state}'; echo RC=$?", env=env)
+    assert "RC=0" in out.stdout and "not yet delivering" in out.stderr
+
+
+def test_wait_live_accepts_a_present_counter_when_the_first_read_had_none(tmp_path):
+    state = tmp_path / "hold.json"
+    state.write_text(json.dumps(["NDI cam3"]))
+    cnt = tmp_path / "n"
+    # read 1: no audit line at all for cam3 (out of the tail); read 2: unparked + a counter
+    reader = _log_reader(tmp_path, f"""\
+        n=$(cat '{cnt}' 2>/dev/null || echo 0); n=$((n+1)); printf '%s' "$n" > '{cnt}'
+        if [ "$n" -ge 2 ]; then
+          printf "12:00:00.200: genlock-fifo audit 'NDI cam3': received=77 consumed=1\\n"
+        fi
+    """)
+    env = {"PATH": "/usr/bin:/bin", "HOME": "/tmp", "CONNECT_ON_SHOW_LOG_READ_CMD": str(reader),
+           "CONNECT_ON_SHOW_LIVE_POLL_S": "0", "CONNECT_ON_SHOW_LIVE_WAIT_S": "10"}
+    out = _bash_lib(f"connect_on_show_e2e_wait_live /x 10.0.0.1 '{state}'; echo RC=$?", env=env)
+    assert "every held input is delivering again" in out.stdout, out.stdout + out.stderr
+
+
+def test_hold_and_restore_set_and_clear_the_strih_side_marker(tmp_path):
+    fake = tmp_path / "obs_phase2.py"
+    fake.write_text("import sys\nprint('ARGS', sys.argv[1:])\n")
+    log = tmp_path / "marker.log"
+    marker_cmd = _log_reader(tmp_path, f"""\
+        echo "$@" >> '{log}'
+    """)
+    state = tmp_path / "hold.json"
+    state.write_text("[]")
+    env = {"PATH": "/usr/bin:/bin", "HOME": "/tmp", "CONNECT_ON_SHOW_MARKER_CMD": str(marker_cmd)}
+    out = _bash_lib(f"connect_on_show_e2e_hold '{tmp_path}' 10.0.0.1 '{state}'; "
+                    f"connect_on_show_e2e_restore '{tmp_path}' 10.0.0.1 '{state}'; echo RC=$?", env=env)
+    assert "RC=0" in out.stdout, out.stderr
+    assert log.read_text().split("\n")[:2] == ["set 10.0.0.1", "clear 10.0.0.1"]
 
 
 def test_wait_live_without_a_state_file_is_a_no_op(tmp_path):

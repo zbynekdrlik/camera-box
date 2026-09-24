@@ -92,8 +92,10 @@ fn the_tally_border_and_the_click_follow_the_target() {
     let pos = cpp
         .find("OBSSource Multiview::GetSourceByPosition(int x, int y)")
         .expect("GetSourceByPosition is gone");
-    let body = &cpp[pos..];
-    let body = &body[..body.find("\n}").unwrap_or(body.len()).min(body.len())];
+    // bound the body at the NEXT Multiview:: member (the squished text has no newlines left)
+    let head = "OBSSource Multiview::GetSourceByPosition(".len();
+    let rest = &cpp[pos + head..];
+    let body = &cpp[pos..pos + head + rest.find("Multiview::").unwrap_or(rest.len())];
     assert!(
         body.contains("OBSSource target = OBSGetStrongRef(multiviewTargets[pos]);")
             && body.contains("return target;"),

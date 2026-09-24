@@ -230,27 +230,18 @@ fn a_park_blanks_the_source_so_a_show_never_presents_a_stale_frame() {
 }
 
 #[test]
-fn an_unpark_bind_skips_the_blocking_identity_verify_only_for_its_own_fresh_finder_url() {
+fn an_unpark_bind_keeps_the_identity_verify() {
+    // Round-2 review: an unpark after a long park is exactly when a SENDER restart may have reshuffled
+    // its NDI port, and the fresh finder itself can serve the dying sender's last advertisement -- the
+    // #1180 post-connect identity verify is the wrong-camera guard, so an unpark bind KEEPS it (the
+    // ~1 s one-shot after the first frames is part of the accepted cold start). No skip helper, and
+    // the #1180 arming line stays the only writer of the pending flag at the bind.
     let src = squish(&read(NDI_SOURCE));
     assert!(
-        src.contains(
-            "if (genlock_unpark_skips_identity_verify(unpark_bind_1242, url_bind_kind_1096)) \
-             identity_verify_pending_1180 = false; unpark_bind_1242 = false;"
-        ),
-        "{NDI_SOURCE}: issue 1242 — the receiver bind must consume the unpark flag and skip the \
-         #1180 one-shot only through genlock_unpark_skips_identity_verify."
+        !src.contains("genlock_unpark_skips_identity_verify") && !src.contains("unpark_bind_1242"),
+        "{NDI_SOURCE}: issue 1242 — an unpark must never skip the #1180 identity verify."
     );
-    // the #1180 arming line itself stays byte-identical (its own gate anchors on it)
     assert!(src.contains("identity_verify_pending_1180 = url_resolved_1096;"));
-    // the unpark arms the flag
-    let unpark_at = src
-        .find("state=unparked")
-        .expect("issue 1242: the unpark line is gone");
-    let window = &src[unpark_at.saturating_sub(900)..unpark_at];
-    assert!(
-        window.contains("unpark_bind_1242 = true;"),
-        "{NDI_SOURCE}: issue 1242 — the unpark must mark the next bind as an unpark bind."
-    );
 }
 
 #[test]
@@ -260,7 +251,6 @@ fn windows_genlock_workflows_mirror_the_park_anchors() {
         for needle in [
             "static inline bool genlock_connect_on_show_park_decision(",
             "ndi_reap_receiver_detached(ndiLib, park_frame_sync, park_receiver);",
-            "static inline bool genlock_unpark_skips_identity_verify(",
         ] {
             assert!(
                 text.contains(needle),
@@ -380,69 +370,5 @@ fn park_decision_computes_the_spec_truth_table() {
         diffs.is_empty(),
         "issue 1242: park truth table mismatch:\n{}",
         diffs.join("\n")
-    );
-}
-
-/// `genlock_unpark_skips_identity_verify(unpark_bind, url_bind_kind)` — skip iff this is the unpark's
-/// bind AND its URL came from this reset's fresh name-resolving finder (kind 0, not the 1/2 guesses).
-#[test]
-fn unpark_identity_skip_computes_the_spec_truth_table() {
-    let src = read(NDI_SOURCE);
-    let sig = "static inline bool genlock_unpark_skips_identity_verify(";
-    let start = src
-        .find(sig)
-        .unwrap_or_else(|| panic!("issue 1242: {NDI_SOURCE} no longer defines {sig}"));
-    let end = src[start..]
-        .find("\n}\n")
-        .map(|i| start + i + 3)
-        .expect("issue 1242: the helper has no closing brace");
-    let rows = [
-        (false, 0, false),
-        (false, 1, false),
-        (false, 2, false),
-        (true, 0, true),
-        (true, 1, false),
-        (true, 2, false),
-    ];
-    let mut c = String::from("#include <stdbool.h>\n#include <stdio.h>\n");
-    c.push_str(&src[start..end]);
-    c.push_str("\nint main(void){\n");
-    for (unpark, kind, _) in rows {
-        c.push_str(&format!(
-            "    printf(\"%d\\n\", genlock_unpark_skips_identity_verify({}, {}) ? 1 : 0);\n",
-            unpark as u8, kind
-        ));
-    }
-    c.push_str("    return 0;\n}\n");
-    let dir = std::env::temp_dir().join("distroav_connect_on_show_park_1242_skip");
-    fs::create_dir_all(&dir).expect("create the scratch dir");
-    let cfile = dir.join("skip.c");
-    let bin = dir.join("skip.bin");
-    fs::write(&cfile, &c).expect("write the harness");
-    let cc = std::env::var("CC").unwrap_or_else(|_| "cc".to_string());
-    let out = Command::new(&cc)
-        .args(["-std=gnu99", "-Wall", "-Wextra", "-Wconversion", "-Werror"])
-        .arg(&cfile)
-        .arg("-o")
-        .arg(&bin)
-        .output()
-        .unwrap_or_else(|e| panic!("issue 1242: could not run the C compiler `{cc}` ({e})"));
-    assert!(
-        out.status.success(),
-        "issue 1242: the lifted skip helper does NOT COMPILE:\n{}\n{c}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let run = Command::new(&bin)
-        .output()
-        .expect("issue 1242: harness failed to execute");
-    let got: Vec<bool> = String::from_utf8(run.stdout)
-        .expect("utf-8")
-        .lines()
-        .map(|l| l.trim() == "1")
-        .collect();
-    let want: Vec<bool> = rows.iter().map(|r| r.2).collect();
-    assert_eq!(
-        got, want,
-        "issue 1242: unpark identity-skip truth table mismatch"
     );
 }
