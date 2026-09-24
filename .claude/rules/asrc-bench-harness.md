@@ -688,3 +688,59 @@ so every launch had its own A/V level (dock + `mbc` level ≈ 135 ± 6 ms in eve
   No new pwsh gate is needed: every existing windows-genlock*.yml asrc substring keeps its presence
   (checked mechanically). The telemetry `fallbacks=%u (#1355)` is appended AFTER the
   byte-identical `restore=%d (#1335)`.
+
+## Issue 1367 — the level loop reads the per-window MEAN, not the window-closing reading
+
+- **Why:** the mixer drains the input buffer in 1024-sample ticks (21.33 ms), so one `buffered_ms`
+  reading lands at a random point of a ~21 ms sawtooth (live `level=` sd 6.44 ms vs 6.16 predicted
+  for a uniform tick phase). A 1 s window is ~46.9 ticks, so the closing reading aliases the
+  sawtooth into a slow pattern the 10 s EMA partly passes, and Kp 2 dithered the resampler rate
+  (live `applied − estimated` sd ≈ 7 ppm). The true depth held within ±2 ms the whole time.
+- **What changed:** every call's `buffered_ms` is summed into the open window
+  (`window_level_sum_ms` / `window_level_count`, reset with the other window sums at every close).
+  Capture (non-absolute depth at lock), the EMA, the integral, the sustained arm and the unreachable
+  bound read the window MEAN. The per-call restore burst/exit and the re-base corroboration keep the
+  live reading (the one-reading bench trap above still applies to them). `level_last_ms` (`level=`)
+  stays the raw closing reading; the mean is `level_avg_ms` (`level_avg=` on the `asrc:` line).
+  `shift_level_target` also moves the open window sum by `delta × count`, so a deliberate trim that
+  lands mid-window never feeds the EMA a blended half-old/half-new mean (a −0.55 ms EMA step, a
+  −1.1 ppm P kick, otherwise).
+- **Bench** (`*_1367`): `run_tick_sawtooth_1367` is the first per-CALLBACK level bench — a +20 ppm
+  source, 128-sample callbacks, a physical 1024-sample drain, and bursty delivery from an LCG (each
+  callback up to J late, monotonic so the flush path never fires). Chatter = sd of
+  `applied − estimated` sampled once per second after a 6000 s warm-up: 1 ms jitter 3.71 → 0.87 ppm,
+  2 ms 3.57 → 0.35 ppm. With NO jitter the callback/tick phase walks only 0.02 ms per window and the
+  mean still carries a slow phase bias of at most half a block, so that case is held to a per-second
+  change < 0.25 ppm rms plus sd < 1.5 ppm (single reading: 0.27 / 11.7). Two unit benches pin the
+  mean as the loop input and the mid-window shift; both were watched failing under a scratch mutation.
+- **C↔Rust parity is now a COMMITTED gate:** `tests/asrc_compensator_parity_1367.rs` compiles the
+  REAL `asrc-compensator.c` (whole file, `-I` media-io, `-Wall -Wextra -Wconversion -Wformat=2
+  -Werror`, `-lm`) with a C driver and requires its 9-decimal trace to equal the Rust authority's
+  line for line over three scenarios (tick sawtooth 2 h; non-absolute mid-window shift + 40 ms loss
+  → restore; absolute 50 ms step re-base + starved window + zero master block). It fails loud when
+  `cc` is missing. Two scratch C mutations (EMA back on the raw reading; no window-sum shift)
+  diverge at trace lines 1 and 131. Local Tier-0 run: copy the test, swap the `use camera_box::…`
+  line for a `#[path]` include of `src/asrc_bench.rs`, and `rustc --test` it with
+  `CARGO_MANIFEST_DIR` + `CARGO_TARGET_TMPDIR` set. `clippy-driver --test -D warnings` on the same
+  copy covers the lints. To mutate the C for a bite check, point the copy's `C_SRC` at a scratch
+  `.c` (its own `#include "asrc-compensator.h"` still resolves through `-I` media-io) — never edit
+  `vendor/` in place.
+- **Known, harmless side effect:** the sustained arm now reads the mean, but the restore's per-call
+  exit still reads the live reading on the ±10.7 ms tick sawtooth. A steady 12–16 ms error therefore
+  arms reliably after 10 windows and the exit ends the burst within about one tick, so the restore
+  toggles on/off about every 10 s. The burst lasts a few calls and the applied rate is slew-limited,
+  so the rate barely moves; the P term (24–32 ppm at that error) carries the correction. Switching
+  the exit to the mean needs a per-call mean the open window does not have yet; leave it unless a
+  live `restore=` flapping trace shows a real cost.
+- **Review-round additions (same branch):** `shift_level_target` moves the open window sum even
+  before capture (a shift inside the capture window of a non-absolute source captures the new-frame
+  mean); the parity driver puts the 50 ms loss on the window-closing callback (so re-base
+  corroboration on the mean would diverge), shifts once inside the capture window, traces
+  `level_avg` right after the captured shift, and compiles with `-ffp-contract=off`. Four scratch
+  C mutants now diverge: `level_avg -=` (line 132), the window-sum shift back under the capture gate
+  (line 121), re-base corroboration on the mean (line 224), and the EMA on the raw reading (line 1).
+- **Lock-step anchor:** `tests/genlock_preload.rs::vendored_source::asrc_level_loop_reads_the_window_mean_1367`
+  (fields, accumulate/close/reset lines, the three mean-reading lines, the shift line, the telemetry
+  tail); the #1355 capture anchor now ends `: window_level_ms;`. No pwsh change: the anchored
+  `ASRC_LEVEL_KI_PPM_PER_MS_S * err_ms * window_master_s` and `level=%.1fms target=%.1fms
+  integral=%.3fppm (#1335)` lines stay byte-identical.

@@ -177,8 +177,14 @@ extern "C" {
  * re-plug, a mixer hiccup) is invisible to the step arm (follow-up 2) and the shift arm (follow-up 3),
  * so the +/-3 ppm I term alone would take hours; this arm catches it. 12 ms sits well above the
  * +/-8 ms 1-s level scatter so ordinary noise never arms, yet below the ~14-32 ms StartStream drops
- * the 18.9. live incident produced (level 100 -> 68 ms). Mirror of src/asrc_bench.rs
- * LEVEL_RESTORE_ARM_ERR_MS -- keep numerically identical. */
+ * the 18.9. live incident produced (level 100 -> 68 ms). camera-box #1367: the arm now reads the
+ * per-window MEAN level, whose scatter is a few tenths of a ms, so the +/-8 ms figure above describes
+ * the old single closing reading; the band is kept. Consequence: a steady 12-16 ms error now arms
+ * reliably after ASRC_LEVEL_RESTORE_ARM_WINDOWS, while the restore's per-call exit still reads the
+ * live buffered_ms on the +/-10.7 ms tick sawtooth and ends the burst within about one tick, so the
+ * restore toggles on and off about every 10 s. Harmless: the burst lasts a few calls, the applied
+ * rate is slew-limited, and the P term (Kp 2 -> 24-32 ppm) carries that error. Mirror of
+ * src/asrc_bench.rs LEVEL_RESTORE_ARM_ERR_MS -- keep numerically identical. */
 #define ASRC_LEVEL_RESTORE_ARM_ERR_MS 12.0
 
 /* camera-box #1335 follow-up 4: number of CONSECUTIVE accepted windows whose |level - target| is at
@@ -221,7 +227,10 @@ extern "C" {
  * 75.2 / 95.3 / 85.1 / 96.2 around a ~86 mean); a 10 s EMA kills that noise while adding only ~10 s
  * of lag, irrelevant at the loop's 500 s time constant. alpha = window_master_s /
  * (ASRC_LEVEL_EMA_TAU_S + window_master_s) per accepted window (~1 s window => alpha ~= 0.091).
- * Mirror of src/asrc_bench.rs LEVEL_EMA_TAU_S -- keep numerically identical. */
+ * camera-box #1367: the EMA now reads the per-window MEAN level, not the single closing reading, so
+ * the +/-10 ms tick noise above no longer reaches it; the aliased remainder the 10 s EMA used to
+ * pass is what dithered the rate (applied - estimated sd ~7 ppm live). The tau is kept. Mirror of
+ * src/asrc_bench.rs LEVEL_EMA_TAU_S -- keep numerically identical. */
 #define ASRC_LEVEL_EMA_TAU_S 10.0
 
 /* camera-box #1355: the ABSOLUTE buffer-LEVEL setpoint, in ms of mix-buffer depth EXCLUDING the
@@ -410,6 +419,22 @@ struct asrc_compensator {
 	 * MONITOR_ONLY source (never feeds the mix buffer, depth 0). Mirror of src/asrc_bench.rs
 	 * RealtimeAsrcCompensator::level_absolute. */
 	bool level_absolute;
+	/* camera-box #1367: sum of every callback's buffered_ms in the CURRENT (not yet closed) window;
+	 * with window_level_count it gives the window's MEAN level, which the level loop reads instead
+	 * of the one reading of the window-closing callback. The mixer drains the buffer in 1024-sample
+	 * ticks (21.33 ms), so one reading lands at a random point of a ~21 ms sawtooth, and a 1 s window
+	 * (~46.9 ticks) aliases it into a slow pattern the 10 s EMA partly passes: Kp 2 then dithered the
+	 * resampler rate (live applied - estimated sd ~7 ppm). Reset at every window close, next to
+	 * window_raw_s. Mirror of src/asrc_bench.rs RealtimeAsrcCompensator::window_level_sum_ms. */
+	double window_level_sum_ms;
+	/* camera-box #1367: count of callbacks folded into window_level_sum_ms this window (>= 1 at every
+	 * close -- the closing call itself adds). Mirror of src/asrc_bench.rs
+	 * RealtimeAsrcCompensator::window_level_count. */
+	uint32_t window_level_count;
+	/* camera-box #1367: the per-window MEAN level of the most recently closed accepted (or re-based)
+	 * window, in ms -- telemetry (obs-source.c prints it as the asrc: line's level_avg= field; level=
+	 * keeps the one raw reading). Mirror of src/asrc_bench.rs RealtimeAsrcCompensator::level_avg_ms. */
+	double level_avg_ms;
 };
 
 /* Reset a servo to its just-constructed state: 0 ppm estimated/applied (assume
@@ -444,8 +469,12 @@ EXPORT void asrc_compensator_init(struct asrc_compensator *c);
  * reads it from audio_input_buf[0].size via obs_source_input_buf_ms()); a slow
  * LEVEL integral captured at first lock folds into the correction target so the
  * buffer holds its setpoint instead of drifting on a residual the pure RATE loop
- * cannot remove. Mirror of RealtimeAsrcCompensator::compensate_with_level() in
- * src/asrc_bench.rs -- keep the two numerically identical. */
+ * cannot remove. camera-box #1367: every call's buffered_ms is folded into the
+ * window, and the level loop (capture, EMA, integral, sustained arm, unreachable
+ * bound) reads the window MEAN; the per-call restore burst/exit and the re-base
+ * corroboration keep the live reading. Mirror of
+ * RealtimeAsrcCompensator::compensate_with_level() in src/asrc_bench.rs -- keep
+ * the two numerically identical. */
 EXPORT double asrc_compensator_compensate(struct asrc_compensator *c, double raw_advance_s, double master_block_s,
 					   double buffered_ms, double *applied_ppm_out);
 
@@ -489,7 +518,8 @@ EXPORT double asrc_compensator_get_outer_bias_ppm(const struct asrc_compensator 
  * UNINTENDED discontinuities (dropout/relock) must NOT call this -- they flush
  * the regression (dropping level_captured) so the setpoint re-captures and the
  * buffer self-heals its calibrated depth. No-op until the setpoint has been
- * captured (first rate lock). Mirror of src/asrc_bench.rs
+ * captured (first rate lock), except that the open window's level sum always
+ * moves (camera-box #1367). Mirror of src/asrc_bench.rs
  * RealtimeAsrcCompensator::shift_level_target. */
 EXPORT void asrc_compensator_shift_level_target(struct asrc_compensator *c, double delta_ms);
 

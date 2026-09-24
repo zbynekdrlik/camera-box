@@ -160,3 +160,31 @@ again. Chase why the depth cannot move there, for example OBS audio buffering or
 placement is not contiguous. Do not raise the bound. The one-time A/V shift at the first #1355
 deploy is `(100 + offset) − the level that launch had`, and the E2E calibrated pin/audio offset
 absorbs it once.
+
+## Addendum (issue 1367, 24.9.2026): read `level_avg=`, not `level=`, for the true buffer depth
+
+`level=` is ONE raw `buffered_ms` reading, taken on the callback that closes the 1 s window. The
+mixer drains the buffer in 1024-sample ticks (21.33 ms), so that reading lands at a random point
+of a ~21 ms sawtooth: the 24.9. production `level=` samples had sd 6.44 ms against 6.16 ms predicted
+for a uniform tick phase, while the 20-min block means stayed within ±2 ms of `target=`. A
+`level=` spread of ±10 ms is therefore tick phase, never buffer wander.
+
+On a #1367 build the `asrc:` line ends `… fallbacks=%u (#1355) level_avg=<ms> (#1367)`. That field
+is the MEAN of every callback's `buffered_ms` over the last closed window, and it is also what the
+level loop now holds. The window is not a whole number of ticks, so a residual of a few tenths of a
+ms remains. Read the depth from it:
+
+- **Healthy mbc:** `level_avg=` within about ±2 ms of `target=` once settled. The rate chatter is
+  the bench's PREDICTION, not yet a live measurement: `applied − estimated` sd ≈ 0.4–0.9 ppm at
+  1–2 ms bursty delivery, down from ≈ 3.6–3.7 ppm on the single reading in the same bench. Live, the
+  single reading gave ≈ 7 ppm sd, so about half of the live chatter is outside the bench model
+  (real delivery jitter, estimate noise). Confirm the post-deploy value in the 1-h live acceptance
+  before quoting it as a health bound.
+- **The 1-h live acceptance and the 8-h soak** (the goal's A/V item) are judged on `level_avg=`.
+  A `level=` excursion alone is not a finding.
+- **No consumer parses `level=`.** asio-starve-health reads `starved_blocks=` and cg-chain-verify
+  reads `estimated=`, both by name, and `level_avg=` does not contain the substring `level=`. A new
+  parser reading the depth should key on `level_avg=`.
+- **Discriminator:** a steady `level_avg=` far from `target=` with `restore=0 fallbacks=0` points at
+  a real level-loop problem. `level_avg=` tracking `target=` while `level=` jumps ±10 ms is the
+  normal sawtooth.
