@@ -90,6 +90,19 @@ NDI feed plays frame-loss-free on strih/stream after a dantesync roll (#811). La
   arg-driven fleet gate takes a DOCUMENTED node (targets.md + `.claude/skills/ops`), not a code
   roster; keep a non-measured / traveling box out of the E2E hot path.
 
+## Adding a KEY to the existing `genlock-fifo audit` line (issue 1355 `stamp_dup=` / `stamp_gap=`)
+
+A new counter on the EXISTING input line is not a new line kind: add the `AuditSample` field
+(named exactly like the token), one `match` arm, the `AuditSummary` window delta, and a test that
+(1) parses it, (2) defaults it to 0 on a line captured before the key existed, (3) asserts the new
+key is mutually non-substring with every key the parser already matches. Never add it to
+`summaries_to_json` (#757). Two construction sites outside the module build `AuditSummary` by
+struct literal (`src/bin/genlock-jitter-report.rs` tests) — grep `AuditSummary {` and add the new
+delta fields there, or the bin stops compiling (CI-only, invisible to a module-only replica run).
+Local run without serde: a replica of `jitter_audit.rs` with `summaries_to_json` and its two tests
+dropped compiles with plain `rustc --test` (script in the #1355 lane notes, `drop_fn` by brace
+matching).
+
 ## The relock-BURST family (issue 1318)
 
 A THIRD parser family over the same log, beside INPUT (`genlock-fifo audit`) and SEND

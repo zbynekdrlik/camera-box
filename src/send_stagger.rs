@@ -62,6 +62,13 @@ use std::time::Duration;
 /// the 1 GbE wire-time vs 2.5 GbE drain arithmetic.
 pub const STAGGER_US: u64 = 1200;
 
+/// Whether the shipped build staggers at all. OFF since 24.9.2026 (issue 1242): the (N−1) × 1.2 ms
+/// offset left CAM7 only ~1 ms of slot when per-frame work spiked to ~15 ms (OVER BUDGET windows,
+/// a 112-relock burst on the strih-lx receiver), while the strih-lx switch-port drops did not
+/// measurably improve. The helpers stay (their arithmetic is still pinned) for a future smaller,
+/// work-sized offset; flip this only with that new design + a rig measurement.
+pub const STAGGER_ACTIVE: bool = false;
+
 /// Every offset is clamped to this percentage of the slot interval (45 % → 7.5 ms at 60 fps), so the
 /// frame is always handed over well inside its own slot AND the [`idle_wait_ms`] correction of the
 /// #1131 buffered-queue signal stays sound (it needs the sleep below half a capture interval; the
@@ -145,6 +152,32 @@ pub struct StaggerPlan {
 /// `... offset=0 us (#1242) — genlock off, no emit grid to stagger` (known camera, genlock off);
 /// `NDI send stagger: hostname 'x' is not a CAM<N> box — offset=0 us (#1242)` (WARN).
 pub fn plan(
+    hostname: &str,
+    genlock_fps: Option<u32>,
+    capture_fps_num: u32,
+    capture_fps_den: u32,
+) -> StaggerPlan {
+    let planned = plan_with(hostname, genlock_fps, capture_fps_num, capture_fps_den);
+    if STAGGER_ACTIVE {
+        return planned;
+    }
+    let name = match planned.camera {
+        Some(n) => format!("cam{n}"),
+        None => format!("hostname '{}'", hostname.trim()),
+    };
+    StaggerPlan {
+        camera: planned.camera,
+        offset: Duration::ZERO,
+        log_line: format!(
+            "NDI send stagger: {name} offset=0 us (#1242) — stagger disabled (STAGGER_ACTIVE=false)"
+        ),
+        warn: false,
+    }
+}
+
+/// The stagger plan as the helper computes it (the arithmetic `plan()` ships when
+/// [`STAGGER_ACTIVE`] is on) — kept pinned by the unit tests for a future re-enable.
+pub fn plan_with(
     hostname: &str,
     genlock_fps: Option<u32>,
     capture_fps_num: u32,
@@ -432,14 +465,26 @@ mod tests {
     }
 
     #[test]
-    fn plan_resolves_offset_and_the_one_startup_line_1242() {
+    fn the_stagger_is_off_in_production_1242() {
+        // 24.9.2026: the 7.2 ms CAM7 offset did not fit the slot (per-frame work spikes to 15 ms
+        // -> OVER BUDGET -> a 112-relock burst on strih-lx), and the switch drops did not clearly
+        // improve, so the shipped plan() hands every frame over at once again.
         let p = plan("CAM7", Some(60), 60, 1);
+        assert_eq!(p.offset, Duration::ZERO);
+        assert!(p.log_line.contains("offset=0 us (#1242)"), "{}", p.log_line);
+        assert!(p.log_line.contains("stagger disabled"), "{}", p.log_line);
+        assert!(!p.warn);
+    }
+
+    #[test]
+    fn plan_resolves_offset_and_the_one_startup_line_1242() {
+        let p = plan_with("CAM7", Some(60), 60, 1);
         assert_eq!(p.camera, Some(7));
         assert_eq!(p.offset, Duration::from_micros(7200));
         assert_eq!(p.log_line, "NDI send stagger: cam7 offset=7200 us (#1242)");
         assert!(!p.warn);
 
-        let p = plan("CAM1", Some(60), 60, 1);
+        let p = plan_with("CAM1", Some(60), 60, 1);
         assert_eq!(p.offset, Duration::ZERO);
         assert_eq!(p.log_line, "NDI send stagger: cam1 offset=0 us (#1242)");
         assert!(!p.warn);
@@ -447,7 +492,7 @@ mod tests {
 
     #[test]
     fn plan_names_genlock_off_and_an_unknown_hostname_1242() {
-        let p = plan("CAM7", None, 60, 1);
+        let p = plan_with("CAM7", None, 60, 1);
         assert_eq!(p.offset, Duration::ZERO);
         assert!(
             p.log_line.contains("offset=0 us (#1242)") && p.log_line.contains("genlock off"),
@@ -456,7 +501,7 @@ mod tests {
         );
         assert!(!p.warn);
 
-        let p = plan(" camera-box ", Some(60), 60, 1);
+        let p = plan_with(" camera-box ", Some(60), 60, 1);
         assert_eq!(p.camera, None);
         assert_eq!(p.offset, Duration::ZERO);
         assert!(p.log_line.contains("'camera-box'"), "{}", p.log_line);

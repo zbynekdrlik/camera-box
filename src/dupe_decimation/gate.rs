@@ -424,9 +424,11 @@ impl DecimationGate {
     /// CONSECUTIVE repeats, RESET by any on-time capture (`lag_intervals == 0`) — so a source that
     /// keeps pace (57.9 fps, crossing a boundary ~2×/s with on-time frames between) is fully filled,
     /// while a source that NEVER catches up (≤~30 fps, every poll late) accumulates to the cap and
-    /// stays exposed. Advancing `candidate_next + repeats*interval` is `<=` the first boundary after
-    /// `now` (the `lag <= 8` gate guarantees no resync fired, so `candidate_next == boundary +
-    /// interval`, and `repeats <= lag`), so it drains the accumulating lag without overshooting.
+    /// stays exposed. Advancing `repeats` grid slots past `candidate_next` is `<=` the first boundary
+    /// after `now` (the `lag <= 8` gate guarantees no resync fired, so `candidate_next` is the grid
+    /// point after the pending boundary, and `repeats <= lag`), so it drains the accumulating lag
+    /// without overshooting. (#1355) The advance walks the per-second grid
+    /// ([`crate::genlock_pacing::genlock_advance_boundary`]), never `+ repeats * interval`.
     fn apply_starvation_fill(
         &mut self,
         copy: bool,
@@ -452,7 +454,11 @@ impl DecimationGate {
                 .saturating_add(starvation_repeats);
             self.last_poll_starvation_repeats = starvation_repeats;
             self.shed_log.record_starvation_repeats(starvation_repeats);
-            self.next_boundary_ns = candidate_next + starvation_repeats * interval_ns;
+            self.next_boundary_ns = crate::genlock_pacing::genlock_advance_boundary(
+                candidate_next,
+                starvation_repeats,
+                interval_ns,
+            );
         } else {
             self.next_boundary_ns = candidate_next;
         }
@@ -746,15 +752,18 @@ impl DecimationGate {
                 // does reach it, the paced converging TAIL below smears the recovery. FastDrain stamps
                 // the shared pace budget so the paced tail/trickle around it stay suppressed (one
                 // coherent skip stream, never re-composed into a double burst).
-                let fast_next = if candidate_next.saturating_add(interval_ns) <= now_ns {
-                    candidate_next + interval_ns
+                // (#1355) the extra slot is the next point of the per-second grid, never
+                // `+ interval` (which lands 1 ns short of it on a long step).
+                let after =
+                    crate::genlock_pacing::genlock_advance_boundary(candidate_next, 1, interval_ns);
+                let fast_next = if after <= now_ns {
+                    after
                 } else {
                     candidate_next
                 };
                 // (#1145 v2.1 review 🟡) record the intentional extra boundary advance so main.rs
                 // deducts it from the #707 boundary-skip diagnostic (a fast-drain is not a sick-leg SKIP).
-                self.last_poll_fast_drain_extra =
-                    (fast_next.saturating_sub(candidate_next)) / interval_ns;
+                self.last_poll_fast_drain_extra = u64::from(fast_next != candidate_next);
                 self.next_boundary_ns = fast_next;
                 self.deferred_this_boundary = false;
                 self.consecutive_drain_holds = 0; // the grid advanced -> hold streak broken

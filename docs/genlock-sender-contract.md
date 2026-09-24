@@ -105,21 +105,37 @@ with stable source names and groups.
 ### 3. Grid
 
 Each output **MUST** define a nominal grid rate equal to the receiving canvas rate (30 fps for
-the `cg` OBS) or an integer multiple of it. Frame boundary *k* is `k · interval` on the
-**Unix-epoch grid** (not a per-stream or session-relative grid). Content that arrives at a
-different rate (a 23.976 or 29.97 file) **MUST** be presented at the first boundary at or after
-its PTS (repeat or drop as needed) and **MUST NOT** be emitted at its free-running file rate.
+the `cg` OBS) or an integer multiple of it. The grid is the **per-second Unix-epoch grid**:
+boundary *k* of whole second *S* (Unix epoch) is `S + floor(k · 1 s / fps)`, *k* = 0 … fps−1 —
+the slot count restarts at every whole second (not a per-stream or session-relative grid, and
+NOT `k · interval` counted from 1970). The two differ: in the receiver's ns units
+`30 × 33_333_333 ns = 999_999_990 ns`, so a 1970 grid loses 10 ns every second (0.864 ms per
+day) — exactly the date-walk issue 1355 removed from the receiver; in a sender's 100 ns units
+`30 × 333_333 = 9_999_990`, so a sender stamping `k · interval_100ns` from 1970 walks **1 µs
+per second at 30 fps (4 µs at 60)** — a whole frame in about 0.4 days. The receiver's release
+deadline and render tick now floor on this same per-second grid
+(`vendor/obs-studio/libobs/obs-genlock-grid.h`, Rust authority `src/genlock_grid.rs`). Content
+that arrives at a different rate (a 23.976 or 29.97 file) **MUST** be presented at the first
+boundary at or after its PTS (repeat or drop as needed) and **MUST NOT** be emitted at its
+free-running file rate.
 
 ### 4. Video timecode
 
 The `NDIlib_video_frame_v2_t.timecode` of every emitted video frame **MUST** be:
 
 ```
-timecode = floor(present_wall_100ns / interval_100ns) · interval_100ns
+S        = floor(present_wall_100ns / 10_000_000) · 10_000_000     # the whole second
+k        = the slot of (present_wall_100ns − S) on the §3 per-second grid
+timecode = S + floor(k · 10_000_000 / fps)
 ```
 
-in **100 ns units since the Unix epoch**. It **MUST** be the FLOOR boundary (the boundary at or
-before the emit instant) and **MUST NOT** be the strictly-next/ceil boundary. It **MUST NOT** be
+in **100 ns units since the Unix epoch** — the per-second grid of §3 (never
+`floor(t / interval_100ns) · interval_100ns` counted from 1970, which walks 1 µs/s at 30 fps
+(4 µs/s at 60) against every other sender and against the receiver). Exactly on a boundary the slot recovery `(offset · fps) /
+10_000_000` can under-count by one (`floor(k · 10_000_000 / fps)` sits up to one unit below the
+exact rational), so promote once when slot *k*+1's boundary is still at or before the instant —
+see `floor_boundary_100ns`. It **MUST** be the FLOOR boundary (the boundary at or before the emit
+instant) and **MUST NOT** be the strictly-next/ceil boundary. It **MUST NOT** be
 `NDIlib_send_timecode_synthesize`, **MUST NOT** be `0`, and **MUST NOT** be a monotonic counter.
 
 The floor is not a detail: a ceil stamp dates every frame 0..1 interval into the receiver's
@@ -135,20 +151,31 @@ stamps `video_frame.timecode = genlock_emit_timecode_100ns(...)` at `:613` (doct
 
 ### 5. Pacing
 
-The sender **MUST** emit exactly one video frame per boundary. It:
+The sender **MUST** emit exactly one video frame per boundary, where the boundaries are the
+per-second grid points of §4 — the SAME grid the frame's `timecode` floors to (a pacing grid
+counted from 1970, `k · interval`, walks against the stamps by `1 s − fps · interval` per second,
+so the slot a frame is paced for and the slot it is stamped into drift apart with the date). It:
 
 - **MUST** catch up at most one interval per emit when it is late by **≤ 8 intervals**;
 - **MUST** resync forward to the next boundary (dropping the intervening boundaries) when it is
   late by **> 8 intervals with nothing queued** — a genuine wall-clock discontinuity;
 - **MUST** re-latch to the rewound clock on a backward clock step (a latched boundary more than
-  one interval in the future);
+  one grid slot in the future);
 - **MUST**, on an underrun, repeat the last frame stamped with the NEW boundary timecode — never
   leave a hole and never emit two frames inside one interval.
 
-*Reference implementation (camera-box):* `genlock_emit_gate` (`src/genlock_pacing.rs:69`) on the
-epoch grid `now % interval`; catch-up bound `GENLOCK_MAX_CATCHUP_INTERVALS = 8` (`:67`);
-backward-step re-latch (`:82-90`, `genlock_latched_boundary` `:134`); starvation repeat with the
-new boundary timecode (`starvation_repeat_timecode_100ns` `:239`).
+*Reference implementation (camera-box):* `genlock_emit_gate` (`src/genlock_pacing.rs:79`) on the
+per-second grid of `src/genlock_grid.rs` (latch / resync `grid_next_boundary_ns`, advance
+`genlock_advance_boundary` `:165`, lag in grid slots `grid_steps_between` — since #1355, before it
+the gate paced on `now % interval` from 1970); catch-up bound `GENLOCK_MAX_CATCHUP_INTERVALS = 8`
+(`:62`); backward-step re-latch (`:92-100`, `genlock_latched_boundary` `:150`); starvation repeat
+with the new boundary timecode (`starvation_repeat_timecode_100ns` `:262`). Tolerance of the
+reference: a repeat is stamped `base − k · floor(10⁷ / fps)` (100 ns units), at most `k` units
+above the exact per-second point of its slot — inside the slot, so it floors to the right one.
+The camera gate decides on its POLL instant while the stamp floors the CAPTURE instant, so a
+frame captured within the dequeue latency before a boundary is paced for that boundary but stamped
+into the previous slot (a free-running grabber's stamp duplicate + gap per beat cycle); an
+external sender that stamps the instant it paces on has no such offset.
 
 ### 6. Audio
 
@@ -204,7 +231,7 @@ window cannot read as "flat" (`:47`).
 | §1 Clock | realtime + monotonic + 100-frame offset resample | `src/main.rs:40,57,74`; `src/genlock_stamp.rs:87,94` |
 | §2 Create | `clock_video/clock_audio=false`, progressive | `src/ndi.rs:628-629,1075` |
 | §4 Timecode | FLOOR boundary, 100 ns epoch | `src/ndi.rs:78,1079` (doctrine `:62-78`); `src/genlock_stamp.rs:52`; `vendor/distroav/src/ndi-output.cpp:613` (doctrine `:34-60`) |
-| §5 Pacing | grid gate, catch-up ≤ 8, resync, re-latch, repeat | `src/genlock_pacing.rs:67,69,82-90,134,239` |
+| §5 Pacing | per-second grid gate, catch-up ≤ 8, resync, re-latch, repeat | `src/genlock_pacing.rs:62,79,92-100,150,165,262`; `src/genlock_grid.rs` |
 | §6 Audio | raw wall-clock timecode, no snap | `vendor/distroav/src/ndi-output.cpp:697` |
 | §8 Acceptance | `genlock-fifo audit` counters + verdict | `src/jitter_audit.rs:41-52`; `src/resolume_playback.rs:46,47,56,71-75,91` |
 | Receiver gate | `PROP_SYNC_NDI_SOURCE_TIMECODE` ×100 → ns | `vendor/distroav/src/ndi-source.cpp:723,1619-1626,1680-1687,1959-1960` |

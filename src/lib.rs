@@ -380,6 +380,19 @@ pub mod painter_pacing;
 // `probe::genlock::ReleaseCadence` and the C `GENLOCK_QDEPTH_RELOCK` both derive from here.
 pub mod genlock_backlog;
 
+// #1355 — ONE per-second genlock frame grid: the sender stamps, the receiver ts-align deadline
+// and the render tick all floor on the same per-second grid, so the receiver no longer walks
+// 10 ns/s (0.864 ms/day) against the senders. Crate-root + std-only (Tier-0 verifiable); the C
+// port `vendor/obs-studio/libobs/obs-genlock-grid.h` is held identical by the committed parity
+// gate in `tests/genlock_grid_parity_1355.rs`.
+pub mod genlock_grid;
+
+// #1355 part 2 — the grid-drift bench: the deep N==1 stream `NDI 2ME PGM` FIFO fed by the
+// strih-lx sender, simulated tick by tick with the production decision functions under the
+// measured rig statistics; reproduces the live 31/32 depth flip on the 1970 grid and proves the
+// per-second grid removes it. Crate-root + default features (Tier-0), no OBS.
+pub mod genlock_grid_bench;
+
 // #1298 — the pure LOCKED/DEGRADED/UNLOCKED decision for the in-OBS genlock statusbar
 // indicator. Crate-root + std-only so it is Tier-0 verifiable; the C port in
 // `vendor/obs-studio/frontend/widgets/GenlockLockState.hpp` is held identical by the
@@ -522,7 +535,8 @@ pub mod cg_chain_gate;
 pub mod burn_tick_cache;
 // #1122 — PURE, dependency-free E2E recordings retention decision (keep newest-N runs UNION
 // younger-than-D-days; delete ONLY files matching the harness's OWN OBS-timestamp allowlist, never
-// a generic *.mkv sweep). The canonical spec that scripts/strih-recordings-retention.ps1 mirrors.
+// a generic *.mkv sweep). The canonical spec that scripts/strih-recordings-retention.ps1 (Windows) and
+// the --local-sweep bash decision in scripts/strih-recordings-retention.sh (strih-lx) mirror.
 pub mod recordings_retention;
 // #789 (residual B / criterion 5) — standalone retention decision for the deploy/backup DIRECTORIES
 // the fleet deploy leaves behind (dated `<stamp>-789` box-backups + per-sha stage dirs); keep newest

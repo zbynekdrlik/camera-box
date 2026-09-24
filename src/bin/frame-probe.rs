@@ -492,9 +492,10 @@ fn synth_ndi_paint(name: &str, cfg: &camera_box::probe::run::RunConfig) -> Resul
         bgra_gray_to_uyvy(&bgra, &mut uyvy);
         sender.send_frame_data(&uyvy, w, h, v4l::FourCC::new(b"UYVY"), w * 2)?;
         frame_id = frame_id.wrapping_add(1);
-        // sleep to the next absolute wall boundary
+        // sleep to the next absolute wall boundary — on the ONE per-second genlock grid the
+        // stamps and every receiver use (#1355), never `now % interval` from 1970
         let now = wall_ns();
-        let next_wall = now - (now % interval_ns) + interval_ns;
+        let next_wall = camera_box::genlock_grid::grid_next_boundary_ns(now, interval_ns);
         std::thread::sleep(Duration::from_nanos(next_wall - now));
     }
     tracing::info!("synth-ndi: sent {} frames", frame_id);

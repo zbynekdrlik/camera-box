@@ -35,6 +35,7 @@
 #if defined(__linux__)
 #include "obs-drm-output.h" /* camera-box #1152 M2: the DRM-lease Program scanout frame hook */
 #endif
+#include "obs-genlock-grid.h" /* camera-box #1355: the ONE per-second genlock grid */
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
@@ -832,7 +833,9 @@ void add_ready_encoder_group(obs_encoder_t *encoder)
  *
  * Genlock mode (env OBS_GENLOCK_WALL_CLOCK=1) instead derives every tick
  * deadline from the DanteSync-disciplined WALL clock, aligned to ABSOLUTE
- * frame boundaries (wall_ns % interval == 0). All genlocked machines tick at
+ * frame boundaries -- since camera-box #1355 the ONE per-second grid the senders
+ * stamp on (obs-genlock-grid.h: slot k of second S = S + floor(k * 1 s / fps)),
+ * no longer wall_ns % interval == 0 counted from 1970. All genlocked machines tick at
  * the same disciplined frequency AND phase, so a chained camera->OBS->OBS
  * pipeline has zero rate mismatch end to end. Wall-clock steps (the NTP
  * fallback regime) are absorbed by clamping the per-tick correction to
@@ -875,12 +878,15 @@ static uint64_t genlock_wall_ns(void)
 }
 
 /* Map the next absolute wall-clock frame boundary onto the monotonic
- * timebase os_sleepto_ns() uses, slew-clamped against the stock deadline. */
+ * timebase os_sleepto_ns() uses, slew-clamped against the stock deadline.
+ * camera-box #1355: the boundary is the ONE per-second grid the senders stamp on
+ * (obs-genlock-grid.h, the same helper the ts-align deadline floors with), not the grid
+ * counted from 1970 that lost 10 ns per second against the stamps. */
 static uint64_t genlock_next_deadline(uint64_t cur_time, uint64_t interval_ns)
 {
 	const uint64_t wall = genlock_wall_ns();
 	const uint64_t mono = os_gettime_ns();
-	const uint64_t next_wall = wall - (wall % interval_ns) + interval_ns;
+	const uint64_t next_wall = genlock_grid_next_boundary_ns(wall, interval_ns);
 	const uint64_t target = mono + (next_wall - wall);
 	const uint64_t stock = cur_time + interval_ns;
 	const int64_t corr = (int64_t)(target - stock);

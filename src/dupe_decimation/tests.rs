@@ -297,17 +297,24 @@ fn summary_names_all_counts_and_the_ticket_tags() {
 /// captures at `capture_fps`; returns `(now_ns, content_id, is_dupe_ground_truth)` in
 /// capture order. `content_id` is a strictly-increasing u64 for every REAL (non-dupe) tick;
 /// a dupe capture repeats the immediately preceding capture's `content_id`.
+///
+/// (#1355) Capture `i` is at the exact rational instant `i / capture_fps` s (floored to ns), NOT
+/// at `i * floor(1e9 / capture_fps)`: the truncated-interval train drifts `1 s − fps · interval`
+/// per second (40 ns/s at 60) and so sat exactly on the grid counted from 1970, a few hundred ns
+/// BEFORE the per-second emit grid points, which made an "exact 60" fixture read as captures
+/// landing just before their boundaries. At 60 fps the rational instants ARE the per-second grid
+/// points; on the old 1970 grid they are at-or-after its points, so the fixture means the same on
+/// both.
 fn synthetic_889_capture_sequence(
     capture_fps: f64,
     count: usize,
     dupe_period: usize,
 ) -> Vec<(u64, u64, bool)> {
-    let interval_ns = (1_000_000_000.0 / capture_fps) as u64;
     let mut out = Vec::with_capacity(count);
     let mut next_id: u64 = 0;
     let mut prev_id: u64 = 0;
     for i in 0..count {
-        let now_ns = i as u64 * interval_ns;
+        let now_ns = (i as f64 * 1_000_000_000.0 / capture_fps) as u64;
         let is_dupe = i > 0 && dupe_period > 0 && i % dupe_period == dupe_period - 1;
         let content_id = if is_dupe {
             prev_id
@@ -1102,6 +1109,11 @@ struct GridBacklogSim {
     /// fast-drain extra advance, summed per poll. Must stay 0 (well under `leg-health-guard.sh`'s
     /// sick-leg threshold) so an intentional fast-drain never trips the #707 clock-step alarm.
     net_707_skips_after_inject: u64,
+    /// (#1355) Polls after which the gate's pending boundary was NOT a point of the ONE
+    /// per-second genlock grid (`genlock_grid::grid_floor_ns(b) != b`) — must stay 0: every arm
+    /// that advances the boundary (emit, retire, drain, fast-drain, starvation fill) advances it
+    /// on the grid the camera stamps on.
+    off_grid_boundaries: u64,
 }
 
 /// (#1145 v2.1) Drive the REAL [`DecimationGate::poll`] with a send-bound emit loop whose
@@ -1115,6 +1127,18 @@ struct GridBacklogSim {
 /// isolated content-PAIRS (a dupe repeats the previous content id — the same model as
 /// [`synthetic_over_rate_with_jitter`]). wall == monotonic; realtime == monotonic + offset.
 fn run_grid_backlog_sim(capture_fps: f64, backlog_intervals: u64, secs: f64) -> GridBacklogSim {
+    run_grid_backlog_sim_at(capture_fps, backlog_intervals, secs, 0)
+}
+
+/// (#1355) [`run_grid_backlog_sim`] with the REALTIME emit-grid clock offset by `rt_base` ns — a
+/// real 2026 date instead of 1970, where the 1970 grid and the per-second grid are milliseconds
+/// apart.
+fn run_grid_backlog_sim_at(
+    capture_fps: f64,
+    backlog_intervals: u64,
+    secs: f64,
+    rt_base: u64,
+) -> GridBacklogSim {
     let cap_int = (1e9 / capture_fps) as u64;
     let emit_int = 1_000_000_000u64 / 60;
     let send_cost = emit_int * 995 / 1000; // ~0.5% slack -> unblocked max emit ~60.3/s
@@ -1133,6 +1157,7 @@ fn run_grid_backlog_sim(capture_fps: f64, backlog_intervals: u64, secs: f64) -> 
     let mut emits = 0u64;
     let mut emits_in_window = 0u64; // emits during inject..converged (review 🔵 #4)
     let mut net_707_skips = 0u64; // boundary_skip_count - fast-drain extra, after inject (🟡 #1)
+    let mut off_grid_boundaries = 0u64; // (#1355)
     let mut last_emit_bidx: Option<u64> = None;
     let (mut uni_ok, mut uni_tot) = (0u64, 0u64);
     let (mut next_id, mut prev_id): (u64, u64) = (0, 0);
@@ -1162,7 +1187,7 @@ fn run_grid_backlog_sim(capture_fps: f64, backlog_intervals: u64, secs: f64) -> 
         }
         let cap_ns = queue.pop_front().unwrap();
         let now_mono = mono;
-        let now_rt = (mono as i64 + rt_off) as u64;
+        let now_rt = rt_base + (mono as i64 + rt_off) as u64;
         let over_rate = capture_fps - 60.0;
         let dupe_period = if over_rate > 0.01 {
             (capture_fps / over_rate).round() as u64
@@ -1182,6 +1207,10 @@ fn run_grid_backlog_sim(capture_fps: f64, backlog_intervals: u64, secs: f64) -> 
         let prev_boundary = gate.next_boundary_ns();
         // poll: now_ns (boundary / lag) is REALTIME; residence + takt are MONOTONIC.
         let emit = gate.poll(now_rt, emit_int, content_hash, true, now_mono, cap_ns);
+        let nb = gate.next_boundary_ns();
+        if nb != 0 && crate::genlock_grid::grid_floor_ns(nb, emit_int) != nb {
+            off_grid_boundaries += 1;
+        }
         // (#1145 v2.1 review 🟡) exactly what main.rs feeds emit_skip_log: the raw #707 skip
         // MINUS the fast-drain's intentional extra advance. Accumulate after injection.
         if injected && converged_at.is_none() {
@@ -1210,7 +1239,7 @@ fn run_grid_backlog_sim(capture_fps: f64, backlog_intervals: u64, secs: f64) -> 
         }
         mono += cost;
         if injected && converged_at.is_none() {
-            let rt = (mono as i64 + rt_off) as u64;
+            let rt = rt_base + (mono as i64 + rt_off) as u64;
             let lag =
                 crate::genlock_pacing::genlock_lag_intervals(rt, gate.next_boundary_ns(), emit_int);
             if lag <= 1 {
@@ -1241,6 +1270,7 @@ fn run_grid_backlog_sim(capture_fps: f64, backlog_intervals: u64, secs: f64) -> 
         fast_drained,
         drain_window_emit_fps,
         net_707_skips_after_inject: net_707_skips,
+        off_grid_boundaries,
     }
 }
 
@@ -2177,7 +2207,10 @@ fn steady_shallow_lag_trickle_drains_paced_then_fills_1167() {
         let _ = gate.poll(b0, emit_int, dupe_hash, true, cap, cap);
         // the DUPE crossing a shallow-stale boundary at lag == SHALLOW_DRAIN_LAG_MIN, budget fresh
         // (warm-up never skipped, so last_converge_skip_mono_ns == 0 and now_mono is far past it).
-        let now = gate.next_boundary_ns() + emit_int * SHALLOW_DRAIN_LAG_MIN;
+        // (#1355) `+ SHALLOW_DRAIN_LAG_MIN` ns: a grid slot is `emit_int` OR `emit_int + 1` ns on
+        // the per-second grid, so N slots late is `N * emit_int + N` (on either grid).
+        let now =
+            gate.next_boundary_ns() + emit_int * SHALLOW_DRAIN_LAG_MIN + SHALLOW_DRAIN_LAG_MIN;
         let cap2 = cap + cap_int;
         let emit = gate.poll(now, emit_int, dupe_hash, true, cap2, cap2);
         let (_ds, _bl, copies, retired, drained, _fast) = gate.take_shed_counts();
@@ -2201,13 +2234,15 @@ fn steady_shallow_lag_trickle_drains_paced_then_fills_1167() {
         let b0 = gate.next_boundary_ns();
         let _ = gate.poll(b0, emit_int, dupe_hash, true, cap, cap);
         // first shallow-lag dupe -> trickle SKIP, stamps the pace budget at now_mono = cap2.
-        let now1 = gate.next_boundary_ns() + emit_int * SHALLOW_DRAIN_LAG_MIN;
+        let now1 =
+            gate.next_boundary_ns() + emit_int * SHALLOW_DRAIN_LAG_MIN + SHALLOW_DRAIN_LAG_MIN;
         let cap2 = cap + cap_int;
         let _ = gate.poll(now1, emit_int, dupe_hash, true, cap2, cap2);
         let _ = gate.take_shed_counts();
         // second shallow-lag dupe one cap_int later -> now_mono only ~16 ms past cap2, far under
         // CONVERGE_SKIP_MIN_GAP_INTERVALS * emit_int (500 ms) -> paced-out -> FILL the slot.
-        let now2 = gate.next_boundary_ns() + emit_int * SHALLOW_DRAIN_LAG_MIN;
+        let now2 =
+            gate.next_boundary_ns() + emit_int * SHALLOW_DRAIN_LAG_MIN + SHALLOW_DRAIN_LAG_MIN;
         let cap3 = cap2 + cap_int;
         let emit = gate.poll(now2, emit_int, dupe_hash, true, cap3, cap3);
         let (_ds, _bl, copies, retired, _drn, _fast) = gate.take_shed_counts();
@@ -2535,18 +2570,31 @@ struct StarvationSim {
     repeats: u64,
     net_skips: u64,
     windows: Vec<u64>,
+    /// (#1355) Polls after which the pending boundary was off the per-second grid — must stay 0.
+    off_grid_boundaries: u64,
 }
 
 fn run_starvation_sim(capture_fps: f64, secs: f64, all_unique: bool) -> StarvationSim {
+    run_starvation_sim_at(capture_fps, secs, all_unique, 0)
+}
+
+/// (#1355) [`run_starvation_sim`] with the wall/grid clock offset by `base` ns (a real 2026 date).
+fn run_starvation_sim_at(
+    capture_fps: f64,
+    secs: f64,
+    all_unique: bool,
+    base: u64,
+) -> StarvationSim {
     let cap_int = (1e9 / capture_fps) as u64;
     let emit_int = 1_000_000_000u64 / 60;
     let n = (capture_fps * secs) as u64;
     let mut gate = DecimationGate::new();
     let (mut emit_events, mut poll_emits, mut repeats, mut net_skips) = (0u64, 0u64, 0u64, 0u64);
     let mut windows: Vec<u64> = Vec::new();
-    let (mut win_events, mut win_start) = (0u64, 0u64);
+    let (mut win_events, mut win_start) = (0u64, base);
+    let mut off_grid_boundaries = 0u64;
     for i in 0..n {
-        let cap_ns = i * cap_int;
+        let cap_ns = base + i * cap_int;
         let now = cap_ns; // UNDER-rate: the loop waited for this frame -> empty queue
         let queue_had_frame = false;
         let content_hash = if all_unique {
@@ -2557,6 +2605,9 @@ fn run_starvation_sim(capture_fps: f64, secs: f64, all_unique: bool) -> Starvati
         let prev_b = gate.next_boundary_ns();
         let emit = gate.poll(now, emit_int, content_hash, queue_had_frame, now, cap_ns);
         let next_b = gate.next_boundary_ns();
+        if next_b != 0 && crate::genlock_grid::grid_floor_ns(next_b, emit_int) != next_b {
+            off_grid_boundaries += 1;
+        }
         let r = gate.last_poll_starvation_repeats();
         let s = crate::genlock_pacing::boundary_skip_count(prev_b, next_b, emit_int)
             .saturating_sub(gate.last_poll_intentional_extra_advance());
@@ -2580,6 +2631,7 @@ fn run_starvation_sim(capture_fps: f64, secs: f64, all_unique: bool) -> Starvati
         repeats,
         net_skips,
         windows,
+        off_grid_boundaries,
     }
 }
 
@@ -2880,4 +2932,60 @@ fn over_rate_empty_queue_stall_fills_every_slot_regardless_of_regime_1167_v5() {
             s.windows
         );
     }
+}
+
+// ── (#1355) the emit boundary stays on the ONE per-second genlock grid ─────────────────────
+
+/// 2026-09-23 17:16:33 UTC (the #1355 design's audit second) in ns — a real date, where the pre-#1355
+/// 1970 emit grid sat milliseconds off the per-second grid the camera stamps on.
+const RT_2309_NS: u64 = 1_790_176_593 * 1_000_000_000;
+
+/// (#1355) Every arm of the DecimationGate that moves the boundary keeps it on the per-second grid
+/// the camera STAMPS on (`genlock_grid`): the deep-backlog FastDrain (+2 slots), the paced
+/// retire/drain tail and the plain emit advance. A `+ interval` advance from a per-second grid
+/// point lands 1 ns short of the next point whenever the step is `interval + 1` (the per-second
+/// 60 fps steps alternate 16_666_666 / 16_666_667 ns), after which the next poll re-crosses the
+/// same slot. The convergence, the emit rate and the #707 net-skip proof of the 1145 sim must hold
+/// unchanged at a 2026 date.
+#[test]
+fn fast_drain_keeps_the_boundary_on_the_per_second_grid_at_a_2026_date_1355() {
+    let s = run_grid_backlog_sim_at(61.5, 24, 60.0, RT_2309_NS);
+    assert!(
+        s.fast_drained > 0,
+        "the backlog must engage the FastDrain arm"
+    );
+    assert_eq!(
+        s.off_grid_boundaries, 0,
+        "every pending emit boundary must be a per-second grid point"
+    );
+    assert!(
+        s.time_to_parity_s.is_finite() && s.time_to_parity_s < 12.0,
+        "the deep backlog must still converge fast at a 2026 date: {:.2}s",
+        s.time_to_parity_s
+    );
+    assert_eq!(s.net_707_skips_after_inject, 0);
+    assert!(s.emit_fps >= 57.0, "emit fps {:.2}", s.emit_fps);
+    assert!(s.uniformity >= 0.95, "uniformity {:.3}", s.uniformity);
+}
+
+/// (#1355) The empty-queue STARVATION fill advances the boundary by `1 + repeats` grid slots in one
+/// poll — that advance must land on grid points too, and the #1167 invariants (every slot filled,
+/// zero net #707 skips, ~60 emit events/s) must hold at a 2026 date.
+#[test]
+fn starvation_fill_keeps_the_boundary_on_the_per_second_grid_at_a_2026_date_1355() {
+    let s = run_starvation_sim_at(57.9, 20.0, true, RT_2309_NS);
+    assert!(
+        s.repeats > 0,
+        "the under-rate source must engage the starvation fill"
+    );
+    assert_eq!(
+        s.off_grid_boundaries, 0,
+        "every pending emit boundary must be a per-second grid point"
+    );
+    assert_eq!(s.net_skips, 0, "windows {:?}", s.windows);
+    let rate = s.emit_events as f64 / 20.0;
+    assert!(
+        (59.0..=60.5).contains(&rate),
+        "starvation fill must hold ~60 at a 2026 date; got {rate:.2}"
+    );
 }
