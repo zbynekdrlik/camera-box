@@ -709,7 +709,18 @@ const char *ndi_source_getname(void *)
  * + resync) before the FIRST warm frame, discovered as dropped/delayed frames on program cuts.
  * KEEP_ACTIVE keeps the receiver thread (and, with the #764 change to the thread loop below,
  * frame decode) running continuously regardless of visibility -- a cut is then just OBS
- * switching which existing warm source to render, no reconnect. */
+ * switching which existing warm source to render, no reconnect.
+ *
+ * camera-box issue 1242 (24.9.2026, owner ruling): KEEP_ACTIVE stays the forced behavior for EVERY
+ * genlocked source, but a source whose box role flags it PROGRAM-PATH (PROP_GENLOCK_CONNECT_ON_SHOW,
+ * set by the strih scene role lib on the camera inputs only) now PARKS inside the receiver thread
+ * while nothing shows it -- the NDI receiver is released, the thread stays alive -- and reconnects
+ * on show (genlock_connect_on_show_park_decision). The built-in multiview then renders the
+ * always-connected #501 genlock_monitor twins, so strih pulls full bandwidth only for what is shown.
+ * A cold start in preview is the accepted cost; the #764 reconnect-on-cut problem cannot return for
+ * a PROGRAM cut because a camera cut to program was already SHOWN in preview. The stock STOP_RESUME
+ * behavior is still NOT the mechanism: its hide path joins the receiver thread on the graphics
+ * thread. Stream's 2ME PGM and the resolume cg OBS never set the flag (unchanged keep-alive). */
 struct genlock_forced_setting {
 	const char *prop;
 	bool is_bool;
@@ -1903,6 +1914,9 @@ void *ndi_source_thread(void *data)
 		// Scoped to genlocked sources only (genlock_source_is_active) -- a non-genlock/aux
 		// input (or this fix running on a stock, unpatched OBS where the getter resolves
 		// nullptr) keeps the ORIGINAL stock behavior exactly as before, unchanged.
+		// camera-box issue 1242: a hidden PROGRAM-PATH (connect-on-show) source never gets here --
+		// it parked at the top of the loop; this keep-alive now covers the monitor twins and every
+		// genlocked source without the role flag (stream's 2ME PGM, the cg inputs).
 		if (!obs_source_showing(s->obs_source) && !genlock_source_is_active(s->obs_source)) {
 			// Avoid busy-waiting when the source is hidden but kept active.
 			std::this_thread::sleep_for(std::chrono::milliseconds(5));

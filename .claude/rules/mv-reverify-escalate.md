@@ -295,3 +295,10 @@ every OTHER `ps_encoded_command` consumer parses a DIFFERENT audit-line family w
 non-byte-safe grep/sed shape — `mv-fps-alert-watchdog.sh`'s `multiview-audit:` grep, `ndi-halving-
 watchdog.sh`'s `recv-timing` tap, `asio-starve-alert-watchdog.sh`'s `asrc:` tap. Same fetch mechanism,
 same locale, same theoretical exposure — just unverified and out of #1258's `received=`-scoped remit.
+
+## issue 1242 — the E2E holds every program-path input connected
+
+Outside an E2E run a strih camera main (`NDI camN`) is PARKED while hidden, which would read as a
+WEDGE here. `recording-e2e.sh` therefore holds `genlock_connect_on_show` off for the whole run
+(`scripts/lib/connect-on-show-hold.sh`, after the cleanup trap arms, restored in cleanup), so the
+reverify and its escalation only ever see connected mains. See `.claude/rules/strih-bandwidth-roles.md`.

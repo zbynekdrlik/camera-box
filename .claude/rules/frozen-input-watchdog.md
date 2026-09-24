@@ -168,3 +168,12 @@ cadence, offset from the #1052 stream instance). Dev1-side only; nothing deploye
 - A grep-filter pipeline exits 1 on "no match"; under `set -o pipefail` that fails the whole pipeline.
   A pure text FILTER whose empty result is a NORMAL outcome must end `|| true` so callers under
   pipefail (and the pure-fn test) do not read "nothing matched" as an error.
+
+## issue 1242 — a PARKED strih camera input is hidden by design, never FROZEN
+
+strih-lx parks a program-path camera input (`genlock_connect_on_show`) while nothing shows it, so
+its `received=` stops by design. The watchdog reads the park state from the same raw tail
+(`genlock-park '<src>': state=parked`, `scripts/lib/genlock-park.sh`): a parked static source is
+SKIP (no FROZEN page, no blind-tap count, baseline dropped), and the #1069 enumeration watches ONE
+live receiver per camera — the main when shown, its always-connected `MV NDI camN` twin when parked,
+never both. See `.claude/rules/strih-bandwidth-roles.md`.

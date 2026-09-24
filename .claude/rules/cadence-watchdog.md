@@ -94,3 +94,10 @@ fleet's UTF-8 locale, plain grep then flags stdin BINARY (empty extraction) and 
 + the fix pattern: `.claude/rules/mv-reverify-escalate.md` "Layer 2" section (this watchdog is one of
 its 3 proven-RED consumers, verified via a Tier-0 fixture with an injected invalid byte). Never
 re-add a plain (non-`LC_ALL=C`) grep/sed on this extraction.
+
+## issue 1242 — a PARKED strih camera input is SKIP
+
+A program-path camera input parked by the strih connect-on-show role (`genlock-park '<src>':
+state=parked` in the same fetched tail) is SKIP: no cadence verdict, no blind-tap WARN, and its
+baseline is dropped so the first pass after it is shown again reseeds instead of dividing a
+post-unpark delta by a window spanning the whole park. See `.claude/rules/strih-bandwidth-roles.md`.

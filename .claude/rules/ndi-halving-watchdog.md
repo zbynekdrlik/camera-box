@@ -121,3 +121,9 @@ after one idle→restore and healed only after a SENDER restart (`systemctl rest
 cam5), which froze the receiver (`received` flat) until the in-loop #767 watchdog ran its own
 `reset_ndi_receiver` (~30 s) and it came back at 60 fps. Before handing the rig to production, read
 all seven `cap_avg` values (≈16.2 ms = 60 fps) — a 32-33 ms input is halved even though `locked=1`.
+
+## issue 1242 — a PARKED input is SKIP (no verdict, no cure)
+
+If a watched input is a strih program-path camera parked by the connect-on-show role, its
+`recv-timing #797` line stops by design: `handle_input` SKIPs it before the decision (no blind-tap
+count, no cure arm). See `.claude/rules/strih-bandwidth-roles.md`.

@@ -26,6 +26,11 @@
 //! `ndi_audio` = false, `ndi_framesync` = false, `ndi_fix_alpha_blending` = false. The two
 //! user knobs (`ndi_source_name`, `genlock_preload`) are NEVER forced.
 //!
+//! issue 1242 (24.9.2026): KEEP_ACTIVE stays forced for every genlocked source, but the
+//! per-source WHITELIST role flag `genlock_connect_on_show` (default OFF, set by the strih scene
+//! role lib on the camera inputs) makes the receiver PARK in-thread while the source is hidden
+//! and reconnect on show; see tests/distroav_connect_on_show_park_1242.rs.
+//!
 //! This is a SOURCE-presence guard (same convention as
 //! tests/distroav_source_config_lock.rs, tests/genlock_preload.rs,
 //! tests/obs_updater_disabled.rs): the lockdown lives in the vendored C++
