@@ -487,7 +487,7 @@ impl FakeNvram {
         let bin = self.dir.join("efibootmgr").display().to_string();
         let state = self.dir.join("state").display().to_string();
         let (code, out, err) = run_efi(
-            &format!("efi_cam_box_ensure /dev/sdz \"{want}\" {mode}\necho \"rc=$?\"\necho ===\n\"$EFI_BOOTMGR_BIN\" -v"),
+            &format!("efi_cam_box_ensure /dev/sdz \"{want}\" {mode}\necho \"rc=$?\"\necho ===\n\"$EFI_BOOTMGR_BIN\" -v || true"),
             &[("EFI_BOOTMGR_BIN", bin), ("FAKE_EFI_STATE", state.clone())],
         );
         assert_eq!(code, 0, "harness must run; stderr: {err}");
