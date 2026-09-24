@@ -883,20 +883,27 @@ fn create_usb_creates_named_efi_boot_entry() {
         "create_efi_boot_entry must GUARD on /sys/firmware/efi/efivars so it only runs when the \
          host booted UEFI (#448)"
     );
-    // Creates a named entry pointing at the removable core.
-    let creates = func.lines().any(|l| {
-        !l.trim_start().starts_with('#') && l.contains("efibootmgr") && l.contains("cam-box")
-    });
+    // Creates a named entry pointing at the removable core. Issue 1311 moved the create (plus its
+    // read-back + repair) into the shared efi_cam_box_ensure in scripts/lib/efi-boot-entry.sh, so
+    // pin the call here and the label / loader constants + the create in the lib -- never an
+    // error message or a comment that merely mentions them.
+    let creates = func
+        .lines()
+        .any(|l| !l.trim_start().starts_with('#') && l.contains("efi_cam_box_ensure \"$DEVICE\""));
     assert!(
         creates,
-        "create_efi_boot_entry must run efibootmgr with the `cam-box` label to create the NVRAM \
-         entry (#448)"
+        "create_efi_boot_entry must create the `cam-box` NVRAM entry through the shared \
+         efi_cam_box_ensure (#448, issue 1311)"
     );
+    let lib = read("scripts/lib/efi-boot-entry.sh");
     assert!(
-        func.contains(r"\EFI\BOOT\BOOTX64.EFI"),
-        "create_efi_boot_entry must point the entry at \\EFI\\BOOT\\BOOTX64.EFI (the real file \
-         grub-install --removable + #344 wrote — \\EFI\\ubuntu\\grubx64.efi does NOT exist with \
-         --removable) (#448)"
+        lib.contains(r#"EFI_CAM_BOX_LABEL="cam-box""#)
+            && lib.contains(r"EFI_CAM_BOX_LOADER='\EFI\BOOT\BOOTX64.EFI'")
+            && lib
+                .contains(r#"-c -d "$disk" -p 1 -L "$EFI_CAM_BOX_LABEL" -l "$EFI_CAM_BOX_LOADER""#),
+        "the shared create must point the `cam-box` entry at \\EFI\\BOOT\\BOOTX64.EFI (the real \
+         file grub-install --removable + #344 wrote — \\EFI\\ubuntu\\grubx64.efi does NOT exist \
+         with --removable) (#448)"
     );
     // Wired into main() (host side), after configure_system.
     let main = extract_shell_function(&body, "main").expect("main function present");

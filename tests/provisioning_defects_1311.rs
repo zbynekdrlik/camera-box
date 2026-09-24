@@ -338,6 +338,9 @@ fn efi_device_path_healthy_requires_hd_never_venhw_1311() {
         ("VenHw(99e275e7-75a0-4b37-a2e6-c5385e6c00cb,00000000)/File(\\EFI\\BOOT\\BOOTX64.EFI)", "", false),
         ("VenHw(99e275e7-75a0-4b37-a2e6-c5385e6c00cb)/HD(1,GPT,5bd6d8d8-1c2e-4a55-9f1e-0123456789ab,0x800,0x100000)", ESP_UUID, false),
         ("", "", false),
+        // Right disk and GUID, but a loader that --removable never wrote (review, issue 1311).
+        ("HD(1,GPT,5bd6d8d8-1c2e-4a55-9f1e-0123456789ab,0x800,0x100000)/File(\\EFI\\ubuntu\\grubx64.efi)", ESP_UUID, false),
+        ("HD(1,GPT,5bd6d8d8-1c2e-4a55-9f1e-0123456789ab,0x800,0x100000)", ESP_UUID, false),
     ];
     for (path, want, healthy) in cases {
         let (code, _o, err) = run_efi(
@@ -445,7 +448,9 @@ case "$mode" in
     order)
         echo "order $neworder" >> "$S/calls"
         echo "$neworder" > "$S/order" ;;
-    *) dump ;;
+    *)
+        if [ -f "$S/vfail" ]; then exit 1; fi
+        dump ;;
 esac
 "##;
 
@@ -455,6 +460,10 @@ struct FakeNvram {
 
 impl FakeNvram {
     fn new(entries: &str, order: &str, mangle: u32, noprepend: bool) -> Self {
+        Self::with_vfail(entries, order, mangle, noprepend, false)
+    }
+
+    fn with_vfail(entries: &str, order: &str, mangle: u32, noprepend: bool, vfail: bool) -> Self {
         let dir = scratch_dir("nvram");
         write_exec(&dir.join("efibootmgr"), FAKE_EFIBOOTMGR);
         let state = dir.join("state");
@@ -466,6 +475,9 @@ impl FakeNvram {
         std::fs::write(state.join("calls"), "").unwrap();
         if noprepend {
             std::fs::write(state.join("noprepend"), "").unwrap();
+        }
+        if vfail {
+            std::fs::write(state.join("vfail"), "").unwrap();
         }
         FakeNvram { dir }
     }
@@ -577,7 +589,7 @@ fn efi_ensure_repairs_a_firmware_mangled_entry_1311() {
 #[test]
 fn efi_ensure_replaces_an_existing_mangled_entry_1311() {
     let nv = FakeNvram::new(
-        "0000|cam-box|VenHw(99e275e7-75a0-4b37-a2e6-c5385e6c00cb,00000000)/File(x)\n0001|UEFI OS|HD(1,GPT,x,0x800,0x100000)\n",
+        "0000|cam-box|VenHw(99e275e7-75a0-4b37-a2e6-c5385e6c00cb,00000000)/File(\\EFI\\BOOT\\BOOTX64.EFI)\n0001|UEFI OS|HD(1,GPT,x,0x800,0x100000)\n",
         "0001,0000",
         0,
         false,
@@ -620,7 +632,7 @@ fn efi_ensure_fails_loud_when_the_firmware_keeps_mangling_1311() {
 #[test]
 fn efi_ensure_reorders_a_healthy_demoted_entry_without_recreating_1311() {
     let nv = FakeNvram::new(
-        &format!("0001|UEFI OS|HD(1,GPT,x,0x800,0x100000)\n0003|cam-box|HD(1,GPT,{ESP_UUID},0x800,0x100000)/File(x)\n"),
+        &format!("0001|UEFI OS|HD(1,GPT,x,0x800,0x100000)\n0003|cam-box|HD(1,GPT,{ESP_UUID},0x800,0x100000)/File(\\EFI\\BOOT\\BOOTX64.EFI)\n"),
         "0001,0003",
         0,
         false,
@@ -640,7 +652,7 @@ fn efi_ensure_reorders_a_healthy_demoted_entry_without_recreating_1311() {
 #[test]
 fn efi_ensure_is_a_no_op_on_a_correct_entry_1311() {
     let nv = FakeNvram::new(
-        &format!("0003|cam-box|HD(1,GPT,{ESP_UUID},0x800,0x100000)/File(x)\n0001|UEFI OS|HD(1,GPT,x,0x800,0x100000)\n"),
+        &format!("0003|cam-box|HD(1,GPT,{ESP_UUID},0x800,0x100000)/File(\\EFI\\BOOT\\BOOTX64.EFI)\n0001|UEFI OS|HD(1,GPT,x,0x800,0x100000)\n"),
         "0003,0001",
         0,
         false,
@@ -657,7 +669,7 @@ fn efi_ensure_is_a_no_op_on_a_correct_entry_1311() {
 #[test]
 fn efi_ensure_replaces_a_stale_entry_from_a_previous_install_1311() {
     let nv = FakeNvram::new(
-        "0003|cam-box|HD(1,GPT,deadbeef-0000-0000-0000-000000000000,0x800,0x100000)/File(x)\n0001|UEFI OS|HD(1,GPT,x,0x800,0x100000)\n",
+        "0003|cam-box|HD(1,GPT,deadbeef-0000-0000-0000-000000000000,0x800,0x100000)/File(\\EFI\\BOOT\\BOOTX64.EFI)\n0001|UEFI OS|HD(1,GPT,x,0x800,0x100000)\n",
         "0003,0001",
         0,
         false,
@@ -685,7 +697,9 @@ fn efi_ensure_reorders_after_a_create_the_firmware_appended_1311() {
 #[test]
 fn efi_ensure_fresh_replaces_even_a_healthy_prior_entry_1311() {
     let nv = FakeNvram::new(
-        &format!("0003|cam-box|HD(1,GPT,{ESP_UUID},0x800,0x100000)/File(x)\n"),
+        &format!(
+            "0003|cam-box|HD(1,GPT,{ESP_UUID},0x800,0x100000)/File(\\EFI\\BOOT\\BOOTX64.EFI)\n"
+        ),
         "0003",
         0,
         false,
@@ -697,6 +711,183 @@ fn efi_ensure_fresh_replaces_even_a_healthy_prior_entry_1311() {
         "{calls}"
     );
     assert_eq!(cam_box_lines(&dump).len(), 1, "{dump}");
+}
+
+/// efibootmgr -v unreadable: never write blind (three creates would pile up duplicates), FAIL.
+#[test]
+fn efi_ensure_fails_without_writing_when_efibootmgr_v_is_unreadable_1311() {
+    let nv = FakeNvram::with_vfail(
+        "0001|UEFI OS|HD(1,GPT,x,0x800,0x100000)\n",
+        "0001",
+        0,
+        false,
+        true,
+    );
+    let (rc, out, _dump, calls) = nv.ensure(ESP_UUID, "fresh");
+    assert_ne!(rc, 0, "an unreadable efibootmgr -v must FAIL: {out}");
+    assert!(
+        out.lines()
+            .any(|l| l.starts_with("FAIL:") && l.contains("unreadable")),
+        "the failure must say efibootmgr -v was unreadable: {out}"
+    );
+    assert!(
+        calls.trim().is_empty(),
+        "no NVRAM write on an unreadable read: {calls}"
+    );
+}
+
+/// verify-device (al): the verdict must also grade the stored path (review, issue 1311) -- a
+/// leading VenHw() entry or a leading entry on another ESP GUID is NOT certified.
+#[test]
+fn efi_entry_verdict_grades_the_stored_path_1311() {
+    let v_mangled_first = "BootCurrent: 0000\nBootOrder: 0000,0001\n\
+        Boot0000* cam-box\tVenHw(99e275e7-75a0-4b37-a2e6-c5385e6c00cb,00000000)/File(\\EFI\\BOOT\\BOOTX64.EFI)\n\
+        Boot0001* UEFI OS\tHD(1,GPT,11111111-aaaa-bbbb-cccc-000000000000,0x800,0x100000)";
+    let (_c, out, err) = efi_call(
+        "efi_entry_verdict",
+        v_mangled_first,
+        &format!("\"{ESP_UUID}\""),
+    );
+    assert!(
+        out.starts_with("FAIL:") && out.contains("VenHw("),
+        "a leading VenHw() entry must FAIL (al): {out} {err}"
+    );
+    let (_c, out2, _e) = efi_call(
+        "efi_entry_verdict",
+        V_HEALTHY_FIRST,
+        "\"deadbeef-0000-0000-0000-000000000000\"",
+    );
+    assert!(
+        out2.starts_with("FAIL:"),
+        "a leading entry on another ESP GUID must FAIL (al): {out2}"
+    );
+    let (_c, out3, _e) = efi_call(
+        "efi_entry_verdict",
+        V_HEALTHY_FIRST,
+        &format!("\"{ESP_UUID}\""),
+    );
+    assert_eq!(out3.trim(), "ok", "healthy + leading -> ok");
+}
+
+#[test]
+fn verify_device_al_reads_the_verbose_entries_and_the_esp_partuuid_1311() {
+    let body = read("scripts/verify-device.sh");
+    let start = body.find("\n# (al) ").expect("(al) block");
+    let end = body[start..].find("\n# (am) ").map(|o| start + o).unwrap();
+    let block = &body[start..end];
+    assert!(
+        on_noncomment_line(block, "efibootmgr -v"),
+        "(al) must read `efibootmgr -v` (the device paths) (issue 1311): {block}"
+    );
+    assert!(
+        on_noncomment_line(block, "PARTUUID") && on_noncomment_line(block, "/boot/efi"),
+        "(al) must read the ESP PARTUUID of /boot/efi to grade a stale entry (issue 1311)"
+    );
+    assert!(
+        on_noncomment_line(
+            block,
+            "efi_entry_verdict \"$EFI_ENTRIES\" \"$EFI_ESP_PARTUUID\""
+        ),
+        "(al) must grade with the path-aware verdict (issue 1311)"
+    );
+}
+
+/// STEP 17d must not abort BEFORE STEP 18 (a fresh box would keep a writable root with no tmpfs
+/// fstab); it records the problem and STEP 19 refuses Setup Complete (review, issue 1311).
+#[test]
+fn setup_device_step17d_failure_is_deferred_to_step19_1311() {
+    let body = read("scripts/setup-device.sh");
+    let start = body.find("STEP 17d").expect("STEP 17d block");
+    let end = body[start..].find("STEP 18:").map(|o| start + o).unwrap();
+    let block = &body[start..end];
+    assert!(
+        on_noncomment_line(block, "EFI_ENTRY_PROBLEM="),
+        "STEP 17d must record a failed entry repair in EFI_ENTRY_PROBLEM: {block}"
+    );
+    assert!(
+        !block
+            .lines()
+            .any(|l| !l.trim_start().starts_with('#') && l.trim_start().starts_with("fail ")),
+        "STEP 17d must NOT abort before STEP 18 flips the root read-only"
+    );
+    let s19 = body.find("# STEP 19:").expect("STEP 19");
+    let tail = &body[s19..];
+    assert!(
+        on_noncomment_line(tail, "EFI_ENTRY_PROBLEM") && tail.contains("MISSING"),
+        "STEP 19 must refuse Setup Complete when the entry could not be verified"
+    );
+}
+
+/// The fleet wrapper's reachability probe and imag's verifier have the same host-key trap.
+#[test]
+fn sibling_verifiers_ignore_known_hosts_too_1311() {
+    for script in ["scripts/verify-fleet.sh", "scripts/verify-imag.sh"] {
+        let body = read(script);
+        let ssh_lines: Vec<&str> = body
+            .lines()
+            .filter(|l| !l.trim_start().starts_with('#') && l.contains(" ssh -o"))
+            .collect();
+        assert!(
+            !ssh_lines.is_empty(),
+            "{script} must have an ssh invocation"
+        );
+        for l in ssh_lines {
+            assert!(
+                l.contains("-o UserKnownHostsFile=/dev/null"),
+                "{script}: every ssh must pass -o UserKnownHostsFile=/dev/null (issue 1311): {l}"
+            );
+        }
+    }
+}
+
+/// The REAL fetch (curl, then the bash /dev/tcp HEAD fallback) against a local HTTP listener.
+#[test]
+fn clock_sanity_fetch_headers_reads_a_real_date_header_both_paths_1311() {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    let port = listener.local_addr().unwrap().port();
+    let server = std::thread::spawn(move || {
+        for _ in 0..2 {
+            let (mut s, _) = match listener.accept() {
+                Ok(c) => c,
+                Err(_) => return,
+            };
+            let mut buf = [0u8; 4096];
+            let mut req = Vec::new();
+            while !req.windows(4).any(|w| w == b"\r\n\r\n") {
+                match s.read(&mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => req.extend_from_slice(&buf[..n]),
+                }
+            }
+            let _ = s.write_all(
+                b"HTTP/1.1 200 OK\r\nServer: test\r\nDate: Thu, 24 Sep 2026 14:00:00 GMT\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            );
+        }
+    });
+    let (code, out, err) = run_setup_sourced_env(
+        r#"CLOCK_SANITY_HOST=127.0.0.1
+           CLOCK_SANITY_PORT="$PORT"
+           printf 'curl=[%s]\n' "$(http_date_header_value "$(clock_sanity_fetch_headers)")"
+           curl() { return 1; }
+           printf 'tcp=[%s]\n' "$(http_date_header_value "$(clock_sanity_fetch_headers)")""#,
+        &[("PORT", port.to_string())],
+    );
+    // Release any accept() the harness never reached (a RED run fetches elsewhere), so the join
+    // can never hang: a connect to an already-finished listener is simply refused.
+    for _ in 0..2 {
+        let _ = std::net::TcpStream::connect(("127.0.0.1", port));
+    }
+    let _ = server.join();
+    assert_eq!(code, 0, "stderr: {err}");
+    assert!(
+        out.contains("curl=[Thu, 24 Sep 2026 14:00:00 GMT]"),
+        "curl path: {out}\n{err}"
+    );
+    assert!(
+        out.contains("tcp=[Thu, 24 Sep 2026 14:00:00 GMT]"),
+        "/dev/tcp path: {out}\n{err}"
+    );
 }
 
 fn function_body(script: &str, name: &str) -> String {
@@ -752,10 +943,8 @@ fn setup_device_step17d_repairs_via_the_shared_ensure_and_fails_loud_1311() {
         "STEP 17d must use the shared efi_cam_box_ensure (issue 1311): {block}"
     );
     assert!(
-        block
-            .lines()
-            .any(|l| !l.trim_start().starts_with('#') && l.trim_start().starts_with("fail ")),
-        "STEP 17d must fail loud when the entry cannot be made correct (issue 1311)"
+        on_noncomment_line(block, "EFI_ENTRY_PROBLEM="),
+        "STEP 17d must record (and STEP 19 fail on) an entry it cannot make correct (issue 1311)"
     );
     assert!(
         !block.contains("not recreating"),
