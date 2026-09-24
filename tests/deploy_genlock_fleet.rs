@@ -1431,11 +1431,14 @@ fn default_plan_is_strih_lx_and_stream_never_a_windows_strih_1317() {
     );
 }
 
-/// The strih-lx plan is the sanctioned provisioning recipe (prune stale stages, stage the strih
-/// FULL artifact + scripts/ + systemd/, setup-strih.sh with STRIH_LX_BUNDLE_SRC, a supervised
-/// strih-obs.service restart) -- never the imag on-box program, which restarts imag-obs.service (a
-/// unit strih-lx does not have) and was printed under a `box=imag` header before issue 1317 part 3.
-/// Every line is a #-comment so a saved whole-plan .ps1 still parses (the issue-1295 rule).
+/// The strih-lx plan prints the SAME steps the issue-1317 part-6 EXECUTE arm runs (built by the
+/// same `scripts/lib/strih-lx-deploy.sh` builders): the same-SHA strih FULL artifact, the
+/// obs-backup-retention `--local-sweep` of stale stages, the whole tree staged into
+/// `/tmp/genlock-stage-<sha>/{bundle,repo}` BEFORE the graceful `strih-obs-stop.sh` stop,
+/// setup-strih.sh with `STRIH_LX_BUNDLE_SRC=<stage>/bundle`, a supervised strih-obs.service start and
+/// the fail-closed SHA read-back -- never the imag on-box program, which restarts imag-obs.service (a
+/// unit strih-lx does not have). Every line is a #-comment so a saved whole-plan .ps1 still parses
+/// (the issue-1295 rule).
 #[test]
 fn strih_lx_plan_is_the_setup_strih_recipe_not_the_imag_program_1317() {
     let tmp = tempfile::tempdir().expect("tempdir");
@@ -1455,18 +1458,20 @@ fn strih_lx_plan_is_the_setup_strih_recipe_not_the_imag_program_1317() {
         "--plan strih-lx must succeed.\nstdout={out}\nstderr={err}"
     );
     for want in [
-        "obs-backup-retention.sh --box strih-lx",
+        "scripts/deploy-genlock-fleet.sh --run-id R1 --boxes strih-lx",
         "obs-genlock-linux-x86_64-strih",
-        // review round 1: the repo tree goes to ONE fixed, overwritten path (a per-sha `-repo` dir
-        // matches no retention allowlist and would never be swept).
-        "rsync -a --delete scripts systemd newlevel@10.77.9.202:/tmp/strih-lx-deploy-repo/",
-        "STRIH_LX_BUNDLE_SRC=/tmp/genlock-stage-deadbeef",
-        // review round 1: $PW expands on dev1 (outer double quotes) and reaches sudo via printf, and
-        // the script runs DIRECTLY so `pgrep -x setup-strih.sh` can actually see it.
-        "sshpass -p \"$PW\" ssh newlevel@10.77.9.202 \"printf '%s\\n' '$PW' | sudo -S -p ''",
-        "nohup /tmp/strih-lx-deploy-repo/scripts/setup-strih.sh",
-        "pgrep -x setup-strih.sh",
-        "systemctl --user restart strih-obs.service",
+        "obs-backup-retention.sh",
+        "--local-sweep --backup-root /opt/obs-backup --stage-parent /tmp --keep-runs 1 --keep-days 0 --execute",
+        "touch '/tmp/genlock-stage-deadbeef'",
+        "newlevel@10.77.9.202:/tmp/genlock-stage-deadbeef/bundle/",
+        "newlevel@10.77.9.202:/tmp/genlock-stage-deadbeef/repo/",
+        "STRIH_LX_BUNDLE_SRC=/tmp/genlock-stage-deadbeef/bundle",
+        "/tmp/genlock-stage-deadbeef/repo/run-setup.sh",
+        "ghtoken:",
+        "/usr/local/bin/strih-obs-stop.sh",
+        "systemctl --user start strih-obs.service",
+        "/opt/obs-genlock/GENLOCK_BUILD_SHA.txt",
+        "http://10.77.9.202:8899/bundle-state.json",
         "verify-strih.sh",
         "PREFLIGHT (report-only, #1303 part 4)",
     ] {
@@ -1480,8 +1485,10 @@ fn strih_lx_plan_is_the_setup_strih_recipe_not_the_imag_program_1317() {
         "the strih-lx plan must never be the imag program:\n{out}"
     );
     assert!(
-        !out.contains("nohup bash ") && !out.contains("'echo \"$PW\""),
-        "no `nohup bash` wrapper (pgrep -x would never match) and no remote-expanded $PW:\n{out}"
+        !out.contains("nohup bash ")
+            && !out.contains("kill -9")
+            && !out.contains("strih-lx-deploy-repo"),
+        "no `nohup bash` wrapper, no hard kill, no unswept fixed repo dir:\n{out}"
     );
     for line in out.lines() {
         let t = line.trim();
@@ -1553,39 +1560,5 @@ fn per_box_table_lives_in_the_shared_lib_1317() {
     assert!(
         deploy.lines().count() < 1000,
         "deploy-genlock-fleet.sh stays under the 1000-line budget"
-    );
-}
-
-/// review round 1: EXECUTE mode has no strih-lx arm yet, so with the new `strih-lx,stream` default
-/// it must neither record strih-lx in the durable fleet log ("strih-lx deployed at <sha>" would be
-/// false) nor "succeed" when strih-lx is the ONLY box. The executed/logged set drops strih-lx; an
-/// empty executed set is a usage error BEFORE any gh/ssh call.
-#[test]
-fn execute_mode_never_logs_or_claims_the_unexecuted_strih_lx_1317() {
-    for (input, want) in [
-        ("strih-lx,stream", "stream"),
-        ("strih-lx,stream,imag,resolume", "stream,imag,resolume"),
-        ("stream,imag", "stream,imag"),
-        ("strih-lx", ""),
-    ] {
-        assert_eq!(
-            run_sourced(&script(), &format!("fleet_execute_boxes {input}")),
-            want,
-            "fleet_execute_boxes {input}"
-        );
-    }
-    let (code, out, err) = run_script(&["--run-id", "R1", "--boxes", "strih-lx"]);
-    assert_eq!(
-        code, 2,
-        "an execute run with nothing executable must be a usage error.\nstdout={out}\nstderr={err}"
-    );
-    assert!(
-        err.contains("nothing to deploy") && !out.contains("fleet-deploy log appended"),
-        "no log line, a named refusal: out={out} err={err}"
-    );
-    let src = std::fs::read_to_string(script()).unwrap();
-    assert!(
-        src.contains("fleet_log_line \"$run_id\" \"$sha\" \"$exec_boxes\" \"$mode\" >>"),
-        "the durable execute-mode log records the EXECUTED boxes only"
     );
 }
