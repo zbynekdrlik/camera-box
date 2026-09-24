@@ -61,8 +61,9 @@ NDI_DISCOVERY_CONFIG_NAME="ndi-config.v1.json"
 # System config dir for root / ProtectHome services (pointed at by NDI_CONFIG_DIR). Overridable for tests.
 NDI_DISCOVERY_SYSTEM_DIR="${NDI_DISCOVERY_SYSTEM_DIR:-/etc/ndi}"
 # The camera-box.service drop-in that points the appliance's libndi at NDI_DISCOVERY_SYSTEM_DIR.
+# Overridable for tests.
 # shellcheck disable=SC2034  # consumed cross-file by setup-device.sh (install) + verify-device.sh (an)
-NDI_DISCOVERY_CAMBOX_DROPIN="/etc/systemd/system/camera-box.service.d/ndi-discovery.conf"
+NDI_DISCOVERY_CAMBOX_DROPIN="${NDI_DISCOVERY_CAMBOX_DROPIN:-/etc/systemd/system/camera-box.service.d/ndi-discovery.conf}"
 # The strih-lx intercom-hub drop-in (ProtectHome hides ~/.ndi from it). Overridable for tests.
 # shellcheck disable=SC2034  # consumed cross-file by setup-strih.sh (install) + verify-strih.sh (item 34)
 NDI_DISCOVERY_INTERCOM_DROPIN="${NDI_DISCOVERY_INTERCOM_DROPIN:-/etc/systemd/system/intercom-hub.service.d/ndi-discovery.conf}"
@@ -70,8 +71,6 @@ NDI_DISCOVERY_INTERCOM_DROPIN="${NDI_DISCOVERY_INTERCOM_DROPIN:-/etc/systemd/sys
 NDI_DISCOVERY_FLEET_FACET="ndi-sender"
 # A bound on the camera_resolve walk (a guard against a runaway loop, not a roster).
 NDI_DISCOVERY_CAMERA_MAX=99
-# Bounded hostname resolution (seconds), the same bound obs_fleet_resolve_host uses.
-NDI_DISCOVERY_RESOLVE_TIMEOUT="${NDI_DISCOVERY_RESOLVE_TIMEOUT:-2}"
 
 # _ndi_discovery_is_ipv4 X -> exit 0 iff X is a dotted-quad IPv4 literal.
 _ndi_discovery_is_ipv4() {
@@ -101,10 +100,10 @@ ndi_discovery_fleet_hosts() {
   done
 }
 
-# ndi_discovery_resolve_ipv4 HOST -> HOST's first IPv4 address, "" when unresolvable. Bounded.
-# The tests redefine this function after sourcing (the resolver seam).
+# ndi_discovery_resolve_ipv4 HOST -> HOST's first IPv4 address, "" when unresolvable. A thin seam
+# over the fleet lib's bounded resolver (obs_fleet_resolve_host_v4); the tests redefine it.
 ndi_discovery_resolve_ipv4() {
-  timeout "$NDI_DISCOVERY_RESOLVE_TIMEOUT" getent ahostsv4 "${1:-}" 2>/dev/null | awk 'NR==1{print $1}' || true
+  obs_fleet_resolve_host_v4 "${1:-}"
 }
 
 # ndi_discovery_sender_ips [resolve|pinned] -> the comma-separated networks.ips list, in fleet order,
@@ -113,9 +112,10 @@ ndi_discovery_resolve_ipv4() {
 #              what the checked-in config / the laptop .ps1 default carry.
 #   resolve -- (default, the provisioners) pinned + every HOSTNAME fleet host resolved to IPv4; an
 #              unresolvable or non-IPv4 answer is skipped and named on stderr.
-# Non-zero (and no output) when the fleet lookup fails.
+# Non-zero (and no output) when the fleet lookup fails or the camera walk finds no camera (a renamed
+# camera_resolve arm must never leave the writer AND the grader agreeing on a camera-less list).
 ndi_discovery_sender_ips() {
-  local mode="${1:-resolve}" hosts cands c ip out="" seen=" "
+  local mode="${1:-resolve}" hosts cams cands c ip out="" seen=" "
   case "$mode" in
     resolve|pinned) ;;
     *) echo "ndi-discovery: unknown mode '${mode}' (expected resolve|pinned)" >&2; return 1 ;;
@@ -124,7 +124,12 @@ ndi_discovery_sender_ips() {
     echo "ndi-discovery: obs-fleet facet '${NDI_DISCOVERY_FLEET_FACET}' lookup failed -- no sender list" >&2
     return 1
   }
-  cands="$(ndi_discovery_camera_ips)"$'\n'"$hosts"
+  cams="$(ndi_discovery_camera_ips)"
+  if [ -z "$cams" ]; then
+    echo "ndi-discovery: camera_resolve knows no camera (cam1 unresolvable) -- no sender list" >&2
+    return 1
+  fi
+  cands="$cams"$'\n'"$hosts"
   while IFS= read -r c; do
     [ -n "$c" ] || continue
     if _ndi_discovery_is_ipv4 "$c"; then
@@ -178,6 +183,17 @@ ndi_discovery_config_servers() { _ndi_discovery_json_string discovery "$1"; }
 # _ndi_discovery_norm_list LIST -> LIST with every space removed ("a, b" == "a,b").
 _ndi_discovery_norm_list() { printf '%s' "$1" | tr -d '[:space:]'; }
 
+# ndi_discovery_missing_ips TEXT LIST -> the comma list of LIST entries absent from TEXT's
+# networks.ips ("" when every entry is present). Spaces in either list are ignored.
+ndi_discovery_missing_ips() {
+  local have ip missing=""
+  have=",$(_ndi_discovery_norm_list "$(ndi_discovery_config_ips "$1")"),"
+  for ip in ${2//,/ }; do
+    case "$have" in *",$ip,"*) ;; *) missing="${missing:+$missing,}$ip" ;; esac
+  done
+  printf '%s' "$missing"
+}
+
 # ndi_discovery_config_verdict TEXT [REQUIRED] -> "ok", or one `FAIL: <facet>` line per failing facet.
 # Always exits 0 (the caller branches on the printed verdict). REQUIRED defaults to the PINNED list.
 # Facets:
@@ -190,7 +206,7 @@ _ndi_discovery_norm_list() { printf '%s' "$1" | tr -d '[:space:]'; }
 #                Extra entries (a resolved traveling box, a stale lease) are fine: a finder just
 #                queries one more address.
 ndi_discovery_config_verdict() {
-  local text="$1" req="${2-}" have missing="" ip out="" disc
+  local text="$1" req="${2-}" missing out="" disc
   if [ "$#" -lt 2 ]; then
     req="$(ndi_discovery_sender_ips pinned)" || req=""
   fi
@@ -206,13 +222,10 @@ ndi_discovery_config_verdict() {
   if [ -n "$(_ndi_discovery_norm_list "$disc")" ]; then
     out="${out}FAIL: networks.discovery='${disc}' is set (a configured sender stops mDNS; receivers need only networks.ips)"$'\n'
   fi
-  have=",$(_ndi_discovery_norm_list "$(ndi_discovery_config_ips "$text")"),"
-  if [ "$have" = ",," ]; then
+  if [ -z "$(_ndi_discovery_norm_list "$(ndi_discovery_config_ips "$text")")" ]; then
     out="${out}FAIL: networks.ips is empty (no managed sender listed -- re-provision)"$'\n'
   fi
-  for ip in ${req//,/ }; do
-    case "$have" in *",$ip,"*) ;; *) missing="${missing:+$missing,}$ip" ;; esac
-  done
+  missing="$(ndi_discovery_missing_ips "$text" "$(_ndi_discovery_norm_list "$req")")"
   if [ -n "$missing" ]; then
     out="${out}FAIL: networks.ips lacks ${missing} (a renumbered or new sender -- re-provision)"$'\n'
   fi
@@ -270,6 +283,12 @@ sys.stdout.write(json.dumps(doc, indent=2) + "\n")
 ndi_discovery_write_config() {
   local dir="${1:?ndi_discovery_write_config: DIR required}" ips="${2:-}" owner="${3:-}" tmp target
   [ -n "$ips" ] || { echo "ndi-discovery: refusing to write an EMPTY networks.ips into $dir" >&2; return 1; }
+  # Root writing into a USER-owned dir (OWNER set): never follow a symlinked dir or config -- a
+  # planted ~/.ndi -> /etc link would otherwise have root chown /etc.
+  if [ -n "$owner" ] && { [ -L "$dir" ] || [ -L "$dir/$NDI_DISCOVERY_CONFIG_NAME" ]; }; then
+    echo "ndi-discovery: refusing a symlinked $dir (or its config) -- remove the link and re-run" >&2
+    return 1
+  fi
   target="$dir/$NDI_DISCOVERY_CONFIG_NAME"
   mkdir -p "$dir" || { echo "ndi-discovery: cannot create $dir" >&2; return 1; }
   tmp="$(mktemp "$dir/.${NDI_DISCOVERY_CONFIG_NAME}.XXXXXX")" \
@@ -290,7 +309,7 @@ ndi_discovery_write_config() {
   fi
   chmod 0644 "$tmp"
   if [ -n "$owner" ]; then
-    chown "$owner":"$owner" "$dir" "$tmp" || { rm -f "$tmp"; echo "ndi-discovery: chown $owner failed" >&2; return 1; }
+    chown -h "$owner":"$owner" "$dir" "$tmp" || { rm -f "$tmp"; echo "ndi-discovery: chown $owner failed" >&2; return 1; }
   fi
   mv -f "$tmp" "$target" || { rm -f "$tmp"; echo "ndi-discovery: rename into $dir failed" >&2; return 1; }
 }

@@ -105,9 +105,13 @@ foreach ($ip in (@(Split-IpList $before) + $want)) {
 $net.ips = ($merged -join ',')
 
 if ($net.PSObject.Properties.Name -contains 'discovery') {
-  if ([string]$net.discovery -eq $retiredServer) {
+  # The earlier script accepted a comma list, so drop the key when EVERY entry is the retired server.
+  $disc = @(Split-IpList ([string]$net.discovery))
+  $foreign = @($disc | Where-Object { $_ -ne $retiredServer })
+  if ($disc.Count -gt 0 -and $foreign.Count -eq 0) {
     $net.PSObject.Properties.Remove('discovery')
-    Write-Output "removed the retired discovery server $retiredServer (it silenced this machine's NDI outputs on mDNS)"
+    $verb = if ($DryRun) { 'would remove' } else { 'removed' }
+    Write-Output "$verb the retired discovery server $retiredServer (it silenced this machine's NDI outputs on mDNS)"
   } elseif ([string]$net.discovery -ne '') {
     Write-Warning "networks.discovery='$($net.discovery)' is set and left as is -- a configured discovery server stops this machine's own NDI outputs from announcing over mDNS"
   }

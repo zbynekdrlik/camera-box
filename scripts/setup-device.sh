@@ -855,8 +855,10 @@ rm -f /etc/systemd/system/camera-box.service.d/publish-30p.conf
 # libndi's NDI_CONFIG_DIR at /etc/ndi (camera-box runs as root with ProtectHome=yes, so /root/.ndi
 # would be invisible to it). Enable-only, effective on the next start. A renumbered sender is picked
 # up by re-running this script (verify-device (an) FAILs until then).
-NDI_IPS="$(ndi_discovery_sender_ips)"
-ndi_discovery_write_config "$NDI_DISCOVERY_SYSTEM_DIR" "$NDI_IPS"
+NDI_IPS="$(ndi_discovery_sender_ips)" \
+    || fail "could not generate the managed NDI sender list (camera-set.sh + obs-fleet.sh ndi-sender facet, issue 1342)"
+ndi_discovery_write_config "$NDI_DISCOVERY_SYSTEM_DIR" "$NDI_IPS" \
+    || fail "NDI receiver config write to ${NDI_DISCOVERY_SYSTEM_DIR} failed (issue 1342)"
 ndi_discovery_dropin_content > "$NDI_DISCOVERY_CAMBOX_DROPIN"
 echo "  NDI receiver config: ${NDI_DISCOVERY_SYSTEM_DIR}/${NDI_DISCOVERY_CONFIG_NAME} (networks.ips=${NDI_IPS}) + camera-box.service.d/ndi-discovery.conf (issue 1342)"
 

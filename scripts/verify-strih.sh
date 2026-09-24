@@ -786,19 +786,27 @@ fi
 #     to the closing summary, so nothing may sit after item 33.
 _ndi_required="$(ndi_discovery_sender_ips pinned)" || _ndi_required=""
 _ndi_dropin_dir="$(ndi_discovery_dropin_config_dir "$(cat "$NDI_DISCOVERY_INTERCOM_DROPIN" 2>/dev/null || true)")"
-for _ndi_dir in "${USER_HOME}/.ndi" "$NDI_DISCOVERY_SYSTEM_DIR"; do
-  _ndi_text="$(cat "${_ndi_dir}/${NDI_DISCOVERY_CONFIG_NAME}" 2>/dev/null || true)"
-  if [ -z "$_ndi_required" ]; then
-    bad "(ndi-discovery) could not generate the managed NDI sender list (camera-set.sh + obs-fleet.sh ndi-sender facet)"
-    continue
+if [ -z "$_ndi_required" ]; then
+  bad "(ndi-discovery) could not generate the managed NDI sender list (camera-set.sh + obs-fleet.sh ndi-sender facet) -- both configs ungraded"
+else
+  for _ndi_dir in "${USER_HOME}/.ndi" "$NDI_DISCOVERY_SYSTEM_DIR"; do
+    _ndi_text="$(cat "${_ndi_dir}/${NDI_DISCOVERY_CONFIG_NAME}" 2>/dev/null || true)"
+    _ndi_verdict="$(ndi_discovery_config_verdict "$_ndi_text" "$_ndi_required")"
+    if [ "$_ndi_verdict" = ok ]; then
+      ok "(ndi-discovery) ${_ndi_dir}/${NDI_DISCOVERY_CONFIG_NAME}: networks.ips lists every managed sender"
+    else
+      bad "(ndi-discovery) ${_ndi_dir}/${NDI_DISCOVERY_CONFIG_NAME}: $(printf '%s' "$_ndi_verdict" | tr '\n' ' ' | sed 's/FAIL: //g')-- re-run setup-strih.sh step 4b (issue 1342)"
+    fi
+  done
+  # A traveling sender (resolume.lan, DHCP) is never REQUIRED, but when it resolves NOW to an address
+  # the OBS config does not list (it was away at the last setup-strih run, or its lease moved), say so:
+  # a NOTE, never a FAIL -- re-running setup-strih.sh picks it up.
+  _ndi_resolved="$(ndi_discovery_sender_ips resolve 2>/dev/null)" || _ndi_resolved=""
+  _ndi_drift="$(ndi_discovery_missing_ips "$(cat "${USER_HOME}/.ndi/${NDI_DISCOVERY_CONFIG_NAME}" 2>/dev/null || true)" "$_ndi_resolved")"
+  if [ -n "$_ndi_drift" ]; then
+    note "(ndi-discovery) a traveling NDI sender resolves now to ${_ndi_drift}, which ${USER_HOME}/.ndi/${NDI_DISCOVERY_CONFIG_NAME} does not list -- re-run setup-strih.sh step 4b to add it (issue 1342)"
   fi
-  _ndi_verdict="$(ndi_discovery_config_verdict "$_ndi_text" "$_ndi_required")"
-  if [ "$_ndi_verdict" = ok ]; then
-    ok "(ndi-discovery) ${_ndi_dir}/${NDI_DISCOVERY_CONFIG_NAME}: networks.ips lists every managed sender"
-  else
-    bad "(ndi-discovery) ${_ndi_dir}/${NDI_DISCOVERY_CONFIG_NAME}: $(printf '%s' "$_ndi_verdict" | tr '\n' ' ' | sed 's/FAIL: //g')-- re-run setup-strih.sh step 4b (issue 1342)"
-  fi
-done
+fi
 if [ "$_ndi_dropin_dir" = "$NDI_DISCOVERY_SYSTEM_DIR" ]; then
   ok "(ndi-discovery) intercom-hub NDI_CONFIG_DIR=${NDI_DISCOVERY_SYSTEM_DIR} drop-in present"
 else

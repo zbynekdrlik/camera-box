@@ -219,6 +219,13 @@ obs_fleet_resolve_host() {
   # NAME through this seam, so a stalled DNS resolver must never stall every caller.
   timeout "${OBS_FLEET_RESOLVE_TIMEOUT:-2}" getent ahosts "${1:-}" 2>/dev/null | awk 'NR==1{print $1}' || true
 }
+
+# obs_fleet_resolve_host_v4 <host> -> the FIRST resolved IPv4 address (empty if none). Same bound as
+# obs_fleet_resolve_host; `ahostsv4` because `ahosts` may answer IPv6 first and some consumers (the
+# NDI receiver list, issue 1342) accept IPv4 only.
+obs_fleet_resolve_host_v4() {
+  timeout "${OBS_FLEET_RESOLVE_TIMEOUT:-2}" getent ahostsv4 "${1:-}" 2>/dev/null | awk 'NR==1{print $1}' || true
+}
 # obs_fleet_status_probe <host> <port> -> 1 (a TCP connect to host:port succeeded) | 0. The OBS-WS
 # port answering is the "box is home + serving" signal. Bash /dev/tcp so no nc/curl dependency; a
 # subshell + timeout bounds a hung connect. Override in a test to stub the probe.

@@ -36,9 +36,12 @@ The receiver side: `vendor/distroav/lib/ndi/Processing.NDI.Find.h`, `p_extra_ips
 > put a comma separated list of those IP addresses here and those sources will be available locally
 > even though they are not mDNS discoverable. ... When none is specified the registry is used."
 
-The "registry" is `ndi.networks.ips` in `ndi-config.v1.json`. A finder with that key queries each
-listed IP by unicast AND keeps using mDNS. **Senders never read it.** So every sender keeps
-announcing over mDNS, and the following keep working exactly as before:
+Find.h does not name the registry key. The documented mapping (NDI SDK docs, *Configuration Files*)
+is `ndi.networks.ips` in `ndi-config.v1.json`, the same list NDI Access Manager's "Remote Sources"
+tab edits. This lane could not exercise it live (the rig was under the E2E lease); the supervisor's
+acceptance step below proves it. A finder with that key queries each listed IP by unicast AND keeps
+using mDNS. **Senders never read it.** So every sender keeps announcing over mDNS, and the following
+keep working exactly as before:
 - stock TVs and building displays showing the strih program (they cannot carry a config);
 - guest laptops that never ran the laptop script;
 - the avahi-based port-map audit (`.claude/rules/ndi-portmap-watchdog.md`).
@@ -77,6 +80,29 @@ The two modes:
   - An unresolvable or non-IPv4 answer is skipped and named on stderr. Those sources stay
     mDNS-only, as before.
   - A traveling box's lease is never REQUIRED, so a verify never flaps on it.
+
+**The traveling resolume gap (known, accepted by the design's provisioning-time model).** Resolume's
+IP is resolved ONCE, when the receiver is provisioned:
+- If resolume was away at that moment, the receiver has no entry for it until its next provisioner run.
+- If resolume's DHCP lease moved afterwards, the entry is stale.
+- In both cases its sources fall back to mDNS, exactly as before this change. They are never hidden.
+- verify-strih item 34 prints a NOTE (never a FAIL) when resolume resolves NOW to an IP the strih-lx
+  OBS config lacks. Re-running setup-strih.sh step 4b fixes it; every strih-lx genlock deploy does.
+- The durable cures are both outside this lane:
+  - (a) a DHCP reservation for RESOLUME-SNV, after which its row becomes a pinned IPv4 in `OBS_FLEET`
+    and the verifiers require it;
+  - (b) regenerate the list at OBS start (an `ExecStartPre=` in `strih-obs.service` running an
+    installed copy of this lib).
+
+**One list for every venue (the design's Shared-benefit line).** The receiver list is a FLEET fact,
+not a per-strih-box fact: `scripts/strih-boxes/<box>.env` (issue 1361) holds a strih's OWN identity
+(hostname, IP, NDI prefix, which cameras it takes as inputs), while the senders a receiver should
+query come from the fleet lists.
+- A second strih (strih-pp) joins `OBS_FLEET` + the `ndi-sender` facet at go-live
+  (`.claude/rules/obs-fleet-list.md`), and every receiver picks it up on its next provisioner run.
+- If the Poprad camboxes turn out to have different IPs from `camera_resolve`, they need their own
+  roster (a venue dimension in `camera-set.sh`) before strih-pp's list can be venue-exact. Until
+  then, strih-pp would list the SNV IPs: harmless extra unicast queries, never a hidden source.
 
 A renumbered camera / strih-lx / stream FAILS `verify-device (an)` / `verify-strih` item 34 until the
 box is re-provisioned. Re-provisioning is the fix; no hand edit is needed. Extra entries in a box's
@@ -139,9 +165,16 @@ and no maintenance window exists: an unconfigured receiver simply keeps mDNS-onl
      then restart OBS the usual way (obs-ops).
 4. **dev1 probes** (optional, they run as `newlevel`):
    `mkdir -p ~/.ndi && cp scripts/ndi-discovery/ndi-config.v1.json ~/.ndi/`.
+   - Part 1's `ndi-discovery-server` user unit shipped DISABLED and was never installed by code.
+     If it was hand-installed on dev1, remove it:
+     `systemctl --user disable --now ndi-discovery-server.service`, then delete
+     `~/.config/systemd/user/ndi-discovery-server.service` + `~/.local/bin/ndi-discovery-server` and
+     run `systemctl --user daemon-reload`.
 5. **Acceptance** (issue 1342):
    - Every managed receiver lists every managed sender within 5 s of OBS start: 10/10 cold starts
      on strih-lx and stream, plus one laptop that ran the `.ps1`.
+     - Resolume counts only when it was resolvable at the receiver's last provisioning run and its
+       lease has not moved since (the traveling gap above). Otherwise it is found by mDNS only.
    - A stock TV / unconfigured laptop still sees the strih program over mDNS.
    - `avahi-browse -rtp _ndi._tcp` from dev1 still lists every sender (senders are unchanged), and
      shows 0 `(30p)` sources.
