@@ -3,7 +3,7 @@
 # Camera-Box Device Setup Script
 # Sets up a clean Ubuntu installation as a camera-box appliance
 #
-# Usage: ./setup-device.sh [--binary <url|path>] [--probe-binary <url|path>] [--run <ci.yml run id>] DEVICE_NAME
+# Usage: ./setup-device.sh [--yes|-y] [--binary <url|path>] [--probe-binary <url|path>] [--run <ci.yml run id>] DEVICE_NAME
 # Example: ./setup-device.sh CAM5        (case-insensitive; cam5 works too)
 #
 # By default the camera-box binary comes from the latest successful ci.yml run on `main` (the
@@ -315,6 +315,21 @@ restore_root_mode() {
     fi
 }
 
+# confirm_setup ASSUME_YES -> 0 = proceed, 1 = abort (issue 1311). ASSUME_YES=1 (the `--yes|-y`
+# flag, the same contract as create-usb-linux.sh) skips the prompt for a remote/unattended run.
+# Otherwise it asks once; an EOF on stdin (a non-interactive run without --yes) reads as "no",
+# so the script aborts instead of hanging or proceeding on a guess.
+confirm_setup() {
+    if [ "${1:-0}" = "1" ]; then
+        echo "  --yes: non-interactive run, skipping the confirmation prompt"
+        return 0
+    fi
+    local reply=""
+    read -p "Continue with setup? (y/N) " -n 1 -r reply || true
+    echo
+    [[ $reply =~ ^[Yy]$ ]]
+}
+
 # --- source-guard: when sourced (the unit tests), stop here -- never run the destructive
 # provisioning flow below. Same convention as scripts/setup-imag.sh / scripts/genlock-manifest.sh.
 if [ "${BASH_SOURCE[0]}" != "${0}" ]; then
@@ -332,9 +347,16 @@ fi
 BINARY_ARG=""
 PROBE_BINARY_ARG=""
 CI_RUN_ID_ARG=""
+ASSUME_YES=0
 POSITIONAL=()
 while [ $# -gt 0 ]; do
     case "$1" in
+        --yes|-y)
+            # issue 1311: non-interactive -- skip the confirmation prompt (the create-usb-linux.sh
+            # contract), for the remote/unattended provisioning run that had to pipe a `y` in.
+            ASSUME_YES=1
+            shift
+            ;;
         --binary)
             BINARY_ARG="${2:?--binary needs a URL or local path}"
             shift 2
@@ -366,7 +388,8 @@ DEVICE_NAME_ARG="${1:-}"
 
 if [ -z "$DEVICE_NAME_ARG" ]; then
     echo -e "${RED}Usage: $0 [--binary <url|path>] DEVICE_NAME${NC}"
-    echo "       (also: --probe-binary <url|path> for cam2's frame-probe #1066 D5, --run <ci.yml run id>)"
+    echo "       (also: --probe-binary <url|path> for cam2's frame-probe #1066 D5, --run <ci.yml run id>;"
+    echo "        --yes|-y = non-interactive, no confirmation prompt)"
     echo ""
     echo "DEVICE_NAME is resolved via scripts/camera-set.sh (cam1-6) -- case-insensitive."
     echo ""
@@ -394,10 +417,8 @@ echo -e "Device IP:    ${YELLOW}${DEVICE_IP}${NC}"
 echo -e "VBAN Stream:  ${YELLOW}${VBAN_STREAM}${NC}"
 echo ""
 
-# Confirm
-read -p "Continue with setup? (y/N) " -n 1 -r
-echo
-if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+# Confirm (issue 1311: --yes|-y skips it; an EOF on stdin without --yes aborts, never hangs)
+if ! confirm_setup "$ASSUME_YES"; then
     echo "Aborted."
     exit 1
 fi
