@@ -282,6 +282,15 @@ pub fn select_irq_target_cores(
 /// now stay SCHED_OTHER once the unit's process-wide `CPUSchedulingPolicy=fifo` is gone.
 pub const CAPTURE_FIFO_PRIORITY: i32 = 90;
 
+/// SCHED_FIFO priority for the NDI SEND thread (#1242): the production `ndi-send` thread and the
+/// E2E cam1-burn thread, both of which wait for the per-camera send-stagger deadline and then run
+/// the synchronous NDI encode + send. They share the isolated core with the capture thread, so
+/// they sit ONE step below it: the capture thread always preempts a send (a stagger wait or a
+/// long SpeedHQ encode can never delay the next capture), while the send still preempts every
+/// SCHED_OTHER task on the box.
+pub const SEND_FIFO_PRIORITY: i32 = CAPTURE_FIFO_PRIORITY - 1;
+const _: () = assert!(SEND_FIFO_PRIORITY < CAPTURE_FIFO_PRIORITY && SEND_FIFO_PRIORITY > 0);
+
 /// The realtime scheduling roles a camera-box thread can take (issue 899 defect 2).
 /// The role is implicit in which affinity entry point a thread calls — the capture+emit
 /// hot threads (the ones [`pin_capture_thread`] places on the isolated core) are
@@ -289,10 +298,13 @@ pub const CAPTURE_FIFO_PRIORITY: i32 = 90;
 /// is `Auxiliary`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RtThreadRole {
-    /// The capture + NDI-emit hot path — the production capture loop thread and the
-    /// cam1-burn EMIT thread (probe/E2E). Raised to SCHED_FIFO so box load on the
-    /// general cores never preempts the grab.
+    /// The capture hot path — the production capture loop thread. Raised to SCHED_FIFO so box
+    /// load on the general cores never preempts the grab.
     CaptureEmit,
+    /// The NDI send threads (#1242) — the production `ndi-send` thread and the cam1-burn EMIT
+    /// thread (probe/E2E). SCHED_FIFO at [`SEND_FIFO_PRIORITY`], one step below the capture
+    /// thread they share the isolated core with.
+    Send,
     /// Every other worker — painter / `--display` render / intercom / QPSK-marker /
     /// publish-30p, plus the NDI SDK and tokio internals. Stays SCHED_OTHER (idle
     /// slack on the general cores), never FIFO.
@@ -300,14 +312,16 @@ pub enum RtThreadRole {
 }
 
 /// The SCHED_FIFO priority a thread ROLE should run at, or `None` to stay SCHED_OTHER
-/// (issue 899 defect 2). Only [`RtThreadRole::CaptureEmit`] is raised to FIFO
-/// ([`CAPTURE_FIFO_PRIORITY`]); every [`RtThreadRole::Auxiliary`] thread returns `None`
+/// (issue 899 defect 2). Only [`RtThreadRole::CaptureEmit`] ([`CAPTURE_FIFO_PRIORITY`]) and the
+/// NDI send threads, [`RtThreadRole::Send`] ([`SEND_FIFO_PRIORITY`], #1242), are raised to FIFO;
+/// every [`RtThreadRole::Auxiliary`] thread returns `None`
 /// and keeps the process default SCHED_OTHER — which is exactly what the unit's own
 /// comment always CLAIMED and, once the process-wide policy is dropped, is finally TRUE.
 /// This pure decision is what the runtime glue [`set_current_thread_realtime`] applies.
 pub fn realtime_fifo_priority(role: RtThreadRole) -> Option<i32> {
     match role {
         RtThreadRole::CaptureEmit => Some(CAPTURE_FIFO_PRIORITY),
+        RtThreadRole::Send => Some(SEND_FIFO_PRIORITY),
         RtThreadRole::Auxiliary => None,
     }
 }
@@ -461,7 +475,8 @@ pub fn pin_off_capture_core(label: &str) {
 
 /// Apply the realtime scheduling policy for `role` to the CURRENT thread (issue 899
 /// defect 2). For [`RtThreadRole::CaptureEmit`] this raises the thread to SCHED_FIFO at
-/// [`CAPTURE_FIFO_PRIORITY`] via `sched_setscheduler`, using the
+/// [`CAPTURE_FIFO_PRIORITY`] (for [`RtThreadRole::Send`] at [`SEND_FIFO_PRIORITY`], #1242) via
+/// `sched_setscheduler`, using the
 /// [`capture_emit_sched_policy_word`] — `SCHED_FIFO | SCHED_RESET_ON_FORK` — so that the
 /// threads this tokio worker later spawns (NDI SDK, tokio blocking pool) do NOT inherit
 /// FIFO 90 across `clone()` and instead fall back to SCHED_OTHER; for
