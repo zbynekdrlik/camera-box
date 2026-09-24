@@ -1737,39 +1737,21 @@ elif ! command -v efibootmgr >/dev/null 2>&1; then
 else
     EFI_ROOT_SRC="$(findmnt -no SOURCE / 2>/dev/null || true)"
     EFI_ROOT_DISK="$(efi_whole_disk_of "$EFI_ROOT_SRC")"
-    EFI_CUR="$(efibootmgr 2>/dev/null || true)"
-    EFI_NUMS="$(efi_cam_box_bootnums "$EFI_CUR")"
-    if [ -z "$EFI_NUMS" ]; then
-        if [ -b "$EFI_ROOT_DISK" ]; then
-            if efibootmgr -c -d "$EFI_ROOT_DISK" -p 1 -L "$EFI_CAM_BOX_LABEL" -l "$EFI_CAM_BOX_LOADER" >/dev/null 2>&1; then
-                echo "  Created named UEFI entry '${EFI_CAM_BOX_LABEL}' -> ${EFI_ROOT_DISK} partition 1 (${EFI_CAM_BOX_LOADER}); efibootmgr -c prepends it, so it leads BootOrder (#1066 D6)."
-            else
-                echo -e "${YELLOW}  efibootmgr failed to create the '${EFI_CAM_BOX_LABEL}' entry on ${EFI_ROOT_DISK} -- the box will fall back to the AMI USB auto-entry (the #1066 D6 fragility). Investigate before relying on a warm reboot.${NC}"
-            fi
+    if [ -b "$EFI_ROOT_DISK" ]; then
+        # Issue 1311: never trust an existing entry blind, and never trust `efibootmgr -c` alone.
+        # The shared efi_cam_box_ensure (scripts/lib/efi-boot-entry.sh, also run by create-usb)
+        # reads the entry back with `efibootmgr -v` and repairs it idempotently: create a missing
+        # one, delete + recreate a firmware-mangled VenHw(...) or a stale one (an HD() path on
+        # another ESP GUID -- e.g. from before a reflash), and move a demoted healthy one to the
+        # front of BootOrder. A correct entry is left untouched.
+        EFI_ESP_PARTUUID="$(efi_esp_partuuid_of_disk "$EFI_ROOT_DISK")"
+        if efi_cam_box_ensure "$EFI_ROOT_DISK" "$EFI_ESP_PARTUUID"; then
+            echo "  '${EFI_CAM_BOX_LABEL}' -> ${EFI_ROOT_DISK} partition 1 (${EFI_CAM_BOX_LOADER}, ESP PARTUUID '${EFI_ESP_PARTUUID:-unread}'): HD() path, leads BootOrder (#1066 D6, issue 1311)."
         else
-            echo -e "${YELLOW}  could not derive the root disk from findmnt (source='${EFI_ROOT_SRC}', disk='${EFI_ROOT_DISK}' is not a block device) -- NOT creating a UEFI entry blind. Create it by hand: efibootmgr -c -d <root-disk> -p 1 -L ${EFI_CAM_BOX_LABEL} -l '${EFI_CAM_BOX_LOADER}' (#1066 D6).${NC}"
+            fail "the named '${EFI_CAM_BOX_LABEL}' UEFI entry could not be made an HD() path that leads BootOrder on ${EFI_ROOT_DISK} (see the FAIL line above) -- the box would fall back to the AMI USB auto-entry that failed on cam2. Inspect 'efibootmgr -v', fix it by hand (efibootmgr -b <num> -B, then efibootmgr -c -d ${EFI_ROOT_DISK} -p 1 -L ${EFI_CAM_BOX_LABEL} -l '<the loader>'), and re-run (issue 1311)."
         fi
     else
-        echo "  named UEFI entry '${EFI_CAM_BOX_LABEL}' already present (Boot$(printf '%s' "$EFI_NUMS" | tr '\n' ',' | sed 's/,$//')) -- not recreating (idempotent)."
-    fi
-    # Ensure the entry LEADS BootOrder (a pre-existing entry may have been demoted below another).
-    EFI_CUR="$(efibootmgr 2>/dev/null || true)"
-    if efi_cam_box_leads "$EFI_CUR"; then
-        echo "  '${EFI_CAM_BOX_LABEL}' leads BootOrder (#1066 D6)."
-    else
-        EFI_NUMS="$(efi_cam_box_bootnums "$EFI_CUR")"
-        EFI_ORDER="$(efi_boot_order "$EFI_CUR")"
-        if [ -n "$EFI_NUMS" ] && [ -n "$EFI_ORDER" ]; then
-            EFI_FIRST_NUM="${EFI_NUMS%%$'\n'*}"  # pipe-free first line -- no printf|head SIGPIPE under the caller's set -euo pipefail (.claude/rules/drift-guard-log-parsers.md)
-            EFI_NEW_ORDER="$(efi_boot_order_lead "$EFI_FIRST_NUM" "$EFI_ORDER")"
-            if efibootmgr -o "$EFI_NEW_ORDER" >/dev/null 2>&1; then
-                echo "  Reordered BootOrder so '${EFI_CAM_BOX_LABEL}' (Boot${EFI_FIRST_NUM}) leads: ${EFI_NEW_ORDER} (#1066 D6)."
-            else
-                echo -e "${YELLOW}  could not set BootOrder to lead with '${EFI_CAM_BOX_LABEL}' (Boot${EFI_FIRST_NUM}) -- do it by hand: efibootmgr -o ${EFI_NEW_ORDER} (#1066 D6).${NC}"
-            fi
-        else
-            echo -e "${YELLOW}  '${EFI_CAM_BOX_LABEL}' entry not readable after create -- cannot lead BootOrder; verify-device.sh (al) will FAIL until fixed (#1066 D6).${NC}"
-        fi
+        echo -e "${YELLOW}  could not derive the root disk from findmnt (source='${EFI_ROOT_SRC}', disk='${EFI_ROOT_DISK}' is not a block device) -- NOT creating a UEFI entry blind. Create it by hand: efibootmgr -c -d <root-disk> -p 1 -L ${EFI_CAM_BOX_LABEL} -l '${EFI_CAM_BOX_LOADER}' (#1066 D6).${NC}"
     fi
 fi
 

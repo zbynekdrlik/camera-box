@@ -27,6 +27,7 @@ set -euo pipefail
 DEVICE=""
 FORCE_TARGET=0
 ASSUME_YES=0
+EFI_ENTRY_RESULT=""  # issue 1311: "verified" once efi_cam_box_ensure read the entry back
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --target-disk) DEVICE="${2:-}"; FORCE_TARGET=1; shift 2 ;;
@@ -660,12 +661,12 @@ create_efi_boot_entry() {
     if [[ ! -d /sys/firmware/efi/efivars ]]; then
         warn "Host has no EFI vars (/sys/firmware/efi/efivars absent) — booted in BIOS/CSM mode or"
         warn "efivars not mounted. NOT creating an NVRAM boot entry. After install completes, REMOVE"
-        warn "the live-USB so firmware boots the internal disk's \\EFI\\BOOT\\BOOTX64.EFI fallback."
+        warn "the live-USB so firmware boots the internal disk's \\\\EFI\\\\BOOT\\\\BOOTX64.EFI fallback."
         return 0
     fi
     if ! command -v efibootmgr &>/dev/null; then
         warn "efibootmgr not installed on the host live-USB — skipping the NVRAM boot entry. REMOVE"
-        warn "the live-USB after install so firmware boots \\EFI\\BOOT\\BOOTX64.EFI on $DEVICE."
+        warn "the live-USB after install so firmware boots \\\\EFI\\\\BOOT\\\\BOOTX64.EFI on $DEVICE."
         return 0
     fi
 
@@ -688,23 +689,21 @@ create_efi_boot_entry() {
 
     log "Creating named UEFI boot entry '$EFI_CAM_BOX_LABEL' for $DEVICE (ESP = partition 1; on-box install: target IS this host's boot disk)..."
 
-    # Idempotent: delete any existing cam-box entries so re-runs don't stack duplicates.
-    local existing bn
-    # NB: [0-9A-Fa-f]+ (not {4}) — portable across mawk (Ubuntu default) which lacks interval exprs.
-    existing=$(efibootmgr 2>/dev/null | awk \
-        '$2=="cam-box" && $1 ~ /^Boot[0-9A-Fa-f]+\*?$/ {n=$1; sub(/^Boot/,"",n); sub(/\*$/,"",n); print n}') || true
-    for bn in $existing; do
-        efibootmgr -b "$bn" -B >/dev/null 2>&1 || true
-    done
-
-    # Create the entry pointing at the REAL removable core (grub-install --removable + #344 wrote
-    # \EFI\BOOT\BOOTX64.EFI; the \EFI\ubuntu\grubx64.efi path does NOT exist with --removable).
-    # efibootmgr -c PREPENDS the new entry to BootOrder, so it becomes first automatically.
-    if efibootmgr -c -d "$DEVICE" -p 1 -L cam-box -l '\EFI\BOOT\BOOTX64.EFI' >/dev/null; then
-        log "UEFI boot entry 'cam-box' created and set first in BootOrder for $DEVICE."
+    # Issue 1311: `efibootmgr -c` reporting success is NOT proof. On the M.2 migration cam1 ended up
+    # with no entry at all and cam2 with a firmware-mangled VenHw(...) path that was not first. The
+    # shared efi_cam_box_ensure (scripts/lib/efi-boot-entry.sh, also run by setup-device.sh STEP 17d)
+    # deletes any prior cam-box entry (`fresh` -- a new install's ESP has a new GUID), creates the
+    # entry on the REAL removable core (grub-install --removable + #344 wrote \EFI\BOOT\BOOTX64.EFI;
+    # \EFI\ubuntu\grubx64.efi does NOT exist with --removable), READS IT BACK with efibootmgr -v, and
+    # repairs a mangled/stale/demoted entry. When it still cannot get an HD() entry that leads
+    # BootOrder, the install fails loud instead of printing a success it never verified.
+    local _esp_partuuid
+    _esp_partuuid="$(efi_esp_partuuid_of_disk "$DEVICE")"
+    if efi_cam_box_ensure "$DEVICE" "$_esp_partuuid" fresh; then
+        EFI_ENTRY_RESULT="verified"
+        log "UEFI boot entry '$EFI_CAM_BOX_LABEL' verified for $DEVICE: HD() device path, first in BootOrder."
     else
-        warn "efibootmgr failed to write the NVRAM entry — REMOVE the live-USB after install so"
-        warn "firmware boots the internal disk's \\EFI\\BOOT\\BOOTX64.EFI fallback."
+        error "the '$EFI_CAM_BOX_LABEL' UEFI entry could not be made correct (see the FAIL line above). Repair by hand on this box: efibootmgr -v, delete the bad entry (efibootmgr -b <num> -B), then efibootmgr -c -d $DEVICE -p 1 -L cam-box -l '\\\\EFI\\\\BOOT\\\\BOOTX64.EFI' and check it is an HD() path first in BootOrder. setup-device.sh STEP 17d re-checks it; verify-device.sh (al) certifies it."
     fi
 }
 
@@ -744,11 +743,16 @@ main() {
     log "Root SSH: enabled (password: newlevel)"
     log "Network: DHCP on all ethernet interfaces"
     log "Boot: sshd starts on first boot (networkd-wait-online masked #448)"
-    if [[ -d /sys/firmware/efi/efivars ]]; then
-        log "Boot: named 'cam-box' UEFI entry created — this box will boot the internal disk."
+    if [[ "$EFI_ENTRY_RESULT" == "verified" ]]; then
+        log "Boot: named 'cam-box' UEFI entry verified (HD() path, first in BootOrder) — this box will boot the internal disk."
+    elif [[ -d /sys/firmware/efi/efivars ]]; then
+        # Issue 1311: never claim an entry this run did not write AND read back (the builder guard
+        # or a missing efibootmgr skipped it -- see the WARN lines above).
+        warn "Boot: NO 'cam-box' NVRAM entry was written by this run — setup-device.sh STEP 17d creates"
+        warn "      and verifies it ON the box; verify-device.sh (al) certifies it."
     else
         warn "Boot: host has no EFI vars — REMOVE the USB so firmware boots the internal disk's"
-        warn "      \\EFI\\BOOT\\BOOTX64.EFI (no NVRAM entry could be created)."
+        warn "      \\\\EFI\\\\BOOT\\\\BOOTX64.EFI (no NVRAM entry could be created)."
     fi
     log ""
     log "You can now remove the USB and boot from it."
