@@ -358,8 +358,10 @@ ro-root-safe config, would pass a box whose service can never actually run).
   path (no `VenHw(`, loader `BOOTX64.EFI`) on the ESP PARTUUID that leads `BootOrder`, and repairs
   the entry. An unreadable `efibootmgr -v` FAILs with no write (never "no entry, create blind").
   create-usb exits on failure; STEP 17d only RECORDS it (`EFI_ENTRY_PROBLEM`) and STEP 19 refuses
-  "Setup Complete" -- a fail before STEP 18 would leave a fresh box with no read-only fstab.
-  verify-device `(al)` grades the same path via `efi_entry_verdict <dump> <partuuid>`. Test it
+  "Setup Complete" -- a fail before STEP 18 would leave a fresh box with no read-only fstab. This
+  is stricter than before on purpose: a missing `efibootmgr` or an underivable root disk now also
+  refuses "Setup Complete" (it used to be a yellow note). verify-device `(al)` grades the same path
+  via `efi_entry_verdict <dump> <partuuid>` and FAILs when the `/boot/efi` PARTUUID is unreadable. Test it
   against the fake-NVRAM `efibootmgr` stub in that test file (`EFI_BOOTMGR_BIN`), never a real box.
 - **`setup-device.sh --yes|-y`** is the non-interactive contract (`confirm_setup`). Do not pipe a `y`.
 - **Every ssh in verify-device.sh, verify-fleet.sh and verify-imag.sh passes
