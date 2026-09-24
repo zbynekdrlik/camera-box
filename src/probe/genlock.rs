@@ -1751,6 +1751,25 @@ impl ReleaseCadence {
             // so the VERY NEXT tick reads as a HOLD (nothing yet matured) and the queue regains
             // via a GAP RESYNC exactly what the drain just shed — a self-cancelling no-op,
             // confirmed by simulation before this was caught.
+            //
+            // issue 1367: a DEEP N==1 conveyor still shallower than its pin-derived depth HOLDS one
+            // tick first (a deliberate repeat, one frame deeper next tick), sharing the drain
+            // throttle. Mirror of the C `genlock_should_hold_n1_phase` at the head of its N==1
+            // STEADY branch; the Tier-0 decision is `genlock_backlog::should_hold_n1_phase`.
+            if let (Some(&head), Some(&newest)) = (queue.front(), queue.back()) {
+                if crate::genlock_n1_depth::should_hold_n1_phase(
+                    wall_now_ns,
+                    head,
+                    newest,
+                    reserve_ms,
+                    interval_ns,
+                    1,
+                    self.ticks_since_last_drain,
+                ) {
+                    self.ticks_since_last_drain = 0;
+                    return hold(false);
+                }
+            }
             let drain = self.should_drain_one(queue, reserve_ms, interval_ns);
             let mut dropped = Vec::new();
             if drain && queue.len() > 1 {

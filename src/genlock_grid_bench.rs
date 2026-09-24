@@ -29,7 +29,10 @@
 //!   [`relock_select_nearest`], STEADY on the locked boundary, GAP RESYNC on the floored deadline,
 //!   HOLD / late HOLD, the erase loop, the #859 settle-back drain via [`should_drain_one`], and the
 //!   #1049 phase-convergence shed via [`should_converge_phase`] (after the drain, sharing its
-//!   throttle, exactly as the C present tail orders them).
+//!   throttle, exactly as the C present tail orders them). Since issue 1367 the N==1 STEADY branch
+//!   first asks [`should_hold_n1_phase`] (the C `genlock_should_hold_n1_phase`) whether a deep
+//!   conveyor is still shallower than its pin-derived depth, and the converge shed's N==1 branch
+//!   removes a frame a restart transient added — so every restart settles on `base + 1` frames.
 //! - **A sender restart** (issue 1367, [`SenderRestart`]): the sender goes silent, then comes back
 //!   with a `k`-slot startup stall — a k-slot stamp gap followed by k duplicate stamps. The receiver
 //!   keeps its locked boundary through the empty FIFO (the ts-align path never re-arms the build
@@ -59,6 +62,7 @@ use crate::genlock_backlog::{
 use crate::genlock_grid::{
     grid_next_boundary_ns, per_second_floor, StampTrack, NS_PER_SECOND, UNITS_100NS_PER_SECOND,
 };
+use crate::genlock_n1_depth::should_hold_n1_phase;
 use std::collections::{BTreeMap, VecDeque};
 
 /// The 30 fps canvas interval of both OBS boxes (`1e9 / 30`, integer).
@@ -123,6 +127,11 @@ pub struct BenchConfig {
     pub tick_late_max_ns: u64,
     /// One strih-lx OBS restart during the run (issue 1367), or none.
     pub restart: Option<SenderRestart>,
+    /// A constant phase error of the stream render tick against the grid, in ns (negative =
+    /// early): what the ±2 ms `GENLOCK_MAX_SLEW_NS` clamp leaves while the tick slews back after a
+    /// clock step. The stamps stay on the grid, so this is the geometry that moves a presented age
+    /// across a depth edge (issue 1367 — a shared N==1 hold/shed edge limit-cycled on it).
+    pub receiver_tick_offset_ns: i64,
 }
 
 /// A sender restart (issue 1367): the strih-lx program output goes silent for `outage_ms`, then
@@ -162,6 +171,7 @@ impl BenchConfig {
             tick_late_min_ns: 10_000_000,
             tick_late_max_ns: 30_000_000,
             restart: None,
+            receiver_tick_offset_ns: 0,
         }
     }
 }
@@ -185,6 +195,9 @@ pub struct BenchReport {
     pub drains: u64,
     /// Phase-convergence sheds (`should_converge_phase`, the C `genlock_converge_sheds`).
     pub converge_sheds: u64,
+    /// issue 1367 N==1 depth holds (`should_hold_n1_phase`, the C `genlock_n1_grows`): a
+    /// deliberate one-tick repeat that deepens a too-shallow deep N==1 conveyor by one frame.
+    pub n1_grows: u64,
     pub dropped_due: u64,
     pub underruns: u64,
     /// The sender's stamp irregularity as the receiver's `stamp_dup=` / `stamp_gap=` audit tokens
@@ -315,6 +328,7 @@ struct TickCounters {
     relocks: u64,
     drains: u64,
     converge_sheds: u64,
+    n1_grows: u64,
     dropped_due: u64,
     underruns: u64,
 }
@@ -362,7 +376,25 @@ impl Fifo {
             }
             release = sel + 1;
         } else if head <= self.locked_next_boundary {
-            // STEADY (N==1 present-oldest).
+            // STEADY (N==1 present-oldest). issue 1367: a deep conveyor still shallower than its
+            // pin-derived depth HOLDS one tick first (the C `genlock_should_hold_n1_phase`).
+            let newest = *self
+                .queue
+                .back()
+                .expect("head exists, so the queue is not empty");
+            if should_hold_n1_phase(
+                wall,
+                head,
+                newest,
+                cfg.latency_ms,
+                CANVAS_INTERVAL_NS,
+                1,
+                self.ticks_since_drain,
+            ) {
+                c.n1_grows += 1;
+                self.ticks_since_drain = 0;
+                return;
+            }
             release = 1;
             drain_eligible = true;
             converge_eligible = true;
@@ -473,7 +505,7 @@ pub fn run_bench(cfg: &BenchConfig) -> BenchReport {
         if rng.ppm(cfg.tick_late_ppm) {
             late = rng.uniform_ns(cfg.tick_late_min_ns, cfg.tick_late_max_ns);
         }
-        let wall = nominal + late;
+        let wall = (nominal + late).saturating_add_signed(cfg.receiver_tick_offset_ns);
         // Produce every frame that has arrived by this tick (keep one frame of look-ahead).
         while pending.back().is_none_or(|&(arrival, _)| arrival <= wall) {
             let (arrival, stamp, dup, gap) = sender.next_frame(cfg);
@@ -497,6 +529,7 @@ pub fn run_bench(cfg: &BenchConfig) -> BenchReport {
             c.relocks += tc.relocks;
             c.drains += tc.drains;
             c.converge_sheds += tc.converge_sheds;
+            c.n1_grows += tc.n1_grows;
             c.dropped_due += tc.dropped_due;
             c.underruns += tc.underruns;
         }
@@ -531,6 +564,7 @@ pub fn run_bench(cfg: &BenchConfig) -> BenchReport {
     report.relocks = c.relocks;
     report.drains = c.drains;
     report.converge_sheds = c.converge_sheds;
+    report.n1_grows = c.n1_grows;
     report.dropped_due = c.dropped_due;
     report.underruns = c.underruns;
     report
@@ -712,6 +746,137 @@ mod tests {
                     r.flips_per_hour <= 1.0,
                     "pin {pin}, {k}-slot stall: flips/h {:.2}: {r:?}",
                     r.flips_per_hour
+                );
+            }
+        }
+    }
+
+    /// One restart like [`after_restart`] under an explicit seed and receiver tick phase.
+    fn after_restart_with(pin: u32, k: u64, seed: u64, tick_offset_ns: i64) -> BenchReport {
+        let mut cfg = BenchConfig::live_2026_09_24(GridModel::Production);
+        cfg.latency_ms = pin;
+        cfg.seed = seed;
+        cfg.receiver_tick_offset_ns = tick_offset_ns;
+        cfg.restart = Some(SenderRestart {
+            at_s: 300,
+            outage_ms: 8_000,
+            stall_slots: k,
+        });
+        cfg.warmup_s = 300 + 8 + 60;
+        cfg.duration_s = cfg.warmup_s + 3600;
+        run_bench(&cfg)
+    }
+
+    fn corrections(r: &BenchReport) -> u64 {
+        r.drains + r.converge_sheds + r.n1_grows
+    }
+
+    /// issue 1367 — the restart result does not hinge on one random seed: three more sender/tick
+    /// random streams, every stall k = 0..3, all settle on `ceil(pin/interval) + 1` within 60 s
+    /// with no correction in the hour after.
+    #[test]
+    fn restart_settles_on_the_same_depth_at_every_seed_1367() {
+        let target = 987_000_000u64.div_ceil(CANVAS_INTERVAL_NS) + 1;
+        for seed in [1u64, 2, 3] {
+            for k in 0..=3 {
+                let r = after_restart_with(987, k, seed, 0);
+                assert_eq!(
+                    settled_state(&r),
+                    Some(target),
+                    "seed {seed}, {k}-slot stall: {r:?}"
+                );
+                assert_eq!(corrections(&r), 0, "seed {seed}, {k}-slot stall: {r:?}");
+            }
+        }
+    }
+
+    /// issue 1367 — a SETTLED deep N==1 source under the live sender tail never pays a correction:
+    /// the single gap/dup tail is neutral at `base + 1`, so the rule stays silent (2 h per point,
+    /// three seeds, a pin on each side of 987 and one whole frame apart).
+    #[test]
+    fn steady_sender_tail_never_corrects_a_settled_deep_source_1367() {
+        for seed in [1u64, 2, 3] {
+            for pin in [950u32, 987, 1010] {
+                let mut cfg = BenchConfig::live_2026_09_24(GridModel::Production);
+                cfg.latency_ms = pin;
+                cfg.seed = seed;
+                cfg.duration_s = 2 * 3600;
+                let r = run_bench(&cfg);
+                assert_eq!(corrections(&r), 0, "seed {seed}, pin {pin}: {r:?}");
+                assert_eq!(r.late_holds, 0, "seed {seed}, pin {pin}: {r:?}");
+            }
+        }
+    }
+
+    /// issue 1367 — the trade-off stated in the design, measured: a sender tail TEN times the live
+    /// rate (double-late frames become common enough to reach an under-/over-depth) costs at most
+    /// one shed and one hold per hour, never a drain or a late hold, and the depth stays on
+    /// `base + 1`. Seeds measured 2-6 shed+hold pairs per 6 h.
+    #[test]
+    fn stressed_sender_tail_costs_at_most_one_correction_pair_per_hour_1367() {
+        let mut cfg = BenchConfig::live_2026_09_24(GridModel::Production);
+        cfg.send_late_ppm *= 10;
+        let r = run_bench(&cfg);
+        let per_hour_cap = r.hours.ceil() as u64;
+        assert!(
+            r.converge_sheds <= per_hour_cap && r.n1_grows <= per_hour_cap,
+            "more than one shed or hold per hour at a 10x tail: {r:?}"
+        );
+        assert_eq!(r.drains + r.late_holds, 0, "{r:?}");
+        assert!(share(&r, &[31]) > 0.99, "states {:?}", r.state_samples);
+    }
+
+    /// issue 1367 — the stream render tick sits on the grid within the ±2 ms slew clamp; anywhere
+    /// in `[-2 ms, +1 ms]` of constant phase error the settled source never corrects and every
+    /// restart stall still lands on one depth. (The SHED reads a whole frame minus 2 ms, so a tick
+    /// that is late by +2 ms or more lets the 10–30 ms late-tick TAIL cross the shed edge — a few
+    /// shed+hold pairs per hour; a tick that far off the grid is outside the slew clamp.)
+    #[test]
+    fn receiver_tick_phase_inside_the_slew_clamp_never_corrects_1367() {
+        let target = 987_000_000u64.div_ceil(CANVAS_INTERVAL_NS) + 1;
+        for offset in [-2_000_000i64, -1_000_000, 1_000_000] {
+            let mut cfg = BenchConfig::live_2026_09_24(GridModel::Production);
+            cfg.receiver_tick_offset_ns = offset;
+            cfg.duration_s = 2 * 3600;
+            let r = run_bench(&cfg);
+            assert_eq!(corrections(&r), 0, "tick offset {offset}: {r:?}");
+            for k in 0..=3 {
+                let r = after_restart_with(
+                    987,
+                    k,
+                    BenchConfig::live_2026_09_24(GridModel::Production).seed,
+                    offset,
+                );
+                assert_eq!(
+                    settled_state(&r),
+                    Some(target),
+                    "tick offset {offset}, {k}-slot stall: {r:?}"
+                );
+                assert_eq!(
+                    corrections(&r),
+                    0,
+                    "tick offset {offset}, {k}-slot stall: {r:?}"
+                );
+            }
+        }
+    }
+
+    /// issue 1367 — a SHALLOW N==1 source (the 3 ms `cg` feeds and imag cameras; a 60 ms pin that
+    /// the arrival skew still dominates) is decided by its arrival, not its pin: the deep-source
+    /// guard keeps both new decisions silent, so its behaviour is exactly the pre-1367 one.
+    #[test]
+    fn shallow_n1_source_is_untouched_1367() {
+        for seed in [BenchConfig::live_2026_09_24(GridModel::Production).seed, 1] {
+            for pin in [3u32, 60] {
+                let mut cfg = BenchConfig::live_2026_09_24(GridModel::Production);
+                cfg.latency_ms = pin;
+                cfg.seed = seed;
+                cfg.duration_s = 2 * 3600;
+                let r = run_bench(&cfg);
+                assert_eq!(
+                    r.converge_sheds + r.n1_grows,
+                    0,
+                    "seed {seed}, pin {pin}: the N==1 rule acted on a shallow source: {r:?}"
                 );
             }
         }

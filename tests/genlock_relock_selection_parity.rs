@@ -23,6 +23,7 @@
 use camera_box::genlock_backlog::{
     relock_acquire_should_hold, relock_anchor_age_ns, relock_select_nearest, should_converge_phase,
 };
+use camera_box::genlock_n1_depth::should_hold_n1_phase;
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
@@ -240,22 +241,103 @@ fn c_relock_selection_matches_the_rust_authority_1003() {
 /// [`camera_box::genlock_backlog::should_converge_phase`] over a spread of vectors — a flipped
 /// comparison, a lost saturation guard, or a wrong `interval/n` quantum fails here in seconds
 /// rather than surviving to the rig.
+///
+/// issue 1367: the N==1 branch of `genlock_phase_converge_due` now calls the `genlock_n1_*` pure
+/// helpers, which sit CONTIGUOUSLY right before it (ending with `genlock_n1_hold_due`). The lift
+/// therefore takes the whole block from `genlock_n1_base_frames` to the end of
+/// `genlock_phase_converge_due` — the same verbatim bytes, just one contiguous run longer — and the
+/// issue-1367 hold gate below compiles the very same block.
 fn lift_converge_helper() -> String {
     let path = repo(OBS_SOURCE);
     let src = fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
     let start = src
-        .find("static inline bool genlock_phase_converge_due(")
+        .find("static inline uint64_t genlock_n1_base_frames(")
         .unwrap_or_else(|| {
             panic!(
-                "#1049: {OBS_SOURCE} no longer defines genlock_phase_converge_due — the phase \
-                 convergence helper is gone, so there is nothing to check parity against."
+                "issue 1367: {OBS_SOURCE} no longer defines genlock_n1_base_frames — the N==1 \
+                 pin-derived depth helpers are gone, so there is nothing to check parity against."
             )
         });
-    let end = src[start..]
+    let converge = src[start..]
+        .find("static inline bool genlock_phase_converge_due(")
+        .map(|i| start + i)
+        .unwrap_or_else(|| {
+            panic!(
+                "#1049: {OBS_SOURCE} no longer defines genlock_phase_converge_due right after the \
+                 issue-1367 N==1 helpers — the phase convergence helper is gone or moved, so \
+                 there is nothing to check parity against."
+            )
+        });
+    let end = src[converge..]
         .find("\n}\n")
-        .map(|i| start + i + 3)
+        .map(|i| converge + i + 3)
         .expect("#1049: genlock_phase_converge_due has no closing brace");
     src[start..end].to_string()
+}
+
+/// The `#define`s the lifted convergence + issue-1367 N==1 block references, lifted from the
+/// SHIPPED C (never hard-coded — review 🟡2 of #1049).
+fn converge_defines() -> String {
+    [
+        "GENLOCK_PHASE_PIN_HYSTERESIS_NS",
+        "GENLOCK_DRAIN_MIN_TICK_INTERVAL",
+        "GENLOCK_N2_JITTER_BUDGET_NS",
+        "GENLOCK_N1_PIN_FRAME_TOLERANCE_NS",
+        "GENLOCK_N1_TICK_EARLY_MARGIN_NS",
+        "GENLOCK_N1_DEEP_MARGIN_FRAMES",
+    ]
+    .iter()
+    .map(|name| lift_define(name))
+    .collect::<Vec<_>>()
+    .join("\n")
+}
+
+/// Compile the lifted block + `main_body` standalone under `-Werror` and return the printed
+/// lines. FAILS LOUDLY (never skips) when no compiler is present.
+fn compile_and_run_n1_block(dirname: &str, main_body: &str) -> Vec<String> {
+    let mut c = format!(
+        "#include <stdint.h>\n#include <stddef.h>\n#include <stdbool.h>\n#include <stdio.h>\n{}\n",
+        converge_defines()
+    );
+    c.push_str(&lift_converge_helper());
+    c.push_str("int main(void){\n");
+    c.push_str(main_body);
+    c.push_str("    return 0;\n}\n");
+
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(dirname);
+    fs::create_dir_all(&dir).expect("create the parity scratch dir");
+    let cfile = dir.join("harness.c");
+    let bin = dir.join("harness.bin");
+    fs::write(&cfile, &c).expect("write the parity harness");
+    let cc = std::env::var("CC").unwrap_or_else(|_| "cc".to_string());
+    let out = Command::new(&cc)
+        .args(["-std=gnu99", "-Wall", "-Wextra", "-Werror", "-O1"])
+        .arg(&cfile)
+        .arg("-o")
+        .arg(&bin)
+        .output()
+        .unwrap_or_else(|e| {
+            panic!(
+                "could not run the C compiler `{cc}` ({e}). This gate compiles the vendored \
+                 genlock helpers to prove the C and the Rust authority agree; it must FAIL rather \
+                 than skip when the toolchain is absent. Install a C compiler or set CC."
+            )
+        });
+    assert!(
+        out.status.success(),
+        "the lifted genlock convergence / issue-1367 N==1 block from {OBS_SOURCE} does NOT \
+         COMPILE standalone under -Wall -Wextra -Werror:\n--- cc stderr ---\n{}\n--- harness \
+         ---\n{c}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let run = Command::new(&bin)
+        .output()
+        .expect("the compiled parity harness failed to execute");
+    String::from_utf8(run.stdout)
+        .expect("harness stdout is utf-8")
+        .lines()
+        .map(|l| l.trim().to_string())
+        .collect()
 }
 
 /// Lift a `#define NAME <value>` line VERBATIM from the vendored C so the parity harness compiles
@@ -364,6 +446,47 @@ fn converge_vectors() -> Vec<(u64, u64, u64, u32, u64, u32, u64)> {
         (w, w - 1_033_000_000, w - 33_000_000, 990, i30, 1, 100), // deep n=1 -> INERT (gated)
         (w, w - 1_033_000_000, w - 33_000_000, 990, i30, 2, 100), // same age, n=2 -> fires
     ];
+    // issue 1367 — the N==1 SHED branch at every edge: the late-tolerant depth edge (target + 1
+    // frames minus the 2 ms early margin), the deep-source guard edge (floor + 2 frames vs base),
+    // the 1 us pin tolerance (an exact 1000 ms pin = 30 frames, not 31), the shared throttle, and
+    // a second interval so a helper that hard-codes 30 fps cannot pass.
+    for (pin, interval) in [(987u32, i30), (1000u32, i30), (963u32, i30), (500u32, i60)] {
+        let base = (pin as u64 * 1_000_000 - 1_000).div_ceil(interval);
+        let deep_newest = w - interval; // floor 1 frame, deep
+        for depth_age in [
+            (base + 1) * interval,                 // AT the target -> inert
+            (base + 2) * interval - 2_000_000,     // late-tolerant edge, exactly -> fires
+            (base + 2) * interval - 2_000_000 - 1, // one ns under -> inert
+            (base + 2) * interval,                 // a whole frame over -> fires
+            (base + 1) * interval + 31_000_000, // a 31 ms late tick at the target (inert at 30 fps)
+        ] {
+            for ticks in [29u64, 30] {
+                v.push((w, w - depth_age, deep_newest, pin, interval, 1, ticks));
+            }
+            // Deep-guard edge: floor frames + 2 == base (still deep), == base + 1 (shallow).
+            v.push((
+                w,
+                w - depth_age,
+                w - (base - 2) * interval,
+                pin,
+                interval,
+                1,
+                100,
+            ));
+            v.push((
+                w,
+                w - depth_age,
+                w - (base - 1) * interval,
+                pin,
+                interval,
+                1,
+                100,
+            ));
+        }
+    }
+    // A shallow N==1 source (the 3 ms cg / imag case): never engages, whatever the age.
+    v.push((w, w - 5 * i30, w - i30, 3, i30, 1, 100));
+    v.push((w, w - 5 * i60, w - i60, 3, i60, 1, 100));
     // A deterministic LCG spread over the argument space, now including the floor axis.
     let mut x: u64 = 0x1234_5678_9abc_def1;
     for _ in 0..120 {
@@ -389,13 +512,11 @@ fn c_phase_convergence_matches_the_rust_authority_1049() {
     let vs = converge_vectors();
 
     // Lift the constants from the SHIPPED C, never hard-code them (review 🟡2). #1354 added
-    // GENLOCK_N2_JITTER_BUDGET_NS — genlock_phase_converge_due now references it, so it MUST be
-    // lifted too or the standalone C fails -Werror on the undefined symbol.
+    // GENLOCK_N2_JITTER_BUDGET_NS and issue 1367 the three GENLOCK_N1_* — the lifted block
+    // references them all, so they MUST be lifted too or the standalone C fails -Werror.
     let mut c = format!(
-        "#include <stdint.h>\n#include <stddef.h>\n#include <stdbool.h>\n#include <stdio.h>\n{}\n{}\n{}\n",
-        lift_define("GENLOCK_PHASE_PIN_HYSTERESIS_NS"),
-        lift_define("GENLOCK_DRAIN_MIN_TICK_INTERVAL"),
-        lift_define("GENLOCK_N2_JITTER_BUDGET_NS"),
+        "#include <stdint.h>\n#include <stddef.h>\n#include <stdbool.h>\n#include <stdio.h>\n{}\n",
+        converge_defines()
     );
     c.push_str(&helper);
     c.push_str("int main(void){\n");
@@ -608,5 +729,102 @@ fn c_acquire_bracketing_gate_matches_the_rust_authority_1161() {
         diffs.len(),
         vs.len(),
         diffs.join("\n")
+    );
+}
+
+/// issue 1367 — `(wall, head_stamp, newest_stamp, latency_ms, interval, n, ticks)`.
+fn n1_hold_vectors() -> Vec<(u64, u64, u64, u32, u64, u32, u64)> {
+    let i30 = 33_333_333u64;
+    let i60 = 16_666_667u64;
+    let w = 1_000_000_000_000u64;
+    let mut v = Vec::new();
+    for (pin, interval) in [(987u32, i30), (1000u32, i30), (963u32, i30), (500u32, i60)] {
+        let base = (pin as u64 * 1_000_000 - 1_000).div_ceil(interval);
+        let deep_newest = w - interval;
+        for head_age in [
+            base * interval,                          // the resync depth, one short -> holds
+            (base + 1) * interval,                    // AT the target -> inert
+            (base + 1) * interval - interval / 2,     // rounded edge, exactly -> inert
+            (base + 1) * interval - interval / 2 - 1, // one ns under -> holds
+            base * interval + 5_000_000,              // a 5 ms late tick one short -> still holds
+            (base + 1) * interval - 3_000_000,        // a 3 ms EARLY tick at the target -> inert
+        ] {
+            for ticks in [29u64, 30] {
+                v.push((w, w - head_age, deep_newest, pin, interval, 1, ticks));
+            }
+            v.push((w, w - head_age, deep_newest, pin, interval, 2, 100)); // n>=2 -> inert
+            v.push((w, w - head_age, deep_newest, pin, interval, 0, 100)); // n=0 treated as 1
+            v.push((
+                w,
+                w - head_age,
+                w - (base - 2) * interval,
+                pin,
+                interval,
+                1,
+                100,
+            )); // deep
+            v.push((
+                w,
+                w - head_age,
+                w - (base - 1) * interval,
+                pin,
+                interval,
+                1,
+                100,
+            )); // shallow
+        }
+    }
+    v.push((w, w - i30, w, 3, i30, 1, 100)); // shallow 3 ms source: never
+    v.push((w, w - 30 * i30, w - i30, 987, 0, 1, 100)); // degenerate interval: never
+    v
+}
+
+/// issue 1367 — the N==1 HOLD half: the lifted `genlock_n1_hold_due` must return byte-identical
+/// booleans to [`camera_box::genlock_backlog::should_hold_n1_phase`] at every edge (the rounded
+/// depth edge, the deep-source guard, the throttle, the n>=2 inertness, the pin tolerance).
+#[test]
+fn c_n1_hold_matches_the_rust_authority_1367() {
+    let vs = n1_hold_vectors();
+    let mut body = String::new();
+    for (wall, head, newest, latency, interval, n, ticks) in &vs {
+        body.push_str(&format!(
+            "    printf(\"%d\\n\", genlock_n1_hold_due({wall}ULL, {head}ULL, {newest}ULL, {latency}, \
+             {interval}ULL, {n}, {ticks}ULL));\n"
+        ));
+    }
+    let c_out = compile_and_run_n1_block("genlock_n1_hold_parity_1367", &body);
+    assert_eq!(
+        c_out.len(),
+        vs.len(),
+        "issue 1367: harness printed the wrong count"
+    );
+    let mut diffs = Vec::new();
+    let mut holds = 0;
+    for (i, ((wall, head, newest, latency, interval, n, ticks), got_c)) in
+        vs.iter().zip(&c_out).enumerate()
+    {
+        let got_c = got_c == "1";
+        let got_rs = should_hold_n1_phase(*wall, *head, *newest, *latency, *interval, *n, *ticks);
+        holds += usize::from(got_rs);
+        if got_rs != got_c {
+            diffs.push(format!(
+                "  vector {i}: wall={wall} head={head} newest={newest} latency={latency} \
+                 interval={interval} n={n} ticks={ticks} -> C {got_c}, Rust {got_rs}"
+            ));
+        }
+    }
+    assert!(
+        diffs.is_empty(),
+        "issue 1367: the vendored C N==1 hold decision DIVERGED from the Tier-0 Rust authority on \
+         {} of {} vectors:\n{}",
+        diffs.len(),
+        vs.len(),
+        diffs.join("\n")
+    );
+    // The vectors must exercise BOTH outcomes, or the gate is blind to a constant-false helper.
+    assert!(
+        holds > 0 && holds < vs.len(),
+        "issue 1367: the hold vectors exercise only one outcome ({holds} of {})",
+        vs.len()
     );
 }
