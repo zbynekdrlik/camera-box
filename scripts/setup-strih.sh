@@ -22,8 +22,14 @@ set -euo pipefail
 # fail-loud flow around them; it reuses the shared genlock-markers.sh helper and the canonical
 # remoteos-mcp / bundle-state tooling rather than re-implementing any of it.
 #
+# issue 1361: every box/venue FACT (hostname, IP, NDI prefix, dantesync role + upstream, intercom
+# config, NIC rule, OBS profile/collection, NDI-runtime peer, Companion controller, CG sender, cameras)
+# comes from the selected box's fact file scripts/strih-boxes/<box>.env, loaded + validated by
+# scripts/lib/strih-box-facts.sh. One script for every strih box -- strih PP is a new fact file, never
+# a copy of this script. A fact file with any TODO_OWNER value (a template) REFUSES, naming each fact.
+#
 # Usage (on the box):
-#   sudo STRIH_LX_IP=10.77.9.NNN GH_TOKEN=<gh-pat-repo-read> ./setup-strih.sh [--yes]
+#   sudo GH_TOKEN=<gh-pat-repo-read> ./setup-strih.sh [--box <name>] [--yes]    (default box: strih-lx)
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
 
@@ -40,6 +46,8 @@ step() { echo -e "${GREEN}[$1/${TOTAL_STEPS}] $2${NC}"; }
 warn() { echo -e "${YELLOW}$1${NC}"; }
 fail() { echo -e "${RED}FAIL: $1${NC}" >&2; exit 1; }
 
+# shellcheck source=scripts/lib/strih-box-facts.sh
+. "${HERE}/lib/strih-box-facts.sh"   # issue 1361: the ONE per-box fact loader (--box <name>)
 # shellcheck source=scripts/lib/strih-provision.sh
 . "${HERE}/lib/strih-provision.sh"
 # shellcheck source=scripts/lib/genlock-markers.sh
@@ -48,6 +56,12 @@ fail() { echo -e "${RED}FAIL: $1${NC}" >&2; exit 1; }
 . "${HERE}/lib/ndi-runtime.sh"   # issue 1317: shared NDI 6.3.2 runtime install recipe (with setup-imag.sh)
 # shellcheck source=scripts/lib/obs-box-baseline.sh
 . "${HERE}/lib/obs-box-baseline.sh"   # issue 1357: the ONE OBS-box appliance baseline (the SAME lib setup-imag.sh runs)
+
+# --- issue 1361: select + load the box facts BEFORE the source-guard, so a sourced setup (the unit
+# tests) sees exactly the facts the real run uses. Any invalid / TODO_OWNER fact refuses here.
+STRIH_BOX="$(strih_box_cli_box "$@")" || fail "usage: setup-strih.sh [--box <name>] [--yes]"
+strih_box_load "$STRIH_BOX" \
+  || fail "box '${STRIH_BOX}': scripts/strih-boxes/${STRIH_BOX}.env is missing, invalid or still has TODO_OWNER facts (listed above) -- refusing to provision"
 
 # --- source-guard: when sourced (the unit tests), stop here -- never run the destructive flow ----
 if [ "${BASH_SOURCE[0]}" != "${0}" ]; then
@@ -58,27 +72,25 @@ fi
 
 STATIC_IP="$(strih_lx_ip)"
 STRIH_HOST="$(strih_lx_host)"
+BOX_NAME="$(strih_lx_hostname)"
 
-echo -e "${GREEN}=== strih-lx setup (issue 1317): parallel Linux strih cutter, host ${STRIH_HOST} ===${NC}"
+echo -e "${GREEN}=== ${BOX_NAME} setup (issue 1317 / 1361): Linux strih cutter, facts scripts/strih-boxes/${STRIH_BOX}.env, host ${STRIH_HOST} ===${NC}"
 
 # ---------------------------------------------------------------------------------------------
 step 1 "Static IP (NetworkManager) + hostname $(strih_lx_hostname)"
-if [ -z "$STATIC_IP" ]; then
-  warn "  STRIH_LX_IP unset -- the notebook's static IP is assigned on arrival (17.9.); leaving DHCP for now"
-else
-  command -v nmcli >/dev/null 2>&1 || fail "nmcli required (desktop Ubuntu NetworkManager)"
-  echo "  (operator: assign ${STATIC_IP}/23 to the rig NIC via nmcli; recorded here as the target)"
-fi
+command -v nmcli >/dev/null 2>&1 || fail "nmcli required (desktop Ubuntu NetworkManager)"
+echo "  (operator: assign ${STATIC_IP}/23 to the rig NIC via nmcli; recorded here as the target)"
 hostnamectl set-hostname "$(strih_lx_hostname)" 2>/dev/null || warn "  could not set hostname (non-fatal)"
 
 # ---------------------------------------------------------------------------------------------
 # issue 1317 (post-M4, 20.9.2026): the strih notebook IS the fleet's ONE NTP master (`strih.lan` ->
-# 10.77.9.202; the cam boxes take NTP from it), so the DEFAULT dantesync ROLE is `server` (a bare
-# `dantesync` daemon = NTP-master mode, ntp_server_mode in /etc/dantesync/config.json). The dead
-# parallel-run CLIENT shape is still available via STRIH_LX_DANTESYNC_ROLE=client. The live box had a
-# hand `dantesync.service.d/10-ntp-master.conf` drop-in overriding the provisioned CLIENT ExecStart --
-# now the role is folded INTO the unit and the stale drop-in is removed.
-DS_ROLE="${STRIH_LX_DANTESYNC_ROLE:-server}"
+# 10.77.9.202; the cam boxes take NTP from it), so strih-lx's dantesync ROLE is `server` (a bare
+# `dantesync` daemon = NTP-master mode, ntp_server_mode in /etc/dantesync/config.json). issue 1361: the
+# role + its upstream are box FACTS (STRIH_DANTESYNC_ROLE / STRIH_DANTESYNC_UPSTREAM), so a venue whose
+# strih is a CLIENT declares it in its fact file. The live box had a hand
+# `dantesync.service.d/10-ntp-master.conf` drop-in overriding the provisioned CLIENT ExecStart -- now
+# the role is folded INTO the unit and the stale drop-in is removed.
+DS_ROLE="$(strih_lx_dantesync_role)"
 step 2 "DanteSync ${DS_ROLE} (single timesync authority; post-M4 the notebook is the fleet NTP master)"
 # Purge any competing timesync daemon (ops hard rule: dantesync OWNS the clock -- never
 # timesyncd/chrony/ptp4l alongside it).
@@ -86,12 +98,8 @@ for svc in systemd-timesyncd chrony chronyd ntp ntpsec; do
   systemctl disable --now "$svc" 2>/dev/null || true
 done
 [ -x /usr/local/bin/dantesync ] || warn "  dantesync binary absent -- install it (see setup-imag.sh step 3 / dantesync-fleet-upgrade.md) before go-live"
-# role -> args: server = bare (NTP master), client = --ntp-server <host>.
-if [ "$DS_ROLE" = client ]; then
-  DS_ARGS="$(strih_lx_dantesync_client_args)"
-else
-  DS_ARGS=""
-fi
+# role -> args: server = bare (NTP master), client = --ntp-server <upstream fact>.
+DS_ARGS="$(strih_lx_dantesync_args)" || fail "dantesync role '${DS_ROLE}' needs STRIH_DANTESYNC_UPSTREAM in the box facts"
 # Fail-closed self-check (the guard BEFORE install): the role+args must be a COHERENT invocation --
 # server with no args, or client with a genuine --ntp-server. An ambiguous shape refuses.
 strih_lx_dantesync_role_ok "$DS_ROLE" "$DS_ARGS" \
@@ -187,7 +195,7 @@ if [ -d "${STRIH_LX_BUNDLE_SRC:-}" ]; then
   echo "  installed bundle into the /usr prefix (/usr/bin/obs + /usr/lib/x86_64-linux-gnu + ldconfig)"
 else
   warn "  STRIH_LX_BUNDLE_SRC unset -- fetch the ${ART} CI artifact and re-run with STRIH_LX_BUNDLE_SRC=<dir>"
-  warn "  (deploy-genlock-fleet.sh --boxes strih-lx does this over ssh once the box is reachable)"
+  warn "  (deploy-genlock-fleet.sh --boxes ${BOX_NAME} does this over ssh once the box is reachable)"
 fi
 # chrome-sandbox setuid-root (issue 1317 F6): the CEF SUID sandbox helper must be owned root:root
 # mode 4755 or the browser sources cannot launch (Chromium aborts unless the sandbox is disabled at
@@ -253,9 +261,10 @@ step 4b "NDI 6.3.2 runtime (fleet-identical from a cambox) -> DistroAV loads WIT
 # issue 1317: without this DistroAV logs `ERR-404 NDI library not found` / `plugin loaded (UI-only)`
 # and the box has NO NDI inputs/outputs. Reuse the shared recipe (scripts/lib/ndi-runtime.sh) so
 # strih + imag install the SAME runtime. Runs BEFORE the OBS launch (step 8) -- DistroAV needs libndi
-# on the loader path at OBS start. Copies from a cam box (default cam1); set STRIH_NDI_PEER=<ip> if
-# cam1 is down, and CAM_PW=<cam ssh pw> (only used when the runtime is not already present).
-NDI_PEER="${STRIH_NDI_PEER:-10.77.9.61}"
+# on the loader path at OBS start. Copies from the box's STRIH_NDI_RUNTIME_PEER fact (a cam box); set
+# STRIH_NDI_PEER=<ip> if that box is down, and CAM_PW=<cam ssh pw> (only used when the runtime is not
+# already present).
+NDI_PEER="${STRIH_NDI_PEER:-$(strih_lx_ndi_runtime_peer)}"
 NDI_RUNTIME_DIR_STRIH="${STRIH_NDI_DIR:-/usr/lib/ndi}"
 if [ -e "${NDI_RUNTIME_DIR_STRIH}/libndi.so.6" ] || [ -n "${CAM_PW:-}" ]; then
   ( eval "$(ndi_runtime_install_cmds "$NDI_PEER" "${CAM_PW:-}" "${STRIH_NDI_USER:-newlevel}" "$NDI_RUNTIME_DIR_STRIH")" ) \
@@ -284,7 +293,7 @@ else
 fi
 
 # ---------------------------------------------------------------------------------------------
-step 5 "OBS profile facts (strih-lx: seeded from the Windows 'light' profile)"
+step 5 "OBS profile facts (${BOX_NAME}: seeded from the Windows 'light' profile)"
 # issue 1317: create ~/.config/obs-studio owned by the DESKTOP user (this script runs under sudo, so a
 # bare `mkdir` roots it and the obs user cannot then create .sentinel -- `Permission denied`, hit live).
 install -d -o "$DESKTOP_USER" -g "$DESKTOP_USER" "$OBS_CFG"
@@ -433,6 +442,13 @@ done
 install -m 0755 "${HERE}/strih-obs-start.sh" /usr/local/bin/strih-obs-start.sh
 install -m 0755 "${HERE}/strih-obs-stop.sh"  /usr/local/bin/strih-obs-stop.sh
 echo "  installed launcher pair -> /usr/local/bin/strih-obs-start.sh + strih-obs-stop.sh (mode 0755)"
+# issue 1361: the box's OBS profile/collection facts reach the launcher through a --user drop-in (the
+# launcher reads STRIH_OBS_PROFILE / STRIH_OBS_COLLECTION from its environment and installs verbatim).
+install -d -o "$DESKTOP_USER" -g "$DESKTOP_USER" "${USER_HOME}/.config/systemd/user/strih-obs.service.d"
+strih_obs_box_facts_dropin_text > "${USER_HOME}/.config/systemd/user/strih-obs.service.d/10-box-facts.conf" \
+  || fail "could not write the strih-obs.service box-facts drop-in"
+chown -R "$DESKTOP_USER":"$DESKTOP_USER" "${USER_HOME}/.config/systemd/user/strih-obs.service.d" 2>/dev/null || true
+echo "  strih-obs.service.d/10-box-facts.conf: OBS profile '$(strih_lx_obs_profile)', collection '$(strih_lx_obs_collection)'"
 sudo -u "$DESKTOP_USER" XDG_RUNTIME_DIR="/run/user/$(id -u "$DESKTOP_USER")" systemctl --user enable strih-obs.service 2>/dev/null \
   || warn "  enable strih-obs.service by hand once the user session bus is up"
 echo "  strih-obs.service installed + enabled (the kiosk openbox autostart, step 15, starts it at every boot)"
@@ -635,7 +651,10 @@ step 13 "Intercom hub unit + matrix (issue 1345 M1: ENABLE-ONLY, NEVER started w
 # here: sending VBAN to the real camboxes is the M4 cut-over (the Windows strih stays their live hub
 # until then). The deployable binary (intercom-hub-linux-amd64 from CI) is placed separately.
 install -Dm644 "${HERE}/../systemd/intercom-hub.service" /etc/systemd/system/intercom-hub.service
-install -Dm644 "${HERE}/../intercom/intercom.strih-lx.toml" /etc/intercom-hub/intercom.toml
+# issue 1361: the routing file is the box fact STRIH_INTERCOM_CONFIG (repo-relative).
+[ -f "${HERE}/../$(strih_lx_intercom_config)" ] \
+  || fail "intercom routing file ${HERE}/../$(strih_lx_intercom_config) (fact STRIH_INTERCOM_CONFIG) not found -- stage the repo intercom/ dir next to scripts/"
+install -Dm644 "${HERE}/../$(strih_lx_intercom_config)" /etc/intercom-hub/intercom.toml
 systemctl daemon-reload
 systemctl enable intercom-hub 2>/dev/null || warn "  could not enable intercom-hub.service"
 if [ -x /usr/local/bin/intercom-hub ]; then
@@ -716,7 +735,7 @@ strih_openbox_autostart_text > "${USER_HOME}/.config/openbox/autostart" \
   || fail "could not write ${USER_HOME}/.config/openbox/autostart"
 chmod +x "${USER_HOME}/.config/openbox/autostart"
 chown "$DESKTOP_USER":"$DESKTOP_USER" "${USER_HOME}/.config/openbox/autostart"
-obs_box_openbox_menu_xml "strih-lx" "systemctl --user start strih-obs.service" "/usr/local/bin/strih-obs-stop.sh" \
+obs_box_openbox_menu_xml "$(strih_lx_hostname)" "systemctl --user start strih-obs.service" "/usr/local/bin/strih-obs-stop.sh" \
   > "${USER_HOME}/.config/openbox/menu.xml" \
   || fail "could not write ${USER_HOME}/.config/openbox/menu.xml"
 chown "$DESKTOP_USER":"$DESKTOP_USER" "${USER_HOME}/.config/openbox/menu.xml"
@@ -892,13 +911,13 @@ if [ -x "${HERE}/verify-strih.sh" ]; then
     # issue 1357: the baseline's kernel / PRIME / Xorg-kiosk changes only run after the next boot, so
     # the gate's baseline items are EXPECTED to report them pending on this run -- report, never fail
     # provisioning here; the post-reboot verify-strih.sh run is the acceptance gate.
-    warn "  the shared OBS-box baseline takes effect at the NEXT boot -- reboot strih-lx, then run verify-strih.sh (the run below only reports what is still pending)"
-    "${HERE}/verify-strih.sh" || warn "  verify-strih.sh reports pending items -- expected before the reboot"
+    warn "  the shared OBS-box baseline takes effect at the NEXT boot -- reboot ${BOX_NAME}, then run verify-strih.sh --box ${STRIH_BOX} (the run below only reports what is still pending)"
+    "${HERE}/verify-strih.sh" --box "$STRIH_BOX" || warn "  verify-strih.sh reports pending items -- expected before the reboot"
   else
-    "${HERE}/verify-strih.sh" || fail "verify-strih.sh acceptance gate did not pass"
+    "${HERE}/verify-strih.sh" --box "$STRIH_BOX" || fail "verify-strih.sh acceptance gate did not pass"
   fi
 else
   warn "  verify-strih.sh not found/executable next to this script -- run it manually"
 fi
 
-echo -e "${GREEN}=== strih-lx setup complete ===${NC}"
+echo -e "${GREEN}=== ${BOX_NAME} setup complete ===${NC}"

@@ -8,10 +8,14 @@ set -euo pipefail
 # into them and prints one PASS/FAIL line per acceptance item. Exit 0 = all clear, 1 = a gate item
 # failed. Latency pins are REPORT-ONLY (per-source latency is the operator's A/V-align domain).
 #
-# Usage (on the box):  ./verify-strih.sh   [STRIH_LX_HOST / OBS_WS_HOST override the WS target]
+# Usage (on the box):  ./verify-strih.sh [--box <name>]   (default box: strih-lx; issue 1361 -- the
+#                      box's facts come from scripts/strih-boxes/<name>.env; a TODO_OWNER fact refuses)
+#                      [STRIH_LX_HOST / OBS_WS_HOST override the WS target]
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/lib/strih-box-facts.sh
+. "${HERE}/lib/strih-box-facts.sh"   # issue 1361: the ONE per-box fact loader (--box <name>)
 # shellcheck source=scripts/lib/strih-provision.sh
 . "${HERE}/lib/strih-provision.sh"
 # issue 1359: the REPORT-ONLY CEF keyring item (14b) grades the OBS CEF password-store switch.
@@ -26,6 +30,12 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # it defines only its pure functions (dantesync_offset_verdict / ptp_locked_from_journal).
 # shellcheck source=scripts/clock-offset-guard.sh
 . "${HERE}/clock-offset-guard.sh"
+
+# --- issue 1361: select + load the box facts BEFORE the source-guard (a sourced verify -- the unit
+# tests -- sees the same facts the real run uses). An invalid / TODO_OWNER fact refuses here.
+STRIH_BOX="$(strih_box_cli_box "$@")" || { echo "usage: verify-strih.sh [--box <name>]" >&2; exit 1; }
+strih_box_load "$STRIH_BOX" \
+  || { echo -e "${RED}FAIL: box '${STRIH_BOX}': scripts/strih-boxes/${STRIH_BOX}.env is missing, invalid or still has TODO_OWNER facts (listed above)${NC}" >&2; exit 1; }
 
 # --- source-guard: when sourced (the unit tests), stop here -- never run the live checks ----------
 if [ "${BASH_SOURCE[0]}" != "${0}" ]; then
@@ -50,7 +60,8 @@ obs_running() {
     || pgrep -f 'bin/64bit/obs\|/obs$' >/dev/null 2>&1
 }
 
-echo -e "${GREEN}=== verify-strih.sh (issue 1317) acceptance gate ===${NC}"
+NDI_PREFIX_V="$(strih_lx_ndi_prefix)"
+echo -e "${GREEN}=== verify-strih.sh (issue 1317) acceptance gate -- box $(strih_lx_hostname) ===${NC}"
 
 # 0) launcher pair present + executable (issue 1317): strih-obs.service ExecStart/ExecStop reference
 #    /usr/local/bin/strih-obs-start.sh + strih-obs-stop.sh; a missing/dangling launcher makes the
@@ -128,7 +139,7 @@ if [ -f /opt/camera-box/strih-lx-seed.json ] && command -v python3 >/dev/null 2>
   if [ -n "$LIVE_OUTS" ]; then
     all_ns=1
     while IFS= read -r o; do [ -n "$o" ] || continue; strih_lx_output_name_ok "$o" || all_ns=0; done <<< "$LIVE_OUTS"
-    [ "$all_ns" = 1 ] && ok "all declared NDI outputs are STRIH-LX-namespaced" || bad "a declared NDI output is not STRIH-LX-namespaced"
+    [ "$all_ns" = 1 ] && ok "all declared NDI outputs are ${NDI_PREFIX_V}-namespaced" || bad "a declared NDI output is not ${NDI_PREFIX_V}-namespaced"
     printf '%s\n' "$LIVE_OUTS" | strih_lx_no_second_strihsnv_sender && ok "no 2nd STRIH-SNV sender in the output set" || bad "a STRIH-SNV sender is present (collision with the Windows PC)"
   else
     note "no outputs in strih-lx-seed.json to check"
@@ -206,8 +217,9 @@ esac
 # 5) Certified latency pins vs scripts/latency-pins-baseline.json (strih-lx key) -- REPORT-ONLY.
 BASELINE="${HERE}/latency-pins-baseline.json"
 if command -v python3 >/dev/null 2>&1 && [ -f "$BASELINE" ]; then
-  FLOOR="$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); b=d.get("strih-lx",{}); print(b.get("_all_camera_ndi_inputs_ms","?"))' "$BASELINE" 2>/dev/null || echo '?')"
-  note "latency-pins-baseline.json strih-lx floor = ${FLOOR} ms (report-only; aligner owns any offset)"
+  PIN_BOX_V="$(strih_lx_hostname)"
+  FLOOR="$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); b=d.get(sys.argv[2],{}); print(b.get("_all_camera_ndi_inputs_ms","?"))' "$BASELINE" "$PIN_BOX_V" 2>/dev/null || echo '?')"
+  note "latency-pins-baseline.json ${PIN_BOX_V} floor = ${FLOOR} ms (report-only; aligner owns any offset)"
 else
   note "latency baseline / python3 absent -- pin verify is report-only"
 fi
@@ -658,7 +670,7 @@ fi
 #     server role (the post-M4 default: the notebook IS the fleet NTP master) -- an ntp UDP :123
 #     listener. Complements item 6 (unit active + fresh offset) with the role/serving-state proof via
 #     the pure strih_lx_dantesync_status_role_verdict.
-DS_ROLE_V="${STRIH_LX_DANTESYNC_ROLE:-server}"
+DS_ROLE_V="$(strih_lx_dantesync_role)"
 DS_STATUS="$(curl -s --max-time 4 http://127.0.0.1:8898/status 2>/dev/null || true)"
 [ -n "$DS_STATUS" ] && DS_REACH=1 || DS_REACH=0
 DS_MODE="$(printf '%s' "$DS_STATUS" | grep -oE '"mode":"[A-Za-z]+"' | head -1 | sed 's/.*:"//; s/"//' || true)"
@@ -726,13 +738,14 @@ fi
 #     SINGLE E-core (>= the first cpu_atom cpu) so its NET_RX softirq never shares an OBS core, AND
 #     that IRQ's /proc/interrupts counter must be ADVANCING over a live 2-s window (NEVER a static
 #     file check -- a smp_affinity_list read alone is a lying gate). Read-only, drain-safe, fail loud.
-IRQ_TARGET_IP="${STRIH_LX_TARGET_IP:-10.77.9.202}"
+IRQ_TARGET_IP="${STRIH_LX_TARGET_IP:-$(strih_lx_ip)}"
 IRQ_IFACE="${STRIH_NIC_IFACE:-}"
 if [ -z "$IRQ_IFACE" ]; then
-  # driver-first (the r8152 USB NIC), then fall back to the address match; MULTI -> NOTE + no iface.
-  IRQ_DRV="$(strih_nic_iface_by_driver /sys r8152 2>/dev/null || true)"
+  # driver-first (the box's STRIH_NIC_DRIVER fact -- strih-lx: the r8152 USB NIC), then fall back to
+  # the address match; MULTI -> NOTE + no iface.
+  IRQ_DRV="$(strih_nic_iface_by_driver /sys "$(strih_lx_nic_driver)" 2>/dev/null || true)"
   case "$IRQ_DRV" in
-    MULTI:*) note "  multiple r8152 NICs (${IRQ_DRV#MULTI:}) -- set STRIH_NIC_IFACE"; IRQ_IFACE="" ;;
+    MULTI:*) note "  multiple $(strih_lx_nic_driver) NICs (${IRQ_DRV#MULTI:}) -- set STRIH_NIC_IFACE"; IRQ_IFACE="" ;;
     "")      IRQ_IFACE="$(ip -o -4 addr show 2>/dev/null | awk -v ip="$IRQ_TARGET_IP" 'BEGIN { gsub(/\./, "\\.", ip) } $4 ~ ("^" ip "/") { print $2; exit }' || true)" ;;
     *)       IRQ_IFACE="$IRQ_DRV" ;;
   esac
