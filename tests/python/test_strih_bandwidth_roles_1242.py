@@ -441,14 +441,14 @@ def test_a_colliding_non_ndi_twin_name_is_left_alone():
 # strih_scenes.py delegation + the launch path
 # ------------------------------------------------------------------------------------------------
 
-def test_strih_obs_start_applies_the_roles_after_the_seed_best_effort():
+def test_strih_obs_start_holds_the_roles_per_the_owner_hold_24_9():
+    # Owner hold 24.9.2026: the launch path must NOT apply the bandwidth roles until released; it
+    # prints the HOLD line instead. Releasing the hold = restore the best-effort `if python3 "$SCN"
+    # --apply-roles` block after the seed and flip this test back.
     s = (SCRIPTS / "strih-obs-start.sh").read_text()
-    boot = s.find('python3 "$SCN" --bootstrap')
-    rls = s.find('python3 "$SCN" --apply-roles')
-    wait = s.find('wait "$OBS_PID"')
-    assert boot != -1 and rls != -1 and boot < rls < wait
-    line = [ln for ln in s.splitlines() if 'python3 "$SCN" --apply-roles' in ln][0]
-    assert line.lstrip().startswith("if "), "a role-apply failure must never abort the unit (OBS is live)"
+    code = "\n".join(ln for ln in s.splitlines() if not ln.lstrip().startswith("#"))
+    assert 'python3 "$SCN" --apply-roles;' not in code
+    assert "HOLD issue 1242" in code
 
 
 def test_apply_roles_cli_delegates_to_the_roles_module(monkeypatch, tmp_path):

@@ -183,11 +183,11 @@ fi
 # program-path cameras connect only while shown, the built-in multiview renders the always-connected
 # low-bandwidth `MV` twins. Idempotent (a correct collection is a pure read). Same best-effort contract
 # as the seed above: OBS is live, so a failure is a loud WARN, never a unit abort.
-if python3 "$SCN" --apply-roles; then
-  echo "OK: bandwidth roles (strih_scenes.py --apply-roles)."
-else
-  echo "WARN issue 1242: strih_scenes.py --apply-roles FAILED (non-fatal) -- OBS stays UP; every camera may still be pulled full-bandwidth. Re-apply: python3 ${SCN} --apply-roles."
-fi
+# OWNER HOLD (24.9.2026, verbatim "Co este dneska nerob to je nizkokvalitne zdroje v multiview"): the
+# role apply is NOT run on launch until the owner releases it -- every camera stays full-bandwidth and
+# the multiview keeps rendering the full inputs. Re-enable = restore the call below (tracked on the
+# issue 1242 ticket), never a per-box toggle.
+echo "HOLD issue 1242: bandwidth roles NOT applied (owner hold 24.9.2026) -- run by hand: python3 ${SCN} --apply-roles"
 
 # #882: BLOCK until obs itself exits, then propagate ITS exit status -- makes obs (not this wrapper)
 # the process a Type=simple unit tracks. A signal death (segfault) reports non-zero and
