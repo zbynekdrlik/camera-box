@@ -851,12 +851,12 @@ rm -f /etc/systemd/system/camera-box.service.d/publish-30p.conf
 # (camera-box runs as root with ProtectHome=yes, so /root/.ndi would be invisible to it). A
 # configured sender stops announcing over mDNS, so it is written ONLY once the rollout gate
 # NDI_DISCOVERY_ENABLED is on (.claude/rules/ndi-discovery.md). Enable-only, effective on the next start.
-if ndi_discovery_enabled; then
+if ndi_discovery_enabled cambox; then
     ndi_discovery_write_config "$NDI_DISCOVERY_SYSTEM_DIR"
     ndi_discovery_dropin_content > "$NDI_DISCOVERY_CAMBOX_DROPIN"
     echo "  NDI discovery: ${NDI_DISCOVERY_SYSTEM_DIR}/${NDI_DISCOVERY_CONFIG_NAME} (discovery=${NDI_DISCOVERY_SERVERS}) + camera-box.service.d/ndi-discovery.conf (issue 1342)"
 else
-    echo "  NDI discovery: rollout gate off (NDI_DISCOVERY_ENABLED=0) -- no client config written, mDNS only (issue 1342)"
+    echo "  NDI discovery: cambox rollout gate off (NDI_DISCOVERY_ENABLED_CAMBOX=0) -- no client config written, mDNS only (issue 1342)"
 fi
 
 systemctl daemon-reload

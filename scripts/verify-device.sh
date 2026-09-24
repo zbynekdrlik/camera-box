@@ -1774,8 +1774,8 @@ NDI_DISC_VERDICT="$(ndi_discovery_config_verdict "$NDI_DISC_CONF")"
 NDI_DISC_DIR="$(ndi_discovery_dropin_config_dir "$NDI_DISC_DROPIN")"
 if [ "$anrc" -ne 0 ]; then
   fail "could not read the NDI discovery config over SSH (rc=$anrc, issue 1342)"
-elif ndi_discovery_rollout_pending "$NDI_DISC_CONF" "$NDI_DISC_DIR"; then
-  ok "NDI discovery rollout gate off (NDI_DISCOVERY_ENABLED=0) and no client config on the box -- mDNS only, the correct pre-rollout state (issue 1342)"
+elif ndi_discovery_rollout_pending "$NDI_DISC_CONF" "$NDI_DISC_DIR" cambox; then
+  ok "NDI discovery cambox rollout gate off (NDI_DISCOVERY_ENABLED_CAMBOX=0) and no client config on the box -- mDNS only, the correct pre-rollout state (issue 1342)"
 elif [ "$NDI_DISC_VERDICT" != "ok" ]; then
   fail "NDI discovery config ${NDI_DISCOVERY_SYSTEM_DIR}/${NDI_DISCOVERY_CONFIG_NAME}: $(printf '%s' "$NDI_DISC_VERDICT" | tr '\n' ' ' | sed 's/FAIL: //g')-- re-run setup-device.sh (issue 1342)"
 elif [ "$NDI_DISC_DIR" != "$NDI_DISCOVERY_SYSTEM_DIR" ]; then

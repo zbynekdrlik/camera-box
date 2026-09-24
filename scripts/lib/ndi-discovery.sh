@@ -45,8 +45,15 @@ NDI_DISCOVERY_SERVERS="${NDI_DISCOVERY_SERVERS:-10.77.9.200}"
 # config ONLY when this is 1; the verifiers accept a box with no config while it is 0. The
 # supervisor flips the checked-in default to 1 as one step of the rollout in
 # .claude/rules/ndi-discovery.md (a code change, never a per-box env tweak); an env value
-# overrides it for a single manual run.
+# overrides it for a single manual run (`sudo NDI_DISCOVERY_ENABLED=1 ./setup-...` -- a plain
+# `VAR=1 sudo ...` is dropped by sudo's env_reset).
 NDI_DISCOVERY_ENABLED="${NDI_DISCOVERY_ENABLED:-0}"
+# Per-CLASS gates (review round 2): the camboxes (setup-device.sh) and strih-lx (setup-strih.sh)
+# are configured by different provisioners at different times, so each class has its own gate,
+# defaulting to the fleet switch above. This lets the rollout configure strih-lx first and the
+# camboxes after, or keep strih-lx off the gate entirely (the stock-display option).
+NDI_DISCOVERY_ENABLED_CAMBOX="${NDI_DISCOVERY_ENABLED_CAMBOX:-$NDI_DISCOVERY_ENABLED}"
+NDI_DISCOVERY_ENABLED_STRIH="${NDI_DISCOVERY_ENABLED_STRIH:-$NDI_DISCOVERY_ENABLED}"
 # The SDK's own config file name.
 NDI_DISCOVERY_CONFIG_NAME="ndi-config.v1.json"
 # System config dir for root / ProtectHome services (pointed at by NDI_CONFIG_DIR).
@@ -54,15 +61,28 @@ NDI_DISCOVERY_SYSTEM_DIR="${NDI_DISCOVERY_SYSTEM_DIR:-/etc/ndi}"
 # The camera-box.service drop-in that points the appliance's libndi at NDI_DISCOVERY_SYSTEM_DIR.
 # shellcheck disable=SC2034  # consumed cross-file by setup-device.sh (install) + verify-device.sh (an)
 NDI_DISCOVERY_CAMBOX_DROPIN="/etc/systemd/system/camera-box.service.d/ndi-discovery.conf"
+# The strih-lx intercom-hub drop-in (ProtectHome hides ~/.ndi from it). Overridable for tests.
+# shellcheck disable=SC2034  # consumed cross-file by setup-strih.sh (install) + verify-strih.sh (item 34)
+NDI_DISCOVERY_INTERCOM_DROPIN="${NDI_DISCOVERY_INTERCOM_DROPIN:-/etc/systemd/system/intercom-hub.service.d/ndi-discovery.conf}"
 
-# ndi_discovery_enabled -> exit 0 iff the rollout gate NDI_DISCOVERY_ENABLED is 1.
-ndi_discovery_enabled() { [ "${NDI_DISCOVERY_ENABLED:-0}" = 1 ]; }
+# ndi_discovery_enabled [CLASS] -> exit 0 iff the rollout gate for CLASS (cambox | strih) is 1;
+# no/unknown CLASS reads the fleet switch NDI_DISCOVERY_ENABLED.
+ndi_discovery_enabled() {
+  local v
+  case "${1:-}" in
+    cambox) v="${NDI_DISCOVERY_ENABLED_CAMBOX:-0}" ;;
+    strih)  v="${NDI_DISCOVERY_ENABLED_STRIH:-0}" ;;
+    *)      v="${NDI_DISCOVERY_ENABLED:-0}" ;;
+  esac
+  [ "$v" = 1 ]
+}
 
-# ndi_discovery_rollout_pending CONF_TEXT DROPIN_DIR -> exit 0 iff the gate is OFF and the box
-# carries neither a config nor an NDI_CONFIG_DIR drop-in -- the correct pre-rollout state, which a
-# verifier reports as ok. Anything half-written, or any box once the gate is on, is graded in full.
+# ndi_discovery_rollout_pending CONF_TEXT DROPIN_DIR [CLASS] -> exit 0 iff CLASS's gate is OFF and
+# the box carries neither a config nor an NDI_CONFIG_DIR drop-in -- the correct pre-rollout state,
+# which a verifier reports as ok. Anything half-written, or any box once its gate is on, is graded
+# in full.
 ndi_discovery_rollout_pending() {
-  ! ndi_discovery_enabled && [ -z "$1" ] && [ -z "$2" ]
+  ! ndi_discovery_enabled "${3:-}" && [ -z "$1" ] && [ -z "$2" ]
 }
 
 # ndi_discovery_config_json [SERVERS] -> the canonical ndi-config.v1.json text (2-space indent,
@@ -164,7 +184,8 @@ sys.stdout.write(json.dumps(doc, indent=2) + "\n")
 # when it cannot be merged (not JSON, or no python3 on the box) and differs from the canonical
 # config, it is backed up to ndi-config.v1.json.bak-<stamp> before being replaced. With OWNER, DIR
 # and the file are chowned to OWNER (a desktop user's ~/.ndi). Idempotent. Returns non-zero (with a
-# message on stderr) when DIR cannot be created or written -- callers wrap it in `|| fail`.
+# message on stderr) when DIR cannot be created or written -- the caller aborts (setup-device.sh
+# via its own `set -e`, setup-strih.sh via `|| fail`).
 ndi_discovery_write_config() {
   local dir="${1:?ndi_discovery_write_config: DIR required}" owner="${2:-}" tmp target
   target="$dir/$NDI_DISCOVERY_CONFIG_NAME"

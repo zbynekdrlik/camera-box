@@ -299,17 +299,17 @@ fi
 # whose ProtectHome hides ~/.ndi -- its drop-in points NDI_CONFIG_DIR there. Written here, before
 # the OBS/intercom units start (steps 8/13); the next OBS/intercom start reads it. strih-lx is a
 # SENDER too (its STRIH-LX outputs) and a configured sender stops mDNS, so nothing is written until
-# the rollout gate NDI_DISCOVERY_ENABLED is on (every strih-lx deploy re-runs this script).
-if ndi_discovery_enabled; then
+# the strih rollout gate NDI_DISCOVERY_ENABLED_STRIH is on (every strih-lx deploy re-runs this script).
+if ndi_discovery_enabled strih; then
   ndi_discovery_write_config "${USER_HOME}/.ndi" "$DESKTOP_USER" \
     || fail "NDI discovery config write to ${USER_HOME}/.ndi failed (issue 1342)"
   ndi_discovery_write_config "$NDI_DISCOVERY_SYSTEM_DIR" \
     || fail "NDI discovery config write to ${NDI_DISCOVERY_SYSTEM_DIR} failed (issue 1342)"
-  mkdir -p /etc/systemd/system/intercom-hub.service.d
-  ndi_discovery_dropin_content > /etc/systemd/system/intercom-hub.service.d/ndi-discovery.conf
+  mkdir -p "$(dirname "$NDI_DISCOVERY_INTERCOM_DROPIN")"
+  ndi_discovery_dropin_content > "$NDI_DISCOVERY_INTERCOM_DROPIN"
   echo "  NDI discovery config: ${USER_HOME}/.ndi + ${NDI_DISCOVERY_SYSTEM_DIR} (discovery=${NDI_DISCOVERY_SERVERS}) + intercom-hub NDI_CONFIG_DIR drop-in (issue 1342)"
 else
-  echo "  NDI discovery: rollout gate off (NDI_DISCOVERY_ENABLED=0) -- no client config written, mDNS only (issue 1342)"
+  echo "  NDI discovery: strih rollout gate off (NDI_DISCOVERY_ENABLED_STRIH=0) -- no client config written, mDNS only (issue 1342)"
 fi
 
 # ---------------------------------------------------------------------------------------------

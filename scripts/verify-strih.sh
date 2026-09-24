@@ -783,13 +783,13 @@ fi
 #     (the same one verify-device.sh (an) uses). Read-only; FAIL on any miss once the rollout gate
 #     NDI_DISCOVERY_ENABLED is on (before that, a box with no config at all passes). Placed BEFORE item 32:
 #     the item-33 test slices "# 33)" to the closing summary, so nothing may sit after item 33.
-_ndi_dropin_dir="$(ndi_discovery_dropin_config_dir "$(cat /etc/systemd/system/intercom-hub.service.d/ndi-discovery.conf 2>/dev/null || true)")"
+_ndi_dropin_dir="$(ndi_discovery_dropin_config_dir "$(cat "$NDI_DISCOVERY_INTERCOM_DROPIN" 2>/dev/null || true)")"
 _ndi_user_text="$(cat "${USER_HOME}/.ndi/${NDI_DISCOVERY_CONFIG_NAME}" 2>/dev/null || true)"
 _ndi_sys_text="$(cat "${NDI_DISCOVERY_SYSTEM_DIR}/${NDI_DISCOVERY_CONFIG_NAME}" 2>/dev/null || true)"
 _ndi_pending=0
-ndi_discovery_rollout_pending "${_ndi_user_text}${_ndi_sys_text}" "$_ndi_dropin_dir" && _ndi_pending=1
+ndi_discovery_rollout_pending "${_ndi_user_text}${_ndi_sys_text}" "$_ndi_dropin_dir" strih && _ndi_pending=1
 if [ "$_ndi_pending" = 1 ]; then
-  ok "(ndi-discovery) rollout gate off (NDI_DISCOVERY_ENABLED=0) and no client config on the box -- mDNS only, the correct pre-rollout state (issue 1342)"
+  ok "(ndi-discovery) strih rollout gate off (NDI_DISCOVERY_ENABLED_STRIH=0) and no client config on the box -- mDNS only, the correct pre-rollout state (issue 1342)"
 fi
 for _ndi_dir in "${USER_HOME}/.ndi" "$NDI_DISCOVERY_SYSTEM_DIR"; do
   [ "$_ndi_pending" = 1 ] && break
@@ -806,7 +806,7 @@ if [ "$_ndi_pending" = 1 ]; then
 elif [ "$_ndi_dropin_dir" = "$NDI_DISCOVERY_SYSTEM_DIR" ]; then
   ok "(ndi-discovery) intercom-hub NDI_CONFIG_DIR=${NDI_DISCOVERY_SYSTEM_DIR} drop-in present"
 else
-  bad "(ndi-discovery) intercom-hub.service.d/ndi-discovery.conf missing or NDI_CONFIG_DIR='${_ndi_dropin_dir:-<none>}' (want ${NDI_DISCOVERY_SYSTEM_DIR}) -- re-run setup-strih.sh step 4b (issue 1342)"
+  bad "(ndi-discovery) ${NDI_DISCOVERY_INTERCOM_DROPIN} missing or NDI_CONFIG_DIR='${_ndi_dropin_dir:-<none>}' (want ${NDI_DISCOVERY_SYSTEM_DIR}) -- re-run setup-strih.sh step 4b (issue 1342)"
 fi
 
 # 32) the shared OBS-box appliance baseline (issue 1357) -- the ONE grader verify-imag.sh runs too
