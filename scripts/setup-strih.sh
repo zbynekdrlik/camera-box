@@ -716,7 +716,7 @@ DEBIAN_FRONTEND=noninteractive apt-get install -y janus \
   || warn "  apt-get install janus failed -- install it before the M4 cut-over (the phones leg needs the audiobridge)"
 JANUS_ROOM="1000"
 JANUS_SECRET_FILE="/etc/intercom-hub/janus-room.secret"
-install -d -m 700 /etc/intercom-hub
+install -d -m 755 /etc/intercom-hub
 if [ ! -f "$JANUS_SECRET_FILE" ]; then
   ( umask 077; openssl rand -hex 16 > "$JANUS_SECRET_FILE" ) \
     || fail "could not generate the Janus room secret at ${JANUS_SECRET_FILE} (openssl present?)"
