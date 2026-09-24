@@ -3713,21 +3713,18 @@ fn openbox_autostart_text_carries_the_preamble_units_and_satellite() {
         !out.contains("WAYLAND") && !out.contains("__NV_PRIME"),
         "no Wayland / PRIME-offload leftovers in the kiosk autostart"
     );
-    for (pinned, fallback) in [(
-        "xrandr --output \"$PANEL\" --primary --mode 1920x1080 --rate 60",
-        "xrandr --output \"$PANEL\" --primary --auto",
-    )] {
-        let p = out
-            .find(pinned)
-            .unwrap_or_else(|| panic!("the autostart pins `{pinned}`:\n{out}"));
-        let f = out
-            .find(fallback)
-            .unwrap_or_else(|| panic!("--auto stays the fallback `{fallback}`"));
-        assert!(
-            p < f,
-            "the pinned mode is tried first, --auto only after it fails"
-        );
-    }
+    let pinned = "xrandr --output \"$PANEL\" --primary --mode 1920x1080 --rate 60";
+    let fallback = "xrandr --output \"$PANEL\" --primary --auto";
+    let p = out
+        .find(pinned)
+        .unwrap_or_else(|| panic!("the autostart pins `{pinned}`:\n{out}"));
+    let f = out
+        .find(fallback)
+        .unwrap_or_else(|| panic!("--auto stays the fallback `{fallback}`"));
+    assert!(
+        p < f,
+        "the pinned mode is tried first, --auto only after it fails"
+    );
     // issue 1346 (24.9.2026): the HDMI output is the in-OBS DRM lease -- the desktop must NEVER
     // extend onto it, so the kiosk takes HDMI out of the X layout instead of placing it right-of.
     assert!(

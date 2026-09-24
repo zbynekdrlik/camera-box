@@ -135,7 +135,10 @@ def test_read_view_absent_is_none(tmp_path):
 
 
 def _cli(args, home):
-    env = dict(os.environ, HOME=str(home))
+    # A fake HOME must not also hide the user site-packages (python3-websocket may live there, and
+    # strih_scenes imports it at module load) -- pin PYTHONUSERBASE to the REAL one first.
+    import site
+    env = dict(os.environ, HOME=str(home), PYTHONUSERBASE=site.getuserbase())
     return subprocess.run([sys.executable, str(SCRIPTS / "strih_scenes.py")] + args,
                           capture_output=True, text=True, env=env, timeout=30)
 
