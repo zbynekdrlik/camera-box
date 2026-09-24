@@ -4059,3 +4059,20 @@ fn setup_strih_pins_umask_022_before_it_creates_any_file() {
          creates root-only directories (the intercom-hub config dir incident)"
     );
 }
+
+/// Root cause of the 24.9.2026 intercom-hub outage: setup-strih.sh created `/etc/intercom-hub`
+/// with `install -d -m 700` (for the Janus room secret) on EVERY run, so the hub (User=newlevel)
+/// lost read access to its own `intercom.toml` after each deploy. The secret stays protected by its
+/// own 0600 file mode; the directory must be traversable (0755).
+#[test]
+fn setup_strih_keeps_the_intercom_config_dir_readable() {
+    let s = read_script("scripts/setup-strih.sh");
+    assert!(
+        !s.contains("install -d -m 700 /etc/intercom-hub"),
+        "/etc/intercom-hub must not be created 0700 -- the hub runs as newlevel and reads intercom.toml there"
+    );
+    assert!(
+        s.contains("install -d -m 755 /etc/intercom-hub"),
+        "setup-strih.sh must (re)create /etc/intercom-hub as 0755 on every run"
+    );
+}
