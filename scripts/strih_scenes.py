@@ -29,6 +29,9 @@ Modes:
                          OBS UI projector menu stays the primary operator switch (SaveProjectors
                          persists it); this is the scripted twin. --bootstrap ALSO seeds the
                          projector (via seed_projector) after the input seed.
+  --apply-roles          issue 1242: apply the strih BANDWIDTH ROLES (program-path cameras connect
+                         only while shown; the multiview renders always-connected low-bandwidth `MV`
+                         twins) -- strih_bandwidth_roles.py, run by strih-obs-start.sh on every launch.
 
 The pure helpers (parse_seed_manifest / seed_inputs / certified_genlock_settings / scene_order /
 input_parity_problems, and for issue 1346 projector_type_to_mix / projector_monitor_index /
@@ -603,6 +606,20 @@ def ensure_program_audio_in_every_scene(obs, plan):
     return added
 
 
+def _roles_module():
+    """issue 1242: the strih BANDWIDTH ROLES live in the sibling strih_bandwidth_roles.py (installed next
+    to this file by setup-strih.sh step 6). Imported LAZILY, only by --apply-roles and the report-only
+    --verify-parity role line, so the strih-obs-start.sh launch preflight (`import strih_scenes`) and
+    --bootstrap never depend on it. Returns None when it is not importable (an older box)."""
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import strih_bandwidth_roles  # noqa: E402
+        return strih_bandwidth_roles
+    except Exception as e:  # noqa: BLE001 -- absence is expected on an older box; report, never crash
+        print("issue 1242: strih_bandwidth_roles not importable (%s)" % e)
+        return None
+
+
 def bootstrap(obs, plan, studio=True, update_only=False):
     """Seed the collection from `plan` (seed_inputs output). Two modes:
 
@@ -703,6 +720,12 @@ def verify_parity(obs, manifest_text):
     # issue 1317: report the per-input CLASS on its OWN line (report-only; verify-strih.sh notes it).
     # The verdict line below stays byte-identical ("strih ndi inputs: OK") for the grep -qxF anchor.
     print("strih ndi input classes: " + input_classes_summary(inputs))
+    # issue 1242: the bandwidth-role state on its OWN report-only line (never changes the exit code --
+    # a box launched before the role apply, or on an older DistroAV, is reported, not failed).
+    rm = _roles_module()
+    if rm is not None:
+        roles = rm.bandwidth_role_problems(actual, rm.program_path_inputs(plan))
+        print("strih bandwidth roles: " + ("; ".join(roles) if roles else "OK"))
     print("strih ndi inputs: " + ("; ".join(problems) if problems else "OK"))
     if problems:
         sys.exit(1)
@@ -826,6 +849,11 @@ def main():
     ap.add_argument("--audio-input-kind", action="store_true",
                     help="issue 1344: print the OBS inputKind of the `ASIO zvuk` program-audio input "
                          "(or `absent`) — read-only, for verify-strih's derived audio verdict")
+    ap.add_argument("--apply-roles", action="store_true",
+                    help="issue 1242: apply the bandwidth roles -- program-path cameras connect only "
+                         "while shown (genlock_connect_on_show), the built-in multiview renders the "
+                         "always-connected low-bandwidth `MV` twins (idempotent; strih-obs-start.sh "
+                         "runs it on every launch after --bootstrap)")
     ap.add_argument("--projector", choices=["program", "multiview"], default=None,
                     help="issue 1346: rewrite strih-lx-projector.json to program|multiview and "
                          "(re)seed the fixed HDMI fullscreen projector (the OBS UI projector menu "
@@ -836,9 +864,9 @@ def main():
     # and MUTATE OBS. --bootstrap seeds; --verify-parity is read-only; --projector sets the HDMI
     # projector (issue 1346).
     if (not args.bootstrap and not args.verify_parity and args.projector is None
-            and not args.audio_input_kind):
+            and not args.audio_input_kind and not args.apply_roles):
         ap.error("specify a mode: --bootstrap (seed), --verify-parity (read-only), "
-                 "--audio-input-kind (read-only), or --projector program|multiview")
+                 "--audio-input-kind (read-only), --apply-roles, or --projector program|multiview")
 
     # --audio-input-kind (issue 1344): read-only print of the `ASIO zvuk` input kind. Does NOT read
     # the seed manifest.
@@ -862,6 +890,18 @@ def main():
     obs = Obs(args.host, args.port, args.password)
     if args.verify_parity:
         verify_parity(obs, manifest_text)
+        return
+    if args.apply_roles:
+        # issue 1242: the bandwidth roles (a SEPARATE mode from --bootstrap so the seed's update-only
+        # never-create contract stays exactly as issue 1317 pinned it; the role lib owns its twins).
+        rm = _roles_module()
+        if rm is None:
+            sys.exit("FAIL issue 1242: strih_bandwidth_roles.py missing next to strih_scenes.py "
+                     "(re-run setup-strih.sh step 6)")
+        inputs, _outputs, latency = parse_seed_manifest(manifest_text)
+        summary = rm.apply_bandwidth_roles(obs, seed_inputs(inputs, latency))
+        print("strih bandwidth roles applied (issue 1242): " + ", ".join(
+            "%s=%s" % (k, summary[k]) for k in sorted(summary)))
         return
     # --bootstrap: seed the collection. `mode` (issue 1317) selects update-only (the OPERATOR
     # collection: heal the certified class onto EXISTING inputs, never CreateScene/CreateInput) vs

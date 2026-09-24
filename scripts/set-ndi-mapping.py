@@ -360,16 +360,25 @@ def _heal_wait_exit_code(done, waiting, failed):
 # (the whole point: the frozen cam1 had a correct name). The C++ #1180 fix owns the separate
 # wrong-source IDENTITY half; this owns the correct-name-no-frames LIVENESS half.
 
-def verify_live_mapping(op, ws, want, sampler, log_err):
+def verify_live_mapping(op, ws, want, sampler, log_err, hidden=None):
     """#1180 liveness verify over `want` [(input, baseline), ...]: sample each input's receiver
     frame-delivery liveness via `sampler(ws, input) -> (state, reason)` and count LIVE / FROZEN /
     INCONCLUSIVE. A FROZEN input is the wedge a name-only verify misses -- logged LOUD, pointing the
     caller at the real cure (an OBS restart), because the name may be correct all along. An
     INCONCLUSIVE input (could not sample enough frames) is left as-is + logged, never torn down on a
     can't-confirm. Pure/dependency-injected (op, ws, sampler, log_err) so it is Tier-0 pytest-able
-    with fakes, no live OBS. Returns (live, frozen, inconclusive)."""
+    with fakes, no live OBS. Returns (live, frozen, inconclusive).
+
+    issue 1242: `hidden(ws, input) -> bool` (optional, obs_phase2.input_hidden_by_design in the CLI)
+    SKIPs an input PARKED by design -- a program-path camera with connect-on-show that nothing shows
+    has released its NDI receiver, so its screenshot is a held frame by design, never a wedge. It is
+    logged and counted in none of the three buckets (never a false FROZEN, never sampled)."""
     live = frozen = inconclusive = 0
     for inp, _snd in want:
+        if hidden is not None and hidden(ws, inp):
+            log_err(f"issue 1242 liveness: '{inp}' is parked (connect-on-show, not shown anywhere) -- "
+                    f"hidden by design, SKIP (its always-connected 'MV {inp}' twin carries the leg)")
+            continue
         state, reason = sampler(ws, inp)
         if state == op.LIVENESS_LIVE:
             live += 1
@@ -427,7 +436,8 @@ def _run_verify_live_mode(args, want):
 
     try:
         live, frozen, inconclusive = verify_live_mapping(
-            op, ws, want, _sampler, lambda m: print(m, file=sys.stderr))
+            op, ws, want, _sampler, lambda m: print(m, file=sys.stderr),
+            hidden=op.input_hidden_by_design)
     except Exception as e:
         print(f"ERROR: OBS WS request: {e}", file=sys.stderr)
         sys.exit(2)

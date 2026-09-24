@@ -164,6 +164,16 @@ else
   echo "WARN issue 1317: strih_scenes.py --bootstrap FAILED (non-fatal) -- OBS stays UP; collection may be unseeded. Re-seed: python3 ${SCN} --bootstrap. NOT aborting the unit (would flap a live OBS)."
 fi
 
+# issue 1242: the BANDWIDTH ROLES on every launch (default on, never a forgettable manual step) --
+# program-path cameras connect only while shown, the built-in multiview renders the always-connected
+# low-bandwidth `MV` twins. Idempotent (a correct collection is a pure read). Same best-effort contract
+# as the seed above: OBS is live, so a failure is a loud WARN, never a unit abort.
+if python3 "$SCN" --apply-roles; then
+  echo "OK: bandwidth roles (strih_scenes.py --apply-roles)."
+else
+  echo "WARN issue 1242: strih_scenes.py --apply-roles FAILED (non-fatal) -- OBS stays UP; every camera may still be pulled full-bandwidth. Re-apply: python3 ${SCN} --apply-roles."
+fi
+
 # #882: BLOCK until obs itself exits, then propagate ITS exit status -- makes obs (not this wrapper)
 # the process a Type=simple unit tracks. A signal death (segfault) reports non-zero and
 # Restart=on-failure relaunches; a clean exit(0) (operator quit) reports 0 and is left alone.

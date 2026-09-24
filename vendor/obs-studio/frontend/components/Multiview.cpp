@@ -30,6 +30,25 @@ Multiview::~Multiview()
 	obs_leave_graphics();
 }
 
+/* camera-box issue 1242: the scene a multiview cell STANDS FOR. strih pulls full-bandwidth NDI only for
+ * SHOWN cameras, so its multiview renders a low-bandwidth twin scene (`MV Cam 3`) instead of the program
+ * scene (`Cam 3`) -- the twin's private setting camera_box_multiview_target names the program scene
+ * (written by scripts/strih_bandwidth_roles.py). The cell's tally border, label and click then follow
+ * the TARGET, so the operator's multiview behaves exactly as before: `Cam 3` on program lights the twin
+ * cell red, the label reads `Cam 3`, and a click puts `Cam 3` (never the twin) into preview/program.
+ * A missing/empty key, or a name that is not an existing scene, -> the cell stands for itself (every
+ * box that never writes the key -- stream, imag, resolume -- is byte-for-byte stock). */
+static OBSSource multiview_cell_target(obs_source_t *src, obs_data_t *priv)
+{
+	const char *target_name = obs_data_get_string(priv, "camera_box_multiview_target");
+	if (!target_name || !*target_name)
+		return OBSSource(src);
+	OBSSourceAutoRelease target = obs_get_source_by_name(target_name);
+	if (!target || !obs_source_is_scene(target))
+		return OBSSource(src);
+	return OBSSource(target.Get());
+}
+
 static OBSSource CreateLabel(const char *name, size_t h)
 {
 	OBSDataAutoRelease settings = obs_data_create();
@@ -152,6 +171,7 @@ void Multiview::Update(MultiviewLayout multiviewLayout, bool drawLabel, bool dra
 	siScaleY = (scenesCY - thicknessx2) / fh;
 
 	std::vector<OBSWeakSource> updatedScenes;
+	std::vector<OBSWeakSource> updatedTargets; // camera-box issue 1242
 	std::vector<OBSSource> updatedLabels;
 
 	updatedLabels.emplace_back(CreateLabel(Str("StudioMode.Preview"), h / 2));
@@ -170,7 +190,11 @@ void Multiview::Update(MultiviewLayout multiviewLayout, bool drawLabel, bool dra
 		updatedScenes.emplace_back(OBSGetWeakRef(src));
 		obs_source_inc_showing(src);
 
-		updatedLabels.emplace_back(CreateLabel(obs_source_get_name(src), h / 3));
+		// camera-box issue 1242: the cell stands for its target (tally/label/click); only `src` (the
+		// rendered scene) is shown -- the target is never inc_showing'd.
+		OBSSource cellTarget = multiview_cell_target(src, data);
+		updatedTargets.emplace_back(OBSGetWeakRef(cellTarget));
+		updatedLabels.emplace_back(CreateLabel(obs_source_get_name(cellTarget), h / 3));
 	}
 
 	obs_frontend_source_list_free(&scenes);
@@ -183,6 +207,7 @@ void Multiview::Update(MultiviewLayout multiviewLayout, bool drawLabel, bool dra
 	}
 
 	multiviewScenes = std::move(updatedScenes);
+	multiviewTargets = std::move(updatedTargets);
 	multiviewLabels = std::move(updatedLabels);
 }
 
@@ -453,12 +478,16 @@ void Multiview::Render(uint32_t cx, uint32_t cy)
 		}
 
 		OBSSource src = OBSGetStrongRef(multiviewScenes[i]);
+		// camera-box issue 1242: the tally border follows the scene this cell stands for.
+		OBSSource tallySrc = i < multiviewTargets.size() ? OBSGetStrongRef(multiviewTargets[i]) : src;
+		if (!tallySrc)
+			tallySrc = src;
 
 		// We have a source. Now chose the proper highlight color
 		uint32_t colorVal = outerColor;
-		if (src == programSrc) {
+		if (tallySrc == programSrc) {
 			colorVal = programColor;
-		} else if (src == previewSrc) {
+		} else if (tallySrc == previewSrc) {
 			colorVal = studioMode ? previewColor : programColor;
 		}
 
@@ -847,5 +876,12 @@ OBSSource Multiview::GetSourceByPosition(int x, int y)
 		return nullptr;
 	}
 
+	// camera-box issue 1242: a click selects the scene the cell stands for (a strih twin cell -> its
+	// program scene), never the low-bandwidth twin itself.
+	if (pos < (int)multiviewTargets.size()) {
+		OBSSource target = OBSGetStrongRef(multiviewTargets[pos]);
+		if (target)
+			return target;
+	}
 	return OBSGetStrongRef(multiviewScenes[pos]);
 }

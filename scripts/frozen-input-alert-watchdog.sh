@@ -58,6 +58,10 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/strih-log-read.sh
 # issue 1360: a Linux strih (strih-lx) is read through the ONE shared strih OBS-log reader.
 . "$HERE/lib/strih-log-read.sh"
+# shellcheck source=scripts/lib/genlock-park.sh
+# issue 1242: a PARKED program-path input (connect-on-show, hidden) is HIDDEN BY DESIGN -> SKIP, and
+# the #1069 enumeration reads its always-connected `MV <input>` twin instead (never both).
+. "$HERE/lib/genlock-park.sh"
 
 DRY_RUN=0
 case "${1:-}" in
@@ -141,10 +145,10 @@ EXPECTED_LIVE=1
 log() { printf '%s [frozen-input-alert-watchdog] %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$*" >&2; }
 
 # -- I/O probe (dev1-local; NOT pure -- kept out of the lib) -------------------------------------
-# probe_received <receiver_ip> <source> -> stdout: the newest cumulative `received=` value for the
-# source (a bare integer), or EMPTY when the read failed / the source's audit line was absent this
-# pass (the seam then returns UNKNOWN -- never a false page). Overridable via FROZEN_INPUT_PROBE_CMD.
-probe_received() {
+# probe_raw <receiver_ip> <source> -> stdout: the RAW newest-OBS-log tail for this source's probe
+# (EMPTY on a failed read). Overridable via FROZEN_INPUT_PROBE_CMD. issue 1242: handle_source reads
+# BOTH the received= counter and the connect-on-show park state from this ONE read.
+probe_raw() {
   local ip="$1" source="$2" raw
   if [ -n "${FROZEN_INPUT_PROBE_CMD:-}" ]; then
     raw="$($FROZEN_INPUT_PROBE_CMD "$ip" "$source" 2>/dev/null || true)"
@@ -169,17 +173,31 @@ probe_received() {
         2>/dev/null || true)"
     fi
   fi
+  printf '%s\n' "$raw"
+}
+
+# received_from_raw <source> -> stdout: the newest cumulative `received=` value for the source (a
+# bare integer) read from the raw OBS-log tail on STDIN, or EMPTY when the source's audit line was
+# absent (the seam then returns UNKNOWN -- never a false page).
+received_from_raw() {
+  local source="$1"
   # Newest audit line for THIS source -> the received= integer. Empty if none found.
   # #1258 layer 2: LC_ALL=C + grep -a -- PowerShell 5.1 `gc` (no -Encoding) reads the UTF-8
   # strih OBS log as ANSI and re-encodes on output, so an audit line's non-ASCII glyphs come
   # back as invalid-UTF-8 bytes; in a UTF-8 locale GNU grep then flags stdin BINARY (empty
   # stdout) and sed's trailing `.*` refuses to consume the invalid byte (line-tail garbage
   # after the digits) -- byte-safe end to end regardless of what bytes the raw tail carries.
-  printf '%s\n' "$raw" \
-    | LC_ALL=C grep -aF "genlock-fifo audit '$source':" \
+  LC_ALL=C grep -aF "genlock-fifo audit '$source':" \
     | tail -1 \
     | LC_ALL=C sed -n 's/.*received=\([0-9][0-9]*\).*/\1/p' \
     | tail -1
+}
+
+# probe_received <receiver_ip> <source> -> stdout: the newest cumulative `received=` value for the
+# source (a bare integer), or EMPTY when the read failed / the source's audit line was absent this
+# pass (the seam then returns UNKNOWN -- never a false page). Overridable via FROZEN_INPUT_PROBE_CMD.
+probe_received() {
+  probe_raw "$1" "$2" | received_from_raw "$2"
 }
 
 # -- #1069 dynamic enumeration probe (dev1-local; NOT pure) -------------------------------------
@@ -204,7 +222,12 @@ probe_enumerate() {
       MV_REVERIFY_RECEIVED_SSH_TIMEOUT="$SSH_TIMEOUT" MV_REVERIFY_RECEIVED_TAIL="$OBS_LOG_TAIL" \
       mv_reverify_probe_raw "$ip" "" 2>/dev/null || true)"
   fi
-  printf '%s\n' "$raw" | frozen_input_cambox_sources "$ENUM_INCLUDE" "$ENUM_EXCLUDE"
+  # issue 1242: exactly ONE live receiver per camera -- a live main is watched (its `MV <input>` twin
+  # dropped, never a double page); a PARKED main (connect-on-show, hidden by design) is dropped and its
+  # always-connected twin watched instead. The shared pure pairing seam (scripts/lib/genlock-park.sh).
+  local names
+  names="$(printf '%s\n' "$raw" | frozen_input_cambox_sources "$ENUM_INCLUDE" "$ENUM_EXCLUDE")"
+  printf '%s\n' "$raw" | genlock_park_watch_set "$names"
 }
 
 # -- issue-1001 reachability read (never re-probed) ---------------------------------------------
@@ -258,16 +281,31 @@ clear_source_throttle() {
 # -- per-source decision ------------------------------------------------------------------------
 handle_source() {
   local source="$1" sender_reachable="$2"
-  local k prev curr verdict unk tap_alerted
+  local k prev curr verdict unk tap_alerted raw park_state
   k="$(source_key "$source")"
   prev="$(read_state_field "recv_${k}" "")"
   # Skip the ssh probe entirely when the no-double-page guard already forces SKIP (a box is down per
   # issue-1001): the verdict is predetermined, and probing a down receiver would block up to
   # SSH_TIMEOUT per source for nothing.
+  park_state=""
   if [ "$sender_reachable" = "1" ]; then
-    curr="$(probe_received "$RECEIVER_IP" "$source")"
+    raw="$(probe_raw "$RECEIVER_IP" "$source")"
+    curr="$(printf '%s\n' "$raw" | received_from_raw "$source")"
+    park_state="$(printf '%s\n' "$raw" | genlock_park_state_of "$source")"
   else
     curr=""
+  fi
+
+  # issue 1242: a PARKED program-path input (connect-on-show: nothing shows it, so its NDI receiver is
+  # released by design) has a frozen received= counter BY DESIGN -- HIDDEN BY DESIGN -> SKIP. Never a
+  # FROZEN page, never a blind-tap count; the stale baseline is dropped so the first pass after it is
+  # shown again reseeds (UNKNOWN) instead of comparing against a pre-park sample.
+  if [ "$park_state" = "parked" ]; then
+    log "'$source' on $RECEIVER_NAME: parked (connect-on-show, hidden by design, issue 1242) -> SKIP"
+    write_state_field "recv_${k}" ""
+    write_state_field "unknown_${k}" 0
+    clear_source_throttle "$k"
+    return 0
   fi
 
   verdict="$(frozen_input_classify "$prev" "$curr" "$EXPECTED_LIVE" "$sender_reachable")"

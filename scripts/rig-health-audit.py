@@ -263,8 +263,11 @@ def cadence_check(log_text: str, expected: int = 60, tol: int = 3,
     UNKNOWN/SKIP never produce a row or a problem."""
     display: dict[str, str] = {}
     problems: list[str] = []
+    # issue 1242: a camera that parked/unparked inside the window (connect-on-show) has a partial
+    # received= history there -- its first-to-last cadence is not a measurement of the source.
+    touched = genlock_park.park_touched_sources(log_text)
     for src, pts in sorted(audit_samples(log_text).items()):
-        if not CAMERA_SRC_RE.match(src) or not pts:
+        if not CAMERA_SRC_RE.match(src) or not pts or src in touched:
             continue
         (p_ts, p_rc), (c_ts, c_rc) = pts[0], pts[-1]
         verdict, fps = cadence_verdict(p_ts, p_rc, c_ts, c_rc, expected, tol, min_window)
@@ -524,6 +527,21 @@ _SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
 if _SCRIPTS_DIR not in sys.path:
     sys.path.insert(0, _SCRIPTS_DIR)
 import obs_fleet_table  # noqa: E402
+import genlock_park  # noqa: E402  -- issue 1242: the ONE connect-on-show park-state parser
+
+# Every program ingest must at least sustain the program rate (the arrivals-low term).
+ARRIVALS_LOW_FPS = 28.0
+
+
+def low_arrival_sources(rates: dict, log: str) -> list:
+    """The sources arriving below ARRIVALS_LOW_FPS -- the HARD arrivals-low problem. issue 1242: a
+    program-path input that PARKED or UNPARKED inside the window (connect-on-show: nothing showed it,
+    so its NDI receiver was released by design, then a cold reconnect) has no steady arrival rate to
+    grade, and an `MV <input>` monitor twin is a low-bandwidth multiview feed, not program ingest --
+    neither is an arrivals-low problem. Order follows `rates`."""
+    touched = genlock_park.park_touched_sources(log)
+    return [s for s, r in rates.items()
+            if r < ARRIVALS_LOW_FPS and s not in touched and not genlock_park.is_monitor_twin(s)]
 
 
 def strih_platform(host: str) -> str:
@@ -671,7 +689,7 @@ def check_windows_box(name: str, ip: str, ws_password: str | None, program_fps: 
         problems.append("ws-stats-missing")
     if buf_peak > AUDIO_BUF_BOUND_MS or buf_maxed:
         problems.append(f"AUDIO-BUF={buf_peak}ms(#786)")
-    low = [s for s, r in rates.items() if r < 28.0]  # every ingest must at least sustain program rate
+    low = low_arrival_sources(rates, log)  # every ingest must at least sustain program rate
     if low:
         problems.append("arrivals-low:" + ",".join(low))
     lat = ""

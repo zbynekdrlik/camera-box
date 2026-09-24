@@ -314,6 +314,12 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # duplicated per-box loop. See scripts/lib/stray-session-check.sh for the actual call.
 # shellcheck source=scripts/lib/stray-session-check.sh
 . "$HERE/lib/stray-session-check.sh"
+# issue 1242: strih-lx program-path camera inputs connect only while SHOWN (owner ruling 24.9.2026);
+# the run HOLDS that off so every input stays full-bandwidth for the measurement (see the lib header).
+# shellcheck source=scripts/lib/connect-on-show-hold.sh
+. "$HERE/lib/connect-on-show-hold.sh"
+# shellcheck source=scripts/lib/genlock-park.sh
+. "$HERE/lib/genlock-park.sh"
 # #758 item 1 — the fleet-wide minute-0 preflight: a named, loud, self-expiring exclusion for a
 # box that's known-offline for a reason outside this harness's control (cambox-offline-ack.sh),
 # plus the per-box service-active/emitter-count/stray-unit check (preflight-fleet-check.sh).
@@ -2080,6 +2086,9 @@ fi"
   # verify can never abort the cleanup trap.
   NDI_CADENCE_RUN_ID="$RUN_ID" NDI_CADENCE_RUN_DIR="$OUTDIR" \
     ndi_cadence_verify_and_heal "$STRIH" || true
+  # issue 1242: restore strih connect-on-show (hidden program-path cameras park again). AFTER the
+  # cadence verify above, which still reads every input connected. Always returns 0.
+  connect_on_show_e2e_restore "$HERE" "$STRIH" "${CONNECT_ON_SHOW_HOLD_STATE:-}"
   # The cam devices are now freed regardless of what the OBS restore does. #328: bound every OBS
   # call by `timeout` so a hung obs-websocket op (#328) can't block the trap even if it runs.
   # #649: StopRecord itself already ran, FIRST, at the top of this function (harness-started boxes
@@ -2423,6 +2432,14 @@ rig_heartbeat_start "recording-e2e" || echo "WARNING: could not start rig-active
 # UNCLEAN death — so "marker present AND heartbeat absent/stale" is the durable stranded-rig signal
 # the rig-restore watchdog keys on, regardless of which scene OBS is left on.
 rig_e2e_marker_set "recording-e2e" || echo "WARNING: could not write rig-in-e2e marker (#353)" >&2
+# issue 1242: HOLD strih connect-on-show off for the whole run (trap armed -> cleanup() restores it),
+# behind its OWN rig-busy guard (a strih OBS settings write is a rig mutation).
+# The state file is STABLE across runs (not the per-run OUTDIR): a SIGKILLed run's held list is
+# unioned by the next run's hold and restored by its cleanup.
+CONNECT_ON_SHOW_HOLD_STATE="${CONNECT_ON_SHOW_HOLD_STATE:-$HOME/.camera-box/connect-on-show-hold.json}"
+stray_session_check_assert "$HERE" "$STRIH" "$STREAM" "the issue-1242 connect-on-show hold"
+connect_on_show_e2e_hold "$HERE" "$STRIH" "$CONNECT_ON_SHOW_HOLD_STATE" || exit 1
+connect_on_show_e2e_wait_live "$HERE" "$STRIH" "$CONNECT_ON_SHOW_HOLD_STATE"
 
 # PROBE_BIN_DIR holds the three probe binaries the harness deploys/runs:
 #   $PROBE_BIN_DIR/camera-box      — PROBE-featured appliance with the #174 cam1 burn
