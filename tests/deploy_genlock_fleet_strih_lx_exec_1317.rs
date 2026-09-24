@@ -107,7 +107,7 @@ cmd="${@: -1}"
 case "$cmd" in
   hostname) echo "${STUB_HOSTNAME:-strih-lx}"; exit 0 ;;
   *"acceptance gate did not pass"*) echo "${STUB_GATE_ONLY:-0}"; exit 0 ;;
-  *"repo/scripts/verify-strih.sh"*) cat > "$STUB_DIR/accept.stdin"; echo "verify-strih output"; exit "${STUB_ACCEPT_RC:-0}" ;;
+  *"repo/scripts/verify-strih.sh"*) cat > "$STUB_DIR/accept.stdin"; echo "verify-strih output"; [ "${STUB_ACCEPT_RC:-0}" = 0 ] || echo "  FAIL dantesync offset unstable"; exit "${STUB_ACCEPT_RC:-0}" ;;
   *"pgrep -x setup-strih.sh"*)
     if [ -f "$STUB_DIR/setup.stdin" ]; then st="${STUB_INSTALLER_AFTER:-idle}"; else st="${STUB_INSTALLER:-idle}"; fi
     [ "$st" = unreachable ] && exit 255
@@ -973,10 +973,22 @@ fn strih_lx_runs_the_acceptance_gate_itself_after_obs_is_up_1317() {
         ("STUB_GATE_ONLY", "1"),
         ("STUB_ACCEPT_RC", "1"),
     ]);
-    assert_eq!(r.code, 4, "err={}", r.err);
-    assert!(r.err.contains("[strih-lx accept]"), "{}", r.err);
+    // review round 6: an acceptance failure is NOT a failed install -- the new build is installed,
+    // running and read back -- so it has its own exit code (5), names the failing items, and the
+    // fleet log records strih-lx as installed with acceptance failures (never an empty log that
+    // understates what runs).
+    assert_eq!(r.code, 5, "err={}", r.err);
+    assert!(
+        r.err.contains("[strih-lx accept]") && r.err.contains("dantesync offset unstable"),
+        "{}",
+        r.err
+    );
     assert!(r.out.contains("verify-strih output"), "{}", r.out);
-    assert!(r.fleet_log().is_empty(), "{}", r.fleet_log());
+    assert!(
+        r.fleet_log().contains("strih-lx:accept-failed") && r.fleet_log().contains(SHA),
+        "{}",
+        r.fleet_log()
+    );
 
     // setup rc 0 = the reboot-pending path (the gate only reported): no in-deploy acceptance run.
     let r = run_exec(&[]);
