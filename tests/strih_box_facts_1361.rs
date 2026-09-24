@@ -279,6 +279,25 @@ fn malformed_fact_files_are_refused() {
             "STRIH_DANTESYNC_UPSTREAM",
         ),
         (
+            "client upstream that is a flag, not a host",
+            vec![
+                ("STRIH_DANTESYNC_ROLE=server", "STRIH_DANTESYNC_ROLE=client"),
+                (
+                    "STRIH_DANTESYNC_UPSTREAM=\n",
+                    "STRIH_DANTESYNC_UPSTREAM=--master\n",
+                ),
+            ],
+            "STRIH_DANTESYNC_UPSTREAM",
+        ),
+        (
+            "Companion host that is a flag, not a host",
+            vec![(
+                "STRIH_COMPANION_HOST=10.77.9.205",
+                "STRIH_COMPANION_HOST=-x",
+            )],
+            "STRIH_COMPANION_HOST",
+        ),
+        (
             "control character in a value",
             vec![(
                 "STRIH_CG_SENDER=RESOLUME-SNV (cg-obs)",
@@ -781,4 +800,72 @@ fn every_fact_dependent_output_follows_a_different_box() {
     // cameras 1 + 3 only, and no CG inputs (the fact is `none`).
     assert!(!out.contains("NDI cam2"), "{out}");
     assert!(!out.contains("\"input\": \"cg\""), "{out}");
+}
+
+/// A value's safety must not depend on the caller's locale: a non-ASCII byte is refused under a
+/// UTF-8 locale exactly as under C (setup runs under sudo, the tests under whatever CI sets).
+#[test]
+fn a_non_ascii_value_is_refused_in_every_locale() {
+    for locale in ["C", "C.UTF-8"] {
+        let d = TmpDir::new("locale");
+        fixture_box(
+            &d,
+            "strih-lx",
+            &[(
+                "STRIH_CG_SENDER=RESOLUME-SNV (cg-obs)",
+                "STRIH_CG_SENDER=RESOLUME-\u{10c} (cg)",
+            )],
+        );
+        let dir = d.path().to_string_lossy().into_owned();
+        let (c, _o, err) = with_loader(
+            &[("STRIH_BOXES_DIR", &dir), ("LC_ALL", locale)],
+            "strih_box_load strih-lx",
+        );
+        assert_ne!(c, 0, "[{locale}] a non-ASCII value must refuse");
+        assert!(err.contains("unsafe character"), "[{locale}] {err}");
+    }
+}
+
+/// After a FAILED load nothing is served -- an accessor must not silently fall back to the default
+/// box; and an inherited scalar STRIH_BOX_FACTS / STRIH_BOX_LOADED pair is not a load either.
+#[test]
+fn a_failed_load_is_never_papered_over_by_the_default_box() {
+    let (c, out, err) = with_loader(
+        &[],
+        "strih_box_load strih-nowhere\nstrih_box_fact STRIH_HOSTNAME",
+    );
+    assert_ne!(
+        c, 0,
+        "an accessor after a failed load must refuse: out={out}"
+    );
+    assert!(out.is_empty(), "no fact after a failed load: {out}");
+    assert!(err.contains("strih-nowhere"), "names the failed box: {err}");
+    let (c2, out2, err2) = with_loader(
+        &[
+            ("STRIH_BOX_LOADED", "strih-lx"),
+            ("STRIH_BOX_FACTS", "junk"),
+        ],
+        "strih_box_fact STRIH_IP",
+    );
+    assert_eq!(
+        c2, 0,
+        "an inherited scalar is not a load -- load the default: {err2}"
+    );
+    assert_eq!(out2, "10.77.9.202");
+}
+
+/// The explicit STRIH_LX_NTP_SERVER override must be a host too -- never a flag smuggled into the
+/// dantesync ExecStart.
+#[test]
+fn the_ntp_server_override_must_be_a_host_name() {
+    let (c, out, err) = with_loader(
+        &[("STRIH_LX_NTP_SERVER", "--master")],
+        &format!(
+            ". \"{}\"\nstrih_lx_dantesync_client_args",
+            root().join("scripts/lib/strih-provision.sh").display()
+        ),
+    );
+    assert_ne!(c, 0, "a flag-shaped override must refuse: out={out}");
+    assert!(out.is_empty(), "{out}");
+    assert!(err.contains("STRIH_LX_NTP_SERVER"), "{err}");
 }

@@ -151,6 +151,8 @@ fn dantesync_client_check_is_fail_closed_and_rejects_master_modes() {
         "grandmaster",
         "",
         "--ntp-server venue.lan --master",
+        "--ntp-server --master",
+        "--ntp-server -m",
     ] {
         let (code, _o, _e) = run_sourced(
             &[],
