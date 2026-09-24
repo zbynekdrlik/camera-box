@@ -4387,16 +4387,23 @@ static inline void asrc_process_audio(obs_source_t *source, uint32_t frames, uin
 		 * (parsers extract by name): the running count of unreachable-setpoint fallbacks, 0 on a
 		 * healthy source. target= is now the ABSOLUTE setpoint (ASRC_LEVEL_TARGET_MS + the source's
 		 * placement offset), identical across launches. */
+		/* camera-box #1367: level_avg= appended AFTER the byte-identical 'fallbacks=%u (#1355)' suffix
+		 * (parsers extract by name; level_avg= does not contain the substring level=): the MEAN of
+		 * every callback's buffered_ms over the last closed window -- the tick-free level the loop
+		 * now holds. level= stays the one raw reading, which lands on the 21.33 ms mixer-tick
+		 * sawtooth (sd ~6 ms of pure tick phase). */
 		blog(LOG_INFO,
 		     "asrc: source '%s' estimated=%.2fppm applied=%.2fppm outer_bias=%.2fppm "
 		     "cumulative_correction=%.3fms/%.0fs starved_blocks=%u (#803/#806/#960) "
 		     "level=%.1fms target=%.1fms integral=%.3fppm (#1335) "
-		     "steps=%u last_step_ms=%.1f restore=%d (#1335) fallbacks=%u (#1355)",
+		     "steps=%u last_step_ms=%.1f restore=%d (#1335) fallbacks=%u (#1355) "
+		     "level_avg=%.2fms (#1367)",
 		     obs_source_get_name(source), source->asrc.estimated_ppm, applied_ppm,
 		     source->asrc.outer_bias_ppm, cumulative_correction_ms, ASRC_LOG_INTERVAL_S,
 		     starved_block_count, source->asrc.level_last_ms, source->asrc.level_target_ms,
 		     source->asrc.level_integral_ppm, source->asrc.step_count, source->asrc.last_step_ms,
-		     (int)source->asrc.level_restore, source->asrc.level_fallback_count);
+		     (int)source->asrc.level_restore, source->asrc.level_fallback_count,
+		     source->asrc.level_avg_ms);
 	}
 }
 

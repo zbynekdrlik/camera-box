@@ -591,6 +591,22 @@ pub struct RealtimeAsrcCompensator {
     /// on) and for a MONITOR_ONLY source (it never feeds the mix buffer, depth 0). Mirror of the C
     /// `level_absolute`.
     level_absolute: bool,
+    /// issue #1367: sum of every callback's `buffered_ms` in the CURRENT (not yet closed) window —
+    /// with [`Self::window_level_count`] it gives the window's MEAN level, which the level loop reads
+    /// instead of the one reading of the window-closing callback. The mixer drains the buffer in
+    /// 1024-sample ticks (21.33 ms), so one reading lands at a random point of a ~21 ms sawtooth and
+    /// a 1 s window (~46.9 ticks) aliases it into a slow pattern the 10 s EMA partly passes: Kp 2
+    /// then dithered the resampler rate (live `applied − estimated` sd ≈ 7 ppm). Reset at every
+    /// window close, next to `window_raw_s`. Accumulated on the C-equivalent path only
+    /// (`buffered_ms == Some`). Mirror of the C `window_level_sum_ms`.
+    window_level_sum_ms: f64,
+    /// issue #1367: count of callbacks folded into `window_level_sum_ms` this window. Mirror of the
+    /// C `window_level_count`.
+    window_level_count: u32,
+    /// issue #1367: the per-window MEAN level of the most recently closed accepted (or re-based)
+    /// window, in ms — telemetry (the C mirror prints it as the `asrc:` line's `level_avg=` field;
+    /// `level=` keeps the one raw reading). Mirror of the C `level_avg_ms`.
+    level_avg_ms: f64,
 }
 
 impl RealtimeAsrcCompensator {
@@ -627,6 +643,9 @@ impl RealtimeAsrcCompensator {
             level_fallback_pending: false, // issue #1355
             level_fallback_done: false,    // issue #1355
             level_absolute: true,          // issue #1355
+            window_level_sum_ms: 0.0,      // issue #1367
+            window_level_count: 0,         // issue #1367
+            level_avg_ms: 0.0,             // issue #1367
         }
     }
 
@@ -722,6 +741,12 @@ impl RealtimeAsrcCompensator {
         self.level_last_ms
     }
 
+    /// issue #1367: the per-window MEAN level of the last closed window, in ms — exposed for
+    /// tests/telemetry (the C mirror prints it as the `asrc:` line's `level_avg=` field).
+    pub fn level_avg_ms(&self) -> f64 {
+        self.level_avg_ms
+    }
+
     /// issue #1335 follow-up 2: cumulative count of STEP re-base events — exposed for tests/telemetry
     /// (the C mirror prints it as the `asrc:` line's `steps=` field).
     pub fn step_count(&self) -> u32 {
@@ -814,6 +839,13 @@ impl RealtimeAsrcCompensator {
         if self.level_captured {
             self.level_target_ms += delta_ms;
             self.level_last_ms += delta_ms;
+            // issue #1367: the level loop reads the per-window MEAN. The buffer moves by delta in
+            // the same callback as this shift, so the readings already folded into the open window
+            // are moved by delta too: the closing mean is then all in the new frame, and the smoothed
+            // error sees no blended half-old/half-new transient. level_avg_ms (telemetry) follows
+            // like level_last_ms. Exact mirror of the C shift.
+            self.window_level_sum_ms += delta_ms * f64::from(self.window_level_count);
+            self.level_avg_ms += delta_ms;
             // camera-box #1335 follow-up 5: the deliberate shift moves BOTH level_target_ms (+delta,
             // this line) AND the buffer level itself (+delta, via the sync-offset re-stamp — the 18.9.
             // live test: level 80 → 108 ms in the same second as a +12 ms shift), so the smoothed
@@ -909,6 +941,12 @@ impl RealtimeAsrcCompensator {
         self.window_raw_s += raw_advance_s;
         self.window_master_s += master_block_s;
         self.window_block_count += 1;
+        // issue #1367: fold EVERY callback's level into the window (C-equivalent path only), so the
+        // level loop reads the window MEAN rather than one reading on the mixer-tick sawtooth.
+        if let Some(buf_ms) = buffered_ms {
+            self.window_level_sum_ms += buf_ms;
+            self.window_level_count += 1;
+        }
 
         if self.window_master_s >= WINDOW_S {
             // This window closes -- compute ONE windowed ppm value from the duration-weighted
@@ -921,6 +959,16 @@ impl RealtimeAsrcCompensator {
             self.window_raw_s = 0.0;
             self.window_master_s = 0.0;
             self.window_block_count = 0;
+            // issue #1367: the window's MEAN level (every callback's buffered_ms), reset with the
+            // other window sums. Always >= 1 reading on the C path (the closing call itself adds);
+            // 0 only on the rate-only bench entry, which never reads it.
+            let window_level_ms = if self.window_level_count > 0 {
+                self.window_level_sum_ms / f64::from(self.window_level_count)
+            } else {
+                0.0
+            };
+            self.window_level_sum_ms = 0.0;
+            self.window_level_count = 0;
 
             // issue #960 (applied to the WINDOW value, not a single block's instantaneous ratio --
             // issue #962): a window whose aggregate ppm magnitude clears the sanity ceiling carries
@@ -973,6 +1021,9 @@ impl RealtimeAsrcCompensator {
                 self.last_step_ms = r_s * 1000.0;
                 if let Some(buf_ms) = buffered_ms {
                     self.level_last_ms = buf_ms;
+                    // issue #1367: telemetry only here; the restore corroboration below stays on the
+                    // live reading of this same call.
+                    self.level_avg_ms = window_level_ms;
                     // FAST bounded level restore, but ONLY if the buffer level corroborates a real
                     // sample loss/dup (|level err| >= half the residual magnitude). A wall-clock-only
                     // jump leaves buffered_ms unchanged => re-base only, no restore. Keeps the
@@ -1045,7 +1096,12 @@ impl RealtimeAsrcCompensator {
                 // source->audio_input_buf[0].size every callback; the rate-only bench entry passes
                 // None and never runs this.
                 if let Some(buf_ms) = buffered_ms {
+                    // issue #1367: level= keeps the one raw reading (telemetry); every level-loop
+                    // decision below (capture, EMA, I, sustained arm, unreachable bound) reads the
+                    // window MEAN. The per-call restore burst/exit further down stays on the live
+                    // buffered_ms.
                     self.level_last_ms = buf_ms;
+                    self.level_avg_ms = window_level_ms;
                     if self.reg_locked {
                         if !self.level_captured {
                             // issue #1355: setpoint = the ABSOLUTE target plus the deliberate placement
@@ -1056,7 +1112,7 @@ impl RealtimeAsrcCompensator {
                             self.level_target_ms = if self.level_absolute {
                                 LEVEL_TARGET_MS + self.level_offset_ms
                             } else {
-                                buf_ms
+                                window_level_ms
                             };
                             self.level_captured = true;
                         }
@@ -1069,7 +1125,7 @@ impl RealtimeAsrcCompensator {
                         // shift moves BOTH the target and the buffer by the same delta, so the error is
                         // unchanged and this EMA is left untouched there (see shift_level_target).
                         // Exact mirror of the C accepted-window branch.
-                        let level_err = buf_ms - self.level_target_ms;
+                        let level_err = window_level_ms - self.level_target_ms;
                         if !self.level_err_ema_seeded {
                             self.level_err_ema_ms = level_err;
                             self.level_err_ema_seeded = true;
@@ -1089,7 +1145,7 @@ impl RealtimeAsrcCompensator {
                             self.estimated_ppm + self.outer_bias_ppm + self.level_integral_ppm;
                         let saturated = rate_target <= -MAX_PPM || rate_target >= MAX_PPM;
                         if !saturated && !self.level_restore {
-                            let err_ms = self.level_target_ms - buf_ms;
+                            let err_ms = self.level_target_ms - window_level_ms;
                             self.level_integral_ppm = (self.level_integral_ppm
                                 - LEVEL_KI_PPM_PER_MS_S * err_ms * window_master_s)
                                 .clamp(-LEVEL_INTEGRAL_MAX_PPM, LEVEL_INTEGRAL_MAX_PPM);
@@ -1105,7 +1161,9 @@ impl RealtimeAsrcCompensator {
                         // The integral above is frozen while restoring so the two level correctors
                         // never wind against each other; the restore burst/exit are unchanged.
                         if self.level_captured && !self.level_restore {
-                            if (buf_ms - self.level_target_ms).abs() >= LEVEL_RESTORE_ARM_ERR_MS {
+                            if (window_level_ms - self.level_target_ms).abs()
+                                >= LEVEL_RESTORE_ARM_ERR_MS
+                            {
                                 self.level_err_windows += 1;
                                 if self.level_err_windows >= LEVEL_RESTORE_ARM_WINDOWS {
                                     self.level_restore = true;
@@ -3473,5 +3531,71 @@ mod tests {
                  (no jitter)"
             );
         }
+    }
+
+    /// issue #1367: `level_avg_ms` is the MEAN of every callback's reading in the closed window and
+    /// the level loop reads it, while `level_last_ms` (`level=`) keeps the one raw reading of the
+    /// closing callback. Four 0.25 s callbacks per window read 70 / 80 / 90 / 100 ms (mean 85): a
+    /// non-absolute source captures its depth-at-lock from the MEAN (85, never the raw 100), and the
+    /// smoothed error then sits at exactly 0.
+    #[test]
+    fn level_avg_is_the_window_mean_and_feeds_the_level_loop_1367() {
+        let mut c = RealtimeAsrcCompensator::new();
+        c.set_level_absolute(false);
+        let readings = [70.0, 80.0, 90.0, 100.0];
+        for _ in 0..120 {
+            for r in readings {
+                c.compensate_with_level(0.25, 0.25, r);
+            }
+        }
+        assert!(
+            (c.level_avg_ms() - 85.0).abs() < 1e-9 && (c.level_last_ms() - 100.0).abs() < 1e-9,
+            "issue #1367: level_avg must be the window mean (85) and level= the closing reading \
+             (100), got level_avg {:.6} / level {:.6}",
+            c.level_avg_ms(),
+            c.level_last_ms()
+        );
+        assert!(
+            (c.level_target_ms() - 85.0).abs() < 1e-9 && c.level_err_ema_ms().abs() < 1e-9,
+            "issue #1367: the depth-at-lock capture and the smoothed error must read the window mean \
+             (target 85, error 0), got target {:.6} / ema {:.6}",
+            c.level_target_ms(),
+            c.level_err_ema_ms()
+        );
+    }
+
+    /// issue #1367: a DELIBERATE shift that lands mid-window (the buffer jumps +12 ms in the same
+    /// callback as `shift_level_target(+12)`) must not feed the EMA a blended half-old/half-new mean.
+    /// The readings already folded into the open window move with the shift, so the closing mean is
+    /// all in the new frame and the smoothed error stays exactly 0. GUARD: without moving the open
+    /// window sum the mean reads target − 6 and the EMA takes a −0.55 ms step (a P kick of −1.1 ppm).
+    #[test]
+    fn mid_window_shift_moves_the_open_window_mean_1367() {
+        let mut c = RealtimeAsrcCompensator::new();
+        c.set_level_absolute(false);
+        for _ in 0..480 {
+            c.compensate_with_level(0.25, 0.25, 90.0);
+        }
+        let target = c.level_target_ms();
+        assert!(
+            (target - 90.0).abs() < 1e-9 && c.level_err_ema_ms().abs() < 1e-9,
+            "issue #1367 precondition: locked and captured at 90, got target {target:.6} / ema {:.6}",
+            c.level_err_ema_ms()
+        );
+        c.compensate_with_level(0.25, 0.25, 90.0);
+        c.compensate_with_level(0.25, 0.25, 90.0);
+        c.shift_level_target(12.0);
+        c.compensate_with_level(0.25, 0.25, 102.0);
+        c.compensate_with_level(0.25, 0.25, 102.0);
+        assert!(
+            (c.level_target_ms() - 102.0).abs() < 1e-9
+                && (c.level_avg_ms() - 102.0).abs() < 1e-9
+                && c.level_err_ema_ms().abs() < 1e-9,
+            "issue #1367: a mid-window shift must leave the window mean in the new frame (102) and \
+             the smoothed error at 0, got target {:.6} / level_avg {:.6} / ema {:.6}",
+            c.level_target_ms(),
+            c.level_avg_ms(),
+            c.level_err_ema_ms()
+        );
     }
 }

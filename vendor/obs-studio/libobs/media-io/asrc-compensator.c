@@ -85,6 +85,9 @@ void asrc_compensator_init(struct asrc_compensator *c)
 	c->level_fallback_pending = false; /* camera-box #1355 */
 	c->level_fallback_done = false; /* camera-box #1355 */
 	c->level_absolute = true; /* camera-box #1355 */
+	c->window_level_sum_ms = 0.0; /* camera-box #1367 */
+	c->window_level_count = 0; /* camera-box #1367 */
+	c->level_avg_ms = 0.0; /* camera-box #1367 */
 	asrc_regression_flush(c); /* camera-box #1084/#1335: empty buffer, 0 cumulatives, 0 integral, unlocked */
 }
 
@@ -114,6 +117,10 @@ double asrc_compensator_compensate(struct asrc_compensator *c, double raw_advanc
 	c->window_raw_s += raw_advance_s;
 	c->window_master_s += master_block_s;
 	c->window_block_count++;
+	/* camera-box #1367: fold EVERY callback's level into the window, so the level loop reads the
+	 * window MEAN rather than one reading on the mixer-tick sawtooth. Mirror of the Rust Some path. */
+	c->window_level_sum_ms += buffered_ms;
+	c->window_level_count++;
 
 	/* camera-box #962: true only for a call that just closed a REJECTED window -- gates the
 	 * target/slew block below OFF (HOLDING applied_ppm at exactly its pre-rejection value, even
@@ -134,6 +141,13 @@ double asrc_compensator_compensate(struct asrc_compensator *c, double raw_advanc
 		c->window_raw_s = 0.0;
 		c->window_master_s = 0.0;
 		c->window_block_count = 0;
+		/* camera-box #1367: the window's MEAN level (every callback's buffered_ms), reset with the
+		 * other window sums. Always >= 1 reading here (the closing call itself adds); the guard
+		 * mirrors the Rust rate-only entry, which never reads it. */
+		const double window_level_ms =
+			c->window_level_count > 0 ? c->window_level_sum_ms / (double)c->window_level_count : 0.0;
+		c->window_level_sum_ms = 0.0;
+		c->window_level_count = 0;
 
 		/* camera-box #960 (applied to the WINDOW value, not a single block's instantaneous
 		 * ratio -- camera-box #962): a window whose aggregate ppm magnitude clears the sanity
@@ -176,6 +190,9 @@ double asrc_compensator_compensate(struct asrc_compensator *c, double raw_advanc
 				c->step_count++;
 				c->last_step_ms = r_s * 1000.0;
 				c->level_last_ms = buffered_ms;
+				/* camera-box #1367: telemetry only here; the restore corroboration below stays on
+				 * the live reading of this same call. */
+				c->level_avg_ms = window_level_ms;
 				/* FAST bounded level restore, but ONLY if the buffer level corroborates a real
 				 * sample loss/dup (|level err| >= half the residual magnitude). A wall-clock-only
 				 * jump leaves buffered_ms unchanged => re-base only, no restore. */
@@ -247,8 +264,12 @@ double asrc_compensator_compensate(struct asrc_compensator *c, double raw_advanc
 				 * window (a rejected window took the branch above; a re-based window took the branch
 				 * above; an unlocked servo skips the update). buffered_ms is the source's current
 				 * mix-buffer depth (obs-source.c reads it from audio_input_buf[0].size). Mirror of
-				 * src/asrc_bench.rs compensate_with_level. */
+				 * src/asrc_bench.rs compensate_with_level. camera-box #1367: level= keeps the one
+				 * raw reading (telemetry); every level-loop decision below (capture, EMA, I,
+				 * sustained arm, unreachable bound) reads the window MEAN. The per-call restore
+				 * burst/exit further down stays on the live buffered_ms. */
 				c->level_last_ms = buffered_ms;
+				c->level_avg_ms = window_level_ms;
 				if (c->reg_locked) {
 					if (!c->level_captured) {
 						/* camera-box #1355: setpoint = the ABSOLUTE target plus the deliberate
@@ -257,7 +278,7 @@ double asrc_compensator_compensate(struct asrc_compensator *c, double raw_advanc
 						 * Re-captured (to the same absolute value) after every flush/relock; the P term
 						 * plus the restore burst the sustained-error arm fires walk the buffer there. */
 						c->level_target_ms = c->level_absolute ? ASRC_LEVEL_TARGET_MS + c->level_offset_ms
-										       : buffered_ms;
+										       : window_level_ms;
 						c->level_captured = true;
 					}
 					/* camera-box #1335 follow-up 5: SMOOTH the per-window level error with an EMA (tau
@@ -269,7 +290,7 @@ double asrc_compensator_compensate(struct asrc_compensator *c, double raw_advanc
 					 * unchanged and this EMA is left untouched there (see asrc_compensator_shift_level_target).
 					 * Mirror of src/asrc_bench.rs compensate_with_level. */
 					{
-						const double level_err = buffered_ms - c->level_target_ms;
+						const double level_err = window_level_ms - c->level_target_ms;
 						if (!c->level_err_ema_seeded) {
 							c->level_err_ema_ms = level_err;
 							c->level_err_ema_seeded = true;
@@ -289,7 +310,7 @@ double asrc_compensator_compensate(struct asrc_compensator *c, double raw_advanc
 					const double rate_target = c->estimated_ppm + c->outer_bias_ppm + c->level_integral_ppm;
 					const bool saturated = rate_target <= -ASRC_MAX_PPM || rate_target >= ASRC_MAX_PPM;
 					if (!saturated && !c->level_restore) {
-						const double err_ms = c->level_target_ms - buffered_ms;
+						const double err_ms = c->level_target_ms - window_level_ms;
 						c->level_integral_ppm =
 							asrc_clamp(c->level_integral_ppm -
 									   ASRC_LEVEL_KI_PPM_PER_MS_S * err_ms * window_master_s,
@@ -305,7 +326,7 @@ double asrc_compensator_compensate(struct asrc_compensator *c, double raw_advanc
 					 * so the two level correctors never wind against each other; the step arm and the shift arm
 					 * stay as the immediate paths. */
 					if (c->level_captured && !c->level_restore) {
-						if (fabs(buffered_ms - c->level_target_ms) >= ASRC_LEVEL_RESTORE_ARM_ERR_MS) {
+						if (fabs(window_level_ms - c->level_target_ms) >= ASRC_LEVEL_RESTORE_ARM_ERR_MS) {
 							if (++c->level_err_windows >= ASRC_LEVEL_RESTORE_ARM_WINDOWS) {
 								c->level_restore = true;
 								c->level_err_windows = 0;
@@ -459,6 +480,13 @@ void asrc_compensator_shift_level_target(struct asrc_compensator *c, double delt
 	if (c->level_captured) {
 		c->level_target_ms += delta_ms;
 		c->level_last_ms += delta_ms;
+		/* camera-box #1367: the level loop reads the per-window MEAN. The buffer moves by delta in the
+		 * same callback as this shift, so the readings already folded into the open window are moved
+		 * by delta too: the closing mean is then all in the new frame, and the smoothed error sees no
+		 * blended half-old/half-new transient. level_avg_ms (telemetry) follows like level_last_ms.
+		 * Mirror of src/asrc_bench.rs RealtimeAsrcCompensator::shift_level_target. */
+		c->window_level_sum_ms += delta_ms * (double)c->window_level_count;
+		c->level_avg_ms += delta_ms;
 		/* camera-box #1335 follow-up 5: the deliberate shift moves BOTH level_target_ms (+delta, this
 		 * line) AND the buffer level itself (+delta, via the sync-offset re-stamp -- the 18.9. live
 		 * test: level 80 -> 108 ms in the same second as a +12 ms shift), so the smoothed error
