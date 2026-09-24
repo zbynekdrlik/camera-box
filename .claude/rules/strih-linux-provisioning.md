@@ -91,7 +91,8 @@ file, never a copy of the script (the unified-design ruling, umbrella issue 1357
   — the dev1 deploy plan rsyncs `scripts/` + `systemd/` only (no `intercom/`), and a load that
   required the file would refuse the whole deploy before step 4.
 - **On-box artifact names are ROLE paths, not identity** (`/opt/camera-box/strih-lx-seed.json`,
-  `strih-lx-projector.json`, `strih-lx-profile-facts.txt`, the retired `90-strih-lx.conf` cleanup,
+  the retired `strih-lx-projector.json` that setup step 6 now only removes (issue 1346),
+  `strih-lx-profile-facts.txt`, the retired `90-strih-lx.conf` cleanup,
   the committed `strih-nic-irq-affinity.service` Description): they are read by `strih_scenes.py` /
   `strih-obs-start.sh` under that fixed name on every strih box. The static test allowlists exactly
   these tokens; any OTHER strih-lx identity value on a code line of the four scripts fails it.
@@ -336,7 +337,8 @@ lease; strih-lx has run Xorg + openbox since 23.9.
   kernel HDMI connector reads `connected` AND X RandR names it (`xrandr --query` as the desktop user
   on `:0`); otherwise a loud `SKIP issue 1346`. Today strih-lx is eDP-only, so it SKIPs. An existing
   file is the operator's choice and is left alone. The retired `/opt/camera-box/strih-lx-projector.json`
-  is removed; its `"type"` seeds the initial view (default multiview).
+  is removed; its `"type"` seeds the initial view (default multiview). The root-run step refuses a
+  symlinked config path and writes the file with `install -o <desktop user>` (never a root redirect).
 - **The desktop never touches HDMI:** the kiosk autostart (`strih_openbox_autostart_text`) turns EVERY
   HDMI output off in X (the panel is the only desktop screen), and `strih-obs-start.sh` runs
   `xrandr --output <connector> --off` before the OBS launch whenever the config arms the lease
@@ -356,7 +358,8 @@ lease; strih-lx has run Xorg + openbox since 23.9.
   every other built-in Multiview. The operator's LAPTOP projector stays (SaveProjectors=true + the
   ProjectorAlwaysOnTop=false pre-seed in step 7 are kept for it).
 - **verify-strih item 4c** (`strih_drm_output_verdict`): SKIP (`skip-no-hdmi`) with no HDMI monitor;
-  NOTE `hdmi-unplugged` when armed but unplugged; FAIL `config-missing` / `view-invalid` /
+  NOTE `hdmi-unplugged` when armed but unplugged; FAIL `classify-failed` (the strih_scenes import
+  failed, the one-liner prints `? program`) / `config-missing` / `view-invalid` /
   `lease-not-live` (no `drm-output: program scanout LIVE` in the newest OBS log) /
   `multiview-not-live` (view multiview but no `drm-output: multiview bind LIVE`). HDMI presence is the
   KERNEL status — after a lease X RandR can stick at `disconnected`.
