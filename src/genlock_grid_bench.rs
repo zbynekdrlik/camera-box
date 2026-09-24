@@ -861,12 +861,18 @@ mod tests {
     }
 
     /// issue 1367 (review rounds 1-2) — a render tick that runs LATE, by anything short of a
-    /// genuine slot skip, must never make the N==1 rule correct a settled conveyor. The live tail is
-    /// 10–30 ms; these stress tails reach 45 and 60 ms, and every such overrun (below two
-    /// intervals) is followed by a CATCH-UP tick (`video_sleep`), so no slot is lost and no
-    /// correction is owed. Reading the depth at the processing wall misfired a shed on every tick
-    /// late by more than one interval minus the early margin (149 holds over 3 x 2 h at 45 ms);
-    /// reading it at the tick's SCHEDULED instant cannot.
+    /// genuine slot skip, must never make the N==1 rule correct a settled conveyor on its own. The
+    /// live tail is 10–30 ms; these stress tails reach 45 and 60 ms, and every such overrun (below
+    /// two intervals) is followed by a CATCH-UP tick (`video_sleep`), so no slot is lost and no
+    /// correction is owed. Reading the depth at the processing wall misfired the N==1 shed on such
+    /// ticks (50 sheds + 50 holds in 2 h at 45 ms); read at the tick's SCHEDULED instant it cannot.
+    ///
+    /// The one thing a 60 ms tick still does is inflate the QUEUE by two frames, which the #859
+    /// drain (a queue-length rule, untouched here: its hysteresis stays at 2 and it predates this
+    /// ticket) reads as an over-deep conveyor and sheds. Before issue 1367 that drop was absorbing
+    /// (30 frames forever, a whole-frame A/V step from one hitch); now the N==1 hold regrows the
+    /// frame on the next throttle window. So at 60 ms: no N==1 shed, and exactly one N==1 hold per
+    /// drain, never a hold of its own.
     #[test]
     fn a_late_or_catch_up_render_tick_never_corrects_a_settled_source_1367() {
         for tail_max_ms in [45u64, 60] {
@@ -885,11 +891,18 @@ mod tests {
                     "tail {tail_max_ms} ms, seed {seed}: {r:?}"
                 );
                 assert_eq!(
-                    r.converge_sheds + r.n1_grows,
-                    0,
-                    "tail {tail_max_ms} ms, seed {seed}: the N==1 rule corrected a settled \
-                     source on a late tick: {r:?}"
+                    r.converge_sheds, 0,
+                    "tail {tail_max_ms} ms, seed {seed}: the N==1 shed misfired on a late tick: \
+                     {r:?}"
                 );
+                assert_eq!(
+                    r.n1_grows, r.drains,
+                    "tail {tail_max_ms} ms, seed {seed}: an N==1 hold that does not repay a #859 \
+                     drain corrected a settled source: {r:?}"
+                );
+                if tail_max_ms <= 45 {
+                    assert_eq!(r.drains, 0, "tail {tail_max_ms} ms, seed {seed}: {r:?}");
+                }
                 assert!(
                     share(&r, &[31]) > 0.99,
                     "tail {tail_max_ms} ms, seed {seed}: states {:?}",
