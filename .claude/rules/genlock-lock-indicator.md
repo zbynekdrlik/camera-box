@@ -140,7 +140,13 @@ no-input-locked; then DEGRADED (amber) precedence some-input-unlocked > recent-e
   - A rate is not a genlock hazard on any box: the render tick (`genlock_next_deadline`) re-derives
     every deadline from the wall clock per tick (2 ms/tick slew clamp), the release keys on the
     wall, and the ASRC servo runs against the mixer clock itself. The one clock hazard is a wall
-    STEP against the monotonic sleep timebase — same meaning on every box.
+    STEP: it moves every wall-keyed FIFO release / ts-align deadline by more than a frame at once
+    (the render tick only slews through it) — same meaning on every box.
+  - **What now notices a SECOND clock writer slewing the wall** (a w32time / systemd-timesyncd next
+    to dantesync — the two-timesync-daemons incident class): dantesync's own lock/offset facet (the
+    `clock` term + the dantesync clock watchdog), FIFO `recent_event` relocks/late-holds on the
+    receivers, and the per-pass `qpc_drift_ppm` vs `qpc_expected_ppm` telemetry the
+    genlock-lock watchdog logs. The removed rate term could only ever see it on Windows.
 
   The verdict is the pure `genlock_qpc_drift_beyond_bound(rate_ready, drift_delta_ms, elapsed_ms,
   max_step_ms, step_bound_ms, &measured_ppm)` (Rust authority in `src/genlock_lock_state.rs`, C

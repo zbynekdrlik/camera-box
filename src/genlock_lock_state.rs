@@ -128,7 +128,7 @@ pub struct GenlockFacets {
     /// sets this (a camera input with `ndi_audio=false` is silent by design), so it can only
     /// DEGRADE, never take a healthy box off LOCKED spuriously. The widget aggregates the
     /// per-source audio-parity condition into this one scalar — the same reduction it applies to
-    /// per-input wall-vs-monotonic drift for [`GenlockFacets::qpc_drift_beyond_bound`] — surfacing
+    /// the wall-step verdict for [`GenlockFacets::qpc_drift_beyond_bound`] — surfacing
     /// the pairing-offset branch of [`crate::genlock_audio_pairing::decide_audio_health`].
     pub audio_unpaired: bool,
     /// #1303 — a genlock source is AUDIBLE when the certified per-box audio table
@@ -308,7 +308,8 @@ pub fn top_phase_event_offender(inputs: &[InputEventCounts]) -> Option<(usize, u
 // instantaneous dantesync `f_ptp + f_phase` sample false-DEGRADED both (28 samples on strih-lx, 4 on
 // stream, 24.9.2026, none a step). A rate is also no genlock hazard: the render tick re-derives every
 // deadline from the wall clock and absorbs up to 2 ms per tick. The one clock hazard for genlock — the
-// same on every box — is a wall STEP against the monotonic sleep timebase. The windowed rate stays
+// same on every box — is a wall STEP: it moves every wall-keyed FIFO release / ts-align deadline by more
+// than a frame at once (the render tick itself only slews through it). The windowed rate stays
 // report-only telemetry.
 /// A single-sample wall STEP beyond this (ms) DEGRADES immediately — one 30 fps frame, the coarsest
 /// fleet frame interval (same value as the audio-pairing bound), so a sub-frame wobble never trips.

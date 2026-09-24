@@ -36,7 +36,7 @@ typedef enum genlock_lock_reason {
 	GENLOCK_LOCK_REASON_INPUT_UNLOCKED = 5,  /* some (not all) inputs unlocked */
 	GENLOCK_LOCK_REASON_RECENT_EVENT = 6,    /* relock/underrun/late-hold/backward-step in last 60 s */
 	GENLOCK_LOCK_REASON_NTP_FAILED = 7,      /* clock up but NTP phase failed */
-	GENLOCK_LOCK_REASON_QPC_DRIFT = 8,       /* wall-vs-monotonic drift beyond bound */
+	GENLOCK_LOCK_REASON_QPC_DRIFT = 8,       /* the wall clock stepped by more than one frame */
 	GENLOCK_LOCK_REASON_AUDIO_PAIRING = 9,   /* #1303 audio-enabled source unpaired with its video FIFO hold */
 	GENLOCK_LOCK_REASON_AUDIO_UNEXPECTED = 10, /* #1303 source audible when the certified per-box table expects it silent (double-audio hazard) */
 } genlock_lock_reason_t;

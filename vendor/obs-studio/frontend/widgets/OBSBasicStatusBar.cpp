@@ -366,9 +366,9 @@ std::string genlock_build_lock_json(const char *state_name, const char *reason_k
 		j += num;
 	}
 	j += "]";
-	/* #1299 Part 4 (v5): report-only windowed-drift telemetry at the END of the object. The qpc_drift
-	 * VERDICT keys on these (the RATE vs the dantesync-reported slew + a STEP), not the cumulative
-	 * qpc_drift_ms above (kept as raw telemetry). Additive: the parser defaults all three to None. */
+	/* #1299 Part 4 (v5): report-only windowed-drift telemetry at the END of the object. Since #1357 the
+	 * qpc_drift VERDICT is the wall STEP only (qpc_step) — neither the rate nor the dantesync slew nor
+	 * the cumulative qpc_drift_ms above gates. Additive: the parser defaults all three to None. */
 	snprintf(num, sizeof(num), ",\"qpc_drift_ppm\":%.3f,\"qpc_expected_ppm\":%.3f,\"qpc_step\":%s}",
 		 qpc_drift_ppm, qpc_expected_ppm, qpc_step ? "true" : "false");
 	j += num;

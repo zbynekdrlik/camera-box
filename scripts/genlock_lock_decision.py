@@ -208,8 +208,9 @@ def analyze(bundle_json_text, box_reachable):
     reason = _enrich_audio_unexpected_reason(reason, facet)
     return {"verdict": classify(state, box_reachable), "state": state, "reason": reason,
             "n_inputs": n_inputs, "n_locked": n_locked, "n_absent": n_absent, "n_idle": n_idle,
-            # #1299 Part 4: windowed drift telemetry (report-only; the widget already decided `state`
-            # from these, so they never change the verdict here — logged so a rate anomaly is visible).
+            # #1299 Part 4: windowed drift telemetry (report-only; since #1357 the widget's qpc_drift
+            # verdict is the wall STEP only, so these never change `state` — logged so a rate anomaly,
+            # e.g. a second clock writer slewing the wall, is visible in-band).
             "qpc_drift_ppm": facet.get("qpc_drift_ppm"),
             "qpc_expected_ppm": facet.get("qpc_expected_ppm")}
 

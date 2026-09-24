@@ -142,8 +142,8 @@ fn genlock_lock_audio_unexpected_offender_present_1303() {
 
 #[test]
 fn genlock_lock_qpc_windowed_drift_present_1299_part4() {
-    // #1299 Part 4: the qpc_drift verdict is a WINDOWED RATE + STEP (vs the dantesync-reported slew),
-    // NOT the cumulative wall-vs-QPC offset that grew unbounded and false-paged the fleet overnight.
+    // #1299 Part 4: the qpc_drift verdict is NOT the cumulative wall-vs-QPC offset that grew unbounded
+    // and false-paged the fleet overnight (since #1357 it is the wall STEP only — see the test below).
     // A subtree pull that reverts any of these silently re-opens that chronic false page.
     // the widget calls the parity-gated pure decision (not an inline `> 100 ms` compare)
     assert_has(STATUSBAR_CPP, "genlock_qpc_drift_beyond_bound(");
