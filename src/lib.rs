@@ -42,12 +42,6 @@ pub mod genlock_stamp;
 pub mod dupe_decimation;
 #[cfg(target_os = "linux")]
 pub mod ndi_display;
-// #792 — optional secondary 30fps NDI stream (2-frame temporal blend of the emitted 60fps
-// pairs). Linux-gated in lock-step with capture/ndi (it carries capture::FrameInfo across a
-// channel and owns a second NdiSender); the pairing/blend/config logic is plain std and
-// unit-tests Tier-0 on the Linux `test` CI job (default features).
-#[cfg(target_os = "linux")]
-pub mod publish_30p;
 pub mod vban;
 
 // #1345 M1b — the pure appliance-side intercom-target env override (`resolve_intercom_target`).

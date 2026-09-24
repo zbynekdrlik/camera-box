@@ -72,7 +72,9 @@ below..." instead of quoting the actual command in the same sentence).
 ## Adding a new `camera-box.service.d` drop-in + its `verify-device.sh` acceptance check (#1087)
 
 To bake a NEW env drop-in into provisioning AND prove it takes effect, follow the (e) genlock pattern
-(worked example: (z) publish-30p, `CAMERA_BOX_PUBLISH_30P=1`, the "CAMn (30p)" blend stream):
+(historical worked example: the retired (z) publish-30p check, `CAMERA_BOX_PUBLISH_30P=1`, removed with
+the 30p stream by issue 1342; the current drop-in + check pair is `ndi-discovery.conf` + `(an)`, which
+grades a lib verdict over ONE gathered ssh block instead of a journal marker):
 
 - **`setup-device.sh` write**: put the `cat > .../<name>.conf` heredoc INSIDE STEP 7, right beside the
   `genlock.conf` write — it shares STEP 7's existing `mkdir` + `daemon-reload` + `enable camera-box`,

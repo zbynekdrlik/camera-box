@@ -51,6 +51,8 @@ fail() { echo -e "${RED}FAIL: $1${NC}" >&2; exit 1; }
 . "${HERE}/lib/strih-provision.sh"
 # shellcheck source=scripts/lib/genlock-markers.sh
 . "${HERE}/lib/genlock-markers.sh"
+# shellcheck source=scripts/lib/ndi-discovery.sh
+. "${HERE}/lib/ndi-discovery.sh"   # issue 1342: the NDI Discovery Server client config (with setup-device.sh)
 # shellcheck source=scripts/lib/ndi-runtime.sh
 . "${HERE}/lib/ndi-runtime.sh"   # issue 1317: shared NDI 6.3.2 runtime install recipe (with setup-imag.sh)
 # shellcheck source=scripts/lib/obs-box-baseline.sh
@@ -290,6 +292,19 @@ if DEBIAN_FRONTEND=noninteractive apt-get install -y ffmpeg; then
 else
   warn "  ffmpeg install failed -- ffprobe (on-box E2E verdict) will be absent; fix the box's apt sources and re-run"
 fi
+# issue 1342: the NDI Discovery Server client config (scripts/lib/ndi-discovery.sh, the SAME source
+# of truth setup-device.sh writes on the camboxes): networks.discovery = the dev1 server, mDNS stays
+# on for receiving. TWO readers on this box: the desktop user's ~/.ndi (OBS via strih-obs.service
+# and bkshading-service, both User=${DESKTOP_USER}), and the system dir /etc/ndi for intercom-hub,
+# whose ProtectHome hides ~/.ndi -- its drop-in points NDI_CONFIG_DIR there. Written here, before
+# the OBS/intercom units start (steps 8/13); the next OBS/intercom start reads it.
+ndi_discovery_write_config "${USER_HOME}/.ndi" "$DESKTOP_USER" \
+  || fail "NDI discovery config write to ${USER_HOME}/.ndi failed (issue 1342)"
+ndi_discovery_write_config "$NDI_DISCOVERY_SYSTEM_DIR" \
+  || fail "NDI discovery config write to ${NDI_DISCOVERY_SYSTEM_DIR} failed (issue 1342)"
+mkdir -p /etc/systemd/system/intercom-hub.service.d
+ndi_discovery_dropin_content > /etc/systemd/system/intercom-hub.service.d/ndi-discovery.conf
+echo "  NDI discovery config: ${USER_HOME}/.ndi + ${NDI_DISCOVERY_SYSTEM_DIR} (discovery=${NDI_DISCOVERY_SERVERS}) + intercom-hub NDI_CONFIG_DIR drop-in (issue 1342)"
 
 # ---------------------------------------------------------------------------------------------
 step 5 "OBS profile facts (${BOX_NAME}: seeded from the Windows 'light' profile)"

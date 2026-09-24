@@ -19,7 +19,8 @@ NTP jitter on the loaded venue LAN; at home offsets are sub-100µs with zero ste
 step jumps that camera's genlock timecodes -> its cell holds a frame -> a single-cell hic. An
 OBS restart does NOT help (nothing accumulates receiver-side); robustness/alarming is
 dantesync#50. Second (structural) component of the feel: MV cells are sharp 60->30 decimation
-judder — the #792 "CAMn (30p)" blend streams are the designed cure once strih consumes them.
+judder. (The issue-792 "CAMn (30p)" blend streams meant to cure it were never consumed and were
+REMOVED by issue 1342 -- each cambox publishes ONLY `CAMn (usb)` now.)
 
 ## Venue/event network — MikroTik topology + the microburst egress-drop gotcha (#797, 2026-07-18)
 
@@ -822,9 +823,9 @@ ffi_seam_tests` (append `# airuleset:build-ok` — the Tier-0 hook blocks `cargo
 cases. It does **NOT** fix a STABLE box whose mDNS registration was simply lost/missed by OBS
 (stable network, no change → no trigger) — and the cam boxes have STATIC IPs, so a clean reboot may
 present a stable sig from process start. That persistent-flakiness case is the **central NDI
-Discovery Server** (`NDI_DISCOVERY_SERVER` on every cam box + both OBS) or a LAN multicast fix
-(avahi reflector / IGMP snooping) — a **fleet-infra decision raised to the user** (pending; file a
-follow-up if chosen). When diagnosing "camera missing from OBS dropdown", check WHICH case it is
+Discovery Server** — CHOSEN by the owner and implemented by issue 1342 (the dev1
+`ndi-discovery-server` unit + `ndi-config.v1.json` `networks.discovery` on every managed box and
+laptop; see `.claude/rules/ndi-discovery.md`, incl. the sender-stops-mDNS caveat). When diagnosing "camera missing from OBS dropdown", check WHICH case it is
 (boot-race/flap → re-announce should cure within ~2s; stable-lost-announce → needs the discovery
 server).
 

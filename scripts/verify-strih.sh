@@ -18,6 +18,8 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "${HERE}/lib/strih-box-facts.sh"   # issue 1361: the ONE per-box fact loader (--box <name>)
 # shellcheck source=scripts/lib/strih-provision.sh
 . "${HERE}/lib/strih-provision.sh"
+# shellcheck source=scripts/lib/ndi-discovery.sh
+. "${HERE}/lib/ndi-discovery.sh"   # issue 1342: item 34 grades the NDI Discovery Server client config
 # issue 1359: the REPORT-ONLY CEF keyring item (14b) grades the OBS CEF password-store switch.
 # shellcheck source=scripts/lib/strih-cef-keyring.sh
 . "${HERE}/lib/strih-cef-keyring.sh"
@@ -772,6 +774,28 @@ else
   else
     bad "NIC xhci IRQ affinity FAILED (iface ${IRQ_IFACE}, irqs ${IRQ_NUMS}): each must be a single cpu >= first cpu_atom (${ATOM_FIRST}) AND advancing over 2 s"
   fi
+fi
+
+# 34) NDI discovery client config (issue 1342): the dev1 NDI Discovery Server (networks.discovery,
+#     empty networks.ips) in BOTH readers' config -- the desktop user's ~/.ndi (OBS + bkshading-service)
+#     and the system dir /etc/ndi (intercom-hub, whose ProtectHome hides ~/.ndi) -- plus the
+#     intercom-hub NDI_CONFIG_DIR drop-in. Graded by the SHARED scripts/lib/ndi-discovery.sh verdict
+#     (the same one verify-device.sh (an) uses). Read-only; FAIL on any miss. Placed BEFORE item 32:
+#     the item-33 test slices "# 33)" to the closing summary, so nothing may sit after item 33.
+for _ndi_dir in "${USER_HOME}/.ndi" "$NDI_DISCOVERY_SYSTEM_DIR"; do
+  _ndi_text="$(cat "${_ndi_dir}/${NDI_DISCOVERY_CONFIG_NAME}" 2>/dev/null || true)"
+  _ndi_verdict="$(ndi_discovery_config_verdict "$_ndi_text")"
+  if [ "$_ndi_verdict" = ok ]; then
+    ok "(ndi-discovery) ${_ndi_dir}/${NDI_DISCOVERY_CONFIG_NAME}: discovery=${NDI_DISCOVERY_SERVERS}"
+  else
+    bad "(ndi-discovery) ${_ndi_dir}/${NDI_DISCOVERY_CONFIG_NAME}: $(printf '%s' "$_ndi_verdict" | tr '\n' ' ' | sed 's/FAIL: //g')-- re-run setup-strih.sh step 4b (issue 1342)"
+  fi
+done
+_ndi_dropin_dir="$(ndi_discovery_dropin_config_dir "$(cat /etc/systemd/system/intercom-hub.service.d/ndi-discovery.conf 2>/dev/null || true)")"
+if [ "$_ndi_dropin_dir" = "$NDI_DISCOVERY_SYSTEM_DIR" ]; then
+  ok "(ndi-discovery) intercom-hub NDI_CONFIG_DIR=${NDI_DISCOVERY_SYSTEM_DIR} drop-in present"
+else
+  bad "(ndi-discovery) intercom-hub.service.d/ndi-discovery.conf missing or NDI_CONFIG_DIR='${_ndi_dropin_dir:-<none>}' (want ${NDI_DISCOVERY_SYSTEM_DIR}) -- re-run setup-strih.sh step 4b (issue 1342)"
 fi
 
 # 32) the shared OBS-box appliance baseline (issue 1357) -- the ONE grader verify-imag.sh runs too

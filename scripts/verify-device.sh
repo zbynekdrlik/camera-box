@@ -99,10 +99,7 @@
 #   (y) camera-box.service has the ExecStartPre device-free bake-in (drop-in wired to the helper,
 #       helper stops the stray E2E burn UNIT + pkills the burn, never the painter) so every start
 #       frees /dev/video instead of crash-looping on "Device or resource busy" (#772).
-#   (z) publish-30p.conf drop-in present with CAMERA_BOX_PUBLISH_30P=1 (setup-device.sh STEP 7 bakes
-#       it) AND the box is ACTUALLY publishing the secondary "CAMn (30p)" 30fps blend stream right
-#       now (the issue-792 publisher's own journal output). A re-provisioned box that lost the
-#       drop-in, or an old binary predating issue 792, FAILs instead of regressing to 60p-only (#1087).
+#   (z) [REMOVED, issue 1342] the retired secondary 30fps NDI stream; the box publishes ONE output.
 #   (aa) interkom audio bake-in (#782): /etc/asound.conf is the by-NAME form (CARD=HID, not the old
 #       enumeration-time card NUMBER that dangles on re-enumeration), alsa-utils is installed, and
 #       the live `amixer -c HID` Mic/PCM percents match this box's per-box table (cam1-4 75%/79%,
@@ -167,6 +164,10 @@
 #        relay: TasksMax <= 512 (fork/thread runaway can't starve the box pid space) AND a running
 #        relay logs at info (zero journal lines while active = an old binary predating info-by-
 #        default logging). A box without the relay = `na`; a disabled/inactive relay skips logging.
+#   (an) NDI discovery client config (issue 1342) -- HARD FAIL: /etc/ndi/ndi-config.v1.json names the
+#        dev1 NDI Discovery Server (networks.discovery, scripts/lib/ndi-discovery.sh) with an EMPTY
+#        networks.ips, AND the camera-box.service.d/ndi-discovery.conf drop-in points NDI_CONFIG_DIR
+#        at /etc/ndi (camera-box runs as root with ProtectHome=yes, so /root/.ndi is invisible).
 #   (al) named `cam-box` UEFI boot entry (#1066 D6) -- HARD FAIL: efibootmgr reports a `cam-box`
 #       entry AND it is FIRST in BootOrder -- so the box boots its internal disk without depending on
 #       the AMI USB auto-entry (which failed on cam2 after a warm reboot). setup-device.sh STEP 17d
@@ -230,6 +231,10 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE/lib/remote-logging.sh"  # remote_log_gather_remote_snippet/remote_log_verdict -- the (ak)
                                  # off-box kernel(netconsole)+journal(upload) forensics check (#1311;
                                  # SAME source of truth as setup-device.sh / create-usb-linux.sh)
+# shellcheck source=scripts/lib/ndi-discovery.sh
+. "$HERE/lib/ndi-discovery.sh"   # ndi_discovery_gather_remote_snippet/ndi_discovery_config_verdict/
+                                 # ndi_discovery_dropin_config_dir -- the (an) NDI discovery client
+                                 # config check (issue 1342; SAME source of truth as setup-device.sh)
 # shellcheck source=scripts/lib/efi-boot-entry.sh
 . "$HERE/lib/efi-boot-entry.sh"  # efi_entry_verdict -- the (al) named cam-box UEFI entry check
                                  # (#1066 D6; SAME source of truth as setup-device.sh / create-usb-linux.sh)
@@ -422,28 +427,6 @@ genlock_fps_matches() {
 # missing value).
 cpu_affinity_dropin_value() {
   printf '%s\n' "$1" | grep -oE 'CPUAffinity=[0-9]+' | tail -1 | cut -d= -f2 || true
-}
-
-# --- (y) publish-30p.conf drop-in + live "CAMn (30p)" blend stream (issue 792, baked into
-# provisioning by #1087) ---------------------------------------------------------------------------
-
-# publish_30p_dropin_value TEXT -> the numeric value of CAMERA_BOX_PUBLISH_30P in TEXT (the contents
-# of the camera-box.service.d/publish-30p.conf drop-in), "" if absent. `|| true` -- same #458
-# footgun as genlock_dropin_fps above (a bare-assignment caller must never abort on a merely-missing
-# value).
-publish_30p_dropin_value() {
-  printf '%s\n' "$1" | grep -oE 'CAMERA_BOX_PUBLISH_30P=[0-9]+' | tail -1 | cut -d= -f2 || true
-}
-
-# publish_30p_stream_live JOURNAL -> the COUNT of lines in JOURNAL showing the issue-792 publish-30p
-# publisher actually emitting the secondary "(30p)" blend stream: the one-shot startup
-# `publish-30p ACTIVE` line, or the recurring `camera_box::publish_30p:` output line. "0" iff none.
-# Proves the "(30p)" NDI source is genuinely being published, not merely that the drop-in enabling
-# it is on disk. `grep -c` (NEVER -q: -q's early pipe close can SIGPIPE the upstream printf and,
-# under pipefail, return non-zero even on a real match) + `|| true` (grep -c exits 1 with a printed
-# "0" on no match; the bare-substitution caller must never abort).
-publish_30p_stream_live() {
-  printf '%s\n' "$1" | grep -cE 'publish-30p ACTIVE|camera_box::publish_30p:' || true
 }
 
 # --- (g) libndi root-owned symlink chain --------------------------------------------------------
@@ -835,8 +818,6 @@ Checks:
       power/control currently reads "on" (drift check; N/A when no grabber is fitted, #894)
   (y) camera-box ExecStartPre device-free bake-in present (drop-in + helper) so every start frees
       /dev/video from a killed E2E run's stray capture burn (#772)
-  (z) publish-30p.conf drop-in present (CAMERA_BOX_PUBLISH_30P=1) AND the box is actually
-      publishing the secondary "CAMn (30p)" 30fps blend stream (issue 792 / #1087)
   (aa) interkom audio bake-in: by-NAME /etc/asound.conf (CARD=HID), alsa-utils installed, and the
       live amixer Mic/PCM gain matches the per-box table (cam1-4 75%/79%, cam5-7 80%/94%) (#782)
   (ab) RemoteOS MCP agent: remoteos-mcp.service enabled (reboot-survival) + active, :8092 listening
@@ -870,6 +851,8 @@ Checks:
       in BootOrder -- FAILs if absent / not leading / efibootmgr unreadable (test-strictness)
   (am) bkshading-relay blast-radius + info logging (#1309): TasksMax <= 512 AND a running relay
       logs at info (zero journal lines while active FAILs); relay not provisioned = n/a
+  (an) NDI discovery client config (issue 1342): /etc/ndi/ndi-config.v1.json names the dev1
+      Discovery Server with empty networks.ips + the camera-box NDI_CONFIG_DIR drop-in
 
 Env: KERNEL_PIN (optional exact running-kernel pin), NDI_VERSION_PIN (default 6.3.2),
      DANTESYNC_OFFSET_FRESHNESS_S (max age of a fresh [NTP] offset line, default 300),
@@ -1387,28 +1370,6 @@ else
   ok "camera-box ExecStartPre frees /dev/video on every start (#772)"
 fi
 
-# (z) publish-30p.conf drop-in + live "CAMn (30p)" blend stream (issue 792 feature, baked into
-# provisioning by #1087) ------------------------------------------------------------------------
-# TWO facets: (1) the camera-box.service.d/publish-30p.conf drop-in is present with
-# CAMERA_BOX_PUBLISH_30P=1 -- setup-device.sh STEP 7 bakes it, so a re-provisioned box keeps the
-# secondary 30fps blend stream instead of silently regressing to 60p-only -- AND (2) the box is
-# ACTUALLY publishing the "(30p)" NDI source right now (the issue-792 publisher's own journal
-# output), reusing CB_JOURNAL already gathered in (c). A drop-in on disk without the live stream
-# (e.g. an old binary predating issue 792) still FAILs. Inserted BEFORE (q) -- see
-# .claude/rules/provisioning-scripts.md: (q) is the intentionally-LAST check.
-rc=0
-P30_CONF="$(ssh_box "cat /etc/systemd/system/camera-box.service.d/publish-30p.conf 2>/dev/null")" || rc=$?
-P30_VAL="$(publish_30p_dropin_value "$P30_CONF")"
-if [ "$P30_VAL" != "1" ]; then
-  fail "publish-30p.conf drop-in missing or CAMERA_BOX_PUBLISH_30P!=1 (got '${P30_VAL:-<none>}', ssh rc=$rc) -- the secondary 30fps '(30p)' blend stream will not come up (issue 792 / #1087)"
-elif [ -z "$CB_JOURNAL" ]; then
-  fail "publish-30p.conf enabled but the camera-box journal was unreadable -- cannot confirm the '(30p)' stream is actually being published (issue 792 / #1087)"
-elif [ "$(publish_30p_stream_live "$CB_JOURNAL")" != "0" ]; then
-  ok "publish-30p.conf CAMERA_BOX_PUBLISH_30P=1 and the '(30p)' blend stream is live (issue 792 / #1087)"
-else
-  fail "publish-30p.conf enabled but NO '(30p)' publisher activity in the last 300 journal lines -- the secondary blend stream is NOT being published (old binary predating issue 792? issue 792 / #1087)"
-fi
-
 # (aa) interkom audio bake-in: by-NAME asound.conf + per-box Mic/PCM mixer gains + alsa-utils
 # installed (#782) ------------------------------------------------------------------------------
 # Provisioning must reproduce the hand-unified fleet audio state so a re-provisioned box does not
@@ -1793,6 +1754,29 @@ else
     FAIL:*) fail "bkshading-relay: ${RELAY_VERDICT#FAIL: }" ;;
     *) fail "could not grade bkshading-relay state (verdict='${RELAY_VERDICT}', present='${R_PRESENT}')" ;;
   esac
+fi
+
+# (an) NDI discovery client config (issue 1342) -- HARD FAIL ---------------------------------------
+# The fleet discovers NDI sources via the dev1 NDI Discovery Server, not only mDNS. setup-device.sh
+# STEP 7 writes /etc/ndi/ndi-config.v1.json (networks.discovery = the server list, networks.ips
+# empty) and a camera-box.service.d drop-in pointing libndi's NDI_CONFIG_DIR at /etc/ndi. This
+# grades BOTH, read-only, in one ssh round trip, via the shared scripts/lib/ndi-discovery.sh verdict.
+# Inserted BEFORE (q) per .claude/rules/provisioning-scripts.md (the (q)-last invariant); fail()
+# only, never a warn.
+anrc=0
+NDI_DISC_BLOCK="$(ssh_box "$(ndi_discovery_gather_remote_snippet)")" || anrc=$?
+NDI_DISC_CONF="$(ndi_discovery_block_section "$NDI_DISC_BLOCK" NDI_CONF)"
+NDI_DISC_DROPIN="$(ndi_discovery_block_section "$NDI_DISC_BLOCK" NDI_DROPIN)"
+NDI_DISC_VERDICT="$(ndi_discovery_config_verdict "$NDI_DISC_CONF")"
+NDI_DISC_DIR="$(ndi_discovery_dropin_config_dir "$NDI_DISC_DROPIN")"
+if [ "$anrc" -ne 0 ]; then
+  fail "could not read the NDI discovery config over SSH (rc=$anrc, issue 1342)"
+elif [ "$NDI_DISC_VERDICT" != "ok" ]; then
+  fail "NDI discovery config ${NDI_DISCOVERY_SYSTEM_DIR}/${NDI_DISCOVERY_CONFIG_NAME}: $(printf '%s' "$NDI_DISC_VERDICT" | tr '\n' ' ' | sed 's/FAIL: //g')-- re-run setup-device.sh (issue 1342)"
+elif [ "$NDI_DISC_DIR" != "$NDI_DISCOVERY_SYSTEM_DIR" ]; then
+  fail "camera-box.service.d/ndi-discovery.conf missing or NDI_CONFIG_DIR='${NDI_DISC_DIR:-<none>}' (want ${NDI_DISCOVERY_SYSTEM_DIR}) -- libndi would never read the discovery config (issue 1342)"
+else
+  ok "NDI discovery client config: discovery=${NDI_DISCOVERY_SERVERS} + NDI_CONFIG_DIR=${NDI_DISCOVERY_SYSTEM_DIR} drop-in (issue 1342)"
 fi
 
 # (q) .bak cruft drift -- WARNING only, never a FAIL (#453) -------------------------------------

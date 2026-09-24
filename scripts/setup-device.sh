@@ -79,6 +79,12 @@ fail() {
                            # create-usb-linux.sh, single source of truth for the NTP-client DSCP
                            # nftables OUTPUT-mangle rule (udp dport 123 -> dscp ef) + its boot oneshot
 
+# shellcheck source=scripts/lib/ndi-discovery.sh
+. "$HERE/lib/ndi-discovery.sh"  # ndi_discovery_write_config / ndi_discovery_dropin_content (issue
+                                # 1342) -- also sourced by verify-device.sh's (an) check +
+                                # setup-strih.sh, single source of truth for the NDI Discovery
+                                # Server client config (/etc/ndi/ndi-config.v1.json)
+
 # shellcheck source=scripts/lib/ndi-provision.sh
 . "$HERE/lib/ndi-provision.sh"  # NDI_VERSION_PIN + ndi_bootstrap_peer_list / ndi_runtime_version_matches_pin
                                 # (#1066) -- also sourced by verify-device.sh's (o) check, single source of
@@ -834,22 +840,24 @@ camera_box_free_capture_device_script_content > /usr/local/bin/camera-box-free-c
 chmod +x /usr/local/bin/camera-box-free-capture-device.sh
 camera_box_free_capture_device_dropin_content > /etc/systemd/system/camera-box.service.d/free-capture-device.conf
 echo "  camera-box.service.d/free-capture-device.conf installed -- frees /dev/video on every start (#772)"
-# issue 792 / #1087 — the secondary 30fps NDI blend stream ("CAMn (30p)", a 2-frame 60->30
-# temporal blend) is enabled by this env drop-in; the binary defaults the feature OFF. Every active
-# fleet box already runs it (hand-installed until now), so writing it here makes a re-provisioned
-# box keep the (30p) stream instead of silently regressing to 60p-only. Same enable-only convention
-# as the drop-ins above — effective on the box's next reboot. The heredoc below reproduces the live
-# fleet file byte-for-byte; verify-device.sh's (z) check then proves the drop-in AND the live (30p)
-# stream post-reboot.
-cat > /etc/systemd/system/camera-box.service.d/publish-30p.conf << 'EOF'
-[Service]
-Environment=CAMERA_BOX_PUBLISH_30P=1
-EOF
+# issue 1342 -- the camera box publishes ONE NDI output, `CAMn (usb)`. The retired secondary
+# 30fps blend stream had no consumer (0 OBS inputs bound to it, verified live 24.9.2026); its
+# code is gone and a re-provision DELETES the drop-in that used to enable it, so a live box that
+# still carries it converges (the env var is ignored by the new binary either way).
+rm -f /etc/systemd/system/camera-box.service.d/publish-30p.conf
+# issue 1342 -- NDI Discovery Server client config (scripts/lib/ndi-discovery.sh): the system-dir
+# ndi-config.v1.json (networks.discovery = dev1) + a drop-in pointing libndi's NDI_CONFIG_DIR at it
+# (camera-box runs as root with ProtectHome=yes, so /root/.ndi would be invisible to it). A
+# configured sender stops announcing over mDNS -- the supervisor configures every RECEIVER first
+# (.claude/rules/ndi-discovery.md rollout order). Enable-only, effective on the next start.
+ndi_discovery_write_config "$NDI_DISCOVERY_SYSTEM_DIR"
+ndi_discovery_dropin_content > "$NDI_DISCOVERY_CAMBOX_DROPIN"
+echo "  NDI discovery: ${NDI_DISCOVERY_SYSTEM_DIR}/${NDI_DISCOVERY_CONFIG_NAME} (discovery=${NDI_DISCOVERY_SERVERS}) + camera-box.service.d/ndi-discovery.conf (issue 1342)"
 
 systemctl daemon-reload
 systemctl enable camera-box
 echo "  Service created and enabled"
-echo "  Drop-ins: cpu-affinity.conf (CPUAffinity=3, isolcpus core) + genlock.conf (CAMERA_BOX_GENLOCK_FPS=${CAMERA_GENLOCK_FPS}) + publish-30p.conf (CAMERA_BOX_PUBLISH_30P=1)"
+echo "  Drop-ins: cpu-affinity.conf (CPUAffinity=3, isolcpus core) + genlock.conf (CAMERA_BOX_GENLOCK_FPS=${CAMERA_GENLOCK_FPS}) + ndi-discovery.conf (NDI_CONFIG_DIR=${NDI_DISCOVERY_SYSTEM_DIR})"
 
 # =============================================================================
 # STEP 8: Configure auto-login on tty1
