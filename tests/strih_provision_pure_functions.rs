@@ -736,12 +736,12 @@ fn dantesync_unit_text_renders_the_role_and_fail_closes_on_ambiguous_shapes() {
     // client with no ARGS defaults to the client args helper -- whose upstream is the box fact
     // STRIH_DANTESYNC_UPSTREAM or the STRIH_LX_NTP_SERVER override (issue 1361).
     let (c2b, out2b, _e) = run_sourced(
-        &[("STRIH_LX_NTP_SERVER", "ntp-master.lan")],
+        &[("STRIH_LX_NTP_SERVER", "venue-ntp.lan")],
         "strih_dantesync_unit_text client ''",
     );
     assert_eq!(c2b, 0);
     assert!(
-        out2b.contains("ExecStart=/usr/local/bin/dantesync --ntp-server ntp-master.lan"),
+        out2b.contains("ExecStart=/usr/local/bin/dantesync --ntp-server venue-ntp.lan"),
         "the default client ExecStart must carry the client args: {out2b}"
     );
     // ...and on a box with NO upstream (strih-lx is the NTP master) `client ''` is refused and emits
