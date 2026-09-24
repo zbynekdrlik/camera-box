@@ -841,18 +841,23 @@ chmod +x /usr/local/bin/camera-box-free-capture-device.sh
 camera_box_free_capture_device_dropin_content > /etc/systemd/system/camera-box.service.d/free-capture-device.conf
 echo "  camera-box.service.d/free-capture-device.conf installed -- frees /dev/video on every start (#772)"
 # issue 1342 -- the camera box publishes ONE NDI output, `CAMn (usb)`. The retired secondary
-# 30fps blend stream had no consumer (0 OBS inputs bound to it, verified live 24.9.2026); its
-# code is gone and a re-provision DELETES the drop-in that used to enable it, so a live box that
-# still carries it converges (the env var is ignored by the new binary either way).
+# 30fps blend stream had no consumer (the main's read-only OBS-WS read on 24.9.2026 found 0 of the
+# strih-lx + stream NDI inputs bound to a (30p) source, and no mapping/pin/scene table in this repo
+# names one); its code is gone and a re-provision DELETES the drop-in that used to enable it, so a
+# live box that still carries it converges (the env var is ignored by the new binary either way).
 rm -f /etc/systemd/system/camera-box.service.d/publish-30p.conf
 # issue 1342 -- NDI Discovery Server client config (scripts/lib/ndi-discovery.sh): the system-dir
 # ndi-config.v1.json (networks.discovery = dev1) + a drop-in pointing libndi's NDI_CONFIG_DIR at it
 # (camera-box runs as root with ProtectHome=yes, so /root/.ndi would be invisible to it). A
-# configured sender stops announcing over mDNS -- the supervisor configures every RECEIVER first
-# (.claude/rules/ndi-discovery.md rollout order). Enable-only, effective on the next start.
-ndi_discovery_write_config "$NDI_DISCOVERY_SYSTEM_DIR"
-ndi_discovery_dropin_content > "$NDI_DISCOVERY_CAMBOX_DROPIN"
-echo "  NDI discovery: ${NDI_DISCOVERY_SYSTEM_DIR}/${NDI_DISCOVERY_CONFIG_NAME} (discovery=${NDI_DISCOVERY_SERVERS}) + camera-box.service.d/ndi-discovery.conf (issue 1342)"
+# configured sender stops announcing over mDNS, so it is written ONLY once the rollout gate
+# NDI_DISCOVERY_ENABLED is on (.claude/rules/ndi-discovery.md). Enable-only, effective on the next start.
+if ndi_discovery_enabled; then
+    ndi_discovery_write_config "$NDI_DISCOVERY_SYSTEM_DIR"
+    ndi_discovery_dropin_content > "$NDI_DISCOVERY_CAMBOX_DROPIN"
+    echo "  NDI discovery: ${NDI_DISCOVERY_SYSTEM_DIR}/${NDI_DISCOVERY_CONFIG_NAME} (discovery=${NDI_DISCOVERY_SERVERS}) + camera-box.service.d/ndi-discovery.conf (issue 1342)"
+else
+    echo "  NDI discovery: rollout gate off (NDI_DISCOVERY_ENABLED=0) -- no client config written, mDNS only (issue 1342)"
+fi
 
 systemctl daemon-reload
 systemctl enable camera-box

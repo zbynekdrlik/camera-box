@@ -297,14 +297,20 @@ fi
 # on for receiving. TWO readers on this box: the desktop user's ~/.ndi (OBS via strih-obs.service
 # and bkshading-service, both User=${DESKTOP_USER}), and the system dir /etc/ndi for intercom-hub,
 # whose ProtectHome hides ~/.ndi -- its drop-in points NDI_CONFIG_DIR there. Written here, before
-# the OBS/intercom units start (steps 8/13); the next OBS/intercom start reads it.
-ndi_discovery_write_config "${USER_HOME}/.ndi" "$DESKTOP_USER" \
-  || fail "NDI discovery config write to ${USER_HOME}/.ndi failed (issue 1342)"
-ndi_discovery_write_config "$NDI_DISCOVERY_SYSTEM_DIR" \
-  || fail "NDI discovery config write to ${NDI_DISCOVERY_SYSTEM_DIR} failed (issue 1342)"
-mkdir -p /etc/systemd/system/intercom-hub.service.d
-ndi_discovery_dropin_content > /etc/systemd/system/intercom-hub.service.d/ndi-discovery.conf
-echo "  NDI discovery config: ${USER_HOME}/.ndi + ${NDI_DISCOVERY_SYSTEM_DIR} (discovery=${NDI_DISCOVERY_SERVERS}) + intercom-hub NDI_CONFIG_DIR drop-in (issue 1342)"
+# the OBS/intercom units start (steps 8/13); the next OBS/intercom start reads it. strih-lx is a
+# SENDER too (its STRIH-LX outputs) and a configured sender stops mDNS, so nothing is written until
+# the rollout gate NDI_DISCOVERY_ENABLED is on (every strih-lx deploy re-runs this script).
+if ndi_discovery_enabled; then
+  ndi_discovery_write_config "${USER_HOME}/.ndi" "$DESKTOP_USER" \
+    || fail "NDI discovery config write to ${USER_HOME}/.ndi failed (issue 1342)"
+  ndi_discovery_write_config "$NDI_DISCOVERY_SYSTEM_DIR" \
+    || fail "NDI discovery config write to ${NDI_DISCOVERY_SYSTEM_DIR} failed (issue 1342)"
+  mkdir -p /etc/systemd/system/intercom-hub.service.d
+  ndi_discovery_dropin_content > /etc/systemd/system/intercom-hub.service.d/ndi-discovery.conf
+  echo "  NDI discovery config: ${USER_HOME}/.ndi + ${NDI_DISCOVERY_SYSTEM_DIR} (discovery=${NDI_DISCOVERY_SERVERS}) + intercom-hub NDI_CONFIG_DIR drop-in (issue 1342)"
+else
+  echo "  NDI discovery: rollout gate off (NDI_DISCOVERY_ENABLED=0) -- no client config written, mDNS only (issue 1342)"
+fi
 
 # ---------------------------------------------------------------------------------------------
 step 5 "OBS profile facts (${BOX_NAME}: seeded from the Windows 'light' profile)"

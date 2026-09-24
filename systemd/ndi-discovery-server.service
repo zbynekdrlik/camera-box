@@ -17,9 +17,10 @@ Type=simple
 # .claude/rules/ndi-discovery.md "Install on dev1". %h = the installing user's home (newlevel).
 # No -bind: the default 0.0.0.0 serves the rig LAN address (10.77.9.200, what every client's
 # networks.discovery names) and survives the address appearing late at boot; dev1's LAN firewall
-# is already open (see rig-lease-server.README.md). -port 5959 = the SDK default every client
-# assumes when networks.discovery carries no port.
-ExecStart=%h/.local/bin/ndi-discovery-server -port 5959
+# is already open (see rig-lease-server.README.md). No flags at all: the documented defaults are
+# bind 0.0.0.0 + port 5959 (what every client assumes when networks.discovery carries no port), and
+# an unverified flag the installed binary rejected would crash-loop the unit.
+ExecStart=%h/.local/bin/ndi-discovery-server
 # always (not on-failure): the registry must be up whenever dev1 is -- a clean exit is never
 # intended. A dead server makes every CONFIGURED sender invisible (senders stop mDNS once a
 # discovery server is configured), so it restarts fast.

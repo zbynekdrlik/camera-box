@@ -164,7 +164,8 @@
 #        relay: TasksMax <= 512 (fork/thread runaway can't starve the box pid space) AND a running
 #        relay logs at info (zero journal lines while active = an old binary predating info-by-
 #        default logging). A box without the relay = `na`; a disabled/inactive relay skips logging.
-#   (an) NDI discovery client config (issue 1342) -- HARD FAIL: /etc/ndi/ndi-config.v1.json names the
+#   (an) NDI discovery client config (issue 1342) -- HARD FAIL once the rollout gate
+#        NDI_DISCOVERY_ENABLED is on (before that, a box with neither file passes): /etc/ndi/ndi-config.v1.json names the
 #        dev1 NDI Discovery Server (networks.discovery, scripts/lib/ndi-discovery.sh) with an EMPTY
 #        networks.ips, AND the camera-box.service.d/ndi-discovery.conf drop-in points NDI_CONFIG_DIR
 #        at /etc/ndi (camera-box runs as root with ProtectHome=yes, so /root/.ndi is invisible).
@@ -1761,6 +1762,8 @@ fi
 # STEP 7 writes /etc/ndi/ndi-config.v1.json (networks.discovery = the server list, networks.ips
 # empty) and a camera-box.service.d drop-in pointing libndi's NDI_CONFIG_DIR at /etc/ndi. This
 # grades BOTH, read-only, in one ssh round trip, via the shared scripts/lib/ndi-discovery.sh verdict.
+# While the rollout gate NDI_DISCOVERY_ENABLED is off, a box with NEITHER file is the correct state
+# (ok); a half-written box, or any box once the gate is on, is graded in full.
 # Inserted BEFORE (q) per .claude/rules/provisioning-scripts.md (the (q)-last invariant); fail()
 # only, never a warn.
 anrc=0
@@ -1771,6 +1774,8 @@ NDI_DISC_VERDICT="$(ndi_discovery_config_verdict "$NDI_DISC_CONF")"
 NDI_DISC_DIR="$(ndi_discovery_dropin_config_dir "$NDI_DISC_DROPIN")"
 if [ "$anrc" -ne 0 ]; then
   fail "could not read the NDI discovery config over SSH (rc=$anrc, issue 1342)"
+elif ndi_discovery_rollout_pending "$NDI_DISC_CONF" "$NDI_DISC_DIR"; then
+  ok "NDI discovery rollout gate off (NDI_DISCOVERY_ENABLED=0) and no client config on the box -- mDNS only, the correct pre-rollout state (issue 1342)"
 elif [ "$NDI_DISC_VERDICT" != "ok" ]; then
   fail "NDI discovery config ${NDI_DISCOVERY_SYSTEM_DIR}/${NDI_DISCOVERY_CONFIG_NAME}: $(printf '%s' "$NDI_DISC_VERDICT" | tr '\n' ' ' | sed 's/FAIL: //g')-- re-run setup-device.sh (issue 1342)"
 elif [ "$NDI_DISC_DIR" != "$NDI_DISCOVERY_SYSTEM_DIR" ]; then

@@ -35,10 +35,18 @@
 # Source-only: defines constants + functions, no side effects on its own.
 
 # --- shared constants (single source of truth, consumed cross-file) ---------------------------
-# The discovery server list. dev1's rig-LAN IP (machine-identities: dev1 = 10.77.9.200 on the
-# venue /23, the same address scripts/lib/remote-logging.sh uses for the log sink). A comma list
-# (NDI's redundancy form, e.g. "10.77.9.200,10.77.9.202") is accepted everywhere below.
+# The discovery server list. dev1's rig-LAN IP (the same address scripts/lib/remote-logging.sh
+# REMOTE_LOG_DEV1_IP uses for the log sink; dev1 reads it on enp2s0). A comma list (NDI's
+# redundancy form, e.g. "10.77.9.200,10.77.9.202") is accepted everywhere below.
 NDI_DISCOVERY_SERVERS="${NDI_DISCOVERY_SERVERS:-10.77.9.200}"
+# THE ROLLOUT GATE (issue 1342 review round 1). A SENDER with a discovery server configured stops
+# announcing over mDNS (NDI SDK docs), so writing the client config on a box before the server runs
+# and before every receiver of that box is configured HIDES its sources. The provisioners write the
+# config ONLY when this is 1; the verifiers accept a box with no config while it is 0. The
+# supervisor flips the checked-in default to 1 as one step of the rollout in
+# .claude/rules/ndi-discovery.md (a code change, never a per-box env tweak); an env value
+# overrides it for a single manual run.
+NDI_DISCOVERY_ENABLED="${NDI_DISCOVERY_ENABLED:-0}"
 # The SDK's own config file name.
 NDI_DISCOVERY_CONFIG_NAME="ndi-config.v1.json"
 # System config dir for root / ProtectHome services (pointed at by NDI_CONFIG_DIR).
@@ -46,6 +54,16 @@ NDI_DISCOVERY_SYSTEM_DIR="${NDI_DISCOVERY_SYSTEM_DIR:-/etc/ndi}"
 # The camera-box.service drop-in that points the appliance's libndi at NDI_DISCOVERY_SYSTEM_DIR.
 # shellcheck disable=SC2034  # consumed cross-file by setup-device.sh (install) + verify-device.sh (an)
 NDI_DISCOVERY_CAMBOX_DROPIN="/etc/systemd/system/camera-box.service.d/ndi-discovery.conf"
+
+# ndi_discovery_enabled -> exit 0 iff the rollout gate NDI_DISCOVERY_ENABLED is 1.
+ndi_discovery_enabled() { [ "${NDI_DISCOVERY_ENABLED:-0}" = 1 ]; }
+
+# ndi_discovery_rollout_pending CONF_TEXT DROPIN_DIR -> exit 0 iff the gate is OFF and the box
+# carries neither a config nor an NDI_CONFIG_DIR drop-in -- the correct pre-rollout state, which a
+# verifier reports as ok. Anything half-written, or any box once the gate is on, is graded in full.
+ndi_discovery_rollout_pending() {
+  ! ndi_discovery_enabled && [ -z "$1" ] && [ -z "$2" ]
+}
 
 # ndi_discovery_config_json [SERVERS] -> the canonical ndi-config.v1.json text (2-space indent,
 # one trailing newline, no BOM). SERVERS defaults to NDI_DISCOVERY_SERVERS. The checked-in laptop
@@ -117,26 +135,61 @@ ndi_discovery_dropin_config_dir() {
   printf '%s\n' "$1" | grep -oE '^Environment=NDI_CONFIG_DIR=[^[:space:]]+' | tail -1 | cut -d= -f3- || true
 }
 
-# ndi_discovery_write_config DIR [OWNER] -> write DIR/ndi-config.v1.json (the canonical config),
-# mode 0644, via a temp file + atomic rename so a reader never sees a half-written file. With OWNER,
-# DIR and the file are chowned to OWNER (a desktop user's ~/.ndi). Idempotent. Returns non-zero
-# (with a message on stderr) when DIR cannot be created or written -- callers run it under their
-# own `set -e` or wrap it in `|| fail`.
+# _ndi_discovery_merged_json FILE -> FILE's JSON with ndi.networks.discovery / ndi.networks.ips set
+# to the fleet values and every other key kept (2-space indent, trailing newline -- a canonical file
+# comes back byte-identical). Non-zero when python3 is absent or FILE is not a JSON object.
+_ndi_discovery_merged_json() {
+  command -v python3 >/dev/null 2>&1 || return 1
+  NDI_DISCOVERY_MERGE_SERVERS="$NDI_DISCOVERY_SERVERS" python3 -c '
+import json, os, sys
+with open(sys.argv[1], encoding="utf-8-sig") as fh:
+    doc = json.load(fh)
+if not isinstance(doc, dict):
+    sys.exit(1)
+ndi = doc.get("ndi")
+if not isinstance(ndi, dict):
+    ndi = doc["ndi"] = {}
+net = ndi.get("networks")
+if not isinstance(net, dict):
+    net = ndi["networks"] = {}
+net["ips"] = ""
+net["discovery"] = os.environ["NDI_DISCOVERY_MERGE_SERVERS"]
+sys.stdout.write(json.dumps(doc, indent=2) + "\n")
+' "$1"
+}
+
+# ndi_discovery_write_config DIR [OWNER] -> write DIR/ndi-config.v1.json, mode 0644, via a temp file
+# + atomic rename so a reader never sees a half-written file. No file yet -> the canonical config.
+# An existing file is MERGED (only ndi.networks.discovery/ips change, every other key is kept);
+# when it cannot be merged (not JSON, or no python3 on the box) and differs from the canonical
+# config, it is backed up to ndi-config.v1.json.bak-<stamp> before being replaced. With OWNER, DIR
+# and the file are chowned to OWNER (a desktop user's ~/.ndi). Idempotent. Returns non-zero (with a
+# message on stderr) when DIR cannot be created or written -- callers wrap it in `|| fail`.
 ndi_discovery_write_config() {
-  local dir="${1:?ndi_discovery_write_config: DIR required}" owner="${2:-}" tmp
+  local dir="${1:?ndi_discovery_write_config: DIR required}" owner="${2:-}" tmp target
+  target="$dir/$NDI_DISCOVERY_CONFIG_NAME"
   mkdir -p "$dir" || { echo "ndi-discovery: cannot create $dir" >&2; return 1; }
   tmp="$(mktemp "$dir/.${NDI_DISCOVERY_CONFIG_NAME}.XXXXXX")" \
     || { echo "ndi-discovery: cannot write into $dir" >&2; return 1; }
-  if ! ndi_discovery_config_json > "$tmp"; then
-    rm -f "$tmp"
-    echo "ndi-discovery: cannot write $tmp" >&2
-    return 1
+  if [ -s "$target" ] && _ndi_discovery_merged_json "$target" > "$tmp" 2>/dev/null; then
+    : # merged: every existing key kept, only networks.discovery/ips set
+  else
+    if ! ndi_discovery_config_json > "$tmp"; then
+      rm -f "$tmp"
+      echo "ndi-discovery: cannot write $tmp" >&2
+      return 1
+    fi
+    if [ -s "$target" ] && ! cmp -s "$target" "$tmp"; then
+      cp -p "$target" "$target.bak-$(date +%Y%m%d-%H%M%S)" \
+        || { rm -f "$tmp"; echo "ndi-discovery: cannot back up $target" >&2; return 1; }
+      echo "ndi-discovery: $target could not be merged -- backed up, replaced with the canonical config" >&2
+    fi
   fi
   chmod 0644 "$tmp"
   if [ -n "$owner" ]; then
     chown "$owner":"$owner" "$dir" "$tmp" || { rm -f "$tmp"; echo "ndi-discovery: chown $owner failed" >&2; return 1; }
   fi
-  mv -f "$tmp" "$dir/$NDI_DISCOVERY_CONFIG_NAME" || { rm -f "$tmp"; echo "ndi-discovery: rename into $dir failed" >&2; return 1; }
+  mv -f "$tmp" "$target" || { rm -f "$tmp"; echo "ndi-discovery: rename into $dir failed" >&2; return 1; }
 }
 
 # ndi_discovery_gather_remote_snippet -> the on-box bash that prints the cambox config + drop-in

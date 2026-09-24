@@ -16,9 +16,10 @@ paths:
 ## What changed and why
 
 - **Each cambox publishes ONE NDI source, `CAMn (usb)`** (60p, the certified `Cam N = CAMN (usb)`
-  mapping). The issue-792 `CAMn (30p)` blend stream is gone: live on 24.9.2026, 0 of 16 OBS NDI
-  inputs on strih-lx + stream were bound to a `(30p)` source, and no mapping table, latency-pin
-  baseline or scene script names one. Setup-device STEP 7 now DELETES a leftover
+  mapping). The issue-792 `CAMn (30p)` blend stream is gone. The main's read-only OBS-WS read on
+  24.9.2026 found 0 of the 16 NDI inputs on strih-lx + stream bound to a `(30p)` source (resolume
+  and laptops were not read), and no mapping table, latency-pin baseline or scene script in this
+  repo names one. Setup-device STEP 7 now DELETES a leftover
   `camera-box.service.d/publish-30p.conf`, so a re-provisioned box converges. The old verify
   check `(z)` is removed. Owner ruling 24.9.2026: "ak na nic tak prosim nech maju iba jeden spravny".
 - **Discovery goes through the NDI SDK's own Discovery Server on dev1**, instead of relying only
@@ -44,13 +45,52 @@ consequences:
 1. **mDNS stays a fallback for RECEIVERS only.** Once a sender (a cambox, the strih-lx OBS
    outputs, stream, resolume) is configured, it is visible only to receivers that are configured
    too. And only while at least one listed server is up.
-2. **Rollout order is receivers first, senders last.** Configuring a receiver is harmless, because
-   it keeps mDNS and only adds the server's list. The cambox re-provision turns the camboxes into
-   discovery-only senders, so it runs only after every receiver below is configured.
+2. **Rollout order is receivers first, senders last.**
+   - Configuring a PURE receiver is harmless: it keeps mDNS and only adds the server's list.
+   - Every managed OBS box is BOTH: strih-lx, stream and resolume publish outputs. Configuring
+     one hides its outputs from every unconfigured receiver, so those boxes belong in the
+     SENDER wave, not the receiver wave.
 
-A redundant second server (`NDI_DISCOVERY_SERVERS="10.77.9.200,10.77.9.202"`, NDI's documented
-redundancy form) removes dev1 as a single point of failure. That call belongs to the main/owner
-(open question on issue 1342); the code takes either value.
+### THE ROLLOUT GATE -- `NDI_DISCOVERY_ENABLED` (scripts/lib/ndi-discovery.sh)
+
+Every strih-lx genlock deploy re-runs `setup-strih.sh` (`scripts/lib/strih-lx-deploy.sh`), and a
+cambox re-provision re-runs `setup-device.sh`. The client config must therefore not ride along on a
+routine deploy before the server and every receiver are ready.
+
+- **Gate OFF (the default, `0`):**
+  - The provisioners write NO client config; they only print that the gate is off.
+  - `verify-device (an)` and `verify-strih` item 34 pass a box that has neither the config nor the
+    drop-in: that is the correct pre-rollout state.
+  - A half-written box is still graded in full.
+- **Gate ON (`1`):** the provisioners write the config, and the verifiers HARD-FAIL any box
+  without it.
+- **Flipping the gate:** the supervisor flips the checked-in default to `1` in the lib, as ONE
+  step of the rollout below. It is a reviewed code change, never a per-box env tweak.
+  `NDI_DISCOVERY_ENABLED=1 setup-*.sh` works for a single manual run.
+
+### Consumers that must have a plan BEFORE the gate flips
+
+Any receiver that cannot or will not carry the config loses every configured sender:
+
+| Consumer | What breaks once the senders are configured | Plan needed |
+|---|---|---|
+| The stock NDI displays / building TVs showing the strih program (`.claude/rules/ndi-portmap-watchdog.md`) | they find sources only via mDNS | owner decision: keep strih-lx unconfigured, or accept the loss |
+| Guest laptops that never ran the `.ps1` | no cambox / strih-lx sources at all | owner decision: every OBS laptop gets the one-line config (owner ruling 24.9.2026 wants every laptop to see every source) |
+| `scripts/ndi-portmap-audit.sh` + its alert watchdog | reads `avahi-browse`; a configured strih-lx drops out of mDNS, so the audit logs an empty map as a gather error and never pages again | move the audit to the server's listing, or keep strih-lx off the gate |
+| dev1 NDI probes (`src/bin/ndi-recv-probe.rs`, `src/probe/reader.rs`, `multi_reader.rs`, `liveness.rs`, run as `newlevel`) | they no longer find the camboxes | copy the config to `~newlevel/.ndi/ndi-config.v1.json` on dev1 before the cambox wave |
+| The cameraman HDMI preview on each cambox (receives `STRIH-LX (interkom)`) | nothing, as long as the cambox and strih-lx flip together (camera-box is configured by the same gate) | flip the gate once for both |
+
+### Open questions for the main / owner
+
+These are recorded on issue 1342; the code accepts either answer.
+
+1. **Server location.** At external events the rig runs at the venue on mobile data, while dev1
+   stays at home behind tailscale (the event-rig network memory). The venue boxes would then
+   depend on a metered off-site link for discovery.
+   - Option: run a server that travels with the rig on strih-lx (`10.77.9.202`), with dev1 as the
+     second entry: `NDI_DISCOVERY_SERVERS="10.77.9.202,10.77.9.200"` (NDI's redundancy form). That
+     would need a strih-lx unit, which is not written yet.
+2. **Stock displays and guest laptops** (the table above).
 
 ## Where the config lives, per box class
 
@@ -66,14 +106,14 @@ The Linux SDK reads `$HOME/.ndi/ndi-config.v1.json`, or `$NDI_CONFIG_DIR/ndi-con
 that env var is set. A root system service without `User=` has no guaranteed `$HOME`, and
 `ProtectHome` hides `/root` anyway, so root services get `/etc/ndi` plus the drop-in.
 
-This also explains the genlock skill's "libndi ignores ndi-config.v1.json" finding (issue 797):
+This plausibly explains the genlock skill's "libndi ignores ndi-config.v1.json" finding (issue 797):
 - That test wrote `/root/.ndi/`, which is invisible under camera-box's `ProtectHome=yes`.
 - It used the non-SDK shape `"rudp":{"recv":false}`; the SDK schema is `"rudp":{"recv":{"enable":false}}`.
 
 So that finding does not prove the SDK ignores the file. Prove the discovery config took effect
 from the SERVER side instead: the server log lists every registered source.
 
-## Supervisor rollout (after production -- code-only lane, nothing here was run live)
+## Supervisor rollout (after production and after the open questions are answered -- code-only lane, nothing here was run live)
 
 1. **Install on dev1.** Fetch the Linux standalone installer
    `Install_NDI_Discovery_Server_v6.sh` from ndi.video. It is NOT in the libndi runtime the
@@ -84,22 +124,28 @@ from the SERVER side instead: the server log lists every registered source.
    `systemctl --user enable --now ndi-discovery-server.service`
    - Linger must be on (`loginctl show-user newlevel -p Linger` = yes, the rig-lease-server precedent).
    - Verify it listens: `ss -ltnp | grep 5959`.
-2. **Receivers first**, each followed by an OBS/app restart:
-   - strih-lx: `setup-strih.sh --box strih-lx` (step 4b), or copy the config by hand, then run
-     `verify-strih.sh` item 34.
-   - stream and resolume: run `scripts/ndi-discovery-laptop.ps1` via the win-* MCP (scp the `.ps1`,
-     then `powershell -File`; never ssh for a GUI step), then restart OBS the usual way (obs-ops).
+2. **Drop the 30p stream (independent of the gate).** Deploy the new camera-box binary and
+   re-provision each cambox. `setup-device.sh` removes `publish-30p.conf`; with the gate still off
+   it writes no discovery config. Restart `camera-box.service`, never a reboot (the
+   never-remote-reboot-a-cambox rule).
+   - Check: `avahi-browse -rtp _ndi._tcp` from dev1 shows 0 `(30p)` sources.
+   - Run this check NOW: once the camboxes are configured senders they drop out of mDNS entirely,
+     and an empty avahi list proves nothing.
+3. **Pure receivers** (safe, they keep mDNS):
    - The owner's laptops: the `.ps1` (Windows), NDI Access Manager -> Advanced -> Discovery Server,
      or the JSON copy (Linux).
-   - Other NDI receivers: any dev1-side NDI probe/finder that still needs to see the camboxes.
-     Inventory it before step 3.
-3. **Senders last:** re-provision the camboxes (setup-device.sh). This removes publish-30p.conf and
-   writes the config + drop-in. Restart `camera-box.service`, never a reboot (the
-   never-remote-reboot-a-cambox rule). Then run `verify-device.sh` `(an)`.
-4. **Acceptance** (issue 1342):
-   - `avahi-browse -rtp _ndi._tcp` from dev1 shows 0 `(30p)` sources.
+   - The dev1 probes: copy `scripts/ndi-discovery/ndi-config.v1.json` to `~newlevel/.ndi/`.
+   - The consumer table above: each row has its plan.
+4. **Sender wave: flip the gate, then configure every sender** together, each followed by an
+   OBS/app/service restart.
+   - Flip: commit `NDI_DISCOVERY_ENABLED` default `1` in the lib.
+   - strih-lx: `setup-strih.sh --box strih-lx` (step 4b), then `verify-strih.sh` item 34.
+   - stream and resolume: `scripts/ndi-discovery-laptop.ps1` via the win-* MCP (scp the `.ps1`,
+     then `powershell -File`; never ssh for a GUI step), then restart OBS the usual way (obs-ops).
+   - Camboxes: `setup-device.sh`, restart `camera-box.service`, then `verify-device.sh` `(an)`.
+5. **Acceptance** (issue 1342):
    - The server log lists every managed sender.
-   - Every managed receiver lists every managed sender within 5 s of OBS start, 10/10 cold starts
+   - Every managed receiver lists every managed sender within 5 s of OBS start: 10/10 cold starts
      on strih-lx and stream, plus one laptop.
 
 ## Laptop quick steps (owner-facing)

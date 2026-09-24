@@ -4,9 +4,9 @@
 
 .DESCRIPTION
   The rig's NDI source discovery used to be mDNS only, and a laptop brought to the venue often did
-  not list every NDI source in OBS. The fleet now runs the NDI Discovery Server on dev1
-  (10.77.9.200, port 5959). This script writes the ONE setting a Windows laptop needs into the
-  machine-wide NDI config file %ProgramData%\NDI\ndi-config.v1.json:
+  not list every NDI source in OBS. The rig's NDI Discovery Server runs on dev1 (10.77.9.200, port
+  5959; rollout in .claude/rules/ndi-discovery.md). This script writes the ONE setting a Windows
+  laptop needs into the machine-wide NDI config file %ProgramData%\NDI\ndi-config.v1.json:
 
       ndi.networks.discovery = <Server>      (the discovery server list)
       ndi.networks.ips       = ""            (a hand-kept static list goes stale -- cleared)
@@ -42,11 +42,14 @@ $ErrorActionPreference = 'Stop'
 $dir  = Join-Path $env:ProgramData 'NDI'
 $path = Join-Path $dir 'ndi-config.v1.json'
 
-# Return $obj.$name, adding it with $default first when the property is missing.
+# Return $obj.$name, adding it with $default first when the property is missing -- or replacing it
+# when it is present but null (e.g. an existing config with "ndi": null).
 function Get-OrAddMember {
   param($obj, [string]$name, $default)
   if ($obj.PSObject.Properties.Name -notcontains $name) {
     $obj | Add-Member -NotePropertyName $name -NotePropertyValue $default
+  } elseif ($null -eq $obj.$name) {
+    $obj.$name = $default
   }
   return $obj.$name
 }
