@@ -20,7 +20,9 @@ set -euo pipefail
 # the win-* MCP (win-ssh-vs-mcp HARD rule -- dev1 has no strih C$, an ssh-launched GUI lands in
 # session 0), so it PRINTS the exact PowerShell program the agent pastes into the box's win-* MCP
 # Shell. The imag leg is Linux (file copy + CLI = Context B), so in execute mode the script actually
-# scp's + ssh-runs its emitted on-imag program. Marker writes go through the shared
+# scp's + ssh-runs its emitted on-imag program, and the strih-lx leg (Linux too) runs the whole
+# setup-strih.sh deploy over ssh with a fail-closed SHA read-back (scripts/lib/strih-lx-deploy.sh,
+# issue 1317 part 6). Marker writes go through the shared
 # scripts/lib/genlock-markers.sh helper (setup-imag.sh carries a parity-locked inline copy).
 #
 # The pure builders take NO network / MCP / Windows and are unit-tested by sourcing this file
@@ -30,8 +32,8 @@ set -euo pipefail
 #   scripts/deploy-genlock-fleet.sh --plan --run-id <id> --sha <headSha> --stage <dir> \
 #       [--full|--fast] [--boxes strih-lx,stream,imag,resolume]
 #
-# Usage (execute mode -- resolve + download the same-SHA artifacts, emit the Windows plan, ssh-deploy
-# imag, append the fleet log; drive Windows via the printed win-* MCP program):
+# Usage (execute mode -- resolve + download the same-SHA artifacts, ssh-deploy strih-lx + imag, emit
+# the Windows plan, append the fleet log; drive Windows via the printed win-* MCP program):
 #   scripts/deploy-genlock-fleet.sh --run-id <id> [--full|--fast] [--boxes strih-lx,stream,imag,resolume] [--yes]
 #
 #   --run-id   the ANCHOR CI run id (any of the three genlock workflows) -- its headSha is the ONE
@@ -64,6 +66,9 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # _keepalive_tasks + the resolume identity note) lives in ONE sourced lib shared with
 # launch-obs-genlock.sh + obs-self-heal-install.sh; it sources scripts/lib/obs-fleet.sh itself.
 . "$HERE/lib/genlock-fleet-boxes.sh"
+# shellcheck source=scripts/lib/strih-lx-deploy.sh
+# issue 1317 part 6: the strih-lx EXECUTE arm + the builders its --plan arm prints (plan == execute).
+. "$HERE/lib/strih-lx-deploy.sh"
 
 GENLOCK_REPO="zbynekdrlik/camera-box"
 FLEET_LOG_DEFAULT="${HOME}/.camera-box/genlock-fleet-deploy.log"
@@ -686,14 +691,16 @@ usage() {
 deploy-genlock-fleet.sh -- ONE deploy path for the OBS genlock build across strih-lx + stream (+ imag
 and resolume, the traveling CG box, when explicitly named -- issues 1316/1295) from ONE anchor CI run id
 (issue 789 bod 4 + bod 5). Resolves the same-SHA artifacts, emits the Windows deploy program for the
-win-* MCP Shell, ssh-deploys imag, applies box-backup retention, and writes one durable fleet-deploy
+win-* MCP Shell, ssh-deploys strih-lx (fail-closed SHA read-back) + imag, applies box-backup
+retention, and writes one durable fleet-deploy
 log line.
 
 Usage (plan -- print the whole fleet plan, no network, from a pre-staged bundle):
   scripts/deploy-genlock-fleet.sh --plan --run-id <id> --sha <headSha> --stage <dir> \
       [--full|--fast] [--boxes strih-lx,stream,imag,resolume]
 
-Usage (execute -- resolve + download the same-SHA artifacts, emit the Windows plan, ssh-deploy imag):
+Usage (execute -- resolve + download the same-SHA artifacts, ssh-deploy strih-lx + imag, emit the
+Windows plan):
   scripts/deploy-genlock-fleet.sh --run-id <id> [--full|--fast] [--boxes strih-lx,stream,imag,resolume] [--yes]
 
   --run-id   the ANCHOR CI run id -- its headSha is the ONE canonical version every box converges to.
@@ -786,48 +793,18 @@ ${program}
 PLAN
 }
 
-# emit the strih-lx plan (issue 1317 part 3). strih-lx is the production strih (a linux-genlock box),
-# but its install is NOT imag's: it runs the strih FULL-build variant into /usr through the
-# provisioning machinery (release-parity gate, runtime packages, /usr prefix, chrome-sandbox) and is
-# supervised by the strih-obs.service user unit, not imag-obs.service. So the plan directs the
-# sanctioned recipe (.claude/rules/strih-linux-provisioning.md "Staging + ssh gotchas") instead of
-# the imag on-box program. Every line is a #-comment, so a saved whole-plan .ps1 still parses (the
-# issue-1295 file-mode rule) and the supervisor runs each step deliberately.
+# emit the strih-lx plan (issue 1317 parts 3 + 6). strih-lx is the production strih (a linux-genlock
+# box), but its install is NOT imag's: the strih FULL-build variant goes into /usr through
+# setup-strih.sh and OBS runs under the strih-obs.service user unit (never imag-obs.service). The
+# steps are printed by scripts/lib/strih-lx-deploy.sh from the SAME builders the execute arm runs,
+# every line a #-comment (the issue-1295 file-mode parse rule).
 emit_strih_lx_plan() {
-  local stage="$1" gsha="$2"
-  # The repo tree (scripts/ + systemd/) goes to ONE fixed path that every deploy overwrites
-  # (rsync --delete), never a per-sha dir: a `<stage>-repo` name matches no obs-backup-retention
-  # allowlist, so it would never be swept, and nesting it inside the stage dir would ship it into
-  # the bundle (setup-strih copies STAGE/. wholesale).
-  local host art lx_stage="/tmp/genlock-stage-${gsha}" lx_repo="/tmp/strih-lx-deploy-repo"
+  local stage="$1" gsha="$2" run="$3" host
   host="$(fleet_box_ip strih-lx)" || { echo "emit_strih_lx_plan: no strih-lx host (STRIH_LX_IP / obs-fleet row)" >&2; return 2; }
-  art="$(fleet_linux_bundle_artifact_for strih-lx)"
   echo "# ================= FLEET PLAN: box=strih-lx (ssh newlevel@${host}, linux-genlock) ================="
   # #1303 part 4: report-only forced-table AUDIO/yuv audit BEFORE the swap (never a write, never a gate).
   emit_forced_table_audit_preflight strih-lx "$host"
-  cat <<PLAN
-# STEP 0a: prune the stale stage copies FIRST -- each staged bundle is ~2.2 GB of /tmp under a
-#          per-user quota, and the third one fails mid-rsync (Disk quota exceeded). From dev1
-#          (it sweeps the obs-fleet strih-lx host; under a STRIH_LX_IP override run the same script
-#          ON that box with --local-sweep instead):
-#            bash scripts/obs-backup-retention.sh --box strih-lx                       # dry-run, read it
-#            bash scripts/obs-backup-retention.sh --box strih-lx --keep-runs 1 --keep-days 0 --execute
-# STEP 0b: stage the '${art}' artifact (downloaded to ${stage}) AND the repo scripts/ + systemd/
-#          dirs (setup-strih.sh reads ../systemd/*.service) on the box:
-#            rsync -a ${stage}/ newlevel@${host}:${lx_stage}/
-#            rsync -a --delete scripts systemd newlevel@${host}:${lx_repo}/
-# STEP 1:  install through the provisioning path (never a hand cp over /usr). sudo needs the
-#          password on stdin over a tty-less ssh -- expand \$PW on dev1 (outer double quotes), and run
-#          the script DIRECTLY (rsync -a keeps its exec bit) so its process name is setup-strih.sh:
-#            sshpass -p "\$PW" ssh newlevel@${host} "printf '%s\\n' '\$PW' | sudo -S -p '' bash -c 'STRIH_LX_BUNDLE_SRC=${lx_stage} nohup ${lx_repo}/scripts/setup-strih.sh > /tmp/setup-strih-${gsha}.log 2>&1 &'"
-#          then poll 'pgrep -x setup-strih.sh' (never pgrep -f -- it matches its own command line)
-#          and read the log's tail for the step-4 'installed genlock bundle' line.
-# STEP 2:  relaunch through the supervised user unit, never a raw launch:
-#            ssh newlevel@${host} 'systemctl --user restart strih-obs.service && systemctl --user is-active strih-obs.service'
-#          then confirm 'render tick ENABLED' in the newest ~/.config/obs-studio/logs/*.txt.
-# STEP 3:  acceptance -- 'bash ${lx_repo}/scripts/verify-strih.sh' ON the box, and from dev1
-#          'python3 scripts/obs_burn_filter.py check --host ${host}' (the WS filter-enum survives).
-PLAN
+  strih_lx_plan_steps "$stage" "$gsha" "$host" "$run"
 }
 
 main() {
@@ -870,7 +847,7 @@ main() {
         imag)            emit_imag_plan "$stage" "$sha" "$sha" ;;
         # issue 1317 part 3: strih-lx gets its OWN plan (setup-strih.sh + strih-obs.service), never
         # the imag on-box program (which restarts imag-obs.service, a unit strih-lx does not have).
-        strih-lx)        emit_strih_lx_plan "$stage" "$sha" ;;
+        strih-lx)        emit_strih_lx_plan "$stage" "$sha" "$run_id" ;;
       esac
     done )
     # issue 1295: emit the fleet-deploy log record as a COMMENT and end the printed plan on `exit 0`.
@@ -887,19 +864,14 @@ main() {
   # --- execute mode -------------------------------------------------------------------------------
   # Resolve the anchor headSha, resolve + download the SAME-SHA artifacts across the (separate)
   # windows/linux workflows, emit the Windows plan (agent uploads + pastes into the win-* MCP Shell),
-  # ssh-deploy imag, and append one fleet-deploy log line. The worker never runs this; the supervisor
+  # ssh-deploy strih-lx + imag, and append one fleet-deploy log line. The worker never runs this; the supervisor
   # drives it live (the ticket stays OPEN until then).
-  # issue 1317 part 3: execute mode has no strih-lx arm yet (see the NOTE below), so the boxes it
-  # really deploys -- and records in the durable fleet log -- exclude strih-lx. A run that would
-  # deploy NOTHING is a usage error, never a green "deployed" log line for a box it never touched.
-  local exec_boxes; exec_boxes="$(fleet_execute_boxes "$boxes")"
-  [ -n "$exec_boxes" ] || { echo "ERROR: execute mode has nothing to deploy for '$boxes' -- the strih-lx execute arm is a follow-up; use --plan for its recipe" >&2; exit 2; }
   command -v gh >/dev/null 2>&1 || { echo "ERROR: gh CLI required for execute mode" >&2; exit 3; }
   command -v jq >/dev/null 2>&1 || { echo "ERROR: jq required for execute mode" >&2; exit 3; }
   local sha; sha="$(gh run view "$run_id" --repo "$GENLOCK_REPO" --json headSha -q .headSha 2>/dev/null)" \
     || { echo "ERROR: could not resolve headSha for anchor run $run_id" >&2; exit 3; }
   [ -n "$sha" ] || { echo "ERROR: empty headSha for anchor run $run_id" >&2; exit 3; }
-  echo "# anchor run $run_id -> canonical SHA $sha; deploying: $exec_boxes (requested: $boxes; mode $mode; retention --yes=$yes)"
+  echo "# anchor run $run_id -> canonical SHA $sha; deploying: $boxes (mode $mode; retention --yes=$yes)"
 
   local workdir; workdir="$(mktemp -d)"
   # shellcheck disable=SC2064
@@ -911,13 +883,11 @@ main() {
   case ",$boxes," in *,stream,*|*,resolume,*) want_win=1 ;; esac
   case ",$boxes," in *,imag,*) want_imag=1 ;; esac
   case ",$boxes," in *,strih-lx,*) want_strihlx=1 ;; esac
-  # issue 1317: the strih-lx EXECUTE deploy (download the strih artifact + drive the setup-strih.sh
-  # recipe over ssh) is a follow-up; the PLAN arm prints that exact recipe (emit_strih_lx_plan).
-  # Until then, execute against strih-lx is a no-op with a loud note rather than a silent success,
-  # so an operator is never misled.
+  # --- strih-lx (issue 1317 part 6): the whole deploy, fail-loud, stage-before-stop, fail-closed
+  # SHA read-back (scripts/lib/strih-lx-deploy.sh). A failure exits 3/4 with the step named and NO
+  # fleet-log line; it runs first so a failed production strih never gets a "deployed" record.
   if [ "$want_strihlx" = 1 ]; then
-    echo "# NOTE(issue 1317): strih-lx EXECUTE deploy is a follow-up -- use --plan for the recipe, or run" >&2
-    echo "#   setup-strih.sh with STRIH_LX_BUNDLE_SRC=<dir of the $(fleet_linux_bundle_artifact_for strih-lx) artifact> ON the box." >&2
+    strih_lx_execute_deploy "$sha" "$workdir" "$HERE/.." "$GENLOCK_REPO" || exit $?
   fi
 
   # --- Windows: download the same-SHA artifact, emit the per-box plan (agent uploads + pastes) -----
@@ -980,7 +950,7 @@ main() {
 
   # --- durable fleet-deploy log line ---------------------------------------------------------------
   mkdir -p "$(dirname "$FLEET_LOG_DEFAULT")"
-  fleet_log_line "$run_id" "$sha" "$exec_boxes" "$mode" >> "$FLEET_LOG_DEFAULT"
+  fleet_log_line "$run_id" "$sha" "$boxes" "$mode" >> "$FLEET_LOG_DEFAULT"
   echo "# fleet-deploy log appended: $FLEET_LOG_DEFAULT"
   exit 0
 }
