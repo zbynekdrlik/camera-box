@@ -432,6 +432,19 @@ mod tests {
     }
 
     #[test]
+    fn the_stagger_is_off_in_production_1242() {
+        // 24.9.2026: the 7.2 ms CAM7 offset did not fit the slot (per-frame work spikes to 15 ms
+        // -> OVER BUDGET -> a 112-relock burst on strih-lx), and the switch drops did not clearly
+        // improve, so the shipped plan() hands every frame over at once again.
+        assert!(!STAGGER_ACTIVE);
+        let p = plan("CAM7", Some(60), 60, 1);
+        assert_eq!(p.offset, Duration::ZERO);
+        assert!(p.log_line.contains("offset=0 us (#1242)"), "{}", p.log_line);
+        assert!(p.log_line.contains("stagger disabled"), "{}", p.log_line);
+        assert!(!p.warn);
+    }
+
+    #[test]
     fn plan_resolves_offset_and_the_one_startup_line_1242() {
         let p = plan("CAM7", Some(60), 60, 1);
         assert_eq!(p.camera, Some(7));
