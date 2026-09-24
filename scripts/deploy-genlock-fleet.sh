@@ -70,6 +70,9 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/strih-lx-deploy.sh
 # issue 1317 part 6: the strih-lx EXECUTE arm + the builders its --plan arm prints (plan == execute).
 . "$HERE/lib/strih-lx-deploy.sh"
+# shellcheck source=scripts/lib/stray-session-check.sh
+# the ONE shared rig-busy guard strih_lx_apply runs before its first mutation (rig-mutation-broadcast-guard.md).
+. "$HERE/lib/stray-session-check.sh"
 
 GENLOCK_REPO="zbynekdrlik/camera-box"
 FLEET_LOG_DEFAULT="${HOME}/.camera-box/genlock-fleet-deploy.log"

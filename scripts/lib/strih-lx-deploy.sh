@@ -28,7 +28,14 @@
 #                 and the intercom routing file it names; the GH token (STRIH_LX_GH_TOKEN, else
 #                 `gh auth token`). setup-strih.sh runs as `setup-strih.sh --box strih-lx` (issue 1361).
 #   strih_lx_apply (exit 4 on failure, every message names its step)
-#     preflight -- refuse while a previous setup-strih.sh still runs on the box;
+#     preflight -- refuse unless the box is the fact file's host, while a previous setup-strih.sh
+#                  still runs on the box, and while a broadcast is LIVE: the ONE shared rig-busy guard
+#                  stray_session_check_assert (scripts/lib/stray-session-check.sh, sourced by the
+#                  caller; .claude/rules/rig-mutation-broadcast-guard.md) reads strih (the strih-lx
+#                  dial IP) + stream (the obs-fleet row) immediately before the first mutation --
+#                  streaming/recording on either = exit 4 naming what is live, nothing changed. Its
+#                  fail-OPEN (WARN + proceed when NO box is readable) is the shared semantics, not
+#                  redefined here;
 #     sweep     -- the stage is created + touched NEWEST, then the EXISTING obs-backup-retention.sh
 #                  --local-sweep decision (--stages-only, keep the newest 1, as the operator -- the
 #                  stage dirs are the operator's) removes every older /tmp/genlock-stage-<sha>; a stage
@@ -55,7 +62,9 @@
 # PATH): STRIH_LX_SETUP_POLLS / STRIH_LX_SETUP_POLL_SECS (setup rc poll, default 270 x 10 s = 45 min),
 # STRIH_LX_VERIFY_POLLS / STRIH_LX_VERIFY_POLL_SECS (read-back poll, default 24 x 10 s = 4 min),
 # STRIH_LX_VERIFY_SETTLE_SECS (how long the MainPID/NRestarts must hold, default 90 s),
-# STRIH_LX_SSH_TIMEOUT (per remote command, default 180 s).
+# STRIH_LX_SSH_TIMEOUT (per remote command, default 180 s), STRIH_LX_OBS_PHASE2_DIR (the dir holding
+# the obs_phase2.py the rig-busy guard runs, default this lib's scripts/ -- the test points it at a
+# fake so no test opens a WebSocket to the rig; mirrors BKSHADING_DEPLOY_OBS_PHASE2_DIR).
 # Transport env: STRIH_LX_IP (dial override only, via fleet_box_ip -- must be an IPv4), STRIH_LX_USER
 # / STRIH_LX_PW (default newlevel / newlevel -- the rig's shared Linux-box creds, targets.md; sshpass
 # -p is the repo-wide convention), STRIH_LX_GH_TOKEN (a read-only token instead of the operator's).
@@ -198,6 +207,38 @@ RUNNER
 
 # --- pure verdicts --------------------------------------------------------------------------------
 
+# strih_lx_busy_summary GUARD_STDERR -> one line naming what is live, built from the shared guard's
+# OWN refusal output (its `rig-busy-check: <json>` diagnostics + the key-free `<box> streaming:
+# <detail>` lines) -- e.g. `stream streaming (server=rtmp://... outputDuration=...)` or `strih
+# recording (timecode 00:04:10.000)`. Never a second WebSocket read. Unparseable = a pointer to the
+# guard output printed just above. Pure.
+strih_lx_busy_summary() {
+  local s
+  s="$(printf '%s\n' "${1:-}" | python3 -c '
+import json, sys
+live, detail, diags = [], {}, []
+for line in sys.stdin.read().splitlines():
+    t = line.strip()
+    if t.startswith("rig-busy-check:"):
+        try:
+            diags = json.loads(t[len("rig-busy-check:"):]).get("diagnostics") or []
+        except (ValueError, AttributeError):
+            diags = []
+    elif " streaming: " in t:
+        box, _, rest = t.partition(" streaming: ")
+        detail[box] = rest
+for x in diags:
+    host = str(x.get("host", "?"))
+    if x.get("streaming"):
+        live.append(host + " streaming" + (" (" + detail[host] + ")" if host in detail else ""))
+    if x.get("recording"):
+        tc = x.get("recordTimecode")
+        live.append(host + " recording" + (" (timecode " + str(tc) + ")" if tc else ""))
+print("; ".join(live))
+' 2>/dev/null)" || s=""
+  printf '%s\n' "${s:-see the rig-busy guard output above}"
+}
+
 # strih_lx_deploy_verdict WANT INSTALLED ACTIVE BS_SHA WANT_LIB LIB TICK -> `OK` (rc 0) or
 # `FAIL: <why>` lines (rc 1). Fail-closed: an empty value anywhere is a FAIL, never "unknown = fine".
 strih_lx_deploy_verdict() {
@@ -288,6 +329,13 @@ _strih_lx_field() {  # KEY LINE -> the value of KEY=<value> in a read-back line
   printf ' %s\n' "$2" | sed -n "s/.*[[:space:]]$1=\([^ ]*\).*/\1/p" | head -n 1
 }
 
+# strih_lx_obs_phase2_dir -> the dir holding the obs_phase2.py the rig-busy guard runs:
+# STRIH_LX_OBS_PHASE2_DIR, else this lib's scripts/ dir.
+strih_lx_obs_phase2_dir() {
+  if [ -n "${STRIH_LX_OBS_PHASE2_DIR:-}" ]; then printf '%s\n' "$STRIH_LX_OBS_PHASE2_DIR"; return 0; fi
+  (cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+}
+
 _strih_lx_start_best_effort() {
   echo "# strih-lx: starting the installed OBS best-effort so the box is not left dark" >&2
   _strih_lx_ssh "$(strih_lx_remote_start_cmd "$STRIH_LX_PREP_STAGE")" || true
@@ -314,13 +362,21 @@ strih_lx_prepare() {
   STRIH_LX_PREP_HOST="$(fleet_box_ip strih-lx)" || { _strih_lx_fail resolve 2 3 "no strih-lx host (STRIH_LX_IP / obs-fleet row)"; return; }
   strih_lx_is_ipv4 "$STRIH_LX_PREP_HOST" \
     || { _strih_lx_fail resolve 2 3 "strih-lx host '$STRIH_LX_PREP_HOST' must be a dotted IPv4 (the fleet row is one; strih-lx.lan does not resolve on dev1, and a flag-shaped or mistyped override is refused up front)"; return; }
+  # the rig-busy guard's inputs, resolved here so a missing one refuses before any box is touched: the
+  # stream OBS host (the obs-fleet row), the obs_phase2.py it runs, and the shared guard itself.
+  STRIH_LX_PREP_STREAM_HOST="$(fleet_box_ip stream)" && [ -n "$STRIH_LX_PREP_STREAM_HOST" ] \
+    || { _strih_lx_fail resolve 2 3 "no stream host (obs-fleet row) for the rig-busy guard"; return; }
+  STRIH_LX_PREP_OBS_PHASE2_DIR="$(strih_lx_obs_phase2_dir)" && [ -f "$STRIH_LX_PREP_OBS_PHASE2_DIR/obs_phase2.py" ] \
+    || { _strih_lx_fail resolve 2 3 "no obs_phase2.py in '${STRIH_LX_PREP_OBS_PHASE2_DIR:-}' -- the rig-busy guard could not read strih/stream"; return; }
+  declare -F stray_session_check_assert >/dev/null \
+    || { _strih_lx_fail resolve 2 3 "stray_session_check_assert is not loaded (source scripts/lib/stray-session-check.sh) -- the deploy never stops OBS unguarded"; return; }
   STRIH_LX_PREP_STAGE="$(strih_lx_stage_dir "$sha")" || { _strih_lx_fail resolve 2 3 "canonical SHA '$sha' is not a hex commit id"; return; }
   local vp="${STRIH_LX_VERIFY_POLLS:-24}" vs="${STRIH_LX_VERIFY_POLL_SECS:-10}" st="${STRIH_LX_VERIFY_SETTLE_SECS:-90}"
   # the first poll has no sleep before it, so the observable window is (polls - 1) x secs.
   if [ "$st" -gt 0 ] && [ $(((vp - 1) * vs)) -lt "$st" ]; then
     _strih_lx_fail resolve 2 3 "STRIH_LX_VERIFY_SETTLE_SECS=$st cannot fit the read-back window (${vp} - 1) x ${vs} s -- the deploy would always be refused"; return
   fi
-  for tool in sshpass rsync curl tar jq timeout; do
+  for tool in sshpass rsync curl tar jq timeout python3; do
     command -v "$tool" >/dev/null 2>&1 || { _strih_lx_fail resolve 127 3 "$tool is required for the strih-lx deploy"; return; }
   done
   art="$(fleet_linux_bundle_artifact_for strih-lx)"
@@ -365,6 +421,14 @@ strih_lx_apply() {
   out="$(_strih_lx_ssh "$(strih_lx_remote_installer_cmd)")"; rc=$?
   [ "$rc" = 0 ] || { _strih_lx_fail preflight "$rc" 4 "cannot reach ${STRIH_LX_PREP_HOST} over ssh -- nothing changed"; return; }
   [ "$(printf '%s' "$out" | tr -d '[:space:]')" = "idle" ] || { _strih_lx_fail preflight 1 4 "a previous setup-strih.sh is still running on the box (pgrep -x setup-strih.sh) -- wait for it; nothing changed"; return; }
+  # ... and never while a broadcast is LIVE: this deploy STOPS the production strih OBS. The ONE
+  # shared rig-busy guard, immediately before the first mutation, at the strih-lx dial IP + the stream
+  # host. It `exit 1`s on a refusal (written for bare-statement callers), so it runs in a subshell
+  # here; its stdout passes through, its stderr is re-printed and names what is live.
+  local guard_err
+  { guard_err="$( ( stray_session_check_assert "$STRIH_LX_PREP_OBS_PHASE2_DIR" "$STRIH_LX_PREP_HOST" "$STRIH_LX_PREP_STREAM_HOST" "the strih-lx OBS deploy (stop + setup-strih.sh)" ) 2>&1 1>&3 3>&- )"; rc=$?; } 3>&1
+  [ -n "$guard_err" ] && printf '%s\n' "$guard_err" >&2
+  [ "$rc" = 0 ] || { _strih_lx_fail preflight "$rc" 4 "a broadcast is LIVE on strih/stream: $(strih_lx_busy_summary "$guard_err") -- refusing to stop the strih OBS; nothing changed"; return; }
 
   # [sweep] stage created + touched newest FIRST, then the retention sweep keeps only it.
   _strih_lx_ssh "$(strih_lx_remote_prep_cmd "$stage")"; rc=$?
@@ -520,6 +584,9 @@ strih_lx_plan_steps() {
 #          generated run-setup.sh -> ${lstage}/repo.
 # STEP 2 (preflight): the box must be the fact file's host ('$(strih_lx_remote_identity_cmd)' == STRIH_HOSTNAME),
 #          and no previous install may run:  $(strih_lx_remote_installer_cmd)
+#          and no broadcast may be LIVE: the shared rig-busy guard stray_session_check_assert
+#          (scripts/lib/stray-session-check.sh) reads strih ${host} + the obs-fleet stream host --
+#          streaming/recording on either = exit 4, nothing changed.
 # STEP 3 (sweep): the stage is created + touched NEWEST, then the obs-backup-retention.sh
 #          --local-sweep decision (what 'obs-backup-retention.sh --box strih-lx' runs), stage dirs
 #          only, as the operator, keeps only it:
