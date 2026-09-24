@@ -1,0 +1,17 @@
+# issue 1346: the drm-output.json "view" grammar -- ONE table, read by BOTH the vendored C lift
+# (tests/drm_output_view_1346.rs -> drm_output_parse_view) and the Python mirror
+# (tests/python/test_strih_drm_output_1346.py -> strih_scenes.drm_output_view_of).
+# Columns: <value><TAB><expected>. <absent> = no "view" key, <empty> = "".
+# expected: program | multiview | unknown (the C fails OPEN to program on unknown + a WARN line;
+# the Python mirror reports it so verify-strih can name the bad value).
+<absent>	program
+<empty>	program
+program	program
+multiview	multiview
+Program	unknown
+MULTIVIEW	unknown
+preview	unknown
+multi	unknown
+ multiview	unknown
+multiview 	unknown
+programx	unknown
