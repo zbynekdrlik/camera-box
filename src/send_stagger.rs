@@ -523,4 +523,158 @@ mod tests {
         assert!(p.log_line.contains("offset=0 us (#1242)"), "{}", p.log_line);
         assert!(p.warn);
     }
+
+    #[test]
+    fn a_backlogged_frame_skips_the_stagger_1242() {
+        let off = Duration::from_micros(7200);
+        assert!(should_sleep(off, false));
+        assert!(!should_sleep(off, true));
+        assert!(!should_sleep(Duration::ZERO, false));
+        assert!(!should_sleep(Duration::ZERO, true));
+    }
+
+    #[test]
+    fn remaining_sleep_counts_from_the_gate_anchor_1242() {
+        let off = Duration::from_micros(7200);
+        assert_eq!(
+            remaining_sleep(off, Duration::from_micros(200)),
+            Duration::from_micros(7000)
+        );
+        assert_eq!(remaining_sleep(off, off), Duration::ZERO);
+        assert_eq!(
+            remaining_sleep(off, Duration::from_millis(20)),
+            Duration::ZERO
+        );
+        assert_eq!(
+            remaining_sleep(Duration::ZERO, Duration::from_micros(5)),
+            Duration::ZERO
+        );
+    }
+
+    #[test]
+    fn idle_wait_adds_the_stagger_sleep_back_1242() {
+        // A healthy empty-queue frame on cam7: the loop slept 7.2 ms, then waited 5 ms in the
+        // dequeue. Without the stagger it would have waited ~12.2 ms → NOT buffered (≥ 8.33 ms).
+        assert!((idle_wait_ms(5.0, 7.2) - 12.2).abs() < 1e-9);
+        // A genuinely buffered frame: dequeue 0, slept 7.2 → 7.2 ms, still below half a slot.
+        assert!(idle_wait_ms(0.0, 7.2) < 16.667 * 0.5);
+        // No stagger (cam1, a decimated previous iteration, or genlock off) → unchanged.
+        assert_eq!(idle_wait_ms(9.5, 0.0), 9.5);
+    }
+
+    #[test]
+    fn idle_wait_ignores_a_bad_stagger_measurement_1242() {
+        assert_eq!(idle_wait_ms(4.0, -1.0), 4.0);
+        assert_eq!(idle_wait_ms(4.0, f64::NAN), 4.0);
+        assert_eq!(idle_wait_ms(4.0, f64::INFINITY), 4.0);
+        // The dequeue term passes through untouched, so the downstream guard still sees a NaN.
+        assert!(idle_wait_ms(f64::NAN, 1.0).is_nan());
+    }
+
+    #[test]
+    fn window_counts_and_drains_1242() {
+        let mut w = StaggerWindow::default();
+        w.note_slept(7.0, 7.05);
+        w.note_slept(6.0, 6.4);
+        w.note_slept(6.0, f64::NAN);
+        w.note_past_offset();
+        w.note_skipped();
+        w.note_work(3.0);
+        w.note_work(5.5);
+        w.note_work(4.0);
+        w.note_work(f64::NAN);
+        w.note_work(-1.0);
+        let d = w.take();
+        assert_eq!(d.slept, 3);
+        assert_eq!(d.past_offset, 1);
+        assert_eq!(d.skipped_backlogged, 1);
+        assert_eq!(d.max_work_ms, 5.5);
+        assert!(
+            (d.max_oversleep_ms - 0.4).abs() < 1e-9,
+            "{}",
+            d.max_oversleep_ms
+        );
+        assert_eq!(w, StaggerWindow::default());
+    }
+
+    #[test]
+    fn window_summary_is_info_with_margin_left_1242() {
+        let w = StaggerWindow {
+            slept: 290,
+            past_offset: 8,
+            skipped_backlogged: 2,
+            max_work_ms: 3.1,
+            max_oversleep_ms: 0.08,
+        };
+        let (line, warn) = window_summary(&w, 7200, 16.667);
+        // Two skips out of 300 is a bursty grabber, not a budget problem: INFO.
+        assert!(!warn, "{line}");
+        assert!(line.starts_with(
+            "#1242 send stagger: offset=7200 us, 290 slept / 8 past the offset / 2 skipped"
+        ));
+        assert!(
+            line.contains("max per-frame work 3.1 ms + offset 7.2 ms vs capture interval 16.7 ms")
+        );
+        assert!(line.contains("max oversleep 0.08 ms"), "{line}");
+        assert!(!line.contains(" — "), "{line}");
+    }
+
+    #[test]
+    fn window_summary_warns_on_no_margin_1242() {
+        let tight = StaggerWindow {
+            slept: 300,
+            max_work_ms: 9.5,
+            ..StaggerWindow::default()
+        };
+        let (line, warn) = window_summary(&tight, 7200, 16.667);
+        assert!(warn);
+        assert!(line.contains("OVER BUDGET"), "{line}");
+
+        // No capture interval known → never a budget WARN.
+        let (_, warn) = window_summary(&tight, 7200, 0.0);
+        assert!(!warn);
+    }
+
+    #[test]
+    fn window_summary_warns_when_oversleep_breaks_the_add_back_1242() {
+        // 7.2 ms offset + 1.2 ms oversleep = 8.4 ms ≥ half of 16.667 ms.
+        let w = StaggerWindow {
+            slept: 300,
+            max_work_ms: 3.0,
+            max_oversleep_ms: 1.2,
+            ..StaggerWindow::default()
+        };
+        let (line, warn) = window_summary(&w, 7200, 16.667);
+        assert!(warn);
+        assert!(line.contains("OVERSLEEP"), "{line}");
+
+        // 0.9 ms oversleep leaves the sum at 8.1 ms: sound, INFO.
+        let ok = StaggerWindow {
+            max_oversleep_ms: 0.9,
+            ..w
+        };
+        let (line, warn) = window_summary(&ok, 7200, 16.667);
+        assert!(!warn, "{line}");
+    }
+
+    #[test]
+    fn window_summary_warns_only_on_many_skips_1242() {
+        let many = StaggerWindow {
+            slept: 270,
+            skipped_backlogged: 30,
+            max_work_ms: 3.0,
+            ..StaggerWindow::default()
+        };
+        let (line, warn) = window_summary(&many, 7200, 16.667);
+        assert!(warn);
+        assert!(line.contains("MANY SKIPS"), "{line}");
+
+        let few = StaggerWindow {
+            slept: 280,
+            skipped_backlogged: 20,
+            ..many
+        };
+        let (line, warn) = window_summary(&few, 7200, 16.667);
+        assert!(!warn, "{line}");
+    }
 }
