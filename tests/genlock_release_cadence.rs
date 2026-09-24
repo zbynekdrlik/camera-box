@@ -589,8 +589,28 @@ fn n1_pin_derived_depth_present_and_wired_1367() {
             "the source-bound HOLD wrapper (queue head + freshest frame)",
         ),
         (
-            "if (n < 2) return genlock_n1_shed_due(",
+            "genlock_n1_shed_due(tick_wall,",
             "the N==1 SHED routing in the source wrapper genlock_should_converge_phase",
+        ),
+        (
+            "genlock_n1_hold_due(tick_wall,",
+            "the N==1 HOLD reading the scheduled instant in genlock_should_hold_n1_phase",
+        ),
+        (
+            "static inline bool genlock_n1_tick_on_grid(",
+            "the pure on-grid predicate (review round 3: a wall step leaves the tick off the grid)",
+        ),
+        (
+            "#define GENLOCK_N1_ON_GRID_NS 2000000ULL",
+            "the 2 ms on-grid window (= GENLOCK_MAX_SLEW_NS)",
+        ),
+        (
+            "static inline bool genlock_n1_tick_is_on_grid(uint64_t tick_wall_ns, uint64_t interval_ns)",
+            "the source-side on-grid read over the per-second grid",
+        ),
+        (
+            "genlock_grid_floor_ns(tick_wall_ns + GENLOCK_N1_ON_GRID_NS, interval_ns)",
+            "the on-grid read floors on the ONE per-second grid (obs-genlock-grid.h)",
         ),
         (
             "#define GENLOCK_N1_PIN_FRAME_TOLERANCE_NS 1000ULL",
@@ -629,6 +649,13 @@ fn n1_pin_derived_depth_present_and_wired_1367() {
         2,
         "{OBS_SOURCE}: issue 1367 (review round 2) — the SHED and the HOLD wrappers must both read \
          the depth at the render tick's scheduled instant (genlock_n1_tick_wall_now(wall_now))."
+    );
+    assert_eq!(
+        src.matches("return genlock_n1_tick_is_on_grid(tick_wall, interval) &&")
+            .count(),
+        2,
+        "{OBS_SOURCE}: issue 1367 (review round 3) — the SHED and the HOLD wrappers must both \
+         defer while the scheduled tick is off the grid (a wall step)."
     );
     assert!(
         !src.contains("GENLOCK_N1_TICK_EARLY_MARGIN_NS") && !src.contains("genlock_n1_rounded_depth_frames"),

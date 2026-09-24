@@ -133,11 +133,28 @@ pub struct BenchConfig {
     /// One strih-lx OBS restart during the run (issue 1367), or none.
     pub restart: Option<SenderRestart>,
     /// A constant phase error of the stream render tick's SCHEDULE against the grid, in ns
-    /// (negative = early): a slew-clamped tick after a clock step sits off the grid until
-    /// `GENLOCK_MAX_SLEW_NS` (2 ms per tick) brings it back. The stamps stay on the grid, so this
-    /// is the geometry that moves a presented age across a depth edge (issue 1367).
+    /// (negative = early). A stress bound: a real tick is never held off the grid (see
+    /// `tick_step`). The stamps stay on the grid, so this is the geometry that moves a presented
+    /// age across a depth edge (issue 1367).
     pub receiver_tick_offset_ns: i64,
+    /// A wall-clock STEP on the stream box during the run (issue 1367), or none.
+    pub tick_step: Option<TickStep>,
 }
+
+/// A wall-clock step on the stream box (issue 1367): from the first tick at or after `at_s` the
+/// scheduled ticks sit `delta_ns` off the grid (positive = a forward step, the ticks late against
+/// the new grid; negative = a backward step, early), and `genlock_next_deadline` (obs-video.c)
+/// pulls them back `GENLOCK_MAX_SLEW_NS` (2 ms) per tick.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TickStep {
+    /// Seconds after the run start at which the step happens.
+    pub at_s: u64,
+    /// The step, in ns.
+    pub delta_ns: i64,
+}
+
+/// The per-tick slew clamp of the render tick (`GENLOCK_MAX_SLEW_NS` in obs-video.c).
+const TICK_MAX_SLEW_NS: i64 = 2_000_000;
 
 /// A sender restart (issue 1367): the strih-lx program output goes silent for `outage_ms`, then
 /// comes back with a `stall_slots`-slot STARTUP STALL. The first frames after the restart are
@@ -177,6 +194,7 @@ impl BenchConfig {
             tick_late_max_ns: 30_000_000,
             restart: None,
             receiver_tick_offset_ns: 0,
+            tick_step: None,
         }
     }
 }
@@ -515,7 +533,16 @@ pub fn run_bench(cfg: &BenchConfig) -> BenchReport {
     let mut last_sample: Option<u64> = None;
     let mut last_tick_state: Option<u64> = None;
     let mut prev_wall: u64 = 0;
+    let step_at = cfg.tick_step.map(|s| t0 + s.at_s * NS_PER_SECOND);
+    let mut step_applied = false;
+    let mut transient_ns: i64 = 0;
     while nominal < end {
+        if let (Some(at), Some(step)) = (step_at, cfg.tick_step) {
+            if !step_applied && nominal >= at {
+                step_applied = true;
+                transient_ns = step.delta_ns;
+            }
+        }
         let mut late = (rng.normal().abs() * cfg.tick_jitter_sigma_ns as f64) as u64;
         if rng.ppm(cfg.tick_late_ppm) {
             late = rng.uniform_ns(cfg.tick_late_min_ns, cfg.tick_late_max_ns);
@@ -525,7 +552,8 @@ pub fn run_bench(cfg: &BenchConfig) -> BenchReport {
         // Ticks run SERIALLY: after an overrun below two intervals `video_sleep` (obs-video.c)
         // counts one frame and schedules the next slot from the previous TARGET, so the next tick
         // is a CATCH-UP that runs right after the late one — no slot is lost.
-        let scheduled = nominal.saturating_add_signed(cfg.receiver_tick_offset_ns);
+        let scheduled =
+            nominal.saturating_add_signed(cfg.receiver_tick_offset_ns.saturating_add(transient_ns));
         let wall = (scheduled + late).max(prev_wall + 1_000);
         prev_wall = wall;
         // Produce every frame that has arrived by this tick (keep one frame of look-ahead).
@@ -572,6 +600,8 @@ pub fn run_bench(cfg: &BenchConfig) -> BenchReport {
             last_tick_state = Some(state);
         }
         tick_no += 1;
+        // A wall step slews back at most `GENLOCK_MAX_SLEW_NS` per tick.
+        transient_ns -= transient_ns.clamp(-TICK_MAX_SLEW_NS, TICK_MAX_SLEW_NS);
         // Only an overrun of TWO intervals or more SKIPS slots (`video_sleep` count >= 2): those
         // slots never tick, so the conveyor genuinely presents one frame deeper per skipped slot.
         let overrun_slots = wall.saturating_sub(scheduled) / CANVAS_INTERVAL_NS;

@@ -318,23 +318,14 @@ fn a_late_or_catch_up_render_tick_never_corrects_a_settled_source_1367() {
     }
 }
 
-/// issue 1367 (review rounds 1-2) — a CONSTANT phase error of the stream render tick's
-/// SCHEDULE, from 10 ms early to 10 ms late, at the live pin 987 (a stress bound: a wall-clock
-/// step leaves the tick off the grid by up to the step, and `GENLOCK_MAX_SLEW_NS` pulls it back
-/// 2 ms per tick, so a real phase error is a few-tick transient). The settled source never
-/// corrects, and every restart stall lands on one depth — asserted with the late-tick tail
-/// switched OFF, so no random late tick can hand the result to the #859 drain.
-///
-/// The EARLY half holds only while the phase stays inside the pin's headroom to the next frame
-/// edge (`ceil(pin / interval) * interval − pin`, 13 ms at 987): an early tick moves the
-/// deadline (`wall − reserve`, floored to the grid) one frame earlier once it crosses that
-/// edge, the resync depth becomes `base + 1`, and a sender gap/dup then lifts the conveyor to
-/// `base + 2`, which the rule sheds back (a hold/shed pair per sender hiccup, measured at pins
-/// 963 and 999 with a sustained 10 ms early phase). A tick never runs early in OBS except for
-/// those few ticks after a BACKWARD wall step (`os_sleepto_ns` sleeps to the mapped grid
-/// slot); a LATE phase of any size is covered for every deep pin by the test below.
+/// issue 1367 (review rounds 1-3) — the rule only acts while the render tick's scheduled
+/// instant sits ON the grid (within `GENLOCK_MAX_SLEW_NS`, 2 ms). A real tick is off the grid only
+/// for the few ticks after a wall-clock step while the slew pulls it back; a CONSTANT phase is a
+/// stress bound. Inside ±2 ms the settled source never corrects and every 0..3-slot restart lands
+/// on `base + 1`; outside it the rule defers — no correction at all, whatever the phase. Asserted
+/// with the late-tick tail OFF, so no random late tick can hand the result to the #859 drain.
 #[test]
-fn a_render_tick_schedule_phase_never_corrects_and_never_blocks_the_settle_1367() {
+fn a_render_tick_schedule_phase_corrects_only_on_the_grid_1367() {
     let target = 987_000_000u64.div_ceil(CANVAS_INTERVAL_NS) + 1;
     for offset_ms in [-10i64, -5, -2, 0, 2, 5, 10] {
         let offset = offset_ms * 1_000_000;
@@ -342,16 +333,7 @@ fn a_render_tick_schedule_phase_never_corrects_and_never_blocks_the_settle_1367(
         cfg.receiver_tick_offset_ns = offset;
         cfg.duration_s = 2 * 3600;
         let r = run_bench(&cfg);
-        assert_eq!(
-            r.converge_sheds + r.n1_grows + r.drains,
-            0,
-            "schedule phase {offset_ms} ms: {r:?}"
-        );
-        assert!(
-            share(&r, &[31]) > 0.99,
-            "schedule phase {offset_ms} ms: {:?}",
-            r.state_samples
-        );
+        assert_eq!(corrections(&r), 0, "schedule phase {offset_ms} ms: {r:?}");
         for k in 0..=3 {
             let mut cfg = BenchConfig::live_2026_09_24(GridModel::Production);
             cfg.receiver_tick_offset_ns = offset;
@@ -364,30 +346,39 @@ fn a_render_tick_schedule_phase_never_corrects_and_never_blocks_the_settle_1367(
             cfg.warmup_s = 300 + 8 + 60;
             cfg.duration_s = cfg.warmup_s + 3600;
             let r = run_bench(&cfg);
-            assert_eq!(
-                settled_state(&r),
-                Some(target),
-                "schedule phase {offset_ms} ms, {k}-slot stall: {r:?}"
-            );
-            assert_eq!(
-                r.converge_sheds + r.n1_grows + r.drains,
-                0,
-                "schedule phase {offset_ms} ms, {k}-slot stall: {r:?}"
-            );
+            if offset_ms.abs() <= 2 {
+                assert_eq!(
+                    settled_state(&r),
+                    Some(target),
+                    "on-grid schedule phase {offset_ms} ms, {k}-slot stall: {r:?}"
+                );
+                assert_eq!(
+                    corrections(&r),
+                    0,
+                    "on-grid schedule phase {offset_ms} ms, {k}-slot stall: {r:?}"
+                );
+            } else {
+                assert_eq!(
+                    r.converge_sheds + r.n1_grows,
+                    0,
+                    "off-grid schedule phase {offset_ms} ms, {k}-slot stall: the rule must \
+                     defer: {r:?}"
+                );
+            }
         }
     }
 }
 
-/// issue 1367 — a LATE schedule phase (2, 5 and 10 ms, the direction a real tick errs in) never
-/// makes the rule correct a settled source at ANY deep pin, including the ones whose frame
-/// headroom is tiny (999 ms: 1 ms; 1000 ms: an exact 30 frames on the per-second grid), and every
-/// 0..3-slot restart stall still lands on `base + 1`. The late-tick tail is off so only the phase
-/// is under test.
+/// issue 1367 — an on-grid LATE schedule phase (+2 ms, the edge of the on-grid window, the
+/// direction a real tick errs in) never makes the rule correct a settled source at ANY deep pin,
+/// including the ones whose frame headroom is tiny (999 ms: 1 ms; 1000 ms: an exact 30 frames on
+/// the per-second grid), and every 0 / 3-slot restart stall still lands on `base + 1`. The
+/// late-tick tail is off so only the phase is under test.
 #[test]
-fn a_late_schedule_phase_never_corrects_any_deep_pin_1367() {
+fn an_on_grid_late_phase_never_corrects_any_deep_pin_1367() {
     for pin in [950u32, 963, 987, 999, 1000, 1010, 1024] {
         let target = (pin as u64 * 1_000_000 - 1_000).div_ceil(CANVAS_INTERVAL_NS) + 1;
-        for offset_ms in [2i64, 5, 10] {
+        for offset_ms in [0i64, 2] {
             let mut cfg = BenchConfig::live_2026_09_24(GridModel::Production);
             cfg.latency_ms = pin;
             cfg.tick_late_ppm = 0;
@@ -395,7 +386,7 @@ fn a_late_schedule_phase_never_corrects_any_deep_pin_1367() {
             cfg.duration_s = 3600;
             let r = run_bench(&cfg);
             assert_eq!(
-                r.converge_sheds + r.n1_grows + r.drains,
+                corrections(&r),
                 0,
                 "pin {pin}, schedule phase +{offset_ms} ms: {r:?}"
             );
@@ -418,6 +409,47 @@ fn a_late_schedule_phase_never_corrects_any_deep_pin_1367() {
                     settled_state(&r),
                     Some(target),
                     "pin {pin}, schedule phase +{offset_ms} ms, {k}-slot stall: {r:?}"
+                );
+            }
+        }
+    }
+}
+
+/// issue 1367 (review round 3) — a WALL-CLOCK STEP on the stream box must not make the rule
+/// correct a settled conveyor. After a step of δ the scheduled ticks sit δ off the grid and slew
+/// back 2 ms per tick; read there, a settled 31-frame conveyor reads 32 after a forward step of
+/// more than half a frame (shed) and 30 once back on the grid (hold) — a visible skip plus a
+/// duplicate where the old code, keyed on the locked boundary, did nothing. The rule defers while
+/// the tick is off the grid. Steps of ±5 / ±10 / ±17 / ±25 ms at pins 987 and 999, 3 seeds.
+#[test]
+fn a_wall_clock_step_never_corrects_a_settled_source_1367() {
+    for pin in [987u32, 999] {
+        let target = (pin as u64 * 1_000_000 - 1_000).div_ceil(CANVAS_INTERVAL_NS) + 1;
+        for delta_ms in [5i64, -5, 10, -10, 17, -17, 25, -25] {
+            for seed in [
+                BenchConfig::live_2026_09_24(GridModel::Production).seed,
+                1,
+                2,
+            ] {
+                let mut cfg = BenchConfig::live_2026_09_24(GridModel::Production);
+                cfg.latency_ms = pin;
+                cfg.seed = seed;
+                cfg.tick_late_ppm = 0;
+                cfg.duration_s = 3600;
+                cfg.tick_step = Some(TickStep {
+                    at_s: 1800,
+                    delta_ns: delta_ms * 1_000_000,
+                });
+                let r = run_bench(&cfg);
+                assert_eq!(
+                    corrections(&r),
+                    0,
+                    "pin {pin}, wall step {delta_ms} ms, seed {seed}: {r:?}"
+                );
+                assert!(
+                    share(&r, &[target]) > 0.99,
+                    "pin {pin}, wall step {delta_ms} ms, seed {seed}: {:?}",
+                    r.state_samples
                 );
             }
         }
