@@ -27,8 +27,23 @@
 //!   (p99 0.53 ms; 0.1 % of ticks > 10 ms late). Each tick runs a port of the N==1 branches of
 //!   `genlock_release_tick` (obs-source.c): ACQUIRE / BACKLOG relock via
 //!   [`relock_select_nearest`], STEADY on the locked boundary, GAP RESYNC on the floored deadline,
-//!   HOLD / late HOLD, the erase loop, and the #859 settle-back drain via [`should_drain_one`]. The
-//!   #1049 converge shed is N>=2-only and inert here.
+//!   HOLD / late HOLD, the erase loop, the #859 settle-back drain via [`should_drain_one`], and the
+//!   phase-convergence shed after it (sharing its throttle, exactly as the C present tail orders
+//!   them) — for an N==1 tick that is the issue-1367 [`n1_shed_due`], the branch the C source
+//!   wrapper `genlock_should_converge_phase` routes it to. Since issue 1367 the N==1 STEADY branch
+//!   also first asks [`should_hold_n1_phase`] (the C `genlock_should_hold_n1_phase`) whether a deep
+//!   conveyor is still shallower than its pin-derived depth; the shed removes a frame a restart
+//!   transient added — so every restart settles on `base + 1` frames. Both read the depth at the
+//!   tick's SCHEDULED instant ([`n1_tick_wall_ns`]).
+//! - **Render-tick timing:** every tick has a scheduled instant (its grid slot plus an optional
+//!   constant schedule phase) and runs at that instant plus a lateness, serially. An overrun below
+//!   two intervals is followed by a CATCH-UP tick (`video_sleep` counts one frame); only an overrun
+//!   of two intervals or more skips slots.
+//! - **A sender restart** (issue 1367, [`SenderRestart`]): the sender goes silent, then comes back
+//!   with a `k`-slot startup stall — a k-slot stamp gap followed by k duplicate stamps. The receiver
+//!   keeps its locked boundary through the empty FIFO (the ts-align path never re-arms the build
+//!   latch), GAP-RESYNCs onto the first post-restart frame, and presents each duplicate one tick
+//!   later on the STEADY path, so it lands `k` frames deeper than the resync depth.
 //! - **The deadline** is the production [`phase_pinned_deadline`] (the Rust authority of the C
 //!   `genlock_phase_pin_deadline`) and **the render tick** is the production
 //!   [`grid_next_boundary_ns`] (the authority of the C `genlock_next_deadline` boundary) — so a bench
@@ -51,6 +66,9 @@ use crate::genlock_backlog::{
 };
 use crate::genlock_grid::{
     grid_next_boundary_ns, per_second_floor, StampTrack, NS_PER_SECOND, UNITS_100NS_PER_SECOND,
+};
+use crate::genlock_n1_depth::{
+    n1_shed_due, n1_tick_on_grid, n1_tick_wall_ns, should_hold_n1_phase, N1_ON_GRID_NS,
 };
 use std::collections::{BTreeMap, VecDeque};
 
@@ -114,6 +132,46 @@ pub struct BenchConfig {
     pub tick_late_ppm: u64,
     pub tick_late_min_ns: u64,
     pub tick_late_max_ns: u64,
+    /// One strih-lx OBS restart during the run (issue 1367), or none.
+    pub restart: Option<SenderRestart>,
+    /// A constant phase error of the stream render tick's SCHEDULE against the grid, in ns
+    /// (negative = early). A stress bound: a real tick is never held off the grid (see
+    /// `tick_step`). The stamps stay on the grid, so this is the geometry that moves a presented
+    /// age across a depth edge (issue 1367).
+    pub receiver_tick_offset_ns: i64,
+    /// A wall-clock STEP on the stream box during the run (issue 1367), or none.
+    pub tick_step: Option<TickStep>,
+}
+
+/// A wall-clock step on the stream box (issue 1367): from the first tick at or after `at_s` the
+/// scheduled ticks sit `delta_ns` off the grid (positive = a forward step, the ticks late against
+/// the new grid; negative = a backward step, early), and `genlock_next_deadline` (obs-video.c)
+/// pulls them back `GENLOCK_MAX_SLEW_NS` (2 ms) per tick.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TickStep {
+    /// Seconds after the run start at which the step happens.
+    pub at_s: u64,
+    /// The step, in ns.
+    pub delta_ns: i64,
+}
+
+/// The per-tick slew clamp of the render tick (`GENLOCK_MAX_SLEW_NS` in obs-video.c).
+const TICK_MAX_SLEW_NS: i64 = 2_000_000;
+
+/// A sender restart (issue 1367): the strih-lx program output goes silent for `outage_ms`, then
+/// comes back with a `stall_slots`-slot STARTUP STALL. The first frames after the restart are
+/// handed to NDI late and all at once, and `ndi-output.cpp` stamps each with the per-second floor
+/// of its SEND instant. So the stream sees one frame stamped `stall_slots` slots after the first
+/// post-restart render tick, then `stall_slots` more frames with the SAME stamp: a k-slot gap, then
+/// k duplicate stamps. This is the live restart transient.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SenderRestart {
+    /// Seconds after the run start at which the sender goes silent.
+    pub at_s: u64,
+    /// How long no frame is sent at all.
+    pub outage_ms: u64,
+    /// The startup stall `k`, in render slots.
+    pub stall_slots: u64,
 }
 
 impl BenchConfig {
@@ -136,6 +194,9 @@ impl BenchConfig {
             tick_late_ppm: 1_000,
             tick_late_min_ns: 10_000_000,
             tick_late_max_ns: 30_000_000,
+            restart: None,
+            receiver_tick_offset_ns: 0,
+            tick_step: None,
         }
     }
 }
@@ -157,8 +218,16 @@ pub struct BenchReport {
     pub resyncs: u64,
     pub relocks: u64,
     pub drains: u64,
+    /// Phase-convergence sheds (the issue-1367 N==1 [`n1_shed_due`], the C
+    /// `genlock_converge_sheds`).
+    pub converge_sheds: u64,
+    /// issue 1367 N==1 depth holds (`should_hold_n1_phase`, the C `genlock_n1_grows`): a
+    /// deliberate one-tick repeat that deepens a too-shallow deep N==1 conveyor by one frame.
+    pub n1_grows: u64,
     pub dropped_due: u64,
     pub underruns: u64,
+    /// Render slots skipped because a tick overran by two intervals or more (after warm-up).
+    pub skipped_ticks: u64,
     /// The sender's stamp irregularity as the receiver's `stamp_dup=` / `stamp_gap=` audit tokens
     /// would count it ([`StampTrack`], the production arrival-side tracker): stamps equal to their
     /// predecessor, and missing stamp intervals.
@@ -215,19 +284,44 @@ struct Sender {
     last_send: u64,
     track: StampTrack,
     rng: Rng,
+    /// The restart outage `[from, until)` in wall ns, when the config has one.
+    outage: Option<(u64, u64)>,
+    stall_slots: u64,
+    /// Set at the first render tick after the outage: frames rendered before this instant are
+    /// handed over together with the frame rendered at it (the startup stall).
+    stall_release: Option<u64>,
 }
 
 impl Sender {
     /// The next frame as `(arrival_wall_ns, stamp_ns, new_dups, new_missing_intervals)`.
     fn next_frame(&mut self, cfg: &BenchConfig) -> (u64, u64, u64, u64) {
         self.tick = self.grid.next_tick(self.tick);
+        if let Some((from, until)) = self.outage {
+            // The restart: no frame at all during the outage (no random draw either, so a run
+            // without a restart consumes the identical random stream).
+            while self.tick >= from && self.tick < until {
+                self.tick = self.grid.next_tick(self.tick);
+            }
+            if self.tick >= until && self.stall_release.is_none() {
+                let mut release = self.tick;
+                for _ in 0..self.stall_slots {
+                    release = self.grid.next_tick(release);
+                }
+                self.stall_release = Some(release);
+            }
+        }
         let core =
             cfg.send_delay_median_ns as f64 + cfg.send_delay_sigma_ns as f64 * self.rng.normal();
         let mut delay = core.max(0.0) as u64;
         if self.rng.ppm(cfg.send_late_ppm) {
             delay = CANVAS_INTERVAL_NS + self.rng.uniform_ns(0, cfg.send_late_extra_max_ns);
         }
-        let send = (self.tick + delay).max(self.last_send + 1);
+        // The startup stall: a frame rendered before the stall releases is handed over with it.
+        let ready = match self.stall_release {
+            Some(release) if self.tick < release => release,
+            _ => self.tick,
+        };
+        let send = (ready + delay).max(self.last_send + 1);
         self.last_send = send;
         let stamp = per_second_floor(send / 100, FPS, UNITS_100NS_PER_SECOND) * 100;
         // The production arrival-side tracker (the C genlock_stamp_track_observe) counts the
@@ -261,13 +355,17 @@ struct TickCounters {
     resyncs: u64,
     relocks: u64,
     drains: u64,
+    converge_sheds: u64,
+    n1_grows: u64,
     dropped_due: u64,
     underruns: u64,
 }
 
 impl Fifo {
-    /// One render tick: the N==1 branches of the C `genlock_release_tick`, in its order.
-    fn tick(&mut self, cfg: &BenchConfig, wall: u64, c: &mut TickCounters) {
+    /// One render tick: the N==1 branches of the C `genlock_release_tick`, in its order. `wall` is
+    /// the processing wall (the C `wall_now`), `scheduled` the wall instant the tick was scheduled
+    /// for (the C `obs->video.video_time`, here already in wall time).
+    fn tick(&mut self, cfg: &BenchConfig, wall: u64, scheduled: u64, c: &mut TickCounters) {
         if self.queue.is_empty() {
             c.underruns += 1;
             return;
@@ -281,6 +379,7 @@ impl Fifo {
             .count();
         let head = self.queue[0];
         let mut drain_eligible = false;
+        let mut converge_eligible = false;
         let mut anchor_update = false;
         let release;
         if self.locked_next_boundary == 0 {
@@ -307,9 +406,34 @@ impl Fifo {
             }
             release = sel + 1;
         } else if head <= self.locked_next_boundary {
-            // STEADY (N==1 present-oldest).
+            // STEADY (N==1 present-oldest). issue 1367: a deep conveyor still shallower than its
+            // pin-derived depth HOLDS one tick first (the C `genlock_should_hold_n1_phase`), the
+            // depth read at the tick's scheduled instant (the C `genlock_n1_tick_wall_now`; the
+            // bench keeps wall and monotonic time in one domain, so the processing wall is the
+            // monotonic now).
+            let newest = *self
+                .queue
+                .back()
+                .expect("head exists, so the queue is not empty");
+            let tick_wall = n1_tick_wall_ns(wall, wall, scheduled);
+            if tick_on_grid(cfg.grid, tick_wall)
+                && should_hold_n1_phase(
+                    tick_wall,
+                    head,
+                    wall.saturating_sub(newest),
+                    cfg.latency_ms,
+                    CANVAS_INTERVAL_NS,
+                    1,
+                    self.ticks_since_drain,
+                )
+            {
+                c.n1_grows += 1;
+                self.ticks_since_drain = 0;
+                return;
+            }
             release = 1;
             drain_eligible = true;
+            converge_eligible = true;
             anchor_update = true;
         } else if present_ts >= head {
             // GAP RESYNC — upstream skipped a stamp and the next frame has aged past the deadline.
@@ -348,6 +472,35 @@ impl Fifo {
                 self.ticks_since_drain += 1;
             }
         }
+        // The #1049 phase-convergence shed, in the C order (after the #859 drain, sharing its
+        // throttle): the wrapper reads the FRESHEST queued frame as the achievable-floor reference.
+        // Every tick here is N==1, so the source wrapper (the C `genlock_should_converge_phase`)
+        // routes it to the issue-1367 pin-derived shed, read at the scheduled instant.
+        if converge_eligible {
+            let newest = *self
+                .queue
+                .back()
+                .expect("a STEADY present has a queued frame");
+            let tick_wall = n1_tick_wall_ns(wall, wall, scheduled);
+            if tick_on_grid(cfg.grid, tick_wall)
+                && n1_shed_due(
+                    tick_wall,
+                    self.locked_next_boundary,
+                    wall.saturating_sub(newest),
+                    cfg.latency_ms,
+                    CANVAS_INTERVAL_NS,
+                    self.ticks_since_drain,
+                )
+                && self.queue.len() > 1
+            {
+                self.queue.pop_front();
+                c.dropped_due += 1;
+                c.converge_sheds += 1;
+                self.ticks_since_drain = 0;
+            } else if !drain_eligible {
+                self.ticks_since_drain += 1;
+            }
+        }
         let presented = self
             .queue
             .pop_front()
@@ -358,6 +511,15 @@ impl Fifo {
         self.locked_next_boundary = presented + CANVAS_INTERVAL_NS;
         self.presented = Some(presented);
     }
+}
+
+/// issue 1367 — the on-grid condition of the N==1 rule on the bench's own grid model (the C
+/// `genlock_n1_tick_is_on_grid` floors on the production per-second grid).
+fn tick_on_grid(grid: GridModel, tick_wall: u64) -> bool {
+    n1_tick_on_grid(
+        tick_wall,
+        grid.deadline_floor(tick_wall.saturating_add(N1_ON_GRID_NS)),
+    )
 }
 
 /// Run one scenario and report what the receiver did.
@@ -372,6 +534,12 @@ pub fn run_bench(cfg: &BenchConfig) -> BenchReport {
         last_send: 0,
         track: StampTrack::default(),
         rng: Rng(rng.next()),
+        outage: cfg.restart.map(|r| {
+            let from = t0 + r.at_s * NS_PER_SECOND;
+            (from, from + r.outage_ms * 1_000_000)
+        }),
+        stall_slots: cfg.restart.map_or(0, |r| r.stall_slots),
+        stall_release: None,
     };
     let mut fifo = Fifo::default();
     let mut pending: VecDeque<(u64, u64)> = VecDeque::new();
@@ -381,12 +549,30 @@ pub fn run_bench(cfg: &BenchConfig) -> BenchReport {
     let mut tick_no: u64 = 0;
     let mut last_sample: Option<u64> = None;
     let mut last_tick_state: Option<u64> = None;
+    let mut prev_wall: u64 = 0;
+    let step_at = cfg.tick_step.map(|s| t0 + s.at_s * NS_PER_SECOND);
+    let mut step_applied = false;
+    let mut transient_ns: i64 = 0;
     while nominal < end {
+        if let (Some(at), Some(step)) = (step_at, cfg.tick_step) {
+            if !step_applied && nominal >= at {
+                step_applied = true;
+                transient_ns = step.delta_ns;
+            }
+        }
         let mut late = (rng.normal().abs() * cfg.tick_jitter_sigma_ns as f64) as u64;
         if rng.ppm(cfg.tick_late_ppm) {
             late = rng.uniform_ns(cfg.tick_late_min_ns, cfg.tick_late_max_ns);
         }
-        let wall = nominal + late;
+        // The tick's SCHEDULED instant (`obs->video.video_time` mapped to wall): the grid slot
+        // plus a constant schedule phase. `late` is the wake / processing lateness on top of it.
+        // Ticks run SERIALLY: after an overrun below two intervals `video_sleep` (obs-video.c)
+        // counts one frame and schedules the next slot from the previous TARGET, so the next tick
+        // is a CATCH-UP that runs right after the late one — no slot is lost.
+        let scheduled =
+            nominal.saturating_add_signed(cfg.receiver_tick_offset_ns.saturating_add(transient_ns));
+        let wall = (scheduled + late).max(prev_wall + 1_000);
+        prev_wall = wall;
         // Produce every frame that has arrived by this tick (keep one frame of look-ahead).
         while pending.back().is_none_or(|&(arrival, _)| arrival <= wall) {
             let (arrival, stamp, dup, gap) = sender.next_frame(cfg);
@@ -402,13 +588,15 @@ pub fn run_bench(cfg: &BenchConfig) -> BenchReport {
         }
         let counted = nominal >= warm;
         let mut tc = TickCounters::default();
-        fifo.tick(cfg, wall, &mut tc);
+        fifo.tick(cfg, wall, scheduled, &mut tc);
         if counted {
             c.holds += tc.holds;
             c.late_holds += tc.late_holds;
             c.resyncs += tc.resyncs;
             c.relocks += tc.relocks;
             c.drains += tc.drains;
+            c.converge_sheds += tc.converge_sheds;
+            c.n1_grows += tc.n1_grows;
             c.dropped_due += tc.dropped_due;
             c.underruns += tc.underruns;
         }
@@ -429,7 +617,18 @@ pub fn run_bench(cfg: &BenchConfig) -> BenchReport {
             last_tick_state = Some(state);
         }
         tick_no += 1;
+        // A wall step slews back at most `GENLOCK_MAX_SLEW_NS` per tick.
+        transient_ns -= transient_ns.clamp(-TICK_MAX_SLEW_NS, TICK_MAX_SLEW_NS);
+        // Only an overrun of TWO intervals or more SKIPS slots (`video_sleep` count >= 2): those
+        // slots never tick, so the conveyor genuinely presents one frame deeper per skipped slot.
+        let overrun_slots = wall.saturating_sub(scheduled) / CANVAS_INTERVAL_NS;
         nominal = cfg.grid.next_tick(nominal);
+        for _ in 1..overrun_slots.max(1) {
+            nominal = cfg.grid.next_tick(nominal);
+            if nominal >= warm {
+                report.skipped_ticks += 1;
+            }
+        }
     }
     report.hours = cfg.duration_s.saturating_sub(cfg.warmup_s) as f64 / 3600.0;
     report.flips_per_hour = if report.hours > 0.0 {
@@ -442,118 +641,13 @@ pub fn run_bench(cfg: &BenchConfig) -> BenchReport {
     report.resyncs = c.resyncs;
     report.relocks = c.relocks;
     report.drains = c.drains;
+    report.converge_sheds = c.converge_sheds;
+    report.n1_grows = c.n1_grows;
     report.dropped_due = c.dropped_due;
     report.underruns = c.underruns;
     report
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn share(r: &BenchReport, states: &[u64]) -> f64 {
-        let total: u64 = r.state_samples.values().sum();
-        let hit: u64 = states
-            .iter()
-            .map(|s| r.state_samples.get(s).copied().unwrap_or(0))
-            .sum();
-        hit as f64 / total.max(1) as f64
-    }
-
-    #[test]
-    fn start_second_carries_the_requested_offset_1355() {
-        for off in [300_000u64, 2_000_000, 16_000_000, 32_000_000] {
-            let t = start_second_for_offset(off) * NS_PER_SECOND;
-            let legacy_floor = (t / CANVAS_INTERVAL_NS) * CANVAS_INTERVAL_NS;
-            assert_eq!(t - legacy_floor, off, "offset {off}");
-        }
-    }
-
-    /// The bench reproduces the live defect on the pre-#1355 arithmetic: the 2ME PGM FIFO lives in
-    /// depth states 31/32 and flips between them inside the measured 10–45 flips/h band, driven by
-    /// late holds (up) and settle-back drains (down).
-    #[test]
-    fn legacy_1970_grid_reproduces_the_live_31_32_flip_1355() {
-        let r = run_bench(&BenchConfig::live_2026_09_24(GridModel::Legacy1970));
-        assert!(
-            (10.0..=45.0).contains(&r.flips_per_hour),
-            "legacy flips/h {:.1} outside the live 10-45 band: {r:?}",
-            r.flips_per_hour
-        );
-        assert!(share(&r, &[31, 32]) > 0.95, "states {:?}", r.state_samples);
-        assert!(
-            share(&r, &[31]) > 0.1 && share(&r, &[32]) > 0.1,
-            "{:?}",
-            r.state_samples
-        );
-        assert!(r.late_holds > 0 && r.drains > 0, "{r:?}");
-        assert_eq!(r.relocks, 0, "no backlog storm in the live data: {r:?}");
-    }
-
-    /// The fix: the SAME inputs on the production grid do not walk. After warm-up the FIFO keeps one
-    /// depth state (no 5 s-sampled flip), with no settle-back drain.
-    #[test]
-    fn production_grid_holds_one_depth_state_1355() {
-        let r = run_bench(&BenchConfig::live_2026_09_24(GridModel::Production));
-        assert!(
-            r.flips_per_hour <= 1.0,
-            "production flips/h {:.2} — the depth still walks: {r:?}",
-            r.flips_per_hour
-        );
-        assert_eq!(r.drains, 0, "{r:?}");
-        assert!(
-            r.stamp_dups > 0 && r.stamp_gaps > 0,
-            "the bench must still inject the sender irregularity: {r:?}"
-        );
-    }
-
-    /// The date-walk, stated for what it is. The production grid never sees the 1970-grid offset
-    /// (its grid is a pure function of the whole second), so two dates give byte-identical runs BY
-    /// CONSTRUCTION — asserted as equality, not re-proven by re-running a flip bound per date. The
-    /// 1970 grid on the same two dates is NOT identical: that difference is the date-walk.
-    #[test]
-    fn production_grid_does_not_see_the_1970_offset_but_the_1970_grid_does_1355() {
-        let run = |grid, off| {
-            let mut cfg = BenchConfig::live_2026_09_24(grid);
-            cfg.start_offset_ns = off;
-            cfg.duration_s = 3600;
-            run_bench(&cfg)
-        };
-        assert_eq!(
-            run(GridModel::Production, 300_000),
-            run(GridModel::Production, 22_000_000)
-        );
-        assert_ne!(
-            run(GridModel::Legacy1970, 300_000),
-            run(GridModel::Legacy1970, 22_000_000)
-        );
-    }
-
-    /// What the production grid DOES see: the pin. Across one whole frame of pins (and one each
-    /// side) the FIFO keeps ONE depth state with no settle-back drain — the state follows the pin
-    /// (30 / 31 / 32 frames), never the date or a sender hiccup. On the 1970 grid every one of these
-    /// pins flips (~20/h over 2 h in the live statistics).
-    #[test]
-    fn production_grid_holds_one_state_at_every_pin_phase_1355() {
-        for pin in [950u32, 963, 967, 975, 987, 999, 1010] {
-            let mut cfg = BenchConfig::live_2026_09_24(GridModel::Production);
-            cfg.latency_ms = pin;
-            cfg.duration_s = 2 * 3600;
-            let r = run_bench(&cfg);
-            assert!(
-                r.flips_per_hour <= 1.0 && r.drains == 0 && r.late_holds == 0,
-                "pin {pin}: production flips/h {:.2}: {r:?}",
-                r.flips_per_hour
-            );
-            let mut legacy = cfg.clone();
-            legacy.grid = GridModel::Legacy1970;
-            let l = run_bench(&legacy);
-            assert!(
-                l.flips_per_hour >= 10.0,
-                "pin {pin}: the 1970-grid control stopped flipping ({:.2}/h) — the bench no longer \
-                 reproduces the defect, so this test would prove nothing: {l:?}",
-                l.flips_per_hour
-            );
-        }
-    }
-}
+#[path = "genlock_grid_bench_tests.rs"]
+mod tests;

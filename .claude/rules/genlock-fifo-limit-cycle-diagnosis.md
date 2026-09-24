@@ -111,6 +111,14 @@ is futile and gating it off is the fix, not widening its threshold.**
 `relocks=0`, `depth` stable, and `ts_head_skew_ms` CONSTANT and ABOVE `latency_ms` — the shed is
 fighting a stable natural hold it cannot move.
 
+**Issue 1367 did NOT reverse this gate — it added a DIFFERENT N==1 target.** The reserve-aimed
+#1049 shed stays N>=2-only (`genlock_phase_converge_due` keeps `if (n < 2) return false;` byte for
+byte). A deep N==1 source now converges to its PIN-DERIVED depth `base + 1`
+(`src/genlock_n1_depth.rs`, routed by the SOURCE wrapper): that target IS the natural hold, so a
+shed there removes only a frame a sender restart added and it sticks. Full rule:
+`genlock-n1-pin-derived-depth.md`. Tell for a misfiring N==1 rule: `n1_grows=` and `converge_sheds=`
+climbing in lockstep on the 2ME PGM in a steady window with no sender restart.
+
 ## The deep-latency release-phase QUANTUM (#1003) is STRUCTURAL — do NOT re-attempt the "grid pin"
 
 `#1003`'s title asks to "pin the release to an absolute wall-clock frame grid" to remove the

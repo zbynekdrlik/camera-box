@@ -374,6 +374,15 @@ pub mod painter_pacing;
 // `probe::genlock::ReleaseCadence` and the C `GENLOCK_QDEPTH_RELOCK` both derive from here.
 pub mod genlock_backlog;
 
+// issue 1367 — the N==1 PIN-DERIVED DEPTH: a deep single-cadence input (the stream `NDI 2ME PGM`)
+// settles on `ceil((pin - 1 us) / interval) + 1` frames after every restart, read from the
+// presented age at the render tick's scheduled instant (shed one frame when deeper, hold one tick
+// when shallower, only while the tick is on the grid). `genlock_backlog::should_converge_phase`
+// stays inert for N==1; the SOURCE wrappers (the C `genlock_should_converge_phase`, the probe
+// `ReleaseCadence`) route an N==1 tick here, and the C `genlock_n1_*` helpers in obs-source.c are
+// held identical by `tests/genlock_relock_selection_parity.rs`.
+pub mod genlock_n1_depth;
+
 // #1355 — ONE per-second genlock frame grid: the sender stamps, the receiver ts-align deadline
 // and the render tick all floor on the same per-second grid, so the receiver no longer walks
 // 10 ns/s (0.864 ms/day) against the senders. Crate-root + std-only (Tier-0 verifiable); the C
