@@ -15,13 +15,8 @@
 //!   returning while the heartbeat goes stale.
 //! - the #297 re-announce check, after every job and on every idle timeout.
 //!
-//! The thread is pinned to the isolated capture core (#289) and raised to SCHED_FIFO one step BELOW
-//! the capture thread (`affinity::RtThreadRole::Send`, like the E2E burn thread): the capture
-//! thread always preempts it, so neither the stagger wait nor a long SpeedHQ encode can delay the
-//! next capture, and the send still preempts every SCHED_OTHER task. It takes each job when the
-//! capture thread blocks on its next dequeue. A wedged send now shows as the #944 emit-freeze
-//! (exit 81: the capture thread keeps returning, the emit heartbeat goes stale), not as the #945
-//! capture wedge (exit 79).
+//! The thread is pinned to the isolated capture core and raised to SCHED_FIFO, exactly like the E2E
+//! burn thread that already sends from its own thread (#289 / issue 899 defect 2).
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -116,7 +111,9 @@ impl NdiSendThread {
             .name("ndi-send".into())
             .spawn(move || {
                 crate::affinity::pin_capture_thread();
-                crate::affinity::set_current_thread_realtime(crate::affinity::RtThreadRole::Send);
+                crate::affinity::set_current_thread_realtime(
+                    crate::affinity::RtThreadRole::CaptureEmit,
+                );
                 crate::send_handoff::run_send_loop(
                     &thread_slot,
                     &window,
@@ -144,7 +141,7 @@ impl NdiSendThread {
         let mut buf = self.pool.take();
         buf.clear();
         buf.extend_from_slice(data);
-        match self.slot.offer(SendJob {
+        let replaced = match self.slot.offer(SendJob {
             frame: SendFrame { buf, info },
             timecodes,
             deadline,
@@ -159,7 +156,12 @@ impl NdiSendThread {
                 self.pool.put(job.frame.buf);
                 0
             }
-        }
+        };
+        // The send thread shares the isolated core at the same SCHED_FIFO priority, so it cannot
+        // preempt this thread: yield once, so it picks the job up (and parks on the deadline)
+        // before this loop drains the next already-buffered frame.
+        std::thread::yield_now();
+        replaced
     }
 
     /// Close the hand-off and join the thread. The last pending frame is still sent, and the
@@ -171,14 +173,5 @@ impl NdiSendThread {
                 tracing::error!("#1242 ndi-send thread panicked during shutdown: {:?}", e);
             }
         }
-    }
-}
-
-impl Drop for NdiSendThread {
-    /// Dropped without [`NdiSendThread::shutdown`] (the capture loop unwinding): close the slot so
-    /// the send thread's loop ends and the sender is destroyed instead of staying announced. No
-    /// join here — it may run during an unwind.
-    fn drop(&mut self) {
-        self.slot.close();
     }
 }

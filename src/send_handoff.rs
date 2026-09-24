@@ -28,25 +28,20 @@
 //! # Overlap policy
 //!
 //! - A NEWER job arriving while the send thread still waits on an older job's deadline makes the
-//!   older job go out immediately (counted as `expedited`), so the frames leave in order and a
-//!   held frame never waits out its offset behind a newer one.
-//! - A job that is still UNTAKEN when the next one arrives is replaced: the newer job wins, and
-//!   the older one is handed back to the caller ([`Offer::Replaced`]) so its buffer is recycled
-//!   and the loss is counted. That happens when the send thread is inside a send that outlasts a
-//!   frame interval, or when the capture thread (one SCHED_FIFO step above the send thread) hands
-//!   over two buffered frames without blocking in between, so the send thread never ran. Both are
-//!   rare once the capture loop no longer waits for sends, and neither is silent: the 5 s
-//!   [`window_summary`] line WARNs `REPLACED`.
+//!   older job go out immediately (counted as `expedited`). A catch-up burst (the capture loop
+//!   draining buffered frames back to back) is therefore sent in order and nothing is lost.
+//! - A job that is still UNTAKEN when the next one arrives means the send thread is inside a send
+//!   and has fallen behind. The newer job wins, and the older one is handed back to the caller
+//!   ([`Offer::Replaced`]) so its buffer is recycled and the loss is counted. That is never
+//!   silent: the 5 s [`window_summary`] line WARNs `REPLACED`.
 //!
 //! # The 5 s line
 //!
 //! [`window_summary`] reports the CAPTURE loop's worst per-frame work against the capture
-//! interval. The offset is no longer in that budget: the capture loop does not wait for it, and the
-//! send thread runs one SCHED_FIFO step BELOW the capture thread on the shared isolated core
-//! (`affinity::RtThreadRole::Send`), so neither the wait nor a long encode can delay the next
-//! capture. It also reports the send thread's side: how many jobs waited for their deadline, how
-//! many were already past it, how many were expedited, the worst lateness (send start minus
-//! deadline), the worst send duration, the worst slot use, and how many jobs were replaced.
+//! interval. The offset is no longer in that budget, because the capture loop does not wait for
+//! it. It also reports the send thread's side: how many jobs waited for their deadline, how many
+//! were already past it, how many were expedited, the worst lateness (send start minus deadline),
+//! the worst send duration, and how many jobs were replaced.
 //!
 //! Std-only and free of any NDI type (the frame is generic), so all of it is Tier-0 testable with
 //! a fake send closure.
@@ -154,11 +149,6 @@ impl<F> HandoffSlot<F> {
         }
     }
 
-    /// Whether a job is waiting in the slot, not yet taken by the send thread.
-    pub fn is_pending(&self) -> bool {
-        self.lock().pending.is_some()
-    }
-
     /// Close the slot (shutdown). A pending job is still handed to the send thread by the next
     /// [`take`](Self::take), so the last frame drains before the thread ends.
     pub fn close(&self) {
@@ -241,9 +231,6 @@ pub struct SendWindow {
     pub max_lateness_ms: f64,
     /// The worst duration of one job's sends (all its timecodes), in ms.
     pub max_send_ms: f64,
-    /// The worst lateness + send duration of ONE job, in ms. Plus the offset, this is how far into
-    /// its slot a frame's send reached (the "slot use" on the 5 s line).
-    pub max_late_plus_send_ms: f64,
 }
 
 impl SendWindow {
@@ -261,9 +248,6 @@ impl SendWindow {
         let send_ms = send.as_secs_f64() * 1000.0;
         if send_ms > self.max_send_ms {
             self.max_send_ms = send_ms;
-        }
-        if late_ms + send_ms > self.max_late_plus_send_ms {
-            self.max_late_plus_send_ms = late_ms + send_ms;
         }
     }
 
@@ -329,11 +313,6 @@ pub const LATE_WARN_FRACTION: f64 = 0.5;
 /// - `LATE`: a send started [`LATE_WARN_FRACTION`] of a capture interval past its deadline;
 /// - `REPLACED`: a job was replaced unsent (newest-wins: the send thread fell behind).
 ///
-/// It also reports the worst SLOT USE: the offset plus the worst lateness + send of one job, i.e. how
-/// far into its slot a frame's send reached. That is a margin figure, not a WARN: the send thread
-/// runs one SCHED_FIFO step below the capture thread, so a send reaching into the next slot can
-/// never delay the next capture; it only makes the next send late, which `LATE` reports.
-///
 /// `capture_interval_ms <= 0` never WARNs on the three interval terms.
 pub fn window_summary(
     capture: &CaptureWindow,
@@ -363,7 +342,7 @@ pub fn window_summary(
         ));
     }
     let line = format!(
-        "#1242 send stagger: offset={offset_us} us, capture loop max work {:.1} ms vs capture interval {:.1} ms; send thread {} job(s) ({} waited for the offset / {} already past it / {} expedited by a newer frame), max lateness {:.2} ms, max send {:.1} ms, max slot use {:.1} ms, {} replaced{flags}",
+        "#1242 send stagger: offset={offset_us} us, capture loop max work {:.1} ms vs capture interval {:.1} ms; send thread {} job(s) ({} waited for the offset / {} already past it / {} expedited by a newer frame), max lateness {:.2} ms, max send {:.1} ms, {} replaced{flags}",
         capture.max_work_ms,
         capture_interval_ms,
         send.jobs(),
@@ -372,7 +351,6 @@ pub fn window_summary(
         send.expedited,
         send.max_lateness_ms,
         send.max_send_ms,
-        offset_us as f64 / 1000.0 + send.max_late_plus_send_ms,
         capture.replaced_jobs,
     );
     (line, over_budget || send_over_budget || late || replaced)

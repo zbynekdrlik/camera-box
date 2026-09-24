@@ -1036,12 +1036,9 @@ async fn run_capture_loop(
                     // issue 899 defect 2: in burn mode this thread is the EMIT hot path (the NDI
                     // sender lives here), so raise SCHED_FIFO PER THREAD — it used to inherit FIFO
                     // from the retired process-wide CPUSchedulingPolicy, now dropped from the unit.
-                    // Only THIS thread is raised; auxiliary threads stay SCHED_OTHER. #1242: it
-                    // takes the SAME Send role as the production ndi-send thread (one FIFO step
-                    // below capture), so the capture thread preempts its stagger wait + send and
-                    // the E2E send timing matches production.
+                    // Only THIS thread is raised; auxiliary threads stay SCHED_OTHER.
                     camera_box::affinity::set_current_thread_realtime(
-                        camera_box::affinity::RtThreadRole::Send,
+                        camera_box::affinity::RtThreadRole::CaptureEmit,
                     );
                     // Burn thread: (optionally) render the QR into the copied frame + NDI-send it in
                     // receive (= emit) order. Ends when the capture loop drops the ring (shutdown).
@@ -1506,10 +1503,6 @@ async fn run_capture_loop(
                         );
                         if replaced > 0 {
                             capture_window.note_replaced(replaced);
-                            // Those frames were counted as emitted when they were collected, but
-                            // they never went out: take them back so `sent`, the #707 per-second
-                            // ring and the #666 emit-rate check stay honest.
-                            emit_count = emit_count.saturating_sub(replaced as u64);
                         }
                     }
                 }
@@ -1549,9 +1542,7 @@ async fn run_capture_loop(
                     // a strih freeze the box emit path dipped; if the box stays clean (buckets ~60)
                     // while strih freezes, the loss is downstream (link / NDI SDK), read off the
                     // transport sampler instead.
-                    // saturating: a #1242 replacement can take frames of an EARLIER iteration back
-                    // out of `emit_count` in this one.
-                    let emitted_this = emit_count.saturating_sub(emit_before) as u32;
+                    let emitted_this = (emit_count - emit_before) as u32;
                     // #944 — stamp the emit-liveness heartbeat when a burn job was actually queued
                     // this iteration (`frame_dispatched`). A corrupted buffer returns Ok without
                     // dispatching, so this never advances on a frozen-output stream — exactly the
