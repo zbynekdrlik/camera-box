@@ -817,7 +817,10 @@ fn verify_device_every_ssh_ignores_known_hosts_1311() {
         .filter(|l| {
             let t = l.trim_start();
             !t.starts_with('#')
-                && (t.contains(" ssh -") || t.starts_with("ssh -") || t.contains("scp "))
+                && (t.contains(" ssh -")
+                    || t.starts_with("ssh -")
+                    || t.starts_with("scp ")
+                    || t.contains(" scp "))
         })
         .collect();
     assert!(
