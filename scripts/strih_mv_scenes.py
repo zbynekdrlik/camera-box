@@ -68,11 +68,8 @@ NDI_SOURCE_NOT_DISCOVERABLE = object()
 # obs-websocket v5 SceneItemTransform: only these fields are SETTABLE via SetSceneItemTransform.
 # GetSceneItemList also returns read-only computed fields (width/height/sourceWidth/sourceHeight)
 # that must be stripped before echoing a transform back, or the request can be rejected/ignored.
-_SETTABLE_TRANSFORM_FIELDS = frozenset({
-    "positionX", "positionY", "rotation", "scaleX", "scaleY", "alignment",
-    "boundsType", "boundsAlignment", "boundsWidth", "boundsHeight",
-    "cropLeft", "cropTop", "cropRight", "cropBottom",
-})
+# issue 1242: the ONE owner of this list is strih_bandwidth_roles.py (the strih-lx role module).
+from strih_bandwidth_roles import SETTABLE_TRANSFORM_FIELDS as _SETTABLE_TRANSFORM_FIELDS  # noqa: E402
 
 
 # --- PURE functions (no network — unit-tested from tests/python/test_strih_mv_scenes.py) --------

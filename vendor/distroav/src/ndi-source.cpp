@@ -245,6 +245,18 @@ static inline bool genlock_connect_on_show_park_decision(bool genlock_active, bo
 	return !showing;
 }
 
+/* camera-box issue 1242: should the #1180 post-connect identity verify be SKIPPED for this bind?
+ * Only for the FIRST bind after an unpark (`unpark_bind`) whose URL came from THIS reset's fresh
+ * name-resolving finder (`url_bind_kind` 0, not the last-known/fleet guesses 1/2). #1180 exists for
+ * the SENDER-restart port reshuffle; an unpark is our OWN show, and the verify's blocking fresh finder
+ * (up to NDI_IDENTITY_VERIFY_MAX_WAITS x 500 ms) would otherwise stall the frame loop right after the
+ * first frames -- exactly while the camera sits in preview waiting for the cut. Every other bind (a
+ * #767/#1096 rebind, a config change, a guessed URL) keeps the verify. PURE (only primitives). */
+static inline bool genlock_unpark_skips_identity_verify(bool unpark_bind, int url_bind_kind)
+{
+	return unpark_bind && url_bind_kind == 0;
+}
+
 /* camera-box issue 1242: while parked, re-log the park state this often so a dev1 watchdog reading a
  * BOUNDED OBS-log tail always finds a `genlock-park '<src>': state=parked` line for a parked input
  * (the same ~5 s cadence as the genlock-fifo audit line it sits beside). */
@@ -1144,6 +1156,9 @@ void *ndi_source_thread(void *data)
 	bool parked_1242 = false;
 	uint64_t park_since_ns_1242 = 0;
 	uint64_t park_last_log_ns_1242 = 0;
+	/* camera-box issue 1242: the next successful receiver bind is the reconnect of an UNPARK (consumed
+	 * at that bind; see genlock_unpark_skips_identity_verify). */
+	bool unpark_bind_1242 = false;
 
 	/* camera-box #797 recv-timing instrumentation: locate the ~50-of-60fps pull-loop
 	 * throttle. Times recv_capture_v3 (wait for SDK) vs process_video2+free (our cost,
@@ -1181,6 +1196,12 @@ void *ndi_source_thread(void *data)
 					ndi_frame_sync = nullptr;
 					ndi_receiver = nullptr;
 					ndi_reap_receiver_detached(ndiLib, park_frame_sync, park_receiver);
+					// Blank it: the certified KEEP_CONTENT would otherwise leave the last
+					// pre-park frame (possibly hours old) on screen as if live when the input is
+					// shown again, until the cold connect delivers. obs_source_output_video(NULL)
+					// also resets the genlock FIFO (last_frame_ts = 0), so a parked input stops
+					// counting an underrun every render tick and re-arms a clean delay line.
+					deactivate_source_output_video_texture(s);
 					// A parked input is idle, not unlocked: report connected=false so the
 					// issue-1299 lock facet excludes it from the DEGRADED gate.
 					if (auto set_genlock_connected = resolve_set_genlock_connected())
@@ -1204,6 +1225,7 @@ void *ndi_source_thread(void *data)
 				// a fresh issue-767 stale window, and a fresh #1096 no-connection timer.
 				was_disconnected = true;
 				no_conn_since_ns = 0;
+				unpark_bind_1242 = true;
 				pthread_mutex_lock(&s->config_mutex);
 				s->config.reset_ndi_receiver = true;
 				pthread_mutex_unlock(&s->config_mutex);
@@ -1514,6 +1536,11 @@ void *ndi_source_thread(void *data)
 			// reset, so it re-fires on every BY-URL reconnect -- the reshuffle window).
 			connected_by_url_1180 = url_resolved_1096;
 			identity_verify_pending_1180 = url_resolved_1096;
+			// camera-box issue 1242: an unpark's own fresh-finder bind skips the blocking one-shot
+			// (see genlock_unpark_skips_identity_verify); the flag is consumed by this bind either way.
+			if (genlock_unpark_skips_identity_verify(unpark_bind_1242, url_bind_kind_1096))
+				identity_verify_pending_1180 = false;
+			unpark_bind_1242 = false;
 			frames_seen_since_reset_1180 = false;
 			bind_recovery_recorded_1096 = false; // camera-box #1096 (reopen): re-arm the per-bind recovery one-shot
 

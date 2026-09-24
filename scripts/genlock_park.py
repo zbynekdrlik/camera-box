@@ -54,6 +54,14 @@ def parked_sources(text):
     return {s for s, st in park_states(text).items() if st == "parked"}
 
 
+def park_touched_sources(text):
+    """The set of sources with ANY park line (parked OR unparked) in the window. A source that parked
+    or unparked inside the window has a partial received= history there (frozen, then a cold
+    reconnect), so a whole-window rate/cadence is not a measurement of it -- rig-health-audit
+    excludes these, never only the currently-parked ones."""
+    return set(park_states(text))
+
+
 def is_monitor_twin(name):
     """True for an always-connected low-bandwidth multiview twin input ('MV NDI cam3')."""
     return (name or "").startswith(TWIN_PREFIX)

@@ -1,6 +1,10 @@
 ---
 paths:
   - "vendor/distroav/src/ndi-source.cpp"
+  - "vendor/obs-studio/frontend/components/Multiview.cpp"
+  - "vendor/obs-studio/frontend/components/Multiview.hpp"
+  - "scripts/strih_bandwidth_roles.py"
+  - "tests/obs_multiview_cell_target_1242.rs"
   - "scripts/strih_scenes.py"
   - "scripts/strih_mv_scenes.py"
   - "scripts/strih-obs-start.sh"
@@ -54,10 +58,18 @@ old program input at every cut (the issue-1320 render-freeze class). So:
   touched → none of the `distroav-receiver-lifecycle.md` hazards (no `break`, no empty name).
 - At the TOP of the receiver loop, BEFORE the reset block, the pure
   `genlock_connect_on_show_park_decision(genlock_active, monitor, connect_on_show, showing)` decides.
-  On park: the receiver + framesync go to the issue-1320 detached reaper, `set_genlock_connected(false)`
+  On park: the receiver + framesync go to the issue-1320 detached reaper, the source is BLANKED
+  (`deactivate_source_output_video_texture` → `obs_source_output_video(NULL)`: no hours-old frame is
+  presented as live on the next show despite the certified KEEP_CONTENT, and the genlock FIFO's
+  `last_frame_ts = 0` stops `async_tick` counting an underrun EVERY render tick for a parked input —
+  `async_tick` runs for every async source regardless of showing), `set_genlock_connected(false)`
   (the issue-1299 LOCK facet treats it as idle, not DEGRADED), log + `sleep 5 ms; continue`.
-  On show: `was_disconnected = true`, `no_conn_since_ns = 0`, re-arm `reset_ndi_receiver` → the
-  normal reset block runs the issue-1096 fresh finder.
+  On show: `was_disconnected = true`, `no_conn_since_ns = 0`, `unpark_bind_1242 = true`, re-arm
+  `reset_ndi_receiver` → the normal reset block runs the issue-1096 fresh finder. That bind SKIPS the
+  #1180 one-shot identity verify only when its URL came from this reset's own fresh finder
+  (`genlock_unpark_skips_identity_verify(unpark_bind, url_bind_kind == 0)`): #1180 guards a SENDER
+  restart's port reshuffle, and its blocking finder (up to 2 × 500 ms) would stall the frame loop
+  while the camera sits in preview waiting for the cut. Guessed URLs (last-known / fleet map) keep it.
 - The role snapshot (`s->config.genlock_monitor` / `s->config.connect_on_show`) is written in
   `ndi_source_update` under `config_mutex`, gated on the genlock lockdown.
 - Log family (mutually non-substring vs every other `genlock-*` marker):
@@ -71,26 +83,49 @@ old program input at every cut (the issue-1320 render-freeze class). So:
 ## Why a multiview must not show a scene holding a full input
 
 `Multiview::Update` calls `obs_source_inc_showing` on every scene it renders. A `Cam N` scene in the
-multiview keeps its full input "showing" → never parked → no saving. So `strih_scenes.py
---apply-roles` (run by `strih-obs-start.sh` after `--bootstrap` on every launch, best-effort):
+multiview keeps its full input "showing" → never parked → no saving. So
+`scripts/strih_bandwidth_roles.py` (via `strih_scenes.py --apply-roles`, run by `strih-obs-start.sh`
+after `--bootstrap` on every launch, best-effort; installed next to strih_scenes.py by setup-strih
+step 6):
 
 1. flags every program-path main `genlock_connect_on_show=true`;
 2. heals/creates the `MV NDI camN` twins (same LIVE sender + pin as the main, monitor, audio off);
-3. gives every multiview scene that holds a program input DIRECTLY an `MV <scene>` twin (items
-   mirrored, each main swapped for its twin, audio-only inputs dropped); the original leaves the
-   multiview, the twin joins it. Covers `Cam N` AND `Moderatori`;
+   the sender name of an existing twin goes through the #795-safe `_enforce_ndi_source_name`; a
+   main with NO sender (an empty name would stop the twin's receiver thread) or a twin name already
+   owned by a non-NDI input → no twin, a `problems` entry;
+3. `scenes_needing_twins`: every scene that holds a program input DIRECTLY or NESTS such a scene
+   (recursive, cycle-safe) gets an `MV <scene>` twin mirroring it — each main swapped for its twin,
+   each nested twinned scene for ITS twin, audio-only inputs dropped, a swapped item pinned to
+   `OBS_BOUNDS_SCALE_INNER` at the main item's on-canvas size (NDI "lowest" is a lower-resolution
+   proxy; a scale-placed twin would otherwise draw small in the tile corner). A drifted twin
+   (source / enabled / transform) is rebuilt. Covers `Cam N` AND `Moderatori`;
 4. never twins an NDI-output scene (an enabled `ndi_filter`: Grading, Interkom) — the filter only
    sends while its parent is SHOWING, and Grading's one enabled nested camera IS the wanted
-   full-bandwidth grading feed;
-5. swaps the custom `MULTIVIEW` grid scene's full inputs / `Cam N` refs for twins;
-6. refreshes the built-in multiview with a scratch-scene create+remove (OBS re-reads membership only
+   full-bandwidth grading feed — nor the custom grid, nor a twin;
+5. the multiview membership hand-off (`membership_on_create`: original out, twin in; a nested-only
+   twin never shown) and the twin's `camera_box_multiview_target` private key are written ONCE, when
+   the twin is created or first adopted — never re-imposed (operator wins, the imag #785 lesson);
+6. a twin whose original lost its camera is RETIRED (original back in, twin out; the scene is kept);
+7. swaps the custom `MULTIVIEW` grid scene's full inputs / twinned scene refs for twins;
+8. refreshes the built-in multiview with a scratch-scene create+remove (OBS re-reads membership only
    on a scene-list change; a WS private-setting write alone does not refresh it).
+
+**The multiview cell stands for its TARGET (vendored frontend, `Multiview.cpp`).** Without it the
+operator's multiview regresses: the tally border never lights (the twin is never on program), the
+label reads `MV Cam 3`, and a click (MultiviewMouseSwitch, default on) / double-click puts the
+LOW-bandwidth twin into preview or straight onto PROGRAM. `multiview_cell_target(src, priv)` resolves
+`camera_box_multiview_target` (a missing key / unknown / non-scene name → the cell itself, so stream /
+imag / resolume are byte-for-byte stock); `Update` records a per-cell target (labels it, NEVER
+inc_showing's it — that would reconnect the camera), `Render` compares the TARGET to program/preview
+for the tally, `GetSourceByPosition` returns the target for both click handlers. Guard:
+`tests/obs_multiview_cell_target_1242.rs` + the python key pin. A FRONTEND change → FULL-bundle deploy.
 
 A correct collection is a pure read (idempotency is tested). `--apply-roles` is a SEPARATE mode from
 `--bootstrap` so the issue-1317 update-only "never create" seed contract stays as pinned; the twins
 are role-owned creates. New twin scenes land at `currentRow()+1` in the scene list — the operator's
 multiview tile ORDER changes once (obs-websocket v5 has no scene-reorder request); fix it in the UI
-once, the collection keeps it.
+once, the collection keeps it. Twin sender names follow the mains only at the next launch (a
+`set-ndi-mapping --heal` of a main does not touch its twin).
 
 ## Every received= consumer reads a parked input as HIDDEN BY DESIGN
 
@@ -103,7 +138,7 @@ not parked (normal classification).
 |---|---|
 | strih frozen-input watchdog (#1069 enumeration) | `genlock_park_watch_set`: one live receiver per camera — a live main (twin dropped), or the twin of a parked main; never both (no double page) |
 | frozen-input static SOURCES / cadence / ndi-halving | parked → SKIP, no blind-tap count, stale baseline dropped |
-| rig-health-audit `arrivals-low` | `low_arrival_sources`: parked inputs and `MV` twins excluded |
+| rig-health-audit `arrivals-low` + `cadence_check` | `park_touched_sources` (ANY park line, parked or unparked, in the window: a partial history is no measurement) + `MV` twins excluded |
 | set-ndi-mapping `--verify-live` | `hidden=obs_phase2.input_hidden_by_design` (settings + `GetSourceActive.videoShowing`) → SKIP, never screenshot-sampled |
 | asio-starve watchdog | n/a (reads `asrc:` audio lines; camera inputs carry no audio) |
 | `[4c/8]`, mv-reverify-escalate, ndi-cadence-heal, `[4j/8settle]`, `recording-e2e.sh` | the E2E HOLD (below) keeps every program-path input connected, so nothing parks during a run |
@@ -113,15 +148,24 @@ not parked (normal classification).
 
 `recording-e2e.sh`, right after `trap cleanup` arms, behind its OWN `stray_session_check_assert`
 (a strih OBS settings write is a rig mutation — it is in the issue-1271 `muts` list):
-`connect_on_show_e2e_hold "$HERE" "$STRIH" "$OUTDIR/connect-on-show-hold.json" || exit 1`.
-`obs_phase2.py connect-on-show --hold` writes the held list BEFORE flipping (a kill mid-hold still
-leaves restore a full list), UNIONS a leftover state file, and reads every write back (failure →
-the run aborts: a hidden input would be measured cold). `cleanup()` restores it after
-`ndi_cadence_verify_and_heal` (always returns 0; a failed restore is fail-SAFE — the inputs just
-stay connected until the next launch re-applies the roles).
+`connect_on_show_e2e_hold "$HERE" "$STRIH" "$CONNECT_ON_SHOW_HOLD_STATE" || exit 1`, then
+`connect_on_show_e2e_wait_live` (bounded 30 s, fail-OPEN WARNING): every held input must UNPARK and
+advance its `received=` before the `[1/8]` pixel-liveness / `[2/8]` reverify checks run, so they never
+race a cold reconnect. The state file is STABLE (`~/.camera-box/connect-on-show-hold.json`, never the
+per-run OUTDIR): `obs_phase2.py connect-on-show --hold` writes the held list BEFORE flipping, UNIONS a
+leftover file (a SIGKILLed run's list is restored by the next run's cleanup), and reads every write
+back (failure → the run aborts: a hidden input would be measured cold). `cleanup()` restores it
+AFTER `cleanup_mv_reverify_active_boxes` + `ndi_cadence_verify_and_heal` (both read every input
+connected — restoring earlier would make the #759 reverify see parked mains as wedged and escalate);
+always returns 0; a failed restore is fail-SAFE (the inputs just stay connected until the next
+launch re-applies the roles). During a run the uplink carries 7 full inputs + 7 LOWEST twins — more
+than before this change — so the live acceptance also reads `ether2` drops DURING an E2E.
 
 ## Live acceptance (supervisor, never on a production day)
 
-Full-bundle deploy (vendored DistroAV) → `strih_scenes.py --apply-roles` (or an OBS relaunch) →
-fix the multiview tile order once → `ether2` tx-drop = 0 over 30 min → PVW-select → first-frame time
-measured → multiview live on all cells → E2E green.
+Full-bundle deploy (vendored DistroAV + OBS frontend) → `strih_scenes.py --apply-roles` (or an OBS
+relaunch) → fix the multiview tile order once → multiview: every cell live, labels read the program
+scene names, a cut lights the right cell red, a click selects the program scene (never an `MV`
+scene) → `ether2` tx-drop = 0 over 30 min idle AND during an E2E → PVW-select → first-frame time
+measured → E2E green. Unverified until then: whether an unpark's fresh-finder bind ever hits the
+#1287 frame-less alternation on the rig.

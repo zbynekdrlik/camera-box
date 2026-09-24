@@ -1245,6 +1245,9 @@ jobs:
           if ($ndi -notmatch [regex]::Escape('ndi_reap_receiver_detached(ndiLib, park_frame_sync, park_receiver);')) {
             Write-Error "ndi-source.cpp: the issue-1242 park no longer releases the NDI receiver through the detached reaper. Re-apply the issue-1242 park"; exit 1
           }
+          if ($ndi -notmatch [regex]::Escape('static inline bool genlock_unpark_skips_identity_verify(')) {
+            Write-Error "ndi-source.cpp: the issue-1242 unpark identity-verify skip is gone -- every preview select stalls the frame loop on the blocking #1180 finder. Re-apply the issue-1242 park"; exit 1
+          }
           # #257: the UI is a HARD WHITELIST — the forced knobs are REMOVED from the UI (not hidden via
           # apply_genlock_lockdown_visibility, which is gone). getproperties must expose EXACTLY the
           # 4 whitelist props and the forced knobs (e.g. behavior list) must NOT be added.

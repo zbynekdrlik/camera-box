@@ -2949,9 +2949,10 @@ def program_scene(a):
 # An E2E run needs every program-path input full-bandwidth and connected for the whole measurement, so
 # recording-e2e.sh HOLDS the flag off for the run (connect_on_show_hold) and cleanup() restores it
 # (connect_on_show_restore). The hold's state file is written BEFORE any flag flips, so a run killed
-# mid-hold still leaves restore a complete list; a re-hold UNIONS the file (a crashed previous run's
-# held inputs are never forgotten). A leftover held flag is fail-SAFE (today's always-connected
-# bandwidth) and the next strih OBS launch re-applies the roles anyway.
+# mid-hold still leaves restore a complete list; it lives at a STABLE path on the runner
+# (~/.camera-box/connect-on-show-hold.json, recording-e2e.sh), so a re-hold by the NEXT run UNIONS a
+# SIGKILLed run's leftover file and that run's cleanup restores both. A leftover held flag is fail-SAFE
+# (today's always-connected bandwidth) and the next strih OBS launch re-applies the roles anyway.
 CONNECT_ON_SHOW_KEY = "genlock_connect_on_show"
 GENLOCK_MONITOR_KEY = "genlock_monitor"
 
@@ -2995,6 +2996,9 @@ def _read_hold_state(path):
 
 
 def _write_hold_state(path, names):
+    d = os.path.dirname(path)
+    if d:
+        os.makedirs(d, exist_ok=True)
     tmp = f"{path}.tmp"
     with open(tmp, "w") as fh:
         json.dump(sorted(names), fh)

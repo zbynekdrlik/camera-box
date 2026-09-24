@@ -336,6 +336,12 @@ fi
 [ -f "${HERE}/strih_scenes.py" ] || fail "scripts/strih_scenes.py not found next to this script (the strih-obs-start.sh --bootstrap seed target)"
 install -m 0755 "${HERE}/strih_scenes.py" /usr/local/bin/strih_scenes.py
 echo "  installed strih_scenes.py -> /usr/local/bin (input/scene/Studio-Mode seeder; strih-obs-start.sh runs --bootstrap on launch)"
+# issue 1242: the strih BANDWIDTH ROLES module (program-path cameras connect only while shown, the
+# multiview renders low-bandwidth MV twins). strih_scenes.py --apply-roles imports it from its own
+# directory, so it installs next to it; strih-obs-start.sh applies the roles on every launch.
+[ -f "${HERE}/strih_bandwidth_roles.py" ] || fail "scripts/strih_bandwidth_roles.py not found next to this script (the strih_scenes.py --apply-roles module)"
+install -m 0755 "${HERE}/strih_bandwidth_roles.py" /usr/local/bin/strih_bandwidth_roles.py
+echo "  installed strih_bandwidth_roles.py -> /usr/local/bin (bandwidth roles; strih-obs-start.sh runs strih_scenes.py --apply-roles on launch)"
 
 # ---------------------------------------------------------------------------------------------
 step 7 "OBS pre-seed: WebSocket :4455 no-auth + Studio Mode"

@@ -318,6 +318,8 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # the run HOLDS that off so every input stays full-bandwidth for the measurement (see the lib header).
 # shellcheck source=scripts/lib/connect-on-show-hold.sh
 . "$HERE/lib/connect-on-show-hold.sh"
+# shellcheck source=scripts/lib/genlock-park.sh
+. "$HERE/lib/genlock-park.sh"
 # #758 item 1 — the fleet-wide minute-0 preflight: a named, loud, self-expiring exclusion for a
 # box that's known-offline for a reason outside this harness's control (cambox-offline-ack.sh),
 # plus the per-box service-active/emitter-count/stray-unit check (preflight-fleet-check.sh).
@@ -2432,9 +2434,12 @@ rig_heartbeat_start "recording-e2e" || echo "WARNING: could not start rig-active
 rig_e2e_marker_set "recording-e2e" || echo "WARNING: could not write rig-in-e2e marker (#353)" >&2
 # issue 1242: HOLD strih connect-on-show off for the whole run (trap armed -> cleanup() restores it),
 # behind its OWN rig-busy guard (a strih OBS settings write is a rig mutation).
-CONNECT_ON_SHOW_HOLD_STATE="$OUTDIR/connect-on-show-hold.json"
+# The state file is STABLE across runs (not the per-run OUTDIR): a SIGKILLed run's held list is
+# unioned by the next run's hold and restored by its cleanup.
+CONNECT_ON_SHOW_HOLD_STATE="${CONNECT_ON_SHOW_HOLD_STATE:-$HOME/.camera-box/connect-on-show-hold.json}"
 stray_session_check_assert "$HERE" "$STRIH" "$STREAM" "the issue-1242 connect-on-show hold"
 connect_on_show_e2e_hold "$HERE" "$STRIH" "$CONNECT_ON_SHOW_HOLD_STATE" || exit 1
+connect_on_show_e2e_wait_live "$HERE" "$STRIH" "$CONNECT_ON_SHOW_HOLD_STATE"
 
 # PROBE_BIN_DIR holds the three probe binaries the harness deploys/runs:
 #   $PROBE_BIN_DIR/camera-box      — PROBE-featured appliance with the #174 cam1 burn

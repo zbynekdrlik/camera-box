@@ -56,6 +56,11 @@ private:
 	gs_vertbuffer_t *rightLine = nullptr;
 
 	std::vector<OBSWeakSource> multiviewScenes;
+	// camera-box issue 1242: per scene cell, the scene the cell STANDS FOR (tally border, label, click).
+	// A strih low-bandwidth twin scene (`MV <scene>`) names its program scene in the private setting
+	// camera_box_multiview_target; every other cell stands for itself. Weak refs, never inc_showing'd
+	// (showing the target would reconnect its full-bandwidth camera).
+	std::vector<OBSWeakSource> multiviewTargets;
 	std::vector<OBSSource> multiviewLabels;
 
 	// Multiview position helpers
