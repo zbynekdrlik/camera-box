@@ -1472,6 +1472,8 @@ fn strih_lx_plan_is_the_setup_strih_recipe_not_the_imag_program_1317() {
         "newlevel@10.77.9.202:/tmp/genlock-stage-deadbeef/bundle/",
         "newlevel@10.77.9.202:/tmp/genlock-stage-deadbeef/repo/",
         "STRIH_LX_BUNDLE_SRC=/tmp/genlock-stage-deadbeef/bundle",
+        // issue 1361: the provisioning run selects the box's fact file explicitly.
+        "setup-strih.sh --box strih-lx",
         "/tmp/genlock-stage-deadbeef/repo/run-setup.sh",
         "ghtoken:",
         "/usr/local/bin/strih-obs-stop.sh",

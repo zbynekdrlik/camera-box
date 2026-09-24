@@ -113,7 +113,7 @@ case "$cmd" in
   *LEFTOVER*) [ -n "${STUB_LEFTOVER:-}" ] && echo "LEFTOVER $STUB_LEFTOVER"; exit "${STUB_STAGECHECK_RC:-0}" ;;
   *setup-strih.rc*) [ -n "${STUB_SETUP_NO_RC:-}" ] || echo "${STUB_SETUP_RC:-0}"; exit 0 ;;
   *run-setup.sh*) cat > "$STUB_DIR/setup.stdin"; exit "${STUB_LAUNCH_RC:-0}" ;;
-  *"reboot strih-lx, then run verify-strih"*) [ -n "${STUB_REBOOT_LINE:-}" ] && echo "$STUB_REBOOT_LINE"; exit 0 ;;
+  *", then run verify-strih"*) [ -n "${STUB_REBOOT_LINE:-}" ] && echo "$STUB_REBOOT_LINE"; exit 0 ;;
   *setup-strih.log*) echo "setup log tail"; exit 0 ;;
   *strih-obs-stop.sh*) exit "${STUB_STOP_RC:-0}" ;;
   *GENLOCK_BUILD_SHA.txt*)
@@ -724,11 +724,11 @@ fn strih_lx_setup_runner_reads_the_token_from_stdin_and_writes_the_rc_1317() {
         fs::create_dir_all(s.join("bundle")).unwrap();
         write_exec(
             &s.join("repo/scripts/setup-strih.sh"),
-            "#!/bin/bash\necho \"B=$STRIH_LX_BUNDLE_SRC IP=$STRIH_LX_IP T=$GH_TOKEN\"\nexit 6\n",
+            "#!/bin/bash\necho \"B=$STRIH_LX_BUNDLE_SRC ARGS=$* IP=${STRIH_LX_IP:-unset} T=$GH_TOKEN\"\nexit 6\n",
         );
         let gen = Command::new("bash")
             .arg("-c")
-            .arg(". \"$LIB\"; strih_lx_setup_runner \"$S\" 10.9.9.9")
+            .arg(". \"$LIB\"; strih_lx_setup_runner \"$S\" strih-lx")
             .env("LIB", lib())
             .env("S", &s)
             .output()
@@ -770,7 +770,8 @@ fn strih_lx_setup_runner_reads_the_token_from_stdin_and_writes_the_rc_1317() {
         let log = fs::read_to_string(s.join("setup-strih.log")).unwrap();
         assert!(
             log.contains(&format!("B={}/bundle", s.display()))
-                && log.contains("IP=10.9.9.9")
+                && log.contains("ARGS=--box strih-lx ")
+                && log.contains("IP=unset")
                 && log.contains("T=tok42"),
             "{stdin:?}: {log}"
         );
@@ -863,7 +864,7 @@ fn strih_lx_reboot_note_selects_only_the_pending_reboot_warning_1317() {
     let t = tempfile::tempdir().unwrap();
     let stage = t.path().join("genlock-stage-abc1");
     fs::create_dir_all(&stage).unwrap();
-    let real = "  the shared OBS-box baseline takes effect at the NEXT boot -- reboot strih-lx, then run verify-strih.sh (the run below only reports what is still pending)";
+    let real = "  the shared OBS-box baseline takes effect at the NEXT boot -- reboot strih-pp, then run verify-strih.sh --box strih-pp (the run below only reports what is still pending)";
     let mut log = String::new();
     for i in 0..5 {
         log.push_str(&format!("  routine {i}: applies at next boot\n"));
@@ -886,7 +887,7 @@ fn strih_lx_reboot_note_selects_only_the_pending_reboot_warning_1317() {
     );
     let setup = fs::read_to_string(manifest_dir().join("scripts/setup-strih.sh")).unwrap();
     assert!(
-        setup.contains("reboot strih-lx, then run verify-strih"),
+        setup.contains(", then run verify-strih"),
         "the deploy's reboot-note key must stay in setup-strih.sh's warning"
     );
 }
@@ -911,6 +912,15 @@ fn strih_lx_unreachable_after_launch_and_settle_budget_1317() {
         r.calls
     );
 
+    for (polls, secs, settle) in [("3", "10", "90"), ("10", "10", "95")] {
+        let r = run_exec(&[
+            ("STRIH_LX_VERIFY_POLLS", polls),
+            ("STRIH_LX_VERIFY_POLL_SECS", secs),
+            ("STRIH_LX_VERIFY_SETTLE_SECS", settle),
+        ]);
+        assert_eq!(r.code, 3, "{polls}x{secs} vs {settle}: err={}", r.err);
+        assert!(!r.calls.contains("ssh "), "{}", r.calls);
+    }
     let r = run_exec(&[
         ("STRIH_LX_VERIFY_POLLS", "3"),
         ("STRIH_LX_VERIFY_POLL_SECS", "10"),
