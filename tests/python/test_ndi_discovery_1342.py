@@ -234,7 +234,7 @@ class StrihWiring(unittest.TestCase):
         code = _strip_comments(text)
         self.assertIn('ndi_discovery_write_config "${USER_HOME}/.ndi" "$DESKTOP_USER"', code)
         self.assertIn('ndi_discovery_write_config "$NDI_DISCOVERY_SYSTEM_DIR"', code)
-        self.assertIn("ndi_discovery_dropin_content > /etc/systemd/system/intercom-hub.service.d/ndi-discovery.conf", code)
+        self.assertIn('ndi_discovery_dropin_content > "$NDI_DISCOVERY_INTERCOM_DROPIN"', code)
 
     def test_verify_strih_grades_the_config(self):
         text = _read(VERIFY_STRIH)
@@ -339,7 +339,7 @@ class RolloutGate(unittest.TestCase):
 
     def test_setup_device_writes_only_behind_the_gate_but_always_removes_30p(self):
         live = _strip_comments(_live_flow(SETUP_DEVICE, "stop here -- never run the destructive"))
-        gate = live.find("if ndi_discovery_enabled; then")
+        gate = live.find("if ndi_discovery_enabled cambox; then")
         write = live.find('ndi_discovery_write_config "$NDI_DISCOVERY_SYSTEM_DIR"')
         close = live.find("\nfi", write)
         reload = live.find("systemctl daemon-reload", write)
@@ -349,19 +349,97 @@ class RolloutGate(unittest.TestCase):
 
     def test_setup_strih_writes_only_behind_the_gate(self):
         code = _strip_comments(_read(SETUP_STRIH))
-        gate = code.find("if ndi_discovery_enabled; then")
+        gate = code.find("if ndi_discovery_enabled strih; then")
         write = code.find('ndi_discovery_write_config "${USER_HOME}/.ndi" "$DESKTOP_USER"')
-        dropin = code.find("ndi_discovery_dropin_content > /etc/systemd/system/intercom-hub.service.d/ndi-discovery.conf")
+        dropin = code.find('ndi_discovery_dropin_content > "$NDI_DISCOVERY_INTERCOM_DROPIN"')
         close = code.find("\nfi", dropin)
         self.assertTrue(0 <= gate < write < dropin < close, "step 4b writes only when the gate is on")
 
     def test_verifiers_accept_a_not_yet_rolled_out_box(self):
         vd = _read(VERIFY_DEVICE)
         an = vd.find("# (an) NDI discovery")
-        self.assertIn('ndi_discovery_rollout_pending "$NDI_DISC_CONF" "$NDI_DISC_DIR"', vd[an:vd.rfind("# (q) .bak cruft drift")])
+        self.assertIn('ndi_discovery_rollout_pending "$NDI_DISC_CONF" "$NDI_DISC_DIR" cambox', vd[an:vd.rfind("# (q) .bak cruft drift")])
         vs = _read(VERIFY_STRIH)
         item = vs.find("# 34) NDI discovery")
-        self.assertIn("ndi_discovery_rollout_pending", vs[item:vs.find("\n# 32) the shared OBS-box", item)])
+        block = vs[item:vs.find("\n# 32) the shared OBS-box", item)]
+        self.assertIn("ndi_discovery_rollout_pending", block)
+        self.assertRegex(block, r"ndi_discovery_rollout_pending [^\n]* strih\b")
+
+
+class PerClassGate(unittest.TestCase):
+    """Review round 2: strih-lx and the camboxes are configured by different provisioners, so one
+    fleet-wide switch cannot express "configure strih-lx first, the camboxes after" (or keeping
+    strih-lx off the gate). Each class has its own gate, defaulting to the fleet switch."""
+
+    def _rc(self, cls, env):
+        return _lib(f'ndi_discovery_enabled {cls}; echo "rc=$?"', env=env).stdout.strip()
+
+    def test_class_gates_default_to_the_fleet_switch(self):
+        for cls in ("cambox", "strih"):
+            self.assertEqual(self._rc(cls, {}), "rc=1")
+            self.assertEqual(self._rc(cls, {"NDI_DISCOVERY_ENABLED": "1"}), "rc=0")
+
+    def test_one_class_can_flip_alone(self):
+        env = {"NDI_DISCOVERY_ENABLED_STRIH": "1"}
+        self.assertEqual(self._rc("strih", env), "rc=0")
+        self.assertEqual(self._rc("cambox", env), "rc=1")
+
+    def test_rollout_pending_honours_the_class(self):
+        env = {"NDI_DISCOVERY_ENABLED_STRIH": "1"}
+        r = _lib("ndi_discovery_rollout_pending '' '' strih; echo \"s=$?\"; ndi_discovery_rollout_pending '' '' cambox; echo \"c=$?\"", env=env)
+        self.assertEqual(r.stdout.split(), ["s=1", "c=0"])
+
+
+class VerifyStrihItem34Behaviour(unittest.TestCase):
+    """Run the REAL item-34 block (sliced from verify-strih.sh) against temp dirs."""
+
+    def _run(self, tmp, env=None):
+        text = _read(VERIFY_STRIH)
+        item = text.find("# 34) NDI discovery")
+        block = text[item:text.find("\n# 32) the shared OBS-box", item)]
+        prelude = (
+            'FAILS=0\nok() { echo "PASS $1"; }\nbad() { echo "FAIL $1"; FAILS=$((FAILS+1)); }\n'
+            'note() { echo "NOTE $1"; }\n'
+        )
+        e = {
+            "NDI_DISCOVERY_SYSTEM_DIR": os.path.join(tmp, "etc-ndi"),
+            "NDI_DISCOVERY_INTERCOM_DROPIN": os.path.join(tmp, "intercom-ndi-discovery.conf"),
+        }
+        e.update(env or {})
+        script = f'set -euo pipefail\n. "{LIB}"\nUSER_HOME="{tmp}/home"\n{prelude}{block}\necho "FAILS=$FAILS"'
+        return _bash(script, env=e)
+
+    def test_pre_rollout_box_passes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            r = self._run(tmp)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertIn("FAILS=0", r.stdout)
+            self.assertIn("rollout gate off", r.stdout)
+
+    def test_half_written_box_fails_even_with_the_gate_off(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual(_lib(f'ndi_discovery_write_config "{tmp}/home/.ndi"').returncode, 0)
+            r = self._run(tmp)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertIn("FAILS=2", r.stdout, r.stdout)
+
+    def test_fully_configured_box_passes_with_the_gate_on(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            env = {"NDI_DISCOVERY_SYSTEM_DIR": os.path.join(tmp, "etc-ndi"), "NDI_DISCOVERY_ENABLED_STRIH": "1"}
+            self.assertEqual(_lib(f'ndi_discovery_write_config "{tmp}/home/.ndi"', env=env).returncode, 0)
+            self.assertEqual(_lib('ndi_discovery_write_config "$NDI_DISCOVERY_SYSTEM_DIR"', env=env).returncode, 0)
+            dropin = _lib("ndi_discovery_dropin_content", env=env).stdout
+            with open(os.path.join(tmp, "intercom-ndi-discovery.conf"), "w") as fh:
+                fh.write(dropin)
+            r = self._run(tmp, env={"NDI_DISCOVERY_ENABLED_STRIH": "1"})
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertIn("FAILS=0", r.stdout, r.stdout)
+            self.assertEqual(r.stdout.count("PASS (ndi-discovery)"), 3, r.stdout)
+
+    def test_gate_on_with_nothing_written_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            r = self._run(tmp, env={"NDI_DISCOVERY_ENABLED_STRIH": "1"})
+            self.assertIn("FAILS=3", r.stdout, r.stdout)
 
 
 class MergingWriter(unittest.TestCase):
@@ -408,7 +486,8 @@ class ReviewRound1Misc(unittest.TestCase):
 
     def test_rule_names_the_gate_and_the_consumers_that_need_a_plan(self):
         text = _read(RULE)
-        for needle in ("NDI_DISCOVERY_ENABLED", "ndi-portmap-audit", "stock", "ndi-recv-probe"):
+        for needle in ("NDI_DISCOVERY_ENABLED", "ndi-portmap-audit", "stock", "ndi-recv-probe",
+                       "NDI_DISCOVERY_ENABLED_STRIH", "sudo NDI_DISCOVERY_ENABLED", "Rollback"):
             self.assertIn(needle, text)
 
 
