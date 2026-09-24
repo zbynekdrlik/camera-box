@@ -3330,4 +3330,148 @@ mod tests {
             tail_mean_1355(&r.trace, 600)
         );
     }
+
+    /// issue #1367 bench: the LIVE stream `mbc` operating point, one audio callback at a time. A
+    /// +20 ppm source (the 24.9. production `estimated=`) delivers 128-sample blocks (the Dante VSC
+    /// block, 2.667 ms) into a mix buffer the OBS mixer drains 1024 samples at a time (one 21.33 ms
+    /// tick), so the level the servo reads every callback is the TRUE depth plus a 21.33 ms
+    /// sawtooth. A 1 s window is ~46.9 ticks, not a whole number, so the ONE reading of the
+    /// window-closing callback lands at a slowly walking sawtooth phase: the live `level=` sd 6.44 ms
+    /// against 6.16 ms predicted for a uniform tick phase. `jitter_s` is bursty delivery: each
+    /// callback lands up to `jitter_s` LATE on its nominal instant (monotonic, never a backward read).
+    /// `(applied − estimated)` is sampled once per simulated second from `observe_from_s`, and the
+    /// true TIME-average depth is summed per 20-min block over the same span.
+    struct TickRun1367 {
+        chatter_ppm: Vec<f64>,
+        block_levels_ms: Vec<f64>,
+        restore_seen: bool,
+        c: RealtimeAsrcCompensator,
+    }
+
+    fn run_tick_sawtooth_1367(jitter_s: f64, total_s: f64, observe_from_s: f64) -> TickRun1367 {
+        const DRIFT_PPM: f64 = 20.0;
+        const BLOCK_S: f64 = 128.0 / 48_000.0;
+        const TICK_MS: f64 = 1024.0 / 48_000.0 * 1000.0;
+        const LEVEL_BLOCK_S: f64 = 1200.0;
+        let period_s = BLOCK_S / (1.0 + DRIFT_PPM / 1_000_000.0);
+        let mut c = RealtimeAsrcCompensator::new();
+        let mut buffer_ms = LEVEL_TARGET_MS + TICK_MS / 2.0;
+        let mut t = 0.0_f64;
+        let mut next_tick_s = TICK_MS / 1000.0;
+        let mut prev_jitter = 0.0_f64;
+        let mut seed: u64 = 0x1367;
+        let mut next_sample_s = observe_from_s;
+        let (mut lvl_sum, mut lvl_dur) = (0.0_f64, 0.0_f64);
+        let mut next_block_s = observe_from_s + LEVEL_BLOCK_S;
+        let mut chatter_ppm = Vec::new();
+        let mut block_levels_ms = Vec::new();
+        let mut restore_seen = false;
+        while t < total_s {
+            seed = seed
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            let jitter = ((seed >> 11) as f64 / (1u64 << 53) as f64) * jitter_s;
+            let master_s = period_s + jitter - prev_jitter;
+            prev_jitter = jitter;
+            t += master_s;
+            while next_tick_s <= t {
+                buffer_ms -= TICK_MS;
+                next_tick_s += TICK_MS / 1000.0;
+            }
+            let corrected_s = c.compensate_with_level(BLOCK_S, master_s, buffer_ms);
+            if t >= observe_from_s {
+                lvl_sum += buffer_ms * master_s;
+                lvl_dur += master_s;
+                restore_seen |= c.level_restore();
+                if t >= next_sample_s {
+                    chatter_ppm.push(c.applied_ppm() - c.estimated_ppm());
+                    next_sample_s += 1.0;
+                }
+                if t >= next_block_s {
+                    block_levels_ms.push(lvl_sum / lvl_dur);
+                    lvl_sum = 0.0;
+                    lvl_dur = 0.0;
+                    next_block_s += LEVEL_BLOCK_S;
+                }
+            }
+            buffer_ms += corrected_s * 1000.0;
+        }
+        TickRun1367 {
+            chatter_ppm,
+            block_levels_ms,
+            restore_seen,
+            c,
+        }
+    }
+
+    fn sd_1367(xs: &[f64]) -> f64 {
+        let n = xs.len() as f64;
+        let mean = xs.iter().sum::<f64>() / n;
+        (xs.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / n).sqrt()
+    }
+
+    /// issue #1367 (ROZHODNUTÉ Option 2): the level loop must read the per-window MEAN of every
+    /// callback's `buffered_ms`, not the one reading of the window-closing callback. On the ONE
+    /// reading the 10 s EMA passes part of the aliased 21.33 ms tick sawtooth, so Kp 2 dithers the
+    /// resampler rate: live `applied − estimated` sd ≈ 7 ppm around a mean of +0.56 ppm, while the
+    /// true buffer depth held within ±2 ms. At the live operating point (+20 ppm, 128-sample
+    /// callbacks, 21.33 ms ticks, bursty delivery 1–2 ms) the rate chatter must stay under 1 ppm sd
+    /// (single-reading RED: ~3.6 ppm), the true 20-min depth within target ±2 ms, no restore, no
+    /// fallback, no step. With perfectly regular delivery (no jitter) the callback/tick phase walks
+    /// only 0.02 ms per window, and the reading mean carries a slow phase bias of at most half a
+    /// block: that case is held to a per-second change under 0.25 ppm rms (the chatter) and a sd
+    /// under 1.5 ppm (the slow beat; single-reading RED: 11.7 ppm sd, 0.27 ppm rms change).
+    #[test]
+    fn per_window_level_mean_kills_tick_sawtooth_rate_chatter_1367() {
+        const TOTAL_S: f64 = 9600.0;
+        const OBSERVE_FROM_S: f64 = 6000.0;
+        for jitter_ms in [1.0_f64, 2.0] {
+            let r = run_tick_sawtooth_1367(jitter_ms / 1000.0, TOTAL_S, OBSERVE_FROM_S);
+            let sd = sd_1367(&r.chatter_ppm);
+            assert!(
+                sd < 1.0,
+                "issue #1367: with {jitter_ms} ms bursty delivery the applied − estimated rate \
+                 chatter must stay under 1 ppm sd (single-reading level loop: ~3.6), got {sd:.3} ppm"
+            );
+            for (i, lvl) in r.block_levels_ms.iter().enumerate() {
+                assert!(
+                    (lvl - LEVEL_TARGET_MS).abs() <= 2.0,
+                    "issue #1367: 20-min block {i} true depth {lvl:.3} ms must hold target \
+                     {LEVEL_TARGET_MS} ± 2 ms ({jitter_ms} ms jitter)"
+                );
+            }
+            assert!(
+                !r.restore_seen && r.c.level_fallback_count() == 0 && r.c.step_count() == 0,
+                "issue #1367: the tick sawtooth must never arm the restore, fall back or re-base \
+                 ({jitter_ms} ms jitter): restore={} fallbacks={} steps={}",
+                r.restore_seen,
+                r.c.level_fallback_count(),
+                r.c.step_count()
+            );
+            assert!(
+                r.block_levels_ms.len() == 3 && r.chatter_ppm.len() >= 3500,
+                "issue #1367: the bench must observe 3 x 20 min, got {} blocks / {} samples",
+                r.block_levels_ms.len(),
+                r.chatter_ppm.len()
+            );
+        }
+
+        let r = run_tick_sawtooth_1367(0.0, TOTAL_S, OBSERVE_FROM_S);
+        let diffs: Vec<f64> = r.chatter_ppm.windows(2).map(|w| w[1] - w[0]).collect();
+        let diff_rms = (diffs.iter().map(|d| d * d).sum::<f64>() / diffs.len() as f64).sqrt();
+        let sd = sd_1367(&r.chatter_ppm);
+        assert!(
+            diff_rms < 0.25 && sd < 1.5,
+            "issue #1367: with perfectly regular delivery the per-second rate change must stay \
+             under 0.25 ppm rms and the slow phase beat under 1.5 ppm sd (single reading: 0.27 / \
+             11.7), got {diff_rms:.3} / {sd:.3}"
+        );
+        for (i, lvl) in r.block_levels_ms.iter().enumerate() {
+            assert!(
+                (lvl - LEVEL_TARGET_MS).abs() <= 2.0,
+                "issue #1367: 20-min block {i} true depth {lvl:.3} ms must hold target ± 2 ms \
+                 (no jitter)"
+            );
+        }
+    }
 }
