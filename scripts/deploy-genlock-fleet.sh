@@ -883,11 +883,11 @@ main() {
   case ",$boxes," in *,stream,*|*,resolume,*) want_win=1 ;; esac
   case ",$boxes," in *,imag,*) want_imag=1 ;; esac
   case ",$boxes," in *,strih-lx,*) want_strihlx=1 ;; esac
-  # --- strih-lx (issue 1317 part 6): the whole deploy, fail-loud, stage-before-stop, fail-closed
-  # SHA read-back (scripts/lib/strih-lx-deploy.sh). A failure exits 3/4 with the step named and NO
-  # fleet-log line; it runs first so a failed production strih never gets a "deployed" record.
+  # --- strih-lx (issue 1317 part 6, scripts/lib/strih-lx-deploy.sh), phase 1: resolve + download +
+  # the provisioning tree -- no box is touched (exit 3). EVERY requested box resolves before any box
+  # changes, so a missing Windows/imag build can never leave the production strih on another SHA.
   if [ "$want_strihlx" = 1 ]; then
-    strih_lx_execute_deploy "$sha" "$workdir" "$HERE/.." "$GENLOCK_REPO" || exit $?
+    strih_lx_prepare "$sha" "$workdir" "$HERE/.." "$GENLOCK_REPO" || exit $?
   fi
 
   # --- Windows: download the same-SHA artifact, emit the per-box plan (agent uploads + pastes) -----
@@ -934,7 +934,16 @@ main() {
     local imag_user="${IMAG_USER:-newlevel}" imag_pw="${IMAG_PW:-newlevel}"
     local imag_stage="/tmp/genlock-stage-$sha"
     build_imag_deploy_program "$imag_stage" '/opt/obs-genlock' '/opt/obs-backup' "$sha" "$sha" "$RETENTION_KEEP" "$yes" > "$workdir/bundle/deploy.sh"
+  fi
 
+  # --- strih-lx phase 2: the box steps (stage before stop, graceful stop, setup, fail-closed
+  # read-back). A failure exits 4 naming the step and writes NO fleet-log line.
+  if [ "$want_strihlx" = 1 ]; then
+    strih_lx_apply "$sha" || exit $?
+  fi
+
+  # --- imag: the ssh deploy of the bundle prepared above --------------------------------------------
+  if [ "$want_imag" = 1 ]; then
     echo "# imag: staging the FULL bundle $workdir/bundle -> ${imag_user}@${imag_ip}:$imag_stage and running the on-imag deploy (sudo) over ssh..."
     sshpass -p "$imag_pw" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=12 "${imag_user}@${imag_ip}" "rm -rf '$imag_stage' && mkdir -p '$imag_stage'" \
       || { echo "ERROR: imag stage mkdir failed" >&2; exit 4; }
