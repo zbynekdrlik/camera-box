@@ -1197,9 +1197,9 @@ pub fn display_render_ewma_update(prev_ewma_ns: u64, measured_ns: u64) -> u64 {
 // a slow consumer to prove the 1:1 / in-order / no-drop / timecode-passthrough guarantee
 // without an OBS/NDI build.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender, TrySendError};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 /// #275b — depth of the async cam1-burn ring: how many emitted frames the capture thread may
@@ -1339,10 +1339,79 @@ pub fn burn_should_render_qr(fourcc: &str) -> bool {
 /// total memory (no unbounded growth).
 pub const BURN_POOL_CAP: usize = BURN_RING_DEPTH + 2;
 
-/// #280 — the bounded pool of reusable frame buffers for the async cam1-burn copy. It moved to
-/// the crate root (`crate::frame_buffer_pool`, issue 1242) so the production NDI send thread
-/// reuses it; re-exported here so the burn path and its tests are unchanged.
-pub use crate::frame_buffer_pool::BufferPool;
+/// #280 — bounded pool of reusable frame buffers for the async cam1-burn copy.
+///
+/// The #275b async burn hands each emitted frame's bytes capture-thread → burn-thread over the
+/// [`BurnRing`]; the bytes MUST be copied off the V4L2 mmap (valid only inside the capture
+/// callback). #275b copied with a per-frame `Vec::to_vec` (~4 MB at 1080p YUYV) → a fresh heap
+/// allocation + free on EVERY emitted frame at up to 60 fps. This pool recycles those buffers: the
+/// capture thread [`take`](Self::take)s a buffer (reusing a returned one, or allocating only when
+/// the free list is empty), copies the frame in, and submits; the burn thread [`put`](Self::put)s
+/// the buffer back after the NDI send. The free list is BOUNDED ([`BURN_POOL_CAP`]) so it can never
+/// grow without limit — a `put` over the cap simply drops the buffer (it is freed). Memory is then
+/// bounded by the peak in-flight count instead of churning one alloc per frame.
+///
+/// This is a pure MEMORY optimization — it carries no frame identity, so it CANNOT change the burn
+/// id ↔ emitted-frame mapping, the frame ORDER, or the carried timecode (all stamped on the capture
+/// thread and carried in the [`BurnRing`] job). Shared capture-thread ↔ burn-thread via `Arc`.
+pub struct BufferPool {
+    free: Mutex<Vec<Vec<u8>>>,
+    cap: usize,
+    /// Count of FRESH allocations [`take`](Self::take) had to make (free list was empty). After
+    /// warm-up this stops climbing — that flat count is the proof the pool recycles rather than
+    /// allocating per frame (vs the #275b `to_vec`, which allocated once per emitted frame).
+    allocated: AtomicUsize,
+}
+
+impl BufferPool {
+    /// Create an empty pool whose free list is bounded at `cap` buffers.
+    pub fn new(cap: usize) -> Self {
+        Self {
+            free: Mutex::new(Vec::new()),
+            cap,
+            allocated: AtomicUsize::new(0),
+        }
+    }
+
+    /// Take a buffer to copy a frame into: reuse a returned one when the free list is non-empty,
+    /// else allocate a fresh `Vec` (and count it). The caller `clear()`s + fills it; a reused
+    /// buffer keeps its ~4 MB capacity so the fill does not reallocate.
+    pub fn take(&self) -> Vec<u8> {
+        // Drop the lock BEFORE allocating on the empty path: pop releases the mutex, then the
+        // fresh `Vec::new` (+ the counter bump) runs unlocked so it never holds the lock against
+        // the burn thread's `put`.
+        let popped = self.free.lock().unwrap().pop();
+        match popped {
+            Some(buf) => buf,
+            None => {
+                self.allocated.fetch_add(1, Ordering::Relaxed);
+                Vec::new()
+            }
+        }
+    }
+
+    /// Return a buffer for reuse after the burn thread has sent it. BOUNDED: if the free list is
+    /// already at `cap`, drop the buffer (it is freed) so the pool can never grow without limit.
+    pub fn put(&self, buf: Vec<u8>) {
+        let mut free = self.free.lock().unwrap();
+        if free.len() < self.cap {
+            free.push(buf);
+        }
+        // else: at capacity — drop `buf` (freed). Bounds the pool's memory.
+    }
+
+    /// Number of FRESH allocations [`take`](Self::take) has made (free list empty). A count that
+    /// stays flat after warm-up proves the pool recycles instead of allocating per frame.
+    pub fn allocations(&self) -> usize {
+        self.allocated.load(Ordering::Relaxed)
+    }
+
+    /// Current number of idle buffers held in the free list (≤ `cap`). Observability for the
+    /// shutdown audit log; also lets a test assert the free list never grows past the cap.
+    pub fn free_len(&self) -> usize {
+        self.free.lock().unwrap().len()
+    }
+}
 
 // ---- #401 phase-locked release cadence (mirror of the C ts-align fix) -----------------
 

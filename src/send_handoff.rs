@@ -46,6 +46,7 @@
 //! Std-only and free of any NDI type (the frame is generic), so all of it is Tier-0 testable with
 //! a fake send closure.
 
+#![allow(unused_variables, unused_mut, dead_code, unreachable_code)]
 use std::sync::{Condvar, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
@@ -64,7 +65,7 @@ pub struct SendJob<F> {
 /// The absolute send deadline for a frame: the emit-gate decision `anchor` plus the camera's
 /// `offset`. One addition, pinned by a test so the anchor never silently becomes "now".
 pub fn send_deadline(anchor: Instant, offset: Duration) -> Instant {
-    anchor + offset
+    todo!("#1242 RED: not implemented yet")
 }
 
 /// The result of [`HandoffSlot::offer`].
@@ -136,72 +137,26 @@ impl<F> HandoffSlot<F> {
 
     /// Hand a job to the send thread. Returns at once; see [`Offer`] for the outcomes.
     pub fn offer(&self, job: SendJob<F>) -> Offer<F> {
-        let mut s = self.lock();
-        if s.closed {
-            return Offer::Closed(job);
-        }
-        let older = s.pending.replace(job);
-        drop(s);
-        self.changed.notify_all();
-        match older {
-            Some(o) => Offer::Replaced(o),
-            None => Offer::Accepted,
-        }
+        todo!("#1242 RED: not implemented yet")
     }
 
     /// Close the slot (shutdown). A pending job is still handed to the send thread by the next
     /// [`take`](Self::take), so the last frame drains before the thread ends.
     pub fn close(&self) {
-        self.lock().closed = true;
-        self.changed.notify_all();
+        todo!("#1242 RED: not implemented yet")
     }
 
     /// Block until a job is pending (returned even after `close`, so it drains), the slot is
     /// closed and empty, or `idle` passes with nothing to do.
     pub fn take(&self, idle: Duration) -> Take<F> {
-        let until = Instant::now() + idle;
-        let mut s = self.lock();
-        loop {
-            if let Some(job) = s.pending.take() {
-                return Take::Job(job);
-            }
-            if s.closed {
-                return Take::Closed;
-            }
-            let now = Instant::now();
-            if now >= until {
-                return Take::Idle;
-            }
-            s = self
-                .changed
-                .wait_timeout(s, until - now)
-                .unwrap_or_else(|e| e.into_inner())
-                .0;
-        }
+        todo!("#1242 RED: not implemented yet")
     }
 
     /// Wait (the send thread, holding a taken job) until `deadline`, returning early when a newer
     /// job arrives or the slot closes. A newer job is checked FIRST, so a catch-up burst never
     /// waits out an older frame's offset.
     pub fn wait_until(&self, deadline: Instant) -> Wait {
-        let mut s = self.lock();
-        loop {
-            if s.pending.is_some() {
-                return Wait::NewerPending;
-            }
-            if s.closed {
-                return Wait::Closed;
-            }
-            let now = Instant::now();
-            if now >= deadline {
-                return Wait::DeadlineReached;
-            }
-            s = self
-                .changed
-                .wait_timeout(s, deadline - now)
-                .unwrap_or_else(|e| e.into_inner())
-                .0;
-        }
+        todo!("#1242 RED: not implemented yet")
     }
 }
 
@@ -218,7 +173,7 @@ pub enum SendStart {
 
 /// How long after its `deadline` a send `started` (zero when it started on time or early).
 pub fn send_lateness(deadline: Instant, started: Instant) -> Duration {
-    started.saturating_duration_since(deadline)
+    todo!("#1242 RED: not implemented yet")
 }
 
 /// The send thread's per-5 s window, shared with the capture loop's report through a mutex.
@@ -236,31 +191,17 @@ pub struct SendWindow {
 impl SendWindow {
     /// Record one job: how its first send started, its lateness and how long its sends took.
     pub fn note_job(&mut self, start: SendStart, lateness: Duration, send: Duration) {
-        match start {
-            SendStart::Waited => self.waited = self.waited.saturating_add(1),
-            SendStart::PastDeadline => self.past_deadline = self.past_deadline.saturating_add(1),
-            SendStart::Expedited => self.expedited = self.expedited.saturating_add(1),
-        }
-        let late_ms = lateness.as_secs_f64() * 1000.0;
-        if late_ms > self.max_lateness_ms {
-            self.max_lateness_ms = late_ms;
-        }
-        let send_ms = send.as_secs_f64() * 1000.0;
-        if send_ms > self.max_send_ms {
-            self.max_send_ms = send_ms;
-        }
+        todo!("#1242 RED: not implemented yet")
     }
 
     /// Jobs recorded this window.
     pub fn jobs(&self) -> u64 {
-        self.waited
-            .saturating_add(self.past_deadline)
-            .saturating_add(self.expedited)
+        todo!("#1242 RED: not implemented yet")
     }
 
     /// Drain the window (returns it and resets to empty).
     pub fn take(&mut self) -> SendWindow {
-        std::mem::take(self)
+        todo!("#1242 RED: not implemented yet")
     }
 }
 
@@ -284,20 +225,17 @@ pub struct CaptureWindow {
 impl CaptureWindow {
     /// Record one emitted iteration's callback work. A non-finite or negative reading is ignored.
     pub fn note_work(&mut self, work_ms: f64) {
-        if work_ms.is_finite() && work_ms >= 0.0 && work_ms > self.max_work_ms {
-            self.max_work_ms = work_ms;
-        }
+        todo!("#1242 RED: not implemented yet")
     }
 
     /// Record one job replaced unsent, carrying `frames` timecodes.
     pub fn note_replaced(&mut self, frames: usize) {
-        self.replaced_jobs = self.replaced_jobs.saturating_add(1);
-        self.replaced_frames = self.replaced_frames.saturating_add(frames as u64);
+        todo!("#1242 RED: not implemented yet")
     }
 
     /// Drain the window (returns it and resets to empty).
     pub fn take(&mut self) -> CaptureWindow {
-        std::mem::take(self)
+        todo!("#1242 RED: not implemented yet")
     }
 }
 
@@ -320,51 +258,13 @@ pub fn window_summary(
     offset_us: u64,
     capture_interval_ms: f64,
 ) -> (String, bool) {
-    let known = capture_interval_ms > 0.0;
-    let over_budget = known && capture.max_work_ms >= capture_interval_ms;
-    let send_over_budget = known && send.max_send_ms >= capture_interval_ms;
-    let late = known && send.max_lateness_ms >= capture_interval_ms * LATE_WARN_FRACTION;
-    let replaced = capture.replaced_jobs > 0;
-    let mut flags = String::new();
-    if over_budget {
-        flags.push_str(" — OVER BUDGET: the capture loop has no margin left");
-    }
-    if send_over_budget {
-        flags.push_str(" — SEND OVER BUDGET: one frame's send took a whole capture interval");
-    }
-    if late {
-        flags.push_str(" — LATE: a send started half a capture interval past its deadline");
-    }
-    if replaced {
-        flags.push_str(&format!(
-            " — REPLACED: {} frame(s) never sent (newest-wins, the send thread fell behind)",
-            capture.replaced_frames
-        ));
-    }
-    let line = format!(
-        "#1242 send stagger: offset={offset_us} us, capture loop max work {:.1} ms vs capture interval {:.1} ms; send thread {} job(s) ({} waited for the offset / {} already past it / {} expedited by a newer frame), max lateness {:.2} ms, max send {:.1} ms, {} replaced{flags}",
-        capture.max_work_ms,
-        capture_interval_ms,
-        send.jobs(),
-        send.waited,
-        send.past_deadline,
-        send.expedited,
-        send.max_lateness_ms,
-        send.max_send_ms,
-        capture.replaced_jobs,
-    );
-    (line, over_budget || send_over_budget || late || replaced)
+    todo!("#1242 RED: not implemented yet")
 }
 
 /// For a thread that already owns its queue (the E2E burn thread, fed by a blocking ring that never
 /// drops): sleep until `deadline` if it is still ahead, and say how the send started.
 pub fn sleep_until(deadline: Instant) -> SendStart {
-    let now = Instant::now();
-    if now >= deadline {
-        return SendStart::PastDeadline;
-    }
-    std::thread::sleep(deadline - now);
-    SendStart::Waited
+    todo!("#1242 RED: not implemented yet")
 }
 
 /// What the send thread does with a job. One owner (`&mut self`) holds the NDI sender, so the send
@@ -389,35 +289,7 @@ pub fn run_send_loop<F, S: SendSink<F>>(
     idle: Duration,
     sink: &mut S,
 ) {
-    loop {
-        let job = match slot.take(idle) {
-            Take::Job(job) => job,
-            Take::Idle => {
-                sink.housekeeping();
-                continue;
-            }
-            Take::Closed => return,
-        };
-        let start = if Instant::now() >= job.deadline {
-            SendStart::PastDeadline
-        } else {
-            match slot.wait_until(job.deadline) {
-                Wait::DeadlineReached => SendStart::Waited,
-                Wait::NewerPending | Wait::Closed => SendStart::Expedited,
-            }
-        };
-        let started = Instant::now();
-        let mut any_ok = false;
-        for &tc in &job.timecodes {
-            if sink.send(&job.frame, tc) {
-                any_ok = true;
-            }
-        }
-        let sent_for = started.elapsed();
-        lock_window(window).note_job(start, send_lateness(job.deadline, started), sent_for);
-        sink.after_job(job.frame, any_ok);
-        sink.housekeeping();
-    }
+    todo!("#1242 RED: not implemented yet")
 }
 
 #[cfg(test)]

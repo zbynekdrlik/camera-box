@@ -30,9 +30,6 @@ struct BurnJob {
     frame_id: u32,
     gen_ts_ns: i64,
     emit_timecode_100ns: i64,
-    /// #1242 — when the burn thread may send this frame: the emit-gate decision instant plus this
-    /// camera's send-stagger offset (the same deadline the production send thread waits for).
-    send_deadline: std::time::Instant,
     /// #279 FIX 3 — render the QR into `buf` before sending? `true` for a YUYV frame (the normal
     /// burn); `false` for a non-YUYV frame the v4l2 driver substituted — sent UNBURNED so a format
     /// substitution can never kill the cam1 feed (the QR burner assumes the YUYV byte layout).
@@ -556,11 +553,10 @@ async fn run_capture_loop(
     // the same grid and (on the splitter rig) capture the same HDMI signal, so their ~300 KB
     // frames used to leave within ~1 ms of each other and overflow the strih-lx 2.5 GbE switch
     // port. Camera N now hands its frame to the NDI SDK (N-1) x STAGGER_US after its emit-gate
-    // decision (see `send_stagger`'s module doc for the arithmetic and the clamp to the shorter of
-    // the send and capture intervals). The capture loop never waits for it: the ndi-send thread
-    // (or the burn thread) waits for the frame's absolute deadline (`send_handoff`). The emit grid
-    // and the FLOOR-boundary timecode are untouched. One rule for every box: the number comes from
-    // the OS hostname (CAM<N>); an unknown hostname or genlock off -> offset 0.
+    // decision (see `send_stagger`'s module doc for the arithmetic, the clamp to the shorter of
+    // the send and capture intervals, and the capture-loop budget guard). The emit grid and the
+    // FLOOR-boundary timecode are untouched. One rule for every box: the number comes from the OS
+    // hostname (CAM<N>); an unknown hostname or genlock off -> offset 0.
     let send_stagger = camera_box::send_stagger::plan(
         &resolved_hostname,
         genlock_fps,
@@ -723,9 +719,8 @@ async fn run_capture_loop(
     // `capture_wedge::CAPTURE_WEDGE_THRESHOLD_S`.
     let wedge_heartbeat_ns = Arc::new(AtomicU64::new(0));
     let wedge_watchdog_epoch = std::time::Instant::now();
-    // #944 — emit-liveness heartbeat, stamped ONLY when a good frame actually goes out: by the
-    // ndi-send thread after a confirmed send (#1242), or by the capture loop when it queues an E2E
-    // burn job. 0 = "no frame emitted yet" (disarmed): the emit-freeze check is
+    // #944 — emit-liveness heartbeat, stamped by the capture loop ONLY when a good frame is
+    // actually emitted (below). 0 = "no frame emitted yet" (disarmed): the emit-freeze check is
     // skipped until the first emit, so boot/NDI warmup never false-fires (a never-emits-from-boot
     // box is #945's + the #747 frozen-camera preflight's domain, not this watchdog's). Polled by
     // the SAME watchdog thread, AFTER the #945 wedge check, so a true dequeue wedge is diagnosed
@@ -810,9 +805,8 @@ async fn run_capture_loop(
 
     // Spawn capture loop in blocking task - minimal overhead for lowest latency
     let running_capture = Arc::clone(&running);
-    // #944 — stamped on every actual emit (by the ndi-send thread or the burn path, see above);
-    // `wedge_watchdog_epoch` (Copy) moves into the closure so the stamps and the watchdog poll
-    // share one epoch.
+    // #944 — the capture loop stamps this on every actual emit; `wedge_watchdog_epoch` (Copy)
+    // moves into the closure so both the stamp here and the watchdog poll share one epoch.
     let emit_heartbeat_capture = Arc::clone(&emit_heartbeat_ns);
     let capture_handle = tokio::task::spawn_blocking(move || {
         // Apply real-time optimizations BEFORE entering the capture loop
@@ -965,8 +959,8 @@ async fn run_capture_loop(
         // #275b — async cam1 capture-burn pipeline. When the burn is active (probe +
         // CAMERA_BOX_BURN_RUN_ID), move the single NDI sender to a dedicated burn thread and hand
         // each emitted frame off over a bounded ring, so the heavy per-frame QR render no longer
-        // runs on the emit loop (which capped cam1 at 30 fps). Otherwise the sender moves to the
-        // #1242 ndi-send thread below (production / non-burn path). `capture_sender` holds
+        // runs on the emit loop (which capped cam1 at 30 fps). Otherwise the sender stays on the
+        // capture thread (production / non-burn zero-copy path, unchanged). `capture_sender` holds
         // the sender so it can be `take`n into the burn thread. `burn_ids` is the monotonic
         // per-EMITTED-frame burn id, drawn once per emit on this thread to keep the burn id ↔
         // emitted-frame mapping strictly 1:1. `send_fps` is the genlock rate used for the
@@ -981,12 +975,6 @@ async fn run_capture_loop(
         // (DanteSync/NTP correction) never permanently skews the capture-based genlock stamp.
         let mut mono_to_real_offset_100ns: i64 = sample_mono_to_real_offset_100ns();
         let mut frames_since_offset_sample: u64 = 0;
-        // #1242 — the send side of the 5 s `#1242 send stagger:` line (waited / past / expedited,
-        // lateness, send time), written by whichever thread owns the NDI sender (the ndi-send
-        // thread, or the burn thread in an E2E run) and drained by the report below.
-        let send_window = Arc::new(std::sync::Mutex::new(
-            camera_box::send_handoff::SendWindow::default(),
-        ));
         #[cfg(feature = "probe")]
         let mut burn_ids = camera_box::probe::genlock::BurnFrameIdSource::default();
         #[cfg(feature = "probe")]
@@ -1021,9 +1009,6 @@ async fn run_capture_loop(
             // OFF (manual burn run): nothing decimates, so the burn thread must restore the old
             // self-pacing send (wait to the sender-rate boundary + stamp that boundary timecode).
             let burn_external_pacing = genlock_fps.is_some();
-            // #1242 — the burn thread owns the send in an E2E run, so it records the send side of
-            // the 5 s stagger line too.
-            let burn_send_window = Arc::clone(&send_window);
             let handle = std::thread::Builder::new()
                 .name("cam1-burn".into())
                 .spawn(move || {
@@ -1060,12 +1045,6 @@ async fn run_capture_loop(
                                 camera_box::probe::qr::CAM1_BURN_QR_PX,
                             );
                         }
-                        // #1242 — wait for the frame's send-stagger deadline here, on the thread
-                        // that owns the send (the ring is blocking and never drops, so the capture
-                        // loop only waits if the ring is full), so the E2E send timing matches
-                        // production. The QR render above runs before the wait, inside the offset.
-                        let send_start = camera_box::send_handoff::sleep_until(job.send_deadline);
-                        let send_started = std::time::Instant::now();
                         let send_result = if burn_external_pacing {
                             // Genlock on: send with the gate-stamped emitted-frame timecode.
                             burn_sender.send_frame_data_with_timecode(
@@ -1089,14 +1068,6 @@ async fn run_capture_loop(
                                 job.info.stride,
                             )
                         };
-                        camera_box::send_handoff::lock_window(&burn_send_window).note_job(
-                            send_start,
-                            camera_box::send_handoff::send_lateness(
-                                job.send_deadline,
-                                send_started,
-                            ),
-                            send_started.elapsed(),
-                        );
                         if let Err(e) = send_result {
                             // #279 FIX 5 — full context on every error path: identify the frame
                             // (frame_id/run_id) and use Debug ({:?}) so the error chain is kept.
@@ -1117,25 +1088,6 @@ async fn run_capture_loop(
             burn_handle = Some(handle);
         }
 
-        // #1242 — the production NDI send thread. Whenever the burn thread did not take the sender
-        // (production, or a probe build without a burn run), the sender moves here: the capture
-        // loop hands each emitted frame over with its absolute send-stagger deadline and returns
-        // to capture at once, and this thread waits for the deadline and sends. The thread also
-        // stamps the #944 emit heartbeat (confirmed sends only) and runs the #297 re-announce.
-        #[cfg(feature = "probe")]
-        let production_sender = capture_sender.take();
-        #[cfg(not(feature = "probe"))]
-        let production_sender = Some(sender);
-        let mut ndi_send_thread = production_sender.map(|s| {
-            camera_box::ndi_send_thread::NdiSendThread::spawn(
-                s,
-                Arc::clone(&send_window),
-                Arc::clone(&emit_heartbeat_capture),
-                wedge_watchdog_epoch,
-            )
-            .expect("spawn ndi-send thread")
-        });
-
         // Genlock decimation state: emit the first capture at/after each target
         // wall-clock boundary, skip the rest. interval_ns 0 => decimation off.
         let out_interval_ns: u64 = genlock_fps
@@ -1146,20 +1098,23 @@ async fn run_capture_loop(
         // grabber's own internal-buffer repeat is preferentially shed over the genuine unique
         // tick next to it. See `camera_box::dupe_decimation`'s module doc for the full mechanism.
         let mut decimation_gate = camera_box::dupe_decimation::DecimationGate::new();
-        // #1242 — the capture side of the 5 s `#1242 send stagger:` line: the worst per-frame
-        // callback work (no offset in it any more) and the jobs the ndi-send thread never took.
-        let mut capture_window = camera_box::send_handoff::CaptureWindow::default();
+        // #1242 — how long the PREVIOUS emitted iteration slept for its send stagger (ms). The
+        // sleep shortens the next V4L2 dequeue wait, so the #1131 buffered-queue signal adds it
+        // back (`send_stagger::idle_wait_ms`); taken (reset) once per loop iteration, BEFORE the
+        // dequeue it shortened. `stagger_window` is the per-5 s slept/skipped/work accounting.
+        let mut last_stagger_sleep_ms: f64 = 0.0;
+        let mut stagger_window = camera_box::send_stagger::StaggerWindow::default();
 
         while running_capture.load(Ordering::Relaxed) {
             // #707 B1 — snapshot the emit counter before the frame closure so the per-second ring
             // can attribute exactly this frame's emit (0 or 1) after it returns.
             let emit_before = emit_count;
-            // #944 — did THIS iteration queue a burn job (the E2E burn path's emit-liveness
-            // signal)? Distinct from `emit_count` (a rate stat). The production path stamps the
-            // heartbeat on the ndi-send thread instead, only after a CONFIRMED send (#1242): a
-            // persistently-failing or wedged send is itself a silent-frozen mode, so it must NOT
-            // advance the heartbeat. Reset per iteration.
-            #[cfg(feature = "probe")]
+            // #944 — did THIS iteration actually DISPATCH a good frame to NDI (a confirmed
+            // production send, or a queued burn job)? This is the emit-liveness signal, distinct
+            // from `emit_count` (which increments even on a production send Err, for rate stats):
+            // a persistently-failing send is itself a silent-frozen mode, so it must NOT advance
+            // the heartbeat. Reset per iteration; set inside the closure only on a confirmed
+            // dispatch.
             let mut frame_dispatched = false;
             // #1167 — snapshot the corrupted-buffer counter before process_frame. A corrupted
             // buffer (V4L2_BUF_FLAG_ERROR / short) is DROPPED inside process_frame BEFORE the
@@ -1169,11 +1124,18 @@ async fn run_capture_loop(
             // A delta after the call means this iteration dropped one; we register a bounded make-up
             // so the gate reclaims exactly that slot with the nearest good frame on its next shed.
             let corrupted_before = capture.corrupted_frames();
+            // #1242 — the previous emitted iteration's send-stagger sleep ran just before THIS
+            // dequeue and shortened it by exactly that much. Taken (reset to 0) here, before the
+            // dequeue, so it always pairs with the very next dequeue — even when that buffer is a
+            // corrupted one that never reaches the callback below.
+            let stagger_slept_ms = std::mem::take(&mut last_stagger_sleep_ms);
             // ZERO-COPY: Process frame directly from mmap buffer without copying
             let result = capture.process_frame(|data, info| {
-                // #1242 — this callback's start: the per-frame work the 5 s stagger line reports
-                // against the capture interval (the capture loop never waits for the offset).
+                // #1242 — this callback's start (per-frame work = callback time minus the stagger
+                // sleep) and whether the frame came from an already non-empty queue (the loop is
+                // behind → skip the stagger sleep for it).
                 let cb_started = std::time::Instant::now();
+                let mut frame_backlogged = false;
                 // #286 — periodically re-sample the monotonic->realtime clock offset. Counts
                 // EVERY captured frame toward the cadence (regardless of emit/decimate
                 // decisions below), so the offset stays fresh even during a long decimated
@@ -1271,17 +1233,21 @@ async fn run_capture_loop(
                     // grabber, whose 0-capture-dropped signature confirms the frames exist). A
                     // frame from an empty queue (the loop genuinely waited — a device/clock gap)
                     // keeps the pre-existing #131 forward-resync. Same `dequeue_duration_ms` signal
-                    // the #707 capture-stall WARN reads, thresholded the other way. (#1242: the
-                    // raw dequeue — the capture loop never sleeps for the send stagger, so there is
-                    // nothing to add back.)
+                    // the #707 capture-stall WARN reads, thresholded the other way.
+                    // #1242 — add back the previous stagger sleep (taken before the dequeue) so a
+                    // healthy empty-queue frame on a later camera never reads as "already buffered".
                     let queue_had_frame = if configured_capture_fps > 0.0 {
                         camera_box::capture_stall::frame_from_nonempty_queue(
-                            info.dequeue_duration_ms,
+                            camera_box::send_stagger::idle_wait_ms(
+                                info.dequeue_duration_ms,
+                                stagger_slept_ms,
+                            ),
                             1000.0 / configured_capture_fps,
                         )
                     } else {
                         false
                     };
+                    frame_backlogged = queue_had_frame;
                     // #1145 v2 — the MONOTONIC clocks the queue-depth drain needs: `now_mono` is
                     // read once here, `capture_mono` is the V4L2 buffer's own CLOCK_MONOTONIC
                     // capture instant (`FrameInfo::capture_monotonic_100ns`, 100ns units; 0 = no
@@ -1329,14 +1295,10 @@ async fn run_capture_loop(
                         return; // decimated -- either blind pacing or a preferred dupe shed
                     }
                 }
-                // #1242 — the send-stagger anchor: the instant this frame passed the emit gate. The
-                // send deadline is this instant plus the camera's offset, an ABSOLUTE monotonic
-                // deadline: the per-frame work below never shifts it, and a DanteSync wall-clock
-                // step cannot stretch the wait. The ndi-send thread (or the burn thread) waits for
-                // it; the capture loop never does.
+                // #1242 — the send-stagger anchor: the instant this frame passed the emit gate.
+                // The per-camera offset below is measured from HERE, so the small per-frame work
+                // between the gate and the send never adds to (or drifts) the stagger.
                 let stagger_anchor = std::time::Instant::now();
-                let send_deadline =
-                    camera_box::send_handoff::send_deadline(stagger_anchor, send_stagger_offset);
                 // #275b — ONE cam1 emit-instant wall-clock stamp (CLOCK_REALTIME, the DanteSync
                 // clock), shared by the burned QR's gen_ts AND the grab-recording tee, so both
                 // describe the SAME instant even when the async submit below back-pressures (the
@@ -1378,9 +1340,6 @@ async fn run_capture_loop(
                 // empty-queue starvation repeats below, parameterized by the genlock emit timecode.
                 // Factored so a repeat and the current frame can never drift in how they send. Every
                 // capture of `emit_one` is disjoint from the per-poll `decimation_gate` borrow above.
-                // #1242 — the production path only COLLECTS the timecodes here; the frame goes to the
-                // ndi-send thread ONCE, after the last `emit_one`, carrying all of them.
-                let mut production_timecodes: Vec<i64> = Vec::new();
                 let mut emit_one = |emit_timecode_100ns: i64| {
                     // #275b ASYNC BURN PATH (test mode: probe + CAMERA_BOX_BURN_RUN_ID).
                     #[cfg(feature = "probe")]
@@ -1420,7 +1379,6 @@ async fn run_capture_loop(
                             // earlier boundary), so every send lands in its own downstream FIFO slot.
                             gen_ts_ns: emit_wall_ns,
                             emit_timecode_100ns,
-                            send_deadline,
                             render_qr,
                         };
                         // BLOCKING submit (back-pressures, never drops → 1:1 preserved). Count the
@@ -1451,11 +1409,24 @@ async fn run_capture_loop(
                         return; // handed to the burn thread; the sender lives there now
                     }
 
-                    // PRODUCTION / non-burn path (#1242): the sender lives on the ndi-send thread, so
-                    // this send's timecode is only collected here. #286 BUG SITE #2 FIX — it is the
-                    // CAPTURE-based genlock timecode (or the repeat's own boundary), carried verbatim;
-                    // the send thread never re-derives an arrival-based boundary at send time.
-                    production_timecodes.push(emit_timecode_100ns);
+                    // PRODUCTION / non-burn path: zero-copy direct send. Under the probe build the
+                    // sender lives in `capture_sender`; it moves to the burn thread ONLY when the burn
+                    // is active, and then the handoff above handles every frame and returns — so this
+                    // path is reached only when the burn is inactive (`capture_sender` = Some).
+                    #[cfg(feature = "probe")]
+                    let sender = capture_sender
+                        .as_mut()
+                        .expect("capture_sender is present whenever the burn is inactive");
+                    // #286 BUG SITE #2 FIX — pass the CAPTURE-based genlock timecode through so
+                    // send_frame_zero_copy stamps the real capture instant (or the repeat's own
+                    // boundary), never re-deriving an arrival-based boundary at send time.
+                    match sender.send_frame_zero_copy(data, info, emit_timecode_100ns) {
+                        // #944 — only a CONFIRMED send proves the NDI output is live; a send that errors
+                        // is itself a silent-frozen mode (nothing reaches NDI while every health signal
+                        // stays green), so it must NOT advance the emit-liveness heartbeat.
+                        Ok(()) => frame_dispatched = true,
+                        Err(e) => tracing::error!("Failed to send frame: {}", e),
+                    }
                     emit_count += 1; // reached only when the frame passed the gate
                     tee_grab(data);
                     // #792 — tee the emitted frame to the optional 30p publisher LAST (one bounded
@@ -1473,6 +1444,37 @@ async fn run_capture_loop(
                     emit_wall_ns / 100,
                     send_fps as i64,
                 );
+                // #1242 — the per-camera NDI send stagger, ONCE per emitted iteration: after the
+                // genlock timecode above is fixed (it never moves) and before the first send (the
+                // starvation repeats and the current frame leave back-to-back behind one delay).
+                // The emit grid is untouched — the gate already polled the wall clock above and
+                // never reads the send instant. Covers the production zero-copy send AND the burn
+                // ring hand-off, so the send timing matches production in an E2E run. The measured
+                // sleep feeds the next frame's #1131 buffered-queue signal (`idle_wait_ms`). A frame
+                // that already came from a non-empty queue skips the sleep: the capture loop is
+                // behind, and captured frames beat the network optimisation (counted per 5 s).
+                let mut stagger_slept_now_ms = 0.0;
+                if camera_box::send_stagger::should_sleep(send_stagger_offset, frame_backlogged) {
+                    let remaining = camera_box::send_stagger::remaining_sleep(
+                        send_stagger_offset,
+                        stagger_anchor.elapsed(),
+                    );
+                    if !remaining.is_zero() {
+                        let slept_from = std::time::Instant::now();
+                        std::thread::sleep(remaining);
+                        stagger_slept_now_ms = slept_from.elapsed().as_secs_f64() * 1000.0;
+                        stagger_window.note_slept(
+                            remaining.as_secs_f64() * 1000.0,
+                            stagger_slept_now_ms,
+                        );
+                    } else {
+                        // The work before the send already ate the whole offset — no sleep needed.
+                        stagger_window.note_past_offset();
+                    }
+                } else if !send_stagger_offset.is_zero() {
+                    stagger_window.note_skipped();
+                }
+                last_stagger_sleep_ms = stagger_slept_now_ms;
                 // (#1167 v4) An UNDER-rate dip left `starvation_repeats` empty-queue 60fps boundaries
                 // unfilled (poll reported them, capped + gated on a measured sustained under-rate). Fill
                 // each by re-emitting the CURRENT good frame (it passed process_frame's corruption
@@ -1488,27 +1490,13 @@ async fn run_capture_loop(
                     ));
                 }
                 emit_one(capture_timecode_100ns);
-                // #1242 — hand the frame to the ndi-send thread: ONE job carrying every timecode of
-                // this iteration (the starvation repeats, earliest first, then the current frame)
-                // and the deadline. It copies the frame off the mmap and returns at once; the send
-                // thread waits for the deadline. A job the send thread never took is replaced by
-                // this newer one (newest wins) and counted.
-                if let Some(send_thread) = ndi_send_thread.as_ref() {
-                    if !production_timecodes.is_empty() {
-                        let replaced = send_thread.hand_off(
-                            data,
-                            info,
-                            std::mem::take(&mut production_timecodes),
-                            send_deadline,
-                        );
-                        if replaced > 0 {
-                            capture_window.note_replaced(replaced);
-                        }
-                    }
+                // #1242 — this emitted iteration's work (everything in the callback except the
+                // stagger sleep): the capture-loop margin the 5 s summary reports per box.
+                if !send_stagger_offset.is_zero() {
+                    stagger_window.note_work(
+                        cb_started.elapsed().as_secs_f64() * 1000.0 - stagger_slept_now_ms,
+                    );
                 }
-                // #1242 — this emitted iteration's callback work: the capture-loop margin the 5 s
-                // stagger line reports (no offset in it).
-                capture_window.note_work(cb_started.elapsed().as_secs_f64() * 1000.0);
             });
 
             // #945 — heartbeat: `capture.process_frame(...)` above just RETURNED (Ok or Err,
@@ -1543,13 +1531,13 @@ async fn run_capture_loop(
                     // while strih freezes, the loss is downstream (link / NDI SDK), read off the
                     // transport sampler instead.
                     let emitted_this = (emit_count - emit_before) as u32;
-                    // #944 — stamp the emit-liveness heartbeat when a burn job was actually queued
-                    // this iteration (`frame_dispatched`). A corrupted buffer returns Ok without
-                    // dispatching, so this never advances on a frozen-output stream — exactly the
-                    // signal #945's return-based heartbeat cannot see. Shared #945 watchdog epoch so
-                    // the poll can subtract it. The production path stamps it on the ndi-send thread
-                    // after each CONFIRMED send (#1242, `ndi_send_thread`).
-                    #[cfg(feature = "probe")]
+                    // #944 — stamp the emit-liveness heartbeat when a good frame was actually
+                    // DISPATCHED to NDI this iteration (`frame_dispatched`: a confirmed production
+                    // send, or a queued burn job — NOT merely a gate-passed frame whose send
+                    // errored). A corrupted buffer returns Ok without dispatching, and a
+                    // persistently-failing send never dispatches either, so this never advances on
+                    // any frozen-output stream — exactly the signal #945's return-based heartbeat
+                    // cannot see. Shared #945 watchdog epoch so the poll can subtract it.
                     if frame_dispatched {
                         emit_heartbeat_capture.store(
                             wedge_watchdog_epoch.elapsed().as_nanos() as u64,
@@ -1644,25 +1632,25 @@ async fn run_capture_loop(
                                     5
                                 )
                             );
-                            // #1242 — the send-stagger window on EVERY box (one rule, CAM1 included):
-                            // the capture loop's worst per-frame work vs the capture interval (no
-                            // offset in it any more) plus the send thread's waited / past / expedited
-                            // counts, worst lateness, worst send and newest-wins replacements. WARN on
-                            // OVER BUDGET / SEND OVER BUDGET / LATE / REPLACED.
-                            let stagger_summary = camera_box::send_handoff::window_summary(
-                                &capture_window.take(),
-                                &camera_box::send_handoff::lock_window(&send_window).take(),
-                                send_stagger_offset.as_micros() as u64,
-                                if configured_capture_fps > 0.0 {
-                                    1000.0 / configured_capture_fps
+                            // #1242 — the send-stagger window: slept / skipped (backlogged) frames and
+                            // the worst per-frame work vs the capture interval. WARN when a frame
+                            // skipped its stagger or no margin was left; a box with offset 0 (CAM1,
+                            // unknown hostname) prints nothing.
+                            if !send_stagger_offset.is_zero() {
+                                let stagger_summary = camera_box::send_stagger::window_summary(
+                                    &stagger_window.take(),
+                                    send_stagger_offset.as_micros() as u64,
+                                    if configured_capture_fps > 0.0 {
+                                        1000.0 / configured_capture_fps
+                                    } else {
+                                        0.0
+                                    },
+                                );
+                                if stagger_summary.1 {
+                                    tracing::warn!("{}", stagger_summary.0);
                                 } else {
-                                    0.0
-                                },
-                            );
-                            if stagger_summary.1 {
-                                tracing::warn!("{}", stagger_summary.0);
-                            } else {
-                                tracing::info!("{}", stagger_summary.0);
+                                    tracing::info!("{}", stagger_summary.0);
+                                }
                             }
 
                             // #666 — emit-vs-capture health: WARN when the EMITTED fps has
@@ -2084,9 +2072,23 @@ async fn run_capture_loop(
                         window_total_captures = 0;
                         last_report = std::time::Instant::now();
                     }
-                    // #297 — the NDI re-announce check runs on the ndi-send thread, which owns the
-                    // production sender (#1242); in a burn/E2E run the sender lives on the burn
-                    // thread and re-announce is not needed.
+
+                    // #297 — re-announce the NDI sender if the host's usable network changed
+                    // (boot race / link flap), so the OBS NDI finder rediscovers this box.
+                    // Throttled internally to REANNOUNCE_POLL_INTERVAL; a stable network is a
+                    // no-op (never re-creates the sender, so steady state is unaffected). The
+                    // PRODUCTION (non-burn) sender is the one being discovered; in a burn/E2E
+                    // run the sender lives on the burn thread and re-announce is not needed.
+                    #[cfg(not(feature = "probe"))]
+                    if let Err(e) = sender.maybe_reannounce() {
+                        tracing::warn!("#297 NDI sender re-announce check failed: {}", e);
+                    }
+                    #[cfg(feature = "probe")]
+                    if let Some(s) = capture_sender.as_mut() {
+                        if let Err(e) = s.maybe_reannounce() {
+                            tracing::warn!("#297 NDI sender re-announce check failed: {}", e);
+                        }
+                    }
                 }
                 Err(e) => {
                     tracing::error!("Failed to capture frame: {}", e);
@@ -2115,11 +2117,6 @@ async fn run_capture_loop(
             if let Err(e) = h.join() {
                 tracing::error!("#275b cam1-burn thread panicked during shutdown: {:?}", e);
             }
-        }
-        // #1242 — close the hand-off and join the ndi-send thread: the last pending frame is still
-        // sent, and the production NDI sender is destroyed on that thread before shutdown continues.
-        if let Some(send_thread) = ndi_send_thread.take() {
-            send_thread.shutdown();
         }
         // #280 — pool audit: how many frame buffers were ever ALLOCATED (vs one `to_vec` per
         // emitted frame before this change) and how many sit idle now. A small allocation count
