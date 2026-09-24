@@ -200,13 +200,17 @@ mod tests {
     #[test]
     fn n1_depth_reads_are_immune_to_a_late_tick_and_half_a_frame_apart_1367() {
         let s = 1_000_000_000_000u64;
-        // The SHED read: a tick up to one interval minus 2 ms late still reads its true depth.
+        // The SHED read: a tick up to one interval minus 100 us late still reads its true depth
+        // (review round 1: at a 2 ms margin a 31.3-33.3 ms late tick read one frame deep).
         assert_eq!(n1_depth_frames(s + 31 * I30, s, I30), 31);
         assert_eq!(n1_depth_frames(s + 31 * I30 + 31_000_000, s, I30), 31);
-        assert_eq!(n1_depth_frames(s + 32 * I30 - 2_000_000, s, I30), 32);
-        assert_eq!(n1_depth_frames(s + 32 * I30 - 2_000_001, s, I30), 31);
-        // ... and a tick up to 2 ms EARLY still reads it too.
-        assert_eq!(n1_depth_frames(s + 31 * I30 - 2_000_000, s, I30), 31);
+        assert_eq!(n1_depth_frames(s + 31 * I30 + 33_000_000, s, I30), 31);
+        assert_eq!(n1_depth_frames(s + 32 * I30 - 100_000, s, I30), 32);
+        assert_eq!(n1_depth_frames(s + 32 * I30 - 100_001, s, I30), 31);
+        // ... and a tick up to 100 us EARLY (wall-vs-monotonic rate error over one sleep) still
+        // reads it too; a tick further early reads one frame shallow, which only defers a shed.
+        assert_eq!(n1_depth_frames(s + 31 * I30 - 100_000, s, I30), 31);
+        assert_eq!(n1_depth_frames(s + 31 * I30 - 100_001, s, I30), 30);
         // The HOLD read rounds: the two decisions sit half a frame apart.
         assert_eq!(n1_rounded_depth_frames(s + 31 * I30 - I30 / 2, s, I30), 31);
         assert_eq!(
@@ -244,15 +248,15 @@ mod tests {
             |age: u64, ticks: u64| should_converge_phase(w, w - age, newest, 987, I30, 1, ticks);
         assert!(!shed(31 * I30, 100), "at the target (31 frames) -> inert");
         assert!(
-            !shed(31 * I30 + 31_000_000, 100),
-            "a 31 ms late tick at the target -> inert"
+            !shed(31 * I30 + 33_000_000, 100),
+            "a 33 ms late tick at the target -> inert"
         );
         assert!(
-            shed(32 * I30 - 2_000_000, 100),
-            "one frame over, 2 ms early -> sheds"
+            shed(32 * I30 - 100_000, 100),
+            "one frame over, 100 us early -> sheds"
         );
         assert!(
-            !shed(32 * I30 - 2_000_001, 100),
+            !shed(32 * I30 - 100_001, 100),
             "one ns under the edge -> inert"
         );
         assert!(shed(33 * I30, 100), "two frames over -> sheds");

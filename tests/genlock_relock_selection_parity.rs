@@ -447,17 +447,18 @@ fn converge_vectors() -> Vec<(u64, u64, u64, u32, u64, u32, u64)> {
         (w, w - 1_033_000_000, w - 33_000_000, 990, i30, 2, 100), // same age, n=2 -> fires
     ];
     // issue 1367 — the N==1 SHED branch at every edge: the late-tolerant depth edge (target + 1
-    // frames minus the 2 ms early margin), the deep-source guard edge (floor + 2 frames vs base),
+    // frames minus the 100 us early margin), the deep-source guard edge (floor + 2 frames vs base),
     // the 1 us pin tolerance (an exact 1000 ms pin = 30 frames, not 31), the shared throttle, and
     // a second interval so a helper that hard-codes 30 fps cannot pass.
     for (pin, interval) in [(987u32, i30), (1000u32, i30), (963u32, i30), (500u32, i60)] {
         let base = (pin as u64 * 1_000_000 - 1_000).div_ceil(interval);
         let deep_newest = w - interval; // floor 1 frame, deep
         for depth_age in [
-            (base + 1) * interval,                 // AT the target -> inert
-            (base + 2) * interval - 2_000_000,     // late-tolerant edge, exactly -> fires
-            (base + 2) * interval - 2_000_000 - 1, // one ns under -> inert
-            (base + 2) * interval,                 // a whole frame over -> fires
+            (base + 1) * interval,               // AT the target -> inert
+            (base + 2) * interval - 100_000,     // late-tolerant edge, exactly -> fires
+            (base + 2) * interval - 100_000 - 1, // one ns under -> inert
+            (base + 1) * interval + 33_000_000,  // a 33 ms late tick at the target (30 fps: inert)
+            (base + 2) * interval,               // a whole frame over -> fires
             (base + 1) * interval + 31_000_000, // a 31 ms late tick at the target (inert at 30 fps)
         ] {
             for ticks in [29u64, 30] {

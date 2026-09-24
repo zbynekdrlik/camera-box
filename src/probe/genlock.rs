@@ -2567,6 +2567,28 @@ mod tests {
     ///
     /// A queue-depth relock (a burst catch-up) is NOT evidence the source RATE changed. Clearing
     /// `last_known_n` there forced the very next INCONCLUSIVE tick to crawl at N==1, which under a
+    /// issue 1367 (review round 1): the N==1 shed runs only for a tick of the N==1 STEADY branch. On
+    /// the N>=2 branch (`last_known_n` latched >= 2 by `effective_source_multiple`) a post-erase
+    /// re-measure that reads a conclusive n == 1 (a pair straddling a dropped 60 fps frame) must stay
+    /// inert, exactly as before the N==1 rule — the C wrapper carries the same guard.
+    #[test]
+    fn n2_branch_tick_never_enters_the_n1_shed_1367() {
+        use std::collections::VecDeque;
+        const I30: u64 = 33_333_333;
+        let wall = 1_000_000_000_000u64;
+        // A deep pin (987 ms, base 30, target 31) whose remaining queue reads n == 1 conclusively
+        // (two frames one canvas interval apart, the freshest one interval old), with the locked
+        // boundary 33 frames old — over the N==1 target.
+        let queue: VecDeque<u64> = [wall - 2 * I30, wall - I30].into();
+        let mut cadence = ReleaseCadence::new();
+        cadence.locked_next_boundary_ns = Some(wall - 33 * I30);
+        cadence.ticks_since_last_drain = 100;
+        cadence.last_known_n = 1; // a tick of the N==1 STEADY branch
+        assert!(cadence.should_converge_phase(&queue, 987, I30, wall));
+        cadence.last_known_n = 2; // the same queue on a tick of the N>=2 branch
+        assert!(!cadence.should_converge_phase(&queue, 987, I30, wall));
+    }
+
     /// steady 60-into-30 backlog re-grew the queue and re-triggered the relock: a self-sustaining
     /// crawl→relock loop (the #707 B2 crawl window). The latch must SURVIVE a relock; it is cleared
     /// only on a genuine source-timeline discontinuity (acquire / gap resync / backward clock-step).

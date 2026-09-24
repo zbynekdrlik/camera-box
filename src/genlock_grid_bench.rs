@@ -200,6 +200,8 @@ pub struct BenchReport {
     pub n1_grows: u64,
     pub dropped_due: u64,
     pub underruns: u64,
+    /// Render ticks skipped because the previous one woke a whole interval late (after warm-up).
+    pub skipped_ticks: u64,
     /// The sender's stamp irregularity as the receiver's `stamp_dup=` / `stamp_gap=` audit tokens
     /// would count it ([`StampTrack`], the production arrival-side tracker): stamps equal to their
     /// predecessor, and missing stamp intervals.
@@ -506,6 +508,17 @@ pub fn run_bench(cfg: &BenchConfig) -> BenchReport {
             late = rng.uniform_ns(cfg.tick_late_min_ns, cfg.tick_late_max_ns);
         }
         let wall = (nominal + late).saturating_add_signed(cfg.receiver_tick_offset_ns);
+        // A render tick that wakes a whole interval late SKIPS the slot(s) it overran:
+        // genlock_next_deadline (obs-video.c) sleeps to the next grid point AFTER the previous
+        // tick, so the late wake serves the latest slot it passed and the skipped one never
+        // ticks — the conveyor then genuinely presents one frame deeper. (No live config here
+        // reaches it: the tail is 10–30 ms; a late-tick stress run does.)
+        while cfg.grid.next_tick(nominal) <= wall {
+            nominal = cfg.grid.next_tick(nominal);
+            if nominal >= warm {
+                report.skipped_ticks += 1;
+            }
+        }
         // Produce every frame that has arrived by this tick (keep one frame of look-ahead).
         while pending.back().is_none_or(|&(arrival, _)| arrival <= wall) {
             let (arrival, stamp, dup, gap) = sender.next_frame(cfg);
@@ -826,20 +839,78 @@ mod tests {
         assert!(share(&r, &[31]) > 0.99, "states {:?}", r.state_samples);
     }
 
-    /// issue 1367 — the stream render tick sits on the grid within the ±2 ms slew clamp; anywhere
-    /// in `[-2 ms, +1 ms]` of constant phase error the settled source never corrects and every
-    /// restart stall still lands on one depth. (The SHED reads a whole frame minus 2 ms, so a tick
-    /// that is late by +2 ms or more lets the 10–30 ms late-tick TAIL cross the shed edge — a few
-    /// shed+hold pairs per hour; a tick that far off the grid is outside the slew clamp.)
+    /// issue 1367 (review round 1) — a render tick that wakes LATE must never read the conveyor one
+    /// frame deep. The live tail is 10–30 ms; this stress tail reaches 45 ms, past one interval, so
+    /// some ticks genuinely SKIP a slot (the conveyor really is one frame deeper afterwards and the
+    /// shed pays it back) and many more wake just short of a skip. The shed may only ever repay a
+    /// skipped tick: no misfire shed, so no hold to undo it (`n1_grows`). With the shed's early
+    /// margin at 2 ms the band 31.3–33.3 ms misfired (19 holds over the three seeds); the
+    /// 100 us margin leaves a 0.1 ms band.
     #[test]
-    fn receiver_tick_phase_inside_the_slew_clamp_never_corrects_1367() {
+    fn a_late_render_tick_never_misfires_a_shed_1367() {
+        let mut misfire_holds = 0;
+        for seed in [
+            BenchConfig::live_2026_09_24(GridModel::Production).seed,
+            1,
+            2,
+        ] {
+            let mut cfg = BenchConfig::live_2026_09_24(GridModel::Production);
+            cfg.seed = seed;
+            cfg.tick_late_max_ns = 45_000_000;
+            cfg.duration_s = 2 * 3600;
+            let r = run_bench(&cfg);
+            assert!(
+                r.skipped_ticks > 0,
+                "the stress tail must skip ticks: {r:?}"
+            );
+            assert!(
+                r.converge_sheds + r.drains <= r.skipped_ticks + r.n1_grows,
+                "seed {seed}: a correction that repays neither a skipped tick nor a misfire: {r:?}"
+            );
+            assert!(
+                share(&r, &[31]) > 0.99,
+                "seed {seed}: states {:?}",
+                r.state_samples
+            );
+            misfire_holds += r.n1_grows;
+        }
+        assert!(
+            misfire_holds <= 3,
+            "{misfire_holds} misfire holds over 3 x 2 h: late ticks read the conveyor one frame deep"
+        );
+    }
+
+    /// issue 1367 (review round 1) — a CONSTANT phase error of the stream render tick, from 2 ms
+    /// early to 20 ms late (a slew-clamped tick after a clock step can sit this far off the grid for
+    /// a while; `GENLOCK_MAX_SLEW_NS` bounds the per-tick correction, not the phase). The settled
+    /// source keeps its depth, every correction repays a genuinely skipped tick (a late phase plus
+    /// the late-tick tail passes a whole interval), and every restart stall still lands on one
+    /// depth. An EARLY phase only defers a shed until the next tick that is on the grid or late.
+    #[test]
+    fn receiver_tick_phase_never_misfires_1367() {
         let target = 987_000_000u64.div_ceil(CANVAS_INTERVAL_NS) + 1;
-        for offset in [-2_000_000i64, -1_000_000, 1_000_000] {
+        for offset_ms in [-2i64, -1, 0, 1, 2, 5, 10, 20] {
+            let offset = offset_ms * 1_000_000;
             let mut cfg = BenchConfig::live_2026_09_24(GridModel::Production);
             cfg.receiver_tick_offset_ns = offset;
             cfg.duration_s = 2 * 3600;
             let r = run_bench(&cfg);
-            assert_eq!(corrections(&r), 0, "tick offset {offset}: {r:?}");
+            assert!(
+                r.n1_grows <= 2,
+                "tick phase {offset_ms} ms: misfire holds: {r:?}"
+            );
+            assert!(
+                r.converge_sheds + r.drains <= r.skipped_ticks + r.n1_grows,
+                "tick phase {offset_ms} ms: a correction that repays no skipped tick: {r:?}"
+            );
+            assert!(
+                share(&r, &[31]) > 0.99,
+                "tick phase {offset_ms} ms: {:?}",
+                r.state_samples
+            );
+        }
+        for offset_ms in [-2i64, 0, 2, 10, 20] {
+            let offset = offset_ms * 1_000_000;
             for k in 0..=3 {
                 let r = after_restart_with(
                     987,
@@ -850,12 +921,11 @@ mod tests {
                 assert_eq!(
                     settled_state(&r),
                     Some(target),
-                    "tick offset {offset}, {k}-slot stall: {r:?}"
+                    "tick phase {offset_ms} ms, {k}-slot stall: {r:?}"
                 );
-                assert_eq!(
-                    corrections(&r),
-                    0,
-                    "tick offset {offset}, {k}-slot stall: {r:?}"
+                assert!(
+                    r.converge_sheds + r.drains <= r.skipped_ticks + r.n1_grows,
+                    "tick phase {offset_ms} ms, {k}-slot stall: {r:?}"
                 );
             }
         }

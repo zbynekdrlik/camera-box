@@ -580,8 +580,9 @@ fn n1_pin_derived_depth_present_and_wired_1367() {
             "the 1 us pin tolerance (an exact-multiple pin counts one frame too many without it)",
         ),
         (
-            "#define GENLOCK_N1_TICK_EARLY_MARGIN_NS 2000000ULL",
-            "the 2 ms early-tick margin (the render-tick slew clamp)",
+            "#define GENLOCK_N1_TICK_EARLY_MARGIN_NS 100000ULL",
+            "the 100 us early-tick margin of the SHED read (review round 1: at 2 ms a 31.3-33.3 ms \
+             late tick misfired a shed)",
         ),
         (
             "#define GENLOCK_N1_DEEP_MARGIN_FRAMES 2ULL",
@@ -593,6 +594,11 @@ fn n1_pin_derived_depth_present_and_wired_1367() {
             "the HOLD call site (distinct counter + the shared drain throttle reset)",
         ),
         ("\"n1_grows=%llu \"", "the n1_grows= audit field"),
+        (
+            "if (n < 2 && source->genlock_last_known_n >= 2) return false;",
+            "the guard that keeps a tick of the N>=2 STEADY branch out of the N==1 shed when the \
+             post-erase re-measure reads below 2 (N>=2 byte-identical at the source level)",
+        ),
         (
             "(unsigned long long)source->genlock_stamp_gaps, \
              (unsigned long long)source->genlock_n1_grows,",
