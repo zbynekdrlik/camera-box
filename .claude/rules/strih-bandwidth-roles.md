@@ -64,12 +64,13 @@ old program input at every cut (the issue-1320 render-freeze class). So:
   `last_frame_ts = 0` stops `async_tick` counting an underrun EVERY render tick for a parked input —
   `async_tick` runs for every async source regardless of showing), `set_genlock_connected(false)`
   (the issue-1299 LOCK facet treats it as idle, not DEGRADED), log + `sleep 5 ms; continue`.
-  On show: `was_disconnected = true`, `no_conn_since_ns = 0`, `unpark_bind_1242 = true`, re-arm
-  `reset_ndi_receiver` → the normal reset block runs the issue-1096 fresh finder. That bind SKIPS the
-  #1180 one-shot identity verify only when its URL came from this reset's own fresh finder
-  (`genlock_unpark_skips_identity_verify(unpark_bind, url_bind_kind == 0)`): #1180 guards a SENDER
-  restart's port reshuffle, and its blocking finder (up to 2 × 500 ms) would stall the frame loop
-  while the camera sits in preview waiting for the cut. Guessed URLs (last-known / fleet map) keep it.
+  On show: `was_disconnected = true`, `no_conn_since_ns = 0`, re-arm `reset_ndi_receiver` → the
+  normal reset block runs the issue-1096 fresh finder. The #1180 post-connect identity verify is
+  KEPT for that bind (review round 2, a decision): after a long park the sender may have restarted
+  and reshuffled its port, and the fresh finder itself can serve a dying sender's last
+  advertisement — the wrong-camera guard outweighs its one-shot blocking finder (up to 2 × 500 ms
+  right after the first frames), which is part of the accepted preview cold start. A round-1 skip
+  was reverted; `tests/distroav_connect_on_show_park_1242.rs` pins that no skip exists.
 - The role snapshot (`s->config.genlock_monitor` / `s->config.connect_on_show`) is written in
   `ndi_source_update` under `config_mutex`, gated on the genlock lockdown.
 - Log family (mutually non-substring vs every other `genlock-*` marker):
@@ -88,7 +89,10 @@ multiview keeps its full input "showing" → never parked → no saving. So
 after `--bootstrap` on every launch, best-effort; installed next to strih_scenes.py by setup-strih
 step 6):
 
-1. flags every program-path main `genlock_connect_on_show=true`;
+1. flags every program-path main `genlock_connect_on_show=true` — or `false` while a FRESH strih-side
+   E2E hold marker exists (`~/.camera-box/connect-on-show-e2e-hold` on strih-lx, 4 h TTL): the #1093
+   wedge escalation can relaunch strih OBS mid-run, and its launch-time apply must not re-park the
+   inputs the run is measuring;
 2. heals/creates the `MV NDI camN` twins (same LIVE sender + pin as the main, monitor, audio off);
    the sender name of an existing twin goes through the #795-safe `_enforce_ndi_source_name`; a
    main with NO sender (an empty name would stop the twin's receiver thread) or a twin name already
@@ -96,16 +100,22 @@ step 6):
 3. `scenes_needing_twins`: every scene that holds a program input DIRECTLY or NESTS such a scene
    (recursive, cycle-safe) gets an `MV <scene>` twin mirroring it — each main swapped for its twin,
    each nested twinned scene for ITS twin, audio-only inputs dropped, a swapped item pinned to
-   `OBS_BOUNDS_SCALE_INNER` at the main item's on-canvas size (NDI "lowest" is a lower-resolution
-   proxy; a scale-placed twin would otherwise draw small in the tile corner). A drifted twin
-   (source / enabled / transform) is rebuilt. Covers `Cam N` AND `Moderatori`;
+   `OBS_BOUNDS_SCALE_INNER` at the main item's footprint = its NOMINAL size (sourceWidth, else the
+   canvas) × scale — NDI "lowest" is a lower-resolution proxy (a scale-placed twin would draw small in
+   the tile corner), and a PARKED main reports a zero computed width/height (async inactive), so the
+   computed size is never used (the twin would otherwise differ parked vs live and rebuild every
+   launch). Crop (main-pixel units) is never mirrored onto the proxy; a cropped camera item is
+   reported. A drifted twin (source / enabled / transform) is rebuilt. Covers `Cam N` AND `Moderatori`;
 4. never twins an NDI-output scene (an enabled `ndi_filter`: Grading, Interkom) — the filter only
    sends while its parent is SHOWING, and Grading's one enabled nested camera IS the wanted
    full-bandwidth grading feed — nor the custom grid, nor a twin;
-5. the multiview membership hand-off (`membership_on_create`: original out, twin in; a nested-only
-   twin never shown) and the twin's `camera_box_multiview_target` private key are written ONCE, when
-   the twin is created or first adopted — never re-imposed (operator wins, the imag #785 lesson);
-6. a twin whose original lost its camera is RETIRED (original back in, twin out; the scene is kept);
+5. the multiview membership hand-off (`membership_on_create(orig_shown, twin_shown)`: the twin takes
+   the cell the original — or an already-shown twin, the migrated Windows #501/#761 layout — held; a
+   nested-only twin never shown) and the twin's `camera_box_multiview_target` private key are written
+   ONCE, when the twin is created or first adopted — never re-imposed (operator wins, the imag #785
+   lesson);
+6. a twin whose original lost its camera is RETIRED (original back in, twin out, the adoption key
+   cleared so a returning camera hands the cell back to the twin; the scene is kept);
 7. swaps the custom `MULTIVIEW` grid scene's full inputs / twinned scene refs for twins;
 8. refreshes the built-in multiview with a scratch-scene create+remove (OBS re-reads membership only
    on a scene-list change; a WS private-setting write alone does not refresh it).
@@ -141,17 +151,21 @@ not parked (normal classification).
 | rig-health-audit `arrivals-low` + `cadence_check` | `park_touched_sources` (ANY park line, parked or unparked, in the window: a partial history is no measurement) + `MV` twins excluded |
 | set-ndi-mapping `--verify-live` | `hidden=obs_phase2.input_hidden_by_design` (settings + `GetSourceActive.videoShowing`) → SKIP, never screenshot-sampled |
 | asio-starve watchdog | n/a (reads `asrc:` audio lines; camera inputs carry no audio) |
-| `[4c/8]`, mv-reverify-escalate, ndi-cadence-heal, `[4j/8settle]`, `recording-e2e.sh` | the E2E HOLD (below) keeps every program-path input connected, so nothing parks during a run |
+| `[4c/8]`, mv-reverify-escalate, ndi-cadence-heal, `[4j/8settle]`, `recording-e2e.sh` | the E2E HOLD (below) keeps every program-path input connected, so nothing parks during a run — including across a mid-run strih OBS relaunch (the strih-side marker makes the launch-time role apply keep the mains connected) |
 | genlock_audit_snapshot / e2e_discord_report / churn / arrival_floor | report-only analysis; arrival_floor already filters `^NDI cam` |
 
 ## The E2E hold
 
 `recording-e2e.sh`, right after `trap cleanup` arms, behind its OWN `stray_session_check_assert`
 (a strih OBS settings write is a rig mutation — it is in the issue-1271 `muts` list):
-`connect_on_show_e2e_hold "$HERE" "$STRIH" "$CONNECT_ON_SHOW_HOLD_STATE" || exit 1`, then
+`connect_on_show_e2e_hold "$HERE" "$STRIH" "$CONNECT_ON_SHOW_HOLD_STATE" || exit 1` (first the
+strih-side marker over ssh — so a mid-run OBS relaunch keeps the mains connected — then the live WS
+flip; the restore clears the marker FIRST), then
 `connect_on_show_e2e_wait_live` (bounded 30 s, fail-OPEN WARNING): every held input must UNPARK and
-advance its `received=` before the `[1/8]` pixel-liveness / `[2/8]` reverify checks run, so they never
-race a cold reconnect. The state file is STABLE (`~/.camera-box/connect-on-show-hold.json`, never the
+advance its `received=` (or, when its first read had no audit line, show one at all) before the
+`[1/8]` pixel-liveness / `[2/8]` reverify checks run, so they never race a cold reconnect; the budget
+is WALL time, so a zero poll interval still terminates. A restore treats an input deleted/renamed
+since the hold as done (the state file never outlives it). The state file is STABLE (`~/.camera-box/connect-on-show-hold.json`, never the
 per-run OUTDIR): `obs_phase2.py connect-on-show --hold` writes the held list BEFORE flipping, UNIONS a
 leftover file (a SIGKILLed run's list is restored by the next run's cleanup), and reads every write
 back (failure → the run aborts: a hidden input would be measured cold). `cleanup()` restores it

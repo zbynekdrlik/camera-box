@@ -28,9 +28,18 @@ inputs/scenes + a scratch refresh scene); the operator's own inputs/scenes are n
 or removed, and the multiview membership of an existing twin is never re-imposed (operator wins).
 The pure planners carry no WebSocket dependency (tests/python/test_strih_bandwidth_roles_1242.py).
 """
+import os
 import re
+import time
 
 CONNECT_ON_SHOW_KEY = "genlock_connect_on_show"
+# The strih-side E2E HOLD marker (scripts/lib/connect-on-show-hold.sh touches it over ssh at the hold,
+# removes it at the restore). While it is FRESH, a launch-time role apply keeps every program-path main
+# CONNECTED (connect-on-show off): a strih OBS relaunch in the middle of an E2E run (the #1093 wedge
+# escalation) must never re-park the inputs the run is measuring. A marker older than the TTL (a run
+# SIGKILLed before its restore) expires, so the roles come back on the next launch.
+E2E_HOLD_MARKER = os.path.expanduser("~/.camera-box/connect-on-show-e2e-hold")
+E2E_HOLD_TTL_S = 4 * 3600
 GENLOCK_MONITOR_KEY = "genlock_monitor"
 TWIN_PREFIX = "MV "
 # The private scene setting the vendored multiview reads: the twin cell stands in for this scene.
@@ -82,9 +91,19 @@ def is_twin(name):
     return (name or "").startswith(TWIN_PREFIX)
 
 
-def main_role_settings():
-    """The program-path role for a main camera input (fresh dict each call)."""
-    return {CONNECT_ON_SHOW_KEY: True}
+def main_role_settings(e2e_hold=False):
+    """The program-path role for a main camera input (fresh dict each call): connect-on-show, unless
+    an E2E run holds every program-path input connected."""
+    return {CONNECT_ON_SHOW_KEY: not e2e_hold}
+
+
+def e2e_hold_active(path, now, ttl_s):
+    """True iff the strih-side E2E hold marker exists and is younger than `ttl_s` at `now`."""
+    try:
+        age = now - os.stat(path).st_mtime
+    except OSError:
+        return False
+    return age < ttl_s
 
 
 def twin_role_settings(main_effective):
@@ -115,23 +134,35 @@ def settable_transform_fields(transform):
     return {k: v for k, v in (transform or {}).items() if k in SETTABLE_TRANSFORM_FIELDS}
 
 
+CROP_FIELDS = ("cropLeft", "cropTop", "cropRight", "cropBottom")
+
+
 def twin_transform(transform, canvas):
     """The transform for a twin item that REPLACES a full-bandwidth item. NDI 'lowest' is a
     lower-resolution proxy, so a main placed by scale (no bounds) would draw its twin as a small
-    image in the corner: pin the twin to BOUNDS equal to the main item's on-canvas size (its
-    computed width/height, else sourceWidth x scale, else the canvas) so the drawn size no longer
-    depends on the source resolution. A main that already uses bounds keeps its transform."""
+    image in the corner: pin the twin to BOUNDS equal to the main item's on-canvas footprint so the
+    drawn size no longer depends on the source resolution. The footprint is the main's NOMINAL size x
+    its scale -- its sourceWidth when known, else the canvas (a fleet camera is canvas-sized): a
+    parked or not-yet-delivering main reports a ZERO computed size (async inactive), and the twin
+    must get the same footprint either way or it would be rebuilt on every launch. Crop values are in
+    MAIN-source pixels and would over-crop the proxy, so they are never mirrored. A main that already
+    uses bounds keeps its transform (minus crop)."""
     t = transform or {}
-    out = settable_transform_fields(t)
+    out = {k: v for k, v in settable_transform_fields(t).items() if k not in CROP_FIELDS}
     if t.get("boundsType") not in (None, BOUNDS_NONE):
         return out
     cw, ch = canvas
-    w = t.get("width") or (t.get("sourceWidth") or 0) * (t.get("scaleX") or 1.0) or cw
-    h = t.get("height") or (t.get("sourceHeight") or 0) * (t.get("scaleY") or 1.0) or ch
+    w = (t.get("sourceWidth") or cw) * (t.get("scaleX") or 1.0)
+    h = (t.get("sourceHeight") or ch) * (t.get("scaleY") or 1.0)
     out.update({"boundsType": "OBS_BOUNDS_SCALE_INNER", "boundsAlignment": 0,
                 "boundsWidth": float(w), "boundsHeight": float(h),
                 "scaleX": 1.0, "scaleY": 1.0})
     return out
+
+
+def has_crop(transform):
+    """True iff a main item is cropped (a crop the twin cannot mirror -- reported)."""
+    return any((transform or {}).get(k) for k in CROP_FIELDS)
 
 
 def is_scene_item(item):
@@ -233,11 +264,12 @@ def multiview_swap_plan(items, program_inputs, twinned_scenes, canvas):
     return plan
 
 
-def membership_on_create(orig_shown):
+def membership_on_create(orig_shown, twin_shown):
     """(original, twin) built-in-multiview membership applied ONCE, when a twin is created or first
-    adopted: a twin takes over the original's multiview cell; a twin of a scene the operator does not
-    show (only needed as a nested reference) is not shown on its own. Never re-imposed afterwards."""
-    return (False, True) if orig_shown else (orig_shown, False)
+    adopted: the twin takes over the cell the original -- or an already-shown twin (the migrated
+    Windows #501/#761 layout) -- held; a twin of a scene nobody shows (only needed as a nested
+    reference) is not shown on its own. Never re-imposed afterwards (operator wins)."""
+    return (False, True) if (orig_shown or twin_shown) else (False, False)
 
 
 def bandwidth_role_problems(actual, program_inputs):
@@ -329,23 +361,28 @@ def _add_scene_item(obs, scene, source, enabled, transform, inputs, create_setti
         }, ignore_err=True)
 
 
-def apply_bandwidth_roles(obs, plan):
+def apply_bandwidth_roles(obs, plan, hold_marker=E2E_HOLD_MARKER, now=None):
     """Apply the roles to the live collection. Returns a summary dict for the log. Steps:
-      1. every program-path main gets genlock_connect_on_show=True;
+      1. every program-path main gets genlock_connect_on_show=True -- or False while a FRESH E2E hold
+         marker exists (e2e_hold_active: an OBS relaunch in the middle of an E2E run must not re-park
+         the inputs the run measures);
       2. every twin input is healed to its role settings (the sender name through the #795-safe
          read-back-verified re-enforce) -- skipped with a problem when the main has NO sender (an
          empty name would stop the twin's receiver thread) or a non-NDI input already owns the name;
       3. every scene that needs a twin (scenes_needing_twins) gets/keeps an `MV <scene>` twin mirroring
          it (rebuilt only on drift); a NEW or never-adopted twin gets the membership_on_create hand-off
-         and its MULTIVIEW_TARGET_KEY; an existing adopted twin's membership is never re-imposed;
+         and its MULTIVIEW_TARGET_KEY; an existing adopted twin's membership is never re-imposed; a
+         cropped camera item is reported (the proxy cannot mirror main-pixel crop);
       4. a twin whose original no longer needs one is RETIRED (original back in the multiview, twin
-         out) -- the twin scene itself is left in place, never deleted;
+         out, the adoption key cleared so the twin takes the cell over again if the camera returns)
+         -- the twin scene itself is left in place, never deleted;
       5. the custom multiview GRID scene renders twins instead of full inputs;
       6. when membership changed, the built-in multiview is refreshed (scratch-scene create+remove)."""
     ss = _scenes_module()
     op = ss._obs_phase2_module()
+    hold = e2e_hold_active(hold_marker, time.time() if now is None else now, E2E_HOLD_TTL_S)
     summary = {"mains": [], "twins": [], "twin_scenes": [], "retired": [], "multiview_grid": [],
-               "problems": [], "refreshed": False}
+               "problems": [], "refreshed": False, "e2e_hold": hold}
     inputs = {i.get("inputName"): i.get("inputKind")
               for i in (obs.req("GetInputList", ignore_err=True) or {}).get("inputs", [])}
     prog = [p for p in program_path_inputs(plan) if p in inputs]
@@ -354,9 +391,9 @@ def apply_bandwidth_roles(obs, plan):
 
     main_eff = {m: ss._effective_input_settings(obs, m) for m in prog}
     for m in prog:
-        if role_update_needed(main_eff[m], main_role_settings()):
+        if role_update_needed(main_eff[m], main_role_settings(hold)):
             obs.req("SetInputSettings", {
-                "inputName": m, "inputSettings": main_role_settings(), "overlay": True,
+                "inputName": m, "inputSettings": main_role_settings(hold), "overlay": True,
             }, ignore_err=True)
             summary["mains"].append(m)
 
@@ -400,6 +437,9 @@ def apply_bandwidth_roles(obs, plan):
             obs.req("CreateScene", {"sceneName": tw_sc}, ignore_err=True)
             scenes.append(tw_sc)
         desired = twin_scene_items(items_by_scene[sc], usable, twinned, canvas)
+        for it in items_by_scene[sc]:
+            if it.get("sourceName") in usable and has_crop(it.get("sceneItemTransform")):
+                summary["problems"].append("%r crops %r -- its twin shows the full frame" % (sc, it["sourceName"]))
         current = _scene_items(obs, tw_sc) if exists else []
         if not twin_items_match(current, desired):
             for it in current:
@@ -412,7 +452,8 @@ def apply_bandwidth_roles(obs, plan):
         tw_priv = _private(obs, tw_sc)
         if tw_priv.get(MULTIVIEW_TARGET_KEY) != sc:
             # created now, or never adopted: the ONE membership hand-off + the target marker.
-            orig_show, twin_show = membership_on_create(_multiview_shown(_private(obs, sc)))
+            orig_show, twin_show = membership_on_create(_multiview_shown(_private(obs, sc)),
+                                                        _multiview_shown(tw_priv) if exists else False)
             _set_private(obs, sc, {"show_in_multiview": orig_show})
             _set_private(obs, tw_sc, {"show_in_multiview": twin_show, MULTIVIEW_TARGET_KEY: sc})
             membership_changed = True
@@ -421,12 +462,14 @@ def apply_bandwidth_roles(obs, plan):
         target = _private(obs, tw_sc).get(MULTIVIEW_TARGET_KEY)
         if not target or target in needing or target not in items_by_scene:
             continue
-        # the original no longer holds a program input: hand its multiview cell back, once.
+        # the original no longer holds a program input: hand its multiview cell back and release
+        # the adoption (a returning camera then hands the cell to the twin again).
         if _multiview_shown(_private(obs, tw_sc)):
             _set_private(obs, target, {"show_in_multiview": True})
             _set_private(obs, tw_sc, {"show_in_multiview": False})
             membership_changed = True
-            summary["retired"].append(tw_sc)
+        _set_private(obs, tw_sc, {MULTIVIEW_TARGET_KEY: ""})
+        summary["retired"].append(tw_sc)
 
     for sc in [s for s in items_by_scene if is_custom_multiview_scene(s)]:
         for e in multiview_swap_plan(items_by_scene[sc], usable, twinned, canvas):

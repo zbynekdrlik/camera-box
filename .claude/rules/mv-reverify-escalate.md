@@ -301,4 +301,7 @@ same locale, same theoretical exposure — just unverified and out of #1258's `r
 Outside an E2E run a strih camera main (`NDI camN`) is PARKED while hidden, which would read as a
 WEDGE here. `recording-e2e.sh` therefore holds `genlock_connect_on_show` off for the whole run
 (`scripts/lib/connect-on-show-hold.sh`, after the cleanup trap arms, restored in cleanup), so the
-reverify and its escalation only ever see connected mains. See `.claude/rules/strih-bandwidth-roles.md`.
+reverify and its escalation only ever see connected mains. The escalation's strih OBS RESTART re-runs
+the launch-time role apply (`strih_scenes.py --apply-roles`); the hold's strih-side marker
+(`~/.camera-box/connect-on-show-e2e-hold`) makes that apply keep the mains connected, so the
+post-restart re-check never measures a parked input. See `.claude/rules/strih-bandwidth-roles.md`.

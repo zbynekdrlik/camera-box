@@ -3045,6 +3045,11 @@ def connect_on_show_restore(ws, state_path):
     names = _read_hold_state(state_path)
     if not names:
         return [], []
+    # an input deleted / renamed since the hold has nothing to restore: done, never a read-back
+    # failure that would keep the state file (and its WARNING) alive forever.
+    present = {i.get("inputName") for i in
+               (_rpc(ws, "GetInputList", {"inputKind": "ndi_source"}) or {}).get("inputs") or []}
+    names = [n for n in names if n in present]
     failed = _set_connect_on_show(ws, names, True)
     if not failed:
         os.remove(state_path)
