@@ -151,20 +151,26 @@ stamps `video_frame.timecode = genlock_emit_timecode_100ns(...)` at `:613` (doct
 
 ### 5. Pacing
 
-The sender **MUST** emit exactly one video frame per boundary. It:
+The sender **MUST** emit exactly one video frame per boundary, where the boundaries are the
+per-second grid points of §4 — the SAME grid the frame's `timecode` floors to, so the frame
+emitted for slot `k` is stamped slot `k` (a pacing grid counted from 1970, `k · interval`, walks
+against the stamps by `1 s − fps · interval` per second and puts captures near a boundary into the
+neighbouring slot). It:
 
 - **MUST** catch up at most one interval per emit when it is late by **≤ 8 intervals**;
 - **MUST** resync forward to the next boundary (dropping the intervening boundaries) when it is
   late by **> 8 intervals with nothing queued** — a genuine wall-clock discontinuity;
 - **MUST** re-latch to the rewound clock on a backward clock step (a latched boundary more than
-  one interval in the future);
+  one grid slot in the future);
 - **MUST**, on an underrun, repeat the last frame stamped with the NEW boundary timecode — never
   leave a hole and never emit two frames inside one interval.
 
-*Reference implementation (camera-box):* `genlock_emit_gate` (`src/genlock_pacing.rs:69`) on the
-epoch grid `now % interval`; catch-up bound `GENLOCK_MAX_CATCHUP_INTERVALS = 8` (`:67`);
-backward-step re-latch (`:82-90`, `genlock_latched_boundary` `:134`); starvation repeat with the
-new boundary timecode (`starvation_repeat_timecode_100ns` `:239`).
+*Reference implementation (camera-box):* `genlock_emit_gate` (`src/genlock_pacing.rs:79`) on the
+per-second grid of `src/genlock_grid.rs` (latch / resync `grid_next_boundary_ns`, advance
+`genlock_advance_boundary` `:165`, lag in grid slots `grid_steps_between` — since #1355, before it
+the gate paced on `now % interval` from 1970); catch-up bound `GENLOCK_MAX_CATCHUP_INTERVALS = 8`
+(`:62`); backward-step re-latch (`:92-100`, `genlock_latched_boundary` `:150`); starvation repeat
+with the new boundary timecode (`starvation_repeat_timecode_100ns` `:262`).
 
 ### 6. Audio
 
@@ -220,7 +226,7 @@ window cannot read as "flat" (`:47`).
 | §1 Clock | realtime + monotonic + 100-frame offset resample | `src/main.rs:40,57,74`; `src/genlock_stamp.rs:87,94` |
 | §2 Create | `clock_video/clock_audio=false`, progressive | `src/ndi.rs:628-629,1075` |
 | §4 Timecode | FLOOR boundary, 100 ns epoch | `src/ndi.rs:78,1079` (doctrine `:62-78`); `src/genlock_stamp.rs:52`; `vendor/distroav/src/ndi-output.cpp:613` (doctrine `:34-60`) |
-| §5 Pacing | grid gate, catch-up ≤ 8, resync, re-latch, repeat | `src/genlock_pacing.rs:67,69,82-90,134,239` |
+| §5 Pacing | per-second grid gate, catch-up ≤ 8, resync, re-latch, repeat | `src/genlock_pacing.rs:62,79,92-100,150,165,262`; `src/genlock_grid.rs` |
 | §6 Audio | raw wall-clock timecode, no snap | `vendor/distroav/src/ndi-output.cpp:697` |
 | §8 Acceptance | `genlock-fifo audit` counters + verdict | `src/jitter_audit.rs:41-52`; `src/resolume_playback.rs:46,47,56,71-75,91` |
 | Receiver gate | `PROP_SYNC_NDI_SOURCE_TIMECODE` ×100 → ns | `vendor/distroav/src/ndi-source.cpp:723,1619-1626,1680-1687,1959-1960` |

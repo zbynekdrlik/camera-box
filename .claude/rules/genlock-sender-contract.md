@@ -31,10 +31,12 @@ The load-bearing invariants the contract pins to this code (keep them honest):
   whole frame in ~0.4 days); check SongPlayer + the cg OBS against contract §4.
 - **Sender create `clock_video=false, clock_audio=false`** (`src/ndi.rs`) — the app owns cadence,
   never the NDI SDK's free-running clock.
-- **Pacing on the epoch grid** — one frame per boundary, catch-up `GENLOCK_MAX_CATCHUP_INTERVALS`
-  ≤ 8, grid-resync beyond, backward-step re-latch, starvation repeat with the NEW boundary
-  timecode (`src/genlock_pacing.rs`: `genlock_emit_gate` / `genlock_latched_boundary` /
-  `starvation_repeat_timecode_100ns`).
+- **Pacing on the SAME per-second grid as the stamps** (#1355 step 3 — before it the emit gate
+  paced on `now % interval` from 1970, 40 ns/s off the stamps at 60 fps) — one frame per boundary,
+  catch-up `GENLOCK_MAX_CATCHUP_INTERVALS` ≤ 8 grid slots, grid-resync beyond, backward-step
+  re-latch, starvation repeat with the NEW boundary timecode (`src/genlock_pacing.rs`:
+  `genlock_emit_gate` / `genlock_latched_boundary` / `genlock_advance_boundary` /
+  `starvation_repeat_timecode_100ns`, all over `src/genlock_grid.rs`).
 - **Audio timecode = raw wall clock, no snap** (`vendor/distroav/src/ndi-output.cpp`), delivered
   at real-time rate; the receiver ASRC paces by arrival rate, not sender audio timecodes.
 - **Receiver side** (why all of the above matters): DistroAV maps the forced

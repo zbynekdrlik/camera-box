@@ -21,7 +21,9 @@ re-qualify them to `[`crate::ndi::…`]`. `ndi.rs` still owns the NDI-timecode g
 (`next_boundary_100ns` / `fps_from_frame_rate`) the gate complements but does not depend on.
 
 - `genlock_pacing::genlock_emit_gate(now, next_boundary, interval)` → `(would_emit, next)` — the
-  wall-clock grid. Emits the first capture at/after each boundary; `#707` resync branch leaps
+  wall-clock grid, which since #1355 step 3 is the PER-SECOND grid the frames are stamped on
+  (`src/genlock_grid.rs`; advance via `genlock_advance_boundary`, lag/skip in grid slots — never
+  `+ interval` / `/ interval`, see `genlock-per-second-grid.md`). Emits the first capture at/after each boundary; `#707` resync branch leaps
   forward only when lag > `GENLOCK_MAX_CATCHUP_INTERVALS` (8) = a real clock STEP.
 - `genlock_pacing::genlock_emit_on_time(...)` (#1111) → is this an ON-TIME/surplus crossing vs a
   LATE catch-up crossing? Shares `genlock_latched_boundary` with the gate so the two never disagree.

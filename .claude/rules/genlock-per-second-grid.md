@@ -4,6 +4,8 @@ paths:
   - "src/genlock_grid_bench.rs"
   - "vendor/obs-studio/libobs/obs-genlock-grid.h"
   - "vendor/obs-studio/libobs/obs-video.c"
+  - "src/genlock_pacing.rs"
+  - "src/dupe_decimation/gate.rs"
 ---
 
 # ONE per-second genlock grid + the grid-drift bench + the stamp counters (#1355)
@@ -50,6 +52,48 @@ phase_pinned_deadline` delegates). Rules for anyone touching it:
   shift with `phase_pinned_deadline` + `grid_next_boundary_ns`, byte-identical on the 1970 grid.
   Grep for any other `% interval`/`% I30` in a test that means "where is the deadline grid" before
   changing the grid again.
+
+## The camera emit gate (step 3) — pacing on the stamp grid
+
+The camera stamps on the per-second grid but its emit gate (`src/genlock_pacing.rs`) paced on the
+1970 grid (`now % interval`, `boundary + interval`, `(now − boundary) / interval`) — 40 ns/s at the
+production 60 fps (`16_666_666 × 60 = 999_999_960`), 8.3 ms apart on 24.9.2026. A capture in that
+window crossed the gate boundary of one slot and was stamped into the neighbouring one. Now:
+
+- **Latch / #131 re-latch / #707 resync** = `grid_next_boundary_ns`; the re-latch test is
+  `next > grid_next(now)` (the exact per-second form of the old `next > now + interval`).
+- **Every boundary ADVANCE** = `genlock_pacing::genlock_advance_boundary` (→
+  `genlock_grid::grid_advance_ns`) — the gate's own advance AND `dupe_decimation/gate.rs`'s
+  starvation fill (`1 + repeats` slots) + FastDrain extra slot. **Never `+ n * interval`:** the
+  per-second steps alternate `interval` / `interval + 1` ns, so `+ interval` from a grid point lands
+  1 ns short of the next point on a long step and the next poll re-crosses the SAME slot (a doubled
+  emit / a phantom skip). The `fast_drain_keeps_…` / `starvation_fill_keeps_…_2026_date_1355` tests
+  count off-grid boundaries through every arm at a real date.
+- **Lag, the #1131 resync bound, on-time, the #707 skip count** = grid SLOTS via
+  `genlock_grid::grid_steps_between` (grid points in `(from, to]`) — never `/ interval`, which calls
+  an instant still inside a long slot "one slot late". `grid_steps_between` / `grid_advance_ns` are
+  Rust-only (no C mirror — the receiver has no slot-count consumer).
+- **Test fixtures that write "N slots late" as `b + N * interval`, or an "exact-rate" capture train
+  as `i * floor(1e9 / fps)`, encode the 1970 grid** (the train drifts 40 ns/s and sits a few hundred
+  ns BEFORE the per-second points). Write N slots late as `b + N * interval + N` (N slots on either
+  grid) and an exact-rate train as `(i as f64 * 1e9 / fps) as u64` (the per-second points at 60).
+- Proof: `emit_boundary_equals_the_stamp_boundary_all_day_1355` (1000 latches over a day, 30 + 60
+  fps: crossed boundary == grid floor of the emitting instant == its stamp slot, consecutive emits
+  one slot apart) + `emit_gate_never_emits_before_the_stamp_boundary_at_the_drift_crossing_1355`
+  (the second where the 1970 grid passes the whole second — a few hundred ns apart, invisible to a
+  random sample). Log lines, counters, and the #707/#1131/#1145/#1167 semantics are byte-identical;
+  only the grid they count on moved. The stamp of a starvation REPEAT (`base − k · (10⁷ / fps)`)
+  stays at most `k` × 100 ns above its slot's point — inside the slot, left as is.
+- **Tier-0 verify recipe used:** one standalone crate `lib.rs` with `#[path]` mods for
+  `genlock_grid` + `genlock_pacing` + `dupe_decimation/mod.rs` (no other `crate::` deps), built with
+  plain `rustc --test` and again with `clippy-driver --test -D warnings`; the old-code check =
+  archive the RED commit's `src/` files into a scratch tree with the new `tests.rs` copied in.
+- **Deploy (supervisor):** camera-box binary only (cambox fleet), no OBS change. Every camera's
+  emitted frames move onto the stamp grid — a one-time phase shift of the emit instants (≤ the
+  day's offset, 8.3 ms at 60 fps on 24.9.), absorbed by the strih/stream genlock FIFO. Watch each
+  cambox's `Streaming:` / `#707` lines stay 299–301 with no new SKIP burst, and the strih
+  `genlock-fifo audit` `stamp_dup=` / `stamp_gap=` rate on the camera inputs against its own
+  pre-deploy baseline (it should not rise; captures near a boundary no longer straddle it).
 
 ## What changes live on deploy (tell the supervisor)
 
