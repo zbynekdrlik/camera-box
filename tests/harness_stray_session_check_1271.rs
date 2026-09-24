@@ -47,7 +47,7 @@ fn a_stray_session_guard_precedes_every_fleet_mutation_1271() {
     let guard = "stray_session_check_assert \"$HERE\"";
     let guards: Vec<usize> = s.match_indices(guard).map(|(i, _)| i).collect();
     // The mutation sites, in file order (name, unique anchor).
-    let muts: [(&str, &str); 4] = [
+    let muts: [(&str, &str); 5] = [
         (
             "bkshading-relay pause",
             "bkshading_e2e_pause_stop \"$CAMERA_NAME\"",
@@ -55,6 +55,12 @@ fn a_stray_session_guard_precedes_every_fleet_mutation_1271() {
         (
             "[0/8] camera-box parity auto-align",
             "cambox_parity_align_before_gate \"$CAMBOX_VERSION_LINUX\"",
+        ),
+        // issue 1242: the strih connect-on-show HOLD (a strih OBS settings write that keeps every
+        // program-path camera input connected for the measurement).
+        (
+            "issue-1242 connect-on-show hold",
+            "connect_on_show_e2e_hold \"$HERE\"",
         ),
         ("[2/8] cam1 camera-box deploy", "echo \"[2/8] $CAMERA_NAME"),
         ("[2b/8] ALL_CAMBOX deploy loop", "echo \"[2b/8] $_cn"),
