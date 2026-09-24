@@ -88,7 +88,8 @@ IP is resolved ONCE, when the receiver is provisioned:
 - In both cases its sources fall back to mDNS, exactly as before this change. They are never hidden.
 - verify-strih item 34 prints a NOTE (never a FAIL) when resolume resolves NOW to an IP the strih-lx
   OBS config lacks. Re-running setup-strih.sh step 4b fixes it; every strih-lx genlock deploy does.
-- The durable cures are both outside this lane:
+- The durable cures are both outside this lane (returned to the supervisor as a follow-up candidate
+  to file):
   - (a) a DHCP reservation for RESOLUME-SNV, after which its row becomes a pinned IPv4 in `OBS_FLEET`
     and the verifiers require it;
   - (b) regenerate the list at OBS start (an `ExecStartPre=` in `strih-obs.service` running an

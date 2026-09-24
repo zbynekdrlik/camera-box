@@ -801,8 +801,11 @@ else
   # A traveling sender (resolume.lan, DHCP) is never REQUIRED, but when it resolves NOW to an address
   # the OBS config does not list (it was away at the last setup-strih run, or its lease moved), say so:
   # a NOTE, never a FAIL -- re-running setup-strih.sh picks it up.
+  # Only the TRAVELING part (resolved minus pinned) is diffed -- a missing PINNED sender is already a
+  # FAIL above, never re-reported here as "traveling".
   _ndi_resolved="$(ndi_discovery_sender_ips resolve 2>/dev/null)" || _ndi_resolved=""
-  _ndi_drift="$(ndi_discovery_missing_ips "$(cat "${USER_HOME}/.ndi/${NDI_DISCOVERY_CONFIG_NAME}" 2>/dev/null || true)" "$_ndi_resolved")"
+  _ndi_traveling="$(ndi_discovery_list_minus "$_ndi_resolved" "$_ndi_required")"
+  _ndi_drift="$(ndi_discovery_missing_ips "$(cat "${USER_HOME}/.ndi/${NDI_DISCOVERY_CONFIG_NAME}" 2>/dev/null || true)" "$_ndi_traveling")"
   if [ -n "$_ndi_drift" ]; then
     note "(ndi-discovery) a traveling NDI sender resolves now to ${_ndi_drift}, which ${USER_HOME}/.ndi/${NDI_DISCOVERY_CONFIG_NAME} does not list -- re-run setup-strih.sh step 4b to add it (issue 1342)"
   fi

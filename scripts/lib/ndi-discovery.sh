@@ -194,6 +194,17 @@ ndi_discovery_missing_ips() {
   printf '%s' "$missing"
 }
 
+# ndi_discovery_list_minus A B -> the comma list of A's entries that are not in B, in A's order ("" when
+# none). Spaces in either list are ignored. Pure.
+ndi_discovery_list_minus() {
+  local b ip out=""
+  b=",$(_ndi_discovery_norm_list "$2"),"
+  for ip in ${1//,/ }; do
+    case "$b" in *",$ip,"*) ;; *) out="${out:+$out,}$ip" ;; esac
+  done
+  printf '%s' "$out"
+}
+
 # ndi_discovery_config_verdict TEXT [REQUIRED] -> "ok", or one `FAIL: <facet>` line per failing facet.
 # Always exits 0 (the caller branches on the printed verdict). REQUIRED defaults to the PINNED list.
 # Facets:
