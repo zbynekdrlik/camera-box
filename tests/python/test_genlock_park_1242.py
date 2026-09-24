@@ -309,6 +309,33 @@ def test_ndi_halving_skips_a_parked_input(tmp_path):
 # rig-health-audit arrivals-low
 # ------------------------------------------------------------------------------------------------
 
+def test_park_touched_sources_counts_parked_and_unparked():
+    gp = _park()
+    assert gp.park_touched_sources(FIXTURE) == {"NDI cam2", "NDI cam3", "NDI cam5"}
+
+
+def test_rig_health_arrivals_low_excludes_an_input_unparked_inside_the_window():
+    rha = _load("rig_health_audit_1242b", SCRIPTS / "rig-health-audit.py")
+    rates = {"NDI cam3": 4.0}  # its last two samples straddle the cold reconnect
+    log = "12:00:00.000: " + UNPARKED_LINE.format(src="NDI cam3", s=40) + "\n"
+    assert rha.low_arrival_sources(rates, log) == []
+
+
+def test_rig_health_cadence_check_skips_a_park_touched_camera():
+    rha = _load("rig_health_audit_1242c", SCRIPTS / "rig-health-audit.py")
+    # a 30 fps first-to-last span on cam2 (would read as a WRONG cadence) -- but cam2 parked in the window
+    lines = [
+        _audit("NDI cam2", 0, ts="12:00:00.000"),
+        "12:00:10.000: " + PARKED_LINE.format(src="NDI cam2", s=0),
+        _audit("NDI cam2", 3000, ts="12:01:40.000"),
+    ]
+    display, problems = rha.cadence_check("\n".join(lines) + "\n")
+    assert "cam2" not in display and problems == []
+    # control: the SAME samples with no park line are graded (proves the skip, not a blind check)
+    display, problems = rha.cadence_check("\n".join([lines[0], lines[2]]) + "\n")
+    assert any("cam2" in p for p in problems)
+
+
 def test_rig_health_arrivals_low_excludes_parked_inputs_and_monitor_twins():
     rha = _load("rig_health_audit_1242", SCRIPTS / "rig-health-audit.py")
     rates = {"NDI cam1": 60.0, "NDI cam2": 0.0, "MV NDI cam3": 25.0, "NDI cam4": 10.0}

@@ -1,16 +1,20 @@
-"""issue 1242 — the strih scene ROLE lib: program-path cameras connect only while shown, the built-in
-multiview renders always-connected low-bandwidth `MV` twins, and an E2E run holds every program-path
-input connected for the measurement.
+"""issue 1242 — the strih BANDWIDTH ROLES: program-path cameras connect only while shown, the built-in
+multiview renders always-connected low-bandwidth `MV` twins (each standing for its program scene), and
+an E2E run holds every program-path input connected for the measurement.
 
 Owner ruling 24.9.2026: strih-lx pulls FULL bandwidth only for cameras that are shown (PVW, PGM, a
 projector, the visible item of the Grading NDI-output scene); the multiview uses `MV Cam N` twins.
 
 Covers:
-  * scripts/strih_scenes.py role planners (pure) + apply_bandwidth_roles against a fake OBS;
+  * scripts/strih_bandwidth_roles.py pure planners + apply_bandwidth_roles against a fake OBS
+    (twin sizing, nested scenes, drift, operator-wins membership, retirement, empty/colliding names);
+  * the vendored OBS multiview cell-target key (python <-> C++ literal pin);
+  * scripts/strih_scenes.py --apply-roles delegation + the launch path;
   * scripts/obs_phase2.py `connect-on-show` hold/restore (the E2E precondition) + hidden_by_design;
   * scripts/set-ndi-mapping.py --verify-live never calls a parked input FROZEN;
-  * scripts/recording-e2e.sh + scripts/lib/connect-on-show-hold.sh wiring (guarded hold after the
-    cleanup trap arms, restore inside cleanup).
+  * scripts/recording-e2e.sh + scripts/lib/connect-on-show-hold.sh wiring (a stable state path, a
+    guarded hold after the cleanup trap arms, a bounded wait for the held inputs to deliver, restore
+    inside cleanup).
 """
 import copy
 import importlib.util
@@ -18,8 +22,7 @@ import json
 import pathlib
 import subprocess
 import sys
-
-import pytest
+import textwrap
 
 REPO = pathlib.Path(__file__).resolve().parents[2]
 SCRIPTS = REPO / "scripts"
@@ -35,6 +38,7 @@ def _load(name, path):
 
 
 ss = _load("strih_scenes_1242", SCRIPTS / "strih_scenes.py")
+roles = _load("strih_bandwidth_roles_1242", SCRIPTS / "strih_bandwidth_roles.py")
 op = _load("obs_phase2_1242", SCRIPTS / "obs_phase2.py")
 snm = _load("set_ndi_mapping_1242", SCRIPTS / "set-ndi-mapping.py")
 
@@ -45,7 +49,16 @@ PLAN = ss.seed_inputs([
     {"sender": "RESOLUME-SNV (cg-obs)", "input": "cg", "scene": "CG"},
 ], 3)
 
-T_FULL = {"positionX": 0, "positionY": 0, "scaleX": 1.0, "scaleY": 1.0}
+CANVAS = (1920, 1080)
+# a main placed by SCALE with no bounds (the no-bounds case a lower-resolution twin would shrink in)
+T_SCALE = {"positionX": 0.0, "positionY": 0.0, "scaleX": 1.0, "scaleY": 1.0,
+           "boundsType": "OBS_BOUNDS_NONE", "width": 1920.0, "height": 1080.0}
+SCENE = "OBS_SOURCE_TYPE_SCENE"
+
+
+def _item(iid, name, enabled=True, kind="ndi_source", stype="OBS_SOURCE_TYPE_INPUT", transform=None):
+    return {"sceneItemId": iid, "sourceName": name, "sceneItemEnabled": enabled,
+            "sceneItemTransform": dict(transform or T_SCALE), "inputKind": kind, "sourceType": stype}
 
 
 # ------------------------------------------------------------------------------------------------
@@ -54,76 +67,97 @@ T_FULL = {"positionX": 0, "positionY": 0, "scaleX": 1.0, "scaleY": 1.0}
 
 def test_program_path_is_the_fleet_camera_inputs_only():
     # cameras only: never the 2ME feedback pair, never the cg input (a CG cut-in must stay instant).
-    assert ss.program_path_inputs(PLAN) == ["NDI cam1", "NDI cam3"]
-    assert ss.is_program_path_sender("CAM7 (usb)")
-    assert not ss.is_program_path_sender("RESOLUME-SNV (cg-obs)")
-    assert not ss.is_program_path_sender("STRIH-LX (2ME PGM)")
+    assert roles.program_path_inputs(PLAN) == ["NDI cam1", "NDI cam3"]
+    assert roles.is_program_path_sender("CAM7 (usb)")
+    assert not roles.is_program_path_sender("RESOLUME-SNV (cg-obs)")
+    assert not roles.is_program_path_sender("STRIH-LX (2ME PGM)")
 
 
 def test_role_settings():
-    assert ss.main_role_settings() == {"genlock_connect_on_show": True}
-    twin = ss.twin_input_settings({"ndi_source_name": "CAM3 (usb)", "genlock_latency_ms_src": 6})
-    assert twin == {
-        "ndi_source_name": "CAM3 (usb)",
-        "genlock_fifo": True,
-        "ndi_sync": 2,
-        "genlock_latency_ms_src": 6,
-        "genlock_monitor": True,
-        "genlock_connect_on_show": False,
-        "ndi_audio": False,
-    }
-    assert ss.twin_name("Cam 3") == "MV Cam 3" and ss.twin_name("NDI cam3") == "MV NDI cam3"
+    assert roles.main_role_settings() == {"genlock_connect_on_show": True}
+    main = {"ndi_source_name": "CAM3 (usb)", "genlock_latency_ms_src": 6}
+    role = {"genlock_fifo": True, "ndi_sync": 2, "genlock_latency_ms_src": 6, "genlock_monitor": True,
+            "genlock_connect_on_show": False, "ndi_audio": False}
+    assert roles.twin_role_settings(main) == role
+    assert roles.twin_input_settings(main) == dict(role, ndi_source_name="CAM3 (usb)")
+    assert roles.twin_name("Cam 3") == "MV Cam 3" and roles.twin_name("NDI cam3") == "MV NDI cam3"
 
 
-def _item(iid, name, enabled=True, kind="ndi_source", stype="OBS_SOURCE_TYPE_INPUT"):
-    return {"sceneItemId": iid, "sourceName": name, "sceneItemEnabled": enabled,
-            "sceneItemTransform": dict(T_FULL, width=1920, height=1080), "inputKind": kind,
-            "sourceType": stype}
+def test_twin_transform_pins_bounds_so_a_proxy_fills_the_main_footprint():
+    # no bounds -> SCALE_INNER bounds at the main item's on-canvas size (the proxy never shrinks)
+    t = roles.twin_transform(T_SCALE, CANVAS)
+    assert t["boundsType"] == "OBS_BOUNDS_SCALE_INNER"
+    assert (t["boundsWidth"], t["boundsHeight"]) == (1920.0, 1080.0)
+    assert "width" not in t and "height" not in t  # read-only computed fields never echoed
+    half = dict(T_SCALE, scaleX=0.5, scaleY=0.5, width=960.0, height=540.0, positionX=960.0)
+    t = roles.twin_transform(half, CANVAS)
+    assert (t["boundsWidth"], t["boundsHeight"], t["positionX"]) == (960.0, 540.0, 960.0)
+    # no computed size at all -> the canvas
+    t = roles.twin_transform({"boundsType": "OBS_BOUNDS_NONE"}, CANVAS)
+    assert (t["boundsWidth"], t["boundsHeight"]) == (1920.0, 1080.0)
+    # a main that already uses bounds keeps its transform
+    bounded = {"boundsType": "OBS_BOUNDS_STRETCH", "boundsWidth": 640.0, "boundsHeight": 360.0,
+               "width": 640.0, "height": 360.0}
+    assert roles.twin_transform(bounded, CANVAS) == {"boundsType": "OBS_BOUNDS_STRETCH",
+                                                     "boundsWidth": 640.0, "boundsHeight": 360.0}
 
 
-def test_scene_needs_twin():
+def test_scenes_needing_twins_is_recursive_and_skips_output_scenes():
     prog = ["NDI cam1", "NDI cam3"]
-    cam3 = [_item(1, "NDI cam3"), _item(2, "ASIO zvuk", kind="pulse_input_capture")]
-    moder = [_item(1, "NDI cam3"), _item(2, "Image", kind="image_source")]
-    grading = [_item(1, "Cam 1", False, kind=None, stype="OBS_SOURCE_TYPE_SCENE")]
-    interkom = [_item(1, "NDI 2ME PVW")]
-    assert ss.scene_needs_twin("Cam 3", cam3, prog, is_output_scene=False)
-    assert ss.scene_needs_twin("Moderatori", moder, prog, is_output_scene=False)
-    # nested scene refs only -> not a direct program input -> no twin (Grading keeps its full input)
-    assert not ss.scene_needs_twin("Grading", grading, prog, is_output_scene=True)
-    # an NDI-output scene is never twinned (its output needs the scene SHOWN as-is)
-    assert not ss.scene_needs_twin("Cam 3", cam3, prog, is_output_scene=True)
-    assert not ss.scene_needs_twin("Interkom", interkom, prog, is_output_scene=True)
-    # a twin is never twinned again
-    assert not ss.scene_needs_twin("MV Cam 3", [_item(1, "MV NDI cam3")], prog, is_output_scene=False)
+    items = {
+        "Cam 1": [_item(1, "NDI cam1"), _item(2, "ASIO zvuk", kind="pulse_input_capture")],
+        "Cam 3": [_item(1, "NDI cam3")],
+        "Moderatori": [_item(1, "NDI cam3"), _item(2, "Image", kind="image_source")],
+        "Two cams": [_item(1, "Cam 1", kind=None, stype=SCENE), _item(2, "Cam 3", kind=None, stype=SCENE)],
+        "Grading": [_item(1, "Cam 1", False, kind=None, stype=SCENE)],
+        "Interkom": [_item(1, "NDI 2ME PVW")],
+        "MULTIVIEW": [_item(1, "NDI cam1")],
+        "MV Cam 1": [_item(1, "MV NDI cam1")],
+        "Loop A": [_item(1, "Loop B", kind=None, stype=SCENE)],
+        "Loop B": [_item(1, "Loop A", kind=None, stype=SCENE)],
+    }
+    got = roles.scenes_needing_twins(items, prog, output_scenes={"Grading", "Interkom"})
+    # direct holders + a scene that only NESTS them; never an output scene, the grid, a twin, a cycle
+    assert got == {"Cam 1", "Cam 3", "Moderatori", "Two cams"}
 
 
-def test_twin_scene_items_swap_program_inputs_and_drop_audio_only():
+def test_twin_scene_items_swap_inputs_and_nested_scenes_and_drop_audio_only():
     prog = ["NDI cam3"]
     items = [_item(1, "NDI cam3"), _item(2, "ASIO zvuk", kind="pulse_input_capture"),
-             _item(3, "Odpocet", False, kind="browser_source")]
-    got = ss.twin_scene_items(items, prog)
+             _item(3, "Odpocet", False, kind="browser_source"),
+             _item(4, "Cam 1", kind=None, stype=SCENE)]
+    got = roles.twin_scene_items(items, prog, {"Cam 1": "MV Cam 1"}, CANVAS)
     assert [(i["sourceName"], i["sceneItemEnabled"]) for i in got] == [
-        ("MV NDI cam3", True), ("Odpocet", False)]
-    # only settable transform fields are carried (read-only width/height dropped)
-    assert got[0]["sceneItemTransform"] == T_FULL
+        ("MV NDI cam3", True), ("Odpocet", False), ("MV Cam 1", True)]
+    assert got[0]["sceneItemTransform"]["boundsType"] == "OBS_BOUNDS_SCALE_INNER"  # swapped -> pinned
+    assert got[1]["sceneItemTransform"]["boundsType"] == "OBS_BOUNDS_NONE"         # reused as-is
 
 
-def test_twin_items_match_compares_source_and_enabled_in_order():
-    desired = [{"sourceName": "MV NDI cam3", "sceneItemEnabled": True, "sceneItemTransform": T_FULL}]
-    assert ss.twin_items_match([_item(9, "MV NDI cam3")], desired)
-    assert not ss.twin_items_match([_item(9, "MV NDI cam3", False)], desired)
-    assert not ss.twin_items_match([], desired)
+def test_twin_items_match_includes_transform_drift():
+    desired = roles.twin_scene_items([_item(1, "NDI cam3")], ["NDI cam3"], {}, CANVAS)
+    current = [dict(_item(9, "MV NDI cam3"), sceneItemTransform=dict(desired[0]["sceneItemTransform"]))]
+    assert roles.twin_items_match(current, desired)
+    drifted = copy.deepcopy(current)
+    drifted[0]["sceneItemTransform"]["positionX"] = 300.0
+    assert not roles.twin_items_match(drifted, desired)
+    assert not roles.twin_items_match([dict(current[0], sceneItemEnabled=False)], desired)
+    assert not roles.twin_items_match([], desired)
 
 
 def test_custom_multiview_swap_plan():
     prog = ["NDI cam1", "NDI cam3"]
     items = [_item(1, "NDI cam1"), _item(2, "NDI 2ME PGM (mv)"),
-             _item(3, "Cam 3", kind=None, stype="OBS_SOURCE_TYPE_SCENE")]
-    plan = ss.multiview_swap_plan(items, prog, {"Cam 3": "MV Cam 3"})
+             _item(3, "Cam 3", kind=None, stype=SCENE)]
+    plan = roles.multiview_swap_plan(items, prog, {"Cam 3": "MV Cam 3"}, CANVAS)
     assert [(p["old_item_id"], p["new_name"]) for p in plan] == [(1, "MV NDI cam1"), (3, "MV Cam 3")]
-    assert ss.is_custom_multiview_scene("MULTIVIEW") and ss.is_custom_multiview_scene("Multiview")
-    assert not ss.is_custom_multiview_scene("MV Cam 1")
+    assert plan[0]["transform"]["boundsType"] == "OBS_BOUNDS_SCALE_INNER"
+    assert roles.is_custom_multiview_scene("MULTIVIEW") and roles.is_custom_multiview_scene("Multiview")
+    assert not roles.is_custom_multiview_scene("MV Cam 1")
+
+
+def test_membership_on_create():
+    assert roles.membership_on_create(True) == (False, True)    # the twin takes over the cell
+    assert roles.membership_on_create(False) == (False, False)  # a nested-only twin is never shown
 
 
 def test_bandwidth_role_problems_is_a_report():
@@ -132,8 +166,13 @@ def test_bandwidth_role_problems_is_a_report():
         "MV NDI cam1": {"genlock_monitor": True},
         "NDI cam3": {},
     }
-    probs = ss.bandwidth_role_problems(actual, ["NDI cam1", "NDI cam3"])
+    probs = roles.bandwidth_role_problems(actual, ["NDI cam1", "NDI cam3"])
     assert probs == ["'NDI cam3' not connect-on-show", "'MV NDI cam3' twin MISSING"]
+
+
+def test_multiview_target_key_matches_the_vendored_frontend():
+    cpp = (REPO / "vendor/obs-studio/frontend/components/Multiview.cpp").read_text()
+    assert f'obs_data_get_string(priv, "{roles.MULTIVIEW_TARGET_KEY}")' in cpp
 
 
 # ------------------------------------------------------------------------------------------------
@@ -159,8 +198,8 @@ class FakeObs:
             "Cam 1": [_item(1, "NDI cam1"), _item(2, "ASIO zvuk", kind="pulse_input_capture")],
             "Cam 3": [_item(1, "NDI cam3"), _item(2, "ASIO zvuk", kind="pulse_input_capture")],
             "Moderatori": [_item(1, "NDI cam3"), _item(2, "Image", kind="image_source")],
-            "Grading": [_item(1, "Cam 1", False, kind=None, stype="OBS_SOURCE_TYPE_SCENE"),
-                        _item(2, "Cam 3", True, kind=None, stype="OBS_SOURCE_TYPE_SCENE")],
+            "Grading": [_item(1, "Cam 1", False, kind=None, stype=SCENE),
+                        _item(2, "Cam 3", True, kind=None, stype=SCENE)],
             "Interkom": [_item(1, "NDI 2ME PVW")],
             "MULTIVIEW": [_item(1, "NDI cam1"), _item(2, "NDI cam3")],
         }
@@ -178,13 +217,15 @@ class FakeObs:
     def req(self, rt, data=None, ignore_err=False):
         data = data or {}
         self.calls.append((rt, copy.deepcopy(data)))
+        if rt == "GetVideoSettings":
+            return {"baseWidth": 1920, "baseHeight": 1080}
         if rt == "GetInputList":
             return {"inputs": [{"inputName": n, "inputKind": v["kind"]} for n, v in self.inputs.items()]}
         if rt == "GetInputSettings":
             i = self.inputs.get(data["inputName"])
             return {"inputSettings": dict(i["settings"])} if i else {}
         if rt == "GetInputDefaultSettings":
-            return {"defaultInputSettings": {"ndi_sync": 2, "genlock_monitor": False,
+            return {"defaultInputSettings": {"ndi_sync": 2, "genlock_monitor": False, "ndi_audio": True,
                                              "genlock_connect_on_show": False}}
         if rt == "SetInputSettings":
             self.inputs[data["inputName"]]["settings"].update(data["inputSettings"])
@@ -205,12 +246,13 @@ class FakeObs:
             self.inputs[data["inputName"]] = {"kind": data["inputKind"],
                                               "settings": dict(data.get("inputSettings", {}))}
             iid = self._new_id()
-            self.scenes[data["sceneName"]].append(_item(iid, data["inputName"]))
+            self.scenes[data["sceneName"]].append(_item(iid, data["inputName"],
+                                                        data.get("sceneItemEnabled", True)))
             return {"sceneItemId": iid}
         if rt == "CreateSceneItem":
             iid = self._new_id()
             kind = self.inputs.get(data["sourceName"], {}).get("kind")
-            stype = "OBS_SOURCE_TYPE_SCENE" if data["sourceName"] in self.scenes else "OBS_SOURCE_TYPE_INPUT"
+            stype = SCENE if data["sourceName"] in self.scenes else "OBS_SOURCE_TYPE_INPUT"
             it = _item(iid, data["sourceName"], data.get("sceneItemEnabled", True), kind, stype)
             self.scenes[data["sceneName"]].append(it)
             return {"sceneItemId": iid}
@@ -218,12 +260,12 @@ class FakeObs:
             self.scenes[data["sceneName"]] = [i for i in self.scenes[data["sceneName"]]
                                               if i["sceneItemId"] != data["sceneItemId"]]
             return {}
-        if rt == "SetSceneItemEnabled":
+        if rt == "SetSceneItemTransform":
             for i in self.scenes[data["sceneName"]]:
                 if i["sceneItemId"] == data["sceneItemId"]:
-                    i["sceneItemEnabled"] = data["sceneItemEnabled"]
+                    i["sceneItemTransform"].update(data["sceneItemTransform"])
             return {}
-        if rt in ("SetSceneItemTransform", "SetInputMute"):
+        if rt == "SetInputMute":
             return {}
         if rt == "GetSourcePrivateSettings":
             return {"sourceSettings": dict(self.private.get(data["sourceName"], {}))}
@@ -239,9 +281,17 @@ def _mv(obs, scene):
     return obs.private.get(scene, {}).get("show_in_multiview", True)
 
 
+def _target(obs, scene):
+    return obs.private.get(scene, {}).get(roles.MULTIVIEW_TARGET_KEY)
+
+
+def _writes(obs):
+    return [c for c in obs.calls if c[0].startswith(("Set", "Create", "Remove"))]
+
+
 def test_apply_bandwidth_roles_on_the_live_strih_shape():
     obs = FakeObs()
-    ss.apply_bandwidth_roles(obs, PLAN)
+    roles.apply_bandwidth_roles(obs, PLAN)
     # program-path mains connect only while shown; the cg / 2ME inputs are untouched
     assert obs.inputs["NDI cam1"]["settings"]["genlock_connect_on_show"] is True
     assert obs.inputs["NDI cam3"]["settings"]["genlock_connect_on_show"] is True
@@ -250,28 +300,127 @@ def test_apply_bandwidth_roles_on_the_live_strih_shape():
     tw = obs.inputs["MV NDI cam3"]["settings"]
     assert tw["genlock_monitor"] is True and tw["genlock_connect_on_show"] is False
     assert tw["ndi_source_name"] == "CAM3 (usb)" and tw["genlock_latency_ms_src"] == 6
-    # twin scenes for every multiview scene that holds a program input directly
+    # twin scenes for every multiview scene that holds a program input; the swapped item is pinned
     assert [i["sourceName"] for i in obs.scenes["MV Cam 3"]] == ["MV NDI cam3"]
+    assert obs.scenes["MV Cam 3"][0]["sceneItemTransform"]["boundsType"] == "OBS_BOUNDS_SCALE_INNER"
     assert [i["sourceName"] for i in obs.scenes["MV Moderatori"]] == ["MV NDI cam3", "Image"]
-    # built-in multiview membership: originals out, twins in; NDI-output scenes stay shown
+    # built-in multiview membership: originals out, twins in, each twin STANDS FOR its original
     for orig in ("Cam 1", "Cam 3", "Moderatori"):
         assert _mv(obs, orig) is False and _mv(obs, "MV " + orig) is True
+        assert _target(obs, "MV " + orig) == orig
+    # NDI-output scenes stay shown as-is and are never twinned
     assert _mv(obs, "Grading") is True and _mv(obs, "Interkom") is True
     assert "MV Grading" not in obs.scenes and "MV Interkom" not in obs.scenes
-    # the custom MULTIVIEW scene renders twins, never the full inputs
+    # the custom MULTIVIEW grid renders twins, never the full inputs
     assert [i["sourceName"] for i in obs.scenes["MULTIVIEW"]] == ["MV NDI cam1", "MV NDI cam3"]
-    # the built-in multiview was refreshed (a scene-list change) and the temp scene is gone
+    # the built-in multiview was refreshed (a scene-list change) and the scratch scene is gone
     assert not any(n.startswith("__") for n in obs.scenes)
     assert any(c[0] == "RemoveScene" for c in obs.calls)
 
 
 def test_apply_bandwidth_roles_is_idempotent():
     obs = FakeObs()
-    ss.apply_bandwidth_roles(obs, PLAN)
+    roles.apply_bandwidth_roles(obs, PLAN)
     obs.calls.clear()
-    ss.apply_bandwidth_roles(obs, PLAN)
-    writes = [c for c in obs.calls if c[0].startswith(("Set", "Create", "Remove"))]
-    assert writes == [], f"a second apply over a correct collection must be read-only: {writes}"
+    roles.apply_bandwidth_roles(obs, PLAN)
+    assert _writes(obs) == [], f"a second apply over a correct collection must be read-only: {_writes(obs)}"
+
+
+def test_operator_multiview_choice_is_never_reimposed():
+    obs = FakeObs()
+    roles.apply_bandwidth_roles(obs, PLAN)
+    # the operator puts `Cam 3` back into the multiview by hand
+    obs.private["Cam 3"]["show_in_multiview"] = True
+    obs.calls.clear()
+    roles.apply_bandwidth_roles(obs, PLAN)
+    assert _mv(obs, "Cam 3") is True, "an adopted twin's membership is never re-imposed (operator wins)"
+    assert _writes(obs) == []
+
+
+def test_twin_drift_is_healed():
+    obs = FakeObs()
+    roles.apply_bandwidth_roles(obs, PLAN)
+    obs.scenes["MV Cam 3"][0]["sceneItemTransform"]["positionX"] = 500.0
+    roles.apply_bandwidth_roles(obs, PLAN)
+    assert obs.scenes["MV Cam 3"][0]["sceneItemTransform"]["positionX"] == 0.0
+
+
+def test_a_twin_whose_original_lost_its_camera_is_retired():
+    obs = FakeObs()
+    roles.apply_bandwidth_roles(obs, PLAN)
+    obs.scenes["Moderatori"] = [_item(1, "Image", kind="image_source")]  # the operator removed cam3
+    roles.apply_bandwidth_roles(obs, PLAN)
+    assert _mv(obs, "Moderatori") is True and _mv(obs, "MV Moderatori") is False
+    assert "MV Moderatori" in obs.scenes, "a retired twin scene is left in place, never deleted"
+
+
+def test_a_scene_that_nests_a_camera_scene_gets_a_twin_nesting_the_twin():
+    obs = FakeObs()
+    obs.scenes["Two cams"] = [_item(1, "Cam 1", kind=None, stype=SCENE),
+                              _item(2, "Cam 3", kind=None, stype=SCENE)]
+    roles.apply_bandwidth_roles(obs, PLAN)
+    assert [i["sourceName"] for i in obs.scenes["MV Two cams"]] == ["MV Cam 1", "MV Cam 3"]
+    assert _mv(obs, "Two cams") is False and _target(obs, "MV Two cams") == "Two cams"
+
+
+def test_a_main_without_a_sender_gets_no_twin():
+    obs = FakeObs()
+    obs.inputs["NDI cam3"]["settings"]["ndi_source_name"] = ""
+    summary = roles.apply_bandwidth_roles(obs, PLAN)
+    assert "MV NDI cam3" not in obs.inputs, "an empty sender name would stop the twin's receiver"
+    assert any("NDI cam3" in p for p in summary["problems"])
+    assert "MV NDI cam1" in obs.inputs
+
+
+def test_a_colliding_non_ndi_twin_name_is_left_alone():
+    obs = FakeObs()
+    obs.inputs["MV NDI cam1"] = {"kind": "image_source", "settings": {}}
+    summary = roles.apply_bandwidth_roles(obs, PLAN)
+    assert obs.inputs["MV NDI cam1"]["kind"] == "image_source"
+    assert any("MV NDI cam1" in p for p in summary["problems"])
+
+
+# ------------------------------------------------------------------------------------------------
+# strih_scenes.py delegation + the launch path
+# ------------------------------------------------------------------------------------------------
+
+def test_strih_obs_start_applies_the_roles_after_the_seed_best_effort():
+    s = (SCRIPTS / "strih-obs-start.sh").read_text()
+    boot = s.find('python3 "$SCN" --bootstrap')
+    rls = s.find('python3 "$SCN" --apply-roles')
+    wait = s.find('wait "$OBS_PID"')
+    assert boot != -1 and rls != -1 and boot < rls < wait
+    line = [ln for ln in s.splitlines() if 'python3 "$SCN" --apply-roles' in ln][0]
+    assert line.lstrip().startswith("if "), "a role-apply failure must never abort the unit (OBS is live)"
+
+
+def test_apply_roles_cli_delegates_to_the_roles_module(monkeypatch, tmp_path):
+    man = tmp_path / "seed.json"
+    man.write_text(json.dumps({"mode": "update-only", "inputs": [
+        {"sender": "CAM1 (usb)", "input": "NDI cam1", "scene": "Cam 1"}], "camera_latency_ms": 3}))
+    seen = {}
+
+    class Stub:
+        @staticmethod
+        def apply_bandwidth_roles(obs, plan):
+            seen["plan"] = plan
+            return {}
+
+    monkeypatch.setattr(ss, "Obs", lambda *a, **k: FakeObs())
+    monkeypatch.setattr(ss, "_roles_module", lambda: Stub)
+    monkeypatch.setattr(sys, "argv", ["strih_scenes.py", "--apply-roles", "--manifest", str(man)])
+    ss.main()
+    assert [p["input"] for p in seen["plan"]] == ["NDI cam1"]
+
+
+def test_setup_strih_installs_the_roles_module_next_to_the_seeder():
+    s = (SCRIPTS / "setup-strih.sh").read_text()
+    assert 'install -m 0755 "${HERE}/strih_bandwidth_roles.py" /usr/local/bin/strih_bandwidth_roles.py' in s
+
+
+def test_strih_mv_scenes_shares_the_one_settable_transform_list():
+    src = (SCRIPTS / "strih_mv_scenes.py").read_text()
+    assert "from strih_bandwidth_roles import SETTABLE_TRANSFORM_FIELDS" in src
 
 
 # ------------------------------------------------------------------------------------------------
@@ -307,7 +456,7 @@ def test_connect_on_show_hold_and_restore(tmp_path, monkeypatch):
         "NDI 2ME PVW": {},
     }}
     monkeypatch.setattr(op, "_rpc", _fake_rpc(state))
-    sf = tmp_path / "hold.json"
+    sf = tmp_path / "sub" / "hold.json"  # the state dir is created on demand
     held, failed = op.connect_on_show_hold(FakeWs(), str(sf))
     assert held == ["NDI cam1", "NDI cam3"] and failed == []
     assert state["inputs"]["NDI cam1"]["genlock_connect_on_show"] is False
@@ -357,22 +506,30 @@ def test_verify_live_skips_a_hidden_by_design_input():
 
 
 # ------------------------------------------------------------------------------------------------
-# recording-e2e.sh wiring
+# recording-e2e.sh wiring + the hold lib
 # ------------------------------------------------------------------------------------------------
 
 E2E = (SCRIPTS / "recording-e2e.sh").read_text()
 LIB = SCRIPTS / "lib" / "connect-on-show-hold.sh"
+PARK_LIB = SCRIPTS / "lib" / "genlock-park.sh"
 
 
 def test_e2e_holds_connect_on_show_after_the_trap_behind_a_rig_busy_guard():
     trap = E2E.index("\ntrap cleanup EXIT HUP INT TERM\n")
     hold = E2E.index('connect_on_show_e2e_hold "$HERE"')
     guard = E2E.rindex('stray_session_check_assert "$HERE"', 0, hold)
+    wait = E2E.index('connect_on_show_e2e_wait_live "$HERE"')
     first_deploy = E2E.index('echo "[2/8] $CAMERA_NAME')
-    assert trap < guard < hold < first_deploy
-    assert '. "$HERE/lib/connect-on-show-hold.sh"' in E2E
+    assert trap < guard < hold < wait < first_deploy
+    assert '. "$HERE/lib/connect-on-show-hold.sh"' in E2E and '. "$HERE/lib/genlock-park.sh"' in E2E
     line = [ln for ln in E2E.splitlines() if 'connect_on_show_e2e_hold "$HERE"' in ln][0]
     assert "|| exit 1" in line, "a failed hold must abort the run (the measurement would be wrong)"
+
+
+def test_e2e_hold_state_path_is_stable_across_runs():
+    assert ('CONNECT_ON_SHOW_HOLD_STATE="${CONNECT_ON_SHOW_HOLD_STATE:-$HOME/.camera-box/'
+            'connect-on-show-hold.json}"') in E2E
+    assert 'CONNECT_ON_SHOW_HOLD_STATE="$OUTDIR' not in E2E
 
 
 def test_e2e_cleanup_restores_connect_on_show():
@@ -380,47 +537,69 @@ def test_e2e_cleanup_restores_connect_on_show():
     assert 'connect_on_show_e2e_restore "$HERE"' in body
 
 
-def _bash_lib(body):
-    return subprocess.run(["bash", "-c", f"set -euo pipefail; . '{LIB}'; {body}"],
-                          capture_output=True, text=True, check=False)
+def _bash_lib(body, env=None, extra=""):
+    return subprocess.run(["bash", "-c", f"set -euo pipefail; . '{PARK_LIB}'; . '{LIB}'; {extra}{body}"],
+                          capture_output=True, text=True, check=False,
+                          env=env or {"PATH": "/usr/bin:/bin", "HOME": "/tmp"})
 
 
 def test_hold_lib_fails_loud_and_restore_never_aborts(tmp_path):
     fake = tmp_path / "obs_phase2.py"
     fake.write_text("import sys\nprint('ARGS', sys.argv[1:])\nsys.exit(int(__import__('os').environ.get('RC','0')))\n")
-    ok = _bash_lib(f"HERE_PY='{tmp_path}'; connect_on_show_e2e_hold '{tmp_path}' 10.0.0.1 /tmp/s.json")
+    ok = _bash_lib(f"connect_on_show_e2e_hold '{tmp_path}' 10.0.0.1 /tmp/s.json")
     assert ok.returncode == 0 and "--hold" in ok.stdout
-    bad = subprocess.run(["bash", "-c", f"set -euo pipefail; . '{LIB}'; "
-                          f"RC=1 connect_on_show_e2e_hold '{tmp_path}' 10.0.0.1 /tmp/s.json"],
-                         capture_output=True, text=True, check=False, env={"RC": "1", "PATH": "/usr/bin:/bin"})
+    bad = _bash_lib(f"connect_on_show_e2e_hold '{tmp_path}' 10.0.0.1 /tmp/s.json",
+                    env={"RC": "1", "PATH": "/usr/bin:/bin", "HOME": "/tmp"})
     assert bad.returncode != 0
-    rest = subprocess.run(["bash", "-c", f"set -euo pipefail; . '{LIB}'; "
-                           f"connect_on_show_e2e_restore '{tmp_path}' 10.0.0.1 /tmp/s.json; echo DONE"],
-                          capture_output=True, text=True, check=False, env={"RC": "1", "PATH": "/usr/bin:/bin"})
+    rest = _bash_lib(f"connect_on_show_e2e_restore '{tmp_path}' 10.0.0.1 /tmp/s.json; echo DONE",
+                     env={"RC": "1", "PATH": "/usr/bin:/bin", "HOME": "/tmp"})
     assert rest.returncode == 0 and "DONE" in rest.stdout, "restore must never abort cleanup()"
 
 
-# ------------------------------------------------------------------------------------------------
-# the launch path: the roles are applied on EVERY strih OBS launch (default on, never forgettable)
-# ------------------------------------------------------------------------------------------------
-
-def test_strih_obs_start_applies_the_roles_after_the_seed_best_effort():
-    s = (SCRIPTS / "strih-obs-start.sh").read_text()
-    boot = s.find('python3 "$SCN" --bootstrap')
-    roles = s.find('python3 "$SCN" --apply-roles')
-    wait = s.find('wait "$OBS_PID"')
-    assert boot != -1 and roles != -1 and boot < roles < wait
-    line = [ln for ln in s.splitlines() if 'python3 "$SCN" --apply-roles' in ln][0]
-    assert line.lstrip().startswith("if "), "a role-apply failure must never abort the unit (OBS is live)"
+def _log_reader(tmp_path, script_body):
+    r = tmp_path / "reader.sh"
+    r.write_text("#!/usr/bin/env bash\n" + textwrap.dedent(script_body))
+    r.chmod(0o755)
+    return r
 
 
-def test_apply_roles_cli_mode_is_accepted(monkeypatch, tmp_path):
-    man = tmp_path / "seed.json"
-    man.write_text(json.dumps({"mode": "update-only", "inputs": [
-        {"sender": "CAM1 (usb)", "input": "NDI cam1", "scene": "Cam 1"}], "camera_latency_ms": 3}))
-    seen = {}
-    monkeypatch.setattr(ss, "Obs", lambda *a, **k: FakeObs())
-    monkeypatch.setattr(ss, "apply_bandwidth_roles", lambda obs, plan: seen.update(plan=plan) or {})
-    monkeypatch.setattr(sys, "argv", ["strih_scenes.py", "--apply-roles", "--manifest", str(man)])
-    ss.main()
-    assert [p["input"] for p in seen["plan"]] == ["NDI cam1"]
+def test_wait_live_returns_once_every_held_input_delivers(tmp_path):
+    state = tmp_path / "hold.json"
+    state.write_text(json.dumps(["NDI cam1", "NDI cam3"]))
+    cnt = tmp_path / "n"
+    # read 1: cam3 still parked (stuck); read 2+: both unparked + advancing
+    reader = _log_reader(tmp_path, f"""\
+        n=$(cat '{cnt}' 2>/dev/null || echo 0); n=$((n+1)); printf '%s' "$n" > '{cnt}'
+        printf "12:00:00.000: genlock-fifo audit 'NDI cam1': received=%s consumed=1\\n" "$((100 + n * 60))"
+        if [ "$n" -le 1 ]; then
+          printf "12:00:00.100: genlock-park 'NDI cam3': state=parked parked_s=9 (x)\\n"
+          printf "12:00:00.200: genlock-fifo audit 'NDI cam3': received=50 consumed=1\\n"
+        else
+          printf "12:00:00.100: genlock-park 'NDI cam3': state=unparked parked_s=9 (x)\\n"
+          printf "12:00:00.200: genlock-fifo audit 'NDI cam3': received=%s consumed=1\\n" "$((50 + n * 60))"
+        fi
+    """)
+    env = {"PATH": "/usr/bin:/bin", "HOME": "/tmp", "CONNECT_ON_SHOW_LOG_READ_CMD": str(reader),
+           "CONNECT_ON_SHOW_LIVE_POLL_S": "0", "CONNECT_ON_SHOW_LIVE_WAIT_S": "10"}
+    out = _bash_lib(f"connect_on_show_e2e_wait_live /x 10.0.0.1 '{state}'; echo RC=$?", env=env)
+    assert out.returncode == 0 and "RC=0" in out.stdout, out.stderr
+    assert "every held input is delivering again" in out.stdout
+    assert "WARNING" not in out.stderr
+
+
+def test_wait_live_is_bounded_and_fail_open(tmp_path):
+    state = tmp_path / "hold.json"
+    state.write_text(json.dumps(["NDI cam3"]))
+    reader = _log_reader(tmp_path, """\
+        printf "12:00:00.100: genlock-park 'NDI cam3': state=parked parked_s=9 (x)\\n"
+    """)
+    env = {"PATH": "/usr/bin:/bin", "HOME": "/tmp", "CONNECT_ON_SHOW_LOG_READ_CMD": str(reader),
+           "CONNECT_ON_SHOW_LIVE_POLL_S": "1", "CONNECT_ON_SHOW_LIVE_WAIT_S": "2"}
+    out = _bash_lib(f"connect_on_show_e2e_wait_live /x 10.0.0.1 '{state}'; echo RC=$?", env=env)
+    assert out.returncode == 0 and "RC=0" in out.stdout
+    assert "not yet delivering after 2s: NDI cam3" in out.stderr
+
+
+def test_wait_live_without_a_state_file_is_a_no_op(tmp_path):
+    out = _bash_lib(f"connect_on_show_e2e_wait_live /x 10.0.0.1 '{tmp_path}/absent.json'; echo RC=$?")
+    assert out.returncode == 0 and "RC=0" in out.stdout
