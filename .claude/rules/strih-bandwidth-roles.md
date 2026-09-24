@@ -110,7 +110,8 @@ step 6):
    parked main has no sourceWidth either, so its footprint falls back to the canvas; a camera at a
    different resolution would size differently parked vs live and its twin would be rebuilt on each
    launch (harmless, but not stable) — revisit if a non-canvas-size camera joins. Crop (main-pixel
-   units) is never mirrored onto the proxy; a cropped camera item is reported. A drifted twin (source / enabled / transform) is rebuilt. Covers `Cam N` AND `Moderatori`;
+   units) is never mirrored onto the proxy; a cropped camera item is reported. A drifted twin
+   (source / enabled / transform) is rebuilt. Covers `Cam N` AND `Moderatori`;
 4. never twins an NDI-output scene (an enabled `ndi_filter`: Grading, Interkom) — the filter only
    sends while its parent is SHOWING, and Grading's one enabled nested camera IS the wanted
    full-bandwidth grading feed — nor the custom grid, nor a twin;
