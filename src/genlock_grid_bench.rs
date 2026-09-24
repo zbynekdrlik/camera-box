@@ -558,24 +558,28 @@ mod tests {
         }
     }
 
-    /// The bench reproduces the live defect on the pre-#1355 arithmetic: the 2ME PGM FIFO lives in
-    /// depth states 31/32 and flips between them inside the measured 10–45 flips/h band, driven by
-    /// late holds (up) and settle-back drains (down).
+    /// The bench reproduces the live defect on the pre-#1355 arithmetic: a stamp that sits 2 ms past
+    /// the 1970-floored deadline makes an irregular sender stamp cost a LATE HOLD (a visible
+    /// duplicate, the FIFO one frame deeper), 10–45 times an hour, and every one is later undone by
+    /// a drain or a phase shed (a visible skip). The 2ME PGM lives in depth states 31/32.
+    ///
+    /// The late hold is the date-walk mechanism itself, so the control counts it. The live 10–45
+    /// FLIPS/h were its consequence while only a random late-tick drain undid it; since issue 1367
+    /// the N==1 depth rule undoes it within a second, so the 5 s-sampled flip count no longer shows
+    /// the defect while the duplicate + skip pairs still do.
     #[test]
     fn legacy_1970_grid_reproduces_the_live_31_32_flip_1355() {
         let r = run_bench(&BenchConfig::live_2026_09_24(GridModel::Legacy1970));
+        let late_holds_per_hour = r.late_holds as f64 / r.hours;
         assert!(
-            (10.0..=45.0).contains(&r.flips_per_hour),
-            "legacy flips/h {:.1} outside the live 10-45 band: {r:?}",
-            r.flips_per_hour
+            (10.0..=45.0).contains(&late_holds_per_hour),
+            "legacy late holds/h {late_holds_per_hour:.1} outside the live 10-45 band: {r:?}"
         );
         assert!(share(&r, &[31, 32]) > 0.95, "states {:?}", r.state_samples);
         assert!(
-            share(&r, &[31]) > 0.1 && share(&r, &[32]) > 0.1,
-            "{:?}",
-            r.state_samples
+            r.drains + r.converge_sheds > 0,
+            "each late hold must be undone by a drain or a shed: {r:?}"
         );
-        assert!(r.late_holds > 0 && r.drains + r.converge_sheds > 0, "{r:?}");
         assert_eq!(r.relocks, 0, "no backlog storm in the live data: {r:?}");
     }
 
@@ -622,7 +626,7 @@ mod tests {
     /// What the production grid DOES see: the pin. Across one whole frame of pins (and one each
     /// side) the FIFO keeps ONE depth state with no settle-back drain — the state follows the pin
     /// (30 / 31 / 32 frames), never the date or a sender hiccup. On the 1970 grid every one of these
-    /// pins flips (~20/h over 2 h in the live statistics).
+    /// pins pays the date-walk late hold (~11-22/h over 2 h in the live statistics).
     #[test]
     fn production_grid_holds_one_state_at_every_pin_phase_1355() {
         for pin in [950u32, 963, 967, 975, 987, 999, 1010] {
@@ -641,11 +645,12 @@ mod tests {
             let mut legacy = cfg.clone();
             legacy.grid = GridModel::Legacy1970;
             let l = run_bench(&legacy);
+            let late_holds_per_hour = l.late_holds as f64 / l.hours;
             assert!(
-                l.flips_per_hour >= 10.0,
-                "pin {pin}: the 1970-grid control stopped flipping ({:.2}/h) — the bench no longer \
-                 reproduces the defect, so this test would prove nothing: {l:?}",
-                l.flips_per_hour
+                late_holds_per_hour >= 10.0,
+                "pin {pin}: the 1970-grid control stopped paying late holds \
+                 ({late_holds_per_hour:.2}/h) — the bench no longer reproduces the defect, so this \
+                 test would prove nothing: {l:?}"
             );
         }
     }
