@@ -40,6 +40,7 @@
 #define PROP_GENLOCK_LATENCY_MS_SRC "genlock_latency_ms_src" /* camera-box #245: WHITELIST — per-source latency (ms), default 3, min 3 */
 #define PROP_BURN "genlock_burn"                    /* camera-box #257: WHITELIST — bool "Measurement burn (test only)", default OFF, runtime */
 #define PROP_GENLOCK_MONITOR "genlock_monitor"       /* camera-box #501: WHITELIST — bool "Monitor-only (low-bandwidth NDI)", default OFF */
+#define PROP_GENLOCK_CONNECT_ON_SHOW "genlock_connect_on_show" /* camera-box issue 1242: WHITELIST — bool "Connect only while shown (program-path)", default OFF */
 #define PROP_GENLOCK_SOURCE_LATENCY_MS_MAX 2000     /* mirrors libobs GENLOCK_SOURCE_LATENCY_MS_MAX (#245) */
 #define PROP_GENLOCK_LATENCY_MS_MIN 3               /* camera-box #257: latency floor (ms), mirrors libobs GENLOCK_LATENCY_MS_MIN */
 #define PROP_GENLOCK_LATENCY_MS_DEFAULT 3           /* camera-box #257: per-source latency default (ms) = the floor */
@@ -211,6 +212,43 @@ static inline bool genlock_frameless_bind_reconnect_decision(bool genlock_active
 		return false; /* clock has not advanced past the bind -> no measurable age */
 	return (now_ns - bind_ns) >= frameless_stale_ns;
 }
+
+/* camera-box issue 1242 (24.9.2026, owner ruling): should this receiver PARK -- release its NDI
+ * receiver so the sender stops streaming to it -- because it is a PROGRAM-PATH input that nothing
+ * shows right now? strih-lx pulls full bandwidth only for the cameras that are SHOWN (preview,
+ * program, a projector, the visible item of the Grading NDI-output scene); the built-in multiview
+ * renders the always-connected low-bandwidth #501 `genlock_monitor` twins instead. Park iff:
+ *   - genlocked (the issue-764 keep-alive scope; a non-genlock/aux input never parks),
+ *   - NOT a monitor twin (a twin feeds the multiview and must ALWAYS stay connected),
+ *   - flagged program-path (PROP_GENLOCK_CONNECT_ON_SHOW -- an EXPLICIT per-source role the strih
+ *     scene role lib sets; stream's always-on 2ME PGM and the resolume cg OBS leave it off, so
+ *     their issue-764 keep-alive is unchanged -- scoped by role, never by platform), and
+ *   - not showing anywhere.
+ * WHY a park inside the thread and not stock `ndi_behavior=STOP_RESUME_*`: libobs calls info.hide
+ * from obs_source_video_tick -- the GRAPHICS thread -- so the stock ndi_source_hidden ->
+ * ndi_source_thread_stop -> pthread_join would block the program render for up to one
+ * recv_capture timeout (100 ms) or one fresh-finder wait (500 ms) on EVERY hide, incl. the old
+ * program input at every cut (the issue-1320 render-freeze class). The park keeps the thread
+ * alive (behavior stays KEEP_ACTIVE, s->running stays true, ndi_source_name untouched -- none of
+ * the distroav-receiver-lifecycle hazards) and hands the receiver to the detached reaper. PURE
+ * (only primitives) so it lift-compiles + truth-table-tests offline
+ * (tests/distroav_connect_on_show_park_1242.rs). */
+static inline bool genlock_connect_on_show_park_decision(bool genlock_active, bool monitor, bool connect_on_show,
+							 bool showing)
+{
+	if (!genlock_active)
+		return false; /* issue-764 scope: genlocked sources only */
+	if (monitor)
+		return false; /* a #501 monitor twin feeds the multiview -> always connected */
+	if (!connect_on_show)
+		return false; /* no program-path role -> the issue-764 keep-alive, unchanged */
+	return !showing;
+}
+
+/* camera-box issue 1242: while parked, re-log the park state this often so a dev1 watchdog reading a
+ * BOUNDED OBS-log tail always finds a `genlock-park '<src>': state=parked` line for a parked input
+ * (the same ~5 s cadence as the genlock-fifo audit line it sits beside). */
+static const uint64_t GENLOCK_PARK_HEARTBEAT_NS = 5ULL * 1000ULL * 1000ULL * 1000ULL;
 
 /* camera-box #1080: back-off (ns) before the next recv_create_v3 retry after a create FAILURE.
  * recv_create_v3 realistically fails only under transient resource exhaustion; hammering it in a
@@ -497,6 +535,12 @@ typedef struct ndi_source_config_t {
 	int behavior;
 	int timeout_action;
 	int sync_mode;
+	/* camera-box issue 1242: the per-source ROLE snapshot (written by ndi_source_update under
+	 * config_mutex after the certified forcer; read by the receiver thread's park check, same
+	 * benign-race plain-bool read as the other non-reset config scalars). Both false for a
+	 * non-genlock input. */
+	bool genlock_monitor;
+	bool connect_on_show;
 	video_range_type yuv_range;
 	video_colorspace yuv_colorspace;
 	bool audio_enabled;
@@ -629,6 +673,13 @@ const char *ndi_source_getname(void *)
 	PROP_GENLOCK_LATENCY_MS_SRC,
 	PROP_BURN,
 	PROP_GENLOCK_MONITOR,
+	/* camera-box issue 1242 (24.9.2026, owner ruling): the PROGRAM-PATH role flag. A genlocked
+	 * source flagged this way PARKS (releases its NDI receiver, the thread stays alive) while it
+	 * is not shown anywhere, and reconnects on show -- see genlock_connect_on_show_park_decision.
+	 * An operator-visible bool (not forced) because the ROLE is per box: only the strih scene role
+	 * lib sets it; stream's always-on 2ME PGM and the resolume cg OBS keep it false (issue 764
+	 * keep-alive unchanged). */
+	PROP_GENLOCK_CONNECT_ON_SHOW,
 	/* issue 1295 (2026-09-13): NDI AUDIO is a per-source, operator-visible knob again (stock
 	 * default true). It was in the forced table as false since #257 because every camera input on
 	 * strih/stream carries no audio -- but the cg OBS on RESOLUME-SNV CONSUMES SongPlayer audio
@@ -841,6 +892,13 @@ obs_properties_t *ndi_source_getproperties(void *data)
 	 * built-in OBS multiview and never feeds program. */
 	obs_properties_add_bool(props, PROP_GENLOCK_MONITOR, "Monitor-only (low-bandwidth NDI, camera-box #501)");
 
+	/* (5b) PROP_GENLOCK_CONNECT_ON_SHOW -- the program-path role (bool, default OFF). issue 1242:
+	 * when set on a genlocked, non-monitor source, the receiver PARKS (releases its NDI receiver)
+	 * while nothing shows the source and reconnects on show. The strih scene role lib sets it on
+	 * the camera inputs; stream/resolume keep it off (the issue-764 keep-alive). */
+	obs_properties_add_bool(props, PROP_GENLOCK_CONNECT_ON_SHOW,
+				"Connect only while shown (full-bandwidth program input, camera-box issue 1242)");
+
 	/* (6) PROP_AUDIO -- NDI audio into the OBS mixer (bool, stock default true). issue 1295:
 	 * per-source again (it was forced false by the certified table; the cg OBS on RESOLUME-SNV
 	 * takes SongPlayer audio over NDI). Camera inputs keep their saved false. */
@@ -873,6 +931,9 @@ void ndi_source_getdefaults(obs_data_t *settings)
 	/* camera-box #501: monitor-only OFF by default — a source is full-bandwidth (feeds program)
 	 * unless explicitly flagged as a multiview-only monitoring receiver. */
 	obs_data_set_default_bool(settings, PROP_GENLOCK_MONITOR, false);
+	/* camera-box issue 1242: connect-on-show OFF by default -- a genlocked source keeps the
+	 * issue-764 keep-alive unless its box's scene role lib explicitly flags it program-path. */
+	obs_data_set_default_bool(settings, PROP_GENLOCK_CONNECT_ON_SHOW, false);
 	obs_log(LOG_DEBUG, "-ndi_source_getdefaults(…)");
 }
 
@@ -1065,6 +1126,14 @@ void *ndi_source_thread(void *data)
 	 * this timestamp instead. Plain uint64_t, no teardown; set at the one create site below. */
 	uint64_t recv_bind_ns_1096 = 0;
 
+	/* camera-box issue 1242: connect-on-show PARK state (thread-local, like the #767/#1096 state
+	 * above). parked_1242 = the receiver was released because the program-path source is hidden;
+	 * park_since_ns_1242 = when (for the log's parked_s=); park_last_log_ns_1242 = the heartbeat
+	 * rate limiter. Plain values, no teardown. */
+	bool parked_1242 = false;
+	uint64_t park_since_ns_1242 = 0;
+	uint64_t park_last_log_ns_1242 = 0;
+
 	/* camera-box #797 recv-timing instrumentation: locate the ~50-of-60fps pull-loop
 	 * throttle. Times recv_capture_v3 (wait for SDK) vs process_video2+free (our cost,
 	 * dominated by obs_source_output_video) per VIDEO frame; logs a 5s summary per
@@ -1077,6 +1146,66 @@ void *ndi_source_thread(void *data)
 	// Main NDI receiver loop: BEGIN
 	//
 	while (s->running) {
+		//
+		// camera-box issue 1242: connect-on-show PARK. BEGIN
+		//
+		// A genlocked PROGRAM-PATH source (PROP_GENLOCK_CONNECT_ON_SHOW) that nothing shows releases
+		// its NDI receiver so the sender stops streaming full bandwidth to it, and reconnects on show
+		// (see genlock_connect_on_show_park_decision for why this parks IN the thread instead of the
+		// stock graphics-thread join on hide). Checked at the TOP of the loop, BEFORE the reset block,
+		// so a hidden source never creates a receiver. Never `break`s (s->running stays true -- a
+		// break is a permanent reattach-proof death); ndi_source_name is never touched.
+		{
+			const bool park_now_1242 = genlock_connect_on_show_park_decision(genlock_source_is_active(s->obs_source), s->config.genlock_monitor, s->config.connect_on_show, obs_source_showing(s->obs_source));
+			const uint64_t park_now_ns_1242 = os_gettime_ns();
+			if (park_now_1242) {
+				if (!parked_1242) {
+					parked_1242 = true;
+					park_since_ns_1242 = park_now_ns_1242;
+					park_last_log_ns_1242 = park_now_ns_1242;
+					// Hand the receiver + framesync to the issue-1320 detached reaper (a slow
+					// NDIlib_recv_destroy must never delay the next show's reconnect).
+					NDIlib_framesync_instance_t park_frame_sync = ndi_frame_sync;
+					NDIlib_recv_instance_t park_receiver = ndi_receiver;
+					ndi_frame_sync = nullptr;
+					ndi_receiver = nullptr;
+					ndi_reap_receiver_detached(ndiLib, park_frame_sync, park_receiver);
+					// A parked input is idle, not unlocked: report connected=false so the
+					// issue-1299 lock facet excludes it from the DEGRADED gate.
+					if (auto set_genlock_connected = resolve_set_genlock_connected())
+						set_genlock_connected(s->obs_source, false);
+					obs_log(LOG_INFO,
+						"genlock-park '%s': state=parked parked_s=0 (connect-on-show, hidden; NDI receiver released, issue 1242)",
+						obs_source_name);
+				} else if (park_now_ns_1242 - park_last_log_ns_1242 >= GENLOCK_PARK_HEARTBEAT_NS) {
+					park_last_log_ns_1242 = park_now_ns_1242;
+					obs_log(LOG_INFO,
+						"genlock-park '%s': state=parked parked_s=%llu (connect-on-show, hidden; NDI receiver released, issue 1242)",
+						obs_source_name,
+						(unsigned long long)((park_now_ns_1242 - park_since_ns_1242) / 1000000000ULL));
+				}
+				std::this_thread::sleep_for(std::chrono::milliseconds(5));
+				continue;
+			}
+			if (parked_1242) {
+				parked_1242 = false;
+				// Shown again: a FRESH connect (the reset block below runs the #1096 fresh finder),
+				// a fresh issue-767 stale window, and a fresh #1096 no-connection timer.
+				was_disconnected = true;
+				no_conn_since_ns = 0;
+				pthread_mutex_lock(&s->config_mutex);
+				s->config.reset_ndi_receiver = true;
+				pthread_mutex_unlock(&s->config_mutex);
+				obs_log(LOG_INFO,
+					"genlock-park '%s': state=unparked parked_s=%llu (shown; reconnecting, issue 1242)",
+					obs_source_name,
+					(unsigned long long)((park_now_ns_1242 - park_since_ns_1242) / 1000000000ULL));
+			}
+		}
+		//
+		// camera-box issue 1242: connect-on-show PARK. END
+		//
+
 		//
 		// reset_ndi_receiver: BEGIN
 		//
@@ -2116,6 +2245,11 @@ void ndi_source_update(void *data, obs_data_t *settings)
 			"ndi_fix_alpha_blending=false, ptz=off); only source + latency + burn are operator-set",
 			obs_source_name);
 	}
+	/* camera-box issue 1242: snapshot the per-source ROLE for the receiver thread's park check
+	 * (still under config_mutex, AFTER the forcer). Gated on the genlock lockdown so a non-genlock
+	 * aux input never parks and is never treated as a monitor twin. */
+	s->config.genlock_monitor = genlock_lockdown && obs_data_get_bool(settings, PROP_GENLOCK_MONITOR);
+	s->config.connect_on_show = genlock_lockdown && obs_data_get_bool(settings, PROP_GENLOCK_CONNECT_ON_SHOW);
 
 	//
 	// reset_ndi_receiver: BEGIN

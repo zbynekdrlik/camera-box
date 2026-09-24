@@ -1235,6 +1235,16 @@ jobs:
           if ($ndi -notmatch [regex]::Escape('ndi_reap_receiver_detached(ndiLib, reap_frame_sync, reap_receiver);')) {
             Write-Error "ndi-source.cpp: the receiver-loop exit path no longer hands its teardown to ndi_reap_receiver_detached(ndiLib, reap_frame_sync, reap_receiver) -- the recv_destroy blocks the graphics-thread pthread_join again. Re-apply the #1320 wiring"; exit 1
           }
+          # camera-box issue 1242: a genlocked PROGRAM-PATH input (genlock_connect_on_show) PARKS in-thread
+          # while hidden -- it releases its NDI receiver through the detached reaper and reconnects on show --
+          # so strih-lx pulls full bandwidth only for shown cameras. In-thread, never the stock graphics-thread
+          # join on hide (the issue-1320 class). Mirrors tests/distroav_connect_on_show_park_1242.rs.
+          if ($ndi -notmatch [regex]::Escape('static inline bool genlock_connect_on_show_park_decision(')) {
+            Write-Error "ndi-source.cpp: the issue-1242 connect-on-show park decision is gone -- every hidden program-path camera is pulled at full bandwidth again (the strih-lx uplink tail-drops). Re-apply the issue-1242 park"; exit 1
+          }
+          if ($ndi -notmatch [regex]::Escape('ndi_reap_receiver_detached(ndiLib, park_frame_sync, park_receiver);')) {
+            Write-Error "ndi-source.cpp: the issue-1242 park no longer releases the NDI receiver through the detached reaper. Re-apply the issue-1242 park"; exit 1
+          }
           # #257: the UI is a HARD WHITELIST — the forced knobs are REMOVED from the UI (not hidden via
           # apply_genlock_lockdown_visibility, which is gone). getproperties must expose EXACTLY the
           # 4 whitelist props and the forced knobs (e.g. behavior list) must NOT be added.
