@@ -63,9 +63,20 @@ file, never a copy of the script (the unified-design ruling, umbrella issue 1357
   Adding a strih to the fleet = add its `OBS_FLEET` row + facet memberships at go-live.
 - **Load before the source-guard.** Both orchestrators select + load the box BEFORE their
   `BASH_SOURCE != $0` guard, so a sourced script (the tests, `render.sh`) sees exactly the facts a
-  real run uses. The `strih_lx_*` accessors in `strih-provision.sh` read through `_strih_fact`, which
-  lazily sources the loader and loads the default box — a test that sources the lib alone still gets
-  strih-lx.
+  real run uses (the box variable is `STRIH_FACT_BOX` — recording-e2e.sh exports an unrelated
+  `STRIH_BOX`). The fact ACCESSORS (`strih_lx_hostname` / `_ip` / `_ndi_prefix` / `_cameras` /
+  `_cg_sender` / `_nic_driver` / `_dantesync_role|args|client_args` / `strih_lx_host` / the unit
+  drop-in, historical `strih_lx_` names) live in the loader lib; `strih-provision.sh` sources it (a
+  source-only lib) and each accessor loads the default box on first use — a test that sources
+  `strih-provision.sh` alone still gets strih-lx. A failed (re)load leaves NOTHING loaded.
+- **Generated files name the loaded box.** The janus jcfg / Companion conf / openbox autostart headers
+  and the IRQ oneshot's `@STRIH_BOX@` / `@STRIH_NIC_DRIVER@` comments follow the box, so a strih PP
+  file never claims to be strih-lx; `every_fact_dependent_output_follows_a_different_box` renders a
+  synthetic `strih-zz` and fails on ANY surviving strih-lx value or `@STRIH_` placeholder.
+- **A client upstream is a host NAME.** `strih_lx_dantesync_is_client_not_master` accepts the exact
+  `--ntp-server <host>` invocation whatever the host is called (a venue `ntp-master.lan` is a name,
+  not a master flag); the loader requires the upstream to be host-shaped, so a client box that loads
+  always renders its unit.
 - **What reaches the box, and how.** The OBS profile/collection go to the UNCHANGED launcher through
   `~/.config/systemd/user/strih-obs.service.d/10-box-facts.conf` (`strih-obs-start.sh` already reads
   `STRIH_OBS_PROFILE` / `STRIH_OBS_COLLECTION` from its environment). The NIC driver + target IP are
