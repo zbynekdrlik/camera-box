@@ -241,7 +241,13 @@ class StrihWiring(unittest.TestCase):
         self.assertRegex(text, r'(?m)^\. "\$\{HERE\}/lib/ndi-discovery\.sh"')
         item = text.find("# 34) NDI discovery")
         self.assertGreaterEqual(item, 0)
-        block = text[item:text.find("echo \"\"\nif [ \"$FAILS\" -eq 0 ]", item)]
+        # Item 34 sits BEFORE item 32: the pre-existing item-33 test slices "# 33)" to the closing
+        # summary, so nothing may follow item 33.
+        end = text.find("\n# 32) the shared OBS-box appliance baseline", item)
+        self.assertGreater(end, item, "item 34 must sit before item 32")
+        self.assertLess(text.find("# 33) NO realtime-priority grant"), text.find('echo ""\nif [ "$FAILS" -eq 0 ]'))
+        self.assertGreater(text.find("# 33) NO realtime-priority grant"), end, "item 33 stays the last item")
+        block = text[item:end]
         self.assertIn("ndi_discovery_config_verdict", block)
         self.assertIn("bad ", block)
 
