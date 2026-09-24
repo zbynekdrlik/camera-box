@@ -33,16 +33,16 @@ static constexpr float badThreshold = 1.0f;
  * that scalarises the libobs genlock stats + the dantesync clock facet into genlock_lock_facets_t
  * and renders the verdict.
  *
- * camera-box #1299 Part 4: the qpc_drift term is a WINDOWED RATE + STEP, NOT the cumulative
- * wall-vs-QPC offset. On a dantesync-disciplined box the wall clock legitimately runs at the
- * grandmaster rate (f_ptp + f_phase ≈ +10..20 ppm) vs the free QPC crystal, so the cumulative
- * st.wall_qpc_drift_ms grows unbounded (~50 ms/h) — the old `> 100 ms` gate crossed after ~2 h and
- * false-paged the whole fleet overnight (38 pages 15./16.9.). We now DEGRADE only on a RATE off the
- * dantesync-reported slew (GENLOCK_QPC_DRIFT_PPM_BOUND) or a single-sample STEP > one 30 fps frame
- * (GENLOCK_QPC_STEP_BOUND_MS, the real genlock hazard); the pure decision is
- * genlock_qpc_drift_beyond_bound in GenlockLockState.hpp. GENLOCK_QPC_WINDOW_S is long enough that
- * the integer-ms cumulative drift resolves the rate (at 14 ppm the window accrues ≈ 4.2 ms). */
-static constexpr double GENLOCK_QPC_DRIFT_PPM_BOUND = 50.0;
+ * camera-box #1299 Part 4 + #1357 scope C: the qpc_drift term is the wall STEP only, NOT the
+ * cumulative wall-vs-QPC offset (it grows ~50 ms/h on a dantesync-disciplined Windows box by design and
+ * false-paged the whole fleet overnight 15./16.9.) and NOT a rate: on Linux CLOCK_MONOTONIC is
+ * kernel-disciplined, so the measured rate is 0 by construction, while on Windows it is the free QPC
+ * crystal — the removed rate-vs-instantaneous-slew check meant a different thing per box and
+ * false-DEGRADED both (28 samples on strih-lx, 4 on stream, 24.9.2026, none a step). We DEGRADE only on
+ * a single-sample STEP > one 30 fps frame (GENLOCK_QPC_STEP_BOUND_MS); the pure decision is
+ * genlock_qpc_drift_beyond_bound in GenlockLockState.hpp. The windowed rate (GENLOCK_QPC_WINDOW_S is
+ * long enough that the integer-ms cumulative drift resolves it) and the dantesync slew stay
+ * report-only JSON telemetry. */
 static constexpr int64_t GENLOCK_QPC_STEP_BOUND_MS = 33;
 static constexpr int GENLOCK_QPC_WINDOW_S = 300;
 
@@ -1023,9 +1023,9 @@ void OBSBasicStatusBar::PollGenlockClock()
 		genlockClockLocked = obs_data_get_bool(d, "is_locked");
 		genlockClockNtpFailed = obs_data_get_bool(d, "ntp_failed");
 		/* #1299 Part 4: the slew the disciplined clock reports it is APPLYING to the wall clock vs the
-		 * free crystal (f_ptp servo freq + f_phase slew integral, ppm) — the EXPECTED wall-vs-QPC drift
-		 * rate the qpc_drift verdict compares the measured windowed rate against. Absent on an old
-		 * dantesync -> 0.0, which the wide 50 ppm bound tolerates (never a false degrade). */
+		 * free crystal (f_ptp servo freq + f_phase slew integral, ppm). #1357: report-only telemetry
+		 * (`qpc_expected_ppm` in the JSON) — it no longer feeds the qpc_drift verdict (the wall STEP
+		 * does). Absent on an old dantesync -> 0.0. */
 		genlockClockFptpPpm = obs_data_get_double(d, "f_ptp_ppm");
 		genlockClockFphasePpm = obs_data_get_double(d, "f_phase_ppm");
 		genlockClockLastOkMs = genlockClock.elapsed();
@@ -1142,11 +1142,11 @@ void OBSBasicStatusBar::UpdateGenlockLabel()
 	/* clock present iff a successful :8898 poll landed within the last 3 s. */
 	const bool clock_present = genlockClockLastOkMs >= 0 && (now_ms - genlockClockLastOkMs) < 3000;
 
-	/* #1299 Part 4: the windowed wall-vs-QPC drift verdict. Push this tick's SIGNED cumulative drift +
+	/* #1299 Part 4 + #1357: the wall-vs-QPC drift verdict. Push this tick's SIGNED cumulative drift +
 	 * monotonic timestamp; prune the ring to GENLOCK_QPC_WINDOW_S. Derive the drift delta + elapsed
-	 * span across the window and the largest single-sample STEP within it, and ask the parity-gated
-	 * pure decision whether that is a genuine hazard (a rate off the dantesync-reported slew, or a
-	 * step). A steady slew on a disciplined clock is by design and no longer pages. */
+	 * span across the window (report-only rate telemetry) and the largest single-sample STEP within
+	 * it, and ask the parity-gated pure decision whether the wall STEPPED by more than one frame — the
+	 * one clock hazard, the same on every box. A steady rate (any box) never pages. */
 	const double qpc_expected_ppm = clock_present ? (genlockClockFptpPpm + genlockClockFphasePpm) : 0.0;
 	if (scan.any_input)
 		genlockQpcHistory.emplace_back(now_ms, scan.qpc_signed_ms);
@@ -1174,8 +1174,8 @@ void OBSBasicStatusBar::UpdateGenlockLabel()
 	}
 	double qpc_measured_ppm = 0.0;
 	const int qpc_beyond = genlock_qpc_drift_beyond_bound(
-		qpc_rate_ready, qpc_delta_ms, qpc_elapsed_ms, qpc_expected_ppm, GENLOCK_QPC_DRIFT_PPM_BOUND,
-		qpc_max_step_ms, GENLOCK_QPC_STEP_BOUND_MS, &qpc_measured_ppm);
+		qpc_rate_ready, qpc_delta_ms, qpc_elapsed_ms, qpc_max_step_ms, GENLOCK_QPC_STEP_BOUND_MS,
+		&qpc_measured_ppm);
 	const bool qpc_step = qpc_max_step_ms > GENLOCK_QPC_STEP_BOUND_MS;
 
 	genlock_lock_facets_t f;
@@ -1235,13 +1235,9 @@ void OBSBasicStatusBar::UpdateGenlockLabel()
 		reasonText = "clock NTP failed";
 		break;
 	case GENLOCK_LOCK_REASON_QPC_DRIFT:
-		/* #1299 Part 4: the verdict now keys on the RATE vs the reported slew (or a STEP), so the
-		 * label shows the measured/expected rate — not the unbounded cumulative offset. */
-		reasonText = qpc_step
-				     ? QString("clock step %1 ms").arg(qpc_max_step_ms)
-				     : QString("clock rate %1 ppm (exp %2)")
-					       .arg(qpc_measured_ppm, 0, 'f', 1)
-					       .arg(qpc_expected_ppm, 0, 'f', 1);
+		/* #1357: the verdict is the wall STEP only, so the label names the step size — never the
+		 * unbounded cumulative offset or a (report-only) rate. */
+		reasonText = QString("clock step %1 ms").arg(qpc_max_step_ms);
 		break;
 	case GENLOCK_LOCK_REASON_AUDIO_PAIRING:
 		if (!scan.audio_unpaired_names.empty()) {

@@ -197,42 +197,32 @@ static inline int genlock_name_is_camera(const char *name)
 	return 0;
 }
 
-/* #1299 Part 4 — the windowed wall-vs-QPC drift verdict + its measured rate. On a dantesync-
- * disciplined box the wall clock legitimately runs at the grandmaster rate (f_ptp + f_phase ≈ +10..20
- * ppm) vs the free QPC crystal, so the CUMULATIVE wall_qpc_drift_ms grows unbounded (~50 ms/h) — the
- * old `> 100 ms` gate crossed after ~2 h and false-paged the whole fleet overnight. This keys on the
- * genuine hazards instead: DEGRADED when (a) a single-sample STEP exceeds step_bound_ms (judged as soon
- * as two samples exist, rate_ready or not), OR (b) once the rate window has filled, the drift RATE over
- * the window departs from expected_ppm (the slew the clock reports it applies) by more than ppm_bound.
- * Writes the measured windowed rate (ppm) to *measured_ppm_out for telemetry. drift_delta_ms/elapsed_ms
+/* #1299 Part 4 + #1357 scope C — the wall-vs-monotonic qpc_drift verdict + its measured rate. The
+ * CUMULATIVE wall_qpc_drift_ms never gates (on a dantesync-disciplined Windows box it grows ~50 ms/h
+ * against the free QPC crystal by design). The RATE never gates either: on Linux CLOCK_MONOTONIC is
+ * kernel-disciplined together with CLOCK_REALTIME, so the measured rate is 0 by construction, while on
+ * Windows it is the free crystal — a rate check meant a different thing per box and false-DEGRADED
+ * both. DEGRADED only on a single-sample wall STEP > step_bound_ms (judged as soon as two samples
+ * exist, rate_ready or not) — the one clock hazard for genlock, the same on every box. Writes the
+ * measured windowed rate (ppm) to *measured_ppm_out as report-only telemetry. drift_delta_ms/elapsed_ms
  * are the integer-ms cumulative-drift delta + elapsed span across the window; max_step_ms the largest
  * single-sample jump within it. Byte-for-byte mirror of
  * camera_box::genlock_lock_state::qpc_drift_beyond_bound (+ qpc_window_rate_ppm) — the parity gate
  * tests/genlock_lock_state_parity.rs lifts THIS function too. Placed AFTER genlock_name_is_camera so no
  * other lift's contiguity is disturbed. */
 static inline int genlock_qpc_drift_beyond_bound(int rate_ready, long long drift_delta_ms,
-						 long long elapsed_ms, double expected_ppm,
-						 double ppm_bound, long long max_step_ms,
+						 long long elapsed_ms, long long max_step_ms,
 						 long long step_bound_ms, double *measured_ppm_out)
 {
 	double measured_ppm = 0.0;
-	double d;
 	if (rate_ready && elapsed_ms > 0)
 		measured_ppm = (double)drift_delta_ms / (double)elapsed_ms * 1000000.0;
 	if (measured_ppm_out)
 		*measured_ppm_out = measured_ppm;
-	/* a STEP is an immediate hazard, judged even before the rate window fills. */
+	/* a STEP is the one clock hazard, judged even before the rate window fills. */
 	if (max_step_ms < 0)
 		max_step_ms = -max_step_ms;
-	if (max_step_ms > step_bound_ms)
-		return 1;
-	/* the RATE mismatch needs a filled window (else the integer-ms delta has no resolution). */
-	if (!rate_ready)
-		return 0;
-	d = measured_ppm - expected_ppm;
-	if (d < 0)
-		d = -d;
-	return d > ppm_bound ? 1 : 0;
+	return max_step_ms > step_bound_ms ? 1 : 0;
 }
 
 #ifdef __cplusplus
