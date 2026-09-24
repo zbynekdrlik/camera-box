@@ -524,6 +524,20 @@ _SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
 if _SCRIPTS_DIR not in sys.path:
     sys.path.insert(0, _SCRIPTS_DIR)
 import obs_fleet_table  # noqa: E402
+import genlock_park  # noqa: E402  -- issue 1242: the ONE connect-on-show park-state parser
+
+# Every program ingest must at least sustain the program rate (the arrivals-low term).
+ARRIVALS_LOW_FPS = 28.0
+
+
+def low_arrival_sources(rates: dict, log: str) -> list:
+    """The sources arriving below ARRIVALS_LOW_FPS -- the HARD arrivals-low problem. issue 1242: a
+    PARKED program-path input (connect-on-show: nothing shows it, so its NDI receiver is released by
+    design) arrives at 0 BY DESIGN, and an `MV <input>` monitor twin is a low-bandwidth multiview feed,
+    not program ingest -- neither is an arrivals-low problem. Order follows `rates`."""
+    parked = genlock_park.parked_sources(log)
+    return [s for s, r in rates.items()
+            if r < ARRIVALS_LOW_FPS and s not in parked and not genlock_park.is_monitor_twin(s)]
 
 
 def strih_platform(host: str) -> str:
@@ -671,7 +685,7 @@ def check_windows_box(name: str, ip: str, ws_password: str | None, program_fps: 
         problems.append("ws-stats-missing")
     if buf_peak > AUDIO_BUF_BOUND_MS or buf_maxed:
         problems.append(f"AUDIO-BUF={buf_peak}ms(#786)")
-    low = [s for s, r in rates.items() if r < 28.0]  # every ingest must at least sustain program rate
+    low = low_arrival_sources(rates, log)  # every ingest must at least sustain program rate
     if low:
         problems.append("arrivals-low:" + ",".join(low))
     lat = ""
