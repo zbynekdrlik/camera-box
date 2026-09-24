@@ -19,6 +19,11 @@ time retrying config-based transport switches; the post-event paths are on camer
 (NDI_CONFIG_DIR env? version-specific keys? SDK update in vendor/). Context: NDI RUDP sender-side
 per-connection degradation to exactly ~50/60fps against the LINUX receiver only (Windows strih
 receiver clean, sender-wire capture proved 14-15ms burst pacing originates in the sender's lib).
+**Re-read (issue 1342):** that test was probably not valid, for two reasons. First,
+`camera-box.service` runs with `ProtectHome=yes`, so `/root/.ndi/` is invisible to it. Second,
+`"rudp":{"recv":false}` is not the SDK schema; the SDK wants `"rudp":{"recv":{"enable":false}}`.
+The fleet now points libndi at `/etc/ndi` through an `NDI_CONFIG_DIR` drop-in. See
+`.claude/rules/ndi-discovery.md`.
 
 
 **The genlock build is hard-locked and ENV-FREE. There is NO `OBS_GENLOCK_*` / `OBS_BURN_*` env any

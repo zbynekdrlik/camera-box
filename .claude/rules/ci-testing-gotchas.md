@@ -904,6 +904,11 @@ and run the command as its OWN plain Bash call with no pipe/`&&`/`PIPESTATUS`. A
 heredoc block IS allowed (the guard permits `python3 -` / `python3 -c`), so classifier/anchor
 simulations run fine that way — only the runtime-variable-in-the-command shape is the blocker.
 
+**Nested heredocs are refused too (issue 1342).** A `python3 - <<'PY'` edit script is allowed.
+But if the text it writes into a file itself contains a heredoc (a bash function with an inner
+`<<'PY'` block), the guard refuses the whole call as "too complex". Put the edit script in a file
+with the `Write` tool and run `python3 /abs/script.py` as a plain call.
+
 ## A worktree-isolated worker CANNOT locally run a sourced-bash-lib test or a PATH-stubbed dry-run (#1265)
 
 The worktree-isolation guard refuses `bash -c '…source lib…'`, `ENV=x bash <script>`, and any
