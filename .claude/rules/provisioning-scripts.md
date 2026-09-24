@@ -345,3 +345,25 @@ verify-device's acceptance check for such a unit should assert the redirect is i
 `--save-state=/run/...` / a cleared `StateDirectory=`), not just that the unit is enabled — an
 enabled-but-start-failing unit is a silent hole (a check that gates only `is-enabled`, not the
 ro-root-safe config, would pass a box whose service can never actually run).
+
+## Five defects the M.2 migration hit (issue 1311) -- the rules they leave behind
+
+- **A backtick inside an UNQUOTED heredoc runs as a command.** STEP 18's `cat > /etc/fstab <<
+  FSTABEOF` must stay unquoted (it expands `ROOT_UUID` and two `$(...)`), so any backtick in its
+  comment text is escaped as `` \` ``. verify-device.sh's `usage()` had the same bug and ran
+  `v4l2-ctl --version` on `--help`. `tests/provisioning_defects_1311.rs` scans every unquoted heredoc
+  in setup-device / verify-device / create-usb for an unescaped backtick.
+- **Never trust `efibootmgr -c` without reading the entry back.** Both create-usb and STEP 17d call
+  the ONE shared `efi_cam_box_ensure` in `scripts/lib/efi-boot-entry.sh`. It requires an `HD(...)`
+  path (no `VenHw(`, loader `BOOTX64.EFI`) on the ESP PARTUUID that leads `BootOrder`, and repairs
+  the entry. An unreadable `efibootmgr -v` FAILs with no write (never "no entry, create blind").
+  create-usb exits on failure; STEP 17d only RECORDS it (`EFI_ENTRY_PROBLEM`) and STEP 19 refuses
+  "Setup Complete" -- a fail before STEP 18 would leave a fresh box with no read-only fstab.
+  verify-device `(al)` grades the same path via `efi_entry_verdict <dump> <partuuid>`. Test it
+  against the fake-NVRAM `efibootmgr` stub in that test file (`EFI_BOOTMGR_BIN`), never a real box.
+- **`setup-device.sh --yes|-y`** is the non-interactive contract (`confirm_setup`). Do not pipe a `y`.
+- **Every ssh in verify-device.sh, verify-fleet.sh and verify-imag.sh passes
+  `-o UserKnownHostsFile=/dev/null`.** Otherwise a reflashed box's new host key reads as `ssh rc=255`.
+- **Clock sanity runs before the first apt/curl.** Forward-only, from the Ubuntu archive `Date`
+  header (curl, or bash `/dev/tcp` because the base image has no curl). Its pure functions and seams
+  live above the source guard, so tests override the fetch, the clock read and the clock set.
