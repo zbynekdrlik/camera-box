@@ -152,10 +152,9 @@ stamps `video_frame.timecode = genlock_emit_timecode_100ns(...)` at `:613` (doct
 ### 5. Pacing
 
 The sender **MUST** emit exactly one video frame per boundary, where the boundaries are the
-per-second grid points of §4 — the SAME grid the frame's `timecode` floors to, so the frame
-emitted for slot `k` is stamped slot `k` (a pacing grid counted from 1970, `k · interval`, walks
-against the stamps by `1 s − fps · interval` per second and puts captures near a boundary into the
-neighbouring slot). It:
+per-second grid points of §4 — the SAME grid the frame's `timecode` floors to (a pacing grid
+counted from 1970, `k · interval`, walks against the stamps by `1 s − fps · interval` per second,
+so the slot a frame is paced for and the slot it is stamped into drift apart with the date). It:
 
 - **MUST** catch up at most one interval per emit when it is late by **≤ 8 intervals**;
 - **MUST** resync forward to the next boundary (dropping the intervening boundaries) when it is
@@ -170,7 +169,13 @@ per-second grid of `src/genlock_grid.rs` (latch / resync `grid_next_boundary_ns`
 `genlock_advance_boundary` `:165`, lag in grid slots `grid_steps_between` — since #1355, before it
 the gate paced on `now % interval` from 1970); catch-up bound `GENLOCK_MAX_CATCHUP_INTERVALS = 8`
 (`:62`); backward-step re-latch (`:92-100`, `genlock_latched_boundary` `:150`); starvation repeat
-with the new boundary timecode (`starvation_repeat_timecode_100ns` `:262`).
+with the new boundary timecode (`starvation_repeat_timecode_100ns` `:262`). Tolerance of the
+reference: a repeat is stamped `base − k · floor(10⁷ / fps)` (100 ns units), at most `k` units
+above the exact per-second point of its slot — inside the slot, so it floors to the right one.
+The camera gate decides on its POLL instant while the stamp floors the CAPTURE instant, so a
+frame captured within the dequeue latency before a boundary is paced for that boundary but stamped
+into the previous slot (a free-running grabber's stamp duplicate + gap per beat cycle); an
+external sender that stamps the instant it paces on has no such offset.
 
 ### 6. Audio
 

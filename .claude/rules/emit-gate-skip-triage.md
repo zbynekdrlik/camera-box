@@ -13,7 +13,7 @@ A `#707 genlock emit-gate SKIPPED boundaries … totalling N boundary interval(s
 (`lag_intervals > GENLOCK_MAX_CATCHUP_INTERVALS(8) && !queue_had_frame`). That branch is the
 HONEST clock-STEP / empty-queue path (#131 cold-boot resync): the loop genuinely waited for the
 triggering frame, so the skipped boundaries had **no captured content** — leaping them loses
-nothing. A CLOCK_REALTIME step re-latches the epoch-relative grid and the counter jumps, while
+nothing. A CLOCK_REALTIME step re-latches the per-second grid and the counter jumps, while
 capture (monotonic) keeps flowing 60 fps and every captured frame is still emitted.
 
 The `queue_had_frame=true` (buffered-drain) case NEVER reaches resync — it catches up ONE

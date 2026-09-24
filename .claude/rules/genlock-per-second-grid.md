@@ -58,7 +58,12 @@ phase_pinned_deadline` delegates). Rules for anyone touching it:
 The camera stamps on the per-second grid but its emit gate (`src/genlock_pacing.rs`) paced on the
 1970 grid (`now % interval`, `boundary + interval`, `(now − boundary) / interval`) — 40 ns/s at the
 production 60 fps (`16_666_666 × 60 = 999_999_960`), 8.3 ms apart on 24.9.2026. A capture in that
-window crossed the gate boundary of one slot and was stamped into the neighbouring one. Now:
+window crossed the gate boundary of one slot and was stamped into the neighbouring one. Now the
+gate grid IS the stamp grid — but the gate still DECIDES on the poll instant (`wall_clock_ns()`
+after the dequeue) while the stamp floors the CAPTURE instant, so a capture within the dequeue
+latency before a boundary is still stamped one slot early (the free-running grabber's stamp
+dup + gap per beat cycle). Step 3 removes the date-walking offset only; deciding on the capture
+instant is the open Design-question on #1355 (review round 1 🔴). Now:
 
 - **Latch / #131 re-latch / #707 resync** = `grid_next_boundary_ns`; the re-latch test is
   `next > grid_next(now)` (the exact per-second form of the old `next > now + interval`).
@@ -93,7 +98,10 @@ window crossed the gate boundary of one slot and was stamped into the neighbouri
   day's offset, 8.3 ms at 60 fps on 24.9.), absorbed by the strih/stream genlock FIFO. Watch each
   cambox's `Streaming:` / `#707` lines stay 299–301 with no new SKIP burst, and the strih
   `genlock-fifo audit` `stamp_dup=` / `stamp_gap=` rate on the camera inputs against its own
-  pre-deploy baseline (it should not rise; captures near a boundary no longer straddle it).
+  pre-deploy baseline: it must NOT rise; do not expect it to fall to zero — the poll-vs-capture
+  latency beat above still produces a dup + gap pair per grabber beat cycle.
+- **frame-probe's synth-ndi sender** (`src/bin/frame-probe.rs`, probe-gated) sleeps to
+  `genlock_grid::grid_next_boundary_ns` too — it was the last `now % interval` pacer.
 
 ## What changes live on deploy (tell the supervisor)
 

@@ -35,6 +35,14 @@
 //! slot but was stamped into the neighbouring one. Per-second steps alternate `interval` /
 //! `interval + 1` ns, so never step or divide by `interval` by hand here.
 //!
+//! What the shared grid does NOT remove: the gate decides on the instant it is POLLED
+//! (`main.rs` passes `wall_clock_ns()` after the dequeue) while the stamp floors the frame's
+//! CAPTURE instant ([`crate::genlock_stamp::genlock_emit_timecode_100ns`]). A frame captured
+//! within that dequeue latency before a boundary crosses it at poll time but is stamped into the
+//! previous slot, so a free-running grabber still beats one stamp duplicate + one stamp gap per
+//! beat cycle against the grid. Only the date-walking grid offset is gone; deciding on the capture
+//! instant is a separate design step (#1355 Design-question).
+//!
 //! `cfg(target_os = "linux")` in lock-step with `crate::ndi`. Pure logic — Tier-0 testable on the
 //! Linux `test` CI job (default features): the sibling-module precedent of `genlock_stamp` /
 //! `dupe_decimation`.
@@ -73,8 +81,9 @@ pub const GENLOCK_MAX_CATCHUP_INTERVALS: u64 = 8;
 /// Pure + fully mutation-tested; the capture loop wires it to `wall_clock_ns()`.
 ///
 /// Every boundary is a point of the per-second grid the frame is STAMPED on (#1355, see the
-/// module doc), so the boundary a capture crosses to be emitted IS the slot its timecode floors
-/// to. `interval_ns == 0` disables the gate and is the guarded divisor case, matching
+/// module doc): for the SAME instant the gate's slot and the stamp's slot coincide (the gate reads
+/// the poll instant, the stamp the capture instant — the module doc says what that leaves).
+/// `interval_ns == 0` disables the gate and is the guarded divisor case, matching
 /// [`crate::ndi::next_boundary_100ns`] which also guards a zero divisor rather than panicking.
 pub fn genlock_emit_gate(
     now_ns: u64,
@@ -92,11 +101,11 @@ pub fn genlock_emit_gate(
     // #131: guard a BACKWARD clock step, symmetric to the forward resync below.
     // The boundary is latched from CLOCK_REALTIME; on a cold boot dantesync can
     // acquire NTP late and step the realtime clock BACKWARD well below the latched
-    // boundary. The latched boundary is then many intervals in the future
-    // (`boundary - now > interval`), so `now < boundary` would stay true forever
+    // boundary. The latched boundary is then many grid slots in the future (more
+    // than one slot ahead of `now`), so `now < boundary` would stay true forever
     // and the gate would wedge at emit=false (0 NDI emitted) until a warm restart.
     // Re-latch to the rewound clock (same formula as the init / forward-resync
-    // branches) so emit resumes within one interval, exactly as a restart does.
+    // branches) so emit resumes within one slot, exactly as a restart does.
     let boundary = genlock_latched_boundary(now_ns, next_boundary_ns, interval_ns);
     if now_ns < boundary {
         // Between boundaries — decimate this capture (do not emit).
@@ -317,9 +326,11 @@ mod tests {
 
     // --- #1355: the emit boundary IS the stamp boundary ------------------------------------------
 
-    /// The whole point of #1355 for the camera: at EVERY time of day, the boundary the emit gate
-    /// crosses to emit a frame is the per-second grid point the frame's stamp floors to — pacing
-    /// and stamping agree, so the frame emitted for slot `k` is stamped slot `k`. On the pre-#1355
+    /// The whole point of #1355 for the camera: at EVERY time of day, for the SAME instant, the
+    /// boundary the emit gate crosses is the per-second grid point the stamp of that instant floors
+    /// to — the gate grid IS the stamp grid. (In production the gate reads the poll instant and
+    /// the stamp the capture instant; that per-frame latency is outside this test, see the module
+    /// doc.) On the pre-#1355
     /// 1970 grid the gate's boundary sat `(S * 1 s) % interval` off the stamp grid (2.08 ms at
     /// 30 fps / 8.32 ms at 60 fps on 24.9.2026, walking 10 / 40 ns per second), so a capture in that
     /// window crossed the boundary of one slot but was stamped into the neighbouring one.
