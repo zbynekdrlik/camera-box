@@ -153,6 +153,11 @@ with open(os.path.join(os.environ["STUB_DIR"], "calls.log"), "a") as f:
     f.write("obs_phase2 " + " ".join(sys.argv[1:]) + "\n")
 mode = os.environ.get("STUB_RIG_BUSY", "idle")
 cmd = sys.argv[1] if len(sys.argv) > 1 else ""
+if cmd == "rig-busy-check" and mode == "live-after-stage":
+    n_file = os.path.join(os.environ["STUB_DIR"], "rigbusy.n")
+    n = int(open(n_file).read()) if os.path.exists(n_file) else 0
+    open(n_file, "w").write(str(n + 1))
+    mode = "idle" if n == 0 else "streaming"
 def box(host, streaming=False, recording=False, tc=None):
     return {"host": host, "streaming": streaming, "recording": recording, "recordTimecode": tc}
 if cmd == "rig-busy-check":
@@ -1202,10 +1207,17 @@ fn strih_lx_idle_rig_passes_the_broadcast_guard_before_the_first_mutation_1317()
         let pre = r.at("pgrep -x setup-strih.sh");
         let guard = r.at("obs_phase2 rig-busy-check");
         let prep = r.at(&format!("touch '{stage}'"));
+        let rs_repo = r.at(&format!("{stage}/repo/"));
+        let reguard = r.last("obs_phase2 rig-busy-check").unwrap();
         let stop = r.at("strih-obs-stop.sh");
         assert!(
             pre < guard && guard < prep && prep < stop,
             "{mode}: installer preflight < rig-busy guard < prep < stop:\n{}",
+            r.calls
+        );
+        assert!(
+            rs_repo < reguard && reguard < stop,
+            "{mode}: the guard runs AGAIN after the stage, immediately before the stop:\n{}",
             r.calls
         );
         assert!(
@@ -1220,4 +1232,42 @@ fn strih_lx_idle_rig_passes_the_broadcast_guard_before_the_first_mutation_1317()
         "the shared guard's fail-open is surfaced:\n{}",
         r.err
     );
+}
+
+/// The deploy stages ~2 GB BEFORE it stops OBS, so a broadcast can start AFTER the preflight guard
+/// passed (the rig-mutation rule: one early check is not enough -- the same read runs immediately
+/// before EACH mutation). The guard re-runs right before the stop: live then = exit 4 in step
+/// `stop`, OBS NOT stopped, nothing installed or started.
+#[test]
+fn strih_lx_refuses_when_a_broadcast_starts_during_staging_1317() {
+    let r = run_exec(&[("STUB_RIG_BUSY", "live-after-stage")]);
+    assert_eq!(
+        r.code, 4,
+        "a broadcast that went live during staging must refuse the stop.\nout={}\nerr={}\ncalls={}",
+        r.out, r.err, r.calls
+    );
+    assert_eq!(
+        r.calls.matches("obs_phase2 rig-busy-check").count(),
+        2,
+        "preflight + pre-stop:\n{}",
+        r.calls
+    );
+    let fail = r
+        .err
+        .lines()
+        .find(|l| l.contains("ERROR: [strih-lx stop]"))
+        .unwrap_or_else(|| panic!("no named stop-step refusal:\n{}", r.err));
+    assert!(
+        fail.contains("stream streaming") && fail.contains("OBS NOT stopped"),
+        "names what went live and that OBS keeps running:\n{fail}"
+    );
+    assert!(r.calls.contains("rsync "), "staged first:\n{}", r.calls);
+    for c in ["strih-obs-stop.sh", "run-setup.sh", "--user start"] {
+        assert!(
+            !r.calls.contains(c),
+            "`{c}` must not run once live:\n{}",
+            r.calls
+        );
+    }
+    assert!(r.fleet_log().is_empty(), "{}", r.fleet_log());
 }
