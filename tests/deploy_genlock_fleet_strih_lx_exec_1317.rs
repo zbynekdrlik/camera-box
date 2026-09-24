@@ -106,12 +106,14 @@ printf 'ssh %s\n' "$*" >> "$STUB_DIR/calls.log"
 cmd="${@: -1}"
 case "$cmd" in
   *"pgrep -x setup-strih.sh"*)
-    if [ -f "$STUB_DIR/setup.stdin" ]; then echo "${STUB_INSTALLER_AFTER:-idle}"; else echo "${STUB_INSTALLER:-idle}"; fi ;;
+    if [ -f "$STUB_DIR/setup.stdin" ]; then st="${STUB_INSTALLER_AFTER:-idle}"; else st="${STUB_INSTALLER:-idle}"; fi
+    [ "$st" = unreachable ] && exit 255
+    echo "$st" ;;
   *--local-sweep*) cat > "$STUB_DIR/sweep.stdin"; echo "SWEEP"; exit "${STUB_SWEEP_RC:-0}" ;;
   *LEFTOVER*) [ -n "${STUB_LEFTOVER:-}" ] && echo "LEFTOVER $STUB_LEFTOVER"; exit "${STUB_STAGECHECK_RC:-0}" ;;
   *setup-strih.rc*) [ -n "${STUB_SETUP_NO_RC:-}" ] || echo "${STUB_SETUP_RC:-0}"; exit 0 ;;
   *run-setup.sh*) cat > "$STUB_DIR/setup.stdin"; exit "${STUB_LAUNCH_RC:-0}" ;;
-  *"grep -i -m 3"*) [ -n "${STUB_REBOOT_LINE:-}" ] && echo "$STUB_REBOOT_LINE"; exit 0 ;;
+  *"reboot strih-lx, then run verify-strih"*) [ -n "${STUB_REBOOT_LINE:-}" ] && echo "$STUB_REBOOT_LINE"; exit 0 ;;
   *setup-strih.log*) echo "setup log tail"; exit 0 ;;
   *strih-obs-stop.sh*) exit "${STUB_STOP_RC:-0}" ;;
   *GENLOCK_BUILD_SHA.txt*)
@@ -851,4 +853,74 @@ fn windows_programs_follow_the_verified_strih_and_strih_is_logged_at_once_1317()
         "imag preparation fails BEFORE strih-lx is applied:\n{}",
         r.calls
     );
+}
+
+/// review round 3: the reboot note greps setup-strih.sh's OWN pending-reboot warning, not every
+/// "next boot" line the baseline prints earlier in the run (`-m 3` used to cut the real one off).
+/// Runs the builder's real grep against a fixture log, and pins the coupling to setup-strih.sh's text.
+#[test]
+fn strih_lx_reboot_note_selects_only_the_pending_reboot_warning_1317() {
+    let t = tempfile::tempdir().unwrap();
+    let stage = t.path().join("genlock-stage-abc1");
+    fs::create_dir_all(&stage).unwrap();
+    let real = "  the shared OBS-box baseline takes effect at the NEXT boot -- reboot strih-lx, then run verify-strih.sh (the run below only reports what is still pending)";
+    let mut log = String::new();
+    for i in 0..5 {
+        log.push_str(&format!("  routine {i}: applies at next boot\n"));
+    }
+    log.push_str(real);
+    log.push('\n');
+    fs::write(stage.join("setup-strih.log"), log).unwrap();
+    let o = Command::new("bash")
+        .arg("-c")
+        .arg(". \"$LIB\"; bash -c \"$(strih_lx_remote_setup_notes_cmd \"$S\")\"")
+        .env("LIB", lib())
+        .env("S", &stage)
+        .output()
+        .unwrap();
+    let out = String::from_utf8_lossy(&o.stdout);
+    assert_eq!(
+        out.trim_end(),
+        real,
+        "only the pending-reboot warning:\n{out}"
+    );
+    let setup = fs::read_to_string(manifest_dir().join("scripts/setup-strih.sh")).unwrap();
+    assert!(
+        setup.contains("reboot strih-lx, then run verify-strih"),
+        "the deploy's reboot-note key must stay in setup-strih.sh's warning"
+    );
+}
+
+/// review round 3: a box that became unreachable after a failed launch fails fast (no 45-min rc
+/// poll, no start), and a settle time the poll budget cannot outlast is refused up front.
+#[test]
+fn strih_lx_unreachable_after_launch_and_settle_budget_1317() {
+    let r = run_exec(&[
+        ("STUB_LAUNCH_RC", "255"),
+        ("STUB_INSTALLER_AFTER", "unreachable"),
+    ]);
+    assert_eq!(r.code, 4, "err={}", r.err);
+    assert!(
+        r.err.contains("[strih-lx setup]") && r.err.contains("unreachable"),
+        "{}",
+        r.err
+    );
+    assert!(
+        !r.calls.contains("setup-strih.rc") && !r.calls.contains("--user start"),
+        "{}",
+        r.calls
+    );
+
+    let r = run_exec(&[
+        ("STRIH_LX_VERIFY_POLLS", "3"),
+        ("STRIH_LX_VERIFY_POLL_SECS", "10"),
+        ("STRIH_LX_VERIFY_SETTLE_SECS", "90"),
+    ]);
+    assert_eq!(r.code, 3, "err={}", r.err);
+    assert!(
+        r.err.contains("[strih-lx resolve]") && r.err.contains("SETTLE"),
+        "{}",
+        r.err
+    );
+    assert!(!r.calls.contains("ssh "), "{}", r.calls);
 }
