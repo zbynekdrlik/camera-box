@@ -185,6 +185,10 @@ def test_e2e_hold_marker_keeps_the_mains_connected(tmp_path):
     assert not roles.e2e_hold_active(str(marker), now + 5 * 3600, 4 * 3600)  # a stale marker expires
     assert not roles.e2e_hold_active(str(tmp_path / "absent"), now, 4 * 3600)
     obs = FakeObs()
+    # the launch before the run applied the roles (mains connect-on-show) ...
+    roles.apply_bandwidth_roles(obs, PLAN, hold_marker=str(tmp_path / "absent"), now=now)
+    assert obs.inputs["NDI cam1"]["settings"]["genlock_connect_on_show"] is True
+    # ... then OBS is relaunched mid-run while the marker is fresh
     summary = roles.apply_bandwidth_roles(obs, PLAN, hold_marker=str(marker), now=now + 60)
     assert summary["e2e_hold"] is True
     # an OBS relaunch DURING an E2E run must not re-park the held mains
