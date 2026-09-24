@@ -218,16 +218,16 @@ fn multiview_never_binds_the_linear_scanout_buffer_as_its_render_target() {
     );
     let c = squish(&file(DRM_C));
     assert!(
-        c.contains("void drm_output_blit_raw(gs_texture_t *src, int idx)"),
+        c.contains("bool drm_output_blit_raw(gs_texture_t *src, int idx)"),
         "issue 1346: the raw blit must be ONE shared helper in {DRM_C}"
     );
     assert!(
-        c.contains("drm_output_blit_raw(program, idx);"),
+        c.contains("drm_output_blit_raw(program, idx)"),
         "issue 1346: the Program path must use the same shared raw blit"
     );
     let i = squish(&file(INTERNAL_H));
     for token in [
-        "void drm_output_blit_raw(gs_texture_t *src, int idx);",
+        "bool drm_output_blit_raw(gs_texture_t *src, int idx);",
         "void drm_output_view_gl_teardown(void);",
     ] {
         assert!(
