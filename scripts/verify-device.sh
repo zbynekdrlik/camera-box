@@ -634,8 +634,8 @@ rt_irq_placement_verdict() {
 }
 
 # rt_fifo_thread_ceiling -> the max acceptable number of SCHED_FIFO threads on the live
-# camera-box process (issue 899 defect 2). Production runs exactly ONE FIFO thread (the
-# capture+emit hot path); this generous ceiling exists only to catch the pre-899 process-wide
+# camera-box process (issue 899 defect 2). Production runs TWO FIFO threads (the capture
+# thread at 90 and the #1242 ndi-send thread at 89); this generous ceiling exists only to catch the pre-899 process-wide
 # `CPUSchedulingPolicy=fifo` regression, which put ~27 threads FIFO on the isolated core -- it
 # is NOT an exact-count pin (a probe/E2E burn adds one more emit thread, but the acceptance
 # gate runs against the production camera-box.service, never a burn unit).
