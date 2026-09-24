@@ -708,3 +708,49 @@ def test_hold_and_restore_set_and_clear_the_strih_side_marker(tmp_path):
 def test_wait_live_without_a_state_file_is_a_no_op(tmp_path):
     out = _bash_lib(f"connect_on_show_e2e_wait_live /x 10.0.0.1 '{tmp_path}/absent.json'; echo RC=$?")
     assert out.returncode == 0 and "RC=0" in out.stdout
+
+
+def _argv_logging_stub(tmp_path, name, log):
+    """A PATH stub that appends its argv (one JSON list per call) to `log` and exits 0."""
+    d = tmp_path / "stubbin"
+    d.mkdir(exist_ok=True)
+    stub = d / name
+    stub.write_text("#!/usr/bin/env python3\nimport json, sys\n"
+                    f"open({str(log)!r}, 'a').write(json.dumps(sys.argv[1:]) + '\\n')\n")
+    stub.chmod(0o755)
+    return d
+
+
+def test_strih_marker_ssh_branch_writes_the_marker_the_role_apply_reads(tmp_path):
+    """The bash hold lib writes the marker over ssh at the SAME home-relative path the python role
+    apply checks (E2E_HOLD_MARKER), through the shared strih transport shape (sshpass outermost so a
+    stub is never bypassed, timeout inside it, LogLevel=ERROR), and on the Linux strih only."""
+    log = tmp_path / "sshpass.log"
+    stubdir = _argv_logging_stub(tmp_path, "sshpass", log)
+    env = {"PATH": f"{stubdir}:/usr/bin:/bin", "HOME": "/tmp"}
+    out = _bash_lib("connect_on_show_strih_marker set 10.0.0.1; "
+                    "connect_on_show_strih_marker clear 10.0.0.1; echo RC=$?",
+                    env=env, extra="strih_platform() { echo linux; }; ")
+    assert "RC=0" in out.stdout, out.stderr
+    calls = [json.loads(line) for line in log.read_text().splitlines()]
+    assert len(calls) == 2, calls
+    rel = pathlib.Path(roles.E2E_HOLD_MARKER).relative_to(pathlib.Path("~").expanduser())
+    for call, verb in zip(calls, ("touch", "rm -f")):
+        assert call[0] == "-p" and call[2] == "timeout" and call[4] == "ssh", call
+        assert "LogLevel=ERROR" in call and call[-2] == "newlevel@10.0.0.1", call
+        assert verb in call[-1] and f'"$HOME/{rel}"' in call[-1], call[-1]
+    # a Windows strih never runs the role apply: nothing is sent
+    log.unlink()
+    out = _bash_lib("connect_on_show_strih_marker set 10.0.0.1; echo RC=$?",
+                    env=env, extra="strih_platform() { echo windows; }; ")
+    assert "RC=0" in out.stdout and not log.exists()
+
+
+def test_e2e_hold_marker_with_a_future_mtime_still_expires(tmp_path):
+    marker = tmp_path / "connect-on-show-e2e-hold"
+    marker.write_text("")
+    mtime = marker.stat().st_mtime
+    # a clock that stepped BACK must not keep a stale marker active past the TTL ...
+    assert not roles.e2e_hold_active(str(marker), mtime - 5 * 3600, 4 * 3600)
+    # ... while a few seconds of skew on a just-touched marker still counts as fresh
+    assert roles.e2e_hold_active(str(marker), mtime - 2, 4 * 3600)
