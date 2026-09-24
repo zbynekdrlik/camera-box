@@ -330,6 +330,89 @@ confirm_setup() {
     [[ $reply =~ ^[Yy]$ ]]
 }
 
+# --- Early clock sanity (issue 1311) ------------------------------------------------------------
+# A fresh image booted after a CMOS reset came up with its clock two months behind; apt then fails
+# ("Release file ... is not valid yet") and TLS downloads fail until dantesync (STEP 17) runs. So
+# before the first apt/curl, compare the clock with the HTTP `Date` header of the Ubuntu archive
+# and, when the box is more than CLOCK_SANITY_MAX_BEHIND_S behind, set it FORWARD from that header.
+# Forward only: a box AHEAD of the archive is never moved back. dantesync owns the clock afterwards.
+CLOCK_SANITY_HOST="archive.ubuntu.com"
+CLOCK_SANITY_PATH="/ubuntu/"
+CLOCK_SANITY_MAX_BEHIND_S=86400
+
+# http_date_header_value <http-headers> -> the value of the `Date:` header (case-insensitive,
+# CR-stripped), or empty when there is none. Pure; always returns 0.
+http_date_header_value() {
+    printf '%s\n' "$1" | tr -d '\r' \
+        | awk '!found && tolower($0) ~ /^date:[ \t]*/ {found=1; sub(/^[^:]*:[ \t]*/, ""); print}' || true
+}
+
+# http_date_to_epoch <http-date> -> epoch seconds, or empty for an empty/unparseable date.
+# (An empty argument must stay empty: `date -d ""` would read as today's midnight.)
+http_date_to_epoch() {
+    [ -n "$1" ] || return 0
+    date -u -d "$1" +%s 2>/dev/null || true
+}
+
+# clock_sanity_decision <now-epoch> <server-epoch> -> `set` when the box is MORE than
+# CLOCK_SANITY_MAX_BEHIND_S behind the server; `ok` otherwise (including a box AHEAD of the
+# server -- never moved backward); `unknown` when either value is missing or not a number.
+clock_sanity_decision() {
+    case "${1:-}" in '' | *[!0-9]*) echo unknown; return 0 ;; esac
+    case "${2:-}" in '' | *[!0-9]*) echo unknown; return 0 ;; esac
+    if [ $(($2 - $1)) -gt "$CLOCK_SANITY_MAX_BEHIND_S" ]; then
+        echo set
+    else
+        echo ok
+    fi
+}
+
+# Seams (tests override these after sourcing): the clock read, the network fetch, the clock set.
+clock_sanity_now_epoch() { date -u +%s; }
+
+# clock_sanity_fetch_headers -> the HTTP response headers of the archive, non-zero on failure.
+# curl when present; the create-usb base image ships WITHOUT curl (the pre-flight below installs it
+# with apt -- exactly what a wrong clock breaks), so fall back to a plain HTTP HEAD over bash's own
+# /dev/tcp, bounded by timeout. Plain HTTP on purpose: TLS is what a wrong clock breaks.
+clock_sanity_fetch_headers() {
+    if command -v curl >/dev/null 2>&1; then
+        curl -sSI --max-time 10 "http://${CLOCK_SANITY_HOST}${CLOCK_SANITY_PATH}" 2>/dev/null && return 0
+    fi
+    # shellcheck disable=SC2016  # the single-quoted program is expanded by the inner bash, on purpose
+    timeout 10 bash -c 'exec 3<>"/dev/tcp/$1/80" || exit 1
+        printf "HEAD %s HTTP/1.0\r\nHost: %s\r\nConnection: close\r\n\r\n" "$2" "$1" >&3
+        head -c 8192 <&3' _ "$CLOCK_SANITY_HOST" "$CLOCK_SANITY_PATH" 2>/dev/null
+}
+
+clock_sanity_set_clock() { date -u -s "@$1" >/dev/null; }
+
+# clock_sanity_fix_from_archive -- the orchestration. Non-fatal when the archive cannot be read
+# (it warns: apt will then show the real error); fatal only when a needed forward step fails.
+clock_sanity_fix_from_archive() {
+    local headers date_str server now verdict
+    echo "  Checking the system clock against http://${CLOCK_SANITY_HOST}${CLOCK_SANITY_PATH} (Date header)..."
+    headers="$(clock_sanity_fetch_headers)" || headers=""
+    date_str="$(http_date_header_value "$headers")"
+    server="$(http_date_to_epoch "$date_str")"
+    now="$(clock_sanity_now_epoch)"
+    verdict="$(clock_sanity_decision "$now" "$server")"
+    case "$verdict" in
+        set)
+            echo -e "${YELLOW}  !!! CLOCK: the system clock is $(((server - now) / 86400)) day(s) BEHIND the Ubuntu archive (box epoch ${now}, archive Date '${date_str}') -- a CMOS reset? Setting the clock FORWARD to the archive time so apt/TLS work. dantesync (STEP 17) owns the clock from then on (issue 1311).${NC}"
+            clock_sanity_set_clock "$server" \
+                || fail "the clock is $(((server - now) / 86400)) day(s) behind and 'date -s' failed -- apt/TLS will fail; set the clock by hand and re-run (issue 1311)"
+            echo "  clock now: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+            ;;
+        ok)
+            echo "  clock OK (within ${CLOCK_SANITY_MAX_BEHIND_S}s of the archive Date '${date_str}', or ahead of it -- never moved back)"
+            ;;
+        *)
+            echo -e "${YELLOW}  could not read the archive Date header -- clock NOT checked. If apt fails with 'Release file ... is not valid yet', set the clock by hand (date -s) and re-run (issue 1311).${NC}"
+            ;;
+    esac
+    return 0
+}
+
 # --- source-guard: when sourced (the unit tests), stop here -- never run the destructive
 # provisioning flow below. Same convention as scripts/setup-imag.sh / scripts/genlock-manifest.sh.
 if [ "${BASH_SOURCE[0]}" != "${0}" ]; then
@@ -435,6 +518,14 @@ fi
 # the rw window covers the WHOLE run; restore_root_mode() still runs after STEP 18 unchanged.
 # =============================================================================
 ensure_root_writable
+
+# =============================================================================
+# Pre-flight: early clock sanity BEFORE the first apt/curl (issue 1311) -- a box booted after a
+# CMOS reset can be months behind, which breaks apt ("not valid yet") and every TLS download.
+# Forward-only, from the Ubuntu archive's HTTP Date header; see clock_sanity_fix_from_archive.
+# =============================================================================
+echo -e "${GREEN}[pre-flight] Clock sanity...${NC}"
+clock_sanity_fix_from_archive
 
 # =============================================================================
 # Pre-flight: ensure curl + CA certificates BEFORE first use
