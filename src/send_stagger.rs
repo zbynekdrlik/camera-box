@@ -296,7 +296,7 @@ mod tests {
         for n in 1..=MAX_CAMERA_NUMBER {
             let o = send_offset_us(Some(n), SLOT_60_US);
             assert!(o <= cap, "cam{n} offset {o} exceeds the clamp {cap}");
-            // Strictly below half an interval: the send starts in the first half of its slot.
+            // Strictly below half an interval: the idle_wait_ms correction relies on it.
             assert!(
                 2 * o < SLOT_60_US,
                 "cam{n} offset {o} not below half the slot"
