@@ -423,7 +423,7 @@ fn strih_lx_deploy_verdict_is_pure_and_fail_closed_1317() {
         format!("{SHA} {SHA} activating {SHA}"),
         format!("{SHA} {SHA} active ''"),
         format!("{SHA} {SHA} active {OTHER}"),
-        format!("'' '' active ''"),
+        "'' '' active ''".to_string(),
     ] {
         let o = run(&args);
         assert!(o.contains("FAIL") && o.contains("rc=1"), "{args}: {o}");
