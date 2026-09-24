@@ -137,7 +137,7 @@ class DiscoveryLib(unittest.TestCase):
 
     def test_parsers_read_discovery_and_ips(self):
         text = '{"ndi": {"networks": {"ips": "10.77.8.51,10.77.8.52", "discovery": "10.77.9.200"}}}'
-        r = _lib(f"T='{text}'; ndi_discovery_config_servers \"$T\"; echo; ndi_discovery_config_ips \"$T\"")
+        r = _lib(f"T='{text}'; ndi_discovery_config_servers \"$T\"; ndi_discovery_config_ips \"$T\"")
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(r.stdout.splitlines(), [DEV1_RIG_IP, "10.77.8.51,10.77.8.52"])
 
