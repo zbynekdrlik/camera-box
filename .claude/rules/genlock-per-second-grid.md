@@ -111,6 +111,8 @@ instant is the open Design-question on #1355 (review round 1 🔴). Now:
 - The bench shows the 2ME PGM settles in ONE state (31 frames with the live sender tail; 30 with
   none) and never drains. The presented age can therefore end one frame different from the
   pre-deploy mix of 31/32 — re-run the A/V align (the E2E split correction) after the deploy.
+  Since issue 1367 every restart settles on `base + 1` (31 at pin 987) whatever the startup stall,
+  tail or no tail (`genlock-n1-pin-derived-depth.md`).
 - **An EXTERNAL sender that follows an old reading of the sender contract** (`k · interval` from
   1970, in 100 ns units) walks 1 µs/s at 30 fps (4 µs/s at 60) — a whole frame in ~0.4 days —
   against every per-second sender and the receiver. The contract (§3/§4) was corrected to the
@@ -148,6 +150,11 @@ failed on today's arithmetic and the GREEN one passes.
   10× sender tail the production grid still gives 3.7 flips/h (sampled blips) vs 52.6 on 1970.
 - This bench DOES reproduce its target, unlike SimConveyor1049 for the N>=2 ladder
   (`genlock-conveyor-jitter-budget.md`): the N==1 mechanism is fully inside the ported branches.
+- **Issue 1367 extended it:** a `SenderRestart` (outage + k-slot startup stall), the N==1 depth
+  rule (hold + shed, read at the tick's SCHEDULED instant), a `receiver_tick_offset_ns` schedule
+  phase, and a render-tick model that runs serially with CATCH-UP ticks (`video_sleep` counts one
+  frame below a two-interval overrun; only >= 2 intervals skips slots — `skipped_ticks`). The
+  numbers above were measured before those changes; the issue-1367 tests carry their own.
 
 ## The stamp counters (`stamp_dup=` / `stamp_gap=`)
 
