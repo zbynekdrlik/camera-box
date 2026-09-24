@@ -67,6 +67,43 @@ void obs_drm_output_maybe_autostart(void);
  * Program into the mailbox back buffer; a cheap atomic no-op otherwise. Linux-only. */
 void obs_drm_output_on_frame(void);
 
+/*
+ * camera-box issue 1346 — the selectable VIEW of the DRM-lease HDMI output (owner 24.9.2026).
+ *
+ * PROGRAM (the default, and what an absent "view" key means — imag stays unchanged) scans out
+ * the Program canvas exactly as the issue-1152 M2 path. MULTIVIEW scans out the frontend's
+ * BUILT-IN Multiview (labels, PVW/PGM tally), never a custom scene: the frontend registers a
+ * renderer and libobs calls it on the graphics thread, with the leased scanout buffer bound as
+ * the render target at the connector mode size. The Multiview render runs ONLY while the view
+ * is MULTIVIEW, and it is throttled by the monitoring-surface budget gate
+ * (obs_aux_sender_should_skip), so the Program always has priority.
+ *
+ * The view is read from ~/.camera-box/drm-output.json ("view":"program"|"multiview") at
+ * autostart; obs_drm_output_set_view() switches it live AND persists it into that file (every
+ * other key kept), so the operator's choice survives an OBS restart.
+ */
+enum obs_drm_output_view {
+	OBS_DRM_OUTPUT_VIEW_PROGRAM = 0,
+	OBS_DRM_OUTPUT_VIEW_MULTIVIEW = 1,
+};
+
+/* Draws the view into the currently bound render target of size cx x cy (graphics thread,
+ * graphics context held, viewport/ortho already set to 0..cx / 0..cy, cleared to black). */
+typedef void (*obs_drm_output_view_render_t)(void *param, uint32_t cx, uint32_t cy);
+
+/* Register (render != NULL) or clear (render == NULL) the MULTIVIEW renderer. Serialised with
+ * the graphics thread (takes the graphics context), so after it returns the previous renderer
+ * is never called again — the caller may free what `param` points to. Linux-only. */
+EXPORT void obs_drm_output_set_view_renderer(obs_drm_output_view_render_t render, void *param);
+
+/* The current view (thread-safe). */
+EXPORT enum obs_drm_output_view obs_drm_output_get_view(void);
+
+/* Switch the view live and persist it into the drm-output config the autostart read. Returns
+ * true when the choice was persisted; false when there is no config to persist into (the view
+ * still switches for this session). */
+EXPORT bool obs_drm_output_set_view(enum obs_drm_output_view view);
+
 #ifdef __cplusplus
 }
 #endif

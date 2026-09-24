@@ -14,8 +14,10 @@ set -euo pipefail
 #   * NO taskset CPU pin unless STRIH_ISOLATED_CPUS / /etc/strih-isolated-cpus.conf exists (never a
 #     guessed pin -- the imag #841 lesson); since issue 1357 the shared baseline's obs_box_cpu_affinity
 #     persists the TOPOLOGY-DERIVED P-core block there (AFFINITY-ONLY, like imag's taskset pin);
-#   * NO DRM lease and NO scene-seeder preflight (the strih scene seeder is a separate follow-up --
-#     the launcher must not depend on a seeder that does not exist yet).
+#   * issue 1346 (owner 24.9.2026): the HDMI output is the in-OBS DRM-lease output (issue 1152),
+#     selectable Program / built-in Multiview. When ~/.camera-box/drm-output.json arms it, the
+#     launcher takes that connector OUT of the X layout before the OBS launch (the lease takes the
+#     idle connector -- the imag-obs-start.sh precedent); a dormant config changes nothing.
 #
 # Idempotent: OBS already running -> prints a note and exits 0 (never a second instance).
 # On launch: clear crash sentinels -> launch obs -> wait <=90 s for the :4455 WebSocket (fail loud if
@@ -117,6 +119,19 @@ fi
 if ! python3 -c "import sys; sys.path.insert(0, '/usr/local/bin'); import strih_scenes"; then
   echo "FAIL: strih_scenes import preflight failed -- a seed dependency is missing on the box (e.g. python3-websocket). Refusing to launch OBS (a broken seed would Restart-loop it). Fix: re-run setup-strih.sh (step 6 installs strih_scenes.py; python3-websocket is a runtime dep)."
   exit 1
+fi
+
+# issue 1346: DRM-lease mode. Classify the config with the ONE Python grammar (strih_scenes mirrors the
+# vendored C module's own contract: full JSON parse, "enabled": true, a non-empty connector) -- the
+# import was proven by the preflight above. Armed -> take the connector out of the X layout NOW, so
+# the desktop never extends onto HDMI and the in-OBS lease finds it idle. Best effort + LOUD: a
+# failed xrandr never aborts the unit (the verify-strih drm-output item names a lease that did not
+# go live).
+DRM_CONNECTOR="$(python3 -c "import sys; sys.path.insert(0, '/usr/local/bin'); import strih_scenes; print(strih_scenes.drm_output_lease_connector(strih_scenes.drm_output_config_text()))" 2>/dev/null || true)"
+if [ -n "$DRM_CONNECTOR" ]; then
+  echo "drm-lease mode ENABLED (${DRM_CONNECTOR} = the in-OBS DRM-lease HDMI output) -- taking it out of the X layout"
+  xrandr --output "$DRM_CONNECTOR" --off 2>/dev/null \
+    || echo "WARN issue 1346: xrandr --output ${DRM_CONNECTOR} --off failed -- if ${DRM_CONNECTOR} is still active in X the in-OBS lease may fail (continuing, never aborting the unit)"
 fi
 
 if [ -n "$ISOLATED_CPUS" ]; then

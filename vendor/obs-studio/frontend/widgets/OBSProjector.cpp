@@ -2,6 +2,9 @@
 
 #include <OBSApp.hpp>
 #include <components/Multiview.hpp>
+#if defined(__linux__)
+#include <components/DrmOutputView.hpp> // camera-box issue 1346
+#endif
 #include <utility/display-helpers.hpp>
 #include <utility/platform.hpp>
 #include <widgets/OBSBasic.hpp>
@@ -415,6 +418,11 @@ void OBSProjector::UpdateMultiviewProjectors()
 	obs_enter_graphics();
 	updatingMultiview = false;
 	obs_leave_graphics();
+
+#if defined(__linux__)
+	/* camera-box issue 1346: the DRM-lease HDMI output's built-in Multiview follows the same refresh. */
+	DrmOutputViewRefresh();
+#endif
 }
 
 void OBSProjector::RenameProjector(QString oldName, QString newName)

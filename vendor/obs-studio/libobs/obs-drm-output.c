@@ -38,6 +38,7 @@
 
 #include "obs.h"
 #include "obs-drm-output.h"
+#include "obs-drm-output-internal.h" /* camera-box issue 1346: the view TU seam */
 #include "graphics/vec4.h"
 #include "util/threading.h"
 
@@ -890,6 +891,11 @@ void obs_drm_output_maybe_autostart(void)
 	bool program = true;
 	if (obs_data_has_user_value(data, "program"))
 		program = obs_data_get_bool(data, "program");
+	/* camera-box issue 1346: the optional "view" key (program | multiview; absent = program) +
+	 * this config's path, which the live switch persists into. Handed over before the enabled
+	 * check so a disabled config still records the choice. */
+	const char *view = obs_data_get_string(data, "view");
+	drm_output_view_configure(view, path);
 
 	if (!enabled) {
 		blog(LOG_INFO, "drm-output: autostart disabled ({\"enabled\":false} in %s) — dormant",
@@ -955,6 +961,14 @@ void obs_drm_output_on_frame(void)
 		g_drm.program_gl_ready = true;
 	}
 
+	/* camera-box issue 1346: the selectable view. MULTIVIEW (the frontend's built-in grid,
+	 * budget-gated) is rendered by the view TU into a claimed buffer, or the last frame is kept;
+	 * only a PROGRAM tick falls through to the issue-1152 M2 copy below. */
+	if (drm_output_view_frame() != DRM_OUTPUT_TICK_PROGRAM) {
+		obs_leave_graphics();
+		return;
+	}
+
 	gs_texture_t *program = obs_get_main_texture();
 	if (!program) { /* nothing rendered yet this session — keep the solid pattern */
 		obs_leave_graphics();
@@ -966,14 +980,8 @@ void obs_drm_output_on_frame(void)
 		return;
 	}
 
-	/* CLAIM: take a buffer out of every mailbox role under the lock. Once claimed it is in
-	 * NO role, so the flip thread cannot select it while we render into it lock-free. */
-	pthread_mutex_lock(&g_drm.program_lock);
-	int idx = drm_output_pick_render_buf(g_drm.p_front, g_drm.p_pending, g_drm.p_ready,
-					     DRM_OUTPUT_PROGRAM_BUFFERS);
-	if (idx == g_drm.p_ready)
-		g_drm.p_ready = -1; /* claim the mailbox slot for overwrite (latest wins) */
-	pthread_mutex_unlock(&g_drm.program_lock);
+	/* CLAIM: take a buffer out of every mailbox role (see drm_output_claim_render_buf). */
+	int idx = drm_output_claim_render_buf();
 	if (idx < 0) {
 		obs_leave_graphics();
 		return;
@@ -1023,14 +1031,52 @@ void obs_drm_output_on_frame(void)
 	 * dma-resv), so scanout can never observe a half-rendered buffer. No glFinish stall. */
 	gs_flush();
 
-	/* PUBLISH: hand the rendered buffer to the flip thread — flush ordered BEFORE this, so
-	 * the flip always finds the implicit fence attached. Skip when a stop disarmed us
-	 * mid-render (the mailbox is about to be torn down). */
+	/* PUBLISH: hand the rendered buffer to the flip thread (flush ordered BEFORE this). */
+	drm_output_publish_render_buf(idx);
+	obs_leave_graphics();
+}
+
+/* -------------------------------------------------------------------------------------------------
+ * camera-box issue 1346 — the mailbox seam shared with the view TU (obs-drm-output-internal.h).
+ * Graphics thread, graphics context held (the frame hook) — the lock order is unchanged: the
+ * context first, then program_lock, held only for the role transaction itself.
+ * ------------------------------------------------------------------------------------------------- */
+
+/* CLAIM: take a buffer out of every mailbox role under the lock. Once claimed it is in NO role,
+ * so the flip thread cannot select it while the caller renders into it lock-free. */
+int drm_output_claim_render_buf(void)
+{
+	pthread_mutex_lock(&g_drm.program_lock);
+	int idx = drm_output_pick_render_buf(g_drm.p_front, g_drm.p_pending, g_drm.p_ready,
+					     DRM_OUTPUT_PROGRAM_BUFFERS);
+	if (idx >= 0 && idx == g_drm.p_ready)
+		g_drm.p_ready = -1; /* claim the mailbox slot for overwrite (latest wins) */
+	pthread_mutex_unlock(&g_drm.program_lock);
+	return idx;
+}
+
+/* PUBLISH: hand the rendered buffer to the flip thread — the caller flushed BEFORE this, so the
+ * flip always finds the implicit fence attached. Skip when a stop disarmed the hook mid-render
+ * (the mailbox is about to be torn down). */
+void drm_output_publish_render_buf(int idx)
+{
 	pthread_mutex_lock(&g_drm.program_lock);
 	if (os_atomic_load_bool(&g_drm.program_want))
 		g_drm.p_ready = idx;
 	pthread_mutex_unlock(&g_drm.program_lock);
-	obs_leave_graphics();
+}
+
+gs_texture_t *drm_output_render_buf_texture(int idx)
+{
+	if (idx < 0 || idx >= DRM_OUTPUT_PROGRAM_BUFFERS)
+		return NULL;
+	return g_drm.pbufs[idx].tex;
+}
+
+void drm_output_mode_size(uint32_t *w, uint32_t *h)
+{
+	*w = g_drm.mode_w;
+	*h = g_drm.mode_h;
 }
 
 #endif /* defined(__linux__) */

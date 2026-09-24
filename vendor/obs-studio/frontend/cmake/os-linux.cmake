@@ -1,6 +1,9 @@
 target_sources(
   obs-studio
   PRIVATE
+    # camera-box issue 1346: the DRM-lease HDMI output view (Program / built-in Multiview), Linux-only
+    components/DrmOutputView.cpp
+    components/DrmOutputView.hpp
     utility/CrashHandler_Linux.cpp
     utility/NativeEventFilter.cpp
     utility/platform-x11.cpp
