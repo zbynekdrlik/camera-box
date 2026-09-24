@@ -2291,63 +2291,55 @@ fn setup_strih_pins_janus_local_ip_from_the_static_ip_source_of_truth() {
     );
 }
 
-/// issue 1352 (a): the mv-host helper + `--user` unit exist in the repo; setup installs python3-xlib,
-/// the helper (0755) + the unit, and ENABLE-ONLY registers it (never a live start). The unit's
-/// ExecStart references the installed helper.
+/// issue 1357: the issue-1352 `strih-mv-host` runtime reparenting helper is RETIRED together with the
+/// vendored child-host projector -- both worked around an XWayland + PRIME-offload present stall that no
+/// box has since the plain-Xorg NVIDIA-primary kiosk (23.9.2026). The helper + its `--user` unit are
+/// gone from the repo; setup step 8b only REMOVES a leftover install (disable --now, rm, daemon-reload),
+/// never installs or enables it, and never live-starts anything.
 #[test]
-fn setup_strih_installs_and_enables_the_mv_host_helper() {
+fn setup_strih_retires_the_mv_host_helper() {
     assert!(
-        manifest_dir().join("scripts/strih-mv-host.py").exists(),
-        "scripts/strih-mv-host.py must exist"
+        !manifest_dir().join("scripts/strih-mv-host.py").exists(),
+        "scripts/strih-mv-host.py must be gone (retired with the child-host, issue 1357)"
     );
     assert!(
-        manifest_dir()
+        !manifest_dir()
             .join("systemd/strih-mv-host.service")
             .exists(),
-        "systemd/strih-mv-host.service must exist"
-    );
-    let unit = read_script("systemd/strih-mv-host.service");
-    assert!(
-        unit.contains("/usr/local/bin/strih-mv-host.py"),
-        "the unit ExecStart must reference the installed helper"
+        "systemd/strih-mv-host.service must be gone (retired with the child-host, issue 1357)"
     );
     let setup = read_script("scripts/setup-strih.sh");
-    assert!(
-        setup.contains("apt-get install -y python3-xlib"),
-        "setup must install python3-xlib (the helper's only dep)"
-    );
-    assert!(
-        setup.contains("install -m 0755 \"${HERE}/strih-mv-host.py\""),
-        "setup must install the helper mode 0755"
-    );
-    assert!(
-        setup.contains("install -m 0644 \"${HERE}/../systemd/strih-mv-host.service\""),
-        "setup must install the --user unit"
-    );
-    // issue 1352 acceptance (22.9.2026): the vendored child-host projector is LIVE, and the runtime
-    // helper CONFLICTS with it (both hosting mechanisms active = MV 0.6 fps / 505 ms presents;
-    // helper stopped = 30 fps / 5 ms). Provisioning therefore installs the helper but leaves it
-    // DISABLED unless STRIH_MV_HOST_ENABLED=1 (a bundle without the vendored fix).
-    assert!(
-        setup.contains("STRIH_MV_HOST_ENABLED:-0"),
-        "setup must gate the mv-host enablement on STRIH_MV_HOST_ENABLED (default 0)"
-    );
-    assert!(
-        setup.contains("systemctl --user enable strih-mv-host.service"),
-        "setup must still be able to enable the mv-host unit (the STRIH_MV_HOST_ENABLED=1 fallback)"
-    );
+    for gone in [
+        "apt-get install -y python3-xlib",
+        "install -m 0755 \"${HERE}/strih-mv-host.py\"",
+        "systemctl --user enable strih-mv-host.service",
+        "STRIH_MV_HOST_ENABLED",
+    ] {
+        assert!(
+            !setup.contains(gone),
+            "setup-strih must no longer install/enable the retired helper (found `{gone}`)"
+        );
+    }
     assert!(
         setup.contains("systemctl --user disable --now strih-mv-host.service"),
-        "setup must disable (and stop) the conflicting helper by default"
+        "setup step 8b must disable (and stop) a leftover helper install"
+    );
+    assert!(
+        setup.contains("rm -f \"${MVH_WANTS}\" \"${MVH_UNIT}\" \"${MVH_HELPER}\""),
+        "setup step 8b must remove the leftover WantedBy link, unit and helper"
     );
     assert!(
         !setup.contains("systemctl --user start strih-mv-host"),
-        "mv-host must never be live-started by provisioning (the provisioning convention)"
+        "provisioning never live-starts a unit (the provisioning convention)"
     );
     let verify = read_script("scripts/verify-strih.sh");
     assert!(
-        verify.contains("STRIH_MV_HOST_ENABLED:-0") && verify.contains("enablement mismatch"),
-        "verify-strih must grade the mv-host enablement against STRIH_MV_HOST_ENABLED (default DISABLED)"
+        verify.contains("(mv-host) retired strih-mv-host helper absent"),
+        "verify-strih must grade the retired helper ABSENT"
+    );
+    assert!(
+        !verify.contains("STRIH_MV_HOST_ENABLED") && !verify.contains("import Xlib"),
+        "verify-strih must no longer grade the helper's enablement or its python3-xlib dep"
     );
 }
 
@@ -2367,17 +2359,14 @@ fn setup_strih_installs_avahi_utils_and_verify_greps_avahi_browse() {
 }
 
 /// issue 1352: verify-strih.sh gates the provisioned items that survive the issue-1357 Xorg kiosk
-/// (mv-host enablement, avahi, DistroAV output names, janus local_ip); the gpu-env item is gone.
+/// (the retired mv-host helper graded absent, avahi, DistroAV output names, janus local_ip); the
+/// gpu-env item is gone.
 #[test]
 fn verify_strih_asserts_the_1352_provisioning_items() {
     let v = read_script("scripts/verify-strih.sh");
     assert!(
         v.contains("strih-mv-host.service"),
-        "verify must gate the mv-host unit"
-    );
-    assert!(
-        v.contains("import Xlib"),
-        "verify must assert python3-xlib importable"
+        "verify must still check for a leftover mv-host unit (graded absent, issue 1357)"
     );
     assert!(
         !v.contains("QT_QPA_PLATFORM=xcb") && !v.contains("STRIH_LX_OBS_GPU_ENV"),
