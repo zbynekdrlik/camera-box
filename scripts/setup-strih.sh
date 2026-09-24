@@ -54,7 +54,7 @@ fail() { echo -e "${RED}FAIL: $1${NC}" >&2; exit 1; }
 # shellcheck source=scripts/lib/genlock-markers.sh
 . "${HERE}/lib/genlock-markers.sh"
 # shellcheck source=scripts/lib/ndi-discovery.sh
-. "${HERE}/lib/ndi-discovery.sh"   # issue 1342: the NDI Discovery Server client config (with setup-device.sh)
+. "${HERE}/lib/ndi-discovery.sh"   # issue 1342: the receiver-side NDI config, networks.ips (with setup-device.sh)
 # shellcheck source=scripts/lib/ndi-runtime.sh
 . "${HERE}/lib/ndi-runtime.sh"   # issue 1317: shared NDI 6.3.2 runtime install recipe (with setup-imag.sh)
 # shellcheck source=scripts/lib/obs-box-baseline.sh
@@ -294,25 +294,24 @@ if DEBIAN_FRONTEND=noninteractive apt-get install -y ffmpeg; then
 else
   warn "  ffmpeg install failed -- ffprobe (on-box E2E verdict) will be absent; fix the box's apt sources and re-run"
 fi
-# issue 1342: the NDI Discovery Server client config (scripts/lib/ndi-discovery.sh, the SAME source
-# of truth setup-device.sh writes on the camboxes): networks.discovery = the dev1 server, mDNS stays
-# on for receiving. TWO readers on this box: the desktop user's ~/.ndi (OBS via strih-obs.service
-# and bkshading-service, both User=${DESKTOP_USER}), and the system dir /etc/ndi for intercom-hub,
-# whose ProtectHome hides ~/.ndi -- its drop-in points NDI_CONFIG_DIR there. Written here, before
-# the OBS/intercom units start (steps 8/13); the next OBS/intercom start reads it. strih-lx is a
-# SENDER too (its STRIH-LX outputs) and a configured sender stops mDNS, so nothing is written until
-# the strih rollout gate NDI_DISCOVERY_ENABLED_STRIH is on (every strih-lx deploy re-runs this script).
-if ndi_discovery_enabled strih; then
-  ndi_discovery_write_config "${USER_HOME}/.ndi" "$DESKTOP_USER" \
-    || fail "NDI discovery config write to ${USER_HOME}/.ndi failed (issue 1342)"
-  ndi_discovery_write_config "$NDI_DISCOVERY_SYSTEM_DIR" \
-    || fail "NDI discovery config write to ${NDI_DISCOVERY_SYSTEM_DIR} failed (issue 1342)"
-  mkdir -p "$(dirname "$NDI_DISCOVERY_INTERCOM_DROPIN")"
-  ndi_discovery_dropin_content > "$NDI_DISCOVERY_INTERCOM_DROPIN"
-  echo "  NDI discovery config: ${USER_HOME}/.ndi + ${NDI_DISCOVERY_SYSTEM_DIR} (discovery=${NDI_DISCOVERY_SERVERS}) + intercom-hub NDI_CONFIG_DIR drop-in (issue 1342)"
-else
-  echo "  NDI discovery: strih rollout gate off (NDI_DISCOVERY_ENABLED_STRIH=0) -- no client config written, mDNS only (issue 1342)"
-fi
+# issue 1342: the RECEIVER-side NDI config (scripts/lib/ndi-discovery.sh, the SAME generator
+# setup-device.sh writes the camboxes with): networks.ips = every managed NDI sender (every camera
+# from camera-set.sh + the obs-fleet ndi-sender boxes; the traveling resolume hostname resolved now,
+# skipped when away). libndi queries those IPs directly IN ADDITION to mDNS; senders never read the
+# list, so strih-lx's own STRIH-LX outputs keep announcing over mDNS -- no gate. THREE receivers on
+# this box: OBS (strih-obs.service) and bkshading-service, both User=${DESKTOP_USER}, read the desktop
+# user's ~/.ndi; intercom-hub's ProtectHome hides ~/.ndi, so it reads the system dir /etc/ndi via its
+# NDI_CONFIG_DIR drop-in. Written here, before the OBS/intercom units start (steps 8/13); the next
+# start reads it. Every strih-lx genlock deploy re-runs this script, so a renumber converges there.
+NDI_IPS="$(ndi_discovery_sender_ips)" \
+  || fail "could not generate the managed NDI sender list (camera-set.sh + obs-fleet.sh ndi-sender facet, issue 1342)"
+ndi_discovery_write_config "${USER_HOME}/.ndi" "$NDI_IPS" "$DESKTOP_USER" \
+  || fail "NDI receiver config write to ${USER_HOME}/.ndi failed (issue 1342)"
+ndi_discovery_write_config "$NDI_DISCOVERY_SYSTEM_DIR" "$NDI_IPS" \
+  || fail "NDI receiver config write to ${NDI_DISCOVERY_SYSTEM_DIR} failed (issue 1342)"
+mkdir -p "$(dirname "$NDI_DISCOVERY_INTERCOM_DROPIN")"
+ndi_discovery_dropin_content > "$NDI_DISCOVERY_INTERCOM_DROPIN"
+echo "  NDI receiver config: ${USER_HOME}/.ndi + ${NDI_DISCOVERY_SYSTEM_DIR} (networks.ips=${NDI_IPS}) + intercom-hub NDI_CONFIG_DIR drop-in (issue 1342)"
 
 # ---------------------------------------------------------------------------------------------
 step 5 "OBS profile facts (${BOX_NAME}: seeded from the Windows 'light' profile)"

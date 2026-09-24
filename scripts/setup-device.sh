@@ -80,10 +80,11 @@ fail() {
                            # nftables OUTPUT-mangle rule (udp dport 123 -> dscp ef) + its boot oneshot
 
 # shellcheck source=scripts/lib/ndi-discovery.sh
-. "$HERE/lib/ndi-discovery.sh"  # ndi_discovery_write_config / ndi_discovery_dropin_content (issue
-                                # 1342) -- also sourced by verify-device.sh's (an) check +
-                                # setup-strih.sh, single source of truth for the NDI Discovery
-                                # Server client config (/etc/ndi/ndi-config.v1.json)
+. "$HERE/lib/ndi-discovery.sh"  # ndi_discovery_sender_ips / ndi_discovery_write_config /
+                                # ndi_discovery_dropin_content (issue 1342) -- also sourced by
+                                # verify-device.sh's (an) check + setup-strih.sh, single source of
+                                # truth for the receiver-side NDI config (/etc/ndi/ndi-config.v1.json,
+                                # networks.ips = every managed sender)
 
 # shellcheck source=scripts/lib/ndi-provision.sh
 . "$HERE/lib/ndi-provision.sh"  # NDI_VERSION_PIN + ndi_bootstrap_peer_list / ndi_runtime_version_matches_pin
@@ -846,18 +847,20 @@ echo "  camera-box.service.d/free-capture-device.conf installed -- frees /dev/vi
 # names one); its code is gone and a re-provision DELETES the drop-in that used to enable it, so a
 # live box that still carries it converges (the env var is ignored by the new binary either way).
 rm -f /etc/systemd/system/camera-box.service.d/publish-30p.conf
-# issue 1342 -- NDI Discovery Server client config (scripts/lib/ndi-discovery.sh): the system-dir
-# ndi-config.v1.json (networks.discovery = dev1) + a drop-in pointing libndi's NDI_CONFIG_DIR at it
-# (camera-box runs as root with ProtectHome=yes, so /root/.ndi would be invisible to it). A
-# configured sender stops announcing over mDNS, so it is written ONLY once the rollout gate
-# NDI_DISCOVERY_ENABLED is on (.claude/rules/ndi-discovery.md). Enable-only, effective on the next start.
-if ndi_discovery_enabled cambox; then
-    ndi_discovery_write_config "$NDI_DISCOVERY_SYSTEM_DIR"
-    ndi_discovery_dropin_content > "$NDI_DISCOVERY_CAMBOX_DROPIN"
-    echo "  NDI discovery: ${NDI_DISCOVERY_SYSTEM_DIR}/${NDI_DISCOVERY_CONFIG_NAME} (discovery=${NDI_DISCOVERY_SERVERS}) + camera-box.service.d/ndi-discovery.conf (issue 1342)"
-else
-    echo "  NDI discovery: cambox rollout gate off (NDI_DISCOVERY_ENABLED_CAMBOX=0) -- no client config written, mDNS only (issue 1342)"
-fi
+# issue 1342 -- the RECEIVER-side NDI config (scripts/lib/ndi-discovery.sh): the camera-box service
+# RECEIVES `STRIH-LX (interkom)` for the cameraman HDMI preview, so /etc/ndi/ndi-config.v1.json lists
+# every managed NDI sender IP in networks.ips (generated from camera-set.sh + obs-fleet.sh, never
+# hand-typed); libndi queries them directly IN ADDITION to mDNS. Senders never read the list, so this
+# box keeps announcing CAMn (usb) over mDNS exactly as before -- no gate needed. A drop-in points
+# libndi's NDI_CONFIG_DIR at /etc/ndi (camera-box runs as root with ProtectHome=yes, so /root/.ndi
+# would be invisible to it). Enable-only, effective on the next start. A renumbered sender is picked
+# up by re-running this script (verify-device (an) FAILs until then).
+NDI_IPS="$(ndi_discovery_sender_ips)" \
+    || fail "could not generate the managed NDI sender list (camera-set.sh + obs-fleet.sh ndi-sender facet, issue 1342)"
+ndi_discovery_write_config "$NDI_DISCOVERY_SYSTEM_DIR" "$NDI_IPS" \
+    || fail "NDI receiver config write to ${NDI_DISCOVERY_SYSTEM_DIR} failed (issue 1342)"
+ndi_discovery_dropin_content > "$NDI_DISCOVERY_CAMBOX_DROPIN"
+echo "  NDI receiver config: ${NDI_DISCOVERY_SYSTEM_DIR}/${NDI_DISCOVERY_CONFIG_NAME} (networks.ips=${NDI_IPS}) + camera-box.service.d/ndi-discovery.conf (issue 1342)"
 
 systemctl daemon-reload
 systemctl enable camera-box

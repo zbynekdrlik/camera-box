@@ -320,8 +320,9 @@ fn bak_cruft_cleanup_is_wired_into_ndi_and_dropin_provisioning_steps() {
 // ---------------------------------------------------------------------------------------------
 // issue 1342 — the unconsumed issue-792 "CAMn (30p)" stream is removed. STEP 7 no longer WRITES the
 // publish-30p.conf drop-in and instead DELETES a leftover one, so a re-provisioned live box converges
-// to the single `CAMn (usb)` output. The same STEP 7 writes the NDI Discovery Server config
-// (/etc/ndi/ndi-config.v1.json) + the camera-box NDI_CONFIG_DIR drop-in (scripts/lib/ndi-discovery.sh).
+// to the single `CAMn (usb)` output. The same STEP 7 writes the receiver-side NDI config
+// (/etc/ndi/ndi-config.v1.json, networks.ips = every managed sender) + the camera-box NDI_CONFIG_DIR
+// drop-in (scripts/lib/ndi-discovery.sh).
 // ---------------------------------------------------------------------------------------------
 
 #[test]

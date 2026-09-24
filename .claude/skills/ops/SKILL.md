@@ -822,12 +822,13 @@ ffi_seam_tests` (append `# airuleset:build-ok` — the Tier-0 hook blocks `cargo
 **SCOPE LIMIT (do NOT overstate):** re-announce fixes the **boot-race / late-DHCP / link-flap**
 cases. It does **NOT** fix a STABLE box whose mDNS registration was simply lost/missed by OBS
 (stable network, no change → no trigger) — and the cam boxes have STATIC IPs, so a clean reboot may
-present a stable sig from process start. That persistent-flakiness case is the **central NDI
-Discovery Server** — CHOSEN by the owner and implemented by issue 1342 (the dev1
-`ndi-discovery-server` unit + `ndi-config.v1.json` `networks.discovery` on every managed box and
-laptop; see `.claude/rules/ndi-discovery.md`, incl. the sender-stops-mDNS caveat). When diagnosing "camera missing from OBS dropdown", check WHICH case it is
-(boot-race/flap → re-announce should cure within ~2s; stable-lost-announce → needs the discovery
-server).
+present a stable sig from process start. That persistent-flakiness case is covered by issue 1342's
+RECEIVER-side sender list: every managed receiver's `ndi-config.v1.json` `networks.ips` names every
+managed sender IP (generated from camera-set.sh + obs-fleet.sh), so the finder queries each one by
+unicast IN ADDITION to mDNS. The part-1 Discovery Server was dropped because a configured SENDER
+stops mDNS; see `.claude/rules/ndi-discovery.md`. When diagnosing "camera missing from OBS dropdown", check WHICH case it is
+(boot-race/flap → re-announce should cure within ~2s; stable-lost-announce → check the receiver
+has the generated `networks.ips` list, `verify-device (an)` / `verify-strih` item 34).
 
 **Rig verify (supervisor):** reboot a box, confirm it reappears in the OBS NDI dropdown within
 seconds (and on a link flap). The unit tests prove the trigger logic only — discovery is a rig check.

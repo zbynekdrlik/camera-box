@@ -164,11 +164,12 @@
 #        relay: TasksMax <= 512 (fork/thread runaway can't starve the box pid space) AND a running
 #        relay logs at info (zero journal lines while active = an old binary predating info-by-
 #        default logging). A box without the relay = `na`; a disabled/inactive relay skips logging.
-#   (an) NDI discovery client config (issue 1342) -- HARD FAIL once the rollout gate
-#        NDI_DISCOVERY_ENABLED is on (before that, a box with neither file passes): /etc/ndi/ndi-config.v1.json names the
-#        dev1 NDI Discovery Server (networks.discovery, scripts/lib/ndi-discovery.sh) with an EMPTY
-#        networks.ips, AND the camera-box.service.d/ndi-discovery.conf drop-in points NDI_CONFIG_DIR
-#        at /etc/ndi (camera-box runs as root with ProtectHome=yes, so /root/.ndi is invisible).
+#   (an) NDI discovery receiver config (issue 1342) -- HARD FAIL: /etc/ndi/ndi-config.v1.json lists
+#        every PINNED managed NDI sender IP in networks.ips (the SAME generator setup-device.sh writes
+#        with, scripts/lib/ndi-discovery.sh: every camera + strih-lx/stream; a renumber FAILs until
+#        re-provisioned) and carries NO networks.discovery, AND the camera-box.service.d/
+#        ndi-discovery.conf drop-in points NDI_CONFIG_DIR at /etc/ndi (camera-box runs as root with
+#        ProtectHome=yes, so /root/.ndi is invisible).
 #   (al) named `cam-box` UEFI boot entry (#1066 D6) -- HARD FAIL: efibootmgr reports a `cam-box`
 #       entry AND it is FIRST in BootOrder -- so the box boots its internal disk without depending on
 #       the AMI USB auto-entry (which failed on cam2 after a warm reboot). setup-device.sh STEP 17d
@@ -233,9 +234,9 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
                                  # off-box kernel(netconsole)+journal(upload) forensics check (#1311;
                                  # SAME source of truth as setup-device.sh / create-usb-linux.sh)
 # shellcheck source=scripts/lib/ndi-discovery.sh
-. "$HERE/lib/ndi-discovery.sh"   # ndi_discovery_gather_remote_snippet/ndi_discovery_config_verdict/
-                                 # ndi_discovery_dropin_config_dir -- the (an) NDI discovery client
-                                 # config check (issue 1342; SAME source of truth as setup-device.sh)
+. "$HERE/lib/ndi-discovery.sh"   # ndi_discovery_sender_ips/ndi_discovery_config_verdict/
+                                 # ndi_discovery_dropin_config_dir -- the (an) NDI discovery receiver
+                                 # config check (issue 1342; SAME generator as setup-device.sh)
 # shellcheck source=scripts/lib/efi-boot-entry.sh
 . "$HERE/lib/efi-boot-entry.sh"  # efi_entry_verdict -- the (al) named cam-box UEFI entry check
                                  # (#1066 D6; SAME source of truth as setup-device.sh / create-usb-linux.sh)
@@ -852,8 +853,8 @@ Checks:
       in BootOrder -- FAILs if absent / not leading / efibootmgr unreadable (test-strictness)
   (am) bkshading-relay blast-radius + info logging (#1309): TasksMax <= 512 AND a running relay
       logs at info (zero journal lines while active FAILs); relay not provisioned = n/a
-  (an) NDI discovery client config (issue 1342): /etc/ndi/ndi-config.v1.json names the dev1
-      Discovery Server with empty networks.ips + the camera-box NDI_CONFIG_DIR drop-in
+  (an) NDI discovery receiver config (issue 1342): /etc/ndi/ndi-config.v1.json networks.ips lists
+      every pinned managed sender, no networks.discovery + the camera-box NDI_CONFIG_DIR drop-in
 
 Env: KERNEL_PIN (optional exact running-kernel pin), NDI_VERSION_PIN (default 6.3.2),
      DANTESYNC_OFFSET_FRESHNESS_S (max age of a fresh [NTP] offset line, default 300),
@@ -1757,31 +1758,32 @@ else
   esac
 fi
 
-# (an) NDI discovery client config (issue 1342) -- HARD FAIL ---------------------------------------
-# The fleet discovers NDI sources via the dev1 NDI Discovery Server, not only mDNS. setup-device.sh
-# STEP 7 writes /etc/ndi/ndi-config.v1.json (networks.discovery = the server list, networks.ips
-# empty) and a camera-box.service.d drop-in pointing libndi's NDI_CONFIG_DIR at /etc/ndi. This
-# grades BOTH, read-only, in one ssh round trip, via the shared scripts/lib/ndi-discovery.sh verdict.
-# While the rollout gate NDI_DISCOVERY_ENABLED is off, a box with NEITHER file is the correct state
-# (ok); a half-written box, or any box once the gate is on, is graded in full.
-# Inserted BEFORE (q) per .claude/rules/provisioning-scripts.md (the (q)-last invariant); fail()
-# only, never a warn.
+# (an) NDI discovery receiver config (issue 1342) -- HARD FAIL -------------------------------------
+# The camera-box service RECEIVES `STRIH-LX (interkom)` (the cameraman preview). setup-device.sh STEP 7
+# writes /etc/ndi/ndi-config.v1.json (networks.ips = every managed NDI sender, generated from
+# camera-set.sh + obs-fleet.sh) and a camera-box.service.d drop-in pointing libndi's NDI_CONFIG_DIR at
+# /etc/ndi. This grades BOTH, read-only, in one ssh round trip, against the SAME generator's PINNED
+# list (the traveling resolume hostname is best-effort at write time, never required here), so a
+# renumbered sender FAILs until the box is re-provisioned. A stray networks.discovery also FAILs (a
+# configured sender stops mDNS). Inserted BEFORE (q) per .claude/rules/provisioning-scripts.md (the
+# (q)-last invariant); fail() only, never a warn.
 anrc=0
 NDI_DISC_BLOCK="$(ssh_box "$(ndi_discovery_gather_remote_snippet)")" || anrc=$?
 NDI_DISC_CONF="$(ndi_discovery_block_section "$NDI_DISC_BLOCK" NDI_CONF)"
 NDI_DISC_DROPIN="$(ndi_discovery_block_section "$NDI_DISC_BLOCK" NDI_DROPIN)"
-NDI_DISC_VERDICT="$(ndi_discovery_config_verdict "$NDI_DISC_CONF")"
+NDI_DISC_REQUIRED="$(ndi_discovery_sender_ips pinned)" || NDI_DISC_REQUIRED=""
+NDI_DISC_VERDICT="$(ndi_discovery_config_verdict "$NDI_DISC_CONF" "$NDI_DISC_REQUIRED")"
 NDI_DISC_DIR="$(ndi_discovery_dropin_config_dir "$NDI_DISC_DROPIN")"
 if [ "$anrc" -ne 0 ]; then
-  fail "could not read the NDI discovery config over SSH (rc=$anrc, issue 1342)"
-elif ndi_discovery_rollout_pending "$NDI_DISC_CONF" "$NDI_DISC_DIR" cambox; then
-  ok "NDI discovery cambox rollout gate off (NDI_DISCOVERY_ENABLED_CAMBOX=0) and no client config on the box -- mDNS only, the correct pre-rollout state (issue 1342)"
+  fail "could not read the NDI receiver config over SSH (rc=$anrc, issue 1342)"
+elif [ -z "$NDI_DISC_REQUIRED" ]; then
+  fail "could not generate the managed NDI sender list (scripts/camera-set.sh + scripts/lib/obs-fleet.sh ndi-sender facet, issue 1342)"
 elif [ "$NDI_DISC_VERDICT" != "ok" ]; then
-  fail "NDI discovery config ${NDI_DISCOVERY_SYSTEM_DIR}/${NDI_DISCOVERY_CONFIG_NAME}: $(printf '%s' "$NDI_DISC_VERDICT" | tr '\n' ' ' | sed 's/FAIL: //g')-- re-run setup-device.sh (issue 1342)"
+  fail "NDI receiver config ${NDI_DISCOVERY_SYSTEM_DIR}/${NDI_DISCOVERY_CONFIG_NAME}: $(printf '%s' "$NDI_DISC_VERDICT" | tr '\n' ' ' | sed 's/FAIL: //g')-- re-run setup-device.sh (issue 1342)"
 elif [ "$NDI_DISC_DIR" != "$NDI_DISCOVERY_SYSTEM_DIR" ]; then
-  fail "camera-box.service.d/ndi-discovery.conf missing or NDI_CONFIG_DIR='${NDI_DISC_DIR:-<none>}' (want ${NDI_DISCOVERY_SYSTEM_DIR}) -- libndi would never read the discovery config (issue 1342)"
+  fail "camera-box.service.d/ndi-discovery.conf missing or NDI_CONFIG_DIR='${NDI_DISC_DIR:-<none>}' (want ${NDI_DISCOVERY_SYSTEM_DIR}) -- libndi would never read the receiver config (issue 1342)"
 else
-  ok "NDI discovery client config: discovery=${NDI_DISCOVERY_SERVERS} + NDI_CONFIG_DIR=${NDI_DISCOVERY_SYSTEM_DIR} drop-in (issue 1342)"
+  ok "NDI receiver config: networks.ips lists every managed sender (${NDI_DISC_REQUIRED}) + NDI_CONFIG_DIR=${NDI_DISCOVERY_SYSTEM_DIR} drop-in (issue 1342)"
 fi
 
 # (q) .bak cruft drift -- WARNING only, never a FAIL (#453) -------------------------------------
