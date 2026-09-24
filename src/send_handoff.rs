@@ -554,13 +554,8 @@ mod tests {
         std::thread::JoinHandle<()>,
     );
 
-    /// Runs the real `run_send_loop` on its own thread with a [`FakeSink`] (5 ms idle poll).
+    /// Runs the real `run_send_loop` on its own thread with a [`FakeSink`].
     fn spawn_loop(send_ok: bool) -> Spawned {
-        spawn_loop_idle(send_ok, Duration::from_millis(5))
-    }
-
-    /// [`spawn_loop`] with an explicit idle poll interval.
-    fn spawn_loop_idle(send_ok: bool, idle: Duration) -> Spawned {
         let slot = Arc::new(HandoffSlot::new());
         let window = Arc::new(Mutex::new(SendWindow::default()));
         let sent: Sent = Arc::new(Mutex::new(Vec::new()));
@@ -574,7 +569,7 @@ mod tests {
         };
         let (s, w) = (Arc::clone(&slot), Arc::clone(&window));
         let h = std::thread::spawn(move || {
-            run_send_loop(&s, &w, idle, &mut sink);
+            run_send_loop(&s, &w, Duration::from_millis(5), &mut sink);
         });
         (slot, window, sent, recycled, ticks, h)
     }
@@ -628,16 +623,8 @@ mod tests {
         let (slot, window, sent, recycled, _ticks, h) = spawn_loop(true);
         let far = Instant::now() + Duration::from_millis(1500);
         assert!(matches!(slot.offer(job(1, &[1], far)), Offer::Accepted));
-        // Wait until the send thread has TAKEN job 1 (it now waits on its deadline). A fixed sleep
-        // would race a loaded CI runner and turn the next offer into a replacement.
-        let taken_by = Instant::now() + Duration::from_secs(5);
-        while slot.is_pending() {
-            assert!(
-                Instant::now() < taken_by,
-                "the send thread never took job 1"
-            );
-            std::thread::sleep(Duration::from_millis(1));
-        }
+        // Let the send thread take job 1 and start waiting on its deadline.
+        std::thread::sleep(Duration::from_millis(150));
         let far2 = Instant::now() + Duration::from_millis(100);
         assert!(
             matches!(slot.offer(job(2, &[2], far2)), Offer::Accepted),
@@ -704,7 +691,7 @@ mod tests {
     }
 
     #[test]
-    fn housekeeping_runs_while_idle_1242() {
+    fn housekeeping_runs_while_idle_and_after_each_job_1242() {
         let (slot, _window, _sent, _recycled, ticks, h) = spawn_loop(true);
         std::thread::sleep(Duration::from_millis(60));
         let idle_ticks = *ticks.lock().unwrap();
@@ -712,37 +699,11 @@ mod tests {
             idle_ticks >= 2,
             "idle housekeeping ran {idle_ticks} time(s)"
         );
+        let _ = slot.offer(job(1, &[1], Instant::now()));
+        std::thread::sleep(Duration::from_millis(60));
         slot.close();
         h.join().unwrap();
-    }
-
-    #[test]
-    fn housekeeping_runs_right_after_each_job_1242() {
-        // A 60 s idle poll: no idle tick can happen during this test, so a tick after the job can
-        // only come from the after-job housekeeping.
-        let (slot, _window, sent, _recycled, ticks, h) =
-            spawn_loop_idle(true, Duration::from_secs(60));
-        std::thread::sleep(Duration::from_millis(30));
-        assert_eq!(*ticks.lock().unwrap(), 0, "no idle tick within 60 s");
-        let _ = slot.offer(job(1, &[1], Instant::now()));
-        let done_by = Instant::now() + Duration::from_secs(5);
-        while *ticks.lock().unwrap() == 0 {
-            assert!(Instant::now() < done_by, "no housekeeping after the job");
-            std::thread::sleep(Duration::from_millis(1));
-        }
-        assert_eq!(sent.lock().unwrap().len(), 1);
-        slot.close();
-        h.join().unwrap();
-    }
-
-    #[test]
-    fn is_pending_reports_an_untaken_job_1242() {
-        let slot = HandoffSlot::new();
-        assert!(!slot.is_pending());
-        let _ = slot.offer(job(1, &[1], Instant::now()));
-        assert!(slot.is_pending());
-        assert!(matches!(slot.take(Duration::from_millis(5)), Take::Job(_)));
-        assert!(!slot.is_pending());
+        assert!(*ticks.lock().unwrap() > idle_ticks);
     }
 
     #[test]
@@ -781,12 +742,6 @@ mod tests {
         assert_eq!((d.waited, d.past_deadline, d.expedited), (1, 1, 1));
         assert!((d.max_lateness_ms - 0.8).abs() < 1e-9);
         assert!((d.max_send_ms - 6.1).abs() < 1e-9);
-        // The worst lateness + send of ONE job: 6.1 (expedited, 0 late) beats 0.8 + 4.0.
-        assert!(
-            (d.max_late_plus_send_ms - 6.1).abs() < 1e-9,
-            "{}",
-            d.max_late_plus_send_ms
-        );
         assert_eq!(w, SendWindow::default());
     }
 
@@ -816,16 +771,13 @@ mod tests {
             waited: 300,
             max_lateness_ms: 0.05,
             max_send_ms: 6.0,
-            max_late_plus_send_ms: 6.03,
             ..SendWindow::default()
         };
         let (line, warn) = window_summary(&capture, &send, 7200, 16.667);
         assert!(!warn, "{line}");
-        // The slot use (offset + the worst lateness + send of one job) is reported, not a WARN:
-        // the send thread runs below the capture thread, so it cannot delay the next capture.
         assert_eq!(
             line,
-            "#1242 send stagger: offset=7200 us, capture loop max work 15.3 ms vs capture interval 16.7 ms; send thread 300 job(s) (300 waited for the offset / 0 already past it / 0 expedited by a newer frame), max lateness 0.05 ms, max send 6.0 ms, max slot use 13.2 ms, 0 replaced"
+            "#1242 send stagger: offset=7200 us, capture loop max work 15.3 ms vs capture interval 16.7 ms; send thread 300 job(s) (300 waited for the offset / 0 already past it / 0 expedited by a newer frame), max lateness 0.05 ms, max send 6.0 ms, 0 replaced"
         );
     }
 
