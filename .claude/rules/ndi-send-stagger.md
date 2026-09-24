@@ -59,23 +59,17 @@ moves the wait to the thread that owns the send, and the stagger is ON again.
   phase relative to the grid is arbitrary, and `max(arrival, slot + offset)` collapses the spread
   whenever a frame arrives later than its camera's offset.
 - `HandoffSlot`: ONE slot, newest wins. `offer` never waits on the send thread. An UNTAKEN older job
-  is handed back as `Offer::Replaced` so the caller recycles its buffer and counts it. That happens
-  when a send outlasts a frame interval, or when the capture thread (one FIFO step above the send
-  thread) hands over two buffered frames without blocking in between, so the send thread never ran.
-  `is_pending()` says whether a job is still untaken.
+  is handed back as `Offer::Replaced` so the caller recycles its buffer and counts it.
 - `run_send_loop(slot, window, idle, &mut sink)`: take → if the deadline is ahead,
   `wait_until(deadline)` (returns early when a NEWER job arrives → the held one goes out at once,
-  counted `expedited`, so frames leave in order and a held frame never waits out its offset behind
-  a newer one) → send every timecode in order → record the window → `after_job` → `housekeeping`.
+  counted `expedited`, so a catch-up burst is sent in order and never overwritten) → send every
+  timecode in order → record the window → `after_job` → `housekeeping`.
 - `sleep_until(deadline)`: the same wait for the ring-fed E2E burn thread.
 - `CaptureWindow` (capture side) + `SendWindow` (send side, shared through a mutex) +
   `window_summary` → the per-5 s line, now printed on EVERY box (CAM1 included):
   `#1242 send stagger: offset=… us, capture loop max work W ms vs capture interval C ms; send thread
   J job(s) (a waited for the offset / b already past it / c expedited by a newer frame), max lateness
-  L ms, max send S ms, max slot use U ms, R replaced`. `U` = offset + the worst lateness + send of ONE
-  job: how far into its slot a send reached (a margin figure, not a WARN — the send thread cannot
-  delay the next capture; a send reaching into the next slot only makes the next send late, which
-  `LATE` reports). It is a WARN on:
+  L ms, max send S ms, R replaced`. It is a WARN on:
   - `OVER BUDGET`: `W ≥ C` (the offset is no longer part of the capture budget);
   - `SEND OVER BUDGET`: one job's sends took `≥ C` (the send thread cannot keep up at that rate);
   - `LATE`: `L ≥ LATE_WARN_FRACTION (0.5) × C`;
@@ -84,13 +78,7 @@ moves the wait to the thread that owns the send, and the stagger is ON again.
 `src/ndi_send_thread.rs` is the NDI glue (CI-compiled only; linux-gated):
 
 - `NdiSendThread::spawn(sender, window, emit_heartbeat_ns, epoch)` moves the `NdiSender` onto an
-  `ndi-send` thread, pinned to the isolated capture core and raised to SCHED_FIFO at
-  `affinity::SEND_FIFO_PRIORITY` = 89, ONE step below the capture thread (`RtThreadRole::Send`; the
-  E2E burn thread takes the same role). The capture thread therefore always preempts a stagger wait
-  or a long SpeedHQ encode. At EQUAL priority (the first draft) an offset + send longer than a frame
-  interval still held the next capture back, which is the old inline timeline minus the sleep. The
-  live camera-box process now has 2 FIFO threads (capture + send), under verify-device (ah)'s
-  ceiling of 4.
+  `ndi-send` thread, pinned to the isolated capture core and raised to SCHED_FIFO like the burn thread.
 - The sink sends with the SYNCHRONOUS `send_frame_zero_copy` (`NDIlib_send_send_video_v2`), so the
   SDK is done with the buffer when the call returns. The buffer goes back to the pool only then:
   no use-after-free window. Do not switch to `send_video_async_v2` without keeping each buffer
@@ -100,11 +88,9 @@ moves the wait to the thread that owns the send, and the stagger is ON again.
   A failed send logs the same `Failed to send frame:` line as before.
 - `hand_off(data, info, timecodes, deadline)` copies the frame off the V4L2 mmap into a pooled
   buffer (`src/frame_buffer_pool.rs`, the #280 `BufferPool` moved to the crate root and re-exported
-  from `probe::genlock`) and offers the job. No yield: `sched_yield` never runs a lower-priority
-  thread. The send thread takes the job when the capture thread blocks on its next dequeue.
-- `Drop` closes the slot, so a capture loop that unwinds cannot leave the sender announced.
-- A wedged send now shows as the #944 emit-freeze (exit 81: the capture thread keeps returning, the
-  emit heartbeat goes stale), no longer as the #945 capture wedge (exit 79).
+  from `probe::genlock`), offers the job, then `yield_now()`: the send thread shares the isolated
+  core at the same SCHED_FIFO priority and cannot preempt the capture thread, so the yield lets it
+  take the job (and park on the deadline) before the capture loop drains the next buffered frame.
 
 `src/main.rs` `run_capture_loop` wires it in:
 
@@ -114,10 +100,7 @@ moves the wait to the thread that owns the send, and the stagger is ON again.
    send_deadline(stagger_anchor, send_stagger_offset)`.
 3. `emit_one` only COLLECTS `production_timecodes` (plus the counters, the grab tee, the 30p tee).
    After the last `emit_one`, ONE `send_thread.hand_off(...)` carries all of them; a replacement is
-   `capture_window.note_replaced` AND is taken back out of `emit_count` (those frames never went
-   out, so `sent`, the #707 per-second ring and the #666 emit-rate check stay honest; the ring's
-   `emit_count.saturating_sub(emit_before)` cannot underflow). `capture_window.note_work(callback
-   time)` follows.
+   `capture_window.note_replaced`. `capture_window.note_work(callback time)` follows.
 4. The #1131 buffered-queue signal reads the raw `dequeue_duration_ms` (nothing to add back).
 5. The burn path puts the same `send_deadline` in `BurnJob`; the burn thread renders the QR, then
    `sleep_until(job.send_deadline)`, then sends, and records into the same `SendWindow`.
@@ -132,13 +115,12 @@ moves the wait to the thread that owns the send, and the stagger is ON again.
   below 2.5 Gb/s once `s ≥ 0.96–1.12 ms`. At 1.2 ms the train peaks at 2.0–2.33 Gb/s.
 - **Fleet size:** seven cameras need `6 × s ≤ 7.5 ms`, so `s ≤ 1.25 ms`. More cameras on the same
   port would need a smaller `s`; otherwise the clamp makes the last cameras share the 7.5 ms slot.
-- **Budget:** the capture thread now does hashing + one ~4 MB frame copy (1080p YUYV, ~0.4 ms) per
-  emitted frame; the YUYV→UYVY conversion, the SpeedHQ encode and the send run on the send thread
-  (same isolated core, one FIFO step lower). The capture thread preempts the send thread, so the
-  capture budget is only its own work (`OVER BUDGET`) and the V4L2 dequeue timing the #1131 / #707
-  signals read is not inflated by a send. The send thread keeps up while one job's send stays under
-  a capture interval (`SEND OVER BUDGET`); the offset only delays WHEN a send starts inside its slot
-  (`max slot use`), and the next frame's deadline is one interval later.
+- **Budget:** the capture thread now does only hashing + the frame copy per emitted frame; the SpeedHQ
+  encode + send run on the send thread (same core). The send thread keeps up while one job's send
+  stays under a capture interval (`SEND OVER BUDGET` is that signal). The offset only delays WHEN the
+  send starts inside its slot; the next frame's deadline is one interval later, so the offset never
+  eats the budget. A long send delays the next capture callback (same core, no preemption) — the V4L2
+  queue buffers it, exactly as the old inline send did.
 
 ## Invariants — do not break
 
@@ -162,9 +144,6 @@ moves the wait to the thread that owns the send, and the stagger is ON again.
 
 ## Verifying a change (Tier-0)
 
-- The `RtThreadRole` → FIFO priority decision in `src/affinity.rs` is pure, but the file needs libc:
-  lift the block from `pub const CAPTURE_FIFO_PRIORITY` up to the SCHED_FIFO policy-id comment plus
-  the role tests into a scratch file and `rustc --test` + `clippy-driver` it.
 - `send_stagger.rs`, `send_handoff.rs` and `frame_buffer_pool.rs` are std-only:
   `rustc --edition 2021 --test -D warnings <file>`, run it, and `clippy-driver --edition 2021 --test
   -D warnings <file>` (+ `--crate-type lib`). The hand-off tests drive the REAL `run_send_loop` with a
@@ -185,9 +164,7 @@ moves the wait to the thread that owns the send, and the stagger is ON again.
 2. Read each box's startup line: `journalctl -u camera-box | grep 'NDI send stagger'` →
    `camN offset=(N-1)×1200 us (#1242)`.
 3. Read every box's 5 s `#1242 send stagger:` line for 30 min: no `OVER BUDGET` / `SEND OVER BUDGET`
-   / `LATE` / `REPLACED`; note the capture-loop max work, the max lateness, the max send and the max
-   slot use (CAM7's is the tightest: 7.2 ms + its worst send). `ps -L -o class,rtprio -p $(pgrep -x
-   camera-box)` shows two FF threads, 90 (capture) and 89 (ndi-send).
+   / `LATE` / `REPLACED`; note the capture-loop max work, the max lateness and the max send.
    Check that `Streaming:` captured fps / capture-dropped are unchanged.
 4. Compare the `foh1_video ether2` `tx-drop-queue1-packet` rate over 30 min: it should be back near the
    stagger-ON level (≈ 50/min), not the stagger-OFF ≈ 790/min.

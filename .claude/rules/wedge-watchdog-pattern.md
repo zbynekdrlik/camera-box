@@ -86,11 +86,6 @@ leaves the other call site silently exposed to the identical bug.
 
 ## A SIBLING watchdog that OVERLAPS an existing one — discriminate it, don't let two fire on one event (#944)
 
-**Since #1242 the production NDI send runs on its own `ndi-send` thread** (`src/ndi_send_thread.rs`),
-which stamps the #944 emit heartbeat after each confirmed send. A send wedged inside the NDI SDK
-therefore shows as the #944 emit-freeze (exit 81: the capture thread keeps returning, the emit
-heartbeat goes stale), not as the #945 capture wedge (exit 79) the old inline send produced.
-
 The 4-piece recipe above watches ONE signal: "did the blocking call RETURN?" (`#945` stamps its
 heartbeat after every `process_frame()` return, Ok OR Err). But a "dead output" can happen while
 that call keeps returning — `VideoCapture::process_frame` returns `Ok(())` on a
