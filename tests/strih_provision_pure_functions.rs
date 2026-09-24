@@ -730,16 +730,25 @@ fn dantesync_unit_text_renders_the_role_and_fail_closes_on_ambiguous_shapes() {
         out2.contains("ExecStart=/usr/local/bin/dantesync --ntp-server strih.lan"),
         "client ExecStart must be the CLIENT daemon: {out2}"
     );
-    // client with no ARGS defaults to the client args helper.
-    let (c2b, out2b, _e) = run_sourced(&[], "strih_dantesync_unit_text client ''");
+    // client with no ARGS defaults to the client args helper -- whose upstream is the box fact
+    // STRIH_DANTESYNC_UPSTREAM or the STRIH_LX_NTP_SERVER override (issue 1361).
+    let (c2b, out2b, _e) = run_sourced(
+        &[("STRIH_LX_NTP_SERVER", "ntp-master.lan")],
+        "strih_dantesync_unit_text client ''",
+    );
     assert_eq!(c2b, 0);
     assert!(
-        out2b.contains("ExecStart=/usr/local/bin/dantesync --ntp-server"),
+        out2b.contains("ExecStart=/usr/local/bin/dantesync --ntp-server ntp-master.lan"),
         "the default client ExecStart must carry the client args: {out2b}"
     );
+    // ...and on a box with NO upstream (strih-lx is the NTP master) `client ''` is refused and emits
+    // nothing -- never a guessed default host.
+    let (c2c, out2c, _e) = run_sourced(&[], "strih_dantesync_unit_text client ''");
+    assert_ne!(c2c, 0, "client with no upstream fact must refuse: {out2c}");
+    assert!(out2c.trim().is_empty(), "a refused client unit emits nothing: {out2c}");
 
     // Ambiguous shapes emit NOTHING and return non-zero. (`client ''` is NOT ambiguous: the
-    // printer defaults an empty client args to the client helper -- asserted above.)
+    // printer defaults an empty client args to the client helper -- asserted above, both branches.)
     for (role, args) in [
         ("server", "--ntp-server strih.lan"),
         ("client", "ntp_server_mode"),
