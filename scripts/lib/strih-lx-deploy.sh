@@ -76,6 +76,23 @@ strih_lx_stage_dir() {
 
 # --- remote command builders (pure; the SAME text execute runs and --plan prints) ----------------
 
+# the box's own hostname -- the identity check against the fact file's STRIH_HOSTNAME.
+strih_lx_remote_identity_cmd() {
+  printf '%s\n' 'hostname'
+}
+
+# setup-strih.sh step 17 runs verify-strih.sh; with no reboot pending it FAILS while the deploy has OBS
+# stopped (item 1 "OBS running"). Prints how often that gate line is among the log's last 5 lines --
+# 1 means every install step before it succeeded (fail() exits at the first failure).
+strih_lx_remote_setup_gate_cmd() {
+  printf "tail -n 5 '%s/setup-strih.log' 2>/dev/null | grep -F -c 'verify-strih.sh acceptance gate did not pass' || true\n" "$1"
+}
+
+# the real acceptance gate, run by the deploy once OBS is up (stdin = the sudo password line).
+strih_lx_remote_accept_cmd() {
+  printf "sudo -k -S -p '' '%s/repo/scripts/verify-strih.sh' --box %s\n" "$1" "$2"
+}
+
 strih_lx_remote_installer_cmd() {
   printf '%s\n' 'if pgrep -x setup-strih.sh >/dev/null; then echo alive; else echo idle; fi'
 }
@@ -225,6 +242,26 @@ strih_lx_is_ipv4() {
   return 0
 }
 
+# strih_lx_tree_check TREE BOX -> prints the fact file's STRIH_HOSTNAME (rc 0) when the staged tree
+# holds what the box deploy needs: setup-strih.sh, verify-strih.sh, obs-backup-retention.sh,
+# systemd/strih-obs.service, the box fact file scripts/strih-boxes/BOX.env (issue 1361) and the
+# intercom routing file its STRIH_INTERCOM_CONFIG names (setup-strih.sh step 13 installs it). The fact
+# file is read with sed, never sourced on dev1. rc 1 + a named reason on stderr otherwise. Pure.
+strih_lx_tree_check() {
+  local tree="$1" box="$2" env ic hn f
+  env="$tree/scripts/strih-boxes/$box.env"
+  for f in scripts/setup-strih.sh scripts/verify-strih.sh scripts/obs-backup-retention.sh systemd/strih-obs.service; do
+    [ -f "$tree/$f" ] || { echo "strih_lx_tree_check: no $f" >&2; return 1; }
+  done
+  [ -f "$env" ] || { echo "strih_lx_tree_check: no scripts/strih-boxes/$box.env (the box fact file)" >&2; return 1; }
+  ic="$(sed -n 's/^STRIH_INTERCOM_CONFIG=//p' "$env" | head -n 1)"
+  [ -n "$ic" ] || { echo "strih_lx_tree_check: scripts/strih-boxes/$box.env has no STRIH_INTERCOM_CONFIG" >&2; return 1; }
+  [ -f "$tree/$ic" ] || { echo "strih_lx_tree_check: no $ic (STRIH_INTERCOM_CONFIG) -- the intercom/ dir must be staged" >&2; return 1; }
+  hn="$(sed -n 's/^STRIH_HOSTNAME=//p' "$env" | head -n 1)"
+  [ -n "$hn" ] || { echo "strih_lx_tree_check: scripts/strih-boxes/$box.env has no STRIH_HOSTNAME" >&2; return 1; }
+  printf '%s\n' "$hn"
+}
+
 # --- execute arm ----------------------------------------------------------------------------------
 
 _strih_lx_fail() {  # STEP RC EXIT MESSAGE -> prints the named error, returns EXIT
@@ -304,14 +341,8 @@ strih_lx_prepare() {
   [ -n "$tree_rev" ] || { _strih_lx_fail tree 1 3 "$repo is not a git checkout"; return; }
   git -C "$repo" archive --format=tar HEAD scripts systemd intercom | tar -x -C "$w/repo"; rc=$?
   [ "$rc" = 0 ] || { _strih_lx_fail tree "$rc" 3 "archiving scripts/ systemd/ intercom/ at $tree_rev failed"; return; }
-  # the box's fact file (issue 1361) and the intercom routing file it names (setup-strih.sh step 13
-  # installs it from intercom/) must be in the staged tree -- read with sed, never sourced on dev1.
-  local ic
-  ic="$(sed -n 's/^STRIH_INTERCOM_CONFIG=//p' "$w/repo/scripts/strih-boxes/strih-lx.env" 2>/dev/null | head -n 1)"
-  [ -n "$ic" ] || { _strih_lx_fail tree 1 3 "the provisioning tree at $tree_rev has no scripts/strih-boxes/strih-lx.env with STRIH_INTERCOM_CONFIG"; return; }
-  for f in scripts/setup-strih.sh scripts/obs-backup-retention.sh systemd/strih-obs.service "$ic"; do
-    [ -f "$w/repo/$f" ] || { _strih_lx_fail tree 1 3 "the provisioning tree at $tree_rev has no $f"; return; }
-  done
+  STRIH_LX_PREP_HOSTNAME="$(strih_lx_tree_check "$w/repo" strih-lx)" \
+    || { _strih_lx_fail tree 1 3 "the provisioning tree at $tree_rev is incomplete (above)"; return; }
   strih_lx_setup_runner "$STRIH_LX_PREP_STAGE" strih-lx > "$w/repo/run-setup.sh" || { _strih_lx_fail tree 1 3 "cannot write run-setup.sh"; return; }
   STRIH_LX_PREP_TOKEN="${STRIH_LX_GH_TOKEN:-}"
   [ -n "$STRIH_LX_PREP_TOKEN" ] || STRIH_LX_PREP_TOKEN="$(gh auth token 2>/dev/null)" || STRIH_LX_PREP_TOKEN=""
@@ -324,7 +355,12 @@ strih_lx_prepare() {
 strih_lx_apply() {
   local sha="$1" w="$STRIH_LX_PREP_WORK" stage="$STRIH_LX_PREP_STAGE" rc out line
 
-  # [preflight] never race a previous install (the sweep would delete the stage it is reading).
+  # [preflight] the right box (a dial override must not provision another box as strih-lx) ...
+  out="$(_strih_lx_ssh "$(strih_lx_remote_identity_cmd)")"; rc=$?
+  [ "$rc" = 0 ] || { _strih_lx_fail preflight "$rc" 4 "cannot reach ${STRIH_LX_PREP_HOST} over ssh -- nothing changed"; return; }
+  out="$(printf '%s' "$out" | tr -d '[:space:]')"
+  [ "$out" = "$STRIH_LX_PREP_HOSTNAME" ] || { _strih_lx_fail preflight 1 4 "the box at ${STRIH_LX_PREP_HOST} is '${out:-<none>}', not '${STRIH_LX_PREP_HOSTNAME}' (scripts/strih-boxes/strih-lx.env) -- refusing to provision it as strih-lx; nothing changed"; return; }
+  # ... and never race a previous install (the sweep would delete the stage it is reading).
   out="$(_strih_lx_ssh "$(strih_lx_remote_installer_cmd)")"; rc=$?
   [ "$rc" = 0 ] || { _strih_lx_fail preflight "$rc" 4 "cannot reach ${STRIH_LX_PREP_HOST} over ssh -- nothing changed"; return; }
   [ "$(printf '%s' "$out" | tr -d '[:space:]')" = "idle" ] || { _strih_lx_fail preflight 1 4 "a previous setup-strih.sh is still running on the box (pgrep -x setup-strih.sh) -- wait for it; nothing changed"; return; }
@@ -383,12 +419,22 @@ strih_lx_apply() {
     _strih_lx_start_best_effort
     _strih_lx_fail setup 124 4 "setup-strih.sh wrote no rc and is no longer running (killed?)"; return
   fi
+  local accept=0 gate
+  if [ "$src" = 1 ]; then
+    gate="$(_strih_lx_ssh "$(strih_lx_remote_setup_gate_cmd "$stage")" 2>/dev/null | tr -d '[:space:]')"
+    if [ "$gate" = 1 ]; then
+      # every install step passed; only step 17's verify-strih.sh failed because OBS is stopped by
+      # this deploy -- the real acceptance gate runs below, once OBS is up and read back.
+      accept=1; src=0
+      echo "# strih-lx: setup-strih.sh installed everything; its own final gate ran with OBS stopped -- the acceptance gate runs after the start"
+    fi
+  fi
   if [ "$src" != 0 ]; then
     echo "# strih-lx: setup-strih.log tail:"; _strih_lx_ssh "$(strih_lx_remote_setup_log_cmd "$stage")" || true
     _strih_lx_start_best_effort
     _strih_lx_fail setup "$src" 4 "setup-strih.sh exited rc=$src (log above, $stage/setup-strih.log) -- the deploy is FAILED"; return
   fi
-  echo "# strih-lx: setup-strih.sh rc=0"
+  echo "# strih-lx: setup-strih.sh done"
   out="$(_strih_lx_ssh "$(strih_lx_remote_setup_notes_cmd "$stage")" 2>/dev/null)" || out=""
   while IFS= read -r line; do
     [ -n "$line" ] && echo "# strih-lx: NOTE from setup-strih.sh: $line"
@@ -398,7 +444,13 @@ strih_lx_apply() {
   _strih_lx_ssh "$(strih_lx_remote_start_cmd "$stage")"; rc=$?
   [ "$rc" = 0 ] || { _strih_lx_fail start "$rc" 4 "systemctl --user start strih-obs.service failed"; return; }
 
-  _strih_lx_verify "$sha"
+  _strih_lx_verify "$sha" || return
+  if [ "$accept" = 1 ]; then
+    # [accept] the acceptance gate setup-strih.sh could not run meaningfully with OBS stopped.
+    _strih_lx_ssh "$(strih_lx_remote_accept_cmd "$stage" strih-lx)" < <(printf '%s\n' "$STRIH_LX_PREP_PW"); rc=$?
+    [ "$rc" = 0 ] || { _strih_lx_fail accept "$rc" 4 "verify-strih.sh --box strih-lx did not pass with the new OBS running (output above)"; return; }
+    echo "# strih-lx: acceptance gate (verify-strih.sh --box strih-lx) passed"
+  fi
 }
 
 # [verify] fail-closed: every field must pass, and the SAME non-zero MainPID + NRestarts must hold from
@@ -459,7 +511,8 @@ strih_lx_plan_steps() {
 #          BUNDLE_MANIFEST.json carries lib/x86_64-linux-gnu/libobs.so.30.
 # STEP 1 (tree): the committed scripts/ systemd/ intercom/ of this checkout (archive of HEAD) + the
 #          generated run-setup.sh -> ${lstage}/repo.
-# STEP 2 (preflight): refuse while a previous install runs:  $(strih_lx_remote_installer_cmd)
+# STEP 2 (preflight): the box must be the fact file's host ('$(strih_lx_remote_identity_cmd)' == STRIH_HOSTNAME),
+#          and no previous install may run:  $(strih_lx_remote_installer_cmd)
 # STEP 3 (sweep): the stage is created + touched NEWEST, then the obs-backup-retention.sh
 #          --local-sweep decision (what 'obs-backup-retention.sh --box strih-lx' runs), stage dirs
 #          only, as the operator, keeps only it:
@@ -481,7 +534,11 @@ strih_lx_plan_steps() {
 #          /usr/lib/x86_64-linux-gnu/libobs.so.30 sha256 == the manifest's, strih-obs.service active with
 #          the SAME MainPID + NRestarts, 'render tick ENABLED' in the OBS log written after the start,
 #          and $(strih_lx_bundle_state_url "$host") genlock_build_sha == ${sha}.
-# ACCEPTANCE (supervisor, after a green execute): 'bash ${stage}/repo/scripts/verify-strih.sh' ON the box,
-#          and from dev1 'python3 scripts/obs_burn_filter.py check --host ${host}' (the WS filter-enum survives).
+# STEP 9 (accept): setup-strih.sh's own final gate runs with OBS stopped; when that gate is its ONLY
+#          failure ($(strih_lx_remote_setup_gate_cmd "$stage")), execute runs the gate itself now:
+#            $(strih_lx_remote_accept_cmd "$stage" strih-lx)   < (the sudo password line)
+#          (a reboot-pending run only reports -- run verify-strih.sh --box strih-lx after the reboot).
+# ACCEPTANCE (supervisor, after a green execute): from dev1
+#          'python3 scripts/obs_burn_filter.py check --host ${host}' (the WS filter-enum survives).
 PLAN
 }
