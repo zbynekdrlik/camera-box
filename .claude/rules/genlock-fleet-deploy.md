@@ -63,6 +63,9 @@ prints the SAME remote-command builders (`strih_lx_plan_steps`). Each failure =
 untouched) runs before the Windows and imag resolution; `strih_lx_apply` (exit 4) runs after them and
 before the imag ssh deploy. A default `strih-lx,stream` run with no Windows build at the SHA can
 therefore never leave the production strih on a different commit than stream (genlock_parity).
+The Windows paste-programs are printed only AFTER strih-lx VERIFIED (nobody pastes stream while the
+strih apply can still fail), and the verified strih-lx gets its OWN fleet-log line at once (the rest
+of the fleet is logged at the end), so a later imag failure never hides the strih deploy.
 
 1. **prepare** — the `linux-genlock.yml` run at the anchor SHA; the artifact is REFUSED unless its
    `GENLOCK_BUILD_SHA.txt` is the canonical SHA and its `BUNDLE_MANIFEST.json` carries the
@@ -94,17 +97,24 @@ therefore never leave the production strih on a different commit than stream (ge
    unread), exports `GH_TOKEN STRIH_LX_BUNDLE_SRC=<stage>/bundle STRIH_LX_IP`, and re-execs itself
    `setsid nohup` to run `setup-strih.sh` DIRECTLY and write `<stage>/setup-strih.rc`; dev1 polls it
    (default 45 min). An ssh drop cannot kill the install mid-apt; the token is never an argv or a
-   file. **OBS is never started over a still-running installer** (an rc timeout or a launch whose ssh
-   dropped after the detach → exit 4 with "wait for setup-strih.rc"); a genuine failure (rc != 0, or
-   no installer running) gets the log tail + a best-effort start + exit 4. Reboot-pending lines from
-   setup-strih.sh (rc 0) are printed as NOTE lines.
+   file. **OBS is never started over a still-running installer**: a launch whose ssh returned
+   non-zero while setup-strih.sh runs is THIS deploy's detached installer (the preflight saw none), so
+   the deploy follows it through the rc poll (WARNING, not a failure — never the strih left dark); an
+   rc timeout with the installer still running (or the box unreachable) is exit 4 "wait for
+   setup-strih.rc" without a start; a genuine failure (rc != 0, or no installer running) gets the log
+   tail + a best-effort start + exit 4. setup-strih's "next boot" reboot-pending warning (rc 0) is
+   printed as NOTE lines.
 7. **start + verify** — touch `<stage>/obs-start.marker`, start the unit, then poll (default 24 x 10 s)
-   and REFUSE unless TWO consecutive polls pass `strih_lx_deploy_verdict` (marker == canonical,
+   and REFUSE unless the polls pass `strih_lx_deploy_verdict` (marker == canonical,
    installed `libobs.so.30` sha256 == the manifest's — the BYTES, not only the marker, since `:8899`
    serves the same marker file — unit `active`, `render tick ENABLED` in an OBS log newer than the
-   start marker, `:8899 genlock_build_sha` == canonical) AND `strih_lx_stable_verdict` (the SAME
-   non-zero MainPID and NRestarts on both). A `Type=simple` unit reads `active` between crash-loop
-   restarts, so a single `active` read proves nothing.
+   start marker, `:8899 genlock_build_sha` == canonical) AND `strih_lx_stable_verdict` holds the SAME
+   non-zero MainPID and NRestarts from the first good poll for `STRIH_LX_VERIFY_SETTLE_SECS` (default
+   90 s; a bad poll restarts the window). A `Type=simple` unit reads `active` between crash-loop
+   restarts, and the one crash loop seen on this box (the CEF trap) cycled every ~60 s, so neither a
+   single `active` read nor two adjacent 10 s polls prove the new OBS runs. The tick grep is
+   `LC_ALL=C grep -a` like every other render-tick reader. The dial host must be four octets 0..255
+   (`strih_lx_is_ipv4`).
 
 Every ssh is `sshpass -p … timeout ${STRIH_LX_SSH_TIMEOUT:-180} ssh …` (`timeout` INSIDE sshpass so
 the password prompt still reaches sshpass's pty).

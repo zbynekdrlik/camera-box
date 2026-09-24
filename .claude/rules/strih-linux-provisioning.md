@@ -343,7 +343,7 @@ to `/opt/obs-genlock` (on no loader path) and installed NO runtime packages, so 
   That program has its own probe-gated anchors, so extracting a shared prefix-install helper is the
   `deploy-genlock-fleet.sh` strih-lx EXECUTE-arm follow-up's job — do it THEN, not now. (Part 6
   landed the execute arm WITHOUT touching strih-provision.sh -- it calls setup-strih.sh as it is --
-  so this consolidation remains open.)
+  so this consolidation remains open -- a follow-up candidate in the part-6 LANE-RETURN.)
 
 ## Baseline completeness — the six live-found gaps, now durable (issue 1317, DONE)
 
@@ -778,7 +778,8 @@ first live boot on strih-lx: re-confirm the oneshot resolved cleanly (the superv
 - ~~**`deploy-genlock-fleet.sh` strih-lx EXECUTE deploy**~~ — **DONE (issue 1317 part 6)**:
   `scripts/lib/strih-lx-deploy.sh`, contract in `.claude/rules/genlock-fleet-deploy.md` ("strih-lx
   EXECUTE arm"). It drives setup-strih.sh unchanged, so the `strih_install_bundle_prefix` vs imag
-  on-box install duplication below is still open (its lib belongs to the provisioning lane).
+  on-box install duplication below is still open (its lib belongs to the provisioning lane; returned
+  to the supervisor as a follow-up candidate in the part-6 LANE-RETURN, not filed by the lane).
 - ~~**`strih-obs-start.sh` / `strih-obs-stop.sh`** launcher pair (sibling of `imag-obs-start.sh`) that
   `strih-obs.service` ExecStart references~~ — **DONE (issue 1317)**, see the "OBS supervision
   launcher pair" section above.
