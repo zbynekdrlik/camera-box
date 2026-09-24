@@ -17,10 +17,12 @@
 //!   LCG — so every call reads a different point of the tick sawtooth and the per-window level
 //!   MEAN (#1367) is exercised at full resolution, 2 h.
 //! - `shift`: a non-absolute source, four 0.25 s callbacks per window over a ±6 ms per-callback
-//!   pattern, a deliberate +12 ms shift landing MID-window (the open window sum must move with
-//!   it), then a 40 ms sample loss with no residual step (the sustained arm → restore burst).
-//! - `step`: an absolute source with a 50 ms input sample loss (re-base + level-corroborated
-//!   restore), a starved window (rejected, flushed — the window level sum must reset; the mixer
+//!   pattern, a +12 ms shift landing mid-window in the CAPTURE window (the depth-at-lock mean must
+//!   be the new frame), a second one landing mid-window after capture (the open window sum and the
+//!   `level_avg` telemetry must move with it — traced right after the call), then a 40 ms sample
+//!   loss with no residual step (the sustained arm → restore burst).
+//! - `step`: an absolute source with a 50 ms input sample loss on the window-closing callback (the
+//!   re-base corroboration must read that live reading, not the window mean), a starved window (rejected, flushed — the window level sum must reset; the mixer
 //!   pads, so the depth holds), and a duplicate wall read (a zero master block, flushed, the next
 //!   block carrying both intervals), each followed by a relock.
 //!
@@ -101,9 +103,14 @@ static void shift_scenario(void)
 	double applied = 0.0;
 	for (long w = 0; w < 3600; w++) {
 		for (int i = 0; i < 4; i++) {
+			if (w == 60 && i == 2) {
+				asrc_compensator_shift_level_target(&c, 12.0);
+				buffer_ms += 12.0;
+			}
 			if (w == 600 && i == 2) {
 				asrc_compensator_shift_level_target(&c, 12.0);
 				buffer_ms += 12.0;
+				line("shiftpt", w, &c);
 			}
 			if (w == 1200 && i == 1)
 				buffer_ms -= 40.0;
@@ -111,7 +118,7 @@ static void shift_scenario(void)
 				asrc_compensator_compensate(&c, raw_s, master_s, buffer_ms + pattern[i], &applied);
 			buffer_ms += (corrected_s - master_s) * 1000.0;
 		}
-		if (w % 60 == 59 || (w >= 598 && w <= 604) || (w >= 1198 && w <= 1215))
+		if (w % 60 == 59 || w == 60 || (w >= 598 && w <= 604) || (w >= 1198 && w <= 1215))
 			line("shift", w, &c);
 	}
 }
@@ -129,7 +136,7 @@ static void step_scenario(void)
 		for (int i = 0; i < 4; i++) {
 			double raw = raw_s;
 			double master = master_s;
-			if (w == 900 && i == 1) {
+			if (w == 900 && i == 3) {
 				raw = raw_s - 0.05;
 				buffer_ms -= 50.0;
 			}
@@ -222,9 +229,14 @@ fn rust_trace() -> Vec<String> {
         let mut buffer_ms = 90.0_f64;
         for w in 0..3600_i64 {
             for (i, p) in pattern.iter().enumerate() {
+                if w == 60 && i == 2 {
+                    c.shift_level_target(12.0);
+                    buffer_ms += 12.0;
+                }
                 if w == 600 && i == 2 {
                     c.shift_level_target(12.0);
                     buffer_ms += 12.0;
+                    out.push(line("shiftpt", w, &c));
                 }
                 if w == 1200 && i == 1 {
                     buffer_ms -= 40.0;
@@ -232,7 +244,7 @@ fn rust_trace() -> Vec<String> {
                 let corrected_s = c.compensate_with_level(raw_s, master_s, buffer_ms + p);
                 buffer_ms += (corrected_s - master_s) * 1000.0;
             }
-            if w % 60 == 59 || (598..=604).contains(&w) || (1198..=1215).contains(&w) {
+            if w % 60 == 59 || w == 60 || (598..=604).contains(&w) || (1198..=1215).contains(&w) {
                 out.push(line("shift", w, &c));
             }
         }
@@ -249,7 +261,7 @@ fn rust_trace() -> Vec<String> {
             for i in 0..4 {
                 let mut raw = raw_s;
                 let mut master = master_s;
-                if w == 900 && i == 1 {
+                if w == 900 && i == 3 {
                     raw = raw_s - 0.05;
                     buffer_ms -= 50.0;
                 }
@@ -296,6 +308,7 @@ fn c_trace() -> Vec<String> {
             "-Wformat=2",
             "-Werror",
             "-O1",
+            "-ffp-contract=off",
         ])
         .arg("-I")
         .arg(repo(MEDIA_IO))

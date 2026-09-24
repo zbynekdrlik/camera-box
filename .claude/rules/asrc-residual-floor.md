@@ -174,9 +174,12 @@ is the MEAN of every callback's `buffered_ms` over the last closed window, and i
 level loop now holds. The window is not a whole number of ticks, so a residual of a few tenths of a
 ms remains. Read the depth from it:
 
-- **Healthy mbc:** `level_avg=` within about ±2 ms of `target=` once settled, and
-  `applied − estimated` within about ±1 ppm across consecutive lines. It was ≈ 7 ppm sd on the
-  single reading.
+- **Healthy mbc:** `level_avg=` within about ±2 ms of `target=` once settled. The rate chatter is
+  the bench's PREDICTION, not yet a live measurement: `applied − estimated` sd ≈ 0.4–0.9 ppm at
+  1–2 ms bursty delivery, down from ≈ 3.6–3.7 ppm on the single reading in the same bench. Live, the
+  single reading gave ≈ 7 ppm sd, so about half of the live chatter is outside the bench model
+  (real delivery jitter, estimate noise). Confirm the post-deploy value in the 1-h live acceptance
+  before quoting it as a health bound.
 - **The 1-h live acceptance and the 8-h soak** (the goal's A/V item) are judged on `level_avg=`.
   A `level=` excursion alone is not a finding.
 - **No consumer parses `level=`.** asio-starve-health reads `starved_blocks=` and cg-chain-verify

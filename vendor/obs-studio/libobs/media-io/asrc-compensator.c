@@ -477,15 +477,17 @@ double asrc_compensator_get_outer_bias_ppm(const struct asrc_compensator *c)
  * 12 h series). A sub-band shift arms nothing -- the gentle I+P loop absorbs it. */
 void asrc_compensator_shift_level_target(struct asrc_compensator *c, double delta_ms)
 {
+	/* camera-box #1367: the level loop reads the per-window MEAN. The buffer moves by delta in the
+	 * same callback as this shift, so the readings already folded into the open window are moved by
+	 * delta too: the closing mean is then all in the new frame, and the smoothed error sees no blended
+	 * half-old/half-new transient. Done whether or not the setpoint is captured yet, so a shift inside
+	 * the capture window of a non-absolute source captures the new-frame mean too. Mirror of
+	 * src/asrc_bench.rs RealtimeAsrcCompensator::shift_level_target. */
+	c->window_level_sum_ms += delta_ms * (double)c->window_level_count;
 	if (c->level_captured) {
 		c->level_target_ms += delta_ms;
 		c->level_last_ms += delta_ms;
-		/* camera-box #1367: the level loop reads the per-window MEAN. The buffer moves by delta in the
-		 * same callback as this shift, so the readings already folded into the open window are moved
-		 * by delta too: the closing mean is then all in the new frame, and the smoothed error sees no
-		 * blended half-old/half-new transient. level_avg_ms (telemetry) follows like level_last_ms.
-		 * Mirror of src/asrc_bench.rs RealtimeAsrcCompensator::shift_level_target. */
-		c->window_level_sum_ms += delta_ms * (double)c->window_level_count;
+		/* camera-box #1367: level_avg_ms (telemetry) follows like level_last_ms. */
 		c->level_avg_ms += delta_ms;
 		/* camera-box #1335 follow-up 5: the deliberate shift moves BOTH level_target_ms (+delta, this
 		 * line) AND the buffer level itself (+delta, via the sync-offset re-stamp -- the 18.9. live

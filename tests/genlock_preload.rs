@@ -2158,10 +2158,13 @@ mod vendored_source {
              single closing reading again; the tick sawtooth would dither the rate (~7 ppm sd)."
         );
         assert!(
-            c.contains("c->window_level_sum_ms += delta_ms * (double)c->window_level_count;"),
+            c.contains(
+                "c->window_level_sum_ms += delta_ms * (double)c->window_level_count; if (c->level_captured) {"
+            ),
             "{ASRC_COMPENSATOR_C}: #1367 — asrc_compensator_shift_level_target no longer moves the \
-             open window's level sum; a deliberate shift landing mid-window would feed the EMA a \
-             blended half-old/half-new mean."
+             open window's level sum BEFORE (outside) the level_captured gate; a deliberate shift \
+             landing mid-window (or inside the capture window) would feed the level loop a blended \
+             half-old/half-new mean."
         );
         let src = squish(&vendor_file(OBS_SOURCE));
         assert!(

@@ -722,7 +722,23 @@ so every launch had its own A/V level (dock + `mbc` level ≈ 135 ± 6 ms in eve
   diverge at trace lines 1 and 131. Local Tier-0 run: copy the test, swap the `use camera_box::…`
   line for a `#[path]` include of `src/asrc_bench.rs`, and `rustc --test` it with
   `CARGO_MANIFEST_DIR` + `CARGO_TARGET_TMPDIR` set. `clippy-driver --test -D warnings` on the same
-  copy covers the lints.
+  copy covers the lints. To mutate the C for a bite check, point the copy's `C_SRC` at a scratch
+  `.c` (its own `#include "asrc-compensator.h"` still resolves through `-I` media-io) — never edit
+  `vendor/` in place.
+- **Known, harmless side effect:** the sustained arm now reads the mean, but the restore's per-call
+  exit still reads the live reading on the ±10.7 ms tick sawtooth. A steady 12–16 ms error therefore
+  arms reliably after 10 windows and the exit ends the burst within about one tick, so the restore
+  toggles on/off about every 10 s. The burst lasts a few calls and the applied rate is slew-limited,
+  so the rate barely moves; the P term (24–32 ppm at that error) carries the correction. Switching
+  the exit to the mean needs a per-call mean the open window does not have yet; leave it unless a
+  live `restore=` flapping trace shows a real cost.
+- **Review-round additions (same branch):** `shift_level_target` moves the open window sum even
+  before capture (a shift inside the capture window of a non-absolute source captures the new-frame
+  mean); the parity driver puts the 50 ms loss on the window-closing callback (so re-base
+  corroboration on the mean would diverge), shifts once inside the capture window, traces
+  `level_avg` right after the captured shift, and compiles with `-ffp-contract=off`. Four scratch
+  C mutants now diverge: `level_avg -=` (line 132), the window-sum shift back under the capture gate
+  (line 121), re-base corroboration on the mean (line 224), and the EMA on the raw reading (line 1).
 - **Lock-step anchor:** `tests/genlock_preload.rs::vendored_source::asrc_level_loop_reads_the_window_mean_1367`
   (fields, accumulate/close/reset lines, the three mean-reading lines, the shift line, the telemetry
   tail); the #1355 capture anchor now ends `: window_level_ms;`. No pwsh change: the anchored
