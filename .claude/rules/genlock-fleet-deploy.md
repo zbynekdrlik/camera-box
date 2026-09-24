@@ -149,8 +149,11 @@ there → setup exits 1 after EVERY install step succeeded (the old scratch scri
 ignored the rc). The arm therefore accepts exactly that failure — rc 1 AND the step-17 line `verify-
 strih.sh acceptance gate did not pass` among the log's last lines (`fail()` exits at the first
 failure, so nothing else failed) — starts OBS, passes the read-back, and then runs `sudo
-verify-strih.sh --box strih-lx` from the staged tree ITSELF as the acceptance gate (fail = exit 4
-`[strih-lx accept]`). A test pins the gate text in setup-strih.sh. The clean fix is a deploy mode in
+verify-strih.sh --box strih-lx` from the staged tree ITSELF as the acceptance gate. Its failure is
+**exit 5**, not 4 — the new build IS installed, running and read back; verify-strih grades the whole
+box, incl. items no deploy changes (e.g. the dantesync offset item on the NTP master) — the error lists
+the verify FAIL lines and the fleet log records `strih-lx:accept-failed`. A read-only root run of
+verify-strih.sh on the healthy box (24.9.2026) was ALL CLEAR in 9 s (inside the 180 s ssh bound). A test pins the gate text in setup-strih.sh. The clean fix is a deploy mode in
 setup-strih.sh that skips step 17 (it belongs to the provisioning lane) — returned as a follow-up
 candidate in the part-6 LANE-RETURN; until then do NOT "fix" the arm by ignoring setup's rc.
 
