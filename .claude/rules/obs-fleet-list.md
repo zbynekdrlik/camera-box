@@ -174,6 +174,13 @@ Per-facet decision (by each facet's PREMISE — a platform-neutral read joins, a
   `STRIH_LX_HOST` override, lazy-sources this lib) return `obs_fleet_host strih-lx`, never the
   unresolvable `strih-lx.lan`. The box's OWN hostname is `strih_lx_hostname` (`strih-lx`) —
   setup-strih no longer cuts it out of the dial address (an IP would have renamed the box `10`).
+- **issue 1361: the strih row is PINNED to the strih box fact file, not computed from it.**
+  `scripts/strih-boxes/<box>.env` holds each strih's `STRIH_HOSTNAME` + `STRIH_IP`; this table keeps
+  its literal row (the python twin parses the literal default block, and every watchdog sources this
+  lib — computing the row from the fact files would make them all depend on the fact loader). The
+  loader refuses a box whose row host (an IP) differs from `STRIH_IP`, and
+  `tests/strih_box_facts_1361.rs` pins `obs_fleet_host strih-lx` == the fact. A new strih (strih PP)
+  gets its row + facet memberships here at go-live; before that `strih_lx_host` dials its fact IP.
 - **The Windows-strih planner arms are RETIRED too (issue 1317 part 3).** `deploy-genlock-fleet.sh`
   (default fleet `strih-lx,stream`; its strih-lx plan is the setup-strih.sh recipe, never the imag
   program), `launch-obs-genlock.sh` + `obs-self-heal-install.sh` (`--box strih` refused by name,
