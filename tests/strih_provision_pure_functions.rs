@@ -129,8 +129,14 @@ fn dantesync_client_args_point_at_the_ntp_server_and_never_server_mode() {
 
 #[test]
 fn dantesync_client_check_is_fail_closed_and_rejects_master_modes() {
-    // Client modes pass.
-    for mode in ["client", "ntp-server=strih.lan", "slave"] {
+    // Client modes pass -- including the exact `--ntp-server <host>` invocation whose host is merely
+    // NAMED like a master (issue 1361: a host name is not a master flag).
+    for mode in [
+        "client",
+        "ntp-server=strih.lan",
+        "slave",
+        "--ntp-server ntp-master.lan",
+    ] {
         let (code, _o, _e) = run_sourced(
             &[],
             &format!("strih_lx_dantesync_is_client_not_master '{mode}'"),
@@ -138,7 +144,14 @@ fn dantesync_client_check_is_fail_closed_and_rejects_master_modes() {
         assert_eq!(code, 0, "client mode '{mode}' should pass");
     }
     // Master/server/empty must FAIL (fail-closed).
-    for mode in ["ntp_server_mode", "server", "master", "grandmaster", ""] {
+    for mode in [
+        "ntp_server_mode",
+        "server",
+        "master",
+        "grandmaster",
+        "",
+        "--ntp-server venue.lan --master",
+    ] {
         let (code, _o, _e) = run_sourced(
             &[],
             &format!("strih_lx_dantesync_is_client_not_master '{mode}'"),
@@ -4035,11 +4048,11 @@ fn setup_strih_final_verify_reports_pending_items_before_the_reboot() {
         .find("if strih_lx_reboot_pending \"$(cat /proc/cmdline 2>/dev/null || true)\"; then")
         .expect("step 17 must branch on the pending reboot");
     let soft = step17
-        .find("\"${HERE}/verify-strih.sh\" --box \"$STRIH_BOX\" || warn")
+        .find("\"${HERE}/verify-strih.sh\" --box \"$STRIH_FACT_BOX\" || warn")
         .expect("pending: verify reports, never fails provisioning");
     let hard = step17
         .find(
-            "\"${HERE}/verify-strih.sh\" --box \"$STRIH_BOX\" || fail \"verify-strih.sh acceptance gate did not pass\"",
+            "\"${HERE}/verify-strih.sh\" --box \"$STRIH_FACT_BOX\" || fail \"verify-strih.sh acceptance gate did not pass\"",
         )
         .expect("running baseline: the hard gate stays");
     assert!(

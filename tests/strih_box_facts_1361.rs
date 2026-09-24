@@ -17,7 +17,6 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 fn root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -66,29 +65,17 @@ fn with_loader(env: &[(&str, &str)], body: &str) -> (i32, String, String) {
     bash(env, &script)
 }
 
-static TMP_SEQ: AtomicUsize = AtomicUsize::new(0);
-
-/// A fresh, empty per-test directory under the system temp dir (removed by the caller's guard).
-struct TmpDir(PathBuf);
+/// A fresh, empty per-test directory (kernel-atomic name via `tempfile`, removed on drop).
+struct TmpDir(tempfile::TempDir);
 impl TmpDir {
-    fn new(tag: &str) -> Self {
-        let n = TMP_SEQ.fetch_add(1, Ordering::SeqCst);
-        let p =
-            std::env::temp_dir().join(format!("strih-box-1361-{tag}-{}-{n}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&p);
-        std::fs::create_dir_all(&p).expect("create temp dir");
-        TmpDir(p)
+    fn new(_tag: &str) -> Self {
+        TmpDir(tempfile::tempdir().expect("create temp dir"))
     }
     fn path(&self) -> &Path {
-        &self.0
+        self.0.path()
     }
     fn write(&self, name: &str, body: &str) {
-        std::fs::write(self.0.join(name), body).expect("write fixture");
-    }
-}
-impl Drop for TmpDir {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
+        std::fs::write(self.0.path().join(name), body).expect("write fixture");
     }
 }
 
@@ -279,6 +266,35 @@ fn malformed_fact_files_are_refused() {
                 "STRIH_INTERCOM_CONFIG=/etc/intercom-hub/intercom.toml",
             )],
             "STRIH_INTERCOM_CONFIG",
+        ),
+        (
+            "client upstream is not a host name",
+            vec![
+                ("STRIH_DANTESYNC_ROLE=server", "STRIH_DANTESYNC_ROLE=client"),
+                (
+                    "STRIH_DANTESYNC_UPSTREAM=\n",
+                    "STRIH_DANTESYNC_UPSTREAM=venue ntp.lan\n",
+                ),
+            ],
+            "STRIH_DANTESYNC_UPSTREAM",
+        ),
+        (
+            "control character in a value",
+            vec![(
+                "STRIH_CG_SENDER=RESOLUME-SNV (cg-obs)",
+                "STRIH_CG_SENDER=RESOLUME-SNV\t(cg-obs)",
+            )],
+            "unsafe character",
+        ),
+        (
+            "camera listed twice",
+            vec![("STRIH_CAMERAS=1 2 3 4 5 6 7", "STRIH_CAMERAS=1 2 2")],
+            "STRIH_CAMERAS",
+        ),
+        (
+            "camera number with a leading zero",
+            vec![("STRIH_CAMERAS=1 2 3 4 5 6 7", "STRIH_CAMERAS=01 2")],
+            "STRIH_CAMERAS",
         ),
         (
             "cameras not numbers",
@@ -482,8 +498,8 @@ fn setup_strih_takes_every_identity_value_from_the_facts() {
     let s = std::fs::read_to_string(root().join("scripts/setup-strih.sh")).unwrap();
     for want in [
         ". \"${HERE}/lib/strih-box-facts.sh\"",
-        "STRIH_BOX=\"$(strih_box_cli_box \"$@\")\"",
-        "strih_box_load \"$STRIH_BOX\"",
+        "STRIH_FACT_BOX=\"$(strih_box_cli_box \"$@\")\"",
+        "strih_box_load \"$STRIH_FACT_BOX\"",
         "DS_ROLE=\"$(strih_lx_dantesync_role)\"",
         "DS_ARGS=\"$(strih_lx_dantesync_args)\"",
         "NDI_PEER=\"${STRIH_NDI_PEER:-$(strih_lx_ndi_runtime_peer)}\"",
@@ -492,13 +508,13 @@ fn setup_strih_takes_every_identity_value_from_the_facts() {
         "[ -f \"${HERE}/../$(strih_lx_intercom_config)\" ]",
         "\"${HERE}/../$(strih_lx_intercom_config)\" /etc/intercom-hub/intercom.toml",
         "strih_obs_box_facts_dropin_text > \"${USER_HOME}/.config/systemd/user/strih-obs.service.d/10-box-facts.conf\"",
-        "\"${HERE}/verify-strih.sh\" --box \"$STRIH_BOX\"",
+        "\"${HERE}/verify-strih.sh\" --box \"$STRIH_FACT_BOX\"",
     ] {
         assert!(s.contains(want), "setup-strih.sh must carry `{want}`");
     }
     // The box selection + load happens BEFORE the source-guard, so a sourced setup (tests) sees the
     // same facts the real run uses.
-    let load = s.find("strih_box_load \"$STRIH_BOX\"").unwrap();
+    let load = s.find("strih_box_load \"$STRIH_FACT_BOX\"").unwrap();
     let guard = s
         .find("if [ \"${BASH_SOURCE[0]}\" != \"${0}\" ]; then")
         .unwrap();
@@ -510,8 +526,8 @@ fn verify_strih_takes_the_box_facts() {
     let v = std::fs::read_to_string(root().join("scripts/verify-strih.sh")).unwrap();
     for want in [
         ". \"${HERE}/lib/strih-box-facts.sh\"",
-        "STRIH_BOX=\"$(strih_box_cli_box \"$@\")\"",
-        "strih_box_load \"$STRIH_BOX\"",
+        "STRIH_FACT_BOX=\"$(strih_box_cli_box \"$@\")\"",
+        "strih_box_load \"$STRIH_FACT_BOX\"",
         "DS_ROLE_V=\"$(strih_lx_dantesync_role)\"",
         "IRQ_TARGET_IP=\"${STRIH_LX_TARGET_IP:-$(strih_lx_ip)}\"",
         "strih_nic_iface_by_driver /sys \"$(strih_lx_nic_driver)\"",
@@ -603,6 +619,7 @@ fn no_strih_lx_identity_literal_remains_outside_the_fact_file() {
         "STRIH_NDI_RUNTIME_PEER",
         "STRIH_COMPANION_HOST",
         "STRIH_CG_SENDER",
+        "STRIH_NIC_DRIVER",
     ]
     .iter()
     .map(|k| fact(k))
@@ -639,4 +656,129 @@ fn no_strih_lx_identity_literal_remains_outside_the_fact_file() {
         "strih-lx identity literals must live only in scripts/strih-boxes/strih-lx.env:\n{}",
         hits.join("\n")
     );
+}
+
+/// A client box whose venue NTP host is NAMED like a master (`ntp-master.lan`) loads AND renders a
+/// client unit -- the host name is not a master flag (review finding: it used to pass the loader and
+/// then fail setup step 2).
+#[test]
+fn a_client_box_with_a_master_named_upstream_host_renders_its_unit() {
+    let d = TmpDir::new("client");
+    fixture_box(
+        &d,
+        "strih-lx",
+        &[
+            ("STRIH_DANTESYNC_ROLE=server", "STRIH_DANTESYNC_ROLE=client"),
+            (
+                "STRIH_DANTESYNC_UPSTREAM=\n",
+                "STRIH_DANTESYNC_UPSTREAM=ntp-master.lan\n",
+            ),
+        ],
+    );
+    let dir = d.path().to_string_lossy().into_owned();
+    let (c, out, err) = with_loader(
+        &[("STRIH_BOXES_DIR", &dir)],
+        &format!(
+            ". \"{}\"\nstrih_box_load strih-lx || exit 9\n\
+             strih_dantesync_unit_text \"$(strih_lx_dantesync_role)\" \"$(strih_lx_dantesync_args)\"",
+            root().join("scripts/lib/strih-provision.sh").display()
+        ),
+    );
+    assert_eq!(c, 0, "a client box must render its unit: {err}");
+    assert!(
+        out.contains("ExecStart=/usr/local/bin/dantesync --ntp-server ntp-master.lan\n"),
+        "{out}"
+    );
+}
+
+/// The facts reach EVERY fact-dependent output: render a synthetic box whose every fact differs from
+/// strih-lx and prove no strih-lx value (and no unsubstituted placeholder) survives anywhere.
+#[test]
+fn every_fact_dependent_output_follows_a_different_box() {
+    let d = TmpDir::new("zz");
+    fixture_box(
+        &d,
+        "strih-zz",
+        &[
+            ("STRIH_HOSTNAME=strih-lx", "STRIH_HOSTNAME=strih-zz"),
+            ("STRIH_IP=10.77.9.202", "STRIH_IP=10.0.0.5"),
+            ("STRIH_NDI_PREFIX=STRIH-LX", "STRIH_NDI_PREFIX=STRIH-ZZ"),
+            ("STRIH_DANTESYNC_ROLE=server", "STRIH_DANTESYNC_ROLE=client"),
+            (
+                "STRIH_DANTESYNC_UPSTREAM=\n",
+                "STRIH_DANTESYNC_UPSTREAM=venue-ntp.lan\n",
+            ),
+            ("STRIH_NIC_DRIVER=r8152", "STRIH_NIC_DRIVER=r8169"),
+            ("STRIH_OBS_PROFILE=strih-lx", "STRIH_OBS_PROFILE=zz-profile"),
+            (
+                "STRIH_OBS_COLLECTION=strih-lx",
+                "STRIH_OBS_COLLECTION=zz-collection",
+            ),
+            (
+                "STRIH_NDI_RUNTIME_PEER=10.77.9.61",
+                "STRIH_NDI_RUNTIME_PEER=10.0.0.61",
+            ),
+            (
+                "STRIH_COMPANION_HOST=10.77.9.205",
+                "STRIH_COMPANION_HOST=10.0.0.205",
+            ),
+            (
+                "STRIH_CG_SENDER=RESOLUME-SNV (cg-obs)",
+                "STRIH_CG_SENDER=none",
+            ),
+            ("STRIH_CAMERAS=1 2 3 4 5 6 7", "STRIH_CAMERAS=1 3"),
+        ],
+    );
+    let dir = d.path().to_string_lossy().into_owned();
+    let render = root().join("tests/fixtures/strih_box_1361/render.sh");
+    let body = format!(
+        "bash \"{}\" \"{}\" strih-zz\nprintf '=== dropin ===\\n'\n\
+         . \"{}\" --box strih-zz\nstrih_obs_box_facts_dropin_text",
+        render.display(),
+        root().display(),
+        root().join("scripts/setup-strih.sh").display()
+    );
+    let (c, out, err) = bash(&[("STRIH_BOXES_DIR", &dir)], &body);
+    assert_eq!(c, 0, "render failed: {err}");
+    for gone in [
+        "10.77.9.202",
+        "10.77.9.61",
+        "10.77.9.205",
+        "r8152",
+        "STRIH-LX",
+        "strih-lx",
+        "RESOLUME-SNV",
+        "@STRIH_",
+    ] {
+        assert!(
+            !out.contains(gone),
+            "a strih-lx value / placeholder `{gone}` survived for strih-zz:\n{out}"
+        );
+    }
+    for want in [
+        "=== hostname ===\nstrih-zz\n",
+        "=== ip ===\n10.0.0.5\n",
+        "=== host ===\n10.0.0.5\n",
+        "STRIH-ZZ (2ME PGM)",
+        "STRIH-ZZ (Grading)",
+        "{\"sender\": \"STRIH-ZZ (2ME PVW)\", \"input\": \"NDI 2ME PVW\", \"scene\": \"2ME PVW\"}",
+        "{\"sender\": \"CAM3 (usb)\", \"input\": \"NDI cam3\", \"scene\": \"Cam 3\"}",
+        "ExecStart=/usr/local/bin/dantesync --ntp-server venue-ntp.lan\n",
+        "local_ip = \"10.0.0.5\"",
+        "ws_ip = \"10.0.0.5\"",
+        "# strih-zz OBS kiosk boot",
+        "label=\"strih-zz\"",
+        "TARGET_IP=\"${STRIH_LX_TARGET_IP:-10.0.0.5}\"",
+        "[ \"$_drv\" = r8169 ]",
+        "=== ndi-runtime-peer ===\n10.0.0.61\n",
+        "COMPANION_SATELLITE_HOST=10.0.0.205",
+        "\"remoteIp\": \"10.0.0.205\"",
+        "Environment=\"STRIH_OBS_PROFILE=zz-profile\"",
+        "Environment=\"STRIH_OBS_COLLECTION=zz-collection\"",
+    ] {
+        assert!(out.contains(want), "strih-zz output lacks `{want}`:\n{out}");
+    }
+    // cameras 1 + 3 only, and no CG inputs (the fact is `none`).
+    assert!(!out.contains("NDI cam2"), "{out}");
+    assert!(!out.contains("\"input\": \"cg\""), "{out}");
 }
