@@ -334,6 +334,11 @@ fn a_render_tick_schedule_phase_corrects_only_on_the_grid_1367() {
         cfg.duration_s = 2 * 3600;
         let r = run_bench(&cfg);
         assert_eq!(corrections(&r), 0, "schedule phase {offset_ms} ms: {r:?}");
+        assert!(
+            share(&r, &[31]) > 0.99,
+            "schedule phase {offset_ms} ms: {:?}",
+            r.state_samples
+        );
         for k in 0..=3 {
             let mut cfg = BenchConfig::live_2026_09_24(GridModel::Production);
             cfg.receiver_tick_offset_ns = offset;
@@ -343,10 +348,15 @@ fn a_render_tick_schedule_phase_corrects_only_on_the_grid_1367() {
                 outage_ms: 8_000,
                 stall_slots: k,
             });
-            cfg.warmup_s = 300 + 8 + 60;
-            cfg.duration_s = cfg.warmup_s + 3600;
+            // On the grid the settled state is judged from 60 s after the restart; off the grid
+            // the counters start BEFORE the restart, so the settle itself is inside the window
+            // and a correction the rule should have deferred is counted (review round 4: a
+            // window that starts after the settle cannot see one).
+            let on_grid = offset_ms.abs() <= 2;
+            cfg.warmup_s = if on_grid { 300 + 8 + 60 } else { 299 };
+            cfg.duration_s = 300 + 8 + 60 + 3600;
             let r = run_bench(&cfg);
-            if offset_ms.abs() <= 2 {
+            if on_grid {
                 assert_eq!(
                     settled_state(&r),
                     Some(target),
