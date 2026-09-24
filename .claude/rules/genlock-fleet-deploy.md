@@ -102,8 +102,12 @@ of the fleet is logged at the end), so a later imag failure never hides the stri
    the deploy follows it through the rc poll (WARNING, not a failure — never the strih left dark); an
    rc timeout with the installer still running (or the box unreachable) is exit 4 "wait for
    setup-strih.rc" without a start; a genuine failure (rc != 0, or no installer running) gets the log
-   tail + a best-effort start + exit 4. setup-strih's "next boot" reboot-pending warning (rc 0) is
-   printed as NOTE lines.
+   tail + a best-effort start + exit 4; a failed launch with the box UNREACHABLE (installer state
+   unknown) is exit 4 at once, no start, no 45-min poll. setup-strih's pending-reboot warning (rc 0)
+   is printed as a NOTE — the grep is keyed on that warning's own text (`reboot strih-lx, then run
+   verify-strih`, a test pins it in setup-strih.sh), never on "next boot", which the baseline prints on
+   routine lines every run. A settle time the read-back budget (polls x secs) cannot outlast is
+   refused in prepare (exit 3).
 7. **start + verify** — touch `<stage>/obs-start.marker`, start the unit, then poll (default 24 x 10 s)
    and REFUSE unless the polls pass `strih_lx_deploy_verdict` (marker == canonical,
    installed `libobs.so.30` sha256 == the manifest's — the BYTES, not only the marker, since `:8899`
@@ -122,7 +126,7 @@ the password prompt still reaches sshpass's pty).
 Tests: `tests/deploy_genlock_fleet_strih_lx_exec_1317.rs` runs the REAL script with `gh` / `sshpass` /
 `ssh` / `rsync` / `curl` stubbed on PATH (the ssh stub dispatches on the remote command text — keep
 the step commands' distinguishing substrings: `pgrep -x setup-strih.sh`, `--local-sweep`, `LEFTOVER`,
-`setup-strih.rc`, `run-setup.sh`, `grep -i -m 3`, `setup-strih.log`, `strih-obs-stop.sh`,
+`setup-strih.rc`, `run-setup.sh`, `reboot strih-lx, then run verify-strih`, `setup-strih.log`, `strih-obs-stop.sh`,
 `GENLOCK_BUILD_SHA.txt`, `--user start`), plus the generated runner (root check stripped for the test)
 and `--stages-only` on real temp dirs. A test SHA must stay SHORT hex — a 40-hex literal trips the
 secret-staging hook. Remaining supervisor steps after a green execute: `verify-strih.sh` on the box
