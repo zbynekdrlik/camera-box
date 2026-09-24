@@ -32,6 +32,13 @@ gs_texture_t *drm_output_render_buf_texture(int idx);
 /* The set mode's active area (the scanout size). */
 void drm_output_mode_size(uint32_t *w, uint32_t *h);
 
+/* Raw byte-faithful blit of `src` into claimed buffer `idx` (sRGB encode off, blending off,
+ * aspect-fit), ending with gs_flush(). The ONE copy both views use. */
+void drm_output_blit_raw(gs_texture_t *src, int idx);
+
+/* Free the view TU's GL objects (the Multiview texrender). Graphics context taken inside. */
+void drm_output_view_gl_teardown(void);
+
 /* Per-tick view step. Returns DRM_OUTPUT_TICK_PROGRAM when the caller must do the Program copy;
  * otherwise the view TU handled the tick (rendered the Multiview, or kept the last frame). */
 #define DRM_OUTPUT_TICK_NOTHING 0

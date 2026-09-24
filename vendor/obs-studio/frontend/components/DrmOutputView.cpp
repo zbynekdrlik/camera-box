@@ -125,6 +125,15 @@ void DrmOutputViewInit()
 {
 	actionProgram = static_cast<QAction *>(obs_frontend_add_tools_menu_qaction("HDMI výstup: Program"));
 	actionMultiview = static_cast<QAction *>(obs_frontend_add_tools_menu_qaction("HDMI výstup: Multiview"));
+	if (!actionProgram || !actionMultiview) {
+		/* the frontend API returns nullptr before its callbacks exist -- no menu, but the view
+		 * config still drives the output and the Multiview still attaches on the load events */
+		blog(LOG_WARNING, "drm-output: could not add the HDMI view switch to the Tools menu");
+		actionProgram = nullptr;
+		actionMultiview = nullptr;
+		obs_frontend_add_event_callback(OnFrontendEvent, nullptr);
+		return;
+	}
 	actionProgram->setCheckable(true);
 	actionMultiview->setCheckable(true);
 	QActionGroup *group = new QActionGroup(actionProgram->parent());

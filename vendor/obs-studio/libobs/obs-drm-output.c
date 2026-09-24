@@ -839,6 +839,8 @@ void obs_drm_output_stop(void)
 	/* M2: destroy the GL side BEFORE the DRM/GBM teardown (the textures alias the BOs); it
 	 * takes graphics context + program_lock, so a frame hook mid-render finishes first. */
 	drm_output_program_gl_teardown();
+	/* camera-box issue 1346: the Multiview texrender goes with the GL side (graphics alive). */
+	drm_output_view_gl_teardown();
 
 	pthread_mutex_lock(&g_drm.lock);
 	drm_output_teardown_locked();
@@ -974,11 +976,6 @@ void obs_drm_output_on_frame(void)
 		obs_leave_graphics();
 		return;
 	}
-	gs_effect_t *effect = obs_get_base_effect(OBS_EFFECT_DEFAULT);
-	if (!effect) {
-		obs_leave_graphics();
-		return;
-	}
 
 	/* CLAIM: take a buffer out of every mailbox role (see drm_output_claim_render_buf). */
 	int idx = drm_output_claim_render_buf();
@@ -987,12 +984,30 @@ void obs_drm_output_on_frame(void)
 		return;
 	}
 
-	/* Raw SDR copy of the Program into the scanout buffer: non-sRGB sampling + framebuffer
-	 * sRGB encode OFF + blending OFF preserves the canvas bytes exactly (the same values a
-	 * monitor on the X desktop shows). Aspect-fit letterboxes a mode/canvas mismatch (the
-	 * rig runs 1:1 1920x1080). Known limitation: SDR only — HDR would need a tonemap pass. */
-	uint32_t src_w = gs_texture_get_width(program);
-	uint32_t src_h = gs_texture_get_height(program);
+	drm_output_blit_raw(program, idx);
+
+	/* PUBLISH: hand the rendered buffer to the flip thread (flush ordered BEFORE this). */
+	drm_output_publish_render_buf(idx);
+	obs_leave_graphics();
+}
+
+/* Raw SDR copy of `src` into scanout buffer `idx` (graphics thread, context held; the caller
+ * claimed `idx`). Non-sRGB sampling + framebuffer sRGB encode OFF + blending OFF preserves the
+ * texture BYTES exactly — the Program canvas and (issue 1346) the Multiview texrender are both
+ * sRGB-ENCODED render targets, and the dma-buf scanout buffer is linear storage, so a byte copy
+ * is the faithful transfer (the same values a monitor on the X desktop shows). Aspect-fit
+ * letterboxes a size mismatch. Ends with gs_flush(): the kernel page-flip then waits on the BO's
+ * implicit fence (i915/Xe dma-resv), so scanout never observes a half-rendered buffer — no
+ * glFinish stall. Known limitation: SDR only (HDR would need a tonemap pass). */
+void drm_output_blit_raw(gs_texture_t *src, int idx)
+{
+	gs_effect_t *effect = obs_get_base_effect(OBS_EFFECT_DEFAULT);
+	gs_texture_t *dst = drm_output_render_buf_texture(idx);
+	if (!src || !effect || !dst)
+		return;
+
+	uint32_t src_w = gs_texture_get_width(src);
+	uint32_t src_h = gs_texture_get_height(src);
 	uint32_t fx, fy, fw, fh;
 	drm_output_fit_rect(src_w, src_h, g_drm.mode_w, g_drm.mode_h, &fx, &fy, &fw, &fh);
 
@@ -1001,7 +1016,7 @@ void obs_drm_output_on_frame(void)
 	gs_matrix_push();
 	gs_matrix_identity();
 
-	gs_set_render_target(g_drm.pbufs[idx].tex, NULL);
+	gs_set_render_target(dst, NULL);
 	struct vec4 black;
 	vec4_zero(&black);
 	gs_clear(GS_CLEAR_COLOR, &black, 0.0f, 0);
@@ -1015,9 +1030,9 @@ void obs_drm_output_on_frame(void)
 	gs_enable_blending(false);
 
 	gs_eparam_t *param = gs_effect_get_param_by_name(effect, "image");
-	gs_effect_set_texture(param, program);
+	gs_effect_set_texture(param, src);
 	while (gs_effect_loop(effect, "Draw"))
-		gs_draw_sprite(program, 0, 0, 0);
+		gs_draw_sprite(src, 0, 0, 0);
 
 	gs_enable_blending(true);
 	gs_enable_framebuffer_srgb(prev_srgb);
@@ -1027,13 +1042,7 @@ void obs_drm_output_on_frame(void)
 	gs_projection_pop();
 	gs_viewport_pop();
 
-	/* Submit now: the kernel page-flip then waits on the BO's implicit fence (i915/Xe
-	 * dma-resv), so scanout can never observe a half-rendered buffer. No glFinish stall. */
 	gs_flush();
-
-	/* PUBLISH: hand the rendered buffer to the flip thread (flush ordered BEFORE this). */
-	drm_output_publish_render_buf(idx);
-	obs_leave_graphics();
 }
 
 /* -------------------------------------------------------------------------------------------------

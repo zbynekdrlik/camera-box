@@ -73,8 +73,9 @@ void obs_drm_output_on_frame(void);
  * PROGRAM (the default, and what an absent "view" key means — imag stays unchanged) scans out
  * the Program canvas exactly as the issue-1152 M2 path. MULTIVIEW scans out the frontend's
  * BUILT-IN Multiview (labels, PVW/PGM tally), never a custom scene: the frontend registers a
- * renderer and libobs calls it on the graphics thread, with the leased scanout buffer bound as
- * the render target at the connector mode size. The Multiview render runs ONLY while the view
+ * renderer and libobs calls it on the graphics thread into an sRGB-capable offscreen texrender at
+ * the connector mode size (the same encode a projector window gets), then blits that raw into
+ * the leased scanout buffer exactly like the Program. The Multiview render runs ONLY while the view
  * is MULTIVIEW, and it is throttled by the monitoring-surface budget gate
  * (obs_aux_sender_should_skip), so the Program always has priority.
  *

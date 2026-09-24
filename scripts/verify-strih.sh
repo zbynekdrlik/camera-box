@@ -187,7 +187,7 @@ strih_drm_hdmi_connected && DRM_HDMI=1
 DRM_SUMMARY="- program"
 if [ -f "$SCN_BIN" ] && command -v python3 >/dev/null 2>&1; then
   DRM_SUMMARY="$(python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); import strih_scenes as s; t = s.drm_output_config_text(sys.argv[2]); print(s.drm_output_lease_connector(t) or "-", s.drm_output_view_token(t))' \
-    "$(dirname "$SCN_BIN")" "$DRM_CONF_V" 2>/dev/null || echo "- program")"
+    "$(dirname "$SCN_BIN")" "$DRM_CONF_V" 2>/dev/null || echo "? program")"
 fi
 DRM_ARMED="${DRM_SUMMARY%% *}"
 DRM_VIEW_V="${DRM_SUMMARY##* }"
@@ -203,6 +203,7 @@ case "$DRM_VERDICT" in
   ok)                 ok   "HDMI output: DRM lease on ${DRM_ARMED} live, view ${DRM_VIEW_V} (${DRM_CONF_V} + the newest OBS log)" ;;
   skip-no-hdmi)       note "HDMI output: SKIP -- no HDMI monitor connected, the DRM-lease output stays dormant (attach one and re-run setup-strih.sh step 6)" ;;
   hdmi-unplugged)     note "HDMI output: ${DRM_ARMED} is armed in ${DRM_CONF_V} but no HDMI monitor is connected (report-only)" ;;
+  classify-failed)    bad  "HDMI output: could not classify ${DRM_CONF_V} (the strih_scenes import failed) -- re-run setup-strih.sh step 6" ;;
   config-missing)     bad  "HDMI output: an HDMI monitor is connected but ${DRM_CONF_V} does not arm the DRM lease -- re-run setup-strih.sh (step 6)" ;;
   view-invalid)       bad  "HDMI output: ${DRM_CONF_V} \"view\" is not program or multiview (OBS falls back to Program) -- fix it in OBS Tools > HDMI výstup" ;;
   lease-not-live)     bad  "HDMI output: ${DRM_ARMED} is armed but the newest OBS log never reached 'drm-output: program scanout LIVE' -- read its drm-output: lines, then restart strih-obs.service" ;;

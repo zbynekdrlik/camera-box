@@ -5,9 +5,12 @@
  * scanout buffers; its frame hook used to copy only the Program. This TU adds the second view:
  * the frontend's BUILT-IN Multiview (labels, PVW/PGM tally, the issue-1242 twin cells), never a
  * custom scene. The frontend registers a renderer (obs_drm_output_set_view_renderer); on a
- * MULTIVIEW tick this TU claims a scanout buffer through the shared mailbox seam
- * (obs-drm-output-internal.h), binds it as the render target at the connector mode size and calls
- * the renderer into it — one render, no extra full-frame copy.
+ * MULTIVIEW tick this TU renders it into an sRGB-capable texrender at the connector mode size
+ * (the built-in Multiview's sRGB-aware draws — obs_render_main_texture for the Program cell, the
+ * scene cells' linear-sRGB path — need an sRGB render target to encode, exactly like the
+ * projector's window surface; the dma-buf scanout buffer is LINEAR storage and would drop that
+ * encode, a review finding), then claims a scanout buffer through the shared mailbox seam
+ * (obs-drm-output-internal.h) and fills it with the SAME raw byte-faithful blit the Program uses.
  *
  * Never degrade the Program (standing rule): the Multiview renders ONLY while the view is
  * MULTIVIEW, and every tick first asks the monitoring-surface budget gate the aux NDI senders use
@@ -96,6 +99,7 @@ static struct {
 
 	obs_drm_output_view_render_t render;
 	void *render_param;
+	gs_texrender_t *texrender; /* the Multiview's sRGB render target, created on first render */
 	bool warned_no_renderer;
 	bool bind_live_logged;
 	uint32_t frame_counter;
@@ -157,6 +161,10 @@ void obs_drm_output_set_view_renderer(obs_drm_output_view_render_t render, void 
 	obs_enter_graphics();
 	g_view.render = render;
 	g_view.render_param = param;
+	if (!render && g_view.texrender) { /* no Multiview any more: free its render target too */
+		gs_texrender_destroy(g_view.texrender);
+		g_view.texrender = NULL;
+	}
 	g_view.warned_no_renderer = false;
 	g_view.bind_live_logged = false;
 	g_view.frame_counter = 0;
@@ -167,27 +175,40 @@ void obs_drm_output_set_view_renderer(obs_drm_output_view_render_t render, void 
 	blog(LOG_INFO, "drm-output: multiview renderer %s", render ? "registered" : "cleared");
 }
 
+void drm_output_view_gl_teardown(void)
+{
+	obs_enter_graphics();
+	if (g_view.texrender) {
+		gs_texrender_destroy(g_view.texrender);
+		g_view.texrender = NULL;
+	}
+	obs_leave_graphics();
+}
+
 /* Rewrite the persisted config with the new "view" (every other key kept, one compact line, an
- * atomic temp-file rename). Caller holds persist_lock. */
-static bool drm_output_view_persist_locked(const char *name)
+ * atomic temp-file rename). Caller holds persist_lock. Returns NULL on success, else the reason
+ * the choice was NOT persisted (named in the log line). */
+static const char *drm_output_view_persist_locked(const char *name)
 {
 	if (g_view.config_path[0] == '\0')
-		return false;
+		return "no drm-output config path (the autostart found no config)";
 	obs_data_t *data = obs_data_create_from_json_file(g_view.config_path);
 	if (!data)
-		return false;
+		return "config unreadable (missing or not JSON)";
 	obs_data_set_string(data, "view", name);
-	bool ok = false;
+	const char *reason = "config unreadable (JSON serialisation failed)";
 	const char *json = obs_data_get_json(data);
 	if (json) {
 		struct dstr line;
 		dstr_init_copy(&line, json);
 		dstr_cat(&line, "\n");
-		ok = os_quick_write_utf8_file_safe(g_view.config_path, line.array, line.len, false, "tmp", NULL);
+		reason = os_quick_write_utf8_file_safe(g_view.config_path, line.array, line.len, false, "tmp", NULL)
+				 ? NULL
+				 : "write failed (temp file or rename)";
 		dstr_free(&line);
 	}
 	obs_data_release(data);
-	return ok;
+	return reason;
 }
 
 bool obs_drm_output_set_view(enum obs_drm_output_view view)
@@ -198,61 +219,55 @@ bool obs_drm_output_set_view(enum obs_drm_output_view view)
 	const char *name = drm_output_view_name(v);
 
 	pthread_mutex_lock(&g_view.persist_lock);
-	const bool persisted = drm_output_view_persist_locked(name);
+	const char *reason = drm_output_view_persist_locked(name);
 	pthread_mutex_unlock(&g_view.persist_lock);
 
-	if (persisted)
+	if (!reason)
 		blog(LOG_INFO, "drm-output: view %s -> %s (persisted)", drm_output_view_name(prev), name);
 	else
-		blog(LOG_WARNING, "drm-output: view %s -> %s (NOT persisted -- no readable drm-output config)",
-		     drm_output_view_name(prev), name);
-	return persisted;
+		blog(LOG_WARNING, "drm-output: view %s -> %s (NOT persisted -- %s)", drm_output_view_name(prev), name,
+		     reason);
+	return reason == NULL;
 }
 
-/* Render the registered Multiview into a claimed scanout buffer. Graphics thread, context held. */
+/* Render the registered Multiview into the sRGB texrender, then blit it raw into a claimed
+ * scanout buffer. Graphics thread, context held. */
 static void drm_output_view_render_multiview(void)
 {
-	const int idx = drm_output_claim_render_buf();
-	if (idx < 0)
-		return;
-	gs_texture_t *tex = drm_output_render_buf_texture(idx);
-	if (!tex)
-		return; /* a claimed buffer that is never published simply stays role-free */
 	uint32_t w, h;
 	drm_output_mode_size(&w, &h);
+	if (!g_view.texrender)
+		g_view.texrender = gs_texrender_create(GS_BGRA, GS_ZS_NONE);
+	if (!g_view.texrender)
+		return;
 
 	const uint64_t t0 = os_gettime_ns();
 
-	gs_viewport_push();
-	gs_projection_push();
-	gs_matrix_push();
-	gs_matrix_identity();
-	gs_blend_state_push();
-	gs_reset_blend_state();
-
-	/* The same frame the display path gives a projector's draw callback: black clear, depth off,
-	 * no culling, viewport + ortho over the whole target. The Multiview letterboxes the canvas
-	 * aspect into it itself. */
-	gs_set_render_target(tex, NULL);
+	gs_texrender_reset(g_view.texrender);
+	if (!gs_texrender_begin(g_view.texrender, w, h))
+		return;
+	/* The frame a projector's draw callback gets (render_display_begin): black clear, depth off,
+	 * no culling, an ortho over the whole target; the texrender set the viewport. The Multiview
+	 * letterboxes the canvas aspect into it itself. */
 	struct vec4 black;
 	vec4_zero(&black);
 	black.w = 1.0f;
 	gs_clear(GS_CLEAR_COLOR, &black, 1.0f, 0);
 	gs_enable_depth_test(false);
 	gs_set_cull_mode(GS_NEITHER);
-	gs_set_viewport(0, 0, (int)w, (int)h);
 	gs_ortho(0.0f, (float)w, 0.0f, (float)h, -100.0f, 100.0f);
+	gs_blend_state_push();
+	gs_reset_blend_state();
 
 	g_view.render(g_view.render_param, w, h);
 
-	gs_set_render_target(NULL, NULL);
 	gs_blend_state_pop();
-	gs_matrix_pop();
-	gs_projection_pop();
-	gs_viewport_pop();
+	gs_texrender_end(g_view.texrender);
 
-	/* Submit before publish: the kernel page-flip waits on the BO's implicit fence. */
-	gs_flush();
+	const int idx = drm_output_claim_render_buf();
+	if (idx < 0)
+		return; /* nothing writable this tick — the last frame stays on scanout */
+	drm_output_blit_raw(gs_texrender_get_texture(g_view.texrender), idx);
 	drm_output_publish_render_buf(idx);
 
 	const uint64_t t1 = os_gettime_ns();
@@ -267,8 +282,8 @@ static void drm_output_view_render_multiview(void)
 	if (!g_view.bind_live_logged) {
 		g_view.bind_live_logged = true;
 		blog(LOG_INFO,
-		     "drm-output: multiview bind LIVE (built-in Multiview rendered into the scanout buffer at "
-		     "%ux%u)",
+		     "drm-output: multiview bind LIVE (built-in Multiview rendered at %ux%u and blitted into the "
+		     "scanout buffer)",
 		     w, h);
 	}
 }

@@ -342,15 +342,16 @@ DRM_CONF_DIR="${USER_HOME}/.camera-box"
 DRM_CONF="${DRM_CONF_DIR}/drm-output.json"
 LEGACY_PROJ=/opt/camera-box/strih-lx-projector.json
 DRM_VIEW0="$(strih_drm_legacy_view "$(cat "$LEGACY_PROJ" 2>/dev/null || true)")"
-if [ -f "$DRM_CONF" ]; then
+if [ -L "$DRM_CONF" ]; then
+  warn "  SKIP issue 1346: ${DRM_CONF} is a symlink -- refusing to write through it as root; remove it and re-run"
+elif [ -f "$DRM_CONF" ]; then
   echo "  ${DRM_CONF} already present -- leaving the operator's HDMI output choice"
 elif strih_drm_hdmi_connected; then
   DRM_CONN="$(sudo -u "$DESKTOP_USER" env DISPLAY=:0 XAUTHORITY="${USER_HOME}/.Xauthority" xrandr --query 2>/dev/null \
     | strih_drm_hdmi_output_from_xrandr || true)"
   if [ -n "$DRM_CONN" ] && DRM_LINE="$(strih_drm_output_config_json "$DRM_CONN" "$DRM_VIEW0")"; then
     install -d -o "$DESKTOP_USER" -g "$DESKTOP_USER" "$DRM_CONF_DIR"
-    printf '%s\n' "$DRM_LINE" > "$DRM_CONF"
-    chown "$DESKTOP_USER":"$DESKTOP_USER" "$DRM_CONF"
+    printf '%s\n' "$DRM_LINE" | install -m 0644 -o "$DESKTOP_USER" -g "$DESKTOP_USER" /dev/stdin "$DRM_CONF"
     echo "  wrote ${DRM_CONF} (HDMI output ${DRM_CONN} = DRM lease, view ${DRM_VIEW0}; takes effect at the next OBS start)"
   else
     warn "  SKIP issue 1346: an HDMI monitor is connected but X RandR could not name it (Xorg :0 not up yet?) -- ${DRM_CONF} NOT provisioned; re-run setup-strih.sh after the kiosk session is up"
