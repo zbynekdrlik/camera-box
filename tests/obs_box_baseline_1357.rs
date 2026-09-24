@@ -99,7 +99,8 @@ fn the_baseline_libs_are_source_only() {
          obs_box_boot_safety_net obs_box_lowlatency_kernel obs_box_cpu_affinity obs_box_nvidia_prime \
          obs_box_dejitter obs_box_crash_popups_off obs_box_kiosk obs_box_power_envelope obs_box_touchpad \
          obs_box_maxperf_persistence obs_box_openbox_menu_xml obs_box_openbox_autostart_preamble \
-         obs_box_baseline_gather_snippet obs_box_baseline_verdict; do \
+         obs_box_baseline_gather_snippet obs_box_baseline_verdict \
+         obs_box_apt_lock_timeout_conf obs_box_apt_lock_timeout; do \
            type -t \"$f\" >/dev/null || echo \"MISSING $f\"; done",
     );
     assert_eq!(c, 0, "stderr={err}");
@@ -996,4 +997,137 @@ fn kiosk_keeps_bluetooth_only_when_the_box_asks() {
         imag.contains("obs_box_kiosk \"$DESKTOP_USER\" imag\n"),
         "setup-imag keeps the plain call (bluetooth disabled)"
     );
+}
+
+// ------------------------------------------------------------------------------------------------
+// The dpkg lock wait (issue 1357 dpkg-lock slice). 24.9.2026: the canonical strih-lx genlock deploy
+// failed twice at setup-strih step 4 with `E: Could not get lock /var/lib/dpkg/lock-frontend ...
+// held by process (apt-get)` -- a periodic apt run held the lock and apt-get's default
+// DPkg::Lock::Timeout is 0. The baseline writes ONE apt drop-in so every present and future apt-get
+// waits up to 10 min; a real apt failure still fails loud after the wait (every call site keeps its
+// `|| fail`). The live box's only lock setting is `Version::2.0::Dpkg::Lock::Timeout`, which binds the
+// interactive `apt` front end, never apt-get.
+// ------------------------------------------------------------------------------------------------
+
+const APT_LOCK_CONF_TEXT: &str = "DPkg::Lock::Timeout \"600\";\n";
+
+/// The rendered drop-in is exactly the 600 s dpkg lock wait (apt's own config mechanism).
+#[test]
+fn apt_lock_timeout_conf_is_the_600s_dpkg_lock_wait() {
+    let (c, out, err) = run(BASELINE, &[], "obs_box_apt_lock_timeout_conf");
+    assert_eq!(c, 0, "stderr={err}");
+    assert_eq!(out, APT_LOCK_CONF_TEXT);
+    assert!(
+        baseline_fn("obs_box_apt_lock_timeout")
+            .contains("/etc/apt/apt.conf.d/90camera-box-lock-timeout"),
+        "the default target is /etc/apt/apt.conf.d/90camera-box-lock-timeout"
+    );
+}
+
+/// The write is idempotent: absent -> written, same -> left alone, different -> rewritten; every
+/// outcome is logged, and the file always ends up as the rendered text.
+#[test]
+fn apt_lock_timeout_write_is_idempotent_and_logged() {
+    let dir = tempfile::tempdir().unwrap();
+    let f = dir.path().join("90camera-box-lock-timeout");
+    let fs = f.to_str().unwrap();
+    let (c, out, err) = run(
+        BASELINE,
+        &[("F", fs)],
+        "obs_box_apt_lock_timeout \"$F\" || exit 3\n\
+         echo '--'\n\
+         obs_box_apt_lock_timeout \"$F\" || exit 4\n\
+         echo '--'\n\
+         printf 'DPkg::Lock::Timeout \"0\";\\n' > \"$F\"\n\
+         obs_box_apt_lock_timeout \"$F\" || exit 5",
+    );
+    assert_eq!(c, 0, "stdout={out} stderr={err}");
+    let logs: Vec<&str> = out.split("--\n").collect();
+    assert_eq!(logs.len(), 3, "three runs, three logs: {out}");
+    assert!(
+        logs[0].contains(&format!("{fs} written")),
+        "absent -> written: {out}"
+    );
+    assert!(
+        logs[1].contains(&format!("{fs} already in place")),
+        "same -> unchanged: {out}"
+    );
+    assert!(
+        !logs[1].contains("written"),
+        "an unchanged file is never rewritten: {out}"
+    );
+    assert!(
+        logs[2].contains(&format!("{fs} written")),
+        "different -> rewritten: {out}"
+    );
+    assert_eq!(std::fs::read_to_string(&f).unwrap(), APT_LOCK_CONF_TEXT);
+}
+
+/// A write that cannot land fails loud (the caller's fail()), never a silent skip.
+#[test]
+fn apt_lock_timeout_write_failure_fails_loud() {
+    let (c, out, err) = run(
+        BASELINE,
+        &[],
+        "obs_box_apt_lock_timeout /nonexistent-dir-1357/90camera-box-lock-timeout; echo survived",
+    );
+    assert_eq!(c, 1, "an unwritable target must exit via fail(): {err}");
+    assert!(err.contains("FAIL:"), "{err}");
+    assert!(!out.contains("survived"), "{out}");
+}
+
+/// The executed provisioning flow of a setup script: everything after its source-guard.
+fn executed_flow(rel: &str) -> String {
+    let s = read(rel);
+    let guard = "if [ \"${BASH_SOURCE[0]}\" != \"${0}\" ]; then";
+    let at = s
+        .find(guard)
+        .unwrap_or_else(|| panic!("{rel} must have the source-guard"));
+    s[at..].to_string()
+}
+
+/// Byte offset of the first non-comment line of `text` matching `pred`.
+fn first_code_line(text: &str, pred: impl Fn(&str) -> bool) -> Option<usize> {
+    let mut off = 0;
+    for line in text.split_inclusive('\n') {
+        if !line.trim_start().starts_with('#') && pred(line) {
+            return Some(off);
+        }
+        off += line.len();
+    }
+    None
+}
+
+/// The lock wait is the FIRST action of every OBS-box provisioning run: both setup scripts call
+/// the writer (a plain statement, once), after the root check and before their first apt-get and
+/// step 1.
+#[test]
+fn apt_lock_timeout_is_written_before_the_first_apt_get() {
+    for script in [SETUP_STRIH, SETUP_IMAG] {
+        let flow = executed_flow(script);
+        let is_call = |l: &str| l.trim() == "obs_box_apt_lock_timeout";
+        let calls = flow
+            .lines()
+            .filter(|l| !l.trim_start().starts_with('#') && is_call(l))
+            .count();
+        assert_eq!(
+            calls, 1,
+            "{script} must call obs_box_apt_lock_timeout exactly once"
+        );
+        let call = first_code_line(&flow, is_call).unwrap();
+        let apt = first_code_line(&flow, |l| l.contains("apt-get"))
+            .unwrap_or_else(|| panic!("{script} runs apt-get"));
+        let step1 = flow
+            .find("\nstep 1 \"")
+            .unwrap_or_else(|| panic!("{script} has a step 1 banner"));
+        let root = flow
+            .find("fail \"run as root (sudo)\"")
+            .unwrap_or_else(|| panic!("{script} has the root check"));
+        assert!(
+            call < apt,
+            "{script}: the lock wait must be written before the first apt-get"
+        );
+        assert!(call < step1, "{script}: the lock wait precedes step 1");
+        assert!(root < call, "{script}: written only once running as root");
+    }
 }
