@@ -251,6 +251,11 @@ if [ "$ASSUME_YES" -ne 1 ]; then
     [[ $REPLY =~ ^[Yy]$ ]] || { echo "Aborted."; exit 1; }
 fi
 
+# issue 1357: the FIRST provisioning action, before any apt-get -- apt-get waits up to 10 min for a
+# background apt run's dpkg lock instead of failing at once (the shared baseline drop-in; setup-strih.sh
+# runs it too).
+obs_box_apt_lock_timeout
+
 # #816: resolve the NDI runtime peer ONCE, up front, from whichever cam box is actually alive —
 # a fleet box being down (grabber card lent out, being re-flashed) must not abort provisioning of
 # an unrelated notebook. `ping -c1 -W1` per candidate: fast, and reachability is exactly what the

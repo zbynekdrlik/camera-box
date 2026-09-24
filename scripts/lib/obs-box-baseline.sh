@@ -24,6 +24,7 @@
 #   FETCH         the caller's `FETCH REPO_RELPATH DEST` installer (gh api on imag, the checkout on strih)
 #
 # The items, in the order both callers run them (imag's step numbers in brackets):
+#   obs_box_apt_lock_timeout [preamble, before any apt-get: the dpkg lock wait]
 #   obs_box_network_tuning [2]   obs_box_max_performance [4]   obs_box_never_sleep [5]
 #   obs_box_boot_safety_net [6]  obs_box_lowlatency_kernel [7] obs_box_cpu_affinity [8]
 #   obs_box_nvidia_prime [9]     obs_box_dejitter [14] (+ obs_box_crash_popups_off)
@@ -49,6 +50,36 @@
 # PATH (setup-imag.sh is sourced that way by its missing-tool tests).
 # shellcheck source=scripts/lib/obs-box-kiosk.sh
 if [ "${BASH_SOURCE[0]%/*}" != "${BASH_SOURCE[0]}" ]; then . "${BASH_SOURCE[0]%/*}/obs-box-kiosk.sh"; else . ./obs-box-kiosk.sh; fi
+
+# obs_box_apt_lock_timeout_conf -> the apt drop-in that makes every apt-get WAIT for the dpkg lock.
+#
+# issue 1357 (24.9.2026): the canonical strih-lx genlock deploy failed twice at setup-strih step 4 with
+# `E: Could not get lock /var/lib/dpkg/lock-frontend ... held by process (apt-get)` -- a periodic apt
+# run (apt-daily / unattended-upgrades) held the lock, and apt-get's default DPkg::Lock::Timeout is 0,
+# so a normal background apt run turned a correct deploy into a failed one. (Ubuntu's own
+# `Version::2.0::Dpkg::Lock::Timeout` binds only the interactive `apt` front end, never apt-get.)
+# With this drop-in apt-get waits up to 10 min for the lock; a REAL apt failure still fails loud after
+# the wait, because every call site keeps its `|| fail`. One apt config file covers every present and
+# future apt-get on the box (no per-call-site `-o` option to forget); security updates keep running.
+obs_box_apt_lock_timeout_conf() {
+    printf 'DPkg::Lock::Timeout "600";\n'
+}
+
+# obs_box_apt_lock_timeout [CONF] -- write the drop-in (default
+# /etc/apt/apt.conf.d/90camera-box-lock-timeout). Idempotent: compared first, rewritten only when it
+# differs, every outcome logged. The FIRST action of every OBS-box provisioning run (setup-strih.sh and
+# setup-imag.sh call it right after their root check, before any apt-get). Fails loud via the caller's
+# fail() when the file cannot be written.
+obs_box_apt_lock_timeout() {
+    local conf="${1:-/etc/apt/apt.conf.d/90camera-box-lock-timeout}"
+    if [ -f "$conf" ] && cmp -s "$conf" <(obs_box_apt_lock_timeout_conf); then
+        echo "  apt lock wait: ${conf} already in place (DPkg::Lock::Timeout 600 s)"
+        return 0
+    fi
+    { obs_box_apt_lock_timeout_conf > "${conf}.tmp" && mv -f "${conf}.tmp" "$conf"; } \
+        || fail "apt lock wait: could not write ${conf} -- apt-get would fail at once on a held dpkg lock"
+    echo "  apt lock wait: ${conf} written (DPkg::Lock::Timeout 600 s -- apt-get waits for a background apt run)"
+}
 
 # obs_box_cpu_isolation_plan  (stdin: one "CPU SIBLINGS_LIST" line per logical CPU, numerically
 # ordered — i.e. cpuN + the contents of its topology/thread_siblings_list) -> THREE lines:

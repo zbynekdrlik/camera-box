@@ -76,6 +76,10 @@ fi
 
 [ "${EUID:-$(id -u)}" -eq 0 ] || fail "run as root (sudo)"
 
+# issue 1357: the FIRST action, before any apt-get -- apt-get waits up to 10 min for a background apt
+# run's dpkg lock instead of failing at once (the shared baseline drop-in; setup-imag.sh runs it too).
+obs_box_apt_lock_timeout
+
 STATIC_IP="$(strih_lx_ip)"
 STRIH_HOST="$(strih_lx_host)"
 BOX_NAME="$(strih_lx_hostname)"

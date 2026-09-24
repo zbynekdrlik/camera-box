@@ -51,6 +51,10 @@ power envelope. A difference between boxes is a defect, not a per-box feature.
   reserved core and its FIFO + affinity leaked to every NDI receiver thread). imag's own issue-484
   limits.d line stays in setup-imag.sh outside the lib (behaviour-identical); setup-strih removes a
   leftover grant and verify-strih item 33 FAILs while one exists.
+- **The dpkg lock wait is the FIRST action of every provisioning run.** `obs_box_apt_lock_timeout` writes `/etc/apt/apt.conf.d/90camera-box-lock-timeout` (`DPkg::Lock::Timeout "600";`) right after the root check in BOTH setup scripts, before any apt-get.
+  - It exists because a periodic apt run held the lock and failed the strih-lx deploy twice at step 4 (24.9.2026). apt-get's default lock wait is 0.
+  - Ubuntu's `Version::2.0::Dpkg::Lock::Timeout` applies only to the `apt` front end, never to apt-get.
+  - Never add a per-call `-o DPkg::Lock::Timeout`, and keep every apt-get's `|| fail`: a real apt failure must still fail loud after the wait.
 - **Adding an item** = a function in the right half + a call in BOTH setup scripts (imag in the step
   that owns it, strih inside step 11 in imag's order) + a verdict row + its gather keys. The
   `gather_and_verdict_share_one_key_set` test fails if the two halves of the grader drift.
