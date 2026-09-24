@@ -118,6 +118,7 @@ case "$cmd" in
     n=0; [ -f "$STUB_DIR/readback.n" ] && n="$(cat "$STUB_DIR/readback.n")"; n=$((n + 1)); echo "$n" > "$STUB_DIR/readback.n"
     pid=4242; restarts=0
     if [ -n "${STUB_CRASHLOOP:-}" ]; then pid=$((4242 + n)); restarts="$n"; fi
+    if [ -n "${STUB_LATE_CRASHLOOP:-}" ] && [ "$n" -ge 3 ]; then pid=$((4242 + n)); restarts="$n"; fi
     printf 'installed=%s active=%s pid=%s restarts=%s lib=%s tick=%s\n' "${STUB_INSTALLED:-$STUB_SHA}" "${STUB_ACTIVE:-active}" "$pid" "$restarts" "${STUB_LIB:-$STUB_LIBSHA}" "${STUB_TICK:-1}"; exit 0 ;;
   *"--user start"*) exit "${STUB_START_RC:-0}" ;;
   *) exit "${STUB_SSH_RC:-0}" ;;
@@ -205,6 +206,7 @@ fn run_exec_boxes(boxes: &str, extra_env: &[(&str, &str)]) -> Run {
         .env("STRIH_LX_SETUP_POLL_SECS", "0")
         .env("STRIH_LX_VERIFY_POLLS", "3")
         .env("STRIH_LX_VERIFY_POLL_SECS", "0")
+        .env("STRIH_LX_VERIFY_SETTLE_SECS", "0")
         .env_remove("STRIH_LX_IP")
         .env_remove("STRIH_LX_USER")
         .env_remove("STRIH_LX_PW")
@@ -473,11 +475,21 @@ fn strih_lx_setup_failure_is_loud_and_never_starts_obs_over_a_running_installer_
         r.calls
     );
 
-    // launch ssh failed (e.g. dropped after the detach) while the installer runs -> no start.
+    // review round 2: the launch ssh dropped AFTER the detach while this deploy's own installer
+    // runs (the preflight saw none) -> follow it through the rc poll, never leave the strih dark.
     let r = run_exec(&[("STUB_LAUNCH_RC", "255"), ("STUB_INSTALLER_AFTER", "alive")]);
-    assert_eq!(r.code, 4, "err={}", r.err);
-    assert!(r.err.contains("[strih-lx setup]"), "{}", r.err);
-    assert!(!r.calls.contains("--user start"), "{}", r.calls);
+    assert_eq!(r.code, 0, "err={}", r.err);
+    assert!(
+        r.err.contains("WARNING") && r.err.contains("rc=255"),
+        "the dropped launch is reported:\n{}",
+        r.err
+    );
+    assert!(
+        r.at("run-setup.sh") < r.at("setup-strih.rc")
+            && r.at("setup-strih.rc") < r.at("--user start"),
+        "{}",
+        r.calls
+    );
 
     // launch failed and no installer is running -> the previous OBS is started best-effort.
     let r = run_exec(&[("STUB_LAUNCH_RC", "1")]);
@@ -536,6 +548,9 @@ fn strih_lx_preparation_failures_never_touch_the_box_1317() {
             "[strih-lx resolve]",
             "IPv4",
         ),
+        (("STRIH_LX_IP", "999.1.1.1"), "[strih-lx resolve]", "IPv4"),
+        (("STRIH_LX_IP", "10.77.9"), "[strih-lx resolve]", "IPv4"),
+        (("STRIH_LX_IP", "..."), "[strih-lx resolve]", "IPv4"),
     ] {
         let r = run_exec(&[env]);
         assert_eq!(r.code, 3, "{env:?}: err={}", r.err);
@@ -771,4 +786,69 @@ fn strih_lx_setup_runner_reads_the_token_from_stdin_and_writes_the_rc_1317() {
         let o = child.wait_with_output().unwrap();
         assert_eq!(o.status.code(), Some(2), "{stdin:?}");
     }
+}
+
+/// review round 2: a crash loop slower than one poll interval (the CEF trap fired every ~60 s) must
+/// still be caught -- the MainPID/NRestarts must hold from the first good poll for a settle time,
+/// not merely across two adjacent polls.
+#[test]
+fn strih_lx_readback_holds_stability_for_the_settle_time_1317() {
+    let r = run_exec(&[
+        ("STUB_LATE_CRASHLOOP", "1"),
+        ("STRIH_LX_VERIFY_POLLS", "5"),
+        ("STRIH_LX_VERIFY_POLL_SECS", "1"),
+        ("STRIH_LX_VERIFY_SETTLE_SECS", "3"),
+    ]);
+    assert_eq!(
+        r.code, 4,
+        "two stable polls inside the settle time are not enough.\nerr={}",
+        r.err
+    );
+    assert!(
+        r.err.contains("[strih-lx verify]") && r.err.contains("MainPID"),
+        "{}",
+        r.err
+    );
+    // a stable OBS still verifies once the settle time has passed.
+    let r = run_exec(&[
+        ("STRIH_LX_VERIFY_POLLS", "6"),
+        ("STRIH_LX_VERIFY_POLL_SECS", "1"),
+        ("STRIH_LX_VERIFY_SETTLE_SECS", "2"),
+    ]);
+    assert_eq!(r.code, 0, "err={}", r.err);
+}
+
+/// review round 2: the Windows paste-programs are printed only AFTER strih-lx verified (an operator
+/// must not paste stream while the strih apply can still fail), and strih-lx is logged the moment it
+/// verified, so a later imag failure never hides the strih deploy that happened.
+#[test]
+fn windows_programs_follow_the_verified_strih_and_strih_is_logged_at_once_1317() {
+    let r = run_exec_boxes("strih-lx,stream", &[]);
+    assert_eq!(r.code, 0, "err={}\nout={}", r.err, r.out);
+    let verified = r.out.find("VERIFIED").expect("strih-lx VERIFIED line");
+    let program = r
+        .out
+        .find("$ErrorActionPreference = 'Stop'")
+        .expect("the stream program");
+    assert!(verified < program, "{}", r.out);
+    let log = r.fleet_log();
+    let strih_line = log
+        .lines()
+        .find(|l| l.contains("\tstrih-lx\t"))
+        .unwrap_or_else(|| panic!("a strih-lx fleet-log line:\n{log}"));
+    assert!(strih_line.contains(SHA), "{log}");
+    assert!(
+        log.lines().any(|l| l.contains("\tstream\t")),
+        "the rest of the fleet is logged too:\n{log}"
+    );
+
+    // an incomplete imag artifact (the stub ships no distroav.so) fails in imag's PREPARATION, which
+    // runs before the strih-lx apply -> the production strih is never touched, nothing is logged.
+    let r = run_exec_boxes("strih-lx,imag", &[]);
+    assert_eq!(r.code, 3, "err={}", r.err);
+    assert!(
+        !r.calls.contains("ssh ") && r.fleet_log().is_empty(),
+        "imag preparation fails BEFORE strih-lx is applied:\n{}",
+        r.calls
+    );
 }
