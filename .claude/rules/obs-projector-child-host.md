@@ -5,112 +5,66 @@ paths:
   - "vendor/obs-studio/frontend/widgets/OBSBasic_Projectors.cpp"
   - "vendor/obs-studio/frontend/widgets/OBSBasic_Preview.cpp"
   - "vendor/obs-studio/frontend/widgets/OBSQTDisplay.cpp"
-  - "tests/obs_projector_child_host_1352.rs"
+  - "tests/obs_projector_stock_toplevel_1357.rs"
   - "vendor/obs-studio/frontend/widgets/OBSQTDisplay.hpp"
   - "tests/obs_display_resize_debounce_1358.rs"
 ---
 
-# Linux OBS projector hosted in a CHILD window (#1352) — the present-stall class + how to change it safely
+# OBS projector window path: the stock toplevel on every OS (the Linux child-host from #1352 is RETIRED, #1357)
 
-## The fix in one paragraph
+## Status: RETIRED 24.9.2026 — do not reintroduce a per-OS projector host
 
-On strih-lx (XWayland + NVIDIA PRIME render offload) an OBS projector whose GL surface IS the
-X toplevel window (`OBSProjector : OBSQTDisplay`, constructed `OBSQTDisplay(widget, Qt::Window)`)
-blocks the graphics thread ~0.5 s **per present** — avg render 513 ms, program lag 93 %, multiview
-1.8 fps, identical windowed / fullscreen / no-always-on-top / 640×360; `__GL_SYNC_TO_VBLANK=0`
-changes nothing; `glxgears` under PRIME runs fine. The property that matters is "the NVIDIA GL
-surface is not the toplevel X window" — proven live by `xdotool windowreparent <projector>
-<obs-main>` → lag 0 %, avg render 23 ms, MV 29.8 fps. Cure (LIVE since #1352): on Linux the single
-creation site `OBSBasic::OpenProjector` wraps the projector in a plain host toplevel and builds the
-projector as its native **child** (`Qt::Widget`); Windows/macOS stay a toplevel projector.
+Issue 1352 (22.9.2026) hosted every Linux OBS projector in a native CHILD of a plain host
+toplevel. On strih-lx, which then ran XWayland + NVIDIA PRIME render offload, a projector whose
+GL surface IS the X toplevel stalled the graphics thread ~0.5 s per present: program lag 93 %,
+MV 1.8 fps. `xdotool windowreparent` into a child fixed it (lag 0 %, MV 29.8 fps).
 
-## Why hosting the display as a child actually moves the GL surface (the load-bearing fact)
+Issue 1357 removed it. **Why:**
 
-`OBSQTDisplay`'s ctor sets `Qt::WA_NativeWindow` **unconditionally** (+ `WA_DontCreateNativeAncestors`),
-so the display ALWAYS owns its own native GL window whether it is `Qt::Window` or `Qt::Widget`. With
-`Qt::Widget` under a host toplevel, that native GL window becomes a native CHILD X window of the host
-— exactly the "GL surface is not the toplevel" shape. This is the same shape the OBS main window's
-preview/program displays already use (native children of the QMainWindow) and they present fine.
+- **The premise is gone.** On 23.9.2026 strih-lx moved to openbox on plain Xorg, with NVIDIA as
+  the primary provider (`xrandr --listproviders`: `NVIDIA-0` Source Output, `modesetting` only
+  Sink/Offload). There is no Xwayland process and no `__NV_PRIME_RENDER_OFFLOAD` in the OBS env.
+  imag and a future strih PP use the same baseline (`obs-box-baseline.md`), and the Windows boxes
+  never used the host.
+- **The hosted shape had its own bug (owner ruling on issue 1346, 23.9.2026).** Toggling "always on
+  top" at runtime turned the projector BLACK. `SetAlwaysOnTop` (`utility/platform-x11.cpp`) is
+  `setWindowFlags(flags); show();` on the host toplevel. Qt recreates the host's native window, and
+  the child's native GL window loses its parent.
+- **One unified design.** A Linux-only projector path was a per-box divergence with no remaining
+  reason (the issue-1357 owner principle).
 
-## The seam: a `Toplevel()` accessor = `window()`, unconditional, `== this` when unhosted
+**What replaced it:** the four vendored files (`OBSProjector.cpp/.hpp`, `OBSBasic_Projectors.cpp`,
+`OBSBasic_Preview.cpp`) are restored byte-for-byte to their pre-issue-1352 content. Only the two
+issue-1352 commits had touched them. That means:
 
-Do NOT `#if` every toplevel call. Add `QWidget *OBSProjector::Toplevel() { return window(); }` and
-route EVERY toplevel-only call inside `OBSProjector` through it. `window()` returns `this` when the
-projector is a top-level (Windows / no-host — **behaviorally byte-identical**) and the host toplevel
-when it is a hosted child (Linux). Only TWO things are `#if defined(__linux__)`-gated: the window-flag
-choice (`projectorWindowFlags(host)` → `host ? Qt::Widget : Qt::Window`) and the host construction at
-the creation site.
+- the projector is `OBSQTDisplay(widget, Qt::Window)`, created parentless by `OpenProjector`;
+- geometry is saved and restored on the projector itself;
+- `SetIsAlwaysOnTop` calls `SetAlwaysOnTop(this, ...)`, and `UpdateProjectorAlwaysOnTop` calls
+  `SetAlwaysOnTop(projectors[i], ...)`.
 
-## The toplevel-only calls that must route — INCLUDING the runtime ones (the #1352 review miss)
+This is the same upstream code on Linux and Windows. The runtime `strih-mv-host` X11 re-hosting
+helper (the other issue-1352 workaround) is retired too: setup-strih step 8b only removes a leftover
+install, and verify-strih item 22 grades it absent.
 
-The ctor calls are easy to find. The trap (a real [major] review finding) is the RUNTIME toggle
-paths, which live in DIFFERENT functions and even a DIFFERENT file:
+**Guard:** `tests/obs_projector_stock_toplevel_1357.rs`, a pure-std source anchor that runs
+offline with plain `rustc --test` (set `CARGO_MANIFEST_DIR`). It pins:
 
-- `OBSProjector::SetIsAlwaysOnTop` → `SetAlwaysOnTop(this, ...)` — `SetAlwaysOnTop`
-  (`utility/platform-x11.cpp`) does `setWindowFlags + show`, so on a child it would try to make it a
-  toplevel again (re-introducing the stall). Route to `SetAlwaysOnTop(Toplevel(), ...)`.
-- `OBSBasic::UpdateProjectorAlwaysOnTop` (`OBSBasic_Preview.cpp`) → `SetAlwaysOnTop(projectors[i], ...)`
-  — route to `projectors[i]->window()`.
-- Geometry PERSISTENCE in `OBSBasic_Projectors.cpp` (`saveGeometry`/`restoreGeometry`/`normalGeometry`/
-  `setGeometry` on `projector`) → `projector->window()->...`, or a windowed projector's saved position
-  is lost (a child's saveGeometry is meaningless).
+- the stock ctor, and no `projectorWindowFlags` / `Toplevel()` / host teardown plumbing;
+- a creation site with no `__linux__` branch, no `QVBoxLayout`, and no `new OBSProjector(host`;
+- that EVERY `SetAlwaysOnTop(` call under `frontend/widgets/*.cpp` passes the window itself,
+  never `window()` or `Toplevel(`.
 
-When you touch this area, grep BOTH files for every window op on `this`/`projector`/`projectors[i]`
-(`setWindowFlags|setWindowTitle|setWindowIcon|showFullScreen|showNormal|setGeometry|restoreGeometry|
-saveGeometry|normalGeometry|windowHandle|isFullScreen|isMaximized|resize\(|geometry\(\)|screen\(\)|
-SetAlwaysOnTop`) — the ctor is NOT the whole surface. `activateWindow()` is fine bare (Qt documents it
-to act on the toplevel containing the widget).
+**If a present stall ever comes back** on a Linux OBS box, fix the box's display stack in the
+shared baseline (Xorg + a primary GPU, no offload). Never re-add a per-OS projector host. A hosted
+GL child cannot survive Qt's native-window recreation on a window-flags change, and the
+workaround only ever existed for a display stack no box runs any more.
 
-## `isOBSProjectorWindow` is Windows-only — null-guard the toplevel handle
+Deploy: a frontend change ships as a FULL bundle (obs64), never fast-dll (`obs-titlebar-build-id.md`).
+Rig acceptance after the deploy, on strih-lx:
 
-The `windowHandle()->setProperty("isOBSProjectorWindow", true)` is read ONLY in
-`OBSBasic::SetDisplayAffinity`, and `SetDisplayAffinitySupported()` returns **false** on X11
-(`utility/platform-x11.cpp`), true on Windows. On the Linux hosted path the host toplevel is not
-realized at ctor time (its `windowHandle()` may be null), so route it as
-`if (QWindow *h = Toplevel()->windowHandle()) h->setProperty(...)` — harmless-skip on Linux, still
-set on Windows (Toplevel()==this, handle non-null).
-
-## Host teardown must be wired BOTH directions (or you leak a toplevel / dangle a pointer)
-
-The host is a plain `QWidget(nullptr, Qt::Window)` with `WA_DeleteOnClose`, a zero-margin
-`QVBoxLayout`, `setFocusProxy(projector)` (so the Escape QAction still fires) and
-`installEventFilter(projector)`. Two directions, one `bool closing` guard:
-
-- **Projector deleted first** (Escape→DeleteProjector, monitor-replace, CloseAllProjectors,
-  source-destroyed): `~OBSProjector` does `if (Toplevel() != this && !closing) Toplevel()->deleteLater();`
-  — tears the host down. (`window()` in the destructor is only COMPARED, never dereferenced, so a
-  mid-destruction host pointer is safe.)
-- **Host closed first** (WM "X"): the projector's `eventFilter` catches `QEvent::Close` on the host,
-  sets `closing = true` and runs `DeleteProjector(this)` (so multiviewProjectors/SaveProjectors
-  bookkeeping runs), then returns false to let the host delete itself; `closing` makes `~OBSProjector`
-  skip the redundant host teardown. Qt cancels the projector's pending `deleteLater` when the host
-  deletes it as a child, so no double-free either ordering.
-
-## Testing: CI is the first compile — buy verification back with the standalone-rustc anchor recipe
-
-The vendored Qt/C++ compiles ONLY on `linux-genlock.yml` (Tier-0, `# airuleset:build-ok` disabled).
-Verify a change with:
-- `tests/obs_projector_child_host_1352.rs` — a pure-`std` source-anchor guard, run offline via
-  `CARGO_MANIFEST_DIR=<worktree-abs> rustc --test --edition 2021 tests/<file>.rs -o /tmp/x && /tmp/x`
-  (exit 101 = RED, 0 = GREEN). A `count(method) == count(Toplevel()->method)` invariant proves every
-  toplevel call is routed. **Substring-collision traps for the count invariant:** `geometry()`
-  collides with `screens()[m]->geometry()` and `setGeometry(`, and prose in a nearby COMMENT that
-  names a method (`windowHandle()`, `geometry()`) inflates the count — anchor those precisely
-  (`prevGeometry = Toplevel()->geometry()`, `Toplevel()->windowHandle()`) instead of counting, and
-  keep the method token out of comment prose (write "its window handle" not "windowHandle()").
-- `cargo fmt --all --check` parses + brace-checks the Rust test; a `{}`/`()` delta count vs
-  `git show origin/dev:<file>` catches an unbalanced C++ edit in one second.
-- This is a #773-class defensive/behavioral guard, NOT a rig-critical divergence that a subtree pull
-  would silently revert while still compiling — so it is a **Rust anchor only, no pwsh mirror** in the
-  windows-genlock ymls (the change is `#if __linux__`-gated; Windows compiles the unchanged path).
-
-## Deploy: FRONTEND change = FULL-BUNDLE deploy (obs64), never fast-dll
-
-This lands in `obs64`/the frontend, not `obs.dll` — see `obs-titlebar-build-id.md` /
-`rig-state-inspection.md`. Acceptance (supervisor, strih-lx): deploy the CI strih bundle,
-`systemctl --user stop strih-mv-host.service`, open the multiview projector windowed AND fullscreen,
-5 min: `program-render-audit lagged=0`, GetStats render lag < 0.5 %, `multiview-audit rendered_fps
->= 28`, 0 restarts; then provisioning flips the belt-and-braces helper unit to disabled-by-default.
+- the multiview projector, windowed AND fullscreen, for 5 min: `program-render-audit lagged=0`
+  and `multiview-audit rendered_fps >= 28`;
+- toggling always-on-top at runtime keeps the picture.
 
 ## Display resize is DEBOUNCED (#1358) — never resize the display per Qt event
 
@@ -144,4 +98,8 @@ locally instead of at CI:
 Two traps: `-include QScreen` is needed (the `screenChanged` connect instantiates
 `QMetaTypeId<QScreen*>`, which in the real build comes in transitively), and `-DENABLE_WAYLAND`
 cannot be used (dev1's Qt is < 6.9 and has no `qpa/qplatformnativeinterface.h` private header).
-
+A header-level check of `OBSProjector.hpp` (a scratch TU that constructs `new OBSProjector(nullptr,
+src, -1, ProjectorType::Multiview)` and calls its public API) needs NO obs.hpp stub: `-I
+vendor/obs-studio/libobs` gives the real `obs.hpp`, and the only missing piece is the CMake-generated
+`obsconfig.h` (a stub with the four `OBS_*_PATH`/`PREFIX` defines). The full `.cpp` needs
+`OBSBasic.hpp`'s whole include tree, so check the header, not the translation unit (issue 1357).

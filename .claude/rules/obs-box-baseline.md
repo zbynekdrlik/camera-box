@@ -124,8 +124,9 @@ Live conversion results (strih-lx, 23.9.2026, first kiosk boot on 7.0.0-31 + `pr
 - The lowlatency config meta must be installed at the INSTALLED generic-hwe version (an unpinned
   install pulled a newer HWE image and conflicted); `obs_box_lowlatency_kernel` pins it.
 - MV projector on Xorg: iconified (`WM_STATE Iconic`) keeps `rendered_fps=30` (GNOME/XWayland fell to
-  7 fps), and a 40-step drag-resize keeps program `lagged=0`. `strih-mv-host` stays disabled; the
-  vendored child-host projector is harmless here and its removal is a separate vendored change.
+  7 fps), and a 40-step drag-resize keeps program `lagged=0`. The `strih-mv-host` helper and the
+  vendored child-host projector (both XWayland + PRIME workarounds) are retired on this baseline
+  (issue 1357): the stock toplevel projector runs on every box.
 - verify item 6 (dantesync offset) can FAIL `unstable` on the fleet NTP master: its upstream is an
   internet NTP server (`ntp_server` 162.159.200.1), so the spread tracks WAN jitter (dev1 saw ping
   mdev 1.6 ms to the same server at the same time). The PTP lock (`mode=LOCK`) is the fleet signal;
