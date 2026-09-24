@@ -70,10 +70,13 @@ of the fleet is logged at the end), so a later imag failure never hides the stri
 1. **prepare** — the `linux-genlock.yml` run at the anchor SHA; the artifact is REFUSED unless its
    `GENLOCK_BUILD_SHA.txt` is the canonical SHA and its `BUNDLE_MANIFEST.json` carries the
    `lib/x86_64-linux-gnu/libobs.so.30` sha256 (the read-back needs it). The dial host must be a dotted
-   IPv4: the runner exports it as `STRIH_LX_IP`, which setup-strih.sh pins as the box's own static
-   address (the janus `local_ip`), so a hostname override would recreate the 22.9. binding outage.
+   IPv4 (`strih_lx_is_ipv4`; the fleet row is one, `strih-lx.lan` does not resolve on dev1, a
+   flag-shaped / mistyped override is refused). The box's OWN address is not the dial host: since
+   issue 1361 setup-strih.sh reads it from the box's fact file, so the runner exports no STRIH_LX_IP.
    The provisioning tree is the COMMITTED `scripts/ systemd/ intercom/` of the checkout (the archive
-   of HEAD — uncommitted edits never ship) + a generated `run-setup.sh`; it is the checkout's tree,
+   of HEAD — uncommitted edits never ship) + a generated `run-setup.sh`, and it must carry
+   `scripts/strih-boxes/strih-lx.env` plus the intercom routing file that fact file's
+   `STRIH_INTERCOM_CONFIG` names (read with sed, never sourced on dev1); it is the checkout's tree,
    not the bundle's SHA (a scripts-only fix never triggers a genlock build; setup-strih.sh is box
    config — the same split as imag's `genlock-markers.sh`). Token: `STRIH_LX_GH_TOKEN` (read-only)
    else `gh auth token`.
@@ -94,8 +97,9 @@ of the fleet is logged at the end), so a later imag failure never hides the stri
    is the unit's contract. Not stopped in 30 s = exit 4, nothing installed, best-effort start.
 6. **setup** — `sudo -k -S … bash <stage>/repo/run-setup.sh`, stdin = the sudo password line then
    `ghtoken:<token>`. The runner reads the token line (skipping a password line a NOPASSWD sudo left
-   unread), exports `GH_TOKEN STRIH_LX_BUNDLE_SRC=<stage>/bundle STRIH_LX_IP`, and re-execs itself
-   `setsid nohup` to run `setup-strih.sh` DIRECTLY and write `<stage>/setup-strih.rc`; dev1 polls it
+   unread), exports `GH_TOKEN STRIH_LX_BUNDLE_SRC=<stage>/bundle`, and re-execs itself `setsid nohup`
+   to run `setup-strih.sh --box strih-lx` DIRECTLY (the explicit fact-file box, issue 1361) and write
+   `<stage>/setup-strih.rc`; dev1 polls it
    (default 45 min). An ssh drop cannot kill the install mid-apt; the token is never an argv or a
    file. **OBS is never started over a still-running installer**: a launch whose ssh returned
    non-zero while setup-strih.sh runs is THIS deploy's detached installer (the preflight saw none), so
@@ -104,10 +108,11 @@ of the fleet is logged at the end), so a later imag failure never hides the stri
    setup-strih.rc" without a start; a genuine failure (rc != 0, or no installer running) gets the log
    tail + a best-effort start + exit 4; a failed launch with the box UNREACHABLE (installer state
    unknown) is exit 4 at once, no start, no 45-min poll. setup-strih's pending-reboot warning (rc 0)
-   is printed as a NOTE — the grep is keyed on that warning's own text (`reboot strih-lx, then run
-   verify-strih`, a test pins it in setup-strih.sh), never on "next boot", which the baseline prints on
-   routine lines every run. A settle time the read-back budget (polls x secs) cannot outlast is
-   refused in prepare (exit 3).
+   is printed as a NOTE — the grep is keyed on that warning's own box-agnostic text (`, then run
+   verify-strih`; the line reads `reboot <box>, then run verify-strih.sh --box <box>`, a test pins it
+   in setup-strih.sh), never on "next boot", which the baseline prints on routine lines every run. A
+   settle time the observable read-back window `(polls - 1) x secs` cannot outlast is refused in
+   prepare (exit 3).
 7. **start + verify** — touch `<stage>/obs-start.marker`, start the unit, then poll (default 24 x 10 s)
    and REFUSE unless the polls pass `strih_lx_deploy_verdict` (marker == canonical,
    installed `libobs.so.30` sha256 == the manifest's — the BYTES, not only the marker, since `:8899`
@@ -126,7 +131,7 @@ the password prompt still reaches sshpass's pty).
 Tests: `tests/deploy_genlock_fleet_strih_lx_exec_1317.rs` runs the REAL script with `gh` / `sshpass` /
 `ssh` / `rsync` / `curl` stubbed on PATH (the ssh stub dispatches on the remote command text — keep
 the step commands' distinguishing substrings: `pgrep -x setup-strih.sh`, `--local-sweep`, `LEFTOVER`,
-`setup-strih.rc`, `run-setup.sh`, `reboot strih-lx, then run verify-strih`, `setup-strih.log`, `strih-obs-stop.sh`,
+`setup-strih.rc`, `run-setup.sh`, `, then run verify-strih`, `setup-strih.log`, `strih-obs-stop.sh`,
 `GENLOCK_BUILD_SHA.txt`, `--user start`), plus the generated runner (root check stripped for the test)
 and `--stages-only` on real temp dirs. A test SHA must stay SHORT hex — a 40-hex literal trips the
 secret-staging hook. Remaining supervisor steps after a green execute: `verify-strih.sh` on the box
