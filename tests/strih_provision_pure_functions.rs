@@ -4041,3 +4041,21 @@ fn strih_lx_hostname_is_the_fleet_name_not_the_dial_address_1317() {
         "the hostname must never be cut from the dial address"
     );
 }
+
+/// Live incident 24.9.2026: the strih-lx deploy ran setup-strih.sh under a 077 umask, so
+/// `install -Dm644 ... /etc/intercom-hub/intercom.toml` created the parent directory 0700 root.
+/// The hub (User=newlevel) could not read its config and crash-looped (NRestarts 15925) until the
+/// directory was chmod-ed by hand. setup-strih.sh must pin a 022 umask before it creates anything.
+#[test]
+fn setup_strih_pins_umask_022_before_it_creates_any_file() {
+    let s = read_script("scripts/setup-strih.sh");
+    let umask = s
+        .find("\numask 022")
+        .expect("setup-strih.sh must set `umask 022` at top level");
+    let first_install = s.find("\ninstall ").expect("setup-strih.sh installs files");
+    assert!(
+        umask < first_install,
+        "`umask 022` must come before the first top-level install, or a caller's 077 umask \
+         creates root-only directories (the intercom-hub config dir incident)"
+    );
+}
