@@ -139,6 +139,52 @@ pub fn grid_next_boundary_ns(t_ns: u64, interval_ns: u64) -> u64 {
     }
 }
 
+/// The index of the grid slot AT OR BEFORE `t_ns`: consecutive grid points have consecutive
+/// indices, so differences of indices count grid slots. Integer rate → `second * fps + slot`;
+/// fractional rate → `t / interval` (the 1970 grid). The caller guards `interval_ns != 0`.
+fn grid_index(t_ns: u64, interval_ns: u64) -> u64 {
+    match integer_fps(interval_ns) {
+        Some(fps) => {
+            let sec = t_ns / NS_PER_SECOND;
+            sec * fps + slot_in_second(t_ns - sec * NS_PER_SECOND, fps, NS_PER_SECOND)
+        }
+        None => t_ns / interval_ns,
+    }
+}
+
+/// The grid point of slot index `index` — the inverse of [`grid_index`] on grid points.
+fn grid_point(index: u64, interval_ns: u64) -> u64 {
+    match integer_fps(interval_ns) {
+        Some(fps) => (index / fps) * NS_PER_SECOND + (index % fps) * NS_PER_SECOND / fps,
+        None => index * interval_ns,
+    }
+}
+
+/// #1355 step 3 — how many grid points lie in `(from_ns, to_ns]`: the number of whole grid slots
+/// `to_ns` sits past `from_ns`. `0` when `to_ns <= from_ns` or `interval_ns == 0`.
+///
+/// The camera emit gate's lag and #707 skip count read the grid through this — never
+/// `(to - from) / interval`, which on the per-second grid (steps alternate `interval` /
+/// `interval + 1`) calls an instant still inside a long slot "one slot late". Rust-only (the
+/// receiver has no slot-count consumer, so there is no C mirror).
+pub fn grid_steps_between(from_ns: u64, to_ns: u64, interval_ns: u64) -> u64 {
+    if interval_ns == 0 || to_ns <= from_ns {
+        return 0;
+    }
+    grid_index(to_ns, interval_ns) - grid_index(from_ns, interval_ns)
+}
+
+/// #1355 step 3 — the grid point `steps` slots after the grid slot of `t_ns` (for a grid point
+/// `t_ns`: exactly `steps` slots later; `steps == 1` equals [`grid_next_boundary_ns`] there).
+/// The camera emit gate advances its boundary through this — never `boundary + n * interval`,
+/// which lands short of the per-second grid. `interval_ns == 0` returns `t_ns`. Rust-only.
+pub fn grid_advance_ns(t_ns: u64, steps: u64, interval_ns: u64) -> u64 {
+    if interval_ns == 0 {
+        return t_ns;
+    }
+    grid_point(grid_index(t_ns, interval_ns) + steps, interval_ns)
+}
+
 /// A stamp interval longer than this is a timeline discontinuity (sender restart, clock step),
 /// not a run of missing stamps, and is not counted.
 pub const STAMP_TRACK_MAX_DELTA_NS: u64 = NS_PER_SECOND;
@@ -348,6 +394,55 @@ mod tests {
         let i2997 = 33_366_666;
         assert_eq!(grid_floor_ns(t, i2997), (t / i2997) * i2997);
         assert_eq!(grid_next_boundary_ns(t, i2997), t - t % i2997 + i2997);
+    }
+
+    /// Step 3 (the camera emit gate): `grid_advance_ns` walks the grid one slot at a time exactly
+    /// like `grid_next_boundary_ns`, and `grid_steps_between` counts those walks back — across a
+    /// whole day, both step lengths and every second roll-over; an instant between two grid points
+    /// counts from the slot it is in.
+    #[test]
+    fn grid_steps_and_advance_walk_the_grid_all_day_1355() {
+        let mut x = 0x5733_1355_u64;
+        for interval in [I30, I60] {
+            for i in 0..1_000u64 {
+                let t =
+                    SEC_2309 * NS_PER_SECOND + i * (DAY_NS / 1_000) + lcg(&mut x) % NS_PER_SECOND;
+                let b0 = grid_floor_ns(t, interval);
+                let mut b = b0;
+                for k in 1..=130u64 {
+                    b = grid_next_boundary_ns(b, interval);
+                    assert_eq!(grid_advance_ns(b0, k, interval), b, "advance {k} from {b0}");
+                    assert_eq!(grid_steps_between(b0, b, interval), k);
+                    assert_eq!(grid_steps_between(b0, b - 1, interval), k - 1);
+                    // From an instant inside the first slot: the same count.
+                    assert_eq!(grid_steps_between(t, b, interval), k);
+                }
+                assert_eq!(grid_advance_ns(b0, 0, interval), b0);
+                assert_eq!(
+                    grid_advance_ns(t, 0, interval),
+                    b0,
+                    "0 steps = the slot's own point"
+                );
+                assert_eq!(
+                    grid_advance_ns(t, 1, interval),
+                    grid_next_boundary_ns(t, interval)
+                );
+                assert_eq!(grid_steps_between(b0, b0, interval), 0);
+                assert_eq!(grid_steps_between(b0 + 5, b0, interval), 0, "backward = 0");
+            }
+        }
+    }
+
+    #[test]
+    fn grid_steps_and_advance_degenerate_and_fractional_1355() {
+        let t = SEC_2309 * NS_PER_SECOND + 123_456_789;
+        assert_eq!(grid_advance_ns(t, 3, 0), t);
+        assert_eq!(grid_steps_between(t, t + NS_PER_SECOND, 0), 0);
+        let i2997 = 33_366_666;
+        let f = (t / i2997) * i2997;
+        assert_eq!(grid_advance_ns(t, 2, i2997), f + 2 * i2997);
+        assert_eq!(grid_steps_between(f, f + 3 * i2997, i2997), 3);
+        assert_eq!(grid_steps_between(f, f + 3 * i2997 - 1, i2997), 2);
     }
 
     #[test]

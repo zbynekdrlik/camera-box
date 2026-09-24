@@ -20,32 +20,27 @@
 //! - [`boundary_skip_count`] (#707) — how many whole emit-boundary intervals were SKIPPED
 //!   (never emitted), the #707 SKIPPED-boundaries diagnostic.
 //!
-//! `cfg(target_os = "linux")` in lock-step with `crate::ndi` (whose NDI-timecode grid,
-//! [`crate::ndi::next_boundary_100ns`] / [`crate::ndi::fps_from_frame_rate`], this pacing gate
-//! complements but does not depend on). Pure logic — Tier-0 testable on the Linux `test` CI job
-//! (default features): the sibling-module precedent of `genlock_stamp` / `dupe_decimation`.
+//! ## The grid (#1355)
+//!
+//! Every boundary here is a point of the ONE per-second genlock grid,
+//! [`crate::genlock_grid`]: slot `k` of whole second `S` is `S + floor(k * 1 s / fps)` — the SAME
+//! grid the camera stamps its NDI timecode on ([`crate::ndi::floor_boundary_100ns`]) and the
+//! receiver floors its release deadline / render tick to. The latch and the resync are
+//! [`crate::genlock_grid::grid_next_boundary_ns`], the advance is the next grid point
+//! ([`genlock_advance_boundary`]), and lag / skip counts are grid SLOTS
+//! ([`crate::genlock_grid::grid_steps_between`]). Until #1355 the gate paced on the grid counted from
+//! 1970 (`now % interval`, `boundary + interval`), which loses `1 s − fps · interval` per second
+//! against the stamps (10 ns/s at 30 fps, 40 ns/s at 60 fps — 8.3 ms apart at 60 fps on
+//! 24.9.2026, walking with the date): a capture in that window crossed the gate boundary of one
+//! slot but was stamped into the neighbouring one. Per-second steps alternate `interval` /
+//! `interval + 1` ns, so never step or divide by `interval` by hand here.
+//!
+//! `cfg(target_os = "linux")` in lock-step with `crate::ndi`. Pure logic — Tier-0 testable on the
+//! Linux `test` CI job (default features): the sibling-module precedent of `genlock_stamp` /
+//! `dupe_decimation`.
 
-/// NDI sender wrapper - optimized for low latency
-/// Genlock decimation gate (#11): given the current wall-clock time `now_ns`, the
-/// next emit boundary `next_boundary_ns` (0 = uninitialized), the boundary
-/// `interval_ns` (1e9 / target_fps), and `queue_had_frame` (#1131 — did THIS frame
-/// come from a NON-EMPTY V4L2 queue, i.e. already buffered? see
-/// [`crate::capture_stall::frame_from_nonempty_queue`]), decide whether THIS captured
-/// frame should be emitted — it is the first capture at/after a boundary — and return
-/// the updated next boundary. The faster capture (e.g. 60 fps) is decimated onto the DanteSync
-/// wall-clock boundaries of the slower genlock/broadcast rate (e.g. 30 fps) so a
-/// downstream genlocked OBS consumes exactly one frame per render tick (zero loss).
-/// Pure + fully mutation-tested; the capture loop wires it to `wall_clock_ns()`.
-///
-/// Grid note: this gate aligns on a continuous epoch-relative grid
-/// (`now_ns % interval_ns`), which is INDEPENDENT of the per-second-reset grid
-/// used for the stamped NDI timecode in [`crate::ndi::next_boundary_100ns`]. With an integer
-/// `interval_ns` (e.g. 33_333_333 for 30 fps) the two grids differ only by the
-/// per-second truncation residue (~10 ns/s, < 2e-8 rate error → under one frame
-/// per hour) — harmless for the OBS-FIFO decimation this drives; the grids are
-/// not required to coincide. `interval_ns == 0` disables the gate and is the
-/// guarded divisor case, matching [`crate::ndi::next_boundary_100ns`] / [`crate::ndi::fps_from_frame_rate`]
-/// which also guard a zero divisor rather than panicking.
+use crate::genlock_grid::{grid_advance_ns, grid_next_boundary_ns, grid_steps_between};
+
 /// #707 B1 — the largest lag (in whole emit-boundary intervals) the emit gate absorbs by
 /// CATCHING UP one interval at a time (emitting each merely-late buffered frame for its own
 /// boundary) before it gives up and grid-resyncs (leaps forward, dropping the intervening
@@ -66,6 +61,21 @@
 /// however large the lag: it catches up one interval so no buffered captured frame is discarded.
 pub const GENLOCK_MAX_CATCHUP_INTERVALS: u64 = 8;
 
+/// Genlock decimation gate (#11): given the current wall-clock time `now_ns`, the
+/// next emit boundary `next_boundary_ns` (0 = uninitialized), the boundary
+/// `interval_ns` (1e9 / target_fps), and `queue_had_frame` (#1131 — did THIS frame
+/// come from a NON-EMPTY V4L2 queue, i.e. already buffered? see
+/// [`crate::capture_stall::frame_from_nonempty_queue`]), decide whether THIS captured
+/// frame should be emitted — it is the first capture at/after a boundary — and return
+/// the updated next boundary. The faster capture (e.g. 60 fps) is decimated onto the DanteSync
+/// wall-clock boundaries of the slower genlock/broadcast rate (e.g. 30 fps) so a
+/// downstream genlocked OBS consumes exactly one frame per render tick (zero loss).
+/// Pure + fully mutation-tested; the capture loop wires it to `wall_clock_ns()`.
+///
+/// Every boundary is a point of the per-second grid the frame is STAMPED on (#1355, see the
+/// module doc), so the boundary a capture crosses to be emitted IS the slot its timecode floors
+/// to. `interval_ns == 0` disables the gate and is the guarded divisor case, matching
+/// [`crate::ndi::next_boundary_100ns`] which also guards a zero divisor rather than panicking.
 pub fn genlock_emit_gate(
     now_ns: u64,
     next_boundary_ns: u64,
@@ -92,8 +102,9 @@ pub fn genlock_emit_gate(
         // Between boundaries — decimate this capture (do not emit).
         return (false, boundary);
     }
-    // Crossed the boundary: emit this (freshest) frame, advance the boundary.
-    let mut next = boundary + interval_ns;
+    // Crossed the boundary: emit this (freshest) frame, advance the boundary to the next grid
+    // point (#1355: `interval` or `interval + 1` ns later on the per-second grid).
+    let mut next = genlock_advance_boundary(boundary, 1, interval_ns);
     if next <= now_ns {
         // Fell behind. #707 B1: distinguish a bounded jitter / CPU-starvation BUFFERED-DRAIN (the
         // freeze mechanism) from a genuine large wall-clock discontinuity (a DanteSync step). The
@@ -106,7 +117,7 @@ pub fn genlock_emit_gate(
         // Only a lag beyond GENLOCK_MAX_CATCHUP_INTERVALS (which a 4-deep queue can never produce
         // as buffered frames — it must be a real clock STEP) grid-resyncs, as before (#131), so an
         // NTP/PTP jump never triggers a pathologically long stale catch-up.
-        let lag_intervals = (now_ns - boundary) / interval_ns; // >= 1 here (next <= now_ns)
+        let lag_intervals = grid_steps_between(boundary, now_ns, interval_ns); // >= 1 here (next <= now_ns)
         if lag_intervals > GENLOCK_MAX_CATCHUP_INTERVALS && !queue_had_frame {
             // #1131: resync (leap the grid forward past the intervening boundaries) ONLY when this
             // frame did NOT come from a buffered V4L2 queue — i.e. the loop genuinely WAITED for it
@@ -119,9 +130,9 @@ pub fn genlock_emit_gate(
             // past the buffered frames and discarding them in a run (the issue-1131 multi-slot
             // judder). The next buffered frame re-evaluates against the following boundary, draining
             // the whole backlog one-per-frame with ZERO skipped boundaries.
-            next = now_ns - (now_ns % interval_ns) + interval_ns;
+            next = grid_next_boundary_ns(now_ns, interval_ns);
         }
-        // else: keep next = boundary + interval_ns — emit this (fresh, merely-late) frame for the
+        // else: keep next = the grid point after `boundary` — emit this (fresh, merely-late) frame for the
         // next un-emitted boundary; the emit rate self-heals one frame at a time (no permanent
         // un-emitted boundary → no emit-rate deficit).
     }
@@ -131,19 +142,35 @@ pub fn genlock_emit_gate(
 /// #1111 — the wall-clock boundary [`genlock_emit_gate`] latches for `now_ns`, factored out so
 /// [`genlock_emit_on_time`] computes the IDENTICAL boundary without duplicating the #131
 /// backward-step / init re-latch formula. The caller guards `interval_ns != 0`.
+///
+/// Re-latches (to the grid point after `now`) when uninitialized or when the pending boundary is
+/// MORE than one grid slot ahead of `now` — a backward clock step (#131). On the pre-#1355 1970
+/// grid `next > now + interval` was exactly that test; on the per-second grid it is
+/// `next > grid_next(now)`.
 fn genlock_latched_boundary(now_ns: u64, next_boundary_ns: u64, interval_ns: u64) -> u64 {
-    if next_boundary_ns == 0 || next_boundary_ns > now_ns + interval_ns {
-        now_ns - (now_ns % interval_ns) + interval_ns
+    let after_now = grid_next_boundary_ns(now_ns, interval_ns);
+    if next_boundary_ns == 0 || next_boundary_ns > after_now {
+        after_now
     } else {
         next_boundary_ns
     }
 }
 
+/// #1355 — the emit boundary `steps` grid slots after `boundary` (a point of the per-second
+/// grid), for every place that ADVANCES the gate's boundary: the gate's own emit advance, and the
+/// `dupe_decimation` fast-drain / starvation-fill multi-slot advances. `boundary + steps *
+/// interval` would land up to `steps` ns short of the grid (the per-second steps alternate
+/// `interval` / `interval + 1`), after which the next poll re-crosses the same slot.
+/// `interval_ns == 0` returns `boundary` unchanged.
+pub fn genlock_advance_boundary(boundary_ns: u64, steps: u64, interval_ns: u64) -> u64 {
+    grid_advance_ns(boundary_ns, steps, interval_ns)
+}
+
 /// #1111 — is `now_ns` an ON-TIME boundary crossing (the "surplus" regime), as opposed to a LATE
 /// catch-up crossing? True iff the capture has reached the pending boundary AND the NEXT boundary
-/// is still in the future (`boundary + interval > now`). It is FALSE both between boundaries
+/// is still in the future (`next grid point > now`). It is FALSE both between boundaries
 /// (`now < boundary` — [`genlock_emit_gate`] returns emit=false) and once the gate has fallen
-/// behind (`boundary + interval <= now`, the catch-up / #707-resync regime where
+/// behind (`next grid point <= now`, the catch-up / #707-resync regime where
 /// [`genlock_emit_gate`] emits a merely-late frame).
 ///
 /// This is the signal `dupe_decimation`'s issue-889 dupe-preferring shed needs to stay
@@ -168,7 +195,7 @@ pub fn genlock_emit_on_time(now_ns: u64, next_boundary_ns: u64, interval_ns: u64
         return false;
     }
     let boundary = genlock_latched_boundary(now_ns, next_boundary_ns, interval_ns);
-    now_ns >= boundary && boundary + interval_ns > now_ns
+    now_ns >= boundary && genlock_advance_boundary(boundary, 1, interval_ns) > now_ns
 }
 
 /// #1145 — how many WHOLE emit-boundary intervals `now_ns` sits PAST the pending boundary: `0`
@@ -190,11 +217,7 @@ pub fn genlock_lag_intervals(now_ns: u64, next_boundary_ns: u64, interval_ns: u6
         return 0;
     }
     let boundary = genlock_latched_boundary(now_ns, next_boundary_ns, interval_ns);
-    if now_ns >= boundary {
-        (now_ns - boundary) / interval_ns
-    } else {
-        0
-    }
+    grid_steps_between(boundary, now_ns, interval_ns)
 }
 
 /// #707 — how many WHOLE emit-boundary intervals were SKIPPED (never emitted) between the
@@ -221,8 +244,8 @@ pub fn boundary_skip_count(old_boundary_ns: u64, new_boundary_ns: u64, interval_
     if interval_ns == 0 || old_boundary_ns == 0 || new_boundary_ns <= old_boundary_ns {
         return 0;
     }
-    let advanced = new_boundary_ns - old_boundary_ns;
-    (advanced / interval_ns).saturating_sub(1)
+    // #1355: count grid SLOTS advanced (the per-second steps are `interval` or `interval + 1`).
+    grid_steps_between(old_boundary_ns, new_boundary_ns, interval_ns).saturating_sub(1)
 }
 
 /// (#1167 v4) The NDI genlock emit timecode (100ns units) for the `repeat_index`-th STARVATION
