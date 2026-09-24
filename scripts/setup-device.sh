@@ -1682,7 +1682,10 @@ else
     echo "  /etc/fstab.bak already exists -- keeping the original backup (idempotent re-run)"
 fi
 
-# Create new fstab with read-only root and tmpfs mounts
+# Create new fstab with read-only root and tmpfs mounts.
+# The heredoc is UNQUOTED (it expands ROOT_UUID and two $(...) lines), so a backtick in its comment
+# text is a command substitution: escape every one as \` (issue 1311 -- a bare `nofail` ran as a
+# command and vanished from the written fstab).
 cat > /etc/fstab << FSTABEOF
 # Root filesystem - read-only for reliability
 UUID=${ROOT_UUID} / ext4 ro 0 1
@@ -1694,7 +1697,7 @@ $(grep '/boot/efi' /etc/fstab.bak 2>/dev/null || echo "# No EFI partition")
 tmpfs /tmp tmpfs defaults,noatime,nosuid,nodev,mode=1777,size=100M 0 0
 tmpfs /var/log tmpfs defaults,noatime,nosuid,nodev,mode=0755,size=50M 0 0
 # #1309: persistent journal on the dedicated ext4 partition, mounted OVER the /var/log tmpfs (systemd
-# orders /var/log first by path prefix). `nofail` -> a box WITHOUT the partition (an old box not yet
+# orders /var/log first by path prefix). \`nofail\` -> a box WITHOUT the partition (an old box not yet
 # reflashed via create-usb-linux.sh) still boots and journald simply falls back to a volatile journal
 # on the tmpfs above. Emitted only when the labelled partition actually exists, so setup-device.sh on
 # such an old box writes a harmless comment instead of an unmountable entry.

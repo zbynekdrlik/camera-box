@@ -830,10 +830,10 @@ Checks:
       to name: "enp*" (the PCI NIC), never the driver wildcard, and no two interfaces carry the box
       IP -- so a USB CDC-NCM camera link (bkshading, issue 808) can never steal the IP + PTP route
   (ae) NTP-client DSCP marking (dantesync issue 52): nftables installed + a dedicated
-      `table ip dantesync_dscp` OUTPUT-mangle rule marks outgoing NTP requests (udp dport 123) with
+      \`table ip dantesync_dscp\` OUTPUT-mangle rule marks outgoing NTP requests (udp dport 123) with
       DSCP EF, applied at boot by the enabled+active dantesync-dscp.service oneshot (rsntp cannot
       setsockopt(IP_TOS) on Linux, so this provisioning rule is the request-half fix)
-  (af) v4l2-ctl (v4l-utils) installed and runnable (`v4l2-ctl --version`) -- already listed in
+  (af) v4l2-ctl (v4l-utils) installed and runnable (\`v4l2-ctl --version\`) -- already listed in
       setup-device.sh STEP 16's apt-get line, but that line silently swallows a per-box apt
       failure; cam3/cam4 were found live missing it despite the script listing it (issue 1213)
   (ag) ethtool installed (command -v ethtool) -- also in setup-device.sh STEP 16's apt-get line,
@@ -849,7 +849,7 @@ Checks:
       cambox-mgmt-selfcheck.timer enabled -- the local ssh-banner probe + restart safety net
   (ak) off-box remote logging (#1311): cambox-netconsole.service enabled+active with a live configfs
       target to dev1:514, AND systemd-journal-upload enabled with URL -> the dev1 sink + a /run cursor
-  (al) named cam-box UEFI boot entry (#1066 D6): efibootmgr reports a `cam-box` entry that is FIRST
+  (al) named cam-box UEFI boot entry (#1066 D6): efibootmgr reports a \`cam-box\` entry that is FIRST
       in BootOrder -- FAILs if absent / not leading / efibootmgr unreadable (test-strictness)
   (am) bkshading-relay blast-radius + info logging (#1309): TasksMax <= 512 AND a running relay
       logs at info (zero journal lines while active FAILs); relay not provisioned = n/a
