@@ -822,21 +822,36 @@ mod tests {
     }
 
     /// issue 1367 — the trade-off stated in the design, measured: a sender tail TEN times the live
-    /// rate (double-late frames become common enough to reach an under-/over-depth) costs at most
-    /// one shed and one hold per hour, never a drain or a late hold, and the depth stays on
-    /// `base + 1`. Seeds measured 2-6 shed+hold pairs per 6 h.
+    /// rate. A single late frame is neutral at `base + 1`; only two late frames close together
+    /// (a double hiccup) reach an under- or over-depth, and each such event costs at most one hold
+    /// plus one shed. At 3000 ppm per frame the double-late rate is (3e-3)^2 x 108 000 frames/h
+    /// ~= 1 per hour, so the bound is TWICE that expected rate — each of shed and hold at most two
+    /// per hour, over five seeds — never a drain or a late hold, and the depth stays on `base + 1`.
     #[test]
-    fn stressed_sender_tail_costs_at_most_one_correction_pair_per_hour_1367() {
-        let mut cfg = BenchConfig::live_2026_09_24(GridModel::Production);
-        cfg.send_late_ppm *= 10;
-        let r = run_bench(&cfg);
-        let per_hour_cap = r.hours.ceil() as u64;
-        assert!(
-            r.converge_sheds <= per_hour_cap && r.n1_grows <= per_hour_cap,
-            "more than one shed or hold per hour at a 10x tail: {r:?}"
-        );
-        assert_eq!(r.drains + r.late_holds, 0, "{r:?}");
-        assert!(share(&r, &[31]) > 0.99, "states {:?}", r.state_samples);
+    fn stressed_sender_tail_costs_at_most_two_correction_pairs_per_hour_1367() {
+        for seed in [
+            BenchConfig::live_2026_09_24(GridModel::Production).seed,
+            1,
+            2,
+            3,
+            4,
+        ] {
+            let mut cfg = BenchConfig::live_2026_09_24(GridModel::Production);
+            cfg.seed = seed;
+            cfg.send_late_ppm *= 10;
+            let r = run_bench(&cfg);
+            let cap = 2 * r.hours.ceil() as u64;
+            assert!(
+                r.converge_sheds <= cap && r.n1_grows <= cap,
+                "seed {seed}: more than two sheds or holds per hour at a 10x tail: {r:?}"
+            );
+            assert_eq!(r.drains + r.late_holds, 0, "seed {seed}: {r:?}");
+            assert!(
+                share(&r, &[31]) > 0.99,
+                "seed {seed}: states {:?}",
+                r.state_samples
+            );
+        }
     }
 
     /// issue 1367 (review round 1) — a render tick that wakes LATE must never read the conveyor one

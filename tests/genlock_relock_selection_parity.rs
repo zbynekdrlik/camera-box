@@ -443,7 +443,7 @@ fn converge_vectors() -> Vec<(u64, u64, u64, u32, u64, u32, u64)> {
         // N>=2-ONLY GATE (#1049 coordinator finding): the deep n=1 stream source at its natural
         // grid-quantized hold (~1033 ms at reserve 990, frac 0.7) is INERT, while the SAME held age
         // on an n>=2 source still fires — proves the gate is n-specific, C and Rust in lock-step.
-        (w, w - 1_033_000_000, w - 33_000_000, 990, i30, 1, 100), // deep n=1 -> INERT (gated)
+        (w, w - 1_033_000_000, w - 33_000_000, 990, i30, 1, 100), // deep n=1 at its N==1 target -> inert
         (w, w - 1_033_000_000, w - 33_000_000, 990, i30, 2, 100), // same age, n=2 -> fires
     ];
     // issue 1367 — the N==1 SHED branch at every edge: the late-tolerant depth edge (target + 1

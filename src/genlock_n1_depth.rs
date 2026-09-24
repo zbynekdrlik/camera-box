@@ -116,7 +116,8 @@ pub fn n1_is_deep_source(
     floor_frames.saturating_add(N1_DEEP_MARGIN_FRAMES) <= n1_base_frames(latency_ms, interval_ns)
 }
 
-/// issue 1367 — the N==1 SHED half, the lifted branch of [`should_converge_phase`]: shed one frame
+/// issue 1367 — the N==1 SHED half, the lifted branch of
+/// [`crate::genlock_backlog::should_converge_phase`]: shed one frame
 /// when the last presented depth (read from the locked boundary, `boundary == last presented +
 /// interval`) is deeper than [`n1_target_frames`] on a deep source, throttled by the shared #859
 /// counter. An unlocked boundary (0) or a degenerate interval never sheds.
@@ -195,8 +196,9 @@ mod tests {
         assert_eq!(n1_base_frames(987, I30), 30); // 29.61 frames -> 30
         assert_eq!(n1_base_frames(963, I30), 29); // 28.89 -> 29
         assert_eq!(n1_base_frames(1010, I30), 31); // 30.30 -> 31
-                                                   // An exact whole number of frames: the integer interval is 1/3 ns short of a real frame,
-                                                   // so 1000 ms reads 30.0000003 frames; the 1 us tolerance keeps it at 30, not 31.
+
+        // An exact whole number of frames: the integer interval is 1/3 ns short of a real frame,
+        // so 1000 ms reads 30.0000003 frames; the 1 us tolerance keeps it at 30, not 31.
         assert_eq!(n1_base_frames(1000, I30), 30);
         assert_eq!(n1_base_frames(100, I30), 3);
         assert_eq!(n1_base_frames(1001, I30), 31);

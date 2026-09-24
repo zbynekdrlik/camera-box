@@ -28,7 +28,7 @@ use std::collections::HashMap;
 /// Field names mirror the log's `key=value` tokens exactly (see [`parse_audit_line`]).
 /// The counters (`received`, `consumed`, `underruns`, `holds`, `overruns`,
 /// `backward_steps`, `backward_regime_ticks`, `dropped_due`, `relocks`, `late_holds`,
-/// `stamp_dup`, `stamp_gap`, `empty_run`) are CUMULATIVE
+/// `stamp_dup`, `stamp_gap`, `n1_grows`, `empty_run`) are CUMULATIVE
 /// since the source was created — they only ever increase — so a per-run answer needs the
 /// DELTA between the first and last sample of a captured window ([`summarize`]), never the
 /// raw value alone. `ts_head_skew_ms` is an instantaneous per-tick value, not cumulative.
@@ -100,6 +100,11 @@ pub struct AuditSample {
     /// #1355 — CUMULATIVE missing stamp intervals (`stamp_gap=`) against the source's own
     /// smallest stamp step. Absent on pre-#1355 logs — parses as 0.
     pub stamp_gap: u64,
+    /// issue 1367 — CUMULATIVE N==1 depth HOLDS (`n1_grows=`): a deep N==1 conveyor (the stream
+    /// `NDI 2ME PGM`) held one tick because it sat shallower than its pin-derived depth. After a
+    /// restart it may fire once; in steady state it must stay flat (its partner, the shed of a
+    /// frame a restart added, counts into `converge_sheds=`). Absent on older logs — parses as 0.
+    pub n1_grows: u64,
 }
 
 /// Parse ONE `genlock-fifo audit` log line into an [`AuditSample`].
@@ -183,6 +188,7 @@ pub fn parse_audit_line(line: &str) -> Option<AuditSample> {
             "audio_pairing_offset_ms" => set!(audio_pairing_offset_ms),
             "stamp_dup" => set!(stamp_dup),
             "stamp_gap" => set!(stamp_gap),
+            "n1_grows" => set!(n1_grows),
             _ => {}
         }
     }
@@ -242,6 +248,9 @@ pub struct AuditSummary {
     /// #1355 — window deltas of the sender stamp-irregularity counters (0 on pre-#1355 logs).
     pub delta_stamp_dup: u64,
     pub delta_stamp_gap: u64,
+    /// issue 1367 — window delta of the N==1 depth holds (0 on older logs). A steady window must
+    /// read 0; a non-zero value outside a restart settle is a misfiring depth rule.
+    pub delta_n1_grows: u64,
     /// Largest `|ts_head_skew_ms|` observed across the window — the worst-case arrival
     /// jitter this reserve had to absorb.
     pub max_abs_head_skew_ms: i64,
@@ -295,6 +304,7 @@ pub fn summarize(samples: &[AuditSample]) -> Option<AuditSummary> {
         delta_late_holds: last.late_holds.saturating_sub(first.late_holds),
         delta_stamp_dup: last.stamp_dup.saturating_sub(first.stamp_dup),
         delta_stamp_gap: last.stamp_gap.saturating_sub(first.stamp_gap),
+        delta_n1_grows: last.n1_grows.saturating_sub(first.n1_grows),
         max_abs_head_skew_ms,
         mean_abs_head_skew_ms,
         mean_head_skew_ms,
@@ -859,6 +869,29 @@ mod tests {
         assert_eq!((sum.delta_stamp_dup, sum.delta_stamp_gap), (3, 5));
     }
 
+    /// issue 1367 — the N==1 depth-hold counter: parsed from its token (printed right after
+    /// `stamp_gap=` by the vendored audit line), 0 on an older line, window-delta'd.
+    #[test]
+    fn n1_grows_parses_defaults_and_deltas_1367() {
+        let line = SAMPLE_LINE_CAM1.replace(
+            "wall_qpc_drift_ms=-252 ",
+            "wall_qpc_drift_ms=-252 stamp_dup=7 stamp_gap=9 n1_grows=2 ",
+        );
+        let s = parse_audit_line(&line).expect("an issue-1367 line parses");
+        assert_eq!(s.n1_grows, 2);
+        assert_eq!((s.stamp_dup, s.stamp_gap), (7, 9));
+        assert!(s.audio_enabled);
+        let old = parse_audit_line(SAMPLE_LINE_CAM1).expect("an older line still parses");
+        assert_eq!(old.n1_grows, 0);
+        let later = parse_audit_line(&line.replace("n1_grows=2", "n1_grows=3")).unwrap();
+        let sum = summarize(&[s, later]).unwrap();
+        assert_eq!(sum.delta_n1_grows, 1);
+        assert_eq!(
+            sum.delta_holds, 0,
+            "an N==1 depth hold is never counted as a benign hold"
+        );
+    }
+
     /// #1355 — the two new keys are mutually non-substring with every key the input-side parser
     /// already matches, so no existing token can be mis-read as one of them or vice versa.
     #[test]
@@ -893,7 +926,8 @@ mod tests {
             "audio_delay_ms",
             "audio_pairing_offset_ms",
         ];
-        for new in ["stamp_dup", "stamp_gap"] {
+        // issue 1367 adds `n1_grows` — deliberately not `*_holds`, which would contain `holds`.
+        for new in ["stamp_dup", "stamp_gap", "n1_grows"] {
             for old in existing {
                 assert!(
                     !old.contains(new) && !new.contains(old),

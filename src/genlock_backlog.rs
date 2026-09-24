@@ -318,7 +318,8 @@ pub fn phase_pinned_is_due(frame_ts_ns: u64, deadline_ns: u64) -> bool {
 /// #1049 — the STEADY-conveyor PHASE-CONVERGENCE shed decision. Should this tick shed exactly ONE
 /// EXTRA frame to slew the conveyor's presentation PHASE back toward its target? For N>=2 the
 /// target is the configured latency floored at the achievable phase (below). For N==1 (issue 1367)
-/// the `source_multiple < 2` branch delegates to [`n1_shed_due`]: a DEEP N==1 source converges to
+/// the `source_multiple < 2` branch delegates to [`crate::genlock_n1_depth::n1_shed_due`]: a DEEP
+/// N==1 source converges to
 /// the pin-derived depth `crate::genlock_n1_depth::n1_target_frames`, read from the presented AGE,
 /// so every restart lands on the same depth. A shallow N==1 source stays inert exactly as before.
 ///
@@ -2854,29 +2855,30 @@ mod tests {
         );
     }
 
-    /// #1049 (coordinator's live finding) — convergence is N>=2 ONLY. The deep n=1 stream source
-    /// `NDI 2ME PGM` (30-into-30, configured 990 ms) sits at its natural grid-quantized hold
-    /// ~1033 ms — one frame above configured at frac 0.7, ABOVE the reserve-based threshold — so a
-    /// naive decision would shed it; but an n=1 shed does not stick (1 frame/tick can't sustain a
-    /// fresher phase → shed-hold-shed limit cycle, the #998 signature). The decision MUST go INERT
-    /// for n<2 while the SAME held age on an n>=2 source still converges (the shed sticks).
+    /// #1049 (coordinator's live finding) / issue 1367 — the deep n=1 stream source `NDI 2ME PGM`
+    /// (30-into-30, configured 990 ms) at its natural grid-quantized hold ~1033 ms (31 frames, one
+    /// above configured at frac 0.7) is NEVER shed. The reserve-aimed N>=2 threshold would shed it,
+    /// and an n=1 shed toward the reserve does not stick (shed-hold-shed, the #998 signature). Since
+    /// issue 1367 the n<2 branch aims at the natural hold itself (`base + 1` = 31 frames at 990), so
+    /// this held age sits exactly AT its N==1 target: inert. The SAME held age on an n>=2 source
+    /// still converges toward the reserve (the shed sticks there).
     #[test]
-    fn convergence_is_n2_only_the_deep_n1_source_is_inert_1049() {
+    fn a_deep_n1_source_at_its_natural_hold_is_never_shed_1049_1367() {
         // wall large enough that a 1033 ms subtraction never underflows.
         let wall = 2_000_000_000_000u64;
         let s = 1033 * 1_000_000; // the live natural hold at reserve 990, frac 0.7
         let boundary = wall - s;
         let newest = wall - 33_000_000; // freshest frame ~1 canvas frame old -> small floor
-                                        // n=1: INERT (gated — the shed would oscillate). This is the RED→GREEN of the fix.
+                                        // n=1: at the N==1 target (31 frames) -> inert. (The #1049 RED→GREEN was the n<2 gate.)
         assert!(
             !should_converge_phase(wall, boundary, newest, 990, I30, 1, 100),
-            "a deep n=1 source at its natural grid-quantized hold must NOT shed — the n=1 shed \
-             does not stick and limit-cycles (the live stream-box `NDI 2ME PGM` oscillation)"
+            "a deep n=1 source at its natural grid-quantized hold must NOT shed — it sits at its \
+             issue-1367 target; a reserve-aimed shed would limit-cycle (the #1049 oscillation)"
         );
-        // n=0 degenerate also gated (0 < 2), no divide-by-zero.
+        // n=0 degenerate is treated as n=1 (the same target), no divide-by-zero.
         assert!(
             !should_converge_phase(wall, boundary, newest, 990, I30, 0, 100),
-            "n=0 (degenerate) is below the N>=2 gate -> inert"
+            "n=0 (degenerate) reads as N==1 at its target -> inert"
         );
         // The SAME held age on an n>=2 source STILL converges — the gate is n-specific, not a
         // blanket disable, so the strih 60-into-30 convergence is untouched.
