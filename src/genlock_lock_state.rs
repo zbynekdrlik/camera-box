@@ -826,7 +826,13 @@ mod tests {
         assert_eq!(input_phase_events(&ev(true, u64::MAX, 5, 0)), u64::MAX);
     }
 
-    // ---- #1299 Part 4: windowed qpc_drift ------------------------------------------
+    // ---- #1299 Part 4 / #1357 scope C: the qpc_drift term is a wall STEP, one semantics per box ----
+    //
+    // Live fixtures from 24.9.2026 (issue 1357 validation): every `qpc_drift` DEGRADED on both boxes
+    // came from the removed RATE-vs-instantaneous-slew branch, none from a step. strih-lx (Linux,
+    // `CLOCK_MONOTONIC` is kernel-disciplined): measured 0.0 on all 689 samples while dantesync's
+    // `f_ptp + f_phase` swung -160..+171 ppm. stream (Windows, free QPC): measured 23.4 ppm while the
+    // instantaneous `f_ptp + f_phase` read 109.8. Neither is a genlock hazard; a STEP is, on both.
 
     #[test]
     fn window_rate_ppm_matches_the_overnight_strih_slope() {
@@ -842,16 +848,8 @@ mod tests {
 
     #[test]
     fn steady_disciplined_slew_does_not_degrade() {
-        // The reopen scenario: measured ≈14 ppm, the clock reports it applies ≈12 ppm.
-        let v = qpc_drift_beyond_bound(
-            true,
-            641,
-            45_000_000,
-            12.0,
-            GENLOCK_QPC_DRIFT_PPM_BOUND,
-            0,
-            GENLOCK_QPC_STEP_BOUND_MS,
-        );
+        // A Windows box: the wall runs ≈14 ppm against the free QPC crystal, no step.
+        let v = qpc_drift_beyond_bound(true, 641, 45_000_000, 0, GENLOCK_QPC_STEP_BOUND_MS);
         assert!((v.measured_ppm - 14.2444).abs() < 0.001);
         assert!(!v.beyond_bound);
     }
@@ -859,45 +857,63 @@ mod tests {
     #[test]
     fn a_step_within_the_window_degrades_even_before_ready() {
         // A 40 ms single-sample jump (an NTP RTC step) > one 30 fps frame (33 ms).
-        let v = qpc_drift_beyond_bound(
-            false,
-            0,
-            0,
-            12.0,
-            GENLOCK_QPC_DRIFT_PPM_BOUND,
-            40,
-            GENLOCK_QPC_STEP_BOUND_MS,
-        );
+        let v = qpc_drift_beyond_bound(false, 0, 0, 40, GENLOCK_QPC_STEP_BOUND_MS);
         assert!(v.beyond_bound);
+        let back = qpc_drift_beyond_bound(true, -40, 300_000, -40, GENLOCK_QPC_STEP_BOUND_MS);
+        assert!(back.beyond_bound, "a backward step degrades too");
     }
 
     #[test]
-    fn a_large_rate_mismatch_degrades() {
-        // ≈134 ppm over a filled window while the clock reports ≈12 ppm.
-        let v = qpc_drift_beyond_bound(
-            true,
-            6,
-            45_000,
-            12.0,
-            GENLOCK_QPC_DRIFT_PPM_BOUND,
-            1,
-            GENLOCK_QPC_STEP_BOUND_MS,
+    fn a_step_at_the_bound_is_not_beyond_and_one_over_is_1357() {
+        assert!(
+            !qpc_drift_beyond_bound(true, 0, 300_000, 33, GENLOCK_QPC_STEP_BOUND_MS).beyond_bound
         );
-        assert!(v.measured_ppm > 120.0);
-        assert!(v.beyond_bound);
+        assert!(
+            qpc_drift_beyond_bound(true, 0, 300_000, 34, GENLOCK_QPC_STEP_BOUND_MS).beyond_bound
+        );
     }
 
     #[test]
-    fn not_ready_window_never_degrades_on_rate_alone() {
-        let v = qpc_drift_beyond_bound(
-            false,
-            999,
-            1000,
-            12.0,
-            GENLOCK_QPC_DRIFT_PPM_BOUND,
-            0,
-            GENLOCK_QPC_STEP_BOUND_MS,
+    fn a_large_rate_alone_no_longer_degrades_1357() {
+        // ≈133 ppm over a filled window with a sub-frame step. The render tick re-derives every
+        // deadline from the wall clock and absorbs up to 2 ms per tick, so a rate is not a genlock
+        // hazard; it stays REPORT-ONLY telemetry (measured_ppm) and never feeds the verdict.
+        let v = qpc_drift_beyond_bound(true, 6, 45_000, 1, GENLOCK_QPC_STEP_BOUND_MS);
+        assert!(
+            v.measured_ppm > 120.0,
+            "the rate is still measured for telemetry"
         );
+        assert!(!v.beyond_bound);
+    }
+
+    #[test]
+    fn linux_disciplined_monotonic_window_never_degrades_1357() {
+        // strih-lx 24.9. 01:10:49: `CLOCK_MONOTONIC` shares the kernel frequency discipline, so the
+        // windowed wall-vs-monotonic delta is 0 by construction (dantesync reported -68.5 ppm, later
+        // +170.9 — a servo excursion, not a wall-vs-monotonic hazard).
+        let v = qpc_drift_beyond_bound(true, 0, 300_000, 0, GENLOCK_QPC_STEP_BOUND_MS);
+        assert_eq!(v.measured_ppm, 0.0);
+        assert!(!v.beyond_bound);
+    }
+
+    #[test]
+    fn windows_and_linux_windows_give_the_same_verdict_1357() {
+        // stream 24.9. 05:09:00 (Windows): 7 ms accrued over a 299 s window = 23.4 ppm, no step.
+        // strih-lx the same minute (Linux): 0 ms accrued. ONE semantics: the same (no-step) verdict,
+        // and the same (step) verdict once either window carries a 40 ms wall step.
+        let win = qpc_drift_beyond_bound(true, 7, 299_000, 1, GENLOCK_QPC_STEP_BOUND_MS);
+        let lx = qpc_drift_beyond_bound(true, 0, 299_000, 0, GENLOCK_QPC_STEP_BOUND_MS);
+        assert!((win.measured_ppm - 23.4114).abs() < 0.001);
+        assert_eq!(win.beyond_bound, lx.beyond_bound);
+        assert!(!win.beyond_bound);
+        let win_step = qpc_drift_beyond_bound(true, 47, 299_000, 41, GENLOCK_QPC_STEP_BOUND_MS);
+        let lx_step = qpc_drift_beyond_bound(true, 40, 299_000, 40, GENLOCK_QPC_STEP_BOUND_MS);
+        assert!(win_step.beyond_bound && lx_step.beyond_bound);
+    }
+
+    #[test]
+    fn not_ready_window_reports_no_rate_and_never_degrades_on_it() {
+        let v = qpc_drift_beyond_bound(false, 999, 1000, 0, GENLOCK_QPC_STEP_BOUND_MS);
         assert_eq!(v.measured_ppm, 0.0);
         assert!(!v.beyond_bound);
     }
@@ -905,15 +921,7 @@ mod tests {
     #[test]
     fn windowed_verdict_feeds_the_three_state_decision() {
         // The verdict's bool is what `decide` consumes for the qpc term.
-        let v = qpc_drift_beyond_bound(
-            false,
-            0,
-            0,
-            12.0,
-            GENLOCK_QPC_DRIFT_PPM_BOUND,
-            40,
-            GENLOCK_QPC_STEP_BOUND_MS,
-        );
+        let v = qpc_drift_beyond_bound(false, 0, 0, 40, GENLOCK_QPC_STEP_BOUND_MS);
         let mut f = healthy();
         f.qpc_drift_beyond_bound = v.beyond_bound;
         assert_eq!(decide(&f), (LockState::Degraded, LockReason::QpcDrift));

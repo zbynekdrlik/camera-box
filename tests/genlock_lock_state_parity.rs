@@ -475,8 +475,8 @@ fn c_name_is_camera_matches_the_rust_authority_1303() {
 }
 
 /// #1299 Part 4 — lift the `genlock_qpc_drift_beyond_bound` function VERBATIM out of the header (it sits
-/// AFTER `genlock_name_is_camera`, contiguous, so this is a separate lift). It takes doubles + a
-/// double out-param, so the harness compares BOTH the int verdict and the measured-rate telemetry
+/// AFTER `genlock_name_is_camera`, contiguous, so this is a separate lift). It writes a double
+/// out-param, so the harness compares BOTH the int verdict and the measured-rate telemetry
 /// against the Rust authority `camera_box::genlock_lock_state::qpc_drift_beyond_bound`.
 fn lift_qpc_drift() -> String {
     let path = repo(HEADER);
@@ -498,31 +498,33 @@ fn c_qpc_drift_beyond_bound_matches_the_rust_authority_1299_part4() {
     use camera_box::genlock_lock_state::qpc_drift_beyond_bound;
     let block = lift_qpc_drift();
 
-    // (rate_ready, drift_delta_ms, elapsed_ms, expected_ppm, ppm_bound, max_step_ms, step_bound_ms)
-    // — the reopen fixture shapes + edge cases (negative drift/step, elapsed 0, exactly-at-bound).
-    let vs: [(i32, i64, i64, f64, f64, i64, i64); 14] = [
-        (1, 641, 45_000_000, 12.0, 50.0, 0, 33), // overnight strih slope ≈14.24 ppm -> not beyond
-        (0, 0, 0, 12.0, 50.0, 40, 33),           // 40 ms step -> beyond (rate not ready)
-        (1, 6, 45_000, 12.0, 50.0, 1, 33),       // ≈133 ppm rate mismatch -> beyond
-        (0, 999, 1000, 12.0, 50.0, 0, 33),       // not ready, big delta ignored -> not beyond, 0.0
-        (0, 0, 0, 12.0, 50.0, -40, 33),          // negative step magnitude -> beyond
-        (1, -641, 45_000_000, -12.0, 50.0, 0, 33), // wall stepping back, matches -12 ppm -> not beyond
-        (1, 5, 0, 12.0, 50.0, 0, 33),              // rate_ready but elapsed 0 -> measured 0.0 guard
-        (1, 4, 300_000, 13.0, 50.0, 1, 33),        // ≈13.3 ppm steady -> not beyond
-        (1, 30, 300_000, 12.0, 50.0, 0, 33),       // 100 ppm -> beyond
-        (1, 0, 300_000, 12.0, 50.0, 33, 33), // step exactly at bound (not > ) + 0 ppm -> not beyond
-        (1, 0, 300_000, 12.0, 50.0, 34, 33), // step one over bound -> beyond
-        (1, 186, 300_000, 12.0, 50.0, 0, 33), // 620 ppm huge -> beyond
-        (0, 0, 0, 0.0, 50.0, 0, 33),         // nothing happening -> not beyond
-        (1, 19, 300_000, 12.0, 50.0, 0, 33), // ≈63.3 ppm, |63.3-12|=51.3 just over 50 -> beyond
+    // (rate_ready, drift_delta_ms, elapsed_ms, max_step_ms, step_bound_ms) — #1357 scope C: the
+    // verdict is the wall STEP only (one semantics on every box); the windowed rate is report-only
+    // telemetry both ports must still compute identically. Reopen shapes, the live 24.9. shapes
+    // (strih-lx 0 ppm, stream 23.4 ppm) + edge cases (negative drift/step, elapsed 0, at-bound).
+    let vs: [(i32, i64, i64, i64, i64); 14] = [
+        (1, 641, 45_000_000, 0, 33), // overnight strih slope ≈14.24 ppm -> not beyond
+        (0, 0, 0, 40, 33),           // 40 ms step -> beyond (rate not ready)
+        (1, 6, 45_000, 1, 33),       // ≈133 ppm rate, sub-frame step -> not beyond (#1357)
+        (0, 999, 1000, 0, 33),       // not ready, big delta ignored -> not beyond, 0.0
+        (0, 0, 0, -40, 33),          // negative step magnitude -> beyond
+        (1, -641, 45_000_000, 0, 33), // wall stepping back slowly -> not beyond
+        (1, 5, 0, 0, 33),            // rate_ready but elapsed 0 -> measured 0.0 guard
+        (1, 0, 300_000, 0, 33),      // strih-lx live: disciplined monotonic, 0 ppm -> not beyond
+        (1, 7, 299_000, 1, 33),      // stream live 05:09:00: 23.4 ppm -> not beyond
+        (1, 0, 300_000, 33, 33),     // step exactly at bound (not > ) -> not beyond
+        (1, 0, 300_000, 34, 33),     // step one over bound -> beyond
+        (1, 186, 300_000, 0, 33),    // 620 ppm rate alone -> not beyond (#1357)
+        (0, 0, 0, 0, 33),            // nothing happening -> not beyond
+        (1, 47, 299_000, 41, 33),    // stream-shaped window carrying a 41 ms step -> beyond
     ];
 
     let mut c = String::from("#include <stdio.h>\n");
     c.push_str(&block);
     c.push_str("int main(void){\n    double m; int r;\n");
-    for &(ready, dd, el, exp, pb, ms, sb) in &vs {
+    for &(ready, dd, el, ms, sb) in &vs {
         c.push_str(&format!(
-            "    m=0; r=genlock_qpc_drift_beyond_bound({ready},{dd}LL,{el}LL,{exp},{pb},{ms}LL,{sb}LL,&m); printf(\"%d %.9g\\n\", r, m);\n"
+            "    m=0; r=genlock_qpc_drift_beyond_bound({ready},{dd}LL,{el}LL,{ms}LL,{sb}LL,&m); printf(\"%d %.9g\\n\", r, m);\n"
         ));
     }
     c.push_str("    return 0;\n}\n");
@@ -575,12 +577,12 @@ fn c_qpc_drift_beyond_bound_matches_the_rust_authority_1299_part4() {
     );
 
     let mut diffs = Vec::new();
-    for (&(ready, dd, el, exp, pb, ms, sb), &(cr, cm)) in vs.iter().zip(&c_out) {
-        let v = qpc_drift_beyond_bound(ready != 0, dd, el, exp, pb, ms, sb);
+    for (&(ready, dd, el, ms, sb), &(cr, cm)) in vs.iter().zip(&c_out) {
+        let v = qpc_drift_beyond_bound(ready != 0, dd, el, ms, sb);
         let ppm_ok = (v.measured_ppm - cm).abs() <= 1e-6 * v.measured_ppm.abs().max(1.0);
         if v.beyond_bound != cr || !ppm_ok {
             diffs.push(format!(
-                "  ready={ready} dd={dd} el={el} exp={exp} pb={pb} step={ms} sb={sb} -> C ({cr},{cm}), Rust ({},{})",
+                "  ready={ready} dd={dd} el={el} step={ms} sb={sb} -> C ({cr},{cm}), Rust ({},{})",
                 v.beyond_bound, v.measured_ppm
             ));
         }
