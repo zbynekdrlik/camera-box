@@ -189,6 +189,10 @@ fn verdict_grades_the_config_and_the_lease_live_line() {
         ("1 HDMI-0 multiview 1 1", "ok", 0),
         ("1 HDMI-0 program 1 0", "ok", 0),
         ("1 HDMI-0 program 1 1", "ok", 0),
+        // review: the classifier itself could not run (strih_scenes import failed) -- never read
+        // that as a missing config; SKIP still wins with no HDMI.
+        ("1 ? program 0 0", "classify-failed", 1),
+        ("0 ? program 0 0", "skip-no-hdmi", 2),
     ];
     for (args, token, rc) in cases {
         let (c, out, _e) = run(&format!("strih_drm_output_verdict {args} || exit $?"), None);
@@ -221,6 +225,14 @@ fn setup_strih_provisions_drm_output_only_with_hdmi_and_retires_the_projector_js
     assert!(
         s.contains("rm -f /opt/camera-box/strih-lx-projector.json"),
         "a leftover strih-lx-projector.json is removed (its type carried over as the initial view)"
+    );
+    assert!(
+        s.contains("[ -L \"$DRM_CONF\" ]"),
+        "review: the root-run step must refuse a symlinked config path"
+    );
+    assert!(
+        s.contains("install -m 0644 -o \"$DESKTOP_USER\" -g \"$DESKTOP_USER\" /dev/stdin \"$DRM_CONF\""),
+        "review: the config is written by install (owned by the desktop user), never a root redirect"
     );
     for token in [
         "strih_drm_hdmi_connected",
@@ -256,6 +268,10 @@ fn verify_strih_grades_drm_output_and_skips_without_hdmi() {
     assert!(
         v.contains("skip-no-hdmi)"),
         "a SKIP branch when no HDMI connector is connected"
+    );
+    assert!(
+        v.contains("echo \"? program\"") && v.contains("classify-failed)"),
+        "review: a failed classifier run is its own token + verdict, never `config-missing`"
     );
     let lib = read("scripts/lib/strih-provision.sh");
     assert!(

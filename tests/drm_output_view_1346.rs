@@ -162,12 +162,13 @@ fn multiview_render_is_budget_gated_audited_and_persisted() {
             "one-line COMPACT json (the drm-output.json one-line contract)",
         ),
         (
-            "gs_set_render_target(",
-            "the Multiview is rendered INTO the leased scanout buffer",
+            "gs_texrender_create(GS_BGRA, GS_ZS_NONE)",
+            "the Multiview renders into an sRGB-capable texrender (review: the linear dma-buf \
+             scanout target would drop the sRGB encode the built-in Multiview relies on)",
         ),
         (
-            "gs_flush();",
-            "submit before publish (implicit-fence ordering, as the M2 path)",
+            "drm_output_blit_raw(gs_texrender_get_texture(",
+            "then the SAME raw byte-faithful blit the Program path uses fills the scanout buffer",
         ),
         (
             "drm_output_publish_render_buf(idx);",
@@ -203,6 +204,61 @@ fn multiview_render_is_budget_gated_audited_and_persisted() {
     assert!(
         !v.contains("program-render-audit"),
         "issue 1346: never emit a program-render-audit line"
+    );
+}
+
+#[test]
+fn multiview_never_binds_the_linear_scanout_buffer_as_its_render_target() {
+    let v = squish(&file(VIEW_C));
+    assert!(
+        !v.contains("gs_set_render_target("),
+        "issue 1346 review: the Multiview must never render straight into the linear dma-buf \
+         scanout texture (no sRGB encode -> a too-dark Program/scene cell); it renders into the \
+         texrender and is blitted raw"
+    );
+    let c = squish(&file(DRM_C));
+    assert!(
+        c.contains("void drm_output_blit_raw(gs_texture_t *src, int idx)"),
+        "issue 1346: the raw blit must be ONE shared helper in {DRM_C}"
+    );
+    assert!(
+        c.contains("drm_output_blit_raw(program, idx);"),
+        "issue 1346: the Program path must use the same shared raw blit"
+    );
+    let i = squish(&file(INTERNAL_H));
+    for token in [
+        "void drm_output_blit_raw(gs_texture_t *src, int idx);",
+        "void drm_output_view_gl_teardown(void);",
+    ] {
+        assert!(
+            i.contains(token),
+            "issue 1346: {INTERNAL_H} must declare `{token}`"
+        );
+    }
+    let stop = c
+        .find("void obs_drm_output_stop(void)")
+        .expect("stop() must exist");
+    assert!(
+        c[stop..].contains("drm_output_view_gl_teardown();"),
+        "issue 1346: stop() must also free the Multiview texrender while graphics is alive"
+    );
+    for reason in [
+        "no drm-output config path",
+        "config unreadable",
+        "write failed",
+    ] {
+        assert!(
+            v.contains(reason),
+            "issue 1346 review: a failed persist must name its real cause (`{reason}`)"
+        );
+    }
+    let fe = file(FE_VIEW_CPP);
+    assert!(
+        fe.matches("if (!actionProgram || !actionMultiview)")
+            .count()
+            >= 2,
+        "issue 1346 review: the Tools-menu actions can be null (frontend API not ready) -- \
+         Init must check them before use, like UpdateMenu"
     );
 }
 
