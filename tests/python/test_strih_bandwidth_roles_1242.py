@@ -398,3 +398,29 @@ def test_hold_lib_fails_loud_and_restore_never_aborts(tmp_path):
                            f"connect_on_show_e2e_restore '{tmp_path}' 10.0.0.1 /tmp/s.json; echo DONE"],
                           capture_output=True, text=True, check=False, env={"RC": "1", "PATH": "/usr/bin:/bin"})
     assert rest.returncode == 0 and "DONE" in rest.stdout, "restore must never abort cleanup()"
+
+
+# ------------------------------------------------------------------------------------------------
+# the launch path: the roles are applied on EVERY strih OBS launch (default on, never forgettable)
+# ------------------------------------------------------------------------------------------------
+
+def test_strih_obs_start_applies_the_roles_after_the_seed_best_effort():
+    s = (SCRIPTS / "strih-obs-start.sh").read_text()
+    boot = s.find('python3 "$SCN" --bootstrap')
+    roles = s.find('python3 "$SCN" --apply-roles')
+    wait = s.find('wait "$OBS_PID"')
+    assert boot != -1 and roles != -1 and boot < roles < wait
+    line = [ln for ln in s.splitlines() if 'python3 "$SCN" --apply-roles' in ln][0]
+    assert line.lstrip().startswith("if "), "a role-apply failure must never abort the unit (OBS is live)"
+
+
+def test_apply_roles_cli_mode_is_accepted(monkeypatch, tmp_path):
+    man = tmp_path / "seed.json"
+    man.write_text(json.dumps({"mode": "update-only", "inputs": [
+        {"sender": "CAM1 (usb)", "input": "NDI cam1", "scene": "Cam 1"}], "camera_latency_ms": 3}))
+    seen = {}
+    monkeypatch.setattr(ss, "Obs", lambda *a, **k: FakeObs())
+    monkeypatch.setattr(ss, "apply_bandwidth_roles", lambda obs, plan: seen.update(plan=plan) or {})
+    monkeypatch.setattr(sys, "argv", ["strih_scenes.py", "--apply-roles", "--manifest", str(man)])
+    ss.main()
+    assert [p["input"] for p in seen["plan"]] == ["NDI cam1"]
