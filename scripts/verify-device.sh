@@ -852,7 +852,7 @@ Checks:
       target to dev1:514, AND systemd-journal-upload enabled with URL -> the dev1 sink + a /run cursor
   (al) named cam-box UEFI boot entry (#1066 D6): efibootmgr reports a \`cam-box\` entry that is FIRST
       in BootOrder (read with -v), with an HD() path on the /boot/efi PARTUUID (issue 1311) -- FAILs if absent /
-      not leading / mangled (VenHw) or stale path / efibootmgr unreadable (test-strictness)
+      not leading / mangled (VenHw) or stale path / efibootmgr or ESP PARTUUID unreadable (test-strictness)
   (am) bkshading-relay blast-radius + info logging (#1309): TasksMax <= 512 AND a running relay
       logs at info (zero journal lines while active FAILs); relay not provisioned = n/a
   (an) NDI discovery receiver config (issue 1342): /etc/ndi/ndi-config.v1.json networks.ips lists
@@ -1711,10 +1711,15 @@ fi
 # .claude/rules/provisioning-scripts.md (the (q)-last invariant).
 alrc=0
 EFI_ENTRIES="$(ssh_box "efibootmgr -v 2>/dev/null")" || alrc=$?
-# An unreadable PARTUUID is graded as "unknown GUID" (empty): the HD()/VenHw()/loader facets still apply.
+# The ESP the cam-box entry must point at: the /boot/efi mount (STEP 18's fstab carries it; on the
+# create-usb layout it is partition 1 of the root disk, the one setup-device STEP 17d reads).
 EFI_ESP_PARTUUID="$(ssh_box 'blkid -s PARTUUID -o value "$(findmnt -no SOURCE /boot/efi)" 2>/dev/null' 2>/dev/null)" || EFI_ESP_PARTUUID=""
 if [ "$alrc" -ne 0 ] || [ -z "$EFI_ENTRIES" ]; then
   fail "could not read UEFI boot entries over SSH (efibootmgr rc=$alrc, empty=$([ -z "$EFI_ENTRIES" ] && echo yes || echo no)) -- cannot certify the named 'cam-box' entry leads BootOrder (#1066 D6). An unreadable/absent efibootmgr output is a FAIL (test-strictness): a non-EFI box, or a missing efibootmgr, must not silently pass."
+elif [ -z "$EFI_ESP_PARTUUID" ]; then
+  # Issue 1311 review: without the ESP GUID a stale entry from a previous install (right HD() shape
+  # and loader, old GUID) would certify -- an unreadable input is a FAIL (test-strictness).
+  fail "could not read the /boot/efi PARTUUID over SSH (is /boot/efi mounted? blkid output empty) -- cannot certify the 'cam-box' entry points at THIS disk's ESP rather than a stale one (issue 1311)"
 else
   EFI_AL_VERDICT="$(efi_entry_verdict "$EFI_ENTRIES" "$EFI_ESP_PARTUUID")"
   if [ "$EFI_AL_VERDICT" = "ok" ]; then
