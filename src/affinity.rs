@@ -326,6 +326,16 @@ pub fn realtime_fifo_priority(role: RtThreadRole) -> Option<i32> {
     }
 }
 
+/// The thread name a role's realtime log line uses (#1242): `capture+emit` keeps the capture
+/// thread's #899 line byte-identical, `NDI send` names the ndi-send / burn threads.
+pub fn rt_role_label(role: RtThreadRole) -> &'static str {
+    match role {
+        RtThreadRole::CaptureEmit => "capture+emit",
+        RtThreadRole::Send => "NDI send",
+        RtThreadRole::Auxiliary => "auxiliary",
+    }
+}
+
 /// SCHED_FIFO scheduling-policy id (Linux `sched.h`; equal to `libc::SCHED_FIFO`,
 /// which is 1). Kept as a plain numeric literal — with no `libc` dependency — so
 /// the pure policy-word decision below compiles standalone and a std-only replica
@@ -503,13 +513,14 @@ pub fn set_current_thread_realtime(role: RtThreadRole) {
         };
         libc::sched_setscheduler(0, capture_emit_sched_policy_word(), &param) == 0
     };
+    let label = rt_role_label(role);
     if ok {
         tracing::info!(
-            "#899 capture+emit thread set SCHED_FIFO prio {prio} per-thread (auxiliary threads stay SCHED_OTHER)"
+            "#899 {label} thread set SCHED_FIFO prio {prio} per-thread (auxiliary threads stay SCHED_OTHER)"
         );
     } else {
         tracing::warn!(
-            "#899 could not set capture+emit thread SCHED_FIFO prio {prio} (need CAP_SYS_NICE) — thread stays SCHED_OTHER"
+            "#899 could not set {label} thread SCHED_FIFO prio {prio} (need CAP_SYS_NICE) — thread stays SCHED_OTHER"
         );
     }
 }
