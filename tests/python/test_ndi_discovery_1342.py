@@ -573,6 +573,24 @@ class VerifyStrihItem34Behaviour(unittest.TestCase):
             self.assertIn("FAILS=0", r.stdout, r.stdout)
             self.assertIn("NOTE (ndi-discovery) a traveling NDI sender resolves now to 10.77.9.201", r.stdout)
 
+    def test_the_drift_note_names_only_traveling_senders(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            # Unconfigured box, nothing traveling resolves: the FAILs say it all, no NOTE.
+            r = self._run(tmp, pre="ndi_discovery_resolve_ipv4() { return 0; }\n")
+            self.assertIn("FAILS=3", r.stdout, r.stdout)
+            self.assertNotIn("NOTE", r.stdout)
+            # Unconfigured box, resolume resolves: the NOTE names resolume only, never a pinned sender.
+            r = self._run(tmp, pre='ndi_discovery_resolve_ipv4() { printf "10.77.9.201\\n"; }\n')
+            note = [l for l in r.stdout.splitlines() if l.startswith("NOTE")]
+            self.assertEqual(len(note), 1, r.stdout)
+            self.assertIn("resolves now to 10.77.9.201,", note[0])
+            self.assertNotIn("10.77.9.61", note[0])
+
+    def test_list_minus_helper(self):
+        r = _lib('ndi_discovery_list_minus "10.0.0.1,10.0.0.2,10.0.0.3" "10.0.0.2"')
+        self.assertEqual(r.stdout, "10.0.0.1,10.0.0.3")
+        self.assertEqual(_lib('ndi_discovery_list_minus "10.0.0.1" "10.0.0.1"').stdout, "")
+
     def test_a_renumbered_sender_fails_until_re_provisioned(self):
         with tempfile.TemporaryDirectory() as tmp:
             self._configure(tmp, ips=",".join(_expected_pinned_ips()[:-1]))
