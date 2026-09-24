@@ -227,6 +227,10 @@ fn setup_strih_provisions_drm_output_only_with_hdmi_and_retires_the_projector_js
         "a leftover strih-lx-projector.json is removed (its type carried over as the initial view)"
     );
     assert!(
+        s.contains("[ -L \"$DRM_CONF_DIR\" ]"),
+        "review round 2: a symlinked ~/.camera-box directory is refused too"
+    );
+    assert!(
         s.contains("[ -L \"$DRM_CONF\" ]"),
         "review: the root-run step must refuse a symlinked config path"
     );
@@ -268,6 +272,15 @@ fn verify_strih_grades_drm_output_and_skips_without_hdmi() {
     assert!(
         v.contains("skip-no-hdmi)"),
         "a SKIP branch when no HDMI connector is connected"
+    );
+    assert!(
+        v.contains("DRM_SUMMARY=\"? program\""),
+        "review round 2: with no classifier at all (strih_scenes / python3 missing) the default is \
+         the unclassified token, never a dormant `-`"
+    );
+    assert!(
+        v.contains("LC_ALL=C grep -aqF 'drm-output: program scanout LIVE'"),
+        "review round 2: OBS logs carry invalid UTF-8 -- grep them byte-safe"
     );
     assert!(
         v.contains("echo \"? program\"") && v.contains("classify-failed)"),

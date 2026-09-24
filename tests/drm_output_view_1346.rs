@@ -262,6 +262,57 @@ fn multiview_never_binds_the_linear_scanout_buffer_as_its_render_target() {
     );
 }
 
+/// Review round 2: the raw blit IS the sRGB fix -- pin its body (byte copy, no decode, no encode,
+/// flush) -- and a claimed buffer is published ONLY when the blit really rendered it.
+#[test]
+fn raw_blit_is_byte_faithful_and_gates_the_publish() {
+    let c = file(DRM_C);
+    let start = c
+        .find("bool drm_output_blit_raw(gs_texture_t *src, int idx)")
+        .expect("issue 1346: drm_output_blit_raw must return bool (rendered or not)");
+    let end = c[start..].find("\n}\n").map(|i| start + i).unwrap();
+    let body = squish(&c[start..end]);
+    for token in [
+        "gs_effect_set_texture(param, src)",
+        "gs_enable_framebuffer_srgb(false)",
+        "gs_enable_blending(false)",
+        "gs_flush();",
+        "return true;",
+    ] {
+        assert!(
+            body.contains(token),
+            "issue 1346: the raw blit must contain `{token}`"
+        );
+    }
+    assert!(
+        !body.contains("set_texture_srgb"),
+        "issue 1346: the raw blit must never sRGB-decode its source (the bytes are already encoded)"
+    );
+    let cs = squish(&c);
+    assert!(
+        cs.contains("if (drm_output_blit_raw(program, idx)) drm_output_publish_render_buf(idx);"),
+        "issue 1346: the Program path publishes only a buffer the blit rendered"
+    );
+    let v = squish(&file(VIEW_C));
+    assert!(
+        v.contains("if (drm_output_blit_raw(gs_texrender_get_texture(g_view.texrender), idx))"),
+        "issue 1346: the Multiview path publishes only a buffer the blit rendered"
+    );
+    assert!(
+        v.contains("drm-output: multiview texrender unavailable"),
+        "issue 1346 review: a texrender failure must be named once, never a silent frozen HDMI"
+    );
+    let stop = c.find("void obs_drm_output_stop(void)").unwrap();
+    let s = &c[stop..];
+    let join = s.find("pthread_join(th, NULL);").unwrap();
+    let view_td = s.find("drm_output_view_gl_teardown();").unwrap();
+    let drm_td = s.find("drm_output_teardown_locked();").unwrap();
+    assert!(
+        join < view_td && view_td < drm_td,
+        "issue 1346: the texrender is freed after the flip thread joined and before the DRM teardown"
+    );
+}
+
 #[test]
 fn frame_hook_delegates_the_view_before_the_program_copy() {
     let c = squish(&file(DRM_C));
