@@ -298,6 +298,14 @@ fn malformed_fact_files_are_refused() {
             "STRIH_COMPANION_HOST",
         ),
         (
+            "NDI runtime peer that is a flag, not a host",
+            vec![(
+                "STRIH_NDI_RUNTIME_PEER=10.77.9.61",
+                "STRIH_NDI_RUNTIME_PEER=--x",
+            )],
+            "STRIH_NDI_RUNTIME_PEER",
+        ),
+        (
             "control character in a value",
             vec![(
                 "STRIH_CG_SENDER=RESOLUME-SNV (cg-obs)",
@@ -840,6 +848,13 @@ fn a_failed_load_is_never_papered_over_by_the_default_box() {
     );
     assert!(out.is_empty(), "no fact after a failed load: {out}");
     assert!(err.contains("strih-nowhere"), "names the failed box: {err}");
+    // an EMPTY box name is a failed load too -- never a silent fall back to the default.
+    let (ce, oute, _e) = with_loader(&[], "strih_box_load ''\nstrih_box_fact STRIH_HOSTNAME");
+    assert_ne!(
+        ce, 0,
+        "an accessor after an empty-name load must refuse: {oute}"
+    );
+    assert!(oute.is_empty(), "{oute}");
     let (c2, out2, err2) = with_loader(
         &[
             ("STRIH_BOX_LOADED", "strih-lx"),
