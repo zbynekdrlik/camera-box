@@ -59,9 +59,11 @@ power envelope. A difference between boxes is a defect, not a per-box feature.
   - It covers the DPKG lock only (install/remove/purge). `apt-get update` takes the separate lists lock (`/var/lib/apt/lists/lock`), which this setting does not govern.
 - **Every list refresh is `obs_box_apt_update`, never a bare `apt-get update`** (main ruling 5821855428).
   - It retries ONLY while the lists lock is HELD (`Could not get lock /var/lib/apt/lists/lock`, the same text on apt 2.8 and 3.2), logs each wait, and gives up after `OBS_BOX_APT_UPDATE_BUDGET_S` (600 s) total.
+  - apt runs under `LC_ALL=C`. The match reads apt's English text, and an ssh session forwards the operator's locale; apt ships translations.
+  - The wait log names the lock line itself, because apt can print `W:` lines before it. Every wait sleeps at least 1 s, never a busy loop.
   - Any other error fails loud at once, with apt's output shown. A permission failure prints `Could not open lock file` and is not retried.
   - `add-apt-repository` always passes `-n`, so it never refreshes the lists itself.
-  - `no_bare_apt_get_update_on_the_obs_box_provisioning_paths` sweeps both setup scripts and every lib they source.
+  - `no_bare_apt_get_update_on_the_obs_box_provisioning_paths` sweeps a hand-kept list of files. It covers both setup scripts, the libs they source, and the libs sourced one level down (`obs-fleet.sh`, `camera-set.sh`). It flags any `apt`/`apt-get` with an `update` sub-command, whatever the flag order. A new lib on either path must be added to that list.
 - **Adding an item** = a function in the right half + a call in BOTH setup scripts (imag in the step
   that owns it, strih inside step 11 in imag's order) + a verdict row + its gather keys. The
   `gather_and_verdict_share_one_key_set` test fails if the two halves of the grader drift.

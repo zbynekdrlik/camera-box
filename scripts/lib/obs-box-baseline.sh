@@ -114,11 +114,13 @@ obs_box_apt_update_lock_held() {
 # (tests/obs_box_baseline_1357.rs sweeps for it).
 obs_box_apt_update() {
     local budget="${OBS_BOX_APT_UPDATE_BUDGET_S:-600}" poll="${OBS_BOX_APT_UPDATE_POLL_S:-10}"
-    local start waited rc out nap
+    local start waited rc out nap lock_line l
     start="$(date +%s)"
     while :; do
         rc=0
-        out="$(apt-get update -qq 2>&1)" || rc=$?
+        # C locale: the held-lock match reads apt's ENGLISH text, and an ssh session forwards the
+        # operator's locale (apt ships translations) -- a translated message would never be retried.
+        out="$(LC_ALL=C apt-get update -qq 2>&1)" || rc=$?
         if [ "$rc" -eq 0 ]; then
             [ -z "$out" ] || printf '%s\n' "$out"
             return 0
@@ -128,13 +130,19 @@ obs_box_apt_update() {
             printf '%s\n' "$out" >&2
             fail "apt-get update failed (exit ${rc}) -- not a held package-lists lock, so not retried"
         fi
+        # apt can print W: lines BEFORE the lock error -- log the lock line itself.
+        lock_line=""
+        while IFS= read -r l; do
+            case "$l" in *"Could not get lock /var/lib/apt/lists/lock"*) lock_line="$l"; break ;; esac
+        done <<<"$out"
         if [ "$waited" -ge "$budget" ]; then
             printf '%s\n' "$out" >&2
-            fail "apt-get update: /var/lib/apt/lists/lock still held after ${waited}s (budget ${budget}s) -- ${out%%$'\n'*}"
+            fail "apt-get update: /var/lib/apt/lists/lock still held after ${waited}s (budget ${budget}s) -- ${lock_line}"
         fi
         nap="$poll"
         [ $(( budget - waited )) -ge "$nap" ] || nap=$(( budget - waited ))
-        echo "  apt update: package lists locked by a background apt run (${out%%$'\n'*}) -- waiting ${nap}s (${waited}s of ${budget}s)"
+        [ "$nap" -ge 1 ] || nap=1   # never a busy loop of apt-get calls
+        echo "  apt update: package lists locked by a background apt run (${lock_line}) -- waiting ${nap}s (${waited}s of ${budget}s)"
         sleep "$nap"
     done
 }
