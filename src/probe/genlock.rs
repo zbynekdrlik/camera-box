@@ -1759,15 +1759,17 @@ impl ReleaseCadence {
             // C reads the depth at the tick's SCHEDULED instant; this sim's ticks run on schedule,
             // so that instant is `wall_now_ns` itself.
             if let (Some(&head), Some(&newest)) = (queue.front(), queue.back()) {
-                if crate::genlock_n1_depth::should_hold_n1_phase(
-                    wall_now_ns,
-                    head,
-                    wall_now_ns.saturating_sub(newest),
-                    reserve_ms,
-                    interval_ns,
-                    1,
-                    self.ticks_since_last_drain,
-                ) {
+                if crate::genlock_n1_depth::n1_tick_is_on_grid(wall_now_ns, interval_ns)
+                    && crate::genlock_n1_depth::should_hold_n1_phase(
+                        wall_now_ns,
+                        head,
+                        wall_now_ns.saturating_sub(newest),
+                        reserve_ms,
+                        interval_ns,
+                        1,
+                        self.ticks_since_last_drain,
+                    )
+                {
                     self.ticks_since_last_drain = 0;
                     return hold(false);
                 }
@@ -1976,19 +1978,21 @@ impl ReleaseCadence {
         // inert for n < 2. That belongs to a tick of the N==1 STEADY branch only (review round 1):
         // on the N>=2 branch (`last_known_n` latched >= 2) a post-erase re-measure reading n == 1
         // stays inert, exactly as before. Mirror of the C `genlock_should_converge_phase` (this
-        // sim ticks on schedule, so the scheduled instant is `wall_now_ns`).
+        // sim ticks on schedule, so the scheduled instant is `wall_now_ns`), including its
+        // defer-while-off-the-grid condition.
         if n < 2 && self.last_known_n >= 2 {
             return false;
         }
         if n < 2 {
-            return crate::genlock_n1_depth::n1_shed_due(
-                wall_now_ns,
-                boundary,
-                wall_now_ns.saturating_sub(newest_stamp),
-                reserve_ms,
-                interval_ns,
-                self.ticks_since_last_drain,
-            );
+            return crate::genlock_n1_depth::n1_tick_is_on_grid(wall_now_ns, interval_ns)
+                && crate::genlock_n1_depth::n1_shed_due(
+                    wall_now_ns,
+                    boundary,
+                    wall_now_ns.saturating_sub(newest_stamp),
+                    reserve_ms,
+                    interval_ns,
+                    self.ticks_since_last_drain,
+                );
         }
         crate::genlock_backlog::should_converge_phase(
             wall_now_ns,

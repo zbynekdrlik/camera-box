@@ -35,11 +35,17 @@
 //!   pulls it back, 2 ms per tick). Rounding keeps the READ exact for up to half a frame of that
 //!   phase, and a shed needs the rounded depth at `target + 1` while a hold needs it at
 //!   `target − 1`: the two decisions never share an edge (a shared edge limit-cycled hold/shed
-//!   ~1100 each per hour in the bench). The one phase the rule does not absorb is an EARLY tick
-//!   past the pin's headroom to the next frame edge: the release deadline then floors one frame
-//!   earlier and every sender gap/dup costs a hold/shed pair. OBS never ticks early except for the
-//!   few ticks after a BACKWARD wall step (`os_sleepto_ns` sleeps to the mapped grid slot), and a
-//!   late phase of any size is safe at every deep pin (the bench proves both).
+//!   ~1100 each per hour in the bench).
+//! - ONLY ON THE GRID ([`n1_tick_is_on_grid`], review round 3). A wall-clock STEP on the box
+//!   leaves the scheduled ticks off the grid by the step, and `genlock_next_deadline` pulls them
+//!   back only `GENLOCK_MAX_SLEW_NS` (2 ms) per tick. Read there, a settled conveyor reads one
+//!   frame deep after a forward step of more than half a frame (a shed) and one frame shallow once
+//!   back on the grid (a hold): a skip plus a duplicate where the boundary-keyed conveyor did
+//!   nothing. Both halves therefore act only while the scheduled tick is within
+//!   [`N1_ON_GRID_NS`] of a per-second grid point and defer otherwise. A normal or caught-up late
+//!   tick is always on the grid (`video_time` is its slot). The same condition removes the
+//!   early-phase case: an early tick past the pin's headroom to the next frame edge moves the
+//!   release deadline a frame, so a sender gap/dup would cost a hold/shed pair.
 //! - THE 1 µs PIN TOLERANCE. The integer interval (33_333_333) is ~1/3 ns short of a real frame,
 //!   so a pin that IS a whole number of frames (100 ms) would count one frame too many and put the
 //!   target on the drain's own edge (23 flips/h in the bench). A sub-microsecond excess is not a
@@ -69,6 +75,13 @@ pub const N1_PIN_FRAME_TOLERANCE_NS: u64 = 1_000;
 /// for the N==1 rule to act (a DEEP source). Mirror of the C `GENLOCK_N1_DEEP_MARGIN_FRAMES`.
 pub const N1_DEEP_MARGIN_FRAMES: u64 = 2;
 
+/// issue 1367 (review round 3) — the N==1 rule acts only while the render tick's scheduled
+/// instant is within this many ns of a grid point: the render tick's own per-tick slew clamp
+/// (`GENLOCK_MAX_SLEW_NS`, obs-video.c), so a tick still slewing back after a wall-clock step is
+/// off the grid and the first on-grid tick is at most one slew step away. Mirror of the C
+/// `GENLOCK_N1_ON_GRID_NS`.
+pub const N1_ON_GRID_NS: u64 = 2_000_000;
+
 /// issue 1367 — the WALL instant the current render tick was SCHEDULED for: the processing wall
 /// minus how far the processing runs behind the tick's scheduled monotonic instant
 /// (`wall_now − (mono_now − scheduled_mono)`, saturating). The C passes `os_gettime_ns()` and
@@ -76,6 +89,25 @@ pub const N1_DEEP_MARGIN_FRAMES: u64 = 2;
 /// processing wall. Mirror of the C `genlock_n1_tick_wall_ns`.
 pub fn n1_tick_wall_ns(wall_now_ns: u64, mono_now_ns: u64, scheduled_mono_ns: u64) -> u64 {
     wall_now_ns.saturating_sub(mono_now_ns.saturating_sub(scheduled_mono_ns))
+}
+
+/// issue 1367 (review round 3) — is the scheduled tick `tick_wall_ns` within [`N1_ON_GRID_NS`]
+/// of the grid point `grid_floor_ns`, where `grid_floor_ns` is the grid floor of
+/// `tick_wall_ns + N1_ON_GRID_NS` (the only grid point that can be that close)? Pure; the caller
+/// supplies the floor of its own grid. Mirror of the C `genlock_n1_tick_on_grid`.
+pub fn n1_tick_on_grid(tick_wall_ns: u64, grid_floor_ns: u64) -> bool {
+    let shifted = tick_wall_ns.saturating_add(N1_ON_GRID_NS);
+    shifted >= grid_floor_ns && shifted - grid_floor_ns <= 2 * N1_ON_GRID_NS
+}
+
+/// issue 1367 (review round 3) — [`n1_tick_on_grid`] on the ONE per-second genlock grid the
+/// render tick and the senders use ([`crate::genlock_grid::grid_floor_ns`]). Mirror of the C
+/// `genlock_n1_tick_is_on_grid`.
+pub fn n1_tick_is_on_grid(tick_wall_ns: u64, interval_ns: u64) -> bool {
+    n1_tick_on_grid(
+        tick_wall_ns,
+        crate::genlock_grid::grid_floor_ns(tick_wall_ns.saturating_add(N1_ON_GRID_NS), interval_ns),
+    )
 }
 
 /// issue 1367 — the depth, in frames, a deep N==1 source lands on after a GAP RESYNC:
@@ -119,7 +151,8 @@ pub fn n1_is_deep_source(arrival_floor_ns: u64, latency_ms: u32, interval_ns: u6
         <= n1_base_frames(latency_ms, interval_ns)
 }
 
-/// issue 1367 — the N==1 SHED half: shed one frame when the last presented depth (read from the
+/// issue 1367 — the N==1 SHED half (the caller gates it on [`n1_tick_is_on_grid`]): shed one
+/// frame when the last presented depth (read from the
 /// locked boundary, `boundary == last presented + interval`, at this tick's scheduled instant) is
 /// deeper than [`n1_target_frames`] on a deep source, throttled by the shared #859 counter. An
 /// unlocked boundary (0) or a degenerate interval never sheds. Mirror of the C
@@ -140,7 +173,8 @@ pub fn n1_shed_due(
         && ticks_since_last_drain >= DRAIN_MIN_TICK_INTERVAL
 }
 
-/// issue 1367 — the N==1 HOLD half: on a STEADY tick, HOLD one tick (a deliberate repeat, the
+/// issue 1367 — the N==1 HOLD half (the caller gates it on [`n1_tick_is_on_grid`]): on a STEADY
+/// tick, HOLD one tick (a deliberate repeat, the
 /// conveyor one frame deeper next tick) when presenting the queue head now would put a deep N==1
 /// source SHALLOWER than [`n1_target_frames`] (both read at the tick's scheduled instant). Reads
 /// the HEAD's age, not the boundary's: a startup DUPLICATE sits one interval below the boundary and
@@ -182,8 +216,7 @@ mod tests {
     fn n1_tick_wall_is_the_processing_wall_minus_the_lateness_1367() {
         let wall = 1_000_000_000_000u64;
         let sched = 5_000_000_000u64;
-        // On schedule, 45 ms late, and 70 ms late (two slots skipped: video_time jumped with them,
-        // so the caller passes the NEW scheduled instant and the read is on time again).
+        // On schedule, 45 ms late and 70 ms late: the lateness comes straight off the wall.
         assert_eq!(n1_tick_wall_ns(wall, sched, sched), wall);
         assert_eq!(
             n1_tick_wall_ns(wall, sched + 45_000_000, sched),
@@ -307,6 +340,45 @@ mod tests {
             "shallow never holds"
         );
         assert!(!should_hold_n1_phase(w, w - 30 * I30, I30, 987, 0, 1, 100));
+    }
+
+    #[test]
+    fn n1_tick_is_on_grid_within_two_milliseconds_of_a_grid_point_1367() {
+        let s = 1_000_000_000_000u64; // a whole second: a grid point at 30 and 60 fps
+        for interval in [I30, I60] {
+            for (offset, on) in [
+                (0i64, true),
+                (1_999_999, true),
+                (2_000_000, true),
+                (2_000_001, false),
+                (-2_000_000, true),
+                (-2_000_001, false),
+                (10_000_000, false),
+                (-10_000_000, false),
+            ] {
+                let t = s.saturating_add_signed(offset);
+                assert_eq!(
+                    n1_tick_is_on_grid(t, interval),
+                    on,
+                    "offset {offset} ns at interval {interval}"
+                );
+            }
+            // Every grid point of the second is on the grid (the per-second slots, not k * I).
+            let mut g = s;
+            for _ in 0..(1_000_000_000 / interval) {
+                assert!(n1_tick_is_on_grid(g, interval), "grid point {g}");
+                assert!(
+                    !n1_tick_is_on_grid(g + 3_000_000, interval),
+                    "3 ms past {g}"
+                );
+                g = crate::genlock_grid::grid_next_boundary_ns(g, interval);
+            }
+        }
+        // The pure predicate at its edges, whatever grid the caller floors on.
+        assert!(n1_tick_on_grid(1_000, 0));
+        assert!(!n1_tick_on_grid(1_000, 3_000_000 + 1_001));
+        assert!(!n1_tick_on_grid(10_000_000, 5_000_000));
+        assert!(n1_tick_on_grid(u64::MAX, u64::MAX - 2_000_000));
     }
 
     /// issue 1367 — the shed and the hold never share an edge: over a dense sweep of presented

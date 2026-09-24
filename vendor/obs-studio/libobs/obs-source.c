@@ -5113,6 +5113,12 @@ static inline uint64_t genlock_phase_pin_deadline(uint64_t deadline_ns, uint64_t
  * src/genlock_n1_depth.rs N1_PIN_FRAME_TOLERANCE_NS / N1_DEEP_MARGIN_FRAMES. */
 #define GENLOCK_N1_PIN_FRAME_TOLERANCE_NS 1000ULL /* 1 us */
 #define GENLOCK_N1_DEEP_MARGIN_FRAMES 2ULL
+/* camera-box issue 1367 (review round 3): the N==1 rule acts only while the render tick's scheduled
+ * instant is within this many ns of a grid point -- the render tick's own per-tick slew clamp
+ * (GENLOCK_MAX_SLEW_NS, obs-video.c). After a wall-clock step the ticks sit off the grid by the
+ * step until the slew pulls them back, and a depth read there is wrong by up to the step. Mirror:
+ * src/genlock_n1_depth.rs N1_ON_GRID_NS. */
+#define GENLOCK_N1_ON_GRID_NS 2000000ULL /* 2 ms */
 
 /* camera-box #1003: PHASE-CONTINUITY RELOCK (history-anchored selection).
  *
@@ -5667,11 +5673,24 @@ static bool genlock_should_drain_one(const obs_source_t *source, uint32_t reserv
  * EARLY past the pin's headroom to the next frame edge -- only the few ticks after a backward wall
  * step -- moves the release deadline a frame and costs a hold/shed pair per sender gap/dup). Only a DEEP
  * source acts: floor_frames + 2 <= base, floor = wall - newest queued stamp (a shallow cg feed /
- * imag camera is decided by its ARRIVAL, not its pin, and stays byte-identical). */
+ * imag camera is decided by its ARRIVAL, not its pin, and stays byte-identical). Both halves act
+ * only while the scheduled tick is ON the grid (genlock_n1_tick_on_grid, review round 3): a
+ * wall-clock step leaves the ticks off the grid by the step and the render tick slews back 2 ms per
+ * tick, so a read there would shed a frame after a forward step and hold one once back on the grid.
+ * A normal or caught-up late tick is always on the grid (video_time is its slot). */
 static inline uint64_t genlock_n1_tick_wall_ns(uint64_t wall_now_ns, uint64_t mono_now_ns, uint64_t scheduled_mono_ns)
 {
 	const uint64_t lateness = mono_now_ns > scheduled_mono_ns ? mono_now_ns - scheduled_mono_ns : 0;
 	return wall_now_ns > lateness ? wall_now_ns - lateness : 0;
+}
+
+/* Is the scheduled tick within GENLOCK_N1_ON_GRID_NS of the grid point grid_floor_ns (the caller's
+ * grid floor of tick_wall_ns + GENLOCK_N1_ON_GRID_NS, the only point that can be that close)? */
+static inline bool genlock_n1_tick_on_grid(uint64_t tick_wall_ns, uint64_t grid_floor_ns)
+{
+	const uint64_t shifted = tick_wall_ns > UINT64_MAX - GENLOCK_N1_ON_GRID_NS ? UINT64_MAX
+										    : tick_wall_ns + GENLOCK_N1_ON_GRID_NS;
+	return shifted >= grid_floor_ns && shifted - grid_floor_ns <= 2 * GENLOCK_N1_ON_GRID_NS;
 }
 
 static inline uint64_t genlock_n1_base_frames(uint32_t latency_ms, uint64_t interval_ns)
@@ -5792,11 +5811,22 @@ static inline bool genlock_phase_converge_due(uint64_t wall_now_ns, uint64_t bou
  * for. obs->video.video_time is the tick's scheduled monotonic instant (the sys_time async_tick
  * passes down to ready_async_frame; video_sleep advances it one interval per tick, catch-up
  * included, and past every skipped slot), os_gettime_ns() - video_time is how far this processing
- * runs behind it, and wall_now is the precise wall clock read once for this tick. Graphics thread
- * only, like every caller. Mirror: src/genlock_n1_depth.rs n1_tick_wall_ns. */
+ * runs behind it, and wall_now is the precise wall clock read once for this tick. The monotonic
+ * read comes a few us after that wall read, and that gap counts as lateness, so the instant comes
+ * out microseconds early -- far inside the rounded read and the 2 ms on-grid window. Graphics
+ * thread only, like every caller. Mirror: src/genlock_n1_depth.rs n1_tick_wall_ns. */
 static inline uint64_t genlock_n1_tick_wall_now(uint64_t wall_now_ns)
 {
 	return genlock_n1_tick_wall_ns(wall_now_ns, os_gettime_ns(), obs->video.video_time);
+}
+
+/* camera-box issue 1367 (review round 3): genlock_n1_tick_on_grid on the ONE per-second grid the
+ * render tick and the senders use (obs-genlock-grid.h). Mirror: src/genlock_n1_depth.rs
+ * n1_tick_is_on_grid. */
+static inline bool genlock_n1_tick_is_on_grid(uint64_t tick_wall_ns, uint64_t interval_ns)
+{
+	return genlock_n1_tick_on_grid(tick_wall_ns,
+				       genlock_grid_floor_ns(tick_wall_ns + GENLOCK_N1_ON_GRID_NS, interval_ns));
 }
 
 /* camera-box #1049: the source-bound wrapper -- reads the live n (READ-ONLY, same as
@@ -5812,7 +5842,8 @@ static bool genlock_should_converge_phase(const obs_source_t *source, uint32_t r
 	const uint32_t n = measured >= 1 ? measured
 					 : (source->genlock_last_known_n >= 1 ? source->genlock_last_known_n : 1);
 	/* camera-box issue 1367: an N==1 tick converges to its PIN-DERIVED depth (genlock_n1_shed_due,
-	 * read at the tick's scheduled instant) instead of the #1049 reserve-aimed shed, which stays
+	 * read at the tick's scheduled instant, only while that is on the grid) instead of the #1049
+	 * reserve-aimed shed, which stays
 	 * inert for n < 2 below. That belongs to a tick of the N==1 STEADY branch only (review round 1):
 	 * on the N>=2 branch genlock_effective_source_multiple latched genlock_last_known_n >= 2, so a
 	 * post-erase re-measure that reads a conclusive n == 1 (a pair straddling a dropped 60 fps frame)
@@ -5822,17 +5853,21 @@ static bool genlock_should_converge_phase(const obs_source_t *source, uint32_t r
 		return false;
 	const uint64_t newest_stamp =
 		source->async_frames.array[source->async_frames.num - 1]->timestamp;
-	if (n < 2)
-		return genlock_n1_shed_due(genlock_n1_tick_wall_now(wall_now), source->genlock_locked_next_boundary_ns,
+	if (n < 2) {
+		const uint64_t tick_wall = genlock_n1_tick_wall_now(wall_now);
+		return genlock_n1_tick_is_on_grid(tick_wall, interval) &&
+		       genlock_n1_shed_due(tick_wall, source->genlock_locked_next_boundary_ns,
 					   wall_now > newest_stamp ? wall_now - newest_stamp : 0, reserve_ms, interval,
 					   source->genlock_ticks_since_drain);
+	}
 	return genlock_phase_converge_due(wall_now, source->genlock_locked_next_boundary_ns, newest_stamp,
 					  reserve_ms, interval, n, source->genlock_ticks_since_drain);
 }
 
 /* camera-box issue 1367: the source-bound wrapper of the N==1 HOLD half -- reads the queue HEAD (what
- * this STEADY tick would present) at the tick's scheduled instant, the FRESHEST queued frame (the
- * arrival floor) and the shared #859 throttle, and delegates to genlock_n1_hold_due. Called ONLY
+ * this STEADY tick would present) at the tick's scheduled instant (deferring while that is off the
+ * grid), the FRESHEST queued frame (the arrival floor) and the shared #859 throttle, and delegates
+ * to genlock_n1_hold_due. Called ONLY
  * from the N==1 STEADY branch (the source multiple is 1 there by construction). Mirror:
  * src/genlock_n1_depth.rs should_hold_n1_phase. */
 static bool genlock_should_hold_n1_phase(const obs_source_t *source, uint32_t reserve_ms, uint64_t interval,
@@ -5842,9 +5877,10 @@ static bool genlock_should_hold_n1_phase(const obs_source_t *source, uint32_t re
 		return false;
 	const uint64_t head_stamp = source->async_frames.array[0]->timestamp;
 	const uint64_t newest_stamp = source->async_frames.array[source->async_frames.num - 1]->timestamp;
-	return genlock_n1_hold_due(genlock_n1_tick_wall_now(wall_now), head_stamp,
-				   wall_now > newest_stamp ? wall_now - newest_stamp : 0, reserve_ms, interval, 1,
-				   source->genlock_ticks_since_drain);
+	const uint64_t tick_wall = genlock_n1_tick_wall_now(wall_now);
+	return genlock_n1_tick_is_on_grid(tick_wall, interval) &&
+	       genlock_n1_hold_due(tick_wall, head_stamp, wall_now > newest_stamp ? wall_now - newest_stamp : 0,
+				   reserve_ms, interval, 1, source->genlock_ticks_since_drain);
 }
 
 /* camera-box #1161: the fail-open MARGIN (ticks) the ACQUIRE bracketing gate

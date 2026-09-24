@@ -23,7 +23,9 @@
 use camera_box::genlock_backlog::{
     relock_acquire_should_hold, relock_anchor_age_ns, relock_select_nearest, should_converge_phase,
 };
-use camera_box::genlock_n1_depth::{n1_shed_due, n1_tick_wall_ns, should_hold_n1_phase};
+use camera_box::genlock_n1_depth::{
+    n1_shed_due, n1_tick_on_grid, n1_tick_wall_ns, should_hold_n1_phase,
+};
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
@@ -285,6 +287,7 @@ fn converge_defines() -> String {
         "GENLOCK_N2_JITTER_BUDGET_NS",
         "GENLOCK_N1_PIN_FRAME_TOLERANCE_NS",
         "GENLOCK_N1_DEEP_MARGIN_FRAMES",
+        "GENLOCK_N1_ON_GRID_NS",
     ]
     .iter()
     .map(|name| lift_define(name))
@@ -920,4 +923,52 @@ fn c_n1_tick_wall_matches_the_rust_authority_1367() {
             "issue 1367: genlock_n1_tick_wall_ns({wall}, {mono}, {sched}) — C {got_c}, Rust {got_rs}"
         );
     }
+}
+
+/// issue 1367 (review round 3) — the on-grid predicate: the lifted `genlock_n1_tick_on_grid` must
+/// return the same booleans as [`camera_box::genlock_n1_depth::n1_tick_on_grid`] at both window
+/// edges, one ns outside each, far off the grid, and at the saturation end.
+#[test]
+fn c_n1_tick_on_grid_matches_the_rust_authority_1367() {
+    let g = 1_000_000_000_000u64;
+    let on = 2_000_000u64;
+    let vs: Vec<(u64, u64)> = vec![
+        (g, g),
+        (g + on, g),
+        (g + on + 1, g),
+        (g - on, g),
+        (g - on - 1, g),
+        (g + 10_000_000, g),
+        (g - 10_000_000, g - 33_333_333),
+        (1_000, 0),
+        (1_000, 3_001_001),
+        (u64::MAX, u64::MAX - on),
+        (u64::MAX - 1, u64::MAX - 3 * on),
+    ];
+    let mut body = String::new();
+    for (tick, floor) in &vs {
+        body.push_str(&format!(
+            "    printf(\"%d\\n\", genlock_n1_tick_on_grid({tick}ULL, {floor}ULL));\n"
+        ));
+    }
+    let c_out = compile_and_run_n1_block("genlock_n1_tick_on_grid_parity_1367", &body);
+    assert_eq!(
+        c_out.len(),
+        vs.len(),
+        "issue 1367: harness printed the wrong count"
+    );
+    let mut ons = 0;
+    for ((tick, floor), got_c) in vs.iter().zip(&c_out) {
+        let got_rs = n1_tick_on_grid(*tick, *floor);
+        ons += usize::from(got_rs);
+        assert_eq!(
+            got_c == "1",
+            got_rs,
+            "issue 1367: genlock_n1_tick_on_grid({tick}, {floor}) — C {got_c}, Rust {got_rs}"
+        );
+    }
+    assert!(
+        ons > 0 && ons < vs.len(),
+        "both outcomes must be exercised: {ons}"
+    );
 }

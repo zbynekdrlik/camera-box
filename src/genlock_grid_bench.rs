@@ -67,7 +67,9 @@ use crate::genlock_backlog::{
 use crate::genlock_grid::{
     grid_next_boundary_ns, per_second_floor, StampTrack, NS_PER_SECOND, UNITS_100NS_PER_SECOND,
 };
-use crate::genlock_n1_depth::{n1_shed_due, n1_tick_wall_ns, should_hold_n1_phase};
+use crate::genlock_n1_depth::{
+    n1_shed_due, n1_tick_on_grid, n1_tick_wall_ns, should_hold_n1_phase, N1_ON_GRID_NS,
+};
 use std::collections::{BTreeMap, VecDeque};
 
 /// The 30 fps canvas interval of both OBS boxes (`1e9 / 30`, integer).
@@ -413,15 +415,18 @@ impl Fifo {
                 .queue
                 .back()
                 .expect("head exists, so the queue is not empty");
-            if should_hold_n1_phase(
-                n1_tick_wall_ns(wall, wall, scheduled),
-                head,
-                wall.saturating_sub(newest),
-                cfg.latency_ms,
-                CANVAS_INTERVAL_NS,
-                1,
-                self.ticks_since_drain,
-            ) {
+            let tick_wall = n1_tick_wall_ns(wall, wall, scheduled);
+            if tick_on_grid(cfg.grid, tick_wall)
+                && should_hold_n1_phase(
+                    tick_wall,
+                    head,
+                    wall.saturating_sub(newest),
+                    cfg.latency_ms,
+                    CANVAS_INTERVAL_NS,
+                    1,
+                    self.ticks_since_drain,
+                )
+            {
                 c.n1_grows += 1;
                 self.ticks_since_drain = 0;
                 return;
@@ -476,14 +481,17 @@ impl Fifo {
                 .queue
                 .back()
                 .expect("a STEADY present has a queued frame");
-            if n1_shed_due(
-                n1_tick_wall_ns(wall, wall, scheduled),
-                self.locked_next_boundary,
-                wall.saturating_sub(newest),
-                cfg.latency_ms,
-                CANVAS_INTERVAL_NS,
-                self.ticks_since_drain,
-            ) && self.queue.len() > 1
+            let tick_wall = n1_tick_wall_ns(wall, wall, scheduled);
+            if tick_on_grid(cfg.grid, tick_wall)
+                && n1_shed_due(
+                    tick_wall,
+                    self.locked_next_boundary,
+                    wall.saturating_sub(newest),
+                    cfg.latency_ms,
+                    CANVAS_INTERVAL_NS,
+                    self.ticks_since_drain,
+                )
+                && self.queue.len() > 1
             {
                 self.queue.pop_front();
                 c.dropped_due += 1;
@@ -503,6 +511,12 @@ impl Fifo {
         self.locked_next_boundary = presented + CANVAS_INTERVAL_NS;
         self.presented = Some(presented);
     }
+}
+
+/// issue 1367 — the on-grid condition of the N==1 rule on the bench's own grid model (the C
+/// `genlock_n1_tick_is_on_grid` floors on the production per-second grid).
+fn tick_on_grid(grid: GridModel, tick_wall: u64) -> bool {
+    n1_tick_on_grid(tick_wall, grid.deadline_floor(tick_wall + N1_ON_GRID_NS))
 }
 
 /// Run one scenario and report what the receiver did.
