@@ -273,13 +273,25 @@ fn setup_device_step17d_creates_named_entry_on_box_1066() {
         .map(|o| start + o)
         .unwrap_or(body.len());
     let block = &body[start..end];
+    // Issue 1311 moved the create + lead-BootOrder logic into the ONE shared
+    // `efi_cam_box_ensure` (scripts/lib/efi-boot-entry.sh), which create-usb-linux.sh also calls
+    // -- so STEP 17d must call it, and the lib function must carry the create + reorder.
     assert!(
-        block.contains("efibootmgr -c -d") && block.contains("$EFI_CAM_BOX_LABEL"),
-        "STEP 17d must create the named entry via efibootmgr -c -d ... -L $EFI_CAM_BOX_LABEL (#1066 D6)"
+        block.contains("efi_cam_box_ensure") && block.contains("$EFI_CAM_BOX_LABEL"),
+        "STEP 17d must create/repair the named entry via the shared efi_cam_box_ensure (#1066 D6, issue 1311)"
+    );
+    let lib = read("scripts/lib/efi-boot-entry.sh");
+    let ensure_start = lib
+        .find("efi_cam_box_ensure()")
+        .expect("scripts/lib/efi-boot-entry.sh must define efi_cam_box_ensure (issue 1311)");
+    let ensure = &lib[ensure_start..];
+    assert!(
+        ensure.contains("-c -d") && ensure.contains("\"$EFI_CAM_BOX_LABEL\""),
+        "efi_cam_box_ensure must create the named entry via efibootmgr -c -d ... -L $EFI_CAM_BOX_LABEL (#1066 D6)"
     );
     assert!(
-        block.contains("efi_cam_box_leads") && block.contains("efi_boot_order_lead"),
-        "STEP 17d must ensure the entry LEADS BootOrder (efi_cam_box_leads + efi_boot_order_lead) (#1066 D6)"
+        ensure.contains("efi_cam_box_repair_plan") && ensure.contains("efi_boot_order_lead"),
+        "efi_cam_box_ensure must ensure the entry LEADS BootOrder (repair plan + efi_boot_order_lead) (#1066 D6)"
     );
     // Enable-only convention: no live start/restart of anything here (it just writes NVRAM).
     assert!(
