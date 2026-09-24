@@ -655,8 +655,9 @@ SETUP_EOF
 # GUARDED: only acts when the host booted UEFI (/sys/firmware/efi/efivars present). If efivars are
 # absent (BIOS/CSM boot, or not mounted) it logs that the operator must REMOVE the live-USB so
 # firmware falls back to the internal disk's \EFI\BOOT\BOOTX64.EFI, and does nothing else.
-# Idempotent: removes any prior `cam-box` entries before creating a fresh one. Non-fatal — the
-# --removable BOOTX64.EFI fallback still boots if this can't write NVRAM.
+# Idempotent: removes any prior `cam-box` entries before creating a fresh one. Issue 1311: the
+# entry is READ BACK (efi_cam_box_ensure); when it cannot be made an HD() entry that leads
+# BootOrder the install FAILS loud (error) instead of reporting a success it never verified.
 create_efi_boot_entry() {
     if [[ ! -d /sys/firmware/efi/efivars ]]; then
         warn "Host has no EFI vars (/sys/firmware/efi/efivars absent) — booted in BIOS/CSM mode or"

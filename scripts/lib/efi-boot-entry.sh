@@ -83,11 +83,14 @@ efi_boot_order_lead() {
     printf '%s\n' "${num}${out:+,$out}"
 }
 
-# efi_entry_verdict <efibootmgr-output> -> exactly `ok` when a cam-box entry exists AND leads
-# BootOrder; otherwise a single `FAIL: <reason>` line. Used by verify-device.sh (al). An
+# efi_entry_verdict <efibootmgr-output> [expected-esp-partuuid] -> exactly `ok` when a cam-box
+# entry exists AND leads BootOrder; otherwise a single `FAIL: <reason>` line. Used by
+# verify-device.sh (al). With a SECOND argument (even an empty one) the output is read as an
+# `efibootmgr -v` dump and every cam-box entry's stored device path is graded too (issue 1311): a
+# firmware-mangled VenHw() path, a non-HD() path or an entry on another ESP GUID FAILs. An
 # empty/unreadable input is the CALLER's concern (an ssh failure is its own FAIL, test-strictness).
 efi_entry_verdict() {
-    local out="$1" nums order first
+    local out="$1" nums order first n path
     nums="$(efi_cam_box_bootnums "$out")"
     if [ -z "$nums" ]; then
         printf 'FAIL: no `%s` UEFI boot entry present -- the box depends on the AMI USB auto-entry, which failed on cam2 after a warm reboot; re-run setup-device.sh to create it (#1066 D6)\n' "$EFI_CAM_BOX_LABEL"
@@ -97,6 +100,16 @@ efi_entry_verdict() {
     if [ -z "$order" ]; then
         printf 'FAIL: BootOrder is unreadable/empty -- cannot certify `%s` leads the boot order (#1066 D6)\n' "$EFI_CAM_BOX_LABEL"
         return 0
+    fi
+    if [ "$#" -ge 2 ]; then
+        for n in $nums; do
+            path="$(efi_cam_box_entry_path "$out" "$n")"
+            if ! efi_device_path_healthy "$path" "$2"; then
+                printf 'FAIL: `%s` entry Boot%s has a bad stored device path (%s) -- not an HD() path to %s on this disk'"'"'s ESP%s; re-run setup-device.sh to repair it (issue 1311)\n' \
+                    "$EFI_CAM_BOX_LABEL" "$n" "${path:-<none>}" "$EFI_CAM_BOX_LOADER" "${2:+ (PARTUUID $2)}"
+                return 0
+            fi
+        done
     fi
     if efi_cam_box_leads "$out"; then
         printf 'ok\n'
@@ -140,15 +153,17 @@ efi_esp_partition_of_disk() {
 
 # efi_device_path_healthy <device-path> [expected-esp-partuuid] -> exit 0 iff the path is a real
 # `HD(...)` disk path (a firmware-expanded PciRoot()/.../HD(...) path is fine) with NO `VenHw(`
-# node, and -- when an expected ESP PARTUUID is given -- its HD() node names that partition GUID
-# (case-insensitive). A stale entry from a previous install points at a GUID that no longer
-# exists, so it is NOT healthy. Pure predicate.
+# node, that names the removable loader BOOTX64.EFI (the only core --removable writes), and --
+# when an expected ESP PARTUUID is given -- whose HD() node names that partition GUID (all
+# case-insensitive). A stale entry from a previous install points at a GUID that no longer exists,
+# so it is NOT healthy. Pure predicate.
 efi_device_path_healthy() {
     local path="$1" want="${2:-}" up
-    case "$path" in *VenHw\(*) return 1 ;; esac
-    case "$path" in *HD\(*) ;; *) return 1 ;; esac
-    [ -n "$want" ] || return 0
     up="$(printf '%s' "$path" | tr 'a-z' 'A-Z')"
+    case "$up" in *VENHW\(*) return 1 ;; esac
+    case "$up" in *HD\(*) ;; *) return 1 ;; esac
+    case "$up" in *BOOTX64.EFI*) ;; *) return 1 ;; esac
+    [ -n "$want" ] || return 0
     case "$up" in *"$(printf '%s' "$want" | tr 'a-z' 'A-Z')"*) return 0 ;; esac
     return 1
 }
@@ -184,6 +199,14 @@ efi_cam_box_repair_plan() {
     fi
 }
 
+# _efi_read_v <efibootmgr-bin> -> the `-v` dump; non-zero when efibootmgr fails OR prints nothing.
+_efi_read_v() {
+    local dump
+    dump="$("$1" -v 2>/dev/null)" || return 1
+    [ -n "$dump" ] || return 1
+    printf '%s\n' "$dump"
+}
+
 # efi_esp_partuuid_of_disk <whole-disk> -> the ESP's PARTUUID via blkid, or empty when unreadable
 # (the health check then skips the GUID facet and still requires an HD() path).
 efi_esp_partuuid_of_disk() {
@@ -196,19 +219,27 @@ efi_esp_partuuid_of_disk() {
 # stale one and recreate it, move a demoted healthy one first -- and re-checks, at most three
 # actions. `fresh` (create-usb: a brand-new install) first deletes every prior `cam-box` entry.
 # Exit 1 with a final `FAIL: ...` line naming what the firmware stored when it still is not right.
+# An UNREADABLE `efibootmgr -v` (non-zero exit or no output) is never read as "no entry": it FAILs
+# at once, with no NVRAM write (three blind creates would only pile up duplicates).
 # Progress lines go to stdout. Idempotent: a correct entry is never touched.
 efi_cam_box_ensure() {
     local disk="$1" want="${2:-}" mode="${3:-}" bin="${EFI_BOOTMGR_BIN:-efibootmgr}"
     local out plan n order attempt stored
+    if ! out="$(_efi_read_v "$bin")"; then
+        printf 'FAIL: efibootmgr -v unreadable (non-zero exit or no output) -- not touching the NVRAM blind (issue 1311)\n'
+        return 1
+    fi
     if [ "$mode" = "fresh" ]; then
-        out="$("$bin" -v 2>/dev/null)" || out=""
         for n in $(efi_cam_box_bootnums "$out"); do
             "$bin" -b "$n" -B >/dev/null 2>&1 || true
             printf '  removed prior %s entry Boot%s (fresh install)\n' "$EFI_CAM_BOX_LABEL" "$n"
         done
     fi
     for attempt in 1 2 3; do
-        out="$("$bin" -v 2>/dev/null)" || out=""
+        if ! out="$(_efi_read_v "$bin")"; then
+            printf 'FAIL: efibootmgr -v became unreadable during the repair (attempt %s) -- stopping (issue 1311)\n' "$attempt"
+            return 1
+        fi
         plan="$(efi_cam_box_repair_plan "$out" "$want")"
         case "$plan" in
             ok)
@@ -239,7 +270,10 @@ efi_cam_box_ensure() {
                 ;;
         esac
     done
-    out="$("$bin" -v 2>/dev/null)" || out=""
+    if ! out="$(_efi_read_v "$bin")"; then
+        printf 'FAIL: efibootmgr -v became unreadable after the repair -- cannot verify the %s entry (issue 1311)\n' "$EFI_CAM_BOX_LABEL"
+        return 1
+    fi
     plan="$(efi_cam_box_repair_plan "$out" "$want")"
     if [ "$plan" = "ok" ]; then
         printf '  verified: %s entry has an HD() device path and leads BootOrder (%s)\n' \

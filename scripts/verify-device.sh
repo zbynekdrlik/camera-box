@@ -170,8 +170,9 @@
 #        re-provisioned) and carries NO networks.discovery, AND the camera-box.service.d/
 #        ndi-discovery.conf drop-in points NDI_CONFIG_DIR at /etc/ndi (camera-box runs as root with
 #        ProtectHome=yes, so /root/.ndi is invisible).
-#   (al) named `cam-box` UEFI boot entry (#1066 D6) -- HARD FAIL: efibootmgr reports a `cam-box`
-#       entry AND it is FIRST in BootOrder -- so the box boots its internal disk without depending on
+#   (al) named `cam-box` UEFI boot entry (#1066 D6) -- HARD FAIL: `efibootmgr -v` reports a `cam-box`
+#       entry with an HD() path to \EFI\BOOT\BOOTX64.EFI on the /boot/efi PARTUUID (never a
+#       firmware-mangled VenHw() one, issue 1311) AND it is FIRST in BootOrder -- so the box boots its internal disk without depending on
 #       the AMI USB auto-entry (which failed on cam2 after a warm reboot). setup-device.sh STEP 17d
 #       creates it on the box; this proves it took effect post-reboot. FAILs (test-strictness) if the
 #       entry is absent, not leading, or efibootmgr is unreadable/absent (a non-EFI box).
@@ -850,7 +851,8 @@ Checks:
   (ak) off-box remote logging (#1311): cambox-netconsole.service enabled+active with a live configfs
       target to dev1:514, AND systemd-journal-upload enabled with URL -> the dev1 sink + a /run cursor
   (al) named cam-box UEFI boot entry (#1066 D6): efibootmgr reports a \`cam-box\` entry that is FIRST
-      in BootOrder -- FAILs if absent / not leading / efibootmgr unreadable (test-strictness)
+      in BootOrder (read with -v), with an HD() path on the /boot/efi PARTUUID (issue 1311) -- FAILs if absent /
+      not leading / mangled (VenHw) or stale path / efibootmgr unreadable (test-strictness)
   (am) bkshading-relay blast-radius + info logging (#1309): TasksMax <= 512 AND a running relay
       logs at info (zero journal lines while active FAILs); relay not provisioned = n/a
   (an) NDI discovery receiver config (issue 1342): /etc/ndi/ndi-config.v1.json networks.ips lists
@@ -898,7 +900,7 @@ warn() { printf "  ${YELLOW}[WARN]${NC} %s\n" "$1"; }
 
 # UserKnownHostsFile=/dev/null (issue 1311): a REFLASHED box has a new host key. With dev1's real
 # known_hosts, ssh refuses password auth for the mismatched key even under StrictHostKeyChecking=no,
-# so every check read `ssh rc=255` (37 false FAILs on cam4). Match every other rig tool here.
+# so every check read `ssh rc=255` (37 false FAILs on cam4). verify-fleet.sh / verify-imag.sh too.
 ssh_box() {
   sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout="$SSH_TIMEOUT" \
     "${SSH_USER}@${IP}" "$1"
@@ -1703,16 +1705,20 @@ fi
 # creates the `cam-box` entry in the box's OWN NVRAM and makes it lead BootOrder; this proves it took
 # effect post-reboot. Graded by the pure efi_entry_verdict. HARD FAIL (test-strictness): the entry
 # absent, not leading, OR efibootmgr unreadable/absent (a non-EFI box) all fail -- a box that would
-# drop to the firmware menu on the next warm reboot must NOT pass acceptance. Inserted BEFORE (q) per
+# drop to the firmware menu on the next warm reboot must NOT pass acceptance. Issue 1311: it reads
+# `efibootmgr -v` and the /boot/efi PARTUUID, so a leading entry with a firmware-mangled VenHw()
+# path (cam2, 24.9.2026) or one on a stale ESP GUID FAILs too. Inserted BEFORE (q) per
 # .claude/rules/provisioning-scripts.md (the (q)-last invariant).
 alrc=0
-EFI_ENTRIES="$(ssh_box "efibootmgr 2>/dev/null")" || alrc=$?
+EFI_ENTRIES="$(ssh_box "efibootmgr -v 2>/dev/null")" || alrc=$?
+# An unreadable PARTUUID is graded as "unknown GUID" (empty): the HD()/VenHw()/loader facets still apply.
+EFI_ESP_PARTUUID="$(ssh_box 'blkid -s PARTUUID -o value "$(findmnt -no SOURCE /boot/efi)" 2>/dev/null' 2>/dev/null)" || EFI_ESP_PARTUUID=""
 if [ "$alrc" -ne 0 ] || [ -z "$EFI_ENTRIES" ]; then
   fail "could not read UEFI boot entries over SSH (efibootmgr rc=$alrc, empty=$([ -z "$EFI_ENTRIES" ] && echo yes || echo no)) -- cannot certify the named 'cam-box' entry leads BootOrder (#1066 D6). An unreadable/absent efibootmgr output is a FAIL (test-strictness): a non-EFI box, or a missing efibootmgr, must not silently pass."
 else
-  EFI_AL_VERDICT="$(efi_entry_verdict "$EFI_ENTRIES")"
+  EFI_AL_VERDICT="$(efi_entry_verdict "$EFI_ENTRIES" "$EFI_ESP_PARTUUID")"
   if [ "$EFI_AL_VERDICT" = "ok" ]; then
-    ok "named UEFI boot entry 'cam-box' present AND leads BootOrder -- the box boots its internal disk without depending on the AMI USB auto-entry (#1066 D6)"
+    ok "named UEFI boot entry 'cam-box' present, HD() path on the ESP (PARTUUID '${EFI_ESP_PARTUUID:-unread}'), AND leads BootOrder -- the box boots its internal disk without depending on the AMI USB auto-entry (#1066 D6, issue 1311)"
   else
     fail "UEFI boot entry: ${EFI_AL_VERDICT#FAIL: }"
   fi

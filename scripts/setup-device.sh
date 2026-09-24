@@ -338,6 +338,7 @@ confirm_setup() {
 # Forward only: a box AHEAD of the archive is never moved back. dantesync owns the clock afterwards.
 CLOCK_SANITY_HOST="archive.ubuntu.com"
 CLOCK_SANITY_PATH="/ubuntu/"
+CLOCK_SANITY_PORT=80
 CLOCK_SANITY_MAX_BEHIND_S=86400
 
 # http_date_header_value <http-headers> -> the value of the `Date:` header (case-insensitive,
@@ -376,12 +377,12 @@ clock_sanity_now_epoch() { date -u +%s; }
 # /dev/tcp, bounded by timeout. Plain HTTP on purpose: TLS is what a wrong clock breaks.
 clock_sanity_fetch_headers() {
     if command -v curl >/dev/null 2>&1; then
-        curl -sSI --max-time 10 "http://${CLOCK_SANITY_HOST}${CLOCK_SANITY_PATH}" 2>/dev/null && return 0
+        curl -sSI --max-time 10 "http://${CLOCK_SANITY_HOST}:${CLOCK_SANITY_PORT}${CLOCK_SANITY_PATH}" 2>/dev/null && return 0
     fi
     # shellcheck disable=SC2016  # the single-quoted program is expanded by the inner bash, on purpose
-    timeout 10 bash -c 'exec 3<>"/dev/tcp/$1/80" || exit 1
+    timeout 10 bash -c 'exec 3<>"/dev/tcp/$1/$3" || exit 1
         printf "HEAD %s HTTP/1.0\r\nHost: %s\r\nConnection: close\r\n\r\n" "$2" "$1" >&3
-        head -c 8192 <&3' _ "$CLOCK_SANITY_HOST" "$CLOCK_SANITY_PATH" 2>/dev/null
+        head -c 8192 <&3' _ "$CLOCK_SANITY_HOST" "$CLOCK_SANITY_PATH" "$CLOCK_SANITY_PORT" 2>/dev/null
 }
 
 clock_sanity_set_clock() { date -u -s "@$1" >/dev/null; }
@@ -398,13 +399,15 @@ clock_sanity_fix_from_archive() {
     verdict="$(clock_sanity_decision "$now" "$server")"
     case "$verdict" in
         set)
-            echo -e "${YELLOW}  !!! CLOCK: the system clock is $(((server - now) / 86400)) day(s) BEHIND the Ubuntu archive (box epoch ${now}, archive Date '${date_str}') -- a CMOS reset? Setting the clock FORWARD to the archive time so apt/TLS work. dantesync (STEP 17) owns the clock from then on (issue 1311).${NC}"
+            # printf %s: the Date text comes off the network and must never be escape-interpreted.
+            printf '%b  !!! CLOCK: the system clock is %s day(s) BEHIND the Ubuntu archive (box epoch %s, archive Date '"'"'%s'"'"') -- a CMOS reset? Setting the clock FORWARD to the archive time so apt/TLS work. dantesync (STEP 17) owns the clock from then on (issue 1311).%b\n' \
+                "$YELLOW" "$(((server - now) / 86400))" "$now" "$date_str" "$NC"
             clock_sanity_set_clock "$server" \
                 || fail "the clock is $(((server - now) / 86400)) day(s) behind and 'date -s' failed -- apt/TLS will fail; set the clock by hand and re-run (issue 1311)"
             echo "  clock now: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
             ;;
         ok)
-            echo "  clock OK (within ${CLOCK_SANITY_MAX_BEHIND_S}s of the archive Date '${date_str}', or ahead of it -- never moved back)"
+            printf '  clock OK (within %ss of the archive Date '"'"'%s'"'"', or ahead of it -- never moved back)\n' "$CLOCK_SANITY_MAX_BEHIND_S" "$date_str"
             ;;
         *)
             echo -e "${YELLOW}  could not read the archive Date header -- clock NOT checked. If apt fails with 'Release file ... is not valid yet', set the clock by hand (date -s) and re-run (issue 1311).${NC}"
@@ -1728,12 +1731,16 @@ echo "  #1311: netconsole (kernel printk -> ${REMOTE_LOG_DEV1_IP}:${REMOTE_LOG_N
 # efibootmgr is on the base image + STEP 16's package list. Lettered sub-step (STEP 3b idiom, NO
 # /${TOTAL_STEPS}); it writes only NVRAM (efivars), no filesystem, so it is safe here in the rw
 # window before STEP 18's ro flip. Certified post-reboot by verify-device.sh (al).
+# Issue 1311: a failure here is RECORDED, never an abort before STEP 18 -- a fresh box must still
+# get its read-only fstab -- and STEP 19 then refuses "Setup Complete".
+EFI_ENTRY_PROBLEM=""
 echo ""
 echo -e "${GREEN}[17d] Ensuring named UEFI boot entry '${EFI_CAM_BOX_LABEL}' in this box's NVRAM (#1066 D6)...${NC}"
 if [ ! -d /sys/firmware/efi/efivars ]; then
     echo "  Box booted in BIOS/CSM mode (/sys/firmware/efi/efivars absent) -- skipping the named UEFI entry (not applicable on a non-EFI boot)."
 elif ! command -v efibootmgr >/dev/null 2>&1; then
     echo -e "${YELLOW}  efibootmgr not installed -- cannot create the named '${EFI_CAM_BOX_LABEL}' UEFI entry. It is on STEP 16's package list + the base image; install it and re-run.${NC}"
+    EFI_ENTRY_PROBLEM="efibootmgr missing"
 else
     EFI_ROOT_SRC="$(findmnt -no SOURCE / 2>/dev/null || true)"
     EFI_ROOT_DISK="$(efi_whole_disk_of "$EFI_ROOT_SRC")"
@@ -1748,10 +1755,13 @@ else
         if efi_cam_box_ensure "$EFI_ROOT_DISK" "$EFI_ESP_PARTUUID"; then
             echo "  '${EFI_CAM_BOX_LABEL}' -> ${EFI_ROOT_DISK} partition 1 (${EFI_CAM_BOX_LOADER}, ESP PARTUUID '${EFI_ESP_PARTUUID:-unread}'): HD() path, leads BootOrder (#1066 D6, issue 1311)."
         else
-            fail "the named '${EFI_CAM_BOX_LABEL}' UEFI entry could not be made an HD() path that leads BootOrder on ${EFI_ROOT_DISK} (see the FAIL line above) -- the box would fall back to the AMI USB auto-entry that failed on cam2. Inspect 'efibootmgr -v', fix it by hand (efibootmgr -b <num> -B, then efibootmgr -c -d ${EFI_ROOT_DISK} -p 1 -L ${EFI_CAM_BOX_LABEL} -l '<the loader>'), and re-run (issue 1311)."
+            EFI_ENTRY_PROBLEM="not an HD() entry leading BootOrder on ${EFI_ROOT_DISK}"
+            echo -e "${RED}  !!! the named '${EFI_CAM_BOX_LABEL}' UEFI entry could not be made an HD() path that leads BootOrder on ${EFI_ROOT_DISK} (see the FAIL line above) -- the box would fall back to the AMI USB auto-entry that failed on cam2. Continuing to STEP 18 (the read-only fstab), then STEP 19 refuses Setup Complete. Inspect 'efibootmgr -v', delete the bad entry (efibootmgr -b <num> -B), recreate it and re-run (issue 1311).${NC}"
         fi
     else
-        echo -e "${YELLOW}  could not derive the root disk from findmnt (source='${EFI_ROOT_SRC}', disk='${EFI_ROOT_DISK}' is not a block device) -- NOT creating a UEFI entry blind. Create it by hand: efibootmgr -c -d <root-disk> -p 1 -L ${EFI_CAM_BOX_LABEL} -l '${EFI_CAM_BOX_LOADER}' (#1066 D6).${NC}"
+        # The loader path has backslashes: double them so echo -e never turns \E into an ESC byte.
+        echo -e "${YELLOW}  could not derive the root disk from findmnt (source='${EFI_ROOT_SRC}', disk='${EFI_ROOT_DISK}' is not a block device) -- NOT creating a UEFI entry blind. Create it by hand: efibootmgr -c -d <root-disk> -p 1 -L ${EFI_CAM_BOX_LABEL} -l '${EFI_CAM_BOX_LOADER//\\/\\\\}' (#1066 D6).${NC}"
+        EFI_ENTRY_PROBLEM="root disk not derivable from findmnt"
     fi
 fi
 
@@ -1842,6 +1852,8 @@ echo -e "${GREEN}[19/${TOTAL_STEPS}] Verifying installation...${NC}"
 MISSING=""
 [ -f /usr/local/bin/camera-box ] || MISSING="${MISSING}camera-box binary (/usr/local/bin/camera-box) "
 [ -f /usr/lib/ndi/libndi.so.6 ] || MISSING="${MISSING}NDI library (/usr/lib/ndi/libndi.so.6) "
+# Issue 1311: STEP 17d records (never aborts on) a cam-box UEFI entry it could not verify.
+[ -z "${EFI_ENTRY_PROBLEM:-}" ] || MISSING="${MISSING}a verified '${EFI_CAM_BOX_LABEL}' UEFI entry (STEP 17d: ${EFI_ENTRY_PROBLEM}) "
 if [ -n "$MISSING" ]; then
     fail "half-configured box -- missing: ${MISSING}-- refusing to report Setup Complete"
 fi
