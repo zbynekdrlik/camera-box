@@ -450,6 +450,11 @@ case "$mode" in
         echo "$neworder" > "$S/order" ;;
     *)
         if [ -f "$S/vfail" ]; then exit 1; fi
+        if [ -f "$S/vfail_after" ]; then
+            n=$(( $(cat "$S/vcount" 2>/dev/null || echo 0) + 1 ))
+            echo "$n" > "$S/vcount"
+            [ "$n" -le "$(cat "$S/vfail_after")" ] || exit 1
+        fi
         dump ;;
 esac
 "##;
@@ -736,6 +741,31 @@ fn efi_ensure_fails_without_writing_when_efibootmgr_v_is_unreadable_1311() {
     );
 }
 
+/// A `-v` read that fails LATER (after a create) must also stop the loop, never re-create blind.
+#[test]
+fn efi_ensure_stops_when_a_later_v_read_fails_1311() {
+    let nv = FakeNvram::new(
+        "0001|UEFI OS|HD(1,GPT,x,0x800,0x100000)\n",
+        "0001",
+        0,
+        false,
+    );
+    // Read 1 = the up-front read, read 2 = attempt 1 (-> create), read 3 (attempt 2) fails.
+    std::fs::write(nv.dir.join("state").join("vfail_after"), "2\n").unwrap();
+    let (rc, out, _dump, calls) = nv.ensure(ESP_UUID, "");
+    assert_ne!(rc, 0, "a later unreadable -v must FAIL: {out}");
+    assert!(
+        out.lines()
+            .any(|l| l.starts_with("FAIL:") && l.contains("unreadable")),
+        "the failure must say efibootmgr -v became unreadable: {out}"
+    );
+    assert_eq!(
+        calls.matches("create ").count(),
+        1,
+        "only the create before the failing read: {calls}"
+    );
+}
+
 /// verify-device (al): the verdict must also grade the stored path (review, issue 1311) -- a
 /// leading VenHw() entry or a leading entry on another ESP GUID is NOT certified.
 #[test]
@@ -790,6 +820,11 @@ fn verify_device_al_reads_the_verbose_entries_and_the_esp_partuuid_1311() {
         ),
         "(al) must grade with the path-aware verdict (issue 1311)"
     );
+    assert!(
+        on_noncomment_line(block, "[ -z \"$EFI_ESP_PARTUUID\" ]"),
+        "(al) must FAIL when the ESP PARTUUID cannot be read -- never certify without the stale-GUID \
+         facet (issue 1311 review)"
+    );
 }
 
 /// STEP 17d must not abort BEFORE STEP 18 (a fresh box would keep a writable root with no tmpfs
@@ -807,8 +842,9 @@ fn setup_device_step17d_failure_is_deferred_to_step19_1311() {
     assert!(
         !block
             .lines()
-            .any(|l| !l.trim_start().starts_with('#') && l.trim_start().starts_with("fail ")),
-        "STEP 17d must NOT abort before STEP 18 flips the root read-only"
+            .any(|l| !l.trim_start().starts_with('#') && l.contains("fail \"")),
+        "STEP 17d must NOT abort (no fail call anywhere in the block) before STEP 18 flips the \
+         root read-only"
     );
     let s19 = body.find("# STEP 19:").expect("STEP 19");
     let tail = &body[s19..];
