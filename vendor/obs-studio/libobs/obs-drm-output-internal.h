@@ -10,6 +10,7 @@
  * context held (the frame hook), except drm_output_view_configure (obs_startup autostart).
  */
 
+#include <stdbool.h>
 #include <stdint.h>
 
 #include "graphics/graphics.h"
@@ -33,8 +34,9 @@ gs_texture_t *drm_output_render_buf_texture(int idx);
 void drm_output_mode_size(uint32_t *w, uint32_t *h);
 
 /* Raw byte-faithful blit of `src` into claimed buffer `idx` (sRGB encode off, blending off,
- * aspect-fit), ending with gs_flush(). The ONE copy both views use. */
-void drm_output_blit_raw(gs_texture_t *src, int idx);
+ * aspect-fit), ending with gs_flush(). The ONE copy both views use. Returns true iff it rendered
+ * the buffer — publish only then. */
+bool drm_output_blit_raw(gs_texture_t *src, int idx);
 
 /* Free the view TU's GL objects (the Multiview texrender). Graphics context taken inside. */
 void drm_output_view_gl_teardown(void);

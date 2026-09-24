@@ -101,6 +101,7 @@ static struct {
 	void *render_param;
 	gs_texrender_t *texrender; /* the Multiview's sRGB render target, created on first render */
 	bool warned_no_renderer;
+	bool warned_no_texrender;
 	bool bind_live_logged;
 	uint32_t frame_counter;
 	uint32_t consecutive_skips;
@@ -166,6 +167,7 @@ void obs_drm_output_set_view_renderer(obs_drm_output_view_render_t render, void 
 		g_view.texrender = NULL;
 	}
 	g_view.warned_no_renderer = false;
+	g_view.warned_no_texrender = false;
 	g_view.bind_live_logged = false;
 	g_view.frame_counter = 0;
 	g_view.consecutive_skips = 0;
@@ -238,14 +240,20 @@ static void drm_output_view_render_multiview(void)
 	drm_output_mode_size(&w, &h);
 	if (!g_view.texrender)
 		g_view.texrender = gs_texrender_create(GS_BGRA, GS_ZS_NONE);
-	if (!g_view.texrender)
-		return;
 
 	const uint64_t t0 = os_gettime_ns();
 
-	gs_texrender_reset(g_view.texrender);
-	if (!gs_texrender_begin(g_view.texrender, w, h))
+	if (g_view.texrender)
+		gs_texrender_reset(g_view.texrender);
+	if (!g_view.texrender || !gs_texrender_begin(g_view.texrender, w, h)) {
+		if (!g_view.warned_no_texrender) {
+			g_view.warned_no_texrender = true;
+			blog(LOG_WARNING,
+			     "drm-output: multiview texrender unavailable (%ux%u) -- the HDMI keeps the last frame",
+			     w, h);
+		}
 		return;
+	}
 	/* The frame a projector's draw callback gets (render_display_begin): black clear, depth off,
 	 * no culling, an ortho over the whole target; the texrender set the viewport. The Multiview
 	 * letterboxes the canvas aspect into it itself. */
@@ -267,8 +275,10 @@ static void drm_output_view_render_multiview(void)
 	const int idx = drm_output_claim_render_buf();
 	if (idx < 0)
 		return; /* nothing writable this tick — the last frame stays on scanout */
-	drm_output_blit_raw(gs_texrender_get_texture(g_view.texrender), idx);
-	drm_output_publish_render_buf(idx);
+	if (drm_output_blit_raw(gs_texrender_get_texture(g_view.texrender), idx))
+		drm_output_publish_render_buf(idx);
+	else
+		return; /* the claimed buffer stays role-free; nothing new reached the scanout */
 
 	const uint64_t t1 = os_gettime_ns();
 	const uint64_t dt = t1 > t0 ? t1 - t0 : 0;

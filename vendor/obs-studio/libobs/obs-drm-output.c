@@ -984,10 +984,10 @@ void obs_drm_output_on_frame(void)
 		return;
 	}
 
-	drm_output_blit_raw(program, idx);
-
-	/* PUBLISH: hand the rendered buffer to the flip thread (flush ordered BEFORE this). */
-	drm_output_publish_render_buf(idx);
+	/* PUBLISH only a buffer the blit really rendered (flush ordered BEFORE this); a claimed but
+	 * unpublished buffer simply stays role-free. */
+	if (drm_output_blit_raw(program, idx))
+		drm_output_publish_render_buf(idx);
 	obs_leave_graphics();
 }
 
@@ -998,13 +998,14 @@ void obs_drm_output_on_frame(void)
  * is the faithful transfer (the same values a monitor on the X desktop shows). Aspect-fit
  * letterboxes a size mismatch. Ends with gs_flush(): the kernel page-flip then waits on the BO's
  * implicit fence (i915/Xe dma-resv), so scanout never observes a half-rendered buffer — no
- * glFinish stall. Known limitation: SDR only (HDR would need a tonemap pass). */
-void drm_output_blit_raw(gs_texture_t *src, int idx)
+ * glFinish stall. Known limitation: SDR only (HDR would need a tonemap pass). Returns true iff
+ * the buffer was rendered (the caller publishes only then). */
+bool drm_output_blit_raw(gs_texture_t *src, int idx)
 {
 	gs_effect_t *effect = obs_get_base_effect(OBS_EFFECT_DEFAULT);
 	gs_texture_t *dst = drm_output_render_buf_texture(idx);
 	if (!src || !effect || !dst)
-		return;
+		return false;
 
 	uint32_t src_w = gs_texture_get_width(src);
 	uint32_t src_h = gs_texture_get_height(src);
@@ -1043,6 +1044,7 @@ void drm_output_blit_raw(gs_texture_t *src, int idx)
 	gs_viewport_pop();
 
 	gs_flush();
+	return true;
 }
 
 /* -------------------------------------------------------------------------------------------------

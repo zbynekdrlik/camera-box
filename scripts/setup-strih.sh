@@ -342,8 +342,8 @@ DRM_CONF_DIR="${USER_HOME}/.camera-box"
 DRM_CONF="${DRM_CONF_DIR}/drm-output.json"
 LEGACY_PROJ=/opt/camera-box/strih-lx-projector.json
 DRM_VIEW0="$(strih_drm_legacy_view "$(cat "$LEGACY_PROJ" 2>/dev/null || true)")"
-if [ -L "$DRM_CONF" ]; then
-  warn "  SKIP issue 1346: ${DRM_CONF} is a symlink -- refusing to write through it as root; remove it and re-run"
+if [ -L "$DRM_CONF_DIR" ] || [ -L "$DRM_CONF" ]; then
+  warn "  SKIP issue 1346: ${DRM_CONF_DIR} or ${DRM_CONF} is a symlink -- refusing to write through it as root; remove it and re-run"
 elif [ -f "$DRM_CONF" ]; then
   echo "  ${DRM_CONF} already present -- leaving the operator's HDMI output choice"
 elif strih_drm_hdmi_connected; then
