@@ -1039,6 +1039,9 @@ fn c_n1_tick_is_on_grid_matches_the_rust_authority_1367() {
     }
     vs.push((u64::MAX, 33_333_333));
     vs.push((u64::MAX - 1_000_000, 33_333_333));
+    // u64::MAX sits 0.47 ms past its floor on this non-integer (1970-fallback) grid: ON only when
+    // the shift saturates (a wrapping add floors near 0 and reads OFF).
+    vs.push((u64::MAX, 33_366_672));
     let mut body = String::new();
     for (tick, interval) in &vs {
         body.push_str(&format!(
