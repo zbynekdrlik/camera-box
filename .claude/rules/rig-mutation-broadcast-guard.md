@@ -39,18 +39,23 @@ rig/cambox box (deploy, restart, reconfigure) reuses THIS guard — never a fres
 editing the guard, remember the deploy tool is a second live caller, not just the E2E harness.
 
 **Third caller — the strih-lx genlock deploy (`scripts/lib/strih-lx-deploy.sh` `strih_lx_apply`,
-issue 1317).** The deploy STOPS the production strih OBS, so its preflight runs the guard after the
-identity + installer checks and immediately before the first mutation (the stage prep), at the
-strih-lx dial IP + the obs-fleet stream host (`deploy-genlock-fleet.sh` sources the guard lib). A
-caller that needs its OWN exit code (the deploy's contract is 0/3/4/5, the guard `exit 1`s) runs the
-guard in a SUBSHELL and maps a non-zero rc — never re-implement the busy read to get a different code:
-`{ err="$( ( stray_session_check_assert … ) 2>&1 1>&3 3>&- )"; rc=$?; } 3>&1` keeps the guard's stdout
-flowing and captures its stderr, which `strih_lx_busy_summary` parses (the `rig-busy-check:` JSON +
-the `<box> streaming:` detail lines) to name what is live in the exit-4 message. So the guard's
-refusal TEXT is now a parsed interface: keep the `    rig-busy-check: <json>` and `    <label>
-streaming: <detail>` line shapes stable, or update the summary + its test together. The test seam is
-`STRIH_LX_OBS_PHASE2_DIR` (a fake `obs_phase2.py`, like `BKSHADING_DEPLOY_OBS_PHASE2_DIR`); the test
-harness also drops `OBS_PASSWORD`, because the guard passes it as an argv the fake logs.
+issue 1317).** The deploy STOPS the production strih OBS, so it runs the guard TWICE through one
+helper `_strih_lx_broadcast_guard`: at preflight (after the identity + installer checks, immediately
+before the first mutation, the stage prep — exit 4, nothing changed) and AGAIN immediately before the
+graceful stop (staging a ~2 GB bundle can take minutes — exit 4 in step `stop`, OBS NOT stopped). Both
+read the strih-lx dial IP + the obs-fleet stream host (`deploy-genlock-fleet.sh` sources the guard
+lib). A caller that needs its OWN exit code (the deploy's contract is 0/3/4/5, the guard `exit 1`s)
+runs the guard in a SUBSHELL and maps a non-zero rc — never re-implement the busy read to get a
+different code: `{ err="$( ( stray_session_check_assert … ) 2>&1 1>&3 3>&- )"; rc=$?; } 3>&1` keeps
+the guard's stdout flowing and captures its stderr, which `stray_session_busy_summary` (in the SAME
+guard lib, reusable by every caller) parses — the `rig-busy-check:` JSON + the `<box> streaming:`
+detail lines — to name what is live in the exit-4 message. So the guard's refusal TEXT is a parsed
+interface: keep the `    rig-busy-check: <json>` and `    <label> streaming: <detail>` line shapes
+stable, or update the summary + its test together. The fail-open WARNING is caller-neutral (only the
+E2E harness has a job-start gate; the strih-lx deploy records the both-unreadable case as an
+accepted risk in its lib header). The test seam is `STRIH_LX_OBS_PHASE2_DIR` (a fake `obs_phase2.py`,
+like `BKSHADING_DEPLOY_OBS_PHASE2_DIR`; its `live-after-stage` mode drives the pre-stop refusal); the
+test harness also drops `OBS_PASSWORD`, because the guard passes it as an argv the fake logs.
 
 - It does NOT re-define "REAL broadcast" — it CALLS the shared `rig-busy-check` (streaming and/or
   recording on strih/stream), reads `busy`, refuses on `busy=true`. Never duplicate the per-box loop.

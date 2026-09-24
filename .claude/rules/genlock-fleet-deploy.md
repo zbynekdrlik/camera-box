@@ -86,7 +86,8 @@ of the fleet is logged at the end), so a later imag failure never hides the stri
    would delete the stage it is reading and a second installer would race it. LAST, immediately
    before the first mutation: the shared rig-busy guard `stray_session_check_assert` at the strih-lx
    dial IP + the obs-fleet stream host — strih or stream streaming/recording = exit 4 naming what is
-   live, nothing changed (`.claude/rules/rig-mutation-broadcast-guard.md`, third caller). prepare
+   live, nothing changed (`.claude/rules/rig-mutation-broadcast-guard.md`, third caller). The SAME
+   guard runs again right before step 5's stop (exit 4 in step `stop`, OBS NOT stopped). prepare
    resolves its inputs (stream host, the `obs_phase2.py` dir via `STRIH_LX_OBS_PHASE2_DIR`, the
    guard's presence, `python3`) so a missing one is exit 3 before the box is touched.
 3. **sweep** — `mkdir` + `touch` the stage FIRST (it is then the newest `genlock-stage-*`), then the
