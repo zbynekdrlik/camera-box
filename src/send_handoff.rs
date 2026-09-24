@@ -34,10 +34,9 @@
 //!   the older one is handed back to the caller ([`Offer::Replaced`]) so its buffer is recycled
 //!   and the loss is counted. That happens when the send thread is inside a send that outlasts a
 //!   frame interval, or when the capture thread (one SCHED_FIFO step above the send thread) hands
-//!   over two buffered frames without blocking in between, so the send thread never ran (a #1131
-//!   buffered catch-up, or USB-bunched arrivals). How often that happens on the rig is not
-//!   measured yet; it is never silent: the 5 s [`window_summary`] line WARNs `REPLACED`, and the
-//!   frames leave the `Streaming:` sent count.
+//!   over two buffered frames without blocking in between, so the send thread never ran. Both are
+//!   rare once the capture loop no longer waits for sends, and neither is silent: the 5 s
+//!   [`window_summary`] line WARNs `REPLACED`.
 //!
 //! # The 5 s line
 //!

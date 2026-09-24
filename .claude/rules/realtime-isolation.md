@@ -48,9 +48,7 @@ enough. An earlier lane's `linux-image-realtime`/`pro attach` plan is SUPERSEDED
   SCHED_FIFO prio 50 on the isolated core (27 on cam1). The binary now raises SCHED_FIFO prio 90
   PER THREAD only on the capture+emit hot path — `src/affinity.rs::set_current_thread_realtime`
   (pure decision `realtime_fifo_priority(RtThreadRole)`) called from the production capture loop
-  (`CaptureEmit`, 90); since #1242 the NDI send threads (the production `ndi-send` thread and the
-  cam1-burn emit thread) take `Send` = 89, one step below capture on the same isolated core so
-  the capture thread always preempts a send (`.claude/rules/ndi-send-stagger.md`); every auxiliary thread (painter/display/intercom/qpsk/publish-30p)
+  and the cam1-burn emit thread; every auxiliary thread (painter/display/intercom/qpsk/publish-30p)
   stays SCHED_OTHER. NO thread moves cores (this is why it is safe without a live measurement,
   unlike the rejected Approach 2 below). Needs `CAP_SYS_NICE` — the STEP 9 setcap already grants
   `cap_sys_nice,cap_ipc_lock`. Locked by `verify-device.sh` check `(ah)` (HARD FAIL): the unit must

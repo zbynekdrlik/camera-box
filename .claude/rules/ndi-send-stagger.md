@@ -61,10 +61,7 @@ moves the wait to the thread that owns the send, and the stagger is ON again.
 - `HandoffSlot`: ONE slot, newest wins. `offer` never waits on the send thread. An UNTAKEN older job
   is handed back as `Offer::Replaced` so the caller recycles its buffer and counts it. That happens
   when a send outlasts a frame interval, or when the capture thread (one FIFO step above the send
-  thread) hands over two buffered frames without blocking in between, so the send thread never ran
-  (a #1131 buffered catch-up, or USB-bunched arrivals). How often is NOT measured yet: the live
-  acceptance reads `REPLACED`. If it shows up, the fix is an in-order queue 2-3 deep (expedite the
-  older job, replace only when full) instead of the single slot — a design change for the main.
+  thread) hands over two buffered frames without blocking in between, so the send thread never ran.
   `is_pending()` says whether a job is still untaken.
 - `run_send_loop(slot, window, idle, &mut sink)`: take → if the deadline is ahead,
   `wait_until(deadline)` (returns early when a NEWER job arrives → the held one goes out at once,
