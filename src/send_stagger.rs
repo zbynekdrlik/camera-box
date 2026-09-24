@@ -31,23 +31,16 @@
 //! 2.0–2.33 Gb/s, so the egress queue no longer builds. Seven cameras then span 6 × 1.2 = 7.2 ms of
 //! send offset (≈ 9.6–10 ms of wire time including the last frame), inside the 16.67 ms slot.
 //!
-//! # The capture-loop budget (why the clamp and the backlog skip exist)
+//! # Who waits (the capture loop never does)
 //!
-//! The send is synchronous on the capture thread, which is also the only thread that drains the
-//! V4L2 queue. The sleep is therefore dead time for the capture loop:
-//!
-//! 1. It shortens the NEXT dequeue wait. The #1131 "was the frame already buffered" signal
-//!    (`capture_stall::frame_from_nonempty_queue`, 0.5 of a capture interval) is kept honest by
-//!    adding the sleep back ([`idle_wait_ms`]). That is only sound while the sleep stays BELOW half
-//!    a capture interval, so every offset is clamped to [`MAX_OFFSET_SLOT_PERCENT`] (45 %) of the
-//!    SHORTER of the send and capture intervals ([`slot_interval_us`]). `lib.rs` pins the clamp
-//!    against the real `BUFFERED_DEQUEUE_FRACTION` at compile time.
-//! 2. A frame that ALREADY came from a non-empty queue means the loop is behind; sleeping would
-//!    push it further behind and could cost captured frames. [`should_sleep`] skips the stagger
-//!    for that frame, and the skip is counted in the 5 s [`window_summary`].
-//! 3. [`StaggerWindow`] records the per-frame work (callback time minus the sleep) so the margin
-//!    left on the latest camera is visible on every box, and [`window_summary`] WARNs when the
-//!    worst frame's work plus the offset reaches a capture interval.
+//! This module only decides the OFFSET. The wait itself lives on the send thread
+//! (`crate::send_handoff`): the capture loop hands every emitted frame over with an absolute
+//! deadline (emit-gate decision + offset) and returns to capture at once, and the send thread
+//! waits for that deadline before the NDI send. The first version slept inside the capture loop
+//! instead, so a ~15 ms per-frame work spike plus CAM7's 7.2 ms offset overran the 16.7 ms capture
+//! slot (issue 1242, 24.9.2026). Every offset is still clamped to [`MAX_OFFSET_SLOT_PERCENT`]
+//! (45 %) of the SHORTER of the send and capture intervals ([`slot_interval_us`]), so a send
+//! starts in the first half of its own slot.
 //!
 //! # Identity
 //!
@@ -62,20 +55,17 @@ use std::time::Duration;
 /// the 1 GbE wire-time vs 2.5 GbE drain arithmetic.
 pub const STAGGER_US: u64 = 1200;
 
-/// Whether the shipped build staggers at all. OFF since 24.9.2026 (issue 1242): the (N−1) × 1.2 ms
-/// offset left CAM7 only ~1 ms of slot when per-frame work spiked to ~15 ms (OVER BUDGET windows,
-/// a 112-relock burst on the strih-lx receiver), while the strih-lx switch-port drops did not
-/// measurably improve. The helpers stay (their arithmetic is still pinned) for a future smaller,
-/// work-sized offset; flip this only with that new design + a rig measurement.
-pub const STAGGER_ACTIVE: bool = false;
+/// Whether the shipped build staggers at all — the one-constant rollback. ON again since the wait
+/// moved to the send thread (`crate::send_handoff`, issue 1242). It was OFF for one release
+/// (24.9.2026) because the first version slept INSIDE the capture loop, and a ~15 ms per-frame
+/// work spike plus CAM7's 7.2 ms offset overran the capture slot.
+pub const STAGGER_ACTIVE: bool = true;
 
-/// Every offset is clamped to this percentage of the slot interval (45 % → 7.5 ms at 60 fps), so the
-/// frame is always handed over well inside its own slot AND the [`idle_wait_ms`] correction of the
-/// #1131 buffered-queue signal stays sound (it needs the sleep below half a capture interval; the
-/// cross-module compile-time check against `capture_stall::BUFFERED_DEQUEUE_FRACTION` lives in
-/// `lib.rs`).
+/// Every offset is clamped to this percentage of the slot interval (45 % → 7.5 ms at 60 fps). A
+/// frame's send therefore starts in the first half of its own slot, and the added arrival latency
+/// stays bounded however many cameras share the port.
 pub const MAX_OFFSET_SLOT_PERCENT: u64 = 45;
-const _: () = assert!(MAX_OFFSET_SLOT_PERCENT > 0 && MAX_OFFSET_SLOT_PERCENT < 100);
+const _: () = assert!(MAX_OFFSET_SLOT_PERCENT > 0 && MAX_OFFSET_SLOT_PERCENT < 50);
 
 /// The highest camera number the parser accepts. Keeps a garbage hostname like `CAM4294967295`
 /// from being read as a real camera; any real cambox is far below this.
@@ -157,8 +147,27 @@ pub fn plan(
     capture_fps_num: u32,
     capture_fps_den: u32,
 ) -> StaggerPlan {
+    plan_gated(
+        STAGGER_ACTIVE,
+        hostname,
+        genlock_fps,
+        capture_fps_num,
+        capture_fps_den,
+    )
+}
+
+/// [`plan`] with the [`STAGGER_ACTIVE`] switch as a parameter, so both positions stay tested:
+/// `active` → [`plan_with`]; off → offset 0 on every box, worded
+/// `NDI send stagger: cam7 offset=0 us (#1242) — stagger disabled (STAGGER_ACTIVE=false)`.
+pub fn plan_gated(
+    active: bool,
+    hostname: &str,
+    genlock_fps: Option<u32>,
+    capture_fps_num: u32,
+    capture_fps_den: u32,
+) -> StaggerPlan {
     let planned = plan_with(hostname, genlock_fps, capture_fps_num, capture_fps_den);
-    if STAGGER_ACTIVE {
+    if active {
         return planned;
     }
     let name = match planned.camera {
@@ -175,8 +184,7 @@ pub fn plan(
     }
 }
 
-/// The stagger plan as the helper computes it (the arithmetic `plan()` ships when
-/// [`STAGGER_ACTIVE`] is on) — kept pinned by the unit tests for a future re-enable.
+/// The stagger plan as the helper computes it (what `plan()` ships while [`STAGGER_ACTIVE`] is on).
 pub fn plan_with(
     hostname: &str,
     genlock_fps: Option<u32>,
@@ -202,140 +210,6 @@ pub fn plan_with(
         log_line,
         warn: camera.is_none(),
     }
-}
-
-/// Should this emitted iteration sleep for its stagger? Only with a non-zero offset AND a frame
-/// that did NOT already come from a non-empty V4L2 queue: a backlogged frame means the capture
-/// loop is behind, and sleeping would push it further behind (the capture budget beats the
-/// network optimisation). The caller counts the skip.
-pub fn should_sleep(offset: Duration, frame_backlogged: bool) -> bool {
-    !offset.is_zero() && !frame_backlogged
-}
-
-/// How long to still sleep before the NDI hand-off: `offset` measured from the emit-gate anchor,
-/// minus what already `elapsed` since that anchor (saturating at zero). Anchoring to the gate
-/// instant keeps the delay precise regardless of the small per-frame work between the gate and
-/// the send.
-pub fn remaining_sleep(offset: Duration, elapsed: Duration) -> Duration {
-    offset.saturating_sub(elapsed)
-}
-
-/// The capture loop's idle wait before this frame, for the #1131 buffered-queue signal: the
-/// measured V4L2 dequeue wait plus the stagger sleep the loop spent just before that dequeue.
-/// Without the stagger the loop would have reached the dequeue that much earlier and waited that
-/// much longer, so a healthy empty-queue frame must not read as "already buffered" merely because
-/// the loop slept first. Non-finite or negative inputs count as 0 for the stagger term, and the
-/// dequeue term passes through unchanged so `frame_from_nonempty_queue`'s own fail-safe guards
-/// still see it.
-pub fn idle_wait_ms(dequeue_ms: f64, stagger_slept_ms: f64) -> f64 {
-    if !stagger_slept_ms.is_finite() || stagger_slept_ms <= 0.0 {
-        return dequeue_ms;
-    }
-    dequeue_ms + stagger_slept_ms
-}
-
-/// The fraction of a capture interval the stagger sleep must stay below for the [`idle_wait_ms`]
-/// add-back to stay sound. It mirrors `capture_stall::BUFFERED_DEQUEUE_FRACTION`; `lib.rs` pins the
-/// two equal at compile time.
-pub const ADDBACK_SOUND_FRACTION: f64 = 0.5;
-
-/// A window WARNs on skips only when at least this percentage of its emitted frames skipped the
-/// stagger. An occasional skip is normal: a bursty grabber hands over back-to-back frames even
-/// when the loop has plenty of margin.
-pub const SKIP_WARN_PERCENT: u64 = 10;
-
-/// Per-5 s-window stagger accounting, drained by the capture loop's routine report.
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct StaggerWindow {
-    /// Emitted iterations that actually slept for their stagger.
-    pub slept: u64,
-    /// Emitted iterations whose work before the send already ate the whole offset (no sleep).
-    pub past_offset: u64,
-    /// Emitted iterations that skipped the stagger because the frame was already backlogged.
-    pub skipped_backlogged: u64,
-    /// The worst emitted iteration's work (callback time minus the stagger sleep), in ms.
-    pub max_work_ms: f64,
-    /// The worst oversleep (measured sleep minus the requested sleep), in ms.
-    pub max_oversleep_ms: f64,
-}
-
-impl StaggerWindow {
-    /// Record one real sleep: the requested and the measured duration (ms). The oversleep is what
-    /// the scheduler added; a non-finite reading is ignored for the oversleep.
-    pub fn note_slept(&mut self, requested_ms: f64, actual_ms: f64) {
-        self.slept = self.slept.saturating_add(1);
-        let over = actual_ms - requested_ms;
-        if over.is_finite() && over > self.max_oversleep_ms {
-            self.max_oversleep_ms = over;
-        }
-    }
-
-    pub fn note_past_offset(&mut self) {
-        self.past_offset = self.past_offset.saturating_add(1);
-    }
-
-    pub fn note_skipped(&mut self) {
-        self.skipped_backlogged = self.skipped_backlogged.saturating_add(1);
-    }
-
-    /// Record one emitted iteration's work. A non-finite or negative reading is ignored.
-    pub fn note_work(&mut self, work_ms: f64) {
-        if work_ms.is_finite() && work_ms >= 0.0 && work_ms > self.max_work_ms {
-            self.max_work_ms = work_ms;
-        }
-    }
-
-    /// Drain the window (returns it and resets to empty).
-    pub fn take(&mut self) -> StaggerWindow {
-        std::mem::take(self)
-    }
-}
-
-/// The 5 s summary line for a drained window, and whether it is a WARN. It WARNs on:
-///
-/// - `OVER BUDGET`: the worst frame's work plus the offset reached a full capture interval;
-/// - `OVERSLEEP`: the offset plus the worst oversleep reached [`ADDBACK_SOUND_FRACTION`] of a
-///   capture interval, so the [`idle_wait_ms`] add-back may misread a buffered frame;
-/// - `MANY SKIPS`: at least [`SKIP_WARN_PERCENT`] % of the emitted frames skipped the stagger.
-///
-/// `capture_interval_ms <= 0` never WARNs on the two interval terms.
-pub fn window_summary(
-    w: &StaggerWindow,
-    offset_us: u64,
-    capture_interval_ms: f64,
-) -> (String, bool) {
-    let offset_ms = offset_us as f64 / 1000.0;
-    let known = capture_interval_ms > 0.0;
-    let over_budget = known && w.max_work_ms + offset_ms >= capture_interval_ms;
-    let oversleep =
-        known && offset_ms + w.max_oversleep_ms >= capture_interval_ms * ADDBACK_SOUND_FRACTION;
-    let total = w
-        .slept
-        .saturating_add(w.past_offset)
-        .saturating_add(w.skipped_backlogged);
-    let many_skips = w.skipped_backlogged > 0
-        && w.skipped_backlogged.saturating_mul(100) >= total.saturating_mul(SKIP_WARN_PERCENT);
-    let mut flags = String::new();
-    if over_budget {
-        flags.push_str(" — OVER BUDGET: the capture loop has no margin left");
-    }
-    if oversleep {
-        flags.push_str(" — OVERSLEEP: offset + oversleep reached half a capture interval");
-    }
-    if many_skips {
-        flags.push_str(" — MANY SKIPS: these frames were not staggered");
-    }
-    let line = format!(
-        "#1242 send stagger: offset={offset_us} us, {} slept / {} past the offset / {} skipped (frame already backlogged) this window, max per-frame work {:.1} ms + offset {:.1} ms vs capture interval {:.1} ms, max oversleep {:.2} ms{flags}",
-        w.slept,
-        w.past_offset,
-        w.skipped_backlogged,
-        w.max_work_ms,
-        offset_ms,
-        capture_interval_ms,
-        w.max_oversleep_ms,
-    );
-    (line, over_budget || oversleep || many_skips)
 }
 
 #[cfg(test)]
