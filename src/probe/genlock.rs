@@ -1755,12 +1755,14 @@ impl ReleaseCadence {
             // issue 1367: a DEEP N==1 conveyor still shallower than its pin-derived depth HOLDS one
             // tick first (a deliberate repeat, one frame deeper next tick), sharing the drain
             // throttle. Mirror of the C `genlock_should_hold_n1_phase` at the head of its N==1
-            // STEADY branch; the Tier-0 decision is `genlock_n1_depth::should_hold_n1_phase`.
+            // STEADY branch; the Tier-0 decision is `genlock_n1_depth::should_hold_n1_phase`. The
+            // C reads the depth at the tick's SCHEDULED instant; this sim's ticks run on schedule,
+            // so that instant is `wall_now_ns` itself.
             if let (Some(&head), Some(&newest)) = (queue.front(), queue.back()) {
                 if crate::genlock_n1_depth::should_hold_n1_phase(
                     wall_now_ns,
                     head,
-                    newest,
+                    wall_now_ns.saturating_sub(newest),
                     reserve_ms,
                     interval_ns,
                     1,
@@ -1969,11 +1971,24 @@ impl ReleaseCadence {
         let n = Self::measure_source_multiple(queue, interval_ns)
             .unwrap_or(self.last_known_n)
             .max(1);
-        // issue 1367 (review round 1): the N==1 shed belongs to a tick of the N==1 STEADY branch
-        // only; on the N>=2 branch (`last_known_n` latched >= 2) a post-erase re-measure reading
-        // n == 1 stays inert, exactly as before. Mirror of the C `genlock_should_converge_phase`.
+        // issue 1367: an N==1 tick converges to its PIN-DERIVED depth
+        // (`genlock_n1_depth::n1_shed_due`) instead of the #1049 reserve-aimed shed, which stays
+        // inert for n < 2. That belongs to a tick of the N==1 STEADY branch only (review round 1):
+        // on the N>=2 branch (`last_known_n` latched >= 2) a post-erase re-measure reading n == 1
+        // stays inert, exactly as before. Mirror of the C `genlock_should_converge_phase` (this
+        // sim ticks on schedule, so the scheduled instant is `wall_now_ns`).
         if n < 2 && self.last_known_n >= 2 {
             return false;
+        }
+        if n < 2 {
+            return crate::genlock_n1_depth::n1_shed_due(
+                wall_now_ns,
+                boundary,
+                wall_now_ns.saturating_sub(newest_stamp),
+                reserve_ms,
+                interval_ns,
+                self.ticks_since_last_drain,
+            );
         }
         crate::genlock_backlog::should_converge_phase(
             wall_now_ns,
@@ -2569,10 +2584,6 @@ mod tests {
         );
     }
 
-    /// #741 (#707 B2) RED→GREEN — a BACKLOG-STORM relock must NOT clear the sticky-N latch.
-    ///
-    /// A queue-depth relock (a burst catch-up) is NOT evidence the source RATE changed. Clearing
-    /// `last_known_n` there forced the very next INCONCLUSIVE tick to crawl at N==1, which under a
     /// issue 1367 (review round 1): the N==1 shed runs only for a tick of the N==1 STEADY branch. On
     /// the N>=2 branch (`last_known_n` latched >= 2 by `effective_source_multiple`) a post-erase
     /// re-measure that reads a conclusive n == 1 (a pair straddling a dropped 60 fps frame) must stay
@@ -2595,6 +2606,51 @@ mod tests {
         assert!(!cadence.should_converge_phase(&queue, 987, I30, wall));
     }
 
+    /// issue 1367 — the N==1 HOLD, at tick level: a deep N==1 conveyor whose queue head would go on
+    /// air one frame SHALLOWER than its pin-derived depth (30 frames at pin 987, target 31) HOLDS
+    /// one tick — nothing presented, nothing dropped, the drain throttle reset — and the same head
+    /// one tick later (now 31 frames old) presents. A head already at the target presents at once.
+    #[test]
+    fn n1_steady_tick_holds_a_too_shallow_deep_conveyor_1367() {
+        use std::collections::VecDeque;
+        const I30: u64 = 33_333_333;
+        let wall = 1_000_000_000_000u64;
+        let head = wall - 30 * I30;
+        let mut queue: VecDeque<u64> = (0..30u64).map(|k| head + k * I30).collect();
+        let mut cadence = ReleaseCadence::new();
+        cadence.locked_next_boundary_ns = Some(head);
+        cadence.last_known_n = 1;
+        cadence.ticks_since_last_drain = 100;
+        let held = cadence.tick(wall, 987, I30, &mut queue);
+        assert_eq!(
+            held.presented, None,
+            "one frame short of the target -> HOLD"
+        );
+        assert!(held.dropped.is_empty() && !held.late_hold && !held.relocked);
+        assert_eq!(
+            cadence.ticks_since_last_drain, 0,
+            "the hold resets the drain throttle"
+        );
+        assert_eq!(queue.len(), 30, "a hold consumes nothing");
+        // One tick later the same head is 31 frames old: at the target, presented (the throttle
+        // is below its interval now, so neither the hold nor a shed may act anyway).
+        queue.push_back(wall);
+        let next = cadence.tick(wall + I30, 987, I30, &mut queue);
+        assert_eq!(next.presented, Some(head));
+        // A fresh conveyor already at the target presents at once.
+        let head2 = wall - 31 * I30;
+        let mut q2: VecDeque<u64> = (0..31u64).map(|k| head2 + k * I30).collect();
+        let mut c2 = ReleaseCadence::new();
+        c2.locked_next_boundary_ns = Some(head2);
+        c2.last_known_n = 1;
+        c2.ticks_since_last_drain = 100;
+        assert_eq!(c2.tick(wall, 987, I30, &mut q2).presented, Some(head2));
+    }
+
+    /// #741 (#707 B2) RED→GREEN — a BACKLOG-STORM relock must NOT clear the sticky-N latch.
+    ///
+    /// A queue-depth relock (a burst catch-up) is NOT evidence the source RATE changed. Clearing
+    /// `last_known_n` there forced the very next INCONCLUSIVE tick to crawl at N==1, which under a
     /// steady 60-into-30 backlog re-grew the queue and re-triggered the relock: a self-sustaining
     /// crawl→relock loop (the #707 B2 crawl window). The latch must SURVIVE a relock; it is cleared
     /// only on a genuine source-timeline discontinuity (acquire / gap resync / backward clock-step).

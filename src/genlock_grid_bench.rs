@@ -28,11 +28,17 @@
 //!   `genlock_release_tick` (obs-source.c): ACQUIRE / BACKLOG relock via
 //!   [`relock_select_nearest`], STEADY on the locked boundary, GAP RESYNC on the floored deadline,
 //!   HOLD / late HOLD, the erase loop, the #859 settle-back drain via [`should_drain_one`], and the
-//!   #1049 phase-convergence shed via [`should_converge_phase`] (after the drain, sharing its
-//!   throttle, exactly as the C present tail orders them). Since issue 1367 the N==1 STEADY branch
-//!   first asks [`should_hold_n1_phase`] (the C `genlock_should_hold_n1_phase`) whether a deep
-//!   conveyor is still shallower than its pin-derived depth, and the converge shed's N==1 branch
-//!   removes a frame a restart transient added — so every restart settles on `base + 1` frames.
+//!   phase-convergence shed after it (sharing its throttle, exactly as the C present tail orders
+//!   them) — for an N==1 tick that is the issue-1367 [`n1_shed_due`], the branch the C source
+//!   wrapper `genlock_should_converge_phase` routes it to. Since issue 1367 the N==1 STEADY branch
+//!   also first asks [`should_hold_n1_phase`] (the C `genlock_should_hold_n1_phase`) whether a deep
+//!   conveyor is still shallower than its pin-derived depth; the shed removes a frame a restart
+//!   transient added — so every restart settles on `base + 1` frames. Both read the depth at the
+//!   tick's SCHEDULED instant ([`n1_tick_wall_ns`]).
+//! - **Render-tick timing:** every tick has a scheduled instant (its grid slot plus an optional
+//!   constant schedule phase) and runs at that instant plus a lateness, serially. An overrun below
+//!   two intervals is followed by a CATCH-UP tick (`video_sleep` counts one frame); only an overrun
+//!   of two intervals or more skips slots.
 //! - **A sender restart** (issue 1367, [`SenderRestart`]): the sender goes silent, then comes back
 //!   with a `k`-slot startup stall — a k-slot stamp gap followed by k duplicate stamps. The receiver
 //!   keeps its locked boundary through the empty FIFO (the ts-align path never re-arms the build
@@ -56,13 +62,12 @@
 
 use crate::genlock_backlog::{
     backlog_relock_threshold, phase_anchor_from_present, phase_pinned_deadline,
-    relock_anchor_age_ns, relock_select_nearest, should_converge_phase, should_drain_one,
-    PHASE_PIN_HYSTERESIS_NS,
+    relock_anchor_age_ns, relock_select_nearest, should_drain_one, PHASE_PIN_HYSTERESIS_NS,
 };
 use crate::genlock_grid::{
     grid_next_boundary_ns, per_second_floor, StampTrack, NS_PER_SECOND, UNITS_100NS_PER_SECOND,
 };
-use crate::genlock_n1_depth::should_hold_n1_phase;
+use crate::genlock_n1_depth::{n1_shed_due, n1_tick_wall_ns, should_hold_n1_phase};
 use std::collections::{BTreeMap, VecDeque};
 
 /// The 30 fps canvas interval of both OBS boxes (`1e9 / 30`, integer).
@@ -193,7 +198,8 @@ pub struct BenchReport {
     pub resyncs: u64,
     pub relocks: u64,
     pub drains: u64,
-    /// Phase-convergence sheds (`should_converge_phase`, the C `genlock_converge_sheds`).
+    /// Phase-convergence sheds (the issue-1367 N==1 [`n1_shed_due`], the C
+    /// `genlock_converge_sheds`).
     pub converge_sheds: u64,
     /// issue 1367 N==1 depth holds (`should_hold_n1_phase`, the C `genlock_n1_grows`): a
     /// deliberate one-tick repeat that deepens a too-shallow deep N==1 conveyor by one frame.
@@ -336,8 +342,10 @@ struct TickCounters {
 }
 
 impl Fifo {
-    /// One render tick: the N==1 branches of the C `genlock_release_tick`, in its order.
-    fn tick(&mut self, cfg: &BenchConfig, wall: u64, c: &mut TickCounters) {
+    /// One render tick: the N==1 branches of the C `genlock_release_tick`, in its order. `wall` is
+    /// the processing wall (the C `wall_now`), `scheduled` the wall instant the tick was scheduled
+    /// for (the C `obs->video.video_time`, here already in wall time).
+    fn tick(&mut self, cfg: &BenchConfig, wall: u64, scheduled: u64, c: &mut TickCounters) {
         if self.queue.is_empty() {
             c.underruns += 1;
             return;
@@ -379,15 +387,18 @@ impl Fifo {
             release = sel + 1;
         } else if head <= self.locked_next_boundary {
             // STEADY (N==1 present-oldest). issue 1367: a deep conveyor still shallower than its
-            // pin-derived depth HOLDS one tick first (the C `genlock_should_hold_n1_phase`).
+            // pin-derived depth HOLDS one tick first (the C `genlock_should_hold_n1_phase`), the
+            // depth read at the tick's scheduled instant (the C `genlock_n1_tick_wall_now`; the
+            // bench keeps wall and monotonic time in one domain, so the processing wall is the
+            // monotonic now).
             let newest = *self
                 .queue
                 .back()
                 .expect("head exists, so the queue is not empty");
             if should_hold_n1_phase(
-                wall,
+                n1_tick_wall_ns(wall, wall, scheduled),
                 head,
-                newest,
+                wall.saturating_sub(newest),
                 cfg.latency_ms,
                 CANVAS_INTERVAL_NS,
                 1,
@@ -440,18 +451,19 @@ impl Fifo {
         }
         // The #1049 phase-convergence shed, in the C order (after the #859 drain, sharing its
         // throttle): the wrapper reads the FRESHEST queued frame as the achievable-floor reference.
+        // Every tick here is N==1, so the source wrapper (the C `genlock_should_converge_phase`)
+        // routes it to the issue-1367 pin-derived shed, read at the scheduled instant.
         if converge_eligible {
             let newest = *self
                 .queue
                 .back()
                 .expect("a STEADY present has a queued frame");
-            if should_converge_phase(
-                wall,
+            if n1_shed_due(
+                n1_tick_wall_ns(wall, wall, scheduled),
                 self.locked_next_boundary,
-                newest,
+                wall.saturating_sub(newest),
                 cfg.latency_ms,
                 CANVAS_INTERVAL_NS,
-                1,
                 self.ticks_since_drain,
             ) && self.queue.len() > 1
             {
@@ -531,7 +543,7 @@ pub fn run_bench(cfg: &BenchConfig) -> BenchReport {
         }
         let counted = nominal >= warm;
         let mut tc = TickCounters::default();
-        fifo.tick(cfg, wall, &mut tc);
+        fifo.tick(cfg, wall, scheduled, &mut tc);
         if counted {
             c.holds += tc.holds;
             c.late_holds += tc.late_holds;
@@ -913,10 +925,20 @@ mod tests {
     }
 
     /// issue 1367 (review rounds 1-2) — a CONSTANT phase error of the stream render tick's
-    /// SCHEDULE, from 10 ms early to 10 ms late (a slew-clamped tick after a clock step; the ±2 ms
-    /// `GENLOCK_MAX_SLEW_NS` bounds the per-tick correction, not the phase). The settled source
-    /// never corrects, and every restart stall lands on one depth — asserted with the late-tick
-    /// tail switched OFF, so no random late tick can hand the result to the #859 drain.
+    /// SCHEDULE, from 10 ms early to 10 ms late, at the live pin 987 (a stress bound: a wall-clock
+    /// step leaves the tick off the grid by up to the step, and `GENLOCK_MAX_SLEW_NS` pulls it back
+    /// 2 ms per tick, so a real phase error is a few-tick transient). The settled source never
+    /// corrects, and every restart stall lands on one depth — asserted with the late-tick tail
+    /// switched OFF, so no random late tick can hand the result to the #859 drain.
+    ///
+    /// The EARLY half holds only while the phase stays inside the pin's headroom to the next frame
+    /// edge (`ceil(pin / interval) * interval − pin`, 13 ms at 987): an early tick moves the
+    /// deadline (`wall − reserve`, floored to the grid) one frame earlier once it crosses that
+    /// edge, the resync depth becomes `base + 1`, and a sender gap/dup then lifts the conveyor to
+    /// `base + 2`, which the rule sheds back (a hold/shed pair per sender hiccup, measured at pins
+    /// 963 and 999 with a sustained 10 ms early phase). A tick never runs early in OBS except for
+    /// those few ticks after a BACKWARD wall step (`os_sleepto_ns` sleeps to the mapped grid
+    /// slot); a LATE phase of any size is covered for every deep pin by the test below.
     #[test]
     fn a_render_tick_schedule_phase_never_corrects_and_never_blocks_the_settle_1367() {
         let target = 987_000_000u64.div_ceil(CANVAS_INTERVAL_NS) + 1;
@@ -958,6 +980,52 @@ mod tests {
                     0,
                     "schedule phase {offset_ms} ms, {k}-slot stall: {r:?}"
                 );
+            }
+        }
+    }
+
+    /// issue 1367 — a LATE schedule phase (2, 5 and 10 ms, the direction a real tick errs in) never
+    /// makes the rule correct a settled source at ANY deep pin, including the ones whose frame
+    /// headroom is tiny (999 ms: 1 ms; 1000 ms: an exact 30 frames on the per-second grid), and every
+    /// 0..3-slot restart stall still lands on `base + 1`. The late-tick tail is off so only the phase
+    /// is under test.
+    #[test]
+    fn a_late_schedule_phase_never_corrects_any_deep_pin_1367() {
+        for pin in [950u32, 963, 987, 999, 1000, 1010, 1024] {
+            let target = (pin as u64 * 1_000_000 - 1_000).div_ceil(CANVAS_INTERVAL_NS) + 1;
+            for offset_ms in [2i64, 5, 10] {
+                let mut cfg = BenchConfig::live_2026_09_24(GridModel::Production);
+                cfg.latency_ms = pin;
+                cfg.tick_late_ppm = 0;
+                cfg.receiver_tick_offset_ns = offset_ms * 1_000_000;
+                cfg.duration_s = 3600;
+                let r = run_bench(&cfg);
+                assert_eq!(
+                    r.converge_sheds + r.n1_grows + r.drains,
+                    0,
+                    "pin {pin}, schedule phase +{offset_ms} ms: {r:?}"
+                );
+                assert!(
+                    share(&r, &[target]) > 0.99,
+                    "pin {pin}, schedule phase +{offset_ms} ms: {:?}",
+                    r.state_samples
+                );
+                for k in [0u64, 3] {
+                    let mut cfg = cfg.clone();
+                    cfg.restart = Some(SenderRestart {
+                        at_s: 300,
+                        outage_ms: 8_000,
+                        stall_slots: k,
+                    });
+                    cfg.warmup_s = 300 + 8 + 60;
+                    cfg.duration_s = cfg.warmup_s + 1800;
+                    let r = run_bench(&cfg);
+                    assert_eq!(
+                        settled_state(&r),
+                        Some(target),
+                        "pin {pin}, schedule phase +{offset_ms} ms, {k}-slot stall: {r:?}"
+                    );
+                }
             }
         }
     }

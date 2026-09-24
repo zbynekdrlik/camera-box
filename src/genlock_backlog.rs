@@ -315,13 +315,10 @@ pub fn phase_pinned_is_due(frame_ts_ns: u64, deadline_ns: u64) -> bool {
     frame_ts_ns <= deadline_ns.saturating_add(PHASE_PIN_HYSTERESIS_NS)
 }
 
-/// #1049 — the STEADY-conveyor PHASE-CONVERGENCE shed decision. Should this tick shed exactly ONE
-/// EXTRA frame to slew the conveyor's presentation PHASE back toward its target? For N>=2 the
-/// target is the configured latency floored at the achievable phase (below). For N==1 (issue 1367)
-/// the `source_multiple < 2` branch delegates to [`crate::genlock_n1_depth::n1_shed_due`]: a DEEP
-/// N==1 source converges to
-/// the pin-derived depth `crate::genlock_n1_depth::n1_target_frames`, read from the presented AGE,
-/// so every restart lands on the same depth. A shallow N==1 source stays inert exactly as before.
+/// #1049 — the STEADY-conveyor PHASE-CONVERGENCE shed decision, N>=2 ONLY. Should this N>=2 tick
+/// shed exactly ONE EXTRA frame to slew the conveyor's presentation PHASE back toward the
+/// configured latency? (N==1 is gated off — see the `source_multiple < 2` early return: an N==1
+/// shed does not stick and limit-cycles, and only N>=2 sources carry the ladder pathology.)
 ///
 /// The phase-locked conveyor (`genlock_locked_next_boundary_ns`) is a pure FOLLOWER: it
 /// re-anchors to the presented stamp every STEADY present and has no restoring force toward the
@@ -398,22 +395,11 @@ pub fn should_converge_phase(
     // single N==1 source has no cross-source spread and its A/V offset is corrected by the
     // ±50 ms 2ME PGM controller. A hysteresis band cannot separate the natural hold from a real
     // error here — the natural overshoot is frac-dependent (up to ceil+2 frames) and differs by n.
-    //
-    // issue 1367 — the finding above was about a shed toward the RESERVE, which sits one frame
-    // BELOW the natural N==1 hold, so the shed could never stick. The N==1 rule below targets the
-    // natural hold itself (`base + 1` frames, the depth the healthy sender tail produces), so a
-    // shed only ever removes a frame the sender's restart transient ADDED — the shallower state is
-    // exactly the one the conveyor sustains. It reads depth from the presented AGE (never the
-    // queue length, which a late render tick inflates by one), and acts only on a DEEP source.
+    // (issue 1367: a DEEP N==1 source converges to its pin-derived depth instead — a different
+    // target, read at the render tick's scheduled instant — via `crate::genlock_n1_depth`, which the
+    // SOURCE wrapper calls for an N==1 tick. This function stays inert for N==1, byte for byte.)
     if source_multiple < 2 {
-        return crate::genlock_n1_depth::n1_shed_due(
-            wall_now_ns,
-            locked_boundary_ns,
-            newest_stamp_ns,
-            latency_ms,
-            interval_ns,
-            ticks_since_last_drain,
-        );
+        return false;
     }
     let n = source_multiple.max(1) as u64;
     let reserve_ns = (latency_ms as u64).saturating_mul(1_000_000);
@@ -2855,30 +2841,29 @@ mod tests {
         );
     }
 
-    /// #1049 (coordinator's live finding) / issue 1367 — the deep n=1 stream source `NDI 2ME PGM`
-    /// (30-into-30, configured 990 ms) at its natural grid-quantized hold ~1033 ms (31 frames, one
-    /// above configured at frac 0.7) is NEVER shed. The reserve-aimed N>=2 threshold would shed it,
-    /// and an n=1 shed toward the reserve does not stick (shed-hold-shed, the #998 signature). Since
-    /// issue 1367 the n<2 branch aims at the natural hold itself (`base + 1` = 31 frames at 990), so
-    /// this held age sits exactly AT its N==1 target: inert. The SAME held age on an n>=2 source
-    /// still converges toward the reserve (the shed sticks there).
+    /// #1049 (coordinator's live finding) — convergence is N>=2 ONLY. The deep n=1 stream source
+    /// `NDI 2ME PGM` (30-into-30, configured 990 ms) sits at its natural grid-quantized hold
+    /// ~1033 ms — one frame above configured at frac 0.7, ABOVE the reserve-based threshold — so a
+    /// naive decision would shed it; but an n=1 shed does not stick (1 frame/tick can't sustain a
+    /// fresher phase → shed-hold-shed limit cycle, the #998 signature). The decision MUST go INERT
+    /// for n<2 while the SAME held age on an n>=2 source still converges (the shed sticks).
     #[test]
-    fn a_deep_n1_source_at_its_natural_hold_is_never_shed_1049_1367() {
+    fn convergence_is_n2_only_the_deep_n1_source_is_inert_1049() {
         // wall large enough that a 1033 ms subtraction never underflows.
         let wall = 2_000_000_000_000u64;
         let s = 1033 * 1_000_000; // the live natural hold at reserve 990, frac 0.7
         let boundary = wall - s;
         let newest = wall - 33_000_000; // freshest frame ~1 canvas frame old -> small floor
-                                        // n=1: at the N==1 target (31 frames) -> inert. (The #1049 RED→GREEN was the n<2 gate.)
+                                        // n=1: INERT (gated — the shed would oscillate). This is the RED→GREEN of the fix.
         assert!(
             !should_converge_phase(wall, boundary, newest, 990, I30, 1, 100),
-            "a deep n=1 source at its natural grid-quantized hold must NOT shed — it sits at its \
-             issue-1367 target; a reserve-aimed shed would limit-cycle (the #1049 oscillation)"
+            "a deep n=1 source at its natural grid-quantized hold must NOT shed — the n=1 shed \
+             does not stick and limit-cycles (the live stream-box `NDI 2ME PGM` oscillation)"
         );
-        // n=0 degenerate is treated as n=1 (the same target), no divide-by-zero.
+        // n=0 degenerate also gated (0 < 2), no divide-by-zero.
         assert!(
             !should_converge_phase(wall, boundary, newest, 990, I30, 0, 100),
-            "n=0 (degenerate) reads as N==1 at its target -> inert"
+            "n=0 (degenerate) is below the N>=2 gate -> inert"
         );
         // The SAME held age on an n>=2 source STILL converges — the gate is n-specific, not a
         // blanket disable, so the strih 60-into-30 convergence is untouched.
@@ -3780,95 +3765,5 @@ mod tests {
             "#1161: the deep hold must STICK — the tail ({tail_age:.1} ms) must not collapse back \
              toward the arrival edge from the post-rise depth ({post_age:.1} ms)"
         );
-    }
-
-    /// issue 1367 — every N>=2 decision is BYTE-IDENTICAL to the pre-1367 authority: a verbatim copy
-    /// of the old `should_converge_phase` body (everything after its n<2 early return) over a
-    /// deterministic spread of the whole argument space, n = 2..4.
-    #[test]
-    fn n_ge_2_converge_decisions_are_byte_identical_to_before_1367() {
-        fn pre_1367(
-            wall_now_ns: u64,
-            locked_boundary_ns: u64,
-            newest_stamp_ns: u64,
-            latency_ms: u32,
-            interval_ns: u64,
-            source_multiple: u32,
-            ticks_since_last_drain: u64,
-        ) -> bool {
-            if interval_ns == 0 || locked_boundary_ns == 0 {
-                return false;
-            }
-            if source_multiple < 2 {
-                return false;
-            }
-            let n = source_multiple.max(1) as u64;
-            let reserve_ns = (latency_ms as u64).saturating_mul(1_000_000);
-            let floor_ns = wall_now_ns.saturating_sub(newest_stamp_ns);
-            let target = reserve_ns.max(floor_ns);
-            let quantum = interval_ns / n;
-            let budget = PHASE_PIN_HYSTERESIS_NS.max(GENLOCK_N2_JITTER_BUDGET_NS);
-            let threshold = target.saturating_add(quantum).saturating_add(budget);
-            let age = wall_now_ns.saturating_sub(locked_boundary_ns);
-            age > threshold && ticks_since_last_drain >= DRAIN_MIN_TICK_INTERVAL
-        }
-        let w = 1_000_000_000_000u64;
-        let mut x: u64 = 0x1367_2026_0924_0001;
-        let mut fired = 0;
-        for i in 0..20_000u64 {
-            x = x
-                .wrapping_mul(6364136223846793005)
-                .wrapping_add(1442695040888963407);
-            let interval = [I30, I60, 0][(x >> 7) as usize % 3];
-            let latency = ((x >> 20) % 1200) as u32;
-            let n = 2 + ((x >> 3) % 3) as u32;
-            let ticks = (x >> 11) % 60;
-            let age = latency as u64 * 1_000_000 + (x >> 33) % 90_000_000;
-            let boundary = if i % 97 == 0 {
-                0
-            } else {
-                w.saturating_sub(age)
-            };
-            let newest = w.saturating_sub((x >> 45) % 80_000_000);
-            let old = pre_1367(w, boundary, newest, latency, interval, n, ticks);
-            fired += usize::from(old);
-            assert_eq!(
-                should_converge_phase(w, boundary, newest, latency, interval, n, ticks),
-                old,
-                "n={n} latency={latency} interval={interval} boundary={boundary} newest={newest} \
-                 ticks={ticks}"
-            );
-            // The hold never touches an N>=2 source.
-            assert!(!crate::genlock_n1_depth::should_hold_n1_phase(
-                w, boundary, newest, latency, interval, n, ticks
-            ));
-        }
-        assert!(
-            fired > 1000 && fired < 19_000,
-            "the spread must exercise both outcomes: {fired}"
-        );
-    }
-
-    /// issue 1367 — for N==1 (and the n=0 floor) `should_converge_phase` IS the pin-derived shed:
-    /// the N>=2 arithmetic never runs for it.
-    #[test]
-    fn n1_converge_delegates_to_the_pin_derived_shed_1367() {
-        let w = 1_000_000_000_000u64;
-        let mut x: u64 = 0x1367_0000_d0e1_0001;
-        for _ in 0..5_000u64 {
-            x = x
-                .wrapping_mul(6364136223846793005)
-                .wrapping_add(1442695040888963407);
-            let interval = [I30, I60, 0][(x >> 7) as usize % 3];
-            let latency = ((x >> 20) % 1200) as u32;
-            let n = ((x >> 3) % 2) as u32; // 0 or 1
-            let ticks = (x >> 11) % 60;
-            let boundary = w.saturating_sub(latency as u64 * 1_000_000 + (x >> 33) % 90_000_000);
-            let newest = w.saturating_sub((x >> 45) % 80_000_000);
-            assert_eq!(
-                should_converge_phase(w, boundary, newest, latency, interval, n, ticks),
-                crate::genlock_n1_depth::n1_shed_due(w, boundary, newest, latency, interval, ticks),
-            );
-        }
     }
 }

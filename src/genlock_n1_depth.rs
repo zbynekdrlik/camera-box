@@ -1,6 +1,5 @@
-//! issue 1367 — the N==1 PIN-DERIVED DEPTH. The Tier-0 authority; the C `genlock_n1_*` helpers +
-//! `genlock_n1_hold_due` and the N==1 branch of `genlock_phase_converge_due` (obs-source.c) mirror
-//! this in lock-step (tests/genlock_relock_selection_parity.rs).
+//! issue 1367 — the N==1 PIN-DERIVED DEPTH. The Tier-0 authority; the C `genlock_n1_*` helpers
+//! (obs-source.c) mirror this in lock-step (tests/genlock_relock_selection_parity.rs).
 //!
 //! WHY. A deep N==1 input (the stream `NDI 2ME PGM`, pin 987) has TWO absorbing depths. A strih OBS
 //! restart empties the FIFO, the release keeps its locked boundary, GAP-RESYNCs onto the first
@@ -12,43 +11,52 @@
 //! THE RULE. Settle to `target = base + 1` frames, where `base = ceil((pin − 1 µs) / interval)`
 //! is the resync depth and `+1` is the depth the healthy sender gap/dup tail produces anyway (a
 //! gap+dup pair at `base` deepens by one; at `base + 1` or deeper it is neutral). Deeper than the
-//! target → shed ONE frame (the lifted #1049 converge shed); shallower → HOLD one tick
-//! ([`should_hold_n1_phase`]). Both share the #859 drain throttle.
+//! target → shed ONE frame ([`n1_shed_due`]); shallower → HOLD one tick ([`should_hold_n1_phase`]).
+//! Both share the #859 drain throttle, and together they leave a one-frame dead-band around the
+//! target.
 //!
-//! Three details carry the design, each found in the issue-1355 bench (`genlock_grid_bench.rs`):
-//! - DEPTH IS THE PRESENTED AGE, not the queue length. A render tick running late by more than the
-//!   ~21.7 ms sender→receiver skew already holds the NEXT frame, so the queue reads one frame deep
-//!   at the correct state. Reducing the drain hysteresis to one frame therefore churned (10 sheds/h,
-//!   17–21 flips/h between 30 and 31, against 0). The SHED reads
-//!   `(age + N1_TICK_EARLY_MARGIN_NS) / interval`: immune to a tick up to one interval (minus the
-//!   margin) late, and tolerant of a wake a hair early (wall-vs-monotonic rate error over one
-//!   sleep, microseconds). The margin is kept at 100 us because the misfire band is exactly
-//!   `[interval − margin, interval)` of lateness: at 2 ms a 31.3–33.3 ms late tick that does not
-//!   yet skip a slot read the settled conveyor one frame deep and shed (review round 1). A tick
-//!   LATER than a whole interval skips its slot (`genlock_next_deadline`), the conveyor really is
-//!   one frame deeper then, and the shed correctly repays it. A tick further EARLY than the
-//!   margin reads one frame shallow, which only defers a shed to the next on-grid tick — the ±2 ms
-//!   `GENLOCK_MAX_SLEW_NS` clamp bounds the per-tick slew, not the phase.
+//! What carries the design, found in the issue-1355 bench (`genlock_grid_bench.rs`):
+//! - DEPTH IS THE PRESENTED AGE AT THE TICK'S SCHEDULED INSTANT, never the queue length and never
+//!   the processing wall. A render tick that runs late already holds the NEXT frame, so the queue
+//!   reads one frame deep at the correct state (lowering the drain hysteresis instead churned 10
+//!   sheds/h, 17–21 flips/h). And a late tick is not a lost slot: `video_sleep` (obs-video.c)
+//!   counts one frame for any overrun below two intervals and schedules the next slot from the
+//!   previous TARGET, so the next tick is a CATCH-UP. The presented age read at the processing
+//!   wall of a late tick is one frame too deep for the whole overrun (review rounds 1-2: a margin
+//!   on the processing wall only moved the misfire band). Read at the scheduled instant
+//!   ([`n1_tick_wall_ns`] — `video_time`, the `sys_time` `async_tick` passes down, mapped into wall
+//!   time) the age carries no lateness at all. An overrun of two intervals or more DOES skip slots
+//!   (`count >= 2`); the next tick's scheduled instant then jumps with them, and the depth it reads
+//!   is the genuinely deeper one the shed repays.
+//! - BOTH HALVES READ THE ROUNDED DEPTH ([`n1_depth_frames`], `(age + interval/2) / interval`).
+//!   Presented stamps and scheduled ticks sit on the same per-second grid (issue 1355), so the
+//!   scheduled age is a whole number of frames plus the stamp's sub-100-ns floor and the tick's
+//!   schedule phase (a tick after a wall-clock step sits off the grid until `GENLOCK_MAX_SLEW_NS`
+//!   pulls it back, 2 ms per tick). Rounding keeps the READ exact for up to half a frame of that
+//!   phase, and a shed needs the rounded depth at `target + 1` while a hold needs it at
+//!   `target − 1`: the two decisions never share an edge (a shared edge limit-cycled hold/shed
+//!   ~1100 each per hour in the bench). The one phase the rule does not absorb is an EARLY tick
+//!   past the pin's headroom to the next frame edge: the release deadline then floors one frame
+//!   earlier and every sender gap/dup costs a hold/shed pair. OBS never ticks early except for the
+//!   few ticks after a BACKWARD wall step (`os_sleepto_ns` sleeps to the mapped grid slot), and a
+//!   late phase of any size is safe at every deep pin (the bench proves both).
 //! - THE 1 µs PIN TOLERANCE. The integer interval (33_333_333) is ~1/3 ns short of a real frame,
 //!   so a pin that IS a whole number of frames (100 ms) would count one frame too many and put the
 //!   target on the drain's own edge (23 flips/h in the bench). A sub-microsecond excess is not a
 //!   real extra frame.
 //! - DEEP SOURCES ONLY. The rule acts only when `floor_frames + N1_DEEP_MARGIN_FRAMES <= base`,
-//!   where `floor = wall − newest queued stamp` (the achievable-floor reference of #1049). A shallow
-//!   source (the `cg` feeds, the imag cameras at 3 ms) has a depth decided by its ARRIVAL, not its
-//!   pin, so a pin-derived target would fight the floor; it stays byte-identical to before. The
-//!   two-frame margin keeps a late-tick understatement of the floor (one frame at most) from ever
-//!   admitting a floor-dominated source.
-//! - THE HOLD ROUNDS, THE SHED DOES NOT. The shed reads the late-tolerant depth above; the hold
-//!   reads the depth ROUNDED to the nearest frame ([`n1_rounded_depth_frames`]), so the two
-//!   decisions sit half a frame apart. On one shared edge, a render tick whose phase sat on it read
-//!   one frame shallow on one tick (hold) and one frame deep on the next (shed) — a hold/shed
-//!   limit cycle, ~1100 each per hour on the bench's 1970-grid control.
+//!   where the ARRIVAL FLOOR is `wall − newest queued stamp` at the processing wall (the
+//!   achievable-floor reference of #1049). A shallow source (the `cg` feeds, the imag cameras at
+//!   3 ms) has a depth decided by its ARRIVAL, not its pin, so a pin-derived target would fight the
+//!   floor; it stays byte-identical to before. The two-frame margin keeps a late tick's larger
+//!   floor (one frame at most) from ever admitting a floor-dominated source.
 //!
-//! Split out of `genlock_backlog.rs` (already past the ~1000-line budget): `genlock_backlog::
-//! should_converge_phase` delegates its N==1 branch here, the release port's STEADY branch calls
-//! [`should_hold_n1_phase`] directly (the C `genlock_should_hold_n1_phase`, the probe
-//! `ReleaseCadence`, the issue-1355 bench). Pure `std` + one crate constant — Tier-0 verifiable.
+//! N>=2 is untouched: `genlock_backlog::should_converge_phase` keeps its `source_multiple < 2`
+//! early return byte for byte; the SOURCE wrapper routes an N==1 tick here instead (the C
+//! `genlock_should_converge_phase`, the probe `ReleaseCadence::should_converge_phase`, the
+//! issue-1355 bench), and the release port's N==1 STEADY branch calls [`should_hold_n1_phase`]
+//! (the C `genlock_should_hold_n1_phase`). A separate module because `genlock_backlog.rs` is already
+//! past the ~1000-line budget. Pure `std` + one crate constant — Tier-0 verifiable.
 
 use crate::genlock_backlog::DRAIN_MIN_TICK_INTERVAL;
 
@@ -57,17 +65,18 @@ use crate::genlock_backlog::DRAIN_MIN_TICK_INTERVAL;
 /// `GENLOCK_N1_PIN_FRAME_TOLERANCE_NS`.
 pub const N1_PIN_FRAME_TOLERANCE_NS: u64 = 1_000;
 
-/// issue 1367 — how early a render tick may wake before its grid point and still read (for the
-/// SHED) the presented depth it is really on: a wall-vs-monotonic rate error over one sleep is
-/// microseconds, so 100 us is ample. It is also the width of the misfire band at the other end —
-/// a tick late by `interval − margin` or more reads one frame deep — so it must stay tiny (2 ms
-/// misfired on 31.3–33.3 ms render hitches, review round 1). Mirror of the C
-/// `GENLOCK_N1_TICK_EARLY_MARGIN_NS`.
-pub const N1_TICK_EARLY_MARGIN_NS: u64 = 100_000;
-
-/// issue 1367 — the pin-derived depth must exceed the achievable floor by at least this many frames
+/// issue 1367 — the pin-derived depth must exceed the arrival floor by at least this many frames
 /// for the N==1 rule to act (a DEEP source). Mirror of the C `GENLOCK_N1_DEEP_MARGIN_FRAMES`.
 pub const N1_DEEP_MARGIN_FRAMES: u64 = 2;
+
+/// issue 1367 — the WALL instant the current render tick was SCHEDULED for: the processing wall
+/// minus how far the processing runs behind the tick's scheduled monotonic instant
+/// (`wall_now − (mono_now − scheduled_mono)`, saturating). The C passes `os_gettime_ns()` and
+/// `obs->video.video_time`; a tick that has not yet reached its schedule (never, in OBS) reads the
+/// processing wall. Mirror of the C `genlock_n1_tick_wall_ns`.
+pub fn n1_tick_wall_ns(wall_now_ns: u64, mono_now_ns: u64, scheduled_mono_ns: u64) -> u64 {
+    wall_now_ns.saturating_sub(mono_now_ns.saturating_sub(scheduled_mono_ns))
+}
 
 /// issue 1367 — the depth, in frames, a deep N==1 source lands on after a GAP RESYNC:
 /// `ceil((pin − N1_PIN_FRAME_TOLERANCE_NS) / interval)`. `interval_ns == 0` returns 0.
@@ -86,69 +95,63 @@ pub fn n1_target_frames(latency_ms: u32, interval_ns: u64) -> u64 {
     n1_base_frames(latency_ms, interval_ns).saturating_add(1)
 }
 
-/// issue 1367 — the presented depth, in whole frames, of a frame stamped `stamp_ns` presented at
-/// `wall_now_ns`: `(wall − stamp + N1_TICK_EARLY_MARGIN_NS) / interval`. Immune to a tick up to one
-/// interval (minus the margin) late, tolerant of a tick up to the margin early. `interval_ns == 0`
-/// returns 0; a stamp ahead of wall reads age 0.
-pub fn n1_depth_frames(wall_now_ns: u64, stamp_ns: u64, interval_ns: u64) -> u64 {
+/// issue 1367 — the presented depth, ROUNDED to whole frames, of a frame stamped `stamp_ns` at the
+/// tick's scheduled instant `tick_wall_ns`: `(tick_wall − stamp + interval/2) / interval`.
+/// `interval_ns == 0` returns 0; a stamp ahead of the tick reads age 0.
+pub fn n1_depth_frames(tick_wall_ns: u64, stamp_ns: u64, interval_ns: u64) -> u64 {
     if interval_ns == 0 {
         return 0;
     }
-    wall_now_ns
+    tick_wall_ns
         .saturating_sub(stamp_ns)
-        .saturating_add(N1_TICK_EARLY_MARGIN_NS)
+        .saturating_add(interval_ns / 2)
         / interval_ns
 }
 
 /// issue 1367 — is this N==1 source DEEP (its pin, not its arrival, decides its depth)? True when
-/// the freshest queued frame's age in whole frames plus [`N1_DEEP_MARGIN_FRAMES`] is at most
-/// [`n1_base_frames`]. `interval_ns == 0` is never deep.
-pub fn n1_is_deep_source(
-    wall_now_ns: u64,
-    newest_stamp_ns: u64,
-    latency_ms: u32,
-    interval_ns: u64,
-) -> bool {
+/// the arrival floor (`wall − newest queued stamp`, ns) in whole frames plus
+/// [`N1_DEEP_MARGIN_FRAMES`] is at most [`n1_base_frames`]. `interval_ns == 0` is never deep.
+pub fn n1_is_deep_source(arrival_floor_ns: u64, latency_ms: u32, interval_ns: u64) -> bool {
     if interval_ns == 0 {
         return false;
     }
-    let floor_frames = wall_now_ns.saturating_sub(newest_stamp_ns) / interval_ns;
-    floor_frames.saturating_add(N1_DEEP_MARGIN_FRAMES) <= n1_base_frames(latency_ms, interval_ns)
+    (arrival_floor_ns / interval_ns).saturating_add(N1_DEEP_MARGIN_FRAMES)
+        <= n1_base_frames(latency_ms, interval_ns)
 }
 
-/// issue 1367 — the N==1 SHED half, the lifted branch of
-/// [`crate::genlock_backlog::should_converge_phase`]: shed one frame
-/// when the last presented depth (read from the locked boundary, `boundary == last presented +
-/// interval`) is deeper than [`n1_target_frames`] on a deep source, throttled by the shared #859
-/// counter. An unlocked boundary (0) or a degenerate interval never sheds.
+/// issue 1367 — the N==1 SHED half: shed one frame when the last presented depth (read from the
+/// locked boundary, `boundary == last presented + interval`, at this tick's scheduled instant) is
+/// deeper than [`n1_target_frames`] on a deep source, throttled by the shared #859 counter. An
+/// unlocked boundary (0) or a degenerate interval never sheds. Mirror of the C
+/// `genlock_n1_shed_due`.
 pub fn n1_shed_due(
-    wall_now_ns: u64,
+    tick_wall_ns: u64,
     locked_boundary_ns: u64,
-    newest_stamp_ns: u64,
+    arrival_floor_ns: u64,
     latency_ms: u32,
     interval_ns: u64,
     ticks_since_last_drain: u64,
 ) -> bool {
     interval_ns != 0
         && locked_boundary_ns != 0
-        && n1_is_deep_source(wall_now_ns, newest_stamp_ns, latency_ms, interval_ns)
-        && n1_depth_frames(wall_now_ns, locked_boundary_ns, interval_ns)
+        && n1_is_deep_source(arrival_floor_ns, latency_ms, interval_ns)
+        && n1_depth_frames(tick_wall_ns, locked_boundary_ns, interval_ns)
             > n1_target_frames(latency_ms, interval_ns)
         && ticks_since_last_drain >= DRAIN_MIN_TICK_INTERVAL
 }
 
 /// issue 1367 — the N==1 HOLD half: on a STEADY tick, HOLD one tick (a deliberate repeat, the
 /// conveyor one frame deeper next tick) when presenting the queue head now would put a deep N==1
-/// source SHALLOWER than [`n1_target_frames`]. Reads the HEAD's age, not the boundary's: a startup
-/// DUPLICATE sits one interval below the boundary and already deepens the conveyor when presented,
-/// so a boundary-based read would hold in front of it and overshoot. Shares the #859 throttle (the
-/// caller resets it on a hold). Inert for `source_multiple >= 2` (the N>=2 conveyor has its own
-/// #1049 shed), for a shallow source, and for a degenerate interval. Mirror of the C
-/// `genlock_n1_hold_due`.
+/// source SHALLOWER than [`n1_target_frames`] (both read at the tick's scheduled instant). Reads
+/// the HEAD's age, not the boundary's: a startup DUPLICATE sits one interval below the boundary and
+/// already deepens the conveyor when presented, so a boundary-based read would hold in front of it
+/// and overshoot. Shares the #859 throttle (the caller resets it on a hold). Inert for
+/// `source_multiple >= 2` (the N>=2 conveyor has its own #1049 shed), for a shallow source, and for
+/// a degenerate interval. Mirror of the C `genlock_n1_hold_due`.
 pub fn should_hold_n1_phase(
-    wall_now_ns: u64,
+    tick_wall_ns: u64,
     head_stamp_ns: u64,
-    newest_stamp_ns: u64,
+    arrival_floor_ns: u64,
     latency_ms: u32,
     interval_ns: u64,
     source_multiple: u32,
@@ -156,40 +159,45 @@ pub fn should_hold_n1_phase(
 ) -> bool {
     source_multiple < 2
         && interval_ns != 0
-        && n1_is_deep_source(wall_now_ns, newest_stamp_ns, latency_ms, interval_ns)
-        && n1_rounded_depth_frames(wall_now_ns, head_stamp_ns, interval_ns)
+        && n1_is_deep_source(arrival_floor_ns, latency_ms, interval_ns)
+        && n1_depth_frames(tick_wall_ns, head_stamp_ns, interval_ns)
             < n1_target_frames(latency_ms, interval_ns)
         && ticks_since_last_drain >= DRAIN_MIN_TICK_INTERVAL
-}
-
-/// issue 1367 — the presented depth ROUNDED to the nearest frame: `(wall − stamp + interval/2) /
-/// interval`. The HOLD reads this, the SHED reads [`n1_depth_frames`], so the two decisions sit
-/// half a frame apart instead of on one shared edge. A stamp phase that lands exactly on a shared
-/// edge (the sender's clock a couple of ms ahead of the receiver, or — in the bench — the 1970
-/// grid's 2 ms date offset) otherwise read the same depth one frame shallow on one tick (HOLD) and
-/// one frame deep on the next (SHED), a hold/shed limit cycle (~1100 each per hour in the bench).
-/// Rounded, a HOLD needs the conveyor at least half a frame shallow; a SHED still fires only on a
-/// whole extra frame (minus the 100 us early-tick margin), so a late tick never reads deeper.
-pub fn n1_rounded_depth_frames(wall_now_ns: u64, stamp_ns: u64, interval_ns: u64) -> u64 {
-    if interval_ns == 0 {
-        return 0;
-    }
-    wall_now_ns
-        .saturating_sub(stamp_ns)
-        .saturating_add(interval_ns / 2)
-        / interval_ns
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::genlock_backlog::should_converge_phase;
+    use crate::genlock_backlog::{
+        should_converge_phase, GENLOCK_N2_JITTER_BUDGET_NS, PHASE_PIN_HYSTERESIS_NS,
+    };
 
     const I30: u64 = 33_333_333; // ~30 Hz frame interval (ns)
     const I60: u64 = 16_666_667; // ~60 Hz frame interval (ns)
 
     // issue 1367 — the N==1 pin-derived depth, arithmetic edges (the faithful proof of each
     // threshold; the dynamic proof is the restart bench in genlock_grid_bench.rs).
+
+    #[test]
+    fn n1_tick_wall_is_the_processing_wall_minus_the_lateness_1367() {
+        let wall = 1_000_000_000_000u64;
+        let sched = 5_000_000_000u64;
+        // On schedule, 45 ms late, and 70 ms late (two slots skipped: video_time jumped with them,
+        // so the caller passes the NEW scheduled instant and the read is on time again).
+        assert_eq!(n1_tick_wall_ns(wall, sched, sched), wall);
+        assert_eq!(
+            n1_tick_wall_ns(wall, sched + 45_000_000, sched),
+            wall - 45_000_000
+        );
+        assert_eq!(
+            n1_tick_wall_ns(wall, sched + 70_000_000, sched),
+            wall - 70_000_000
+        );
+        // A monotonic read that has not reached the schedule reads the processing wall; an absurd
+        // lateness saturates at 0.
+        assert_eq!(n1_tick_wall_ns(wall, sched - 1, sched), wall);
+        assert_eq!(n1_tick_wall_ns(10, 1_000, 0), 0);
+    }
 
     #[test]
     fn n1_base_frames_is_the_resync_depth_with_a_one_microsecond_pin_tolerance_1367() {
@@ -210,66 +218,49 @@ mod tests {
     }
 
     #[test]
-    fn n1_depth_reads_are_immune_to_a_late_tick_and_half_a_frame_apart_1367() {
+    fn n1_depth_rounds_to_the_nearest_frame_1367() {
         let s = 1_000_000_000_000u64;
-        // The SHED read: a tick up to one interval minus 100 us late still reads its true depth
-        // (review round 1: at a 2 ms margin a 31.3-33.3 ms late tick read one frame deep).
+        // A schedule phase of up to half a frame either way reads the true depth.
         assert_eq!(n1_depth_frames(s + 31 * I30, s, I30), 31);
-        assert_eq!(n1_depth_frames(s + 31 * I30 + 31_000_000, s, I30), 31);
-        assert_eq!(n1_depth_frames(s + 31 * I30 + 33_000_000, s, I30), 31);
-        assert_eq!(n1_depth_frames(s + 32 * I30 - 100_000, s, I30), 32);
-        assert_eq!(n1_depth_frames(s + 32 * I30 - 100_001, s, I30), 31);
-        // ... and a tick up to 100 us EARLY (wall-vs-monotonic rate error over one sleep) still
-        // reads it too; a tick further early reads one frame shallow, which only defers a shed.
-        assert_eq!(n1_depth_frames(s + 31 * I30 - 100_000, s, I30), 31);
-        assert_eq!(n1_depth_frames(s + 31 * I30 - 100_001, s, I30), 30);
-        // The HOLD read rounds: the two decisions sit half a frame apart.
-        assert_eq!(n1_rounded_depth_frames(s + 31 * I30 - I30 / 2, s, I30), 31);
-        assert_eq!(
-            n1_rounded_depth_frames(s + 31 * I30 - I30 / 2 - 1, s, I30),
-            30
-        );
-        assert_eq!(
-            n1_rounded_depth_frames(s + 31 * I30 + 5_000_000, s, I30),
-            31
-        );
-        // Degenerate inputs never divide by zero; a stamp ahead of wall reads age 0.
+        assert_eq!(n1_depth_frames(s + 31 * I30 + 10_000_000, s, I30), 31);
+        assert_eq!(n1_depth_frames(s + 31 * I30 - 10_000_000, s, I30), 31);
+        assert_eq!(n1_depth_frames(s + 31 * I30 - I30 / 2, s, I30), 31);
+        assert_eq!(n1_depth_frames(s + 31 * I30 - I30 / 2 - 1, s, I30), 30);
+        assert_eq!(n1_depth_frames(s + 32 * I30 - I30 / 2 - 1, s, I30), 31);
+        assert_eq!(n1_depth_frames(s + 32 * I30 - I30 / 2, s, I30), 32);
+        // Degenerate inputs never divide by zero; a stamp ahead of the tick reads age 0.
         assert_eq!(n1_depth_frames(s, s, 0), 0);
-        assert_eq!(n1_rounded_depth_frames(s, s + I30, I30), 0);
+        assert_eq!(n1_depth_frames(s, s + I30, I30), 0);
     }
 
     #[test]
     fn n1_deep_source_guard_needs_two_frames_of_pin_over_the_arrival_floor_1367() {
-        let w = 1_000_000_000_000u64;
         // pin 987: base 30. The freshest frame one interval old (the stream 2ME PGM) is deep.
-        assert!(n1_is_deep_source(w, w - I30, 987, I30));
+        assert!(n1_is_deep_source(I30, 987, I30));
         // Edge: floor 28 frames + 2 == base 30 -> deep; floor 29 frames -> shallow.
-        assert!(n1_is_deep_source(w, w - 28 * I30, 987, I30));
-        assert!(!n1_is_deep_source(w, w - 29 * I30, 987, I30));
+        assert!(n1_is_deep_source(28 * I30, 987, I30));
+        assert!(n1_is_deep_source(29 * I30 - 1, 987, I30));
+        assert!(!n1_is_deep_source(29 * I30, 987, I30));
         // The 3 ms cg / imag case (base 1) is never deep, whatever its floor.
-        assert!(!n1_is_deep_source(w, w, 3, I30));
-        assert!(!n1_is_deep_source(w, w, 3, I60));
-        assert!(!n1_is_deep_source(w, w - I30, 987, 0));
+        assert!(!n1_is_deep_source(0, 3, I30));
+        assert!(!n1_is_deep_source(0, 3, I60));
+        assert!(!n1_is_deep_source(I30, 987, 0));
     }
 
     #[test]
     fn n1_shed_fires_only_a_whole_frame_past_the_target_on_a_deep_source_1367() {
         let w = 1_000_000_000_000u64;
-        let newest = w - I30; // deep
-        let shed =
-            |age: u64, ticks: u64| should_converge_phase(w, w - age, newest, 987, I30, 1, ticks);
+        let shed = |age: u64, ticks: u64| n1_shed_due(w, w - age, I30, 987, I30, ticks);
         assert!(!shed(31 * I30, 100), "at the target (31 frames) -> inert");
+        // The rounded edge sits at 32 frames minus half a frame (I30 is odd: one ns past 31.5).
         assert!(
-            !shed(31 * I30 + 33_000_000, 100),
-            "a 33 ms late tick at the target -> inert"
+            !shed(32 * I30 - I30 / 2 - 1, 100),
+            "just under half a frame over -> inert"
         );
+        assert!(shed(32 * I30 - I30 / 2, 100), "half a frame over -> sheds");
         assert!(
-            shed(32 * I30 - 100_000, 100),
-            "one frame over, 100 us early -> sheds"
-        );
-        assert!(
-            !shed(32 * I30 - 100_001, 100),
-            "one ns under the edge -> inert"
+            shed(32 * I30 - 10_000_000, 100),
+            "one frame over, 10 ms early -> sheds"
         );
         assert!(shed(33 * I30, 100), "two frames over -> sheds");
         assert!(!shed(32 * I30, DRAIN_MIN_TICK_INTERVAL - 1), "throttled");
@@ -278,43 +269,17 @@ mod tests {
             "throttle exactly met"
         );
         // Shallow source, unlocked boundary, degenerate interval: never.
-        assert!(!should_converge_phase(
-            w,
-            w - 5 * I30,
-            w - I30,
-            3,
-            I30,
-            1,
-            100
-        ));
-        assert!(!should_converge_phase(w, 0, newest, 987, I30, 1, 100));
-        assert!(!should_converge_phase(
-            w,
-            w - 40 * I30,
-            newest,
-            987,
-            0,
-            1,
-            100
-        ));
-        // source_multiple 0 is treated as N==1 (the C wrapper floors n at 1).
-        assert!(should_converge_phase(
-            w,
-            w - 33 * I30,
-            newest,
-            987,
-            I30,
-            0,
-            100
-        ));
+        assert!(!n1_shed_due(w, w - 5 * I30, I30, 3, I30, 100));
+        assert!(!n1_shed_due(w, w - 40 * I30, 29 * I30, 987, I30, 100));
+        assert!(!n1_shed_due(w, 0, I30, 987, I30, 100));
+        assert!(!n1_shed_due(w, w - 40 * I30, I30, 987, 0, 100));
     }
 
     #[test]
-    fn n1_hold_fires_only_half_a_frame_short_of_the_target_on_a_deep_source_1367() {
+    fn n1_hold_fires_only_a_whole_frame_short_of_the_target_on_a_deep_source_1367() {
         let w = 1_000_000_000_000u64;
-        let newest = w - I30;
         let hold = |age: u64, n: u32, ticks: u64| {
-            should_hold_n1_phase(w, w - age, newest, 987, I30, n, ticks)
+            should_hold_n1_phase(w, w - age, I30, 987, I30, n, ticks)
         };
         assert!(
             hold(30 * I30, 1, 100),
@@ -327,28 +292,110 @@ mod tests {
         );
         assert!(hold(31 * I30 - I30 / 2 - 1, 1, 100), "one ns more -> holds");
         assert!(
-            !hold(31 * I30 - 3_000_000, 1, 100),
-            "a 3 ms EARLY tick at the target -> inert"
+            !hold(31 * I30 - 10_000_000, 1, 100),
+            "a 10 ms EARLY schedule phase at the target -> inert"
         );
         assert!(
-            hold(30 * I30 + 5_000_000, 1, 100),
-            "a 5 ms late tick one short -> still holds"
+            hold(30 * I30 + 10_000_000, 1, 100),
+            "a 10 ms late schedule phase one short -> still holds"
         );
         assert!(!hold(30 * I30, 1, DRAIN_MIN_TICK_INTERVAL - 1), "throttled");
         assert!(hold(30 * I30, 0, 100), "source_multiple 0 is N==1");
         assert!(!hold(30 * I30, 2, 100), "an N>=2 source has its own shed");
         assert!(
-            !should_hold_n1_phase(w, w - I30 / 3, w, 3, I30, 1, 100),
+            !should_hold_n1_phase(w, w - I30 / 3, 0, 3, I30, 1, 100),
             "shallow never holds"
         );
-        assert!(!should_hold_n1_phase(
-            w,
-            w - 30 * I30,
-            newest,
-            987,
-            0,
-            1,
-            100
-        ));
+        assert!(!should_hold_n1_phase(w, w - 30 * I30, I30, 987, 0, 1, 100));
+    }
+
+    /// issue 1367 — the shed and the hold never share an edge: over a dense sweep of presented
+    /// ages there is no age at which both fire, and between them sits a one-frame dead-band.
+    #[test]
+    fn the_shed_and_the_hold_leave_a_one_frame_dead_band_1367() {
+        let w = 1_000_000_000_000u64;
+        for step in 0..2_000u64 {
+            let age = 29 * I30 + step * (4 * I30 / 2_000);
+            let shed = n1_shed_due(w, w - age, I30, 987, I30, 100);
+            let hold = should_hold_n1_phase(w, w - age, I30, 987, I30, 1, 100);
+            assert!(!(shed && hold), "age {age}");
+            let inert = (31 * I30 - I30 / 2..32 * I30 - I30 / 2).contains(&age);
+            assert_eq!(inert, !shed && !hold, "age {age}");
+        }
+    }
+
+    /// issue 1367 — every decision of `should_converge_phase` is BYTE-IDENTICAL to the pre-1367
+    /// authority (a verbatim copy of it) over a deterministic spread of the whole argument space,
+    /// N==1 included (it stays inert there: the SOURCE wrapper routes an N==1 tick to
+    /// [`n1_shed_due`]), and the N==1 hold never touches an N>=2 source.
+    #[test]
+    fn converge_decisions_are_byte_identical_to_before_1367() {
+        fn pre_1367(
+            wall_now_ns: u64,
+            locked_boundary_ns: u64,
+            newest_stamp_ns: u64,
+            latency_ms: u32,
+            interval_ns: u64,
+            source_multiple: u32,
+            ticks_since_last_drain: u64,
+        ) -> bool {
+            if interval_ns == 0 || locked_boundary_ns == 0 {
+                return false;
+            }
+            if source_multiple < 2 {
+                return false;
+            }
+            let n = source_multiple.max(1) as u64;
+            let reserve_ns = (latency_ms as u64).saturating_mul(1_000_000);
+            let floor_ns = wall_now_ns.saturating_sub(newest_stamp_ns);
+            let target = reserve_ns.max(floor_ns);
+            let quantum = interval_ns / n;
+            let budget = PHASE_PIN_HYSTERESIS_NS.max(GENLOCK_N2_JITTER_BUDGET_NS);
+            let threshold = target.saturating_add(quantum).saturating_add(budget);
+            let age = wall_now_ns.saturating_sub(locked_boundary_ns);
+            age > threshold && ticks_since_last_drain >= DRAIN_MIN_TICK_INTERVAL
+        }
+        let w = 1_000_000_000_000u64;
+        let mut x: u64 = 0x1367_2026_0924_0001;
+        let mut fired = 0;
+        for i in 0..20_000u64 {
+            x = x
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            let interval = [I30, I60, 0][(x >> 7) as usize % 3];
+            let latency = ((x >> 20) % 1200) as u32;
+            let n = ((x >> 3) % 5) as u32; // 0..4, the N==1 floor included
+            let ticks = (x >> 11) % 60;
+            let age = latency as u64 * 1_000_000 + (x >> 33) % 90_000_000;
+            let boundary = if i % 97 == 0 {
+                0
+            } else {
+                w.saturating_sub(age)
+            };
+            let newest = w.saturating_sub((x >> 45) % 80_000_000);
+            let old = pre_1367(w, boundary, newest, latency, interval, n, ticks);
+            fired += usize::from(old);
+            assert_eq!(
+                should_converge_phase(w, boundary, newest, latency, interval, n, ticks),
+                old,
+                "n={n} latency={latency} interval={interval} boundary={boundary} newest={newest} \
+                 ticks={ticks}"
+            );
+            if n >= 2 {
+                assert!(!should_hold_n1_phase(
+                    w,
+                    boundary,
+                    w - newest,
+                    latency,
+                    interval,
+                    n,
+                    ticks
+                ));
+            }
+        }
+        assert!(
+            fired > 1000 && fired < 19_000,
+            "the spread must exercise both outcomes: {fired}"
+        );
     }
 }

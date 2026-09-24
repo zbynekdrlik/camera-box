@@ -5108,17 +5108,10 @@ static inline uint64_t genlock_phase_pin_deadline(uint64_t deadline_ns, uint64_t
 
 /* camera-box issue 1367: the N==1 PIN-DERIVED DEPTH constants (genlock_n1_* below). A pin within
  * GENLOCK_N1_PIN_FRAME_TOLERANCE_NS above a whole number of frame intervals counts as that whole
- * number (the integer interval is fractionally short of a real frame); the SHED reads a render
- * tick up to GENLOCK_N1_TICK_EARLY_MARGIN_NS early as the slot it serves (a wake a hair before its
- * grid point from wall-vs-monotonic rate error over one sleep -- microseconds) and a tick up to one
- * interval minus that margin late likewise, so the margin is kept tiny: at 2 ms a 31.3-33.3 ms late
- * tick read one frame deep and misfired a shed (review round 1); a tick further early reads one
- * frame shallow, which only defers a shed to the next on-grid tick. The rule acts only when the
- * pin-derived depth exceeds the achievable floor by GENLOCK_N1_DEEP_MARGIN_FRAMES. Mirrors:
- * src/genlock_n1_depth.rs N1_PIN_FRAME_TOLERANCE_NS / N1_TICK_EARLY_MARGIN_NS /
- * N1_DEEP_MARGIN_FRAMES. */
+ * number (the integer interval is fractionally short of a real frame); the rule acts only when the
+ * pin-derived depth exceeds the arrival floor by GENLOCK_N1_DEEP_MARGIN_FRAMES. Mirrors:
+ * src/genlock_n1_depth.rs N1_PIN_FRAME_TOLERANCE_NS / N1_DEEP_MARGIN_FRAMES. */
 #define GENLOCK_N1_PIN_FRAME_TOLERANCE_NS 1000ULL /* 1 us */
-#define GENLOCK_N1_TICK_EARLY_MARGIN_NS 100000ULL /* 100 us */
 #define GENLOCK_N1_DEEP_MARGIN_FRAMES 2ULL
 
 /* camera-box #1003: PHASE-CONTINUITY RELOCK (history-anchored selection).
@@ -5650,7 +5643,7 @@ static bool genlock_should_drain_one(const obs_source_t *source, uint32_t reserv
  * GENLOCK_N1_* / GENLOCK_DRAIN_MIN_TICK_INTERVAL defines) and CONTIGUOUS with
  * genlock_phase_converge_due below, so tests/genlock_relock_selection_parity.rs lifts the whole
  * block standalone and proves it byte-identical to the Rust authority src/genlock_n1_depth.rs
- * (n1_base_frames / n1_depth_frames / n1_rounded_depth_frames / n1_is_deep_source / n1_shed_due /
+ * (n1_tick_wall_ns / n1_base_frames / n1_depth_frames / n1_is_deep_source / n1_shed_due /
  * should_hold_n1_phase).
  *
  * WHY: a deep N==1 input (the stream NDI 2ME PGM, pin 987) had TWO absorbing depths. A strih OBS
@@ -5661,16 +5654,26 @@ static bool genlock_should_drain_one(const obs_source_t *source, uint32_t reserv
  * A/V step per restart.
  *
  * THE RULE: settle to base + 1 frames (base = the resync depth; +1 = the depth the healthy sender
- * gap/dup tail produces anyway). Deeper -> shed ONE frame (the N==1 branch of
- * genlock_phase_converge_due); shallower -> HOLD one tick (genlock_n1_hold_due). Depth is the
- * presented AGE, never the queue length (a late render tick already holds the NEXT frame, so the
- * queue reads one deep at the correct state -- lowering the drain hysteresis instead churned 10
- * sheds/h in the bench). The SHED reads the late-tolerant depth ((age + 100 us) / interval, so a
- * tick up to one interval minus 100 us late never reads deeper); the HOLD reads the ROUNDED depth, so the
- * two decisions sit half a frame apart (a shared edge limit-cycled hold/shed ~1100 each per hour in
- * the bench when the tick phase sat on it). Only a DEEP source acts: floor_frames + 2 <= base,
- * floor = wall - newest queued stamp (a shallow cg feed / imag camera is decided by its ARRIVAL, not
- * its pin, and stays byte-identical). */
+ * gap/dup tail produces anyway). Deeper -> shed ONE frame (genlock_n1_shed_due, which the source
+ * wrapper genlock_should_converge_phase calls for an N==1 tick); shallower -> HOLD one tick
+ * (genlock_n1_hold_due). Depth is the presented AGE at the render tick's SCHEDULED instant, ROUNDED
+ * to whole frames -- never the queue length (a late tick already holds the NEXT frame, so the queue
+ * reads one deep at the correct state; lowering the drain hysteresis instead churned 10 sheds/h in
+ * the bench) and never the processing wall: video_sleep (obs-video.c) catches a tick that overran
+ * by less than two intervals up without losing its slot, so the processing wall of a late tick
+ * reads the conveyor one frame too deep (review rounds 1-2). Stamps and scheduled ticks share the
+ * per-second grid, so rounding keeps the read exact for a schedule phase of up to half a frame, and
+ * the shed (rounded > base + 1) and the hold (rounded < base + 1) sit a whole frame apart (a tick
+ * EARLY past the pin's headroom to the next frame edge -- only the few ticks after a backward wall
+ * step -- moves the release deadline a frame and costs a hold/shed pair per sender gap/dup). Only a DEEP
+ * source acts: floor_frames + 2 <= base, floor = wall - newest queued stamp (a shallow cg feed /
+ * imag camera is decided by its ARRIVAL, not its pin, and stays byte-identical). */
+static inline uint64_t genlock_n1_tick_wall_ns(uint64_t wall_now_ns, uint64_t mono_now_ns, uint64_t scheduled_mono_ns)
+{
+	const uint64_t lateness = mono_now_ns > scheduled_mono_ns ? mono_now_ns - scheduled_mono_ns : 0;
+	return wall_now_ns > lateness ? wall_now_ns - lateness : 0;
+}
+
 static inline uint64_t genlock_n1_base_frames(uint32_t latency_ms, uint64_t interval_ns)
 {
 	if (interval_ns == 0)
@@ -5681,41 +5684,31 @@ static inline uint64_t genlock_n1_base_frames(uint32_t latency_ms, uint64_t inte
 	return (tolerated + interval_ns - 1) / interval_ns;
 }
 
-static inline uint64_t genlock_n1_depth_frames(uint64_t wall_now_ns, uint64_t stamp_ns, uint64_t interval_ns)
+static inline uint64_t genlock_n1_depth_frames(uint64_t tick_wall_ns, uint64_t stamp_ns, uint64_t interval_ns)
 {
 	if (interval_ns == 0)
 		return 0;
-	const uint64_t age = wall_now_ns > stamp_ns ? wall_now_ns - stamp_ns : 0;
-	return (age + GENLOCK_N1_TICK_EARLY_MARGIN_NS) / interval_ns;
-}
-
-static inline uint64_t genlock_n1_rounded_depth_frames(uint64_t wall_now_ns, uint64_t stamp_ns,
-						       uint64_t interval_ns)
-{
-	if (interval_ns == 0)
-		return 0;
-	const uint64_t age = wall_now_ns > stamp_ns ? wall_now_ns - stamp_ns : 0;
+	const uint64_t age = tick_wall_ns > stamp_ns ? tick_wall_ns - stamp_ns : 0;
 	return (age + interval_ns / 2) / interval_ns;
 }
 
-static inline bool genlock_n1_is_deep_source(uint64_t wall_now_ns, uint64_t newest_stamp_ns, uint32_t latency_ms,
-					     uint64_t interval_ns)
+static inline bool genlock_n1_is_deep_source(uint64_t arrival_floor_ns, uint32_t latency_ms, uint64_t interval_ns)
 {
 	if (interval_ns == 0)
 		return false;
-	const uint64_t floor_ns = wall_now_ns > newest_stamp_ns ? wall_now_ns - newest_stamp_ns : 0;
-	return floor_ns / interval_ns + GENLOCK_N1_DEEP_MARGIN_FRAMES <= genlock_n1_base_frames(latency_ms, interval_ns);
+	return arrival_floor_ns / interval_ns + GENLOCK_N1_DEEP_MARGIN_FRAMES <=
+	       genlock_n1_base_frames(latency_ms, interval_ns);
 }
 
 /* The SHED half: the last presented depth (boundary == last presented + interval) deeper than base + 1. */
-static inline bool genlock_n1_shed_due(uint64_t wall_now_ns, uint64_t boundary_ns, uint64_t newest_stamp_ns,
+static inline bool genlock_n1_shed_due(uint64_t tick_wall_ns, uint64_t boundary_ns, uint64_t arrival_floor_ns,
 				       uint32_t latency_ms, uint64_t interval_ns, uint64_t ticks_since_drain)
 {
 	if (interval_ns == 0 || boundary_ns == 0)
 		return false;
-	if (!genlock_n1_is_deep_source(wall_now_ns, newest_stamp_ns, latency_ms, interval_ns))
+	if (!genlock_n1_is_deep_source(arrival_floor_ns, latency_ms, interval_ns))
 		return false;
-	return genlock_n1_depth_frames(wall_now_ns, boundary_ns, interval_ns) >
+	return genlock_n1_depth_frames(tick_wall_ns, boundary_ns, interval_ns) >
 		       genlock_n1_base_frames(latency_ms, interval_ns) + 1 &&
 	       ticks_since_drain >= GENLOCK_DRAIN_MIN_TICK_INTERVAL;
 }
@@ -5723,15 +5716,15 @@ static inline bool genlock_n1_shed_due(uint64_t wall_now_ns, uint64_t boundary_n
 /* The HOLD half: presenting the queue HEAD now would put the conveyor shallower than base + 1. Reads
  * the head, not the boundary: a startup DUPLICATE sits one interval below the boundary and already
  * deepens the conveyor when presented. Inert for n >= 2 (the N>=2 conveyor has its own shed). */
-static inline bool genlock_n1_hold_due(uint64_t wall_now_ns, uint64_t head_stamp_ns, uint64_t newest_stamp_ns,
+static inline bool genlock_n1_hold_due(uint64_t tick_wall_ns, uint64_t head_stamp_ns, uint64_t arrival_floor_ns,
 				       uint32_t latency_ms, uint64_t interval_ns, uint32_t n,
 				       uint64_t ticks_since_drain)
 {
 	if (n >= 2 || interval_ns == 0)
 		return false;
-	if (!genlock_n1_is_deep_source(wall_now_ns, newest_stamp_ns, latency_ms, interval_ns))
+	if (!genlock_n1_is_deep_source(arrival_floor_ns, latency_ms, interval_ns))
 		return false;
-	return genlock_n1_rounded_depth_frames(wall_now_ns, head_stamp_ns, interval_ns) <
+	return genlock_n1_depth_frames(tick_wall_ns, head_stamp_ns, interval_ns) <
 		       genlock_n1_base_frames(latency_ms, interval_ns) + 1 &&
 	       ticks_since_drain >= GENLOCK_DRAIN_MIN_TICK_INTERVAL;
 }
@@ -5777,16 +5770,9 @@ static inline bool genlock_phase_converge_due(uint64_t wall_now_ns, uint64_t bou
 	 * the stream box's deep NDI 2ME PGM, 990 ms, natural grid-quantized hold ~1033 ms one frame
 	 * above configured at frac 0.7). N>=2 delivers >=2 frames/tick so the shed sticks -- and only
 	 * N>=2 carries the per-camera ladder pathology. Mirror: src/genlock_backlog.rs
-	 * should_converge_phase source_multiple < 2 early return.
-	 *
-	 * camera-box issue 1367: that shed aimed at the RESERVE, one frame BELOW the natural N==1 hold,
-	 * so it could never stick. The N==1 rule aims at the natural hold itself (base + 1 frames, read
-	 * from the presented AGE) on a DEEP source only, so a shed only removes a frame a restart
-	 * transient ADDED -- the shallower state is exactly the one the conveyor sustains. N>=2 is
-	 * untouched below. Mirror: src/genlock_n1_depth.rs n1_shed_due. */
+	 * should_converge_phase source_multiple < 2 early return. */
 	if (n < 2)
-		return genlock_n1_shed_due(wall_now_ns, boundary_ns, newest_stamp_ns, latency_ms, interval_ns,
-					   ticks_since_drain);
+		return false;
 	const uint64_t nn = n >= 1 ? (uint64_t)n : 1;
 	const uint64_t reserve_ns = (uint64_t)latency_ms * 1000000ULL;
 	const uint64_t floor_ns = wall_now_ns > newest_stamp_ns ? wall_now_ns - newest_stamp_ns : 0;
@@ -5802,6 +5788,17 @@ static inline bool genlock_phase_converge_due(uint64_t wall_now_ns, uint64_t bou
 	return age > threshold && ticks_since_drain >= GENLOCK_DRAIN_MIN_TICK_INTERVAL;
 }
 
+/* camera-box issue 1367 (review round 2): the WALL instant the current render tick was SCHEDULED
+ * for. obs->video.video_time is the tick's scheduled monotonic instant (the sys_time async_tick
+ * passes down to ready_async_frame; video_sleep advances it one interval per tick, catch-up
+ * included, and past every skipped slot), os_gettime_ns() - video_time is how far this processing
+ * runs behind it, and wall_now is the precise wall clock read once for this tick. Graphics thread
+ * only, like every caller. Mirror: src/genlock_n1_depth.rs n1_tick_wall_ns. */
+static inline uint64_t genlock_n1_tick_wall_now(uint64_t wall_now_ns)
+{
+	return genlock_n1_tick_wall_ns(wall_now_ns, os_gettime_ns(), obs->video.video_time);
+}
+
 /* camera-box #1049: the source-bound wrapper -- reads the live n (READ-ONLY, same as
  * genlock_should_drain_one), the locked boundary + shared throttle, and the FRESHEST queued frame
  * (async_frames.array[num-1], the achievable-floor reference), delegates the arithmetic to
@@ -5814,24 +5811,30 @@ static bool genlock_should_converge_phase(const obs_source_t *source, uint32_t r
 	const uint32_t measured = genlock_measure_source_multiple(source, interval);
 	const uint32_t n = measured >= 1 ? measured
 					 : (source->genlock_last_known_n >= 1 ? source->genlock_last_known_n : 1);
-	/* camera-box issue 1367 (review round 1): the N==1 shed belongs to a tick of the N==1 STEADY
-	 * branch only. On the N>=2 branch genlock_effective_source_multiple latched
-	 * genlock_last_known_n >= 2, so a post-erase re-measure that reads a conclusive n == 1 (a pair
-	 * straddling a dropped 60 fps frame) stays inert, exactly as before the N==1 rule. Mirror:
-	 * src/probe/genlock.rs ReleaseCadence::should_converge_phase. */
+	/* camera-box issue 1367: an N==1 tick converges to its PIN-DERIVED depth (genlock_n1_shed_due,
+	 * read at the tick's scheduled instant) instead of the #1049 reserve-aimed shed, which stays
+	 * inert for n < 2 below. That belongs to a tick of the N==1 STEADY branch only (review round 1):
+	 * on the N>=2 branch genlock_effective_source_multiple latched genlock_last_known_n >= 2, so a
+	 * post-erase re-measure that reads a conclusive n == 1 (a pair straddling a dropped 60 fps frame)
+	 * stays inert, exactly as before the N==1 rule. Mirror: src/probe/genlock.rs
+	 * ReleaseCadence::should_converge_phase. */
 	if (n < 2 && source->genlock_last_known_n >= 2)
 		return false;
 	const uint64_t newest_stamp =
 		source->async_frames.array[source->async_frames.num - 1]->timestamp;
+	if (n < 2)
+		return genlock_n1_shed_due(genlock_n1_tick_wall_now(wall_now), source->genlock_locked_next_boundary_ns,
+					   wall_now > newest_stamp ? wall_now - newest_stamp : 0, reserve_ms, interval,
+					   source->genlock_ticks_since_drain);
 	return genlock_phase_converge_due(wall_now, source->genlock_locked_next_boundary_ns, newest_stamp,
 					  reserve_ms, interval, n, source->genlock_ticks_since_drain);
 }
 
 /* camera-box issue 1367: the source-bound wrapper of the N==1 HOLD half -- reads the queue HEAD (what
- * this STEADY tick would present), the FRESHEST queued frame (the achievable floor) and the shared
- * #859 throttle, and delegates to genlock_n1_hold_due. Called ONLY from the N==1 STEADY branch
- * (the source multiple is 1 there by construction). Mirror: src/genlock_n1_depth.rs
- * should_hold_n1_phase. */
+ * this STEADY tick would present) at the tick's scheduled instant, the FRESHEST queued frame (the
+ * arrival floor) and the shared #859 throttle, and delegates to genlock_n1_hold_due. Called ONLY
+ * from the N==1 STEADY branch (the source multiple is 1 there by construction). Mirror:
+ * src/genlock_n1_depth.rs should_hold_n1_phase. */
 static bool genlock_should_hold_n1_phase(const obs_source_t *source, uint32_t reserve_ms, uint64_t interval,
 					 uint64_t wall_now)
 {
@@ -5839,7 +5842,8 @@ static bool genlock_should_hold_n1_phase(const obs_source_t *source, uint32_t re
 		return false;
 	const uint64_t head_stamp = source->async_frames.array[0]->timestamp;
 	const uint64_t newest_stamp = source->async_frames.array[source->async_frames.num - 1]->timestamp;
-	return genlock_n1_hold_due(wall_now, head_stamp, newest_stamp, reserve_ms, interval, 1,
+	return genlock_n1_hold_due(genlock_n1_tick_wall_now(wall_now), head_stamp,
+				   wall_now > newest_stamp ? wall_now - newest_stamp : 0, reserve_ms, interval, 1,
 				   source->genlock_ticks_since_drain);
 }
 
