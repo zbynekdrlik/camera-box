@@ -62,10 +62,7 @@ fn bash(env: &[(&str, &str)], script: &str) -> (i32, String, String) {
 
 /// Source the facts loader and run `body`.
 fn with_loader(env: &[(&str, &str)], body: &str) -> (i32, String, String) {
-    let script = format!(
-        "set -uo pipefail\n. \"{}\"\n{body}",
-        facts_lib().display()
-    );
+    let script = format!("set -uo pipefail\n. \"{}\"\n{body}", facts_lib().display());
     bash(env, &script)
 }
 
@@ -76,10 +73,8 @@ struct TmpDir(PathBuf);
 impl TmpDir {
     fn new(tag: &str) -> Self {
         let n = TMP_SEQ.fetch_add(1, Ordering::SeqCst);
-        let p = std::env::temp_dir().join(format!(
-            "strih-box-1361-{tag}-{}-{n}",
-            std::process::id()
-        ));
+        let p =
+            std::env::temp_dir().join(format!("strih-box-1361-{tag}-{}-{n}", std::process::id()));
         let _ = std::fs::remove_dir_all(&p);
         std::fs::create_dir_all(&p).expect("create temp dir");
         TmpDir(p)
@@ -107,7 +102,10 @@ fn strih_lx_env() -> String {
 fn fixture_box(dir: &TmpDir, name: &str, edits: &[(&str, &str)]) {
     let mut body = strih_lx_env();
     for (from, to) in edits {
-        assert!(body.contains(from), "fixture edit anchor `{from}` not in strih-lx.env");
+        assert!(
+            body.contains(from),
+            "fixture edit anchor `{from}` not in strih-lx.env"
+        );
         body = body.replacen(from, to, 1);
     }
     dir.write(&format!("{name}.env"), &body);
@@ -184,7 +182,10 @@ fn accessors_lazily_load_the_default_box_strih_lx() {
 #[test]
 fn todo_owner_template_is_refused_naming_every_missing_fact() {
     let (c, out, err) = with_loader(&[], "strih_box_load strih-pp && echo LOADED");
-    assert_ne!(c, 0, "strih-pp (TODO_OWNER template) must refuse; out={out}");
+    assert_ne!(
+        c, 0,
+        "strih-pp (TODO_OWNER template) must refuse; out={out}"
+    );
     assert!(!out.contains("LOADED"), "must not load: {out}");
     for k in FACT_KEYS {
         assert!(
@@ -197,7 +198,11 @@ fn todo_owner_template_is_refused_naming_every_missing_fact() {
 #[test]
 fn a_single_todo_owner_value_is_refused_by_name() {
     let d = TmpDir::new("todo1");
-    fixture_box(&d, "strih-lx", &[("STRIH_NIC_DRIVER=r8152", "STRIH_NIC_DRIVER=TODO_OWNER")]);
+    fixture_box(
+        &d,
+        "strih-lx",
+        &[("STRIH_NIC_DRIVER=r8152", "STRIH_NIC_DRIVER=TODO_OWNER")],
+    );
     let dir = d.path().to_string_lossy().into_owned();
     let (c, _o, err) = with_loader(&[("STRIH_BOXES_DIR", &dir)], "strih_box_load strih-lx");
     assert_ne!(c, 0);
@@ -296,7 +301,10 @@ fn malformed_fact_files_are_refused() {
         );
         assert_ne!(c, 0, "[{label}] must refuse; out={out}");
         assert!(!out.contains("LOADED"), "[{label}] loaded anyway");
-        assert!(err.contains(want), "[{label}] stderr must mention `{want}`:\n{err}");
+        assert!(
+            err.contains(want),
+            "[{label}] stderr must mention `{want}`:\n{err}"
+        );
     }
 }
 
@@ -327,14 +335,18 @@ fn a_fact_file_is_parsed_never_executed() {
 
 #[test]
 fn a_fleet_row_that_disagrees_with_the_fact_ip_is_refused() {
-    let fleet = "strih-lx|10.77.9.203|linux-genlock|always\nstream|10.77.9.204|windows-genlock|always";
+    let fleet =
+        "strih-lx|10.77.9.203|linux-genlock|always\nstream|10.77.9.204|windows-genlock|always";
     let (c, _o, err) = with_loader(&[("OBS_FLEET", fleet)], "strih_box_load strih-lx");
     assert_ne!(c, 0, "fleet row .203 vs fact .202 must refuse");
     assert!(err.contains("fleet"), "{err}");
     // A box with NO fleet row yet (a new strih before go-live) is fine.
     let fleet2 = "stream|10.77.9.204|windows-genlock|always";
     let (c2, _o, err2) = with_loader(&[("OBS_FLEET", fleet2)], "strih_box_load strih-lx");
-    assert_eq!(c2, 0, "no fleet row = not yet in the fleet, allowed: {err2}");
+    assert_eq!(
+        c2, 0,
+        "no fleet row = not yet in the fleet, allowed: {err2}"
+    );
 }
 
 #[test]
@@ -348,7 +360,10 @@ fn the_real_fleet_row_matches_the_fact_file() {
     );
     assert_eq!(c, 0, "{err}");
     let (fleet, fact) = out.split_once('|').expect("two fields");
-    assert_eq!(fleet, fact, "obs-fleet.sh strih-lx row must equal strih-lx.env STRIH_IP");
+    assert_eq!(
+        fleet, fact,
+        "obs-fleet.sh strih-lx row must equal strih-lx.env STRIH_IP"
+    );
 }
 
 #[test]
@@ -404,7 +419,10 @@ fn setup_and_verify_refuse_the_todo_owner_box() {
     for script in ["scripts/setup-strih.sh", "scripts/verify-strih.sh"] {
         let (c, out, err) = source_orchestrator(script, "--box strih-pp");
         assert_ne!(c, 0, "{script} --box strih-pp must refuse; out={out}");
-        assert!(!out.contains("SOURCED-OK"), "{script} continued past the refusal");
+        assert!(
+            !out.contains("SOURCED-OK"),
+            "{script} continued past the refusal"
+        );
         for k in FACT_KEYS {
             assert!(
                 err.contains(&format!("{k} is TODO_OWNER")),
@@ -437,9 +455,14 @@ fn setup_and_verify_default_to_strih_lx() {
 #[test]
 fn strih_lx_generated_output_is_byte_identical_to_the_pre_change_golden() {
     let render = root().join("tests/fixtures/strih_box_1361/render.sh");
-    let golden = std::fs::read_to_string(root().join("tests/fixtures/strih_box_1361/strih-lx.golden"))
-        .expect("golden");
-    let body = format!("bash \"{}\" \"{}\" strih-lx", render.display(), root().display());
+    let golden =
+        std::fs::read_to_string(root().join("tests/fixtures/strih_box_1361/strih-lx.golden"))
+            .expect("golden");
+    let body = format!(
+        "bash \"{}\" \"{}\" strih-lx",
+        render.display(),
+        root().display()
+    );
     let (c, out, err) = bash(&[], &body);
     assert_eq!(c, 0, "render failed: {err}");
     if out != golden {
@@ -473,7 +496,9 @@ fn setup_strih_takes_every_identity_value_from_the_facts() {
     // The box selection + load happens BEFORE the source-guard, so a sourced setup (tests) sees the
     // same facts the real run uses.
     let load = s.find("strih_box_load \"$STRIH_BOX\"").unwrap();
-    let guard = s.find("if [ \"${BASH_SOURCE[0]}\" != \"${0}\" ]; then").unwrap();
+    let guard = s
+        .find("if [ \"${BASH_SOURCE[0]}\" != \"${0}\" ]; then")
+        .unwrap();
     assert!(load < guard, "load facts before the source-guard");
 }
 
@@ -521,7 +546,10 @@ fn seed_manifest_follows_the_camera_and_cg_facts() {
         "strih-lx",
         &[
             ("STRIH_CAMERAS=1 2 3 4 5 6 7", "STRIH_CAMERAS=2 5"),
-            ("STRIH_CG_SENDER=RESOLUME-SNV (cg-obs)", "STRIH_CG_SENDER=none"),
+            (
+                "STRIH_CG_SENDER=RESOLUME-SNV (cg-obs)",
+                "STRIH_CG_SENDER=none",
+            ),
         ],
     );
     let dir = d.path().to_string_lossy().into_owned();

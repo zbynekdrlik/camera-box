@@ -108,7 +108,10 @@ fn dantesync_client_args_point_at_the_ntp_server_and_never_server_mode() {
     // guessed `strih.lan` default any more.
     let (c, out, err) = run_sourced(&[], "strih_lx_dantesync_client_args");
     assert_ne!(c, 0, "a server-role box has no client upstream: out={out}");
-    assert!(err.contains("STRIH_DANTESYNC_UPSTREAM"), "names the missing fact: {err}");
+    assert!(
+        err.contains("STRIH_DANTESYNC_UPSTREAM"),
+        "names the missing fact: {err}"
+    );
     // Overridable NTP server seam.
     let (_c2, out2, _e2) = run_sourced(
         &[("STRIH_LX_NTP_SERVER", "strih2.lan")],
@@ -745,7 +748,10 @@ fn dantesync_unit_text_renders_the_role_and_fail_closes_on_ambiguous_shapes() {
     // nothing -- never a guessed default host.
     let (c2c, out2c, _e) = run_sourced(&[], "strih_dantesync_unit_text client ''");
     assert_ne!(c2c, 0, "client with no upstream fact must refuse: {out2c}");
-    assert!(out2c.trim().is_empty(), "a refused client unit emits nothing: {out2c}");
+    assert!(
+        out2c.trim().is_empty(),
+        "a refused client unit emits nothing: {out2c}"
+    );
 
     // Ambiguous shapes emit NOTHING and return non-zero. (`client ''` is NOT ambiguous: the
     // printer defaults an empty client args to the client helper -- asserted above, both branches.)
@@ -4024,11 +4030,7 @@ fn reboot_pending_is_the_lowlatency_dropin_without_a_running_preempt_full() {
 #[test]
 fn setup_strih_final_verify_reports_pending_items_before_the_reboot() {
     let s = read_script("scripts/setup-strih.sh");
-    let step17 = block_between(
-        &s,
-        "step 17 \"Final verification",
-        "setup complete ===",
-    );
+    let step17 = block_between(&s, "step 17 \"Final verification", "setup complete ===");
     let pending = step17
         .find("if strih_lx_reboot_pending \"$(cat /proc/cmdline 2>/dev/null || true)\"; then")
         .expect("step 17 must branch on the pending reboot");
