@@ -615,3 +615,18 @@ fn tick_action_computes_the_view_truth_table() {
         diffs.join("\n")
     );
 }
+
+/// CI linux-genlock strih build (24.9.2026): OBS builds the frontend with context-less connects
+/// disabled, so `QObject::connect(sender, &Signal, lambda)` (3 args) has no overload and the
+/// DrmOutputView TU failed to compile. Every functor connect there must pass a context object.
+#[test]
+fn drm_output_view_menu_connects_pass_a_context_object() {
+    let src = file("vendor/obs-studio/frontend/components/DrmOutputView.cpp");
+    for line in src.lines().filter(|l| l.contains("QObject::connect(")) {
+        let args = line.matches(',').count();
+        assert!(
+            args >= 3,
+            "context-less 3-argument QObject::connect does not compile in the OBS frontend: {line}"
+        );
+    }
+}
