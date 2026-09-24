@@ -127,10 +127,10 @@ pub struct BenchConfig {
     pub tick_late_max_ns: u64,
     /// One strih-lx OBS restart during the run (issue 1367), or none.
     pub restart: Option<SenderRestart>,
-    /// A constant phase error of the stream render tick against the grid, in ns (negative =
-    /// early): what the ±2 ms `GENLOCK_MAX_SLEW_NS` clamp leaves while the tick slews back after a
-    /// clock step. The stamps stay on the grid, so this is the geometry that moves a presented age
-    /// across a depth edge (issue 1367 — a shared N==1 hold/shed edge limit-cycled on it).
+    /// A constant phase error of the stream render tick's SCHEDULE against the grid, in ns
+    /// (negative = early): a slew-clamped tick after a clock step sits off the grid until
+    /// `GENLOCK_MAX_SLEW_NS` (2 ms per tick) brings it back. The stamps stay on the grid, so this
+    /// is the geometry that moves a presented age across a depth edge (issue 1367).
     pub receiver_tick_offset_ns: i64,
 }
 
@@ -200,7 +200,7 @@ pub struct BenchReport {
     pub n1_grows: u64,
     pub dropped_due: u64,
     pub underruns: u64,
-    /// Render ticks skipped because the previous one woke a whole interval late (after warm-up).
+    /// Render slots skipped because a tick overran by two intervals or more (after warm-up).
     pub skipped_ticks: u64,
     /// The sender's stamp irregularity as the receiver's `stamp_dup=` / `stamp_gap=` audit tokens
     /// would count it ([`StampTrack`], the production arrival-side tracker): stamps equal to their
@@ -502,23 +502,20 @@ pub fn run_bench(cfg: &BenchConfig) -> BenchReport {
     let mut tick_no: u64 = 0;
     let mut last_sample: Option<u64> = None;
     let mut last_tick_state: Option<u64> = None;
+    let mut prev_wall: u64 = 0;
     while nominal < end {
         let mut late = (rng.normal().abs() * cfg.tick_jitter_sigma_ns as f64) as u64;
         if rng.ppm(cfg.tick_late_ppm) {
             late = rng.uniform_ns(cfg.tick_late_min_ns, cfg.tick_late_max_ns);
         }
-        let wall = (nominal + late).saturating_add_signed(cfg.receiver_tick_offset_ns);
-        // A render tick that wakes a whole interval late SKIPS the slot(s) it overran:
-        // genlock_next_deadline (obs-video.c) sleeps to the next grid point AFTER the previous
-        // tick, so the late wake serves the latest slot it passed and the skipped one never
-        // ticks — the conveyor then genuinely presents one frame deeper. (No live config here
-        // reaches it: the tail is 10–30 ms; a late-tick stress run does.)
-        while cfg.grid.next_tick(nominal) <= wall {
-            nominal = cfg.grid.next_tick(nominal);
-            if nominal >= warm {
-                report.skipped_ticks += 1;
-            }
-        }
+        // The tick's SCHEDULED instant (`obs->video.video_time` mapped to wall): the grid slot
+        // plus a constant schedule phase. `late` is the wake / processing lateness on top of it.
+        // Ticks run SERIALLY: after an overrun below two intervals `video_sleep` (obs-video.c)
+        // counts one frame and schedules the next slot from the previous TARGET, so the next tick
+        // is a CATCH-UP that runs right after the late one — no slot is lost.
+        let scheduled = nominal.saturating_add_signed(cfg.receiver_tick_offset_ns);
+        let wall = (scheduled + late).max(prev_wall + 1_000);
+        prev_wall = wall;
         // Produce every frame that has arrived by this tick (keep one frame of look-ahead).
         while pending.back().is_none_or(|&(arrival, _)| arrival <= wall) {
             let (arrival, stamp, dup, gap) = sender.next_frame(cfg);
@@ -563,7 +560,16 @@ pub fn run_bench(cfg: &BenchConfig) -> BenchReport {
             last_tick_state = Some(state);
         }
         tick_no += 1;
+        // Only an overrun of TWO intervals or more SKIPS slots (`video_sleep` count >= 2): those
+        // slots never tick, so the conveyor genuinely presents one frame deeper per skipped slot.
+        let overrun_slots = wall.saturating_sub(scheduled) / CANVAS_INTERVAL_NS;
         nominal = cfg.grid.next_tick(nominal);
+        for _ in 1..overrun_slots.max(1) {
+            nominal = cfg.grid.next_tick(nominal);
+            if nominal >= warm {
+                report.skipped_ticks += 1;
+            }
+        }
     }
     report.hours = cfg.duration_s.saturating_sub(cfg.warmup_s) as f64 / 3600.0;
     report.flips_per_hour = if report.hours > 0.0 {
@@ -854,93 +860,90 @@ mod tests {
         }
     }
 
-    /// issue 1367 (review round 1) — a render tick that wakes LATE must never read the conveyor one
-    /// frame deep. The live tail is 10–30 ms; this stress tail reaches 45 ms, past one interval, so
-    /// some ticks genuinely SKIP a slot (the conveyor really is one frame deeper afterwards and the
-    /// shed pays it back) and many more wake just short of a skip. The shed may only ever repay a
-    /// skipped tick: no misfire shed, so no hold to undo it (`n1_grows`). With the shed's early
-    /// margin at 2 ms the band 31.3–33.3 ms misfired (19 holds over the three seeds); the
-    /// 100 us margin leaves a 0.1 ms band.
+    /// issue 1367 (review rounds 1-2) — a render tick that runs LATE, by anything short of a
+    /// genuine slot skip, must never make the N==1 rule correct a settled conveyor. The live tail is
+    /// 10–30 ms; these stress tails reach 45 and 60 ms, and every such overrun (below two
+    /// intervals) is followed by a CATCH-UP tick (`video_sleep`), so no slot is lost and no
+    /// correction is owed. Reading the depth at the processing wall misfired a shed on every tick
+    /// late by more than one interval minus the early margin (149 holds over 3 x 2 h at 45 ms);
+    /// reading it at the tick's SCHEDULED instant cannot.
     #[test]
-    fn a_late_render_tick_never_misfires_a_shed_1367() {
-        let mut misfire_holds = 0;
-        for seed in [
-            BenchConfig::live_2026_09_24(GridModel::Production).seed,
-            1,
-            2,
-        ] {
-            let mut cfg = BenchConfig::live_2026_09_24(GridModel::Production);
-            cfg.seed = seed;
-            cfg.tick_late_max_ns = 45_000_000;
-            cfg.duration_s = 2 * 3600;
-            let r = run_bench(&cfg);
-            assert!(
-                r.skipped_ticks > 0,
-                "the stress tail must skip ticks: {r:?}"
-            );
-            assert!(
-                r.converge_sheds + r.drains <= r.skipped_ticks + r.n1_grows,
-                "seed {seed}: a correction that repays neither a skipped tick nor a misfire: {r:?}"
-            );
-            assert!(
-                share(&r, &[31]) > 0.99,
-                "seed {seed}: states {:?}",
-                r.state_samples
-            );
-            misfire_holds += r.n1_grows;
+    fn a_late_or_catch_up_render_tick_never_corrects_a_settled_source_1367() {
+        for tail_max_ms in [45u64, 60] {
+            for seed in [
+                BenchConfig::live_2026_09_24(GridModel::Production).seed,
+                1,
+                2,
+            ] {
+                let mut cfg = BenchConfig::live_2026_09_24(GridModel::Production);
+                cfg.seed = seed;
+                cfg.tick_late_max_ns = tail_max_ms * 1_000_000;
+                cfg.duration_s = 2 * 3600;
+                let r = run_bench(&cfg);
+                assert_eq!(
+                    r.skipped_ticks, 0,
+                    "tail {tail_max_ms} ms, seed {seed}: {r:?}"
+                );
+                assert_eq!(
+                    r.converge_sheds + r.n1_grows,
+                    0,
+                    "tail {tail_max_ms} ms, seed {seed}: the N==1 rule corrected a settled \
+                     source on a late tick: {r:?}"
+                );
+                assert!(
+                    share(&r, &[31]) > 0.99,
+                    "tail {tail_max_ms} ms, seed {seed}: states {:?}",
+                    r.state_samples
+                );
+            }
         }
-        assert!(
-            misfire_holds <= 3,
-            "{misfire_holds} misfire holds over 3 x 2 h: late ticks read the conveyor one frame deep"
-        );
     }
 
-    /// issue 1367 (review round 1) — a CONSTANT phase error of the stream render tick, from 2 ms
-    /// early to 20 ms late (a slew-clamped tick after a clock step can sit this far off the grid for
-    /// a while; `GENLOCK_MAX_SLEW_NS` bounds the per-tick correction, not the phase). The settled
-    /// source keeps its depth, every correction repays a genuinely skipped tick (a late phase plus
-    /// the late-tick tail passes a whole interval), and every restart stall still lands on one
-    /// depth. An EARLY phase only defers a shed until the next tick that is on the grid or late.
+    /// issue 1367 (review rounds 1-2) — a CONSTANT phase error of the stream render tick's
+    /// SCHEDULE, from 10 ms early to 10 ms late (a slew-clamped tick after a clock step; the ±2 ms
+    /// `GENLOCK_MAX_SLEW_NS` bounds the per-tick correction, not the phase). The settled source
+    /// never corrects, and every restart stall lands on one depth — asserted with the late-tick
+    /// tail switched OFF, so no random late tick can hand the result to the #859 drain.
     #[test]
-    fn receiver_tick_phase_never_misfires_1367() {
+    fn a_render_tick_schedule_phase_never_corrects_and_never_blocks_the_settle_1367() {
         let target = 987_000_000u64.div_ceil(CANVAS_INTERVAL_NS) + 1;
-        for offset_ms in [-2i64, -1, 0, 1, 2, 5, 10, 20] {
+        for offset_ms in [-10i64, -5, -2, 0, 2, 5, 10] {
             let offset = offset_ms * 1_000_000;
             let mut cfg = BenchConfig::live_2026_09_24(GridModel::Production);
             cfg.receiver_tick_offset_ns = offset;
             cfg.duration_s = 2 * 3600;
             let r = run_bench(&cfg);
-            assert!(
-                r.n1_grows <= 2,
-                "tick phase {offset_ms} ms: misfire holds: {r:?}"
-            );
-            assert!(
-                r.converge_sheds + r.drains <= r.skipped_ticks + r.n1_grows,
-                "tick phase {offset_ms} ms: a correction that repays no skipped tick: {r:?}"
+            assert_eq!(
+                r.converge_sheds + r.n1_grows + r.drains,
+                0,
+                "schedule phase {offset_ms} ms: {r:?}"
             );
             assert!(
                 share(&r, &[31]) > 0.99,
-                "tick phase {offset_ms} ms: {:?}",
+                "schedule phase {offset_ms} ms: {:?}",
                 r.state_samples
             );
-        }
-        for offset_ms in [-2i64, 0, 2, 10, 20] {
-            let offset = offset_ms * 1_000_000;
             for k in 0..=3 {
-                let r = after_restart_with(
-                    987,
-                    k,
-                    BenchConfig::live_2026_09_24(GridModel::Production).seed,
-                    offset,
-                );
+                let mut cfg = BenchConfig::live_2026_09_24(GridModel::Production);
+                cfg.receiver_tick_offset_ns = offset;
+                cfg.tick_late_ppm = 0;
+                cfg.restart = Some(SenderRestart {
+                    at_s: 300,
+                    outage_ms: 8_000,
+                    stall_slots: k,
+                });
+                cfg.warmup_s = 300 + 8 + 60;
+                cfg.duration_s = cfg.warmup_s + 3600;
+                let r = run_bench(&cfg);
                 assert_eq!(
                     settled_state(&r),
                     Some(target),
-                    "tick phase {offset_ms} ms, {k}-slot stall: {r:?}"
+                    "schedule phase {offset_ms} ms, {k}-slot stall: {r:?}"
                 );
-                assert!(
-                    r.converge_sheds + r.drains <= r.skipped_ticks + r.n1_grows,
-                    "tick phase {offset_ms} ms, {k}-slot stall: {r:?}"
+                assert_eq!(
+                    r.converge_sheds + r.n1_grows + r.drains,
+                    0,
+                    "schedule phase {offset_ms} ms, {k}-slot stall: {r:?}"
                 );
             }
         }

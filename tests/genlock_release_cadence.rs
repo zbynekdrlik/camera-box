@@ -480,16 +480,12 @@ fn phase_convergence_present_and_wired_in_1049() {
         src.contains("const uint64_t target = reserve_ns > floor_ns ? reserve_ns : floor_ns;"),
         "{OBS_SOURCE}: #1049 — the converge target must be max(reserve, floor), never reserve alone."
     );
-    // N==1 is NOT the reserve-aimed #1049 shed (that one limit-cycled on a deep N==1 source, the
-    // coordinator's live finding): issue 1367 routes n<2 to the pin-derived depth rule instead,
-    // which aims at the natural hold (base + 1 frames) and only on a deep source. The old bare
-    // `if (n < 2) return false;` must not come back, and the reserve-aimed N>=2 arithmetic below
-    // must never run for n<2.
+    // N>=2-ONLY gate (coordinator's live finding): an N==1 phase shed does not stick and
+    // limit-cycles on a deep source; convergence must early-return for n<2.
     assert!(
-        src.contains("if (n < 2) return genlock_n1_shed_due("),
-        "{OBS_SOURCE}: #1049 / issue 1367 — n<2 no longer routes to the N==1 pin-derived shed \
-         (if (n < 2) return genlock_n1_shed_due(...)); either the reserve-aimed N>=2 shed now runs \
-         on a deep N==1 source (the NDI 2ME PGM oscillation) or the restart depth is random again."
+        src.contains("if (n < 2) return false;"),
+        "{OBS_SOURCE}: #1049 — the N>=2-only gate (if (n < 2) return false;) is gone; convergence \
+         would limit-cycle on a deep N==1 source (the stream NDI 2ME PGM oscillation)."
     );
     // The shed is CALLED from the release tail, gated on converge_eligible.
     assert!(
@@ -542,9 +538,13 @@ fn phase_convergence_present_and_wired_in_1049() {
 
 /// issue 1367 — the N==1 PIN-DERIVED DEPTH must be present and WIRED. A strih OBS restart landed
 /// the stream `NDI 2ME PGM` on 31 OR 32 frames at random; the rule settles every restart on
-/// `base + 1`: the shed half is the n<2 branch of `genlock_phase_converge_due` (anchored in the
-/// #1049 test above), the hold half is `genlock_n1_hold_due` called at the HEAD of the N==1 STEADY
-/// branch. Mirrors: src/genlock_backlog.rs n1_shed_due / should_hold_n1_phase + the C-vs-Rust
+/// `base + 1`. The shed half is routed by the SOURCE wrapper `genlock_should_converge_phase` for an
+/// N==1 tick (the pure `genlock_phase_converge_due` keeps its #1049 `if (n < 2) return false;`, so
+/// every N>=2 decision is the pre-1367 arithmetic, byte for byte); the hold half is
+/// `genlock_n1_hold_due` called at the HEAD of the N==1 STEADY branch. Both read the depth at the
+/// render tick's SCHEDULED instant (review round 2: `video_sleep` catches a late tick up without
+/// losing its slot, so the processing wall of a late tick over-reads the conveyor). Mirrors:
+/// src/genlock_n1_depth.rs n1_shed_due / should_hold_n1_phase / n1_tick_wall_ns + the C-vs-Rust
 /// parity gates in tests/genlock_relock_selection_parity.rs.
 #[test]
 fn n1_pin_derived_depth_present_and_wired_1367() {
@@ -552,37 +552,49 @@ fn n1_pin_derived_depth_present_and_wired_1367() {
     let src = squish(&raw);
     for (needle, why) in [
         (
+            "static inline uint64_t genlock_n1_tick_wall_ns(",
+            "the pure scheduled-instant helper (wall_now - (mono_now - scheduled mono))",
+        ),
+        (
             "static inline uint64_t genlock_n1_base_frames(",
             "the resync-depth helper (ceil((pin - 1 us) / interval))",
         ),
         (
             "static inline uint64_t genlock_n1_depth_frames(",
-            "the late-tolerant presented depth the SHED reads",
-        ),
-        (
-            "static inline uint64_t genlock_n1_rounded_depth_frames(",
-            "the ROUNDED presented depth the HOLD reads (half a frame from the shed edge)",
+            "the ROUNDED presented depth both halves read",
         ),
         (
             "static inline bool genlock_n1_is_deep_source(",
             "the deep-source guard (shallow cg / imag sources stay untouched)",
         ),
         (
+            "static inline bool genlock_n1_shed_due(",
+            "the pure SHED decision",
+        ),
+        (
             "static inline bool genlock_n1_hold_due(",
             "the pure HOLD decision",
+        ),
+        (
+            "static inline uint64_t genlock_n1_tick_wall_now(uint64_t wall_now_ns)",
+            "the source-side scheduled-instant read",
+        ),
+        (
+            "return genlock_n1_tick_wall_ns(wall_now_ns, os_gettime_ns(), obs->video.video_time);",
+            "the scheduled instant = the render tick's own video_time (the sys_time async_tick \
+             passes down), mapped into wall time",
         ),
         (
             "static bool genlock_should_hold_n1_phase(",
             "the source-bound HOLD wrapper (queue head + freshest frame)",
         ),
         (
-            "#define GENLOCK_N1_PIN_FRAME_TOLERANCE_NS 1000ULL",
-            "the 1 us pin tolerance (an exact-multiple pin counts one frame too many without it)",
+            "if (n < 2) return genlock_n1_shed_due(",
+            "the N==1 SHED routing in the source wrapper genlock_should_converge_phase",
         ),
         (
-            "#define GENLOCK_N1_TICK_EARLY_MARGIN_NS 100000ULL",
-            "the 100 us early-tick margin of the SHED read (review round 1: at 2 ms a 31.3-33.3 ms \
-             late tick misfired a shed)",
+            "#define GENLOCK_N1_PIN_FRAME_TOLERANCE_NS 1000ULL",
+            "the 1 us pin tolerance (an exact-multiple pin counts one frame too many without it)",
         ),
         (
             "#define GENLOCK_N1_DEEP_MARGIN_FRAMES 2ULL",
@@ -611,6 +623,19 @@ fn n1_pin_derived_depth_present_and_wired_1367() {
             "{OBS_SOURCE}: issue 1367 — {why} is gone or duplicated (anchor `{needle}`)."
         );
     }
+    // Both N==1 decisions read the depth at the SCHEDULED instant, never the processing wall.
+    assert_eq!(
+        src.matches("genlock_n1_tick_wall_now(wall_now)").count(),
+        2,
+        "{OBS_SOURCE}: issue 1367 (review round 2) — the SHED and the HOLD wrappers must both read \
+         the depth at the render tick's scheduled instant (genlock_n1_tick_wall_now(wall_now))."
+    );
+    assert!(
+        !src.contains("GENLOCK_N1_TICK_EARLY_MARGIN_NS") && !src.contains("genlock_n1_rounded_depth_frames"),
+        "{OBS_SOURCE}: issue 1367 (review round 2) — the processing-wall early-tick margin and its \
+         separate rounded read are replaced by the scheduled-instant read; a late tick below two \
+         intervals is caught up by video_sleep, so any processing-wall margin misfires."
+    );
     // ORDER inside the N==1 STEADY branch: the hold decides BEFORE the branch marks itself
     // drain/converge-eligible, so a held tick neither drains nor sheds (one correction per tick).
     // `drain_eligible = true;` is set ONLY on the N==1 STEADY branch, and the N>=2 STEADY branch
