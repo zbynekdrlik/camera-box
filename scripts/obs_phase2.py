@@ -2942,6 +2942,131 @@ def program_scene(a):
     print(scene)
 
 
+# --- issue 1242: strih connect-on-show (program-path inputs connect only while shown) ---------------
+# The vendored DistroAV receiver PARKS a genlocked input flagged `genlock_connect_on_show` (and not a
+# `genlock_monitor` twin) while nothing shows it: its NDI receiver is released, its received= counter
+# stops. The strih scene role lib (strih_scenes.py --apply-roles) sets the flag on the camera inputs.
+# An E2E run needs every program-path input full-bandwidth and connected for the whole measurement, so
+# recording-e2e.sh HOLDS the flag off for the run (connect_on_show_hold) and cleanup() restores it
+# (connect_on_show_restore). The hold's state file is written BEFORE any flag flips, so a run killed
+# mid-hold still leaves restore a complete list; a re-hold UNIONS the file (a crashed previous run's
+# held inputs are never forgotten). A leftover held flag is fail-SAFE (today's always-connected
+# bandwidth) and the next strih OBS launch re-applies the roles anyway.
+CONNECT_ON_SHOW_KEY = "genlock_connect_on_show"
+GENLOCK_MONITOR_KEY = "genlock_monitor"
+
+
+def hidden_by_design(settings, showing):
+    """PURE: is this input PARKED by design right now? True iff it is genlocked, flagged program-path
+    connect-on-show, NOT a monitor twin, and not showing anywhere. A consumer (e.g. a liveness verify)
+    must then SKIP it -- its held frame is the design, never a wedge."""
+    s = settings or {}
+    return (bool(s.get("genlock_fifo")) and bool(s.get(CONNECT_ON_SHOW_KEY))
+            and not bool(s.get(GENLOCK_MONITOR_KEY)) and not showing)
+
+
+def input_hidden_by_design(ws, input_name):
+    """IMPURE wrapper: read the input's settings + GetSourceActive videoShowing and apply
+    hidden_by_design. A failed read -> False (never SKIP a check on a can't-confirm)."""
+    settings = (_rpc(ws, "GetInputSettings", {"inputName": input_name}, ignore_err=True)
+                or {}).get("inputSettings") or {}
+    if not settings.get(CONNECT_ON_SHOW_KEY):
+        return False
+    active = _rpc(ws, "GetSourceActive", {"sourceName": input_name}, ignore_err=True) or {}
+    if "videoShowing" not in active:
+        return False
+    return hidden_by_design(settings, bool(active.get("videoShowing")))
+
+
+def connect_on_show_targets(settings_by_input):
+    """PURE: the input names whose settings carry genlock_connect_on_show=True (sorted)."""
+    return sorted(n for n, s in (settings_by_input or {}).items() if (s or {}).get(CONNECT_ON_SHOW_KEY))
+
+
+def _read_hold_state(path):
+    try:
+        with open(path) as fh:
+            names = json.load(fh)
+    except FileNotFoundError:
+        return []
+    except (OSError, ValueError) as e:
+        raise RuntimeError(f"connect-on-show hold state {path!r} unreadable: {e}") from e
+    return sorted({str(n) for n in names if n}) if isinstance(names, list) else []
+
+
+def _write_hold_state(path, names):
+    tmp = f"{path}.tmp"
+    with open(tmp, "w") as fh:
+        json.dump(sorted(names), fh)
+    os.replace(tmp, path)
+
+
+def _set_connect_on_show(ws, names, value):
+    """Set the flag on each input (overlay) and read it back. Returns the names whose read-back
+    did not match (an empty list = every write landed)."""
+    failed = []
+    for n in names:
+        _rpc(ws, "SetInputSettings",
+             {"inputName": n, "inputSettings": {CONNECT_ON_SHOW_KEY: value}, "overlay": True},
+             ignore_err=True)
+        back = (_rpc(ws, "GetInputSettings", {"inputName": n}, ignore_err=True)
+                or {}).get("inputSettings") or {}
+        if bool(back.get(CONNECT_ON_SHOW_KEY)) != value:
+            failed.append(n)
+    return failed
+
+
+def connect_on_show_hold(ws, state_path):
+    """HOLD every connect-on-show input connected for an E2E run: record the targets (UNION with any
+    existing state file) BEFORE flipping, then set the flag off and read it back. Returns
+    (held_names, failed_names)."""
+    inputs = (_rpc(ws, "GetInputList", {"inputKind": "ndi_source"}) or {}).get("inputs") or []
+    settings = {}
+    for i in inputs:
+        name = i.get("inputName")
+        if name and i.get("inputKind", "ndi_source") == "ndi_source":
+            settings[name] = (_rpc(ws, "GetInputSettings", {"inputName": name}, ignore_err=True)
+                              or {}).get("inputSettings") or {}
+    targets = connect_on_show_targets(settings)
+    held = sorted(set(_read_hold_state(state_path)) | set(targets))
+    _write_hold_state(state_path, held)
+    failed = _set_connect_on_show(ws, held, False)
+    return held, failed
+
+
+def connect_on_show_restore(ws, state_path):
+    """RESTORE the connect-on-show flag on every input the hold recorded, read it back, and remove
+    the state file only when every restore landed. No state file -> ([], []). Returns
+    (restored_names, failed_names)."""
+    names = _read_hold_state(state_path)
+    if not names:
+        return [], []
+    failed = _set_connect_on_show(ws, names, True)
+    if not failed:
+        os.remove(state_path)
+    return names, failed
+
+
+def connect_on_show(a):
+    """CLI: `connect-on-show --host H (--hold FILE | --restore FILE)`. Exit 1 when any flag write did
+    not read back (the caller decides: the E2E hold aborts the run, the cleanup restore only warns)."""
+    ws = _conn(a.host, a.password)
+    try:
+        if a.hold:
+            names, failed = connect_on_show_hold(ws, a.hold)
+            verb = "held (connect-on-show OFF for the run)"
+        else:
+            names, failed = connect_on_show_restore(ws, a.restore)
+            verb = "restored (connect-on-show ON)"
+    finally:
+        ws.close()
+    print(f"issue 1242 connect-on-show {verb}: {', '.join(names) if names else '(none)'}")
+    if failed:
+        print(f"ERROR issue 1242: connect-on-show read-back FAILED on: {', '.join(failed)}",
+              file=sys.stderr)
+        sys.exit(1)
+
+
 def main():
     ap = argparse.ArgumentParser()
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -3092,6 +3217,13 @@ def main():
     rbc.add_argument("--strih-host", default=os.environ.get("STRIH_HOST", "10.77.9.202"))
     rbc.add_argument("--stream-host", default=os.environ.get("STREAM_HOST", "10.77.9.204"))
     rbc.add_argument("--password", default=os.environ.get("OBS_PASSWORD", ""))
+    # issue 1242: the E2E connect-on-show hold/restore (exactly one of --hold / --restore).
+    cos = sub.add_parser("connect-on-show")
+    cos.add_argument("--host", required=True)
+    cos.add_argument("--password", default="")
+    cos_mode = cos.add_mutually_exclusive_group(required=True)
+    cos_mode.add_argument("--hold", default=None, metavar="STATE_FILE")
+    cos_mode.add_argument("--restore", default=None, metavar="STATE_FILE")
     a = ap.parse_args()
     {"setup": setup, "teardown": teardown, "record": record,
      "prod-scene": prod_scene, "switch": switch,
@@ -3107,7 +3239,8 @@ def main():
      "republish-black-check": republish_black_check,
      "idle-receiver": idle_receiver,
      "apply-measurement-pins": apply_measurement_pins,
-     "verify-measurement-pins": verify_measurement_pins}[a.cmd](a)
+     "verify-measurement-pins": verify_measurement_pins,
+     "connect-on-show": connect_on_show}[a.cmd](a)
 
 
 if __name__ == "__main__":

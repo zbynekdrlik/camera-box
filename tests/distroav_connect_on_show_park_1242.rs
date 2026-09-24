@@ -204,7 +204,10 @@ fn park_marker_is_mutually_non_substring_vs_existing_families() {
              watchdogs + E2E gates read it to classify a hidden-by-design input as SKIP)."
         );
     }
-    assert!(src.contains(PARK_MARKER), "{NDI_SOURCE}: issue 1242 — the park marker is gone.");
+    assert!(
+        src.contains(PARK_MARKER),
+        "{NDI_SOURCE}: issue 1242 — the park marker is gone."
+    );
 }
 
 #[test]
@@ -280,7 +283,15 @@ fn park_decision_computes_the_spec_truth_table() {
 
     let cc = std::env::var("CC").unwrap_or_else(|_| "cc".to_string());
     let out = Command::new(&cc)
-        .args(["-std=gnu99", "-Wall", "-Wextra", "-Wformat=2", "-Wconversion", "-Werror", "-O1"])
+        .args([
+            "-std=gnu99",
+            "-Wall",
+            "-Wextra",
+            "-Wformat=2",
+            "-Wconversion",
+            "-Werror",
+            "-O1",
+        ])
         .arg(&cfile)
         .arg("-o")
         .arg(&bin)
@@ -296,7 +307,9 @@ fn park_decision_computes_the_spec_truth_table() {
         "issue 1242: the lifted park decision does NOT COMPILE standalone under -Werror:\n{}\n{c}",
         String::from_utf8_lossy(&out.stderr)
     );
-    let run = Command::new(&bin).output().expect("issue 1242: harness failed to execute");
+    let run = Command::new(&bin)
+        .output()
+        .expect("issue 1242: harness failed to execute");
     assert!(run.status.success(), "issue 1242: harness exited non-zero");
     let got: Vec<bool> = String::from_utf8(run.stdout)
         .expect("utf-8")
@@ -304,7 +317,13 @@ fn park_decision_computes_the_spec_truth_table() {
         .filter(|l| !l.trim().is_empty())
         .map(|l| l.trim() == "1")
         .collect();
-    assert_eq!(got.len(), vs.len(), "issue 1242: harness printed {} of {} rows", got.len(), vs.len());
+    assert_eq!(
+        got.len(),
+        vs.len(),
+        "issue 1242: harness printed {} of {} rows",
+        got.len(),
+        vs.len()
+    );
     let diffs: Vec<String> = vs
         .iter()
         .zip(&got)
@@ -313,5 +332,9 @@ fn park_decision_computes_the_spec_truth_table() {
             format!("  park(genlock={ga}, monitor={mon}, connect_on_show={cos}, showing={show}) -> C {g}, want {want}")
         })
         .collect();
-    assert!(diffs.is_empty(), "issue 1242: park truth table mismatch:\n{}", diffs.join("\n"));
+    assert!(
+        diffs.is_empty(),
+        "issue 1242: park truth table mismatch:\n{}",
+        diffs.join("\n")
+    );
 }

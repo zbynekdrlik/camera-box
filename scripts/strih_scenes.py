@@ -45,6 +45,7 @@ import argparse
 import glob
 import json
 import os
+import re
 import sys
 
 from websocket import create_connection
@@ -388,6 +389,168 @@ def input_classes_summary(inputs):
     return "%d camera, %d feedback (%s)" % (ncam, nfb, ", ".join(pairs))
 
 
+# --- issue 1242: the BANDWIDTH ROLES (pure helpers -> Tier-0 testable) -----------------------------
+# Owner ruling 24.9.2026: strih pulls FULL bandwidth only for the cameras that are SHOWN -- preview,
+# program, a projector, the visible item of the Grading NDI-output scene. Two receiver roles per camera:
+#   * PROGRAM-PATH main (`NDI camN`, genlock_connect_on_show=True): the vendored DistroAV receiver PARKS
+#     it (releases the NDI receiver) while nothing shows it and reconnects on show. A cold start in
+#     preview is accepted by the owner.
+#   * MONITOR twin (`MV NDI camN`, genlock_monitor=True): the #501 low-bandwidth receiver of the SAME
+#     sender, ALWAYS connected, feeding the built-in multiview via an `MV <scene>` twin scene.
+# The built-in multiview renders the twin scenes (show_in_multiview), never a scene holding a full
+# program-path input -- otherwise the multiview itself would keep every camera shown (= connected).
+# This reverses, for the strih role, the issue-761 same-source multiview and the issue-764 keep-alive
+# of every genlocked input. Scoped by ROLE, never by platform: only the fleet camera senders become
+# program-path (the cg inputs stay always-connected -- a CG cut-in must be instant; the 2ME feedback
+# inputs are not genlocked); stream / resolume never run this lib.
+CONNECT_ON_SHOW_KEY = "genlock_connect_on_show"
+GENLOCK_MONITOR_KEY = "genlock_monitor"
+TWIN_PREFIX = "MV "
+# A fleet camera sender (`CAM<n> (usb)`, `CAM<n> (30p)`, ...) -- the only program-path senders.
+PROGRAM_PATH_SENDER_RE = re.compile(r"^CAM\d+ \(")
+# Audio-only inputs carry no picture; a multiview twin scene never needs them (the multiview only
+# SHOWS a scene -- its audio is never mixed), so they are left out of a twin.
+AUDIO_ONLY_INPUT_KINDS = frozenset({
+    "pulse_input_capture", "pulse_output_capture", "alsa_input_capture", "jack_input_client",
+    "asio_input_capture", "wasapi_input_capture", "wasapi_output_capture",
+    "wasapi_process_output_capture", "coreaudio_input_capture", "coreaudio_output_capture",
+})
+# obs-websocket 5 SetSceneItemTransform accepts only these (GetSceneItemList also returns read-only
+# computed width/height/sourceWidth/sourceHeight -- the strih_mv_scenes.py convention).
+SETTABLE_TRANSFORM_FIELDS = frozenset({
+    "positionX", "positionY", "rotation", "scaleX", "scaleY", "alignment",
+    "boundsType", "boundsAlignment", "boundsWidth", "boundsHeight",
+    "cropLeft", "cropTop", "cropRight", "cropBottom",
+})
+# The built-in multiview only re-reads scene membership on a scene-list change (OBS
+# UpdateMultiviewProjectors on add/remove/rename); a create+remove of this scratch scene triggers it.
+MULTIVIEW_REFRESH_SCENE = "__camera-box multiview refresh (issue 1242)"
+
+
+def is_program_path_sender(sender):
+    """True for a fleet camera sender (`CAM<n> (...)`) -- the only program-path (connect-on-show)
+    inputs. The cg sender, the 2ME feedback pair and anything else stay always connected."""
+    return bool(PROGRAM_PATH_SENDER_RE.match(sender or ""))
+
+
+def program_path_inputs(plan):
+    """The seed plan's program-path INPUT names (plan order): genlocked camera-class inputs whose
+    sender is a fleet camera."""
+    return [item["input"] for item in plan
+            if item["settings"].get("genlock_fifo") and is_program_path_sender(item["ndi_source_name"])]
+
+
+def twin_name(name):
+    """'Cam 3' -> 'MV Cam 3', 'NDI cam3' -> 'MV NDI cam3' (the strih_mv_scenes.py convention)."""
+    return TWIN_PREFIX + name
+
+
+def main_role_settings():
+    """The program-path role for a main camera input (fresh dict each call)."""
+    return {CONNECT_ON_SHOW_KEY: True}
+
+
+def twin_input_settings(main_effective):
+    """The monitor-twin settings: the SAME live sender + pin as its main, genlocked, flagged
+    genlock_monitor (the forcer narrows it to LOWEST bandwidth and it is never parked),
+    connect-on-show explicitly OFF, NDI audio off (a camera twin never feeds the mixer)."""
+    main_effective = main_effective or {}
+    return {
+        "ndi_source_name": main_effective.get("ndi_source_name", ""),
+        "genlock_fifo": True,
+        "ndi_sync": 2,
+        "genlock_latency_ms_src": main_effective.get("genlock_latency_ms_src", DEFAULT_CAMERA_LATENCY_MS),
+        GENLOCK_MONITOR_KEY: True,
+        CONNECT_ON_SHOW_KEY: False,
+        "ndi_audio": False,
+    }
+
+
+def _is_twin(name):
+    return (name or "").startswith(TWIN_PREFIX)
+
+
+def scene_needs_twin(scene_name, items, program_inputs, is_output_scene):
+    """True iff `scene_name` must be replaced in the built-in multiview by an `MV` twin: it holds at
+    least one program-path input DIRECTLY, it is not itself a twin, and it is not an NDI-output scene
+    (an output scene -- Grading, Interkom -- must stay SHOWN as-is so its output is valid; Grading's
+    visible nested camera is exactly the one full-bandwidth grading feed the owner wants)."""
+    if is_output_scene or _is_twin(scene_name):
+        return False
+    prog = set(program_inputs)
+    return any(i.get("sourceName") in prog for i in items or [])
+
+
+def _settable_transform(transform):
+    return {k: v for k, v in (transform or {}).items() if k in SETTABLE_TRANSFORM_FIELDS}
+
+
+def twin_scene_items(items, program_inputs):
+    """The desired twin-scene items, in the original stacking order: every program-path input is
+    swapped for its monitor twin, audio-only inputs are dropped, every other item is reused as-is;
+    enabled state and the settable transform are preserved."""
+    prog = set(program_inputs)
+    out = []
+    for i in items or []:
+        if i.get("inputKind") in AUDIO_ONLY_INPUT_KINDS:
+            continue
+        name = i.get("sourceName")
+        out.append({
+            "sourceName": twin_name(name) if name in prog else name,
+            "sceneItemEnabled": bool(i.get("sceneItemEnabled", True)),
+            "sceneItemTransform": _settable_transform(i.get("sceneItemTransform")),
+        })
+    return out
+
+
+def twin_items_match(current_items, desired):
+    """True iff the twin scene already carries exactly `desired` (source + enabled, in order)."""
+    cur = [(i.get("sourceName"), bool(i.get("sceneItemEnabled", True))) for i in current_items or []]
+    want = [(d["sourceName"], d["sceneItemEnabled"]) for d in desired]
+    return cur == want
+
+
+def is_custom_multiview_scene(name):
+    """The operator's hand-built multiview GRID scene ('MULTIVIEW' on strih-lx, 'Multiview' on the
+    old Windows strih) -- matched case-insensitively."""
+    return (name or "").strip().lower() == "multiview"
+
+
+def multiview_swap_plan(items, program_inputs, twinned_scenes):
+    """For the custom multiview grid scene: every item that renders a program-path input directly, or
+    a scene that got an `MV` twin, is swapped for its twin (same spot, same transform, same enabled
+    state), so the grid never keeps a full input shown. `twinned_scenes` = {scene: twin scene}."""
+    prog = set(program_inputs)
+    plan = []
+    for i in items or []:
+        name = i.get("sourceName")
+        new = twin_name(name) if name in prog else twinned_scenes.get(name)
+        if not new:
+            continue
+        plan.append({
+            "old_item_id": i["sceneItemId"],
+            "new_name": new,
+            "enabled": bool(i.get("sceneItemEnabled", True)),
+            "transform": _settable_transform(i.get("sceneItemTransform")),
+        })
+    return plan
+
+
+def bandwidth_role_problems(actual, program_inputs):
+    """Report-only role check: `actual` = {inputName: settings}. A program-path main must carry
+    connect-on-show, and its `MV` twin must exist as a monitor input. Returns problem strings."""
+    problems = []
+    for inp in program_inputs:
+        if not (actual.get(inp) or {}).get(CONNECT_ON_SHOW_KEY):
+            problems.append("%r not connect-on-show" % inp)
+        tw = twin_name(inp)
+        if tw not in actual:
+            problems.append("%r twin MISSING" % tw)
+        elif not (actual.get(tw) or {}).get(GENLOCK_MONITOR_KEY):
+            problems.append("%r twin not genlock_monitor" % tw)
+    return problems
+
+
 # --- issue 1346: fixed HDMI projector pure helpers (no WS/file dependency -> Tier-0 testable) ------
 
 def projector_type_to_mix(t):
@@ -603,6 +766,158 @@ def ensure_program_audio_in_every_scene(obs, plan):
     return added
 
 
+# --- issue 1242: applying the BANDWIDTH ROLES over WS (the pure planners are above) -----------------
+
+def _role_update_needed(effective, desired):
+    """True iff `desired` differs from `effective`. A bool is compared by truthiness: obs-websocket
+    omits a bool key that equals its (possibly unregistered) default, so absent == False must be a
+    pure read, never a re-write every launch (the genlock_fifo lesson in settings_update_needed)."""
+    for k, v in desired.items():
+        ev = (effective or {}).get(k)
+        if isinstance(v, bool):
+            if bool(ev) != v:
+                return True
+        elif ev != v:
+            return True
+    return False
+
+
+def _multiview_shown(obs, scene):
+    """The scene's EFFECTIVE built-in-multiview membership (OBS defaults an absent key to true)."""
+    s = (obs.req("GetSourcePrivateSettings", {"sourceName": scene}, ignore_err=True)
+         or {}).get("sourceSettings") or {}
+    v = s.get("show_in_multiview")
+    return True if v is None else bool(v)
+
+
+def _set_multiview_shown(obs, scene, show):
+    """Set the scene's built-in-multiview membership only on drift. Returns True iff it wrote."""
+    if _multiview_shown(obs, scene) == show:
+        return False
+    obs.req("SetSourcePrivateSettings", {
+        "sourceName": scene, "sourceSettings": {"show_in_multiview": show},
+    }, ignore_err=True)
+    return True
+
+
+def _is_ndi_output_scene(obs, scene):
+    """True iff the scene publishes itself over NDI (an ENABLED DistroAV ndi_filter) -- such a scene
+    (Grading, Interkom) must stay SHOWN as-is: the filter only sends while its parent is showing."""
+    fl = (obs.req("GetSourceFilterList", {"sourceName": scene}, ignore_err=True) or {}).get("filters") or []
+    return any(f.get("filterKind") == "ndi_filter" and f.get("filterEnabled") for f in fl)
+
+
+def _scene_items(obs, scene):
+    return (obs.req("GetSceneItemList", {"sceneName": scene}, ignore_err=True) or {}).get("sceneItems") or []
+
+
+def _add_scene_item(obs, scene, source, enabled, transform, existing_inputs, twin_settings):
+    """Add `source` to `scene`. A monitor twin input that does not exist yet is CREATED here (inside
+    this scene) with its role settings and muted; anything else is a plain CreateSceneItem."""
+    if source not in existing_inputs and source in twin_settings:
+        res = obs.req("CreateInput", {
+            "sceneName": scene, "inputName": source, "inputKind": "ndi_source",
+            "inputSettings": twin_settings[source], "sceneItemEnabled": enabled,
+        }, ignore_err=True) or {}
+        existing_inputs.add(source)
+        obs.req("SetInputMute", {"inputName": source, "inputMuted": True}, ignore_err=True)
+    else:
+        res = obs.req("CreateSceneItem", {
+            "sceneName": scene, "sourceName": source, "sceneItemEnabled": enabled,
+        }, ignore_err=True) or {}
+    item_id = res.get("sceneItemId")
+    if item_id is not None and transform:
+        obs.req("SetSceneItemTransform", {
+            "sceneName": scene, "sceneItemId": item_id, "sceneItemTransform": transform,
+        }, ignore_err=True)
+    return item_id
+
+
+def apply_bandwidth_roles(obs, plan):
+    """Apply the issue-1242 bandwidth roles to the live collection (idempotent; a correct collection
+    is a pure read). Steps:
+      1. every program-path main (`NDI camN`) gets genlock_connect_on_show=True;
+      2. every existing `MV` twin input is healed to its role settings (same live sender + pin as its
+         main, genlock_monitor=True, connect-on-show off); a missing twin is created in step 3;
+      3. every multiview scene that holds a program-path input directly (not an NDI-output scene, not
+         the custom grid, not a twin) gets an `MV <scene>` twin whose items mirror it with each main
+         swapped for its twin; the original leaves the built-in multiview, the twin joins it;
+      4. the custom multiview GRID scene (`MULTIVIEW`) renders twins instead of full inputs;
+      5. when membership changed, the built-in multiview is refreshed (a scratch scene create+remove --
+         OBS re-reads membership only on a scene-list change).
+    ROLE-OWNED creates only (the twin inputs/scenes + the scratch refresh scene); the operator's own
+    inputs/scenes are never created, renamed or removed. Returns a summary dict for the log."""
+    summary = {"mains": [], "twins": [], "twin_scenes": [], "multiview_grid": [], "refreshed": False}
+    inputs = {i.get("inputName"): i.get("inputKind")
+              for i in (obs.req("GetInputList", ignore_err=True) or {}).get("inputs", [])}
+    prog = [p for p in program_path_inputs(plan) if p in inputs]
+    if not prog:
+        return summary
+    existing = set(inputs)
+
+    main_eff = {}
+    for m in prog:
+        main_eff[m] = _effective_input_settings(obs, m)
+        if _role_update_needed(main_eff[m], main_role_settings()):
+            obs.req("SetInputSettings", {
+                "inputName": m, "inputSettings": main_role_settings(), "overlay": True,
+            }, ignore_err=True)
+            summary["mains"].append(m)
+
+    twin_settings = {twin_name(m): twin_input_settings(main_eff[m]) for m in prog}
+    for tw, st in twin_settings.items():
+        if tw in existing and _role_update_needed(_effective_input_settings(obs, tw), st):
+            obs.req("SetInputSettings", {"inputName": tw, "inputSettings": st, "overlay": True},
+                    ignore_err=True)
+            summary["twins"].append(tw)
+
+    scenes = [s.get("sceneName") for s in (obs.req("GetSceneList", ignore_err=True) or {}).get("scenes", [])]
+    twinned = {}
+    membership_changed = False
+    for sc in scenes:
+        if is_custom_multiview_scene(sc):
+            continue
+        items = _scene_items(obs, sc)
+        if not scene_needs_twin(sc, items, prog, _is_ndi_output_scene(obs, sc)):
+            continue
+        tw_sc = twin_name(sc)
+        tw_exists = tw_sc in scenes
+        # Only a scene the operator shows in the multiview (or one already twinned) gets a twin.
+        if not tw_exists and not _multiview_shown(obs, sc):
+            continue
+        twinned[sc] = tw_sc
+        desired = twin_scene_items(items, prog)
+        if not tw_exists:
+            obs.req("CreateScene", {"sceneName": tw_sc}, ignore_err=True)
+            membership_changed = True
+        current = _scene_items(obs, tw_sc) if tw_exists else []
+        if not twin_items_match(current, desired):
+            for it in current:
+                obs.req("RemoveSceneItem", {"sceneName": tw_sc, "sceneItemId": it["sceneItemId"]},
+                        ignore_err=True)
+            for d in desired:
+                _add_scene_item(obs, tw_sc, d["sourceName"], d["sceneItemEnabled"],
+                                d["sceneItemTransform"], existing, twin_settings)
+            summary["twin_scenes"].append(tw_sc)
+        membership_changed |= _set_multiview_shown(obs, sc, False)
+        membership_changed |= _set_multiview_shown(obs, tw_sc, True)
+
+    for sc in scenes:
+        if not is_custom_multiview_scene(sc):
+            continue
+        for e in multiview_swap_plan(_scene_items(obs, sc), prog, twinned):
+            # add the twin BEFORE removing the full input (the grid never drops a tile mid-swap)
+            _add_scene_item(obs, sc, e["new_name"], e["enabled"], e["transform"], existing, twin_settings)
+            obs.req("RemoveSceneItem", {"sceneName": sc, "sceneItemId": e["old_item_id"]}, ignore_err=True)
+            summary["multiview_grid"].append(e["new_name"])
+
+    if membership_changed:
+        obs.req("CreateScene", {"sceneName": MULTIVIEW_REFRESH_SCENE}, ignore_err=True)
+        obs.req("RemoveScene", {"sceneName": MULTIVIEW_REFRESH_SCENE}, ignore_err=True)
+        summary["refreshed"] = True
+    return summary
+
+
 def bootstrap(obs, plan, studio=True, update_only=False):
     """Seed the collection from `plan` (seed_inputs output). Two modes:
 
@@ -703,6 +1018,10 @@ def verify_parity(obs, manifest_text):
     # issue 1317: report the per-input CLASS on its OWN line (report-only; verify-strih.sh notes it).
     # The verdict line below stays byte-identical ("strih ndi inputs: OK") for the grep -qxF anchor.
     print("strih ndi input classes: " + input_classes_summary(inputs))
+    # issue 1242: the bandwidth-role state on its OWN report-only line (never changes the exit code --
+    # a box launched before the role apply, or on an older DistroAV, is reported, not failed).
+    roles = bandwidth_role_problems(actual, program_path_inputs(plan))
+    print("strih bandwidth roles: " + ("; ".join(roles) if roles else "OK"))
     print("strih ndi inputs: " + ("; ".join(problems) if problems else "OK"))
     if problems:
         sys.exit(1)
@@ -826,6 +1145,11 @@ def main():
     ap.add_argument("--audio-input-kind", action="store_true",
                     help="issue 1344: print the OBS inputKind of the `ASIO zvuk` program-audio input "
                          "(or `absent`) — read-only, for verify-strih's derived audio verdict")
+    ap.add_argument("--apply-roles", action="store_true",
+                    help="issue 1242: apply the bandwidth roles -- program-path cameras connect only "
+                         "while shown (genlock_connect_on_show), the built-in multiview renders the "
+                         "always-connected low-bandwidth `MV` twins (idempotent; strih-obs-start.sh "
+                         "runs it on every launch after --bootstrap)")
     ap.add_argument("--projector", choices=["program", "multiview"], default=None,
                     help="issue 1346: rewrite strih-lx-projector.json to program|multiview and "
                          "(re)seed the fixed HDMI fullscreen projector (the OBS UI projector menu "
@@ -836,9 +1160,9 @@ def main():
     # and MUTATE OBS. --bootstrap seeds; --verify-parity is read-only; --projector sets the HDMI
     # projector (issue 1346).
     if (not args.bootstrap and not args.verify_parity and args.projector is None
-            and not args.audio_input_kind):
+            and not args.audio_input_kind and not args.apply_roles):
         ap.error("specify a mode: --bootstrap (seed), --verify-parity (read-only), "
-                 "--audio-input-kind (read-only), or --projector program|multiview")
+                 "--audio-input-kind (read-only), --apply-roles, or --projector program|multiview")
 
     # --audio-input-kind (issue 1344): read-only print of the `ASIO zvuk` input kind. Does NOT read
     # the seed manifest.
@@ -862,6 +1186,14 @@ def main():
     obs = Obs(args.host, args.port, args.password)
     if args.verify_parity:
         verify_parity(obs, manifest_text)
+        return
+    if args.apply_roles:
+        # issue 1242: the bandwidth roles (a SEPARATE mode from --bootstrap so the seed's update-only
+        # never-create contract stays exactly as issue 1317 pinned it; the role lib owns its twins).
+        inputs, _outputs, latency = parse_seed_manifest(manifest_text)
+        summary = apply_bandwidth_roles(obs, seed_inputs(inputs, latency))
+        print("strih bandwidth roles applied (issue 1242): " + ", ".join(
+            "%s=%s" % (k, summary[k]) for k in sorted(summary)))
         return
     # --bootstrap: seed the collection. `mode` (issue 1317) selects update-only (the OPERATOR
     # collection: heal the certified class onto EXISTING inputs, never CreateScene/CreateInput) vs
