@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# airuleset:script-ok source-only lib (defines the strih-lx role FACTS + pure decision helpers,
-# no top-level statements) -- matches the sibling scripts/lib/*.sh convention (obs-fleet.sh,
-# camera-set.sh, genlock-markers.sh) of deliberately NOT setting `set -euo pipefail` here: sourcing
+# airuleset:script-ok source-only lib (defines the strih role FACTS + pure decision helpers; its
+# only top-level statement sources the equally source-only fact loader) -- matches the sibling
+# scripts/lib/*.sh convention (obs-fleet.sh, camera-set.sh, genlock-markers.sh) of deliberately NOT setting `set -euo pipefail` here: sourcing
 # this file executes it in the CALLER's shell, so strict mode here would leak into whichever caller
 # sources it. Each caller (setup-strih.sh / verify-strih.sh) sets its own strict mode.
 #
@@ -10,35 +10,23 @@
 # scripts/verify-strih.sh (acceptance gate) AND tests/strih_provision_pure_functions.rs (rustc-free
 # Tier-0). Same source-of-truth model as camera-set.sh for the camera fleet.
 #
-# PARALLEL-RUN CONTRACT (owner 16.9.2026): the notebook runs IN PARALLEL with the Windows STRIH-SNV
-# cutter until tuned. TWO strih senders coexist, so strih-lx's NDI OUTPUTS are namespaced
-# `STRIH-LX (...)` and it joins the clock as a dantesync CLIENT (the Windows PC stays the one NTP
-# master). The stream box + receivers must NEVER see a second `STRIH-SNV (...)` sender.
+# NAMESPACE + CLOCK CONTRACT: a strih box's NDI OUTPUTS are namespaced `<STRIH_NDI_PREFIX> (...)`
+# (strih-lx: `STRIH-LX (...)`) and the stream box + receivers must NEVER see a `STRIH-SNV (...)` sender
+# (the retired Windows PC's names). The dantesync ROLE is the box fact STRIH_DANTESYNC_ROLE -- the old
+# parallel-run "CLIENT only" contract ended with the M4 cut-over (strih-lx = the fleet NTP master).
 
-# strih_lx_host -> the address the fleet dials for strih-lx. STRIH_LX_HOST overrides; the default is
-# the ONE fleet list's host for strih-lx (issue 1317 part 2: `obs_fleet_host strih-lx`, 10.77.9.202
-# since the M4 cut-over). The old `strih-lx.lan` default has NO DNS entry on dev1. obs-fleet.sh is
-# sourced lazily from this lib's own dir (keeps this lib free of top-level statements); a missing or
-# unknown fleet row fails loud (non-zero, no output), never a silent guess.
-strih_lx_host() {
-  if [ -n "${STRIH_LX_HOST:-}" ]; then
-    printf '%s' "$STRIH_LX_HOST"
-    return 0
-  fi
-  if ! declare -F obs_fleet_host >/dev/null; then
-    # shellcheck source=scripts/lib/obs-fleet.sh
-    . "$(dirname "${BASH_SOURCE[0]}")/obs-fleet.sh" || return 1
-  fi
-  obs_fleet_host strih-lx
-}
-
-# strih_lx_hostname -> the box's OWN hostname = its fleet NAME (`strih-lx`, the name mDNS announces
-# as strih-lx.local). Never derived from strih_lx_host: that is a DIAL address (an IP by default
-# since issue 1317 part 2), and cutting it at the first dot would rename the box to `10`.
-strih_lx_hostname() { printf '%s' 'strih-lx'; }
-
-# strih_lx_ip -> the assigned static IP, or empty until it is assigned on arrival. STRIH_LX_IP wins.
-strih_lx_ip() { printf '%s' "${STRIH_LX_IP:-}"; }
+# --- issue 1361: the box/venue FACTS -------------------------------------------------------------
+# Every box-identity value (hostname, IP, NDI prefix, cameras, CG sender, dantesync role + upstream,
+# intercom file, NIC driver, NDI-runtime peer, Companion host, OBS profile/collection) is read from
+# scripts/strih-boxes/<box>.env through the ONE loader scripts/lib/strih-box-facts.sh, which also
+# DEFINES the fact accessors this lib calls (strih_lx_hostname / strih_lx_ip / strih_lx_ndi_prefix /
+# strih_lx_cameras / ... -- historical `strih_lx_` names, they serve whichever strih box is loaded).
+# It is a source-only lib (functions + constants, no side effects), sourced here unless the caller
+# already did; with no box loaded, the first fact read loads the default box (strih-lx).
+if ! declare -F strih_box_fact >/dev/null; then
+  # shellcheck source=scripts/lib/strih-box-facts.sh
+  . "$(dirname "${BASH_SOURCE[0]}")/strih-box-facts.sh"
+fi
 
 # strih_lx_ndi_inputs -> the 10 NDI input names the strih role receives, one per line (issue 1317
 # spec; the 2ME feedback inputs are the task's explicit STRIH-SNV names). NOTE (issue 1352): the
@@ -49,18 +37,26 @@ strih_lx_ip() { printf '%s' "${STRIH_LX_IP:-}"; }
 # documented in .claude/rules/strih-linux-provisioning.md ("Follow-ups: the 2ME self-feedback INPUT
 # names"); flipping these two here is deferred to that follow-up, not this provisioning lane.
 strih_lx_ndi_inputs() {
-  printf '%s\n' \
-    'CAM1 (usb)' 'CAM2 (usb)' 'CAM3 (usb)' 'CAM4 (usb)' \
-    'CAM5 (usb)' 'CAM6 (usb)' 'CAM7 (usb)' \
-    'STRIH-SNV (2ME PGM)' 'STRIH-SNV (2ME PVW)' 'RESOLUME-SNV (cg-obs)'
+  local n cg
+  cg="$(strih_lx_cg_sender)" || return 1
+  for n in $(strih_lx_cameras); do printf 'CAM%s (usb)\n' "$n"; done
+  printf '%s\n' 'STRIH-SNV (2ME PGM)' 'STRIH-SNV (2ME PVW)'
+  [ -z "$cg" ] || printf '%s\n' "$cg"
 }
 
-# strih_lx_ndi_outputs -> the namespaced 2ME NDI output names (never a STRIH-SNV name), one per line.
-strih_lx_ndi_outputs() { printf '%s\n' 'STRIH-LX (2ME PGM)' 'STRIH-LX (2ME PVW)'; }
+# strih_lx_ndi_outputs -> the box-namespaced 2ME NDI output names `<PREFIX> (2ME PGM|PVW)` (never a
+# STRIH-SNV name), one per line.
+strih_lx_ndi_outputs() {
+  local p
+  p="$(strih_lx_ndi_prefix)" || return 1
+  printf '%s (2ME PGM)\n%s (2ME PVW)\n' "$p" "$p"
+}
 
-# strih_lx_ndi_republishes -> the namespaced genlock-ndi-filter republish names, one per line.
+# strih_lx_ndi_republishes -> the box-namespaced genlock-ndi-filter republish names, one per line.
 strih_lx_ndi_republishes() {
-  printf '%s\n' 'STRIH-LX (interkom)' 'STRIH-LX (MULTIVIEW)' 'STRIH-LX (Grading)'
+  local p
+  p="$(strih_lx_ndi_prefix)" || return 1
+  printf '%s (interkom)\n%s (MULTIVIEW)\n%s (Grading)\n' "$p" "$p" "$p"
 }
 
 # strih_lx_camera_latency_ms -> the genlock latency floor (ms) every camera input rides (3, the
@@ -182,22 +178,25 @@ strih_lx_obs_plugin_dirs() {
 #   * The 5 STRIH-LX NDI OUTPUTS stay in `outputs` (issue 1347 owns the rename); the seeder never
 #     touches outputs. Latency rides the manifest floor 3 (genlock_latency_ms_src).
 strih_lx_seed_manifest_json() {
-  local lat
+  local lat p cg n
+  local -a rows=()
   lat="$(strih_lx_camera_latency_ms)"
+  p="$(strih_lx_ndi_prefix)" || return 1
+  cg="$(strih_lx_cg_sender)" || return 1
+  # issue 1361: the cameras, the self-loop prefix and the CG sender are the loaded box's facts.
+  for n in $(strih_lx_cameras); do
+    rows+=("{\"sender\": \"CAM${n} (usb)\", \"input\": \"NDI cam${n}\", \"scene\": \"Cam ${n}\"}")
+  done
+  rows+=("{\"sender\": \"${p} (2ME PVW)\", \"input\": \"NDI 2ME PVW\", \"scene\": \"2ME PVW\"}")
+  rows+=("{\"sender\": \"${p} (2ME PGM)\", \"input\": \"NDI 2ME PGM (mv)\", \"scene\": \"2ME PGM\"}")
+  if [ -n "$cg" ]; then
+    rows+=("{\"sender\": \"${cg}\", \"input\": \"cg\", \"scene\": \"CG\"}")
+    rows+=("{\"sender\": \"${cg}\", \"input\": \"CG-obs\", \"scene\": \"CG-obs\"}")
+  fi
   printf '{\n'
   printf '  "mode": "update-only",\n'
   printf '  "inputs": [\n'
-  printf '    {"sender": "CAM1 (usb)", "input": "NDI cam1", "scene": "Cam 1"},\n'
-  printf '    {"sender": "CAM2 (usb)", "input": "NDI cam2", "scene": "Cam 2"},\n'
-  printf '    {"sender": "CAM3 (usb)", "input": "NDI cam3", "scene": "Cam 3"},\n'
-  printf '    {"sender": "CAM4 (usb)", "input": "NDI cam4", "scene": "Cam 4"},\n'
-  printf '    {"sender": "CAM5 (usb)", "input": "NDI cam5", "scene": "Cam 5"},\n'
-  printf '    {"sender": "CAM6 (usb)", "input": "NDI cam6", "scene": "Cam 6"},\n'
-  printf '    {"sender": "CAM7 (usb)", "input": "NDI cam7", "scene": "Cam 7"},\n'
-  printf '    {"sender": "STRIH-LX (2ME PVW)", "input": "NDI 2ME PVW", "scene": "2ME PVW"},\n'
-  printf '    {"sender": "STRIH-LX (2ME PGM)", "input": "NDI 2ME PGM (mv)", "scene": "2ME PGM"},\n'
-  printf '    {"sender": "RESOLUME-SNV (cg-obs)", "input": "cg", "scene": "CG"},\n'
-  printf '    {"sender": "RESOLUME-SNV (cg-obs)", "input": "CG-obs", "scene": "CG-obs"}\n'
+  printf '    %s,\n' "${rows[@]}" | sed '$ s/,$//'
   printf '  ],\n'
   printf '  "outputs": [\n'
   { strih_lx_ndi_outputs; strih_lx_ndi_republishes; } | sed 's/.*/    "&",/' | sed '$ s/,$//'
@@ -208,10 +207,6 @@ strih_lx_seed_manifest_json() {
 
 # strih_lx_bundle_artifact -> the strih FULL-build CI artifact name (linux-genlock.yml strih job).
 strih_lx_bundle_artifact() { printf 'obs-genlock-linux-x86_64-strih'; }
-
-# strih_lx_dantesync_client_args -> the dantesync CLIENT invocation args. It points at the Windows
-# strih PC as the NTP server and NEVER enables server/master mode (single master while parallel).
-strih_lx_dantesync_client_args() { printf -- '--ntp-server %s' "${STRIH_LX_NTP_SERVER:-strih.lan}"; }
 
 # strih_lx_dantesync_is_client_not_master MODE -> 0 iff MODE is a CLIENT mode (never server/master).
 # INTERNAL helper (issue 1317, this lane): retained as the pure CLIENT-args classifier that the
@@ -225,8 +220,14 @@ strih_lx_dantesync_is_client_not_master() {
   # + `*master*`/`*grandmaster*` -- NEVER a bare `*server*`, which would also swallow the CLIENT
   # `--ntp-server` / `ntp_server=<host>` forms and misclassify a client as master (shellcheck
   # SC2221/SC2222 caught exactly that). A bare "server" with no "_mode" is ambiguous -> fail-closed.
+  # issue 1361: the exact client invocation `--ntp-server <host>` is a CLIENT whatever the host is
+  # called -- a venue NTP host named e.g. `ntp-master.lan` is a host NAME, not a master flag. Only this
+  # exact two-word shape passes; every OTHER `--ntp-server ...` shape is refused just below.
+  [[ "${1:-}" =~ ^--ntp-server\ [A-Za-z0-9][A-Za-z0-9.-]*$ ]] && return 0
   case "${1:-}" in
     "") return 1 ;;
+    # any OTHER `--ntp-server <x>` shape (a flag-led or extra-argument upstream) is not a clean client.
+    "--ntp-server "*) return 1 ;;
     *server_mode*|*master*) return 1 ;;
     *client*|*slave*|*ntp-server*|*ntp_server=*) return 0 ;;
     *) return 1 ;;
@@ -257,7 +258,7 @@ strih_lx_dantesync_role_ok() {
 # verify-strih's dantesync-role acceptance item (issue 1317). Prints ONE token and returns 0 only for
 # the fully-`ok` state; every other state prints its own token + returns non-zero. Args (verify-strih
 # feeds live reads):
-#   ROLE       client|server (the provisioned STRIH_LX_DANTESYNC_ROLE, default server post-M4)
+#   ROLE       client|server (the box fact STRIH_DANTESYNC_ROLE; strih-lx = server, post-M4)
 #   REACHABLE  1 iff :8898/status answered
 #   MODE       the status `mode` field value (LOCK / NANO / ... / absent)
 #   UDP123     1 iff an ntp UDP :123 listener is present (ss -ulnp) -- REQUIRED for the server role only
@@ -451,12 +452,14 @@ strih_lx_program_audio_verdict() {
   printf 'NOTE program audio wired; FOH idle so level unchecked (report-only)\n'; return 0
 }
 
-# strih_lx_output_name_ok NAME -> 0 iff NAME is a namespaced `STRIH-LX (...)` output and NOT a
-# `STRIH-SNV (...)` one (the never-a-2nd-STRIH-SNV-sender invariant, single output check).
+# strih_lx_output_name_ok NAME -> 0 iff NAME is namespaced with the box's NDI prefix (`<PREFIX> (...)`)
+# and NOT a `STRIH-SNV (...)` one (the never-a-2nd-STRIH-SNV-sender invariant, single output check).
 strih_lx_output_name_ok() {
+  local p
+  p="$(strih_lx_ndi_prefix)" || return 1
   case "${1:-}" in
     'STRIH-SNV '*) return 1 ;;
-    'STRIH-LX ('*) return 0 ;;
+    "${p} ("*) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -942,12 +945,13 @@ strih_projector_verdict() {
 # `general` empty (Janus default all-interfaces) -- the caller passes it (the `ws_ip` blank-omits idiom).
 strih_janus_audiobridge_jcfg_text() {
   local room="${1:?room id required}" secret_path="${2:?secret path required}" local_ip="${3:-}"
-  local ip_line=""
+  local ip_line="" box
+  box="$(strih_lx_hostname)" || return 1
   if [ -n "$local_ip" ]; then
     ip_line="    local_ip = \"${local_ip}\""
   fi
   cat <<EOF
-# strih-lx intercom audiobridge -- GENERATED by setup-strih.sh (issue 1345 M3a; issue 1352 pins local_ip). DO NOT EDIT BY HAND.
+# ${box} intercom audiobridge -- GENERATED by setup-strih.sh (issue 1345 M3a; issue 1352 pins local_ip). DO NOT EDIT BY HAND.
 # The room secret is injected from ${secret_path} at provisioning (never in git, never logged).
 general: {
 ${ip_line}
@@ -970,12 +974,13 @@ EOF
 # needed path. A blank LAN_IP omits ws_ip (Janus default all-interfaces) -- the caller always passes it.
 strih_janus_ws_jcfg_text() {
   local lan_ip="${1:-}"
-  local ws_ip_line=""
+  local ws_ip_line="" box
+  box="$(strih_lx_hostname)" || return 1
   if [ -n "$lan_ip" ]; then
     ws_ip_line="    ws_ip = \"${lan_ip}\""
   fi
   cat <<EOF
-# strih-lx intercom Janus WebSocket transport -- GENERATED by setup-strih.sh (issue 1345 M3a).
+# ${box} intercom Janus WebSocket transport -- GENERATED by setup-strih.sh (issue 1345 M3a).
 # ws BOUND to ${lan_ip} :8188 (the dev1 front reaches it over the LAN), NO wss (TLS on the front); no admin API.
 general: {
     json = "indented"
@@ -1075,8 +1080,14 @@ strih_companion_satellite_bin() { printf '/opt/companion-satellite/companion-sat
 strih_companion_satellite_udev_rule() { printf '/etc/udev/rules.d/50-satellite-desktop.rules'; }
 
 # strih_companion_satellite_host -> the venue Companion CONTROLLER host the satellite connects to.
-# COMPANION_SATELLITE_HOST overrides (default 10.77.9.205).
-strih_companion_satellite_host() { printf '%s' "${COMPANION_SATELLITE_HOST:-10.77.9.205}"; }
+# COMPANION_SATELLITE_HOST overrides; the default is the box fact STRIH_COMPANION_HOST.
+strih_companion_satellite_host() {
+  if [ -n "${COMPANION_SATELLITE_HOST:-}" ]; then
+    printf '%s' "$COMPANION_SATELLITE_HOST"
+  else
+    strih_box_fact STRIH_COMPANION_HOST
+  fi
+}
 
 # strih_companion_satellite_port -> the controller TCP port (Satellite DEFAULT_TCP_PORT).
 # COMPANION_SATELLITE_PORT overrides (default 16622).
@@ -1086,9 +1097,10 @@ strih_companion_satellite_port() { printf '%s' "${COMPANION_SATELLITE_PORT:-1662
 # host, human-readable. This is the operator/supervisor's paper trail; the FUNCTIONAL seed the app
 # actually reads is the JSON below.
 strih_companion_satellite_config_text() {
-  local host="${1:?host required}"
+  local host="${1:?host required}" box
+  box="$(strih_lx_hostname)" || return 1
   cat <<EOF
-# strih-lx Bitfocus Companion Satellite -- GENERATED by setup-strih.sh (issue 1317). DO NOT EDIT BY HAND.
+# ${box} Bitfocus Companion Satellite -- GENERATED by setup-strih.sh (issue 1317). DO NOT EDIT BY HAND.
 # The venue Companion CONTROLLER this satellite exposes its locally-attached Stream Deck to.
 COMPANION_SATELLITE_HOST=${host}
 EOF
@@ -1505,11 +1517,25 @@ UNIT
 # STRIH_NIC_IFACE) so a test can run the emitted script over fixtures shaped like the real box.
 # issue 1317 item H.
 strih_nic_irq_affinity_script_text() {
+  # issue 1361: the target IP + NIC driver are the loaded box's facts, substituted into the quoted
+  # script body's @STRIH_TARGET_IP@ / @STRIH_NIC_DRIVER@ placeholders (the rest stays literal).
+  local ip drv box body
+  ip="$(strih_lx_ip)" || return 1
+  drv="$(strih_lx_nic_driver)" || return 1
+  box="$(strih_lx_hostname)" || return 1
+  body="$(_strih_nic_irq_affinity_script_template)" || return 1
+  body="${body//@STRIH_TARGET_IP@/"$ip"}"
+  body="${body//@STRIH_BOX@/"$box"}"
+  printf '%s\n' "${body//@STRIH_NIC_DRIVER@/"$drv"}"
+}
+
+# _strih_nic_irq_affinity_script_template -> the boot oneshot body with the box facts as placeholders.
+_strih_nic_irq_affinity_script_template() {
   cat <<'SCRIPT'
 #!/usr/bin/env bash
 # /usr/local/bin/strih-nic-irq-affinity.sh
 set -euo pipefail
-# strih-lx USB-NIC xhci IRQ placement (issue 1317 item H). Emitted by
+# @STRIH_BOX@ USB-NIC xhci IRQ placement (issue 1317 item H). Emitted by
 # strih_nic_irq_affinity_script_text in scripts/lib/strih-provision.sh, installed by
 # scripts/setup-strih.sh, run at boot by strih-nic-irq-affinity.service (and once live by the
 # supervisor). It pins the USB NIC's xhci interrupt to an idle E-core so its ~1.1 Gb/s NDI NET_RX
@@ -1523,14 +1549,14 @@ PROC_INTERRUPTS="${PROC_INTERRUPTS:-/proc/interrupts}"
 CPU_ATOM_FILE="${CPU_ATOM_FILE:-/sys/devices/cpu_atom/cpus}"
 CPU_ONLINE_FILE="${CPU_ONLINE_FILE:-/sys/devices/system/cpu/online}"
 IRQ_DIR="${IRQ_DIR:-/proc/irq}"
-TARGET_IP="${STRIH_LX_TARGET_IP:-10.77.9.202}"
+TARGET_IP="${STRIH_LX_TARGET_IP:-@STRIH_TARGET_IP@}"
 
 log() { printf 'strih-nic-irq-affinity: %s\n' "$*"; }
 die() { printf 'strih-nic-irq-affinity: FATAL: %s\n' "$*" >&2; exit 1; }
 
-# (1) NIC iface -- STRIH_NIC_IFACE override wins; else resolve by DRIVER (the r8152 USB NIC), which
+# (1) NIC iface -- STRIH_NIC_IFACE override wins; else resolve by DRIVER (the @STRIH_NIC_DRIVER@ USB NIC), which
 # works at boot BEFORE any address is assigned; else fall back to the address match. Exactly one
-# r8152 iface is expected -- more than one fails LOUD (set STRIH_NIC_IFACE to disambiguate).
+# @STRIH_NIC_DRIVER@ iface is expected -- more than one fails LOUD (set STRIH_NIC_IFACE to disambiguate).
 iface="${STRIH_NIC_IFACE:-}"
 if [ -z "$iface" ]; then
   matches=""
@@ -1541,15 +1567,15 @@ if [ -z "$iface" ]; then
     _dl="$(readlink -f "${_net}/device/driver" 2>/dev/null || true)"
     _drv=""
     [ -n "$_dl" ] && _drv="$(basename "$_dl")"
-    [ "$_drv" = r8152 ] && matches="${matches:+$matches }$_ifc"
+    [ "$_drv" = @STRIH_NIC_DRIVER@ ] && matches="${matches:+$matches }$_ifc"
   done
   case "$matches" in
-    *" "*) die "multiple r8152 NICs (${matches}) -- set STRIH_NIC_IFACE" ;;
+    *" "*) die "multiple @STRIH_NIC_DRIVER@ NICs (${matches}) -- set STRIH_NIC_IFACE" ;;
     "")    iface="$(ip -o -4 addr show 2>/dev/null | awk -v ip="$TARGET_IP" 'BEGIN { gsub(/\./, "\\.", ip) } $4 ~ ("^" ip "/") { print $2; exit }' || true)" ;;
     *)     iface="$matches" ;;
   esac
 fi
-[ -n "$iface" ] || die "could not resolve the NIC iface (no r8152, no ${TARGET_IP} address; set STRIH_NIC_IFACE)"
+[ -n "$iface" ] || die "could not resolve the NIC iface (no @STRIH_NIC_DRIVER@, no ${TARGET_IP} address; set STRIH_NIC_IFACE)"
 
 # (2) xhci host controller PCI function = walk the device symlink up to the usbN root.
 dev="$(readlink -f "${SYS_ROOT}/class/net/${iface}/device" 2>/dev/null || true)"
@@ -1612,12 +1638,13 @@ SCRIPT
 # (strih_nic_iface_by_driver) -> the interface carrying STATIC_IP in IP_ADDR_TEXT (`ip -o -4 addr show`
 # output). Two r8152 NICs and no STATIC_IP match fail loud (set STRIH_NIC_IFACE to disambiguate).
 strih_lx_rig_nic() {
-  local sysroot="${1:?sysroot required}" addrs="${2-}" ip="${3-}" nic rc=0 by_ip=""
+  local sysroot="${1:?sysroot required}" addrs="${2-}" ip="${3-}" nic rc=0 by_ip="" drv
   if [ -n "${STRIH_NIC_IFACE:-}" ]; then
     printf '%s' "$STRIH_NIC_IFACE"
     return 0
   fi
-  nic="$(strih_nic_iface_by_driver "$sysroot" r8152)" || rc=$?
+  drv="$(strih_lx_nic_driver)" || return 1
+  nic="$(strih_nic_iface_by_driver "$sysroot" "$drv")" || rc=$?
   if [ "$rc" = 0 ] && [ -n "$nic" ]; then
     printf '%s' "$nic"
     return 0
@@ -1629,7 +1656,7 @@ strih_lx_rig_nic() {
     printf '%s' "$by_ip"
     return 0
   fi
-  echo "strih_lx_rig_nic: cannot resolve the rig NDI NIC (r8152 lookup: ${nic:-none}; no interface carries '${ip:-<no STRIH_LX_IP>}') -- set STRIH_NIC_IFACE" >&2
+  echo "strih_lx_rig_nic: cannot resolve the rig NDI NIC (${drv} lookup: ${nic:-none}; no interface carries '${ip:-<no STRIH_IP>}') -- set STRIH_NIC_IFACE" >&2
   return 1
 }
 
@@ -1723,9 +1750,10 @@ strih_companion_satellite_openbox_line() {
 # alone would never fire -- imag's step-16 pattern) and launches Companion Satellite. RustDesk needs no
 # line: its system rustdesk.service serves the Xorg session itself. Needs obs-box-baseline.sh sourced.
 strih_openbox_autostart_text() {
+  local box
+  box="$(strih_lx_hostname)" || return 1
+  printf '#!/bin/bash\n# %s OBS kiosk boot -- WRITTEN BY setup-strih.sh (issue 1357, the shared OBS-box baseline). Do not hand-edit.\n' "$box"
   cat <<'AUTOSTART_EOF'
-#!/bin/bash
-# strih-lx OBS kiosk boot -- WRITTEN BY setup-strih.sh (issue 1357, the shared OBS-box baseline). Do not hand-edit.
 sleep 1
 PANEL=$(xrandr | awk '/ connected/ && $1 !~ /^HDMI/ {print $1; exit}')
 PROJ=$(xrandr  | awk '/ connected/ && $1 ~  /^HDMI/ {print $1; exit}')

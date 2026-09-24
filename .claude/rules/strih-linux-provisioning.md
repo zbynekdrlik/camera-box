@@ -11,6 +11,10 @@ paths:
   - "tests/ndi_runtime_lib.rs"
   - "scripts/lib/strih-cef-keyring.sh"
   - "tests/cef_password_store_1359.rs"
+  - "scripts/lib/strih-box-facts.sh"
+  - "scripts/strih-boxes/*.env"
+  - "tests/strih_box_facts_1361.rs"
+  - "tests/fixtures/strih_box_1361/*"
 ---
 
 # strih-lx — the Linux notebook replacing the Windows strih PC (issue 1317)
@@ -29,6 +33,75 @@ covers the provisioning scaffolding built during that preparation.
 > history. strih-obs-start.sh resolves `DISPLAY=:0` only; Companion Satellite starts from the openbox
 > autostart. See `.claude/rules/obs-box-baseline.md` for the conversion runbook.
 
+## Per-box FACT files — one script for every strih box (issue 1361)
+
+`setup-strih.sh` / `verify-strih.sh` take `--box <name>` (default `strih-lx`, so a bare run is
+today's run) and read EVERY box/venue identity value from `scripts/strih-boxes/<name>.env` through
+the ONE loader `scripts/lib/strih-box-facts.sh`. A second strih (strih PP, Poprad) is a new fact
+file, never a copy of the script (the unified-design ruling, umbrella issue 1357).
+
+- **The facts** (all required): `STRIH_HOSTNAME` (= the file name = the fleet name),
+  `STRIH_IP`, `STRIH_NDI_PREFIX` (MUST be the hostname upper-cased — DistroAV prepends the hostname
+  to every output), `STRIH_DANTESYNC_ROLE` (`server` = NTP master, no upstream / `client` + a
+  non-empty `STRIH_DANTESYNC_UPSTREAM`), `STRIH_INTERCOM_CONFIG` (`intercom/<file>.toml`),
+  `STRIH_NIC_DRIVER` (the rig-NIC selection rule; the IP match is the fallback, `STRIH_NIC_IFACE`
+  stays the run-time override), `STRIH_OBS_PROFILE` / `STRIH_OBS_COLLECTION`,
+  `STRIH_NDI_RUNTIME_PEER`, `STRIH_COMPANION_HOST`, `STRIH_CG_SENDER` (`none` = no CG inputs),
+  `STRIH_CAMERAS` (space-separated numbers). **Run-time facts stay derived on the box** — PL1 watts,
+  the CPU plan, the NIC interface name.
+- **The file is PARSED, never sourced.** Only `KEY=value` / `#` / blank lines; the value is literal
+  text and may not carry a shell metacharacter, quote or glob. Unknown / missing / duplicate keys
+  refuse. A `TODO_OWNER` value refuses and EVERY such fact is named (the template `strih-pp.env`
+  carries all of them until the owner answers). A per-run `STRIH_LX_IP` / `STRIH_LX_DANTESYNC_ROLE`
+  that CONTRADICTS the fact refuses (the old knobs are retired; an equal value is harmless).
+- **The fleet list stays literal and is PINNED to the facts.** `scripts/obs_fleet_table.py` parses the
+  literal `OBS_FLEET` default block and ~25 dev1 watchdogs source `obs-fleet.sh`, so the row is NOT
+  computed from the fact files (every watchdog would then depend on the loader). Instead the loader
+  refuses a box whose fleet row host (when it is an IP) differs from `STRIH_IP`, and
+  `tests/strih_box_facts_1361.rs` pins `obs_fleet_host strih-lx` == `strih-lx.env`'s `STRIH_IP`. A box
+  with NO fleet row yet (strih PP before go-live) loads fine; `strih_lx_host` then dials its fact IP.
+  Adding a strih to the fleet = add its `OBS_FLEET` row + facet memberships at go-live.
+- **Load before the source-guard.** Both orchestrators select + load the box BEFORE their
+  `BASH_SOURCE != $0` guard, so a sourced script (the tests, `render.sh`) sees exactly the facts a
+  real run uses (the box variable is `STRIH_FACT_BOX` — recording-e2e.sh exports an unrelated
+  `STRIH_BOX`). The fact ACCESSORS (`strih_lx_hostname` / `_ip` / `_ndi_prefix` / `_cameras` /
+  `_cg_sender` / `_nic_driver` / `_dantesync_role|args|client_args` / `strih_lx_host` / the unit
+  drop-in, historical `strih_lx_` names) live in the loader lib; `strih-provision.sh` sources it (a
+  source-only lib) and each accessor loads the default box on first use — a test that sources
+  `strih-provision.sh` alone still gets strih-lx.
+- **Generated files name the loaded box.** The janus jcfg / Companion conf / openbox autostart headers
+  and the IRQ oneshot's `@STRIH_BOX@` / `@STRIH_NIC_DRIVER@` comments follow the box, so a strih PP
+  file never claims to be strih-lx; `every_fact_dependent_output_follows_a_different_box` renders a
+  synthetic `strih-zz` and fails on ANY surviving strih-lx value or `@STRIH_` placeholder.
+- **A client upstream is a host NAME.** `strih_lx_dantesync_is_client_not_master` accepts the exact
+  `--ntp-server <host>` invocation whatever the host is called (a venue `ntp-master.lan` is a name,
+  not a master flag) and refuses every OTHER `--ntp-server ...` shape; every host-shaped fact (and the
+  `STRIH_LX_NTP_SERVER` override) must START with a letter or digit, so `--master` can never be
+  smuggled in as a "host". A client box that loads therefore always renders its unit.
+- **A failed load stays failed.** After a refused `strih_box_load` in a shell, accessors refuse
+  instead of quietly loading the default box; the unsafe-value check runs under `LC_ALL=C`, so a
+  non-ASCII byte is refused in every locale (sudo and CI differ).
+- **What reaches the box, and how.** The OBS profile/collection go to the UNCHANGED launcher through
+  `~/.config/systemd/user/strih-obs.service.d/10-box-facts.conf` (`strih-obs-start.sh` already reads
+  `STRIH_OBS_PROFILE` / `STRIH_OBS_COLLECTION` from its environment). The NIC driver + target IP are
+  substituted into the boot IRQ oneshot's `@STRIH_NIC_DRIVER@` / `@STRIH_TARGET_IP@` placeholders.
+  The intercom file is only SHAPE-checked at load and checked for existence where step 13 installs it
+  — the dev1 deploy plan rsyncs `scripts/` + `systemd/` only (no `intercom/`), and a load that
+  required the file would refuse the whole deploy before step 4.
+- **On-box artifact names are ROLE paths, not identity** (`/opt/camera-box/strih-lx-seed.json`,
+  `strih-lx-projector.json`, `strih-lx-profile-facts.txt`, the retired `90-strih-lx.conf` cleanup,
+  the committed `strih-nic-irq-affinity.service` Description): they are read by `strih_scenes.py` /
+  `strih-obs-start.sh` under that fixed name on every strih box. The static test allowlists exactly
+  these tokens; any OTHER strih-lx identity value on a code line of the four scripts fails it.
+- **Byte-identity net.** `tests/fixtures/strih_box_1361/render.sh <root> <box>` sources
+  `setup-strih.sh --box <box>` and prints every fact-dependent output (hostname/IP/host, NDI names,
+  seed manifest, dantesync unit, janus jcfgs, openbox autostart + menu, IRQ oneshot, intercom sha256,
+  NDI peer, Companion conf/json); `strih-lx.golden` was captured from the PRE-1361 scripts run as
+  `STRIH_LX_IP=10.77.9.202`. Any intentional change to one of those outputs must regenerate the golden
+  in the SAME commit and say why — a drift there is a behaviour change on the live strih.
+- **Owner questions for strih PP** = the `TODO_OWNER` lines in `strih-pp.env`. `STRIH_NIC_DRIVER` is
+  read off the notebook on arrival (`readlink /sys/class/net/<if>/device/driver`), not asked.
+
 ## The parallel-run contract (why the namespacing + the client-clock matter)
 
 While both boxes run, TWO strih senders coexist on the NDI wire and must never collide:
@@ -42,7 +115,8 @@ While both boxes run, TWO strih senders coexist on the NDI wire and must never c
   "dantesync CLIENT only, the Windows PC keeps the single NTP-master role" contract was true ONLY
   during the parallel run; it is STALE. Since M4, `strih.lan` = the notebook (10.77.9.202) and the
   cam boxes take NTP from it, so `setup-strih.sh` step 2 provisions dantesync with a ROLE
-  (`STRIH_LX_DANTESYNC_ROLE`, default **`server`**): `strih_dantesync_unit_text ROLE [ARGS]` renders
+  (the box fact `STRIH_DANTESYNC_ROLE`, strih-lx = **`server`**; issue 1361 retired the per-run
+  `STRIH_LX_DANTESYNC_ROLE` knob): `strih_dantesync_unit_text ROLE [ARGS]` renders
   the bare NTP-master ExecStart for `server` (folding the live hand `dantesync.service.d/10-ntp-master.conf`
   drop-in INTO the unit, and removing any stale drop-in), or `--ntp-server <host>` for the historical
   `client` role. The self-check is now the role-aware `strih_lx_dantesync_role_ok ROLE ARGS`
@@ -50,7 +124,8 @@ While both boxes run, TWO strih senders coexist on the NDI wire and must never c
   role — but NEVER on a plain server role, which is correct post-M4); the internal
   `strih_lx_dantesync_is_client_not_master` is retained as the client-branch classifier. `verify-strih`
   adds a role live-check: `:8898/status` reachable + `mode` LOCK/NANO + (server role) an ntp UDP :123
-  listener. To run a future box as a client again: `STRIH_LX_DANTESYNC_ROLE=client`.
+  listener. To run a box as a client: `STRIH_DANTESYNC_ROLE=client` + `STRIH_DANTESYNC_UPSTREAM=<host>`
+  in its fact file (a client with no upstream is refused -- there is no guessed `strih.lan` default).
 
   The NDI-output `STRIH-LX (...)` namespacing above is a SEPARATE matter (issue 1347 owns the rename
   back to non-namespaced production names now the Windows strih is retired); it is untouched here.
