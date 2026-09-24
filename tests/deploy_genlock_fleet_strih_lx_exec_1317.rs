@@ -140,6 +140,41 @@ fi
 exit 0
 "#,
     );
+    // the rig-busy read (issue 1317, the broadcast guard): a fake obs_phase2.py on the
+    // STRIH_LX_OBS_PHASE2_DIR seam, so no test ever opens a WebSocket to the real rig. It answers
+    // `rig-busy-check` in the shape scripts/obs_phase2.py prints, per STUB_RIG_BUSY (default idle).
+    let obs = dir.join("obs");
+    fs::create_dir_all(&obs).unwrap();
+    write_exec(
+        &obs.join("obs_phase2.py"),
+        r#"#!/usr/bin/env python3
+import json, os, sys
+with open(os.path.join(os.environ["STUB_DIR"], "calls.log"), "a") as f:
+    f.write("obs_phase2 " + " ".join(sys.argv[1:]) + "\n")
+mode = os.environ.get("STUB_RIG_BUSY", "idle")
+cmd = sys.argv[1] if len(sys.argv) > 1 else ""
+def box(host, streaming=False, recording=False, tc=None):
+    return {"host": host, "streaming": streaming, "recording": recording, "recordTimecode": tc}
+if cmd == "rig-busy-check":
+    if mode == "idle":
+        print(json.dumps({"busy": False, "reasons": [], "diagnostics": [box("strih"), box("stream")]}))
+    elif mode == "streaming":
+        print(json.dumps({"busy": True, "reasons": ["stream is streaming (GetStreamStatus.outputActive=true)"],
+                          "diagnostics": [box("strih"), box("stream", streaming=True)], "hint": "a real broadcast"}))
+    elif mode == "recording":
+        print(json.dumps({"busy": True, "reasons": ["strih is recording (GetRecordStatus.outputActive=true)"],
+                          "diagnostics": [box("strih", recording=True, tc="00:04:10.000"), box("stream")]}))
+    elif mode == "partial-busy":
+        print(json.dumps({"busy": None, "reasons": ["strih (10.77.9.202) unreachable: timed out"],
+                          "diagnostics": [box("stream", streaming=True)]}))
+        sys.exit(3)
+    elif mode == "unreachable":
+        print(json.dumps({"busy": None, "reasons": ["strih unreachable", "stream unreachable"], "diagnostics": []}))
+        sys.exit(3)
+elif cmd == "stream-detail":
+    print("server=rtmp://a.rtmp.youtube.com/live2 outputDuration=00:12:34")
+"#,
+    );
     write_exec(
         &bin.join("curl"),
         r#"#!/usr/bin/env bash
@@ -212,6 +247,7 @@ fn run_exec_boxes(boxes: &str, extra_env: &[(&str, &str)]) -> Run {
         .env("STRIH_LX_VERIFY_POLLS", "3")
         .env("STRIH_LX_VERIFY_POLL_SECS", "0")
         .env("STRIH_LX_VERIFY_SETTLE_SECS", "0")
+        .env("STRIH_LX_OBS_PHASE2_DIR", dir.path().join("obs"))
         .env_remove("STRIH_LX_IP")
         .env_remove("STRIH_LX_USER")
         .env_remove("STRIH_LX_PW")
@@ -1080,5 +1116,105 @@ fn strih_lx_tree_check_needs_the_fact_file_and_its_intercom_file_1317() {
     assert!(
         out.contains("strih-lx\nrc=0"),
         "prints the fact hostname:\n{out}{err}"
+    );
+}
+
+/// The broadcast guard (issue 1317, `.claude/rules/rig-mutation-broadcast-guard.md`): the deploy
+/// STOPS the production strih OBS, so while strih or stream is streaming/recording the preflight
+/// must refuse with exit 4 -- through the ONE shared `stray_session_check_assert` rig-busy read,
+/// dialled at the strih-lx IP + the obs-fleet stream host -- naming the step and WHAT is live,
+/// before anything on the box changes.
+#[test]
+fn strih_lx_refuses_while_a_broadcast_is_live_1317() {
+    for (mode, live) in [
+        ("streaming", "stream streaming"),
+        ("recording", "strih recording"),
+        ("partial-busy", "stream streaming"),
+    ] {
+        let r = run_exec(&[("STUB_RIG_BUSY", mode)]);
+        assert_eq!(
+            r.code, 4,
+            "{mode}: a live broadcast must refuse the deploy.\nout={}\nerr={}\ncalls={}",
+            r.out, r.err, r.calls
+        );
+        assert!(
+            r.calls.contains(
+                "obs_phase2 rig-busy-check --strih-host 10.77.9.202 --stream-host 10.77.9.204"
+            ),
+            "{mode}: the shared rig-busy read at strih-lx + stream:\n{}",
+            r.calls
+        );
+        let fail = r
+            .err
+            .lines()
+            .find(|l| l.contains("ERROR: [strih-lx preflight]"))
+            .unwrap_or_else(|| panic!("{mode}: no named preflight failure:\n{}", r.err));
+        assert!(
+            fail.contains(live) && fail.contains("nothing changed"),
+            "{mode}: the failure names what is live ({live}):\n{fail}"
+        );
+        for c in [
+            "--local-sweep",
+            "touch '",
+            "rsync ",
+            "strih-obs-stop.sh",
+            "run-setup.sh",
+            "--user start",
+        ] {
+            assert!(
+                !r.calls.contains(c),
+                "{mode}: `{c}` must not run while live:\n{}",
+                r.calls
+            );
+        }
+        assert!(r.fleet_log().is_empty(), "{mode}: {}", r.fleet_log());
+    }
+    // a streaming box is named with its key-free ingest detail (the guard's stream-detail read).
+    let r = run_exec(&[("STUB_RIG_BUSY", "streaming")]);
+    let fail = r
+        .err
+        .lines()
+        .find(|l| l.contains("ERROR: [strih-lx preflight]"))
+        .unwrap_or_default();
+    assert!(
+        fail.contains("rtmp://a.rtmp.youtube.com/live2"),
+        "names the live ingest:\n{}",
+        r.err
+    );
+}
+
+/// An idle rig proceeds exactly as before; the guard runs AFTER the identity + installer preflight
+/// and immediately BEFORE the first mutation (the stage prep / sweep). An unreadable rig follows the
+/// shared guard's fail-OPEN semantics (WARN + proceed) -- never a second, stricter definition here.
+#[test]
+fn strih_lx_idle_rig_passes_the_broadcast_guard_before_the_first_mutation_1317() {
+    let stage = format!("/tmp/genlock-stage-{SHA}");
+    for mode in ["idle", "unreachable"] {
+        let r = run_exec(&[("STUB_RIG_BUSY", mode)]);
+        assert_eq!(
+            r.code, 0,
+            "{mode}: must proceed.\nout={}\nerr={}\ncalls={}",
+            r.out, r.err, r.calls
+        );
+        let pre = r.at("pgrep -x setup-strih.sh");
+        let guard = r.at("obs_phase2 rig-busy-check");
+        let prep = r.at(&format!("touch '{stage}'"));
+        let stop = r.at("strih-obs-stop.sh");
+        assert!(
+            pre < guard && guard < prep && prep < stop,
+            "{mode}: installer preflight < rig-busy guard < prep < stop:\n{}",
+            r.calls
+        );
+        assert!(
+            r.fleet_log().contains("strih-lx"),
+            "{mode}: {}",
+            r.fleet_log()
+        );
+    }
+    let r = run_exec(&[("STUB_RIG_BUSY", "unreachable")]);
+    assert!(
+        r.err.contains("WARNING: could not read rig-busy state"),
+        "the shared guard's fail-open is surfaced:\n{}",
+        r.err
     );
 }
