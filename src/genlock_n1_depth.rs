@@ -19,9 +19,16 @@
 //! - DEPTH IS THE PRESENTED AGE, not the queue length. A render tick running late by more than the
 //!   ~21.7 ms sender→receiver skew already holds the NEXT frame, so the queue reads one frame deep
 //!   at the correct state. Reducing the drain hysteresis to one frame therefore churned (10 sheds/h,
-//!   17–21 flips/h between 30 and 31, against 0). The age is immune to a tick up to one interval
-//!   late: `depth = (age + N1_TICK_EARLY_MARGIN_NS) / interval`, and the margin tolerates a tick
-//!   up to 2 ms early (the render-tick slew clamp `GENLOCK_MAX_SLEW_NS`).
+//!   17–21 flips/h between 30 and 31, against 0). The SHED reads
+//!   `(age + N1_TICK_EARLY_MARGIN_NS) / interval`: immune to a tick up to one interval (minus the
+//!   margin) late, and tolerant of a wake a hair early (wall-vs-monotonic rate error over one
+//!   sleep, microseconds). The margin is kept at 100 us because the misfire band is exactly
+//!   `[interval − margin, interval)` of lateness: at 2 ms a 31.3–33.3 ms late tick that does not
+//!   yet skip a slot read the settled conveyor one frame deep and shed (review round 1). A tick
+//!   LATER than a whole interval skips its slot (`genlock_next_deadline`), the conveyor really is
+//!   one frame deeper then, and the shed correctly repays it. A tick further EARLY than the
+//!   margin reads one frame shallow, which only defers a shed to the next on-grid tick — the ±2 ms
+//!   `GENLOCK_MAX_SLEW_NS` clamp bounds the per-tick slew, not the phase.
 //! - THE 1 µs PIN TOLERANCE. The integer interval (33_333_333) is ~1/3 ns short of a real frame,
 //!   so a pin that IS a whole number of frames (100 ms) would count one frame too many and put the
 //!   target on the drain's own edge (23 flips/h in the bench). A sub-microsecond excess is not a
@@ -50,10 +57,13 @@ use crate::genlock_backlog::DRAIN_MIN_TICK_INTERVAL;
 /// `GENLOCK_N1_PIN_FRAME_TOLERANCE_NS`.
 pub const N1_PIN_FRAME_TOLERANCE_NS: u64 = 1_000;
 
-/// issue 1367 — how early a render tick may run before its grid point and still read the presented
-/// depth it is really on (the ±2 ms render-tick slew clamp). Mirror of the C
+/// issue 1367 — how early a render tick may wake before its grid point and still read (for the
+/// SHED) the presented depth it is really on: a wall-vs-monotonic rate error over one sleep is
+/// microseconds, so 100 us is ample. It is also the width of the misfire band at the other end —
+/// a tick late by `interval − margin` or more reads one frame deep — so it must stay tiny (2 ms
+/// misfired on 31.3–33.3 ms render hitches, review round 1). Mirror of the C
 /// `GENLOCK_N1_TICK_EARLY_MARGIN_NS`.
-pub const N1_TICK_EARLY_MARGIN_NS: u64 = 2_000_000;
+pub const N1_TICK_EARLY_MARGIN_NS: u64 = 100_000;
 
 /// issue 1367 — the pin-derived depth must exceed the achievable floor by at least this many frames
 /// for the N==1 rule to act (a DEEP source). Mirror of the C `GENLOCK_N1_DEEP_MARGIN_FRAMES`.
@@ -158,7 +168,7 @@ pub fn should_hold_n1_phase(
 /// grid's 2 ms date offset) otherwise read the same depth one frame shallow on one tick (HOLD) and
 /// one frame deep on the next (SHED), a hold/shed limit cycle (~1100 each per hour in the bench).
 /// Rounded, a HOLD needs the conveyor at least half a frame shallow; a SHED still fires only on a
-/// whole extra frame (minus the 2 ms early-tick margin), so a late tick never reads deeper.
+/// whole extra frame (minus the 100 us early-tick margin), so a late tick never reads deeper.
 pub fn n1_rounded_depth_frames(wall_now_ns: u64, stamp_ns: u64, interval_ns: u64) -> u64 {
     if interval_ns == 0 {
         return 0;

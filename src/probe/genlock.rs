@@ -1755,7 +1755,7 @@ impl ReleaseCadence {
             // issue 1367: a DEEP N==1 conveyor still shallower than its pin-derived depth HOLDS one
             // tick first (a deliberate repeat, one frame deeper next tick), sharing the drain
             // throttle. Mirror of the C `genlock_should_hold_n1_phase` at the head of its N==1
-            // STEADY branch; the Tier-0 decision is `genlock_backlog::should_hold_n1_phase`.
+            // STEADY branch; the Tier-0 decision is `genlock_n1_depth::should_hold_n1_phase`.
             if let (Some(&head), Some(&newest)) = (queue.front(), queue.back()) {
                 if crate::genlock_n1_depth::should_hold_n1_phase(
                     wall_now_ns,
@@ -1969,6 +1969,12 @@ impl ReleaseCadence {
         let n = Self::measure_source_multiple(queue, interval_ns)
             .unwrap_or(self.last_known_n)
             .max(1);
+        // issue 1367 (review round 1): the N==1 shed belongs to a tick of the N==1 STEADY branch
+        // only; on the N>=2 branch (`last_known_n` latched >= 2) a post-erase re-measure reading
+        // n == 1 stays inert, exactly as before. Mirror of the C `genlock_should_converge_phase`.
+        if n < 2 && self.last_known_n >= 2 {
+            return false;
+        }
         crate::genlock_backlog::should_converge_phase(
             wall_now_ns,
             boundary,
