@@ -4,6 +4,8 @@ paths:
   - "src/genlock_grid_bench.rs"
   - "src/genlock_grid_bench_tests.rs"
   - "tests/genlock_relock_selection_parity.rs"
+  - "vendor/obs-studio/libobs/obs-source.c"
+  - "src/probe/genlock.rs"
 ---
 
 # The N==1 PIN-DERIVED DEPTH (issue 1367) — one depth after every restart
@@ -56,7 +58,9 @@ comparison against a verbatim pre-1367 copy (`converge_decisions_are_byte_identi
    `GENLOCK_MAX_SLEW_NS` (2 ms) per tick; read there, a settled conveyor read one frame deep after
    a forward step of more than half a frame (a shed) and one frame shallow once back (a hold).
    Both halves act only while the tick is within 2 ms of a grid point and defer otherwise.
-   Normal and caught-up late ticks are always on the grid, so nothing else changes.
+   Normal and caught-up late ticks are scheduled on their slot or at most 2 ms after it (a tick
+   that overran the next slot by under 2 ms sleeps to that slot + the clamped 2 ms), so they are
+   on the grid; at that exact edge the read order can defer one tick, never more.
 
 Plus the 1 µs pin tolerance (a whole-frame pin like 1000 ms must not count one frame too many).
 

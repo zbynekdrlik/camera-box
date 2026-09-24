@@ -609,7 +609,7 @@ fn n1_pin_derived_depth_present_and_wired_1367() {
             "the source-side on-grid read over the per-second grid",
         ),
         (
-            "genlock_grid_floor_ns(tick_wall_ns + GENLOCK_N1_ON_GRID_NS, interval_ns)",
+            "genlock_grid_floor_ns(shifted_ns, interval_ns)",
             "the on-grid read floors on the ONE per-second grid (obs-genlock-grid.h)",
         ),
         (

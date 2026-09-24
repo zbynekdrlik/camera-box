@@ -5677,7 +5677,9 @@ static bool genlock_should_drain_one(const obs_source_t *source, uint32_t reserv
  * only while the scheduled tick is ON the grid (genlock_n1_tick_on_grid, review round 3): a
  * wall-clock step leaves the ticks off the grid by the step and the render tick slews back 2 ms per
  * tick, so a read there would shed a frame after a forward step and hold one once back on the grid.
- * A normal or caught-up late tick is always on the grid (video_time is its slot). */
+ * A normal or caught-up late tick is scheduled on its slot, or at most GENLOCK_MAX_SLEW_NS after it
+ * (a tick that overran the next grid point by under 2 ms sleeps to that slot + the clamped 2 ms),
+ * so it is on the grid; at that +2 ms edge the wall/monotonic read order can defer one tick. */
 static inline uint64_t genlock_n1_tick_wall_ns(uint64_t wall_now_ns, uint64_t mono_now_ns, uint64_t scheduled_mono_ns)
 {
 	const uint64_t lateness = mono_now_ns > scheduled_mono_ns ? mono_now_ns - scheduled_mono_ns : 0;
@@ -5825,8 +5827,10 @@ static inline uint64_t genlock_n1_tick_wall_now(uint64_t wall_now_ns)
  * n1_tick_is_on_grid. */
 static inline bool genlock_n1_tick_is_on_grid(uint64_t tick_wall_ns, uint64_t interval_ns)
 {
-	return genlock_n1_tick_on_grid(tick_wall_ns,
-				       genlock_grid_floor_ns(tick_wall_ns + GENLOCK_N1_ON_GRID_NS, interval_ns));
+	const uint64_t shifted_ns = tick_wall_ns > UINT64_MAX - GENLOCK_N1_ON_GRID_NS
+					    ? UINT64_MAX
+					    : tick_wall_ns + GENLOCK_N1_ON_GRID_NS;
+	return genlock_n1_tick_on_grid(tick_wall_ns, genlock_grid_floor_ns(shifted_ns, interval_ns));
 }
 
 /* camera-box #1049: the source-bound wrapper -- reads the live n (READ-ONLY, same as

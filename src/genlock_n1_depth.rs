@@ -43,9 +43,13 @@
 //!   back on the grid (a hold): a skip plus a duplicate where the boundary-keyed conveyor did
 //!   nothing. Both halves therefore act only while the scheduled tick is within
 //!   [`N1_ON_GRID_NS`] of a per-second grid point and defer otherwise. A normal or caught-up late
-//!   tick is always on the grid (`video_time` is its slot). The same condition removes the
-//!   early-phase case: an early tick past the pin's headroom to the next frame edge moves the
-//!   release deadline a frame, so a sender gap/dup would cost a hold/shed pair.
+//!   tick is scheduled on its slot or at most `GENLOCK_MAX_SLEW_NS` after it (a tick that overran
+//!   the next grid point by under 2 ms sleeps to that slot plus the clamped 2 ms), so it is on the
+//!   grid; at that exact +2 ms edge the wall/monotonic read order can defer one tick. The same
+//!   condition removes the early-phase case beyond 2 ms: an early tick past the pin's headroom to
+//!   the next frame edge moves the release deadline a frame, so a sender gap/dup would cost a
+//!   hold/shed pair. At pins whose headroom is under 2 ms (999 ms, 1000 ms) an early tick inside
+//!   the window still can — only on the last one or two ticks of a backward-step slew.
 //! - THE 1 µs PIN TOLERANCE. The integer interval (33_333_333) is ~1/3 ns short of a real frame,
 //!   so a pin that IS a whole number of frames (100 ms) would count one frame too many and put the
 //!   target on the drain's own edge (23 flips/h in the bench). A sub-microsecond excess is not a
@@ -363,6 +367,8 @@ mod tests {
                     "offset {offset} ns at interval {interval}"
                 );
             }
+            // +1_999_999 / +2_000_001 above also bracket the clamped catch-up tick (`video_sleep`
+            // after an overrun of under 2 ms past the next slot schedules slot + 2 ms).
             // Every grid point of the second is on the grid (the per-second slots, not k * I).
             let mut g = s;
             for _ in 0..(1_000_000_000 / interval) {
@@ -374,6 +380,14 @@ mod tests {
                 g = crate::genlock_grid::grid_next_boundary_ns(g, interval);
             }
         }
+        // 29.97 fps has no per-second grid: the check floors on the 1970 grid, the same fallback
+        // the render tick uses (`genlock_next_deadline`).
+        let i2997 = 33_366_666u64;
+        let g2997 = 30_000 * i2997;
+        assert!(n1_tick_is_on_grid(g2997, i2997));
+        assert!(n1_tick_is_on_grid(g2997 + 2_000_000, i2997));
+        assert!(!n1_tick_is_on_grid(g2997 + 3_000_000, i2997));
+        assert!(!n1_tick_is_on_grid(g2997 - 3_000_000, i2997));
         // The pure predicate at its edges, whatever grid the caller floors on.
         assert!(n1_tick_on_grid(1_000, 0));
         assert!(!n1_tick_on_grid(1_000, 3_000_000 + 1_001));

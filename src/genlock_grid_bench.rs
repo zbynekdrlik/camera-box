@@ -516,7 +516,10 @@ impl Fifo {
 /// issue 1367 — the on-grid condition of the N==1 rule on the bench's own grid model (the C
 /// `genlock_n1_tick_is_on_grid` floors on the production per-second grid).
 fn tick_on_grid(grid: GridModel, tick_wall: u64) -> bool {
-    n1_tick_on_grid(tick_wall, grid.deadline_floor(tick_wall + N1_ON_GRID_NS))
+    n1_tick_on_grid(
+        tick_wall,
+        grid.deadline_floor(tick_wall.saturating_add(N1_ON_GRID_NS)),
+    )
 }
 
 /// Run one scenario and report what the receiver did.
