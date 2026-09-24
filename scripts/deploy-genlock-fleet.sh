@@ -50,7 +50,8 @@ set -euo pipefail
 #   --sha      the canonical build SHA to stamp into the markers (plan mode override).
 #   --yes      (execute mode) auto-confirm the box-backup retention deletions.
 #
-# Exit codes: 0 = ok, 2 = usage error, 3 = resolution/download failure, 4 = a box deploy failed.
+# Exit codes: 0 = ok, 2 = usage error, 3 = resolution/download failure, 4 = a box deploy failed,
+#             5 = strih-lx installed + running but its verify-strih.sh acceptance gate is not clear.
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/genlock-markers.sh
@@ -714,7 +715,8 @@ Windows plan):
   --sha      the canonical build SHA to stamp into the markers (plan mode).
   --yes      (execute mode) auto-confirm the box-backup retention deletions.
 
-Exit codes: 0 ok, 2 usage error, 3 resolution/download failure, 4 a box deploy failed.
+Exit codes: 0 ok, 2 usage error, 3 resolution/download failure, 4 a box deploy failed, 5 strih-lx
+installed + running but its verify-strih.sh acceptance gate not clear.
 EOF
 }
 
@@ -936,7 +938,13 @@ main() {
   # --- strih-lx phase 2: the box steps (stage before stop, graceful stop, setup, fail-closed
   # read-back). A failure exits 4 naming the step and writes NO fleet-log line.
   if [ "$want_strihlx" = 1 ]; then
-    strih_lx_apply "$sha" || exit $?
+    local lx_rc=0
+    strih_lx_apply "$sha" || lx_rc=$?
+    if [ "$lx_rc" = 5 ]; then   # installed + running, acceptance gate not clear: log what runs.
+      mkdir -p "$(dirname "$FLEET_LOG_DEFAULT")"
+      fleet_log_line "$run_id" "$sha" "strih-lx:accept-failed" "$mode" >> "$FLEET_LOG_DEFAULT"
+    fi
+    [ "$lx_rc" = 0 ] || exit "$lx_rc"
     # logged the moment it verified, so a later imag failure never hides the strih deploy.
     mkdir -p "$(dirname "$FLEET_LOG_DEFAULT")"
     fleet_log_line "$run_id" "$sha" "strih-lx" "$mode" >> "$FLEET_LOG_DEFAULT"

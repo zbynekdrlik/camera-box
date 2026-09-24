@@ -48,7 +48,8 @@
 #                  (a crash-looping Type=simple unit reads `active` between restarts), the OBS log
 #                  written after the start shows `render tick ENABLED`, and :8899 reports the SHA.
 #
-# Every failure prints `ERROR: [strih-lx <step>] failed (rc=N): <what>` on stderr.
+# Every failure prints `ERROR: [strih-lx <step>] failed (rc=N): <what>` on stderr. Exit 5 = installed,
+# running and read back, but the in-deploy verify-strih.sh acceptance gate is not clear.
 #
 # Test seams (tests/deploy_genlock_fleet_strih_lx_exec_1317.rs stubs gh/sshpass/ssh/rsync/curl on
 # PATH): STRIH_LX_SETUP_POLLS / STRIH_LX_SETUP_POLL_SECS (setup rc poll, default 270 x 10 s = 45 min),
@@ -446,9 +447,15 @@ strih_lx_apply() {
 
   _strih_lx_verify "$sha" || return
   if [ "$accept" = 1 ]; then
-    # [accept] the acceptance gate setup-strih.sh could not run meaningfully with OBS stopped.
-    _strih_lx_ssh "$(strih_lx_remote_accept_cmd "$stage" strih-lx)" < <(printf '%s\n' "$STRIH_LX_PREP_PW"); rc=$?
-    [ "$rc" = 0 ] || { _strih_lx_fail accept "$rc" 4 "verify-strih.sh --box strih-lx did not pass with the new OBS running (output above)"; return; }
+    # [accept] the acceptance gate setup-strih.sh could not run meaningfully with OBS stopped. A
+    # failure here is exit 5, NOT 4: the new build is installed, running and read back; only the
+    # whole-box gate (which also grades things the deploy cannot change) is not clear.
+    out="$(_strih_lx_ssh "$(strih_lx_remote_accept_cmd "$stage" strih-lx)" < <(printf '%s\n' "$STRIH_LX_PREP_PW"))"; rc=$?
+    printf '%s\n' "$out"
+    if [ "$rc" != 0 ]; then
+      _strih_lx_fail accept "$rc" 5 "the new build is installed + running (read back), but verify-strih.sh --box strih-lx did not pass: $(printf '%s\n' "$out" | grep -F 'FAIL' | sed 's/\x1b\[[0-9;]*m//g; s/^[[:space:]]*//' | tr '\n' ';')"
+      return
+    fi
     echo "# strih-lx: acceptance gate (verify-strih.sh --box strih-lx) passed"
   fi
 }
