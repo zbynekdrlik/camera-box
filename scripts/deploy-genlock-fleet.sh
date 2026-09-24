@@ -943,6 +943,7 @@ main() {
     if [ "$lx_rc" = 5 ]; then   # installed + running, acceptance gate not clear: log what runs.
       mkdir -p "$(dirname "$FLEET_LOG_DEFAULT")"
       fleet_log_line "$run_id" "$sha" "strih-lx:accept-failed" "$mode" >> "$FLEET_LOG_DEFAULT"
+      [ "$boxes" = strih-lx ] || echo "NOTE: the other boxes (${boxes#strih-lx,}) were WITHHELD -- deploy them at $sha once the acceptance items are understood, or the fleet stays on two builds" >&2
     fi
     [ "$lx_rc" = 0 ] || exit "$lx_rc"
     # logged the moment it verified, so a later imag failure never hides the strih deploy.
