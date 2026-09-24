@@ -105,6 +105,9 @@ exec "$@"
 printf 'ssh %s\n' "$*" >> "$STUB_DIR/calls.log"
 cmd="${@: -1}"
 case "$cmd" in
+  hostname) echo "${STUB_HOSTNAME:-strih-lx}"; exit 0 ;;
+  *"acceptance gate did not pass"*) echo "${STUB_GATE_ONLY:-0}"; exit 0 ;;
+  *"repo/scripts/verify-strih.sh"*) cat > "$STUB_DIR/accept.stdin"; echo "verify-strih output"; exit "${STUB_ACCEPT_RC:-0}" ;;
   *"pgrep -x setup-strih.sh"*)
     if [ -f "$STUB_DIR/setup.stdin" ]; then st="${STUB_INSTALLER_AFTER:-idle}"; else st="${STUB_INSTALLER:-idle}"; fi
     [ "$st" = unreachable ] && exit 255
@@ -933,4 +936,137 @@ fn strih_lx_unreachable_after_launch_and_settle_budget_1317() {
         r.err
     );
     assert!(!r.calls.contains("ssh "), "{}", r.calls);
+}
+
+/// review round 5: setup-strih.sh's own final gate (step 17) runs verify-strih.sh while the deploy
+/// has OBS STOPPED, so with no reboot pending it always fails `OBS running` and exits 1 after every
+/// install step succeeded. The arm accepts exactly that failure (the gate line is the log's last
+/// FAIL), starts OBS, passes the fail-closed read-back, and then runs verify-strih.sh --box strih-lx
+/// itself as the real acceptance gate -- a failure there is exit 4.
+#[test]
+fn strih_lx_runs_the_acceptance_gate_itself_after_obs_is_up_1317() {
+    let r = run_exec(&[("STUB_SETUP_RC", "1"), ("STUB_GATE_ONLY", "1")]);
+    assert_eq!(r.code, 0, "err={}\nout={}", r.err, r.out);
+    let accept = r.at("repo/scripts/verify-strih.sh");
+    assert!(
+        r.at("--user start") < accept && r.at("GENLOCK_BUILD_SHA.txt") < accept,
+        "the gate runs after OBS is up and read back:\n{}",
+        r.calls
+    );
+    assert!(
+        r.calls
+            .lines()
+            .nth(accept)
+            .unwrap()
+            .contains("--box strih-lx"),
+        "{}",
+        r.calls
+    );
+    assert!(
+        r.file("accept.stdin").starts_with("newlevel\n"),
+        "sudo reads the password from stdin"
+    );
+    assert!(r.fleet_log().contains("strih-lx"), "{}", r.fleet_log());
+
+    let r = run_exec(&[
+        ("STUB_SETUP_RC", "1"),
+        ("STUB_GATE_ONLY", "1"),
+        ("STUB_ACCEPT_RC", "1"),
+    ]);
+    assert_eq!(r.code, 4, "err={}", r.err);
+    assert!(r.err.contains("[strih-lx accept]"), "{}", r.err);
+    assert!(r.out.contains("verify-strih output"), "{}", r.out);
+    assert!(r.fleet_log().is_empty(), "{}", r.fleet_log());
+
+    // setup rc 0 = the reboot-pending path (the gate only reported): no in-deploy acceptance run.
+    let r = run_exec(&[]);
+    assert_eq!(r.code, 0, "err={}", r.err);
+    assert!(
+        !r.calls.contains("repo/scripts/verify-strih.sh"),
+        "{}",
+        r.calls
+    );
+
+    // the gate text the arm keys on stays in setup-strih.sh.
+    let setup = fs::read_to_string(manifest_dir().join("scripts/setup-strih.sh")).unwrap();
+    assert!(setup.contains("verify-strih.sh acceptance gate did not pass"));
+}
+
+/// review round 5: a STRIH_LX_IP override that reaches ANOTHER box must not provision it as
+/// strih-lx -- the preflight reads the box's hostname and refuses unless it is the fact file's.
+#[test]
+fn strih_lx_refuses_a_box_that_is_not_strih_lx_1317() {
+    let r = run_exec(&[("STUB_HOSTNAME", "strih-pp")]);
+    assert_eq!(r.code, 4, "err={}", r.err);
+    assert!(
+        r.err.contains("[strih-lx preflight]") && r.err.contains("strih-pp"),
+        "{}",
+        r.err
+    );
+    for c in ["--local-sweep", "rsync ", "strih-obs-stop.sh"] {
+        assert!(!r.calls.contains(c), "`{c}` must not run:\n{}", r.calls);
+    }
+}
+
+/// review round 5: the staged-tree check (the box fact file, its intercom routing file) is a pure
+/// function with its own failure cases.
+#[test]
+fn strih_lx_tree_check_needs_the_fact_file_and_its_intercom_file_1317() {
+    let check = |dir: &Path| {
+        let o = Command::new("bash")
+            .arg("-c")
+            .arg(". \"$LIB\"; strih_lx_tree_check \"$D\" strih-lx; echo \"rc=$?\"")
+            .env("LIB", lib())
+            .env("D", dir)
+            .output()
+            .unwrap();
+        (
+            String::from_utf8_lossy(&o.stdout).into_owned(),
+            String::from_utf8_lossy(&o.stderr).into_owned(),
+        )
+    };
+    let t = tempfile::tempdir().unwrap();
+    let d = t.path();
+    for f in [
+        "scripts/setup-strih.sh",
+        "scripts/verify-strih.sh",
+        "scripts/obs-backup-retention.sh",
+        "systemd/strih-obs.service",
+    ] {
+        fs::create_dir_all(d.join(f).parent().unwrap()).unwrap();
+        fs::write(d.join(f), "x").unwrap();
+    }
+    let (out, err) = check(d);
+    assert!(
+        out.contains("rc=1") && err.contains("strih-lx.env"),
+        "{out}{err}"
+    );
+    fs::create_dir_all(d.join("scripts/strih-boxes")).unwrap();
+    fs::write(
+        d.join("scripts/strih-boxes/strih-lx.env"),
+        "STRIH_HOSTNAME=strih-lx\n",
+    )
+    .unwrap();
+    let (out, err) = check(d);
+    assert!(
+        out.contains("rc=1") && err.contains("STRIH_INTERCOM_CONFIG"),
+        "{out}{err}"
+    );
+    fs::write(
+        d.join("scripts/strih-boxes/strih-lx.env"),
+        "STRIH_HOSTNAME=strih-lx\nSTRIH_INTERCOM_CONFIG=intercom/x.toml\n",
+    )
+    .unwrap();
+    let (out, err) = check(d);
+    assert!(
+        out.contains("rc=1") && err.contains("intercom/x.toml"),
+        "{out}{err}"
+    );
+    fs::create_dir_all(d.join("intercom")).unwrap();
+    fs::write(d.join("intercom/x.toml"), "x").unwrap();
+    let (out, err) = check(d);
+    assert!(
+        out.contains("strih-lx\nrc=0"),
+        "prints the fact hostname:\n{out}{err}"
+    );
 }
