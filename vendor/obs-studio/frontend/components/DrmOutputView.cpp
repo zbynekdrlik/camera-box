@@ -140,8 +140,10 @@ void DrmOutputViewInit()
 	group->setExclusive(true);
 	group->addAction(actionProgram);
 	group->addAction(actionMultiview);
-	QObject::connect(actionProgram, &QAction::triggered, [] { SelectView(OBS_DRM_OUTPUT_VIEW_PROGRAM); });
-	QObject::connect(actionMultiview, &QAction::triggered, [] { SelectView(OBS_DRM_OUTPUT_VIEW_MULTIVIEW); });
+	QObject::connect(actionProgram, &QAction::triggered, actionProgram,
+			 [] { SelectView(OBS_DRM_OUTPUT_VIEW_PROGRAM); });
+	QObject::connect(actionMultiview, &QAction::triggered, actionMultiview,
+			 [] { SelectView(OBS_DRM_OUTPUT_VIEW_MULTIVIEW); });
 
 	obs_frontend_add_event_callback(OnFrontendEvent, nullptr);
 	UpdateMenu();
