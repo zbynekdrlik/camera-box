@@ -2,6 +2,9 @@
 # strih-lx One-Shot Setup (issue 1317) -- see the extended header below the strict-mode line.
 # Provisions a Linux notebook as the strih cutter/mix box; runs ON the box as root, idempotent.
 set -euo pipefail
+# Pin a 022 umask: a caller running this under 077 (the 24.9.2026 deploy) made every directory it
+# created root-only, and the intercom-hub (User=newlevel) could not read its own config.
+umask 022
 #
 # The box:
 #   * emits its NDI outputs under its own NAMESPACED `<STRIH_NDI_PREFIX> (...)` names (never a
