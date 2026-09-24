@@ -39,6 +39,37 @@ fn squish(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// Drop `//` line comments and `/* ... */` block comments (newlines kept), so the call-site scan
+/// below judges code only: a comment that names the always-on-top helper and then the window
+/// accessor must neither fail the scan nor stand in for a real call. Not string-literal aware --
+/// it only bounds an ASCII substring search over vendored C++, it never rebuilds source.
+fn strip_cpp_comments(src: &str) -> String {
+    let b = src.as_bytes();
+    let mut out = String::with_capacity(src.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'/' && i + 1 < b.len() && b[i + 1] == b'/' {
+            while i < b.len() && b[i] != b'\n' {
+                i += 1;
+            }
+        } else if b[i] == b'/' && i + 1 < b.len() && b[i + 1] == b'*' {
+            i += 2;
+            while i + 1 < b.len() && !(b[i] == b'*' && b[i + 1] == b'/') {
+                if b[i] == b'\n' {
+                    out.push('\n');
+                }
+                i += 1;
+            }
+            i += 2;
+        } else {
+            let ch = src[i..].chars().next().expect("char boundary");
+            out.push(ch);
+            i += ch.len_utf8();
+        }
+    }
+    out
+}
+
 const PROJECTOR: &str = "vendor/obs-studio/frontend/widgets/OBSProjector.cpp";
 const PROJECTOR_HPP: &str = "vendor/obs-studio/frontend/widgets/OBSProjector.hpp";
 const CREATION_SITE: &str = "vendor/obs-studio/frontend/widgets/OBSBasic_Projectors.cpp";
@@ -135,7 +166,8 @@ fn runtime_always_on_top_acts_on_the_projector_itself() {
 }
 
 /// Every `SetAlwaysOnTop(` CALL in the vendored frontend widgets passes the window itself --
-/// never a host toplevel reached through `window()` or a `Toplevel()` accessor.
+/// never a host toplevel reached through `window()` or a `Toplevel()` accessor. Comments are
+/// stripped first, so only real code is judged.
 #[test]
 fn no_set_always_on_top_call_goes_through_a_host_toplevel() {
     let dir = repo_path(WIDGETS_DIR);
@@ -149,7 +181,7 @@ fn no_set_always_on_top_call_goes_through_a_host_toplevel() {
     for path in entries {
         let text = std::fs::read_to_string(&path)
             .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
-        let s = squish(&text);
+        let s = squish(&strip_cpp_comments(&text));
         let mut rest = s.as_str();
         while let Some(at) = rest.find("SetAlwaysOnTop(") {
             let call = &rest[at..];
