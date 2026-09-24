@@ -3,12 +3,11 @@
 # Provisions a Linux notebook as the strih cutter/mix box; runs ON the box as root, idempotent.
 set -euo pipefail
 #
-# The notebook runs IN PARALLEL with the Windows STRIH-SNV cutter until tuned (owner 16.9.2026), so
-# this box:
-#   * emits its NDI outputs under the NAMESPACED `STRIH-LX (...)` names (never a 2nd STRIH-SNV
-#     sender on the wire -- the stream box + receivers must never see two STRIH-SNV (2ME PGM)), and
-#   * joins the cluster clock as a dantesync CLIENT (`--ntp-server strih.lan`) -- the Windows PC
-#     stays the ONE NTP master while both run.
+# The box:
+#   * emits its NDI outputs under its own NAMESPACED `<STRIH_NDI_PREFIX> (...)` names (never a
+#     `STRIH-SNV (...)` sender on the wire -- the stream box + receivers must never see two), and
+#   * runs dantesync in the ROLE its fact file declares (strih-lx: `server`, the fleet NTP master since
+#     the M4 cut-over 20.9.2026; a `client` box syncs from its STRIH_DANTESYNC_UPSTREAM).
 #
 # issue 1357 (owner rulings): the box itself is the SAME OBS-only appliance imag was -- every box-level
 # item (lightdm autologin -> openbox on plain Xorg with GNOME purged, low-latency kernel, boot safety
@@ -59,9 +58,9 @@ fail() { echo -e "${RED}FAIL: $1${NC}" >&2; exit 1; }
 
 # --- issue 1361: select + load the box facts BEFORE the source-guard, so a sourced setup (the unit
 # tests) sees exactly the facts the real run uses. Any invalid / TODO_OWNER fact refuses here.
-STRIH_BOX="$(strih_box_cli_box "$@")" || fail "usage: setup-strih.sh [--box <name>] [--yes]"
-strih_box_load "$STRIH_BOX" \
-  || fail "box '${STRIH_BOX}': scripts/strih-boxes/${STRIH_BOX}.env is missing, invalid or still has TODO_OWNER facts (listed above) -- refusing to provision"
+STRIH_FACT_BOX="$(strih_box_cli_box "$@")" || fail "usage: setup-strih.sh [--box <name>] [--yes]"
+strih_box_load "$STRIH_FACT_BOX" \
+  || fail "box '${STRIH_FACT_BOX}': scripts/strih-boxes/${STRIH_FACT_BOX}.env is missing, invalid or still has TODO_OWNER facts (listed above) -- refusing to provision"
 
 # --- source-guard: when sourced (the unit tests), stop here -- never run the destructive flow ----
 if [ "${BASH_SOURCE[0]}" != "${0}" ]; then
@@ -74,7 +73,7 @@ STATIC_IP="$(strih_lx_ip)"
 STRIH_HOST="$(strih_lx_host)"
 BOX_NAME="$(strih_lx_hostname)"
 
-echo -e "${GREEN}=== ${BOX_NAME} setup (issue 1317 / 1361): Linux strih cutter, facts scripts/strih-boxes/${STRIH_BOX}.env, host ${STRIH_HOST} ===${NC}"
+echo -e "${GREEN}=== ${BOX_NAME} setup (issue 1317 / 1361): Linux strih cutter, facts scripts/strih-boxes/${STRIH_FACT_BOX}.env, host ${STRIH_HOST} ===${NC}"
 
 # ---------------------------------------------------------------------------------------------
 step 1 "Static IP (NetworkManager) + hostname $(strih_lx_hostname)"
@@ -911,10 +910,10 @@ if [ -x "${HERE}/verify-strih.sh" ]; then
     # issue 1357: the baseline's kernel / PRIME / Xorg-kiosk changes only run after the next boot, so
     # the gate's baseline items are EXPECTED to report them pending on this run -- report, never fail
     # provisioning here; the post-reboot verify-strih.sh run is the acceptance gate.
-    warn "  the shared OBS-box baseline takes effect at the NEXT boot -- reboot ${BOX_NAME}, then run verify-strih.sh --box ${STRIH_BOX} (the run below only reports what is still pending)"
-    "${HERE}/verify-strih.sh" --box "$STRIH_BOX" || warn "  verify-strih.sh reports pending items -- expected before the reboot"
+    warn "  the shared OBS-box baseline takes effect at the NEXT boot -- reboot ${BOX_NAME}, then run verify-strih.sh --box ${STRIH_FACT_BOX} (the run below only reports what is still pending)"
+    "${HERE}/verify-strih.sh" --box "$STRIH_FACT_BOX" || warn "  verify-strih.sh reports pending items -- expected before the reboot"
   else
-    "${HERE}/verify-strih.sh" --box "$STRIH_BOX" || fail "verify-strih.sh acceptance gate did not pass"
+    "${HERE}/verify-strih.sh" --box "$STRIH_FACT_BOX" || fail "verify-strih.sh acceptance gate did not pass"
   fi
 else
   warn "  verify-strih.sh not found/executable next to this script -- run it manually"

@@ -52,10 +52,13 @@ strih_box_dir() {
 }
 
 # _strih_box_unsafe VALUE -> 0 iff VALUE carries a character a fact value must never hold (a shell
-# metacharacter, a quote, a glob). Values are later embedded in generated configs and commands, so
+# metacharacter, a quote, a glob, a control character). Values are later embedded in generated
+# configs and commands, so
 # they stay plain text: letters, digits, space, `.` `-` `_` `/` `:` `(` `)` `,` `=` `+` `@` `%`.
 _strih_box_unsafe() {
   local v="${1-}" i c
+  # a control character (tab, CR from a CRLF file, ESC, ...) would corrupt the generated JSON/units.
+  [[ "$v" == *[^[:print:]]* ]] && return 0
   for ((i = 0; i < ${#STRIH_BOX_UNSAFE_CHARS}; i++)); do
     c="${STRIH_BOX_UNSAFE_CHARS:i:1}"
     [[ "$v" == *"$c"* ]] && return 0
@@ -136,8 +139,8 @@ strih_box_validate() {
   case "${f[STRIH_DANTESYNC_ROLE]}" in
     server) [ -z "${f[STRIH_DANTESYNC_UPSTREAM]}" ] \
       || { echo "strih-box ${name}: STRIH_DANTESYNC_UPSTREAM must be empty for the server role (the NTP master syncs from nobody)" >&2; bad=1; } ;;
-    client) [ -n "${f[STRIH_DANTESYNC_UPSTREAM]}" ] \
-      || { echo "strih-box ${name}: STRIH_DANTESYNC_UPSTREAM (the NTP master host) is required for the client role" >&2; bad=1; } ;;
+    client) [[ "${f[STRIH_DANTESYNC_UPSTREAM]}" =~ ^[A-Za-z0-9.-]+$ ]] \
+      || { echo "strih-box ${name}: STRIH_DANTESYNC_UPSTREAM '${f[STRIH_DANTESYNC_UPSTREAM]}' must be the NTP master host name / address (required for the client role)" >&2; bad=1; } ;;
     *) echo "strih-box ${name}: STRIH_DANTESYNC_ROLE '${f[STRIH_DANTESYNC_ROLE]}' must be server or client" >&2; bad=1 ;;
   esac
   # Shape only (a repo-relative .toml under intercom/): the deploy plan stages scripts/ + systemd/ on
@@ -157,8 +160,11 @@ strih_box_validate() {
     [[ "${f[$k]}" =~ ^[A-Za-z0-9.-]+$ ]] \
       || { echo "strih-box ${name}: ${k} '${f[$k]}' is not a host name / address" >&2; bad=1; }
   done
-  [[ "${f[STRIH_CAMERAS]}" =~ ^[0-9]+( [0-9]+)*$ ]] \
-    || { echo "strih-box ${name}: STRIH_CAMERAS '${f[STRIH_CAMERAS]}' must be space-separated camera numbers" >&2; bad=1; }
+  if [[ ! "${f[STRIH_CAMERAS]}" =~ ^[1-9][0-9]*( [1-9][0-9]*)*$ ]]; then
+    echo "strih-box ${name}: STRIH_CAMERAS '${f[STRIH_CAMERAS]}' must be space-separated camera numbers (1, 2, ... no leading zero)" >&2; bad=1
+  elif [ "$(tr ' ' '\n' <<<"${f[STRIH_CAMERAS]}" | sort -u | wc -l)" -ne "$(wc -w <<<"${f[STRIH_CAMERAS]}")" ]; then
+    echo "strih-box ${name}: STRIH_CAMERAS '${f[STRIH_CAMERAS]}' lists a camera twice" >&2; bad=1
+  fi
   [ "$bad" = 0 ]
 }
 
@@ -168,6 +174,7 @@ strih_box_validate() {
 # (STRIH_LX_IP / STRIH_LX_DANTESYNC_ROLE) contradicts the loaded fact. Nothing is loaded on failure.
 strih_box_load() {
   local name="${1-}" file parsed line fleet_ip
+  strih_box_unload
   if [[ ! "$name" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$ ]]; then
     echo "strih-box: box name '${name}' is invalid (lower-case letters, digits, '-'; never a path)" >&2
     return 1
@@ -225,7 +232,8 @@ strih_box_known() {
 # strih_box_ensure_loaded -> rc 0 once a box is loaded; loads STRIH_BOX_DEFAULT when none is yet (a
 # sourced lib -- the unit tests -- gets today's box without an explicit load).
 strih_box_ensure_loaded() {
-  [ -n "${STRIH_BOX_LOADED:-}" ] && return 0
+  # both the name AND this shell's fact map: an inherited STRIH_BOX_LOADED alone is not a load.
+  [ -n "${STRIH_BOX_LOADED:-}" ] && declare -p STRIH_BOX_FACTS >/dev/null 2>&1 && return 0
   strih_box_load "$STRIH_BOX_DEFAULT"
 }
 
@@ -268,4 +276,107 @@ strih_box_cli_box() {
     esac
   done
   printf '%s\n' "${box:-$STRIH_BOX_DEFAULT}"
+}
+
+# --- the fact ACCESSORS (the `strih_lx_*` names are historical -- issue 1317 wrote them for the first
+# strih box; they serve whichever box is loaded). scripts/lib/strih-provision.sh sources this lib and
+# calls them; each reads through strih_box_fact, so an unloaded shell loads the default box. ---------
+
+# strih_lx_host -> the address the fleet dials for this strih box. STRIH_LX_HOST overrides; the
+# default is the ONE fleet list's host for the box's name (issue 1317 part 2: `obs_fleet_host <name>`;
+# the old `.lan` default had NO DNS entry on dev1). A box with no fleet row yet (a new strih before
+# go-live) dials its fact IP. obs-fleet.sh is sourced lazily from this lib's own dir.
+strih_lx_host() {
+  local name
+  if [ -n "${STRIH_LX_HOST:-}" ]; then
+    printf '%s' "$STRIH_LX_HOST"
+    return 0
+  fi
+  name="$(strih_lx_hostname)" || return 1
+  if ! declare -F obs_fleet_host >/dev/null; then
+    # shellcheck source=scripts/lib/obs-fleet.sh
+    . "$(dirname "${BASH_SOURCE[0]}")/obs-fleet.sh" || return 1
+  fi
+  obs_fleet_host "$name" || strih_lx_ip
+}
+
+# strih_lx_hostname -> the box's OWN hostname = its fleet NAME = its fact-file name (the name mDNS
+# announces as <name>.local). Never derived from strih_lx_host: that is a DIAL address (an IP by
+# default since issue 1317 part 2), and cutting it at the first dot would rename the box to `10`.
+strih_lx_hostname() { strih_box_fact STRIH_HOSTNAME; }
+
+# strih_lx_ip -> the box's static rig-LAN IP (fact STRIH_IP; the loader refuses a STRIH_LX_IP env
+# value that contradicts it).
+strih_lx_ip() { strih_box_fact STRIH_IP; }
+
+# strih_lx_ndi_prefix -> the NDI output name prefix (fact STRIH_NDI_PREFIX = the hostname upper-cased,
+# because DistroAV prepends the hostname to every output it announces).
+strih_lx_ndi_prefix() { strih_box_fact STRIH_NDI_PREFIX; }
+
+# strih_lx_cameras -> the camera numbers the strih receives, one per line (fact STRIH_CAMERAS).
+strih_lx_cameras() {
+  local c
+  c="$(strih_box_fact STRIH_CAMERAS)" || return 1
+  # shellcheck disable=SC2086  # word-split the validated space-separated number list on purpose
+  printf '%s\n' $c
+}
+
+# strih_lx_cg_sender -> the venue CG sender name, or empty when the fact is `none` (no CG inputs).
+strih_lx_cg_sender() {
+  local c
+  c="$(strih_box_fact STRIH_CG_SENDER)" || return 1
+  [ "$c" = none ] || printf '%s' "$c"
+}
+
+# strih_lx_intercom_config -> the repo-relative intercom hub routing file (fact STRIH_INTERCOM_CONFIG),
+# installed as /etc/intercom-hub/intercom.toml.
+strih_lx_intercom_config() { strih_box_fact STRIH_INTERCOM_CONFIG; }
+
+# strih_lx_nic_driver -> the kernel driver of the ONE rig NDI NIC (fact STRIH_NIC_DRIVER, the NIC
+# selection rule shared by the baseline tuning, the boot IRQ oneshot and verify-strih).
+strih_lx_nic_driver() { strih_box_fact STRIH_NIC_DRIVER; }
+
+# strih_lx_ndi_runtime_peer -> the cam box the NDI runtime is copied from (fact STRIH_NDI_RUNTIME_PEER).
+strih_lx_ndi_runtime_peer() { strih_box_fact STRIH_NDI_RUNTIME_PEER; }
+
+# strih_lx_obs_profile / strih_lx_obs_collection -> the OBS profile + scene-collection names the
+# launcher starts OBS with (facts STRIH_OBS_PROFILE / STRIH_OBS_COLLECTION).
+strih_lx_obs_profile() { strih_box_fact STRIH_OBS_PROFILE; }
+strih_lx_obs_collection() { strih_box_fact STRIH_OBS_COLLECTION; }
+
+# strih_obs_box_facts_dropin_text -> the strih-obs.service --user drop-in that hands the box's OBS
+# profile/collection facts to strih-obs-start.sh (it reads STRIH_OBS_PROFILE / STRIH_OBS_COLLECTION
+# from its environment), so the launcher itself installs verbatim on every strih box.
+strih_obs_box_facts_dropin_text() {
+  local prof coll
+  prof="$(strih_lx_obs_profile)" || return 1
+  coll="$(strih_lx_obs_collection)" || return 1
+  printf '[Service]\nEnvironment="STRIH_OBS_PROFILE=%s"\nEnvironment="STRIH_OBS_COLLECTION=%s"\n' "$prof" "$coll"
+}
+
+# strih_lx_dantesync_client_args -> the dantesync CLIENT invocation args `--ntp-server <upstream>`,
+# upstream = STRIH_LX_NTP_SERVER (an explicit override) else the box fact STRIH_DANTESYNC_UPSTREAM.
+# NEVER enables server/master mode. A server-role box has no upstream -> rc 1 + a stderr reason (no
+# guessed default host, issue 1361).
+strih_lx_dantesync_client_args() {
+  local up="${STRIH_LX_NTP_SERVER:-}"
+  [ -n "$up" ] || up="$(strih_box_fact STRIH_DANTESYNC_UPSTREAM)" || return 1
+  if [ -z "$up" ]; then
+    echo "strih_lx_dantesync_client_args: box '$(strih_lx_hostname)' has no STRIH_DANTESYNC_UPSTREAM (it is the NTP master) -- no client args" >&2
+    return 1
+  fi
+  printf -- '--ntp-server %s' "$up"
+}
+
+# strih_lx_dantesync_role -> the box's dantesync role (fact STRIH_DANTESYNC_ROLE: server | client).
+strih_lx_dantesync_role() { strih_box_fact STRIH_DANTESYNC_ROLE; }
+
+# strih_lx_dantesync_args -> the args the role implies: none for `server` (the bare NTP-master
+# daemon), strih_lx_dantesync_client_args for `client`.
+strih_lx_dantesync_args() {
+  local role
+  role="$(strih_lx_dantesync_role)" || return 1
+  if [ "$role" = client ]; then
+    strih_lx_dantesync_client_args
+  fi
 }

@@ -33,9 +33,9 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # --- issue 1361: select + load the box facts BEFORE the source-guard (a sourced verify -- the unit
 # tests -- sees the same facts the real run uses). An invalid / TODO_OWNER fact refuses here.
-STRIH_BOX="$(strih_box_cli_box "$@")" || { echo "usage: verify-strih.sh [--box <name>]" >&2; exit 1; }
-strih_box_load "$STRIH_BOX" \
-  || { echo -e "${RED}FAIL: box '${STRIH_BOX}': scripts/strih-boxes/${STRIH_BOX}.env is missing, invalid or still has TODO_OWNER facts (listed above)${NC}" >&2; exit 1; }
+STRIH_FACT_BOX="$(strih_box_cli_box "$@")" || { echo "usage: verify-strih.sh [--box <name>]" >&2; exit 1; }
+strih_box_load "$STRIH_FACT_BOX" \
+  || { echo -e "${RED}FAIL: box '${STRIH_FACT_BOX}': scripts/strih-boxes/${STRIH_FACT_BOX}.env is missing, invalid or still has TODO_OWNER facts (listed above)${NC}" >&2; exit 1; }
 
 # --- source-guard: when sourced (the unit tests), stop here -- never run the live checks ----------
 if [ "${BASH_SOURCE[0]}" != "${0}" ]; then
