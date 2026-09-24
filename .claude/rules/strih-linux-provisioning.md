@@ -341,7 +341,9 @@ to `/opt/obs-genlock` (on no loader path) and installed NO runtime packages, so 
   duplicates ~30 lines of the imag on-box install program (the templated heredoc inside
   `scripts/deploy-genlock-fleet.sh`, its `cp -a` + issue-1236 perms-normalize + `ldconfig` block).
   That program has its own probe-gated anchors, so extracting a shared prefix-install helper is the
-  `deploy-genlock-fleet.sh` strih-lx EXECUTE-arm follow-up's job — do it THEN, not now.
+  `deploy-genlock-fleet.sh` strih-lx EXECUTE-arm follow-up's job — do it THEN, not now. (Part 6
+  landed the execute arm WITHOUT touching strih-provision.sh -- it calls setup-strih.sh as it is --
+  so this consolidation remains open.)
 
 ## Baseline completeness — the six live-found gaps, now durable (issue 1317, DONE)
 
@@ -773,9 +775,10 @@ first live boot on strih-lx: re-confirm the oneshot resolved cleanly (the superv
   OUTPUTS** (`STRIH-LX (2ME PGM/PVW)` + the `interkom/MULTIVIEW/Grading` republishes) are a SEPARATE
   ticket — they need a study of the Windows-strih DistroAV output+republish config (imag has one
   output, no reference); the seeder never touches outputs.
-- **`deploy-genlock-fleet.sh` strih-lx EXECUTE deploy** (scp the strih artifact + ssh-run the on-box
-  program). The pure helpers + the PLAN arm exist; execute reuses the imag transport with
-  `fleet_linux_bundle_artifact_for strih-lx` + `STRIH_LX_IP` once the box exists.
+- ~~**`deploy-genlock-fleet.sh` strih-lx EXECUTE deploy**~~ — **DONE (issue 1317 part 6)**:
+  `scripts/lib/strih-lx-deploy.sh`, contract in `.claude/rules/genlock-fleet-deploy.md` ("strih-lx
+  EXECUTE arm"). It drives setup-strih.sh unchanged, so the `strih_install_bundle_prefix` vs imag
+  on-box install duplication below is still open (its lib belongs to the provisioning lane).
 - ~~**`strih-obs-start.sh` / `strih-obs-stop.sh`** launcher pair (sibling of `imag-obs-start.sh`) that
   `strih-obs.service` ExecStart references~~ — **DONE (issue 1317)**, see the "OBS supervision
   launcher pair" section above.
