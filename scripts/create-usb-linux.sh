@@ -338,6 +338,14 @@ set -e
 
 export DEBIAN_FRONTEND=noninteractive
 
+# #1311 (cam1 M.2 install, 2026-09-24): the host side already baked /etc/systemd/journal-upload.conf
+# before this script runs, and systemd-journal-remote ships the same conffile -- without these
+# options dpkg asks keep-or-replace, reads EOF on stdin and aborts the whole install. Keep the
+# pre-baked conffiles for every apt-get install below.
+cat > /etc/apt/apt.conf.d/90camera-box-keep-conffiles << 'APT_CONF_EOF'
+Dpkg::Options { "--force-confdef"; "--force-confold"; };
+APT_CONF_EOF
+
 # Update package list
 apt-get update
 
