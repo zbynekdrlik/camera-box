@@ -4985,11 +4985,14 @@ static inline uint64_t genlock_wall_now_ns(void)
 
 /* camera-box #800: wall(RTC)-vs-monotonic(QPC) clock drift since the first audit tick, in ms.
  * The video release deadline keys on the WALL clock (genlock_wall_now_ns() =
- * GetSystemTimePreciseAsFileTime on Windows, disciplined by NTP/DanteSync), while the
- * render tick and audio capture ride the MONOTONIC clock (os_gettime_ns() = QPC, free-
- * running). If the two clock domains drift apart over a long event, the wall-slaved video
- * and the QPC-slaved audio diverge — the leading remaining candidate for the #800 all-day
- * A/V shift the instrumented FIFO already ruled out. Both clocks are read back-to-back
+ * GetSystemTimePreciseAsFileTime on Windows, disciplined by NTP/DanteSync), and so does the
+ * render tick (obs-video.c genlock_next_deadline re-derives every deadline from the wall clock
+ * and only maps it into the monotonic sleep timebase), while the audio mixer paces on the
+ * MONOTONIC clock (os_gettime_ns() = QPC on Windows, free-running; CLOCK_MONOTONIC on Linux,
+ * kernel-disciplined like CLOCK_REALTIME, so this reads ~0 there). #800 suspected the Windows
+ * divergence for an all-day A/V shift; #1355/#1357 measured it (~13 ppm) and found no A/V or
+ * FIFO effect (the ASRC servo runs on the mixer clock). Telemetry only — the LOCK indicator
+ * gates on a single-sample wall STEP, never on this value or its rate. Both clocks are read back-to-back
  * (the #269 single-read discipline) and anchored ONCE at the first tick; drift =
  * (wall_now - wall_anchor) - (mono_now - mono_anchor). Positive = wall ran FASTER than QPC
  * (video deadline advancing ahead of audio). Process-global; called only from
