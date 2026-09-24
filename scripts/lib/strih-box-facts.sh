@@ -52,10 +52,12 @@ strih_box_dir() {
 }
 
 # _strih_box_unsafe VALUE -> 0 iff VALUE carries a character a fact value must never hold (a shell
-# metacharacter, a quote, a glob, a control character). Values are later embedded in generated
-# configs and commands, so
+# metacharacter, a quote, a glob, a control character, any non-ASCII byte). Values are later
+# embedded in generated configs and commands, so
 # they stay plain text: letters, digits, space, `.` `-` `_` `/` `:` `(` `)` `,` `=` `+` `@` `%`.
 _strih_box_unsafe() {
+  # C locale: a non-ASCII byte is "not printable" whatever locale the caller runs under.
+  local LC_ALL=C
   local v="${1-}" i c
   # a control character (tab, CR from a CRLF file, ESC, ...) would corrupt the generated JSON/units.
   [[ "$v" == *[^[:print:]]* ]] && return 0
@@ -96,6 +98,12 @@ strih_box_parse_file() {
     printf '%s=%s\n' "$key" "$val"
   done < "$file"
   [ "$bad" = 0 ]
+}
+
+# _strih_box_host VALUE -> 0 iff VALUE is a host name / address: letters, digits, `.` `-`, starting
+# with a letter or digit (a `-`-led value would reach a command line as a FLAG, e.g. `--master`).
+_strih_box_host() {
+  [[ "${1-}" =~ ^[A-Za-z0-9][A-Za-z0-9.-]*$ ]]
 }
 
 # _strih_box_ipv4 VALUE -> 0 iff VALUE is a dotted-quad IPv4 address (each octet 0-255).
@@ -139,7 +147,7 @@ strih_box_validate() {
   case "${f[STRIH_DANTESYNC_ROLE]}" in
     server) [ -z "${f[STRIH_DANTESYNC_UPSTREAM]}" ] \
       || { echo "strih-box ${name}: STRIH_DANTESYNC_UPSTREAM must be empty for the server role (the NTP master syncs from nobody)" >&2; bad=1; } ;;
-    client) [[ "${f[STRIH_DANTESYNC_UPSTREAM]}" =~ ^[A-Za-z0-9.-]+$ ]] \
+    client) _strih_box_host "${f[STRIH_DANTESYNC_UPSTREAM]}" \
       || { echo "strih-box ${name}: STRIH_DANTESYNC_UPSTREAM '${f[STRIH_DANTESYNC_UPSTREAM]}' must be the NTP master host name / address (required for the client role)" >&2; bad=1; } ;;
     *) echo "strih-box ${name}: STRIH_DANTESYNC_ROLE '${f[STRIH_DANTESYNC_ROLE]}' must be server or client" >&2; bad=1 ;;
   esac
@@ -157,7 +165,7 @@ strih_box_validate() {
       || { echo "strih-box ${name}: ${k} '${f[$k]}' may only carry letters, digits, space, . _ -" >&2; bad=1; }
   done
   for k in STRIH_NDI_RUNTIME_PEER STRIH_COMPANION_HOST; do
-    [[ "${f[$k]}" =~ ^[A-Za-z0-9.-]+$ ]] \
+    _strih_box_host "${f[$k]}" \
       || { echo "strih-box ${name}: ${k} '${f[$k]}' is not a host name / address" >&2; bad=1; }
   done
   if [[ ! "${f[STRIH_CAMERAS]}" =~ ^[1-9][0-9]*( [1-9][0-9]*)*$ ]]; then
@@ -175,6 +183,7 @@ strih_box_validate() {
 strih_box_load() {
   local name="${1-}" file parsed line fleet_ip
   strih_box_unload
+  STRIH_BOX_LOAD_FAILED="$name"   # cleared only when this load succeeds (see strih_box_ensure_loaded)
   if [[ ! "$name" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$ ]]; then
     echo "strih-box: box name '${name}' is invalid (lower-case letters, digits, '-'; never a path)" >&2
     return 1
@@ -211,6 +220,7 @@ strih_box_load() {
     echo "strih-box ${name}: STRIH_LX_DANTESYNC_ROLE=${STRIH_LX_DANTESYNC_ROLE} contradicts STRIH_DANTESYNC_ROLE=${STRIH_BOX_FACTS[STRIH_DANTESYNC_ROLE]} -- the role is a box fact now (edit ${file})" >&2
     strih_box_unload; return 1
   fi
+  STRIH_BOX_LOAD_FAILED=""
   return 0
 }
 
@@ -232,8 +242,14 @@ strih_box_known() {
 # strih_box_ensure_loaded -> rc 0 once a box is loaded; loads STRIH_BOX_DEFAULT when none is yet (a
 # sourced lib -- the unit tests -- gets today's box without an explicit load).
 strih_box_ensure_loaded() {
-  # both the name AND this shell's fact map: an inherited STRIH_BOX_LOADED alone is not a load.
-  [ -n "${STRIH_BOX_LOADED:-}" ] && declare -p STRIH_BOX_FACTS >/dev/null 2>&1 && return 0
+  # A box whose load FAILED in this shell is never replaced by the default behind the caller's back.
+  if [ -n "${STRIH_BOX_LOAD_FAILED:-}" ]; then
+    echo "strih-box: the load of box '${STRIH_BOX_LOAD_FAILED}' failed -- no facts are served until a box loads" >&2
+    return 1
+  fi
+  # both the name AND this shell's associative fact map: an inherited STRIH_BOX_LOADED (or a scalar
+  # STRIH_BOX_FACTS from the environment) is not a load.
+  [ -n "${STRIH_BOX_LOADED:-}" ] && [[ "$(declare -p STRIH_BOX_FACTS 2>/dev/null)" == "declare -A"* ]] && return 0
   strih_box_load "$STRIH_BOX_DEFAULT"
 }
 
@@ -360,6 +376,10 @@ strih_obs_box_facts_dropin_text() {
 # guessed default host, issue 1361).
 strih_lx_dantesync_client_args() {
   local up="${STRIH_LX_NTP_SERVER:-}"
+  if [ -n "$up" ] && ! _strih_box_host "$up"; then
+    echo "strih_lx_dantesync_client_args: STRIH_LX_NTP_SERVER '${up}' is not a host name / address" >&2
+    return 1
+  fi
   [ -n "$up" ] || up="$(strih_box_fact STRIH_DANTESYNC_UPSTREAM)" || return 1
   if [ -z "$up" ]; then
     echo "strih_lx_dantesync_client_args: box '$(strih_lx_hostname)' has no STRIH_DANTESYNC_UPSTREAM (it is the NTP master) -- no client args" >&2

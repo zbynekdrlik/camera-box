@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# airuleset:script-ok source-only lib (defines the strih role FACTS + pure decision helpers; its only
-# top-level statement sources the equally source-only fact loader) -- matches the sibling scripts/lib/*.sh convention (obs-fleet.sh,
+# airuleset:script-ok source-only lib (defines the strih role FACTS + pure decision helpers; its
+# only top-level statement sources the equally source-only fact loader) -- matches the sibling scripts/lib/*.sh convention (obs-fleet.sh,
 # camera-set.sh, genlock-markers.sh) of deliberately NOT setting `set -euo pipefail` here: sourcing
 # this file executes it in the CALLER's shell, so strict mode here would leak into whichever caller
 # sources it. Each caller (setup-strih.sh / verify-strih.sh) sets its own strict mode.
@@ -223,9 +223,11 @@ strih_lx_dantesync_is_client_not_master() {
   # issue 1361: the exact client invocation `--ntp-server <host>` is a CLIENT whatever the host is
   # called -- a venue NTP host named e.g. `ntp-master.lan` is a host NAME, not a master flag. Only this
   # exact two-word shape short-circuits; anything longer still goes through the flag checks below.
-  [[ "${1:-}" =~ ^--ntp-server\ [A-Za-z0-9.-]+$ ]] && return 0
+  [[ "${1:-}" =~ ^--ntp-server\ [A-Za-z0-9][A-Za-z0-9.-]*$ ]] && return 0
   case "${1:-}" in
     "") return 1 ;;
+    # any OTHER `--ntp-server <x>` shape (a flag-led or extra-argument upstream) is not a clean client.
+    "--ntp-server "*) return 1 ;;
     *server_mode*|*master*) return 1 ;;
     *client*|*slave*|*ntp-server*|*ntp_server=*) return 0 ;;
     *) return 1 ;;

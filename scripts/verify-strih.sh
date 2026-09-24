@@ -229,8 +229,8 @@ fi
 #    artifact), so this asserts the RUNNING state: the unit is active AND the journal shows a fresh
 #    offset within bound via the SHARED dantesync_offset_verdict/freshest_offset_us. A `stale`/`absent`
 #    offset with the PTP servo LOCKED is disciplined near-zero (the #550 reasoning) -> PASS; not
-#    locked -> FAIL (no trustworthy clock signal). setup-strih.sh step 2 already fail-closes the unit's
-#    ExecStart to a CLIENT invocation, so a 2nd-master risk is guarded at install time, not here.
+#    locked -> FAIL (no trustworthy clock signal). setup-strih.sh step 2 refuses an ambiguous
+#    role+args shape (strih_lx_dantesync_role_ok) at install time; the role itself is graded in 6b.
 DS_ACTIVE="$(systemctl is-active dantesync 2>/dev/null || true)"
 if [ "$DS_ACTIVE" != active ]; then
   bad "dantesync.service not active (state='${DS_ACTIVE:-<none>}') -- clock undisciplined/free-running"
