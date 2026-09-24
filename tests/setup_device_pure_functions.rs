@@ -318,27 +318,46 @@ fn bak_cruft_cleanup_is_wired_into_ndi_and_dropin_provisioning_steps() {
 }
 
 // ---------------------------------------------------------------------------------------------
-// #1087 — STEP 7 bakes the publish-30p.conf drop-in so a re-provisioned box keeps the secondary
-// "CAMn (30p)" 30fps blend stream (issue 792). The binary defaults the feature OFF; this env
-// drop-in is what enables it, byte-faithful to the live fleet file. Enable-only (written now,
-// effective on the box's next reboot) -- proven post-reboot by verify-device.sh's (y) check.
+// issue 1342 — the unconsumed issue-792 "CAMn (30p)" stream is removed. STEP 7 no longer WRITES the
+// publish-30p.conf drop-in and instead DELETES a leftover one, so a re-provisioned live box converges
+// to the single `CAMn (usb)` output. The same STEP 7 writes the NDI Discovery Server config
+// (/etc/ndi/ndi-config.v1.json) + the camera-box NDI_CONFIG_DIR drop-in (scripts/lib/ndi-discovery.sh).
 // ---------------------------------------------------------------------------------------------
 
 #[test]
-fn publish_30p_dropin_is_written_in_step_7() {
+fn publish_30p_dropin_is_removed_not_written_in_step_7_1342() {
     let body = std::fs::read_to_string(script()).unwrap();
     let guard_pos = body
         .find("stop here -- never run the destructive")
         .expect("source-guard comment must still be present");
     let live_flow = &body[guard_pos..];
     assert!(
-        live_flow.contains("/etc/systemd/system/camera-box.service.d/publish-30p.conf"),
-        "STEP 7 must write the publish-30p.conf drop-in so a re-provisioned box keeps the (30p) \
-         blend stream (issue 792 / #1087)"
+        !live_flow.contains("CAMERA_BOX_PUBLISH_30P"),
+        "STEP 7 must not enable the removed 30p stream any more (issue 1342)"
     );
     assert!(
-        live_flow.contains("CAMERA_BOX_PUBLISH_30P=1"),
-        "the publish-30p.conf drop-in must set CAMERA_BOX_PUBLISH_30P=1 (issue 792 / #1087)"
+        live_flow.contains("rm -f /etc/systemd/system/camera-box.service.d/publish-30p.conf"),
+        "STEP 7 must DELETE a leftover publish-30p.conf so a live box converges (issue 1342)"
+    );
+}
+
+#[test]
+fn ndi_discovery_config_and_dropin_written_in_step_7_1342() {
+    let body = std::fs::read_to_string(script()).unwrap();
+    let guard_pos = body
+        .find("stop here -- never run the destructive")
+        .expect("source-guard comment must still be present");
+    let live_flow = &body[guard_pos..];
+    let write = live_flow
+        .find("ndi_discovery_write_config \"$NDI_DISCOVERY_SYSTEM_DIR\"")
+        .expect("STEP 7 must write /etc/ndi/ndi-config.v1.json (issue 1342)");
+    let dropin = live_flow
+        .find("ndi_discovery_dropin_content > \"$NDI_DISCOVERY_CAMBOX_DROPIN\"")
+        .expect("STEP 7 must write the camera-box NDI_CONFIG_DIR drop-in (issue 1342)");
+    let step8 = live_flow.find("STEP 8").expect("STEP 8 banner");
+    assert!(
+        write < step8 && dropin < step8,
+        "both writes belong to STEP 7"
     );
 }
 
