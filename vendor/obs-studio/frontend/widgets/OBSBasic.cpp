@@ -47,6 +47,9 @@
 #endif
 #include <widgets/AudioMixer.hpp>
 #include <widgets/OBSProjector.hpp>
+#if defined(__linux__)
+#include <components/DrmOutputView.hpp> // camera-box issue 1346
+#endif
 
 #include <OBSStudioAPI.hpp>
 #ifdef BROWSER_AVAILABLE
@@ -1118,6 +1121,12 @@ void OBSBasic::OBSInit()
 		UpdateContextBar(true);
 	}
 	UpdateEditMenu();
+
+#if defined(__linux__)
+	/* camera-box issue 1346: the DRM-lease HDMI output view switch (Tools menu) + its Multiview,
+	 * hooked BEFORE the scene collection loads so the load's own events attach the Multiview. */
+	DrmOutputViewInit();
+#endif
 
 	{
 		ProfileScope("OBSBasic::Load");

@@ -957,46 +957,6 @@ fn verify_strih_dantesync_and_sleep_items_are_fixed() {
     );
 }
 
-/// issue 1346: `strih_projector_verdict SAVEPROJ EXT SAVED` grades the fixed HDMI projector
-/// acceptance (report-only): SaveProjectors=true pre-seeded, and — when an external monitor is
-/// connected — a saved type-3/4 projector entry exists. Fail-closed order: SaveProjectors first,
-/// then external-monitor presence, then the saved entry. Returns 0 ONLY for the fully-`ok` state;
-/// every other state prints its own token and returns non-zero (the caller renders 0->PASS else
-/// NOTE, since the whole item is report-only). Fixtures: connected/not-connected + present/absent.
-#[test]
-fn projector_verdict_grades_saveprojectors_hdmi_and_saved_entry() {
-    // fully healthy: SaveProjectors on, an external monitor, a saved projector -> ok, rc 0
-    let (c, out, _e) = run_sourced(&[], "strih_projector_verdict 1 1 1");
-    assert_eq!(c, 0, "the fully-configured state must be ok; token={out}");
-    assert_eq!(out, "ok");
-
-    // SaveProjectors not pre-seeded -> saveprojectors-missing (checked FIRST, even with no monitor)
-    let (c2, out2, _e) = run_sourced(&[], "strih_projector_verdict 0 1 1");
-    assert_ne!(c2, 0);
-    assert_eq!(out2, "saveprojectors-missing");
-    let (c2b, out2b, _e) = run_sourced(&[], "strih_projector_verdict 0 0 0");
-    assert_ne!(c2b, 0);
-    assert_eq!(
-        out2b, "saveprojectors-missing",
-        "SaveProjectors is graded before the monitor"
-    );
-
-    // SaveProjectors ok but no external monitor connected (today's box) -> hdmi-absent (report-only)
-    let (c3, out3, _e) = run_sourced(&[], "strih_projector_verdict 1 0 0");
-    assert_ne!(c3, 0);
-    assert_eq!(out3, "hdmi-absent");
-
-    // external monitor present but no saved projector yet -> projector-unseeded
-    let (c4, out4, _e) = run_sourced(&[], "strih_projector_verdict 1 1 0");
-    assert_ne!(c4, 0);
-    assert_eq!(out4, "projector-unseeded");
-
-    // fail-closed defaults: missing args behave as 0 (not configured)
-    let (c5, out5, _e) = run_sourced(&[], "strih_projector_verdict");
-    assert_ne!(c5, 0);
-    assert_eq!(out5, "saveprojectors-missing");
-}
-
 /// issue 1345 M3a: `strih_janus_audiobridge_jcfg_text ROOM SECRET_PATH` renders the interkom room
 /// jcfg (48 kHz, plain-RTP participants) with the secret as a PLACEHOLDER (never inlined), and names
 /// the secret path only in a provenance comment.
@@ -3753,27 +3713,28 @@ fn openbox_autostart_text_carries_the_preamble_units_and_satellite() {
         !out.contains("WAYLAND") && !out.contains("__NV_PRIME"),
         "no Wayland / PRIME-offload leftovers in the kiosk autostart"
     );
-    for (pinned, fallback) in [
-        (
-            "xrandr --output \"$PANEL\" --primary --mode 1920x1080 --rate 60",
-            "xrandr --output \"$PANEL\" --primary --auto",
-        ),
-        (
-            "xrandr --output \"$PROJ\" --mode 1920x1080 --rate 60 --right-of \"$PANEL\"",
-            "xrandr --output \"$PROJ\" --auto --right-of \"$PANEL\"",
-        ),
-    ] {
-        let p = out
-            .find(pinned)
-            .unwrap_or_else(|| panic!("the autostart pins `{pinned}`:\n{out}"));
-        let f = out
-            .find(fallback)
-            .unwrap_or_else(|| panic!("--auto stays the fallback `{fallback}`"));
-        assert!(
-            p < f,
-            "the pinned mode is tried first, --auto only after it fails"
-        );
-    }
+    let pinned = "xrandr --output \"$PANEL\" --primary --mode 1920x1080 --rate 60";
+    let fallback = "xrandr --output \"$PANEL\" --primary --auto";
+    let p = out
+        .find(pinned)
+        .unwrap_or_else(|| panic!("the autostart pins `{pinned}`:\n{out}"));
+    let f = out
+        .find(fallback)
+        .unwrap_or_else(|| panic!("--auto stays the fallback `{fallback}`"));
+    assert!(
+        p < f,
+        "the pinned mode is tried first, --auto only after it fails"
+    );
+    // issue 1346 (24.9.2026): the HDMI output is the in-OBS DRM lease -- the desktop must NEVER
+    // extend onto it, so the kiosk takes HDMI out of the X layout instead of placing it right-of.
+    assert!(
+        out.contains("xrandr --output \"$PROJ\" --off"),
+        "the kiosk must turn HDMI off in X (issue 1346):\n{out}"
+    );
+    assert!(
+        !out.contains("--right-of"),
+        "the desktop must never extend onto HDMI (issue 1346):\n{out}"
+    );
 }
 
 /// setup-strih.sh sources the shared baseline and runs EVERY baseline item in step 11, in imag's

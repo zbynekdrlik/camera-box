@@ -900,32 +900,6 @@ unset __rd_pw;
 EOF
 }
 
-# --- issue 1346: fixed HDMI fullscreen projector acceptance (REPORT-ONLY) --------------------------
-# The owner ROZHODNUTE (19.9.): the strih-lx HDMI output is an OBS fullscreen projector (Program or
-# Multiview), PERSISTED via SaveProjectors=true and re-opened on every launch. verify-strih.sh reports
-# (never hard-fails, since the live open needs an HDMI display on the notebook): SaveProjectors=true is
-# pre-seeded in user.ini, and -- when an external monitor is connected -- a saved ProjectorType 3/4
-# entry exists.
-
-# strih_projector_verdict SAVEPROJ_PRESENT EXT_CONNECTED SAVED_ENTRY_PRESENT -> print ONE verdict
-# token and return 0 ONLY for the fully-configured `ok` state; every other state returns non-zero so
-# the caller renders 0->PASS else NOTE (the whole item is report-only -- it never hard-FAILs the gate).
-#   arg1 SAVEPROJ_PRESENT:     1 iff user.ini has SaveProjectors=true
-#   arg2 EXT_CONNECTED:        1 iff an external (HDMI/DP) monitor is connected (a /sys/class/drm status)
-#   arg3 SAVED_ENTRY_PRESENT:  1 iff the current scene collection's saved_projectors has a type-3/4 entry
-# Fail-closed order (missing args default to 0 = not configured):
-#   saveprojectors-missing  -> SaveProjectors not pre-seeded (setup-strih step 7 not applied)
-#   hdmi-absent             -> SaveProjectors ok but no external monitor connected (expected today)
-#   projector-unseeded      -> external monitor present but no saved projector entry yet
-#   ok                      -> SaveProjectors true + external monitor + a saved ProjectorType 3/4
-strih_projector_verdict() {
-  local saveproj="${1:-0}" ext="${2:-0}" saved="${3:-0}"
-  [ "$saveproj" = 1 ] || { printf 'saveprojectors-missing'; return 1; }
-  [ "$ext" = 1 ]      || { printf 'hdmi-absent';            return 1; }
-  [ "$saved" = 1 ]    || { printf 'projector-unseeded';     return 1; }
-  printf 'ok'; return 0
-}
-
 # --- issue 1345 M3a: Janus audiobridge audio edge (enable-only) ------------------------------------
 # The phones intercom leg moves off VDO.Ninja onto a Janus audiobridge room the hub joins as a
 # plain-RTP PCMU participant. setup-strih.sh installs Janus (apt), writes these two jcfg files, and
@@ -1742,9 +1716,10 @@ strih_companion_satellite_openbox_line() {
 }
 
 # strih_openbox_autostart_text -> the strih-lx kiosk ~/.config/openbox/autostart (lightdm autologin ->
-# openbox on plain Xorg, the imag appliance). It extends the display at 1920x1080@60 (the notebook panel
-# = the primary operator screen with the OBS UI + Multiview, the HDMI output right of it for the fixed fullscreen
-# projector OBS restores via SaveProjectors, issue 1346), carries the shared kiosk preamble (never-blank
+# openbox on plain Xorg, the imag appliance). The notebook panel is the ONLY desktop screen (1920x1080@60,
+# the operator's OBS UI + Multiview projector); every HDMI output stays OFF in X, because the HDMI output
+# is the in-OBS DRM-lease output (issue 1346, owner 24.9.2026) and the desktop must never appear on it.
+# It carries the shared kiosk preamble (never-blank
 # + OBS crash-sentinel clear, obs_box_openbox_autostart_preamble -- graded by the baseline verify), then
 # STARTS the supervised --user units (openbox never reaches graphical-session.target, so their WantedBy
 # alone would never fire -- imag's step-16 pattern) and launches Companion Satellite. RustDesk needs no
@@ -1756,17 +1731,17 @@ strih_openbox_autostart_text() {
   cat <<'AUTOSTART_EOF'
 sleep 1
 PANEL=$(xrandr | awk '/ connected/ && $1 !~ /^HDMI/ {print $1; exit}')
-PROJ=$(xrandr  | awk '/ connected/ && $1 ~  /^HDMI/ {print $1; exit}')
-# Both outputs PINNED to 1920x1080@60 (a notebook panel's --auto can pick 144/165 Hz, an HDMI sink's
-# --auto its preferred 4K/50) -- --auto only as the fallback when that mode is not offered.
+# The notebook panel is the ONLY desktop screen, PINNED to 1920x1080@60 (a notebook panel's --auto can
+# pick 144/165 Hz) -- --auto only as the fallback when that mode is not offered.
 if [ -n "$PANEL" ]; then
   xrandr --output "$PANEL" --primary --mode 1920x1080 --rate 60 2>/dev/null \
     || xrandr --output "$PANEL" --primary --auto 2>/dev/null || true
 fi
-if [ -n "$PROJ" ] && [ -n "$PANEL" ]; then
-  xrandr --output "$PROJ" --mode 1920x1080 --rate 60 --right-of "$PANEL" 2>/dev/null \
-    || xrandr --output "$PROJ" --auto --right-of "$PANEL" 2>/dev/null || true
-fi
+# issue 1346 (owner 24.9.2026): the HDMI output is the in-OBS DRM-lease output (Program / Multiview),
+# NEVER the desktop -- every HDMI output stays OFF in X (the lease takes the idle connector).
+for PROJ in $(xrandr | awk '$1 ~ /^HDMI/ {print $1}'); do
+  xrandr --output "$PROJ" --off 2>/dev/null || true
+done
 AUTOSTART_EOF
   obs_box_openbox_autostart_preamble
   # one start per unit: a not-yet-installed bundle-state server must never block the OBS start.

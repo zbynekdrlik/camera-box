@@ -14,6 +14,11 @@ paths:
   - "scripts/lib/imag-projector-lease-count.sh"
   - "tests/harness_imag_projector_lease_count_1152.rs"
   - "tests/harness_verify_imag_lease_count_1152.rs"
+  - "vendor/obs-studio/libobs/obs-drm-output-view.c"
+  - "vendor/obs-studio/libobs/obs-drm-output-internal.h"
+  - "vendor/obs-studio/frontend/components/DrmOutputView.cpp"
+  - "vendor/obs-studio/frontend/components/DrmOutputView.hpp"
+  - "tests/drm_output_view_1346.rs"
 ---
 
 # In-OBS vendored DRM-lease HDMI output (#1152) — the forked OBS draws Program onto a DRM-leased connector
@@ -261,6 +266,61 @@ still-held lease) → `systemctl --user start imag-obs`. Skipping the xrandr ste
 DORMANT unit instead: with the config gone the wrapper touches nothing and `projector()` is back
 to hard-failing on a missing HDMI monitor — which is correct for a genuinely unplugged projector
 and exactly why the restore must come first.
+
+## The VIEW — Program or the built-in Multiview (issue 1346, strih-lx, owner 24.9.2026)
+
+The output scans out one of two views, chosen by `"view"` in the same config (`program` | `multiview`;
+absent = program, so imag is byte-for-byte unchanged in behaviour):
+
+- **PROGRAM** = the M2 path above, unchanged.
+- **MULTIVIEW** = the frontend's BUILT-IN `Multiview` (labels, PVW/PGM tally, the issue-1242 twin
+  cells), never a custom scene. The frontend registers a renderer with
+  `obs_drm_output_set_view_renderer` (the setter takes the graphics context, so after it returns no
+  render is in flight); on a multiview tick the view TU (`obs-drm-output-view.c`) renders it into an
+  sRGB-capable `GS_BGRA` texrender at the connector mode size, then claims a mailbox buffer through
+  the shared seam (`obs-drm-output-internal.h`: claim / publish / texture / mode size / blit) and
+  fills it with the ONE raw blit both views use (`drm_output_blit_raw`). The frame hook asks
+  `drm_output_view_frame()` before the Program copy; only a PROGRAM tick falls through to it.
+- **GOTCHA (review round 1) — never render an OBS scene straight into the dma-buf scanout texture.**
+  OBS's own render targets are `GL_SRGB8(_ALPHA8)` storage, and every sRGB-aware draw
+  (`obs_render_main_texture` for the Multiview's Program cell, the scene items' linear-sRGB path)
+  relies on the TARGET encoding with `GL_FRAMEBUFFER_SRGB` on. The GBM BO imported through
+  `gs_texture_create_from_dmabuf` is LINEAR storage (no EGL colorspace attribute), so GL writes the
+  decoded values unencoded -> too dark. Render into a texrender, then copy the BYTES raw
+  (`gs_effect_set_texture`, which OBS GL samples with `GL_TEXTURE_SRGB_DECODE_EXT = SKIP`, and
+  framebuffer sRGB off) — the same shape the Program path always had.
+- **Never degrade the Program:** the Multiview renders ONLY in the multiview view, and each tick first
+  asks the monitoring-surface budget gate `obs_aux_sender_should_skip` (issue 879 over the
+  278/293/756/776 `obs_display_should_skip` + canvas-rate divisor): a skipped tick keeps the last frame
+  on scanout, the anti-starvation floor still renders every K+1 ticks.
+- **Logs (all `drm-output:`, mutually non-substring with the M1/M2 markers and with
+  `multiview-audit:` / `program-render-audit`):** `view=<v> (from <path>)` at autostart,
+  `multiview renderer registered|cleared`, the one-shot `multiview bind LIVE`, the ~5 s
+  `multiview-render rendered_fps=… skipped=… avg_ms=… max_ms=… ewma_ms=… cx=… cy=…` cost line (read
+  it next to `program-render-audit lagged`), and `view <a> -> <b> (persisted)` on a live switch.
+  `program scanout LIVE` still means "a GBM buffer is on the CRTC" for either view.
+- **The live switch** is the OBS Tools menu pair (Linux-only `components/DrmOutputView.cpp`) →
+  `obs_drm_output_set_view`, which rewrites ONLY `"view"` into the config the autostart read (obs_data
+  round-trip, one compact line, `os_quick_write_utf8_file_safe`). The pure helpers
+  `drm_output_parse_view` + `drm_output_view_tick_action` are lift-tested in
+  `tests/drm_output_view_1346.rs`; the view grammar is ONE table
+  (`tests/fixtures/drm_output_view_parity.tsv`) shared with the Python mirror in
+  `scripts/strih_scenes.py`.
+- **NVIDIA note (live-verify item):** imag's M2 path was built and verified on Intel (i915/Xe implicit
+  fencing). strih-lx drives HDMI from the RTX 5050 (NVIDIA primary), so the first live run must watch
+  for torn/partial frames and a failed GBM/AddFB2/dma-buf import (`program bind FAILED`) — the output
+  fails open to the solid pattern, never to the desktop.
+- **imag stays Program:** the Tools switch ships in the whole Linux bundle, and `program scanout
+  LIVE` fires for either view, so the imag `drm_output` facet (`scripts/lib/imag-display-path.sh`)
+  gathers `DRM_OUTPUT_VIEW` and grades `"view":"multiview"` as DRIFT (audience projection + cam2 tap).
+- **Live-verify items the first strih-lx run must read (review round 1):** (1) the laptop Multiview
+  projector's `multiview-audit rendered_fps` next to the new `multiview-render` line — the HDMI
+  Multiview renders in the frame hook BEFORE `render_displays()`, so it takes budget first; if the
+  laptop projector sags under its floor, move the view render after `render_displays()` or share one
+  throttle; (2) NVIDIA implicit fencing — `gs_flush()` + publish relies on dma-resv implicit sync
+  (proven on Intel only); torn/partial frames on the RTX 5050 would need a CPU fence wait before
+  publish (libobs exposes only the GPU-side `gs_sync_wait`, so that is a graphics-vtable addition).
+- strih provisioning / verify: `.claude/rules/strih-linux-provisioning.md` (issue 1346 section).
 
 ## Lifecycle invariants (locked by the #1152 review — keep them if you touch the module)
 

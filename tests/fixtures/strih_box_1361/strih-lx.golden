@@ -104,17 +104,17 @@ general: {
 # strih-lx OBS kiosk boot -- WRITTEN BY setup-strih.sh (issue 1357, the shared OBS-box baseline). Do not hand-edit.
 sleep 1
 PANEL=$(xrandr | awk '/ connected/ && $1 !~ /^HDMI/ {print $1; exit}')
-PROJ=$(xrandr  | awk '/ connected/ && $1 ~  /^HDMI/ {print $1; exit}')
-# Both outputs PINNED to 1920x1080@60 (a notebook panel's --auto can pick 144/165 Hz, an HDMI sink's
-# --auto its preferred 4K/50) -- --auto only as the fallback when that mode is not offered.
+# The notebook panel is the ONLY desktop screen, PINNED to 1920x1080@60 (a notebook panel's --auto can
+# pick 144/165 Hz) -- --auto only as the fallback when that mode is not offered.
 if [ -n "$PANEL" ]; then
   xrandr --output "$PANEL" --primary --mode 1920x1080 --rate 60 2>/dev/null \
     || xrandr --output "$PANEL" --primary --auto 2>/dev/null || true
 fi
-if [ -n "$PROJ" ] && [ -n "$PANEL" ]; then
-  xrandr --output "$PROJ" --mode 1920x1080 --rate 60 --right-of "$PANEL" 2>/dev/null \
-    || xrandr --output "$PROJ" --auto --right-of "$PANEL" 2>/dev/null || true
-fi
+# issue 1346 (owner 24.9.2026): the HDMI output is the in-OBS DRM-lease output (Program / Multiview),
+# NEVER the desktop -- every HDMI output stays OFF in X (the lease takes the idle connector).
+for PROJ in $(xrandr | awk '$1 ~ /^HDMI/ {print $1}'); do
+  xrandr --output "$PROJ" --off 2>/dev/null || true
+done
 xset s off -dpms s noblank 2>/dev/null || true
 rm -rf "$HOME/.config/obs-studio/.sentinel"/* 2>/dev/null || true
 systemctl --user start strih-obs.service || true

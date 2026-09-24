@@ -49,6 +49,8 @@ fail() { echo -e "${RED}FAIL: $1${NC}" >&2; exit 1; }
 . "${HERE}/lib/strih-box-facts.sh"   # issue 1361: the ONE per-box fact loader (--box <name>)
 # shellcheck source=scripts/lib/strih-provision.sh
 . "${HERE}/lib/strih-provision.sh"
+# shellcheck source=scripts/lib/strih-drm-output.sh
+. "${HERE}/lib/strih-drm-output.sh"   # issue 1346: the DRM-lease HDMI output config + verdict helpers
 # shellcheck source=scripts/lib/genlock-markers.sh
 . "${HERE}/lib/genlock-markers.sh"
 # shellcheck source=scripts/lib/ndi-discovery.sh
@@ -328,16 +330,35 @@ install -d -m 755 /opt/camera-box
 # duplicate `NDI CAMn (usb)` receivers). The full DATA name-map is strih_lx_seed_manifest_json.
 strih_lx_seed_manifest_json > /opt/camera-box/strih-lx-seed.json
 echo "  wrote /opt/camera-box/strih-lx-seed.json (operator collection: update-only, explicit strih input names NDI camN / NDI 2ME PVW / NDI 2ME PGM (mv) / cg / CG-obs, floor-3 pins)"
-# issue 1346: default fixed-HDMI-projector config. The owner ROZHODNUTE (19.9.): multiview default
-# (matching the Windows strih saved_projectors {monitor,type:4}); strih_scenes.py --bootstrap reads
-# it and seeds an OBS fullscreen projector on the HDMI monitor. Do NOT overwrite an existing file --
-# once the box is live the operator's OBS UI choice + `strih_scenes.py --projector` own it.
-if [ ! -f /opt/camera-box/strih-lx-projector.json ]; then
-  echo '{"type":"multiview"}' > /opt/camera-box/strih-lx-projector.json
-  echo "  wrote /opt/camera-box/strih-lx-projector.json (default: multiview HDMI projector)"
+# issue 1346 (owner 24.9.2026): the HDMI output is the in-OBS DRM-lease output (the imag hardware
+# output, issue 1152), selectable Program / built-in Multiview -- never an OBS projector window and
+# never the desktop. Its activation contract is ~/.camera-box/drm-output.json of the OBS user
+# (scripts/lib/strih-drm-output.sh). Provision it ONLY when an HDMI monitor is plugged in (the
+# connector name must come from X RandR), default view multiview; an existing file is the
+# operator's choice (the OBS Tools menu writes it) and is left alone. The retired 19.9. projector
+# config is removed; its type seeds the initial view.
+DRM_CONF_DIR="${USER_HOME}/.camera-box"
+DRM_CONF="${DRM_CONF_DIR}/drm-output.json"
+LEGACY_PROJ=/opt/camera-box/strih-lx-projector.json
+DRM_VIEW0="$(strih_drm_legacy_view "$(cat "$LEGACY_PROJ" 2>/dev/null || true)")"
+if [ -L "$DRM_CONF_DIR" ] || [ -L "$DRM_CONF" ]; then
+  warn "  SKIP issue 1346: ${DRM_CONF_DIR} or ${DRM_CONF} is a symlink -- refusing to write through it as root; remove it and re-run"
+elif [ -f "$DRM_CONF" ]; then
+  echo "  ${DRM_CONF} already present -- leaving the operator's HDMI output choice"
+elif strih_drm_hdmi_connected; then
+  DRM_CONN="$(sudo -u "$DESKTOP_USER" env DISPLAY=:0 XAUTHORITY="${USER_HOME}/.Xauthority" xrandr --query 2>/dev/null \
+    | strih_drm_hdmi_output_from_xrandr || true)"
+  if [ -n "$DRM_CONN" ] && DRM_LINE="$(strih_drm_output_config_json "$DRM_CONN" "$DRM_VIEW0")"; then
+    install -d -o "$DESKTOP_USER" -g "$DESKTOP_USER" "$DRM_CONF_DIR"
+    printf '%s\n' "$DRM_LINE" | install -m 0644 -o "$DESKTOP_USER" -g "$DESKTOP_USER" /dev/stdin "$DRM_CONF"
+    echo "  wrote ${DRM_CONF} (HDMI output ${DRM_CONN} = DRM lease, view ${DRM_VIEW0}; takes effect at the next OBS start)"
+  else
+    warn "  SKIP issue 1346: an HDMI monitor is connected but X RandR could not name it (Xorg :0 not up yet?) -- ${DRM_CONF} NOT provisioned; re-run setup-strih.sh after the kiosk session is up"
+  fi
 else
-  echo "  /opt/camera-box/strih-lx-projector.json already present -- leaving the operator's choice"
+  warn "  SKIP issue 1346: no HDMI monitor connected -- ${DRM_CONF} NOT provisioned (the fixed HDMI output stays dormant); attach the HDMI monitor and re-run setup-strih.sh"
 fi
+rm -f /opt/camera-box/strih-lx-projector.json
 if [ -n "${GH_TOKEN:-}" ]; then
   curl -fsSL -H "Authorization: token ${GH_TOKEN}" -H 'Accept: application/vnd.github.raw' \
     "https://api.github.com/repos/${GENLOCK_REPO}/contents/scripts/obs_phase2.py?ref=dev" \
@@ -375,12 +396,13 @@ WS
 chown -R "$DESKTOP_USER":"$DESKTOP_USER" "$OBS_CFG/plugin_config" 2>/dev/null || true
 echo "  obs-websocket :4455 no-auth pre-seeded; Studio Mode is enforced by the scene seeder (step 6)"
 # issue 1346: pre-seed [BasicWindow] SaveProjectors=true + ProjectorAlwaysOnTop=false in the desktop
-# user's user.ini so OBS PERSISTS the fixed HDMI fullscreen projector and re-opens it on every
-# launch. The OBS default is SaveProjectors=false, so a hand-opened or seeded projector would NEVER
-# come back after strih-obs.service relaunches. Idempotent (RawConfigParser upsert; the literal
-# `SaveProjectors=true` is the verify-strih anchor), owned by the desktop user. NOTE: this is the
-# OPPOSITE of imag (#522 SaveProjectors=false + an openbox-autostart re-open hook) -- strih-lx has no
-# such boot hook, so it relies on OBS's own SaveProjectors restore + the seed_projector idempotency.
+# user's user.ini so OBS PERSISTS the operator's LAPTOP-screen projector (the Multiview on the eDP
+# panel) and re-opens it on every launch. The OBS default is SaveProjectors=false, so a hand-opened
+# projector would NEVER come back after strih-obs.service relaunches. (The HDMI output is NOT a
+# projector since 24.9.2026 -- it is the DRM lease, step 6.) Idempotent (RawConfigParser upsert; the
+# literal `SaveProjectors=true` is the verify-strih anchor), owned by the desktop user. NOTE: this is
+# the OPPOSITE of imag (#522 SaveProjectors=false + an openbox-autostart re-open hook) -- strih-lx
+# has no such boot hook, so it relies on OBS's own SaveProjectors restore.
 # ProjectorAlwaysOnTop=false: owner ruling 23.9.2026 -- the multiview must not stay on top of the
 # operator's other windows (the seed rewrote a hand-set OFF back to ON on every provisioning run).
 USER_INI="${OBS_CFG}/user.ini"

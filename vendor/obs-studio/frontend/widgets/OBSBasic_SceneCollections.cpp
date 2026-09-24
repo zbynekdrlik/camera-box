@@ -21,6 +21,9 @@
 #include <importer/OBSImporter.hpp>
 #include <models/SceneCollection.hpp>
 #include <utility/item-widget-helpers.hpp>
+#if defined(__linux__)
+#include <components/DrmOutputView.hpp> // camera-box issue 1346
+#endif
 
 #include <qt-wrappers.hpp>
 
@@ -1579,6 +1582,10 @@ void OBSBasic::ClearSceneData()
 	emit TransitionsCleared();
 
 	ClearProjectors();
+#if defined(__linux__)
+	/* camera-box issue 1346: the DRM-lease HDMI output's Multiview goes with the projectors. */
+	DrmOutputViewClear();
+#endif
 
 	for (int i = 0; i < MAX_CHANNELS; i++) {
 		obs_set_output_source(i, nullptr);

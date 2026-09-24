@@ -270,6 +270,8 @@ imag_display_path_verdict() {
     printf 'drm_output|OK|dormant — drm-output.json present but not enabled; Program on the X projector path (issue 1152)\n'
   elif [ "$(_dp_field "$g" DRM_OUTPUT_PROGRAM)" = "false" ]; then
     printf 'drm_output|DRIFT|drm-output ENABLED in the M1 solid diagnostic mode ("program": false) — the projector carries a grey test pattern, not the Program; not a production state (issue 1152)\n'
+  elif [ "$(_dp_field "$g" DRM_OUTPUT_VIEW)" = "multiview" ]; then
+    printf 'drm_output|DRIFT|drm-output ENABLED with "view":"multiview" — the imag HDMI (the audience projection and the cam2 tap) shows the Multiview grid, not the Program; switch it back in OBS Tools > HDMI výstup: Program (issue 1346)\n'
   elif ! _dp_has "$g" DRM_OUTPUT_LOG; then
     printf 'drm_output|UNKNOWN|drm-output ENABLED but the OBS-log scanout state was not gathered — cannot prove nor disprove the Program scanout (issue 1152)\n'
   elif [ "$(_dp_field "$g" DRM_OUTPUT_LOG)" != "present" ]; then
@@ -382,6 +384,12 @@ if [ -e "$_dp_cfg" ]; then
     printf 'DRM_OUTPUT_PROGRAM|false\n'
   else
     printf 'DRM_OUTPUT_PROGRAM|true\n'
+  fi
+  # issue 1346: the selectable view (the OBS Tools switch persists it); multiview on imag = DRIFT.
+  if tr -d '\n' <"$_dp_cfg" 2>/dev/null | LC_ALL=C grep -aqE '"view"[[:space:]]*:[[:space:]]*"multiview"'; then
+    printf 'DRM_OUTPUT_VIEW|multiview\n'
+  else
+    printf 'DRM_OUTPUT_VIEW|program\n'
   fi
 else
   printf 'DRM_OUTPUT_CONFIG|absent\n'

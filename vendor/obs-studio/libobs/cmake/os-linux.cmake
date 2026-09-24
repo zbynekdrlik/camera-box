@@ -13,6 +13,8 @@ find_package(Gio)
 target_sources(
   libobs
   PRIVATE
+    obs-drm-output-internal.h
+    obs-drm-output-view.c
     obs-drm-output.c
     obs-drm-output.h
     obs-nix-platform.c

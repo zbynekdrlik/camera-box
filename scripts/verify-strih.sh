@@ -18,6 +18,8 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "${HERE}/lib/strih-box-facts.sh"   # issue 1361: the ONE per-box fact loader (--box <name>)
 # shellcheck source=scripts/lib/strih-provision.sh
 . "${HERE}/lib/strih-provision.sh"
+# shellcheck source=scripts/lib/strih-drm-output.sh
+. "${HERE}/lib/strih-drm-output.sh"   # issue 1346: item 4c grades the DRM-lease HDMI output
 # shellcheck source=scripts/lib/ndi-discovery.sh
 . "${HERE}/lib/ndi-discovery.sh"   # issue 1342: item 34 grades the receiver-side NDI config (networks.ips)
 # issue 1359: the REPORT-ONLY CEF keyring item (14b) grades the OBS CEF password-store switch.
@@ -172,49 +174,50 @@ else
   note "strih_scenes.py / python3 absent -- run setup-strih.sh step 6 first (seed-input parity report skipped)"
 fi
 
-# 4c) issue 1346: fixed HDMI fullscreen projector -- REPORT-ONLY (the live open needs an HDMI display
-#     on the notebook, a supervisor/owner rig step, so this NEVER hard-FAILs). Reports via the pure
-#     strih_projector_verdict: SaveProjectors=true pre-seeded in user.ini; and -- when an external
-#     HDMI/DP monitor is connected -- a saved ProjectorType 3/4 entry in a scene collection.
-OBS_CFG_DIR_V="$(dirname "$OBS_LOG_DIR")"   # OBS_LOG_DIR is <cfg>/logs -> the cfg dir is its parent
-PROJ_USER_INI="${OBS_CFG_DIR_V}/user.ini"
-SAVEPROJ=0
-[ -f "$PROJ_USER_INI" ] && grep -qi '^SaveProjectors=true' "$PROJ_USER_INI" && SAVEPROJ=1
-EXT_CONN=0
-for _st in /sys/class/drm/card*-HDMI*/status /sys/class/drm/card*-DP*/status; do
-  [ -f "$_st" ] || continue
-  if [ "$(cat "$_st" 2>/dev/null)" = connected ]; then EXT_CONN=1; break; fi
-done
-SAVED_ENTRY=0
-if command -v python3 >/dev/null 2>&1; then
-  SAVED_ENTRY="$(python3 - "$OBS_CFG_DIR_V" <<'PY'
-import glob, json, os, sys
-cfg = sys.argv[1]
-found = 0
-for path in glob.glob(os.path.join(cfg, "basic", "scenes", "*.json")):
-    try:
-        with open(path) as fh:
-            d = json.load(fh)
-    except (OSError, ValueError):
-        continue
-    for p in (d.get("saved_projectors") or []):
-        if isinstance(p, dict) and p.get("type") in (3, 4):
-            found = 1
-            break
-    if found:
-        break
-print(found)
-PY
-)"
+# 4c) issue 1346 (owner 24.9.2026): the fixed HDMI output = the in-OBS DRM-lease output (issue 1152),
+#     selectable Program / built-in Multiview -- never a projector window, never the desktop. SKIP
+#     when no HDMI monitor is connected (the kernel connector status; today's strih-lx is eDP-only).
+#     With one plugged in: ~/.camera-box/drm-output.json must arm the lease (classified by the ONE
+#     Python grammar in strih_scenes.py, the C module's own contract) and the newest OBS log must
+#     reach `drm-output: program scanout LIVE` -- plus `drm-output: multiview bind LIVE` for the
+#     multiview view. The pure verdict is strih_drm_output_verdict (scripts/lib/strih-drm-output.sh).
+DRM_CONF_V="${USER_HOME}/.camera-box/drm-output.json"
+DRM_HDMI=0
+strih_drm_hdmi_connected && DRM_HDMI=1
+DRM_SUMMARY="? program"   # no classifier at all (strih_scenes / python3 missing) = unclassified
+if [ -f "$SCN_BIN" ] && command -v python3 >/dev/null 2>&1; then
+  DRM_SUMMARY="$(python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); import strih_scenes as s; t = s.drm_output_config_text(sys.argv[2]); print(s.drm_output_lease_connector(t) or "-", s.drm_output_view_token(t))' \
+    "$(dirname "$SCN_BIN")" "$DRM_CONF_V" 2>/dev/null || echo "? program")"
 fi
-PROJ_VERDICT="$(strih_projector_verdict "$SAVEPROJ" "$EXT_CONN" "${SAVED_ENTRY:-0}" || true)"
-case "$PROJ_VERDICT" in
-  ok)                     ok   "fixed HDMI projector: SaveProjectors + external monitor + a saved ProjectorType 3/4" ;;
-  saveprojectors-missing) note "fixed HDMI projector: SaveProjectors=true NOT pre-seeded in ${PROJ_USER_INI} (re-run setup-strih.sh step 7)" ;;
-  hdmi-absent)            note "fixed HDMI projector: SaveProjectors ok; HDMI display not connected (report-only -- plug a display into HDMI for the live projector)" ;;
-  projector-unseeded)     note "fixed HDMI projector: external monitor present but no saved projector yet (strih_scenes.py --bootstrap opens it on the next launch)" ;;
-  *)                      note "fixed HDMI projector: unknown verdict '${PROJ_VERDICT}'" ;;
+DRM_ARMED="${DRM_SUMMARY%% *}"
+DRM_VIEW_V="${DRM_SUMMARY##* }"
+DRM_LIVE=0
+DRM_MV_LIVE=0
+DRM_LOG="$(newest_log || true)"
+if [ -n "$DRM_LOG" ]; then
+  # byte-safe: OBS logs carry raw invalid UTF-8 (the imag-display-path.sh grep form)
+  LC_ALL=C grep -aqF 'drm-output: program scanout LIVE' "$DRM_LOG" 2>/dev/null && DRM_LIVE=1
+  LC_ALL=C grep -aqF 'drm-output: multiview bind LIVE' "$DRM_LOG" 2>/dev/null && DRM_MV_LIVE=1
+fi
+DRM_VERDICT="$(strih_drm_output_verdict "$DRM_HDMI" "$DRM_ARMED" "$DRM_VIEW_V" "$DRM_LIVE" "$DRM_MV_LIVE" || true)"
+case "$DRM_VERDICT" in
+  ok)                 ok   "HDMI output: DRM lease on ${DRM_ARMED} live, view ${DRM_VIEW_V} (${DRM_CONF_V} + the newest OBS log)" ;;
+  skip-no-hdmi)       note "HDMI output: SKIP -- no HDMI monitor connected, the DRM-lease output stays dormant (attach one and re-run setup-strih.sh step 6)" ;;
+  hdmi-unplugged)     note "HDMI output: ${DRM_ARMED} is armed in ${DRM_CONF_V} but no HDMI monitor is connected (report-only)" ;;
+  classify-failed)    bad  "HDMI output: could not classify ${DRM_CONF_V} (strih_scenes.py / python3 missing or its import failed) -- re-run setup-strih.sh step 6" ;;
+  config-missing)     bad  "HDMI output: an HDMI monitor is connected but ${DRM_CONF_V} does not arm the DRM lease -- re-run setup-strih.sh (step 6)" ;;
+  view-invalid)       bad  "HDMI output: ${DRM_CONF_V} \"view\" is not program or multiview (OBS falls back to Program) -- fix it in OBS Tools > HDMI výstup" ;;
+  lease-not-live)     bad  "HDMI output: ${DRM_ARMED} is armed but the newest OBS log never reached 'drm-output: program scanout LIVE' -- read its drm-output: lines, then restart strih-obs.service" ;;
+  multiview-not-live) bad  "HDMI output: the view is multiview but the newest OBS log has no 'drm-output: multiview bind LIVE' (the built-in Multiview never reached the scanout)" ;;
+  *)                  bad  "HDMI output: unknown verdict '${DRM_VERDICT}'" ;;
 esac
+# The operator's LAPTOP projector (the Multiview on the eDP panel) persists via SaveProjectors
+# (setup-strih.sh step 7) -- report-only.
+if grep -qi '^SaveProjectors=true' "$(dirname "$OBS_LOG_DIR")/user.ini" 2>/dev/null; then
+  ok "laptop projector persistence: SaveProjectors=true pre-seeded in user.ini"
+else
+  note "laptop projector persistence: SaveProjectors=true NOT pre-seeded in user.ini (re-run setup-strih.sh step 7)"
+fi
 
 # 5) Certified latency pins vs scripts/latency-pins-baseline.json (strih-lx key) -- REPORT-ONLY.
 BASELINE="${HERE}/latency-pins-baseline.json"
