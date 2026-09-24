@@ -92,7 +92,9 @@ step 6):
 1. flags every program-path main `genlock_connect_on_show=true` — or `false` while a FRESH strih-side
    E2E hold marker exists (`~/.camera-box/connect-on-show-e2e-hold` on strih-lx, 4 h TTL): the #1093
    wedge escalation can relaunch strih OBS mid-run, and its launch-time apply must not re-park the
-   inputs the run is measuring;
+   inputs the run is measuring. The path is written twice (the bash hold lib over ssh, the python
+   `E2E_HOLD_MARKER` read) and pinned equal by the pytest; a future-stamped marker (clock stepped
+   back) only counts within 60 s of skew, so it can never outlive the TTL;
 2. heals/creates the `MV NDI camN` twins (same LIVE sender + pin as the main, monitor, audio off);
    the sender name of an existing twin goes through the #795-safe `_enforce_ndi_source_name`; a
    main with NO sender (an empty name would stop the twin's receiver thread) or a twin name already
@@ -104,8 +106,11 @@ step 6):
    canvas) × scale — NDI "lowest" is a lower-resolution proxy (a scale-placed twin would draw small in
    the tile corner), and a PARKED main reports a zero computed width/height (async inactive), so the
    computed size is never used (the twin would otherwise differ parked vs live and rebuild every
-   launch). Crop (main-pixel units) is never mirrored onto the proxy; a cropped camera item is
-   reported. A drifted twin (source / enabled / transform) is rebuilt. Covers `Cam N` AND `Moderatori`;
+   launch). ASSUMPTION: a camera's native resolution equals the strih canvas (1920×1080 today). A
+   parked main has no sourceWidth either, so its footprint falls back to the canvas; a camera at a
+   different resolution would size differently parked vs live and its twin would be rebuilt on each
+   launch (harmless, but not stable) — revisit if a non-canvas-size camera joins. Crop (main-pixel
+   units) is never mirrored onto the proxy; a cropped camera item is reported. A drifted twin (source / enabled / transform) is rebuilt. Covers `Cam N` AND `Moderatori`;
 4. never twins an NDI-output scene (an enabled `ndi_filter`: Grading, Interkom) — the filter only
    sends while its parent is SHOWING, and Grading's one enabled nested camera IS the wanted
    full-bandwidth grading feed — nor the custom grid, nor a twin;

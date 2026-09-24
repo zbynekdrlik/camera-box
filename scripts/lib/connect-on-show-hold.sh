@@ -49,9 +49,12 @@ connect_on_show_strih_marker() {
   else
     cmd='rm -f "$HOME/.camera-box/connect-on-show-e2e-hold"'
   fi
-  if ! timeout "${CONNECT_ON_SHOW_MARKER_SSH_TIMEOUT:-20}" sshpass -p "${STRIH_PW:-newlevel}" ssh \
-      -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=8 \
-      "${STRIH_USER:-newlevel}@${strih}" "$cmd" >/dev/null 2>&1; then
+  # The shared strih transport shape (strih-log-read.sh): sshpass OUTERMOST, timeout inside it, so a
+  # stubbed sshpass is never bypassed by a real timeout binary. The path must stay byte-identical to
+  # strih_bandwidth_roles.E2E_HOLD_MARKER (pinned by the issue-1242 pytest).
+  if ! sshpass -p "${STRIH_PW:-newlevel}" timeout "${CONNECT_ON_SHOW_MARKER_SSH_TIMEOUT:-20}" ssh \
+      -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR \
+      -o ConnectTimeout=8 "${STRIH_USER:-newlevel}@${strih}" "$cmd" >/dev/null 2>&1; then
     echo "WARNING: issue 1242 connect-on-show: could not ${op} the strih-side hold marker on ${strih} (a strih OBS relaunch during this run would re-park the held inputs)" >&2
   fi
   return 0

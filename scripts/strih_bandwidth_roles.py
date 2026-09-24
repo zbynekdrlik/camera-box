@@ -40,6 +40,7 @@ CONNECT_ON_SHOW_KEY = "genlock_connect_on_show"
 # SIGKILLed before its restore) expires, so the roles come back on the next launch.
 E2E_HOLD_MARKER = os.path.expanduser("~/.camera-box/connect-on-show-e2e-hold")
 E2E_HOLD_TTL_S = 4 * 3600
+E2E_HOLD_FUTURE_SKEW_S = 60
 GENLOCK_MONITOR_KEY = "genlock_monitor"
 TWIN_PREFIX = "MV "
 # The private scene setting the vendored multiview reads: the twin cell stands in for this scene.
@@ -98,12 +99,14 @@ def main_role_settings(e2e_hold=False):
 
 
 def e2e_hold_active(path, now, ttl_s):
-    """True iff the strih-side E2E hold marker exists and is younger than `ttl_s` at `now`."""
+    """True iff the strih-side E2E hold marker exists and is younger than `ttl_s` at `now`. A marker
+    stamped in the FUTURE (the clock stepped back) counts only within E2E_HOLD_FUTURE_SKEW_S, so a
+    stale marker can never outlive the TTL through a clock step."""
     try:
         age = now - os.stat(path).st_mtime
     except OSError:
         return False
-    return age < ttl_s
+    return -E2E_HOLD_FUTURE_SKEW_S <= age < ttl_s
 
 
 def twin_role_settings(main_effective):
