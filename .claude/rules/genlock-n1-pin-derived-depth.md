@@ -2,6 +2,7 @@
 paths:
   - "src/genlock_n1_depth.rs"
   - "src/genlock_grid_bench.rs"
+  - "src/genlock_grid_bench_tests.rs"
   - "tests/genlock_relock_selection_parity.rs"
 ---
 
@@ -24,16 +25,18 @@ newest queued stamp`); a shallow source (cg feeds, imag cameras at 3 ms) is unto
 | Piece | Rust authority | C (obs-source.c) | Also |
 |---|---|---|---|
 | scheduled instant | `n1_tick_wall_ns` | `genlock_n1_tick_wall_ns` (pure) + `genlock_n1_tick_wall_now` (reads `os_gettime_ns()` + `obs->video.video_time`) | |
+| on the grid | `n1_tick_on_grid` (pure) + `n1_tick_is_on_grid` | `genlock_n1_tick_on_grid` (pure) + `genlock_n1_tick_is_on_grid` (`genlock_grid_floor_ns`), `GENLOCK_N1_ON_GRID_NS` 2 ms | both wrappers `return genlock_n1_tick_is_on_grid(tick_wall, interval) && …` |
 | rounded depth | `n1_depth_frames` | `genlock_n1_depth_frames` | |
 | deep guard | `n1_is_deep_source(floor)` | `genlock_n1_is_deep_source` | |
 | SHED | `n1_shed_due` | `genlock_n1_shed_due`, called by the SOURCE wrapper `genlock_should_converge_phase` for `n < 2 && last_known_n < 2` | probe `ReleaseCadence::should_converge_phase`, bench |
 | HOLD | `should_hold_n1_phase` | `genlock_n1_hold_due` via `genlock_should_hold_n1_phase`, at the head of the N==1 STEADY branch | counts `n1_grows=` on the audit line |
 
-`genlock_phase_converge_due` / `genlock_backlog::should_converge_phase` are BYTE-IDENTICAL to their
-pre-1367 text (`if (n < 2) return false;`): every N>=2 decision is the old code path, proven by a
-20 000-vector comparison against a verbatim pre-1367 copy (`converge_decisions_are_byte_identical_to_before_1367`).
+`genlock_phase_converge_due` is byte-identical to its pre-1367 text and
+`genlock_backlog::should_converge_phase` code-identical (one comment added), both with
+`if (n < 2) return false;`: every N>=2 decision is the old code path, proven by a 20 000-vector
+comparison against a verbatim pre-1367 copy (`converge_decisions_are_byte_identical_to_before_1367`).
 
-## The three things that went wrong first (do not undo them)
+## The four things that went wrong first (do not undo them)
 
 1. **Queue length is not depth.** Lowering the drain hysteresis to one frame churned (10 sheds/h,
    17–21 flips/h): a render tick later than the ~21.7 ms sender skew already holds the NEXT frame,
@@ -48,21 +51,29 @@ pre-1367 text (`if (n < 2) return false;`): every N>=2 decision is the old code 
 3. **A shared edge limit-cycles.** Hold and shed on one depth edge cycled ~1100 each per hour when
    the tick phase sat on it. Both read the ROUNDED depth; shed needs `> target`, hold `< target`:
    a one-frame dead-band.
+4. **A wall-clock step moves the scheduled tick off the grid** (review round 3). After a step of
+   δ the ticks sit δ off the per-second grid and `genlock_next_deadline` slews them back only
+   `GENLOCK_MAX_SLEW_NS` (2 ms) per tick; read there, a settled conveyor read one frame deep after
+   a forward step of more than half a frame (a shed) and one frame shallow once back (a hold).
+   Both halves act only while the tick is within 2 ms of a grid point and defer otherwise.
+   Normal and caught-up late ticks are always on the grid, so nothing else changes.
 
 Plus the 1 µs pin tolerance (a whole-frame pin like 1000 ms must not count one frame too many).
 
-## Known limits (measured, documented, not bugs)
+## Known limits (measured)
 
-- **Early schedule phase past the pin's headroom.** An EARLY tick moves the release deadline
-  (`wall − reserve`, floored to the grid) one frame earlier once the phase exceeds
-  `ceil(pin / I) · I − pin`; the resync depth is then `base + 1` and each sender gap/dup costs a
-  hold/shed pair (bench: pins 963/999 at a sustained −10 ms). OBS never ticks early except the few
-  ticks after a BACKWARD wall step (`GENLOCK_MAX_SLEW_NS` 2 ms/tick). Late phases are safe at every
-  deep pin (`a_late_schedule_phase_never_corrects_any_deep_pin_1367`).
-- **The drain still reads queue length.** A tick late by > ~1.4 intervals inflates the queue by
-  two frames and the untouched settle-back drain sheds; before issue 1367 that was absorbing (30
-  forever), now the hold regrows it within the throttle window — exactly one `n1_grows` per drain
-  (bench: ~5/h at a 60 ms late-tick tail, 0 at 45 ms and at the live 10–30 ms tail).
+- **A tick held OFF the grid disables the rule.** A constant schedule phase beyond ±2 ms (a
+  stress bound; a real tick is off the grid only while a wall step slews back) defers every N==1
+  correction, so the conveyor behaves exactly like the pre-1367 code (bench: the ±10 ms constant
+  phase sweep is identical with and without the rule). Inside ±2 ms at pins whose frame headroom is
+  under 2 ms (999: 1 ms; 1000: 0) an EARLY tick still moves the release deadline a frame, but OBS
+  never ticks early outside the last one or two ticks of a backward-step slew.
+- **The settle-back drain still reads queue length** — owned by the drain, which the design kept
+  unchanged, and proposed to the supervisor as a follow-up. A tick late by more than ~1.4 intervals
+  inflates the queue by two frames and the drain sheds; before issue 1367 that was absorbing (30
+  forever), now the hold regrows it within the throttle window, exactly one `n1_grows` per drain.
+  That is a skip plus a duplicate per such tick (bench: 5–7 drains/h at a 60 ms late-tick tail,
+  none at 45 ms or at the live 10–30 ms tail).
 
 ## Verification recipe (Tier-0, no cargo compile)
 
@@ -72,11 +83,12 @@ Plus the 1 µs pin tolerance (a whole-frame pin like 1000 ms must not count one 
 - Parity gate: build a stub `camera_box` rlib from those three modules, compile
   `tests/genlock_relock_selection_parity.rs` with `--extern camera_box=…`, `CARGO_MANIFEST_DIR` +
   `CARGO_TARGET_TMPDIR` set. Mutation-proof it by pointing `CARGO_MANIFEST_DIR` at a scratch repo
-  with a mutated obs-source.c (11 mutations, all RED at landing).
-- The C wrappers (`genlock_n1_tick_wall_now`, the routing, the hold call site) are not in the
-  parity lift: lift them with stub `obs` / `os_gettime_ns` / `obs_source_t` and `gcc -Wall -Wextra
+  with a mutated obs-source.c (14 mutations, all RED at landing).
+- The C wrappers (`genlock_n1_tick_wall_now`, `genlock_n1_tick_is_on_grid`, the routing, the hold
+  call site) are not in the parity lift: lift them with stub `obs` / `os_gettime_ns` /
+  `obs_source_t`, `#include` the real `obs-genlock-grid.h`, compile with `gcc -Wall -Wextra
   -Wformat=2 -Wconversion -Werror`, and drive a late tick (scheduled read inert, processing read
-  sheds).
+  sheds) and a wall step (20 ms off the grid defers, 1 ms off sheds).
 - pwsh mirrors: check every `Escape('…')` literal against the `\s+`-squished C offline.
 
 ## Live acceptance (supervisor)
