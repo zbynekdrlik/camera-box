@@ -103,12 +103,12 @@ fn bundle_artifact_is_the_strih_variant() {
 
 #[test]
 fn dantesync_client_args_point_at_the_ntp_server_and_never_server_mode() {
-    let (_c, out, _e) = run_sourced(&[], "strih_lx_dantesync_client_args");
-    assert!(out.contains("--ntp-server strih.lan"), "got: {out}");
-    assert!(
-        !out.contains("server_mode") && !out.contains("--master"),
-        "must not be master: {out}"
-    );
+    // issue 1361: the client upstream is the box fact STRIH_DANTESYNC_UPSTREAM. strih-lx is the NTP
+    // master (role server, NO upstream), so asking it for client args fails closed -- there is no
+    // guessed `strih.lan` default any more.
+    let (c, out, err) = run_sourced(&[], "strih_lx_dantesync_client_args");
+    assert_ne!(c, 0, "a server-role box has no client upstream: out={out}");
+    assert!(err.contains("STRIH_DANTESYNC_UPSTREAM"), "names the missing fact: {err}");
     // Overridable NTP server seam.
     let (_c2, out2, _e2) = run_sourced(
         &[("STRIH_LX_NTP_SERVER", "strih2.lan")],
@@ -117,6 +117,10 @@ fn dantesync_client_args_point_at_the_ntp_server_and_never_server_mode() {
     assert!(
         out2.contains("--ntp-server strih2.lan"),
         "override ignored: {out2}"
+    );
+    assert!(
+        !out2.contains("server_mode") && !out2.contains("--master"),
+        "must not be master: {out2}"
     );
 }
 
@@ -837,9 +841,15 @@ fn setup_strih_installs_the_dantesync_unit_in_step_2() {
         s.contains("/etc/systemd/system/dantesync.service"),
         "setup-strih must write the dantesync unit to /etc/systemd/system/dantesync.service"
     );
+    // issue 1361: the role is a FACT of the selected box (strih-lx.env: server, the post-M4 NTP
+    // master), no longer a per-run STRIH_LX_DANTESYNC_ROLE env knob.
     assert!(
-        s.contains("STRIH_LX_DANTESYNC_ROLE:-server"),
-        "setup-strih step 2 must default the dantesync role to `server` (the post-M4 NTP master)"
+        s.contains("DS_ROLE=\"$(strih_lx_dantesync_role)\""),
+        "setup-strih step 2 must take the dantesync role from the box facts (strih_lx_dantesync_role)"
+    );
+    assert!(
+        !s.contains("STRIH_LX_DANTESYNC_ROLE:-server"),
+        "the per-run role env knob is retired (issue 1361)"
     );
     assert!(
         s.contains("strih_lx_dantesync_role_ok \"$DS_ROLE\" \"$DS_ARGS\""),
@@ -2734,8 +2744,8 @@ fn verify_strih_has_the_dantesync_role_live_item() {
         "verify-strih must check the ntp :123 listener for the server role"
     );
     assert!(
-        v.contains("STRIH_LX_DANTESYNC_ROLE:-server"),
-        "verify-strih must default the role to `server` (matching setup-strih)"
+        v.contains("DS_ROLE_V=\"$(strih_lx_dantesync_role)\""),
+        "verify-strih must grade the role the box facts declare (the same source as setup-strih, issue 1361)"
     );
 }
 
@@ -3957,7 +3967,7 @@ fn setup_strih_step_15_writes_the_kiosk_autostart_and_menu() {
     for want in [
         "strih_openbox_autostart_text > \"${USER_HOME}/.config/openbox/autostart\"",
         "chmod +x \"${USER_HOME}/.config/openbox/autostart\"",
-        "obs_box_openbox_menu_xml \"strih-lx\" \"systemctl --user start strih-obs.service\" \"/usr/local/bin/strih-obs-stop.sh\"",
+        "obs_box_openbox_menu_xml \"$(strih_lx_hostname)\" \"systemctl --user start strih-obs.service\" \"/usr/local/bin/strih-obs-stop.sh\"",
         "rm -f \"${USER_HOME}/.config/autostart/companion-satellite.desktop\"",
     ] {
         assert!(step15.contains(want), "step 15 must carry `{want}`");
@@ -4008,17 +4018,17 @@ fn setup_strih_final_verify_reports_pending_items_before_the_reboot() {
     let step17 = block_between(
         &s,
         "step 17 \"Final verification",
-        "=== strih-lx setup complete",
+        "setup complete ===",
     );
     let pending = step17
         .find("if strih_lx_reboot_pending \"$(cat /proc/cmdline 2>/dev/null || true)\"; then")
         .expect("step 17 must branch on the pending reboot");
     let soft = step17
-        .find("\"${HERE}/verify-strih.sh\" || warn")
+        .find("\"${HERE}/verify-strih.sh\" --box \"$STRIH_BOX\" || warn")
         .expect("pending: verify reports, never fails provisioning");
     let hard = step17
         .find(
-            "\"${HERE}/verify-strih.sh\" || fail \"verify-strih.sh acceptance gate did not pass\"",
+            "\"${HERE}/verify-strih.sh\" --box \"$STRIH_BOX\" || fail \"verify-strih.sh acceptance gate did not pass\"",
         )
         .expect("running baseline: the hard gate stays");
     assert!(
