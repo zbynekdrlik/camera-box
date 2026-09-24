@@ -183,7 +183,7 @@ strih_box_validate() {
 strih_box_load() {
   local name="${1-}" file parsed line fleet_ip
   strih_box_unload
-  STRIH_BOX_LOAD_FAILED="$name"   # cleared only when this load succeeds (see strih_box_ensure_loaded)
+  STRIH_BOX_LOAD_FAILED="${name:-<empty>}"   # cleared only when this load succeeds (see strih_box_ensure_loaded)
   if [[ ! "$name" =~ ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$ ]]; then
     echo "strih-box: box name '${name}' is invalid (lower-case letters, digits, '-'; never a path)" >&2
     return 1
@@ -224,7 +224,8 @@ strih_box_load() {
   return 0
 }
 
-# strih_box_unload -> forget the loaded box (the next accessor lazily loads the default again).
+# strih_box_unload -> forget the loaded box. The next accessor lazily loads the default again --
+# unless a load FAILED in this shell (STRIH_BOX_LOAD_FAILED), which keeps every accessor refusing.
 strih_box_unload() {
   declare -gA STRIH_BOX_FACTS=()
   STRIH_BOX_LOADED=""
