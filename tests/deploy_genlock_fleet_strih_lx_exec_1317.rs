@@ -248,6 +248,9 @@ fn run_exec_boxes(boxes: &str, extra_env: &[(&str, &str)]) -> Run {
         .env("STRIH_LX_VERIFY_POLL_SECS", "0")
         .env("STRIH_LX_VERIFY_SETTLE_SECS", "0")
         .env("STRIH_LX_OBS_PHASE2_DIR", dir.path().join("obs"))
+        // the guard passes --password "$OBS_PASSWORD" to obs_phase2.py; the fake logs its argv to
+        // calls.log (printed by failing asserts) -- never let a real password reach a test log.
+        .env_remove("OBS_PASSWORD")
         .env_remove("STRIH_LX_IP")
         .env_remove("STRIH_LX_USER")
         .env_remove("STRIH_LX_PW")
