@@ -54,7 +54,9 @@ power envelope. A difference between boxes is a defect, not a per-box feature.
 - **The dpkg lock wait is the FIRST action of every provisioning run.** `obs_box_apt_lock_timeout` writes `/etc/apt/apt.conf.d/90camera-box-lock-timeout` (`DPkg::Lock::Timeout "600";`) right after the root check in BOTH setup scripts, before any apt-get.
   - It exists because a periodic apt run held the lock and failed the strih-lx deploy twice at step 4 (24.9.2026). apt-get's default lock wait is 0.
   - Ubuntu's `Version::2.0::Dpkg::Lock::Timeout` applies only to the `apt` front end, never to apt-get.
-  - Never add a per-call `-o DPkg::Lock::Timeout`, and keep every apt-get's `|| fail`: a real apt failure must still fail loud after the wait.
+  - Never add a per-call `-o DPkg::Lock::Timeout`. A real apt failure must still fail loud after the wait, through a `|| fail` or the caller's `set -e`.
+  - The file is written 0644 through a `.dpkg-tmp` sibling, a name apt ignores silently.
+  - It covers the DPKG lock only (install/remove/purge). `apt-get update` takes the separate lists lock (`/var/lib/apt/lists/lock`), which this setting does not govern, so a collision with apt-daily's list refresh still fails at once.
 - **Adding an item** = a function in the right half + a call in BOTH setup scripts (imag in the step
   that owns it, strih inside step 11 in imag's order) + a verdict row + its gather keys. The
   `gather_and_verdict_share_one_key_set` test fails if the two halves of the grader drift.

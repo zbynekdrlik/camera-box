@@ -58,9 +58,12 @@ if [ "${BASH_SOURCE[0]%/*}" != "${BASH_SOURCE[0]}" ]; then . "${BASH_SOURCE[0]%/
 # run (apt-daily / unattended-upgrades) held the lock, and apt-get's default DPkg::Lock::Timeout is 0,
 # so a normal background apt run turned a correct deploy into a failed one. (Ubuntu's own
 # `Version::2.0::Dpkg::Lock::Timeout` binds only the interactive `apt` front end, never apt-get.)
-# With this drop-in apt-get waits up to 10 min for the lock; a REAL apt failure still fails loud after
-# the wait, because every call site keeps its `|| fail`. One apt config file covers every present and
-# future apt-get on the box (no per-call-site `-o` option to forget); security updates keep running.
+# With this drop-in every apt-get that takes the DPKG lock (install / remove / purge) waits up to
+# 10 min for it; a REAL apt failure still fails loud after the wait (the call site's `|| fail`, or the
+# caller's `set -e`). One apt config file covers every present and future such call on the box (no
+# per-call-site `-o` option to forget); security updates keep running. NOT covered: `apt-get update`
+# takes the separate package-LISTS lock (/var/lib/apt/lists/lock), which DPkg::Lock::Timeout does not
+# govern -- a collision with apt-daily's list refresh still fails at once.
 obs_box_apt_lock_timeout_conf() {
     printf 'DPkg::Lock::Timeout "600";\n'
 }
@@ -68,16 +71,21 @@ obs_box_apt_lock_timeout_conf() {
 # obs_box_apt_lock_timeout [CONF] -- write the drop-in (default
 # /etc/apt/apt.conf.d/90camera-box-lock-timeout). Idempotent: compared first, rewritten only when it
 # differs, every outcome logged. The FIRST action of every OBS-box provisioning run (setup-strih.sh and
-# setup-imag.sh call it right after their root check, before any apt-get). Fails loud via the caller's
-# fail() when the file cannot be written.
+# setup-imag.sh call it right after their root check, before any apt-get). Written 0644 whatever the
+# umask (apt run by a non-root user errors on an unreadable conf) through a `.dpkg-tmp` sibling (a name
+# apt ignores silently), removed again if the rename fails. Fails loud via the caller's fail() when the
+# file cannot be written.
 obs_box_apt_lock_timeout() {
     local conf="${1:-/etc/apt/apt.conf.d/90camera-box-lock-timeout}"
+    local tmp="${conf}.dpkg-tmp"
     if [ -f "$conf" ] && cmp -s "$conf" <(obs_box_apt_lock_timeout_conf); then
         echo "  apt lock wait: ${conf} already in place (DPkg::Lock::Timeout 600 s)"
         return 0
     fi
-    { obs_box_apt_lock_timeout_conf > "${conf}.tmp" && mv -f "${conf}.tmp" "$conf"; } \
-        || fail "apt lock wait: could not write ${conf} -- apt-get would fail at once on a held dpkg lock"
+    if ! { obs_box_apt_lock_timeout_conf > "$tmp" && chmod 0644 "$tmp" && mv -f "$tmp" "$conf"; }; then
+        rm -f "$tmp"
+        fail "apt lock wait: could not write ${conf} -- apt-get would fail at once on a held dpkg lock"
+    fi
     echo "  apt lock wait: ${conf} written (DPkg::Lock::Timeout 600 s -- apt-get waits for a background apt run)"
 }
 
