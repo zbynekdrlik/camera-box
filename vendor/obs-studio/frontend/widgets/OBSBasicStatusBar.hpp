@@ -85,8 +85,8 @@ private:
 	bool genlockClockLocked = false;
 	bool genlockClockNtpFailed = false;
 	/* #1299 Part 4: the slew the disciplined clock reports it applies (f_ptp servo + f_phase integral,
-	 * ppm) — the EXPECTED wall-vs-QPC drift rate the qpc_drift verdict compares the measured windowed
-	 * rate against. Cached by the async :8898 reply, read by UpdateGenlockLabel. */
+	 * ppm) — report-only qpc_expected_ppm telemetry (#1357: it no longer feeds the qpc_drift verdict,
+	 * the wall STEP does). Cached by the async :8898 reply, read by UpdateGenlockLabel. */
 	double genlockClockFptpPpm = 0.0;
 	double genlockClockFphasePpm = 0.0;
 	qint64 genlockClockLastOkMs = -1; /* monotonic ms of the last successful :8898 poll; -1 = never */
@@ -94,9 +94,9 @@ private:
 	quint64 genlockLastEventSum = 0;
 	qint64 genlockLastEventMs = -1; /* monotonic ms of the last observed counter increase */
 	bool genlockFirstSample = true;
-	/* #1299 Part 4: windowed wall-vs-QPC drift RATE. A ring of (monotonic ms, SIGNED cumulative drift
-	 * ms) samples over GENLOCK_QPC_WINDOW_S; the qpc_drift verdict keys on the RATE vs the dantesync
-	 * f_ptp+f_phase slew + a single-sample STEP, not the unbounded cumulative offset. */
+	/* #1299 Part 4 + #1357: a ring of (monotonic ms, SIGNED cumulative drift ms) samples over
+	 * GENLOCK_QPC_WINDOW_S. The qpc_drift verdict keys on the largest single-sample wall STEP in it; the
+	 * windowed RATE it also yields is report-only telemetry (never the unbounded cumulative offset). */
 	std::deque<std::pair<qint64, int64_t>> genlockQpcHistory;
 	/* #1341: per-input received-frame history (input name -> ring of (monotonic ms, cumulative
 	 * frames_received)) over GENLOCK_IDLE_WINDOW_MS. An input whose received DELTA over the window is

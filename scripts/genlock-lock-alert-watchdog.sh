@@ -187,8 +187,8 @@ handle_box() {
   # #1299: senderless input count -- observability only (an absent sender never pages; it is
   # excluded from the widget's DEGRADED gate). Logged so a HEALTHY box with idle inputs is visible.
   n_absent="$(printf '%s\n' "$analyze_out" | sed -n 's/^n_absent=//p')"
-  # #1299 Part 4: windowed wall-vs-QPC drift telemetry -- observability only (the widget already
-  # folded the rate/step verdict into `state`; a steady disciplined slew no longer pages). Logged so a
+  # #1299 Part 4: windowed wall-vs-QPC drift telemetry -- observability only (the widget folded the
+  # qpc_drift verdict -- since #1357 the wall STEP only -- into `state`; no rate ever pages). Logged so a
   # genuine rate anomaly (measured far off the dantesync-reported expected slew) is visible in-band.
   qpc_ppm="$(printf '%s\n' "$analyze_out" | sed -n 's/^qpc_drift_ppm=//p')"
   qpc_exp="$(printf '%s\n' "$analyze_out" | sed -n 's/^qpc_expected_ppm=//p')"

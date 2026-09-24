@@ -223,9 +223,9 @@ jobs:
           if ($sb -notmatch [regex]::Escape('f.n_idle = scan.n_idle;') -or $sb -notmatch [regex]::Escape('GENLOCK_IDLE_INPUT_MIN_FRAMES') -or $sb -notmatch [regex]::Escape('r.idle ? "true" : "false"')) {
             Write-Error "OBSBasicStatusBar.cpp: the #1341 connected-but-idle input class is gone — an idle SongPlayer input would flap the box DEGRADED again; re-apply"; exit 1
           }
-          # #1299 Part 4: the qpc_drift verdict is a WINDOWED RATE + STEP (vs the dantesync-reported f_ptp+f_phase slew), NOT the cumulative wall-vs-QPC offset that grew unbounded and false-paged the fleet overnight 15./16.9. Mirror of GenlockLockState.hpp genlock_qpc_drift_beyond_bound (parity-gated by tests/genlock_lock_state_parity.rs) + tests/genlock_lock_json_guards.rs::genlock_lock_qpc_windowed_drift_present_1299_part4.
-          if ($sb -notmatch [regex]::Escape('genlock_qpc_drift_beyond_bound(') -or $sb -notmatch [regex]::Escape('GENLOCK_QPC_DRIFT_PPM_BOUND')) {
-            Write-Error "OBSBasicStatusBar.cpp: the #1299 Part 4 windowed qpc_drift verdict is gone — the cumulative-slew false-page would re-open; re-apply"; exit 1
+          # #1299 Part 4 + #1357 scope C: the qpc_drift verdict is the wall STEP only (one semantics on every box) — NOT the cumulative wall-vs-QPC offset (grew unbounded, false-paged the fleet overnight 15./16.9.) and NOT a rate vs the dantesync f_ptp+f_phase slew (0 by construction on Linux's disciplined CLOCK_MONOTONIC, the free crystal on Windows: 28 false DEGRADED on strih-lx + 4 on stream 24.9.). Mirror of GenlockLockState.hpp genlock_qpc_drift_beyond_bound (parity-gated by tests/genlock_lock_state_parity.rs) + tests/genlock_lock_json_guards.rs::genlock_lock_qpc_drift_is_the_step_only_1357.
+          if ($sb -notmatch [regex]::Escape('genlock_qpc_drift_beyond_bound( qpc_rate_ready, qpc_delta_ms, qpc_elapsed_ms, qpc_max_step_ms, GENLOCK_QPC_STEP_BOUND_MS, &qpc_measured_ppm);') -or $sb -match [regex]::Escape('GENLOCK_QPC_DRIFT_PPM_BOUND')) {
+            Write-Error "OBSBasicStatusBar.cpp: the #1357 step-only qpc_drift verdict is gone (or the per-box rate bound is back) — the per-box false DEGRADED would re-open; re-apply"; exit 1
           }
           Write-Output "in-OBS genlock LOCK indicator present (stats API + shared audit fill + output wall-stamping + statusbar widget + genlock-lock: log + genlock-lock-json: fleet facet) — OK"
 

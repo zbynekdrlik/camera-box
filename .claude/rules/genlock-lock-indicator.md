@@ -39,13 +39,11 @@ no-input-locked; then DEGRADED (amber) precedence some-input-unlocked > recent-e
 - **DEGRADED:** some (not all) inputs unlocked (names the input, e.g. `NDI cam7`); OR a
   relock/late-hold/backward-step on a CONNECTED input in the last 60 s (#1299 Part 3: underruns are
   NO LONGER a recent-event class; the label names the offender, `recent event: cg`); OR clock
-  `ntp_failed`; OR (#1299 Part 4) the wall-vs-QPC drift is a genuine hazard — the WINDOWED drift
-  RATE departs from the dantesync-reported slew (`f_ptp_ppm + f_phase_ppm`) by more than
-  `GENLOCK_QPC_DRIFT_PPM_BOUND` (50 ppm) once the rolling `GENLOCK_QPC_WINDOW_S` (300 s) window has
-  filled, OR a single-sample wall STEP exceeds `GENLOCK_QPC_STEP_BOUND_MS` (33 ms = one 30 fps
-  frame, judged immediately). This REPLACED the old cumulative `wall_qpc_drift > 100 ms` gate, which
-  grew unbounded on a dantesync-disciplined box (the wall runs at the GM rate vs the free QPC
-  crystal, ~50 ms/h) and false-paged the whole fleet after ~2 h; OR (#1303, lowest
+  `ntp_failed`; OR (#1299 Part 4 + #1357) the wall clock STEPPED — a single-sample wall STEP exceeds
+  `GENLOCK_QPC_STEP_BOUND_MS` (33 ms = one 30 fps frame, judged immediately), `clock step N ms`.
+  That is the WHOLE `qpc_drift` verdict, identical on every box: neither the cumulative offset (grew
+  unbounded on a dantesync-disciplined Windows box, false-paged the fleet after ~2 h) nor a rate
+  (see the Gotchas bullet — 0 by construction on Linux, the free crystal on Windows) gates; OR (#1303, lowest
   precedence, part 3b) an audio-ENABLED genlock source whose `|audio_pairing_offset_ms|` breaches
   `GENLOCK_AUDIO_PAIRING_BOUND_MS` (33 ms / one 30 fps frame) — `audio unpaired: <src>`. The widget
   aggregates the per-source breach into `GenlockFacets.audio_unpaired` (the twin of how it reduces
@@ -125,25 +123,41 @@ no-input-locked; then DEGRADED (amber) precedence some-input-unlocked > recent-e
     (schema v2→v3, additive, omit-when-absent) and the human `genlock-lock:` line as
     `reason=recent_event:<name>`; `genlock_lock_decision.analyze` enriches the watchdog's reason to
     `recent_event:<name>` so a page is actionable.
-- **#1299 Part 4 — `qpc_drift` is a WINDOWED RATE + STEP, never the cumulative offset.** The libobs
-  producer `genlock_wall_qpc_drift_ms()` is a wall-RTC-vs-QPC accumulator since OBS start; on a
-  dantesync-disciplined box the wall clock is slewed to the GM rate (`f_ptp + f_phase`) vs the free
-  QPC crystal, so it grows without bound (~14 ppm ≈ 50 ms/h) BY DESIGN — the old `> 100 ms` gate was
-  a bound on an unbounded quantity and false-paged the fleet after ~2 h. The verdict is the pure
-  `genlock_qpc_drift_beyond_bound(rate_ready, drift_delta_ms, elapsed_ms, expected_ppm, ppm_bound,
+- **`qpc_drift` is the wall STEP only — never the cumulative offset (#1299 Part 4), never a rate
+  (#1357 scope C).** The libobs producer `genlock_wall_qpc_drift_ms()` is a wall-vs-`os_gettime_ns`
+  accumulator since OBS start. What it measures DIFFERS PER OS, which is why no rate/offset term may
+  gate:
+  - **Windows** (`os_gettime_ns` = QPC, the free crystal): the wall is slewed to the GM rate, so the
+    accumulator grows ~13 ppm ≈ 47 ms/h BY DESIGN (stream 24.9.: 0 → 250 ms over 5.4 h). The old
+    `> 100 ms` gate false-paged the fleet after ~2 h (#1299 Part 4).
+  - **Linux** (`os_gettime_ns` = `CLOCK_MONOTONIC`, which the kernel frequency-disciplines together
+    with `CLOCK_REALTIME`): the accumulator stays 0 by construction (strih-lx 24.9.: 0 on every
+    sample for 5.2 h).
+  - The #1299 Part 4 RATE branch compared the 300 s windowed rate with ONE instantaneous dantesync
+    `f_ptp_ppm + f_phase_ppm` sample (-160..+171 ppm on the strih-lx NTP master). On Linux that
+    re-reported a dantesync servo excursion (28 false DEGRADED samples, 24.9.); on Windows the
+    instantaneous spikes tripped it against a steady 13-23 ppm rate (4 samples). #1357 removed it.
+  - A rate is not a genlock hazard on any box: the render tick (`genlock_next_deadline`) re-derives
+    every deadline from the wall clock per tick (2 ms/tick slew clamp), the release keys on the
+    wall, and the ASRC servo runs against the mixer clock itself. The one clock hazard is a wall
+    STEP: it moves every wall-keyed FIFO release / ts-align deadline by more than a frame at once
+    (the render tick only slews through it) — same meaning on every box.
+  - **What now notices a SECOND clock writer slewing the wall** (a w32time / systemd-timesyncd next
+    to dantesync — the two-timesync-daemons incident class): dantesync's own lock/offset facet (the
+    `clock` term + the dantesync clock watchdog), FIFO `recent_event` relocks/late-holds on the
+    receivers, and the per-pass `qpc_drift_ppm` vs `qpc_expected_ppm` telemetry the
+    genlock-lock watchdog logs. The removed rate term could only ever see it on Windows.
+
+  The verdict is the pure `genlock_qpc_drift_beyond_bound(rate_ready, drift_delta_ms, elapsed_ms,
   max_step_ms, step_bound_ms, &measured_ppm)` (Rust authority in `src/genlock_lock_state.rs`, C
-  mirror in `GenlockLockState.hpp`, parity-gated by the 4th lift in
-  `tests/genlock_lock_state_parity.rs`): a STEP > `GENLOCK_QPC_STEP_BOUND_MS` (33 ms) trips
-  IMMEDIATELY (before the window fills); the RATE mismatch (|measured − expected| >
-  `GENLOCK_QPC_DRIFT_PPM_BOUND` = 50 ppm) trips only once `rate_ready` (the ring spans ≥ 90 % of
-  `GENLOCK_QPC_WINDOW_S` = 300 s — long enough that the integer-ms drift resolves the rate:
-  at 14 ppm the window accrues ≈ 4.2 ms, quantisation ≈ 3.3 ppm ≪ 50 ppm). The WINDOW state (the
-  `genlockQpcHistory` `(monotonic_ms, SIGNED drift_ms)` ring) lives in the widget; `expected_ppm =
-  f_ptp_ppm + f_phase_ppm` is polled from `:8898/status` (absent on an old dantesync → 0.0, the wide
-  bound tolerates it). `qpc_drift_ms` stays in the JSON as raw report-only telemetry; the additive
-  `qpc_drift_ppm` / `qpc_expected_ppm` / `qpc_step` (schema v4→v5) are report-only too. **A steady
-  disciplined slew must read LOCKED** — the reopen bug; never re-introduce a bound on the cumulative
-  value.
+  mirror in `GenlockLockState.hpp`, python mirror in `scripts/genlock_lock_decision.py`,
+  parity-gated by the 4th lift in `tests/genlock_lock_state_parity.rs`): `|max_step_ms| >
+  GENLOCK_QPC_STEP_BOUND_MS` (33 ms), judged as soon as two samples exist. `measured_ppm` (once the
+  `genlockQpcHistory` ring spans ≥ 90 % of `GENLOCK_QPC_WINDOW_S` = 300 s) and `qpc_expected_ppm`
+  (`f_ptp + f_phase` from `:8898/status`) stay in the JSON as REPORT-ONLY telemetry, beside the raw
+  cumulative `qpc_drift_ms`; the v5 JSON schema is unchanged. **Never re-introduce a rate or offset
+  bound** — `tests/genlock_lock_json_guards.rs::genlock_lock_qpc_drift_is_the_step_only_1357` and
+  both `windows-genlock*.yml` pwsh anchors forbid `GENLOCK_QPC_DRIFT_PPM_BOUND` in the widget.
 - **A `tests/genlock_lock_json_guards.rs` needle for a REAL C++ quote uses Rust `\"`, not the
   escaped-JSON `\\\"` (#1299 Part 4).** The guards `squish()` the source then `.contains(needle)`.
   A JSON KEY in the builder is an escaped-quote C string literal (`,\"qpc_drift_ppm\":`), so its
