@@ -310,5 +310,107 @@ class Rule(unittest.TestCase):
         self.assertIn("receivers first", text.lower())
 
 
+# --------------------------------------------------------------------------------------------------
+# Review round 1 -- the client config is a ROLLOUT GATE (a configured sender stops mDNS, so the
+# config must not go live on a routine deploy before the server + every receiver are ready), the
+# Linux writer MERGES, the unit passes no unverified flags, the .ps1 survives "ndi": null.
+# --------------------------------------------------------------------------------------------------
+
+
+class RolloutGate(unittest.TestCase):
+    def test_gate_defaults_off(self):
+        r = _lib('printf "%s|" "$NDI_DISCOVERY_ENABLED"; ndi_discovery_enabled; echo "rc=$?"')
+        self.assertEqual(r.stdout.strip(), "0|rc=1")
+
+    def test_gate_on_with_the_checked_in_switch(self):
+        r = _lib('ndi_discovery_enabled; echo "rc=$?"', env={"NDI_DISCOVERY_ENABLED": "1"})
+        self.assertEqual(r.stdout.strip(), "rc=0")
+
+    def test_rollout_pending_only_when_off_and_nothing_written(self):
+        cases = [
+            ({}, "''", "''", "0"),
+            ({}, '"$(ndi_discovery_config_json)"', "''", "1"),
+            ({}, "''", "/etc/ndi", "1"),
+            ({"NDI_DISCOVERY_ENABLED": "1"}, "''", "''", "1"),
+        ]
+        for env, conf, drop, want in cases:
+            r = _lib(f'ndi_discovery_rollout_pending {conf} {drop}; echo "rc=$?"', env=env)
+            self.assertEqual(r.stdout.strip(), f"rc={want}", (env, conf, drop, r.stderr))
+
+    def test_setup_device_writes_only_behind_the_gate_but_always_removes_30p(self):
+        live = _strip_comments(_live_flow(SETUP_DEVICE, "stop here -- never run the destructive"))
+        gate = live.find("if ndi_discovery_enabled; then")
+        write = live.find('ndi_discovery_write_config "$NDI_DISCOVERY_SYSTEM_DIR"')
+        close = live.find("\nfi", write)
+        reload = live.find("systemctl daemon-reload", write)
+        self.assertTrue(0 <= gate < write < close < reload, "STEP 7 writes the config only when the gate is on")
+        self.assertLess(live.find("rm -f /etc/systemd/system/camera-box.service.d/publish-30p.conf"), gate,
+                        "the 30p drop-in removal is unconditional (outside the discovery gate)")
+
+    def test_setup_strih_writes_only_behind_the_gate(self):
+        code = _strip_comments(_read(SETUP_STRIH))
+        gate = code.find("if ndi_discovery_enabled; then")
+        write = code.find('ndi_discovery_write_config "${USER_HOME}/.ndi" "$DESKTOP_USER"')
+        dropin = code.find("ndi_discovery_dropin_content > /etc/systemd/system/intercom-hub.service.d/ndi-discovery.conf")
+        close = code.find("\nfi", dropin)
+        self.assertTrue(0 <= gate < write < dropin < close, "step 4b writes only when the gate is on")
+
+    def test_verifiers_accept_a_not_yet_rolled_out_box(self):
+        vd = _read(VERIFY_DEVICE)
+        an = vd.find("# (an) NDI discovery")
+        self.assertIn('ndi_discovery_rollout_pending "$NDI_DISC_CONF" "$NDI_DISC_DIR"', vd[an:vd.rfind("# (q) .bak cruft drift")])
+        vs = _read(VERIFY_STRIH)
+        item = vs.find("# 34) NDI discovery")
+        self.assertIn("ndi_discovery_rollout_pending", vs[item:vs.find("\n# 32) the shared OBS-box", item)])
+
+
+class MergingWriter(unittest.TestCase):
+    def test_existing_keys_are_kept_and_only_networks_is_set(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "ndi-config.v1.json")
+            with open(path, "w") as fh:
+                fh.write('{"ndi": {"groups": {"recv": "Public"}, "networks": {"ips": "10.77.8.51", "discovery": "x"}}, "other": 1}')
+            r = _lib(f'ndi_discovery_write_config "{tmp}"')
+            self.assertEqual(r.returncode, 0, r.stderr)
+            doc = json.loads(_read(path))
+            self.assertEqual(doc["ndi"]["groups"], {"recv": "Public"})
+            self.assertEqual(doc["other"], 1)
+            self.assertEqual(doc["ndi"]["networks"], {"ips": "", "discovery": DEV1_RIG_IP})
+
+    def test_unparseable_existing_config_is_backed_up_then_replaced(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "ndi-config.v1.json")
+            with open(path, "w") as fh:
+                fh.write("{not json")
+            r = _lib(f'ndi_discovery_write_config "{tmp}"')
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertEqual(_read(path), _lib("ndi_discovery_config_json").stdout)
+            baks = [f for f in os.listdir(tmp) if f.startswith("ndi-config.v1.json.bak-")]
+            self.assertEqual(len(baks), 1, os.listdir(tmp))
+            self.assertEqual(_read(os.path.join(tmp, baks[0])), "{not json")
+
+    def test_a_canonical_file_is_rewritten_byte_identically_with_no_backup(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            for _ in range(2):
+                self.assertEqual(_lib(f'ndi_discovery_write_config "{tmp}"').returncode, 0)
+            self.assertEqual(os.listdir(tmp), ["ndi-config.v1.json"])
+            self.assertEqual(_read(os.path.join(tmp, "ndi-config.v1.json")), _lib("ndi_discovery_config_json").stdout)
+
+
+class ReviewRound1Misc(unittest.TestCase):
+    def test_unit_execstart_passes_no_unverified_flags(self):
+        self.assertRegex(_read(DEV1_UNIT), r"(?m)^ExecStart=%h/\.local/bin/ndi-discovery-server$")
+
+    def test_ps1_treats_a_null_member_as_missing(self):
+        text = _read(LAPTOP_PS1)
+        body = text[text.find("function Get-OrAddMember"):text.find("$cfg = New-Object PSObject")]
+        self.assertIn("$null -eq $obj.$name", body, '"ndi": null must be replaced, not dereferenced')
+
+    def test_rule_names_the_gate_and_the_consumers_that_need_a_plan(self):
+        text = _read(RULE)
+        for needle in ("NDI_DISCOVERY_ENABLED", "ndi-portmap-audit", "stock", "ndi-recv-probe"):
+            self.assertIn(needle, text)
+
+
 if __name__ == "__main__":
     unittest.main()
