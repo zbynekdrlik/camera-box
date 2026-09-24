@@ -378,6 +378,22 @@ class CamboxWiring(unittest.TestCase):
         self.assertNotIn("rollout_pending", block)
 
 
+class SourcedByTheRealCallers(unittest.TestCase):
+    """setup-device.sh / verify-device.sh source camera-set.sh BEFORE the lib; the lib lazily sources
+    obs-fleet.sh itself. Sourcing each real caller under strict mode must expose a working generator,
+    and must not clobber the caller's own resolved camera."""
+
+    def test_setup_device_and_verify_device_expose_the_generator(self):
+        for script in (SETUP_DEVICE, VERIFY_DEVICE):
+            r = _bash(f'set -euo pipefail\n. "{script}"\nndi_discovery_sender_ips pinned')
+            self.assertEqual(r.returncode, 0, f"{script}: {r.stderr}")
+            self.assertEqual(r.stdout.strip(), _pinned(), script)
+
+    def test_the_strih_scripts_source_the_lib_with_both_fleet_lists(self):
+        r = _bash(f'set -euo pipefail\n. "{LIB}"\ntype camera_resolve obs_fleet_boxes >/dev/null && echo both')
+        self.assertEqual(r.stdout.strip(), "both", r.stderr)
+
+
 class StrihWiring(unittest.TestCase):
     def test_setup_strih_writes_both_configs_and_the_intercom_dropin_ungated(self):
         text = _read(SETUP_STRIH)

@@ -1,62 +1,64 @@
 #!/usr/bin/env bash
-# airuleset:script-ok source-only pure-function library, sourced by setup-device.sh /
-# verify-device.sh / setup-strih.sh / verify-strih.sh + tests/python/test_ndi_discovery_1342.py --
-# mirrors every sibling in scripts/lib/ (remote-logging.sh, dscp-nft.sh, ndi-runtime.sh), none of
-# which set -euo pipefail: sourcing a `set -e`-carrying file would silently change the CALLER's
-# shell options too. Each caller sets its own strict mode.
+# airuleset:script-ok source-only pure-function library (plus a tiny CLI when executed, which sets its
+# own strict mode below), sourced by setup-device.sh / verify-device.sh / setup-strih.sh /
+# verify-strih.sh + tests/python/test_ndi_discovery_1342.py -- mirrors every sibling in scripts/lib/
+# (remote-logging.sh, dscp-nft.sh, ndi-runtime.sh), none of which set -euo pipefail at file level:
+# sourcing a `set -e`-carrying file would silently change the CALLER's shell options too.
 #
-# scripts/lib/ndi-discovery.sh -- issue 1342: the ONE source of truth for the fleet's NDI
-# Discovery Server client config (`ndi-config.v1.json`).
+# scripts/lib/ndi-discovery.sh -- issue 1342: the ONE source of truth for the fleet's RECEIVER-side
+# NDI config (`ndi-config.v1.json`), which lists every managed NDI sender by IP.
 #
 # WHY: NDI source discovery on this rig was pure mDNS (`_ndi._tcp` multicast via avahi). On the
-# venue MikroTik LAN that is unreliable: the strih OBS missed the RESOLUME-SNV sources, a freshly
-# connected laptop did not list every source (owner, 18.9.2026). The NDI SDK's own answer is the
-# NDI Discovery Server -- one unicast registry every sender registers with and every finder queries.
-# The server runs on dev1 (`systemd/ndi-discovery-server.service`, a --user unit that ships
-# DISABLED); every managed box gets the client config below, and a foreign laptop needs the same
-# one file (`scripts/ndi-discovery/ndi-config.v1.json`, `scripts/ndi-discovery-laptop.ps1`).
+# venue MikroTik LAN that is unreliable: the strih OBS missed the RESOLUME-SNV sources, and a freshly
+# connected laptop did not list every source (owner, 18.9.2026).
 #
-# The SDK config key is `ndi.networks.discovery` (a comma-delimited server list, default port
-# 5959). `ndi.networks.ips` (a static list of extra machines to query) is written EMPTY on purpose:
-# a hand-kept list is exactly what went stale on the Windows strih (dead 10.77.8.5x addresses).
+# MECHANISM -- the NDI SDK's own receiver-side list (vendor/distroav/lib/ndi/Processing.NDI.Find.h,
+# `p_extra_ips`): "The list of additional IP addresses that exist that we should query for sources on
+# ... those sources will be available locally even though they are not mDNS discoverable ... When
+# none is specified the registry is used." The registry is `ndi.networks.ips` in the config file. A
+# finder queries every listed IP directly (unicast) AND keeps using mDNS. Senders never consult the
+# list, so every sender keeps announcing over mDNS and stock TVs, guest laptops and the avahi-based
+# port-map audit are untouched.
 #
-# SENDER CAVEAT (NDI docs, quoted in .claude/rules/ndi-discovery.md): a RECEIVER with a discovery
-# server configured merges the server's list with mDNS, but a SENDER with one configured STOPS
-# announcing over mDNS. Configured senders are then visible only to receivers that are configured
-# too, so the supervisor rollout order is receivers first, senders (the camboxes) last.
+# The config therefore carries `networks.ips` ONLY. It never carries `networks.discovery`: a SENDER
+# with a discovery server configured STOPS announcing over mDNS (NDI docs), which is why the part-1
+# Discovery-Server model was dropped (the lane finding + the revised main design on issue 1342). The
+# managed-box writer below DELETES a stray `networks.discovery` for the same reason.
 #
-# Config LOCATION: the SDK reads `$HOME/.ndi/ndi-config.v1.json` on Linux, or
-# `$NDI_CONFIG_DIR/ndi-config.v1.json` when that env var is set. `camera-box.service` runs as root
-# with `ProtectHome=yes` (and no User=, so no guaranteed $HOME), so a /root/.ndi file would be
-# invisible to it -- the cambox config therefore lives in the system dir /etc/ndi and a
-# camera-box.service.d drop-in points NDI_CONFIG_DIR at it. The same drop-in shape serves any other
-# root/ProtectHome NDI service (strih-lx's intercom-hub).
+# The list is GENERATED, never hand-typed (a hand-kept list is what went stale on the old Windows
+# strih, dead 10.77.8.5x addresses):
+#   * every camera `camera_resolve` knows (scripts/camera-set.sh), walked cam1, cam2, ... to the first
+#     unknown name -- NOT CAMERA_ACTIVE_SET: a camera retired from MEASUREMENT is still a powered
+#     sender, and walking the resolver means a new `camN)` arm is picked up with no second roster;
+#   * every member of the obs-fleet `ndi-sender` facet (scripts/lib/obs-fleet.sh: strih-lx, stream,
+#     resolume; `retired` rows excluded by obs_fleet_boxes).
+# A fleet host that is a hostname (resolume.lan, a traveling DHCP box) is resolved to IPv4 at WRITE
+# time; unresolvable -> skipped with a log line, and its sources stay mDNS-only exactly as before.
+# The VERIFIERS require only the PINNED part (every IPv4 entry), so a traveling lease never makes a
+# verify flap, while a renumbered camera / strih-lx / stream still FAILS until re-provisioned.
 #
-# Source-only: defines constants + functions, no side effects on its own.
+# Config LOCATION: the Linux SDK reads `$HOME/.ndi/ndi-config.v1.json`, or
+# `$NDI_CONFIG_DIR/ndi-config.v1.json` when that env var is set. `camera-box.service` (the cameraman
+# HDMI preview receives `STRIH-LX (interkom)`) runs as root with `ProtectHome=yes` and no User=, so a
+# /root/.ndi file would be invisible to it -- the cambox config lives in the system dir /etc/ndi and a
+# camera-box.service.d drop-in points NDI_CONFIG_DIR at it. strih-lx's intercom-hub gets the same.
+#
+# Rule + supervisor steps: .claude/rules/ndi-discovery.md.
+
+# --- the two fleet sources of truth (lazy-sourced; a caller that already sourced them keeps its own) ---
+if ! command -v camera_resolve >/dev/null 2>&1; then
+  # shellcheck source=scripts/camera-set.sh
+  . "${BASH_SOURCE[0]%/*}/../camera-set.sh"
+fi
+if ! command -v obs_fleet_boxes >/dev/null 2>&1; then
+  # shellcheck source=scripts/lib/obs-fleet.sh
+  . "${BASH_SOURCE[0]%/*}/obs-fleet.sh"
+fi
 
 # --- shared constants (single source of truth, consumed cross-file) ---------------------------
-# The discovery server list. dev1's rig-LAN IP (the same address scripts/lib/remote-logging.sh
-# REMOTE_LOG_DEV1_IP uses for the log sink; dev1 reads it on enp2s0). A comma list (NDI's
-# redundancy form, e.g. "10.77.9.200,10.77.9.202") is accepted everywhere below.
-NDI_DISCOVERY_SERVERS="${NDI_DISCOVERY_SERVERS:-10.77.9.200}"
-# THE ROLLOUT GATE (issue 1342 review round 1). A SENDER with a discovery server configured stops
-# announcing over mDNS (NDI SDK docs), so writing the client config on a box before the server runs
-# and before every receiver of that box is configured HIDES its sources. The provisioners write the
-# config ONLY when this is 1; the verifiers accept a box with no config while it is 0. The
-# supervisor flips the checked-in default to 1 as one step of the rollout in
-# .claude/rules/ndi-discovery.md (a code change, never a per-box env tweak); an env value
-# overrides it for a single manual run (`sudo NDI_DISCOVERY_ENABLED=1 ./setup-...` -- a plain
-# `VAR=1 sudo ...` is dropped by sudo's env_reset).
-NDI_DISCOVERY_ENABLED="${NDI_DISCOVERY_ENABLED:-0}"
-# Per-CLASS gates (review round 2): the camboxes (setup-device.sh) and strih-lx (setup-strih.sh)
-# are configured by different provisioners at different times, so each class has its own gate,
-# defaulting to the fleet switch above. This lets the rollout configure strih-lx first and the
-# camboxes after, or keep strih-lx off the gate entirely (the stock-display option).
-NDI_DISCOVERY_ENABLED_CAMBOX="${NDI_DISCOVERY_ENABLED_CAMBOX:-$NDI_DISCOVERY_ENABLED}"
-NDI_DISCOVERY_ENABLED_STRIH="${NDI_DISCOVERY_ENABLED_STRIH:-$NDI_DISCOVERY_ENABLED}"
 # The SDK's own config file name.
 NDI_DISCOVERY_CONFIG_NAME="ndi-config.v1.json"
-# System config dir for root / ProtectHome services (pointed at by NDI_CONFIG_DIR).
+# System config dir for root / ProtectHome services (pointed at by NDI_CONFIG_DIR). Overridable for tests.
 NDI_DISCOVERY_SYSTEM_DIR="${NDI_DISCOVERY_SYSTEM_DIR:-/etc/ndi}"
 # The camera-box.service drop-in that points the appliance's libndi at NDI_DISCOVERY_SYSTEM_DIR.
 # shellcheck disable=SC2034  # consumed cross-file by setup-device.sh (install) + verify-device.sh (an)
@@ -64,34 +66,98 @@ NDI_DISCOVERY_CAMBOX_DROPIN="/etc/systemd/system/camera-box.service.d/ndi-discov
 # The strih-lx intercom-hub drop-in (ProtectHome hides ~/.ndi from it). Overridable for tests.
 # shellcheck disable=SC2034  # consumed cross-file by setup-strih.sh (install) + verify-strih.sh (item 34)
 NDI_DISCOVERY_INTERCOM_DROPIN="${NDI_DISCOVERY_INTERCOM_DROPIN:-/etc/systemd/system/intercom-hub.service.d/ndi-discovery.conf}"
+# The obs-fleet facet whose members are the managed OBS-box NDI SENDERS.
+NDI_DISCOVERY_FLEET_FACET="ndi-sender"
+# A bound on the camera_resolve walk (a guard against a runaway loop, not a roster).
+NDI_DISCOVERY_CAMERA_MAX=99
+# Bounded hostname resolution (seconds), the same bound obs_fleet_resolve_host uses.
+NDI_DISCOVERY_RESOLVE_TIMEOUT="${NDI_DISCOVERY_RESOLVE_TIMEOUT:-2}"
 
-# ndi_discovery_enabled [CLASS] -> exit 0 iff the rollout gate for CLASS (cambox | strih) is 1;
-# no/unknown CLASS reads the fleet switch NDI_DISCOVERY_ENABLED.
-ndi_discovery_enabled() {
-  local v
-  case "${1:-}" in
-    cambox) v="${NDI_DISCOVERY_ENABLED_CAMBOX:-0}" ;;
-    strih)  v="${NDI_DISCOVERY_ENABLED_STRIH:-0}" ;;
-    *)      v="${NDI_DISCOVERY_ENABLED:-0}" ;;
+# _ndi_discovery_is_ipv4 X -> exit 0 iff X is a dotted-quad IPv4 literal.
+_ndi_discovery_is_ipv4() {
+  [[ "${1:-}" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]]
+}
+
+# ndi_discovery_camera_ips -> one IP per line for every camera camera_resolve knows, walked cam1,
+# cam2, ... until the first unknown name. Runs in a SUBSHELL so the caller's CAMERA_IP / CAMERA_NAME /
+# CAMERA_SOURCE (setup-device.sh's own box) are never clobbered.
+ndi_discovery_camera_ips() {
+  (
+    n=1
+    while [ "$n" -le "$NDI_DISCOVERY_CAMERA_MAX" ] && camera_resolve "cam$n" 2>/dev/null; do
+      printf '%s\n' "$CAMERA_IP"
+      n=$((n + 1))
+    done
+  )
+}
+
+# ndi_discovery_fleet_hosts -> one host per line for every ndi-sender facet member (IP or hostname).
+# Non-zero when the facet or a member is missing from OBS_FLEET -- the caller then writes nothing.
+ndi_discovery_fleet_hosts() {
+  local roster pair
+  roster="$(obs_fleet_boxes "$NDI_DISCOVERY_FLEET_FACET")" || return 1
+  for pair in $roster; do
+    printf '%s\n' "${pair#*|}"
+  done
+}
+
+# ndi_discovery_resolve_ipv4 HOST -> HOST's first IPv4 address, "" when unresolvable. Bounded.
+# The tests redefine this function after sourcing (the resolver seam).
+ndi_discovery_resolve_ipv4() {
+  timeout "$NDI_DISCOVERY_RESOLVE_TIMEOUT" getent ahostsv4 "${1:-}" 2>/dev/null | awk 'NR==1{print $1}' || true
+}
+
+# ndi_discovery_sender_ips [resolve|pinned] -> the comma-separated networks.ips list, in fleet order,
+# each IP once.
+#   pinned  -- the cameras + every IPv4 fleet host. Deterministic: what the verifiers REQUIRE and
+#              what the checked-in config / the laptop .ps1 default carry.
+#   resolve -- (default, the provisioners) pinned + every HOSTNAME fleet host resolved to IPv4; an
+#              unresolvable or non-IPv4 answer is skipped and named on stderr.
+# Non-zero (and no output) when the fleet lookup fails.
+ndi_discovery_sender_ips() {
+  local mode="${1:-resolve}" hosts cands c ip out="" seen=" "
+  case "$mode" in
+    resolve|pinned) ;;
+    *) echo "ndi-discovery: unknown mode '${mode}' (expected resolve|pinned)" >&2; return 1 ;;
   esac
-  [ "$v" = 1 ]
+  hosts="$(ndi_discovery_fleet_hosts)" || {
+    echo "ndi-discovery: obs-fleet facet '${NDI_DISCOVERY_FLEET_FACET}' lookup failed -- no sender list" >&2
+    return 1
+  }
+  cands="$(ndi_discovery_camera_ips)"$'\n'"$hosts"
+  while IFS= read -r c; do
+    [ -n "$c" ] || continue
+    if _ndi_discovery_is_ipv4 "$c"; then
+      ip="$c"
+    elif [ "$mode" = resolve ]; then
+      ip="$(ndi_discovery_resolve_ipv4 "$c")"
+      if ! _ndi_discovery_is_ipv4 "$ip"; then
+        echo "ndi-discovery: sender '$c' did not resolve to IPv4 ('${ip}') -- skipped, its sources stay mDNS-only" >&2
+        continue
+      fi
+    else
+      continue
+    fi
+    case "$seen" in *" $ip "*) continue ;; esac
+    seen="${seen}${ip} "
+    out="${out:+$out,}$ip"
+  done <<EOF
+$cands
+EOF
+  printf '%s' "$out"
 }
 
-# ndi_discovery_rollout_pending CONF_TEXT DROPIN_DIR [CLASS] -> exit 0 iff CLASS's gate is OFF and
-# the box carries neither a config nor an NDI_CONFIG_DIR drop-in -- the correct pre-rollout state,
-# which a verifier reports as ok. Anything half-written, or any box once its gate is on, is graded
-# in full.
-ndi_discovery_rollout_pending() {
-  ! ndi_discovery_enabled "${3:-}" && [ -z "$1" ] && [ -z "$2" ]
-}
-
-# ndi_discovery_config_json [SERVERS] -> the canonical ndi-config.v1.json text (2-space indent,
-# one trailing newline, no BOM). SERVERS defaults to NDI_DISCOVERY_SERVERS. The checked-in laptop
-# file scripts/ndi-discovery/ndi-config.v1.json is pinned byte-identical to this output.
-# shellcheck disable=SC2120  # SERVERS is optional (a redundant list); in-file callers use the default
+# ndi_discovery_config_json [IPS] -> the canonical ndi-config.v1.json text (2-space indent, one
+# trailing newline, no BOM), networks.ips ONLY. IPS defaults to the PINNED list, so the checked-in
+# file scripts/ndi-discovery/ndi-config.v1.json is pinned byte-identical to this with no argument.
 ndi_discovery_config_json() {
-  local servers="${1:-$NDI_DISCOVERY_SERVERS}"
-  printf '{\n  "ndi": {\n    "networks": {\n      "ips": "",\n      "discovery": "%s"\n    }\n  }\n}\n' "$servers"
+  local ips
+  if [ "$#" -ge 1 ]; then
+    ips="$1"
+  else
+    ips="$(ndi_discovery_sender_ips pinned)" || return 1
+  fi
+  printf '{\n  "ndi": {\n    "networks": {\n      "ips": "%s"\n    }\n  }\n}\n' "$ips"
 }
 
 # _ndi_discovery_json_string KEY TEXT -> the string value of the LAST `"KEY": "<value>"` pair in
@@ -102,24 +168,32 @@ _ndi_discovery_json_string() {
     | sed -E 's/.*:[[:space:]]*"([^"]*)"$/\1/' || true
 }
 
-# ndi_discovery_config_servers TEXT -> the `networks.discovery` value in TEXT, "" if absent.
-ndi_discovery_config_servers() { _ndi_discovery_json_string discovery "$1"; }
-
 # ndi_discovery_config_ips TEXT -> the `networks.ips` value in TEXT, "" if absent.
 ndi_discovery_config_ips() { _ndi_discovery_json_string ips "$1"; }
+
+# ndi_discovery_config_servers TEXT -> a `networks.discovery` value in TEXT, "" if absent (graded
+# only to catch a stray one: a managed box must never carry it).
+ndi_discovery_config_servers() { _ndi_discovery_json_string discovery "$1"; }
 
 # _ndi_discovery_norm_list LIST -> LIST with every space removed ("a, b" == "a,b").
 _ndi_discovery_norm_list() { printf '%s' "$1" | tr -d '[:space:]'; }
 
-# ndi_discovery_config_verdict TEXT [EXPECTED_SERVERS] -> "ok", or one `FAIL: <facet>` line per
-# failing facet. Always exits 0 (the caller branches on the printed verdict). Facets:
+# ndi_discovery_config_verdict TEXT [REQUIRED] -> "ok", or one `FAIL: <facet>` line per failing facet.
+# Always exits 0 (the caller branches on the printed verdict). REQUIRED defaults to the PINNED list.
+# Facets:
 #   missing   -- TEXT empty (no config file on the box)
 #   JSON      -- TEXT is not valid JSON (checked only when python3 is available; verify-device runs
 #                this on dev1, verify-strih on strih-lx -- both have it)
-#   discovery -- networks.discovery != EXPECTED (spaces ignored)
-#   ips       -- networks.ips is non-empty (a hand-kept static source list; they go stale)
+#   discovery -- a networks.discovery is set (it would silence this box's senders on mDNS)
+#   ips       -- networks.ips is empty, or a REQUIRED IP is absent from it (a renumber / new
+#                sender: re-provision).
+#                Extra entries (a resolved traveling box, a stale lease) are fine: a finder just
+#                queries one more address.
 ndi_discovery_config_verdict() {
-  local text="$1" want="${2:-$NDI_DISCOVERY_SERVERS}" got ips out=""
+  local text="$1" req="${2-}" have missing="" ip out="" disc
+  if [ "$#" -lt 2 ]; then
+    req="$(ndi_discovery_sender_ips pinned)" || req=""
+  fi
   if [ -z "$text" ]; then
     printf 'FAIL: config missing (no %s)\n' "$NDI_DISCOVERY_CONFIG_NAME"
     return 0
@@ -128,13 +202,19 @@ ndi_discovery_config_verdict() {
     && ! printf '%s' "$text" | python3 -c 'import json,sys; json.load(sys.stdin)' >/dev/null 2>&1; then
     out="${out}FAIL: not valid JSON (the NDI SDK ignores an unparseable config)"$'\n'
   fi
-  got="$(ndi_discovery_config_servers "$text")"
-  if [ "$(_ndi_discovery_norm_list "$got")" != "$(_ndi_discovery_norm_list "$want")" ]; then
-    out="${out}FAIL: networks.discovery='${got}' (want '${want}')"$'\n'
+  disc="$(ndi_discovery_config_servers "$text")"
+  if [ -n "$(_ndi_discovery_norm_list "$disc")" ]; then
+    out="${out}FAIL: networks.discovery='${disc}' is set (a configured sender stops mDNS; receivers need only networks.ips)"$'\n'
   fi
-  ips="$(ndi_discovery_config_ips "$text")"
-  if [ -n "$(_ndi_discovery_norm_list "$ips")" ]; then
-    out="${out}FAIL: networks.ips='${ips}' is a static source list (must be empty -- a hand-kept list goes stale)"$'\n'
+  have=",$(_ndi_discovery_norm_list "$(ndi_discovery_config_ips "$text")"),"
+  if [ "$have" = ",," ]; then
+    out="${out}FAIL: networks.ips is empty (no managed sender listed -- re-provision)"$'\n'
+  fi
+  for ip in ${req//,/ }; do
+    case "$have" in *",$ip,"*) ;; *) missing="${missing:+$missing,}$ip" ;; esac
+  done
+  if [ -n "$missing" ]; then
+    out="${out}FAIL: networks.ips lacks ${missing} (a renumbered or new sender -- re-provision)"$'\n'
   fi
   if [ -z "$out" ]; then
     printf 'ok\n'
@@ -143,10 +223,10 @@ ndi_discovery_config_verdict() {
   fi
 }
 
-# ndi_discovery_dropin_content -> the systemd drop-in that points a root/ProtectHome NDI service
-# at NDI_DISCOVERY_SYSTEM_DIR.
+# ndi_discovery_dropin_content -> the systemd drop-in that points a root/ProtectHome NDI receiver at
+# NDI_DISCOVERY_SYSTEM_DIR.
 ndi_discovery_dropin_content() {
-  printf '[Service]\n# issue 1342: libndi reads $NDI_CONFIG_DIR/%s (the NDI Discovery Server client config).\n# ProtectHome hides /root/.ndi, so the config lives in the system dir.\nEnvironment=NDI_CONFIG_DIR=%s\n' \
+  printf '[Service]\n# issue 1342: libndi reads $NDI_CONFIG_DIR/%s (networks.ips = every managed NDI sender).\n# ProtectHome hides /root/.ndi, so the config lives in the system dir.\nEnvironment=NDI_CONFIG_DIR=%s\n' \
     "$NDI_DISCOVERY_CONFIG_NAME" "$NDI_DISCOVERY_SYSTEM_DIR"
 }
 
@@ -155,12 +235,12 @@ ndi_discovery_dropin_config_dir() {
   printf '%s\n' "$1" | grep -oE '^Environment=NDI_CONFIG_DIR=[^[:space:]]+' | tail -1 | cut -d= -f3- || true
 }
 
-# _ndi_discovery_merged_json FILE -> FILE's JSON with ndi.networks.discovery / ndi.networks.ips set
-# to the fleet values and every other key kept (2-space indent, trailing newline -- a canonical file
-# comes back byte-identical). Non-zero when python3 is absent or FILE is not a JSON object.
+# _ndi_discovery_merged_json FILE IPS -> FILE's JSON with ndi.networks.ips = IPS, any
+# ndi.networks.discovery REMOVED, every other key kept (2-space indent, trailing newline -- a canonical
+# file comes back byte-identical). Non-zero when python3 is absent or FILE is not a JSON object.
 _ndi_discovery_merged_json() {
   command -v python3 >/dev/null 2>&1 || return 1
-  NDI_DISCOVERY_MERGE_SERVERS="$NDI_DISCOVERY_SERVERS" python3 -c '
+  NDI_DISCOVERY_MERGE_IPS="$2" python3 -c '
 import json, os, sys
 with open(sys.argv[1], encoding="utf-8-sig") as fh:
     doc = json.load(fh)
@@ -172,30 +252,32 @@ if not isinstance(ndi, dict):
 net = ndi.get("networks")
 if not isinstance(net, dict):
     net = ndi["networks"] = {}
-net["ips"] = ""
-net["discovery"] = os.environ["NDI_DISCOVERY_MERGE_SERVERS"]
+net["ips"] = os.environ["NDI_DISCOVERY_MERGE_IPS"]
+net.pop("discovery", None)
 sys.stdout.write(json.dumps(doc, indent=2) + "\n")
 ' "$1"
 }
 
-# ndi_discovery_write_config DIR [OWNER] -> write DIR/ndi-config.v1.json, mode 0644, via a temp file
-# + atomic rename so a reader never sees a half-written file. No file yet -> the canonical config.
-# An existing file is MERGED (only ndi.networks.discovery/ips change, every other key is kept);
-# when it cannot be merged (not JSON, or no python3 on the box) and differs from the canonical
-# config, it is backed up to ndi-config.v1.json.bak-<stamp> before being replaced. With OWNER, DIR
-# and the file are chowned to OWNER (a desktop user's ~/.ndi). Idempotent. Returns non-zero (with a
-# message on stderr) when DIR cannot be created or written -- the caller aborts (setup-device.sh
-# via its own `set -e`, setup-strih.sh via `|| fail`).
+# ndi_discovery_write_config DIR IPS [OWNER] -> write DIR/ndi-config.v1.json (networks.ips = IPS),
+# mode 0644, via a temp file + atomic rename so a reader never sees a half-written file. No file yet
+# -> the canonical config. An existing file is MERGED (networks.ips set, networks.discovery removed,
+# every other key kept); when it cannot be merged (not JSON, or no python3 on the box) and differs
+# from the canonical config, it is backed up to ndi-config.v1.json.bak-<stamp> before being replaced.
+# With OWNER, DIR and the file are chowned to OWNER (a desktop user's ~/.ndi). Idempotent. Returns
+# non-zero (with a message on stderr) on an EMPTY IPS (a failed generator must never write an empty
+# list) or when DIR cannot be created or written -- the caller aborts (setup-device.sh via its own
+# `set -e`, setup-strih.sh via `|| fail`).
 ndi_discovery_write_config() {
-  local dir="${1:?ndi_discovery_write_config: DIR required}" owner="${2:-}" tmp target
+  local dir="${1:?ndi_discovery_write_config: DIR required}" ips="${2:-}" owner="${3:-}" tmp target
+  [ -n "$ips" ] || { echo "ndi-discovery: refusing to write an EMPTY networks.ips into $dir" >&2; return 1; }
   target="$dir/$NDI_DISCOVERY_CONFIG_NAME"
   mkdir -p "$dir" || { echo "ndi-discovery: cannot create $dir" >&2; return 1; }
   tmp="$(mktemp "$dir/.${NDI_DISCOVERY_CONFIG_NAME}.XXXXXX")" \
     || { echo "ndi-discovery: cannot write into $dir" >&2; return 1; }
-  if [ -s "$target" ] && _ndi_discovery_merged_json "$target" > "$tmp" 2>/dev/null; then
-    : # merged: every existing key kept, only networks.discovery/ips set
+  if [ -s "$target" ] && _ndi_discovery_merged_json "$target" "$ips" > "$tmp" 2>/dev/null; then
+    : # merged: every existing key kept, networks.ips set, networks.discovery removed
   else
-    if ! ndi_discovery_config_json > "$tmp"; then
+    if ! ndi_discovery_config_json "$ips" > "$tmp"; then
       rm -f "$tmp"
       echo "ndi-discovery: cannot write $tmp" >&2
       return 1
@@ -225,3 +307,20 @@ ndi_discovery_gather_remote_snippet() {
 ndi_discovery_block_section() {
   printf '%s\n' "$1" | awk -v b="__${2}_BEGIN__" -v e="__${2}_END__" '$0==b{on=1;next} $0==e{on=0} on' || true
 }
+
+# --- CLI (executed, not sourced): print the list / config for a box this repo does not provision ---
+# (stream, resolume, an owner laptop -- see the rule). `resolve` (default) resolves the traveling
+# hostname senders from THIS machine; `pinned` is the deterministic checked-in form.
+#   bash scripts/lib/ndi-discovery.sh --ips  [resolve|pinned]
+#   bash scripts/lib/ndi-discovery.sh --json [resolve|pinned]
+if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
+  set -euo pipefail
+  case "${1:-}" in
+    --ips)  _ndi_ips="$(ndi_discovery_sender_ips "${2:-resolve}")"; printf '%s\n' "$_ndi_ips" ;;
+    --json) _ndi_ips="$(ndi_discovery_sender_ips "${2:-resolve}")"; ndi_discovery_config_json "$_ndi_ips" ;;
+    *)
+      echo "usage: $0 --ips|--json [resolve|pinned]" >&2
+      exit 2
+      ;;
+  esac
+fi
