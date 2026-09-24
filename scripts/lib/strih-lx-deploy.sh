@@ -42,8 +42,8 @@
 #     start     -- systemctl --user start strih-obs.service (after touching a start marker);
 #     verify    -- REFUSE unless /opt/obs-genlock/GENLOCK_BUILD_SHA.txt == the canonical SHA, the
 #                  installed /usr/lib/x86_64-linux-gnu/libobs.so.30 bytes match the bundle manifest,
-#                  strih-obs.service is active with the SAME MainPID and NRestarts on two consecutive
-#                  polls (a crash-looping Type=simple unit reads `active` between restarts), the OBS log
+#                  strih-obs.service is active with the SAME MainPID and NRestarts for a settle time
+#                  (a crash-looping Type=simple unit reads `active` between restarts), the OBS log
 #                  written after the start shows `render tick ENABLED`, and :8899 reports the SHA.
 #
 # Every failure prints `ERROR: [strih-lx <step>] failed (rc=N): <what>` on stderr.
@@ -51,6 +51,7 @@
 # Test seams (tests/deploy_genlock_fleet_strih_lx_exec_1317.rs stubs gh/sshpass/ssh/rsync/curl on
 # PATH): STRIH_LX_SETUP_POLLS / STRIH_LX_SETUP_POLL_SECS (setup rc poll, default 270 x 10 s = 45 min),
 # STRIH_LX_VERIFY_POLLS / STRIH_LX_VERIFY_POLL_SECS (read-back poll, default 24 x 10 s = 4 min),
+# STRIH_LX_VERIFY_SETTLE_SECS (how long the MainPID/NRestarts must hold, default 90 s),
 # STRIH_LX_SSH_TIMEOUT (per remote command, default 180 s).
 # Transport env: STRIH_LX_IP (dial override, via fleet_box_ip -- must be the box's IPv4), STRIH_LX_USER
 # / STRIH_LX_PW (default newlevel / newlevel -- the rig's shared Linux-box creds, targets.md; sshpass
@@ -121,7 +122,7 @@ strih_lx_remote_setup_log_cmd() {
 # setup-strih.sh exits 0 with a reboot-pending warning (the baseline lands at the next boot): pass
 # those lines on instead of letting VERIFIED swallow them.
 strih_lx_remote_setup_notes_cmd() {
-  printf "grep -i -m 3 -e 'reboot' '%s/setup-strih.log' 2>/dev/null || true\n" "$1"
+  printf "grep -i -m 3 -e 'next boot' '%s/setup-strih.log' 2>/dev/null || true\n" "$1"
 }
 
 # touch the start marker (the read-back only trusts an OBS log written after it), then start.
@@ -135,7 +136,7 @@ strih_lx_remote_start_cmd() {
 # marker AND shows `render tick ENABLED`, else 0>`.
 strih_lx_remote_readback_cmd() {
   # shellcheck disable=SC2016  # expanded on the box, not here
-  printf 'export XDG_RUNTIME_DIR=/run/user/$(id -u); L=$(ls -t "$HOME"/.config/obs-studio/logs/*.txt 2>/dev/null | head -n 1); t=0; M=%s; if [ -n "$L" ] && [ -f "$M" ] && [ "$L" -nt "$M" ] && grep -q "render tick ENABLED" "$L"; then t=1; fi; printf "installed=%%s active=%%s pid=%%s restarts=%%s lib=%%s tick=%%s\\n" "$(tr -d "[:space:]" 2>/dev/null < /opt/obs-genlock/GENLOCK_BUILD_SHA.txt)" "$(systemctl --user is-active strih-obs.service 2>/dev/null)" "$(systemctl --user show -p MainPID --value strih-obs.service 2>/dev/null)" "$(systemctl --user show -p NRestarts --value strih-obs.service 2>/dev/null)" "$(sha256sum /usr/lib/x86_64-linux-gnu/libobs.so.30 2>/dev/null | cut -d" " -f1)" "$t"\n' "'$1/obs-start.marker'"
+  printf 'export XDG_RUNTIME_DIR=/run/user/$(id -u); L=$(ls -t "$HOME"/.config/obs-studio/logs/*.txt 2>/dev/null | head -n 1); t=0; M=%s; if [ -n "$L" ] && [ -f "$M" ] && [ "$L" -nt "$M" ] && LC_ALL=C grep -a -q "render tick ENABLED" "$L"; then t=1; fi; printf "installed=%%s active=%%s pid=%%s restarts=%%s lib=%%s tick=%%s\\n" "$(tr -d "[:space:]" 2>/dev/null < /opt/obs-genlock/GENLOCK_BUILD_SHA.txt)" "$(systemctl --user is-active strih-obs.service 2>/dev/null)" "$(systemctl --user show -p MainPID --value strih-obs.service 2>/dev/null)" "$(systemctl --user show -p NRestarts --value strih-obs.service 2>/dev/null)" "$(sha256sum /usr/lib/x86_64-linux-gnu/libobs.so.30 2>/dev/null | cut -d" " -f1)" "$t"\n' "'$1/obs-start.marker'"
 }
 
 strih_lx_bundle_state_url() {
@@ -210,6 +211,15 @@ strih_lx_stable_verdict() {
   echo "OK"
 }
 
+# strih_lx_is_ipv4 ADDR -> rc 0 for four dot-separated decimal octets 0..255. Pure.
+strih_lx_is_ipv4() {
+  local a="${1:-}" o
+  [[ "$a" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]] || return 1
+  local IFS=.
+  for o in $a; do [ "$((10#$o))" -le 255 ] || return 1; done
+  return 0
+}
+
 # --- execute arm ----------------------------------------------------------------------------------
 
 _strih_lx_fail() {  # STEP RC EXIT MESSAGE -> prints the named error, returns EXIT
@@ -255,9 +265,8 @@ strih_lx_prepare() {
   STRIH_LX_PREP_USER="${STRIH_LX_USER:-newlevel}"
   STRIH_LX_PREP_PW="${STRIH_LX_PW:-newlevel}"
   STRIH_LX_PREP_HOST="$(fleet_box_ip strih-lx)" || { _strih_lx_fail resolve 2 3 "no strih-lx host (STRIH_LX_IP / obs-fleet row)"; return; }
-  case "$STRIH_LX_PREP_HOST" in
-    ''|*[!0-9.]*) _strih_lx_fail resolve 2 3 "strih-lx host '$STRIH_LX_PREP_HOST' must be the box's dotted IPv4 -- setup-strih.sh pins STRIH_LX_IP as the box's own static address"; return ;;
-  esac
+  strih_lx_is_ipv4 "$STRIH_LX_PREP_HOST" \
+    || { _strih_lx_fail resolve 2 3 "strih-lx host '$STRIH_LX_PREP_HOST' must be the box's dotted IPv4 -- setup-strih.sh pins STRIH_LX_IP as the box's own static address"; return; }
   STRIH_LX_PREP_STAGE="$(strih_lx_stage_dir "$sha")" || { _strih_lx_fail resolve 2 3 "canonical SHA '$sha' is not a hex commit id"; return; }
   for tool in sshpass rsync curl tar jq timeout; do
     command -v "$tool" >/dev/null 2>&1 || { _strih_lx_fail resolve 127 3 "$tool is required for the strih-lx deploy"; return; }
@@ -330,11 +339,13 @@ strih_lx_apply() {
   _strih_lx_ssh "$(strih_lx_remote_setup_launch_cmd "$stage")" < <(printf '%s\n' "$STRIH_LX_PREP_PW"; printf 'ghtoken:%s\n' "$STRIH_LX_PREP_TOKEN"); rc=$?
   STRIH_LX_PREP_TOKEN=""
   if [ "$rc" != 0 ]; then
-    if _strih_lx_installer_alive; then
-      _strih_lx_fail setup "$rc" 4 "the launch returned rc=$rc but setup-strih.sh IS running (detached) -- NOT starting OBS over it; wait for $stage/setup-strih.rc, then start strih-obs.service"; return
+    # The preflight saw no installer, so one running now is THIS deploy's (the ssh dropped after the
+    # detach -- exactly what the detach is for): follow it through the rc poll below.
+    if ! _strih_lx_installer_alive; then
+      _strih_lx_start_best_effort
+      _strih_lx_fail setup "$rc" 4 "launching setup-strih.sh failed (sudo / run-setup.sh) -- nothing installed"; return
     fi
-    _strih_lx_start_best_effort
-    _strih_lx_fail setup "$rc" 4 "launching setup-strih.sh failed (sudo / run-setup.sh) -- nothing installed"; return
+    echo "WARNING: [strih-lx setup] the launch ssh returned rc=$rc but setup-strih.sh is running (or the box is unreachable) -- following it through the rc poll" >&2
   fi
   local polls="${STRIH_LX_SETUP_POLLS:-270}" secs="${STRIH_LX_SETUP_POLL_SECS:-10}" i=0 src=""
   while [ "$i" -lt "$polls" ]; do
@@ -344,7 +355,7 @@ strih_lx_apply() {
   done
   if [ -z "$src" ]; then
     if _strih_lx_installer_alive; then
-      _strih_lx_fail setup 124 4 "setup-strih.sh wrote no rc after $polls polls x ${secs} s and is STILL running -- NOT starting OBS over it; wait for $stage/setup-strih.rc"; return
+      _strih_lx_fail setup 124 4 "setup-strih.sh wrote no rc after $polls polls x ${secs} s and is still running (or the box is unreachable) -- NOT starting OBS over it; wait for $stage/setup-strih.rc"; return
     fi
     echo "# strih-lx: setup-strih.log tail:"; _strih_lx_ssh "$(strih_lx_remote_setup_log_cmd "$stage")" || true
     _strih_lx_start_best_effort
@@ -368,10 +379,13 @@ strih_lx_apply() {
   _strih_lx_verify "$sha"
 }
 
-# [verify] fail-closed: every field of two consecutive polls must pass, with a stable MainPID.
+# [verify] fail-closed: every field must pass, and the SAME non-zero MainPID + NRestarts must hold from
+# the first good poll for STRIH_LX_VERIFY_SETTLE_SECS (default 90 -- a crash loop can be slower than
+# one poll interval: the CEF trap on this box fired every ~60 s). A bad poll restarts the window.
 _strih_lx_verify() {
   local sha="$1" vpolls="${STRIH_LX_VERIFY_POLLS:-24}" vsecs="${STRIH_LX_VERIFY_POLL_SECS:-10}"
-  local i=0 have_prev=0 prev_pid="" prev_r="" line pid restarts bs verdict="FAIL: no read-back" url
+  local settle="${STRIH_LX_VERIFY_SETTLE_SECS:-90}"
+  local i=0 have_first=0 first_pid="" first_r="" first_t=0 line pid restarts bs verdict="FAIL: no read-back" url
   url="$(strih_lx_bundle_state_url "$STRIH_LX_PREP_HOST")"
   while [ "$i" -lt "$vpolls" ]; do
     [ "$i" -gt 0 ] && sleep "$vsecs"
@@ -380,17 +394,21 @@ _strih_lx_verify() {
     pid="$(_strih_lx_field pid "$line")"; restarts="$(_strih_lx_field restarts "$line")"
     bs="$(curl -s -m 8 "$url" 2>/dev/null | jq -r '.genlock_build_sha // empty' 2>/dev/null)" || bs=""
     if ! verdict="$(strih_lx_deploy_verdict "$sha" "$(_strih_lx_field installed "$line")" "$(_strih_lx_field active "$line")" "$bs" "$STRIH_LX_PREP_LIBSHA" "$(_strih_lx_field lib "$line")" "$(_strih_lx_field tick "$line")")"; then
-      have_prev=0; continue
+      have_first=0; continue
     fi
-    if [ "$have_prev" = 1 ]; then
-      if verdict="$(strih_lx_stable_verdict "$prev_pid" "$prev_r" "$pid" "$restarts")"; then
-        echo "# strih-lx: VERIFIED -- marker + libobs bytes = $sha, strih-obs active (MainPID $pid stable, NRestarts $restarts), render tick ENABLED, :8899=$bs"
-        return 0
+    if [ "$have_first" = 1 ]; then
+      if verdict="$(strih_lx_stable_verdict "$first_pid" "$first_r" "$pid" "$restarts")"; then
+        if [ $((SECONDS - first_t)) -ge "$settle" ]; then
+          echo "# strih-lx: VERIFIED -- marker + libobs bytes = $sha, strih-obs active (MainPID $pid stable for $((SECONDS - first_t)) s, NRestarts $restarts), render tick ENABLED, :8899=$bs"
+          return 0
+        fi
+        verdict="FAIL: MainPID $pid stable for $((SECONDS - first_t)) s only (settle ${settle} s)"
+        continue
       fi
     else
-      verdict="FAIL: only one good read-back -- the MainPID/NRestarts stability needs a second poll"
+      verdict="FAIL: only one good read-back -- the MainPID/NRestarts stability needs a later poll"
     fi
-    have_prev=1; prev_pid="$pid"; prev_r="$restarts"
+    have_first=1; first_pid="$pid"; first_r="$restarts"; first_t="$SECONDS"
   done
   _strih_lx_fail verify 1 4 "post-deploy read-back refused after $vpolls polls: $(printf '%s' "$verdict" | tr '\n' ';') (see $url)"
 }
@@ -434,7 +452,7 @@ strih_lx_plan_steps() {
 #          then poll: $(strih_lx_remote_setup_rc_cmd "$stage")  (0 = done; else the log tail + FAIL;
 #          OBS is never started while setup-strih.sh still runs)
 # STEP 7 (start): $(strih_lx_remote_start_cmd "$stage")
-# STEP 8 (verify, fail-closed, two consecutive polls): /opt/obs-genlock/GENLOCK_BUILD_SHA.txt == ${sha},
+# STEP 8 (verify, fail-closed, held for ${STRIH_LX_VERIFY_SETTLE_SECS:-90} s): /opt/obs-genlock/GENLOCK_BUILD_SHA.txt == ${sha},
 #          /usr/lib/x86_64-linux-gnu/libobs.so.30 sha256 == the manifest's, strih-obs.service active with
 #          the SAME MainPID + NRestarts, 'render tick ENABLED' in the OBS log written after the start,
 #          and $(strih_lx_bundle_state_url "$host") genlock_build_sha == ${sha}.

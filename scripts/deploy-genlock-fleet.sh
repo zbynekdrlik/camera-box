@@ -899,9 +899,6 @@ main() {
     gh run download "$win_run" --repo "$GENLOCK_REPO" -n "$win_art" -D "$workdir/win" \
       || { echo "ERROR: download of $win_art (run $win_run) failed" >&2; exit 3; }
     echo "# Windows artifact $win_art (run $win_run) downloaded to $workdir/win"
-    echo "# Upload it to each box at C:\\stage-genlock-$sha (win-* MCP FileUpload / scp), then paste each program:"
-    # subshell so the comma-split IFS never leaks into the rest of main (the loop only prints).
-    ( IFS=','; for b in $boxes; do case "$b" in stream|resolume) emit_windows_plan "$b" "$mode" "$workdir/win" "$sha" "$sha" "$yes" ;; esac; done )
   fi
 
   # --- imag: download the same-SHA linux artifacts, scp the WHOLE bundle + ssh-run (issue 1026) -----
@@ -940,6 +937,17 @@ main() {
   # read-back). A failure exits 4 naming the step and writes NO fleet-log line.
   if [ "$want_strihlx" = 1 ]; then
     strih_lx_apply "$sha" || exit $?
+    # logged the moment it verified, so a later imag failure never hides the strih deploy.
+    mkdir -p "$(dirname "$FLEET_LOG_DEFAULT")"
+    fleet_log_line "$run_id" "$sha" "strih-lx" "$mode" >> "$FLEET_LOG_DEFAULT"
+  fi
+
+  # --- Windows: the paste-programs, printed only now (after a verified strih-lx), so no operator
+  # pastes stream while the strih apply can still fail.
+  if [ "$want_win" = 1 ]; then
+    echo "# Upload it to each box at C:\\stage-genlock-$sha (win-* MCP FileUpload / scp), then paste each program:"
+    # subshell so the comma-split IFS never leaks into the rest of main (the loop only prints).
+    ( IFS=','; for b in $boxes; do case "$b" in stream|resolume) emit_windows_plan "$b" "$mode" "$workdir/win" "$sha" "$sha" "$yes" ;; esac; done )
   fi
 
   # --- imag: the ssh deploy of the bundle prepared above --------------------------------------------
@@ -958,8 +966,11 @@ main() {
   fi
 
   # --- durable fleet-deploy log line ---------------------------------------------------------------
-  mkdir -p "$(dirname "$FLEET_LOG_DEFAULT")"
-  fleet_log_line "$run_id" "$sha" "$boxes" "$mode" >> "$FLEET_LOG_DEFAULT"
+  local rest="${boxes/strih-lx/}"; rest="${rest#,}"
+  if [ -n "$rest" ]; then
+    mkdir -p "$(dirname "$FLEET_LOG_DEFAULT")"
+    fleet_log_line "$run_id" "$sha" "$rest" "$mode" >> "$FLEET_LOG_DEFAULT"
+  fi
   echo "# fleet-deploy log appended: $FLEET_LOG_DEFAULT"
   exit 0
 }
