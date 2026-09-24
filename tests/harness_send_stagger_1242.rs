@@ -119,11 +119,23 @@ fn the_frame_is_handed_off_after_every_timecode_is_fixed_1242() {
 }
 
 #[test]
-fn a_replaced_frame_is_counted_1242() {
+fn a_replaced_frame_is_counted_and_not_reported_as_sent_1242() {
     let s = main_rs();
     let hand_off = unique(&s, "send_thread.hand_off(");
     let counted = unique(&s, "capture_window.note_replaced(replaced);");
-    assert!(hand_off < counted);
+    let uncounted = unique(
+        &s,
+        "emit_count = emit_count.saturating_sub(replaced as u64);",
+    );
+    assert!(
+        hand_off < counted && counted < uncounted,
+        "a replaced job never went out: count it AND take it back out of the sent count"
+    );
+    // The per-second ring must not underflow when a replacement takes frames back.
+    unique(
+        &s,
+        "let emitted_this = emit_count.saturating_sub(emit_before) as u32;",
+    );
 }
 
 #[test]
@@ -145,15 +157,34 @@ fn the_send_thread_owns_the_sender_the_wait_and_the_heartbeat_1242() {
         "crate::send_handoff::run_send_loop(",
         "crate::affinity::pin_capture_thread();",
         "crate::affinity::set_current_thread_realtime(",
+        "crate::affinity::RtThreadRole::Send",
         "if any_ok {",
         "\"Failed to send frame: {}\"",
-        "std::thread::yield_now();",
+        "impl Drop for NdiSendThread",
     ] {
         assert!(
             t.contains(needle),
             "src/ndi_send_thread.rs must contain {needle:?}"
         );
     }
+    assert!(
+        !t.contains("RtThreadRole::CaptureEmit"),
+        "the send thread runs one FIFO step BELOW capture, so capture always preempts a send"
+    );
+    assert!(
+        !t.contains("yield_now"),
+        "sched_yield never runs a lower-priority thread; the send thread takes the job when the \
+         capture thread blocks on its next dequeue"
+    );
+}
+
+#[test]
+fn only_the_capture_thread_runs_at_the_capture_priority_1242() {
+    let s = main_rs();
+    // apply_realtime_scheduling (the capture thread) keeps CaptureEmit; the E2E burn thread owns
+    // the send there, so it takes the SAME Send role as the production ndi-send thread.
+    unique(&s, "camera_box::affinity::RtThreadRole::CaptureEmit");
+    unique(&s, "camera_box::affinity::RtThreadRole::Send");
 }
 
 #[test]

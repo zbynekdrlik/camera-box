@@ -1002,12 +1002,37 @@ LOC:    1000000    1000000    1000000    1000000   Local timer interrupts
     }
 
     #[test]
-    fn only_the_capture_emit_role_gets_realtime_fifo() {
-        // A strict split: exactly the CaptureEmit role is raised, nothing else.
-        for role in [RtThreadRole::CaptureEmit, RtThreadRole::Auxiliary] {
+    fn only_the_capture_and_send_roles_get_realtime_fifo() {
+        // A strict split: exactly the capture thread and the NDI send thread (#1242) are raised;
+        // every auxiliary worker stays SCHED_OTHER.
+        for role in [
+            RtThreadRole::CaptureEmit,
+            RtThreadRole::Send,
+            RtThreadRole::Auxiliary,
+        ] {
             let is_fifo = realtime_fifo_priority(role).is_some();
-            assert_eq!(is_fifo, matches!(role, RtThreadRole::CaptureEmit));
+            assert_eq!(
+                is_fifo,
+                matches!(role, RtThreadRole::CaptureEmit | RtThreadRole::Send)
+            );
         }
+    }
+
+    #[test]
+    fn the_send_role_runs_one_fifo_step_below_capture_1242() {
+        // #1242 — the NDI send thread shares the isolated core with the capture thread. One FIFO
+        // step BELOW it, the capture thread always preempts a send (a stagger wait or a long
+        // SpeedHQ encode can never delay the next capture), while the send still preempts every
+        // SCHED_OTHER task on the box.
+        assert_eq!(
+            realtime_fifo_priority(RtThreadRole::Send),
+            Some(SEND_FIFO_PRIORITY)
+        );
+        assert_eq!(realtime_fifo_priority(RtThreadRole::Send), Some(89));
+        assert!(
+            realtime_fifo_priority(RtThreadRole::Send)
+                < realtime_fifo_priority(RtThreadRole::CaptureEmit)
+        );
     }
 
     #[test]
