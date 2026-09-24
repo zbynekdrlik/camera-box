@@ -80,8 +80,10 @@ of the fleet is logged at the end), so a later imag failure never hides the stri
    not the bundle's SHA (a scripts-only fix never triggers a genlock build; setup-strih.sh is box
    config — the same split as imag's `genlock-markers.sh`). Token: `STRIH_LX_GH_TOKEN` (read-only)
    else `gh auth token`.
-2. **preflight** — refuse while a previous `setup-strih.sh` still runs (`pgrep -x`): the sweep would
-   delete the stage it is reading and a second installer would race it.
+2. **preflight** — the box's `hostname` must equal the fact file's `STRIH_HOSTNAME` (a dial override
+   that reaches another box would otherwise be provisioned AS strih-lx: its hostname, IP, janus
+   `local_ip`, NTP-master role), and no previous `setup-strih.sh` may still run (`pgrep -x`): the sweep
+   would delete the stage it is reading and a second installer would race it.
 3. **sweep** — `mkdir` + `touch` the stage FIRST (it is then the newest `genlock-stage-*`), then the
    EXISTING `obs-backup-retention.sh --local-sweep` decision with **`--stages-only`** (added here: the
    dated rollback backups are never touched), keep-runs 1 / keep-days 0, **as the operator** (the
@@ -134,8 +136,23 @@ the step commands' distinguishing substrings: `pgrep -x setup-strih.sh`, `--loca
 `setup-strih.rc`, `run-setup.sh`, `, then run verify-strih`, `setup-strih.log`, `strih-obs-stop.sh`,
 `GENLOCK_BUILD_SHA.txt`, `--user start`), plus the generated runner (root check stripped for the test)
 and `--stages-only` on real temp dirs. A test SHA must stay SHORT hex — a 40-hex literal trips the
-secret-staging hook. Remaining supervisor steps after a green execute: `verify-strih.sh` on the box
-and the WS filter-enum survival check (printed as ACCEPTANCE in the plan).
+secret-staging hook. Remaining supervisor step after a green execute: the WS filter-enum survival
+check (printed as ACCEPTANCE in the plan); after a reboot-pending run, `verify-strih.sh --box strih-lx`
+after the reboot.
+
+## GOTCHA — setup-strih.sh's own final gate FAILS while the deploy has OBS stopped (issue 1317 part 6)
+
+`setup-strih.sh` step 17 runs `verify-strih.sh --box <box>` and, when no reboot is pending (the live
+box boots `preempt=full`, so none is), `fail`s on it. The deploy stops OBS BEFORE setup (the libs are
+replaced under a running OBS otherwise), so verify item 1 "OBS running" and the :4455 item always fail
+there → setup exits 1 after EVERY install step succeeded (the old scratch script never noticed: it
+ignored the rc). The arm therefore accepts exactly that failure — rc 1 AND the step-17 line `verify-
+strih.sh acceptance gate did not pass` among the log's last lines (`fail()` exits at the first
+failure, so nothing else failed) — starts OBS, passes the read-back, and then runs `sudo
+verify-strih.sh --box strih-lx` from the staged tree ITSELF as the acceptance gate (fail = exit 4
+`[strih-lx accept]`). A test pins the gate text in setup-strih.sh. The clean fix is a deploy mode in
+setup-strih.sh that skips step 17 (it belongs to the provisioning lane) — returned as a follow-up
+candidate in the part-6 LANE-RETURN; until then do NOT "fix" the arm by ignoring setup's rc.
 
 ## Same-SHA cross-workflow resolution — the heart of "one canonical version"
 
