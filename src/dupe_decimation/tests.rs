@@ -297,17 +297,24 @@ fn summary_names_all_counts_and_the_ticket_tags() {
 /// captures at `capture_fps`; returns `(now_ns, content_id, is_dupe_ground_truth)` in
 /// capture order. `content_id` is a strictly-increasing u64 for every REAL (non-dupe) tick;
 /// a dupe capture repeats the immediately preceding capture's `content_id`.
+///
+/// (#1355) Capture `i` is at the exact rational instant `i / capture_fps` s (floored to ns), NOT
+/// at `i * floor(1e9 / capture_fps)`: the truncated-interval train drifts `1 s − fps · interval`
+/// per second (40 ns/s at 60) and so sat exactly on the grid counted from 1970, a few hundred ns
+/// BEFORE the per-second emit grid points, which made an "exact 60" fixture read as captures
+/// landing just before their boundaries. At 60 fps the rational instants ARE the per-second grid
+/// points; on the old 1970 grid they are at-or-after its points, so the fixture means the same on
+/// both.
 fn synthetic_889_capture_sequence(
     capture_fps: f64,
     count: usize,
     dupe_period: usize,
 ) -> Vec<(u64, u64, bool)> {
-    let interval_ns = (1_000_000_000.0 / capture_fps) as u64;
     let mut out = Vec::with_capacity(count);
     let mut next_id: u64 = 0;
     let mut prev_id: u64 = 0;
     for i in 0..count {
-        let now_ns = i as u64 * interval_ns;
+        let now_ns = (i as f64 * 1_000_000_000.0 / capture_fps) as u64;
         let is_dupe = i > 0 && dupe_period > 0 && i % dupe_period == dupe_period - 1;
         let content_id = if is_dupe {
             prev_id
@@ -2200,7 +2207,10 @@ fn steady_shallow_lag_trickle_drains_paced_then_fills_1167() {
         let _ = gate.poll(b0, emit_int, dupe_hash, true, cap, cap);
         // the DUPE crossing a shallow-stale boundary at lag == SHALLOW_DRAIN_LAG_MIN, budget fresh
         // (warm-up never skipped, so last_converge_skip_mono_ns == 0 and now_mono is far past it).
-        let now = gate.next_boundary_ns() + emit_int * SHALLOW_DRAIN_LAG_MIN;
+        // (#1355) `+ SHALLOW_DRAIN_LAG_MIN` ns: a grid slot is `emit_int` OR `emit_int + 1` ns on
+        // the per-second grid, so N slots late is `N * emit_int + N` (on either grid).
+        let now =
+            gate.next_boundary_ns() + emit_int * SHALLOW_DRAIN_LAG_MIN + SHALLOW_DRAIN_LAG_MIN;
         let cap2 = cap + cap_int;
         let emit = gate.poll(now, emit_int, dupe_hash, true, cap2, cap2);
         let (_ds, _bl, copies, retired, drained, _fast) = gate.take_shed_counts();
@@ -2224,13 +2234,15 @@ fn steady_shallow_lag_trickle_drains_paced_then_fills_1167() {
         let b0 = gate.next_boundary_ns();
         let _ = gate.poll(b0, emit_int, dupe_hash, true, cap, cap);
         // first shallow-lag dupe -> trickle SKIP, stamps the pace budget at now_mono = cap2.
-        let now1 = gate.next_boundary_ns() + emit_int * SHALLOW_DRAIN_LAG_MIN;
+        let now1 =
+            gate.next_boundary_ns() + emit_int * SHALLOW_DRAIN_LAG_MIN + SHALLOW_DRAIN_LAG_MIN;
         let cap2 = cap + cap_int;
         let _ = gate.poll(now1, emit_int, dupe_hash, true, cap2, cap2);
         let _ = gate.take_shed_counts();
         // second shallow-lag dupe one cap_int later -> now_mono only ~16 ms past cap2, far under
         // CONVERGE_SKIP_MIN_GAP_INTERVALS * emit_int (500 ms) -> paced-out -> FILL the slot.
-        let now2 = gate.next_boundary_ns() + emit_int * SHALLOW_DRAIN_LAG_MIN;
+        let now2 =
+            gate.next_boundary_ns() + emit_int * SHALLOW_DRAIN_LAG_MIN + SHALLOW_DRAIN_LAG_MIN;
         let cap3 = cap2 + cap_int;
         let emit = gate.poll(now2, emit_int, dupe_hash, true, cap3, cap3);
         let (_ds, _bl, copies, retired, _drn, _fast) = gate.take_shed_counts();
