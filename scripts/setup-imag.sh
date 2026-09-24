@@ -269,7 +269,7 @@ fi
 # Pre-flight: curl + CA certs BEFORE first use (the cam5/#450 lesson — a base image without
 # curl makes every download step fail silently mid-run; ensure it up-front, fail loud).
 if ! command -v curl >/dev/null 2>&1; then
-    apt-get update -qq
+    obs_box_apt_update
     DEBIAN_FRONTEND=noninteractive apt-get install -y curl ca-certificates >/dev/null \
         || fail "cannot install curl — network/apt broken"
 fi
@@ -584,8 +584,8 @@ step 11 "OBS Studio (official PPA, 32.x) — base install; libobs.so.30 gets gen
 # =============================================================================
 INSTALLED_OBS_VERSION="$(dpkg-query -W -f='${Version}' obs-studio 2>/dev/null || true)"
 if [ "$INSTALLED_OBS_VERSION" != "$IMAG_OBS_BASE_VERSION" ]; then
-    add-apt-repository -y ppa:obsproject/obs-studio >/dev/null
-    apt-get update -qq
+    add-apt-repository -y -n ppa:obsproject/obs-studio >/dev/null   # -n: never refresh the lists here -- obs_box_apt_update below does, waiting out a held lock
+    obs_box_apt_update
     OBS_CANDIDATE="$(apt-cache policy obs-studio 2>/dev/null | awk '/Candidate:/{print $2}')"
     OBS_BASE_PLAN="$(imag_obs_base_plan "$OBS_CANDIDATE" "$IMAG_OBS_BASE_VERSION")" || exit 1
     echo "  #824: OBS base pin ${IMAG_OBS_BASE_VERSION} (PPA candidate ${OBS_CANDIDATE:-none}) -> ${OBS_BASE_PLAN}"
@@ -1115,7 +1115,7 @@ rmdir "$USER_HOME/.config/autostart" 2>/dev/null || true
 # boot hook below runs the seeder LOCALLY (127.0.0.1) on every boot, so it cannot depend on a
 # hand-made venv or a checked-out copy of the repo (this script "is copied to the box standalone",
 # per the step-12 comment above -- no sibling scripts/ files exist here at runtime).
-apt-get update -qq
+obs_box_apt_update
 DEBIAN_FRONTEND=noninteractive apt-get install -y python3-websocket >/dev/null \
     || fail "python3-websocket install failed — imag_scenes.py needs it for the boot-time self-heal (#522)"
 SCN="/usr/local/bin/imag_scenes.py"

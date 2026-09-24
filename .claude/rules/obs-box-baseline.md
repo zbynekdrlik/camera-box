@@ -56,7 +56,12 @@ power envelope. A difference between boxes is a defect, not a per-box feature.
   - Ubuntu's `Version::2.0::Dpkg::Lock::Timeout` applies only to the `apt` front end, never to apt-get.
   - Never add a per-call `-o DPkg::Lock::Timeout`. A real apt failure must still fail loud after the wait, through a `|| fail` or the caller's `set -e`.
   - The file is written 0644 through a `.dpkg-tmp` sibling, a name apt ignores silently.
-  - It covers the DPKG lock only (install/remove/purge). `apt-get update` takes the separate lists lock (`/var/lib/apt/lists/lock`), which this setting does not govern, so a collision with apt-daily's list refresh still fails at once.
+  - It covers the DPKG lock only (install/remove/purge). `apt-get update` takes the separate lists lock (`/var/lib/apt/lists/lock`), which this setting does not govern.
+- **Every list refresh is `obs_box_apt_update`, never a bare `apt-get update`** (main ruling 5821855428).
+  - It retries ONLY while the lists lock is HELD (`Could not get lock /var/lib/apt/lists/lock`, the same text on apt 2.8 and 3.2), logs each wait, and gives up after `OBS_BOX_APT_UPDATE_BUDGET_S` (600 s) total.
+  - Any other error fails loud at once, with apt's output shown. A permission failure prints `Could not open lock file` and is not retried.
+  - `add-apt-repository` always passes `-n`, so it never refreshes the lists itself.
+  - `no_bare_apt_get_update_on_the_obs_box_provisioning_paths` sweeps both setup scripts and every lib they source.
 - **Adding an item** = a function in the right half + a call in BOTH setup scripts (imag in the step
   that owns it, strih inside step 11 in imag's order) + a verdict row + its gather keys. The
   `gather_and_verdict_share_one_key_set` test fails if the two halves of the grader drift.
