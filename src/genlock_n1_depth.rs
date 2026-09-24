@@ -383,9 +383,16 @@ mod tests {
         // 29.97 fps has no per-second grid: the check floors on the 1970 grid, the same fallback
         // the render tick uses (`genlock_next_deadline`).
         let i2997 = 33_366_666u64;
-        let g2997 = 30_000 * i2997;
+        // This 29.97 grid point sits ~16.7 ms from any 30 fps per-second slot, so a floor on the
+        // wrong grid would read it OFF the grid.
+        let g2997 = 30_501 * i2997;
+        assert!(
+            !n1_tick_is_on_grid(g2997, I30),
+            "the same instant on the 30 fps grid is off"
+        );
         assert!(n1_tick_is_on_grid(g2997, i2997));
         assert!(n1_tick_is_on_grid(g2997 + 2_000_000, i2997));
+        assert!(n1_tick_is_on_grid(g2997 - 2_000_000, i2997));
         assert!(!n1_tick_is_on_grid(g2997 + 3_000_000, i2997));
         assert!(!n1_tick_is_on_grid(g2997 - 3_000_000, i2997));
         // The pure predicate at its edges, whatever grid the caller floors on.

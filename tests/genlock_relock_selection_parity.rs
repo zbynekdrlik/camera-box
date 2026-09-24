@@ -24,7 +24,7 @@ use camera_box::genlock_backlog::{
     relock_acquire_should_hold, relock_anchor_age_ns, relock_select_nearest, should_converge_phase,
 };
 use camera_box::genlock_n1_depth::{
-    n1_shed_due, n1_tick_on_grid, n1_tick_wall_ns, should_hold_n1_phase,
+    n1_shed_due, n1_tick_is_on_grid, n1_tick_on_grid, n1_tick_wall_ns, should_hold_n1_phase,
 };
 use std::fs;
 use std::path::PathBuf;
@@ -298,11 +298,24 @@ fn converge_defines() -> String {
 /// Compile the lifted block + `main_body` standalone under `-Werror` and return the printed
 /// lines. FAILS LOUDLY (never skips) when no compiler is present.
 fn compile_and_run_n1_block(dirname: &str, main_body: &str) -> Vec<String> {
+    compile_and_run_n1_block_with(dirname, "", "", main_body)
+}
+
+/// [`compile_and_run_n1_block`] with an extra C `prelude` (before the lifted block, e.g. an
+/// `#include` of the REAL `obs-genlock-grid.h`) and `tail` (after it, e.g. a lifted source-side
+/// helper that calls into the block).
+fn compile_and_run_n1_block_with(
+    dirname: &str,
+    prelude: &str,
+    tail: &str,
+    main_body: &str,
+) -> Vec<String> {
     let mut c = format!(
-        "#include <stdint.h>\n#include <stddef.h>\n#include <stdbool.h>\n#include <stdio.h>\n{}\n",
+        "#include <stdint.h>\n#include <stddef.h>\n#include <stdbool.h>\n#include <stdio.h>\n{prelude}{}\n",
         converge_defines()
     );
     c.push_str(&lift_converge_helper());
+    c.push_str(tail);
     c.push_str("int main(void){\n");
     c.push_str(main_body);
     c.push_str("    return 0;\n}\n");
@@ -967,6 +980,101 @@ fn c_n1_tick_on_grid_matches_the_rust_authority_1367() {
             "issue 1367: genlock_n1_tick_on_grid({tick}, {floor}) — C {got_c}, Rust {got_rs}"
         );
     }
+    assert!(
+        ons > 0 && ons < vs.len(),
+        "both outcomes must be exercised: {ons}"
+    );
+}
+
+/// issue 1367 (review round 5) — the SOURCE-side on-grid read: `genlock_n1_tick_is_on_grid`
+/// (outside the pure lifted block, it floors on the REAL `obs-genlock-grid.h`, `#include`d as-is)
+/// must return the same booleans as [`camera_box::genlock_n1_depth::n1_tick_is_on_grid`] at 30,
+/// 60 and 29.97 fps (the 1970-grid fallback) — at grid points, both window edges, one ns outside
+/// each, far off the grid, and at the saturation end. A lost +2 ms shift (the window collapsing
+/// to one side) or a floor on the wrong grid diverges here.
+#[test]
+fn c_n1_tick_is_on_grid_matches_the_rust_authority_1367() {
+    let src = fs::read_to_string(repo(OBS_SOURCE)).expect("read obs-source.c");
+    let sig = "static inline bool genlock_n1_tick_is_on_grid(";
+    let start = src.find(sig).unwrap_or_else(|| {
+        panic!("issue 1367: {OBS_SOURCE} no longer defines genlock_n1_tick_is_on_grid")
+    });
+    let end = src[start..]
+        .find("\n}\n")
+        .map(|i| start + i + 3)
+        .expect("issue 1367: genlock_n1_tick_is_on_grid has no closing brace");
+    let header = repo("vendor/obs-studio/libobs/obs-genlock-grid.h");
+    let prelude = format!("#include \"{}\"\n", header.display());
+
+    let i2997 = 33_366_666u64;
+    let mut vs: Vec<(u64, u64)> = Vec::new();
+    for interval in [33_333_333u64, 16_666_667, i2997] {
+        // Grid points of the interval's own grid: whole seconds + a few slots for 30 / 60 fps
+        // (the per-second grid), multiples of the interval for 29.97 (the 1970 fallback). The
+        // 29.97 base sits ~16.7 ms from any 30 fps per-second slot, so a floor on the wrong grid
+        // reads it OFF the grid.
+        let points: Vec<u64> = if interval == i2997 {
+            vec![30_501 * i2997, 30_502 * i2997]
+        } else {
+            let fps = if interval == 33_333_333 { 30 } else { 60 };
+            vec![1_000_000_000_000, 1_000_000_000_000 + 1_000_000_000 / fps]
+        };
+        for g in points {
+            for off in [
+                -10_000_000i64,
+                -3_000_000,
+                -2_000_001,
+                -2_000_000,
+                -1,
+                0,
+                1_999_999,
+                2_000_000,
+                2_000_001,
+                3_000_000,
+                10_000_000,
+            ] {
+                vs.push((g.saturating_add_signed(off), interval));
+            }
+        }
+    }
+    vs.push((u64::MAX, 33_333_333));
+    vs.push((u64::MAX - 1_000_000, 33_333_333));
+    let mut body = String::new();
+    for (tick, interval) in &vs {
+        body.push_str(&format!(
+            "    printf(\"%d\\n\", genlock_n1_tick_is_on_grid({tick}ULL, {interval}ULL));\n"
+        ));
+    }
+    let c_out = compile_and_run_n1_block_with(
+        "genlock_n1_tick_is_on_grid_parity_1367",
+        &prelude,
+        &src[start..end],
+        &body,
+    );
+    assert_eq!(
+        c_out.len(),
+        vs.len(),
+        "issue 1367: harness printed the wrong count"
+    );
+    let mut ons = 0;
+    let mut diffs = Vec::new();
+    for ((tick, interval), got_c) in vs.iter().zip(&c_out) {
+        let got_rs = n1_tick_is_on_grid(*tick, *interval);
+        ons += usize::from(got_rs);
+        if (got_c == "1") != got_rs {
+            diffs.push(format!(
+                "  genlock_n1_tick_is_on_grid({tick}, {interval}) -> C {got_c}, Rust {got_rs}"
+            ));
+        }
+    }
+    assert!(
+        diffs.is_empty(),
+        "issue 1367: the source-side on-grid read DIVERGED from the Rust authority on {} of {} \
+         vectors:\n{}",
+        diffs.len(),
+        vs.len(),
+        diffs.join("\n")
+    );
     assert!(
         ons > 0 && ons < vs.len(),
         "both outcomes must be exercised: {ons}"

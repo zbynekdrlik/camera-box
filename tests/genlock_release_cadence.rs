@@ -609,6 +609,12 @@ fn n1_pin_derived_depth_present_and_wired_1367() {
             "the source-side on-grid read over the per-second grid",
         ),
         (
+            "shifted_ns = tick_wall_ns > UINT64_MAX - GENLOCK_N1_ON_GRID_NS ? UINT64_MAX : \
+             tick_wall_ns + GENLOCK_N1_ON_GRID_NS;",
+            "the on-grid read shifts the tick by the 2 ms window before flooring (a lost shift \
+             collapses the window to the late side)",
+        ),
+        (
             "genlock_grid_floor_ns(shifted_ns, interval_ns)",
             "the on-grid read floors on the ONE per-second grid (obs-genlock-grid.h)",
         ),

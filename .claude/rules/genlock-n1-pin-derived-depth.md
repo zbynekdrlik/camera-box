@@ -6,6 +6,7 @@ paths:
   - "tests/genlock_relock_selection_parity.rs"
   - "vendor/obs-studio/libobs/obs-source.c"
   - "src/probe/genlock.rs"
+  - "src/probe/genlock_n1_tests.rs"
 ---
 
 # The N==1 PIN-DERIVED DEPTH (issue 1367) — one depth after every restart
@@ -83,11 +84,13 @@ Plus the 1 µs pin tolerance (a whole-frame pin like 1000 ms must not count one 
 
 - Bench + authority: one `lib.rs` with `#[path]` mods for `genlock_grid`, `genlock_backlog`,
   `genlock_n1_depth`, `genlock_grid_bench`; `clippy-driver --edition 2021 --test -D warnings`, run.
-- Probe mirror: the same plus `pub mod probe { #[path] pub mod genlock; }`.
+- Probe mirror: the same plus `pub mod probe { #[path] pub mod genlock; }` (its N==1 tests live in
+  `src/probe/genlock_n1_tests.rs`, a `#[path]` child of `genlock`).
 - Parity gate: build a stub `camera_box` rlib from those three modules, compile
   `tests/genlock_relock_selection_parity.rs` with `--extern camera_box=…`, `CARGO_MANIFEST_DIR` +
   `CARGO_TARGET_TMPDIR` set. Mutation-proof it by pointing `CARGO_MANIFEST_DIR` at a scratch repo
-  with a mutated obs-source.c (14 mutations, all RED at landing).
+  with a mutated obs-source.c (16 mutations, all RED at landing). The source-side
+  `genlock_n1_tick_is_on_grid` has its own parity case against the REAL `obs-genlock-grid.h`.
 - The C wrappers (`genlock_n1_tick_wall_now`, `genlock_n1_tick_is_on_grid`, the routing, the hold
   call site) are not in the parity lift: lift them with stub `obs` / `os_gettime_ns` /
   `obs_source_t`, `#include` the real `obs-genlock-grid.h`, compile with `gcc -Wall -Wextra
