@@ -1063,6 +1063,32 @@ fn apt_lock_timeout_write_is_idempotent_and_logged() {
     assert_eq!(std::fs::read_to_string(&f).unwrap(), APT_LOCK_CONF_TEXT);
 }
 
+/// Under a strict root umask the drop-in must still be world-readable (apt run by a non-root user
+/// errors on an unreadable conf file), and no temp file is ever left in apt.conf.d (a `.tmp` sibling
+/// makes apt print an "invalid filename extension" notice on every run).
+#[test]
+fn apt_lock_timeout_write_is_0644_and_leaves_no_temp_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let f = dir.path().join("90camera-box-lock-timeout");
+    let fs = f.to_str().unwrap();
+    let (c, out, err) = run(
+        BASELINE,
+        &[("F", fs)],
+        "umask 077\nobs_box_apt_lock_timeout \"$F\" || exit 3\nstat -c %a \"$F\"",
+    );
+    assert_eq!(c, 0, "stdout={out} stderr={err}");
+    assert!(out.ends_with("644\n"), "the drop-in must be 0644: {out}");
+    let names: Vec<String> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(
+        names,
+        vec!["90camera-box-lock-timeout".to_string()],
+        "only the drop-in itself may remain"
+    );
+}
+
 /// A write that cannot land fails loud (the caller's fail()), never a silent skip.
 #[test]
 fn apt_lock_timeout_write_failure_fails_loud() {
