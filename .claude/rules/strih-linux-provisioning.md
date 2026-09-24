@@ -68,15 +68,19 @@ file, never a copy of the script (the unified-design ruling, umbrella issue 1357
   `_cg_sender` / `_nic_driver` / `_dantesync_role|args|client_args` / `strih_lx_host` / the unit
   drop-in, historical `strih_lx_` names) live in the loader lib; `strih-provision.sh` sources it (a
   source-only lib) and each accessor loads the default box on first use — a test that sources
-  `strih-provision.sh` alone still gets strih-lx. A failed (re)load leaves NOTHING loaded.
+  `strih-provision.sh` alone still gets strih-lx.
 - **Generated files name the loaded box.** The janus jcfg / Companion conf / openbox autostart headers
   and the IRQ oneshot's `@STRIH_BOX@` / `@STRIH_NIC_DRIVER@` comments follow the box, so a strih PP
   file never claims to be strih-lx; `every_fact_dependent_output_follows_a_different_box` renders a
   synthetic `strih-zz` and fails on ANY surviving strih-lx value or `@STRIH_` placeholder.
 - **A client upstream is a host NAME.** `strih_lx_dantesync_is_client_not_master` accepts the exact
   `--ntp-server <host>` invocation whatever the host is called (a venue `ntp-master.lan` is a name,
-  not a master flag); the loader requires the upstream to be host-shaped, so a client box that loads
-  always renders its unit.
+  not a master flag) and refuses every OTHER `--ntp-server ...` shape; every host-shaped fact (and the
+  `STRIH_LX_NTP_SERVER` override) must START with a letter or digit, so `--master` can never be
+  smuggled in as a "host". A client box that loads therefore always renders its unit.
+- **A failed load stays failed.** After a refused `strih_box_load` in a shell, accessors refuse
+  instead of quietly loading the default box; the unsafe-value check runs under `LC_ALL=C`, so a
+  non-ASCII byte is refused in every locale (sudo and CI differ).
 - **What reaches the box, and how.** The OBS profile/collection go to the UNCHANGED launcher through
   `~/.config/systemd/user/strih-obs.service.d/10-box-facts.conf` (`strih-obs-start.sh` already reads
   `STRIH_OBS_PROFILE` / `STRIH_OBS_COLLECTION` from its environment). The NIC driver + target IP are
