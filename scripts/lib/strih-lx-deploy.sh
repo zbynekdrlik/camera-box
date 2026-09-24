@@ -35,14 +35,18 @@
 #                  dial IP) + stream (the obs-fleet row) immediately before the first mutation --
 #                  streaming/recording on either = exit 4 naming what is live, nothing changed. Its
 #                  fail-OPEN (WARN + proceed when NO box is readable) is the shared semantics, not
-#                  redefined here;
+#                  redefined here -- no job-start gate precedes this deploy, so that is an ACCEPTED
+#                  risk (both OBS WebSockets unreadable while the strih-lx ssh answers; a strih OBS
+#                  that is down is often exactly what the deploy repairs);
 #     sweep     -- the stage is created + touched NEWEST, then the EXISTING obs-backup-retention.sh
 #                  --local-sweep decision (--stages-only, keep the newest 1, as the operator -- the
 #                  stage dirs are the operator's) removes every older /tmp/genlock-stage-<sha>; a stage
 #                  it could not remove is a loud WARNING (the rsync below is the hard gate);
 #     stage     -- rsync bundle/ + repo/ into /tmp/genlock-stage-<sha>/ WHILE THE OLD OBS KEEPS
 #                  RUNNING: a failed rsync exits 4 before anything is stopped;
-#     stop      -- delegated to the sanctioned stop code (/usr/local/bin/strih-obs-stop.sh, which
+#     stop      -- the SAME rig-busy guard again first (the stage can take minutes; a broadcast that
+#                  went live meanwhile = exit 4 in step stop, OBS NOT stopped), then
+#                  delegated to the sanctioned stop code (/usr/local/bin/strih-obs-stop.sh, which
 #                  routes through `systemctl --user stop`) + a bounded wait; the deploy itself sends no
 #                  kill (the stop code's own SIGTERM->grace->SIGKILL ladder is the unit's contract);
 #     setup     -- setup-strih.sh as root, DETACHED on the box (an ssh drop cannot kill it mid-apt),
@@ -207,38 +211,6 @@ RUNNER
 
 # --- pure verdicts --------------------------------------------------------------------------------
 
-# strih_lx_busy_summary GUARD_STDERR -> one line naming what is live, built from the shared guard's
-# OWN refusal output (its `rig-busy-check: <json>` diagnostics + the key-free `<box> streaming:
-# <detail>` lines) -- e.g. `stream streaming (server=rtmp://... outputDuration=...)` or `strih
-# recording (timecode 00:04:10.000)`. Never a second WebSocket read. Unparseable = a pointer to the
-# guard output printed just above. Pure.
-strih_lx_busy_summary() {
-  local s
-  s="$(printf '%s\n' "${1:-}" | python3 -c '
-import json, sys
-live, detail, diags = [], {}, []
-for line in sys.stdin.read().splitlines():
-    t = line.strip()
-    if t.startswith("rig-busy-check:"):
-        try:
-            diags = json.loads(t[len("rig-busy-check:"):]).get("diagnostics") or []
-        except (ValueError, AttributeError):
-            diags = []
-    elif " streaming: " in t:
-        box, _, rest = t.partition(" streaming: ")
-        detail[box] = rest
-for x in diags:
-    host = str(x.get("host", "?"))
-    if x.get("streaming"):
-        live.append(host + " streaming" + (" (" + detail[host] + ")" if host in detail else ""))
-    if x.get("recording"):
-        tc = x.get("recordTimecode")
-        live.append(host + " recording" + (" (timecode " + str(tc) + ")" if tc else ""))
-print("; ".join(live))
-' 2>/dev/null)" || s=""
-  printf '%s\n' "${s:-see the rig-busy guard output above}"
-}
-
 # strih_lx_deploy_verdict WANT INSTALLED ACTIVE BS_SHA WANT_LIB LIB TICK -> `OK` (rc 0) or
 # `FAIL: <why>` lines (rc 1). Fail-closed: an empty value anywhere is a FAIL, never "unknown = fine".
 strih_lx_deploy_verdict() {
@@ -336,6 +308,19 @@ strih_lx_obs_phase2_dir() {
   (cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 }
 
+# _strih_lx_broadcast_guard STEP WHAT_KEPT -> the ONE shared rig-busy guard (stray_session_check_assert)
+# at the strih-lx dial IP + the stream host. It `exit 1`s on a refusal (written for bare-statement
+# callers), so it runs in a subshell here: its stdout passes through, its stderr is re-printed and
+# names what is live (stray_session_busy_summary). Returns 0, or 4 with `[strih-lx STEP]` naming what
+# is live + WHAT_KEPT (what the box still has).
+_strih_lx_broadcast_guard() {
+  local step="$1" kept="$2" guard_err grc
+  { guard_err="$( ( stray_session_check_assert "$STRIH_LX_PREP_OBS_PHASE2_DIR" "$STRIH_LX_PREP_HOST" "$STRIH_LX_PREP_STREAM_HOST" "the strih-lx OBS deploy (stop + setup-strih.sh)" ) 2>&1 1>&3 3>&- )"; grc=$?; } 3>&1
+  [ -n "$guard_err" ] && printf '%s\n' "$guard_err" >&2
+  [ "$grc" = 0 ] && return 0
+  _strih_lx_fail "$step" "$grc" 4 "a broadcast is LIVE on strih/stream: $(stray_session_busy_summary "$guard_err") -- refusing to stop the strih OBS; ${kept} (a leftover recording: stop it over OBS-WS, see the hint above, and re-run)"
+}
+
 _strih_lx_start_best_effort() {
   echo "# strih-lx: starting the installed OBS best-effort so the box is not left dark" >&2
   _strih_lx_ssh "$(strih_lx_remote_start_cmd "$STRIH_LX_PREP_STAGE")" || true
@@ -368,7 +353,7 @@ strih_lx_prepare() {
     || { _strih_lx_fail resolve 2 3 "no stream host (obs-fleet row) for the rig-busy guard"; return; }
   STRIH_LX_PREP_OBS_PHASE2_DIR="$(strih_lx_obs_phase2_dir)" && [ -f "$STRIH_LX_PREP_OBS_PHASE2_DIR/obs_phase2.py" ] \
     || { _strih_lx_fail resolve 2 3 "no obs_phase2.py in '${STRIH_LX_PREP_OBS_PHASE2_DIR:-}' -- the rig-busy guard could not read strih/stream"; return; }
-  declare -F stray_session_check_assert >/dev/null \
+  declare -F stray_session_check_assert >/dev/null && declare -F stray_session_busy_summary >/dev/null \
     || { _strih_lx_fail resolve 2 3 "stray_session_check_assert is not loaded (source scripts/lib/stray-session-check.sh) -- the deploy never stops OBS unguarded"; return; }
   STRIH_LX_PREP_STAGE="$(strih_lx_stage_dir "$sha")" || { _strih_lx_fail resolve 2 3 "canonical SHA '$sha' is not a hex commit id"; return; }
   local vp="${STRIH_LX_VERIFY_POLLS:-24}" vs="${STRIH_LX_VERIFY_POLL_SECS:-10}" st="${STRIH_LX_VERIFY_SETTLE_SECS:-90}"
@@ -421,14 +406,9 @@ strih_lx_apply() {
   out="$(_strih_lx_ssh "$(strih_lx_remote_installer_cmd)")"; rc=$?
   [ "$rc" = 0 ] || { _strih_lx_fail preflight "$rc" 4 "cannot reach ${STRIH_LX_PREP_HOST} over ssh -- nothing changed"; return; }
   [ "$(printf '%s' "$out" | tr -d '[:space:]')" = "idle" ] || { _strih_lx_fail preflight 1 4 "a previous setup-strih.sh is still running on the box (pgrep -x setup-strih.sh) -- wait for it; nothing changed"; return; }
-  # ... and never while a broadcast is LIVE: this deploy STOPS the production strih OBS. The ONE
-  # shared rig-busy guard, immediately before the first mutation, at the strih-lx dial IP + the stream
-  # host. It `exit 1`s on a refusal (written for bare-statement callers), so it runs in a subshell
-  # here; its stdout passes through, its stderr is re-printed and names what is live.
-  local guard_err
-  { guard_err="$( ( stray_session_check_assert "$STRIH_LX_PREP_OBS_PHASE2_DIR" "$STRIH_LX_PREP_HOST" "$STRIH_LX_PREP_STREAM_HOST" "the strih-lx OBS deploy (stop + setup-strih.sh)" ) 2>&1 1>&3 3>&- )"; rc=$?; } 3>&1
-  [ -n "$guard_err" ] && printf '%s\n' "$guard_err" >&2
-  [ "$rc" = 0 ] || { _strih_lx_fail preflight "$rc" 4 "a broadcast is LIVE on strih/stream: $(strih_lx_busy_summary "$guard_err") -- refusing to stop the strih OBS; nothing changed"; return; }
+  # ... and never while a broadcast is LIVE: this deploy STOPS the production strih OBS. The shared
+  # rig-busy guard, immediately before the first mutation (and again right before the stop, below).
+  _strih_lx_broadcast_guard preflight "nothing changed" || return
 
   # [sweep] stage created + touched newest FIRST, then the retention sweep keeps only it.
   _strih_lx_ssh "$(strih_lx_remote_prep_cmd "$stage")"; rc=$?
@@ -448,7 +428,9 @@ strih_lx_apply() {
   [ "$rc" = 0 ] || { _strih_lx_fail stage "$rc" 4 "rsync of the provisioning tree to $stage/repo failed -- OBS NOT stopped, the old build keeps running"; return; }
   echo "# strih-lx: staged $stage/{bundle,repo}"
 
-  # [stop] delegated to the sanctioned stop code.
+  # [stop] the guard again first: staging can take minutes, and one early check is not enough
+  # (.claude/rules/rig-mutation-broadcast-guard.md). Then delegated to the sanctioned stop code.
+  _strih_lx_broadcast_guard stop "OBS NOT stopped, the old build keeps running ($stage stays for the next sweep)" || return
   _strih_lx_ssh "$(strih_lx_remote_stop_cmd)"; rc=$?
   if [ "$rc" != 0 ]; then
     _strih_lx_start_best_effort
@@ -586,7 +568,7 @@ strih_lx_plan_steps() {
 #          and no previous install may run:  $(strih_lx_remote_installer_cmd)
 #          and no broadcast may be LIVE: the shared rig-busy guard stray_session_check_assert
 #          (scripts/lib/stray-session-check.sh) reads strih ${host} + the obs-fleet stream host --
-#          streaming/recording on either = exit 4, nothing changed.
+#          streaming/recording on either = exit 4, nothing changed (re-checked right before STEP 5).
 # STEP 3 (sweep): the stage is created + touched NEWEST, then the obs-backup-retention.sh
 #          --local-sweep decision (what 'obs-backup-retention.sh --box strih-lx' runs), stage dirs
 #          only, as the operator, keeps only it:
