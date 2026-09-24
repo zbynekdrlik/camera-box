@@ -516,27 +516,19 @@ else
   fi
 fi
 
-# 22) strih-mv-host projector-host helper (issue 1352): the --user unit must be installed + ENABLED
-#     (it re-hosts every OBS projector as a child window so the RTX render path does not stall
-#     0.5 s/present), the helper present + executable, and python3-xlib importable. FAIL loud -- the
-#     RTX render path depends on it until the vendored child-display projector fix lands. Enablement
-#     is read from the WantedBy=default.target symlink (no --user session bus needed at verify time).
+# 22) retired strih-mv-host helper absent (issue 1357): the issue-1352 projector re-hosting helper
+#     worked around an XWayland + PRIME-offload present stall that the plain Xorg kiosk does not have;
+#     it was retired together with the vendored child-host projector (the stock toplevel projector
+#     runs on every box). A leftover unit, WantedBy link or helper is drift from the one baseline --
+#     FAIL loud and point at setup-strih.sh step 8b, which removes it. Read from the files, so no
+#     --user session bus is needed at verify time.
 MVH_UNIT="${USER_HOME}/.config/systemd/user/strih-mv-host.service"
 MVH_WANTS="${USER_HOME}/.config/systemd/user/default.target.wants/strih-mv-host.service"
 MVH_HELPER="/usr/local/bin/strih-mv-host.py"
-MVH_XLIB=MISSING; python3 -c "import Xlib" 2>/dev/null && MVH_XLIB=ok
-# issue 1352 acceptance (22.9.2026): the vendored child-host projector is the live mechanism and the
-# helper CONFLICTS with it (both active = MV 0.6 fps), so the expected enablement follows
-# STRIH_MV_HOST_ENABLED (default 0 = installed but DISABLED); a mismatch either way is a FAIL.
-MVH_WANT="${STRIH_MV_HOST_ENABLED:-0}"
-if [ -f "$MVH_UNIT" ] && [ -x "$MVH_HELPER" ] && [ "$MVH_XLIB" = ok ] && [ "$MVH_WANT" = 1 ] && [ -L "$MVH_WANTS" ]; then
-  ok "(mv-host) strih-mv-host.service installed + enabled (STRIH_MV_HOST_ENABLED=1 fallback) + helper present + python3-xlib importable"
-elif [ -f "$MVH_UNIT" ] && [ -x "$MVH_HELPER" ] && [ "$MVH_XLIB" = ok ] && [ "$MVH_WANT" != 1 ] && [ ! -L "$MVH_WANTS" ]; then
-  ok "(mv-host) strih-mv-host.service installed but DISABLED (vendored child-host projector is the live mechanism) + helper present + python3-xlib importable"
-elif [ -f "$MVH_UNIT" ] && [ -x "$MVH_HELPER" ] && [ "$MVH_XLIB" = ok ]; then
-  bad "(mv-host) enablement mismatch: STRIH_MV_HOST_ENABLED=${MVH_WANT} but the WantedBy symlink is $( [ -L "$MVH_WANTS" ] && echo present || echo absent ) -- both hosting mechanisms active = MV 0.6 fps (22.9.2026); disable the helper unless the bundle lacks the vendored child-host"
+if [ ! -e "$MVH_UNIT" ] && [ ! -L "$MVH_WANTS" ] && [ ! -e "$MVH_HELPER" ]; then
+  ok "(mv-host) retired strih-mv-host helper absent (stock toplevel OBS projector, no re-hosting)"
 else
-  bad "(mv-host) strih-mv-host gate: unit=$( [ -f "$MVH_UNIT" ] && echo present || echo MISSING ) enabled=$( [ -L "$MVH_WANTS" ] && echo yes || echo no ) helper=$( [ -x "$MVH_HELPER" ] && echo present || echo MISSING ) xlib=${MVH_XLIB} -- re-run setup-strih.sh step 8b"
+  bad "(mv-host) retired strih-mv-host helper still installed: unit=$( [ -e "$MVH_UNIT" ] && echo present || echo absent ) enabled=$( [ -L "$MVH_WANTS" ] && echo yes || echo no ) helper=$( [ -e "$MVH_HELPER" ] && echo present || echo absent ) -- re-run setup-strih.sh step 8b"
 fi
 
 # 24) avahi-browse present (issue 1352): the NDI/mDNS discovery CLI (avahi-utils) -- Ubuntu 26.04 omits

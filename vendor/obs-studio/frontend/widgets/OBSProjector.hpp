@@ -27,22 +27,9 @@ private:
 	void mousePressEvent(QMouseEvent *event) override;
 	void mouseDoubleClickEvent(QMouseEvent *event) override;
 	void closeEvent(QCloseEvent *event) override;
-	// camera-box #1352: on Linux the projector is a native CHILD of a plain host
-	// toplevel. This filter catches the host window's Close (WM "X") so the projector's
-	// own close bookkeeping (multiviewProjectors / SaveProjectors) runs before the host
-	// is deleted. Inert when unhosted (the filter is only installed on Linux).
-	bool eventFilter(QObject *watched, QEvent *event) override;
-
-	// camera-box #1352: the toplevel window this projector drives. window() IS `this`
-	// when the projector is unhosted (Windows / no-host path — byte-identical), and the
-	// host toplevel when the projector is a hosted child (Linux).
-	QWidget *Toplevel();
 
 	bool isAlwaysOnTop;
 	bool isAlwaysOnTopOverridden = false;
-	// camera-box #1352: re-entrancy guard shared by the two host-teardown directions
-	// (host Close -> DeleteProjector, and projector destroyed -> host deleteLater).
-	bool closing = false;
 	int savedMonitor = -1;
 	ProjectorType type = ProjectorType::Source;
 

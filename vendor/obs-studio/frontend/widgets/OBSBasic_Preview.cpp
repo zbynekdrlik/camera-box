@@ -567,10 +567,7 @@ void OBSBasic::UpdateProjectorHideCursor()
 void OBSBasic::UpdateProjectorAlwaysOnTop(bool top)
 {
 	for (size_t i = 0; i < projectors.size(); i++) {
-		// camera-box #1352: apply the stays-on-top flag to each projector's host
-		// TOPLEVEL (projector->window()), not the hosted GL child. window() == the
-		// projector when unhosted (byte-identical on Windows).
-		SetAlwaysOnTop(projectors[i]->window(), top);
+		SetAlwaysOnTop(projectors[i], top);
 	}
 }
 

@@ -453,38 +453,26 @@ sudo -u "$DESKTOP_USER" XDG_RUNTIME_DIR="/run/user/$(id -u "$DESKTOP_USER")" sys
 echo "  strih-obs.service installed + enabled (the kiosk openbox autostart, step 15, starts it at every boot)"
 
 # ---------------------------------------------------------------------------------------------
-step "8b" "strih-mv-host projector-host helper (issue 1352, XWayland+PRIME present-stall workaround) -- enable-only"
-# issue 1352: on the RTX-via-XWayland-PRIME render path an OBS projector whose GL surface is the X
-# toplevel stalls the graphics thread ~0.5 s per present (program lag 93 %, MV 1.8 fps). strih-mv-host.py
-# re-hosts every OBS projector into a plain child window at runtime (lag 93 % -> 0 %, MV 29.8 fps
-# proven). Supervised --user unit BESIDE strih-obs.service, independent of OBS's lifecycle (it adopts
-# any projector toplevel whenever one appears). Install python3-xlib (its only dep), the helper (0755)
-# + the --user unit, daemon-reload + ENABLE-ONLY (never live-start -- the provisioning convention; the
-# unit comes up on the next graphical session). A lettered sub-step so TOTAL_STEPS is unchanged.
-# issue 1357: kept in place, but the stall it works around is an XWayland+PRIME-offload artefact --
-# on the plain Xorg openbox kiosk (NVIDIA-primary, baseline step 11) both this helper and the vendored
-# child-host projector must be RE-MEASURED by the supervisor and removed if the stall is gone. Its unit
-# still reads the GNOME mutter Xwayland auth file, so it stays DISABLED (the default below) on Xorg.
-DEBIAN_FRONTEND=noninteractive apt-get install -y python3-xlib \
-  || fail "python3-xlib install failed -- strih-mv-host.py imports Xlib; fix the box's apt sources and re-run"
-[ -f "${HERE}/strih-mv-host.py" ] || fail "scripts/strih-mv-host.py not found next to this script (issue 1352 projector-host helper)"
-[ -f "${HERE}/../systemd/strih-mv-host.service" ] || fail "systemd/strih-mv-host.service not found next to this script (issue 1352)"
-install -m 0755 "${HERE}/strih-mv-host.py" /usr/local/bin/strih-mv-host.py
-install -m 0644 "${HERE}/../systemd/strih-mv-host.service" "${USER_HOME}/.config/systemd/user/strih-mv-host.service"
-chown -R "$DESKTOP_USER":"$DESKTOP_USER" "${USER_HOME}/.config/systemd/user" 2>/dev/null || true
-sudo -u "$DESKTOP_USER" XDG_RUNTIME_DIR="/run/user/$(id -u "$DESKTOP_USER")" systemctl --user daemon-reload 2>/dev/null || true
-# issue 1352 acceptance (22.9.2026): the VENDORED child-host projector is live in the strih bundle and
-# the runtime helper CONFLICTS with it -- both mechanisms active = MV 0.6 fps / 505 ms presents,
-# helper stopped = MV 30 fps / 5 ms. Default = installed but DISABLED (and stopped, the one live
-# action here: a running helper actively breaks the render path); STRIH_MV_HOST_ENABLED=1 restores
-# the enable-only fallback for a bundle WITHOUT the vendored fix.
-if [ "${STRIH_MV_HOST_ENABLED:-0}" = 1 ]; then
-  sudo -u "$DESKTOP_USER" XDG_RUNTIME_DIR="/run/user/$(id -u "$DESKTOP_USER")" systemctl --user enable strih-mv-host.service 2>/dev/null \
-    || warn "  enable strih-mv-host.service by hand once the user session bus is up"
-  echo "  strih-mv-host.service installed + enabled (STRIH_MV_HOST_ENABLED=1: runtime fallback for a bundle without the vendored child-host projector)"
-else
+step "8b" "retired strih-mv-host projector-host helper (issue 1357) -- remove a leftover install"
+# issue 1357: the issue-1352 strih-mv-host.py helper re-hosted every OBS projector into a child X
+# window to work around an XWayland + NVIDIA-PRIME-offload present stall (~0.5 s per present). The
+# plain Xorg openbox kiosk (NVIDIA-primary, baseline step 11) has no XWayland and no PRIME offload,
+# so the stall's premise is gone on every box; the vendored child-host projector was removed with it
+# (the stock upstream toplevel projector, identical on every OS). The helper is retired: this step
+# only REMOVES a leftover install from an earlier provisioning -- stop + disable the --user unit,
+# delete the WantedBy link, the unit file and the helper -- and never installs or enables anything.
+# Idempotent: a box that never had the helper is a no-op. A lettered sub-step so TOTAL_STEPS is
+# unchanged.
+MVH_UNIT="${USER_HOME}/.config/systemd/user/strih-mv-host.service"
+MVH_WANTS="${USER_HOME}/.config/systemd/user/default.target.wants/strih-mv-host.service"
+MVH_HELPER="/usr/local/bin/strih-mv-host.py"
+if [ -e "$MVH_UNIT" ] || [ -L "$MVH_WANTS" ] || [ -e "$MVH_HELPER" ]; then
   sudo -u "$DESKTOP_USER" XDG_RUNTIME_DIR="/run/user/$(id -u "$DESKTOP_USER")" systemctl --user disable --now strih-mv-host.service 2>/dev/null || true
-  echo "  strih-mv-host.service installed but DISABLED (default: the vendored child-host projector is the live mechanism; set STRIH_MV_HOST_ENABLED=1 only for a bundle without it)"
+  rm -f "${MVH_WANTS}" "${MVH_UNIT}" "${MVH_HELPER}"
+  sudo -u "$DESKTOP_USER" XDG_RUNTIME_DIR="/run/user/$(id -u "$DESKTOP_USER")" systemctl --user daemon-reload 2>/dev/null || true
+  echo "  removed the retired strih-mv-host helper (unit, WantedBy link, /usr/local/bin/strih-mv-host.py)"
+else
+  echo "  strih-mv-host helper not installed -- nothing to remove"
 fi
 
 # ---------------------------------------------------------------------------------------------
