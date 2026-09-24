@@ -27,8 +27,14 @@
 //!   (p99 0.53 ms; 0.1 % of ticks > 10 ms late). Each tick runs a port of the N==1 branches of
 //!   `genlock_release_tick` (obs-source.c): ACQUIRE / BACKLOG relock via
 //!   [`relock_select_nearest`], STEADY on the locked boundary, GAP RESYNC on the floored deadline,
-//!   HOLD / late HOLD, the erase loop, and the #859 settle-back drain via [`should_drain_one`]. The
-//!   #1049 converge shed is N>=2-only and inert here.
+//!   HOLD / late HOLD, the erase loop, the #859 settle-back drain via [`should_drain_one`], and the
+//!   #1049 phase-convergence shed via [`should_converge_phase`] (after the drain, sharing its
+//!   throttle, exactly as the C present tail orders them).
+//! - **A sender restart** (issue 1367, [`SenderRestart`]): the sender goes silent, then comes back
+//!   with a `k`-slot startup stall — a k-slot stamp gap followed by k duplicate stamps. The receiver
+//!   keeps its locked boundary through the empty FIFO (the ts-align path never re-arms the build
+//!   latch), GAP-RESYNCs onto the first post-restart frame, and presents each duplicate one tick
+//!   later on the STEADY path, so it lands `k` frames deeper than the resync depth.
 //! - **The deadline** is the production [`phase_pinned_deadline`] (the Rust authority of the C
 //!   `genlock_phase_pin_deadline`) and **the render tick** is the production
 //!   [`grid_next_boundary_ns`] (the authority of the C `genlock_next_deadline` boundary) — so a bench
@@ -47,7 +53,8 @@
 
 use crate::genlock_backlog::{
     backlog_relock_threshold, phase_anchor_from_present, phase_pinned_deadline,
-    relock_anchor_age_ns, relock_select_nearest, should_drain_one, PHASE_PIN_HYSTERESIS_NS,
+    relock_anchor_age_ns, relock_select_nearest, should_converge_phase, should_drain_one,
+    PHASE_PIN_HYSTERESIS_NS,
 };
 use crate::genlock_grid::{
     grid_next_boundary_ns, per_second_floor, StampTrack, NS_PER_SECOND, UNITS_100NS_PER_SECOND,
@@ -114,6 +121,24 @@ pub struct BenchConfig {
     pub tick_late_ppm: u64,
     pub tick_late_min_ns: u64,
     pub tick_late_max_ns: u64,
+    /// One strih-lx OBS restart during the run (issue 1367), or none.
+    pub restart: Option<SenderRestart>,
+}
+
+/// A sender restart (issue 1367): the strih-lx program output goes silent for `outage_ms`, then
+/// comes back with a `stall_slots`-slot STARTUP STALL. The first frames after the restart are
+/// handed to NDI late and all at once, and `ndi-output.cpp` stamps each with the per-second floor
+/// of its SEND instant. So the stream sees one frame stamped `stall_slots` slots after the first
+/// post-restart render tick, then `stall_slots` more frames with the SAME stamp: a k-slot gap, then
+/// k duplicate stamps. This is the live restart transient.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SenderRestart {
+    /// Seconds after the run start at which the sender goes silent.
+    pub at_s: u64,
+    /// How long no frame is sent at all.
+    pub outage_ms: u64,
+    /// The startup stall `k`, in render slots.
+    pub stall_slots: u64,
 }
 
 impl BenchConfig {
@@ -136,6 +161,7 @@ impl BenchConfig {
             tick_late_ppm: 1_000,
             tick_late_min_ns: 10_000_000,
             tick_late_max_ns: 30_000_000,
+            restart: None,
         }
     }
 }
@@ -157,6 +183,8 @@ pub struct BenchReport {
     pub resyncs: u64,
     pub relocks: u64,
     pub drains: u64,
+    /// Phase-convergence sheds (`should_converge_phase`, the C `genlock_converge_sheds`).
+    pub converge_sheds: u64,
     pub dropped_due: u64,
     pub underruns: u64,
     /// The sender's stamp irregularity as the receiver's `stamp_dup=` / `stamp_gap=` audit tokens
@@ -215,19 +243,44 @@ struct Sender {
     last_send: u64,
     track: StampTrack,
     rng: Rng,
+    /// The restart outage `[from, until)` in wall ns, when the config has one.
+    outage: Option<(u64, u64)>,
+    stall_slots: u64,
+    /// Set at the first render tick after the outage: frames rendered before this instant are
+    /// handed over together with the frame rendered at it (the startup stall).
+    stall_release: Option<u64>,
 }
 
 impl Sender {
     /// The next frame as `(arrival_wall_ns, stamp_ns, new_dups, new_missing_intervals)`.
     fn next_frame(&mut self, cfg: &BenchConfig) -> (u64, u64, u64, u64) {
         self.tick = self.grid.next_tick(self.tick);
+        if let Some((from, until)) = self.outage {
+            // The restart: no frame at all during the outage (no random draw either, so a run
+            // without a restart consumes the identical random stream).
+            while self.tick >= from && self.tick < until {
+                self.tick = self.grid.next_tick(self.tick);
+            }
+            if self.tick >= until && self.stall_release.is_none() {
+                let mut release = self.tick;
+                for _ in 0..self.stall_slots {
+                    release = self.grid.next_tick(release);
+                }
+                self.stall_release = Some(release);
+            }
+        }
         let core =
             cfg.send_delay_median_ns as f64 + cfg.send_delay_sigma_ns as f64 * self.rng.normal();
         let mut delay = core.max(0.0) as u64;
         if self.rng.ppm(cfg.send_late_ppm) {
             delay = CANVAS_INTERVAL_NS + self.rng.uniform_ns(0, cfg.send_late_extra_max_ns);
         }
-        let send = (self.tick + delay).max(self.last_send + 1);
+        // The startup stall: a frame rendered before the stall releases is handed over with it.
+        let ready = match self.stall_release {
+            Some(release) if self.tick < release => release,
+            _ => self.tick,
+        };
+        let send = (ready + delay).max(self.last_send + 1);
         self.last_send = send;
         let stamp = per_second_floor(send / 100, FPS, UNITS_100NS_PER_SECOND) * 100;
         // The production arrival-side tracker (the C genlock_stamp_track_observe) counts the
@@ -261,6 +314,7 @@ struct TickCounters {
     resyncs: u64,
     relocks: u64,
     drains: u64,
+    converge_sheds: u64,
     dropped_due: u64,
     underruns: u64,
 }
@@ -281,6 +335,7 @@ impl Fifo {
             .count();
         let head = self.queue[0];
         let mut drain_eligible = false;
+        let mut converge_eligible = false;
         let mut anchor_update = false;
         let release;
         if self.locked_next_boundary == 0 {
@@ -310,6 +365,7 @@ impl Fifo {
             // STEADY (N==1 present-oldest).
             release = 1;
             drain_eligible = true;
+            converge_eligible = true;
             anchor_update = true;
         } else if present_ts >= head {
             // GAP RESYNC — upstream skipped a stamp and the next frame has aged past the deadline.
@@ -348,6 +404,31 @@ impl Fifo {
                 self.ticks_since_drain += 1;
             }
         }
+        // The #1049 phase-convergence shed, in the C order (after the #859 drain, sharing its
+        // throttle): the wrapper reads the FRESHEST queued frame as the achievable-floor reference.
+        if converge_eligible {
+            let newest = *self
+                .queue
+                .back()
+                .expect("a STEADY present has a queued frame");
+            if should_converge_phase(
+                wall,
+                self.locked_next_boundary,
+                newest,
+                cfg.latency_ms,
+                CANVAS_INTERVAL_NS,
+                1,
+                self.ticks_since_drain,
+            ) && self.queue.len() > 1
+            {
+                self.queue.pop_front();
+                c.dropped_due += 1;
+                c.converge_sheds += 1;
+                self.ticks_since_drain = 0;
+            } else if !drain_eligible {
+                self.ticks_since_drain += 1;
+            }
+        }
         let presented = self
             .queue
             .pop_front()
@@ -372,6 +453,12 @@ pub fn run_bench(cfg: &BenchConfig) -> BenchReport {
         last_send: 0,
         track: StampTrack::default(),
         rng: Rng(rng.next()),
+        outage: cfg.restart.map(|r| {
+            let from = t0 + r.at_s * NS_PER_SECOND;
+            (from, from + r.outage_ms * 1_000_000)
+        }),
+        stall_slots: cfg.restart.map_or(0, |r| r.stall_slots),
+        stall_release: None,
     };
     let mut fifo = Fifo::default();
     let mut pending: VecDeque<(u64, u64)> = VecDeque::new();
@@ -409,6 +496,7 @@ pub fn run_bench(cfg: &BenchConfig) -> BenchReport {
             c.resyncs += tc.resyncs;
             c.relocks += tc.relocks;
             c.drains += tc.drains;
+            c.converge_sheds += tc.converge_sheds;
             c.dropped_due += tc.dropped_due;
             c.underruns += tc.underruns;
         }
@@ -442,6 +530,7 @@ pub fn run_bench(cfg: &BenchConfig) -> BenchReport {
     report.resyncs = c.resyncs;
     report.relocks = c.relocks;
     report.drains = c.drains;
+    report.converge_sheds = c.converge_sheds;
     report.dropped_due = c.dropped_due;
     report.underruns = c.underruns;
     report
@@ -486,7 +575,7 @@ mod tests {
             "{:?}",
             r.state_samples
         );
-        assert!(r.late_holds > 0 && r.drains > 0, "{r:?}");
+        assert!(r.late_holds > 0 && r.drains + r.converge_sheds > 0, "{r:?}");
         assert_eq!(r.relocks, 0, "no backlog storm in the live data: {r:?}");
     }
 
@@ -501,6 +590,7 @@ mod tests {
             r.flips_per_hour
         );
         assert_eq!(r.drains, 0, "{r:?}");
+        assert_eq!(r.converge_sheds, 0, "{r:?}");
         assert!(
             r.stamp_dups > 0 && r.stamp_gaps > 0,
             "the bench must still inject the sender irregularity: {r:?}"
@@ -541,7 +631,10 @@ mod tests {
             cfg.duration_s = 2 * 3600;
             let r = run_bench(&cfg);
             assert!(
-                r.flips_per_hour <= 1.0 && r.drains == 0 && r.late_holds == 0,
+                r.flips_per_hour <= 1.0
+                    && r.drains == 0
+                    && r.converge_sheds == 0
+                    && r.late_holds == 0,
                 "pin {pin}: production flips/h {:.2}: {r:?}",
                 r.flips_per_hour
             );
@@ -554,6 +647,68 @@ mod tests {
                  reproduces the defect, so this test would prove nothing: {l:?}",
                 l.flips_per_hour
             );
+        }
+    }
+
+    /// One strih-lx OBS restart at 5 min (8 s silent) with a `k`-slot startup stall, measured over
+    /// the hour that follows a BOUNDED 60 s settle (goal item 1: the latency is right after every
+    /// restart by itself, not after the next random sender hiccup).
+    fn after_restart(pin: u32, k: u64) -> BenchReport {
+        let mut cfg = BenchConfig::live_2026_09_24(GridModel::Production);
+        cfg.latency_ms = pin;
+        cfg.restart = Some(SenderRestart {
+            at_s: 300,
+            outage_ms: 8_000,
+            stall_slots: k,
+        });
+        cfg.warmup_s = 300 + 8 + 60;
+        cfg.duration_s = cfg.warmup_s + 3600;
+        run_bench(&cfg)
+    }
+
+    /// The depth state holding at least 99 % of the 5 s samples, if one does.
+    fn settled_state(r: &BenchReport) -> Option<u64> {
+        let total: u64 = r.state_samples.values().sum();
+        r.state_samples
+            .iter()
+            .find(|&(_, &n)| n * 100 >= total * 99)
+            .map(|(&state, _)| state)
+    }
+
+    /// issue 1367 (goal item 1): the depth after a restart is a function of the pin alone. The live
+    /// rig settled on 31 OR 32 frames at pin 987 depending on the sender's startup stall. After the
+    /// fix every stall (0 to 3 slots) settles on `ceil(pin / interval) + 1` frames, and the steady
+    /// single gap/dup sender tail after the settle costs no shed at all.
+    #[test]
+    fn every_restart_stall_settles_on_one_pin_derived_depth_1367() {
+        for pin in [987u32, 963, 1010] {
+            let target = (pin as u64 * 1_000_000).div_ceil(CANVAS_INTERVAL_NS) + 1;
+            let settled: Vec<(u64, Option<u64>, BenchReport)> = (0..=3)
+                .map(|k| {
+                    let r = after_restart(pin, k);
+                    (k, settled_state(&r), r)
+                })
+                .collect();
+            let summary: Vec<(u64, Option<u64>)> =
+                settled.iter().map(|(k, s, _)| (*k, *s)).collect();
+            for (k, state, r) in &settled {
+                assert_eq!(
+                    *state,
+                    Some(target),
+                    "pin {pin}, {k}-slot startup stall: settled on {state:?}, want {target} \
+                     (all stalls: {summary:?}): {r:?}"
+                );
+                assert_eq!(
+                    r.drains + r.converge_sheds,
+                    0,
+                    "pin {pin}, {k}-slot stall: the steady tail after the settle shed frames: {r:?}"
+                );
+                assert!(
+                    r.flips_per_hour <= 1.0,
+                    "pin {pin}, {k}-slot stall: flips/h {:.2}: {r:?}",
+                    r.flips_per_hour
+                );
+            }
         }
     }
 }
