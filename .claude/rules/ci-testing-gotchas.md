@@ -1326,3 +1326,12 @@ FIRST append (the transcript is written after every tool round), so one call pro
 loops on `[ "$(date +%s)" -lt "$end" ]`, parses ONLY the last JSONL line of the output file
 (`tail -n 1 | python3 -c` printing `type` + the content-block types) and stops on
 `assistant text`, sleeping ~5 s between reads; then run `bash /abs/waitrev.sh` as its own call.
+
+## A Python CLI test that overrides HOME also hides the USER site-packages (issue 1346)
+
+Running `subprocess.run([sys.executable, script, …], env=dict(os.environ, HOME=tmp))` to point a
+CLI at a fake `~/.camera-box/...` file makes Python look for the user site-packages under the FAKE
+home, so a module installed with `pip --user` (python3-websocket on dev1, which `strih_scenes.py`
+imports at module load) raises `ModuleNotFoundError` before the code under test runs. Pin the real
+user base alongside the fake home: `env = dict(os.environ, HOME=str(tmp),
+PYTHONUSERBASE=site.getuserbase())`.

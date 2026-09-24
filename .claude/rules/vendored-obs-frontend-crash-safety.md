@@ -123,3 +123,22 @@ keeps 2 for its `obs_data_set_string`). Before/after the fix these two counts SW
 RED→GREEN. GOTCHA: `grep -c` counts LINES — an `add_action(..., obs_data_get_json(a),
 obs_data_get_json(b))` line has TWO constructions on ONE line (Clipboard), so use occurrence-count
 (`grep -o ... | wc -l`, or Rust `.matches().count()`); a line-based expected count undercounts it.
+
+## g++ -fsyntax-only of ANY frontend widget TU locally — four stubs make it work (issue 1346)
+
+A frontend `.cpp` that includes `widgets/OBSBasic.hpp` (OBSProjector, OBSBasic, the
+OBSBasic_* split files) fails at once on missing GENERATED headers, not on your code. With four
+scratch-dir stubs the whole TU syntax-checks against the local Qt 6.4 headers (all four touched
+files in issue 1346 passed this way):
+
+1. `ui_*.h`: run `/usr/lib/qt6/libexec/uic <form>.ui -o <scratch>/ui_<form>.h` over every
+   `frontend/forms/*.ui` and `forms/source-toolbar/*.ui` (uic lives in `libexec`, not on PATH).
+2. `moc_<File>.cpp`: an EMPTY file per `#include "moc_…cpp"` (syntax-only never links).
+3. `ui-config.h`: the `frontend/cmake/templates/ui-config.h.in` defines with empty strings / `0x0`.
+4. `obsconfig.h`: the same stub the libobs fsyntax recipe uses (obs-drm-output.md).
+
+Include dirs: the scratch dir, `libobs`, `frontend`, `frontend/api`, every `shared/qt/*/`,
+`shared/qt/*/include/`, `shared/*/`, and the Qt6 `QtCore`/`QtGui`/`QtWidgets`/`QtSvg`/`QtNetwork`/
+`QtXml` dirs under `/usr/include/x86_64-linux-gnu/qt6`. Then
+`g++ -fsyntax-only -std=c++17 -fPIC -Wall -Wextra <includes> <file>.cpp`. Put the command in a
+script FILE (the worktree guard refuses the include-array expansion inline).
