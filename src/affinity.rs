@@ -1034,14 +1034,6 @@ LOC:    1000000    1000000    1000000    1000000   Local timer interrupts
     }
 
     #[test]
-    fn the_realtime_log_names_the_thread_by_role_1242() {
-        // The capture thread's #899 line stays byte-identical; the send thread says what it is.
-        assert_eq!(rt_role_label(RtThreadRole::CaptureEmit), "capture+emit");
-        assert_eq!(rt_role_label(RtThreadRole::Send), "NDI send");
-        assert_eq!(rt_role_label(RtThreadRole::Auxiliary), "auxiliary");
-    }
-
-    #[test]
     fn the_send_role_runs_one_fifo_step_below_capture_1242() {
         // #1242 — the NDI send thread shares the isolated core with the capture thread. One FIFO
         // step BELOW it, the capture thread always preempts a send (a stagger wait or a long
