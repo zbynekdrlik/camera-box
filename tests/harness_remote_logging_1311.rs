@@ -339,6 +339,30 @@ fn create_usb_bakes_and_enables_both_transports_in_the_base_image() {
     );
 }
 
+/// cam1 M.2 install 24.9.2026: the base image writes /etc/systemd/journal-upload.conf on the host
+/// side BEFORE the chroot `apt-get install ... systemd-journal-remote`. That package ships the same
+/// conffile, so dpkg asked "keep or replace?", read EOF on stdin, failed the configure step and the
+/// whole install aborted ("end of file on stdin at conffile prompt"). The chroot setup script must
+/// keep the pre-baked conffiles (--force-confdef + --force-confold) before its FIRST apt-get install.
+#[test]
+fn create_usb_chroot_keeps_prebaked_conffiles_before_the_first_apt_install() {
+    let s = read("scripts/create-usb-linux.sh");
+    let setup = s
+        .split("cat > \"$MOUNT_ROOT/tmp/setup.sh\" << 'SETUP_EOF'")
+        .nth(1)
+        .expect("create-usb-linux.sh must write the chroot setup script");
+    let first_install = setup
+        .find("apt-get install")
+        .expect("the chroot setup script must apt-get install packages");
+    let head = &setup[..first_install];
+    assert!(
+        head.contains("--force-confold") && head.contains("--force-confdef"),
+        "the chroot setup script must configure dpkg --force-confdef/--force-confold BEFORE its \
+         first apt-get install, or the pre-baked journal-upload.conf aborts the install at a \
+         conffile prompt"
+    );
+}
+
 #[test]
 fn verify_device_has_the_ak_check_before_q() {
     let s = read("scripts/verify-device.sh");
