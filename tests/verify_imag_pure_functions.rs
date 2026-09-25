@@ -735,18 +735,20 @@ fn phase_slew_check_composes_correctly_when_reused_from_clock_offset_guard_sh_12
 }
 
 #[test]
-fn verify_imag_wires_phase_slew_check_into_the_live_flow_1215() {
+fn verify_imag_wires_the_clock_discipline_check_into_the_live_flow_1372() {
+    // Issue 1372: dantesync 1.9.0 runs `ptp_phase_lock` by default (phase_slew_enabled=false by
+    // design), so check (l) grades the node's clock DISCIPLINE through the shared classifier in
+    // clock-offset-guard.sh rather than the bare phase_slew flag (#1215 lineage).
     let body = std::fs::read_to_string(script()).unwrap();
     assert!(
-        body.contains("phase_slew_check imag"),
-        "verify-imag.sh must CALL phase_slew_check on the imag-nb dantesync status (#1215) -- a \
-         pure function that is only ever defined (in clock-offset-guard.sh) and never invoked \
-         here provides zero acceptance coverage for the phase_slew provisioning gap"
+        body.contains("clock_discipline_check imag \"$DS_HTTP_STATUS\""),
+        "verify-imag.sh must CALL clock_discipline_check on the SAME $DS_HTTP_STATUS blob check \
+         (l) already fetches for ptp_locked/offset/gm_source_ip (#1215/#1372)"
     );
     assert!(
-        body.contains("phase_slew_enabled_from_pipe_json"),
-        "verify-imag.sh must parse phase_slew_enabled out of the SAME $DS_HTTP_STATUS blob check \
-         (l) already fetches for ptp_locked/offset/gm_source_ip (#1215)"
+        !body.contains("phase_slew_check imag"),
+        "verify-imag.sh must no longer grade the bare phase_slew flag -- dantesync 1.9.0 runs \
+         ptp_phase_lock with phase_slew off by design (#1372)"
     );
 }
 

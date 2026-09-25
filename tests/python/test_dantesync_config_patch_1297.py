@@ -33,15 +33,18 @@ _RESOLUME_CONFIG = json.dumps(
 )
 
 
-# ---------------------------------------------------------------- phase_slew enablement
+# ---------------------------------------------------------------- phase_slew enablement (legacy)
+# Issue 1372: dantesync 1.9.0 ignores phase_slew under its default ptp_phase_lock discipline, so the
+# patcher only flips phase_slew for a pre-1.9.0 node (legacy_phase_slew=True); the default writes
+# system.clock_discipline instead (tests/python/test_clock_discipline_1372.py).
 def test_adds_system_phase_slew_enabled_true_when_absent():
-    out = json.loads(dcp.patch_config(_RESOLUME_CONFIG))
+    out = json.loads(dcp.patch_config(_RESOLUME_CONFIG, legacy_phase_slew=True))
     assert out["system"]["phase_slew"]["enabled"] is True
 
 
 def test_phase_slew_flips_false_to_true_in_place():
     text = json.dumps({"system": {"phase_slew": {"enabled": False}}, "ntp_server": "strih.lan"})
-    out = json.loads(dcp.patch_config(text))
+    out = json.loads(dcp.patch_config(text, legacy_phase_slew=True))
     assert out["system"]["phase_slew"]["enabled"] is True
 
 
@@ -55,7 +58,7 @@ def test_preserves_sibling_keys_inside_system_and_phase_slew():
     text = json.dumps(
         {"system": {"affinity": "rt", "phase_slew": {"step_us": 2500, "enabled": False}}}
     )
-    out = json.loads(dcp.patch_config(text))
+    out = json.loads(dcp.patch_config(text, legacy_phase_slew=True))
     assert out["system"]["affinity"] == "rt"
     assert out["system"]["phase_slew"]["step_us"] == 2500
     assert out["system"]["phase_slew"]["enabled"] is True
@@ -116,7 +119,7 @@ def test_rejects_non_object_system():
 
 def test_rejects_non_object_phase_slew():
     with pytest.raises(dcp.ConfigPatchError):
-        dcp.patch_config(json.dumps({"system": {"phase_slew": True}}))
+        dcp.patch_config(json.dumps({"system": {"phase_slew": True}}), legacy_phase_slew=True)
 
 
 # ---------------------------------------------------------------- emit apply program
