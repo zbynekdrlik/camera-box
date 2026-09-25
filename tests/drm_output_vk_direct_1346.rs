@@ -912,6 +912,12 @@ fn a_lost_display_is_rebuilt_bounded_and_the_teardown_never_hangs() {
         "issue 1346 review round 3: a rebuild RETIRES the replaced swapchain (+ surface) -- its last \
          present may still be queued -- instead of destroying it"
     );
+    assert!(
+        rebuild.contains("const bool fresh = pending_retiree && !g_drm_vk.presented_since_rebuild;")
+            && thread.contains("g_drm_vk.presented_since_rebuild = true;"),
+        "issue 1346 review round 4: a back-to-back rebuild destroys the never-presented presentation \
+         and KEEPS the older retiree (its present may still be queued)"
+    );
     let swap_destroy = body_of(
         &setup,
         "static void drm_output_vk_destroy_swapchain(void)",

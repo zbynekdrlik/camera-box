@@ -548,18 +548,43 @@ bool drm_output_vk_rebuild_presentation(bool surface_lost)
 	/* No device wait (it cannot be bounded and halt() joins this thread). The replaced swapchain -- whose
 	 * last present may still be queued, waiting a present semaphore -- is RETIRED, not destroyed: it is
 	 * handed to the new swapchain as oldSwapchain (same surface) and freed after RETIRE_FRAMES later
-	 * signalled fences or at the teardown. An older retiree still pending is freed first (a rebuild is at
-	 * least one loop iteration after it). */
-	drm_output_vk_free_retired();
-	g_drm_vk.retired_swapchain = g_drm_vk.swapchain;
-	g_drm_vk.swapchain = VK_NULL_HANDLE;
-	memset(g_drm_vk.swap_images, 0, sizeof(g_drm_vk.swap_images));
-	g_drm_vk.n_swap = 0;
-	g_drm_vk.retire_countdown = DRM_OUTPUT_VK_RETIRE_FRAMES;
+	 * signalled fences or at the teardown.
+	 * Back-to-back rebuilds (a rebuilt swapchain whose very first acquire is out of date again): the
+	 * current presentation never presented, so nothing is queued on it -- destroy it directly and KEEP
+	 * the older retiree, whose present may still be queued. Only a presentation that completed a fenced
+	 * present since the last rebuild replaces the retiree (>= 1 fence has passed since it was retired). */
+	const bool pending_retiree = g_drm_vk.retired_swapchain || g_drm_vk.retired_surface;
+	const bool fresh = pending_retiree && !g_drm_vk.presented_since_rebuild;
+	VkSwapchainKHR old_for_create = VK_NULL_HANDLE;
+	if (fresh) {
+		drm_output_vk_destroy_swapchain();
+		if (surface_lost && g_drm_vk.surface) {
+			if (!g_drm_vk.retired_surface) {
+				/* the retiree was retired on THIS surface: the surface must outlive it, retire it too */
+				g_drm_vk.retired_surface = g_drm_vk.surface;
+			} else {
+				/* the retiree lives on an older surface: this one carried only the never-used swapchain */
+				g_drm_vk.vk.vkDestroySurfaceKHR(g_drm_vk.instance, g_drm_vk.surface, NULL);
+			}
+			g_drm_vk.surface = VK_NULL_HANDLE;
+		}
+	} else {
+		drm_output_vk_free_retired();
+		g_drm_vk.retired_swapchain = g_drm_vk.swapchain;
+		g_drm_vk.swapchain = VK_NULL_HANDLE;
+		memset(g_drm_vk.swap_images, 0, sizeof(g_drm_vk.swap_images));
+		g_drm_vk.n_swap = 0;
+		g_drm_vk.retire_countdown = DRM_OUTPUT_VK_RETIRE_FRAMES;
+		if (surface_lost) {
+			/* the retired swapchain belongs to the old surface: retire both, free them together */
+			g_drm_vk.retired_surface = g_drm_vk.surface;
+			g_drm_vk.surface = VK_NULL_HANDLE;
+		} else {
+			old_for_create = g_drm_vk.retired_swapchain; /* a swapchain is retired into at most one */
+		}
+	}
+	g_drm_vk.presented_since_rebuild = false;
 	if (surface_lost) {
-		/* the retired swapchain belongs to the old surface: retire both, free them together */
-		g_drm_vk.retired_surface = g_drm_vk.surface;
-		g_drm_vk.surface = VK_NULL_HANDLE;
 		if (!drm_output_vk_create_surface(true))
 			return false;
 		VkBool32 present = VK_FALSE;
@@ -570,7 +595,7 @@ bool drm_output_vk_rebuild_presentation(bool surface_lost)
 			return false;
 		}
 	}
-	if (!drm_output_vk_create_swapchain_only(surface_lost ? VK_NULL_HANDLE : g_drm_vk.retired_swapchain)) {
+	if (!drm_output_vk_create_swapchain_only(old_for_create)) {
 		drm_output_vk_destroy_swapchain();
 		return false;
 	}
@@ -743,6 +768,10 @@ void drm_output_vk_destroy_all(void)
 	g_drm_vk.fence = VK_NULL_HANDLE;
 	g_drm_vk.pool = VK_NULL_HANDLE;
 	g_drm_vk.cmd = VK_NULL_HANDLE;
+	g_drm_vk.retired_swapchain = VK_NULL_HANDLE; /* leaked with a wedged device, or already freed */
+	g_drm_vk.retired_surface = VK_NULL_HANDLE;
+	g_drm_vk.retire_countdown = 0;
+	g_drm_vk.presented_since_rebuild = false;
 	g_drm_vk.front = g_drm_vk.pending = g_drm_vk.ready = -1;
 	g_drm_vk.open = false;
 }

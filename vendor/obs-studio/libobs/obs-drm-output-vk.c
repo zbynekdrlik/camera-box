@@ -313,6 +313,7 @@ static void *drm_output_vk_present_thread(void *arg)
 			break;
 		}
 		rebuilds = 0;
+		g_drm_vk.presented_since_rebuild = true;
 		g_drm_vk.presents++;
 		if (src >= 0) {
 			g_drm_vk.program_presents++;
