@@ -79,6 +79,18 @@ static int drm_output_view_tick_action(int view, bool have_renderer, bool skip)
 	return 2;
 }
 
+/* main design 5840501628 (review round 1): the render cost the budget gate may leave out on THIS
+ * call. obs_aux_sender_should_skip_excluding() reads the previous graphics tick's total, which holds
+ * the view's render only when that render ran in the immediately previous tick. obs_get_total_frames()
+ * advances once per processed tick (by the lag count on a lagged one), so that is exactly a difference
+ * of 1. Anything else -- a frame-hook call a backend skipped (a disarmed output, a dead vk-direct
+ * present loop, a GL bind failure), a lagged tick, no render yet -- leaves nothing out, which counts
+ * the render in full (the pre-fix term). The u32 counter wraps. */
+static uint64_t drm_output_view_self_last_ns(uint64_t last_render_ns, uint32_t render_frame, uint32_t now_frame)
+{
+	return (uint32_t)(now_frame - render_frame) == 1u ? last_render_ns : 0;
+}
+
 _Static_assert(OBS_DRM_OUTPUT_VIEW_PROGRAM == 0 && OBS_DRM_OUTPUT_VIEW_MULTIVIEW == 1,
 	       "drm_output_parse_view returns the enum values as literals");
 _Static_assert(DRM_OUTPUT_TICK_NOTHING == 0 && DRM_OUTPUT_TICK_PROGRAM == 1 && DRM_OUTPUT_TICK_MULTIVIEW == 2,
@@ -108,10 +120,12 @@ static struct {
 	uint32_t frame_counter;
 	uint32_t consecutive_skips;
 	uint64_t ewma_ns;
-	/* main design 5840501628: the ns of the render in the PREVIOUS call, handed to the budget gate
-	 * once (read then cleared), so the gate does not count this view's own render twice. 0 after a
-	 * skip, a program tick or a missed call. last_self_ns = the value the gate last used (audit). */
+	/* main design 5840501628: the cost of the last Multiview render and the graphics tick it ran in
+	 * (obs_get_total_frames()), so the budget gate can leave this view's own render out of the
+	 * previous tick's total (drm_output_view_self_last_ns). last_self_ns = the value the gate last
+	 * used (the audit line's self_ns=). */
 	uint64_t last_render_ns;
+	uint32_t last_render_frame;
 	uint64_t last_self_ns;
 
 	uint64_t win_start_ns;
@@ -180,6 +194,7 @@ void obs_drm_output_set_view_renderer(obs_drm_output_view_render_t render, void 
 	g_view.consecutive_skips = 0;
 	g_view.ewma_ns = 0;
 	g_view.last_render_ns = 0;
+	g_view.last_render_frame = 0;
 	g_view.last_self_ns = 0;
 	drm_output_view_reset_window_locked();
 	obs_leave_graphics();
@@ -281,6 +296,12 @@ static void drm_output_view_render_multiview(void)
 	gs_blend_state_pop();
 	gs_texrender_end(g_view.texrender);
 
+	/* The Multiview cost is spent in this tick even when no scanout buffer is free or the blit fails,
+	 * so record it (and the tick) now; a published render overwrites it with the full cost below. */
+	const uint64_t t_rendered = os_gettime_ns();
+	g_view.last_render_ns = t_rendered > t0 ? t_rendered - t0 : 0;
+	g_view.last_render_frame = obs_get_total_frames();
+
 	const int idx = drm_output_claim_render_buf();
 	if (idx < 0)
 		return; /* nothing writable this tick — the last frame stays on scanout */
@@ -338,11 +359,10 @@ static void drm_output_view_audit(uint64_t now)
 int drm_output_view_frame(void)
 {
 	const int view = (int)os_atomic_load_long(&g_view.view);
-	/* main design 5840501628: the previous call's render cost goes to the gate exactly once. A skip,
-	 * a program tick or a call the backend skipped leaves 0, so a render is never subtracted from a
-	 * tick that did not contain it (the vk-direct hook skips this call while a READY image waits). */
-	const uint64_t self_last_ns = g_view.last_render_ns;
-	g_view.last_render_ns = 0;
+	/* main design 5840501628: leave the view's own render out of the previous tick's total only when
+	 * it ran in that tick (drm_output_view_self_last_ns), never across a skipped call. */
+	const uint64_t self_last_ns =
+		drm_output_view_self_last_ns(g_view.last_render_ns, g_view.last_render_frame, obs_get_total_frames());
 	if (view != OBS_DRM_OUTPUT_VIEW_MULTIVIEW) {
 		if (g_view.win_start_ns != 0)
 			drm_output_view_reset_window_locked();

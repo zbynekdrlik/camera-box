@@ -41,7 +41,9 @@ STRIH_DRM_OUTPUT_ARGB=2105376
 #     names a connected HDMI output. The NVIDIA X driver does not drive the KMS connector status, so
 #     sysfs reads `disconnected` with the monitor plugged in (main design 5840508308). A connected
 #     output with NO mode/CRTC counts too -- that is how xrandr lists HDMI-0 while vk-direct holds it.
-#     An empty text (X not up) is never connected.
+#     An empty text (X not up) is never connected. Any connected `HDMI*` output counts: on an
+#     NVIDIA-primary box the NVIDIA outputs (HDMI-0) are the ones X lists first, and the connector the
+#     config arms comes from the same first match (strih_drm_hdmi_output_from_xrandr).
 strih_drm_hdmi_connected() {
   local dir="${1:-/sys/class/drm}" backend="${2:-lease}" xr="${3:-}" st
   if [ "$backend" = vk-direct ]; then
@@ -114,7 +116,8 @@ strih_drm_legacy_view() {
 }
 
 # strih_drm_output_verdict HDMI_CONNECTED ARMED_CONNECTOR VIEW LIVE_SCANOUT LIVE_MULTIVIEW [BACKEND FACT [DEAD]]
-#   HDMI_CONNECTED   1 iff strih_drm_hdmi_connected
+#   HDMI_CONNECTED   1 iff strih_drm_hdmi_connected; "?" = UNKNOWN (a vk-direct box whose X RandR
+#                    view could not be read -- never a measured "no HDMI")
 #   ARMED_CONNECTOR  the connector the config arms ("-" / empty = dormant: absent, disabled, bad;
 #                    "?" = the classifier itself could not run, e.g. the strih_scenes import failed)
 #   VIEW             program | multiview | unknown (the config's "view" token)
@@ -125,6 +128,7 @@ strih_drm_legacy_view() {
 #   FACT             the box fact STRIH_HDMI_OUTPUT_BACKEND ("?" or empty = not read -- skipped)
 #   DEAD             1 iff strih_drm_vk_present_dead on the newest OBS log (the vk present loop died)
 # Prints ONE token; return code 0 = PASS, 2 = NOTE (skip / report), 1 = FAIL:
+#   x-unreadable        (1) HDMI_CONNECTED "?": the X view a vk-direct box needs was not readable
 #   skip-no-hdmi        (2) no HDMI monitor and no armed config -- today's eDP-only strih-lx
 #   hdmi-unplugged      (2) the config is armed but no HDMI monitor is plugged in
 #   classify-failed     (1) an HDMI monitor is plugged in but the config could not be classified
@@ -140,6 +144,10 @@ strih_drm_output_verdict() {
   local hdmi="${1:-0}" conn="${2:-}" view="${3:-program}" live="${4:-0}" mv="${5:-0}"
   local backend="${6:-?}" fact="${7:-?}" dead="${8:-0}"
   [ "$conn" = "-" ] && conn=""
+  if [ "$hdmi" = "?" ]; then
+    printf 'x-unreadable'
+    return 1
+  fi
   if [ "$hdmi" != 1 ]; then
     if [ -n "$conn" ] && [ "$conn" != "?" ]; then
       printf 'hdmi-unplugged'
@@ -233,9 +241,6 @@ strih_drm_output_provision() {
       || fail "issue 1346: apt-get install libvulkan1 failed -- the vk-direct HDMI output cannot start without the Vulkan loader"
     [ -f /usr/share/vulkan/icd.d/nvidia_icd.json ] \
       || warn "  issue 1346: no NVIDIA Vulkan ICD (/usr/share/vulkan/icd.d/nvidia_icd.json) -- the vk-direct HDMI output needs the NVIDIA driver's Vulkan"
-    # The NVIDIA connector's kernel status stays `disconnected`; vk-direct detects the monitor through
-    # the X RandR view (main design 5840508308).
-    DRM_XRANDR="$(strih_drm_xrandr_query "$user_home" "$desktop_user")"
   fi
   if [ -L "$DRM_CONF_DIR" ] || [ -L "$DRM_CONF" ]; then
     warn "  SKIP issue 1346: ${DRM_CONF_DIR} or ${DRM_CONF} is a symlink -- refusing to write through it as root; remove it and re-run"
@@ -257,20 +262,27 @@ except ValueError as e:
     else
       warn "  issue 1346: could not write backend ${backend} into ${DRM_CONF} (the reason is above) -- verify-strih item 4c reports it as backend-drift"
     fi
-  elif [ "$backend" = vk-direct ] && [ -z "$DRM_XRANDR" ]; then
-    warn "  SKIP issue 1346: vk-direct detects the HDMI monitor through X RandR, but xrandr on :0 answered nothing (Xorg :0 not up yet?) -- ${DRM_CONF} NOT provisioned; re-run setup-strih.sh after the kiosk session is up"
-  elif strih_drm_hdmi_connected /sys/class/drm "$backend" "$DRM_XRANDR"; then
-    [ -n "$DRM_XRANDR" ] || DRM_XRANDR="$(strih_drm_xrandr_query "$user_home" "$desktop_user")"
-    DRM_CONN="$(printf '%s\n' "$DRM_XRANDR" | strih_drm_hdmi_output_from_xrandr)"
-    if [ -n "$DRM_CONN" ] && DRM_LINE="$(strih_drm_output_config_json "$DRM_CONN" "$DRM_VIEW0" "$backend")"; then
-      install -d -o "$desktop_user" -g "$desktop_user" "$DRM_CONF_DIR"
-      printf '%s\n' "$DRM_LINE" | install -m 0644 -o "$desktop_user" -g "$desktop_user" /dev/stdin "$DRM_CONF"
-      echo "  wrote ${DRM_CONF} (HDMI output ${DRM_CONN}, backend ${backend}, view ${DRM_VIEW0}; takes effect at the next OBS start)"
-    else
-      warn "  SKIP issue 1346: an HDMI monitor is connected but X RandR could not name it (Xorg :0 not up yet?) -- ${DRM_CONF} NOT provisioned; re-run setup-strih.sh after the kiosk session is up"
-    fi
   else
-    warn "  SKIP issue 1346: no HDMI monitor connected -- ${DRM_CONF} NOT provisioned (the fixed HDMI output stays dormant); attach the HDMI monitor and re-run setup-strih.sh"
+    # No config yet. The NVIDIA connector's kernel status stays `disconnected`, so a vk-direct box
+    # detects the monitor through the X RandR view (main design 5840508308), queried only here.
+    if [ "$backend" = vk-direct ]; then
+      DRM_XRANDR="$(strih_drm_xrandr_query "$user_home" "$desktop_user")"
+    fi
+    if [ "$backend" = vk-direct ] && [ -z "$DRM_XRANDR" ]; then
+      warn "  SKIP issue 1346: vk-direct detects the HDMI monitor through X RandR, but xrandr on :0 answered nothing (Xorg :0 not up yet?) -- ${DRM_CONF} NOT provisioned; re-run setup-strih.sh after the kiosk session is up"
+    elif strih_drm_hdmi_connected /sys/class/drm "$backend" "$DRM_XRANDR"; then
+      [ -n "$DRM_XRANDR" ] || DRM_XRANDR="$(strih_drm_xrandr_query "$user_home" "$desktop_user")"
+      DRM_CONN="$(printf '%s\n' "$DRM_XRANDR" | strih_drm_hdmi_output_from_xrandr)"
+      if [ -n "$DRM_CONN" ] && DRM_LINE="$(strih_drm_output_config_json "$DRM_CONN" "$DRM_VIEW0" "$backend")"; then
+        install -d -o "$desktop_user" -g "$desktop_user" "$DRM_CONF_DIR"
+        printf '%s\n' "$DRM_LINE" | install -m 0644 -o "$desktop_user" -g "$desktop_user" /dev/stdin "$DRM_CONF"
+        echo "  wrote ${DRM_CONF} (HDMI output ${DRM_CONN}, backend ${backend}, view ${DRM_VIEW0}; takes effect at the next OBS start)"
+      else
+        warn "  SKIP issue 1346: an HDMI monitor is connected but X RandR could not name it (Xorg :0 not up yet?) -- ${DRM_CONF} NOT provisioned; re-run setup-strih.sh after the kiosk session is up"
+      fi
+    else
+      warn "  SKIP issue 1346: no HDMI monitor connected -- ${DRM_CONF} NOT provisioned (the fixed HDMI output stays dormant); attach the HDMI monitor and re-run setup-strih.sh"
+    fi
   fi
   rm -f "$LEGACY_PROJ"
 }

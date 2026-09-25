@@ -311,11 +311,19 @@ absent = program, so imag is byte-for-byte unchanged in behaviour):
   calls `obs_aux_sender_should_skip_excluding(..., self_last_ns)` (obs.c). It subtracts the caller's
   previous render from the previous tick's total, saturating. `obs_aux_sender_should_skip()` is its
   `self_last_ns = 0` case, so the ndi_filter aux senders are unchanged.
-  - The view hands `last_render_ns` over ONCE: it reads it, then clears it at the top of every
-    `drm_output_view_frame()`. A skip, a program tick, a render that failed before its measurement,
-    and a frame-hook call the vk-direct backend skipped (`drm_output_vk_wants_frames()` false while
-    a READY image waits) all pass 0. So a render is never subtracted from a tick that did not
-    contain it.
+  - The view leaves its render out ONLY when that render ran in the immediately previous graphics
+    tick (the pure `drm_output_view_self_last_ns`, lift-tested in `tests/drm_output_view_1346.rs`).
+    The render records its cost and `obs_get_total_frames()` right after `gs_texrender_end()`,
+    BEFORE the scanout-buffer claim, because a failed claim or blit still spent that time in the
+    tick. `total_frames` advances once per processed tick (by the lag count on a lagged one), so the
+    render is excluded exactly when the difference is 1.
+  - Anything else excludes nothing: a lagged tick, no render yet, or a frame-hook call a backend
+    skipped. The vk-direct hook skips the call while the output is disarmed or its present loop is
+    dead (`drm_output_vk_wants_frames()` is a latch set at open and cleared at halt/death, NOT a
+    per-READY-image wait). The lease hook skips while `program_want` is false, and both skip on a
+    GL bind failure.
+  - Review round 1 corrected a first version that read-then-cleared the value per call. That
+    version carried a render across a stop/restart into a tick that did not contain it.
   - The `multiview-render` line carries `self_ns=` (the value the gate last used). On a healthy
     30 fps view it reads about the Multiview cost (~14e6).
   - Tier-0 mirror: `src/render_budget.rs` (`display_should_skip` + `aux_consumed_ns` +

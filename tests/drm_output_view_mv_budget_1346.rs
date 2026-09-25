@@ -104,8 +104,9 @@ static const uint64_t EWS[] = {{ {ews} }};
 static const uint32_t CSS[] = {{ {css} }};
 #define N(a) (sizeof(a) / sizeof((a)[0]))
 
-/* The DRM-output view's per-tick loop: the gate sees elapsed = pre, the previous tick's total
- * (pre + mv when it rendered), ewma = mv, and its own previous render handed over once. */
+/* The DRM-output view's per-tick loop (called every tick): the gate sees elapsed = pre, the
+ * previous tick's total (pre + mv when it rendered), ewma = mv, and -- with exclude_self -- its render
+ * of the previous tick (0 after a skip; the view's tick-exact rule is drm_output_view_self_last_ns). */
 static unsigned sim(uint64_t pre, uint64_t mv, int exclude_self)
 {{
     const uint64_t iv = 33333333ULL;
