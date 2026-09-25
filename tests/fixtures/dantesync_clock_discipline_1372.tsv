@@ -2,40 +2,48 @@
 # verdict. BOTH implementations read it: the bash `clock_discipline_class` / `date_master_verdict`
 # (scripts/clock-offset-guard.sh) and the python twin `classify_clock_discipline` /
 # `date_master_verdict` (scripts/dantesync_fleet.py), pinned by tests/python/test_clock_discipline_1372.py.
-# Columns (TAB-separated): case, status, class, date_verdict (margin 1000 us).
+# Columns (TAB-separated): case, status, class, date_verdict (margin 1000 us), unlocked.
 #   status  = `@<repo-relative path>` to a /status JSON file, or an inline compact JSON object.
 #   class   = PTP_PHASE_LOCK | LEGACY_SLEW | LEGACY_NO_SLEW | UNKNOWN
 #   date_verdict = none (not the date master) | ok | out | unknown (master, fields unreadable)
+#   unlocked = yes only for clock_discipline=ptp_phase_lock with ptp_phase_locked=false (the
+#              named PTP-PHASE UNLOCKED failure: clock_discipline_unlocked), else no
 # The four @ files are /status captured read-only from the live fleet on 26.9.2026 (strih-lx master
 # and the stream slave, both dantesync 1.9.0) plus two legacy nodes synthesized from the pre-1.9.0
 # field shape (no clock_discipline / ptp_phase_locked / date_* fields).
-live_master_1_9_0	@tests/fixtures/dantesync_status_1372/strih-lx-master-1.9.0.json	PTP_PHASE_LOCK	ok
-live_slave_1_9_0	@tests/fixtures/dantesync_status_1372/stream-slave-1.9.0.json	PTP_PHASE_LOCK	none
-legacy_build_slew_on	@tests/fixtures/dantesync_status_1372/legacy-slew-1.8.52.json	LEGACY_SLEW	none
-legacy_build_slew_off	@tests/fixtures/dantesync_status_1372/legacy-no-slew-1.8.52.json	LEGACY_NO_SLEW	none
-explicit_legacy_slew_on	{"clock_discipline":"legacy","phase_slew_enabled":true,"ptp_phase_locked":false}	LEGACY_SLEW	none
-explicit_legacy_slew_off	{"clock_discipline":"legacy","phase_slew_enabled":false,"ptp_phase_locked":false}	LEGACY_NO_SLEW	none
-empty_discipline_is_an_older_blob	{"clock_discipline":"","phase_slew_enabled":true}	LEGACY_SLEW	none
-null_discipline_is_an_older_blob	{"clock_discipline":null,"phase_slew_enabled":false}	LEGACY_NO_SLEW	none
-spaced_json	{ "clock_discipline" : "ptp_phase_lock" , "ptp_phase_locked" : true }	PTP_PHASE_LOCK	none
-phase_lock_not_locked	{"clock_discipline":"ptp_phase_lock","ptp_phase_locked":false,"phase_slew_enabled":false}	UNKNOWN	none
-phase_lock_locked_unread	{"clock_discipline":"ptp_phase_lock","phase_slew_enabled":false}	UNKNOWN	none
-phase_lock_locked_is_a_string	{"clock_discipline":"ptp_phase_lock","ptp_phase_locked":"true"}	UNKNOWN	none
-unknown_discipline_value	{"clock_discipline":"foo","ptp_phase_locked":true,"phase_slew_enabled":true}	UNKNOWN	none
-legacy_slew_unread	{"clock_discipline":"legacy"}	UNKNOWN	none
-older_blob_slew_unread	{"mode":"LOCK","is_locked":true}	UNKNOWN	none
-empty_object	{}	UNKNOWN	none
-master_on_the_line	{"date_authority":"master","date_offset_error_ms":0.0,"date_step_bound_ms":50.0}	UNKNOWN	ok
-master_at_bound_plus_margin	{"date_authority":"master","date_offset_error_ms":-51.0,"date_step_bound_ms":50.0}	UNKNOWN	ok
-master_step_pending_positive	{"date_authority":"master","date_offset_error_ms":50.9,"date_step_bound_ms":50.0}	UNKNOWN	ok
-master_past_bound_plus_margin	{"date_authority":"master","date_offset_error_ms":-51.5,"date_step_bound_ms":50.0}	UNKNOWN	out
-master_far_out	{"date_authority":"master","date_offset_error_ms":120.25,"date_step_bound_ms":50.0}	UNKNOWN	out
-master_smaller_bound	{"date_authority":"master","date_offset_error_ms":12.0,"date_step_bound_ms":10.0}	UNKNOWN	out
-master_integer_fields	{"date_authority":"master","date_offset_error_ms":-3,"date_step_bound_ms":50}	UNKNOWN	ok
-master_error_null	{"date_authority":"master","date_offset_error_ms":null,"date_step_bound_ms":50.0}	UNKNOWN	unknown
-master_bound_null	{"date_authority":"master","date_offset_error_ms":-1.0,"date_step_bound_ms":null}	UNKNOWN	unknown
-master_bound_zero	{"date_authority":"master","date_offset_error_ms":-1.0,"date_step_bound_ms":0.0}	UNKNOWN	unknown
-master_fields_absent	{"date_authority":"master"}	UNKNOWN	unknown
-follower	{"date_authority":"follower","date_offset_error_ms":null,"date_step_bound_ms":null}	UNKNOWN	none
-local	{"date_authority":"local","date_offset_error_ms":null}	UNKNOWN	none
-legacy_empty_authority	{"date_authority":"","date_offset_error_ms":null}	UNKNOWN	none
+live_master_1_9_0	@tests/fixtures/dantesync_status_1372/strih-lx-master-1.9.0.json	PTP_PHASE_LOCK	ok	no
+live_slave_1_9_0	@tests/fixtures/dantesync_status_1372/stream-slave-1.9.0.json	PTP_PHASE_LOCK	none	no
+legacy_build_slew_on	@tests/fixtures/dantesync_status_1372/legacy-slew-1.8.52.json	LEGACY_SLEW	none	no
+legacy_build_slew_off	@tests/fixtures/dantesync_status_1372/legacy-no-slew-1.8.52.json	LEGACY_NO_SLEW	none	no
+explicit_legacy_slew_on	{"clock_discipline":"legacy","phase_slew_enabled":true,"ptp_phase_locked":false}	LEGACY_SLEW	none	no
+explicit_legacy_slew_off	{"clock_discipline":"legacy","phase_slew_enabled":false,"ptp_phase_locked":false}	LEGACY_NO_SLEW	none	no
+empty_discipline_is_an_older_blob	{"clock_discipline":"","phase_slew_enabled":true}	LEGACY_SLEW	none	no
+null_discipline_is_an_older_blob	{"clock_discipline":null,"phase_slew_enabled":false}	LEGACY_NO_SLEW	none	no
+spaced_json	{ "clock_discipline" : "ptp_phase_lock" , "ptp_phase_locked" : true }	PTP_PHASE_LOCK	none	no
+phase_lock_not_locked	{"clock_discipline":"ptp_phase_lock","ptp_phase_locked":false,"phase_slew_enabled":false}	UNKNOWN	none	yes
+phase_lock_locked_unread	{"clock_discipline":"ptp_phase_lock","phase_slew_enabled":false}	UNKNOWN	none	no
+phase_lock_locked_is_a_string	{"clock_discipline":"ptp_phase_lock","ptp_phase_locked":"true"}	UNKNOWN	none	no
+unknown_discipline_value	{"clock_discipline":"foo","ptp_phase_locked":true,"phase_slew_enabled":true}	UNKNOWN	none	no
+legacy_slew_unread	{"clock_discipline":"legacy"}	UNKNOWN	none	no
+older_blob_slew_unread	{"mode":"LOCK","is_locked":true}	UNKNOWN	none	no
+empty_object	{}	UNKNOWN	none	no
+master_on_the_line	{"date_authority":"master","date_offset_error_ms":0.0,"date_step_bound_ms":50.0}	UNKNOWN	ok	no
+master_at_bound_plus_margin	{"date_authority":"master","date_offset_error_ms":-51.0,"date_step_bound_ms":50.0}	UNKNOWN	ok	no
+master_step_pending_positive	{"date_authority":"master","date_offset_error_ms":50.9,"date_step_bound_ms":50.0}	UNKNOWN	ok	no
+master_past_bound_plus_margin	{"date_authority":"master","date_offset_error_ms":-51.5,"date_step_bound_ms":50.0}	UNKNOWN	out	no
+master_far_out	{"date_authority":"master","date_offset_error_ms":120.25,"date_step_bound_ms":50.0}	UNKNOWN	out	no
+master_smaller_bound	{"date_authority":"master","date_offset_error_ms":12.0,"date_step_bound_ms":10.0}	UNKNOWN	out	no
+master_integer_fields	{"date_authority":"master","date_offset_error_ms":-3,"date_step_bound_ms":50}	UNKNOWN	ok	no
+master_error_null	{"date_authority":"master","date_offset_error_ms":null,"date_step_bound_ms":50.0}	UNKNOWN	unknown	no
+master_bound_null	{"date_authority":"master","date_offset_error_ms":-1.0,"date_step_bound_ms":null}	UNKNOWN	unknown	no
+master_bound_zero	{"date_authority":"master","date_offset_error_ms":-1.0,"date_step_bound_ms":0.0}	UNKNOWN	unknown	no
+master_fields_absent	{"date_authority":"master"}	UNKNOWN	unknown	no
+follower	{"date_authority":"follower","date_offset_error_ms":null,"date_step_bound_ms":null}	UNKNOWN	none	no
+local	{"date_authority":"local","date_offset_error_ms":null}	UNKNOWN	none	no
+legacy_empty_authority	{"date_authority":"","date_offset_error_ms":null}	UNKNOWN	none	no
+non_string_discipline_number	{"clock_discipline":5,"phase_slew_enabled":true}	UNKNOWN	none	no
+non_string_discipline_bool	{"clock_discipline":true,"ptp_phase_locked":true}	UNKNOWN	none	no
+legacy_value_with_lock_false	{"clock_discipline":"legacy","ptp_phase_locked":false}	UNKNOWN	none	no
+master_error_not_finite	{"date_authority":"master","date_offset_error_ms":1e400,"date_step_bound_ms":50.0}	UNKNOWN	unknown	no
+master_error_absurd	{"date_authority":"master","date_offset_error_ms":1e20,"date_step_bound_ms":50.0}	UNKNOWN	unknown	no
+master_bound_absurd	{"date_authority":"master","date_offset_error_ms":-1.0,"date_step_bound_ms":1e20}	UNKNOWN	unknown	no

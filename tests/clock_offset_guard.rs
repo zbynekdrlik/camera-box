@@ -1166,7 +1166,7 @@ fn gm_check_ok_foreign_and_unknown() {
     );
 }
 
-// --- phase_slew_enabled_from_pipe_json / phase_slew_check (#1215) ---------------------------
+// --- phase_slew_enabled_from_pipe_json (#1215) + clock_discipline_check (issue 1372) ---------
 //
 // #1215: imag-nb shipped with NO /etc/dantesync/config.json at all, so it ran on dantesync's
 // built-in default (system.phase_slew.enabled=false) and corrected phase error by STEPPING
@@ -1212,19 +1212,37 @@ fn phase_slew_enabled_from_pipe_json_empty_when_field_absent() {
 }
 
 #[test]
-fn phase_slew_check_maps_state_to_exit_code() {
-    // true -> rc 0 (ENABLED), false -> rc 2 (DISABLED, box will STEP), anything else
-    // (UNKNOWN/empty/garbage) -> rc 3. An unread field must NEVER map to OK (test-strictness: a
-    // box we can't confirm is slewing must never look correct).
-    let cases = [("true", 0), ("false", 2), ("", 3), ("garbage", 3)];
-    for (state, want) in cases {
+fn clock_discipline_check_maps_status_to_exit_code_1372() {
+    // Issue 1372: the bare phase_slew_check is gone -- dantesync 1.9.0 runs ptp_phase_lock with
+    // phase_slew off BY DESIGN, so every consumer grades the node's clock DISCIPLINE through
+    // clock_discipline_check (scripts/lib/dantesync-clock-discipline.sh, sourced by this guard).
+    // The 1.9.0 phase lock and a pre-1.9.0 node with phase_slew on -> rc 0; a pre-1.9.0 node that
+    // would STEP (phase_slew off) or a phase lock that is not locked -> rc 2; anything unread ->
+    // rc 3. An unread field must NEVER map to OK (test-strictness).
+    let cases = [
+        (
+            "{\"clock_discipline\":\"ptp_phase_lock\",\"ptp_phase_locked\":true}",
+            0,
+            "CLOCK PTP-PHASE-LOCK",
+        ),
+        ("{\"phase_slew_enabled\":true}", 0, "PHASE-SLEW ENABLED"),
+        ("{\"phase_slew_enabled\":false}", 2, "PHASE-SLEW DISABLED"),
+        (
+            "{\"clock_discipline\":\"ptp_phase_lock\",\"ptp_phase_locked\":false}",
+            2,
+            "PTP-PHASE UNLOCKED",
+        ),
+        ("{\"mode\":\"LOCK\"}", 3, "PHASE-SLEW UNKNOWN"),
+        ("", 3, "CLOCK-DISCIPLINE UNKNOWN"),
+    ];
+    for (status, want, needle) in cases {
         let out = run_sourced(
-            "set +e; phase_slew_check imag \"$S\"; echo \"rc=$?\"",
-            &[("S", state)],
+            "set +e; clock_discipline_check imag \"$S\"; echo \"rc=$?\"",
+            &[("S", status)],
         );
         assert!(
-            out.contains(&format!("rc={want}")),
-            "phase_slew_check({state:?}) must exit {want}: {out:?}"
+            out.contains(&format!("rc={want}")) && out.contains(needle),
+            "clock_discipline_check({status:?}) must exit {want} naming {needle}: {out:?}"
         );
     }
 }

@@ -1138,7 +1138,6 @@ fn setup_imag_installs_dantesync_clock_discipline_config_1372() {
     for needle in [
         "/etc/dantesync/config.json",
         "\"clock_discipline\": \"ptp_phase_lock\"",
-        "\"enabled\": true",
         "gm_allowlist",
         "\"http_status\"",
         "RIG_GRANDMASTER_IP",

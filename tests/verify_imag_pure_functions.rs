@@ -715,21 +715,21 @@ fn gm_check_composes_correctly_when_reused_from_clock_offset_guard_sh() {
 // ---------------------------------------------------------------------------------------------
 
 #[test]
-fn phase_slew_check_composes_correctly_when_reused_from_clock_offset_guard_sh_1215() {
+fn clock_discipline_check_composes_correctly_when_reused_from_clock_offset_guard_sh_1372() {
+    // imag-nb's pre-#1215 state (an older dantesync, phase_slew off -> it STEPS) must still be
+    // caught through the issue-1372 discipline check verify-imag.sh (l) now calls.
     let json = "{\"phase_slew_enabled\":false,\"mode\":\"PROD\",\"ntp_offset_us\":2924}";
     let (code, out, err) = run_sourced(&format!(
         r#"
         JSON='{json}'
-        PS="$(phase_slew_enabled_from_pipe_json "$JSON")"
-        echo "$PS"
         set +e
-        phase_slew_check imag "$PS"
+        clock_discipline_check imag "$JSON"
         echo "rc=$?"
         "#
     ));
     assert_eq!(code, 0, "stderr: {err}");
     assert!(
-        out.contains("false") && out.contains("PHASE-SLEW DISABLED") && out.contains("rc=2"),
+        out.contains("PHASE-SLEW DISABLED") && out.contains("rc=2"),
         "imag-nb's pre-#1215 disabled state must be caught when composed inside verify-imag.sh: {out:?}"
     );
 }

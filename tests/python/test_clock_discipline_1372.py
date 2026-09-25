@@ -49,7 +49,8 @@ _pspec.loader.exec_module(dcp)
 _CLEAN = ("DANTESYNC_FLEET", "OBS_FLEET", "OBS_FLEET_HOME", "DANTESYNC_AUDIO_GM_HOST",
           "RIG_GRANDMASTER_HOST", "RIG_GRANDMASTER_IP", "DANTESYNC_GATE_GM_ENFORCE",
           "DANTESYNC_GATE_PHASE_SLEW_ENFORCE", "DANTESYNC_NTP_MASTER_NAME",
-          "DANTESYNC_DEADBAND_MARGIN_US", "CLOCK_GUARD_BOUND_US", "DANTESYNC_STABILITY_US")
+          "DANTESYNC_DEADBAND_MARGIN_US", "CLOCK_GUARD_BOUND_US", "DANTESYNC_STABILITY_US",
+          "DANTESYNC_DATE_MARGIN_US")
 
 
 def _env(**over):
@@ -63,10 +64,10 @@ def _rows():
     for line in _TSV.read_text().splitlines():
         if not line.strip() or line.startswith("#"):
             continue
-        case, status, klass, date_verdict = line.split("\t")
+        case, status, klass, date_verdict, unlocked = line.split("\t")
         if status.startswith("@"):
             status = (_ROOT / status[1:]).read_text()
-        rows.append(pytest.param(status, klass, date_verdict, id=case))
+        rows.append(pytest.param(status, klass, date_verdict, unlocked, id=case))
     return rows
 
 
@@ -90,30 +91,54 @@ def _bash_call(tmp_path, fn, status, *args):
 # the ONE classifier + the ONE date-master verdict, bash and python pinned by the same table
 # ---------------------------------------------------------------------------------------------
 
-@pytest.mark.parametrize("status,klass,date_verdict", _rows())
-def test_bash_classifier_matches_the_table(tmp_path, status, klass, date_verdict):
+@pytest.mark.parametrize("status,klass,date_verdict,unlocked", _rows())
+def test_bash_classifier_matches_the_table(tmp_path, status, klass, date_verdict, unlocked):
     assert _bash_call(tmp_path, "clock_discipline_class", status) == klass
 
 
-@pytest.mark.parametrize("status,klass,date_verdict", _rows())
-def test_python_classifier_matches_the_table(status, klass, date_verdict):
+@pytest.mark.parametrize("status,klass,date_verdict,unlocked", _rows())
+def test_python_classifier_matches_the_table(status, klass, date_verdict, unlocked):
     assert df.classify_clock_discipline(json.loads(status)) == klass
 
 
-@pytest.mark.parametrize("status,klass,date_verdict", _rows())
-def test_bash_date_master_verdict_matches_the_table(tmp_path, status, klass, date_verdict):
+@pytest.mark.parametrize("status,klass,date_verdict,unlocked", _rows())
+def test_bash_date_master_verdict_matches_the_table(tmp_path, status, klass, date_verdict, unlocked):
     assert _bash_call(tmp_path, "date_master_verdict", status, _MARGIN_US) == date_verdict
 
 
-@pytest.mark.parametrize("status,klass,date_verdict", _rows())
-def test_python_date_master_verdict_matches_the_table(status, klass, date_verdict):
+@pytest.mark.parametrize("status,klass,date_verdict,unlocked", _rows())
+def test_python_date_master_verdict_matches_the_table(status, klass, date_verdict, unlocked):
     assert df.date_master_verdict(json.loads(status), _MARGIN_US) == date_verdict
+
+
+@pytest.mark.parametrize("status,klass,date_verdict,unlocked", _rows())
+def test_bash_unlocked_helper_matches_the_table(tmp_path, status, klass, date_verdict, unlocked):
+    """The named PTP-PHASE UNLOCKED state is part of the ONE classifier module, never re-derived
+    from the raw fields by a consumer (review finding on the first GREEN)."""
+    assert _bash_call(tmp_path, "clock_discipline_unlocked", status) == unlocked
+
+
+@pytest.mark.parametrize("status,klass,date_verdict,unlocked", _rows())
+def test_python_unlocked_helper_matches_the_table(status, klass, date_verdict, unlocked):
+    assert df.clock_discipline_unlocked(json.loads(status)) is (unlocked == "yes")
 
 
 def test_the_table_covers_every_class_and_verdict():
     rows = [p.values for p in _rows()]
     assert {r[1] for r in rows} == {"PTP_PHASE_LOCK", "LEGACY_SLEW", "LEGACY_NO_SLEW", "UNKNOWN"}
     assert {r[2] for r in rows} == {"none", "ok", "out", "unknown"}
+    assert {r[3] for r in rows} == {"yes", "no"}
+
+
+def test_the_classifier_lives_in_its_own_lib_sourced_by_the_guard():
+    """clock-offset-guard.sh was already ~2000 lines; the issue-1372 group is its own lib, sourced by
+    the guard so every consumer that sources the guard gets it unchanged."""
+    lib = (_ROOT / "scripts" / "lib" / "dantesync-clock-discipline.sh").read_text()
+    guard = _GUARD.read_text()
+    for fn in ("clock_discipline_class()", "clock_discipline_unlocked()", "clock_discipline_check()",
+               "date_master_verdict()", "date_master_check()", "dantesync_journal_clock_verdict()"):
+        assert fn + " {" in lib and fn + " {" not in guard, fn
+    assert "lib/dantesync-clock-discipline.sh" in guard
 
 
 def test_python_twin_accepts_the_raw_json_text_too():
@@ -235,7 +260,7 @@ def _fresh(tmp_path, name, src, **edits):
         s["ntp_updated_ts"] = now - 1
         s["ntp_age_s"] = 1
     for k, v in edits.items():
-        if v is None and k.startswith("drop_"):
+        if k.startswith("drop_"):
             s.pop(k[5:], None)
         else:
             s[k] = v
@@ -288,6 +313,61 @@ def test_gate_fails_a_date_master_past_its_step_bound(tmp_path):
     code, out, err = _gate(_MASTER_ONLY, DANTESYNC_GATE_WIN_HTTP_STRIH=str(p))
     assert code == 20, out + err
     assert "DATE MASTER OUT" in out
+
+
+def test_gate_fails_a_date_master_whose_date_is_out_while_its_median_is_in_bound(tmp_path):
+    """Isolates the date rc fold: ntp_offset_us stays in the median bound, only
+    date_offset_error_ms is past step bound + margin."""
+    p = _fresh(tmp_path, "strih", _STATUS / "strih-lx-master-1.9.0.json", date_offset_error_ms=-60.0)
+    code, out, err = _gate(_MASTER_ONLY, DANTESYNC_GATE_WIN_HTTP_STRIH=str(p))
+    assert code == 20, out + err
+    assert "DATE MASTER OUT" in out
+
+
+@pytest.mark.parametrize("field", ["date_offset_error_ms", "date_step_bound_ms"])
+def test_gate_is_incomplete_when_the_date_master_fields_are_unreadable(tmp_path, field):
+    """A master with a null date error or step bound is UNKNOWN (11), and its median keeps the
+    #1021/#1119 widening instead of failing DRIFT on the bare 2 ms bound (review finding)."""
+    p = _fresh(tmp_path, "strih", _STATUS / "strih-lx-master-1.9.0.json", **{field: None})
+    code, out, err = _gate(_MASTER_ONLY, DANTESYNC_GATE_WIN_HTTP_STRIH=str(p))
+    assert code == 11, out + err
+    assert "DATE MASTER UNKNOWN" in out
+    assert "DRIFT" not in out
+
+
+def test_gate_never_grades_the_date_of_a_stale_master(tmp_path):
+    p = _fresh(tmp_path, "strih", _STATUS / "strih-lx-master-1.9.0.json",
+               ntp_failed=True, date_offset_error_ms=-60.0)
+    code, out, err = _gate(_MASTER_ONLY, DANTESYNC_GATE_WIN_HTTP_STRIH=str(p))
+    assert code == 11, out + err
+    assert "DATE MASTER" not in out
+
+
+def test_gate_date_margin_is_the_one_shared_knob(tmp_path):
+    """DANTESYNC_DATE_MARGIN_US is the ONE date margin every consumer reads (the gate, verify-imag,
+    verify-strih); the gate's deadband margin no longer doubles as it."""
+    p = _fresh(tmp_path, "strih", _STATUS / "strih-lx-master-1.9.0.json", date_offset_error_ms=-50.5)
+    code, out, err = _gate(_MASTER_ONLY, DANTESYNC_GATE_WIN_HTTP_STRIH=str(p))
+    assert code == 0, out + err
+    code, out, err = _gate(_MASTER_ONLY, DANTESYNC_GATE_WIN_HTTP_STRIH=str(p), DANTESYNC_DATE_MARGIN_US="0")
+    assert code == 20, out + err
+    assert "DATE MASTER OUT" in out
+    for script in ("verify-imag.sh", "verify-strih.sh"):
+        body = (_ROOT / "scripts" / script).read_text()
+        assert "DATE_MASTER_MARGIN_US" in body and "IMAG_CLOCK_DATE_MARGIN_US" not in body, script
+
+
+def test_gate_journal_fallback_grades_a_date_master_line_on_its_step_bound(tmp_path):
+    """The gate's linux journal FALLBACK (HTTP down) goes through the shared journal verdict too."""
+    j = tmp_path / "strih-lx.log"
+    j.write_text(_journal(_date_line(-25217), _date_line(-25230), _date_line(-25240))
+                 + "2026-09-26T08:00:30+02:00 strih-lx dantesync[1]: [PTP] LOCK  Drift: 12ns/s\n")
+    args = ["--linux", "strih-lx=10.77.9.202", "--ntp-master", "", "--samples", "1",
+            "--min-distinct", "1", "--window-s", "0"]
+    code, out, err = _gate(args, DANTESYNC_GATE_LINUX_HTTP_STRIH_LX="/nonexistent-1372",
+                           DANTESYNC_GATE_LINUX_JOURNAL_STRIH_LX=str(j))
+    assert "NTP OK" in out and "date master step bound 50000us" in out, out + err
+    assert code == 0, out + err
 
 
 def test_gate_fails_a_phase_lock_node_that_is_not_phase_locked_by_name(tmp_path):
@@ -391,6 +471,13 @@ def test_the_template_asserts_clock_discipline_not_phase_slew(role, monkeypatch)
 # ---------------------------------------------------------------------------------------------
 # the config patcher and the provisioning writers stop asserting phase_slew for 1.9.0
 # ---------------------------------------------------------------------------------------------
+
+def test_ignore_rule_takes_only_true(monkeypatch):
+    _with_env(monkeypatch)
+    with pytest.raises(ValueError):
+        df.drift(b'{"system": {"phase_slew": {"enabled": true}}}', "video",
+                 {"video": {"system": {"phase_slew": {"$ignore": False}}}})
+
 
 def test_patcher_writes_the_1_9_0_discipline_and_leaves_phase_slew_alone():
     out = json.loads(dcp.patch_config(json.dumps({"ntp_server": "strih.lan"})))
