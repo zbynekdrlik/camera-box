@@ -369,20 +369,28 @@ from the per-box fact `STRIH_HDMI_OUTPUT_BACKEND` (strih-lx = `vk-direct`).
   `VK_QUEUE_FAMILY_EXTERNAL` on every copy. The GL side never does the matching acquire/release
   (GL_EXT_semaphore carries only layouts), so this leans on the NVIDIA driver being lenient about
   external ownership — proven live on the target GPU, re-check on any other vendor. Roles change only
-  after a SIGNALLED per-vblank fence, so a GL write never races a Vulkan read; a READY image the GL side
-  overwrites before the present thread took it still carries an unconsumed signal (`armed`) and is
-  consumed with `glWaitSemaphoreEXT` first (a binary semaphore is never signalled twice). The
-  bookkeeping is four pure helpers (`drm_output_vk_pick_claim` / `_present_pick` / `_present_done` /
-  `_publish_arm`), model-checked over 200000 random interleavings in
-  `tests/drm_output_vk_direct_1346.rs` (a mutant that stops clearing the taken signal fails it); the
-  claim rule is pinned EQUAL to the lease mailbox rule.
+  after a SIGNALLED per-vblank fence, so a GL write never races a Vulkan read. **A signalled READY
+  image is NEVER overwritten:** the GL claim skips while one waits, so every GL signal is waited
+  exactly once by the present thread and no GL-side semaphore wait exists. GOTCHA (live 25.9.2026):
+  the first design kept the lease's "latest wins" overwrite and consumed the overwritten signal with a
+  GL-side `glWaitSemaphoreEXT` — under a publish burst that GL wait was still pending when Vulkan
+  waited the same binary semaphore (a spec violation); the copy never completed, the teardown leaked
+  and the process hung at exit HOLDING the display (`vkAcquireXlibDisplayEXT` then returned -13 and
+  `xrandr` could not re-enable HDMI-0 until the process was killed). Never reintroduce a GL-side
+  consume wait. A skipped claim drops the NEWER frame (the lease drops the older one): one frame either
+  way, and a burst self-paces to the display rate. The bookkeeping is three pure helpers
+  (`drm_output_vk_pick_claim` / `_present_pick` / `_present_done`), model-checked over 200000 random
+  interleavings in `tests/drm_output_vk_direct_1346.rs` (a mutant restoring the overwrite fails it with
+  ~180000 violations); with no READY frame the claim is exactly the lease mailbox rule.
 - **Bounded, and a replug is not the end:** the present loop's acquire/fence waits are 1 s and
   re-checked. `VK_ERROR_OUT_OF_DATE_KHR` / `VK_ERROR_SURFACE_LOST_KHR` (an HDMI or grabber replug)
-  rebuild the swapchain (+ the display-plane surface when lost) with 10 tries 1 s apart; a display
-  that now offers a different mode size gives up by name (the shared images no longer fit — restart
-  OBS). The teardown waits an outstanding copy bounded (5 x 1 s); a GPU that never finishes it LEAKS
-  the Vulkan objects (and keeps the loader + X connection) with a loud line instead of hanging the OBS
-  shutdown. `glFinish` runs before the GL objects are deleted. verify-strih item 4c reads a present
+  rebuild the swapchain (+ the display-plane surface when lost, or from the 2nd try on) with 10 tries
+  1 s apart, without any device wait; the committed mode never changes during a rebuild, and a display
+  that now offers a different size gives up by name (the shared images no longer fit — restart OBS).
+  The teardown waits an outstanding copy bounded (5 x 1 s); a TIMEOUT LEAKS the Vulkan objects (and
+  keeps the loader + X connection) with a loud line instead of hanging `obs_shutdown` — note the
+  process may then still hang at exit inside the driver, holding the display (the burst incident
+  above); a lost device is destroyed normally. `glFinish` runs before the GL objects are deleted. verify-strih item 4c reads a present
   loop that died on its own (`vk-direct present loop exited` with no `stopped (vk-direct` after it) as
   `present-dead`, because `program scanout LIVE` stays in the log.
 - **Swapchain format:** B8G8R8A8 UNORM, else R8G8B8A8 UNORM, else refuse — never an sRGB format (the
@@ -398,12 +406,13 @@ from the per-box fact `STRIH_HDMI_OUTPUT_BACKEND` (strih-lx = `vk-direct`).
   / `solid-present #` are mutually non-substring with the lease `program-flip #` / `page-flip #`.
 - **Proof without OBS:** `tests/c/drm_output_vk_rig_harness.c` compiles the REAL core (gcc ON the box
   with staged headers — never on dev1) with its own EGL/GL 3.3 core context and publishes red, green,
-  blue and 50 % grey phases, then a 2 s BURST with no sleep that forces the overwrite path and requires
-  `gl_consumes > 0`. Live on strih-lx 25.9.2026: 716 phase publishes, 0 skipped; cam2 (which captures
+  blue and 50 % grey phases, then a 2 s BURST that claims with no pause (claim FIRST, render only when
+  claimed — like the OBS hook) and requires `gl_skips > 0`, a present loop still alive after a GL drain,
+  and a clean release. Live on strih-lx 25.9.2026: 716 phase publishes, 0 skipped; cam2 (which captures
   HDMI-0) read `245/0/0`, `0/255/0`, `0/0/239`, `127/128/127` — channel order right, no gamma step;
-  the burst published 14790 frames with 14783 overwritten signals consumed and released cleanly
-  (VkResult 0). The burst queues far more GL work than the GPU drains (the phase took ~12 s), which OBS
-  never does (one publish per render tick). Re-run it on every new NVIDIA strih box (strih PP).
+  the burst published 121 frames in 2 s (the 60 Hz display rate) with 7835 skipped claims, released
+  with VkResult 0 and exited. After ANY harness run check `pgrep -af vk-rig-harness` is empty — a hung
+  harness holds HDMI-0 acquired. Re-run it on every new NVIDIA strih box (strih PP).
 - **Enable (supervisor runbook, after CI + a FULL Linux bundle deploy on strih-lx):** re-run
   `setup-strih.sh --box strih-lx` step 6 with the HDMI monitor/grabber plugged (it writes or upserts
   `"backend":"vk-direct"` and installs `libvulkan1`) — or write the one line by hand as the desktop
