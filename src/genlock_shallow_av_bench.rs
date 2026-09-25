@@ -37,7 +37,11 @@
 //!   (1 ms per second after a depth change, ~33 s per frame) it trails the video by up to one frame,
 //!   measured separately and bounded by the songplayer gate (`SLEW_MAX_AV_MS`, 40 ms);
 //! - no shed / hold / drain / underrun churn: zero corrections on a clean feed, and at most one
-//!   correction per injected disturbance on a disturbed one.
+//!   correction per injected disturbance on a disturbed one;
+//! - a SONG CHANGE (the sender skipping stamps in bursts, starving the queue) never puts the video on
+//!   air under the latched D, so the video delay the audio follows stays on D (design 5833339163 —
+//!   before it, every skip presented the post-gap head one frame young: `video_delay_ms=67` against
+//!   an audio hold of 100 ms).
 //!
 //! The anti-tautology run switches the rule off (`BenchConfig::shallow_depth_rule = false`, the
 //! pre-rule conveyor): on the disturbed feed its depth random-walks off the target and the free

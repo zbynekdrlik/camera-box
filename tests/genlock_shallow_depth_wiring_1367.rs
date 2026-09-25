@@ -9,7 +9,9 @@
 //! 3. a lock is an ACQUIRE or a sender-restart GAP RESYNC, and a pin change re-arms the measurement;
 //! 4. the present tail samples the floor and latches D (`genlock_shallow_latch`), AFTER the audio
 //!    tracker, which follows the latched D (`genlock_video_delay_lock_ms`);
-//! 5. the min-latency (imag) box marker, the latch log line and the audit tokens exist.
+//! 5. the min-latency (imag) box marker, the latch log line and the audit tokens exist;
+//! 6. a GAP RESYNC of a governed shallow source holds until the post-gap head is D frames old
+//!    (`genlock_should_hold_n1_gap`, design 5833339163).
 //!
 //! Std-only on purpose: it runs under `cargo test` AND standalone
 //! (`CARGO_MANIFEST_DIR=<repo> rustc --test --edition 2021 tests/genlock_shallow_depth_wiring_1367.rs`).
@@ -171,6 +173,63 @@ fn the_release_tick_locks_measures_and_keeps_the_drain_out_1367() {
         src.matches("genlock_shallow_relock = true;").count(),
         1,
         "issue 1367: exactly the sender-restart GAP RESYNC sets the relock flag"
+    );
+}
+
+/// design 5833339163 (the song change): a GAP RESYNC of a governed shallow source HOLDS while the
+/// post-gap head is younger than the latched D, so a skipped stamp never puts the conveyor on air
+/// under D (live resolume 25.9.2026 15:29: `video_delay_ms=67 audio_delay_ms=100`).
+#[test]
+fn a_gap_resync_holds_a_shallow_source_on_its_latched_depth_1367() {
+    let src = squished();
+    let wrapper = body(
+        &src,
+        "static bool genlock_should_hold_n1_gap(const obs_source_t *source, uint32_t reserve_ms, uint64_t interval, uint64_t wall_now)",
+    );
+    assert_in(
+        wrapper,
+        "if (interval == 0 || source->async_frames.num == 0 || source->genlock_last_known_n >= 2) return false;",
+        "the GAP hold is N==1 only (an N>=2 source has no latched D)",
+    );
+    assert_in(
+        wrapper,
+        "const uint64_t next_stamp = source->async_frames.num > 1 ? source->async_frames.array[1]->timestamp : 0;",
+        "the frame queued behind the head tells a late-labelled (duplicated) head from a real skip",
+    );
+    assert_in(
+        wrapper,
+        "const uint64_t tick_wall = genlock_n1_tick_wall_now(wall_now);",
+        "the GAP hold reads the head's age at the tick's SCHEDULED instant",
+    );
+    assert_in(
+        wrapper,
+        "return genlock_n1_tick_is_on_grid(tick_wall, interval) && genlock_n1_shallow_gap_hold_due(tick_wall, head_stamp, next_stamp, source->genlock_locked_next_boundary_ns, arrival_floor, reserve_ms, interval, source->genlock_shallow_target_frames);",
+        "the GAP hold defers off the grid and delegates to the pure decision with the latched D",
+    );
+    let tick = body(
+        &src,
+        "static bool genlock_release_tick(obs_source_t *source, uint64_t wall_now, uint64_t present_ts, size_t due, uint64_t interval, uint32_t reserve_ms, uint64_t now_ns)",
+    );
+    let branch = tick
+        .find("} else if (present_ts >= source->async_frames.array[0]->timestamp) {")
+        .expect("issue 1367: the GAP RESYNC branch is gone");
+    let call = "if (genlock_should_hold_n1_gap(source, reserve_ms, interval, wall_now)) { source->genlock_n1_grows++; genlock_audit_log(source, now_ns); return false; }";
+    let hold = tick
+        .find(call)
+        .expect("issue 1367: the GAP RESYNC no longer asks the shallow GAP hold first");
+    let sticky = tick[branch..]
+        .find("source->genlock_last_known_n = 0;")
+        .map(|i| branch + i)
+        .expect("issue 1367: the GAP RESYNC STICKY-N clear is gone");
+    assert!(
+        branch < hold && hold < sticky,
+        "issue 1367: the GAP hold must decide at the HEAD of the GAP RESYNC branch, before it \
+         clears STICKY-N and presents"
+    );
+    assert_eq!(
+        src.matches("genlock_should_hold_n1_gap(").count(),
+        2,
+        "issue 1367: the GAP hold has exactly one definition and one call site"
     );
 }
 

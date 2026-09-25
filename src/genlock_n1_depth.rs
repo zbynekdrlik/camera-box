@@ -606,6 +606,44 @@ pub fn n1_shallow_hold_due(
         && ticks_since_last_drain >= DRAIN_MIN_TICK_INTERVAL
 }
 
+/// issue 1367 (design 5833339163, the song change) — the shallow GAP hold (the caller gates it on
+/// [`n1_tick_is_on_grid`]): on a GAP RESYNC tick (the queue head is past the locked boundary —
+/// upstream skipped stamps), HOLD instead of presenting while the head is still younger than the
+/// latched D. The GAP RESYNC used to present that head at once at its arrival age, one frame (or
+/// more) under D, and [`n1_shallow_hold_due`] then needed a throttle window per frame to climb back
+/// (live resolume 25.9.2026 15:29: `video_delay_ms=67 audio_delay_ms=100` for ~10 s while the
+/// sender skipped stamps across a song change). Held here, the head goes on air at D, so a skipped
+/// stamp costs exactly the one repeat it costs anyway and the conveyor never leaves D. NOT
+/// throttled: the hold bounds itself (the head ages a frame per tick, so it presents after at most
+/// D ticks) and it never moves the conveyor off D, so it cannot limit-cycle with the shed. Only
+/// while D governs, and never for a sender RESTART ([`n1_shallow_gap_is_relock`]: that relock
+/// re-measures the floor, the old path).
+///
+/// A gap whose head is already DUPLICATED behind it (`next_stamp_ns`, the second queued frame's
+/// stamp, `0` = none queued, is at or below the head's) is not missing content: a sender that
+/// stamps at SEND time (strih-lx, the #1355 residual) labels a slow frame one slot late and the
+/// next frame carries the same stamp, so the head IS the frame due now and the GAP RESYNC puts it
+/// on air on time (the stamp age reads one frame short for that tick only). Holding there would
+/// turn that label into a visible repeat plus a shed. Mirror of the C
+/// `genlock_n1_shallow_gap_hold_due`.
+#[allow(clippy::too_many_arguments)]
+pub fn n1_shallow_gap_hold_due(
+    tick_wall_ns: u64,
+    head_stamp_ns: u64,
+    next_stamp_ns: u64,
+    locked_boundary_ns: u64,
+    arrival_floor_ns: u64,
+    latency_ms: u32,
+    interval_ns: u64,
+    target_frames: u64,
+) -> bool {
+    locked_boundary_ns != 0
+        && (next_stamp_ns == 0 || next_stamp_ns > head_stamp_ns)
+        && !n1_shallow_gap_is_relock(head_stamp_ns.saturating_sub(locked_boundary_ns))
+        && n1_shallow_governs(target_frames, arrival_floor_ns, latency_ms, interval_ns)
+        && n1_depth_frames(tick_wall_ns, head_stamp_ns, interval_ns) < target_frames
+}
+
 #[cfg(test)]
 #[path = "genlock_n1_depth_tests.rs"]
 mod tests;

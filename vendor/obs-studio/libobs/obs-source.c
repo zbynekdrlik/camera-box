@@ -6478,6 +6478,29 @@ static inline bool genlock_n1_shallow_hold_due(uint64_t tick_wall_ns, uint64_t h
 	       ticks_since_drain >= GENLOCK_DRAIN_MIN_TICK_INTERVAL;
 }
 
+/* camera-box issue 1367 (design 5833339163, the song change): the shallow GAP hold. On a GAP RESYNC tick
+ * (the head is past the locked boundary: upstream skipped stamps) HOLD instead of presenting while the head
+ * is still younger than the latched D. The GAP RESYNC used to put that head on air at once at its arrival
+ * age, one frame (or more) under D, and the throttled shallow hold then took a second per frame to climb
+ * back (live resolume 25.9.2026 15:29: video_delay_ms=67 audio_delay_ms=100 for ~10 s while the sender
+ * skipped stamps across a song change). Held here, the head goes on air at D, so a skipped stamp costs the
+ * one repeat it costs anyway and the conveyor never leaves D. Not throttled: the head ages a frame per tick,
+ * so the hold ends within D ticks, and it never moves the conveyor off D. Only while D governs, never for a
+ * sender RESTART (the relock gap re-measures the floor, the old path), and never when the head is already
+ * DUPLICATED behind it (next_stamp_ns, the second queued frame's stamp, 0 = none, at or below the head's):
+ * a SEND-time-stamping sender labels a slow frame one slot late and the next frame carries the same stamp,
+ * so the head is the frame due now and presents on time. Mirror of src/genlock_n1_depth.rs
+ * n1_shallow_gap_hold_due. */
+static inline bool genlock_n1_shallow_gap_hold_due(uint64_t tick_wall_ns, uint64_t head_stamp_ns, uint64_t next_stamp_ns,
+						   uint64_t boundary_ns, uint64_t arrival_floor_ns, uint32_t latency_ms,
+						   uint64_t interval_ns, uint64_t target_frames)
+{
+	return boundary_ns != 0 && (next_stamp_ns == 0 || next_stamp_ns > head_stamp_ns) &&
+	       !genlock_n1_shallow_gap_is_relock(head_stamp_ns > boundary_ns ? head_stamp_ns - boundary_ns : 0) &&
+	       genlock_n1_shallow_governs(target_frames, arrival_floor_ns, latency_ms, interval_ns) &&
+	       genlock_n1_depth_frames(tick_wall_ns, head_stamp_ns, interval_ns) < target_frames;
+}
+
 /* camera-box #1049: the STEADY-conveyor PHASE-CONVERGENCE shed decision, PURE part.
  * Self-contained (only stdint + the scalars) so tests/genlock_relock_selection_parity.rs can
  * lift it standalone and prove it byte-identical to the Rust authority
@@ -6621,6 +6644,28 @@ static bool genlock_should_hold_n1_phase(const obs_source_t *source, uint32_t re
 				    source->genlock_ticks_since_drain) ||
 		genlock_n1_shallow_hold_due(tick_wall, head_stamp, arrival_floor, reserve_ms, interval,
 					    source->genlock_shallow_target_frames, source->genlock_ticks_since_drain));
+}
+
+/* camera-box issue 1367 (design 5833339163): the source-bound wrapper of the shallow GAP hold -- reads the
+ * queue HEAD (what this GAP RESYNC would present), the frame queued behind it (a duplicate of the head =
+ * a late-labelled frame, on time), the locked boundary, the FRESHEST queued frame (the arrival floor) and
+ * the latched D at the tick's scheduled instant (deferring while that is off the grid), and delegates to
+ * genlock_n1_shallow_gap_hold_due. N==1 only (an N>=2 source has no latched D). Called ONLY from the GAP
+ * RESYNC branch. Mirror: the GAP RESYNC arm of src/genlock_grid_bench.rs Fifo::tick. */
+static bool genlock_should_hold_n1_gap(const obs_source_t *source, uint32_t reserve_ms, uint64_t interval,
+				       uint64_t wall_now)
+{
+	if (interval == 0 || source->async_frames.num == 0 || source->genlock_last_known_n >= 2)
+		return false;
+	const uint64_t head_stamp = source->async_frames.array[0]->timestamp;
+	const uint64_t next_stamp = source->async_frames.num > 1 ? source->async_frames.array[1]->timestamp : 0;
+	const uint64_t newest_stamp = source->async_frames.array[source->async_frames.num - 1]->timestamp;
+	const uint64_t tick_wall = genlock_n1_tick_wall_now(wall_now);
+	const uint64_t arrival_floor = wall_now > newest_stamp ? wall_now - newest_stamp : 0;
+	return genlock_n1_tick_is_on_grid(tick_wall, interval) &&
+	       genlock_n1_shallow_gap_hold_due(tick_wall, head_stamp, next_stamp,
+					       source->genlock_locked_next_boundary_ns, arrival_floor, reserve_ms,
+					       interval, source->genlock_shallow_target_frames);
 }
 
 /* camera-box issue 1367 (ROZHODNUTÉ 5827497952): does the latched shallow depth govern this N==1
@@ -7154,6 +7199,17 @@ static bool genlock_release_tick(obs_source_t *source, uint64_t wall_now, uint64
 		 * Present it and re-anchor the boundary to the real stream;
 		 * not a drop of ours (nothing is discarded), not a relock (no
 		 * catch-up jump). */
+		/* camera-box issue 1367 (design 5833339163): a SHALLOW source whose latched depth D governs
+		 * HOLDS while the post-gap head is still younger than D, so the head goes on air at D, not one
+		 * frame (or more) under it -- a skipped stamp (a song change, a scene switch on the sender)
+		 * costs the one repeat it costs anyway and the video delay the audio follows never drops.
+		 * Counted as n1_grows=; the #859 throttle is left alone (the hold never moves the conveyor
+		 * off D). */
+		if (genlock_should_hold_n1_gap(source, reserve_ms, interval, wall_now)) {
+			source->genlock_n1_grows++;
+			genlock_audit_log(source, now_ns);
+			return false;
+		}
 		/* #726 STICKY-N: a GAP RESYNC means upstream skipped stamps
 		 * (sender restart / upstream loss) -- the source timeline (and
 		 * possibly its rate) changed; clear the latch so the post-gap

@@ -868,3 +868,74 @@ fn a_re_latch_clears_the_downward_watches_1367() {
     }
     assert!(!s.measuring, "two relocks after the latch are not a storm");
 }
+
+// ---- design 5833339163: the shallow GAP hold (a skipped stamp never shortens D) ----------------
+
+#[test]
+fn a_gap_resync_holds_until_the_head_is_d_frames_old_1367() {
+    let w = 1_000_000_000_000u64;
+    // the latched depth D (100 ms) and the missing slot's stamp, due now at D.
+    let d = 3u64;
+    let boundary = w - 3 * I30;
+    // the post-gap head one / two / three slots on: 2, 1 and 0 frames old -> hold; at D -> present.
+    let gap =
+        |head: u64, floor: u64| n1_shallow_gap_hold_due(w, head, 0, boundary, floor, 3, I30, d);
+    assert!(gap(boundary + I30, 2 * I30), "the head 2 frames old holds");
+    assert!(gap(boundary + 2 * I30, I30), "the head 1 frame old holds");
+    assert!(gap(boundary + 3 * I30, 0), "a just-arrived head holds");
+    // a head AT D presents, and so does one deeper than D (the gap resync as before).
+    let at_d = |head: u64| n1_shallow_gap_hold_due(w, head, 0, head - I30, 2 * I30, 3, I30, d);
+    assert!(!at_d(w - 3 * I30), "the head at D presents");
+    assert!(!at_d(w - 4 * I30), "a head deeper than D presents");
+    // the rounding edge: 2.5 frames less 1 ns reads 2 (hold), plus 1 ns reads 3 (present).
+    assert!(at_d(w - (2 * I30 + I30 / 2 - 1)));
+    assert!(!at_d(w - (2 * I30 + I30 / 2 + 1)));
+}
+
+#[test]
+fn the_gap_hold_is_unthrottled_and_scoped_to_a_governed_short_gap_1367() {
+    let w = 1_000_000_000_000u64;
+    let head = w - 2 * I30; // two frames old, under D 3
+    let hold = |boundary: u64, latency: u32, interval: u64, target: u64| {
+        n1_shallow_gap_hold_due(w, head, 0, boundary, I30, latency, interval, target)
+    };
+    // a short gap (one missing slot) holds; a sender RESTART (a gap of a second or more) keeps the
+    // old relock path; one ns under a second is still a short gap.
+    assert!(hold(head - I30, 3, I30, 3));
+    assert!(!hold(head - N1_SHALLOW_RELOCK_GAP_NS, 3, I30, 3));
+    assert!(hold(head - (N1_SHALLOW_RELOCK_GAP_NS - 1), 3, I30, 3));
+    // no latched D (0), an unlocked boundary, a degenerate interval: never.
+    assert!(!hold(head - I30, 3, I30, 0));
+    assert!(!hold(0, 3, I30, 3));
+    assert!(!hold(head - I30, 3, 0, 3));
+    // a DEEP source (pin 987, floor one frame) keeps the pin rule, whatever its latched D says.
+    assert!(!hold(head - I30, 987, I30, 31));
+    // the target is a parameter, not a constant: D 2 presents the same two-frame-old head.
+    assert!(!hold(head - I30, 3, I30, 2));
+    // no throttle input at all: the hold acts on the very next tick after a gap, where
+    // n1_shallow_hold_due defers the same head inside the throttle window.
+    assert!(!n1_shallow_hold_due(w, head, I30, 3, I30, 3, 0));
+}
+
+#[test]
+fn a_gap_whose_head_is_duplicated_behind_it_presents_on_time_1367() {
+    // the #1355 residual: a SEND-time-stamping sender labels a slow frame one slot late and the
+    // next frame carries the same stamp. The head is the frame due now, so it presents.
+    let w = 1_000_000_000_000u64;
+    let head = w - 2 * I30;
+    let hold = |next: u64| n1_shallow_gap_hold_due(w, head, next, head - I30, I30, 3, I30, 3);
+    assert!(!hold(head), "a duplicate queued behind the head: present");
+    assert!(
+        !hold(head - 1),
+        "a stamp behind the head (backward) counts too"
+    );
+    assert!(
+        hold(head + 1),
+        "the next slot queued behind it: a real skip, hold"
+    );
+    assert!(
+        hold(head + I30),
+        "the next slot queued behind it: a real skip, hold"
+    );
+    assert!(hold(0), "nothing queued behind it: hold");
+}

@@ -68,10 +68,10 @@ use crate::genlock_grid::{
     grid_next_boundary_ns, per_second_floor, StampTrack, NS_PER_SECOND, UNITS_100NS_PER_SECOND,
 };
 use crate::genlock_n1_depth::{
-    n1_base_frames, n1_depth_frames, n1_is_deep_source, n1_shallow_gap_is_relock,
-    n1_shallow_governs, n1_shallow_hold_due, n1_shallow_shed_due, n1_shallow_track, n1_shed_due,
-    n1_tick_on_grid, n1_tick_wall_ns, should_hold_n1_phase, ShallowDepth, ShallowTick,
-    N1_ON_GRID_NS,
+    n1_base_frames, n1_depth_frames, n1_is_deep_source, n1_shallow_gap_hold_due,
+    n1_shallow_gap_is_relock, n1_shallow_governs, n1_shallow_hold_due, n1_shallow_shed_due,
+    n1_shallow_track, n1_shed_due, n1_tick_on_grid, n1_tick_wall_ns, should_hold_n1_phase,
+    ShallowDepth, ShallowTick, N1_ON_GRID_NS,
 };
 use std::collections::{BTreeMap, VecDeque};
 
@@ -498,6 +498,31 @@ impl Fifo {
             anchor_update = true;
         } else if present_ts >= head {
             // GAP RESYNC — upstream skipped a stamp and the next frame has aged past the deadline.
+            // design 5833339163: a SHALLOW source whose latched D governs HOLDS while the post-gap
+            // head is still younger than D (the C `genlock_should_hold_n1_gap`), so the head goes
+            // on air at D instead of one frame (or more) under it (never when the head is already
+            // duplicated behind it: a late-labelled frame, on time); counted as an n1 grow, and the
+            // #859 throttle is left alone (the hold never moves the conveyor off D).
+            let newest = *self
+                .queue
+                .back()
+                .expect("head exists, so the queue is not empty");
+            let tick_wall = n1_tick_wall_ns(wall, wall, scheduled);
+            if tick_on_grid(cfg.grid, tick_wall)
+                && n1_shallow_gap_hold_due(
+                    tick_wall,
+                    head,
+                    self.queue.get(1).copied().unwrap_or(0),
+                    self.locked_next_boundary,
+                    wall.saturating_sub(newest),
+                    cfg.latency_ms,
+                    CANVAS_INTERVAL_NS,
+                    self.shallow.target_frames,
+                )
+            {
+                c.n1_grows += 1;
+                return;
+            }
             c.resyncs += 1;
             // issue 1367: a gap of a second or more is a sender restart, i.e. a relock.
             if n1_shallow_gap_is_relock(head.saturating_sub(self.locked_next_boundary)) {

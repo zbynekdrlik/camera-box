@@ -6,13 +6,17 @@
 //! test-strictness rule this FAILS LOUDLY rather than skipping when the toolchain is missing.
 
 use camera_box::genlock_n1_depth::{
-    n1_shallow_gap_is_relock, n1_shallow_governs, n1_shallow_hist_bin, n1_shallow_hold_due,
-    n1_shallow_percentile_bin, n1_shallow_shed_due, n1_shallow_target_frames, n1_shallow_track,
-    n1_shallow_window_deep, ShallowDepth, ShallowTick, N1_SHALLOW_HIST_BINS,
+    n1_shallow_gap_hold_due, n1_shallow_gap_is_relock, n1_shallow_governs, n1_shallow_hist_bin,
+    n1_shallow_hold_due, n1_shallow_percentile_bin, n1_shallow_shed_due, n1_shallow_target_frames,
+    n1_shallow_track, n1_shallow_window_deep, ShallowDepth, ShallowTick, N1_SHALLOW_HIST_BINS,
 };
 
 mod genlock_n1_lift;
 use genlock_n1_lift::compile_and_run_n1_block;
+
+/// design 5833339163 — one GAP-hold vector: (tick_wall, head, next, boundary, floor, latency,
+/// interval, target).
+type GapHoldVector = (u64, u64, u64, u64, u64, u32, u64, u64);
 
 /// issue 1367 (ROZHODNUTÉ 5827497952) — the SHALLOW per-lock depth: the lifted
 /// `genlock_n1_shallow_*` helpers (inside the same contiguous N==1 block) must match
@@ -25,7 +29,9 @@ use genlock_n1_lift::compile_and_run_n1_block;
 /// it). Design 5830750134 adds the floor histogram + its percentile, the base + 3 clamp, and the
 /// sequence cases for a short burst (p90 ignores it), a transient window (rejected, re-measured),
 /// the bounded rejects, a whole-window transient (clamped, then re-measured once the floor falls),
-/// an unreachable D (the realized depth stays under it) and a backlog relock storm.
+/// an unreachable D (the realized depth stays under it) and a backlog relock storm. Design 5833339163
+/// (the song change) adds the GAP hold at every edge: the head's age around D, a short gap vs a
+/// sender-restart gap, a duplicated head, an unlocked boundary, no latched D and a deep source.
 #[test]
 fn c_n1_shallow_depth_matches_the_rust_authority_1367() {
     let i30 = 33_333_333u64;
@@ -107,6 +113,32 @@ fn c_n1_shallow_depth_matches_the_rust_authority_1367() {
     }
     // an unlocked boundary never sheds
     sheds.push((w, 0, i30, 3, i30, 3, 100));
+    // design 5833339163: (tick_wall, head, next, boundary, floor, latency, interval, target).
+    let mut gap_holds: Vec<GapHoldVector> = Vec::new();
+    for step in 0..60u64 {
+        let head = w - (i30 / 4 + step * (4 * i30 / 60));
+        for (boundary, next, latency, target, floor) in [
+            (head - i30, 0u64, 3u32, 3u64, i30),
+            (head - i30, head + i30, 3, 3, i30),
+            (head - i30, head, 3, 3, i30),
+            (head - i30, head - 1, 3, 3, i30),
+            (head - i30, 0, 3, 2, i30),
+            (head - i30, 0, 3, 4, i30),
+            (head - i30, 0, 3, 0, i30),
+            (0, 0, 3, 3, i30),
+            (head - 999_999_999, 0, 3, 3, i30),
+            (head - 1_000_000_000, 0, 3, 3, i30),
+            (head - i30, 0, 987, 31, i30),
+            (head - i30, 0, 987, 31, 29 * i30),
+        ] {
+            gap_holds.push((w, head, next, boundary, floor, latency, i30, target));
+        }
+    }
+    // a degenerate interval never holds
+    gap_holds.push((w, w - i30, 0, w - 2 * i30, i30, 3, 0, 3));
+    // an unlocked boundary never holds, even where its "gap" to a head near the epoch is short
+    // (so the relock check alone would not catch it).
+    gap_holds.push((3 * i30, i30, 0, 0, i30, 3, i30, 3));
     // One present tick: (n1, relock, on_grid, floor_frames, base, deep, min_latency, realized,
     // backlog_relock). The realized depth sits over any D unless a block says otherwise.
     let mut seq: Vec<ShallowTick> = Vec::new();
@@ -267,6 +299,11 @@ fn c_n1_shallow_depth_matches_the_rust_authority_1367() {
             "    printf(\"%d\\n\", genlock_n1_shallow_hold_due({tw}ULL, {h}ULL, {f}ULL, {l}u, {iv}ULL, {tg}ULL, {k}ULL) ? 1 : 0);\n"
         ));
     }
+    for (tw, h, nx, bd, f, l, iv, tg) in &gap_holds {
+        body.push_str(&format!(
+            "    printf(\"%d\\n\", genlock_n1_shallow_gap_hold_due({tw}ULL, {h}ULL, {nx}ULL, {bd}ULL, {f}ULL, {l}u, {iv}ULL, {tg}ULL) ? 1 : 0);\n"
+        ));
+    }
     // The tick sequence goes in as C arrays driven by one loop (a statement per tick made the
     // harness take minutes to compile at -O1 once the sequence passed 3000 ticks).
     let col = |f: &dyn Fn(&ShallowTick) -> String| seq.iter().map(f).collect::<Vec<_>>().join(",");
@@ -312,6 +349,12 @@ fn c_n1_shallow_depth_matches_the_rust_authority_1367() {
     for (tw, h, f, l, iv, tg, k) in &holds {
         let r = n1_shallow_hold_due(*tw, *h, *f, *l, *iv, *tg, *k);
         fired.1 += usize::from(r);
+        want.push(b(r).to_string());
+    }
+    let mut gap_fired = 0usize;
+    for (tw, h, nx, bd, f, l, iv, tg) in &gap_holds {
+        let r = n1_shallow_gap_hold_due(*tw, *h, *nx, *bd, *f, *l, *iv, *tg);
+        gap_fired += usize::from(r);
         want.push(b(r).to_string());
     }
     let mut s = ShallowDepth::default();
@@ -373,6 +416,11 @@ fn c_n1_shallow_depth_matches_the_rust_authority_1367() {
     assert!(
         fired.1 > 0 && fired.1 < holds.len(),
         "hold vectors one-sided: {fired:?}"
+    );
+    assert!(
+        gap_fired > 0 && gap_fired < gap_holds.len(),
+        "GAP hold vectors one-sided: {gap_fired} of {}",
+        gap_holds.len()
     );
     assert_eq!(
         latched,
