@@ -1616,7 +1616,7 @@ step 25 "Touchpad usability (#779): tap-to-click + natural scroll + gentler scro
 obs_box_touchpad imag
 
 # =============================================================================
-step 26 "Full max-performance persistence (issue 756/#791): EPP/turbo/platform-profile/runtime-PM via imag-maxperf.service + hotplug udev rule"
+step 26 "Full max-performance persistence (issue 756/#791): EPP/turbo/platform-profile/runtime-PM via imag-maxperf.service + hotplug udev rule + the CPU idle wake-up latency bound (issue 1357)"
 # =============================================================================
 # issue 1357: this step's body moved VERBATIM into the shared OBS-box appliance baseline
 # (scripts/lib/obs-box-baseline.sh) -- setup-strih.sh runs the SAME function, so the two boxes can

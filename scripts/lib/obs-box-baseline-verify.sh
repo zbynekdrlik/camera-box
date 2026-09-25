@@ -156,6 +156,8 @@ echo "cstate_bound=$(systemctl show -p Environment --value obs-box-cpu-latency.s
 # /dev/cpu_dma_latency, and a PM QoS request never marks a state disabled): the usage counters of every
 # cpuidle state whose exit latency exceeds the baseline bound must not advance over a 1 s sample.
 # _cs_sum prints "<states read> <usage sum of the deeper states>" (sum `x` when such a counter is unreadable).
+# A CPU hot-(un)plugged between the two reads changes the summed set, so the delta can move either way;
+# that grades FAIL (never a false pass) and a re-run clears it.
 _cs_root=/sys/devices/system/cpu
 _cs_bound="$(obs_box_cpu_latency_bound_us)"
 _cs_sum() {

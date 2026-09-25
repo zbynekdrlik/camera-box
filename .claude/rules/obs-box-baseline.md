@@ -166,8 +166,24 @@ render tick, the audio thread and the NDI receive threads. The governor/EPP pins
     active. The apply is the baseline's `enable --now` pattern.
   - It fails before touching anything when `/dev/cpu_dma_latency` is missing.
   - imag fetches `?ref=dev`, so the files must be on dev before an imag re-provision.
-- **Unit hardening:** `DevicePolicy=closed` + `DeviceAllow=/dev/cpu_dma_latency w`. Never
+- **`Type=notify` + `NotifyAccess=all`.** The holder runs `systemd-notify --ready` only after the
+  bound is written (only when `NOTIFY_SOCKET` is set). So `systemctl start` returns once the bound is
+  held, and a holder that cannot open/write the device FAILS the start. With `Type=simple` the
+  installer's `is-active` check passed a holder that died a moment later. Checked on dev1's systemd
+  255 with a transient `systemd-run --user -p Type=notify -p NotifyAccess=all` unit: a scratch device
+  started `active`/`NRestarts=0`, an unopenable one failed the start.
+- **First install under errexit.** The before/after text hash reads files that do not exist yet on a
+  first install. It is written `{ cat … || true; } | sha256sum`; the bare pipeline aborted setup
+  silently under the callers' `set -euo pipefail`. `tests/obs_box_cpu_latency_1357.rs` runs the real
+  installer under `set -euo pipefail` (paths moved into a temp dir, a logging `systemctl` stub).
+- **Unit hardening:** `DevicePolicy=closed` + `DeviceAllow=/dev/cpu_dma_latency w`,
+  `CapabilityBoundingSet=` (root owns the 0600 device, no capability needed),
+  `RestrictAddressFamilies=AF_UNIX` (the notify socket), `SystemCallArchitectures=native`. Never
   `PrivateDevices=`, which would hide the device.
+- **imag acceptance (supervisor).** imag runs intel_idle, where 150 us also keeps out C6/C8/C10
+  (dev1, the same Intel family, lists C6 at 195 us). Idle cores then sit in C1E: more idle power
+  inside the imag PL1 envelope. Read the RAPL package power + TCPU and the power-envelope guard
+  state before/after the first imag install.
 - **Grader row `cstate` (after `perf`).** It runs unprivileged, and the device is root-only 0600,
   so it grades the unit AND the kernel effect.
   - The unit must be `enabled` + `active`, and its `Environment=` bound (read via

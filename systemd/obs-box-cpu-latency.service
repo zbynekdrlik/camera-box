@@ -7,7 +7,10 @@ Documentation=https://github.com/zbynekdrlik/camera-box/issues/1357
 Before=display-manager.service
 
 [Service]
-Type=simple
+# The holder sends READY=1 (systemd-notify, a child process -> NotifyAccess=all) only after the bound
+# is written, so `systemctl start` returns once it is held and a failed open/write fails the start.
+Type=notify
+NotifyAccess=all
 # The ONE baseline bound (obs_box_cpu_latency_bound_us, test-pinned to this line): 150 us keeps C1/C2 and
 # keeps out the ~1 ms C3 exit on strih-lx's ACPI idle driver. The grader reads it back from here.
 Environment=OBS_BOX_CPU_LATENCY_US=150
@@ -19,6 +22,10 @@ ProtectSystem=strict
 ProtectHome=yes
 PrivateTmp=yes
 PrivateNetwork=yes
+# root owns the 0600 device, so no capability is needed; AF_UNIX stays for the systemd-notify socket
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_UNIX
+SystemCallArchitectures=native
 DevicePolicy=closed
 DeviceAllow=/dev/cpu_dma_latency w
 

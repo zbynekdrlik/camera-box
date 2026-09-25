@@ -17,7 +17,8 @@ set -euo pipefail
 # (4 bytes) would be taken as the binary value of its four ASCII characters -- a huge, useless bound.
 #
 # OBS_BOX_CPU_LATENCY_DEV overrides the device path (the tests point it at a scratch file). The script
-# never retries: a failure exits non-zero and systemd's Restart=on-failure brings it back.
+# never retries: a failure exits non-zero and systemd's Restart=on-failure brings it back. Outside
+# systemd (no NOTIFY_SOCKET) it skips the readiness notification.
 
 US="${1-}"
 DEV="${OBS_BOX_CPU_LATENCY_DEV:-/dev/cpu_dma_latency}"
@@ -28,8 +29,9 @@ case "$US" in
         exit 2
         ;;
 esac
-# at most 7 digits (the kernel's own default "no constraint" is 2 s = 2000000 us); 10# drops leading
-# zeros so they are never read as octal
+# a sanity cap of 2 s (2000000 us) -- far above any useful bound, well under the kernel's own
+# "no constraint" default (PM_QOS_CPU_LATENCY_DEFAULT_VALUE, 2000 s); 10# drops leading zeros so
+# they are never read as octal
 if [ "${#US}" -gt 7 ] || [ "$((10#$US))" -gt 2000000 ]; then
     echo "obs-box-cpu-latency: bound ${US} us is out of range (0..2000000)" >&2
     exit 2
@@ -45,4 +47,11 @@ if ! printf '0x%08x' "$US" >&3; then
     exit 1
 fi
 echo "obs-box-cpu-latency: holding a CPU wake-up latency bound of ${US} us on ${DEV} (idle states with a longer exit latency are skipped while this runs)"
+# Under the Type=notify unit, report ready only now that the bound is written: `systemctl start`
+# (the installer, the boot ordering before the display manager) returns once the bound is held, and a
+# holder that failed to open or write the device fails the start instead of passing it.
+if [ -n "${NOTIFY_SOCKET:-}" ] && ! systemd-notify --ready; then
+    echo "obs-box-cpu-latency: systemd-notify --ready failed -- the unit would never finish starting" >&2
+    exit 1
+fi
 exec sleep infinity

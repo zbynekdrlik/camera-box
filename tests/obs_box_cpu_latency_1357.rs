@@ -331,14 +331,22 @@ fn the_installer_fails_loud_when_the_holder_is_not_active() {
 // ------------------------------------------------------------------------------------------------
 
 fn holder(dev: &Path, args: &[&str]) -> (i32, String, String) {
-    let out = Command::new("timeout")
-        .arg("1")
+    holder_env(dev, args, &[])
+}
+
+/// Run the holder under a 1 s timeout, outside systemd unless `env` sets NOTIFY_SOCKET.
+fn holder_env(dev: &Path, args: &[&str], env: &[(&str, &str)]) -> (i32, String, String) {
+    let mut cmd = Command::new("timeout");
+    cmd.arg("1")
         .arg("bash")
         .arg(manifest_dir().join(HOLDER))
         .args(args)
         .env("OBS_BOX_CPU_LATENCY_DEV", dev)
-        .output()
-        .expect("run the holder");
+        .env_remove("NOTIFY_SOCKET");
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+    let out = cmd.output().expect("run the holder");
     (
         out.status.code().unwrap_or(-1),
         String::from_utf8_lossy(&out.stdout).into_owned(),
@@ -383,6 +391,7 @@ fn the_holder_process_keeps_the_device_open() {
         .arg(manifest_dir().join(HOLDER))
         .arg("150")
         .env("OBS_BOX_CPU_LATENCY_DEV", &dev)
+        .env_remove("NOTIFY_SOCKET")
         .stdout(std::process::Stdio::null())
         .spawn()
         .expect("spawn the holder");
@@ -430,6 +439,90 @@ fn the_holder_rejects_a_bad_bound_or_device() {
     assert!(err.contains("cannot open"), "{err}");
 }
 
+/// A `systemd-notify` stand-in on PATH that records its arguments and the device content at the
+/// moment it is called, then exits `rc`.
+fn notify_stub(dir: &Path, rc: i32) -> String {
+    let bin = dir.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let stub = bin.join("systemd-notify");
+    std::fs::write(
+        &stub,
+        format!(
+            "#!/bin/bash\nprintf '%s|%s\\n' \"$*\" \"$(cat \"$OBS_BOX_CPU_LATENCY_DEV\")\" >> \"$MARK\"\nexit {rc}\n"
+        ),
+    )
+    .unwrap();
+    let mut p = std::fs::metadata(&stub).unwrap().permissions();
+    std::os::unix::fs::PermissionsExt::set_mode(&mut p, 0o755);
+    std::fs::set_permissions(&stub, p).unwrap();
+    format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    )
+}
+
+/// Under systemd (NOTIFY_SOCKET set) the holder reports READY only AFTER the bound is written, then
+/// keeps running; the unit is Type=notify so `systemctl start` waits for exactly that.
+#[test]
+fn the_holder_notifies_ready_only_after_the_bound_is_written() {
+    let d = tempfile::tempdir().unwrap();
+    let dev = d.path().join("qos");
+    std::fs::write(&dev, "").unwrap();
+    let mark = d.path().join("mark");
+    let path = notify_stub(d.path(), 0);
+    let (c, out, err) = holder_env(
+        &dev,
+        &["150"],
+        &[
+            ("NOTIFY_SOCKET", "/run/fake-notify"),
+            ("PATH", &path),
+            ("MARK", mark.to_str().unwrap()),
+        ],
+    );
+    assert_eq!(c, 124, "keeps running after READY: {out} {err}");
+    assert_eq!(
+        std::fs::read_to_string(&mark).unwrap(),
+        "--ready|0x00000096\n",
+        "one READY, sent after the bound was written"
+    );
+    let u = read(UNIT);
+    assert!(
+        u.lines().any(|l| l == "Type=notify") && u.lines().any(|l| l == "NotifyAccess=all"),
+        "the unit waits for the holder's READY (systemd-notify is a child process):\n{u}"
+    );
+}
+
+/// A failed READY fails the holder (the start would otherwise hang to its timeout); outside systemd
+/// no notification is attempted at all.
+#[test]
+fn the_holder_fails_loud_on_a_failed_notify_and_skips_it_outside_systemd() {
+    let d = tempfile::tempdir().unwrap();
+    let dev = d.path().join("qos");
+    std::fs::write(&dev, "").unwrap();
+    let mark = d.path().join("mark");
+    let path = notify_stub(d.path(), 1);
+    let (c, _out, err) = holder_env(
+        &dev,
+        &["150"],
+        &[
+            ("NOTIFY_SOCKET", "/run/fake-notify"),
+            ("PATH", &path),
+            ("MARK", mark.to_str().unwrap()),
+        ],
+    );
+    assert_eq!(c, 1, "{err}");
+    assert!(err.contains("systemd-notify --ready failed"), "{err}");
+    std::fs::remove_file(&mark).unwrap();
+    let (c, _out, err) = holder_env(
+        &dev,
+        &["150"],
+        &[("PATH", &path), ("MARK", mark.to_str().unwrap())],
+    );
+    assert_eq!(c, 124, "{err}");
+    assert!(!mark.exists(), "no NOTIFY_SOCKET -> no systemd-notify call");
+}
+
 // ------------------------------------------------------------------------------------------------
 // the grader row
 // ------------------------------------------------------------------------------------------------
@@ -458,20 +551,18 @@ const ACPI: &[(&str, u32, u64)] = &[
 /// `_cs_root` path and the 1 s sample sleep, which becomes `between` (a shell command run between the
 /// two counter reads -- deterministic, never a race against the gather's own timing).
 fn gather_cstate(root: &Path, between: &str) -> Vec<String> {
-    let body = format!(
-        "snip=\"$(obs_box_baseline_gather_snippet strih nosuchuser strih-obs.service)\"\n\
+    let body = "snip=\"$(obs_box_baseline_gather_snippet strih nosuchuser strih-obs.service)\"\n\
          old_root='_cs_root=/sys/devices/system/cpu'\n\
-         [ \"${{snip//\"$old_root\"/}}\" != \"$snip\" ] || {{ echo ROOT-ANCHOR-MISSING; exit 3; }}\n\
-         snip=\"${{snip//\"$old_root\"/\"_cs_root=$ROOT\"}}\"\n\
+         [ \"${snip//\"$old_root\"/}\" != \"$snip\" ] || { echo ROOT-ANCHOR-MISSING; exit 3; }\n\
+         snip=\"${snip//\"$old_root\"/\"_cs_root=$ROOT\"}\"\n\
          nl=$'\\n'\n\
-         [ \"${{snip//\"${{nl}}sleep 1${{nl}}\"/}}\" != \"$snip\" ] || {{ echo SLEEP-ANCHOR-MISSING; exit 3; }}\n\
-         snip=\"${{snip//\"${{nl}}sleep 1${{nl}}\"/\"${{nl}}${{BETWEEN}}${{nl}}\"}}\"\n\
-         bash -c \"$snip\" | grep '^cstate_'"
-    );
+         [ \"${snip//\"${nl}sleep 1${nl}\"/}\" != \"$snip\" ] || { echo SLEEP-ANCHOR-MISSING; exit 3; }\n\
+         snip=\"${snip//\"${nl}sleep 1${nl}\"/\"${nl}${BETWEEN}${nl}\"}\"\n\
+         bash -c \"$snip\" | grep '^cstate_'";
     let (c, out, err) = run(
         VERIFY_LIB,
         &[("ROOT", root.to_str().unwrap()), ("BETWEEN", between)],
-        &body,
+        body,
     );
     assert_eq!(c, 0, "stdout={out} stderr={err}");
     out.lines().map(str::to_string).collect()
