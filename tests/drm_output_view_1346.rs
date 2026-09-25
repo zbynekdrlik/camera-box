@@ -139,13 +139,18 @@ fn multiview_render_is_budget_gated_audited_and_persisted() {
              (main design 5840501628: the view's own previous render is not counted twice)",
         ),
         (
-            "const uint64_t self_last_ns = g_view.last_render_ns; g_view.last_render_ns = 0;",
-            "the view hands its previous render cost over ONCE (0 after a skip or a missed call), so \
-             a render is never subtracted from a tick that did not contain it",
+            "drm_output_view_self_last_ns(g_view.last_render_ns, g_view.last_render_frame, obs_get_total_frames())",
+            "the view excludes its render cost only when that render ran in the immediately previous \
+             graphics tick (review round 1: a skipped frame-hook call must never subtract a render \
+             from a tick that did not contain it)",
+        ),
+        (
+            "g_view.last_render_frame = obs_get_total_frames();",
+            "a render records the graphics tick it ran in",
         ),
         (
             "g_view.last_render_ns = dt;",
-            "a measured render records its cost for the next tick's gate",
+            "a published render records its full cost for the next tick's gate",
         ),
         (
             "self_ns=%llu",
@@ -218,6 +223,23 @@ fn multiview_render_is_budget_gated_audited_and_persisted() {
     assert!(
         !v.contains("program-render-audit"),
         "issue 1346: never emit a program-render-audit line"
+    );
+    // review round 1: the render cost is recorded as soon as the Multiview is rendered, BEFORE the
+    // scanout-buffer claim -- a failed claim/blit still spent it in this tick.
+    let render_fn = v
+        .find("static void drm_output_view_render_multiview(void)")
+        .expect("issue 1346: the Multiview render function");
+    let body = &v[render_fn..];
+    let recorded = body
+        .find("g_view.last_render_frame = obs_get_total_frames();")
+        .expect("the render records its tick");
+    let claim = body
+        .find("drm_output_claim_render_buf()")
+        .expect("the render claims a scanout buffer");
+    assert!(
+        recorded < claim,
+        "issue 1346 review: the render cost must be recorded before the claim, so a failed \
+         publish is not counted twice on the next tick"
     );
     // The line's keys stay mutually non-substring, so a `key=` token scan reads each one alone
     // (main design 5840501628: `self_ns=` joins them).
@@ -650,6 +672,61 @@ fn tick_action_computes_the_view_truth_table() {
     assert!(
         diffs.is_empty(),
         "issue 1346: drm_output_view_tick_action DIVERGED from the spec:\n{}",
+        diffs.join("\n")
+    );
+}
+
+/// main design 5840501628 + review round 1: `(last_render_ns, render_frame, now_frame)` -> the
+/// cost the budget gate may exclude. `obs_get_total_frames()` advances once per processed graphics
+/// tick (by the lag count on a lagged one), so the render ran in the immediately previous tick --
+/// the one whose total the gate reads back -- exactly when the difference is 1. Everything else
+/// (same tick, a missed hook call, a lagged tick, no render yet, a counter that went backwards)
+/// excludes nothing. The u32 counter wraps.
+fn self_last_vectors() -> Vec<((u64, u32, u32), u64)> {
+    let mv = 14_000_000u64;
+    vec![
+        ((mv, 100, 101), mv),
+        ((mv, 100, 100), 0),
+        ((mv, 100, 102), 0),
+        ((mv, 100, 200), 0),
+        ((mv, 101, 100), 0),
+        ((0, 100, 101), 0),
+        ((mv, u32::MAX, 0), mv),
+        ((mv, u32::MAX, u32::MAX), 0),
+        ((9_876_543_210, 7, 8), 9_876_543_210),
+    ]
+}
+
+#[test]
+fn self_last_ns_excludes_only_the_previous_tick_render() {
+    let helper = lift(
+        "static uint64_t drm_output_view_self_last_ns(uint64_t last_render_ns, uint32_t render_frame,",
+    );
+    let vs = self_last_vectors();
+    let mut c = String::from("#include <stdint.h>\n#include <stdio.h>\n");
+    c.push_str(&helper);
+    c.push_str("\nint main(void){\n");
+    for ((ns, rf, nf), _) in &vs {
+        c.push_str(&format!(
+            "    printf(\"%llu\\n\", (unsigned long long)drm_output_view_self_last_ns({ns}ULL, {rf}u, {nf}u));\n"
+        ));
+    }
+    c.push_str("    return 0;\n}\n");
+    let got: Vec<u64> = compile_and_run(&c, "selflast")
+        .lines()
+        .map(|l| l.trim().parse().expect("u64"))
+        .collect();
+    let diffs: Vec<String> = vs
+        .iter()
+        .zip(&got)
+        .filter(|((_, want), g)| *g != want)
+        .map(|((a, want), g)| {
+            format!("  (ns,render_frame,now_frame)={a:?} -> C {g}, expected {want}")
+        })
+        .collect();
+    assert!(
+        diffs.is_empty(),
+        "issue 1346: drm_output_view_self_last_ns DIVERGED from the spec:\n{}",
         diffs.join("\n")
     );
 }

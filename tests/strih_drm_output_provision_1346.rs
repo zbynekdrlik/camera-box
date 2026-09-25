@@ -549,6 +549,14 @@ fn verdict_grades_the_backend_against_the_box_fact() {
             "hdmi-unplugged",
             2,
         ),
+        // review round 1: a vk-direct box whose X RandR view could not be read is UNKNOWN by name,
+        // never a measured "no HDMI" (which would hide present-dead / not-live / drift).
+        (
+            "? HDMI-0 multiview 0 0 vk-direct vk-direct 1",
+            "x-unreadable",
+            1,
+        ),
+        ("? - program 0 0 ? vk-direct", "x-unreadable", 1),
     ];
     for (args, token, rc) in cases {
         let (c, out, _e) = run(&format!("strih_drm_output_verdict {args} || exit $?"), None);
@@ -643,18 +651,129 @@ fn setup_and_verify_detect_the_hdmi_monitor_by_backend() {
     let xr = v
         .find("DRM_XRANDR_V=\"$(strih_drm_xrandr_query \"$USER_HOME\"")
         .expect("verify reads the X RandR view for vk-direct");
+    let unreadable = v
+        .find("DRM_HDMI=\"?\"")
+        .expect("verify marks an unread X view as unknown, never as no-HDMI");
     let det = v
-        .find("strih_drm_hdmi_connected /sys/class/drm \"$DRM_BACKEND_FACT\" \"$DRM_XRANDR_V\" && DRM_HDMI=1")
+        .find("elif strih_drm_hdmi_connected /sys/class/drm \"$DRM_BACKEND_FACT\" \"$DRM_XRANDR_V\"; then")
         .expect("verify's detector takes the backend fact + the X view");
     assert!(
-        fact < xr && xr < det,
-        "verify: backend fact -> X RandR view -> detector"
+        fact < xr && xr < unreadable && unreadable < det,
+        "verify: backend fact -> X RandR view -> unknown when unread -> detector"
+    );
+    assert!(
+        v.contains("x-unreadable)"),
+        "verify grades the unread X view by name"
     );
     assert_eq!(
         v.matches("strih_drm_hdmi_connected").count(),
         1,
         "verify runs the detector exactly once"
     );
+}
+
+/// review round 1: step 6 driven for real on a fake root (vk-direct only -- it never reads sysfs, so
+/// the run is hermetic on any runner). Fake `id` (root), `sudo`, `apt-get`, `install` and `xrandr`
+/// sit on PATH; `warn`/`fail` are the caller's. A connected HDMI-0 without a CRTC writes the
+/// vk-direct config named from that X text through the ROOT `sudo -u <desktop user>` branch; an
+/// empty X answer SKIPs by name and writes nothing; an existing config never queries X at all.
+#[test]
+fn provision_step6_vk_direct_reads_the_x_view_through_the_desktop_user() {
+    let d = scratch("prov_vk");
+    let bin = d.join("bin");
+    let home = d.join("home/op");
+    fs::create_dir_all(&bin).unwrap();
+    fs::create_dir_all(&home).unwrap();
+    let log = d.join("calls.log");
+    for (name, body) in [
+        ("id", "#!/bin/sh\necho 0\n"),
+        (
+            "sudo",
+            "#!/bin/sh\necho \"sudo $*\" >> \"$CALL_LOG\"\n[ \"$1\" = -u ] && shift 2\nexec \"$@\"\n",
+        ),
+        ("apt-get", "#!/bin/sh\necho \"apt-get $*\" >> \"$CALL_LOG\"\n"),
+        (
+            "xrandr",
+            "#!/bin/sh\necho \"xrandr $* DISPLAY=$DISPLAY XAUTHORITY=$XAUTHORITY\" >> \"$CALL_LOG\"\n\
+             [ -f \"$XRANDR_FIXTURE\" ] && cat \"$XRANDR_FIXTURE\"\nexit 0\n",
+        ),
+        (
+            "install",
+            "#!/bin/bash\nargs=()\nskip=0\nfor a in \"$@\"; do\n  if [ \"$skip\" = 1 ]; then skip=0; continue; fi\n  \
+             case \"$a\" in -o|-g) skip=1 ;; *) args+=(\"$a\") ;; esac\ndone\nexec /usr/bin/install \"${args[@]}\"\n",
+        ),
+    ] {
+        let p = bin.join(name);
+        fs::write(&p, body).unwrap();
+        Command::new("chmod").arg("+x").arg(&p).status().unwrap();
+    }
+    let fixture = d.join("xr.txt");
+    fs::write(
+        &fixture,
+        "eDP-1-1 connected primary 1920x1200+0+0 (normal left inverted right x axis y axis)\n\
+         HDMI-0 connected (normal left inverted right x axis y axis)\n",
+    )
+    .unwrap();
+    let conf = home.join(".camera-box/drm-output.json");
+    let body = "warn() { echo \"WARN: $*\"; }\nfail() { echo \"FAIL: $*\"; exit 1; }\n\
+                PATH=\"$FAKE:$PATH\"\n\
+                strih_drm_output_provision \"$HOMEDIR\" op \"$SCRIPTS\" vk-direct";
+    let scripts = root().join("scripts");
+    let envs = |fx: &str| -> Vec<(String, String)> {
+        vec![
+            ("FAKE".into(), bin.to_str().unwrap().into()),
+            ("HOMEDIR".into(), home.to_str().unwrap().into()),
+            ("SCRIPTS".into(), scripts.to_str().unwrap().into()),
+            ("CALL_LOG".into(), log.to_str().unwrap().into()),
+            ("XRANDR_FIXTURE".into(), fx.into()),
+        ]
+    };
+    let run_with = |fx: &str| {
+        let owned = envs(fx);
+        let refs: Vec<(&str, &str)> = owned
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.as_str()))
+            .collect();
+        run_env(body, &refs)
+    };
+
+    let (c, out, err) = run_with(fixture.to_str().unwrap());
+    assert_eq!(c, 0, "step 6 must succeed: {out}{err}");
+    assert_eq!(
+        fs::read_to_string(&conf).unwrap(),
+        "{\"enabled\":true,\"connector\":\"HDMI-0\",\"argb\":2105376,\"view\":\"multiview\",\"backend\":\"vk-direct\"}\n",
+        "a connected HDMI-0 without a CRTC writes the vk-direct config named from the X view: {out}"
+    );
+    let calls = fs::read_to_string(&log).unwrap();
+    assert!(
+        calls.contains("sudo -u op env DISPLAY=:0 XAUTHORITY=")
+            && calls.contains("xrandr --query DISPLAY=:0 XAUTHORITY=")
+            && calls.contains("/home/op/.Xauthority"),
+        "as root the X view is read as the desktop user on :0 with their Xauthority: {calls}"
+    );
+
+    // An existing config is the operator's choice: X is never queried for it.
+    fs::write(&log, "").unwrap();
+    let (c2, out2, _e) = run_with(fixture.to_str().unwrap());
+    assert!(
+        out2.contains("already present"),
+        "an existing config is left alone: {out2} (rc {c2})"
+    );
+    assert!(
+        !fs::read_to_string(&log).unwrap().contains("xrandr"),
+        "review round 1: no X query when the config already exists"
+    );
+
+    // No X answer: a named SKIP, nothing written.
+    fs::remove_dir_all(home.join(".camera-box")).unwrap();
+    let (c3, out3, _e) = run_with(d.join("none.txt").to_str().unwrap());
+    assert_eq!(c3, 0);
+    assert!(
+        out3.contains("xrandr on :0 answered nothing"),
+        "an empty X answer SKIPs by name: {out3}"
+    );
+    assert!(!conf.exists(), "nothing is written without an X answer");
+    let _ = fs::remove_dir_all(&d);
 }
 
 /// A dead vk-direct present loop is visible although `program scanout LIVE` stays in the log (review
