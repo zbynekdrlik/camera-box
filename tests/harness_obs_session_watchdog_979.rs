@@ -121,11 +121,12 @@ fn targets(env: &[(&str, &str)]) -> String {
 
 #[test]
 fn targets_are_windows_genlock_only_with_per_box_ahk_1317() {
-    // stream has no AHK watcher; resolume runs the NL_STARTUP.ahk v2 safe-loop (has_ahk=1, the
-    // same fact deploy-genlock-fleet.sh / launch-obs-genlock.sh carry).
+    // stream has no AHK watcher; resolume has the NL_STARTUP.ahk v2 safe-loop INSTALLED (has_ahk=1),
+    // but whether it runs is the owner's choice (issue 1372, "ale ahk nespustaj"), so the watchdog
+    // grades it in `guard` mode: 0 or 1 in the active session is healthy.
     assert_eq!(
         targets(&[("OBS_FLEET_HOME", "stream resolume")]),
-        "stream 10.77.9.204 0\nresolume resolume.lan 1"
+        "stream 10.77.9.204 0\nresolume resolume.lan guard"
     );
 }
 
@@ -161,7 +162,7 @@ fn targets_keep_the_per_box_host_env_overrides_1317() {
             ("STREAM_HOST", "192.0.2.9"),
             ("RESOLUME_HOST", "192.0.2.7"),
         ]),
-        "stream 192.0.2.9 0\nresolume 192.0.2.7 1"
+        "stream 192.0.2.9 0\nresolume 192.0.2.7 guard"
     );
 }
 
