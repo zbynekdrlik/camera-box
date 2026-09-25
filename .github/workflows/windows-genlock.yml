@@ -384,6 +384,36 @@ jobs:
           }
           Write-Output "ASRC sliding-regression estimator present (#1084 constants + buffer fields + slope + flush; EMA gone) — OK"
 
+      # Issue 1372 part A: on Windows os_gettime_ns() is the dantesync-DISCIPLINED media clock --
+      # QPC deltas scaled by the system-time rate inc/adj from GetSystemTimeAdjustmentPrecise
+      # (resolved at runtime from kernelbase.dll), rebased on a rate change; os_sleepto_ns waits on
+      # that same clock, never on raw QPC counts. Mirrors the executable C-vs-Rust parity gate
+      # tests/os_clock_discipline_parity_1372.rs (lifts the block and runs it on a fake Win32
+      # layer) + the Tier-0 authority src/os_clock_discipline.rs. Keep all in lock-step.
+      - name: Assert the disciplined Windows media clock is present (issue 1372)
+        shell: pwsh
+        run: |
+          $pw = (Get-Content "vendor/obs-studio/libobs/util/platform-windows.c" -Raw) -replace '\s+', ' '
+          if ($pw -notmatch [regex]::Escape('/* camera-box issue 1372 BEGIN') -or $pw -notmatch [regex]::Escape('/* camera-box issue 1372 END */')) {
+            Write-Error "platform-windows.c: the issue-1372 disciplined os_gettime_ns block is gone -- Windows OBS is back on raw QPC, off the Dante tick"; exit 1
+          }
+          if ($pw -notmatch [regex]::Escape('*num = inc; *den = adj;')) {
+            Write-Error "platform-windows.c: issue 1372 rate is no longer inc/adj -- a larger adjustment SLOWS system time (measured live); adj/inc runs the clock the wrong way"; exit 1
+          }
+          if ($pw -notmatch [regex]::Escape('return seg->base_ns + util_mul_div64(raw_ns, seg->rate_num, seg->rate_den);')) {
+            Write-Error "platform-windows.c: issue 1372 os_clk_seg_now no longer integrates QPC at the disciplined rate"; exit 1
+          }
+          if ($pw -notmatch [regex]::Escape('GetProcAddress(kernelbase, "GetSystemTimeAdjustmentPrecise")')) {
+            Write-Error "platform-windows.c: issue 1372 GetSystemTimeAdjustmentPrecise is no longer resolved from kernelbase.dll (kernel32 does not export it)"; exit 1
+          }
+          if ($pw -notmatch [regex]::Escape('current = os_gettime_ns(); if (current >= time_target) break;')) {
+            Write-Error "platform-windows.c: issue 1372 os_sleepto_ns no longer waits on the disciplined os_gettime_ns clock"; exit 1
+          }
+          if ($pw -match [regex]::Escape('const LONGLONG count_target = util_mul_div64(time_target, freq, 1000000000);')) {
+            Write-Error "platform-windows.c: issue 1372 the raw-QPC os_sleepto_ns target is BACK -- it drifts from the disciplined clock at the dantesync rate"; exit 1
+          }
+          Write-Output "disciplined Windows media clock (issue 1372) -- OK"
+
       # #1325: asrc_process_audio must measure the servo against os_gettime_ns() (the monotonic QPC
       # clock the OBS audio mixer paces on, media-io/audio-io.c — what buffered_ms is balanced
       # against), NOT the dantesync-slewed genlock_wall_now_ns(); AND negate the ppm fed to

@@ -396,6 +396,13 @@ pub mod genlock_grid;
 // per-second grid removes it. Crate-root + default features (Tier-0), no OBS.
 pub mod genlock_grid_bench;
 
+// Issue 1372 part A — the Windows OBS media clock follows the dantesync-disciplined tick: the
+// vendored `os_gettime_ns()` (platform-windows.c) integrates QPC deltas at the system-time rate
+// `inc / adj` from GetSystemTimeAdjustmentPrecise, rebasing on a rate change. Crate-root +
+// std-only (Tier-0 verifiable); the C block is held identical by the committed parity gate
+// `tests/os_clock_discipline_parity_1372.rs`, which lifts it and runs it on a fake Win32 layer.
+pub mod os_clock_discipline;
+
 // #1298 — the pure LOCKED/DEGRADED/UNLOCKED decision for the in-OBS genlock statusbar
 // indicator. Crate-root + std-only so it is Tier-0 verifiable; the C port in
 // `vendor/obs-studio/frontend/widgets/GenlockLockState.hpp` is held identical by the
