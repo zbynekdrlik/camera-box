@@ -515,9 +515,10 @@ fn harness_main(scs: &[Scenario]) -> String {
          \t}}\n",
         v.join(",")
     ));
-    c.push_str(&format!(
-        "\tif (strcmp(argv[1], \"wallqpc\") == 0) {{\n\
-         \t\tg_freq = 10000000ULL; g_inc = 10000000ULL; g_dis = FALSE; g_adj = {WALLQPC_ADJ}ULL;\n\
+    for (name, disabled) in [("wallqpc", "FALSE"), ("wallqpc-raw", "TRUE")] {
+        c.push_str(&format!(
+        "\tif (strcmp(argv[1], \"{name}\") == 0) {{\n\
+         \t\tg_freq = 10000000ULL; g_inc = 10000000ULL; g_dis = {disabled}; g_adj = {WALLQPC_ADJ}ULL;\n\
          \t\tg_qpc = 36000000000ULL; g_wall = 1790000000000000000ULL;\n\
          \t\t(void)os_gettime_ns(); (void)genlock_wall_qpc_drift_ms();\n\
          \t\tconst uint64_t qpc0 = g_qpc, wall0 = g_wall;\n\
@@ -538,6 +539,7 @@ fn harness_main(scs: &[Scenario]) -> String {
          \t\treturn 0;\n\
          \t}}\n"
     ));
+    }
     for (name, step) in BRACKET_STEPS {
         c.push_str(&format!(
             "\tif (strcmp(argv[1], \"{name}\") == 0) {{\n\
@@ -906,28 +908,32 @@ fn a_wasapi_raw_qpc_stamp_is_mapped_onto_the_disciplined_clock() {
 fn the_genlock_wall_qpc_drift_stays_flat_on_the_disciplined_clock() {
     // The genlock code maps wall <-> monotonic only through LIVE offsets (the render tick's
     // `mono + (next_wall - wall)`, the audio pairing's `mono_now - wall_now`), never through a
-    // stored rate, so nothing double-corrects once os_gettime_ns() follows the wall RATE. The
-    // #800 audit term `wall_qpc_drift_ms` is the observable: it must stay ~0 (only dantesync phase
-    // STEPS remain), where raw QPC drifted ~54 ms in the same hour (the live stream showed
-    // 0 -> 67 ms in 83 min).
+    // stored rate. The #800 audit term `wall_qpc_drift_ms` is the observable: on the disciplined
+    // clock it must stay ~0 (only dantesync phase STEPS remain). The raw-QPC control run proves the
+    // lifted helper still measures: with the adjustment disabled (rate 1/1 = the pre-issue-1372
+    // clock) the SAME helper must read tens of ms over the same hour (the live stream showed 0 -> 67
+    // ms in 83 min).
     let dir = Scratch::new("wallqpc");
     let bin = build_harness(&dir, &scenarios());
-    let stdout = run(&bin, "wallqpc");
-    let f: Vec<i64> = stdout
-        .split_whitespace()
-        .map(|t| t.parse().expect("wallqpc fields"))
-        .collect();
-    let (max_abs_ms, raw_drift_ms) = (f[0], f[1]);
+    let read = |name: &str| -> (i64, i64) {
+        let f: Vec<i64> = run(&bin, name)
+            .split_whitespace()
+            .map(|t| t.parse().expect("wallqpc fields"))
+            .collect();
+        (f[0], f[1])
+    };
+    let (raw_helper_ms, raw_drift_ms) = read("wallqpc-raw");
     assert!(
-        raw_drift_ms >= 40,
-        "issue 1372: the scenario must drift raw QPC against the wall clock ({raw_drift_ms} ms) or \\
-         the flat-drift check proves nothing"
+        raw_drift_ms >= 40 && raw_helper_ms >= 40,
+        "issue 1372: on raw QPC the scenario must drift (harness {raw_drift_ms} ms) and the lifted \
+         genlock_wall_qpc_drift_ms must see it ({raw_helper_ms} ms), or the flat check proves nothing"
     );
+    let (max_abs_ms, _) = read("wallqpc");
     assert!(
         max_abs_ms <= 1,
-        "issue 1372: genlock_wall_qpc_drift_ms reached {max_abs_ms} ms over an hour on the \\
-         disciplined clock (raw QPC: {raw_drift_ms} ms) -- os_gettime_ns no longer follows the \\
-         wall rate, or something corrects the rate twice"
+        "issue 1372: genlock_wall_qpc_drift_ms reached {max_abs_ms} ms over an hour on the \
+         disciplined clock (raw QPC: {raw_helper_ms} ms) -- os_gettime_ns no longer follows the \
+         system-time rate"
     );
 }
 
