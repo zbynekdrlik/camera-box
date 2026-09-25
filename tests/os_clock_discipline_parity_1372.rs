@@ -512,8 +512,52 @@ fn harness_main(scs: &[Scenario]) -> String {
          \t}}\n",
         v.join(",")
     ));
+    for (name, step) in BRACKET_STEPS {
+        c.push_str(&format!(
+            "\tif (strcmp(argv[1], \"{name}\") == 0) {{\n\
+             \t\tg_freq = 10000000ULL; g_adj = {SLEEP_ADJ}ULL; g_inc = 10000000ULL; g_dis = FALSE;\n\
+             \t\tg_qpc = 0; (void)os_gettime_ns();\n\
+             \t\tg_qpc = {BRACKET_START_QPC}ULL; (void)os_gettime_ns(); /* polls: the next reads do not */\n\
+             \t\tg_qpc_step = {step};\n\
+             \t\tconst uint64_t mapped = os_raw_qpc_ns_to_gettime_ns({BRACKET_STAMP_NS}ULL);\n\
+             \t\tprintf(\"%llu\\n\", (unsigned long long)mapped);\n\
+             \t\treturn 0;\n\
+             \t}}\n"
+        ));
+    }
     c.push_str("\treturn 3;\n}\n");
     c
+}
+
+/// The bracket scenarios: every counter read advances the fake QPC by `step` counts. 50 counts
+/// (5 us) between reads is inside the 50 us bracket bound; 400 counts is outside it and forces all
+/// four attempts.
+const BRACKET_STEPS: [(&str, u64); 2] = [("bracket-tight", 50), ("bracket-retry", 400)];
+const BRACKET_START_QPC: u64 = 1_000_000_000;
+const BRACKET_STAMP_NS: u64 = 99_990_000_000;
+
+/// The Rust model of `os_raw_qpc_ns_to_gettime_ns` on the scripted fake: the read sequence of up
+/// to four attempts (counter, os_gettime_ns's one counter read, counter), the midpoint, the map.
+fn bracket_expected(step: u64) -> u64 {
+    let freq = 10_000_000;
+    let mut c = DisciplinedClock::new(freq);
+    c.now(0, Some((SLEEP_ADJ, freq, false)));
+    c.now(BRACKET_START_QPC, Some((SLEEP_ADJ, freq, false)));
+    let mut q = BRACKET_START_QPC;
+    let (mut before, mut os_q, mut after) = (0, 0, 0);
+    for _ in 0..4 {
+        before = q;
+        q += step;
+        os_q = q;
+        q += step;
+        after = q;
+        q += step;
+        if after - before <= freq / 20_000 {
+            break;
+        }
+    }
+    let raw_now = mul_div64((before + after) / 2, NS_PER_SEC, freq);
+    map_foreign_clock_ns(BRACKET_STAMP_NS, raw_now, c.seg.now(os_q, freq))
 }
 
 /// `(stamp, clock_now, disciplined_now)` for the foreign-clock mapper: every guard boundary (an age
@@ -818,6 +862,23 @@ fn a_wasapi_raw_qpc_stamp_is_mapped_onto_the_disciplined_clock() {
 }
 
 #[test]
+fn the_raw_qpc_now_is_the_midpoint_of_a_tight_bracket() {
+    // The disciplined now is paired with the MIDPOINT of two counter reads around it, retried while
+    // they are more than 50 us apart -- a preemption between the reads cannot skew the age.
+    let dir = Scratch::new("bracket");
+    let bin = build_harness(&dir, &scenarios());
+    for (name, step) in BRACKET_STEPS {
+        let got: u64 = run(&bin, name).trim().parse().expect("bracket value");
+        assert_eq!(
+            got,
+            bracket_expected(step),
+            "issue 1372 `{name}`: os_raw_qpc_ns_to_gettime_ns no longer pairs the disciplined now \
+             with the midpoint of the last (or first tight) counter bracket"
+        );
+    }
+}
+
+#[test]
 fn the_foreign_clock_mapper_matches_the_rust_authority() {
     let dir = Scratch::new("foreign");
     let bin = build_harness(&dir, &scenarios());
@@ -837,9 +898,10 @@ fn the_foreign_clock_mapper_matches_the_rust_authority() {
 }
 
 #[test]
-fn browser_and_vlc_stamps_are_mapped_on_windows() {
-    // CEF's audio pts is base::TimeTicks ms (QPC-based on Windows) and VLC stamps on its own clock;
-    // both sat on the raw-QPC os_gettime_ns() timeline before issue 1372.
+fn browser_stamps_are_mapped_on_windows() {
+    // CEF's audio pts is base::TimeTicks ms (QPC-based on Windows); it sat on the raw-QPC
+    // os_gettime_ns() timeline before issue 1372. (vlc-video would need the same mapping, but the
+    // Windows bundle is built with ENABLE_VLC=OFF, so it is a documented known limit instead.)
     let browser = fs::read_to_string(repo(
         "vendor/obs-studio/plugins/obs-browser/browser-client.cpp",
     ))
@@ -848,23 +910,6 @@ fn browser_and_vlc_stamps_are_mapped_on_windows() {
         browser
             .contains("audio.timestamp = os_raw_qpc_ns_to_gettime_ns((uint64_t)pts * 1000000LLU);"),
         "issue 1372: obs-browser no longer maps CEF's audio pts onto the disciplined clock"
-    );
-    let vlc = fs::read_to_string(repo(
-        "vendor/obs-studio/plugins/vlc-video/vlc-video-source.c",
-    ))
-    .expect("read vlc-video-source.c");
-    assert!(
-        vlc.contains(
-            "c->frame.timestamp = VLCS_STAMP_NS((uint64_t)libvlc_clock_() * 1000ULL) - time_start;"
-        ) && vlc
-            .contains("c->audio.timestamp = VLCS_STAMP_NS((uint64_t)pts * 1000ULL) - time_start;"),
-        "issue 1372: vlc-video no longer maps its stamps onto the disciplined clock"
-    );
-    assert!(
-        vlc.contains(
-            "os_foreign_clock_ns_to_gettime_ns((stamp_ns), (uint64_t)libvlc_clock_() * 1000ULL)"
-        ),
-        "issue 1372: VLCS_STAMP_NS must measure the age on VLC's own clock"
     );
 }
 
