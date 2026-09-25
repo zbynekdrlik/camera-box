@@ -219,7 +219,21 @@ pub(super) struct AudioLeg {
     /// The smoothed placement error the production ingest measures (actual − intended).
     place_err_ns: i64,
     place_err_seeded: bool,
+    /// Review round 1: an OBS-style mix BUFFER beside the truth, so the production formula
+    /// ([`audio_actual_place_ns`] over `audio_ts` + the buffered length) is what the measurement
+    /// reads: the previous packet's timecode, first-sample instant and the stretch applied by then.
+    /// The buffer end for the next append is `buf_actual + (tc − buf_tc) + (correction − buf_corr)`.
+    buf_tc: u64,
+    buf_actual: f64,
+    buf_corr: f64,
+    /// The largest gap between the production formula's actual instant and the truth
+    /// ([`Self::play_mono`]) over every measured packet, ns.
+    pub(super) max_formula_vs_truth_ns: f64,
 }
+
+/// The mixer's read position (`audio_ts`) sits this far behind real time (the live OBS audio
+/// buffering, 64 ms); the bench's buffered length is measured from it.
+const MIX_BUFFERING_NS: u64 = 64_000_000;
 
 /// `TS_SMOOTHING_THRESHOLD` of `obs-source.c`.
 const TS_SMOOTHING_THRESHOLD_NS: u64 = 70_000_000;
@@ -252,6 +266,10 @@ impl AudioLeg {
             legacy_append_after_reset: false,
             place_err_ns: 0,
             place_err_seeded: false,
+            buf_tc: 0,
+            buf_actual: 0.0,
+            buf_corr: 0.0,
+            max_formula_vs_truth_ns: 0.0,
         }
     }
 
@@ -348,6 +366,9 @@ impl AudioLeg {
         };
         let term = audio_place_term_ns(mode, hold, off_used, self.timing_adjust);
         let prev_term = audio_place_term_ns(self.mode, self.hold_ms, off_used, self.timing_adjust);
+        // the ingest appends on these actions (back to back), and places on the others.
+        let appended =
+            continuous && matches!(action, AudioHoldAction::Continue | AudioHoldAction::Slew);
         match action {
             AudioHoldAction::Withhold => {
                 self.withheld += 1;
@@ -402,17 +423,36 @@ impl AudioLeg {
         }
         self.mode = mode;
         self.hold_ms = hold;
-        // the production ingest's placement measurement: where this packet's first sample actually
-        // plays (the modelled buffer) against where the hold meant it to (in.timestamp after the term).
+        // the production ingest's placement measurement, through the production formula: an
+        // appended packet lands at the buffer end (audio_ts + buffered), a placed one at its own
+        // timestamp; after a timeline reset OBS emptied the buffer and put audio_ts on the arrival
+        // instant (reset_audio_data). The truth (play_mono) is checked against it on every packet.
         if self.placed && mode.is_active() {
             let intended = tc
                 .wrapping_add(self.timing_adjust)
                 .wrapping_add(term as u64);
-            let actual = self.play_mono(tc).round() as u64;
+            let (audio_ts, buffered, end) = if appended && resync {
+                (mono, 0, mono as f64)
+            } else if appended {
+                let end = self.buf_actual
+                    + (tc as f64 - self.buf_tc as f64)
+                    + (self.correction_ns - self.buf_corr);
+                let read = mono.saturating_sub(MIX_BUFFERING_NS);
+                (read, (end - read as f64).round().max(0.0) as u64, end)
+            } else {
+                (0, 0, intended as f64)
+            };
+            let actual = audio_actual_place_ns(appended, audio_ts, buffered, intended);
+            self.max_formula_vs_truth_ns = self
+                .max_formula_vs_truth_ns
+                .max((actual as f64 - self.play_mono(tc)).abs());
             let err = audio_place_error_ns(actual, intended);
             self.place_err_ns =
                 audio_place_error_smooth_ns(self.place_err_ns, err, self.place_err_seeded);
             self.place_err_seeded = true;
+            self.buf_tc = tc;
+            self.buf_actual = end;
+            self.buf_corr = self.correction_ns;
         } else {
             self.place_err_seeded = false;
         }

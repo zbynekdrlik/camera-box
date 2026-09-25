@@ -818,3 +818,53 @@ fn the_shallow_shed_never_chases_a_depth_the_arrival_cannot_supply_1367() {
         100
     ));
 }
+
+#[test]
+fn a_re_latch_clears_the_downward_watches_1367() {
+    // review round 1: the constants the bound and the latch reset stand on.
+    assert_eq!(
+        N1_SHALLOW_MAX_REJECTS, 3,
+        "three rejected windows, the fourth latches"
+    );
+    assert_eq!(N1_SHALLOW_UNDER_TICKS, 180);
+    assert_eq!(N1_SHALLOW_CHURN_RELOCKS, 3);
+    let t = |realized: u64, relock: bool| ShallowTick {
+        realized_frames: realized,
+        backlog_relock: relock,
+        ..tick(false, 2)
+    };
+    // an unreachable D re-measures and re-latches; the latch clears the under count, so the very
+    // next under tick does not re-arm again.
+    let mut s = latched_at_three();
+    for _ in 0..N1_SHALLOW_UNDER_TICKS {
+        n1_shallow_track(&mut s, t(1, false));
+    }
+    assert!(s.measuring);
+    let mut latched = 0;
+    for _ in 1..N1_SHALLOW_SETTLE_TICKS {
+        latched += u32::from(n1_shallow_track(&mut s, t(1, false)));
+    }
+    assert_eq!((latched, s.target_frames, s.measuring), (1, 3, false));
+    assert_eq!(s.under_ticks, 0, "the latch clears the under count");
+    assert!(!n1_shallow_track(&mut s, t(1, false)));
+    assert!(
+        !s.measuring,
+        "one under tick after the latch must not re-measure"
+    );
+    // a relock storm re-measures and re-latches; the latch clears the churn count, so one more
+    // relock right after it does not re-arm.
+    let mut s = latched_at_three();
+    for k in 0..3 * 40 {
+        n1_shallow_track(&mut s, t(u64::MAX, k % 40 == 0));
+    }
+    assert!(s.measuring, "three relocks re-measure");
+    for _ in 1..N1_SHALLOW_SETTLE_TICKS {
+        n1_shallow_track(&mut s, t(u64::MAX, false));
+    }
+    assert!(!s.measuring);
+    assert_eq!(s.churn_relocks, 0, "the latch clears the churn count");
+    for _ in 0..2 {
+        assert!(!n1_shallow_track(&mut s, t(u64::MAX, true)));
+    }
+    assert!(!s.measuring, "two relocks after the latch are not a storm");
+}

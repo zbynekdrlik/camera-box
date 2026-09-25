@@ -231,9 +231,17 @@ pure module + mirror:
   `audio_place_err_ms=`. A hold missing from the samples reads as the gap, never 0.
 - The benches model OBS's append-after-reset (the `AudioLeg` used to re-place on every resync, which
   hid the defect); every bench with a sender restart went RED on the old verdict (|A/V| 96.9 ms). The
-  shallow bench compares the REPORTED pairing offset with the TRUE A/V of the samples on every settled
-  tick (≤ 1.03 ms), and the anti-tautology `legacy_append` run loses the hold (96.9 ms) and the audit
-  reports it within 1.03 ms.
+  measurement runs the PRODUCTION formula (`audio_actual_place_ns` over `audio_ts` = the mixer read
+  position 64 ms behind real time + the buffered length of an OBS-style buffer; after a reset
+  `audio_ts` = the arrival instant and an empty buffer), cross-checked against the modelled truth on
+  every packet (≤ 0.00001 ms). The shallow bench compares the REPORTED pairing offset with the TRUE
+  A/V of the samples on every settled tick (≤ 1.03 ms), and the anti-tautology `legacy_append` run
+  loses the hold (96.9 ms) and the audit reports it within 1.03 ms.
+- **Known limit: rejects at the FIRST lock can outlast the withhold.** While a first window measures,
+  the tracker is PENDING; three spread-rejects plus the latching window is 4 × 90 on-grid ticks
+  (12 s at 30 fps), past `AUDIO_WITHHOLD_MAX_NS` (10 s). The audio then plays on the #1303 latency
+  hold and the latched delay is slewed in (the existing, tested withhold-expiry path) — only on a
+  start that itself carries a multi-second transient.
 
 **Audio-thread stall probe (the FOH-click report, 25.9.2026).** The obs-vban raw-audio output on
 resolume sent with 308–378 ms gaps while the recording was clean. `obs-audio.c` `audio_callback`
@@ -241,8 +249,14 @@ records the gap since the previous tick's entry and its own duration; the 60 s `
 `audio-stall #1367: tick_gap_max_ms= callback_max_ms= ticks= ticks_over= tick_ms=` (ticks_over = gaps
 over 1.5 ticks) and resets. Healthy: `tick_gap_max_ms` near `tick_ms` (21.3 at 48 kHz), `ticks_over=0`.
 The genlock audio path takes no lock beyond the pre-existing `audio_buf_mutex`, calls no blocking API
-(two clock reads) and has no loop, so it is not a stall candidate; the probe proves the mixer side
-either way on the next deploy (a clean probe with VBAN gaps puts them in the obs-vban output itself).
+(two clock reads) and has no loop, so it is not a stall candidate. **Reading the probe (review round
+1):** `media-io/audio-io.c` runs `audio_callback` and then `do_audio_output` — every raw-audio output
+callback, obs-vban included — on the SAME thread, so a blocking output callback delays the NEXT entry:
+- `tick_gap_max_ms ≈ callback_max_ms` (both large) → the mixer / `execute_audio_tasks` stalled;
+- `tick_gap_max_ms ≫ callback_max_ms` → the output callbacks (obs-vban's send) or thread scheduling
+  stalled — NOT the mixer;
+- a clean probe (`ticks_over=0`) while VBAN still gaps → obs-vban's own send path (its socket /
+  sender thread), outside this thread.
 Anchored by `tests/audio_telemetry_800.rs` (both `audio_callback` returns close the probe's tick).
 
 **Lock-step anchors of THIS change** (all must move together): the std-only

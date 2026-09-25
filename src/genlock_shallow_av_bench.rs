@@ -112,6 +112,8 @@ struct Run {
     /// The largest gap between the REPORTED pairing offset (the audit's realized audio side minus
     /// the measured video delay) and the TRUE A/V error of the samples, on the same ticks.
     max_pairing_vs_av_ms: f64,
+    /// The largest gap between the production placement formula and the modelled truth, ms.
+    max_formula_vs_truth_ms: f64,
     /// |A/V| while the audio is still slewing onto a new hold (excluded from `max_abs_av_ms`, which
     /// is the settled pairing), and how many ticks the audio spent slewing.
     max_abs_av_slew_ms: f64,
@@ -337,6 +339,9 @@ fn run(sc: Scenario) -> Run {
             }
         }
         out.slewing_ticks += u64::from(audio.slewing());
+        out.max_formula_vs_truth_ms = out
+            .max_formula_vs_truth_ms
+            .max(audio.max_formula_vs_truth_ns / 1e6);
         nominal = grid_next_boundary_ns(nominal, IV_NS);
     }
     out.places = totals.0 + audio.places;
@@ -651,6 +656,13 @@ fn a_sender_restart_never_appends_the_audio_at_arrival_1367() {
         "the reported pairing offset left the true A/V by {:.2} ms",
         r.max_pairing_vs_av_ms
     );
+    // review round 1: the measurement runs the PRODUCTION formula (audio_ts + buffered for an
+    // append) over an OBS-style buffer, and it agrees with the modelled truth on every packet.
+    assert!(
+        r.max_formula_vs_truth_ms <= 0.01,
+        "the placement formula left the truth by {:.4} ms",
+        r.max_formula_vs_truth_ms
+    );
 }
 
 #[test]
@@ -673,5 +685,11 @@ fn the_append_after_reset_loses_the_hold_and_the_audit_now_says_so_1367() {
         r.max_pairing_vs_av_ms <= 4.0,
         "the audit must report the lost hold: pairing vs true A/V {:.2} ms",
         r.max_pairing_vs_av_ms
+    );
+    // the append after the reset goes through audio_ts (the arrival) + an empty buffer.
+    assert!(
+        r.max_formula_vs_truth_ms <= 0.01,
+        "the placement formula left the truth by {:.4} ms",
+        r.max_formula_vs_truth_ms
     );
 }

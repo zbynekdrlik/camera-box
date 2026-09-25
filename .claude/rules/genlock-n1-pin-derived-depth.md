@@ -242,6 +242,13 @@ its fall, an unreachable D and a relock storm (latched `… 2 2 4 4 3 3 3`); it 
 one loop (per-tick statements compiled for minutes). Mutation sweep: 22/25 RED at landing, the two
 real survivors (the shed guard, a lock left mid-count) closed with new vectors, one equivalent mutant.
 
+**Known limit (review round 1): an unreachable D has no two-clock bench case.** The `unreachable`
+and `relocks` watches are proven by unit + parity tests. On a feed where every re-latched D stays
+unreachable, a re-measure (and its `genlock-shallow-remeasure` line) repeats about every 270 on-grid
+ticks (180 watched + 90 window) — no rate limit; the bench's transient cases never reach it because
+the p90 / spread / clamp keep the latched D reachable. `(d)` also FOLLOWS a realized delay above the
+lock (a clamp under a slow arrival), a decided extension of "never exceeds".
+
 **Live acceptance (supervisor).** After a SongPlayer song change / pause-resume cycle on resolume:
 `shallow_depth ≤ base + 3` (≤ 4 at pin 3), `relocks=` flat, no `genlock-shallow-remeasure
 reason=unreachable|relocks` in steady state, and the songplayer gate ±40 ms with 0 dropouts.

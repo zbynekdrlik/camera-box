@@ -215,8 +215,10 @@ pub fn should_hold_n1_phase(
 //
 // THE RULE. After each LOCK, measure the ARRIVAL FLOOR — the rounded age of the newest queued frame
 // at the tick's scheduled instant — over [`N1_SHALLOW_SETTLE_TICKS`] on-grid present ticks and LATCH
-// `D = max(base, floor_max) + 1` ([`n1_shallow_target_frames`]): one frame of jitter headroom above
-// the worst arrival seen. D then stays constant until the next relock (an ACQUIRE, a GAP RESYNC over
+// `D = max(base, p90 floor) + 1` ([`n1_shallow_target_frames`]): one frame of jitter headroom above
+// the window's 90th-percentile arrival (design 5830750134 — the window MAX let one sender transient
+// latch D 12 = 400 ms live; a window whose p10–p90 spread exceeds a frame re-measures instead, and D
+// is clamped to `base + N1_SHALLOW_MAX_EXTRA_FRAMES` and reported). D then stays constant until the next relock (an ACQUIRE, a GAP RESYNC over
 // a gap of at least [`N1_SHALLOW_RELOCK_GAP_NS`] = a sender restart, or a pin change), and the same
 // one-frame hold / shed as the deep rule keeps the presented depth ON D
 // ([`n1_shallow_hold_due`] / [`n1_shallow_shed_due`]). Stamps and scheduled ticks share the
@@ -238,9 +240,12 @@ pub fn should_hold_n1_phase(
 // A DEEP source (the pin, not the arrival, decides its depth) latches the pin rule's own
 // `base + 1`, whatever its floor did during the window, so the two rules can never disagree.
 //
-// Re-measure without a relock (review round 1): a latched source whose rounded floor sits AT or
-// OVER D for a whole settle window (its arrival rose — the frame at D is the newest or not there
-// yet) re-arms; and an N==1 source with no depth, no window and no cap (it became N==1 without an
+// Re-measure without a relock ([`n1_shallow_watch`]): a latched source whose rounded floor sits AT
+// or OVER D for a whole settle window (its arrival rose, review round 1) — or, for a CLAMPED latch,
+// two frames or more under D (the over-cap floor was a transient) — re-arms; so does one whose
+// REALIZED depth stays under D for [`N1_SHALLOW_UNDER_TICKS`] (D is unreachable) or that takes
+// [`N1_SHALLOW_CHURN_RELOCKS`] backlog relocks without a quiet gap (a relock storm against D,
+// design 5830750134). An N==1 source with no depth, no window and no cap (it became N==1 without an
 // ACQUIRE, e.g. a 60p sender switched to 30p) opens a window.
 
 /// issue 1367 — the on-grid PRESENT ticks the arrival floor is measured over after a lock
