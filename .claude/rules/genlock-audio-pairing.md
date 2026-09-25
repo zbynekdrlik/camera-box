@@ -49,7 +49,8 @@ the AUDIO leg a first-class genlocked signal with the same evidence bar.
 `src/genlock_audio_pairing.rs` is the Tier-0 authority: the video-delay tracker
 (`video_delay_sample_ns` / `_smooth_ns` / `_round_ms` / `_moved` / `video_delay_track`), the hold
 (`audio_hold_mode` / `audio_hold_ms` / `AudioHoldMode::token`), the placement
-(`audio_wall_to_mono_ns` / `audio_place_term_ns` / `audio_place_shift_ms`), the offset
+(`audio_wall_to_mono_ns` / `audio_place_term_ns`; the level shift of a placement is
+`audio_level_shift_ns`), the offset
 (`video_delay_reference_ns` / `pairing_offset_ms`) and `decide_audio_health` (Ok /
 AudioDisabledOnProgram / AsrcSaturated / PairingOffsetExceeded — precedence in that order; the
 pairing bound is HALF a frame, strict, since issue 1367). The C mirror is ONE contiguous block of
@@ -180,7 +181,9 @@ described here stay as they are.
 - **Between placements** packets append back to back, and the genlock ASRC (the rate servo
   disciplined against the wall clock plus its level loop) holds the captured depth. That is what
   absorbs the wall-vs-QPC drift; the placement only has to be right when it happens.
-- **The pairing offset is a PROXY.** `audio_pairing_offset_ms` = applied hold − measured delay. It
+- **The pairing offset is a PROXY.** `audio_pairing_offset_ms` = (applied hold − the slew still
+  owed, `audio_applied_delay_ns`) − measured delay: mid-slew it reads how far the audio still trails
+  (a one-frame re-time reads −33 ms at the start and walks to 0 over ~33 s; review round 2). It
   never observes where the audio samples actually sit, so a wrong placement, or a depth the rate
   servo walked, would still read 0. Real A/V proof stays with an end-to-end measurement (the
   songplayer A/V gate, the camera-box E2E A/V gate).
@@ -230,8 +233,14 @@ Clean feed: the depth latches once per lock and never moves, 0 hold/shed/drain/u
 presents) and the free tracker re-times the audio 36 times. A min-latency box REPORTS a floor
 over base + 1 and applies no depth (0 corrections). Review-round-1 scenarios: a band straddling
 the SECOND frame edge (50–80 ms) locks 4 frames; a band that rises mid-run with no gap
-(28–40 → 60–80 ms) re-measures 3 → 4 and slews the audio exactly once; a sender restart onto a
-slower band relatches 3 → 4 and slews once — 0 steps in all of them. The bench's rate estimate converges on the TRUE
+(28–40 → 70–95 ms, every rounded floor = D) re-measures 3 → 4 at the rise — D 4 is presented from
+~1510 s, not only after the later sender restart — and slews the audio exactly once; a sender
+restart onto a slower band (60–80 ms) relatches 3 → 4 and slews once — 0 steps in all of them.
+(A 60–80 ms RISE floors at 2 or 3 and never re-measures; the first round's scenario used it and
+only passed through the sender-restart relatch — corrected in review round 2.) The SLEW window is
+measured on its own: while the audio walks onto the new hold it trails the video by ≤ 29.1 ms
+(bound `SLEW_MAX_AV_MS` = 40, the songplayer gate) for 990 ticks (33 s); the settled `|A/V| ≤ 5 ms`
+excludes those ticks. The bench's rate estimate converges on the TRUE
 drift by construction, so it ASSUMES drift is absorbed between placements (the real servo is
 proven by `src/asrc_bench.rs`). What it proves is that each placement lands on the live offset.
 

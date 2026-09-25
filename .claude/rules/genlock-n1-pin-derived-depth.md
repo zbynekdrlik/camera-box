@@ -1,6 +1,7 @@
 ---
 paths:
   - "src/genlock_n1_depth.rs"
+  - "src/genlock_n1_depth_tests.rs"
   - "src/genlock_grid_bench.rs"
   - "src/genlock_grid_bench_tests.rs"
   - "tests/genlock_relock_selection_parity.rs"
@@ -9,6 +10,8 @@ paths:
   - "src/probe/genlock_n1_tests.rs"
   - "src/genlock_shallow_av_bench.rs"
   - "tests/genlock_shallow_depth_wiring_1367.rs"
+  - "tests/genlock_shallow_depth_parity_1367.rs"
+  - "tests/genlock_n1_lift/mod.rs"
 ---
 
 # The N==1 PIN-DERIVED DEPTH (issue 1367) — one depth after every restart
@@ -128,7 +131,8 @@ frame at the tick's SCHEDULED instant, `n1_depth_frames(tick_wall, newest)`) ove
 |---|---|---|
 | latch target + imag cap | `n1_shallow_target_frames(base, floor_max, deep, min_latency)` → `(D, capped)`, `D = 0` when capped | `genlock_n1_shallow_target_frames(…, deep, min_latency_box, bool *capped)` |
 | relock gap | `n1_shallow_gap_is_relock` (≥ 1 s) | `genlock_n1_shallow_gap_is_relock`, `GENLOCK_N1_SHALLOW_RELOCK_GAP_NS` |
-| window + re-measure | `n1_shallow_rearm` / `n1_shallow_track` (`ShallowDepth` incl. `over_ticks`, per-tick `ShallowTick`) | `genlock_n1_shallow_rearm` / `genlock_n1_shallow_track` (the six `genlock_shallow_*` state fields) |
+| window + re-measure | `n1_shallow_rearm` / `n1_shallow_track` (`ShallowDepth` incl. `over_ticks` + `deep_ticks`, per-tick `ShallowTick`) | `genlock_n1_shallow_rearm` / `genlock_n1_shallow_track` (the seven `genlock_shallow_*` state fields) |
+| the window's deep verdict | `n1_shallow_window_deep` (strict majority) | `genlock_n1_shallow_window_deep` |
 | the present-tail latch | — | `genlock_shallow_latch(source, tick_wall, wall_now, interval, reserve_ms, relock)` (computes `deep`, calls the tracker, logs) |
 | governs (not deep) | `n1_shallow_governs` | `genlock_n1_shallow_governs` + the source wrapper `genlock_n1_shallow_governs_now` |
 | SHED / HOLD | `n1_shallow_shed_due` / `n1_shallow_hold_due` | ORed next to the deep halves in `genlock_should_converge_phase` / `genlock_should_hold_n1_phase` |
@@ -157,8 +161,14 @@ What carries it (do not undo):
   became N==1 without an ACQUIRE (its canvas-rate ratio changed) still gets a D.
 - **Deep sources keep the pin rule.** The shallow halves act only while `!n1_is_deep_source`, and a
   deep source LATCHES the pin rule's own `base + 1` (the `deep` flag of the target), never a
-  floor-derived D, so the audio lock is harmless there (2ME PGM carries no audio anyway). An N>=2
-  tick clears the whole state (`last_known_n < 2` gates it).
+  floor-derived D, so the audio lock is harmless there (2ME PGM carries no audio anyway). The deep
+  flag is the window's strict MAJORITY (`deep_ticks * 2 > window_ticks`, review round 2): read on
+  the one latch tick, a startup stall still running there would latch `floor_max + 1` (~100 ms too
+  deep for the audio) on a deep source. An N>=2 tick clears the whole state (`last_known_n < 2`
+  gates it). An UNKNOWN N (`last_known_n = 0` after an ACQUIRE / GAP RESYNC, until
+  `genlock_effective_source_multiple` re-confirms it — normally the same or the next tick) reads as
+  N==1: an N>=2 source then opens a window for that tick, which only freezes its audio tracker
+  (PENDING) until the next tick clears it. Harmless, documented at `genlock_shallow_latch`.
 - **The #859 queue-length drain stays out while D governs** (`drain_eligible = false` after the N==1
   mark): a queue-length read would shed a correctly deep conveyor on a wide arrival spread, and the
   shallow shed already covers depth > D.
@@ -170,9 +180,14 @@ What carries it (do not undo):
   drain stays on, no auto re-measure churns it until a real relock, and the report is
   `genlock-shallow-lock … wanted_frames=<D> capped=1` at LOG_WARNING + `shallow_capped=1`. A box
   without the marker (every Windows box, strih-lx) reads false. The marker fails OPEN when absent,
-  so it is written in THREE places and gated: `setup-imag.sh` step 13, the fleet deploy's imag leg
-  (step 5a, before the supervised restart that loads the new libobs) and `verify-imag.sh` check
-  (bc), which FAILs an absent or unreadable marker before check (o)'s OBS restart.
+  so it is written in TWO places — `setup-imag.sh` step 13 and the fleet deploy's imag leg (step 5a,
+  as the desktop user from `getent`, before the supervised restart that loads the new libobs) — and
+  gated twice by `verify-imag.sh`: check (bc) FAILs an absent or unreadable marker before check
+  (o)'s OBS restart, and check (bd), after that restart, requires the NEW OBS log to say
+  `genlock-min-latency: ON` (libobs reads the marker once per process, so the file alone does not
+  prove the loaded libobs honours it). Note for the owner: on imag an uncapped governed input is
+  held at `base + 1` = 2 frames, one frame deeper than a free conveyor whose floor sits at or below
+  base; that is the decided formula, recorded on the ticket.
 
 Observability: one `genlock-shallow-lock '<src>': depth_frames= floor_max_frames= base_frames=
 wanted_frames= latency_ms= capped=` line per latch, and `shallow_depth= shallow_capped= shallow_latches=` on the
@@ -182,13 +197,18 @@ audit line (audit-line-only).
 `lib.rs` with `#[path]` mods for `genlock_grid`, `genlock_backlog`, `genlock_n1_depth`,
 `genlock_grid_bench`, `genlock_audio_pairing` (the shallow bench is a `#[path]` child of the audio
 pairing bench, which is a child of `genlock_audio_pairing`); `rustc --test` + `clippy-driver --test
--D warnings`. The parity gate `c_n1_shallow_depth_matches_the_rust_authority_1367` lifts the new
-helpers with the rest of the N==1 block (the two new `#define`s are in `converge_defines`). Mutation
+-D warnings`. The parity gate `c_n1_shallow_depth_matches_the_rust_authority_1367` (its own file
+`tests/genlock_shallow_depth_parity_1367.rs` since review round 2 — the relock parity file was past
+the 1000-line budget) lifts the new helpers with the rest of the N==1 block through the shared
+directory module `tests/genlock_n1_lift/mod.rs` (`lift_converge_helper` / `converge_defines` /
+`compile_and_run_n1_block`, used by both files; the two new `#define`s are in `converge_defines`).
+Its tick sequence covers a relock in the middle of an open window, a capped report then a relock,
+and a deep window whose latch tick reads not-deep. Mutation
 proof: COMPILE each parity test with `CARGO_MANIFEST_DIR=<scratch repo with the mutated C>` —
 `env!` is resolved at COMPILE time, so setting it only at run time silently tests the unmutated
-file (20/20 RED at landing, 27/27 after review round 1 — the deep flag, the capped 0, the
-re-measure, the auto-window, the booking and the fold each have a mutation; 0/20 when only the
-run-time env was set). The std-only
+file (20/20 RED at landing, 31/31 after review round 2 — the deep flag + its majority, the capped
+0, the re-measure, the auto-window, the booking, the fold and the applied audio delay each have a
+mutation; 0/20 when only the run-time env was set). The std-only
 `tests/genlock_shallow_depth_wiring_1367.rs` pins the wiring, mirrored in both
 `windows-genlock*.yml`.
 
