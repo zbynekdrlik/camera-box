@@ -188,6 +188,144 @@ fn the_installer_fails_before_touching_anything_without_the_pm_qos_device() {
     );
 }
 
+/// Run the REAL installer under the callers' `set -euo pipefail` (setup-imag.sh / setup-strih.sh),
+/// with its /etc + /usr/local/sbin paths and the device test moved into `t`, the caller's FETCH
+/// copying the repo files, and a `systemctl` stub that logs every call to `t/calls` and answers
+/// `is-active` with `ACTIVE_RC` (default 0). `body` runs after the definitions.
+fn run_installer(t: &Path, env: &[(&str, &str)], body: &str) -> (i32, String, String) {
+    let tp = t.to_str().unwrap();
+    let f = baseline_fn("obs_box_cpu_latency")
+        .replace("/etc/systemd/system", &format!("{tp}/unit"))
+        .replace("/usr/local/sbin", &format!("{tp}/sbin"))
+        .replace("[ -c /dev/cpu_dma_latency ]", &format!("[ -e {tp}/qos ]"));
+    let harness = format!(
+        "set -euo pipefail\nfail() {{ echo \"FAIL: $1\" >&2; exit 1; }}\nYELLOW=''; NC=''\n\
+         . \"$LIB\"\n{f}\n}}\n\
+         fetch() {{ cp \"$REPO/$1\" \"$2\"; }}\n\
+         systemctl() {{ echo \"$*\" >> \"$T/calls\"; \
+         if [ \"$1\" = is-active ]; then return \"${{ACTIVE_RC:-0}}\"; fi; }}\n\
+         mkdir -p \"$T/unit\"; : > \"$T/qos\"\n{body}"
+    );
+    let mut cmd = Command::new("bash");
+    cmd.arg("-c")
+        .arg(&harness)
+        .env("LIB", manifest_dir().join(BASELINE))
+        .env("REPO", manifest_dir())
+        .env("T", t);
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
+    let out = cmd.output().expect("run the installer harness");
+    (
+        out.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        String::from_utf8_lossy(&out.stderr).into_owned(),
+    )
+}
+
+fn calls(t: &Path) -> Vec<String> {
+    std::fs::read_to_string(t.join("calls"))
+        .unwrap_or_default()
+        .lines()
+        .map(str::to_string)
+        .collect()
+}
+
+/// A box that never had the holder (strih-lx and imag today): the installer runs to the end under
+/// `set -euo pipefail`, installs both files byte-identical to the repo (holder executable), enables
+/// the unit and RESTARTS it (the text changed), then checks it is active.
+#[test]
+fn the_installer_completes_a_first_install_under_errexit() {
+    let d = tempfile::tempdir().unwrap();
+    let (c, out, err) = run_installer(d.path(), &[], "obs_box_cpu_latency fetch\necho DONE");
+    assert_eq!(
+        c, 0,
+        "a first install must not abort: stdout={out} stderr={err}"
+    );
+    assert!(out.contains("DONE"), "{out}");
+    assert_eq!(
+        std::fs::read(d.path().join("sbin/obs-box-cpu-latency-hold.sh")).unwrap(),
+        std::fs::read(manifest_dir().join(HOLDER)).unwrap()
+    );
+    assert_eq!(
+        std::fs::read(d.path().join("unit/obs-box-cpu-latency.service")).unwrap(),
+        std::fs::read(manifest_dir().join(UNIT)).unwrap()
+    );
+    let mode = std::fs::metadata(d.path().join("sbin/obs-box-cpu-latency-hold.sh"))
+        .unwrap()
+        .permissions();
+    assert_eq!(
+        std::os::unix::fs::PermissionsExt::mode(&mode) & 0o777,
+        0o755
+    );
+    assert_eq!(
+        calls(d.path()),
+        [
+            "daemon-reload",
+            "enable obs-box-cpu-latency.service",
+            "restart obs-box-cpu-latency.service",
+            "is-active --quiet obs-box-cpu-latency.service",
+        ]
+    );
+}
+
+/// A re-run with the SAME installed text only starts the unit (a no-op when it is active) -- the
+/// strih-lx genlock deploy re-runs setup-strih every time and must not bounce the holder.
+#[test]
+fn the_installer_rerun_starts_without_a_restart() {
+    let d = tempfile::tempdir().unwrap();
+    let (c, out, err) = run_installer(
+        d.path(),
+        &[],
+        "obs_box_cpu_latency fetch\n: > \"$T/calls\"\nobs_box_cpu_latency fetch\necho DONE",
+    );
+    assert_eq!(c, 0, "stdout={out} stderr={err}");
+    assert!(out.contains("DONE"), "{out}");
+    let got = calls(d.path());
+    assert!(
+        got.contains(&"start obs-box-cpu-latency.service".to_string())
+            && !got.iter().any(|l| l.starts_with("restart")),
+        "{got:?}"
+    );
+}
+
+/// Only one of the two files present (an interrupted earlier install): still installs + restarts.
+#[test]
+fn the_installer_completes_when_only_one_file_is_present() {
+    let d = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(d.path().join("unit")).unwrap();
+    std::fs::copy(
+        manifest_dir().join(UNIT),
+        d.path().join("unit/obs-box-cpu-latency.service"),
+    )
+    .unwrap();
+    let (c, out, err) = run_installer(d.path(), &[], "obs_box_cpu_latency fetch\necho DONE");
+    assert_eq!(c, 0, "stdout={out} stderr={err}");
+    assert!(out.contains("DONE"), "{out}");
+    assert!(
+        calls(d.path()).contains(&"restart obs-box-cpu-latency.service".to_string()),
+        "{:?}",
+        calls(d.path())
+    );
+}
+
+/// A holder that is not running after the start fails the installer loud.
+#[test]
+fn the_installer_fails_loud_when_the_holder_is_not_active() {
+    let d = tempfile::tempdir().unwrap();
+    let (c, out, err) = run_installer(
+        d.path(),
+        &[("ACTIVE_RC", "3")],
+        "obs_box_cpu_latency fetch\necho DONE",
+    );
+    assert_eq!(c, 1, "stdout={out} stderr={err}");
+    assert!(!out.contains("DONE"), "{out}");
+    assert!(
+        err.contains("FAIL: issue 1357: obs-box-cpu-latency.service is not active"),
+        "{err}"
+    );
+}
+
 // ------------------------------------------------------------------------------------------------
 // the holder
 // ------------------------------------------------------------------------------------------------
