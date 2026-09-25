@@ -755,6 +755,23 @@ fn remoteos_pip_keeps_the_proxy_ca_and_index_variables() {
         "PIPPASS: PROXY=http://proxy.invalid:3128 ALL=socks5://proxy.invalid:1080 INDEX=https://pypi.invalid/simple CERT=/etc/ssl/pip.pem CA=/etc/ssl/ca.pem HOME={want_home}"
     );
     assert!(rig.log().contains(&want), "{}", rig.log());
+
+    // The root branch, on any runner: an `id` that reports uid 0 must give pip HOME=/root even when
+    // the caller exported the operator's HOME (a `sudo -E` run).
+    let rig = Rig::new();
+    write_exec(
+        &rig.base.join("bin/id"),
+        "#!/bin/bash\ncase \"$*\" in -u) echo 0 ;; *) exec /usr/bin/id \"$@\" ;; esac\n",
+    );
+    let (c, out, err) = rig.install(
+        &[
+            ("REMOTEOS_MCP_AUTH_KEY", "abc123"),
+            ("HOME", "/home/pipuser1361"),
+        ],
+        &format!("{} headless enable-only", whoami()),
+    );
+    assert_eq!(c, 0, "stdout={out}\nstderr={err}");
+    assert!(rig.log().contains(" HOME=/root"), "{}", rig.log());
 }
 
 /// Review round 1: a failed pip never breaks a working box -- the installed venv is kept (WARNING)
@@ -846,8 +863,9 @@ fn remoteos_refuses_a_source_without_constraints() {
     assert!(!rig.log().contains("PIP: "), "pip never runs");
 }
 
-/// Review round 2: the headless (cam) service user is SUDO_USER, else the EXISTING unit's User= (the
-/// documented systemd-run re-run of setup-device runs as root with no SUDO_USER), else root.
+/// Review rounds 2-3: the headless (cam) service user is the EXISTING unit's User= first (neither a
+/// sudo re-run nor the documented systemd-run re-run as root moves the account), else SUDO_USER on a
+/// fresh box, else root.
 #[test]
 fn remoteos_headless_user_keeps_the_existing_account() {
     let unit_dir = tempfile::tempdir().unwrap();
