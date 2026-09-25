@@ -293,3 +293,59 @@ each `sp-*_video` logs one `genlock-shallow-lock` per OBS start (depth 2–3), t
 `ts_head_skew_ms` stays on `depth × 33` apart from ≤ 1 s excursions, `shallow_latches=` stays flat
 between restarts, `audio_slews=` / `audio_steps=` stay 0. The songplayer gate (±40 ms, 0 dropouts)
 passes across two OBS restarts.
+
+## A skipped stamp never shortens D — the GAP hold (design 5833339163)
+
+**Why.** Live resolume 25.9.2026 15:29: a SongPlayer song change + operator scene switches made the
+sender skip stamps on `sp-slow_video` (D 3). Audit: `stamp_gap` +11 / `underruns` +7 per 5 s,
+`video_delay_ms=67 audio_delay_ms=100 audio_pairing_offset_ms=33` for ~10 s, `shallow_depth=3`,
+relocks / sheds flat. Mechanism: a skipped stamp puts the head past the locked boundary, so the
+tick takes GAP RESYNC, which presented the head AT ONCE at its arrival age — one frame (or more)
+under D. The STEADY branch cannot present shallower than D (its head stamp is ≤ the boundary), so
+GAP RESYNC is the only path that loses depth. The restore (`n1_shallow_hold_due`) shares the #859
+throttle, whose counter only advances on STEADY presents: one frame back per ≥ 1 s of clean
+presents, while the next skips re-shallowed it. Not the grid guard, not the rounding, not a
+starvation repeat (an empty tick presents nothing).
+
+| Piece | Rust | C (`obs-source.c`) |
+|---|---|---|
+| pure decision | `n1_shallow_gap_hold_due(tick_wall, head, next, boundary, floor, pin, interval, D)` | `genlock_n1_shallow_gap_hold_due` (in the contiguous N==1 block, parity-lifted) |
+| source wrapper | the GAP arm of `Fifo::tick` (`genlock_grid_bench.rs`) | `genlock_should_hold_n1_gap` (N==1 only, on-grid, scheduled instant) |
+| call site | — | head of the GAP RESYNC branch: hold → `n1_grows++`, `return false` |
+
+What carries it (do not undo):
+- **Unthrottled.** The head ages a frame per tick, so the hold ends within D ticks; it never moves
+  the conveyor off D, so it cannot limit-cycle with the shed. The #859 counter is left alone.
+- **A normal frame is never held.** Per-second stamps step 33 333 300 / 33 333 400 ns against a
+  boundary of presented + 33 333 333, so about one normal frame in three takes GAP RESYNC — but it is
+  already D old there.
+- **Relock gaps (≥ 1 s) keep the old path** (the window re-measures); deep, unlatched, capped and
+  N>=2 sources are untouched.
+- **The duplicate guard.** A send-time-stamping sender (strih-lx, the #1355 residual) labels a slow
+  frame one slot late and the NEXT frame repeats the stamp: the head is on time. `next ≤ head`
+  (the second queued frame) → present. Without it the grid bench's shallow strih-lx case turned 55
+  labels into 55 holds + 55 sheds.
+
+**Known limit (review round 1).** The guard only sees a duplicate that is ALREADY queued. When it
+has not arrived, the hold fires on the label (a repeat, then a shallow shed): 0 at the live strih-lx
+jitter, 22 + 22 per 2 h at σ 4 ms (`a_late_label_without_its_queued_duplicate_costs_a_bounded_repeat_1367`
+pins ≤ 30 + 30, paired). The stamps alone cannot separate it from a real skip ("hold only when
+two frames short" brings the song-change bug straight back); a real fix needs per-frame arrival
+times. A non-30-multiple source (25/50p, 29.97) with a latched D now takes the GAP hold on most
+ticks, holding its presented age at ~D — untested, no such source on the rig.
+
+**Bench** (`genlock_shallow_av_bench.rs`, `Scenario::song_change` = for 12 s skip 1 / 2 / 3 stamps
+every 500 ms on the 40–64 ms feed): RED 273 of 402 presents under D, video delay 67 vs audio 100,
+|A/V| 31.6 ms; GREEN 0 under D, 100 / 100, 1.72 ms. Its metrics sample EVERY presenting tick of the
+window (a shallow present is exactly what the settled gate skips). Parity: 12 edge families × 60
+ages + a degenerate interval + an unlocked boundary near the epoch (the boundary guard is otherwise
+equivalent to the relock check); 8 / 8 C mutations RED. The C wrapper was lifted with a stub
+`obs_source_t` and driven (hold / duplicate / nothing queued / N>=2 / unknown N / at D / 20 ms off
+the grid / no D / empty queue). Anchors: `genlock_n1_tick_wall_now(wall_now)` count 4, the on-grid
+wrapper return count 3, `tests/genlock_shallow_depth_wiring_1367.rs` + both pwsh gates.
+
+**Live acceptance (supervisor).** After a SongPlayer song change / scene switch on resolume:
+`video_delay_ms` stays on `shallow_depth × 33` (no 67 against an audio 100), `audio_pairing_offset_ms`
+within ±16. `n1_grows=` rises once per real skipped stamp (`stamp_gap=`) with NO `converge_sheds=`
+partner; the two climbing TOGETHER on a shallow feed (strih-lx `CG-obs`, `sp-*`) is the late-label
+residual above.

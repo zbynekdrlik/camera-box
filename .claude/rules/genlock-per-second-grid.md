@@ -145,7 +145,12 @@ failed on today's arithmetic and the GREEN one passes.
   stamped one slot late (a gap) followed by an on-time duplicate stamp (~31/h in the bench), but
   the release presents both frames at their normal ticks (a GAP-RESYNC, then STEADY; only the
   stamp-derived age reads one frame short for that one tick) — no hold, no duplicate, no skip, no
-  depth change. On the 1970 grid the same pair cost a held frame (a
+  depth change. **Since the issue-1367 GAP hold (design 5833339163) that is true on a SHALLOW
+  latched source only while the duplicate is already queued behind the late-labelled head;** when
+  it has not arrived yet, the GAP hold reads the label as a real skip and costs a repeat + a
+  shallow shed (0 at the live strih-lx jitter, 22 + 22 per 2 h at σ 4 ms, pinned in
+  `a_late_label_without_its_queued_duplicate_costs_a_bounded_repeat_1367`; see
+  `genlock-n1-pin-derived-depth.md`). A deep source (the 2ME PGM) is unaffected. On the 1970 grid the same pair cost a held frame (a
   visible duplicate), a +1 frame A/V step, and later a drained frame (a visible skip). With the
   10× sender tail the production grid still gives 3.7 flips/h (sampled blips) vs 52.6 on 1970.
 - This bench DOES reproduce its target, unlike SimConveyor1049 for the N>=2 ladder
