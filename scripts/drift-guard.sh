@@ -1483,6 +1483,38 @@ drift_check() {
   esac
 }
 
+# drift_check_either LABEL EXPECTED EXPECTED_ALT OBSERVED MANIFEST ALT_MANIFEST -> #1346: the exact
+# build-SHA compare against TWO acceptable entries -- the primary manifest's and the alternate's. The
+# two Windows CI workflows (windows-genlock-fast.yml + the full windows-genlock.yml bundle) are NOT
+# byte-reproducible, so for ONE marker sha the fast obs.dll and the full bundle's bin/64bit/obs.dll
+# differ; a box deployed from either is correct. OK names WHICH manifest matched; DRIFT names both
+# accepted shas and the observed one; an unread observed value or a component neither manifest lists
+# is UNKNOWN (never a false clean). An empty EXPECTED/EXPECTED_ALT is simply not a candidate.
+# Prints one status line; returns 0 OK / 2 DRIFT / 3 UNKNOWN (the drift_check contract).
+drift_check_either() {
+  local label="$1" expected="$2" expected_alt="$3" observed="$4" manifest="$5" alt="$6"
+  if [ -z "$expected" ] && [ -z "$expected_alt" ]; then
+    printf '  %-20s UNKNOWN  (neither manifest %s nor alternate manifest %s lists its sha256)\n' \
+      "$label" "$manifest" "$alt"
+    return 3
+  fi
+  local want="${expected:-<not listed>} (manifest ${manifest}) or ${expected_alt:-<not listed>} (alternate ${alt})"
+  if [ -z "$observed" ]; then
+    printf '  %-20s UNKNOWN  (expected %s, observed <missing>)\n' "$label" "$want"
+    return 3
+  fi
+  if [ -n "$expected" ] && [ "$observed" = "$expected" ]; then
+    printf '  %-20s OK       (%s — matches the primary manifest %s)\n' "$label" "$observed" "$manifest"
+    return 0
+  fi
+  if [ -n "$expected_alt" ] && [ "$observed" = "$expected_alt" ]; then
+    printf '  %-20s OK       (%s — matches the alternate manifest %s)\n' "$label" "$observed" "$alt"
+    return 0
+  fi
+  printf '  %-20s DRIFT    (expected %s, observed %s)\n' "$label" "$want" "$observed"
+  return 2
+}
+
 # drift_check_inputs EXPECTED OBSERVED_CSV -> per-input latency drift on the genlocked
 # broadcast-path NDI inputs (#84). EXPECTED is the single pinned latency mode (e.g. "0"=Normal);
 # OBSERVED_CSV is a comma-separated "input name=latency" list gathered live (the obs-websocket
@@ -1910,6 +1942,12 @@ Usage:
     lines; a STOCK OBS 32.2.0 emits NONE -> DRIFT even though its version matches).
   With a manifest supplied, an unread live SHA or capability marker is UNKNOWN (exit 11), never a
   silent clean — a wrong build we failed to hash is exactly the false-negative this facet prevents.
+  alt_manifest (#1346, optional: the OTHER Windows workflow's BUNDLE_MANIFEST.json of the SAME build —
+    the full windows-genlock bundle beside the fast obs.dll-only one; their obs.dll bytes differ):
+    obs_dll_sha256 is OK on EITHER manifest's entry (the line names which) and DRIFT on neither;
+    distroav_dll_sha256 accepts either only when the primary manifest already lists distroav (an
+    alternate never switches on a check the primary skips). Given WITHOUT manifest=, it is judged
+    exactly like a lone manifest=.
 
 --compare WHOLE-BUNDLE byte/SHA key (#121, post-deploy verify — supply `bundle_hashes` with `manifest`):
   bundle_hashes (a comma-separated `relpath=sha256` list of EVERY deployed bundle file's live
@@ -2063,6 +2101,17 @@ compare_observed() {
   # distroav_version/output_fps/genlock_wall_clock/ndi_input_latency, and the manifest-gated
   # obs_dll_sha256/distroav_dll_sha256/genlock_capability byte facets) is completely unaffected.
   local o_strih_linux="${31:-}"
+  # #1346: alt_manifest=PATH (arg 32, opt-in -- every historic --compare call omits it and is
+  # byte-identical) is the ALTERNATE bundle manifest of the SAME build: the full windows-genlock
+  # bundle beside the fast obs.dll-only primary. The two workflows' obs.dll bytes differ, so the
+  # obs.dll byte facet accepts EITHER entry. It only WIDENS a check the primary makes -- it never
+  # switches on the distroav compare an obs.dll-only primary skips. Supplied ALONE (the primary
+  # could not be fetched) it is judged exactly like a lone manifest= (fail-closed).
+  local o_alt_manifest="${32:-}"
+  if [ -z "$manifest" ] && [ -n "$o_alt_manifest" ]; then
+    manifest="$o_alt_manifest"
+    o_alt_manifest=""
+  fi
 
   echo "== drift-guard --compare  host=${host:-?}  (pins from manifest; FAILS loudly on drift) =="
 
@@ -2124,6 +2173,10 @@ compare_observed() {
       echo "!! --compare manifest not found: $manifest" >&2
       exit 1
     fi
+    if [ -n "$o_alt_manifest" ] && [ ! -f "$o_alt_manifest" ]; then
+      echo "!! --compare alt_manifest not found: $o_alt_manifest" >&2
+      exit 1
+    fi
     # The #122 per-component obs.dll/distroav.dll SHA checks run ONLY when the #121 whole-bundle facet
     # is NOT active. When `bundle_hashes=` is supplied, drift_check_all_files (below) verifies EVERY
     # bundle file — including obs.dll + distroav.dll by their exact path — so the two-DLL checks here
@@ -2131,9 +2184,13 @@ compare_observed() {
     # (UNKNOWN) that the whole-bundle scan already covers. So #121 supersedes them; #122's hot-swap
     # obs.dll-only verify (no full file set) is preserved when bundle_hashes is absent.
     if [ -z "$o_bundle_hashes" ]; then
-      local m_obs_sha m_distroav_sha
+      local m_obs_sha m_distroav_sha a_obs_sha="" a_distroav_sha=""
       m_obs_sha="$(manifest_sha_for_component "$manifest" obs)"
       m_distroav_sha="$(manifest_sha_for_component "$manifest" distroav)"
+      if [ -n "$o_alt_manifest" ]; then
+        a_obs_sha="$(manifest_sha_for_component "$o_alt_manifest" obs)"
+        a_distroav_sha="$(manifest_sha_for_component "$o_alt_manifest" distroav)"
+      fi
 
       # obs.dll build SHA — the libobs core our genlock patches live in. The manifest must list it;
       # if it does not, the manifest is unusable for this check (UNKNOWN, never a false clean).
@@ -2143,6 +2200,13 @@ compare_observed() {
         # the Windows obs.dll byte facet reads UNKNOWN there and refused a healthy rig. SKIP it, like
         # the other Windows-only facets, never UNKNOWN (an UNKNOWN box refuses the run).
         printf '  %-20s SKIPPED  (Windows-only obs.dll byte facet skipped on a Linux strih -- genlock_build_sha parity covers the bundle -- issue 1351 --strih-linux)\n' "obs_dll_sha256"
+      elif [ -n "$o_alt_manifest" ]; then
+        # #1346: fast OR full bundle of the same build -- either obs.dll is the right one.
+        rc=0
+        drift_check_either "obs_dll_sha256" "$m_obs_sha" "$a_obs_sha" "$o_obs_sha" \
+          "$manifest" "$o_alt_manifest" || rc=$?
+        [ "$rc" -eq 2 ] && drift=$((drift + 1))
+        [ "$rc" -eq 3 ] && unknown=$((unknown + 1))
       elif [ -z "$m_obs_sha" ]; then
         printf '  %-20s UNKNOWN  (manifest %s lists no obs.dll sha256)\n' "obs_dll_sha256" "$manifest"
         unknown=$((unknown + 1))
@@ -2163,9 +2227,23 @@ compare_observed() {
       # compare is honest once the deploy ships the bundle bytes to that load path (Option A).
       if [ -n "$m_distroav_sha" ]; then
         rc=0
-        drift_check "distroav_dll_sha256" exact "$m_distroav_sha" "$o_distroav_sha" || rc=$?
+        if [ -n "$o_alt_manifest" ]; then
+          drift_check_either "distroav_dll_sha256" "$m_distroav_sha" "$a_distroav_sha" \
+            "$o_distroav_sha" "$manifest" "$o_alt_manifest" || rc=$?
+        else
+          drift_check "distroav_dll_sha256" exact "$m_distroav_sha" "$o_distroav_sha" || rc=$?
+        fi
         [ "$rc" -eq 2 ] && drift=$((drift + 1))
         [ "$rc" -eq 3 ] && unknown=$((unknown + 1))
+      elif [ -n "$o_distroav_sha" ] && [ -n "$a_distroav_sha" ]; then
+        # #1346: only the alternate lists distroav. Report whether the box matches it, but keep it
+        # SKIPPED: a --fast deploy ships obs.dll only and leaves distroav from an older build, and
+        # distroav is not byte-reproducible across builds, so enforcing it here would false-refuse
+        # every correct fast deploy.
+        local dav_vs_alt="differs from"
+        [ "$o_distroav_sha" = "$a_distroav_sha" ] && dav_vs_alt="matches"
+        printf '  %-20s SKIPPED  (observed %s; not in this obs.dll-only manifest — %s the alternate manifest entry %s, informational only: an alternate never switches on a check the primary skips)\n' \
+          "distroav_dll_sha256" "$o_distroav_sha" "$dav_vs_alt" "$a_distroav_sha"
       elif [ -n "$o_distroav_sha" ]; then
         # #237: the supplied distroav SHA is NOT compared here (this is an obs.dll-only manifest), so
         # it must be labeled SKIPPED — NOT OK. Calling an UNCHECKED value "OK" misleads an operator
@@ -2406,6 +2484,9 @@ main() {
   # observed key (incl. the manifest-gated obs_dll_sha256/distroav_dll_sha256/genlock_capability
   # byte facets) is unaffected -- this key ONLY gates those two.
   local o_strih_linux=""
+  # #1346: alt_manifest=PATH -- the alternate bundle manifest of the same build (the full
+  # windows-genlock bundle beside the fast obs.dll-only one); see compare_observed arg 32.
+  local o_alt_manifest=""
   for pair in "${kv[@]+"${kv[@]}"}"; do
     k="${pair%%=*}"; v="${pair#*=}"
     case "$k" in
@@ -2418,6 +2499,7 @@ main() {
       ndi_input_latency)  o_latency="$v" ;;
       distroav_dll_paths) o_plugin="$v" ;;
       manifest)           manifest="$v" ;;       # #122: BUNDLE_MANIFEST.json of the build under test
+      alt_manifest)       o_alt_manifest="$v" ;; # #1346: the other CI workflow's manifest of the SAME build
       obs_dll_sha256)     o_obs_sha="$v" ;;      # #122: live Get-FileHash of the deployed obs.dll
       distroav_dll_sha256) o_distroav_sha="$v" ;; # #122: live Get-FileHash of the deployed distroav.dll
       genlock_capability) o_capability="$v" ;;   # #122: the live OBS-log genlock marker text
@@ -2483,7 +2565,7 @@ main() {
     "$manifest" "$o_obs_sha" "$o_distroav_sha" "$o_capability" "$o_bundle_hashes" "$o_burn" \
     "$p_src_lat_strih" "$p_src_lat_stream" "$o_src_latency" "$o_av_sync_calibrated_ms" \
     "$o_genlock_build_sha" "$o_gl_build_rc" "$o_gl_build_range" "$o_gl_build_ahead" "$o_gl_build_on_dev" \
-    "$o_strih_linux"
+    "$o_strih_linux" "$o_alt_manifest"
 }
 
 main "$@"

@@ -112,6 +112,19 @@ manifest_autosource_fetch() {
   return 0
 }
 
+# manifest_autosource_fetch_win_full REPO SHA DEST -> #1346: the FULL windows-genlock bundle's
+# BUNDLE_MANIFEST.json (windows-genlock.yml / artifact obs-genlock-windows-x64) for the SAME marker
+# SHA the FAST manifest is keyed on. The gate passes it as the ALTERNATE manifest: the two Windows
+# workflows are not byte-reproducible (build 54995646: fast obs.dll 18ea7acf..., full
+# bin/64bit/obs.dll e454b134...), so a correct full-bundle deploy read DRIFT against the fast
+# manifest alone. Same best-effort contract as manifest_autosource_fetch ("" on any failure -> no
+# alternate -> the fast manifest is judged exactly as before). Only the manifest is kept; the
+# download itself is the whole artifact (~270 MB zip, extracted to a mktemp dir and removed at once)
+# because GitHub serves an artifact only as one zip.
+manifest_autosource_fetch_win_full() {
+  manifest_autosource_fetch "$1" windows-genlock.yml obs-genlock-windows-x64 "$2" "$3"
+}
+
 # genlock_build_sha_state_read FILE -> the `genlock_build_sha` value (the marker SHA a box's
 # bundle-state-server reports) from the flat JSON state FILE, "" if absent/unreadable. Mirrors the
 # gate's own genlock_build_sha_from_state, kept here so recording-e2e.sh can key the Windows manifest
