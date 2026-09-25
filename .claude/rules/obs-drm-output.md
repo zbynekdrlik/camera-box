@@ -19,6 +19,13 @@ paths:
   - "vendor/obs-studio/frontend/components/DrmOutputView.cpp"
   - "vendor/obs-studio/frontend/components/DrmOutputView.hpp"
   - "tests/drm_output_view_1346.rs"
+  - "vendor/obs-studio/libobs/obs-drm-output-backend.c"
+  - "vendor/obs-studio/libobs/obs-drm-output-vk.c"
+  - "vendor/obs-studio/libobs/obs-drm-output-vk.h"
+  - "vendor/obs-studio/libobs/obs-drm-output-vk-internal.h"
+  - "vendor/obs-studio/libobs/obs-drm-output-vk-setup.c"
+  - "tests/drm_output_vk_direct_1346.rs"
+  - "tests/c/drm_output_vk_rig_harness.c"
 ---
 
 # In-OBS vendored DRM-lease HDMI output (#1152) — the forked OBS draws Program onto a DRM-leased connector
@@ -306,10 +313,9 @@ absent = program, so imag is byte-for-byte unchanged in behaviour):
   `tests/drm_output_view_1346.rs`; the view grammar is ONE table
   (`tests/fixtures/drm_output_view_parity.tsv`) shared with the Python mirror in
   `scripts/strih_scenes.py`.
-- **NVIDIA note (live-verify item):** imag's M2 path was built and verified on Intel (i915/Xe implicit
-  fencing). strih-lx drives HDMI from the RTX 5050 (NVIDIA primary), so the first live run must watch
-  for torn/partial frames and a failed GBM/AddFB2/dma-buf import (`program bind FAILED`) — the output
-  fails open to the solid pattern, never to the desktop.
+- **NVIDIA:** the LEASE path is Intel-only in practice. The NVIDIA X driver refuses the RandR lease
+  (live on strih-lx 25.9.2026, also with `non-desktop 1`), so an NVIDIA-driven connector uses the
+  vk-direct backend below, never this one.
 - **imag stays Program:** the Tools switch ships in the whole Linux bundle, and `program scanout
   LIVE` fires for either view, so the imag `drm_output` facet (`scripts/lib/imag-display-path.sh`)
   gathers `DRM_OUTPUT_VIEW` and grades `"view":"multiview"` as DRIFT (audience projection + cam2 tap).
@@ -321,6 +327,70 @@ absent = program, so imag is byte-for-byte unchanged in behaviour):
   (proven on Intel only); torn/partial frames on the RTX 5050 would need a CPU fence wait before
   publish (libobs exposes only the GPU-side `gs_sync_wait`, so that is a graphics-vtable addition).
 - strih provisioning / verify: `.claude/rules/strih-linux-provisioning.md` (issue 1346 section).
+
+## The vk-direct backend — NVIDIA Vulkan direct display (issue 1346, strih-lx built-in HDMI)
+
+The owner ruled the strih-lx HDMI output must use the BUILT-IN port (NVIDIA RTX 5050, X output
+`HDMI-0`) and must be indestructible like imag's (never an X window, no mouse; rulings 5838578002 +
+5838662632). The NVIDIA X driver refuses the X RandR lease, so the module has a SECOND backend:
+`VK_EXT_acquire_xlib_display` + `VK_KHR_display`, the NVIDIA-supported way to take a display away
+from X (SteamVR/Monado direct mode). Selected by `"backend":"vk-direct"` in the SAME config file
+(absent / `"lease"` = the lease backend, so imag is byte-for-byte unchanged); on strih boxes it comes
+from the per-box fact `STRIH_HDMI_OUTPUT_BACKEND` (strih-lx = `vk-direct`).
+
+- **Structure:** `obs-drm-output.c` routes its public entry points (start/stop/active/the frame hook)
+  and its mailbox seam (claim/publish/texture/mode size) to `drm_output_vk_direct_backend` (a
+  `struct drm_output_backend_ops` in `obs-drm-output-internal.h`) while that backend OWNS the output;
+  the lease code under each branch is unchanged. `obs-drm-output-backend.c` = the backend grammar
+  (`drm_output_parse_backend`, one TSV with the Python mirror) + the OBS side (a GS_BGRA
+  intermediate at the display mode size that the ONE raw blit fills, the lazy bind, the frame hook,
+  the ordered stop). `obs-drm-output-vk.c` = present thread + lifecycle + GL side;
+  `obs-drm-output-vk-setup.c` = Vulkan/X setup + teardown. The view TU, the budget gate, the
+  Tools-menu switch and the `drm-output:` log family are shared.
+- **Build:** Vulkan HEADERS only (`find_package(Vulkan REQUIRED)` + `Vulkan::Headers`, `libvulkan-dev`
+  in linux-genlock.yml); `libvulkan.so.1` is `dlopen`ed (`VK_NO_PROTOTYPES`), so a box without the
+  loader keeps the output dormant instead of failing to load libobs. The xlib entry points are
+  declared locally with RROutput as `unsigned long` (no libxrandr-dev). GL entry points are resolved
+  at run time through `eglGetProcAddress` (OBS runs EGL/X11).
+- **The X precondition (STEP 0 finding):** `vkAcquireXlibDisplayEXT` returns `-13`
+  (VK_ERROR_INITIALIZATION_FAILED) while the output has an X CRTC. `strih-obs-start.sh` already runs
+  `xrandr --output <connector> --off` for any armed config, and the kiosk autostart keeps HDMI off.
+  After `vkReleaseDisplayEXT` the output comes back to X DISABLED (no CRTC), never onto the desktop.
+  OBS closes an X projector whose screen leaves X (`OBSProjector::ScreenRemoved`), and a saved
+  projector on a missing monitor index is not restored (`OpenProjector` returns null), so no stray
+  window lands on the laptop screen.
+- **Data path + sync:** 3 shared `R8G8B8A8_UNORM` optimal-tiling images, exported `OPAQUE_FD` with a
+  DEDICATED allocation and imported into the OBS GL context with `GL_EXT_memory_object_fd` (DSA
+  `glCreateTextures` + `glTextureStorageMem2DEXT` — no texture binding changes behind the libobs GL
+  state cache). Per tick: the raw blit into the intermediate, then `glCopyImageSubData` (a byte copy,
+  sRGB8_ALPHA8 -> RGBA8 are copy-compatible) + `glSignalSemaphoreEXT` + `glFlush`. The present thread
+  (FIFO: `vkAcquireNextImageKHR` blocks on vblank) blits the newest READY image — or re-blits the FRONT
+  one — into the swapchain `B8G8R8A8_UNORM` image, acquiring/releasing it from/to
+  `VK_QUEUE_FAMILY_EXTERNAL` on every copy. Roles change only after the per-vblank fence, so a GL write
+  never races a Vulkan read; a READY image the GL side overwrites before the present thread took it
+  still carries an unconsumed signal (`armed`) and is consumed with `glWaitSemaphoreEXT` first (a
+  binary semaphore is never signalled twice). Every blocking Vulkan wait is bounded (1 s) so stop()
+  never hangs on a wedged GPU. The claim rule is pinned EQUAL to the lease mailbox rule.
+- **Logs (all `drm-output:`):** `vk-direct display acquired`, `vk-direct mode WxH@HzHz on display
+  plane N`, `vk-direct swapchain WxH FIFO images=N`, `solid-present #N` (before the first frame),
+  `program bind ready (vk-direct: ...)` / `program bind FAILED (vk-direct: ...)`, **`program scanout
+  LIVE (vk-direct: ...)`** (the SAME marker verify-strih greps), `program-present #N`, `vk-direct
+  present loop exited`, `vk-direct display released`, `stopped (vk-direct, ...)`. `program-present #`
+  / `solid-present #` are mutually non-substring with the lease `program-flip #` / `page-flip #`.
+- **Proof without OBS:** `tests/c/drm_output_vk_rig_harness.c` compiles the REAL core (gcc ON the box
+  with staged headers — never on dev1) with its own EGL/GL 3.3 core context and publishes red, green,
+  blue and 50 % grey phases. Live on strih-lx 25.9.2026: 843 presents in ~14 s, 716 publishes, 0
+  skipped; cam2 (which captures HDMI-0) read `245/0/0`, `0/255/0`, `0/0/239`, `127/128/127` — channel
+  order right, no gamma step. Re-run it on every new NVIDIA strih box (strih PP).
+- **Enable (supervisor runbook, after CI + a FULL Linux bundle deploy on strih-lx):** re-run
+  `setup-strih.sh --box strih-lx` step 6 with the HDMI monitor/grabber plugged (it writes or upserts
+  `"backend":"vk-direct"` and installs `libvulkan1`) — or write the one line by hand as the desktop
+  user — then `systemctl --user restart strih-obs.service`. Expect in the OBS log: `autostart ENABLED`
+  → `backend=vk-direct` → `vk-direct display acquired` → `ACTIVE (vk-direct)` → `program bind ready`
+  → `program scanout LIVE` (+ `multiview bind LIVE` for the multiview view); verify-strih item 4c
+  green; the HDMI shows the chosen view and the Tools switch changes it live. Rollback: remove the
+  config (or its `"backend"` key) and restart OBS; `xrandr --output HDMI-0 --auto` brings the port
+  back to the desktop only if wanted.
 
 ## Lifecycle invariants (locked by the #1152 review — keep them if you touch the module)
 
