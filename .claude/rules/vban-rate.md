@@ -14,6 +14,8 @@ paths:
   byte 24); a packet's sample index is `nuFrame x (nbs+1)`; the stream clock is the least-squares
   slope of that index against capture time, pooled over counter segments (common slope, one
   intercept per segment). A lost packet leaves a hole but moves no point, so loss never biases rate.
+  The count method read −132.9 ppm for a +18.1 ppm stream with 5 lost packets (#1367 comment
+  5832526338) — a count mixes two faults into one number.
 - **The fit is ONE-SIDED TRIMMED (review round 1).** Delay only makes an arrival LATER, so a plain
   fit over every arrival was biased by one stall-then-burst (+65.7 ppm for a single 500 ms stall in
   60 s). Points later than the line by more than `max(4 × 1.4826 × MAD, 2 ms)` above the median
@@ -21,8 +23,6 @@ paths:
   every point. A per-window lower-envelope fit was tried first and REJECTED: with ~190 packets per
   1 s window the minimum is itself noisy at ~0.2 ms, which is ±10 ppm over 60 s.
 - A rate FAULT needs the bound cleared by 2 standard errors of that fit.
-  The count method read −132.9 ppm for a +18.1 ppm stream with 5 lost packets (#1367 comment
-  5832526338) — a count mixes two faults into one number.
 - **Loss** = per segment `(max − min + 1) − unique`: a pktmon duplicate (the same packet at several
   components) or a reorder is never loss. **Jump** = a step back > 64 frames, a step back to a
   counter already seen more than 50 ms earlier or below everything the segment has seen (a restart
