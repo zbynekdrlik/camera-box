@@ -88,11 +88,21 @@ confirms the camera is set right):**
   paused relays. Keep it there if the region is reordered.
 - **"Exactly one gphoto2 user" is CHECKED on the box, not assumed.** The issue-808 pause is
   best-effort: it times out after 8 s, is `|| true`, and never confirms the unit stopped. So every
-  gphoto2 session (`camera_test_settings_gphoto2_cmd`) starts with two checks in the SAME remote
+  gphoto2 session (`camera_test_settings_gphoto2_cmd`) starts with three checks in the SAME remote
   command:
-  - a still-active `bkshading-relay.service` exits 97 -> the abort "relay still active on <box>";
-  - a leftover `gphoto2` process (`pgrep -x`) exits 98 -> the abort "another gphoto2 process".
-  Without these, a relay that kept polling would show up as a misleading "read failed" or MISMATCH.
+  - `bkshading-relay.service` must be truly stopped. The check reads the printed
+    `systemctl is-active` state, NOT `--quiet`, because `--quiet` is false for `activating`
+    (auto-restart), `deactivating` and `reloading`. Only `inactive` / `failed` / `unknown` pass;
+    anything else exits 97, the abort "relay still active on <box>";
+  - `pgrep` must exist, else exit 96. A missing pgrep would otherwise silently skip the next check;
+  - no leftover `gphoto2` process (`pgrep -x`), else exit 98, the abort "another gphoto2 process".
+  The set path aborts on 96/97/98 too, so a relay that comes back between read and set is caught.
+  Without these checks, a relay that kept polling would show up as a misleading "read failed" or
+  MISMATCH.
+- **The tests RUN the generated remote text.** The fake `sshpass` executes every gphoto2 command
+  under bash, with PATH = stub `systemctl` / `pgrep` / `gphoto2` + the real `timeout`. So a
+  changed exit code, an inverted condition or a check moved after the gphoto2 call goes red. Only
+  the sysfs presence probe is emulated.
 - **Transport and decision exit codes are kept apart.** The ssh/gphoto2 rc is named in the abort:
   124 timed out, 127 not found, 255 ssh. A python `plan`/`grade` rc is reported as "decision
   rc", so an unreadable output is never confused with a dead transport.
@@ -100,8 +110,8 @@ confirms the camera is set right):**
   grades the result, so a partially applied set is caught as a MISMATCH abort, never trusted.
 - **Pinning `f-number` needs the camera's exact label spelling.** The relay treats `f/4` and
   `f/4.0` as the same aperture (read.rs), but this step compares strings, so pin the exact
-  `Current:` text the camera prints. The `suggest` output flags any value the baseline would refuse
-  (`UNPINNABLE`).
+  `Current:` text the camera prints. `suggest` only proposes `iso` + `d002`, and flags either one
+  when the baseline would refuse it (`UNPINNABLE`). An f-number is pinned by hand.
 - Presence matches any Blackmagic USB device (vendor only, no interface-class check). The
   interface class the BMPCC's PTP function uses has not been verified live (no camera on USB,
   issue 1350). A non-camera Blackmagic device would still abort loudly as a failed gphoto2 read on
