@@ -1,0 +1,22 @@
+{
+  "_ntp_server_examples": "sk.pool.ntp.org, europe.pool.ntp.org, time.google.com, time.cloudflare.com",
+  "http_status": {
+    "enabled": true,
+    "port": 8898
+  },
+  "ntp_server": "strih.lan",
+  "ntp_server_mode": {
+    "enabled": false,
+    "port": 123,
+    "stratum": 3,
+    "max_step_us": 100000
+  },
+  "system": {
+    "gm_allowlist": [
+      "video-clock.lan"
+    ],
+    "phase_slew": {
+      "enabled": true
+    }
+  }
+}
