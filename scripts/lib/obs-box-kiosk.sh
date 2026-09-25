@@ -5,8 +5,9 @@
 # Sourced by scripts/lib/obs-box-baseline.sh (the one entry point both setup-imag.sh and
 # setup-strih.sh source); split out only to keep each lib file readable. This half owns what makes the
 # box an OBS-only appliance instead of a desktop: never-sleep, the de-jitter masks + the crash-popup
-# item, the lightdm-autologin -> openbox-on-plain-Xorg kiosk with the GNOME purge, the touchpad
-# InputClass, and the shared openbox autostart preamble + root menu. The system half (network,
+# item, the lightdm-autologin -> openbox-on-plain-Xorg kiosk with the GNOME purge (and its
+# panel-brightness keys facet), the touchpad InputClass, and the shared openbox autostart preamble +
+# root menu. The system half (network,
 # performance, boot safety, kernel, CPU affinity, GPU, power envelope) lives in obs-box-baseline.sh;
 # see its header for the box-fact ARGUMENTS convention and the item order. The bodies keep
 # setup-imag.sh's column-0 layout so their heredocs stay byte-identical to what imag has always written.
@@ -363,6 +364,10 @@ fi
 obs_box_same_unit /etc/systemd/system/display-manager.service /lib/systemd/system/lightdm.service \
     || fail "#504: display-manager.service no longer points at lightdm after the GNOME purge — refuse to leave the box with an uncertain display manager"
 
+# (f) issue 1357: the panel-brightness keys (openbox has no brightness handler) -- helper + udev rule +
+#     the two keybinds merged into the kiosk rc.xml. After (a), which installs openbox and its stock rc.xml.
+obs_box_brightness_keys "$DESKTOP_USER"
+
 echo "  NOTE: the kiosk (lightdm+openbox) takes over the SESSION on the NEXT boot — this script does not reboot the box"
 }
 
@@ -393,4 +398,117 @@ Section "InputClass"
 EndSection
 EOF
 echo "  #779: /etc/X11/xorg.conf.d/30-touchpad-tap.conf provisioned (tap-to-click + natural scroll + ScrollPixelDistance 50)"
+}
+
+# --- issue 1357: panel-brightness keys (the kiosk brightness facet) -------------------------------
+# Openbox, the kiosk WM, has no brightness handler, so a notebook's Fn brightness keys did nothing (the
+# owner hit it on strih-lx during the 24.9.2026 production; imag had the same problem). A hand fix went
+# live on strih-lx (24.9.2026 16:58); this facet carries the SAME text to every kiosk box. The helper,
+# the udev rule and the keybind lines render the live strih-lx text byte-for-byte (read 25.9.2026).
+# obs_box_kiosk runs obs_box_brightness_keys; the shared grader's `brightness` row grades it.
+
+# obs_box_brightness_helper_text -> /usr/local/bin/obs-box-brightness: steps the first sysfs backlight by
+# a tenth of max_brightness (at least 1), clamps to max and a 5 % floor, exits 2 on a bad argument and 1
+# (logged) when the box has no backlight device.
+obs_box_brightness_helper_text() {
+    cat <<'HELPER_EOF'
+#!/bin/bash
+# Laptop panel brightness step for the OBS-box kiosk (openbox has no brightness handler).
+# Usage: obs-box-brightness up|down   (bound to XF86MonBrightnessUp/Down in ~/.config/openbox/rc.xml)
+set -euo pipefail
+dir="$(ls -d /sys/class/backlight/* 2>/dev/null | head -1)"
+[ -n "$dir" ] || { logger -t obs-box-brightness "no backlight device"; exit 1; }
+max="$(cat "$dir/max_brightness")"; cur="$(cat "$dir/brightness")"
+step=$(( max / 10 )); [ "$step" -ge 1 ] || step=1
+case "${1:-}" in
+  up)   new=$(( cur + step )) ;;
+  down) new=$(( cur - step )) ;;
+  *)    echo "usage: $0 up|down" >&2; exit 2 ;;
+esac
+[ "$new" -gt "$max" ] && new="$max"
+min=$(( max / 20 )); [ "$new" -lt "$min" ] && new="$min"
+echo "$new" > "$dir/brightness"
+HELPER_EOF
+}
+
+# obs_box_backlight_udev_rule -> /etc/udev/rules.d/90-obs-box-backlight.rules: every backlight node
+# becomes group `video` + group-writable when it appears, so the desktop user's key binding can write it
+# without root.
+obs_box_backlight_udev_rule() {
+    cat <<'RULE_EOF'
+# OBS-box kiosk: let the desktop user (group video) step the panel backlight from openbox key bindings.
+ACTION=="add", SUBSYSTEM=="backlight", RUN+="/bin/chgrp video /sys/class/backlight/%k/brightness", RUN+="/bin/chmod g+w /sys/class/backlight/%k/brightness"
+RULE_EOF
+}
+
+# obs_box_brightness_keybinds_xml -> the three rc.xml lines (a comment + the Up/Down keybinds, indented as
+# openbox's own <keyboard> entries). ONE source for the merge below AND the grader (which embeds this
+# function and checks both keybind lines in the effective rc.xml).
+obs_box_brightness_keybinds_xml() {
+    cat <<'KEYS_EOF'
+  <!-- OBS-box kiosk: panel brightness keys (openbox has no brightness handler) -->
+  <keybind key="XF86MonBrightnessUp"><action name="Execute"><command>/usr/local/bin/obs-box-brightness up</command></action></keybind>
+  <keybind key="XF86MonBrightnessDown"><action name="Execute"><command>/usr/local/bin/obs-box-brightness down</command></action></keybind>
+KEYS_EOF
+}
+
+# obs_box_openbox_rc_with_brightness_keys (stdin: an openbox rc.xml) -> the same rc.xml with every
+# MISSING keybind line (plus the comment, when absent) inserted right before the first </keyboard> line.
+# Pure filter, the kiosk's ONE rc.xml writer: an rc.xml that already carries both keybinds comes back
+# unchanged (idempotent), operator content is never replaced or reordered (the root-menu binding that
+# verify-imag checks stays as it is). No </keyboard> line -> rc 1 and NO output (never a partial file).
+obs_box_openbox_rc_with_brightness_keys() {
+    local rc line trimmed comment="" block="" need=0
+    rc="$(cat; printf x)"
+    rc="${rc%x}"
+    while IFS= read -r line; do
+        trimmed="${line#"${line%%[![:space:]]*}"}"
+        case "$rc" in *"$trimmed"*) continue ;; esac
+        case "$trimmed" in
+            '<!--'*) comment="${line}"$'\n' ;;
+            *) block="${block}${line}"$'\n'; need=1 ;;
+        esac
+    done < <(obs_box_brightness_keybinds_xml)
+    if [ "$need" = 0 ]; then
+        printf '%s' "$rc"
+        return 0
+    fi
+    printf '%s' "$rc" | awk -v block="${comment}${block}" '
+        { lines[NR] = $0 }
+        !found && /^[[:space:]]*<\/keyboard>/ { at = NR; found = 1 }
+        END {
+            if (!found) exit 1
+            for (i = 1; i <= NR; i++) { if (i == at) printf "%s", block; print lines[i] }
+        }'
+}
+
+# obs_box_brightness_keys DESKTOP_USER -- install the facet: the helper (root 0755), the udev rule + a
+# backlight trigger so it applies now, the desktop user in group `video`, and the keybinds merged into the
+# user's ~/.config/openbox/rc.xml (seeded from the stock /etc/xdg/openbox/rc.xml when the user has none --
+# openbox reads the user file first). Every file goes through obs_box_write_if_changed (compared, rewritten
+# only on a difference, logged). The running openbox picks the keybinds up at the next login (the kiosk
+# takes over at the next boot anyway). Fails loud when a file cannot be written or rc.xml has no
+# <keyboard> section.
+obs_box_brightness_keys() {
+    local DESKTOP_USER="${1:?obs_box_brightness_keys: desktop user required}"
+    local home grp rc_user rc_src merged
+    home="$(getent passwd "$DESKTOP_USER" | cut -d: -f6)"
+    [ -n "$home" ] || home="/home/${DESKTOP_USER}"
+    grp="$(id -gn "$DESKTOP_USER")" || fail "brightness keys: unknown desktop user ${DESKTOP_USER}"
+    obs_box_brightness_helper_text | obs_box_write_if_changed /usr/local/bin/obs-box-brightness 0755 root:root "brightness helper"
+    obs_box_backlight_udev_rule | obs_box_write_if_changed /etc/udev/rules.d/90-obs-box-backlight.rules 0644 root:root "backlight udev rule"
+    if udevadm control --reload-rules && udevadm trigger --subsystem-match=backlight --action=add; then
+        echo "  brightness keys: udev reloaded + backlight nodes re-triggered (group video may write them now)"
+    else
+        echo "  WARNING: brightness keys: udevadm reload/trigger failed -- the backlight rule applies at the next boot"
+    fi
+    usermod -aG video "$DESKTOP_USER" || fail "brightness keys: could not add ${DESKTOP_USER} to group video"
+    [ -d "${home}/.config" ] || install -d -o "$DESKTOP_USER" -g "$grp" -m 755 "${home}/.config"
+    install -d -o "$DESKTOP_USER" -g "$grp" -m 755 "${home}/.config/openbox"
+    rc_user="${home}/.config/openbox/rc.xml"
+    if [ -f "$rc_user" ]; then rc_src="$rc_user"; else rc_src=/etc/xdg/openbox/rc.xml; fi
+    [ -f "$rc_src" ] || fail "brightness keys: no openbox rc.xml to merge into (${rc_src} missing -- is openbox installed?)"
+    merged="$(obs_box_openbox_rc_with_brightness_keys < "$rc_src")" \
+        || fail "brightness keys: ${rc_src} has no </keyboard> section -- add the two XF86MonBrightness keybinds by hand"
+    printf '%s\n' "$merged" | obs_box_write_if_changed "$rc_user" 0644 "${DESKTOP_USER}:${grp}" "openbox rc.xml brightness keys"
 }
