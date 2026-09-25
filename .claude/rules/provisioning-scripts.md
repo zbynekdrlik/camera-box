@@ -120,7 +120,7 @@ issue 858 — into setup-device.sh). Two adaptations are NOT optional copy-paste
   root).
 - **Prefer ONE shared lib over a mirrored copy.** Since issue 1361 the remoteos-mcp step is a single
   call on every box (`remoteos_mcp_install "$(remoteos_mcp_headless_user)" headless enable-only` here
-  -- SUDO_USER, else the existing unit's account, else root -- `... desktop restart` in
+  -- the existing unit's account, else SUDO_USER on a fresh box, else root -- `... desktop restart` in
   setup-strih/setup-imag, all from `scripts/lib/remoteos-mcp.sh`); the POLICY argument carries the
   box-class difference below instead of two drifting step bodies.
 - **Gate on `is-enabled`, not imag's `is-active`.** setup-device.sh is enable-only / defer-to-reboot

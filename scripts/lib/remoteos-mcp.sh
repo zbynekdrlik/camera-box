@@ -132,25 +132,32 @@ remoteos_mcp_resolve_key() {
     return 0
 }
 
-# remoteos_mcp_user_from_unit_text TEXT -> the `User=` of an existing unit, or nothing. Always rc 0.
+# remoteos_mcp_user_from_unit_text TEXT -> the `User=` of an existing unit (surrounding whitespace
+# trimmed), or nothing. Always rc 0.
 remoteos_mcp_user_from_unit_text() {
-    local line
+    local line v
     while IFS= read -r line; do
         case "$line" in
-            User=*) printf '%s' "${line#User=}"; return 0 ;;
+            User=*)
+                v="${line#User=}"
+                v="${v#"${v%%[![:space:]]*}"}"
+                v="${v%"${v##*[![:space:]]}"}"
+                printf '%s' "$v"
+                return 0
+                ;;
         esac
     done <<<"${1-}"
     return 0
 }
 
-# remoteos_mcp_headless_user -> the account a HEADLESS (cam) agent runs as: SUDO_USER (the operator
-# who ran the provisioner under sudo -- the upstream installer's rule), else the EXISTING unit's User=
-# (a re-provision run as root, e.g. the documented systemd-run re-run, keeps the box's account), else
-# root. A value that is not a plain account name is skipped.
+# remoteos_mcp_headless_user -> the account a HEADLESS (cam) agent runs as: the EXISTING unit's User=
+# first (a re-provision -- sudo or the documented systemd-run re-run as root -- never moves the MCP
+# shell to another account), else SUDO_USER on a fresh box (the operator who ran the provisioner under
+# sudo -- the upstream installer's rule), else root. A value that is not a plain account name is skipped.
 remoteos_mcp_headless_user() {
     local u
-    for u in "${SUDO_USER:-}" \
-        "$(remoteos_mcp_user_from_unit_text "$(cat "$(remoteos_mcp_unit_path)" 2>/dev/null || true)")"; do
+    for u in "$(remoteos_mcp_user_from_unit_text "$(cat "$(remoteos_mcp_unit_path)" 2>/dev/null || true)")" \
+        "${SUDO_USER:-}"; do
         case "$u" in
             ''|*[!A-Za-z0-9._-]*) ;;
             *) printf '%s' "$u"; return 0 ;;
@@ -311,7 +318,7 @@ remoteos_mcp_unauth_code() {
 # rc 0 = installed and gated; rc 1 = a named failure on stderr.
 remoteos_mcp_install() {
     local user="${1-}" mode="${2-}" policy="${3-}"
-    local venv uid unit_text cfg_key unit_key ef_key key work src_id="" marker pkg_changed=0 en code pv
+    local venv uid unit_text cfg_key unit_key ef_key key work src_id="" marker pkg_changed=0 en code pv pip_home
     local -a pip_env=()
     case "$policy" in
         restart|enable-only) ;;
@@ -352,9 +359,12 @@ remoteos_mcp_install() {
             && "${venv}/bin/python" -c 'import remoteos' >/dev/null 2>&1; then
             echo "  remoteos-mcp: ${src_id} already installed in ${venv}"
         else
-            pip_env=(PATH="$PATH" HOME="${HOME:-/root}" LANG="${LANG:-C.UTF-8}" TMPDIR="${TMPDIR:-/tmp}")
-            for pv in http_proxy https_proxy no_proxy HTTP_PROXY HTTPS_PROXY NO_PROXY \
-                SSL_CERT_FILE SSL_CERT_DIR REQUESTS_CA_BUNDLE PIP_INDEX_URL PIP_EXTRA_INDEX_URL PIP_TRUSTED_HOST; do
+            # HOME: root's own when run as root (a `sudo -E` run would otherwise hand pip the operator's).
+            if [ "$(id -u)" = 0 ]; then pip_home=/root; else pip_home="${HOME:-/tmp}"; fi
+            pip_env=(PATH="$PATH" HOME="$pip_home" LANG="${LANG:-C.UTF-8}" TMPDIR="${TMPDIR:-/tmp}")
+            for pv in http_proxy https_proxy no_proxy all_proxy HTTP_PROXY HTTPS_PROXY NO_PROXY ALL_PROXY \
+                SSL_CERT_FILE SSL_CERT_DIR REQUESTS_CA_BUNDLE CURL_CA_BUNDLE \
+                PIP_INDEX_URL PIP_EXTRA_INDEX_URL PIP_TRUSTED_HOST PIP_CERT PIP_CONFIG_FILE; do
                 if [ -n "${!pv:-}" ]; then pip_env+=("${pv}=${!pv}"); fi
             done
             if ! "${venv}/bin/python" -c 'import sys' >/dev/null 2>&1; then

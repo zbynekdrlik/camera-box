@@ -998,7 +998,8 @@ would have produced a different box. Each is now provisioned at its source and g
   project's `constraints.txt` (`PIP_CONSTRAINT`). Never the system python, never
   `--break-system-packages`. pip runs under an `env -i` ALLOWLIST (PATH/HOME/LANG/TMPDIR plus the
   proxy, CA-bundle and pip-index variables when set): it executes the build code of the source and of
-  every sdist dependency, so no GH_TOKEN, agent key or CAM_PW reaches it. An unchanged source id with an
+  every sdist dependency, so no GH_TOKEN, agent key or CAM_PW reaches it. HOME is `/root` when run as
+  root (a `sudo -E` run would hand pip the operator's). An unchanged source id with an
   importable venv skips pip; a failed pip with an importable venv keeps it (WARNING, the marker stays,
   the next run retries).
 - Files: `config.json` (the upstream key store) and the unit's `EnvironmentFile`
@@ -1015,9 +1016,9 @@ would have produced a different box. Each is now provisioned at its source and g
   `REMOTEOS_AUTH_KEY` turns remoteos's auth OFF on a 0.0.0.0 full-shell agent); `enable-only` (cams)
   never starts. Both compare the LITERAL `is-enabled` to `enabled`.
 - The unit's `User=`: strih/imag pass the desktop user; setup-device passes
-  `remoteos_mcp_headless_user` = SUDO_USER (the upstream installer's rule), else the EXISTING unit's
-  `User=` (the provision skill's systemd-run re-run is root with no SUDO_USER), else root -- so a
-  re-provision never moves a cam's MCP shell to another account. verify-device `(ab)` also requires
+  `remoteos_mcp_headless_user` = the EXISTING unit's `User=` first (neither a sudo re-run nor the
+  provision skill's systemd-run re-run as root moves a cam's MCP shell to another account), else
+  SUDO_USER on a fresh box (the upstream installer's rule), else root. verify-device `(ab)` also requires
   the unauthenticated `/mcp` probe (curl on the cam) to answer 401.
 - A failed fetch with a working venv keeps it (WARNING) and still refreshes the unit/key files; with
   nothing installed it fails. The strih-lx genlock deploy re-runs setup-strih, so a GitHub outage never
