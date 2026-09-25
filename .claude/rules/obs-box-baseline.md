@@ -73,6 +73,14 @@ power envelope. A difference between boxes is a defect, not a per-box feature.
   its test-pinned step-16 heredoc, strih-lx uses `strih_openbox_autostart_text`. Both MUST carry the
   preamble lines verbatim and `systemctl --user start <obs unit>` — that is what the verify grades.
 
+## python3-websocket (kiosk package install, issue 1361)
+
+Both OBS launchers run a websocket scene seeder (`strih-obs-start.sh` refuses to start OBS without
+`python3-websocket`; `imag_scenes.py` imports it). It was only a hand install on strih-lx, so
+`obs_box_kiosk` step (a) installs it with the other kiosk packages, and the grader row `websocket`
+(after `kiosk`, before `brightness`) is OK only when the package is installed AND the system python3
+can `from websocket import create_connection`. setup-imag.sh's own step-11b install stays (a no-op).
+
 ## The panel-brightness keys (kiosk facet, issue 1357)
 
 Openbox has no brightness handler, so a notebook's Fn brightness keys did nothing on the kiosk

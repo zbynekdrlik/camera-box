@@ -1362,6 +1362,9 @@ fn no_bare_apt_get_update_on_the_obs_box_provisioning_paths() {
         "scripts/lib/ndi-runtime.sh",
         "scripts/lib/imag-power-envelope.sh",
         "scripts/lib/rig-grandmaster.sh",
+        // issue 1361: the shared remoteos-mcp install + the Downstream Keyer plugin libs
+        "scripts/lib/remoteos-mcp.sh",
+        "scripts/lib/obs-downstream-keyer.sh",
         // sourced one level down (strih-box-facts.sh / ndi-discovery.sh)
         "scripts/lib/obs-fleet.sh",
         "scripts/camera-set.sh",

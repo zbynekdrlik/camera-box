@@ -247,8 +247,10 @@ Each routes on the ONE resolver above; the Windows branch is kept (a future Wind
   rule): REMOVED with the PC — history only. strih-lx has no on-box self-heal; the dev1 reach
   watchdog is the only outage signal.
 - **Still open (followup candidates, not done):** a Linux recordings-retention executor for strih-lx
-  `/srv/_REC`; the strih-lx port of the zero-loss restart mode (its `[$label 8a]` region still prints
-  win-strih text, but the mode is refused on Linux up front by `strih_zero_loss_restart_preflight`);
+  `/srv/_REC`; the strih-lx port of the zero-loss restart mode (refused on Linux up front by
+  `strih_zero_loss_restart_preflight`; issue 1361 routed its banner, holder and OBS-restart text
+  through `strih_access_label` / `strih_obs_restart_hint`, and only the byte-pinned Windows
+  pull-back line keeps its win-strih text);
   the strih-lx execute arm of deploy-genlock-fleet.
 
 ## Scope beyond the watchdogs
