@@ -66,6 +66,8 @@ JUMP_BACK_FRAMES = 64
 DUP_WINDOW_S = 0.05
 # How far the restart-vs-straggler lookahead may skip over counters the segment already holds.
 LOOKAHEAD_MAX = 256
+# Packets arriving closer together than this were released as one burst: one timing observation.
+CLUSTER_GAP_S = 0.001
 # The one-sided trim: drop points LATER than the line by more than max(LATE_TRIM_MADS robust
 # standard deviations, LATE_TRIM_FLOOR_S) above the median lateness; refit up to LATE_TRIM_ROUNDS.
 LATE_TRIM_MADS = 4.0
@@ -395,9 +397,9 @@ def measure_stream(times_ns: list, frames: list, samples_per_frame: int, sample_
         # the rate: a one-sided trimmed fit -- a late burst (stall) cannot bias it
         slope, sse, sxx, npts, fitted = _late_trimmed_fit(points, first)
         rate_ppm = (slope / sample_rate - 1.0) * 1e6
-        dof = npts - len(fitted) - 1
-        if dof > 0 and sxx > 0:
-            stderr_ppm = math.sqrt(sse / dof / sxx) / sample_rate * 1e6
+        se = _cluster_stderr(slope, sxx, fitted)
+        if se is not None:
+            stderr_ppm = se / sample_rate * 1e6
 
     max_gap_ms = 0.0
     for a, b in zip(times_ns, times_ns[1:]):
@@ -416,32 +418,71 @@ def measure_stream(times_ns: list, frames: list, samples_per_frame: int, sample_
 def _next_continues(times_ns: list, frames: list, i: int, head_u: int, f: int, head_t: int,
                     frames_per_s: float, seen: dict) -> str:
     """Decide the jump candidate at index I (counter F; current segment head HEAD_U, arrived HEAD_T;
-    the segment's SEEN counters) by what follows it. Counters the segment already holds are skipped
-    (the rest of a late-duplicate burst -- or of a restart that re-sends counters this segment saw;
-    at most LOOKAHEAD_MAX packets). The first NEW counter then decides:
-      "old" -- it continues the old head (0 < step <= the step limit) AND arrives ON TIME for that
-              step (within DUP_WINDOW_S of step / rate after HEAD_T): the old stream never stopped,
-              so the candidate is a straggler or a late duplicate;
-      "new" -- it continues from F instead (a restart), including a restart whose re-sent counters
-              collided with the old ones: their continuation then arrives LATE for the old head;
-      ""    -- no such packet, or it continues neither."""
+    the segment's SEEN counters) by what follows it, looking at most LOOKAHEAD_MAX packets ahead.
+    Skipped on the way: counters the segment already holds (the rest of a late-duplicate burst, or a
+    restart re-sending counters this segment saw) and counters still in flight around the head
+    (-JUMP_BACK_FRAMES <= step <= 0: an ordinary reorder). The first counter ABOVE the head decides:
+      "old" -- it continues the old head within the step limit: the old stream never stopped, so the
+              candidate is a straggler or a late duplicate. Only when the skipped counters (held
+              or in flight) cover the whole gap back to F (a restart re-sending them would do exactly
+              that) must it also arrive ON TIME for its step (within DUP_WINDOW_S of step / rate
+              after HEAD_T) -- a restart's continuation arrives late for the old head;
+      "new" -- it continues from F instead: a restart;
+      ""    -- it continues neither. If the lookahead window is used up by already-held counters
+              and F itself is held, the candidate is "old" (a very long replay of old counters)."""
     t_cand = times_ns[i]
+    u_cand = head_u + _signed32(f - (head_u & 0xFFFFFFFF))
+    skipped_seen = skipped = 0
     for j in range(i + 1, min(len(frames), i + 1 + LOOKAHEAD_MAX)):
         t_next, f_next = times_ns[j], frames[j]
         d_old = _signed32(f_next - (head_u & 0xFFFFFFFF))
         if head_u + d_old in seen:
+            skipped_seen += 1
+            skipped += 1
             continue
+        if -JUMP_BACK_FRAMES <= d_old <= 0:
+            skipped += 1
+            continue  # still in flight around the head -- an ordinary reorder, not a decision
         elapsed_old = max(0.0, (t_next - head_t) / 1e9)
         limit_old = 2.0 * elapsed_old * frames_per_s + JUMP_FWD_SLACK_FRAMES
+        # a restart re-sending counters covers the whole gap back to F (some may still be in flight)
+        replay = skipped_seen > 0 and skipped >= head_u - u_cand
         on_time = elapsed_old <= d_old / frames_per_s + DUP_WINDOW_S
-        if 0 < d_old <= limit_old and on_time:
+        if 0 < d_old <= limit_old and (on_time or not replay):
             return "old"
         d_new = _signed32(f_next - f)
         limit_new = 2.0 * max(0.0, (t_next - t_cand) / 1e9) * frames_per_s + JUMP_FWD_SLACK_FRAMES
         if 0 < d_new <= limit_new:
             return "new"
         return ""
-    return ""
+    return "old" if u_cand in seen else ""
+
+
+def _cluster_stderr(slope: float, sxx: float, fitted: list):
+    """The slope's standard error with every ARRIVAL CLUSTER as one observation: packets arriving
+    less than CLUSTER_GAP_S apart were released together (obs-vban sends in bursts) and share one
+    timing error, so a per-packet stderr is ~sqrt(burst size) too small (review round 4: a true
+    0 ppm clock graded FAULT on 2/40 bursty seeds). Cluster-robust sandwich
+    Var(b) = G/(G-1) x sum_c (sum_{i in c} (x_i - mx) e_i)^2 / Sxx^2 over G clusters."""
+    if sxx <= 0:
+        return None
+    total = 0.0
+    clusters = 0
+    for xy, mx, my in fitted:
+        acc, last_x = 0.0, None
+        for x, y in xy:
+            if last_x is not None and x - last_x >= CLUSTER_GAP_S:
+                total += acc * acc
+                clusters += 1
+                acc = 0.0
+            acc += (x - mx) * (y - (my + slope * (x - mx)))
+            last_x = x
+        if last_x is not None:
+            total += acc * acc
+            clusters += 1
+    if clusters < 3:
+        return None
+    return math.sqrt(clusters / (clusters - 1) * total) / sxx
 
 
 def _pooled_fit(segments_xy: list):
