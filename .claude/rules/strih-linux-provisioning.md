@@ -21,6 +21,7 @@ paths:
   - "scripts/lib/remoteos-mcp.sh"
   - "scripts/lib/obs-downstream-keyer.sh"
   - "tests/fresh_install_gaps_1361.rs"
+  - "tests/remoteos_mcp_1361.rs"
 ---
 
 # strih-lx — the Linux notebook replacing the Windows strih PC (issue 1317)

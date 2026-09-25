@@ -14,7 +14,7 @@
 //!
 //! Same convention as the other setup-imag guards (`tests/setup_imag_guards.rs`): read the REAL
 //! script (and the lib it calls) and assert its REAL contract via `body.contains(...)`. The
-//! behaviour of the lib itself is exercised in `tests/fresh_install_gaps_1361.rs`.
+//! behaviour of the lib itself is exercised in `tests/remoteos_mcp_1361.rs`.
 
 use std::path::PathBuf;
 

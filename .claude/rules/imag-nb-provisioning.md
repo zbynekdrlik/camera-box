@@ -685,7 +685,7 @@ Auth-key (a full-shell-RCE bearer token on `0.0.0.0:8092`) is NEVER committed. `
 matching a freshly-hardware'd box; unset, the box's existing `/etc/remoteos-mcp/config.json` key (or a
 legacy unit's `--auth-key`) is KEPT, and only a bare box gets a fresh key (then update dev1's
 `.mcp.json` `linux-imag-nb` entry). A key outside `[A-Za-z0-9]` is refused before anything is written.
-The lib's contract + behaviour tests: `tests/fresh_install_gaps_1361.rs`;
+The lib's contract + behaviour tests: `tests/remoteos_mcp_1361.rs`;
 `.claude/rules/strih-linux-provisioning.md` ("Fresh-install gaps").
 
 ## Projector openers must be COUNT-FIRST — the SEEDER dedups, not just the gate (#769)
