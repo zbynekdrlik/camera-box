@@ -143,8 +143,11 @@ took 3 s — the decode on the small Tier-0 dev1 box was the cost). Now it follo
 
 - **`scripts/recording-verdict-on-resolume.sh`** (always executes, plain session-agnostic ssh —
   a file copy, a headless CLI decode and a download, so `win-ssh-vs-mcp.md` context B holds):
-  STEP 0 fails loud BY NAME on a missing `ffmpeg`/`ffprobe` (`MISSING-TOOL:`, exit 3) and deletes a
-  stale partial of the same name; STEP 1 deploys `recording-verdict.exe` behind the issue-1118 sha256
+  STEP 0 first puts the first `ffmpeg.exe` found under `RESOLUME_FFMPEG_ROOT` (default `C:\ffmpeg`)
+  on PATH — RESOLUME-SNV keeps ffmpeg under `C:\ffmpeg\<build>\bin` but NOT on PATH (read live
+  25.9.2026), and the decode session gets the same prefix — then fails loud BY NAME on a missing
+  `ffmpeg`/`ffprobe` (`MISSING-TOOL:`, exit 3); it stops a leftover decode of the same exe and
+  deletes a stale partial of the same name; STEP 1 deploys `recording-verdict.exe` behind the issue-1118 sha256
   version gate (`Get-FileHash` on the box vs `sha256sum` on dev1); STEP 2 runs
   `recording-verdict.exe --extract-partial cg --cg <recording> --out <partial>` at the issue-1260
   BelowNormal PriorityClass (`build_onbox_command`, SOURCED from recording-verdict-on-stream.sh,
@@ -158,9 +161,10 @@ took 3 s — the decode on the small Tier-0 dev1 box was the cost). Now it follo
   same pair the fused `--cg` path decodes, independent of `--cg-chain-burns`) and a `cg=` merge slot
   that fills the SAME `cg` DecodedRec the fused path does — the cg_chain section reads frames only,
   so no verdict logic changed. A cg partial wins over a stray `--cg` (a warning, no second decode).
-  A cg partial that fails to load for ANY reason is DROPPED by the crate-root
-  `partial_schema_gate::box_drops_on_any_load_failure` (the report-only leg must never abort the
-  merge into a false camera RED); only an imag drop sets `imag_leg_skip_reason`.
+  A cg partial that fails to load for ANY reason — or is another box's partial in the cg slot — is
+  DROPPED by the crate-root `partial_schema_gate::box_drops_on_any_load_failure` (the report-only
+  leg must never abort the merge into a false camera RED); only an imag drop sets
+  `imag_leg_skip_reason`.
 - **Harness wiring (#675, two new call lines):** `cg_chain_onbox_extract_launch "$HERE"
   "${WIN_VERDICT_EXE_LOCAL:-}" "$E2E_EXECUTE_VERDICT"` right after the stream extract's pull-back
   echo (so strih, stream, imag and cg decode CONCURRENTLY — wall time is max(), not the sum), and
@@ -168,16 +172,25 @@ took 3 s — the decode on the small Tier-0 dev1 box was the cost). Now it follo
   banner. `cg_chain_merge_args_append` then adds `--merge-partials cg=<partial>` when THIS run's
   partial (`cg-partial-<RUN_ID>.json`, RUN_ID-keyed) reached dev1.
 - **The job budget is bounded by construction:** the collect step waits at most
-  `CG_CHAIN_EXTRACT_GRACE_SECS` (default 900) PAST the camera legs, then stops the extract's whole
-  process group (it is launched under `setsid`) and reports it; cleanup() also stops an in-flight
-  extract on an early abort. The on-box decode itself may still finish on the box; nothing reads it.
+  `CG_CHAIN_EXTRACT_GRACE_SECS` (default 300 — reasoned in `cg_chain_extract_grace_secs`) PAST the
+  camera legs, then stops the extract's whole dev1 process group (launched under `setsid`, skipped
+  when job control is on) AND, bounded, the decode on the box (`recording-verdict-on-resolume.sh
+  --stop-decode`: only processes running from that one exe path, never OBS/Arena), so it never keeps
+  running next to the live CG box nor keeps the exe locked for the next upload; cleanup() does the
+  same on an early abort.
+- **GOTCHA — PowerShell's exit code is the LAST statement's `$?`.** `powershell -EncodedCommand`
+  exits 1 when the last statement failed, and `-ErrorAction SilentlyContinue` only hides the message
+  (`$?` stays false). The first cut ended the prepare step with a silenced `Remove-Item` of files
+  that do not exist on a normal run, so every run died there (a review caught it live on the box).
+  Guard an expected-to-fail statement (`if (Test-Path …) { … }`) or never make it the last one; the
+  harness test's fake `ssh` models this rule, so a builder regressing to that shape goes red.
 - **Every outcome is ONE named run-log line**, never a red: `CG-LEG-VERIFIED` (partial merged),
   `CG-LEG-SKIPPED` (no cg recording this run — resolume away/unresolvable or its StartRecord failed,
   the home gate; or a plan-only run with `E2E_EXECUTE_VERDICT=0`), `CG-LEG-NOT-VERIFIED` (attempted:
   no StopRecord path, no Windows exe, a failed decode, a grace overrun). A failed/stopped extract
   leaves no partial behind, so a stale one is never merged.
-- **Live precondition (supervisor, first CG_CHAIN=1 run):** `ffmpeg` + `ffprobe` on the RESOLUME-SNV
-  PATH (STEP 0 names them if absent), and the grace vs the real on-box decode time — a first run
+- **Live precondition (supervisor, first CG_CHAIN=1 run):** `ffmpeg` + `ffprobe` found under
+  `C:\ffmpeg` on RESOLUME-SNV (STEP 0 names them if absent), and the grace vs the real on-box decode time — a first run
   that ends `CG-LEG-NOT-VERIFIED: … still running …` means the grace (or the box) needs a look, never
   a longer job timeout. Tier-0 coverage: `tests/harness_cg_chain_onbox_1302.rs` (std-only, runs with
   plain `rustc --test` + a `tempfile` shim) drives the launch/collect/marker/merge-args seam against a
