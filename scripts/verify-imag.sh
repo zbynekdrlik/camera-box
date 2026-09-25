@@ -1714,15 +1714,17 @@ if [ "${persist_ok:-0}" -eq 1 ]; then
   MINLAT_LOG=""
   minlat_deadline=$((SECONDS + IMAG_OBS_PROJECTOR_POLL_S))
   while :; do
-    MINLAT_LOG="$(ssh_box "grep -ho 'genlock-min-latency: [A-Za-z]*' \"\$(ls -t /home/${IMAG_USER}/.config/obs-studio/logs/*.txt 2>/dev/null | head -1)\" 2>/dev/null | tail -1" || true)"
+    MINLAT_LOG="$(ssh_box "grep -ho 'genlock-min-latency: [A-Za-z]*' \"\$(ls -t \$HOME/.config/obs-studio/logs/*.txt 2>/dev/null | head -1)\" 2>/dev/null | tail -1" || true)"
     [ -n "$MINLAT_LOG" ] && break
     [ "$SECONDS" -ge "$minlat_deadline" ] && break
     sleep 5
   done
   if [ "$MINLAT_LOG" = "genlock-min-latency: ON" ]; then
     ok "(bd) the restarted OBS logs 'genlock-min-latency: ON' -- its libobs caps a shallow imag input at base + 1 (issue 1367)"
+  elif [ -z "$MINLAT_LOG" ]; then
+    fail "(bd) no genlock-min-latency line logged within ${IMAG_OBS_PROJECTOR_POLL_S}s of the restart -- libobs logs it on the first genlock present tick; are any NDI inputs live? (issue 1367)"
   else
-    fail "(bd) the restarted OBS logged '${MINLAT_LOG:-nothing within ${IMAG_OBS_PROJECTOR_POLL_S}s}', want 'genlock-min-latency: ON' -- the loaded libobs does not honour the imag min-latency marker (issue 1367)"
+    fail "(bd) the restarted OBS logged '${MINLAT_LOG}', want 'genlock-min-latency: ON' -- the loaded libobs does not honour the imag min-latency marker (issue 1367)"
   fi
 fi
 

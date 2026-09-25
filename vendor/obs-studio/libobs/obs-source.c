@@ -5670,7 +5670,10 @@ static void genlock_fill_stats(const obs_source_t *source, struct obs_genlock_st
 	stats->audio_delay_ms = source->genlock_audio_delay_ms;
 	/* issue 1367: a WITHHELD source (no video delay known yet, nothing placed) is not unpaired -- 0,
 	 * so the LOCK widget does not read DEGRADED for the first seconds after every OBS start. Mid-slew
-	 * the audio side is the hold minus the slew still owed (where the audio really sits). */
+	 * the audio side is the hold minus the slew still owed (where the audio really sits). The hold,
+	 * mode and owed slew are written by the audio thread and read here unlocked, like the other
+	 * audio facets (aligned 64-bit, not torn on x86_64); a read between the hold and the slew
+	 * updates can show one sample as paired, never falsely degraded. */
 	stats->audio_pairing_offset_ms =
 		source->genlock_audio_hold_mode == GENLOCK_AUDIO_HOLD_PENDING
 			? 0
