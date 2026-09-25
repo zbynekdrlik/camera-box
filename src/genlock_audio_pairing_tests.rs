@@ -280,9 +280,17 @@ fn shift_is_the_delay_delta_for_a_timecode_change() {
     let ta = 17_000_000_000_000_000_000u64;
     let a = audio_place_term_ns(AudioHoldMode::Timecode, 100, off, ta);
     let b = audio_place_term_ns(AudioHoldMode::Timecode, 67, off, ta);
-    assert_eq!(audio_place_shift_ms(b, a), -33.0);
+    // the level shift of a timecode->timecode change is exactly the delay delta (the live offset
+    // and timing_adjust cancel); from a zero term the shift is the hold itself.
+    assert_eq!(
+        audio_level_shift_ns(AudioHoldAction::Place, AudioHoldMode::Timecode, b, a, 0),
+        -33_000_000
+    );
     let l = audio_place_term_ns(AudioHoldMode::Latency, 3, off, ta);
-    assert_eq!(audio_place_shift_ms(l, 0), 3.0);
+    assert_eq!(
+        audio_level_shift_ns(AudioHoldAction::Place, AudioHoldMode::Latency, l, 0, 0),
+        3_000_000
+    );
 }
 
 // ---- the pairing offset + health -------------------------------------------------------

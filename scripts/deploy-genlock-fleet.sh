@@ -592,12 +592,14 @@ nm -D -u "\$OBS_FRONTEND_REAL" 2>/dev/null | grep 'obs_display_set_render_diviso
 genlock_write_markers "\$MARKER_DIR" '${gsha_bq}' '${dsha_bq}'
 cp -a "\$MANIFEST" "\$MARKER_DIR/BUNDLE_MANIFEST.json"
 
-# (5a) issue 1367: the genlock MIN-LATENCY imag marker libobs reads (absent = fail OPEN: a shallow input
-#      could deepen past base + 1); written as the desktop user BEFORE the restart (7). Idempotent.
-MINLAT_USER="\${SUDO_USER:-newlevel}"
-install -d -o "\$MINLAT_USER" -g "\$MINLAT_USER" "/home/\$MINLAT_USER/.camera-box"
-install -o "\$MINLAT_USER" -g "\$MINLAT_USER" -m 0644 /dev/null "/home/\$MINLAT_USER/.camera-box/genlock-min-latency"
-echo "  issue 1367: genlock min-latency box marker present (/home/\$MINLAT_USER/.camera-box/genlock-min-latency)"
+# (5a) issue 1367: the genlock MIN-LATENCY imag marker libobs reads (absent = fail OPEN), as the desktop
+#      user BEFORE the restart (7, which reuses IMAG_USER / IMAG_UID set here). Idempotent.
+IMAG_USER="\${SUDO_USER:-newlevel}"
+IMAG_UID="\$(id -u "\$IMAG_USER")"
+IMAG_HOME="\$(getent passwd "\$IMAG_USER" | cut -d: -f6)"
+install -d -o "\$IMAG_USER" -g "\$IMAG_USER" "\$IMAG_HOME/.camera-box"
+install -o "\$IMAG_USER" -g "\$IMAG_USER" -m 0644 /dev/null "\$IMAG_HOME/.camera-box/genlock-min-latency"
+echo "  issue 1367: genlock min-latency box marker present (\$IMAG_HOME/.camera-box/genlock-min-latency)"
 
 # (6) box-backup RETENTION (bod 5) -- keep the newest \$KEEP dated dirs; delete the rest ONLY when the
 #     operator confirmed (--yes), else print the plan.
@@ -614,8 +616,6 @@ done
 #     exported; we act as \${SUDO_USER:-newlevel}. Stop-then-pkill guarantees the OLD obs (old libobs
 #     still mapped -- the #912 stop-race; and any stray from a prior background-launch deploy) is gone
 #     before the fresh supervised start. This mirrors the strih AHK stop->verify->relaunch ordering.
-IMAG_USER="\${SUDO_USER:-newlevel}"
-IMAG_UID="\$(id -u "\$IMAG_USER")"
 # env sets XDG_RUNTIME_DIR + DBUS in the CHILD, bypassing sudo env_reset (a bare sudo -u user VAR=val
 # form can be stripped by sudoers env policy -- a stripped XDG_RUNTIME_DIR silently loses the user bus
 # and re-creates the exact unsupervised-launch failure this fix exists to kill; DBUS mirrors

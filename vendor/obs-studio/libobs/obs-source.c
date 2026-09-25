@@ -1813,11 +1813,6 @@ static inline int64_t genlock_audio_place_term_ns(int mode, uint32_t hold_ms, in
 		return (int64_t)((uint64_t)off_live_ns + hold_ns - timing_adjust_ns);
 	return 0;
 }
-/* the ASRC level-target shift (ms) of a re-placement: new term - previous term of the SAME packet. */
-static inline double genlock_audio_place_shift_ms(int64_t new_term_ns, int64_t prev_term_ns)
-{
-	return (double)(int64_t)((uint64_t)new_term_ns - (uint64_t)prev_term_ns) / 1e6;
-}
 /* issue 1367 (ROZHODNUTÉ 5827497952): decide one packet. continuous = the ingest's own push_back
  * verdict; a hold change while playing SLEWS (never steps) unless the source cannot slew. */
 static inline int genlock_audio_hold_action(int prev_mode, uint32_t prev_hold_ms, int mode, uint32_t hold_ms,
@@ -1889,6 +1884,13 @@ static inline int64_t genlock_audio_pairing_offset_ms(int64_t applied_audio_dela
 	/* residual A/V offset (ms, signed, truncated): applied audio hold minus the video's MEASURED
 	 * stamp->present delay; 0 = paired. */
 	return (int64_t)((uint64_t)applied_audio_delay_ns - (uint64_t)video_delay_ns) / 1000000;
+}
+/* issue 1367 (review round 2): where the audio actually sits -- the applied hold minus the slew it
+ * still owes (a hold change is slewed in at 1 ms per second, so mid-slew the audio is not yet at the
+ * new hold). The pairing offset uses this, so a slew still owing 33 ms reads -33, not 0. */
+static inline int64_t genlock_audio_applied_delay_ns(uint32_t hold_ms, int64_t slew_remaining_ns)
+{
+	return (int64_t)(genlock_audio_present_delay_ns(hold_ms) - (uint64_t)slew_remaining_ns);
 }
 /* genlock_audio_health: 0=Ok 1=AudioDisabledOnProgram 2=AsrcSaturated 3=PairingOffsetExceeded (above
  * HALF a frame, issue 1367). Precedence matches decide_audio_health() in the Rust authority. */
@@ -5667,12 +5669,14 @@ static void genlock_fill_stats(const obs_source_t *source, struct obs_genlock_st
 	stats->audio_enabled = obs_source_audio_active(source);
 	stats->audio_delay_ms = source->genlock_audio_delay_ms;
 	/* issue 1367: a WITHHELD source (no video delay known yet, nothing placed) is not unpaired -- 0,
-	 * so the LOCK widget does not read DEGRADED for the first seconds after every OBS start. */
+	 * so the LOCK widget does not read DEGRADED for the first seconds after every OBS start. Mid-slew
+	 * the audio side is the hold minus the slew still owed (where the audio really sits). */
 	stats->audio_pairing_offset_ms =
 		source->genlock_audio_hold_mode == GENLOCK_AUDIO_HOLD_PENDING
 			? 0
 			: genlock_audio_pairing_offset_ms(
-				  (int64_t)genlock_audio_present_delay_ns(source->genlock_audio_delay_ms),
+				  genlock_audio_applied_delay_ns(source->genlock_audio_delay_ms,
+								 source->genlock_audio_slew_remaining_ns),
 				  genlock_audio_video_delay_ref_ns(source->genlock_video_delay_smoothed_ns, effective_latency_ms));
 	/* camera-box #1299 (v3): the DistroAV receiver's live NDI connection state. An input with
 	 * connected=false (sender not running) is excluded from the LOCK decision's DEGRADED gate so a
@@ -6158,19 +6162,28 @@ static inline bool genlock_n1_shallow_gap_is_relock(uint64_t gap_ns)
 
 /* open a new measurement window; the latched D (if any) stays maintained. */
 static inline void genlock_n1_shallow_rearm(uint64_t *floor_max_frames, uint32_t *window_ticks, uint32_t *over_ticks,
-					    bool *measuring)
+					    uint32_t *deep_ticks, bool *measuring)
 {
 	*floor_max_frames = 0;
 	*window_ticks = 0;
 	*over_ticks = 0;
+	*deep_ticks = 0;
 	*measuring = true;
+}
+
+/* the window's deep verdict: a strict MAJORITY of its sampled ticks read deep (review round 2 -- a
+ * stall still running on the one latch tick cannot decide it). */
+static inline bool genlock_n1_shallow_window_deep(uint32_t deep_ticks, uint32_t window_ticks)
+{
+	return (uint64_t)deep_ticks * 2u > (uint64_t)window_ticks;
 }
 
 /* one PRESENT tick; returns true on the tick that latches a D (or a capped report). An N>=2 tick
  * clears the state; a relock, or an N==1 source with no depth / window / cap, opens a window; a
  * whole window of floors at or over D re-opens one. */
 static inline bool genlock_n1_shallow_track(uint64_t *target_frames, uint64_t *floor_max_frames,
-					    uint32_t *window_ticks, uint32_t *over_ticks, bool *measuring, bool *capped,
+					    uint32_t *window_ticks, uint32_t *over_ticks, uint32_t *deep_ticks,
+					    bool *measuring, bool *capped,
 					    bool n1, bool relock, bool on_grid, uint64_t floor_frames, uint64_t base_frames,
 					    bool deep, bool min_latency_box)
 {
@@ -6179,12 +6192,13 @@ static inline bool genlock_n1_shallow_track(uint64_t *target_frames, uint64_t *f
 		*floor_max_frames = 0;
 		*window_ticks = 0;
 		*over_ticks = 0;
+		*deep_ticks = 0;
 		*measuring = false;
 		*capped = false;
 		return false;
 	}
 	if (relock || (*target_frames == 0 && !*measuring && !*capped))
-		genlock_n1_shallow_rearm(floor_max_frames, window_ticks, over_ticks, measuring);
+		genlock_n1_shallow_rearm(floor_max_frames, window_ticks, over_ticks, deep_ticks, measuring);
 	if (!on_grid)
 		return false;
 	if (!*measuring) {
@@ -6196,16 +6210,19 @@ static inline bool genlock_n1_shallow_track(uint64_t *target_frames, uint64_t *f
 			*over_ticks += 1u;
 		if (*over_ticks < GENLOCK_N1_SHALLOW_SETTLE_TICKS)
 			return false;
-		genlock_n1_shallow_rearm(floor_max_frames, window_ticks, over_ticks, measuring);
+		genlock_n1_shallow_rearm(floor_max_frames, window_ticks, over_ticks, deep_ticks, measuring);
 	}
 	if (floor_frames > *floor_max_frames)
 		*floor_max_frames = floor_frames;
 	if (*window_ticks < UINT32_MAX)
 		*window_ticks += 1u;
+	if (deep && *deep_ticks < UINT32_MAX)
+		*deep_ticks += 1u;
 	if (*window_ticks < GENLOCK_N1_SHALLOW_SETTLE_TICKS)
 		return false;
-	*target_frames =
-		genlock_n1_shallow_target_frames(base_frames, *floor_max_frames, deep, min_latency_box, capped);
+	*target_frames = genlock_n1_shallow_target_frames(base_frames, *floor_max_frames,
+							  genlock_n1_shallow_window_deep(*deep_ticks, *window_ticks),
+							  min_latency_box, capped);
 	*measuring = false;
 	return true;
 }
@@ -6474,7 +6491,11 @@ static inline bool genlock_relock_acquire_should_hold(uint64_t oldest_queued_age
  * genlock_release_tick. Samples the arrival floor (the newest queued frame's rounded age at the
  * scheduled instant tick_wall) while a window is open and LATCHES D = max(base, floor_max) + 1 when
  * it closes (a deep source: base + 1); D then holds until the next relock, and the audio tracker
- * follows it (genlock_video_delay_lock_ms). N==1 only (an N>=2 tick clears the state). One log line
+ * follows it (genlock_video_delay_lock_ms). N==1 only (an N>=2 tick clears the state; an UNKNOWN N --
+ * genlock_last_known_n 0 after an ACQUIRE / GAP RESYNC until genlock_effective_source_multiple
+ * re-confirms it, normally the same or the next tick -- reads as N==1: an N>=2 source then opens a
+ * window for that tick, which only freezes its audio tracker (PENDING) until the next tick clears
+ * it; harmless, review round 2). One log line
  * per latch; a capped latch (the imag min-latency guard: reported, not applied) is a WARNING. Split
  * out of genlock_release_tick (review round 1, the function-size budget). */
 static void genlock_shallow_latch(obs_source_t *source, uint64_t tick_wall, uint64_t wall_now, uint64_t interval,
@@ -6484,7 +6505,8 @@ static void genlock_shallow_latch(obs_source_t *source, uint64_t tick_wall, uint
 	const uint64_t base_frames = genlock_n1_base_frames(reserve_ms, interval);
 	if (!genlock_n1_shallow_track(&source->genlock_shallow_target_frames, &source->genlock_shallow_floor_max_frames,
 				      &source->genlock_shallow_window_ticks, &source->genlock_shallow_over_ticks,
-				      &source->genlock_shallow_measuring, &source->genlock_shallow_capped,
+				      &source->genlock_shallow_deep_ticks, &source->genlock_shallow_measuring,
+				      &source->genlock_shallow_capped,
 				      source->genlock_last_known_n < 2, relock, genlock_n1_tick_is_on_grid(tick_wall, interval),
 				      genlock_n1_depth_frames(tick_wall, newest_stamp, interval), base_frames,
 				      genlock_n1_is_deep_source(wall_now > newest_stamp ? wall_now - newest_stamp : 0,
@@ -6501,8 +6523,10 @@ static void genlock_shallow_latch(obs_source_t *source, uint64_t tick_wall, uint
 	     source->context.name ? source->context.name : "?",
 	     (unsigned long long)source->genlock_shallow_target_frames,
 	     (unsigned long long)source->genlock_shallow_floor_max_frames, (unsigned long long)base_frames,
-	     (unsigned long long)genlock_n1_shallow_target_frames(base_frames, source->genlock_shallow_floor_max_frames,
-								   false, false, &unused_capped),
+	     (unsigned long long)genlock_n1_shallow_target_frames(
+		     base_frames, source->genlock_shallow_floor_max_frames,
+		     genlock_n1_shallow_window_deep(source->genlock_shallow_deep_ticks, source->genlock_shallow_window_ticks),
+		     false, &unused_capped),
 	     reserve_ms, source->genlock_shallow_capped ? 1 : 0);
 }
 
@@ -9075,7 +9099,7 @@ void obs_source_set_genlock_latency_ms(obs_source_t *source, uint32_t ms)
 		if (source->genlock_last_known_n < 2)
 			genlock_n1_shallow_rearm(&source->genlock_shallow_floor_max_frames,
 						 &source->genlock_shallow_window_ticks, &source->genlock_shallow_over_ticks,
-						 &source->genlock_shallow_measuring);
+						 &source->genlock_shallow_deep_ticks, &source->genlock_shallow_measuring);
 	}
 	pthread_mutex_unlock(&source->async_mutex);
 

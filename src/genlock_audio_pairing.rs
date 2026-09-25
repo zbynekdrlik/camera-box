@@ -349,15 +349,6 @@ pub fn audio_place_term_ns(
     }
 }
 
-/// The ASRC level-target shift (ms) for a re-placement: the difference between the new and the
-/// previous placement term of the SAME packet (so the live offset and `timing_adjust` cancel for a
-/// timecode→timecode change, which shifts by exactly the delay delta).
-///
-/// Mirror of `genlock_audio_place_shift_ms`.
-pub fn audio_place_shift_ms(new_term_ns: i64, prev_term_ns: i64) -> f64 {
-    new_term_ns.wrapping_sub(prev_term_ns) as f64 / 1e6
-}
-
 /// Issue 1367 (ROZHODNUTÉ 5827497952) — what the audio ingest does with one packet. Discriminants
 /// match the C `GENLOCK_AUDIO_ACT_*` defines.
 #[repr(u8)]
@@ -511,6 +502,14 @@ pub fn video_delay_reference_ns(smoothed_ns: u64, latency_ms: u32) -> i64 {
 /// Mirror of `genlock_audio_pairing_offset_ms` in `obs-source.c`.
 pub fn pairing_offset_ms(applied_audio_delay_ns: i64, video_delay_ns: i64) -> i64 {
     applied_audio_delay_ns.wrapping_sub(video_delay_ns) / NS_PER_MS as i64
+}
+
+/// Issue 1367 (review round 2) — where the audio actually sits: the applied hold minus the slew it
+/// still owes (a hold change is slewed in at [`AUDIO_SLEW_PPM`], so mid-slew the audio is not yet at
+/// the new hold). The pairing offset's audio side, so a slew still owing 33 ms reads −33, not 0.
+/// Mirror of `genlock_audio_applied_delay_ns`.
+pub fn audio_applied_delay_ns(hold_ms: u32, slew_remaining_ns: i64) -> i64 {
+    genlock_audio_delay_ns(hold_ms).wrapping_sub(slew_remaining_ns as u64) as i64
 }
 
 /// The audio-parity health of one genlocked source — the reason the LOCK indicator DEGRADES on the

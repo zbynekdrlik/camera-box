@@ -1151,6 +1151,7 @@ struct obs_source {
 	uint64_t genlock_shallow_floor_max_frames;  /* the max rounded arrival floor of the open window */
 	uint32_t genlock_shallow_window_ticks;      /* on-grid present ticks sampled in the open window */
 	uint32_t genlock_shallow_over_ticks;        /* consecutive on-grid present ticks with the floor at/over D (a whole window re-measures) */
+	uint32_t genlock_shallow_deep_ticks;        /* window ticks that read deep (the latch takes the majority) */
 	bool genlock_shallow_measuring;             /* a measurement window is open (after a relock) */
 	bool genlock_shallow_capped;                /* the last latch was capped by the min-latency (imag) guard: reported, no depth applied */
 	uint32_t genlock_shallow_latches;           /* cumulative latches (audit shallow_latches=) */

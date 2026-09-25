@@ -181,6 +181,8 @@ set -euo pipefail
 #       source's latched depth at base + 1 (reporting the cap); an ABSENT marker fails OPEN -- an
 #       imag input could be deepened past its 3 ms floor -- so its absence FAILs here. A pure ssh
 #       read, BEFORE check (o)'s OBS restart.
+#   (bd) the OBS check (o) just restarted logs `genlock-min-latency: ON` (issue 1367): libobs reads
+#       the marker once per process, so this proves the LOADED libobs honours it. After (o).
 #
 # Every remote helper this gate shells out to (wmctrl, python3) is preflighted BY NAME before use
 # (#822 pattern) -- a missing tool is reported as a missing tool, never folded into a failed
@@ -1701,6 +1703,26 @@ else
         fail "projectors did NOT persist across a real OBS restart within ${IMAG_OBS_PROJECTOR_POLL_S}s -- Multiview=${MV_COUNT2:-0} Program=${PGM_COUNT2:-0} after 'systemctl --user restart imag-obs.service' (#840/#890)"
       fi
     fi
+  fi
+fi
+
+# (bd) the RESTARTED OBS took the min-latency marker (issue 1367, review round 2) ------------------
+# (bc) proves the file; libobs reads it ONCE per process (genlock_min_latency_box) and logs the
+# verdict on the first genlock present tick, so only the OBS that check (o) just restarted proves the
+# loaded libobs honours it. Runs only after a restart that brought the projectors back.
+if [ "${persist_ok:-0}" -eq 1 ]; then
+  MINLAT_LOG=""
+  minlat_deadline=$((SECONDS + IMAG_OBS_PROJECTOR_POLL_S))
+  while :; do
+    MINLAT_LOG="$(ssh_box "grep -ho 'genlock-min-latency: [A-Za-z]*' \"\$(ls -t /home/${IMAG_USER}/.config/obs-studio/logs/*.txt 2>/dev/null | head -1)\" 2>/dev/null | tail -1" || true)"
+    [ -n "$MINLAT_LOG" ] && break
+    [ "$SECONDS" -ge "$minlat_deadline" ] && break
+    sleep 5
+  done
+  if [ "$MINLAT_LOG" = "genlock-min-latency: ON" ]; then
+    ok "(bd) the restarted OBS logs 'genlock-min-latency: ON' -- its libobs caps a shallow imag input at base + 1 (issue 1367)"
+  else
+    fail "(bd) the restarted OBS logged '${MINLAT_LOG:-nothing within ${IMAG_OBS_PROJECTOR_POLL_S}s}', want 'genlock-min-latency: ON' -- the loaded libobs does not honour the imag min-latency marker (issue 1367)"
   fi
 fi
 
