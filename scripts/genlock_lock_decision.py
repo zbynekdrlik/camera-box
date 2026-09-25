@@ -63,6 +63,7 @@ MC_DRIFT = "drift"
 MC_UNDISCIPLINED = "undisciplined"
 GENLOCK_MEDIA_CLOCK_WINDOW_S = 600          # the window the drift growth is measured over
 GENLOCK_MEDIA_CLOCK_DRIFT_BOUND_MS = 2      # growth beyond this (ms per window) is DRIFT
+GENLOCK_MEDIA_CLOCK_MAX_RATE_PPM = 500      # dantesync DRIFT_MAX_PPM: a bigger change is a wall STEP
 # The Windows os_gettime_discipline() outcomes that mean "fell back to raw QPC".
 MEDIA_DISCIPLINE_RAW_FALLBACK = ("disabled", "read_failed", "api_missing")
 
@@ -97,16 +98,27 @@ def qpc_drift_beyond_bound(rate_ready, drift_delta_ms, elapsed_ms, max_step_ms, 
     return (abs(max_step_ms) > step_bound_ms, measured_ppm)
 
 
-def media_clock_window_drift_ms(samples, step_bound_ms):
-    """Issue 1372 part D -- the wall-vs-media drift GROWTH across cumulative integer-ms drift samples
-    (oldest first): the sum of the sample-to-sample deltas with |delta| <= step_bound_ms (a larger jump
-    is a wall STEP, owned by the qpc_drift verdict). Fewer than two samples -> 0. Mirror of
+def media_clock_step_allowance_ms(dt_ms, max_rate_ppm):
+    """Issue 1372 part D -- the largest sample-to-sample change (ms) a clock RATE of max_rate_ppm can
+    produce over dt_ms: 1 + floor(dt_ms * max_rate_ppm / 1e6) (the 1 is the integer-ms truncation
+    boundary). A non-positive interval or rate allows 1. Mirror of
+    camera_box::genlock_lock_state::media_clock_step_allowance_ms."""
+    if dt_ms <= 0 or max_rate_ppm <= 0:
+        return 1
+    return 1 + (dt_ms * max_rate_ppm) // 1_000_000
+
+
+def media_clock_window_drift_ms(samples, max_rate_ppm):
+    """Issue 1372 part D -- the wall-vs-media drift GROWTH across `(t_ms, drift_ms)` samples (oldest
+    first): the sum of the sample-to-sample drift changes a clock rate of max_rate_ppm could produce
+    over their interval; a larger change is a wall STEP (a dantesync phase step, the slow-GM sawtooth, a
+    step the qpc_drift verdict owns) and is left out. Fewer than two samples -> 0. Mirror of
     camera_box::genlock_lock_state::media_clock_window_drift_ms (python ints never overflow, so the
-    Rust/C saturation only matters at the i64 extremes no real drift reaches)."""
+    Rust/C saturation only matters at the i64 extremes no real clock reaches)."""
     total = 0
-    for a, b in zip(samples, samples[1:]):
-        jump = b - a
-        if abs(jump) > step_bound_ms:
+    for (ta, da), (tb, db) in zip(samples, samples[1:]):
+        jump = db - da
+        if abs(jump) > media_clock_step_allowance_ms(tb - ta, max_rate_ppm):
             continue
         total += jump
     return total

@@ -388,16 +388,33 @@ def test_qpc_step_beats_media_clock_beats_audio():
     assert d.decide(**f) == (d.ST_DEGRADED, d.R_MEDIA_CLOCK)
 
 
+def _at_1hz(n, f):
+    return [(i * 1000, f(i)) for i in range(n + 1)]
+
+
 def test_media_clock_window_drift_mirrors_the_rust_authority():
-    ramp = [i // 75 for i in range(601)]  # the pre-part-A stream: ~8 ms per 10 min
-    assert d.media_clock_window_drift_ms(ramp, d.GENLOCK_QPC_STEP_BOUND_MS) == 8
-    stepped = ramp[:301] + [v + 40 for v in ramp[301:]]  # a 40 ms wall step is not a rate
-    assert d.media_clock_window_drift_ms(stepped, d.GENLOCK_QPC_STEP_BOUND_MS) == 8
-    assert d.media_clock_window_drift_ms([0, 33], 33) == 33
-    assert d.media_clock_window_drift_ms([0, 34], 33) == 0
-    assert d.media_clock_window_drift_ms([5, 6, 5, 6, 5], 33) == 0
-    assert d.media_clock_window_drift_ms([7], 33) == 0
-    assert d.media_clock_window_drift_ms([], 33) == 0
+    r = d.GENLOCK_MEDIA_CLOCK_MAX_RATE_PPM
+    # the pre-part-A stream: ~8 ms per 10 min at 1 Hz
+    assert d.media_clock_window_drift_ms(_at_1hz(600, lambda i: i // 75), r) == 8
+    # a 40 ms wall step is not a rate
+    stepped = _at_1hz(600, lambda i: i // 75 + (40 if i > 300 else 0))
+    assert d.media_clock_window_drift_ms(stepped, r) == 8
+    # the slow-GM sawtooth (2.5 ms same-direction steps every ~100 s) is steps, never drift
+    assert d.media_clock_window_drift_ms(_at_1hz(600, lambda i: (i // 100) * 5 // 2), r) == 0
+    assert d.media_clock_window_drift_ms([(0, 0), (1000, 1)], r) == 1
+    assert d.media_clock_window_drift_ms([(0, 0), (1000, 2)], r) == 0
+    assert d.media_clock_window_drift_ms([(0, 0), (4000, 3)], r) == 3  # a 4 s UI stall
+    assert d.media_clock_window_drift_ms([(0, 0), (4000, 4)], r) == 0
+    assert d.media_clock_window_drift_ms(_at_1hz(4, lambda i: 5 + i % 2), r) == 0
+    assert d.media_clock_window_drift_ms([(0, 7)], r) == 0
+    assert d.media_clock_window_drift_ms([], r) == 0
+
+
+def test_media_clock_step_allowance_mirrors_the_rust_authority():
+    r = d.GENLOCK_MEDIA_CLOCK_MAX_RATE_PPM
+    assert [d.media_clock_step_allowance_ms(dt, r) for dt in (1000, 1999, 2000, 4000, 0, -5)] == \
+        [1, 1, 2, 3, 1, 1]
+    assert d.media_clock_step_allowance_ms(1000, 0) == 1
 
 
 def test_media_clock_verdict_mirrors_the_rust_authority():

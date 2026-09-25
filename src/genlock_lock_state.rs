@@ -397,18 +397,26 @@ pub fn qpc_drift_beyond_bound(
 // compared the rate with an instantaneous dantesync `f_ptp + f_phase` sample, which meant a different
 // thing per box; this one compares with 0, which means the same thing everywhere.
 //
-// Single-sample jumps beyond the wall-STEP bound are EXCLUDED from the growth (the `qpc_drift` step
-// verdict owns a step, so a step never reads as a rate for the next 10 min). The second input is the
-// Windows discipline state libobs publishes (`os_gettime_discipline()`): a fallback to raw QPC while
-// dantesync answers is DEGRADED at once, before any drift accrues. The term never makes a box
+// A sample-to-sample change larger than any clock RATE can make in that interval is a wall STEP (a
+// dantesync phase step, the slow-GM sawtooth of up to 2.5 ms per step, a larger step the `qpc_drift`
+// verdict owns) and is EXCLUDED from the growth, so steps never read as an audio-clock rate. At the
+// widget's 1 Hz sampling that allowance is 1 ms (the integer-ms truncation boundary), so a sub-frame
+// step of 2+ ms is left out; a 1 ms step cannot be told from a rate and counts. The second input is
+// the Windows discipline state libobs publishes (`os_gettime_discipline()`): a fallback to raw QPC
+// while dantesync answers is DEGRADED at once, before any drift accrues. The term never makes a box
 // UNLOCKED on its own.
 
 /// The window (s) the media-clock drift growth is measured over — the design's "per 10 min".
 pub const GENLOCK_MEDIA_CLOCK_WINDOW_S: i64 = 600;
 /// Drift growth (ms) over the window beyond which the media clock DEGRADES: > 2 ms per 10 min
-/// (> 3.3 ppm). The integer-ms drift carries ±1 ms of truncation noise; the undisciplined stream
-/// accrued ≈ 8 ms per 10 min; a disciplined box stays at 0.
+/// (> 3.3 ppm). The drift is truncated toward zero to integer ms, so a window that crosses zero reads
+/// up to ~2 ms off: the effective trip is 2–4 ms of real growth. The undisciplined stream accrued
+/// ≈ 8 ms per 10 min; a disciplined box stays at 0.
 pub const GENLOCK_MEDIA_CLOCK_DRIFT_BOUND_MS: i64 = 2;
+/// The fastest rate (ppm) the media clock can drift from the wall: dantesync's `DRIFT_MAX_PPM`. A
+/// sample-to-sample change beyond `1 ms + interval × this` is a wall STEP, not a rate (see
+/// [`media_clock_step_allowance_ms`]).
+pub const GENLOCK_MEDIA_CLOCK_MAX_RATE_PPM: i64 = 500;
 
 /// What the Windows `os_gettime_ns()` last read from the system-time adjustment. Discriminants match
 /// libobs `enum os_gettime_discipline_state` (`util/platform.h`) and the C mirror
@@ -465,18 +473,34 @@ impl MediaClock {
     }
 }
 
-/// The wall-vs-media drift GROWTH across a window of cumulative integer-ms `wall_qpc_drift_ms`
-/// samples (oldest first): the sum of the sample-to-sample deltas whose magnitude is at most
-/// `step_bound_ms`. A larger single-sample jump is a wall STEP (the `qpc_drift` verdict's), not a
-/// rate, and is left out. Saturating, so no input can overflow. Fewer than two samples → 0.
+/// The largest sample-to-sample change (ms) a clock RATE of `max_rate_ppm` can produce over `dt_ms`:
+/// `1 + floor(dt_ms × max_rate_ppm / 1e6)`. The `1` is the integer-ms truncation boundary (a true
+/// change of at most 1 ms reads as at most 1); the rest is the growth itself. A non-positive interval
+/// or rate allows 1. Saturating.
+///
+/// Byte-for-byte mirror of `genlock_media_clock_step_allowance_ms` in `GenlockLockState.hpp`.
+pub fn media_clock_step_allowance_ms(dt_ms: i64, max_rate_ppm: i64) -> i64 {
+    if dt_ms <= 0 || max_rate_ppm <= 0 {
+        return 1;
+    }
+    1i64.saturating_add(dt_ms.saturating_mul(max_rate_ppm) / 1_000_000)
+}
+
+/// The wall-vs-media drift GROWTH across a window of `(t_ms, drift_ms)` samples (oldest first;
+/// `t_ms` the widget's monotonic ms, `drift_ms` the cumulative integer-ms `wall_qpc_drift_ms`): the
+/// sum of the sample-to-sample drift changes that a clock rate of `max_rate_ppm` could produce over
+/// their interval ([`media_clock_step_allowance_ms`]). A larger change is a wall STEP and is left out,
+/// so steps never read as an audio-clock rate. Saturating, so no input can overflow. Fewer than two
+/// samples → 0.
 ///
 /// Byte-for-byte mirror of `genlock_media_clock_window_drift_ms` in `GenlockLockState.hpp` — the
 /// parity gate `tests/genlock_lock_state_parity.rs` keeps the two identical.
-pub fn media_clock_window_drift_ms(samples: &[i64], step_bound_ms: i64) -> i64 {
+pub fn media_clock_window_drift_ms(samples: &[(i64, i64)], max_rate_ppm: i64) -> i64 {
     let mut sum: i64 = 0;
     for w in samples.windows(2) {
-        let jump = w[1].saturating_sub(w[0]);
-        if jump.saturating_abs() > step_bound_ms {
+        let dt = w[1].0.saturating_sub(w[0].0);
+        let jump = w[1].1.saturating_sub(w[0].1);
+        if jump.saturating_abs() > media_clock_step_allowance_ms(dt, max_rate_ppm) {
             continue;
         }
         sum = sum.saturating_add(jump);
@@ -1099,44 +1123,62 @@ mod tests {
         assert_eq!(decide(&f), (LockState::Degraded, LockReason::MediaClock));
     }
 
+    /// `(t_ms, drift_ms)` samples every `dt_ms`, drift = `f(i)`.
+    fn ramp(n: i64, dt_ms: i64, f: impl Fn(i64) -> i64) -> Vec<(i64, i64)> {
+        (0..=n).map(|i| (i * dt_ms, f(i))).collect()
+    }
+
     #[test]
     fn window_drift_sums_the_rate_and_leaves_a_step_out() {
-        // The pre-part-A stream: +1 ms every ~75 samples (≈ 8 ms over the 600 s window).
-        let mut s = vec![0i64];
-        for i in 1..=600i64 {
-            s.push(i / 75);
-        }
+        let r = GENLOCK_MEDIA_CLOCK_MAX_RATE_PPM;
+        // The pre-part-A stream at 1 Hz: +1 ms every ~75 samples (≈ 8 ms over the 600 s window).
+        let s = ramp(600, 1000, |i| i / 75);
+        assert_eq!(media_clock_window_drift_ms(&s, r), 8);
+        // A 40 ms wall step (the qpc_drift verdict's) is never counted as drift.
+        let stepped = ramp(600, 1000, |i| i / 75 + if i > 300 { 40 } else { 0 });
+        assert_eq!(media_clock_window_drift_ms(&stepped, r), 8);
+        // The slow-GM sawtooth: a 2.5 ms same-direction wall step every ~100 s on a disciplined
+        // clock (reads 2 or 3 at 1 Hz) is a step too — never "audio clock drift".
+        let sawtooth = ramp(600, 1000, |i| (i / 100) * 5 / 2);
+        assert_eq!(media_clock_window_drift_ms(&sawtooth, r), 0);
+        // A 1 ms change per sample is within the rate allowance and counts; 2 ms is a step.
+        assert_eq!(media_clock_window_drift_ms(&[(0, 0), (1000, 1)], r), 1);
+        assert_eq!(media_clock_window_drift_ms(&[(0, 0), (1000, 2)], r), 0);
+        // A UI stall: 4 s between samples allows 1 + 2 = 3 ms of growth.
+        assert_eq!(media_clock_window_drift_ms(&[(0, 0), (4000, 3)], r), 3);
+        assert_eq!(media_clock_window_drift_ms(&[(0, 0), (4000, 4)], r), 0);
+        // Negative drift, truncation noise that returns, fewer than two samples.
+        assert_eq!(media_clock_window_drift_ms(&ramp(3, 1000, |i| -i), r), -3);
         assert_eq!(
-            media_clock_window_drift_ms(&s, GENLOCK_QPC_STEP_BOUND_MS),
-            8
-        );
-        // A 40 ms wall step in the middle is the step verdict's, never counted as drift.
-        let mut stepped = s.clone();
-        for v in stepped.iter_mut().skip(301) {
-            *v += 40;
-        }
-        assert_eq!(
-            media_clock_window_drift_ms(&stepped, GENLOCK_QPC_STEP_BOUND_MS),
-            8
-        );
-        // Exactly the step bound still counts (strictly greater is a step).
-        assert_eq!(
-            media_clock_window_drift_ms(&[0, 33], GENLOCK_QPC_STEP_BOUND_MS),
-            33
-        );
-        assert_eq!(
-            media_clock_window_drift_ms(&[0, 34], GENLOCK_QPC_STEP_BOUND_MS),
+            media_clock_window_drift_ms(&ramp(4, 1000, |i| 5 + i % 2), r),
             0
         );
-        // Negative drift, truncation noise that returns, fewer than two samples.
-        assert_eq!(media_clock_window_drift_ms(&[0, -1, -2, -3], 33), -3);
-        assert_eq!(media_clock_window_drift_ms(&[5, 6, 5, 6, 5], 33), 0);
-        assert_eq!(media_clock_window_drift_ms(&[7], 33), 0);
-        assert_eq!(media_clock_window_drift_ms(&[], 33), 0);
-        // Saturating at the extremes, never a panic.
+        assert_eq!(media_clock_window_drift_ms(&[(0, 7)], r), 0);
+        assert_eq!(media_clock_window_drift_ms(&[], r), 0);
+        // Saturating at the extremes, never a panic (the saturated jump is a step, left out).
         assert_eq!(
-            media_clock_window_drift_ms(&[i64::MIN, i64::MAX], i64::MAX),
-            i64::MAX
+            media_clock_window_drift_ms(&[(0, i64::MIN), (i64::MAX, i64::MAX)], i64::MAX),
+            0
+        );
+        assert_eq!(
+            media_clock_window_drift_ms(&[(i64::MAX, 0), (i64::MIN, 1)], i64::MAX),
+            1
+        );
+    }
+
+    #[test]
+    fn the_step_allowance_is_one_ms_plus_the_rate_over_the_interval() {
+        let r = GENLOCK_MEDIA_CLOCK_MAX_RATE_PPM;
+        assert_eq!(media_clock_step_allowance_ms(1000, r), 1);
+        assert_eq!(media_clock_step_allowance_ms(1999, r), 1);
+        assert_eq!(media_clock_step_allowance_ms(2000, r), 2);
+        assert_eq!(media_clock_step_allowance_ms(4000, r), 3);
+        assert_eq!(media_clock_step_allowance_ms(0, r), 1);
+        assert_eq!(media_clock_step_allowance_ms(-5, r), 1);
+        assert_eq!(media_clock_step_allowance_ms(1000, 0), 1);
+        assert_eq!(
+            media_clock_step_allowance_ms(i64::MAX, i64::MAX),
+            1 + i64::MAX / 1_000_000
         );
     }
 

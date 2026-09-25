@@ -25,7 +25,7 @@ facet + dev1 watchdog that CONSUMES the same structs over obs-websocket).
 | Per-output stats API | `obs.h` (`struct obs_genlock_output_stats`, `obs_output_set_genlock_wall_stamping`, `obs_output_get_genlock_stats`) + `obs-output.c` + `obs-internal.h` (two bool fields, bzalloc-zeroed) | DistroAV's `ndi-output.cpp` sets `wall_stamping=true` at `begin_data_capture` success, `false` at stop. |
 | The widget | `OBSBasicStatusBar.{hpp,cpp}` (`UpdateGenlockLabel`, `PollGenlockClock`) | A permanent `QLabel` + an ALWAYS-ON 1 Hz `QTimer` (NOT the stream-only `refreshTimer`). |
 | Vendored-source guards | `tests/genlock_lock_indicator_guards.rs` | std-only, runnable via `rustc --test`; the Linux-CI twin of the pwsh gates. |
-| Media-clock term (issue 1372 part D) | `src/genlock_lock_state.rs` (`MediaClock`, `MediaDiscipline`, `media_clock_window_drift_ms`, `media_clock_verdict`) ↔ `GenlockLockState.hpp` (the `genlock_media_*` block after the qpc lift) + libobs `os_gettime_discipline()` (`util/platform.h`, `platform-windows.c`) | Parity: the decision grid × the three media verdicts + a 5th lift (`c_media_clock_matches_the_rust_authority_1372_part_d`); the libobs getter is checked read by read in `tests/os_clock_discipline_parity_1372.rs`. Guards: `genlock_lock_media_clock_term_present_1372_part_d` + the part-D pwsh block in both ymls. |
+| Media-clock term (issue 1372 part D) | `src/genlock_lock_state.rs` (`MediaClock`, `MediaDiscipline`, `media_clock_step_allowance_ms`, `media_clock_window_drift_ms`, `media_clock_verdict`) ↔ `GenlockLockState.hpp` (the `genlock_media_*` block after the qpc lift) + libobs `os_gettime_discipline()` (`util/platform.h`, `platform-windows.c`) | Parity: the decision grid × the three media verdicts + a 5th lift (`c_media_clock_matches_the_rust_authority_1372_part_d`); the libobs getter is checked read by read in `tests/os_clock_discipline_parity_1372.rs`. Guards: `genlock_lock_media_clock_term_present_1372_part_d` + the part-D pwsh block in both ymls. |
 | pwsh source-anchor gates | `windows-genlock.yml` + `windows-genlock-fast.yml` (`Assert in-OBS genlock LOCK indicator present (#1298)`) | 3-copy lock-step per `obs-titlebar-build-id.md`. |
 
 ## State decision (the contract)
@@ -41,17 +41,32 @@ lowest)**; else LOCKED (green).
   the wall-vs-media drift must stay FLAT on every box. The widget keeps a second ring
   (`genlockMediaClockHistory`, `GENLOCK_MEDIA_CLOCK_WINDOW_S` = 600 s) of the same cumulative
   `wall_qpc_drift_ms` samples and asks the pure, parity-gated pair:
-  - `genlock_media_clock_window_drift_ms(samples, n, GENLOCK_QPC_STEP_BOUND_MS)`: the sum of the
-    per-sample deltas, a single jump > 33 ms LEFT OUT (the step verdict owns it, so a step never
-    reads as a rate for the next 10 min);
+  - `genlock_media_clock_window_drift_ms(t_ms, drift_ms, n, GENLOCK_MEDIA_CLOCK_MAX_RATE_PPM)`: the
+    sum of the per-sample drift changes, a change larger than `1 ms + interval × 500 ppm`
+    (`genlock_media_clock_step_allowance_ms`; 500 ppm = dantesync's `DRIFT_MAX_PPM`) LEFT OUT as a
+    wall STEP. At 1 Hz that allowance is 1 ms, so every 2+ ms step is left out: dantesync phase
+    steps, the slow-GM sawtooth (up to 2.5 ms per step, all one direction, ≈ 14 ms / 10 min — the
+    first version summed every step below the 33 ms frame bound and would have read that as "audio
+    clock drift" on strih-lx, the NTP master, and its clients; caught in review), and anything the
+    step verdict owns. A 1 ms step cannot be told from a rate and counts. A UI stall widens the
+    allowance with the interval;
   - `genlock_media_clock_verdict(ready, drift, 2, discipline, clock_present)`: `UNDISCIPLINED` when
     the Windows `os_gettime_discipline()` (libobs, `util/platform.h`) reports a raw-QPC fallback
     (disabled / read failed / API missing) while dantesync answers — at once, before any drift
     accrues; else `DRIFT` when the window spans >= 90 % and `|drift| > 2 ms`; else `OK`. Linux
     passes `NOT_APPLICABLE` (drift only).
   - Calibration: the undisciplined stream mixer drifted 67 ms / 83 min (≈ 8 ms per 10 min, green the
-    whole time); after the part-A deploy 0 ms over 47 min; strih-lx 0 for hours; the integer-ms
-    drift carries ±1 ms truncation noise, so `> 2` needs 3+ ms of real growth.
+    whole time); after the part-A deploy 0 ms over 47 min; strih-lx 0 for hours (review re-read
+    25.9.: every `wall_qpc_drift_ms` sample 0 on strih-lx and stream). The drift is truncated toward
+    ZERO to integer ms, so a window crossing zero reads up to ~2 ms off: `> 2` trips at 2–4 ms of
+    real growth.
+  - The widget reduces it in `ReduceGenlockMediaClock` (and the label text in
+    `genlock_reason_text`), so `UpdateGenlockLabel` stays under ~300 lines. The media sub-kind is part
+    of the `genlock-lock:` / JSON change key while the reason is `media_clock`, so a drift ↔
+    undisciplined switch logs at once.
+  - **Deploy: the FULL bundle, never the fast obs.dll alone or the frontend alone.** The widget
+    imports the new obs.dll export `os_gettime_discipline`; a frontend without the matching obs.dll
+    fails to load ("entry point not found").
   - Anything but OK DEGRADES with `LockReason::MediaClock` (= 11), label `audio clock drift N ms/10
     min` / `audio clock not disciplined (<outcome>)`, human line `reason=media_clock:<kind>`, JSON v7
     `media_clock:{state, drift_ms, window_s, ready, discipline}`. It NEVER makes a box UNLOCKED.

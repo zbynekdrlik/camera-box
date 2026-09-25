@@ -283,17 +283,32 @@ static inline int64_t genlock_media_sat_abs(int64_t v)
 	return v < 0 ? -v : v;
 }
 
-/* The drift GROWTH across n cumulative integer-ms wall_qpc_drift_ms samples (oldest first): the sum of
- * the sample-to-sample deltas with |delta| <= step_bound_ms. A larger single-sample jump is a wall STEP
- * (the qpc_drift verdict owns it), not a rate, and is left out. n < 2 -> 0. */
-static inline int64_t genlock_media_clock_window_drift_ms(const int64_t *drift_ms, int n,
-							  int64_t step_bound_ms)
+/* The largest sample-to-sample change (ms) a clock RATE of max_rate_ppm can produce over dt_ms:
+ * 1 + floor(dt_ms * max_rate_ppm / 1e6). The 1 is the integer-ms truncation boundary; the rest is the
+ * growth itself. A non-positive interval or rate allows 1. Saturating. */
+static inline int64_t genlock_media_clock_step_allowance_ms(int64_t dt_ms, int64_t max_rate_ppm)
+{
+	int64_t product;
+	if (dt_ms <= 0 || max_rate_ppm <= 0)
+		return 1;
+	product = dt_ms > INT64_MAX / max_rate_ppm ? INT64_MAX : dt_ms * max_rate_ppm;
+	return genlock_media_sat_add(1, product / 1000000);
+}
+
+/* The drift GROWTH across n samples (oldest first; t_ms the widget's monotonic ms, drift_ms the
+ * cumulative integer-ms wall_qpc_drift_ms): the sum of the sample-to-sample drift changes a clock rate
+ * of max_rate_ppm could produce over their interval. A larger change is a wall STEP (a dantesync phase
+ * step, the slow-GM sawtooth, a step the qpc_drift verdict owns) and is left out, so a step never reads
+ * as an audio-clock rate. n < 2 -> 0. */
+static inline int64_t genlock_media_clock_window_drift_ms(const int64_t *t_ms, const int64_t *drift_ms,
+							  int n, int64_t max_rate_ppm)
 {
 	int64_t sum = 0;
 	int i;
 	for (i = 1; i < n; ++i) {
+		const int64_t dt = genlock_media_sat_sub(t_ms[i], t_ms[i - 1]);
 		const int64_t jump = genlock_media_sat_sub(drift_ms[i], drift_ms[i - 1]);
-		if (genlock_media_sat_abs(jump) > step_bound_ms)
+		if (genlock_media_sat_abs(jump) > genlock_media_clock_step_allowance_ms(dt, max_rate_ppm))
 			continue;
 		sum = genlock_media_sat_add(sum, jump);
 	}

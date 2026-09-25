@@ -226,7 +226,7 @@ fn genlock_lock_media_clock_term_present_1372_part_d() {
     // the pure reduction (steps left to the step verdict) + verdict, fed the widget's own samples
     assert_has(
         STATUSBAR_CPP,
-        "genlock_media_clock_window_drift_ms(drift_samples.data(), (int)drift_samples.size(), GENLOCK_QPC_STEP_BOUND_MS);",
+        "genlock_media_clock_window_drift_ms(sample_ms.data(), drift_samples.data(), (int)drift_samples.size(), GENLOCK_MEDIA_CLOCK_MAX_RATE_PPM);",
     );
     assert_has(
         STATUSBAR_CPP,
@@ -261,7 +261,18 @@ fn genlock_lock_media_clock_term_present_1372_part_d() {
     );
     assert_has(
         hpp,
-        "static inline int64_t genlock_media_clock_window_drift_ms(const int64_t *drift_ms, int n,",
+        "static inline int64_t genlock_media_clock_window_drift_ms(const int64_t *t_ms, const int64_t *drift_ms,",
+    );
+    // a step is judged against what a clock RATE can do over the sample interval (never the 33 ms
+    // frame bound): the widget passes the dantesync drift ceiling
+    assert_has(
+        STATUSBAR_CPP,
+        "static constexpr int64_t GENLOCK_MEDIA_CLOCK_MAX_RATE_PPM = 500;",
+    );
+    // the reduction lives in its own helper (UpdateGenlockLabel stays readable)
+    assert_has(
+        STATUSBAR_CPP,
+        "const GenlockMediaClockTick mc = ReduceGenlockMediaClock(now_ms, scan.any_input, scan.qpc_signed_ms, clock_present);",
     );
     // the media term must never become a rate bound on the qpc STEP verdict (issue 1357 stays intact)
     let widget = squish(&vendor_file(STATUSBAR_CPP));

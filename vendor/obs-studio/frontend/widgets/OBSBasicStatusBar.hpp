@@ -118,6 +118,20 @@ private:
 	int genlockJsonHeartbeatTicks = 0;
 	int genlockJsonLastState = -1;
 	int genlockJsonLastReason = -1;
+	/* camera-box issue 1372 part D: the media-clock sub-kind (drift / undisciplined) is part of the
+	 * change key while the reason is media_clock, so a switch between the two logs at once. */
+	int genlockLastLoggedMedia = -1;
+	int genlockJsonLastMedia = -1;
+
+	/* camera-box issue 1372 part D: one tick of the media-clock (audio clock) term. */
+	struct GenlockMediaClockTick {
+		int verdict = 0;      /* genlock_media_clock_t */
+		int64_t drift_ms = 0; /* the drift growth over the window, steps left out */
+		int ready = 0;        /* the window spans >= 90 % */
+		int discipline = 0;   /* genlock_media_discipline_t */
+	};
+	GenlockMediaClockTick ReduceGenlockMediaClock(qint64 now_ms, bool any_input, int64_t drift_ms,
+						      bool clock_present);
 
 	void UpdateGenlockLabel();
 	void PollGenlockClock();
