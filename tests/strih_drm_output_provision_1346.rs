@@ -211,19 +211,42 @@ fn verdict_grades_the_config_and_the_lease_live_line() {
 // Wiring anchors
 // ----------------------------------------------------------------------------------------------
 
+/// The step-6 block lives in the lib (`strih_drm_output_provision`, issue 1346 review: setup-strih.sh
+/// stays under the 1000-line budget); setup-strih calls it with the box's backend fact.
+fn provision_body() -> String {
+    let lib = read("scripts/lib/strih-drm-output.sh");
+    let start = lib
+        .find("strih_drm_output_provision() {")
+        .expect("the step-6 provisioning function");
+    let end = lib[start..].find("\n}\n").expect("its end") + start;
+    lib[start..end].to_string()
+}
+
 #[test]
 fn setup_strih_provisions_drm_output_only_with_hdmi_and_retires_the_projector_json() {
-    let s = read("scripts/setup-strih.sh");
+    let setup = read("scripts/setup-strih.sh");
     assert!(
-        s.contains(". \"${HERE}/lib/strih-drm-output.sh\""),
+        setup.contains(". \"${HERE}/lib/strih-drm-output.sh\""),
         "setup-strih must source the drm-output lib"
     );
+    assert!(
+        setup.contains(
+            "strih_drm_output_provision \"$USER_HOME\" \"$DESKTOP_USER\" \"$HERE\" \"$(strih_lx_hdmi_output_backend)\""
+        ),
+        "setup-strih step 6 runs the lib's provisioning with the backend fact"
+    );
+    assert!(
+        !setup.contains("> /opt/camera-box/strih-lx-projector.json"),
+        "the retired HDMI projector config must no longer be written"
+    );
+    let s = provision_body();
     assert!(
         !s.contains("> /opt/camera-box/strih-lx-projector.json"),
         "the retired HDMI projector config must no longer be written"
     );
     assert!(
-        s.contains("rm -f /opt/camera-box/strih-lx-projector.json"),
+        s.contains("LEGACY_PROJ=/opt/camera-box/strih-lx-projector.json")
+            && s.contains("rm -f \"$LEGACY_PROJ\""),
         "a leftover strih-lx-projector.json is removed (its type carried over as the initial view)"
     );
     assert!(
@@ -235,7 +258,7 @@ fn setup_strih_provisions_drm_output_only_with_hdmi_and_retires_the_projector_js
         "review: the root-run step must refuse a symlinked config path"
     );
     assert!(
-        s.contains("install -m 0644 -o \"$DESKTOP_USER\" -g \"$DESKTOP_USER\" /dev/stdin \"$DRM_CONF\""),
+        s.contains("install -m 0644 -o \"$desktop_user\" -g \"$desktop_user\" /dev/stdin \"$DRM_CONF\""),
         "review: the config is written by install (owned by the desktop user), never a root redirect"
     );
     for token in [
@@ -390,6 +413,17 @@ fn verdict_grades_the_backend_against_the_box_fact() {
         ("1 HDMI-0 multiview 1 1 ? vk-direct", "ok", 0),
         ("0 - program 0 0 lease vk-direct", "skip-no-hdmi", 2),
         ("1 - program 0 0 lease vk-direct", "config-missing", 1),
+        (
+            "1 HDMI-0 multiview 1 1 vk-direct vk-direct 1",
+            "present-dead",
+            1,
+        ),
+        ("1 HDMI-0 multiview 1 1 vk-direct vk-direct 0", "ok", 0),
+        (
+            "0 HDMI-0 multiview 1 1 vk-direct vk-direct 1",
+            "hdmi-unplugged",
+            2,
+        ),
     ];
     for (args, token, rc) in cases {
         let (c, out, _e) = run(&format!("strih_drm_output_verdict {args} || exit $?"), None);
@@ -419,14 +453,17 @@ fn setup_and_verify_take_the_backend_from_the_box_fact() {
             .any(|l| l == "STRIH_HDMI_OUTPUT_BACKEND=TODO_OWNER"),
         "the strih PP template carries the new fact undecided"
     );
-    let s = read("scripts/setup-strih.sh");
+    let s = provision_body();
     for token in [
-        "DRM_BACKEND=\"$(strih_lx_hdmi_output_backend)\"",
-        "strih_drm_output_config_json \"$DRM_CONN\" \"$DRM_VIEW0\" \"$DRM_BACKEND\"",
+        "strih_drm_output_config_json \"$DRM_CONN\" \"$DRM_VIEW0\" \"$backend\"",
         "write_drm_backend",
-        "libvulkan1",
+        "fail \"issue 1346: apt-get install libvulkan1 failed",
+        "cannot import strih_scenes",
     ] {
-        assert!(s.contains(token), "setup-strih must contain `{token}`");
+        assert!(
+            s.contains(token),
+            "the step-6 provisioning must contain `{token}`"
+        );
     }
     let v = read("scripts/verify-strih.sh");
     for token in [
@@ -434,8 +471,29 @@ fn setup_and_verify_take_the_backend_from_the_box_fact() {
         "strih_lx_hdmi_output_backend",
         "backend-drift)",
         "backend-invalid)",
-        "\"$DRM_BACKEND_V\" \"$DRM_BACKEND_FACT\"",
+        "present-dead)",
+        "strih_drm_vk_present_dead < \"$DRM_LOG\"",
+        "\"$DRM_BACKEND_V\" \"$DRM_BACKEND_FACT\" \"$DRM_VK_DEAD\"",
     ] {
         assert!(v.contains(token), "verify-strih must contain `{token}`");
+    }
+}
+
+/// A dead vk-direct present loop is visible although `program scanout LIVE` stays in the log (review
+/// round 1): the loop's exit line with no stop after it = dead; a clean stop and an old log are alive.
+#[test]
+fn vk_present_dead_reads_the_exit_without_a_stop() {
+    let live = "10:00:00.000: drm-output: program scanout LIVE (vk-direct: a published frame reached 'HDMI-0')\n";
+    let exit = "10:05:00.000: drm-output: vk-direct present loop exited after 18000 presents (3 overwritten frames consumed)\n";
+    let stop = "10:05:00.100: drm-output: stopped (vk-direct, 'HDMI-0')\n";
+    for (log, dead) in [
+        (format!("{live}{exit}"), true),
+        (format!("{live}{exit}{stop}"), false),
+        (live.to_string(), false),
+        (String::new(), false),
+        (format!("{live}{exit}{stop}{live}{exit}"), true),
+    ] {
+        let (c, _o, _e) = run("strih_drm_vk_present_dead", Some(&log));
+        assert_eq!(c == 0, dead, "log:\n{log}");
     }
 }

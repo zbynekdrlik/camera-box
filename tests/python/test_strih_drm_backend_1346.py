@@ -105,3 +105,14 @@ def test_write_view_still_keeps_the_backend_key(tmp_path):
                            "backend": "vk-direct"})
     _mod.write_drm_view("program", str(p))
     assert json.loads(p.read_text())["backend"] == "vk-direct"
+
+
+def test_an_unknown_backend_never_arms_the_wrapper():
+    # The C stays dormant on an unknown backend, so strih-obs-start.sh must not take the connector out
+    # of X for it (a black HDMI) -- review round 1.
+    base = {"enabled": True, "connector": "HDMI-0", "argb": 2105376, "view": "multiview"}
+    assert _mod.drm_output_lease_connector(json.dumps(dict(base, backend="vk-direct"))) == "HDMI-0"
+    assert _mod.drm_output_lease_connector(json.dumps(base)) == "HDMI-0"
+    assert _mod.drm_output_lease_connector(json.dumps(dict(base, backend="vulkan"))) == ""
+    assert _mod.drm_output_lease_connector(json.dumps(dict(base, backend=7))) == "HDMI-0"
+

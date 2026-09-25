@@ -669,45 +669,246 @@ fn pick_mode_computes_the_mode_truth_table() {
 }
 
 /// `(front, pending, ready)` -> `(returned src, pending', ready', took_new)`.
-/// One present-pick row: `(front, pending, ready)` and the expected `(src, pending', ready', took)`.
-type PresentVector = ((i32, i32, i32), (i32, i32, i32, i32));
+/// One present-pick row: `(front, pending, ready, armed[ready])` and the expected
+/// `(src, pending', ready', took_new, wait_gl, armed images left)`. Taking a READY image takes its GL
+/// signal (waits it once, clears it); re-copying the FRONT waits nothing.
+type PresentVector = ((i32, i32, i32, bool), (i32, i32, i32, i32, i32, i32));
 
 fn present_vectors() -> Vec<PresentVector> {
     vec![
-        ((-1, -1, -1), (-1, -1, -1, 0)),
-        ((-1, -1, 2), (2, 2, -1, 1)),
-        ((0, -1, 1), (1, 1, -1, 1)),
-        ((0, -1, -1), (0, -1, -1, 0)),
-        ((2, -1, -1), (2, -1, -1, 0)),
-        ((1, -1, 0), (0, 0, -1, 1)),
+        ((-1, -1, -1, false), (-1, -1, -1, 0, 0, 0)),
+        ((-1, -1, 2, true), (2, 2, -1, 1, 1, 0)),
+        ((-1, -1, 2, false), (2, 2, -1, 1, 0, 0)),
+        ((0, -1, 1, true), (1, 1, -1, 1, 1, 0)),
+        ((0, -1, -1, false), (0, -1, -1, 0, 0, 0)),
+        ((2, -1, -1, false), (2, -1, -1, 0, 0, 0)),
+        ((1, -1, 0, true), (0, 0, -1, 1, 1, 0)),
     ]
 }
 
 #[test]
-fn present_pick_takes_the_newest_or_recopies_the_front() {
-    let helper = lift(VK_C, "static int drm_output_vk_present_pick(int front, int *pending, int *ready, bool *took_new)");
+fn present_pick_takes_the_newest_with_its_signal_or_recopies_the_front() {
+    let helper = lift(
+        VK_C,
+        "static int drm_output_vk_present_pick(int front, int *pending, int *ready, bool *armed, bool *took_new, bool *wait_gl)",
+    );
     let vs = present_vectors();
     let mut c = String::from("#include <stdbool.h>\n#include <stdio.h>\n");
     c.push_str(&helper);
     c.push_str("\nint main(void){\n");
-    for ((f, p, r), _) in &vs {
+    for ((f, p, r, a), _) in &vs {
         c.push_str(&format!(
-            "    {{ int p = {p}, r = {r}; bool t = false; int s = drm_output_vk_present_pick({f}, &p, &r, &t);\n      printf(\"%d %d %d %d\\n\", s, p, r, t ? 1 : 0); }}\n"
+            "    {{ int p = {p}, r = {r}; bool a[3] = {{false, false, false}}; bool t = false, w = false;\n      if (r >= 0) a[r] = {a};\n      int s = drm_output_vk_present_pick({f}, &p, &r, a, &t, &w);\n      printf(\"%d %d %d %d %d %d\\n\", s, p, r, t ? 1 : 0, w ? 1 : 0, (a[0] ? 1 : 0) + (a[1] ? 1 : 0) + (a[2] ? 1 : 0)); }}\n"
         ));
     }
     c.push_str("    return 0;\n}\n");
     let out = compile_and_run(&c, "present");
-    let got: Vec<(i32, i32, i32, i32)> = out
+    let got: Vec<(i32, i32, i32, i32, i32, i32)> = out
         .lines()
         .map(|l| {
             let v: Vec<i32> = l.split_whitespace().map(|x| x.parse().unwrap()).collect();
-            (v[0], v[1], v[2], v[3])
+            (v[0], v[1], v[2], v[3], v[4], v[5])
         })
         .collect();
     for ((args, want), g) in vs.iter().zip(&got) {
         assert_eq!(g, want, "issue 1346: drm_output_vk_present_pick{args:?}");
     }
     assert_eq!(got.len(), vs.len());
+}
+
+/// The mailbox + binary-semaphore protocol, model-checked over 200000 random interleavings of the
+/// GL side (claim + publish) and the present thread (pick, then the fenced done) with the REAL lifted
+/// helpers. A binary semaphore must never be signalled while it holds a signal, never be waited without
+/// one, a taken image with a pending signal must be waited, and GL must never write front/pending. The
+/// interleaving forces the overwrite path (GL re-claims a READY image), so consumes > 0 is required.
+#[test]
+fn mailbox_semaphore_protocol_holds_over_random_interleavings() {
+    let mut c = String::from("#include <stdbool.h>\n#include <stdio.h>\n");
+    for sig in [
+        "static int drm_output_vk_pick_claim(int front, int pending, int ready, int n)",
+        "static int drm_output_vk_present_pick(int front, int *pending, int *ready, bool *armed, bool *took_new, bool *wait_gl)",
+        "static void drm_output_vk_present_done(int src, bool took_new, int *front, int *pending)",
+        "static bool drm_output_vk_publish_arm(bool *armed_idx)",
+    ] {
+        c.push_str(&lift(VK_C, sig));
+        c.push('\n');
+    }
+    c.push_str(
+        r#"int main(void)
+{
+	int front = -1, pending = -1, ready = -1, src = -1;
+	bool armed[3] = {false, false, false}, inflight = false, took = false, wait = false;
+	int sem[3] = {0, 0, 0};
+	unsigned long long seed = 12345u, consumes = 0u, bad = 0u, takes = 0u;
+	for (int step = 0; step < 200000; step++) {
+		seed = seed * 6364136223846793005ull + 1442695040888963407ull;
+		unsigned r = (unsigned)(seed >> 33) % 4u;
+		if (r == 0u && !inflight) {
+			src = drm_output_vk_present_pick(front, &pending, &ready, armed, &took, &wait);
+			if (wait) {
+				if (sem[src] != 1)
+					bad++;
+				sem[src] = 0;
+			} else if (took && sem[src] != 0) {
+				bad++;
+			}
+			if (took)
+				takes++;
+			inflight = true;
+		} else if (r == 1u && inflight) {
+			drm_output_vk_present_done(src, took, &front, &pending);
+			inflight = false;
+		} else {
+			int idx = drm_output_vk_pick_claim(front, pending, ready, 3);
+			if (idx < 0)
+				continue;
+			if (idx == front || idx == pending)
+				bad++;
+			if (idx == ready)
+				ready = -1;
+			if (drm_output_vk_publish_arm(&armed[idx])) {
+				if (sem[idx] != 1)
+					bad++;
+				sem[idx] = 0;
+				consumes++;
+			}
+			if (sem[idx] != 0)
+				bad++;
+			sem[idx] = 1;
+			ready = idx;
+		}
+	}
+	printf("bad %llu consumes %llu takes %llu\n", bad, consumes, takes);
+	return 0;
+}
+"#,
+    );
+    let out = compile_and_run(&c, "model");
+    let v: Vec<u64> = out
+        .split_whitespace()
+        .filter_map(|t| t.parse().ok())
+        .collect();
+    assert_eq!(v.len(), 3, "issue 1346: model output `{out}`");
+    assert_eq!(
+        v[0], 0,
+        "issue 1346: the mailbox/semaphore protocol broke an invariant: {out}"
+    );
+    assert!(
+        v[1] > 0 && v[2] > 0,
+        "issue 1346: the model must exercise the overwrite (consume) path and the takes: {out}"
+    );
+}
+
+/// `(offered formats)` -> the chosen index: B8G8R8A8_UNORM, else R8G8B8A8_UNORM, else -1 (never an
+/// sRGB format -- the blit between two UNORM formats is the byte-faithful copy).
+#[test]
+fn surface_format_pick_never_takes_an_srgb_format() {
+    let helper = lift(
+        VK_SETUP_C,
+        "static int drm_output_vk_pick_surface_format(const VkFormat *fmts, uint32_t n)",
+    );
+    let vs: &[(&[u32], i32)] = &[
+        (&[50, 44], 1),
+        (&[44, 37], 0),
+        (&[43, 37], 1),
+        (&[50, 43], -1),
+        (&[64], -1),
+        (&[], -1),
+    ];
+    let mut c = String::from(
+        "#include <stdint.h>\n#include <stdio.h>\ntypedef enum { VK_FORMAT_R8G8B8A8_UNORM = 37, VK_FORMAT_R8G8B8A8_SRGB = 43, VK_FORMAT_B8G8R8A8_UNORM = 44, VK_FORMAT_B8G8R8A8_SRGB = 50, VK_FORMAT_A2B10G10R10_UNORM_PACK32 = 64 } VkFormat;\n",
+    );
+    c.push_str(&helper);
+    c.push_str("\nint main(void){\n");
+    for (i, (fmts, _)) in vs.iter().enumerate() {
+        let mut list: Vec<String> = fmts.iter().map(|f| format!("(VkFormat){f}")).collect();
+        if list.is_empty() {
+            list.push("(VkFormat)0".into());
+        }
+        c.push_str(&format!(
+            "    {{ const VkFormat f{i}[] = {{{}}}; printf(\"%d\\n\", drm_output_vk_pick_surface_format(f{i}, {}u)); }}\n",
+            list.join(", "),
+            fmts.len()
+        ));
+    }
+    c.push_str("    return 0;\n}\n");
+    let got: Vec<i32> = compile_and_run(&c, "fmt")
+        .lines()
+        .map(|l| l.trim().parse().expect("int"))
+        .collect();
+    let want: Vec<i32> = vs.iter().map(|(_, w)| *w).collect();
+    assert_eq!(got, want, "issue 1346: drm_output_vk_pick_surface_format");
+}
+
+#[test]
+fn a_lost_display_is_rebuilt_bounded_and_the_teardown_never_hangs() {
+    let core = file(VK_C);
+    let thread = body_of(
+        &core,
+        "static void *drm_output_vk_present_thread(void *arg)",
+        VK_C,
+    );
+    assert_eq!(
+        thread.matches("drm_output_vk_rebuild_or_give_up(").count(),
+        2,
+        "issue 1346: both the acquire and the present rebuild an out-of-date / lost display"
+    );
+    assert!(
+        thread.contains("VK_ERROR_OUT_OF_DATE_KHR") && thread.contains("VK_ERROR_SURFACE_LOST_KHR"),
+        "issue 1346: an HDMI replug (out of date / surface lost) is rebuilt, not the end of the output"
+    );
+    let fence = thread
+        .find("if (!drm_output_vk_wait_fence())")
+        .expect("the fence wait");
+    let done = thread
+        .find("drm_output_vk_present_done(")
+        .expect("the role update");
+    assert!(
+        fence < done,
+        "issue 1346: roles change only after a SIGNALLED fence (a failed wait breaks first)"
+    );
+    let policy = body_of(
+        &core,
+        "static bool drm_output_vk_rebuild_or_give_up(VkResult why, unsigned *rebuilds)",
+        VK_C,
+    );
+    assert!(
+        policy.contains("DRM_OUTPUT_VK_REBUILD_TRIES") && policy.contains("giving up"),
+        "issue 1346: the rebuild is bounded and names its give-up"
+    );
+    let setup = file(VK_SETUP_C);
+    assert!(
+        setup.contains("bool drm_output_vk_rebuild_presentation(bool surface_lost)"),
+        "issue 1346: the rebuild lives with the setup code"
+    );
+    let destroy = body_of(&setup, "void drm_output_vk_destroy_all(void)", VK_SETUP_C);
+    let quiesce = destroy
+        .find("g_drm_vk.submit_outstanding")
+        .expect("the teardown quiesces an outstanding copy");
+    let idle = destroy.find("vkDeviceWaitIdle(").expect("the idle wait");
+    assert!(
+        quiesce < idle && destroy.contains("leaking the Vulkan objects"),
+        "issue 1346: an outstanding copy is waited BOUNDED before the idle wait; a wedged GPU leaks \
+         instead of hanging the OBS shutdown"
+    );
+    let unbind = body_of(&core, "void drm_output_vk_gl_unbind(void)", VK_C);
+    let finish = unbind
+        .find("g->Finish();")
+        .expect("glFinish before the deletes");
+    let delete = unbind.find("g->DeleteTextures(").expect("the deletes");
+    assert!(
+        finish < delete,
+        "issue 1346: in-flight GL copy/signal work finishes before the GL objects go"
+    );
+    assert!(
+        core.contains("RTLD_NOLOAD"),
+        "issue 1346: the GL lookup also asks an already (privately) loaded libEGL"
+    );
+    let h = file(RIG_HARNESS);
+    assert!(
+        h.contains("PHASE burst") && h.contains("consumes > 0"),
+        "issue 1346: the rig harness forces the overwrite path and requires it ran"
+    );
 }
 
 #[test]
