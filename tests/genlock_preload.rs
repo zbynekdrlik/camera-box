@@ -2575,7 +2575,7 @@ mod vendored_source {
         assert!(
             src.contains("in.timestamp += (uint64_t)genlock_term_ns;")
                 && src.contains(
-                    "const int64_t genlock_off_live_ns = genlock_audio_wall_to_mono_ns(os_gettime_ns(), genlock_wall_now_ns());"
+                    "const int64_t genlock_off_live_ns = genlock_audio_needs_live_offset(genlock_hold_mode, prev_genlock_audio_hold_mode) ? genlock_audio_wall_to_mono_ns(os_gettime_ns(), genlock_wall_now_ns()) : 0;"
                 ),
             "{OBS_SOURCE}: #1303 + issue 1367 — the audio HOLD is no longer applied in \
              source_output_audio_data on the live wall->mono offset; a genlock source's audio would \

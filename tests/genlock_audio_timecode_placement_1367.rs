@@ -23,6 +23,9 @@ use std::fs;
 use std::path::PathBuf;
 
 const OBS_SOURCE: &str = "vendor/obs-studio/libobs/obs-source.c";
+const TRACK: &str = "const uint64_t genlock_delay_tick_wall = genlock_n1_tick_wall_now(wall_now); if (genlock_n1_tick_is_on_grid(genlock_delay_tick_wall, interval)) genlock_video_delay_track(&source->genlock_video_delay_smoothed_ns,";
+const SAMPLE: &str =
+    "genlock_video_delay_sample_ns(genlock_delay_tick_wall, next_frame->timestamp), interval);";
 
 fn squished() -> String {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(OBS_SOURCE);
@@ -49,17 +52,38 @@ fn audio_ingest(src: &str) -> &str {
 }
 
 #[test]
-fn render_thread_tracks_the_scheduled_tick_video_delay_1367() {
+fn render_thread_tracks_the_presented_frame_at_the_scheduled_tick_1367() {
     let src = squished();
-    assert_has(
-        &src,
-        "genlock_video_delay_track(&source->genlock_video_delay_smoothed_ns, &source->genlock_video_delay_applied_ms, &source->genlock_video_delay_settle_ticks,",
-        "the render thread no longer tracks the source's stamp->present delay",
+    // The sample is taken at the PRESENT TAIL of genlock_release_tick, on the frame this tick
+    // actually presents (after every erase / drain / converge shed): on an N >= 2 source the queue
+    // head is (N - 1) source intervals older than the presented frame.
+    let tick = src
+        .find("static bool genlock_release_tick(")
+        .expect("issue 1367: genlock_release_tick is gone");
+    let body = &src[tick..];
+    let body = &body[..body.find(" static ").unwrap_or(body.len())];
+    let presented = body
+        .find("struct obs_source_frame *next_frame = source->async_frames.array[0];")
+        .expect("issue 1367: genlock_release_tick no longer picks the presented frame");
+    let track = body.find(TRACK).unwrap_or_else(|| {
+        panic!(
+            "issue 1367: genlock_release_tick no longer tracks the presented frame's delay on an \
+             on-grid scheduled tick (anchor `{TRACK}`)"
+        )
+    });
+    assert!(
+        track > presented,
+        "issue 1367: the delay must be sampled AFTER the presented frame is chosen"
     );
-    assert_has(
-        &src,
-        "genlock_video_delay_sample_ns( genlock_n1_tick_wall_now(wall_now), source->async_frames.array[0]->timestamp), interval);",
-        "the delay sample must be the head's age at the tick's SCHEDULED instant, not the processing wall",
+    assert!(
+        body.contains(SAMPLE),
+        "issue 1367: the sample must be the PRESENTED frame's age at the scheduled tick (`{SAMPLE}`)"
+    );
+    // the head-skew site (the processing wall, array[0]) must not feed the tracker.
+    assert_eq!(
+        src.matches("genlock_video_delay_track(").count(),
+        2,
+        "issue 1367: genlock_video_delay_track must have exactly its definition and ONE call site"
     );
 }
 
@@ -69,8 +93,8 @@ fn audio_ingest_places_on_the_live_offset_and_replaces_on_a_change_1367() {
     let ingest = audio_ingest(&src);
     for (needle, why) in [
         (
-            "const int64_t genlock_off_live_ns = genlock_audio_wall_to_mono_ns(os_gettime_ns(), genlock_wall_now_ns());",
-            "the wall->mono offset must be read LIVE on every packet (never latched)",
+            "const int64_t genlock_off_live_ns = genlock_audio_needs_live_offset(genlock_hold_mode, prev_genlock_audio_hold_mode) ? genlock_audio_wall_to_mono_ns(os_gettime_ns(), genlock_wall_now_ns()) : 0;",
+            "the wall->mono offset must be read LIVE on every packet that needs it (never latched)",
         ),
         (
             "genlock_is_wallclock_ts(data->timestamp),",

@@ -4,11 +4,13 @@
 //! ## What the video does, and what the audio must do
 //!
 //! A `genlock_fifo` source releases each frame once its NDI stamp is due against the wall clock
-//! (`vendor/obs-studio/libobs/obs-source.c`). The frame the tick presents is the queue HEAD, so it
-//! reaches the program at `stamp + (tick − head stamp)`, the head's age at the render tick. That age
-//! is the source's REAL stamp→present delay. It is `latency_ms` only on a source whose FIFO is
-//! exactly one pin deep. A shallow cg feed sits 2–3 frames deep at a 3 ms pin, which makes its
-//! delay 60–100 ms (the win-resolume `ts_head_skew_ms=97` at `latency_ms=3`).
+//! (`vendor/obs-studio/libobs/obs-source.c`). The frame a tick presents reaches the program at
+//! `stamp + (tick − presented stamp)`, its age at the render tick. That age is the source's REAL
+//! stamp→present delay. On a canvas-rate source the presented frame is the queue head; on a source
+//! at N ≥ 2 × the canvas rate it is the NEWEST matured frame, so the head would over-read by
+//! (N − 1) source intervals. The delay is `latency_ms` only on a source whose FIFO is exactly one
+//! pin deep. A shallow cg feed sits 2–3 frames deep at a 3 ms pin, which makes its delay 60–100 ms
+//! (the win-resolume `ts_head_skew_ms=97` at `latency_ms=3`).
 //!
 //! #1303 held the audio by the fixed `latency_ms` on its ARRIVAL clock. Audio therefore led video by
 //! `delay − latency_ms − arrival lag`, about 94 ms on resolume, and `audio_pairing_offset_ms` was
@@ -16,9 +18,11 @@
 //!
 //! Issue 1367 (Option 3) makes the audio follow the video's MEASURED delay:
 //!
-//! 1. **Measure.** Every ts-align render tick samples `tick_scheduled_wall − head_stamp`
-//!    ([`video_delay_sample_ns`]; the scheduled instant, so a late tick's processing lag is not
-//!    counted). [`video_delay_track`] smooths it with an EMA ([`VIDEO_DELAY_EMA_SHIFT`]).
+//! 1. **Measure.** Every ts-align tick that PRESENTS a frame samples
+//!    `tick_scheduled_wall − presented_stamp` ([`video_delay_sample_ns`]; the scheduled instant, so
+//!    a late tick's processing lag is not counted). A tick off the per-second grid (a wall-clock
+//!    step slewing back) is not sampled. [`video_delay_track`] smooths it with an EMA
+//!    ([`VIDEO_DELAY_EMA_SHIFT`]).
 //! 2. **Quantize with hysteresis.** A change of the smoothed delay by half a frame or more
 //!    ([`video_delay_moved`]) ARMS a re-application. The new whole-ms delay
 //!    ([`video_delay_round_ms`]) is applied once the EMA has settled ([`VIDEO_DELAY_SETTLE_TICKS`]).
@@ -27,17 +31,19 @@
 //! 3. **Place.** The audio ingest ([`audio_hold_mode`] / [`audio_place_term_ns`]) places a packet
 //!    with timecode `tc` (the same wall-epoch basis DistroAV stamps the video with) at the OBS
 //!    monotonic instant `tc + off_live + delay`. `off_live = mono_now − wall_now` is read on EVERY
-//!    packet ([`audio_wall_to_mono_ns`]), never latched, because the wall and QPC clocks drift apart
-//!    (318 ms on resolume). Packets that follow append back to back. The genlock ASRC rate servo
-//!    (disciplined against the wall clock) and its level loop then hold the captured depth, so the
-//!    drift is absorbed physically between placements.
+//!    packet that needs it ([`audio_wall_to_mono_ns`], [`audio_needs_live_offset`]), never latched,
+//!    because the wall and QPC clocks drift apart (318 ms on resolume). Packets that follow append
+//!    back to back. The genlock ASRC rate servo (disciplined against the wall clock) and its level
+//!    loop then hold the captured depth, so the drift is absorbed physically between placements.
 //! 4. **Re-place at once.** When the applied delay (or the hold mode) changes, the ingest forces a
 //!    fresh placement and shifts the ASRC level target by the same placement delta
 //!    ([`audio_place_shift_ms`]), exactly like a sync-offset change. The slow level integral alone
 //!    would take minutes to walk a 33 ms step.
 //! 5. **Observe.** `audio_pairing_offset_ms` is the applied audio delay minus the MEASURED video
 //!    delay ([`pairing_offset_ms`] with [`video_delay_reference_ns`]). The health verdict flags it
-//!    above half a frame ([`decide_audio_health`]).
+//!    above half a frame ([`decide_audio_health`]). It is a PROXY: it compares the applied hold with
+//!    the measured delay and never observes where the audio samples actually sit, so a wrong
+//!    placement, or a depth the rate servo walked, would still read 0.
 //!
 //! Until the first measurement settles, or for an audio timestamp that is not a wall-clock
 //! timecode, the ingest keeps the #1303 behaviour byte-for-byte: arrival basis + `latency_ms`
@@ -82,22 +88,28 @@ pub fn genlock_audio_delay_ns(hold_ms: u32) -> u64 {
     hold_ms as u64 * NS_PER_MS
 }
 
-/// One stamp→present delay sample: the head frame's age at the render tick's SCHEDULED wall instant
-/// (`genlock_n1_tick_wall_now`). Saturates at 0 for a head stamped after the tick.
+/// One stamp→present delay sample: the PRESENTED frame's age at the render tick's SCHEDULED wall
+/// instant (`genlock_n1_tick_wall_now`). Clamped to at least 1 ns, so a frame stamped at or after
+/// the tick never produces the `0` "unseeded" sentinel of [`video_delay_smooth_ns`] (which would
+/// re-seed the EMA on every such tick).
 ///
 /// Mirror of `genlock_video_delay_sample_ns`.
-pub fn video_delay_sample_ns(tick_wall_ns: u64, head_stamp_ns: u64) -> u64 {
-    tick_wall_ns.saturating_sub(head_stamp_ns)
+pub fn video_delay_sample_ns(tick_wall_ns: u64, presented_stamp_ns: u64) -> u64 {
+    // RED stub: the first cut saturated to the 0 sentinel.
+    tick_wall_ns.saturating_sub(presented_stamp_ns)
 }
 
 /// One EMA step of the smoothed stamp→present delay. `0` is the unseeded sentinel: the first sample
-/// seeds the EMA. The step truncates toward zero, identically in C (`int64_t` division).
+/// seeds the EMA. The step truncates toward zero, identically in C (`int64_t` division), and every
+/// sum wraps like the C `uint64_t` arithmetic (no signed overflow at any input). With samples ≥ 1
+/// (the [`video_delay_sample_ns`] clamp) a seeded EMA never returns to 0.
 ///
 /// Mirror of `genlock_video_delay_smooth_ns`.
 pub fn video_delay_smooth_ns(smoothed_ns: u64, sample_ns: u64) -> u64 {
     if smoothed_ns == 0 {
         return sample_ns;
     }
+    // RED stub: the first cut's signed difference.
     let diff = sample_ns as i64 - smoothed_ns as i64;
     (smoothed_ns as i64 + diff / (1i64 << VIDEO_DELAY_EMA_SHIFT)) as u64
 }
@@ -218,6 +230,18 @@ pub fn audio_hold_ms(mode: AudioHoldMode, latency_ms: u32, video_delay_ms: u32) 
         AudioHoldMode::Latency => latency_ms,
         AudioHoldMode::Timecode => video_delay_ms,
     }
+}
+
+/// Does this packet need the live wall→mono offset? Only when the new or the previous hold is the
+/// timecode placement (its term, or the re-placement shift's previous term, contains the offset).
+/// Every other audio source (a mic, desktop audio, a latency-mode genlock source) skips the two
+/// clock reads.
+///
+/// Mirror of `genlock_audio_needs_live_offset`.
+pub fn audio_needs_live_offset(mode: AudioHoldMode, prev_mode: AudioHoldMode) -> bool {
+    // RED stub: the first cut read the clocks on every packet.
+    let _ = (mode, prev_mode);
+    true
 }
 
 /// The live wall→OBS-monotonic offset: `mono_now − wall_now` (two's-complement, so a monotonic
@@ -366,6 +390,7 @@ mod tests {
 
     const IV30: u64 = 33_333_333;
     const IV60: u64 = 16_666_666;
+    const WALL: u64 = 1_790_000_000_123_456_789;
 
     #[test]
     fn delay_is_hold_in_ns() {
@@ -377,13 +402,62 @@ mod tests {
     // ---- the video stamp→present delay measurement ---------------------------------------
 
     #[test]
+    fn sample_never_returns_the_unseeded_sentinel() {
+        // a frame stamped at or after the tick would read 0 and re-seed the EMA every tick.
+        assert_eq!(video_delay_sample_ns(WALL, WALL), 1);
+        assert_eq!(video_delay_sample_ns(WALL, WALL + 5_000_000), 1);
+        let mut t = VideoDelayTracker::default();
+        run(&mut t, 100_000_000, IV30, 200);
+        for _ in 0..50 {
+            video_delay_track(&mut t, video_delay_sample_ns(WALL, WALL + 1), IV30);
+            assert_ne!(
+                t.smoothed_ns, 0,
+                "a seeded EMA must never fall back to the sentinel"
+            );
+        }
+    }
+
+    #[test]
+    fn ema_step_never_overflows_at_the_extremes() {
+        // two's-complement wrap, exactly as the C uint64 arithmetic: the difference reads -2 / +2
+        // and an eighth of it truncates to 0, so the EMA stays put.
+        assert_eq!(video_delay_smooth_ns(1, u64::MAX), 1);
+        assert_eq!(video_delay_smooth_ns(u64::MAX, 1), u64::MAX);
+        // i64::MAX minus a "negative" (above 2^63) smoothed value overflowed the old signed
+        // difference; the wrapping form reads it as -11 and steps by -11/8 = -1.
+        assert_eq!(
+            video_delay_smooth_ns((1u64 << 63) + 10, i64::MAX as u64),
+            (1u64 << 63) + 9
+        );
+        // a difference that crosses i64 must not panic.
+        assert_eq!(
+            video_delay_smooth_ns(i64::MAX as u64 + 7, 3),
+            (i64::MAX as u64 + 7)
+                .wrapping_add(((3u64.wrapping_sub(i64::MAX as u64 + 7)) as i64 / 8) as u64)
+        );
+        // an ordinary step is unchanged by the wrapping form.
+        assert_eq!(video_delay_smooth_ns(100_000_000, 108_000_000), 101_000_000);
+    }
+
+    #[test]
+    fn only_a_timecode_hold_needs_the_live_offset() {
+        use AudioHoldMode::*;
+        assert!(!audio_needs_live_offset(Off, Off));
+        assert!(!audio_needs_live_offset(Latency, Latency));
+        assert!(!audio_needs_live_offset(Latency, Off));
+        assert!(audio_needs_live_offset(Timecode, Latency));
+        assert!(audio_needs_live_offset(Latency, Timecode));
+        assert!(audio_needs_live_offset(Timecode, Timecode));
+    }
+
+    #[test]
     fn sample_is_the_head_age_at_the_scheduled_tick() {
         assert_eq!(
             video_delay_sample_ns(1_000_100_000_000, 1_000_000_000_000),
             100_000_000
         );
-        // a head stamped after the tick (a sender stamping ahead) saturates at 0.
-        assert_eq!(video_delay_sample_ns(5, 9), 0);
+        // a frame stamped after the tick (a sender stamping ahead) clamps to 1 ns, never 0.
+        assert_eq!(video_delay_sample_ns(5, 9), 1);
     }
 
     #[test]

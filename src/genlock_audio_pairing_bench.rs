@@ -10,10 +10,13 @@
 //!   grid) and OBS's MONOTONIC clock (QPC: the audio mixer, the render tick's `video_time`).
 //!   `mono = wall + off(t)`, and `off` walks [`Bench::drift_total_ns`] (300 ms) linearly over the run:
 //!   the resolume `wall_qpc_drift_ms` magnitude.
-//! - **Video.** The sender stamps one frame per 30 fps grid slot. The receiver FIFO presents the head
-//!   `d(t)` frames behind the tick, `d` following a scripted depth profile (depth changes, a sender
-//!   restart, an OBS restart). The frame presents at the tick's monotonic instant. The receiver
-//!   measures `tick − head` every tick and runs the production tracker [`video_delay_track`].
+//! - **Video.** The sender stamps frames on the per-second grid, at the canvas rate or at
+//!   `source_multiple` × it (a 60p source on a 30p canvas). The receiver FIFO presents a frame
+//!   `d(t)` canvas frames behind the tick, `d` following a scripted depth profile (depth changes, a
+//!   sender restart, an OBS restart). On an N ≥ 2 source the presented frame is the NEWEST matured
+//!   one, (N − 1) source intervals younger than the queue head. The frame presents at the tick's
+//!   monotonic instant. The receiver measures `tick − presented stamp` every tick and runs the
+//!   production tracker [`video_delay_track`].
 //! - **Audio ingest** runs the production decisions: [`audio_hold_mode`] / [`audio_hold_ms`] pick
 //!   the hold, [`audio_wall_to_mono_ns`] reads the live offset, [`audio_place_term_ns`] places a
 //!   packet, and a change re-places it and shifts the level target by [`audio_place_shift_ms`]. The
@@ -24,7 +27,10 @@
 //!   true wall-vs-mono rate with an EMA of time constant [`ASRC_TAU_S`], plus a P level loop on the
 //!   per-second mean buffered depth against the target captured at lock, clamped at
 //!   [`LEVEL_MAX_PPM`]. A resync (sender restart) or an OBS restart re-captures, while a deliberate
-//!   re-placement shifts the target.
+//!   re-placement shifts the target. The rate estimate converges on the TRUE drift rate by
+//!   construction, so this bench ASSUMES the drift is absorbed between placements. The real servo's
+//!   ability to do that is proven separately, by `src/asrc_bench.rs`. What this bench proves is the
+//!   placement: each (re-)placement must land at `timecode + live offset + measured delay`.
 //!
 //! The A/V error of a tick is `audio play instant(timecode = presented stamp) − video present
 //! instant`, both on the monotonic clock. The gate excludes [`GATE_SKIP_S`] after the start and
@@ -34,6 +40,8 @@
 //! **Anti-tautology variants** (each MUST fail the same gate):
 //! - `LatchedOffset`: the placement uses the wall→mono offset latched at the first packet.
 //! - `LegacyLatency`: the #1303 fixed `latency_ms` hold on the arrival basis.
+//! - `HeadSample` (on a 2× source): the delay sampled on the queue HEAD instead of the presented
+//!   frame over-reads by one source interval.
 
 use super::*;
 
@@ -60,6 +68,7 @@ enum Variant {
     Production,
     LatchedOffset,
     LegacyLatency,
+    HeadSample,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -78,6 +87,8 @@ struct Bench {
     events: Vec<(u64, Event)>,
     initial_depth: u64,
     single_tick_hold_every: u64,
+    /// Source frames per canvas frame (1 = canvas rate, 2 = a 60p source on a 30p canvas).
+    source_multiple: u64,
 }
 
 impl Bench {
@@ -100,6 +111,7 @@ impl Bench {
                 (3000, Event::Depth(2)),
             ],
             single_tick_hold_every: 0,
+            source_multiple: 1,
         }
     }
 }
@@ -236,8 +248,16 @@ fn simulate(b: &Bench, variant: Variant) -> Outcome {
         if b.single_tick_hold_every > 0 && k % b.single_tick_hold_every == 0 {
             d += 1;
         }
+        // the PRESENTED frame (the newest matured one) and, on an N >= 2 source, the queue head
+        // (N - 1) source intervals older.
         let head = W0 + (k - d.min(k)) * IV_NUM / FPS;
-        video_delay_track(&mut tracker, video_delay_sample_ns(wall, head), IV_NS);
+        let queue_head = head - (b.source_multiple - 1) * IV_NUM / (FPS * b.source_multiple);
+        let sampled = if variant == Variant::HeadSample {
+            queue_head
+        } else {
+            head
+        };
+        video_delay_track(&mut tracker, video_delay_sample_ns(wall, sampled), IV_NS);
 
         // ---- audio: one packet timecoded at emit, arriving now --------------------------------
         let lag = 1_000_000 + lcg(&mut rng) % 3_000_000;
@@ -382,4 +402,25 @@ fn single_tick_holds_neither_churn_nor_break_the_pairing() {
     // the held ticks themselves present a frame 33 ms older than the audio beside it — that is the
     // video's own repeat, not a pairing error; every other tick stays paired.
     assert!(o.max_abs_av_ms <= IV_NS as f64 / 1e6 + GATE_MAX_AV_MS);
+}
+
+#[test]
+fn a_source_at_twice_the_canvas_rate_pairs_on_the_presented_frame() {
+    let mut b = Bench::scripted();
+    b.source_multiple = 2;
+    let o = simulate(&b, Variant::Production);
+    eprintln!("2x production: {o:?}");
+    assert!(
+        o.max_abs_av_ms <= GATE_MAX_AV_MS,
+        "|A/V| {:.2} ms at t={:.1} s on a 2x source exceeds {GATE_MAX_AV_MS} ms",
+        o.max_abs_av_ms,
+        o.worst_at_s
+    );
+    let h = simulate(&b, Variant::HeadSample);
+    eprintln!("2x head-sample: {h:?}");
+    assert!(
+        h.max_abs_av_ms > 10.0,
+        "sampling the queue head of a 2x source must over-read by a source interval, got {:.2} ms",
+        h.max_abs_av_ms
+    );
 }

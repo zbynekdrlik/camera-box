@@ -20,10 +20,11 @@
 //! toolchain is missing — a parity test that silently passes without running is worse than none.
 
 use camera_box::genlock_audio_pairing::{
-    audio_hold_mode, audio_hold_ms, audio_place_shift_ms, audio_place_term_ns,
-    audio_wall_to_mono_ns, decide_audio_health, genlock_audio_delay_ns, pairing_offset_ms,
-    video_delay_moved, video_delay_reference_ns, video_delay_round_ms, video_delay_sample_ns,
-    video_delay_smooth_ns, video_delay_track, AudioHoldMode, AudioPairingFacets, VideoDelayTracker,
+    audio_hold_mode, audio_hold_ms, audio_needs_live_offset, audio_place_shift_ms,
+    audio_place_term_ns, audio_wall_to_mono_ns, decide_audio_health, genlock_audio_delay_ns,
+    pairing_offset_ms, video_delay_moved, video_delay_reference_ns, video_delay_round_ms,
+    video_delay_sample_ns, video_delay_smooth_ns, video_delay_track, AudioHoldMode,
+    AudioPairingFacets, VideoDelayTracker,
 };
 use std::fs;
 use std::path::PathBuf;
@@ -66,6 +67,7 @@ fn lift_block() -> String {
         "genlock_audio_hold_mode(",
         "genlock_audio_hold_ms(",
         "genlock_audio_hold_token(",
+        "genlock_audio_needs_live_offset(",
         "genlock_audio_wall_to_mono_ns(",
         "genlock_audio_place_term_ns(",
         "genlock_audio_place_shift_ms(",
@@ -175,14 +177,18 @@ fn c_audio_delay_matches_the_rust_authority_1303() {
 
 #[test]
 fn c_video_delay_scalar_helpers_match_the_rust_authority_1367() {
-    let samples: [(u64, u64); 5] = [
+    let samples: [(u64, u64); 9] = [
         (WALL, WALL - 97_000_000),
         (WALL, WALL),
         (WALL - 5, WALL),
         (1_000_100_000_000, 1_000_000_000_000),
         (u64::MAX, 0),
+        (0, u64::MAX),
+        (WALL, WALL + 1),
+        (WALL + 1, WALL),
+        (WALL + 2, WALL),
     ];
-    let smooths: [(u64, u64); 8] = [
+    let smooths: [(u64, u64); 12] = [
         (0, 97_000_000),
         (100_000_000, 108_000_000),
         (100_000_000, 92_000_000),
@@ -191,6 +197,10 @@ fn c_video_delay_scalar_helpers_match_the_rust_authority_1367() {
         (100_000_000, 133_333_333),
         (66_666_667, 100_000_000),
         (1, 0),
+        (1, u64::MAX),
+        (u64::MAX, 1),
+        (9_223_372_036_854_775_814, 3),
+        (9_223_372_036_854_775_818, 9_223_372_036_854_775_807),
     ];
     let rounds: [u64; 7] = [
         0,
@@ -404,6 +414,13 @@ fn c_audio_hold_and_placement_match_the_rust_authority_1367() {
             lit(*b)
         ));
     }
+    for m in 0u8..3 {
+        for p in 0u8..3 {
+            body.push_str(&format!(
+                "    printf(\"%d\\n\", genlock_audio_needs_live_offset({m}, {p}) ? 1 : 0);\n"
+            ));
+        }
+    }
     let out = run_c(&body, "hold_place");
     let mode_of = |c: u8| match c {
         0 => AudioHoldMode::Off,
@@ -428,6 +445,11 @@ fn c_audio_hold_and_placement_match_the_rust_authority_1367() {
     }
     for (a, b) in &shifts {
         want.push(format!("{:.6}", audio_place_shift_ms(*a, *b)));
+    }
+    for m in 0u8..3 {
+        for p in 0u8..3 {
+            want.push((audio_needs_live_offset(mode_of(m), mode_of(p)) as i32).to_string());
+        }
     }
     assert_eq!(
         out, want,
