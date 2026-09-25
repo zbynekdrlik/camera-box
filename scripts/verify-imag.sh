@@ -1579,7 +1579,8 @@ fi
 # (bb) the shared OBS-box appliance baseline (issue 1357) ---------------------------------------
 # The ONE grader verify-strih.sh runs too (scripts/lib/obs-box-baseline-verify.sh): every item the
 # shared scripts/lib/obs-box-baseline.sh provisions -- network tuning, governor + imag-maxperf
-# persistence, never-sleep, boot safety net, preempt=full, AFFINITY-ONLY core reservation, PRIME,
+# persistence, the PM QoS CPU idle wake-up latency bound (cstate: +1 s sample inside the gather),
+# never-sleep, boot safety net, preempt=full, AFFINITY-ONLY core reservation, PRIME,
 # de-jitter, no crash popups (incl. the 26.04 apport coredump-hook template), the lightdm -> openbox
 # kiosk, the openbox autostart contract, the power envelope, the touchpad. One [OK]/[FAIL] line per
 # item; the per-item checks above keep imag's deeper reads (PL1 value, maxperf state, ...). A pure

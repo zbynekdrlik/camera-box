@@ -33,6 +33,7 @@
 #                                OBS unit, which projector layout) starting with the
 #                                obs_box_openbox_autostart_preamble lines + the obs_box_openbox_menu_xml
 #   obs_box_power_envelope [22]  obs_box_touchpad [25]         obs_box_maxperf_persistence [26]
+#   obs_box_cpu_latency [26, after maxperf: the PM QoS idle wake-up latency bound]
 # One grader for every item: scripts/lib/obs-box-baseline-verify.sh (verify-imag.sh + verify-strih.sh).
 #
 # NOT in the baseline (issue 1357 design, comment 5793075833): a realtime (rtprio) grant for the genlock
@@ -893,4 +894,54 @@ systemctl enable --now "${BOX}-maxperf.service" \
 systemctl is-active --quiet "${BOX}-maxperf.service" \
     || fail "issue 756/#791: ${BOX}-maxperf.service is not active after enable --now — the boot-enforcement script did not run"
 echo "  issue 756/#791: full max-performance persistence provisioned (${BOX}-maxperf.service active + udev rule)"
+}
+
+# obs_box_cpu_latency_bound_us -> the CPU idle wake-up latency bound (microseconds) every OBS box holds.
+# 150 us keeps C1 (1 us) and C2 (127 us) on strih-lx's ACPI idle driver and keeps out C3_ACPI (1048 us),
+# which was entered ~106 M times on cpu0 -- a ~1 ms wake-up landing on the genlock render tick (16.7 ms),
+# the audio thread (21.3 ms blocks) and the NDI receive threads (issue 1357 finding 5839598285). ONE
+# baseline value, never per box: systemd/obs-box-cpu-latency.service carries the same number (test-pinned)
+# and the grader compares the unit's configured bound against it.
+obs_box_cpu_latency_bound_us() {
+    printf '150'
+}
+
+# obs_box_cpu_latency FETCH -- the issue 1357 idle-latency bound: install the PM QoS holder
+# (scripts/obs-box-cpu-latency-hold.sh -> /usr/local/sbin, systemd/obs-box-cpu-latency.service ->
+# /etc/systemd/system) through the caller's `FETCH REPO_RELPATH DEST` installer, enable it for every boot
+# and apply it now (the baseline's `enable --now` pattern; a restart when the installed text changed, so a
+# re-provision picks up a new bound). While the service runs it holds /dev/cpu_dma_latency open with the
+# bound written, so the cpuidle governor skips every state whose exit latency is longer; stopping it drops
+# the request (reversible, no reboot, no per-index C-state disable that a new kernel could renumber).
+# Fails loud when the box has no PM QoS device or the holder is not running afterwards.
+obs_box_cpu_latency() {
+    local FETCH="${1:?obs_box_cpu_latency: fetch function required}"
+    local unit=/etc/systemd/system/obs-box-cpu-latency.service holder=/usr/local/sbin/obs-box-cpu-latency-hold.sh
+    local before after
+    [ -c /dev/cpu_dma_latency ] \
+        || fail "issue 1357: /dev/cpu_dma_latency is missing -- this kernel has no PM QoS CPU latency interface to bound the idle wake-up latency"
+    # `|| true` inside the group: on a first install the files are absent, cat exits 1, and under the
+    # callers' `set -euo pipefail` a bare `cat ... | sha256sum` assignment would abort setup silently
+    before="$( { cat "$unit" "$holder" 2>/dev/null || true; } | sha256sum)"
+    mkdir -p /usr/local/sbin
+    "$FETCH" scripts/obs-box-cpu-latency-hold.sh "$holder" \
+        || fail "could not fetch scripts/obs-box-cpu-latency-hold.sh via ${FETCH}"
+    chmod 755 "$holder"
+    "$FETCH" systemd/obs-box-cpu-latency.service "$unit" \
+        || fail "could not fetch systemd/obs-box-cpu-latency.service via ${FETCH}"
+    chmod 644 "$unit"
+    after="$( { cat "$unit" "$holder" 2>/dev/null || true; } | sha256sum)"
+    systemctl daemon-reload
+    systemctl enable obs-box-cpu-latency.service >/dev/null 2>&1 \
+        || fail "issue 1357: could not enable obs-box-cpu-latency.service -- the idle-latency bound would not survive a reboot"
+    if [ "$before" != "$after" ]; then
+        systemctl restart obs-box-cpu-latency.service \
+            || fail "issue 1357: could not (re)start obs-box-cpu-latency.service"
+    else
+        systemctl start obs-box-cpu-latency.service \
+            || fail "issue 1357: could not start obs-box-cpu-latency.service"
+    fi
+    systemctl is-active --quiet obs-box-cpu-latency.service \
+        || fail "issue 1357: obs-box-cpu-latency.service is not active -- no idle-latency bound is held (journalctl -u obs-box-cpu-latency)"
+    echo "  issue 1357: CPU idle wake-up latency bounded to $(obs_box_cpu_latency_bound_us) us (obs-box-cpu-latency.service holds /dev/cpu_dma_latency; deeper C-states are skipped)"
 }

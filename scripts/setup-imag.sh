@@ -1616,13 +1616,16 @@ step 25 "Touchpad usability (#779): tap-to-click + natural scroll + gentler scro
 obs_box_touchpad imag
 
 # =============================================================================
-step 26 "Full max-performance persistence (issue 756/#791): EPP/turbo/platform-profile/runtime-PM via imag-maxperf.service + hotplug udev rule"
+step 26 "Full max-performance persistence (issue 756/#791): EPP/turbo/platform-profile/runtime-PM via imag-maxperf.service + hotplug udev rule + the CPU idle wake-up latency bound (issue 1357)"
 # =============================================================================
 # issue 1357: this step's body moved VERBATIM into the shared OBS-box appliance baseline
 # (scripts/lib/obs-box-baseline.sh) -- setup-strih.sh runs the SAME function, so the two boxes can
 # never diverge again. Box facts are its arguments; with these imag values it writes exactly what
 # this step always wrote.
 obs_box_maxperf_persistence imag
+# issue 1357: the baseline's CPU idle wake-up latency bound (the PM QoS holder unit), the same on every
+# OBS box; its unit + holder come from the repo through the step-22 fetch function.
+obs_box_cpu_latency imag_fetch_repo_file
 
 # =============================================================================
 step 27 "picom vsync compositor (issue 1146): tear-free HDMI-projector present + enable"

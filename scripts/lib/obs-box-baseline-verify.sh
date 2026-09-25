@@ -14,7 +14,8 @@
 #                                                                lines, rc 1 when any item FAILs
 #
 # Items (the obs-box-baseline.sh functions they grade): net (network tuning), perf (governor +
-# <BOX>-maxperf persistence), nosleep, boot (boot safety net), kernel (preempt=full low-latency),
+# <BOX>-maxperf persistence), cstate (the PM QoS idle wake-up latency bound: the holder unit + no state
+# deeper than the bound entered over a 1 s sample), nosleep, boot (boot safety net), kernel (preempt=full low-latency),
 # affinity (AFFINITY-ONLY core reservation, no kernel isolcpus/nohz_full), gpu (PRIME nvidia-primary on
 # a dGPU box, the iGPU max-frequency pin otherwise), dejitter (oomd + off-hours + OBS ProcessPriority=High
 # + the user-unit masks), crash (no operator crash popup), kiosk (lightdm + openbox installed, autologin
@@ -131,7 +132,8 @@ obs_box_baseline_gather_snippet() {
     fi
     printf 'BOX=%q\nU=%q\nUNIT=%q\n' "$box" "$user" "$unit"
     declare -f obs_box_has_discrete_nvidia obs_box_crash_popup_units obs_box_dejitter_user_units \
-        obs_box_brightness_helper_text obs_box_backlight_udev_rule obs_box_brightness_keybinds_xml
+        obs_box_brightness_helper_text obs_box_backlight_udev_rule obs_box_brightness_keybinds_xml \
+        obs_box_cpu_latency_bound_us
     cat <<'GATHER_EOF'
 set +e
 HOMEDIR="$(getent passwd "$U" 2>/dev/null | cut -d: -f6)"; [ -n "$HOMEDIR" ] || HOMEDIR="/home/$U"
@@ -147,6 +149,42 @@ echo "rc_local_active=$(systemctl is-active rc-local.service 2>/dev/null | first
 echo "governors=$(cat /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor 2>/dev/null | sort -u | tr '\n' ' ' | sed 's/ $//')"
 echo "maxperf_active=$(systemctl is-active "${BOX}-maxperf.service" 2>/dev/null | first)"
 echo "maxperf_udev=$(fexists "/etc/udev/rules.d/99-${BOX}-maxperf-pm.rules")"
+echo "cstate_unit=$(systemctl is-enabled obs-box-cpu-latency.service 2>/dev/null | first)"
+echo "cstate_active=$(systemctl is-active obs-box-cpu-latency.service 2>/dev/null | first)"
+echo "cstate_bound=$(systemctl show -p Environment --value obs-box-cpu-latency.service 2>/dev/null | tr ' ' '\n' | sed -n 's/^OBS_BOX_CPU_LATENCY_US=//p' | first)"
+# The kernel EFFECT of the bound, readable by any user (the request itself sits behind the root-only
+# /dev/cpu_dma_latency, and a PM QoS request never marks a state disabled): the usage counters of every
+# cpuidle state whose exit latency exceeds the baseline bound must not advance over a 1 s sample.
+# _cs_sum prints "<states read> <usage sum of the deeper states>" (sum `x` when such a counter is unreadable).
+# A CPU hot-(un)plugged between the two reads changes the summed set, so the delta can move either way;
+# that grades FAIL (never a false pass) and a re-run clears it.
+_cs_root=/sys/devices/system/cpu
+_cs_bound="$(obs_box_cpu_latency_bound_us)"
+_cs_sum() {
+    local s l u n=0 sum=0
+    for s in "$_cs_root"/cpu[0-9]*/cpuidle/state[0-9]*; do
+        l="$(cat "$s/latency" 2>/dev/null)"
+        case "$l" in ''|*[!0-9]*) continue ;; esac
+        n=$((n + 1))
+        [ "$l" -gt "$_cs_bound" ] || continue
+        u="$(cat "$s/usage" 2>/dev/null)"
+        case "$u" in ''|*[!0-9]*) echo "$n x"; return ;; esac
+        sum=$((sum + u))
+    done
+    echo "$n $sum"
+}
+_cs_deep=""
+for _cs_s in "$_cs_root"/cpu0/cpuidle/state[0-9]*; do
+    _cs_l="$(cat "$_cs_s/latency" 2>/dev/null)"
+    case "$_cs_l" in ''|*[!0-9]*) continue ;; esac
+    if [ "$_cs_l" -gt "$_cs_bound" ]; then _cs_deep="${_cs_deep}${_cs_deep:+ }$(cat "$_cs_s/name" 2>/dev/null):${_cs_l}us"; fi
+done
+read -r _ _cs_a <<<"$(_cs_sum)"
+sleep 1
+read -r _cs_n _cs_b <<<"$(_cs_sum)"
+echo "cstate_states=${_cs_n}"
+echo "cstate_deep=${_cs_deep}"
+echo "cstate_deep_delta=$(case "${_cs_a}${_cs_b}" in ''|*[!0-9]*) ;; *) echo $((_cs_b - _cs_a)) ;; esac)"
 echo "ppd=$(systemctl is-enabled power-profiles-daemon.service 2>/dev/null | first)"
 echo "sleep_target=$(systemctl is-enabled sleep.target 2>/dev/null | first)"
 echo "logind_nosleep=$(fexists "/etc/systemd/logind.conf.d/99-${BOX}-no-sleep.conf")"
@@ -244,7 +282,7 @@ obs_box_baseline_verdict() {
     }
     _obs_box_f() { _obs_box_fact "$1" "$facts"; }
     if [ "$(_obs_box_f gather_done)" != 1 ]; then
-        for v in net perf nosleep boot kernel affinity gpu dejitter crash kiosk websocket brightness autostart power touchpad; do
+        for v in net perf cstate nosleep boot kernel affinity gpu dejitter crash kiosk websocket brightness autostart power touchpad; do
             _obs_box_item "$v" 0 "unreadable (the baseline gather did not complete)"
         done
         return 1
@@ -262,6 +300,18 @@ obs_box_baseline_verdict() {
         && [ "$(_obs_box_f maxperf_active)" = active ] && [ "$(_obs_box_f maxperf_udev)" = 1 ] \
         && case "$(_obs_box_f ppd)" in masked|masked-runtime|not-found|'') true ;; *) false ;; esac && ok=1
     _obs_box_item perf "$ok" "cpu-performance=$(_obs_box_f cpu_perf_unit) governors=[$(_obs_box_f governors)] rc.local-eee=$(_obs_box_f rc_local_eee) rc-local.service=$(_obs_box_f rc_local_active) maxperf=$(_obs_box_f maxperf_active) udev=$(_obs_box_f maxperf_udev) power-profiles-daemon=$(_obs_box_f ppd)"
+    # cstate -- the PM QoS idle wake-up latency bound (issue 1357): obs-box-cpu-latency.service enabled +
+    # active with the baseline bound configured, at least one cpuidle state readable, and no state whose
+    # exit latency exceeds the bound entered during the gather's 1 s sample (the kernel honours the held
+    # request; a box with no deeper state trivially passes that part)
+    local cs_delta cs_states cs_bound
+    cs_delta="$(_obs_box_f cstate_deep_delta)"
+    cs_states="$(_obs_box_f cstate_states)"
+    cs_bound="$(_obs_box_f cstate_bound)"
+    ok=0; [ "$(_obs_box_f cstate_unit)" = enabled ] && [ "$(_obs_box_f cstate_active)" = active ] \
+        && [ "$cs_bound" = "$(obs_box_cpu_latency_bound_us)" ] \
+        && [[ "$cs_states" =~ ^[1-9][0-9]*$ ]] && [ "$cs_delta" = 0 ] && ok=1
+    _obs_box_item cstate "$ok" "obs-box-cpu-latency.service=$(_obs_box_f cstate_unit)/$(_obs_box_f cstate_active) bound=${cs_bound:-unset} us (baseline $(obs_box_cpu_latency_bound_us) us) cpuidle-states=${cs_states:-unreadable} deeper-than-bound=[$(_obs_box_f cstate_deep)] entries-in-1s=${cs_delta:-unreadable}"
     # nosleep -- sleep.target masked + both logind drop-ins
     ok=0; [ "$(_obs_box_f sleep_target)" = masked ] && [ "$(_obs_box_f logind_nosleep)" = 1 ] && [ "$(_obs_box_f logind_powerkey)" = 1 ] && ok=1
     _obs_box_item nosleep "$ok" "sleep.target=$(_obs_box_f sleep_target) no-sleep.conf=$(_obs_box_f logind_nosleep) no-powerkey.conf=$(_obs_box_f logind_powerkey)"
