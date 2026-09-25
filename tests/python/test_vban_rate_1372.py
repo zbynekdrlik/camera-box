@@ -578,3 +578,97 @@ def test_a_late_duplicate_inside_an_outage_never_hides_the_outage_loss():
     s = only_stream(pcap_bytes(276, sorted(recs + [dup])))
     assert s.lost == gap, (s.lost, s.jumps)
     assert s.jumps == 0
+
+
+
+# ---------------------------------------------------------------------------------------------
+# review round 4 (issue 1372): jittery, bursty, reordered real-looking streams
+# ---------------------------------------------------------------------------------------------
+
+import random  # noqa: E402
+
+_FPS = NOMINAL / SPF
+_T0 = 1_790_000_000_000_000_000
+
+
+def _gen(n, ppm=0.0, start=1000, burst=None, jitter_ns=0.0, seed=0):
+    """(ts_ns, counter) pairs of a sender at `ppm`; `burst=(lo, hi)` releases lo..hi packets together
+    (obs-vban style) at the last one's due time plus one shared uniform(+-jitter_ns) error."""
+    rng = random.Random(seed)
+    per = SPF / (NOMINAL * (1 + ppm * 1e-6)) * 1e9
+    out, i = [], 0
+    while i < n:
+        k = rng.randint(*burst) if burst else 1
+        rel = _T0 + (i + k - 1) * per + (rng.uniform(-jitter_ns, jitter_ns) if jitter_ns else 0.0)
+        for m in range(k):
+            if i + m < n:
+                out.append((int(rel + m * 20_000), start + i + m))
+        i += k
+    out.sort()
+    return out
+
+
+def _measure(pairs):
+    return vr.measure_stream([t for t, _ in pairs], [f & 0xFFFFFFFF for _, f in pairs], SPF, NOMINAL)
+
+
+def test_an_in_flight_reorder_never_lets_a_late_copy_become_a_restart():
+    """Round 4 (e7 a/a'): K+2 before K+1, and a 2 s late copy (or the late original) of K-400
+    arriving between them read as 2 jumps and phantom loss."""
+    base = _gen(11280)
+    t = {f: tt for tt, f in base}
+    k = 6000
+    for late_copy in (True, False):
+        recs = [(t[k + 2] if f == k + 1 else t[k + 1] if f == k + 2 else tt, f) for tt, f in base
+                if late_copy or f != k - 400]
+        recs.append((t[k + 1] + 1000, k - 400))
+        m = _measure(sorted(recs))
+        assert m["jumps"] == 0 and m["lost"] == 0, (late_copy, m["jumps"], m["lost"])
+
+
+def test_a_late_copy_during_a_stall_burst_is_a_duplicate():
+    """Round 4 (e7 b): a 60 ms stall-then-burst with a 1.5 s late copy arriving during the stall."""
+    base = _gen(11280)
+    t = {f: tt for tt, f in base}
+    k = 6000
+    recs = [((t[k] + 60_000_000 + (f - k) * 20_000) if k < f <= k + 11 else tt, f) for tt, f in base]
+    recs.append((t[k] + 30_000_000, k - 300))
+    m = _measure(sorted(recs))
+    assert m["jumps"] == 0 and m["duplicates"] == 1 and m["lost"] == 0, m
+
+
+def test_bursty_jitter_with_late_packets_books_no_phantom_jumps_or_loss():
+    for seed in range(6):
+        rng = random.Random(100 + seed)
+        base = _gen(11280, burst=(3, 6), jitter_ns=15e6, seed=seed)
+        recs = list(base)
+        for _ in range(10):  # ten late copies, 0.2-2 s late
+            tt, f = base[rng.randrange(200, len(base) - 400)]
+            recs.append((tt + int(rng.uniform(0.2, 2.0) * 1e9), f))
+        m = _measure(sorted(recs))
+        assert m["jumps"] == 0 and m["lost"] == 0, (seed, m["jumps"], m["lost"])
+
+
+def test_the_stderr_is_honest_for_bursty_streams():
+    """Round 4: packets released in one burst share one timing error, so a per-packet stderr was ~2x
+    too small and a TRUE 0 ppm clock graded FAULT on 2/40 seeds. The stderr now treats each arrival
+    cluster as one observation."""
+    g = vr.Grading(ppm_bound=20.0, loss_ceiling=1e-4, min_span_s=20.0)
+    zs, faults = [], 0
+    for seed in range(30):
+        m = _measure(_gen(11280, burst=(3, 6), jitter_ns=20e6, seed=seed))
+        zs.append(m["rate_ppm"] / m["rate_stderr_ppm"])
+        st = vr.StreamStats(key="k", name="n", src="s", sport=1, dst="d", dport=1, sample_rate=NOMINAL,
+                            samples_per_frame=SPF, channels=2, **m)
+        faults += vr.grade(st, g)[0] == "FAULT"
+    sd = (sum(z * z for z in zs) / len(zs)) ** 0.5
+    assert 0.6 < sd < 1.5, sd
+    assert faults == 0
+
+
+def test_a_restart_at_segment_start_is_still_a_jump_through_jitter():
+    for seed in range(4):
+        base = _gen(3000, start=0, burst=(1, 3), jitter_ns=5e6, seed=seed)
+        recs = [(tt, f if f < 40 else f - 40) for tt, f in base]  # counters restart at 0 after 40
+        m = _measure(recs)
+        assert m["jumps"] == 1 and m["lost"] == 0, (seed, m["jumps"], m["lost"])
