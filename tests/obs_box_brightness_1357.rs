@@ -305,3 +305,134 @@ fn the_new_functions_are_defined_and_sourcing_stays_silent() {
     assert!(out.is_empty(), "{out}");
     assert!(err.is_empty(), "{err}");
 }
+
+/// The gather text with the three brightness paths pointed at fixture files, plus an optional
+/// replacement of the embedded keybind renderer (the only test-only rewrites; the grading logic
+/// under test is the real gather).
+fn brightness_facts(dir: &std::path::Path, empty_keybind_renderer: bool) -> String {
+    let (c, snippet, err) = run(
+        VERIFY_LIB,
+        &[],
+        "obs_box_baseline_gather_snippet strih nosuchuser-1357 strih-obs.service",
+    );
+    assert_eq!(c, 0, "{err}");
+    let mut snippet = snippet
+        .replace(
+            "_bh=/usr/local/bin/obs-box-brightness",
+            &format!("_bh={}/helper", dir.display()),
+        )
+        .replace(
+            "_br=/etc/udev/rules.d/90-obs-box-backlight.rules",
+            &format!("_br={}/rule", dir.display()),
+        )
+        .replace(
+            "[ -f \"$_rcx\" ] || _rcx=/etc/xdg/openbox/rc.xml",
+            &format!("[ -f \"$_rcx\" ] || _rcx={}/rc.xml", dir.display()),
+        );
+    assert!(
+        snippet.contains(&format!("{}/helper", dir.display()))
+            && snippet.contains(&format!("{}/rule", dir.display()))
+            && snippet.contains(&format!("{}/rc.xml", dir.display())),
+        "the gather must carry the three brightness paths:\n{snippet}"
+    );
+    if empty_keybind_renderer {
+        snippet = snippet.replacen(
+            "\nset +e\n",
+            "\nobs_box_brightness_keybinds_xml() { :; }\nset +e\n",
+            1,
+        );
+    }
+    let out = Command::new("bash")
+        .arg("-c")
+        .arg(&snippet)
+        .output()
+        .expect("run the gather");
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+fn fact<'a>(facts: &'a str, key: &str) -> &'a str {
+    facts
+        .lines()
+        .rev()
+        .find_map(|l| l.strip_prefix(&format!("{key}=")))
+        .unwrap_or_else(|| panic!("no {key}= in:\n{facts}"))
+}
+
+fn write_fixture(dir: &std::path::Path, helper: &str, helper_mode: u32, rule: &str, rc: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::write(dir.join("helper"), helper).unwrap();
+    std::fs::set_permissions(
+        dir.join("helper"),
+        std::fs::Permissions::from_mode(helper_mode),
+    )
+    .unwrap();
+    std::fs::write(dir.join("rule"), rule).unwrap();
+    std::fs::write(dir.join("rc.xml"), rc).unwrap();
+}
+
+fn merged_stock_rc() -> String {
+    STOCK_RC.replacen("</keyboard>\n", &format!("{KEYBINDS}</keyboard>\n"), 1)
+}
+
+#[test]
+fn the_gather_passes_a_provisioned_box_on_all_three_files() {
+    let d = tempfile::tempdir().unwrap();
+    write_fixture(d.path(), HELPER, 0o755, UDEV_RULE, &merged_stock_rc());
+    let facts = brightness_facts(d.path(), false);
+    assert_eq!(fact(&facts, "brightness_helper"), "1", "{facts}");
+    assert_eq!(fact(&facts, "brightness_rule"), "1", "{facts}");
+    assert_eq!(fact(&facts, "brightness_keys"), "1", "{facts}");
+}
+
+#[test]
+fn the_gather_grades_the_helper_and_rule_by_content_not_presence() {
+    let d = tempfile::tempdir().unwrap();
+    let drifted_helper = HELPER.replace("max / 10", "max / 5");
+    let drifted_rule = UDEV_RULE.replace("chmod g+w", "chmod o+w");
+    write_fixture(
+        d.path(),
+        &drifted_helper,
+        0o755,
+        &drifted_rule,
+        &merged_stock_rc(),
+    );
+    let facts = brightness_facts(d.path(), false);
+    assert_eq!(
+        fact(&facts, "brightness_helper"),
+        "0",
+        "drifted helper: {facts}"
+    );
+    assert_eq!(
+        fact(&facts, "brightness_rule"),
+        "0",
+        "drifted rule: {facts}"
+    );
+    // the right text but not executable is not a working helper
+    write_fixture(d.path(), HELPER, 0o644, UDEV_RULE, &merged_stock_rc());
+    let facts = brightness_facts(d.path(), false);
+    assert_eq!(
+        fact(&facts, "brightness_helper"),
+        "0",
+        "non-executable: {facts}"
+    );
+}
+
+#[test]
+fn the_gather_fails_the_keybinds_when_one_is_missing() {
+    let d = tempfile::tempdir().unwrap();
+    let up = KEYBINDS.lines().nth(1).unwrap();
+    let only_up = STOCK_RC.replacen("</keyboard>\n", &format!("{up}\n</keyboard>\n"), 1);
+    write_fixture(d.path(), HELPER, 0o755, UDEV_RULE, &only_up);
+    let facts = brightness_facts(d.path(), false);
+    assert_eq!(fact(&facts, "brightness_keys"), "0", "{facts}");
+}
+
+/// Fail-closed: a keybind renderer that yields nothing (renamed, not embedded, a broken heredoc)
+/// must never read as "every keybind present".
+#[test]
+fn the_gather_keybind_check_fails_closed_when_the_renderer_yields_nothing() {
+    let d = tempfile::tempdir().unwrap();
+    write_fixture(d.path(), HELPER, 0o755, UDEV_RULE, &merged_stock_rc());
+    let facts = brightness_facts(d.path(), true);
+    assert_eq!(fact(&facts, "brightness_keys"), "0", "{facts}");
+}
