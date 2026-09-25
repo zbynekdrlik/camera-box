@@ -151,9 +151,15 @@ pub struct VideoDelayTracker {
 ///
 /// Mirror of `genlock_video_delay_track`.
 pub fn video_delay_track(t: &mut VideoDelayTracker, sample_ns: u64, interval_ns: u64) {
-    // RED stub: the old code never tracked the video delay.
     t.smoothed_ns = video_delay_smooth_ns(t.smoothed_ns, sample_ns);
-    let _ = (interval_ns, VIDEO_DELAY_SETTLE_TICKS);
+    if t.settle_ticks > 0 {
+        t.settle_ticks -= 1;
+        if t.settle_ticks == 0 && video_delay_moved(t.applied_ms, t.smoothed_ns, interval_ns) {
+            t.applied_ms = video_delay_round_ms(t.smoothed_ns);
+        }
+    } else if video_delay_moved(t.applied_ms, t.smoothed_ns, interval_ns) {
+        t.settle_ticks = VIDEO_DELAY_SETTLE_TICKS;
+    }
 }
 
 /// How a source's audio is held. Discriminants match the C `GENLOCK_AUDIO_HOLD_*` defines.
@@ -196,9 +202,9 @@ pub fn audio_hold_mode(
 ) -> AudioHoldMode {
     if !genlock_fifo || latency_ms == 0 {
         AudioHoldMode::Off
+    } else if audio_ts_is_wallclock && video_delay_ms > 0 {
+        AudioHoldMode::Timecode
     } else {
-        // RED stub: the old fixed-pin arrival hold only.
-        let _ = (audio_ts_is_wallclock, video_delay_ms);
         AudioHoldMode::Latency
     }
 }
@@ -264,9 +270,11 @@ pub fn audio_place_shift_ms(new_term_ns: i64, prev_term_ns: i64) -> f64 {
 ///
 /// Mirror of `genlock_audio_video_delay_ref_ns`.
 pub fn video_delay_reference_ns(smoothed_ns: u64, latency_ms: u32) -> i64 {
-    // RED stub: the old offset was measured against the pin.
-    let _ = smoothed_ns;
-    genlock_audio_delay_ns(latency_ms) as i64
+    if smoothed_ns > 0 {
+        smoothed_ns as i64
+    } else {
+        genlock_audio_delay_ns(latency_ms) as i64
+    }
 }
 
 /// The residual A/V pairing offset, in ms (truncated toward zero), between the audio hold actually
@@ -340,7 +348,9 @@ pub fn decide_audio_health(f: &AudioPairingFacets) -> AudioPairingHealth {
     if f.audio_enabled && f.asrc_saturated {
         return AudioPairingHealth::AsrcSaturated;
     }
-    if f.audio_enabled && f.pairing_offset_ms.saturating_abs() > f.frame_interval_ms {
+    if f.audio_enabled
+        && f.pairing_offset_ms.saturating_abs().saturating_mul(2) > f.frame_interval_ms
+    {
         return AudioPairingHealth::PairingOffsetExceeded;
     }
     AudioPairingHealth::Ok

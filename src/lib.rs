@@ -402,8 +402,9 @@ pub mod genlock_grid_bench;
 // committed parity gate `tests/genlock_lock_state_parity.rs`.
 pub mod genlock_lock_state;
 
-// #1303 — the pure receiver-side AUDIO ↔ video-FIFO pairing decision (audio held by the same
-// latency_ms the video FIFO holds video). Crate-root + std-only so it is Tier-0 verifiable; the C
+// #1303 — the pure receiver-side AUDIO ↔ video-FIFO pairing decision (issue 1367: audio placed at
+// its NDI timecode + the video's MEASURED stamp→present delay through the live wall→mono offset;
+// the two-clock bench is its test-only child). Crate-root + std-only so it is Tier-0 verifiable; the C
 // mirror (`genlock_audio_*` in `vendor/obs-studio/libobs/obs-source.c`) is held identical by the
 // committed parity gate `tests/genlock_audio_pairing_parity.rs`.
 pub mod genlock_audio_pairing;

@@ -85,12 +85,15 @@ pub struct AuditSample {
     /// "audio disabled on a program source" reads this.
     pub audio_enabled: bool,
     /// #1303 — the receiver-side AUDIO HOLD (ms) last applied so this source's audio pairs with
-    /// its video FIFO hold (= `latency_ms` for a genlock_fifo source; 0 = not held / no audio).
-    /// The audit twin of `latency_ms` for the audio leg. Absent on pre-#1303 logs — parses as 0.
+    /// its video. Since issue 1367 it is the video's MEASURED stamp→present delay for a
+    /// genlock_fifo source with wall-clock audio timecodes (`audio_hold=timecode`), `latency_ms`
+    /// before that measurement settles (`audio_hold=latency`), 0 = not held / no audio. Absent on
+    /// pre-#1303 logs — parses as 0.
     pub audio_delay_ms: u32,
-    /// #1303 — residual A/V pairing offset (ms, signed): `audio_delay_ms - latency_ms`. 0 =
-    /// paired; `-latency_ms` = audio never held (the wiring did not fire). An instantaneous
-    /// per-tick value, NOT summarized. Absent on pre-#1303 logs — parses as 0.
+    /// #1303 — residual A/V pairing offset (ms, signed): `audio_delay_ms` minus the video's
+    /// MEASURED stamp→present delay since issue 1367 (`latency_ms` on older builds and before any
+    /// measurement). 0 = paired; `-video delay` = audio never held. An instantaneous per-tick
+    /// value, NOT summarized. Absent on pre-#1303 logs — parses as 0.
     pub audio_pairing_offset_ms: i64,
     /// #1355 — CUMULATIVE received stamps equal to their predecessor (`stamp_dup=`): the second
     /// half of a sender's gap-then-duplicate pair (a slow frame stamped into the next 1/30 s
