@@ -7755,7 +7755,7 @@ fn extract_partial_flagged_frames(
 
 /// Issue 1302 slice 2 — read the harness's CG window record (`cg_chain_window_json` in
 /// scripts/lib/cg-chain-e2e.sh: `{"kind":"cg","scene","input","start_ns","end_ns"}`): the file read
-/// + JSON parse here, the field validation in the Tier-0 `CgWindow::from_record`. Any error makes
+/// and JSON parse here, the field validation in the Tier-0 `CgWindow::from_record`. Any error makes
 /// the caller fall back to the unscoped hop with a WARNING instead of scoping to a bogus window.
 fn load_cg_window(path: &Path) -> Result<camera_box::cg_chain_gate::CgWindow> {
     let text = std::fs::read_to_string(path)
