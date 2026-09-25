@@ -74,7 +74,8 @@ anchor). Measure it directly:
 `python3 -c "s=open('scripts/recording-e2e.sh').read(); mb=s.find('\"\$VERDICT_BIN\" \"\${MERGE_ARGS[@]}\" || GATE=\$?'); print(s.find('exit \"\$GATE\"', mb)-mb)"`
 then set the window above that with headroom + the file's own `// #NNNN: widened from A to B bytes
 ... (measured distance N)` convention comment. `recording-e2e-cleanup-composition.md` documents the
-widening itself; THIS entry is the reason the count sweep won't remind you to.
+widening itself; THIS entry is the reason the count sweep won't remind you to. Last measured 25.9.2026
+(issue 1367 pixel-proof step): 11535 of the 12000-byte window — the NEXT step added there must widen it.
 
 ## Raising a shared formula constant (a `PHASE_SYNC_FLOOR_MS`-style floor/cap) breaks EVERY hardcoded literal test expectation that assumed the old value -- across BOTH languages (#707)
 
