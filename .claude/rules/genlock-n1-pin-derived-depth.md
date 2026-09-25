@@ -212,6 +212,16 @@ mutation; 0/20 when only the run-time env was set). The std-only
 `tests/genlock_shallow_depth_wiring_1367.rs` pins the wiring, mirrored in both
 `windows-genlock*.yml`.
 
+**Bench pitfalls (issue 1367 review rounds 2-3 — both were shipped once and caught later).**
+- A scenario that changes the arrival mid-run can pass VACUOUSLY: a later relock (sender or OBS
+  restart) re-latches the new D anyway, so a dedup'd latched sequence `[3, 4]` proves nothing about
+  WHEN it happened. Assert the time share (`depth_hist[D_new]` covers the span from the change on).
+  And the rounded floor is `ceil(lag / interval)`, so a "rise" must put EVERY floor at or over D
+  (28–40 → 70–95 ms at D 3), not straddle it (60–80 ms floors at 2 or 3 and never re-measures).
+- A transient metric sampled only inside the settled gate silently drops the transient's start (the
+  gate reopens seconds after a re-latch; the slew's first seconds are its largest |A/V|). Sample the
+  transient on its own, outside the gate, and LOWER-bound its peak so a late start fails.
+
 **The grid-bench port carries the rule** (`Fifo` in `src/genlock_grid_bench.rs`, now `pub(crate)`
 for the shallow bench), with `BenchConfig::shallow_depth_rule` (default true; false = the
 pre-rule floating conveyor, the anti-tautology) and `min_latency_box`. The deep 2ME PGM bench results
