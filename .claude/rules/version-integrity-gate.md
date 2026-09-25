@@ -7,6 +7,8 @@ paths:
   - "tests/python/test_bundle_state_gather.py"
   - "tests/python/test_bundle_state_server_log.py"
   - "tests/python/test_bundle_state_server_port4455.py"
+  - "scripts/lib/manifest-autosource.sh"
+  - "tests/harness_manifest_autosource_1082.rs"
 ---
 
 # version-integrity-gate.sh — the pre-rig-test Windows-stack drift gate (#123/#119)
@@ -227,6 +229,49 @@ exported + unit-tested); only its USE as the opt-in guard is removed.
   `manifest_autosource_state_has_key` (the assertion forbids it fleet-wide) — the #832 self-collision
   class. Editing recording-e2e.sh MANDATES the full `cargo test` suite at integration (per the
   static-anchor GOTCHA); no test anchors on this block or the removed comment text (verified by grep).
+
+## #1346 — the FAST and FULL Windows builds are NOT byte-reproducible: the gate accepts either (`--alt-manifest`)
+
+`windows-genlock-fast.yml` and `windows-genlock.yml` build the SAME source to DIFFERENT obs.dll bytes
+(same size). Build 54995646: fast `obs.dll` = `18ea7acf…`, full `bin/64bit/obs.dll` = `e454b134…`;
+build 8151a12ac: fast `a5374104…`, full `54048531…`. Their distroav.dll differs the same way (the
+`distroav-fast-dll` artifact vs the full bundle's `obs-plugins/64bit/distroav.dll`). The auto-source
+used to fetch ONLY the fast manifest, so a correct FULL-bundle deploy (every FRONTEND / vendor-plugin
+change ships only that way) read `obs_dll_sha256 DRIFT` and refused the release E2E (run 36041775725,
+24.9.2026). The fix (Approach 1 of the main design):
+
+- `manifest_autosource_fetch_win_full REPO SHA DEST` (`scripts/lib/manifest-autosource.sh`) fetches the
+  FULL bundle's BUNDLE_MANIFEST.json (`windows-genlock.yml` / artifact `obs-genlock-windows-x64`) for
+  the SAME strih marker sha as the fast one. Best-effort ("" on failure). GitHub serves an artifact
+  only as one zip, so it downloads the whole ~270 MB bundle into a mktemp dir, keeps only the
+  manifest, and removes the rest at once. `recording-e2e.sh` runs it only when `VERSION_GATE_MANIFEST`
+  is unset (an operator pin is never widened) and passes it to BOTH gate invocations as
+  `${AUTO_WIN_ALT_MANIFEST:+--alt-manifest …}`.
+- `version-integrity-gate.sh --alt-manifest PATH` threads it to every `--win-state` box exactly where
+  `--manifest` is (only when the box state has no own `manifest=`), as drift-guard's `alt_manifest=`.
+- `drift-guard.sh --compare alt_manifest=PATH` (`compare_observed` arg 32, `drift_check_either`):
+  - `obs_dll_sha256` is OK when the observed hash equals the primary OR the alternate entry; the OK
+    line names which manifest matched. It is DRIFT when it matches neither (the line names both
+    accepted hashes) and UNKNOWN when unread or when neither manifest lists obs.dll.
+  - `distroav_dll_sha256` takes the either-match ONLY when the PRIMARY already lists distroav. With
+    the fast (obs.dll-only) primary it stays SKIPPED, and the SKIPPED line reports whether the box
+    matches the alternate's entry (informational). Reason: `deploy-genlock-fleet.sh --fast` ships
+    obs.dll only, so after a fast deploy distroav is an OLDER build's bytes. Distroav is also not
+    byte-reproducible, so enforcing it against the full manifest would false-refuse every correct fast
+    deploy (the mirror image of this bug). Enforcing distroav needs its own decision.
+  - An `alt_manifest=` given WITHOUT `manifest=` (the fast fetch failed and the full one succeeded)
+    is PROMOTED to the primary and judged exactly like a lone `manifest=` today (fail-closed; a
+    fast-deployed box then reads DRIFT, which is correct: evidence is incomplete).
+  - A supplied alternate that does not exist is a usage error (exit 1), like a missing `manifest=`.
+  - With NO alternate every line and exit code is byte-identical to before. This is pinned by
+    `compare_single_manifest_obs_dll_lines_are_byte_identical_1346` in `tests/drift_guard.rs`.
+- Tests: `tests/drift_guard.rs` (`*_1346`, engine), `tests/version_integrity_gate.rs`
+  (`run_gate_alt_1346`: full-bundle pass / foreign refuse / unchanged without the flag; its manifest
+  file names are prefixed `bundle_1346_` per the write_state-clobber GOTCHA below),
+  `tests/harness_manifest_autosource_1082.rs` (the seam records workflow + artifact + sha), and
+  `tests/harness_windows_manifest_enforce_1100.rs` (the static recording-e2e.sh wiring, count 2).
+- Tier-0 local proof without cargo: a python replica drives the real `drift-guard.sh` /
+  `version-integrity-gate.sh` / sourced lib with the same fixtures and assertions as the Rust tests.
 
 ## #1164 — `--imag-acked-offline REASON`: an operator-acked absent imag must NOT UNKNOWN-refuse
 
