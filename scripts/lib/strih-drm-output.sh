@@ -18,7 +18,7 @@
 # Pure helpers (unit-tested by tests/strih_drm_output_provision_1346.rs):
 #   strih_drm_hdmi_connected [SYSFS_DIR]    0 iff a kernel HDMI connector reads `connected`
 #   strih_drm_hdmi_output_from_xrandr       stdin `xrandr --query` -> the first connected HDMI name
-#   strih_drm_output_config_json CONN [VIEW] the one-line config (refuses a bad name/view)
+#   strih_drm_output_config_json CONN [VIEW] [BACKEND] the one-line config (refuses a bad name/view/backend)
 #   strih_drm_legacy_view TEXT              the retired strih-lx-projector.json type -> initial view
 #   strih_drm_output_verdict ...            verify-strih's drm-output item verdict
 
@@ -46,12 +46,14 @@ strih_drm_hdmi_output_from_xrandr() {
   awk '$1 ~ /^HDMI/ && $2 == "connected" && !done { print $1; done = 1 }' || true
 }
 
-# strih_drm_output_config_json CONNECTOR [VIEW] -> the one-line config the C module and the Python
-# classifier both arm on. VIEW defaults to multiview (owner ROZHODNUTE). Refuses (prints nothing,
-# returns 1) an empty / non-[A-Za-z0-9._-] connector or an unknown view -- a config the C would
-# ignore must never be written.
+# strih_drm_output_config_json CONNECTOR [VIEW] [BACKEND] -> the one-line config the C module and the
+# Python classifier both arm on. VIEW defaults to multiview (owner ROZHODNUTE). BACKEND (issue 1346)
+# defaults to lease = NO "backend" key, so a lease config stays byte-identical to the pre-backend one;
+# vk-direct (the NVIDIA Vulkan direct-display backend) is written explicitly. Refuses (prints nothing,
+# returns 1) an empty / non-[A-Za-z0-9._-] connector, an unknown view or an unknown backend -- a config
+# the C would ignore or keep dormant must never be written.
 strih_drm_output_config_json() {
-  local conn="${1:-}" view="${2:-multiview}"
+  local conn="${1:-}" view="${2:-multiview}" backend="${3:-lease}" extra=""
   case "$conn" in
     '' | *[!A-Za-z0-9._-]*) return 1 ;;
   esac
@@ -59,7 +61,12 @@ strih_drm_output_config_json() {
     program | multiview) ;;
     *) return 1 ;;
   esac
-  printf '{"enabled":true,"connector":"%s","argb":%s,"view":"%s"}\n' "$conn" "$STRIH_DRM_OUTPUT_ARGB" "$view"
+  case "$backend" in
+    lease) ;;
+    vk-direct) extra=',"backend":"vk-direct"' ;;
+    *) return 1 ;;
+  esac
+  printf '{"enabled":true,"connector":"%s","argb":%s,"view":"%s"%s}\n' "$conn" "$STRIH_DRM_OUTPUT_ARGB" "$view" "$extra"
 }
 
 # strih_drm_legacy_view TEXT -> the initial view carried over from the retired
@@ -75,24 +82,30 @@ strih_drm_legacy_view() {
   return 0
 }
 
-# strih_drm_output_verdict HDMI_CONNECTED ARMED_CONNECTOR VIEW LIVE_SCANOUT LIVE_MULTIVIEW
+# strih_drm_output_verdict HDMI_CONNECTED ARMED_CONNECTOR VIEW LIVE_SCANOUT LIVE_MULTIVIEW [BACKEND FACT]
 #   HDMI_CONNECTED   1 iff strih_drm_hdmi_connected
 #   ARMED_CONNECTOR  the connector the config arms ("-" / empty = dormant: absent, disabled, bad;
 #                    "?" = the classifier itself could not run, e.g. the strih_scenes import failed)
 #   VIEW             program | multiview | unknown (the config's "view" token)
 #   LIVE_SCANOUT     1 iff the newest OBS log has `drm-output: program scanout LIVE`
 #   LIVE_MULTIVIEW   1 iff the newest OBS log has `drm-output: multiview bind LIVE`
+#   BACKEND          issue 1346: the config's backend token (lease | vk-direct | unknown; "?" or empty
+#                    = not read -- the check is skipped)
+#   FACT             the box fact STRIH_HDMI_OUTPUT_BACKEND ("?" or empty = not read -- skipped)
 # Prints ONE token; return code 0 = PASS, 2 = NOTE (skip / report), 1 = FAIL:
 #   skip-no-hdmi        (2) no HDMI monitor and no armed config -- today's eDP-only strih-lx
 #   hdmi-unplugged      (2) the config is armed but no HDMI monitor is plugged in
 #   classify-failed     (1) an HDMI monitor is plugged in but the config could not be classified
 #   config-missing      (1) an HDMI monitor is plugged in but no armed config -> setup-strih step 6
 #   view-invalid        (1) the "view" value is neither program nor multiview (the C runs Program)
+#   backend-invalid     (1) the "backend" value is neither lease nor vk-direct (the C stays dormant)
+#   backend-drift       (1) the config's backend is not the box fact (setup-strih step 6 re-writes it)
 #   lease-not-live      (1) armed + plugged, but the OBS log never reached the scanout
 #   multiview-not-live  (1) view multiview, scanout live, but the built-in Multiview never bound
 #   ok                  (0)
 strih_drm_output_verdict() {
   local hdmi="${1:-0}" conn="${2:-}" view="${3:-program}" live="${4:-0}" mv="${5:-0}"
+  local backend="${6:-?}" fact="${7:-?}"
   [ "$conn" = "-" ] && conn=""
   if [ "$hdmi" != 1 ]; then
     if [ -n "$conn" ] && [ "$conn" != "?" ]; then
@@ -117,6 +130,14 @@ strih_drm_output_verdict() {
       return 1
       ;;
   esac
+  if [ "$backend" = unknown ]; then
+    printf 'backend-invalid'
+    return 1
+  fi
+  if [ -n "$backend" ] && [ "$backend" != "?" ] && [ -n "$fact" ] && [ "$fact" != "?" ] && [ "$backend" != "$fact" ]; then
+    printf 'backend-drift'
+    return 1
+  fi
   if [ "$live" != 1 ]; then
     printf 'lease-not-live'
     return 1

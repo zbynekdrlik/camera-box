@@ -196,6 +196,14 @@ if [ -f "$SCN_BIN" ] && command -v python3 >/dev/null 2>&1; then
 fi
 DRM_ARMED="${DRM_SUMMARY%% *}"
 DRM_VIEW_V="${DRM_SUMMARY##* }"
+# issue 1346: the config's backend against the box fact STRIH_HDMI_OUTPUT_BACKEND (a lease config on the
+# NVIDIA-driven HDMI never goes live). "?" = not read (an older installed strih_scenes) -- the check skips.
+DRM_BACKEND_V="?"
+if [ -f "$SCN_BIN" ] && command -v python3 >/dev/null 2>&1; then
+  DRM_BACKEND_V="$(python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); import strih_scenes as s; print(s.drm_output_backend_token(s.drm_output_config_text(sys.argv[2])))' \
+    "$(dirname "$SCN_BIN")" "$DRM_CONF_V" 2>/dev/null || echo "?")"
+fi
+DRM_BACKEND_FACT="$(strih_lx_hdmi_output_backend 2>/dev/null || echo "?")"
 DRM_LIVE=0
 DRM_MV_LIVE=0
 DRM_LOG="$(newest_log || true)"
@@ -204,14 +212,16 @@ if [ -n "$DRM_LOG" ]; then
   LC_ALL=C grep -aqF 'drm-output: program scanout LIVE' "$DRM_LOG" 2>/dev/null && DRM_LIVE=1
   LC_ALL=C grep -aqF 'drm-output: multiview bind LIVE' "$DRM_LOG" 2>/dev/null && DRM_MV_LIVE=1
 fi
-DRM_VERDICT="$(strih_drm_output_verdict "$DRM_HDMI" "$DRM_ARMED" "$DRM_VIEW_V" "$DRM_LIVE" "$DRM_MV_LIVE" || true)"
+DRM_VERDICT="$(strih_drm_output_verdict "$DRM_HDMI" "$DRM_ARMED" "$DRM_VIEW_V" "$DRM_LIVE" "$DRM_MV_LIVE" "$DRM_BACKEND_V" "$DRM_BACKEND_FACT" || true)"
 case "$DRM_VERDICT" in
-  ok)                 ok   "HDMI output: DRM lease on ${DRM_ARMED} live, view ${DRM_VIEW_V} (${DRM_CONF_V} + the newest OBS log)" ;;
+  ok)                 ok   "HDMI output: ${DRM_ARMED} live (backend ${DRM_BACKEND_V}), view ${DRM_VIEW_V} (${DRM_CONF_V} + the newest OBS log)" ;;
   skip-no-hdmi)       note "HDMI output: SKIP -- no HDMI monitor connected, the DRM-lease output stays dormant (attach one and re-run setup-strih.sh step 6)" ;;
   hdmi-unplugged)     note "HDMI output: ${DRM_ARMED} is armed in ${DRM_CONF_V} but no HDMI monitor is connected (report-only)" ;;
   classify-failed)    bad  "HDMI output: could not classify ${DRM_CONF_V} (strih_scenes.py / python3 missing or its import failed) -- re-run setup-strih.sh step 6" ;;
   config-missing)     bad  "HDMI output: an HDMI monitor is connected but ${DRM_CONF_V} does not arm the DRM lease -- re-run setup-strih.sh (step 6)" ;;
   view-invalid)       bad  "HDMI output: ${DRM_CONF_V} \"view\" is not program or multiview (OBS falls back to Program) -- fix it in OBS Tools > HDMI výstup" ;;
+  backend-invalid)    bad  "HDMI output: ${DRM_CONF_V} \"backend\" is not lease or vk-direct (OBS keeps the output dormant) -- re-run setup-strih.sh step 6" ;;
+  backend-drift)      bad  "HDMI output: ${DRM_CONF_V} uses backend ${DRM_BACKEND_V} but the box fact STRIH_HDMI_OUTPUT_BACKEND is ${DRM_BACKEND_FACT} -- re-run setup-strih.sh step 6" ;;
   lease-not-live)     bad  "HDMI output: ${DRM_ARMED} is armed but the newest OBS log never reached 'drm-output: program scanout LIVE' -- read its drm-output: lines, then restart strih-obs.service" ;;
   multiview-not-live) bad  "HDMI output: the view is multiview but the newest OBS log has no 'drm-output: multiview bind LIVE' (the built-in Multiview never reached the scanout)" ;;
   *)                  bad  "HDMI output: unknown verdict '${DRM_VERDICT}'" ;;

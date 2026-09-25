@@ -364,17 +364,37 @@ DRM_CONF_DIR="${USER_HOME}/.camera-box"
 DRM_CONF="${DRM_CONF_DIR}/drm-output.json"
 LEGACY_PROJ=/opt/camera-box/strih-lx-projector.json
 DRM_VIEW0="$(strih_drm_legacy_view "$(cat "$LEGACY_PROJ" 2>/dev/null || true)")"
+# issue 1346: HOW the output leaves the X desktop is a BOX fact (STRIH_HDMI_OUTPUT_BACKEND): lease = the
+# X RandR lease (an Intel-driven connector), vk-direct = Vulkan direct display (strih-lx's built-in HDMI is
+# NVIDIA-driven and the NVIDIA X driver refuses the lease). vk-direct dlopens the Vulkan loader, and the
+# NVIDIA driver ships the ICD.
+DRM_BACKEND="$(strih_lx_hdmi_output_backend)"
+if [ "$DRM_BACKEND" = vk-direct ]; then
+  DEBIAN_FRONTEND=noninteractive apt-get install -y libvulkan1 \
+    || warn "  issue 1346: apt-get install libvulkan1 failed -- the vk-direct HDMI output stays dormant until the Vulkan loader is installed"
+  [ -f /usr/share/vulkan/icd.d/nvidia_icd.json ] \
+    || warn "  issue 1346: no NVIDIA Vulkan ICD (/usr/share/vulkan/icd.d/nvidia_icd.json) -- the vk-direct HDMI output needs the NVIDIA driver's Vulkan"
+fi
 if [ -L "$DRM_CONF_DIR" ] || [ -L "$DRM_CONF" ]; then
   warn "  SKIP issue 1346: ${DRM_CONF_DIR} or ${DRM_CONF} is a symlink -- refusing to write through it as root; remove it and re-run"
 elif [ -f "$DRM_CONF" ]; then
   echo "  ${DRM_CONF} already present -- leaving the operator's HDMI output choice"
+  # issue 1346: the backend is the box fact, not an operator choice -- bring an existing config onto it
+  # (the operator's view and every other key kept; lease = the absent key). Run as the desktop user, so
+  # the atomic rename keeps the file owned by the user and root never writes through a user directory.
+  if sudo -u "$DESKTOP_USER" python3 -c 'import sys; sys.path[:0] = [sys.argv[1], "/usr/local/bin"]; import strih_scenes as s; s.write_drm_backend(sys.argv[2], sys.argv[3])' \
+      "$HERE" "$DRM_BACKEND" "$DRM_CONF"; then
+    echo "  ${DRM_CONF}: backend ${DRM_BACKEND} (the box fact STRIH_HDMI_OUTPUT_BACKEND)"
+  else
+    warn "  issue 1346: could not write backend ${DRM_BACKEND} into ${DRM_CONF} (not a JSON object?) -- fix or remove it and re-run setup-strih.sh"
+  fi
 elif strih_drm_hdmi_connected; then
   DRM_CONN="$(sudo -u "$DESKTOP_USER" env DISPLAY=:0 XAUTHORITY="${USER_HOME}/.Xauthority" xrandr --query 2>/dev/null \
     | strih_drm_hdmi_output_from_xrandr || true)"
-  if [ -n "$DRM_CONN" ] && DRM_LINE="$(strih_drm_output_config_json "$DRM_CONN" "$DRM_VIEW0")"; then
+  if [ -n "$DRM_CONN" ] && DRM_LINE="$(strih_drm_output_config_json "$DRM_CONN" "$DRM_VIEW0" "$DRM_BACKEND")"; then
     install -d -o "$DESKTOP_USER" -g "$DESKTOP_USER" "$DRM_CONF_DIR"
     printf '%s\n' "$DRM_LINE" | install -m 0644 -o "$DESKTOP_USER" -g "$DESKTOP_USER" /dev/stdin "$DRM_CONF"
-    echo "  wrote ${DRM_CONF} (HDMI output ${DRM_CONN} = DRM lease, view ${DRM_VIEW0}; takes effect at the next OBS start)"
+    echo "  wrote ${DRM_CONF} (HDMI output ${DRM_CONN}, backend ${DRM_BACKEND}, view ${DRM_VIEW0}; takes effect at the next OBS start)"
   else
     warn "  SKIP issue 1346: an HDMI monitor is connected but X RandR could not name it (Xorg :0 not up yet?) -- ${DRM_CONF} NOT provisioned; re-run setup-strih.sh after the kiosk session is up"
   fi
