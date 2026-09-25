@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # airuleset:script-ok source-only lib (defines functions; the only top-level statement is the guarded
-# win-ssh-exec.sh source below, a no-op when the caller already sourced it) — matches the
-# sibling scripts/lib/*.sh convention (cold-cut-step.sh, camera-box-restart-verify.sh) of
-# deliberately NOT setting `set -euo pipefail` here: sourcing runs in the CALLER's shell, and
-# recording-e2e.sh (the only caller) already sets it. Every function ALWAYS `return 0` on its
+# win-ssh-exec.sh source below) — matches the sibling scripts/lib/*.sh convention (cold-cut-step.sh,
+# camera-box-restart-verify.sh) of NOT setting `set -euo pipefail` in THIS file: sourcing runs in
+# the CALLER's shell, and recording-e2e.sh (the only caller) already sets it and already sourced
+# win-ssh-exec.sh, so the guarded source is a no-op there. A caller that did NOT source it first
+# (a test) gets win-ssh-exec.sh's own top-level `set -euo pipefail` with it — the same flags every
+# caller of this lib runs under anyway. Every function ALWAYS `return 0` on its
 # best-effort (runtime) paths so a no-op / failed branch can never trip the caller's `set -e`
 # (the sourced-`set -e`-leak class, .claude/rules/ci-testing-gotchas.md).
 #
@@ -17,19 +19,23 @@
 #   - at [5/8]: turn the SongPlayer output burn ON through the SHIPPED API (POST
 #     {base}/api/v1/ndi/burn {"output":"SP-fast","on":true}) and READ IT BACK from
 #     {base}/api/v1/ndi/health (`burn_on` of that output), cut cg OBS program to the scene carrying
-#     that output (`sp-fast`), and StartRecord cg OBS over OBS-WS.
+#     that output (`sp-fast`, under the Cut transition), and StartRecord cg OBS over OBS-WS. No cg
+#     recording started ⇒ the burn goes straight back OFF.
 #   - after the camera sweep/hold, BEFORE [7/8] StopRecord: ONE tail CG window — strih program is
-#     cut to the scene carrying the `CG-obs` input (only that item shown), so the strih + stream
-#     recordings carry the CG chain. It is a TAIL window on purpose: a window inside
-#     switch-schedule.json would have no cam2 tick (a zero-frame cambox window FAILS) and a mid-run
-#     cut would land inside the optical span — the camera-chain verdict must stay untouched.
-#   - right after [7/8] StopRecord: strih's scene + program are restored.
-#   - at [8/8d]: StopRecord cg OBS (keeping the StopRecord host path) and scp that exact file to
-#     dev1 (or run the operator's CG_CHAIN_PULL_CMD), fed to the merge as `--cg <path>`, which emits
-#     the REPORT-ONLY cg_chain section (src/cg_chain_gate.rs; never changes overall_pass).
-#   - in cleanup(): the #246/#844 leak-guard — burn OFF (verified on /health, retried, a loud LEAK
-#     line if it never reads false), StopRecord cg OBS, and every scene snapshot restored, even on
-#     an early abort.
+#     HARD-CUT (Cut transition, never a blend) to the scene carrying the `CG-obs` input (only that
+#     item shown), so the strih + stream recordings carry the CG chain. It is a TAIL window on
+#     purpose: a window inside switch-schedule.json would have no cam2 tick (a zero-frame cambox
+#     window FAILS) and a mid-run cut would land inside the optical span. The tail placement + the
+#     hard cut are DESIGNED to keep the camera-chain verdict out of it (the CG frames are a trailing
+#     no-tick run after the last optical read); the first live CG_CHAIN=1 run is what confirms it.
+#   - right after [7/8] StopRecord: StopRecord cg OBS (keeping the StopRecord host path), burn OFF,
+#     strih's scene + program + transition restored — so nothing CG runs during the on-box decodes.
+#   - at [8/8d]: scp that exact cg file to dev1 (or run the operator's CG_CHAIN_PULL_CMD), fed to the
+#     merge as `--cg <path>`, which emits the REPORT-ONLY cg_chain section (src/cg_chain_gate.rs;
+#     never changes overall_pass).
+#   - in cleanup(): the #246/#844 leak-guard — burn OFF (verified on /health, retried with a SHORT
+#     per-request timeout, a loud LEAK line if it never reads false), StopRecord cg OBS, and every
+#     scene snapshot of this run restored, even on an early abort.
 
 # win_ssh_scp_source_path (the backslash-to-slash scp source fix) lives in win-ssh-exec.sh, which
 # recording-e2e.sh sources earlier; source it here too when a caller (a test) did not.
@@ -170,9 +176,10 @@ cg_chain_cg_scene() {
 }
 
 # The restore-snapshot path for kind $1 (cg-program | strih-scene), in CG_CHAIN_STATE_DIR (the
-# run's OUTDIR; falls back to TMPDIR). Pure.
+# run's OUTDIR; falls back to TMPDIR), keyed to RUN_ID when set — a reused OUTDIR never replays
+# another run's snapshot. Pure.
 cg_chain_state_file() {
-  printf '%s/cg-chain-%s-state.json' "${CG_CHAIN_STATE_DIR:-${TMPDIR:-/tmp}}" "$1"
+  printf '%s/cg-chain-%s-state%s.json' "${CG_CHAIN_STATE_DIR:-${TMPDIR:-/tmp}}" "$1" "${RUN_ID:+-$RUN_ID}"
 }
 
 # The scene helper that sits next to obs_phase2.py ($1 = the obs_phase2.py path). Pure.
@@ -239,11 +246,12 @@ cg_chain_pull_source_spec() {
 }
 
 # Pull the cg OBS recording to the local path $2. With CG_CHAIN_PULL_CMD set, that operator command
-# runs (with CG_HOST_IP, CG_HOST_PATH and CG_RECORDING exported). Otherwise the DEFAULT: scp the
-# exact StopRecord file (CG_HOST_RECORDING_PATH) from `${CG_CHAIN_USER:-newlevel}@$1`, bounded by
-# CG_CHAIN_PULL_TIMEOUT (default 900 s). $1=cg-host-ip $2=local-dest-path. Returns 0 iff the
-# destination file exists afterwards. MUST be called from an `if` (nonzero = "no cg recording this
-# run, omit --cg").
+# runs (with CG_HOST_IP, CG_HOST_PATH and CG_RECORDING exported). Otherwise the DEFAULT: the shared
+# win_ssh_download (win-ssh-exec.sh) fetches the exact StopRecord file (CG_HOST_RECORDING_PATH) from
+# `${CG_CHAIN_USER:-newlevel}@$1`, bounded by CG_CHAIN_PULL_TIMEOUT (default 900 s — `timeout` cannot
+# exec a shell function, so it runs through `bash -c` re-sourcing the lib, the recording-e2e.sh
+# win_ssh_run pattern). $1=cg-host-ip $2=local-dest-path. Returns 0 iff the destination file exists
+# afterwards. MUST be called from an `if` (nonzero = "no cg recording this run, omit --cg").
 cg_chain_pull_recording() {
   local host="$1" dest="$2"
   local cmd="${CG_CHAIN_PULL_CMD:-}" hostpath="${CG_HOST_RECORDING_PATH:-}" spec
@@ -260,8 +268,9 @@ cg_chain_pull_recording() {
     return 1
   fi
   spec="$(cg_chain_pull_source_spec "${CG_CHAIN_USER:-newlevel}" "$host" "$hostpath")"
-  if timeout "${CG_CHAIN_PULL_TIMEOUT:-900}" sshpass -p "${CG_CHAIN_PW:-newlevel}" scp \
-    -o StrictHostKeyChecking=no -o ConnectTimeout=10 "$spec" "$dest" >/dev/null 2>&1 && [ -f "$dest" ]; then
+  if timeout "${CG_CHAIN_PULL_TIMEOUT:-900}" bash -c '. "$1"; win_ssh_download "$2" "$3" "$4" "$5" "$6"' _ \
+    "${BASH_SOURCE[0]%/*}/win-ssh-exec.sh" "${CG_CHAIN_USER:-newlevel}" "${CG_CHAIN_PW:-newlevel}" \
+    "$host" "$hostpath" "$dest" >/dev/null 2>&1 && [ -f "$dest" ]; then
     echo "[cg_chain] cg OBS recording pulled to $dest ($(du -h "$dest" 2>/dev/null | cut -f1) from $spec)"
     return 0
   fi
@@ -323,9 +332,11 @@ cg_chain_window() {
   echo "[6/8] #1302 CG window: strih program -> '$scene' ('$input' only) for ${secs}s, cut at ${start_ns} ns"
   if declare -F interruptible_sleep >/dev/null 2>&1; then interruptible_sleep "$secs"; else sleep "$secs"; fi
   end_ns="$(date +%s%N)"
+  # The window record is the run's evidence of WHEN strih carried the CG chain (the live acceptance
+  # reads it next to the verdict's cg_chain section); it is logged too, so it survives in the CI log.
   if json="$(cg_chain_window_json "$scene" "$input" "$start_ns" "$end_ns")"; then
     printf '%s\n' "$json" >"${CG_CHAIN_STATE_DIR:-${TMPDIR:-/tmp}}/cg-window.json" \
-      && echo "    wrote CG window -> ${CG_CHAIN_STATE_DIR:-${TMPDIR:-/tmp}}/cg-window.json"
+      && echo "    CG window $json -> ${CG_CHAIN_STATE_DIR:-${TMPDIR:-/tmp}}/cg-window.json"
   else
     echo "[cg_chain] WARNING: bad CG window bounds (start=$start_ns end=$end_ns) — window record not written" >&2
   fi
@@ -346,21 +357,32 @@ cg_chain_restore_snapshot() {
   return 0
 }
 
-# Restore strih's CG-window scene + program right after [7/8] StopRecord (cleanup() retries it).
-# $1=path-to-obs_phase2.py $2=timeout-secs. A pure no-op unless CG_CHAIN=1; ALWAYS return 0.
-cg_chain_strih_restore() {
+# End the CG leg right after [7/8] StopRecord: StopRecord cg OBS (keeping the host path for the
+# [8/8d] pull), burn OFF (verified), and strih's CG-window scene + program + transition restored —
+# so neither the cg recording nor the burn nor the CG program runs through the long on-box decodes.
+# cleanup() repeats every step (each is idempotent). $1=cg-host-ip-or-empty $2=path-to-obs_phase2.py
+# $3=timeout-secs. A pure no-op unless CG_CHAIN=1; ALWAYS return 0.
+cg_chain_after_stoprecord() {
   cg_chain_enabled || return 0
-  cg_chain_restore_snapshot strih-scene "$1" "${2:-30}"
+  local host="$1" py="$2" tmo="${3:-30}"
+  if [ "${CG_RECORDING_STARTED:-0}" = 1 ] && [ -n "$host" ]; then
+    cg_chain_record_stop "$host" "$py" "$tmo"
+  fi
+  cg_chain_songplayer_burn off
+  cg_chain_restore_snapshot strih-scene "$py" "$tmo"
+  return 0
 }
 
-# cleanup() leak-guard: burn OFF (verified), StopRecord cg OBS, and every scene snapshot restored,
-# even on an early abort. A pure no-op when CG_CHAIN is not enabled (so it is safe to call
-# unconditionally from cleanup()). Args: $1=cg-host-ip-or-empty $2=path-to-obs_phase2.py
-# $3=timeout-secs. ALWAYS return 0.
+# cleanup() leak-guard: burn OFF (verified), StopRecord cg OBS, and every scene snapshot of this run
+# restored, even on an early abort. The burn requests use a SHORT per-request timeout
+# (CG_CHAIN_CLEANUP_BURN_TIMEOUT, default 3 s), so an unreachable SongPlayer costs ~20 s, never a
+# minute in front of the stream/strih teardowns that follow. A pure no-op when CG_CHAIN is not
+# enabled (so it is safe to call unconditionally from cleanup()). Args: $1=cg-host-ip-or-empty
+# $2=path-to-obs_phase2.py $3=timeout-secs. ALWAYS return 0.
 cg_chain_cleanup() {
   cg_chain_enabled || return 0
   local host="$1" py="$2" tmo="${3:-30}"
-  cg_chain_songplayer_burn off
+  CG_CHAIN_BURN_TIMEOUT="${CG_CHAIN_CLEANUP_BURN_TIMEOUT:-3}" cg_chain_songplayer_burn off
   if [ -n "$host" ]; then
     cg_chain_record_stop "$host" "$py" "$tmo"
   fi
