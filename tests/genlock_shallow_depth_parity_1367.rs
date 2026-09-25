@@ -88,9 +88,17 @@ fn c_n1_shallow_depth_matches_the_rust_authority_1367() {
     let mut holds = Vec::new();
     for step in 0..120u64 {
         let age = i30 / 2 + step * (5 * i30 / 120);
-        for (target, latency, floor) in
-            [(3u64, 3u32, i30), (2, 3, i30), (0, 3, i30), (31, 987, i30)]
-        {
+        // design 5830750134: a clamp under a slow arrival (the newest frame already 4.5 / 5 / 6
+        // frames old at D 4) -- the shed guard's both sides.
+        for (target, latency, floor) in [
+            (3u64, 3u32, i30),
+            (2, 3, i30),
+            (0, 3, i30),
+            (31, 987, i30),
+            (4, 3, 4 * i30 + i30 / 2),
+            (4, 3, 5 * i30),
+            (4, 3, 6 * i30),
+        ] {
             for ticks in [29u64, 30] {
                 sheds.push((w, w - age, floor, latency, i30, target, ticks));
                 holds.push((w, w - age, floor, latency, i30, target, ticks));

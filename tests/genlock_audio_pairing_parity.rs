@@ -330,6 +330,10 @@ fn c_video_delay_tracker_matches_the_rust_authority_tick_by_tick_1367() {
     seq.extend(std::iter::repeat_n((500_000_000, IV30, 400), 250));
     seq.extend(std::iter::repeat_n((100_000_000, IV30, 100), 60));
     seq.extend(std::iter::repeat_n((233_333_333, IV30, 0), 100));
+    // a lock left MID follow-count: the free tracker must start from a fresh arm, not the count.
+    seq.extend(std::iter::repeat_n((100_000_000, IV30, 100), 5));
+    seq.extend(std::iter::repeat_n((200_000_000, IV30, 100), 60));
+    seq.extend(std::iter::repeat_n((200_000_000, IV30, 0), 80));
 
     let mut body = String::from(
         "    uint64_t sm = 0; uint32_t ap = 0; uint32_t st = 0; uint32_t lk = 0;\n    static const unsigned long long S[] = {",
