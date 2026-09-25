@@ -1,12 +1,14 @@
-//! Issue 1372 part A — the Windows OBS media clock follows the dantesync-disciplined tick.
+//! Issue 1372 part A — the Windows OBS media clock runs at the dantesync-disciplined rate.
 //!
 //! ## Why this module exists
 //!
 //! libobs paces its audio thread, video thread, ASRC servo and every output timestamp off
 //! `os_gettime_ns()`. On Windows that was raw QPC. dantesync disciplines the SYSTEM time with
-//! `SetSystemTimeAdjustmentPrecise` (the Dante PTP tick) and never touches QPC. So Windows OBS
-//! ran up to ~20 ppm off the Dante network (live, win-resolume 25.9.2026), and VBAN streams
-//! between the PCs slipped a packet every few minutes.
+//! `SetSystemTimeAdjustmentPrecise` (PTP frequency plus the NTP phase slew) and never touches
+//! QPC. So Windows OBS ran up to ~20 ppm off every other disciplined box (live, win-resolume
+//! 25.9.2026), and VBAN streams between the PCs slipped a packet every few minutes. The result
+//! follows dantesync's SYSTEM time; a peer clocked by Dante itself (ASIO/DVS, a Dante-clocked
+//! VB-Matrix) still differs by dantesync's steady `f_phase` (the Dante-GM-vs-UTC offset).
 //!
 //! The vendored `os_gettime_ns()` in `vendor/obs-studio/libobs/util/platform-windows.c` now
 //! integrates QPC deltas scaled by the rate the OS currently applies to system time. This
@@ -127,6 +129,19 @@ impl Segment {
             self.last_poll_qpc = qpc;
         }
     }
+}
+
+/// Map a RAW-QPC timestamp (ns on the raw QPC timeline, e.g. WASAPI `qpcPosition * 100`) onto the
+/// disciplined clock: measure its age on raw QPC (`raw_now_ns - raw_ts_ns`) and subtract it from the
+/// disciplined `now_ns` (a future stamp adds). Over an age of milliseconds the rate difference is
+/// below a microsecond. Mirrors `os_qpc_ns_map_to_gettime_ns` in
+/// `vendor/obs-studio/libobs/util/windows/qpc-timestamp.h`.
+pub fn map_raw_qpc_ns(raw_ts_ns: u64, raw_now_ns: u64, now_ns: u64) -> u64 {
+    if raw_ts_ns >= raw_now_ns {
+        return now_ns + (raw_ts_ns - raw_now_ns);
+    }
+    let age_ns = raw_now_ns - raw_ts_ns;
+    now_ns.saturating_sub(age_ns)
 }
 
 /// The single-thread model of the C `os_gettime_ns()`: read the segment, poll the adjustment
@@ -256,6 +271,20 @@ mod tests {
         c.now(11 * F, Some((10_001_000, F, false))); // rebase at 11 s
         let base = c.seg.base_ns;
         assert_eq!(c.seg.now(11 * F - 5, F), base);
+    }
+
+    #[test]
+    fn a_raw_qpc_timestamp_maps_by_its_age() {
+        // The disciplined clock is 100 ms ahead of raw QPC; a stamp 10 ms old on raw QPC is 10 ms
+        // before the disciplined now, not 110 ms before it.
+        let raw_now = 1_000_000_000_000;
+        let now = raw_now + 100_000_000;
+        assert_eq!(
+            map_raw_qpc_ns(raw_now - 10_000_000, raw_now, now),
+            now - 10_000_000
+        );
+        assert_eq!(map_raw_qpc_ns(raw_now + 5, raw_now, now), now + 5);
+        assert_eq!(map_raw_qpc_ns(0, raw_now, 7), 0);
     }
 
     #[test]

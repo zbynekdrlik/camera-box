@@ -6,15 +6,18 @@
 //! runner, so this gate buys the verification back on Linux:
 //!
 //! 1. It lifts the WHOLE `camera-box issue 1372 BEGIN … END` block VERBATIM (the pure helpers,
-//!    the static state, the runtime API resolve and `os_gettime_ns` itself), plus
-//!    `os_sleepto_ns`, from the shipped file. Nothing is retyped.
+//!    the static state, the runtime API resolve, the sequence-counter snapshot and
+//!    `os_gettime_ns` itself), `os_sleepto_ns`, and the raw-QPC timestamp mapper from
+//!    `util/windows/qpc-timestamp.h`. Nothing is retyped.
 //! 2. It compiles them with `cc -Wall -Wextra -Wconversion -Werror` against a FAKE Win32 layer:
-//!    a scripted QPC, a scripted adjustment API, a `Sleep` that advances the fake QPC, and SRW
-//!    locks that count and check their pairing.
+//!    a scripted QPC, a scripted adjustment API and a `Sleep` that advances the fake QPC.
 //! 3. It drives scenarios (live-like dantesync steering, a rate flip between polls, disabled /
-//!    missing API, clamping, odd QPC frequencies, a sleep on a clock 100 ms ahead of raw QPC).
-//!    It requires the C output to equal the Tier-0 authority `src/os_clock_discipline.rs`
-//!    exactly, read by read.
+//!    missing API, clamping, odd QPC frequencies, a sleep on a clock 100 ms ahead of raw QPC, a
+//!    WASAPI raw-QPC stamp). It requires the C output to equal the Tier-0 authority
+//!    `src/os_clock_discipline.rs` exactly, read by read.
+//! 4. It compiles the same block a SECOND time against a threaded fake (pthreads, GCC atomics,
+//!    `CLOCK_MONOTONIC` as QPC, the rate flipping ±1000 ppm on every 250 µs poll) and requires
+//!    that no thread ever reads a value below one another thread already returned.
 //!
 //! The Rust authority is included by `#[path]`, so this file is std-only. It runs under
 //! `cargo test` in CI AND standalone, with no cargo, via the vendored-libobs Tier-0 recipe:
@@ -30,14 +33,15 @@
 #[path = "../src/os_clock_discipline.rs"]
 mod os_clock_discipline;
 
-use os_clock_discipline::{mul_div64, DisciplinedClock, NS_PER_SEC};
+use os_clock_discipline::{map_raw_qpc_ns, mul_div64, DisciplinedClock, NS_PER_SEC};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::OnceLock;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 const PLATFORM_WINDOWS: &str = "vendor/obs-studio/libobs/util/platform-windows.c";
 const UTIL_UINT64: &str = "vendor/obs-studio/libobs/util/util_uint64.h";
+const QPC_TIMESTAMP_H: &str = "vendor/obs-studio/libobs/util/windows/qpc-timestamp.h";
 const BEGIN: &str = "/* camera-box issue 1372 BEGIN";
 const END: &str = "/* camera-box issue 1372 END */";
 
@@ -65,17 +69,43 @@ fn lift_block(src: &str) -> String {
     src[start..end].to_string()
 }
 
-/// The verbatim `os_sleepto_ns` definition (signature → first `\n}\n`).
-fn lift_sleepto(src: &str) -> String {
-    let sig = "bool os_sleepto_ns(uint64_t time_target)\n{";
+/// The verbatim definition of one C function: its signature line → the first `\n}\n`.
+fn lift_fn(src: &str, sig: &str, file: &str) -> String {
     let start = src
         .find(sig)
-        .unwrap_or_else(|| panic!("issue 1372: {PLATFORM_WINDOWS} lost `{sig}`"));
+        .unwrap_or_else(|| panic!("issue 1372: {file} lost `{sig}`"));
     let end = src[start..]
         .find("\n}\n")
         .map(|i| start + i + 3)
-        .expect("issue 1372: os_sleepto_ns has no closing brace");
+        .unwrap_or_else(|| panic!("issue 1372: `{sig}` has no closing brace"));
     src[start..end].to_string()
+}
+
+/// Everything the harnesses compile, lifted verbatim from the shipped files.
+fn lifted_c() -> String {
+    let src = platform_src();
+    let qpc_h = fs::read_to_string(repo(QPC_TIMESTAMP_H))
+        .unwrap_or_else(|e| panic!("issue 1372: read {QPC_TIMESTAMP_H}: {e}"));
+    let mut c = String::from("\n/* ---- lifted VERBATIM from platform-windows.c ---- */\n");
+    c.push_str(&lift_block(&src));
+    c.push('\n');
+    c.push_str(&lift_fn(
+        &src,
+        "bool os_sleepto_ns(uint64_t time_target)\n{",
+        PLATFORM_WINDOWS,
+    ));
+    c.push_str("\n/* ---- lifted VERBATIM from util/windows/qpc-timestamp.h ---- */\n");
+    c.push_str(&lift_fn(
+        &qpc_h,
+        "static inline uint64_t os_qpc_ns_map_to_gettime_ns(",
+        QPC_TIMESTAMP_H,
+    ));
+    c.push_str(&lift_fn(
+        &qpc_h,
+        "static inline uint64_t os_raw_qpc_100ns_to_gettime_ns(",
+        QPC_TIMESTAMP_H,
+    ));
+    c
 }
 
 /// The fake Win32 layer the lifted code compiles and runs against.
@@ -102,17 +132,17 @@ typedef unsigned long DWORD;
 typedef uint64_t DWORD64;
 typedef DWORD64 *PDWORD64;
 typedef long LONG;
+typedef long long LONG64;
 typedef long long LONGLONG;
 typedef void *PVOID;
 typedef void *HMODULE;
 typedef void (*FARPROC)(void);
 typedef struct {{ long long QuadPart; }} LARGE_INTEGER;
-typedef struct {{ int unused; }} SRWLOCK;
-#define SRWLOCK_INIT {{0}}
 typedef struct {{ int done; }} INIT_ONCE, *PINIT_ONCE;
 #define INIT_ONCE_STATIC_INIT {{0}}
 typedef BOOL(CALLBACK *PINIT_ONCE_FN)(PINIT_ONCE, PVOID, PVOID *);
 #define YieldProcessor() ((void)0)
+#define MemoryBarrier() __atomic_thread_fence(__ATOMIC_SEQ_CST)
 
 static uint64_t g_freq = 10000000;
 static uint64_t g_qpc = 0;
@@ -122,7 +152,6 @@ static int g_api_present = 1;
 static DWORD64 g_adj = 0, g_inc = 0;
 static BOOL g_dis = TRUE;
 static int g_polls = 0;
-static int g_shared = 0, g_excl = 0, g_lock_errors = 0;
 
 static uint64_t get_clockfreq(void) {{ return g_freq; }}
 static BOOL QueryPerformanceCounter(LARGE_INTEGER *c)
@@ -136,10 +165,17 @@ static void Sleep(DWORD ms)
 	g_qpc += (uint64_t)ms * g_freq / 1000;
 	g_slept_ms += ms;
 }}
-static void AcquireSRWLockShared(SRWLOCK *l) {{ (void)l; if (g_excl) g_lock_errors++; g_shared++; }}
-static void ReleaseSRWLockShared(SRWLOCK *l) {{ (void)l; if (g_shared <= 0) g_lock_errors++; g_shared--; }}
-static void AcquireSRWLockExclusive(SRWLOCK *l) {{ (void)l; if (g_excl || g_shared) g_lock_errors++; g_excl++; }}
-static void ReleaseSRWLockExclusive(SRWLOCK *l) {{ (void)l; if (g_excl != 1) g_lock_errors++; g_excl--; }}
+static BOOL QueryPerformanceFrequency(LARGE_INTEGER *f)
+{{
+	f->QuadPart = (long long)g_freq;
+	return TRUE;
+}}
+static BOOL SwitchToThread(void) {{ return TRUE; }}
+static LONG64 InterlockedIncrement64(LONG64 volatile *d)
+{{
+	*d += 1;
+	return *d;
+}}
 static BOOL InitOnceExecuteOnce(PINIT_ONCE o, PINIT_ONCE_FN fn, PVOID p, PVOID *ctx)
 {{
 	if (o->done) return TRUE;
@@ -407,7 +443,7 @@ fn harness_main(scs: &[Scenario]) -> String {
              \t\t\tg_qpc = q[i]; g_adj = a[i]; g_inc = inc[i]; g_dis = d[i];\n\
              \t\t\tprintf(\"%llu\\n\", (unsigned long long)os_gettime_ns());\n\
              \t\t}}\n\
-             \t\tprintf(\"END polls=%d lock_errors=%d shared=%d excl=%d polling=%ld\\n\", g_polls, g_lock_errors, g_shared, g_excl, (long)os_clk_polling);\n\
+             \t\tprintf(\"END polls=%d seq_odd=%d polling=%ld\\n\", g_polls, (int)(os_clk_seq & 1), (long)os_clk_polling);\n\
              \t\treturn 0;\n\
              \t}}\n",
             name = s.name,
@@ -432,7 +468,19 @@ fn harness_main(scs: &[Scenario]) -> String {
          \t\tconst uint64_t wake_qpc = g_qpc;\n\
          \t\tconst uint64_t after = os_gettime_ns();\n\
          \t\tconst bool stall_past = os_sleepto_ns(now);\n\
-         \t\tprintf(\"%llu %llu %d %llu %llu %llu %d %d\\n\", (unsigned long long)now, (unsigned long long)target, stall ? 1 : 0, (unsigned long long)g_slept_ms, (unsigned long long)wake_qpc, (unsigned long long)after, stall_past ? 1 : 0, g_lock_errors);\n\
+         \t\tprintf(\"%llu %llu %d %llu %llu %llu %d %d\\n\", (unsigned long long)now, (unsigned long long)target, stall ? 1 : 0, (unsigned long long)g_slept_ms, (unsigned long long)wake_qpc, (unsigned long long)after, stall_past ? 1 : 0, (int)(os_clk_seq & 1));\n\
+         \t\treturn 0;\n\
+         \t}}\n"
+    ));
+    c.push_str(&format!(
+        "\tif (strcmp(argv[1], \"wasapi\") == 0) {{\n\
+         \t\tg_freq = 10000000ULL; g_adj = {SLEEP_ADJ}ULL; g_inc = 10000000ULL; g_dis = FALSE;\n\
+         \t\tg_qpc = 0; (void)os_gettime_ns();\n\
+         \t\tg_qpc = 1000000000ULL; /* 100 s later: the disciplined clock is 100 ms ahead */\n\
+         \t\tconst uint64_t now = os_gettime_ns();\n\
+         \t\tconst uint64_t raw_now_100ns = g_qpc; /* 10 MHz: one count is 100 ns */\n\
+         \t\tconst uint64_t stamp = raw_now_100ns - {WASAPI_AGE_100NS}ULL;\n\
+         \t\tprintf(\"%llu %llu %llu\\n\", (unsigned long long)now, (unsigned long long)os_raw_qpc_100ns_to_gettime_ns(stamp), (unsigned long long)(stamp * 100));\n\
          \t\treturn 0;\n\
          \t}}\n"
     ));
@@ -440,35 +488,40 @@ fn harness_main(scs: &[Scenario]) -> String {
     c
 }
 
-fn scratch_dir() -> PathBuf {
-    let base = option_env!("CARGO_TARGET_TMPDIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir);
-    let d = base.join(format!("os_clock_parity_1372_{}", std::process::id()));
-    fs::create_dir_all(&d).expect("create the parity scratch dir");
-    d
+/// The WASAPI scenario: a device stamp 10 ms old on the raw QPC timeline.
+const WASAPI_AGE_100NS: u64 = 100_000;
+
+/// A per-build scratch dir, removed on drop. pid + an in-process counter: unique across processes
+/// and across this binary's parallel test threads (never pid + timestamp).
+struct Scratch(PathBuf);
+
+impl Scratch {
+    fn new(tag: &str) -> Self {
+        static SEQ: AtomicUsize = AtomicUsize::new(0);
+        let base = option_env!("CARGO_TARGET_TMPDIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir);
+        let d = base.join(format!(
+            "os_clock_parity_1372_{}_{}_{tag}",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&d).expect("create the parity scratch dir");
+        Scratch(d)
+    }
 }
 
-/// The harness binary, compiled once per test process (the tests run in parallel threads).
-fn harness() -> &'static Path {
-    static BIN: OnceLock<PathBuf> = OnceLock::new();
-    BIN.get_or_init(|| build_harness(&scenarios()))
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
 }
 
-/// Compile the lifted C; return the binary path.
-fn build_harness(scs: &[Scenario]) -> PathBuf {
-    let src = platform_src();
-    let mut c = fake_win32();
-    c.push_str("\n/* ---- lifted VERBATIM from platform-windows.c ---- */\n");
-    c.push_str(&lift_block(&src));
-    c.push('\n');
-    c.push_str(&lift_sleepto(&src));
-    c.push_str(&harness_main(scs));
-
-    let dir = scratch_dir();
-    let cfile = dir.join("os_clock.c");
-    let bin = dir.join("os_clock.bin");
-    fs::write(&cfile, &c).expect("write the harness");
+/// Compile `c` with the gate's flags plus `extra`; return the binary path inside `dir`.
+fn compile(dir: &Scratch, c: &str, extra: &[&str]) -> PathBuf {
+    let cfile = dir.0.join("os_clock.c");
+    let bin = dir.0.join("os_clock.bin");
+    fs::write(&cfile, c).expect("write the harness");
     let cc = std::env::var("CC").unwrap_or_else(|_| "cc".to_string());
     let out = Command::new(&cc)
         .args([
@@ -478,8 +531,8 @@ fn build_harness(scs: &[Scenario]) -> PathBuf {
             "-Wconversion",
             "-Wformat=2",
             "-Werror",
-            "-O1",
         ])
+        .args(extra)
         .arg(&cfile)
         .arg("-o")
         .arg(&bin)
@@ -492,11 +545,20 @@ fn build_harness(scs: &[Scenario]) -> PathBuf {
         });
     assert!(
         out.status.success(),
-        "issue 1372: the lifted os_gettime_ns / os_sleepto_ns do NOT COMPILE against the fake \
-         Win32 layer under -Wall -Wextra -Wconversion -Werror:\n--- cc stderr ---\n{}",
+        "issue 1372: the lifted os_gettime_ns / os_sleepto_ns / qpc-timestamp.h do NOT COMPILE \
+         against the fake Win32 layer under -Wall -Wextra -Wconversion -Werror:\n--- cc stderr \
+         ---\n{}",
         String::from_utf8_lossy(&out.stderr)
     );
     bin
+}
+
+/// The single-threaded scripted harness.
+fn build_harness(dir: &Scratch, scs: &[Scenario]) -> PathBuf {
+    let mut c = fake_win32();
+    c.push_str(&lifted_c());
+    c.push_str(&harness_main(scs));
+    compile(dir, &c, &["-O1"])
 }
 
 fn run(bin: &Path, arg: &str) -> String {
@@ -515,9 +577,10 @@ fn run(bin: &Path, arg: &str) -> String {
 #[test]
 fn c_os_gettime_ns_matches_the_rust_authority_read_by_read() {
     let scs = scenarios();
-    let bin = harness();
+    let dir = Scratch::new("reads");
+    let bin = build_harness(&dir, &scs);
     for s in &scs {
-        let stdout = run(bin, s.name);
+        let stdout = run(&bin, s.name);
         let mut lines: Vec<&str> = stdout.lines().collect();
         let tail = lines.pop().expect("harness printed nothing");
         let c_vals: Vec<u64> = lines
@@ -551,10 +614,10 @@ fn c_os_gettime_ns_matches_the_rust_authority_read_by_read() {
                 w[1]
             );
         }
-        // Lock pairing and the single-poller flag.
+        // The writer left the sequence even and released the single-poller flag.
         assert!(
-            tail.contains("lock_errors=0 shared=0 excl=0 polling=0"),
-            "issue 1372 `{}`: SRW lock pairing / poller flag broken: {tail}",
+            tail.contains("seq_odd=0 polling=0"),
+            "issue 1372 `{}`: the writer left the sequence odd or kept the poller flag: {tail}",
             s.name
         );
         // The adjustment is polled ~every 250 ms, never on every read.
@@ -578,11 +641,12 @@ fn c_os_gettime_ns_matches_the_rust_authority_read_by_read() {
 #[test]
 fn the_rate_follows_the_adjustment_and_rate_one_without_it() {
     let scs = scenarios();
-    let bin = harness();
+    let dir = Scratch::new("rate");
+    let bin = build_harness(&dir, &scs);
     // Disabled / absent = exactly the old raw-QPC nanoseconds.
     for name in ["disabled", "absent"] {
         let s = scs.iter().find(|s| s.name == name).unwrap();
-        let stdout = run(bin, name);
+        let stdout = run(&bin, name);
         for (st, line) in s.steps.iter().zip(stdout.lines()) {
             let v: u64 = line.parse().unwrap();
             assert_eq!(
@@ -595,7 +659,7 @@ fn the_rate_follows_the_adjustment_and_rate_one_without_it() {
     // A constant adj 9_999_809 (inc 10_000_000): a LARGER adj is SLOWER, so the clock must run
     // +19.1 ppm vs raw QPC (rate = inc/adj), never -19.1 (the adj/inc reading).
     let s = scs.iter().find(|s| s.name == "const").unwrap();
-    let stdout = run(bin, "const");
+    let stdout = run(&bin, "const");
     let vals: Vec<u64> = stdout.lines().filter_map(|l| l.parse().ok()).collect();
     let (q0, q1) = (s.steps[0].qpc, s.steps[s.steps.len() - 1].qpc);
     let raw = (mul_div64(q1, NS_PER_SEC, s.freq) - mul_div64(q0, NS_PER_SEC, s.freq)) as f64;
@@ -610,13 +674,14 @@ fn the_rate_follows_the_adjustment_and_rate_one_without_it() {
 
 #[test]
 fn os_sleepto_ns_waits_on_the_disciplined_clock() {
-    let bin = harness();
-    let stdout = run(bin, "sleep");
+    let dir = Scratch::new("sleep");
+    let bin = build_harness(&dir, &scenarios());
+    let stdout = run(&bin, "sleep");
     let f: Vec<u64> = stdout
         .split_whitespace()
         .map(|t| t.parse().expect("sleep fields"))
         .collect();
-    let (now, target, stall, slept_ms, wake_qpc, after, stall_past, lock_errors) =
+    let (now, target, stall, slept_ms, wake_qpc, after, stall_past, seq_odd) =
         (f[0], f[1], f[2], f[3], f[4], f[5], f[6], f[7]);
     assert_eq!(target, now + SLEEP_TARGET_AHEAD_NS);
     // The Rust authority for the same clock: +1000 ppm (clamped), 100 s in → 100 ms ahead.
@@ -632,10 +697,7 @@ fn os_sleepto_ns_waits_on_the_disciplined_clock() {
         stall_past, 0,
         "issue 1372: a past target must return at once"
     );
-    assert_eq!(
-        lock_errors, 0,
-        "issue 1372: SRW lock pairing broken in os_sleepto_ns"
-    );
+    assert_eq!(seq_odd, 0, "issue 1372: the writer left the sequence odd");
     let wake_disc = c.seg.now(wake_qpc, 10_000_000);
     assert!(
         wake_disc >= target && after >= target,
@@ -663,7 +725,273 @@ fn the_api_is_resolved_at_runtime_from_kernelbase() {
         "issue 1372: the adjustment API must be resolved at runtime from kernelbase.dll"
     );
     assert!(
-        !platform_src().contains("GetModuleHandleW(L\"kernel32.dll\")"),
+        !block.contains("GetModuleHandleW(L\"kernel32.dll\")"),
         "issue 1372: kernel32.dll does not export GetSystemTimeAdjustmentPrecise"
+    );
+}
+
+#[test]
+fn a_wasapi_raw_qpc_stamp_is_mapped_onto_the_disciplined_clock() {
+    // WASAPI stamps capture buffers with a RAW-QPC time. With the disciplined clock 100 ms ahead
+    // of raw QPC, a 10 ms-old stamp must land 10 ms before the disciplined now; `ts * 100` (the
+    // stock code) would land ~110 ms before it and drift further every hour.
+    let dir = Scratch::new("wasapi");
+    let bin = build_harness(&dir, &scenarios());
+    let stdout = run(&bin, "wasapi");
+    let f: Vec<u64> = stdout
+        .split_whitespace()
+        .map(|t| t.parse().expect("wasapi fields"))
+        .collect();
+    let (now, mapped, raw_stamp_ns) = (f[0], f[1], f[2]);
+    let raw_now_ns = mul_div64(1_000_000_000, NS_PER_SEC, 10_000_000);
+    assert_eq!(
+        mapped,
+        map_raw_qpc_ns(raw_stamp_ns, raw_now_ns, now),
+        "issue 1372: the C raw-QPC mapper diverges from src/os_clock_discipline.rs"
+    );
+    assert_eq!(mapped, now - WASAPI_AGE_100NS * 100);
+    assert!(
+        now - raw_stamp_ns > 100_000_000,
+        "issue 1372: the scenario must put the disciplined clock ahead of raw QPC"
+    );
+    // The plugin really uses the mapper at both raw-QPC stamp sites.
+    let wasapi = fs::read_to_string(repo("vendor/obs-studio/plugins/win-wasapi/win-wasapi.cpp"))
+        .expect("read win-wasapi.cpp");
+    assert_eq!(
+        wasapi.matches("os_raw_qpc_100ns_to_gettime_ns(ts)").count(),
+        2,
+        "issue 1372: win-wasapi.cpp must map both raw-QPC stamps (process capture + device timing)"
+    );
+    assert!(
+        !wasapi.contains("ts * 100"),
+        "issue 1372: a raw `ts * 100` WASAPI stamp is back -- it drifts against os_gettime_ns()"
+    );
+}
+
+/// The threaded fake: pthreads, GCC atomics, `CLOCK_MONOTONIC` as a 10 MHz QPC running 1000x
+/// fast (a 250 ms poll = 250 µs of real time), and an adjustment that flips between the ±1000 ppm
+/// clamp on every poll, so rebases are frequent and each one changes the rate by 2000 ppm.
+fn fake_win32_threaded() -> String {
+    let util = repo(UTIL_UINT64);
+    format!(
+        r#"#define _GNU_SOURCE
+#include <stdint.h>
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <wchar.h>
+#include <time.h>
+#include <sched.h>
+#include <pthread.h>
+#include "{util}"
+
+#define WINAPI
+#define CALLBACK
+#define TRUE 1
+#define FALSE 0
+#define UNUSED_PARAMETER(param) (void)param
+typedef int BOOL;
+typedef BOOL *PBOOL;
+typedef unsigned long DWORD;
+typedef uint64_t DWORD64;
+typedef DWORD64 *PDWORD64;
+typedef long LONG;
+typedef long long LONG64;
+typedef long long LONGLONG;
+typedef void *PVOID;
+typedef void *HMODULE;
+typedef void (*FARPROC)(void);
+typedef struct {{ long long QuadPart; }} LARGE_INTEGER;
+typedef struct {{ int state; }} INIT_ONCE, *PINIT_ONCE;
+#define INIT_ONCE_STATIC_INIT {{0}}
+typedef BOOL(CALLBACK *PINIT_ONCE_FN)(PINIT_ONCE, PVOID, PVOID *);
+#define YieldProcessor() ((void)0)
+#define MemoryBarrier() __atomic_thread_fence(__ATOMIC_SEQ_CST)
+
+#define FAKE_FREQ 10000000ULL
+static int g_polls = 0;
+
+static uint64_t get_clockfreq(void) {{ return FAKE_FREQ; }}
+static uint64_t real_ns(void)
+{{
+	struct timespec ts;
+	clock_gettime(CLOCK_MONOTONIC, &ts);
+	return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+}}
+/* Preemption stand-in: a thread stalls at a random point, the way a real thread is descheduled.
+ * Without it the race windows are nanoseconds wide and a broken ordering never shows. */
+static __thread uint64_t g_rng = 0;
+static __thread int g_poller = 0; /* set when this thread just read the adjustment (the writer) */
+static void maybe_stall(unsigned int one_in, uint64_t stall_ns)
+{{
+	if (!g_rng)
+		g_rng = real_ns() | 1;
+	g_rng ^= g_rng << 13;
+	g_rng ^= g_rng >> 7;
+	g_rng ^= g_rng << 17;
+	if (g_rng % one_in)
+		return;
+	const uint64_t until = real_ns() + stall_ns;
+	while (real_ns() < until) {{
+	}}
+}}
+static BOOL QueryPerformanceCounter(LARGE_INTEGER *c)
+{{
+	maybe_stall(16, 20000);
+	/* 10 counts per real ns = a 10 MHz QPC running 1000x fast */
+	c->QuadPart = (long long)(real_ns() * 10ULL);
+	if (g_poller) {{
+		/* the writer is descheduled right after sampling its rebase count */
+		g_poller = 0;
+		maybe_stall(1, 200000);
+	}} else {{
+		maybe_stall(16, 20000);
+	}}
+	return TRUE;
+}}
+static BOOL QueryPerformanceFrequency(LARGE_INTEGER *f)
+{{
+	f->QuadPart = (long long)FAKE_FREQ;
+	return TRUE;
+}}
+static void Sleep(DWORD ms) {{ (void)ms; }}
+static BOOL SwitchToThread(void) {{ return sched_yield() == 0; }}
+static BOOL InitOnceExecuteOnce(PINIT_ONCE o, PINIT_ONCE_FN fn, PVOID p, PVOID *ctx)
+{{
+	int expect = 0;
+	if (__atomic_compare_exchange_n(&o->state, &expect, 1, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)) {{
+		BOOL r = fn(o, p, ctx);
+		__atomic_store_n(&o->state, 2, __ATOMIC_SEQ_CST);
+		return r;
+	}}
+	while (__atomic_load_n(&o->state, __ATOMIC_SEQ_CST) != 2)
+		sched_yield();
+	return TRUE;
+}}
+static LONG InterlockedCompareExchange(LONG volatile *d, LONG x, LONG c)
+{{
+	LONG expect = c;
+	__atomic_compare_exchange_n(d, &expect, x, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
+	return expect;
+}}
+static LONG InterlockedExchange(LONG volatile *d, LONG v) {{ return __atomic_exchange_n(d, v, __ATOMIC_SEQ_CST); }}
+static LONG64 InterlockedIncrement64(LONG64 volatile *d)
+{{
+	const LONG64 v = __atomic_add_fetch(d, 1, __ATOMIC_SEQ_CST);
+	/* the writer's closing increment: stall before it releases the poller flag */
+	if ((v & 1) == 0)
+		maybe_stall(2, 50000);
+	return v;
+}}
+static BOOL WINAPI fake_get_adjustment(PDWORD64 adj, PDWORD64 inc, PBOOL disabled)
+{{
+	/* only the single poller calls this */
+	g_polls++;
+	g_poller = 1;
+	*adj = (g_polls & 1) ? FAKE_FREQ - FAKE_FREQ / 1000 : FAKE_FREQ + FAKE_FREQ / 1000;
+	*inc = FAKE_FREQ;
+	*disabled = FALSE;
+	return TRUE;
+}}
+static HMODULE GetModuleHandleW(const wchar_t *name)
+{{
+	static int present = 1;
+	return wcscmp(name, L"kernelbase.dll") == 0 ? (HMODULE)&present : NULL;
+}}
+static FARPROC GetProcAddress(HMODULE mod, const char *name)
+{{
+	(void)mod;
+	return strcmp(name, "GetSystemTimeAdjustmentPrecise") == 0 ? (FARPROC)fake_get_adjustment : NULL;
+}}
+uint64_t os_gettime_ns(void);
+"#,
+        util = util.display()
+    )
+}
+
+const THREADED_MAIN: &str = r#"
+#define THREADS 4
+#define SECONDS 2
+static uint64_t g_max = 0;
+static uint64_t g_violations = 0;
+static uint64_t g_worst = 0;
+static uint64_t g_calls = 0;
+static void *worker(void *arg)
+{
+	(void)arg;
+	const uint64_t end = real_ns() + SECONDS * 1000000000ULL;
+	uint64_t calls = 0;
+	while (real_ns() < end) {
+		for (int i = 0; i < 256; i++) {
+			const uint64_t before = __atomic_load_n(&g_max, __ATOMIC_SEQ_CST);
+			const uint64_t v = os_gettime_ns();
+			if (v < before) {
+				__atomic_add_fetch(&g_violations, 1, __ATOMIC_SEQ_CST);
+				uint64_t back = before - v, w = __atomic_load_n(&g_worst, __ATOMIC_SEQ_CST);
+				while (back > w && !__atomic_compare_exchange_n(&g_worst, &w, back, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)) {
+				}
+			}
+			uint64_t cur = __atomic_load_n(&g_max, __ATOMIC_SEQ_CST);
+			while (v > cur && !__atomic_compare_exchange_n(&g_max, &cur, v, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)) {
+			}
+			calls++;
+		}
+	}
+	__atomic_add_fetch(&g_calls, calls, __ATOMIC_SEQ_CST);
+	return NULL;
+}
+int main(void)
+{
+	pthread_t t[THREADS];
+	for (int i = 0; i < THREADS; i++)
+		pthread_create(&t[i], NULL, worker, NULL);
+	for (int i = 0; i < THREADS; i++)
+		pthread_join(t[i], NULL);
+	printf("violations=%llu worst_ns=%llu calls=%llu polls=%d seq_odd=%d polling=%ld\n",
+	       (unsigned long long)g_violations, (unsigned long long)g_worst, (unsigned long long)g_calls,
+	       g_polls, (int)(os_clk_seq & 1), (long)os_clk_polling);
+	return 0;
+}
+"#;
+
+fn threaded_field(out: &str, key: &str) -> u64 {
+    out.split_whitespace()
+        .find_map(|t| t.strip_prefix(key))
+        .and_then(|v| v.parse().ok())
+        .unwrap_or_else(|| panic!("issue 1372: threaded harness printed no `{key}`: {out}"))
+}
+
+#[test]
+fn no_thread_ever_reads_the_clock_backwards_across_a_rebase() {
+    let mut c = fake_win32_threaded();
+    c.push_str(&lifted_c());
+    c.push_str(THREADED_MAIN);
+    let dir = Scratch::new("threads");
+    let bin = compile(&dir, &c, &["-O2", "-pthread"]);
+    let out = String::from_utf8(
+        Command::new(&bin)
+            .output()
+            .expect("issue 1372: the threaded harness failed to execute")
+            .stdout,
+    )
+    .expect("utf-8");
+    eprintln!("issue 1372 threaded run: {out}");
+    let violations = threaded_field(&out, "violations=");
+    let polls = threaded_field(&out, "polls=");
+    let calls = threaded_field(&out, "calls=");
+    assert!(
+        polls > 500 && calls > 20_000,
+        "issue 1372: the threaded run exercised too little ({out}) -- it proves nothing"
+    );
+    assert_eq!(
+        violations, 0,
+        "issue 1372: a thread read os_gettime_ns() BELOW a value another thread had already \
+         returned ({out}) -- the counter must be read inside the validated sequence window"
+    );
+    assert!(
+        out.contains("seq_odd=0 polling=0"),
+        "issue 1372: the writer left the sequence odd or kept the poller flag: {out}"
     );
 }
