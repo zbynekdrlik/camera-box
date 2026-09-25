@@ -5673,7 +5673,8 @@ static void genlock_fill_stats(const obs_source_t *source, struct obs_genlock_st
 	 * the audio side is the hold minus the slew still owed (where the audio really sits). The hold,
 	 * mode and owed slew are written by the audio thread and read here unlocked, like the other
 	 * audio facets (aligned 64-bit, not torn on x86_64); a read between the hold and the slew
-	 * updates can show one sample as paired, never falsely degraded. */
+	 * updates can show one sample as paired -- in practice never falsely degraded (source order is
+	 * hold then slew; plain stores, no barrier). */
 	stats->audio_pairing_offset_ms =
 		source->genlock_audio_hold_mode == GENLOCK_AUDIO_HOLD_PENDING
 			? 0

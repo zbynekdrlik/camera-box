@@ -595,8 +595,8 @@ cp -a "\$MANIFEST" "\$MARKER_DIR/BUNDLE_MANIFEST.json"
 # (5a) issue 1367: the genlock MIN-LATENCY imag marker libobs reads (absent = fail OPEN), as the desktop
 #      user BEFORE the restart (7, which reuses IMAG_USER / IMAG_UID set here). Idempotent.
 IMAG_USER="\${SUDO_USER:-newlevel}"
-IMAG_UID="\$(id -u "\$IMAG_USER")"
-IMAG_HOME="\$(getent passwd "\$IMAG_USER" | cut -d: -f6)"; [ -n "\$IMAG_HOME" ] || { echo "#789 IMAG FAIL: no home directory for \$IMAG_USER (getent)" >&2; exit 4; }
+IMAG_UID="\$(id -u "\$IMAG_USER" 2>/dev/null || true)"; [ -n "\$IMAG_UID" ] || { echo "#789 IMAG FAIL: no such user \$IMAG_USER" >&2; exit 4; }
+IMAG_HOME="\$(getent passwd "\$IMAG_USER" | cut -d: -f6 || true)"; [ -n "\$IMAG_HOME" ] || { echo "#789 IMAG FAIL: no home directory for \$IMAG_USER (getent)" >&2; exit 4; }
 install -d -o "\$IMAG_USER" -g "\$IMAG_USER" "\$IMAG_HOME/.camera-box"
 install -o "\$IMAG_USER" -g "\$IMAG_USER" -m 0644 /dev/null "\$IMAG_HOME/.camera-box/genlock-min-latency"
 echo "  issue 1367: genlock min-latency box marker present (\$IMAG_HOME/.camera-box/genlock-min-latency)"

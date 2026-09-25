@@ -185,9 +185,10 @@ described here stay as they are.
   owed, `audio_applied_delay_ns`) − measured delay: mid-slew it reads how far the audio still trails
   (a one-frame re-time reads −33 ms at the start and walks to 0 over ~33 s; review round 2). That is
   honest and has two visible effects: the audit's half-frame `audio_health=` reads
-  PairingOffsetExceeded for the first ~16 s of every one-frame re-time, and a TWO-frame re-time
-  (a relock onto a much slower band, −66 ms) turns the LOCK widget DEGRADED (its 33 ms bound) for
-  ~33 s — shorter than the lock-alert watchdog's 2-pass confirm (a 5 min timer), so a legitimate
+  PairingOffsetExceeded for the first ~16 s of every one-frame re-time; a one-frame re-time can
+  also turn the LOCK widget DEGRADED (its strict 33 ms bound) for ~1–2 s at the slew start (the
+  settled residual on top of −33), and a TWO-frame re-time (a relock onto a much slower band,
+  −66 ms) for ~33 s — shorter than the lock-alert watchdog's 2-pass confirm (a 5 min timer), so a legitimate
   relock cannot page; read `audio_slew_ms=` on the audit line before treating either as a fault. It
   never observes where the audio samples actually sit, so a wrong placement, or a depth the rate
   servo walked, would still read 0. Real A/V proof stays with an end-to-end measurement (the
@@ -247,7 +248,9 @@ measured on its own, on every presenting tick from the re-latch on (review round
 gate reopens seconds after the slew starts, and the first seconds are the largest): while the audio
 walks onto the new hold it trails the video by ≤ 35.0 ms (rising) / 33.2 ms (sender restart) —
 bound `SLEW_MAX_AV_MS` = 40, the songplayer gate, and the peak must be ≥ 30 ms so the start is
-provably inside — for 990 ticks (33 s); the settled `|A/V| ≤ 5 ms` excludes those ticks. The bench's rate estimate converges on the TRUE
+provably inside — for 990 ticks (33 s); the settled `|A/V| ≤ 5 ms` excludes those ticks. The
+40 ms slew bound is proven for ONE-frame re-times only: a two-frame re-time trails by up to ~66 ms
+for ~26 s and has no bench scenario yet (a follow-up candidate). The bench's rate estimate converges on the TRUE
 drift by construction, so it ASSUMES drift is absorbed between placements (the real servo is
 proven by `src/asrc_bench.rs`). What it proves is that each placement lands on the live offset.
 
