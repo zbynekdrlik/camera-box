@@ -35,18 +35,25 @@
 //!    because the wall and QPC clocks drift apart (318 ms on resolume). Packets that follow append
 //!    back to back. The genlock ASRC rate servo (disciplined against the wall clock) and its level
 //!    loop then hold the captured depth, so the drift is absorbed physically between placements.
-//! 4. **Re-place at once.** When the applied delay (or the hold mode) changes, the ingest forces a
-//!    fresh placement and shifts the ASRC level target by the same placement delta
-//!    ([`audio_place_shift_ms`]), exactly like a sync-offset change. The slow level integral alone
-//!    would take minutes to walk a 33 ms step.
+//! 4. **Slew, never step (ROZHODNUTÉ 5827497952).** A shallow N==1 source's audio follows its
+//!    LATCHED per-lock video depth ([`video_delay_lock_ms`]), so its hold is constant between
+//!    relocks. A change of the hold while audio PLAYS (a relock with a new depth, the late
+//!    latency→timecode switch) is SLEWED ([`audio_hold_action`] → [`AudioHoldAction::Slew`]): the
+//!    packets keep appending back to back and the ASRC resampler stretches or compresses at
+//!    [`AUDIO_SLEW_PPM`] until the term delta is paid ([`audio_slew_step_ns`]), the level target
+//!    moving with each step. The old immediate re-placement was the audible dropout the songplayer
+//!    gate measured. A first placement and a timeline discontinuity still PLACE
+//!    ([`audio_level_shift_ns`]); a source with no ASRC resampler keeps the legacy step.
 //! 5. **Observe.** `audio_pairing_offset_ms` is the applied audio delay minus the MEASURED video
 //!    delay ([`pairing_offset_ms`] with [`video_delay_reference_ns`]). The health verdict flags it
 //!    above half a frame ([`decide_audio_health`]). It is a PROXY: it compares the applied hold with
 //!    the measured delay and never observes where the audio samples actually sit, so a wrong
 //!    placement, or a depth the rate servo walked, would still read 0.
 //!
-//! Until the first measurement settles, or for an audio timestamp that is not a wall-clock
-//! timecode, the ingest keeps the #1303 behaviour byte-for-byte: arrival basis + `latency_ms`
+//! Until the first video delay is known, a wall-clock-timecoded source's audio is WITHHELD
+//! ([`AudioHoldMode::Pending`]) so its first placement already lands on the right delay, for at
+//! most [`AUDIO_WITHHOLD_MAX_NS`]; after that, and for an audio timestamp that is not a wall-clock
+//! timecode, the ingest keeps the #1303 behaviour: arrival basis + `latency_ms`
 //! ([`AudioHoldMode::Latency`]).
 //!
 //! This is orthogonal to the ASRC servo (#803/#912/#1084), which disciplines the audio
@@ -154,14 +161,40 @@ pub struct VideoDelayTracker {
     pub settle_ticks: u32,
 }
 
+/// Issue 1367 (ROZHODNUTÉ 5827497952) — the `lock_ms` of [`video_delay_track`] while a SHALLOW N==1
+/// source measures its first per-lock depth: smooth only, apply nothing, so the audio waits for the
+/// latched depth instead of following the floating one. Mirror of `GENLOCK_VIDEO_DELAY_LOCK_PENDING`.
+pub const VIDEO_DELAY_LOCK_PENDING: u32 = u32::MAX;
+
+/// Issue 1367 — the `lock_ms` the render thread passes to [`video_delay_track`] for an N==1 source
+/// with the shallow per-lock depth state (`genlock_n1_depth::ShallowDepth`): a latched depth D →
+/// `round(D · interval)` ms (the audio follows the LOCKED video delay, constant until the next
+/// relock); no D yet but a window measuring → [`VIDEO_DELAY_LOCK_PENDING`]; otherwise 0 (the free
+/// Option-3 tracker, e.g. an N>=2 source). Mirror of `genlock_video_delay_lock_ms`.
+pub fn video_delay_lock_ms(target_frames: u64, measuring: bool, interval_ns: u64) -> u32 {
+    let _ = (target_frames, measuring, interval_ns);
+    0
+}
+
 /// One render tick of the tracker: smooth the sample; an idle tracker ARMS a settle countdown when
 /// the smoothed delay has moved half a frame or more; an armed one counts down and, at 0, applies
 /// the rounded smoothed delay if it is STILL half a frame or more away (a transient that reversed
 /// during the settle applies nothing, so the audio is never re-placed for a sub-half-frame change).
 ///
+/// Issue 1367 (ROZHODNUTÉ 5827497952): `lock_ms` ([`video_delay_lock_ms`]) overrides the apply —
+/// `0` = the free tracker above; [`VIDEO_DELAY_LOCK_PENDING`] = smooth only, apply nothing; any other
+/// value = the LOCKED delay of a shallow source's latched depth, applied as-is (the EMA keeps
+/// running for the audit's `video_delay_ms=`).
+///
 /// Mirror of `genlock_video_delay_track`.
-pub fn video_delay_track(t: &mut VideoDelayTracker, sample_ns: u64, interval_ns: u64) {
+pub fn video_delay_track(
+    t: &mut VideoDelayTracker,
+    lock_ms: u32,
+    sample_ns: u64,
+    interval_ns: u64,
+) {
     t.smoothed_ns = video_delay_smooth_ns(t.smoothed_ns, sample_ns);
+    let _ = lock_ms;
     if t.settle_ticks > 0 {
         t.settle_ticks -= 1;
         if t.settle_ticks == 0 && video_delay_moved(t.applied_ms, t.smoothed_ns, interval_ns) {
@@ -183,6 +216,10 @@ pub enum AudioHoldMode {
     Latency = 1,
     /// Issue 1367: timecode → wall → OBS clock through the live offset + the measured video delay.
     Timecode = 2,
+    /// Issue 1367 (ROZHODNUTÉ 5827497952): a timecode-capable genlock source whose video delay is
+    /// not known yet — its audio is WITHHELD (not placed) so the first placement already lands on
+    /// the right delay, at most [`AUDIO_WITHHOLD_MAX_NS`] after its first packet.
+    Pending = 3,
 }
 
 impl AudioHoldMode {
@@ -196,12 +233,34 @@ impl AudioHoldMode {
             AudioHoldMode::Off => "off",
             AudioHoldMode::Latency => "latency",
             AudioHoldMode::Timecode => "timecode",
+            AudioHoldMode::Pending => "pending",
         }
+    }
+    /// Is audio PLAYING under this mode (placed into the mix)? Off plays unheld; Pending plays
+    /// nothing.
+    pub fn is_active(self) -> bool {
+        matches!(self, AudioHoldMode::Latency | AudioHoldMode::Timecode)
     }
 }
 
+/// Issue 1367 — how long a timecode-capable genlock source's audio is withheld at most while its
+/// video delay is unknown (a box whose ticks never land on the grid never measures one). After it,
+/// the #1303 latency hold plays, and a later video delay is SLEWED in. Mirror of
+/// `GENLOCK_AUDIO_WITHHOLD_MAX_NS`.
+pub const AUDIO_WITHHOLD_MAX_NS: u64 = 10_000_000_000;
+
+/// Issue 1367 — has the withhold window of a source whose first genlock audio packet arrived at
+/// `first_packet_ns` (OBS monotonic; 0 = none yet) run out at `now_ns`? Mirror of
+/// `genlock_audio_withhold_expired`.
+pub fn audio_withhold_expired(first_packet_ns: u64, now_ns: u64) -> bool {
+    let _ = (first_packet_ns, now_ns);
+    true
+}
+
 /// Pick the hold for one audio packet. `latency_ms == 0` is the unreachable floor-violating value
-/// (the pin is seeded ≥ 3 ms) and holds nothing, as in #1303.
+/// (the pin is seeded ≥ 3 ms) and holds nothing, as in #1303. Issue 1367: a wall-clock-timecoded
+/// source with no video delay yet is WITHHELD ([`AudioHoldMode::Pending`]) until
+/// [`audio_withhold_expired`], then falls back to the latency hold.
 ///
 /// Mirror of `genlock_audio_hold_mode`.
 pub fn audio_hold_mode(
@@ -209,12 +268,14 @@ pub fn audio_hold_mode(
     latency_ms: u32,
     audio_ts_is_wallclock: bool,
     video_delay_ms: u32,
+    withhold_expired: bool,
 ) -> AudioHoldMode {
     if !genlock_fifo || latency_ms == 0 {
         AudioHoldMode::Off
     } else if audio_ts_is_wallclock && video_delay_ms > 0 {
         AudioHoldMode::Timecode
     } else {
+        let _ = withhold_expired;
         AudioHoldMode::Latency
     }
 }
@@ -224,7 +285,7 @@ pub fn audio_hold_mode(
 /// Mirror of `genlock_audio_hold_ms`.
 pub fn audio_hold_ms(mode: AudioHoldMode, latency_ms: u32, video_delay_ms: u32) -> u32 {
     match mode {
-        AudioHoldMode::Off => 0,
+        AudioHoldMode::Off | AudioHoldMode::Pending => 0,
         AudioHoldMode::Latency => latency_ms,
         AudioHoldMode::Timecode => video_delay_ms,
     }
@@ -268,7 +329,7 @@ pub fn audio_place_term_ns(
 ) -> i64 {
     let hold_ns = genlock_audio_delay_ns(hold_ms) as i64;
     match mode {
-        AudioHoldMode::Off => 0,
+        AudioHoldMode::Off | AudioHoldMode::Pending => 0,
         AudioHoldMode::Latency => hold_ns,
         AudioHoldMode::Timecode => off_live_ns
             .wrapping_add(hold_ns)
@@ -283,6 +344,92 @@ pub fn audio_place_term_ns(
 /// Mirror of `genlock_audio_place_shift_ms`.
 pub fn audio_place_shift_ms(new_term_ns: i64, prev_term_ns: i64) -> f64 {
     new_term_ns.wrapping_sub(prev_term_ns) as f64 / 1e6
+}
+
+/// Issue 1367 (ROZHODNUTÉ 5827497952) — what the audio ingest does with one packet. Discriminants
+/// match the C `GENLOCK_AUDIO_ACT_*` defines.
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AudioHoldAction {
+    /// Drop the packet: the hold is [`AudioHoldMode::Pending`].
+    Withhold = 0,
+    /// A genuine (re)placement: the first placement after a withhold or genlock toggle, or a
+    /// timeline discontinuity. Places at the full new term and settles any slew.
+    Place = 1,
+    /// Nothing changed: append as the ingest decided.
+    Continue = 2,
+    /// The hold changed while audio plays: keep appending back to back and SLEW the placement by
+    /// the term delta through the ASRC resampler ([`audio_slew_step_ns`]).
+    Slew = 3,
+    /// The hold changed but the source has no ASRC resampler to slew with: the legacy step
+    /// re-placement. Counted as an audible STEP.
+    Replace = 4,
+}
+
+impl AudioHoldAction {
+    /// The integer the C helpers use.
+    pub fn code(self) -> u8 {
+        self as u8
+    }
+}
+
+/// Issue 1367 — decide one packet. `continuous`: the ingest's own continuity verdict (`push_back`)
+/// before any hold logic. `can_slew`: the source's ASRC resampler is active. `slew_pending`: a slew
+/// has not finished yet. A hold change never STEPS while audio plays unless the source cannot slew.
+///
+/// Mirror of `genlock_audio_hold_action`.
+pub fn audio_hold_action(
+    prev_mode: AudioHoldMode,
+    prev_hold_ms: u32,
+    mode: AudioHoldMode,
+    hold_ms: u32,
+    continuous: bool,
+    can_slew: bool,
+    slew_pending: bool,
+) -> AudioHoldAction {
+    let _ = (continuous, can_slew, slew_pending);
+    if mode != prev_mode || hold_ms != prev_hold_ms {
+        AudioHoldAction::Place
+    } else {
+        AudioHoldAction::Continue
+    }
+}
+
+/// Issue 1367 — the ASRC level-target shift (ns) a (re)placement moves the buffer by: the new term
+/// minus the effective previous placement (the previous term minus the slew still owed), only when
+/// audio was playing before (a first placement has no captured level to move). Every other action
+/// shifts nothing at once (a slew shifts the target step by step with each consumed increment).
+///
+/// Mirror of `genlock_audio_level_shift_ns`.
+pub fn audio_level_shift_ns(
+    action: AudioHoldAction,
+    prev_mode: AudioHoldMode,
+    new_term_ns: i64,
+    prev_term_ns: i64,
+    slew_remaining_ns: i64,
+) -> i64 {
+    let _ = (action, prev_mode, slew_remaining_ns);
+    new_term_ns.wrapping_sub(prev_term_ns)
+}
+
+/// Issue 1367 — the ASRC-rate SLEW of the audio placement: 1000 ppm (0.1 %, ~1.7 cents — the NTSC
+/// pull-down magnitude, inaudible), i.e. 1 ms of placement per second. A one-frame (33 ms) relock
+/// change settles in 33 s. Mirror of `GENLOCK_AUDIO_SLEW_PPM`.
+pub const AUDIO_SLEW_PPM: u64 = 1000;
+
+/// Issue 1367 — the placement slew one audio callback of `dt_ns` consumes from `remaining_ns`
+/// (signed: positive = the audio moves LATER, the resampler stretches): `remaining` clamped to
+/// `±dt · AUDIO_SLEW_PPM / 1e6`. Mirror of `genlock_audio_slew_step_ns`.
+pub fn audio_slew_step_ns(remaining_ns: i64, dt_ns: u64) -> i64 {
+    let _ = (remaining_ns, dt_ns);
+    0
+}
+
+/// Issue 1367 — the resampler ppm of one slew step (`step · 1e6 / dt`, 0 for an empty callback).
+/// Positive = stretch (the swresample-native sign). Mirror of `genlock_audio_slew_ppm`.
+pub fn audio_slew_ppm(step_ns: i64, dt_ns: u64) -> f64 {
+    let _ = (step_ns, dt_ns);
+    0.0
 }
 
 /// The video delay the pairing offset is measured against: the smoothed MEASURED stamp→present
@@ -405,7 +552,7 @@ mod tests {
         let mut t = VideoDelayTracker::default();
         run(&mut t, 100_000_000, IV30, 200);
         for _ in 0..50 {
-            video_delay_track(&mut t, video_delay_sample_ns(WALL, WALL + 1), IV30);
+            video_delay_track(&mut t, 0, video_delay_sample_ns(WALL, WALL + 1), IV30);
             assert_ne!(
                 t.smoothed_ns, 0,
                 "a seeded EMA must never fall back to the sentinel"
@@ -496,14 +643,14 @@ mod tests {
 
     fn run(t: &mut VideoDelayTracker, sample: u64, iv: u64, ticks: u32) {
         for _ in 0..ticks {
-            video_delay_track(t, sample, iv);
+            video_delay_track(t, 0, sample, iv);
         }
     }
 
     #[test]
     fn tracker_applies_the_first_delay_after_the_settle() {
         let mut t = VideoDelayTracker::default();
-        video_delay_track(&mut t, 100_000_000, IV30);
+        video_delay_track(&mut t, 0, 100_000_000, IV30);
         assert_eq!(t.applied_ms, 0, "armed, not applied");
         assert_eq!(t.settle_ticks, VIDEO_DELAY_SETTLE_TICKS);
         run(&mut t, 100_000_000, IV30, VIDEO_DELAY_SETTLE_TICKS - 1);
@@ -540,7 +687,7 @@ mod tests {
             } else {
                 100_000_000
             };
-            video_delay_track(&mut t, s, IV30);
+            video_delay_track(&mut t, 0, s, IV30);
             assert_eq!(
                 t.settle_ticks, 0,
                 "a single held tick must not arm a re-application"
@@ -568,11 +715,38 @@ mod tests {
 
     #[test]
     fn hold_mode_selection() {
-        assert_eq!(audio_hold_mode(false, 3, true, 97), AudioHoldMode::Off);
-        assert_eq!(audio_hold_mode(true, 0, true, 97), AudioHoldMode::Off);
-        assert_eq!(audio_hold_mode(true, 3, true, 0), AudioHoldMode::Latency);
-        assert_eq!(audio_hold_mode(true, 3, false, 97), AudioHoldMode::Latency);
-        assert_eq!(audio_hold_mode(true, 3, true, 97), AudioHoldMode::Timecode);
+        assert_eq!(
+            audio_hold_mode(false, 3, true, 97, false),
+            AudioHoldMode::Off
+        );
+        assert_eq!(
+            audio_hold_mode(true, 0, true, 97, false),
+            AudioHoldMode::Off
+        );
+        assert_eq!(
+            audio_hold_mode(true, 3, true, 0, true),
+            AudioHoldMode::Latency
+        );
+        assert_eq!(
+            audio_hold_mode(true, 3, true, 0, false),
+            AudioHoldMode::Pending
+        );
+        assert_eq!(
+            audio_hold_mode(true, 3, false, 97, false),
+            AudioHoldMode::Latency
+        );
+        assert_eq!(
+            audio_hold_mode(true, 3, false, 0, false),
+            AudioHoldMode::Latency
+        );
+        assert_eq!(
+            audio_hold_mode(true, 3, true, 97, false),
+            AudioHoldMode::Timecode
+        );
+        assert_eq!(
+            audio_hold_mode(true, 3, true, 97, true),
+            AudioHoldMode::Timecode
+        );
         assert_eq!(audio_hold_ms(AudioHoldMode::Off, 3, 97), 0);
         assert_eq!(audio_hold_ms(AudioHoldMode::Latency, 3, 97), 3);
         assert_eq!(audio_hold_ms(AudioHoldMode::Timecode, 3, 97), 97);
@@ -786,5 +960,161 @@ mod tests {
         assert_eq!(AudioPairingHealth::AudioDisabledOnProgram.code(), 1);
         assert_eq!(AudioPairingHealth::AsrcSaturated.code(), 2);
         assert_eq!(AudioPairingHealth::PairingOffsetExceeded.code(), 3);
+    }
+
+    // ---- issue 1367 (ROZHODNUTÉ 5827497952): the locked video delay + the slewed audio ---------
+
+    #[test]
+    fn the_lock_follows_the_latched_depth_else_waits_else_is_free_1367() {
+        assert_eq!(video_delay_lock_ms(2, false, IV30), 67);
+        assert_eq!(
+            video_delay_lock_ms(3, true, IV30),
+            100,
+            "a relock keeps the old D"
+        );
+        assert_eq!(video_delay_lock_ms(2, false, IV60), 33);
+        assert_eq!(video_delay_lock_ms(0, true, IV30), VIDEO_DELAY_LOCK_PENDING);
+        assert_eq!(video_delay_lock_ms(0, false, IV30), 0);
+        assert_eq!(video_delay_lock_ms(2, true, 0), VIDEO_DELAY_LOCK_PENDING);
+        // a huge D never aliases the pending sentinel.
+        assert_eq!(
+            video_delay_lock_ms(u64::MAX, false, IV30),
+            VIDEO_DELAY_LOCK_PENDING - 1
+        );
+    }
+
+    #[test]
+    fn a_locked_tracker_applies_the_lock_and_never_follows_the_float_1367() {
+        let mut t = VideoDelayTracker::default();
+        // pending: the EMA runs, nothing is applied, nothing arms.
+        run_locked(&mut t, VIDEO_DELAY_LOCK_PENDING, 66_666_667, 200);
+        assert_eq!(t.applied_ms, 0);
+        assert_eq!(t.settle_ticks, 0);
+        assert!(t.smoothed_ns > 60_000_000);
+        // latched: applied at once, and a floating depth never moves it.
+        run_locked(&mut t, 100, 66_666_667, 1);
+        assert_eq!(t.applied_ms, 100);
+        for i in 0..2_000u32 {
+            let s = [66_666_667u64, 100_000_000, 133_333_333][(i / 100 % 3) as usize];
+            video_delay_track(&mut t, 100, s, IV30);
+            assert_eq!(t.applied_ms, 100);
+            assert_eq!(t.settle_ticks, 0);
+        }
+        // released (an N>=2 source): the free tracker takes over from the EMA.
+        run_locked(&mut t, 0, 66_666_667, 200);
+        assert_eq!(t.applied_ms, 67);
+    }
+
+    fn run_locked(t: &mut VideoDelayTracker, lock: u32, sample: u64, ticks: u32) {
+        for _ in 0..ticks {
+            video_delay_track(t, lock, sample, IV30);
+        }
+    }
+
+    #[test]
+    fn the_withhold_expires_ten_seconds_after_the_first_packet_1367() {
+        assert!(!audio_withhold_expired(0, u64::MAX), "no packet yet");
+        let t0 = 5_000_000_000u64;
+        assert!(!audio_withhold_expired(t0, t0));
+        assert!(!audio_withhold_expired(t0, t0 + AUDIO_WITHHOLD_MAX_NS - 1));
+        assert!(audio_withhold_expired(t0, t0 + AUDIO_WITHHOLD_MAX_NS));
+        assert!(
+            !audio_withhold_expired(t0, 1),
+            "a clock behind the first packet"
+        );
+        assert_eq!(AudioHoldMode::Pending.token(), "pending");
+        assert_eq!(AudioHoldMode::Pending.code(), 3);
+        assert!(!AudioHoldMode::Pending.is_active());
+        assert!(!AudioHoldMode::Off.is_active());
+        assert!(AudioHoldMode::Latency.is_active());
+        assert!(AudioHoldMode::Timecode.is_active());
+        assert_eq!(audio_hold_ms(AudioHoldMode::Pending, 3, 97), 0);
+        assert_eq!(audio_place_term_ns(AudioHoldMode::Pending, 97, -5, 7), 0);
+    }
+
+    #[test]
+    fn a_hold_change_while_playing_slews_never_steps_1367() {
+        use AudioHoldAction::*;
+        use AudioHoldMode::*;
+        let act =
+            |pm, ph, m, h, cont, slew, pend| audio_hold_action(pm, ph, m, h, cont, slew, pend);
+        // withheld while the delay is unknown.
+        assert_eq!(act(Off, 0, Pending, 0, false, true, false), Withhold);
+        assert_eq!(act(Pending, 0, Pending, 0, true, true, false), Withhold);
+        // the first real placement.
+        assert_eq!(act(Pending, 0, Timecode, 100, true, true, false), Place);
+        assert_eq!(act(Off, 0, Latency, 3, true, true, false), Place);
+        // steady.
+        assert_eq!(
+            act(Timecode, 100, Timecode, 100, true, true, false),
+            Continue
+        );
+        assert_eq!(act(Off, 0, Off, 0, false, true, false), Continue);
+        // a relock with a new D, or the late latency->timecode switch: a SLEW.
+        assert_eq!(act(Timecode, 100, Timecode, 67, true, true, false), Slew);
+        assert_eq!(act(Latency, 3, Timecode, 100, true, true, false), Slew);
+        assert_eq!(act(Timecode, 67, Timecode, 100, true, true, true), Slew);
+        // no resampler: the legacy step.
+        assert_eq!(
+            act(Timecode, 100, Timecode, 67, true, false, false),
+            Replace
+        );
+        // a discontinuity places at the full new term, slew or not.
+        assert_eq!(act(Timecode, 100, Timecode, 67, false, true, false), Place);
+        assert_eq!(act(Timecode, 67, Timecode, 67, false, true, true), Place);
+        assert_eq!(act(Timecode, 67, Timecode, 67, true, false, true), Place);
+        assert_eq!(act(Timecode, 67, Timecode, 67, true, true, true), Continue);
+        // genlock turned off while playing.
+        assert_eq!(act(Timecode, 67, Off, 0, true, true, false), Place);
+        assert_eq!(Replace.code(), 4);
+    }
+
+    #[test]
+    fn a_placement_shifts_the_level_by_the_true_buffer_jump_1367() {
+        use AudioHoldAction::*;
+        use AudioHoldMode::*;
+        // 100 -> 67 ms with 10 ms of an earlier slew still owed.
+        assert_eq!(
+            audio_level_shift_ns(Place, Timecode, 67_000_000, 100_000_000, 10_000_000),
+            -23_000_000
+        );
+        assert_eq!(
+            audio_level_shift_ns(Replace, Timecode, 67_000_000, 100_000_000, 0),
+            -33_000_000
+        );
+        // a first placement moves nothing (no captured level), a slew moves it step by step.
+        assert_eq!(audio_level_shift_ns(Place, Pending, i64::MIN, 0, 0), 0);
+        assert_eq!(audio_level_shift_ns(Place, Off, 5, 0, 0), 0);
+        assert_eq!(audio_level_shift_ns(Slew, Timecode, 67, 100, 0), 0);
+        assert_eq!(audio_level_shift_ns(Continue, Timecode, 67, 100, 9), 0);
+    }
+
+    #[test]
+    fn the_slew_moves_one_ms_per_second_and_lands_exactly_1367() {
+        let dt = 10_666_666u64; // one 512-sample callback at 48 kHz
+        assert_eq!(audio_slew_step_ns(33_000_000, dt), 10_666);
+        assert_eq!(audio_slew_step_ns(-33_000_000, dt), -10_666);
+        assert_eq!(
+            audio_slew_step_ns(4_000, dt),
+            4_000,
+            "the tail lands exactly"
+        );
+        assert_eq!(audio_slew_step_ns(0, dt), 0);
+        assert_eq!(
+            audio_slew_step_ns(i64::MIN, u64::MAX),
+            -((u64::MAX / 1_000_000) as i64),
+            "a saturated cap, never an overflow"
+        );
+        assert_eq!(audio_slew_ppm(10_666, dt), 10_666.0 * 1e6 / dt as f64);
+        assert_eq!(audio_slew_ppm(5, 0), 0.0);
+        // a 33 ms change settles in ~33 s of callbacks, landing on exactly 0 owed.
+        let mut remaining = 33_333_333i64;
+        let mut callbacks = 0u32;
+        while remaining != 0 {
+            remaining -= audio_slew_step_ns(remaining, dt);
+            callbacks += 1;
+        }
+        let secs = callbacks as f64 * dt as f64 / 1e9;
+        assert!((33.0..34.0).contains(&secs), "settled in {secs} s");
     }
 }

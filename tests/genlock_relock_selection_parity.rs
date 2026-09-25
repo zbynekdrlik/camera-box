@@ -24,7 +24,9 @@ use camera_box::genlock_backlog::{
     relock_acquire_should_hold, relock_anchor_age_ns, relock_select_nearest, should_converge_phase,
 };
 use camera_box::genlock_n1_depth::{
-    n1_shed_due, n1_tick_is_on_grid, n1_tick_on_grid, n1_tick_wall_ns, should_hold_n1_phase,
+    n1_shallow_gap_is_relock, n1_shallow_governs, n1_shallow_hold_due, n1_shallow_shed_due,
+    n1_shallow_target_frames, n1_shallow_track, n1_shed_due, n1_tick_is_on_grid, n1_tick_on_grid,
+    n1_tick_wall_ns, should_hold_n1_phase, ShallowDepth,
 };
 use std::fs;
 use std::path::PathBuf;
@@ -288,6 +290,8 @@ fn converge_defines() -> String {
         "GENLOCK_N1_PIN_FRAME_TOLERANCE_NS",
         "GENLOCK_N1_DEEP_MARGIN_FRAMES",
         "GENLOCK_N1_ON_GRID_NS",
+        "GENLOCK_N1_SHALLOW_SETTLE_TICKS",
+        "GENLOCK_N1_SHALLOW_RELOCK_GAP_NS",
     ]
     .iter()
     .map(|name| lift_define(name))
@@ -1082,4 +1086,171 @@ fn c_n1_tick_is_on_grid_matches_the_rust_authority_1367() {
         ons > 0 && ons < vs.len(),
         "both outcomes must be exercised: {ons}"
     );
+}
+
+/// issue 1367 (ROZHODNUTÉ 5827497952) — the SHALLOW per-lock depth: the lifted
+/// `genlock_n1_shallow_*` helpers (inside the same contiguous N==1 block) must match
+/// [`camera_box::genlock_n1_depth`] on the latch target + cap, the relock gap, the governs guard, the
+/// shed and hold halves at every edge, and a tick-by-tick `genlock_n1_shallow_track` sequence (a
+/// latch, a constant D, a relock that finds a deeper floor, an N>=2 reset, off-grid ticks, the
+/// min-latency cap).
+#[test]
+fn c_n1_shallow_depth_matches_the_rust_authority_1367() {
+    let i30 = 33_333_333u64;
+    let w = 1_000_000_000_000u64;
+    let targets: [(u64, u64, bool); 8] = [
+        (1, 1, false),
+        (1, 2, false),
+        (1, 0, false),
+        (30, 1, false),
+        (1, 2, true),
+        (1, 1, true),
+        (u64::MAX, 0, false),
+        (3, u64::MAX, true),
+    ];
+    let gaps: [u64; 5] = [i30, 999_999_999, 1_000_000_000, 3_000_000_000, 0];
+    let governs: [(u64, u64, u32, u64); 6] = [
+        (2, i30, 3, i30),
+        (0, i30, 3, i30),
+        (2, i30, 3, 0),
+        (31, i30, 987, i30),
+        (31, 29 * i30, 987, i30),
+        (3, 2 * i30, 100, i30),
+    ];
+    let mut sheds = Vec::new();
+    let mut holds = Vec::new();
+    for step in 0..120u64 {
+        let age = i30 / 2 + step * (5 * i30 / 120);
+        for (target, latency, floor) in
+            [(3u64, 3u32, i30), (2, 3, i30), (0, 3, i30), (31, 987, i30)]
+        {
+            for ticks in [29u64, 30] {
+                sheds.push((w, w - age, floor, latency, i30, target, ticks));
+                holds.push((w, w - age, floor, latency, i30, target, ticks));
+            }
+        }
+    }
+    sheds.push((w, 0, i30, 3, i30, 3, 100)); // an unlocked boundary never sheds
+                                             // (n1, relock, on_grid, floor_frames, base, min_latency) per tick.
+    let mut seq: Vec<(bool, bool, bool, u64, u64, bool)> = Vec::new();
+    for k in 0..110u64 {
+        seq.push((
+            true,
+            k == 0,
+            k % 11 != 5,
+            1 + u64::from(k % 7 == 3),
+            1,
+            false,
+        ));
+    }
+    for k in 0..95u64 {
+        seq.push((true, k == 0, true, 2, 1, false));
+    }
+    seq.push((false, false, true, 1, 1, false));
+    for k in 0..92u64 {
+        seq.push((true, k == 0, true, 3, 1, true));
+    }
+
+    let mut body = String::new();
+    for (b, f, m) in &targets {
+        body.push_str(&format!(
+            "    {{ bool cap = false; unsigned long long d = (unsigned long long)genlock_n1_shallow_target_frames({b}ULL, {f}ULL, {}, &cap); printf(\"%llu %d\\n\", d, cap ? 1 : 0); }}\n",
+            *m as i32
+        ));
+    }
+    for g in &gaps {
+        body.push_str(&format!(
+            "    printf(\"%d\\n\", genlock_n1_shallow_gap_is_relock({g}ULL) ? 1 : 0);\n"
+        ));
+    }
+    for (t, f, l, iv) in &governs {
+        body.push_str(&format!(
+            "    printf(\"%d\\n\", genlock_n1_shallow_governs({t}ULL, {f}ULL, {l}u, {iv}ULL) ? 1 : 0);\n"
+        ));
+    }
+    for (tw, b, f, l, iv, t, k) in &sheds {
+        body.push_str(&format!(
+            "    printf(\"%d\\n\", genlock_n1_shallow_shed_due({tw}ULL, {b}ULL, {f}ULL, {l}u, {iv}ULL, {t}ULL, {k}ULL) ? 1 : 0);\n"
+        ));
+    }
+    for (tw, h, f, l, iv, t, k) in &holds {
+        body.push_str(&format!(
+            "    printf(\"%d\\n\", genlock_n1_shallow_hold_due({tw}ULL, {h}ULL, {f}ULL, {l}u, {iv}ULL, {t}ULL, {k}ULL) ? 1 : 0);\n"
+        ));
+    }
+    body.push_str("    { uint64_t tf = 0, fm = 0; uint32_t wt = 0; bool me = false, ca = false;\n");
+    for (n1, rl, og, ff, base, ml) in &seq {
+        body.push_str(&format!(
+            "      {{ bool l = genlock_n1_shallow_track(&tf, &fm, &wt, &me, &ca, {}, {}, {}, {ff}ULL, {base}ULL, {}); printf(\"%d %llu %llu %u %d %d\\n\", l ? 1 : 0, (unsigned long long)tf, (unsigned long long)fm, (unsigned)wt, me ? 1 : 0, ca ? 1 : 0); }}\n",
+            *n1 as i32, *rl as i32, *og as i32, *ml as i32
+        ));
+    }
+    body.push_str("    }\n");
+    let c_out = compile_and_run_n1_block("genlock_n1_shallow_parity_1367", &body);
+
+    let mut want: Vec<String> = Vec::new();
+    for (b, f, m) in &targets {
+        let (d, cap) = n1_shallow_target_frames(*b, *f, *m);
+        want.push(format!("{d} {}", cap as i32));
+    }
+    for g in &gaps {
+        want.push((n1_shallow_gap_is_relock(*g) as i32).to_string());
+    }
+    for (t, f, l, iv) in &governs {
+        want.push((n1_shallow_governs(*t, *f, *l, *iv) as i32).to_string());
+    }
+    let mut fired = (0usize, 0usize);
+    for (tw, b, f, l, iv, t, k) in &sheds {
+        let r = n1_shallow_shed_due(*tw, *b, *f, *l, *iv, *t, *k);
+        fired.0 += usize::from(r);
+        want.push((r as i32).to_string());
+    }
+    for (tw, h, f, l, iv, t, k) in &holds {
+        let r = n1_shallow_hold_due(*tw, *h, *f, *l, *iv, *t, *k);
+        fired.1 += usize::from(r);
+        want.push((r as i32).to_string());
+    }
+    let mut s = ShallowDepth::default();
+    let mut latches = 0;
+    for (n1, rl, og, ff, base, ml) in &seq {
+        let l = n1_shallow_track(&mut s, *n1, *rl, *og, *ff, *base, *ml);
+        latches += usize::from(l);
+        want.push(format!(
+            "{} {} {} {} {} {}",
+            l as i32,
+            s.target_frames,
+            s.floor_max_frames,
+            s.window_ticks,
+            s.measuring as i32,
+            s.capped as i32
+        ));
+    }
+    let diffs: Vec<String> = c_out
+        .iter()
+        .zip(&want)
+        .enumerate()
+        .filter(|(_, (c, r))| c != r)
+        .map(|(k, (c, r))| format!("  line {k}: C `{c}` vs Rust `{r}`"))
+        .take(12)
+        .collect();
+    assert_eq!(
+        c_out.len(),
+        want.len(),
+        "issue 1367: harness printed the wrong count"
+    );
+    assert!(
+        diffs.is_empty(),
+        "issue 1367: the vendored C shallow-depth helpers DIVERGED from the Tier-0 Rust authority:\n{}",
+        diffs.join("\n")
+    );
+    // both outcomes of every decision, and at least two latches (start + relock) plus the capped one.
+    assert!(
+        fired.0 > 0 && fired.0 < sheds.len(),
+        "shed vectors one-sided: {fired:?}"
+    );
+    assert!(
+        fired.1 > 0 && fired.1 < holds.len(),
+        "hold vectors one-sided: {fired:?}"
+    );
+    assert!(latches >= 3, "the track sequence latched {latches} times");
 }

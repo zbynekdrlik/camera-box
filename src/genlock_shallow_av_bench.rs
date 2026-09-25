@@ -1,0 +1,390 @@
+//! Issue 1367 (ROZHODNUTÉ 5827497952) — the two-clock A/V bench for a SHALLOW genlocked source with
+//! jittery arrivals: the per-lock latched video depth + the slewed audio.
+//!
+//! A test-only child of `genlock_audio_pairing_bench` (declared there with `#[path]`): the audio leg
+//! is that bench's [`AudioLeg`] (the production ingest / withhold / slew decisions + the first-order
+//! ASRC), and the VIDEO is the real N==1 port of the C `genlock_release_tick`,
+//! `crate::genlock_grid_bench::Fifo` — the same decisions the issue-1355 grid bench runs, now with
+//! the shallow rule ([`crate::genlock_n1_depth::n1_shallow_track`] / `_hold_due` / `_shed_due` and the
+//! drain suppression).
+//!
+//! ## Model
+//!
+//! - **Sender** (a cg feed at a 3 ms pin, SongPlayer / cg OBS): one frame per per-second grid slot,
+//!   stamped with the slot; it ARRIVES `lag` later, `lag` uniform in the scenario's band (the live
+//!   arrival floors: resolume `NDI test` ~31 ms, `sp-slow_video` ~64 ms, strih-lx `CG-obs` 33-67 ms),
+//!   delivered in order. Optional DISTURBANCES: a lost frame (a stamp gap) and a late spike (+45 ms on
+//!   one frame, in order, so the frames behind it wait too). A sender restart = 3 s of silence.
+//! - **Receiver**: render ticks on the grid, each scheduled on its slot and run up to a few ms late
+//!   (half-normal 0.3 ms + a rare 5-20 ms tail); the FIFO ticks at the processing wall with the
+//!   scheduled instant (the C `wall_now` + `video_time`). The audio's video delay is the production
+//!   tracker under [`video_delay_lock_ms`] (the latched D, pending while the first window measures).
+//! - **Audio**: one packet per tick timecoded at the sender's emit instant (1-4 ms before arrival).
+//! - **Two clocks**: `mono = wall + off(t)`, `off` walks 300 ms per hour (resolume's drift).
+//!
+//! ## What it proves (per floor, one hour, an OBS restart and a sender restart)
+//!
+//! - the depth latches once per lock at `max(base, floor_max) + 1` and the presented depth stays ON it
+//!   (a constant video delay) — on a clean feed on every tick after the lock settles;
+//! - the audio is placed once per (re)start, straight onto the latched delay: 0 slews, 0 steps;
+//! - `|A/V| ≤ 5 ms` on every gated tick;
+//! - no shed / hold / drain / underrun churn: zero corrections on a clean feed, and at most one
+//!   correction per injected disturbance on a disturbed one.
+//!
+//! The anti-tautology run switches the rule off (`BenchConfig::shallow_depth_rule = false`, the
+//! pre-rule conveyor): on the disturbed feed its depth random-walks off the target and the free
+//! tracker re-times the audio.
+
+use super::*;
+use crate::genlock_grid::grid_next_boundary_ns;
+use crate::genlock_grid_bench::{tick_on_grid, BenchConfig, Fifo, GridModel, TickCounters};
+use crate::genlock_n1_depth::n1_tick_wall_ns;
+use std::collections::VecDeque;
+
+/// The wall-vs-mono drift over the hour (resolume's `wall_qpc_drift_ms`).
+const DRIFT_PER_HOUR_NS: i64 = 300_000_000;
+/// A late spike adds this to one frame's arrival.
+const LATE_SPIKE_NS: u64 = 45_000_000;
+
+#[derive(Clone, Copy, Debug)]
+struct Scenario {
+    lag_min_ns: u64,
+    lag_max_ns: u64,
+    /// Expected latched depth, frames.
+    want_depth: u64,
+    /// Disturbances per million frames (0 = a clean feed).
+    drop_ppm: u64,
+    late_ppm: u64,
+    rule: bool,
+    min_latency_box: bool,
+}
+
+impl Scenario {
+    fn clean(lag_min_ms: u64, lag_max_ms: u64, want_depth: u64) -> Scenario {
+        Scenario {
+            lag_min_ns: lag_min_ms * 1_000_000,
+            lag_max_ns: lag_max_ms * 1_000_000,
+            want_depth,
+            drop_ppm: 0,
+            late_ppm: 0,
+            rule: true,
+            min_latency_box: false,
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct Run {
+    /// Latched depths, one per lock (start, sender restart, OBS restart).
+    latched: Vec<u64>,
+    capped: bool,
+    /// Presenting ticks in the gated (settled) windows, and how many sat at the latched depth.
+    gated_presents: u64,
+    at_depth: u64,
+    /// Presented-depth changes between consecutive gated presenting ticks.
+    depth_changes: u64,
+    /// Gated presents per presented depth (frames).
+    depth_hist: std::collections::BTreeMap<u64, u64>,
+    max_abs_av_ms: f64,
+    av_ticks: u64,
+    corrections: u64,
+    drains: u64,
+    underruns: u64,
+    late_holds: u64,
+    disturbances: u64,
+    places: u32,
+    slews: u32,
+    steps: u32,
+}
+
+fn run(sc: Scenario) -> Run {
+    const DURATION_S: u64 = 3600;
+    const OBS_RESTART_S: u64 = 1200;
+    const SENDER_RESTART_S: u64 = 2400;
+    const SENDER_SILENT_S: u64 = 3;
+    // the gate waits for the lock window (3 s), the move onto D (a throttled step per second) and
+    // the audio placement; the same after every restart.
+    const SETTLE_S: u64 = 12;
+
+    let cfg = BenchConfig {
+        latency_ms: LATENCY_MS,
+        min_latency_box: sc.min_latency_box,
+        shallow_depth_rule: sc.rule,
+        ..BenchConfig::live_2026_09_24(GridModel::Production)
+    };
+    let mut out = Run::default();
+    let mut rng = 0x1367_5827u64;
+    let mut fifo = Fifo::default();
+    let mut tracker = VideoDelayTracker::default();
+    let mut audio = AudioLeg::fresh(false);
+    let mut totals = (0u32, 0u32, 0u32);
+    let mut arrivals: VecDeque<(u64, u64)> = VecDeque::new();
+    let mut sender_slot = W0;
+    let mut last_arrival = 0u64;
+    let mut nominal = W0;
+    let mut prev_wall = 0u64;
+    let mut settle_until = W0 + SETTLE_S * NS_PER_S;
+    let mut last_depth: Option<u64> = None;
+    let mut resync = false;
+    let mut last_latched = 0u64;
+    let end = W0 + DURATION_S * NS_PER_S;
+    let obs_restart = W0 + OBS_RESTART_S * NS_PER_S;
+    let silent = (
+        W0 + SENDER_RESTART_S * NS_PER_S,
+        W0 + (SENDER_RESTART_S + SENDER_SILENT_S) * NS_PER_S,
+    );
+    let mut obs_restarted = false;
+    let mut sender_back = false;
+    let true_ppm = DRIFT_PER_HOUR_NS as f64 / 3600e9 * 1e6;
+
+    while nominal < end {
+        // ---- events ------------------------------------------------------------------------------
+        if !obs_restarted && nominal >= obs_restart {
+            obs_restarted = true;
+            fifo = Fifo::default();
+            tracker = VideoDelayTracker::default();
+            totals.0 += audio.places;
+            totals.1 += audio.slews;
+            totals.2 += audio.steps;
+            audio = AudioLeg::fresh(false);
+            last_latched = 0;
+            last_depth = None;
+            settle_until = nominal + SETTLE_S * NS_PER_S;
+        }
+        if !sender_back && nominal >= silent.1 {
+            sender_back = true;
+            resync = true;
+            last_depth = None;
+            settle_until = nominal + SETTLE_S * NS_PER_S;
+        }
+
+        // ---- the sender: every slot up to this tick (+ look-ahead), stamped on the grid ----------
+        while sender_slot <= nominal + 4 * IV_NS {
+            let stamp = sender_slot;
+            sender_slot = grid_next_boundary_ns(sender_slot, IV_NS);
+            if stamp >= silent.0 && stamp < silent.1 {
+                continue;
+            }
+            let mut lag = sc.lag_min_ns + lcg(&mut rng) % (sc.lag_max_ns - sc.lag_min_ns + 1);
+            if lcg(&mut rng) % 1_000_000 < sc.drop_ppm {
+                out.disturbances += 1;
+                continue;
+            }
+            if lcg(&mut rng) % 1_000_000 < sc.late_ppm {
+                out.disturbances += 1;
+                lag += LATE_SPIKE_NS;
+            }
+            let arrival = (stamp + lag).max(last_arrival + 1);
+            last_arrival = arrival;
+            arrivals.push_back((arrival, stamp));
+        }
+
+        // ---- the receiver tick: scheduled on its slot, run a little late -------------------------
+        let mut late = (lcg(&mut rng) % 300_000) + (lcg(&mut rng) % 300_000) / 2;
+        if lcg(&mut rng) % 1_000_000 < 500 {
+            late = 5_000_000 + lcg(&mut rng) % 15_000_000;
+        }
+        let scheduled = nominal;
+        let wall = (scheduled + late).max(prev_wall + 1_000);
+        prev_wall = wall;
+        while arrivals.front().is_some_and(|&(a, _)| a <= wall) {
+            let (_, stamp) = arrivals.pop_front().expect("front exists");
+            fifo.queue.push_back(stamp);
+        }
+        let drift = (DRIFT_PER_HOUR_NS as i128 * (nominal - W0) as i128 / 3_600_000_000_000) as i64;
+        let off = (MONO0 as i64).wrapping_sub(W0 as i64).wrapping_add(drift);
+        let mono = (wall as i64).wrapping_add(off) as u64;
+        let mono_sched = (scheduled as i64).wrapping_add(off) as u64;
+
+        let mut c = TickCounters::default();
+        fifo.tick(&cfg, wall, scheduled, &mut c);
+        // the sender's own 3 s silence is the event, not churn: it is outside the gate.
+        let gated = nominal >= settle_until && !(nominal >= silent.0 && nominal < silent.1);
+        if gated {
+            out.corrections += c.n1_grows + c.converge_sheds;
+            out.drains += c.drains;
+            out.underruns += c.underruns;
+            out.late_holds += c.late_holds;
+        }
+        if fifo.shallow.target_frames != 0 && fifo.shallow.target_frames != last_latched
+            || c.shallow_latches > 0
+        {
+            last_latched = fifo.shallow.target_frames;
+            out.latched.push(last_latched);
+            out.capped |= fifo.shallow.capped;
+        }
+
+        // ---- the render-thread tracker (the present tail) ----------------------------------------
+        let tick_wall = n1_tick_wall_ns(wall, wall, scheduled);
+        let lock = video_delay_lock_ms(fifo.shallow.target_frames, fifo.shallow.measuring, IV_NS);
+        if fifo.presented_now && tick_on_grid(GridModel::Production, tick_wall) {
+            let presented = fifo.presented.expect("a present sets it");
+            video_delay_track(
+                &mut tracker,
+                lock,
+                video_delay_sample_ns(tick_wall, presented),
+                IV_NS,
+            );
+        }
+
+        // ---- the audio: one packet, timecoded at emit --------------------------------------------
+        if !(nominal >= silent.0 && nominal < silent.1) {
+            let tc = wall - (1_000_000 + lcg(&mut rng) % 3_000_000);
+            audio.ingest(tc, mono, wall, tracker.applied_ms, resync);
+            resync = false;
+            audio.asrc_tick(true_ppm, IV_NS, tc, mono);
+        }
+
+        // ---- the gate ----------------------------------------------------------------------------
+        if gated && fifo.presented_now {
+            let presented = fifo.presented.expect("a present sets it");
+            let depth = (scheduled - presented + IV_NS / 2) / IV_NS;
+            out.gated_presents += 1;
+            *out.depth_hist.entry(depth).or_insert(0) += 1;
+            if depth == fifo.shallow.target_frames {
+                out.at_depth += 1;
+                if audio.playing() && !audio.slewing() {
+                    let av = audio.av_ms(presented, mono_sched);
+                    out.av_ticks += 1;
+                    out.max_abs_av_ms = out.max_abs_av_ms.max(av.abs());
+                }
+            }
+            if last_depth.is_some_and(|d| d != depth) {
+                out.depth_changes += 1;
+            }
+            last_depth = Some(depth);
+        }
+        nominal = grid_next_boundary_ns(nominal, IV_NS);
+    }
+    out.places = totals.0 + audio.places;
+    out.slews = totals.1 + audio.slews;
+    out.steps = totals.2 + audio.steps;
+    out
+}
+
+const NS_PER_S: u64 = 1_000_000_000;
+
+fn assert_clean(name: &str, sc: Scenario) {
+    let r = run(sc);
+    eprintln!("{name}: {r:?}");
+    assert!(
+        !r.latched.is_empty() && r.latched.iter().all(|&d| d == sc.want_depth),
+        "{name}: latched {:?}, want {} every lock",
+        r.latched,
+        sc.want_depth
+    );
+    assert!(r.gated_presents > 90_000, "{name}: gate too thin");
+    assert_eq!(
+        r.at_depth, r.gated_presents,
+        "{name}: the presented depth left the latched D"
+    );
+    assert_eq!(r.depth_changes, 0, "{name}: the video delay moved");
+    assert_eq!(r.corrections, 0, "{name}: hold/shed churn");
+    assert_eq!(r.drains, 0, "{name}: drain churn");
+    assert_eq!(r.underruns, 0, "{name}: underruns");
+    assert_eq!(r.late_holds, 0, "{name}: late holds");
+    assert_eq!(r.steps, 0, "{name}: an audio step re-placement");
+    assert_eq!(r.slews, 0, "{name}: the audio re-timed");
+    assert_eq!(
+        r.places, 3,
+        "{name}: one placement per start, sender restart and OBS restart"
+    );
+    assert!(r.av_ticks > 90_000, "{name}: A/V gate too thin");
+    assert!(
+        r.max_abs_av_ms <= GATE_MAX_AV_MS,
+        "{name}: |A/V| {:.2} ms",
+        r.max_abs_av_ms
+    );
+}
+
+#[test]
+fn ndi_test_floor_31ms_locks_two_frames_and_pairs_1367() {
+    assert_clean("ndi-test", Scenario::clean(22, 31, 2));
+}
+
+#[test]
+fn sp_slow_floor_64ms_locks_three_frames_and_pairs_1367() {
+    assert_clean("sp-slow", Scenario::clean(40, 64, 3));
+}
+
+#[test]
+fn cg_obs_floor_33_to_67ms_locks_three_frames_and_pairs_1367() {
+    // the lag straddles one frame, so the rounded floor flips 1 <-> 2 frame to frame: the depth
+    // latches on the worse one.
+    assert_clean("cg-obs", Scenario::clean(28, 40, 3));
+}
+
+fn disturbed(rule: bool) -> Scenario {
+    Scenario {
+        drop_ppm: 400,
+        late_ppm: 300,
+        rule,
+        ..Scenario::clean(28, 40, 3)
+    }
+}
+
+#[test]
+fn a_disturbed_feed_returns_to_its_depth_and_the_audio_never_moves_1367() {
+    let r = run(disturbed(true));
+    eprintln!("disturbed: {r:?}");
+    assert!(r.disturbances > 50, "the feed must be disturbed");
+    assert!(r.latched.iter().all(|&d| d == 3), "latched {:?}", r.latched);
+    // every disturbance costs at most one correction, nothing more.
+    assert!(
+        r.corrections <= r.disturbances,
+        "corrections {} for {} disturbances",
+        r.corrections,
+        r.disturbances
+    );
+    // the depth is back on D after each one: off D only for the throttle window per disturbance.
+    let off_d = r.gated_presents - r.at_depth;
+    assert!(
+        off_d <= r.disturbances * 32,
+        "{off_d} presents off D for {} disturbances",
+        r.disturbances
+    );
+    assert_eq!((r.steps, r.slews), (0, 0), "the audio must never move");
+    assert!(
+        r.max_abs_av_ms <= GATE_MAX_AV_MS,
+        "|A/V| {:.2} ms",
+        r.max_abs_av_ms
+    );
+}
+
+#[test]
+fn without_the_rule_the_same_feed_floats_and_re_times_the_audio_1367() {
+    let with = run(disturbed(true));
+    let without = run(disturbed(false));
+    eprintln!("rule off: {without:?}");
+    assert!(without.latched.is_empty(), "the rule is off");
+    // with the rule every excursion returns to D within the throttle window, so D holds nearly
+    // every present; without it the depth random-walks and no single depth dominates like that.
+    let modal =
+        |r: &Run| *r.depth_hist.values().max().expect("presents") as f64 / r.gated_presents as f64;
+    assert!(modal(&with) > 0.999, "with the rule: {:.4}", modal(&with));
+    assert!(
+        modal(&without) < 0.9,
+        "the floating conveyor must random-walk off any one depth: {:.4} ({:?})",
+        modal(&without),
+        without.depth_hist
+    );
+    assert!(
+        without.slews > 0,
+        "the free tracker must re-time the audio on a floating depth"
+    );
+}
+
+#[test]
+fn the_min_latency_guard_caps_the_depth_and_reports_it_1367() {
+    let r = run(Scenario {
+        min_latency_box: true,
+        ..Scenario::clean(40, 64, 2)
+    });
+    eprintln!("min-latency: {r:?}");
+    assert!(r.capped, "a capped latch must be reported");
+    assert!(
+        r.latched.iter().all(|&d| d == 2),
+        "never deeper than base + 1: {:?}",
+        r.latched
+    );
+}
