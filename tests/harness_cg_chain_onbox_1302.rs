@@ -104,12 +104,12 @@ fn partial_log_and_onbox_paths_are_keyed_to_the_run() {
 }
 
 #[test]
-fn credentials_default_to_a_value_and_follow_the_env() {
-    let (ok, out, err) = run("u=\"$(cg_chain_user)\"; p=\"$(cg_chain_pw)\"\n\
-         [ -n \"$u\" ] && [ -n \"$p\" ] && echo SET\n\
-         CG_CHAIN_USER=x CG_CHAIN_PW=y; printf '%s/%s' \"$(cg_chain_user)\" \"$(cg_chain_pw)\"");
+fn credentials_follow_the_env() {
+    let (ok, out, err) = run(
+        "CG_CHAIN_USER=x CG_CHAIN_PW=y; printf '%s/%s' \"$(cg_chain_user)\" \"$(cg_chain_pw)\"",
+    );
     assert!(ok, "{err}");
-    assert_eq!(out, "SET\nx/y");
+    assert_eq!(out, "x/y");
 }
 
 #[test]
@@ -145,7 +145,10 @@ fn leg_marker_names_all_three_outcomes() {
     assert!(ok, "{err}");
     let lines: Vec<&str> = out.lines().collect();
     assert_eq!(lines.len(), 5, "{out}");
+    // VERIFIED claims only what is true at collect time: the partial reached dev1 (the merge can
+    // still drop it, with its own warning).
     assert!(lines[0].starts_with("CG-LEG-VERIFIED:"), "{}", lines[0]);
+    assert!(lines[0].contains("reached dev1"), "{}", lines[0]);
     assert!(
         lines[1].starts_with("CG-LEG-SKIPPED: resolume away"),
         "{}",
@@ -266,6 +269,10 @@ fn a_launched_extract_is_collected_and_its_partial_is_merged() {
         "the extract log is replayed: {out}"
     );
     assert!(out.contains("CG-LEG-VERIFIED:"), "{out}");
+    assert!(
+        out.contains("cg extract ran for "),
+        "the decode duration is logged, to calibrate the grace: {out}"
+    );
     let partial = state.path().join("cg-partial-5.json");
     assert!(
         out.ends_with(&format!(
@@ -311,6 +318,9 @@ fn a_failed_extract_is_not_verified_and_leaves_no_partial() {
     assert!(out.contains("CG-LEG-NOT-VERIFIED:"), "{out}");
     assert!(out.contains("rc=5"), "{out}");
     assert!(out.ends_with("ARGS=a|ARGS=--cg-chain-burns|"), "{out}");
+    // A dev1 side that died (ssh drop) may leave the decode running on the box: stop it too.
+    let calls = fs::read_to_string(scripts.path().join("calls.log")).expect("calls");
+    assert!(calls.contains("STOP-DECODE BOX=1.2.3.4"), "{calls}");
 }
 
 #[test]
@@ -334,7 +344,10 @@ fn an_extract_past_its_grace_is_stopped_and_never_holds_the_job() {
         "the grace bounds the wait"
     );
     assert!(out.contains("CG-LEG-NOT-VERIFIED:"), "{out}");
-    assert!(out.contains("still running"), "{out}");
+    assert!(
+        out.contains("still running after "),
+        "the elapsed time is in the reason: {out}"
+    );
     assert!(out.ends_with("GONE"), "{out}");
     // The decode it started ON the box is asked to stop too (never left next to Arena / cg OBS).
     let calls = fs::read_to_string(scripts.path().join("calls.log")).expect("calls");
@@ -381,13 +394,15 @@ fn resolume_builders_are_well_formed_powershell() {
          onresolume_prepare_ps 'C:\\camera-box\\verdict-out' 'C:\\camera-box\\verdict-out\\cg-partial-1.json' \
            'C:\\camera-box\\recording-verdict.exe'; echo\n\
          onresolume_ffmpeg_path_ps 'C:\\ffmpeg'; echo\n\
-         printf '[%s]' \"$(onresolume_ffmpeg_path_ps '')\"",
+         printf '[%s]\\n' \"$(onresolume_ffmpeg_path_ps '')\"\n\
+         onresolume_path_exists_ps 'C:\\camera-box\\verdict-out\\cg-partial-1-pixels'; echo\n\
+         onresolume_ps_quote \"$(printf 'a%sb%sc%sd' \"'\" '$' '`')\"; echo",
     );
     assert!(ok, "{err}");
     let lines: Vec<&str> = out.lines().collect();
     assert_eq!(
         lines[0],
-        r#"if (Test-Path -LiteralPath "C:\camera-box\recording-verdict.exe" -PathType Leaf) { (Get-FileHash -Algorithm SHA256 -LiteralPath "C:\camera-box\recording-verdict.exe").Hash.ToLower() }"#
+        r#"if (Test-Path -LiteralPath 'C:\camera-box\recording-verdict.exe' -PathType Leaf) { (Get-FileHash -Algorithm SHA256 -LiteralPath 'C:\camera-box\recording-verdict.exe').Hash.ToLower() }"#
     );
     assert!(
         lines[1].contains(r#"@("ffmpeg","ffprobe")"#),
@@ -401,19 +416,26 @@ fn resolume_builders_are_well_formed_powershell() {
     // is silenced (the first draft ended in `Remove-Item … -ErrorAction SilentlyContinue`).
     assert_eq!(
         lines[2],
-        r#"Get-Process -Name "recording-verdict" -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq "C:\camera-box\recording-verdict.exe" } | Stop-Process -Force; New-Item -ItemType Directory -Force -Path "C:\camera-box\verdict-out" | Out-Null; foreach ($p in @("C:\camera-box\verdict-out\cg-partial-1.json", "C:\camera-box\verdict-out\cg-partial-1-pixels")) { if (Test-Path -LiteralPath $p) { Remove-Item -LiteralPath $p -Recurse -Force } }"#
+        r#"Get-Process -Name 'recording-verdict' -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq 'C:\camera-box\recording-verdict.exe' } | Stop-Process -Force; New-Item -ItemType Directory -Force -Path 'C:\camera-box\verdict-out' | Out-Null; foreach ($p in @('C:\camera-box\verdict-out\cg-partial-1.json', 'C:\camera-box\verdict-out\cg-partial-1-pixels')) { if (Test-Path -LiteralPath $p) { Remove-Item -LiteralPath $p -Recurse -Force } }"#
     );
-    // ffmpeg is found under the root (RESOLUME-SNV keeps it off PATH) and put first on PATH; the
-    // trailing "; " lets it prefix the next statement.
+    // ffmpeg is found under the root (RESOLUME-SNV keeps it off PATH), newest build first, and put
+    // first on PATH; the trailing "; " lets it prefix the next statement.
     assert_eq!(
         lines[3],
-        r#"$f = Get-ChildItem -LiteralPath "C:\ffmpeg" -Filter ffmpeg.exe -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1; if ($f) { $env:Path = $f.DirectoryName + ";" + $env:Path }; "#
+        r#"$f = Get-ChildItem -LiteralPath 'C:\ffmpeg' -Filter ffmpeg.exe -Recurse -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1; if ($f) { $env:Path = $f.DirectoryName + ";" + $env:Path }; "#
     );
     assert_eq!(lines[4], "[]", "an empty root adds no prefix");
+    // The pixel-dir probe is PowerShell, so it works whatever the box's OpenSSH default shell is.
+    assert_eq!(
+        lines[5],
+        r#"if (Test-Path -LiteralPath 'C:\camera-box\verdict-out\cg-partial-1-pixels') { exit 0 } else { exit 1 }"#
+    );
+    // Paths are single-quoted PowerShell literals: `$` and a backtick stay literal, `'` doubles.
+    assert_eq!(lines[6], "'a''b$c`d'");
 }
 
 /// Fake `sshpass` / `ssh` / `scp` on PATH: ssh decodes each `-EncodedCommand` into `ssh.log` and
-/// answers the sha256 probe with `$FAKE_REMOTE_SHA`; `if exist` (the pixel-dir probe) says absent;
+/// answers the sha256 probe with `$FAKE_REMOTE_SHA`; the Test-Path pixel-dir probe says absent;
 /// scp logs to `scp.log` and materialises a downloaded file. It models PowerShell's exit code on a
 /// box where nothing is there to delete or stop: a text whose LAST statement is a silenced
 /// cmdlet (`… -ErrorAction SilentlyContinue`) fails, exactly as `powershell -EncodedCommand` does.
@@ -432,6 +454,7 @@ case "$last" in
     dec="$(printf '%s' "${last##* }" | base64 -d | iconv -f UTF-16LE -t UTF-8)"
     printf '%s\n' "$dec" >> "$FAKE_LOG_DIR/ssh.log"
     case "$dec" in *Get-FileHash*) printf '%s\r\n' "${FAKE_REMOTE_SHA:-}" ;; esac
+    case "$dec" in *"-pixels') { exit 0 } else { exit 1 }") exit 1 ;; esac
     case "$dec" in *SilentlyContinue) exit 1 ;; esac ;;
 esac
 exit 0
@@ -507,7 +530,7 @@ fn resolume_main_decodes_on_the_box_and_pulls_back_only_the_partial() {
         .expect("the on-box cg decode ran");
     assert!(pre < prep && prep < sha && sha < dec, "{ssh_log}");
     // ffmpeg is put on PATH in BOTH sessions that need it (preflight and decode).
-    let ffmpeg = r#"Get-ChildItem -LiteralPath "C:\ffmpeg" -Filter ffmpeg.exe"#;
+    let ffmpeg = r#"Get-ChildItem -LiteralPath 'C:\ffmpeg' -Filter ffmpeg.exe"#;
     assert_eq!(ssh_log.matches(ffmpeg).count(), 2, "{ssh_log}");
     let dec_line = ssh_log
         .lines()
@@ -533,6 +556,13 @@ fn resolume_main_decodes_on_the_box_and_pulls_back_only_the_partial() {
     );
     assert!(!scp_log.contains(".mkv"), "{scp_log}");
     assert!(r.partial_pulled, "the partial landed in --local-out-dir");
+    assert!(
+        ssh_log.contains(
+            r#"if (Test-Path -LiteralPath 'C:\camera-box\verdict-out\cg-partial-4-pixels') { exit 0 } else { exit 1 }"#
+        ),
+        "the pixel-dir probe runs through PowerShell: {ssh_log}"
+    );
+    assert!(r.stdout.contains("STEP 2 decode took "), "{}", r.stdout);
 }
 
 #[test]
@@ -567,7 +597,7 @@ fn resolume_stop_decode_stops_only_that_exe_and_never_fails() {
     assert!(stdout.trim_end().ends_with("RC=0"), "{stdout}");
     let ssh_log = fs::read_to_string(logs.path().join("ssh.log")).expect("ssh log");
     assert!(
-        ssh_log.contains(r#"Where-Object { $_.Path -eq "C:\camera-box\recording-verdict.exe" } | Stop-Process -Force; exit 0"#),
+        ssh_log.contains(r#"Where-Object { $_.Path -eq 'C:\camera-box\recording-verdict.exe' } | Stop-Process -Force; exit 0"#),
         "{ssh_log}"
     );
     assert!(

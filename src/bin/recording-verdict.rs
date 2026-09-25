@@ -9502,11 +9502,13 @@ mod tests {
         let v2: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&json).unwrap()).unwrap();
         assert_eq!(v2["cg_chain"], serde_json::Value::Null);
-        assert_eq!(
-            v["full_chain"]["imag_leg_skip_reason"],
-            serde_json::Value::Null,
-            "a dropped cg partial is never reported as an imag skip"
-        );
+        for (case, verdict) in [("corrupt", &v), ("mislabelled", &v2)] {
+            assert_eq!(
+                verdict["full_chain"]["imag_leg_skip_reason"],
+                serde_json::Value::Null,
+                "{case}: a dropped cg partial is never reported as an imag skip"
+            );
+        }
     }
 
     /// #755 — a window of N delivered frames carrying cam7's OWN digital capture-burn in every
