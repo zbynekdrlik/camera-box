@@ -648,7 +648,7 @@ fn lift_media_clock() -> String {
 fn c_media_clock_matches_the_rust_authority_1372_part_d() {
     use camera_box::genlock_lock_state::{
         media_clock_verdict, media_clock_window, media_clock_window_ready, MediaDiscipline,
-        GENLOCK_MEDIA_CLOCK_MAX_GAP_MS, GENLOCK_MEDIA_CLOCK_WINDOW_S,
+        GENLOCK_MEDIA_CLOCK_BAND_PPB, GENLOCK_MEDIA_CLOCK_MAX_GAP_MS, GENLOCK_MEDIA_CLOCK_WINDOW_S,
     };
     let block = lift_media_clock();
     let (win, gap) = (GENLOCK_MEDIA_CLOCK_WINDOW_S, GENLOCK_MEDIA_CLOCK_MAX_GAP_MS);
@@ -688,6 +688,22 @@ fn c_media_clock_matches_the_rust_authority_1372_part_d() {
         (jittered, win, gap),
         (at_1hz(3, &|i| -20 * i), win, gap),
         (vec![(0, 0), (1000, 10), (2000, 30)], win, gap),
+        (vec![(0, 0), (3, -1), (6, -1)], win, gap),
+        (vec![(0, 0), (3, 1), (6, 3)], win, gap),
+        (at_1hz(600, &|i| (i * 9 / 20) * 20), win, gap),
+        (
+            vec![
+                (0, 0),
+                (1000, 0),
+                (2000, 0),
+                (3000, 0),
+                (4000, 0),
+                (5000, 0),
+                (6000, 25),
+            ],
+            win,
+            gap,
+        ),
         (vec![(1000, 0), (1000, 50), (500, 70)], win, gap),
         (vec![(0, 7)], win, gap),
         (vec![], win, gap),
@@ -766,14 +782,18 @@ fn c_media_clock_matches_the_rust_authority_1372_part_d() {
     let mut c = String::from("#include <stdio.h>\n#include <stdint.h>\n#include <inttypes.h>\n");
     c.push_str(&block);
     c.push_str("int main(void){\n    int64_t counted;\n");
+    // Every window runs against several trimming bands: the production one, none (only the centre),
+    // 1 ppb, a wide one and all-inclusive.
+    let bands = [GENLOCK_MEDIA_CLOCK_BAND_PPB, 0, 1, 500_000, i64::MAX];
     for (i, (w, ws, g)) in windows.iter().enumerate() {
         let ts: Vec<String> = w.iter().map(|s| lit(s.0)).collect();
         let ds: Vec<String> = w.iter().map(|s| lit(s.1)).collect();
         c.push_str(&format!(
-            "    {{ static const int64_t t{i}[] = {{{}}}; static const int64_t d{i}[] = {{{}}}; static int64_t s{i}[{}]; counted = -1; const int64_t r = genlock_media_clock_window_drift_us(t{i}, d{i}, {}, {}, {}, s{i}, &counted); printf(\"W %\" PRId64 \" %\" PRId64 \"\\n\", r, counted); }}\n",
+            "    {{ static const int64_t t{i}[] = {{{}}}; static const int64_t d{i}[] = {{{}}}; static int64_t s{i}[{}]; static const int64_t b{i}[] = {{{}}}; for (size_t k = 0; k < sizeof(b{i}) / sizeof(b{i}[0]); k++) {{ counted = -1; const int64_t r = genlock_media_clock_window_drift_us(t{i}, d{i}, {}, {}, {}, b{i}[k], s{i}, &counted); printf(\"W %\" PRId64 \" %\" PRId64 \"\\n\", r, counted); }} }}\n",
             arr(ts),
             arr(ds),
             w.len().max(1),
+            arr(bands.iter().map(|b| lit(*b)).collect()),
             w.len(),
             lit(*ws),
             lit(*g)
@@ -848,7 +868,7 @@ fn c_media_clock_matches_the_rust_authority_1372_part_d() {
     let (c_windows, c_ready, c_verdicts) = (pick("W "), pick("R "), pick("V "));
     assert_eq!(
         c_windows.len(),
-        windows.len(),
+        windows.len() * bands.len(),
         "issue 1372 part D: window line count"
     );
     assert_eq!(
@@ -863,11 +883,84 @@ fn c_media_clock_matches_the_rust_authority_1372_part_d() {
     );
 
     let mut diffs = Vec::new();
-    for ((w, ws, g), cv) in windows.iter().zip(&c_windows) {
-        let rv = media_clock_window(w, *ws, *g);
+    let runs: Vec<(&Window, i64)> = windows
+        .iter()
+        .flat_map(|w| bands.iter().map(move |b| (w, *b)))
+        .collect();
+    for (((w, ws, g), band), cv) in runs.iter().zip(&c_windows) {
+        let rv = media_clock_window(w, *ws, *g, *band);
         if cv[..] != [rv.drift_us, rv.counted_ms] {
             diffs.push(format!(
-                "  window len={} first={:?} window_s={ws} gap={g} -> C {cv:?}, Rust {rv:?}",
+                "  window len={} first={:?} window_s={ws} gap={g} band={band} -> C {cv:?}, Rust {rv:?}",
+                w.len(),
+                w.first()
+            ));
+        }
+    }
+
+    // The python mirror (scripts/genlock_lock_decision.py, the fleet watchdog's decision module) gets
+    // the same real-range runs: python ints never saturate, so the i64-extreme vectors stay C/Rust only.
+    let real = |v: i64| v.unsigned_abs() < 1_000_000_000_000;
+    let py_runs: Vec<(&Window, i64)> = runs
+        .iter()
+        .copied()
+        .filter(|((w, ws, g), band)| {
+            w.iter().all(|(t, o)| real(*t) && real(*o))
+                && real(*ws)
+                && real(*g)
+                && (real(*band) || *band == i64::MAX)
+        })
+        .collect();
+    let py_in: Vec<String> = py_runs
+        .iter()
+        .map(|((w, ws, g), band)| {
+            let pts: Vec<String> = w.iter().map(|(t, o)| format!("[{t},{o}]")).collect();
+            format!("[[{}],{ws},{g},{band}]", pts.join(","))
+        })
+        .collect();
+    let py_file = dir.join("media_py_runs.json");
+    fs::write(&py_file, format!("[{}]", py_in.join(","))).expect("write the python runs");
+    let py = Command::new("python3")
+        .arg("-c")
+        .arg(
+            "import json, sys; sys.path.insert(0, sys.argv[1]); import genlock_lock_decision as d\n\
+             for w, ws, g, b in json.load(open(sys.argv[2])):\n\
+             \x20   print(*d.media_clock_window([tuple(x) for x in w], ws, g, b))",
+        )
+        .arg(repo("scripts"))
+        .arg(&py_file)
+        .output()
+        .unwrap_or_else(|e| {
+            panic!("issue 1372 part D: could not run python3 ({e}); the python mirror of the media-clock term must be checked, never skipped")
+        });
+    assert!(
+        py.status.success(),
+        "issue 1372 part D: the python mirror run failed: {}",
+        String::from_utf8_lossy(&py.stderr)
+    );
+    let py_out: Vec<Vec<i64>> = String::from_utf8(py.stdout)
+        .expect("python stdout is utf-8")
+        .lines()
+        .map(|l| {
+            l.split_whitespace()
+                .map(|x| x.parse().expect("an int"))
+                .collect()
+        })
+        .collect();
+    assert_eq!(
+        py_out.len(),
+        py_runs.len(),
+        "issue 1372 part D: python line count"
+    );
+    assert!(
+        py_runs.len() > 100,
+        "issue 1372 part D: too few real-range runs reach the python mirror"
+    );
+    for (((w, ws, g), band), pv) in py_runs.iter().zip(&py_out) {
+        let rv = media_clock_window(w, *ws, *g, *band);
+        if pv[..] != [rv.drift_us, rv.counted_ms] {
+            diffs.push(format!(
+                "  PYTHON window len={} first={:?} window_s={ws} gap={g} band={band} -> python {pv:?}, Rust {rv:?}",
                 w.len(),
                 w.first()
             ));

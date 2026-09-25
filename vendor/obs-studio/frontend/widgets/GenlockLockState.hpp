@@ -297,17 +297,21 @@ static inline int64_t genlock_media_sat_mul_pos(int64_t a, int64_t b)
 /* The wall-vs-media rate across n samples (oldest first; t_ms the widget's monotonic ms, offset_us the
  * wall-minus-media offset in us). Each consecutive pair with 0 < dt <= max_gap_ms yields one rate in ppb
  * (change_us * 1e6 / dt_ms, truncated toward zero, saturating), kept sorted in the caller's scratch
- * (>= n - 1 entries); the result is their MEDIAN (the mean of the two middle rates for an even count,
- * a + (b - a) / 2, saturating) scaled to window_s: median_ppb * window_s / 1000 us. A rate is in every
- * pair, a wall step only in the pair that spans it, so steps of any size that touch fewer than half the
- * pairs never move the result. *counted_ms_out gets the total interval of the counted pairs. No pair or a
- * non-positive window_s -> 0. */
+ * (>= n - 1 entries). Their MEDIAN (the mean of the two middle rates for an even count,
+ * a + (b - a) / 2) is the centre; the result is the TRIMMED MEAN of the rates within band_ppb of it
+ * (the centre itself when none is), truncated toward zero, scaled to window_s: mean_ppb * window_s /
+ * 1000 us. Every step saturates. A wall step lands far outside the band and never counts; a drift in
+ * only part of the pairs stays inside and is averaged in. *counted_ms_out gets the total interval of the
+ * counted pairs. No pair or a non-positive window_s -> 0. */
 static inline int64_t genlock_media_clock_window_drift_us(const int64_t *t_ms, const int64_t *offset_us, int n,
-							  int64_t window_s, int64_t max_gap_ms, int64_t *scratch,
-							  int64_t *counted_ms_out)
+							  int64_t window_s, int64_t max_gap_ms, int64_t band_ppb,
+							  int64_t *scratch, int64_t *counted_ms_out)
 {
 	int64_t counted = 0;
-	int64_t median;
+	int64_t centre;
+	int64_t sum = 0;
+	int64_t kept = 0;
+	int64_t mean;
 	int m = 0;
 	int i;
 	int j;
@@ -328,11 +332,18 @@ static inline int64_t genlock_media_clock_window_drift_us(const int64_t *t_ms, c
 	if (m == 0 || window_s <= 0)
 		return 0;
 	if (m % 2 == 1)
-		median = scratch[m / 2];
+		centre = scratch[m / 2];
 	else
-		median = genlock_media_sat_add(scratch[m / 2 - 1],
+		centre = genlock_media_sat_add(scratch[m / 2 - 1],
 					       genlock_media_sat_sub(scratch[m / 2], scratch[m / 2 - 1]) / 2);
-	return genlock_media_sat_mul_pos(median, window_s) / 1000;
+	for (i = 0; i < m; ++i) {
+		if (genlock_media_sat_abs(genlock_media_sat_sub(scratch[i], centre)) <= band_ppb) {
+			sum = genlock_media_sat_add(sum, scratch[i]);
+			++kept;
+		}
+	}
+	mean = kept == 0 ? centre : sum / kept;
+	return genlock_media_sat_mul_pos(mean, window_s) / 1000;
 }
 
 /* 1 once the counted pairs cover >= 90 % of the window_s window; a non-positive window is never ready. */

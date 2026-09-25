@@ -25,7 +25,7 @@ facet + dev1 watchdog that CONSUMES the same structs over obs-websocket).
 | Per-output stats API | `obs.h` (`struct obs_genlock_output_stats`, `obs_output_set_genlock_wall_stamping`, `obs_output_get_genlock_stats`) + `obs-output.c` + `obs-internal.h` (two bool fields, bzalloc-zeroed) | DistroAV's `ndi-output.cpp` sets `wall_stamping=true` at `begin_data_capture` success, `false` at stop. |
 | The widget | `OBSBasicStatusBar.{hpp,cpp}` (`UpdateGenlockLabel`, `PollGenlockClock`) | A permanent `QLabel` + an ALWAYS-ON 1 Hz `QTimer` (NOT the stream-only `refreshTimer`). |
 | Vendored-source guards | `tests/genlock_lock_indicator_guards.rs` | std-only, runnable via `rustc --test`; the Linux-CI twin of the pwsh gates. |
-| Media-clock term (issue 1372 part D) | `src/genlock_lock_state.rs` (`MediaClock`, `MediaDiscipline`, `media_clock_window`, `media_clock_window_ready`, `media_clock_verdict`) ↔ `GenlockLockState.hpp` (the `genlock_media_*` block after the qpc lift) + libobs `os_gettime_discipline()` (`util/platform.h`, `platform-windows.c`) | Parity: the decision grid × the three media verdicts + a 5th lift (`c_media_clock_matches_the_rust_authority_1372_part_d`); the libobs getter is checked read by read in `tests/os_clock_discipline_parity_1372.rs`. Guards: `genlock_lock_media_clock_term_present_1372_part_d` + the part-D pwsh block in both ymls. |
+| Media-clock term (issue 1372 part D) | `src/genlock_lock_state.rs` (`MediaClock`, `MediaDiscipline`, `media_clock_window` (trimmed mean), `media_clock_window_ready`, `media_clock_verdict`; python mirror cross-checked by the same parity test) ↔ `GenlockLockState.hpp` (the `genlock_media_*` block after the qpc lift) + libobs `os_gettime_discipline()` (`util/platform.h`, `platform-windows.c`) | Parity: the decision grid × the three media verdicts + a 5th lift (`c_media_clock_matches_the_rust_authority_1372_part_d`); the libobs getter is checked read by read in `tests/os_clock_discipline_parity_1372.rs`. Guards: `genlock_lock_media_clock_term_present_1372_part_d` + the part-D pwsh block in both ymls. |
 | pwsh source-anchor gates | `windows-genlock.yml` + `windows-genlock-fast.yml` (`Assert in-OBS genlock LOCK indicator present (#1298)`) | 3-copy lock-step per `obs-titlebar-build-id.md`. |
 
 ## State decision (the contract)
@@ -46,15 +46,20 @@ lowest)**; else LOCKED (green).
     measured ±1 µs sample-to-sample). NOT the libobs `wall_qpc_drift_ms`: that is integer ms truncated
     toward zero, and a 1–2 ms dantesync phase step reads like one second of a rate. It samples with or
     without genlock inputs, so the ring has no gaps.
-  - **The rate is the MEDIAN of the per-pair rates** (`genlock_media_clock_window_drift_us`: each pair
-    with `0 < dt ≤ 5000 ms` gives `change_us × 1e6 / dt_ms` ppb, the median — the mean of the two
-    middle rates for an even count — scaled to the window, `median × 600 / 1000` µs). A rate is in
-    every pair; a wall step only in the pair that spans it. So steps of ANY size (dantesync steps from
-    ~150 µs when not PTP-locked, ≥ 500 µs as a client, `1000 µs + 2 × ppm × 10 s` as a locked master
-    with phase_slew off, 2.5 ms at the cap, the −146 µs seen on win-resolume) never move it, as long as
-    they touch fewer than half the pairs. Review rounds 1–3 went through a 33 ms exclusion, a
-    rate-bounded per-sample exclusion on integer ms, and the same on µs; each left a band of real
-    dantesync steps counted as drift. The median has no such band.
+  - **The rate is a TRIMMED MEAN of the per-pair rates** (`genlock_media_clock_window_drift_us`: each
+    pair with `0 < dt ≤ 5000 ms` gives `change_us × 1e6 / dt_ms` ppb; their median — the mean of the
+    two middle rates for an even count — is the centre; the result is the mean of the rates within
+    `GENLOCK_MEDIA_CLOCK_BAND_PPB` = 25 ppm of it, scaled to the window, `mean × 600 / 1000` µs). A
+    rate is in every pair; a wall step only in the pair that spans it, ≥ 146 000 ppb from the centre on
+    a 1 s pair (dantesync steps from ~150 µs when not PTP-locked, ≥ 500 µs as a client,
+    `1000 µs + 2 × ppm × 10 s` as a locked master with phase_slew off, 2.5 ms at the cap, the −146 µs
+    seen on win-resolume), so steps of any size never count while they touch fewer than half the pairs.
+    A drift present in only PART of the seconds (≤ 25 ppm) stays inside the band and is averaged in at
+    its true share — a pure median dropped it below half coverage and quantised to 600 µs steps. Review
+    rounds 1–4 went through a 33 ms exclusion, a rate-bounded per-sample exclusion on integer ms, the
+    same on µs, and a pure median; each left a gap (sub-frame steps counted, a band of real steps
+    counted, partial drift invisible). Known limit: a drift faster than 25 ppm present in fewer than
+    half the seconds is not averaged in (a raw-QPC fallback, the fast case, is the discipline outcome's).
   - The window is ready (`genlock_media_clock_window_ready`) only once the COUNTED pairs cover ≥ 90 %
     of it, so a UI thread that keeps stalling past 5 s never reads as a healthy OK.
   - `genlock_media_clock_verdict(ready, drift_us, 2000, discipline, clock_present)`: `UNDISCIPLINED`

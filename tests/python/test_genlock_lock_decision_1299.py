@@ -393,7 +393,8 @@ def _at_1hz(n, f):
 
 
 def _window(samples):
-    return d.media_clock_window(samples, d.GENLOCK_MEDIA_CLOCK_WINDOW_S, d.GENLOCK_MEDIA_CLOCK_MAX_GAP_MS)
+    return d.media_clock_window(samples, d.GENLOCK_MEDIA_CLOCK_WINDOW_S, d.GENLOCK_MEDIA_CLOCK_MAX_GAP_MS,
+                                d.GENLOCK_MEDIA_CLOCK_BAND_PPB)
 
 
 def test_media_clock_window_mirrors_the_rust_authority():
@@ -404,8 +405,10 @@ def test_media_clock_window_mirrors_the_rust_authority():
     for f in (lambda i: (i // 60) * 1460, lambda i: (i // 30) * 600, lambda i: (i // 25) * 250,
               lambda i: -146 * (i // 20)):
         assert _window(_at_1hz(600, f))[0] == 0
-    # the same steps on top of the rate: exactly the rate
-    assert _window(_at_1hz(600, lambda i: i * 27 // 2 + (i // 60) * 1460))[0] == 8100
+    # the same steps on top of the rate: the rate (each step pair's own ~14 us leaves with it)
+    assert _window(_at_1hz(600, lambda i: i * 27 // 2 + (i // 60) * 1460))[0] == 8094
+    # a 20 ppm drift in only 45 % of the seconds: its true share, 5.4 ms (a pure median reads 0)
+    assert _window(_at_1hz(600, lambda i: (i * 9 // 20) * 20))[0] == 5400
     # a stalled pair (> 5 s) is not a sample and not coverage
     gap = _window([(0, 0), (1000, 20), (121_000, -14_000), (122_000, -13_980)])
     assert gap == (12_000, 2000)
@@ -414,9 +417,11 @@ def test_media_clock_window_mirrors_the_rust_authority():
     assert _window(_at_1hz(3, lambda i: -20 * i))[0] == -12_000
     assert _window([(0, 0), (1000, 10), (2000, 30)])[0] == 9000
     assert _window([(0, 0), (3000, -1)])[0] == -199  # -333 ppb * 600 / 1000, toward zero
+    # an odd, negative middle gap: the centre rounds like the C (a + (b - a) / 2)
+    assert d.media_clock_window([(0, 0), (3, -1), (6, -1)], 600, 5000, 0)[0] == -100_000
     assert _window([(0, 7)]) == (0, 0)
     assert _window([]) == (0, 0)
-    assert d.media_clock_window([(0, 0), (1000, 5)], 0, 5000)[0] == 0
+    assert d.media_clock_window([(0, 0), (1000, 5)], 0, 5000, 25_000)[0] == 0
 
 
 def test_media_clock_window_ready_mirrors_the_rust_authority():

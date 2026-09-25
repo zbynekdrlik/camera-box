@@ -64,6 +64,7 @@ MC_UNDISCIPLINED = "undisciplined"
 GENLOCK_MEDIA_CLOCK_WINDOW_S = 600          # the window the drift growth is measured over
 GENLOCK_MEDIA_CLOCK_DRIFT_BOUND_US = 2000   # offset growth beyond this (us per window) is DRIFT
 GENLOCK_MEDIA_CLOCK_MAX_GAP_MS = 5000       # a pair further apart (a stalled UI) is not a sample
+GENLOCK_MEDIA_CLOCK_BAND_PPB = 25_000       # the trimmed mean keeps pairs within this of the median
 # The Windows os_gettime_discipline() outcomes that mean "fell back to raw QPC".
 MEDIA_DISCIPLINE_RAW_FALLBACK = ("disabled", "read_failed", "api_missing")
 
@@ -104,15 +105,17 @@ def _trunc_div(a, b):
     return q if (a >= 0) == (b > 0) else -q
 
 
-def media_clock_window(samples, window_s, max_gap_ms):
+def media_clock_window(samples, window_s, max_gap_ms, band_ppb):
     """Issue 1372 part D -- the wall-vs-media rate across `(t_ms, offset_us)` samples (oldest first):
     each consecutive pair with 0 < dt <= max_gap_ms yields one rate in ppb (change_us * 1e6 / dt,
-    truncated toward zero); the result is their MEDIAN (the mean of the two middle rates for an even
-    count, a + (b - a) / 2) scaled to window_s: median_ppb * window_s / 1000 us. A rate is in every pair,
-    a wall step only in the pair that spans it, so steps never move it. Returns (drift_us, counted_ms);
-    no pair or a non-positive window_s gives drift 0. Mirror of
-    camera_box::genlock_lock_state::media_clock_window (python ints never overflow, so the Rust/C
-    saturation only matters at the i64 extremes no real clock reaches)."""
+    truncated toward zero). Their MEDIAN (the mean of the two middle rates for an even count,
+    a + (b - a) / 2) is the centre; the result is the TRIMMED MEAN of the rates within band_ppb of it
+    (the centre itself when none is), truncated toward zero, scaled to window_s: mean_ppb * window_s /
+    1000 us. A wall step lands far outside the band; a drift in only part of the pairs is averaged in.
+    Returns (drift_us, counted_ms); no pair or a non-positive window_s gives drift 0. Mirror of
+    camera_box::genlock_lock_state::media_clock_window, cross-checked vector by vector against it by
+    tests/genlock_lock_state_parity.rs (python ints never overflow, so the Rust/C saturation only
+    matters at the i64 extremes no real clock reaches; that gate keeps to the real range)."""
     rates = []
     counted_ms = 0
     for (ta, oa), (tb, ob) in zip(samples, samples[1:]):
@@ -126,11 +129,13 @@ def media_clock_window(samples, window_s, max_gap_ms):
     rates.sort()
     m = len(rates)
     if m % 2 == 1:
-        median = rates[m // 2]
+        centre = rates[m // 2]
     else:
         a, b = rates[m // 2 - 1], rates[m // 2]
-        median = a + _trunc_div(b - a, 2)
-    return (_trunc_div(median * window_s, 1000), counted_ms)
+        centre = a + _trunc_div(b - a, 2)
+    kept = [r for r in rates if abs(r - centre) <= band_ppb]
+    mean = _trunc_div(sum(kept), len(kept)) if kept else centre
+    return (_trunc_div(mean * window_s, 1000), counted_ms)
 
 
 def media_clock_window_ready(counted_ms, window_s):

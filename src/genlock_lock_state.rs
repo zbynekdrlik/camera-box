@@ -399,11 +399,13 @@ pub fn qpc_drift_beyond_bound(
 // means the same thing everywhere.
 //
 // The widget samples the offset itself in µs each 1 Hz tick (the libobs `wall_qpc_drift_ms` is integer
-// ms truncated toward zero). The rate is the MEDIAN of the per-pair rates across the window: a rate is
-// present in every pair, a wall step (dantesync steps from ~150 µs to 2.5 ms, rarely) only in the
-// pair that spans it, so no step size or step pattern that touches fewer than half the pairs moves the
-// median. A pair more than [`GENLOCK_MEDIA_CLOCK_MAX_GAP_MS`] apart (a stalled UI) is not a sample, and
-// the window counts as ready only once the counted pairs cover ≥ 90 % of it. The second input is the
+// ms truncated toward zero). The rate is a TRIMMED MEAN of the per-pair rates: the mean of the pairs
+// within [`GENLOCK_MEDIA_CLOCK_BAND_PPB`] of their median. A wall step (dantesync steps from ~146 µs to
+// 2.5 ms, rarely) puts its pair ≥ 146 000 ppb away from the median and out of the mean, whatever the
+// step pattern, as long as steps touch fewer than half the pairs; a drift present in only part of the
+// seconds stays inside the band and is averaged in at its true share (a pure median would drop it
+// below half coverage). A pair more than [`GENLOCK_MEDIA_CLOCK_MAX_GAP_MS`] apart (a stalled UI) is not
+// a sample, and the window counts as ready only once the counted pairs cover ≥ 90 % of it. The second input is the
 // Windows discipline state libobs publishes (`os_gettime_discipline()`): a fallback to raw QPC while
 // dantesync answers is DEGRADED at once. The term never makes a box UNLOCKED on its own.
 
@@ -414,11 +416,18 @@ pub const GENLOCK_MEDIA_CLOCK_WINDOW_S: i64 = 600;
 pub const GENLOCK_MEDIA_CLOCK_DRIFT_BOUND_US: i64 = 2000;
 /// A pair of samples further apart than this (ms) — a stalled UI thread — is not a rate sample.
 pub const GENLOCK_MEDIA_CLOCK_MAX_GAP_MS: i64 = 5000;
+/// The trimmed mean keeps the pairs within this many ppb of the median (25 ppm). The undisciplined
+/// mixer runs 13–23 ppm; ±1 µs sampling noise is ±1000–2000 ppb; the smallest recorded dantesync step
+/// (146 µs) is 146 000 ppb on a 1 s pair and stays outside the band on any pair shorter than the 5 s
+/// gap cut-off.
+pub const GENLOCK_MEDIA_CLOCK_BAND_PPB: i64 = 25_000;
 
 /// What the Windows `os_gettime_ns()` last read from the system-time adjustment. Discriminants match
 /// libobs `enum os_gettime_discipline_state` (`util/platform.h`) and the C mirror
 /// `genlock_media_discipline` in `GenlockLockState.hpp`; `NotApplicable` is the widget's value on a
-/// box whose OS disciplines the monotonic clock itself (Linux / macOS).
+/// Linux box, whose kernel disciplines `CLOCK_MONOTONIC` together with the wall clock (macOS
+/// `os_gettime_ns` is the raw `CLOCK_UPTIME_RAW`; no fleet box runs it, and the drift input still
+/// covers it).
 #[repr(i32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MediaDiscipline {
@@ -432,7 +441,7 @@ pub enum MediaDiscipline {
     ReadFailed = 3,
     /// The API is not exported (old Windows): raw QPC.
     ApiMissing = 4,
-    /// Not a Windows box: the OS kernel disciplines the monotonic clock.
+    /// Not a Windows box: there is no discipline outcome to read (the drift input still applies).
     NotApplicable = 5,
 }
 
@@ -473,7 +482,7 @@ impl MediaClock {
 /// The media-clock rate over one window, as the widget reduces it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MediaClockWindow {
-    /// The median per-pair rate scaled to the window: µs of wall-vs-media drift per `window_s`.
+    /// The trimmed-mean per-pair rate scaled to the window: µs of wall-vs-media drift per `window_s`.
     pub drift_us: i64,
     /// The total interval (ms) of the pairs that counted (gaps and non-increasing times left out);
     /// the window is ready once this covers ≥ 90 % of `window_s`.
@@ -488,18 +497,21 @@ pub fn media_clock_pair_rate_ppb(change_us: i64, dt_ms: i64) -> i64 {
 
 /// The wall-vs-media rate across a window of `(t_ms, offset_us)` samples (oldest first; `t_ms` the
 /// widget's monotonic ms, `offset_us` the wall-minus-media offset in µs). Each consecutive pair with
-/// `0 < dt ≤ max_gap_ms` yields one rate ([`media_clock_pair_rate_ppb`]); the result is their MEDIAN
-/// (the mean of the two middle rates for an even count, `a + (b − a) / 2`, saturating) scaled to
-/// `window_s`: `median_ppb × window_s / 1000` µs. A rate is in every pair, a wall step only in the pair
-/// that spans it, so steps of any size that touch fewer than half the pairs never move the result.
-/// No pair, or a non-positive `window_s`, gives 0 drift (`counted_ms` is still reported).
+/// `0 < dt ≤ max_gap_ms` yields one rate ([`media_clock_pair_rate_ppb`]). Their MEDIAN (the mean of the
+/// two middle rates for an even count, `a + (b − a) / 2`) is the centre; the result is the TRIMMED MEAN
+/// of the rates within `band_ppb` of it (`|rate − centre| ≤ band_ppb`; the centre itself when none is),
+/// truncated toward zero, scaled to `window_s`: `mean_ppb × window_s / 1000` µs. Every step saturates.
+/// A wall step lands far outside the band and never counts; a drift in only part of the pairs stays
+/// inside and is averaged in. No pair, or a non-positive `window_s`, gives 0 drift (`counted_ms` is
+/// still reported).
 ///
 /// Byte-for-byte mirror of `genlock_media_clock_window_drift_us` in `GenlockLockState.hpp` — the
-/// parity gate `tests/genlock_lock_state_parity.rs` keeps the two identical.
+/// parity gate `tests/genlock_lock_state_parity.rs` keeps the two (and the python mirror) identical.
 pub fn media_clock_window(
     samples: &[(i64, i64)],
     window_s: i64,
     max_gap_ms: i64,
+    band_ppb: i64,
 ) -> MediaClockWindow {
     let mut rates: Vec<i64> = Vec::with_capacity(samples.len());
     let mut counted_ms: i64 = 0;
@@ -519,14 +531,22 @@ pub fn media_clock_window(
     }
     rates.sort_unstable();
     let m = rates.len();
-    let median = if m % 2 == 1 {
+    let centre = if m % 2 == 1 {
         rates[m / 2]
     } else {
         let (a, b) = (rates[m / 2 - 1], rates[m / 2]);
         a.saturating_add(b.saturating_sub(a) / 2)
     };
+    let (mut sum, mut kept) = (0i64, 0i64);
+    for &r in &rates {
+        if r.saturating_sub(centre).saturating_abs() <= band_ppb {
+            sum = sum.saturating_add(r);
+            kept += 1;
+        }
+    }
+    let mean = if kept == 0 { centre } else { sum / kept };
     MediaClockWindow {
-        drift_us: median.saturating_mul(window_s) / 1000,
+        drift_us: mean.saturating_mul(window_s) / 1000,
         counted_ms,
     }
 }
@@ -1162,6 +1182,7 @@ mod tests {
             samples,
             GENLOCK_MEDIA_CLOCK_WINDOW_S,
             GENLOCK_MEDIA_CLOCK_MAX_GAP_MS,
+            GENLOCK_MEDIA_CLOCK_BAND_PPB,
         )
     }
 
@@ -1176,7 +1197,7 @@ mod tests {
     }
 
     #[test]
-    fn the_window_rate_is_the_median_so_steps_never_read_as_drift() {
+    fn the_window_rate_is_a_trimmed_mean_so_steps_never_read_as_drift() {
         // The pre-part-A stream: 13.5 ppm = 13.5 µs per 1 Hz pair -> 8.1 ms per 600 s.
         let w = window(&ramp(600, 1000, |i| i * 27 / 2));
         assert_eq!(w.drift_us, 8100);
@@ -1188,10 +1209,11 @@ mod tests {
         assert_eq!(window(&ramp(600, 1000, |i| (i / 30) * 600)).drift_us, 0);
         assert_eq!(window(&ramp(600, 1000, |i| (i / 25) * 250)).drift_us, 0);
         assert_eq!(window(&ramp(600, 1000, |i| (i / 20) * -146)).drift_us, 0);
-        // The same steps on top of the undisciplined rate: exactly the rate.
+        // The same steps on top of the undisciplined rate: the rate (each step pair also carried
+        // ~14 µs of rate, which leaves with it: (300 × 13 000 + 290 × 14 000) / 590 ppb).
         assert_eq!(
             window(&ramp(600, 1000, |i| i * 27 / 2 + (i / 60) * 1460)).drift_us,
-            8100
+            8094
         );
         // A late UI tick carrying a step, and jittered ticks: still the rate.
         let mut late: Vec<(i64, i64)> = ramp(600, 1000, |i| i * 27 / 2);
@@ -1199,9 +1221,25 @@ mod tests {
             s.0 += 500; // one 1.5 s tick at 300
             s.1 += 520 + if k >= 450 { 520 } else { 0 };
         }
-        assert_eq!(window(&late).drift_us, 8100);
-        // Wobble of ±40 µs per sample that does not drift stays far below the 2 ms bound.
-        let wobble = window(&ramp(600, 1000, |i| noise(i, 40)));
+        assert_eq!(window(&late).drift_us, 8098);
+        // A 20 ppm drift in only 45 % of the seconds (the rest flat): a pure median would read 0; the
+        // trimmed mean reads its true share, 20 × 0.45 × 600 = 5400 µs -> DRIFT.
+        let partial = ramp(600, 1000, |i| (i * 9 / 20) * 20);
+        assert_eq!(window(&partial).drift_us, 5400);
+        // The band edge: a rate exactly `band` from the centre is kept, one ppb further is not.
+        let edge = |far: i64| {
+            let mut v = vec![(0i64, 0i64)];
+            for k in 1..=5i64 {
+                v.push((k * 1000, 0));
+            }
+            v.push((6000, far));
+            window(&v).drift_us
+        };
+        // 25 000 ppb is kept (25 000 / 6 = 4166 ppb × 600 / 1000); 26 000 ppb is dropped.
+        assert_eq!(edge(25), 2499);
+        assert_eq!(edge(26), 0);
+        // Sampling wobble (5× the ±1 µs measured on dev1) that does not drift stays far below 2 ms.
+        let wobble = window(&ramp(600, 1000, |i| noise(i, 5)));
         assert!(wobble.drift_us.abs() < 200, "{wobble:?}");
         // A pair more than 5 s apart (a stalled UI) is not a sample, and does not count as covered.
         let gap = window(&[(0, 0), (1000, 20), (121_000, -14_000), (122_000, -13_980)]);
@@ -1213,10 +1251,16 @@ mod tests {
             }
         );
         assert!(!media_clock_window_ready(gap.counted_ms, 600));
-        // Negative drift; an even count averages the two middle rates.
+        // Negative drift; an even count averages the two middle rates, and an odd, negative middle
+        // gap rounds toward the lower rate exactly like the C (a + (b - a) / 2).
         assert_eq!(window(&ramp(3, 1000, |i| -20 * i)).drift_us, -12_000);
         assert_eq!(window(&[(0, 0), (1000, 10), (2000, 30)]).drift_us, 9000);
-        // No pair, a non-increasing time, a non-positive window.
+        // (band 0 keeps neither rate, so the centre itself is the result)
+        let odd_neg = media_clock_window(&[(0, 0), (3, -1), (6, -1)], 600, 5000, 0);
+        assert_eq!(odd_neg.drift_us, -100_000); // centre -333 333 + 333 333 / 2 = -166 667 ppb
+        let odd_pos = media_clock_window(&[(0, 0), (3, 1), (6, 3)], 600, 5000, 1);
+        assert_eq!(odd_pos.drift_us, 299_999); // centre 333 333 + 333 333 / 2 = 499 999, none within 1
+                                               // No pair, a non-increasing time, a non-positive window.
         assert_eq!(
             window(&[(0, 7)]),
             MediaClockWindow {
@@ -1227,19 +1271,39 @@ mod tests {
         assert_eq!(window(&[]).drift_us, 0);
         assert_eq!(window(&[(1000, 0), (1000, 50)]).counted_ms, 0);
         assert_eq!(
-            media_clock_window(&[(0, 0), (1000, 5)], 0, 5000).drift_us,
+            media_clock_window(&[(0, 0), (1000, 5)], 0, 5000, GENLOCK_MEDIA_CLOCK_BAND_PPB)
+                .drift_us,
             0
         );
         // Saturating at the extremes, never a panic.
         assert_eq!(
-            media_clock_window(&[(0, i64::MIN), (1, i64::MAX)], i64::MAX, i64::MAX).drift_us,
+            media_clock_window(
+                &[(0, i64::MIN), (1, i64::MAX)],
+                i64::MAX,
+                i64::MAX,
+                i64::MAX
+            )
+            .drift_us,
             i64::MAX / 1000
         );
-        // an even count of MIN and MAX: MIN + MAX / 2 < 0, times a huge window saturates to MIN
+        // an even count of MIN and MAX: the centre MIN + MAX / 2 < 0 keeps neither (band 25 000), so the
+        // centre is the rate; times a huge window it saturates to MIN
         assert_eq!(
-            media_clock_window(&[(0, 0), (1, i64::MIN), (2, i64::MAX)], i64::MAX, i64::MAX)
-                .drift_us,
+            media_clock_window(
+                &[(0, 0), (1, i64::MIN), (2, i64::MAX)],
+                i64::MAX,
+                i64::MAX,
+                GENLOCK_MEDIA_CLOCK_BAND_PPB
+            )
+            .drift_us,
             i64::MIN / 1000
+        );
+        // a saturating sum: two saturated (MAX) rates kept -> the sum saturates, the mean is MAX / 2,
+        // and the window scale saturates again
+        assert_eq!(
+            media_clock_window(&[(0, 0), (1, 1 << 62), (2, i64::MAX)], 1000, 5000, i64::MAX)
+                .drift_us,
+            i64::MAX / 1000
         );
     }
 
