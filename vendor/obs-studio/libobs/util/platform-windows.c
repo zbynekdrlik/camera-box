@@ -556,6 +556,7 @@ uint64_t os_gettime_ns(void)
 	uint64_t num;
 	uint64_t den;
 	LARGE_INTEGER count;
+	unsigned int spins = 0;
 
 	for (;;) {
 		os_clk_snapshot(&seg, &qpc);
@@ -567,7 +568,12 @@ uint64_t os_gettime_ns(void)
 		 * segment yet; wait for the thread initialising it. */
 		if (seg.rate_den != 0)
 			return os_clk_seg_now(&seg, qpc, freq);
-		YieldProcessor();
+		if (++spins < 64) {
+			YieldProcessor();
+		} else {
+			SwitchToThread();
+			spins = 0;
+		}
 	}
 
 	/* The single writer. The adjustment syscall stays outside the odd window. */
