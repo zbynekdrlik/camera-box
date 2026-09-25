@@ -65,6 +65,16 @@ same-session title check `build <9-char sha> - <label>: <profile>` (label locali
 byte-identical. The managed stop-first/restart-last bracket below is HAS_AHK=1 only; no planner picks
 it now (owner ruling on the ticket). Pinned by `tests/launch_obs_genlock.rs` (`*_1372`).
 
+Three gotchas from that slice, for any NEW check added to these emitted programs:
+- **The OBS window title is localized.** `Str("TitleBar.Profile")` is `Profil` in sk-SK/cs-CZ, so a
+  title check matches `build <sha> - [^:]+: <profile>( - |$)`, never the English literal.
+- **`Write-Error` under `$ErrorActionPreference = 'Stop'` throws, so the `exit N` after it never runs:**
+  the process exits 1. Every existing fail line (exits 5-8) has this shape, so a caller that branches
+  on the specific code is wrong. Use `[Console]::Error.WriteLine(...)` then `exit N` if a code matters.
+- **Re-checking that a process is gone after `Stop-Process`:** `Kill` does not wait. `Wait-Process
+  -Timeout` first, then count LIVE instances only (`-not HasExited -and Threads.Count -gt 0`). A fixed
+  sleep, or counting a 0-thread handle, false-fails (the obs64 zombie class in `win-ssh-vs-mcp.md`).
+
 ## AHK stop-first/restart-last MUST wrap EVERY obs64-kill site, not just the redraw loop (#1272)
 
 `build_launch_program`'s AHK bracket (`$ahkStopped`/`ahk_stop_ps`/`ahk_restart_ps`, has_ahk=1 only)
