@@ -311,11 +311,14 @@ fn backlog_branch_resets_a_stale_burst_anchor_1367() {
         })
     };
     let n = pos("const uint32_t n_for_log =");
+    // The arrival floor is the NEWEST queued frame at the processing wall (the governor's own
+    // floor reference), the N==1 gate mirrors its source wrappers, and the latched D is passed.
     let depth = pos(
-        "const uint64_t expected_frames_1367 = (n_for_log < 2 && source->genlock_last_known_n < 2) \
-         ? genlock_n1_expected_depth_frames(",
+        "const uint64_t newest_1367 = source->async_frames.array[source->async_frames.num - 1]->timestamp; \
+         const uint64_t expected_frames_1367 = (n_for_log < 2 && source->genlock_last_known_n < 2) ? \
+         genlock_n1_expected_depth_frames(wall_now > newest_1367 ? wall_now - newest_1367 : 0, reserve_ms, \
+         interval, source->genlock_shallow_target_frames) : 0;",
     );
-    let latched = pos("source->genlock_shallow_target_frames) : 0;");
     let expected = pos(
         "const size_t sel_exp_1367 = genlock_relock_select_expected(source, wall_now, reserve_ms, \
          expected_frames_1367, interval);",
@@ -328,8 +331,7 @@ fn backlog_branch_resets_a_stale_burst_anchor_1367() {
     let log = pos("stale_reset=%d");
     assert!(
         n < depth
-            && depth < latched
-            && latched < expected
+            && depth < expected
             && expected < stale
             && stale < guard
             && guard < reset

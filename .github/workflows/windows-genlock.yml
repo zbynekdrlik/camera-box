@@ -781,8 +781,8 @@ jobs:
           if ($src -notmatch [regex]::Escape('const bool stale_1367 = genlock_relock_anchor_is_stale(sel_1003, sel_exp_1367, n_for_log);')) {
             Write-Error "obs-source.c: the BACKLOG branch no longer tests the anchor for a stale burst phase (issue 1367)"; exit 1
           }
-          if ($src -notmatch [regex]::Escape('const uint64_t expected_frames_1367 = (n_for_log < 2 && source->genlock_last_known_n < 2) ? genlock_n1_expected_depth_frames(')) {
-            Write-Error "obs-source.c: the BACKLOG branch no longer reads the N==1 governor depth (base + 1 / latched D) for the stale-anchor test - a correct deep or shallow N==1 anchor would be reset (ROZHODNUTE 5840479751, issue 1367)"; exit 1
+          if ($src -notmatch [regex]::Escape('const uint64_t newest_1367 = source->async_frames.array[source->async_frames.num - 1]->timestamp; const uint64_t expected_frames_1367 = (n_for_log < 2 && source->genlock_last_known_n < 2) ? genlock_n1_expected_depth_frames(wall_now > newest_1367 ? wall_now - newest_1367 : 0, reserve_ms, interval, source->genlock_shallow_target_frames) : 0;')) {
+            Write-Error "obs-source.c: the BACKLOG branch no longer reads the N==1 governor depth (base + 1 / latched D, from the newest-frame arrival floor) for the stale-anchor test - a correct deep or shallow N==1 anchor would be reset (ROZHODNUTE 5840479751, issue 1367)"; exit 1
           }
           if ($src -notmatch [regex]::Escape('if (genlock_n1_is_deep_source(arrival_floor_ns, latency_ms, interval_ns)) return genlock_n1_base_frames(latency_ms, interval_ns) + 1; if (genlock_n1_shallow_governs(shallow_target_frames, arrival_floor_ns, latency_ms, interval_ns)) return shallow_target_frames; return 0;')) {
             Write-Error "obs-source.c: genlock_n1_expected_depth_frames no longer derives the expected depth from the N==1 governor (deep base + 1, else the latched D, else 0) (issue 1367)"; exit 1

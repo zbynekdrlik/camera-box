@@ -202,6 +202,22 @@ fn the_expected_age_is_the_expected_depth_floored_at_the_pin_1367() {
     assert_eq!(relock_expected_age_ns(u64::MAX, 3, I30), u64::MAX);
 }
 
+/// The one Rust helper the sim and the probe share: the newest-frame floor, the N==1 governor
+/// depth when `n1`, and the pick at it.
+#[test]
+fn the_expected_pick_reads_the_governor_depth_only_on_n1_1367() {
+    let q = queue_at(W0, 40, 40 * I30 + 5_000_000, I30);
+    // Deep 2ME PGM (pin 987): base + 1 = 31 frames -> index 9 (40 - 31).
+    assert_eq!(relock_select_expected(&q, W0, 987, I30, true, 0), 9);
+    // Not N==1: the configured latency -> index 11 (the 5 ms late tick rounds 987 ms there).
+    assert_eq!(relock_select_expected(&q, W0, 987, I30, false, 0), 11);
+    // Shallow governed at D = 4 (pin 3, floor one frame): index 4 of an 8-frame queue.
+    let q = queue_at(W0, 8, 8 * I30 + 10_000_000, I30);
+    assert_eq!(relock_select_expected(&q, W0, 3, I30, true, 4), 4);
+    assert_eq!(relock_select_expected(&q, W0, 3, I30, true, 0), 7);
+    assert_eq!(relock_select_expected(&[], W0, 3, I30, true, 4), 0);
+}
+
 #[test]
 fn stale_boundary_is_strictly_more_than_n_plus_one_source_frames_1367() {
     // n = 2 (60-into-30): a gap of 3 is kept, 4 is past it.

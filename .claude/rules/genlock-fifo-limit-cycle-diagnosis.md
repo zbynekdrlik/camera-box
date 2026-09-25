@@ -222,21 +222,35 @@ arrived late. The anchor pick sheds only the frames that age past it, while a 60
 two per tick, so the depth never drops below `steady_depth + 6·n`. The old `sel_1003 == 0`
 stale guard never fires because the pick is 1.
 
-**Fix (lane branch, pending integration):** `relock_anchor_is_stale(sel_anchor, sel_configured, n)`
-(`src/genlock_backlog.rs`) with its byte-identical C twin. The BACKLOG branch now resets on
-`(sel_1003 == 0 || stale_1367)` and logs `stale_reset=1`. `stale_reset=1` on the relock line is the
-live tell that the reset fired. The C nearest scan is now an age-taking core
-(`genlock_relock_select_nearest_age`) with two wrappers: the anchor pick and
-`genlock_relock_select_configured`.
+**Fix (ROZHODNUTÉ 5840479751):** the BACKLOG branch compares the anchor pick with the pick at the
+depth the source is SUPPOSED to hold, and resets on `(sel_1003 == 0 || stale_1367)`:
 
-**Trap — measure the tolerance against a CORRECT conveyor, not the bare pin (review round 1).**
-The configured-latency pick is NOT where a healthy N==1 conveyor sits. A deep N==1 source settles on
-`base + 1` frames, and a governed shallow one on D ≤ base + 3. When the relock tick lands a few ms
-late on the grid, a CORRECT anchor reads 2 frames behind the configured pick (pin 987 ms: gap 2 from
-ε ≈ 5 ms). A tolerance of `n` frames therefore resets a healthy 2ME PGM anchor. The tolerance
-decision went to the main as a Design-question on the ticket. Any future test of this rule must
-include a `(base + 1) × interval` anchor with a non-zero ε; a fixture 1.05 frames apart proves
-nothing.
+| Piece | Rust | C (`obs-source.c`) |
+|---|---|---|
+| governor depth: `base + 1` when deep, the latched D while it governs a shallow source, else 0 | `n1_expected_depth_frames` (`src/genlock_n1_depth.rs`, built only from `n1_is_deep_source` / `n1_target_frames` / `n1_shallow_governs`) | `genlock_n1_expected_depth_frames`, in the lifted N==1 block |
+| the pick at that depth, floored at the configured latency | `relock_expected_age_ns` + `relock_select_expected` (floor = newest queued frame, `n1` gate) | `genlock_relock_select_expected`, in the lifted #1003 block |
+| stale = more than `n + 1` source frames behind that pick | `relock_anchor_is_stale` | `genlock_relock_anchor_is_stale` |
+
+- The branch reads the arrival floor from the NEWEST queued frame at the processing wall (the
+  governor's own floor reference).
+- It gates on `n_for_log < 2 && genlock_last_known_n < 2`, like the governor's source wrappers.
+- It passes `genlock_shallow_target_frames`.
+- The `genlock-relock` line carries `expected_frames=` (the depth the anchor was judged by; 0 =
+  the configured pick) and `stale_reset=1` (the live tell that the anchor was dropped).
+- A reset re-selects at the CONFIGURED latency, same as the shed-nothing reset. On a governed
+  N==1 source the HOLD then repeats back to `base + 1` / D (one frame per #859 throttle window).
+
+**Why the governor depth, not the bare pin (review round 1).** A healthy N==1 conveyor does not sit
+at the configured-latency pick. The deep 2ME PGM settles on `base + 1`, a governed shallow source on
+D ≤ base + 3, and a relock tick a few ms late shifts the configured pick one more frame. A CORRECT
+anchor read 2–4 frames behind the bare pin. Against the governor depth it reads 0, and the `+ 1`
+covers the late tick. The round-2 review replayed 200 k correct anchors (pins 3–1000 ms, D base+1..+3,
+ε 0–16 ms): 0 false resets, the worst gap exactly 2, at the absorbing `base + 2`.
+
+**Known narrow case:** an N==1 source with no governor depth yet (not deep, no latched D, before
+its first latch) is judged by the configured pick. An absorbing `base + 2` conveyor there reads a
+gap of 3 and resets. Any test of this rule must use a `(base + 1) × interval` / D anchor with a
+non-zero late-tick ε; a fixture 1.05 frames apart proves nothing.
 
 **Verification recipe (Tier-0):** a `#[path]` harness `lib.rs` of genlock_grid + genlock_backlog +
 genlock_n1_depth + `probe { genlock }` under `clippy-driver --test -D warnings` runs the authority,

@@ -1646,28 +1646,14 @@ impl ReleaseCadence {
                 // in `backlog_relock_qdepth`). Mirror of the C
                 // `if ((sel_1003 == 0 || stale_1367) && source->genlock_phase_anchor_ns != 0)`.
                 let n = self.read_only_source_multiple(queue, interval_ns);
-                let floor = queue
-                    .back()
-                    .map_or(0, |&newest| wall_now_ns.saturating_sub(newest));
-                let expected = if n < 2 && self.last_known_n < 2 {
-                    crate::genlock_n1_depth::n1_expected_depth_frames(
-                        floor,
-                        reserve_ms,
-                        interval_ns,
-                        0,
-                    )
-                } else {
-                    0
-                };
                 let queue_ts: Vec<u64> = queue.iter().copied().collect();
-                let sel_expected = crate::genlock_backlog::relock_select_nearest(
+                let sel_expected = crate::genlock_backlog::relock_select_expected(
                     &queue_ts,
                     wall_now_ns,
-                    crate::genlock_backlog::relock_expected_age_ns(
-                        expected,
-                        reserve_ms,
-                        interval_ns,
-                    ),
+                    reserve_ms,
+                    interval_ns,
+                    n < 2 && self.last_known_n < 2,
+                    0,
                 );
                 let stale = crate::genlock_backlog::relock_anchor_is_stale(sel, sel_expected, n);
                 if (sel == 0 || stale) && self.phase_anchor_ns != 0 {

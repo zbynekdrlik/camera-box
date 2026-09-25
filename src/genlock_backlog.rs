@@ -600,6 +600,42 @@ pub fn relock_expected_age_ns(expected_frames: u64, latency_ms: u32, interval_ns
     relock_anchor_age_ns(expected_frames.saturating_mul(interval_ns), latency_ms)
 }
 
+/// Issue 1367 (ROZHODNUTÉ 5840479751) — the BACKLOG relock's EXPECTED-depth pick over `queue_ts`
+/// (oldest first), the whole chain in one place: the arrival floor is the age of the NEWEST queued
+/// frame at `wall_now_ns` (the governor's own floor reference); on an N==1 source (`n1`, the
+/// caller's `n < 2 && last_known_n < 2` gate) the depth is the N==1 governor's
+/// `crate::genlock_n1_depth::n1_expected_depth_frames` with the latched shallow D, otherwise 0
+/// (the configured latency); the pick is [`relock_select_nearest`] at
+/// [`relock_expected_age_ns`]. Mirror of the C BACKLOG branch's `expected_frames_1367` +
+/// `genlock_relock_select_expected()`.
+pub fn relock_select_expected(
+    queue_ts: &[u64],
+    wall_now_ns: u64,
+    latency_ms: u32,
+    interval_ns: u64,
+    n1: bool,
+    shallow_target_frames: u64,
+) -> usize {
+    let expected = if n1 {
+        let floor = queue_ts
+            .last()
+            .map_or(0, |&newest| wall_now_ns.saturating_sub(newest));
+        crate::genlock_n1_depth::n1_expected_depth_frames(
+            floor,
+            latency_ms,
+            interval_ns,
+            shallow_target_frames,
+        )
+    } else {
+        0
+    };
+    relock_select_nearest(
+        queue_ts,
+        wall_now_ns,
+        relock_expected_age_ns(expected, latency_ms, interval_ns),
+    )
+}
+
 /// Issue 1367 — is the tracked phase anchor STALE for a BACKLOG relock?
 ///
 /// `sel_anchor` is the index [`relock_select_nearest`] picks against the tracked anchor;
@@ -1673,11 +1709,7 @@ mod tests {
                     // sits more than n + 1 frames behind the pick at the depth the N==1
                     // governor holds the source at (an arrival-burst phase). This sim is
                     // 30-into-30 (n = 1) and carries no shallow latch (D = 0).
-                    let floor = q.last().map_or(0, |&newest| wall.saturating_sub(newest));
-                    let expected =
-                        crate::genlock_n1_depth::n1_expected_depth_frames(floor, ms, I30, 0);
-                    let sel_expected =
-                        relock_select_nearest(&q, wall, relock_expected_age_ns(expected, ms, I30));
+                    let sel_expected = relock_select_expected(&q, wall, ms, I30, true, 0);
                     let stale = relock_anchor_is_stale(i, sel_expected, 1);
                     if backlog && (i == 0 || stale) && self.phase_anchor_ns != 0 {
                         self.phase_anchor_ns = 0;
