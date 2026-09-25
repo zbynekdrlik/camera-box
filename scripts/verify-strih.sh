@@ -257,14 +257,24 @@ fi
 #    offset with the PTP servo LOCKED is disciplined near-zero (the #550 reasoning) -> PASS; not
 #    locked -> FAIL (no trustworthy clock signal). setup-strih.sh step 2 refuses an ambiguous
 #    role+args shape (strih_lx_dantesync_role_ok) at install time; the role itself is graded in 6b.
+#    Issue 1372: under dantesync 1.9.0 strih-lx is the fleet DATE master, whose `(date authority,
+#    ..., step bound Nus)` journal line is graded on that step bound + margin through the shared
+#    dantesync_journal_clock_verdict (clock-offset-guard.sh), never on the 2 ms UTC bound.
 DS_ACTIVE="$(systemctl is-active dantesync 2>/dev/null || true)"
 if [ "$DS_ACTIVE" != active ]; then
   bad "dantesync.service not active (state='${DS_ACTIVE:-<none>}') -- clock undisciplined/free-running"
 else
   DS_JOURNAL="$(journalctl -u dantesync --no-pager -n 400 -o short-iso 2>/dev/null || true)"
-  case "$(dantesync_offset_verdict "$DS_JOURNAL" "${DANTESYNC_OFFSET_FRESHNESS_S:-300}" "${CLOCK_GUARD_BOUND_US:-2000}" "${DANTESYNC_STABILITY_US:-2000}")" in
+  # Issue 1372: strih-lx is the fleet DATE master under dantesync 1.9.0; its journal reads
+  # `[NTP] offset:-25217us (date authority, fleet line ..., step bound 50000us)` and is graded on
+  # that step bound + DANTESYNC_DATE_MARGIN_US, median-only (dantesync_journal_clock_verdict). Any
+  # other journal line shape keeps the CLOCK_GUARD_BOUND_US + stability grade.
+  DS_STEP_US="$(date_step_bound_us_from_journal "$DS_JOURNAL")"
+  DS_BOUND_TXT="${CLOCK_GUARD_BOUND_US:-2000}us bound"
+  [ -n "$DS_STEP_US" ] && DS_BOUND_TXT="date master step bound ${DS_STEP_US}us + ${DANTESYNC_DATE_MARGIN_US:-1000}us margin"
+  case "$(dantesync_journal_clock_verdict "$DS_JOURNAL" "${DANTESYNC_OFFSET_FRESHNESS_S:-300}" "${CLOCK_GUARD_BOUND_US:-2000}" "${DANTESYNC_STABILITY_US:-2000}" "${DANTESYNC_DATE_MARGIN_US:-1000}")" in
     ok)
-      ok "dantesync active + FRESH clock offset within ${CLOCK_GUARD_BOUND_US:-2000}us bound" ;;
+      ok "dantesync active + FRESH clock offset within ${DS_BOUND_TXT}" ;;
     stale|absent)
       if [ "$(ptp_locked_from_journal "$DS_JOURNAL")" = LOCKED ]; then
         ok "dantesync active + PTP servo LOCKED (no fresh [NTP] line; offset disciplined near-zero, #550)"
@@ -272,7 +282,7 @@ else
         bad "dantesync active but NO fresh clock offset and PTP servo not LOCKED -- no trustworthy clock signal"
       fi ;;
     *)
-      bad "dantesync clock offset OUTSIDE the ${CLOCK_GUARD_BOUND_US:-2000}us bound / unstable -- a REAL clock desync" ;;
+      bad "dantesync clock offset OUTSIDE the ${DS_BOUND_TXT} / unstable -- a REAL clock desync" ;;
   esac
 fi
 

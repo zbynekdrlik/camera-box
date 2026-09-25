@@ -931,11 +931,12 @@ echo "[0/8] DanteSync NTP+PTP gate — $CAMERA_NAME, cam2, strih, stream must AL
 # grandmaster 10.77.9.184 (dantesync election + PTP-interface fix v1.8.42-1.8.46), so a node
 # PTP-locked to a foreign/unreadable GM now HARD-fails here (FOREIGN->20, UNKNOWN->11) instead of
 # only being reported — the stream-on-a-foreign-GM false-green issue 834/1073 is about.
-# Enforce PHASE-SLEW too (was report-first per issue 1130). phase_slew_check ships report-only in
-# dantesync-gate.sh (DANTESYNC_GATE_PHASE_SLEW_ENFORCE default 0); every graded fleet node now
-# serves phase_slew_enabled=true (the fleet-wide cure for the chronic NTP step storm, verified
-# 2026-09-02 including cam5/cam6/cam7), so a box that silently reverts to phase_slew=off now
-# HARD-fails here (DISABLED->20, UNKNOWN->11) instead of only being reported.
+# Enforce the CLOCK DISCIPLINE too (was the issue-1130 phase_slew flag). The env name keeps its
+# phase_slew wording; since issue 1372 it enforces clock-offset-guard.sh's clock_discipline_check:
+# dantesync 1.9.0's ptp_phase_lock (phase_slew off by design) or a pre-1.9.0 node with phase_slew
+# on pass, a pre-1.9.0 node that would STEP (phase_slew off) or a phase lock that is not locked
+# HARD-fails here (->20), an unreadable discipline is INCOMPLETE (->11). The fleet date master
+# (strih-lx, date_authority=master) is graded on its own date step bound, always on.
 DANTESYNC_GATE_GM_ENFORCE=1 DANTESYNC_GATE_PHASE_SLEW_ENFORCE=1 ${STRIH_LX_GATE_PREFIX:-} "$HERE/dantesync-gate.sh" \
   --bound-us "${CLOCK_GUARD_BOUND_US:-2000}" \
   --win-http-port "${WIN_DANTE_PORT:-8898}" \
@@ -1445,9 +1446,9 @@ if [ "${ALL_CAMBOX:-0}" = "1" ]; then
     # call (harmless, already proven clean by the main gate above).
     # Enforce grandmaster identity here too (issue 1073): this call grades strih (the NTP master),
     # whose grandmaster identity must be enforced exactly like the main gate above.
-    # Enforce phase_slew here too (issue 1130 enforce follow-up): this call grades strih plus the
-    # active secondary cameras, whose phase_slew state must be enforced exactly like the main
-    # gate above.
+    # Enforce the clock discipline here too (issue 1130 enforce follow-up, re-scoped to the
+    # dantesync 1.9.0 discipline by issue 1372): this call grades strih plus the active secondary
+    # cameras, whose discipline must be enforced exactly like the main gate above.
     DANTESYNC_GATE_GM_ENFORCE=1 DANTESYNC_GATE_PHASE_SLEW_ENFORCE=1 "$HERE/dantesync-gate.sh" \
       --bound-us "${CLOCK_GUARD_BOUND_US:-2000}" \
       --win-http-port "${WIN_DANTE_PORT:-8898}" \

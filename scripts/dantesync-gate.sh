@@ -186,12 +186,12 @@ GATE_GRANDMASTER_IP="${RIG_GRANDMASTER_IP:-}"
 # foreign grandmaster (a rig/dantesync BMCA/subnet fix tracked separately, out of #834's scope). Flip
 # to 1 once every node holds the rig grandmaster. Overridable via DANTESYNC_GATE_GM_ENFORCE.
 GATE_GM_ENFORCE="${DANTESYNC_GATE_GM_ENFORCE:-0}"
-# #1130 REPORT-FIRST (mirrors #834): the phase_slew check ALWAYS prints a loud PHASE-SLEW
-# ENABLED/DISABLED/UNKNOWN line per HTTP-graded node (phase_slew = the fleet-wide NTP-step-storm
-# cure, dantesync issue 97), but only feeds the node's OK/BAD verdict (i.e. can FAIL the gate) when
-# this is 1. Default 0 -- so wiring the check cannot brick the standing E2E gate; flip to 1 (a
-# one-prefix change in recording-e2e.sh, like GM's #1073) once every graded node is confirmed to
-# serve phase_slew_enabled. Overridable via DANTESYNC_GATE_PHASE_SLEW_ENFORCE.
+# #1130 REPORT-FIRST (mirrors #834), re-scoped by issue 1372: the CLOCK-DISCIPLINE check ALWAYS
+# prints a line per HTTP-graded node (clock-offset-guard.sh's clock_discipline_check: dantesync
+# 1.9.0's PTP phase lock, or a pre-1.9.0 node's phase_slew state), but only feeds the node's OK/BAD
+# verdict (i.e. can FAIL the gate) when this is 1. Default 0; recording-e2e.sh sets it to 1 on both
+# gate calls. The env name keeps its pre-1.9.0 phase_slew wording for compatibility.
+# Overridable via DANTESYNC_GATE_PHASE_SLEW_ENFORCE.
 GATE_PHASE_SLEW_ENFORCE="${DANTESYNC_GATE_PHASE_SLEW_ENFORCE:-0}"
 
 # read_linux_node_journal NAME IP -> that Linux node's latest DanteSync journald lines over SSH,
@@ -469,7 +469,19 @@ grade_http_node() {
   # LINUX client additionally fetches ITS OWN freshest journal to derive its real threshold, ONLY
   # when a master is genuinely configured (master_chase_status non-empty) -- a plain invocation
   # with no master configured never pays this extra SSH call.
-  if [ "$mode" = "median-only" ]; then
+  if [ "$mode" = "median-only" ] && [ "$(date_master_verdict "$status" "$deadband_margin")" != none ]; then
+    # Issue 1372 (dantesync 1.9.0 / dantesync#88): the NTP master is the fleet DATE authority. It
+    # lets the fleet line sit up to date_step_bound_ms off UTC, then makes a coordinated fleet
+    # step, so its own ntp_offset_us (that fleet-line error) is graded on the step bound + margin
+    # (clock-offset-guard.sh's date_master_effective_bound_us), never the 2 ms UTC bound and never
+    # by accident through the #1021 deadband widening. date_master_check below grades the
+    # freshest date_offset_error_ms on the same bound.
+    local orig_bound="$bound"
+    bound="$(date_master_effective_bound_us "$status" "$bound" "$deadband_margin")"
+    if [ "$bound" != "$orig_bound" ]; then
+      deadband_note=" -- date master graded on its own step bound: bound ${bound}us = date_step_bound_ms + ${deadband_margin}us margin (the fleet date may sit up to the step bound off UTC before a coordinated fleet step, dantesync#88/#1372; base bound ${orig_bound}us)"
+    fi
+  elif [ "$mode" = "median-only" ]; then
     local orig_bound="$bound"
     # #1119: the master's median bound floors at max(#1021 deadband floor, step_cap + margin) --
     # v1.8.46's reported ntp_deadband_us (1000us) is the no-step THRESHOLD, not the <=2500us
@@ -668,6 +680,15 @@ grade_http_node() {
       "$name" "$([ -n "$steps_h" ] && [ "$steps_h" != null ] && printf ', %s steps/hour past its 120/h alarm' "$steps_h")"
     rc_off=2
   fi
+  # Issue 1372: the date master's freshest date_offset_error_ms must sit within its own step bound
+  # + margin (a date the master failed to step is a real fault). Silent and rc 0 on any node that
+  # is not the date master; folds into the offset rc. Like the #1119 storm check it only grades a
+  # freshly-graded payload (rc_off != 3): a stale/unknown status stays UNKNOWN, never flipped BAD.
+  local rc_date=0
+  if [ "$rc_off" != 3 ]; then
+    date_master_check "$name" "$status" "$deadband_margin" || rc_date=$?
+    [ "$rc_date" != 0 ] && [ "$rc_off" != 2 ] && rc_off="$rc_date"
+  fi
   ptp="$(ptp_locked_from_pipe_json "$status")"
   rc_ptp=0; ptp_check "$name" "$ptp" || rc_ptp=$?
   # #834: grandmaster IDENTITY -- gm_check ALWAYS prints its GM OK/FOREIGN/UNKNOWN line (report), but
@@ -685,22 +706,18 @@ grade_http_node() {
   gm_actual="$(gm_source_ip_from_pipe_json "$status")"
   gm_check "$name" "$gm_actual" "$GATE_GRANDMASTER_IP" || rc_gm=$?
   [ "$GATE_GM_ENFORCE" = 1 ] && gm_gate_rc="$rc_gm"
-  # #1130: phase_slew (dantesync issue 97) is the fleet-wide CURE for the chronic NTP step storm this
-  # ticket tracks -- a bounded rate-slew that absorbs UTC phase error instead of stepping it (proven
-  # live 2026-09-01: every graded node phase_slew_enabled=true, master ntp_steps_last_hour=0). It is a
-  # per-box config toggle, so a box that silently reverts to phase_slew=off would re-introduce the
-  # storm, uncaught until dantesync's own >120/h ntp_step_storm alarm (far above the visible-judder
-  # threshold). REPORT-FIRST like gm_check (#834): the PHASE-SLEW ENABLED/DISABLED/UNKNOWN line is
-  # ALWAYS printed per HTTP-graded node, but its rc feeds node_verdict ONLY when
-  # GATE_PHASE_SLEW_ENFORCE=1 (default 0 -> ps_gate_rc stays 0, verdict byte-identical to today). The
-  # enforce flip is a one-prefix follow-up (cf. gm #834->#1073) once the full graded node set is
-  # confirmed to serve phase_slew_enabled. HTTP-path only, same freshest $status the offset/PTP/GM
-  # checks graded; the journal FALLBACK returns before here (journald carries no phase_slew_enabled,
-  # verify-imag.sh:1239 documents the same). phase_slew_enabled_from_pipe_json/phase_slew_check are the
-  # #1215 pure functions in clock-offset-guard.sh, already used by verify-imag.sh for the imag box.
-  local ps_actual rc_ps=0 ps_gate_rc=0
-  ps_actual="$(phase_slew_enabled_from_pipe_json "$status")"
-  phase_slew_check "$name" "$ps_actual" || rc_ps=$?
+  # Issue 1372 (was the #1130 phase_slew check): the node's CLOCK DISCIPLINE. dantesync 1.9.0 runs
+  # `ptp_phase_lock` by default -- the rate and phase from the PTP tick only, phase_slew_enabled=false
+  # BY DESIGN -- and `clock_discipline=legacy` restores the pre-1.9.0 servo, where phase_slew is again
+  # the cure for the NTP step storm (#1130/#1215). So the check grades the discipline through the ONE
+  # shared classifier (clock-offset-guard.sh's clock_discipline_check): PTP_PHASE_LOCK or LEGACY_SLEW
+  # pass; LEGACY_NO_SLEW fails (the #1215 stepping node, rc 2); a phase lock with
+  # ptp_phase_locked=false fails by name (PTP-PHASE UNLOCKED, rc 2); unreadable is UNKNOWN (rc 3).
+  # REPORT-FIRST like gm_check (#834): the line ALWAYS prints per HTTP-graded node, but its rc feeds
+  # node_verdict ONLY when GATE_PHASE_SLEW_ENFORCE=1 (the env name is kept for compatibility; it now
+  # enforces the clock discipline). HTTP-path only: the journal FALLBACK returns before here.
+  local rc_ps=0 ps_gate_rc=0
+  clock_discipline_check "$name" "$status" || rc_ps=$?
   [ "$GATE_PHASE_SLEW_ENFORCE" = 1 ] && ps_gate_rc="$rc_ps"
   printf '%s' "$(node_verdict "$rc_off" "$rc_ptp" "$gm_gate_rc" "$ps_gate_rc")" > "$verdictfile"
 }
@@ -794,14 +811,20 @@ Options:
                        like a DRIFT/PTP-degraded node. Kept report-first so wiring the check does not
                        brick the standing E2E gate while a rig-side grandmaster mis-election is still
                        being fixed; flip to 1 once every node holds RIG_GRANDMASTER_IP.
-    DANTESYNC_GATE_PHASE_SLEW_ENFORCE  0 (default) = REPORT-FIRST: a PHASE-SLEW
-                       ENABLED/DISABLED/UNKNOWN line is printed per HTTP-graded node but does NOT
-                       affect the verdict. 1 = a DISABLED/unreadable phase_slew is a hard node
-                       failure (DISABLED => BAD/20, UNKNOWN => INCOMPLETE/11). phase_slew (dantesync
-                       issue 97) is the fleet-wide cure for the chronic NTP step storm (#1130) --
-                       a box reverting to stepping re-introduces visible judder; report-first
-                       surfaces it every run, flip to 1 once every graded node serves
-                       phase_slew_enabled (a one-prefix change in recording-e2e.sh, cf. GM's #1073).
+    DANTESYNC_GATE_PHASE_SLEW_ENFORCE  0 (default) = REPORT-FIRST: a CLOCK discipline line is
+                       printed per HTTP-graded node but does NOT affect the verdict. 1 = the
+                       discipline is enforced (issue 1372; the env name keeps its phase_slew
+                       wording for compatibility): dantesync 1.9.0's CLOCK PTP-PHASE-LOCK or a
+                       pre-1.9.0 node's CLOCK LEGACY PHASE-SLEW ENABLED pass; LEGACY PHASE-SLEW
+                       DISABLED (the #1130/#1215 stepping node) and a PTP-PHASE UNLOCKED phase
+                       lock are BAD/20; an unreadable discipline is INCOMPLETE/11.
+                       recording-e2e.sh sets it to 1 on both gate calls.
+    Date master (issue 1372, dantesync 1.9.0, always on): the node whose /status says
+                       date_authority=master (the NTP master) is graded on its OWN date step
+                       bound -- |date_offset_error_ms| <= date_step_bound_ms + --deadband-margin-us
+                       (a DATE MASTER OK/OUT/UNKNOWN line) -- and its median bound is the same
+                       step bound + margin instead of the #1021/#1119 widening below. The fleet
+                       date may sit up to the step bound off UTC before a coordinated fleet step.
   --deadband-margin-us N  #1021 (dantesync PR #84/#86, closes dantesync issue 83): when the NTP
                        master's own /status reports a numeric "ntp_deadband_us" (its currently
                        active PTP-locked step-deferral threshold), the master's median bound

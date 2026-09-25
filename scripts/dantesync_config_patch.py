@@ -5,8 +5,12 @@ RESOLUME-SNV's dantesync carried NO ``system.phase_slew`` key, so it STEPS its U
 discrete jumps (the issue-1130 storm the rig boxes + mbc already cured by enabling phase_slew).
 This helper turns the on-box flip into a reviewed, repeatable, text-only transform:
 
-  * set ``system.phase_slew.enabled = true`` (creating the nesting, preserving every sibling key
-    and the document's key order),
+  * set the clock policy (issue 1372): for a dantesync 1.9.0+ node (the default) write
+    ``system.clock_discipline = "ptp_phase_lock"`` -- the rate and phase from the PTP tick only,
+    phase slew is not used -- and leave ``system.phase_slew`` exactly as it is (1.9.0 ignores it).
+    For a pre-1.9.0 node (``legacy_phase_slew=True`` / ``--legacy-phase-slew``) keep the old flip,
+    ``system.phase_slew.enabled = true``. Either way the nesting is created and every sibling key
+    and the document's key order are preserved,
   * optionally repoint ``ntp_server`` -- PARAMETRISED, default UNCHANGED until the dantesync
     failover-list feature (zbynekdrlik/dantesync#111) lands and the master-chain target is decided
     on the ticket,
@@ -36,13 +40,19 @@ def _nsm_fingerprint(cfg):
     return json.dumps(cfg["ntp_server_mode"], sort_keys=True)
 
 
-def patch_config(text, ntp_server=None):
-    """Return TEXT (a dantesync config.json) with system.phase_slew.enabled=true, preserving every
-    other key + order, optionally repointing ntp_server, and NEVER touching ntp_server_mode.
+def patch_config(text, ntp_server=None, legacy_phase_slew=False):
+    """Return TEXT (a dantesync config.json) with the clock policy set, preserving every other key +
+    order, optionally repointing ntp_server, and NEVER touching ntp_server_mode.
+
+    The clock policy (issue 1372): by default ``system.clock_discipline = "ptp_phase_lock"`` (the
+    dantesync 1.9.0 discipline; a ``legacy`` value is replaced) with ``system.phase_slew`` left
+    untouched. ``legacy_phase_slew=True`` instead sets ``system.phase_slew.enabled = true`` for a
+    pre-1.9.0 node, which has no clock_discipline and cures its step storm by slewing.
 
     Raises ConfigPatchError on invalid JSON, a non-object top level, a non-object ``system`` /
-    ``system.phase_slew`` (we refuse to clobber an unexpected shape), an empty ntp_server, or if
-    ntp_server_mode would change (defensive -- it never should, so a change means a bug)."""
+    ``system.phase_slew`` in legacy mode (we refuse to clobber an unexpected shape), an empty
+    ntp_server, or if ntp_server_mode would change (defensive -- it never should, so a change
+    means a bug)."""
     try:
         cfg = json.loads(text)
     except json.JSONDecodeError as exc:
@@ -52,20 +62,25 @@ def patch_config(text, ntp_server=None):
 
     nsm_before = _nsm_fingerprint(cfg)
 
-    # system.phase_slew.enabled = true, creating the nesting but preserving any sibling keys.
+    # The clock policy, creating the system nesting but preserving any sibling keys.
     system = cfg.get("system")
     if system is None:
         system = {}
         cfg["system"] = system
     elif not isinstance(system, dict):
         raise ConfigPatchError('"system" is present but is not a JSON object')
-    phase_slew = system.get("phase_slew")
-    if phase_slew is None:
-        phase_slew = {}
-        system["phase_slew"] = phase_slew
-    elif not isinstance(phase_slew, dict):
-        raise ConfigPatchError('"system.phase_slew" is present but is not a JSON object')
-    phase_slew["enabled"] = True
+    if legacy_phase_slew:
+        # A pre-1.9.0 node: system.phase_slew.enabled = true (the issue-1130 step-storm cure).
+        phase_slew = system.get("phase_slew")
+        if phase_slew is None:
+            phase_slew = {}
+            system["phase_slew"] = phase_slew
+        elif not isinstance(phase_slew, dict):
+            raise ConfigPatchError('"system.phase_slew" is present but is not a JSON object')
+        phase_slew["enabled"] = True
+    else:
+        # dantesync 1.9.0+: the PTP phase lock; phase_slew is ignored by it and left as it is.
+        system["clock_discipline"] = "ptp_phase_lock"
 
     # Optional ntp_server repoint. Default None => leave the existing value exactly as-is (the
     # repoint target is a deferred design decision, see the module docstring).
@@ -142,6 +157,12 @@ def _main(argv=None):
         "of the patched JSON",
     )
     ap.add_argument(
+        "--legacy-phase-slew",
+        action="store_true",
+        help="a pre-1.9.0 dantesync node: set system.phase_slew.enabled=true instead of the 1.9.0 "
+        "system.clock_discipline=ptp_phase_lock (issue 1372)",
+    )
+    ap.add_argument(
         "--ntp-server",
         default=None,
         help="repoint ntp_server to this value (default: leave the existing value unchanged)",
@@ -157,7 +178,8 @@ def _main(argv=None):
 
     text = sys.stdin.read()
     try:
-        patched = patch_config(text, ntp_server=args.ntp_server)
+        patched = patch_config(text, ntp_server=args.ntp_server,
+                               legacy_phase_slew=args.legacy_phase_slew)
     except ConfigPatchError as exc:
         print(f"dantesync_config_patch: {exc}", file=sys.stderr)
         return 1

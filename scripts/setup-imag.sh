@@ -390,13 +390,15 @@ else
 fi
 [ -x /usr/local/bin/dantesync ] || fail "dantesync binary missing after install attempt"
 
-# #1215: install the phase_slew canary config (dantesync issue 97) so dantesync SLEWS phase
-# error smoothly instead of STEPPING it in discrete jumps on a from-scratch provision. imag-nb was
+# #1215: install the dantesync config on a from-scratch provision so the box never STEPS its clock
+# in discrete jumps. Issue 1372: the pinned dantesync (1.9.0+) runs `clock_discipline=ptp_phase_lock`
+# (the rate and phase from the PTP tick only, phase slew not used), written explicitly so the
+# canonical config reads it; the old phase_slew canary key is no longer written. imag-nb was
 # the ONE box on the rig that never received this -- it had no /etc/dantesync/ directory at all
 # and stepped 16x/hour of 6-7ms each, a visible hitch on the projected output every ~4 minutes.
 # The cam1-4 fleet got its copy through an out-of-band canary rollout, never this script -- this
 # is written BEFORE the systemd unit/restart below so the same restart that proves PTP re-lock
-# also picks up phase_slew on a first provision. RIG_GRANDMASTER_IP mirrors the SAME override
+# also picks up the config on a first provision. RIG_GRANDMASTER_IP mirrors the SAME override
 # verify-imag.sh already uses (#834) so one env var controls the grandmaster everywhere.
 _RG_HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # #1307: DNS-named grandmaster (video-clock.lan) via the shared resolver -- the allowlist written
@@ -429,14 +431,12 @@ cat > /etc/dantesync/config.json <<DANTECFGEOF
     "gm_allowlist": [
       "${RIG_GRANDMASTER_IP}"
     ],
-    "phase_slew": {
-      "enabled": true
-    }
+    "clock_discipline": "ptp_phase_lock"
   }
 }
 DANTECFGEOF
 chmod 644 /etc/dantesync/config.json
-echo "  #1215: /etc/dantesync/config.json installed (phase_slew.enabled=true, gm_allowlist=${RIG_GRANDMASTER_IP}) -- reprovision-durable"
+echo "  #1215/#1372: /etc/dantesync/config.json installed (clock_discipline=ptp_phase_lock, gm_allowlist=${RIG_GRANDMASTER_IP}) -- reprovision-durable"
 
 cat > /etc/systemd/system/dantesync.service <<EOF
 [Unit]

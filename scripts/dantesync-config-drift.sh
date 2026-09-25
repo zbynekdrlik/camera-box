@@ -12,8 +12,10 @@ set -euo pipefail
 # scripts/dantesync_fleet.py, printing a NAMED diff per node.
 #
 # REPORT-ONLY. It never writes a config to any box: turning a drift into a change is a deliberate,
-# separate step (a policy flip such as phase_slew belongs to dantesync#117's role contract and is
-# rolled out from there). No E2E step calls this as a blocking gate.
+# separate step (a policy flip belongs to dantesync#117's role contract and is rolled out from
+# there). The clock policy since dantesync 1.9.0 (issue 1372): system.clock_discipline absent or
+# "ptp_phase_lock", "legacy" = drift; system.phase_slew is no longer graded ({"$ignore": true}).
+# No E2E step calls this as a blocking gate.
 #
 # READS (read-only): dev1's own /etc/dantesync/config.json (local), a Linux node's
 # /etc/dantesync/config.json and a Windows node's C:\ProgramData\DanteSync\config.json over

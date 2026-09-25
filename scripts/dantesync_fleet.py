@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Issue 1372 part B -- python twin of scripts/lib/dantesync-fleet.sh + the config-drift decision.
 
-Two jobs, both PURE (no network):
+Three jobs, all PURE (no network):
 
 1. The fleet list for python consumers. Python cannot source the bash lib, so this reads the SAME
    `DANTESYNC_FLEET` table (the env var when set, exactly like the bash `${DANTESYNC_FLEET:-...}`
@@ -10,9 +10,14 @@ Two jobs, both PURE (no network):
    addresses through scripts/obs_fleet_table.py. `rows()` prints byte-identical lines to the bash
    `dantesync_fleet_rows` (pinned by tests/python/test_dantesync_fleet_1372.py).
 
-2. The config-drift decision. Each node's dantesync config.json is compared with ONE canonical
+2. The clock-discipline classifier + the date-master verdict (issue 1372, dantesync 1.9.0): the
+   python twin of clock_discipline_class / date_master_verdict in scripts/clock-offset-guard.sh,
+   pinned against it by tests/fixtures/dantesync_clock_discipline_1372.tsv.
+
+3. The config-drift decision. Each node's dantesync config.json is compared with ONE canonical
    template per role (scripts/dantesync-canonical-config.json): every template leaf must match, a
-   node key the template lacks is an extra key, and a file that starts with a byte-order mark is
+   node key the template lacks is an extra key (unless the template marks it {"$ignore": true}, a
+   retired policy such as phase_slew under dantesync 1.9.0), and a file that starts with a byte-order mark is
    drift on its own (dantesync then ignores the whole file and runs on defaults -- the 13.9.2026
    PowerShell-write incident). The verdict is OK / DRIFT / UNKNOWN (unreadable or not JSON), with a
    named diff line per difference. Report-only: nothing here writes a config anywhere.
@@ -114,6 +119,65 @@ def role_gm_host(role: str) -> str:
 
 
 # ---------------------------------------------------------------------------------------------
+# clock discipline + date master (issue 1372, dantesync 1.9.0) -- the python twin of
+# clock_discipline_class / date_master_verdict in scripts/clock-offset-guard.sh. Both are pinned
+# by ONE table, tests/fixtures/dantesync_clock_discipline_1372.tsv.
+# ---------------------------------------------------------------------------------------------
+
+PTP_PHASE_LOCK, LEGACY_SLEW, LEGACY_NO_SLEW = "PTP_PHASE_LOCK", "LEGACY_SLEW", "LEGACY_NO_SLEW"
+
+
+def _status_dict(status) -> dict:
+    """A /status blob as a dict: a dict passes through, JSON text is parsed, anything else is {}."""
+    if isinstance(status, dict):
+        return status
+    try:
+        parsed = json.loads(status) if status else {}
+    except (TypeError, ValueError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def classify_clock_discipline(status) -> str:
+    """PTP_PHASE_LOCK / LEGACY_SLEW / LEGACY_NO_SLEW / UNKNOWN for one node's /status.
+
+    `ptp_phase_lock` + `ptp_phase_locked` true is the dantesync 1.9.0 phase lock. An absent, null
+    or empty `clock_discipline` (an older build) or `legacy` is graded on `phase_slew_enabled`
+    (#1215). Anything else, including a phase lock that is not locked, is UNKNOWN here (the gate's
+    check names the unlocked case and fails it)."""
+    s = _status_dict(status)
+    disc = s.get("clock_discipline")
+    if disc == "ptp_phase_lock":
+        return PTP_PHASE_LOCK if s.get("ptp_phase_locked") is True else UNKNOWN
+    if disc in (None, "", "legacy"):
+        slew = s.get("phase_slew_enabled")
+        if slew is True:
+            return LEGACY_SLEW
+        if slew is False:
+            return LEGACY_NO_SLEW
+    return UNKNOWN
+
+
+def _ms_to_us(value):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return int(round(value * 1000))
+
+
+def date_master_verdict(status, margin_us: int) -> str:
+    """none / ok / out / unknown: the date master (`date_authority` master) is graded on
+    |date_offset_error_ms| <= date_step_bound_ms + margin; any other node is `none`."""
+    s = _status_dict(status)
+    if s.get("date_authority") != "master":
+        return "none"
+    err_us = _ms_to_us(s.get("date_offset_error_ms"))
+    bound_us = _ms_to_us(s.get("date_step_bound_ms"))
+    if err_us is None or bound_us is None or bound_us <= 0:
+        return "unknown"
+    return "ok" if abs(err_us) <= bound_us + int(margin_us) else "out"
+
+
+# ---------------------------------------------------------------------------------------------
 # config drift
 # ---------------------------------------------------------------------------------------------
 
@@ -143,7 +207,7 @@ def template_for(role: str, templates: dict | None = None) -> dict:
 
 
 def _is_rule(v) -> bool:
-    return isinstance(v, dict) and len(v) == 1 and next(iter(v)) in ("$optional", "$any")
+    return isinstance(v, dict) and len(v) == 1 and next(iter(v)) in ("$optional", "$any", "$ignore")
 
 
 def _fmt(v) -> str:
@@ -157,6 +221,8 @@ def _compare(tpl: dict, node: dict, prefix: str, diffs: list) -> None:
         path = f"{prefix}{key}"
         if _is_rule(want):
             rule, arg = next(iter(want.items()))
+            if rule == "$ignore":
+                continue  # no longer a policy: present with any value, or absent (issue 1372)
             if key not in node:
                 if rule == "$any":
                     diffs.append(f"{path}: missing (canonical: any value)")

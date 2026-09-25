@@ -2,8 +2,14 @@
 paths:
   - "scripts/clock-offset-guard.sh"
   - "scripts/dantesync-gate.sh"
+  - "scripts/verify-strih.sh"
+  - "scripts/verify-imag.sh"
+  - "scripts/dantesync-maintenance-gate.sh"
   - "tests/clock_offset_guard.rs"
   - "tests/dantesync_gate.rs"
+  - "tests/python/test_clock_discipline_1372.py"
+  - "tests/fixtures/dantesync_clock_discipline_1372.tsv"
+  - "tests/fixtures/dantesync_status_1372/**"
 ---
 
 # DanteSync clock-offset gate (#8 precondition) — grading paths, slew lineage, test seams
@@ -12,6 +18,63 @@ paths:
 NTP-in-bound AND PTP-locked. `scripts/clock-offset-guard.sh` holds its PURE, unit-tested functions
 (sourced by `tests/clock_offset_guard.rs` via its `BASH_SOURCE != $0` guard; the gate's own e2e is
 `tests/dantesync_gate.rs`).
+
+## dantesync 1.9.0: grade the CLOCK DISCIPLINE and the DATE MASTER, never the bare phase_slew flag (issue 1372)
+
+dantesync 1.9.0 (dantesync#117) made `ptp_phase_lock` the default: the rate AND phase come from the
+PTP tick only, NTP only moves the date, and `phase_slew_enabled` reads **false by design**
+(`f_phase=0`, `rate_source=ptp`). `system.clock_discipline="legacy"` restores the pre-1.9.0 servo.
+The first 1.9.0 fleet roll made every E2E `[0/8]` refuse (rc=20, every node `PHASE-SLEW DISABLED`)
+because the gate still graded phase_slew. The fix is ONE classifier + ONE date-master verdict in
+`clock-offset-guard.sh`, a python twin in `scripts/dantesync_fleet.py`, and ONE parity table:
+
+- `clock_discipline_class STATUS` -> `PTP_PHASE_LOCK` (`clock_discipline=ptp_phase_lock` AND
+  `ptp_phase_locked=true`) | `LEGACY_SLEW` (`clock_discipline` absent/""/null = an older build, or
+  `legacy`, with `phase_slew_enabled=true`) | `LEGACY_NO_SLEW` (same, slew false) | `UNKNOWN`.
+  `clock_discipline_check LABEL STATUS` prints + returns 0/2/3: the two healthy classes pass,
+  `LEGACY_NO_SLEW` fails (the #1215 stepping node, the line keeps `PHASE-SLEW DISABLED`), a phase
+  lock with `ptp_phase_locked=false` fails BY NAME (`PTP-PHASE UNLOCKED`, rc 2 — not the 11 an
+  UNKNOWN gets), everything else is `CLOCK-DISCIPLINE UNKNOWN` (rc 3, the line also carries
+  `PHASE-SLEW UNKNOWN`). The legacy lines keep the old `PHASE-SLEW ENABLED/DISABLED/UNKNOWN` words,
+  so every pre-1.9.0 fixture in `tests/dantesync_gate.rs` still reads as before.
+- `date_master_verdict STATUS MARGIN_US` -> `none` (not `date_authority=master`) | `ok` | `out` |
+  `unknown`: the NTP master (strih-lx) owns the fleet DATE (dantesync#88) — it lets the fleet line
+  sit up to `date_step_bound_ms` (50) off UTC and then makes a COORDINATED fleet step, so a healthy
+  master reads `ntp_offset_us≈-25000..-36000`. It is graded on
+  `|date_offset_error_ms| <= date_step_bound_ms*1000 + margin` (ms f64 -> us via half-even rounding,
+  bash `printf %.0f` == python `round()`). `date_master_effective_bound_us` gives the SAME bound to
+  the master's median; `date_master_check` prints `DATE MASTER OK/OUT/UNKNOWN` and is silent on a
+  non-master. Before this, the master passed only BY ACCIDENT through the #1021 deadband widening
+  (1.9.0 reports `ntp_deadband_us=50000`).
+- The journal path (verify-strih check 6, the verify-imag fallback) calls
+  `dantesync_journal_clock_verdict JOURNAL FRESH BOUND STABILITY MARGIN`: when the freshest
+  `[NTP] offset:` line has the master's shape
+  `[NTP] offset:-25217us (date authority, fleet line -25217us, step bound 50000us)` it grades
+  MEDIAN-ONLY on that step bound + margin (a coordinated step moves every sample, so spread is not a
+  health signal — the gate's master is median-only for the same reason); any other line keeps the
+  2 ms bound + stability. `date_step_bound_us_from_journal` reads the bound from the line itself.
+
+**Wiring.** `dantesync-gate.sh` `grade_http_node`: the median-only (master) branch takes the date
+bound when the payload is a date master, else the old #1021/#1119 widening; `date_master_check`
+folds into `rc_off` only on a freshly-graded payload (`rc_off != 3`, like the #1119 storm check);
+`clock_discipline_check` replaces `phase_slew_check`. `DANTESYNC_GATE_PHASE_SLEW_ENFORCE` keeps its
+NAME (recording-e2e.sh sets it on both calls) — it now enforces the discipline. `verify-imag.sh` (l)
+uses `clock_discipline_check` + `date_master_effective_bound_us` + `date_master_check`
+(`DANTESYNC_DATE_MARGIN_US`, default 1000). The maintenance gate's token is `clock ptp_phase_lock` /
+`phase-slew ENABLED|DISABLED` / `ptp-phase UNLOCKED` / `clock-discipline?`.
+
+**Parity table.** `tests/fixtures/dantesync_clock_discipline_1372.tsv` (case, status, class,
+date_verdict at margin 1000 us) — `@` rows are `/status` captured read-only from the live 1.9.0 fleet
+(`tests/fixtures/dantesync_status_1372/`: strih-lx master, stream slave) plus two legacy nodes
+synthesized from the old field shape. `tests/python/test_clock_discipline_1372.py` runs BOTH the bash
+(through `bash <file>` subprocesses) and the python twin over every row, plus the gate on fresh
+copies of the captured payloads (`updated_ts`/`ntp_updated_ts` moved to now — the gate grades
+freshness against its own `date +%s`; `RIG_GRANDMASTER_IP=10.77.9.230`, the live GM). A new
+dantesync release that adds a discipline value = one new TSV row + both implementations.
+
+**Live check (read-only, allowed):** `DANTESYNC_GATE_GM_ENFORCE=1 DANTESYNC_GATE_PHASE_SLEW_ENFORCE=1
+scripts/dantesync-gate.sh --linux "" --win-http strih=10.77.9.202 --win-http stream=10.77.9.204`
+only curls `:8898/status` — run it before trusting a change here.
 
 ## Two grading paths — know which one a CLIENT actually hits
 `grade_http_node` samples each node via **HTTP `/status`** first (`gather_http_samples` → N reads →
@@ -277,6 +340,10 @@ shell out), then run the binary; OR run the pure bash fn under `bash -c 'set -uo
 clock-offset-guard.sh; ...'` (`cargo test --no-run` is now hook-blocked too, #477 tightening).
 
 ## phase_slew is now ENFORCED at the fleet [0/8] gate (#1130 — report-first landed, then flipped)
+
+> **Superseded by issue 1372 for dantesync 1.9.0+:** the flag below now enforces the clock
+> DISCIPLINE (`clock_discipline_check`, see the 1.9.0 section at the top). The history is kept
+> because a pre-1.9.0 node is still graded on phase_slew through the LEGACY classes.
 
 The #1215 section above added `phase_slew_check`/`phase_slew_enabled_from_pipe_json` but wired
 them into `verify-imag.sh` ONLY (imag box). #1130 wired them into `dantesync-gate.sh`'s
