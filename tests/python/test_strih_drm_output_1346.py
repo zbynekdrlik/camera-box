@@ -82,6 +82,10 @@ def test_lease_connector_agrees_with_imag_on_every_vector():
         '{"enabled":true,"connector":""}',
         '{"enabled":true,"connector":7}',
         '{"enabled":true}',
+        '{"enabled":true,"connector":"HDMI-0","backend":"vk-direct"}',
+        '{"enabled":true,"connector":"HDMI-0","backend":"lease"}',
+        '{"enabled":true,"connector":"HDMI-0","backend":"vulkan"}',
+        '{"enabled":true,"connector":"HDMI-0","backend":7}',
     ):
         assert _mod.drm_output_lease_connector(text) == imag.drm_output_lease_connector(text), text
 

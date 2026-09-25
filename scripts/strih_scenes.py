@@ -77,6 +77,9 @@ FEEDBACK_LATENCY_MODE = 1
 # (effective at the next OBS start).
 DRM_OUTPUT_CONF = "~/.camera-box/drm-output.json"
 DRM_OUTPUT_VIEWS = ("program", "multiview")
+# issue 1346: how the output leaves the X desktop -- the X RandR lease (the default = the absent key) or
+# the NVIDIA Vulkan direct display. Mirrors obs-drm-output-backend.c drm_output_parse_backend.
+DRM_OUTPUT_BACKENDS = ("lease", "vk-direct")
 
 
 def certified_genlock_settings(latency):
@@ -399,15 +402,19 @@ def drm_output_view_of(value):
 
 
 def drm_output_lease_connector(config_text):
-    """Pure: the connector IFF the drm-output config arms the in-OBS DRM-lease output, else "".
+    """Pure: the connector IFF the drm-output config arms the in-OBS DRM output, else "".
     The C module's OWN contract (and imag_scenes.drm_output_lease_connector's, pinned equal by
-    tests/python/test_strih_drm_output_1346.py): a full JSON parse, a boolean "enabled": true AND a
-    non-empty string "connector". Empty / malformed / disabled -> "" (dormant), never a raise."""
+    tests/python/test_strih_drm_output_1346.py): a full JSON parse, a boolean "enabled": true, a
+    non-empty string "connector" AND (issue 1346) a known "backend" -- the C keeps the output dormant on
+    an unknown one, so the wrapper must not take the connector out of X for it (a black HDMI).
+    Empty / malformed / disabled / unknown backend -> "" (dormant), never a raise."""
     if not config_text:
         return ""
     try:
         cfg = json.loads(config_text)
         if cfg.get("enabled") is not True:
+            return ""
+        if drm_output_backend_of(cfg.get("backend")) is None:
             return ""
         connector = cfg.get("connector")
         return connector if isinstance(connector, str) and connector else ""
@@ -425,6 +432,29 @@ def drm_output_view_token(config_text):
     if not isinstance(cfg, dict):
         return "program"
     return drm_output_view_of(cfg.get("view")) or "unknown"
+
+
+def drm_output_backend_of(value):
+    """Pure: the "backend" JSON value -> "lease" | "vk-direct" | None (unknown). Mirrors the vendored C
+    grammar (obs-drm-output-backend.c drm_output_parse_backend) row for row -- ONE shared table,
+    tests/fixtures/drm_output_backend_parity.tsv. Absent (None) / empty / a non-string (which
+    obs_data_get_string reads as "") -> "lease" (the issue-1152 default, imag unchanged); only the exact
+    lowercase names count. The C keeps the output DORMANT on an unknown value."""
+    if value is None or not isinstance(value, str) or value == "":
+        return "lease"
+    return value if value in DRM_OUTPUT_BACKENDS else None
+
+
+def drm_output_backend_token(config_text):
+    """Pure: the config's backend as ONE token for verify-strih -- "lease" | "vk-direct" | "unknown". An
+    unreadable config is "lease" (it arms nothing; the connector half reports that)."""
+    try:
+        cfg = json.loads(config_text) if config_text else {}
+    except ValueError:
+        return "lease"
+    if not isinstance(cfg, dict):
+        return "lease"
+    return drm_output_backend_of(cfg.get("backend")) or "unknown"
 
 
 def drm_output_config_text(path=DRM_OUTPUT_CONF):
@@ -447,14 +477,11 @@ def read_drm_view(path=DRM_OUTPUT_CONF):
     return None if tok == "unknown" else tok
 
 
-def write_drm_view(view, path=DRM_OUTPUT_CONF):
-    """Persist `view` into an EXISTING drm-output config: every other key kept in order, ONE compact
-    line (the machine-written contract obs-drm-output.md pins), an atomic temp-file rename. Raises
-    ValueError on an unknown view, an absent file (the output is not provisioned -- setup-strih.sh
-    step 6 writes it only with an HDMI monitor plugged in) or a config that is not a JSON object
-    (never rewritten)."""
-    if view not in DRM_OUTPUT_VIEWS:
-        raise ValueError("unknown HDMI output view %r (want 'program' or 'multiview')" % (view,))
+def _rewrite_drm_config(path, mutate):
+    """Rewrite an EXISTING drm-output config through `mutate(cfg)`: every other key kept in order, ONE
+    compact line (the machine-written contract obs-drm-output.md pins), an atomic temp-file rename.
+    Raises ValueError on an absent file (the output is not provisioned -- setup-strih.sh step 6 writes
+    it only with an HDMI monitor plugged in) or a config that is not a JSON object (never rewritten)."""
     real = os.path.expanduser(path)
     try:
         with open(real) as fh:
@@ -466,11 +493,36 @@ def write_drm_view(view, path=DRM_OUTPUT_CONF):
         raise ValueError("%s is not valid JSON (%s) -- not rewriting it" % (path, e))
     if not isinstance(cfg, dict):
         raise ValueError("%s is not a JSON object -- not rewriting it" % path)
-    cfg["view"] = view
+    mutate(cfg)
     tmp = real + ".tmp"
     with open(tmp, "w") as fh:
         fh.write(json.dumps(cfg, separators=(",", ":")) + "\n")
     os.replace(tmp, real)
+
+
+def write_drm_view(view, path=DRM_OUTPUT_CONF):
+    """Persist `view` into an EXISTING drm-output config (every other key kept -- see
+    _rewrite_drm_config). Raises ValueError on an unknown view or an unprovisioned / broken config."""
+    if view not in DRM_OUTPUT_VIEWS:
+        raise ValueError("unknown HDMI output view %r (want 'program' or 'multiview')" % (view,))
+    _rewrite_drm_config(path, lambda cfg: cfg.__setitem__("view", view))
+
+
+def write_drm_backend(backend, path=DRM_OUTPUT_CONF):
+    """issue 1346: persist the box's HDMI-output backend (the fact STRIH_HDMI_OUTPUT_BACKEND) into an
+    EXISTING drm-output config, keeping the operator's view and every other key. `lease` is the ABSENT
+    key (a lease config stays byte-identical to the pre-backend shape); `vk-direct` is written
+    explicitly. Raises ValueError on an unknown backend or an unprovisioned / broken config."""
+    if backend not in DRM_OUTPUT_BACKENDS:
+        raise ValueError("unknown HDMI output backend %r (want 'lease' or 'vk-direct')" % (backend,))
+
+    def mutate(cfg):
+        if backend == "lease":
+            cfg.pop("backend", None)
+        else:
+            cfg["backend"] = backend
+
+    _rewrite_drm_config(path, mutate)
 
 
 def _obs_phase2_module():

@@ -52,6 +52,35 @@ int drm_output_view_frame(void);
  * live switch persists into. */
 void drm_output_view_configure(const char *view, const char *config_path);
 
+/*
+ * camera-box issue 1346 — the SECOND backend. The lease backend (obs-drm-output.c, issue 1152) is the
+ * module's built-in default and stays exactly as it was; a backend selected by the config's "backend"
+ * key is reached through this table: obs-drm-output.c routes its public entry points (start / stop /
+ * active / the frame hook) and the mailbox seam above (claim / publish / texture / mode size) to it
+ * while it OWNS the output. Today there is one: vk-direct (obs-drm-output-backend.c + the Vulkan core
+ * obs-drm-output-vk*.c), the NVIDIA Vulkan direct-display scanout.
+ */
+struct obs_drm_output_config;
+struct drm_output_backend_ops {
+	const char *name;
+	bool (*start)(const struct obs_drm_output_config *cfg);
+	void (*stop)(void);    /* safe when inactive */
+	bool (*active)(void);
+	bool (*on_frame)(void); /* graphics thread: true = this backend owns the output (handled the tick) */
+	bool (*owns)(void);     /* true = the mailbox seam routes to this backend */
+	int (*claim)(void);
+	void (*publish)(int idx);
+	gs_texture_t *(*texture)(int idx);
+	void (*mode_size)(uint32_t *w, uint32_t *h);
+};
+
+/* The NVIDIA Vulkan direct-display backend ("backend": "vk-direct"). */
+extern const struct drm_output_backend_ops drm_output_vk_direct_backend;
+
+/* The "backend" config grammar: absent/"" or "lease" -> OBS_DRM_OUTPUT_BACKEND_LEASE, "vk-direct" ->
+ * OBS_DRM_OUTPUT_BACKEND_VK_DIRECT, anything else -> -1 (unknown: the autostart stays dormant). */
+int drm_output_backend_from_config(const char *value);
+
 #ifdef __cplusplus
 }
 #endif

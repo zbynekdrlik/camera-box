@@ -34,7 +34,8 @@ strih_box_fact_keys() {
     STRIH_DANTESYNC_ROLE STRIH_DANTESYNC_UPSTREAM \
     STRIH_INTERCOM_CONFIG STRIH_NIC_DRIVER \
     STRIH_OBS_PROFILE STRIH_OBS_COLLECTION \
-    STRIH_NDI_RUNTIME_PEER STRIH_COMPANION_HOST STRIH_CG_SENDER STRIH_CAMERAS
+    STRIH_NDI_RUNTIME_PEER STRIH_COMPANION_HOST STRIH_CG_SENDER STRIH_CAMERAS \
+    STRIH_HDMI_OUTPUT_BACKEND
 }
 
 # strih_box_repo_root -> the repo root this lib lives in (scripts/lib/../..).
@@ -168,6 +169,13 @@ strih_box_validate() {
     _strih_box_host "${f[$k]}" \
       || { echo "strih-box ${name}: ${k} '${f[$k]}' is not a host name / address" >&2; bad=1; }
   done
+  # issue 1346: how the fixed HDMI output leaves the X desktop -- `lease` (the issue-1152 X RandR lease,
+  # an Intel-driven connector) or `vk-direct` (Vulkan direct display, an NVIDIA-driven connector whose X
+  # driver refuses the lease). The same grammar the vendored C module + strih_scenes read.
+  case "${f[STRIH_HDMI_OUTPUT_BACKEND]}" in
+    lease | vk-direct) ;;
+    *) echo "strih-box ${name}: STRIH_HDMI_OUTPUT_BACKEND '${f[STRIH_HDMI_OUTPUT_BACKEND]}' must be lease or vk-direct" >&2; bad=1 ;;
+  esac
   if [[ ! "${f[STRIH_CAMERAS]}" =~ ^[1-9][0-9]*( [1-9][0-9]*)*$ ]]; then
     echo "strih-box ${name}: STRIH_CAMERAS '${f[STRIH_CAMERAS]}' must be space-separated camera numbers (1, 2, ... no leading zero)" >&2; bad=1
   elif [ "$(tr ' ' '\n' <<<"${f[STRIH_CAMERAS]}" | sort -u | wc -l)" -ne "$(wc -w <<<"${f[STRIH_CAMERAS]}")" ]; then
@@ -344,6 +352,10 @@ strih_lx_cg_sender() {
   c="$(strih_box_fact STRIH_CG_SENDER)" || return 1
   [ "$c" = none ] || printf '%s' "$c"
 }
+
+# strih_lx_hdmi_output_backend -> how the box's fixed HDMI output leaves the X desktop (fact
+# STRIH_HDMI_OUTPUT_BACKEND: lease | vk-direct), written into ~/.camera-box/drm-output.json (issue 1346).
+strih_lx_hdmi_output_backend() { strih_box_fact STRIH_HDMI_OUTPUT_BACKEND; }
 
 # strih_lx_intercom_config -> the repo-relative intercom hub routing file (fact STRIH_INTERCOM_CONFIG),
 # installed as /etc/intercom-hub/intercom.toml.
