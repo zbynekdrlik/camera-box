@@ -4,7 +4,6 @@ paths:
   - "vendor/obs-studio/libobs/util/windows/qpc-timestamp.h"
   - "vendor/obs-studio/plugins/win-wasapi/win-wasapi.cpp"
   - "vendor/obs-studio/plugins/obs-browser/browser-client.cpp"
-  - "vendor/obs-studio/plugins/vlc-video/vlc-video-source.c"
   - "src/os_clock_discipline.rs"
   - "tests/os_clock_discipline_parity_1372.rs"
 ---
@@ -91,14 +90,12 @@ rate. The Tier-0 authority is `src/os_clock_discipline.rs`.
     - **obs-browser** CEF audio pts: `base::TimeTicks` ms, QPC-based on Windows. The CEF docs say
       "ms since the Unix Epoch", but `libcef/browser/audio_capturer.cc` computes
       `audio_capture_time - base::TimeTicks()`.
-    - **vlc-video** `libvlc_clock()`, whose age is measured on VLC's own clock (no QPC
-      assumption).
   - A stamp more than `OS_FOREIGN_STAMP_MAX_AGE_NS` (60 s) from its clock's now is not on that clock
     (e.g. an epoch value) and passes through unchanged, as before issue 1372.
   - The raw-QPC variant brackets `os_gettime_ns()` with two counter reads and uses their midpoint,
     retried while they are more than 50 µs apart, so a preemption cannot skew the age.
   - It is header-only, so obs.dll gets no new export. Linux/macOS builds are untouched (`_WIN32`
-    only): there, TimeTicks, VLC's clock and `os_gettime_ns()` are the same monotonic clock.
+    only): there, TimeTicks and `os_gettime_ns()` are the same monotonic clock.
 
 ## The verification pattern: lift the Win32 glue and run it on FAKE Win32 layers
 
@@ -143,6 +140,10 @@ Gotchas:
 - **Keep single-line anchors single-line.** `GetProcAddress(kernelbase, "GetSystemTimeAdjustmentPrecise")`
   and the `if ((seq & 1) == 0) { QueryPerformanceCounter(&count); *seg = os_clk_state;` window must
   not wrap. A wrap puts a space after `(` and the squished pwsh anchors stop matching.
+- **The raw-QPC midpoint bracket** is pinned by a scripted scenario whose fake counter advances on
+  every read. At 50 counts per read it takes the first bracket; at 400 counts (over the 50 µs
+  bound) it takes all four attempts. Using `before` instead of the midpoint, dropping `/2`,
+  dropping the retry, and flipping the bound each went RED.
 - **Every mutation was watched going RED:** rate `adj/inc`, rebase dropped, poll every read, clamp
   dropped, init at 0, `disabled` ignored, `os_sleepto_ns` on raw counts (a conversion-clean variant;
   the stock one only fails to COMPILE under `-Wconversion`, which proves nothing about behaviour),
@@ -154,14 +155,15 @@ Gotchas:
 ## Live verification after deploy (supervisor)
 
 - **This needs a FULL bundle, not only the fast obs.dll.** The clock is in obs.dll, but the stamp
-  mapping is in `win-wasapi.dll`, `obs-browser.dll` and `vlc-video.dll`. The rig uses them (live
+  mapping is in `obs-browser.dll` and `win-wasapi.dll`. The rig uses browser audio (live
   25.9.2026):
-  - stream `Stream_Obs` has a `vlc_source` ("NL playlist") and two browser sources;
   - resolume `cg_scenes` has nine browser sources, six with `reroute_audio` (YouTube / VDO.Ninja
     audio into the cg mix);
-  - neither has a WASAPI or DirectShow source.
+  - stream `Stream_Obs` has two browser sources;
+  - neither collection has a WASAPI or DirectShow source.
 
-  With obs.dll alone, those VLC and browser stamps drift against the disciplined mixer.
+  With obs.dll alone, those browser stamps drift against the disciplined mixer.
+- stream's `vlc_source` ("NL playlist") stays on the stock `vlc-video.dll` (see Known limit).
 - The genlock audit's `wall_qpc_drift_ms=` (obs-source.c) goes FLAT on Windows apart from
   dantesync phase steps. It moved ~10 ppm before.
 - **The stream `asrc: source 'mbc' estimated=` reading moves.** The mixer clock is now the
@@ -178,6 +180,18 @@ OBS can read "now" on, so the age mapping does not apply. Such a source drifts v
 mixer at the discipline rate, like any capture device whose clock differs from OBS's. There is none
 on the rig.
 
-Third-party plugins (the ASIO input on stream, `obs-vban` on resolume) are not vendored. If one
-stamps with its own raw-QPC read instead of `os_gettime_ns()`, it drifts the same way. Check its
-timestamps before relying on it.
+**vlc-video is not built on Windows** (`-DENABLE_VLC=OFF` in both windows-genlock workflows since
+issue 42), so the rig runs the stock `vlc-video.dll` (4/12/2026 on stream). Its stamps are
+`libvlc_clock()` relative to plugin load, and libobs latches an offset for them. Before issue 1372
+that clock and the raw-QPC mixer matched. Now stream's "NL playlist" drifts against the mixer at
+the discipline rate and resyncs at libobs' 70 ms audio smoothing threshold.
+
+The mapping is written and simple: `os_foreign_clock_ns_to_gettime_ns(stamp, libvlc_clock_() * 1000)`
+at both stamp sites, without the `- time_start`. It needs the plugin built into the bundle (libvlc
+headers on the runner, `vlc-video.dll` in the package), which is a CI/bundle change of its own.
+
+Third-party plugins are not vendored: stream's `obs-asio.dll` (feeds `mbc`) and resolume's
+`obs-vban.dll`. Both import the `os_gettime_ns` symbol (checked 25.9.2026 by reading the DLL
+import strings), so they very likely stamp on the disciplined clock. Both also carry
+`QueryPerformanceCounter`, but the MSVC runtime startup pulls that in anyway. How each one forms
+its stamp is not verified.

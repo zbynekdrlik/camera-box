@@ -137,7 +137,7 @@ impl Segment {
 pub const FOREIGN_STAMP_MAX_AGE_NS: u64 = 60_000_000_000;
 
 /// Map a stamp taken on ANOTHER clock (raw QPC for WASAPI `qpcPosition * 100` and CEF's
-/// TimeTicks pts, VLC's own clock) onto the disciplined clock: measure its age on that clock
+/// TimeTicks pts) onto the disciplined clock: measure its age on that clock
 /// (`clock_now_ns - stamp_ns`) and subtract it from the disciplined `now_ns` (a future stamp
 /// adds). Over an age of milliseconds the rate difference is below a microsecond. A stamp more
 /// than [`FOREIGN_STAMP_MAX_AGE_NS`] from the clock's now is returned unchanged. Mirrors

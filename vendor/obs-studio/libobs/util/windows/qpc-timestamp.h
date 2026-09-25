@@ -7,8 +7,9 @@
  * discipline rate (~72 ms per hour at 20 ppm), and libobs keeps direct timestamps (timing_adjust = 0)
  * until the 2 s jump detection snaps them. Such sources:
  *   - WASAPI: IAudioCaptureClient::GetBuffer's qpcPosition (100 ns units, raw QPC);
- *   - obs-browser: CEF's audio pts (base::TimeTicks ms, QPC-based on Windows);
- *   - vlc-video: libvlc_clock() (VLC's own monotonic clock).
+ *   - obs-browser: CEF's audio pts (base::TimeTicks ms, QPC-based on Windows).
+ * (vlc-video stamps on libvlc_clock() and would map the same way with its own clock's now, but the
+ * camera-box Windows bundle is built with ENABLE_VLC=OFF.)
  *
  * The stamp's AGE is measured on its own clock and subtracted from the disciplined now. Over an age of
  * milliseconds the rate difference (<= 1000 ppm) is well below a microsecond. A stamp further than

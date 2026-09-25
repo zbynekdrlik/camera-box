@@ -4,15 +4,6 @@
 #include <util/platform.h>
 #include <util/dstr.h>
 
-#ifdef _WIN32
-#include <util/windows/qpc-timestamp.h>
-/* camera-box issue 1372: os_gettime_ns() runs at the dantesync-disciplined rate on Windows, VLC's
- * clock does not; map a VLC stamp by its age on VLC's own clock. */
-#define VLCS_STAMP_NS(stamp_ns) os_foreign_clock_ns_to_gettime_ns((stamp_ns), (uint64_t)libvlc_clock_() * 1000ULL)
-#else
-#define VLCS_STAMP_NS(stamp_ns) (stamp_ns)
-#endif
-
 #define do_log(level, format, ...) \
 	blog(level, "[vlc_source: '%s'] " format, obs_source_get_name(ss->source), ##__VA_ARGS__)
 
@@ -372,7 +363,7 @@ static void *vlcs_video_lock(void *data, void **planes)
 static void vlcs_video_display(void *data, void *picture)
 {
 	struct vlc_source *c = data;
-	c->frame.timestamp = VLCS_STAMP_NS((uint64_t)libvlc_clock_() * 1000ULL) - time_start;
+	c->frame.timestamp = (uint64_t)libvlc_clock_() * 1000ULL - time_start;
 	obs_source_output_video(c->source, &c->frame);
 
 	UNUSED_PARAMETER(picture);
@@ -481,7 +472,7 @@ static void vlcs_audio_play(void *data, const void *samples, unsigned count, int
 	}
 
 	memcpy((void *)c->audio.data[0], samples, size);
-	c->audio.timestamp = VLCS_STAMP_NS((uint64_t)pts * 1000ULL) - time_start;
+	c->audio.timestamp = (uint64_t)pts * 1000ULL - time_start;
 	c->audio.frames = count;
 
 	obs_source_output_audio(c->source, &c->audio);
