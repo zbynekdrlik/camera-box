@@ -920,7 +920,9 @@ obs_box_cpu_latency() {
     local before after
     [ -c /dev/cpu_dma_latency ] \
         || fail "issue 1357: /dev/cpu_dma_latency is missing -- this kernel has no PM QoS CPU latency interface to bound the idle wake-up latency"
-    before="$(cat "$unit" "$holder" 2>/dev/null | sha256sum)"
+    # `|| true` inside the group: on a first install the files are absent, cat exits 1, and under the
+    # callers' `set -euo pipefail` a bare `cat ... | sha256sum` assignment would abort setup silently
+    before="$( { cat "$unit" "$holder" 2>/dev/null || true; } | sha256sum)"
     mkdir -p /usr/local/sbin
     "$FETCH" scripts/obs-box-cpu-latency-hold.sh "$holder" \
         || fail "could not fetch scripts/obs-box-cpu-latency-hold.sh via ${FETCH}"
@@ -928,7 +930,7 @@ obs_box_cpu_latency() {
     "$FETCH" systemd/obs-box-cpu-latency.service "$unit" \
         || fail "could not fetch systemd/obs-box-cpu-latency.service via ${FETCH}"
     chmod 644 "$unit"
-    after="$(cat "$unit" "$holder" 2>/dev/null | sha256sum)"
+    after="$( { cat "$unit" "$holder" 2>/dev/null || true; } | sha256sum)"
     systemctl daemon-reload
     systemctl enable obs-box-cpu-latency.service >/dev/null 2>&1 \
         || fail "issue 1357: could not enable obs-box-cpu-latency.service -- the idle-latency bound would not survive a reboot"
