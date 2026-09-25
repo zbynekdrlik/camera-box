@@ -227,9 +227,11 @@ def test_network_outage_counts_as_loss_and_max_gap():
     """The sender kept counting through a 3 s outage: the counter gap is LOSS (not a jump) and the
     inter-packet gap is reported."""
     n = 10000
-    s = only_stream(pcap_bytes(276, stream_records(n, gap_at=5000, gap_s=3.0)))
+    gap_frames = 562  # ~3 s; the outage length is a WHOLE number of frames so the sender's clock
+    #                   stays on one line (a fractional-frame fixture would inject a phase step)
+    s = only_stream(pcap_bytes(276, stream_records(n, gap_at=5000, gap_s=gap_frames * SPF / NOMINAL)))
     assert s.jumps == 0
-    assert s.lost == int(3.0 * NOMINAL / SPF)
+    assert s.lost == gap_frames
     assert s.max_gap_ms > 2900
     assert abs(s.rate_ppm) < 0.5
 
@@ -387,3 +389,23 @@ def test_cli_unreadable_capture_exits_2(tmp_path, capsys):
     p.write_bytes(b"not a capture at all, just text")
     assert vr.main(["analyze", str(p)]) == 2
     assert "vban_rate:" in capsys.readouterr().err
+
+
+def test_dst_filter_keeps_only_streams_arriving_at_the_receiver(tmp_path, capsys):
+    """A capture on strih-lx also carries the hub's OWN outgoing streams (strih-lx -> camN); the
+    watchdog grades only what ARRIVES there (live capture 25.9.: 7 hub streams + fohabl-strih)."""
+    t0 = 1_790_000_000_000_000_000
+    inbound = stream_records(3000, name="fohabl-strih", src="10.77.7.30", t0_ns=t0)
+    outbound = [(t0 + i * 5_333_333 + 7,
+                 sll2(udp_ipv4(src="10.77.9.202", dst="10.77.9.61",
+                               payload=vban_payload(name="cam1", frame=i))))
+                for i in range(3000)]
+    data = pcap_bytes(276, sorted(inbound + outbound))
+    assert {s.name for s in vr.analyze_capture(data).streams} == {"fohabl-strih", "cam1"}
+    kept = vr.analyze_capture(data, only_dst=("10.77.9.202",)).streams
+    assert [s.name for s in kept] == ["fohabl-strih"]
+    p = tmp_path / "mixed.pcap"
+    p.write_bytes(data)
+    assert vr.main(["analyze", str(p), "--dst", "10.77.9.202", "--min-span-s", "5"]) == 0
+    out = capsys.readouterr().out
+    assert "stream=fohabl-strih" in out and "stream=cam1" not in out
