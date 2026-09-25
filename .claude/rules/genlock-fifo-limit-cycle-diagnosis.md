@@ -212,3 +212,35 @@ HOLDs both writes. The applied audio offset + source are persisted additively in
 `av-sync-last.json`. The two remaining continuous-drift terms are separate lanes: the ASRC buffer
 drain (issue 1335) and the free-running camera/display-vs-grid sawtooth (≤ 17 ms, physics, inside
 the ±30 budget). Acceptance is a green ±30 gate across three ≥ 6 h-apart runs.
+
+## Arrival-burst STALE ANCHOR: a backlog relock that fires every tick for minutes (issue 1367, live 25.9.2026)
+
+**Tell:** the `genlock-relock` lines of one input repeat on EVERY tick, with a small `erased=` (1)
+and a large negative `sel_vs_newest_due` (−13 / −15), and `ts_head_skew_ms` stays at the burst lateness
+(~300 ms). The sender is clean. Mechanism: the issue-1003 phase anchor was sampled while frames
+arrived late. The anchor pick sheds only the frames that age past it, while a 60-into-30 source adds
+two per tick, so the depth never drops below `steady_depth + 6·n`. The old `sel_1003 == 0`
+stale guard never fires because the pick is 1.
+
+**Fix (lane branch, pending integration):** `relock_anchor_is_stale(sel_anchor, sel_configured, n)`
+(`src/genlock_backlog.rs`) with its byte-identical C twin. The BACKLOG branch now resets on
+`(sel_1003 == 0 || stale_1367)` and logs `stale_reset=1`. `stale_reset=1` on the relock line is the
+live tell that the reset fired. The C nearest scan is now an age-taking core
+(`genlock_relock_select_nearest_age`) with two wrappers: the anchor pick and
+`genlock_relock_select_configured`.
+
+**Trap — measure the tolerance against a CORRECT conveyor, not the bare pin (review round 1).**
+The configured-latency pick is NOT where a healthy N==1 conveyor sits. A deep N==1 source settles on
+`base + 1` frames, and a governed shallow one on D ≤ base + 3. When the relock tick lands a few ms
+late on the grid, a CORRECT anchor reads 2 frames behind the configured pick (pin 987 ms: gap 2 from
+ε ≈ 5 ms). A tolerance of `n` frames therefore resets a healthy 2ME PGM anchor. The tolerance
+decision went to the main as a Design-question on the ticket. Any future test of this rule must
+include a `(base + 1) × interval` anchor with a non-zero ε; a fixture 1.05 frames apart proves
+nothing.
+
+**Verification recipe (Tier-0):** a `#[path]` harness `lib.rs` of genlock_grid + genlock_backlog +
+genlock_n1_depth + `probe { genlock }` under `clippy-driver --test -D warnings` runs the authority,
+the sims and the probe mirror. The integration parity files build against a stub `camera_box` rlib
+of the first three modules. The C mutation proof points `CARGO_MANIFEST_DIR` at a scratch tree
+holding only the mutated `obs-source.c`, and the test must be recompiled per mutation because `env!`
+is resolved at compile time.
