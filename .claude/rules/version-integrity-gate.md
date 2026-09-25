@@ -7,6 +7,8 @@ paths:
   - "tests/python/test_bundle_state_gather.py"
   - "tests/python/test_bundle_state_server_log.py"
   - "tests/python/test_bundle_state_server_port4455.py"
+  - "scripts/lib/manifest-autosource.sh"
+  - "tests/harness_manifest_autosource_1082.rs"
 ---
 
 # version-integrity-gate.sh — the pre-rig-test Windows-stack drift gate (#123/#119)
@@ -227,6 +229,80 @@ exported + unit-tested); only its USE as the opt-in guard is removed.
   `manifest_autosource_state_has_key` (the assertion forbids it fleet-wide) — the #832 self-collision
   class. Editing recording-e2e.sh MANDATES the full `cargo test` suite at integration (per the
   static-anchor GOTCHA); no test anchors on this block or the removed comment text (verified by grep).
+
+## #1346 — the FAST and FULL Windows builds are NOT byte-reproducible: the gate accepts either (`--alt-manifest`)
+
+`windows-genlock-fast.yml` and `windows-genlock.yml` build the SAME source to DIFFERENT obs.dll bytes
+(same size). Build 54995646: fast `obs.dll` = `18ea7acf…`, full `bin/64bit/obs.dll` = `e454b134…`;
+build 8151a12ac: fast `a5374104…`, full `54048531…`. Their distroav.dll differs the same way (the
+`distroav-fast-dll` artifact vs the full bundle's `obs-plugins/64bit/distroav.dll`). The auto-source
+used to fetch ONLY the fast manifest, so a correct FULL-bundle deploy (every FRONTEND / vendor-plugin
+change ships only that way) read `obs_dll_sha256 DRIFT` and refused the release E2E (run 36041775725,
+24.9.2026). The fix (Approach 1 of the main design):
+
+- `manifest_autosource_fetch_win_full REPO SHA DEST` (`scripts/lib/manifest-autosource.sh`) fetches the
+  FULL bundle's BUNDLE_MANIFEST.json (`windows-genlock.yml` / artifact `obs-genlock-windows-x64`) for
+  the SAME strih marker sha as the fast one (the cross-box parity facet holds strih and stream on
+  one build). Best-effort ("" on failure). GitHub serves an artifact only as one zip, so the first
+  fetch of a build downloads the whole ~270 MB bundle into a mktemp dir, keeps only the manifest and
+  removes the rest at once (measured live 25.9.2026 on build 8151a12ac: 145 s). `manifest_autosource_fetch`
+  therefore CACHES every fetched manifest per CI run and attempt
+  (`${MANIFEST_AUTOSOURCE_CACHE_DIR:-~/.camera-box/manifest-cache}/<workflow>--<artifact>--<run_id>-<updatedAt digits>.json`;
+  the same fetch from the cache took 3 s). The key is the RUN, never the sha (a second run at one sha
+  builds different bytes), PLUS updatedAt: a GitHub re-run KEEPS the run id and a full re-run
+  republishes, and `gh run list --json` has no `attempt` field. No stamp -> no caching (the fetch
+  still works). Only valid JSON is cached; entries and leftover temp files older than 30 days are
+  pruned. Every gh call is bounded by `timeout ${MANIFEST_AUTOSOURCE_TIMEOUT_S:-300}` (a timeout is a
+  fetch failure -> ""). `recording-e2e.sh` runs it only when `VERSION_GATE_MANIFEST`
+  is unset (an operator pin is never widened) and passes it to BOTH gate invocations as
+  `${AUTO_WIN_ALT_MANIFEST:+--alt-manifest …}` -- after the pair is resolved by the main ruling
+  below (a full-only build reaches the gate as `--manifest`, a fast-fetch outage passes neither).
+  Every fetch resolves its run with the server-side `gh run list --commit SHA --status success`
+  filter (the same filter as the run-state lookup), so no recency window can make them disagree.
+- `version-integrity-gate.sh --alt-manifest PATH` threads it to every `--win-state` box exactly where
+  `--manifest` is (only when the box state has no own `manifest=`), as drift-guard's `alt_manifest=`.
+- `drift-guard.sh --compare alt_manifest=PATH` (`compare_observed` arg 32, `drift_check_either`):
+  - `obs_dll_sha256` is OK when the observed hash equals the primary OR the alternate entry; the OK
+    line names which manifest matched. It is DRIFT when it matches neither (the line names both
+    accepted hashes) and UNKNOWN when unread or when neither manifest lists obs.dll.
+  - `distroav_dll_sha256` takes the either-match ONLY when the PRIMARY already lists distroav. With
+    the fast (obs.dll-only) primary it stays SKIPPED, and the SKIPPED line reports whether the box
+    matches the alternate's entry (informational). Reason: `deploy-genlock-fleet.sh --fast` ships
+    obs.dll only, so after a fast deploy distroav is an OLDER build's bytes. Distroav is also not
+    byte-reproducible, so enforcing it against the full manifest would false-refuse every correct fast
+    deploy (the mirror image of this bug). Even a box whose obs.dll matched the FULL manifest may
+    legitimately carry a later `distroav-fast-dll` hot-swap (`windows-genlock-fast.yml`), so no
+    "enforce distroav when obs.dll matched the alternate" rule is safe either.
+  - An `alt_manifest=` given WITHOUT `manifest=` (the E2E never produces that shape since the ruling)
+    is PROMOTED to the primary and judged exactly like a lone `manifest=` (an engine property).
+    The E2E only ever hands the gate a lone full manifest for a FULL-ONLY build -- the main's ruling
+    (ROZHODNUTÉ, issue comment 5829099220), decided in `scripts/lib/manifest-autosource.sh` BEFORE
+    the gate runs:
+    - `manifest_autosource_run_state REPO WORKFLOW SHA` -> `found` / `none` / `unknown`: a successful
+      run of the workflow at the marker sha, via the server-side `gh run list --commit SHA --status
+      success` filter (the fetch resolves its run the same way), time-bounded. Any lookup failure or
+      a missing sha is `unknown`, never `none`. Accepted edge (follows the ruling literally): while a
+      re-run of the only fast run is in flight, `--status success` hides it and the full manifest is
+      judged alone for that window.
+    - `win_manifest_pair_decide FAST FULL STATE` (pure, two stdout lines primary/alternate):
+      fast fetched -> fast primary + full alternate; no fast + full + `none` -> a FULL-ONLY build,
+      full judged alone (logged); no fast + full + `found`/`unknown` -> a FETCH OUTAGE, the byte pin
+      is OMITTED for this run with a loud `WARNING` (the pre-existing outage semantics), never the
+      full manifest alone (which would refuse a correctly fast-deployed box); neither -> dormant.
+    - `win_manifest_pair_resolve` runs the lookup only in the no-fast-but-full case, and
+      `recording-e2e.sh` calls it once (`{ IFS= read -r AUTO_WIN_MANIFEST; IFS= read -r
+      AUTO_WIN_ALT_MANIFEST; } < <(win_manifest_pair_resolve …)`) after the full fetch. An
+      operator-pinned `VERSION_GATE_MANIFEST` passes through unchanged (no alternate, no lookup).
+  - A supplied alternate that does not exist is a usage error (exit 1), like a missing `manifest=`.
+  - With NO alternate every line and exit code is byte-identical to before. This is pinned by
+    `compare_single_manifest_obs_dll_lines_are_byte_identical_1346` in `tests/drift_guard.rs`.
+- Tests: `tests/drift_guard.rs` (`*_1346`, engine), `tests/version_integrity_gate.rs`
+  (`run_gate_alt_1346`: full-bundle pass / foreign refuse / unchanged without the flag; its manifest
+  file names are prefixed `bundle_1346_` per the write_state-clobber GOTCHA below),
+  `tests/harness_manifest_autosource_1082.rs` (the seam records workflow + artifact + sha), and
+  `tests/harness_windows_manifest_enforce_1100.rs` (the static recording-e2e.sh wiring, count 2).
+- Tier-0 local proof without cargo: a python replica drives the real `drift-guard.sh` /
+  `version-integrity-gate.sh` / sourced lib with the same fixtures and assertions as the Rust tests.
 
 ## #1164 — `--imag-acked-offline REASON`: an operator-acked absent imag must NOT UNKNOWN-refuse
 

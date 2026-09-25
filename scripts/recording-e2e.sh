@@ -1074,6 +1074,23 @@ if [ -z "$AUTO_WIN_MANIFEST" ]; then
   AUTO_WIN_MANIFEST="$(manifest_autosource_fetch "$VERSION_GATE_REPO" windows-genlock-fast.yml obs-genlock-fast-dll \
     "$(genlock_build_sha_state_read "$VERSION_STRIH_STATE")" "$OUTDIR/win-fast-manifest.json")"
 fi
+# #1346: the two Windows CI workflows are not byte-reproducible -- for ONE marker sha the fast
+# obs.dll and the FULL windows-genlock bundle's bin/64bit/obs.dll differ, so the fast manifest alone
+# refused a correct full-bundle deploy. Also fetch the full bundle's manifest of the same build and
+# hand it to the gate as the ALTERNATE (a box is OK on either entry, DRIFT on neither). Skipped when
+# the operator pinned VERSION_GATE_MANIFEST (a pin is never widened); a failed fetch leaves it empty,
+# so the fast manifest is judged exactly as before. Keyed on strih's marker like the fast fetch (the
+# cross-box parity facet holds strih and stream on one build). Fetch helper (per-run cache + a
+# timeout on every gh call): scripts/lib/manifest-autosource.sh.
+AUTO_WIN_ALT_MANIFEST=""
+[ -z "${VERSION_GATE_MANIFEST:-}" ] && AUTO_WIN_ALT_MANIFEST="$(manifest_autosource_fetch_win_full "$VERSION_GATE_REPO" \
+  "$(genlock_build_sha_state_read "$VERSION_STRIH_STATE")" "$OUTDIR/win-full-manifest.json")"
+# Main ruling (issue comment 5829099220): the full manifest is judged ALONE only for a full-only build
+# (no successful fast run at the marker sha); a fast run whose manifest fetch failed is a fetch outage
+# and the byte pin is omitted for this run with a loud WARNING, never a refusal. An operator-pinned
+# VERSION_GATE_MANIFEST passes through unchanged (no alternate was fetched, no lookup is made).
+{ IFS= read -r AUTO_WIN_MANIFEST; IFS= read -r AUTO_WIN_ALT_MANIFEST; } < <(win_manifest_pair_resolve "$VERSION_GATE_REPO" \
+  "$(genlock_build_sha_state_read "$VERSION_STRIH_STATE")" "$AUTO_WIN_MANIFEST" "$AUTO_WIN_ALT_MANIFEST")
 # imag linux .so byte gather (ssh) + its own CI manifest, keyed on imag's marker SHA. The manifest is
 # fetched only when the .so gather actually returned SHAs, so a failed gather leaves the facet dormant.
 AUTO_IMAG_MANIFEST=""
@@ -1105,6 +1122,7 @@ fi
 if [ "$IMAG_OFFLINE_ACKED" = 1 ]; then
   "$HERE/version-integrity-gate.sh" \
     ${AUTO_WIN_MANIFEST:+--manifest "$AUTO_WIN_MANIFEST"} \
+    ${AUTO_WIN_ALT_MANIFEST:+--alt-manifest "$AUTO_WIN_ALT_MANIFEST"} \
     --win-state "strih=$VERSION_STRIH_STATE" \
     --win-state "stream=$VERSION_STREAM_STATE" \
     --imag-acked-offline "$IMAG_OFFLINE_ACK_REASON" \
@@ -1112,6 +1130,7 @@ if [ "$IMAG_OFFLINE_ACKED" = 1 ]; then
 else
 "$HERE/version-integrity-gate.sh" \
   ${AUTO_WIN_MANIFEST:+--manifest "$AUTO_WIN_MANIFEST"} \
+  ${AUTO_WIN_ALT_MANIFEST:+--alt-manifest "$AUTO_WIN_ALT_MANIFEST"} \
   --win-state "strih=$VERSION_STRIH_STATE" \
   --win-state "stream=$VERSION_STREAM_STATE" \
   --genlock-sha "imag=$IMAG_GENLOCK_SHA" \

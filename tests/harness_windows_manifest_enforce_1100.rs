@@ -67,3 +67,59 @@ fn windows_manifest_autosource_still_fetches_the_fast_manifest() {
          removes only the opt-in guard, not the byte-parity auto-source itself."
     );
 }
+
+/// #1346: the two Windows CI builds are not byte-reproducible, so the FAST manifest alone refuses a
+/// correct FULL-bundle deploy of the same build. recording-e2e.sh must ALSO fetch the FULL bundle's
+/// manifest (via the lib helper, keyed on the same strih marker sha) -- but only when the operator
+/// did not pin VERSION_GATE_MANIFEST (an operator pin is never widened) -- and pass it to BOTH gate
+/// invocations as the conditional `--alt-manifest` (omitted when the fetch failed, so the FAST
+/// manifest is then judged exactly as before).
+#[test]
+fn windows_full_bundle_manifest_is_fetched_and_passed_as_the_alternate_1346() {
+    let s = recording_e2e();
+    assert!(
+        s.contains(
+            "[ -z \"${VERSION_GATE_MANIFEST:-}\" ] && AUTO_WIN_ALT_MANIFEST=\"$(manifest_autosource_fetch_win_full \
+             \"$VERSION_GATE_REPO\""
+        ),
+        "#1346: recording-e2e.sh must fetch the FULL bundle manifest through \
+         manifest_autosource_fetch_win_full, skipped when VERSION_GATE_MANIFEST is pinned"
+    );
+    assert!(
+        s.contains("\"$(genlock_build_sha_state_read \"$VERSION_STRIH_STATE\")\" \"$OUTDIR/win-full-manifest.json\""),
+        "#1346: the FULL manifest must be keyed on the same strih marker sha as the FAST one"
+    );
+    assert_eq!(
+        s.matches("${AUTO_WIN_ALT_MANIFEST:+--alt-manifest \"$AUTO_WIN_ALT_MANIFEST\"}")
+            .count(),
+        2,
+        "#1346: both version-integrity-gate.sh invocations (imag-acked + normal) must pass the \
+         alternate conditionally"
+    );
+}
+
+/// #1346 main ruling: after both fetches, recording-e2e.sh resolves the pair through the lib's
+/// win_manifest_pair_resolve (full manifest alone only for a full-only build; a fast fetch outage
+/// omits the byte pin) -- once, reading both variables back, before the gate invocations.
+#[test]
+fn windows_manifest_pair_is_resolved_by_the_main_ruling_1346() {
+    let s = recording_e2e();
+    let call = "{ IFS= read -r AUTO_WIN_MANIFEST; IFS= read -r AUTO_WIN_ALT_MANIFEST; } < <(win_manifest_pair_resolve \"$VERSION_GATE_REPO\"";
+    assert_eq!(
+        s.matches(call).count(),
+        1,
+        "#1346: recording-e2e.sh must resolve the fast/full pair exactly once via win_manifest_pair_resolve"
+    );
+    let at = s.find(call).unwrap();
+    let full_fetch = s
+        .find("AUTO_WIN_ALT_MANIFEST=\"$(manifest_autosource_fetch_win_full")
+        .expect("the full-manifest fetch must exist");
+    let gate = s[at..]
+        .find("${AUTO_WIN_ALT_MANIFEST:+--alt-manifest")
+        .map(|p| at + p)
+        .expect("the gate invocation must follow the resolution");
+    assert!(
+        full_fetch < at && at < gate,
+        "#1346: resolve after the full fetch and before the gate invocations"
+    );
+}

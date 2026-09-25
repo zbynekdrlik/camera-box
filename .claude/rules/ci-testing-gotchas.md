@@ -1327,6 +1327,9 @@ FIRST append (the transcript is written after every tool round), so one call pro
 loops on `[ "$(date +%s)" -lt "$end" ]`, parses ONLY the last JSONL line of the output file
 (`tail -n 1 | python3 -c` printing `type` + the content-block types) and stops on
 `assistant text`, sleeping ~5 s between reads; then run `bash /abs/waitrev.sh` as its own call.
+**Also require `message.stop_reason == "end_turn"`** (issue 1346): the reviewer emits intermediate
+text-only assistant lines between tool rounds, so an `assistant ['text']` last line alone fired
+"DONE" while the review was still running.
 
 ## A Python CLI test that overrides HOME also hides the USER site-packages (issue 1346)
 

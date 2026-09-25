@@ -469,12 +469,17 @@ The Windows boxes deny ssh; the caller (win-* MCP holder) pre-fetches each box's
 state into a flat JSON file (the drift-guard --compare observed keys) and passes it via --win-state.
 
 Usage:
-  version-integrity-gate.sh [--readme PATH] [--manifest PATH] --win-state NAME=FILE [...]
+  version-integrity-gate.sh [--readme PATH] [--manifest PATH] [--alt-manifest PATH] --win-state NAME=FILE [...]
 
 Options:
   --readme PATH     pinned-set source (default ${DEFAULT_README}); threaded to drift-guard --compare.
   --manifest PATH   the build-under-test BUNDLE_MANIFEST.json — when set, applied to every box that
                     does not already carry a manifest= in its state (activates the BUILD-SHA facet).
+  --alt-manifest PATH  #1346 -- the OTHER Windows workflow's BUNDLE_MANIFEST.json of the SAME build
+                    (the full windows-genlock bundle beside the fast obs.dll-only --manifest). The
+                    two builds' obs.dll bytes differ, so a box is OK on EITHER entry (the line
+                    names which) and DRIFT on neither. Applied wherever --manifest is; given alone
+                    it is judged exactly like a lone --manifest (fail-closed).
   --win-state N=FILE  a box N whose observed drift-guard stack state JSON the caller wrote to FILE
                     (this gate has no headless ssh gather of its own; the win-* MCP holder
                     pre-fetches it -- #701 proved plain scp/ssh reaches strih/stream, not migrated
@@ -512,6 +517,10 @@ EOF
 
 main() {
   local readme="$DEFAULT_README" manifest=""
+  # #1346 -- the ALTERNATE Windows bundle manifest of the SAME build (the full windows-genlock bundle
+  # beside the fast obs.dll-only --manifest): the two workflows' obs.dll bytes differ, so drift-guard
+  # accepts either entry. Threaded to each box exactly where --manifest is (alt_manifest=).
+  local alt_manifest=""
   local -a win_state=()
   # #756 — extra box genlock-build SHAs supplied directly (LABEL=SHA), for boxes not gated via
   # --win-state (imag-nb is SSH-reachable, so recording-e2e.sh reads its GENLOCK_BUILD_SHA.txt and
@@ -545,6 +554,7 @@ main() {
     case "$1" in
       --readme)             shift; readme="${1:-}" ;;
       --manifest)           shift; manifest="${1:-}" ;;
+      --alt-manifest)       shift; alt_manifest="${1:-}" ;;
       --win-state)          shift; win_state+=("${1:-}") ;;
       --win-state-report-only) shift; win_state_report_only+=("${1:-}") ;;
       --genlock-sha)        shift; genlock_sha+=("${1:-}") ;;
@@ -600,6 +610,9 @@ main() {
     # BUILD-SHA / whole-bundle facet runs on every box uniformly.
     if [ "$has_manifest" -eq 0 ] && [ -n "$manifest" ]; then
       compare_args+=("manifest=${manifest}")
+    fi
+    if [ "$has_manifest" -eq 0 ] && [ -n "$alt_manifest" ]; then
+      compare_args+=("alt_manifest=${alt_manifest}")
     fi
     # issue 1351 follow-up: tell drift-guard's engine to SKIP the Windows-only ndi_runtime +
     # distroav_dll_paths mandatory facets for a Linux strih (loud SKIPPED, counted ok) while every
