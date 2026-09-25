@@ -2177,9 +2177,17 @@ mod vendored_source {
         let src = squish(&vendor_file(OBS_SOURCE));
         assert!(
             src.contains("restore=%d (#1335) fallbacks=%u (#1355) \" \"level_avg=%.2fms (#1367)\"")
-                && src.contains("source->asrc.level_fallback_count, source->asrc.level_avg_ms);"),
-            "{OBS_SOURCE}: #1367 — the asrc: telemetry line no longer ends with level_avg= (the \
+                && src.contains("source->asrc.level_fallback_count, source->asrc.level_avg_ms,"),
+            "{OBS_SOURCE}: #1367 — the asrc: telemetry line no longer carries level_avg= (the \
              tick-free level) appended after the byte-identical fallbacks=%u (#1355) suffix."
+        );
+        // issue 1372: the confirmed-step recovery still owed rides AFTER level_avg= as recover_ms=,
+        // so every name-extracting parser of the line is unaffected.
+        assert!(
+            src.contains("\"level_avg=%.2fms (#1367)\" \" recover_ms=%.1f (issue 1372)\"")
+                && src.contains("source->asrc.level_avg_ms, source->asrc.step_recover_ms);"),
+            "{OBS_SOURCE}: issue 1372 — the asrc: telemetry line no longer ends with recover_ms= \
+             (the confirmed sample-count step still being paid back at ASRC_STEP_RECOVER_PPM)."
         );
     }
 
@@ -2229,10 +2237,13 @@ mod vendored_source {
         );
         assert!(
             c.contains(
-                "if (c->level_captured && fabs(buffered_ms - c->level_target_ms) >= 0.5 * fabs(r_s * 1000.0)) c->level_restore = true;"
+                "if (c->level_captured && fabs(buffered_ms - c->level_target_ms) >= 0.5 * fabs(r_s * 1000.0)) { const double owed_ms = -r_s * 1000.0; c->step_recover_ms += owed_ms; c->level_target_ms -= owed_ms; }"
+            ) && c.contains(
+                "const double paid_ms = asrc_clamp(c->step_recover_ms, -budget_ms, budget_ms);"
             ),
-            "{ASRC_COMPENSATOR_C}: #1335 follow-up 2 — the level-corroborated fast-restore entry is \
-             gone; a sample-loss step would not refill the buffer."
+            "{ASRC_COMPENSATOR_C}: #1335 follow-up 2 / issue 1372 — the level-corroborated step \
+             booking (the owed amount paid back at ASRC_STEP_RECOVER_PPM) is gone; a sample-loss \
+             step would not refill the buffer."
         );
         assert!(
             // #1335 follow-up 5: the P term now reads the SMOOTHED error (c->level_err_ema_ms) at

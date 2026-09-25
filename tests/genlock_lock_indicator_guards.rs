@@ -220,3 +220,90 @@ fn genlock_lock_marker_is_mutually_non_substring() {
         );
     }
 }
+
+#[test]
+fn qpc_drift_books_a_fleet_date_step_1372() {
+    // Issue 1372: the widget re-baselines its qpc history by a booked dantesync date step (one
+    // genlock-wall-step: line) instead of reading it DEGRADED for the whole 300 s window. The
+    // decision is the parity-gated genlock_qpc_wall_step_rebase_ms; a clock set and a step storm
+    // still degrade. Mirror of the issue-1372 pwsh block in both windows-genlock*.yml.
+    assert_has(
+        HEADER,
+        "static inline int64_t genlock_qpc_wall_step_rebase_ms(int64_t jump_ms, int64_t step_bound_ms, int64_t book_max_ms, int64_t booked_in_window, int64_t steps_per_window)",
+    );
+    assert_has(
+        STATUSBAR_CPP,
+        "const int64_t rebase = genlock_qpc_wall_step_rebase_ms( jump, GENLOCK_QPC_STEP_BOUND_MS, GENLOCK_QPC_WALL_STEP_BOOK_MAX_MS, (int64_t)genlockQpcBookedSteps.size(), GENLOCK_QPC_WALL_STEPS_PER_WINDOW);",
+    );
+    assert_has(
+        STATUSBAR_CPP,
+        "for (auto &sample : genlockQpcHistory) sample.second += rebase;",
+    );
+    assert_has(
+        STATUSBAR_CPP,
+        "\"genlock-wall-step: the wall clock stepped %lld ms",
+    );
+    assert_has(STATUSBAR_HPP, "std::deque<qint64> genlockQpcBookedSteps;");
+    // the booking runs BEFORE this tick's sample joins the history (the jump is new vs back())
+    let src = squish(&vendor_file(STATUSBAR_CPP));
+    let book = src
+        .find("const int64_t rebase = genlock_qpc_wall_step_rebase_ms(")
+        .expect("booking call present");
+    let push = src
+        .find("genlockQpcHistory.emplace_back(now_ms, scan.qpc_signed_ms);")
+        .expect("history push present");
+    assert!(
+        book < push,
+        "issue 1372: the date-step booking must run before the new sample is pushed"
+    );
+    // the widget's two booking constants stay equal to the Rust authority's
+    let rust = vendor_file("src/genlock_lock_state.rs");
+    for (widget, authority) in [
+        (
+            "static constexpr int64_t GENLOCK_QPC_WALL_STEP_BOOK_MAX_MS = 200;",
+            "pub const GENLOCK_QPC_WALL_STEP_BOOK_MAX_MS: i64 = 200;",
+        ),
+        (
+            "static constexpr int64_t GENLOCK_QPC_WALL_STEPS_PER_WINDOW = 1;",
+            "pub const GENLOCK_QPC_WALL_STEPS_PER_WINDOW: i64 = 1;",
+        ),
+    ] {
+        assert_has(STATUSBAR_CPP, widget);
+        assert!(
+            rust.contains(authority),
+            "issue 1372: `{authority}` drifted in src/genlock_lock_state.rs — keep the widget and \
+             the Rust authority in lock-step"
+        );
+    }
+}
+
+#[test]
+fn wall_step_markers_are_mutually_non_substring_1372() {
+    // Issue 1372's two new OBS-log families: the widget's booked date step and the render tick's
+    // one-tick re-grid. Mutually non-substring with every existing marker and with each other.
+    let new = ["genlock-wall-step:", "genlock-regrid:"];
+    let existing = [
+        "genlock-lock:",
+        "genlock-lock-json:",
+        "genlock-fifo audit '",
+        "genlock-ndi-output audit '",
+        "genlock-ndi-filter audit '",
+        "genlock-relock",
+        "genlock-acquire-bracket '%s':",
+        "genlock-shallow-lock",
+        "genlock-shallow-remeasure",
+        "genlock-park '",
+        "multiview-audit:",
+        "program-render-audit:",
+        "recv-timing #797 '",
+        "asrc: source '",
+    ];
+    for n in new {
+        for m in existing.iter().chain(new.iter().filter(|x| **x != n)) {
+            assert!(
+                !n.contains(m) && !m.contains(n),
+                "issue 1372: marker `{n}` collides (substring) with `{m}`"
+            );
+        }
+    }
+}

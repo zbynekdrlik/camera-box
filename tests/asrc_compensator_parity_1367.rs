@@ -22,7 +22,8 @@
 //!   `level_avg` telemetry must move with it — traced right after the call), then a 40 ms sample
 //!   loss with no residual step (the sustained arm → restore burst).
 //! - `step`: an absolute source with a 50 ms input sample loss on the window-closing callback (the
-//!   re-base corroboration must read that live reading, not the window mean), a starved window (rejected, flushed — the window level sum must reset; the mixer
+//!   re-base corroboration must read that live reading, not the window mean; issue 1372: the
+//!   confirmed loss is booked and paid back at `STEP_RECOVER_PPM`, traced as `rec=` / `recp=`), a starved window (rejected, flushed — the window level sum must reset; the mixer
 //!   pads, so the depth holds), and a duplicate wall read (a zero master block, flushed, the next
 //!   block carrying both intervals), each followed by a relock.
 //!
@@ -50,10 +51,10 @@ const HARNESS_C: &str = r##"#include <stdint.h>
 
 static void line(const char *tag, long k, const struct asrc_compensator *c)
 {
-	printf("%s k=%ld est=%.9f app=%.9f lvl=%.9f avg=%.9f tgt=%.9f int=%.9f ema=%.9f rst=%d steps=%u fb=%u\n", tag,
+	printf("%s k=%ld est=%.9f app=%.9f lvl=%.9f avg=%.9f tgt=%.9f int=%.9f ema=%.9f rst=%d steps=%u fb=%u rec=%.9f recp=%.9f\n", tag,
 	       k, c->estimated_ppm, c->applied_ppm, c->level_last_ms, c->level_avg_ms, c->level_target_ms,
 	       c->level_integral_ppm, c->level_err_ema_ms, c->level_restore ? 1 : 0, c->step_count,
-	       c->level_fallback_count);
+	       c->level_fallback_count, c->step_recover_ms, c->step_recover_ppm);
 }
 
 static void tick_scenario(void)
@@ -166,7 +167,7 @@ int main(void)
 
 fn line(tag: &str, k: i64, c: &RealtimeAsrcCompensator) -> String {
     format!(
-        "{tag} k={k} est={:.9} app={:.9} lvl={:.9} avg={:.9} tgt={:.9} int={:.9} ema={:.9} rst={} steps={} fb={}",
+        "{tag} k={k} est={:.9} app={:.9} lvl={:.9} avg={:.9} tgt={:.9} int={:.9} ema={:.9} rst={} steps={} fb={} rec={:.9} recp={:.9}",
         c.estimated_ppm(),
         c.applied_ppm(),
         c.level_last_ms(),
@@ -176,7 +177,9 @@ fn line(tag: &str, k: i64, c: &RealtimeAsrcCompensator) -> String {
         c.level_err_ema_ms(),
         u8::from(c.level_restore()),
         c.step_count(),
-        c.level_fallback_count()
+        c.level_fallback_count(),
+        c.step_recover_ms(),
+        c.step_recover_ppm()
     )
 }
 
@@ -373,7 +376,14 @@ fn c_asrc_compensator_matches_the_rust_authority_1367() {
         r.len() >= 150
             && has("rst=1")
             && r.iter()
-                .any(|l| l.starts_with("step") && !l.contains("steps=0")),
+                .any(|l| l.starts_with("step") && !l.contains("steps=0"))
+            // issue 1372: the confirmed 50 ms loss is booked and paid back at 1000 ppm -- the trace
+            // must catch the recovery mid-way (an amount still owed, paid at the full rate).
+            && r.iter().any(|l| {
+                l.starts_with("step")
+                    && l.contains(" recp=-1000.000000000")
+                    && !l.contains(" rec=0.000000000")
+            }),
         "#1367: the parity scenarios no longer exercise the restore burst and a step re-base \
          ({} lines) — the gate would pass on a trace that skips the paths it guards",
         r.len()

@@ -302,6 +302,18 @@ pub const LEVEL_RESTORE_K_PPM_PER_MS: f64 = 2.0;
 /// asrc-compensator.h ASRC_LEVEL_RESTORE_MAX_PPM — keep numerically identical.
 pub const LEVEL_RESTORE_MAX_PPM: f64 = 100.0;
 
+/// Issue 1372 (ROZHODNUTÉ 5841039244): the rate, in ppm, at which a CONFIRMED sample-count step is
+/// paid back. A re-based step whose size the buffer level corroborates (a real sample loss/dup, not a
+/// wall-clock-only jump — the #1335 follow-up-2 corroboration) is booked as an owed amount and
+/// stretched (loss) or compressed (dup) back at exactly this rate: 1000 ppm = 1 ms per second, so the
+/// live 44 ms `mbc` loss at the 25.9.2026 fleet date step returns in ≈ 44 s instead of the 3–4 min the
+/// proportional ±100 ppm restore needed. It is the pitch budget (0.1 %) the #1303/#1367 audio
+/// placement slew already uses (`GENLOCK_AUDIO_SLEW_PPM`). It is a separate term on top of the servo's
+/// `applied_ppm`: the servo's own clamp (`MAX_PPM`) and slew limit (`MAX_SLEW_PPM_PER_S`) are
+/// unchanged, and nothing but a confirmed step ever sets it. Mirror of asrc-compensator.h
+/// ASRC_STEP_RECOVER_PPM — keep numerically identical.
+pub const STEP_RECOVER_PPM: f64 = 1000.0;
+
 /// camera-box #1335 follow-up 3: arm band (ms) for the FAST level restore when a DELIBERATE setpoint
 /// shift ([`RealtimeAsrcCompensator::shift_level_target`]) moves the setpoint. A shift whose |delta|
 /// is at least this arms the restore burst, so a deliberate audio sync-offset trim settles in minutes
@@ -616,6 +628,16 @@ pub struct RealtimeAsrcCompensator {
     /// window, in ms — telemetry (the C mirror prints it as the `asrc:` line's `level_avg=` field;
     /// `level=` keeps the one raw reading). Mirror of the C `level_avg_ms`.
     level_avg_ms: f64,
+    /// Issue 1372: the part of a CONFIRMED sample-count step still owed, in ms (+ = the buffer lost
+    /// samples, stretch; − = duplicated samples, compress). Booked at the corroborated re-base together
+    /// with a setpoint move of the same size, paid back at [`STEP_RECOVER_PPM`]. Cleared by a flush and
+    /// by a capture-rule change. Mirror of the C `step_recover_ms`.
+    step_recover_ms: f64,
+    /// Issue 1372: the recovery rate applied on THIS call, in ppm, in the servo's sign (negative =
+    /// stretch, like `applied_ppm`); 0 on every call without an owed step. The C caller adds it to the
+    /// resampler compensation on top of the servo's own `applied_ppm`. Mirror of the C
+    /// `step_recover_ppm`.
+    step_recover_ppm: f64,
 }
 
 impl RealtimeAsrcCompensator {
@@ -655,6 +677,8 @@ impl RealtimeAsrcCompensator {
             window_level_sum_ms: 0.0,      // issue #1367
             window_level_count: 0,         // issue #1367
             level_avg_ms: 0.0,             // issue #1367
+            step_recover_ms: 0.0,          // issue 1372
+            step_recover_ppm: 0.0,         // issue 1372
         }
     }
 
@@ -697,6 +721,9 @@ impl RealtimeAsrcCompensator {
         // are caller state and survive.
         self.level_unconverged_windows = 0;
         self.level_fallback_done = false;
+        // Issue 1372: a flush re-captures the setpoint, so a step still owed is abandoned with the
+        // capture it was booked against.
+        self.step_recover_ms = 0.0;
     }
 
     /// The current rate estimate, in ppm (issue #1084: the least-squares regression slope times
@@ -801,7 +828,21 @@ impl RealtimeAsrcCompensator {
             self.level_err_ema_seeded = false;
             self.level_unconverged_windows = 0;
             self.level_fallback_done = false;
+            // Issue 1372: the owed step belongs to the dropped capture.
+            self.step_recover_ms = 0.0;
         }
+    }
+
+    /// Issue 1372: the part of a confirmed sample-count step still owed, in ms (the C `asrc:` line's
+    /// `recover_ms=` field).
+    pub fn step_recover_ms(&self) -> f64 {
+        self.step_recover_ms
+    }
+
+    /// Issue 1372: the recovery rate applied on the last call, in ppm, servo sign (negative =
+    /// stretch). The C caller adds it to the resampler compensation.
+    pub fn step_recover_ppm(&self) -> f64 {
+        self.step_recover_ppm
     }
 
     /// issue #1355: the smoothed level error (`buffered − target` EMA), in ms — exposed for tests.
@@ -886,7 +927,9 @@ impl RealtimeAsrcCompensator {
     /// sites can never silently drift apart the way this project's C/Rust mirrors have before —
     /// see the top-level CLAUDE.md's repeated "mirror drifted apart" GOTCHAs.
     fn corrected_advance(&self, raw_advance_s: f64) -> f64 {
-        raw_advance_s / (1.0 + self.applied_ppm / 1_000_000.0)
+        // Issue 1372: a confirmed step's recovery rides on the same resampler, so the advance the
+        // source actually produces carries it too (0 on every call without an owed step).
+        raw_advance_s / (1.0 + (self.applied_ppm + self.step_recover_ppm) / 1_000_000.0)
     }
 }
 
@@ -933,6 +976,8 @@ impl RealtimeAsrcCompensator {
         master_block_s: f64,
         buffered_ms: Option<f64>,
     ) -> f64 {
+        // Issue 1372: the recovery rate is per call; only the owed-step block below sets it.
+        self.step_recover_ppm = 0.0;
         if master_block_s <= 0.0 {
             // A non-positive block duration carries no timing information (e.g. a duplicate or
             // backward wall-clock read — an NTP step) and, because the regression accumulates a
@@ -1040,6 +1085,11 @@ impl RealtimeAsrcCompensator {
                     // sample loss/dup (|level err| >= half the residual magnitude). A wall-clock-only
                     // jump leaves buffered_ms unchanged => re-base only, no restore. Keeps the
                     // captured setpoint + integral (the design's intent).
+                    // Issue 1372 (ROZHODNUTÉ 5841039244): a CONFIRMED step is booked, not restored
+                    // proportionally. The owed amount is the measured sample-count step itself; the
+                    // setpoint moves with the buffer (so the level loop, the restore arms and the
+                    // unreachable bound see no disturbance) and walks back as the recovery pays it at
+                    // STEP_RECOVER_PPM below — the live 44 ms loss in ≈ 44 s, not 3–4 min.
                     if self.level_captured
                         && (buf_ms - self.level_target_ms).abs() >= 0.5 * (r_s * 1000.0).abs()
                     {

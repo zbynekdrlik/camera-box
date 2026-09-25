@@ -396,6 +396,19 @@ pub mod genlock_grid;
 // per-second grid removes it. Crate-root + default features (Tier-0), no OBS.
 pub mod genlock_grid_bench;
 
+// Issue 1372 — the ONE wall-step detector of the genlock render tick: a coordinated dantesync fleet
+// DATE step (the wall moves, the media clock does not) re-grids the tick in ONE tick instead of the
+// 2 ms/tick slew-back that left the tick and the sender's floored stamps off phase. Crate-root +
+// std-only (Tier-0 verifiable); the C twin `vendor/obs-studio/libobs/obs-genlock-wall-step.h` is held
+// identical by the committed parity gate `tests/genlock_wall_step_parity_1372.rs`.
+pub mod genlock_wall_step;
+
+// Issue 1372 — the two-clock WALL-STEP bench: the logged −51 ms fleet date step replayed against the
+// render tick + sender stamp, the LOCK indicator's qpc_drift verdict and the stream `mbc` ASRC (a
+// confirmed 44 ms sample loss paid back at 1000 ppm). Test-only.
+#[cfg(test)]
+mod genlock_wall_step_bench;
+
 // Issue 1372 part A — the Windows OBS media clock runs at the dantesync-disciplined system-time rate: the
 // vendored `os_gettime_ns()` (platform-windows.c) integrates QPC deltas at the system-time rate
 // `inc / adj` from GetSystemTimeAdjustmentPrecise, rebasing on a rate change. Crate-root +
