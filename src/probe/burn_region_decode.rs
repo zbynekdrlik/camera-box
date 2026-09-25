@@ -197,7 +197,7 @@ mod tests {
         BURN_RUN_ID_CAM7,
     ];
 
-    fn p(run_id: u32, frame_id: u32, gen_ts_ns: u64) -> Payload {
+    fn p(run_id: u32, frame_id: u32, gen_ts_ns: i64) -> Payload {
         Payload {
             run_id,
             frame_id,
