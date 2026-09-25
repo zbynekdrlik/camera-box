@@ -104,3 +104,49 @@ def test_the_capture_command_keeps_the_header_and_filters_vban():
     assert 'SNAPLEN="${VBAN_RATE_SNAPLEN:-96}"' in s
     assert "udp[8:4] = 0x5642414e" in s                  # the VBAN magic BPF
     assert "sudo -S -p ''" in s                           # sudo fed on stdin, never a tty prompt
+
+
+# ---------------------------------------------------------------------------------------------
+# review round 1 (issue 1372): a capture that keeps failing on a live box pages; stale state resets
+# ---------------------------------------------------------------------------------------------
+
+def _run_failing(tmp_path, box_up, passes, **env):
+    stub = tmp_path / "capture-fail.sh"
+    stub.write_text("#!/usr/bin/env bash\necho 'sudo: 1 incorrect password attempt' >&2\nexit 1\n")
+    stub.chmod(stub.stat().st_mode | stat.S_IEXEC)
+    up = tmp_path / "boxup.sh"
+    up.write_text(f"#!/usr/bin/env bash\nprintf {box_up}\n")
+    up.chmod(up.stat().st_mode | stat.S_IEXEC)
+    e = {k: v for k, v in os.environ.items() if not k.startswith(("VBAN_RATE_", "OBS_FLEET"))}
+    e.update({"VBAN_RATE_CAPTURE_CMD": str(stub), "VBAN_RATE_BOX_UP_CMD": str(up),
+              "VBAN_RATE_HOST": "10.77.9.202", "VBAN_RATE_NOW": str(_NOW),
+              "VBAN_RATE_ALERT_STATE_DIR": str(tmp_path)})
+    e.update(env)
+    errs = []
+    for _ in range(passes):
+        r = subprocess.run(["bash", str(_WATCHDOG), "--dry-run"], capture_output=True, text=True, env=e)
+        assert r.returncode == 0, r.stderr
+        errs.append(r.stderr)
+    return errs
+
+
+def test_a_capture_that_keeps_failing_on_a_live_box_pages_once_confirmed(tmp_path):
+    errs = _run_failing(tmp_path, box_up=1, passes=3)
+    assert "sudo: 1 incorrect password attempt" in errs[0]          # the remote reason is logged
+    assert "WOULD alert" not in errs[0] and "WOULD alert" not in errs[1]
+    key = f"vban-rate-capture-strih-lx-{_NOW // 600}"
+    assert f"WOULD alert (dedup-key={key})" in errs[2], errs[2]
+
+
+def test_a_capture_failing_because_the_box_is_down_never_pages(tmp_path):
+    errs = _run_failing(tmp_path, box_up=0, passes=4)
+    assert all("WOULD alert" not in e for e in errs)
+    assert "box down" in errs[-1]
+
+
+def test_a_stream_that_went_away_does_not_resume_its_old_confirm_count(tmp_path):
+    pcap = b.pcap_bytes(276, _inbound(drop={100, 200, 300}))
+    first = _run(tmp_path, pcap, VBAN_RATE_CONFIRM_THRESHOLD="2")
+    assert "not yet CONFIRMED" in first
+    days_later = _run(tmp_path, pcap, VBAN_RATE_CONFIRM_THRESHOLD="2", VBAN_RATE_NOW=str(_NOW + 86400))
+    assert "not yet CONFIRMED" in days_later and "WOULD alert" not in days_later, days_later
