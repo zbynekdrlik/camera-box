@@ -331,3 +331,111 @@ fn kiosk_autostart_never_extends_the_desktop_onto_hdmi() {
         "the desktop must never extend onto HDMI"
     );
 }
+
+// ----------------------------------------------------------------------------------------------
+// issue 1346 -- the NVIDIA Vulkan direct-display backend, selected by the box fact
+// STRIH_HDMI_OUTPUT_BACKEND (main design 5838663570; STEP 0 + the GPU interop proven live on
+// strih-lx, 5838745730 + 5839007372)
+// ----------------------------------------------------------------------------------------------
+
+#[test]
+fn config_json_carries_the_backend_and_keeps_the_lease_shape_byte_identical() {
+    let (c, out, _e) = run(
+        "strih_drm_output_config_json HDMI-0 multiview vk-direct",
+        None,
+    );
+    assert_eq!(c, 0);
+    assert_eq!(
+        out,
+        "{\"enabled\":true,\"connector\":\"HDMI-0\",\"argb\":2105376,\"view\":\"multiview\",\"backend\":\"vk-direct\"}\n",
+        "vk-direct is written explicitly, on the same one machine-written line"
+    );
+    let (c2, lease, _e) = run("strih_drm_output_config_json HDMI-1 program lease", None);
+    let (c3, legacy, _e) = run("strih_drm_output_config_json HDMI-1 program", None);
+    assert_eq!((c2, c3), (0, 0));
+    assert_eq!(
+        lease, legacy,
+        "the lease backend is the ABSENT key: a lease config stays byte-identical to the pre-backend one"
+    );
+    assert!(!lease.contains("backend"), "{lease}");
+    for bad in [
+        "strih_drm_output_config_json HDMI-0 multiview vulkan",
+        "strih_drm_output_config_json HDMI-0 multiview VK-DIRECT",
+        "strih_drm_output_config_json HDMI-0 multiview 'vk-direct\"'",
+    ] {
+        let (cb, ob, _e) = run(bad, None);
+        assert_ne!(
+            cb, 0,
+            "`{bad}` must refuse, never write a config the C would keep dormant"
+        );
+        assert!(ob.is_empty(), "`{bad}` must print nothing: {ob}");
+    }
+}
+
+/// The two backend args (config token, box fact) are optional: an old 5-arg call grades exactly as
+/// before (the existing verdict test), a drift between the config and the fact is its own FAIL.
+#[test]
+fn verdict_grades_the_backend_against_the_box_fact() {
+    let cases: &[(&str, &str, i32)] = &[
+        ("1 HDMI-0 multiview 1 1 vk-direct vk-direct", "ok", 0),
+        ("1 HDMI-0 program 1 0 lease lease", "ok", 0),
+        ("1 HDMI-0 multiview 1 1 lease vk-direct", "backend-drift", 1),
+        ("1 HDMI-0 multiview 0 0 lease vk-direct", "backend-drift", 1),
+        (
+            "1 HDMI-0 multiview 1 1 unknown vk-direct",
+            "backend-invalid",
+            1,
+        ),
+        ("1 HDMI-0 multiview 1 1 vk-direct ?", "ok", 0),
+        ("1 HDMI-0 multiview 1 1 ? vk-direct", "ok", 0),
+        ("0 - program 0 0 lease vk-direct", "skip-no-hdmi", 2),
+        ("1 - program 0 0 lease vk-direct", "config-missing", 1),
+    ];
+    for (args, token, rc) in cases {
+        let (c, out, _e) = run(&format!("strih_drm_output_verdict {args} || exit $?"), None);
+        assert_eq!(out, *token, "args `{args}`");
+        assert_eq!(c, *rc, "args `{args}` -> rc");
+    }
+}
+
+#[test]
+fn setup_and_verify_take_the_backend_from_the_box_fact() {
+    let facts = read("scripts/lib/strih-box-facts.sh");
+    assert!(
+        facts.contains(
+            "strih_lx_hdmi_output_backend() { strih_box_fact STRIH_HDMI_OUTPUT_BACKEND; }"
+        ),
+        "the fact has ONE accessor"
+    );
+    let env = read("scripts/strih-boxes/strih-lx.env");
+    assert!(
+        env.lines()
+            .any(|l| l == "STRIH_HDMI_OUTPUT_BACKEND=vk-direct"),
+        "strih-lx's built-in HDMI is NVIDIA-driven: vk-direct (owner ruling 5838662632)"
+    );
+    let pp = read("scripts/strih-boxes/strih-pp.env");
+    assert!(
+        pp.lines()
+            .any(|l| l == "STRIH_HDMI_OUTPUT_BACKEND=TODO_OWNER"),
+        "the strih PP template carries the new fact undecided"
+    );
+    let s = read("scripts/setup-strih.sh");
+    for token in [
+        "DRM_BACKEND=\"$(strih_lx_hdmi_output_backend)\"",
+        "strih_drm_output_config_json \"$DRM_CONN\" \"$DRM_VIEW0\" \"$DRM_BACKEND\"",
+        "write_drm_backend",
+        "libvulkan1",
+    ] {
+        assert!(s.contains(token), "setup-strih must contain `{token}`");
+    }
+    let v = read("scripts/verify-strih.sh");
+    for token in [
+        "drm_output_backend_token",
+        "strih_lx_hdmi_output_backend",
+        "backend-drift)",
+        "backend-invalid)",
+        "\"$DRM_BACKEND_V\" \"$DRM_BACKEND_FACT\"",
+    ] {
+        assert!(v.contains(token), "verify-strih must contain `{token}`");
+    }
+}
