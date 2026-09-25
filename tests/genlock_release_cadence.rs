@@ -764,7 +764,9 @@ fn relock_events_log_phase_evidence_940() {
         "tick_phase_ns=%llu",
         "anchor_ns=%llu",
         "sel_vs_newest_due=%lld",
-        // Issue 1367: whether this relock dropped a stale anchor (an arrival burst).
+        // Issue 1367: the N==1 governor depth the anchor was judged by (0 = the configured
+        // latency), and whether this relock dropped a stale anchor (an arrival burst).
+        "expected_frames=%llu",
         "stale_reset=%d",
     ] {
         assert!(

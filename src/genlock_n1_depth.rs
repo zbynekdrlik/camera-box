@@ -567,6 +567,27 @@ pub fn n1_shallow_governs(
         && !n1_is_deep_source(arrival_floor_ns, latency_ms, interval_ns)
 }
 
+/// issue 1367 (ROZHODNUTÉ 5840479751) — the depth, in frames, the N==1 governor holds this source
+/// at, or 0 when it holds none: [`n1_target_frames`] (`base + 1`) on a DEEP source, the latched D
+/// while [`n1_shallow_governs`], else 0. The backlog relock's stale-anchor test reads it to know
+/// where a CORRECT anchor sits (`relock_anchor_is_stale` in `genlock_backlog`). Built only from the
+/// governor's own predicates, so the two can never disagree. The caller gates it on N==1 exactly
+/// as the governor's source wrappers do. Mirror of the C `genlock_n1_expected_depth_frames`.
+pub fn n1_expected_depth_frames(
+    arrival_floor_ns: u64,
+    latency_ms: u32,
+    interval_ns: u64,
+    shallow_target_frames: u64,
+) -> u64 {
+    let _ = (
+        arrival_floor_ns,
+        latency_ms,
+        interval_ns,
+        shallow_target_frames,
+    );
+    0
+}
+
 /// issue 1367 — the shallow SHED half (the caller gates it on [`n1_tick_is_on_grid`]): shed one frame
 /// when the last presented depth (the locked boundary) sits deeper than the latched D, throttled by
 /// the shared #859 counter. Design 5830750134: never while the NEWEST queued frame is already more

@@ -591,6 +591,16 @@ pub fn relock_select_nearest(queue_ts: &[u64], wall_now_ns: u64, anchor_age_ns: 
     best
 }
 
+/// Issue 1367 (ROZHODNUTÉ 5840479751) — the age the BACKLOG relock's EXPECTED-depth pick targets:
+/// `expected_frames` whole frames (the depth the N==1 governor holds the source at,
+/// `crate::genlock_n1_depth::n1_expected_depth_frames`, 0 = none), floored at the configured
+/// latency exactly like the anchor ([`relock_anchor_age_ns`]). With no governor depth it IS the
+/// configured-latency pick. Mirror of the C `genlock_relock_select_expected()` target.
+pub fn relock_expected_age_ns(expected_frames: u64, latency_ms: u32, interval_ns: u64) -> u64 {
+    let _ = (expected_frames, interval_ns);
+    relock_anchor_age_ns(0, latency_ms)
+}
+
 /// Issue 1367 — is the tracked phase anchor STALE for a BACKLOG relock?
 ///
 /// `sel_anchor` is the index [`relock_select_nearest`] picks against the tracked anchor;

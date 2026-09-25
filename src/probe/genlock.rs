@@ -2662,20 +2662,20 @@ mod tests {
     ///
     /// This is the demonstrative lock for the whole ticket: the pre-1037 harness presented the
     /// NEWEST due frame at a backlog relock, re-minting the release phase on every lock episode —
-    /// the instant-sampled defect #1003 removes. With a deep ~925 ms phase anchor tracked on an
-    /// 890 ms conveyor, the relock must present the frame NEAREST `wall_now − anchor` — one frame
-    /// BEHIND the newest due one — keeping the deep delay line, and must PRESERVE the anchor (a
-    /// relock corrects DEPTH, never phase).
+    /// the instant-sampled defect #1003 removes. With a deep phase anchor tracked on an 890 ms
+    /// conveyor, the relock must present the frame NEAREST `wall_now − anchor` — one frame BEHIND
+    /// the newest due one — keeping the deep delay line, and must PRESERVE the anchor (a relock
+    /// corrects DEPTH, never phase).
     ///
-    /// Issue 1367: the anchor here sits within one canvas tick of the configured phase (ordinary
-    /// jitter), so it is kept. The earlier revision of this test tracked a 900 ms anchor over a
-    /// 3 ms configured latency — 27 frames behind it, which is now exactly the stale burst phase
-    /// the backlog relock drops (`genlock_stale_relock_tests.rs`).
+    /// Issue 1367: the anchor is the REAL deep N==1 depth — `base + 1` = 28 frames at pin 890,
+    /// sampled 2 ms late — which is where the N==1 governor holds this source, so it is kept. The
+    /// earlier revision of this test tracked a 900 ms anchor over a 3 ms configured latency (27
+    /// frames behind it), which is now exactly the stale burst phase the backlog relock drops
+    /// (`genlock_stale_relock_tests.rs`).
     ///
     /// Trace (interval 33.333 ms, wall = frame 39 + 5 ms): the deadline `wall − 890 ms` ≈ frame
-    /// 12.45, so newest-due is index 12 and the configured pick is 12 (12.45 is nearer 12 than
-    /// 13); the anchor target `wall − 925 ms` ≈ frame 11.4, so the anchor pick is index 11 — one
-    /// frame behind, within the one-tick tolerance of a 1:1 source.
+    /// 12.45, so newest-due is index 12; the anchor target `wall − 935.3 ms` ≈ frame 11.1, so the
+    /// anchor pick is index 11; the expected-depth pick (`wall − 28 × interval`) is also 11.
     #[test]
     fn backlog_relock_inherits_the_phase_anchor_not_newest_due_1037() {
         use std::collections::VecDeque;
@@ -2684,7 +2684,7 @@ mod tests {
         let mut cadence = ReleaseCadence::new();
         cadence.locked_next_boundary_ns = Some(base); // past ACQUIRE
         cadence.last_known_n = 1; // 1:1 source
-        cadence.phase_anchor_ns = 925_000_000; // a deep ~925 ms conveyor, tracked from steady
+        cadence.phase_anchor_ns = 28 * I + 2_000_000; // base + 1 at pin 890, sampled 2 ms late
         let n = 40u64;
         let mut queue: VecDeque<u64> = (0..n).map(|i| base + i * I).collect();
         let wall_now = base + (n - 1) * I + 5_000_000;
@@ -2703,7 +2703,7 @@ mod tests {
         assert_eq!(
             out.presented,
             Some(base + 11 * I),
-            "#1037: the relock must present the frame NEAREST the 925 ms phase anchor (index 11), \
+            "#1037: the relock must present the frame NEAREST the base + 1 phase anchor (index 11), \
              NOT the newest due one (index 12). Presenting newest-due re-mints the release phase \
              every episode, the #1003 defect."
         );
@@ -2715,7 +2715,8 @@ mod tests {
         );
         assert_eq!(queue.len(), 28, "#1037: the deep delay line is preserved");
         assert_eq!(
-            cadence.phase_anchor_ns, 925_000_000,
+            cadence.phase_anchor_ns,
+            28 * I + 2_000_000,
             "#1037: a relock corrects DEPTH, never PHASE — the anchor must be PRESERVED, never \
              re-minted from the frame the relock happened to select (the C anchor_update gate: \
              relocks never write the anchor)"
