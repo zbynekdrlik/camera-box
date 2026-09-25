@@ -3063,6 +3063,27 @@ mod vendored_source {
             ),
             "{OBS_CORE_C}: #1063 — obs_aux_sender_should_skip() no longer gates on max(elapsed, obs->video.last_tick_total_ns); the budget term is render-order-dependent again and an aux filter that decides early in the tick under-throttles."
         );
+        // issue 1346: the self-excluding form (the DRM-output HDMI Multiview view) subtracts the
+        // caller's own previous render from the previous-tick total, saturating; the #879 wrapper
+        // is its self_last_ns = 0 case.
+        assert!(
+            api.contains(
+                "EXPORT bool obs_aux_sender_should_skip_excluding(uint32_t render_divisor, uint32_t frame_counter,"
+            ),
+            "{OBS_API}: issue 1346 — obs_aux_sender_should_skip_excluding() is not EXPORTed; the DRM-output view cannot exclude its own previous render and the HDMI Multiview halves to 15 fps again."
+        );
+        assert!(
+            core.contains(
+                "const uint64_t last_tick_total = (tick_total > self_last_ns) ? tick_total - self_last_ns : 0;"
+            ),
+            "{OBS_CORE_C}: issue 1346 — the aux seam no longer subtracts the caller's own previous render (saturating) from the previous-tick total; the view's cost is counted twice again."
+        );
+        assert!(
+            core.contains(
+                "return obs_aux_sender_should_skip_excluding(render_divisor, frame_counter, ewma_ns, consecutive_skips, 0);"
+            ),
+            "{OBS_CORE_C}: issue 1346 — obs_aux_sender_should_skip() is no longer the self_last_ns = 0 case of the _excluding form; the #879 aux senders may have changed behaviour."
+        );
 
         let flt = squish(&vendor_file(NDI_FILTER));
         assert!(

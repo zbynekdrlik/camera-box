@@ -134,8 +134,22 @@ fn multiview_render_is_budget_gated_audited_and_persisted() {
             "the pure per-tick decision (lifted below)",
         ),
         (
-            "obs_aux_sender_should_skip(",
-            "the EXISTING never-degrade-Program budget gate (issue 879) -- no new throttle logic",
+            "obs_aux_sender_should_skip_excluding(",
+            "the EXISTING never-degrade-Program budget gate (issue 879), in its self-excluding form \
+             (main design 5840501628: the view's own previous render is not counted twice)",
+        ),
+        (
+            "const uint64_t self_last_ns = g_view.last_render_ns; g_view.last_render_ns = 0;",
+            "the view hands its previous render cost over ONCE (0 after a skip or a missed call), so \
+             a render is never subtracted from a tick that did not contain it",
+        ),
+        (
+            "g_view.last_render_ns = dt;",
+            "a measured render records its cost for the next tick's gate",
+        ),
+        (
+            "self_ns=%llu",
+            "the multiview-render line reports the self-exclusion the gate used",
         ),
         (
             "drm-output: multiview-render",
@@ -205,6 +219,30 @@ fn multiview_render_is_budget_gated_audited_and_persisted() {
         !v.contains("program-render-audit"),
         "issue 1346: never emit a program-render-audit line"
     );
+    // The line's keys stay mutually non-substring, so a `key=` token scan reads each one alone
+    // (main design 5840501628: `self_ns=` joins them).
+    let line_at = v
+        .find("drm-output: multiview-render ")
+        .expect("issue 1346: the multiview-render format string");
+    let line_end = v[line_at..].find(",").expect("format string end") + line_at;
+    let keys: Vec<&str> = v[line_at..line_end]
+        .split(' ')
+        .filter_map(|tok| tok.split_once('=').map(|(k, _)| k))
+        .map(|k| k.trim_start_matches('"'))
+        .collect();
+    assert!(
+        keys.contains(&"self_ns") && keys.contains(&"rendered_fps"),
+        "issue 1346: multiview-render keys {keys:?} must carry self_ns"
+    );
+    for a in &keys {
+        for b in &keys {
+            assert!(
+                a == b || !format!("{b}=").contains(&format!("{a}=")),
+                "issue 1346: multiview-render key `{a}=` is a substring of `{b}=` -- a token scan \
+                 would misread it"
+            );
+        }
+    }
 }
 
 #[test]
