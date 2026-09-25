@@ -172,8 +172,14 @@ pub const VIDEO_DELAY_LOCK_PENDING: u32 = u32::MAX;
 /// relock); no D yet but a window measuring → [`VIDEO_DELAY_LOCK_PENDING`]; otherwise 0 (the free
 /// Option-3 tracker, e.g. an N>=2 source). Mirror of `genlock_video_delay_lock_ms`.
 pub fn video_delay_lock_ms(target_frames: u64, measuring: bool, interval_ns: u64) -> u32 {
-    let _ = (target_frames, measuring, interval_ns);
-    0
+    if target_frames != 0 && interval_ns != 0 {
+        video_delay_round_ms(target_frames.saturating_mul(interval_ns))
+            .min(VIDEO_DELAY_LOCK_PENDING - 1)
+    } else if measuring {
+        VIDEO_DELAY_LOCK_PENDING
+    } else {
+        0
+    }
 }
 
 /// One render tick of the tracker: smooth the sample; an idle tracker ARMS a settle countdown when
@@ -194,7 +200,13 @@ pub fn video_delay_track(
     interval_ns: u64,
 ) {
     t.smoothed_ns = video_delay_smooth_ns(t.smoothed_ns, sample_ns);
-    let _ = lock_ms;
+    if lock_ms != 0 {
+        t.settle_ticks = 0;
+        if lock_ms != VIDEO_DELAY_LOCK_PENDING {
+            t.applied_ms = lock_ms;
+        }
+        return;
+    }
     if t.settle_ticks > 0 {
         t.settle_ticks -= 1;
         if t.settle_ticks == 0 && video_delay_moved(t.applied_ms, t.smoothed_ns, interval_ns) {
@@ -253,8 +265,7 @@ pub const AUDIO_WITHHOLD_MAX_NS: u64 = 10_000_000_000;
 /// `first_packet_ns` (OBS monotonic; 0 = none yet) run out at `now_ns`? Mirror of
 /// `genlock_audio_withhold_expired`.
 pub fn audio_withhold_expired(first_packet_ns: u64, now_ns: u64) -> bool {
-    let _ = (first_packet_ns, now_ns);
-    true
+    first_packet_ns != 0 && now_ns.saturating_sub(first_packet_ns) >= AUDIO_WITHHOLD_MAX_NS
 }
 
 /// Pick the hold for one audio packet. `latency_ms == 0` is the unreachable floor-violating value
@@ -274,8 +285,9 @@ pub fn audio_hold_mode(
         AudioHoldMode::Off
     } else if audio_ts_is_wallclock && video_delay_ms > 0 {
         AudioHoldMode::Timecode
+    } else if audio_ts_is_wallclock && !withhold_expired {
+        AudioHoldMode::Pending
     } else {
-        let _ = withhold_expired;
         AudioHoldMode::Latency
     }
 }
@@ -387,11 +399,23 @@ pub fn audio_hold_action(
     can_slew: bool,
     slew_pending: bool,
 ) -> AudioHoldAction {
-    let _ = (continuous, can_slew, slew_pending);
-    if mode != prev_mode || hold_ms != prev_hold_ms {
-        AudioHoldAction::Place
+    if mode == AudioHoldMode::Pending {
+        return AudioHoldAction::Withhold;
+    }
+    let changed = mode != prev_mode || hold_ms != prev_hold_ms;
+    if !changed {
+        if slew_pending && (!continuous || !can_slew) {
+            return AudioHoldAction::Place;
+        }
+        return AudioHoldAction::Continue;
+    }
+    if !prev_mode.is_active() || !mode.is_active() || !continuous {
+        return AudioHoldAction::Place;
+    }
+    if can_slew {
+        AudioHoldAction::Slew
     } else {
-        AudioHoldAction::Continue
+        AudioHoldAction::Replace
     }
 }
 
@@ -408,8 +432,12 @@ pub fn audio_level_shift_ns(
     prev_term_ns: i64,
     slew_remaining_ns: i64,
 ) -> i64 {
-    let _ = (action, prev_mode, slew_remaining_ns);
-    new_term_ns.wrapping_sub(prev_term_ns)
+    match action {
+        AudioHoldAction::Place | AudioHoldAction::Replace if prev_mode.is_active() => new_term_ns
+            .wrapping_sub(prev_term_ns)
+            .wrapping_add(slew_remaining_ns),
+        _ => 0,
+    }
 }
 
 /// Issue 1367 — the ASRC-rate SLEW of the audio placement: 1000 ppm (0.1 %, ~1.7 cents — the NTSC
@@ -421,15 +449,18 @@ pub const AUDIO_SLEW_PPM: u64 = 1000;
 /// (signed: positive = the audio moves LATER, the resampler stretches): `remaining` clamped to
 /// `±dt · AUDIO_SLEW_PPM / 1e6`. Mirror of `genlock_audio_slew_step_ns`.
 pub fn audio_slew_step_ns(remaining_ns: i64, dt_ns: u64) -> i64 {
-    let _ = (remaining_ns, dt_ns);
-    0
+    let cap = (dt_ns.saturating_mul(AUDIO_SLEW_PPM) / 1_000_000).min(i64::MAX as u64) as i64;
+    remaining_ns.clamp(-cap, cap)
 }
 
 /// Issue 1367 — the resampler ppm of one slew step (`step · 1e6 / dt`, 0 for an empty callback).
 /// Positive = stretch (the swresample-native sign). Mirror of `genlock_audio_slew_ppm`.
 pub fn audio_slew_ppm(step_ns: i64, dt_ns: u64) -> f64 {
-    let _ = (step_ns, dt_ns);
-    0.0
+    if dt_ns == 0 {
+        0.0
+    } else {
+        step_ns as f64 * 1e6 / dt_ns as f64
+    }
 }
 
 /// The video delay the pairing offset is measured against: the smoothed MEASURED stamp→present

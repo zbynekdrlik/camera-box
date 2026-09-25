@@ -1046,6 +1046,16 @@ seed_ini "$OBS_CFG/global.ini"
 seed_ini "$OBS_CFG/user.ini"
 chown -R "$DESKTOP_USER:$DESKTOP_USER" "$OBS_CFG"
 
+# camera-box issue 1367 (ROZHODNUTÉ 5827497952, item 4): declare THIS box a genlock MIN-LATENCY box
+# (the imag projection: every input at the 3 ms floor -- "najmensia mozna latencia"). The vendored
+# libobs reads this marker once and caps a shallow source's latched depth at its pin-derived
+# base + 1 here, REPORTING the cap (a genlock-shallow-lock WARNING + shallow_capped=1 on the audit
+# line) instead of deepening an imag input. libobs has no other box identity (the imag and strih
+# inputs share their names), so this file IS the identity. Idempotent.
+install -d -o "$DESKTOP_USER" -g "$DESKTOP_USER" "$USER_HOME/.camera-box"
+install -o "$DESKTOP_USER" -g "$DESKTOP_USER" -m 0644 /dev/null "$USER_HOME/.camera-box/genlock-min-latency"
+echo "  issue 1367: genlock min-latency box marker written ($USER_HOME/.camera-box/genlock-min-latency)"
+
 # #791: install the CANONICAL 17-scene operator collection -- ONLY when this box genuinely has NO
 # scene collection yet (a fresh profile). imag_scenes.py's own WS-based seed deliberately never
 # creates "resolume imag" / "MW resolume imag" (its #785 OPERATOR-WINS carve-out -- those are

@@ -262,21 +262,27 @@ pub fn n1_shallow_target_frames(
     floor_max_frames: u64,
     min_latency_box: bool,
 ) -> (u64, bool) {
-    let _ = (base_frames, floor_max_frames, min_latency_box);
-    (0, false)
+    let d = base_frames.max(floor_max_frames).saturating_add(1);
+    let cap = base_frames.saturating_add(1);
+    if min_latency_box && d > cap {
+        (cap, true)
+    } else {
+        (d, false)
+    }
 }
 
 /// issue 1367 — is a GAP RESYNC over this missing-stamp gap a sender restart (a relock)? Mirror of
 /// the C `genlock_n1_shallow_gap_is_relock`.
 pub fn n1_shallow_gap_is_relock(gap_ns: u64) -> bool {
-    let _ = gap_ns;
-    false
+    gap_ns >= N1_SHALLOW_RELOCK_GAP_NS
 }
 
 /// issue 1367 — open a new measurement window; the latched D (if any) stays maintained. Mirror of
 /// the C `genlock_n1_shallow_rearm`.
 pub fn n1_shallow_rearm(s: &mut ShallowDepth) {
-    let _ = s;
+    s.floor_max_frames = 0;
+    s.window_ticks = 0;
+    s.measuring = true;
 }
 
 /// issue 1367 — one PRESENT tick of the shallow-depth state. `n1`: this tick presented on the N==1
@@ -294,16 +300,26 @@ pub fn n1_shallow_track(
     base_frames: u64,
     min_latency_box: bool,
 ) -> bool {
-    let _ = (
-        s,
-        n1,
-        relock,
-        on_grid,
-        floor_frames,
-        base_frames,
-        min_latency_box,
-    );
-    false
+    if !n1 {
+        *s = ShallowDepth::default();
+        return false;
+    }
+    if relock {
+        n1_shallow_rearm(s);
+    }
+    if !s.measuring || !on_grid {
+        return false;
+    }
+    s.floor_max_frames = s.floor_max_frames.max(floor_frames);
+    s.window_ticks = s.window_ticks.saturating_add(1);
+    if s.window_ticks < N1_SHALLOW_SETTLE_TICKS {
+        return false;
+    }
+    let (d, capped) = n1_shallow_target_frames(base_frames, s.floor_max_frames, min_latency_box);
+    s.target_frames = d;
+    s.capped = capped;
+    s.measuring = false;
+    true
 }
 
 /// issue 1367 — does the latched shallow depth govern this source now? A latched D on a source
@@ -314,8 +330,9 @@ pub fn n1_shallow_governs(
     latency_ms: u32,
     interval_ns: u64,
 ) -> bool {
-    let _ = (target_frames, arrival_floor_ns, latency_ms, interval_ns);
-    false
+    target_frames != 0
+        && interval_ns != 0
+        && !n1_is_deep_source(arrival_floor_ns, latency_ms, interval_ns)
 }
 
 /// issue 1367 — the shallow SHED half (the caller gates it on [`n1_tick_is_on_grid`]): shed one frame
@@ -330,15 +347,10 @@ pub fn n1_shallow_shed_due(
     target_frames: u64,
     ticks_since_last_drain: u64,
 ) -> bool {
-    let _ = (
-        tick_wall_ns,
-        locked_boundary_ns,
-        arrival_floor_ns,
-        latency_ms,
-        interval_ns,
-    );
-    let _ = (target_frames, ticks_since_last_drain);
-    false
+    locked_boundary_ns != 0
+        && n1_shallow_governs(target_frames, arrival_floor_ns, latency_ms, interval_ns)
+        && n1_depth_frames(tick_wall_ns, locked_boundary_ns, interval_ns) > target_frames
+        && ticks_since_last_drain >= DRAIN_MIN_TICK_INTERVAL
 }
 
 /// issue 1367 — the shallow HOLD half (the caller gates it on [`n1_tick_is_on_grid`]): hold one
@@ -353,15 +365,9 @@ pub fn n1_shallow_hold_due(
     target_frames: u64,
     ticks_since_last_drain: u64,
 ) -> bool {
-    let _ = (
-        tick_wall_ns,
-        head_stamp_ns,
-        arrival_floor_ns,
-        latency_ms,
-        interval_ns,
-    );
-    let _ = (target_frames, ticks_since_last_drain);
-    false
+    n1_shallow_governs(target_frames, arrival_floor_ns, latency_ms, interval_ns)
+        && n1_depth_frames(tick_wall_ns, head_stamp_ns, interval_ns) < target_frames
+        && ticks_since_last_drain >= DRAIN_MIN_TICK_INTERVAL
 }
 
 #[cfg(test)]
