@@ -178,12 +178,13 @@ capture_failed() {
   # A blind watchdog is a CHRONIC config fault (tcpdump missing, a wrong sudo password), not an on-air
   # fault: ONE page per incident on a STABLE key -- airuleset edits the card on every repeat -- never
   # the production-critical time bucket (review round 2; .claude/rules/watchdog-notify-dedup.md).
+  local ckey="vban-rate-capture-${BOX}"
   local body="⚠️ VBAN ($REPO_SLUG): meranie VBAN na **$BOX** zlyháva už $n kontrol po sebe, hoci box je hore -- watchdog je slepý. Chyba: ${reason:-bez textu}. Náprava: tcpdump + sudo na $BOX (heslo / balík)."
   if [ "$DRY_RUN" -eq 1 ]; then
-    log "[dry-run] WOULD alert (dedup-key=vban-rate-capture-${BOX}): $body"
+    log "[dry-run] WOULD alert (dedup-key=$ckey): $body"
     return 0
   fi
-  python3 "$NOTIFY" notify --body "$body" --dedup-key "vban-rate-capture-${BOX}" \
+  python3 "$NOTIFY" notify --body "$body" --dedup-key "$ckey" \
     >/dev/null 2>&1 || log "ALERT: airuleset.py notify failed (non-fatal)"
 }
 

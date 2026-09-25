@@ -64,6 +64,8 @@ JUMP_BACK_FRAMES = 64
 # A step back to a counter ALREADY seen more than this long ago is a sender restart, not a network
 # duplicate (a pktmon/network duplicate arrives within microseconds to a few ms of the original).
 DUP_WINDOW_S = 0.05
+# How far the restart-vs-straggler lookahead may skip over counters the segment already holds.
+LOOKAHEAD_MAX = 256
 # The one-sided trim: drop points LATER than the line by more than max(LATE_TRIM_MADS robust
 # standard deviations, LATE_TRIM_FLOOR_S) above the median lateness; refit up to LATE_TRIM_ROUNDS.
 LATE_TRIM_MADS = 4.0
@@ -324,7 +326,9 @@ def measure_stream(times_ns: list, frames: list, samples_per_frame: int, sample_
     jumps = reordered = duplicates = 0
     # head_u = the highest unwrapped counter of the current segment: every step is measured from it,
     # so a reordered straggler (a step back) never moves the reference the next packet is read from.
-    head_u = prev_t = seg_min = seg_t0 = None
+    # head_t = the arrival of the last ACCEPTED packet: a duplicate or a dropped straggler must never
+    # shrink the elapsed time the step limits are computed from (review round 3)
+    head_u = head_t = seg_min = seg_t0 = None
     seen: dict = {}   # unwrapped counter -> first arrival (ns) in the current segment
     for i, (t, f) in enumerate(zip(times_ns, frames)):
         straggler = False
@@ -334,7 +338,7 @@ def measure_stream(times_ns: list, frames: list, samples_per_frame: int, sample_
             seg_t0 = t
         else:
             d = _signed32(f - (head_u & 0xFFFFFFFF))
-            dt_s = max(0.0, (t - prev_t) / 1e9)
+            dt_s = max(0.0, (t - head_t) / 1e9)
             fwd_limit = 2.0 * dt_s * frames_per_s + JUMP_FWD_SLACK_FRAMES
             u = head_u + d
             settled = (t - seg_t0) / 1e9 > DUP_WINDOW_S  # a reorder at a segment's start is normal
@@ -344,7 +348,7 @@ def measure_stream(times_ns: list, frames: list, samples_per_frame: int, sample_
             if candidate:
                 # One packet of lookahead decides: the NEXT packet continuing the OLD sequence makes
                 # this one a straggler/late duplicate; continuing from THIS packet makes it a restart.
-                verdict = _next_continues(times_ns, frames, i, head_u, f, prev_t, frames_per_s)
+                verdict = _next_continues(times_ns, frames, i, head_u, f, head_t, frames_per_s, seen)
                 if verdict == "old":
                     straggler = True
                 elif verdict == "new" or d < -JUMP_BACK_FRAMES or d > fwd_limit:
@@ -356,7 +360,6 @@ def measure_stream(times_ns: list, frames: list, samples_per_frame: int, sample_
                     seg_t0 = t
                 else:
                     straggler = True
-        prev_t = t
         if u in seen:
             duplicates += 1
             continue
@@ -369,6 +372,7 @@ def measure_stream(times_ns: list, frames: list, samples_per_frame: int, sample_
             reordered += 1
         seen[u] = t
         segments[-1].append((t, u))
+        head_t = t
         head_u = u if head_u is None or u > head_u else head_u
         seg_min = u if seg_min is None or u < seg_min else seg_min
 
@@ -409,22 +413,34 @@ def measure_stream(times_ns: list, frames: list, samples_per_frame: int, sample_
     }
 
 
-def _next_continues(times_ns: list, frames: list, i: int, head_u: int, f: int, prev_t: int,
-                    frames_per_s: float) -> str:
-    """For the jump candidate at index I (counter F, current segment head HEAD_U, last accepted
-    arrival PREV_T): "old" when the next packet continues the old sequence (0 < step from the head
-    <= the frames its elapsed time explains, 2x + slack), "new" when it continues from F instead,
-    "" when there is no next packet or it continues neither."""
-    if i + 1 >= len(frames):
+def _next_continues(times_ns: list, frames: list, i: int, head_u: int, f: int, head_t: int,
+                    frames_per_s: float, seen: dict) -> str:
+    """Decide the jump candidate at index I (counter F; current segment head HEAD_U, arrived HEAD_T;
+    the segment's SEEN counters) by what follows it. Counters the segment already holds are skipped
+    (the rest of a late-duplicate burst -- or of a restart that re-sends counters this segment saw;
+    at most LOOKAHEAD_MAX packets). The first NEW counter then decides:
+      "old" -- it continues the old head (0 < step <= the step limit) AND arrives ON TIME for that
+              step (within DUP_WINDOW_S of step / rate after HEAD_T): the old stream never stopped,
+              so the candidate is a straggler or a late duplicate;
+      "new" -- it continues from F instead (a restart), including a restart whose re-sent counters
+              collided with the old ones: their continuation then arrives LATE for the old head;
+      ""    -- no such packet, or it continues neither."""
+    t_cand = times_ns[i]
+    for j in range(i + 1, min(len(frames), i + 1 + LOOKAHEAD_MAX)):
+        t_next, f_next = times_ns[j], frames[j]
+        d_old = _signed32(f_next - (head_u & 0xFFFFFFFF))
+        if head_u + d_old in seen:
+            continue
+        elapsed_old = max(0.0, (t_next - head_t) / 1e9)
+        limit_old = 2.0 * elapsed_old * frames_per_s + JUMP_FWD_SLACK_FRAMES
+        on_time = elapsed_old <= d_old / frames_per_s + DUP_WINDOW_S
+        if 0 < d_old <= limit_old and on_time:
+            return "old"
+        d_new = _signed32(f_next - f)
+        limit_new = 2.0 * max(0.0, (t_next - t_cand) / 1e9) * frames_per_s + JUMP_FWD_SLACK_FRAMES
+        if 0 < d_new <= limit_new:
+            return "new"
         return ""
-    t_next, f_next = times_ns[i + 1], frames[i + 1]
-    limit = 2.0 * max(0.0, (t_next - prev_t) / 1e9) * frames_per_s + JUMP_FWD_SLACK_FRAMES
-    d_old = _signed32(f_next - (head_u & 0xFFFFFFFF))
-    if 0 < d_old <= limit:
-        return "old"
-    d_new = _signed32(f_next - f)
-    if 0 < d_new <= limit:
-        return "new"
     return ""
 
 
@@ -525,23 +541,26 @@ def analyze_capture(data: bytes, only_dst: tuple = ()) -> CaptureResult:
 # ---------------------------------------------------------------------------------------------
 
 def grade(s: StreamStats, g: Grading) -> tuple:
-    """(verdict, reasons): OK | FAULT (rate out of +-ppm_bound by more than 2 stderr, and/or loss
-    over the ceiling) | UNCERTAIN (2 stderr exceed half the bound, so the rate can neither pass nor
-    fail; loss is still graded) | SHORT (too little data to grade). Neither SHORT nor UNCERTAIN
-    ever pages or recovers."""
+    """(verdict, reasons): OK | FAULT (|rate| - 2 stderr outside +-ppm_bound, and/or loss over the
+    ceiling) | UNCERTAIN (the rate's 2-stderr interval straddles the bound; loss is still graded) |
+    SHORT (too little data to grade). Neither SHORT nor UNCERTAIN ever pages or recovers."""
     if s.span_s < g.min_span_s or s.unique_frames < MIN_FRAMES or s.rate_ppm is None:
         return "SHORT", [f"span {s.span_s:.1f}s / {s.unique_frames} frames is too short to grade"]
     why = []
     margin = RATE_STDERR_MARGIN * (s.rate_stderr_ppm or 0.0)
-    uncertain = margin > g.ppm_bound / 2.0  # the fit cannot resolve the bound -- neither OK nor FAULT
-    if not uncertain and abs(s.rate_ppm) - margin > g.ppm_bound:
+    # the 2-stderr interval decides: wholly outside the bound = FAULT, wholly inside = OK, straddling
+    # it = UNCERTAIN (review round 3: a gross fault is a FAULT however noisy the fit)
+    uncertain = False
+    if abs(s.rate_ppm) - margin > g.ppm_bound:
         why.append(f"rate {s.rate_ppm:+.2f} ppm is outside +-{g.ppm_bound:g} ppm of nominal")
+    elif abs(s.rate_ppm) + margin > g.ppm_bound:
+        uncertain = True
     if s.loss_ratio > g.loss_ceiling:
         why.append(f"loss {s.lost} frames ({s.loss_ratio:.2e}) is over the {g.loss_ceiling:.0e} ceiling")
     if why:
         return "FAULT", why
     if uncertain:
-        return "UNCERTAIN", [f"rate {s.rate_ppm:+.2f} +- {margin:.1f} ppm (2 stderr) cannot resolve "
+        return "UNCERTAIN", [f"rate {s.rate_ppm:+.2f} +- {margin:.1f} ppm (2 stderr) straddles "
                              f"the +-{g.ppm_bound:g} ppm bound"]
     return "OK", []
 
