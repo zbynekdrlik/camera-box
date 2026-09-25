@@ -184,6 +184,14 @@ restarts AHK itself, VERIFIED, before exiting** — reuse the ONE shared `script
 `ahk_resolve_and_relaunch_ps` helper `launch` uses (never a fork; sets `$ahkRelaunchVerified`), fail
 loud (`exit 9`) if it doesn't come back. This leaves AHK count==1 so `launch`'s gate passes.
 
+**Superseded for resolume (issue 1372, owner ruling "ale ahk nespustaj"):** the only AHK box left is
+resolume, and its watcher is the OWNER's. The planner now passes HAS_AHK=`guard`
+(`fleet_box_ahk_mode`): step (1) stops AutoHotkey64 only if it is running, step (8) only logs the
+count (`#1372 AHK REPORT`), and the launch's AutoHotkey64 gate is report-only too, so nothing
+restarts AHK and nothing fails when it is off. The HAS_AHK=1 contract above still describes the
+builders' managed mode, which no planner chooses any more. Full detail:
+`.claude/rules/resolume-cg-obs.md`.
+
 ## imag deploy = the WHOLE bundle, never a hand-picked subset (issue 1026)
 
 The imag leg ships the ENTIRE linux bundle (`cp -a lib/x86_64-linux-gnu/.` incl EVERY

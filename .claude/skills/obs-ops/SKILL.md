@@ -20,7 +20,8 @@ Current ops:
 - **Relaunch OBS:** `scripts/launch-obs-genlock.sh --box strih|stream|resolume [--force]` — env-free;
   it clears sentinels, launches cwd=bin\64bit, and log-verifies `genlock: … render tick ENABLED` (the
   build-default proof) + DistroAV. There is no `--mode`, no PEB env check. `resolume` = RESOLUME-SNV's
-  `cg` OBS (win-resolume MCP, `resolume.lan`, no AHK watcher; profile `cg`, scene collection
+  `cg` OBS (win-resolume MCP, `resolume.lan`; the owner's NL_STARTUP.ahk watcher is stopped if it
+  runs and NEVER started by our tooling, issue 1372; profile `cg`, scene collection
   `cg_scenes`, NDI output `RESOLUME-SNV (cg-obs)`) — a traveling CG box, full runbook in
   `.claude/rules/resolume-cg-obs.md` (#1295).
 - **Genlock config:** render tick + ts-align are build defaults (always on); latency is a build

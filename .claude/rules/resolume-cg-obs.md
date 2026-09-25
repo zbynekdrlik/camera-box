@@ -2,6 +2,8 @@
 paths:
   - "scripts/deploy-genlock-fleet.sh"
   - "scripts/launch-obs-genlock.sh"
+  - "scripts/lib/ahk-watchdog.sh"
+  - "scripts/lib/genlock-fleet-boxes.sh"
   - "scripts/cg-chain-verify.sh"
   - "scripts/latency-pins-baseline.json"
 ---
@@ -39,22 +41,39 @@ hand the TVs a frameless ghost. For cg OBS the same ordering discipline applies 
 confirm `RESOLUME-SNV (cg-obs)` is the sender the downstream consumers resolve (the NDI port-map
 watchdog baseline, `.claude/rules/ndi-portmap-watchdog.md`, is the durable guard once registered).
 
-## AHK v2 safe-loop on this box — `has_ahk=1` (issue 1295 correction)
+## AHK on this box — the OWNER's watcher, our tooling never starts it (issue 1372, was `has_ahk=1` in issue 1295)
 
-RESOLUME-SNV RUNS an AutoHotkey **v2** auto-respawn watcher, exactly like strih (the code half
-wrongly assumed `has_ahk=0`; the supervisor's 2026-09-13 pre-deploy inventory corrected it):
+RESOLUME-SNV has an AutoHotkey **v2** auto-respawn watcher installed:
 `C:\Program Files\AutoHotkey\v2\AutoHotkey64.exe` runs `C:\Users\Resolume\Documents\_NLMEDIA
-resolume\_APPS\NL_STARTUP.ahk` (Startup shortcut `NL_STARTUP.ahk - Shortcut.lnk`, `SafeLoop := 1`),
-respawning **both Resolume Arena AND OBS**. So both planners set `has_ahk=1` for resolume and emit
-the strih-shape **stop AutoHotkey64 → deploy/relaunch → verify → restart-AHK-verified** program,
-and the `SessionId=1` / `MainWindowTitle` acceptance gate covers BOTH `obs64` and `AutoHotkey64`.
-A deploy/relaunch that does NOT stop the watcher first races a **SECOND obs64** (the likely origin
-of the dead 0-thread pid seen 2026-09-12). The relaunch identity is per-box: resolume passes its own
-v2 `.ahk` path (the space is double-quoted in the `ArgumentList`) and PREFERS the Startup `.lnk` as
-the relaunch target, so a future path move on this traveling box cannot break the relaunch (the
-`%ProgramFiles%\AutoHotkey\v2\` exe candidates still back it up). The `.ahk` ALSO RunAs-launches an
-`Arena-Bridge` app under a second user — it embeds a credential; the planner NEVER reads, echoes, or
-copies the `.ahk` body, it only stops/relaunches the watcher by process name / the `.lnk`.
+resolume\_APPS\NL_STARTUP.ahk` (Startup shortcut `NL_STARTUP.ahk - Shortcut.lnk`, `SafeLoop := 1`).
+It respawns **both Resolume Arena AND OBS**.
+
+**Owner ruling 25.9.2026 (issue 1372, "ale ahk nespustaj"): do NOT start AHK on this box.** Whether
+the watcher runs is the owner's choice, never a deploy or launch postcondition. So both planners pass
+the AHK mode `guard` for resolume (`fleet_box_ahk_mode` in `scripts/lib/genlock-fleet-boxes.sh`):
+
+- **Stop it only if it is running**, so it cannot respawn a second obs64 during the byte copy or the
+  relaunch. A deploy or relaunch that leaves a running watcher up races a **second obs64** (the likely
+  origin of the dead 0-thread pid seen 2026-09-12). The stop sits before the byte copy, before every
+  obs64 kill, and (plain launch) after the "already running" refusal.
+- **Never start or restart it.** The guard programs carry no relaunch primitive, no `exit 9`, no
+  best-effort restart.
+- **The AutoHotkey64 count is report-only** (`#1372 AHK REPORT (report-only, never a gate)`), logged
+  in deploy step (8) and after the launch's session gate. The old #978 "exactly 1 AutoHotkey64" gate
+  failed the launch whenever the owner had AHK off.
+- **OBS is launched directly**, in session 1, through the box's own `OBS Studio.lnk` (the #786
+  guarded launcher when the shortcut is retargeted to it, exactly as on stream). The launch then
+  verifies exactly one LIVE obs64 in the active session and the window title
+  `build <9-char short sha of GENLOCK_BUILD_SHA.txt> - Profile: cg` (`fleet_box_obs_profile`).
+
+Both guard fragments (`ahk_guard_stop_ps`, `ahk_guard_report_ps`) live in `scripts/lib/ahk-watchdog.sh`,
+so the deploy and launch programs cannot drift. The obs-fleet `has_ahk` fact still says the watcher is
+INSTALLED (`obs_fleet_has_ahk resolume` = 1). That fact also drives the obs-session watchdog's AHK
+probe, which still grades "AutoHotkey64 count == 1" on resolume. With AHK off that is a known
+follow-up (it reports a count of 0 as a fault), not part of this slice. The managed stop→restart-
+verified mode `1` still exists in the builders for a box that sets it, but no planner chooses it.
+The `.ahk` also RunAs-launches an `Arena-Bridge` app under a second user and embeds a credential.
+Tooling NEVER reads, echoes, or copies the `.ahk` body; it only stops the watcher by process name.
 
 ## SUPERVISOR RUNBOOK — the exact ordered commands for the live sitting
 
@@ -74,9 +93,9 @@ live `getent hosts resolume.lan` address.
    Follow the emitted plan: the STEP -1 identity-confirm, then upload the staged bytes to
    `C:\stage-genlock-<sha>` via the **win-resolume MCP** FileUpload, then paste the emitted deploy
    program into the **win-resolume MCP Shell** (timeout ≥ 240 s). It stops the AutoHotkey64 watcher
-   (so it can't respawn obs64 mid-copy) + obs64, backs up, swaps the bytes, writes the markers,
-   byte-verifies the deployed obs.dll/distroav.dll, and restarts the AHK watcher VERIFIED (failing
-   loud if it doesn't come back — the STEP-2 launch session gate expects it running).
+   ONLY if it is running (so it can't respawn obs64 mid-copy) + obs64, backs up, swaps the bytes,
+   writes the markers, byte-verifies the deployed obs.dll/distroav.dll, and only REPORTS the
+   AutoHotkey64 count. It never restarts AHK (issue 1372); OBS stays down until STEP 2.
 
 2. **RELAUNCH** OBS in the interactive session (NEVER over ssh — `win-ssh-vs-mcp`):
 
@@ -84,11 +103,12 @@ live `getent hosts resolume.lan` address.
    bash scripts/launch-obs-genlock.sh --box resolume --force
    ```
 
-   Paste its emitted program into the **win-resolume MCP Shell**. It stops AutoHotkey64 before the
-   obs64 force-kill (so the watcher can't race a duplicate obs64), relaunches via the box's
-   `OBS Studio.lnk`, restarts AutoHotkey64 VERIFIED, then verifies `render tick ENABLED` + DistroAV
-   loaded + the SessionId/MainWindowTitle session-visibility gate over BOTH obs64 AND AutoHotkey64,
-   failing loud otherwise.
+   Paste its emitted program into the **win-resolume MCP Shell**. It stops a running AutoHotkey64
+   before the obs64 force-kill (so the watcher can't race a duplicate obs64), launches OBS directly
+   via the box's `OBS Studio.lnk` (the #786 guarded launcher when the shortcut points at it), and
+   NEVER starts AutoHotkey64 (issue 1372). It then verifies `render tick ENABLED` + DistroAV loaded,
+   exactly one LIVE obs64 in the active session, and the title `build <short sha> - Profile: cg`,
+   failing loud otherwise. The AutoHotkey64 count is only logged (`#1372 AHK REPORT`).
 
 3. **CONFIRM the pins** (NOT a write — the build defaulted them). From dev1 (read-only OBS-WS,
    session-agnostic):

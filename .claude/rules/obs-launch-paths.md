@@ -55,6 +55,16 @@ Standing docs already covering related facts: obs-ops SKILL §144 ("every relaun
 `launch-obs-genlock.sh`; do NOT hand-roll a Start-Process"); `.claude/rules/rig-state-inspection.md`
 (the per-box `.lnk` TargetPath+Arguments live-resolve, the box-specific `.lnk` locations differ).
 
+## HAS_AHK=guard — the owner's watcher: stop if running, never restart (issue 1372)
+
+`build_launch_program` has a third AHK mode. `guard` (what `launch-obs-genlock.sh --box resolume`
+passes, via `fleet_box_ahk_mode`) emits `ahk_guard_stop_ps` at every obs64-kill site AND after the
+plain-launch refusal, never a relaunch, and replaces the #978 AutoHotkey64 gate with the report-only
+`ahk_guard_report_ps` line. A 6th arg TITLE_PROFILE (`fleet_box_obs_profile`, resolume = `cg`) adds the
+same-session title check `build <9-char sha> - Profile: <profile>`; without it the emitted gate is
+byte-identical. The managed stop-first/restart-last bracket below is HAS_AHK=1 only; no planner picks
+it now (owner ruling on the ticket). Pinned by `tests/launch_obs_genlock.rs` (`*_1372`).
+
 ## AHK stop-first/restart-last MUST wrap EVERY obs64-kill site, not just the redraw loop (#1272)
 
 `build_launch_program`'s AHK bracket (`$ahkStopped`/`ahk_stop_ps`/`ahk_restart_ps`, has_ahk=1 only)
