@@ -769,6 +769,16 @@ echo "    bkshading-relay pause (cam2/painter, $PAINTER_IP): was-active=$BKSH_PA
   bkshading_e2e_pause_restore cam2 "$PAINTER_IP" "$CAM_PW" "${BKSH_PAUSE_PAINTER_WAS_ACTIVE:-0}"
 ' EXIT HUP INT TERM
 
+# issue 1371: read + ENFORCE the ONE test camera's shutter/ISO over the bkshading USB-PTP path
+# (gphoto2 on the cambox holding the camera's USB-C) against scripts/camera-test-baseline.json.
+# Runs AFTER the relay pause above (exactly one gphoto2 user) and after its temporary restore
+# handler (an abort here still restores the relays). The whole step lives in the sourced lib (the
+# sourced-helper pattern) + the pure scripts/camera_test_settings.py; a bare statement so its
+# exit propagates. Absent camera + unpinned baseline = a loud report-only UNVERIFIED (issue 1350).
+# shellcheck source=scripts/lib/camera-test-settings.sh
+. "$HERE/lib/camera-test-settings.sh"
+camera_test_settings_enforce "$HERE" "$STRIH" "$STREAM" "$CAM_PW" "$CAMERA_NAME=$CAM1_IP" "cam2=$PAINTER_IP"
+
 echo "[0/8] reachability preflight ($CAMERA_NAME source, cam2 painter, strih, stream, imag — #462)"
 for hp in "$CAMERA_NAME=$CAM1_IP" "cam2(painter)=$PAINTER_IP" "strih=$STRIH" "stream=$STREAM" "imag=$IMAG_IP"; do
   _name="${hp%%=*}"; _ip="${hp#*=}"
