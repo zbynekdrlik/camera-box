@@ -684,7 +684,7 @@ jobs:
           if ($src -notmatch [regex]::Escape('genlock-relock')) {
             Write-Error "obs-source.c: the per-event relock log line (genlock-relock) is gone — #940 piece 1 phase-evidence instrumentation reverted"; exit 1
           }
-          foreach ($field in @('depth=%zu', 'steady_depth_frames=%zu', 'due=%zu', 'erased=%zu', 'head_skew_ms=%lld', 'tick_phase_ns=%llu', 'anchor_ns=%llu', 'sel_vs_newest_due=%lld')) {
+          foreach ($field in @('depth=%zu', 'steady_depth_frames=%zu', 'due=%zu', 'erased=%zu', 'head_skew_ms=%lld', 'tick_phase_ns=%llu', 'anchor_ns=%llu', 'sel_vs_newest_due=%lld', 'expected_frames=%llu', 'stale_reset=%d')) {
             if ($src -notmatch [regex]::Escape($field)) {
               Write-Error "obs-source.c: the relock phase-evidence log line is missing field '$field' — #940 piece 1 reverted"; exit 1
             }
@@ -766,8 +766,26 @@ jobs:
           if ($src -notmatch [regex]::Escape('release = sel_1003 + 1;')) {
             Write-Error "obs-source.c: the BACKLOG-STORM branch no longer selects by phase continuity — this is the branch the live episode steps were traced to (#1003)"; exit 1
           }
-          if ($src -notmatch [regex]::Escape('if (sel_1003 == 0 && source->genlock_phase_anchor_ns != 0)')) {
+          if ($src -notmatch [regex]::Escape('if ((sel_1003 == 0 || stale_1367) && source->genlock_phase_anchor_ns != 0)')) {
             Write-Error "obs-source.c: the BACKLOG stale-anchor self-heal is gone; a relock shedding zero frames would re-fire every tick and starve the settle-back drain (#1003)"; exit 1
+          }
+          if ($src -notmatch [regex]::Escape('static inline bool genlock_relock_anchor_is_stale(size_t sel_anchor, size_t sel_expected, uint32_t n)')) {
+            Write-Error "obs-source.c: the stale-burst anchor test genlock_relock_anchor_is_stale is gone - after an arrival burst the backlog relock would hold the late phase and fire every tick (issue 1367)"; exit 1
+          }
+          if ($src -notmatch [regex]::Escape('return sel_expected > sel_anchor && sel_expected - sel_anchor > tolerance;')) {
+            Write-Error "obs-source.c: genlock_relock_anchor_is_stale no longer reads stale ONLY past n + 1 frames from the expected-depth pick - a correct anchor on a late tick would lose the #1003 phase continuity, or a burst would keep its late phase (issue 1367)"; exit 1
+          }
+          if ($src -notmatch [regex]::Escape('const size_t sel_exp_1367 = genlock_relock_select_expected(source, wall_now, reserve_ms, expected_frames_1367, interval);')) {
+            Write-Error "obs-source.c: the BACKLOG branch no longer picks the frame at the depth the source is supposed to hold for the stale-anchor test (issue 1367)"; exit 1
+          }
+          if ($src -notmatch [regex]::Escape('const bool stale_1367 = genlock_relock_anchor_is_stale(sel_1003, sel_exp_1367, n_for_log);')) {
+            Write-Error "obs-source.c: the BACKLOG branch no longer tests the anchor for a stale burst phase (issue 1367)"; exit 1
+          }
+          if ($src -notmatch [regex]::Escape('const uint64_t newest_1367 = source->async_frames.array[source->async_frames.num - 1]->timestamp; const uint64_t expected_frames_1367 = (n_for_log < 2 && source->genlock_last_known_n < 2) ? genlock_n1_expected_depth_frames(wall_now > newest_1367 ? wall_now - newest_1367 : 0, reserve_ms, interval, source->genlock_shallow_target_frames) : 0;')) {
+            Write-Error "obs-source.c: the BACKLOG branch no longer reads the N==1 governor depth (base + 1 / latched D, from the newest-frame arrival floor) for the stale-anchor test - a correct deep or shallow N==1 anchor would be reset (ROZHODNUTE 5840479751, issue 1367)"; exit 1
+          }
+          if ($src -notmatch [regex]::Escape('if (genlock_n1_is_deep_source(arrival_floor_ns, latency_ms, interval_ns)) return genlock_n1_base_frames(latency_ms, interval_ns) + 1; if (genlock_n1_shallow_governs(shallow_target_frames, arrival_floor_ns, latency_ms, interval_ns)) return shallow_target_frames; return 0;')) {
+            Write-Error "obs-source.c: genlock_n1_expected_depth_frames no longer derives the expected depth from the N==1 governor (deep base + 1, else the latched D, else 0) (issue 1367)"; exit 1
           }
           if ($src -notmatch [regex]::Escape('size_t to_drop = release - 1;')) {
             Write-Error "obs-source.c: the erase-into-dropped_due idiom (to_drop = release - 1) is gone; a relock would stop shedding backlog depth (#1003)"; exit 1

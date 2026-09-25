@@ -1638,9 +1638,25 @@ impl ReleaseCadence {
                 // against the CONFIGURED latency: one relock sheds the overshoot, and the anchor
                 // rebuilds from the next STEADY present. ACQUIRE is deliberately exempt — index 0
                 // there just means "present the head", and the fresh lock stops the branch
-                // re-firing. Mirror of the C
-                // `if (sel_1003 == 0 && source->genlock_phase_anchor_ns != 0) { ... }`.
-                if sel == 0 && self.phase_anchor_ns != 0 {
+                // re-firing. Issue 1367 (ROZHODNUTÉ 5840479751) widened it: an anchor pick more
+                // than n + 1 source frames behind the pick at the depth the N==1 governor holds
+                // the source at (`base + 1` when deep; this reference sim carries no shallow latch,
+                // so otherwise the configured latency) is an arrival-burst phase and is dropped
+                // the same way (`crate::genlock_backlog::relock_anchor_is_stale`, n read-only as
+                // in `backlog_relock_qdepth`). Mirror of the C
+                // `if ((sel_1003 == 0 || stale_1367) && source->genlock_phase_anchor_ns != 0)`.
+                let n = self.read_only_source_multiple(queue, interval_ns);
+                let queue_ts: Vec<u64> = queue.iter().copied().collect();
+                let sel_expected = crate::genlock_backlog::relock_select_expected(
+                    &queue_ts,
+                    wall_now_ns,
+                    reserve_ms,
+                    interval_ns,
+                    n < 2 && self.last_known_n < 2,
+                    0,
+                );
+                let stale = crate::genlock_backlog::relock_anchor_is_stale(sel, sel_expected, n);
+                if (sel == 0 || stale) && self.phase_anchor_ns != 0 {
                     self.phase_anchor_ns = 0;
                     sel = self.relock_select(queue, wall_now_ns, reserve_ms);
                 }
@@ -1876,9 +1892,7 @@ impl ReleaseCadence {
         //
         // The source rate as an EXACT rational, never a truncated integer fps: a 29.97 canvas
         // would floor to 29 and under-state the implied depth. source_fps = 1e9 * n / interval_ns.
-        let n = Self::measure_source_multiple(queue, interval_ns)
-            .unwrap_or(self.last_known_n)
-            .max(1);
+        let n = self.read_only_source_multiple(queue, interval_ns);
         let (Ok(src_num), Ok(src_den)) = (
             u32::try_from(1_000_000_000u64.saturating_mul(n as u64)),
             u32::try_from(interval_ns),
@@ -1924,9 +1938,7 @@ impl ReleaseCadence {
         if interval_ns == 0 {
             return false;
         }
-        let n = Self::measure_source_multiple(queue, interval_ns)
-            .unwrap_or(self.last_known_n)
-            .max(1);
+        let n = self.read_only_source_multiple(queue, interval_ns);
         let (Ok(src_num), Ok(src_den)) = (
             u32::try_from(1_000_000_000u64.saturating_mul(n as u64)),
             u32::try_from(interval_ns),
@@ -1970,9 +1982,7 @@ impl ReleaseCadence {
         if interval_ns == 0 {
             return false;
         }
-        let n = Self::measure_source_multiple(queue, interval_ns)
-            .unwrap_or(self.last_known_n)
-            .max(1);
+        let n = self.read_only_source_multiple(queue, interval_ns);
         // issue 1367: an N==1 tick converges to its PIN-DERIVED depth
         // (`genlock_n1_depth::n1_shed_due`) instead of the #1049 reserve-aimed shed, which stays
         // inert for n < 2. That belongs to a tick of the N==1 STEADY branch only (review round 1):
@@ -2052,6 +2062,21 @@ impl ReleaseCadence {
 
     /// camera-box #726 STICKY-N — the EFFECTIVE source-rate multiple to release at THIS tick.
     ///
+    /// The source multiple read WITHOUT latching: the pure measurement, else the sticky latch,
+    /// floored at 1. Same value as [`Self::effective_source_multiple`] on a measurable tick, but a
+    /// getter (a threshold, a drain or a stale-anchor decision) must not write `last_known_n` as a
+    /// side effect. Mirror of the C `n_for_log` derivation (`genlock_measure_source_multiple` with
+    /// the `genlock_last_known_n` fallback).
+    fn read_only_source_multiple(
+        &self,
+        queue: &std::collections::VecDeque<u64>,
+        interval_ns: u64,
+    ) -> u32 {
+        Self::measure_source_multiple(queue, interval_ns)
+            .unwrap_or(self.last_known_n)
+            .max(1)
+    }
+
     /// A fresh measurement ([`Self::measure_source_multiple`]) is the CONFIRMATION authority: when
     /// the front pair is measurable it WINS and updates the latch (so a genuine 1:1 rate re-latches
     /// to 1 → the present-oldest lossless path, byte-identical). When the front pair is INCONCLUSIVE
@@ -2641,16 +2666,21 @@ mod tests {
     /// instead of jumping to the newest due frame.
     ///
     /// This is the demonstrative lock for the whole ticket: the pre-1037 harness presented the
-    /// NEWEST due frame at a backlog relock (the live edge), re-minting the release phase on every
-    /// lock episode — the instant-sampled defect #1003 removes. With a deep phase anchor tracked
-    /// (a ~900 ms conveyor, floored above the shallow 3 ms configured latency), the relock must
-    /// present the frame NEAREST `wall_now − anchor` — well BEHIND the live edge — keeping the
-    /// deep delay-line depth, and must PRESERVE the anchor (a relock corrects DEPTH, never phase).
+    /// NEWEST due frame at a backlog relock, re-minting the release phase on every lock episode —
+    /// the instant-sampled defect #1003 removes. With a deep phase anchor tracked on an 890 ms
+    /// conveyor, the relock must present the frame NEAREST `wall_now − anchor` — one frame BEHIND
+    /// the newest due one — keeping the deep delay line, and must PRESERVE the anchor (a relock
+    /// corrects DEPTH, never phase).
     ///
-    /// The pinned indices were OBSERVED from a default-feature replica that imports the real
-    /// Tier-0 authority (`relock_select_nearest` / `relock_anchor_age_ns`), not guessed. Trace:
-    /// interval 33.333 ms, anchor 900 ms ≈ 27 intervals; target = `wall − 900 ms` ≈ frame 12.15,
-    /// so the nearest stamp is index 12 (`|12−12.15| < |13−12.15|`). Newest-due would be index 39.
+    /// Issue 1367: the anchor is the REAL deep N==1 depth — `base + 1` = 28 frames at pin 890,
+    /// sampled 2 ms late — which is where the N==1 governor holds this source, so it is kept. The
+    /// earlier revision of this test tracked a 900 ms anchor over a 3 ms configured latency (27
+    /// frames behind it), which is now exactly the stale burst phase the backlog relock drops
+    /// (`genlock_stale_relock_tests.rs`).
+    ///
+    /// Trace (interval 33.333 ms, wall = frame 39 + 5 ms): the deadline `wall − 890 ms` ≈ frame
+    /// 12.45, so newest-due is index 12; the anchor target `wall − 935.3 ms` ≈ frame 11.1, so the
+    /// anchor pick is index 11; the expected-depth pick (`wall − 28 × interval`) is also 11.
     #[test]
     fn backlog_relock_inherits_the_phase_anchor_not_newest_due_1037() {
         use std::collections::VecDeque;
@@ -2658,21 +2688,18 @@ mod tests {
         let base = 1_000_000_000_000u64;
         let mut cadence = ReleaseCadence::new();
         cadence.locked_next_boundary_ns = Some(base); // past ACQUIRE
-        cadence.last_known_n = 1; // 1:1 source, small backlog qdepth
-        cadence.phase_anchor_ns = 900_000_000; // a deep ~900 ms conveyor, tracked from steady
+        cadence.last_known_n = 1; // 1:1 source
+        cadence.phase_anchor_ns = 28 * I + 2_000_000; // base + 1 at pin 890, sampled 2 ms late
         let n = 40u64;
         let mut queue: VecDeque<u64> = (0..n).map(|i| base + i * I).collect();
-        let wall_now = base + (n - 1) * I + 5_000_000; // every queued frame is due
+        let wall_now = base + (n - 1) * I + 5_000_000;
 
-        // The newest-due rule (pre-1037) WOULD have presented the live edge.
-        let deadline = genlock_present_ts_reserve(wall_now, 3);
+        // The newest-due rule (pre-1037) WOULD have presented index 12.
+        let deadline = genlock_present_ts_reserve(wall_now, 890);
         let newest_due_idx = queue.iter().take_while(|&&ts| ts <= deadline).count() - 1;
-        assert_eq!(
-            newest_due_idx, 39,
-            "setup: newest-due is the live edge (index 39)"
-        );
+        assert_eq!(newest_due_idx, 12, "setup: newest-due is index 12");
 
-        let out = cadence.tick(wall_now, 3, I, &mut queue);
+        let out = cadence.tick(wall_now, 890, I, &mut queue);
 
         assert!(
             out.relocked,
@@ -2680,24 +2707,21 @@ mod tests {
         );
         assert_eq!(
             out.presented,
-            Some(base + 12 * I),
-            "#1037: the relock must present the frame NEAREST the 900 ms phase anchor (index 12), \
-             NOT the newest due one (index 39 — the live edge). Presenting newest-due re-mints the \
-             release phase every episode, the #1003 defect."
+            Some(base + 11 * I),
+            "#1037: the relock must present the frame NEAREST the base + 1 phase anchor (index 11), \
+             NOT the newest due one (index 12). Presenting newest-due re-mints the release phase \
+             every episode, the #1003 defect."
         );
         assert_eq!(
             out.dropped.len(),
-            12,
-            "#1037: exactly the 12 frames OLDER than the selected one are shed (DEPTH correction \
-             intact); the ~27-frame conveyor behind index 12 is KEPT"
+            11,
+            "#1037: exactly the 11 frames OLDER than the selected one are shed (DEPTH correction \
+             intact); the ~28-frame conveyor behind index 11 is KEPT"
         );
+        assert_eq!(queue.len(), 28, "#1037: the deep delay line is preserved");
         assert_eq!(
-            queue.len(),
-            27,
-            "#1037: the ~900 ms/33 ms ≈ 27-frame delay line is preserved"
-        );
-        assert_eq!(
-            cadence.phase_anchor_ns, 900_000_000,
+            cadence.phase_anchor_ns,
+            28 * I + 2_000_000,
             "#1037: a relock corrects DEPTH, never PHASE — the anchor must be PRESERVED, never \
              re-minted from the frame the relock happened to select (the C anchor_update gate: \
              relocks never write the anchor)"
@@ -2792,7 +2816,7 @@ mod tests {
         assert_eq!(
             cadence.phase_anchor_ns, 0,
             "#1037: the stale-anchor self-heal CLEARS the anchor (mirror of the C \
-             `if (sel_1003 == 0 && genlock_phase_anchor_ns != 0) {{ genlock_phase_anchor_ns = 0; ...}}`) \
+             `if ((sel_1003 == 0 || stale_1367) && genlock_phase_anchor_ns != 0) {{ genlock_phase_anchor_ns = 0; ...}}`) \
              so it rebuilds from the next STEADY present rather than re-firing this branch every tick"
         );
     }
@@ -4263,3 +4287,8 @@ mod tests {
 #[cfg(test)]
 #[path = "genlock_n1_tests.rs"]
 mod n1_tests;
+
+// issue 1367 — the backlog relock's stale-burst anchor reset, the same split.
+#[cfg(test)]
+#[path = "genlock_stale_relock_tests.rs"]
+mod stale_relock_tests;
