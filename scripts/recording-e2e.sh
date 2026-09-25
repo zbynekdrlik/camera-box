@@ -4733,10 +4733,6 @@ CAPTURE_RATE_WINDOW_END_EPOCH="$(date +%s)"
 echo "    strih host file:  ${STRIH_HOST_PATH:-<unknown>}"
 echo "    stream host file: ${STREAM_HOST_PATH:-<unknown>}"
 echo "    imag host file:   ${IMAG_HOST_PATH:-<unknown>}  (#462 — stays ON imag, decoded in place below)"
-# #1302: end the CG leg now that strih + stream stopped recording — cg StopRecord (the host path is
-# kept for the pull below), SongPlayer burn OFF, strih scene/program/transition restored — so none
-# of it runs through the on-box decodes (cleanup() repeats each step). Pure no-op unless CG_CHAIN=1.
-cg_chain_after_stoprecord "${CG_HOST_IP:-}" "$HERE/obs_phase2.py" "${CG_CHAIN_RECORD_TIMEOUT:-${OBS_CLEANUP_TIMEOUT:-30}}"
 
 # issue 1354 scope 3: AFTER-window snapshot of strih's per-input genlock-fifo audit counters --
 # pairs with the BEFORE snapshot in [5/8] so genlock_audit_snapshot.py's window deltas span EXACTLY
@@ -4753,6 +4749,12 @@ if measurement_eq_enabled && [ "${ALL_CAMBOX:-0}" = "1" ]; then
   # ever leaves `set +e` (the helper also returns 0 internally; belt-and-suspenders).
   measurement_eq_post_record_stomp_recheck "$MEASUREMENT_EQ_PROFILE" "$STRIH" "$STRIH_PW" "$STREAM" "$STREAM_PW" || true
 fi
+
+# #1302: end the CG leg now that strih + stream stopped recording and the audit/stomp reads above are
+# done — cg StopRecord (the host path is kept for the pull below), SongPlayer burn OFF, the strih and
+# cg OBS program changes restored — so none of it runs through the on-box decodes (cleanup() repeats
+# each step). Pure no-op unless CG_CHAIN=1.
+cg_chain_after_stoprecord "${CG_HOST_IP:-}" "$HERE/obs_phase2.py" "${CG_CHAIN_RECORD_TIMEOUT:-${OBS_CLEANUP_TIMEOUT:-30}}"
 
 # [7b/8] #894: burn-unit run-integrity check. Runs BEFORE the merge/verdict below, so a burn unit
 # that died mid-run (e.g. the exact #894 device-steal race: a hotplug's udev rule restarting
