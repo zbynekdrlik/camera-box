@@ -647,86 +647,74 @@ fn lift_media_clock() -> String {
 #[test]
 fn c_media_clock_matches_the_rust_authority_1372_part_d() {
     use camera_box::genlock_lock_state::{
-        media_clock_step_allowance_us, media_clock_verdict, media_clock_window_drift_us,
-        MediaDiscipline, GENLOCK_MEDIA_CLOCK_MAX_GAP_MS, GENLOCK_MEDIA_CLOCK_MAX_RATE_PPM,
-        GENLOCK_MEDIA_CLOCK_STEP_FLOOR_US,
+        media_clock_verdict, media_clock_window, media_clock_window_ready, MediaDiscipline,
+        GENLOCK_MEDIA_CLOCK_MAX_GAP_MS, GENLOCK_MEDIA_CLOCK_WINDOW_S,
     };
     let block = lift_media_clock();
-    let (rate, floor, gap) = (
-        GENLOCK_MEDIA_CLOCK_MAX_RATE_PPM,
-        GENLOCK_MEDIA_CLOCK_STEP_FLOOR_US,
-        GENLOCK_MEDIA_CLOCK_MAX_GAP_MS,
-    );
+    let (win, gap) = (GENLOCK_MEDIA_CLOCK_WINDOW_S, GENLOCK_MEDIA_CLOCK_MAX_GAP_MS);
 
-    // Window vectors `((t_ms, offset_us) samples, max_rate_ppm, floor_us, max_gap_ms)`: the pre-part-A
-    // stream rate at 1 Hz, the real dantesync step shapes (a locked master's 1460 µs, a client's
-    // 600 µs) alone and on top of the rate, returning noise, the rate ceiling (400 vs 401 µs per
-    // second), a UI stall and a gap, jittered ticks, a negative ramp, 0/1 samples, and the i64
-    // extremes the saturating arithmetic must agree on.
+    // Window vectors `((t_ms, offset_us) samples, window_s, max_gap_ms)`: the pre-part-A stream rate at
+    // 1 Hz, the real dantesync step shapes (a locked master's 1460 µs, a client's 600 µs, a not-locked
+    // master's 250 µs, the −146 µs seen on win-resolume) alone and on the rate, a late tick carrying a
+    // step, wobble, a gap, jittered ticks, odd/even counts, a non-increasing time, 0/1 samples, a
+    // non-positive window, and the i64 extremes the saturating arithmetic must agree on.
     let at_1hz = |n: i64, f: &dyn Fn(i64) -> i64| -> Vec<(i64, i64)> {
         (0..=n).map(|i| (i * 1000, f(i))).collect()
     };
+    let mut late = at_1hz(600, &|i| i * 27 / 2);
+    for (k, s) in late.iter_mut().enumerate().skip(300) {
+        s.0 += 500;
+        s.1 += 520 + if k >= 450 { 520 } else { 0 };
+    }
     let jittered: Vec<(i64, i64)> = (0..=600i64)
         .map(|i| (i * 1000 + (i * 7919) % 97 - 48, i * 20 + (i * 31) % 41 - 20))
         .collect();
-    /// `((t_ms, offset_us) samples, max_rate_ppm, floor_us, max_gap_ms)`.
-    type Window = (Vec<(i64, i64)>, i64, i64, i64);
+    /// `((t_ms, offset_us) samples, window_s, max_gap_ms)`.
+    type Window = (Vec<(i64, i64)>, i64, i64);
     let windows: Vec<Window> = vec![
-        (at_1hz(600, &|i| i * 27 / 2), rate, floor, gap),
-        (at_1hz(600, &|i| (i / 60) * 1460), rate, floor, gap),
-        (at_1hz(600, &|i| (i / 30) * 600), rate, floor, gap),
-        (
-            at_1hz(600, &|i| i * 27 / 2 + (i / 60) * 1460),
-            rate,
-            floor,
-            gap,
-        ),
-        (at_1hz(600, &|i| (i % 3 - 1) * 40), rate, floor, gap),
-        (vec![(0, 0); 600], rate, floor, gap),
-        (vec![(0, 0), (1000, 400)], rate, floor, gap),
-        (vec![(0, 0), (1000, 401)], rate, floor, gap),
-        (vec![(0, 0), (4000, 1150)], rate, floor, gap),
-        (vec![(0, 0), (4000, 1151)], rate, floor, gap),
-        (vec![(0, 0), (6000, 100)], rate, floor, gap),
+        (at_1hz(600, &|i| i * 27 / 2), win, gap),
+        (at_1hz(600, &|i| (i / 60) * 1460), win, gap),
+        (at_1hz(600, &|i| (i / 30) * 600), win, gap),
+        (at_1hz(600, &|i| (i / 25) * 250), win, gap),
+        (at_1hz(600, &|i| (i / 20) * -146), win, gap),
+        (at_1hz(600, &|i| i * 27 / 2 + (i / 60) * 1460), win, gap),
+        (late, win, gap),
+        (at_1hz(600, &|i| (i * 7919) % 81 - 40), win, gap),
         (
             vec![(0, 0), (1000, 20), (121_000, -14_000), (122_000, -13_980)],
-            rate,
-            floor,
+            win,
             gap,
         ),
-        (jittered, rate, floor, gap),
-        (at_1hz(4, &|i| -20 * i), rate, floor, gap),
-        (vec![(0, 7)], rate, floor, gap),
-        (vec![], rate, floor, gap),
-        (vec![(0, 0), (1000, 100)], 0, 0, gap),
+        (jittered, win, gap),
+        (at_1hz(3, &|i| -20 * i), win, gap),
+        (vec![(0, 0), (1000, 10), (2000, 30)], win, gap),
+        (vec![(1000, 0), (1000, 50), (500, 70)], win, gap),
+        (vec![(0, 7)], win, gap),
+        (vec![], win, gap),
+        (vec![(0, 0), (1000, 5)], 0, gap),
+        (vec![(0, 0), (1000, 5)], -3, gap),
+        (vec![(0, i64::MIN), (1, i64::MAX)], i64::MAX, i64::MAX),
         (
-            vec![(0, i64::MIN), (1000, i64::MAX)],
-            i64::MAX,
+            vec![(0, 0), (1, i64::MIN), (2, i64::MAX)],
             i64::MAX,
             i64::MAX,
         ),
-        (vec![(i64::MAX, 0), (i64::MIN, 1)], rate, floor, gap),
         (
-            vec![(0, i64::MAX - 1), (1000, i64::MAX), (2000, i64::MAX)],
-            rate,
-            floor,
-            gap,
+            vec![(i64::MAX - 1, 0), (i64::MAX, 3), (i64::MIN, 4)],
+            win,
+            i64::MAX,
         ),
-        (vec![(0, 0), (i64::MAX, 5)], i64::MAX, 1, i64::MAX),
     ];
-    // Step-allowance vectors `(dt_ms, max_rate_ppm, floor_us)`, incl. the saturating product.
-    let allowances: Vec<(i64, i64, i64)> = vec![
-        (1000, rate, floor),
-        (1003, rate, floor),
-        (1004, rate, floor),
-        (4000, rate, floor),
-        (0, rate, floor),
-        (-5, rate, floor),
-        (1000, 0, floor),
-        (1000, -1, floor),
-        (i64::MAX, rate, floor),
-        (i64::MAX, i64::MAX, 1),
-        (1, i64::MAX, i64::MAX),
+    // Readiness vectors `(counted_ms, window_s)`.
+    let readies: Vec<(i64, i64)> = vec![
+        (539_999, 600),
+        (540_000, 600),
+        (600_000, 600),
+        (0, 600),
+        (0, 0),
+        (i64::MAX, -1),
+        (i64::MAX, i64::MAX),
+        (i64::MIN, 1),
     ];
 
     let disciplines = [
@@ -768,35 +756,34 @@ fn c_media_clock_matches_the_rust_authority_1372_part_d() {
             format!("INT64_C({v})")
         }
     };
+    let arr = |v: Vec<String>| {
+        if v.is_empty() {
+            "0".to_string()
+        } else {
+            v.join(",")
+        }
+    };
     let mut c = String::from("#include <stdio.h>\n#include <stdint.h>\n#include <inttypes.h>\n");
     c.push_str(&block);
-    c.push_str("int main(void){\n");
-    for (i, (w, r, fl, g)) in windows.iter().enumerate() {
+    c.push_str("int main(void){\n    int64_t counted;\n");
+    for (i, (w, ws, g)) in windows.iter().enumerate() {
         let ts: Vec<String> = w.iter().map(|s| lit(s.0)).collect();
         let ds: Vec<String> = w.iter().map(|s| lit(s.1)).collect();
-        let arr = |v: Vec<String>| {
-            if v.is_empty() {
-                "0".to_string()
-            } else {
-                v.join(",")
-            }
-        };
         c.push_str(&format!(
-            "    {{ static const int64_t t{i}[] = {{{}}}; static const int64_t d{i}[] = {{{}}}; printf(\"W %\" PRId64 \"\\n\", genlock_media_clock_window_drift_us(t{i}, d{i}, {}, {}, {}, {})); }}\n",
+            "    {{ static const int64_t t{i}[] = {{{}}}; static const int64_t d{i}[] = {{{}}}; static int64_t s{i}[{}]; counted = -1; const int64_t r = genlock_media_clock_window_drift_us(t{i}, d{i}, {}, {}, {}, s{i}, &counted); printf(\"W %\" PRId64 \" %\" PRId64 \"\\n\", r, counted); }}\n",
             arr(ts),
             arr(ds),
+            w.len().max(1),
             w.len(),
-            lit(*r),
-            lit(*fl),
+            lit(*ws),
             lit(*g)
         ));
     }
-    for &(dt, r, fl) in &allowances {
+    for &(counted, ws) in &readies {
         c.push_str(&format!(
-            "    printf(\"A %\" PRId64 \"\\n\", genlock_media_clock_step_allowance_us({}, {}, {}));\n",
-            lit(dt),
-            lit(r),
-            lit(fl)
+            "    printf(\"R %d\\n\", genlock_media_clock_window_ready({}, {}));\n",
+            lit(counted),
+            lit(ws)
         ));
     }
     for &(ready, d, bound, disc, present) in &verdicts {
@@ -847,23 +834,27 @@ fn c_media_clock_matches_the_rust_authority_1372_part_d() {
         String::from_utf8_lossy(&run.stderr)
     );
     let stdout = String::from_utf8(run.stdout).expect("harness stdout is utf-8");
-    let pick = |tag: &str| -> Vec<i64> {
+    let pick = |tag: &str| -> Vec<Vec<i64>> {
         stdout
             .lines()
             .filter_map(|l| l.strip_prefix(tag))
-            .map(|v| v.parse().expect("an i64 per line"))
+            .map(|v| {
+                v.split_whitespace()
+                    .map(|x| x.parse().expect("an i64"))
+                    .collect()
+            })
             .collect()
     };
-    let (c_windows, c_allow, c_verdicts) = (pick("W "), pick("A "), pick("V "));
+    let (c_windows, c_ready, c_verdicts) = (pick("W "), pick("R "), pick("V "));
     assert_eq!(
         c_windows.len(),
         windows.len(),
         "issue 1372 part D: window line count"
     );
     assert_eq!(
-        c_allow.len(),
-        allowances.len(),
-        "issue 1372 part D: allowance line count"
+        c_ready.len(),
+        readies.len(),
+        "issue 1372 part D: readiness line count"
     );
     assert_eq!(
         c_verdicts.len(),
@@ -872,29 +863,29 @@ fn c_media_clock_matches_the_rust_authority_1372_part_d() {
     );
 
     let mut diffs = Vec::new();
-    for ((w, r, fl, g), &cv) in windows.iter().zip(&c_windows) {
-        let rv = media_clock_window_drift_us(w, *r, *fl, *g);
-        if rv != cv {
+    for ((w, ws, g), cv) in windows.iter().zip(&c_windows) {
+        let rv = media_clock_window(w, *ws, *g);
+        if cv[..] != [rv.drift_us, rv.counted_ms] {
             diffs.push(format!(
-                "  window len={} first={:?} rate={r} floor={fl} gap={g} -> C {cv}, Rust {rv}",
+                "  window len={} first={:?} window_s={ws} gap={g} -> C {cv:?}, Rust {rv:?}",
                 w.len(),
                 w.first()
             ));
         }
     }
-    for (&(dt, r, fl), &cv) in allowances.iter().zip(&c_allow) {
-        let rv = media_clock_step_allowance_us(dt, r, fl);
-        if rv != cv {
+    for (&(counted, ws), cv) in readies.iter().zip(&c_ready) {
+        let rv = i64::from(media_clock_window_ready(counted, ws));
+        if cv[..] != [rv] {
             diffs.push(format!(
-                "  allowance dt={dt} rate={r} floor={fl} -> C {cv}, Rust {rv}"
+                "  ready counted={counted} window_s={ws} -> C {cv:?}, Rust {rv}"
             ));
         }
     }
-    for (&(ready, d, bound, disc, present), &cv) in verdicts.iter().zip(&c_verdicts) {
+    for (&(ready, d, bound, disc, present), cv) in verdicts.iter().zip(&c_verdicts) {
         let rv = i64::from(media_clock_verdict(ready, d, bound, disc, present).code());
-        if rv != cv {
+        if cv[..] != [rv] {
             diffs.push(format!(
-                "  ready={ready} drift={d} bound={bound} discipline={disc:?} present={present} -> C {cv}, Rust {rv}"
+                "  ready={ready} drift={d} bound={bound} discipline={disc:?} present={present} -> C {cv:?}, Rust {rv}"
             ));
         }
     }

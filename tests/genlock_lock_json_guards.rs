@@ -226,7 +226,7 @@ fn genlock_lock_media_clock_term_present_1372_part_d() {
     // the pure reduction (steps left to the step verdict) + verdict, fed the widget's own samples
     assert_has(
         STATUSBAR_CPP,
-        "genlock_media_clock_window_drift_us(sample_ms.data(), offset_us.data(), (int)offset_us.size(), GENLOCK_MEDIA_CLOCK_MAX_RATE_PPM, GENLOCK_MEDIA_CLOCK_STEP_FLOOR_US, GENLOCK_MEDIA_CLOCK_MAX_GAP_MS);",
+        "genlock_media_clock_window_drift_us( sample_ms.data(), offset_us.data(), (int)offset_us.size(), GENLOCK_MEDIA_CLOCK_WINDOW_S, GENLOCK_MEDIA_CLOCK_MAX_GAP_MS, rate_scratch.data(), &counted_ms);",
     );
     assert_has(
         STATUSBAR_CPP,
@@ -261,10 +261,10 @@ fn genlock_lock_media_clock_term_present_1372_part_d() {
     );
     assert_has(
         hpp,
-        "static inline int64_t genlock_media_clock_window_drift_us(const int64_t *t_ms, const int64_t *offset_us, int n,",
+        "static inline int64_t genlock_media_clock_window_drift_us(const int64_t *t_ms, const int64_t *offset_us, int n, int64_t window_s, int64_t max_gap_ms, int64_t *scratch,",
     );
-    // the offset is sampled in us by the widget itself (integer-ms libobs drift cannot tell a 1-2 ms
-    // dantesync step from a rate), and a step is judged against what a rate can do over the interval
+    // the offset is sampled in us by the widget itself (integer-ms libobs drift cannot tell a dantesync
+    // step from a rate), and the rate is the median of the per-pair rates, so steps never move it
     assert_has(
         STATUSBAR_CPP,
         "static int64_t genlock_wall_minus_media_us()",
@@ -275,11 +275,7 @@ fn genlock_lock_media_clock_term_present_1372_part_d() {
     );
     assert_has(
         STATUSBAR_CPP,
-        "static constexpr int64_t GENLOCK_MEDIA_CLOCK_MAX_RATE_PPM = 250;",
-    );
-    assert_has(
-        STATUSBAR_CPP,
-        "static constexpr int64_t GENLOCK_MEDIA_CLOCK_STEP_FLOOR_US = 150;",
+        "genlock_media_clock_window_ready(counted_ms, GENLOCK_MEDIA_CLOCK_WINDOW_S);",
     );
     assert_has(
         STATUSBAR_CPP,

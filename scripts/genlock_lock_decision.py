@@ -63,9 +63,7 @@ MC_DRIFT = "drift"
 MC_UNDISCIPLINED = "undisciplined"
 GENLOCK_MEDIA_CLOCK_WINDOW_S = 600          # the window the drift growth is measured over
 GENLOCK_MEDIA_CLOCK_DRIFT_BOUND_US = 2000   # offset growth beyond this (us per window) is DRIFT
-GENLOCK_MEDIA_CLOCK_MAX_RATE_PPM = 250      # a change beyond floor + interval x this is a wall STEP
-GENLOCK_MEDIA_CLOCK_STEP_FLOOR_US = 150     # the offset sampling noise floor
-GENLOCK_MEDIA_CLOCK_MAX_GAP_MS = 5000       # a pair further apart (a stalled UI) adds nothing
+GENLOCK_MEDIA_CLOCK_MAX_GAP_MS = 5000       # a pair further apart (a stalled UI) is not a sample
 # The Windows os_gettime_discipline() outcomes that mean "fell back to raw QPC".
 MEDIA_DISCIPLINE_RAW_FALLBACK = ("disabled", "read_failed", "api_missing")
 
@@ -100,32 +98,45 @@ def qpc_drift_beyond_bound(rate_ready, drift_delta_ms, elapsed_ms, max_step_ms, 
     return (abs(max_step_ms) > step_bound_ms, measured_ppm)
 
 
-def media_clock_step_allowance_us(dt_ms, max_rate_ppm, floor_us):
-    """Issue 1372 part D -- the largest sample-to-sample offset change (us) that is still a RATE over
-    dt_ms: floor_us + floor(dt_ms * max_rate_ppm / 1000). A non-positive interval or rate allows
-    floor_us. Mirror of camera_box::genlock_lock_state::media_clock_step_allowance_us."""
-    if dt_ms <= 0 or max_rate_ppm <= 0:
-        return floor_us
-    return floor_us + (dt_ms * max_rate_ppm) // 1000
+def _trunc_div(a, b):
+    """Integer division truncated toward zero (C / Rust `/`), never python's floor."""
+    q = abs(a) // abs(b)
+    return q if (a >= 0) == (b > 0) else -q
 
 
-def media_clock_window_drift_us(samples, max_rate_ppm, floor_us, max_gap_ms):
-    """Issue 1372 part D -- the wall-vs-media GROWTH (us) across `(t_ms, offset_us)` samples (oldest
-    first): the sum of the sample-to-sample offset changes a rate of at most max_rate_ppm could make over
-    their interval; a larger change is a wall STEP (every dantesync step is >= 500 us) and is left out,
-    and a pair more than max_gap_ms apart adds nothing. Fewer than two samples -> 0. Mirror of
-    camera_box::genlock_lock_state::media_clock_window_drift_us (python ints never overflow, so the
-    Rust/C saturation only matters at the i64 extremes no real clock reaches)."""
-    total = 0
+def media_clock_window(samples, window_s, max_gap_ms):
+    """Issue 1372 part D -- the wall-vs-media rate across `(t_ms, offset_us)` samples (oldest first):
+    each consecutive pair with 0 < dt <= max_gap_ms yields one rate in ppb (change_us * 1e6 / dt,
+    truncated toward zero); the result is their MEDIAN (the mean of the two middle rates for an even
+    count, a + (b - a) / 2) scaled to window_s: median_ppb * window_s / 1000 us. A rate is in every pair,
+    a wall step only in the pair that spans it, so steps never move it. Returns (drift_us, counted_ms);
+    no pair or a non-positive window_s gives drift 0. Mirror of
+    camera_box::genlock_lock_state::media_clock_window (python ints never overflow, so the Rust/C
+    saturation only matters at the i64 extremes no real clock reaches)."""
+    rates = []
+    counted_ms = 0
     for (ta, oa), (tb, ob) in zip(samples, samples[1:]):
         dt = tb - ta
-        if dt > max_gap_ms:
+        if dt <= 0 or dt > max_gap_ms:
             continue
-        change = ob - oa
-        if abs(change) > media_clock_step_allowance_us(dt, max_rate_ppm, floor_us):
-            continue
-        total += change
-    return total
+        rates.append(_trunc_div((ob - oa) * 1_000_000, dt))
+        counted_ms += dt
+    if not rates or window_s <= 0:
+        return (0, counted_ms)
+    rates.sort()
+    m = len(rates)
+    if m % 2 == 1:
+        median = rates[m // 2]
+    else:
+        a, b = rates[m // 2 - 1], rates[m // 2]
+        median = a + _trunc_div(b - a, 2)
+    return (_trunc_div(median * window_s, 1000), counted_ms)
+
+
+def media_clock_window_ready(counted_ms, window_s):
+    """Issue 1372 part D -- True once the counted pairs cover >= 90 % of the window; a non-positive
+    window is never ready. Mirror of camera_box::genlock_lock_state::media_clock_window_ready."""
+    return window_s > 0 and counted_ms >= (window_s * 1000) // 10 * 9
 
 
 def media_clock_verdict(window_ready, drift_us, drift_bound_us, discipline, clock_present):

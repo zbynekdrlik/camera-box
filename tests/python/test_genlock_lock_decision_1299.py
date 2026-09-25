@@ -392,35 +392,37 @@ def _at_1hz(n, f):
     return [(i * 1000, f(i)) for i in range(n + 1)]
 
 
-def _growth(samples):
-    return d.media_clock_window_drift_us(samples, d.GENLOCK_MEDIA_CLOCK_MAX_RATE_PPM,
-                                         d.GENLOCK_MEDIA_CLOCK_STEP_FLOOR_US,
-                                         d.GENLOCK_MEDIA_CLOCK_MAX_GAP_MS)
+def _window(samples):
+    return d.media_clock_window(samples, d.GENLOCK_MEDIA_CLOCK_WINDOW_S, d.GENLOCK_MEDIA_CLOCK_MAX_GAP_MS)
 
 
-def test_media_clock_window_drift_mirrors_the_rust_authority():
-    # the pre-part-A stream: 13.5 us per 1 Hz sample -> 8.1 ms over the 600 s window
-    assert _growth(_at_1hz(600, lambda i: i * 27 // 2)) == 8100
-    # a dantesync locked master stepping 1460 us with phase_slew off, and a client stepping 600 us:
-    # steps, never drift
-    assert _growth(_at_1hz(600, lambda i: (i // 60) * 1460)) == 0
-    assert _growth(_at_1hz(600, lambda i: (i // 30) * 600)) == 0
-    # the same steps on top of the rate: only the rate counts (each step sample takes its ~14 us)
-    assert _growth(_at_1hz(600, lambda i: i * 27 // 2 + (i // 60) * 1460)) == 7960
-    assert _growth(_at_1hz(600, lambda i: (i % 3 - 1) * 40)) == 0     # noise that returns
-    assert _growth([(0, 0), (1000, 400)]) == 400                       # the rate ceiling
-    assert _growth([(0, 0), (1000, 401)]) == 0
-    assert _growth([(0, 0), (4000, 1150)]) == 1150                     # a 4 s UI stall
-    assert _growth([(0, 0), (6000, 100)]) == 0                         # a 6 s stall adds nothing
-    assert _growth([(0, 7)]) == 0
-    assert _growth([]) == 0
+def test_media_clock_window_mirrors_the_rust_authority():
+    # the pre-part-A stream: 13.5 us per 1 Hz pair -> 8.1 ms over the 600 s window
+    assert _window(_at_1hz(600, lambda i: i * 27 // 2)) == (8100, 600_000)
+    # dantesync steps on a disciplined box (a locked master's 1460 us with phase_slew off, a client's
+    # 600 us, a not-locked master's 250 us, the -146 us seen on win-resolume): never drift
+    for f in (lambda i: (i // 60) * 1460, lambda i: (i // 30) * 600, lambda i: (i // 25) * 250,
+              lambda i: -146 * (i // 20)):
+        assert _window(_at_1hz(600, f))[0] == 0
+    # the same steps on top of the rate: exactly the rate
+    assert _window(_at_1hz(600, lambda i: i * 27 // 2 + (i // 60) * 1460))[0] == 8100
+    # a stalled pair (> 5 s) is not a sample and not coverage
+    gap = _window([(0, 0), (1000, 20), (121_000, -14_000), (122_000, -13_980)])
+    assert gap == (12_000, 2000)
+    assert not d.media_clock_window_ready(gap[1], 600)
+    # negative drift (truncated toward zero like C / Rust), an even count averages the middle two
+    assert _window(_at_1hz(3, lambda i: -20 * i))[0] == -12_000
+    assert _window([(0, 0), (1000, 10), (2000, 30)])[0] == 9000
+    assert _window([(0, 0), (3000, -1)])[0] == -199  # -333 ppb * 600 / 1000, toward zero
+    assert _window([(0, 7)]) == (0, 0)
+    assert _window([]) == (0, 0)
+    assert d.media_clock_window([(0, 0), (1000, 5)], 0, 5000)[0] == 0
 
 
-def test_media_clock_step_allowance_mirrors_the_rust_authority():
-    r, f = d.GENLOCK_MEDIA_CLOCK_MAX_RATE_PPM, d.GENLOCK_MEDIA_CLOCK_STEP_FLOOR_US
-    assert [d.media_clock_step_allowance_us(dt, r, f) for dt in (1000, 1003, 1004, 4000, 0, -5)] == \
-        [400, 400, 401, 1150, 150, 150]
-    assert d.media_clock_step_allowance_us(1000, 0, f) == 150
+def test_media_clock_window_ready_mirrors_the_rust_authority():
+    assert not d.media_clock_window_ready(539_999, 600)
+    assert d.media_clock_window_ready(540_000, 600)
+    assert not d.media_clock_window_ready(0, 0)
 
 
 def test_media_clock_verdict_mirrors_the_rust_authority():

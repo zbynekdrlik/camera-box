@@ -236,8 +236,8 @@ static inline int genlock_qpc_drift_beyond_bound(int rate_ready, long long drift
  * dantesync-disciplined rate (Linux's CLOCK_MONOTONIC always did), so the wall-vs-media offset must stay
  * flat on EVERY box apart from wall steps. Its growth over a window is therefore compared with 0 -- the
  * same meaning on every box, unlike the removed #1357 rate-vs-slew term. Mirror of
- * camera_box::genlock_lock_state (MediaDiscipline / MediaClock / media_clock_step_allowance_us /
- * media_clock_window_drift_us / media_clock_verdict); the parity gate
+ * camera_box::genlock_lock_state (MediaDiscipline / MediaClock / media_clock_window /
+ * media_clock_window_ready / media_clock_verdict); the parity gate
  * tests/genlock_lock_state_parity.rs lifts this block from the discipline enum through the verdict's
  * closing brace. Placed AFTER genlock_qpc_drift_beyond_bound so no earlier lift is disturbed. */
 
@@ -284,40 +284,65 @@ static inline int64_t genlock_media_sat_abs(int64_t v)
 	return v < 0 ? -v : v;
 }
 
-/* The largest sample-to-sample offset change (us) that is still a RATE over dt_ms:
- * floor_us + floor(dt_ms * max_rate_ppm / 1000). A non-positive interval or rate allows floor_us.
- * Saturating. */
-static inline int64_t genlock_media_clock_step_allowance_us(int64_t dt_ms, int64_t max_rate_ppm, int64_t floor_us)
+/* a * b for b > 0, saturating (the Rust saturating_mul for a positive factor). */
+static inline int64_t genlock_media_sat_mul_pos(int64_t a, int64_t b)
 {
-	int64_t product;
-	if (dt_ms <= 0 || max_rate_ppm <= 0)
-		return floor_us;
-	product = dt_ms > INT64_MAX / max_rate_ppm ? INT64_MAX : dt_ms * max_rate_ppm;
-	return genlock_media_sat_add(floor_us, product / 1000);
+	if (a > INT64_MAX / b)
+		return INT64_MAX;
+	if (a < INT64_MIN / b)
+		return INT64_MIN;
+	return a * b;
 }
 
-/* The wall-vs-media GROWTH (us) across n samples (oldest first; t_ms the widget's monotonic ms,
- * offset_us the wall-minus-media offset the widget samples in us): the sum of the sample-to-sample
- * offset changes a rate of at most max_rate_ppm could make over their interval. A larger change is a
- * wall STEP (every dantesync phase step is >= 500 us) and is left out, and a pair more than max_gap_ms
- * apart (a stalled UI) adds nothing, so steps and stalls never read as an audio-clock rate. n < 2 -> 0. */
+/* The wall-vs-media rate across n samples (oldest first; t_ms the widget's monotonic ms, offset_us the
+ * wall-minus-media offset in us). Each consecutive pair with 0 < dt <= max_gap_ms yields one rate in ppb
+ * (change_us * 1e6 / dt_ms, truncated toward zero, saturating), kept sorted in the caller's scratch
+ * (>= n - 1 entries); the result is their MEDIAN (the mean of the two middle rates for an even count,
+ * a + (b - a) / 2, saturating) scaled to window_s: median_ppb * window_s / 1000 us. A rate is in every
+ * pair, a wall step only in the pair that spans it, so steps of any size that touch fewer than half the
+ * pairs never move the result. *counted_ms_out gets the total interval of the counted pairs. No pair or a
+ * non-positive window_s -> 0. */
 static inline int64_t genlock_media_clock_window_drift_us(const int64_t *t_ms, const int64_t *offset_us, int n,
-							  int64_t max_rate_ppm, int64_t floor_us,
-							  int64_t max_gap_ms)
+							  int64_t window_s, int64_t max_gap_ms, int64_t *scratch,
+							  int64_t *counted_ms_out)
 {
-	int64_t sum = 0;
+	int64_t counted = 0;
+	int64_t median;
+	int m = 0;
 	int i;
+	int j;
 	for (i = 1; i < n; ++i) {
 		const int64_t dt = genlock_media_sat_sub(t_ms[i], t_ms[i - 1]);
-		int64_t change;
-		if (dt > max_gap_ms)
+		int64_t rate;
+		if (dt <= 0 || dt > max_gap_ms)
 			continue;
-		change = genlock_media_sat_sub(offset_us[i], offset_us[i - 1]);
-		if (genlock_media_sat_abs(change) > genlock_media_clock_step_allowance_us(dt, max_rate_ppm, floor_us))
-			continue;
-		sum = genlock_media_sat_add(sum, change);
+		rate = genlock_media_sat_mul_pos(genlock_media_sat_sub(offset_us[i], offset_us[i - 1]), 1000000) / dt;
+		for (j = m; j > 0 && scratch[j - 1] > rate; --j)
+			scratch[j] = scratch[j - 1];
+		scratch[j] = rate;
+		++m;
+		counted = genlock_media_sat_add(counted, dt);
 	}
-	return sum;
+	if (counted_ms_out)
+		*counted_ms_out = counted;
+	if (m == 0 || window_s <= 0)
+		return 0;
+	if (m % 2 == 1)
+		median = scratch[m / 2];
+	else
+		median = genlock_media_sat_add(scratch[m / 2 - 1],
+					       genlock_media_sat_sub(scratch[m / 2], scratch[m / 2 - 1]) / 2);
+	return genlock_media_sat_mul_pos(median, window_s) / 1000;
+}
+
+/* 1 once the counted pairs cover >= 90 % of the window_s window; a non-positive window is never ready. */
+static inline int genlock_media_clock_window_ready(int64_t counted_ms, int64_t window_s)
+{
+	int64_t window_ms;
+	if (window_s <= 0)
+		return 0;
+	window_ms = genlock_media_sat_mul_pos(window_s, 1000);
+	return counted_ms >= window_ms / 10 * 9 ? 1 : 0;
 }
 
 /* UNDISCIPLINED when the Windows clock fell back to raw QPC while dantesync answers (clock_present);

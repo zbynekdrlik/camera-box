@@ -53,18 +53,16 @@ static constexpr int GENLOCK_QPC_WINDOW_S = 300;
  * mixer and every output; since part A it runs at the dantesync-disciplined rate on Windows too, so the
  * wall-vs-media offset must stay flat on every box apart from wall steps. The widget samples that offset
  * itself in us each tick (libobs' wall_qpc_drift_ms is integer ms truncated toward zero, which cannot
- * tell a 1-2 ms dantesync phase step from a rate). Its GROWTH over GENLOCK_MEDIA_CLOCK_WINDOW_S beyond
- * GENLOCK_MEDIA_CLOCK_DRIFT_BOUND_US DEGRADES, and so does a Windows fallback to raw QPC while dantesync
- * answers. A sample-to-sample change beyond GENLOCK_MEDIA_CLOCK_STEP_FLOOR_US + interval *
- * GENLOCK_MEDIA_CLOCK_MAX_RATE_PPM (400 us at 1 Hz) is a wall STEP -- every dantesync step is >= 500 us
- * -- and a pair more than GENLOCK_MEDIA_CLOCK_MAX_GAP_MS apart adds nothing. Calibration: the
+ * tell a dantesync phase step from a rate). The rate is the MEDIAN of the per-pair rates over
+ * GENLOCK_MEDIA_CLOCK_WINDOW_S: a rate is in every pair, a wall step (dantesync steps from ~150 us to
+ * 2.5 ms) only in the pair that spans it, so steps never move it. Scaled to the window it DEGRADES beyond
+ * GENLOCK_MEDIA_CLOCK_DRIFT_BOUND_US (3.3 ppm), and so does a Windows fallback to raw QPC while
+ * dantesync answers. A pair more than GENLOCK_MEDIA_CLOCK_MAX_GAP_MS apart (a stalled UI) is not a
+ * sample; the window is ready once the counted pairs cover >= 90 % of it. Calibration: the
  * undisciplined stream mixer drifted ~8 ms per 10 min (67 ms / 83 min), a disciplined box stays at 0.
- * The pure decision is genlock_media_clock_verdict in GenlockLockState.hpp (parity-gated). Never
- * UNLOCKED. */
+ * The pure decision is in GenlockLockState.hpp (parity-gated). Never UNLOCKED. */
 static constexpr int GENLOCK_MEDIA_CLOCK_WINDOW_S = 600;
 static constexpr int64_t GENLOCK_MEDIA_CLOCK_DRIFT_BOUND_US = 2000;
-static constexpr int64_t GENLOCK_MEDIA_CLOCK_MAX_RATE_PPM = 250;
-static constexpr int64_t GENLOCK_MEDIA_CLOCK_STEP_FLOOR_US = 150;
 static constexpr int64_t GENLOCK_MEDIA_CLOCK_MAX_GAP_MS = 5000;
 
 /* camera-box #1303: the A/V pairing-offset bound that trips the audio DEGRADE term. An
@@ -1212,34 +1210,30 @@ static int64_t genlock_wall_minus_media_us()
 
 /* camera-box issue 1372 part D: one tick of the media-clock (audio clock) term. Push this tick's
  * (monotonic ms, wall-minus-media offset us) sample into the GENLOCK_MEDIA_CLOCK_WINDOW_S ring, reduce it
- * with the parity-gated pure growth (a change no plausible rate can make in its interval is a wall STEP
- * and is left out, a stalled pair adds nothing), read the Windows discipline outcome (libobs
- * os_gettime_discipline(); every other OS disciplines its monotonic clock itself), and ask the pure
- * verdict. The widget samples every tick, with or without genlock inputs, so the ring has no gaps. */
+ * with the parity-gated pure median rate (wall steps never move it, a stalled pair is not a sample), read
+ * the Windows discipline outcome (libobs os_gettime_discipline(); every other OS disciplines its
+ * monotonic clock itself), and ask the pure verdict. The widget samples every tick, with or without
+ * genlock inputs, so the ring has no gaps. */
 OBSBasicStatusBar::GenlockMediaClockTick OBSBasicStatusBar::ReduceGenlockMediaClock(qint64 now_ms, bool clock_present)
 {
 	genlockMediaClockHistory.emplace_back(now_ms, genlock_wall_minus_media_us());
 	while (genlockMediaClockHistory.size() > 1 &&
 	       now_ms - genlockMediaClockHistory.front().first > (qint64)GENLOCK_MEDIA_CLOCK_WINDOW_S * 1000)
 		genlockMediaClockHistory.pop_front();
-	int64_t media_drift_us = 0;
-	int media_window_ready = 0;
-	if (genlockMediaClockHistory.size() >= 2) {
-		std::vector<int64_t> sample_ms;
-		std::vector<int64_t> offset_us;
-		sample_ms.reserve(genlockMediaClockHistory.size());
-		offset_us.reserve(genlockMediaClockHistory.size());
-		for (const auto &sample : genlockMediaClockHistory) {
-			sample_ms.push_back((int64_t)sample.first);
-			offset_us.push_back(sample.second);
-		}
-		media_drift_us = genlock_media_clock_window_drift_us(sample_ms.data(), offset_us.data(),
-								     (int)offset_us.size(), GENLOCK_MEDIA_CLOCK_MAX_RATE_PPM,
-								     GENLOCK_MEDIA_CLOCK_STEP_FLOOR_US,
-								     GENLOCK_MEDIA_CLOCK_MAX_GAP_MS);
-		const qint64 media_span = genlockMediaClockHistory.back().first - genlockMediaClockHistory.front().first;
-		media_window_ready = media_span >= (qint64)GENLOCK_MEDIA_CLOCK_WINDOW_S * 1000 * 9 / 10 ? 1 : 0;
+	std::vector<int64_t> sample_ms;
+	std::vector<int64_t> offset_us;
+	std::vector<int64_t> rate_scratch(genlockMediaClockHistory.size());
+	sample_ms.reserve(genlockMediaClockHistory.size());
+	offset_us.reserve(genlockMediaClockHistory.size());
+	for (const auto &sample : genlockMediaClockHistory) {
+		sample_ms.push_back((int64_t)sample.first);
+		offset_us.push_back(sample.second);
 	}
+	int64_t counted_ms = 0;
+	const int64_t media_drift_us = genlock_media_clock_window_drift_us(
+		sample_ms.data(), offset_us.data(), (int)offset_us.size(), GENLOCK_MEDIA_CLOCK_WINDOW_S,
+		GENLOCK_MEDIA_CLOCK_MAX_GAP_MS, rate_scratch.data(), &counted_ms);
+	const int media_window_ready = genlock_media_clock_window_ready(counted_ms, GENLOCK_MEDIA_CLOCK_WINDOW_S);
 #ifdef _WIN32
 	const int media_discipline = os_gettime_discipline();
 #else
