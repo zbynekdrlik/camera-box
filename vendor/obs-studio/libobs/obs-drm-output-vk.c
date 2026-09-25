@@ -17,25 +17,29 @@
  * Mailbox + sync (the lease backend's triple buffer, adapted to a copy-based consumer):
  *   - roles front / pending / ready live under g_drm_vk.lock; GL only ever writes a role-free image;
  *   - GL -> Vulkan: the per-image binary semaphore GL signals on publish; the present thread waits it
- *     exactly once (the first copy of that publish). A READY image the GL side overwrites before the
- *     present thread took it still carries an unconsumed signal (`armed`), so the next publish into it
- *     first consumes it with glWaitSemaphoreEXT — a binary semaphore is never signalled twice;
+ *     exactly once (the first copy of that publish). The GL side NEVER overwrites a READY image (it
+ *     skips the tick while one is waiting), so every signal is waited by the Vulkan side and no GL-side
+ *     wait on the same semaphore exists. (A "latest wins" overwrite needs such a GL-side consume wait,
+ *     which can still be pending when the Vulkan side waits the semaphore -- a spec violation that
+ *     deadlocked the copy live under a publish burst on strih-lx, 25.9.2026.)
  *   - Vulkan -> GL: the present thread waits its fence before it changes a role, so when an image
  *     leaves front/pending every Vulkan read of it has completed on the GPU — a later GL write is
  *     ordered after it without a second semaphore. Every copy acquires the image from
  *     VK_QUEUE_FAMILY_EXTERNAL and releases it back. The GL side never does the matching GL-side
  *     acquire/release (GL_EXT_semaphore only carries layouts on the semaphore ops): this relies on the
  *     NVIDIA driver being lenient about external ownership, proven live on the target GPU.
- *   - every blocking wait is bounded: the present loop's acquire/fence waits (1 s, re-checked), and the
- *     teardown's quiesce of an outstanding copy (a GPU that never finishes it leaks the Vulkan objects
- *     loudly instead of hanging the OBS shutdown).
+ *   - the waits a wedged GPU could hang are bounded: the present loop's acquire/fence waits (1 s,
+ *     re-checked) and the teardown's quiesce of an outstanding copy (a timeout leaks the Vulkan objects
+ *     loudly instead of hanging the OBS shutdown). The teardown's vkDeviceWaitIdle runs only once no
+ *     submit is outstanding, and the swapchain rebuild never waits on the device at all.
  *
  * The present thread never touches GL; the graphics thread never touches the Vulkan queue. Building
  * the Vulkan/X objects (and tearing them down) is obs-drm-output-vk-setup.c; the shared state type is
  * obs-drm-output-vk-internal.h.
  * Linux-only; built only via libobs/cmake/os-linux.cmake (Vulkan headers only — libvulkan.so.1 is
  * dlopen'd, so a box without the loader just logs and stays dormant). The pure helpers
- * drm_output_vk_present_pick + drm_output_vk_pick_claim are lift-compiled + truth-tabled by
+ * drm_output_vk_present_pick + drm_output_vk_present_done + drm_output_vk_pick_claim are lift-compiled +
+ * model-checked by
  * tests/drm_output_vk_direct_1346.rs.
  */
 
@@ -64,21 +68,17 @@
  * ------------------------------------------------------------------------------------------------- */
 
 /* The present thread's per-vblank source: the READY image when one is waiting (it moves to pending,
- * *took_new = true), else the FRONT image (a re-copy, *took_new = false), else -1 (nothing published
- * yet — present the solid pattern). Taking a READY image also takes its GL signal: *wait_gl = armed[src]
- * and armed[src] is cleared, so this submit waits the semaphore exactly once. A re-copy waits nothing.
- * Caller holds g_drm_vk.lock. */
-static int drm_output_vk_present_pick(int front, int *pending, int *ready, bool *armed, bool *took_new, bool *wait_gl)
+ * *took_new = true -- this submit waits the image's GL signal, exactly once), else the FRONT image (a
+ * re-copy that waits nothing), else -1 (nothing published yet — present the solid pattern). Caller holds
+ * g_drm_vk.lock. */
+static int drm_output_vk_present_pick(int front, int *pending, int *ready, bool *took_new)
 {
 	*took_new = false;
-	*wait_gl = false;
 	if (*ready >= 0) {
 		int src = *ready;
 		*ready = -1;
 		*pending = src;
 		*took_new = true;
-		*wait_gl = armed[src];
-		armed[src] = false;
 		return src;
 	}
 	return front;
@@ -95,29 +95,19 @@ static void drm_output_vk_present_done(int src, bool took_new, int *front, int *
 	*front = src;
 }
 
-/* The GL side's publish bookkeeping for image idx, BEFORE its GL work: returns true when an earlier,
- * never-consumed signal is still pending on the image's semaphore (a READY image the GL side is
- * overwriting before the present thread took it) — the publish must consume it with glWaitSemaphoreEXT
- * first — and marks the image armed for the signal this publish is about to issue. So a binary
- * semaphore is never signalled twice and never waited without a pending signal. Caller holds the lock. */
-static bool drm_output_vk_publish_arm(bool *armed_idx)
-{
-	bool consume = *armed_idx;
-	*armed_idx = true;
-	return consume;
-}
-
-/* The GL side's claim: never front or pending, prefer an image holding no role, else overwrite ready
- * (latest wins); -1 when nothing is writable. The same rule as the lease backend's
- * drm_output_pick_render_buf (a separate copy: each TU is lift-tested on its own). */
+/* The GL side's claim: -1 while a READY image is waiting (its signal must be waited by the present
+ * thread before anything else is published -- never overwritten), else the first image holding no role
+ * (never front or pending: the present thread may still read them). With nothing ready this is exactly
+ * the lease backend's drm_output_pick_render_buf. A skipped tick drops the NEWER frame where the lease
+ * drops the older one: one frame either way, the next tick publishes again. */
 static int drm_output_vk_pick_claim(int front, int pending, int ready, int n)
 {
+	if (ready >= 0)
+		return -1;
 	for (int i = 0; i < n; i++) {
-		if (i != front && i != pending && i != ready)
+		if (i != front && i != pending)
 			return i;
 	}
-	if (ready >= 0 && ready < n && ready != front && ready != pending)
-		return ready;
 	return -1;
 }
 
@@ -226,7 +216,8 @@ static bool drm_output_vk_rebuild_or_give_up(VkResult why, unsigned *rebuilds)
 		(*rebuilds)++;
 		blog(LOG_WARNING, "drm-output: vk-direct: presentation out of date (VkResult %d) on '%s' -- rebuilding (try %u of %u)",
 		     (int)why, g_drm_vk.output_name, *rebuilds, DRM_OUTPUT_VK_REBUILD_TRIES);
-		if (drm_output_vk_rebuild_presentation(why == VK_ERROR_SURFACE_LOST_KHR))
+		/* a lost surface is rebuilt whole; an out-of-date one keeps its surface once, then escalates */
+		if (drm_output_vk_rebuild_presentation(why == VK_ERROR_SURFACE_LOST_KHR || *rebuilds >= 2u))
 			return true;
 		const struct timespec pause = {1, 0};
 		nanosleep(&pause, NULL);
@@ -265,11 +256,11 @@ static void *drm_output_vk_present_thread(void *arg)
 		}
 		overdue = 0;
 
-		bool took_new = false, wait_gl = false;
+		bool took_new = false;
 		pthread_mutex_lock(&g_drm_vk.lock);
-		int src = drm_output_vk_present_pick(g_drm_vk.front, &g_drm_vk.pending, &g_drm_vk.ready, g_drm_vk.armed,
-						     &took_new, &wait_gl);
+		int src = drm_output_vk_present_pick(g_drm_vk.front, &g_drm_vk.pending, &g_drm_vk.ready, &took_new);
 		pthread_mutex_unlock(&g_drm_vk.lock);
+		const bool wait_gl = took_new; /* a newly taken image carries exactly one GL signal */
 
 		if (!drm_output_vk_record(img, src)) {
 			blog(LOG_WARNING, "drm-output: vk-direct: command recording failed -- stopping");
@@ -336,8 +327,8 @@ static void *drm_output_vk_present_thread(void *arg)
 	}
 	/* A self-death (display lost, device lost) disarms the frame hook too: nobody drains the mailbox. */
 	os_atomic_set_bool(&g_drm_vk.want_frames, false);
-	blog(LOG_INFO, "drm-output: vk-direct present loop exited after %llu presents (%llu overwritten frames consumed)",
-	     g_drm_vk.presents, g_drm_vk.gl_consumes);
+	blog(LOG_INFO, "drm-output: vk-direct present loop exited after %llu presents (%llu publishes skipped behind a ready frame)",
+	     g_drm_vk.presents, g_drm_vk.gl_skips);
 	return NULL;
 }
 
@@ -354,9 +345,8 @@ bool drm_output_vk_open(const char *output_name, uint32_t solid_argb)
 	g_drm_vk.presents = 0;
 	g_drm_vk.program_presents = 0;
 	g_drm_vk.scanout_live_logged = false;
-	g_drm_vk.gl_consumes = 0;
+	g_drm_vk.gl_skips = 0;
 	g_drm_vk.submit_outstanding = false;
-	memset(g_drm_vk.armed, 0, sizeof(g_drm_vk.armed));
 
 	if (!drm_output_vk_setup(output_name)) {
 		drm_output_vk_destroy_all();
@@ -470,7 +460,6 @@ static bool drm_output_vk_gl_resolve(void)
 	DRM_OUTPUT_VK_GL(DeleteSemaphoresEXT, "glDeleteSemaphoresEXT", PFNGLDELETESEMAPHORESEXTPROC)
 	DRM_OUTPUT_VK_GL(ImportSemaphoreFdEXT, "glImportSemaphoreFdEXT", PFNGLIMPORTSEMAPHOREFDEXTPROC)
 	DRM_OUTPUT_VK_GL(SignalSemaphoreEXT, "glSignalSemaphoreEXT", PFNGLSIGNALSEMAPHOREEXTPROC)
-	DRM_OUTPUT_VK_GL(WaitSemaphoreEXT, "glWaitSemaphoreEXT", PFNGLWAITSEMAPHOREEXTPROC)
 	DRM_OUTPUT_VK_GL(CopyImageSubData, "glCopyImageSubData", PFNGLCOPYIMAGESUBDATAPROC)
 	DRM_OUTPUT_VK_GL(Flush, "glFlush", drm_output_vk_gl_flush_fn)
 	DRM_OUTPUT_VK_GL(Finish, "glFinish", drm_output_vk_gl_flush_fn)
@@ -568,8 +557,8 @@ int drm_output_vk_claim(void)
 {
 	pthread_mutex_lock(&g_drm_vk.lock);
 	int idx = drm_output_vk_pick_claim(g_drm_vk.front, g_drm_vk.pending, g_drm_vk.ready, DRM_OUTPUT_VK_SHARED_IMAGES);
-	if (idx >= 0 && idx == g_drm_vk.ready)
-		g_drm_vk.ready = -1; /* claim the mailbox slot for overwrite (latest wins) */
+	if (idx < 0)
+		g_drm_vk.gl_skips++;
 	pthread_mutex_unlock(&g_drm_vk.lock);
 	return idx;
 }
@@ -583,13 +572,6 @@ bool drm_output_vk_publish_gl(int idx, unsigned int src_gl_name, uint32_t w, uin
 	struct drm_output_vk_shared *s = &g_drm_vk.shared[idx];
 	GLenum layout = GL_LAYOUT_TRANSFER_SRC_EXT;
 
-	pthread_mutex_lock(&g_drm_vk.lock);
-	bool consume = drm_output_vk_publish_arm(&g_drm_vk.armed[idx]);
-	if (consume)
-		g_drm_vk.gl_consumes++;
-	pthread_mutex_unlock(&g_drm_vk.lock);
-	if (consume) /* an overwritten READY image: its signal was never waited */
-		g->WaitSemaphoreEXT(s->gl_sem, 0, NULL, 1, &s->gl_tex, &layout);
 
 	g->CopyImageSubData((GLuint)src_gl_name, GL_TEXTURE_2D, 0, 0, 0, 0, s->gl_tex, GL_TEXTURE_2D, 0, 0, 0, 0,
 			    (GLsizei)w, (GLsizei)h, 1);

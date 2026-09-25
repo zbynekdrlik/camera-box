@@ -230,8 +230,12 @@ static bool drm_output_vk_acquire(unsigned long output)
 	return true;
 }
 
-/* The native ~60 Hz mode, a display plane that can show it, and the display-plane surface. */
-static bool drm_output_vk_create_surface(void)
+/* The native ~60 Hz mode, a display plane that can show it, and the display-plane surface. The chosen
+ * mode is committed to g_drm_vk.mode_* only when the surface exists. `rebuild` (the present thread's
+ * rebuild after a lost surface) requires the mode to have the SAME size as the committed one -- the
+ * shared images and the OBS intermediate are sized to it, and the graphics thread reads mode_* without
+ * a lock -- so a rebuild never changes mode_* at all; a different size refuses by name. */
+static bool drm_output_vk_create_surface(bool rebuild)
 {
 	VkExtent2D native = {0, 0};
 	uint32_t nd = 0;
@@ -264,9 +268,18 @@ static bool drm_output_vk_create_surface(void)
 		int best = drm_output_vk_pick_mode(mw, mh, mr, (int)nm, native.width, native.height);
 		if (best >= 0) {
 			VkDisplayModePropertiesKHR mode = modes[best];
-			g_drm_vk.mode_w = mw[best];
-			g_drm_vk.mode_h = mh[best];
-			g_drm_vk.refresh_mhz = mr[best];
+			const uint32_t sel_w = mw[best], sel_h = mh[best], sel_hz = mr[best];
+			if (rebuild && (sel_w != g_drm_vk.mode_w || sel_h != g_drm_vk.mode_h)) {
+				blog(LOG_WARNING,
+				     "drm-output: vk-direct: the display now offers %ux%u instead of %ux%u -- the shared images "
+				     "no longer fit (restart OBS)",
+				     sel_w, sel_h, g_drm_vk.mode_w, g_drm_vk.mode_h);
+				free(modes);
+				free(mw);
+				free(mh);
+				free(mr);
+				return false;
+			}
 
 			uint32_t npl = 0;
 			g_drm_vk.vk.vkGetPhysicalDeviceDisplayPlanePropertiesKHR(g_drm_vk.pd, &npl, NULL);
@@ -304,11 +317,13 @@ static bool drm_output_vk_create_surface(void)
 				VkResult r = g_drm_vk.vk.vkCreateDisplayPlaneSurfaceKHR(g_drm_vk.instance, &dsci, NULL, &g_drm_vk.surface);
 				if (r == VK_SUCCESS) {
 					ok = true;
+					g_drm_vk.mode_w = sel_w;
+					g_drm_vk.mode_h = sel_h;
+					g_drm_vk.refresh_mhz = sel_hz;
 					blog(LOG_INFO,
 					     "drm-output: vk-direct mode %ux%u@%u.%03uHz on display plane %d (native %ux%u, "
 					     "%u modes)",
-					     g_drm_vk.mode_w, g_drm_vk.mode_h, g_drm_vk.refresh_mhz / 1000u, g_drm_vk.refresh_mhz % 1000u,
-					     plane, native.width, native.height, nm);
+					     sel_w, sel_h, sel_hz / 1000u, sel_hz % 1000u, plane, native.width, native.height, nm);
 				} else {
 					blog(LOG_WARNING, "drm-output: vk-direct: vkCreateDisplayPlaneSurfaceKHR FAILED VkResult %d",
 					     (int)r);
@@ -516,21 +531,20 @@ static void drm_output_vk_destroy_swapchain(void)
 bool drm_output_vk_rebuild_presentation(bool surface_lost)
 {
 	const uint32_t w = g_drm_vk.mode_w, h = g_drm_vk.mode_h;
-	g_drm_vk.vk.vkDeviceWaitIdle(g_drm_vk.device); /* the present loop fenced its last copy */
+	/* No vkDeviceWaitIdle here (it cannot be bounded and halt() joins this thread): at both call sites the
+	 * present loop has seen its last copy's fence signalled, and nothing else is ever submitted. */
 	drm_output_vk_destroy_swapchain();
 	if (surface_lost) {
 		if (g_drm_vk.surface)
 			g_drm_vk.vk.vkDestroySurfaceKHR(g_drm_vk.instance, g_drm_vk.surface, NULL);
 		g_drm_vk.surface = VK_NULL_HANDLE;
-		if (!drm_output_vk_create_surface())
+		if (!drm_output_vk_create_surface(true))
 			return false;
-		if (g_drm_vk.mode_w != w || g_drm_vk.mode_h != h) {
-			blog(LOG_WARNING,
-			     "drm-output: vk-direct: the display now offers %ux%u instead of %ux%u -- the shared images no "
-			     "longer fit (restart OBS)",
-			     g_drm_vk.mode_w, g_drm_vk.mode_h, w, h);
-			g_drm_vk.mode_w = w;
-			g_drm_vk.mode_h = h;
+		VkBool32 present = VK_FALSE;
+		g_drm_vk.vk.vkGetPhysicalDeviceSurfaceSupportKHR(g_drm_vk.pd, g_drm_vk.qfi, g_drm_vk.surface, &present);
+		if (!present) {
+			blog(LOG_WARNING, "drm-output: vk-direct: the rebuilt display surface is not presentable from queue family %u",
+			     g_drm_vk.qfi);
 			return false;
 		}
 	}
@@ -603,7 +617,6 @@ static bool drm_output_vk_create_shared(void)
 			blog(LOG_WARNING, "drm-output: vk-direct: shared semaphore %d create failed", i);
 			return false;
 		}
-		g_drm_vk.armed[i] = false;
 	}
 	return true;
 }
@@ -618,7 +631,7 @@ bool drm_output_vk_setup(const char *output_name)
 	unsigned long output = 0;
 	return drm_output_vk_load() && drm_output_vk_create_instance() &&
 	       (output = drm_output_vk_find_output(output_name)) != 0 && drm_output_vk_acquire(output) &&
-	       drm_output_vk_create_surface() && drm_output_vk_create_device() && drm_output_vk_create_swapchain() &&
+	       drm_output_vk_create_surface(false) && drm_output_vk_create_device() && drm_output_vk_create_swapchain() &&
 	       drm_output_vk_create_shared();
 }
 
@@ -632,7 +645,7 @@ void drm_output_vk_destroy_all(void)
 		VkResult fr = VK_TIMEOUT;
 		for (int i = 0; i < 5 && fr == VK_TIMEOUT; i++)
 			fr = g_drm_vk.vk.vkWaitForFences(g_drm_vk.device, 1, &g_drm_vk.fence, VK_TRUE, DRM_OUTPUT_VK_WAIT_NS);
-		if (fr != VK_SUCCESS) {
+		if (fr == VK_TIMEOUT) { /* a lost device returns at once: destroy it normally below */
 			blog(LOG_WARNING,
 			     "drm-output: vk-direct: the last copy never completed (VkResult %d) -- leaking the Vulkan objects "
 			     "of '%s' instead of hanging the shutdown",

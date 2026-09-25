@@ -14,10 +14,11 @@
  *   2 s solid pattern (before any publish) -> 3 s RED -> 3 s GREEN -> 3 s BLUE -> 3 s GREY 50 %
  * and prints the wall-clock start of each phase, so a capture of the HDMI (cam2 on the SNV rig) can be
  * matched phase by phase: the R/G/B order proves the channel mapping, the grey proves no gamma step.
- * Then a 2 s BURST phase publishes with no sleep (several frames per vblank), which forces the overwrite
- * path — the GL side re-claims a READY image the present thread has not taken and must consume its
- * pending semaphore signal first. The harness requires gl_consumes > 0 (the path really ran) and a clean
- * release after it (a double-signalled binary semaphore would fail the submit or wedge the fence).
+ * Then a 2 s BURST phase tries to publish with no sleep (many claims per vblank): the GL side must SKIP
+ * every claim while a READY image waits for the present thread (never overwrite it -- every GL signal is
+ * waited by Vulkan exactly once). The harness requires gl_skips > 0 (the path really ran), a present loop
+ * still alive after the burst, and a clean release (a double-signalled or never-signalled binary
+ * semaphore would wedge the copy fence and force the teardown's leak path).
  *
  * Build ON the box (never on dev1 — Tier-0), with the X11/xcb/EGL/GL/Vulkan headers staged in $INC and
  * the libobs tree in $LIBOBS (only the util headers and the four obs-drm-output-vk files are read):
@@ -71,6 +72,7 @@ typedef void(APIENTRYP clear_color_fn)(GLfloat, GLfloat, GLfloat, GLfloat);
 typedef void(APIENTRYP clear_fn)(GLbitfield);
 typedef void(APIENTRYP disable_fn)(GLenum);
 typedef void(APIENTRYP viewport_fn)(GLint, GLint, GLsizei, GLsizei);
+typedef void(APIENTRYP finish_fn)(void);
 
 int main(int argc, char **argv)
 {
@@ -119,6 +121,7 @@ int main(int argc, char **argv)
 	GLP(clear_fn, glClear);
 	GLP(disable_fn, glDisable);
 	GLP(viewport_fn, glViewport);
+	GLP(finish_fn, glFinish);
 #undef GLP
 	if (!glGenTextures || !glTexStorage2D || !glGenFramebuffers || !glClear) {
 		fprintf(stderr, "FAIL: GL entry points\n");
@@ -181,19 +184,29 @@ int main(int argc, char **argv)
 	unsigned burst = 0;
 	double burst_end = now_s() + 2.0;
 	for (unsigned k = 0; now_s() < burst_end; k++) {
+		/* claim FIRST, like the OBS frame hook: a refused claim renders nothing (no GL backlog) */
+		int idx = drm_output_vk_claim();
+		if (idx < 0) {
+			usleep(200);
+			continue;
+		}
 		const float v = (k & 1u) ? 0.75f : 0.25f;
 		glClearColor(v, v, v, 1.0f);
 		glClear(GL_COLOR_BUFFER_BIT);
-		int idx = drm_output_vk_claim();
-		if (idx >= 0 && drm_output_vk_publish_gl(idx, tex, w, h))
+		if (drm_output_vk_publish_gl(idx, tex, w, h))
 			burst++;
 	}
+	/* Drain the GL work of the burst, then let the present loop run on for 2 s -- it must still be alive
+	 * (no fence wedge, no semaphore misuse) and the release below must not need the leak path. */
+	glFinish();
+	sleep(2);
 	pthread_mutex_lock(&g_drm_vk.lock);
-	unsigned long long consumes = g_drm_vk.gl_consumes;
+	unsigned long long skips = g_drm_vk.gl_skips;
 	pthread_mutex_unlock(&g_drm_vk.lock);
-	printf("PHASE end t=%.3f published=%u skipped=%u burst=%u gl_consumes=%llu\n", now_s(), published, skipped,
-	       burst, consumes);
-	rc = (published > 0 && burst > 0 && consumes > 0 && drm_output_vk_wants_frames()) ? 0 : 1;
+	printf("PHASE end t=%.3f published=%u skipped=%u burst=%u gl_skips=%llu\n", now_s(), published, skipped, burst,
+	       skips);
+	rc = (published > 0 && burst > 0 && skips > 0 && drm_output_vk_wants_frames()) ? 0 : 1;
+	printf("present loop alive after the drain: %s\n", drm_output_vk_wants_frames() ? "yes" : "NO");
 
 out:
 	drm_output_vk_halt();

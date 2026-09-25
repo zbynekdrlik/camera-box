@@ -120,7 +120,6 @@ struct drm_output_vk_gl {
 	PFNGLDELETESEMAPHORESEXTPROC DeleteSemaphoresEXT;
 	PFNGLIMPORTSEMAPHOREFDEXTPROC ImportSemaphoreFdEXT;
 	PFNGLSIGNALSEMAPHOREEXTPROC SignalSemaphoreEXT;
-	PFNGLWAITSEMAPHOREEXTPROC WaitSemaphoreEXT;
 	PFNGLCOPYIMAGESUBDATAPROC CopyImageSubData;
 	drm_output_vk_gl_flush_fn Flush;
 	drm_output_vk_gl_flush_fn Finish; /* same signature as glFlush */
@@ -144,7 +143,7 @@ struct drm_output_vk_shared {
 };
 
 struct drm_output_vk_state {
-	pthread_mutex_t lock; /* the mailbox roles + armed flags */
+	pthread_mutex_t lock; /* the mailbox roles */
 	bool open;
 	volatile bool running;     /* present-thread run flag (os_atomic) */
 	volatile bool want_frames; /* the frame hook's fast gate (os_atomic) */
@@ -181,11 +180,9 @@ struct drm_output_vk_state {
 	int front;   /* image last presented (re-copied when nothing new), -1 before the first */
 	int pending; /* image taken by the present thread, copy in flight */
 	int ready;   /* newest published image not yet taken */
-	/* armed[i]: GL signalled shared[i].sem and nobody consumed that signal yet (g_drm_vk.lock). */
-	bool armed[DRM_OUTPUT_VK_SHARED_IMAGES];
 	/* A submit whose fence was never seen signalled (present thread; read by the teardown quiesce). */
 	bool submit_outstanding;
-	unsigned long long gl_consumes; /* overwritten READY signals consumed by the GL side */
+	unsigned long long gl_skips; /* GL claims refused while a READY image was waiting (g_drm_vk.lock) */
 
 	struct drm_output_vk_gl gl;
 	bool gl_bound; /* graphics thread only */

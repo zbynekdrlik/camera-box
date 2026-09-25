@@ -65,7 +65,8 @@ bool drm_output_vk_gl_bind(void);
 /* GL context current: delete the GL-side objects (safe when never bound). */
 void drm_output_vk_gl_unbind(void);
 
-/* Mailbox CLAIM: a shared image the GL side may overwrite now (never front/pending), -1 when none. */
+/* Mailbox CLAIM: a shared image the GL side may write now (never front/pending), -1 when none or while a
+ * READY image is still waiting for the present thread (a READY image is never overwritten). */
 int drm_output_vk_claim(void);
 
 /* GL context current: copy GL texture `src_gl_name` (w x h, must equal the mode size) into claimed

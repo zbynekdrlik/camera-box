@@ -195,6 +195,10 @@ strih_drm_output_provision() {
   local DRM_CONF="${DRM_CONF_DIR}/drm-output.json"
   local LEGACY_PROJ=/opt/camera-box/strih-lx-projector.json
   local DRM_VIEW0 DRM_CONN DRM_LINE
+  case "$backend" in
+    lease | vk-direct) ;;
+    *) fail "issue 1346: the HDMI output backend fact is '${backend}' (want lease or vk-direct) -- fix the box fact STRIH_HDMI_OUTPUT_BACKEND" ;;
+  esac
   DRM_VIEW0="$(strih_drm_legacy_view "$(cat "$LEGACY_PROJ" 2>/dev/null || true)")"
   if [ "$backend" = vk-direct ]; then
     DEBIAN_FRONTEND=noninteractive apt-get install -y libvulkan1 \
