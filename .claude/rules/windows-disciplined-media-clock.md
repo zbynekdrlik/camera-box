@@ -140,6 +140,16 @@ Gotchas:
 - **Keep single-line anchors single-line.** `GetProcAddress(kernelbase, "GetSystemTimeAdjustmentPrecise")`
   and the `if ((seq & 1) == 0) { QueryPerformanceCounter(&count); *seg = os_clk_state;` window must
   not wrap. A wrap puts a space after `(` and the squished pwsh anchors stop matching.
+- **`wall_qpc_drift_ms` stays flat.** The genlock code maps wall ↔ monotonic only through LIVE
+  offsets: the render tick's `mono + (next_wall - wall)` in obs-video.c and the audio pairing's
+  `mono_now - wall_now`. It never uses a stored rate, so nothing corrects the rate twice once
+  `os_gettime_ns()` follows the wall rate.
+  - The gate lifts the #800 `genlock_wall_qpc_drift_ms()` verbatim and runs one simulated hour: a
+    fake system clock integrating `inc/adj` at ≈ +15 ppm ± 5, re-steered every second, with one
+    −146 µs step.
+  - Raw QPC drifts ≥ 40 ms there, and the disciplined clock must stay within 1 ms. It went RED with
+    the rate forced to 1 and with `adj/inc`.
+  - Live on stream before the fix, the term went 0 → 67 ms in 83 min.
 - **The raw-QPC midpoint bracket** is pinned by a scripted scenario whose fake counter advances on
   every read. At 50 counts per read it takes the first bracket; at 400 counts (over the 50 µs
   bound) it takes all four attempts. Using `before` instead of the midpoint, dropping `/2`,
@@ -164,6 +174,9 @@ Gotchas:
 
   With obs.dll alone, those browser stamps drift against the disciplined mixer.
 - stream's `vlc_source` ("NL playlist") stays on the stock `vlc-video.dll` (see Known limit).
+- **Compile proof for obs-browser = a green `windows-genlock.yml` run at the lane's head.** The
+  pre-merge fast gate configures with `-DENABLE_BROWSER=OFF`, so `browser-client.cpp` compiles only
+  in the full build. The Rust test pins its text, not its compile. Require that run before deploying.
 - The genlock audit's `wall_qpc_drift_ms=` (obs-source.c) goes FLAT on Windows apart from
   dantesync phase steps. It moved ~10 ppm before.
 - **The stream `asrc: source 'mbc' estimated=` reading moves.** The mixer clock is now the
@@ -183,12 +196,14 @@ on the rig.
 **vlc-video is not built on Windows** (`-DENABLE_VLC=OFF` in both windows-genlock workflows since
 issue 42), so the rig runs the stock `vlc-video.dll` (4/12/2026 on stream). Its stamps are
 `libvlc_clock()` relative to plugin load, and libobs latches an offset for them. Before issue 1372
-that clock and the raw-QPC mixer matched. Now stream's "NL playlist" drifts against the mixer at
-the discipline rate and resyncs at libobs' 70 ms audio smoothing threshold.
+that clock and the raw-QPC mixer matched. Now stream's "NL playlist" drifts against the mixer at the
+discipline rate (≈ 72 ms/h at 20 ppm). The audio 70 ms smoothing check does not catch it: it
+compares the source's own sample continuation with its own stamps, both on VLC's clock.
 
-The mapping is written and simple: `os_foreign_clock_ns_to_gettime_ns(stamp, libvlc_clock_() * 1000)`
-at both stamp sites, without the `- time_start`. It needs the plugin built into the bundle (libvlc
-headers on the runner, `vlc-video.dll` in the package), which is a CI/bundle change of its own.
+The mapping would be simple: `os_foreign_clock_ns_to_gettime_ns(stamp, libvlc_clock_() * 1000)` at
+both stamp sites, without the `- time_start`. But the plugin must be built into the bundle first
+(libvlc headers on the runner, `vlc-video.dll` in the package), and that is a CI/bundle change of
+its own.
 
 Third-party plugins are not vendored: stream's `obs-asio.dll` (feeds `mbc`) and resolume's
 `obs-vban.dll`. Both import the `os_gettime_ns` symbol (checked 25.9.2026 by reading the DLL
