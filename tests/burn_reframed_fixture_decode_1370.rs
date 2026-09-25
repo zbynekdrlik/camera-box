@@ -32,8 +32,8 @@ use camera_box::probe::qr::{
     decode_qr_luma_all_robust, DecodePath,
 };
 use camera_box::probe::recording_latency::{
-    BURN_RUN_ID_CAM1, BURN_RUN_ID_CAM2, BURN_RUN_ID_CAM3, BURN_RUN_ID_CAM4, BURN_RUN_ID_CAM5,
-    BURN_RUN_ID_CAM6, BURN_RUN_ID_CAM7, BURN_RUN_ID_STRIH,
+    AUX_TICK_RUN_ID, BURN_RUN_ID_CAM1, BURN_RUN_ID_CAM2, BURN_RUN_ID_CAM3, BURN_RUN_ID_CAM4,
+    BURN_RUN_ID_CAM5, BURN_RUN_ID_CAM6, BURN_RUN_ID_CAM7, BURN_RUN_ID_STRIH,
 };
 use image::GrayImage;
 use std::path::PathBuf;
@@ -120,10 +120,18 @@ fn production_strih_decode(luma: GrayImage) -> (Vec<Payload>, DecodePath) {
 }
 
 /// Precondition (the bug condition, from real pixels): the full-frame pass reads strih's burn
-/// but MISSES the cam1 burn on these reframed frames.
+/// but MISSES the cam1 burn on these reframed frames, and so do the #202 bottom tiles.
 #[test]
-fn full_frame_pass_misses_the_reframed_cam1_burn_1370() {
+fn full_frame_pass_and_tiles_miss_the_reframed_cam1_burn_1370() {
     for case in cases() {
+        let robust = decode_qr_luma_all_robust(fixture_luma(case.file));
+        assert!(
+            !robust.iter().any(|p| p.run_id == BURN_RUN_ID_CAM1),
+            "{}: precondition — plain + the #202 tiles miss the cam1 burn (the production decode \
+             of these exact pixels did); got {:?}",
+            case.file,
+            ids(&robust)
+        );
         let full = decode_qr_luma_all(fixture_luma(case.file));
         assert!(
             full.contains(&case.strih),
@@ -173,8 +181,9 @@ fn production_strih_decode_reads_the_cam1_burn_on_a_reframed_view_1370() {
 }
 
 /// The recovery only ADDS: every payload the robust decode (plain ∪ Otsu ∪ tiles) already read
-/// is returned byte-identical, and anything extra is an expected camera burn — never optical or
-/// aux content the tear/continuity metrics would then see.
+/// is returned byte-identical, and anything extra is an expected burn — never aux content the
+/// tear detector reads by run_id. (An extra optical-run payload may come from the #754 top-band
+/// pass the production path runs when the optical read is short; that pass is not this fix.)
 #[test]
 fn recovery_is_a_superset_of_the_robust_decode_that_adds_only_expected_burns_1370() {
     for case in cases() {
@@ -189,12 +198,24 @@ fn recovery_is_a_superset_of_the_robust_decode_that_adds_only_expected_burns_137
                 ids(&got)
             );
         }
-        for p in got.iter().filter(|p| !robust.contains(p)) {
+        for p in got
+            .iter()
+            .filter(|p| !robust.contains(p) && p.run_id != OPTICAL_RUN_ID)
+        {
             assert!(
                 CAMERA_IDS.contains(&p.run_id) || p.run_id == BURN_RUN_ID_STRIH,
                 "{}: the recovery may only add an EXPECTED burn, never {p:?}",
                 case.file
             );
         }
+        assert_eq!(
+            got.iter().filter(|p| p.run_id == AUX_TICK_RUN_ID).count(),
+            robust
+                .iter()
+                .filter(|p| p.run_id == AUX_TICK_RUN_ID)
+                .count(),
+            "{}: no aux tick payload is ever added",
+            case.file
+        );
     }
 }
