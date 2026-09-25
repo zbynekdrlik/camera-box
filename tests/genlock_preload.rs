@@ -2106,11 +2106,14 @@ mod vendored_source {
         );
         assert!(
             src.contains(
-                "if (source->genlock_audio_delay_ms != prev_genlock_audio_delay_ms) asrc_compensator_shift_level_target(&source->asrc, (double)source->genlock_audio_delay_ms - (double)prev_genlock_audio_delay_ms);"
+                "if (genlock_hold_mode != prev_genlock_audio_hold_mode || genlock_hold_ms != prev_genlock_audio_delay_ms) {"
+            ) && src.contains(
+                "push_back = false; asrc_compensator_shift_level_target(&source->asrc, genlock_audio_place_shift_ms(genlock_term_ns, genlock_prev_term_ns));"
             ),
-            "{OBS_SOURCE}: #1355 — a change of the applied genlock audio hold no longer moves the ASRC \
-             level setpoint; the level loop would walk the depth back and undo a pin write's audio \
-             hold (breaking the #1303 A/V pairing) until the next flush."
+            "{OBS_SOURCE}: #1355 + issue 1367 — a change of the applied genlock audio hold no longer \
+             re-places the audio at once and moves the ASRC level setpoint by the placement delta; \
+             the level loop would walk the depth back and undo the hold (breaking the A/V pairing) \
+             until the next flush."
         );
         assert!(
             src.contains("UNREACHABLE after %d windows outside +/-%.0fms")
@@ -2566,11 +2569,17 @@ mod vendored_source {
             "{OBS_SOURCE}: #1303 — genlock_audio_decide_health() is gone; the audio LOCK-health \
              decision mirror is missing. Re-apply."
         );
-        // the HOLD is actually wired into the audio ingest path (not just defined).
+        // the HOLD is actually wired into the audio ingest path (not just defined). Issue 1367: it is
+        // the timecode + measured-video-delay placement term through the LIVE wall->mono offset
+        // (full wiring guard: tests/genlock_audio_timecode_placement_1367.rs).
         assert!(
-            src.contains("in.timestamp += (int64_t)genlock_audio_present_delay_ns(source->genlock_latency_ms);"),
-            "{OBS_SOURCE}: #1303 — the audio HOLD is no longer applied in source_output_audio_data; \
-             a genlock source's audio would not be delayed to pair with its video FIFO hold. Re-apply."
+            src.contains("in.timestamp += (uint64_t)genlock_term_ns;")
+                && src.contains(
+                    "const int64_t genlock_off_live_ns = genlock_audio_wall_to_mono_ns(os_gettime_ns(), genlock_wall_now_ns());"
+                ),
+            "{OBS_SOURCE}: #1303 + issue 1367 — the audio HOLD is no longer applied in \
+             source_output_audio_data on the live wall->mono offset; a genlock source's audio would \
+             not be placed to pair with its video's stamp->present delay. Re-apply."
         );
         // the audit line carries the audio parity facet.
         assert!(
