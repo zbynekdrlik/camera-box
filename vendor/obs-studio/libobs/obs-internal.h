@@ -1168,6 +1168,8 @@ struct obs_source {
 	/* camera-box issue 1367: the audio placement SLEW + withhold (audio thread; the audit reads them
 	 * as benign single-word cross-thread telemetry). Decisions: src/genlock_audio_pairing.rs. */
 	int64_t genlock_audio_slew_remaining_ns;    /* placement move still owed (signed; + = later) */
+	int64_t genlock_audio_place_err_ns;         /* issue 1367: smoothed placement error of the samples (actual - intended, ns; audit audio_place_err_ms=, the pairing offset's audio side) */
+	bool genlock_audio_place_err_seeded;        /* issue 1367: a placement error has been measured since the hold became active */
 	int64_t genlock_audio_slew_step_ns;         /* the step asrc_process_audio stretched, not yet booked by source_output_audio_data */
 	uint64_t genlock_audio_first_packet_ns;     /* the first genlock audio packet (OBS monotonic), the withhold clock; 0 = none */
 	uint32_t genlock_audio_slews;               /* cumulative slews started (audit audio_slews=) */

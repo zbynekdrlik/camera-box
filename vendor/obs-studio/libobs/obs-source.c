@@ -1918,6 +1918,44 @@ static inline int64_t genlock_audio_applied_delay_ns(uint32_t hold_ms, int64_t s
 {
 	return (int64_t)(genlock_audio_present_delay_ns(hold_ms) - (uint64_t)slew_remaining_ns);
 }
+/* issue 1367 (live 25.9.2026 12:31, resolume sp-slow_video): may the ingest APPEND this packet? OBS's
+ * own push_back, EXCEPT right after the ingest reset its timeline in this packet (handle_ts_jump on a
+ * >2 s timestamp jump -- a sender restart / song change: reset_audio_data puts the buffer start AND
+ * next_audio_sys_ts_min on the ARRIVAL instant, so OBS appends there and the genlock term never reaches
+ * the samples). An active genlock hold places that packet at its term instead. */
+static inline bool genlock_audio_push_back_allowed(bool push_back, bool timeline_reset, int mode)
+{
+	return push_back && !(timeline_reset && genlock_audio_mode_active(mode));
+}
+/* issue 1367: where this packet's first sample ACTUALLY lands in the source's mix buffer (appended:
+ * the buffer end audio_ts + buffered; placed: its own timestamp), and the placement ERROR against the
+ * timestamp the hold meant (negative = EARLY: the hold is not in the samples). EMA 1/16 per packet. */
+#define GENLOCK_AUDIO_PLACE_ERR_EMA_SHIFT 4
+static inline uint64_t genlock_audio_actual_place_ns(bool appended, uint64_t audio_ts_ns, uint64_t buffered_ns,
+						     uint64_t placed_ns)
+{
+	return appended ? audio_ts_ns + buffered_ns : placed_ns;
+}
+static inline int64_t genlock_audio_place_error_ns(uint64_t actual_ns, uint64_t intended_ns)
+{
+	return (int64_t)(actual_ns - intended_ns);
+}
+static inline int64_t genlock_audio_place_error_smooth_ns(int64_t smoothed_ns, int64_t sample_ns, bool seeded)
+{
+	if (!seeded)
+		return sample_ns;
+	const int64_t diff = (int64_t)((uint64_t)sample_ns - (uint64_t)smoothed_ns);
+	return (int64_t)((uint64_t)smoothed_ns + (uint64_t)(diff / ((int64_t)1 << GENLOCK_AUDIO_PLACE_ERR_EMA_SHIFT)));
+}
+/* issue 1367: the pairing offset's AUDIO side -- where the samples REALLY sit: with a measurement the
+ * hold plus the measured placement error (an owed slew is in it), else the hold minus the owed slew. */
+static inline int64_t genlock_audio_realized_delay_ns(uint32_t hold_ms, int64_t slew_remaining_ns, int64_t place_err_ns,
+						      bool measured)
+{
+	if (measured)
+		return (int64_t)(genlock_audio_present_delay_ns(hold_ms) + (uint64_t)place_err_ns);
+	return genlock_audio_applied_delay_ns(hold_ms, slew_remaining_ns);
+}
 /* genlock_audio_health: 0=Ok 1=AudioDisabledOnProgram 2=AsrcSaturated 3=PairingOffsetExceeded (above
  * HALF a frame, issue 1367). Precedence matches decide_audio_health() in the Rust authority. */
 static inline int genlock_audio_decide_health(int audio_enabled, int is_program_source, int asrc_saturated,
@@ -1951,6 +1989,9 @@ static void source_output_audio_data(obs_source_t *source, const struct audio_da
 	int64_t sync_offset;
 	bool using_direct_ts = false;
 	bool push_back = false;
+	/* camera-box issue 1367: this packet reset the source's audio timeline (see
+	 * genlock_audio_push_back_allowed). */
+	bool genlock_timeline_reset = false;
 
 	/* detects 'directly' set timestamps as long as they're within
 	 * a certain threshold */
@@ -1967,9 +2008,10 @@ static void source_output_audio_data(obs_source_t *source, const struct audio_da
 		diff = uint64_diff(source->next_audio_ts_min, in.timestamp);
 
 		/* smooth audio if within threshold */
-		if (diff > MAX_TS_VAR && !using_direct_ts)
+		if (diff > MAX_TS_VAR && !using_direct_ts) {
 			handle_ts_jump(source, source->next_audio_ts_min, in.timestamp, diff, os_time);
-		else if (diff < TS_SMOOTHING_THRESHOLD) {
+			genlock_timeline_reset = true;
+		} else if (diff < TS_SMOOTHING_THRESHOLD) {
 			if (source->async_unbuffered && source->async_decoupled)
 				source->timing_adjust = os_time - in.timestamp;
 			in.timestamp = source->next_audio_ts_min;
@@ -2015,6 +2057,7 @@ static void source_output_audio_data(obs_source_t *source, const struct audio_da
 			 * resync.  This handles all cases rather than just looping. */
 			reset_audio_timing(source, data->timestamp, os_time);
 			in.timestamp = data->timestamp + source->timing_adjust;
+			genlock_timeline_reset = true;
 		}
 	}
 
@@ -2069,6 +2112,10 @@ static void source_output_audio_data(obs_source_t *source, const struct audio_da
 	 * src/genlock_audio_pairing.rs audio_hold_action / audio_level_shift_ns. */
 	const int64_t genlock_prev_term_ns = genlock_audio_place_term_ns(
 		prev_genlock_audio_hold_mode, prev_genlock_audio_delay_ms, genlock_off_live_ns, genlock_timing_adjust);
+	/* issue 1367 (live 25.9.2026 12:31): after a timeline reset in this packet OBS would APPEND at the
+	 * arrival instant and silently drop the hold -- an active genlock hold places instead. Decided
+	 * before the action, so the action sees the corrected continuity. */
+	push_back = genlock_audio_push_back_allowed(push_back, genlock_timeline_reset, genlock_hold_mode);
 	const int genlock_action = genlock_audio_hold_action(
 		prev_genlock_audio_hold_mode, prev_genlock_audio_delay_ms, genlock_hold_mode, genlock_hold_ms, push_back,
 		source->asrc_enabled && source->resampler, source->genlock_audio_slew_remaining_ns != 0);
@@ -2121,7 +2168,22 @@ static void source_output_audio_data(obs_source_t *source, const struct audio_da
 	}
 
 	/* issue 1367: a withheld genlock packet (its video delay not known yet) never enters the mix. */
+	if (!genlock_audio_mode_active(genlock_hold_mode))
+		source->genlock_audio_place_err_seeded = false;
 	if (genlock_action != GENLOCK_AUDIO_ACT_WITHHOLD && source->monitoring_type != OBS_MONITORING_TYPE_MONITOR_ONLY) {
+		/* issue 1367 (live 25.9.2026 12:31): MEASURE where this packet actually lands against where the
+		 * hold meant it to (in.timestamp carries the term). The audit's pairing offset reads the samples
+		 * through it, so a hold that never reached them can no longer read 0. Under audio_buf_mutex,
+		 * so audio_ts and the buffer size are the mixer's consistent pair. */
+		if (genlock_audio_mode_active(genlock_hold_mode)) {
+			const uint64_t genlock_actual_ns = genlock_audio_actual_place_ns(
+				push_back && source->audio_ts, source->audio_ts,
+				conv_frames_to_time(sample_rate, source->audio_input_buf[0].size / sizeof(float)), in.timestamp);
+			source->genlock_audio_place_err_ns = genlock_audio_place_error_smooth_ns(
+				source->genlock_audio_place_err_ns, genlock_audio_place_error_ns(genlock_actual_ns, in.timestamp),
+				source->genlock_audio_place_err_seeded);
+			source->genlock_audio_place_err_seeded = true;
+		}
 		if (push_back && source->audio_ts)
 			source_output_audio_push_back(source, &in);
 		else
@@ -5721,8 +5783,10 @@ static void genlock_fill_stats(const obs_source_t *source, struct obs_genlock_st
 		source->genlock_audio_hold_mode == GENLOCK_AUDIO_HOLD_PENDING
 			? 0
 			: genlock_audio_pairing_offset_ms(
-				  genlock_audio_applied_delay_ns(source->genlock_audio_delay_ms,
-								 source->genlock_audio_slew_remaining_ns),
+				  genlock_audio_realized_delay_ns(source->genlock_audio_delay_ms,
+								  source->genlock_audio_slew_remaining_ns,
+								  source->genlock_audio_place_err_ns,
+								  source->genlock_audio_place_err_seeded),
 				  genlock_audio_video_delay_ref_ns(source->genlock_video_delay_smoothed_ns, effective_latency_ms));
 	/* camera-box #1299 (v3): the DistroAV receiver's live NDI connection state. An input with
 	 * connected=false (sender not running) is excluded from the LOCK decision's DEGRADED gate so a
@@ -5828,6 +5892,9 @@ static void genlock_audit_log(obs_source_t *source, uint64_t now_ns)
 	      * was known. Audit-line-only (not in obs_genlock_stats). */
 	     "shallow_depth=%llu shallow_capped=%d shallow_latches=%u audio_slew_ms=%lld audio_slews=%u "
 	     "audio_steps=%u audio_withheld=%llu "
+	     /* camera-box issue 1367 (live 25.9.2026 12:31): the smoothed placement error of the samples
+	      * (actual minus intended, ms; negative = the audio sits EARLY, the hold is not in them). */
+	     "audio_place_err_ms=%lld "
 	     /* camera-box issue 1367 (Option 3): the audio pairing's basis. audio_hold= off / latency (the
 	      * #1303 arrival + latency_ms hold, before the first measurement settles) / timecode (the NDI
 	      * timecode + the measured video delay); video_delay_ms= the smoothed MEASURED stamp->present
@@ -5887,6 +5954,7 @@ static void genlock_audit_log(obs_source_t *source, uint64_t now_ns)
 	     source->genlock_shallow_latches, (long long)(source->genlock_audio_slew_remaining_ns / 1000000),
 	     source->genlock_audio_slews, source->genlock_audio_steps,
 	     (unsigned long long)source->genlock_audio_withheld,
+	     (long long)(source->genlock_audio_place_err_ns / 1000000),
 	     /* camera-box issue 1367: the audio pairing basis (audit-line-only). */
 	     genlock_audio_hold_token(source->genlock_audio_hold_mode),
 	     (long long)((source->genlock_video_delay_smoothed_ns + 500000ull) / 1000000ull),

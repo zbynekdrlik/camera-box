@@ -557,8 +557,7 @@ pub fn audio_applied_delay_ns(hold_ms: u32, slew_remaining_ns: i64) -> i64 {
 /// `audio_delay_ms=133`). An ACTIVE genlock hold therefore places that packet at its term.
 /// Mirror of `genlock_audio_push_back_allowed`.
 pub fn audio_push_back_allowed(push_back: bool, timeline_reset: bool, mode: AudioHoldMode) -> bool {
-    let _ = (timeline_reset, mode);
-    push_back
+    push_back && !(timeline_reset && mode.is_active())
 }
 
 /// Issue 1367 — the OBS-monotonic instant this packet's first sample ACTUALLY lands in the source's
@@ -610,8 +609,11 @@ pub fn audio_realized_delay_ns(
     place_err_ns: i64,
     measured: bool,
 ) -> i64 {
-    let _ = (place_err_ns, measured);
-    audio_applied_delay_ns(hold_ms, slew_remaining_ns)
+    if measured {
+        genlock_audio_delay_ns(hold_ms).wrapping_add(place_err_ns as u64) as i64
+    } else {
+        audio_applied_delay_ns(hold_ms, slew_remaining_ns)
+    }
 }
 
 /// The audio-parity health of one genlocked source — the reason the LOCK indicator DEGRADES on the
