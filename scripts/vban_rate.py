@@ -34,7 +34,7 @@ PURE: no I/O outside `main`. Tier-0 tests: tests/python/test_vban_rate_1372.py.
 
 Usage:
   vban_rate.py analyze CAPTURE [--dst IP ...] [--ppm-bound N] [--loss-ceiling X]
-                               [--min-span-s S] [--json]
+                               [--min-span-s S] [--json | --tsv]
 Exit: 0 = analysed (the verdict is in the output, report-only), 2 = unreadable capture / usage.
 """
 from __future__ import annotations
@@ -487,6 +487,20 @@ def render_json(res: CaptureResult, grades: list, g: Grading) -> str:
                        "grading": asdict(g), "streams": streams}, indent=2)
 
 
+def render_tsv(res: CaptureResult, grades: list) -> str:
+    """The shell-facing form (the dev1 watchdog): `overall<TAB><verdict>` then one line per stream:
+    `stream<TAB>key<TAB>name<TAB>src<TAB>verdict<TAB>rate_ppm<TAB>lost<TAB>loss_ratio<TAB>why`.
+    Tabs/newlines never occur inside a field (a VBAN name is <= 16 printable bytes)."""
+    def clean(v):
+        return str(v).replace("\t", " ").replace("\n", " ")
+    lines = [f"overall\t{overall_verdict(res, grades)}"]
+    for s, (v, why) in zip(res.streams, grades):
+        lines.append("\t".join(clean(x) for x in (
+            "stream", s.key, s.name, s.src, v, _fmt(s.rate_ppm, "+.2f"), s.lost,
+            f"{s.loss_ratio:.2e}", "; ".join(why) or "-")))
+    return "\n".join(lines)
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="vban_rate.py", description=__doc__.split("\n\n")[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -498,6 +512,7 @@ def main(argv=None) -> int:
     a.add_argument("--dst", action="append", default=[],
                    help="keep only streams arriving at this IPv4 (repeatable; default: all)")
     a.add_argument("--json", action="store_true")
+    a.add_argument("--tsv", action="store_true", help="tab-separated lines for the dev1 watchdog")
     ns = ap.parse_args(argv)
     g = Grading(ppm_bound=ns.ppm_bound, loss_ceiling=ns.loss_ceiling, min_span_s=ns.min_span_s)
     try:
@@ -508,7 +523,12 @@ def main(argv=None) -> int:
         print(f"vban_rate: cannot read capture {ns.capture}: {exc}", file=sys.stderr)
         return 2
     grades = [grade(s, g) for s in res.streams]
-    print(render_json(res, grades, g) if ns.json else render_text(res, grades, g))
+    if ns.tsv:
+        print(render_tsv(res, grades))
+    elif ns.json:
+        print(render_json(res, grades, g))
+    else:
+        print(render_text(res, grades, g))
     return 0
 
 
