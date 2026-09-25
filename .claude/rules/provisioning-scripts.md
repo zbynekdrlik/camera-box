@@ -374,3 +374,15 @@ ro-root-safe config, would pass a box whose service can never actually run).
 - **Clock sanity runs before the first apt/curl.** Forward-only, from the Ubuntu archive `Date`
   header (curl, or bash `/dev/tcp` because the base image has no curl). Its pure functions and seams
   live above the source guard, so tests override the fetch, the clock read and the clock set.
+
+## The bkshading relay is part of every cambox install (issue 808, 25.9.2026)
+
+- `setup-device.sh` `[bkshading-relay]` (rw window, before STEP 18) installs the relay through the ONE
+  lib `scripts/lib/bkshading-relay-provision.sh`. The enable-state follows `--rig-mode` (default
+  `test`: the source box + cam2 installed DISABLED). A gh-less box needs `--relay-binary <path|url>`
+  next to `--binary`; without a binary source the step RECORDS `RELAY_PROBLEM` and STEP 19 refuses
+  Setup Complete. Full detail: `.claude/rules/bkshading.md`.
+- `verify-device.sh` `(ao)` grades it. **Never add a check between `(an)` and `(q)`:**
+  `tests/python/test_ndi_discovery_1342.py` slices the `(an)` block up to `(q)` and EXECUTES it
+  with only the ndi-discovery lib sourced, so any new block there runs inside that test and fails
+  it (`command not found` / an unbound variable). `(ao)` sits after `(am)`, before `(an)`.

@@ -3,7 +3,8 @@
 # Camera-Box Device Setup Script
 # Sets up a clean Ubuntu installation as a camera-box appliance
 #
-# Usage: ./setup-device.sh [--yes|-y] [--binary <url|path>] [--probe-binary <url|path>] [--run <ci.yml run id>] DEVICE_NAME
+# Usage: ./setup-device.sh [--yes|-y] [--binary <url|path>] [--probe-binary <url|path>] [--run <ci.yml run id>]
+#                         [--relay-binary <url|path>] [--rig-mode test|event] DEVICE_NAME
 # Example: ./setup-device.sh CAM5        (case-insensitive; cam5 works too)
 #
 # By default the camera-box binary comes from the latest successful ci.yml run on `main` (the
@@ -59,6 +60,12 @@ fail() {
                                 # -- the on-box ssh-banner self-heal; ONE source of truth shared with
                                 # verify-device.sh's (aj) check (the pure decision embedded via declare -f)
 
+# shellcheck source=scripts/lib/bkshading-relay-provision.sh
+. "$HERE/lib/bkshading-relay-provision.sh"  # bkshading_relay_provision_install / _expected_enable_state /
+                                            # _binary_plan / _fetch_binary (issue 808) -- the ONE relay install
+                                            # body, shared with bkshading-provision-relay.sh; it sources the
+                                            # relay CI artifact names + the ONE run resolver itself.
+                                            # verify-device.sh (ao) grades the result.
 # shellcheck source=scripts/lib/udev-camera-box.sh
 . "$HERE/lib/udev-camera-box.sh"  # udev_camera_box_rules_content/udev_camera_box_helper_script_content
                                    # (#894) -- also sourced (unmodified) by verify-device.sh's (w)
@@ -435,6 +442,13 @@ fi
 BINARY_ARG=""
 PROBE_BINARY_ARG=""
 CI_RUN_ID_ARG=""
+# issue 808: the bkshading relay binary (a gh-less box is handed a dev1-staged one, the --probe-binary
+# idiom) and the rig mode its enable-state follows. The default mode is `test`: the development
+# steady state AND the passive direction of the issue-1311 rule -- a relay-roster box (the source box
+# + cam2) comes up with the relay installed but DISABLED, never provoking a PTP power toggle on the
+# boot stick's USB hub; `rig-mode.sh event` enables+starts it for a broadcast.
+RELAY_BINARY_ARG="${BKSHADING_RELAY_BINARY_URL:-}"
+RIG_MODE_ARG="${CAMERA_BOX_RIG_MODE:-test}"
 ASSUME_YES=0
 POSITIONAL=()
 while [ $# -gt 0 ]; do
@@ -457,6 +471,17 @@ while [ $# -gt 0 ]; do
             PROBE_BINARY_ARG="${2:?--probe-binary needs a URL or local path}"
             shift 2
             ;;
+        --relay-binary)
+            # issue 808: the CI-built bkshading-relay (bkshading-linux-amd64 artifact) as a local path or
+            # URL -- symmetric with --binary / --probe-binary for a gh-less box.
+            RELAY_BINARY_ARG="${2:?--relay-binary needs a URL or local path}"
+            shift 2
+            ;;
+        --rig-mode)
+            # issue 808: test|event -- the relay's enable-state follows it (TEST: the relay roster is disabled).
+            RIG_MODE_ARG="${2:?--rig-mode needs test or event}"
+            shift 2
+            ;;
         --run)
             # #1066: pin the CI artifact to an EXPLICIT ci.yml run id (mirrors deploy-fleet.sh's
             # --run), bypassing the default `gh run list` latest-successful lookup -- for a
@@ -477,6 +502,8 @@ DEVICE_NAME_ARG="${1:-}"
 if [ -z "$DEVICE_NAME_ARG" ]; then
     echo -e "${RED}Usage: $0 [--binary <url|path>] DEVICE_NAME${NC}"
     echo "       (also: --probe-binary <url|path> for cam2's frame-probe #1066 D5, --run <ci.yml run id>;"
+    echo "        --relay-binary <url|path> = the CI bkshading-relay for a gh-less box, --rig-mode test|event"
+    echo "        (default test: the relay on the source box + cam2 is installed DISABLED, issue 808/1311);"
     echo "        --yes|-y = non-interactive, no confirmation prompt)"
     echo ""
     echo "DEVICE_NAME is resolved via scripts/camera-set.sh (cam1-6) -- case-insensitive."
@@ -490,6 +517,11 @@ if [ -z "$DEVICE_NAME_ARG" ]; then
 fi
 
 resolve_device_name "$DEVICE_NAME_ARG"
+
+case "$RIG_MODE_ARG" in
+    test | event) ;;
+    *) fail "--rig-mode must be test or event (got '$RIG_MODE_ARG') -- the bkshading relay enable-state follows it (issue 808)" ;;
+esac
 
 TOTAL_STEPS=19
 
@@ -1673,6 +1705,56 @@ echo "  #1311: netconsole (kernel printk -> ${REMOTE_LOG_DEV1_IP}:${REMOTE_LOG_N
 
 
 # =============================================================================
+# [bkshading-relay]: the bkshading shading relay (issue 808, unnumbered sub-step, ENABLE-only)
+# =============================================================================
+# WHY: the M.2 re-provisioning of cam1-4 (24.9.2026) left NO relay on them -- no unit, no binary, no
+# gphoto2 -- because only the separate bkshading-provision-relay.sh installed it, so the shading
+# panel silently lost those cameras. Every cambox now gets it HERE, through the ONE provisioning lib
+# (scripts/lib/bkshading-relay-provision.sh, the same body bkshading-provision-relay.sh runs):
+# gphoto2 + the unit + the env derived from the camera-box drop-ins (STEP 7 wrote them) + the CI
+# relay binary from the SAME ci.yml run as camera-box (the bkshading-linux-amd64 artifact).
+# ENABLE-only, never a live start (.claude/rules/provisioning-scripts.md). The enable-state follows
+# the rig mode (--rig-mode, default test): TEST = the relay roster (the source box + cam2, the SAME
+# two boxes rig-mode.sh stops+disables, issue 1311) installed DISABLED, every other box enabled;
+# EVENT = enabled. MUST sit in the rw window, BEFORE STEP 18's ro flip. A failure is RECORDED
+# (RELAY_PROBLEM) and STEP 19 refuses Setup Complete -- never an abort before the ro fstab (the
+# UEFI-entry sub-step pattern). verify-device.sh (ao) grades the result after the reboot.
+echo ""
+echo -e "${GREEN}[bkshading-relay] Provisioning the bkshading shading relay (issue 808, --rig-mode ${RIG_MODE_ARG})...${NC}"
+RELAY_PROBLEM=""
+RELAY_SOURCE_BOX="$(camera_source_box 2>/dev/null || true)"
+RELAY_ENABLE_STATE="$(bkshading_relay_expected_enable_state "$DEVICE_NAME" "$RIG_MODE_ARG" "$RELAY_SOURCE_BOX" "$(bkshading_relay_roster_painter_box)")"
+if [ "$RELAY_ENABLE_STATE" = unknown ]; then
+    # The TEST roster could not be resolved (no source box): take the passive direction and record it.
+    RELAY_ENABLE_STATE=disabled
+    RELAY_PROBLEM="could not resolve the rig source box (camera_source_box) for the TEST relay roster -- installed DISABLED"
+fi
+RELAY_GH=no
+if command -v gh >/dev/null 2>&1 && [ -n "${GH_TOKEN:-}" ]; then RELAY_GH=yes; fi
+# The binary is the bkshading-linux-amd64 CI artifact: --relay-binary (a dev1-staged path/URL), else
+# the SAME ci.yml run STEP 3 took camera-box from, else the newest run carrying it (gh boxes only).
+RELAY_PLAN="$(bkshading_relay_provision_binary_plan "$RELAY_BINARY_ARG" "${RUN_ID:-${CI_RUN_ID_ARG:-}}" "$RELAY_GH")"
+RELAY_DL_DIR="$(mktemp -d)"
+RELAY_BIN_SRC=""
+if RELAY_FETCH_OUT="$(bkshading_relay_provision_fetch_binary "$RELAY_PLAN" "$RELAY_DL_DIR" "$GITHUB_REPO" "$CI_BRANCH")"; then
+    RELAY_BIN_SRC="$RELAY_FETCH_OUT"
+else
+    RELAY_PROBLEM="${RELAY_PROBLEM:+$RELAY_PROBLEM; }$RELAY_FETCH_OUT"
+fi
+# The unit + env + gphoto2 go in even when the binary could not be fetched (the recorded problem
+# still refuses Setup Complete); the lib warns loudly about the missing binary.
+if bkshading_relay_provision_install "$RELAY_ENABLE_STATE" "$RELAY_BIN_SRC"; then
+    echo "  issue 808: bkshading relay provisioned -- unit ${RELAY_ENABLE_STATE} (rig mode ${RIG_MODE_ARG}), never started here; verify-device.sh (ao) grades it after the reboot"
+else
+    RELAY_PROBLEM="${RELAY_PROBLEM:+$RELAY_PROBLEM; }the relay install (gphoto2/unit/env/enable-state) failed -- see the lines above"
+fi
+rm -rf "$RELAY_DL_DIR"
+if [ -n "$RELAY_PROBLEM" ]; then
+    echo -e "${RED}  !!! bkshading relay NOT fully provisioned: ${RELAY_PROBLEM}. Continuing to STEP 18 (the read-only fstab), then STEP 19 refuses Setup Complete (issue 808).${NC}"
+fi
+
+
+# =============================================================================
 # STEP 17d: named `cam-box` UEFI boot entry, created in THIS box's OWN NVRAM (#1066 D6)
 # =============================================================================
 # #1066 D6: create-usb-linux.sh's host-side create_efi_boot_entry writes the named entry into the
@@ -1807,6 +1889,8 @@ MISSING=""
 [ -f /usr/lib/ndi/libndi.so.6 ] || MISSING="${MISSING}NDI library (/usr/lib/ndi/libndi.so.6) "
 # Issue 1311: STEP 17d records (never aborts on) a cam-box UEFI entry it could not verify.
 [ -z "${EFI_ENTRY_PROBLEM:-}" ] || MISSING="${MISSING}a verified '${EFI_CAM_BOX_LABEL}' UEFI entry (STEP 17d: ${EFI_ENTRY_PROBLEM}) "
+# issue 808: the [bkshading-relay] sub-step records (never aborts on) a relay it could not provision.
+[ -z "${RELAY_PROBLEM:-}" ] || MISSING="${MISSING}the bkshading relay ([bkshading-relay]: ${RELAY_PROBLEM}) "
 if [ -n "$MISSING" ]; then
     fail "half-configured box -- missing: ${MISSING}-- refusing to report Setup Complete"
 fi
