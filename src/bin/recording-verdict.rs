@@ -8192,6 +8192,19 @@ fn run_merge(args: &Args) -> Result<()> {
                 }
             }
         };
+        // Issue 1302: a mislabelled partial in the report-only cg slot is dropped like any other
+        // cg load failure — it must never abort the merge into a false camera-chain RED.
+        if partial.box_name != box_name
+            && camera_box::partial_schema_gate::box_drops_on_any_load_failure(box_name)
+        {
+            eprintln!(
+                "WARNING: --merge-partials {spec}: the partial file's box is {:?}, not {box_name:?} \
+                 — dropped; the REPORT-ONLY cg_chain section is omitted, the camera-chain verdict \
+                 is unaffected (issue 1302).",
+                partial.box_name
+            );
+            continue;
+        }
         // The partial's recorded box name MUST match the slot it is assigned to — a strih
         // partial can NEVER be merged as the stream input (the #208 box-to-box guard, enforced
         // at the data level, not just the path).

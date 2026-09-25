@@ -271,11 +271,17 @@ cg_chain_partial_file() {
   printf '%s/cg-partial%s.json' "${CG_CHAIN_STATE_DIR:-${TMPDIR:-/tmp}}" "${RUN_ID:+-$RUN_ID}"
 }
 
-# The same partial's path ON the box (env CG_CHAIN_ONBOX_OUT_DIR, default the stream extract's
-# `C:\camera-box\verdict-out`); its basename matches cg_chain_partial_file so the pull-back lands on
-# exactly that dev1 path. Pure.
+# The box-local output dir (env CG_CHAIN_ONBOX_OUT_DIR, default the stream extract's
+# `C:\camera-box\verdict-out`). The launch passes it as --out-dir AND builds the partial path from
+# it, so the two can never point at different dirs. Pure.
+cg_chain_onbox_out_dir_win() {
+  printf '%s' "${CG_CHAIN_ONBOX_OUT_DIR:-C:\\camera-box\\verdict-out}"
+}
+
+# The same partial's path ON the box; its basename matches cg_chain_partial_file so the pull-back
+# lands on exactly that dev1 path. Pure.
 cg_chain_onbox_partial_win() {
-  printf '%s\\cg-partial%s.json' "${CG_CHAIN_ONBOX_OUT_DIR:-C:\\camera-box\\verdict-out}" "${RUN_ID:+-$RUN_ID}"
+  printf '%s\\cg-partial%s.json' "$(cg_chain_onbox_out_dir_win)" "${RUN_ID:+-$RUN_ID}"
 }
 
 # The background extract's log on dev1 (replayed into the run log by the collect step). Pure.
@@ -284,11 +290,15 @@ cg_chain_extract_log() {
 }
 
 # How long (s) the collect step still waits for the cg extract once it is reached — i.e. AFTER the
-# strih/stream extracts are done (env CG_CHAIN_EXTRACT_GRACE_SECS, default 900; a non-integer value
-# falls back to 900, 0 means "do not wait"). Pure.
+# strih/stream extracts are done (env CG_CHAIN_EXTRACT_GRACE_SECS, default 300; a non-integer value
+# falls back to 300, 0 means "do not wait"). Why 300: the cg decode starts together with the camera
+# extracts, which took 8-10 min on 25.9.2026, so it already had that long; 5 more minutes keeps the
+# slowest run seen that day (the merge reached at minute ~47 of `timeout-minutes: 75`, with the
+# merge + report + cleanup tail at ~1-2 min) far inside the job budget. A run that overruns reports
+# CG-LEG-NOT-VERIFIED — look at the box, never raise the job timeout. Pure.
 cg_chain_extract_grace_secs() {
   case "${CG_CHAIN_EXTRACT_GRACE_SECS:-}" in
-    '' | *[!0-9]*) printf '900' ;;
+    '' | *[!0-9]*) printf '300' ;;
     *) printf '%s' "$CG_CHAIN_EXTRACT_GRACE_SECS" ;;
   esac
 }
@@ -310,14 +320,22 @@ cg_chain_leg_marker() {
   fi
 }
 
-# Stop an in-flight background cg extract (its whole process group — the script, sshpass and ssh).
-# The on-box decode itself may still finish on the box; nothing reads it. ALWAYS returns 0.
+# Stop an in-flight background cg extract: its whole dev1 process group (the script, sshpass and
+# ssh), then — bounded by CG_CHAIN_STOP_TIMEOUT (default 30 s) — the decode it started ON the box
+# (`recording-verdict-on-resolume.sh --stop-decode`, which stops only processes running from that one
+# exe path), so the decode never keeps running next to the live Arena / cg OBS and never keeps the
+# exe locked for the next run's upload. ALWAYS returns 0.
 cg_chain_extract_stop() {
-  local pid="${CG_EXTRACT_PID:-}"
+  local pid="${CG_EXTRACT_PID:-}" here="${CG_EXTRACT_HERE:-}"
   [ -n "$pid" ] || return 0
   kill -0 "$pid" 2>/dev/null || return 0
   kill -TERM -- "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
   echo "[cg_chain] stopped the in-flight cg OBS extract (pid $pid)" >&2
+  if [ -n "$here" ] && [ -n "${CG_HOST_IP:-}" ]; then
+    RESOLUME_BOX="$CG_HOST_IP" RESOLUME_USER="$(cg_chain_user)" RESOLUME_PW="$(cg_chain_pw)" \
+      timeout "${CG_CHAIN_STOP_TIMEOUT:-30}" "$here/recording-verdict-on-resolume.sh" --stop-decode >&2 \
+      || echo "[cg_chain] WARNING: could not stop the on-box cg decode on $CG_HOST_IP (it may run to its end)" >&2
+  fi
   return 0
 }
 
@@ -328,8 +346,9 @@ cg_chain_extract_stop() {
 # shell that later waits for it. A pure no-op unless CG_CHAIN=1; ALWAYS returns 0.
 cg_chain_onbox_extract_launch() {
   cg_chain_enabled || return 0
-  local here="$1" exe_local="${2:-}" execute="${3:-0}" partial log
+  local here="$1" exe_local="${2:-}" execute="${3:-0}" partial log sess=setsid
   CG_EXTRACT_PID=""
+  CG_EXTRACT_HERE="$here"
   CG_LEG_STATE=""
   CG_LEG_REASON=""
   partial="$(cg_chain_partial_file)"
@@ -355,11 +374,16 @@ cg_chain_onbox_extract_launch() {
     return 0
   fi
   log="$(cg_chain_extract_log)"
-  # setsid: its own process group, so the collect step (grace overrun) and cleanup() can stop the
-  # script together with its sshpass/ssh children.
+  # Its own process group, so the collect step (grace overrun) and cleanup() can stop the script
+  # together with its sshpass/ssh children. Without job control (the harness) a background child is
+  # not a group leader, so `setsid` execs in place and $! IS the new group's leader. With job control
+  # on (`set -m`), bash already gives the job its own group — and setsid would fork, leaving $! a
+  # parent that exits at once — so setsid is skipped there.
+  case "$-" in *m*) sess="" ;; esac
   RESOLUME_BOX="$CG_HOST_IP" RESOLUME_USER="$(cg_chain_user)" RESOLUME_PW="$(cg_chain_pw)" \
-    setsid "$here/recording-verdict-on-resolume.sh" \
+    ${sess:+"$sess"} "$here/recording-verdict-on-resolume.sh" \
     --verdict-exe-local "$exe_local" --local-out-dir "$(dirname "$partial")" \
+    --out-dir "$(cg_chain_onbox_out_dir_win)" \
     -- --extract-partial cg --cg "$CG_HOST_RECORDING_PATH" --out "$(cg_chain_onbox_partial_win)" \
     >"$log" 2>&1 &
   CG_EXTRACT_PID=$!
