@@ -102,6 +102,7 @@ typedef unsigned long DWORD;
 typedef uint64_t DWORD64;
 typedef DWORD64 *PDWORD64;
 typedef long LONG;
+typedef long long LONGLONG;
 typedef void *PVOID;
 typedef void *HMODULE;
 typedef void (*FARPROC)(void);
@@ -654,7 +655,8 @@ fn the_api_is_resolved_at_runtime_from_kernelbase() {
     // GetSystemTimeAdjustmentPrecise is NOT exported by kernel32.dll (checked live on
     // win-resolume); a static import would fail to load obs.dll there, a kernel32 lookup would
     // silently leave the clock undisciplined.
-    let block = lift_block(&platform_src());
+    let squish = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+    let block = squish(&lift_block(&platform_src()));
     assert!(
         block.contains("GetModuleHandleW(L\"kernelbase.dll\")")
             && block.contains("GetProcAddress(kernelbase, \"GetSystemTimeAdjustmentPrecise\")"),
