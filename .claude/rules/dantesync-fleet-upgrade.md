@@ -95,6 +95,17 @@ sourcing), network/mutating flow below.
   on the findmnt-less path too. This is the FIRST place to reuse for any future generated-remote
   or on-box ro-root read in this repo.
 
+## `--fleet` (issue 1372)
+
+`--fleet` appends every node of `scripts/lib/dantesync-fleet.sh` not named by `--linux/--win/--local`
+(every camera, dev1, the OBS boxes, the audio-VLAN PCs mbc + fohabl), so a roll can no longer forget
+a box (mbc sat one release behind on 25.9.2026). A node whose fleet row names its own credential
+(fohabl, user `master`, `DANTESYNC_FOHABL_SSH_PASS`) is dialled with that value via `node_pass`
+(ssh AND scp); a missing value SKIPS the node, never dials it with `SSH_PASS`. Without an explicit
+`NTP_MASTER`, the fleet's `ntp-master` row (strih-lx) gets the master-aware verify. Always
+`--fleet --dry-run` first. A daemon roll does NOT refresh `dantesync-tray.exe`; the version gate's
+report-only tray check names a lagging tray (mbc, 25.9.2026).
+
 ## Testing (Tier-0)
 
 Heavy `cargo test` is CI-only here (#477) — no `# airuleset:build-ok` bypass. Verify the bash logic

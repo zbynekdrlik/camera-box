@@ -83,6 +83,7 @@ production without, invisible without a page:
 | `avsync-heartbeat-alert-watchdog.sh` | #812 | A/V-sync heartbeat stale |
 | `imag-obs-alert-watchdog.sh` | #882 | imag OBS down / latency-drift / restart-storm |
 | `measurement-audio-alert-watchdog.sh` | #1310 | mbc measurement-audio chain digital-silent (TEST-gated) |
+| `vban-rate-alert-watchdog.sh` | issue 1372 | a VBAN stream at strih-lx off its nominal rate or losing packets (on-air audio) |
 
 (`measurement-audio-alert-watchdog.sh` is EVENT-gated on `rig-mode-state.sh` like splitter-port #1290
 — the QPSK marker only sounds in TEST — but its FAULT is production-critical: a silent measurement
