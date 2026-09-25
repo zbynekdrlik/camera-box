@@ -290,7 +290,8 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # #1301: the opt-in CG_CHAIN=1 profile for the SongPlayer-originated content chain (SongPlayer ->
 # cg OBS (RESOLUME-SNV) -> strih -> stream). OFF by default (CG_CHAIN unset/0 ⇒ every function the
 # harness calls is a pure no-op). The guarded call lines below follow the #675 sourced-lib pattern
-# (added AFTER anchored lines, never editing one). UNVERIFIED until songplayer#151 ships.
+# (added AFTER anchored lines, never editing one). Since the SongPlayer burn API shipped (songplayer
+# 151, issue 1302) the burn toggle is read back from SongPlayer's own health endpoint.
 # shellcheck source=scripts/lib/cg-chain-e2e.sh
 . "$HERE/lib/cg-chain-e2e.sh"
 # #707 B1 (freeze+jump discriminator, second prong): the per-cambox TCP-transport + NIC sampler.
@@ -2396,6 +2397,10 @@ IMAG_RECORDING_STARTED=0
 CG_HOST_IP=""
 CG_RECORDING_STARTED=0
 CG_RECORDING="$OUTDIR/cg-obs-recording.mkv"
+# #1302: the cg OBS / strih scene snapshots the CG profile restores in cleanup() live in this run's
+# OUTDIR; CG_HOST_RECORDING_PATH is the cg OBS StopRecord host path the default pull scps.
+CG_CHAIN_STATE_DIR="$OUTDIR"
+CG_HOST_RECORDING_PATH=""
 # #286 ALL_CAMBOX — strih's OWN render-time burn (911002) must be present on WHICHEVER strih
 # NDI input the sweep currently has cut into program, not just the single default
 # STRIH_PROG_SOURCE (cam1's mapped input under the plain single-camera path). Without this,
@@ -4486,11 +4491,11 @@ fi
 CAPTURE_RATE_WINDOW_START_EPOCH="$(date +%s)"
 
 # #1301: CG_CHAIN=1 — turn the SongPlayer output burn ON + StartRecord cg OBS (RESOLUME-SNV) for
-# the run. ALL best-effort (the SongPlayer sender is songplayer#151, unshipped) — a failure is
+# the run. ALL best-effort (the burn is read back from SongPlayer's health endpoint) — a failure is
 # loud but NEVER aborts the camera-chain run; the SongPlayer burn OFF + cg OBS StopRecord run in
 # cleanup() (the #246/#844 leak-guard class). Pure no-op unless CG_CHAIN=1.
 if cg_chain_enabled; then
-  echo "[5/8] #1301 CG_CHAIN=1 — SongPlayer burn ON + cg OBS StartRecord (UNVERIFIED until songplayer#151 ships)"
+  echo "[5/8] #1301 CG_CHAIN=1 — SongPlayer burn ON (verified on its health endpoint) + cg OBS program + StartRecord"
   cg_chain_songplayer_burn on
   if CG_HOST_IP="$(cg_chain_resolve_host)" \
     && cg_chain_record_start "$CG_HOST_IP" "$HERE/obs_phase2.py" "${CG_CHAIN_RECORD_TIMEOUT:-${OBS_CLEANUP_TIMEOUT:-30}}"; then
@@ -4689,6 +4694,12 @@ else
   interruptible_sleep "$(( DURATION + RECORD_PAD ))"
 fi
 
+# #1302: CG_CHAIN=1 only — ONE tail CG window AFTER every camera window: strih program is cut to
+# the scene carrying the cg OBS input, so the strih + stream recordings carry the SongPlayer chain.
+# A tail window keeps the camera-chain verdict untouched (no zero-tick cambox window, nothing in
+# the optical span). Pure no-op unless the profile is on AND cg OBS started recording.
+if cg_chain_window_due; then cg_chain_window "$STRIH" "$HERE/obs_phase2.py" "${OBS_CLEANUP_TIMEOUT:-30}"; fi
+
 echo "[7/8] StopRecord + download strih + stream recordings to dev1 (NO grab #179)"
 # #758 item 3 — disarm the in-run freeze watch now that the recording window has ended (its own
 # verdict is read further below, at recording-verdict time, from the poison file this leaves behind).
@@ -4719,6 +4730,9 @@ CAPTURE_RATE_WINDOW_END_EPOCH="$(date +%s)"
 echo "    strih host file:  ${STRIH_HOST_PATH:-<unknown>}"
 echo "    stream host file: ${STREAM_HOST_PATH:-<unknown>}"
 echo "    imag host file:   ${IMAG_HOST_PATH:-<unknown>}  (#462 — stays ON imag, decoded in place below)"
+# #1302: put strih's CG-window scene + program back now that its recording is stopped (cleanup()
+# retries it). Pure no-op unless CG_CHAIN=1.
+cg_chain_strih_restore "$HERE/obs_phase2.py" "${OBS_CLEANUP_TIMEOUT:-30}"
 
 # issue 1354 scope 3: AFTER-window snapshot of strih's per-input genlock-fifo audit counters --
 # pairs with the BEFORE snapshot in [5/8] so genlock_audit_snapshot.py's window deltas span EXACTLY
@@ -5471,8 +5485,8 @@ continuing WITHOUT the imag partial; the merge below will omit --merge-partials 
   # #1301: CG_CHAIN=1 — StopRecord cg OBS (finalize the file) + pull it to dev1 so the merge can
   # feed it as --cg below. BEST-EFFORT: a failed stop/pull just omits --cg (the merge runs exactly
   # as today, no cg_chain section) — it NEVER aborts the camera-chain verdict. The resolume
-  # recording transport is env-configured via CG_CHAIN_PULL_CMD (pending songplayer#151); with it
-  # unset the pull is a loud no-op. Pure no-op unless CG_CHAIN=1.
+  # recording is scp'd from resolume (the exact StopRecord file) unless CG_CHAIN_PULL_CMD overrides
+  # the transport. Pure no-op unless CG_CHAIN=1.
   if cg_chain_enabled && [ "$CG_RECORDING_STARTED" = 1 ]; then
     cg_chain_record_stop "$CG_HOST_IP" "$HERE/obs_phase2.py" "${CG_CHAIN_RECORD_TIMEOUT:-${OBS_CLEANUP_TIMEOUT:-30}}"
     cg_chain_pull_recording "$CG_HOST_IP" "$CG_RECORDING" || true
