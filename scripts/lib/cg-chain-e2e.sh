@@ -265,6 +265,7 @@ cg_chain_pull_recording() {
       echo "[cg_chain] cg OBS recording pulled to $dest (CG_CHAIN_PULL_CMD)"
       return 0
     fi
+    rm -f -- "$dest"
     echo "[cg_chain] WARNING: cg OBS recording pull failed (CG_CHAIN_PULL_CMD) — omitting --cg this run" >&2
     return 1
   fi
