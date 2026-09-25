@@ -165,12 +165,14 @@ fn remoteos_paths_follow_their_overrides() {
     );
 }
 
+/// Review round 1: the source is 8b4ce58dbed08c366ecbd50a32ff66213b77a9baNED to the commit the live strih-lx venv runs (pin-not-latest,
+/// like the Downstream Keyer), so a deploy never silently installs whatever upstream `main` is.
 #[test]
-fn remoteos_source_is_the_github_api_tarball_of_main_by_default() {
+fn remoteos_source_is_the_github_api_tarball_of_the_pinned_commit() {
     let (_c, out, _e) = run(REMOTEOS_LIB, &[], "remoteos_mcp_source_url");
     assert_eq!(
         out,
-        "https://api.github.com/repos/zbynekdrlik/remoteos-mcp/tarball/main"
+        "https://api.github.com/repos/zbynekdrlik/remoteos-mcp/tarball/8b4ce58dbed08c366ecbd50a32ff66213b77a9ba"
     );
     let (_c, out, _e) = run(
         REMOTEOS_LIB,
@@ -225,30 +227,52 @@ fn remoteos_key_is_read_back_from_config_json_and_a_legacy_unit() {
     assert_eq!((c, out.as_str()), (0, ""));
 }
 
-/// The key order: REMOTEOS_MCP_AUTH_KEY, else the existing config.json, else a legacy unit, else
-/// nothing (the caller generates). A bad env key refuses; a bad on-box key is skipped.
+/// The key order (review round 1): REMOTEOS_MCP_AUTH_KEY, else a legacy unit's `--auth-key` (the key
+/// the RUNNING service accepts, the one dev1's .mcp.json holds), else the EnvironmentFile, else
+/// config.json, else nothing (the caller generates). A bad env key refuses; a bad on-box key is skipped.
 #[test]
 fn remoteos_key_resolution_order() {
-    let cases: [(&str, i32, &str); 6] = [
+    let cases: [(&str, i32, &str); 7] = [
         (
-            "remoteos_mcp_resolve_key EnvKey1 CfgKey2 UnitKey3",
+            "remoteos_mcp_resolve_key EnvKey1 UnitKey2 EfKey3 CfgKey4",
             0,
             "EnvKey1",
         ),
-        ("remoteos_mcp_resolve_key '' CfgKey2 UnitKey3", 0, "CfgKey2"),
-        ("remoteos_mcp_resolve_key '' '' UnitKey3", 0, "UnitKey3"),
         (
-            "remoteos_mcp_resolve_key '' 'bad key!' UnitKey3",
+            "remoteos_mcp_resolve_key '' UnitKey2 EfKey3 CfgKey4",
             0,
-            "UnitKey3",
+            "UnitKey2",
         ),
-        ("remoteos_mcp_resolve_key '' '' ''", 0, ""),
-        ("remoteos_mcp_resolve_key 'bad$key' CfgKey2 ''", 2, ""),
+        ("remoteos_mcp_resolve_key '' '' EfKey3 CfgKey4", 0, "EfKey3"),
+        ("remoteos_mcp_resolve_key '' '' '' CfgKey4", 0, "CfgKey4"),
+        (
+            "remoteos_mcp_resolve_key '' 'bad key!' '' CfgKey4",
+            0,
+            "CfgKey4",
+        ),
+        ("remoteos_mcp_resolve_key '' '' '' ''", 0, ""),
+        ("remoteos_mcp_resolve_key 'bad$key' UnitKey2 '' ''", 2, ""),
     ];
     for (body, want_rc, want_out) in cases {
         let (c, out, _e) = run(REMOTEOS_LIB, &[], body);
         assert_eq!((c, out.as_str()), (want_rc, want_out), "`{body}`");
     }
+}
+
+#[test]
+fn remoteos_key_is_read_back_from_the_environment_file() {
+    let (_c, out, _e) = run(
+        REMOTEOS_LIB,
+        &[("T", "REMOTEOS_AUTH_KEY=EfKey3\n")],
+        "remoteos_mcp_key_from_env_text \"$T\"",
+    );
+    assert_eq!(out, "EfKey3");
+    let (c, out, _e) = run(
+        REMOTEOS_LIB,
+        &[("T", "OTHER=1\n")],
+        "remoteos_mcp_key_from_env_text \"$T\"",
+    );
+    assert_eq!((c, out.as_str()), (0, ""));
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -267,6 +291,9 @@ for ((i = 0; i < ${#args[@]}; i++)); do
 done
 echo "CURL_ARGV: $*" >> "$STUB_LOG"
 if [ "$hstdin" = 1 ]; then echo "CURL_STDIN: $(cat)" >> "$STUB_LOG"; fi
+case " $* " in
+  *" -w "*) printf '%s' "${FAKE_UNAUTH_CODE:-401}"; exit 0 ;;
+esac
 case "$url" in
   */tarball/*)
     if [ "${FAKE_CURL_FAIL:-0}" = 1 ]; then exit 22; fi
@@ -291,6 +318,8 @@ const VENV_PYTHON_STUB: &str = r#"#!/bin/bash
 here="$(cd "$(dirname "$0")/.." && pwd)"
 if [ "${1:-}" = -m ] && [ "${2:-}" = pip ]; then
   echo "PIP: ${PIP_CONSTRAINT:-} $*" >> "$STUB_LOG"
+  echo "PIPENV: GH=${GH_TOKEN:-unset} KEY=${REMOTEOS_MCP_AUTH_KEY:-unset}" >> "$STUB_LOG"
+  if [ "${FAKE_PIP_FAIL:-0}" = 1 ]; then exit 1; fi
   touch "$here/.importable"
   exit 0
 fi
@@ -593,7 +622,7 @@ fn remoteos_fetch_sends_the_token_on_stdin_never_argv() {
     );
     assert!(
         argv.iter().any(|l| l.contains("-H @-")
-            && l.contains("api.github.com/repos/zbynekdrlik/remoteos-mcp/tarball/main")),
+            && l.contains("api.github.com/repos/zbynekdrlik/remoteos-mcp/tarball/8b4ce58dbed08c366ecbd50a32ff66213b77a9ba")),
         "{log}"
     );
     assert!(
@@ -643,6 +672,100 @@ fn remoteos_fetch_failure_keeps_a_working_install_else_fails() {
     assert!(err.contains("no working install"), "{err}");
 }
 
+/// Review round 1: a legacy unit's `--auth-key` is what the running service accepts; a stale,
+/// DIFFERENT config.json key must never replace it (that would lock dev1 out).
+#[test]
+fn remoteos_install_prefers_the_live_unit_key_over_a_stale_config_json() {
+    let rig = Rig::new();
+    fs::write(
+        rig.base.join("units/remoteos-mcp.service"),
+        "[Service]\nExecStart=/opt/remoteos-mcp-venv/bin/python -m remoteos --transport streamable-http --enable-all --host 0.0.0.0 --port 8092 --auth-key LiveKey1\n",
+    )
+    .unwrap();
+    fs::write(
+        rig.base.join("etc/config.json"),
+        "{\"port\": 8092, \"auth_key\": \"StaleKey2\", \"host\": \"0.0.0.0\"}\n",
+    )
+    .unwrap();
+    let (c, out, err) = rig.install(&[], &format!("{} headless enable-only", whoami()));
+    assert_eq!(c, 0, "stdout={out}\nstderr={err}");
+    assert_eq!(
+        rig.file("etc/remoteos-mcp.env"),
+        "REMOTEOS_AUTH_KEY=LiveKey1\n"
+    );
+    assert!(
+        rig.file("etc/config.json")
+            .contains("\"auth_key\": \"LiveKey1\""),
+        "config.json follows the live key"
+    );
+    assert!(
+        err.contains("WARNING") && err.contains("differs"),
+        "a stale config.json key is reported: {err}"
+    );
+}
+
+/// Review round 1: pip runs the build code of the fetched source and of every sdist dependency, so
+/// neither the GitHub token nor the agent key may be in its environment.
+#[test]
+fn remoteos_pip_never_sees_the_token_or_the_key() {
+    let rig = Rig::new();
+    let (c, out, err) = rig.install(
+        &[
+            ("REMOTEOS_MCP_AUTH_KEY", "abc123"),
+            ("GH_TOKEN", "tokSECRET9"),
+        ],
+        &format!("{} headless enable-only", whoami()),
+    );
+    assert_eq!(c, 0, "stdout={out}\nstderr={err}");
+    let log = rig.log();
+    assert!(
+        log.contains("PIPENV: GH=unset KEY=unset"),
+        "pip must run without GH_TOKEN / REMOTEOS_MCP_AUTH_KEY: {log}"
+    );
+}
+
+/// Review round 1: a failed pip never breaks a working box -- the installed venv is kept (WARNING)
+/// and the marker is not advanced, so the next run retries; on a box with nothing installed it fails.
+#[test]
+fn remoteos_pip_failure_keeps_a_working_install_else_fails() {
+    let rig = Rig::new();
+    fs::write(rig.base.join("venv/.importable"), "").unwrap();
+    fs::write(rig.base.join("venv/.camera-box-source"), "older-source\n").unwrap();
+    let (c, out, err) = rig.install(
+        &[("REMOTEOS_MCP_AUTH_KEY", "abc123"), ("FAKE_PIP_FAIL", "1")],
+        &format!("{} headless enable-only", whoami()),
+    );
+    assert_eq!(c, 0, "stdout={out}\nstderr={err}");
+    assert!(
+        err.contains("WARNING") && err.contains("pip install") && err.contains("keeping"),
+        "{err}"
+    );
+    assert_eq!(rig.file("venv/.camera-box-source"), "older-source\n");
+
+    let rig = Rig::new();
+    let (c, _o, err) = rig.install(
+        &[("REMOTEOS_MCP_AUTH_KEY", "abc123"), ("FAKE_PIP_FAIL", "1")],
+        &format!("{} headless enable-only", whoami()),
+    );
+    assert_ne!(c, 0);
+    assert!(err.contains("pip install"), "{err}");
+}
+
+/// Review round 1: the restart policy proves authentication is ON before it passes.
+#[test]
+fn remoteos_restart_fails_when_authentication_is_off() {
+    let rig = Rig::new();
+    let (c, _o, err) = rig.install(
+        &[
+            ("REMOTEOS_MCP_AUTH_KEY", "abc123"),
+            ("FAKE_UNAUTH_CODE", "200"),
+        ],
+        &format!("{} desktop restart", whoami()),
+    );
+    assert_ne!(c, 0);
+    assert!(err.contains("authentication"), "{err}");
+}
+
 // ------------------------------------------------------------------------------------------------
 // G2 -- the grader
 // ------------------------------------------------------------------------------------------------
@@ -655,7 +778,7 @@ ExecStart=/opt/remoteos-mcp-venv/bin/python -m remoteos --transport streamable-h
 
 #[test]
 fn remoteos_verdict_grades_every_fact() {
-    let v = |unit: &str, env_stat: &str, import: &str, en: &str, act: &str| {
+    let vu = |unit: &str, env_stat: &str, import: &str, en: &str, act: &str, unauth: &str| {
         run(
             REMOTEOS_LIB,
             &[
@@ -664,10 +787,27 @@ fn remoteos_verdict_grades_every_fact() {
                 ("I", import),
                 ("E", en),
                 ("A", act),
+                ("H", unauth),
             ],
-            "remoteos_mcp_verdict \"$U\" \"$S\" \"$I\" \"$E\" \"$A\"",
+            "remoteos_mcp_verdict \"$U\" \"$S\" \"$I\" \"$E\" \"$A\" \"$H\"",
         )
     };
+    let v = |unit: &str, env_stat: &str, import: &str, en: &str, act: &str| {
+        vu(unit, env_stat, import, en, act, "401")
+    };
+    // Review round 1: an empty REMOTEOS_AUTH_KEY turns authentication OFF on a 0.0.0.0 full-shell
+    // agent, so the grade requires the unauthenticated probe to be refused.
+    for (code, why) in [
+        ("200", "authentication is OFF"),
+        ("", "authentication unverified"),
+    ] {
+        let (c, out, _e) = vu(GOOD_UNIT, "600 root", "1", "enabled", "active", code);
+        assert_eq!(c, 1, "{why}: {out}");
+        assert!(
+            out.starts_with("FAIL: ") && out.contains(why),
+            "{why}: {out}"
+        );
+    }
     let (c, out, _e) = v(GOOD_UNIT, "600 root", "1", "enabled", "active");
     assert_eq!(c, 0, "{out}");
     assert!(out.starts_with("ok "), "{out}");
@@ -760,7 +900,7 @@ fn every_setup_script_installs_remoteos_through_the_shared_lib() {
         ),
         (
             "scripts/setup-device.sh",
-            "remoteos_mcp_install root headless enable-only",
+            "remoteos_mcp_install \"${SUDO_USER:-root}\" headless enable-only",
         ),
     ] {
         let s = read(script);
@@ -788,7 +928,7 @@ fn every_setup_script_installs_remoteos_through_the_shared_lib() {
 fn setup_device_installs_remoteos_in_the_rw_window() {
     let s = read("scripts/setup-device.sh");
     let call = s
-        .find("remoteos_mcp_install root headless enable-only")
+        .find("remoteos_mcp_install \"${SUDO_USER:-root}\" headless enable-only")
         .expect("STEP 17b call");
     let step = s.find("STEP 17b").expect("STEP 17b");
     let ro = s.find("STEP 18: Configure read-only").expect("STEP 18");
@@ -822,5 +962,9 @@ fn verify_strih_grades_remoteos_through_the_shared_verdict() {
     assert!(
         !body.contains("note \"remoteos-mcp not active"),
         "item 8 is graded, no longer a NOTE: {body}"
+    );
+    assert!(
+        body.contains("-w '%{http_code}'") && body.contains(":$(remoteos_mcp_port)/mcp"),
+        "item 8 must probe that an unauthenticated /mcp request is refused: {body}"
     );
 }
