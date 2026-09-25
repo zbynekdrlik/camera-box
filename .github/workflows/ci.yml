@@ -600,7 +600,7 @@ jobs:
       - name: Install Playwright chromium (intercom phone E2E)
         working-directory: intercom/tests/e2e
         run: |
-          npm install
+          npm ci
           npx playwright install --with-deps chromium
       - name: intercom phone PWA E2E
         working-directory: intercom/tests/e2e
