@@ -433,8 +433,8 @@ def _stall(recs, at_s, stall_s):
 
 def test_a_single_stall_then_burst_does_not_bias_the_rate():
     """Review round 1: an OLS fit of counter vs ARRIVAL read +65.7 ppm for one 500 ms stall 10 s off
-    centre in a clean 60 s capture. Delay is one-sided, so the rate is read off the LOWER envelope
-    of the arrivals (the least-delayed packet per window)."""
+    centre in a clean 60 s capture. Delay is one-sided, so the fit drops points that arrive far
+    LATER than the line (a one-sided trim) and refits."""
     n = int(60 * NOMINAL / SPF)
     s = only_stream(pcap_bytes(276, _stall(stream_records(n, ppm=0.0), at_s=20.0, stall_s=0.5)))
     assert abs(s.rate_ppm) < 1.0, s.rate_ppm
@@ -442,7 +442,7 @@ def test_a_single_stall_then_burst_does_not_bias_the_rate():
     assert s.max_gap_ms > 490
 
 
-def test_the_envelope_fit_still_reads_a_true_offset_through_stalls_and_jitter():
+def test_the_trimmed_fit_still_reads_a_true_offset_through_stalls_and_jitter():
     n = int(60 * NOMINAL / SPF)
     recs = stream_records(n, ppm=-12.0, jitter_ms=5.0)
     for at in (8.0, 31.0, 47.0):
