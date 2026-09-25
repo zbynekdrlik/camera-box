@@ -274,6 +274,161 @@ fn win_full_manifest_fetch_is_dormant_on_failure_1346() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A stand-in `gh` on PATH for the real (non-seam) fetch path: `run list` resolves run 4242,
+/// `run download` writes a BUNDLE_MANIFEST.json into its `--dir` and counts the download -- or fails
+/// once `$STUB_DIR/dl-fail` exists, or hangs (exec sleep) once `$STUB_DIR/dl-hang` exists.
+fn write_gh_stub(dir: &std::path::Path) -> PathBuf {
+    let bin = dir.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let gh = write_file(
+        &bin,
+        "gh",
+        "#!/usr/bin/env bash\n\
+         case \"$1 $2\" in\n\
+         \"run list\") printf '4242' ;;\n\
+         \"run download\")\n\
+           [ -f \"$STUB_DIR/dl-fail\" ] && exit 1\n\
+           [ -f \"$STUB_DIR/dl-hang\" ] && exec sleep 30\n\
+           echo x >> \"$STUB_DIR/downloads\"\n\
+           d=\"\"\n\
+           while [ $# -gt 0 ]; do [ \"$1\" = \"--dir\" ] && d=\"$2\"; shift; done\n\
+           mkdir -p \"$d/bin/64bit\"\n\
+           printf '{\"files\":[]}' > \"$d/BUNDLE_MANIFEST.json\" ;;\n\
+         *) exit 2 ;;\n\
+         esac\n",
+    );
+    std::fs::set_permissions(&gh, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    bin
+}
+
+/// #1346 review: the FULL bundle artifact is ~270 MB, so the manifest of a CI run is cached per
+/// (workflow, artifact, run id) -- a run's artifact never changes -- and a later fetch of the same
+/// run reads the cache instead of downloading again.
+#[test]
+fn manifest_fetch_caches_by_run_id_and_skips_the_second_download_1346() {
+    let td = tempfile::tempdir().unwrap();
+    let dir = td.path().to_path_buf();
+    let bin = write_gh_stub(&dir);
+    let path = format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let cache = dir.join("cache");
+    let dest1 = dir.join("one/win-full-manifest.json");
+    let dest2 = dir.join("two/win-full-manifest.json");
+    let out = run_sourced(
+        "manifest_autosource_fetch_win_full o/r \"$SHA\" \"$DEST1\"; echo; \
+         : > \"$STUB_DIR/dl-fail\"; \
+         manifest_autosource_fetch_win_full o/r \"$SHA\" \"$DEST2\"",
+        &[
+            ("PATH", path.as_str()),
+            ("MANIFEST_AUTOSOURCE_CMD", ""),
+            ("MANIFEST_AUTOSOURCE_CACHE_DIR", cache.to_str().unwrap()),
+            ("STUB_DIR", dir.to_str().unwrap()),
+            ("SHA", "54995646abc"),
+            ("DEST1", dest1.to_str().unwrap()),
+            ("DEST2", dest2.to_str().unwrap()),
+        ],
+    );
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(
+        lines,
+        [dest1.to_str().unwrap(), dest2.to_str().unwrap()],
+        "both fetches must deliver the manifest: {out:?}"
+    );
+    let downloads = std::fs::read_to_string(dir.join("downloads")).unwrap_or_default();
+    assert_eq!(
+        downloads.lines().count(),
+        1,
+        "the second fetch of the same run must come from the cache, not a new download"
+    );
+    assert!(
+        cache
+            .join("windows-genlock.yml--obs-genlock-windows-x64--4242.json")
+            .is_file(),
+        "the manifest must be cached under workflow--artifact--run_id"
+    );
+    assert!(
+        dest2.is_file(),
+        "the cached copy must land at the second DEST"
+    );
+    drop(td);
+}
+
+#[test]
+fn manifest_fetch_stays_dormant_and_caches_nothing_when_the_download_fails_1346() {
+    let td = tempfile::tempdir().unwrap();
+    let dir = td.path().to_path_buf();
+    let bin = write_gh_stub(&dir);
+    std::fs::write(dir.join("dl-fail"), "").unwrap();
+    let path = format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let cache = dir.join("cache");
+    let dest = dir.join("win-full-manifest.json");
+    let out = run_sourced(
+        "manifest_autosource_fetch_win_full o/r \"$SHA\" \"$DEST\"",
+        &[
+            ("PATH", path.as_str()),
+            ("MANIFEST_AUTOSOURCE_CMD", ""),
+            ("MANIFEST_AUTOSOURCE_CACHE_DIR", cache.to_str().unwrap()),
+            ("STUB_DIR", dir.to_str().unwrap()),
+            ("SHA", "54995646abc"),
+            ("DEST", dest.to_str().unwrap()),
+        ],
+    );
+    assert_eq!(out.trim(), "", "a failed download yields no manifest");
+    assert!(!dest.exists(), "nothing written to DEST");
+    assert!(
+        !cache
+            .join("windows-genlock.yml--obs-genlock-windows-x64--4242.json")
+            .exists(),
+        "a failed download must never leave a cache entry"
+    );
+    drop(td);
+}
+
+/// #1346 review: the gh calls are bounded -- a stalled download must not hang the [0/8] preflight.
+#[test]
+fn manifest_fetch_is_bounded_when_the_download_hangs_1346() {
+    let td = tempfile::tempdir().unwrap();
+    let dir = td.path().to_path_buf();
+    let bin = write_gh_stub(&dir);
+    std::fs::write(dir.join("dl-hang"), "").unwrap();
+    let path = format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let dest = dir.join("win-full-manifest.json");
+    let started = std::time::Instant::now();
+    let out = run_sourced(
+        "manifest_autosource_fetch_win_full o/r \"$SHA\" \"$DEST\"",
+        &[
+            ("PATH", path.as_str()),
+            ("MANIFEST_AUTOSOURCE_CMD", ""),
+            ("MANIFEST_AUTOSOURCE_TIMEOUT_S", "1"),
+            (
+                "MANIFEST_AUTOSOURCE_CACHE_DIR",
+                dir.join("cache").to_str().unwrap(),
+            ),
+            ("STUB_DIR", dir.to_str().unwrap()),
+            ("SHA", "54995646abc"),
+            ("DEST", dest.to_str().unwrap()),
+        ],
+    );
+    assert_eq!(out.trim(), "", "a timed-out download yields no manifest");
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(20),
+        "the fetch must give up at its timeout, not wait out the 30 s hang: {:?}",
+        started.elapsed()
+    );
+    drop(td);
+}
+
 // ── the small state-reading helpers recording-e2e.sh keys the auto-source on ────────────────────
 
 #[test]
