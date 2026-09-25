@@ -1339,3 +1339,12 @@ home, so a module installed with `pip --user` (python3-websocket on dev1, which 
 imports at module load) raises `ModuleNotFoundError` before the code under test runs. Pin the real
 user base alongside the fake home: `env = dict(os.environ, HOME=str(tmp),
 PYTHONUSERBASE=site.getuserbase())`.
+
+## Running a std-only test that needs `tempfile` locally (Tier-0, issue 1367)
+
+`tests/deploy_genlock_fleet.rs` / `tests/obs_box_baseline_1357.rs` are otherwise std-only but call
+`tempfile::tempdir()`, so a plain `rustc --test` fails E0433. Build a ~30-line shim crate (a
+`TempDir(PathBuf)` with `path()` / `into_path()` + remove-on-drop, and `tempdir()` under
+`std::env::temp_dir()`) as `rustc --crate-type rlib --crate-name tempfile shim.rs`, then
+`CARGO_MANIFEST_DIR=<wt> rustc --edition 2021 --test tests/<file>.rs --extern tempfile=<shim.rlib>
+-L <dir>` and run the binary from the worktree root. The real crate still runs on CI.

@@ -2105,15 +2105,18 @@ mod vendored_source {
              MONITOR_ONLY depth of 0, or ignore the sync offset."
         );
         assert!(
-            src.contains(
-                "if (genlock_hold_mode != prev_genlock_audio_hold_mode || genlock_hold_ms != prev_genlock_audio_delay_ms) {"
-            ) && src.contains(
-                "push_back = false; asrc_compensator_shift_level_target(&source->asrc, genlock_audio_place_shift_ms(genlock_term_ns, genlock_prev_term_ns));"
-            ),
-            "{OBS_SOURCE}: #1355 + issue 1367 — a change of the applied genlock audio hold no longer \
-             re-places the audio at once and moves the ASRC level setpoint by the placement delta; \
-             the level loop would walk the depth back and undo the hold (breaking the A/V pairing) \
-             until the next flush."
+            src.contains("if (genlock_action == GENLOCK_AUDIO_ACT_SLEW) {")
+                && src.contains(
+                    "push_back = false; asrc_compensator_shift_level_target( &source->asrc, (double)genlock_audio_level_shift_ns("
+                )
+                && src.contains(
+                    "asrc_compensator_shift_level_target(&source->asrc, (double)genlock_slew_step_ns / 1e6);"
+                ),
+            "{OBS_SOURCE}: #1355 + issue 1367 (ROZHODNUTÉ 5827497952) — a change of the applied \
+             genlock audio hold no longer SLEWS while audio plays (moving the ASRC level setpoint \
+             with every slew step), or a (re)placement no longer shifts the setpoint by the true \
+             buffer jump; the level loop would walk the depth back and undo the hold, or the audio \
+             would step (the audible dropout)."
         );
         assert!(
             src.contains("UNREACHABLE after %d windows outside +/-%.0fms")

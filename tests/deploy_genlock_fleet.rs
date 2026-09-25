@@ -1571,3 +1571,64 @@ fn per_box_table_lives_in_the_shared_lib_1317() {
         "deploy-genlock-fleet.sh stays under the 1000-line budget"
     );
 }
+
+/// issue 1367: the imag leg writes the genlock MIN-LATENCY box marker the new libobs reads (an imag
+/// provisioned before the marker existed never ran that setup-imag.sh step, and an absent marker
+/// fails OPEN), as the desktop user, BEFORE the supervised restart that loads the new libobs.
+#[test]
+fn imag_program_writes_the_min_latency_marker_before_the_restart_1367() {
+    let p = imag_program();
+    let marker = p
+        .find("install -o \"$IMAG_USER\" -g \"$IMAG_USER\" -m 0644 /dev/null \"$IMAG_HOME/.camera-box/genlock-min-latency\"")
+        .unwrap_or_else(|| panic!("the imag leg must write the min-latency marker (issue 1367):\n{p}"));
+    assert!(
+        p.contains("IMAG_USER=\"${SUDO_USER:-newlevel}\"")
+            && p.contains("IMAG_HOME=\"$(getent passwd \"$IMAG_USER\" | cut -d: -f6 || true)\""),
+        "the marker belongs to the desktop user the program acts as (issue 1367):\n{p}"
+    );
+    let restart = p
+        .find("uctl restart imag-obs.service")
+        .expect("the supervised restart must exist");
+    assert_eq!(
+        p.matches("IMAG_USER=\"${SUDO_USER:-newlevel}\"").count(),
+        1,
+        "the desktop user is resolved ONCE and reused by the restart step (issue 1367):\n{p}"
+    );
+    // review round 3: one home for the user (the getent one), guarded against an empty lookup
+    // (else the marker lands in /.camera-box), and the restart's sentinel clear uses it too.
+    assert!(
+        p.contains("[ -n \"$IMAG_HOME\" ] || { echo \"#789 IMAG FAIL: no home directory for $IMAG_USER (getent)\" >&2; exit 4; }"),
+        "an empty getent home must fail the deploy (issue 1367):\n{p}"
+    );
+    // review round 4: under the program's set -e a FAILING lookup (missing user) would exit silently
+    // before the guard -- both lookups swallow their rc and fail through a NAMED line instead.
+    assert!(
+        p.contains("IMAG_UID=\"$(id -u \"$IMAG_USER\" 2>/dev/null || true)\"; [ -n \"$IMAG_UID\" ] || { echo \"#789 IMAG FAIL: no such user $IMAG_USER\" >&2; exit 4; }"),
+        "a missing desktop user must fail the deploy with a named line (issue 1367):\n{p}"
+    );
+    assert!(
+        p.contains("rm -f \"$IMAG_HOME/.config/obs-studio/.sentinel/\"*")
+            && !p.contains("/home/$IMAG_USER/"),
+        "the imag program must use the one resolved home, never a hardcoded /home/<user> (issue 1367):\n{p}"
+    );
+    assert!(
+        marker < restart,
+        "the marker must be written BEFORE the restart that loads the new libobs (issue 1367)"
+    );
+    // the emitted program must stay valid bash with the new step (unquoted-EOS escaping).
+    let dir = std::env::temp_dir().join(format!("imag-program-1367-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let f = dir.join("deploy.sh");
+    std::fs::write(&f, &p).unwrap();
+    let out = Command::new("bash")
+        .arg("-n")
+        .arg(&f)
+        .output()
+        .expect("bash -n");
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        out.status.success(),
+        "the emitted imag program must parse (issue 1367): {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
