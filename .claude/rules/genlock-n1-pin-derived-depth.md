@@ -7,6 +7,8 @@ paths:
   - "vendor/obs-studio/libobs/obs-source.c"
   - "src/probe/genlock.rs"
   - "src/probe/genlock_n1_tests.rs"
+  - "src/genlock_shallow_av_bench.rs"
+  - "tests/genlock_shallow_depth_wiring_1367.rs"
 ---
 
 # The N==1 PIN-DERIVED DEPTH (issue 1367) — one depth after every restart
@@ -23,7 +25,8 @@ drain only fires above `ceil + 2`, so 30 / 31 / 32 were all stable. Live: four r
 The rule: settle to `target = base + 1` (the depth the healthy sender gap/dup tail produces
 anyway — neutral there). Deeper → SHED one frame; shallower → HOLD one tick. Both share the drain
 throttle (30 ticks). Active only on a DEEP source (`floor_frames + 2 ≤ base`, floor = `wall −
-newest queued stamp`); a shallow source (cg feeds, imag cameras at 3 ms) is untouched.
+newest queued stamp`). A shallow source (cg feeds, imag cameras at 3 ms) has its own PER-LOCK
+depth since ROZHODNUTÉ 5827497952 — see the section at the end.
 
 | Piece | Rust authority | C (obs-source.c) | Also |
 |---|---|---|---|
@@ -104,3 +107,78 @@ Full-bundle deploy on stream (and strih-lx, same vendored tree), then ≥ 6 stri
 the pin unchanged. After each settle the stream `NDI 2ME PGM` audit `ts_head_skew_ms` must return
 to ONE value (≈ 31 frames at 987); `n1_grows=` / `converge_sheds=` may step by a few right after a
 restart and must stay flat in steady windows. Then the release E2E A/V gate.
+
+## The SHALLOW per-lock depth (ROZHODNUTÉ 5827497952)
+
+**Why.** A shallow N==1 source (resolume `sp-*_video`, strih-lx `CG-obs`, pin 3 ms, base 1) is
+never deep, so the pin rule above never acted and its depth FLOATED with arrival: live
+`sp-slow_video` stepped 66 / 100 / 133 ms between 5 s audits, and the audio (which follows the
+video delay, `genlock-audio-pairing.md`) was re-placed 72 times in 42 min — the songplayer gate's
+33 ms dropout.
+
+**The rule.** After each LOCK, measure the ARRIVAL FLOOR (the ROUNDED age of the newest queued
+frame at the tick's SCHEDULED instant, `n1_depth_frames(tick_wall, newest)`) over
+`N1_SHALLOW_SETTLE_TICKS` (90) on-grid N==1 PRESENT ticks, then latch
+`D = max(base, floor_max) + 1` (`n1_shallow_track` / `n1_shallow_target_frames`). D holds until the
+next relock; the same one-frame hold / shed keeps the presented depth on it
+(`n1_shallow_hold_due` / `n1_shallow_shed_due`, the shared #859 throttle, the one-frame dead band).
+
+| Piece | Rust (`src/genlock_n1_depth.rs`) | C (`obs-source.c`) |
+|---|---|---|
+| latch target + imag cap | `n1_shallow_target_frames` → `(D, capped)` | `genlock_n1_shallow_target_frames(…, bool *capped)` |
+| relock gap | `n1_shallow_gap_is_relock` (≥ 1 s) | `genlock_n1_shallow_gap_is_relock`, `GENLOCK_N1_SHALLOW_RELOCK_GAP_NS` |
+| window | `n1_shallow_rearm` / `n1_shallow_track` (`ShallowDepth`) | `genlock_n1_shallow_rearm` / `genlock_n1_shallow_track` (the five `genlock_shallow_*` fields) |
+| governs (not deep) | `n1_shallow_governs` | `genlock_n1_shallow_governs` + the source wrapper `genlock_n1_shallow_governs_now` |
+| SHED / HOLD | `n1_shallow_shed_due` / `n1_shallow_hold_due` | ORed next to the deep halves in `genlock_should_converge_phase` / `genlock_should_hold_n1_phase` |
+
+What carries it (do not undo):
+- **The rounded floor, not a raw `ceil`.** Stamps and scheduled ticks share the per-second grid, so
+  the rounded newest-frame age already IS `ceil(arrival lag / interval)`; a raw `ceil` of the ns
+  value jumps a frame on a 1 ns phase. The max over the window absorbs a late tick (a late tick only
+  UNDER-reads the floor at the scheduled instant).
+- **Sampled at the PRESENT TAIL only**, after the audio tracker (it reuses `genlock_delay_tick_wall`,
+  so `genlock_n1_tick_wall_now(wall_now)` stays count-3). A tick with an empty queue never reaches
+  `genlock_release_tick`, so a hold/underrun has no floor to read anyway.
+- **Relock = ACQUIRE (`genlock_shallow_relock = boundary == 0` at the top of the tick) or a GAP RESYNC
+  whose missing-stamp gap is ≥ 1 s** (a sender restart; a single lost frame is not). A pin change
+  re-arms it in `obs_source_set_genlock_latency_ms` (a new base). During the new window the OLD D is
+  still maintained, so a relock that finds the same floor changes nothing — video or audio.
+- **Deep sources keep the pin rule.** The shallow halves act only while `!n1_is_deep_source`; for a
+  deep source the latched D is `base + 1` anyway (so the audio lock is harmless there — 2ME PGM
+  carries no audio). An N>=2 tick clears the whole state (`last_known_n < 2` gates it).
+- **The #859 queue-length drain stays out while D governs** (`drain_eligible = false` after the N==1
+  mark): a queue-length read would shed a correctly deep conveyor on a wide arrival spread, and the
+  shallow shed already covers depth > D.
+- **imag (item 4):** libobs has no box identity (imag and strih share input names), so the box
+  declares it: `setup-imag.sh` step 13 writes `~/.camera-box/genlock-min-latency`, read ONCE by
+  `genlock_min_latency_box()`. There D is capped at `base + 1` and the cap is REPORTED
+  (`genlock-shallow-lock … capped=1` at LOG_WARNING + `shallow_capped=1`). A box without the marker
+  (every Windows box, strih-lx) reads false.
+
+Observability: one `genlock-shallow-lock '<src>': depth_frames= floor_max_frames= base_frames=
+latency_ms= capped=` line per latch, and `shallow_depth= shallow_capped= shallow_latches=` on the
+audit line (audit-line-only).
+
+**Verification (Tier-0).** Authority + the grid-bench port + the two-clock A/V bench: one harness
+`lib.rs` with `#[path]` mods for `genlock_grid`, `genlock_backlog`, `genlock_n1_depth`,
+`genlock_grid_bench`, `genlock_audio_pairing` (the shallow bench is a `#[path]` child of the audio
+pairing bench, which is a child of `genlock_audio_pairing`); `rustc --test` + `clippy-driver --test
+-D warnings`. The parity gate `c_n1_shallow_depth_matches_the_rust_authority_1367` lifts the new
+helpers with the rest of the N==1 block (the two new `#define`s are in `converge_defines`). Mutation
+proof: COMPILE each parity test with `CARGO_MANIFEST_DIR=<scratch repo with the mutated C>` —
+`env!` is resolved at COMPILE time, so setting it only at run time silently tests the unmutated
+file (20/20 RED at landing; 0/20 when only the run-time env was set). The std-only
+`tests/genlock_shallow_depth_wiring_1367.rs` pins the wiring, mirrored in both
+`windows-genlock*.yml`.
+
+**The grid-bench port carries the rule** (`Fifo` in `src/genlock_grid_bench.rs`, now `pub(crate)`
+for the shallow bench), with `BenchConfig::shallow_depth_rule` (default true; false = the
+pre-rule floating conveyor, the anti-tautology) and `min_latency_box`. The deep 2ME PGM bench results
+are unchanged. The probe `ReleaseCadence` mirror does NOT carry the shallow rule (a test-only
+reference with no scheduled-tick model); the authority + parity + grid-bench port are the proof.
+
+**Live acceptance (supervisor).** Full-bundle deploy on resolume + strih-lx + stream. On resolume
+each `sp-*_video` logs one `genlock-shallow-lock` per OBS start (depth 2–3), then its audit
+`ts_head_skew_ms` stays on `depth × 33` apart from ≤ 1 s excursions, `shallow_latches=` stays flat
+between restarts, `audio_slews=` / `audio_steps=` stay 0. The songplayer gate (±40 ms, 0 dropouts)
+passes across two OBS restarts.
