@@ -371,11 +371,16 @@ lease; strih-lx has run Xorg + openbox since 23.9.
 - **Backend = a box fact (owner 25.9.2026: the BUILT-IN HDMI, NVIDIA-driven):** the fact
   `STRIH_HDMI_OUTPUT_BACKEND` (`lease` | `vk-direct`; strih-lx = `vk-direct`, strih-pp TODO_OWNER)
   picks how the output leaves X — the NVIDIA X driver refuses the lease, so strih-lx uses the Vulkan
-  direct-display backend (`.claude/rules/obs-drm-output.md`, vk-direct section). Step 6 writes it into
-  a fresh config (`strih_drm_output_config_json CONN VIEW BACKEND`; lease = the ABSENT key) and
-  UPSERTS it into an existing one as the desktop user (`strih_scenes.write_drm_backend`, the view
-  kept), and installs `libvulkan1` + warns on a missing NVIDIA ICD for vk-direct. Verify item 4c adds
-  `backend-invalid` / `backend-drift` (the config backend vs the fact; skipped when either is unread).
+  direct-display backend (`.claude/rules/obs-drm-output.md`, vk-direct section). Step 6 is ONE call,
+  `strih_drm_output_provision` in `scripts/lib/strih-drm-output.sh` (setup-strih.sh stays under the
+  1000-line budget): it writes the fact into a fresh config (`strih_drm_output_config_json CONN VIEW
+  BACKEND`; lease = the ABSENT key), UPSERTS it into an existing one as the desktop user
+  (`strih_scenes.write_drm_backend`, the view kept; an import failure is named), installs
+  `libvulkan1` (a failure FAILS the step) and warns on a missing NVIDIA ICD. Verify item 4c adds
+  `backend-invalid` / `backend-drift` (the config backend vs the fact; skipped when either is unread)
+  and `present-dead` (`strih_drm_vk_present_dead`: the vk present loop exited with no stop after it).
+  Both Python classifiers (strih_scenes + imag_scenes, pinned equal) treat an unknown backend as
+  dormant, so the wrapper never takes the connector out of X for an output the C will not start.
 - **Tests:** `tests/strih_drm_output_provision_1346.rs` (the lib helpers + the wiring anchors),
   `tests/python/test_strih_drm_output_1346.py` (the Python grammar, the shared
   `tests/fixtures/drm_output_view_parity.tsv` with the C lift, read/write, the CLI) and
