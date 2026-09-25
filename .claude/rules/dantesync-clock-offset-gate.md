@@ -90,6 +90,16 @@ copies of the captured payloads (`updated_ts`/`ntp_updated_ts` moved to now — 
 freshness against its own `date +%s`; `RIG_GRANDMASTER_IP=10.77.9.230`, the live GM). A new
 dantesync release that adds a discipline value = one new TSV row + both implementations.
 
+**Gotcha: a bash grep parser and its python twin disagree on odd JSON values.** Two traps showed up in review,
+and both now have TSV rows:
+- A grep-for-a-quoted-string bash parser reads a NON-string value (`"clock_discipline":5`) as ABSENT, which the
+  classifier treats as an older build. Python sees the non-string and returns UNKNOWN. The bash side must detect
+  the value's presence and mark it non-string.
+- Python's `math.isfinite(int)` raises `OverflowError` on a JSON integer too large for a float (a 401-digit
+  value). Bash's awk turns it into `inf` or a 20+ digit string. Both sides must reject any value past the same
+  limit before any float conversion (|us| >= 1e15 = more than 15 digits for bash integer arithmetic).
+When adding a field to the table, add a non-string row and an absurd-magnitude row.
+
 **Live check (read-only, allowed):** `DANTESYNC_GATE_GM_ENFORCE=1 DANTESYNC_GATE_PHASE_SLEW_ENFORCE=1
 scripts/dantesync-gate.sh --linux "" --win-http strih=10.77.9.202 --win-http stream=10.77.9.204`
 only curls `:8898/status` — run it before trusting a change here.
