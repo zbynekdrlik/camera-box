@@ -301,6 +301,36 @@ esac
 # talkback capture (report-only): the MiniFuse 4 is the operator talkback mic (the hub reads it).
 if arecord -l 2>/dev/null | grep -qi 'MiniFuse'; then note "talkback: MiniFuse 4 present (operator mic)"; else note "talkback: MiniFuse 4 not detected (plug it in before go-live)"; fi
 
+# 9b) MiniFuse period + graph quantum (issue 1345, owner accepted 25.9.2026): both operator-session
+#     drop-ins present with the rendered content (FAIL when missing or drifted -- the buzz / robotic
+#     cameraman fixes a reprovision must keep), and the LIVE graph held at quantum 1024
+#     (`pw-metadata -n settings`, read in the operator session as root like item 9). The live read is
+#     REPORTED: PASS when held, NOTE otherwise (the drop-in applies only at the next PipeWire start).
+for _q_pair in \
+  "${USER_HOME}/.config/wireplumber/wireplumber.conf.d/51-minifuse-output-period.conf|strih_wireplumber_minifuse_output_period_conf" \
+  "${USER_HOME}/.config/pipewire/pipewire.conf.d/51-strih-quantum-1024.conf|strih_pipewire_quantum_conf"; do
+  _q_file="${_q_pair%%|*}"; _q_fn="${_q_pair##*|}"
+  if [ -f "$_q_file" ] && cmp -s "$_q_file" <("$_q_fn"); then
+    ok "(audio-quantum) ${_q_file##*/} present with the provisioned content"
+  else
+    bad "(audio-quantum) ${_q_file} missing or drifted from ${_q_fn} -- re-run setup-strih.sh step 12 (issue 1345)"
+  fi
+done
+if command -v pw-metadata >/dev/null 2>&1; then
+  if [ "$(id -u)" = 0 ]; then
+    PW_SETTINGS="$(sudo -u "${STRIH_LX_USER:-newlevel}" XDG_RUNTIME_DIR="/run/user/$(id -u "${STRIH_LX_USER:-newlevel}")" timeout 5 pw-metadata -n settings 2>/dev/null || true)"
+  else
+    PW_SETTINGS="$(timeout 5 pw-metadata -n settings 2>/dev/null || true)"
+  fi
+else
+  PW_SETTINGS=""
+fi
+if Q_DETAIL="$(strih_lx_graph_quantum_ok "$PW_SETTINGS")"; then
+  ok "(audio-quantum) ${Q_DETAIL}"
+else
+  note "(audio-quantum) ${Q_DETAIL} -- report-only; restart the operator PipeWire session (or reboot) so the min-quantum drop-in applies"
+fi
+
 # 10) NVENC encoder available.
 { ffmpeg -hide_banner -encoders 2>/dev/null; cat "$LOG" 2>/dev/null; } | strih_lx_nvenc_available_ok && ok "NVENC encoder available" || bad "NVENC encoder not available"
 

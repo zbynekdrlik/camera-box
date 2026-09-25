@@ -674,6 +674,11 @@ chown "$DESKTOP_USER":"$DESKTOP_USER" "${USER_HOME}/.config/pipewire/pipewire.co
 install -d -o "$DESKTOP_USER" -g "$DESKTOP_USER" "${USER_HOME}/.config/wireplumber/wireplumber.conf.d"
 strih_wireplumber_minifuse_rule > "${USER_HOME}/.config/wireplumber/wireplumber.conf.d/51-strih-minifuse.conf"
 chown "$DESKTOP_USER":"$DESKTOP_USER" "${USER_HOME}/.config/wireplumber/wireplumber.conf.d/51-strih-minifuse.conf"
+# issue 1345 (owner accepted 25.9.2026): the MiniFuse PLAYBACK period (1024 x 3, headroom 256 -- the
+# buzz fix) and the graph's min-quantum floor 1024 (the robotic-cameraman fix). Compared, rewritten only
+# on a difference, logged; both apply at the next WirePlumber/PipeWire start (the reboot after setup).
+strih_wireplumber_minifuse_output_period_conf | obs_box_write_if_changed "${USER_HOME}/.config/wireplumber/wireplumber.conf.d/51-minifuse-output-period.conf" 0664 "$DESKTOP_USER:$DESKTOP_USER" "MiniFuse output period"
+strih_pipewire_quantum_conf | obs_box_write_if_changed "${USER_HOME}/.config/pipewire/pipewire.conf.d/51-strih-quantum-1024.conf" 0664 "$DESKTOP_USER:$DESKTOP_USER" "graph quantum 1024"
 # the intercom-hub systemd drop-in that runs the hub AS THE OPERATOR (reach the PipeWire session).
 mkdir -p /etc/systemd/system/intercom-hub.service.d
 strih_intercom_audio_dropin "$DESKTOP_USER" "$DESKTOP_UID" > /etc/systemd/system/intercom-hub.service.d/10-local-audio.conf

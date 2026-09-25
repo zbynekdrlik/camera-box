@@ -90,6 +90,31 @@ obs_box_apt_lock_timeout() {
     echo "  apt lock wait: ${conf} written (DPkg::Lock::Timeout 600 s -- apt-get waits for a background apt run)"
 }
 
+# obs_box_write_if_changed DEST MODE OWNER LABEL (content on stdin) -- the ONE idempotent install of a
+# rendered config file: compare, rewrite only when the content or the mode differs, log the outcome
+# (`LABEL: DEST unchanged` / `LABEL: DEST written`). OWNER is `user:group`. The new content goes to a
+# `.<name>.new.<pid>` sibling first (chmod + chown there), then one rename, so a reader never sees a
+# half-written file; the temp is removed when any step fails. Fails loud via the caller's fail() when the
+# file cannot be written. Used for the operator-session audio drop-ins (setup-strih step 12) and the
+# kiosk brightness facet (obs_box_brightness_keys).
+obs_box_write_if_changed() {
+    local dest="${1:?obs_box_write_if_changed: DEST required}" mode="${2:?obs_box_write_if_changed: MODE required}"
+    local owner="${3:?obs_box_write_if_changed: OWNER required}" label="${4:-file}"
+    local tmp="${dest%/*}/.${dest##*/}.new.$$" want
+    want="$(cat; printf x)"
+    want="${want%x}"
+    if [ -f "$dest" ] && [ "$(stat -c %a "$dest" 2>/dev/null)" = "${mode#0}" ] \
+        && cmp -s "$dest" <(printf '%s' "$want"); then
+        echo "  ${label}: ${dest} unchanged"
+        return 0
+    fi
+    if ! { printf '%s' "$want" > "$tmp" && chmod "$mode" "$tmp" && chown "$owner" "$tmp" && mv -f "$tmp" "$dest"; } 2>/dev/null; then
+        rm -f "$tmp" 2>/dev/null
+        fail "${label}: could not write ${dest}"
+    fi
+    echo "  ${label}: ${dest} written"
+}
+
 # obs_box_apt_update_lock_held TEXT -> exit 0 iff TEXT is apt-get update's HELD package-lists lock error.
 #
 # The exact message, captured live on apt 2.8.3 (imag's 24.04) and apt 3.2.0 (strih-lx's 26.04):
