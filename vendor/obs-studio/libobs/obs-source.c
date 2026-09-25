@@ -5411,8 +5411,10 @@ static inline uint64_t genlock_wall_now_ns(void)
  * GetSystemTimePreciseAsFileTime on Windows, disciplined by NTP/DanteSync), and so does the
  * render tick (obs-video.c genlock_next_deadline re-derives every deadline from the wall clock
  * and only maps it into the monotonic sleep timebase), while the audio mixer paces on the
- * MONOTONIC clock (os_gettime_ns() = QPC on Windows, free-running; CLOCK_MONOTONIC on Linux,
- * kernel-disciplined like CLOCK_REALTIME, so this reads ~0 there). #800 suspected the Windows
+ * MONOTONIC clock (os_gettime_ns(): CLOCK_MONOTONIC on Linux, kernel-disciplined like
+ * CLOCK_REALTIME; on Windows QPC integrated at the dantesync-disciplined system-time rate since
+ * issue 1372 -- before that raw, free-running QPC. So this reads ~0 on both, apart from dantesync
+ * phase STEPS, which move the wall but never the monotonic clock). #800 suspected the Windows
  * divergence for an all-day A/V shift; #1355/#1357 measured it (~13 ppm) and found no A/V or
  * FIFO effect (the ASRC servo runs on the mixer clock). Telemetry only — the LOCK indicator
  * gates on a single-sample wall STEP, never on this value or its rate. Both clocks are read back-to-back

@@ -310,7 +310,8 @@ pub fn top_phase_event_offender(inputs: &[InputEventCounts]) -> Option<(usize, u
 // deadline from the wall clock and absorbs up to 2 ms per tick. The one clock hazard for genlock — the
 // same on every box — is a wall STEP: it moves every wall-keyed FIFO release / ts-align deadline by more
 // than a frame at once (the render tick itself only slews through it). The windowed rate stays
-// report-only telemetry.
+// report-only telemetry. (Since issue 1372 the Windows `os_gettime_ns()` also runs at the
+// dantesync-disciplined rate, so the measured rate is ~0 on every box; the step verdict is unchanged.)
 /// A single-sample wall STEP beyond this (ms) DEGRADES immediately — one 30 fps frame, the coarsest
 /// fleet frame interval (same value as the audio-pairing bound), so a sub-frame wobble never trips.
 pub const GENLOCK_QPC_STEP_BOUND_MS: i64 = 33;

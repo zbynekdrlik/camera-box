@@ -188,3 +188,17 @@ ms remains. Read the depth from it:
 - **Discriminator:** a steady `level_avg=` far from `target=` with `restore=0 fallbacks=0` points at
   a real level-loop problem. `level_avg=` tracking `target=` while `level=` jumps ±10 ms is the
   normal sawtooth.
+
+## Addendum (issue 1372 part A, 25.9.2026): the Windows mixer clock is disciplined now — the reading moves again
+
+Since the #1325 fix the servo measures against `os_gettime_ns()`, the mixer clock. On Windows that
+was raw QPC, so mbc read ≈ −6 ppm (Dante vs the QPC crystal), and a reading of `|estimated| ≈
+|f_phase|` then meant the obs.dll had regressed to the wall clock. Issue 1372 part A makes the
+Windows `os_gettime_ns()` run at the dantesync-disciplined SYSTEM-TIME rate
+(`windows-disciplined-media-clock.md`). After that deploy:
+
+- `estimated ≈ −f_phase` is the EXPECTED reading again (the mixer runs at the wall rate), not a
+  regression.
+- Tell the two apart by the deployed build (`GENLOCK_BUILD_SHA.txt` contains the issue-1372 change),
+  never by the ppm value alone.
+- The health signal is still a flat `buffered_ms` / `level_avg=` near `target=`.
