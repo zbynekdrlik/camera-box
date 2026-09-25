@@ -905,6 +905,27 @@ fn a_lost_display_is_rebuilt_bounded_and_the_teardown_never_hangs() {
         "issue 1346 review round 2: a rebuilt surface keeps the committed size and is re-checked for \
          present support"
     );
+    assert!(
+        rebuild.contains("g_drm_vk.retired_swapchain = g_drm_vk.swapchain;")
+            && rebuild.contains("g_drm_vk.retired_surface = g_drm_vk.surface;")
+            && setup.contains(".oldSwapchain = old_swapchain"),
+        "issue 1346 review round 3: a rebuild RETIRES the replaced swapchain (+ surface) -- its last \
+         present may still be queued -- instead of destroying it"
+    );
+    let swap_destroy = body_of(
+        &setup,
+        "static void drm_output_vk_destroy_swapchain(void)",
+        VK_SETUP_C,
+    );
+    assert!(
+        !swap_destroy.contains("vkDestroySemaphore("),
+        "issue 1346 review round 3: the present semaphores live across rebuilds"
+    );
+    assert!(
+        thread.contains("--g_drm_vk.retire_countdown == 0u")
+            && thread.contains("drm_output_vk_free_retired();"),
+        "issue 1346 review round 3: the retirees go after RETIRE_FRAMES later signalled fences"
+    );
     let surface = body_of(
         &setup,
         "static bool drm_output_vk_create_surface(bool rebuild)",

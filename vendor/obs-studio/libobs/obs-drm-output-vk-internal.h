@@ -131,6 +131,9 @@ struct drm_output_vk_gl {
  * ------------------------------------------------------------------------------------------------- */
 #define DRM_OUTPUT_VK_MAX_SWAP 8
 #define DRM_OUTPUT_VK_WAIT_NS 1000000000ull /* 1 s bound on every blocking Vulkan wait */
+/* A rebuilt presentation's old swapchain (+ surface) is freed only after this many later signalled
+ * copy fences -- its queued present may still wait on a semaphore -- or at the teardown's idle wait. */
+#define DRM_OUTPUT_VK_RETIRE_FRAMES 4u
 
 struct drm_output_vk_shared {
 	VkImage image;
@@ -165,6 +168,9 @@ struct drm_output_vk_state {
 	VkQueue queue;
 	uint32_t qfi;
 	VkSwapchainKHR swapchain;
+	VkSwapchainKHR retired_swapchain; /* replaced by a rebuild, freed later (see RETIRE_FRAMES) */
+	VkSurfaceKHR retired_surface;     /* replaced by a surface-lost rebuild, freed with it */
+	unsigned retire_countdown;        /* signalled fences left before the retired objects go */
 	VkImage swap_images[DRM_OUTPUT_VK_MAX_SWAP];
 	uint32_t n_swap;
 	VkSemaphore sem_done[DRM_OUTPUT_VK_MAX_SWAP];
@@ -210,3 +216,7 @@ void drm_output_vk_destroy_all(void);
  * replug. false = the display now offers a different mode size (the shared images no longer fit) or a
  * Vulkan call failed; the caller retries a bounded number of times, then gives up. */
 bool drm_output_vk_rebuild_presentation(bool surface_lost);
+
+/* obs-drm-output-vk-setup.c, present thread (after a signalled fence) or teardown: free a retired
+ * swapchain + surface (safe when none). */
+void drm_output_vk_free_retired(void);

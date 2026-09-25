@@ -373,8 +373,8 @@ from the per-box fact `STRIH_HDMI_OUTPUT_BACKEND` (strih-lx = `vk-direct`).
   image is NEVER overwritten:** the GL claim skips while one waits, so every GL signal is waited
   exactly once by the present thread and no GL-side semaphore wait exists. GOTCHA (live 25.9.2026):
   the first design kept the lease's "latest wins" overwrite and consumed the overwritten signal with a
-  GL-side `glWaitSemaphoreEXT` — under a publish burst that GL wait was still pending when Vulkan
-  waited the same binary semaphore (a spec violation); the copy never completed, the teardown leaked
+  GL-side `glWaitSemaphoreEXT` — under a publish burst the copy DEADLOCKED (observed; the likely cause
+  is the GL wait still pending when Vulkan waited the same binary semaphore): the copy never completed, the teardown leaked
   and the process hung at exit HOLDING the display (`vkAcquireXlibDisplayEXT` then returned -13 and
   `xrandr` could not re-enable HDMI-0 until the process was killed). Never reintroduce a GL-side
   consume wait. A skipped claim drops the NEWER frame (the lease drops the older one): one frame either
@@ -385,7 +385,10 @@ from the per-box fact `STRIH_HDMI_OUTPUT_BACKEND` (strih-lx = `vk-direct`).
 - **Bounded, and a replug is not the end:** the present loop's acquire/fence waits are 1 s and
   re-checked. `VK_ERROR_OUT_OF_DATE_KHR` / `VK_ERROR_SURFACE_LOST_KHR` (an HDMI or grabber replug)
   rebuild the swapchain (+ the display-plane surface when lost, or from the 2nd try on) with 10 tries
-  1 s apart, without any device wait; the committed mode never changes during a rebuild, and a display
+  1 s apart, without any device wait: the replaced swapchain (+ surface) is RETIRED (handed over as
+  `oldSwapchain`, freed after 4 later signalled fences or at the teardown) and the per-image present
+  semaphores live across rebuilds, so a still-queued present never waits a destroyed object; the
+  committed mode never changes during a rebuild, and a display
   that now offers a different size gives up by name (the shared images no longer fit — restart OBS).
   The teardown waits an outstanding copy bounded (5 x 1 s); a TIMEOUT LEAKS the Vulkan objects (and
   keeps the loader + X connection) with a loud line instead of hanging `obs_shutdown` — note the

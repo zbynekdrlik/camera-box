@@ -412,7 +412,7 @@ static bool drm_output_vk_create_device(void)
 
 /* The swapchain (+ its images and per-image present semaphores) at the current mode. Called at open
  * and by the rebuild. */
-static bool drm_output_vk_create_swapchain_only(void)
+static bool drm_output_vk_create_swapchain_only(VkSwapchainKHR old_swapchain)
 {
 	VkSurfaceCapabilitiesKHR caps;
 	if (g_drm_vk.vk.vkGetPhysicalDeviceSurfaceCapabilitiesKHR(g_drm_vk.pd, g_drm_vk.surface, &caps) != VK_SUCCESS)
@@ -465,7 +465,8 @@ static bool drm_output_vk_create_swapchain_only(void)
 					.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
 					/* FIFO = vblank-locked, never tearing (the only mode the spec guarantees). */
 					.presentMode = VK_PRESENT_MODE_FIFO_KHR,
-					.clipped = VK_TRUE};
+					.clipped = VK_TRUE,
+					.oldSwapchain = old_swapchain};
 	VkResult r = g_drm_vk.vk.vkCreateSwapchainKHR(g_drm_vk.device, &sci, NULL, &g_drm_vk.swapchain);
 	if (r != VK_SUCCESS) {
 		g_drm_vk.swapchain = VK_NULL_HANDLE;
@@ -481,10 +482,16 @@ static bool drm_output_vk_create_swapchain_only(void)
 	g_drm_vk.vk.vkGetSwapchainImagesKHR(g_drm_vk.device, g_drm_vk.swapchain, &n, g_drm_vk.swap_images);
 	g_drm_vk.n_swap = n;
 
+	/* The per-image present semaphores live across rebuilds (a retired swapchain's queued present may
+	 * still wait one; re-signalling a semaphore whose earlier wait is already submitted is valid): only
+	 * the missing slots are created, all of them go in the teardown. */
 	VkSemaphoreCreateInfo smci = {.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
 	for (uint32_t i = 0; i < n; i++)
-		if (g_drm_vk.vk.vkCreateSemaphore(g_drm_vk.device, &smci, NULL, &g_drm_vk.sem_done[i]) != VK_SUCCESS)
+		if (!g_drm_vk.sem_done[i] &&
+		    g_drm_vk.vk.vkCreateSemaphore(g_drm_vk.device, &smci, NULL, &g_drm_vk.sem_done[i]) != VK_SUCCESS) {
+			g_drm_vk.sem_done[i] = VK_NULL_HANDLE;
 			return false;
+		}
 	blog(LOG_INFO, "drm-output: vk-direct swapchain %ux%u FIFO images=%u format=%d", g_drm_vk.mode_w,
 	     g_drm_vk.mode_h, n, (int)fmt.format);
 	return true;
@@ -493,7 +500,7 @@ static bool drm_output_vk_create_swapchain_only(void)
 /* The swapchain + the per-vblank sync objects and command buffer (open only). */
 static bool drm_output_vk_create_swapchain(void)
 {
-	if (!drm_output_vk_create_swapchain_only())
+	if (!drm_output_vk_create_swapchain_only(VK_NULL_HANDLE))
 		return false;
 	VkSemaphoreCreateInfo smci = {.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
 	if (g_drm_vk.vk.vkCreateSemaphore(g_drm_vk.device, &smci, NULL, &g_drm_vk.sem_acquire) != VK_SUCCESS)
@@ -513,14 +520,10 @@ static bool drm_output_vk_create_swapchain(void)
 	return g_drm_vk.vk.vkAllocateCommandBuffers(g_drm_vk.device, &cbai, &g_drm_vk.cmd) == VK_SUCCESS;
 }
 
-/* Drop the swapchain + its present semaphores (the device must be idle). */
+/* Drop the current swapchain (the device must be idle -- the teardown). The present semaphores stay
+ * (destroy_all frees them). */
 static void drm_output_vk_destroy_swapchain(void)
 {
-	for (uint32_t i = 0; i < DRM_OUTPUT_VK_MAX_SWAP; i++) {
-		if (g_drm_vk.sem_done[i])
-			g_drm_vk.vk.vkDestroySemaphore(g_drm_vk.device, g_drm_vk.sem_done[i], NULL);
-		g_drm_vk.sem_done[i] = VK_NULL_HANDLE;
-	}
 	if (g_drm_vk.swapchain)
 		g_drm_vk.vk.vkDestroySwapchainKHR(g_drm_vk.device, g_drm_vk.swapchain, NULL);
 	g_drm_vk.swapchain = VK_NULL_HANDLE;
@@ -528,15 +531,34 @@ static void drm_output_vk_destroy_swapchain(void)
 	g_drm_vk.n_swap = 0;
 }
 
+void drm_output_vk_free_retired(void)
+{
+	if (g_drm_vk.retired_swapchain)
+		g_drm_vk.vk.vkDestroySwapchainKHR(g_drm_vk.device, g_drm_vk.retired_swapchain, NULL);
+	if (g_drm_vk.retired_surface)
+		g_drm_vk.vk.vkDestroySurfaceKHR(g_drm_vk.instance, g_drm_vk.retired_surface, NULL);
+	g_drm_vk.retired_swapchain = VK_NULL_HANDLE;
+	g_drm_vk.retired_surface = VK_NULL_HANDLE;
+	g_drm_vk.retire_countdown = 0;
+}
+
 bool drm_output_vk_rebuild_presentation(bool surface_lost)
 {
 	const uint32_t w = g_drm_vk.mode_w, h = g_drm_vk.mode_h;
-	/* No vkDeviceWaitIdle here (it cannot be bounded and halt() joins this thread): at both call sites the
-	 * present loop has seen its last copy's fence signalled, and nothing else is ever submitted. */
-	drm_output_vk_destroy_swapchain();
+	/* No device wait (it cannot be bounded and halt() joins this thread). The replaced swapchain -- whose
+	 * last present may still be queued, waiting a present semaphore -- is RETIRED, not destroyed: it is
+	 * handed to the new swapchain as oldSwapchain (same surface) and freed after RETIRE_FRAMES later
+	 * signalled fences or at the teardown. An older retiree still pending is freed first (a rebuild is at
+	 * least one loop iteration after it). */
+	drm_output_vk_free_retired();
+	g_drm_vk.retired_swapchain = g_drm_vk.swapchain;
+	g_drm_vk.swapchain = VK_NULL_HANDLE;
+	memset(g_drm_vk.swap_images, 0, sizeof(g_drm_vk.swap_images));
+	g_drm_vk.n_swap = 0;
+	g_drm_vk.retire_countdown = DRM_OUTPUT_VK_RETIRE_FRAMES;
 	if (surface_lost) {
-		if (g_drm_vk.surface)
-			g_drm_vk.vk.vkDestroySurfaceKHR(g_drm_vk.instance, g_drm_vk.surface, NULL);
+		/* the retired swapchain belongs to the old surface: retire both, free them together */
+		g_drm_vk.retired_surface = g_drm_vk.surface;
 		g_drm_vk.surface = VK_NULL_HANDLE;
 		if (!drm_output_vk_create_surface(true))
 			return false;
@@ -548,7 +570,7 @@ bool drm_output_vk_rebuild_presentation(bool surface_lost)
 			return false;
 		}
 	}
-	if (!drm_output_vk_create_swapchain_only()) {
+	if (!drm_output_vk_create_swapchain_only(surface_lost ? VK_NULL_HANDLE : g_drm_vk.retired_swapchain)) {
 		drm_output_vk_destroy_swapchain();
 		return false;
 	}
@@ -679,6 +701,12 @@ void drm_output_vk_destroy_all(void)
 		if (g_drm_vk.sem_acquire)
 			g_drm_vk.vk.vkDestroySemaphore(g_drm_vk.device, g_drm_vk.sem_acquire, NULL);
 		drm_output_vk_destroy_swapchain();
+		drm_output_vk_free_retired();
+		for (uint32_t i = 0; i < DRM_OUTPUT_VK_MAX_SWAP; i++) {
+			if (g_drm_vk.sem_done[i])
+				g_drm_vk.vk.vkDestroySemaphore(g_drm_vk.device, g_drm_vk.sem_done[i], NULL);
+			g_drm_vk.sem_done[i] = VK_NULL_HANDLE;
+		}
 		g_drm_vk.vk.vkDestroyDevice(g_drm_vk.device, NULL);
 	}
 	if (g_drm_vk.surface)

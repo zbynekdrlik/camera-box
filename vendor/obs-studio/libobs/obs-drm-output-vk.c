@@ -19,9 +19,10 @@
  *   - GL -> Vulkan: the per-image binary semaphore GL signals on publish; the present thread waits it
  *     exactly once (the first copy of that publish). The GL side NEVER overwrites a READY image (it
  *     skips the tick while one is waiting), so every signal is waited by the Vulkan side and no GL-side
- *     wait on the same semaphore exists. (A "latest wins" overwrite needs such a GL-side consume wait,
- *     which can still be pending when the Vulkan side waits the semaphore -- a spec violation that
- *     deadlocked the copy live under a publish burst on strih-lx, 25.9.2026.)
+ *     wait on the same semaphore exists. (The first design kept a "latest wins" overwrite and consumed
+ *     the overwritten signal with a GL-side glWaitSemaphoreEXT; that DEADLOCKED the copy live under a
+ *     publish burst on strih-lx, 25.9.2026 -- the likely cause is the GL wait still pending when the
+ *     Vulkan side waited the same binary semaphore. Removing every GL-side wait removes the question.)
  *   - Vulkan -> GL: the present thread waits its fence before it changes a role, so when an image
  *     leaves front/pending every Vulkan read of it has completed on the GPU — a later GL write is
  *     ordered after it without a second semaphore. Every copy acquires the image from
@@ -293,6 +294,8 @@ static void *drm_output_vk_present_thread(void *arg)
 			break; /* roles untouched: the copy may still read the image; the teardown quiesces */
 		g_drm_vk.vk.vkResetFences(g_drm_vk.device, 1, &g_drm_vk.fence);
 		g_drm_vk.submit_outstanding = false;
+		if (g_drm_vk.retire_countdown && --g_drm_vk.retire_countdown == 0u)
+			drm_output_vk_free_retired(); /* the replaced swapchain's last present has long completed */
 
 		/* Roles change only after the fence: every Vulkan read of the old front has completed, so the
 		 * GL side may overwrite it from now on. */
@@ -347,6 +350,7 @@ bool drm_output_vk_open(const char *output_name, uint32_t solid_argb)
 	g_drm_vk.scanout_live_logged = false;
 	g_drm_vk.gl_skips = 0;
 	g_drm_vk.submit_outstanding = false;
+	g_drm_vk.retire_countdown = 0;
 
 	if (!drm_output_vk_setup(output_name)) {
 		drm_output_vk_destroy_all();
@@ -578,6 +582,10 @@ bool drm_output_vk_publish_gl(int idx, unsigned int src_gl_name, uint32_t w, uin
 	g->SignalSemaphoreEXT(s->gl_sem, 0, NULL, 1, &s->gl_tex, &layout);
 	g->Flush(); /* the signal must be submitted before the present thread waits on it */
 
+	/* INVARIANT: want_frames is a one-way latch within one open (only halt() and a present-loop death clear
+	 * it; only open() sets it). A publish that loses the race below leaves a signalled image with no role
+	 * -- safe ONLY because nothing can publish again before the next open recreates every semaphore. A
+	 * future "restart the present loop" must first recreate (or drain) the shared semaphores. */
 	pthread_mutex_lock(&g_drm_vk.lock);
 	if (os_atomic_load_bool(&g_drm_vk.want_frames))
 		g_drm_vk.ready = idx;
