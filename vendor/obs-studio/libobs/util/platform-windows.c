@@ -411,6 +411,8 @@ void os_sleep_ms(uint32_t duration)
  *   apply an old segment to a count taken after a rebase -- no backwards step across threads.
  * - No API (it is in kernelbase.dll, not kernel32.dll), a failed read or a disabled adjustment
  *   gives rate 1/1: stock QPC behaviour. The first value equals the old raw-QPC ns.
+ * - os_gettime_discipline() publishes which of those outcomes the last read hit (part D: the
+ *   GENLOCK LOCK indicator shows DEGRADED when the clock fell back to raw QPC while dantesync runs).
  *
  * Rust authority: src/os_clock_discipline.rs. The executable parity gate
  * tests/os_clock_discipline_parity_1372.rs lifts this whole block and runs it on a fake Win32
@@ -501,20 +503,40 @@ static BOOL CALLBACK os_clk_resolve(PINIT_ONCE once, PVOID param, PVOID *context
 	return TRUE;
 }
 
+/* Part D: the outcome of the last adjustment read (enum os_gettime_discipline_state in platform.h),
+ * published for the GENLOCK LOCK indicator's media-clock term. Written only by the poller. */
+static volatile LONG os_clk_discipline = OS_GETTIME_DISCIPLINE_UNKNOWN;
+
 static void os_clk_read_rate(uint64_t *num, uint64_t *den)
 {
 	DWORD64 adjustment = 0;
 	DWORD64 increment = 0;
 	BOOL disabled = TRUE;
+	LONG discipline;
 
 	InitOnceExecuteOnce(&os_clk_resolve_once, os_clk_resolve, NULL, NULL);
-	if (!os_clk_get_adjustment || !os_clk_get_adjustment(&adjustment, &increment, &disabled)) {
+	if (!os_clk_get_adjustment) {
+		discipline = OS_GETTIME_DISCIPLINE_API_MISSING;
+	} else if (!os_clk_get_adjustment(&adjustment, &increment, &disabled)) {
 		adjustment = 0;
 		increment = 0;
 		disabled = TRUE;
+		discipline = OS_GETTIME_DISCIPLINE_READ_FAILED;
+	} else if (disabled != FALSE || adjustment == 0 || increment == 0) {
+		discipline = OS_GETTIME_DISCIPLINE_DISABLED;
+	} else {
+		discipline = OS_GETTIME_DISCIPLINE_ACTIVE;
 	}
+	InterlockedExchange(&os_clk_discipline, discipline);
 
 	os_clk_rate_from_adjustment(adjustment, increment, disabled != FALSE, num, den);
+}
+
+/* Part D: whether os_gettime_ns() currently runs at the disciplined rate (ACTIVE) or fell back to
+ * raw QPC, and why. UNKNOWN until the first poll. */
+int os_gettime_discipline(void)
+{
+	return (int)os_clk_discipline; /* an aligned LONG read is atomic */
 }
 
 /* A consistent (segment, counter) pair. The counter is read between the two sequence reads, so if
