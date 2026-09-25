@@ -271,13 +271,23 @@ change ships only that way) read `obs_dll_sha256 DRIFT` and refused the release 
     legitimately carry a later `distroav-fast-dll` hot-swap (`windows-genlock-fast.yml`), so no
     "enforce distroav when obs.dll matched the alternate" rule is safe either.
   - An `alt_manifest=` given WITHOUT `manifest=` (the fast fetch failed and the full one succeeded)
-    is PROMOTED to the primary and judged exactly like a lone `manifest=` today. This is the main
-    design's explicit fail-closed choice, and its cost is known: a CORRECT fast-deployed box then
-    REFUSES (obs.dll DRIFT, and distroav is enforced against the full manifest), while a TOTAL fetch
-    outage leaves the facet dormant and passes (the #1100 contract). The alternative raised in review
-    (tell "no fast run at this sha" apart from "fast fetch failed", promote only the former) was left
-    to the main. The realistic trigger is a transient gh error; the fast workflow's `-L 100` window
-    spanned 7 weeks on 25.9.2026.
+    is PROMOTED to the primary and judged exactly like a lone `manifest=` (an engine property).
+    The E2E only ever hands the gate a lone full manifest for a FULL-ONLY build -- the main's ruling
+    (ROZHODNUTÉ, issue comment 5829099220), decided in `scripts/lib/manifest-autosource.sh` BEFORE
+    the gate runs:
+    - `manifest_autosource_run_state REPO WORKFLOW SHA` -> `found` / `none` / `unknown`: a successful
+      run of the workflow at the marker sha, via the server-side `gh run list --commit SHA --status
+      success` filter (independent of the fetch's `-L 100` recency window), time-bounded. Any lookup
+      failure or a missing sha is `unknown`, never `none`.
+    - `win_manifest_pair_decide FAST FULL STATE` (pure, two stdout lines primary/alternate):
+      fast fetched -> fast primary + full alternate; no fast + full + `none` -> a FULL-ONLY build,
+      full judged alone (logged); no fast + full + `found`/`unknown` -> a FETCH OUTAGE, the byte pin
+      is OMITTED for this run with a loud `WARNING` (the pre-existing outage semantics), never the
+      full manifest alone (which would refuse a correctly fast-deployed box); neither -> dormant.
+    - `win_manifest_pair_resolve` runs the lookup only in the no-fast-but-full case, and
+      `recording-e2e.sh` calls it once (`{ read -r AUTO_WIN_MANIFEST; read -r
+      AUTO_WIN_ALT_MANIFEST; } < <(win_manifest_pair_resolve …)`) after the full fetch. An
+      operator-pinned `VERSION_GATE_MANIFEST` passes through unchanged (no alternate, no lookup).
   - A supplied alternate that does not exist is a usage error (exit 1), like a missing `manifest=`.
   - With NO alternate every line and exit code is byte-identical to before. This is pinned by
     `compare_single_manifest_obs_dll_lines_are_byte_identical_1346` in `tests/drift_guard.rs`.
