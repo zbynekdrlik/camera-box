@@ -461,9 +461,11 @@ fn assert_band_change(name: &str, sc: Scenario, latched: &[u64]) -> Run {
     // the slew window itself (review round 2): the audio walks onto the new hold at 1 ms per second,
     // so for ~33 s after a one-frame re-time it trails the video by up to one frame. Bounded by the
     // songplayer A/V gate (40 ms), measured (not vacuous), and over within 40 s of slewing.
-    // the START of the slew is inside the measurement: a one-frame re-time begins ~33 ms apart.
+    // the START of the slew is inside the measurement: a one-frame re-time begins one frame
+    // (33.3 ms) apart, so the peak must reach that minus the residual (a sampling that started even
+    // a second late reads <= 32.3 ms).
     assert!(
-        r.slew_av_ticks > 0 && r.max_abs_av_slew_ms >= 30.0,
+        r.slew_av_ticks > 0 && r.max_abs_av_slew_ms >= 32.5,
         "{name}: the start of the slew window was not measured: {r:?}"
     );
     assert!(

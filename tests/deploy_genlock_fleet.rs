@@ -1583,7 +1583,7 @@ fn imag_program_writes_the_min_latency_marker_before_the_restart_1367() {
         .unwrap_or_else(|| panic!("the imag leg must write the min-latency marker (issue 1367):\n{p}"));
     assert!(
         p.contains("IMAG_USER=\"${SUDO_USER:-newlevel}\"")
-            && p.contains("IMAG_HOME=\"$(getent passwd \"$IMAG_USER\" | cut -d: -f6)\""),
+            && p.contains("IMAG_HOME=\"$(getent passwd \"$IMAG_USER\" | cut -d: -f6 || true)\""),
         "the marker belongs to the desktop user the program acts as (issue 1367):\n{p}"
     );
     let restart = p
@@ -1599,6 +1599,12 @@ fn imag_program_writes_the_min_latency_marker_before_the_restart_1367() {
     assert!(
         p.contains("[ -n \"$IMAG_HOME\" ] || { echo \"#789 IMAG FAIL: no home directory for $IMAG_USER (getent)\" >&2; exit 4; }"),
         "an empty getent home must fail the deploy (issue 1367):\n{p}"
+    );
+    // review round 4: under the program's set -e a FAILING lookup (missing user) would exit silently
+    // before the guard -- both lookups swallow their rc and fail through a NAMED line instead.
+    assert!(
+        p.contains("IMAG_UID=\"$(id -u \"$IMAG_USER\" 2>/dev/null || true)\"; [ -n \"$IMAG_UID\" ] || { echo \"#789 IMAG FAIL: no such user $IMAG_USER\" >&2; exit 4; }"),
+        "a missing desktop user must fail the deploy with a named line (issue 1367):\n{p}"
     );
     assert!(
         p.contains("rm -f \"$IMAG_HOME/.config/obs-studio/.sentinel/\"*")
