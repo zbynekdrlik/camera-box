@@ -722,9 +722,11 @@ DIFFERENT from every other node's (burn id vs optical tick):
 
 ## #463 — adding a Nth burn corner: FOUR independent places have to agree
 
-**issue 1370 adds a FIFTH:** `src/burn_regions.rs` (the burn-isolated recovery slot table,
-`BurnSlot` + `slot_rect` + `slot_for_run_id`), pinned by probe-gated parity tests in
-`src/probe/burn_region_decode.rs`. See `.claude/rules/burn-region-recovery.md`.
+**issue 1370 changed mirror 2:** `src/burn_regions.rs` (`BurnSlot` + `slot_rect` +
+`slot_for_run_id`) is now the ONE Rust copy. `colour_sample::node_burn_exclusions` pads its slots
+by 6 px, and the burn-isolated decode recovery crops them. It is pinned to the shipped
+`burn-geom.hpp` by `tests/burn_regions_cpp_parity_1370.rs`. See
+`.claude/rules/burn-region-recovery.md`.
 
 Adding imag's `Corner::BottomCenterLeft` (a 4th burn corner, after cam1-center + strih-BL +
 stream-BR) touches FOUR separate implementations of "where does this burn sit" — miss one and

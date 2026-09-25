@@ -7,6 +7,7 @@ paths:
   - "src/probe/recording_latency.rs"
   - "vendor/distroav/src/burn-geom.hpp"
   - "tests/burn_reframed_fixture_decode_1370.rs"
+  - "tests/burn_regions_cpp_parity_1370.rs"
 ---
 
 # Burn-isolated slot recovery — a crisp node burn decodes whatever the camera shows (issue 1370)
@@ -44,24 +45,31 @@ nothing foreign in it for rqrr to group with.
 - The 2x CatmullRom look runs only when the 1x crop read no burn of that slot. One slot carries one
   burn, so a slot that read the deployed camera's burn never gets a 2x look for the other cams.
 - An id without a reserved slot is never localized: SongPlayer 911014 is painted by the sender,
-  911013 is optical content, and an operator `--burn-*-run-id` override has no slot.
+  911013 is optical content, and an operator `--burn-*-run-id` override has no slot. A
+  non-reserved expected id logs ONE warning per process, so an override is not a silent loss.
+- The verdict log line `recording analysis complete` carries `burn_region_recoveries`: how many
+  burns only the slot crops read. A large count means the camera view pushed optical content into
+  the burn tiles.
 
-## Adding a node burn or corner — `burn_regions` is now ONE MORE mirror
+## Adding a node burn or corner — `burn_regions` is the ONE Rust copy
 
-The #463 four-mirror list in `.claude/skills/recording-decode` gains a fifth entry:
-`src/burn_regions.rs`.
+`src/burn_regions.rs` holds the Rust burn geometry for both the recovery pass and the colour gate's
+burn dodge. `colour_sample::node_burn_exclusions` is now just its slots padded by 6 px, so the
+colour gate's former hand-copy of the corner math is gone.
 - A new run_id goes into `slot_for_run_id`.
-- A new corner goes into `BurnSlot` and `slot_rect`, including any fallback tier.
+- A new corner goes into `BurnSlot` and `slot_rect`, including any fallback tier and the
+  `band_cy` rounding (an odd side sits 1 px lower than `h - margin - side`).
 
-The probe-gated parity tests in `src/probe/burn_region_decode.rs` fail when this table drifts:
-- `corner_slots_match_the_colour_sample_burn_geom_mirror_1370` — corners vs
-  `colour_sample::node_burn_exclusions` on 1080, 720p, 4K and narrow canvases;
-- `camera_slot_matches_the_cam1_burn_writer_at_the_design_height_1370`;
-- `slot_ids_match_the_reserved_burn_run_ids_1370`.
+Two pins catch drift:
+- `tests/burn_regions_cpp_parity_1370.rs` (default features, needs `c++`) compiles the shipped
+  `burn-geom.hpp` and checks every corner on 1080, 720p, 4K and narrow canvases.
+- the probe-gated tests in `src/probe/burn_region_decode.rs`:
+  `camera_slot_matches_the_cam1_burn_writer_at_the_design_height_1370` and
+  `slot_ids_match_the_reserved_burn_run_ids_1370`.
 
-On a height other than 1080, the camera slot deliberately differs from `colour_sample`'s native
-320 px. The camera burn is rendered on the 1080 capture frame, so it scales with the canvas it
-lands in.
+The camera slot scales with the frame height, because the camera burn is rendered on the 1080
+capture frame. Every colour-gate caller passes the 1920x1080 painter canvas, where the slot is
+exactly `qr::cam1_burn_origin(320)`.
 
 ## Verifying a decode change here at Tier-0 (no cargo)
 
@@ -77,6 +85,7 @@ The probe path compiles at CI only, but the REAL rqrr can run locally:
    production decode of those exact pixels — never on a resized replica.
 
 The glue can also be type-checked and clippy-linted: mount the real module through `#[path]` in a
-test crate, with stub `image`/`tracing` rlibs shaped like the used API. The issue-1370 lane measured this
-way: across every pixel proof of run 68573319 (65 frames), the 1x slot crops read all 13 burns the
-production decode had missed.
+test crate, with stub `image`/`tracing` rlibs shaped like the used API. Measured this way in
+the issue-1370 lane: across every pixel proof of run 68573319 (65 frames), the 1x slot crops read
+all 13 burns the production decode had missed. (That is a sample; the run's 280 slots are proven
+fixed only by a post-merge E2E whose BURN-UNREADABLE count drops.)

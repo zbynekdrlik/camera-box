@@ -50,14 +50,6 @@ pub const PAINTER_CANVAS_H: u32 = 1080;
 /// bottom-anchored burns, so no patch loses pixels regardless.
 const BURN_EXCLUSION_PAD_PX: u32 = 6;
 
-/// Canvas-height fraction of the strih/stream corner burn QR (mirrors
-/// `burn_geom::BURN_QR_HEIGHT_FRACTION`).
-const CORNER_BURN_HEIGHT_FRACTION: f64 = 0.28;
-
-/// Canvas-height fraction of the corner burn edge margin (mirrors `burn_geom::BURN_MARGIN_FRACTION`
-/// = 40/1080).
-const CORNER_BURN_MARGIN_FRACTION: f64 = 40.0 / 1080.0;
-
 /// Default number of frames sampled across a recording for the colour gate. The colour scale is
 /// static reference content and a real colour defect is persistent, so a handful of frames spread
 /// across the clip is sufficient and bounds the cost independent of the recording's length.
@@ -78,98 +70,15 @@ fn pad_rect(r: Rect, pad: u32, canvas_w: u32, canvas_h: u32) -> Rect {
 }
 
 /// The burn rectangles to DODGE when sampling the colour column on a `canvas_w`×`canvas_h` frame:
-/// the cam1 capture burn (center-bottom) and the strih/stream/imag corner burns (bottom-left /
-/// bottom-right / bottom-center-left, #463). Each is computed from the SAME geometry the writers
-/// use (`qr::cam1_burn_origin` and `burn_geom::corner_placement`), then padded by
-/// [`BURN_EXCLUSION_PAD_PX`]. Empty for a canvas too small to carry the burns.
+/// the cam1 capture burn (center-bottom) and the strih/stream/imag/cg corner burns (bottom-left /
+/// bottom-right / bottom-center-left #463 / bottom-center-right #1301). Issue 1370: these are the
+/// [`crate::burn_regions`] slots — the ONE Rust copy of the writers' geometry, pinned to the shipped
+/// `burn-geom.hpp` and to `qr::cam1_burn_origin` — padded by [`BURN_EXCLUSION_PAD_PX`]. Order: cam,
+/// BL, BR, BCL, BCR. Empty for an empty canvas.
 pub fn node_burn_exclusions(canvas_w: u32, canvas_h: u32) -> Vec<Rect> {
-    if canvas_w == 0 || canvas_h == 0 {
-        return Vec::new();
-    }
-    let mut rects = Vec::with_capacity(5);
-
-    // cam1 capture burn — horizontally centered, bottom-anchored (qr::cam1_burn_origin geometry).
-    let cam1_px = qr::CAM1_BURN_QR_PX.min(canvas_w).min(canvas_h);
-    let (cx, cy) = qr::cam1_burn_origin(canvas_w, canvas_h, cam1_px, cam1_px);
-    rects.push(Rect {
-        x: cx,
-        y: cy,
-        w: cam1_px,
-        h: cam1_px,
-    });
-
-    // strih (bottom-left) + stream (bottom-right) + imag (bottom-center-left, #463) corner
-    // burns — burn_geom::corner_placement (vendor/distroav/src/burn-geom.hpp), mirrored exactly
-    // including its in-frame clamp fallback for a degenerate tiny canvas.
-    let margin = ((CORNER_BURN_MARGIN_FRACTION * canvas_h as f64) as u32).max(8);
-    let mut side = (CORNER_BURN_HEIGHT_FRACTION * canvas_h as f64) as u32;
-    side = side.max(64);
-    let max_w = canvas_w.saturating_sub(2 * margin).max(1);
-    let max_h = canvas_h.saturating_sub(2 * margin).max(1);
-    side = side.min(max_w).min(max_h).max(1);
-    // Bottom edge sits at canvas_h - margin; top = bottom - side.
-    let top = canvas_h.saturating_sub(margin).saturating_sub(side);
-    // bottom-left (strih)
-    rects.push(Rect {
-        x: margin,
-        y: top,
-        w: side,
-        h: side,
-    });
-    // bottom-right (stream)
-    let right_x = canvas_w.saturating_sub(margin).saturating_sub(side);
-    rects.push(Rect {
-        x: right_x,
-        y: top,
-        w: side,
-        h: side,
-    });
-    // bottom-center-left (imag, #463): one `margin` clear of the bottom-left burn's trailing
-    // edge (`margin + side`) — mirrors `burn_geom::Corner::BottomCenterLeft` exactly, INCLUDING
-    // its 2-tier fallback (review fix): flushing straight to the frame's right edge on a
-    // too-narrow canvas could land back inside the bottom-left rect itself (overlapping
-    // exclusion rects would leave a hole in the dodge). Tier 2 flushes against the bottom-left
-    // rect's own trailing edge instead (zero overlap, zero gap); only a canvas too small to
-    // hold even that falls through to the frame edge (tier 3, last resort).
-    let bcl_x_wanted = margin.saturating_add(side).saturating_add(margin);
-    let bcl_x_tier2 = margin.saturating_add(side); // flush against the bottom-left rect's edge
-    let bcl_x = if bcl_x_wanted.saturating_add(side) <= canvas_w {
-        bcl_x_wanted
-    } else if bcl_x_tier2.saturating_add(side) <= canvas_w {
-        bcl_x_tier2
-    } else {
-        canvas_w.saturating_sub(side)
-    };
-    rects.push(Rect {
-        x: bcl_x,
-        y: top,
-        w: side,
-        h: side,
-    });
-    // bottom-center-right (cg OBS, #1301): the MIRROR of bottom-center-left from the RIGHT — one
-    // `margin` clear of the bottom-right (stream) burn's LEFT edge, so cg never collides with
-    // stream's corner. Mirrors `burn_geom::Corner::BottomCenterRight` exactly, INCLUDING its
-    // right-anchored 3-tier fallback (tier 1 = full margin gap; tier 2 = flush against the
-    // bottom-right rect's left edge; tier 3 = frame-left last resort on a degenerate canvas).
-    // The cg burn can appear on a strih/stream recording during a CG_CHAIN run, so the colour
-    // sampler must dodge it belt-and-braces exactly like the other four corner burns.
-    let right_burn_x = canvas_w.saturating_sub(margin).saturating_sub(side); // bottom-right band_x
-    let bcr_x = if right_burn_x > margin.saturating_add(side) {
-        right_burn_x - margin - side // tier 1
-    } else {
-        // tier 2: flush against bottom-right's left edge; saturates to tier 3 (frame-left, 0)
-        // on a degenerate canvas -- same three tiers as burn_geom, clippy-clean shape.
-        right_burn_x.saturating_sub(side)
-    };
-    rects.push(Rect {
-        x: bcr_x,
-        y: top,
-        w: side,
-        h: side,
-    });
-
-    rects
-        .into_iter()
+    crate::burn_regions::BurnSlot::ALL
+        .iter()
+        .filter_map(|&slot| crate::burn_regions::slot_rect(slot, canvas_w, canvas_h))
         .map(|r| pad_rect(r, BURN_EXCLUSION_PAD_PX, canvas_w, canvas_h))
         .collect()
 }

@@ -27,13 +27,15 @@
 //!
 //! It lives in its own module rather than in `qr.rs` (already over the ~1000-line budget). The
 //! pure slot geometry is the Tier-0 [`crate::burn_regions`]; this is the thin probe-gated decode
-//! glue plus the parity pins of that table against the existing probe-side mirrors.
+//! glue plus the probe-gated pins of that table against the camera-burn writer (`probe::qr`) and
+//! the reserved run_ids (`probe::recording_latency`).
 
 use crate::burn_regions::{recovery_crop, recovery_slots, slot_for_run_id};
 use crate::probe::payload::Payload;
 use crate::probe::qr::{decode_qr_luma_all, merge_payloads};
+use crate::probe::recording_latency::{AUX_TICK_RUN_ID, BURN_RUN_ID_SONGPLAYER};
 use image::GrayImage;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 /// The upscale factor of the second, conditional look at a slot crop. The 1x crop already reads
 /// every burn on the real run-68573319 frames. The 2x look (the #202 idea: bigger modules for
@@ -92,6 +94,7 @@ pub fn recover_missing_burns(
 /// Decode each slot that can hold one of `missing_run_ids` from its isolated crop and merge the
 /// crop's payloads of those ids into `out` (see the module doc for the contract).
 pub fn burn_region_passes(img: &GrayImage, missing_run_ids: &[u32], out: &mut Vec<Payload>) {
+    warn_once_on_unlocalized(missing_run_ids);
     let (w, h) = (img.width(), img.height());
     for slot in recovery_slots(missing_run_ids) {
         // The missing ids this slot holds (an id without a fixed slot is never localized).
@@ -143,6 +146,28 @@ pub fn burn_region_passes(img: &GrayImage, missing_run_ids: &[u32], out: &mut Ve
     }
 }
 
+/// Log ONCE per process when an expected burn run_id is not a reserved id at all (an operator
+/// `--burn-*-run-id` override), so the pass silently skipping it stays visible. The reserved ids
+/// without a fixed overlay slot (SongPlayer, the painted aux marks) are expected and not logged.
+fn warn_once_on_unlocalized(missing_run_ids: &[u32]) {
+    static WARNED: AtomicBool = AtomicBool::new(false);
+    let unlocalized: Vec<u32> = missing_run_ids
+        .iter()
+        .copied()
+        .filter(|&id| {
+            slot_for_run_id(id).is_none() && id != BURN_RUN_ID_SONGPLAYER && id != AUX_TICK_RUN_ID
+        })
+        .collect();
+    if !unlocalized.is_empty() && !WARNED.swap(true, Ordering::Relaxed) {
+        tracing::warn!(
+            run_ids = ?unlocalized,
+            "issue 1370: expected burn run_id(s) that are not reserved ids (an operator \
+             --burn-*-run-id override?) have no overlay slot — the burn-isolated slot recovery \
+             cannot look for them (logged once per process)"
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -150,16 +175,16 @@ mod tests {
         slot_rect, BurnSlot, CAM_BURN_BOTTOM_MARGIN_PX, CAM_BURN_DESIGN_H, CAM_BURN_QR_PX,
     };
     use crate::colour_scale::Rect;
-    use crate::probe::colour_sample::node_burn_exclusions;
     use crate::probe::luma::bgra_to_luma;
     use crate::probe::qr::{
         cam1_burn_origin, render_payload_qr, render_qr_dual_bgra, CAM1_BURN_BOTTOM_MARGIN_PX,
         CAM1_BURN_QR_PX,
     };
+    // AUX_TICK_RUN_ID + BURN_RUN_ID_SONGPLAYER come in through `super::*`.
     use crate::probe::recording_latency::{
-        AUX_TICK_RUN_ID, BURN_RUN_ID_CAM1, BURN_RUN_ID_CAM2, BURN_RUN_ID_CAM3, BURN_RUN_ID_CAM4,
-        BURN_RUN_ID_CAM5, BURN_RUN_ID_CAM6, BURN_RUN_ID_CAM7, BURN_RUN_ID_CG, BURN_RUN_ID_IMAG,
-        BURN_RUN_ID_SONGPLAYER, BURN_RUN_ID_STREAM, BURN_RUN_ID_STRIH,
+        BURN_RUN_ID_CAM1, BURN_RUN_ID_CAM2, BURN_RUN_ID_CAM3, BURN_RUN_ID_CAM4, BURN_RUN_ID_CAM5,
+        BURN_RUN_ID_CAM6, BURN_RUN_ID_CAM7, BURN_RUN_ID_CG, BURN_RUN_ID_IMAG, BURN_RUN_ID_STREAM,
+        BURN_RUN_ID_STRIH,
     };
 
     const CAMERA_IDS: [u32; 7] = [
@@ -308,51 +333,9 @@ mod tests {
         assert_eq!(out, already);
     }
 
-    // ---- parity pins: the Tier-0 slot table vs the probe-side mirrors ----
-
-    /// `colour_sample`'s own pad (its private `BURN_EXCLUSION_PAD_PX` = 6, clamped to the frame).
-    fn pad6(r: Rect, w: u32, h: u32) -> Rect {
-        let x = r.x.saturating_sub(6);
-        let y = r.y.saturating_sub(6);
-        Rect {
-            x,
-            y,
-            w: (r.x + r.w + 6).min(w) - x,
-            h: (r.y + r.h + 6).min(h) - y,
-        }
-    }
-
-    #[test]
-    fn corner_slots_match_the_colour_sample_burn_geom_mirror_1370() {
-        // Production, 720p, 4K, and narrow 1080-high canvases that reach every BCL/BCR tier.
-        let canvases = [
-            (1920, 1080),
-            (1280, 720),
-            (3840, 2160),
-            (1200, 1080),
-            (900, 1080),
-            (650, 1080),
-            (600, 1080),
-            (500, 1080),
-        ];
-        let corners = [
-            BurnSlot::BottomLeft,
-            BurnSlot::BottomRight,
-            BurnSlot::BottomCenterLeft,
-            BurnSlot::BottomCenterRight,
-        ];
-        for (w, h) in canvases {
-            let ex = node_burn_exclusions(w, h);
-            assert_eq!(ex.len(), 5, "{w}x{h}: cam + four corner burns");
-            for (i, &slot) in corners.iter().enumerate() {
-                assert_eq!(
-                    pad6(slot_rect(slot, w, h).unwrap(), w, h),
-                    ex[i + 1],
-                    "{w}x{h} {slot:?} must equal the colour_sample mirror"
-                );
-            }
-        }
-    }
+    // ---- parity pins: the Tier-0 slot table vs the probe-side writers and ids ----
+    // (The corner slots are pinned to the shipped burn-geom.hpp by
+    // tests/burn_regions_cpp_parity_1370.rs, which runs on default features.)
 
     #[test]
     fn camera_slot_matches_the_cam1_burn_writer_at_the_design_height_1370() {
@@ -372,7 +355,6 @@ mod tests {
                 Some(want),
                 "{w}x{h}"
             );
-            assert_eq!(pad6(want, w, h), node_burn_exclusions(w, h)[0], "{w}x{h}");
         }
     }
 

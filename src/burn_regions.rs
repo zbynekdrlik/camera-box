@@ -14,18 +14,21 @@
 //! view put the optical dual-QR and the aux marks into the cam1 burn's tile). A lone crisp QR in
 //! its own crop has no foreign capstones to group with.
 //!
-//! ## One table, pinned to the existing mirrors
+//! ## The ONE Rust copy of the burn geometry, pinned to the shipped C++
 //!
 //! - The corner slots reproduce `burn_geom::corner_placement` exactly, including the narrow-canvas
-//!   fallback tiers. They are canvas-relative (a fraction of the frame height), so they hold on
-//!   any recording size.
+//!   fallback tiers and the `band_cy` rounding of an odd side. They are canvas-relative (a
+//!   fraction of the frame height), so they hold on any recording size.
 //! - The camera slot equals `qr::cam1_burn_origin` with `CAM1_BURN_QR_PX` = 320 and a 24 px bottom
 //!   margin on the 1080-high design frame. The camera burn is rendered on the 1080 capture frame,
 //!   so on a recording of another height the slot scales with the height (640 px on 4K). A smaller
 //!   burn stays inside the centred, bottom-anchored slot.
-//! - The probe-gated tests in `src/probe/burn_region_decode.rs` pin this table against
-//!   `probe::colour_sample::node_burn_exclusions` (the Rust `burn_geom` mirror), the
-//!   `probe::qr` camera-burn constants and the `probe::recording_latency::BURN_RUN_ID_*` ids.
+//! - Consumers: the recovery pass (`probe::burn_region_decode`) and the colour gate's burn dodge
+//!   (`probe::colour_sample::node_burn_exclusions`, the slots padded by 6 px).
+//! - Pins: `tests/burn_regions_cpp_parity_1370.rs` compiles the shipped `burn-geom.hpp` and checks
+//!   every corner on production, 720p, 4K and narrow canvases (default features). The probe-gated
+//!   tests in `src/probe/burn_region_decode.rs` check the camera slot against the `probe::qr`
+//!   writer and the run_id map against `probe::recording_latency::BURN_RUN_ID_*`.
 //!
 //! ## Why this lives at the crate root (default features)
 //!
@@ -150,7 +153,15 @@ pub fn slot_rect(slot: BurnSlot, frame_w: u32, frame_h: u32) -> Option<Rect> {
         .min(max_w)
         .min(max_h)
         .max(1);
-    let top = frame_h.saturating_sub(margin).saturating_sub(side);
+    // `burn_qr::render` centres the square on `band_cy` (bottom edge at `frame_h - margin`), so an
+    // odd side sits 1 px lower than `frame_h - margin - side` — mirror the C++ rounding exactly.
+    let half = side / 2;
+    let band_cy = if frame_h > margin + half {
+        frame_h - margin - half
+    } else {
+        half
+    };
+    let top = band_cy - half;
     let right_x = frame_w.saturating_sub(margin).saturating_sub(side);
     let x = match slot {
         BurnSlot::BottomLeft => margin,
@@ -241,6 +252,16 @@ mod tests {
     }
 
     #[test]
+    fn an_odd_burn_side_is_centred_on_band_cy_like_burn_geom() {
+        // 720p: margin 40/1080*720 = 26.67 -> 26, side 0.28*720 = 201.6 -> 201 (odd), half 100,
+        // band_cy 720-26-100 = 594, top 594-100 = 494 (not 720-26-201 = 493).
+        let r = slot_rect(BurnSlot::BottomLeft, 1280, 720).unwrap();
+        assert_eq!(r, rect(26, 494, 201, 201));
+        // The square still ends at or above frame_h - margin + 1 and stays in frame.
+        assert!(r.y + r.h <= 720);
+    }
+
+    #[test]
     fn no_two_slots_overlap_and_every_slot_is_in_frame() {
         for (w, h) in [(1920, 1080), (3840, 2160), (1280, 720)] {
             let rects: Vec<Rect> = BurnSlot::ALL
@@ -264,9 +285,9 @@ mod tests {
 
     #[test]
     fn narrow_canvas_uses_the_burn_geom_fallback_tiers() {
-        // 1080 high, margin 40, side 302. On 900 wide BCL cannot keep its gap (382+302 = 684 fits,
-        // wanted tier) -> tier 1; on 650 wide: wanted 684 > 650, flush 342+302 = 644 <= 650 -> tier
-        // 2 at 342; on 600 wide: flush 644 > 600 -> tier 3 at 600-302 = 298.
+        // 1080 high, margin 40, side 302. On 900 wide BCL keeps its full gap (382+302 = 684 fits)
+        // -> tier 1; on 650 wide: wanted 684 > 650, flush 342+302 = 644 <= 650 -> tier 2 at 342;
+        // on 600 wide: flush 644 > 600 -> tier 3 at 600-302 = 298.
         let bcl = |w| slot_rect(BurnSlot::BottomCenterLeft, w, 1080).unwrap().x;
         assert_eq!(bcl(900), 382);
         assert_eq!(bcl(650), 342);
@@ -295,8 +316,7 @@ mod tests {
                 );
             }
         }
-        // On 1080 the camera crop is the slot grown by 8 px each way; at the bottom the crop
-        // stops at the frame edge.
+        // On 1080 the camera crop is the slot grown by 8 px each way.
         assert_eq!(
             recovery_crop(BurnSlot::CameraCapture, 1920, 1080),
             Some(rect(792, 728, 336, 336))
