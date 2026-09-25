@@ -666,6 +666,19 @@ def test_the_stderr_is_honest_for_bursty_streams():
     assert faults == 0
 
 
+def test_two_late_originals_back_to_back_are_stragglers_not_restarts():
+    """Review round 5: a second late ORIGINAL far below the head decided the lookahead ("") and two
+    stragglers arriving together booked 3 jumps + 2 phantom lost frames (1.8e-4: a false FAULT)."""
+    base = {f: tt for tt, f in _gen(11280)}
+    for moves in ([(4600, 1000), (4700, 2000)], [(4700, 1000), (4600, 2000)],
+                  [(4600, 1000), (4900, 2000)], [(4600, 1000)]):
+        t = dict(base)
+        for f, off in moves:
+            t[f] = base[6000] + off  # arrives right after counter 6000, ~7 s late
+        m = _measure(sorted((tt, f) for f, tt in t.items()))
+        assert m["jumps"] == 0 and m["lost"] == 0, (moves, m["jumps"], m["lost"], m["segments"])
+
+
 def test_a_restart_at_segment_start_is_still_a_jump_through_jitter():
     for seed in range(4):
         base = _gen(3000, start=0, burst=(1, 3), jitter_ns=5e6, seed=seed)
