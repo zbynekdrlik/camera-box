@@ -1718,7 +1718,7 @@ echo "  #1311: netconsole (kernel printk -> ${REMOTE_LOG_DEV1_IP}:${REMOTE_LOG_N
 # two boxes rig-mode.sh stops+disables, issue 1311) installed DISABLED, every other box enabled;
 # EVENT = enabled. MUST sit in the rw window, BEFORE STEP 18's ro flip. A failure is RECORDED
 # (RELAY_PROBLEM) and STEP 19 refuses Setup Complete -- never an abort before the ro fstab (the
-# STEP 17d pattern). verify-device.sh (ao) grades the result after the reboot.
+# UEFI-entry sub-step pattern). verify-device.sh (ao) grades the result after the reboot.
 echo ""
 echo -e "${GREEN}[bkshading-relay] Provisioning the bkshading shading relay (issue 808, --rig-mode ${RIG_MODE_ARG})...${NC}"
 RELAY_PROBLEM=""

@@ -27,12 +27,15 @@ ci_run_newest_success_filter() {
   printf '%s\n' '[.[] | select(.conclusion == "success")] | sort_by(.createdAt) | reverse | .[] | "\(.databaseId) \(.createdAt) \(.headSha)"'
 }
 
-# ci_run_has_artifact REPO RUN_ID ARTIFACT -> 0 iff that run lists a non-expired ARTIFACT.
+# ci_run_has_artifact REPO RUN_ID ARTIFACT -> 0 = the run lists a non-expired ARTIFACT, 1 = it does
+#   not, 2 = the artifact list could NOT be read (a gh/api failure). The caller must stop on 2: moving
+#   on to an older run there would be exactly the stale pick this lib exists to prevent.
 ci_run_has_artifact() {
   local repo="$1" run="$2" art="$3" gh="${CI_RUN_RESOLVE_GH:-gh}" names
   names="$("$gh" api "repos/$repo/actions/runs/$run/artifacts?per_page=100" \
-    --jq '.artifacts[] | select(.expired | not) | .name' 2>/dev/null)" || return 1
-  printf '%s\n' "$names" | grep -qxF -- "$art"
+    --jq '.artifacts[] | select(.expired | not) | .name' </dev/null 2>/dev/null)" || return 2
+  printf '%s\n' "$names" | grep -qxF -- "$art" && return 0
+  return 1
 }
 
 # ci_run_latest_success REPO BRANCH WORKFLOW ARTIFACT [LIMIT]
@@ -42,7 +45,7 @@ ci_run_has_artifact() {
 #      it looks; the list is not status-filtered, so it must cover a streak of failed runs.
 ci_run_latest_success() {
   local repo="$1" branch="$2" workflow="$3" art="$4" limit="${5:-100}" gh="${CI_RUN_RESOLVE_GH:-gh}"
-  local lines id when sha
+  local lines id when sha rc
   lines="$("$gh" run list --repo "$repo" --branch "$branch" --workflow "$workflow" \
     --limit "$limit" --json databaseId,createdAt,conclusion,headSha \
     --jq "$(ci_run_newest_success_filter)" 2>/dev/null)" || {
@@ -51,12 +54,20 @@ ci_run_latest_success() {
   }
   while read -r id when sha; do
     case "$id" in '' | *[!0-9]*) continue ;; esac
-    if ci_run_has_artifact "$repo" "$id" "$art"; then
-      echo "ci-run-resolve: newest successful $workflow run on $branch carrying $art = $id (created ${when:-?}, sha ${sha:0:9})" >&2
-      printf '%s\n' "$id"
-      return 0
-    fi
-    echo "ci-run-resolve: run $id has no non-expired $art artifact -- trying the next older successful run" >&2
+    rc=0
+    ci_run_has_artifact "$repo" "$id" "$art" || rc=$?
+    case "$rc" in
+      0)
+        echo "ci-run-resolve: newest successful $workflow run on $branch carrying $art = $id (created ${when:-?}, sha ${sha:0:9})" >&2
+        printf '%s\n' "$id"
+        return 0
+        ;;
+      1) echo "ci-run-resolve: run $id has no non-expired $art artifact -- trying the next older successful run" >&2 ;;
+      *)
+        echo "ci-run-resolve: the artifact list of run $id is UNREADABLE (gh/api failure) -- refusing to fall back to an older run" >&2
+        return 1
+        ;;
+    esac
   done <<<"$lines"
   echo "ci-run-resolve: no successful $workflow run on $branch among the last $limit carries $art" >&2
   return 1
