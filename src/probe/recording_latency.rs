@@ -850,11 +850,25 @@ pub fn burn_ids_in(frames: &[RecordingFrame], run_id: u32) -> Vec<u32> {
 /// VALUE can't distinguish a real early/late drop from a boundary artifact; trimming by frame
 /// POSITION can, because it never has to look at what the value IS.
 pub fn burn_ids_with_frame_index_in(frames: &[RecordingFrame], run_id: u32) -> Vec<(u64, u32)> {
+    burn_id_ts_with_frame_index_in(frames, run_id)
+        .into_iter()
+        .map(|(frame_index, id, _)| (frame_index, id))
+        .collect()
+}
+
+/// Issue 1302 slice 2 — [`burn_ids_with_frame_index_in`] plus each payload's OWN `gen_ts_ns`:
+/// `(frame_index, id, gen_ts_ns)` in recorded order. The ONE loop both share; the CG chain scopes
+/// its strih/stream hops to the recorded CG window by this stamp
+/// (`crate::cg_chain_gate::pairs_in_window`).
+pub fn burn_id_ts_with_frame_index_in(
+    frames: &[RecordingFrame],
+    run_id: u32,
+) -> Vec<(u64, u32, i64)> {
     let mut out = Vec::new();
     for f in frames {
         for p in &f.payloads {
             if p.run_id == run_id {
-                out.push((f.frame_index, p.frame_id));
+                out.push((f.frame_index, p.frame_id, p.gen_ts_ns));
             }
         }
     }

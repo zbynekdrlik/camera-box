@@ -27,7 +27,8 @@
 //! ## What a hop proves
 //!
 //! Per recording (`cg_obs` / `strih` / `stream`): the SongPlayer burn-id sequence is CONTIGUOUS
-//! (`first..=last`, presence-only — duplicated from [`crate::probe::burn_contiguity`] because the
+//! (at the hop's decimation step; step 1 = presence-only `first..=last` — duplicated from
+//! [`crate::probe::burn_contiguity`] because the
 //! whole `probe` module is CI-only, so a crate-root decision cannot depend on it) AND does not
 //! REPEAT past [`crate::burn_hold::MAX_HOLD_FRAMES`] (a frozen / re-delivered rendered image), and
 //! the cg OBS burn is likewise present + contiguous + within the hold bound (the cg OBS box
@@ -59,7 +60,8 @@
 use crate::burn_hold::{burn_hold_distribution, hold_gate_pass, MAX_HOLD_FRAMES};
 use std::collections::{BTreeMap, BTreeSet};
 
-/// Presence-only `first..=last` contiguity of a burn-id sequence. Mirrors
+/// Contiguity of a burn-id sequence at a by-design decimation step ([`hop_contiguity_with_step`];
+/// step 1 = the presence-only `first..=last` check). Mirrors
 /// [`crate::probe::burn_contiguity::NodeContiguity`]'s shape + `is_contiguous` rule (so the
 /// probe-gated caller can serialize it straight into the existing reporting shape) — duplicated
 /// here only because the probe module is CI-only.
@@ -71,9 +73,11 @@ pub struct HopContiguity {
     pub last_id: Option<u32>,
     /// Count of DISTINCT ids present.
     pub present_count: u32,
-    /// `last - first + 1` (the integers that SHOULD be present over the span).
+    /// `present_count + missing_ids.len()`: the ids the recording should carry at this step (at
+    /// step 1 that is `last - first + 1`).
     pub expected_count: u32,
-    /// The integers in `first..=last` that did NOT decode (the dropped generations).
+    /// One representative id per missing slot (`prev + k * step`); at step 1 exactly the integers
+    /// in `first..=last` that did NOT decode (the dropped generations).
     pub missing_ids: Vec<u32>,
     /// Issue 1302 slice 2: histogram of the forward gaps between consecutive DISTINCT present ids
     /// (`gap -> count`). The calibration evidence for the decimation model on a real run.
@@ -175,6 +179,27 @@ impl CgWindow {
     /// `ts` lies inside the window, both ends inclusive.
     pub fn contains(&self, ts: i64) -> bool {
         self.start_ns <= ts && ts <= self.end_ns
+    }
+
+    /// Validate the fields of the harness's window record (`cg_chain_window_json` in
+    /// scripts/lib/cg-chain-e2e.sh: `{"kind":"cg","scene","input","start_ns","end_ns"}`), already
+    /// read out of the JSON by the caller. Anything but `kind == "cg"` with integer
+    /// `start_ns < end_ns` is an error naming what is wrong, so the caller falls back to the
+    /// unscoped hop with a WARNING instead of scoping to a bogus window.
+    pub fn from_record(
+        kind: Option<&str>,
+        start_ns: Option<i64>,
+        end_ns: Option<i64>,
+    ) -> Result<Self, String> {
+        if kind != Some("cg") {
+            return Err(format!("not a kind=\"cg\" record (kind={kind:?})"));
+        }
+        let (start, end) = match (start_ns, end_ns) {
+            (Some(s), Some(e)) => (s, e),
+            _ => return Err("start_ns / end_ns missing or not an integer".to_string()),
+        };
+        CgWindow::new(start, end)
+            .ok_or_else(|| format!("empty or inverted window (start_ns={start} end_ns={end})"))
     }
 }
 
@@ -543,6 +568,22 @@ mod tests {
                 end_ns: 6
             })
         );
+    }
+
+    #[test]
+    fn cg_window_record_is_validated_field_by_field_1302() {
+        assert_eq!(
+            CgWindow::from_record(Some("cg"), Some(5), Some(9)),
+            Ok(CgWindow {
+                start_ns: 5,
+                end_ns: 9
+            })
+        );
+        assert!(CgWindow::from_record(Some("cam"), Some(5), Some(9)).is_err());
+        assert!(CgWindow::from_record(None, Some(5), Some(9)).is_err());
+        assert!(CgWindow::from_record(Some("cg"), None, Some(9)).is_err());
+        assert!(CgWindow::from_record(Some("cg"), Some(5), None).is_err());
+        assert!(CgWindow::from_record(Some("cg"), Some(9), Some(5)).is_err());
     }
 
     #[test]

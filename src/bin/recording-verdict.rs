@@ -50,13 +50,14 @@ use camera_box::probe::recording::{
     select_frames_to_extract, RecordingFrame, DEFAULT_MAX_PIXEL_PROOF,
 };
 use camera_box::probe::recording_latency::{
-    burn_ids_in, burn_ids_with_frame_index_in, cam2_cam1_samples, cam2_cam1_samples_from_burn,
-    cam2_cam1_samples_from_flip, cam_strih_samples, chain_hop_samples_from_stream, hop_latency,
-    n_camera_strih_samples, painter_internal_gen_to_flip, per_frame_latency_csv_rows,
-    strih_stream_samples, strih_stream_samples_from_stream, write_latency_csv, HopLatency,
-    LatencySample, RunIds, BURN_RUN_ID_CAM1, BURN_RUN_ID_CAM2, BURN_RUN_ID_CAM3, BURN_RUN_ID_CAM4,
-    BURN_RUN_ID_CAM5, BURN_RUN_ID_CAM6, BURN_RUN_ID_CAM7, BURN_RUN_ID_CG, BURN_RUN_ID_IMAG,
-    BURN_RUN_ID_SONGPLAYER, BURN_RUN_ID_STREAM, BURN_RUN_ID_STRIH,
+    burn_id_ts_with_frame_index_in, burn_ids_in, burn_ids_with_frame_index_in, cam2_cam1_samples,
+    cam2_cam1_samples_from_burn, cam2_cam1_samples_from_flip, cam_strih_samples,
+    chain_hop_samples_from_stream, hop_latency, n_camera_strih_samples,
+    painter_internal_gen_to_flip, per_frame_latency_csv_rows, strih_stream_samples,
+    strih_stream_samples_from_stream, write_latency_csv, HopLatency, LatencySample, RunIds,
+    BURN_RUN_ID_CAM1, BURN_RUN_ID_CAM2, BURN_RUN_ID_CAM3, BURN_RUN_ID_CAM4, BURN_RUN_ID_CAM5,
+    BURN_RUN_ID_CAM6, BURN_RUN_ID_CAM7, BURN_RUN_ID_CG, BURN_RUN_ID_IMAG, BURN_RUN_ID_SONGPLAYER,
+    BURN_RUN_ID_STREAM, BURN_RUN_ID_STRIH,
 };
 use camera_box::probe::recording_partial::RecordingPartial;
 use camera_box::probe::recording_segments::{
@@ -7372,14 +7373,20 @@ fn build_and_print_verdict_with_stream_diffs(
                 _ => (0, 0),
             };
             let sp_pairs = trim_boundary_pairs(
-                &cg_chain_gate::pairs_in_window(&burn_triples_in(frames, sp_id), scope),
+                &cg_chain_gate::pairs_in_window(
+                    &burn_id_ts_with_frame_index_in(frames, sp_id),
+                    scope,
+                ),
                 first_idx,
                 last_idx,
                 BOUNDARY_TRIM_LEAD_FRAMES,
                 BOUNDARY_TRIM_TAIL_FRAMES,
             );
             let cg_pairs = trim_boundary_pairs(
-                &cg_chain_gate::pairs_in_window(&burn_triples_in(frames, cg_id), scope),
+                &cg_chain_gate::pairs_in_window(
+                    &burn_id_ts_with_frame_index_in(frames, cg_id),
+                    scope,
+                ),
                 first_idx,
                 last_idx,
                 BOUNDARY_TRIM_LEAD_FRAMES,
@@ -7746,47 +7753,21 @@ fn extract_partial_flagged_frames(
     (flagged, undecodable)
 }
 
-/// Issue 1302 slice 2 — every decoded payload of burn `run_id` as a recorded-order
-/// `(frame_index, id, gen_ts_ns)` triple: [`burn_ids_with_frame_index_in`] plus each payload's OWN
-/// generation stamp, which `cg_chain_gate::pairs_in_window` scopes to the CG window.
-fn burn_triples_in(frames: &[RecordingFrame], run_id: u32) -> Vec<(u64, u32, i64)> {
-    let mut out = Vec::new();
-    for f in frames {
-        for p in &f.payloads {
-            if p.run_id == run_id {
-                out.push((f.frame_index, p.frame_id, p.gen_ts_ns));
-            }
-        }
-    }
-    out
-}
-
 /// Issue 1302 slice 2 — read the harness's CG window record (`cg_chain_window_json` in
-/// scripts/lib/cg-chain-e2e.sh: `{"kind":"cg","scene","input","start_ns","end_ns"}`). Anything but
-/// a `kind == "cg"` record with integer `start_ns < end_ns` is an error, so the caller falls back
-/// to the unscoped hop with a WARNING instead of scoping to a bogus window.
+/// scripts/lib/cg-chain-e2e.sh: `{"kind":"cg","scene","input","start_ns","end_ns"}`): the file read
+/// + JSON parse here, the field validation in the Tier-0 `CgWindow::from_record`. Any error makes
+/// the caller fall back to the unscoped hop with a WARNING instead of scoping to a bogus window.
 fn load_cg_window(path: &Path) -> Result<camera_box::cg_chain_gate::CgWindow> {
     let text = std::fs::read_to_string(path)
         .with_context(|| format!("read CG window {}", path.display()))?;
     let v: serde_json::Value = serde_json::from_str(&text)
         .with_context(|| format!("parse CG window {}", path.display()))?;
-    anyhow::ensure!(
-        v["kind"] == "cg",
-        "CG window {} is not a kind=\"cg\" record: {v}",
-        path.display()
-    );
-    let start = v["start_ns"]
-        .as_i64()
-        .context("CG window start_ns is not an integer")?;
-    let end = v["end_ns"]
-        .as_i64()
-        .context("CG window end_ns is not an integer")?;
-    camera_box::cg_chain_gate::CgWindow::new(start, end).with_context(|| {
-        format!(
-            "CG window {} is empty or inverted (start_ns={start} end_ns={end})",
-            path.display()
-        )
-    })
+    camera_box::cg_chain_gate::CgWindow::from_record(
+        v["kind"].as_str(),
+        v["start_ns"].as_i64(),
+        v["end_ns"].as_i64(),
+    )
+    .map_err(|e| anyhow::anyhow!("CG window {}: {e}", path.display()))
 }
 
 /// Issue 1302 slice 2 — [`load_cg_window`] for the verdict: an unusable window file is a loud
