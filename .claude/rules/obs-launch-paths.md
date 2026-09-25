@@ -61,7 +61,7 @@ Standing docs already covering related facts: obs-ops SKILL §144 ("every relaun
 passes, via `fleet_box_ahk_mode`) emits `ahk_guard_stop_ps` at every obs64-kill site AND after the
 plain-launch refusal, never a relaunch, and replaces the #978 AutoHotkey64 gate with the report-only
 `ahk_guard_report_ps` line. A 6th arg TITLE_PROFILE (`fleet_box_obs_profile`, resolume = `cg`) adds the
-same-session title check `build <9-char sha> - Profile: <profile>`; without it the emitted gate is
+same-session title check `build <9-char sha> - <label>: <profile>` (label localized, profile case-exact); without it the emitted gate is
 byte-identical. The managed stop-first/restart-last bracket below is HAS_AHK=1 only; no planner picks
 it now (owner ruling on the ticket). Pinned by `tests/launch_obs_genlock.rs` (`*_1372`).
 

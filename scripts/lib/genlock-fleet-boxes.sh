@@ -62,7 +62,7 @@ fleet_box_ahk_prefer() { case "${1:-}" in resolume) echo "lnk" ;; *) return 2 ;;
 fleet_box_ahk_mode() { if [ "$(fleet_box_has_ahk "${1:-}")" = "1" ]; then echo "guard"; else echo "0"; fi; }
 
 # fleet_box_obs_profile BOX -> the OBS profile the launch program expects in the window title
-# (`build <short sha> - Profile: <profile>`, issue 1372): resolume's cg OBS runs profile `cg`. rc 2
+# (`build <short sha> - <label>: <profile>`, the label localized, issue 1372): resolume's cg OBS runs profile `cg`. rc 2
 # (no output) for a box with no pinned profile -- its launch program carries no title identity check.
 fleet_box_obs_profile() { case "${1:-}" in resolume) echo "cg" ;; *) return 2 ;; esac; }
 

@@ -138,8 +138,9 @@ ahk_guard_stop_ps() {
 # cannot respawn a second obs64 here. This program NEVER starts or restarts it.
 if (Get-Process AutoHotkey64 -ErrorAction SilentlyContinue) {
   Stop-Process -Name AutoHotkey64 -Force -ErrorAction SilentlyContinue
-  Start-Sleep -Milliseconds 500
-  if (Get-Process AutoHotkey64 -ErrorAction SilentlyContinue) {
+  Get-Process AutoHotkey64 -ErrorAction SilentlyContinue | Wait-Process -Timeout 5 -ErrorAction SilentlyContinue
+  # count only LIVE instances -- an exited process can linger as a 0-thread handle (the obs64 zombie class)
+  if (@(Get-Process AutoHotkey64 -ErrorAction SilentlyContinue | Where-Object { -not $_.HasExited -and $_.Threads.Count -gt 0 }).Count -gt 0) {
     Write-Error "#1372 FAIL: AutoHotkey64 is still running after Stop-Process -- it would respawn a second obs64; stop it by hand, then re-run."
     exit 11
   }
@@ -154,7 +155,7 @@ PS
 # start. It replaces the #978 "exactly 1 AutoHotkey64" gate on a guard box.
 ahk_guard_report_ps() {
   cat <<'PS'
-$ahkReport = @(Get-Process AutoHotkey64 -ErrorAction SilentlyContinue)
+$ahkReport = @(Get-Process AutoHotkey64 -ErrorAction SilentlyContinue | Where-Object { -not $_.HasExited -and $_.Threads.Count -gt 0 })
 Write-Host ("#1372 AHK REPORT (report-only, never a gate): AutoHotkey64 count=" + $ahkReport.Count + " SessionId=[" + (@($ahkReport | ForEach-Object { $_.SessionId }) -join ',') + "] -- whether it runs is the owner's choice.")
 PS
 }

@@ -536,7 +536,7 @@ fn cli_box_resolume_selects_win_resolume_ahk_guard_1372() {
         out.contains("GENLOCK_BUILD_SHA.txt")
             && out.contains("$wantProfile = 'cg'")
             && out.contains("$titleRe = 'build ' + [regex]::Escape($shaShort) + ' - [^:]+: '"),
-        "issue 1372: resolume must verify the 'build <sha> - Profile: cg' window title:\n{out}"
+        "issue 1372: resolume must verify the 'build <sha> - <label>: cg' window title:\n{out}"
     );
     // the build-proof verify still applies
     assert!(
@@ -652,7 +652,7 @@ fn title_identity_check_is_same_session_only_and_profile_scoped_1372() {
     assert!(
         p.contains("Join-Path $obsDir 'GENLOCK_BUILD_SHA.txt'")
             && p.contains("[Math]::Min(9, $shaTok.Length)")
-            && p.contains("[string]$sessProc.MainWindowTitle -match $titleRe"),
+            && p.contains("[string]$sessProc.MainWindowTitle -cmatch $titleRe"),
         "the title check reads the deployed marker, cuts the 9-char short sha, matches the title:\n{p}"
     );
     // the profile LABEL is localized (en "Profile", sk/cs "Profil"): the match takes any label word

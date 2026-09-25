@@ -64,7 +64,8 @@ the AHK mode `guard` for resolume (`fleet_box_ahk_mode` in `scripts/lib/genlock-
 - **OBS is launched directly**, in session 1, through the box's own `OBS Studio.lnk` (the #786
   guarded launcher when the shortcut is retargeted to it, exactly as on stream). The launch then
   verifies exactly one LIVE obs64 in the active session and the window title
-  `build <9-char short sha of GENLOCK_BUILD_SHA.txt> - Profile: cg` (`fleet_box_obs_profile`).
+  `build <9-char short sha of GENLOCK_BUILD_SHA.txt> - <label>: cg` (`fleet_box_obs_profile`; the
+  label is localized, en `Profile` / sk-cs `Profil`; the profile match is case-exact).
 
 Both guard fragments (`ahk_guard_stop_ps`, `ahk_guard_report_ps`) live in `scripts/lib/ahk-watchdog.sh`,
 so the deploy and launch programs cannot drift. The obs-fleet `has_ahk` fact still says the watcher is
@@ -76,7 +77,9 @@ LANE-RETURN comment on the ticket (a worker cannot file tickets):
 - the obs-self-heal builder still emits the managed restart + backstop for an AHK box (latent: its
   CLI accepts `--box stream` only).
 The managed stop→restart-verified mode `1` still exists in the builders for a box that sets it, but
-no planner chooses it. The title match takes any profile LABEL word (en `Profile`, sk/cs `Profil`).
+no planner chooses it. The guard stop waits for AutoHotkey64 to exit and re-checks LIVE instances
+(a 0-thread handle is not a survivor). Failure lines use `Write-Error` under `$ErrorActionPreference =
+'Stop'`, so the process exits 1 (the cited exit 8 / 11 codes are not reached; same as exits 5-7).
 The `.ahk` also RunAs-launches an `Arena-Bridge` app under a second user and embeds a credential.
 Tooling NEVER reads, echoes, or copies the `.ahk` body; it only stops the watcher by process name.
 
@@ -112,7 +115,7 @@ live `getent hosts resolume.lan` address.
    before the obs64 force-kill (so the watcher can't race a duplicate obs64), launches OBS directly
    via the box's `OBS Studio.lnk` (the #786 guarded launcher when the shortcut points at it), and
    NEVER starts AutoHotkey64 (issue 1372). It then verifies `render tick ENABLED` + DistroAV loaded,
-   exactly one LIVE obs64 in the active session, and the title `build <short sha> - Profile: cg`,
+   exactly one LIVE obs64 in the active session, and the title `build <short sha> - <label>: cg`,
    failing loud otherwise. The AutoHotkey64 count is only logged (`#1372 AHK REPORT`).
 
 3. **CONFIRM the pins** (NOT a write — the build defaulted them). From dev1 (read-only OBS-WS,

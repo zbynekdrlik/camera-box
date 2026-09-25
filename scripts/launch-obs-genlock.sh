@@ -45,7 +45,7 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/ahk-watchdog.sh
-# Sourcing (not executing) ahk-watchdog.sh: it defines ONE pure function, no top-level statements.
+# Sourcing (not executing) ahk-watchdog.sh: it defines pure functions only, no top-level statements.
 . "$HERE/lib/ahk-watchdog.sh"
 # shellcheck source=scripts/lib/genlock-fleet-boxes.sh
 # issue 1317 part 3: the per-box MCP / address / AHK-identity table shared with deploy-genlock-fleet.sh.
@@ -74,7 +74,7 @@ build_title_identity_ps() {
   \$wantProfile = '${profile_ps}'
   \$wantTitle = 'build ' + \$shaShort + ' - <profile label>: ' + \$wantProfile
   \$titleRe = 'build ' + [regex]::Escape(\$shaShort) + ' - [^:]+: ' + [regex]::Escape(\$wantProfile) + '( - |\$)'
-  if (-not ([string]\$sessProc.MainWindowTitle -match \$titleRe)) {
+  if (-not ([string]\$sessProc.MainWindowTitle -cmatch \$titleRe)) {
     Write-Error "#1372 FAIL: obs64 title '\$(\$sessProc.MainWindowTitle)' does not carry '\$wantTitle' -- wrong build or wrong profile."
     exit 8
   }
@@ -98,7 +98,7 @@ PSTITLE
 # 'exe' default | 'lnk') are the PER-BOX relaunch identity (issue 1295) passed to
 # scripts/lib/ahk-watchdog.sh; a guard box needs neither. TITLE_PROFILE ($6, optional, issue 1372)
 # adds a title identity check: the obs64 window title must carry `build <9-char short sha of
-# GENLOCK_BUILD_SHA.txt> - Profile: <profile>` (resolume: `cg`); empty = no check. Pure string builder
+# GENLOCK_BUILD_SHA.txt> - <label>: <profile>` (label localized; resolume: `cg`); empty = no check. Pure string builder
 # so a unit test can assert the program is well-formed without a Windows host. Heredoc body is a
 # literal PowerShell here-string — bash-level interpolation is ONLY $OBS_DIR / the FORCE branch /
 # the AHK bracket; everything else (PowerShell $vars) is literal.
@@ -317,7 +317,7 @@ Remove-Item "\$env:APPDATA\\obs-studio\\.sentinel\\*" -Force -ErrorAction Silent
 #     for camera/mic access; a bare exe launch dropped them and rendered a "Permissions denied"
 #     box on program output, user-caught live). Fallback to the bare exe ONLY if the shortcut is
 #     genuinely absent (fail-open recovery beats no OBS at all -- the verify below still gates).
-#     NB on an AHK box (strih/resolume): its NL_STARTUP.ahk auto-respawns obs64 from this same dir,
+#     NB on a MANAGED AHK box its NL_STARTUP.ahk auto-respawns obs64 from this same dir (a guard box has it stopped),
 #     but it won't double-launch once one is running, so this Start-Process wins; the log verify
 #     below fails loud on a non-genlock build regardless. See obs-ops skill.
 \$obsDir = '${obs_dir_ps}'
@@ -558,7 +558,7 @@ main() {
   # is `guard` -- a running watcher is stopped before every obs64 kill, NEVER restarted, and the count
   # is report-only; OBS is launched directly via the box's own shortcut. stream has none (`0`, no real
   # AutoHotkey64 command -- the #411 self-heal guard pins this). The title profile
-  # (fleet_box_obs_profile) adds the `build <sha> - Profile: cg` title check on resolume.
+  # (fleet_box_obs_profile) adds the `build <sha> - <label>: cg` title check on resolume (label localized).
   # resolume's host is the HOSTNAME resolume.lan, NEVER a pinned IP -- it DHCP-drifts and currently
   # collides with `bridge` at .201 (targets.md), so the emitted STEP-3/3b WS ops resolve it live via
   # `--host resolume.lan`; confirm the box identity before trusting it. A Linux box (strih-lx) is
