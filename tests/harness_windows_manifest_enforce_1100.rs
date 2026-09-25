@@ -104,7 +104,7 @@ fn windows_full_bundle_manifest_is_fetched_and_passed_as_the_alternate_1346() {
 #[test]
 fn windows_manifest_pair_is_resolved_by_the_main_ruling_1346() {
     let s = recording_e2e();
-    let call = "{ read -r AUTO_WIN_MANIFEST; read -r AUTO_WIN_ALT_MANIFEST; } < <(win_manifest_pair_resolve \"$VERSION_GATE_REPO\"";
+    let call = "{ IFS= read -r AUTO_WIN_MANIFEST; IFS= read -r AUTO_WIN_ALT_MANIFEST; } < <(win_manifest_pair_resolve \"$VERSION_GATE_REPO\"";
     assert_eq!(
         s.matches(call).count(),
         1,

@@ -278,7 +278,8 @@ fn win_full_manifest_fetch_is_dormant_on_failure_1346() {
 /// updatedAt (the jq output `<id> <updatedAt>`; `$STUB_DIR/runlist` overrides it, e.g. a re-run),
 /// `run download` writes a BUNDLE_MANIFEST.json into its `--dir` and counts the download -- or fails
 /// once `$STUB_DIR/dl-fail` exists, or hangs (exec sleep) once `$STUB_DIR/dl-hang` exists.
-/// `run list` itself fails once `$STUB_DIR/list-fail` exists.
+/// `run list` itself fails once `$STUB_DIR/list-fail` exists, and every `run list` call appends its
+/// arguments to `$STUB_DIR/list-args`.
 fn write_gh_stub(dir: &std::path::Path) -> PathBuf {
     let bin = dir.join("bin");
     std::fs::create_dir_all(&bin).unwrap();
@@ -288,6 +289,7 @@ fn write_gh_stub(dir: &std::path::Path) -> PathBuf {
         "#!/usr/bin/env bash\n\
          case \"$1 $2\" in\n\
          \"run list\")\n\
+           echo \"$*\" >> \"$STUB_DIR/list-args\"\n\
            [ -f \"$STUB_DIR/list-fail\" ] && exit 1\n\
            cat \"$STUB_DIR/runlist\" 2>/dev/null || printf '4242 2026-09-25T04:48:30Z' ;;\n\
          \"run download\")\n\
@@ -662,6 +664,38 @@ fn win_manifest_pair_resolve_passes_a_fetched_fast_manifest_through_1346() {
     assert!(
         err.is_empty(),
         "no log when the fast manifest was fetched: {err:?}"
+    );
+    assert!(
+        !dir.join("list-args").exists(),
+        "a fetched fast manifest must not trigger any run lookup"
+    );
+}
+
+/// #1346 review round 3: the manifest fetch resolves the run with the SAME server-side commit
+/// filter as the run-state lookup, so a fast build older than the recency window is still fetched
+/// (otherwise the lookup says a run exists while the fetch never finds it -> a permanent "outage").
+#[test]
+fn manifest_fetch_resolves_the_run_with_the_server_side_commit_filter_1346() {
+    let td = tempfile::tempdir().unwrap();
+    let dir = td.path();
+    let dest = dir.join("win-fast-manifest.json");
+    let (out, _) = run_with_gh_stub(
+        dir,
+        "manifest_autosource_fetch o/r windows-genlock-fast.yml obs-genlock-fast-dll \"$SHA\" \"$DEST\"",
+        &[
+            ("SHA", "54995646abc"),
+            ("DEST", dest.to_str().unwrap()),
+            (
+                "MANIFEST_AUTOSOURCE_CACHE_DIR",
+                dir.join("cache").to_str().unwrap(),
+            ),
+        ],
+    );
+    assert_eq!(out.trim(), dest.to_str().unwrap(), "{out:?}");
+    let args = std::fs::read_to_string(dir.join("list-args")).unwrap_or_default();
+    assert!(
+        args.contains("--commit 54995646abc") && args.contains("--status success"),
+        "the fetch must filter runs by commit and success on the server side: {args:?}"
     );
 }
 
