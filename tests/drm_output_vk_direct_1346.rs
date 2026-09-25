@@ -423,14 +423,13 @@ fn the_obs_side_stops_in_order_and_fails_open() {
 fn the_log_family_is_shared_with_verify_strih() {
     let v = file(VERIFY_STRIH);
     let core = file(VK_C);
-    for marker in ["drm-output: program scanout LIVE"] {
-        assert!(v.contains(marker), "verify-strih greps `{marker}`");
-        assert!(
-            core.contains(marker),
-            "issue 1346: the vk-direct backend must emit `{marker}` so verify-strih's drm-output item \
-             grades it exactly like the lease backend"
-        );
-    }
+    let marker = "drm-output: program scanout LIVE";
+    assert!(v.contains(marker), "verify-strih greps `{marker}`");
+    assert!(
+        core.contains(marker),
+        "issue 1346: the vk-direct backend must emit `{marker}` so verify-strih's drm-output item \
+         grades it exactly like the lease backend"
+    );
     for (new, old) in [
         (
             "drm-output: program-present #",
@@ -570,7 +569,10 @@ fn parse_backend_computes_the_shared_grammar_table() {
 /// `(modes [(w, h, refresh mHz)], native (w, h))` -> the chosen index. Native size first (the
 /// physical resolution stands in for the connector's preferred mode), then the refresh closest to
 /// 60 Hz, the first on a tie; all modes when the native size is unknown or unmatched; -1 when empty.
-fn mode_vectors() -> Vec<(Vec<(u32, u32, u32)>, (u32, u32), i32)> {
+/// One mode-pick row: the modes `(w, h, refresh mHz)`, the native size, the expected index.
+type ModeVector = (Vec<(u32, u32, u32)>, (u32, u32), i32);
+
+fn mode_vectors() -> Vec<ModeVector> {
     vec![
         (
             vec![
@@ -667,7 +669,10 @@ fn pick_mode_computes_the_mode_truth_table() {
 }
 
 /// `(front, pending, ready)` -> `(returned src, pending', ready', took_new)`.
-fn present_vectors() -> Vec<((i32, i32, i32), (i32, i32, i32, i32))> {
+/// One present-pick row: `(front, pending, ready)` and the expected `(src, pending', ready', took)`.
+type PresentVector = ((i32, i32, i32), (i32, i32, i32, i32));
+
+fn present_vectors() -> Vec<PresentVector> {
     vec![
         ((-1, -1, -1), (-1, -1, -1, 0)),
         ((-1, -1, 2), (2, 2, -1, 1)),
