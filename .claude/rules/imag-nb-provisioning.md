@@ -670,7 +670,7 @@ setup-device STEP 17b run, so every box gets the shape strih-lx runs:
 
 - the SEPARATE `zbynekdrlik/remoteos-mcp` project's own source (its GitHub API tarball of the
   pinned commit strih-lx runs, `remoteos_mcp_pinned_ref`; `REMOTEOS_MCP_REF` bumps it) pip-installed
-  (pip's env stripped of `GH_TOKEN` / the key) with the project's own `constraints.txt` into a
+  (pip under an env allowlist, so no `GH_TOKEN` / key / `CAM_PW`) with the project's own `constraints.txt` into a
   venv at `/opt/remoteos-mcp-venv`. The upstream `install-linux.sh` pip-installed into the SYSTEM
   python with `--break-system-packages` and is no longer run anywhere. Nothing is re-pinned in
   camera-box (the #555 discipline), and `tests/setup_imag_remoteos_mcp_858.rs` still forbids an inline
