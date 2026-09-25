@@ -86,8 +86,29 @@ confirms the camera is set right):**
   `test_a_live_broadcast_blocks_the_set` pins the order.
 - **The call sits AFTER the temporary relay-restore handler**, so any abort here still restores the
   paused relays. Keep it there if the region is reordered.
-- Set failure (`gphoto2 --set-config` rc != 0) is only a WARNING. The read-back grades the result,
-  so a partially applied set is caught as a MISMATCH abort, never trusted.
+- **"Exactly one gphoto2 user" is CHECKED on the box, not assumed.** The issue-808 pause is
+  best-effort: it times out after 8 s, is `|| true`, and never confirms the unit stopped. So every
+  gphoto2 session (`camera_test_settings_gphoto2_cmd`) starts with two checks in the SAME remote
+  command:
+  - a still-active `bkshading-relay.service` exits 97 -> the abort "relay still active on <box>";
+  - a leftover `gphoto2` process (`pgrep -x`) exits 98 -> the abort "another gphoto2 process".
+  Without these, a relay that kept polling would show up as a misleading "read failed" or MISMATCH.
+- **Transport and decision exit codes are kept apart.** The ssh/gphoto2 rc is named in the abort:
+  124 timed out, 127 not found, 255 ssh. A python `plan`/`grade` rc is reported as "decision
+  rc", so an unreadable output is never confused with a dead transport.
+- Set failure (`gphoto2 --set-config` rc != 0, other than 97/98) is only a WARNING. The read-back
+  grades the result, so a partially applied set is caught as a MISMATCH abort, never trusted.
+- **Pinning `f-number` needs the camera's exact label spelling.** The relay treats `f/4` and
+  `f/4.0` as the same aperture (read.rs), but this step compares strings, so pin the exact
+  `Current:` text the camera prints. The `suggest` output flags any value the baseline would refuse
+  (`UNPINNABLE`).
+- Presence matches any Blackmagic USB device (vendor only, no interface-class check). The
+  interface class the BMPCC's PTP function uses has not been verified live (no camera on USB,
+  issue 1350). A non-camera Blackmagic device would still abort loudly as a failed gphoto2 read on
+  that named box, never a silent pass.
+- The UNVERIFIED reaches only the run log + a `::warning` annotation, not the per-run Discord
+  report. That is the same as the issue-1324 marker UNVERIFIED: the report has no channel for
+  preflight notes yet.
 
 ## Tier-0 verification
 
