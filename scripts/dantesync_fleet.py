@@ -175,6 +175,8 @@ def _ms_to_us(value):
     non-number, a non-finite value, or |us| >= 1e15 (the bash twin's integer limit)."""
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
+    if isinstance(value, int) and abs(value) >= _US_LIMIT:
+        return None  # a JSON integer too large for a float (math.isfinite would overflow)
     if not math.isfinite(value):
         return None
     us = value * 1000
