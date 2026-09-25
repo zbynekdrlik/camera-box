@@ -591,6 +591,22 @@ fn the_kiosk_item_installs_xorg_and_switches_the_dm_before_the_gnome_purge() {
     );
 }
 
+/// issue 1361 (G1): `python3-websocket` rides the shared baseline's package install, so EVERY OBS box
+/// has it (strih-obs-start.sh refuses to launch OBS without it; imag_scenes.py imports it too). It was
+/// only a hand install on strih-lx; setup-imag.sh's own step-11b install stays (a no-op then).
+#[test]
+fn the_kiosk_package_install_carries_python3_websocket_1361() {
+    let k = baseline_fn("obs_box_kiosk");
+    let line = k
+        .lines()
+        .find(|l| l.contains("apt-get install -y openbox lightdm"))
+        .expect("the kiosk package install line");
+    assert!(
+        line.split_whitespace().any(|w| w == "python3-websocket"),
+        "the shared baseline must install python3-websocket: {line}"
+    );
+}
+
 // ------------------------------------------------------------------------------------------------
 // the shared grader
 // ------------------------------------------------------------------------------------------------
@@ -632,6 +648,8 @@ dm_lightdm=/usr/lib/systemd/system/lightdm.service
 autologin=1
 gdm3=deinstall ok config-files
 gnome_shell=
+pyws=install ok installed
+pyws_import=1
 brightness_helper=1
 brightness_rule=1
 brightness_keys=1
@@ -647,7 +665,7 @@ touchpad=1
 gather_done=1
 ";
 
-const ITEMS: [&str; 14] = [
+const ITEMS: [&str; 15] = [
     "net",
     "perf",
     "nosleep",
@@ -658,6 +676,7 @@ const ITEMS: [&str; 14] = [
     "dejitter",
     "crash",
     "kiosk",
+    "websocket",
     "brightness",
     "autostart",
     "power",
@@ -754,6 +773,8 @@ fn verdict_fails_each_item_on_its_own_broken_fact() {
             "openbox=install ok installed",
             "openbox=deinstall ok config-files",
         ),
+        ("websocket", "pyws=install ok installed", "pyws="),
+        ("websocket", "pyws_import=1", "pyws_import=0"),
         ("brightness", "brightness_helper=1", "brightness_helper=0"),
         ("brightness", "brightness_rule=1", "brightness_rule=0"),
         ("brightness", "brightness_keys=1", "brightness_keys=0"),
