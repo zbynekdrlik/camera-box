@@ -224,7 +224,10 @@ obs_session_targets() {
       continue
     fi
     host="$(obs_session_box_env "$name" HOST "$host")"
-    printf '%s %s %s\n' "$name" "$host" "$(obs_fleet_has_ahk "$name")"
+    # issue 1372 (owner: "ale ahk nespustaj"): an installed AHK watcher is the OWNER's choice to run,
+    # so it is graded in `guard` mode (0 or 1 in the active session is healthy, never "want exactly 1").
+    local ahk; ahk="$(obs_fleet_has_ahk "$name")"; [ "$ahk" = "1" ] && ahk="guard"
+    printf '%s %s %s\n' "$name" "$host" "$ahk"
   done
 }
 

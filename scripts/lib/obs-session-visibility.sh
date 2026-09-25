@@ -63,7 +63,7 @@ if ($obs.Count -ge 1) {
   Write-Output ("OBS_TITLE=" + $obs[0].MainWindowTitle)
 }
 PS
-  if [ "$has_ahk" = "1" ]; then
+  if [ "$has_ahk" = "1" ] || [ "$has_ahk" = "guard" ]; then
     cat <<'PSAHK'
 $ahk = @(Get-Process AutoHotkey64 -ErrorAction SilentlyContinue)
 Write-Output ("AHK_COUNT=" + $ahk.Count)
@@ -122,10 +122,20 @@ obs_session_visibility_message() {
     printf 'obs64 SessionId=%s but MainWindowTitle is EMPTY -- no visible window (issue 958)' "$obs_session"
     return 0
   fi
-  if [ "$has_ahk" = "1" ]; then
+  if [ "$has_ahk" = "1" ] || [ "$has_ahk" = "guard" ]; then
     local ahk_count ahk_session
     ahk_count="$(printf '%s\n' "$out" | sed -n 's/^AHK_COUNT=//p' | tail -1)"
     ahk_session="$(printf '%s\n' "$out" | sed -n 's/^AHK_SESSION=//p' | tail -1)"
+    # issue 1372 (owner: "ale ahk nespustaj"): in `guard` mode the watcher is the OWNER's choice, so a
+    # count of 0 is healthy. A duplicated watcher or one in session 0 is still a fault.
+    if [ "$has_ahk" = "guard" ] && [ "${ahk_count:-0}" = "0" ]; then
+      printf ''
+      return 0
+    fi
+    if [ "$has_ahk" = "guard" ] && [ "${ahk_count:-0}" != "1" ]; then
+      printf 'AutoHotkey64 count=%s (want at most 1) -- the respawn watcher is duplicated' "${ahk_count}"
+      return 0
+    fi
     if [ "${ahk_count:-0}" != "1" ]; then
       printf 'AutoHotkey64 count=%s on strih (want exactly 1) -- the respawn watcher is missing/duplicated' "${ahk_count:-0}"
       return 0
