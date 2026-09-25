@@ -177,6 +177,16 @@ def test_upgrade_verify_grades_an_audio_node_against_the_audio_grandmaster(tmp_p
     assert src.count('"${gate_env[@]}" "$HERE/dantesync-gate.sh"') == 2
 
 
+def test_upgrade_verify_env_fails_loudly_when_the_audio_grandmaster_does_not_resolve(tmp_path):
+    """Review round 2: an unresolvable audio grandmaster (only via a hostname override) must fail
+    the audio node's verify loudly -- never fall back to the video grandmaster silently."""
+    r = _source_upgrade(tmp_path, 'dantesync_gate_env_for mbc; echo "rc=$?"',
+                        DANTESYNC_AUDIO_GM_HOST="no-such-grandmaster.invalid")
+    assert "rc=1" in r.stdout, r.stdout + r.stderr
+    assert "cannot resolve the audio grandmaster" in r.stderr
+    assert "gate_env_for" in _UPGRADE.read_text() and 'genv="$(dantesync_gate_env_for "$name")" || {' in _UPGRADE.read_text()
+
+
 def test_upgrade_without_nodes_names_the_fleet_flag(tmp_path):
     bindir, _ = _stub_bin(tmp_path, {})
     r = subprocess.run(["bash", str(_UPGRADE), "--dry-run"], capture_output=True, text=True,

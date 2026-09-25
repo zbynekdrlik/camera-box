@@ -138,8 +138,9 @@ def test_a_capture_that_keeps_failing_on_a_live_box_pages_once_confirmed(tmp_pat
     errs = _run_failing(tmp_path, box_up=1, passes=3)
     assert "sudo: 1 incorrect password attempt" in errs[0]          # the remote reason is logged
     assert "WOULD alert" not in errs[0] and "WOULD alert" not in errs[1]
-    key = f"vban-rate-capture-strih-lx-{_NOW // 600}"
-    assert f"WOULD alert (dedup-key={key})" in errs[2], errs[2]
+    # review round 2: a blind watchdog is a CHRONIC config fault -- ONE page per incident on a
+    # STABLE key (the diagnostic class), never the production-critical time bucket
+    assert "WOULD alert (dedup-key=vban-rate-capture-strih-lx)" in errs[2], errs[2]
 
 
 def test_a_capture_failing_because_the_box_is_down_never_pages(tmp_path):
@@ -154,3 +155,17 @@ def test_a_stream_that_went_away_does_not_resume_its_old_confirm_count(tmp_path)
     assert "not yet CONFIRMED" in first
     days_later = _run(tmp_path, pcap, VBAN_RATE_CONFIRM_THRESHOLD="2", VBAN_RATE_NOW=str(_NOW + 86400))
     assert "not yet CONFIRMED" in days_later and "WOULD alert" not in days_later, days_later
+
+
+def test_a_short_pass_does_not_keep_a_stale_confirm_count_alive(tmp_path):
+    """Review round 2: last_seen is refreshed only by a GRADED (OK/FAULT) pass, so a stream that is
+    SHORT for hours and then faults starts its confirm count again."""
+    lossy = b.pcap_bytes(276, _inbound(drop={100, 200, 300}))
+    short = b.pcap_bytes(276, b.stream_records(500, name="fohabl-strih", src="10.77.7.30"))
+    first = _run(tmp_path, lossy, VBAN_RATE_CONFIRM_THRESHOLD="2")
+    assert "not yet CONFIRMED" in first
+    # SHORT every 10 min for 2 h -- each pass well inside the 900 s stale window of the previous one
+    for k in range(1, 13):
+        _run(tmp_path, short, VBAN_RATE_CONFIRM_THRESHOLD="2", VBAN_RATE_NOW=str(_NOW + k * 600))
+    later = _run(tmp_path, lossy, VBAN_RATE_CONFIRM_THRESHOLD="2", VBAN_RATE_NOW=str(_NOW + 13 * 600))
+    assert "not yet CONFIRMED" in later and "WOULD alert" not in later, later

@@ -496,3 +496,51 @@ def test_rate_fault_needs_the_bound_cleared_by_two_stderr():
     g = vr.Grading(ppm_bound=20.0, loss_ceiling=1e-4, min_span_s=20.0)
     assert vr.grade(_stats(rate_ppm=21.0, rate_stderr_ppm=1.0), g)[0] == "OK"
     assert vr.grade(_stats(rate_ppm=23.0, rate_stderr_ppm=1.0), g)[0] == "FAULT"
+
+
+# ---------------------------------------------------------------------------------------------
+# review round 2 (issue 1372): no phantom restart from a start reorder or a late duplicate;
+# a stream too noisy to resolve the bound is UNCERTAIN, never OK
+# ---------------------------------------------------------------------------------------------
+
+def test_a_reorder_right_at_the_segment_start_is_not_a_restart():
+    recs = stream_records(3000, start_frame=0)
+    frames_in_arrival_order = [recs[2][1], recs[0][1], recs[1][1]]  # arrival order 2, 0, 1, 3, ...
+    recs[0:3] = [(recs[i][0], f) for i, f in enumerate(frames_in_arrival_order)]
+    s = only_stream(pcap_bytes(276, recs))
+    assert s.jumps == 0 and s.lost == 0, (s.jumps, s.lost)
+
+
+def test_a_duplicate_arriving_late_is_a_duplicate_not_a_restart():
+    recs = stream_records(6000)
+    late = []
+    for k in range(10):
+        i = 500 + k * 500
+        t, fr = recs[i]
+        late.append((t + 60_000_000, fr))  # the same packet again, 60 ms later
+    s = only_stream(pcap_bytes(276, sorted(recs + late)))
+    assert s.jumps == 0, s.jumps
+    assert s.lost == 0 and s.duplicates == 10, (s.lost, s.duplicates)
+
+
+def test_a_very_late_straggler_is_not_a_restart_and_books_no_phantom_loss():
+    recs = stream_records(6000)
+    t, fr = recs[3000]
+    recs = recs[:3000] + recs[3001:4000] + [(recs[3999][0] + 1000, fr)] + recs[4000:]
+    s = only_stream(pcap_bytes(276, recs))
+    assert s.jumps == 0 and s.lost == 0, (s.jumps, s.lost)
+
+
+def test_a_genuine_restart_is_still_a_jump():
+    s = only_stream(pcap_bytes(276, stream_records(6000, start_frame=50_000, restart_at=3000)))
+    assert s.jumps == 1 and s.lost == 0
+
+
+def test_a_stream_too_noisy_to_resolve_the_bound_is_uncertain_not_ok():
+    g = vr.Grading(ppm_bound=20.0, loss_ceiling=1e-4, min_span_s=20.0)
+    assert vr.grade(_stats(rate_ppm=30.0, rate_stderr_ppm=10.8), g)[0] == "UNCERTAIN"
+    assert vr.grade(_stats(rate_ppm=1.0, rate_stderr_ppm=10.8), g)[0] == "UNCERTAIN"
+    # loss is graded independently of the rate's precision
+    assert vr.grade(_stats(rate_ppm=1.0, rate_stderr_ppm=10.8, lost=9, loss_ratio=8e-4), g)[0] == "FAULT"
+    res = vr.CaptureResult(linktype=276, packets=0, streams=[], truncated_vban=0)
+    assert vr.overall_verdict(res, [("UNCERTAIN", ["x"])]) == "UNKNOWN"
