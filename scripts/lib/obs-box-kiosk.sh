@@ -276,8 +276,11 @@ obs_box_kiosk() {
 #     issue 1357: xserver-xorg + x11-xserver-utils (xrandr/xset) ride along -- Ubuntu 26.04 (strih-lx)
 #     no longer installs the Xorg server with the Wayland-only GNOME desktop, and lightdm+openbox need
 #     it; on 24.04 (imag) both are already present, so the install is a no-op there.
+#     issue 1361: python3-websocket rides along -- both OBS launchers run a websocket seeder
+#     (strih-obs-start.sh refuses to start OBS without it, imag_scenes.py imports it); strih-lx had
+#     it only as a hand install. Graded by the `websocket` row of obs-box-baseline-verify.sh.
 obs_box_apt_update
-DEBIAN_FRONTEND=noninteractive apt-get install -y openbox lightdm feh wmctrl btop xserver-xorg x11-xserver-utils \
+DEBIAN_FRONTEND=noninteractive apt-get install -y openbox lightdm feh wmctrl btop xserver-xorg x11-xserver-utils python3-websocket \
     || fail "#504: openbox+lightdm install failed — cannot convert the box to the kiosk WM"
 
 # (b) lightdm autologin → openbox. Idempotent full-file write of a fixed drop-in (always the same

@@ -62,6 +62,10 @@ fail() { echo -e "${RED}FAIL: $1${NC}" >&2; exit 1; }
 . "${HERE}/lib/ndi-runtime.sh"   # issue 1317: shared NDI 6.3.2 runtime install recipe (with setup-imag.sh)
 # shellcheck source=scripts/lib/obs-box-baseline.sh
 . "${HERE}/lib/obs-box-baseline.sh"   # issue 1357: the ONE OBS-box appliance baseline (the SAME lib setup-imag.sh runs)
+# shellcheck source=scripts/lib/remoteos-mcp.sh
+. "${HERE}/lib/remoteos-mcp.sh"   # issue 1361: the ONE remoteos-mcp venv install (with setup-imag.sh + setup-device.sh)
+# shellcheck source=scripts/lib/obs-downstream-keyer.sh
+. "${HERE}/lib/obs-downstream-keyer.sh"   # issue 1361: the pinned Downstream Keyer OBS plugin (step 4c)
 
 # --- issue 1361: select + load the box facts BEFORE the source-guard, so a sourced setup (the unit
 # tests) sees exactly the facts the real run uses. Any invalid / TODO_OWNER fact refuses here.
@@ -321,6 +325,18 @@ ndi_discovery_dropin_content > "$NDI_DISCOVERY_INTERCOM_DROPIN"
 echo "  NDI receiver config: ${USER_HOME}/.ndi + ${NDI_DISCOVERY_SYSTEM_DIR} (networks.ips=${NDI_IPS}) + intercom-hub NDI_CONFIG_DIR drop-in (issue 1342)"
 
 # ---------------------------------------------------------------------------------------------
+# A lettered sub-step so TOTAL_STEPS stays 17 (test-pinned).
+step "4c" "Downstream Keyer OBS plugin $(obs_dsk_version) (pinned upstream .deb, sha256-checked) -> the /usr prefix"
+# issue 1361: the operator collection uses exeldro's Downstream Keyer; on strih-lx it was a hand
+# extraction of the upstream .deb. This installs the SAME file from the SAME pinned release asset: the
+# .deb and the extracted plugin are both sha256-checked (the plugin hash == the live strih-lx file),
+# then only the plugin + its locale go into the /usr prefix OBS loads. Extracted, never dpkg-installed:
+# the .deb depends on the distro obs-studio package, which the genlock bundle OBS does not provide.
+# Idempotent: a plugin that already has the pinned hash downloads nothing. verify-strih item 35 grades it.
+( eval "$(obs_dsk_install_cmds "$(obs_dsk_version)" "$(obs_dsk_deb_url)" "$(obs_dsk_deb_sha256)" "$(obs_dsk_so_sha256)" /usr/lib/x86_64-linux-gnu /usr/share)" ) \
+  || fail "Downstream Keyer install failed (see above) -- check the pinned .deb URL / sha256 in scripts/lib/obs-downstream-keyer.sh and re-run"
+
+# ---------------------------------------------------------------------------------------------
 step 5 "OBS profile facts (${BOX_NAME}: seeded from the Windows 'light' profile)"
 # issue 1317: create ~/.config/obs-studio owned by the DESKTOP user (this script runs under sudo, so a
 # bare `mkdir` roots it and the obs user cannot then create .sentinel -- `Permission denied`, hit live).
@@ -556,16 +572,13 @@ else
 fi
 
 # ---------------------------------------------------------------------------------------------
-step 10 "RemoteOS MCP control-channel agent (canonical install-linux.sh)"
-REMOTEOS_MCP_INSTALLER_URL="${REMOTEOS_MCP_INSTALLER_URL:-https://raw.githubusercontent.com/zbynekdrlik/remoteos-mcp/master/install-linux.sh}"
-TMP_INST="$(mktemp)"
-if curl -fsSL "$REMOTEOS_MCP_INSTALLER_URL" -o "$TMP_INST" 2>/dev/null; then
-  bash "$TMP_INST" 2>/dev/null && echo "  remoteos-mcp installed (update dev1 .mcp.json linux-strih entry to match)" \
-    || warn "  remoteos-mcp installer returned non-zero -- run it by hand"
-else
-  warn "  could not fetch remoteos-mcp install-linux.sh -- install it by hand (ops skill #555)"
-fi
-rm -f "$TMP_INST"
+step 10 "RemoteOS MCP control-channel agent (venv /opt/remoteos-mcp-venv, shared scripts/lib/remoteos-mcp.sh)"
+# issue 1361: the SAME venv install the live strih-lx box runs, from the ONE shared lib setup-imag.sh and
+# setup-device.sh call too (the upstream install-linux.sh pip-installs into the SYSTEM python with
+# --break-system-packages; strih-lx runs a venv). Keeps the box's existing key (REMOTEOS_MCP_AUTH_KEY overrides), restarts the
+# agent only when the source / unit / key changed, and fails the run unless :8092 answers /health.
+remoteos_mcp_install "$DESKTOP_USER" desktop restart \
+  || fail "remoteos-mcp agent install failed -- see the remoteos-mcp line above (GH_TOKEN for a private fork; REMOTEOS_MCP_AUTH_KEY to pin the key)"
 
 # ---------------------------------------------------------------------------------------------
 step 11 "OBS-box appliance baseline (issue 1357: the SAME lib as imag -- Xorg openbox kiosk, low-latency kernel, de-jitter, max-performance, power envelope)"

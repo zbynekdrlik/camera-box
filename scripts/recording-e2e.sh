@@ -4051,7 +4051,7 @@ if [ "${ZERO_LOSS_RESTART_GATE:-0}" = "1" ]; then
     # `harness_recording_e2e_paths.rs`'s `.find("recording-verdict-on-strih.sh\" \\")` anchor
     # keeps landing on the NORMAL [8/8a] invocation (the one it actually guards), not this
     # earlier restart-survival-mode call to the same planner.
-    echo "    --- [$label 8a] extract the STRIH partial ON the strih box (win-strih), in place ---"
+    echo "    --- [$label 8a] extract the STRIH partial ON the strih box ($(strih_access_label "$STRIH")), in place ---"
     "$HERE/recording-verdict-on-strih.sh" --verdict-exe "$VERDICT_EXE_WIN" --out-dir "$OUT_DIR_WIN" \
       --strih-rec "$strih_rec_win" \
       -- --extract-partial strih --strih "$strih_rec_win" --capture-fps "$STRIH_CAPTURE_FPS" \
@@ -4093,7 +4093,7 @@ if [ "${ZERO_LOSS_RESTART_GATE:-0}" = "1" ]; then
 
   echo "[Z2/Z3] #109 restart — OPERATOR/SUPERVISOR ACTION (this script does NOT execute it)"
   echo "    Perform the restart under test now:"
-  echo "      OBS restart: stop then start OBS on strih AND stream (scripts/launch-obs-genlock.sh),"
+  echo "      OBS restart: restart OBS on strih ($(strih_obs_restart_hint "$STRIH")) AND stream (scripts/launch-obs-genlock.sh),"
   echo "      PC restart:  reboot the strih/stream host(s) (approval-gated — get the user's explicit"
   echo "                   go-ahead first; this dev rig's reboot is standing-approved WORK, never"
   echo "                   auto-executed by this unattended script) — then relaunch OBS the same way."
@@ -4143,8 +4143,8 @@ if [ "${ZERO_LOSS_RESTART_GATE:-0}" = "1" ]; then
         ;;
     esac
   else
-    echo "    [zero-loss-restart-gate] both verdict JSONs not yet on dev1 — the win-strih/win-stream-snv"
-    echo "    holder must run the decode+merge plans above for BOTH passes, then run the gate command"
+    echo "    [zero-loss-restart-gate] both verdict JSONs not yet on dev1 — the strih ($(strih_access_label "$STRIH"))"
+    echo "    and stream (win-stream-snv) holders must run the decode+merge plans above for BOTH passes, then run the gate command"
     echo "    printed above by hand."
   fi
   exit "$GATE"
