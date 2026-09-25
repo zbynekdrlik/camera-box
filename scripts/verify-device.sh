@@ -823,7 +823,7 @@ Checks:
       /dev/video from a killed E2E run's stray capture burn (#772)
   (aa) interkom audio bake-in: by-NAME /etc/asound.conf (CARD=HID), alsa-utils installed, and the
       live amixer Mic/PCM gain matches the per-box table (cam1-4 75%/79%, cam5-7 80%/94%) (#782)
-  (ab) RemoteOS MCP agent: remoteos-mcp.service enabled (reboot-survival) + active, :8092 listening
+  (ab) RemoteOS MCP agent: remoteos-mcp.service enabled (reboot-survival) + active, :8092 listening, unauthenticated /mcp refused
       (the linux-camN MCP control surface, provisioned by setup-device.sh STEP 17b) (#1066)
   (ac) realtime-isolation drift (issue 899, WARN-only): kernel PREEMPT_RT status + the xhci capture
       IRQ routed off the isolated grab core on a stock kernel (defects 1+3; hard-FAIL flip staged)
@@ -1428,14 +1428,20 @@ mcpacr=0
 MCP_ACTIVE="$(ssh_box "systemctl is-active remoteos-mcp 2>/dev/null | tr -d '[:space:]'")" || mcpacr=$?
 mcplr=0
 MCP_LISTEN="$(ssh_box "ss -ltn 2>/dev/null | grep -cE ':8092([^0-9]|\$)' || true")" || mcplr=$?
+# issue 1361: an empty agent key turns remoteos's authentication OFF on this 0.0.0.0 full-shell
+# surface, so an unauthenticated POST /mcp (curl ON the box) must answer 401.
+mcpaur=0
+MCP_UNAUTH="$(ssh_box "curl -s -o /dev/null -w '%{http_code}' --max-time 5 -X POST http://127.0.0.1:8092/mcp 2>/dev/null || true")" || mcpaur=$?
 if [ "${MCP_ENABLED:-}" != "enabled" ]; then
   fail "remoteos-mcp.service is not enabled (is-enabled='${MCP_ENABLED:-<none>}', ssh rc=$mcpenr) -- the linux-camN MCP surface would be dead after a reboot (#1066)"
 elif [ "${MCP_ACTIVE:-}" != "active" ]; then
   fail "remoteos-mcp.service is not active (is-active='${MCP_ACTIVE:-<none>}', ssh rc=$mcpacr) -- the linux-camN MCP :8092 surface is down (#1066)"
 elif [ "${MCP_LISTEN:-0}" = "0" ]; then
   fail "remoteos-mcp is not listening on :8092 (ss rc=$mcplr) -- the linux-camN MCP surface is unreachable (#1066)"
+elif [ "${MCP_UNAUTH:-}" != "401" ]; then
+  fail "remoteos-mcp authentication is not enforced: an unauthenticated POST /mcp answered '${MCP_UNAUTH:-<none>}' (want 401, ssh rc=$mcpaur) -- re-run setup-device.sh STEP 17b (issue 1361)"
 else
-  ok "remoteos-mcp agent enabled + active + listening on :8092 (linux-camN MCP surface, #1066)"
+  ok "remoteos-mcp agent enabled + active + listening on :8092 + unauthenticated /mcp refused (linux-camN MCP surface, #1066)"
 fi
 
 # (ac) realtime-isolation drift (issue 899) -- WARNING only for now ------------------------------

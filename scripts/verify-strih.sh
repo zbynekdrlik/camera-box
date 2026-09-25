@@ -275,7 +275,7 @@ _rm_import=0
 _rm_en="$(systemctl is-enabled remoteos-mcp 2>/dev/null || true)"
 _rm_act="$(systemctl is-active remoteos-mcp 2>/dev/null || true)"
 # An unauthenticated POST to the local agent must be refused (401): an empty key turns auth OFF.
-_rm_unauth="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 -X POST "http://127.0.0.1:$(remoteos_mcp_port)/mcp" 2>/dev/null || true)"
+_rm_unauth="$(remoteos_mcp_unauth_code)"
 _rm_verdict="$(remoteos_mcp_verdict "$_rm_unit" "$_rm_env" "$_rm_import" "$_rm_en" "$_rm_act" "$_rm_unauth")" || true
 case "$_rm_verdict" in
   ok*) ok "remoteos-mcp ${_rm_verdict#ok }" ;;

@@ -20,7 +20,8 @@
 #     `Authorization: token` header read from STDIN when GH_TOKEN is set (never argv), anonymously
 #     otherwise (the repo is public);
 #   * pip installs it into the venv with the project's own constraints.txt, never into /usr, and runs
-#     with GH_TOKEN / REMOTEOS_MCP_AUTH_KEY removed from its environment (it executes build code);
+#     under an env ALLOWLIST (PATH/HOME/LANG/TMPDIR + proxy/CA/index vars): it executes build code, so
+#     no GH_TOKEN, agent key or CAM_PW ever reaches it;
 #   * the key comes from REMOTEOS_MCP_AUTH_KEY, else a legacy unit's `--auth-key` (what the RUNNING
 #     service accepts), else the existing EnvironmentFile, else config.json, else a fresh one -- a
 #     re-run keeps the key dev1's .mcp.json holds. It lands in 0600 files only (config.json + the
@@ -129,6 +130,33 @@ remoteos_mcp_resolve_key() {
         if remoteos_mcp_key_ok "$k"; then printf '%s' "$k"; return 0; fi
     done
     return 0
+}
+
+# remoteos_mcp_user_from_unit_text TEXT -> the `User=` of an existing unit, or nothing. Always rc 0.
+remoteos_mcp_user_from_unit_text() {
+    local line
+    while IFS= read -r line; do
+        case "$line" in
+            User=*) printf '%s' "${line#User=}"; return 0 ;;
+        esac
+    done <<<"${1-}"
+    return 0
+}
+
+# remoteos_mcp_headless_user -> the account a HEADLESS (cam) agent runs as: SUDO_USER (the operator
+# who ran the provisioner under sudo -- the upstream installer's rule), else the EXISTING unit's User=
+# (a re-provision run as root, e.g. the documented systemd-run re-run, keeps the box's account), else
+# root. A value that is not a plain account name is skipped.
+remoteos_mcp_headless_user() {
+    local u
+    for u in "${SUDO_USER:-}" \
+        "$(remoteos_mcp_user_from_unit_text "$(cat "$(remoteos_mcp_unit_path)" 2>/dev/null || true)")"; do
+        case "$u" in
+            ''|*[!A-Za-z0-9._-]*) ;;
+            *) printf '%s' "$u"; return 0 ;;
+        esac
+    done
+    printf 'root'
 }
 
 # remoteos_mcp_generate_key -> 32 random letters/digits (the upstream installer's generator).
@@ -283,7 +311,8 @@ remoteos_mcp_unauth_code() {
 # rc 0 = installed and gated; rc 1 = a named failure on stderr.
 remoteos_mcp_install() {
     local user="${1-}" mode="${2-}" policy="${3-}"
-    local venv uid unit_text cfg_key unit_key ef_key key work src_id="" marker pkg_changed=0 en code
+    local venv uid unit_text cfg_key unit_key ef_key key work src_id="" marker pkg_changed=0 en code pv
+    local -a pip_env=()
     case "$policy" in
         restart|enable-only) ;;
         *) echo "remoteos_mcp_install: POLICY must be restart|enable-only (got '${policy}')" >&2; return 1 ;;
@@ -323,15 +352,20 @@ remoteos_mcp_install() {
             && "${venv}/bin/python" -c 'import remoteos' >/dev/null 2>&1; then
             echo "  remoteos-mcp: ${src_id} already installed in ${venv}"
         else
+            pip_env=(PATH="$PATH" HOME="${HOME:-/root}" LANG="${LANG:-C.UTF-8}" TMPDIR="${TMPDIR:-/tmp}")
+            for pv in http_proxy https_proxy no_proxy HTTP_PROXY HTTPS_PROXY NO_PROXY \
+                SSL_CERT_FILE SSL_CERT_DIR REQUESTS_CA_BUNDLE PIP_INDEX_URL PIP_EXTRA_INDEX_URL PIP_TRUSTED_HOST; do
+                if [ -n "${!pv:-}" ]; then pip_env+=("${pv}=${!pv}"); fi
+            done
             if ! "${venv}/bin/python" -c 'import sys' >/dev/null 2>&1; then
                 # Ubuntu's python3 ships venv without ensurepip; python3-venv adds it (no-op when present).
                 DEBIAN_FRONTEND=noninteractive apt-get install -y python3-venv >/dev/null \
                     || { echo "remoteos-mcp: apt-get install python3-venv failed" >&2; rm -rf "$work"; return 1; }
                 python3 -m venv "$venv" || { echo "remoteos-mcp: python3 -m venv ${venv} failed" >&2; rm -rf "$work"; return 1; }
             fi
-            # pip executes the build code of the source and of every sdist dependency: never hand it
-            # the GitHub token or the agent key.
-            if env -u GH_TOKEN -u REMOTEOS_MCP_AUTH_KEY \
+            # pip executes the build code of the source and of every sdist dependency, so it runs
+            # under an env ALLOWLIST: no GH_TOKEN, no agent key, no CAM_PW, nothing the caller exports.
+            if env -i "${pip_env[@]}" \
                 PIP_CONSTRAINT="${work}/src/constraints.txt" PIP_DISABLE_PIP_VERSION_CHECK=1 \
                 "${venv}/bin/python" -m pip install --no-cache-dir --upgrade "${work}/src" >/dev/null; then
                 "${venv}/bin/python" -c 'import remoteos' >/dev/null 2>&1 \
