@@ -110,3 +110,31 @@ fn same_schema_or_non_schema_failures_stay_fatal_even_for_imag() {
         PartialLoadDisposition::Fatal
     );
 }
+
+/// Issue 1302 — the cg (RESOLUME-SNV cg OBS) partial feeds the REPORT-ONLY `cg_chain` section, so
+/// ANY load failure DROPS it (a schema mismatch, a same-schema error and an unreadable file alike):
+/// a bad cg partial may cost only the cg section, never abort the merge into a false camera RED.
+#[test]
+fn cg_leg_drops_on_any_load_failure_1302() {
+    use camera_box::partial_schema_gate::box_drops_on_any_load_failure;
+    assert!(box_drops_on_any_load_failure("cg"));
+    for other in ["strih", "stream", "imag", "unknown"] {
+        assert!(!box_drops_on_any_load_failure(other), "{other}");
+    }
+    for found in [Some(3), Some(4), None] {
+        let d = classify_load_failure("cg", found, 4);
+        assert!(
+            is_degrade(&d),
+            "cg must drop, never abort ({found:?}): {d:?}"
+        );
+        if let PartialLoadDisposition::Degrade { reason } = &d {
+            assert!(reason.contains("cg_chain"), "{reason}");
+            assert!(reason.contains("1302"), "{reason}");
+        }
+    }
+    // The cg rule never widens the other legs: an unreadable imag partial stays fatal.
+    assert_eq!(
+        classify_load_failure("imag", None, 4),
+        PartialLoadDisposition::Fatal
+    );
+}

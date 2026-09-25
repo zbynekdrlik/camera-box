@@ -9312,6 +9312,122 @@ mod tests {
         );
     }
 
+    /// Issue 1302 — the on-box `cg` extract expects exactly the SongPlayer origin + cg OBS hop
+    /// burns (the pair the fused `--cg` decode uses), with or without `--cg-chain-burns`.
+    #[test]
+    fn cg_box_expects_the_songplayer_and_cg_burns_1302() {
+        use super::args_expected_burns_for;
+        use clap::Parser;
+        for argv in [
+            &["recording-verdict"][..],
+            &["recording-verdict", "--cg-chain-burns"][..],
+        ] {
+            let args = super::Args::parse_from(argv);
+            assert_eq!(
+                args_expected_burns_for("cg", &args),
+                Some(vec![SP, CGB]),
+                "{argv:?}"
+            );
+        }
+    }
+
+    /// Issue 1302 — `--extract-partial cg` needs the cg OBS recording via `--cg`; without it the
+    /// extract fails loudly BEFORE any decode (never a silent empty partial).
+    #[test]
+    fn extract_partial_cg_needs_the_cg_recording_1302() {
+        use clap::Parser;
+        let args = super::Args::parse_from(["recording-verdict", "--extract-partial", "cg"]);
+        let err = super::extract_partial(&args, "cg").unwrap_err();
+        assert!(format!("{err:#}").contains("--cg"), "{err:#}");
+    }
+
+    /// Issue 1302 — a cg partial decoded ON the RESOLUME-SNV box fills the cg slot of the merge:
+    /// the report-only cg_chain section is computed from it with NO recording on this host.
+    #[test]
+    fn run_merge_builds_cg_chain_from_an_onbox_cg_partial_1302() {
+        use super::run_merge;
+        use camera_box::probe::recording_partial::RecordingPartial;
+        use clap::Parser;
+        use std::path::PathBuf;
+
+        let dir = tempfile::tempdir().unwrap();
+        let cg_p = RecordingPartial::from_frames(
+            "cg",
+            &PathBuf::from("cg.mkv"),
+            &[SP, CGB],
+            cg_window(60, None),
+        );
+        let cg_path = dir.path().join("cg-partial.json");
+        cg_p.save(&cg_path).unwrap();
+        let json = dir.path().join("verdict.json");
+        let spec = format!("cg={}", cg_path.display());
+        let args = super::Args::parse_from([
+            "recording-verdict",
+            "--min-secs",
+            "1",
+            "--merge-partials",
+            spec.as_str(),
+            "--json",
+            json.to_str().expect("utf8 path"),
+        ]);
+        // run_merge exits the PROCESS on a FAIL verdict: a clean cg-only merge must PASS.
+        run_merge(&args).expect("a clean cg-only merge must not error");
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&json).unwrap()).unwrap();
+        assert_eq!(
+            v["cg_chain"]["cg_obs"]["songplayer"]["contiguous"],
+            serde_json::json!(true),
+            "the cg_chain origin hop comes from the on-box partial: {}",
+            v["cg_chain"]
+        );
+        assert_eq!(v["cg_chain"]["gated_live"], serde_json::json!(false));
+    }
+
+    /// Issue 1302 — an unreadable cg partial is DROPPED (the report-only cg_chain section is
+    /// omitted), never a merge abort that would RED the camera gate.
+    #[test]
+    fn run_merge_drops_an_unreadable_cg_partial_instead_of_aborting_1302() {
+        use super::run_merge;
+        use camera_box::probe::recording_partial::RecordingPartial;
+        use clap::Parser;
+        use std::path::PathBuf;
+
+        let dir = tempfile::tempdir().unwrap();
+        let imag_p = RecordingPartial::from_frames(
+            "imag",
+            &PathBuf::from("imag.mkv"),
+            &[super::BURN_RUN_ID_IMAG],
+            imag_window_with_burn(None),
+        );
+        let imag_path = dir.path().join("imag-partial.json");
+        imag_p.save(&imag_path).unwrap();
+        let cg_path = dir.path().join("cg-partial.json");
+        std::fs::write(&cg_path, "not json at all {").unwrap();
+        let json = dir.path().join("verdict.json");
+        let imag_spec = format!("imag={}", imag_path.display());
+        let cg_spec = format!("cg={}", cg_path.display());
+        let args = super::Args::parse_from([
+            "recording-verdict",
+            "--min-secs",
+            "1",
+            "--merge-partials",
+            imag_spec.as_str(),
+            "--merge-partials",
+            cg_spec.as_str(),
+            "--json",
+            json.to_str().expect("utf8 path"),
+        ]);
+        run_merge(&args).expect("a corrupt cg partial must not abort the merge");
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&json).unwrap()).unwrap();
+        assert_eq!(v["cg_chain"], serde_json::Value::Null, "cg section omitted");
+        assert_eq!(
+            v["full_chain"]["imag_leg_skip_reason"],
+            serde_json::Value::Null,
+            "a dropped cg partial is never reported as an imag skip"
+        );
+    }
+
     /// #755 — a window of N delivered frames carrying cam7's OWN digital capture-burn in every
     /// frame (mirrors [`window_cam5_and_cam6`] for the 7th camera, #753).
     fn window_cam7(n: u32, with_stream: bool) -> Vec<RecordingFrame> {
