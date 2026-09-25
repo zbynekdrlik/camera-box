@@ -43,7 +43,8 @@ being supplied (a normal camera run omits it). It folds via `cg_chain_gate::fold
 which is a **no-op while `gates_overall_pass() == false`** — so the camera-chain gate is untouched.
 
 **It is REPORT-ONLY on purpose.** The SongPlayer burn shipped (songplayer 151, 25.9.2026) but no
-CG_CHAIN=1 run has produced real data yet, so the hold/decimation behaviour is uncalibrated. The flip to LIVE is the standard one-line seam
+CG_CHAIN=1 run has produced real data yet, so the hold/decimation behaviour is uncalibrated. The
+flip to LIVE is the standard one-line seam
 (`gates_overall_pass() -> true`, `verdict-gate-seam-calibration.md`) — but the checklist is MORE
 than "calibrate the hold". Before the flip:
 
@@ -77,16 +78,21 @@ currently honest end-to-end.
 renders the 911014 payload with the production renderer and decodes it with the production decoder —
 proving the fleet decode path reads the new origin run_id, but NOT that it survives the real lossy
 chain (projection → grabber → NDI → re-encode). Mine the real fixture from the first CG_CHAIN=1 rig
-run after songplayer#151 deploys (supervisor/rig-ops), per the #1196 precedent.
+run (songplayer 151 is deployed since 25.9.2026; a supervisor/rig-ops step), per the #1196 precedent.
 
 ## The E2E profile is opt-in + leak-guarded (`scripts/lib/cg-chain-e2e.sh`)
 
 `CG_CHAIN=1` turns the SongPlayer burn ON + cuts cg OBS program to the SP scene + StartRecords cg
-OBS at `[5/8]`, runs ONE tail CG window on strih before `[7/8]`, StopRecords + pulls the cg
-recording at `[8/8d]` (feeding `--cg`), and — the #246/#844 leak-guard — turns the burn OFF,
-StopRecords cg OBS and restores every scene snapshot in `cleanup()` even on an early abort (the
-burn must NEVER stay on the LED wall). All runners are best-effort + loud; `CG_CHAIN` unset =
-byte-for-byte inert. A live CG_CHAIN=1 run is a supervisor/rig-ops step, never unattended.
+OBS at `[5/8]` (no cg recording started ⇒ the burn goes straight back OFF), runs ONE tail CG window
+on strih before `[7/8]`, ends the CG leg right after the `[7/8]` StopRecord
+(`cg_chain_after_stoprecord`: cg StopRecord keeping the host path, burn OFF, strih restored — so
+nothing CG runs through the long on-box decodes), pulls the cg recording at `[8/8d]` (feeding
+`--cg`), and — the #246/#844 leak-guard — repeats burn OFF + cg StopRecord + every scene restore in
+`cleanup()` even on an early abort (the burn must NEVER stay on the LED wall). cleanup() uses a 3 s
+per-request burn timeout (`CG_CHAIN_CLEANUP_BURN_TIMEOUT`) so an unreachable SongPlayer never
+stalls the stream/strih teardowns behind it by a minute. All runners are best-effort + loud;
+`CG_CHAIN` unset = byte-for-byte inert. A live CG_CHAIN=1 run is a supervisor/rig-ops step, never
+unattended.
 
 ### The shipped SongPlayer burn API (issue 1302)
 
@@ -105,13 +111,22 @@ byte-for-byte inert. A live CG_CHAIN=1 run is a supervisor/rig-ops step, never u
 
 `cg_chain_record_stop` keeps the `obs_phase2.py record --action stop` stdout (the StopRecord
 `outputPath`, e.g. `C:\Users\Resolume\Videos\<stamp>.mkv`) in `CG_HOST_RECORDING_PATH`; an empty
-answer (the cleanup() re-stop) never clears it. With `CG_CHAIN_PULL_CMD` unset, the default pull scps
-THAT file from `${CG_CHAIN_USER:-newlevel}@<cg-ip>` (source spec through `win_ssh_scp_source_path` —
-a backslash scp source reads "No such file"), bounded by `CG_CHAIN_PULL_TIMEOUT` (900 s). Only this
-run's file is pulled. The whole-run cg recording can be large; the merge decodes it on dev1.
+answer (the `[8/8d]` / cleanup() re-stop) never clears it. With `CG_CHAIN_PULL_CMD` unset, the
+default pull fetches THAT file from `${CG_CHAIN_USER:-newlevel}@<cg-ip>` through the SHARED
+`win_ssh_download` (win-ssh-exec.sh — its `win_ssh_scp_source_path` fixes the backslash scp source
+that reads "No such file"), bounded by `CG_CHAIN_PULL_TIMEOUT` (900 s) via `timeout bash -c '. lib;
+win_ssh_download …'` (`timeout` cannot exec a shell function). Only this run's file is pulled; the
+recording now stops right after `[7/8]`, so it is the recording window, not the whole decode. The
+merge decodes it on dev1.
 
 ### The ONE tail CG window (issue 1302) — why it is NOT a switch-schedule window
 
+- **Every program cut is a HARD CUT.** `cg_chain_scene.py` switches the box to its cut transition
+  (found by `transitionKind == cut_transition`, the name can be localized), snapshots the previous
+  transition and restores it LAST. A Fade blends the old program into the new one and those frames
+  read as undecodable — cg OBS runs a live 2 s Fade (strih ran Cut on 25.9.2026). The sweep's own
+  `obs_phase2.py switch` does not need this: every sweep cut is camera→camera over the SAME painted
+  QR, so a blend is invisible there.
 - **cg OBS:** `scripts/cg_chain_scene.py program` cuts program to `CG_CHAIN_CG_SCENE` (default the
   lower-cased output, `sp-fast` — the live `cg_scenes` has one `sp-*` scene per SongPlayer output)
   BEFORE the cg StartRecord, so the cg recording carries the SP burn for the whole run.
@@ -119,29 +134,44 @@ run's file is pulled. The whole-run cg recording can be large; the merge decodes
   (default `CG-obs`, the `RESOLUME-SNV (cg-obs)` ndi_source; live 25.9.2026 only `CG bridge` carries
   it), shows ONLY that item (live, `CG-obs` is DISABLED in `CG bridge` and a `CG-presenter` browser
   overlay sits on top — cutting to the scene as-is would show the overlay, not the burns) and cuts
-  program to it. Several scenes carrying it = fail loud unless `CG_CHAIN_STRIH_SCENE` names one.
+  program to it, then runs obs_phase2's own polled `_assert_program_nonblack` (`min_mean=0`,
+  peak-only: an idle SongPlayer frame can be dark, a dead CG-obs is not). Several scenes carrying it
+  = fail loud unless `CG_CHAIN_STRIH_SCENE` names one.
 - **It is a TAIL window after the last camera window, never an entry in `switch-schedule.json`:** a
   schedule window with no cam2 tick FAILS the per-cambox verdict (zero in-window frames), and a
   mid-run CG cut would land INSIDE the optical span (undecodable frames against the live floor). After
-  the last camera window the CG frames are outside every schedule window and past the last optical
-  read, so the camera-chain verdict is untouched. The window is recorded to `$OUTDIR/cg-window.json`
-  (`{"kind":"cg","scene","input","start_ns","end_ns"}`). Never cut strih BACK to a camera before
+  the last camera window the CG frames are outside every schedule window and a trailing no-tick run
+  past the last optical read — the tail placement + the hard cut are DESIGNED to keep the
+  camera-chain verdict out of it; the first live CG_CHAIN=1 run is what confirms it (watch the
+  undecodable counts and the A/V marker pairing on that run). The window is recorded to
+  `$OUTDIR/cg-window.json` (`{"kind":"cg","scene","input","start_ns","end_ns"}`) and echoed into the
+  log — the run's evidence of WHEN strih carried the chain; no verdict code reads it yet (scoping the
+  strih/stream `cg_chain` hops to it is a follow-up). Never cut strih BACK to a camera before
   StopRecord — a cam burn reappearing after the gap opens missing ids in its `first..=last`.
 - **Snapshot-before-mutate:** every scene change writes its restore snapshot
-  (`$OUTDIR/cg-chain-{cg-program,strih-scene}-state.json`: host, scene, previous program, every
-  item's enabled state) BEFORE changing anything; `restore` replays it (program first, then items)
-  and renames the file `.restored`, so the cleanup() second pass is a no-op. strih is restored right
-  after the `[7/8]` StopRecord (so the long on-box decode does not run with strih on CG), again in
-  cleanup(). A failed restore keeps the snapshot and prints the manual restore command.
-- `recording-e2e.sh` wiring is three NEW lines, no anchored line edited: `CG_CHAIN_STATE_DIR="$OUTDIR"`
-  next to `CG_RECORDING`, `if cg_chain_window_due; then cg_chain_window "$STRIH" …; fi` between the
-  sweep/hold `fi` and the `[7/8]` banner (its comment must never contain the `[7/8]` literal — a test
-  anchors on the FIRST `[7/8]` in the file), and `cg_chain_strih_restore …` after the `imag host file`
-  echo.
-- Tier-0: the pure bash builders + the fake-curl/fake-scp runners are driven by
-  `tests/harness_cg_chain_e2e_1302.rs` (a worktree worker replicates it with a python driver that runs
-  each snippet through `bash` — a `bash -c '. lib'` Bash call is guard-refused); the scene helper is
-  pytest (`tests/python/test_cg_chain_scene_1302.py`, a scripted fake rpc).
+  (`$OUTDIR/cg-chain-{cg-program,strih-scene}-state-<RUN_ID>.json`: host, scene, previous program,
+  previous transition, every item's enabled state) BEFORE changing anything; `restore` replays it
+  (program first, then items, then the transition) and renames the file `.restored`, so the cleanup()
+  second pass is a no-op. The RUN_ID key means a reused OUTDIR never replays another run's snapshot.
+  strih is restored right after the `[7/8]` StopRecord, again in cleanup(). A failed restore keeps
+  the snapshot and prints the manual restore command. `cg_chain_scene.py` closes every WS session it
+  opens.
+- `recording-e2e.sh` wiring adds NEW lines only (plus rewording three stale comment/echo lines of the
+  #1301 block that said the SongPlayer burn was unshipped): `CG_CHAIN_STATE_DIR="$OUTDIR"` next to
+  `CG_RECORDING`; the burn-back-OFF line inside the `[5/8]` CG block; `if cg_chain_window_due; then
+  cg_chain_window "$STRIH" …; fi` between the sweep/hold `fi` and the `[7/8]` banner (its comment
+  must never contain the `[7/8]` literal — a test anchors on the FIRST `[7/8]` in the file); and
+  `cg_chain_after_stoprecord …` after the `imag host file` echo. Anchor gotcha hit here: `[5b/8]`
+  first appears in a source-block comment near the top — anchor on `# [5b/8] #707 B1`.
+- Tier-0: the pure bash builders + the fake-curl / fake-python3 / fake-scp runners are driven by
+  `tests/harness_cg_chain_e2e_1302.rs` (std-only — it RUNS locally with plain `rustc --test` +
+  `CARGO_MANIFEST_DIR`, from a script file in a worktree); the scene helper is pytest
+  (`tests/python/test_cg_chain_scene_1302.py`, a scripted fake OBS that refuses a program cut under
+  anything but Cut).
+- **Follow-up before trusting the strih/stream hops (out of this slice):** the strih/stream
+  `--extract-partial` decode sets do not include 911014/911015 (item 2 above), and the cg hop burn is
+  decimated on the 30 fps strih recording (item 3), so `cg_chain.strih` / `.stream` may read empty
+  or gapped on the first live run even with the window working.
 
 ## Adding ANOTHER chain-origin/hop pair later
 
