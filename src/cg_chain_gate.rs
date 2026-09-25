@@ -35,6 +35,11 @@
 //! missing id at the cg OBS hop and — being upstream content — the SAME missing id at strih and
 //! stream.
 //!
+//! Issue 1302 slice 2: strih and stream record at 30 fps while the SongPlayer output and the cg OBS
+//! render run at 60, so their hops are judged at the by-design decimation step
+//! ([`hop_contiguity_with_step`], [`cg_hop_with_step`]) and only inside the recorded CG window
+//! ([`pairs_in_window`]). The cg OBS origin recording stays the 1:1, unscoped case.
+//!
 //! ## LIVE status — REPORT-ONLY first cut (issue 1301)
 //!
 //! [`gates_overall_pass`] returns **`false`**: `cg_chain` is fully computed, serialized into the
@@ -84,9 +89,30 @@ impl HopContiguity {
     }
 }
 
-/// Presence-only contiguity over a burn-id list. Empty input ⇒ `first_id == None` ⇒ NOT
+/// Presence-only contiguity over a burn-id list — the 1:1 case of [`hop_contiguity_with_step`]
+/// (every integer in `first..=last` must be present). Empty input ⇒ `first_id == None` ⇒ NOT
 /// contiguous (nothing proven).
 pub fn hop_contiguity(ids: &[u32]) -> HopContiguity {
+    hop_contiguity_with_step(ids, 1)
+}
+
+/// Issue 1302 slice 2 — decimation-aware contiguity over a burn-id list (order-independent: the
+/// DISTINCT ids, ascending). `expected_step` is the hop's by-design decimation factor (from the fps
+/// ratio, `recording_span_gate::painted_tick_step(source_fps, recording_fps)`): a 60 fps id read
+/// from a 30 fps recording steps by 2 by design.
+///
+/// The SAME model as the probe-gated `burn_contiguity_in_window_with_step` (duplicated because the
+/// probe module is CI-only): for each forward gap between consecutive present ids, the excess
+/// `gap / step - 1` (INTEGER division, never below 0) is charged as missing slots. So gap == step
+/// is decimation (0), a gap of `step + 1` is beat jitter (0 at step 2), and a gap of `2 * step`
+/// is one missing slot. The charged slots are listed as the ids `prev + k * step` (a
+/// representative id per missing slot). With `expected_step == 1` this is EXACTLY the historical
+/// presence check: every absent integer in `first..=last` is listed. A step of 0 floors to 1.
+///
+/// `expected_count` = `present_count + missing_ids.len()` (the ids the recording should carry at
+/// this step). `forward_steps` is the gap histogram — the calibration evidence for the step.
+pub fn hop_contiguity_with_step(ids: &[u32], expected_step: u32) -> HopContiguity {
+    let step = expected_step.max(1);
     let present: BTreeSet<u32> = ids.iter().copied().collect();
     let (first, last) = match (
         present.iter().next().copied(),
@@ -104,22 +130,29 @@ pub fn hop_contiguity(ids: &[u32]) -> HopContiguity {
             }
         }
     };
-    let missing_ids: Vec<u32> = (first..=last).filter(|id| !present.contains(id)).collect();
+    let mut missing_ids: Vec<u32> = Vec::new();
+    let mut forward_steps: BTreeMap<u32, u32> = BTreeMap::new();
+    let mut prev: Option<u32> = None;
+    for &id in &present {
+        if let Some(p) = prev {
+            // Ascending distinct ids ⇒ gap >= 1.
+            let gap = id - p;
+            *forward_steps.entry(gap).or_insert(0) += 1;
+            let excess = (gap / step).saturating_sub(1);
+            // p + k * step < id for every k <= excess, so this never overflows.
+            missing_ids.extend((1..=excess).map(|k| p + k * step));
+        }
+        prev = Some(id);
+    }
+    let present_count = present.len() as u32;
     HopContiguity {
         first_id: Some(first),
         last_id: Some(last),
-        present_count: present.len() as u32,
-        // last >= first by construction, and both are u32 ids well under u32::MAX.
-        expected_count: last - first + 1,
+        present_count,
+        expected_count: present_count + missing_ids.len() as u32,
         missing_ids,
-        forward_steps: BTreeMap::new(),
+        forward_steps,
     }
-}
-
-/// RED stub (issue 1302 slice 2): ignores `expected_step`.
-pub fn hop_contiguity_with_step(ids: &[u32], expected_step: u32) -> HopContiguity {
-    let _ = expected_step;
-    hop_contiguity(ids)
 }
 
 /// Issue 1302 slice 2: the CG window recorded by the harness (`cg-window-<RUN_ID>.json`), in
@@ -133,16 +166,33 @@ pub struct CgWindow {
 }
 
 impl CgWindow {
-    /// RED stub.
+    /// A window with `start_ns < end_ns`; an empty or inverted window is `None` (nothing to scope
+    /// to — the caller then judges the whole recording and says so).
     pub fn new(start_ns: i64, end_ns: i64) -> Option<Self> {
-        Some(CgWindow { start_ns, end_ns })
+        (start_ns < end_ns).then_some(CgWindow { start_ns, end_ns })
+    }
+
+    /// `ts` lies inside the window, both ends inclusive.
+    pub fn contains(&self, ts: i64) -> bool {
+        self.start_ns <= ts && ts <= self.end_ns
     }
 }
 
-/// RED stub (issue 1302 slice 2): ignores the window.
+/// Issue 1302 slice 2 — keep only the burn payloads stamped INSIDE the CG window, as the
+/// recorded-order `(frame_index, id)` pairs [`cg_hop_with_step`] takes. Input: one
+/// `(frame_index, id, gen_ts_ns)` triple per decoded payload. The filter reads each payload's OWN
+/// generation stamp: that stamp rises with the id, so a stamp window keeps a contiguous id range
+/// (no artificial gap) and drops a stray read far outside the window. `None` = no window: every
+/// payload is kept (the whole recording, the pre-window behaviour).
 pub fn pairs_in_window(triples: &[(u64, u32, i64)], window: Option<CgWindow>) -> Vec<(u64, u32)> {
-    let _ = window;
-    triples.iter().map(|&(fi, id, _)| (fi, id)).collect()
+    triples
+        .iter()
+        .filter(|&&(_, _, ts)| match window {
+            None => true,
+            Some(w) => w.contains(ts),
+        })
+        .map(|&(frame_index, id, _)| (frame_index, id))
+        .collect()
 }
 
 /// True when the measured max-hold is within [`MAX_HOLD_FRAMES`] (mirrors
@@ -186,31 +236,32 @@ impl CgHop {
 }
 
 /// Build one hop's verdict from its recorded-ORDER `(frame_index, id)` pairs for the SongPlayer
-/// burn and the cg burn (already #575-boundary-trimmed by the probe glue). The hold term uses
-/// [`crate::burn_hold::burn_hold_distribution`] (recording-adjacent run lengths), so a decode gap
-/// breaks a run rather than merging two holds.
+/// burn and the cg burn (already #575-boundary-trimmed by the probe glue) — the 1:1 case of
+/// [`cg_hop_with_step`] (the cg OBS origin recording).
 pub fn cg_hop(hop: &str, songplayer_pairs: &[(u64, u32)], cg_pairs: &[(u64, u32)]) -> CgHop {
-    let sp_ids: Vec<u32> = songplayer_pairs.iter().map(|&(_, id)| id).collect();
-    let cg_ids: Vec<u32> = cg_pairs.iter().map(|&(_, id)| id).collect();
-    CgHop {
-        hop: hop.to_string(),
-        songplayer: hop_contiguity(&sp_ids),
-        songplayer_max_hold: burn_hold_distribution(hop, songplayer_pairs).measured_max_hold(),
-        cg: hop_contiguity(&cg_ids),
-        cg_max_hold: burn_hold_distribution(hop, cg_pairs).measured_max_hold(),
-        expected_step: 1,
-    }
+    cg_hop_with_step(hop, songplayer_pairs, cg_pairs, 1)
 }
 
-/// RED stub (issue 1302 slice 2): ignores `expected_step`.
+/// Issue 1302 slice 2 — one hop's verdict judged at its by-design decimation step (both burns
+/// share it: the SongPlayer output and the cg OBS render run at the same source rate). The hold
+/// term uses [`crate::burn_hold::burn_hold_distribution`] (recording-adjacent run lengths), so a
+/// decode gap breaks a run rather than merging two holds.
 pub fn cg_hop_with_step(
     hop: &str,
     songplayer_pairs: &[(u64, u32)],
     cg_pairs: &[(u64, u32)],
     expected_step: u32,
 ) -> CgHop {
-    let _ = expected_step;
-    cg_hop(hop, songplayer_pairs, cg_pairs)
+    let sp_ids: Vec<u32> = songplayer_pairs.iter().map(|&(_, id)| id).collect();
+    let cg_ids: Vec<u32> = cg_pairs.iter().map(|&(_, id)| id).collect();
+    CgHop {
+        hop: hop.to_string(),
+        songplayer: hop_contiguity_with_step(&sp_ids, expected_step),
+        songplayer_max_hold: burn_hold_distribution(hop, songplayer_pairs).measured_max_hold(),
+        cg: hop_contiguity_with_step(&cg_ids, expected_step),
+        cg_max_hold: burn_hold_distribution(hop, cg_pairs).measured_max_hold(),
+        expected_step: expected_step.max(1),
+    }
 }
 
 /// The whole CG chain across its (optional) three recordings.

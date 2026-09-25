@@ -2401,6 +2401,9 @@ CG_RECORDING="$OUTDIR/cg-obs-recording.mkv"
 # OUTDIR; CG_HOST_RECORDING_PATH is the cg OBS StopRecord host path the default pull scps.
 CG_CHAIN_STATE_DIR="$OUTDIR"
 CG_HOST_RECORDING_PATH=""
+# Issue 1302 slice 2: the strih/stream extracts decode for the SongPlayer + cg burns too, only when
+# CG_CHAIN=1 (empty on a normal run, so their argv stays byte-identical).
+CG_CHAIN_BURN_FLAG="$(cg_chain_extract_burn_flag)"
 # #286 ALL_CAMBOX — strih's OWN render-time burn (911002) must be present on WHICHEVER strih
 # NDI input the sweep currently has cut into program, not just the single default
 # STRIH_PROG_SOURCE (cam1's mapped input under the plain single-camera path). Without this,
@@ -5299,6 +5302,7 @@ if [ "$VERDICT_ON_STREAM" = "1" ]; then
         --strih-rec "$STRIH_HOST_PATH" \
         -- --extract-partial strih --strih "$STRIH_HOST_PATH" --capture-fps "$STRIH_CAPTURE_FPS" \
            --burn-cam1-run-id "$BURN_CAM1_RUN_ID" --burn-strih-run-id "$BURN_STRIH_RUN_ID" \
+           ${CG_CHAIN_BURN_FLAG:+"$CG_CHAIN_BURN_FLAG"} \
            $CG --out "$STRIH_LX_REMOTE_OUT_DIR/strih-partial-${RUN_ID}.json"
       return
     fi
@@ -5307,6 +5311,7 @@ if [ "$VERDICT_ON_STREAM" = "1" ]; then
       "${EXEC_STRIH_ARGS[@]}" \
       -- --extract-partial strih --strih "$STRIH_REC_WIN" --capture-fps "$STRIH_CAPTURE_FPS" \
          --burn-cam1-run-id "$BURN_CAM1_RUN_ID" --burn-strih-run-id "$BURN_STRIH_RUN_ID" \
+         ${CG_CHAIN_BURN_FLAG:+"$CG_CHAIN_BURN_FLAG"} \
          $CG --out "$STRIH_PARTIAL_WIN"
   }
   STRIH_EXTRACT_PID=""
@@ -5390,6 +5395,7 @@ if [ "$VERDICT_ON_STREAM" = "1" ]; then
          --burn-stream-run-id "$BURN_STREAM_RUN_ID" \
          $_av_marker_args \
          $_switch_schedule_args \
+         ${CG_CHAIN_BURN_FLAG:+"$CG_CHAIN_BURN_FLAG"} \
          $CG --out "$STREAM_PARTIAL_WIN"
   }
   STREAM_EXTRACT_PID=""
@@ -5533,6 +5539,9 @@ continuing WITHOUT the imag partial; the merge below will omit --merge-partials 
   # section. Only when CG_CHAIN=1 AND the pull above actually produced the file — otherwise the
   # merge runs exactly as today (no --cg, no cg_chain). Never changes the camera-chain pass verdict.
   if cg_chain_enabled && [ -f "$CG_RECORDING" ]; then MERGE_ARGS+=(--cg "$CG_RECORDING"); fi
+  # Issue 1302 slice 2: the CG_CHAIN burn flag (matching the extracts) + this run's CG window, so the
+  # strih/stream cg_chain hops are judged only inside it. A no-op unless CG_CHAIN=1.
+  cg_chain_merge_args_append
   if [ -f "$PAINTER_CSV" ]; then MERGE_ARGS+=(--painter "$PAINTER_CSV"); fi
   if [ -f "$CAM1_CAPTURE_STATS" ]; then MERGE_ARGS+=(--cam1-capture-stats "$CAM1_CAPTURE_STATS"); fi
   # #1003 review finding 2: raise the LIVE #1035 cam->strih p99 bound by the marker camera's pin

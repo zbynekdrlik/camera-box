@@ -2,6 +2,7 @@
 paths:
   - "src/cg_chain_gate.rs"
   - "scripts/lib/cg-chain-e2e.sh"
+  - "tests/harness_cg_chain_hops_1302.rs"
   - "tests/harness_cg_chain_e2e_1301.rs"
   - "tests/harness_cg_chain_e2e_1302.rs"
   - "scripts/cg_chain_scene.py"
@@ -37,8 +38,9 @@ strih/stream recording during a CG_CHAIN run and must never hijack the cam2 Vern
 
 The pure decision is the crate-root `src/cg_chain_gate.rs` (Tier-0, mirrors `imag_tick_gate.rs` +
 reuses `burn_hold`): per hop (`cg_obs`/`strih`/`stream`) the SongPlayer (911014) and cg (911015)
-burn-id contiguity (presence-only `first..=last`) + max-hold (`MAX_HOLD_FRAMES=4`,
-#575-boundary-trimmed). `recording-verdict --cg <path>` emits `report["cg_chain"]`, gated on `--cg`
+burn-id contiguity + max-hold (`MAX_HOLD_FRAMES=4`, #575-boundary-trimmed). Contiguity is
+decimation-aware since issue 1302 slice 2 (`hop_contiguity_with_step`, below); `cg_obs` is the 1:1
+case (step 1 = the old presence-only `first..=last`). `recording-verdict --cg <path>` emits `report["cg_chain"]`, gated on `--cg`
 being supplied (a normal camera run omits it). It folds via `cg_chain_gate::folds_into_overall_pass`,
 which is a **no-op while `gates_overall_pass() == false`** — so the camera-chain gate is untouched.
 
@@ -50,27 +52,42 @@ than "calibrate the hold". Before the flip:
 
 1. A real captured cg-OBS frame with the SP burn replaces the generated decode fixture
    (`pattern-change-needs-decode-fixture.md`).
-2. **The strih + stream `cg_chain` hops must DECODE sp/cg on the real decode path — they do NOT
-   today.** The strih/stream recordings are decoded via `decode_for_grouped` with expected-burn
-   lists of `[strih]` / `[strih,stream]` (recording-verdict.rs `main()`) — sp/cg (911014/911015)
-   are in NEITHER, so the #207 robust tiling never chases the cg/sp corners on those recordings;
-   only whatever the cheap plain+Otsu full-frame pass happens to read shows up. So the "a dropped
-   SongPlayer frame shows the SAME missing id at strih AND stream" propagation is proven ONLY in
-   the `cg_chain_gate.rs` unit test, NOT end-to-end. The flip MUST first add sp/cg to the
-   strih/stream expected-burn decode sets (without regressing the #463 GENERIC_DIAGNOSTIC fast-path
-   on normal runs — they are not present there, so gate it to CG_CHAIN runs / a dedicated decode).
-3. **Model the cg→strih 60→30 DECIMATION on the strih hop.** strih records at 30fps, so the SP id
-   (painted per cg-OBS render) lands DECIMATED in the strih recording — a strict `first..=last`
-   presence check would false-FAIL it exactly like the cam-chain #571 case. The strih (and
-   stream) hop needs the same decimation-aware treatment (step-aware, or gap-ignore) the camera
-   chain already applies, NOT the raw presence check `cg_chain_gate::hop_contiguity` does today
-   (which is correct only for the cg-OBS ORIGIN recording, 1:1).
+2. **DONE in code (issue 1302 slice 2), unproven live: the strih + stream hops decode sp/cg.**
+   With `CG_CHAIN=1` the harness passes `--cg-chain-burns` to the strih/stream `--extract-partial`
+   calls AND the merge, which appends 911014/911015 to `args_expected_burns_for("strih"|"stream")`
+   (the partial's `expected_burns` + the merge consistency check). The fast-path decode groups are
+   deliberately NOT touched: a CG-window frame carries no camera-under-test burn (and no cam2
+   Vernier), so the any-of group is unsatisfied and EVERY CG frame already takes the robust
+   bottom-band tiling, which spans the full width (incl. `BottomCenterRight`). Adding the CG ids to
+   the any-of group could only WEAKEN the gate (a frame with the cg burn but a missed SP burn would
+   skip the tiling); a mandatory group would force the tiling on every camera frame. The partial
+   carries every CRC-valid payload regardless, so the merge sees the CG ids. Normal runs: the flag
+   is absent and both burn sets are byte-identical.
+3. **DONE in code (issue 1302 slice 2), unproven live: decimation.** `hop_contiguity_with_step`
+   is the `burn_contiguity_in_window_with_step` model (duplicated — the probe module is CI-only):
+   per forward gap between consecutive DISTINCT present ids, the excess `gap / step - 1` (integer
+   division) is charged; gap == step is decimation, `step + 1` is beat jitter (0 at step 2), and a
+   charged slot is listed as `prev + k * step`. The step comes from the fps ratio
+   (`painted_tick_step(--cg-source-fps, <recording fps>)`): cg_obs = `--cg-capture-fps` (60 ⇒ 1),
+   strih = `--capture-fps` (30 ⇒ 2), stream = `--stream-capture-fps` (30 ⇒ 2). Each hop reports
+   `expected_step` + a `forward_steps` gap histogram (`{"2": 29}`) — the calibration evidence. Watch
+   it on the first live run: the camera chain found the cam(60)->strih(30) beat irregular (#571:
+   bursts of delta 1 then ~7), which this integer-division model would charge. If the CG histogram
+   shows the same shape, the strih/stream hops need gap-ignore (`node_render_step`'s answer), not
+   this model.
+   **The CG window scope (slice 2 item 3):** the merge gets `--cg-window cg-window-<RUN_ID>.json`
+   (`cg_chain_merge_args_append`, only when the file exists for THIS run). The strih/stream hops then
+   keep only CG payloads whose OWN `gen_ts_ns` is inside `[start_ns, end_ns]` (`pairs_in_window`) —
+   a stamp window is a contiguous id range, so it opens no artificial gap, and a stray CG read far
+   outside the window no longer widens `first..=last`. cg_obs is never scoped. A missing / bad /
+   wrong-kind window file = a WARNING and the whole recording (`window_scoped: false`), never an
+   error. The report carries `cg_chain.window` (`{start_ns,end_ns}` or null) and per hop
+   `window_scoped`.
 4. A green CG_CHAIN=1 run series calibrates the hold bound (`MAX_HOLD_FRAMES`) against real data.
 
-Until all four hold, flipping `gates_overall_pass()` true would enable a STRUCTURALLY-RED gate
-(the strih/stream hops would fail on decode gaps + decimation), not a calibrated one — do NOT flip
-blind. The cg-OBS ORIGIN hop (decoded WITH sp/cg in its expected set, 1:1) is the only one
-currently honest end-to-end.
+Until all four hold LIVE, do NOT flip `gates_overall_pass()` — items 2+3 are code, not proof. The
+live `CG_CHAIN=1` E2E must show the strih/stream hops populated for SP-fast and `contiguous=true`
+on a clean chain (issue 1302 acceptance) before the flip is even discussed.
 
 ## The decode fixture is GENERATED — a real cg-OBS frame MUST replace it
 
@@ -152,8 +169,8 @@ pulling only the small partial, is the follow-up shape if the dev1 decode load b
   camera-chain verdict out of it; the first live CG_CHAIN=1 run is what confirms it (watch the
   undecodable counts and the A/V marker pairing on that run). The window is recorded to
   `$OUTDIR/cg-window.json` (`{"kind":"cg","scene","input","start_ns","end_ns"}`) and echoed into the
-  log — the run's evidence of WHEN strih carried the chain; no verdict code reads it yet (scoping the
-  strih/stream `cg_chain` hops to it is a follow-up). Its path is `cg-window-<RUN_ID>.json`
+  log — the run's evidence of WHEN strih carried the chain; the merge reads it as `--cg-window` to
+  scope the strih/stream `cg_chain` hops (issue 1302 slice 2). Its path is `cg-window-<RUN_ID>.json`
   (`cg_chain_window_file`). The strih cut runs under `cg_chain_window_cut_timeout` = max(caller
   timeout, `OBS_BLACKCHECK_TIMEOUT_S` + 30 s): the helper enumerates every scene AND polls the
   non-black check, and a kill after the cut would leave strih on CG with no window hold. Never cut strih BACK to a camera before
@@ -178,10 +195,14 @@ pulling only the small partial, is the follow-up shape if the dev1 decode load b
   `CARGO_MANIFEST_DIR`, from a script file in a worktree); the scene helper is pytest
   (`tests/python/test_cg_chain_scene_1302.py`, a scripted fake OBS that refuses a program cut under
   anything but Cut).
-- **Follow-up before trusting the strih/stream hops (out of this slice):** the strih/stream
-  `--extract-partial` decode sets do not include 911014/911015 (item 2 above), and the cg hop burn is
-  decimated on the 30 fps strih recording (item 3), so `cg_chain.strih` / `.stream` may read empty
-  or gapped on the first live run even with the window working.
+- **The strih/stream hops (issue 1302 slice 2):** items 2 + 3 above — the `--cg-chain-burns` flag
+  (`cg_chain_extract_burn_flag`, spliced as `${CG_CHAIN_BURN_FLAG:+"$CG_CHAIN_BURN_FLAG"}` into all
+  three extract calls: strih-lx, Windows strih, stream — an empty flag adds NO argv word) and
+  `cg_chain_merge_args_append` (after the `--cg` merge line). `tests/harness_cg_chain_hops_1302.rs`
+  pins both (std-only, runs with plain `rustc --test`); the verdict side is pinned by the
+  `*_1302` tests in `recording-verdict.rs` (CI-only) and the `cg_chain_gate` unit tests (Tier-0 via
+  a `#[path]` rustc replica with `burn_hold` + `recording_boundary_trim`). A verdict fixture must
+  keep its CG frames clear of the 3-frame #575 lead/tail trim, or the trim silently drops them.
 
 ## Adding ANOTHER chain-origin/hop pair later
 
