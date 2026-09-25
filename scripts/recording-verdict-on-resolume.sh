@@ -51,10 +51,10 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/recording-verdict-on-stream.sh
 . "$HERE/recording-verdict-on-stream.sh"
 
-# onresolume_ps_quote <text> — a PowerShell double-quoted literal of <text> (an embedded " is
-# doubled). Pure.
+# onresolume_ps_quote <text> — a PowerShell SINGLE-quoted (verbatim) literal of <text>: `$` and a
+# backtick stay literal (a double-quoted string would expand them), an embedded ' is doubled. Pure.
 onresolume_ps_quote() {
-  printf '"%s"' "${1//\"/\"\"}"
+  printf "'%s'" "${1//\'/\'\'}"
 }
 
 # PowerShell exit-code rule every builder below respects: `powershell -EncodedCommand` exits 1 when
@@ -62,16 +62,24 @@ onresolume_ps_quote() {
 # still false. So a statement whose failure is expected (nothing to stop, nothing to delete) is
 # either guarded (`if (Test-Path …)`) or never the last one.
 
-# onresolume_ffmpeg_path_ps <root> — the PowerShell prefix that puts the first ffmpeg.exe found under
-# <root> at the front of PATH for this session. RESOLUME-SNV has ffmpeg under C:\ffmpeg\<build>\bin
-# but NOT on PATH (read 25.9.2026), and recording-verdict.exe shells out to ffmpeg/ffprobe. The
-# build dir is found, never hard-coded, so an ffmpeg upgrade on the box needs no change here. Empty
-# <root> = no prefix. Ends with "; " so it prefixes the next statement. Pure.
+# onresolume_ffmpeg_path_ps <root> — the PowerShell prefix that puts the NEWEST ffmpeg.exe found
+# under <root> (by LastWriteTime) at the front of PATH for this session. RESOLUME-SNV has ffmpeg under
+# C:\ffmpeg\<build>\bin but NOT on PATH (read 25.9.2026), and recording-verdict.exe shells out to
+# ffmpeg/ffprobe. The build dir is found, never hard-coded, so an ffmpeg upgrade on the box (even
+# with the old build left beside it) needs no change here. Empty <root> = no prefix. Ends with "; "
+# so it prefixes the next statement. Pure.
 onresolume_ffmpeg_path_ps() {
   [ -n "${1:-}" ] || return 0
   # shellcheck disable=SC2016  # PowerShell $f / $env:Path must NOT expand in bash
-  printf '$f = Get-ChildItem -LiteralPath %s -Filter ffmpeg.exe -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1; if ($f) { $env:Path = $f.DirectoryName + ";" + $env:Path }; ' \
+  printf '$f = Get-ChildItem -LiteralPath %s -Filter ffmpeg.exe -Recurse -ErrorAction SilentlyContinue | Sort-Object LastWriteTime -Descending | Select-Object -First 1; if ($f) { $env:Path = $f.DirectoryName + ";" + $env:Path }; ' \
     "$(onresolume_ps_quote "$1")"
+}
+
+# onresolume_path_exists_ps <path> — the PowerShell text that exits 0 iff <path> exists. Used for the
+# pixel-dir probe instead of win_ssh_path_exists's cmd.exe `if exist`: this goes through
+# `powershell -EncodedCommand`, so it works whatever the box's OpenSSH default shell is. Pure.
+onresolume_path_exists_ps() {
+  printf 'if (Test-Path -LiteralPath %s) { exit 0 } else { exit 1 }' "$(onresolume_ps_quote "$1")"
 }
 
 # onresolume_tool_preflight_ps — the PowerShell text that exits 3 and names every missing decode
@@ -206,14 +214,18 @@ main() {
   # The decode runs in its own ssh session, so ffmpeg goes on PATH again for it.
   ONBOX_CMD="${FFMPEG_PS}$(build_onbox_command "$VERDICT_EXE" "${PASS_ARGS[@]}")"
   echo "[recording-verdict-on-resolume] STEP 2: decoding ON ${RESOLUME_BOX}: $ONBOX_CMD"
+  local decode_start
+  decode_start="$(date +%s)"
   win_ssh_run "$RESOLUME_USER" "$RESOLUME_PW" "$RESOLUME_BOX" "$ONBOX_CMD"
+  # The measured on-box decode time is the evidence the harness grace is calibrated from.
+  echo "[recording-verdict-on-resolume] STEP 2 decode took $(($(date +%s) - decode_start))s on ${RESOLUME_BOX}"
 
   mkdir -p "$LOCAL_OUT_DIR"
   local local_partial
   local_partial="$LOCAL_OUT_DIR/$(win_ssh_basename "$OUT_PARTIAL")"
   echo "[recording-verdict-on-resolume] STEP 3: pulling back $OUT_PARTIAL -> $local_partial"
   win_ssh_download "$RESOLUME_USER" "$RESOLUME_PW" "$RESOLUME_BOX" "$OUT_PARTIAL" "$local_partial"
-  if win_ssh_path_exists "$RESOLUME_USER" "$RESOLUME_PW" "$RESOLUME_BOX" "$PIXELS_DIR"; then
+  if win_ssh_run "$RESOLUME_USER" "$RESOLUME_PW" "$RESOLUME_BOX" "$(onresolume_path_exists_ps "$PIXELS_DIR")"; then
     echo "[recording-verdict-on-resolume] pulling back the pixel proofs $PIXELS_DIR -> $LOCAL_OUT_DIR/"
     win_ssh_download_dir "$RESOLUME_USER" "$RESOLUME_PW" "$RESOLUME_BOX" "$PIXELS_DIR" "$LOCAL_OUT_DIR/"
   else

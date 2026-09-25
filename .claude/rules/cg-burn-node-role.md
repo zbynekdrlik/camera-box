@@ -152,7 +152,7 @@ took 3 s — the decode on the small Tier-0 dev1 box was the cost). Now it follo
   `recording-verdict.exe --extract-partial cg --cg <recording> --out <partial>` at the issue-1260
   BelowNormal PriorityClass (`build_onbox_command`, SOURCED from recording-verdict-on-stream.sh,
   never re-implemented) so it cannot starve the live obs64/Arena; STEP 3 pulls back only the partial
-  and its `-pixels` dir. Credentials come from the caller (`RESOLUME_USER`/`RESOLUME_PW`, which
+  and its `-pixels` dir (probed with PowerShell `Test-Path`, never cmd.exe `if exist` — the box default shell is not known), logging the measured STEP 2 decode time — the evidence the grace is calibrated from. Paths are single-quoted PowerShell literals. Credentials come from the caller (`RESOLUME_USER`/`RESOLUME_PW`, which
   `cg_chain_user`/`cg_chain_pw` resolve from `CG_CHAIN_USER`/`CG_CHAIN_PW`).
 - **The ONE sha256 upload decision** is `scripts/lib/verdict-upload-gate.sh`
   (`verdict_upload_decision`); `onimag_upload_decision` / `onstrihlx_upload_decision` delegate to it.
@@ -177,14 +177,14 @@ took 3 s — the decode on the small Tier-0 dev1 box was the cost). Now it follo
   when job control is on) AND, bounded, the decode on the box (`recording-verdict-on-resolume.sh
   --stop-decode`: only processes running from that one exe path, never OBS/Arena), so it never keeps
   running next to the live CG box nor keeps the exe locked for the next upload; cleanup() does the
-  same on an early abort.
+  same on an early abort, and any other failed extract (a dev1 side that died) asks the box to stop too.
 - **GOTCHA — PowerShell's exit code is the LAST statement's `$?`.** `powershell -EncodedCommand`
   exits 1 when the last statement failed, and `-ErrorAction SilentlyContinue` only hides the message
   (`$?` stays false). The first cut ended the prepare step with a silenced `Remove-Item` of files
   that do not exist on a normal run, so every run died there (a review caught it live on the box).
   Guard an expected-to-fail statement (`if (Test-Path …) { … }`) or never make it the last one; the
   harness test's fake `ssh` models this rule, so a builder regressing to that shape goes red.
-- **Every outcome is ONE named run-log line**, never a red: `CG-LEG-VERIFIED` (partial merged),
+- **Every outcome is ONE named run-log line**, never a red: `CG-LEG-VERIFIED` (the partial reached dev1 and goes to the merge, which may still drop an unloadable one with its own WARNING),
   `CG-LEG-SKIPPED` (no cg recording this run — resolume away/unresolvable or its StartRecord failed,
   the home gate; or a plan-only run with `E2E_EXECUTE_VERDICT=0`), `CG-LEG-NOT-VERIFIED` (attempted:
   no StopRecord path, no Windows exe, a failed decode, a grace overrun). A failed/stopped extract

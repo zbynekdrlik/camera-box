@@ -305,14 +305,15 @@ cg_chain_extract_grace_secs() {
 
 # The ONE run-log marker for the cg leg, printed by the collect step. $1=dev1 partial path
 # $2=state (`skipped` | `failed` | empty) $3=reason. Distinct greppable tokens:
-#   CG-LEG-VERIFIED      the on-box cg partial reached dev1 (the merge computes cg_chain).
+#   CG-LEG-VERIFIED      the on-box cg partial reached dev1 and goes to the merge (which may still
+#                        drop an unloadable one, with its own WARNING).
 #   CG-LEG-SKIPPED       no cg leg this run BY DESIGN (resolume away / unresolvable, a plan-only run).
 #   CG-LEG-NOT-VERIFIED  the cg leg was attempted and did not produce a partial.
 # Pure (one `[ -f ]` + printf).
 cg_chain_leg_marker() {
   local partial="${1:-}" state="${2:-}" reason="${3:-}"
   if [ "$state" != failed ] && [ "$state" != skipped ] && [ -n "$partial" ] && [ -f "$partial" ]; then
-    printf 'CG-LEG-VERIFIED: cg OBS partial decoded ON RESOLUME-SNV (%s) — the report-only cg_chain section is computed this run (issue 1302).\n' "$partial"
+    printf 'CG-LEG-VERIFIED: the cg OBS partial decoded ON RESOLUME-SNV reached dev1 (%s) and goes to the merge for the report-only cg_chain section (issue 1302).\n' "$partial"
   elif [ "$state" = skipped ]; then
     printf 'CG-LEG-SKIPPED: %s — the report-only cg_chain section is omitted; the camera-chain gate is unaffected (issue 1302).\n' "$reason"
   else
@@ -320,22 +321,28 @@ cg_chain_leg_marker() {
   fi
 }
 
+# Stop the decode this run started ON the box, bounded by CG_CHAIN_STOP_TIMEOUT (default 30 s):
+# `recording-verdict-on-resolume.sh --stop-decode` stops only processes running from that one exe
+# path, so the decode never keeps running next to the live Arena / cg OBS and never keeps the exe
+# locked for the next run's upload. A no-op before a launch. ALWAYS returns 0.
+cg_chain_onbox_decode_stop() {
+  local here="${CG_EXTRACT_HERE:-}"
+  [ -n "$here" ] && [ -n "${CG_HOST_IP:-}" ] || return 0
+  RESOLUME_BOX="$CG_HOST_IP" RESOLUME_USER="$(cg_chain_user)" RESOLUME_PW="$(cg_chain_pw)" \
+    timeout "${CG_CHAIN_STOP_TIMEOUT:-30}" "$here/recording-verdict-on-resolume.sh" --stop-decode >&2 \
+    || echo "[cg_chain] WARNING: could not stop the on-box cg decode on $CG_HOST_IP (it may run to its end)" >&2
+  return 0
+}
+
 # Stop an in-flight background cg extract: its whole dev1 process group (the script, sshpass and
-# ssh), then — bounded by CG_CHAIN_STOP_TIMEOUT (default 30 s) — the decode it started ON the box
-# (`recording-verdict-on-resolume.sh --stop-decode`, which stops only processes running from that one
-# exe path), so the decode never keeps running next to the live Arena / cg OBS and never keeps the
-# exe locked for the next run's upload. ALWAYS returns 0.
+# ssh), then the decode it started on the box (cg_chain_onbox_decode_stop). ALWAYS returns 0.
 cg_chain_extract_stop() {
-  local pid="${CG_EXTRACT_PID:-}" here="${CG_EXTRACT_HERE:-}"
+  local pid="${CG_EXTRACT_PID:-}"
   [ -n "$pid" ] || return 0
   kill -0 "$pid" 2>/dev/null || return 0
   kill -TERM -- "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
   echo "[cg_chain] stopped the in-flight cg OBS extract (pid $pid)" >&2
-  if [ -n "$here" ] && [ -n "${CG_HOST_IP:-}" ]; then
-    RESOLUME_BOX="$CG_HOST_IP" RESOLUME_USER="$(cg_chain_user)" RESOLUME_PW="$(cg_chain_pw)" \
-      timeout "${CG_CHAIN_STOP_TIMEOUT:-30}" "$here/recording-verdict-on-resolume.sh" --stop-decode >&2 \
-      || echo "[cg_chain] WARNING: could not stop the on-box cg decode on $CG_HOST_IP (it may run to its end)" >&2
-  fi
+  cg_chain_onbox_decode_stop
   return 0
 }
 
@@ -387,17 +394,20 @@ cg_chain_onbox_extract_launch() {
     -- --extract-partial cg --cg "$CG_HOST_RECORDING_PATH" --out "$(cg_chain_onbox_partial_win)" \
     >"$log" 2>&1 &
   CG_EXTRACT_PID=$!
+  CG_EXTRACT_STARTED="$(date +%s)"
   echo "    --- [8/8cg] #1302 cg OBS extract launched ON RESOLUME-SNV ($CG_HOST_IP) in the background (pid $CG_EXTRACT_PID, log $log) ---"
   return 0
 }
 
 # Collect the background cg extract: wait for it at most cg_chain_extract_grace_secs more (polling
-# every CG_CHAIN_EXTRACT_POLL_SECS, default 5), stop it on an overrun, replay its log and print the
-# CG-LEG marker. A failed / stopped extract leaves NO partial behind, so the merge never feeds a
-# stale one. A pure no-op unless CG_CHAIN=1; ALWAYS returns 0.
+# every CG_CHAIN_EXTRACT_POLL_SECS, default 5), stop it on an overrun, replay its log, log how long it
+# ran (the evidence the grace is calibrated from) and print the CG-LEG marker. Any failure also asks
+# the box to stop its decode — a dev1 side that died (an ssh drop) may have left it running. A failed
+# / stopped extract leaves NO partial behind, so the merge never feeds a stale one. A pure no-op
+# unless CG_CHAIN=1; ALWAYS returns 0.
 cg_chain_onbox_extract_wait() {
   cg_chain_enabled || return 0
-  local partial pid="${CG_EXTRACT_PID:-}" grace poll waited=0 rc=0
+  local partial pid="${CG_EXTRACT_PID:-}" grace poll waited=0 rc=0 ran stopped=0
   partial="$(cg_chain_partial_file)"
   if [ -n "$pid" ]; then
     grace="$(cg_chain_extract_grace_secs)"
@@ -407,21 +417,27 @@ cg_chain_onbox_extract_wait() {
       if declare -F interruptible_sleep >/dev/null 2>&1; then interruptible_sleep "$poll"; else sleep "$poll"; fi
       waited=$((waited + poll))
     done
+    ran=$(($(date +%s) - ${CG_EXTRACT_STARTED:-$(date +%s)}))
     if kill -0 "$pid" 2>/dev/null; then
       cg_chain_extract_stop
+      stopped=1
       CG_LEG_STATE=failed
-      CG_LEG_REASON="the cg OBS decode on RESOLUME-SNV was still running ${grace}s after the camera extracts — stopped so it can never cost the job budget"
+      CG_LEG_REASON="the cg OBS decode on RESOLUME-SNV was still running after ${ran}s (${grace}s past the camera extracts) — stopped so it can never cost the job budget"
     fi
     wait "$pid" 2>/dev/null || rc=$?
     CG_EXTRACT_PID=""
     echo "    ----- cg extract log ($(cg_chain_extract_log)) -----"
     cat "$(cg_chain_extract_log)" 2>/dev/null || true
     echo "    ------------------------------------"
+    echo "    [8/8cg] cg extract ran for ${ran}s (launch to collect; its on-box decode time is in the log above)"
     if [ -z "${CG_LEG_STATE:-}" ] && { [ "$rc" != 0 ] || [ ! -f "$partial" ]; }; then
       CG_LEG_STATE=failed
-      CG_LEG_REASON="the cg OBS extract on RESOLUME-SNV failed (rc=$rc — see its log above)"
+      CG_LEG_REASON="the cg OBS extract on RESOLUME-SNV failed after ${ran}s (rc=$rc — see its log above)"
     fi
-    if [ "${CG_LEG_STATE:-}" = failed ]; then rm -rf -- "$partial" "${partial%.json}-pixels"; fi
+    if [ "${CG_LEG_STATE:-}" = failed ]; then
+      rm -rf -- "$partial" "${partial%.json}-pixels"
+      if [ "$stopped" = 0 ]; then cg_chain_onbox_decode_stop; fi
+    fi
   fi
   echo "    $(cg_chain_leg_marker "$partial" "${CG_LEG_STATE:-}" "${CG_LEG_REASON:-}")"
   return 0
