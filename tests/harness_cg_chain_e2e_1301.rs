@@ -61,13 +61,15 @@ fn cg_chain_enabled_is_off_by_default_and_on_at_1() {
 
 #[test]
 fn songplayer_burn_url_is_pure_and_env_overridable() {
-    let (ok, def) = run("cg_chain_songplayer_burn_url on");
+    // Since the SongPlayer burn API shipped, the URL is the fixed `/api/v1/ndi/burn` endpoint and
+    // on/off travels in the JSON body (tests/harness_cg_chain_e2e_1302.rs pins the body).
+    let (ok, def) = run("cg_chain_songplayer_burn_url");
     assert!(ok);
-    assert_eq!(def, "http://songplayer.lan:8099/burn/on");
-    let (_, ov) = run("CG_CHAIN_SONGPLAYER_API=http://sp.test:9 cg_chain_songplayer_burn_url off");
+    assert_eq!(def, "http://resolume.lan:8920/api/v1/ndi/burn");
+    let (_, ov) = run("CG_CHAIN_SONGPLAYER_API=http://sp.test:9 cg_chain_songplayer_burn_url");
     assert_eq!(
-        ov, "http://sp.test:9/burn/off",
-        "the burn API base is env-overridable (pending songplayer#151)"
+        ov, "http://sp.test:9/api/v1/ndi/burn",
+        "the burn API base is env-overridable"
     );
 }
 

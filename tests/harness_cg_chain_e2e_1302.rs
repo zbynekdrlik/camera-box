@@ -1,0 +1,390 @@
+//! #1302 — the CG_CHAIN=1 E2E profile wired to the SHIPPED SongPlayer burn API, a default cg OBS
+//! recording pull, and ONE tail CG window on strih (so strih + stream record the CG chain).
+//!
+//! All Tier-0 (no rig, no network): the pure builders are called directly, and the runners are
+//! driven against FAKE `curl` / `sshpass` / `scp` / `python3` binaries put first on PATH inside the
+//! bash snippet, so the exact request body, the health read-back and the scp source spec are
+//! asserted without touching SongPlayer, OBS or resolume.
+
+use std::fs;
+use std::path::PathBuf;
+use std::process::Command;
+
+fn manifest_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+}
+
+fn lib_script() -> PathBuf {
+    manifest_dir().join("scripts/lib/cg-chain-e2e.sh")
+}
+
+fn recording_e2e_text() -> String {
+    let p = manifest_dir().join("scripts/recording-e2e.sh");
+    fs::read_to_string(&p).unwrap_or_else(|e| panic!("read {}: {e}", p.display()))
+}
+
+/// Source the lib under the caller's real `set -euo pipefail` and run `snippet`. Returns
+/// (exit_ok, stdout, stderr).
+fn run(snippet: &str) -> (bool, String, String) {
+    let script = format!(
+        "set -euo pipefail\n. \"{}\"\n{}",
+        lib_script().display(),
+        snippet
+    );
+    let out = Command::new("bash")
+        .arg("-c")
+        .arg(&script)
+        .output()
+        .expect("run bash");
+    (
+        out.status.success(),
+        String::from_utf8_lossy(&out.stdout).trim().to_string(),
+        String::from_utf8_lossy(&out.stderr).trim().to_string(),
+    )
+}
+
+/// A health JSON shaped like the live `/api/v1/ndi/health` answer (read 25.9.2026): an array with
+/// one object per SongPlayer output. `$1` = SP-fast's `burn_on`.
+const HEALTH_FN: &str = r#"
+health_json() {
+  printf '[{"ndi_name":"SP-slow","burn_on":false,"lock_state":"LOCKED"},{"ndi_name":"SP-fast","burn_on":%s,"lock_state":"LOCKED"}]' "$1"
+}
+"#;
+
+/// Fake `curl` on PATH: a GET of a URL ending in /api/v1/ndi/health prints $FAKE_HEALTH_FILE; any
+/// other call (the burn POST) appends its `-d` body + URL to $FAKE_LOG.
+const FAKE_CURL: &str = r#"
+FAKE_DIR="$(mktemp -d)"
+trap 'rm -rf "$FAKE_DIR"' EXIT
+export FAKE_LOG="$FAKE_DIR/curl.log" FAKE_HEALTH_FILE="$FAKE_DIR/health.json"
+cat > "$FAKE_DIR/curl" <<'SH'
+#!/usr/bin/env bash
+body=""; url=""; prev=""
+for a in "$@"; do
+  case "$prev" in -d|--data|--data-raw) body="$a" ;; esac
+  case "$a" in http*) url="$a" ;; esac
+  prev="$a"
+done
+case "$url" in
+  */api/v1/ndi/health) cat "$FAKE_HEALTH_FILE" ;;
+  *) printf 'POST %s %s\n' "$url" "$body" >> "$FAKE_LOG" ;;
+esac
+SH
+chmod +x "$FAKE_DIR/curl"
+export PATH="$FAKE_DIR:$PATH"
+export CG_CHAIN_BURN_RETRY_SLEEP=0
+"#;
+
+// ---- (a) the shipped burn API ------------------------------------------------------------------
+
+#[test]
+fn burn_url_is_the_shipped_api_with_an_env_base() {
+    let (ok, def, _) = run("cg_chain_songplayer_burn_url");
+    assert!(ok);
+    assert_eq!(def, "http://resolume.lan:8920/api/v1/ndi/burn");
+    let (_, ov, _) =
+        run("CG_CHAIN_SONGPLAYER_API=http://10.77.9.201:8920/ cg_chain_songplayer_burn_url");
+    assert_eq!(
+        ov, "http://10.77.9.201:8920/api/v1/ndi/burn",
+        "the base is env-configurable and a trailing slash never doubles"
+    );
+    let (_, h, _) = run("cg_chain_songplayer_health_url");
+    assert_eq!(h, "http://resolume.lan:8920/api/v1/ndi/health");
+}
+
+#[test]
+fn burn_body_carries_the_output_and_the_on_flag() {
+    let (ok, on, _) = run("cg_chain_songplayer_burn_body on");
+    assert!(ok);
+    assert_eq!(on, r#"{"output":"SP-fast","on":true}"#);
+    let (_, off, _) = run("cg_chain_songplayer_burn_body off");
+    assert_eq!(off, r#"{"output":"SP-fast","on":false}"#);
+    let (_, ov, _) = run("CG_CHAIN_SONGPLAYER_OUTPUT=SP-slow cg_chain_songplayer_burn_body on");
+    assert_eq!(ov, r#"{"output":"SP-slow","on":true}"#);
+    let (_, bad, _) =
+        run("if cg_chain_songplayer_burn_body maybe; then echo BUILT; else echo REJECTED; fi");
+    assert_eq!(
+        bad, "REJECTED",
+        "only on|off build a body — a typo never POSTs"
+    );
+}
+
+#[test]
+fn health_parse_reads_burn_on_of_the_named_output_only() {
+    let snippet = format!(
+        "{HEALTH_FN}\n\
+         health_json true | cg_chain_health_burn_on SP-fast; echo\n\
+         health_json false | cg_chain_health_burn_on SP-fast; echo\n\
+         health_json true | cg_chain_health_burn_on SP-slow; echo\n\
+         health_json true | cg_chain_health_burn_on SP-missing; echo\n\
+         printf 'not json' | cg_chain_health_burn_on SP-fast; echo\n\
+         printf '[{{\"ndi_name\":\"SP-fast\"}}]' | cg_chain_health_burn_on SP-fast; echo"
+    );
+    let (ok, out, _) = run(&snippet);
+    assert!(ok, "the parser never fails the caller's set -e");
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(
+        lines,
+        vec!["true", "false", "false", "unknown", "unknown", "unknown"],
+        "burn_on is read from the NAMED output; absent output / bad JSON / missing field = unknown"
+    );
+}
+
+#[test]
+fn burn_on_posts_the_body_and_verifies_it_on_health() {
+    let snippet = format!(
+        "{HEALTH_FN}{FAKE_CURL}\n\
+         health_json true > \"$FAKE_HEALTH_FILE\"\n\
+         cg_chain_songplayer_burn on\n\
+         cat \"$FAKE_LOG\""
+    );
+    let (ok, out, _) = run(&snippet);
+    assert!(ok);
+    assert!(
+        out.contains(
+            r#"POST http://resolume.lan:8920/api/v1/ndi/burn {"output":"SP-fast","on":true}"#
+        ),
+        "the ON toggle POSTs the shipped body to the shipped URL: {out}"
+    );
+    assert!(
+        out.contains("VERIFIED"),
+        "burn_on=true read back from /api/v1/ndi/health is reported as verified: {out}"
+    );
+}
+
+#[test]
+fn burn_off_that_never_reads_back_false_is_a_loud_leak_and_never_aborts() {
+    let snippet = format!(
+        "{HEALTH_FN}{FAKE_CURL}\n\
+         health_json true > \"$FAKE_HEALTH_FILE\"\n\
+         CG_CHAIN_BURN_ATTEMPTS=3 cg_chain_songplayer_burn off\n\
+         echo REACHED\n\
+         grep -c 'on\":false' \"$FAKE_LOG\""
+    );
+    let (ok, out, err) = run(&snippet);
+    assert!(ok, "a leaked burn is loud but never aborts cleanup()");
+    assert!(out.contains("REACHED"));
+    assert!(
+        out.ends_with('3'),
+        "OFF is retried CG_CHAIN_BURN_ATTEMPTS times: {out}"
+    );
+    assert!(
+        err.contains("LEAK"),
+        "a burn that stays on after OFF is reported as a LEAK: {err}"
+    );
+}
+
+#[test]
+fn burn_off_verified_on_the_first_read_back_posts_once() {
+    let snippet = format!(
+        "{HEALTH_FN}{FAKE_CURL}\n\
+         health_json false > \"$FAKE_HEALTH_FILE\"\n\
+         cg_chain_songplayer_burn off\n\
+         grep -c . \"$FAKE_LOG\""
+    );
+    let (ok, out, err) = run(&snippet);
+    assert!(ok);
+    assert!(out.contains("VERIFIED"), "{out}");
+    assert!(out.ends_with('1'), "a verified OFF is not re-posted: {out}");
+    assert!(!err.contains("LEAK"), "{err}");
+}
+
+// ---- (b) the default recording pull ------------------------------------------------------------
+
+#[test]
+fn pull_source_spec_uses_forward_slashes_and_keeps_spaces() {
+    let (ok, spec, _) = run(
+        r#"cg_chain_pull_source_spec newlevel 10.77.9.201 'C:\Users\Resolume\Videos\2026-09-25 07-24-00.mkv'"#,
+    );
+    assert!(ok);
+    assert_eq!(
+        spec,
+        "newlevel@10.77.9.201:C:/Users/Resolume/Videos/2026-09-25 07-24-00.mkv"
+    );
+}
+
+#[test]
+fn record_stop_keeps_the_stoprecord_host_path() {
+    // A fake python3 stands in for `obs_phase2.py record --action stop` (it prints the host path).
+    let snippet = r#"
+D="$(mktemp -d)"; trap 'rm -rf "$D"' EXIT
+cat > "$D/python3" <<'SH'
+#!/usr/bin/env bash
+echo 'C:\Users\Resolume\Videos\2026-09-25 07-24-00.mkv'
+SH
+chmod +x "$D/python3"; PATH="$D:$PATH"
+cg_chain_record_stop 10.77.9.201 /x/obs_phase2.py 5
+printf 'PATH=%s\n' "$CG_HOST_RECORDING_PATH"
+"#;
+    let (ok, out, _) = run(snippet);
+    assert!(ok);
+    assert!(
+        out.contains(r"PATH=C:\Users\Resolume\Videos\2026-09-25 07-24-00.mkv"),
+        "{out}"
+    );
+}
+
+#[test]
+fn default_pull_scps_the_exact_stoprecord_file_to_the_local_dest() {
+    let snippet = r#"
+D="$(mktemp -d)"; trap 'rm -rf "$D"' EXIT
+cat > "$D/sshpass" <<'SH'
+#!/usr/bin/env bash
+shift 2; exec "$@"
+SH
+cat > "$D/scp" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$@" > "$SCP_LOG"
+for last in "$@"; do :; done
+echo cg-bytes > "$last"
+SH
+chmod +x "$D/sshpass" "$D/scp"; PATH="$D:$PATH"; export SCP_LOG="$D/scp.log"
+unset CG_CHAIN_PULL_CMD
+CG_HOST_RECORDING_PATH='C:\Users\Resolume\Videos\2026-09-25 07-24-00.mkv'
+if cg_chain_pull_recording 10.77.9.201 "$D/cg.mkv"; then echo PULLED; fi
+grep -c 'newlevel@10.77.9.201:C:/Users/Resolume/Videos/2026-09-25 07-24-00.mkv' "$SCP_LOG"
+cat "$D/cg.mkv"
+"#;
+    let (ok, out, _) = run(snippet);
+    assert!(ok);
+    let lines: Vec<&str> = out.lines().collect();
+    assert!(lines.contains(&"PULLED"), "{out}");
+    assert!(
+        lines.contains(&"1"),
+        "the scp source is the exact StopRecord file: {out}"
+    );
+    assert!(lines.contains(&"cg-bytes"), "{out}");
+}
+
+#[test]
+fn default_pull_without_a_host_path_omits_cg() {
+    let (ok, out, _) = run("unset CG_CHAIN_PULL_CMD CG_HOST_RECORDING_PATH; \
+         if cg_chain_pull_recording 1.2.3.4 /tmp/none-1302.mkv; then echo GOT; else echo NONE; fi");
+    assert!(ok);
+    assert_eq!(out.lines().last(), Some("NONE"));
+}
+
+// ---- (c) the ONE tail CG window ----------------------------------------------------------------
+
+#[test]
+fn window_due_needs_the_profile_and_a_started_cg_recording() {
+    let (_, a, _) = run(
+        "unset CG_CHAIN; CG_RECORDING_STARTED=1; if cg_chain_window_due; then echo Y; else echo N; fi",
+    );
+    assert_eq!(a, "N", "CG_CHAIN unset = inert");
+    let (_, b, _) = run(
+        "CG_CHAIN=1 CG_RECORDING_STARTED=0; if cg_chain_window_due; then echo Y; else echo N; fi",
+    );
+    assert_eq!(b, "N", "no cg recording = nothing to judge, no strih cut");
+    let (_, c, _) = run(
+        "CG_CHAIN=1 CG_RECORDING_STARTED=1; if cg_chain_window_due; then echo Y; else echo N; fi",
+    );
+    assert_eq!(c, "Y");
+}
+
+#[test]
+fn window_secs_defaults_and_rejects_garbage() {
+    let (_, d, _) = run("unset CG_CHAIN_WINDOW_SECS; cg_chain_window_secs");
+    assert_eq!(d, "30");
+    let (_, o, _) = run("CG_CHAIN_WINDOW_SECS=45 cg_chain_window_secs");
+    assert_eq!(o, "45");
+    let (_, g, _) = run("CG_CHAIN_WINDOW_SECS=0 cg_chain_window_secs");
+    assert_eq!(
+        g, "30",
+        "a non-positive / non-integer value falls back to the default"
+    );
+}
+
+#[test]
+fn window_json_is_the_one_cg_window_record() {
+    let (ok, j, _) = run("cg_chain_window_json 'CG bridge' CG-obs 100 250");
+    assert!(ok);
+    assert_eq!(
+        j,
+        r#"{"kind":"cg","scene":"CG bridge","input":"CG-obs","start_ns":100,"end_ns":250}"#
+    );
+    let (_, bad, _) = run(
+        "if cg_chain_window_json 'CG bridge' CG-obs 250 100; then echo BUILT; else echo REJECTED; fi",
+    );
+    assert_eq!(bad, "REJECTED", "a window must have start_ns < end_ns");
+}
+
+#[test]
+fn state_files_live_in_the_run_dir() {
+    let (_, s, _) = run("CG_CHAIN_STATE_DIR=/r/out cg_chain_state_file strih-scene");
+    assert_eq!(s, "/r/out/cg-chain-strih-scene-state.json");
+    let (_, p, _) = run("cg_chain_scene_py /x/scripts/obs_phase2.py");
+    assert_eq!(p, "/x/scripts/cg_chain_scene.py");
+    let (_, c, _) = run("unset CG_CHAIN_CG_SCENE; cg_chain_cg_scene");
+    assert_eq!(
+        c, "sp-fast",
+        "the cg OBS scene defaults to the lower-cased output name"
+    );
+}
+
+#[test]
+fn disabled_profile_never_calls_obs_or_songplayer() {
+    // CG_CHAIN unset: the window, the strih restore and cleanup are byte-inert (no python3, no curl).
+    let snippet = r#"
+D="$(mktemp -d)"; trap 'rm -rf "$D"' EXIT
+for b in python3 curl scp sshpass; do
+  printf '#!/usr/bin/env bash\necho %s >> "%s/called"\n' "$b" "$D" > "$D/$b"; chmod +x "$D/$b"
+done
+PATH="$D:$PATH"; unset CG_CHAIN
+cg_chain_window 10.77.9.202 /x/obs_phase2.py 5
+cg_chain_strih_restore /x/obs_phase2.py 5
+cg_chain_cleanup "" /x/obs_phase2.py 5
+if [ -f "$D/called" ]; then cat "$D/called"; else echo INERT; fi
+"#;
+    let (ok, out, _) = run(snippet);
+    assert!(ok);
+    assert_eq!(out, "INERT");
+}
+
+// ---- recording-e2e.sh wiring (static reads) ----------------------------------------------------
+
+#[test]
+fn recording_e2e_runs_the_cg_window_after_the_camera_schedule_and_before_stoprecord() {
+    let s = recording_e2e_text();
+    let window = s
+        .find("if cg_chain_window_due; then cg_chain_window \"$STRIH\"")
+        .expect("#1302: the tail CG window must be wired, gated by cg_chain_window_due");
+    let schedule = s
+        .find("echo \"    wrote switch schedule -> $SWITCH_SCHEDULE_JSON\"")
+        .expect("the ALL_CAMBOX schedule write");
+    let steady = s
+        .find("interruptible_sleep \"$(( DURATION + RECORD_PAD ))\"")
+        .expect("the steady-state hold");
+    let stop = s
+        .find("echo \"[7/8] StopRecord + download strih + stream recordings to dev1")
+        .expect("the [7/8] banner");
+    assert!(
+        schedule < window && steady < window,
+        "the CG window is a TAIL window: after every camera window, so the camera verdict never sees it"
+    );
+    assert!(
+        window < stop,
+        "the CG window must be recorded (before StopRecord)"
+    );
+}
+
+#[test]
+fn recording_e2e_restores_strih_right_after_stoprecord() {
+    let s = recording_e2e_text();
+    let stop = s
+        .find("STREAM_HOST_PATH=$(python3 \"$HERE/obs_phase2.py\" record --host \"$STREAM\" --action stop)")
+        .expect("the [7/8] stream StopRecord");
+    let restore = s
+        .find("cg_chain_strih_restore \"$HERE/obs_phase2.py\"")
+        .expect("#1302: strih must be restored after the [7/8] StopRecord");
+    assert!(stop < restore);
+}
+
+#[test]
+fn recording_e2e_points_the_state_dir_at_the_run_dir() {
+    let s = recording_e2e_text();
+    assert!(
+        s.contains("CG_CHAIN_STATE_DIR=\"$OUTDIR\""),
+        "#1302: the cg/strih restore snapshots live in this run's OUTDIR"
+    );
+}
