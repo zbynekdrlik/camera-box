@@ -531,7 +531,7 @@ jobs:
     # (intercom/vban, intercom/hub). The appliance jobs above run cargo at the ROOT WITHOUT
     # --workspace, so they never build/test the hub (they DO compile intercom-vban as a path
     # dep, but its tests only run here); THIS job is the members' first clippy + test + build.
-    # Pure tokio/axum/toml — no libv4l/libasound needed.
+    # tokio/axum/toml + the bundled libopus (built with cmake) — no libv4l/libasound needed.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -545,6 +545,12 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           key: intercom-hub
+
+      # The phones leg's Opus codec (issue 1345): the `opus` crate's `opusic-sys` builds the bundled
+      # libopus source with cmake and links it statically, so no libopus-dev is needed — but cmake
+      # is. Install it if the runner image ever drops it (a failed apt install fails this step).
+      - name: Ensure cmake (bundled libopus build)
+        run: command -v cmake >/dev/null || (sudo apt-get update && sudo apt-get install -y cmake)
 
       # Clippy -D warnings on the codec crate + the hub (all targets incl. the unit tests). Default
       # features = the Interkom picture `ndi` path (issue 1345 M3c): libloading is a RUNTIME dynamic

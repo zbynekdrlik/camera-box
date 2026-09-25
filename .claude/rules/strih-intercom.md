@@ -380,9 +380,9 @@ only the WS transport is LAN-reachable (TLS terminates on the dev1 front, no wss
   keepalive < 60 s, re-join on ANY error with a bounded 1→30 s backoff (`run_janus_participant`;
   `establish_session` is exercised against a fake-Janus axum server in `janus_session.rs`).
 - **G.711 trade-off:** µ-law is telephone-band (~3.4 kHz) talkback — the design's stability trade
-  (zero extra codec/GPU installs; every hop is Janus's own or pure Rust already in-repo). **Opus
-  upgrade path:** the `janus_rtp` PCMU leg is the seam to swap for the vendored `opus` crate if
-  quality is short — the adapter boundary and the engine stay unchanged.
+  (zero extra codec/GPU installs; every hop is Janus's own or pure Rust already in-repo). **SUPERSEDED
+  25.9.2026:** the leg now defaults to Opus with FEC on a paced 20 ms sender (see the "25.9.2026
+  phone audio" section); PCMU stays selectable via `[janus].codec = "pcmu"`.
 - The adapter up/down-mixes mono↔stereo, so the `phones` participant keeps its 2-in / 2-out matrix
   shape. `src/mulaw.rs` is the pure G.711 codec + the 6:1 48 kHz↔8 kHz resample (FIR anti-alias decimator down, one-pole-smoothed
   ZOH up), verified against the ITU reference vectors.
@@ -484,6 +484,94 @@ installed, unit enabled/not-required-active, room jcfg parses via `strih_janus_r
   use `io::Error::other(msg)`. This is invisible to the Tier-0 local net (`cargo fmt` doesn't lint),
   so grep every new `io::Error::new(...Other...)` site before a push. Add `io_other_error` to the
   hand-audit list above alongside `dead_code` / `too_many_arguments`.
+
+## 25.9.2026 phone audio: a paced 20 ms sender + Opus (issue 1345, design comment 5828489060)
+
+The owner heard the cutter's voice as "robotic" on the phone. Read this before touching
+`janus_rtp`, `janus_sender`, `janus_pacing` or `janus_codec`.
+
+- **The cause was a send beat, not the network.** The old sender sent a 20 ms packet whenever
+  960 frames had piled up from 256-frame (5.33 ms) mix blocks, which is every 3.75 blocks.
+  - Live capture on udp 6990: hub → Janus spacing sd 2.29 ms, min 15.3, max 22.4.
+  - The Janus audiobridge mixes each participant every 20 ms from a small buffer. So a 16/21 ms
+    beat made it conceal.
+- **Rule: a packetized egress whose packet duration is NOT the block duration gets its own clock.**
+  - The block loop only `push`es the phones' N-1 mix (mono) into a `janus_pacing::PacedRing`.
+  - The `janus_sender` OS thread ("janus-paced-tx") sleeps to absolute 20 ms deadlines
+    (`PaceSchedule`). Each tick it pops exactly one 960-frame frame, encodes it and sends one packet.
+  - An underflow sends a whole silent frame and re-primes to the target (2 frames). An overflow
+    above 5 frames trims the oldest back to the target.
+  - One packet per tick keeps the RTP timestamps contiguous (+960 Opus, +160 PCMU).
+  - A stall over 100 ms restarts the grid instead of bursting the missed packets.
+  - It is an OS thread, not a tokio task: the tokio timer wheel rounds to whole ms.
+    `std::thread::sleep` on strih-lx wakes with sd 0.027 ms / max 0.29 ms (measured 25.9.).
+    dev1 under load 10 on 4 cores measures sd 0.7-2 ms, so judge pacing ON strih-lx, not dev1.
+  - The async session task (`run_janus_participant`) keeps the HTTP session, the keepalive (its own
+    spawned task, so a slow POST never holds up receive) and the decoder. It points the sender at
+    each session via `PacedSenderShared::set_target`. A failed send sets a flag the task checks
+    every 1 s, and the task then re-establishes.
+  - Both directions use ONE UDP socket: the std socket is `try_clone`d. The tokio side needs
+    `set_nonblocking(true)`, which is shared by the clone, so a `WouldBlock` send drops one packet
+    (debug log) and is not treated as a dead session.
+- **The block period is exact (`janus_pacing::hub_block_period`).** It used to be whole µs:
+  `256*1_000_000/48_000` = 5333 instead of 5333.33, so the loop ran 62.5 ppm fast. Every egress
+  (the Janus ring, VBAN to the camboxes, the program/cutters pw-cat pipes) gained about 3 samples/s
+  against its 48 kHz consumer. Never compute a period in truncated µs again.
+- **The ring's fill servo.** A missed mix tick (`MissedTickBehavior::Skip` loses a block) or a rate
+  offset drifts the fill. So after 50 pops in a row with the pre-pop fill above target+FRAME/2 the
+  ring drops 1 ms; after 50 below target-FRAME/4 it plays 1 ms twice (both mid-frame, crossfaded).
+  - "In a row" measures the extreme of the 256-sample ripple, so a steady exact feed never
+    triggers it. Priming ends EXACTLY at the target (the excess that piled up during the silent
+    priming ticks is the oldest audio, dropped inaudibly), otherwise a prime that overshot to
+    ~2940 made the servo drop ~8 ms right after every (re)prime. Pinned for 16 start phases.
+  - Both splices (1 ms skip / 1 ms repeat) are 48-sample linear crossfades at mid-frame, never a
+    hard cut (a click).
+  - The 60 ms trim and the silent underflow frame are the last resort only.
+  - 20-minute simulations at ±62.5 ppm and with a skipped block every 30 s pin 0 trims and
+    0 underflows.
+- **Receive-side safety (review round 1).**
+  - Only the session's Janus endpoint is accepted (`is_session_peer`, port + ip unless Janus
+    advertised 0.0.0.0). This keeps out stray hosts only: **Janus reuses the SAME rtp port
+    (10.77.9.202:10000) for every new session** (hub journal 24./25.9.), so old-vs-new session is
+    separated by the SSRC restart, `MAX_MISORDER` and a socket drain right before the sender is
+    pointed at the new session.
+  - A new SSRC restarts the sequence plan and codec state.
+  - `rx_gap` treats only a backward step of up to `MAX_MISORDER` (100) as late. A bigger backward
+    jump is a restart, so one stray packet cannot lock the stream out for ~11 min.
+  - An abandoned session is `destroy`ed (best effort, 2 s) before re-joining, so its participant
+    stops sending the old room mix to our port.
+- **The egress audit ("everywhere", owner 25.9.).** The other hub egresses do NOT have this beat
+  (they shared only the 62.5 ppm period error above, now fixed):
+  - VBAN to the camboxes sends one 256-frame packet per 5.33 ms block (packet = tick, sd 0.6);
+  - the `program_out` / cutters `pw-cat --playback` sinks are PULLED by the PipeWire driver.
+    pw-cat raw mode `fread`s the requested quantum from stdin (pw-cat.c `stdin_play`), so our
+    write cadence only sets the pipe fill. Live `pw-top` showed ERR 0 on the program sink after
+    40430 s.
+- **Opus.** `[janus].codec = "opus"` (default) | `"pcmu"`. Unknown values fail the load.
+  - The join sends a top-level `codec`, `rtp.payload_type` 111 and `rtp.fec: true`. The receiver
+    filters on the payload type Janus echoes in `joined` (fallback: ours).
+  - Opus 48 kHz mono, VoIP, 32 kbit/s, in-band FEC with 10 % expected loss (FEC is only produced
+    when that is above 0).
+  - `RxDecoder` uses `janus_pacing::rx_gap`: for a gap of n (≤ 5) it runs PLC for n-1 frames, then
+    FEC from the current packet for the frame right before it, then decodes the packet. Duplicates
+    and late packets are dropped; a longer gap is a fresh start.
+  - The `opus` 0.4 crate → `opusic-sys` default `bundled`: cmake builds the vendored libopus and
+    links it statically. No libopus-dev, no runtime libopus.so. The CI `intercom-hub` job ensures
+    cmake.
+- **`/api/state` janus facet** also carries `codec`, `tx_interval_ms_sd`, `tx_interval_ms_max`
+  (last 5 s of real send spacing), `tx_underflows`, `tx_overflow_trims` and `rx_lost_frames`.
+  - Acceptance after deploy: `codec: "opus"`, sd < 0.5, max < 21 on strih-lx.
+  - Then a udp 6990 capture: spacing sd < 0.5 ms, max < 21 ms.
+- **Tier-0 verify without cargo.**
+  - `janus_pacing` is std-only: a rustc `--test` replica + `clippy-driver`.
+  - `janus_codec` against the REAL `opus` crate: rustc the `opusic-sys` and `opus` sources from a
+    downloaded `.crate` as rlibs, and link the SYSTEM `libopus.so.0` with
+    `-C link-arg=/usr/lib/x86_64-linux-gnu/libopus.so.0`. opusic-sys has no `#[link]`, so the lib
+    must be passed explicitly. The system lib is 1.4 and the bundled one newer; the API is the same.
+  - `janus_sender` type-checks the same way with `tracing` built per the vban_io recipe, and the
+    pure half of `janus_rtp.rs` awk-extracted with its serde derives stripped. A loopback smoke
+    runs the real thread against a 5.33 ms feeder.
+  - `janus_rtp`'s runtime (reqwest/tokio) and `main.rs` still first compile at CI.
 
 ## M3b — the phone PWA (served by the hub) + the LAN-HTTPS interkom front (issue 1345)
 
