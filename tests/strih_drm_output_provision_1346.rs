@@ -459,6 +459,7 @@ fn setup_and_verify_take_the_backend_from_the_box_fact() {
         "write_drm_backend",
         "fail \"issue 1346: apt-get install libvulkan1 failed",
         "cannot import strih_scenes",
+        "lease | vk-direct) ;;",
     ] {
         assert!(
             s.contains(token),

@@ -233,10 +233,6 @@ fn the_vk_core_takes_the_display_off_x_and_presents_fifo() {
         ),
         ("->SignalSemaphoreEXT(", "GL -> Vulkan ordering"),
         (
-            "->WaitSemaphoreEXT(",
-            "an overwritten READY image's signal is consumed, never doubled",
-        ),
-        (
             "VK_QUEUE_FAMILY_EXTERNAL",
             "the ownership bounce with the GL side",
         ),
@@ -668,46 +664,44 @@ fn pick_mode_computes_the_mode_truth_table() {
     );
 }
 
-/// `(front, pending, ready)` -> `(returned src, pending', ready', took_new)`.
-/// One present-pick row: `(front, pending, ready, armed[ready])` and the expected
-/// `(src, pending', ready', took_new, wait_gl, armed images left)`. Taking a READY image takes its GL
-/// signal (waits it once, clears it); re-copying the FRONT waits nothing.
-type PresentVector = ((i32, i32, i32, bool), (i32, i32, i32, i32, i32, i32));
+/// One present-pick row: `(front, pending, ready)` and the expected `(src, pending', ready', took_new)`.
+/// Taking the READY image moves it to pending (that submit waits its one GL signal); re-copying the
+/// FRONT waits nothing.
+type PresentVector = ((i32, i32, i32), (i32, i32, i32, i32));
 
 fn present_vectors() -> Vec<PresentVector> {
     vec![
-        ((-1, -1, -1, false), (-1, -1, -1, 0, 0, 0)),
-        ((-1, -1, 2, true), (2, 2, -1, 1, 1, 0)),
-        ((-1, -1, 2, false), (2, 2, -1, 1, 0, 0)),
-        ((0, -1, 1, true), (1, 1, -1, 1, 1, 0)),
-        ((0, -1, -1, false), (0, -1, -1, 0, 0, 0)),
-        ((2, -1, -1, false), (2, -1, -1, 0, 0, 0)),
-        ((1, -1, 0, true), (0, 0, -1, 1, 1, 0)),
+        ((-1, -1, -1), (-1, -1, -1, 0)),
+        ((-1, -1, 2), (2, 2, -1, 1)),
+        ((0, -1, 1), (1, 1, -1, 1)),
+        ((0, -1, -1), (0, -1, -1, 0)),
+        ((2, -1, -1), (2, -1, -1, 0)),
+        ((1, -1, 0), (0, 0, -1, 1)),
     ]
 }
 
 #[test]
-fn present_pick_takes_the_newest_with_its_signal_or_recopies_the_front() {
+fn present_pick_takes_the_newest_or_recopies_the_front() {
     let helper = lift(
         VK_C,
-        "static int drm_output_vk_present_pick(int front, int *pending, int *ready, bool *armed, bool *took_new, bool *wait_gl)",
+        "static int drm_output_vk_present_pick(int front, int *pending, int *ready, bool *took_new)",
     );
     let vs = present_vectors();
     let mut c = String::from("#include <stdbool.h>\n#include <stdio.h>\n");
     c.push_str(&helper);
     c.push_str("\nint main(void){\n");
-    for ((f, p, r, a), _) in &vs {
+    for ((f, p, r), _) in &vs {
         c.push_str(&format!(
-            "    {{ int p = {p}, r = {r}; bool a[3] = {{false, false, false}}; bool t = false, w = false;\n      if (r >= 0) a[r] = {a};\n      int s = drm_output_vk_present_pick({f}, &p, &r, a, &t, &w);\n      printf(\"%d %d %d %d %d %d\\n\", s, p, r, t ? 1 : 0, w ? 1 : 0, (a[0] ? 1 : 0) + (a[1] ? 1 : 0) + (a[2] ? 1 : 0)); }}\n"
+            "    {{ int p = {p}, r = {r}; bool t = false; int s = drm_output_vk_present_pick({f}, &p, &r, &t);\n      printf(\"%d %d %d %d\\n\", s, p, r, t ? 1 : 0); }}\n"
         ));
     }
     c.push_str("    return 0;\n}\n");
     let out = compile_and_run(&c, "present");
-    let got: Vec<(i32, i32, i32, i32, i32, i32)> = out
+    let got: Vec<(i32, i32, i32, i32)> = out
         .lines()
         .map(|l| {
             let v: Vec<i32> = l.split_whitespace().map(|x| x.parse().unwrap()).collect();
-            (v[0], v[1], v[2], v[3], v[4], v[5])
+            (v[0], v[1], v[2], v[3])
         })
         .collect();
     for ((args, want), g) in vs.iter().zip(&got) {
@@ -718,17 +712,17 @@ fn present_pick_takes_the_newest_with_its_signal_or_recopies_the_front() {
 
 /// The mailbox + binary-semaphore protocol, model-checked over 200000 random interleavings of the
 /// GL side (claim + publish) and the present thread (pick, then the fenced done) with the REAL lifted
-/// helpers. A binary semaphore must never be signalled while it holds a signal, never be waited without
-/// one, a taken image with a pending signal must be waited, and GL must never write front/pending. The
-/// interleaving forces the overwrite path (GL re-claims a READY image), so consumes > 0 is required.
+/// helpers. A binary semaphore must never be signalled while it holds a signal (GL publishes), and every
+/// taken image must hold exactly one signal (the present thread waits it). GL never writes a
+/// front/pending/READY image -- it skips while a READY image waits (the live burst deadlock of the
+/// earlier "latest wins" overwrite, 25.9.2026). Requires skips > 0 and takes > 0 (both paths ran).
 #[test]
 fn mailbox_semaphore_protocol_holds_over_random_interleavings() {
     let mut c = String::from("#include <stdbool.h>\n#include <stdio.h>\n");
     for sig in [
         "static int drm_output_vk_pick_claim(int front, int pending, int ready, int n)",
-        "static int drm_output_vk_present_pick(int front, int *pending, int *ready, bool *armed, bool *took_new, bool *wait_gl)",
+        "static int drm_output_vk_present_pick(int front, int *pending, int *ready, bool *took_new)",
         "static void drm_output_vk_present_done(int src, bool took_new, int *front, int *pending)",
-        "static bool drm_output_vk_publish_arm(bool *armed_idx)",
     ] {
         c.push_str(&lift(VK_C, sig));
         c.push('\n');
@@ -737,48 +731,39 @@ fn mailbox_semaphore_protocol_holds_over_random_interleavings() {
         r#"int main(void)
 {
 	int front = -1, pending = -1, ready = -1, src = -1;
-	bool armed[3] = {false, false, false}, inflight = false, took = false, wait = false;
+	bool inflight = false, took = false;
 	int sem[3] = {0, 0, 0};
-	unsigned long long seed = 12345u, consumes = 0u, bad = 0u, takes = 0u;
+	unsigned long long seed = 12345u, bad = 0u, takes = 0u, skips = 0u;
 	for (int step = 0; step < 200000; step++) {
 		seed = seed * 6364136223846793005ull + 1442695040888963407ull;
 		unsigned r = (unsigned)(seed >> 33) % 4u;
 		if (r == 0u && !inflight) {
-			src = drm_output_vk_present_pick(front, &pending, &ready, armed, &took, &wait);
-			if (wait) {
+			src = drm_output_vk_present_pick(front, &pending, &ready, &took);
+			if (took) {
 				if (sem[src] != 1)
 					bad++;
 				sem[src] = 0;
-			} else if (took && sem[src] != 0) {
-				bad++;
-			}
-			if (took)
 				takes++;
+			}
 			inflight = true;
 		} else if (r == 1u && inflight) {
 			drm_output_vk_present_done(src, took, &front, &pending);
 			inflight = false;
 		} else {
 			int idx = drm_output_vk_pick_claim(front, pending, ready, 3);
-			if (idx < 0)
+			if (idx < 0) {
+				skips++;
 				continue;
-			if (idx == front || idx == pending)
-				bad++;
-			if (idx == ready)
-				ready = -1;
-			if (drm_output_vk_publish_arm(&armed[idx])) {
-				if (sem[idx] != 1)
-					bad++;
-				sem[idx] = 0;
-				consumes++;
 			}
+			if (idx == front || idx == pending || idx == ready)
+				bad++;
 			if (sem[idx] != 0)
 				bad++;
 			sem[idx] = 1;
 			ready = idx;
 		}
 	}
-	printf("bad %llu consumes %llu takes %llu\n", bad, consumes, takes);
+	printf("bad %llu skips %llu takes %llu\n", bad, skips, takes);
 	return 0;
 }
 "#,
@@ -795,7 +780,7 @@ fn mailbox_semaphore_protocol_holds_over_random_interleavings() {
     );
     assert!(
         v[1] > 0 && v[2] > 0,
-        "issue 1346: the model must exercise the overwrite (consume) path and the takes: {out}"
+        "issue 1346: the model must exercise the skip path and the takes: {out}"
     );
 }
 
@@ -904,15 +889,58 @@ fn a_lost_display_is_rebuilt_bounded_and_the_teardown_never_hangs() {
         core.contains("RTLD_NOLOAD"),
         "issue 1346: the GL lookup also asks an already (privately) loaded libEGL"
     );
+    let rebuild = body_of(
+        &setup,
+        "bool drm_output_vk_rebuild_presentation(bool surface_lost)",
+        VK_SETUP_C,
+    );
+    assert!(
+        !rebuild.contains("vkDeviceWaitIdle("),
+        "issue 1346 review round 2: the rebuild runs on the present thread halt() joins -- it must \
+         never block in an unbounded device wait"
+    );
+    assert!(
+        rebuild.contains("drm_output_vk_create_surface(true)")
+            && rebuild.contains("vkGetPhysicalDeviceSurfaceSupportKHR("),
+        "issue 1346 review round 2: a rebuilt surface keeps the committed size and is re-checked for \
+         present support"
+    );
+    let surface = body_of(
+        &setup,
+        "static bool drm_output_vk_create_surface(bool rebuild)",
+        VK_SETUP_C,
+    );
+    let refuse = surface
+        .find("if (rebuild && (sel_w != g_drm_vk.mode_w || sel_h != g_drm_vk.mode_h))")
+        .expect("a rebuild refuses a different size");
+    let commit = surface
+        .find("g_drm_vk.mode_w = sel_w;")
+        .expect("the mode is committed");
+    let created = surface
+        .find("vkCreateDisplayPlaneSurfaceKHR(")
+        .expect("the surface create");
+    assert!(
+        refuse < created && created < commit,
+        "issue 1346 review round 2: mode_* is committed only after the surface exists, and a rebuild \
+         never changes it (the shared images + the intermediate are sized to it)"
+    );
+    assert!(
+        destroy.contains("if (fr == VK_TIMEOUT)"),
+        "issue 1346 review round 2: only a timeout leaks; a lost device is destroyed normally"
+    );
+    assert!(
+        policy.contains("*rebuilds >= 2u"),
+        "issue 1346 review round 2: a repeatedly out-of-date surface escalates to a surface rebuild"
+    );
     let h = file(RIG_HARNESS);
     assert!(
-        h.contains("PHASE burst") && h.contains("consumes > 0"),
+        h.contains("PHASE burst") && h.contains("skips > 0"),
         "issue 1346: the rig harness forces the overwrite path and requires it ran"
     );
 }
 
 #[test]
-fn vk_claim_rule_equals_the_lease_mailbox_rule() {
+fn vk_claim_is_the_lease_rule_without_a_ready_frame_and_skips_with_one() {
     let vk = lift(
         VK_C,
         "static int drm_output_vk_pick_claim(int front, int pending, int ready, int n)",
@@ -926,12 +954,12 @@ fn vk_claim_rule_equals_the_lease_mailbox_rule() {
     c.push('\n');
     c.push_str(&lease);
     c.push_str(
-        "\nint main(void){\n    int bad = 0, n = 0;\n    for (int f = -1; f < 3; f++) for (int p = -1; p < 3; p++) for (int r = -1; r < 3; r++) {\n        n++;\n        if (drm_output_vk_pick_claim(f, p, r, 3) != drm_output_pick_render_buf(f, p, r, 3)) { printf(\"DIFF %d %d %d\\n\", f, p, r); bad++; }\n    }\n    printf(\"checked %d bad %d\\n\", n, bad);\n    return 0;\n}\n",
+        "\nint main(void){\n    int bad = 0, n = 0;\n    for (int f = -1; f < 3; f++) for (int p = -1; p < 3; p++) for (int r = -1; r < 3; r++) {\n        n++;\n        int want = r >= 0 ? -1 : drm_output_pick_render_buf(f, p, r, 3);\n        if (drm_output_vk_pick_claim(f, p, r, 3) != want) { printf(\"DIFF %d %d %d\\n\", f, p, r); bad++; }\n    }\n    printf(\"checked %d bad %d\\n\", n, bad);\n    return 0;\n}\n",
     );
     let out = compile_and_run(&c, "claim");
     assert!(
         out.contains("checked 64 bad 0"),
-        "issue 1346: the vk-direct claim rule must equal the lease mailbox rule over every role \
-         combination (a GL write never lands on front/pending):\n{out}"
+        "issue 1346: with no READY frame the vk-direct claim is the lease mailbox rule (a GL write never \
+         lands on front/pending); with one it skips (a signalled READY image is never overwritten):\n{out}"
     );
 }
