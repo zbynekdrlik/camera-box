@@ -578,7 +578,9 @@ fn recording_e2e_turns_the_burn_off_when_the_cg_recording_never_started() {
     let off = s
         .find("if [ \"$CG_RECORDING_STARTED\" != 1 ]; then cg_chain_songplayer_burn off; fi")
         .expect("#1302: a burn with no cg recording is turned straight back off");
-    let next = s.find("[5b/8]").expect("the [5b/8] step");
+    let next = s
+        .find("# [5b/8] #707 B1")
+        .expect("the [5b/8] step banner comment");
     assert!(start < off && off < next);
 }
 
