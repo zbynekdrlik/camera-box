@@ -157,10 +157,15 @@ described here stay as they are.
   (1000 ppm = 1 ms per second, 0.1 % pitch) and passes `slew_ppm − applied_ppm` to
   `audio_resampler_set_compensation_ppm` (the plain `-applied_ppm` call — the #1325 anchor — stays
   for the no-slew case); `source_output_audio_data` BOOKS each step: it subtracts it from
-  `next_audio_ts_min` (so the 70 ms `TS_SMOOTHING_THRESHOLD` guard never snaps a slew back to the
-  old placement) and shifts the ASRC level setpoint by it (`asrc_compensator_shift_level_target`
+  `next_audio_ts_min` through the one wrapping helper `audio_slew_book_ts_ns` /
+  `genlock_audio_slew_book_ts_ns` (so the 70 ms `TS_SMOOTHING_THRESHOLD` guard never snaps a slew
+  back to the old placement — the bench's `NoBooking` variant snaps once, 70.03 ms) and shifts the ASRC level setpoint by it (`asrc_compensator_shift_level_target`
   also shifts the open window's readings, so a ramp stays error-free for the level loop). The servo's
-  own `applied_ppm` and its telemetry are untouched.
+  own `applied_ppm` and its telemetry are untouched. **An owed slew is FOLDED when the ingest
+  places the packet anyway** (review round 1): a `Continue` / `Slew` packet that still ends up
+  placed (`!(push_back && audio_ts)` — a sync-offset change, or no `audio_ts` yet) lands at the
+  full new term, so `audio_placed_slew_fold_ns` shifts the level setpoint by the remaining slew
+  and clears it, or the resampler would keep stretching past the placement.
 - **Withhold, then place once.** A wall-clock-timecoded genlock source with no video delay yet is
   `AudioHoldMode::Pending` (`audio_hold=pending`): its packets never enter the mix (they still reach
   the audio callbacks/monitoring), for at most `AUDIO_WITHHOLD_MAX_NS` (10 s after the first genlock
@@ -188,8 +193,10 @@ described here stay as they are.
   timecodes (it stays on the latency hold, and its audio really is off by that much). Both are
   honest readings; the start window is far shorter than the lock-alert watchdog's 2-pass confirm
   (a 5 min timer), so it cannot page on it.
-- **Deep sources are unaffected.** Stream `NDI 2ME PGM` and every strih/stream/imag input carry no
-  NDI audio (the certified table below), so their video path is byte-identical.
+- **Deep sources are unaffected in effect.** Stream `NDI 2ME PGM` and every strih/stream/imag input
+  carry no NDI audio (the certified table below), and a deep source's video keeps the pin rule: the
+  shallow halves act only on a non-deep source, and a deep source latches the pin rule's own
+  `base + 1` (the code path changed, the presented depth did not).
 
 **Lock-step anchors of THIS change** (all must move together): the std-only
 `tests/genlock_audio_timecode_placement_1367.rs` (tracker at the present tail after the presented
@@ -220,8 +227,11 @@ Clean feed: the depth latches once per lock and never moves, 0 hold/shed/drain/u
 3 placements, 0 slews, 0 steps, |A/V| ≤ 1.97 ms. Disturbed feed (lost frames + 45 ms late spikes):
 ≤ 1 correction per disturbance, back on D within the throttle window, the audio never moves.
 `shallow_depth_rule = false` on the same feed: the depth random-walks (modal depth < 90 % of
-presents) and the free tracker re-times the audio 36 times. A min-latency box caps D at 2 and
-reports it. The bench's rate estimate converges on the TRUE
+presents) and the free tracker re-times the audio 36 times. A min-latency box REPORTS a floor
+over base + 1 and applies no depth (0 corrections). Review-round-1 scenarios: a band straddling
+the SECOND frame edge (50–80 ms) locks 4 frames; a band that rises mid-run with no gap
+(28–40 → 60–80 ms) re-measures 3 → 4 and slews the audio exactly once; a sender restart onto a
+slower band relatches 3 → 4 and slews once — 0 steps in all of them. The bench's rate estimate converges on the TRUE
 drift by construction, so it ASSUMES drift is absorbed between placements (the real servo is
 proven by `src/asrc_bench.rs`). What it proves is that each placement lands on the live offset.
 
@@ -229,7 +239,9 @@ proven by `src/asrc_bench.rs`). What it proves is that each placement lands on t
 the `sp-*_video` audit shows `audio_hold=timecode`, `audio_delay_ms` = the latched
 `shallow_depth × 33` (constant between restarts), `audio_pairing_offset_ms` within ±16 with
 `audio_health=0`, and `audio_slews=` / `audio_steps=` flat at 0 in steady state (`audio_withheld=`
-grows only in the first seconds after an OBS start). The songplayer post-deploy A/V gate
+grows only in the first seconds after an OBS start). A depth change slews at 1 ms per second, so
+a 2-frame re-time takes ~67 s: read `audio_slew_ms=0` before trusting a post-restart A/V
+measurement (the E2E settle-wait does not wait on it yet). The songplayer post-deploy A/V gate
 (±40 ms, 0 dropouts) passes across two OBS restarts. The camera-box release E2E A/V gate stays
 green.
 
