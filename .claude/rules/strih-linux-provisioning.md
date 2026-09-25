@@ -17,6 +17,7 @@ paths:
   - "tests/fixtures/strih_box_1361/*"
   - "scripts/lib/strih-drm-output.sh"
   - "tests/strih_drm_output_provision_1346.rs"
+  - "tests/strih_audio_quantum_1345.rs"
 ---
 
 # strih-lx — the Linux notebook replacing the Windows strih PC (issue 1317)
@@ -529,6 +530,37 @@ hub program-rx; FOH-live level is a supervisor NOTE). **Supervisor live steps:**
 capture node name against `wpctl status`, restart the operator PipeWire/WirePlumber for the sink to
 appear, and do the FOH-live level acceptance. Arena stays on the Windows PC (Spout has no Linux); its
 cg feed reaches the notebook over NDI (`RESOLUME-SNV (cg-obs)`).
+
+### The MiniFuse period + graph quantum 1024 (issue 1345, owner accepted 25.9.2026)
+
+The interkom became clean on 24.9.2026 only after two hand-made drop-ins. Step 12 now installs both:
+
+- `~/.config/wireplumber/wireplumber.conf.d/51-minifuse-output-period.conf`
+  (`strih_wireplumber_minifuse_output_period_conf`): the MiniFuse PLAYBACK node at
+  `period-size 1024, period-num 3, headroom 256`. At the default period 256 against the 1024 graph it
+  ran ~24 xruns/s, which was the buzz the operator heard.
+- `~/.config/pipewire/pipewire.conf.d/51-strih-quantum-1024.conf` (`strih_pipewire_quantum_conf`):
+  `default.clock.min-quantum = 1024`, so no client can pull the graph below the MiniFuse period.
+  The hub capture child's `--latency 256` did exactly that, and the cameraman sounded robotic. The hub
+  now asks 1024 too (`PW_CAT_RECORD_LATENCY_FRAMES = PW_GRAPH_BURST_FRAMES`).
+
+Rules for this pair:
+
+- Both renderers print the LIVE strih-lx text byte-for-byte, comment headers included (sha256
+  checked against the box). On the hand-fixed box, a re-run logs `unchanged`.
+- They are written by `obs_box_write_if_changed` (shared baseline lib): compare, rewrite only on a
+  content or mode difference, log, one atomic rename. Use it for any new rendered config file
+  instead of a bare `>` redirect.
+- verify-strih item **9b** FAILs when either file is missing or differs from its renderer. It then
+  REPORTS the live graph quantum from `pw-metadata -n settings`, read in the operator session as root
+  like item 9, through the pure `strih_lx_graph_quantum_ok`:
+  - PASS when `clock.force-quantum` is 1024 (the running session's hand force), or when it is 0 and
+    `clock.min-quantum` is 1024 (the drop-in after a restart);
+  - NOTE otherwise. The drop-in applies only at the next PipeWire start, and the hand force does not
+    survive one;
+  - an unreadable session is never a pass.
+- The two files are box-independent constants, so the issue-1361 golden (fact-dependent renders
+  only) does not include them.
 
 ## CI — the strih FULL-build variant, with obs-browser + CEF (issue 1317)
 

@@ -9,6 +9,7 @@ paths:
   - "scripts/verify-strih.sh"
   - "scripts/strih-obs-start.sh"
   - "tests/obs_box_baseline_1357.rs"
+  - "tests/obs_box_brightness_1357.rs"
 ---
 
 # The shared OBS-box appliance baseline (issue 1357 scope A)
@@ -28,8 +29,9 @@ power envelope. A difference between boxes is a defect, not a per-box feature.
   kernel, AFFINITY-ONLY core reservation, NVIDIA 595-open + PRIME nvidia-primary, power envelope,
   maxperf persistence. It sources its kiosk half:
 - `scripts/lib/obs-box-kiosk.sh` — never-sleep, de-jitter + the crash-popup item, the
-  lightdm -> openbox kiosk with the owner's GNOME purge list, touchpad, and the kiosk openbox
-  autostart preamble + root-menu printer (`user_bus_alive`/`gs` live here too).
+  lightdm -> openbox kiosk with the owner's GNOME purge list (plus its panel-brightness keys facet),
+  touchpad, and the kiosk openbox autostart preamble + root-menu printer (`user_bus_alive`/`gs` live
+  here too). `obs_box_write_if_changed` (the compare-then-rewrite install) lives in the system half.
 - `scripts/lib/obs-box-baseline-verify.sh` — the ONE grader: `obs_box_baseline_gather_snippet`
   (read-only bash, runs as any user, locally or over ssh) + the pure `obs_box_baseline_verdict`
   (one `item|OK|FAIL|detail` row per item, fail-closed on a gather that never completed). verify-imag
@@ -70,6 +72,48 @@ power envelope. A difference between boxes is a defect, not a per-box feature.
 - **Autostart CONTENT stays per box** (which supervised OBS unit, which projector layout): imag keeps
   its test-pinned step-16 heredoc, strih-lx uses `strih_openbox_autostart_text`. Both MUST carry the
   preamble lines verbatim and `systemctl --user start <obs unit>` — that is what the verify grades.
+
+## The panel-brightness keys (kiosk facet, issue 1357)
+
+Openbox has no brightness handler, so a notebook's Fn brightness keys did nothing on the kiosk
+(strih-lx, 24.9.2026 production; imag the same). `obs_box_kiosk` step (f) runs
+`obs_box_brightness_keys "$DESKTOP_USER"`, so BOTH setup scripts get it with no extra call site:
+
+- `/usr/local/bin/obs-box-brightness up|down` (root 0755): the first sysfs backlight, a tenth of
+  `max_brightness` per step (at least 1), clamped to max and to a 5 % floor; exit 2 on a bad argument,
+  exit 1 (logged) on a box with no backlight.
+- `/etc/udev/rules.d/90-obs-box-backlight.rules`: `chgrp video` + `chmod g+w` on every backlight node
+  at `add`, then `udevadm control --reload-rules` + `udevadm trigger --subsystem-match=backlight
+  --action=add`. A failed trigger is a WARNING (the rule still applies at the next boot).
+- The desktop user in group `video` (`usermod -aG`).
+- The two `XF86MonBrightnessUp/Down` keybinds in `~/.config/openbox/rc.xml`.
+
+Rules for the facet:
+
+- **The helper and the rule text are the live strih-lx files byte-for-byte**
+  (`obs_box_brightness_helper_text`, `obs_box_backlight_udev_rule`, sha256 checked 25.9.2026).
+  Change them only together with the box.
+- **rc.xml is MERGED, never replaced.** `obs_box_openbox_rc_with_brightness_keys` is a pure stdin
+  filter and the kiosk's only rc.xml writer.
+  - It inserts only the missing lines of `obs_box_brightness_keybinds_xml` (the comment only when a
+    keybind is missing) right before the first `</keyboard>` line.
+  - An rc.xml that already has both keybinds comes back unchanged. Without `</keyboard>` it returns 1
+    with NO output, and the install fails loud.
+  - The source is the user's rc.xml when present, else the stock `/etc/xdg/openbox/rc.xml` (openbox
+    reads the user file first). The merged text is written through `obs_box_write_if_changed`.
+  - Merging the strih-lx stock rc.xml reproduces its live rc.xml byte-for-byte (checked under mawk,
+    Ubuntu's default awk).
+  - This is additive, and the only exception to verify-imag's "never rewrite operator rc.xml"
+    doctrine (issue 1095). Operator content and the Root right-click binding stay untouched, so that
+    reachability check keeps its meaning.
+- **Every file goes through `obs_box_write_if_changed`** (obs-box-baseline.sh): compared, rewritten
+  only on a content or mode difference, logged `unchanged` / `written`, one atomic rename. It is the
+  shared install for rendered config files (setup-strih step 12 uses it for the audio drop-ins).
+- **Grader row `brightness`** (after `kiosk`, before `autostart`). It is OK only when all four hold:
+  the helper is executable, the rule carries the `chmod g+w` RUN, both keybind lines are in the rc.xml
+  openbox loads, and the user is in `video`. The gather embeds `obs_box_brightness_keybinds_xml` via
+  `declare -f`, so the grader and the merge read the same lines. A box provisioned before this facet
+  FAILs the row until setup re-runs (imag included).
 
 ## Tests + the Tier-0 equivalence net
 

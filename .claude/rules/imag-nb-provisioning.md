@@ -771,6 +771,11 @@ bind the desktop click elsewhere and silently orphan the menu, with no gate catc
   fails loud and names the offending file; the operator fixes it by hand. This is the
   `minimal-fix-inform-dont-force` model — the right default for ANY "the box has an operator-owned
   config file" reachability check here (weigh it before reaching for a provision/overwrite fix).
+  - **One ADDITIVE exception (issue 1357, main design 25.9.2026): the kiosk brightness keybinds.**
+    `obs_box_brightness_keys` merges ONLY the two missing `XF86MonBrightness*` keybind lines before
+    `</keyboard>` in the effective rc.xml (seeding the user file from the stock one) and never touches
+    any other line. The Root right-click binding this check reads stays as it was. Details:
+    `.claude/rules/obs-box-baseline.md` "The panel-brightness keys".
 - **Read the EFFECTIVE rc.xml, not a fixed path.** openbox loads `~/.config/openbox/rc.xml` when
   present, else the stock `/etc/xdg/openbox/rc.xml`. The check does a remote
   `[ -f <user> ] && echo user || echo stock` to pick whichever openbox will ACTUALLY load, asserts
