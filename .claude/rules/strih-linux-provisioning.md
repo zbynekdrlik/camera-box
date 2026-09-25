@@ -986,30 +986,46 @@ would have produced a different box. Each is now provisioned at its source and g
 **G2 — the ONE remoteos-mcp install for every Linux box** (setup-imag step 23 and setup-device STEP
 17b call the same function; `.claude/rules/imag-nb-provisioning.md` #858, `provisioning-scripts.md`):
 
-- Source: the project's GitHub API tarball (`REMOTEOS_MCP_REF`, default `main`). `GH_TOKEN`, when set,
-  is the `Authorization` header read by curl from STDIN (`curl -H @-`), never an argv. The repo is
-  public (checked 25.9.2026), so a run without the token fetches anonymously. The tarball's top dir
-  (`zbynekdrlik-remoteos-mcp-<sha7>`) is the source id, recorded in `<venv>/.camera-box-source`.
+- Source: the project's GitHub API tarball of a PINNED commit, `remoteos_mcp_pinned_ref` = the commit
+  the live strih-lx venv runs (pip `direct_url` commit_id `8b4ce58`, read 25.9.2026). Pin-not-latest:
+  every strih-lx genlock deploy re-runs setup-strih, so an unpinned `main` would install whatever
+  upstream is on every deploy. Bump the pin on purpose (or `REMOTEOS_MCP_REF=<sha>` for one run).
+  `GH_TOKEN`, when set, is the `Authorization` header read by curl from STDIN (`curl -H @-`), never
+  an argv. The repo is public (checked 25.9.2026), so a run without the token fetches anonymously.
+  The tarball's top dir (`zbynekdrlik-remoteos-mcp-<sha7>`) is the source id, recorded in
+  `<venv>/.camera-box-source`.
 - Install: `python3 -m venv` (after `apt-get install python3-venv`), then the venv's own pip with the
   project's `constraints.txt` (`PIP_CONSTRAINT`). Never the system python, never
-  `--break-system-packages`. An unchanged source id with an importable venv skips pip.
+  `--break-system-packages`. pip runs under `env -u GH_TOKEN -u REMOTEOS_MCP_AUTH_KEY`: it executes
+  the build code of the source and of every sdist dependency. An unchanged source id with an
+  importable venv skips pip; a failed pip with an importable venv keeps it (WARNING, the marker stays,
+  the next run retries).
 - Files: `config.json` (the upstream key store) and the unit's `EnvironmentFile`
   `/etc/remoteos-mcp/remoteos-mcp.env` (`REMOTEOS_AUTH_KEY=...`) are 0600; the unit is 0644. All are
   compare-then-write. The unit is the live strih-lx unit with ONE change: the key left the
   world-readable ExecStart (remoteos reads `REMOTEOS_AUTH_KEY` through click's `envvar`; checked on a
   scratch venv: no key 401, the right key 200).
-- Key order: `REMOTEOS_MCP_AUTH_KEY`, else the existing `config.json`, else a legacy unit's
-  `--auth-key` (the hand-made strih-lx unit and the upstream installer both put it there), else a fresh
-  32-char key. So re-running setup on a provisioned box keeps the key dev1's `.mcp.json` holds.
+- Key order: `REMOTEOS_MCP_AUTH_KEY`, else a legacy unit's `--auth-key` (the hand-made strih-lx unit
+  and the upstream installer both put it there, and it is the key the RUNNING service accepts), else
+  the EnvironmentFile, else `config.json`, else a fresh 32-char key. A differing `config.json` key is
+  a WARNING and follows the installed key. So re-running setup keeps the key dev1's `.mcp.json` holds.
 - Policy: `restart` (strih/imag) restarts only when the source, unit or key changed, else `start`,
-  then requires `/health` on :8092; `enable-only` (cams) never starts. Both compare the LITERAL
-  `is-enabled` to `enabled`.
+  then requires `/health` on :8092 AND an unauthenticated `POST /mcp` answering 401 (an empty
+  `REMOTEOS_AUTH_KEY` turns remoteos's auth OFF on a 0.0.0.0 full-shell agent); `enable-only` (cams)
+  never starts. Both compare the LITERAL `is-enabled` to `enabled`.
+- The unit's `User=`: strih/imag pass the desktop user; setup-device passes `"${SUDO_USER:-root}"`
+  (the upstream installer's rule), so a re-provision never moves a cam's MCP shell to another account.
 - A failed fetch with a working venv keeps it (WARNING) and still refreshes the unit/key files; with
   nothing installed it fails. The strih-lx genlock deploy re-runs setup-strih, so a GitHub outage never
   breaks a deploy of a box that already has the venv.
 - verify item 8 (`remoteos_mcp_verdict`): the venv ExecStart, no `--auth-key` in the unit, the
-  EnvironmentFile line, env file `600 root`, the venv imports remoteos, enabled + active. strih-lx
-  itself FAILs item 8 until step 10 re-runs once (its hand unit still carries the key in ExecStart).
+  EnvironmentFile line, env file `600 root`, the venv imports remoteos, enabled + active, and an
+  unauthenticated `POST /mcp` answering 401 (runs as a non-root operator: the config dir is 0755, the
+  key files 0600). strih-lx itself FAILs item 8 until step 10 re-runs once (its hand unit still
+  carries the key in ExecStart).
+- The key files are written compare-then-write on content, mode AND owner (the
+  `obs_box_write_if_changed` rule); the lib keeps its own small writer because setup-device.sh does
+  not source the obs-box baseline.
 
 **G3 — the Downstream Keyer plugin.** The pinned upstream release asset
 `downstream-keyer-0.4.4-x86_64-linux-gnu.deb` (sha256 = its GitHub release digest) carries the
