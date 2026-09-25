@@ -196,9 +196,9 @@ handle_box() {
   # issue 1372 part D: the audio (media) clock facet -- a DEGRADED/media_clock page already carries
   # `media_clock:<kind>` in the reason; the drift + discipline are logged every pass for the trend.
   media_clock="$(printf '%s\n' "$analyze_out" | sed -n 's/^media_clock=//p')"
-  media_drift="$(printf '%s\n' "$analyze_out" | sed -n 's/^media_clock_drift_ms=//p')"
+  media_drift="$(printf '%s\n' "$analyze_out" | sed -n 's/^media_clock_drift_us=//p')"
   media_disc="$(printf '%s\n' "$analyze_out" | sed -n 's/^media_clock_discipline=//p')"
-  log "$box ($ip): reachable=$reachable verdict=${verdict:-<none>} state=${state:-} reason=${reason:-} n_absent=${n_absent:-} qpc_drift_ppm=${qpc_ppm:-} qpc_expected_ppm=${qpc_exp:-} media_clock=${media_clock:-} media_clock_drift_ms=${media_drift:-} media_clock_discipline=${media_disc:-}"
+  log "$box ($ip): reachable=$reachable verdict=${verdict:-<none>} state=${state:-} reason=${reason:-} n_absent=${n_absent:-} qpc_drift_ppm=${qpc_ppm:-} qpc_expected_ppm=${qpc_exp:-} media_clock=${media_clock:-} media_clock_drift_us=${media_drift:-} media_clock_discipline=${media_disc:-}"
 
   case "$verdict" in
     SKIP)

@@ -63,7 +63,7 @@ int main() {
     // v7 signature (issue 1372 part D): (state, reason, n_inputs, n_locked, n_absent, n_idle,
     //   latency_ms, clock, output, recent_event, recent_event_input_name, recent_event_input_events,
     //   qpc_drift_ms, qpc_drift_ppm, qpc_expected_ppm, qpc_step, audio_unexpected_input_name,
-    //   media_clock_state, media_clock_drift_ms, media_clock_window_s, media_clock_ready,
+    //   media_clock_state, media_clock_drift_us, media_clock_window_s, media_clock_ready,
     //   media_clock_discipline, inputs)
     // no offender (recent_event false / true-but-none) -> recent_event_inputs is []; nullptr audio
     // offender -> audio_unexpected_inputs is []
@@ -85,7 +85,7 @@ int main() {
     // #1299 Part 4: a DEGRADED/qpc_drift line carrying a STEP (qpc_step=1)
     printf("%s\n", genlock_build_lock_json("DEGRADED","audio_unexpected",7,7,0,0,3,"locked","stamping",false,nullptr,0,0,14.0,13.0,1,"CAM3 (usb)","ok",0,600,1,"active",ins).c_str());
     // issue 1372 part D: DEGRADED/media_clock lines -- a drifting mixer and a raw-QPC fallback
-    printf("%s\n", genlock_build_lock_json("DEGRADED","media_clock",4,4,0,0,3,"locked","stamping",false,nullptr,0,67,13.5,13.0,0,nullptr,"drift",8,600,1,"active",ins2).c_str());
+    printf("%s\n", genlock_build_lock_json("DEGRADED","media_clock",4,4,0,0,3,"locked","stamping",false,nullptr,0,67,13.5,13.0,0,nullptr,"drift",8100,600,1,"active",ins2).c_str());
     printf("%s\n", genlock_build_lock_json("DEGRADED","media_clock",4,4,0,0,3,"locked","stamping",false,nullptr,0,0,0.0,13.0,0,nullptr,"undisciplined",0,600,0,"disabled",ins2).c_str());
     return 0;
 }
@@ -153,7 +153,7 @@ def test_cpp_builder_output_roundtrips_through_the_python_parser(tmp_path):
         assert obj["v"] == 7
         assert facet["media_clock"] == {
             "state": obj["media_clock"]["state"],
-            "drift_ms": obj["media_clock"]["drift_ms"],
+            "drift_us": obj["media_clock"]["drift_us"],
             "window_s": obj["media_clock"]["window_s"],
             "ready": obj["media_clock"]["ready"],
             "discipline": obj["media_clock"]["discipline"],
@@ -192,7 +192,7 @@ def test_cpp_builder_output_roundtrips_through_the_python_parser(tmp_path):
 
     # issue 1372 part D: the two DEGRADED/media_clock lines carry the sub-kind the watchdog names.
     drift = json.loads(lines[6])["media_clock"]
-    assert drift == {"state": "drift", "drift_ms": 8, "window_s": 600, "ready": True,
+    assert drift == {"state": "drift", "drift_us": 8100, "window_s": 600, "ready": True,
                      "discipline": "active"}
     undisc = json.loads(lines[7])["media_clock"]
     assert undisc["state"] == "undisciplined" and undisc["discipline"] == "disabled"

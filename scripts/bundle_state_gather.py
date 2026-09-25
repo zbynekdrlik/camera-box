@@ -121,10 +121,10 @@ def genlock_lock_facet_from_log(text):
        clock:{state}, output:{present, stamping_wallclock},
        inputs:{<name>:{locked, connected, idle, latency_ms, underruns, relocks, late_holds, depth}},
        [recent_event_inputs:[{name, events}]], [audio_unexpected_inputs:[{name}]],
-       [media_clock:{state, drift_ms, window_s, ready, discipline}], source:"log"}
+       [media_clock:{state, drift_us, window_s, ready, discipline}], source:"log"}
 
     Issue 1372 part D (schema v7): `media_clock` is the audio (media) clock facet the widget decided
-    with -- `state` ok|drift|undisciplined, the wall-vs-media drift growth `drift_ms` over `window_s`,
+    with -- `state` ok|drift|undisciplined, the wall-vs-media offset growth `drift_us` over `window_s`,
     whether that window has filled (`ready`), and the Windows discipline outcome (`discipline`:
     active|disabled|read_failed|api_missing|unknown, or n/a on Linux). Omitted for a pre-v7 line or a
     malformed object, never fabricated.
@@ -279,7 +279,7 @@ def genlock_lock_facet_from_log(text):
     if isinstance(raw_mc, dict) and isinstance(raw_mc.get("state"), str):
         facet["media_clock"] = {
             "state": raw_mc.get("state"),
-            "drift_ms": raw_mc.get("drift_ms"),
+            "drift_us": raw_mc.get("drift_us"),
             "window_s": raw_mc.get("window_s"),
             "ready": bool(raw_mc.get("ready")),
             "discipline": raw_mc.get("discipline"),

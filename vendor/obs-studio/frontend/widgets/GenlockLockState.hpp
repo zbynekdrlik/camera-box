@@ -233,10 +233,11 @@ static inline int genlock_qpc_drift_beyond_bound(int rate_ready, long long drift
 
 /* Issue 1372 part D: the MEDIA-clock (audio clock) term. os_gettime_ns() paces the audio mixer, the
  * video thread and every output timestamp; since part A the Windows os_gettime_ns() runs at the
- * dantesync-disciplined rate (Linux's CLOCK_MONOTONIC always did), so the wall-vs-media drift must stay
- * flat on EVERY box. Its growth over a window is therefore compared with 0 -- the same meaning on every
- * box, unlike the removed #1357 rate-vs-slew term. Mirror of camera_box::genlock_lock_state
- * (MediaDiscipline / MediaClock / media_clock_window_drift_ms / media_clock_verdict); the parity gate
+ * dantesync-disciplined rate (Linux's CLOCK_MONOTONIC always did), so the wall-vs-media offset must stay
+ * flat on EVERY box apart from wall steps. Its growth over a window is therefore compared with 0 -- the
+ * same meaning on every box, unlike the removed #1357 rate-vs-slew term. Mirror of
+ * camera_box::genlock_lock_state (MediaDiscipline / MediaClock / media_clock_step_allowance_us /
+ * media_clock_window_drift_us / media_clock_verdict); the parity gate
  * tests/genlock_lock_state_parity.rs lifts this block from the discipline enum through the verdict's
  * closing brace. Placed AFTER genlock_qpc_drift_beyond_bound so no earlier lift is disturbed. */
 
@@ -283,42 +284,46 @@ static inline int64_t genlock_media_sat_abs(int64_t v)
 	return v < 0 ? -v : v;
 }
 
-/* The largest sample-to-sample change (ms) a clock RATE of max_rate_ppm can produce over dt_ms:
- * 1 + floor(dt_ms * max_rate_ppm / 1e6). The 1 is the integer-ms truncation boundary; the rest is the
- * growth itself. A non-positive interval or rate allows 1. Saturating. */
-static inline int64_t genlock_media_clock_step_allowance_ms(int64_t dt_ms, int64_t max_rate_ppm)
+/* The largest sample-to-sample offset change (us) that is still a RATE over dt_ms:
+ * floor_us + floor(dt_ms * max_rate_ppm / 1000). A non-positive interval or rate allows floor_us.
+ * Saturating. */
+static inline int64_t genlock_media_clock_step_allowance_us(int64_t dt_ms, int64_t max_rate_ppm, int64_t floor_us)
 {
 	int64_t product;
 	if (dt_ms <= 0 || max_rate_ppm <= 0)
-		return 1;
+		return floor_us;
 	product = dt_ms > INT64_MAX / max_rate_ppm ? INT64_MAX : dt_ms * max_rate_ppm;
-	return genlock_media_sat_add(1, product / 1000000);
+	return genlock_media_sat_add(floor_us, product / 1000);
 }
 
-/* The drift GROWTH across n samples (oldest first; t_ms the widget's monotonic ms, drift_ms the
- * cumulative integer-ms wall_qpc_drift_ms): the sum of the sample-to-sample drift changes a clock rate
- * of max_rate_ppm could produce over their interval. A larger change is a wall STEP (a dantesync phase
- * step, the slow-GM sawtooth, a step the qpc_drift verdict owns) and is left out, so a step never reads
- * as an audio-clock rate. n < 2 -> 0. */
-static inline int64_t genlock_media_clock_window_drift_ms(const int64_t *t_ms, const int64_t *drift_ms,
-							  int n, int64_t max_rate_ppm)
+/* The wall-vs-media GROWTH (us) across n samples (oldest first; t_ms the widget's monotonic ms,
+ * offset_us the wall-minus-media offset the widget samples in us): the sum of the sample-to-sample
+ * offset changes a rate of at most max_rate_ppm could make over their interval. A larger change is a
+ * wall STEP (every dantesync phase step is >= 500 us) and is left out, and a pair more than max_gap_ms
+ * apart (a stalled UI) adds nothing, so steps and stalls never read as an audio-clock rate. n < 2 -> 0. */
+static inline int64_t genlock_media_clock_window_drift_us(const int64_t *t_ms, const int64_t *offset_us, int n,
+							  int64_t max_rate_ppm, int64_t floor_us,
+							  int64_t max_gap_ms)
 {
 	int64_t sum = 0;
 	int i;
 	for (i = 1; i < n; ++i) {
 		const int64_t dt = genlock_media_sat_sub(t_ms[i], t_ms[i - 1]);
-		const int64_t jump = genlock_media_sat_sub(drift_ms[i], drift_ms[i - 1]);
-		if (genlock_media_sat_abs(jump) > genlock_media_clock_step_allowance_ms(dt, max_rate_ppm))
+		int64_t change;
+		if (dt > max_gap_ms)
 			continue;
-		sum = genlock_media_sat_add(sum, jump);
+		change = genlock_media_sat_sub(offset_us[i], offset_us[i - 1]);
+		if (genlock_media_sat_abs(change) > genlock_media_clock_step_allowance_us(dt, max_rate_ppm, floor_us))
+			continue;
+		sum = genlock_media_sat_add(sum, change);
 	}
 	return sum;
 }
 
 /* UNDISCIPLINED when the Windows clock fell back to raw QPC while dantesync answers (clock_present);
- * else DRIFT when the window is ready and |drift_ms| > drift_bound_ms; else OK. */
-static inline genlock_media_clock_t genlock_media_clock_verdict(int window_ready, int64_t drift_ms,
-								int64_t drift_bound_ms, int discipline,
+ * else DRIFT when the window is ready and |drift_us| > drift_bound_us; else OK. */
+static inline genlock_media_clock_t genlock_media_clock_verdict(int window_ready, int64_t drift_us,
+								int64_t drift_bound_us, int discipline,
 								int clock_present)
 {
 	const int raw_fallback = discipline == GENLOCK_MEDIA_DISCIPLINE_DISABLED ||
@@ -326,7 +331,7 @@ static inline genlock_media_clock_t genlock_media_clock_verdict(int window_ready
 				 discipline == GENLOCK_MEDIA_DISCIPLINE_API_MISSING;
 	if (clock_present && raw_fallback)
 		return GENLOCK_MEDIA_CLOCK_UNDISCIPLINED;
-	if (window_ready && genlock_media_sat_abs(drift_ms) > drift_bound_ms)
+	if (window_ready && genlock_media_sat_abs(drift_us) > drift_bound_us)
 		return GENLOCK_MEDIA_CLOCK_DRIFT;
 	return GENLOCK_MEDIA_CLOCK_OK;
 }

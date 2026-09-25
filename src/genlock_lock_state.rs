@@ -67,8 +67,8 @@ pub enum LockReason {
     /// double-audio hazard. The lowest-precedence DEGRADED reason, below `AudioPairing`.
     AudioUnexpected = 10,
     /// Issue 1372 part D — OBS's MEDIA clock (`os_gettime_ns`, which paces the audio mixer and every
-    /// output) does not tick with the dantesync-disciplined wall clock: the wall-vs-media drift grew
-    /// beyond [`GENLOCK_MEDIA_CLOCK_DRIFT_BOUND_MS`] over [`GENLOCK_MEDIA_CLOCK_WINDOW_S`], or (Windows)
+    /// output) does not tick with the dantesync-disciplined wall clock: the wall-vs-media offset grew
+    /// beyond [`GENLOCK_MEDIA_CLOCK_DRIFT_BOUND_US`] over [`GENLOCK_MEDIA_CLOCK_WINDOW_S`], or (Windows)
     /// the disciplined clock fell back to raw QPC while dantesync runs. Below `QpcDrift`, above the
     /// audio-pairing axes; never UNLOCKED on its own.
     MediaClock = 11,
@@ -390,33 +390,38 @@ pub fn qpc_drift_beyond_bound(
 // Issue 1372 part D — the MEDIA-clock (audio clock) term. `os_gettime_ns()` paces OBS's audio mixer,
 // its video thread and every output timestamp. Once issue 1372 part A made the Windows
 // `os_gettime_ns()` run at the dantesync-disciplined system-time rate (Linux's `CLOCK_MONOTONIC` is
-// kernel-disciplined already), the wall-vs-media drift must stay FLAT on every box: 0 ms over 47 min on
-// stream after the part-A deploy, 0 on strih-lx for hours, while the undisciplined stream mixer walked
-// 67 ms in 83 min (≈ 8 ms per 10 min) before it — green on the indicator the whole time. So the drift
-// GROWTH over a window is a real fault signal again, unlike the #1357-removed rate term: that one
-// compared the rate with an instantaneous dantesync `f_ptp + f_phase` sample, which meant a different
-// thing per box; this one compares with 0, which means the same thing everywhere.
+// kernel-disciplined already), the wall-vs-media offset must stay FLAT on every box apart from wall
+// steps: 0 ms over 47 min on stream after the part-A deploy, 0 on strih-lx for hours, while the
+// undisciplined stream mixer walked 67 ms in 83 min (≈ 8 ms per 10 min) before it — green on the
+// indicator the whole time. So the offset's GROWTH over a window is a real fault signal again, unlike
+// the #1357-removed rate term: that one compared the rate with an instantaneous dantesync
+// `f_ptp + f_phase` sample, which meant a different thing per box; this one compares with 0, which
+// means the same thing everywhere.
 //
-// A sample-to-sample change larger than any clock RATE can make in that interval is a wall STEP (a
-// dantesync phase step, the slow-GM sawtooth of up to 2.5 ms per step, a larger step the `qpc_drift`
-// verdict owns) and is EXCLUDED from the growth, so steps never read as an audio-clock rate. At the
-// widget's 1 Hz sampling that allowance is 1 ms (the integer-ms truncation boundary), so a sub-frame
-// step of 2+ ms is left out; a 1 ms step cannot be told from a rate and counts. The second input is
-// the Windows discipline state libobs publishes (`os_gettime_discipline()`): a fallback to raw QPC
-// while dantesync answers is DEGRADED at once, before any drift accrues. The term never makes a box
-// UNLOCKED on its own.
+// The widget samples the offset itself in µs each 1 Hz tick (the libobs `wall_qpc_drift_ms` is integer
+// ms truncated toward zero, which cannot tell a 1–2 ms dantesync phase step from one second of a rate).
+// A sample-to-sample change larger than any plausible rate can make in that interval is a wall STEP
+// (dantesync steps at ≥ 500 µs: the client threshold; the locked master's `1000 µs + 2 × ppm × 10 s`)
+// and is EXCLUDED from the growth; a pair more than [`GENLOCK_MEDIA_CLOCK_MAX_GAP_MS`] apart (a UI
+// stall) adds nothing. The second input is the Windows discipline state libobs publishes
+// (`os_gettime_discipline()`): a fallback to raw QPC while dantesync answers is DEGRADED at once,
+// before any drift accrues. The term never makes a box UNLOCKED on its own.
 
-/// The window (s) the media-clock drift growth is measured over — the design's "per 10 min".
+/// The window (s) the media-clock growth is measured over — the design's "per 10 min".
 pub const GENLOCK_MEDIA_CLOCK_WINDOW_S: i64 = 600;
-/// Drift growth (ms) over the window beyond which the media clock DEGRADES: > 2 ms per 10 min
-/// (> 3.3 ppm). The drift is truncated toward zero to integer ms, so a window that crosses zero reads
-/// up to ~2 ms off: the effective trip is 2–4 ms of real growth. The undisciplined stream accrued
-/// ≈ 8 ms per 10 min; a disciplined box stays at 0.
-pub const GENLOCK_MEDIA_CLOCK_DRIFT_BOUND_MS: i64 = 2;
-/// The fastest rate (ppm) the media clock can drift from the wall: dantesync's `DRIFT_MAX_PPM`. A
-/// sample-to-sample change beyond `1 ms + interval × this` is a wall STEP, not a rate (see
-/// [`media_clock_step_allowance_ms`]).
-pub const GENLOCK_MEDIA_CLOCK_MAX_RATE_PPM: i64 = 500;
+/// Growth (µs) over the window beyond which the media clock DEGRADES: > 2 ms per 10 min (> 3.3 ppm).
+/// The undisciplined stream accrued ≈ 8 ms per 10 min; a disciplined box stays at 0.
+pub const GENLOCK_MEDIA_CLOCK_DRIFT_BOUND_US: i64 = 2000;
+/// The fastest wall-vs-media rate (ppm) the growth counts. A change beyond
+/// [`GENLOCK_MEDIA_CLOCK_STEP_FLOOR_US`] + interval × this is a wall STEP (400 µs at 1 Hz, below
+/// dantesync's 500 µs step threshold). A faster mismatch can only be a raw-QPC fallback against a
+/// hard-slewing wall, which the discipline outcome flags as UNDISCIPLINED.
+pub const GENLOCK_MEDIA_CLOCK_MAX_RATE_PPM: i64 = 250;
+/// The sampling noise floor (µs) of one offset sample: the two clock reads are bracketed and retried
+/// while more than 50 µs apart, plus sub-µs rounding.
+pub const GENLOCK_MEDIA_CLOCK_STEP_FLOOR_US: i64 = 150;
+/// A pair of samples further apart than this (ms) — a stalled UI thread — adds nothing to the growth.
+pub const GENLOCK_MEDIA_CLOCK_MAX_GAP_MS: i64 = 5000;
 
 /// What the Windows `os_gettime_ns()` last read from the system-time adjustment. Discriminants match
 /// libobs `enum os_gettime_discipline_state` (`util/platform.h`) and the C mirror
@@ -460,7 +465,7 @@ impl MediaDiscipline {
 pub enum MediaClock {
     /// The media clock follows the disciplined wall clock (or there is not yet enough data).
     Ok = 0,
-    /// The wall-vs-media drift grew beyond the bound over the window.
+    /// The wall-vs-media offset grew beyond the bound over the window.
     Drift = 1,
     /// Windows: the disciplined clock fell back to raw QPC while dantesync runs.
     Undisciplined = 2,
@@ -473,57 +478,64 @@ impl MediaClock {
     }
 }
 
-/// The largest sample-to-sample change (ms) a clock RATE of `max_rate_ppm` can produce over `dt_ms`:
-/// `1 + floor(dt_ms × max_rate_ppm / 1e6)`. The `1` is the integer-ms truncation boundary (a true
-/// change of at most 1 ms reads as at most 1); the rest is the growth itself. A non-positive interval
-/// or rate allows 1. Saturating.
+/// The largest sample-to-sample offset change (µs) that is still a RATE over `dt_ms`:
+/// `floor_us + floor(dt_ms × max_rate_ppm / 1000)`. A non-positive interval or rate allows `floor_us`.
+/// Saturating.
 ///
-/// Byte-for-byte mirror of `genlock_media_clock_step_allowance_ms` in `GenlockLockState.hpp`.
-pub fn media_clock_step_allowance_ms(dt_ms: i64, max_rate_ppm: i64) -> i64 {
+/// Byte-for-byte mirror of `genlock_media_clock_step_allowance_us` in `GenlockLockState.hpp`.
+pub fn media_clock_step_allowance_us(dt_ms: i64, max_rate_ppm: i64, floor_us: i64) -> i64 {
     if dt_ms <= 0 || max_rate_ppm <= 0 {
-        return 1;
+        return floor_us;
     }
-    1i64.saturating_add(dt_ms.saturating_mul(max_rate_ppm) / 1_000_000)
+    floor_us.saturating_add(dt_ms.saturating_mul(max_rate_ppm) / 1000)
 }
 
-/// The wall-vs-media drift GROWTH across a window of `(t_ms, drift_ms)` samples (oldest first;
-/// `t_ms` the widget's monotonic ms, `drift_ms` the cumulative integer-ms `wall_qpc_drift_ms`): the
-/// sum of the sample-to-sample drift changes that a clock rate of `max_rate_ppm` could produce over
-/// their interval ([`media_clock_step_allowance_ms`]). A larger change is a wall STEP and is left out,
-/// so steps never read as an audio-clock rate. Saturating, so no input can overflow. Fewer than two
-/// samples → 0.
+/// The wall-vs-media GROWTH (µs) across a window of `(t_ms, offset_us)` samples (oldest first; `t_ms`
+/// the widget's monotonic ms, `offset_us` the wall-minus-media offset): the sum of the sample-to-sample
+/// offset changes that a rate of at most `max_rate_ppm` could make over their interval
+/// ([`media_clock_step_allowance_us`]). A larger change is a wall STEP and is left out, and a pair more
+/// than `max_gap_ms` apart adds nothing, so steps and stalls never read as an audio-clock rate.
+/// Saturating, so no input can overflow. Fewer than two samples → 0.
 ///
-/// Byte-for-byte mirror of `genlock_media_clock_window_drift_ms` in `GenlockLockState.hpp` — the
+/// Byte-for-byte mirror of `genlock_media_clock_window_drift_us` in `GenlockLockState.hpp` — the
 /// parity gate `tests/genlock_lock_state_parity.rs` keeps the two identical.
-pub fn media_clock_window_drift_ms(samples: &[(i64, i64)], max_rate_ppm: i64) -> i64 {
+pub fn media_clock_window_drift_us(
+    samples: &[(i64, i64)],
+    max_rate_ppm: i64,
+    floor_us: i64,
+    max_gap_ms: i64,
+) -> i64 {
     let mut sum: i64 = 0;
     for w in samples.windows(2) {
         let dt = w[1].0.saturating_sub(w[0].0);
-        let jump = w[1].1.saturating_sub(w[0].1);
-        if jump.saturating_abs() > media_clock_step_allowance_ms(dt, max_rate_ppm) {
+        if dt > max_gap_ms {
             continue;
         }
-        sum = sum.saturating_add(jump);
+        let change = w[1].1.saturating_sub(w[0].1);
+        if change.saturating_abs() > media_clock_step_allowance_us(dt, max_rate_ppm, floor_us) {
+            continue;
+        }
+        sum = sum.saturating_add(change);
     }
     sum
 }
 
 /// Decide the media-clock verdict. `Undisciplined` when the Windows discipline fell back to raw QPC
 /// while dantesync answers (`clock_present`); else `Drift` when the window is ready (spans ≥ 90 % of
-/// [`GENLOCK_MEDIA_CLOCK_WINDOW_S`]) and `|drift_ms|` exceeds `drift_bound_ms`; else `Ok`.
+/// [`GENLOCK_MEDIA_CLOCK_WINDOW_S`]) and `|drift_us|` exceeds `drift_bound_us`; else `Ok`.
 ///
 /// Byte-for-byte mirror of `genlock_media_clock_verdict` in `GenlockLockState.hpp` (parity-gated).
 pub fn media_clock_verdict(
     window_ready: bool,
-    drift_ms: i64,
-    drift_bound_ms: i64,
+    drift_us: i64,
+    drift_bound_us: i64,
     discipline: MediaDiscipline,
     clock_present: bool,
 ) -> MediaClock {
     if clock_present && discipline.is_raw_fallback() {
         return MediaClock::Undisciplined;
     }
-    if window_ready && drift_ms.saturating_abs() > drift_bound_ms {
+    if window_ready && drift_us.saturating_abs() > drift_bound_us {
         return MediaClock::Drift;
     }
     MediaClock::Ok
@@ -1123,87 +1135,118 @@ mod tests {
         assert_eq!(decide(&f), (LockState::Degraded, LockReason::MediaClock));
     }
 
-    /// `(t_ms, drift_ms)` samples every `dt_ms`, drift = `f(i)`.
+    /// `(t_ms, offset_us)` samples every `dt_ms`, offset = `f(i)`.
     fn ramp(n: i64, dt_ms: i64, f: impl Fn(i64) -> i64) -> Vec<(i64, i64)> {
         (0..=n).map(|i| (i * dt_ms, f(i))).collect()
     }
 
+    fn growth(samples: &[(i64, i64)]) -> i64 {
+        media_clock_window_drift_us(
+            samples,
+            GENLOCK_MEDIA_CLOCK_MAX_RATE_PPM,
+            GENLOCK_MEDIA_CLOCK_STEP_FLOOR_US,
+            GENLOCK_MEDIA_CLOCK_MAX_GAP_MS,
+        )
+    }
+
     #[test]
-    fn window_drift_sums_the_rate_and_leaves_a_step_out() {
-        let r = GENLOCK_MEDIA_CLOCK_MAX_RATE_PPM;
-        // The pre-part-A stream at 1 Hz: +1 ms every ~75 samples (≈ 8 ms over the 600 s window).
-        let s = ramp(600, 1000, |i| i / 75);
-        assert_eq!(media_clock_window_drift_ms(&s, r), 8);
-        // A 40 ms wall step (the qpc_drift verdict's) is never counted as drift.
-        let stepped = ramp(600, 1000, |i| i / 75 + if i > 300 { 40 } else { 0 });
-        assert_eq!(media_clock_window_drift_ms(&stepped, r), 8);
-        // The slow-GM sawtooth: a 2.5 ms same-direction wall step every ~100 s on a disciplined
-        // clock (reads 2 or 3 at 1 Hz) is a step too — never "audio clock drift".
-        let sawtooth = ramp(600, 1000, |i| (i / 100) * 5 / 2);
-        assert_eq!(media_clock_window_drift_ms(&sawtooth, r), 0);
-        // A 1 ms change per sample is within the rate allowance and counts; 2 ms is a step.
-        assert_eq!(media_clock_window_drift_ms(&[(0, 0), (1000, 1)], r), 1);
-        assert_eq!(media_clock_window_drift_ms(&[(0, 0), (1000, 2)], r), 0);
-        // A UI stall: 4 s between samples allows 1 + 2 = 3 ms of growth.
-        assert_eq!(media_clock_window_drift_ms(&[(0, 0), (4000, 3)], r), 3);
-        assert_eq!(media_clock_window_drift_ms(&[(0, 0), (4000, 4)], r), 0);
-        // Negative drift, truncation noise that returns, fewer than two samples.
-        assert_eq!(media_clock_window_drift_ms(&ramp(3, 1000, |i| -i), r), -3);
+    fn window_growth_counts_a_rate_and_leaves_steps_and_stalls_out() {
+        // The pre-part-A stream: 13.5 ppm = 13.5 µs per 1 Hz sample -> 8.1 ms over the 600 s window.
+        assert_eq!(growth(&ramp(600, 1000, |i| i * 27 / 2)), 8100);
+        // A disciplined box stepping like a dantesync locked master with phase_slew off: the offset
+        // only moves at the steps (1000 µs + 2 × 23 ppm × 10 s = 1460 µs, all one direction) -> 0.
+        assert_eq!(growth(&ramp(600, 1000, |i| (i / 60) * 1460)), 0);
+        // A client stepping 600 µs every 30 s (its threshold is 500 µs) -> 0.
+        assert_eq!(growth(&ramp(600, 1000, |i| (i / 30) * 600)), 0);
+        // The same steps on top of the undisciplined rate: only the rate is counted.
+        // (each step sample also carries ~13.5 µs of rate, which goes out with the step: 10 × 14)
         assert_eq!(
-            media_clock_window_drift_ms(&ramp(4, 1000, |i| 5 + i % 2), r),
-            0
+            growth(&ramp(600, 1000, |i| i * 27 / 2 + (i / 60) * 1460)),
+            7960
         );
-        assert_eq!(media_clock_window_drift_ms(&[(0, 7)], r), 0);
-        assert_eq!(media_clock_window_drift_ms(&[], r), 0);
-        // Saturating at the extremes, never a panic (the saturated jump is a step, left out).
+        // Measurement noise that returns (±40 µs) is never growth.
+        assert_eq!(growth(&ramp(600, 1000, |i| (i % 3 - 1) * 40)), 0);
+        // The rate ceiling: 400 µs per second is still a rate, 401 µs is a step.
+        assert_eq!(growth(&[(0, 0), (1000, 400)]), 400);
+        assert_eq!(growth(&[(0, 0), (1000, 401)]), 0);
+        // A 4 s UI stall widens the allowance to 150 + 1000 µs; a 6 s stall adds nothing.
+        assert_eq!(growth(&[(0, 0), (4000, 1150)]), 1150);
+        assert_eq!(growth(&[(0, 0), (4000, 1151)]), 0);
+        assert_eq!(growth(&[(0, 0), (6000, 100)]), 0);
+        // Negative growth, fewer than two samples.
+        assert_eq!(growth(&ramp(3, 1000, |i| -20 * i)), -60);
+        assert_eq!(growth(&[(0, 7)]), 0);
+        assert_eq!(growth(&[]), 0);
+        // Saturating at the extremes, never a panic.
         assert_eq!(
-            media_clock_window_drift_ms(&[(0, i64::MIN), (i64::MAX, i64::MAX)], i64::MAX),
-            0
+            media_clock_window_drift_us(
+                &[(0, i64::MIN), (1000, i64::MAX)],
+                i64::MAX,
+                i64::MAX,
+                i64::MAX
+            ),
+            i64::MAX
         );
         assert_eq!(
-            media_clock_window_drift_ms(&[(i64::MAX, 0), (i64::MIN, 1)], i64::MAX),
+            media_clock_window_drift_us(&[(i64::MAX, 0), (i64::MIN, 1)], 250, 150, 5000),
             1
         );
     }
 
     #[test]
-    fn the_step_allowance_is_one_ms_plus_the_rate_over_the_interval() {
-        let r = GENLOCK_MEDIA_CLOCK_MAX_RATE_PPM;
-        assert_eq!(media_clock_step_allowance_ms(1000, r), 1);
-        assert_eq!(media_clock_step_allowance_ms(1999, r), 1);
-        assert_eq!(media_clock_step_allowance_ms(2000, r), 2);
-        assert_eq!(media_clock_step_allowance_ms(4000, r), 3);
-        assert_eq!(media_clock_step_allowance_ms(0, r), 1);
-        assert_eq!(media_clock_step_allowance_ms(-5, r), 1);
-        assert_eq!(media_clock_step_allowance_ms(1000, 0), 1);
-        assert_eq!(
-            media_clock_step_allowance_ms(i64::MAX, i64::MAX),
-            1 + i64::MAX / 1_000_000
+    fn the_step_allowance_is_the_floor_plus_the_rate_over_the_interval() {
+        let (r, f) = (
+            GENLOCK_MEDIA_CLOCK_MAX_RATE_PPM,
+            GENLOCK_MEDIA_CLOCK_STEP_FLOOR_US,
         );
+        assert_eq!(media_clock_step_allowance_us(1000, r, f), 400);
+        assert_eq!(media_clock_step_allowance_us(1003, r, f), 400);
+        assert_eq!(media_clock_step_allowance_us(1004, r, f), 401);
+        assert_eq!(media_clock_step_allowance_us(4000, r, f), 1150);
+        assert_eq!(media_clock_step_allowance_us(0, r, f), 150);
+        assert_eq!(media_clock_step_allowance_us(-5, r, f), 150);
+        assert_eq!(media_clock_step_allowance_us(1000, 0, f), 150);
+        assert_eq!(
+            media_clock_step_allowance_us(i64::MAX, i64::MAX, 1),
+            1 + i64::MAX / 1000
+        );
+        // Every dantesync step (≥ 500 µs) is above the 1 Hz allowance.
+        assert!(media_clock_step_allowance_us(1000, r, f) < 500);
     }
 
     #[test]
     fn drift_verdict_follows_the_bound_and_waits_for_the_window() {
-        let b = GENLOCK_MEDIA_CLOCK_DRIFT_BOUND_MS;
+        let b = GENLOCK_MEDIA_CLOCK_DRIFT_BOUND_US;
         let a = MediaDiscipline::Active;
-        // Pre-part-A stream (≈ 8 ms / 10 min) -> DRIFT; a disciplined box (0) and truncation
-        // noise (±1, ±2) -> OK.
-        assert_eq!(media_clock_verdict(true, 8, b, a, true), MediaClock::Drift);
-        assert_eq!(media_clock_verdict(true, -3, b, a, true), MediaClock::Drift);
-        for d in [-2, -1, 0, 1, 2] {
+        // Pre-part-A stream (≈ 8 ms / 10 min) -> DRIFT; a disciplined box (0) -> OK.
+        assert_eq!(
+            media_clock_verdict(true, 8100, b, a, true),
+            MediaClock::Drift
+        );
+        assert_eq!(
+            media_clock_verdict(true, -2001, b, a, true),
+            MediaClock::Drift
+        );
+        for d in [-2000, -1, 0, 1, 2000] {
             assert_eq!(media_clock_verdict(true, d, b, a, true), MediaClock::Ok);
         }
         // Not ready (the window is not yet ~full) -> never judged on drift.
-        assert_eq!(media_clock_verdict(false, 99, b, a, true), MediaClock::Ok);
+        assert_eq!(
+            media_clock_verdict(false, 99_000, b, a, true),
+            MediaClock::Ok
+        );
         // Linux: not applicable, judged on drift only.
         let na = MediaDiscipline::NotApplicable;
         assert_eq!(media_clock_verdict(true, 0, b, na, true), MediaClock::Ok);
-        assert_eq!(media_clock_verdict(true, 5, b, na, true), MediaClock::Drift);
+        assert_eq!(
+            media_clock_verdict(true, 5000, b, na, true),
+            MediaClock::Drift
+        );
     }
 
     #[test]
     fn a_raw_qpc_fallback_while_dantesync_runs_is_undisciplined() {
-        let b = GENLOCK_MEDIA_CLOCK_DRIFT_BOUND_MS;
+        let b = GENLOCK_MEDIA_CLOCK_DRIFT_BOUND_US;
         for d in [
             MediaDiscipline::Disabled,
             MediaDiscipline::ReadFailed,
@@ -1217,7 +1260,10 @@ mod tests {
             );
             // No dantesync answering: raw QPC is the right clock, judged on drift only.
             assert_eq!(media_clock_verdict(false, 0, b, d, false), MediaClock::Ok);
-            assert_eq!(media_clock_verdict(true, 9, b, d, false), MediaClock::Drift);
+            assert_eq!(
+                media_clock_verdict(true, 9000, b, d, false),
+                MediaClock::Drift
+            );
         }
         for d in [
             MediaDiscipline::Unknown,

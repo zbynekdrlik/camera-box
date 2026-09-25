@@ -178,7 +178,7 @@ V7_MEDIA_DRIFT_LINE = (
     '"n_locked":4,"n_absent":0,"n_idle":0,"latency_ms":3,"clock":"locked","output":"stamping",'
     '"recent_event":false,"recent_event_inputs":[],"audio_unexpected_inputs":[],"qpc_drift_ms":67,'
     '"inputs":[],"qpc_drift_ppm":13.500,"qpc_expected_ppm":13.000,"qpc_step":false,'
-    '"media_clock":{"state":"drift","drift_ms":8,"window_s":600,"ready":true,"discipline":"active"}}'
+    '"media_clock":{"state":"drift","drift_us":8100,"window_s":600,"ready":true,"discipline":"active"}}'
     ' (#1299)\n'
 )
 
@@ -186,7 +186,7 @@ V7_MEDIA_DRIFT_LINE = (
 def test_v7_line_carries_the_media_clock_facet():
     f = bsg.genlock_lock_facet_from_log(V7_MEDIA_DRIFT_LINE)
     assert f["state"] == "DEGRADED" and f["reason"] == "media_clock"
-    assert f["media_clock"] == {"state": "drift", "drift_ms": 8, "window_s": 600, "ready": True,
+    assert f["media_clock"] == {"state": "drift", "drift_us": 8100, "window_s": 600, "ready": True,
                                 "discipline": "active"}
 
 
@@ -197,9 +197,9 @@ def test_pre_v7_line_omits_the_media_clock_facet():
 
 
 def test_malformed_media_clock_object_is_omitted():
-    good = ('"media_clock":{"state":"drift","drift_ms":8,"window_s":600,"ready":true,'
+    good = ('"media_clock":{"state":"drift","drift_us":8100,"window_s":600,"ready":true,'
             '"discipline":"active"}')
-    for bad in ('"media_clock":"drift"', '"media_clock":{"drift_ms":8}', '"media_clock":{"state":1}'):
+    for bad in ('"media_clock":"drift"', '"media_clock":{"drift_us":8100}', '"media_clock":{"state":1}'):
         line = V7_MEDIA_DRIFT_LINE.replace(good, bad)
         assert bad in line
         f = bsg.genlock_lock_facet_from_log(line)

@@ -98,9 +98,10 @@ private:
 	 * GENLOCK_QPC_WINDOW_S. The qpc_drift verdict keys on the largest single-sample wall STEP in it; the
 	 * windowed RATE it also yields is report-only telemetry (never the unbounded cumulative offset). */
 	std::deque<std::pair<qint64, int64_t>> genlockQpcHistory;
-	/* camera-box issue 1372 part D: the same (monotonic ms, cumulative drift ms) samples over the
-	 * longer GENLOCK_MEDIA_CLOCK_WINDOW_S. The media-clock term keys on the drift GROWTH across it
-	 * (steps excluded): since part A the media clock follows the disciplined wall on every box. */
+	/* camera-box issue 1372 part D: (monotonic ms, wall-minus-media offset us) samples the widget takes
+	 * itself each tick, over GENLOCK_MEDIA_CLOCK_WINDOW_S. The media-clock term keys on the offset
+	 * GROWTH across it (wall steps left out): since part A the media clock follows the disciplined wall
+	 * on every box. */
 	std::deque<std::pair<qint64, int64_t>> genlockMediaClockHistory;
 	/* #1341: per-input received-frame history (input name -> ring of (monotonic ms, cumulative
 	 * frames_received)) over GENLOCK_IDLE_WINDOW_MS. An input whose received DELTA over the window is
@@ -126,12 +127,11 @@ private:
 	/* camera-box issue 1372 part D: one tick of the media-clock (audio clock) term. */
 	struct GenlockMediaClockTick {
 		int verdict = 0;      /* genlock_media_clock_t */
-		int64_t drift_ms = 0; /* the drift growth over the window, steps left out */
+		int64_t drift_us = 0; /* the offset growth over the window, wall steps left out */
 		int ready = 0;        /* the window spans >= 90 % */
 		int discipline = 0;   /* genlock_media_discipline_t */
 	};
-	GenlockMediaClockTick ReduceGenlockMediaClock(qint64 now_ms, bool any_input, int64_t drift_ms,
-						      bool clock_present);
+	GenlockMediaClockTick ReduceGenlockMediaClock(qint64 now_ms, bool clock_present);
 
 	void UpdateGenlockLabel();
 	void PollGenlockClock();

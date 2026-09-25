@@ -647,62 +647,86 @@ fn lift_media_clock() -> String {
 #[test]
 fn c_media_clock_matches_the_rust_authority_1372_part_d() {
     use camera_box::genlock_lock_state::{
-        media_clock_step_allowance_ms, media_clock_verdict, media_clock_window_drift_ms,
-        MediaDiscipline, GENLOCK_MEDIA_CLOCK_MAX_RATE_PPM,
+        media_clock_step_allowance_us, media_clock_verdict, media_clock_window_drift_us,
+        MediaDiscipline, GENLOCK_MEDIA_CLOCK_MAX_GAP_MS, GENLOCK_MEDIA_CLOCK_MAX_RATE_PPM,
+        GENLOCK_MEDIA_CLOCK_STEP_FLOOR_US,
     };
     let block = lift_media_clock();
-    let rate = GENLOCK_MEDIA_CLOCK_MAX_RATE_PPM;
+    let (rate, floor, gap) = (
+        GENLOCK_MEDIA_CLOCK_MAX_RATE_PPM,
+        GENLOCK_MEDIA_CLOCK_STEP_FLOOR_US,
+        GENLOCK_MEDIA_CLOCK_MAX_GAP_MS,
+    );
 
-    // Window vectors `((t_ms, drift_ms) samples, max_rate_ppm)`: the pre-part-A stream ramp at 1 Hz,
-    // a 40 ms step inside it, the slow-GM 2.5 ms sawtooth, a disciplined flat window, truncation
-    // noise, 1 vs 2 ms per sample, a UI stall, jittered tick intervals, a negative ramp, 0/1
-    // samples, and the i64 extremes the saturating arithmetic must agree on.
+    // Window vectors `((t_ms, offset_us) samples, max_rate_ppm, floor_us, max_gap_ms)`: the pre-part-A
+    // stream rate at 1 Hz, the real dantesync step shapes (a locked master's 1460 µs, a client's
+    // 600 µs) alone and on top of the rate, returning noise, the rate ceiling (400 vs 401 µs per
+    // second), a UI stall and a gap, jittered ticks, a negative ramp, 0/1 samples, and the i64
+    // extremes the saturating arithmetic must agree on.
     let at_1hz = |n: i64, f: &dyn Fn(i64) -> i64| -> Vec<(i64, i64)> {
         (0..=n).map(|i| (i * 1000, f(i))).collect()
     };
     let jittered: Vec<(i64, i64)> = (0..=600i64)
-        .map(|i| (i * 1000 + (i * 7919) % 97 - 48, i / 60))
+        .map(|i| (i * 1000 + (i * 7919) % 97 - 48, i * 20 + (i * 31) % 41 - 20))
         .collect();
-    let windows: Vec<(Vec<(i64, i64)>, i64)> = vec![
-        (at_1hz(600, &|i| i / 75), rate),
+    /// `((t_ms, offset_us) samples, max_rate_ppm, floor_us, max_gap_ms)`.
+    type Window = (Vec<(i64, i64)>, i64, i64, i64);
+    let windows: Vec<Window> = vec![
+        (at_1hz(600, &|i| i * 27 / 2), rate, floor, gap),
+        (at_1hz(600, &|i| (i / 60) * 1460), rate, floor, gap),
+        (at_1hz(600, &|i| (i / 30) * 600), rate, floor, gap),
         (
-            at_1hz(600, &|i| i / 75 + if i > 300 { 40 } else { 0 }),
+            at_1hz(600, &|i| i * 27 / 2 + (i / 60) * 1460),
             rate,
+            floor,
+            gap,
         ),
-        (at_1hz(600, &|i| (i / 100) * 5 / 2), rate),
-        (vec![(0, 0); 600], rate),
-        (at_1hz(6, &|i| 5 + i % 2), rate),
-        (vec![(0, 0), (1000, 1)], rate),
-        (vec![(0, 0), (1000, 2)], rate),
-        (vec![(0, 0), (4000, 3)], rate),
-        (vec![(0, 0), (4000, 4)], rate),
-        (vec![(0, 0), (1999, 1), (3998, 3)], rate),
-        (jittered, rate),
-        (at_1hz(4, &|i| -i), rate),
-        (vec![(0, 7)], rate),
-        (vec![], rate),
-        (vec![(0, 0), (1000, 1)], 0),
-        (vec![(0, i64::MIN), (i64::MAX, i64::MAX)], i64::MAX),
-        (vec![(i64::MAX, 0), (i64::MIN, 1)], i64::MAX),
+        (at_1hz(600, &|i| (i % 3 - 1) * 40), rate, floor, gap),
+        (vec![(0, 0); 600], rate, floor, gap),
+        (vec![(0, 0), (1000, 400)], rate, floor, gap),
+        (vec![(0, 0), (1000, 401)], rate, floor, gap),
+        (vec![(0, 0), (4000, 1150)], rate, floor, gap),
+        (vec![(0, 0), (4000, 1151)], rate, floor, gap),
+        (vec![(0, 0), (6000, 100)], rate, floor, gap),
+        (
+            vec![(0, 0), (1000, 20), (121_000, -14_000), (122_000, -13_980)],
+            rate,
+            floor,
+            gap,
+        ),
+        (jittered, rate, floor, gap),
+        (at_1hz(4, &|i| -20 * i), rate, floor, gap),
+        (vec![(0, 7)], rate, floor, gap),
+        (vec![], rate, floor, gap),
+        (vec![(0, 0), (1000, 100)], 0, 0, gap),
+        (
+            vec![(0, i64::MIN), (1000, i64::MAX)],
+            i64::MAX,
+            i64::MAX,
+            i64::MAX,
+        ),
+        (vec![(i64::MAX, 0), (i64::MIN, 1)], rate, floor, gap),
         (
             vec![(0, i64::MAX - 1), (1000, i64::MAX), (2000, i64::MAX)],
             rate,
+            floor,
+            gap,
         ),
-        (vec![(0, 0), (i64::MAX, i64::MAX), (i64::MAX, 0)], i64::MAX),
+        (vec![(0, 0), (i64::MAX, 5)], i64::MAX, 1, i64::MAX),
     ];
-    // Step-allowance vectors `(dt_ms, max_rate_ppm)`, incl. the saturating product.
-    let allowances: Vec<(i64, i64)> = vec![
-        (1000, rate),
-        (1999, rate),
-        (2000, rate),
-        (4000, rate),
-        (0, rate),
-        (-5, rate),
-        (1000, 0),
-        (1000, -1),
-        (i64::MAX, rate),
-        (i64::MAX, i64::MAX),
-        (1, i64::MAX),
+    // Step-allowance vectors `(dt_ms, max_rate_ppm, floor_us)`, incl. the saturating product.
+    let allowances: Vec<(i64, i64, i64)> = vec![
+        (1000, rate, floor),
+        (1003, rate, floor),
+        (1004, rate, floor),
+        (4000, rate, floor),
+        (0, rate, floor),
+        (-5, rate, floor),
+        (1000, 0, floor),
+        (1000, -1, floor),
+        (i64::MAX, rate, floor),
+        (i64::MAX, i64::MAX, 1),
+        (1, i64::MAX, i64::MAX),
     ];
 
     let disciplines = [
@@ -713,13 +737,25 @@ fn c_media_clock_matches_the_rust_authority_1372_part_d() {
         MediaDiscipline::ApiMissing,
         MediaDiscipline::NotApplicable,
     ];
-    let drifts = [0i64, 1, 2, 3, -2, -3, 8, -67, i64::MIN, i64::MAX];
+    let drifts = [
+        0i64,
+        1,
+        1999,
+        2000,
+        2001,
+        -2000,
+        -2001,
+        8100,
+        -67_000,
+        i64::MIN,
+        i64::MAX,
+    ];
     let mut verdicts: Vec<(bool, i64, i64, MediaDiscipline, bool)> = Vec::new();
     for &ready in &[false, true] {
         for &d in &drifts {
             for &disc in &disciplines {
                 for &present in &[false, true] {
-                    verdicts.push((ready, d, 2, disc, present));
+                    verdicts.push((ready, d, 2000, disc, present));
                 }
             }
         }
@@ -735,7 +771,7 @@ fn c_media_clock_matches_the_rust_authority_1372_part_d() {
     let mut c = String::from("#include <stdio.h>\n#include <stdint.h>\n#include <inttypes.h>\n");
     c.push_str(&block);
     c.push_str("int main(void){\n");
-    for (i, (w, r)) in windows.iter().enumerate() {
+    for (i, (w, r, fl, g)) in windows.iter().enumerate() {
         let ts: Vec<String> = w.iter().map(|s| lit(s.0)).collect();
         let ds: Vec<String> = w.iter().map(|s| lit(s.1)).collect();
         let arr = |v: Vec<String>| {
@@ -746,18 +782,21 @@ fn c_media_clock_matches_the_rust_authority_1372_part_d() {
             }
         };
         c.push_str(&format!(
-            "    {{ static const int64_t t{i}[] = {{{}}}; static const int64_t d{i}[] = {{{}}}; printf(\"W %\" PRId64 \"\\n\", genlock_media_clock_window_drift_ms(t{i}, d{i}, {}, {})); }}\n",
+            "    {{ static const int64_t t{i}[] = {{{}}}; static const int64_t d{i}[] = {{{}}}; printf(\"W %\" PRId64 \"\\n\", genlock_media_clock_window_drift_us(t{i}, d{i}, {}, {}, {}, {})); }}\n",
             arr(ts),
             arr(ds),
             w.len(),
-            lit(*r)
+            lit(*r),
+            lit(*fl),
+            lit(*g)
         ));
     }
-    for &(dt, r) in &allowances {
+    for &(dt, r, fl) in &allowances {
         c.push_str(&format!(
-            "    printf(\"A %\" PRId64 \"\\n\", genlock_media_clock_step_allowance_ms({}, {}));\n",
+            "    printf(\"A %\" PRId64 \"\\n\", genlock_media_clock_step_allowance_us({}, {}, {}));\n",
             lit(dt),
-            lit(r)
+            lit(r),
+            lit(fl)
         ));
     }
     for &(ready, d, bound, disc, present) in &verdicts {
@@ -833,20 +872,22 @@ fn c_media_clock_matches_the_rust_authority_1372_part_d() {
     );
 
     let mut diffs = Vec::new();
-    for ((w, r), &cv) in windows.iter().zip(&c_windows) {
-        let rv = media_clock_window_drift_ms(w, *r);
+    for ((w, r, fl, g), &cv) in windows.iter().zip(&c_windows) {
+        let rv = media_clock_window_drift_us(w, *r, *fl, *g);
         if rv != cv {
             diffs.push(format!(
-                "  window len={} first={:?} rate={r} -> C {cv}, Rust {rv}",
+                "  window len={} first={:?} rate={r} floor={fl} gap={g} -> C {cv}, Rust {rv}",
                 w.len(),
                 w.first()
             ));
         }
     }
-    for (&(dt, r), &cv) in allowances.iter().zip(&c_allow) {
-        let rv = media_clock_step_allowance_ms(dt, r);
+    for (&(dt, r, fl), &cv) in allowances.iter().zip(&c_allow) {
+        let rv = media_clock_step_allowance_us(dt, r, fl);
         if rv != cv {
-            diffs.push(format!("  allowance dt={dt} rate={r} -> C {cv}, Rust {rv}"));
+            diffs.push(format!(
+                "  allowance dt={dt} rate={r} floor={fl} -> C {cv}, Rust {rv}"
+            ));
         }
     }
     for (&(ready, d, bound, disc, present), &cv) in verdicts.iter().zip(&c_verdicts) {

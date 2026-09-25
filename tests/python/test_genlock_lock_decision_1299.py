@@ -392,38 +392,44 @@ def _at_1hz(n, f):
     return [(i * 1000, f(i)) for i in range(n + 1)]
 
 
+def _growth(samples):
+    return d.media_clock_window_drift_us(samples, d.GENLOCK_MEDIA_CLOCK_MAX_RATE_PPM,
+                                         d.GENLOCK_MEDIA_CLOCK_STEP_FLOOR_US,
+                                         d.GENLOCK_MEDIA_CLOCK_MAX_GAP_MS)
+
+
 def test_media_clock_window_drift_mirrors_the_rust_authority():
-    r = d.GENLOCK_MEDIA_CLOCK_MAX_RATE_PPM
-    # the pre-part-A stream: ~8 ms per 10 min at 1 Hz
-    assert d.media_clock_window_drift_ms(_at_1hz(600, lambda i: i // 75), r) == 8
-    # a 40 ms wall step is not a rate
-    stepped = _at_1hz(600, lambda i: i // 75 + (40 if i > 300 else 0))
-    assert d.media_clock_window_drift_ms(stepped, r) == 8
-    # the slow-GM sawtooth (2.5 ms same-direction steps every ~100 s) is steps, never drift
-    assert d.media_clock_window_drift_ms(_at_1hz(600, lambda i: (i // 100) * 5 // 2), r) == 0
-    assert d.media_clock_window_drift_ms([(0, 0), (1000, 1)], r) == 1
-    assert d.media_clock_window_drift_ms([(0, 0), (1000, 2)], r) == 0
-    assert d.media_clock_window_drift_ms([(0, 0), (4000, 3)], r) == 3  # a 4 s UI stall
-    assert d.media_clock_window_drift_ms([(0, 0), (4000, 4)], r) == 0
-    assert d.media_clock_window_drift_ms(_at_1hz(4, lambda i: 5 + i % 2), r) == 0
-    assert d.media_clock_window_drift_ms([(0, 7)], r) == 0
-    assert d.media_clock_window_drift_ms([], r) == 0
+    # the pre-part-A stream: 13.5 us per 1 Hz sample -> 8.1 ms over the 600 s window
+    assert _growth(_at_1hz(600, lambda i: i * 27 // 2)) == 8100
+    # a dantesync locked master stepping 1460 us with phase_slew off, and a client stepping 600 us:
+    # steps, never drift
+    assert _growth(_at_1hz(600, lambda i: (i // 60) * 1460)) == 0
+    assert _growth(_at_1hz(600, lambda i: (i // 30) * 600)) == 0
+    # the same steps on top of the rate: only the rate counts (each step sample takes its ~14 us)
+    assert _growth(_at_1hz(600, lambda i: i * 27 // 2 + (i // 60) * 1460)) == 7960
+    assert _growth(_at_1hz(600, lambda i: (i % 3 - 1) * 40)) == 0     # noise that returns
+    assert _growth([(0, 0), (1000, 400)]) == 400                       # the rate ceiling
+    assert _growth([(0, 0), (1000, 401)]) == 0
+    assert _growth([(0, 0), (4000, 1150)]) == 1150                     # a 4 s UI stall
+    assert _growth([(0, 0), (6000, 100)]) == 0                         # a 6 s stall adds nothing
+    assert _growth([(0, 7)]) == 0
+    assert _growth([]) == 0
 
 
 def test_media_clock_step_allowance_mirrors_the_rust_authority():
-    r = d.GENLOCK_MEDIA_CLOCK_MAX_RATE_PPM
-    assert [d.media_clock_step_allowance_ms(dt, r) for dt in (1000, 1999, 2000, 4000, 0, -5)] == \
-        [1, 1, 2, 3, 1, 1]
-    assert d.media_clock_step_allowance_ms(1000, 0) == 1
+    r, f = d.GENLOCK_MEDIA_CLOCK_MAX_RATE_PPM, d.GENLOCK_MEDIA_CLOCK_STEP_FLOOR_US
+    assert [d.media_clock_step_allowance_us(dt, r, f) for dt in (1000, 1003, 1004, 4000, 0, -5)] == \
+        [400, 400, 401, 1150, 150, 150]
+    assert d.media_clock_step_allowance_us(1000, 0, f) == 150
 
 
 def test_media_clock_verdict_mirrors_the_rust_authority():
-    b = d.GENLOCK_MEDIA_CLOCK_DRIFT_BOUND_MS
-    assert d.media_clock_verdict(True, 8, b, "active", True) == d.MC_DRIFT
-    for drift in (-2, -1, 0, 1, 2):
+    b = d.GENLOCK_MEDIA_CLOCK_DRIFT_BOUND_US
+    assert d.media_clock_verdict(True, 8100, b, "active", True) == d.MC_DRIFT
+    for drift in (-2000, -1, 0, 1, 2000):
         assert d.media_clock_verdict(True, drift, b, "active", True) == d.MC_OK
-    assert d.media_clock_verdict(False, 99, b, "active", True) == d.MC_OK  # window not ready
-    assert d.media_clock_verdict(True, 5, b, "n/a", True) == d.MC_DRIFT    # Linux: drift only
+    assert d.media_clock_verdict(False, 99000, b, "active", True) == d.MC_OK  # window not ready
+    assert d.media_clock_verdict(True, 5000, b, "n/a", True) == d.MC_DRIFT    # Linux: drift only
     for disc in ("disabled", "read_failed", "api_missing"):
         assert d.media_clock_verdict(False, 0, b, disc, True) == d.MC_UNDISCIPLINED
         assert d.media_clock_verdict(False, 0, b, disc, False) == d.MC_OK  # no dantesync
@@ -432,31 +438,31 @@ def test_media_clock_verdict_mirrors_the_rust_authority():
 
 
 def test_analyze_names_the_media_clock_sub_kind():
-    mc = {"state": "drift", "drift_ms": 8, "window_s": 600, "ready": True, "discipline": "active"}
+    mc = {"state": "drift", "drift_us": 8100, "window_s": 600, "ready": True, "discipline": "active"}
     r = d.analyze(_bundle("DEGRADED", "media_clock", extra={"media_clock": mc}), box_reachable=1)
     assert r["verdict"] == "DEGRADED"
     assert r["reason"] == "media_clock:drift"
-    assert r["media_clock"] == "drift" and r["media_clock_drift_ms"] == 8
+    assert r["media_clock"] == "drift" and r["media_clock_drift_us"] == 8100
     assert r["media_clock_discipline"] == "active"
-    mc2 = dict(mc, state="undisciplined", drift_ms=0, discipline="disabled")
+    mc2 = dict(mc, state="undisciplined", drift_us=0, discipline="disabled")
     r = d.analyze(_bundle("DEGRADED", "media_clock", extra={"media_clock": mc2}), box_reachable=1)
     assert r["reason"] == "media_clock:undisciplined"
 
 
 def test_analyze_pre_v7_facet_has_no_media_clock_and_keeps_the_bare_reason():
     r = d.analyze(_bundle("LOCKED", "none"), box_reachable=1)
-    assert r["media_clock"] is None and r["media_clock_drift_ms"] is None
+    assert r["media_clock"] is None and r["media_clock_drift_us"] is None
     # a media_clock reason without the object (malformed) stays the bare token, never `media_clock:`
     r = d.analyze(_bundle("DEGRADED", "media_clock"), box_reachable=1)
     assert r["reason"] == "media_clock"
     # an unrelated reason is never rewritten by a stray media_clock object
-    mc = {"state": "drift", "drift_ms": 8, "window_s": 600, "ready": True, "discipline": "active"}
+    mc = {"state": "drift", "drift_us": 8100, "window_s": 600, "ready": True, "discipline": "active"}
     r = d.analyze(_bundle("DEGRADED", "ntp_failed", extra={"media_clock": mc}), box_reachable=1)
     assert r["reason"] == "ntp_failed"
 
 
 def test_cli_prints_the_media_clock_fields(capsys):
-    mc = {"state": "drift", "drift_ms": 8, "window_s": 600, "ready": True, "discipline": "active"}
+    mc = {"state": "drift", "drift_us": 8100, "window_s": 600, "ready": True, "discipline": "active"}
     body = _bundle("DEGRADED", "media_clock", extra={"media_clock": mc})
 
     class _Stdin:
@@ -474,5 +480,5 @@ def test_cli_prints_the_media_clock_fields(capsys):
     out = capsys.readouterr().out.splitlines()
     assert "reason=media_clock:drift" in out
     assert "media_clock=drift" in out
-    assert "media_clock_drift_ms=8" in out
+    assert "media_clock_drift_us=8100" in out
     assert "media_clock_discipline=active" in out

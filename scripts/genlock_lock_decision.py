@@ -62,8 +62,10 @@ MC_OK = "ok"
 MC_DRIFT = "drift"
 MC_UNDISCIPLINED = "undisciplined"
 GENLOCK_MEDIA_CLOCK_WINDOW_S = 600          # the window the drift growth is measured over
-GENLOCK_MEDIA_CLOCK_DRIFT_BOUND_MS = 2      # growth beyond this (ms per window) is DRIFT
-GENLOCK_MEDIA_CLOCK_MAX_RATE_PPM = 500      # dantesync DRIFT_MAX_PPM: a bigger change is a wall STEP
+GENLOCK_MEDIA_CLOCK_DRIFT_BOUND_US = 2000   # offset growth beyond this (us per window) is DRIFT
+GENLOCK_MEDIA_CLOCK_MAX_RATE_PPM = 250      # a change beyond floor + interval x this is a wall STEP
+GENLOCK_MEDIA_CLOCK_STEP_FLOOR_US = 150     # the offset sampling noise floor
+GENLOCK_MEDIA_CLOCK_MAX_GAP_MS = 5000       # a pair further apart (a stalled UI) adds nothing
 # The Windows os_gettime_discipline() outcomes that mean "fell back to raw QPC".
 MEDIA_DISCIPLINE_RAW_FALLBACK = ("disabled", "read_failed", "api_missing")
 
@@ -98,40 +100,42 @@ def qpc_drift_beyond_bound(rate_ready, drift_delta_ms, elapsed_ms, max_step_ms, 
     return (abs(max_step_ms) > step_bound_ms, measured_ppm)
 
 
-def media_clock_step_allowance_ms(dt_ms, max_rate_ppm):
-    """Issue 1372 part D -- the largest sample-to-sample change (ms) a clock RATE of max_rate_ppm can
-    produce over dt_ms: 1 + floor(dt_ms * max_rate_ppm / 1e6) (the 1 is the integer-ms truncation
-    boundary). A non-positive interval or rate allows 1. Mirror of
-    camera_box::genlock_lock_state::media_clock_step_allowance_ms."""
+def media_clock_step_allowance_us(dt_ms, max_rate_ppm, floor_us):
+    """Issue 1372 part D -- the largest sample-to-sample offset change (us) that is still a RATE over
+    dt_ms: floor_us + floor(dt_ms * max_rate_ppm / 1000). A non-positive interval or rate allows
+    floor_us. Mirror of camera_box::genlock_lock_state::media_clock_step_allowance_us."""
     if dt_ms <= 0 or max_rate_ppm <= 0:
-        return 1
-    return 1 + (dt_ms * max_rate_ppm) // 1_000_000
+        return floor_us
+    return floor_us + (dt_ms * max_rate_ppm) // 1000
 
 
-def media_clock_window_drift_ms(samples, max_rate_ppm):
-    """Issue 1372 part D -- the wall-vs-media drift GROWTH across `(t_ms, drift_ms)` samples (oldest
-    first): the sum of the sample-to-sample drift changes a clock rate of max_rate_ppm could produce
-    over their interval; a larger change is a wall STEP (a dantesync phase step, the slow-GM sawtooth, a
-    step the qpc_drift verdict owns) and is left out. Fewer than two samples -> 0. Mirror of
-    camera_box::genlock_lock_state::media_clock_window_drift_ms (python ints never overflow, so the
+def media_clock_window_drift_us(samples, max_rate_ppm, floor_us, max_gap_ms):
+    """Issue 1372 part D -- the wall-vs-media GROWTH (us) across `(t_ms, offset_us)` samples (oldest
+    first): the sum of the sample-to-sample offset changes a rate of at most max_rate_ppm could make over
+    their interval; a larger change is a wall STEP (every dantesync step is >= 500 us) and is left out,
+    and a pair more than max_gap_ms apart adds nothing. Fewer than two samples -> 0. Mirror of
+    camera_box::genlock_lock_state::media_clock_window_drift_us (python ints never overflow, so the
     Rust/C saturation only matters at the i64 extremes no real clock reaches)."""
     total = 0
-    for (ta, da), (tb, db) in zip(samples, samples[1:]):
-        jump = db - da
-        if abs(jump) > media_clock_step_allowance_ms(tb - ta, max_rate_ppm):
+    for (ta, oa), (tb, ob) in zip(samples, samples[1:]):
+        dt = tb - ta
+        if dt > max_gap_ms:
             continue
-        total += jump
+        change = ob - oa
+        if abs(change) > media_clock_step_allowance_us(dt, max_rate_ppm, floor_us):
+            continue
+        total += change
     return total
 
 
-def media_clock_verdict(window_ready, drift_ms, drift_bound_ms, discipline, clock_present):
+def media_clock_verdict(window_ready, drift_us, drift_bound_us, discipline, clock_present):
     """Issue 1372 part D -- UNDISCIPLINED when the Windows clock fell back to raw QPC (`discipline` one
     of MEDIA_DISCIPLINE_RAW_FALLBACK) while dantesync answers; else DRIFT when the window is ready and
-    |drift_ms| > drift_bound_ms; else OK. Mirror of camera_box::genlock_lock_state::media_clock_verdict
+    |drift_us| > drift_bound_us; else OK. Mirror of camera_box::genlock_lock_state::media_clock_verdict
     (the discipline is the widget's token: active/disabled/read_failed/api_missing/unknown/n/a)."""
     if clock_present and discipline in MEDIA_DISCIPLINE_RAW_FALLBACK:
         return MC_UNDISCIPLINED
-    if window_ready and abs(drift_ms) > drift_bound_ms:
+    if window_ready and abs(drift_us) > drift_bound_us:
         return MC_DRIFT
     return MC_OK
 
@@ -248,13 +252,13 @@ def analyze(bundle_json_text, box_reachable):
         return {"verdict": "SKIP", "state": None, "reason": None,
                 "n_inputs": None, "n_locked": None, "n_absent": None, "n_idle": None,
                 "qpc_drift_ppm": None, "qpc_expected_ppm": None,
-                "media_clock": None, "media_clock_drift_ms": None, "media_clock_discipline": None}
+                "media_clock": None, "media_clock_drift_us": None, "media_clock_discipline": None}
     facet = facet_from_obj(_loads_obj(bundle_json_text))
     if facet is None:
         return {"verdict": "UNKNOWN", "state": None, "reason": None,
                 "n_inputs": None, "n_locked": None, "n_absent": None, "n_idle": None,
                 "qpc_drift_ppm": None, "qpc_expected_ppm": None,
-                "media_clock": None, "media_clock_drift_ms": None, "media_clock_discipline": None}
+                "media_clock": None, "media_clock_drift_us": None, "media_clock_discipline": None}
     state = facet.get("state")
     reason = facet.get("reason")
     n_inputs = facet.get("n_inputs")
@@ -275,7 +279,7 @@ def analyze(bundle_json_text, box_reachable):
             "qpc_expected_ppm": facet.get("qpc_expected_ppm"),
             # issue 1372 part D: the audio (media) clock facet (None for a pre-v7 line).
             "media_clock": mc.get("state"),
-            "media_clock_drift_ms": mc.get("drift_ms"),
+            "media_clock_drift_us": mc.get("drift_us"),
             "media_clock_discipline": mc.get("discipline")}
 
 
@@ -361,7 +365,7 @@ def _main(argv):
                        ("n_inputs", "n_inputs"), ("n_locked", "n_locked"), ("n_absent", "n_absent"),
                        ("n_idle", "n_idle"),
                        ("qpc_drift_ppm", "qpc_drift_ppm"), ("qpc_expected_ppm", "qpc_expected_ppm"),
-                       ("media_clock", "media_clock"), ("media_clock_drift_ms", "media_clock_drift_ms"),
+                       ("media_clock", "media_clock"), ("media_clock_drift_us", "media_clock_drift_us"),
                        ("media_clock_discipline", "media_clock_discipline")):
             print(f"{k}={_fmt(res[key])}")
         return 0
