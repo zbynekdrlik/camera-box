@@ -299,8 +299,9 @@ static inline int64_t genlock_media_sat_mul_pos(int64_t a, int64_t b)
  * (change_us * 1e6 / dt_ms, truncated toward zero, saturating), kept sorted in the caller's scratch
  * (>= n - 1 entries); their MEDIAN (the mean of the two middle rates for an even count, a + (b - a) / 2)
  * is the centre. A pair is kept when its change is within band_us of centre * dt / 1e6 us (a negative
- * band keeps none): the deviation of a pair that spans a wall step IS the step, and every dantesync step
- * is >= ~146 us. The rate is sum(kept change) * 1e6 / sum(kept dt) ppb (the centre when none is kept),
+ * band keeps none): the deviation of a pair that spans a wall step IS the step; dantesync requests steps
+ * of >= 200 us (server) / >= 500 us (client), and the small remnant of a Windows step that lands up to
+ * one timer tick short is unbiased and <= 100 us. The rate is sum(kept change) * 1e6 / sum(kept dt) ppb (the centre when none is kept),
  * truncated toward zero, scaled to window_s: rate * window_s / 1000 us. Every step saturates.
  * *counted_ms_out gets the total interval of the counted pairs. No pair or a non-positive window_s -> 0. */
 static inline int64_t genlock_media_clock_window_drift_us(const int64_t *t_ms, const int64_t *offset_us, int n,

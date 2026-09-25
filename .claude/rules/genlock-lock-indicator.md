@@ -51,19 +51,23 @@ lowest)**; else LOCKED (green).
     the two middle rates for an even count — is the centre rate; a pair whose change is more than
     `GENLOCK_MEDIA_CLOCK_BAND_US` = 100 µs off `centre × dt / 1e6` is a wall STEP and left out; the rate
     is the TIME-WEIGHTED rate of the kept pairs, `Σ change × 1e6 / Σ dt`, scaled to the window, `× 600 /
-    1000` µs). The deviation of a pair that spans a step IS the step, whatever the interval, and every
-    dantesync step is ≥ ~146 µs (from ~150–200 µs when not PTP-locked, ≥ 500 µs as a client,
-    `1000 µs + 2 × ppm × 10 s` as a locked master with phase_slew off, 2.5 ms at the cap, the −146 µs
-    seen on win-resolume), so steps never count while they touch fewer than half the pairs. A drift in
-    only PART of the seconds moves a 1 s pair by its rate in µs, so up to 100 ppm (20 ppm on 5 s
-    pairs) it is kept and counted at its true share; time weighting makes short pairs count by their
-    duration. Review rounds 1–5 went through a 33 ms exclusion, a rate-bounded per-sample exclusion on
+    1000` µs). The deviation of a pair that spans a step IS the step, whatever the interval. dantesync
+    requests steps of ≥ 200 µs (server, when not PTP-locked) / ≥ 500 µs (client) / `1000 µs + 2 × ppm
+    × 10 s` (a locked master with phase_slew off), 2.5 ms at the cap, so they never count while they
+    touch fewer than half the pairs. On Windows dantesync computes the step target from the coarse
+    `GetSystemTimeAsFileTime`, so a step lands up to one timer tick short and a small remnant can fall
+    inside the band (the −146 µs seen on win-resolume is likely one): unbiased, ≤ 100 µs each, < 0.7 ms
+    per window at 30 steps. A drift in only PART of the seconds moves a ~1 s pair by its rate in µs, so
+    up to ~95 ppm with ±50 ms tick jitter (20 ppm on 5 s pairs) it is kept and counted at its true
+    share; time weighting makes each pair count by its duration. Review rounds 1–5 went through a 33 ms exclusion, a rate-bounded per-sample exclusion on
     integer ms, the same on µs, a pure median (partial drift invisible, 600 µs quantisation) and a
     25 ppm band around the median rate (partial drift > 25 ppm invisible, then over-read); each left a
     gap. Known limit: a drift faster than 100 ppm present in fewer than half the seconds reads as steps
     (a raw-QPC fallback, the fast case, is the discipline outcome's).
   - The window is ready (`genlock_media_clock_window_ready`) only once the COUNTED pairs cover ≥ 90 %
-    of it, so a UI thread that keeps stalling past 5 s never reads as a healthy OK.
+    of it, so a UI thread that keeps stalling past 5 s never reads as a healthy OK. Until then the
+    widget publishes `drift_us` = 0 (label, tooltip, JSON; `ready:false`): a single step pair while the
+    window fills is its own centre and would read as a huge rate.
   - `genlock_media_clock_verdict(ready, drift_us, 2000, discipline, clock_present)`: `UNDISCIPLINED`
     when the Windows `os_gettime_discipline()` (libobs, `util/platform.h`) reports a raw-QPC fallback
     (disabled / read failed / API missing) while dantesync answers — at once, before any drift

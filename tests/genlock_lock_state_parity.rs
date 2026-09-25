@@ -693,6 +693,14 @@ fn c_media_clock_matches_the_rust_authority_1372_part_d() {
         (at_1hz(600, &|i| (i * 9 / 20) * 20), win, gap),
         (at_1hz(600, &|i| (i * 9 / 20) * 40), win, gap),
         (
+            (0..=300i64)
+                .map(|i| (i * 1000, 0))
+                .chain((1..=60i64).map(|k| (300_000 + k * 4000, 60 * k)))
+                .collect(),
+            win,
+            gap,
+        ),
+        (
             (0..=3000i64)
                 .map(|i| (i * 16, i * 16 * 20 / 1000))
                 .collect(),

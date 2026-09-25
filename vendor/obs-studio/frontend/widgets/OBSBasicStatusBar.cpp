@@ -55,9 +55,10 @@ static constexpr int GENLOCK_QPC_WINDOW_S = 300;
  * itself in us each tick (libobs' wall_qpc_drift_ms is integer ms truncated toward zero, which cannot
  * tell a dantesync phase step from a rate). Over GENLOCK_MEDIA_CLOCK_WINDOW_S the median per-pair rate is
  * the centre; a pair whose change is off the centre's prediction by more than GENLOCK_MEDIA_CLOCK_BAND_US
- * is a wall STEP (its deviation IS the step; dantesync steps are >= ~146 us) and is left out, and the
- * rate is the time-weighted rate of the kept pairs -- a drift in only part of the seconds (up to
- * 100 ppm on 1 s pairs) counts at its true share. Scaled to the window it DEGRADES beyond
+ * is a wall STEP (its deviation IS the step; dantesync requests steps of >= 200/500 us, a Windows step
+ * can land up to a timer tick short, an unbiased <= 100 us remnant) and is left out, and the rate is the
+ * time-weighted rate of the kept pairs -- a drift in only part of the seconds (up to ~95 ppm on ~1 s
+ * pairs) counts at its true share. Scaled to the window it DEGRADES beyond
  * GENLOCK_MEDIA_CLOCK_DRIFT_BOUND_US (3.3 ppm), and so does a Windows fallback to raw QPC while
  * dantesync answers. A pair more than GENLOCK_MEDIA_CLOCK_MAX_GAP_MS apart (a stalled UI) is not a
  * sample; the window is ready once the counted pairs cover >= 90 % of it. Calibration: the
@@ -1244,7 +1245,9 @@ OBSBasicStatusBar::GenlockMediaClockTick OBSBasicStatusBar::ReduceGenlockMediaCl
 	GenlockMediaClockTick tick;
 	tick.verdict = (int)genlock_media_clock_verdict(media_window_ready, media_drift_us, GENLOCK_MEDIA_CLOCK_DRIFT_BOUND_US,
 							media_discipline, clock_present ? 1 : 0);
-	tick.drift_us = media_drift_us;
+	/* Not published (label, tooltip, JSON) until the window is ready: while it fills, one step pair is
+	 * its own centre and would read as a huge rate. The verdict already requires ready. */
+	tick.drift_us = media_window_ready ? media_drift_us : 0;
 	tick.ready = media_window_ready;
 	tick.discipline = media_discipline;
 	return tick;
@@ -1469,11 +1472,12 @@ void OBSBasicStatusBar::UpdateGenlockLabel()
 	if (f.n_idle > 0 || f.n_absent > 0)
 		tip += QString("Idle: %1 (absent %2, low-rate %3)\n").arg(f.n_idle + f.n_absent).arg(f.n_absent).arg(f.n_idle);
 	/* issue 1372 part D: the audio (media) clock facet. */
-	tip += QString("Audio clock: %1 (drift %2 ms / %3 min%4, discipline %5)\n")
+	tip += QString("Audio clock: %1 (%2, discipline %3)\n")
 		       .arg(genlock_media_clock_name(media_clock))
-		       .arg(QString::number((double)media_drift_us / 1000.0, 'f', 1))
-		       .arg(GENLOCK_MEDIA_CLOCK_WINDOW_S / 60)
-		       .arg(media_window_ready ? "" : ", window filling")
+		       .arg(media_window_ready ? QString("drift %1 ms / %2 min")
+							 .arg(QString::number((double)media_drift_us / 1000.0, 'f', 1))
+							 .arg(GENLOCK_MEDIA_CLOCK_WINDOW_S / 60)
+					       : QString("window filling"))
 		       .arg(genlock_media_discipline_name(media_discipline));
 	for (const std::string &row : scan.rows)
 		tip += "  " + QString::fromStdString(row) + "\n";

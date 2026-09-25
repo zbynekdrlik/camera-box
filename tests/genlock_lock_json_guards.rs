@@ -232,6 +232,11 @@ fn genlock_lock_media_clock_term_present_1372_part_d() {
         STATUSBAR_CPP,
         "genlock_media_clock_verdict(media_window_ready, media_drift_us, GENLOCK_MEDIA_CLOCK_DRIFT_BOUND_US, media_discipline, clock_present ? 1 : 0);",
     );
+    // the drift is not published while the window fills (one step pair would read as a huge rate)
+    assert_has(
+        STATUSBAR_CPP,
+        "tick.drift_us = media_window_ready ? media_drift_us : 0;",
+    );
     // Windows reads the libobs discipline outcome; every other OS is not applicable
     assert_has(
         STATUSBAR_CPP,

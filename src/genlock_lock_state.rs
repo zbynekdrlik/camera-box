@@ -402,9 +402,12 @@ pub fn qpc_drift_beyond_bound(
 // ms truncated toward zero). The centre rate is the MEDIAN of the per-pair rates; a pair whose offset
 // change differs from what the centre rate predicts over its interval by more than
 // [`GENLOCK_MEDIA_CLOCK_BAND_US`] (100 µs) is a wall STEP and is left out; the rate is the TIME-WEIGHTED
-// rate of the kept pairs (Σ change / Σ interval). Every dantesync step is ≥ ~146 µs, so it is out
-// whatever its pattern, as long as steps touch fewer than half the pairs; a drift present in only part
-// of the seconds moves a 1 s pair by its rate in µs, so up to 100 ppm it is kept and counted at its
+// rate of the kept pairs (Σ change / Σ interval). dantesync requests steps of ≥ 200 µs (server) /
+// ≥ 500 µs (client), so they are out whatever their pattern, as long as steps touch fewer than half the
+// pairs. On Windows a step lands up to one timer tick short of the request (dantesync targets the
+// coarse `GetSystemTimeAsFileTime`), so some remnants fall inside the band: they are unbiased and
+// ≤ 100 µs each, well under 1 ms per window. A drift present in only part of the seconds moves a ~1 s
+// pair by its rate in µs, so up to ~95 ppm (with ±50 ms tick jitter) it is kept and counted at its
 // true share (a pure median would drop it below half coverage). A pair more than [`GENLOCK_MEDIA_CLOCK_MAX_GAP_MS`] apart (a stalled UI) is not
 // a sample, and the window counts as ready only once the counted pairs cover ≥ 90 % of it. The second input is the
 // Windows discipline state libobs publishes (`os_gettime_discipline()`): a fallback to raw QPC while
@@ -418,12 +421,13 @@ pub const GENLOCK_MEDIA_CLOCK_DRIFT_BOUND_US: i64 = 2000;
 /// A pair of samples further apart than this (ms) — a stalled UI thread — is not a rate sample.
 pub const GENLOCK_MEDIA_CLOCK_MAX_GAP_MS: i64 = 5000;
 /// A pair whose offset change differs from the centre rate's prediction by more than this (µs) is a
-/// wall STEP. The deviation of a pair that spans a step IS the step, whatever the interval, and every
-/// dantesync step is ≥ ~146 µs (the −146 µs seen on win-resolume; thresholds 200 µs server / 500 µs
-/// client); ±1 µs sampling noise stays far inside. A drift that differs from the centre by R ppm moves
-/// a 1 s pair by R µs, so a partial drift up to 100 ppm is kept (up to 20 ppm on a 5 s pair); a faster
-/// one present in fewer than half the seconds reads as steps — a raw-QPC fallback, the fast case, is
-/// the discipline outcome's.
+/// wall STEP. The deviation of a pair that spans a step IS the step, whatever the interval; dantesync
+/// requests steps of ≥ 200 µs (server) / ≥ 500 µs (client) — a Windows step can land up to one timer
+/// tick short, so a small remnant may count (unbiased, ≤ 100 µs each); ±1 µs sampling noise stays far
+/// inside. A drift that differs from the centre by R ppm moves a 1 s pair by R µs, so a partial drift up
+/// to ~95 ppm is kept with ±50 ms tick jitter (up to 20 ppm on a 5 s pair); a faster one present in
+/// fewer than half the seconds reads as steps — a raw-QPC fallback, the fast case, is the discipline
+/// outcome's.
 pub const GENLOCK_MEDIA_CLOCK_BAND_US: i64 = 100;
 
 /// What the Windows `os_gettime_ns()` last read from the system-time adjustment. Discriminants match
@@ -1240,9 +1244,17 @@ mod tests {
         // The same at 40 ppm (a 40 µs change per 1 s pair, inside the 100 µs band): 10 800 µs, not 0.
         let partial40 = ramp(600, 1000, |i| (i * 9 / 20) * 40);
         assert_eq!(window(&partial40).drift_us, 10_800);
-        // Time-weighted: a drift sampled by short (16 ms) pairs reads the same as by 1 s pairs.
+        // A drift sampled by short (16 ms) pairs, each change 0 or 1 µs, stays inside the band.
         let short = ramp(3000, 16, |i| i * 16 * 20 / 1000);
         assert_eq!(window(&short).drift_us, 12_000);
+        // Time-weighted: 300 flat 1 s pairs + 60 stalled 4 s pairs carrying 15 ppm (60 µs each). The
+        // rate is Σ change / Σ dt = 3600 µs / 540 s = 6666 ppb -> 3999 µs; an unweighted mean of the
+        // per-pair rates would read 2500 ppb -> 1500 µs.
+        let mut mixed: Vec<(i64, i64)> = ramp(300, 1000, |_| 0);
+        for k in 1..=60i64 {
+            mixed.push((300_000 + k * 4000, 60 * k));
+        }
+        assert_eq!(window(&mixed).drift_us, 3999);
         // The band edge: a change exactly `band` µs off the centre's prediction is kept, 1 µs more is not.
         let edge = |far: i64| {
             let mut v = vec![(0i64, 0i64)];
