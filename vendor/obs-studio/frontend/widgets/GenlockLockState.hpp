@@ -201,8 +201,9 @@ static inline int genlock_name_is_camera(const char *name)
  * CUMULATIVE wall_qpc_drift_ms never gates (on a dantesync-disciplined Windows box it grows ~50 ms/h
  * against the free QPC crystal by design). The RATE never gates either: on Linux CLOCK_MONOTONIC is
  * kernel-disciplined together with CLOCK_REALTIME, so the measured rate is 0 by construction, while on
- * Windows it is the free crystal — a rate check meant a different thing per box and false-DEGRADED
- * both. DEGRADED only on a single-sample wall STEP > step_bound_ms (judged as soon as two samples
+ * Windows it was the free crystal (since issue 1372 the Windows os_gettime_ns runs at the
+ * disciplined rate too, so it reads ~0 on every box) — a rate check meant a different thing per box
+ * and false-DEGRADED both. DEGRADED only on a single-sample wall STEP > step_bound_ms (judged as soon as two samples
  * exist, rate_ready or not) — the one clock hazard for genlock, the same on every box. Writes the
  * measured windowed rate (ppm) to *measured_ppm_out as report-only telemetry. drift_delta_ms/elapsed_ms
  * are the integer-ms cumulative-drift delta + elapsed span across the window; max_step_ms the largest

@@ -518,7 +518,7 @@ jobs:
         run: |
           $pw = (Get-Content "vendor/obs-studio/libobs/util/platform-windows.c" -Raw) -replace '\s+', ' '
           if ($pw -notmatch [regex]::Escape('/* camera-box issue 1372 BEGIN') -or $pw -notmatch [regex]::Escape('/* camera-box issue 1372 END */')) {
-            Write-Error "platform-windows.c: the issue-1372 disciplined os_gettime_ns block is gone -- Windows OBS is back on raw QPC, off the Dante tick"; exit 1
+            Write-Error "platform-windows.c: the issue-1372 disciplined os_gettime_ns block is gone -- Windows OBS is back on raw QPC, off the dantesync-disciplined system-time rate"; exit 1
           }
           if ($pw -notmatch [regex]::Escape('*num = inc; *den = adj;')) {
             Write-Error "platform-windows.c: issue 1372 rate is no longer inc/adj -- a larger adjustment SLOWS system time (measured live); adj/inc runs the clock the wrong way"; exit 1

@@ -36,8 +36,8 @@ static constexpr float badThreshold = 1.0f;
  * camera-box #1299 Part 4 + #1357 scope C: the qpc_drift term is the wall STEP only, NOT the
  * cumulative wall-vs-QPC offset (it grows ~50 ms/h on a dantesync-disciplined Windows box by design and
  * false-paged the whole fleet overnight 15./16.9.) and NOT a rate: on Linux CLOCK_MONOTONIC is
- * kernel-disciplined, so the measured rate is 0 by construction, while on Windows it is the free QPC
- * crystal — the removed rate-vs-instantaneous-slew check meant a different thing per box and
+ * kernel-disciplined, so the measured rate is 0 by construction, while on Windows it was the free QPC
+ * crystal (since issue 1372 the Windows os_gettime_ns runs at the disciplined rate too) — the removed rate-vs-instantaneous-slew check meant a different thing per box and
  * false-DEGRADED both (28 samples on strih-lx, 4 on stream, 24.9.2026, none a step). We DEGRADE only on
  * a single-sample STEP > one 30 fps frame (GENLOCK_QPC_STEP_BOUND_MS); the pure decision is
  * genlock_qpc_drift_beyond_bound in GenlockLockState.hpp. The windowed rate (GENLOCK_QPC_WINDOW_S is

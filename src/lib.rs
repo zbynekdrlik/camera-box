@@ -396,7 +396,7 @@ pub mod genlock_grid;
 // per-second grid removes it. Crate-root + default features (Tier-0), no OBS.
 pub mod genlock_grid_bench;
 
-// Issue 1372 part A — the Windows OBS media clock follows the dantesync-disciplined tick: the
+// Issue 1372 part A — the Windows OBS media clock runs at the dantesync-disciplined system-time rate: the
 // vendored `os_gettime_ns()` (platform-windows.c) integrates QPC deltas at the system-time rate
 // `inc / adj` from GetSystemTimeAdjustmentPrecise, rebasing on a rate change. Crate-root +
 // std-only (Tier-0 verifiable); the C block is held identical by the committed parity gate

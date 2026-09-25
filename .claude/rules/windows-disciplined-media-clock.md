@@ -3,6 +3,8 @@ paths:
   - "vendor/obs-studio/libobs/util/platform-windows.c"
   - "vendor/obs-studio/libobs/util/windows/qpc-timestamp.h"
   - "vendor/obs-studio/plugins/win-wasapi/win-wasapi.cpp"
+  - "vendor/obs-studio/plugins/obs-browser/browser-client.cpp"
+  - "vendor/obs-studio/plugins/vlc-video/vlc-video-source.c"
   - "src/os_clock_discipline.rs"
   - "tests/os_clock_discipline_parity_1372.rs"
 ---
@@ -36,8 +38,10 @@ rate. The Tier-0 authority is `src/os_clock_discipline.rs`.
 - **The rate is `inc / adj`, NOT `adj / inc`.** `GetSystemTimeAdjustmentPrecise(&adj, &inc,
   &disabled)`: a LARGER `adj` SLOWS the time-of-day clock.
   - Measured on win-resolume, 25.9.2026, as per-second sys−QPC ns vs the `inc/adj` prediction
-    integrated every 50 ms: `10500/10679`, `11000/10970`, `11500/11107`, `10700/10749`… (39 s,
-    each within the 100 ns FILETIME quantum + sampling jitter).
+    integrated every 50 ms: `10500/10679`, `11000/10970`, `11500/11107`, `10700/10749`… Over
+    39 s the largest per-second deviation was 393 ns (≈ 0.4 ppm, FILETIME's 100 ns quantum plus
+    the 50 ms sampling), with no bias. The sign and the 1:1 magnitude decide `inc/adj` over
+    `adj/inc`.
   - dantesync steers the same way: `new_adj = inc − ppm·freq/1e6` (its `src/clock/windows.rs`
     says "increasing adjustment slows the clock").
   - The MS docs only say "adjusted clock update frequency" and never give the direction.
@@ -75,18 +79,31 @@ rate. The Tier-0 authority is `src/os_clock_discipline.rs`.
 - **`os_sleepto_ns` waits on `os_gettime_ns()`, never on raw QPC counts.** The audio/video threads
   compute targets on the disciplined clock. A raw-count conversion drifts from it at the dantesync
   rate (~36 ms per hour).
-- **Raw-QPC stamps are mapped by their AGE** (`util/windows/qpc-timestamp.h`,
-  `os_raw_qpc_100ns_to_gettime_ns`): `disciplined_now − (raw_now − raw_stamp)`. WASAPI stamps its
-  buffers with raw QPC `qpcPosition` (process capture always, device capture with
-  `use_device_timing`, which defaults to true for Desktop Audio). `ts * 100` would drift about
-  72 ms/h at 20 ppm. libobs keeps direct timestamps (`timing_adjust = 0`) below `MAX_TS_VAR` = 2 s,
-  so nothing corrects that before it snaps. It is a header-only helper, so obs.dll gets no new
-  export.
+- **Stamps taken on another clock are mapped by their AGE** (`util/windows/qpc-timestamp.h`):
+  `disciplined_now − (clock_now − stamp)`, measured on the stamp's own clock.
+  - Before issue 1372 these stamps sat on the raw-QPC `os_gettime_ns()` timeline by construction.
+    Unmapped, they would drift ~72 ms/h at 20 ppm against the disciplined mixer. libobs keeps
+    direct timestamps (`timing_adjust = 0`) below `MAX_TS_VAR` = 2 s, so nothing corrects that
+    before it snaps.
+  - The sources:
+    - **win-wasapi** raw-QPC `qpcPosition`. Process capture always stamps with it; device capture
+      does with `use_device_timing`, which is the Desktop Audio default.
+    - **obs-browser** CEF audio pts: `base::TimeTicks` ms, QPC-based on Windows. The CEF docs say
+      "ms since the Unix Epoch", but `libcef/browser/audio_capturer.cc` computes
+      `audio_capture_time - base::TimeTicks()`.
+    - **vlc-video** `libvlc_clock()`, whose age is measured on VLC's own clock (no QPC
+      assumption).
+  - A stamp more than `OS_FOREIGN_STAMP_MAX_AGE_NS` (60 s) from its clock's now is not on that clock
+    (e.g. an epoch value) and passes through unchanged, as before issue 1372.
+  - The raw-QPC variant brackets `os_gettime_ns()` with two counter reads and uses their midpoint,
+    retried while they are more than 50 µs apart, so a preemption cannot skew the age.
+  - It is header-only, so obs.dll gets no new export. Linux/macOS builds are untouched (`_WIN32`
+    only): there, TimeTicks, VLC's clock and `os_gettime_ns()` are the same monotonic clock.
 
 ## The verification pattern: lift the Win32 glue and run it on FAKE Win32 layers
 
 The file compiles only on the Windows runner, and dev1 has no mingw. `tests/os_clock_discipline_parity_1372.rs`
-lifts the whole BEGIN…END block, `os_sleepto_ns` and the two `qpc-timestamp.h` helpers VERBATIM,
+lifts the whole BEGIN…END block, `os_sleepto_ns` and the `qpc-timestamp.h` helpers VERBATIM,
 and compiles them with `cc -Werror -Wconversion -Wformat=2` twice:
 
 1. **A scripted fake** (typedefs, a scripted QPC, a fake adjustment handed out by the fake
@@ -94,7 +111,8 @@ and compiles them with `cc -Werror -Wconversion -Wformat=2` twice:
    the Rust authority, plus the sleep and WASAPI checks.
 2. **A threaded fake:** pthreads, GCC atomics, `CLOCK_MONOTONIC` as a 10 MHz QPC running 1000×
    fast, the rate flipping ±1000 ppm on every 250 µs poll. Four threads assert that no read goes
-   below a value another thread already returned.
+   below a value another thread already returned. It runs until ≥ 1000 polls and ≥ 50k reads
+   (at least 2 s, at most 10 s), so a slow runner takes longer instead of flaking.
 
 The Rust module is included with `#[path = "../src/os_clock_discipline.rs"]`, so the gate is
 std-only and runs locally:
@@ -112,11 +130,14 @@ Gotchas:
   - randomly around QPC reads;
   - the writer for 200 µs right after it samples its rebase count (a thread-local flag set by the
     fake adjustment call, which only the writer makes);
-  - the writer for 50 µs after its closing increment.
+  - 300 µs before 1 in 16 QPC samples;
+  - the writer for 400 µs after its closing increment (before it releases the poller flag).
 
-  With these, both ordering mutations (reader sample after validation; writer sample before the odd
-  increment) produce tens to hundreds of violations every run, and the correct code produces 0
-  (5/5 runs).
+  - Why the stalls must be long: a stale read is only `Δrate × gap` ahead (0.2 % at 2000 ppm), so
+    another thread must read within 0.2 % of the gap to see it.
+  - With these stalls, both ordering mutations produce violations every run: the reader sampling
+    after validation gave ~2700, the writer sampling before the odd increment 8–16. The correct
+    code gives 0 in every run.
 - **Fake `FARPROC` is `void (*)(void)`.** gcc's `-Wcast-function-type` (in `-Wextra`) exempts that
   type, so the shipped cast compiles under `-Werror`.
 - **Keep single-line anchors single-line.** `GetProcAddress(kernelbase, "GetSystemTimeAdjustmentPrecise")`
@@ -132,10 +153,15 @@ Gotchas:
 
 ## Live verification after deploy (supervisor)
 
-- The clock is a libobs change, so the fast obs.dll path deploys it. The WASAPI mapping is in
-  `win-wasapi.dll` and ships only with a FULL bundle. The rig's active collections (stream
-  `Stream_Obs`, resolume `cg_scenes`) have no WASAPI or DirectShow source (checked 25.9.2026), so
-  the fast path is complete for the rig.
+- **This needs a FULL bundle, not only the fast obs.dll.** The clock is in obs.dll, but the stamp
+  mapping is in `win-wasapi.dll`, `obs-browser.dll` and `vlc-video.dll`. The rig uses them (live
+  25.9.2026):
+  - stream `Stream_Obs` has a `vlc_source` ("NL playlist") and two browser sources;
+  - resolume `cg_scenes` has nine browser sources, six with `reroute_audio` (YouTube / VDO.Ninja
+    audio into the cg mix);
+  - neither has a WASAPI or DirectShow source.
+
+  With obs.dll alone, those VLC and browser stamps drift against the disciplined mixer.
 - The genlock audit's `wall_qpc_drift_ms=` (obs-source.c) goes FLAT on Windows apart from
   dantesync phase steps. It moved ~10 ppm before.
 - **The stream `asrc: source 'mbc' estimated=` reading moves.** The mixer clock is now the
@@ -147,6 +173,11 @@ Gotchas:
 
 ## Known limit
 
-DirectShow sources (win-dshow) stamp with the filter graph's reference-clock stream time, not
-absolute QPC, so the age mapping does not apply. Such a source drifts vs the disciplined mixer at
-the discipline rate, like any capture device whose clock differs from OBS's. None is on the rig.
+DirectShow sources (win-dshow) stamp with the filter graph's reference-clock stream time, not a clock
+OBS can read "now" on, so the age mapping does not apply. Such a source drifts vs the disciplined
+mixer at the discipline rate, like any capture device whose clock differs from OBS's. There is none
+on the rig.
+
+Third-party plugins (the ASIO input on stream, `obs-vban` on resolume) are not vendored. If one
+stamps with its own raw-QPC read instead of `os_gettime_ns()`, it drifts the same way. Check its
+timestamps before relying on it.

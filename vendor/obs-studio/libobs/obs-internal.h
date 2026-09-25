@@ -1014,7 +1014,8 @@ struct obs_source {
 	 * duration. camera-box #1325: that basis is now os_gettime_ns() -- the monotonic QPC clock the
 	 * OBS audio MIXER thread paces on (media-io/audio-io.c) and buffered_ms is balanced against --
 	 * NOT genlock_wall_now_ns() (the dantesync-slewed system clock the video FIFO release uses).
-	 * The field name keeps its historical `_wall_` spelling; the stored VALUE is the QPC clock. */
+	 * The field name keeps its historical `_wall_` spelling; the stored VALUE is the mixer clock
+	 * (on Windows QPC integrated at the dantesync-disciplined rate since issue 1372). */
 	bool asrc_enabled;
 	struct asrc_compensator asrc;
 	uint64_t asrc_last_wall_ns;

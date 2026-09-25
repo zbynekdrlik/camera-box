@@ -281,6 +281,9 @@ live `mbc` mix buffer (issue 1325). Both are fixed in `obs-source.c asrc_process
   balanced against), NOT `genlock_wall_now_ns()` (the dantesync-slewed system clock). Measuring vs
   the slewed clock made `estimated ≈ −f_phase` (~18 ppm) — a drift the QPC mixer never sees — instead
   of the true source-vs-mixer residual (~−5 ppm). `asrc-residual-floor.md` carries the reading change.
+  Since issue 1372 the Windows mixer clock (`os_gettime_ns()`) itself runs at the
+  dantesync-disciplined rate, so the residual reads about −f_phase again. The rule stands: the servo
+  measures against the MIXER's clock (`windows-disciplined-media-clock.md`).
 
 - **Sign.** The compensator's convention (`applied<0` = slow source = STRETCH) is the RECIPROCAL of
   the swresample-native wrapper (`audio_resampler_set_compensation_ppm` → `sample_delta =

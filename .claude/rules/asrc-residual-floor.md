@@ -83,6 +83,9 @@ catches it because it asserts against `compensate()`'s RETURN, never against a r
 buffer. The live drain is 1× (not the 2× a pure sign flip predicts), so the net effect is
 compensation-does-not-reach-the-buffer, not a clean inversion.
 
+(The ≈ −6 ppm "Dante vs QPC crystal" reading below held until issue 1372 part A; see the addendum at
+the end of this file for the reading after that deploy.)
+
 **FIX LANDED (issue 1325 FIX lane, 16.9.2026) — TWO coupled defects, both in `asrc_process_audio()`
 (`obs-source.c`):** (1) the servo measured `master_block_s` against `genlock_wall_now_ns()` = the
 dantesync-SLEWED system clock, but the OBS audio mixer thread paces on `os_gettime_ns()` (QPC,

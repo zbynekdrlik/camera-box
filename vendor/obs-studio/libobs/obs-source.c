@@ -4703,7 +4703,10 @@ static inline void asrc_process_audio(obs_source_t *source, uint32_t frames, uin
 	 * rate (live discriminator 16.9., SetAsrcOuterBiasPpm +10 moved the drain 1:1 with applied).
 	 * Measured against the mixer's own clock the residual is the true source-vs-mixer deficit
 	 * (~-5 ppm). See issue 1325's design/discriminator comments and
-	 * .claude/rules/asrc-residual-floor.md. */
+	 * .claude/rules/asrc-residual-floor.md. Since issue 1372 the Windows os_gettime_ns() runs at
+	 * the dantesync-disciplined system-time RATE (QPC integrated at inc/adj), so the mixer itself
+	 * follows the f_phase slew now and the residual reads about -f_phase again; the rule of this
+	 * fix is unchanged -- the servo measures against the MIXER's own clock. */
 	const uint64_t mixer_now_ns = os_gettime_ns();
 
 	if (!source->asrc_has_last_wall) {

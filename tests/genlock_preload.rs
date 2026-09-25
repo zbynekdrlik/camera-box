@@ -1801,6 +1801,8 @@ mod vendored_source {
         //       against -- NOT genlock_wall_now_ns() (GetSystemTimePreciseAsFileTime = the SYSTEM
         //       clock dantesync SLEWS). Measuring vs the slewed clock made the servo see
         //       |estimated| = f_phase and "correct" a drift the QPC-paced mixer never sees.
+        //       (Since issue 1372 the Windows mixer clock itself runs at the disciplined rate; the
+        //       servo still measures against the MIXER's clock, which is what this pins.)
         //   (2) the ppm handed to the swresample-native wrapper must be NEGATED (`-applied_ppm`):
         //       the compensator's lock model `corrected = raw/(1+applied/1e6)` is the reciprocal
         //       sign of swresample's `output = input*(1+ppm/1e6)`, so a non-negated applied_ppm
