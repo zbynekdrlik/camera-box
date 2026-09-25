@@ -582,6 +582,30 @@ jobs:
           if-no-files-found: error
           path: target/release/intercom-hub
 
+  intercom-web-e2e:
+    name: intercom phone PWA E2E (issue 1345)
+    # Real-browser E2E of the phone interkom page (the 25.9.2026 phone UX rework): the REAL
+    # intercom/web client served by a stdlib stub hub (intercom/tests/e2e/stub_hub.py) with a Janus
+    # test double and Chromium fake media, at a 390x844 phone viewport. Auto-join receive-only with
+    # the mic off, the mic toggle + both live meters, tap-to-fullscreen, the reconnect state, the
+    # remembered name, the tap-for-sound layer — and an empty browser console in every test. No Rust
+    # build needed: the page is plain static files.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Node (intercom phone E2E)
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Install Playwright chromium (intercom phone E2E)
+        working-directory: intercom/tests/e2e
+        run: |
+          npm install
+          npx playwright install --with-deps chromium
+      - name: intercom phone PWA E2E
+        working-directory: intercom/tests/e2e
+        run: npx playwright test
+
   build:
     name: Build
     runs-on: ubuntu-22.04
@@ -839,7 +863,7 @@ jobs:
     # (#notifications id). NOTE: the older n8n CLAUDE_DISCORD_WEBHOOK_URL relay
     # accepts POSTs (HTTP 200) but no longer DELIVERS to Discord, so the bot REST
     # API is used directly — Discord returns the created message object on success.
-    needs: [lint, test, coverage, mutants, python-tests, bkshading, bkshading-windows, intercom-hub, build, windows-probe, security, drift-guard, shellcheck, deploy-fleet]
+    needs: [lint, test, coverage, mutants, python-tests, bkshading, bkshading-windows, intercom-hub, build, windows-probe, security, drift-guard, shellcheck, deploy-fleet, intercom-web-e2e]
     if: ${{ failure() }}
     runs-on: ubuntu-latest
     steps:
