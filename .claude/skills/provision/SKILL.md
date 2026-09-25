@@ -36,7 +36,7 @@ CI relay staged next to camera-box: `gh run download <run> -n bkshading-linux-am
 scp `bkshading-relay` to the box, then `setup-device.sh --binary /tmp/camera-box --relay-binary
 /tmp/bkshading-relay [--rig-mode test|event] NAME`. Without it STEP 19 refuses Setup Complete.
 `--rig-mode` defaults to `test` (source box + cam2 relay installed disabled). verify-device `(ao)`
-grades it; pass `RIG_MODE=test|event` or let it read cam2's painter state.
+grades it; pass `CAMERA_BOX_RIG_MODE=test|event` (the SAME env setup-device reads) or let it read cam2's painter state.
 
 Every step is idempotent-ish and fails LOUD (script-failure-policy) — a half-configured box never
 silently reports success. If any step fails, fix the root cause and re-run that step; do not

@@ -62,13 +62,10 @@ fail() {
 
 # shellcheck source=scripts/lib/bkshading-relay-provision.sh
 . "$HERE/lib/bkshading-relay-provision.sh"  # bkshading_relay_provision_install / _expected_enable_state /
-                                            # _binary_plan (issue 808) -- the ONE relay install body, shared
-                                            # with bkshading-provision-relay.sh; verify-device.sh (ao) grades it
-# shellcheck source=scripts/lib/bkshading-deploy-runtime.sh
-. "$HERE/lib/bkshading-deploy-runtime.sh"  # bkshading_deploy_artifact_name / _relay_artifact_bin -- the CI
-                                           # artifact the relay binary comes from (issue 808)
-# shellcheck source=scripts/lib/ci-run-resolve.sh
-. "$HERE/lib/ci-run-resolve.sh"  # ci_run_latest_success -- the ONE newest-successful-run resolver (issue 808)
+                                            # _binary_plan / _fetch_binary (issue 808) -- the ONE relay install
+                                            # body, shared with bkshading-provision-relay.sh; it sources the
+                                            # relay CI artifact names + the ONE run resolver itself.
+                                            # verify-device.sh (ao) grades the result.
 # shellcheck source=scripts/lib/udev-camera-box.sh
 . "$HERE/lib/udev-camera-box.sh"  # udev_camera_box_rules_content/udev_camera_box_helper_script_content
                                    # (#894) -- also sourced (unmodified) by verify-device.sh's (w)
@@ -1726,51 +1723,24 @@ echo ""
 echo -e "${GREEN}[bkshading-relay] Provisioning the bkshading shading relay (issue 808, --rig-mode ${RIG_MODE_ARG})...${NC}"
 RELAY_PROBLEM=""
 RELAY_SOURCE_BOX="$(camera_source_box 2>/dev/null || true)"
-if [ -z "$RELAY_SOURCE_BOX" ] && [ "$RIG_MODE_ARG" = test ]; then
-    # No resolvable source box: the TEST roster is unknown, so take the passive direction.
-    echo -e "${YELLOW}  could not resolve the rig source box (camera_source_box) -- installing the relay DISABLED (the passive TEST direction)${NC}"
+RELAY_ENABLE_STATE="$(bkshading_relay_expected_enable_state "$DEVICE_NAME" "$RIG_MODE_ARG" "$RELAY_SOURCE_BOX" "$(bkshading_relay_roster_painter_box)")"
+if [ "$RELAY_ENABLE_STATE" = unknown ]; then
+    # The TEST roster could not be resolved (no source box): take the passive direction and record it.
     RELAY_ENABLE_STATE=disabled
-else
-    RELAY_ENABLE_STATE="$(bkshading_relay_expected_enable_state "$DEVICE_NAME" "$RIG_MODE_ARG" "$RELAY_SOURCE_BOX" cam2)"
+    RELAY_PROBLEM="could not resolve the rig source box (camera_source_box) for the TEST relay roster -- installed DISABLED"
 fi
 RELAY_GH=no
 if command -v gh >/dev/null 2>&1 && [ -n "${GH_TOKEN:-}" ]; then RELAY_GH=yes; fi
-RELAY_ARTIFACT="$(bkshading_deploy_artifact_name)"
+# The binary is the bkshading-linux-amd64 CI artifact: --relay-binary (a dev1-staged path/URL), else
+# the SAME ci.yml run STEP 3 took camera-box from, else the newest run carrying it (gh boxes only).
 RELAY_PLAN="$(bkshading_relay_provision_binary_plan "$RELAY_BINARY_ARG" "${RUN_ID:-${CI_RUN_ID_ARG:-}}" "$RELAY_GH")"
 RELAY_DL_DIR="$(mktemp -d)"
 RELAY_BIN_SRC=""
-case "$RELAY_PLAN" in
-    local:*)
-        RELAY_BIN_SRC="${RELAY_PLAN#local:}"
-        echo "  relay binary: local $RELAY_BIN_SRC"
-        ;;
-    url:*)
-        echo "  relay binary: downloading ${RELAY_PLAN#url:}"
-        if curl -fsSL "${RELAY_PLAN#url:}" -o "$RELAY_DL_DIR/bkshading-relay"; then
-            RELAY_BIN_SRC="$RELAY_DL_DIR/bkshading-relay"
-        else
-            RELAY_PROBLEM="download of the relay binary from ${RELAY_PLAN#url:} failed"
-        fi
-        ;;
-    run:* | latest)
-        RELAY_RUN="${RELAY_PLAN#run:}"
-        if [ "$RELAY_PLAN" = latest ]; then
-            RELAY_RUN="$(ci_run_latest_success "$GITHUB_REPO" "$CI_BRANCH" ci.yml "$RELAY_ARTIFACT")" || RELAY_RUN=""
-        fi
-        if [ -z "$RELAY_RUN" ]; then
-            RELAY_PROBLEM="no successful ci.yml run on '$CI_BRANCH' carries $RELAY_ARTIFACT"
-        elif gh run download "$RELAY_RUN" --repo "$GITHUB_REPO" -n "$RELAY_ARTIFACT" --dir "$RELAY_DL_DIR" 2>/dev/null \
-            && [ -s "$RELAY_DL_DIR/$(bkshading_deploy_relay_artifact_bin)" ]; then
-            RELAY_BIN_SRC="$RELAY_DL_DIR/$(bkshading_deploy_relay_artifact_bin)"
-            echo "  relay binary: $RELAY_ARTIFACT from ci.yml run $RELAY_RUN (the camera-box run when STEP 3 used one)"
-        else
-            RELAY_PROBLEM="gh run download of $RELAY_ARTIFACT from ci.yml run $RELAY_RUN failed"
-        fi
-        ;;
-    *)
-        RELAY_PROBLEM="no relay binary source -- this box has no gh/GH_TOKEN and no --relay-binary was given (or it is not a file/URL). STAGE IT FROM dev1: gh run download <ci.yml run> -n bkshading-linux-amd64 --dir /tmp && scp /tmp/bkshading-relay root@<box>:/tmp/ , then re-run with --relay-binary /tmp/bkshading-relay"
-        ;;
-esac
+if RELAY_FETCH_OUT="$(bkshading_relay_provision_fetch_binary "$RELAY_PLAN" "$RELAY_DL_DIR" "$GITHUB_REPO" "$CI_BRANCH")"; then
+    RELAY_BIN_SRC="$RELAY_FETCH_OUT"
+else
+    RELAY_PROBLEM="${RELAY_PROBLEM:+$RELAY_PROBLEM; }$RELAY_FETCH_OUT"
+fi
 # The unit + env + gphoto2 go in even when the binary could not be fetched (the recorded problem
 # still refuses Setup Complete); the lib warns loudly about the missing binary.
 if bkshading_relay_provision_install "$RELAY_ENABLE_STATE" "$RELAY_BIN_SRC"; then

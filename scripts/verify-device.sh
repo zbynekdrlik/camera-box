@@ -174,7 +174,7 @@
 #        installed bkshading-relay.service BYTE-matches the repo unit, /etc/bkshading/relay.env carries
 #        CAMERA_BOX_CAPTURE_FPS=<int>, gphoto2 is installed, AND the unit's enable-state matches the rig
 #        mode (TEST: the relay roster -- the source box + cam2 -- disabled, every other box enabled;
-#        EVENT: enabled). Mode = RIG_MODE=test|event, else read from cam2's painter state (a roster box
+#        EVENT: enabled). Mode = CAMERA_BOX_RIG_MODE=test|event, else read from cam2's painter state (a roster box
 #        whose mode is unreadable FAILs). setup-device.sh's [bkshading-relay] sub-step provisions it;
 #        the 24.9.2026 M.2 re-provisioning of cam1-4 came up with NO relay and nothing noticed.
 #   (al) named `cam-box` UEFI boot entry (#1066 D6) -- HARD FAIL: `efibootmgr -v` reports a `cam-box`
@@ -250,7 +250,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
                                             # snippet (issue 808; SAME lib setup-device.sh installs with)
 # shellcheck source=scripts/lib/rig-mode-state.sh
 . "$HERE/lib/rig-mode-state.sh"  # rig_mode_state_probe_remote_snippet / rig_mode_from_painter_snapshot --
-                                 # the (ao) check reads the rig mode off cam2 when RIG_MODE is unset
+                                 # the (ao) check reads the rig mode off cam2 when CAMERA_BOX_RIG_MODE is unset
 # shellcheck source=scripts/lib/efi-boot-entry.sh
 . "$HERE/lib/efi-boot-entry.sh"  # efi_entry_verdict -- the (al) named cam-box UEFI entry check
                                  # (#1066 D6; SAME source of truth as setup-device.sh / create-usb-linux.sh)
@@ -871,11 +871,11 @@ Checks:
   (an) NDI discovery receiver config (issue 1342): /etc/ndi/ndi-config.v1.json networks.ips lists
       every pinned managed sender, no networks.discovery + the camera-box NDI_CONFIG_DIR drop-in
   (ao) bkshading relay provisioned (issue 808): binary + byte-matching unit + env + gphoto2, and the
-      unit enable-state matches the rig mode (TEST: source box + cam2 disabled; RIG_MODE=test|event,
+      unit enable-state matches the rig mode (TEST: source box + cam2 disabled; CAMERA_BOX_RIG_MODE=test|event,
       else read from cam2's painter state)
 
 Env: KERNEL_PIN (optional exact running-kernel pin), NDI_VERSION_PIN (default 6.3.2),
-     RIG_MODE (test|event for the (ao) relay enable-state; unset = read cam2's painter state),
+     CAMERA_BOX_RIG_MODE (test|event for the (ao) relay enable-state; unset = read cam2's painter state),
      DANTESYNC_OFFSET_FRESHNESS_S (max age of a fresh [NTP] offset line, default 300),
      DANTESYNC_JOURNAL_MAX_AGE_S (max age of the newest dantesync journal line vs the box
      clock before the daemon is treated as hung/free-running, default 60; #600).
@@ -1806,7 +1806,7 @@ fi
 # now provisions it on every cambox through the ONE lib; this proves it after the reboot, read-only,
 # graded by the SAME lib's pure verdict. The enable-state follows the rig mode (issue 1311): TEST =
 # the relay roster (the source box + cam2) disabled, every other box enabled; EVENT = enabled. The
-# mode is RIG_MODE when set, else read off cam2's painter state (rig-mode-state.sh) -- only a roster
+# mode is CAMERA_BOX_RIG_MODE when set, else read off cam2's painter state (rig-mode-state.sh) -- only a roster
 # box needs it, and an unreadable mode for one FAILs (test-strictness). Inserted after (am) and
 # BEFORE (an)/(q) per .claude/rules/provisioning-scripts.md (the (q)-last invariant; the (an) block
 # is sliced to (q) and executed by test_ndi_discovery_1342.py, so nothing new goes between them).
@@ -1814,15 +1814,16 @@ fi
 aorc=0
 RELAY_PROV_BLOCK="$(ssh_box "$(bkshading_relay_provision_gather_remote_snippet)")" || aorc=$?
 RELAY_SRC_BOX="$(camera_source_box 2>/dev/null || true)"
-RELAY_MODE="$(printf '%s' "${RIG_MODE:-}" | tr '[:upper:]' '[:lower:]')"
-RELAY_MODE_SRC="RIG_MODE"
+RELAY_PAINTER_BOX="$(bkshading_relay_roster_painter_box)"
+RELAY_MODE="$(printf '%s' "${CAMERA_BOX_RIG_MODE:-}" | tr '[:upper:]' '[:lower:]')"
+RELAY_MODE_SRC="CAMERA_BOX_RIG_MODE"
 case "$RELAY_MODE" in
   test | event) ;;
   *)
     RELAY_MODE=unknown
     RELAY_MODE_SRC="cam2 painter state"
-    if [ "$(bkshading_relay_expected_enable_state "$CAMERA_NAME" unknown "$RELAY_SRC_BOX" cam2)" = unknown ]; then
-      RELAY_PAINTER_IP="$(camera_resolve cam2 >/dev/null 2>&1 && printf '%s' "$CAMERA_IP")" || RELAY_PAINTER_IP=""
+    if [ "$(bkshading_relay_expected_enable_state "$CAMERA_NAME" unknown "$RELAY_SRC_BOX" "$RELAY_PAINTER_BOX")" = unknown ]; then
+      RELAY_PAINTER_IP="$(camera_resolve "$RELAY_PAINTER_BOX" >/dev/null 2>&1 && printf '%s' "$CAMERA_IP")" || RELAY_PAINTER_IP=""
       if [ -n "$RELAY_PAINTER_IP" ]; then
         RELAY_MODE_SNAP="$(ssh_ip "$RELAY_PAINTER_IP" "$(rig_mode_state_probe_remote_snippet)" 2>/dev/null)" || RELAY_MODE_SNAP=""
         RELAY_MODE="$(rig_mode_from_painter_snapshot "$RELAY_MODE_SNAP" | tr '[:upper:]' '[:lower:]')"
@@ -1830,7 +1831,7 @@ case "$RELAY_MODE" in
     fi
     ;;
 esac
-RELAY_EXPECTED="$(bkshading_relay_expected_enable_state "$CAMERA_NAME" "$RELAY_MODE" "$RELAY_SRC_BOX" cam2)"
+RELAY_EXPECTED="$(bkshading_relay_expected_enable_state "$CAMERA_NAME" "$RELAY_MODE" "$RELAY_SRC_BOX" "$RELAY_PAINTER_BOX")"
 RELAY_PROV_VERDICT="$(bkshading_relay_provision_verdict "$RELAY_PROV_BLOCK" "$RELAY_EXPECTED")"
 if [ "$aorc" -ne 0 ]; then
   fail "could not read the bkshading relay provisioning state over SSH (rc=$aorc, issue 808)"
