@@ -165,7 +165,7 @@ fn remoteos_paths_follow_their_overrides() {
     );
 }
 
-/// Review round 1: the source is 8b4ce58dbed08c366ecbd50a32ff66213b77a9baNED to the commit the live strih-lx venv runs (pin-not-latest,
+/// Review round 1: the source is PINNED to the commit the live strih-lx venv runs (pin-not-latest,
 /// like the Downstream Keyer), so a deploy never silently installs whatever upstream `main` is.
 #[test]
 fn remoteos_source_is_the_github_api_tarball_of_the_pinned_commit() {
@@ -317,9 +317,11 @@ exit 0
 const VENV_PYTHON_STUB: &str = r#"#!/bin/bash
 here="$(cd "$(dirname "$0")/.." && pwd)"
 if [ "${1:-}" = -m ] && [ "${2:-}" = pip ]; then
-  echo "PIP: ${PIP_CONSTRAINT:-} $*" >> "$STUB_LOG"
-  echo "PIPENV: GH=${GH_TOKEN:-unset} KEY=${REMOTEOS_MCP_AUTH_KEY:-unset}" >> "$STUB_LOG"
-  if [ "${FAKE_PIP_FAIL:-0}" = 1 ]; then exit 1; fi
+  # pip runs under an env ALLOWLIST, so log next to the rig and read the failure flag from a file.
+  log="$here/../stub.log"
+  echo "PIP: ${PIP_CONSTRAINT:-} $*" >> "$log"
+  echo "PIPENV: GH=${GH_TOKEN:-unset} KEY=${REMOTEOS_MCP_AUTH_KEY:-unset} CAM=${CAM_PW:-unset} STUB=${STUB_LOG:-unset}" >> "$log"
+  if [ -f "$here/.pip-fail" ]; then exit 1; fi
   touch "$here/.importable"
   exit 0
 fi
@@ -713,14 +715,15 @@ fn remoteos_pip_never_sees_the_token_or_the_key() {
         &[
             ("REMOTEOS_MCP_AUTH_KEY", "abc123"),
             ("GH_TOKEN", "tokSECRET9"),
+            ("CAM_PW", "camSECRET8"),
         ],
         &format!("{} headless enable-only", whoami()),
     );
     assert_eq!(c, 0, "stdout={out}\nstderr={err}");
     let log = rig.log();
     assert!(
-        log.contains("PIPENV: GH=unset KEY=unset"),
-        "pip must run without GH_TOKEN / REMOTEOS_MCP_AUTH_KEY: {log}"
+        log.contains("PIPENV: GH=unset KEY=unset CAM=unset STUB=unset"),
+        "pip runs under an env allowlist: no GH_TOKEN / key / CAM_PW / anything else: {log}"
     );
 }
 
@@ -731,8 +734,9 @@ fn remoteos_pip_failure_keeps_a_working_install_else_fails() {
     let rig = Rig::new();
     fs::write(rig.base.join("venv/.importable"), "").unwrap();
     fs::write(rig.base.join("venv/.camera-box-source"), "older-source\n").unwrap();
+    fs::write(rig.base.join("venv/.pip-fail"), "").unwrap();
     let (c, out, err) = rig.install(
-        &[("REMOTEOS_MCP_AUTH_KEY", "abc123"), ("FAKE_PIP_FAIL", "1")],
+        &[("REMOTEOS_MCP_AUTH_KEY", "abc123")],
         &format!("{} headless enable-only", whoami()),
     );
     assert_eq!(c, 0, "stdout={out}\nstderr={err}");
@@ -743,8 +747,9 @@ fn remoteos_pip_failure_keeps_a_working_install_else_fails() {
     assert_eq!(rig.file("venv/.camera-box-source"), "older-source\n");
 
     let rig = Rig::new();
+    fs::write(rig.base.join("venv/.pip-fail"), "").unwrap();
     let (c, _o, err) = rig.install(
-        &[("REMOTEOS_MCP_AUTH_KEY", "abc123"), ("FAKE_PIP_FAIL", "1")],
+        &[("REMOTEOS_MCP_AUTH_KEY", "abc123")],
         &format!("{} headless enable-only", whoami()),
     );
     assert_ne!(c, 0);
@@ -764,6 +769,104 @@ fn remoteos_restart_fails_when_authentication_is_off() {
     );
     assert_ne!(c, 0);
     assert!(err.contains("authentication"), "{err}");
+}
+
+/// Review round 2: the key-file write compares the OWNER too -- a file some other account owns is
+/// rewritten, never logged `unchanged` (verify item 8 requires `600 root`).
+#[test]
+fn remoteos_write_rewrites_a_file_another_account_owns() {
+    let rig = Rig::new();
+    let args = format!("{} headless enable-only", whoami());
+    let (c, _o, err) = rig.install(&[("REMOTEOS_MCP_AUTH_KEY", "abc123")], &args);
+    assert_eq!(c, 0, "stderr={err}");
+    // An `id` that names another account for -un/-gn makes every existing file "foreign-owned".
+    write_exec(
+        &rig.base.join("bin/id"),
+        "#!/bin/bash\ncase \"$*\" in -un|-gn) echo someoneelse1361 ;; *) exec /usr/bin/id \"$@\" ;; esac\n",
+    );
+    let (c, out, err) = rig.install(&[("REMOTEOS_MCP_AUTH_KEY", "abc123")], &args);
+    assert_eq!(c, 0, "stdout={out}\nstderr={err}");
+    assert!(
+        out.contains("EnvironmentFile written") && out.contains("config.json written"),
+        "a key file owned by another account is rewritten: {out}"
+    );
+}
+
+/// Review round 2: a source without constraints.txt is refused (never an unconstrained pip).
+#[test]
+fn remoteos_refuses_a_source_without_constraints() {
+    let rig = Rig::new();
+    let src = rig.base.join("srcbuild/zbynekdrlik-remoteos-mcp-abc1234");
+    fs::remove_file(src.join("constraints.txt")).unwrap();
+    let st = Command::new("tar")
+        .arg("-czf")
+        .arg(rig.base.join("src.tgz"))
+        .arg("-C")
+        .arg(rig.base.join("srcbuild"))
+        .arg("zbynekdrlik-remoteos-mcp-abc1234")
+        .status()
+        .unwrap();
+    assert!(st.success());
+    let (c, _o, err) = rig.install(
+        &[("REMOTEOS_MCP_AUTH_KEY", "abc123")],
+        &format!("{} headless enable-only", whoami()),
+    );
+    assert_ne!(c, 0);
+    assert!(err.contains("constraints.txt"), "{err}");
+    assert!(!rig.log().contains("PIP: "), "pip never runs");
+}
+
+/// Review round 2: the headless (cam) service user is SUDO_USER, else the EXISTING unit's User= (the
+/// documented systemd-run re-run of setup-device runs as root with no SUDO_USER), else root.
+#[test]
+fn remoteos_headless_user_keeps_the_existing_account() {
+    let unit_dir = tempfile::tempdir().unwrap();
+    let unit = unit_dir.path().join("remoteos-mcp.service");
+    let unit_s = unit.display().to_string();
+    let who = |sudo: Option<&str>| {
+        // The runner's own SUDO_USER (a sudo'd test run) must never leak into the "unset" cases.
+        let body = match sudo {
+            Some(u) => format!("SUDO_USER={u} remoteos_mcp_headless_user"),
+            None => "unset SUDO_USER; remoteos_mcp_headless_user".to_string(),
+        };
+        run(
+            REMOTEOS_LIB,
+            &[("REMOTEOS_MCP_UNIT_PATH", unit_s.as_str())],
+            &body,
+        )
+        .1
+    };
+    assert_eq!(who(None), "root", "no unit, no SUDO_USER -> root");
+    fs::write(&unit, "[Service]\nUser=newlevel\nExecStart=/x\n").unwrap();
+    assert_eq!(who(None), "newlevel", "the existing unit's account is kept");
+    assert_eq!(who(Some("alice")), "alice", "SUDO_USER wins");
+    fs::write(&unit, "[Service]\nUser=bad user\n").unwrap();
+    assert_eq!(who(None), "root", "an unusable User= falls back to root");
+    let (_c, out, _e) = run(
+        REMOTEOS_LIB,
+        &[("T", "[Unit]\n[Service]\nType=simple\nUser=cam7user\n")],
+        "remoteos_mcp_user_from_unit_text \"$T\"",
+    );
+    assert_eq!(out, "cam7user");
+}
+
+/// Review round 2: verify-device (ab) proves the cam agent refuses an unauthenticated request too.
+#[test]
+fn verify_device_ab_probes_authentication() {
+    let v = read("scripts/verify-device.sh");
+    let ab = v
+        .find("# (ab) RemoteOS MCP control-channel agent (#1066) ---")
+        .expect("(ab) exec block");
+    let end = ab + v[ab..].find("\n# (ac) ").expect("(ac) follows (ab)");
+    let block = &v[ab..end];
+    assert!(
+        block.contains("-X POST http://127.0.0.1:8092/mcp"),
+        "(ab) must probe an unauthenticated POST /mcp on the box: {block}"
+    );
+    assert!(
+        block.contains("!= \"401\"") && block.contains("authentication"),
+        "(ab) must FAIL unless the probe answers 401: {block}"
+    );
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -900,7 +1003,7 @@ fn every_setup_script_installs_remoteos_through_the_shared_lib() {
         ),
         (
             "scripts/setup-device.sh",
-            "remoteos_mcp_install \"${SUDO_USER:-root}\" headless enable-only",
+            "remoteos_mcp_install \"$(remoteos_mcp_headless_user)\" headless enable-only",
         ),
     ] {
         let s = read(script);
@@ -928,7 +1031,7 @@ fn every_setup_script_installs_remoteos_through_the_shared_lib() {
 fn setup_device_installs_remoteos_in_the_rw_window() {
     let s = read("scripts/setup-device.sh");
     let call = s
-        .find("remoteos_mcp_install \"${SUDO_USER:-root}\" headless enable-only")
+        .find("remoteos_mcp_install \"$(remoteos_mcp_headless_user)\" headless enable-only")
         .expect("STEP 17b call");
     let step = s.find("STEP 17b").expect("STEP 17b");
     let ro = s.find("STEP 18: Configure read-only").expect("STEP 18");
@@ -964,7 +1067,7 @@ fn verify_strih_grades_remoteos_through_the_shared_verdict() {
         "item 8 is graded, no longer a NOTE: {body}"
     );
     assert!(
-        body.contains("-w '%{http_code}'") && body.contains(":$(remoteos_mcp_port)/mcp"),
+        body.contains("\"$(remoteos_mcp_unauth_code)\""),
         "item 8 must probe that an unauthenticated /mcp request is refused: {body}"
     );
 }

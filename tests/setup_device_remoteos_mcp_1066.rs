@@ -79,8 +79,8 @@ fn setup_device_uses_canonical_remoteos_installer_not_inline_pip_1066() {
         "{SETUP}: must source scripts/lib/remoteos-mcp.sh (issue 1361)"
     );
     assert!(
-        on_code_line(&body, "remoteos_mcp_install \"${SUDO_USER:-root}\" headless enable-only"),
-        "{SETUP}: STEP 17b must run the shared install as the operator who ran it (the upstream SUDO_USER rule), headless, enable-only (the cam-box convention)"
+        on_code_line(&body, "remoteos_mcp_install \"$(remoteos_mcp_headless_user)\" headless enable-only"),
+        "{SETUP}: STEP 17b must run the shared install as the box's agent account (SUDO_USER, else the existing unit's User=, else root), headless, enable-only (the cam-box convention)"
     );
     assert!(
         !on_code_line(&body, "install-linux.sh"),
