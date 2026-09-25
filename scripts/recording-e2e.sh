@@ -294,6 +294,10 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # 151, issue 1302) the burn toggle is read back from SongPlayer's own health endpoint.
 # shellcheck source=scripts/lib/cg-chain-e2e.sh
 . "$HERE/lib/cg-chain-e2e.sh"
+# Issue 1367: after the merge, export the classified slots that have no pixel proof as PNGs ON the
+# box holding the recording (the verdict's own decode indexing), before the report + cleanup plan.
+# shellcheck source=scripts/lib/missing-slot-pixels.sh
+. "$HERE/lib/missing-slot-pixels.sh"
 # #707 B1 (freeze+jump discriminator, second prong): the per-cambox TCP-transport + NIC sampler.
 # Pure REMOTE-COMMAND-STRING builders (no ssh at source time) — launched in [5b/8], harvested in
 # [7c/8]. See the lib header for WHY (record Send-Q/retrans/NIC counters during the window so the
@@ -5696,6 +5700,11 @@ continuing WITHOUT the imag partial; the merge below will omit --merge-partials 
     # and the composer's `[ -s ]` guard omits the section; it NEVER touches $GATE.
     GENLOCK_AUDIT_JSON="$OUTDIR/genlock-audit-${RUN_ID}.json"
     genlock_audit_snapshot_compute "$OUTDIR/genlock-audit-before-${RUN_ID}.txt" "$OUTDIR/genlock-audit-after-${RUN_ID}.txt" "$GENLOCK_AUDIT_JSON" || true
+    # Issue 1367: pixel proof (the slot + its two neighbours) for every classified slot the merge
+    # left without one, pulled to $OUTDIR/<node>-missing/ and recorded in the verdict JSON for the
+    # report. Best-effort, report-only: never changes $GATE.
+    _msp_strih_os="$(strih_platform "$STRIH")"
+    missing_slot_pixels_run "$REPORT_JSON" "$OUTDIR" "$RUN_ID" "$STRIH" "$_msp_strih_os" "${STRIH_HOST_PATH:-}" "$STREAM" "${STREAM_REC_WIN:-}" "$OUT_DIR_WIN" || true
     echo "    [8/8f] #711: Discord full-report (fail-open — never affects \$GATE below)"
     e2e_discord_report_send "$REPORT_JSON" "$RUN_ID" "$GATE" "$DURATION" "$PINS_JSON" "$MV_SKEW_JSON" "$GENLOCK_AUDIT_JSON"
     echo "    --- [8/8e] cleanup plan (JSON secured at $REPORT_JSON) ---"
