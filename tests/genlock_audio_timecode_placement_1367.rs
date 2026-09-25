@@ -165,6 +165,12 @@ fn audio_ingest_places_on_the_live_offset_and_replaces_on_a_change_1367() {
         "issue 1367: the #1303 fixed-pin ARRIVAL hold is back — genlock audio would again lead a \
          shallow feed's video by its FIFO depth"
     );
+    // review round 2: mid-slew the pairing offset's audio side is the hold minus the slew still owed.
+    assert!(
+        src.contains("genlock_audio_applied_delay_ns(source->genlock_audio_delay_ms, source->genlock_audio_slew_remaining_ns),"),
+        "issue 1367: the pairing offset no longer uses where the audio actually sits (hold minus the \
+         owed slew) -- a slew still owing 33 ms would read paired"
+    );
     // the legacy "re-place on every hold change" is gone: that step IS the audible 33 ms dropout.
     assert!(
         !src.contains(

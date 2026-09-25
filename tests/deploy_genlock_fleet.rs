@@ -1579,15 +1579,21 @@ fn per_box_table_lives_in_the_shared_lib_1317() {
 fn imag_program_writes_the_min_latency_marker_before_the_restart_1367() {
     let p = imag_program();
     let marker = p
-        .find("install -o \"$MINLAT_USER\" -g \"$MINLAT_USER\" -m 0644 /dev/null \"/home/$MINLAT_USER/.camera-box/genlock-min-latency\"")
+        .find("install -o \"$IMAG_USER\" -g \"$IMAG_USER\" -m 0644 /dev/null \"$IMAG_HOME/.camera-box/genlock-min-latency\"")
         .unwrap_or_else(|| panic!("the imag leg must write the min-latency marker (issue 1367):\n{p}"));
     assert!(
-        p.contains("MINLAT_USER=\"${SUDO_USER:-newlevel}\""),
+        p.contains("IMAG_USER=\"${SUDO_USER:-newlevel}\"")
+            && p.contains("IMAG_HOME=\"$(getent passwd \"$IMAG_USER\" | cut -d: -f6)\""),
         "the marker belongs to the desktop user the program acts as (issue 1367):\n{p}"
     );
     let restart = p
         .find("uctl restart imag-obs.service")
         .expect("the supervised restart must exist");
+    assert_eq!(
+        p.matches("IMAG_USER=\"${SUDO_USER:-newlevel}\"").count(),
+        1,
+        "the desktop user is resolved ONCE and reused by the restart step (issue 1367):\n{p}"
+    );
     assert!(
         marker < restart,
         "the marker must be written BEFORE the restart that loads the new libobs (issue 1367)"

@@ -20,8 +20,8 @@
 //! toolchain is missing — a parity test that silently passes without running is worse than none.
 
 use camera_box::genlock_audio_pairing::{
-    audio_hold_action, audio_hold_mode, audio_hold_ms, audio_level_shift_ns,
-    audio_needs_live_offset, audio_place_shift_ms, audio_place_term_ns, audio_placed_slew_fold_ns,
+    audio_applied_delay_ns, audio_hold_action, audio_hold_mode, audio_hold_ms,
+    audio_level_shift_ns, audio_needs_live_offset, audio_place_term_ns, audio_placed_slew_fold_ns,
     audio_slew_book_ts_ns, audio_slew_ppm, audio_slew_step_ns, audio_wall_to_mono_ns,
     audio_withhold_expired, decide_audio_health, genlock_audio_delay_ns, pairing_offset_ms,
     video_delay_lock_ms, video_delay_moved, video_delay_reference_ns, video_delay_round_ms,
@@ -72,7 +72,6 @@ fn lift_block() -> String {
         "genlock_audio_needs_live_offset(",
         "genlock_audio_wall_to_mono_ns(",
         "genlock_audio_place_term_ns(",
-        "genlock_audio_place_shift_ms(",
         "genlock_audio_video_delay_ref_ns(",
         "genlock_audio_pairing_offset_ms(",
         "genlock_video_delay_lock_ms(",
@@ -84,6 +83,7 @@ fn lift_block() -> String {
         "genlock_audio_slew_ppm(",
         "genlock_audio_slew_book_ts_ns(",
         "genlock_audio_placed_slew_fold_ns(",
+        "genlock_audio_applied_delay_ns(",
     ] {
         assert!(
             block.contains(helper),
@@ -414,13 +414,6 @@ fn c_audio_hold_and_placement_match_the_rust_authority_1367() {
         (2, 0, 0, 0),
         (1, 923, i64::MAX, 0),
     ];
-    let shifts: [(i64, i64); 5] = [
-        (100_000_000, 133_000_000),
-        (-5, 3_000_000),
-        (i64::MIN, i64::MAX),
-        (0, 0),
-        (123_456_789, -987_654_321),
-    ];
     let mut body = String::new();
     for (g, l, w, v, x) in &modes {
         body.push_str(&format!(
@@ -442,20 +435,6 @@ fn c_audio_hold_and_placement_match_the_rust_authority_1367() {
         };
         body.push_str(&format!(
             "    printf(\"%lld\\n\", (long long)genlock_audio_place_term_ns({m}, {h}u, {o_lit}, {t}ull));\n"
-        ));
-    }
-    for (a, b) in &shifts {
-        let lit = |v: i64| {
-            if v == i64::MIN {
-                "INT64_MIN".to_string()
-            } else {
-                format!("{v}ll")
-            }
-        };
-        body.push_str(&format!(
-            "    printf(\"%.6f\\n\", genlock_audio_place_shift_ms({}, {}));\n",
-            lit(*a),
-            lit(*b)
         ));
     }
     for m in 0u8..4 {
@@ -485,9 +464,6 @@ fn c_audio_hold_and_placement_match_the_rust_authority_1367() {
     }
     for (m, h, o, t) in &terms {
         want.push(audio_place_term_ns(mode_of(*m), *h, *o, *t).to_string());
-    }
-    for (a, b) in &shifts {
-        want.push(format!("{:.6}", audio_place_shift_ms(*a, *b)));
     }
     for m in 0u8..4 {
         for p in 0u8..4 {
@@ -715,6 +691,25 @@ fn c_pairing_offset_matches_the_rust_authority_1367() {
             "    printf(\"%lld\\n\", (long long)genlock_audio_pairing_offset_ms({a}ll, {v}ll));\n"
         ));
     }
+    // review round 2: the audio side of the offset is the hold minus the slew still owed.
+    let applied: [(u32, i64); 6] = [
+        (100, 0),
+        (100, 33_000_000),
+        (67, -33_000_000),
+        (0, 5),
+        (u32::MAX, i64::MIN),
+        (3, i64::MAX),
+    ];
+    for (h, r) in &applied {
+        let r_lit = if *r == i64::MIN {
+            "INT64_MIN".to_string()
+        } else {
+            format!("{r}ll")
+        };
+        body.push_str(&format!(
+            "    printf(\"%lld\\n\", (long long)genlock_audio_applied_delay_ns({h}u, {r_lit}));\n"
+        ));
+    }
     let out = run_c(&body, "offset");
     let mut want: Vec<String> = Vec::new();
     for (s, l) in &refs {
@@ -723,6 +718,14 @@ fn c_pairing_offset_matches_the_rust_authority_1367() {
     for (a, v) in &cases {
         want.push(pairing_offset_ms(*a, *v).to_string());
     }
+    for (h, r) in &applied {
+        want.push(audio_applied_delay_ns(*h, *r).to_string());
+    }
+    // a slew still owing 33 ms of a 100 ms hold against a 100 ms video reads -33, not 0.
+    assert_eq!(
+        pairing_offset_ms(audio_applied_delay_ns(100, 33_000_000), 100_000_000),
+        -33
+    );
     assert_eq!(
         out, want,
         "issue 1367: the C pairing offset diverged from the Rust authority"

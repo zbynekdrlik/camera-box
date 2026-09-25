@@ -17,7 +17,8 @@
 //!   `NDI test` ~31 ms (lag 22-31 ms → 1 frame), `sp-slow_video` ~64 ms (lag 40-64 ms → 2 frames),
 //!   strih-lx `CG-obs` 33-67 ms (lag 28-40 ms, straddling one frame → 1 or 2 frames). A band that
 //!   straddles the SECOND frame edge (50-80 ms → 2 or 3 frames) and a band that RISES mid-run (no
-//!   gap: the arrival floor climbs over D) or changes at a sender restart cover the review cases.
+//!   gap: 28-40 → 70-95 ms, every floor climbs to D) or changes at a sender restart cover the review
+//!   cases.
 //!   Optional DISTURBANCES: a lost frame (a stamp gap) and a late spike (+45 ms on one frame, in
 //!   order, so the frames behind it wait too). A sender restart = 3 s of silence.
 //! - **Receiver**: render ticks on the grid, each scheduled on its slot and run up to a few ms late
@@ -32,7 +33,9 @@
 //! - the depth latches once per lock at `max(base, floor_max) + 1` and the presented depth stays ON it
 //!   (a constant video delay) — on a clean feed on every tick after the lock settles;
 //! - the audio is placed once per (re)start, straight onto the latched delay: 0 slews, 0 steps;
-//! - `|A/V| ≤ 5 ms` on every gated tick;
+//! - `|A/V| ≤ 5 ms` on every gated tick while the audio is settled; while it SLEWS onto a new hold
+//!   (1 ms per second after a depth change, ~33 s per frame) it trails the video by up to one frame,
+//!   measured separately and bounded by the songplayer gate (`SLEW_MAX_AV_MS`, 40 ms);
 //! - no shed / hold / drain / underrun churn: zero corrections on a clean feed, and at most one
 //!   correction per injected disturbance on a disturbed one.
 //!
@@ -50,6 +53,9 @@ use std::collections::VecDeque;
 const DRIFT_PER_HOUR_NS: i64 = 300_000_000;
 /// A late spike adds this to one frame's arrival.
 const LATE_SPIKE_NS: u64 = 45_000_000;
+/// The songplayer post-deploy A/V gate: the bound the SLEW window (audio still walking onto a new
+/// hold, ≤ one frame behind) must stay inside. The settled pairing keeps `GATE_MAX_AV_MS`.
+const SLEW_MAX_AV_MS: f64 = 40.0;
 
 #[derive(Clone, Copy, Debug)]
 struct Scenario {
@@ -95,6 +101,11 @@ struct Run {
     depth_hist: std::collections::BTreeMap<u64, u64>,
     max_abs_av_ms: f64,
     av_ticks: u64,
+    /// |A/V| while the audio is still slewing onto a new hold (excluded from `max_abs_av_ms`, which
+    /// is the settled pairing), and how many ticks the audio spent slewing.
+    max_abs_av_slew_ms: f64,
+    slew_av_ticks: u64,
+    slewing_ticks: u64,
     corrections: u64,
     drains: u64,
     underruns: u64,
@@ -218,6 +229,9 @@ fn run(sc: Scenario) -> Run {
         let mono = (wall as i64).wrapping_add(off) as u64;
         let mono_sched = (scheduled as i64).wrapping_add(off) as u64;
 
+        // the audio tracker's lock input is read BEFORE this tick's latch, the C order (the present
+        // tail runs the tracker, then genlock_shallow_latch).
+        let lock = video_delay_lock_ms(fifo.shallow.target_frames, fifo.shallow.measuring, IV_NS);
         let mut c = TickCounters::default();
         fifo.tick(&cfg, wall, scheduled, &mut c);
         // the sender's own 3 s silence is the event, not churn: it is outside the gate.
@@ -238,7 +252,6 @@ fn run(sc: Scenario) -> Run {
 
         // ---- the render-thread tracker (the present tail) ----------------------------------------
         let tick_wall = n1_tick_wall_ns(wall, wall, scheduled);
-        let lock = video_delay_lock_ms(fifo.shallow.target_frames, fifo.shallow.measuring, IV_NS);
         if fifo.presented_now && tick_on_grid(GridModel::Production, tick_wall) {
             let presented = fifo.presented.expect("a present sets it");
             video_delay_track(
@@ -269,6 +282,11 @@ fn run(sc: Scenario) -> Run {
                     let av = audio.av_ms(presented, mono_sched);
                     out.av_ticks += 1;
                     out.max_abs_av_ms = out.max_abs_av_ms.max(av.abs());
+                } else if audio.playing() {
+                    // the slew window: the video is on the new D, the audio still on its way.
+                    let av = audio.av_ms(presented, mono_sched);
+                    out.slew_av_ticks += 1;
+                    out.max_abs_av_slew_ms = out.max_abs_av_slew_ms.max(av.abs());
                 }
             }
             if last_depth.is_some_and(|d| d != depth) {
@@ -276,6 +294,7 @@ fn run(sc: Scenario) -> Run {
             }
             last_depth = Some(depth);
         }
+        out.slewing_ticks += u64::from(audio.slewing());
         nominal = grid_next_boundary_ns(nominal, IV_NS);
     }
     out.places = totals.0 + audio.places;
@@ -421,7 +440,7 @@ fn a_band_straddling_the_second_frame_edge_locks_four_frames_1367() {
 }
 
 /// A run whose arrival band changes, with the audio re-timed ONCE by a slew and never stepped.
-fn assert_band_change(name: &str, sc: Scenario, latched: &[u64]) {
+fn assert_band_change(name: &str, sc: Scenario, latched: &[u64]) -> Run {
     let r = run(sc);
     eprintln!("{name}: {r:?}");
     let mut seen: Vec<u64> = r.latched.clone();
@@ -430,25 +449,51 @@ fn assert_band_change(name: &str, sc: Scenario, latched: &[u64]) {
     assert_eq!(r.steps, 0, "{name}: an audio step re-placement");
     assert_eq!(r.slews, 1, "{name}: the new D is slewed in exactly once");
     assert_eq!(r.places, 3, "{name}: start, sender restart, OBS restart");
+    // the slew window itself (review round 2): the audio walks onto the new hold at 1 ms per second,
+    // so for ~33 s after a one-frame re-time it trails the video by up to one frame. Bounded by the
+    // songplayer A/V gate (40 ms), measured (not vacuous), and over within 40 s of slewing.
+    assert!(
+        r.slew_av_ticks > 0 && r.max_abs_av_slew_ms > GATE_MAX_AV_MS,
+        "{name}: the slew window was not measured: {r:?}"
+    );
+    assert!(
+        r.max_abs_av_slew_ms <= SLEW_MAX_AV_MS,
+        "{name}: |A/V| while slewing {:.2} ms",
+        r.max_abs_av_slew_ms
+    );
+    assert!(
+        r.slewing_ticks <= 40 * 30,
+        "{name}: the audio slewed {} ticks (> 40 s) for one frame",
+        r.slewing_ticks
+    );
     assert!(
         r.max_abs_av_ms <= GATE_MAX_AV_MS,
         "{name}: |A/V| {:.2} ms",
         r.max_abs_av_ms
     );
     assert!(r.av_ticks > 80_000, "{name}: A/V gate too thin");
+    r
 }
 
 #[test]
 fn a_rising_arrival_re_measures_and_slews_the_audio_once_1367() {
-    // lag 28-40 ms (D 3) rises to 60-80 ms at t = 1500 s with no gap: the floor sits at/over D for
-    // a whole window, the depth re-measures to 4, and the audio slews +33 ms once.
-    assert_band_change(
+    // lag 28-40 ms (D 3) rises to 70-95 ms at t = 1500 s with no gap: every rounded floor is 3 =
+    // D, so after a whole window at/over D the depth re-measures to 4 and the audio slews +33 ms
+    // once. (A 60-80 ms band floors at 2 or 3 and never re-measures -- it waits for a relock.)
+    let r = assert_band_change(
         "rising",
         Scenario {
-            band_change: Some((1500, 60, 80)),
+            band_change: Some((1500, 70, 95)),
             ..Scenario::clean(28, 40, 3)
         },
         &[3, 4],
+    );
+    // the re-measure happened at the RISE, not at the later sender restart (t = 2400 s): D 4 is
+    // presented from ~1510 s on (the sender-restart relatch alone would give ~1190 s of it).
+    let at_4 = r.depth_hist.get(&4).copied().unwrap_or(0);
+    assert!(
+        at_4 > 55_000,
+        "rising: D 4 presented {at_4} ticks -- the rise did not re-measure before the restart"
     );
 }
 

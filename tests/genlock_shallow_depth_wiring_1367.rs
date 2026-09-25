@@ -134,6 +134,11 @@ fn the_release_tick_locks_measures_and_keeps_the_drain_out_1367() {
         "reserve_ms, interval), genlock_min_latency_box()))",
         "the latch passes the deep flag and the min-latency (imag) box guard",
     );
+    assert_in(
+        helper,
+        "&source->genlock_shallow_deep_ticks, &source->genlock_shallow_measuring, &source->genlock_shallow_capped, source->genlock_last_known_n < 2, relock,",
+        "the latch counts the window's deep ticks (the MAJORITY decides deep, review round 2)",
+    );
     // the relock flag is set before the present tail reads it, and never elsewhere.
     assert_eq!(
         src.matches("genlock_shallow_relock = true;").count(),
@@ -151,7 +156,7 @@ fn a_pin_change_rearms_and_the_box_marker_log_and_audit_exist_1367() {
     );
     assert_in(
         setter,
-        "if (source->genlock_last_known_n < 2) genlock_n1_shallow_rearm(&source->genlock_shallow_floor_max_frames, &source->genlock_shallow_window_ticks, &source->genlock_shallow_over_ticks, &source->genlock_shallow_measuring);",
+        "if (source->genlock_last_known_n < 2) genlock_n1_shallow_rearm(&source->genlock_shallow_floor_max_frames, &source->genlock_shallow_window_ticks, &source->genlock_shallow_over_ticks, &source->genlock_shallow_deep_ticks, &source->genlock_shallow_measuring);",
         "a new pin is a new base: an N==1 source's shallow depth must re-measure",
     );
     assert_in(

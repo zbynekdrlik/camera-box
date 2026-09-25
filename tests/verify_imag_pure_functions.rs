@@ -2049,3 +2049,29 @@ fn verify_imag_check_bc_requires_the_min_latency_marker_1367() {
         "check (bc) must run BEFORE check (o)'s OBS restart (#884 ordering)"
     );
 }
+
+/// issue 1367 (review round 2): check (bd) — the marker file alone does not prove the LOADED libobs
+/// honours it (it is read once per process), so after check (o)'s restart the gate reads the new
+/// OBS log for `genlock-min-latency: ON`, and FAILs on anything else (incl. `off` or nothing).
+#[test]
+fn verify_imag_check_bd_proves_the_restarted_obs_took_the_marker_1367() {
+    let body = std::fs::read_to_string(script()).unwrap();
+    let restart_call = body
+        .find(r#"ssh_box_timeout "$IMAG_OBS_RESTART_TIMEOUT""#)
+        .expect("check (o)'s restart must exist");
+    let bd = body
+        .find(r#"if [ "$MINLAT_LOG" = "genlock-min-latency: ON" ]; then"#)
+        .expect("check (bd) must grade the restarted OBS's min-latency log line (issue 1367)");
+    assert!(
+        bd > restart_call,
+        "check (bd) must read the log of the OBS check (o) RESTARTED (issue 1367)"
+    );
+    assert!(
+        body.contains(r#"if [ "${persist_ok:-0}" -eq 1 ]; then"#),
+        "check (bd) runs only after a restart that came back (issue 1367)"
+    );
+    assert!(
+        body.contains(r#"fail "(bd) the restarted OBS logged"#),
+        "anything but ON must FAIL (issue 1367)"
+    );
+}
