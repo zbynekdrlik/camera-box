@@ -1638,19 +1638,38 @@ impl ReleaseCadence {
                 // against the CONFIGURED latency: one relock sheds the overshoot, and the anchor
                 // rebuilds from the next STEADY present. ACQUIRE is deliberately exempt — index 0
                 // there just means "present the head", and the fresh lock stops the branch
-                // re-firing. Issue 1367 widened it: an anchor pick more than one canvas tick
-                // (n source frames) behind the configured-latency pick is an arrival-burst phase
-                // and is dropped the same way (`crate::genlock_backlog::relock_anchor_is_stale`,
-                // n read-only as in `backlog_relock_qdepth`). Mirror of the C
+                // re-firing. Issue 1367 (ROZHODNUTÉ 5840479751) widened it: an anchor pick more
+                // than n + 1 source frames behind the pick at the depth the N==1 governor holds
+                // the source at (`base + 1` when deep; this reference sim carries no shallow latch,
+                // so otherwise the configured latency) is an arrival-burst phase and is dropped
+                // the same way (`crate::genlock_backlog::relock_anchor_is_stale`, n read-only as
+                // in `backlog_relock_qdepth`). Mirror of the C
                 // `if ((sel_1003 == 0 || stale_1367) && source->genlock_phase_anchor_ns != 0)`.
                 let n = self.read_only_source_multiple(queue, interval_ns);
+                let floor = queue
+                    .back()
+                    .map_or(0, |&newest| wall_now_ns.saturating_sub(newest));
+                let expected = if n < 2 && self.last_known_n < 2 {
+                    crate::genlock_n1_depth::n1_expected_depth_frames(
+                        floor,
+                        reserve_ms,
+                        interval_ns,
+                        0,
+                    )
+                } else {
+                    0
+                };
                 let queue_ts: Vec<u64> = queue.iter().copied().collect();
-                let configured = crate::genlock_backlog::relock_select_nearest(
+                let sel_expected = crate::genlock_backlog::relock_select_nearest(
                     &queue_ts,
                     wall_now_ns,
-                    crate::genlock_backlog::relock_anchor_age_ns(0, reserve_ms),
+                    crate::genlock_backlog::relock_expected_age_ns(
+                        expected,
+                        reserve_ms,
+                        interval_ns,
+                    ),
                 );
-                let stale = crate::genlock_backlog::relock_anchor_is_stale(sel, configured, n);
+                let stale = crate::genlock_backlog::relock_anchor_is_stale(sel, sel_expected, n);
                 if (sel == 0 || stale) && self.phase_anchor_ns != 0 {
                     self.phase_anchor_ns = 0;
                     sel = self.relock_select(queue, wall_now_ns, reserve_ms);

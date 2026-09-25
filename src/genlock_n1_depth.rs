@@ -579,13 +579,18 @@ pub fn n1_expected_depth_frames(
     interval_ns: u64,
     shallow_target_frames: u64,
 ) -> u64 {
-    let _ = (
+    if n1_is_deep_source(arrival_floor_ns, latency_ms, interval_ns) {
+        n1_target_frames(latency_ms, interval_ns)
+    } else if n1_shallow_governs(
+        shallow_target_frames,
         arrival_floor_ns,
         latency_ms,
         interval_ns,
-        shallow_target_frames,
-    );
-    0
+    ) {
+        shallow_target_frames
+    } else {
+        0
+    }
 }
 
 /// issue 1367 — the shallow SHED half (the caller gates it on [`n1_tick_is_on_grid`]): shed one frame

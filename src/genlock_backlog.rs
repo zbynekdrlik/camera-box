@@ -597,34 +597,34 @@ pub fn relock_select_nearest(queue_ts: &[u64], wall_now_ns: u64, anchor_age_ns: 
 /// latency exactly like the anchor ([`relock_anchor_age_ns`]). With no governor depth it IS the
 /// configured-latency pick. Mirror of the C `genlock_relock_select_expected()` target.
 pub fn relock_expected_age_ns(expected_frames: u64, latency_ms: u32, interval_ns: u64) -> u64 {
-    let _ = (expected_frames, interval_ns);
-    relock_anchor_age_ns(0, latency_ms)
+    relock_anchor_age_ns(expected_frames.saturating_mul(interval_ns), latency_ms)
 }
 
 /// Issue 1367 — is the tracked phase anchor STALE for a BACKLOG relock?
 ///
 /// `sel_anchor` is the index [`relock_select_nearest`] picks against the tracked anchor;
-/// `sel_configured` is the index it picks against the source's CONFIGURED latency
-/// (`relock_anchor_age_ns(0, latency_ms)`). Both index the same queue, oldest first. `n` is the
-/// source's measured integer rate multiple over the canvas (2 for a 60-into-30 ingest).
+/// `sel_expected` is the index it picks at the depth the source is SUPPOSED to hold
+/// ([`relock_expected_age_ns`]: `base + 1` on a deep N==1 source, the latched D on a governed
+/// shallow one, else the configured latency — ROZHODNUTÉ 5840479751). Both index the same queue,
+/// oldest first. `n` is the source's measured integer rate multiple over the canvas (2 for a
+/// 60-into-30 ingest).
 ///
-/// The anchor is FLOORED at the configured latency, so it only ever targets an OLDER (or the
-/// same) frame: `sel_anchor <= sel_configured`. The gap between the two is how far the
-/// remembered phase sits behind the configured one, in SOURCE frames. Up to `n` source frames is
-/// one canvas tick — ordinary arrival jitter, where the #1003 phase continuity must be kept. More
-/// than that means the anchor was sampled while frames were arriving LATE (an arrival burst): a
-/// relock that keeps it sheds only the frames that aged past it, a 60-into-30 source adds two
-/// frames per tick, and the depth never falls below the relock threshold — the branch fires
-/// every tick for minutes (live 25.9.2026 20:50:58: cam6 relocked 5028 times, ~300 ms late).
+/// A correct anchor sits at or within a frame of the expected pick. More than `n + 1` source
+/// frames behind it (one canvas tick of arrival jitter, plus one frame for a relock tick that
+/// runs a few ms late) means the anchor was sampled while frames were arriving LATE, an arrival
+/// burst. A relock that keeps it sheds only the frames that aged past it, a 60-into-30 source
+/// adds two frames per tick, and the depth never falls below the relock threshold, so the branch
+/// fires every tick for minutes (live 25.9.2026 20:50:58: cam6 relocked 5028 times, ~300 ms
+/// late, a 15-frame gap).
 ///
 /// Returns `true` (drop the anchor and re-select against the configured latency) when the anchor
-/// pick is MORE than `n` source frames behind the configured pick. `n == 0` (an unmeasured
-/// multiple) counts as 1. An anchor pick at or after the configured pick is never stale.
+/// pick is MORE than `n + 1` source frames behind the expected pick. `n == 0` (an unmeasured
+/// multiple) counts as 1. An anchor pick at or after the expected pick is never stale.
 ///
 /// Mirror of the C `genlock_relock_anchor_is_stale()` (obs-source.c) — keep both in lock-step.
-pub fn relock_anchor_is_stale(sel_anchor: usize, sel_configured: usize, n: u32) -> bool {
-    let tolerance = n.max(1) as usize;
-    sel_configured > sel_anchor && sel_configured - sel_anchor > tolerance
+pub fn relock_anchor_is_stale(sel_anchor: usize, sel_expected: usize, n: u32) -> bool {
+    let tolerance = (n.max(1) as usize).saturating_add(1);
+    sel_expected > sel_anchor && sel_expected - sel_anchor > tolerance
 }
 
 /// #1161 — the fail-open MARGIN (ticks) the ACQUIRE bracketing gate ([`relock_acquire_should_hold`])
@@ -1669,11 +1669,16 @@ mod tests {
                     // relock sheds the overshoot and the anchor rebuilds from the next
                     // STEADY present. (ACQUIRE is exempt: idx 0 there just means "present
                     // the head", and the fresh lock stops the branch re-firing.)
-                    // Issue 1367: the same reset when the anchor pick sits more than one
-                    // canvas tick behind the configured pick (an arrival-burst phase). This
-                    // sim is 30-into-30, so the C's measured multiple is 1 here.
-                    let configured = relock_select_nearest(&q, wall, relock_anchor_age_ns(0, ms));
-                    let stale = relock_anchor_is_stale(i, configured, 1);
+                    // Issue 1367 (ROZHODNUTÉ 5840479751): the same reset when the anchor pick
+                    // sits more than n + 1 frames behind the pick at the depth the N==1
+                    // governor holds the source at (an arrival-burst phase). This sim is
+                    // 30-into-30 (n = 1) and carries no shallow latch (D = 0).
+                    let floor = q.last().map_or(0, |&newest| wall.saturating_sub(newest));
+                    let expected =
+                        crate::genlock_n1_depth::n1_expected_depth_frames(floor, ms, I30, 0);
+                    let sel_expected =
+                        relock_select_nearest(&q, wall, relock_expected_age_ns(expected, ms, I30));
+                    let stale = relock_anchor_is_stale(i, sel_expected, 1);
                     if backlog && (i == 0 || stale) && self.phase_anchor_ns != 0 {
                         self.phase_anchor_ns = 0;
                         i = relock_select_nearest(&q, wall, relock_anchor_age_ns(0, ms));
