@@ -5622,11 +5622,12 @@ static inline uint64_t genlock_relock_target_age_ns(const obs_source_t *source, 
  * forward so a tie can never oscillate between neighbours on successive episodes. Callers are
  * only ever reached with num >= 1 (ready_async_frame guards on it and both relock branches
  * additionally require due > 0); the num == 0 early return is defensive, never a live path.
- * Mirror of src/genlock_backlog.rs relock_select_nearest. */
-static inline size_t genlock_relock_select_nearest(const obs_source_t *source, uint64_t wall_now_ns,
-						   uint32_t latency_ms)
+ * The scan itself takes the target AGE (issue 1367: the backlog relock also needs the pick at the
+ * configured latency without touching the anchor). Mirror of src/genlock_backlog.rs
+ * relock_select_nearest, which takes the age too. */
+static inline size_t genlock_relock_select_nearest_age(const obs_source_t *source, uint64_t wall_now_ns,
+						       uint64_t age)
 {
-	const uint64_t age = genlock_relock_target_age_ns(source, latency_ms);
 	const uint64_t target = wall_now_ns > age ? wall_now_ns - age : 0;
 	size_t best = 0;
 	uint64_t best_d;
@@ -5644,6 +5645,36 @@ static inline size_t genlock_relock_select_nearest(const obs_source_t *source, u
 		}
 	}
 	return best;
+}
+
+/* camera-box #1003: the pick against the tracked anchor (floored at the configured latency). */
+static inline size_t genlock_relock_select_nearest(const obs_source_t *source, uint64_t wall_now_ns,
+						   uint32_t latency_ms)
+{
+	return genlock_relock_select_nearest_age(source, wall_now_ns,
+						 genlock_relock_target_age_ns(source, latency_ms));
+}
+
+/* camera-box issue 1367: the pick against the CONFIGURED latency alone -- what the anchor-unset
+ * fallback would select. Mirror of src/genlock_backlog.rs
+ * relock_select_nearest(queue, wall, relock_anchor_age_ns(0, latency_ms)). */
+static inline size_t genlock_relock_select_configured(const obs_source_t *source, uint64_t wall_now_ns,
+						      uint32_t latency_ms)
+{
+	return genlock_relock_select_nearest_age(source, wall_now_ns, (uint64_t)latency_ms * 1000000ULL);
+}
+
+/* camera-box issue 1367: is the tracked anchor STALE for a BACKLOG relock? The anchor is floored
+ * at the configured latency, so its pick is never younger than the configured pick. A gap of up
+ * to n source frames (n = the measured source multiple, 0 counts as 1) is one canvas tick of
+ * ordinary arrival jitter, where the #1003 phase continuity is kept. More than that is an
+ * arrival-burst phase: keeping it sheds only the frames that age past it, a 60-into-30 source
+ * adds two per tick, and the branch re-fires every tick for minutes (live 25.9.2026: cam6 5028
+ * relocks, ~300 ms late). Mirror of src/genlock_backlog.rs relock_anchor_is_stale. */
+static inline bool genlock_relock_anchor_is_stale(size_t sel_anchor, size_t sel_configured, uint32_t n)
+{
+	const size_t tolerance = n > 1 ? (size_t)n : 1;
+	return sel_configured > sel_anchor && sel_configured - sel_anchor > tolerance;
 }
 
 /* camera-box #1003: the anchor to remember after presenting `presented_ts_ns` at wall instant
@@ -7051,6 +7082,29 @@ static bool genlock_release_tick(obs_source_t *source, uint64_t wall_now, uint64
 		 * no longer re-mint the release PHASE while doing it. */
 		size_t sel_1003 =
 			genlock_relock_select_nearest(source, wall_now, reserve_ms);
+		/* #940 piece 1: re-derive n the SAME way genlock_backlog_relock_qdepth()
+		 * did internally (READ-ONLY, same tick -> same result) so the logged
+		 * steady_depth_frames subtracts the FULL scaled margin (#940 piece 2:
+		 * MARGIN * n, not the bare MARGIN) -- otherwise a 60-into-30 source
+		 * (n>=2) would log an inflated steady_depth_frames by MARGIN*(n-1).
+		 * Issue 1367: the stale-anchor test below reads the same n. */
+		const uint32_t measured_n_for_log = genlock_measure_source_multiple(source, interval);
+		const uint32_t n_for_log =
+			measured_n_for_log >= 1
+				? measured_n_for_log
+				: (source->genlock_last_known_n >= 1 ? source->genlock_last_known_n : 1);
+		/* camera-box issue 1367: after an arrival BURST (frames ~300 ms late,
+		 * depth 15-17) the anchor holds the LATE phase. Its pick then sheds only
+		 * the frames that age past it while a 60-into-30 source adds two per
+		 * tick, so the depth stays above the threshold and this branch re-fires
+		 * every tick for minutes (live 25.9.2026: cam6 relocked 5028 times,
+		 * presented ~300 ms late). An anchor pick more than one canvas tick
+		 * behind the configured-latency pick is that burst phase, not jitter:
+		 * drop it with the same reset as the shed-nothing case below, so ONE
+		 * relock sheds the whole burst. Within one tick the anchor is kept. */
+		const size_t sel_cfg_1367 = genlock_relock_select_configured(source, wall_now, reserve_ms);
+		const bool stale_1367 = genlock_relock_anchor_is_stale(sel_1003, sel_cfg_1367, n_for_log);
+		bool stale_reset_1367 = false;
 		/* camera-box #1003 (adversarial review finding): a BACKLOG relock
 		 * that would shed NOTHING is proof the anchor is STALE. This
 		 * branch only fires ABOVE the latency-implied depth, so an anchor
@@ -7062,25 +7116,15 @@ static bool genlock_release_tick(obs_source_t *source, uint64_t wall_now, uint64
 		 * one relock sheds the overshoot, and the anchor rebuilds from the
 		 * next STEADY present. ACQUIRE is deliberately exempt -- index 0
 		 * there just means "present the head", and the fresh lock stops the
-		 * branch re-firing. Mirror: the Tier-0 sim's relock_present. */
-		if (sel_1003 == 0 && source->genlock_phase_anchor_ns != 0) {
+		 * branch re-firing. Mirror: the Tier-0 sim's relock_present.
+		 * Issue 1367 widened it to the stale burst anchor (stale_1367 above). */
+		if ((sel_1003 == 0 || stale_1367) && source->genlock_phase_anchor_ns != 0) {
 			source->genlock_phase_anchor_ns = 0;
 			sel_1003 = genlock_relock_select_nearest(source, wall_now,
 								reserve_ms);
+			stale_reset_1367 = true;
 		}
 		{
-			/* #940 piece 1: re-derive n the SAME way genlock_backlog_relock_qdepth()
-			 * did internally (READ-ONLY, same tick -> same result) so the logged
-			 * steady_depth_frames subtracts the FULL scaled margin (#940 piece 2:
-			 * MARGIN * n, not the bare MARGIN) -- otherwise a 60-into-30 source
-			 * (n>=2) would log an inflated steady_depth_frames by MARGIN*(n-1). */
-			const uint32_t measured_n_for_log =
-				genlock_measure_source_multiple(source, interval);
-			const uint32_t n_for_log =
-				measured_n_for_log >= 1
-					? measured_n_for_log
-					: (source->genlock_last_known_n >= 1 ? source->genlock_last_known_n
-									: 1);
 			const size_t steady_depth_frames_for_log =
 				(size_t)genlock_backlog_relock_qdepth(
 					source, reserve_ms, interval) -
@@ -7103,7 +7147,7 @@ static bool genlock_release_tick(obs_source_t *source, uint64_t wall_now, uint64
 			     "genlock-relock '%s': depth=%zu steady_depth_frames=%zu "
 			     "due=%zu erased=%zu head_skew_ms=%lld "
 			     "tick_phase_ns=%llu anchor_ns=%llu sel_vs_newest_due=%lld "
-			     "interval_ns=%llu latency_ms=%u",
+			     "interval_ns=%llu latency_ms=%u stale_reset=%d",
 			     source->context.name ? source->context.name : "?",
 			     source->async_frames.num, steady_depth_frames_for_log,
 			     due, sel_1003,
@@ -7115,7 +7159,10 @@ static bool genlock_release_tick(obs_source_t *source, uint64_t wall_now, uint64
 							  : 0),
 			     (unsigned long long)source->genlock_phase_anchor_ns,
 			     (long long)((long long)sel_1003 - (long long)(due - 1)),
-			     (unsigned long long)interval, reserve_ms);
+			     (unsigned long long)interval, reserve_ms,
+			     /* issue 1367: 1 = this relock dropped the anchor (a burst or a shed-nothing
+			      * anchor) and shed to the configured latency; anchor_ns then reads 0. */
+			     stale_reset_1367 ? 1 : 0);
 		}
 		release = sel_1003 + 1;
 	} else if (source->async_frames.array[0]->timestamp <=

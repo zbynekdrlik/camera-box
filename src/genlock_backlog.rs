@@ -613,8 +613,8 @@ pub fn relock_select_nearest(queue_ts: &[u64], wall_now_ns: u64, anchor_age_ns: 
 ///
 /// Mirror of the C `genlock_relock_anchor_is_stale()` (obs-source.c) — keep both in lock-step.
 pub fn relock_anchor_is_stale(sel_anchor: usize, sel_configured: usize, n: u32) -> bool {
-    let _ = (sel_anchor, sel_configured, n);
-    false
+    let tolerance = n.max(1) as usize;
+    sel_configured > sel_anchor && sel_configured - sel_anchor > tolerance
 }
 
 /// #1161 — the fail-open MARGIN (ticks) the ACQUIRE bracketing gate ([`relock_acquire_should_hold`])
@@ -1659,7 +1659,12 @@ mod tests {
                     // relock sheds the overshoot and the anchor rebuilds from the next
                     // STEADY present. (ACQUIRE is exempt: idx 0 there just means "present
                     // the head", and the fresh lock stops the branch re-firing.)
-                    if backlog && i == 0 && self.phase_anchor_ns != 0 {
+                    // Issue 1367: the same reset when the anchor pick sits more than one
+                    // canvas tick behind the configured pick (an arrival-burst phase). This
+                    // sim is 30-into-30, so the C's measured multiple is 1 here.
+                    let configured = relock_select_nearest(&q, wall, relock_anchor_age_ns(0, ms));
+                    let stale = relock_anchor_is_stale(i, configured, 1);
+                    if backlog && (i == 0 || stale) && self.phase_anchor_ns != 0 {
                         self.phase_anchor_ns = 0;
                         i = relock_select_nearest(&q, wall, relock_anchor_age_ns(0, ms));
                     }
