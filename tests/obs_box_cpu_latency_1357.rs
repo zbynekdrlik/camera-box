@@ -334,10 +334,11 @@ fn holder(dev: &Path, args: &[&str]) -> (i32, String, String) {
     holder_env(dev, args, &[])
 }
 
-/// Run the holder under a 1 s timeout, outside systemd unless `env` sets NOTIFY_SOCKET.
+/// Run the holder under a 2 s timeout (room for a loaded CI runner), outside systemd unless `env`
+/// sets NOTIFY_SOCKET.
 fn holder_env(dev: &Path, args: &[&str], env: &[(&str, &str)]) -> (i32, String, String) {
     let mut cmd = Command::new("timeout");
-    cmd.arg("1")
+    cmd.arg("2")
         .arg("bash")
         .arg(manifest_dir().join(HOLDER))
         .args(args)

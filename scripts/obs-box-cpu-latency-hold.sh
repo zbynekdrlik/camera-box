@@ -49,7 +49,9 @@ fi
 echo "obs-box-cpu-latency: holding a CPU wake-up latency bound of ${US} us on ${DEV} (idle states with a longer exit latency are skipped while this runs)"
 # Under the Type=notify unit, report ready only now that the bound is written: `systemctl start`
 # (the installer, the boot ordering before the display manager) returns once the bound is held, and a
-# holder that failed to open or write the device fails the start instead of passing it.
+# holder that failed to open or write the device fails the start instead of passing it. Keep the call
+# BLOCKING (never --no-block): with NotifyAccess=all PID1 attributes READY by the sender's pid, and the
+# default barrier wait keeps systemd-notify alive until PID1 handled it.
 if [ -n "${NOTIFY_SOCKET:-}" ] && ! systemd-notify --ready; then
     echo "obs-box-cpu-latency: systemd-notify --ready failed -- the unit would never finish starting" >&2
     exit 1
