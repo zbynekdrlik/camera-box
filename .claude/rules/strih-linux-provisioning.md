@@ -1032,6 +1032,14 @@ would have produced a different box. Each is now provisioned at its source and g
   `obs_box_write_if_changed` rule); the lib keeps its own small writer because setup-device.sh does
   not source the obs-box baseline.
 
+- **Proving a change to the lib without the rig:** every path is an env seam (`REMOTEOS_MCP_VENV`,
+  `REMOTEOS_MCP_CONFIG_DIR`, `REMOTEOS_MCP_UNIT_PATH`, `REMOTEOS_MCP_HEALTH_SLEEP`), so a script that
+  puts stub `systemctl`/`apt-get` on PATH and points the seams at a scratch dir runs the REAL fetch +
+  `python3 -m venv` + pip as a normal user (~50 s), then a second run must log every file `unchanged`.
+  Start the scratch venv's `python -m remoteos --port <free port>` with the env file sourced to check
+  auth (no key 401, right key 200). The Rust tests' fake venv python must log next to the rig and take
+  its failure flag from a FILE: pip runs under `env -i`, so the test's env vars never reach it.
+
 **G3 — the Downstream Keyer plugin.** The pinned upstream release asset
 `downstream-keyer-0.4.4-x86_64-linux-gnu.deb` (sha256 = its GitHub release digest) carries the
 exact `.so` strih-lx loads (sha256 `9304d665…08be5`, compared 25.9.2026). The .deb `Depends:
