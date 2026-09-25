@@ -95,8 +95,7 @@ pub fn genlock_audio_delay_ns(hold_ms: u32) -> u64 {
 ///
 /// Mirror of `genlock_video_delay_sample_ns`.
 pub fn video_delay_sample_ns(tick_wall_ns: u64, presented_stamp_ns: u64) -> u64 {
-    // RED stub: the first cut saturated to the 0 sentinel.
-    tick_wall_ns.saturating_sub(presented_stamp_ns)
+    tick_wall_ns.saturating_sub(presented_stamp_ns).max(1)
 }
 
 /// One EMA step of the smoothed stamp→present delay. `0` is the unseeded sentinel: the first sample
@@ -109,9 +108,8 @@ pub fn video_delay_smooth_ns(smoothed_ns: u64, sample_ns: u64) -> u64 {
     if smoothed_ns == 0 {
         return sample_ns;
     }
-    // RED stub: the first cut's signed difference.
-    let diff = sample_ns as i64 - smoothed_ns as i64;
-    (smoothed_ns as i64 + diff / (1i64 << VIDEO_DELAY_EMA_SHIFT)) as u64
+    let diff = sample_ns.wrapping_sub(smoothed_ns) as i64;
+    smoothed_ns.wrapping_add((diff / (1i64 << VIDEO_DELAY_EMA_SHIFT)) as u64)
 }
 
 /// The smoothed delay rounded to whole ms, never 0 (`0` means "no delay applied yet").
@@ -239,9 +237,7 @@ pub fn audio_hold_ms(mode: AudioHoldMode, latency_ms: u32, video_delay_ms: u32) 
 ///
 /// Mirror of `genlock_audio_needs_live_offset`.
 pub fn audio_needs_live_offset(mode: AudioHoldMode, prev_mode: AudioHoldMode) -> bool {
-    // RED stub: the first cut read the clocks on every packet.
-    let _ = (mode, prev_mode);
-    true
+    mode == AudioHoldMode::Timecode || prev_mode == AudioHoldMode::Timecode
 }
 
 /// The live wall→OBS-monotonic offset: `mono_now − wall_now` (two's-complement, so a monotonic

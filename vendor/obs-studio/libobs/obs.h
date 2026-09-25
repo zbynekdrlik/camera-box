@@ -1679,7 +1679,7 @@ struct obs_genlock_stats {
 	 * delay (issue 1367; latency_ms before the first measurement settles). */
 	bool audio_enabled;              /* this source's NDI audio is active (obs_source_audio_active) */
 	uint32_t audio_delay_ms;         /* the audio hold last applied at ingest (the measured video delay, or latency_ms before it settles; 0 = not held / no audio yet) */
-	int64_t audio_pairing_offset_ms; /* residual A/V offset: audio_delay_ms - the MEASURED video stamp->present delay (latency_ms before any measurement); 0 = paired, -video delay = audio never held */
+	int64_t audio_pairing_offset_ms; /* residual A/V offset: audio_delay_ms - the MEASURED video stamp->present delay (latency_ms before any measurement); 0 = paired, -video delay = audio never held. A PROXY: it never observes where the audio samples actually sit */
 	/* camera-box #1299 — receiver connection state (added in v3; a consumer reads `version >= 3`
 	 * before touching it). true = the DistroAV receiver has a live NDI connection (no_connections>0);
 	 * false = its sender is not running. An input with connected=false is EXCLUDED from the DEGRADED

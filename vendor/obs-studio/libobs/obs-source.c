@@ -1661,18 +1661,22 @@ static inline uint64_t genlock_audio_present_delay_ns(uint32_t latency_ms)
 #define GENLOCK_AUDIO_HOLD_OFF 0
 #define GENLOCK_AUDIO_HOLD_LATENCY 1
 #define GENLOCK_AUDIO_HOLD_TIMECODE 2
-/* one stamp->present sample: the head's age at the render tick's SCHEDULED wall instant. */
-static inline uint64_t genlock_video_delay_sample_ns(uint64_t tick_wall_ns, uint64_t head_stamp_ns)
+/* one stamp->present sample: the PRESENTED frame's age at the render tick's SCHEDULED wall
+ * instant, clamped to >= 1 ns so it never produces the 0 "unseeded" sentinel of the EMA. */
+static inline uint64_t genlock_video_delay_sample_ns(uint64_t tick_wall_ns, uint64_t presented_stamp_ns)
 {
-	return tick_wall_ns > head_stamp_ns ? tick_wall_ns - head_stamp_ns : 0;
+	const uint64_t age = tick_wall_ns > presented_stamp_ns ? tick_wall_ns - presented_stamp_ns : 0;
+	return age > 1 ? age : 1;
 }
-/* one EMA step; 0 = unseeded (the first sample seeds). Truncates toward zero like the Rust i64. */
+/* one EMA step; 0 = unseeded (the first sample seeds). The difference is taken in uint64 and read
+ * as two's complement, the eighth truncates toward zero, and the sum wraps -- no signed overflow at
+ * any input, identical to the Rust wrapping form. */
 static inline uint64_t genlock_video_delay_smooth_ns(uint64_t smoothed_ns, uint64_t sample_ns)
 {
 	if (smoothed_ns == 0)
 		return sample_ns;
-	const int64_t diff = (int64_t)sample_ns - (int64_t)smoothed_ns;
-	return (uint64_t)((int64_t)smoothed_ns + diff / ((int64_t)1 << GENLOCK_VIDEO_DELAY_EMA_SHIFT));
+	const int64_t diff = (int64_t)(sample_ns - smoothed_ns);
+	return smoothed_ns + (uint64_t)(diff / ((int64_t)1 << GENLOCK_VIDEO_DELAY_EMA_SHIFT));
 }
 /* the smoothed delay rounded to whole ms, never 0 (0 = nothing applied). */
 static inline uint32_t genlock_video_delay_round_ms(uint64_t smoothed_ns)
@@ -1736,6 +1740,12 @@ static inline const char *genlock_audio_hold_token(int mode)
 	if (mode == GENLOCK_AUDIO_HOLD_LATENCY)
 		return "latency";
 	return "off";
+}
+/* only a timecode hold (new or previous) needs the live offset; everything else skips the two
+ * clock reads. */
+static inline bool genlock_audio_needs_live_offset(int mode, int prev_mode)
+{
+	return mode == GENLOCK_AUDIO_HOLD_TIMECODE || prev_mode == GENLOCK_AUDIO_HOLD_TIMECODE;
 }
 /* the live wall -> OBS monotonic offset, mono_now - wall_now (two's complement). */
 static inline int64_t genlock_audio_wall_to_mono_ns(uint64_t mono_now_ns, uint64_t wall_now_ns)
@@ -1884,7 +1894,10 @@ static void source_output_audio_data(obs_source_t *source, const struct audio_da
 							      genlock_video_delay_ms);
 	const uint32_t genlock_hold_ms =
 		genlock_audio_hold_ms(genlock_hold_mode, source->genlock_latency_ms, genlock_video_delay_ms);
-	const int64_t genlock_off_live_ns = genlock_audio_wall_to_mono_ns(os_gettime_ns(), genlock_wall_now_ns());
+	const int64_t genlock_off_live_ns =
+		genlock_audio_needs_live_offset(genlock_hold_mode, prev_genlock_audio_hold_mode)
+			? genlock_audio_wall_to_mono_ns(os_gettime_ns(), genlock_wall_now_ns())
+			: 0;
 	const int64_t genlock_term_ns =
 		genlock_audio_place_term_ns(genlock_hold_mode, genlock_hold_ms, genlock_off_live_ns, genlock_timing_adjust);
 	in.timestamp += (uint64_t)genlock_term_ns;
@@ -6572,6 +6585,20 @@ static bool genlock_release_tick(obs_source_t *source, uint64_t wall_now, uint64
 		next_frame->timestamp + interval;
 	source->genlock_frames_consumed++;
 	source->last_frame_ts = next_frame->timestamp;
+	/* camera-box issue 1367 (Option 3): track this source's REAL stamp->present delay for its audio
+	 * -- the age of the frame this tick PRESENTS (the queue head on a canvas-rate source, the newest
+	 * matured frame on an N >= 2 source, whose head is (N-1) source intervals older) at the tick's
+	 * SCHEDULED instant (the head skew sampled in ready_async_frame is taken at the processing wall
+	 * and carries tick lateness). A tick off the per-second grid (a wall step slewing back) is not
+	 * sampled. EMA-smoothed and re-applied only on a half-frame move once settled; the audio ingest
+	 * (source_output_audio_data) places this source's audio at its timecode + the applied delay. */
+	const uint64_t genlock_delay_tick_wall = genlock_n1_tick_wall_now(wall_now);
+	if (genlock_n1_tick_is_on_grid(genlock_delay_tick_wall, interval))
+		genlock_video_delay_track(&source->genlock_video_delay_smoothed_ns,
+					  &source->genlock_video_delay_applied_ms,
+					  &source->genlock_video_delay_settle_ticks,
+					  genlock_video_delay_sample_ns(genlock_delay_tick_wall, next_frame->timestamp),
+					  interval);
 	genlock_audit_log(source, now_ns);
 	return true;
 }
@@ -6682,19 +6709,6 @@ static bool ready_async_frame(obs_source_t *source, uint64_t sys_time)
 				source->genlock_last_head_skew_ns =
 					(int64_t)(wall_now -
 						  source->async_frames.array[0]->timestamp);
-				/* camera-box issue 1367 (Option 3): track this source's REAL stamp->present
-				 * delay for its audio -- the head's age at the tick's SCHEDULED instant (the
-				 * skew above is taken at the processing wall and so carries tick lateness),
-				 * EMA-smoothed and re-applied only on a half-frame move once settled. The
-				 * audio ingest (source_output_audio_data) places this source's audio at its
-				 * timecode + genlock_video_delay_applied_ms. */
-				genlock_video_delay_track(&source->genlock_video_delay_smoothed_ns,
-							  &source->genlock_video_delay_applied_ms,
-							  &source->genlock_video_delay_settle_ticks,
-							  genlock_video_delay_sample_ns(
-								  genlock_n1_tick_wall_now(wall_now),
-								  source->async_frames.array[0]->timestamp),
-							  interval);
 				/* count-gate machinery (empty_run re-arm / fill latch) is unused on
 				 * this path — ts-align self-heals after a transient via the real ts. */
 				source->genlock_empty_run = 0;

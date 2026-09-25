@@ -101,10 +101,24 @@ and `audio_pairing_offset_ms`, computed against the same pin, read 0.
 **The decision (ROZHODNUTÉ on the ticket).** Leave the shallow VIDEO depth alone. Make the audio
 follow whatever delay the video actually has.
 
-- **Measure on the render thread** at the ts-align head-skew site: `genlock_video_delay_track`
-  fed `genlock_video_delay_sample_ns(genlock_n1_tick_wall_now(wall_now), head->timestamp)`. The
-  sample uses the tick's SCHEDULED instant, not the processing wall (`genlock_last_head_skew_ns`
-  carries tick lateness). EMA 1/8 per tick.
+- **Measure on the render thread at the PRESENT TAIL of `genlock_release_tick`**, on the frame the
+  tick actually presents (`next_frame`, after every erase / drain / converge shed):
+  `genlock_video_delay_sample_ns(genlock_delay_tick_wall, next_frame->timestamp)` with
+  `genlock_delay_tick_wall = genlock_n1_tick_wall_now(wall_now)`. Three things were wrong with the
+  first cut, which sampled `array[0]` at the head-skew site (review round 1):
+  - on a source at N ≥ 2 × the canvas rate the STEADY branch presents the NEWEST matured frame, so
+    the head over-read by (N − 1) source intervals (16.7 ms for a 60p source on a 30p canvas; the
+    bench's `HeadSample` variant shows it);
+  - the processing-wall skew carries tick lateness, so the sample uses the SCHEDULED instant;
+  - a tick off the per-second grid (a wall step slewing back) is not sampled
+    (`genlock_n1_tick_is_on_grid`), or a long step could apply a transient delay.
+
+  A hold tick presents nothing new and is not sampled. The sample is clamped to ≥ 1 ns, so it never
+  produces the EMA's `0` "unseeded" sentinel. EMA 1/8 per sample, computed in wrapping u64 on both
+  sides (the first cut's signed difference could overflow). This makes the tracker the THIRD
+  `genlock_n1_tick_wall_now(wall_now)` reader: the count anchor is 3 in
+  `tests/genlock_release_cadence.rs` and both ymls (`Count -ne 3`), and
+  `const uint64_t genlock_delay_tick_wall = genlock_n1_tick_wall_now(wall_now);` is pinned count-1.
 - **Quantize with hysteresis, apply once settled.** A move of the EMA by half a frame or more ARMS
   a 64-tick settle; at its end the rounded delay is applied only if it is STILL half a frame away.
   Applying at the crossing would latch the audio mid-step (≈ 83 ms for a 100 → 67 ms step), and the
@@ -112,7 +126,9 @@ follow whatever delay the video actually has.
   nothing (pinned by a parity sequence: excursion to 100, back to 70 with 67 applied → stays 67).
 - **Place through the LIVE offset.** In `source_output_audio_data`, `in.timestamp` is
   `tc + timing_adjust` at that point, so the term is `off_live + delay − timing_adjust` with
-  `off_live = os_gettime_ns() − genlock_wall_now_ns()` read on EVERY packet. The result is
+  `off_live = os_gettime_ns() − genlock_wall_now_ns()` read on EVERY packet whose new or previous
+  hold is the timecode one (`genlock_audio_needs_live_offset`; a mic or a latency-mode source skips
+  the two clock reads, and `GetSystemTimePreciseAsFileTime` is not free). The result is
   `tc + off_live + delay`. A mapping latched at the first packet walks by the wall-vs-QPC drift
   (resolume: 318 ms); the bench's `LatchedOffset` variant fails at 150 ms.
 - **Re-place at once on a change.** A change of `(mode, hold)` forces `push_back = false` and shifts
@@ -125,6 +141,10 @@ follow whatever delay the video actually has.
 - **Between placements** packets append back to back, and the genlock ASRC (the rate servo
   disciplined against the wall clock plus its level loop) holds the captured depth. That is what
   absorbs the wall-vs-QPC drift; the placement only has to be right when it happens.
+- **The pairing offset is a PROXY.** `audio_pairing_offset_ms` = applied hold − measured delay. It
+  never observes where the audio samples actually sit, so a wrong placement, or a depth the rate
+  servo walked, would still read 0. Real A/V proof stays with an end-to-end measurement (the
+  songplayer A/V gate, the camera-box E2E A/V gate).
 - **Health.** The audit's `audio_health=` uses `decide_audio_health` at half a frame (the
   program-source / ASRC-saturation inputs pass 0 at that seam). The LOCK widget's own
   `GENLOCK_AUDIO_PAIRING_BOUND_MS` stays one frame (33 ms). It now sees REAL residuals, which were
@@ -137,12 +157,23 @@ follow whatever delay the video actually has.
 - **Deep sources are unaffected.** Stream `NDI 2ME PGM` and every strih/stream/imag input carry no
   NDI audio (the certified table below), so their video path is byte-identical.
 
+**Lock-step anchors of THIS change** (all must move together): the std-only
+`tests/genlock_audio_timecode_placement_1367.rs` (tracker at the present tail after the presented
+frame, exactly one call site, the ingest seams, the offset reference, the audit tokens), the
+`tests/genlock_preload.rs` hold + shift anchors, the `genlock_n1_tick_wall_now(wall_now)` count of
+3 + the count-1 tracker read in `tests/genlock_release_cadence.rs`, and the matching
+`-notmatch` / `Count -ne 3` anchors in BOTH `windows-genlock*.yml`.
+
 **The two-clock bench** (`src/genlock_audio_pairing_bench.rs`, a test-only child): wall and QPC
 clocks with 300 ms of drift over an hour, scripted depth changes, a sender restart (3 s silence,
 audio resync) and an OBS restart (all receiver state zeroed), a first-order ASRC (rate servo that
 locks after 5 s with τ = 20 s, plus a clamped P level loop). The A/V error is measured on every tick
 outside a 6 s window after each event. Production: max 1.80 ms. `LatchedOffset`: 150.8 ms.
 `LegacyLatency` (the #1303 hold): 130.3 ms. Single held ticks (1 in 15) cause no extra re-placement.
+A 2× source (60p on a 30p canvas) pairs at 1.80 ms when the presented frame is sampled, and at
+16.7 ms (`HeadSample`) when the queue head is. The bench's rate estimate converges on the TRUE
+drift by construction, so it ASSUMES drift is absorbed between placements (the real servo is
+proven by `src/asrc_bench.rs`). What it proves is that each placement lands on the live offset.
 
 **Live acceptance (supervisor).** Full-bundle deploy on resolume, strih-lx and stream. On resolume
 the `sp-*_video` audit shows `audio_hold=timecode`, `audio_delay_ms` ≈ `video_delay_ms`, and
