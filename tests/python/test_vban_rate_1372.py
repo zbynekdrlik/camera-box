@@ -494,7 +494,10 @@ def test_tsv_keeps_its_columns_for_an_empty_stream_name():
 
 def test_rate_fault_needs_the_bound_cleared_by_two_stderr():
     g = vr.Grading(ppm_bound=20.0, loss_ceiling=1e-4, min_span_s=20.0)
-    assert vr.grade(_stats(rate_ppm=21.0, rate_stderr_ppm=1.0), g)[0] == "OK"
+    # review round 3: a rate is OK only when |rate| + 2 stderr stays inside the bound, FAULT only when
+    # |rate| - 2 stderr is outside it; a reading straddling the bound is UNCERTAIN (was OK)
+    assert vr.grade(_stats(rate_ppm=21.0, rate_stderr_ppm=1.0), g)[0] == "UNCERTAIN"
+    assert vr.grade(_stats(rate_ppm=17.0, rate_stderr_ppm=1.0), g)[0] == "OK"
     assert vr.grade(_stats(rate_ppm=23.0, rate_stderr_ppm=1.0), g)[0] == "FAULT"
 
 
@@ -544,3 +547,34 @@ def test_a_stream_too_noisy_to_resolve_the_bound_is_uncertain_not_ok():
     assert vr.grade(_stats(rate_ppm=1.0, rate_stderr_ppm=10.8, lost=9, loss_ratio=8e-4), g)[0] == "FAULT"
     res = vr.CaptureResult(linktype=276, packets=0, streams=[], truncated_vban=0)
     assert vr.overall_verdict(res, [("UNCERTAIN", ["x"])]) == "UNKNOWN"
+
+
+
+# ---------------------------------------------------------------------------------------------
+# review round 3 (issue 1372): a gross rate fault is never hidden by noise; a burst of late
+# duplicates is not a restart; a late duplicate inside an outage never hides the outage's loss
+# ---------------------------------------------------------------------------------------------
+
+def test_a_gross_rate_fault_is_a_fault_however_noisy():
+    g = vr.Grading(ppm_bound=20.0, loss_ceiling=1e-4, min_span_s=20.0)
+    assert vr.grade(_stats(rate_ppm=1000.0, rate_stderr_ppm=12.0), g)[0] == "FAULT"
+    assert vr.grade(_stats(rate_ppm=-300.0, rate_stderr_ppm=16.0), g)[0] == "FAULT"
+
+
+def test_a_burst_of_late_duplicates_is_not_a_restart():
+    recs = stream_records(3000)
+    base = recs[980][0] + 100_000_000  # three late copies arriving BACK TO BACK, 100 ms late
+    burst = [(base + j * 10, recs[k][1]) for j, k in enumerate((980, 981, 982))]
+    s = only_stream(pcap_bytes(276, sorted(recs + burst)))
+    assert s.jumps == 0 and s.lost == 0, (s.jumps, s.lost)
+    assert s.unique_frames == 3000 and s.duplicates == 3
+
+
+def test_a_late_duplicate_inside_an_outage_never_hides_the_outage_loss():
+    gap = 187
+    recs = stream_records(6000, gap_at=3000, gap_s=gap * SPF / NOMINAL)
+    t_gap0 = recs[2999][0]
+    dup = (t_gap0 + 950_000_000, recs[2990][1])  # a late copy of an earlier packet, near the outage end
+    s = only_stream(pcap_bytes(276, sorted(recs + [dup])))
+    assert s.lost == gap, (s.lost, s.jumps)
+    assert s.jumps == 0

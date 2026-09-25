@@ -169,3 +169,11 @@ def test_a_short_pass_does_not_keep_a_stale_confirm_count_alive(tmp_path):
         _run(tmp_path, short, VBAN_RATE_CONFIRM_THRESHOLD="2", VBAN_RATE_NOW=str(_NOW + k * 600))
     later = _run(tmp_path, lossy, VBAN_RATE_CONFIRM_THRESHOLD="2", VBAN_RATE_NOW=str(_NOW + 13 * 600))
     assert "not yet CONFIRMED" in later and "WOULD alert" not in later, later
+
+
+
+def test_the_blind_capture_key_is_one_literal_for_dry_run_and_the_real_notify():
+    """Review round 3: the stable key must not be two literals that can drift apart."""
+    s = _WATCHDOG.read_text()
+    assert s.count('local ckey="vban-rate-capture-${BOX}"') == 1
+    assert '--dedup-key "$ckey"' in s and "dedup-key=$ckey" in s
