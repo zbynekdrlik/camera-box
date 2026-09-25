@@ -125,7 +125,7 @@ def genlock_lock_facet_from_log(text):
 
     Issue 1372 part D (schema v7): `media_clock` is the audio (media) clock facet the widget decided
     with -- `state` ok|drift|undisciplined, the wall-vs-media drift `drift_us` per `window_s` (the
-    trimmed-mean per-pair rate scaled to the window),
+    time-weighted rate of the non-step pairs, scaled to the window),
     whether that window has filled (`ready`), and the Windows discipline outcome (`discipline`:
     active|disabled|read_failed|api_missing|unknown, or n/a on Linux). Omitted for a pre-v7 line or a
     malformed object, never fabricated.

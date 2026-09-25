@@ -64,7 +64,7 @@ MC_UNDISCIPLINED = "undisciplined"
 GENLOCK_MEDIA_CLOCK_WINDOW_S = 600          # the window the drift growth is measured over
 GENLOCK_MEDIA_CLOCK_DRIFT_BOUND_US = 2000   # offset growth beyond this (us per window) is DRIFT
 GENLOCK_MEDIA_CLOCK_MAX_GAP_MS = 5000       # a pair further apart (a stalled UI) is not a sample
-GENLOCK_MEDIA_CLOCK_BAND_PPB = 25_000       # the trimmed mean keeps pairs within this of the median
+GENLOCK_MEDIA_CLOCK_BAND_US = 100           # a pair off the centre's prediction by more is a STEP
 # The Windows os_gettime_discipline() outcomes that mean "fell back to raw QPC".
 MEDIA_DISCIPLINE_RAW_FALLBACK = ("disabled", "read_failed", "api_missing")
 
@@ -105,37 +105,35 @@ def _trunc_div(a, b):
     return q if (a >= 0) == (b > 0) else -q
 
 
-def media_clock_window(samples, window_s, max_gap_ms, band_ppb):
+def media_clock_window(samples, window_s, max_gap_ms, band_us):
     """Issue 1372 part D -- the wall-vs-media rate across `(t_ms, offset_us)` samples (oldest first):
     each consecutive pair with 0 < dt <= max_gap_ms yields one rate in ppb (change_us * 1e6 / dt,
-    truncated toward zero). Their MEDIAN (the mean of the two middle rates for an even count,
-    a + (b - a) / 2) is the centre; the result is the TRIMMED MEAN of the rates within band_ppb of it
-    (the centre itself when none is), truncated toward zero, scaled to window_s: mean_ppb * window_s /
-    1000 us. A wall step lands far outside the band; a drift in only part of the pairs is averaged in.
-    Returns (drift_us, counted_ms); no pair or a non-positive window_s gives drift 0. Mirror of
-    camera_box::genlock_lock_state::media_clock_window, cross-checked vector by vector against it by
+    truncated toward zero); their MEDIAN (the mean of the two middle rates for an even count,
+    a + (b - a) / 2) is the centre. A pair is kept when its change is within band_us of the centre's
+    prediction centre * dt / 1e6 us (a negative band keeps none) -- a pair that spans a wall step is off
+    by the step itself; the rate is sum(kept change) * 1e6 / sum(kept dt) ppb (the centre when none is
+    kept), truncated toward zero, scaled to window_s: rate * window_s / 1000 us. Returns
+    (drift_us, counted_ms); no pair or a non-positive window_s gives drift 0. Mirror of
+    camera_box::genlock_lock_state::media_clock_window, cross-checked run by run against it by
     tests/genlock_lock_state_parity.rs (python ints never overflow, so the Rust/C saturation only
     matters at the i64 extremes no real clock reaches; that gate keeps to the real range)."""
-    rates = []
-    counted_ms = 0
-    for (ta, oa), (tb, ob) in zip(samples, samples[1:]):
-        dt = tb - ta
-        if dt <= 0 or dt > max_gap_ms:
-            continue
-        rates.append(_trunc_div((ob - oa) * 1_000_000, dt))
-        counted_ms += dt
-    if not rates or window_s <= 0:
+    pairs = [(tb - ta, ob - oa) for (ta, oa), (tb, ob) in zip(samples, samples[1:])]
+    pairs = [(dt, change) for dt, change in pairs if 0 < dt <= max_gap_ms]
+    counted_ms = sum(dt for dt, _ in pairs)
+    if not pairs or window_s <= 0:
         return (0, counted_ms)
-    rates.sort()
+    rates = sorted(_trunc_div(change * 1_000_000, dt) for dt, change in pairs)
     m = len(rates)
     if m % 2 == 1:
         centre = rates[m // 2]
     else:
         a, b = rates[m // 2 - 1], rates[m // 2]
         centre = a + _trunc_div(b - a, 2)
-    kept = [r for r in rates if abs(r - centre) <= band_ppb]
-    mean = _trunc_div(sum(kept), len(kept)) if kept else centre
-    return (_trunc_div(mean * window_s, 1000), counted_ms)
+    kept = [(dt, change) for dt, change in pairs
+            if abs(change - _trunc_div(centre * dt, 1_000_000)) <= band_us]
+    dt_sum = sum(dt for dt, _ in kept)
+    rate = _trunc_div(sum(c for _, c in kept) * 1_000_000, dt_sum) if dt_sum else centre
+    return (_trunc_div(rate * window_s, 1000), counted_ms)
 
 
 def media_clock_window_ready(counted_ms, window_s):

@@ -297,33 +297,33 @@ static inline int64_t genlock_media_sat_mul_pos(int64_t a, int64_t b)
 /* The wall-vs-media rate across n samples (oldest first; t_ms the widget's monotonic ms, offset_us the
  * wall-minus-media offset in us). Each consecutive pair with 0 < dt <= max_gap_ms yields one rate in ppb
  * (change_us * 1e6 / dt_ms, truncated toward zero, saturating), kept sorted in the caller's scratch
- * (>= n - 1 entries). Their MEDIAN (the mean of the two middle rates for an even count,
- * a + (b - a) / 2) is the centre; the result is the TRIMMED MEAN of the rates within band_ppb of it
- * (the centre itself when none is), truncated toward zero, scaled to window_s: mean_ppb * window_s /
- * 1000 us. Every step saturates. A wall step lands far outside the band and never counts; a drift in
- * only part of the pairs stays inside and is averaged in. *counted_ms_out gets the total interval of the
- * counted pairs. No pair or a non-positive window_s -> 0. */
+ * (>= n - 1 entries); their MEDIAN (the mean of the two middle rates for an even count, a + (b - a) / 2)
+ * is the centre. A pair is kept when its change is within band_us of centre * dt / 1e6 us (a negative
+ * band keeps none): the deviation of a pair that spans a wall step IS the step, and every dantesync step
+ * is >= ~146 us. The rate is sum(kept change) * 1e6 / sum(kept dt) ppb (the centre when none is kept),
+ * truncated toward zero, scaled to window_s: rate * window_s / 1000 us. Every step saturates.
+ * *counted_ms_out gets the total interval of the counted pairs. No pair or a non-positive window_s -> 0. */
 static inline int64_t genlock_media_clock_window_drift_us(const int64_t *t_ms, const int64_t *offset_us, int n,
-							  int64_t window_s, int64_t max_gap_ms, int64_t band_ppb,
+							  int64_t window_s, int64_t max_gap_ms, int64_t band_us,
 							  int64_t *scratch, int64_t *counted_ms_out)
 {
 	int64_t counted = 0;
 	int64_t centre;
-	int64_t sum = 0;
-	int64_t kept = 0;
-	int64_t mean;
+	int64_t change_sum = 0;
+	int64_t dt_sum = 0;
+	int64_t rate;
 	int m = 0;
 	int i;
 	int j;
 	for (i = 1; i < n; ++i) {
 		const int64_t dt = genlock_media_sat_sub(t_ms[i], t_ms[i - 1]);
-		int64_t rate;
+		int64_t pair_rate;
 		if (dt <= 0 || dt > max_gap_ms)
 			continue;
-		rate = genlock_media_sat_mul_pos(genlock_media_sat_sub(offset_us[i], offset_us[i - 1]), 1000000) / dt;
-		for (j = m; j > 0 && scratch[j - 1] > rate; --j)
+		pair_rate = genlock_media_sat_mul_pos(genlock_media_sat_sub(offset_us[i], offset_us[i - 1]), 1000000) / dt;
+		for (j = m; j > 0 && scratch[j - 1] > pair_rate; --j)
 			scratch[j] = scratch[j - 1];
-		scratch[j] = rate;
+		scratch[j] = pair_rate;
 		++m;
 		counted = genlock_media_sat_add(counted, dt);
 	}
@@ -336,14 +336,20 @@ static inline int64_t genlock_media_clock_window_drift_us(const int64_t *t_ms, c
 	else
 		centre = genlock_media_sat_add(scratch[m / 2 - 1],
 					       genlock_media_sat_sub(scratch[m / 2], scratch[m / 2 - 1]) / 2);
-	for (i = 0; i < m; ++i) {
-		if (genlock_media_sat_abs(genlock_media_sat_sub(scratch[i], centre)) <= band_ppb) {
-			sum = genlock_media_sat_add(sum, scratch[i]);
-			++kept;
+	for (i = 1; i < n; ++i) {
+		const int64_t dt = genlock_media_sat_sub(t_ms[i], t_ms[i - 1]);
+		int64_t change;
+		if (dt <= 0 || dt > max_gap_ms)
+			continue;
+		change = genlock_media_sat_sub(offset_us[i], offset_us[i - 1]);
+		if (genlock_media_sat_abs(genlock_media_sat_sub(change, genlock_media_sat_mul_pos(centre, dt) / 1000000)) <=
+		    band_us) {
+			change_sum = genlock_media_sat_add(change_sum, change);
+			dt_sum = genlock_media_sat_add(dt_sum, dt);
 		}
 	}
-	mean = kept == 0 ? centre : sum / kept;
-	return genlock_media_sat_mul_pos(mean, window_s) / 1000;
+	rate = dt_sum == 0 ? centre : genlock_media_sat_mul_pos(change_sum, 1000000) / dt_sum;
+	return genlock_media_sat_mul_pos(rate, window_s) / 1000;
 }
 
 /* 1 once the counted pairs cover >= 90 % of the window_s window; a non-positive window is never ready. */

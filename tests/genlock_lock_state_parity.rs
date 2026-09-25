@@ -648,7 +648,7 @@ fn lift_media_clock() -> String {
 fn c_media_clock_matches_the_rust_authority_1372_part_d() {
     use camera_box::genlock_lock_state::{
         media_clock_verdict, media_clock_window, media_clock_window_ready, MediaDiscipline,
-        GENLOCK_MEDIA_CLOCK_BAND_PPB, GENLOCK_MEDIA_CLOCK_MAX_GAP_MS, GENLOCK_MEDIA_CLOCK_WINDOW_S,
+        GENLOCK_MEDIA_CLOCK_BAND_US, GENLOCK_MEDIA_CLOCK_MAX_GAP_MS, GENLOCK_MEDIA_CLOCK_WINDOW_S,
     };
     let block = lift_media_clock();
     let (win, gap) = (GENLOCK_MEDIA_CLOCK_WINDOW_S, GENLOCK_MEDIA_CLOCK_MAX_GAP_MS);
@@ -691,6 +691,14 @@ fn c_media_clock_matches_the_rust_authority_1372_part_d() {
         (vec![(0, 0), (3, -1), (6, -1)], win, gap),
         (vec![(0, 0), (3, 1), (6, 3)], win, gap),
         (at_1hz(600, &|i| (i * 9 / 20) * 20), win, gap),
+        (at_1hz(600, &|i| (i * 9 / 20) * 40), win, gap),
+        (
+            (0..=3000i64)
+                .map(|i| (i * 16, i * 16 * 20 / 1000))
+                .collect(),
+            win,
+            gap,
+        ),
         (
             vec![
                 (0, 0),
@@ -699,7 +707,7 @@ fn c_media_clock_matches_the_rust_authority_1372_part_d() {
                 (3000, 0),
                 (4000, 0),
                 (5000, 0),
-                (6000, 25),
+                (6000, 100),
             ],
             win,
             gap,
@@ -782,9 +790,9 @@ fn c_media_clock_matches_the_rust_authority_1372_part_d() {
     let mut c = String::from("#include <stdio.h>\n#include <stdint.h>\n#include <inttypes.h>\n");
     c.push_str(&block);
     c.push_str("int main(void){\n    int64_t counted;\n");
-    // Every window runs against several trimming bands: the production one, none (only the centre),
-    // 1 ppb, a wide one and all-inclusive.
-    let bands = [GENLOCK_MEDIA_CLOCK_BAND_PPB, 0, 1, 500_000, i64::MAX];
+    // Every window runs against several step bands: the production one, exact (0), none kept (-1), a
+    // wide one and all-inclusive.
+    let bands = [GENLOCK_MEDIA_CLOCK_BAND_US, 0, -1, 1000, i64::MAX];
     for (i, (w, ws, g)) in windows.iter().enumerate() {
         let ts: Vec<String> = w.iter().map(|s| lit(s.0)).collect();
         let ds: Vec<String> = w.iter().map(|s| lit(s.1)).collect();

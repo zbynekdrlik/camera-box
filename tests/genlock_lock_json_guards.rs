@@ -205,8 +205,8 @@ fn genlock_lock_qpc_drift_is_the_step_only_1357() {
 
 #[test]
 fn genlock_lock_media_clock_term_present_1372_part_d() {
-    // Issue 1372 part D: the MEDIA-clock (audio clock) term. The widget reduces the trimmed-mean rate of
-    // the wall-vs-media offset over the 600 s window + the Windows discipline outcome into the pure,
+    // Issue 1372 part D: the MEDIA-clock (audio clock) term. The widget reduces the non-step rate of the
+    // wall-vs-media offset over the 600 s window + the Windows discipline outcome into the pure,
     // parity-gated verdict, feeds it to the decision, names it in the label/log, and carries it on the
     // v7 json. A subtree pull that reverts any of these makes the indicator green again while the
     // audio mixer walks off the video grid. Linux-CI twin of the part-D pwsh gate in BOTH
@@ -223,10 +223,10 @@ fn genlock_lock_media_clock_term_present_1372_part_d() {
         STATUSBAR_HPP,
         "std::deque<std::pair<qint64, int64_t>> genlockMediaClockHistory;",
     );
-    // the pure reduction (wall steps fall outside the band) + verdict, fed the widget's own samples
+    // the pure reduction (wall steps left out) + verdict, fed the widget's own samples
     assert_has(
         STATUSBAR_CPP,
-        "genlock_media_clock_window_drift_us( sample_ms.data(), offset_us.data(), (int)offset_us.size(), GENLOCK_MEDIA_CLOCK_WINDOW_S, GENLOCK_MEDIA_CLOCK_MAX_GAP_MS, GENLOCK_MEDIA_CLOCK_BAND_PPB, rate_scratch.data(), &counted_ms);",
+        "genlock_media_clock_window_drift_us( sample_ms.data(), offset_us.data(), (int)offset_us.size(), GENLOCK_MEDIA_CLOCK_WINDOW_S, GENLOCK_MEDIA_CLOCK_MAX_GAP_MS, GENLOCK_MEDIA_CLOCK_BAND_US, rate_scratch.data(), &counted_ms);",
     );
     assert_has(
         STATUSBAR_CPP,
@@ -261,13 +261,13 @@ fn genlock_lock_media_clock_term_present_1372_part_d() {
     );
     assert_has(
         hpp,
-        "static inline int64_t genlock_media_clock_window_drift_us(const int64_t *t_ms, const int64_t *offset_us, int n, int64_t window_s, int64_t max_gap_ms, int64_t band_ppb, int64_t *scratch, int64_t *counted_ms_out)",
+        "static inline int64_t genlock_media_clock_window_drift_us(const int64_t *t_ms, const int64_t *offset_us, int n, int64_t window_s, int64_t max_gap_ms, int64_t band_us, int64_t *scratch, int64_t *counted_ms_out)",
     );
     // the offset is sampled in us by the widget itself (integer-ms libobs drift cannot tell a dantesync
-    // step from a rate), and the rate is the trimmed mean of the per-pair rates around their median
+    // step from a rate); a pair off the median rate's prediction by more than 100 µs is a step
     assert_has(
         STATUSBAR_CPP,
-        "static constexpr int64_t GENLOCK_MEDIA_CLOCK_BAND_PPB = 25000;",
+        "static constexpr int64_t GENLOCK_MEDIA_CLOCK_BAND_US = 100;",
     );
     assert_has(
         STATUSBAR_CPP,
