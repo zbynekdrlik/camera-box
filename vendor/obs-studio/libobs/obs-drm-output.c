@@ -757,6 +757,9 @@ bool obs_drm_output_start(const struct obs_drm_output_config *cfg)
 		blog(LOG_WARNING, "drm-output: start called with no connector — ignored");
 		return false;
 	}
+	/* camera-box issue 1346: the NVIDIA Vulkan direct-display backend owns this start. */
+	if (cfg->backend == OBS_DRM_OUTPUT_BACKEND_VK_DIRECT)
+		return drm_output_vk_direct_backend.start(cfg);
 
 	/* NOTE: the whole start sequence holds g_drm.lock across X round-trips + a full modeset
 	 * (seconds if X is slow). obs_drm_output_active() blocks for that window — fine for M1's
@@ -820,6 +823,9 @@ bool obs_drm_output_start(const struct obs_drm_output_config *cfg)
 
 void obs_drm_output_stop(void)
 {
+	/* camera-box issue 1346: the vk-direct backend (a no-op when it never started). */
+	drm_output_vk_direct_backend.stop();
+
 	pthread_mutex_lock(&g_drm.lock);
 	if (!g_drm.active || g_drm.stopping) {
 		/* Not running, or another stop already claimed the teardown — never join twice
@@ -852,6 +858,8 @@ void obs_drm_output_stop(void)
 
 bool obs_drm_output_active(void)
 {
+	if (drm_output_vk_direct_backend.active()) /* camera-box issue 1346 */
+		return true;
 	pthread_mutex_lock(&g_drm.lock);
 	bool a = g_drm.active;
 	pthread_mutex_unlock(&g_drm.lock);
@@ -898,6 +906,10 @@ void obs_drm_output_maybe_autostart(void)
 	 * check so a disabled config still records the choice. */
 	const char *view = obs_data_get_string(data, "view");
 	drm_output_view_configure(view, path);
+	/* camera-box issue 1346: the optional "backend" key (lease | vk-direct; absent = lease). An unknown
+	 * value keeps the output dormant — the wrong backend only fails on the wrong GPU. */
+	const char *backend_s = obs_data_get_string(data, "backend");
+	int backend = drm_output_backend_from_config(backend_s);
 
 	if (!enabled) {
 		blog(LOG_INFO, "drm-output: autostart disabled ({\"enabled\":false} in %s) — dormant",
@@ -907,6 +919,14 @@ void obs_drm_output_maybe_autostart(void)
 	}
 	if (!connector || connector[0] == '\0') {
 		blog(LOG_WARNING, "drm-output: autostart config %s has no \"connector\" — dormant", path);
+		obs_data_release(data);
+		return;
+	}
+	if (backend < 0) {
+		blog(LOG_WARNING,
+		     "drm-output: autostart config %s has an unknown \"backend\":\"%s\" (want lease or vk-direct) — "
+		     "dormant",
+		     path, backend_s);
 		obs_data_release(data);
 		return;
 	}
@@ -920,15 +940,21 @@ void obs_drm_output_maybe_autostart(void)
 	/* Honour an explicit "argb": 0 (solid black); only fall back to dark grey when absent. */
 	cfg.solid_argb = has_argb ? (uint32_t)argb_ll : 0x00202020u;
 	cfg.program = program;
+	cfg.backend = (enum obs_drm_output_backend)backend;
 
 	blog(LOG_INFO, "drm-output: autostart ENABLED from %s — connector='%s'", path,
 	     cfg.connector_name);
+	if (cfg.backend == OBS_DRM_OUTPUT_BACKEND_VK_DIRECT)
+		blog(LOG_INFO, "drm-output: backend=vk-direct (from %s) — NVIDIA Vulkan direct display", path);
 	obs_data_release(data);
 	(void)obs_drm_output_start(&cfg);
 }
 
 void obs_drm_output_on_frame(void)
 {
+	/* camera-box issue 1346: the vk-direct backend's own hook when it owns the output. */
+	if (drm_output_vk_direct_backend.on_frame())
+		return;
 	if (!os_atomic_load_bool(&g_drm.program_want))
 		return;
 
@@ -1009,8 +1035,10 @@ bool drm_output_blit_raw(gs_texture_t *src, int idx)
 
 	uint32_t src_w = gs_texture_get_width(src);
 	uint32_t src_h = gs_texture_get_height(src);
+	uint32_t dst_w, dst_h; /* camera-box issue 1346: the owning backend's mode (lease or vk-direct) */
+	drm_output_mode_size(&dst_w, &dst_h);
 	uint32_t fx, fy, fw, fh;
-	drm_output_fit_rect(src_w, src_h, g_drm.mode_w, g_drm.mode_h, &fx, &fy, &fw, &fh);
+	drm_output_fit_rect(src_w, src_h, dst_w, dst_h, &fx, &fy, &fw, &fh);
 
 	gs_viewport_push();
 	gs_projection_push();
@@ -1057,6 +1085,8 @@ bool drm_output_blit_raw(gs_texture_t *src, int idx)
  * so the flip thread cannot select it while the caller renders into it lock-free. */
 int drm_output_claim_render_buf(void)
 {
+	if (drm_output_vk_direct_backend.owns()) /* camera-box issue 1346 */
+		return drm_output_vk_direct_backend.claim();
 	pthread_mutex_lock(&g_drm.program_lock);
 	int idx = drm_output_pick_render_buf(g_drm.p_front, g_drm.p_pending, g_drm.p_ready,
 					     DRM_OUTPUT_PROGRAM_BUFFERS);
@@ -1071,6 +1101,10 @@ int drm_output_claim_render_buf(void)
  * (the mailbox is about to be torn down). */
 void drm_output_publish_render_buf(int idx)
 {
+	if (drm_output_vk_direct_backend.owns()) { /* camera-box issue 1346 */
+		drm_output_vk_direct_backend.publish(idx);
+		return;
+	}
 	pthread_mutex_lock(&g_drm.program_lock);
 	if (os_atomic_load_bool(&g_drm.program_want))
 		g_drm.p_ready = idx;
@@ -1079,6 +1113,8 @@ void drm_output_publish_render_buf(int idx)
 
 gs_texture_t *drm_output_render_buf_texture(int idx)
 {
+	if (drm_output_vk_direct_backend.owns()) /* camera-box issue 1346 */
+		return drm_output_vk_direct_backend.texture(idx);
 	if (idx < 0 || idx >= DRM_OUTPUT_PROGRAM_BUFFERS)
 		return NULL;
 	return g_drm.pbufs[idx].tex;
@@ -1086,6 +1122,10 @@ gs_texture_t *drm_output_render_buf_texture(int idx)
 
 void drm_output_mode_size(uint32_t *w, uint32_t *h)
 {
+	if (drm_output_vk_direct_backend.owns()) { /* camera-box issue 1346 */
+		drm_output_vk_direct_backend.mode_size(w, h);
+		return;
+	}
 	*w = g_drm.mode_w;
 	*h = g_drm.mode_h;
 }

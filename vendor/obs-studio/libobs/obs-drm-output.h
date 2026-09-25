@@ -29,6 +29,14 @@ extern "C" {
  * (strih+stream are libobs-d3d11, where xcb/libdrm/RandR-lease do not exist).
  */
 
+/* camera-box issue 1346: how the output takes the connector off the X desktop. LEASE = the issue-1152
+ * X RandR lease + GBM page-flip (Intel; imag). VK_DIRECT = Vulkan VK_EXT_acquire_xlib_display + a FIFO
+ * display-plane swapchain (NVIDIA, whose X driver refuses the lease; strih-lx's built-in HDMI). */
+enum obs_drm_output_backend {
+	OBS_DRM_OUTPUT_BACKEND_LEASE = 0,
+	OBS_DRM_OUTPUT_BACKEND_VK_DIRECT = 1,
+};
+
 struct obs_drm_output_config {
 	/* X RandR OUTPUT name, as `xrandr` prints it, e.g. "HDMI-1". NOTE: this differs from the
 	 * DRM kernel connector name ("HDMI-A-1"); the lease is requested by the RandR output XID,
@@ -42,6 +50,8 @@ struct obs_drm_output_config {
 	 * initial image (before the first rendered Program frame) and the fail-open fallback
 	 * when the GL bind fails. The autostart config key "program" defaults this to true. */
 	bool program;
+	/* camera-box issue 1346: the backend (config key "backend"; absent = LEASE). */
+	enum obs_drm_output_backend backend;
 };
 
 /* Start the DRM-lease output: lease {connector + a free CRTC} out of X and page-flip a solid

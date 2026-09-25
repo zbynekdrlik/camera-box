@@ -8,13 +8,22 @@ find_package(Libdrm REQUIRED)
 # camera-box #1152 M2: GBM allocates the Program scanout buffers (dma-buf import into GL).
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(Gbm REQUIRED IMPORTED_TARGET gbm)
+# camera-box issue 1346: the vk-direct DRM-output backend (NVIDIA Vulkan direct display) needs only the
+# Vulkan HEADERS -- libvulkan.so.1 is dlopen'd at run time, so there is no link-time Vulkan dependency and a
+# box without the loader just keeps the output dormant. Vulkan::Headers comes from CMake's FindVulkan.
+find_package(Vulkan REQUIRED)
 find_package(Gio)
 
 target_sources(
   libobs
   PRIVATE
+    obs-drm-output-backend.c
     obs-drm-output-internal.h
     obs-drm-output-view.c
+    obs-drm-output-vk-internal.h
+    obs-drm-output-vk-setup.c
+    obs-drm-output-vk.c
+    obs-drm-output-vk.h
     obs-drm-output.c
     obs-drm-output.h
     obs-nix-platform.c
@@ -63,6 +72,7 @@ target_link_libraries(
     XCB::RANDR # camera-box #1152: xcb_randr_create_lease for the DRM-lease output
     Libdrm::Libdrm # camera-box #1152: drmModePageFlip page-flip onto the leased HDMI connector
     PkgConfig::Gbm # camera-box #1152 M2: gbm_bo_create scanout buffers for the Program dma-buf path
+    Vulkan::Headers # camera-box issue 1346: vk-direct backend (headers only; libvulkan.so.1 is dlopen'd)
     LibUUID::LibUUID
     ${CMAKE_DL_LIBS}
     $<$<NOT:$<BOOL:${HAVE_MATH_IN_STD_LIB}>>:m>
