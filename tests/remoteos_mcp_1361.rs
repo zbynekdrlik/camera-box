@@ -321,6 +321,7 @@ if [ "${1:-}" = -m ] && [ "${2:-}" = pip ]; then
   log="$here/../stub.log"
   echo "PIP: ${PIP_CONSTRAINT:-} $*" >> "$log"
   echo "PIPENV: GH=${GH_TOKEN:-unset} KEY=${REMOTEOS_MCP_AUTH_KEY:-unset} CAM=${CAM_PW:-unset} STUB=${STUB_LOG:-unset}" >> "$log"
+  echo "PIPPASS: PROXY=${HTTPS_PROXY:-unset} ALL=${ALL_PROXY:-unset} INDEX=${PIP_INDEX_URL:-unset} CERT=${PIP_CERT:-unset} CA=${CURL_CA_BUNDLE:-unset} HOME=${HOME:-unset}" >> "$log"
   if [ -f "$here/.pip-fail" ]; then exit 1; fi
   touch "$here/.importable"
   exit 0
@@ -727,6 +728,35 @@ fn remoteos_pip_never_sees_the_token_or_the_key() {
     );
 }
 
+/// Review round 3: the pip allowlist still lets a box's proxy / CA bundle / package index through,
+/// and HOME (the invoking user's, root's /root when run as root).
+#[test]
+fn remoteos_pip_keeps_the_proxy_ca_and_index_variables() {
+    let rig = Rig::new();
+    let (c, out, err) = rig.install(
+        &[
+            ("REMOTEOS_MCP_AUTH_KEY", "abc123"),
+            ("HTTPS_PROXY", "http://proxy.invalid:3128"),
+            ("ALL_PROXY", "socks5://proxy.invalid:1080"),
+            ("PIP_INDEX_URL", "https://pypi.invalid/simple"),
+            ("PIP_CERT", "/etc/ssl/pip.pem"),
+            ("CURL_CA_BUNDLE", "/etc/ssl/ca.pem"),
+            ("HOME", "/home/pipuser1361"),
+        ],
+        &format!("{} headless enable-only", whoami()),
+    );
+    assert_eq!(c, 0, "stdout={out}\nstderr={err}");
+    let want_home = if uid() == "0" {
+        "/root"
+    } else {
+        "/home/pipuser1361"
+    };
+    let want = format!(
+        "PIPPASS: PROXY=http://proxy.invalid:3128 ALL=socks5://proxy.invalid:1080 INDEX=https://pypi.invalid/simple CERT=/etc/ssl/pip.pem CA=/etc/ssl/ca.pem HOME={want_home}"
+    );
+    assert!(rig.log().contains(&want), "{}", rig.log());
+}
+
 /// Review round 1: a failed pip never breaks a working box -- the installed venv is kept (WARNING)
 /// and the marker is not advanced, so the next run retries; on a box with nothing installed it fails.
 #[test]
@@ -837,9 +867,23 @@ fn remoteos_headless_user_keeps_the_existing_account() {
         .1
     };
     assert_eq!(who(None), "root", "no unit, no SUDO_USER -> root");
+    assert_eq!(who(Some("alice")), "alice", "a fresh box takes SUDO_USER");
     fs::write(&unit, "[Service]\nUser=newlevel\nExecStart=/x\n").unwrap();
     assert_eq!(who(None), "newlevel", "the existing unit's account is kept");
-    assert_eq!(who(Some("alice")), "alice", "SUDO_USER wins");
+    // Review round 3: a sudo re-run never moves the account either -- the existing unit wins.
+    assert_eq!(
+        who(Some("alice")),
+        "newlevel",
+        "the existing unit's account beats SUDO_USER"
+    );
+    fs::write(&unit, "[Service]\nUser=root\n").unwrap();
+    assert_eq!(
+        who(Some("alice")),
+        "root",
+        "an existing root agent stays root"
+    );
+    fs::write(&unit, "[Service]\nUser=  newlevel  \n").unwrap();
+    assert_eq!(who(None), "newlevel", "surrounding whitespace is trimmed");
     fs::write(&unit, "[Service]\nUser=bad user\n").unwrap();
     assert_eq!(who(None), "root", "an unusable User= falls back to root");
     let (_c, out, _e) = run(
