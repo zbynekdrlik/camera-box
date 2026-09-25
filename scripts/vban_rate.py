@@ -324,29 +324,46 @@ def measure_stream(times_ns: list, frames: list, samples_per_frame: int, sample_
     jumps = reordered = duplicates = 0
     # head_u = the highest unwrapped counter of the current segment: every step is measured from it,
     # so a reordered straggler (a step back) never moves the reference the next packet is read from.
-    head_u = prev_t = seg_min = None
+    head_u = prev_t = seg_min = seg_t0 = None
     seen: dict = {}   # unwrapped counter -> first arrival (ns) in the current segment
-    for t, f in zip(times_ns, frames):
+    for i, (t, f) in enumerate(zip(times_ns, frames)):
+        straggler = False
         if head_u is None:
             u, d = f, 1
             segments.append([])
+            seg_t0 = t
         else:
             d = _signed32(f - (head_u & 0xFFFFFFFF))
             dt_s = max(0.0, (t - prev_t) / 1e9)
             fwd_limit = 2.0 * dt_s * frames_per_s + JUMP_FWD_SLACK_FRAMES
             u = head_u + d
-            restarted = d < 0 and (
-                u < seg_min - 1  # older than everything this segment has seen
-                or (u in seen and (t - seen[u]) / 1e9 > DUP_WINDOW_S))  # an old counter again
-            if d < -JUMP_BACK_FRAMES or d > fwd_limit or restarted:
-                jumps += 1
-                u, d = f, 1
-                segments.append([])
-                seen = {}
-                head_u = seg_min = None
+            settled = (t - seg_t0) / 1e9 > DUP_WINDOW_S  # a reorder at a segment's start is normal
+            candidate = (d < -JUMP_BACK_FRAMES or d > fwd_limit
+                         or (d < 0 and settled and u < seg_min - 1)
+                         or (d < 0 and u in seen and (t - seen[u]) / 1e9 > DUP_WINDOW_S))
+            if candidate:
+                # One packet of lookahead decides: the NEXT packet continuing the OLD sequence makes
+                # this one a straggler/late duplicate; continuing from THIS packet makes it a restart.
+                verdict = _next_continues(times_ns, frames, i, head_u, f, prev_t, frames_per_s)
+                if verdict == "old":
+                    straggler = True
+                elif verdict == "new" or d < -JUMP_BACK_FRAMES or d > fwd_limit:
+                    jumps += 1
+                    u, d = f, 1
+                    segments.append([])
+                    seen = {}
+                    head_u = seg_min = None
+                    seg_t0 = t
+                else:
+                    straggler = True
         prev_t = t
         if u in seen:
             duplicates += 1
+            continue
+        if straggler and (d > 0 or u < seg_min - 1):
+            # a lone far-ahead counter or a very late packet from before everything this segment has
+            # seen: dropped -- adding it would stretch the span into phantom loss
+            reordered += 1
             continue
         if d < 0:
             reordered += 1
@@ -390,6 +407,25 @@ def measure_stream(times_ns: list, frames: list, samples_per_frame: int, sample_
         "rate_stderr_ppm": stderr_ppm, "max_gap_ms": max_gap_ms, "resid_rms_ms": resid_rms_ms,
         "resid_max_ms": resid_max_ms,
     }
+
+
+def _next_continues(times_ns: list, frames: list, i: int, head_u: int, f: int, prev_t: int,
+                    frames_per_s: float) -> str:
+    """For the jump candidate at index I (counter F, current segment head HEAD_U, last accepted
+    arrival PREV_T): "old" when the next packet continues the old sequence (0 < step from the head
+    <= the frames its elapsed time explains, 2x + slack), "new" when it continues from F instead,
+    "" when there is no next packet or it continues neither."""
+    if i + 1 >= len(frames):
+        return ""
+    t_next, f_next = times_ns[i + 1], frames[i + 1]
+    limit = 2.0 * max(0.0, (t_next - prev_t) / 1e9) * frames_per_s + JUMP_FWD_SLACK_FRAMES
+    d_old = _signed32(f_next - (head_u & 0xFFFFFFFF))
+    if 0 < d_old <= limit:
+        return "old"
+    d_new = _signed32(f_next - f)
+    if 0 < d_new <= limit:
+        return "new"
+    return ""
 
 
 def _pooled_fit(segments_xy: list):
@@ -489,22 +525,30 @@ def analyze_capture(data: bytes, only_dst: tuple = ()) -> CaptureResult:
 # ---------------------------------------------------------------------------------------------
 
 def grade(s: StreamStats, g: Grading) -> tuple:
-    """(verdict, reasons): OK | FAULT (rate out of +-ppm_bound and/or loss over the ceiling) |
-    SHORT (too little data to grade -- never a FAULT)."""
+    """(verdict, reasons): OK | FAULT (rate out of +-ppm_bound by more than 2 stderr, and/or loss
+    over the ceiling) | UNCERTAIN (2 stderr exceed half the bound, so the rate can neither pass nor
+    fail; loss is still graded) | SHORT (too little data to grade). Neither SHORT nor UNCERTAIN
+    ever pages or recovers."""
     if s.span_s < g.min_span_s or s.unique_frames < MIN_FRAMES or s.rate_ppm is None:
         return "SHORT", [f"span {s.span_s:.1f}s / {s.unique_frames} frames is too short to grade"]
     why = []
     margin = RATE_STDERR_MARGIN * (s.rate_stderr_ppm or 0.0)
-    if abs(s.rate_ppm) - margin > g.ppm_bound:
+    uncertain = margin > g.ppm_bound / 2.0  # the fit cannot resolve the bound -- neither OK nor FAULT
+    if not uncertain and abs(s.rate_ppm) - margin > g.ppm_bound:
         why.append(f"rate {s.rate_ppm:+.2f} ppm is outside +-{g.ppm_bound:g} ppm of nominal")
     if s.loss_ratio > g.loss_ceiling:
         why.append(f"loss {s.lost} frames ({s.loss_ratio:.2e}) is over the {g.loss_ceiling:.0e} ceiling")
-    return ("FAULT" if why else "OK"), why
+    if why:
+        return "FAULT", why
+    if uncertain:
+        return "UNCERTAIN", [f"rate {s.rate_ppm:+.2f} +- {margin:.1f} ppm (2 stderr) cannot resolve "
+                             f"the +-{g.ppm_bound:g} ppm bound"]
+    return "OK", []
 
 
 def overall_verdict(res: CaptureResult, grades: list) -> str:
     """CAPTURE_TRUNCATED (snaplen cut every VBAN header) | NO_STREAMS | FAULT | OK | UNKNOWN (every
-    stream too short)."""
+    stream SHORT or UNCERTAIN)."""
     if not res.streams and res.truncated_vban:
         return "CAPTURE_TRUNCATED"
     if not grades:
