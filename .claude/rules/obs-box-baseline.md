@@ -110,10 +110,22 @@ Rules for the facet:
   only on a content or mode difference, logged `unchanged` / `written`, one atomic rename. It is the
   shared install for rendered config files (setup-strih step 12 uses it for the audio drop-ins).
 - **Grader row `brightness`** (after `kiosk`, before `autostart`). It is OK only when all four hold:
-  the helper is executable, the rule carries the `chmod g+w` RUN, both keybind lines are in the rc.xml
-  openbox loads, and the user is in `video`. The gather embeds `obs_box_brightness_keybinds_xml` via
-  `declare -f`, so the grader and the merge read the same lines. A box provisioned before this facet
-  FAILs the row until setup re-runs (imag included).
+  - the helper is executable AND byte-identical to `obs_box_brightness_helper_text`;
+  - the udev rule is byte-identical to `obs_box_backlight_udev_rule`;
+  - every keybind line of `obs_box_brightness_keybinds_xml` is in the rc.xml openbox loads. The check
+    counts the renderer's lines and FAILs when there are none, so a missing or broken renderer is
+    never a pass;
+  - the desktop user is in `video`.
+
+  The gather embeds all three renderers via `declare -f`, so the grader and the install read the same
+  text. `tests/obs_box_brightness_1357.rs` runs the real gather against fixture files by rewriting
+  only its three paths. A box provisioned before this facet FAILs the row until setup re-runs (imag
+  included).
+- **Re-runs stay quiet.** `obs_box_brightness_keys` reloads and re-triggers udev only when the rule
+  text changed, and runs `usermod` only when the user is not yet in `video`. The strih-lx genlock
+  deploy re-runs setup-strih every time.
+- **`obs_box_write_if_changed` details:** an exclusive `mktemp` sibling (never a predictable root
+  temp inside a user-writable config dir); content, mode AND owner are all part of the unchanged check.
 
 ## Tests + the Tier-0 equivalence net
 

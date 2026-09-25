@@ -551,7 +551,9 @@ Rules for this pair:
 - They are written by `obs_box_write_if_changed` (shared baseline lib): compare, rewrite only on a
   content or mode difference, log, one atomic rename. Use it for any new rendered config file
   instead of a bare `>` redirect.
-- verify-strih item **9b** FAILs when either file is missing or differs from its renderer. It then
+- verify-strih item **9b** FAILs when either file is missing or differs from its renderer. This is
+  deliberately a hard FAIL, like every other provisioned-file check in verify-strih: a missing file is
+  a provisioning gap that brings the buzz back. It then
   REPORTS the live graph quantum from `pw-metadata -n settings`, read in the operator session as root
   like item 9, through the pure `strih_lx_graph_quantum_ok`:
   - PASS when `clock.force-quantum` is 1024 (the running session's hand force), or when it is 0 and
