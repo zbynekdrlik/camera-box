@@ -33,7 +33,9 @@
 #[path = "../src/os_clock_discipline.rs"]
 mod os_clock_discipline;
 
-use os_clock_discipline::{map_raw_qpc_ns, mul_div64, DisciplinedClock, NS_PER_SEC};
+use os_clock_discipline::{
+    map_foreign_clock_ns, mul_div64, DisciplinedClock, FOREIGN_STAMP_MAX_AGE_NS, NS_PER_SEC,
+};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -59,7 +61,7 @@ fn lift_block(src: &str) -> String {
     let start = src.find(BEGIN).unwrap_or_else(|| {
         panic!(
             "issue 1372: {PLATFORM_WINDOWS} has no `{BEGIN}` block — the disciplined \
-             os_gettime_ns() is gone and Windows OBS runs on raw QPC again, off the Dante tick"
+             os_gettime_ns() is gone and Windows OBS runs on raw QPC again, off the dantesync-disciplined system-time rate"
         )
     });
     let end = src[start..]
@@ -86,6 +88,12 @@ fn lifted_c() -> String {
     let src = platform_src();
     let qpc_h = fs::read_to_string(repo(QPC_TIMESTAMP_H))
         .unwrap_or_else(|e| panic!("issue 1372: read {QPC_TIMESTAMP_H}: {e}"));
+    let max_age = qpc_h
+        .lines()
+        .find(|l| l.starts_with("#define OS_FOREIGN_STAMP_MAX_AGE_NS "))
+        .unwrap_or_else(|| {
+            panic!("issue 1372: {QPC_TIMESTAMP_H} lost OS_FOREIGN_STAMP_MAX_AGE_NS")
+        });
     let mut c = String::from("\n/* ---- lifted VERBATIM from platform-windows.c ---- */\n");
     c.push_str(&lift_block(&src));
     c.push('\n');
@@ -95,9 +103,16 @@ fn lifted_c() -> String {
         PLATFORM_WINDOWS,
     ));
     c.push_str("\n/* ---- lifted VERBATIM from util/windows/qpc-timestamp.h ---- */\n");
+    c.push_str(max_age);
+    c.push('\n');
     c.push_str(&lift_fn(
         &qpc_h,
-        "static inline uint64_t os_qpc_ns_map_to_gettime_ns(",
+        "static inline uint64_t os_foreign_clock_map_ns(",
+        QPC_TIMESTAMP_H,
+    ));
+    c.push_str(&lift_fn(
+        &qpc_h,
+        "static inline uint64_t os_raw_qpc_ns_to_gettime_ns(",
         QPC_TIMESTAMP_H,
     ));
     c.push_str(&lift_fn(
@@ -484,8 +499,42 @@ fn harness_main(scs: &[Scenario]) -> String {
          \t\treturn 0;\n\
          \t}}\n"
     ));
+    let v: Vec<String> = foreign_vectors()
+        .iter()
+        .map(|(a, b, n)| format!("{{{a}ULL,{b}ULL,{n}ULL}}"))
+        .collect();
+    c.push_str(&format!(
+        "\tif (strcmp(argv[1], \"foreign\") == 0) {{\n\
+         \t\tstatic const uint64_t v[][3] = {{{}}};\n\
+         \t\tfor (size_t i = 0; i < sizeof(v) / sizeof(v[0]); i++)\n\
+         \t\t\tprintf(\"%llu\\n\", (unsigned long long)os_foreign_clock_map_ns(v[i][0], v[i][1], v[i][2]));\n\
+         \t\treturn 0;\n\
+         \t}}\n",
+        v.join(",")
+    ));
     c.push_str("\treturn 3;\n}\n");
     c
+}
+
+/// `(stamp, clock_now, disciplined_now)` for the foreign-clock mapper: every guard boundary (an age
+/// or lead of exactly the limit, one past it), a stamp older than the disciplined now, and a
+/// Unix-epoch value that must pass through unchanged.
+fn foreign_vectors() -> Vec<(u64, u64, u64)> {
+    let m = FOREIGN_STAMP_MAX_AGE_NS;
+    let clk = 5_000_000_000_000u64;
+    let now = clk + 123_456_789;
+    vec![
+        (clk, clk, now),
+        (clk - 10_000_000, clk, now),
+        (clk + 7, clk, now),
+        (clk - m, clk, now),
+        (clk - m - 1, clk, now),
+        (clk + m, clk, now),
+        (clk + m + 1, clk, now),
+        (0, m / 2, m / 4),
+        (1_790_000_000_000_000_000, clk, now),
+        (clk - 1, clk, 0),
+    ]
 }
 
 /// The WASAPI scenario: a device stamp 10 ms old on the raw QPC timeline.
@@ -746,7 +795,7 @@ fn a_wasapi_raw_qpc_stamp_is_mapped_onto_the_disciplined_clock() {
     let raw_now_ns = mul_div64(1_000_000_000, NS_PER_SEC, 10_000_000);
     assert_eq!(
         mapped,
-        map_raw_qpc_ns(raw_stamp_ns, raw_now_ns, now),
+        map_foreign_clock_ns(raw_stamp_ns, raw_now_ns, now),
         "issue 1372: the C raw-QPC mapper diverges from src/os_clock_discipline.rs"
     );
     assert_eq!(mapped, now - WASAPI_AGE_100NS * 100);
@@ -765,6 +814,57 @@ fn a_wasapi_raw_qpc_stamp_is_mapped_onto_the_disciplined_clock() {
     assert!(
         !wasapi.contains("ts * 100"),
         "issue 1372: a raw `ts * 100` WASAPI stamp is back -- it drifts against os_gettime_ns()"
+    );
+}
+
+#[test]
+fn the_foreign_clock_mapper_matches_the_rust_authority() {
+    let dir = Scratch::new("foreign");
+    let bin = build_harness(&dir, &scenarios());
+    let stdout = run(&bin, "foreign");
+    let c_vals: Vec<u64> = stdout.lines().map(|l| l.parse().expect("u64")).collect();
+    let vs = foreign_vectors();
+    assert_eq!(c_vals.len(), vs.len());
+    for ((stamp, clk, now), c) in vs.iter().zip(&c_vals) {
+        assert_eq!(
+            *c,
+            map_foreign_clock_ns(*stamp, *clk, *now),
+            "issue 1372: os_foreign_clock_map_ns({stamp}, {clk}, {now}) diverges from Rust"
+        );
+    }
+    // The epoch value passes through untouched (it is not on the foreign clock).
+    assert_eq!(c_vals[8], 1_790_000_000_000_000_000);
+}
+
+#[test]
+fn browser_and_vlc_stamps_are_mapped_on_windows() {
+    // CEF's audio pts is base::TimeTicks ms (QPC-based on Windows) and VLC stamps on its own clock;
+    // both sat on the raw-QPC os_gettime_ns() timeline before issue 1372.
+    let browser = fs::read_to_string(repo(
+        "vendor/obs-studio/plugins/obs-browser/browser-client.cpp",
+    ))
+    .expect("read browser-client.cpp");
+    assert!(
+        browser
+            .contains("audio.timestamp = os_raw_qpc_ns_to_gettime_ns((uint64_t)pts * 1000000LLU);"),
+        "issue 1372: obs-browser no longer maps CEF's audio pts onto the disciplined clock"
+    );
+    let vlc = fs::read_to_string(repo(
+        "vendor/obs-studio/plugins/vlc-video/vlc-video-source.c",
+    ))
+    .expect("read vlc-video-source.c");
+    assert!(
+        vlc.contains(
+            "c->frame.timestamp = VLCS_STAMP_NS((uint64_t)libvlc_clock_() * 1000ULL) - time_start;"
+        ) && vlc
+            .contains("c->audio.timestamp = VLCS_STAMP_NS((uint64_t)pts * 1000ULL) - time_start;"),
+        "issue 1372: vlc-video no longer maps its stamps onto the disciplined clock"
+    );
+    assert!(
+        vlc.contains(
+            "os_foreign_clock_ns_to_gettime_ns((stamp_ns), (uint64_t)libvlc_clock_() * 1000ULL)"
+        ),
+        "issue 1372: VLCS_STAMP_NS must measure the age on VLC's own clock"
     );
 }
 
@@ -839,7 +939,7 @@ static void maybe_stall(unsigned int one_in, uint64_t stall_ns)
 }}
 static BOOL QueryPerformanceCounter(LARGE_INTEGER *c)
 {{
-	maybe_stall(16, 20000);
+	maybe_stall(16, 300000);
 	/* 10 counts per real ns = a 10 MHz QPC running 1000x fast */
 	c->QuadPart = (long long)(real_ns() * 10ULL);
 	if (g_poller) {{
@@ -882,15 +982,15 @@ static LONG64 InterlockedIncrement64(LONG64 volatile *d)
 	const LONG64 v = __atomic_add_fetch(d, 1, __ATOMIC_SEQ_CST);
 	/* the writer's closing increment: stall before it releases the poller flag */
 	if ((v & 1) == 0)
-		maybe_stall(2, 50000);
+		maybe_stall(1, 400000);
 	return v;
 }}
 static BOOL WINAPI fake_get_adjustment(PDWORD64 adj, PDWORD64 inc, PBOOL disabled)
 {{
 	/* only the single poller calls this */
-	g_polls++;
+	const int polls = __atomic_add_fetch(&g_polls, 1, __ATOMIC_SEQ_CST);
 	g_poller = 1;
-	*adj = (g_polls & 1) ? FAKE_FREQ - FAKE_FREQ / 1000 : FAKE_FREQ + FAKE_FREQ / 1000;
+	*adj = (polls & 1) ? FAKE_FREQ - FAKE_FREQ / 1000 : FAKE_FREQ + FAKE_FREQ / 1000;
 	*inc = FAKE_FREQ;
 	*disabled = FALSE;
 	return TRUE;
@@ -913,17 +1013,21 @@ uint64_t os_gettime_ns(void);
 
 const THREADED_MAIN: &str = r#"
 #define THREADS 4
-#define SECONDS 2
+/* Run until enough rebases and reads happened (a slow, loaded runner just takes longer), at least
+ * 2 s and at most 10 s. */
+#define MIN_POLLS 1000
+#define MIN_CALLS 50000ULL
+#define MIN_RUN_NS 2000000000ULL
+#define MAX_RUN_NS 10000000000ULL
 static uint64_t g_max = 0;
 static uint64_t g_violations = 0;
 static uint64_t g_worst = 0;
 static uint64_t g_calls = 0;
+static int g_stop = 0;
 static void *worker(void *arg)
 {
 	(void)arg;
-	const uint64_t end = real_ns() + SECONDS * 1000000000ULL;
-	uint64_t calls = 0;
-	while (real_ns() < end) {
+	while (!__atomic_load_n(&g_stop, __ATOMIC_SEQ_CST)) {
 		for (int i = 0; i < 256; i++) {
 			const uint64_t before = __atomic_load_n(&g_max, __ATOMIC_SEQ_CST);
 			const uint64_t v = os_gettime_ns();
@@ -936,17 +1040,27 @@ static void *worker(void *arg)
 			uint64_t cur = __atomic_load_n(&g_max, __ATOMIC_SEQ_CST);
 			while (v > cur && !__atomic_compare_exchange_n(&g_max, &cur, v, 0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)) {
 			}
-			calls++;
 		}
+		__atomic_add_fetch(&g_calls, 256, __ATOMIC_SEQ_CST);
 	}
-	__atomic_add_fetch(&g_calls, calls, __ATOMIC_SEQ_CST);
 	return NULL;
 }
 int main(void)
 {
 	pthread_t t[THREADS];
+	const uint64_t start = real_ns();
 	for (int i = 0; i < THREADS; i++)
 		pthread_create(&t[i], NULL, worker, NULL);
+	for (;;) {
+		const struct timespec tick = {0, 50000000};
+		nanosleep(&tick, NULL);
+		const uint64_t ran = real_ns() - start;
+		const int enough = __atomic_load_n(&g_polls, __ATOMIC_SEQ_CST) >= MIN_POLLS &&
+				   __atomic_load_n(&g_calls, __ATOMIC_SEQ_CST) >= MIN_CALLS;
+		if (ran >= MAX_RUN_NS || (ran >= MIN_RUN_NS && enough))
+			break;
+	}
+	__atomic_store_n(&g_stop, 1, __ATOMIC_SEQ_CST);
 	for (int i = 0; i < THREADS; i++)
 		pthread_join(t[i], NULL);
 	printf("violations=%llu worst_ns=%llu calls=%llu polls=%d seq_odd=%d polling=%ld\n",
@@ -982,7 +1096,7 @@ fn no_thread_ever_reads_the_clock_backwards_across_a_rebase() {
     let polls = threaded_field(&out, "polls=");
     let calls = threaded_field(&out, "calls=");
     assert!(
-        polls > 500 && calls > 20_000,
+        polls >= 1000 && calls >= 50_000,
         "issue 1372: the threaded run exercised too little ({out}) -- it proves nothing"
     );
     assert_eq!(

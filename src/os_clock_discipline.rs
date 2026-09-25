@@ -1,4 +1,4 @@
-//! Issue 1372 part A — the Windows OBS media clock runs at the dantesync-disciplined rate.
+//! Issue 1372 part A — the Windows OBS media clock runs at the dantesync-disciplined system-time rate.
 //!
 //! ## Why this module exists
 //!
@@ -131,16 +131,30 @@ impl Segment {
     }
 }
 
-/// Map a RAW-QPC timestamp (ns on the raw QPC timeline, e.g. WASAPI `qpcPosition * 100`) onto the
-/// disciplined clock: measure its age on raw QPC (`raw_now_ns - raw_ts_ns`) and subtract it from the
-/// disciplined `now_ns` (a future stamp adds). Over an age of milliseconds the rate difference is
-/// below a microsecond. Mirrors `os_qpc_ns_map_to_gettime_ns` in
+/// A stamp further than this from its own clock's now is not on that clock (e.g. a Unix-epoch
+/// value) and passes through unchanged. Mirrors `OS_FOREIGN_STAMP_MAX_AGE_NS` in
 /// `vendor/obs-studio/libobs/util/windows/qpc-timestamp.h`.
-pub fn map_raw_qpc_ns(raw_ts_ns: u64, raw_now_ns: u64, now_ns: u64) -> u64 {
-    if raw_ts_ns >= raw_now_ns {
-        return now_ns + (raw_ts_ns - raw_now_ns);
+pub const FOREIGN_STAMP_MAX_AGE_NS: u64 = 60_000_000_000;
+
+/// Map a stamp taken on ANOTHER clock (raw QPC for WASAPI `qpcPosition * 100` and CEF's
+/// TimeTicks pts, VLC's own clock) onto the disciplined clock: measure its age on that clock
+/// (`clock_now_ns - stamp_ns`) and subtract it from the disciplined `now_ns` (a future stamp
+/// adds). Over an age of milliseconds the rate difference is below a microsecond. A stamp more
+/// than [`FOREIGN_STAMP_MAX_AGE_NS`] from the clock's now is returned unchanged. Mirrors
+/// `os_foreign_clock_map_ns` in `vendor/obs-studio/libobs/util/windows/qpc-timestamp.h`.
+pub fn map_foreign_clock_ns(stamp_ns: u64, clock_now_ns: u64, now_ns: u64) -> u64 {
+    if stamp_ns >= clock_now_ns {
+        let ahead_ns = stamp_ns - clock_now_ns;
+        return if ahead_ns <= FOREIGN_STAMP_MAX_AGE_NS {
+            now_ns + ahead_ns
+        } else {
+            stamp_ns
+        };
     }
-    let age_ns = raw_now_ns - raw_ts_ns;
+    let age_ns = clock_now_ns - stamp_ns;
+    if age_ns > FOREIGN_STAMP_MAX_AGE_NS {
+        return stamp_ns;
+    }
     now_ns.saturating_sub(age_ns)
 }
 
@@ -274,17 +288,30 @@ mod tests {
     }
 
     #[test]
-    fn a_raw_qpc_timestamp_maps_by_its_age() {
+    fn a_foreign_stamp_maps_by_its_age() {
         // The disciplined clock is 100 ms ahead of raw QPC; a stamp 10 ms old on raw QPC is 10 ms
         // before the disciplined now, not 110 ms before it.
         let raw_now = 1_000_000_000_000;
         let now = raw_now + 100_000_000;
         assert_eq!(
-            map_raw_qpc_ns(raw_now - 10_000_000, raw_now, now),
+            map_foreign_clock_ns(raw_now - 10_000_000, raw_now, now),
             now - 10_000_000
         );
-        assert_eq!(map_raw_qpc_ns(raw_now + 5, raw_now, now), now + 5);
-        assert_eq!(map_raw_qpc_ns(0, raw_now, 7), 0);
+        assert_eq!(map_foreign_clock_ns(raw_now + 5, raw_now, now), now + 5);
+        assert_eq!(map_foreign_clock_ns(raw_now - 1, raw_now, 0), 0);
+    }
+
+    #[test]
+    fn a_stamp_not_on_the_foreign_clock_passes_through() {
+        let clk = 5_000_000_000_000;
+        let now = clk + 9;
+        let epoch = 1_790_000_000_000_000_000;
+        assert_eq!(map_foreign_clock_ns(epoch, clk, now), epoch);
+        let m = FOREIGN_STAMP_MAX_AGE_NS;
+        assert_eq!(map_foreign_clock_ns(clk - m, clk, now), now - m);
+        assert_eq!(map_foreign_clock_ns(clk - m - 1, clk, now), clk - m - 1);
+        assert_eq!(map_foreign_clock_ns(clk + m, clk, now), now + m);
+        assert_eq!(map_foreign_clock_ns(clk + m + 1, clk, now), clk + m + 1);
     }
 
     #[test]
