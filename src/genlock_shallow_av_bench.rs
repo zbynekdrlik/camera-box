@@ -282,17 +282,26 @@ fn run(sc: Scenario) -> Run {
                     let av = audio.av_ms(presented, mono_sched);
                     out.av_ticks += 1;
                     out.max_abs_av_ms = out.max_abs_av_ms.max(av.abs());
-                } else if audio.playing() {
-                    // the slew window: the video is on the new D, the audio still on its way.
-                    let av = audio.av_ms(presented, mono_sched);
-                    out.slew_av_ticks += 1;
-                    out.max_abs_av_slew_ms = out.max_abs_av_slew_ms.max(av.abs());
                 }
             }
             if last_depth.is_some_and(|d| d != depth) {
                 out.depth_changes += 1;
             }
             last_depth = Some(depth);
+        }
+        // the SLEW window (review round 3): measured on EVERY presenting tick outside the sender's
+        // silence, not only inside the settled gate -- the slew starts at the re-latch, seconds
+        // before the gate reopens, and its first seconds are the largest |A/V|.
+        let sender_silent = nominal >= silent.0 && nominal < silent.1;
+        if !sender_silent && fifo.presented_now && audio.playing() && audio.slewing() {
+            let presented = fifo.presented.expect("a present sets it");
+            let depth = (scheduled - presented + IV_NS / 2) / IV_NS;
+            if depth == fifo.shallow.target_frames {
+                // the video is on the new D, the audio still on its way.
+                let av = audio.av_ms(presented, mono_sched);
+                out.slew_av_ticks += 1;
+                out.max_abs_av_slew_ms = out.max_abs_av_slew_ms.max(av.abs());
+            }
         }
         out.slewing_ticks += u64::from(audio.slewing());
         nominal = grid_next_boundary_ns(nominal, IV_NS);
@@ -452,9 +461,10 @@ fn assert_band_change(name: &str, sc: Scenario, latched: &[u64]) -> Run {
     // the slew window itself (review round 2): the audio walks onto the new hold at 1 ms per second,
     // so for ~33 s after a one-frame re-time it trails the video by up to one frame. Bounded by the
     // songplayer A/V gate (40 ms), measured (not vacuous), and over within 40 s of slewing.
+    // the START of the slew is inside the measurement: a one-frame re-time begins ~33 ms apart.
     assert!(
-        r.slew_av_ticks > 0 && r.max_abs_av_slew_ms > GATE_MAX_AV_MS,
-        "{name}: the slew window was not measured: {r:?}"
+        r.slew_av_ticks > 0 && r.max_abs_av_slew_ms >= 30.0,
+        "{name}: the start of the slew window was not measured: {r:?}"
     );
     assert!(
         r.max_abs_av_slew_ms <= SLEW_MAX_AV_MS,

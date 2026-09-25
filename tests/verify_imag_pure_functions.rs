@@ -2074,4 +2074,15 @@ fn verify_imag_check_bd_proves_the_restarted_obs_took_the_marker_1367() {
         body.contains(r#"fail "(bd) the restarted OBS logged"#),
         "anything but ON must FAIL (issue 1367)"
     );
+    // review round 3: the log is found under the box's own $HOME (the same home libobs reads the
+    // marker from), and an empty read is reported as "no genlock present tick", not as a marker
+    // the libobs ignores.
+    assert!(
+        body.contains(r#"ls -t \$HOME/.config/obs-studio/logs/*.txt"#),
+        "check (bd) must read the log under the box's own $HOME (issue 1367)"
+    );
+    assert!(
+        body.contains(r#"fail "(bd) no genlock-min-latency line logged within"#),
+        "an empty read must name the missing genlock present tick (issue 1367)"
+    );
 }
