@@ -262,6 +262,17 @@ if "CTS_USB" in cmd:
         sys.exit(255)  # unreachable box: no marker line
     print("CTS_USB:%d" % p)
     sys.exit(0)
+if "--set-config" in cmd or "--get-config" in cmd:
+    # The remote shell's own single-gphoto2-user checks: only honoured when the command really
+    # carries them, so a command without the check cannot pass a relay-active test.
+    if state.get("relay_active") and "systemctl is-active --quiet bkshading-relay.service" in cmd:
+        print("CTS_RELAY_ACTIVE")
+        sys.exit(97)
+    if state.get("gphoto2_busy") and "pgrep -x gphoto2" in cmd:
+        print("CTS_GPHOTO2_BUSY")
+        sys.exit(98)
+    if state.get("read_exit"):
+        sys.exit(state["read_exit"])
 if "--set-config" in cmd:
     log("SET " + ip + " " + " ".join(re.findall(r"--set-config (\S+)", cmd)))
     for kv in re.findall(r"--set-config (\S+)", cmd):
@@ -294,21 +305,24 @@ print(json.dumps({"busy": busy, "diagnostics": [{"host": "stream", "streaming": 
 
 
 class Rig:
-    def __init__(self, present, camera, baseline_values, ack="", busy=False, ignore=(), read_fail=False):
+    def __init__(self, present, camera, baseline_values, ack="", busy=False, ignore=(), read_fail=False,
+                 relay_active=False, gphoto2_busy=False, read_exit=0):
         self.root = tempfile.mkdtemp(prefix="cts1371-")
         self.here = os.path.join(self.root, "scripts")
         self.bin = os.path.join(self.root, "bin")
         os.makedirs(os.path.join(self.here, "lib"))
         os.makedirs(self.bin)
         shutil.copy(MODULE, os.path.join(self.here, "camera_test_settings.py"))
-        for name in ("camera-test-settings.sh", "cambox-offline-ack.sh", "stray-session-check.sh"):
+        for name in ("camera-test-settings.sh", "cambox-offline-ack.sh", "stray-session-check.sh",
+                     "bkshading-relay-runtime.sh"):
             shutil.copy(os.path.join(REPO, "scripts", "lib", name), os.path.join(self.here, "lib", name))
         self._exe(os.path.join(self.bin, "sshpass"), FAKE_SSHPASS)
         self._exe(os.path.join(self.here, "obs_phase2.py"), FAKE_OBS_PHASE2)
         with open(os.path.join(self.here, "camera-test-baseline.json"), "w") as f:
             f.write(_baseline_text(baseline_values))
         with open(os.path.join(self.root, "state.json"), "w") as f:
-            json.dump({"present": present, "camera": camera, "ignore": list(ignore), "read_fail": read_fail}, f)
+            json.dump({"present": present, "camera": camera, "ignore": list(ignore), "read_fail": read_fail,
+                       "relay_active": relay_active, "gphoto2_busy": gphoto2_busy, "read_exit": read_exit}, f)
         open(os.path.join(self.root, "calls.log"), "w").close()
         self.ack = ack
         self.busy = busy
@@ -431,6 +445,33 @@ def test_gphoto2_read_failure_on_a_present_camera_aborts():
     r = Rig({"10.77.9.61": 1}, dict(GOOD), _pinned(), read_fail=True).run()
     assert r.rc == 1, r.out
     assert "gphoto2 read failed" in r.out
+
+
+def test_a_relay_still_active_on_the_camera_box_aborts_by_name():
+    # review finding: the issue-808 pause is best-effort, so "exactly one gphoto2 user" is checked
+    # on the box, in the same remote command, before every gphoto2 session.
+    r = Rig({"10.77.9.61": 1}, dict(GOOD, iso="1600"), _pinned(), relay_active=True).run()
+    assert r.rc == 1, r.out
+    assert "bkshading-relay is still active on cam1 (10.77.9.61)" in r.out
+    assert not any(c.startswith(("SET", "GUARD")) for c in r.calls), r.calls
+
+
+def test_a_leftover_gphoto2_process_aborts_by_name():
+    r = Rig({"10.77.9.61": 1}, dict(GOOD), _pinned(), gphoto2_busy=True).run()
+    assert r.rc == 1, r.out
+    assert "another gphoto2 process is running on cam1 (10.77.9.61)" in r.out
+
+
+def test_a_transport_timeout_is_named_not_reported_as_unreadable_output():
+    r = Rig({"10.77.9.61": 1}, dict(GOOD), _pinned(), read_exit=124).run()
+    assert r.rc == 1, r.out
+    assert "transport rc=124 (timed out)" in r.out
+
+
+def test_suggest_flags_a_value_that_cannot_be_pinned():
+    r = _cli(["suggest"], _blocks({"iso": "Auto ISO", "d002": 4320, "d007": 60}))
+    assert r.returncode == 0
+    assert "UNPINNABLE iso" in r.stderr
 
 
 def test_a_live_broadcast_blocks_the_set():
