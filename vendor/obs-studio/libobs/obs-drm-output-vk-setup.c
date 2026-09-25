@@ -550,11 +550,12 @@ bool drm_output_vk_rebuild_presentation(bool surface_lost)
 	 * handed to the new swapchain as oldSwapchain (same surface) and freed after RETIRE_FRAMES later
 	 * signalled fences or at the teardown.
 	 * Back-to-back rebuilds (a rebuilt swapchain whose very first acquire is out of date again): the
-	 * current presentation never presented, so nothing is queued on it -- destroy it directly and KEEP
-	 * the older retiree, whose present may still be queued. Only a presentation that completed a fenced
-	 * present since the last rebuild replaces the retiree (>= 1 fence has passed since it was retired). */
+	 * current presentation never queued a present, so nothing waits on it -- destroy it directly and KEEP
+	 * the older retiree, whose present may still be queued. A presentation that queued a present (even a
+	 * rejected one, which still queues its semaphore wait) is retired instead and replaces the older
+	 * retiree: its copy's fence signalled after the older retiree's last present was queued. */
 	const bool pending_retiree = g_drm_vk.retired_swapchain || g_drm_vk.retired_surface;
-	const bool fresh = pending_retiree && !g_drm_vk.presented_since_rebuild;
+	const bool fresh = pending_retiree && !g_drm_vk.present_queued_since_rebuild;
 	VkSwapchainKHR old_for_create = VK_NULL_HANDLE;
 	if (fresh) {
 		drm_output_vk_destroy_swapchain();
@@ -583,7 +584,7 @@ bool drm_output_vk_rebuild_presentation(bool surface_lost)
 			old_for_create = g_drm_vk.retired_swapchain; /* a swapchain is retired into at most one */
 		}
 	}
-	g_drm_vk.presented_since_rebuild = false;
+	g_drm_vk.present_queued_since_rebuild = false;
 	if (surface_lost) {
 		if (!drm_output_vk_create_surface(true))
 			return false;
@@ -771,7 +772,7 @@ void drm_output_vk_destroy_all(void)
 	g_drm_vk.retired_swapchain = VK_NULL_HANDLE; /* leaked with a wedged device, or already freed */
 	g_drm_vk.retired_surface = VK_NULL_HANDLE;
 	g_drm_vk.retire_countdown = 0;
-	g_drm_vk.presented_since_rebuild = false;
+	g_drm_vk.present_queued_since_rebuild = false;
 	g_drm_vk.front = g_drm_vk.pending = g_drm_vk.ready = -1;
 	g_drm_vk.open = false;
 }

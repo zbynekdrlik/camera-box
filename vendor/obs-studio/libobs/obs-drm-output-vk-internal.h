@@ -171,7 +171,7 @@ struct drm_output_vk_state {
 	VkSwapchainKHR retired_swapchain; /* replaced by a rebuild, freed later (see RETIRE_FRAMES) */
 	VkSurfaceKHR retired_surface;     /* replaced by a surface-lost rebuild, freed with it */
 	unsigned retire_countdown;        /* signalled fences left before the retired objects go */
-	bool presented_since_rebuild;     /* the current swapchain completed >= 1 fenced present */
+	bool present_queued_since_rebuild; /* vkQueuePresentKHR was called on the current swapchain */
 	VkImage swap_images[DRM_OUTPUT_VK_MAX_SWAP];
 	uint32_t n_swap;
 	VkSemaphore sem_done[DRM_OUTPUT_VK_MAX_SWAP];

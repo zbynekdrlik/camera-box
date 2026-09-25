@@ -290,6 +290,8 @@ static void *drm_output_vk_present_thread(void *arg)
 				       .pSwapchains = &g_drm_vk.swapchain,
 				       .pImageIndices = &img};
 		VkResult pr = g_drm_vk.vk.vkQueuePresentKHR(g_drm_vk.queue, &pi);
+		/* even a rejected (out-of-date) present queues its semaphore wait on this swapchain */
+		g_drm_vk.present_queued_since_rebuild = true;
 		if (!drm_output_vk_wait_fence())
 			break; /* roles untouched: the copy may still read the image; the teardown quiesces */
 		g_drm_vk.vk.vkResetFences(g_drm_vk.device, 1, &g_drm_vk.fence);
@@ -313,7 +315,6 @@ static void *drm_output_vk_present_thread(void *arg)
 			break;
 		}
 		rebuilds = 0;
-		g_drm_vk.presented_since_rebuild = true;
 		g_drm_vk.presents++;
 		if (src >= 0) {
 			g_drm_vk.program_presents++;
