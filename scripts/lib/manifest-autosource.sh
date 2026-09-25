@@ -90,21 +90,27 @@ manifest_autosource_fetch() {
   # #1346 review: every gh call is time-bounded (a stalled ~270 MB full-bundle download must not hang
   # the [0/8] preflight); a timeout is just another fetch failure -> "" -> dormant.
   local tmo="${MANIFEST_AUTOSOURCE_TIMEOUT_S:-300}"
-  local run_id=""
+  local run="" run_id="" run_stamp=""
   # jq reads the marker SHA via env.SHA (never string-interpolated into the filter) so a box's
-  # reported marker can't break out of the jq program even if it carried a metacharacter.
-  run_id="$(SHA="$sha" timeout "$tmo" gh run list --repo "$repo" --workflow "$workflow" -L 100 \
-    --json databaseId,conclusion,headSha \
-    --jq '[.[] | select(.headSha==env.SHA and .conclusion=="success")][0].databaseId' 2>/dev/null)" || return 0
+  # reported marker can't break out of the jq program even if it carried a metacharacter. It prints
+  # `<run id> <updatedAt>` (the stamp keys the cache below), or nothing when no run matches.
+  run="$(SHA="$sha" timeout "$tmo" gh run list --repo "$repo" --workflow "$workflow" -L 100 \
+    --json databaseId,conclusion,headSha,updatedAt \
+    --jq '[.[] | select(.headSha==env.SHA and .conclusion=="success")][0] | select(. != null) | "\(.databaseId) \(.updatedAt)"' 2>/dev/null)" || return 0
+  run_id="${run%% *}"
   case "$run_id" in
-    ''|*[!0-9]*) return 0 ;;   # unresolved ("", "null") or not a plain run id -> dormant
+    ''|*[!0-9]*) return 0 ;;   # unresolved or not a plain run id -> dormant
   esac
-  # #1346 review: a CI run's artifact never changes, so its manifest is cached per (workflow,
-  # artifact, run id) -- a second E2E on the same build reads the cache instead of downloading again.
+  [ "$run" != "$run_id" ] && run_stamp="${run#* }"
+  run_stamp="${run_stamp//[!0-9]/}"
+  # #1346 review: the manifest is cached per (workflow, artifact, run id, updatedAt), so a second E2E
+  # on the same build reads the cache instead of downloading again. updatedAt is in the key because a
+  # GitHub re-run KEEPS the run id and a full re-run republishes non-reproducible bytes; without a
+  # stamp nothing is cached (the fetch still works).
   local cache=""
-  cache="$(manifest_autosource_cache_path "$workflow" "$artifact" "$run_id")"
+  [ -n "$run_stamp" ] && cache="$(manifest_autosource_cache_path "$workflow" "$artifact" "${run_id}-${run_stamp}")"
   if [ -n "$cache" ] && [ -s "$cache" ]; then
-    mkdir -p "$(dirname "$dest")" 2>/dev/null
+    mkdir -p "$(dirname "$dest")" 2>/dev/null || true
     cp -f "$cache" "$dest" 2>/dev/null && printf '%s' "$dest"
     return 0
   fi
@@ -119,7 +125,7 @@ manifest_autosource_fetch() {
   local found=""
   found="$(find "$tmp" -name BUNDLE_MANIFEST.json -type f -print -quit 2>/dev/null)"
   if [ -n "$found" ] && [ -s "$found" ]; then
-    mkdir -p "$(dirname "$dest")" 2>/dev/null
+    mkdir -p "$(dirname "$dest")" 2>/dev/null || true
     cp -f "$found" "$dest" 2>/dev/null && printf '%s' "$dest"
     manifest_autosource_cache_store "$found" "$cache"
   fi
@@ -127,10 +133,11 @@ manifest_autosource_fetch() {
   return 0
 }
 
-# manifest_autosource_cache_path WORKFLOW ARTIFACT RUN_ID -> the cache file for that CI run's
-# manifest: "${MANIFEST_AUTOSOURCE_CACHE_DIR:-$HOME/.camera-box/manifest-cache}/<workflow>--<artifact>--<run_id>.json".
-# Empty (no cache) when neither the dir override nor HOME is set. Keyed on the RUN id, never the
-# commit sha: a re-run at the same sha builds different (non-reproducible) bytes.
+# manifest_autosource_cache_path WORKFLOW ARTIFACT RUN_KEY -> the cache file for that CI run's
+# manifest: "${MANIFEST_AUTOSOURCE_CACHE_DIR:-$HOME/.camera-box/manifest-cache}/<workflow>--<artifact>--<run_key>.json",
+# RUN_KEY = `<run id>-<updatedAt digits>`. Empty (no cache) when neither the dir override nor HOME is
+# set. Keyed on the run, never the commit sha (a second run at one sha builds different,
+# non-reproducible bytes), and on updatedAt too (a re-run keeps the run id but republishes).
 manifest_autosource_cache_path() {
   local dir="${MANIFEST_AUTOSOURCE_CACHE_DIR:-}"
   if [ -z "$dir" ] && [ -n "${HOME:-}" ]; then
@@ -141,16 +148,19 @@ manifest_autosource_cache_path() {
 }
 
 # manifest_autosource_cache_store SRC CACHE -> best-effort: copy SRC to CACHE atomically (a temp name
-# then rename, so a concurrent reader never sees a half-written manifest), and drop cache entries
-# older than 30 days (manifests are a few hundred KB; old builds are never fetched again).
+# then rename, so a concurrent reader never sees a half-written manifest), and drop cache entries --
+# and temp files a killed store left behind -- older than 30 days (manifests are a few hundred KB;
+# old builds are never fetched again). A manifest that is not valid JSON is never cached, so a bad
+# download affects one run, not the next 30 days.
 manifest_autosource_cache_store() {
   local src="$1" cache="$2"
   [ -n "$cache" ] || return 0
+  python3 -c 'import json, sys; json.load(open(sys.argv[1]))' "$src" >/dev/null 2>&1 || return 0
   local dir="${cache%/*}"
   mkdir -p "$dir" 2>/dev/null || return 0
   cp -f "$src" "$cache.tmp.$$" 2>/dev/null && mv -f "$cache.tmp.$$" "$cache" 2>/dev/null
   rm -f "$cache.tmp.$$" 2>/dev/null
-  find "$dir" -maxdepth 1 -type f -name '*--*--*.json' -mtime +30 -delete 2>/dev/null || true
+  find "$dir" -maxdepth 1 -type f -name '*--*--*.json*' -mtime +30 -delete 2>/dev/null || true
   return 0
 }
 

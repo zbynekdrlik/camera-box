@@ -245,11 +245,15 @@ change ships only that way) read `obs_dll_sha256 DRIFT` and refused the release 
   the SAME strih marker sha as the fast one (the cross-box parity facet holds strih and stream on
   one build). Best-effort ("" on failure). GitHub serves an artifact only as one zip, so the first
   fetch of a build downloads the whole ~270 MB bundle into a mktemp dir, keeps only the manifest and
-  removes the rest at once. `manifest_autosource_fetch` therefore CACHES every fetched manifest per
-  CI run (`${MANIFEST_AUTOSOURCE_CACHE_DIR:-~/.camera-box/manifest-cache}/<workflow>--<artifact>--<run_id>.json`,
-  keyed on the RUN id, never the sha: a re-run at one sha builds different bytes; entries older than
-  30 days are pruned) and bounds every gh call with `timeout ${MANIFEST_AUTOSOURCE_TIMEOUT_S:-300}`
-  (a timeout is a fetch failure -> ""). `recording-e2e.sh` runs it only when `VERSION_GATE_MANIFEST`
+  removes the rest at once (measured live 25.9.2026 on build 8151a12ac: 145 s). `manifest_autosource_fetch`
+  therefore CACHES every fetched manifest per CI run and attempt
+  (`${MANIFEST_AUTOSOURCE_CACHE_DIR:-~/.camera-box/manifest-cache}/<workflow>--<artifact>--<run_id>-<updatedAt digits>.json`;
+  the same fetch from the cache took 3 s). The key is the RUN, never the sha (a second run at one sha
+  builds different bytes), PLUS updatedAt: a GitHub re-run KEEPS the run id and a full re-run
+  republishes, and `gh run list --json` has no `attempt` field. No stamp -> no caching (the fetch
+  still works). Only valid JSON is cached; entries and leftover temp files older than 30 days are
+  pruned. Every gh call is bounded by `timeout ${MANIFEST_AUTOSOURCE_TIMEOUT_S:-300}` (a timeout is a
+  fetch failure -> ""). `recording-e2e.sh` runs it only when `VERSION_GATE_MANIFEST`
   is unset (an operator pin is never widened) and passes it to BOTH gate invocations as
   `${AUTO_WIN_ALT_MANIFEST:+--alt-manifest …}`.
 - `version-integrity-gate.sh --alt-manifest PATH` threads it to every `--win-state` box exactly where
