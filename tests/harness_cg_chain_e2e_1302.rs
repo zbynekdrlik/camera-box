@@ -311,6 +311,38 @@ cat "$D/cg.mkv"
 }
 
 #[test]
+fn a_failed_pull_leaves_no_partial_or_stale_file_for_the_cg_gate() {
+    // recording-e2e.sh feeds --cg on `[ -f "$CG_RECORDING" ]`, so a failed scp must leave NO file at
+    // the destination — not a partial one, and not a stale one from an earlier attempt.
+    let snippet = r#"
+D="$(mktemp -d)"; trap 'rm -rf "$D"' EXIT
+cat > "$D/sshpass" <<'SH'
+#!/usr/bin/env bash
+shift 2; exec "$@"
+SH
+cat > "$D/scp" <<'SH'
+#!/usr/bin/env bash
+for last in "$@"; do :; done
+echo partial > "$last"
+exit 1
+SH
+chmod +x "$D/sshpass" "$D/scp"; PATH="$D:$PATH"
+unset CG_CHAIN_PULL_CMD
+echo stale > "$D/cg.mkv"
+CG_HOST_RECORDING_PATH='C:\x.mkv'
+if cg_chain_pull_recording 10.77.9.201 "$D/cg.mkv"; then echo GOT; else echo NONE; fi
+if [ -e "$D/cg.mkv" ]; then echo LEFTOVER; else echo CLEAN; fi
+ls "$D" | grep -c 'cg.mkv' || true
+"#;
+    let (ok, out, _) = run(snippet);
+    assert!(ok);
+    let lines: Vec<&str> = out.lines().collect();
+    assert!(lines.contains(&"NONE"), "{out}");
+    assert!(lines.contains(&"CLEAN"), "no cg file may remain: {out}");
+    assert_eq!(lines.last(), Some(&"0"), "no .part file either: {out}");
+}
+
+#[test]
 fn default_pull_without_a_host_path_omits_cg() {
     let (ok, out, _) = run("unset CG_CHAIN_PULL_CMD CG_HOST_RECORDING_PATH; \
          if cg_chain_pull_recording 1.2.3.4 /tmp/none-1302.mkv; then echo GOT; else echo NONE; fi");
@@ -364,6 +396,29 @@ fn window_json_is_the_one_cg_window_record() {
 }
 
 #[test]
+fn window_record_is_keyed_to_the_run() {
+    let (_, a, _) = run("unset RUN_ID; CG_CHAIN_STATE_DIR=/r cg_chain_window_file");
+    assert_eq!(a, "/r/cg-window.json");
+    let (_, b, _) = run("RUN_ID=77 CG_CHAIN_STATE_DIR=/r cg_chain_window_file");
+    assert_eq!(b, "/r/cg-window-77.json");
+}
+
+#[test]
+fn window_cut_timeout_covers_the_non_black_check() {
+    // The strih cut enumerates every scene AND runs the polled non-black check
+    // (OBS_BLACKCHECK_TIMEOUT_S, default 20 s), so it gets that budget + 30 s, never less than the
+    // caller's timeout.
+    let (_, d, _) = run("unset OBS_BLACKCHECK_TIMEOUT_S; cg_chain_window_cut_timeout 30");
+    assert_eq!(d, "50");
+    let (_, e, _) = run("OBS_BLACKCHECK_TIMEOUT_S=40 cg_chain_window_cut_timeout 30");
+    assert_eq!(e, "70");
+    let (_, f, _) = run("unset OBS_BLACKCHECK_TIMEOUT_S; cg_chain_window_cut_timeout 100");
+    assert_eq!(f, "100");
+    let (_, g, _) = run("OBS_BLACKCHECK_TIMEOUT_S=abc cg_chain_window_cut_timeout 30");
+    assert_eq!(g, "50", "a non-integer check budget falls back to 20 s");
+}
+
+#[test]
 fn state_files_live_in_the_run_dir() {
     let (_, s, _) = run("unset RUN_ID; CG_CHAIN_STATE_DIR=/r/out cg_chain_state_file strih-scene");
     assert_eq!(s, "/r/out/cg-chain-strih-scene-state.json");
@@ -405,7 +460,7 @@ if [ -f "$D/called" ]; then cat "$D/called"; else echo INERT; fi
 fn window_cuts_strih_holds_it_and_writes_the_window_record() {
     let snippet = format!(
         "{FAKE_PY}\n\
-         OUT=\"$(mktemp -d)\"\n\
+         OUT=\"$(mktemp -d)\"; unset RUN_ID\n\
          CG_CHAIN=1 CG_RECORDING_STARTED=1 CG_CHAIN_STATE_DIR=\"$OUT\" CG_CHAIN_WINDOW_SECS=1 \\\n\
            cg_chain_window 10.77.9.202 /x/obs_phase2.py 5\n\
          cat \"$OUT/cg-window.json\"; echo\n\
@@ -430,7 +485,7 @@ fn window_cuts_strih_holds_it_and_writes_the_window_record() {
 fn window_with_a_failing_cut_returns_zero_and_writes_nothing() {
     let snippet = format!(
         "{FAKE_PY}\n\
-         OUT=\"$(mktemp -d)\"\n\
+         OUT=\"$(mktemp -d)\"; unset RUN_ID\n\
          CG_CHAIN=1 CG_RECORDING_STARTED=1 CG_CHAIN_STATE_DIR=\"$OUT\" CG_CHAIN_WINDOW_SECS=1 \\\n\
            FAKE_SOLO_RC=2 cg_chain_window 10.77.9.202 /x/obs_phase2.py 5\n\
          echo REACHED\n\
@@ -473,6 +528,7 @@ fn after_stoprecord_stops_cg_turns_the_burn_off_and_restores_strih() {
         "{HEALTH_FN}{FAKE_CURL}{FAKE_PY}\n\
          health_json false > \"$FAKE_HEALTH_FILE\"\n\
          OUT=\"$(mktemp -d)\"; echo '{{}}' > \"$OUT/cg-chain-strih-scene-state.json\"\n\
+         echo '{{}}' > \"$OUT/cg-chain-cg-program-state.json\"\n\
          unset RUN_ID\n\
          CG_CHAIN=1 CG_RECORDING_STARTED=1 CG_CHAIN_STATE_DIR=\"$OUT\" FAKE_STOP_OUT='C:\\cg.mkv' \\\n\
            cg_chain_after_stoprecord 10.77.9.201 /x/obs_phase2.py 5\n\
@@ -495,9 +551,28 @@ fn after_stoprecord_stops_cg_turns_the_burn_off_and_restores_strih() {
         "the burn goes OFF right after the recordings stop: {out}"
     );
     assert!(
-        out.contains("restore --state-file"),
-        "strih is restored right after StopRecord: {out}"
+        out.contains("cg-chain-strih-scene-state.json")
+            && out.contains("cg-chain-cg-program-state.json"),
+        "strih AND the cg program are restored right after StopRecord: {out}"
     );
+}
+
+#[test]
+fn cleanup_never_stops_a_cg_recording_this_run_did_not_start() {
+    // CG_HOST_IP is set as soon as the host resolves — BEFORE StartRecord — so cleanup() must key the
+    // cg StopRecord on CG_RECORDING_STARTED, never on the host alone (never stop a recording this run
+    // did not start).
+    let snippet = format!(
+        "{HEALTH_FN}{FAKE_CURL}{FAKE_PY}\n\
+         health_json false > \"$FAKE_HEALTH_FILE\"\n\
+         touch \"$PY_LOG\"\n\
+         CG_CHAIN=1 CG_RECORDING_STARTED=0 CG_CHAIN_STATE_DIR=\"$(mktemp -d)\" \\\n\
+           cg_chain_cleanup 10.77.9.201 /x/obs_phase2.py 5\n\
+         if grep -q 'record --host 10.77.9.201 --action stop' \"$PY_LOG\"; then echo STOPPED; else echo UNTOUCHED; fi"
+    );
+    let (ok, out, err) = run(&snippet);
+    assert!(ok, "{err}");
+    assert!(out.ends_with("UNTOUCHED"), "{out}");
 }
 
 #[test]
@@ -508,7 +583,8 @@ fn cleanup_turns_the_burn_off_fast_and_restores_both_snapshots() {
          OUT=\"$(mktemp -d)\"\n\
          echo '{{}}' > \"$OUT/cg-chain-strih-scene-state-9.json\"\n\
          echo '{{}}' > \"$OUT/cg-chain-cg-program-state-9.json\"\n\
-         RUN_ID=9 CG_CHAIN=1 CG_CHAIN_STATE_DIR=\"$OUT\" cg_chain_cleanup 10.77.9.201 /x/obs_phase2.py 5\n\
+         RUN_ID=9 CG_CHAIN=1 CG_RECORDING_STARTED=1 CG_CHAIN_STATE_DIR=\"$OUT\" \\\n\
+           cg_chain_cleanup 10.77.9.201 /x/obs_phase2.py 5\n\
          cat \"$PY_LOG\"; cat \"$FAKE_LOG\"; cat \"$FAKE_GETLOG\"\n\
          rm -rf \"$OUT\""
     );
@@ -569,6 +645,18 @@ fn recording_e2e_ends_the_cg_leg_right_after_stoprecord() {
         .find("cg_chain_pull_recording \"$CG_HOST_IP\" \"$CG_RECORDING\"")
         .expect("the [8/8d] pull");
     assert!(stop < after && after < pull);
+    // It must not skew the genlock-audit AFTER snapshot (its window spans EXACTLY the recording) nor
+    // run ahead of the post-record stomp re-check.
+    let audit = s
+        .find("genlock_audit_snapshot_capture after \"$OUTDIR/genlock-audit-after-${RUN_ID}.txt\"")
+        .expect("the genlock-audit AFTER snapshot");
+    let stomp = s
+        .find("measurement_eq_post_record_stomp_recheck \"$MEASUREMENT_EQ_PROFILE\"")
+        .expect("the post-record stomp re-check");
+    assert!(
+        audit < after && stomp < after,
+        "the CG leg ends AFTER both reads"
+    );
 }
 
 #[test]
