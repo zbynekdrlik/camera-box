@@ -143,7 +143,7 @@ took 3 s — the decode on the small Tier-0 dev1 box was the cost). Now it follo
 
 - **`scripts/recording-verdict-on-resolume.sh`** (always executes, plain session-agnostic ssh —
   a file copy, a headless CLI decode and a download, so `win-ssh-vs-mcp.md` context B holds):
-  STEP 0 first puts the first `ffmpeg.exe` found under `RESOLUME_FFMPEG_ROOT` (default `C:\ffmpeg`)
+  STEP 0 first puts the newest (by LastWriteTime) `ffmpeg.exe` under `RESOLUME_FFMPEG_ROOT` (default `C:\ffmpeg`)
   on PATH — RESOLUME-SNV keeps ffmpeg under `C:\ffmpeg\<build>\bin` but NOT on PATH (read live
   25.9.2026), and the decode session gets the same prefix — then fails loud BY NAME on a missing
   `ffmpeg`/`ffprobe` (`MISSING-TOOL:`, exit 3); it stops a leftover decode of the same exe and
@@ -152,7 +152,7 @@ took 3 s — the decode on the small Tier-0 dev1 box was the cost). Now it follo
   `recording-verdict.exe --extract-partial cg --cg <recording> --out <partial>` at the issue-1260
   BelowNormal PriorityClass (`build_onbox_command`, SOURCED from recording-verdict-on-stream.sh,
   never re-implemented) so it cannot starve the live obs64/Arena; STEP 3 pulls back only the partial
-  and its `-pixels` dir (probed with PowerShell `Test-Path`, never cmd.exe `if exist` — the box default shell is not known), logging the measured STEP 2 decode time — the evidence the grace is calibrated from. Paths are single-quoted PowerShell literals. Credentials come from the caller (`RESOLUME_USER`/`RESOLUME_PW`, which
+  and its `-pixels` dir (probed with PowerShell `Test-Path`, never cmd.exe `if exist` — the box default shell is not known), logging the measured STEP 2 decode time — the evidence the grace is calibrated from. The resolume-owned builders quote paths as single-quoted PowerShell literals; the STEP 2 decode command reuses the stream builder's double-quoted args (OBS timestamp paths hold no `$`/backtick). Credentials come from the caller (`RESOLUME_USER`/`RESOLUME_PW`, which
   `cg_chain_user`/`cg_chain_pw` resolve from `CG_CHAIN_USER`/`CG_CHAIN_PW`).
 - **The ONE sha256 upload decision** is `scripts/lib/verdict-upload-gate.sh`
   (`verdict_upload_decision`); `onimag_upload_decision` / `onstrihlx_upload_decision` delegate to it.

@@ -10,7 +10,7 @@ set -euo pipefail
 # way recording-verdict-on-stream.sh --execute does it for the stream box:
 #   STEP 0  preflight: ffmpeg + ffprobe must be reachable (fail loud BY NAME, never a decode that
 #           dies half way with an opaque error). RESOLUME-SNV keeps ffmpeg under C:\ffmpeg\<build>\bin
-#           but not on PATH, so every session first prepends the first ffmpeg.exe found under
+#           but not on PATH, so every session first prepends the newest ffmpeg.exe (by LastWriteTime) under
 #           RESOLUME_FFMPEG_ROOT (default C:\ffmpeg; empty = rely on PATH). Then any decode of the
 #           same exe still running from an earlier run is stopped, and a stale partial of the same
 #           name is deleted.
@@ -225,12 +225,19 @@ main() {
   local_partial="$LOCAL_OUT_DIR/$(win_ssh_basename "$OUT_PARTIAL")"
   echo "[recording-verdict-on-resolume] STEP 3: pulling back $OUT_PARTIAL -> $local_partial"
   win_ssh_download "$RESOLUME_USER" "$RESOLUME_PW" "$RESOLUME_BOX" "$OUT_PARTIAL" "$local_partial"
-  if win_ssh_run "$RESOLUME_USER" "$RESOLUME_PW" "$RESOLUME_BOX" "$(onresolume_path_exists_ps "$PIXELS_DIR")"; then
-    echo "[recording-verdict-on-resolume] pulling back the pixel proofs $PIXELS_DIR -> $LOCAL_OUT_DIR/"
-    win_ssh_download_dir "$RESOLUME_USER" "$RESOLUME_PW" "$RESOLUME_BOX" "$PIXELS_DIR" "$LOCAL_OUT_DIR/"
-  else
-    echo "[recording-verdict-on-resolume] no pixel-proof dir on the box — nothing was flagged"
-  fi
+  # 0 = the dir exists, 1 = it does not (PowerShell's own exit 1); anything else is a transport
+  # failure, which must never read as "nothing was flagged".
+  local probe_rc=0
+  win_ssh_run "$RESOLUME_USER" "$RESOLUME_PW" "$RESOLUME_BOX" "$(onresolume_path_exists_ps "$PIXELS_DIR")" \
+    || probe_rc=$?
+  case "$probe_rc" in
+    0)
+      echo "[recording-verdict-on-resolume] pulling back the pixel proofs $PIXELS_DIR -> $LOCAL_OUT_DIR/"
+      win_ssh_download_dir "$RESOLUME_USER" "$RESOLUME_PW" "$RESOLUME_BOX" "$PIXELS_DIR" "$LOCAL_OUT_DIR/"
+      ;;
+    1) echo "[recording-verdict-on-resolume] no pixel-proof dir on the box — nothing was flagged" ;;
+    *) echo "[recording-verdict-on-resolume] WARNING: could not probe the pixel-proof dir $PIXELS_DIR on ${RESOLUME_BOX} (rc=$probe_rc) — any flagged-frame PNGs stay on the box" >&2 ;;
+  esac
   echo "[recording-verdict-on-resolume] done: partial at $local_partial (the cg recording stayed on RESOLUME-SNV)"
 }
 

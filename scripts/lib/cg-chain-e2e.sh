@@ -400,9 +400,10 @@ cg_chain_onbox_extract_launch() {
 }
 
 # Collect the background cg extract: wait for it at most cg_chain_extract_grace_secs more (polling
-# every CG_CHAIN_EXTRACT_POLL_SECS, default 5), stop it on an overrun, replay its log, log how long it
-# ran (the evidence the grace is calibrated from) and print the CG-LEG marker. Any failure also asks
-# the box to stop its decode — a dev1 side that died (an ssh drop) may have left it running. A failed
+# every CG_CHAIN_EXTRACT_POLL_SECS, default 5), stop it on an overrun, replay its log, log how long
+# after its launch it was collected (the on-box STEP 2 time in the log is the calibration evidence)
+# and print the CG-LEG marker. Any failure also asks the box to stop its decode — a dev1 side that
+# died (an ssh drop) may have left it running. A failed
 # / stopped extract leaves NO partial behind, so the merge never feeds a stale one. A pure no-op
 # unless CG_CHAIN=1; ALWAYS returns 0.
 cg_chain_onbox_extract_wait() {
@@ -422,17 +423,17 @@ cg_chain_onbox_extract_wait() {
       cg_chain_extract_stop
       stopped=1
       CG_LEG_STATE=failed
-      CG_LEG_REASON="the cg OBS decode on RESOLUME-SNV was still running after ${ran}s (${grace}s past the camera extracts) — stopped so it can never cost the job budget"
+      CG_LEG_REASON="the cg OBS decode on RESOLUME-SNV was still running after ${ran}s from its launch (${grace}s past the camera extracts) — stopped so it can never cost the job budget"
     fi
     wait "$pid" 2>/dev/null || rc=$?
     CG_EXTRACT_PID=""
     echo "    ----- cg extract log ($(cg_chain_extract_log)) -----"
     cat "$(cg_chain_extract_log)" 2>/dev/null || true
     echo "    ------------------------------------"
-    echo "    [8/8cg] cg extract ran for ${ran}s (launch to collect; its on-box decode time is in the log above)"
+    echo "    [8/8cg] cg extract collected ${ran}s after its launch (the measured on-box decode time is the STEP 2 line in the log above, when STEP 2 finished)"
     if [ -z "${CG_LEG_STATE:-}" ] && { [ "$rc" != 0 ] || [ ! -f "$partial" ]; }; then
       CG_LEG_STATE=failed
-      CG_LEG_REASON="the cg OBS extract on RESOLUME-SNV failed after ${ran}s (rc=$rc — see its log above)"
+      CG_LEG_REASON="the cg OBS extract on RESOLUME-SNV failed (rc=$rc, collected ${ran}s after its launch — see its log above)"
     fi
     if [ "${CG_LEG_STATE:-}" = failed ]; then
       rm -rf -- "$partial" "${partial%.json}-pixels"
