@@ -448,6 +448,25 @@ dantesync_resolume_win_spec() {
   printf 'resolume=%s@%s' "${DANTESYNC_RESOLUME_USER:-newlevel}" "$ip"
 }
 
+# dantesync_gate_env_for NAME -> the env assignment the per-node verification gate needs (stdout,
+# one `KEY=VALUE` word, or nothing). issue 1372: an AUDIO-role node (mbc, fohabl) locks to the
+# audio-VLAN grandmaster, so its dantesync-gate.sh run must compare gm_source_ip against THAT, never
+# the video grandmaster (which only stays harmless while DANTESYNC_GATE_GM_ENFORCE is off). A video
+# node or an unknown name prints nothing: the gate keeps its own default (video-clock.lan). An audio
+# node whose grandmaster does not resolve (only possible with a hostname override) fails LOUDLY
+# (stderr + rc 1) -- its verify must fail, never fall back to the video grandmaster.
+dantesync_gate_env_for() {
+  local role gm
+  role="$(dantesync_fleet_field "${1:-}" role 2>/dev/null || true)"
+  [ "$role" = "audio" ] || return 0
+  gm="$(dantesync_fleet_role_gm_ip audio 2>/dev/null || true)"
+  if [ -z "$gm" ]; then
+    echo "dantesync-fleet-upgrade: cannot resolve the audio grandmaster '$DANTESYNC_AUDIO_GM_HOST' for $1 -- refusing to verify it against the video grandmaster" >&2
+    return 1
+  fi
+  printf 'RIG_GRANDMASTER_IP=%s' "$gm"
+}
+
 # dantesync_skip_away_traveling NAME -> 0 (TRUE: SKIP this node) iff NAME is an obs-fleet
 # `traveling` box (home-check=traveling) AND it is NOT currently home (obs_fleet_is_home false).
 # Reuses the #1296 obs-fleet home gate so a fleet roll that INCLUDES a traveling box (resolume)
@@ -455,20 +474,6 @@ dantesync_resolume_win_spec() {
 # node. Returns 1 (do NOT skip) for an always-home box, a home traveling box, OR an unknown name
 # (fail-safe: never silently skip a box we cannot classify -- it proceeds and fails loudly on its
 # own reachability check if it really is unreachable).
-# dantesync_gate_env_for NAME -> the env assignment the per-node verification gate needs (stdout,
-# one `KEY=VALUE` word, or nothing). issue 1372: an AUDIO-role node (mbc, fohabl) locks to the
-# audio-VLAN grandmaster, so its dantesync-gate.sh run must compare gm_source_ip against THAT, never
-# the video grandmaster (which only stays harmless while DANTESYNC_GATE_GM_ENFORCE is off). A video
-# node or an unknown name prints nothing: the gate keeps its own default (video-clock.lan).
-dantesync_gate_env_for() {
-  local role gm
-  role="$(dantesync_fleet_field "${1:-}" role 2>/dev/null || true)"
-  [ "$role" = "audio" ] || return 0
-  gm="$(dantesync_fleet_role_gm_ip audio 2>/dev/null || true)"
-  [ -n "$gm" ] && printf 'RIG_GRANDMASTER_IP=%s' "$gm"
-  return 0
-}
-
 dantesync_skip_away_traveling() {
   local name="${1:-}" check
   check="$(obs_fleet_home_check "$name" 2>/dev/null || true)"
@@ -653,7 +658,10 @@ verify_node() {
   # issue 1372: an audio-role node is verified against ITS grandmaster (dantesync_gate_env_for).
   local -a gate_env=(env)
   local genv
-  genv="$(dantesync_gate_env_for "$name")"
+  genv="$(dantesync_gate_env_for "$name")" || {
+    err "[$name] cannot verify: its role grandmaster does not resolve"
+    return 1
+  }
   [ -n "$genv" ] && gate_env+=("$genv")
   for i in $(seq 1 "$tries"); do
     gate_rc=0

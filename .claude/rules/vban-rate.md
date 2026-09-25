@@ -28,7 +28,11 @@ paths:
   counter already seen more than 50 ms earlier or below everything the segment has seen (a restart
   right after the capture began), or a step forward beyond 2 × the frames the elapsed time explains
   + 64 (a sender restart). A real outage advances the counter by ~the elapsed frames and therefore
-  counts as LOSS, not a jump.
+  counts as LOSS, not a jump. **Every jump candidate is confirmed by ONE packet of lookahead (review
+  round 2):** the next packet continuing the OLD sequence makes it a straggler / late duplicate (a
+  late duplicate stays a duplicate, a straggler fills its own hole, a lone far-ahead counter or a
+  pre-segment packet is dropped — never phantom loss); continuing from the candidate makes it a
+  restart. A reorder in a segment's first 50 ms (2,0,1 at capture start) is never a jump.
 - Reported alongside: `max_gap_ms`, the fit residual (arrival jitter — obs-vban bursts), the slope
   stderr. A stream shorter than `--min-span-s` (default 20 s) reads SHORT, never a FAULT.
 - **Formats:** classic pcap (either byte order, µs/ns) LINUX_SLL2 276 (`tcpdump -i any`), SLL 113,
@@ -57,7 +61,7 @@ paths:
 - **Never silently blind (review round 1).** The remote sudo/tcpdump stderr is kept. A capture that
   fails `VBAN_RATE_CAPTURE_FAIL_PASSES` (3) passes in a row while strih-lx answers ssh :22 (tcpdump
   missing, a wrong sudo password) pages once (`vban-rate-capture-<box>`); a failure with the box down
-  is a SKIP. A stream unseen for longer than `VBAN_RATE_STALE_S` (900 s) restarts its confirm count.
+  is a SKIP. A stream not GRADED (OK/FAULT) for longer than `VBAN_RATE_STALE_S` (900 s) restarts its confirm count; the blind-capture page uses a STABLE key (a chronic config fault, one page per incident). A 2-stderr margin above half the bound grades UNCERTAIN (no page, no recovery).
 - Seams: `VBAN_RATE_CAPTURE_CMD <outfile>` replaces the ssh capture (tests feed synthetic pcaps);
   `VBAN_RATE_BOX_UP_CMD` replaces the ssh :22 probe.
 

@@ -41,8 +41,9 @@ set -uo pipefail
 # while the box IS up (tcpdump missing, a wrong sudo password) would leave this watchdog blind, so
 # after VBAN_RATE_CAPTURE_FAIL_PASSES consecutive failures on a live box (ssh :22 answers) it pages
 # once, with the remote error in the text. CAPTURE_TRUNCATED (snaplen cut every header) is logged
-# loudly as a configuration error, never a page. A stream unseen for longer than VBAN_RATE_STALE_S
-# restarts its confirm count when it reappears (an old single-pass fault never completes a page).
+# loudly as a configuration error, never a page. A stream not GRADED for longer than
+# VBAN_RATE_STALE_S restarts its confirm count when it is graded again (an old single-pass fault never
+# completes a page). The blind-capture page is a chronic config fault: ONE page on a stable key.
 #
 # Usage:
 #   scripts/vban-rate-alert-watchdog.sh            # one pass: capture -> grade -> alert
@@ -138,7 +139,7 @@ capture() {
   [ -s "$out" ]
 }
 
-# fire_alert <base key> <body> -- the ONE alert emit seam (time-bucketed: production-critical class).
+# fire_alert <base key> <body> -- the ON-AIR stream alert seam (time-bucketed: production-critical class).
 # The key falls back to the stable base if the shared helper ever fails -- never an empty key.
 fire_alert() {
   local base="$1" body="$2" key
@@ -174,8 +175,16 @@ capture_failed() {
   log "capture on $BOX failed or empty -- SKIP ($n/$CAPTURE_FAIL_PASSES consecutive while the box is up): ${reason:-no error text}"
   [ "$n" -ge "$CAPTURE_FAIL_PASSES" ] || return 0
   write_state_field "alerted_capture" 1
-  fire_alert "vban-rate-capture-${BOX}" \
-    "⚠️ VBAN ($REPO_SLUG): meranie VBAN na **$BOX** zlyháva už $n kontrol po sebe, hoci box je hore -- watchdog je slepý. Chyba: ${reason:-bez textu}. Náprava: tcpdump + sudo na $BOX (heslo / balík). Re-ping každých ~$((REPING_INTERVAL_S/60)) min kým to trvá."
+  # A blind watchdog is a CHRONIC config fault (tcpdump missing, a wrong sudo password), not an on-air
+  # fault: ONE page per incident on a STABLE key -- airuleset edits the card on every repeat -- never
+  # the production-critical time bucket (review round 2; .claude/rules/watchdog-notify-dedup.md).
+  local body="⚠️ VBAN ($REPO_SLUG): meranie VBAN na **$BOX** zlyháva už $n kontrol po sebe, hoci box je hore -- watchdog je slepý. Chyba: ${reason:-bez textu}. Náprava: tcpdump + sudo na $BOX (heslo / balík)."
+  if [ "$DRY_RUN" -eq 1 ]; then
+    log "[dry-run] WOULD alert (dedup-key=vban-rate-capture-${BOX}): $body"
+    return 0
+  fi
+  python3 "$NOTIFY" notify --body "$body" --dedup-key "vban-rate-capture-${BOX}" \
+    >/dev/null 2>&1 || log "ALERT: airuleset.py notify failed (non-fatal)"
 }
 
 # handle_stream <key> <name> <src> <verdict> <rate> <lost> <loss_ratio> <why>
@@ -186,7 +195,13 @@ handle_stream() {
   # would otherwise open a new incident and reset its confirm count); KEY stays in the log only.
   sk="$(state_key "${name}-${src}")"
   log "$name ($src -> $BOX) [$key]: verdict=$verdict rate_ppm=$rate lost=$lost loss_ratio=$ratio${why:+ why=$why}"
-  # a stream unseen for longer than STALE_S restarts its confirm count (never completes an old page)
+  case "$verdict" in
+    FAULT) fault=1 ;;
+    OK) fault=0 ;;
+    *) log "$name: $verdict -- not graded this pass, holding (no page, no recovery)"; return 0 ;;
+  esac
+  # a stream not GRADED for longer than STALE_S restarts its confirm count (never completes an old
+  # page); only an OK/FAULT pass refreshes last_seen -- a SHORT/UNCERTAIN pass is not a reading
   local now last
   now="$(now_epoch)"
   last="$(read_state_field "last_seen_${sk}" "")"
@@ -195,11 +210,6 @@ handle_stream() {
     write_state_field "confirm_${sk}" 0
   fi
   write_state_field "last_seen_${sk}" "$now"
-  case "$verdict" in
-    FAULT) fault=1 ;;
-    OK) fault=0 ;;
-    *) log "$name: $verdict -- not graded this pass, holding (no page)"; return 0 ;;
-  esac
   prev="$(read_state_field "confirm_${sk}" 0)"
   decision="$(obs_watchdog_confirm "$prev" "$fault" "$CONFIRM_THRESHOLD")"
   confirm="$(printf '%s\n' "$decision" | sed -n 's/^confirm=//p')"
