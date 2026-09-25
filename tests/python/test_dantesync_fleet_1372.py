@@ -211,12 +211,13 @@ def test_live_mbc_drift_is_named(monkeypatch):
     assert diffs == ['system.gm_allowlist: missing (canonical ["10.77.7.106"])']
 
 
-def test_live_fohabl_drift_names_both_missing_keys(monkeypatch):
+def test_live_fohabl_drift_names_the_missing_allowlist(monkeypatch):
+    # Issue 1372: phase_slew is no longer a per-role policy (dantesync 1.9.0 ignores it under the
+    # default ptp_phase_lock discipline), so fohabl's missing phase_slew is no longer drift.
     _with_env(monkeypatch)
     verdict, diffs = df.drift((_FIX / "fohabl.json").read_bytes(), "audio")
     assert verdict == df.DRIFT
-    assert diffs == ['system.gm_allowlist: missing (canonical ["10.77.7.106"])',
-                     "system.phase_slew.enabled: missing (canonical true)"]
+    assert diffs == ['system.gm_allowlist: missing (canonical ["10.77.7.106"])']
 
 
 def test_a_byte_order_mark_is_drift_even_when_the_content_matches(monkeypatch):
@@ -241,13 +242,13 @@ def test_value_changes_extra_keys_and_rules(monkeypatch):
     _with_env(monkeypatch)
     base = json.loads((_FIX / "stream.json").read_text())
     cfg = json.loads(json.dumps(base))
-    cfg["system"]["phase_slew"]["enabled"] = False
+    cfg["system"]["clock_discipline"] = "legacy"
     cfg["system"]["gm_allowlist"] = ["10.77.9.184"]
     cfg["mystery"] = 1
     verdict, diffs = df.drift(json.dumps(cfg).encode(), "video")
     assert verdict == df.DRIFT
     assert 'system.gm_allowlist: ["10.77.9.184"] (canonical ["video-clock.lan"])' in diffs
-    assert "system.phase_slew.enabled: false (canonical true)" in diffs
+    assert 'system.clock_discipline: "legacy" (canonical "ptp_phase_lock")' in diffs
     assert any(d.startswith("mystery: extra key") for d in diffs)
     # ntp_server is OPTIONAL for the video role (camboxes pass it on the unit command line) ...
     del cfg["mystery"]
@@ -304,7 +305,7 @@ def test_orchestrator_reports_the_live_audio_drift(tmp_path):
     r = _run_drift(tmp_path, stub)
     assert r.returncode == 20, r.stdout + r.stderr
     assert "node=mbc role=audio verdict=DRIFT" in r.stdout
-    assert "system.phase_slew.enabled: missing" in r.stdout
+    assert "system.gm_allowlist: missing" in r.stdout
     assert "DANTESYNC CONFIG DRIFT on: mbc fohabl" in r.stdout
     for name in ("cam1", "cam7", "dev1", "strih-lx", "stream", "resolume"):
         assert f"node={name} " in r.stdout and f"node={name} role=" in r.stdout

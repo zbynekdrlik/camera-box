@@ -1520,7 +1520,11 @@ fi
 # #1307/#1066: write the dantesync config the cam boxes had only ever received out-of-band (a
 # fresh box came up with NO gm_allowlist and locked to a FOREIGN grandmaster, 2026-09-13). Same
 # shape as setup-imag.sh: http_status on :8898, NTP server mode OFF (strih is the fleet NTP master,
-# see the --ntp-server ExecStart below), phase_slew on. #1066: dantesync >= 1.8.54 (dantesync#113)
+# see the --ntp-server ExecStart below), and the clock discipline. Issue 1372: the pinned dantesync
+# (1.9.0+) runs `clock_discipline=ptp_phase_lock` -- the rate and phase from the PTP tick only, phase
+# slew not used -- which is also its default; it is written explicitly so the canonical config
+# (scripts/dantesync-canonical-config.json) reads it and a stray "legacy" never survives a reprovision.
+# The old phase_slew key is no longer written (ptp_phase_lock ignores it). #1066: dantesync >= 1.8.54 (dantesync#113)
 # now accepts a HOSTNAME in gm_allowlist, and the fleet is on ["video-clock.lan"] since 2026-09-13,
 # so write the literal DNS name -- NOT the resolved IPv4, which drifts a fresh box off the fleet the
 # moment the grandmaster's DHCP lease moves (the exact incident rig-grandmaster.sh exists for).
@@ -1547,14 +1551,12 @@ cat > /etc/dantesync/config.json <<DANTECFGEOF
     "gm_allowlist": [
       "${_RG_GM_HOST}"
     ],
-    "phase_slew": {
-      "enabled": true
-    }
+    "clock_discipline": "ptp_phase_lock"
   }
 }
 DANTECFGEOF
 chmod 644 /etc/dantesync/config.json
-echo "  #1307/#1066: /etc/dantesync/config.json installed (gm_allowlist=[\"${_RG_GM_HOST}\"], resolves to ${_RG_GM_IP}, phase_slew.enabled=true)"
+echo "  #1307/#1066: /etc/dantesync/config.json installed (gm_allowlist=[\"${_RG_GM_HOST}\"], resolves to ${_RG_GM_IP}, clock_discipline=ptp_phase_lock)"
 
 cat > /etc/systemd/system/dantesync.service << 'DANTEEOF'
 [Unit]

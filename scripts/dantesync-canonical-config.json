@@ -3,34 +3,41 @@
     "Issue 1372 part B: the ONE canonical dantesync config.json per ROLE. scripts/dantesync-config-drift.sh",
     "reads every fleet node's config (scripts/lib/dantesync-fleet.sh) and scripts/dantesync_fleet.py",
     "compares it with its role's template here and prints a named diff. Report-only: nothing writes a",
-    "config to a box from this file. Changing a role's policy (e.g. phase_slew, the dantesync#117",
-    "role contract) is an edit here plus a separate, deliberate roll-out.",
+    "config to a box from this file. Changing a role's policy (e.g. the clock discipline, the",
+    "dantesync#117 role contract) is an edit here plus a separate, deliberate roll-out.",
+    "Clock policy (issue 1372, dantesync 1.9.0): system.clock_discipline must be absent (the default",
+    "is ptp_phase_lock) or \"ptp_phase_lock\"; \"legacy\" is drift. system.phase_slew is no longer a",
+    "policy (ptp_phase_lock ignores it), so it is {\"$ignore\": true}: present or absent, not graded.",
     "Every leaf of a template must match the node. Keys starting with '_' are comments on both sides.",
     "A node key the template does not have is reported as an extra key.",
     "Value tokens: '@video_gm' = the rig grandmaster name (scripts/lib/rig-grandmaster.sh,",
     "video-clock.lan); '@audio_gm' = DANTESYNC_AUDIO_GM_HOST (scripts/lib/dantesync-fleet.sh).",
     "{\"$optional\": V} = the key may be absent, but when present it must equal V (the camboxes pass",
     "ntp_server on the unit's --ntp-server command line, so their config has no ntp_server key).",
-    "{\"$any\": true} = the key must be present; any value is accepted."
+    "{\"$any\": true} = the key must be present; any value is accepted.",
+    "{\"$ignore\": true} = the key is not graded: present with any value, or absent."
   ],
   "roles": {
     "video": {
       "http_status": {"enabled": true, "port": 8898},
       "ntp_server": {"$optional": "strih.lan"},
       "ntp_server_mode": {"enabled": false, "max_step_us": 100000, "port": 123, "stratum": 3},
-      "system": {"gm_allowlist": ["@video_gm"], "phase_slew": {"enabled": true}}
+      "system": {"gm_allowlist": ["@video_gm"], "clock_discipline": {"$optional": "ptp_phase_lock"},
+                 "phase_slew": {"$ignore": true}}
     },
     "audio": {
       "http_status": {"enabled": true, "port": 8898},
       "ntp_server": "strih.lan",
       "ntp_server_mode": {"enabled": false, "max_step_us": 100000, "port": 123, "stratum": 3},
-      "system": {"gm_allowlist": ["@audio_gm"], "phase_slew": {"enabled": true}}
+      "system": {"gm_allowlist": ["@audio_gm"], "clock_discipline": {"$optional": "ptp_phase_lock"},
+                 "phase_slew": {"$ignore": true}}
     },
     "ntp-master": {
       "http_status": {"enabled": true, "port": 8898},
       "ntp_server": {"$any": true},
       "ntp_server_mode": {"enabled": true, "max_step_us": 100000, "port": 123, "stratum": 3},
-      "system": {"gm_allowlist": ["@video_gm"], "phase_slew": {"enabled": true}}
+      "system": {"gm_allowlist": ["@video_gm"], "clock_discipline": {"$optional": "ptp_phase_lock"},
+                 "phase_slew": {"$ignore": true}}
     }
   }
 }

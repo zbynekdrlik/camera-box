@@ -715,55 +715,69 @@ fn gm_check_composes_correctly_when_reused_from_clock_offset_guard_sh() {
 // ---------------------------------------------------------------------------------------------
 
 #[test]
-fn phase_slew_check_composes_correctly_when_reused_from_clock_offset_guard_sh_1215() {
+fn clock_discipline_check_composes_correctly_when_reused_from_clock_offset_guard_sh_1372() {
+    // imag-nb's pre-#1215 state (an older dantesync, phase_slew off -> it STEPS) must still be
+    // caught through the issue-1372 discipline check verify-imag.sh (l) now calls.
     let json = "{\"phase_slew_enabled\":false,\"mode\":\"PROD\",\"ntp_offset_us\":2924}";
     let (code, out, err) = run_sourced(&format!(
         r#"
         JSON='{json}'
-        PS="$(phase_slew_enabled_from_pipe_json "$JSON")"
-        echo "$PS"
         set +e
-        phase_slew_check imag "$PS"
+        clock_discipline_check imag "$JSON"
         echo "rc=$?"
         "#
     ));
     assert_eq!(code, 0, "stderr: {err}");
     assert!(
-        out.contains("false") && out.contains("PHASE-SLEW DISABLED") && out.contains("rc=2"),
+        out.contains("PHASE-SLEW DISABLED") && out.contains("rc=2"),
         "imag-nb's pre-#1215 disabled state must be caught when composed inside verify-imag.sh: {out:?}"
     );
 }
 
 #[test]
-fn verify_imag_wires_phase_slew_check_into_the_live_flow_1215() {
+fn verify_imag_wires_the_clock_discipline_check_into_the_live_flow_1372() {
+    // Issue 1372: dantesync 1.9.0 runs `ptp_phase_lock` by default (phase_slew_enabled=false by
+    // design), so check (l) grades the node's clock DISCIPLINE through the shared classifier in
+    // clock-offset-guard.sh rather than the bare phase_slew flag (#1215 lineage).
     let body = std::fs::read_to_string(script()).unwrap();
     assert!(
-        body.contains("phase_slew_check imag"),
-        "verify-imag.sh must CALL phase_slew_check on the imag-nb dantesync status (#1215) -- a \
-         pure function that is only ever defined (in clock-offset-guard.sh) and never invoked \
-         here provides zero acceptance coverage for the phase_slew provisioning gap"
+        body.contains("clock_discipline_check imag \"$DS_HTTP_STATUS\""),
+        "verify-imag.sh must CALL clock_discipline_check on the SAME $DS_HTTP_STATUS blob check \
+         (l) already fetches for ptp_locked/offset/gm_source_ip (#1215/#1372)"
     );
     assert!(
-        body.contains("phase_slew_enabled_from_pipe_json"),
-        "verify-imag.sh must parse phase_slew_enabled out of the SAME $DS_HTTP_STATUS blob check \
-         (l) already fetches for ptp_locked/offset/gm_source_ip (#1215)"
+        !body.contains("phase_slew_check imag"),
+        "verify-imag.sh must no longer grade the bare phase_slew flag -- dantesync 1.9.0 runs \
+         ptp_phase_lock with phase_slew off by design (#1372)"
     );
 }
 
 #[test]
-fn clock_offset_guard_defines_phase_slew_enabled_from_pipe_json_and_phase_slew_check_1215() {
-    let guard_path = manifest_dir().join("scripts/clock-offset-guard.sh");
-    let body = std::fs::read_to_string(&guard_path).unwrap();
-    for needle in [
-        "phase_slew_enabled_from_pipe_json() {",
-        "phase_slew_check() {",
-    ] {
-        assert!(
-            body.contains(needle),
-            "scripts/clock-offset-guard.sh must define {needle} (#1215), following the EXACT \
-             shape of gm_source_ip_from_pipe_json()/gm_check() in the same file"
-        );
-    }
+fn clock_offset_guard_provides_the_phase_slew_parser_and_the_clock_discipline_check_1372() {
+    // #1215 put the phase_slew parser in the guard next to gm_source_ip_from_pipe_json(); issue
+    // 1372 replaced the bare phase_slew_check with clock_discipline_check in the lib the guard
+    // sources (scripts/lib/dantesync-clock-discipline.sh), which verify-imag.sh (l) calls.
+    let guard =
+        std::fs::read_to_string(manifest_dir().join("scripts/clock-offset-guard.sh")).unwrap();
+    let lib =
+        std::fs::read_to_string(manifest_dir().join("scripts/lib/dantesync-clock-discipline.sh"))
+            .unwrap();
+    assert!(
+        guard.contains("phase_slew_enabled_from_pipe_json() {"),
+        "scripts/clock-offset-guard.sh must define phase_slew_enabled_from_pipe_json (#1215)"
+    );
+    assert!(
+        guard.contains("lib/dantesync-clock-discipline.sh"),
+        "scripts/clock-offset-guard.sh must source the clock-discipline lib (#1372)"
+    );
+    assert!(
+        lib.contains("clock_discipline_check() {"),
+        "scripts/lib/dantesync-clock-discipline.sh must define clock_discipline_check (#1372)"
+    );
+    assert!(
+        !guard.contains("phase_slew_check() {") && !lib.contains("phase_slew_check() {"),
+        "the bare phase_slew_check is retired (#1372): no consumer may grade the bare flag"
+    );
 }
 
 #[test]

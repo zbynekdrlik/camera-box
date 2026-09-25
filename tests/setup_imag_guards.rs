@@ -1128,26 +1128,25 @@ fn setup_imag_dantesync_install_from_temp_fails_loud_and_cleans_up_on_failure_12
 }
 
 /// #1215: imag-nb shipped with NO /etc/dantesync/config.json at all (a hand-placed fix, never
-/// provisioned by this script), so it ran on dantesync's built-in default (phase_slew.enabled=
-/// false) and corrected phase error by STEPPING (16x/hour of 6-7ms, a visible ~4-minute hitch on
-/// the projected output) instead of SLEWING like the cam1-4 fleet. Step 3 must install the SAME
-/// JSON the cam boxes carry so a future reprovision cannot silently revert to stepping.
+/// provisioned by this script), so it ran on dantesync's built-in defaults. Step 3 must install
+/// the SAME JSON the cam boxes carry so a future reprovision cannot silently drift. Issue 1372:
+/// since dantesync 1.9.0 the clock policy is `system.clock_discipline = "ptp_phase_lock"` (the rate
+/// from the PTP tick only), which replaces the old `phase_slew` canary flag.
 #[test]
-fn setup_imag_installs_dantesync_phase_slew_config_1215() {
+fn setup_imag_installs_dantesync_clock_discipline_config_1372() {
     let body = read(SETUP);
     for needle in [
         "/etc/dantesync/config.json",
-        "\"phase_slew\"",
-        "\"enabled\": true",
+        "\"clock_discipline\": \"ptp_phase_lock\"",
         "gm_allowlist",
         "\"http_status\"",
         "RIG_GRANDMASTER_IP",
     ] {
         assert!(
             body.contains(needle),
-            "{SETUP} step 3 must install /etc/dantesync/config.json carrying `{needle}` (#1215) \
-             — the same phase_slew canary config the cam1-4 fleet carries, or a reprovisioned \
-             imag-nb silently reverts to stepping the clock"
+            "{SETUP} step 3 must install /etc/dantesync/config.json carrying `{needle}` \
+             (#1215/#1372) — the same clock config the cam boxes carry, or a reprovisioned \
+             imag-nb silently drifts off the fleet's clock discipline"
         );
     }
     // mode 644 (matching the ticket's spec: "mode 644, root-owned" — the whole script already
@@ -1165,7 +1164,7 @@ fn setup_imag_installs_dantesync_phase_slew_config_1215() {
 fn setup_imag_installs_dantesync_config_before_the_restart_1215() {
     let body = read(SETUP);
     let config_pos = body.find("/etc/dantesync/config.json").expect(
-        "the config write must exist (see setup_imag_installs_dantesync_phase_slew_config_1215)",
+        "the config write must exist (see setup_imag_installs_dantesync_clock_discipline_config_1372)",
     );
     let restart_pos = body
         .find("systemctl restart dantesync")

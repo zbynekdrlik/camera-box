@@ -10,6 +10,8 @@ paths:
   - "scripts/rig-dev-handover-check.sh"
   - "tests/python/test_dantesync_fleet*_1372.py"
   - "tests/python/test_dantesync_clock_fleet_1372.py"
+  - "tests/python/test_clock_discipline_1372.py"
+  - "tests/fixtures/dantesync_clock_discipline_1372.tsv"
 ---
 
 # DANTESYNC_FLEET — the ONE declared list of every dantesync node (issue 1372 part B)
@@ -44,6 +46,13 @@ hand (25.9.2026). Adding a node is now ONE row; every consumer picks it up.
   00:1d:c1:1a:44:30 — the same clock as video-clock.lan, #1367 comment 5832526338). No DNS name exists
   for it yet; the address lives in this ONE variable.
 - **Python twin:** `scripts/dantesync_fleet.py rows` prints byte-identical rows (parity pinned).
+- **Clock-discipline twin (issue 1372):** `dantesync_fleet.classify_clock_discipline(status)`,
+  `clock_discipline_unlocked(status)` and `date_master_verdict(status, margin_us)` are the python
+  twins of `scripts/lib/dantesync-clock-discipline.sh`'s `clock_discipline_class` /
+  `clock_discipline_unlocked` / `date_master_verdict`, pinned by ONE table
+  `tests/fixtures/dantesync_clock_discipline_1372.tsv` (see `dantesync-clock-offset-gate.md`). A python
+  consumer (a watchdog, a report) grades the 1.9.0 discipline through them, never by re-reading
+  `phase_slew_enabled`.
 
 ## Consumers (each keeps its env override / explicit arms byte-compatible)
 
@@ -65,14 +74,26 @@ powered-off FOH PC would refuse every E2E. It stays per-run (camera_active_exclu
 every template leaf must match (a missing dict names each missing LEAF), a node-only key is an
 `extra key`, a UTF-8/UTF-16 byte-order mark is DRIFT on its own (dantesync ignores such a file — the
 PowerShell-write trap). Tokens: `@video_gm` / `@audio_gm`; rules `{"$optional": V}` (cams carry
-`ntp_server` on the unit command line) and `{"$any": true}` (the master's upstream). Exit 0 / 20 DRIFT
-/ 11 UNKNOWN. NOTHING is ever written to a box; a policy flip (phase_slew = dantesync #117) is a
-template edit plus a deliberate roll-out.
+`ntp_server` on the unit command line), `{"$any": true}` (the master's upstream) and
+`{"$ignore": true}` (a retired policy key: present with any value or absent, never graded; any
+other argument raises, so `{"$ignore": false}` can never silently mean "not graded"). Exit 0 /
+20 DRIFT / 11 UNKNOWN. NOTHING is ever written to a box; a policy flip is a template edit plus a
+deliberate roll-out.
+
+**Clock policy since dantesync 1.9.0 (issue 1372):** every role asserts
+`system.clock_discipline: {"$optional": "ptp_phase_lock"}` — absent (1.9.0's default) or
+`ptp_phase_lock` passes, `legacy` (or any other value) is DRIFT. `system.phase_slew` is
+`{"$ignore": true}`: the live nodes still carry `phase_slew.enabled=true` from the pre-1.9.0 rollout,
+and ptp_phase_lock ignores it, so dropping the key without the rule would read "extra key" DRIFT on
+all 13 nodes. The provisioning writers (`setup-device.sh`, `setup-imag.sh`) write
+`"clock_discipline": "ptp_phase_lock"` and no phase_slew; `scripts/dantesync_config_patch.py` writes
+the same by default and keeps the old phase_slew flip only behind `--legacy-phase-slew` (a
+pre-1.9.0 node).
 
 ## Tier-0
 
 `pytest tests/python/test_dantesync_fleet_1372.py tests/python/test_dantesync_fleet_consumers_1372.py
-tests/python/test_dantesync_clock_fleet_1372.py` (live-captured configs under
+tests/python/test_dantesync_clock_fleet_1372.py tests/python/test_clock_discipline_1372.py` (live-captured configs under
 `tests/python/fixtures/dantesync_config_1372/`; PATH `sshpass`/`dantesync` stubs record which password
 each target was dialled with). A worktree worker drives bash through pytest subprocesses (the
 isolation guard refuses a bare `bash -c`).
