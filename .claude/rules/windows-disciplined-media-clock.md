@@ -176,7 +176,10 @@ Gotchas:
 - stream's `vlc_source` ("NL playlist") stays on the stock `vlc-video.dll` (see Known limit).
 - **Compile proof for obs-browser = a green `windows-genlock.yml` run at the lane's head.** The
   pre-merge fast gate configures with `-DENABLE_BROWSER=OFF`, so `browser-client.cpp` compiles only
-  in the full build. The Rust test pins its text, not its compile. Require that run before deploying.
+  in the full build. The Rust test pins its text, not its compile. `windows-genlock.yml` is
+  dispatch-only: after the lane is integrated, run
+  `gh workflow run "Windows genlock build (vendored OBS + DistroAV)" --ref dev` (check the exact name
+  with `gh workflow list`) and require it green before deploying.
 - The genlock audit's `wall_qpc_drift_ms=` (obs-source.c) goes FLAT on Windows apart from
   dantesync phase steps. It moved ~10 ppm before.
 - **The stream `asrc: source 'mbc' estimated=` reading moves.** The mixer clock is now the

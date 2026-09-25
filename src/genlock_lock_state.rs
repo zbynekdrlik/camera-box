@@ -300,10 +300,11 @@ pub fn top_phase_event_offender(inputs: &[InputEventCounts]) -> Option<(usize, u
 }
 
 // #1299 Part 4 + #1357 scope C — the wall-vs-monotonic `qpc_drift` term. The CUMULATIVE offset must
-// never gate: on a dantesync-disciplined Windows box the wall runs at the grandmaster rate vs the free
-// QPC crystal and the offset grows ~50 ms/h (38 false pages overnight 15./16.9.2026). The RATE must not
+// never gate: on a dantesync-disciplined Windows box the wall ran at the grandmaster rate vs the free
+// QPC crystal and the offset grew ~50 ms/h (38 false pages overnight 15./16.9.2026; issue 1372 has
+// since disciplined the Windows `os_gettime_ns()`). The RATE must not
 // gate either (#1357): on Linux `CLOCK_MONOTONIC` is kernel-disciplined together with `CLOCK_REALTIME`,
-// so the measured wall-vs-monotonic rate is 0 by construction, while on Windows it is the free crystal —
+// so the measured wall-vs-monotonic rate is 0 by construction, while on Windows it was the free crystal —
 // a rate check therefore meant a different thing on every box, and comparing a windowed rate with one
 // instantaneous dantesync `f_ptp + f_phase` sample false-DEGRADED both (28 samples on strih-lx, 4 on
 // stream, 24.9.2026, none a step). A rate is also no genlock hazard: the render tick re-derives every

@@ -198,8 +198,8 @@ static inline int genlock_name_is_camera(const char *name)
 }
 
 /* #1299 Part 4 + #1357 scope C — the wall-vs-monotonic qpc_drift verdict + its measured rate. The
- * CUMULATIVE wall_qpc_drift_ms never gates (on a dantesync-disciplined Windows box it grows ~50 ms/h
- * against the free QPC crystal by design). The RATE never gates either: on Linux CLOCK_MONOTONIC is
+ * CUMULATIVE wall_qpc_drift_ms never gates (on a dantesync-disciplined Windows box it grew ~50 ms/h
+ * against the free QPC crystal until issue 1372 disciplined os_gettime_ns). The RATE never gates either: on Linux CLOCK_MONOTONIC is
  * kernel-disciplined together with CLOCK_REALTIME, so the measured rate is 0 by construction, while on
  * Windows it was the free crystal (since issue 1372 the Windows os_gettime_ns runs at the
  * disciplined rate too, so it reads ~0 on every box) — a rate check meant a different thing per box
