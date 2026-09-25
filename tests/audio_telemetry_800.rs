@@ -43,3 +43,31 @@ fn audio_telemetry_dump_is_pinned_in_the_audio_tick_800() {
         "#800 telemetry: per-source walk lost its audio_sources_mutex lock"
     );
 }
+
+/// Issue 1367 (the FOH-click report, 25.9.2026): the obs-vban raw-audio output on resolume sent with
+/// 308-378 ms gaps while the recording was clean. The mixer tick must PROVE it never stalls: the
+/// largest gap between two audio-thread ticks and the longest tick of every 60 s window are logged
+/// on their own line (a marker no other audio/genlock line contains).
+#[test]
+fn audio_thread_stall_probe_is_logged_every_window_1367() {
+    let src = fs::read_to_string(OBS_AUDIO).expect("read vendored obs-audio.c");
+    for token in [
+        "audio-stall #1367: tick_gap_max_ms=",
+        "callback_max_ms=",
+        "ticks_over=",
+        "static void audio_stall_probe_exit(uint64_t entry_ns)",
+        "const uint64_t stall_entry_ns = os_gettime_ns();",
+    ] {
+        assert!(
+            src.contains(token),
+            "issue 1367: the audio-thread stall probe `{token}` is missing from obs-audio.c"
+        );
+    }
+    // both returns of audio_callback close the tick (the buffering-wait early return included).
+    assert_eq!(
+        src.matches("audio_stall_probe_exit(stall_entry_ns);")
+            .count(),
+        2,
+        "issue 1367: every return of audio_callback must close the stall probe's tick"
+    );
+}

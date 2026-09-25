@@ -683,3 +683,72 @@ fn a_realized_delay_over_the_lock_is_followed_too_1367() {
     // a fresh free-tracker arm, not the lock's leftover count ticking down.
     assert_eq!((t.locked_ms, t.settle_ticks), (0, VIDEO_DELAY_SETTLE_TICKS));
 }
+
+// ---- issue 1367 (live 25.9.2026 12:31): the hold must reach the samples -----------------------
+
+#[test]
+fn an_active_hold_never_appends_right_after_a_timeline_reset_1367() {
+    use AudioHoldMode::*;
+    // OBS's verdict stands everywhere except right after a reset under an active genlock hold.
+    for mode in [Off, Latency, Timecode, Pending] {
+        assert!(audio_push_back_allowed(true, false, mode), "{mode:?}");
+        assert!(!audio_push_back_allowed(false, false, mode), "{mode:?}");
+        assert!(!audio_push_back_allowed(false, true, mode), "{mode:?}");
+    }
+    assert!(!audio_push_back_allowed(true, true, Timecode));
+    assert!(!audio_push_back_allowed(true, true, Latency));
+    assert!(
+        audio_push_back_allowed(true, true, Off),
+        "not held: OBS decides"
+    );
+    assert!(
+        audio_push_back_allowed(true, true, Pending),
+        "withheld: never placed"
+    );
+}
+
+#[test]
+fn the_placement_error_is_measured_on_the_samples_1367() {
+    // appended: the buffer end; placed: its own timestamp.
+    assert_eq!(audio_actual_place_ns(true, 1_000, 250, 9_999), 1_250);
+    assert_eq!(audio_actual_place_ns(false, 1_000, 250, 9_999), 9_999);
+    assert_eq!(
+        audio_actual_place_ns(true, u64::MAX, 2, 0),
+        1,
+        "wraps like C"
+    );
+    // the live 12:36 read: the samples 88 ms early on a 133 ms hold.
+    assert_eq!(audio_place_error_ns(WALL - 88_000_000, WALL), -88_000_000);
+    assert_eq!(audio_place_error_ns(WALL, WALL - 5), 5);
+    // the EMA seeds, then steps a sixteenth, truncating toward zero on both signs.
+    assert_eq!(
+        audio_place_error_smooth_ns(123, -88_000_000, false),
+        -88_000_000
+    );
+    assert_eq!(audio_place_error_smooth_ns(0, 160, true), 10);
+    assert_eq!(audio_place_error_smooth_ns(0, -160, true), -10);
+    assert_eq!(audio_place_error_smooth_ns(0, -15, true), 0);
+    assert_eq!(
+        audio_place_error_smooth_ns(i64::MIN, i64::MAX, true),
+        i64::MIN.wrapping_add(i64::MAX.wrapping_sub(i64::MIN) / 16),
+        "wraps like C"
+    );
+}
+
+#[test]
+fn the_pairing_offset_reads_the_samples_not_the_bookkeeping_1367() {
+    // the live 12:36 state: a 133 ms hold, samples 88 ms early, video 133 ms -> -88, never 0.
+    let realized = audio_realized_delay_ns(133, 0, -88_000_000, true);
+    assert_eq!(realized, 45_000_000);
+    assert_eq!(pairing_offset_ms(realized, 133_333_333), -88);
+    // mid-slew the measured error already carries the owed slew.
+    assert_eq!(
+        audio_realized_delay_ns(133, 33_000_000, -33_000_000, true),
+        100_000_000
+    );
+    // unmeasured: the bookkeeping fallback (hold minus the owed slew).
+    assert_eq!(
+        audio_realized_delay_ns(133, 33_000_000, -88_000_000, false),
+        audio_applied_delay_ns(133, 33_000_000)
+    );
+}

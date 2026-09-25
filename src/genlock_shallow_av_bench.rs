@@ -70,6 +70,8 @@ struct Scenario {
     min_latency_box: bool,
     /// From this many seconds after the start the lag band becomes `(min, max)` ms (no gap).
     band_change: Option<(u64, u64, u64)>,
+    /// live 25.9.2026 12:31: the anti-tautology audio leg that appends after a timeline reset.
+    legacy_append: bool,
     /// design 5830750134: a sender TRANSIENT — frames stamped in `[at_ms, at_ms + dur_ms)` after
     /// the start arrive `extra_ms` later (in order, so the frames right behind wait too): the live
     /// 25.9.2026 12:01 song change that latched `floor_max_frames=11`.
@@ -88,6 +90,7 @@ impl Scenario {
             min_latency_box: false,
             band_change: None,
             burst: None,
+            legacy_append: false,
         }
     }
 }
@@ -106,6 +109,9 @@ struct Run {
     depth_hist: std::collections::BTreeMap<u64, u64>,
     max_abs_av_ms: f64,
     av_ticks: u64,
+    /// The largest gap between the REPORTED pairing offset (the audit's realized audio side minus
+    /// the measured video delay) and the TRUE A/V error of the samples, on the same ticks.
+    max_pairing_vs_av_ms: f64,
     /// |A/V| while the audio is still slewing onto a new hold (excluded from `max_abs_av_ms`, which
     /// is the settled pairing), and how many ticks the audio spent slewing.
     max_abs_av_slew_ms: f64,
@@ -142,7 +148,14 @@ fn run(sc: Scenario) -> Run {
     let mut rng = 0x1367_5827u64;
     let mut fifo = Fifo::default();
     let mut tracker = VideoDelayTracker::default();
-    let mut audio = AudioLeg::fresh(false);
+    let leg = || {
+        if sc.legacy_append {
+            AudioLeg::fresh(false).with_legacy_append_after_reset()
+        } else {
+            AudioLeg::fresh(false)
+        }
+    };
+    let mut audio = leg();
     let mut totals = (0u32, 0u32, 0u32);
     let mut arrivals: VecDeque<(u64, u64)> = VecDeque::new();
     let mut sender_slot = W0;
@@ -172,7 +185,7 @@ fn run(sc: Scenario) -> Run {
             totals.0 += audio.places;
             totals.1 += audio.slews;
             totals.2 += audio.steps;
-            audio = AudioLeg::fresh(false);
+            audio = leg();
             last_latched = 0;
             last_depth = None;
             settle_until = nominal + SETTLE_S * NS_PER_S;
@@ -296,6 +309,12 @@ fn run(sc: Scenario) -> Run {
                     let av = audio.av_ms(presented, mono_sched);
                     out.av_ticks += 1;
                     out.max_abs_av_ms = out.max_abs_av_ms.max(av.abs());
+                    let reported = pairing_offset_ms(
+                        audio.realized_delay_ns(),
+                        video_delay_reference_ns(tracker.smoothed_ns, LATENCY_MS),
+                    );
+                    out.max_pairing_vs_av_ms =
+                        out.max_pairing_vs_av_ms.max((reported as f64 - av).abs());
                 }
             }
             if last_depth.is_some_and(|d| d != depth) {
@@ -610,4 +629,49 @@ fn a_whole_window_transient_latches_the_clamp_then_re_measures_1367() {
     assert!(r.capped, "the over-cap latch must be reported");
     assert!(r.latched.contains(&4), "latched {:?}", r.latched);
     assert_transient("transient-4s", &r, 2);
+}
+
+// ---- live 25.9.2026 12:31: the hold must reach the SAMPLES after a sender restart ---------------
+
+#[test]
+fn a_sender_restart_never_appends_the_audio_at_arrival_1367() {
+    // every run has a sender restart (t = 2400 s, 3 s of silence: a >2 s timestamp jump). OBS then
+    // resets the buffer to the ARRIVAL instant and appends; the fixed ingest places at the term. The
+    // settled pairing of the SAMPLES (not the bookkeeping) stays within 5 ms, and the pairing offset
+    // the audit reports tracks the true A/V error.
+    let r = run(Scenario::clean(40, 64, 3));
+    eprintln!("placed-after-reset: {r:?}");
+    assert!(
+        r.max_abs_av_ms <= GATE_MAX_AV_MS,
+        "|A/V| {:.2} ms",
+        r.max_abs_av_ms
+    );
+    assert!(
+        r.max_pairing_vs_av_ms <= 4.0,
+        "the reported pairing offset left the true A/V by {:.2} ms",
+        r.max_pairing_vs_av_ms
+    );
+}
+
+#[test]
+fn the_append_after_reset_loses_the_hold_and_the_audit_now_says_so_1367() {
+    // the anti-tautology: OBS's append taken as-is (the live ebea02a2d behaviour) puts the audio on
+    // its arrival after the restart -- ~1-2 frames EARLY on this 40-64 ms feed (live: +101 ms on a
+    // 133 ms hold). The audit's pairing offset measures the samples, so it reads that gap instead
+    // of the old structural 0.
+    let r = run(Scenario {
+        legacy_append: true,
+        ..Scenario::clean(40, 64, 3)
+    });
+    eprintln!("legacy-append: {r:?}");
+    assert!(
+        r.max_abs_av_ms > 30.0,
+        "the legacy append must lose the hold: |A/V| {:.2} ms",
+        r.max_abs_av_ms
+    );
+    assert!(
+        r.max_pairing_vs_av_ms <= 4.0,
+        "the audit must report the lost hold: pairing vs true A/V {:.2} ms",
+        r.max_pairing_vs_av_ms
+    );
 }

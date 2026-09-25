@@ -213,6 +213,12 @@ pub(super) struct AudioLeg {
     pub(super) slews: u32,
     pub(super) steps: u32,
     pub(super) withheld: u64,
+    /// Issue 1367 (live 25.9.2026 12:31): the anti-tautology variant — a packet right after a
+    /// timeline reset is APPENDED as OBS decides, never corrected by [`audio_push_back_allowed`].
+    legacy_append_after_reset: bool,
+    /// The smoothed placement error the production ingest measures (actual − intended).
+    place_err_ns: i64,
+    place_err_seeded: bool,
 }
 
 /// `TS_SMOOTHING_THRESHOLD` of `obs-source.c`.
@@ -243,7 +249,28 @@ impl AudioLeg {
             slews: 0,
             steps: 0,
             withheld: 0,
+            legacy_append_after_reset: false,
+            place_err_ns: 0,
+            place_err_seeded: false,
         }
+    }
+
+    /// The anti-tautology variant of the live 12:31 defect: OBS's append after a timeline reset is
+    /// taken as-is, so the hold is lost at every sender restart.
+    pub(super) fn with_legacy_append_after_reset(mut self) -> AudioLeg {
+        self.legacy_append_after_reset = true;
+        self
+    }
+
+    /// The pairing offset's AUDIO side as the production audit computes it
+    /// ([`audio_realized_delay_ns`] over the measured placement error).
+    pub(super) fn realized_delay_ns(&self) -> i64 {
+        audio_realized_delay_ns(
+            self.hold_ms,
+            self.slew_remaining_ns,
+            self.place_err_ns,
+            self.place_err_seeded,
+        )
     }
 
     /// The anti-tautology variant: the slew steps are NOT booked out of the smoothing timeline.
@@ -294,7 +321,16 @@ impl AudioLeg {
             self.timing_adjust = mono.wrapping_sub(tc);
             self.timing_set = true;
         }
-        let continuous = self.placed && !resync;
+        // OBS's own continuity verdict: back to back. A sender restart's >2 s timestamp jump runs
+        // handle_ts_jump, which empties the buffer and puts its start AND next_audio_sys_ts_min on the
+        // ARRIVAL instant -- the packet's pre-term timestamp equals it, so OBS still appends (live
+        // 25.9.2026 12:31); the production ingest corrects that for an active genlock hold.
+        let obs_push_back = self.placed;
+        let continuous = if self.legacy_append_after_reset {
+            obs_push_back
+        } else {
+            audio_push_back_allowed(obs_push_back, resync, mode)
+        };
         let action = audio_hold_action(
             self.mode,
             self.hold_ms,
@@ -323,7 +359,18 @@ impl AudioLeg {
                     .wrapping_add(term.wrapping_sub(prev_term));
                 self.slews += 1;
             }
-            AudioHoldAction::Continue if continuous => {}
+            AudioHoldAction::Continue if continuous => {
+                if resync {
+                    // appended at the reset buffer start: the ARRIVAL instant -- the genlock term
+                    // never reaches the samples (the live 12:31 defect).
+                    self.asrc.recapture();
+                    self.anchor_tc = tc;
+                    self.anchor_mono = mono;
+                    self.correction_ns = 0.0;
+                    self.ts_raw_next = tc;
+                    self.ts_next_min = tc;
+                }
+            }
             AudioHoldAction::Place | AudioHoldAction::Replace | AudioHoldAction::Continue => {
                 let shift = audio_level_shift_ns(
                     action,
@@ -355,6 +402,20 @@ impl AudioLeg {
         }
         self.mode = mode;
         self.hold_ms = hold;
+        // the production ingest's placement measurement: where this packet's first sample actually
+        // plays (the modelled buffer) against where the hold meant it to (in.timestamp after the term).
+        if self.placed && mode.is_active() {
+            let intended = tc
+                .wrapping_add(self.timing_adjust)
+                .wrapping_add(term as u64);
+            let actual = self.play_mono(tc).round() as u64;
+            let err = audio_place_error_ns(actual, intended);
+            self.place_err_ns =
+                audio_place_error_smooth_ns(self.place_err_ns, err, self.place_err_seeded);
+            self.place_err_seeded = true;
+        } else {
+            self.place_err_seeded = false;
+        }
     }
 
     /// One render tick of the ASRC (`dt_ns` of audio): the rate servo, the slew increment (the

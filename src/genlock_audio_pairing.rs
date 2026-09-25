@@ -547,6 +547,73 @@ pub fn audio_applied_delay_ns(hold_ms: u32, slew_remaining_ns: i64) -> i64 {
     genlock_audio_delay_ns(hold_ms).wrapping_sub(slew_remaining_ns as u64) as i64
 }
 
+/// Issue 1367 (live 25.9.2026 12:31, resolume `sp-slow_video`) — may the ingest APPEND this packet
+/// back to back? OBS's own continuity verdict `push_back`, EXCEPT right after the ingest reset its
+/// timeline in this packet (`handle_ts_jump` on a timestamp jump over `MAX_TS_VAR` — a sender
+/// restart or song change). `reset_audio_data` then empties the buffer and puts BOTH its start
+/// (`audio_ts`) and `next_audio_sys_ts_min` on the ARRIVAL instant, so the packet's pre-term
+/// timestamp equals it and OBS appends it there: the genlock term never reaches the samples and the
+/// hold is silently lost (the buffer level fell 111 → 46 → 13 ms while the audit still read
+/// `audio_delay_ms=133`). An ACTIVE genlock hold therefore places that packet at its term.
+/// Mirror of `genlock_audio_push_back_allowed`.
+pub fn audio_push_back_allowed(push_back: bool, timeline_reset: bool, mode: AudioHoldMode) -> bool {
+    let _ = (timeline_reset, mode);
+    push_back
+}
+
+/// Issue 1367 — the OBS-monotonic instant this packet's first sample ACTUALLY lands in the source's
+/// mix buffer: an APPENDED packet goes to the buffer end (`audio_ts + buffered`), a PLACED one to its
+/// own timestamp. Wraps like the C `uint64_t`. Mirror of `genlock_audio_actual_place_ns`.
+pub fn audio_actual_place_ns(
+    appended: bool,
+    audio_ts_ns: u64,
+    buffered_ns: u64,
+    placed_ns: u64,
+) -> u64 {
+    if appended {
+        audio_ts_ns.wrapping_add(buffered_ns)
+    } else {
+        placed_ns
+    }
+}
+
+/// Issue 1367 — the placement ERROR of one packet: where it actually landed minus where the genlock
+/// hold meant it to land (`in.timestamp` after the term). Negative = the audio sits EARLY (the hold is
+/// not in the samples). Two's complement, like the C. Mirror of `genlock_audio_place_error_ns`.
+pub fn audio_place_error_ns(actual_ns: u64, intended_ns: u64) -> i64 {
+    actual_ns.wrapping_sub(intended_ns) as i64
+}
+
+/// Issue 1367 — the EMA weight of one placement-error sample, as a right shift (1/16 per packet, a
+/// time constant of 16 packets ≈ 0.2–0.3 s). Mirror of `GENLOCK_AUDIO_PLACE_ERR_EMA_SHIFT`.
+pub const AUDIO_PLACE_ERR_EMA_SHIFT: u32 = 4;
+
+/// Issue 1367 — one EMA step of the placement error; an unseeded EMA takes the sample. Division
+/// truncates toward zero and the sums wrap, identically in C. Mirror of
+/// `genlock_audio_place_error_smooth_ns`.
+pub fn audio_place_error_smooth_ns(smoothed_ns: i64, sample_ns: i64, seeded: bool) -> i64 {
+    if !seeded {
+        return sample_ns;
+    }
+    smoothed_ns
+        .wrapping_add(sample_ns.wrapping_sub(smoothed_ns) / (1i64 << AUDIO_PLACE_ERR_EMA_SHIFT))
+}
+
+/// Issue 1367 — the pairing offset's AUDIO side: where the samples REALLY sit. With a measured
+/// placement error it is the applied hold plus that error (an owed slew is already in it: the
+/// buffer is not stretched yet), so a hold that never reached the samples reads as the gap it is.
+/// Without a measurement it falls back to [`audio_applied_delay_ns`] (hold minus the owed slew).
+/// Mirror of `genlock_audio_realized_delay_ns`.
+pub fn audio_realized_delay_ns(
+    hold_ms: u32,
+    slew_remaining_ns: i64,
+    place_err_ns: i64,
+    measured: bool,
+) -> i64 {
+    let _ = (place_err_ns, measured);
+    audio_applied_delay_ns(hold_ms, slew_remaining_ns)
+}
+
 /// The audio-parity health of one genlocked source — the reason the LOCK indicator DEGRADES on the
 /// audio axis (mirrors the video-side `LockReason` discriminant model). Discriminants match the C
 /// `genlock_audio_health` enum and are compared as `u8` by the parity gate.

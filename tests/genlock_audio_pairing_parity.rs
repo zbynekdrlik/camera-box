@@ -20,6 +20,10 @@
 //! toolchain is missing — a parity test that silently passes without running is worse than none.
 
 use camera_box::genlock_audio_pairing::{
+    audio_actual_place_ns, audio_place_error_ns, audio_place_error_smooth_ns,
+    audio_push_back_allowed, audio_realized_delay_ns,
+};
+use camera_box::genlock_audio_pairing::{
     audio_applied_delay_ns, audio_hold_action, audio_hold_mode, audio_hold_ms,
     audio_level_shift_ns, audio_needs_live_offset, audio_place_term_ns, audio_placed_slew_fold_ns,
     audio_slew_book_ts_ns, audio_slew_ppm, audio_slew_step_ns, audio_wall_to_mono_ns,
@@ -84,6 +88,11 @@ fn lift_block() -> String {
         "genlock_audio_slew_book_ts_ns(",
         "genlock_audio_placed_slew_fold_ns(",
         "genlock_audio_applied_delay_ns(",
+        "genlock_audio_push_back_allowed(",
+        "genlock_audio_actual_place_ns(",
+        "genlock_audio_place_error_ns(",
+        "genlock_audio_place_error_smooth_ns(",
+        "genlock_audio_realized_delay_ns(",
     ] {
         assert!(
             block.contains(helper),
@@ -825,4 +834,135 @@ fn c_audio_health_matches_the_rust_authority_1303() {
         vectors.len(),
         diffs.join("\n")
     );
+}
+
+/// Issue 1367 (live 25.9.2026 12:31) — the append-after-reset guard and the placement measurement
+/// the audit's pairing offset now reads: `genlock_audio_push_back_allowed`,
+/// `genlock_audio_actual_place_ns`, `genlock_audio_place_error_ns`,
+/// `genlock_audio_place_error_smooth_ns` and `genlock_audio_realized_delay_ns` must match the Rust
+/// authority on every mode, both append paths, both error signs and the wrap extremes.
+#[test]
+fn c_audio_placement_measurement_matches_the_rust_authority_1367() {
+    let modes = [
+        AudioHoldMode::Off,
+        AudioHoldMode::Latency,
+        AudioHoldMode::Timecode,
+        AudioHoldMode::Pending,
+    ];
+    let actual: [(bool, u64, u64, u64); 5] = [
+        (true, 1_000, 250, 9_999),
+        (false, 1_000, 250, 9_999),
+        (true, u64::MAX, 2, 0),
+        (false, 0, u64::MAX, u64::MAX),
+        (true, 1_790_000_000_000_000_000, 144_000_000, 0),
+    ];
+    let errs: [(u64, u64); 5] = [
+        (
+            1_790_000_000_000_000_000 - 88_000_000,
+            1_790_000_000_000_000_000,
+        ),
+        (5, 0),
+        (0, 5),
+        (0, u64::MAX),
+        (u64::MAX, 0),
+    ];
+    let smooth: [(i64, i64, bool); 7] = [
+        (123, -88_000_000, false),
+        (0, 160, true),
+        (0, -160, true),
+        (0, -15, true),
+        (i64::MIN, i64::MAX, true),
+        (i64::MAX, i64::MIN, true),
+        (-88_000_000, -87_000_000, true),
+    ];
+    let realized: [(u32, i64, i64, bool); 6] = [
+        (133, 0, -88_000_000, true),
+        (133, 33_000_000, -33_000_000, true),
+        (133, 33_000_000, -88_000_000, false),
+        (0, 0, 0, true),
+        (u32::MAX, i64::MIN, i64::MAX, true),
+        (3, i64::MAX, i64::MIN, false),
+    ];
+    let lit = |v: i64| {
+        if v == i64::MIN {
+            "INT64_MIN".to_string()
+        } else {
+            format!("{v}ll")
+        }
+    };
+    let b = |v: bool| i32::from(v);
+    let mut body = String::new();
+    for m in &modes {
+        for (pb, reset) in [(false, false), (true, false), (false, true), (true, true)] {
+            body.push_str(&format!(
+                "    printf(\"%d\\n\", genlock_audio_push_back_allowed({}, {}, {}) ? 1 : 0);\n",
+                b(pb),
+                b(reset),
+                m.code()
+            ));
+        }
+    }
+    for (ap, ts, buf, placed) in &actual {
+        body.push_str(&format!(
+            "    printf(\"%llu\\n\", (unsigned long long)genlock_audio_actual_place_ns({}, {ts}ull, {buf}ull, {placed}ull));\n",
+            b(*ap)
+        ));
+    }
+    for (a, i) in &errs {
+        body.push_str(&format!(
+            "    printf(\"%lld\\n\", (long long)genlock_audio_place_error_ns({a}ull, {i}ull));\n"
+        ));
+    }
+    for (sm, sa, seeded) in &smooth {
+        body.push_str(&format!(
+            "    printf(\"%lld\\n\", (long long)genlock_audio_place_error_smooth_ns({}, {}, {}));\n",
+            lit(*sm),
+            lit(*sa),
+            b(*seeded)
+        ));
+    }
+    for (h, r, e, measured) in &realized {
+        body.push_str(&format!(
+            "    printf(\"%lld\\n\", (long long)genlock_audio_realized_delay_ns({h}u, {}, {}, {}));\n",
+            lit(*r),
+            lit(*e),
+            b(*measured)
+        ));
+    }
+    let out = run_c(&body, "placement");
+    let mut want: Vec<String> = Vec::new();
+    for m in &modes {
+        for (pb, reset) in [(false, false), (true, false), (false, true), (true, true)] {
+            want.push(b(audio_push_back_allowed(pb, reset, *m)).to_string());
+        }
+    }
+    for (ap, ts, buf, placed) in &actual {
+        want.push(audio_actual_place_ns(*ap, *ts, *buf, *placed).to_string());
+    }
+    for (a, i) in &errs {
+        want.push(audio_place_error_ns(*a, *i).to_string());
+    }
+    for (sm, sa, seeded) in &smooth {
+        want.push(audio_place_error_smooth_ns(*sm, *sa, *seeded).to_string());
+    }
+    for (h, r, e, measured) in &realized {
+        want.push(audio_realized_delay_ns(*h, *r, *e, *measured).to_string());
+    }
+    assert_eq!(
+        out, want,
+        "issue 1367: the C append guard / placement measurement diverged from the Rust authority"
+    );
+    // the live 12:36 read must not read paired: 133 ms hold, samples 88 ms early.
+    assert_eq!(
+        pairing_offset_ms(
+            audio_realized_delay_ns(133, 0, -88_000_000, true),
+            133_333_333
+        ),
+        -88
+    );
+    assert!(!audio_push_back_allowed(
+        true,
+        true,
+        AudioHoldMode::Timecode
+    ));
 }

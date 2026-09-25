@@ -165,11 +165,13 @@ fn audio_ingest_places_on_the_live_offset_and_replaces_on_a_change_1367() {
         "issue 1367: the #1303 fixed-pin ARRIVAL hold is back — genlock audio would again lead a \
          shallow feed's video by its FIFO depth"
     );
-    // review round 2: mid-slew the pairing offset's audio side is the hold minus the slew still owed.
+    // review round 2 + live 25.9.2026 12:31: the pairing offset's audio side is where the SAMPLES
+    // sit -- the hold plus the measured placement error (an owed slew is in it), the hold minus the
+    // owed slew only until a measurement exists.
     assert!(
-        src.contains("genlock_audio_applied_delay_ns(source->genlock_audio_delay_ms, source->genlock_audio_slew_remaining_ns),"),
-        "issue 1367: the pairing offset no longer uses where the audio actually sits (hold minus the \
-         owed slew) -- a slew still owing 33 ms would read paired"
+        src.contains("genlock_audio_realized_delay_ns(source->genlock_audio_delay_ms, source->genlock_audio_slew_remaining_ns, source->genlock_audio_place_err_ns, source->genlock_audio_place_err_seeded),"),
+        "issue 1367: the pairing offset no longer reads where the audio samples actually sit -- a \
+         hold that never reached the samples (the live 12:31 append after a reset) would read paired"
     );
     // the legacy "re-place on every hold change" is gone: that step IS the audible 33 ms dropout.
     assert!(
@@ -250,4 +252,57 @@ fn the_asrc_resampler_carries_the_slew_1367() {
             "issue 1367: asrc_process_audio no longer contains `{needle}` — {why}"
         );
     }
+}
+
+/// Live 25.9.2026 12:31 (resolume `sp-slow_video`, build ebea02a2d): after a sender restart the
+/// ingest's `handle_ts_jump` reset the buffer to the ARRIVAL instant and OBS APPENDED the packet
+/// there, so the genlock term never reached the samples (level 111 -> 46 -> 13 ms, songplayer's
+/// gate +101 ms) while the audit still read `audio_delay_ms=133 audio_pairing_offset_ms=0`.
+#[test]
+fn a_timeline_reset_places_and_the_placement_is_measured_on_the_samples_1367() {
+    let src = squished();
+    let ingest = audio_ingest(&src);
+    for (needle, why) in [
+        (
+            "bool genlock_timeline_reset = false;",
+            "the ingest must know when it reset its own timeline in this packet",
+        ),
+        (
+            "handle_ts_jump(source, source->next_audio_ts_min, in.timestamp, diff, os_time); genlock_timeline_reset = true;",
+            "a >2 s timestamp jump (a sender restart / song change) resets the buffer to the arrival instant",
+        ),
+        (
+            "push_back = genlock_audio_push_back_allowed(push_back, genlock_timeline_reset, genlock_hold_mode);",
+            "an active genlock hold must PLACE right after a timeline reset, never append at the arrival instant",
+        ),
+        (
+            "const uint64_t genlock_actual_ns = genlock_audio_actual_place_ns( push_back && source->audio_ts, source->audio_ts, conv_frames_to_time(sample_rate, source->audio_input_buf[0].size / sizeof(float)), in.timestamp);",
+            "where the packet ACTUALLY lands (appended: the buffer end; placed: its timestamp) must be measured",
+        ),
+        (
+            "source->genlock_audio_place_err_ns = genlock_audio_place_error_smooth_ns( source->genlock_audio_place_err_ns, genlock_audio_place_error_ns(genlock_actual_ns, in.timestamp), source->genlock_audio_place_err_seeded);",
+            "the placement error (actual minus intended) must be smoothed per packet",
+        ),
+    ] {
+        assert!(
+            ingest.contains(needle),
+            "issue 1367: source_output_audio_data no longer contains `{needle}` -- {why}"
+        );
+    }
+    // the correction sits before the action is decided, so the action sees the corrected verdict.
+    let fix = ingest
+        .find("push_back = genlock_audio_push_back_allowed(")
+        .expect("the append guard");
+    let action = ingest
+        .find("const int genlock_action = genlock_audio_hold_action(")
+        .expect("the action");
+    assert!(
+        fix < action,
+        "issue 1367: the append guard must run before the hold action reads push_back"
+    );
+    assert_has(
+        &src,
+        "\"audio_place_err_ms=%lld \"",
+        "the audit line must carry the measured placement error",
+    );
 }
