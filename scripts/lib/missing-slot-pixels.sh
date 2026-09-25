@@ -75,7 +75,9 @@ for node, nv in (loss.items() if isinstance(loss, dict) else []):
     if not re.fullmatch(r"cam[0-9]{1,2}|strih|stream", node) or not isinstance(nv, dict):
         continue
     for c in nv.get("classified") or []:
-        fi = c.get("frame_index") if isinstance(c, dict) else None
+        if not isinstance(c, dict):
+            continue
+        fi = c.get("frame_index")
         if c.get("png") is None and isinstance(fi, int) and not isinstance(fi, bool) and fi >= 0:
             rows.add((node, fi))
 rows = sorted(rows)
@@ -318,13 +320,13 @@ m = {"cap": int(cap), "total_slots": int(total), "boxes": boxes, "slots": slots,
      "exported_slots": sum(1 for s in slots if s["pngs"]),
      "dirs": sorted({os.path.dirname(p) for s in slots for p in s["pngs"]})}
 with open(out, "w") as f:
-    json.dump(m, f, indent=1)
-with open(report) as f:
+    json.dump(m, f, indent=1, ensure_ascii=False)
+with open(report, encoding="utf-8") as f:
     v = json.load(f)
 v["missing_slot_pixels"] = m
 tmp = report + ".tmp"
-with open(tmp, "w") as f:
-    json.dump(v, f, indent=2)
+with open(tmp, "w", encoding="utf-8") as f:
+    json.dump(v, f, indent=2, ensure_ascii=False)
 os.replace(tmp, report)
 ' "$1" "$2" "$3" "$4" "$5" 2>/dev/null \
     || echo "[missing-slot-pixels] WARNING: could not write the manifest / merge it into $5" >&2

@@ -74,7 +74,9 @@ def test_fail_summary_carries_one_line_with_the_proof_dir():
     summary = edr.compose_summary(_with_block(_FAIL), _META)
     hits = [ln for ln in _lines(summary) if ln.startswith("🖼")]
     assert len(hits) == 1, summary
-    assert "/tmp/recording-e2e-77/cam3-missing" in hits[0]
+    assert "recording-e2e-full-path" in hits[0], "names the CI artifact"
+    assert "cam3-missing" in hits[0]
+    assert "/tmp/" not in hits[0], "no dev1 path on the phone"
     assert _lines(summary)[-1].startswith("🔗"), "the link stays last"
 
 

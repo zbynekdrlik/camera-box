@@ -1,7 +1,7 @@
 //! Issue 1367 — pixel proof for every classified missing/unreadable slot the merge could not
 //! extract (`scripts/lib/missing-slot-pixels.sh`).
 //!
-//! Tier-0 (std-only, no rig): the lib's pure builders are called directly under the caller's real
+//! Tier-0 (std + the tempfile dev-dependency, no rig): the lib's pure builders are called directly under the caller's real
 //! `set -euo pipefail`; the load-bearing INDEXING contract is pinned with REAL ffmpeg against a VFR
 //! fixture (a recording with a timestamp gap, where the verdict's CFR decode duplicates a frame);
 //! and the whole runner is driven end-to-end against a fake `sshpass` that runs the "remote" side
@@ -464,4 +464,12 @@ fn recording_e2e_runs_the_step_after_the_merge_before_the_report_and_cleanup_pla
         line.trim_end().ends_with("|| true"),
         "never aborts the run: {line}"
     );
+}
+
+#[test]
+fn the_ci_run_uploads_the_proofs_with_the_verdict() {
+    let wf = read(".github/workflows/full-path-e2e.yml");
+    assert!(wf.contains("/tmp/recording-e2e-${{ env.RECORDING_E2E_RUN_ID }}/*-missing/**"));
+    assert!(wf
+        .contains("/tmp/recording-e2e-${{ env.RECORDING_E2E_RUN_ID }}/missing-slot-pixels-*.json"));
 }

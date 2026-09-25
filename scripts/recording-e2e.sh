@@ -5700,11 +5700,12 @@ continuing WITHOUT the imag partial; the merge below will omit --merge-partials 
     # and the composer's `[ -s ]` guard omits the section; it NEVER touches $GATE.
     GENLOCK_AUDIT_JSON="$OUTDIR/genlock-audit-${RUN_ID}.json"
     genlock_audit_snapshot_compute "$OUTDIR/genlock-audit-before-${RUN_ID}.txt" "$OUTDIR/genlock-audit-after-${RUN_ID}.txt" "$GENLOCK_AUDIT_JSON" || true
-    # Issue 1367: pixel proof (the slot + its two neighbours) for every classified slot the merge
-    # left without one, pulled to $OUTDIR/<node>-missing/ and recorded in the verdict JSON for the
-    # report. Best-effort, report-only: never changes $GATE.
+    # Issue 1367: PNG proof of the classified slots the merge left without one ($OUTDIR/<node>-missing/,
+    # the report reads it). Best-effort: never changes $GATE. Same recording paths as the extracts.
     _msp_strih_os="$(strih_platform "$STRIH")"
-    missing_slot_pixels_run "$REPORT_JSON" "$OUTDIR" "$RUN_ID" "$STRIH" "$_msp_strih_os" "${STRIH_HOST_PATH:-}" "$STREAM" "${STREAM_REC_WIN:-}" "$OUT_DIR_WIN" || true
+    _msp_strih_rec="${STRIH_HOST_PATH:-}"
+    if [ "$_msp_strih_os" != linux ]; then _msp_strih_rec="$STRIH_REC_WIN"; fi
+    missing_slot_pixels_run "$REPORT_JSON" "$OUTDIR" "$RUN_ID" "$STRIH" "$_msp_strih_os" "$_msp_strih_rec" "$STREAM" "$STREAM_REC_WIN" "$OUT_DIR_WIN" || true
     echo "    [8/8f] #711: Discord full-report (fail-open — never affects \$GATE below)"
     e2e_discord_report_send "$REPORT_JSON" "$RUN_ID" "$GATE" "$DURATION" "$PINS_JSON" "$MV_SKEW_JSON" "$GENLOCK_AUDIT_JSON"
     echo "    --- [8/8e] cleanup plan (JSON secured at $REPORT_JSON) ---"

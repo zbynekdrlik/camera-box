@@ -733,12 +733,16 @@ def _section_missing_slot_pixels(verdict):
 
 def _missing_slot_pixels_line(verdict):
     """Issue 1367 -- the ONE summary line pointing at the exported pixel proofs, or None when
-    nothing was exported."""
+    nothing was exported. It names the CI artifact that carries them (the phone reader has no
+    access to the dev1 paths); the full report lists the paths."""
     m = verdict.get("missing_slot_pixels")
     if not isinstance(m, dict) or not m.get("exported_slots"):
         return None
-    dirs = ", ".join(m.get("dirs") or [])
-    return f"🖼 Pixelový dôkaz chýbajúcich snímok: {m['exported_slots']} → {dirs}"
+    names = ", ".join(str(d).rstrip("/").rsplit("/", 1)[-1] for d in m.get("dirs") or [])
+    return (
+        f"🖼 Pixelový dôkaz chýbajúcich snímok: {m['exported_slots']} → artefakt"
+        f" recording-e2e-full-path ({names})"
+    )
 
 
 # ===========================================================================
