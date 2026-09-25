@@ -624,6 +624,7 @@ obs_box_kiosk "$DESKTOP_USER" strih keep-bluetooth
 obs_box_power_envelope "$STRIH_PL1_W" strih_fetch_repo_file "$STRIH_PL1_STEPDOWN_W"
 obs_box_touchpad strih
 obs_box_maxperf_persistence strih
+obs_box_cpu_latency strih_fetch_repo_file   # issue 1357: the PM QoS idle wake-up latency bound (150 us)
 # Self-heal: the retired strih never-sleep logind drop-in -- obs_box_never_sleep's 99-strih-no-sleep.conf
 # + 99-production-no-powerkey.conf now own the lid/suspend/power-key policy, one source of truth.
 if [ -e /etc/systemd/logind.conf.d/90-strih-lx.conf ]; then

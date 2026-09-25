@@ -1623,6 +1623,9 @@ step 26 "Full max-performance persistence (issue 756/#791): EPP/turbo/platform-p
 # never diverge again. Box facts are its arguments; with these imag values it writes exactly what
 # this step always wrote.
 obs_box_maxperf_persistence imag
+# issue 1357: the baseline's CPU idle wake-up latency bound (the PM QoS holder unit), the same on every
+# OBS box; its unit + holder come from the repo through the step-22 fetch function.
+obs_box_cpu_latency imag_fetch_repo_file
 
 # =============================================================================
 step 27 "picom vsync compositor (issue 1146): tear-free HDMI-projector present + enable"
