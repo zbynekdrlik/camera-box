@@ -8,7 +8,22 @@ paths:
   - "scripts/dantesync-version-gate.sh"
 ---
 
-# ASRC residual floor on `stream` = Dante-GM-vs-UTC frequency offset (≈ +8 ppm), not a defect
+# ASRC residual on `stream` `mbc`: ≈ 0 ppm today; the ≈ +8 / ≈ −6 ppm floors below are HISTORY
+
+**CURRENT (25.9.2026, issue 1372).** dantesync 1.9.0 takes the system-clock RATE from the Dante PTP
+tick only (NTP steps the date, `f_phase=0`), and the Windows OBS media clock follows that
+disciplined rate (issue 1372 part A, `.claude/rules/windows-disciplined-media-clock.md`). So the
+stream mixer clock and the Dante audio now tick together. Measured live: `estimated` −0.7 … +0.3 ppm
+per minute and `level` around its 113 ms target (issue 1372 comment 5840207034). The resolume `cg`
+VBAN measured at fohabl reads −0.04 ppm vs the Dante-clocked streams (comment 5840202393).
+**A steady `estimated` ≥ 3 ppm now means a clock left the Dante tick.** Check first:
+- dantesync `rate_source` / `f_phase` on stream and mbc (a node on `clock_discipline="legacy"`);
+- the `media_clock` facet of the genlock LOCK indicator (a build without the part A clock).
+
+Never tune the ASRC for it. Everything below describes the pre-1.9.0 states and stays for reading
+old logs.
+
+## History: the Dante-GM-vs-UTC floor (≈ +8 ppm) and the DVS port collision (≈ −18 ppm)
 
 The stream OBS log line `asrc: source 'mbc' estimated=<X>ppm applied=<X>ppm … starved_blocks=N` is
 the per-source ASRC servo (#803/#912) reporting the audio-clock-vs-wall-clock rate mismatch it is
