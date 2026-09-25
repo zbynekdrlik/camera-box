@@ -592,6 +592,13 @@ nm -D -u "\$OBS_FRONTEND_REAL" 2>/dev/null | grep 'obs_display_set_render_diviso
 genlock_write_markers "\$MARKER_DIR" '${gsha_bq}' '${dsha_bq}'
 cp -a "\$MANIFEST" "\$MARKER_DIR/BUNDLE_MANIFEST.json"
 
+# (5a) issue 1367: the genlock MIN-LATENCY imag marker libobs reads (absent = fail OPEN: a shallow input
+#      could deepen past base + 1); written as the desktop user BEFORE the restart (7). Idempotent.
+MINLAT_USER="\${SUDO_USER:-newlevel}"
+install -d -o "\$MINLAT_USER" -g "\$MINLAT_USER" "/home/\$MINLAT_USER/.camera-box"
+install -o "\$MINLAT_USER" -g "\$MINLAT_USER" -m 0644 /dev/null "/home/\$MINLAT_USER/.camera-box/genlock-min-latency"
+echo "  issue 1367: genlock min-latency box marker present (/home/\$MINLAT_USER/.camera-box/genlock-min-latency)"
+
 # (6) box-backup RETENTION (bod 5) -- keep the newest \$KEEP dated dirs; delete the rest ONLY when the
 #     operator confirmed (--yes), else print the plan.
 echo "RETENTION PLAN (keep newest \$KEEP of \$BACKUP_ROOT/*-789):"

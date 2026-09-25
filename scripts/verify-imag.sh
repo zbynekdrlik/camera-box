@@ -175,6 +175,12 @@ set -euo pipefail
 #       the dev1 genlock-lock alert watchdog (which lists imag in the obs-fleet genlock-lock facet)
 #       stops SKIPping imag ":8899 not fetchable" and can page an imag genlock LOCK loss. Pure ssh
 #       reads + a bounded on-box curl (side-effect free), so it runs BEFORE check (o)'s OBS restart.
+#   (bb) the shared OBS-box appliance baseline (issue 1357): the ONE grader verify-strih.sh runs too.
+#   (bc) genlock MIN-LATENCY box marker (issue 1367): ~/.camera-box/genlock-min-latency exists for the
+#       desktop user. The vendored libobs reads it once as the imag identity and caps a shallow
+#       source's latched depth at base + 1 (reporting the cap); an ABSENT marker fails OPEN -- an
+#       imag input could be deepened past its 3 ms floor -- so its absence FAILs here. A pure ssh
+#       read, BEFORE check (o)'s OBS restart.
 #
 # Every remote helper this gate shells out to (wmctrl, python3) is preflighted BY NAME before use
 # (#822 pattern) -- a missing tool is reported as a missing tool, never folded into a failed
@@ -1587,6 +1593,20 @@ while IFS='|' read -r _bl_item _bl_state _bl_detail; do
     fail "(bb) baseline:${_bl_item} -- ${_bl_detail} (re-run setup-imag.sh, reboot)"
   fi
 done < <(obs_box_baseline_verdict <<<"${BASELINE_FACTS:-}" || true)
+
+# (bc) genlock MIN-LATENCY box marker (issue 1367) ------------------------------------------------
+# libobs has no other box identity (the imag and strih inputs share their names), so this file IS the
+# imag identity: its absence fails OPEN (a shallow imag input would latch base + 2 or deeper instead of
+# being capped + reported). setup-imag.sh step 13 and the fleet deploy's imag leg both write it.
+rc=0
+MINLAT_STATE="$(ssh_box 'if [ -f "$HOME/.camera-box/genlock-min-latency" ]; then echo present; else echo absent; fi')" || rc=$?
+if [ "$rc" -ne 0 ] || [ -z "$MINLAT_STATE" ]; then
+  fail "(bc) genlock min-latency marker unreadable (ssh rc=$rc) (issue 1367)"
+elif [ "$MINLAT_STATE" = present ]; then
+  ok "(bc) genlock min-latency marker present -- a shallow imag input is capped at base + 1 and reported (issue 1367)"
+else
+  fail "(bc) genlock min-latency marker ABSENT (~/.camera-box/genlock-min-latency) -- libobs would deepen a shallow imag input past base + 1 (re-run setup-imag.sh or the fleet deploy, issue 1367)"
+fi
 
 # (o) both projectors PRESENT (never self-established) + PERSIST across a real restart (#756/#840)
 # ---------------------------------------------------------------------------------------------

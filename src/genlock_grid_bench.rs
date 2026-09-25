@@ -68,9 +68,10 @@ use crate::genlock_grid::{
     grid_next_boundary_ns, per_second_floor, StampTrack, NS_PER_SECOND, UNITS_100NS_PER_SECOND,
 };
 use crate::genlock_n1_depth::{
-    n1_base_frames, n1_depth_frames, n1_shallow_gap_is_relock, n1_shallow_governs,
-    n1_shallow_hold_due, n1_shallow_shed_due, n1_shallow_track, n1_shed_due, n1_tick_on_grid,
-    n1_tick_wall_ns, should_hold_n1_phase, ShallowDepth, N1_ON_GRID_NS,
+    n1_base_frames, n1_depth_frames, n1_is_deep_source, n1_shallow_gap_is_relock,
+    n1_shallow_governs, n1_shallow_hold_due, n1_shallow_shed_due, n1_shallow_track, n1_shed_due,
+    n1_tick_on_grid, n1_tick_wall_ns, should_hold_n1_phase, ShallowDepth, ShallowTick,
+    N1_ON_GRID_NS,
 };
 use std::collections::{BTreeMap, VecDeque};
 
@@ -461,7 +462,7 @@ impl Fifo {
             }
             // issue 1367 (ROZHODNUTÉ 5827497952): a SHALLOW source HOLDS one tick when presenting
             // the head now would put it shallower than its latched depth D (the C
-            // `genlock_should_hold_n1_shallow`), counted as an n1 grow too.
+            // shallow half of `genlock_should_hold_n1_phase`), counted as an n1 grow too.
             if tick_on_grid(cfg.grid, tick_wall)
                 && n1_shallow_hold_due(
                     tick_wall,
@@ -578,12 +579,19 @@ impl Fifo {
         if cfg.shallow_depth_rule
             && n1_shallow_track(
                 &mut self.shallow,
-                true,
-                shallow_relock,
-                tick_on_grid(cfg.grid, tick_wall),
-                n1_depth_frames(tick_wall, newest, CANVAS_INTERVAL_NS),
-                n1_base_frames(cfg.latency_ms, CANVAS_INTERVAL_NS),
-                cfg.min_latency_box,
+                ShallowTick {
+                    n1: true,
+                    relock: shallow_relock,
+                    on_grid: tick_on_grid(cfg.grid, tick_wall),
+                    floor_frames: n1_depth_frames(tick_wall, newest, CANVAS_INTERVAL_NS),
+                    base_frames: n1_base_frames(cfg.latency_ms, CANVAS_INTERVAL_NS),
+                    deep: n1_is_deep_source(
+                        wall.saturating_sub(newest),
+                        cfg.latency_ms,
+                        CANVAS_INTERVAL_NS,
+                    ),
+                    min_latency_box: cfg.min_latency_box,
+                },
             )
         {
             c.shallow_latches += 1;

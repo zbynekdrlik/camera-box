@@ -228,8 +228,19 @@ pub fn should_hold_n1_phase(
 // pin. While it governs, the caller suppresses the #859 queue-length drain (the shed covers
 // depth > D, and a queue-length drain would fight it on a wide arrival spread).
 //
-// The imag guard: on a MIN-LATENCY box (the imag projection, "najmenšia možná latencia") D is
-// capped at the pin-derived `base + 1` and the cap is REPORTED (`capped`), never applied silently.
+// The imag guard: on a MIN-LATENCY box (the imag projection, "najmenšia možná latencia") a D above
+// the pin-derived `base + 1` is REPORTED (`capped`) and NOT applied: the latch stores no depth, so
+// the rule never governs that input and its conveyor keeps the pre-rule behaviour (the #859 drain
+// included) — report instead of deepening, never a forced shallower depth that sheds/holds against
+// the input's own arrival (review round 1).
+//
+// A DEEP source (the pin, not the arrival, decides its depth) latches the pin rule's own
+// `base + 1`, whatever its floor did during the window, so the two rules can never disagree.
+//
+// Re-measure without a relock (review round 1): a latched source whose rounded floor sits AT or
+// OVER D for a whole settle window (its arrival rose — the frame at D is the newest or not there
+// yet) re-arms; and an N==1 source with no depth, no window and no cap (it became N==1 without an
+// ACQUIRE, e.g. a 60p sender switched to 30p) opens a window.
 
 /// issue 1367 — the on-grid PRESENT ticks the arrival floor is measured over after a lock
 /// (3 s at 30 fps, 1.5 s at 60 fps). Mirror of the C `GENLOCK_N1_SHALLOW_SETTLE_TICKS`.
@@ -251,21 +262,48 @@ pub struct ShallowDepth {
     pub window_ticks: u32,
     /// A measurement window is open (after a relock, until the latch).
     pub measuring: bool,
-    /// The last latch was capped by the min-latency guard.
+    /// The last latch was capped by the min-latency guard (it stores no depth: report only).
     pub capped: bool,
+    /// Consecutive on-grid present ticks whose rounded floor sat at or over the latched D.
+    pub over_ticks: u32,
 }
 
-/// issue 1367 — the latched depth: `max(base, floor_max) + 1`, capped at `base + 1` on a
-/// min-latency box. Returns `(depth, capped)`. Mirror of the C `genlock_n1_shallow_target_frames`.
+/// issue 1367 — one PRESENT tick's inputs to [`n1_shallow_track`] (the C passes them as scalars).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ShallowTick {
+    /// This tick presented on the N==1 path (an N>=2 source clears the whole state).
+    pub n1: bool,
+    /// This present was an ACQUIRE or a sender-restart GAP RESYNC (or a pin change re-armed it).
+    pub relock: bool,
+    /// The scheduled tick is on the per-second grid (only those are sampled).
+    pub on_grid: bool,
+    /// The rounded arrival floor at the scheduled instant, frames.
+    pub floor_frames: u64,
+    /// The pin-derived base, frames ([`n1_base_frames`]).
+    pub base_frames: u64,
+    /// The source is DEEP now ([`n1_is_deep_source`] at the processing wall).
+    pub deep: bool,
+    /// This OBS box is a min-latency (imag) box.
+    pub min_latency_box: bool,
+}
+
+/// issue 1367 — the latched depth: `max(base, floor_max) + 1` (a DEEP source: the pin rule's own
+/// `base + 1`). On a min-latency box a depth above `base + 1` is not applied: `(0, true)` (report
+/// only). Returns `(depth, capped)`. Mirror of the C `genlock_n1_shallow_target_frames`.
 pub fn n1_shallow_target_frames(
     base_frames: u64,
     floor_max_frames: u64,
+    deep: bool,
     min_latency_box: bool,
 ) -> (u64, bool) {
-    let d = base_frames.max(floor_max_frames).saturating_add(1);
     let cap = base_frames.saturating_add(1);
+    let d = if deep {
+        cap
+    } else {
+        base_frames.max(floor_max_frames).saturating_add(1)
+    };
     if min_latency_box && d > cap {
-        (cap, true)
+        (0, true)
     } else {
         (d, false)
     }
@@ -282,40 +320,45 @@ pub fn n1_shallow_gap_is_relock(gap_ns: u64) -> bool {
 pub fn n1_shallow_rearm(s: &mut ShallowDepth) {
     s.floor_max_frames = 0;
     s.window_ticks = 0;
+    s.over_ticks = 0;
     s.measuring = true;
 }
 
-/// issue 1367 — one PRESENT tick of the shallow-depth state. `n1`: this tick presented on the N==1
-/// path (an N>=2 source clears the whole state: it has its own conveyor rule). `relock`: this present
-/// was an ACQUIRE or a sender-restart GAP RESYNC. `on_grid`: the scheduled tick is on the per-second
-/// grid (only those are sampled, like every N==1 read). `floor_frames`: the rounded arrival floor at
-/// the scheduled instant. Returns true on the tick that LATCHES a D. Mirror of the C
+/// issue 1367 — one PRESENT tick of the shallow-depth state ([`ShallowTick`]). An N>=2 tick clears
+/// the whole state (it has its own conveyor rule). A relock, or an N==1 source with no depth, no
+/// window and no cap, opens a window; a latched source whose rounded floor sat at or over D for
+/// [`N1_SHALLOW_SETTLE_TICKS`] on-grid ticks re-opens one (its arrival rose). Only on-grid ticks are
+/// sampled. Returns true on the tick that LATCHES a D (or a capped report). Mirror of the C
 /// `genlock_n1_shallow_track`.
-pub fn n1_shallow_track(
-    s: &mut ShallowDepth,
-    n1: bool,
-    relock: bool,
-    on_grid: bool,
-    floor_frames: u64,
-    base_frames: u64,
-    min_latency_box: bool,
-) -> bool {
-    if !n1 {
+pub fn n1_shallow_track(s: &mut ShallowDepth, t: ShallowTick) -> bool {
+    if !t.n1 {
         *s = ShallowDepth::default();
         return false;
     }
-    if relock {
+    if t.relock || (s.target_frames == 0 && !s.measuring && !s.capped) {
         n1_shallow_rearm(s);
     }
-    if !s.measuring || !on_grid {
+    if !t.on_grid {
         return false;
     }
-    s.floor_max_frames = s.floor_max_frames.max(floor_frames);
+    if !s.measuring {
+        if s.target_frames == 0 || t.floor_frames < s.target_frames {
+            s.over_ticks = 0;
+            return false;
+        }
+        s.over_ticks = s.over_ticks.saturating_add(1);
+        if s.over_ticks < N1_SHALLOW_SETTLE_TICKS {
+            return false;
+        }
+        n1_shallow_rearm(s);
+    }
+    s.floor_max_frames = s.floor_max_frames.max(t.floor_frames);
     s.window_ticks = s.window_ticks.saturating_add(1);
     if s.window_ticks < N1_SHALLOW_SETTLE_TICKS {
         return false;
     }
-    let (d, capped) = n1_shallow_target_frames(base_frames, s.floor_max_frames, min_latency_box);
+    let (d, capped) =
+        n1_shallow_target_frames(t.base_frames, s.floor_max_frames, t.deep, t.min_latency_box);
     s.target_frames = d;
     s.capped = capped;
     s.measuring = false;
@@ -661,21 +704,40 @@ mod tests {
 
     // ---- issue 1367 (ROZHODNUTÉ 5827497952): the shallow per-lock depth -------------------------
 
+    /// One shallow-source present tick on the grid at pin 3 (base 1), not deep, no imag cap.
+    fn tick(relock: bool, floor_frames: u64) -> ShallowTick {
+        ShallowTick {
+            n1: true,
+            relock,
+            on_grid: true,
+            floor_frames,
+            base_frames: 1,
+            deep: false,
+            min_latency_box: false,
+        }
+    }
+
     #[test]
     fn shallow_target_is_one_frame_over_the_worse_of_pin_and_floor_1367() {
-        // pin 3 at 30 fps: base 1. The live floors: `NDI test` ~31 ms (1 frame), `sp-slow_video`
-        // ~64 ms (2 frames), `CG-obs` 33-67 ms (max 2 frames).
+        // pin 3 at 30 fps: base 1. The live floors (newest-frame ages): `NDI test` ~31 ms (1 frame),
+        // `sp-slow_video` ~64 ms (2 frames), `CG-obs` 33-67 ms (max 2 frames).
         let base = n1_base_frames(3, I30);
         assert_eq!(base, 1);
-        assert_eq!(n1_shallow_target_frames(base, 1, false), (2, false));
-        assert_eq!(n1_shallow_target_frames(base, 2, false), (3, false));
-        assert_eq!(n1_shallow_target_frames(base, 0, false), (2, false));
-        // a floor under the pin: the pin rule's own base + 1 (deep sources agree).
-        assert_eq!(n1_shallow_target_frames(30, 1, false), (31, false));
-        // the min-latency (imag) guard caps at base + 1 and REPORTS it.
-        assert_eq!(n1_shallow_target_frames(base, 2, true), (2, true));
-        assert_eq!(n1_shallow_target_frames(base, 1, true), (2, false));
-        assert_eq!(n1_shallow_target_frames(u64::MAX, 0, false).0, u64::MAX);
+        assert_eq!(n1_shallow_target_frames(base, 1, false, false), (2, false));
+        assert_eq!(n1_shallow_target_frames(base, 2, false, false), (3, false));
+        assert_eq!(n1_shallow_target_frames(base, 0, false, false), (2, false));
+        // a floor under the pin: the pin rule's own base + 1.
+        assert_eq!(n1_shallow_target_frames(30, 1, false, false), (31, false));
+        // a DEEP source latches base + 1 whatever its floor did in the window (review round 1: a
+        // post-ACQUIRE stall must never latch a D the deep rule would fight).
+        assert_eq!(n1_shallow_target_frames(30, 33, true, false), (31, false));
+        // the min-latency (imag) guard: a D above base + 1 is REPORTED and not applied (0).
+        assert_eq!(n1_shallow_target_frames(base, 2, false, true), (0, true));
+        assert_eq!(n1_shallow_target_frames(base, 1, false, true), (2, false));
+        assert_eq!(
+            n1_shallow_target_frames(u64::MAX, 0, false, false).0,
+            u64::MAX
+        );
     }
 
     #[test]
@@ -689,7 +751,11 @@ mod tests {
     fn run_window(s: &mut ShallowDepth, floors: &[u64], on_grid: bool) -> u32 {
         let mut latches = 0;
         for (i, &f) in floors.iter().enumerate() {
-            if n1_shallow_track(s, true, i == 0, on_grid, f, 1, false) {
+            let t = ShallowTick {
+                on_grid,
+                ..tick(i == 0, f)
+            };
+            if n1_shallow_track(s, t) {
                 latches += 1;
             }
         }
@@ -707,12 +773,12 @@ mod tests {
         assert_eq!(latched, 0);
         assert_eq!(s.target_frames, 0, "no D before the window closes");
         assert!(s.measuring);
-        assert!(n1_shallow_track(&mut s, true, false, true, 1, 1, false));
+        assert!(n1_shallow_track(&mut s, tick(false, 1)));
         assert_eq!(s.target_frames, 3, "max floor 2 + 1");
         assert!(!s.measuring);
-        // constant until the next relock, whatever the floor does.
+        // constant until the next relock, whatever the floor does short of a whole window over D.
         for f in [0, 5, 1, 2] {
-            assert!(!n1_shallow_track(&mut s, true, false, true, f, 1, false));
+            assert!(!n1_shallow_track(&mut s, tick(false, f)));
             assert_eq!(s.target_frames, 3);
         }
     }
@@ -729,41 +795,115 @@ mod tests {
     #[test]
     fn a_relock_keeps_the_old_depth_until_the_new_window_latches_1367() {
         let mut s = ShallowDepth::default();
-        run_window(&mut s, &vec![1u64; N1_SHALLOW_SETTLE_TICKS as usize], true);
+        run_window(&mut s, &[1u64; N1_SHALLOW_SETTLE_TICKS as usize], true);
         assert_eq!(s.target_frames, 2);
         // relock: a new window; the old D stays maintained meanwhile.
-        assert!(!n1_shallow_track(&mut s, true, true, true, 2, 1, false));
+        assert!(!n1_shallow_track(&mut s, tick(true, 2)));
         assert!(s.measuring);
         assert_eq!(s.target_frames, 2);
         for _ in 1..N1_SHALLOW_SETTLE_TICKS - 1 {
-            assert!(!n1_shallow_track(&mut s, true, false, true, 2, 1, false));
+            assert!(!n1_shallow_track(&mut s, tick(false, 2)));
             assert_eq!(s.target_frames, 2);
         }
-        assert!(n1_shallow_track(&mut s, true, false, true, 2, 1, false));
+        assert!(n1_shallow_track(&mut s, tick(false, 2)));
         assert_eq!(s.target_frames, 3, "the relock found a deeper floor");
         // a relock that finds the same floor changes nothing.
-        let latched = run_window(&mut s, &vec![2u64; N1_SHALLOW_SETTLE_TICKS as usize], true);
+        let latched = run_window(&mut s, &[2u64; N1_SHALLOW_SETTLE_TICKS as usize], true);
         assert_eq!(latched, 1);
         assert_eq!(s.target_frames, 3);
     }
 
     #[test]
-    fn an_n2_source_never_carries_a_shallow_depth_1367() {
+    fn an_n2_source_never_carries_a_shallow_depth_and_an_n1_one_always_measures_1367() {
         let mut s = ShallowDepth::default();
-        run_window(&mut s, &vec![1u64; N1_SHALLOW_SETTLE_TICKS as usize], true);
+        run_window(&mut s, &[1u64; N1_SHALLOW_SETTLE_TICKS as usize], true);
         assert_eq!(s.target_frames, 2);
-        assert!(!n1_shallow_track(&mut s, false, false, true, 1, 1, false));
+        let n2 = ShallowTick {
+            n1: false,
+            ..tick(false, 1)
+        };
+        assert!(!n1_shallow_track(&mut s, n2));
         assert_eq!(s, ShallowDepth::default());
+        // review round 1: back on N==1 WITHOUT a relock (a 60p sender switched to 30p inside a
+        // second) the source still opens a window and latches.
+        let mut latched = 0;
+        for _ in 0..N1_SHALLOW_SETTLE_TICKS {
+            latched += u32::from(n1_shallow_track(&mut s, tick(false, 1)));
+        }
+        assert_eq!(latched, 1);
+        assert_eq!(s.target_frames, 2);
     }
 
     #[test]
-    fn the_min_latency_guard_caps_and_reports_1367() {
+    fn a_floor_that_stays_at_or_over_d_re_measures_without_a_relock_1367() {
+        let mut s = ShallowDepth::default();
+        run_window(&mut s, &[1u64; N1_SHALLOW_SETTLE_TICKS as usize], true);
+        assert_eq!(s.target_frames, 2);
+        // one short excursion to the floor D resets as soon as it clears.
+        for _ in 0..N1_SHALLOW_SETTLE_TICKS - 1 {
+            assert!(!n1_shallow_track(&mut s, tick(false, 2)));
+        }
+        assert!(!n1_shallow_track(&mut s, tick(false, 1)));
+        assert_eq!(s.over_ticks, 0);
+        assert!(!s.measuring);
+        // the arrival rose for good: a whole window at/over D re-opens the window, keeping the old D
+        // until the new one latches.
+        for _ in 0..N1_SHALLOW_SETTLE_TICKS - 1 {
+            assert!(!n1_shallow_track(&mut s, tick(false, 3)));
+        }
+        assert!(!n1_shallow_track(&mut s, tick(false, 3)));
+        assert!(s.measuring, "the arrival rose: a new window");
+        assert_eq!(s.target_frames, 2);
+        let mut latched = 0;
+        for _ in 1..N1_SHALLOW_SETTLE_TICKS {
+            latched += u32::from(n1_shallow_track(&mut s, tick(false, 3)));
+        }
+        assert_eq!(latched, 1);
+        assert_eq!(s.target_frames, 4, "max floor 3 + 1");
+    }
+
+    #[test]
+    fn the_min_latency_guard_reports_and_stores_no_depth_1367() {
+        let mut s = ShallowDepth::default();
+        let mut latched = 0;
+        for i in 0..N1_SHALLOW_SETTLE_TICKS {
+            let t = ShallowTick {
+                min_latency_box: true,
+                ..tick(i == 0, 3)
+            };
+            latched += u32::from(n1_shallow_track(&mut s, t));
+        }
+        assert_eq!(latched, 1, "the capped latch is reported once");
+        assert_eq!(
+            s.target_frames, 0,
+            "no depth applied: the rule never governs"
+        );
+        assert!(s.capped);
+        // no auto re-measure churn: a capped source stays reported until a real relock.
+        for _ in 0..3 * N1_SHALLOW_SETTLE_TICKS {
+            let t = ShallowTick {
+                min_latency_box: true,
+                ..tick(false, 3)
+            };
+            assert!(!n1_shallow_track(&mut s, t));
+        }
+        assert!(!s.measuring);
+        assert!(!n1_shallow_governs(s.target_frames, I30, 3, I30));
+    }
+
+    #[test]
+    fn a_deep_source_latches_the_pin_depth_1367() {
         let mut s = ShallowDepth::default();
         for i in 0..N1_SHALLOW_SETTLE_TICKS {
-            n1_shallow_track(&mut s, true, i == 0, true, 3, 1, true);
+            // a post-ACQUIRE stall pushes the floor over the pin for part of the window.
+            let t = ShallowTick {
+                base_frames: 30,
+                deep: true,
+                ..tick(i == 0, if i < 10 { 33 } else { 1 })
+            };
+            n1_shallow_track(&mut s, t);
         }
-        assert_eq!(s.target_frames, 2);
-        assert!(s.capped);
+        assert_eq!(s.target_frames, 31, "base + 1, never floor_max + 1");
     }
 
     #[test]
