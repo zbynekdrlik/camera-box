@@ -112,8 +112,7 @@ dantesync_maintenance_verdict() {
     LEGACY_SLEW)    stok="phase-slew ENABLED" ;;
     LEGACY_NO_SLEW) stok="phase-slew DISABLED"; [ "$agg" = UNKNOWN ] || agg="ALARM" ;;
     *)
-      if [ "$(clock_discipline_from_pipe_json "$status")" = ptp_phase_lock ] \
-         && [ "$(ptp_phase_locked_from_pipe_json "$status")" = false ]; then
+      if [ "$(clock_discipline_unlocked "$status")" = yes ]; then
         stok="ptp-phase UNLOCKED"; [ "$agg" = UNKNOWN ] || agg="ALARM"
       else
         stok="clock-discipline?"; agg="UNKNOWN"

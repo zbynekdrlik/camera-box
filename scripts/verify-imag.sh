@@ -260,9 +260,6 @@ IMAG_CLOCK_BOUND_US="${CLOCK_GUARD_BOUND_US:-2000}"
 # #837: max tolerated SPREAD (max-min) of the FRESH offset samples, in us -- the journal twin of
 # the #836 HTTP spread check; same 2000us default + DANTESYNC_STABILITY_US knob as the gate.
 IMAG_CLOCK_STABILITY_US="${DANTESYNC_STABILITY_US:-2000}"
-# Issue 1372: the margin on the fleet DATE MASTER's own step bound (date_step_bound_ms). Only a box
-# serving date_authority=master is graded on it; every other box keeps IMAG_CLOCK_BOUND_US.
-IMAG_CLOCK_DATE_MARGIN_US="${DANTESYNC_DATE_MARGIN_US:-1000}"
 DANTESYNC_OFFSET_FRESHNESS_S="${DANTESYNC_OFFSET_FRESHNESS_S:-300}"
 DANTESYNC_JOURNAL_MAX_AGE_S="${DANTESYNC_JOURNAL_MAX_AGE_S:-60}"
 # #834: the rig's PTP grandmaster every node must agree on. Every DanteSync status-pipe/HTTP
@@ -1254,9 +1251,9 @@ if [ -n "$DS_HTTP_STATUS" ]; then
   gm_actual="$(gm_source_ip_from_pipe_json "$DS_HTTP_STATUS")"
   rc_ptp=0; ptp_check imag "$ptp_state" || rc_ptp=$?
   # Issue 1372: a fleet date master is graded on its own step bound (a no-op on any other box).
-  ds_bound="$(date_master_effective_bound_us "$DS_HTTP_STATUS" "$IMAG_CLOCK_BOUND_US" "$IMAG_CLOCK_DATE_MARGIN_US")"
+  ds_bound="$(date_master_effective_bound_us "$DS_HTTP_STATUS" "$IMAG_CLOCK_BOUND_US" "$DATE_MASTER_MARGIN_US")"
   rc_off=0; offset_check imag "$offset_us" "$ds_bound" || rc_off=$?
-  rc_date=0; date_master_check imag "$DS_HTTP_STATUS" "$IMAG_CLOCK_DATE_MARGIN_US" || rc_date=$?
+  rc_date=0; date_master_check imag "$DS_HTTP_STATUS" "$DATE_MASTER_MARGIN_US" || rc_date=$?
   rc_gm=0; gm_check imag "$gm_actual" "$RIG_GRANDMASTER_IP" || rc_gm=$?
   rc_ps=0; clock_discipline_check imag "$DS_HTTP_STATUS" || rc_ps=$?
   [ "$rc_ptp" -eq 0 ] && ok "dantesync PTP servo LOCKED (via :8898/status)" || fail "dantesync PTP servo not LOCKED (via :8898/status)"
@@ -1282,7 +1279,7 @@ else
     else
       fail "dantesync PTP servo not LOCKED"
     fi
-    case "$(dantesync_journal_clock_verdict "$DS_JOURNAL" "$DANTESYNC_OFFSET_FRESHNESS_S" "$IMAG_CLOCK_BOUND_US" "$IMAG_CLOCK_STABILITY_US" "$IMAG_CLOCK_DATE_MARGIN_US")" in
+    case "$(dantesync_journal_clock_verdict "$DS_JOURNAL" "$DANTESYNC_OFFSET_FRESHNESS_S" "$IMAG_CLOCK_BOUND_US" "$IMAG_CLOCK_STABILITY_US" "$DATE_MASTER_MARGIN_US")" in
       ok) ok "dantesync clock offset within ${IMAG_CLOCK_BOUND_US}us bound + samples within ${IMAG_CLOCK_STABILITY_US}us spread (fresh)" ;;
       drift) fail "dantesync clock offset OUTSIDE the ${IMAG_CLOCK_BOUND_US}us bound -- a real clock desync" ;;
       unstable) fail "dantesync clock offset median within the ${IMAG_CLOCK_BOUND_US}us bound but the FRESH samples scatter past the ${IMAG_CLOCK_STABILITY_US}us stability bound -- scattered/unusable clock (#837)" ;;

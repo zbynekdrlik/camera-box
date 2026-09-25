@@ -423,10 +423,18 @@ grade_http_node() {
       # #837: pass the gate's spread/stability bound so the journal FALLBACK grades scatter too
       # (the twin of the HTTP path's sampled_offset_check). A scattered-but-in-bound-median node
       # now grades UNSTABLE/DRIFT+UNSTABLE (rc 2, the drift class) instead of a silent NTP OK.
-      case "$(dantesync_offset_verdict "$status" "$freshness" "$bound" "$GATE_STABILITY_US")" in
+      # Issue 1372: through the SHARED journal verdict, so a date master's `(date authority, ...)`
+      # line is graded median-only on its own step bound + DATE_MASTER_MARGIN_US.
+      local jdate_bound
+      jdate_bound="$(dantesync_journal_date_bound_us "$status" "$DATE_MASTER_MARGIN_US")"
+      if [ -n "$jdate_bound" ]; then
+        bound="$jdate_bound"
+        deadband_note=" -- date master step bound $(date_step_bound_us_from_journal "$status")us + ${DATE_MASTER_MARGIN_US}us margin, median-only (dantesync#88/#1372)"
+      fi
+      case "$(dantesync_journal_clock_verdict "$status" "$freshness" "$bound" "$GATE_STABILITY_US" "$DATE_MASTER_MARGIN_US")" in
         ok)
-          printf '  %-14s NTP OK       (fresh offset within %s us bound; spread within %s us)\n' \
-            "$name" "$bound" "$GATE_STABILITY_US" ;;
+          printf '  %-14s NTP OK       (fresh offset within %s us bound; spread within %s us)%s\n' \
+            "$name" "$bound" "$GATE_STABILITY_US" "$deadband_note" ;;
         drift)
           printf '  %-14s NTP DRIFT    (fresh offset exceeds %s us bound)\n' "$name" "$bound"
           rc_off=2 ;;
@@ -469,17 +477,21 @@ grade_http_node() {
   # LINUX client additionally fetches ITS OWN freshest journal to derive its real threshold, ONLY
   # when a master is genuinely configured (master_chase_status non-empty) -- a plain invocation
   # with no master configured never pays this extra SSH call.
-  if [ "$mode" = "median-only" ] && [ "$(date_master_verdict "$status" "$deadband_margin")" != none ]; then
+  local date_v="none"
+  [ "$mode" = "median-only" ] && date_v="$(date_master_verdict "$status" "$DATE_MASTER_MARGIN_US")"
+  if [ "$date_v" = ok ] || [ "$date_v" = out ]; then
     # Issue 1372 (dantesync 1.9.0 / dantesync#88): the NTP master is the fleet DATE authority. It
     # lets the fleet line sit up to date_step_bound_ms off UTC, then makes a coordinated fleet
     # step, so its own ntp_offset_us (that fleet-line error) is graded on the step bound + margin
     # (clock-offset-guard.sh's date_master_effective_bound_us), never the 2 ms UTC bound and never
     # by accident through the #1021 deadband widening. date_master_check below grades the
-    # freshest date_offset_error_ms on the same bound.
+    # freshest date_offset_error_ms on the same bound. A master whose date fields are unreadable
+    # (verdict unknown) falls through to the #1021/#1119 widening below, and date_master_check
+    # reports it UNKNOWN (11) instead of a false DRIFT on the bare bound.
     local orig_bound="$bound"
-    bound="$(date_master_effective_bound_us "$status" "$bound" "$deadband_margin")"
+    bound="$(date_master_effective_bound_us "$status" "$bound" "$DATE_MASTER_MARGIN_US")"
     if [ "$bound" != "$orig_bound" ]; then
-      deadband_note=" -- date master graded on its own step bound: bound ${bound}us = date_step_bound_ms + ${deadband_margin}us margin (the fleet date may sit up to the step bound off UTC before a coordinated fleet step, dantesync#88/#1372; base bound ${orig_bound}us)"
+      deadband_note=" -- date master graded on its own step bound: bound ${bound}us = date_step_bound_ms + ${DATE_MASTER_MARGIN_US}us margin (the fleet date may sit up to the step bound off UTC before a coordinated fleet step, dantesync#88/#1372; base bound ${orig_bound}us)"
     fi
   elif [ "$mode" = "median-only" ]; then
     local orig_bound="$bound"
@@ -686,7 +698,7 @@ grade_http_node() {
   # freshly-graded payload (rc_off != 3): a stale/unknown status stays UNKNOWN, never flipped BAD.
   local rc_date=0
   if [ "$rc_off" != 3 ]; then
-    date_master_check "$name" "$status" "$deadband_margin" || rc_date=$?
+    date_master_check "$name" "$status" "$DATE_MASTER_MARGIN_US" || rc_date=$?
     [ "$rc_date" != 0 ] && [ "$rc_off" != 2 ] && rc_off="$rc_date"
   fi
   ptp="$(ptp_locked_from_pipe_json "$status")"
@@ -819,12 +831,14 @@ Options:
                        DISABLED (the #1130/#1215 stepping node) and a PTP-PHASE UNLOCKED phase
                        lock are BAD/20; an unreadable discipline is INCOMPLETE/11.
                        recording-e2e.sh sets it to 1 on both gate calls.
-    Date master (issue 1372, dantesync 1.9.0, always on): the node whose /status says
-                       date_authority=master (the NTP master) is graded on its OWN date step
-                       bound -- |date_offset_error_ms| <= date_step_bound_ms + --deadband-margin-us
-                       (a DATE MASTER OK/OUT/UNKNOWN line) -- and its median bound is the same
-                       step bound + margin instead of the #1021/#1119 widening below. The fleet
-                       date may sit up to the step bound off UTC before a coordinated fleet step.
+    DANTESYNC_DATE_MARGIN_US  Date master (issue 1372, dantesync 1.9.0, always on): the node
+                       whose /status says date_authority=master (the NTP master) is graded on its
+                       OWN date step bound -- |date_offset_error_ms| <= date_step_bound_ms + this
+                       margin (default ${DATE_MASTER_MARGIN_US}us; a DATE MASTER OK/OUT/UNKNOWN
+                       line) -- and its median bound is the same step bound + margin instead of
+                       the #1021/#1119 widening below. The fleet date may sit up to the step bound
+                       off UTC before a coordinated fleet step. The same variable sets the margin
+                       in verify-imag.sh and verify-strih.sh (one knob).
   --deadband-margin-us N  #1021 (dantesync PR #84/#86, closes dantesync issue 83): when the NTP
                        master's own /status reports a numeric "ntp_deadband_us" (its currently
                        active PTP-locked step-deferral threshold), the master's median bound

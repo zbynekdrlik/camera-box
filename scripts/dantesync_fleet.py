@@ -34,6 +34,7 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
+import math
 import os
 import re
 import sys
@@ -120,8 +121,9 @@ def role_gm_host(role: str) -> str:
 
 # ---------------------------------------------------------------------------------------------
 # clock discipline + date master (issue 1372, dantesync 1.9.0) -- the python twin of
-# clock_discipline_class / date_master_verdict in scripts/clock-offset-guard.sh. Both are pinned
-# by ONE table, tests/fixtures/dantesync_clock_discipline_1372.tsv.
+# clock_discipline_class / clock_discipline_unlocked / date_master_verdict in
+# scripts/lib/dantesync-clock-discipline.sh (sourced by scripts/clock-offset-guard.sh). Both are
+# pinned by ONE table, tests/fixtures/dantesync_clock_discipline_1372.tsv.
 # ---------------------------------------------------------------------------------------------
 
 PTP_PHASE_LOCK, LEGACY_SLEW, LEGACY_NO_SLEW = "PTP_PHASE_LOCK", "LEGACY_SLEW", "LEGACY_NO_SLEW"
@@ -143,8 +145,8 @@ def classify_clock_discipline(status) -> str:
 
     `ptp_phase_lock` + `ptp_phase_locked` true is the dantesync 1.9.0 phase lock. An absent, null
     or empty `clock_discipline` (an older build) or `legacy` is graded on `phase_slew_enabled`
-    (#1215). Anything else, including a phase lock that is not locked, is UNKNOWN here (the gate's
-    check names the unlocked case and fails it)."""
+    (#1215). Anything else -- a non-string value, an unknown one, or a phase lock that is not locked
+    -- is UNKNOWN here; clock_discipline_unlocked names the last case so a consumer can fail it."""
     s = _status_dict(status)
     disc = s.get("clock_discipline")
     if disc == "ptp_phase_lock":
@@ -158,10 +160,28 @@ def classify_clock_discipline(status) -> str:
     return UNKNOWN
 
 
+def clock_discipline_unlocked(status) -> bool:
+    """True iff clock_discipline is ptp_phase_lock AND ptp_phase_locked is false: the phase lock
+    does not own the clock (a read, wrong state -- the named PTP-PHASE UNLOCKED failure)."""
+    s = _status_dict(status)
+    return s.get("clock_discipline") == "ptp_phase_lock" and s.get("ptp_phase_locked") is False
+
+
+_US_LIMIT = 10 ** 15  # the bash twin grades at most 15 integer digits
+
+
 def _ms_to_us(value):
+    """Integer microseconds of a millisecond number (half-even, like bash printf %.0f); None for a
+    non-number, a non-finite value, or |us| >= 1e15 (the bash twin's integer limit)."""
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
-    return int(round(value * 1000))
+    if not math.isfinite(value):
+        return None
+    us = value * 1000
+    if not math.isfinite(us) or abs(us) >= _US_LIMIT:
+        return None
+    us = int(round(us))
+    return us if abs(us) < _US_LIMIT else None
 
 
 def date_master_verdict(status, margin_us: int) -> str:
@@ -222,6 +242,8 @@ def _compare(tpl: dict, node: dict, prefix: str, diffs: list) -> None:
         if _is_rule(want):
             rule, arg = next(iter(want.items()))
             if rule == "$ignore":
+                if arg is not True:
+                    raise ValueError(f'{path}: "$ignore" takes only true (got {_fmt(arg)})')
                 continue  # no longer a policy: present with any value, or absent (issue 1372)
             if key not in node:
                 if rule == "$any":

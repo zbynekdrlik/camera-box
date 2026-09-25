@@ -267,12 +267,13 @@ else
   DS_JOURNAL="$(journalctl -u dantesync --no-pager -n 400 -o short-iso 2>/dev/null || true)"
   # Issue 1372: strih-lx is the fleet DATE master under dantesync 1.9.0; its journal reads
   # `[NTP] offset:-25217us (date authority, fleet line ..., step bound 50000us)` and is graded on
-  # that step bound + DANTESYNC_DATE_MARGIN_US, median-only (dantesync_journal_clock_verdict). Any
-  # other journal line shape keeps the CLOCK_GUARD_BOUND_US + stability grade.
-  DS_STEP_US="$(date_step_bound_us_from_journal "$DS_JOURNAL")"
+  # that step bound + DATE_MASTER_MARGIN_US (the one DANTESYNC_DATE_MARGIN_US knob), median-only
+  # (dantesync_journal_clock_verdict). Any other journal line shape keeps the CLOCK_GUARD_BOUND_US +
+  # stability grade. The printed bound comes from the SAME decision the verdict uses.
+  DS_DATE_BOUND_US="$(dantesync_journal_date_bound_us "$DS_JOURNAL" "$DATE_MASTER_MARGIN_US")"
   DS_BOUND_TXT="${CLOCK_GUARD_BOUND_US:-2000}us bound"
-  [ -n "$DS_STEP_US" ] && DS_BOUND_TXT="date master step bound ${DS_STEP_US}us + ${DANTESYNC_DATE_MARGIN_US:-1000}us margin"
-  case "$(dantesync_journal_clock_verdict "$DS_JOURNAL" "${DANTESYNC_OFFSET_FRESHNESS_S:-300}" "${CLOCK_GUARD_BOUND_US:-2000}" "${DANTESYNC_STABILITY_US:-2000}" "${DANTESYNC_DATE_MARGIN_US:-1000}")" in
+  [ -n "$DS_DATE_BOUND_US" ] && DS_BOUND_TXT="date master step bound + ${DATE_MASTER_MARGIN_US}us margin = ${DS_DATE_BOUND_US}us"
+  case "$(dantesync_journal_clock_verdict "$DS_JOURNAL" "${DANTESYNC_OFFSET_FRESHNESS_S:-300}" "${CLOCK_GUARD_BOUND_US:-2000}" "${DANTESYNC_STABILITY_US:-2000}" "$DATE_MASTER_MARGIN_US")" in
     ok)
       ok "dantesync active + FRESH clock offset within ${DS_BOUND_TXT}" ;;
     stale|absent)

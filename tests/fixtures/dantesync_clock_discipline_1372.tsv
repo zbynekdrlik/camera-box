@@ -1,7 +1,9 @@
 # Issue 1372: the ONE parity table for the dantesync clock-discipline classifier and the date-master
-# verdict. BOTH implementations read it: the bash `clock_discipline_class` / `date_master_verdict`
-# (scripts/clock-offset-guard.sh) and the python twin `classify_clock_discipline` /
-# `date_master_verdict` (scripts/dantesync_fleet.py), pinned by tests/python/test_clock_discipline_1372.py.
+# verdict. BOTH implementations read it: the bash `clock_discipline_class` /
+# `clock_discipline_unlocked` / `date_master_verdict` (scripts/lib/dantesync-clock-discipline.sh,
+# sourced by scripts/clock-offset-guard.sh) and the python twin `classify_clock_discipline` /
+# `clock_discipline_unlocked` / `date_master_verdict` (scripts/dantesync_fleet.py), pinned by
+# tests/python/test_clock_discipline_1372.py.
 # Columns (TAB-separated): case, status, class, date_verdict (margin 1000 us), unlocked.
 #   status  = `@<repo-relative path>` to a /status JSON file, or an inline compact JSON object.
 #   class   = PTP_PHASE_LOCK | LEGACY_SLEW | LEGACY_NO_SLEW | UNKNOWN
