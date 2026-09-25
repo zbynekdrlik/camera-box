@@ -278,6 +278,7 @@ fn win_full_manifest_fetch_is_dormant_on_failure_1346() {
 /// updatedAt (the jq output `<id> <updatedAt>`; `$STUB_DIR/runlist` overrides it, e.g. a re-run),
 /// `run download` writes a BUNDLE_MANIFEST.json into its `--dir` and counts the download -- or fails
 /// once `$STUB_DIR/dl-fail` exists, or hangs (exec sleep) once `$STUB_DIR/dl-hang` exists.
+/// `run list` itself fails once `$STUB_DIR/list-fail` exists.
 fn write_gh_stub(dir: &std::path::Path) -> PathBuf {
     let bin = dir.join("bin");
     std::fs::create_dir_all(&bin).unwrap();
@@ -286,7 +287,9 @@ fn write_gh_stub(dir: &std::path::Path) -> PathBuf {
         "gh",
         "#!/usr/bin/env bash\n\
          case \"$1 $2\" in\n\
-         \"run list\") cat \"$STUB_DIR/runlist\" 2>/dev/null || printf '4242 2026-09-25T04:48:30Z' ;;\n\
+         \"run list\")\n\
+           [ -f \"$STUB_DIR/list-fail\" ] && exit 1\n\
+           cat \"$STUB_DIR/runlist\" 2>/dev/null || printf '4242 2026-09-25T04:48:30Z' ;;\n\
          \"run download\")\n\
            [ -f \"$STUB_DIR/dl-fail\" ] && exit 1\n\
            [ -f \"$STUB_DIR/dl-hang\" ] && exec sleep 30\n\
@@ -482,6 +485,184 @@ fn manifest_fetch_is_bounded_when_the_download_hangs_1346() {
         started.elapsed()
     );
     drop(td);
+}
+
+// ── #1346 main ruling (ROZHODNUTÉ 5829099220): which Windows manifest(s) the gate gets ─────────────
+//
+// The FULL manifest is judged ALONE only for a full-only build (no successful fast run at the marker
+// sha). A fast run that exists but whose manifest could not be fetched is a FETCH OUTAGE: the byte pin
+// is omitted for that run with a loud line -- never a refusal of a correctly fast-deployed box.
+
+/// Run `body` with the PATH-stubbed gh and return (stdout, stderr-file contents).
+fn run_with_gh_stub(dir: &std::path::Path, body: &str, extra: &[(&str, &str)]) -> (String, String) {
+    let bin = write_gh_stub(dir);
+    let path = format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let errf = dir.join("stderr.txt");
+    let mut env: Vec<(&str, &str)> = vec![
+        ("PATH", path.as_str()),
+        ("MANIFEST_AUTOSOURCE_CMD", ""),
+        ("STUB_DIR", dir.to_str().unwrap()),
+        ("ERRF", errf.to_str().unwrap()),
+    ];
+    env.extend_from_slice(extra);
+    let out = run_sourced(body, &env);
+    let err = std::fs::read_to_string(&errf).unwrap_or_default();
+    (out, err)
+}
+
+#[test]
+fn win_manifest_pair_decide_follows_the_main_ruling_1346() {
+    let td = tempfile::tempdir().unwrap();
+    let dir = td.path();
+    // (fast, full, fast-run state) -> (primary, alternate, stderr must contain)
+    let cases: [(&str, &str, &str, &str, &str, &str); 7] = [
+        ("F", "U", "found", "F", "U", ""),
+        ("F", "", "found", "F", "", ""),
+        ("", "U", "none", "U", "", "full-only build"),
+        ("", "U", "found", "", "", "fetch outage"),
+        ("", "U", "unknown", "", "", "fetch outage"),
+        ("", "", "none", "", "", ""),
+        ("", "", "found", "", "", ""),
+    ];
+    for (fast, full, state, want_p, want_a, want_err) in cases {
+        let (out, err) = run_with_gh_stub(
+            dir,
+            "win_manifest_pair_decide \"$FAST\" \"$FULL\" \"$STATE\" 2>\"$ERRF\"",
+            &[("FAST", fast), ("FULL", full), ("STATE", state)],
+        );
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(
+            lines,
+            [want_p, want_a],
+            "fast={fast:?} full={full:?} state={state}: {out:?}"
+        );
+        if want_err.is_empty() {
+            assert!(
+                err.is_empty(),
+                "no log line expected for fast={fast:?} full={full:?} state={state}: {err:?}"
+            );
+        } else {
+            assert!(
+                err.contains(want_err),
+                "fast={fast:?} full={full:?} state={state}: stderr must say {want_err:?}: {err:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn manifest_autosource_run_state_reads_found_none_unknown_1346() {
+    let td = tempfile::tempdir().unwrap();
+    let dir = td.path();
+    for (runlist, list_fail, want) in [
+        ("1", false, "found"),
+        ("0", false, "none"),
+        ("oops", false, "unknown"),
+        ("1", true, "unknown"),
+    ] {
+        std::fs::write(dir.join("runlist"), runlist).unwrap();
+        let fail = dir.join("list-fail");
+        if list_fail {
+            std::fs::write(&fail, "").unwrap();
+        } else {
+            let _ = std::fs::remove_file(&fail);
+        }
+        let (out, _) = run_with_gh_stub(
+            dir,
+            "manifest_autosource_run_state o/r windows-genlock-fast.yml \"$SHA\"",
+            &[("SHA", "54995646abc")],
+        );
+        assert_eq!(
+            out.trim(),
+            want,
+            "run list {runlist:?} (fail={list_fail}) must read {want}"
+        );
+    }
+    let (empty_sha, _) = run_with_gh_stub(
+        dir,
+        "manifest_autosource_run_state o/r windows-genlock-fast.yml \"\"",
+        &[],
+    );
+    assert_eq!(
+        empty_sha.trim(),
+        "unknown",
+        "no marker sha -> unknown, never none"
+    );
+}
+
+/// A full-only build (no successful fast run at the marker sha): the FULL manifest is the pin.
+#[test]
+fn win_manifest_pair_resolve_pins_a_full_only_build_1346() {
+    let td = tempfile::tempdir().unwrap();
+    let dir = td.path();
+    std::fs::write(dir.join("runlist"), "0").unwrap();
+    let (out, err) = run_with_gh_stub(
+        dir,
+        "win_manifest_pair_resolve o/r \"$SHA\" \"\" /x/win-full-manifest.json 2>\"$ERRF\"",
+        &[("SHA", "54995646abc")],
+    );
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(
+        lines,
+        ["/x/win-full-manifest.json", ""],
+        "a full-only build is judged against the full manifest alone: {out:?}"
+    );
+    assert!(err.contains("full-only build"), "must log why: {err:?}");
+}
+
+/// A fast run exists but its manifest fetch failed: a fetch outage -> the byte pin is omitted for
+/// this run (loud line), never the full manifest alone (which would refuse a fast-deployed box).
+#[test]
+fn win_manifest_pair_resolve_omits_the_pin_on_a_fast_fetch_outage_1346() {
+    let td = tempfile::tempdir().unwrap();
+    let dir = td.path();
+    std::fs::write(dir.join("runlist"), "1").unwrap();
+    let (out, err) = run_with_gh_stub(
+        dir,
+        "win_manifest_pair_resolve o/r \"$SHA\" \"\" /x/win-full-manifest.json 2>\"$ERRF\"",
+        &[("SHA", "54995646abc")],
+    );
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(
+        lines,
+        ["", ""],
+        "a fetch outage omits the byte pin: {out:?}"
+    );
+    assert!(
+        err.contains("WARNING") && err.contains("fetch outage"),
+        "the omission must be loud: {err:?}"
+    );
+    // The run lookup itself failing is also an outage, never a full-only verdict.
+    std::fs::write(dir.join("list-fail"), "").unwrap();
+    let (out2, _) = run_with_gh_stub(
+        dir,
+        "win_manifest_pair_resolve o/r \"$SHA\" \"\" /x/win-full-manifest.json 2>\"$ERRF\"",
+        &[("SHA", "54995646abc")],
+    );
+    assert_eq!(out2.lines().collect::<Vec<_>>(), ["", ""]);
+}
+
+/// With the fast manifest in hand no run lookup happens, and the pair passes through unchanged.
+#[test]
+fn win_manifest_pair_resolve_passes_a_fetched_fast_manifest_through_1346() {
+    let td = tempfile::tempdir().unwrap();
+    let dir = td.path();
+    std::fs::write(dir.join("list-fail"), "").unwrap();
+    let (out, err) = run_with_gh_stub(
+        dir,
+        "win_manifest_pair_resolve o/r \"$SHA\" /x/fast.json /x/full.json 2>\"$ERRF\"",
+        &[("SHA", "54995646abc")],
+    );
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines, ["/x/fast.json", "/x/full.json"], "{out:?}");
+    assert!(
+        err.is_empty(),
+        "no log when the fast manifest was fetched: {err:?}"
+    );
 }
 
 // ── the small state-reading helpers recording-e2e.sh keys the auto-source on ────────────────────

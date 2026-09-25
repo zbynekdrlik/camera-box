@@ -97,3 +97,29 @@ fn windows_full_bundle_manifest_is_fetched_and_passed_as_the_alternate_1346() {
          alternate conditionally"
     );
 }
+
+/// #1346 main ruling: after both fetches, recording-e2e.sh resolves the pair through the lib's
+/// win_manifest_pair_resolve (full manifest alone only for a full-only build; a fast fetch outage
+/// omits the byte pin) -- once, reading both variables back, before the gate invocations.
+#[test]
+fn windows_manifest_pair_is_resolved_by_the_main_ruling_1346() {
+    let s = recording_e2e();
+    let call = "{ read -r AUTO_WIN_MANIFEST; read -r AUTO_WIN_ALT_MANIFEST; } < <(win_manifest_pair_resolve \"$VERSION_GATE_REPO\"";
+    assert_eq!(
+        s.matches(call).count(),
+        1,
+        "#1346: recording-e2e.sh must resolve the fast/full pair exactly once via win_manifest_pair_resolve"
+    );
+    let at = s.find(call).unwrap();
+    let full_fetch = s
+        .find("AUTO_WIN_ALT_MANIFEST=\"$(manifest_autosource_fetch_win_full")
+        .expect("the full-manifest fetch must exist");
+    let gate = s[at..]
+        .find("${AUTO_WIN_ALT_MANIFEST:+--alt-manifest")
+        .map(|p| at + p)
+        .expect("the gate invocation must follow the resolution");
+    assert!(
+        full_fetch < at && at < gate,
+        "#1346: resolve after the full fetch and before the gate invocations"
+    );
+}
