@@ -283,7 +283,14 @@ def main(argv=None):
         if current is None:
             print("unreadable gphoto2 output", file=sys.stderr)
             return EXIT_UNREADABLE
-        print(json.dumps(suggest_baseline(current), sort_keys=True))
+        doc = suggest_baseline(current)
+        # A camera label the baseline would refuse (a space, a symbol) must be said here, not
+        # discovered when the supervisor pins it.
+        for k in REQUIRED_KEYS:
+            v = doc["values"][k]
+            if not SAFE_VALUE_RE.match(v):
+                print("UNPINNABLE %s %r: not a plain token, the baseline would refuse it" % (k, v), file=sys.stderr)
+        print(json.dumps(doc, sort_keys=True))
         return EXIT_OK
 
     try:

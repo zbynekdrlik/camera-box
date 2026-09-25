@@ -34,6 +34,8 @@ _CTS_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$_CTS_LIB_DIR/cambox-offline-ack.sh"
 # shellcheck source=scripts/lib/stray-session-check.sh
 . "$_CTS_LIB_DIR/stray-session-check.sh"
+# shellcheck source=scripts/lib/bkshading-relay-runtime.sh
+. "$_CTS_LIB_DIR/bkshading-relay-runtime.sh"
 
 # The name the test camera is acked under in CAMBOX_OFFLINE_ACK / rig-fleet.txt, e.g.
 #   CAMBOX_OFFLINE_ACK="testcam:usb-c-unplugged-until-1350"
@@ -85,9 +87,44 @@ camera_test_settings_ssh() {
     -o ConnectTimeout=8 root@"$ip" "$cmd"
 }
 
-# Remote text for ONE gphoto2 session with the given (already validated, plain-token) argv.
+# Remote exit codes of the single-gphoto2-user checks below.
+camera_test_settings_rc_relay_active() { printf '%s\n' 97; }
+camera_test_settings_rc_gphoto2_busy() { printf '%s\n' 98; }
+
+# Remote text for ONE gphoto2 session with the given (already validated, plain-token) argv. The
+# issue-808 pause is best-effort (it never confirms the unit stopped), so "exactly one gphoto2 user"
+# is CHECKED on the box, in the same command, right before the session: a still-active relay or a
+# leftover gphoto2 process refuses with its own exit code instead of racing the camera.
 camera_test_settings_gphoto2_cmd() {
+  local unit
+  unit="$(bkshading_relay_unit_name)"
+  printf 'if systemctl is-active --quiet %s 2>/dev/null; then echo CTS_RELAY_ACTIVE; exit %s; fi; ' \
+    "$unit" "$(camera_test_settings_rc_relay_active)"
+  printf 'if pgrep -x gphoto2 >/dev/null 2>&1; then echo CTS_GPHOTO2_BUSY; exit %s; fi; ' \
+    "$(camera_test_settings_rc_gphoto2_busy)"
   printf 'timeout 20 gphoto2 %s\n' "$*"
+}
+
+# camera_test_settings_transport_abort RC LABEL IP WHAT -> exits 1 with a message naming the cause
+# of a failed ssh + gphoto2 session. Only called for a non-zero RC.
+camera_test_settings_transport_abort() {
+  local rc="$1" label="$2" ip="$3" what="$4" cause
+  case "$rc" in
+    "$(camera_test_settings_rc_relay_active)")
+      echo "ERROR: issue 1371: bkshading-relay is still active on $label ($ip) -- the issue-808 relay pause did not take, so the $what would race the relay's own gphoto2; refusing." >&2
+      exit 1
+      ;;
+    "$(camera_test_settings_rc_gphoto2_busy)")
+      echo "ERROR: issue 1371: another gphoto2 process is running on $label ($ip) -- refusing to start the $what next to it (exactly one gphoto2 user)." >&2
+      exit 1
+      ;;
+    124) cause="timed out" ;;
+    127) cause="command not found on the box (is gphoto2 installed?)" ;;
+    255) cause="ssh failed" ;;
+    *) cause="gphoto2 or ssh error" ;;
+  esac
+  echo "ERROR: issue 1371: the test camera is on USB ($label, $ip) but its gphoto2 $what failed: transport rc=$rc ($cause) -- refusing to run on an unknown exposure." >&2
+  exit 1
 }
 
 _cts_prefix() { sed 's/^/    /'; }
@@ -176,31 +213,38 @@ camera_test_settings_enforce() {
       ;;
   esac
 
-  local read_args raw plan setargs readback grade
-  read_args="$(python3 "$py" read-args)"
+  local read_args raw plan setargs readback grade read_rc
   rc=0
-  raw="$(camera_test_settings_ssh "$found_ip" "$pw" "$(camera_test_settings_gphoto2_cmd "$read_args")")" || rc=$?
+  read_args="$(python3 "$py" read-args)" || rc=$?
+  if [ "$rc" -ne 0 ] || [ -z "$read_args" ]; then
+    echo "ERROR: issue 1371: could not build the gphoto2 read arguments (rc=$rc) -- refusing to run blind." >&2
+    exit 1
+  fi
+  read_rc=0
+  raw="$(camera_test_settings_ssh "$found_ip" "$pw" "$(camera_test_settings_gphoto2_cmd "$read_args")")" || read_rc=$?
   if [ "$action" = abort-unpinned ]; then
     local suggestion
+    echo "ERROR: issue 1371: the test camera IS on USB ($found_label, $found_ip) but the baseline $baseline is not pinned (iso/d002 null) -- refusing to run without a pinned exposure." >&2
+    [ "$read_rc" -eq 0 ] || camera_test_settings_transport_abort "$read_rc" "$found_label" "$found_ip" read
     rc=0
     suggestion="$(python3 "$py" suggest <<<"$raw")" || rc=$?
-    echo "ERROR: issue 1371: the test camera IS on USB ($found_label, $found_ip) but the baseline $baseline is not pinned (iso/d002 null) -- refusing to run without a pinned exposure." >&2
     if [ "$rc" -eq 0 ]; then
       echo "    The camera reads now (pin these only after the owner confirms the camera is set right):" >&2
       echo "    $suggestion" >&2
     else
-      echo "    The camera read also failed (gphoto2 output unreadable), so no values can be suggested." >&2
+      echo "    The camera read was unreadable, so no values can be suggested." >&2
     fi
     exit 1
   fi
+  [ "$read_rc" -eq 0 ] || camera_test_settings_transport_abort "$read_rc" "$found_label" "$found_ip" read
 
   rc=0
   plan="$(python3 "$py" plan --baseline "$baseline" <<<"$raw")" || rc=$?
   if [ "$rc" -ne 0 ]; then
-    echo "ERROR: issue 1371: the test camera is on USB ($found_label, $found_ip) but its gphoto2 read failed or was unreadable (rc=$rc) -- refusing to run on an unknown exposure." >&2
+    echo "ERROR: issue 1371: the test camera is on USB ($found_label, $found_ip) but its gphoto2 read output was unreadable (decision rc=$rc) -- refusing to run on an unknown exposure." >&2
     exit 1
   fi
-  printf '%s\n' "$plan" | grep -v '^SETARGS ' | _cts_prefix
+  printf '%s\n' "$plan" | { grep -v '^SETARGS ' || true; } | _cts_prefix
   setargs="$(printf '%s\n' "$plan" | sed -n 's/^SETARGS //p')"
   if [ -z "$setargs" ]; then
     echo "    ok: the test camera is already at the baseline -- nothing set"
@@ -212,10 +256,17 @@ camera_test_settings_enforce() {
   stray_session_check_assert "$here" "$strih" "$stream" "the test-camera shutter/ISO set"
   rc=0
   camera_test_settings_ssh "$found_ip" "$pw" "$(camera_test_settings_gphoto2_cmd "$setargs")" >/dev/null || rc=$?
-  [ "$rc" -eq 0 ] || echo "    WARNING: issue 1371: gphoto2 --set-config exited rc=$rc -- the read-back decides" >&2
+  case "$rc" in
+    0) ;;
+    "$(camera_test_settings_rc_relay_active)" | "$(camera_test_settings_rc_gphoto2_busy)")
+      camera_test_settings_transport_abort "$rc" "$found_label" "$found_ip" set
+      ;;
+    *) echo "    WARNING: issue 1371: gphoto2 --set-config exited rc=$rc -- the read-back decides" >&2 ;;
+  esac
 
-  rc=0
-  readback="$(camera_test_settings_ssh "$found_ip" "$pw" "$(camera_test_settings_gphoto2_cmd "$read_args")")" || rc=$?
+  read_rc=0
+  readback="$(camera_test_settings_ssh "$found_ip" "$pw" "$(camera_test_settings_gphoto2_cmd "$read_args")")" || read_rc=$?
+  [ "$read_rc" -eq 0 ] || camera_test_settings_transport_abort "$read_rc" "$found_label" "$found_ip" read-back
   rc=0
   grade="$(python3 "$py" grade --baseline "$baseline" <<<"$readback")" || rc=$?
   printf '%s\n' "$grade" | _cts_prefix
@@ -229,7 +280,7 @@ camera_test_settings_enforce() {
       exit 1
       ;;
     *)
-      echo "ERROR: issue 1371: the test-camera read-back failed or was unreadable (rc=$rc) -- refusing to run on an unknown exposure." >&2
+      echo "ERROR: issue 1371: the test-camera read-back output was unreadable (decision rc=$rc) -- refusing to run on an unknown exposure." >&2
       exit 1
       ;;
   esac
