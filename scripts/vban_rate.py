@@ -11,7 +11,12 @@ packet loss) into one number. This module separates them:
   * RATE comes from the VBAN frame COUNTER (the 32-bit `nuFrame` in every header): the sample index
     of a packet is nuFrame x samples-per-frame, and the stream's sample clock is the least-squares
     slope of that index against the capture time. A lost packet leaves a hole in the counter but
-    moves no point off the line, so loss never biases the rate.
+    moves no point off the line, so loss never biases the rate. Network and sender delay only ever
+    make an arrival LATER, so a plain fit over every arrival is biased by one stall-then-burst
+    (+65.7 ppm for one 500 ms stall in 60 s, review round 1): the fit is ONE-SIDED TRIMMED -- points
+    arriving later than the line by more than LATE_TRIM_MADS robust deviations (and at least
+    LATE_TRIM_FLOOR_S) are dropped and the line refitted, a few times. Symmetric jitter is bounded,
+    so it keeps every point (full least-squares precision); a stalled burst is dropped.
   * LOSS is the hole count: per counter segment, (max - min + 1) - unique frames. A duplicate (pktmon
     captures one packet at several components) or a reorder is therefore never counted as loss.
   * A JUMP is a counter discontinuity the elapsed time cannot explain (a sender restart resets the
@@ -56,13 +61,24 @@ MIN_SNAPLEN = 96
 
 # A backwards counter step larger than this many frames is a sender restart, not a reorder.
 JUMP_BACK_FRAMES = 64
+# A step back to a counter ALREADY seen more than this long ago is a sender restart, not a network
+# duplicate (a pktmon/network duplicate arrives within microseconds to a few ms of the original).
+DUP_WINDOW_S = 0.05
+# The one-sided trim: drop points LATER than the line by more than max(LATE_TRIM_MADS robust
+# standard deviations, LATE_TRIM_FLOOR_S) above the median lateness; refit up to LATE_TRIM_ROUNDS.
+LATE_TRIM_MADS = 4.0
+LATE_TRIM_FLOOR_S = 0.002
+LATE_TRIM_ROUNDS = 4
+# A rate is only a FAULT when it clears the bound by this many standard errors of the fit.
+RATE_STDERR_MARGIN = 2.0
 # A forward step is a jump when it exceeds twice the frames the elapsed time can explain plus this
 # slack (a real network outage advances the counter by ~the elapsed frames: that is LOSS).
 JUMP_FWD_SLACK_FRAMES = 64
 
 DEFAULT_PPM_BOUND = 20.0      # provisional -- calibrate from data once part A (the Windows OBS
                               # media clock) is live; before it Windows senders sit ~10-20 ppm off
-DEFAULT_LOSS_CEILING = 1e-4   # the fohabl VBAN OUT loss found on 25.9. (a click source) is ~1e-4
+DEFAULT_LOSS_CEILING = 1e-4   # provisional; the fohabl VBAN OUT loss measured on 25.9. at strih-lx
+                              # was 8.8e-4..1.05e-3 (a click source) -- ~10x over this ceiling
 DEFAULT_MIN_SPAN_S = 20.0     # a shorter stream cannot resolve a few ppm through the arrival jitter
 MIN_FRAMES = 50
 
@@ -238,7 +254,7 @@ def _iter_pcapng(data: bytes):
     e = "<"
     ifaces: list[tuple[int, int, int]] = []  # (linktype, units-per-second numerator, is_pow2)
     while off + 12 <= len(data):
-        btype = struct.unpack_from("<I", data, off)[0]
+        btype = struct.unpack_from(e + "I", data, off)[0]  # SHB's type is a byte palindrome
         if btype == 0x0A0D0D0A:
             bom = struct.unpack_from("<I", data, off + 8)[0]
             e = "<" if bom == 0x1A2B3C4D else ">"
@@ -308,8 +324,8 @@ def measure_stream(times_ns: list, frames: list, samples_per_frame: int, sample_
     jumps = reordered = duplicates = 0
     # head_u = the highest unwrapped counter of the current segment: every step is measured from it,
     # so a reordered straggler (a step back) never moves the reference the next packet is read from.
-    head_u = prev_t = None
-    seen: set = set()
+    head_u = prev_t = seg_min = None
+    seen: dict = {}   # unwrapped counter -> first arrival (ns) in the current segment
     for t, f in zip(times_ns, frames):
         if head_u is None:
             u, d = f, 1
@@ -318,23 +334,26 @@ def measure_stream(times_ns: list, frames: list, samples_per_frame: int, sample_
             d = _signed32(f - (head_u & 0xFFFFFFFF))
             dt_s = max(0.0, (t - prev_t) / 1e9)
             fwd_limit = 2.0 * dt_s * frames_per_s + JUMP_FWD_SLACK_FRAMES
-            if d < -JUMP_BACK_FRAMES or d > fwd_limit:
+            u = head_u + d
+            restarted = d < 0 and (
+                u < seg_min - 1  # older than everything this segment has seen
+                or (u in seen and (t - seen[u]) / 1e9 > DUP_WINDOW_S))  # an old counter again
+            if d < -JUMP_BACK_FRAMES or d > fwd_limit or restarted:
                 jumps += 1
                 u, d = f, 1
                 segments.append([])
-                seen = set()
-                head_u = None
-            else:
-                u = head_u + d
+                seen = {}
+                head_u = seg_min = None
         prev_t = t
         if u in seen:
             duplicates += 1
             continue
         if d < 0:
             reordered += 1
-        seen.add(u)
+        seen[u] = t
         segments[-1].append((t, u))
         head_u = u if head_u is None or u > head_u else head_u
+        seg_min = u if seg_min is None or u < seg_min else seg_min
 
     unique = sum(len(s) for s in segments)
     lost = 0
@@ -343,38 +362,21 @@ def measure_stream(times_ns: list, frames: list, samples_per_frame: int, sample_
         lost += (max(us) - min(us) + 1) - len(us)
 
     t0 = times_ns[0] if n else 0
-    sxx = sxy = 0.0
-    fitted = []
-    for s in segments:
-        if len(s) < 2:
-            continue
-        xs = [(t - t0) / 1e9 for t, _ in s]
-        ys = [u * samples_per_frame for _, u in s]
-        mx = sum(xs) / len(xs)
-        my = sum(ys) / len(ys)
-        sxx += sum((x - mx) ** 2 for x in xs)
-        sxy += sum((x - mx) * (y - my) for x, y in zip(xs, ys))
-        fitted.append((xs, ys, mx, my))
-
+    points = [[((t - t0) / 1e9, u * samples_per_frame) for t, u in s] for s in segments]
     rate_ppm = stderr_ppm = resid_rms_ms = resid_max_ms = None
-    if sxx > 0:
-        slope = sxy / sxx
+    first = _pooled_fit(points)
+    if first is not None:
+        # arrival jitter of ALL packets around the preliminary line (samples -> seconds via slope)
+        slope0, _, _, _, fitted0 = first
+        sq = [((y - (my + slope0 * (x - mx))) / slope0) for xs_ys, mx, my in fitted0 for x, y in xs_ys]
+        resid_rms_ms = math.sqrt(sum(r * r for r in sq) / len(sq)) * 1e3
+        resid_max_ms = max(abs(r) for r in sq) * 1e3
+        # the rate: a one-sided trimmed fit -- a late burst (stall) cannot bias it
+        slope, sse, sxx, npts, fitted = _late_trimmed_fit(points, first)
         rate_ppm = (slope / sample_rate - 1.0) * 1e6
-        sse = 0.0
-        rmax = 0.0
-        npts = 0
-        for xs, ys, mx, my in fitted:
-            for x, y in zip(xs, ys):
-                r = y - (my + slope * (x - mx))
-                sse += r * r
-                rmax = max(rmax, abs(r))
-                npts += 1
         dof = npts - len(fitted) - 1
-        if dof > 0:
+        if dof > 0 and sxx > 0:
             stderr_ppm = math.sqrt(sse / dof / sxx) / sample_rate * 1e6
-        # residuals are in samples; as arrival-time error that is r / slope seconds
-        resid_rms_ms = math.sqrt(sse / npts) / slope * 1e3 if npts else None
-        resid_max_ms = rmax / slope * 1e3
 
     max_gap_ms = 0.0
     for a, b in zip(times_ns, times_ns[1:]):
@@ -388,6 +390,65 @@ def measure_stream(times_ns: list, frames: list, samples_per_frame: int, sample_
         "rate_stderr_ppm": stderr_ppm, "max_gap_ms": max_gap_ms, "resid_rms_ms": resid_rms_ms,
         "resid_max_ms": resid_max_ms,
     }
+
+
+def _pooled_fit(segments_xy: list):
+    """Least-squares slope of y on x pooled over segments (one intercept each). Returns
+    (slope, sse, sxx, npts, fitted) or None when there is no spread to fit."""
+    sxx = sxy = 0.0
+    fitted = []
+    for xy in segments_xy:
+        if len(xy) < 2:
+            continue
+        mx = sum(x for x, _ in xy) / len(xy)
+        my = sum(y for _, y in xy) / len(xy)
+        sxx += sum((x - mx) ** 2 for x, _ in xy)
+        sxy += sum((x - mx) * (y - my) for x, y in xy)
+        fitted.append((xy, mx, my))
+    if sxx <= 0:
+        return None
+    slope = sxy / sxx
+    sse = sum((y - (my + slope * (x - mx))) ** 2 for xy, mx, my in fitted for x, y in xy)
+    npts = sum(len(xy) for xy, _, _ in fitted)
+    return slope, sse, sxx, npts, fitted
+
+
+def _late_trimmed_fit(points: list, fit: tuple) -> tuple:
+    """Refit without the points that arrived LATER than the line by more than the robust bound
+    (median lateness + max(LATE_TRIM_MADS x 1.4826 x MAD, LATE_TRIM_FLOOR_S)). Delay is one-sided:
+    only late points are dropped, never early ones. Stops when nothing more is dropped, after
+    LATE_TRIM_ROUNDS, or when too few points would remain; returns the last valid fit."""
+    for _ in range(LATE_TRIM_ROUNDS):
+        slope, _, _, _, fitted = fit
+        lines = {id(xy): (mx, my) for xy, mx, my in fitted}
+        late = []
+        for seg in points:
+            if id(seg) not in lines:
+                continue
+            mx, my = lines[id(seg)]
+            late.extend(-(y - (my + slope * (x - mx))) / slope for x, y in seg)
+        if not late:
+            return fit
+        ordered = sorted(late)
+        med = ordered[len(ordered) // 2]
+        mad = sorted(abs(v - med) for v in late)[len(late) // 2] * 1.4826
+        bound = med + max(LATE_TRIM_MADS * mad, LATE_TRIM_FLOOR_S)
+        kept, dropped = [], 0
+        for seg in points:
+            if id(seg) not in lines:
+                kept.append(seg)
+                continue
+            mx, my = lines[id(seg)]
+            keep = [(x, y) for x, y in seg if -(y - (my + slope * (x - mx))) / slope <= bound]
+            dropped += len(seg) - len(keep)
+            kept.append(keep)
+        if dropped == 0:
+            return fit
+        refit = _pooled_fit(kept)
+        if refit is None or refit[3] < 3:
+            return fit
+        points, fit = kept, refit
+    return fit
 
 
 def analyze_capture(data: bytes, only_dst: tuple = ()) -> CaptureResult:
@@ -433,7 +494,8 @@ def grade(s: StreamStats, g: Grading) -> tuple:
     if s.span_s < g.min_span_s or s.unique_frames < MIN_FRAMES or s.rate_ppm is None:
         return "SHORT", [f"span {s.span_s:.1f}s / {s.unique_frames} frames is too short to grade"]
     why = []
-    if abs(s.rate_ppm) > g.ppm_bound:
+    margin = RATE_STDERR_MARGIN * (s.rate_stderr_ppm or 0.0)
+    if abs(s.rate_ppm) - margin > g.ppm_bound:
         why.append(f"rate {s.rate_ppm:+.2f} ppm is outside +-{g.ppm_bound:g} ppm of nominal")
     if s.loss_ratio > g.loss_ceiling:
         why.append(f"loss {s.lost} frames ({s.loss_ratio:.2e}) is over the {g.loss_ceiling:.0e} ceiling")
@@ -492,7 +554,8 @@ def render_tsv(res: CaptureResult, grades: list) -> str:
     `stream<TAB>key<TAB>name<TAB>src<TAB>verdict<TAB>rate_ppm<TAB>lost<TAB>loss_ratio<TAB>why`.
     Tabs/newlines never occur inside a field (a VBAN name is <= 16 printable bytes)."""
     def clean(v):
-        return str(v).replace("\t", " ").replace("\n", " ")
+        v = str(v).replace("\t", " ").replace("\n", " ")
+        return v if v else "-"  # bash `read` merges EMPTY tab fields -- never emit one
     lines = [f"overall\t{overall_verdict(res, grades)}"]
     for s, (v, why) in zip(res.streams, grades):
         lines.append("\t".join(clean(x) for x in (
