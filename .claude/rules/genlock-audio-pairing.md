@@ -183,7 +183,12 @@ described here stay as they are.
   absorbs the wall-vs-QPC drift; the placement only has to be right when it happens.
 - **The pairing offset is a PROXY.** `audio_pairing_offset_ms` = (applied hold − the slew still
   owed, `audio_applied_delay_ns`) − measured delay: mid-slew it reads how far the audio still trails
-  (a one-frame re-time reads −33 ms at the start and walks to 0 over ~33 s; review round 2). It
+  (a one-frame re-time reads −33 ms at the start and walks to 0 over ~33 s; review round 2). That is
+  honest and has two visible effects: the audit's half-frame `audio_health=` reads
+  PairingOffsetExceeded for the first ~16 s of every one-frame re-time, and a TWO-frame re-time
+  (a relock onto a much slower band, −66 ms) turns the LOCK widget DEGRADED (its 33 ms bound) for
+  ~33 s — shorter than the lock-alert watchdog's 2-pass confirm (a 5 min timer), so a legitimate
+  relock cannot page; read `audio_slew_ms=` on the audit line before treating either as a fault. It
   never observes where the audio samples actually sit, so a wrong placement, or a depth the rate
   servo walked, would still read 0. Real A/V proof stays with an end-to-end measurement (the
   songplayer A/V gate, the camera-box E2E A/V gate).
@@ -238,9 +243,11 @@ the SECOND frame edge (50–80 ms) locks 4 frames; a band that rises mid-run wit
 restart onto a slower band (60–80 ms) relatches 3 → 4 and slews once — 0 steps in all of them.
 (A 60–80 ms RISE floors at 2 or 3 and never re-measures; the first round's scenario used it and
 only passed through the sender-restart relatch — corrected in review round 2.) The SLEW window is
-measured on its own: while the audio walks onto the new hold it trails the video by ≤ 29.1 ms
-(bound `SLEW_MAX_AV_MS` = 40, the songplayer gate) for 990 ticks (33 s); the settled `|A/V| ≤ 5 ms`
-excludes those ticks. The bench's rate estimate converges on the TRUE
+measured on its own, on every presenting tick from the re-latch on (review round 3 — the settled
+gate reopens seconds after the slew starts, and the first seconds are the largest): while the audio
+walks onto the new hold it trails the video by ≤ 35.0 ms (rising) / 33.2 ms (sender restart) —
+bound `SLEW_MAX_AV_MS` = 40, the songplayer gate, and the peak must be ≥ 30 ms so the start is
+provably inside — for 990 ticks (33 s); the settled `|A/V| ≤ 5 ms` excludes those ticks. The bench's rate estimate converges on the TRUE
 drift by construction, so it ASSUMES drift is absorbed between placements (the real servo is
 proven by `src/asrc_bench.rs`). What it proves is that each placement lands on the live offset.
 
