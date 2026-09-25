@@ -414,7 +414,7 @@ from the per-box fact `STRIH_HDMI_OUTPUT_BACKEND` (strih-lx = `vk-direct`).
   and a clean release. Live on strih-lx 25.9.2026: 716 phase publishes, 0 skipped; cam2 (which captures
   HDMI-0) read `245/0/0`, `0/255/0`, `0/0/239`, `127/128/127` — channel order right, no gamma step;
   the burst published 121 frames in 2 s (the 60 Hz display rate) with 7835 skipped claims, released
-  with VkResult 0 and exited. After ANY harness run check `pgrep -af vk-rig-harness` is empty — a hung
+  with VkResult 0 and exited. After ANY harness run check `pgrep -x vk-rig-harness` is empty (NOT `pgrep -f`, which matches the ssh `bash -c` that carries the name) — a hung
   harness holds HDMI-0 acquired. Re-run it on every new NVIDIA strih box (strih PP).
 - **Enable (supervisor runbook, after CI + a FULL Linux bundle deploy on strih-lx):** re-run
   `setup-strih.sh --box strih-lx` step 6 with the HDMI monitor/grabber plugged (it writes or upserts
