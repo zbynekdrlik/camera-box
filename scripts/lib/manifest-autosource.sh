@@ -178,6 +178,61 @@ manifest_autosource_fetch_win_full() {
   manifest_autosource_fetch "$1" windows-genlock.yml obs-genlock-windows-x64 "$2" "$3"
 }
 
+# manifest_autosource_run_state REPO WORKFLOW SHA -> "found" when WORKFLOW has a SUCCESSFUL run at
+# commit SHA, "none" when it provably has none, "unknown" on any lookup failure (gh missing/failing/
+# timing out, unparseable answer, no SHA). Uses the server-side --commit filter, so the answer does
+# not depend on the -L 100 recency window the fetch scans. Only "none" is ever acted on as a fact.
+manifest_autosource_run_state() {
+  local repo="$1" workflow="$2" sha="$3" n=""
+  if [ -z "$sha" ] || ! command -v gh >/dev/null 2>&1; then
+    printf 'unknown'
+    return 0
+  fi
+  n="$(timeout "${MANIFEST_AUTOSOURCE_TIMEOUT_S:-300}" gh run list --repo "$repo" --workflow "$workflow" \
+    --commit "$sha" --status success -L 1 --json databaseId --jq 'length' 2>/dev/null)" || n=""
+  case "$n" in
+    0) printf 'none' ;;
+    ''|*[!0-9]*) printf 'unknown' ;;
+    *) printf 'found' ;;
+  esac
+  return 0
+}
+
+# win_manifest_pair_decide FAST FULL FAST_RUN_STATE -> pure: the Windows manifest pair the gate gets,
+# as two stdout lines "<primary>" and "<alternate>" (either may be empty), per the main's #1346 ruling
+# (issue comment 5829099220):
+#   - FAST fetched                    -> FAST primary, FULL (if any) alternate
+#   - no FAST, FULL, run state "none" -> a FULL-ONLY build: FULL is judged alone (logged)
+#   - no FAST, FULL, "found"/"unknown"-> a FETCH OUTAGE: the byte pin is OMITTED for this run (loud
+#     WARNING), never the full manifest alone -- that would refuse a correctly fast-deployed box
+#   - neither                         -> both empty (the pre-existing dormant outage semantics)
+# Log lines go to stderr so stdout stays the two-line contract.
+win_manifest_pair_decide() {
+  local fast="$1" full="$2" state="$3"
+  if [ -n "$fast" ]; then
+    printf '%s\n%s\n' "$fast" "$full"
+  elif [ -z "$full" ]; then
+    printf '\n\n'
+  elif [ "$state" = "none" ]; then
+    echo "version gate: no successful windows-genlock-fast.yml run at the marker sha -- full-only build, judging the full bundle manifest alone" >&2
+    printf '%s\n\n' "$full"
+  else
+    echo "WARNING: version gate: a fast windows-genlock run exists (or could not be ruled out: $state) but its manifest fetch failed -- fetch outage, the Windows obs.dll byte pin is OMITTED for this run" >&2
+    printf '\n\n'
+  fi
+  return 0
+}
+
+# win_manifest_pair_resolve REPO SHA FAST FULL -> win_manifest_pair_decide, looking the fast run up
+# ONLY when it matters (no FAST manifest but a FULL one), so the normal path costs no extra gh call.
+win_manifest_pair_resolve() {
+  local repo="$1" sha="$2" fast="$3" full="$4" state="found"
+  if [ -z "$fast" ] && [ -n "$full" ]; then
+    state="$(manifest_autosource_run_state "$repo" windows-genlock-fast.yml "$sha")"
+  fi
+  win_manifest_pair_decide "$fast" "$full" "$state"
+}
+
 # genlock_build_sha_state_read FILE -> the `genlock_build_sha` value (the marker SHA a box's
 # bundle-state-server reports) from the flat JSON state FILE, "" if absent/unreadable. Mirrors the
 # gate's own genlock_build_sha_from_state, kept here so recording-e2e.sh can key the Windows manifest
