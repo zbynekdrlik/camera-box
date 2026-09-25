@@ -125,7 +125,8 @@ fn scale_to_height(v: u32, frame_h: u32) -> u32 {
 }
 
 /// The design rectangle of `slot` on a `frame_w`×`frame_h` frame, the burn's white quiet zone
-/// included. `None` for an empty frame. Always inside the frame.
+/// included. `None` for an empty frame, or a frame too small to hold the slot (narrower than the
+/// corner margin; never a real recording). A returned slot is always inside the frame.
 pub fn slot_rect(slot: BurnSlot, frame_w: u32, frame_h: u32) -> Option<Rect> {
     if frame_w == 0 || frame_h == 0 {
         return None;
@@ -189,16 +190,17 @@ pub fn slot_rect(slot: BurnSlot, frame_w: u32, frame_h: u32) -> Option<Rect> {
         }
         BurnSlot::CameraCapture => unreachable!("handled above"),
     };
-    Some(Rect {
+    let r = Rect {
         x,
         y: top,
         w: side,
         h: side,
-    })
+    };
+    (r.x + r.w <= frame_w && r.y + r.h <= frame_h).then_some(r)
 }
 
 /// The recovery crop for `slot`: its [`slot_rect`] grown by [`RECOVERY_PAD_PX`] (scaled with the
-/// frame height) on every side, clamped to the frame. `None` for an empty frame.
+/// frame height) on every side, clamped to the frame. `None` when [`slot_rect`] is `None`.
 pub fn recovery_crop(slot: BurnSlot, frame_w: u32, frame_h: u32) -> Option<Rect> {
     let r = slot_rect(slot, frame_w, frame_h)?;
     let pad = scale_to_height(RECOVERY_PAD_PX, frame_h).max(RECOVERY_PAD_PX);
@@ -338,6 +340,22 @@ mod tests {
             assert_eq!(slot_rect(s, 0, 1080), None);
             assert_eq!(slot_rect(s, 1920, 0), None);
             assert_eq!(recovery_crop(s, 0, 0), None);
+        }
+    }
+
+    #[test]
+    fn a_frame_too_small_for_a_slot_has_none_and_never_panics() {
+        // 5 px wide: the corner margin (40 on 1080) is already off-frame, so BottomLeft has no
+        // slot; every crop that exists stays in frame.
+        assert_eq!(slot_rect(BurnSlot::BottomLeft, 5, 1080), None);
+        assert_eq!(recovery_crop(BurnSlot::BottomLeft, 5, 1080), None);
+        for (w, h) in [(1, 1), (5, 1080), (8, 8), (17, 17), (1920, 1)] {
+            for &s in &BurnSlot::ALL {
+                if let Some(c) = recovery_crop(s, w, h) {
+                    assert!(c.w > 0 && c.h > 0, "{w}x{h} {s:?}: {c:?}");
+                    assert!(c.x + c.w <= w && c.y + c.h <= h, "{w}x{h} {s:?}: {c:?}");
+                }
+            }
         }
     }
 

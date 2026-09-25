@@ -959,8 +959,8 @@ fn optical_read_short(payloads: &[Payload], min_distinct_optical: Option<(u32, u
 /// So: decode the full frame plainly; if every id in `expected_burn_run_ids` already decoded,
 /// return immediately (the FAST path); otherwise run the tiled recovery (the ROBUST
 /// fallback). The result is IDENTICAL to [`decode_qr_luma_all_robust`] for any frame whose
-/// burns the plain pass or the tiles read (a SUPERSET-of-plain), and for any frame missing a
-/// burn the full robust passes run unchanged — so the #186 0-miss
+/// burns the plain pass already had (a SUPERSET-of-plain that the tiles couldn't extend), and
+/// for any frame missing a burn the full robust passes run unchanged — so the #186 0-miss
 /// guarantee is preserved exactly, just gated behind a cheap plain-first check. `expected_…`
 /// empty ⇒ always fast (no burns to require); pass [`recording::NODE_BURN_RUN_IDS`] for the
 /// recording path. issue 1370: an expected burn the tiles STILL miss is then read from its own

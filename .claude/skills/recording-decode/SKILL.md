@@ -736,9 +736,11 @@ catch:
 1. **`vendor/distroav/src/burn-geom.hpp`** (C++, the ACTUAL render geometry) — `Corner` enum +
    `corner_placement()`'s per-corner `if`/`else` branch. This is ground truth; everything else
    below is a MIRROR of it.
-2. **`src/probe/colour_sample.rs::node_burn_exclusions`** (Rust, probe-gated) — the colour gate's
-   dodge rects. Must reproduce the SAME formula (margin/side/band_x) as step 1, by hand, in Rust —
-   there is no shared code between the C++ render path and this Rust dodge path.
+2. **`src/burn_regions.rs::slot_rect`** (Rust, Tier-0; issue 1370) — the ONE Rust copy of the
+   formula (margin/side/band_x + the band_cy rounding + every fallback tier).
+   `colour_sample::node_burn_exclusions` (the colour gate's dodge rects) pads these slots, and the
+   decode's burn-isolated recovery crops them. A new corner or tier goes HERE; the default-feature
+   `tests/burn_regions_cpp_parity_1370.rs` compiles step 1 and fails on any drift.
 3. **`src/colour_scale.rs` test module** (Rust, Tier-0) — a THIRD hand-written mirror of the same
    formula, as `const` test fixtures, used to prove (locally, RED→GREEN, no `--features probe`
    needed) that the new corner doesn't collide with any colour patch or any other burn.

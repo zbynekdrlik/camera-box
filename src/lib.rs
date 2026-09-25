@@ -574,7 +574,9 @@ pub mod aux_tick;
 // issue 1370 — the node-burn SLOT table (camera capture burn + the four `burn_geom` corners) on a
 // W×H frame, pure + Tier-0 like aux_tick/colour_scale. The probe-gated recording decode
 // (src/probe/burn_region_decode.rs) crops a missing expected burn's own slot so optical content in
-// the #202 bottom tile cannot hide it; its tests pin this table against the probe-side mirrors.
+// the #202 bottom tile cannot hide it, and colour_sample pads the same slots. Corners are pinned
+// to the shipped burn-geom.hpp by tests/burn_regions_cpp_parity_1370.rs; the camera slot and the
+// run_id map by probe-gated tests in burn_region_decode.rs.
 pub mod burn_regions;
 // #1141 — head-end OPTICAL blur/shutter preflight: pure crate-root classifier (Tier-0) over
 // the running service's `rough=` capture telemetry, consumed by scripts/lib/optical-preflight.sh.
