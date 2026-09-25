@@ -230,6 +230,7 @@ strih_drm_output_provision() {
   local DRM_CONF_DIR="${user_home}/.camera-box"
   local DRM_CONF="${DRM_CONF_DIR}/drm-output.json"
   local LEGACY_PROJ=/opt/camera-box/strih-lx-projector.json
+  LEGACY_PROJ="${STRIH_LEGACY_PROJ:-$LEGACY_PROJ}" # a test seam only; a real step-6 run never sets it
   local DRM_VIEW0 DRM_CONN DRM_LINE DRM_XRANDR=""
   case "$backend" in
     lease | vk-direct) ;;

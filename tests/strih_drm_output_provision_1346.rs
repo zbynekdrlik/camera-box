@@ -726,6 +726,11 @@ fn provision_step6_vk_direct_reads_the_x_view_through_the_desktop_user() {
             ("SCRIPTS".into(), scripts.to_str().unwrap().into()),
             ("CALL_LOG".into(), log.to_str().unwrap().into()),
             ("XRANDR_FIXTURE".into(), fx.into()),
+            // never read or remove the host's real legacy projector config
+            (
+                "STRIH_LEGACY_PROJ".into(),
+                d.join("legacy-projector.json").to_str().unwrap().into(),
+            ),
         ]
     };
     let run_with = |fx: &str| {
