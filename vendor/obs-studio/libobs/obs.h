@@ -1083,6 +1083,17 @@ EXPORT void obs_display_report_multiview_cells(obs_display_t *display, uint32_t 
 EXPORT bool obs_aux_sender_should_skip(uint32_t render_divisor, uint32_t frame_counter,
 				       uint64_t ewma_ns, uint32_t consecutive_skips);
 
+/*
+ * camera-box issue 1346: the same gate for a surface that renders INSIDE the graphics tick whose
+ * total the gate reads back (the DRM-output HDMI Multiview view). self_last_ns is the caller's own
+ * render cost in the previous tick (0 when it did not render); it is subtracted, saturating, from
+ * the previous tick's total so that cost is not counted twice (it is already ewma_ns).
+ * obs_aux_sender_should_skip() is exactly the self_last_ns = 0 case. Graphics thread only.
+ */
+EXPORT bool obs_aux_sender_should_skip_excluding(uint32_t render_divisor, uint32_t frame_counter,
+						 uint64_t ewma_ns, uint32_t consecutive_skips,
+						 uint64_t self_last_ns);
+
 EXPORT void obs_display_size(obs_display_t *display, uint32_t *width, uint32_t *height);
 
 /* ------------------------------------------------------------------------- */

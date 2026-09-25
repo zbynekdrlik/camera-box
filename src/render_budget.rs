@@ -176,9 +176,8 @@ pub struct AuxTickClock {
 /// again in `consumed` made a view that fits the budget skip every other tick (the vk-direct HDMI
 /// Multiview at 15 fps instead of 30). `self_last_ns == 0` is the #1063 term unchanged.
 pub fn aux_consumed_ns(elapsed_ns: u64, last_tick_total_ns: u64, self_last_ns: u64) -> u64 {
-    // issue 1346 [red]: stub -- the own previous render is not excluded yet.
-    let _ = self_last_ns;
-    elapsed_ns.max(last_tick_total_ns)
+    let previous_tick_rest = last_tick_total_ns.saturating_sub(self_last_ns);
+    elapsed_ns.max(previous_tick_rest)
 }
 
 /// issue 1346 — Tier-0 mirror of `obs_aux_sender_should_skip_excluding()` in
