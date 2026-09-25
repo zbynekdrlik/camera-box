@@ -9462,6 +9462,33 @@ mod tests {
         let v: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&json).unwrap()).unwrap();
         assert_eq!(v["cg_chain"], serde_json::Value::Null, "cg section omitted");
+
+        // A readable partial of ANOTHER box in the cg slot is dropped the same way (the #208
+        // box-mismatch guard stays fatal for the camera-chain slots only).
+        let strih_p = RecordingPartial::from_frames(
+            "strih",
+            &PathBuf::from("strih.mkv"),
+            &[CAM1B, STRIH],
+            vec![],
+        );
+        let mislabelled = dir.path().join("mislabelled-cg.json");
+        strih_p.save(&mislabelled).unwrap();
+        let cg_spec2 = format!("cg={}", mislabelled.display());
+        let args2 = super::Args::parse_from([
+            "recording-verdict",
+            "--min-secs",
+            "1",
+            "--merge-partials",
+            imag_spec.as_str(),
+            "--merge-partials",
+            cg_spec2.as_str(),
+            "--json",
+            json.to_str().expect("utf8 path"),
+        ]);
+        run_merge(&args2).expect("a mislabelled cg partial must not abort the merge");
+        let v2: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&json).unwrap()).unwrap();
+        assert_eq!(v2["cg_chain"], serde_json::Value::Null);
         assert_eq!(
             v["full_chain"]["imag_leg_skip_reason"],
             serde_json::Value::Null,

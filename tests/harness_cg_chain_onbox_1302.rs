@@ -65,6 +65,7 @@ fn fake_scripts_dir(mode: &str) -> tempfile::TempDir {
     let body = format!(
         r#"#!/usr/bin/env bash
 set -euo pipefail
+if [ "${{1:-}}" = --stop-decode ]; then echo "STOP-DECODE BOX=$RESOLUME_BOX" >> "$(dirname "$0")/calls.log"; exit 0; fi
 printf 'BOX=%s\n' "$RESOLUME_BOX" >> "$(dirname "$0")/calls.log"
 printf 'ARG=%s\n' "$@" >> "$(dirname "$0")/calls.log"
 out_dir=""; out=""; prev=""
@@ -95,6 +96,11 @@ fn partial_log_and_onbox_paths_are_keyed_to_the_run() {
         out,
         r"/r/cg-partial-42.json|/r/cg-extract-42.log|C:\camera-box\verdict-out\cg-partial-42.json"
     );
+    // An out-dir override moves the partial AND the dir the launch passes as --out-dir together.
+    let (ok, out, err) = run("CG_CHAIN_ONBOX_OUT_DIR='D:\\cg' RUN_ID=42\n\
+         printf '%s|%s' \"$(cg_chain_onbox_out_dir_win)\" \"$(cg_chain_onbox_partial_win)\"");
+    assert!(ok, "{err}");
+    assert_eq!(out, r"D:\cg|D:\cg\cg-partial-42.json");
 }
 
 #[test]
@@ -109,9 +115,9 @@ fn credentials_default_to_a_value_and_follow_the_env() {
 #[test]
 fn grace_defaults_and_rejects_garbage() {
     for (val, want) in [
-        ("", "900"),
-        ("abc", "900"),
-        ("-3", "900"),
+        ("", "300"),
+        ("abc", "300"),
+        ("-3", "300"),
         ("0", "0"),
         ("45", "45"),
     ] {
@@ -276,10 +282,16 @@ fn a_launched_extract_is_collected_and_its_partial_is_merged() {
         "ARG=--cg",
         "ARG=C:/Users/Resolume/Videos/2026-09-25 11-26-55.mkv",
         r"ARG=C:\camera-box\verdict-out\cg-partial-5.json",
+        "ARG=--out-dir",
+        r"ARG=C:\camera-box\verdict-out",
         &format!("ARG={}", exe.display()),
     ] {
         assert!(calls.lines().any(|l| l == want), "missing {want}: {calls}");
     }
+    assert!(
+        !calls.contains("STOP-DECODE"),
+        "a finished decode is never stopped: {calls}"
+    );
 }
 
 #[test]
@@ -324,6 +336,9 @@ fn an_extract_past_its_grace_is_stopped_and_never_holds_the_job() {
     assert!(out.contains("CG-LEG-NOT-VERIFIED:"), "{out}");
     assert!(out.contains("still running"), "{out}");
     assert!(out.ends_with("GONE"), "{out}");
+    // The decode it started ON the box is asked to stop too (never left next to Arena / cg OBS).
+    let calls = fs::read_to_string(scripts.path().join("calls.log")).expect("calls");
+    assert!(calls.contains("STOP-DECODE BOX=1.2.3.4"), "{calls}");
 }
 
 #[test]
@@ -348,6 +363,8 @@ fn cleanup_stops_an_inflight_extract() {
         "{err}"
     );
     assert!(out.ends_with("GONE"), "{out}");
+    let calls = fs::read_to_string(scripts.path().join("calls.log")).expect("calls");
+    assert!(calls.contains("STOP-DECODE BOX=1.2.3.4"), "{calls}");
 }
 
 // ---- recording-verdict-on-resolume.sh -----------------------------------------------------------
@@ -361,7 +378,10 @@ fn resolume_builders_are_well_formed_powershell() {
     let (ok, out, err) = resolume(
         "onresolume_sha_probe_ps 'C:\\camera-box\\recording-verdict.exe'; echo\n\
          onresolume_tool_preflight_ps; echo\n\
-         onresolume_prepare_ps 'C:\\camera-box\\verdict-out' 'C:\\camera-box\\verdict-out\\cg-partial-1.json'",
+         onresolume_prepare_ps 'C:\\camera-box\\verdict-out' 'C:\\camera-box\\verdict-out\\cg-partial-1.json' \
+           'C:\\camera-box\\recording-verdict.exe'; echo\n\
+         onresolume_ffmpeg_path_ps 'C:\\ffmpeg'; echo\n\
+         printf '[%s]' \"$(onresolume_ffmpeg_path_ps '')\"",
     );
     assert!(ok, "{err}");
     let lines: Vec<&str> = out.lines().collect();
@@ -376,15 +396,27 @@ fn resolume_builders_are_well_formed_powershell() {
     );
     assert!(lines[1].contains("exit 3"), "{}", lines[1]);
     assert!(lines[1].contains("MISSING-TOOL"), "{}", lines[1]);
+    // The prep stops only a leftover decode of THIS exe, then deletes guarded — nothing to delete
+    // must be a SUCCESS: PowerShell exits 1 when the last statement failed, even when its error
+    // is silenced (the first draft ended in `Remove-Item … -ErrorAction SilentlyContinue`).
     assert_eq!(
         lines[2],
-        r#"New-Item -ItemType Directory -Force -Path "C:\camera-box\verdict-out" | Out-Null; Remove-Item -LiteralPath "C:\camera-box\verdict-out\cg-partial-1.json", "C:\camera-box\verdict-out\cg-partial-1-pixels" -Recurse -Force -ErrorAction SilentlyContinue"#
+        r#"Get-Process -Name "recording-verdict" -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq "C:\camera-box\recording-verdict.exe" } | Stop-Process -Force; New-Item -ItemType Directory -Force -Path "C:\camera-box\verdict-out" | Out-Null; foreach ($p in @("C:\camera-box\verdict-out\cg-partial-1.json", "C:\camera-box\verdict-out\cg-partial-1-pixels")) { if (Test-Path -LiteralPath $p) { Remove-Item -LiteralPath $p -Recurse -Force } }"#
     );
+    // ffmpeg is found under the root (RESOLUME-SNV keeps it off PATH) and put first on PATH; the
+    // trailing "; " lets it prefix the next statement.
+    assert_eq!(
+        lines[3],
+        r#"$f = Get-ChildItem -LiteralPath "C:\ffmpeg" -Filter ffmpeg.exe -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1; if ($f) { $env:Path = $f.DirectoryName + ";" + $env:Path }; "#
+    );
+    assert_eq!(lines[4], "[]", "an empty root adds no prefix");
 }
 
 /// Fake `sshpass` / `ssh` / `scp` on PATH: ssh decodes each `-EncodedCommand` into `ssh.log` and
 /// answers the sha256 probe with `$FAKE_REMOTE_SHA`; `if exist` (the pixel-dir probe) says absent;
-/// scp logs to `scp.log` and materialises a downloaded file.
+/// scp logs to `scp.log` and materialises a downloaded file. It models PowerShell's exit code on a
+/// box where nothing is there to delete or stop: a text whose LAST statement is a silenced
+/// cmdlet (`… -ErrorAction SilentlyContinue`) fails, exactly as `powershell -EncodedCommand` does.
 const FAKE_WIN_SSH: &str = r#"
 F="$(mktemp -d)"; trap 'rm -rf "$F"' EXIT
 cat > "$F/sshpass" <<'SH'
@@ -399,7 +431,8 @@ case "$last" in
   powershell*)
     dec="$(printf '%s' "${last##* }" | base64 -d | iconv -f UTF-16LE -t UTF-8)"
     printf '%s\n' "$dec" >> "$FAKE_LOG_DIR/ssh.log"
-    case "$dec" in *Get-FileHash*) printf '%s\r\n' "${FAKE_REMOTE_SHA:-}" ;; esac ;;
+    case "$dec" in *Get-FileHash*) printf '%s\r\n' "${FAKE_REMOTE_SHA:-}" ;; esac
+    case "$dec" in *SilentlyContinue) exit 1 ;; esac ;;
 esac
 exit 0
 SH
@@ -473,6 +506,17 @@ fn resolume_main_decodes_on_the_box_and_pulls_back_only_the_partial() {
         .find(r#""--extract-partial" "cg" "--cg" "C:/Users/Resolume/Videos/a b.mkv""#)
         .expect("the on-box cg decode ran");
     assert!(pre < prep && prep < sha && sha < dec, "{ssh_log}");
+    // ffmpeg is put on PATH in BOTH sessions that need it (preflight and decode).
+    let ffmpeg = r#"Get-ChildItem -LiteralPath "C:\ffmpeg" -Filter ffmpeg.exe"#;
+    assert_eq!(ssh_log.matches(ffmpeg).count(), 2, "{ssh_log}");
+    let dec_line = ssh_log
+        .lines()
+        .find(|l| l.contains(r#""--extract-partial" "cg""#))
+        .expect("decode line");
+    assert!(
+        dec_line.starts_with("$f = Get-ChildItem"),
+        "the decode session finds ffmpeg first: {dec_line}"
+    );
     assert!(
         ssh_log.contains(r#"PriorityClass = "BelowNormal""#),
         "the decode yields to the live obs64/Arena: {ssh_log}"
@@ -502,6 +546,34 @@ fn resolume_main_skips_the_upload_for_an_identical_binary() {
         r.scp_log
     );
     assert!(r.partial_pulled);
+}
+
+#[test]
+fn resolume_stop_decode_stops_only_that_exe_and_never_fails() {
+    let logs = tempfile::tempdir().expect("tempdir");
+    let script = format!(
+        "set -euo pipefail\n{FAKE_WIN_SSH}\nexport FAKE_LOG_DIR='{l}'\n\
+         RESOLUME_BOX=10.77.9.201 RESOLUME_USER=u RESOLUME_PW=p '{r}' --stop-decode; echo RC=$?",
+        l = logs.path().display(),
+        r = resolume_script().display()
+    );
+    let out = Command::new("bash")
+        .arg("-c")
+        .arg(&script)
+        .output()
+        .expect("run bash");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{stdout}");
+    assert!(stdout.trim_end().ends_with("RC=0"), "{stdout}");
+    let ssh_log = fs::read_to_string(logs.path().join("ssh.log")).expect("ssh log");
+    assert!(
+        ssh_log.contains(r#"Where-Object { $_.Path -eq "C:\camera-box\recording-verdict.exe" } | Stop-Process -Force; exit 0"#),
+        "{ssh_log}"
+    );
+    assert!(
+        !logs.path().join("scp.log").exists(),
+        "a stop never copies anything"
+    );
 }
 
 #[test]
