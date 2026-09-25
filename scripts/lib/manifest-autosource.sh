@@ -91,10 +91,13 @@ manifest_autosource_fetch() {
   # the [0/8] preflight); a timeout is just another fetch failure -> "" -> dormant.
   local tmo="${MANIFEST_AUTOSOURCE_TIMEOUT_S:-300}"
   local run="" run_id="" run_stamp=""
-  # jq reads the marker SHA via env.SHA (never string-interpolated into the filter) so a box's
-  # reported marker can't break out of the jq program even if it carried a metacharacter. It prints
+  # The run is resolved with the SERVER-SIDE --commit/--status filter (#1346 review: the same filter
+  # manifest_autosource_run_state uses, so a build older than any recency window is still found and
+  # the two never disagree). jq re-checks the sha via env.SHA (never string-interpolated into the
+  # filter, so a box's reported marker can't break out of the jq program) and prints
   # `<run id> <updatedAt>` (the stamp keys the cache below), or nothing when no run matches.
-  run="$(SHA="$sha" timeout "$tmo" gh run list --repo "$repo" --workflow "$workflow" -L 100 \
+  run="$(SHA="$sha" timeout "$tmo" gh run list --repo "$repo" --workflow "$workflow" \
+    --commit "$sha" --status success -L 5 \
     --json databaseId,conclusion,headSha,updatedAt \
     --jq '[.[] | select(.headSha==env.SHA and .conclusion=="success")][0] | select(. != null) | "\(.databaseId) \(.updatedAt)"' 2>/dev/null)" || return 0
   run_id="${run%% *}"
@@ -181,7 +184,9 @@ manifest_autosource_fetch_win_full() {
 # manifest_autosource_run_state REPO WORKFLOW SHA -> "found" when WORKFLOW has a SUCCESSFUL run at
 # commit SHA, "none" when it provably has none, "unknown" on any lookup failure (gh missing/failing/
 # timing out, unparseable answer, no SHA). Uses the server-side --commit filter, so the answer does
-# not depend on the -L 100 recency window the fetch scans. Only "none" is ever acted on as a fact.
+# not depend on any recency window (the fetch uses the same filter). Only "none" is ever acted on as
+# a fact. It always asks the real gh: the MANIFEST_AUTOSOURCE_CMD offline seam replaces only the
+# FETCH, so an offline test of a no-fast-manifest path stubs gh on PATH instead.
 manifest_autosource_run_state() {
   local repo="$1" workflow="$2" sha="$3" n=""
   if [ -z "$sha" ] || ! command -v gh >/dev/null 2>&1; then

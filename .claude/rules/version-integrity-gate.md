@@ -255,7 +255,10 @@ change ships only that way) read `obs_dll_sha256 DRIFT` and refused the release 
   pruned. Every gh call is bounded by `timeout ${MANIFEST_AUTOSOURCE_TIMEOUT_S:-300}` (a timeout is a
   fetch failure -> ""). `recording-e2e.sh` runs it only when `VERSION_GATE_MANIFEST`
   is unset (an operator pin is never widened) and passes it to BOTH gate invocations as
-  `${AUTO_WIN_ALT_MANIFEST:+--alt-manifest …}`.
+  `${AUTO_WIN_ALT_MANIFEST:+--alt-manifest …}` -- after the pair is resolved by the main ruling
+  below (a full-only build reaches the gate as `--manifest`, a fast-fetch outage passes neither).
+  Every fetch resolves its run with the server-side `gh run list --commit SHA --status success`
+  filter (the same filter as the run-state lookup), so no recency window can make them disagree.
 - `version-integrity-gate.sh --alt-manifest PATH` threads it to every `--win-state` box exactly where
   `--manifest` is (only when the box state has no own `manifest=`), as drift-guard's `alt_manifest=`.
 - `drift-guard.sh --compare alt_manifest=PATH` (`compare_observed` arg 32, `drift_check_either`):
@@ -270,22 +273,24 @@ change ships only that way) read `obs_dll_sha256 DRIFT` and refused the release 
     deploy (the mirror image of this bug). Even a box whose obs.dll matched the FULL manifest may
     legitimately carry a later `distroav-fast-dll` hot-swap (`windows-genlock-fast.yml`), so no
     "enforce distroav when obs.dll matched the alternate" rule is safe either.
-  - An `alt_manifest=` given WITHOUT `manifest=` (the fast fetch failed and the full one succeeded)
+  - An `alt_manifest=` given WITHOUT `manifest=` (the E2E never produces that shape since the ruling)
     is PROMOTED to the primary and judged exactly like a lone `manifest=` (an engine property).
     The E2E only ever hands the gate a lone full manifest for a FULL-ONLY build -- the main's ruling
     (ROZHODNUTÉ, issue comment 5829099220), decided in `scripts/lib/manifest-autosource.sh` BEFORE
     the gate runs:
     - `manifest_autosource_run_state REPO WORKFLOW SHA` -> `found` / `none` / `unknown`: a successful
       run of the workflow at the marker sha, via the server-side `gh run list --commit SHA --status
-      success` filter (independent of the fetch's `-L 100` recency window), time-bounded. Any lookup
-      failure or a missing sha is `unknown`, never `none`.
+      success` filter (the fetch resolves its run the same way), time-bounded. Any lookup failure or
+      a missing sha is `unknown`, never `none`. Accepted edge (follows the ruling literally): while a
+      re-run of the only fast run is in flight, `--status success` hides it and the full manifest is
+      judged alone for that window.
     - `win_manifest_pair_decide FAST FULL STATE` (pure, two stdout lines primary/alternate):
       fast fetched -> fast primary + full alternate; no fast + full + `none` -> a FULL-ONLY build,
       full judged alone (logged); no fast + full + `found`/`unknown` -> a FETCH OUTAGE, the byte pin
       is OMITTED for this run with a loud `WARNING` (the pre-existing outage semantics), never the
       full manifest alone (which would refuse a correctly fast-deployed box); neither -> dormant.
     - `win_manifest_pair_resolve` runs the lookup only in the no-fast-but-full case, and
-      `recording-e2e.sh` calls it once (`{ read -r AUTO_WIN_MANIFEST; read -r
+      `recording-e2e.sh` calls it once (`{ IFS= read -r AUTO_WIN_MANIFEST; IFS= read -r
       AUTO_WIN_ALT_MANIFEST; } < <(win_manifest_pair_resolve …)`) after the full fetch. An
       operator-pinned `VERSION_GATE_MANIFEST` passes through unchanged (no alternate, no lookup).
   - A supplied alternate that does not exist is a usage error (exit 1), like a missing `manifest=`.
