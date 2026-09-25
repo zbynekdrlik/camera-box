@@ -20,6 +20,10 @@
 //! toolchain is missing — a parity test that silently passes without running is worse than none.
 
 use camera_box::genlock_audio_pairing::{
+    audio_actual_place_ns, audio_place_error_ns, audio_place_error_smooth_ns,
+    audio_push_back_allowed, audio_realized_delay_ns,
+};
+use camera_box::genlock_audio_pairing::{
     audio_applied_delay_ns, audio_hold_action, audio_hold_mode, audio_hold_ms,
     audio_level_shift_ns, audio_needs_live_offset, audio_place_term_ns, audio_placed_slew_fold_ns,
     audio_slew_book_ts_ns, audio_slew_ppm, audio_slew_step_ns, audio_wall_to_mono_ns,
@@ -84,6 +88,11 @@ fn lift_block() -> String {
         "genlock_audio_slew_book_ts_ns(",
         "genlock_audio_placed_slew_fold_ns(",
         "genlock_audio_applied_delay_ns(",
+        "genlock_audio_push_back_allowed(",
+        "genlock_audio_actual_place_ns(",
+        "genlock_audio_place_error_ns(",
+        "genlock_audio_place_error_smooth_ns(",
+        "genlock_audio_realized_delay_ns(",
     ] {
         assert!(
             block.contains(helper),
@@ -311,9 +320,23 @@ fn c_video_delay_tracker_matches_the_rust_authority_tick_by_tick_1367() {
     }
     seq.extend(std::iter::repeat_n((66_666_667, IV30, 67), 30));
     seq.extend(std::iter::repeat_n((100_000_000, IV30, 0), 150));
+    // design 5830750134: a lock of 400 ms over a realized ~233 ms is followed once the offset has
+    // held for VIDEO_DELAY_FOLLOW_TICKS (with a short return to 400 that resets the count), the
+    // same lock over a realized 500 ms follows upward, a NEW lock applies at once, and the free
+    // tracker afterwards starts from a fresh arm.
+    seq.extend(std::iter::repeat_n((233_333_333, IV30, 400), 100));
+    seq.extend(std::iter::repeat_n((400_000_000, IV30, 400), 30));
+    seq.extend(std::iter::repeat_n((233_333_333, IV30, 400), 250));
+    seq.extend(std::iter::repeat_n((500_000_000, IV30, 400), 250));
+    seq.extend(std::iter::repeat_n((100_000_000, IV30, 100), 60));
+    seq.extend(std::iter::repeat_n((233_333_333, IV30, 0), 100));
+    // a lock left MID follow-count: the free tracker must start from a fresh arm, not the count.
+    seq.extend(std::iter::repeat_n((100_000_000, IV30, 100), 5));
+    seq.extend(std::iter::repeat_n((200_000_000, IV30, 100), 60));
+    seq.extend(std::iter::repeat_n((200_000_000, IV30, 0), 80));
 
     let mut body = String::from(
-        "    uint64_t sm = 0; uint32_t ap = 0; uint32_t st = 0;\n    static const unsigned long long S[] = {",
+        "    uint64_t sm = 0; uint32_t ap = 0; uint32_t st = 0; uint32_t lk = 0;\n    static const unsigned long long S[] = {",
     );
     body.push_str(
         &seq.iter()
@@ -336,7 +359,7 @@ fn c_video_delay_tracker_matches_the_rust_authority_tick_by_tick_1367() {
             .join(","),
     );
     body.push_str(&format!(
-        "}};\n    for (int k = 0; k < {}; k++) {{\n        genlock_video_delay_track(&sm, &ap, &st, L[k], S[k], I[k]);\n        printf(\"%llu %u %u\\n\", (unsigned long long)sm, (unsigned)ap, (unsigned)st);\n    }}\n",
+        "}};\n    for (int k = 0; k < {}; k++) {{\n        genlock_video_delay_track(&sm, &ap, &st, &lk, L[k], S[k], I[k]);\n        printf(\"%llu %u %u %u\\n\", (unsigned long long)sm, (unsigned)ap, (unsigned)st, (unsigned)lk);\n    }}\n",
         seq.len()
     ));
     let out = run_c(&body, "tracker");
@@ -345,8 +368,8 @@ fn c_video_delay_tracker_matches_the_rust_authority_tick_by_tick_1367() {
     for (s, iv, lock) in &seq {
         video_delay_track(&mut t, *lock, *s, *iv);
         want.push(format!(
-            "{} {} {}",
-            t.smoothed_ns, t.applied_ms, t.settle_ticks
+            "{} {} {} {}",
+            t.smoothed_ns, t.applied_ms, t.settle_ticks, t.locked_ms
         ));
     }
     assert_eq!(out.len(), want.len());
@@ -364,21 +387,28 @@ fn c_video_delay_tracker_matches_the_rust_authority_tick_by_tick_1367() {
         diffs.join("\n")
     );
     // the sequence must actually exercise re-applications, or the gate compares idle trackers.
+    // A line is `smoothed applied settle locked`.
+    let seen = |applied: u32, locked: u32| {
+        want.iter().any(|l| {
+            let f: Vec<&str> = l.split(' ').collect();
+            f[1] == applied.to_string() && f[2] == "0" && f[3] == locked.to_string()
+        })
+    };
+    assert!(seen(67, 0), "the sequence never applied 67 ms");
+    assert!(seen(133, 0), "the sequence never applied 133 ms");
     assert!(
-        want.iter().any(|l| l.ends_with(" 67 0")),
-        "the sequence never applied 67 ms"
-    );
-    assert!(
-        want.iter().any(|l| l.ends_with(" 133 0")),
-        "the sequence never applied 133 ms"
-    );
-    assert!(
-        !want.iter().any(|l| l.ends_with(" 70 0")),
+        !seen(70, 0),
         "the reversed excursion must not apply its sub-half-frame 70 ms"
     );
+    assert!(seen(100, 100), "the sequence never applied the 100 ms lock");
+    // design 5830750134: the 400 ms lock was bounded by the realized 233 ms, then followed 500 ms.
     assert!(
-        want.iter().any(|l| l.ends_with(" 100 0")),
-        "the sequence never applied the 100 ms lock"
+        seen(233, 400),
+        "the lock never followed the realized 233 ms"
+    );
+    assert!(
+        seen(500, 400),
+        "the lock never followed the realized 500 ms"
     );
 }
 
@@ -808,4 +838,135 @@ fn c_audio_health_matches_the_rust_authority_1303() {
         vectors.len(),
         diffs.join("\n")
     );
+}
+
+/// Issue 1367 (live 25.9.2026 12:31) — the append-after-reset guard and the placement measurement
+/// the audit's pairing offset now reads: `genlock_audio_push_back_allowed`,
+/// `genlock_audio_actual_place_ns`, `genlock_audio_place_error_ns`,
+/// `genlock_audio_place_error_smooth_ns` and `genlock_audio_realized_delay_ns` must match the Rust
+/// authority on every mode, both append paths, both error signs and the wrap extremes.
+#[test]
+fn c_audio_placement_measurement_matches_the_rust_authority_1367() {
+    let modes = [
+        AudioHoldMode::Off,
+        AudioHoldMode::Latency,
+        AudioHoldMode::Timecode,
+        AudioHoldMode::Pending,
+    ];
+    let actual: [(bool, u64, u64, u64); 5] = [
+        (true, 1_000, 250, 9_999),
+        (false, 1_000, 250, 9_999),
+        (true, u64::MAX, 2, 0),
+        (false, 0, u64::MAX, u64::MAX),
+        (true, 1_790_000_000_000_000_000, 144_000_000, 0),
+    ];
+    let errs: [(u64, u64); 5] = [
+        (
+            1_790_000_000_000_000_000 - 88_000_000,
+            1_790_000_000_000_000_000,
+        ),
+        (5, 0),
+        (0, 5),
+        (0, u64::MAX),
+        (u64::MAX, 0),
+    ];
+    let smooth: [(i64, i64, bool); 7] = [
+        (123, -88_000_000, false),
+        (0, 160, true),
+        (0, -160, true),
+        (0, -15, true),
+        (i64::MIN, i64::MAX, true),
+        (i64::MAX, i64::MIN, true),
+        (-88_000_000, -87_000_000, true),
+    ];
+    let realized: [(u32, i64, i64, bool); 6] = [
+        (133, 0, -88_000_000, true),
+        (133, 33_000_000, -33_000_000, true),
+        (133, 33_000_000, -88_000_000, false),
+        (0, 0, 0, true),
+        (u32::MAX, i64::MIN, i64::MAX, true),
+        (3, i64::MAX, i64::MIN, false),
+    ];
+    let lit = |v: i64| {
+        if v == i64::MIN {
+            "INT64_MIN".to_string()
+        } else {
+            format!("{v}ll")
+        }
+    };
+    let b = |v: bool| i32::from(v);
+    let mut body = String::new();
+    for m in &modes {
+        for (pb, reset) in [(false, false), (true, false), (false, true), (true, true)] {
+            body.push_str(&format!(
+                "    printf(\"%d\\n\", genlock_audio_push_back_allowed({}, {}, {}) ? 1 : 0);\n",
+                b(pb),
+                b(reset),
+                m.code()
+            ));
+        }
+    }
+    for (ap, ts, buf, placed) in &actual {
+        body.push_str(&format!(
+            "    printf(\"%llu\\n\", (unsigned long long)genlock_audio_actual_place_ns({}, {ts}ull, {buf}ull, {placed}ull));\n",
+            b(*ap)
+        ));
+    }
+    for (a, i) in &errs {
+        body.push_str(&format!(
+            "    printf(\"%lld\\n\", (long long)genlock_audio_place_error_ns({a}ull, {i}ull));\n"
+        ));
+    }
+    for (sm, sa, seeded) in &smooth {
+        body.push_str(&format!(
+            "    printf(\"%lld\\n\", (long long)genlock_audio_place_error_smooth_ns({}, {}, {}));\n",
+            lit(*sm),
+            lit(*sa),
+            b(*seeded)
+        ));
+    }
+    for (h, r, e, measured) in &realized {
+        body.push_str(&format!(
+            "    printf(\"%lld\\n\", (long long)genlock_audio_realized_delay_ns({h}u, {}, {}, {}));\n",
+            lit(*r),
+            lit(*e),
+            b(*measured)
+        ));
+    }
+    let out = run_c(&body, "placement");
+    let mut want: Vec<String> = Vec::new();
+    for m in &modes {
+        for (pb, reset) in [(false, false), (true, false), (false, true), (true, true)] {
+            want.push(b(audio_push_back_allowed(pb, reset, *m)).to_string());
+        }
+    }
+    for (ap, ts, buf, placed) in &actual {
+        want.push(audio_actual_place_ns(*ap, *ts, *buf, *placed).to_string());
+    }
+    for (a, i) in &errs {
+        want.push(audio_place_error_ns(*a, *i).to_string());
+    }
+    for (sm, sa, seeded) in &smooth {
+        want.push(audio_place_error_smooth_ns(*sm, *sa, *seeded).to_string());
+    }
+    for (h, r, e, measured) in &realized {
+        want.push(audio_realized_delay_ns(*h, *r, *e, *measured).to_string());
+    }
+    assert_eq!(
+        out, want,
+        "issue 1367: the C append guard / placement measurement diverged from the Rust authority"
+    );
+    // the live 12:36 read must not read paired: 133 ms hold, samples 88 ms early.
+    assert_eq!(
+        pairing_offset_ms(
+            audio_realized_delay_ns(133, 0, -88_000_000, true),
+            133_333_333
+        ),
+        -88
+    );
+    assert!(!audio_push_back_allowed(
+        true,
+        true,
+        AudioHoldMode::Timecode
+    ));
 }

@@ -190,8 +190,68 @@ What carries it (do not undo):
   base; that is the decided formula, recorded on the ticket.
 
 Observability: one `genlock-shallow-lock '<src>': depth_frames= floor_max_frames= base_frames=
-wanted_frames= latency_ms= capped=` line per latch, and `shallow_depth= shallow_capped= shallow_latches=` on the
-audit line (audit-line-only).
+latch_floor_frames= spread_frames= rejects= wanted_frames= latency_ms= capped=` line per latch, one
+`genlock-shallow-remeasure '<src>': reason=spread|rise|fell|unreachable|relocks …` line per
+re-measure that is not a relock / pin change, and `shallow_depth= shallow_capped= shallow_latches=`
+on the audit line (audit-line-only).
+
+## The latch never latches an outlier (design 5830750134)
+
+**Why.** Live 25.9.2026 12:01:17 on resolume: a SongPlayer song change pushed `sp-slow_video`'s
+arrival floor to 11 frames inside the settle window. The window MAX latched D 12 (400 ms); the hold
+then deepened the queue past the backlog threshold, so the FIFO BACKLOG-relocked ~3 per 5 s and sat
+at ~233 ms, and the audio held the latched 400 ms against it (`audio_pairing_offset_ms` walking to
++166, songplayer `audio_corr=0.13`). An OBS relaunch cleared it. The shallow bench reproduces it
+exactly on the old code (`latched [3, 3, 12]`, depth stuck at 7, 732 relocks once settled).
+
+| Piece | Rust (`src/genlock_n1_depth.rs`) | C (`obs-source.c`) |
+|---|---|---|
+| (a) window histogram relative to base, 4 bins (`floor − base`, saturating at 0 and at the over-clamp bin) | `n1_shallow_hist_bin`, `ShallowDepth.hist` | `genlock_n1_shallow_hist_bin`, `genlock_shallow_hist[GENLOCK_SHALLOW_HIST_FIELD_BINS]` (a `_Static_assert` holds it to `GENLOCK_N1_SHALLOW_HIST_BINS`) |
+| (a) the latch floor = the window's p90, not its max | `n1_shallow_percentile_bin`, `N1_SHALLOW_LATCH_PERCENTILE` 90 | `genlock_n1_shallow_percentile_bin` |
+| (a) p90 − p10 > 1 frame on a non-deep window = a transient: re-measure (old D kept), at most 3 in a row, then latch | `N1_SHALLOW_MAX_SPREAD_FRAMES` 1, `N1_SHALLOW_MAX_REJECTS` 3 | inside `genlock_n1_shallow_track` |
+| (b) D ≤ base + 3, an over-clamp D is CLAMPED and reported (`capped`, WARNING); the imag min-latency report-only cap is checked first | `N1_SHALLOW_MAX_EXTRA_FRAMES` 3, `n1_shallow_target_frames` | `genlock_n1_shallow_target_frames` |
+| (b) the shed never fires while the newest frame is already more than D frames old | `n1_shallow_shed_due` | `genlock_n1_shallow_shed_due` |
+| (b)/(c) the latched watches: floor at/over D a window (rise) — or, clamped, two frames under D a window (fell); realized depth < D for 180 ticks (unreachable); 3 backlog relocks without a 180-tick quiet gap (relocks) | `n1_shallow_watch`, `N1_SHALLOW_UNDER_TICKS`, `N1_SHALLOW_CHURN_RELOCKS`, `N1_SHALLOW_CHURN_QUIET_TICKS` | `genlock_n1_shallow_watch`; the latch helper passes `genlock_n1_depth_frames(tick_wall, source->last_frame_ts, interval)` and the `genlock_relocks` delta (`genlock_shallow_relocks_seen`) |
+| (d) the audio hold follows the REALIZED delay under the same lock | `video_delay_track` + `VideoDelayTracker.locked_ms`, `VIDEO_DELAY_FOLLOW_TICKS` 180 (`genlock_audio_pairing.rs`) | `genlock_video_delay_track(…, &locked_ms, …)`, `genlock_video_delay_locked_ms` |
+
+What carries it (do not undo):
+- **The cap is sized from the live healthy latches**, not a guess: every `sp-*` / `NDI test` latch of
+  25.9.2026 had `floor_max_frames` 1–2 (D − base 1–2); the bench's 50–80 ms straddle band needs
+  base + 3.
+- **The spread bound is 1, not 2.** On the live 2-frame floor the song change reads p10 = base + 1,
+  p90 = the over-clamp bin: spread 2. A bound of 2 let the bench's one-second transient through to
+  a clamped latch.
+- **The histogram is cleared on the window's FIRST sample**, so the rearm (anchored at the pin setter)
+  stays a five-field reset in C.
+- **A clamped latch under a genuinely slow arrival must not churn**: the shed guard keeps the conveyor
+  off a D the arrival cannot supply, the over-floor watch is replaced by the fell-two-frames watch
+  while clamped (no re-measure loop, no WARNING spam), and (d) pairs the audio with the video on air.
+- **The downward watches are LATCHED-only.** The realized-under count (180) is twice the settle window
+  so the hold's climb onto a clamped D (3 holds × the 30-tick throttle) never trips it; the relock
+  count clears after a 180-tick quiet gap so a stall's relock hours apart never re-measures.
+- **(d) keeps "a new lock applies at once"**: a clean latch still places the audio once, straight
+  onto D (0 slews). Under the same lock the hold follows the smoothed realized delay only after it
+  stayed half a frame off for 180 consecutive ticks; leaving a lock clears the count.
+
+Bench (`src/genlock_shallow_av_bench.rs`, `Scenario::burst` = +300 ms on the frames after the sender
+restart): a 150 ms / 1 s / 4 s transient all end on D 3 with 0 backlog relocks once settled and
+settled |A/V| ≤ 1.97 ms; the 1 s one is rejected (spread) and re-latches the same D (0 slews); the 4 s
+one latches the clamp 4 (reported), re-measures once the floor fell and slews twice. Parity: the
+shallow sequence adds a short burst, a rejected transient, bounded rejects, a whole-window clamp and
+its fall, an unreachable D and a relock storm (latched `… 2 2 4 4 3 3 3`); it runs from C arrays in
+one loop (per-tick statements compiled for minutes). Mutation sweep: 22/25 RED at landing, the two
+real survivors (the shed guard, a lock left mid-count) closed with new vectors, one equivalent mutant.
+
+**Known limit (review round 1): an unreachable D has no two-clock bench case.** The `unreachable`
+and `relocks` watches are proven by unit + parity tests. On a feed where every re-latched D stays
+unreachable, a re-measure (and its `genlock-shallow-remeasure` line) repeats about every 270 on-grid
+ticks (180 watched + 90 window) — no rate limit; the bench's transient cases never reach it because
+the p90 / spread / clamp keep the latched D reachable. `(d)` also FOLLOWS a realized delay above the
+lock (a clamp under a slow arrival), a decided extension of "never exceeds".
+
+**Live acceptance (supervisor).** After a SongPlayer song change / pause-resume cycle on resolume:
+`shallow_depth ≤ base + 3` (≤ 4 at pin 3), `relocks=` flat, no `genlock-shallow-remeasure
+reason=unreachable|relocks` in steady state, and the songplayer gate ±40 ms with 0 dropouts.
 
 **Verification (Tier-0).** Authority + the grid-bench port + the two-clock A/V bench: one harness
 `lib.rs` with `#[path]` mods for `genlock_grid`, `genlock_backlog`, `genlock_n1_depth`,

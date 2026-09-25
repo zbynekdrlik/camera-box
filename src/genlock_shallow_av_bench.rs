@@ -70,6 +70,12 @@ struct Scenario {
     min_latency_box: bool,
     /// From this many seconds after the start the lag band becomes `(min, max)` ms (no gap).
     band_change: Option<(u64, u64, u64)>,
+    /// live 25.9.2026 12:31: the anti-tautology audio leg that appends after a timeline reset.
+    legacy_append: bool,
+    /// design 5830750134: a sender TRANSIENT — frames stamped in `[at_ms, at_ms + dur_ms)` after
+    /// the start arrive `extra_ms` later (in order, so the frames right behind wait too): the live
+    /// 25.9.2026 12:01 song change that latched `floor_max_frames=11`.
+    burst: Option<(u64, u64, u64)>,
 }
 
 impl Scenario {
@@ -83,6 +89,8 @@ impl Scenario {
             rule: true,
             min_latency_box: false,
             band_change: None,
+            burst: None,
+            legacy_append: false,
         }
     }
 }
@@ -101,12 +109,19 @@ struct Run {
     depth_hist: std::collections::BTreeMap<u64, u64>,
     max_abs_av_ms: f64,
     av_ticks: u64,
+    /// The largest gap between the REPORTED pairing offset (the audit's realized audio side minus
+    /// the measured video delay) and the TRUE A/V error of the samples, on the same ticks.
+    max_pairing_vs_av_ms: f64,
+    /// The largest gap between the production placement formula and the modelled truth, ms.
+    max_formula_vs_truth_ms: f64,
     /// |A/V| while the audio is still slewing onto a new hold (excluded from `max_abs_av_ms`, which
     /// is the settled pairing), and how many ticks the audio spent slewing.
     max_abs_av_slew_ms: f64,
     slew_av_ticks: u64,
     slewing_ticks: u64,
     corrections: u64,
+    /// BACKLOG relocks in the gated windows (a D the FIFO cannot reach storms them).
+    relocks: u64,
     drains: u64,
     underruns: u64,
     late_holds: u64,
@@ -135,7 +150,14 @@ fn run(sc: Scenario) -> Run {
     let mut rng = 0x1367_5827u64;
     let mut fifo = Fifo::default();
     let mut tracker = VideoDelayTracker::default();
-    let mut audio = AudioLeg::fresh(false);
+    let leg = || {
+        if sc.legacy_append {
+            AudioLeg::fresh(false).with_legacy_append_after_reset()
+        } else {
+            AudioLeg::fresh(false)
+        }
+    };
+    let mut audio = leg();
     let mut totals = (0u32, 0u32, 0u32);
     let mut arrivals: VecDeque<(u64, u64)> = VecDeque::new();
     let mut sender_slot = W0;
@@ -165,7 +187,7 @@ fn run(sc: Scenario) -> Run {
             totals.0 += audio.places;
             totals.1 += audio.slews;
             totals.2 += audio.steps;
-            audio = AudioLeg::fresh(false);
+            audio = leg();
             last_latched = 0;
             last_depth = None;
             settle_until = nominal + SETTLE_S * NS_PER_S;
@@ -207,6 +229,12 @@ fn run(sc: Scenario) -> Run {
                 out.disturbances += 1;
                 lag += LATE_SPIKE_NS;
             }
+            if let Some((at_ms, dur_ms, extra_ms)) = sc.burst {
+                let from = W0 + at_ms * 1_000_000;
+                if stamp >= from && stamp < from + dur_ms * 1_000_000 {
+                    lag += extra_ms * 1_000_000;
+                }
+            }
             let arrival = (stamp + lag).max(last_arrival + 1);
             last_arrival = arrival;
             arrivals.push_back((arrival, stamp));
@@ -239,6 +267,7 @@ fn run(sc: Scenario) -> Run {
         if gated {
             out.corrections += c.n1_grows + c.converge_sheds;
             out.drains += c.drains;
+            out.relocks += c.relocks;
             out.underruns += c.underruns;
             out.late_holds += c.late_holds;
         }
@@ -282,6 +311,12 @@ fn run(sc: Scenario) -> Run {
                     let av = audio.av_ms(presented, mono_sched);
                     out.av_ticks += 1;
                     out.max_abs_av_ms = out.max_abs_av_ms.max(av.abs());
+                    let reported = pairing_offset_ms(
+                        audio.realized_delay_ns(),
+                        video_delay_reference_ns(tracker.smoothed_ns, LATENCY_MS),
+                    );
+                    out.max_pairing_vs_av_ms =
+                        out.max_pairing_vs_av_ms.max((reported as f64 - av).abs());
                 }
             }
             if last_depth.is_some_and(|d| d != depth) {
@@ -304,6 +339,9 @@ fn run(sc: Scenario) -> Run {
             }
         }
         out.slewing_ticks += u64::from(audio.slewing());
+        out.max_formula_vs_truth_ms = out
+            .max_formula_vs_truth_ms
+            .max(audio.max_formula_vs_truth_ns / 1e6);
         nominal = grid_next_boundary_ns(nominal, IV_NS);
     }
     out.places = totals.0 + audio.places;
@@ -520,5 +558,138 @@ fn a_sender_restart_on_a_new_band_relatches_and_slews_once_1367() {
             ..Scenario::clean(28, 40, 3)
         },
         &[3, 4],
+    );
+}
+
+// ---- design 5830750134: the shallow latch never latches an outlier ------------------------------
+
+/// The sender comes back from its restart (t = 2403 s, the relock that opens a fresh window) with
+/// its first frames 300 ms late for `dur_ms` — the live song change: every `sp-*` source re-latched
+/// at 12:01:17 and `sp-slow_video` measured `floor_max_frames=11` (a +300 ms transient on its
+/// 40-64 ms band floors at 11 frames).
+fn transient(dur_ms: u64) -> Scenario {
+    Scenario {
+        burst: Some((2_403_000, dur_ms, 300)),
+        ..Scenario::clean(40, 64, 3)
+    }
+}
+
+/// The acceptance of design 5830750134: every latch inside the cap, no relock churn once settled,
+/// the settled A/V pairing within 5 ms, and the depth back on the healthy D.
+fn assert_transient(name: &str, r: &Run, max_slews: u32) {
+    eprintln!("{name}: {r:?}");
+    let cap = 1 + crate::genlock_n1_depth::N1_SHALLOW_MAX_EXTRA_FRAMES;
+    assert!(
+        r.latched.iter().all(|&d| d <= cap),
+        "{name}: latched {:?} over the cap {cap}",
+        r.latched
+    );
+    assert_eq!(r.latched.last(), Some(&3), "{name}: re-converged on D 3");
+    assert_eq!(r.relocks, 0, "{name}: relock churn once settled");
+    assert_eq!(r.late_holds, 0, "{name}: late holds once settled");
+    assert_eq!(r.steps, 0, "{name}: an audio step re-placement");
+    assert!(r.slews <= max_slews, "{name}: {} slews", r.slews);
+    assert_eq!(r.places, 3, "{name}: start, sender restart, OBS restart");
+    assert!(r.av_ticks > 80_000, "{name}: A/V gate too thin");
+    assert!(
+        r.max_abs_av_ms <= GATE_MAX_AV_MS,
+        "{name}: |A/V| {:.2} ms",
+        r.max_abs_av_ms
+    );
+    let at_3 = r.depth_hist.get(&3).copied().unwrap_or(0);
+    assert!(
+        at_3 * 100 >= r.gated_presents * 99,
+        "{name}: D 3 held on {at_3} of {} gated presents: {:?}",
+        r.gated_presents,
+        r.depth_hist
+    );
+}
+
+#[test]
+fn a_short_transient_in_the_settle_window_is_ignored_by_the_p90_latch_1367() {
+    // 150 ms (5 ticks, under a tenth of the window): the percentile never sees it, the relatch
+    // finds the same D 3 and the audio never moves.
+    let r = run(transient(150));
+    assert_transient("transient-150ms", &r, 0);
+    assert!(r.latched.iter().all(|&d| d == 3), "latched {:?}", r.latched);
+}
+
+#[test]
+fn the_live_one_second_transient_never_latches_the_400ms_depth_1367() {
+    // the live case: a one-second song-change transient in the window after the sender restart.
+    // Before the fix the window MAX latched D 12 (400 ms), the hold drove the queue into a backlog
+    // relock storm and the audio held 400 ms against a far shallower video. Now the window's spread
+    // rejects it, the next window latches the healthy D 3, and the audio never moves.
+    let r = run(transient(1_000));
+    assert_transient("transient-1s", &r, 0);
+    assert!(r.latched.iter().all(|&d| d == 3), "latched {:?}", r.latched);
+}
+
+#[test]
+fn a_whole_window_transient_latches_the_clamp_then_re_measures_1367() {
+    // 4 s: the whole first window sits on the transient (no spread to reject), so the latch is the
+    // clamp base + 3 = 4, reported. Once the floor falls back, a whole window two frames under it
+    // re-measures onto D 3. The audio follows the clamp and back by the slew, never a step.
+    let r = run(transient(4_000));
+    assert!(r.capped, "the over-cap latch must be reported");
+    assert!(r.latched.contains(&4), "latched {:?}", r.latched);
+    assert_transient("transient-4s", &r, 2);
+}
+
+// ---- live 25.9.2026 12:31: the hold must reach the SAMPLES after a sender restart ---------------
+
+#[test]
+fn a_sender_restart_never_appends_the_audio_at_arrival_1367() {
+    // every run has a sender restart (t = 2400 s, 3 s of silence: a >2 s timestamp jump). OBS then
+    // resets the buffer to the ARRIVAL instant and appends; the fixed ingest places at the term. The
+    // settled pairing of the SAMPLES (not the bookkeeping) stays within 5 ms, and the pairing offset
+    // the audit reports tracks the true A/V error.
+    let r = run(Scenario::clean(40, 64, 3));
+    eprintln!("placed-after-reset: {r:?}");
+    assert!(
+        r.max_abs_av_ms <= GATE_MAX_AV_MS,
+        "|A/V| {:.2} ms",
+        r.max_abs_av_ms
+    );
+    assert!(
+        r.max_pairing_vs_av_ms <= 4.0,
+        "the reported pairing offset left the true A/V by {:.2} ms",
+        r.max_pairing_vs_av_ms
+    );
+    // review round 1: the measurement runs the PRODUCTION formula (audio_ts + buffered for an
+    // append) over an OBS-style buffer, and it agrees with the modelled truth on every packet.
+    assert!(
+        r.max_formula_vs_truth_ms <= 0.01,
+        "the placement formula left the truth by {:.4} ms",
+        r.max_formula_vs_truth_ms
+    );
+}
+
+#[test]
+fn the_append_after_reset_loses_the_hold_and_the_audit_now_says_so_1367() {
+    // the anti-tautology: OBS's append taken as-is (the live ebea02a2d behaviour) puts the audio on
+    // its arrival after the restart -- ~1-2 frames EARLY on this 40-64 ms feed (live: +101 ms on a
+    // 133 ms hold). The audit's pairing offset measures the samples, so it reads that gap instead
+    // of the old structural 0.
+    let r = run(Scenario {
+        legacy_append: true,
+        ..Scenario::clean(40, 64, 3)
+    });
+    eprintln!("legacy-append: {r:?}");
+    assert!(
+        r.max_abs_av_ms > 30.0,
+        "the legacy append must lose the hold: |A/V| {:.2} ms",
+        r.max_abs_av_ms
+    );
+    assert!(
+        r.max_pairing_vs_av_ms <= 4.0,
+        "the audit must report the lost hold: pairing vs true A/V {:.2} ms",
+        r.max_pairing_vs_av_ms
+    );
+    // the append after the reset goes through audio_ts (the arrival) + an empty buffer.
+    assert!(
+        r.max_formula_vs_truth_ms <= 0.01,
+        "the placement formula left the truth by {:.4} ms",
+        r.max_formula_vs_truth_ms
     );
 }

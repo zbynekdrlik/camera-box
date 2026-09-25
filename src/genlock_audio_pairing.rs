@@ -157,9 +157,20 @@ pub struct VideoDelayTracker {
     pub smoothed_ns: u64,
     /// The quantized delay the audio follows, ms (0 = not measured yet → the #1303 latency hold).
     pub applied_ms: u32,
-    /// Render ticks left until an armed re-application applies (0 = idle).
+    /// Render ticks left until an armed re-application applies (0 = idle). Under a lock it counts
+    /// UP the consecutive ticks the realized delay sat half a frame or more off the applied one.
     pub settle_ticks: u32,
+    /// Issue 1367 (design 5830750134) — the lock last applied (0 = the free tracker): a NEW lock
+    /// applies at once, the same lock lets the realized delay bound the hold.
+    pub locked_ms: u32,
 }
+
+/// Issue 1367 (design 5830750134) — under the SAME lock, the render ticks the smoothed realized
+/// delay must stay half a frame or more off the applied hold, CONSECUTIVELY, before the hold
+/// follows it. Longer than the hold's climb onto a capped latched depth (3 holds × the 30-tick
+/// throttle = 90 ticks), so a normal climb onto D never moves the audio; a disturbance's one-frame
+/// excursion (≤ one throttle window) resets it. Mirror of `GENLOCK_VIDEO_DELAY_FOLLOW_TICKS`.
+pub const VIDEO_DELAY_FOLLOW_TICKS: u32 = 180;
 
 /// Issue 1367 (ROZHODNUTÉ 5827497952) — the `lock_ms` of [`video_delay_track`] while a SHALLOW N==1
 /// source measures its first per-lock depth: smooth only, apply nothing, so the audio waits for the
@@ -189,8 +200,15 @@ pub fn video_delay_lock_ms(target_frames: u64, measuring: bool, interval_ns: u64
 ///
 /// Issue 1367 (ROZHODNUTÉ 5827497952): `lock_ms` ([`video_delay_lock_ms`]) overrides the apply —
 /// `0` = the free tracker above; [`VIDEO_DELAY_LOCK_PENDING`] = smooth only, apply nothing; any other
-/// value = the LOCKED delay of a shallow source's latched depth, applied as-is (the EMA keeps
-/// running for the audit's `video_delay_ms=`).
+/// value = the LOCKED delay of a shallow source's latched depth.
+///
+/// Design 5830750134 (the audio never holds beyond the video actually on air): a NEW lock applies
+/// at once (a clean latch still places the audio once, straight onto D); under the SAME lock the
+/// hold follows the smoothed REALIZED delay once it has stayed half a frame or more off the applied
+/// hold for [`VIDEO_DELAY_FOLLOW_TICKS`] consecutive ticks — a latched D the video never reaches
+/// (the live 400 ms lock over a 233 ms video) or a clamped D under a slower arrival. A hold climb
+/// onto D, or a disturbance's one-frame excursion, is shorter and never moves the audio. Leaving a
+/// lock for the free tracker clears the follow count, so it cannot leak into the free countdown.
 ///
 /// Mirror of `genlock_video_delay_track`.
 pub fn video_delay_track(
@@ -200,12 +218,29 @@ pub fn video_delay_track(
     interval_ns: u64,
 ) {
     t.smoothed_ns = video_delay_smooth_ns(t.smoothed_ns, sample_ns);
-    if lock_ms != 0 {
+    if lock_ms == VIDEO_DELAY_LOCK_PENDING {
         t.settle_ticks = 0;
-        if lock_ms != VIDEO_DELAY_LOCK_PENDING {
+        return;
+    }
+    if lock_ms != 0 {
+        if lock_ms != t.locked_ms || t.applied_ms == 0 {
+            t.locked_ms = lock_ms;
             t.applied_ms = lock_ms;
+            t.settle_ticks = 0;
+        } else if video_delay_moved(t.applied_ms, t.smoothed_ns, interval_ns) {
+            t.settle_ticks = t.settle_ticks.saturating_add(1);
+            if t.settle_ticks >= VIDEO_DELAY_FOLLOW_TICKS {
+                t.applied_ms = video_delay_round_ms(t.smoothed_ns);
+                t.settle_ticks = 0;
+            }
+        } else {
+            t.settle_ticks = 0;
         }
         return;
+    }
+    if t.locked_ms != 0 {
+        t.locked_ms = 0;
+        t.settle_ticks = 0;
     }
     if t.settle_ticks > 0 {
         t.settle_ticks -= 1;
@@ -510,6 +545,75 @@ pub fn pairing_offset_ms(applied_audio_delay_ns: i64, video_delay_ns: i64) -> i6
 /// Mirror of `genlock_audio_applied_delay_ns`.
 pub fn audio_applied_delay_ns(hold_ms: u32, slew_remaining_ns: i64) -> i64 {
     genlock_audio_delay_ns(hold_ms).wrapping_sub(slew_remaining_ns as u64) as i64
+}
+
+/// Issue 1367 (live 25.9.2026 12:31, resolume `sp-slow_video`) — may the ingest APPEND this packet
+/// back to back? OBS's own continuity verdict `push_back`, EXCEPT right after the ingest reset its
+/// timeline in this packet (`handle_ts_jump` on a timestamp jump over `MAX_TS_VAR` — a sender
+/// restart or song change). `reset_audio_data` then empties the buffer and puts BOTH its start
+/// (`audio_ts`) and `next_audio_sys_ts_min` on the ARRIVAL instant, so the packet's pre-term
+/// timestamp equals it and OBS appends it there: the genlock term never reaches the samples and the
+/// hold is silently lost (the buffer level fell 111 → 46 → 13 ms while the audit still read
+/// `audio_delay_ms=133`). An ACTIVE genlock hold therefore places that packet at its term.
+/// Mirror of `genlock_audio_push_back_allowed`.
+pub fn audio_push_back_allowed(push_back: bool, timeline_reset: bool, mode: AudioHoldMode) -> bool {
+    push_back && !(timeline_reset && mode.is_active())
+}
+
+/// Issue 1367 — the OBS-monotonic instant this packet's first sample ACTUALLY lands in the source's
+/// mix buffer: an APPENDED packet goes to the buffer end (`audio_ts + buffered`), a PLACED one to its
+/// own timestamp. Wraps like the C `uint64_t`. Mirror of `genlock_audio_actual_place_ns`.
+pub fn audio_actual_place_ns(
+    appended: bool,
+    audio_ts_ns: u64,
+    buffered_ns: u64,
+    placed_ns: u64,
+) -> u64 {
+    if appended {
+        audio_ts_ns.wrapping_add(buffered_ns)
+    } else {
+        placed_ns
+    }
+}
+
+/// Issue 1367 — the placement ERROR of one packet: where it actually landed minus where the genlock
+/// hold meant it to land (`in.timestamp` after the term). Negative = the audio sits EARLY (the hold is
+/// not in the samples). Two's complement, like the C. Mirror of `genlock_audio_place_error_ns`.
+pub fn audio_place_error_ns(actual_ns: u64, intended_ns: u64) -> i64 {
+    actual_ns.wrapping_sub(intended_ns) as i64
+}
+
+/// Issue 1367 — the EMA weight of one placement-error sample, as a right shift (1/16 per packet, a
+/// time constant of 16 packets ≈ 0.2–0.3 s). Mirror of `GENLOCK_AUDIO_PLACE_ERR_EMA_SHIFT`.
+pub const AUDIO_PLACE_ERR_EMA_SHIFT: u32 = 4;
+
+/// Issue 1367 — one EMA step of the placement error; an unseeded EMA takes the sample. Division
+/// truncates toward zero and the sums wrap, identically in C. Mirror of
+/// `genlock_audio_place_error_smooth_ns`.
+pub fn audio_place_error_smooth_ns(smoothed_ns: i64, sample_ns: i64, seeded: bool) -> i64 {
+    if !seeded {
+        return sample_ns;
+    }
+    smoothed_ns
+        .wrapping_add(sample_ns.wrapping_sub(smoothed_ns) / (1i64 << AUDIO_PLACE_ERR_EMA_SHIFT))
+}
+
+/// Issue 1367 — the pairing offset's AUDIO side: where the samples REALLY sit. With a measured
+/// placement error it is the applied hold plus that error (an owed slew is already in it: the
+/// buffer is not stretched yet), so a hold that never reached the samples reads as the gap it is.
+/// Without a measurement it falls back to [`audio_applied_delay_ns`] (hold minus the owed slew).
+/// Mirror of `genlock_audio_realized_delay_ns`.
+pub fn audio_realized_delay_ns(
+    hold_ms: u32,
+    slew_remaining_ns: i64,
+    place_err_ns: i64,
+    measured: bool,
+) -> i64 {
+    if measured {
+        genlock_audio_delay_ns(hold_ms).wrapping_add(place_err_ns as u64) as i64
+    } else {
+        audio_applied_delay_ns(hold_ms, slew_remaining_ns)
+    }
 }
 
 /// The audio-parity health of one genlocked source — the reason the LOCK indicator DEGRADES on the

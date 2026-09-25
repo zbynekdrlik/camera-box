@@ -215,8 +215,10 @@ pub fn should_hold_n1_phase(
 //
 // THE RULE. After each LOCK, measure the ARRIVAL FLOOR — the rounded age of the newest queued frame
 // at the tick's scheduled instant — over [`N1_SHALLOW_SETTLE_TICKS`] on-grid present ticks and LATCH
-// `D = max(base, floor_max) + 1` ([`n1_shallow_target_frames`]): one frame of jitter headroom above
-// the worst arrival seen. D then stays constant until the next relock (an ACQUIRE, a GAP RESYNC over
+// `D = max(base, p90 floor) + 1` ([`n1_shallow_target_frames`]): one frame of jitter headroom above
+// the window's 90th-percentile arrival (design 5830750134 — the window MAX let one sender transient
+// latch D 12 = 400 ms live; a window whose p10–p90 spread exceeds a frame re-measures instead, and D
+// is clamped to `base + N1_SHALLOW_MAX_EXTRA_FRAMES` and reported). D then stays constant until the next relock (an ACQUIRE, a GAP RESYNC over
 // a gap of at least [`N1_SHALLOW_RELOCK_GAP_NS`] = a sender restart, or a pin change), and the same
 // one-frame hold / shed as the deep rule keeps the presented depth ON D
 // ([`n1_shallow_hold_due`] / [`n1_shallow_shed_due`]). Stamps and scheduled ticks share the
@@ -238,9 +240,12 @@ pub fn should_hold_n1_phase(
 // A DEEP source (the pin, not the arrival, decides its depth) latches the pin rule's own
 // `base + 1`, whatever its floor did during the window, so the two rules can never disagree.
 //
-// Re-measure without a relock (review round 1): a latched source whose rounded floor sits AT or
-// OVER D for a whole settle window (its arrival rose — the frame at D is the newest or not there
-// yet) re-arms; and an N==1 source with no depth, no window and no cap (it became N==1 without an
+// Re-measure without a relock ([`n1_shallow_watch`]): a latched source whose rounded floor sits AT
+// or OVER D for a whole settle window (its arrival rose, review round 1) — or, for a CLAMPED latch,
+// two frames or more under D (the over-cap floor was a transient) — re-arms; so does one whose
+// REALIZED depth stays under D for [`N1_SHALLOW_UNDER_TICKS`] (D is unreachable) or that takes
+// [`N1_SHALLOW_CHURN_RELOCKS`] backlog relocks without a quiet gap (a relock storm against D,
+// design 5830750134). An N==1 source with no depth, no window and no cap (it became N==1 without an
 // ACQUIRE, e.g. a 60p sender switched to 30p) opens a window.
 
 /// issue 1367 — the on-grid PRESENT ticks the arrival floor is measured over after a lock
@@ -251,6 +256,56 @@ pub const N1_SHALLOW_SETTLE_TICKS: u32 = 90;
 /// a sender RESTART, i.e. a relock that re-measures the floor. A single lost frame is not. Mirror of
 /// the C `GENLOCK_N1_SHALLOW_RELOCK_GAP_NS`.
 pub const N1_SHALLOW_RELOCK_GAP_NS: u64 = 1_000_000_000;
+
+/// issue 1367 (design 5830750134, the shallow-latch outlier) — the latched depth never exceeds
+/// `base + N1_SHALLOW_MAX_EXTRA_FRAMES`. Sized from the live healthy latches: every resolume
+/// `sp-*` / `NDI test` latch of 25.9.2026 had `floor_max_frames` 1–2 (D − base 1–2), and the
+/// bench's 50–80 ms straddle band needs base + 3. The live outlier (`floor_max_frames=11` during a
+/// sender transient → D 12, 400 ms) is what it bounds. An over-cap latch is CLAMPED and reported
+/// (`capped`). Mirror of the C `GENLOCK_N1_SHALLOW_MAX_EXTRA_FRAMES`.
+pub const N1_SHALLOW_MAX_EXTRA_FRAMES: u64 = 3;
+
+/// issue 1367 (design 5830750134) — the settle window's floor histogram bins, RELATIVE to base:
+/// bin k counts floors of `base + k` (a floor under base counts as bin 0 — it cannot change D), the
+/// last bin every floor at or over `base + N1_SHALLOW_MAX_EXTRA_FRAMES` (a D over the cap). Mirror
+/// of the C `GENLOCK_N1_SHALLOW_HIST_BINS`.
+pub const N1_SHALLOW_HIST_BINS: usize = 4;
+const _: () = assert!(N1_SHALLOW_HIST_BINS as u64 == N1_SHALLOW_MAX_EXTRA_FRAMES + 1);
+
+/// issue 1367 (design 5830750134) — the latch reads this PERCENTILE of the window's floors, not the
+/// max: a transient burst shorter than a tenth of the window cannot set D. Mirror of the C
+/// `GENLOCK_N1_SHALLOW_LATCH_PERCENTILE`.
+pub const N1_SHALLOW_LATCH_PERCENTILE: u32 = 90;
+
+/// issue 1367 (design 5830750134) — a non-deep window whose p90 − p10 floor spread (in histogram
+/// bins) exceeds this is a transient in progress: it does not latch, it re-measures. The healthy
+/// spread is 0–1 (a lag straddling at most one frame edge: the live `CG-obs` 33–67 ms, the bench's
+/// 50–80 ms band). The live song change on its 2-frame floor reads p10 = base + 1, p90 = the
+/// over-cap bin: spread 2, rejected (a threshold of 2 let the bench's one-second transient through
+/// to a clamped latch). Mirror of the C `GENLOCK_N1_SHALLOW_MAX_SPREAD_FRAMES`.
+pub const N1_SHALLOW_MAX_SPREAD_FRAMES: u64 = 1;
+
+/// issue 1367 (design 5830750134) — consecutive spread-rejected windows after which the next one
+/// latches anyway (bounded by the cap), so a genuinely bimodal feed still gets a D. Mirror of the
+/// C `GENLOCK_N1_SHALLOW_MAX_REJECTS`.
+pub const N1_SHALLOW_MAX_REJECTS: u32 = 3;
+
+/// issue 1367 (design 5830750134) — a latched D whose REALIZED depth (the presented frame's
+/// rounded age at the scheduled tick) stays below it for this many consecutive on-grid present
+/// ticks is unreachable: re-measure. Twice the settle window, so the hold's climb onto a capped D
+/// (`N1_SHALLOW_MAX_EXTRA_FRAMES` holds × the 30-tick throttle = 90 ticks) never trips it. Mirror
+/// of the C `GENLOCK_N1_SHALLOW_UNDER_TICKS`.
+pub const N1_SHALLOW_UNDER_TICKS: u32 = 180;
+
+/// issue 1367 (design 5830750134) — this many BACKLOG relocks while latched, with no
+/// [`N1_SHALLOW_CHURN_QUIET_TICKS`] gap between them, is a relock storm against D (the live 400 ms
+/// latch relocked ~3 per 5 s): re-measure. Mirror of the C `GENLOCK_N1_SHALLOW_CHURN_RELOCKS`.
+pub const N1_SHALLOW_CHURN_RELOCKS: u32 = 3;
+
+/// issue 1367 (design 5830750134) — on-grid present ticks without a backlog relock that clear the
+/// churn count (an occasional stall's relock hours apart never re-measures). Mirror of the C
+/// `GENLOCK_N1_SHALLOW_CHURN_QUIET_TICKS`.
+pub const N1_SHALLOW_CHURN_QUIET_TICKS: u32 = 180;
 
 /// issue 1367 — the per-source shallow-depth state (the C `genlock_shallow_*` fields).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -270,6 +325,17 @@ pub struct ShallowDepth {
     /// On-grid ticks of the current window on which the source read DEEP (the latch takes the
     /// MAJORITY, so a stall on the one latch tick cannot decide it).
     pub deep_ticks: u32,
+    /// The current window's floor histogram, relative to base ([`N1_SHALLOW_HIST_BINS`]). Cleared
+    /// on the window's FIRST sample (lazily, so the rearm stays a five-field reset in C too).
+    pub hist: [u32; N1_SHALLOW_HIST_BINS],
+    /// Consecutive on-grid present ticks whose realized depth sat below the latched D.
+    pub under_ticks: u32,
+    /// Backlog relocks while latched, since the last quiet gap.
+    pub churn_relocks: u32,
+    /// On-grid present ticks since the last backlog relock (a quiet gap clears the churn count).
+    pub churn_quiet_ticks: u32,
+    /// Consecutive spread-rejected windows.
+    pub rejects: u32,
 }
 
 /// issue 1367 — one PRESENT tick's inputs to [`n1_shallow_track`] (the C passes them as scalars).
@@ -290,25 +356,64 @@ pub struct ShallowTick {
     pub deep: bool,
     /// This OBS box is a min-latency (imag) box.
     pub min_latency_box: bool,
+    /// The REALIZED depth: the rounded age of the frame this tick presents, at the scheduled
+    /// instant (the C `genlock_n1_depth_frames(tick_wall, source->last_frame_ts, interval)`).
+    pub realized_frames: u64,
+    /// A BACKLOG relock happened since the previous call (the C `genlock_relocks` moved).
+    pub backlog_relock: bool,
 }
 
-/// issue 1367 — the latched depth: `max(base, floor_max) + 1` (a DEEP source: the pin rule's own
-/// `base + 1`). On a min-latency box a depth above `base + 1` is not applied: `(0, true)` (report
-/// only). Returns `(depth, capped)`. Mirror of the C `genlock_n1_shallow_target_frames`.
+/// issue 1367 (design 5830750134) — the histogram bin of one rounded floor: `floor − base`,
+/// saturating at 0 (a floor under base cannot change D) and at the last bin (over the cap). Mirror
+/// of the C `genlock_n1_shallow_hist_bin`.
+pub fn n1_shallow_hist_bin(floor_frames: u64, base_frames: u64) -> usize {
+    floor_frames
+        .saturating_sub(base_frames)
+        .min(N1_SHALLOW_HIST_BINS as u64 - 1) as usize
+}
+
+/// issue 1367 (design 5830750134) — the `pct` percentile of a window's histogram, as a bin: the
+/// first bin whose cumulative count reaches `pct %` of `window_ticks` (integer: `cum · 100 ≥
+/// window · pct`). An empty window reads bin 0. Mirror of the C `genlock_n1_shallow_percentile_bin`.
+pub fn n1_shallow_percentile_bin(
+    hist: &[u32; N1_SHALLOW_HIST_BINS],
+    window_ticks: u32,
+    pct: u32,
+) -> u64 {
+    let need = u64::from(window_ticks) * u64::from(pct);
+    let mut cum = 0u64;
+    for (bin, &n) in hist.iter().enumerate() {
+        cum += u64::from(n);
+        if cum * 100 >= need {
+            return bin as u64;
+        }
+    }
+    N1_SHALLOW_HIST_BINS as u64 - 1
+}
+
+/// issue 1367 — the latched depth: `max(base, latch_floor) + 1` (a DEEP source: the pin rule's own
+/// `base + 1`), where `latch_floor` is the window's p90 floor ([`n1_shallow_track`]). On a
+/// min-latency box a depth above `base + 1` is not applied: `(0, true)` (report only). Design
+/// 5830750134: any other depth above `base + N1_SHALLOW_MAX_EXTRA_FRAMES` is CLAMPED to it and
+/// reported: `(base + 3, true)`. Returns `(depth, capped)`. Mirror of the C
+/// `genlock_n1_shallow_target_frames`.
 pub fn n1_shallow_target_frames(
     base_frames: u64,
-    floor_max_frames: u64,
+    latch_floor_frames: u64,
     deep: bool,
     min_latency_box: bool,
 ) -> (u64, bool) {
-    let cap = base_frames.saturating_add(1);
+    let pin_depth = base_frames.saturating_add(1);
     let d = if deep {
-        cap
+        pin_depth
     } else {
-        base_frames.max(floor_max_frames).saturating_add(1)
+        base_frames.max(latch_floor_frames).saturating_add(1)
     };
-    if min_latency_box && d > cap {
+    let clamp = base_frames.saturating_add(N1_SHALLOW_MAX_EXTRA_FRAMES);
+    if min_latency_box && d > pin_depth {
         (0, true)
+    } else if d > clamp {
+        (clamp, true)
     } else {
         (d, false)
     }
@@ -337,12 +442,60 @@ pub fn n1_shallow_window_deep(deep_ticks: u32, window_ticks: u32) -> bool {
     u64::from(deep_ticks) * 2 > u64::from(window_ticks)
 }
 
+/// issue 1367 (design 5830750134) — one on-grid PRESENT tick of a LATCHED source (`target_frames !=
+/// 0`, no window open): update the three re-measure watches and say whether the window re-opens.
+/// - The FLOOR left D for a whole window ([`N1_SHALLOW_SETTLE_TICKS`] consecutive ticks): at or over
+///   D (the arrival rose, review round 1) — or, for a CLAMPED latch, two frames or more under it
+///   (the over-cap floor was a transient; a floor still at the clamp keeps it, so a genuinely slow
+///   arrival never re-measures in a loop).
+/// - The REALIZED depth stayed under D for [`N1_SHALLOW_UNDER_TICKS`]: D is unreachable.
+/// - [`N1_SHALLOW_CHURN_RELOCKS`] backlog relocks without a [`N1_SHALLOW_CHURN_QUIET_TICKS`] gap: a
+///   relock storm against D.
+///
+/// Mirror of the C `genlock_n1_shallow_watch`.
+pub fn n1_shallow_watch(s: &mut ShallowDepth, t: &ShallowTick) -> bool {
+    let floor_off = if s.capped {
+        t.floor_frames.saturating_add(2) <= s.target_frames
+    } else {
+        t.floor_frames >= s.target_frames
+    };
+    s.over_ticks = if floor_off {
+        s.over_ticks.saturating_add(1)
+    } else {
+        0
+    };
+    s.under_ticks = if t.realized_frames < s.target_frames {
+        s.under_ticks.saturating_add(1)
+    } else {
+        0
+    };
+    if t.backlog_relock {
+        s.churn_relocks = s.churn_relocks.saturating_add(1);
+        s.churn_quiet_ticks = 0;
+    } else {
+        s.churn_quiet_ticks = s.churn_quiet_ticks.saturating_add(1);
+        if s.churn_quiet_ticks >= N1_SHALLOW_CHURN_QUIET_TICKS {
+            s.churn_relocks = 0;
+            s.churn_quiet_ticks = 0;
+        }
+    }
+    s.over_ticks >= N1_SHALLOW_SETTLE_TICKS
+        || s.under_ticks >= N1_SHALLOW_UNDER_TICKS
+        || s.churn_relocks >= N1_SHALLOW_CHURN_RELOCKS
+}
+
 /// issue 1367 — one PRESENT tick of the shallow-depth state ([`ShallowTick`]). An N>=2 tick clears
 /// the whole state (it has its own conveyor rule). A relock, or an N==1 source with no depth, no
-/// window and no cap, opens a window; a latched source whose rounded floor sat at or over D for
-/// [`N1_SHALLOW_SETTLE_TICKS`] on-grid ticks re-opens one (its arrival rose). Only on-grid ticks are
-/// sampled. Returns true on the tick that LATCHES a D (or a capped report). Mirror of the C
-/// `genlock_n1_shallow_track`.
+/// window and no cap, opens a window; a latched source re-opens one when [`n1_shallow_watch`] says
+/// so. Only on-grid ticks are sampled.
+///
+/// Design 5830750134 (the latch never latches an outlier): the window's floors go into a histogram
+/// relative to base ([`n1_shallow_hist_bin`], cleared on the window's first sample) and the latch
+/// reads its p90 ([`N1_SHALLOW_LATCH_PERCENTILE`]), not the max. A non-deep window whose p90 − p10
+/// spread exceeds [`N1_SHALLOW_MAX_SPREAD_FRAMES`] is a transient in progress: it re-measures (the
+/// old D stays maintained), at most [`N1_SHALLOW_MAX_REJECTS`] times in a row. The depth is clamped
+/// by [`n1_shallow_target_frames`]. Returns true on the tick that LATCHES a D (or a capped report).
+/// Mirror of the C `genlock_n1_shallow_track`.
 pub fn n1_shallow_track(s: &mut ShallowDepth, t: ShallowTick) -> bool {
     if !t.n1 {
         *s = ShallowDepth::default();
@@ -355,17 +508,21 @@ pub fn n1_shallow_track(s: &mut ShallowDepth, t: ShallowTick) -> bool {
         return false;
     }
     if !s.measuring {
-        if s.target_frames == 0 || t.floor_frames < s.target_frames {
+        if s.target_frames == 0 {
             s.over_ticks = 0;
             return false;
         }
-        s.over_ticks = s.over_ticks.saturating_add(1);
-        if s.over_ticks < N1_SHALLOW_SETTLE_TICKS {
+        if !n1_shallow_watch(s, &t) {
             return false;
         }
         n1_shallow_rearm(s);
     }
+    if s.window_ticks == 0 {
+        s.hist = [0; N1_SHALLOW_HIST_BINS];
+    }
     s.floor_max_frames = s.floor_max_frames.max(t.floor_frames);
+    let bin = n1_shallow_hist_bin(t.floor_frames, t.base_frames);
+    s.hist[bin] = s.hist[bin].saturating_add(1);
     s.window_ticks = s.window_ticks.saturating_add(1);
     if t.deep {
         s.deep_ticks = s.deep_ticks.saturating_add(1);
@@ -373,15 +530,27 @@ pub fn n1_shallow_track(s: &mut ShallowDepth, t: ShallowTick) -> bool {
     if s.window_ticks < N1_SHALLOW_SETTLE_TICKS {
         return false;
     }
+    let deep = n1_shallow_window_deep(s.deep_ticks, s.window_ticks);
+    let high = n1_shallow_percentile_bin(&s.hist, s.window_ticks, N1_SHALLOW_LATCH_PERCENTILE);
+    let low = n1_shallow_percentile_bin(&s.hist, s.window_ticks, 100 - N1_SHALLOW_LATCH_PERCENTILE);
+    if !deep && high - low > N1_SHALLOW_MAX_SPREAD_FRAMES && s.rejects < N1_SHALLOW_MAX_REJECTS {
+        s.rejects += 1;
+        n1_shallow_rearm(s);
+        return false;
+    }
     let (d, capped) = n1_shallow_target_frames(
         t.base_frames,
-        s.floor_max_frames,
-        n1_shallow_window_deep(s.deep_ticks, s.window_ticks),
+        t.base_frames.saturating_add(high),
+        deep,
         t.min_latency_box,
     );
     s.target_frames = d;
     s.capped = capped;
     s.measuring = false;
+    s.rejects = 0;
+    s.under_ticks = 0;
+    s.churn_relocks = 0;
+    s.churn_quiet_ticks = 0;
     true
 }
 
@@ -400,7 +569,10 @@ pub fn n1_shallow_governs(
 
 /// issue 1367 — the shallow SHED half (the caller gates it on [`n1_tick_is_on_grid`]): shed one frame
 /// when the last presented depth (the locked boundary) sits deeper than the latched D, throttled by
-/// the shared #859 counter. Mirror of the C `genlock_n1_shallow_shed_due`.
+/// the shared #859 counter. Design 5830750134: never while the NEWEST queued frame is already more
+/// than D whole frames old (`arrival_floor / interval > D`) — a D the arrival cannot supply (a clamp
+/// under a genuinely slow sender) would only skip a frame and run the queue dry every throttle
+/// window. Mirror of the C `genlock_n1_shallow_shed_due`.
 pub fn n1_shallow_shed_due(
     tick_wall_ns: u64,
     locked_boundary_ns: u64,
@@ -412,6 +584,7 @@ pub fn n1_shallow_shed_due(
 ) -> bool {
     locked_boundary_ns != 0
         && n1_shallow_governs(target_frames, arrival_floor_ns, latency_ms, interval_ns)
+        && arrival_floor_ns / interval_ns <= target_frames
         && n1_depth_frames(tick_wall_ns, locked_boundary_ns, interval_ns) > target_frames
         && ticks_since_last_drain >= DRAIN_MIN_TICK_INTERVAL
 }

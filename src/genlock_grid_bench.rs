@@ -410,6 +410,8 @@ impl Fifo {
         // issue 1367: an ACQUIRE (or a sender-restart GAP RESYNC below) is a new LOCK — the shallow
         // depth re-measures its arrival floor (the C `genlock_shallow_relock`).
         let mut shallow_relock = self.locked_next_boundary == 0;
+        // design 5830750134: a BACKLOG relock this tick (the C `genlock_relocks` moved).
+        let mut backlog_relock = false;
         let release;
         if self.locked_next_boundary == 0 {
             // ACQUIRE (N==1: no #1161 bracket).
@@ -426,6 +428,7 @@ impl Fifo {
         {
             // BACKLOG relock (#1003 phase-continuity selection + the stale-anchor re-select).
             c.relocks += 1;
+            backlog_relock = true;
             let q: Vec<u64> = self.queue.iter().copied().collect();
             let mut sel =
                 relock_select_nearest(&q, wall, relock_anchor_age_ns(self.anchor, cfg.latency_ms));
@@ -591,6 +594,9 @@ impl Fifo {
                         CANVAS_INTERVAL_NS,
                     ),
                     min_latency_box: cfg.min_latency_box,
+                    // the frame this tick presents (the C `source->last_frame_ts`).
+                    realized_frames: n1_depth_frames(tick_wall, self.queue[0], CANVAS_INTERVAL_NS),
+                    backlog_relock,
                 },
             )
         {
