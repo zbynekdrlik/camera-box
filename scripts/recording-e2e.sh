@@ -1079,7 +1079,9 @@ fi
 # refused a correct full-bundle deploy. Also fetch the full bundle's manifest of the same build and
 # hand it to the gate as the ALTERNATE (a box is OK on either entry, DRIFT on neither). Skipped when
 # the operator pinned VERSION_GATE_MANIFEST (a pin is never widened); a failed fetch leaves it empty,
-# so the fast manifest is judged exactly as before. Fetch helper: scripts/lib/manifest-autosource.sh.
+# so the fast manifest is judged exactly as before. Keyed on strih's marker like the fast fetch (the
+# cross-box parity facet holds strih and stream on one build). Fetch helper (per-run cache + a
+# timeout on every gh call): scripts/lib/manifest-autosource.sh.
 AUTO_WIN_ALT_MANIFEST=""
 [ -z "${VERSION_GATE_MANIFEST:-}" ] && AUTO_WIN_ALT_MANIFEST="$(manifest_autosource_fetch_win_full "$VERSION_GATE_REPO" \
   "$(genlock_build_sha_state_read "$VERSION_STRIH_STATE")" "$OUTDIR/win-full-manifest.json")"

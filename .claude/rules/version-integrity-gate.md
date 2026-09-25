@@ -242,9 +242,14 @@ change ships only that way) read `obs_dll_sha256 DRIFT` and refused the release 
 
 - `manifest_autosource_fetch_win_full REPO SHA DEST` (`scripts/lib/manifest-autosource.sh`) fetches the
   FULL bundle's BUNDLE_MANIFEST.json (`windows-genlock.yml` / artifact `obs-genlock-windows-x64`) for
-  the SAME strih marker sha as the fast one. Best-effort ("" on failure). GitHub serves an artifact
-  only as one zip, so it downloads the whole ~270 MB bundle into a mktemp dir, keeps only the
-  manifest, and removes the rest at once. `recording-e2e.sh` runs it only when `VERSION_GATE_MANIFEST`
+  the SAME strih marker sha as the fast one (the cross-box parity facet holds strih and stream on
+  one build). Best-effort ("" on failure). GitHub serves an artifact only as one zip, so the first
+  fetch of a build downloads the whole ~270 MB bundle into a mktemp dir, keeps only the manifest and
+  removes the rest at once. `manifest_autosource_fetch` therefore CACHES every fetched manifest per
+  CI run (`${MANIFEST_AUTOSOURCE_CACHE_DIR:-~/.camera-box/manifest-cache}/<workflow>--<artifact>--<run_id>.json`,
+  keyed on the RUN id, never the sha: a re-run at one sha builds different bytes; entries older than
+  30 days are pruned) and bounds every gh call with `timeout ${MANIFEST_AUTOSOURCE_TIMEOUT_S:-300}`
+  (a timeout is a fetch failure -> ""). `recording-e2e.sh` runs it only when `VERSION_GATE_MANIFEST`
   is unset (an operator pin is never widened) and passes it to BOTH gate invocations as
   `${AUTO_WIN_ALT_MANIFEST:+--alt-manifest …}`.
 - `version-integrity-gate.sh --alt-manifest PATH` threads it to every `--win-state` box exactly where
@@ -258,10 +263,17 @@ change ships only that way) read `obs_dll_sha256 DRIFT` and refused the release 
     matches the alternate's entry (informational). Reason: `deploy-genlock-fleet.sh --fast` ships
     obs.dll only, so after a fast deploy distroav is an OLDER build's bytes. Distroav is also not
     byte-reproducible, so enforcing it against the full manifest would false-refuse every correct fast
-    deploy (the mirror image of this bug). Enforcing distroav needs its own decision.
+    deploy (the mirror image of this bug). Even a box whose obs.dll matched the FULL manifest may
+    legitimately carry a later `distroav-fast-dll` hot-swap (`windows-genlock-fast.yml`), so no
+    "enforce distroav when obs.dll matched the alternate" rule is safe either.
   - An `alt_manifest=` given WITHOUT `manifest=` (the fast fetch failed and the full one succeeded)
-    is PROMOTED to the primary and judged exactly like a lone `manifest=` today (fail-closed; a
-    fast-deployed box then reads DRIFT, which is correct: evidence is incomplete).
+    is PROMOTED to the primary and judged exactly like a lone `manifest=` today. This is the main
+    design's explicit fail-closed choice, and its cost is known: a CORRECT fast-deployed box then
+    REFUSES (obs.dll DRIFT, and distroav is enforced against the full manifest), while a TOTAL fetch
+    outage leaves the facet dormant and passes (the #1100 contract). The alternative raised in review
+    (tell "no fast run at this sha" apart from "fast fetch failed", promote only the former) was left
+    to the main. The realistic trigger is a transient gh error; the fast workflow's `-L 100` window
+    spanned 7 weeks on 25.9.2026.
   - A supplied alternate that does not exist is a usage error (exit 1), like a missing `manifest=`.
   - With NO alternate every line and exit code is byte-identical to before. This is pinned by
     `compare_single_manifest_obs_dll_lines_are_byte_identical_1346` in `tests/drift_guard.rs`.

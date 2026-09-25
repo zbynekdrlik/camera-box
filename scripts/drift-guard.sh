@@ -2106,7 +2106,8 @@ compare_observed() {
   # bundle beside the fast obs.dll-only primary. The two workflows' obs.dll bytes differ, so the
   # obs.dll byte facet accepts EITHER entry. It only WIDENS a check the primary makes -- it never
   # switches on the distroav compare an obs.dll-only primary skips. Supplied ALONE (the primary
-  # could not be fetched) it is judged exactly like a lone manifest= (fail-closed).
+  # could not be fetched) it is judged exactly like a lone manifest= (fail-closed by design: a
+  # correct fast-deployed box then refuses -- see .claude/rules/version-integrity-gate.md).
   local o_alt_manifest="${32:-}"
   if [ -z "$manifest" ] && [ -n "$o_alt_manifest" ]; then
     manifest="$o_alt_manifest"
