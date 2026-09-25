@@ -472,13 +472,14 @@ fn cli_box_selects_correct_mcp_and_emits_program() {
     );
 }
 
-/// #1295: RESOLUME-SNV (the traveling cg OBS box) is a valid --box: win-resolume MCP, hostname
-/// resolume.lan (never a pinned IP), has_ahk=1 (it RUNS an AutoHotkey v2 safe-loop respawning OBS,
-/// confirmed live by the supervisor pre-deploy inventory), so its program carries the AHK
-/// stop/restart-verified bracket + the #978 SessionId/MainWindowTitle gate over BOTH obs64 AND
-/// AutoHotkey64, and the render-tick verify.
+/// #1295 + issue 1372: RESOLUME-SNV (the traveling cg OBS box) is a valid --box: win-resolume MCP,
+/// hostname resolume.lan (never a pinned IP). Its NL_STARTUP.ahk AutoHotkey v2 watcher is the
+/// OWNER's (ROZHODNUTE issuecomment-5839273463, "ale ahk nespustaj"): the program stops AutoHotkey64
+/// ONLY if it is running (so it cannot respawn a second obs64), NEVER starts or restarts it, and the
+/// #978 AutoHotkey64 count is REPORT-ONLY. OBS is launched directly (the box's own shortcut, the
+/// #786 guarded launcher when present) and verified: one live obs64 + the build/profile title.
 #[test]
-fn cli_box_resolume_selects_win_resolume_with_ahk_1295() {
+fn cli_box_resolume_selects_win_resolume_ahk_guard_1372() {
     let (code, out, _err) = run_script(&["--box", "resolume"]);
     assert_eq!(code, 0, "--box resolume must print the plan (exit 0)");
     assert!(
@@ -495,34 +496,51 @@ fn cli_box_resolume_selects_win_resolume_with_ahk_1295() {
         out.contains("--host resolume.lan"),
         "resolume plan addresses the box by hostname in its --host args:\n{out}"
     );
-    // has_ahk=1 -> the AHK watcher is stopped before obs64 is touched and restarted + VERIFIED
-    // afterward (issue 867 / 1272) -- the same bracket strih gets.
+    // the owner's watcher is stopped if running, so it cannot fight the relaunch ...
     assert!(
-        out.contains("Stop-Process -Name AutoHotkey64"),
-        "resolume runs the AHK watcher -- its program must stop AutoHotkey64:\n{out}"
+        out.contains("if (Get-Process AutoHotkey64 -ErrorAction SilentlyContinue)")
+            && out.contains("Stop-Process -Name AutoHotkey64"),
+        "resolume must stop a RUNNING AutoHotkey64 before touching obs64:\n{out}"
+    );
+    // ... and NEVER started again: no relaunch machinery, no restart line, no AHK exit code.
+    for banned in [
+        "$ahkScriptPath",
+        "$ahkRelaunchVerified",
+        "$ahkLnk",
+        "AHK watchdog restarted",
+        "best-effort AHK restart",
+        "exit 9",
+    ] {
+        assert!(
+            !out.contains(banned),
+            "issue 1372: the resolume program must NEVER start AutoHotkey64 (found {banned:?}):\n{out}"
+        );
+    }
+    // the #978 AutoHotkey64 count is REPORT-ONLY: logged, never a failure on 0.
+    assert!(
+        !out.contains("expected exactly 1 AutoHotkey64")
+            && !out.contains("$ahkSessProcs[0].SessionId -ne $activeSession"),
+        "issue 1372: the AutoHotkey64 count/session must not gate the resolume launch:\n{out}"
     );
     assert!(
-        out.contains("$ahkRelaunchVerified") && out.contains("Get-Process AutoHotkey64"),
-        "resolume must carry the VERIFIED AHK restart machinery (issue 867):\n{out}"
+        out.contains("#1372 AHK REPORT (report-only"),
+        "issue 1372: the resolume program must LOG the AutoHotkey64 count:\n{out}"
     );
-    // the #978 session gate must cover AutoHotkey64 too (a session-0 AHK respawns obs64 into
-    // session 0 forever), not just obs64.
+    // the obs64 session gate stays strict (exactly one LIVE obs64 in the active session) and the
+    // title must carry the deployed build + the cg profile.
     assert!(
-        out.contains("$ahkSessProcs")
-            && out.contains("$ahkSessProcs[0].SessionId -ne $activeSession"),
-        "resolume (has_ahk=1) must gate AutoHotkey64's SessionId in the #978 session gate:\n{out}"
+        out.contains("expected exactly 1 LIVE obs64 process") && out.contains("SESSION-VISIBILITY"),
+        "resolume keeps the strict one-obs64 session gate:\n{out}"
     );
-    // the relaunch target is resolume's OWN v2 .ahk path, never strih's D:\_APPS path.
     assert!(
-        out.contains(
-            "$ahkScriptPath = 'C:\\Users\\Resolume\\Documents\\_NLMEDIA resolume\\_APPS\\NL_STARTUP.ahk'"
-        ) && !out.contains("$ahkScriptPath = 'D:\\_APPS\\NL_STARTUP.ahk'"),
-        "resolume must relaunch via its OWN .ahk path, not strih's:\n{out}"
+        out.contains("GENLOCK_BUILD_SHA.txt")
+            && out.contains("$wantTitle = \"build $shaShort - Profile: cg\""),
+        "issue 1372: resolume must verify the 'build <sha> - Profile: cg' window title:\n{out}"
     );
-    // the build-proof verify + the session-visibility gate still apply
+    // the build-proof verify still applies
     assert!(
-        out.contains("render tick ENABLED") && out.contains("SESSION-VISIBILITY"),
-        "resolume plan keeps the render-tick verify + the #978 session gate:\n{out}"
+        out.contains("render tick ENABLED"),
+        "resolume plan keeps the render-tick verify:\n{out}"
     );
     // STEP 3b wires the report-only latency verify for the resolume box
     assert!(
@@ -535,6 +553,87 @@ fn cli_box_resolume_selects_win_resolume_with_ahk_1295() {
     assert!(
         out.contains("box IDENTITY confirm"),
         "resolume launch plan must carry the identity-confirm caveat before the STEP-3 WS write:\n{out}"
+    );
+}
+
+/// issue 1372: the AHK GUARD mode of the shared builder (the one the resolume plan uses). With
+/// --force the running watcher is stopped BEFORE the obs64 kill, the #786 redraw loop stops it again
+/// before its own kill, and the only AutoHotkey64 line after the launch is the report.
+#[test]
+fn guard_mode_stops_ahk_before_every_obs_kill_and_only_reports_after_1372() {
+    let p = run_sourced("build_launch_program 'C:\\Program Files\\obs-studio' 1 guard '' '' cg");
+    let stop = "Stop-Process -Name AutoHotkey64";
+    let first_stop = p
+        .find(stop)
+        .expect("guard mode must stop a running AutoHotkey64");
+    let force_kill = p
+        .find("ForEach-Object { Stop-Process -Id $_.Id -Force }")
+        .expect("--force kill of obs64");
+    assert!(
+        first_stop < force_kill,
+        "the AHK stop must precede the --force obs64 kill (stop@{first_stop} kill@{force_kill}):\n{p}"
+    );
+    let redraw_kill = p
+        .find("Stop-Process -Name obs64 -Force")
+        .expect("the #786 redraw kill");
+    let redraw_stop = p[..redraw_kill]
+        .rfind(stop)
+        .expect("a stop before the redraw kill");
+    assert!(
+        redraw_stop > force_kill,
+        "the #786 redraw loop must stop a running AutoHotkey64 before its own obs64 kill:\n{p}"
+    );
+    assert!(
+        !p[redraw_kill..].contains(stop) && !p.contains("Start-Process -FilePath $ahk"),
+        "after the last obs64 kill nothing stops or starts AutoHotkey64 again:\n{p}"
+    );
+    let report = p
+        .find("#1372 AHK REPORT (report-only")
+        .expect("the AHK count report");
+    let obs_gate = p
+        .find("expected exactly 1 LIVE obs64 process")
+        .expect("the obs64 session gate");
+    assert!(
+        report > obs_gate,
+        "the AHK report sits after the obs64 session gate:\n{p}"
+    );
+    let report_line_end = p[report..].find('\n').map_or(p.len(), |i| report + i);
+    assert!(
+        !p[report..report_line_end].contains("exit"),
+        "the AHK report never exits:\n{p}"
+    );
+}
+
+/// issue 1372: the title identity check runs only where the title is readable (the same-session
+/// branch of the #978 gate) and fails loud (exit 8). A box with no expected profile (stream) gets
+/// no title identity check at all.
+#[test]
+fn title_identity_check_is_same_session_only_and_profile_scoped_1372() {
+    let p = run_sourced("build_launch_program 'C:\\Program Files\\obs-studio' 0 guard '' '' cg");
+    let same = p
+        .find("if ($ownSession -eq $sessProc.SessionId) {")
+        .expect("the same-session branch");
+    let other = p[same..]
+        .find("} else {")
+        .map(|i| same + i)
+        .expect("the cross-session branch");
+    let want = p
+        .find("$wantTitle = \"build $shaShort - Profile: cg\"")
+        .expect("title check");
+    assert!(
+        same < want && want < other,
+        "the title identity check must live in the same-session branch only:\n{p}"
+    );
+    assert!(
+        p.contains("Join-Path $obsDir 'GENLOCK_BUILD_SHA.txt'")
+            && p.contains("[Math]::Min(9, $shaTok.Length)")
+            && p.contains("#1372 FAIL: obs64 title"),
+        "the title check reads the deployed marker, cuts the 9-char short sha, fails loud:\n{p}"
+    );
+    let (_c, stream, _e) = run_script(&["--box", "stream"]);
+    assert!(
+        !stream.contains("$wantTitle") && !stream.contains("Profile: cg"),
+        "stream has no expected profile -> no title identity check:\n{stream}"
     );
 }
 
