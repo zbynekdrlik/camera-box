@@ -62,10 +62,16 @@ def _run_dry(tmp_path, by_ip, **env):
     boxup = tmp_path / "boxup.sh"
     boxup.write_text("#!/usr/bin/env bash\nprintf 0\n")
     boxup.chmod(boxup.stat().st_mode | stat.S_IEXEC)
+    # The #1309 management axis probes the REAL ssh banner of a cam node unless stubbed -- hermetic
+    # runs stub it to "banner read back" (1) so the verdict never depends on the runner's network.
+    mgmt = tmp_path / "mgmt.sh"
+    mgmt.write_text("#!/usr/bin/env bash\nprintf 1\n")
+    mgmt.chmod(mgmt.stat().st_mode | stat.S_IEXEC)
     e = {k: v for k, v in os.environ.items() if not k.startswith(("DANTE_CLOCK_", "DANTESYNC_", "OBS_FLEET"))}
     e.update({
         "DANTE_CLOCK_LOCAL_NODES": "", "DANTE_CLOCK_CAM_NODES": "", "DANTE_CLOCK_OBS_NODES": "",
         "DANTE_CLOCK_FETCH_CMD": str(fetch), "DANTE_CLOCK_BOX_UP_CMD": str(boxup),
+        "DANTE_CLOCK_MGMT_SSH_CMD": str(mgmt),
         "RIG_GRANDMASTER_IP": VIDEO_GM, "DANTE_CLOCK_CONFIRM_THRESHOLD": "1",
         "DANTE_CLOCK_NOW": str(_NOW), "DANTE_CLOCK_VERSION_PIN": "1.8.54",
         "DANTE_CLOCK_ALERT_STATE_DIR": str(tmp_path),
