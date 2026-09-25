@@ -1,6 +1,8 @@
 ---
 paths:
   - "src/genlock_audio_pairing.rs"
+  - "vendor/obs-studio/libobs/obs-audio.c"
+  - "tests/audio_telemetry_800.rs"
   - "src/genlock_audio_pairing_bench.rs"
   - "tests/genlock_audio_pairing_parity.rs"
   - "tests/genlock_audio_timecode_placement_1367.rs"
@@ -42,7 +44,8 @@ the AUDIO leg a first-class genlocked signal with the same evidence bar.
    `genlock_lock_indicator_guards.rs` anchor). Parsed by `src/jitter_audit.rs` (additive,
    forward-compatible; the three new keys are ignored there). Since ROZHODNUTÉ 5827497952 the line
    also carries `shallow_depth= shallow_capped= shallow_latches= audio_slew_ms= audio_slews=
-   audio_steps= audio_withheld=` right after `n1_grows=` (audit-line-only).
+   audio_steps= audio_withheld= audio_place_err_ms=` right after `n1_grows=` (audit-line-only;
+   `audio_place_err_ms=` = the measured placement error of the samples, below).
 
 ## The pure decision + parity discipline
 
@@ -206,6 +209,41 @@ described here stay as they are.
   carry no NDI audio (the certified table below), and a deep source's video keeps the pin rule: the
   shallow halves act only on a non-deep source, and a deep source latches the pin rule's own
   `base + 1` (the code path changed, the presented depth did not).
+
+**A timeline reset must PLACE, and the pairing offset reads the SAMPLES (live 25.9.2026 12:31).**
+After each SongPlayer song change on resolume the `sp-slow_video` mix-buffer level fell
+111 → 46 → 13 ms (the `asrc:` line's `level_avg`, the ASRC then re-capturing the low depth) while the
+audit read `audio_delay_ms=133 audio_pairing_offset_ms=0`; songplayer measured the audio +101 ms
+early. Mechanism: a >2 s audio timestamp jump runs `handle_ts_jump`, whose `reset_audio_data` puts the
+buffer start AND `next_audio_sys_ts_min` on the ARRIVAL instant, so the packet's pre-term timestamp
+equals it and OBS APPENDS it there — an append ignores `in.timestamp`, so the genlock term never
+reaches the samples. The latched D keeps the hold constant across the relock (`Continue`), so nothing
+re-placed it; the floating depth of 8151a12ac used to mask it by changing the hold. Fix, all in the
+pure module + mirror:
+- `audio_push_back_allowed(push_back, timeline_reset, mode)`: an ACTIVE hold never appends right
+  after the ingest reset its timeline in this packet. The ingest flags both reset sites
+  (`genlock_timeline_reset`) and corrects `push_back` BEFORE `genlock_audio_hold_action` reads it.
+- The ingest MEASURES every packet under `audio_buf_mutex`: `audio_actual_place_ns` (appended → the
+  buffer end `audio_ts + buffered`; placed → its own timestamp) minus the intended `in.timestamp`
+  (`audio_place_error_ns`), EMA 1/16 per packet (`audio_place_error_smooth_ns`), reset whenever the
+  hold is not active. `audio_pairing_offset_ms` now uses `audio_realized_delay_ns` = hold + that error
+  (an owed slew is in it; hold − owed slew only until a measurement exists), and the audit carries
+  `audio_place_err_ms=`. A hold missing from the samples reads as the gap, never 0.
+- The benches model OBS's append-after-reset (the `AudioLeg` used to re-place on every resync, which
+  hid the defect); every bench with a sender restart went RED on the old verdict (|A/V| 96.9 ms). The
+  shallow bench compares the REPORTED pairing offset with the TRUE A/V of the samples on every settled
+  tick (≤ 1.03 ms), and the anti-tautology `legacy_append` run loses the hold (96.9 ms) and the audit
+  reports it within 1.03 ms.
+
+**Audio-thread stall probe (the FOH-click report, 25.9.2026).** The obs-vban raw-audio output on
+resolume sent with 308–378 ms gaps while the recording was clean. `obs-audio.c` `audio_callback`
+records the gap since the previous tick's entry and its own duration; the 60 s `#800` dump logs
+`audio-stall #1367: tick_gap_max_ms= callback_max_ms= ticks= ticks_over= tick_ms=` (ticks_over = gaps
+over 1.5 ticks) and resets. Healthy: `tick_gap_max_ms` near `tick_ms` (21.3 at 48 kHz), `ticks_over=0`.
+The genlock audio path takes no lock beyond the pre-existing `audio_buf_mutex`, calls no blocking API
+(two clock reads) and has no loop, so it is not a stall candidate; the probe proves the mixer side
+either way on the next deploy (a clean probe with VBAN gaps puts them in the obs-vban output itself).
+Anchored by `tests/audio_telemetry_800.rs` (both `audio_callback` returns close the probe's tick).
 
 **Lock-step anchors of THIS change** (all must move together): the std-only
 `tests/genlock_audio_timecode_placement_1367.rs` (tracker at the present tail after the presented
