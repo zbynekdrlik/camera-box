@@ -1144,9 +1144,10 @@ its own CLAUDE.md, its own `.claude/skills/install` playbook, and its own versio
 (`0.7.0.devN`). camera-box does NOT re-implement, re-pin, or UPGRADE this agent — upgrades always
 use the agent's own installer (below). The ONE exception is PROVISIONING a Linux box: since issue
 1361 `setup-strih.sh` step 10, `setup-imag.sh` step 23 and `setup-device.sh` STEP 17b all call the
-shared `scripts/lib/remoteos-mcp.sh`, which pip-installs the project's own source (GitHub API tarball,
-`main`) with the project's own `constraints.txt` into a venv at `/opt/remoteos-mcp-venv` -- nothing is
-re-pinned in camera-box -- so a freshly hardware'd box comes up with a working MCP surface.
+shared `scripts/lib/remoteos-mcp.sh`, which pip-installs the project's own source (GitHub API tarball
+of ONE pinned commit, `remoteos_mcp_pinned_ref` = what strih-lx runs; bump it deliberately) with the
+project's own `constraints.txt` into a venv at `/opt/remoteos-mcp-venv`, so a freshly hardware'd box
+comes up with a working MCP surface. The dependency pins stay the project's own.
 
 **How it runs on each box type** (all four rig Windows/Linux boxes, `--enable-all --port 8092`):
 - **Windows (strih/stream):** scheduled task `RemoteOSMCP` (`wscript.exe .remoteos-mcp\
@@ -1164,9 +1165,9 @@ re-pinned in camera-box -- so a freshly hardware'd box comes up with a working M
   `/opt/remoteos-mcp-venv/bin/python -m remoteos` with the key in the 0600
   `/etc/remoteos-mcp/remoteos-mcp.env` (issue 1361; strih-lx ran this venv by hand first). Boxes
   provisioned earlier still carry the upstream installer's system-pip install + a key in ExecStart
-  until their provisioner re-runs (it keeps the key). Upgrade = re-run the box's provisioner step (or
-  `remoteos_mcp_install` from the lib): a new `main` commit changes the source id and triggers the
-  pip; never a bare pip command. `REMOTEOS_MCP_AUTH_KEY` pins the key so dev1's `.mcp.json` keeps
+  until their provisioner re-runs (it keeps the key). Upgrade = bump `remoteos_mcp_pinned_ref` (or
+  `REMOTEOS_MCP_REF=<sha>` for one run) and re-run the box's provisioner step: the new commit changes
+  the source id and triggers the pip; never a bare pip command. `REMOTEOS_MCP_AUTH_KEY` pins the key so dev1's `.mcp.json` keeps
   matching a fresh box.
 
 **Rollback point for a specific old version:** find the exact commit via

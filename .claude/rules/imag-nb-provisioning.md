@@ -668,8 +668,9 @@ provisions it. **Since issue 1361 the step is one call into the shared lib `scri
 (`remoteos_mcp_install "$DESKTOP_USER" desktop restart`), the SAME install setup-strih step 10 and
 setup-device STEP 17b run, so every box gets the shape strih-lx runs:
 
-- the SEPARATE `zbynekdrlik/remoteos-mcp` project's own source (its GitHub API tarball, ref
-  `REMOTEOS_MCP_REF`, default `main`) pip-installed with the project's own `constraints.txt` into a
+- the SEPARATE `zbynekdrlik/remoteos-mcp` project's own source (its GitHub API tarball of the
+  pinned commit strih-lx runs, `remoteos_mcp_pinned_ref`; `REMOTEOS_MCP_REF` bumps it) pip-installed
+  (pip's env stripped of `GH_TOKEN` / the key) with the project's own `constraints.txt` into a
   venv at `/opt/remoteos-mcp-venv`. The upstream `install-linux.sh` pip-installed into the SYSTEM
   python with `--break-system-packages` and is no longer run anywhere. Nothing is re-pinned in
   camera-box (the #555 discipline), and `tests/setup_imag_remoteos_mcp_858.rs` still forbids an inline
@@ -678,12 +679,14 @@ setup-device STEP 17b run, so every box gets the shape strih-lx runs:
   is public, so a run without it fetches anonymously;
 - the unit runs as the desktop user on `DISPLAY=:0`, and the key is in a 0600 `EnvironmentFile`
   (remoteos reads `REMOTEOS_AUTH_KEY`), never in the unit text;
-- the restart policy requires the service active + `/health` answering on :8092, or step 23 fails.
+- the restart policy requires the service active + `/health` answering on :8092 AND an
+  unauthenticated `/mcp` request refused with 401, or step 23 fails.
 
 Auth-key (a full-shell-RCE bearer token on `0.0.0.0:8092`) is NEVER committed. `REMOTEOS_MCP_AUTH_KEY`
 (env-secret convention, like `CAM_PW`/`GH_TOKEN`) pins it so dev1's gitignored `.mcp.json` keeps
-matching a freshly-hardware'd box; unset, the box's existing `/etc/remoteos-mcp/config.json` key (or a
-legacy unit's `--auth-key`) is KEPT, and only a bare box gets a fresh key (then update dev1's
+matching a freshly-hardware'd box; unset, the box's existing key is KEPT (a legacy unit's
+`--auth-key` first, then the EnvironmentFile, then `/etc/remoteos-mcp/config.json`), and only a bare
+box gets a fresh key (then update dev1's
 `.mcp.json` `linux-imag-nb` entry). A key outside `[A-Za-z0-9]` is refused before anything is written.
 The lib's contract + behaviour tests: `tests/remoteos_mcp_1361.rs`;
 `.claude/rules/strih-linux-provisioning.md` ("Fresh-install gaps").
