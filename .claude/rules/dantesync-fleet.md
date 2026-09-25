@@ -50,7 +50,7 @@ hand (25.9.2026). Adding a node is now ONE row; every consumer picks it up.
 | consumer | how it derives |
 |---|---|
 | `dantesync-version-gate.sh --fleet` | adds every node not named explicitly; `--present` skips an away traveling box (named `SKIPPED`); per-node credential by name (`_dv_ssh_pass` / `_dv_cred_missing`) |
-| `dantesync-fleet-upgrade.sh --fleet` | same set + credential; the fleet `ntp-master` node is the master-aware verify unless `NTP_MASTER` is given; a node missing its credential is SKIPPED |
+| `dantesync-fleet-upgrade.sh --fleet` | same set + credential; the fleet `ntp-master` node is the master-aware verify unless `NTP_MASTER` is given; an audio node is verified against the audio grandmaster (`dantesync_gate_env_for`); a node missing its credential is SKIPPED |
 | `dantesync-clock-alert-watchdog.sh` | `DANTE_CLOCK_{CAM,OBS,LOCAL}_NODES` defaults + the new `DANTE_CLOCK_FIXED_NODES` (mbc, fohabl; box-up = ssh :22, no mgmt axis); roster lines carry a 4th ROLE field, and an audio node is graded against the audio grandmaster |
 | `rig-dev-handover-check.sh` item 12 | `dantesync-version-gate.sh --fleet` |
 

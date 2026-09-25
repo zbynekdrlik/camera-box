@@ -102,7 +102,9 @@ sourcing), network/mutating flow below.
 a box (mbc sat one release behind on 25.9.2026). A node whose fleet row names its own credential
 (fohabl, user `master`, `DANTESYNC_FOHABL_SSH_PASS`) is dialled with that value via `node_pass`
 (ssh AND scp); a missing value SKIPS the node, never dials it with `SSH_PASS`. Without an explicit
-`NTP_MASTER`, the fleet's `ntp-master` row (strih-lx) gets the master-aware verify. Always
+`NTP_MASTER`, the fleet's `ntp-master` row (strih-lx) gets the master-aware verify. An
+audio-role node (mbc, fohabl) is verified with `RIG_GRANDMASTER_IP` = the audio grandmaster
+(`dantesync_gate_env_for`), never the video one, so GM enforcement cannot fail its verify. Always
 `--fleet --dry-run` first. A daemon roll does NOT refresh `dantesync-tray.exe`; the version gate's
 report-only tray check names a lagging tray (mbc, 25.9.2026).
 
