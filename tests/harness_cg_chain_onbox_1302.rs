@@ -352,6 +352,11 @@ fn an_extract_past_its_grace_is_stopped_and_never_holds_the_job() {
     // The decode it started ON the box is asked to stop too (never left next to Arena / cg OBS).
     let calls = fs::read_to_string(scripts.path().join("calls.log")).expect("calls");
     assert!(calls.contains("STOP-DECODE BOX=1.2.3.4"), "{calls}");
+    assert_eq!(
+        calls.matches("STOP-DECODE").count(),
+        1,
+        "stopped once: {calls}"
+    );
 }
 
 #[test]
@@ -454,7 +459,7 @@ case "$last" in
     dec="$(printf '%s' "${last##* }" | base64 -d | iconv -f UTF-16LE -t UTF-8)"
     printf '%s\n' "$dec" >> "$FAKE_LOG_DIR/ssh.log"
     case "$dec" in *Get-FileHash*) printf '%s\r\n' "${FAKE_REMOTE_SHA:-}" ;; esac
-    case "$dec" in *"-pixels') { exit 0 } else { exit 1 }") exit 1 ;; esac
+    case "$dec" in *"-pixels') { exit 0 } else { exit 1 }") exit "${FAKE_PIXEL_RC:-1}" ;; esac
     case "$dec" in *SilentlyContinue) exit 1 ;; esac ;;
 esac
 exit 0
@@ -478,7 +483,7 @@ struct ResolumeRun {
     partial_pulled: bool,
 }
 
-fn run_resolume_main(remote_sha_same: bool) -> ResolumeRun {
+fn run_resolume_main(remote_sha_same: bool, pixel_probe_rc: u8) -> ResolumeRun {
     let logs = tempfile::tempdir().expect("tempdir");
     let exe = logs.path().join("recording-verdict.exe");
     fs::write(&exe, "the-exe-bytes").expect("exe");
@@ -490,7 +495,7 @@ fn run_resolume_main(remote_sha_same: bool) -> ResolumeRun {
     };
     let script = format!(
         "set -euo pipefail\n{FAKE_WIN_SSH}\nexport FAKE_LOG_DIR='{l}' EXE='{e}'\n\
-         export FAKE_REMOTE_SHA={sha}\n\
+         export FAKE_REMOTE_SHA={sha} FAKE_PIXEL_RC={pixel_probe_rc}\n\
          RESOLUME_BOX=10.77.9.201 RESOLUME_USER=u RESOLUME_PW=p '{r}' \
          --verdict-exe-local '{e}' --local-out-dir '{o}' \
          -- --extract-partial cg --cg 'C:/Users/Resolume/Videos/a b.mkv' \
@@ -518,7 +523,7 @@ fn run_resolume_main(remote_sha_same: bool) -> ResolumeRun {
 
 #[test]
 fn resolume_main_decodes_on_the_box_and_pulls_back_only_the_partial() {
-    let r = run_resolume_main(false);
+    let r = run_resolume_main(false, 1);
     let (ssh_log, scp_log) = (&r.ssh_log, &r.scp_log);
     assert!(r.ok, "{}\n{}", r.stdout, r.stderr);
     // STEP 0 preflight, the stale-output prep, the sha probe, then the decode itself.
@@ -567,7 +572,7 @@ fn resolume_main_decodes_on_the_box_and_pulls_back_only_the_partial() {
 
 #[test]
 fn resolume_main_skips_the_upload_for_an_identical_binary() {
-    let r = run_resolume_main(true);
+    let r = run_resolume_main(true, 1);
     assert!(r.ok, "{}\n{}", r.stdout, r.stderr);
     assert!(r.stdout.contains("upload skipped"), "{}", r.stdout);
     assert!(
@@ -575,6 +580,18 @@ fn resolume_main_skips_the_upload_for_an_identical_binary() {
         "{}",
         r.scp_log
     );
+    assert!(r.partial_pulled);
+}
+
+#[test]
+fn resolume_main_names_a_failed_pixel_probe_instead_of_nothing_flagged() {
+    // A transport failure on the pixel-dir probe (ssh 255) is not "absent": say so, never claim
+    // that nothing was flagged. The partial itself still comes back.
+    let r = run_resolume_main(false, 255);
+    assert!(r.ok, "{}\n{}", r.stdout, r.stderr);
+    assert!(r.stderr.contains("could not probe"), "{}", r.stderr);
+    assert!(r.stderr.contains("rc=255"), "{}", r.stderr);
+    assert!(!r.stdout.contains("nothing was flagged"), "{}", r.stdout);
     assert!(r.partial_pulled);
 }
 

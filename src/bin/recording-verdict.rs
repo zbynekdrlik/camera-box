@@ -9487,6 +9487,8 @@ mod tests {
         let mislabelled = dir.path().join("mislabelled-cg.json");
         strih_p.save(&mislabelled).unwrap();
         let cg_spec2 = format!("cg={}", mislabelled.display());
+        // Its own verdict path, so a stale verdict of the first case can never satisfy it.
+        let json2 = dir.path().join("verdict-mislabelled.json");
         let args2 = super::Args::parse_from([
             "recording-verdict",
             "--min-secs",
@@ -9496,13 +9498,14 @@ mod tests {
             "--merge-partials",
             cg_spec2.as_str(),
             "--json",
-            json.to_str().expect("utf8 path"),
+            json2.to_str().expect("utf8 path"),
         ]);
         run_merge(&args2).expect("a mislabelled cg partial must not abort the merge");
         let v2: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(&json).unwrap()).unwrap();
+            serde_json::from_str(&std::fs::read_to_string(&json2).unwrap()).unwrap();
         assert_eq!(v2["cg_chain"], serde_json::Value::Null);
         for (case, verdict) in [("corrupt", &v), ("mislabelled", &v2)] {
+            assert!(verdict["full_chain"].is_object(), "{case}: {verdict}");
             assert_eq!(
                 verdict["full_chain"]["imag_leg_skip_reason"],
                 serde_json::Value::Null,
