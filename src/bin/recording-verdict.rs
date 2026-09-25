@@ -8987,18 +8987,32 @@ mod tests {
     const CG_WIN_START_NS: i64 = 1_000_000_000_000;
     const CG_WIN_END_NS: i64 = 1_000_000_000_000 + 30 * 33_333_333;
 
-    /// Issue 1302 slice 2 — a strih/stream recording tail: one STRAY SongPlayer frame long before
-    /// the CG window (a transient read outside the window, frame 0), then 30 frames of the CG
-    /// window where the 60 fps SongPlayer + cg ids arrive DECIMATED to 30 fps (step 2), each
-    /// stamped inside `[CG_WIN_START_NS, CG_WIN_END_NS]`.
+    /// Issue 1302 slice 2 — a strih/stream recording: 10 camera frames (strih burn only), one of
+    /// them (frame 5, past the #575 lead trim) also carrying a STRAY SongPlayer read long before
+    /// the CG window; then 30 frames of the CG window where the 60 fps SongPlayer + cg ids arrive
+    /// DECIMATED to 30 fps (step 2), each stamped inside `[CG_WIN_START_NS, CG_WIN_END_NS]`; then 5
+    /// strih-only frames up to StopRecord, so the #575 tail trim never touches a CG frame.
     fn decimated_cg_tail() -> Vec<RecordingFrame> {
-        let mut v = vec![frame_ts(0, &[(SP, 4000, CG_WIN_START_NS - 60_000_000_000)])];
+        let mut v: Vec<RecordingFrame> = (0..10u32)
+            .map(|i| {
+                let ts = CG_WIN_START_NS - 60_000_000_000 + i64::from(i) * 33_333_333;
+                if i == 5 {
+                    frame_ts(u64::from(i), &[(STRIH, 1000 + i, ts), (SP, 4000, ts)])
+                } else {
+                    frame_ts(u64::from(i), &[(STRIH, 1000 + i, ts)])
+                }
+            })
+            .collect();
         for k in 0..30u32 {
             let ts = CG_WIN_START_NS + i64::from(k) * 33_333_333;
             v.push(frame_ts(
                 10 + u64::from(k),
                 &[(SP, 5000 + 2 * k, ts), (CGB, 6000 + 2 * k, ts)],
             ));
+        }
+        for j in 0..5u32 {
+            let ts = CG_WIN_END_NS + 1_000_000_000 + i64::from(j) * 33_333_333;
+            v.push(frame_ts(40 + u64::from(j), &[(STRIH, 2000 + j, ts)]));
         }
         v
     }
