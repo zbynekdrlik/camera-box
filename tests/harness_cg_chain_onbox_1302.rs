@@ -270,8 +270,8 @@ fn a_launched_extract_is_collected_and_its_partial_is_merged() {
     );
     assert!(out.contains("CG-LEG-VERIFIED:"), "{out}");
     assert!(
-        out.contains("cg extract ran for "),
-        "the decode duration is logged, to calibrate the grace: {out}"
+        out.contains("cg extract collected "),
+        "when the extract was collected is logged (the on-box decode time is its STEP 2 line): {out}"
     );
     let partial = state.path().join("cg-partial-5.json");
     assert!(
