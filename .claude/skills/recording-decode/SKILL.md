@@ -21,6 +21,11 @@ The offline recording verdict decodes every recorded frame's QR(s): the big opti
 - `decode_qr_luma_all_fast_then_robust(img, expected_burn_run_ids)` (#207) = plain FIRST; run
   the tiles ONLY when an `expected_burn_run_ids` id is missing from the plain pass. This is the
   per-frame recording decode — ~10× faster on a clean recording, identical reads.
+- issue 1370 — on that ROBUST branch, an expected burn the tiles STILL miss is decoded from
+  its own known slot crop (`probe::burn_region_decode`, table `crate::burn_regions`): a tile
+  that also holds optical finder patterns can come back empty from rqrr's single grid pass.
+  Only missing expected ids are merged (superset, never optical/aux). Rule:
+  `.claude/rules/burn-region-recovery.md`.
 
 ## THE GOTCHA — pass the burns THIS recording actually carries (cost me real time)
 
@@ -717,6 +722,10 @@ DIFFERENT from every other node's (burn id vs optical tick):
 
 ## #463 — adding a Nth burn corner: FOUR independent places have to agree
 
+**issue 1370 adds a FIFTH:** `src/burn_regions.rs` (the burn-isolated recovery slot table,
+`BurnSlot` + `slot_rect` + `slot_for_run_id`), pinned by probe-gated parity tests in
+`src/probe/burn_region_decode.rs`. See `.claude/rules/burn-region-recovery.md`.
+
 Adding imag's `Corner::BottomCenterLeft` (a 4th burn corner, after cam1-center + strih-BL +
 stream-BR) touches FOUR separate implementations of "where does this burn sit" — miss one and
 you get a silent geometry mismatch that only a real recording (or the C++ parity test) would
@@ -936,7 +945,9 @@ widening `NODE_BURN_RUN_IDS` from 4 to 9 entries (all six camera-under-test ids 
 strih/stream/imag) and locking it with `node_burn_run_ids_includes_every_camera_under_test_312`
 (mirrors the existing `node_burn_run_ids_includes_imag_463`).
 
-**Checklist for the next new node burn:** reserving a fresh `BURN_RUN_ID_*` constant in
+**Checklist for the next new node burn** (issue 1370: ALSO map the id in
+`src/burn_regions.rs::slot_for_run_id` if it is a fixed-position overlay burn, or the
+burn-isolated recovery never looks for it): reserving a fresh `BURN_RUN_ID_*` constant in
 `recording_latency.rs` is NOT enough by itself — also (1) add it to `NODE_BURN_RUN_IDS` in
 `src/probe/recording.rs` (this file, the tick-exclusion list), (2) add it to `CAMERA_UNDER_TEST_NODES`
 in THREE separate places if it's a camera-under-test node (`recording-verdict.rs`,
