@@ -10,6 +10,9 @@ paths:
   - "scripts/strih-obs-start.sh"
   - "tests/obs_box_baseline_1357.rs"
   - "tests/obs_box_brightness_1357.rs"
+  - "tests/obs_box_cpu_latency_1357.rs"
+  - "scripts/obs-box-cpu-latency-hold.sh"
+  - "systemd/obs-box-cpu-latency.service"
 ---
 
 # The shared OBS-box appliance baseline (issue 1357 scope A)
@@ -134,6 +137,52 @@ Rules for the facet:
   deploy re-runs setup-strih every time.
 - **`obs_box_write_if_changed` details:** an exclusive `mktemp` sibling (never a predictable root
   temp inside a user-writable config dir); content, mode AND owner are all part of the unchanged check.
+
+## The CPU idle wake-up latency bound (item `obs_box_cpu_latency`, grader row `cstate`)
+
+strih-lx runs the ACPI idle driver: POLL / C1_ACPI 1 us / C2_ACPI 127 us / C3_ACPI 1048 us, and C3
+was entered ~106 M times on cpu0 (finding 5839598285). A ~1 ms wake-up can land on the genlock
+render tick, the audio thread and the NDI receive threads. The governor/EPP pins do not touch this.
+
+- **Mechanism = a PM QoS request, never a C-state index.** `systemd/obs-box-cpu-latency.service`
+  (a SYSTEM unit) runs `/usr/local/sbin/obs-box-cpu-latency-hold.sh ${OBS_BOX_CPU_LATENCY_US}`.
+  - The holder opens `/dev/cpu_dma_latency`, writes the bound, then `exec sleep infinity`. The
+    sleep inherits fd 3, and the kernel honours the request while that fd stays open.
+  - Every cpuidle governor then skips the states whose exit latency is longer. Stopping the unit
+    drops the request: reversible, no reboot.
+  - Rejected: a kernel cmdline max_cstate (reboot, GRUB edit, and the ACPI driver ignores
+    `intel_idle.*`), and `/sys/.../stateN/disable` (a state INDEX that differs per box and can be
+    renumbered by a new kernel).
+- **The bound is ONE baseline value**, `obs_box_cpu_latency_bound_us` = 150 us (C1/C2 stay, C3 is
+  out). The unit's `Environment=OBS_BOX_CPU_LATENCY_US=150` is test-pinned to it; never per box.
+- **Write format trap.** The kernel reads a write of EXACTLY 4 bytes as a raw binary s32, and any
+  other length as a hex number. The holder writes `printf '0x%08x'` (10 bytes).
+  - A short hex string like `0x96` is 4 bytes, so it would become a huge garbage bound.
+  - The holder also strips leading zeros with `10#`, so `0150` never reads as octal.
+- **Install:** `obs_box_cpu_latency FETCH`, after `obs_box_maxperf_persistence` in BOTH setup
+  scripts (imag step 26 with `imag_fetch_repo_file`, strih step 11 with `strih_fetch_repo_file`).
+  - It fetches the holder and the unit from the repo, then runs daemon-reload and enable.
+  - It restarts when the installed text changed, else starts, then fails loud unless the unit is
+    active. The apply is the baseline's `enable --now` pattern.
+  - It fails before touching anything when `/dev/cpu_dma_latency` is missing.
+  - imag fetches `?ref=dev`, so the files must be on dev before an imag re-provision.
+- **Unit hardening:** `DevicePolicy=closed` + `DeviceAllow=/dev/cpu_dma_latency w`. Never
+  `PrivateDevices=`, which would hide the device.
+- **Grader row `cstate` (after `perf`).** It runs unprivileged, and the device is root-only 0600,
+  so it grades the unit AND the kernel effect.
+  - The unit must be `enabled` + `active`, and its `Environment=` bound (read via
+    `systemctl show -p Environment`) must equal the baseline constant.
+  - At least one cpuidle state must be readable.
+  - The summed `usage` of every state whose `latency` exceeds the bound must not advance over a
+    1 s sample (`cstate_deep_delta=0`).
+  - `/sys/.../cpu0/power/pm_qos_resume_latency_us` is NOT this aggregate; it is the per-device
+    resume latency, so never grade it.
+  - The deepest state stays LISTED and enabled while the bound is held (the governor just skips it),
+    so "deepest enabled state <= bound" would FAIL a healthy box.
+  - dev1 (no holder) reads ~1400 deep entries per second, so the signal discriminates.
+  - The gather's `_cs_root` path and its single `sleep 1` line are the test seams:
+    `tests/obs_box_cpu_latency_1357.rs` rewrites the path to a fixture tree and swaps the sleep
+    for a counter write, so it never races the gather's timing.
 
 ## Tests + the Tier-0 equivalence net
 
