@@ -69,6 +69,15 @@ pub fn converge_defines() -> String {
         "GENLOCK_N1_ON_GRID_NS",
         "GENLOCK_N1_SHALLOW_SETTLE_TICKS",
         "GENLOCK_N1_SHALLOW_RELOCK_GAP_NS",
+        // design 5830750134: the latch that never latches an outlier.
+        "GENLOCK_N1_SHALLOW_MAX_EXTRA_FRAMES",
+        "GENLOCK_N1_SHALLOW_HIST_BINS",
+        "GENLOCK_N1_SHALLOW_LATCH_PERCENTILE",
+        "GENLOCK_N1_SHALLOW_MAX_SPREAD_FRAMES",
+        "GENLOCK_N1_SHALLOW_MAX_REJECTS",
+        "GENLOCK_N1_SHALLOW_UNDER_TICKS",
+        "GENLOCK_N1_SHALLOW_CHURN_RELOCKS",
+        "GENLOCK_N1_SHALLOW_CHURN_QUIET_TICKS",
     ]
     .iter()
     .map(|name| lift_define(name))

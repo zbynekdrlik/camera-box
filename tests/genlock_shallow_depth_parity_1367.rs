@@ -259,24 +259,20 @@ fn c_n1_shallow_depth_matches_the_rust_authority_1367() {
             "    printf(\"%d\\n\", genlock_n1_shallow_hold_due({tw}ULL, {h}ULL, {f}ULL, {l}u, {iv}ULL, {tg}ULL, {k}ULL) ? 1 : 0);\n"
         ));
     }
-    body.push_str(
-        "    { uint64_t tf = 0, fm = 0; uint32_t wt = 0, ov = 0, dt = 0, un = 0, ch = 0, qu = 0, rj = 0; uint32_t hi[4] = {0u, 0u, 0u, 0u}; bool me = false, ca = false;\n",
-    );
-    for x in &seq {
-        body.push_str(&format!(
-            "      {{ bool l = genlock_n1_shallow_track(&tf, &fm, &wt, &ov, &dt, &me, &ca, {}, {}, {}, {}ULL, {}ULL, {}, {}, {}ULL, {}, hi, &un, &ch, &qu, &rj); printf(\"%d %llu %llu %u %u %u %d %d %u %u %u %u %u %u %u %u\\n\", l ? 1 : 0, (unsigned long long)tf, (unsigned long long)fm, (unsigned)wt, (unsigned)ov, (unsigned)dt, me ? 1 : 0, ca ? 1 : 0, (unsigned)un, (unsigned)ch, (unsigned)qu, (unsigned)rj, (unsigned)hi[0], (unsigned)hi[1], (unsigned)hi[2], (unsigned)hi[3]); }}\n",
-            b(x.n1),
-            b(x.relock),
-            b(x.on_grid),
-            x.floor_frames,
-            x.base_frames,
-            b(x.deep),
-            b(x.min_latency_box),
-            x.realized_frames,
-            b(x.backlog_relock)
-        ));
-    }
-    body.push_str("    }\n");
+    // The tick sequence goes in as C arrays driven by one loop (a statement per tick made the
+    // harness take minutes to compile at -O1 once the sequence passed 3000 ticks).
+    let col = |f: &dyn Fn(&ShallowTick) -> String| seq.iter().map(f).collect::<Vec<_>>().join(",");
+    body.push_str(&format!(
+        "    {{ static const unsigned char F[] = {{{}}};\n      static const unsigned long long FL[] = {{{}}};\n      static const unsigned long long BA[] = {{{}}};\n      static const unsigned long long RE[] = {{{}}};\n",
+        col(&|x| (b(x.n1) | (b(x.relock) << 1) | (b(x.on_grid) << 2) | (b(x.deep) << 3) | (b(x.min_latency_box) << 4) | (b(x.backlog_relock) << 5)).to_string()),
+        col(&|x| format!("{}ULL", x.floor_frames)),
+        col(&|x| format!("{}ULL", x.base_frames)),
+        col(&|x| format!("{}ULL", x.realized_frames)),
+    ));
+    body.push_str(&format!(
+        "      uint64_t tf = 0, fm = 0; uint32_t wt = 0, ov = 0, dt = 0, un = 0, ch = 0, qu = 0, rj = 0; uint32_t hi[4] = {{0u, 0u, 0u, 0u}}; bool me = false, ca = false;\n      for (int k = 0; k < {}; k++) {{\n        const unsigned f = F[k];\n        bool l = genlock_n1_shallow_track(&tf, &fm, &wt, &ov, &dt, &me, &ca, (f & 1u) != 0, (f & 2u) != 0, (f & 4u) != 0, FL[k], BA[k], (f & 8u) != 0, (f & 16u) != 0, RE[k], (f & 32u) != 0, hi, &un, &ch, &qu, &rj);\n        printf(\"%d %llu %llu %u %u %u %d %d %u %u %u %u %u %u %u %u\\n\", l ? 1 : 0, (unsigned long long)tf, (unsigned long long)fm, (unsigned)wt, (unsigned)ov, (unsigned)dt, me ? 1 : 0, ca ? 1 : 0, (unsigned)un, (unsigned)ch, (unsigned)qu, (unsigned)rj, (unsigned)hi[0], (unsigned)hi[1], (unsigned)hi[2], (unsigned)hi[3]);\n      }}\n    }}\n",
+        seq.len()
+    ));
     let c_out = compile_and_run_n1_block("genlock_n1_shallow_parity_1367", &body);
 
     let mut want: Vec<String> = Vec::new();
@@ -356,9 +352,12 @@ fn c_n1_shallow_depth_matches_the_rust_authority_1367() {
         diffs.join("\n")
     );
     // both outcomes of every decision, and every latch kind the sequence scripts: the first D, the
-    // relock's deeper D, the re-measure after the rise, the auto-window after N>=2, the deep base + 1
-    // (twice: the second with a not-deep latch tick), the mid-window relock's fresh D, the capped
-    // report (0) and the relatch after it.
+    // relock's deeper D, the re-measure after the rise (design 5830750134: its p90 floor asks for
+    // base + 4, clamped to 4), the auto-window after N>=2, the deep base + 1 (twice: the second with a
+    // not-deep latch tick), the mid-window relock's fresh D, the capped report (0) and the relatch
+    // after it; then the short burst the p90 ignores (2), the rejected transient's clean re-latch (2),
+    // the bounded rejects' clamp (4), the whole-window transient's clamp (4) and its re-measure once
+    // the floor fell (3), the unreachable D's re-measure (3) and the relock storm's (3).
     assert!(
         fired.0 > 0 && fired.0 < sheds.len(),
         "shed vectors one-sided: {fired:?}"
@@ -369,7 +368,7 @@ fn c_n1_shallow_depth_matches_the_rust_authority_1367() {
     );
     assert_eq!(
         latched,
-        vec![3, 3, 5, 2, 31, 31, 2, 0, 2],
+        vec![3, 3, 4, 2, 31, 31, 2, 0, 2, 2, 2, 4, 4, 3, 3, 3],
         "the track sequence latched {latched:?}"
     );
 }

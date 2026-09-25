@@ -630,7 +630,7 @@ fn a_short_late_burst_in_the_settle_window_cannot_set_d_1367() {
 
 #[test]
 fn a_window_with_a_transient_in_progress_re_measures_instead_of_latching_1367() {
-    // a third of the window at 11 frames: p90 = the over-cap bin, p10 = bin 0 -> spread 3 > 2.
+    // a third of the window at 11 frames: p90 = the over-cap bin, p10 = bin 0 -> spread 3 > 1.
     let mut s = ShallowDepth::default();
     assert_eq!(
         window(&mut s, burst_window(30, 11)),

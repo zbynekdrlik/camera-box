@@ -200,8 +200,15 @@ pub fn video_delay_lock_ms(target_frames: u64, measuring: bool, interval_ns: u64
 ///
 /// Issue 1367 (ROZHODNUTÉ 5827497952): `lock_ms` ([`video_delay_lock_ms`]) overrides the apply —
 /// `0` = the free tracker above; [`VIDEO_DELAY_LOCK_PENDING`] = smooth only, apply nothing; any other
-/// value = the LOCKED delay of a shallow source's latched depth, applied as-is (the EMA keeps
-/// running for the audit's `video_delay_ms=`).
+/// value = the LOCKED delay of a shallow source's latched depth.
+///
+/// Design 5830750134 (the audio never holds beyond the video actually on air): a NEW lock applies
+/// at once (a clean latch still places the audio once, straight onto D); under the SAME lock the
+/// hold follows the smoothed REALIZED delay once it has stayed half a frame or more off the applied
+/// hold for [`VIDEO_DELAY_FOLLOW_TICKS`] consecutive ticks — a latched D the video never reaches
+/// (the live 400 ms lock over a 233 ms video) or a clamped D under a slower arrival. A hold climb
+/// onto D, or a disturbance's one-frame excursion, is shorter and never moves the audio. Leaving a
+/// lock for the free tracker clears the follow count, so it cannot leak into the free countdown.
 ///
 /// Mirror of `genlock_video_delay_track`.
 pub fn video_delay_track(
@@ -211,12 +218,29 @@ pub fn video_delay_track(
     interval_ns: u64,
 ) {
     t.smoothed_ns = video_delay_smooth_ns(t.smoothed_ns, sample_ns);
-    if lock_ms != 0 {
+    if lock_ms == VIDEO_DELAY_LOCK_PENDING {
         t.settle_ticks = 0;
-        if lock_ms != VIDEO_DELAY_LOCK_PENDING {
+        return;
+    }
+    if lock_ms != 0 {
+        if lock_ms != t.locked_ms || t.applied_ms == 0 {
+            t.locked_ms = lock_ms;
             t.applied_ms = lock_ms;
+            t.settle_ticks = 0;
+        } else if video_delay_moved(t.applied_ms, t.smoothed_ns, interval_ns) {
+            t.settle_ticks = t.settle_ticks.saturating_add(1);
+            if t.settle_ticks >= VIDEO_DELAY_FOLLOW_TICKS {
+                t.applied_ms = video_delay_round_ms(t.smoothed_ns);
+                t.settle_ticks = 0;
+            }
+        } else {
+            t.settle_ticks = 0;
         }
         return;
+    }
+    if t.locked_ms != 0 {
+        t.locked_ms = 0;
+        t.settle_ticks = 0;
     }
     if t.settle_ticks > 0 {
         t.settle_ticks -= 1;

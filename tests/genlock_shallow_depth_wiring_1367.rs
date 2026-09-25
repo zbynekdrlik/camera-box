@@ -143,7 +143,7 @@ fn the_release_tick_locks_measures_and_keeps_the_drain_out_1367() {
     );
     assert_in(
         helper,
-        "source->genlock_shallow_hist, &source->genlock_shallow_under_ticks, &source->genlock_shallow_churn_relocks, &source->genlock_shallow_churn_quiet_ticks, &source->genlock_shallow_rejects))",
+        "source->genlock_shallow_hist, &source->genlock_shallow_under_ticks, &source->genlock_shallow_churn_relocks, &source->genlock_shallow_churn_quiet_ticks, &source->genlock_shallow_rejects);",
         "the latch keeps the window histogram (p90 + spread) and the downward re-measure state",
     );
     assert_in(

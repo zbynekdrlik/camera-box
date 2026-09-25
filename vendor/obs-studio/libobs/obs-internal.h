@@ -1144,6 +1144,7 @@ struct obs_source {
 	uint64_t genlock_video_delay_smoothed_ns;   /* camera-box issue 1367: EMA of the head's age at the render tick's SCHEDULED instant = this source's real stamp->present video delay (0 = not measured). Render thread (genlock_video_delay_track). */
 	uint32_t genlock_video_delay_applied_ms;    /* camera-box issue 1367: the quantized video delay the audio follows (0 = none yet -> the #1303 latency hold). Written on the render thread, read once per packet by the audio ingest -- a benign single-word cross-thread read like genlock_latency_ms. */
 	uint32_t genlock_video_delay_settle_ticks;  /* camera-box issue 1367: render ticks left before an armed re-application applies (0 = idle). Render thread. */
+	uint32_t genlock_video_delay_locked_ms;     /* camera-box issue 1367 (design 5830750134): the lock last applied (0 = the free tracker) -- a NEW lock applies at once, under the same one the realized delay bounds the hold. Render thread. */
 	/* camera-box issue 1367 (ROZHODNUTÉ 5827497952): the SHALLOW N==1 source's per-LOCK depth
 	 * (genlock_n1_shallow_track; decision authority src/genlock_n1_depth.rs ShallowDepth). Render
 	 * thread, under async_mutex (the latency setter re-arms it there). Zeroed at create (bzalloc). */
@@ -1153,7 +1154,16 @@ struct obs_source {
 	uint32_t genlock_shallow_over_ticks;        /* consecutive on-grid present ticks with the floor at/over D (a whole window re-measures) */
 	uint32_t genlock_shallow_deep_ticks;        /* window ticks that read deep (the latch takes the majority) */
 	bool genlock_shallow_measuring;             /* a measurement window is open (after a relock) */
-	bool genlock_shallow_capped;                /* the last latch was capped by the min-latency (imag) guard: reported, no depth applied */
+	bool genlock_shallow_capped;                /* the last latch was capped: the min-latency (imag) guard (reported, no depth applied) or the base + 3 clamp (reported, clamped D applied) */
+	/* design 5830750134: the latch never latches an outlier. GENLOCK_SHALLOW_HIST_FIELD_BINS must equal
+	 * GENLOCK_N1_SHALLOW_HIST_BINS in obs-source.c (a _Static_assert there holds them together). */
+#define GENLOCK_SHALLOW_HIST_FIELD_BINS 4
+	uint32_t genlock_shallow_hist[GENLOCK_SHALLOW_HIST_FIELD_BINS]; /* the open window's floor histogram, relative to base (p90 latch + spread reject) */
+	uint32_t genlock_shallow_under_ticks;       /* consecutive on-grid presents whose realized depth sat under D (an unreachable D re-measures) */
+	uint32_t genlock_shallow_churn_relocks;     /* backlog relocks while latched since the last quiet gap (a relock storm re-measures) */
+	uint32_t genlock_shallow_churn_quiet_ticks; /* on-grid presents since the last backlog relock */
+	uint32_t genlock_shallow_rejects;           /* consecutive spread-rejected windows (bounded) */
+	uint64_t genlock_shallow_relocks_seen;      /* genlock_relocks at the previous latch call (its delta = a backlog relock) */
 	uint32_t genlock_shallow_latches;           /* cumulative latches (audit shallow_latches=) */
 	/* camera-box issue 1367: the audio placement SLEW + withhold (audio thread; the audit reads them
 	 * as benign single-word cross-thread telemetry). Decisions: src/genlock_audio_pairing.rs. */
