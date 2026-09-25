@@ -274,7 +274,8 @@ fn win_full_manifest_fetch_is_dormant_on_failure_1346() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// A stand-in `gh` on PATH for the real (non-seam) fetch path: `run list` resolves run 4242,
+/// A stand-in `gh` on PATH for the real (non-seam) fetch path: `run list` resolves run 4242 with its
+/// updatedAt (the jq output `<id> <updatedAt>`; `$STUB_DIR/runlist` overrides it, e.g. a re-run),
 /// `run download` writes a BUNDLE_MANIFEST.json into its `--dir` and counts the download -- or fails
 /// once `$STUB_DIR/dl-fail` exists, or hangs (exec sleep) once `$STUB_DIR/dl-hang` exists.
 fn write_gh_stub(dir: &std::path::Path) -> PathBuf {
@@ -285,7 +286,7 @@ fn write_gh_stub(dir: &std::path::Path) -> PathBuf {
         "gh",
         "#!/usr/bin/env bash\n\
          case \"$1 $2\" in\n\
-         \"run list\") printf '4242' ;;\n\
+         \"run list\") cat \"$STUB_DIR/runlist\" 2>/dev/null || printf '4242 2026-09-25T04:48:30Z' ;;\n\
          \"run download\")\n\
            [ -f \"$STUB_DIR/dl-fail\" ] && exit 1\n\
            [ -f \"$STUB_DIR/dl-hang\" ] && exec sleep 30\n\
@@ -345,7 +346,7 @@ fn manifest_fetch_caches_by_run_id_and_skips_the_second_download_1346() {
     );
     assert!(
         cache
-            .join("windows-genlock.yml--obs-genlock-windows-x64--4242.json")
+            .join("windows-genlock.yml--obs-genlock-windows-x64--4242-20260925044830.json")
             .is_file(),
         "the manifest must be cached under workflow--artifact--run_id"
     );
@@ -384,10 +385,64 @@ fn manifest_fetch_stays_dormant_and_caches_nothing_when_the_download_fails_1346(
     assert!(!dest.exists(), "nothing written to DEST");
     assert!(
         !cache
-            .join("windows-genlock.yml--obs-genlock-windows-x64--4242.json")
+            .join("windows-genlock.yml--obs-genlock-windows-x64--4242-20260925044830.json")
             .exists(),
         "a failed download must never leave a cache entry"
     );
+    drop(td);
+}
+
+/// #1346 review round 2: a GitHub re-run KEEPS the run id (only the attempt and updatedAt change)
+/// and a full re-run republishes non-reproducible bytes, so the cache key carries updatedAt -- a
+/// re-run of an already-cached run is downloaded again, never served the old attempt's manifest.
+#[test]
+fn manifest_fetch_rerun_of_a_cached_run_is_downloaded_again_1346() {
+    let td = tempfile::tempdir().unwrap();
+    let dir = td.path().to_path_buf();
+    let bin = write_gh_stub(&dir);
+    let path = format!(
+        "{}:{}",
+        bin.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let cache = dir.join("cache");
+    let dest1 = dir.join("one/win-full-manifest.json");
+    let dest2 = dir.join("two/win-full-manifest.json");
+    let out = run_sourced(
+        "manifest_autosource_fetch_win_full o/r \"$SHA\" \"$DEST1\"; echo; \
+         printf '4242 2026-09-26T10:00:00Z' > \"$STUB_DIR/runlist\"; \
+         manifest_autosource_fetch_win_full o/r \"$SHA\" \"$DEST2\"",
+        &[
+            ("PATH", path.as_str()),
+            ("MANIFEST_AUTOSOURCE_CMD", ""),
+            ("MANIFEST_AUTOSOURCE_CACHE_DIR", cache.to_str().unwrap()),
+            ("STUB_DIR", dir.to_str().unwrap()),
+            ("SHA", "54995646abc"),
+            ("DEST1", dest1.to_str().unwrap()),
+            ("DEST2", dest2.to_str().unwrap()),
+        ],
+    );
+    assert_eq!(
+        out.lines().count(),
+        2,
+        "both fetches must deliver the manifest: {out:?}"
+    );
+    let downloads = std::fs::read_to_string(dir.join("downloads")).unwrap_or_default();
+    assert_eq!(
+        downloads.lines().count(),
+        2,
+        "a re-run (same run id, new updatedAt) must be downloaded again, not served from the cache"
+    );
+    for stamp in ["20260925044830", "20260926100000"] {
+        assert!(
+            cache
+                .join(format!(
+                    "windows-genlock.yml--obs-genlock-windows-x64--4242-{stamp}.json"
+                ))
+                .is_file(),
+            "each attempt is cached under its own updatedAt ({stamp})"
+        );
+    }
     drop(td);
 }
 
