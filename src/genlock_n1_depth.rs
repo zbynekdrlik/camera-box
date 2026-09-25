@@ -1,5 +1,6 @@
 //! issue 1367 — the N==1 PIN-DERIVED DEPTH. The Tier-0 authority; the C `genlock_n1_*` helpers
-//! (obs-source.c) mirror this in lock-step (tests/genlock_relock_selection_parity.rs).
+//! (obs-source.c) mirror this in lock-step (tests/genlock_relock_selection_parity.rs +
+//! tests/genlock_shallow_depth_parity_1367.rs; the unit tests live in genlock_n1_depth_tests.rs).
 //!
 //! WHY. A deep N==1 input (the stream `NDI 2ME PGM`, pin 987) has TWO absorbing depths. A strih OBS
 //! restart empties the FIFO, the release keeps its locked boundary, GAP-RESYNCs onto the first
@@ -58,8 +59,10 @@
 //!   where the ARRIVAL FLOOR is `wall − newest queued stamp` at the processing wall (the
 //!   achievable-floor reference of #1049). A shallow source (the `cg` feeds, the imag cameras at
 //!   3 ms) has a depth decided by its ARRIVAL, not its pin, so a pin-derived target would fight the
-//!   floor; it stays byte-identical to before. The two-frame margin keeps a late tick's larger
-//!   floor (one frame at most) from ever admitting a floor-dominated source.
+//!   floor. The two-frame margin keeps a late tick's larger floor (one frame at most) from ever
+//!   admitting a floor-dominated source. Since ROZHODNUTÉ 5827497952 a shallow source is held on
+//!   its own PER-LOCK depth instead: `max(base, measured arrival floor) + 1`, latched after each lock
+//!   ([`n1_shallow_track`], the section before the tests).
 //!
 //! N>=2 is untouched: `genlock_backlog::should_converge_phase` keeps its `source_multiple < 2`
 //! early return byte for byte; the SOURCE wrapper routes an N==1 tick here instead (the C
@@ -203,292 +206,233 @@ pub fn should_hold_n1_phase(
         && ticks_since_last_drain >= DRAIN_MIN_TICK_INTERVAL
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::genlock_backlog::{
-        should_converge_phase, GENLOCK_N2_JITTER_BUDGET_NS, PHASE_PIN_HYSTERESIS_NS,
+// ---- issue 1367 (ROZHODNUTÉ 5827497952): the SHALLOW N==1 source's per-LOCK depth ----------------
+//
+// WHY. A SHALLOW N==1 source (a cg feed at a 3 ms pin: resolume `sp-*_video`, strih-lx `CG-obs`) has a
+// depth set by its ARRIVAL, not its pin, so the deep rule above never acts on it and its depth
+// FLOATED: live `sp-slow_video` stepped 66 / 100 / 133 ms between 5 s audits, and the Option-3 audio
+// hold followed every step (72 audio re-placements in 42 min = the songplayer gate's 33 ms dropout).
+//
+// THE RULE. After each LOCK, measure the ARRIVAL FLOOR — the rounded age of the newest queued frame
+// at the tick's scheduled instant — over [`N1_SHALLOW_SETTLE_TICKS`] on-grid present ticks and LATCH
+// `D = max(base, floor_max) + 1` ([`n1_shallow_target_frames`]): one frame of jitter headroom above
+// the worst arrival seen. D then stays constant until the next relock (an ACQUIRE, a GAP RESYNC over
+// a gap of at least [`N1_SHALLOW_RELOCK_GAP_NS`] = a sender restart, or a pin change), and the same
+// one-frame hold / shed as the deep rule keeps the presented depth ON D
+// ([`n1_shallow_hold_due`] / [`n1_shallow_shed_due`]). Stamps and scheduled ticks share the
+// per-second grid, so the rounded floor already IS `ceil(arrival lag / interval)`; a raw `ceil` of
+// the ns value would jump a frame on a 1 ns phase. A relock keeps the OLD D maintained while the new
+// floor is measured, so a relock that finds the same floor changes nothing.
+//
+// The rule acts only while the source is NOT deep ([`n1_shallow_governs`]): a deep source keeps the
+// pin rule above, whose target `base + 1` equals `max(base, floor_max) + 1` for any floor below the
+// pin. While it governs, the caller suppresses the #859 queue-length drain (the shed covers
+// depth > D, and a queue-length drain would fight it on a wide arrival spread).
+//
+// The imag guard: on a MIN-LATENCY box (the imag projection, "najmenšia možná latencia") a D above
+// the pin-derived `base + 1` is REPORTED (`capped`) and NOT applied: the latch stores no depth, so
+// the rule never governs that input and its conveyor keeps the pre-rule behaviour (the #859 drain
+// included) — report instead of deepening, never a forced shallower depth that sheds/holds against
+// the input's own arrival (review round 1).
+//
+// A DEEP source (the pin, not the arrival, decides its depth) latches the pin rule's own
+// `base + 1`, whatever its floor did during the window, so the two rules can never disagree.
+//
+// Re-measure without a relock (review round 1): a latched source whose rounded floor sits AT or
+// OVER D for a whole settle window (its arrival rose — the frame at D is the newest or not there
+// yet) re-arms; and an N==1 source with no depth, no window and no cap (it became N==1 without an
+// ACQUIRE, e.g. a 60p sender switched to 30p) opens a window.
+
+/// issue 1367 — the on-grid PRESENT ticks the arrival floor is measured over after a lock
+/// (3 s at 30 fps, 1.5 s at 60 fps). Mirror of the C `GENLOCK_N1_SHALLOW_SETTLE_TICKS`.
+pub const N1_SHALLOW_SETTLE_TICKS: u32 = 90;
+
+/// issue 1367 — a GAP RESYNC whose missing-stamp gap (head stamp − locked boundary) reaches this is
+/// a sender RESTART, i.e. a relock that re-measures the floor. A single lost frame is not. Mirror of
+/// the C `GENLOCK_N1_SHALLOW_RELOCK_GAP_NS`.
+pub const N1_SHALLOW_RELOCK_GAP_NS: u64 = 1_000_000_000;
+
+/// issue 1367 — the per-source shallow-depth state (the C `genlock_shallow_*` fields).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ShallowDepth {
+    /// The latched depth D, frames (0 = none latched yet).
+    pub target_frames: u64,
+    /// The largest rounded arrival floor of the current measurement window, frames.
+    pub floor_max_frames: u64,
+    /// On-grid present ticks sampled in the current window.
+    pub window_ticks: u32,
+    /// A measurement window is open (after a relock, until the latch).
+    pub measuring: bool,
+    /// The last latch was capped by the min-latency guard (it stores no depth: report only).
+    pub capped: bool,
+    /// Consecutive on-grid present ticks whose rounded floor sat at or over the latched D.
+    pub over_ticks: u32,
+    /// On-grid ticks of the current window on which the source read DEEP (the latch takes the
+    /// MAJORITY, so a stall on the one latch tick cannot decide it).
+    pub deep_ticks: u32,
+}
+
+/// issue 1367 — one PRESENT tick's inputs to [`n1_shallow_track`] (the C passes them as scalars).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ShallowTick {
+    /// This tick presented on the N==1 path (an N>=2 source clears the whole state).
+    pub n1: bool,
+    /// This present was an ACQUIRE or a sender-restart GAP RESYNC (or a pin change re-armed it).
+    pub relock: bool,
+    /// The scheduled tick is on the per-second grid (only those are sampled).
+    pub on_grid: bool,
+    /// The rounded arrival floor at the scheduled instant, frames.
+    pub floor_frames: u64,
+    /// The pin-derived base, frames ([`n1_base_frames`]).
+    pub base_frames: u64,
+    /// The source is DEEP now ([`n1_is_deep_source`] at the processing wall); the latch uses the
+    /// window's majority of these.
+    pub deep: bool,
+    /// This OBS box is a min-latency (imag) box.
+    pub min_latency_box: bool,
+}
+
+/// issue 1367 — the latched depth: `max(base, floor_max) + 1` (a DEEP source: the pin rule's own
+/// `base + 1`). On a min-latency box a depth above `base + 1` is not applied: `(0, true)` (report
+/// only). Returns `(depth, capped)`. Mirror of the C `genlock_n1_shallow_target_frames`.
+pub fn n1_shallow_target_frames(
+    base_frames: u64,
+    floor_max_frames: u64,
+    deep: bool,
+    min_latency_box: bool,
+) -> (u64, bool) {
+    let cap = base_frames.saturating_add(1);
+    let d = if deep {
+        cap
+    } else {
+        base_frames.max(floor_max_frames).saturating_add(1)
     };
-
-    const I30: u64 = 33_333_333; // ~30 Hz frame interval (ns)
-    const I60: u64 = 16_666_667; // ~60 Hz frame interval (ns)
-
-    // issue 1367 — the N==1 pin-derived depth, arithmetic edges (the faithful proof of each
-    // threshold; the dynamic proof is the restart bench in genlock_grid_bench.rs).
-
-    #[test]
-    fn n1_tick_wall_is_the_processing_wall_minus_the_lateness_1367() {
-        let wall = 1_000_000_000_000u64;
-        let sched = 5_000_000_000u64;
-        // On schedule, 45 ms late and 70 ms late: the lateness comes straight off the wall.
-        assert_eq!(n1_tick_wall_ns(wall, sched, sched), wall);
-        assert_eq!(
-            n1_tick_wall_ns(wall, sched + 45_000_000, sched),
-            wall - 45_000_000
-        );
-        assert_eq!(
-            n1_tick_wall_ns(wall, sched + 70_000_000, sched),
-            wall - 70_000_000
-        );
-        // A monotonic read that has not reached the schedule reads the processing wall; an absurd
-        // lateness saturates at 0.
-        assert_eq!(n1_tick_wall_ns(wall, sched - 1, sched), wall);
-        assert_eq!(n1_tick_wall_ns(10, 1_000, 0), 0);
-    }
-
-    #[test]
-    fn n1_base_frames_is_the_resync_depth_with_a_one_microsecond_pin_tolerance_1367() {
-        assert_eq!(n1_base_frames(987, I30), 30); // 29.61 frames -> 30
-        assert_eq!(n1_base_frames(963, I30), 29); // 28.89 -> 29
-        assert_eq!(n1_base_frames(1010, I30), 31); // 30.30 -> 31
-
-        // An exact whole number of frames: the integer interval is 1/3 ns short of a real frame,
-        // so 1000 ms reads 30.0000003 frames; the 1 us tolerance keeps it at 30, not 31.
-        assert_eq!(n1_base_frames(1000, I30), 30);
-        assert_eq!(n1_base_frames(100, I30), 3);
-        assert_eq!(n1_base_frames(1001, I30), 31);
-        assert_eq!(n1_base_frames(3, I30), 1);
-        assert_eq!(n1_base_frames(500, I60), 30);
-        assert_eq!(n1_base_frames(0, I30), 0);
-        assert_eq!(n1_base_frames(987, 0), 0);
-        assert_eq!(n1_target_frames(987, I30), 31);
-    }
-
-    #[test]
-    fn n1_depth_rounds_to_the_nearest_frame_1367() {
-        let s = 1_000_000_000_000u64;
-        // A schedule phase of up to half a frame either way reads the true depth.
-        assert_eq!(n1_depth_frames(s + 31 * I30, s, I30), 31);
-        assert_eq!(n1_depth_frames(s + 31 * I30 + 10_000_000, s, I30), 31);
-        assert_eq!(n1_depth_frames(s + 31 * I30 - 10_000_000, s, I30), 31);
-        assert_eq!(n1_depth_frames(s + 31 * I30 - I30 / 2, s, I30), 31);
-        assert_eq!(n1_depth_frames(s + 31 * I30 - I30 / 2 - 1, s, I30), 30);
-        assert_eq!(n1_depth_frames(s + 32 * I30 - I30 / 2 - 1, s, I30), 31);
-        assert_eq!(n1_depth_frames(s + 32 * I30 - I30 / 2, s, I30), 32);
-        // Degenerate inputs never divide by zero; a stamp ahead of the tick reads age 0.
-        assert_eq!(n1_depth_frames(s, s, 0), 0);
-        assert_eq!(n1_depth_frames(s, s + I30, I30), 0);
-    }
-
-    #[test]
-    fn n1_deep_source_guard_needs_two_frames_of_pin_over_the_arrival_floor_1367() {
-        // pin 987: base 30. The freshest frame one interval old (the stream 2ME PGM) is deep.
-        assert!(n1_is_deep_source(I30, 987, I30));
-        // Edge: floor 28 frames + 2 == base 30 -> deep; floor 29 frames -> shallow.
-        assert!(n1_is_deep_source(28 * I30, 987, I30));
-        assert!(n1_is_deep_source(29 * I30 - 1, 987, I30));
-        assert!(!n1_is_deep_source(29 * I30, 987, I30));
-        // The 3 ms cg / imag case (base 1) is never deep, whatever its floor.
-        assert!(!n1_is_deep_source(0, 3, I30));
-        assert!(!n1_is_deep_source(0, 3, I60));
-        assert!(!n1_is_deep_source(I30, 987, 0));
-    }
-
-    #[test]
-    fn n1_shed_fires_only_a_whole_frame_past_the_target_on_a_deep_source_1367() {
-        let w = 1_000_000_000_000u64;
-        let shed = |age: u64, ticks: u64| n1_shed_due(w, w - age, I30, 987, I30, ticks);
-        assert!(!shed(31 * I30, 100), "at the target (31 frames) -> inert");
-        // The rounded edge sits at 32 frames minus half a frame (I30 is odd: one ns past 31.5).
-        assert!(
-            !shed(32 * I30 - I30 / 2 - 1, 100),
-            "just under half a frame over -> inert"
-        );
-        assert!(shed(32 * I30 - I30 / 2, 100), "half a frame over -> sheds");
-        assert!(
-            shed(32 * I30 - 10_000_000, 100),
-            "one frame over, 10 ms early -> sheds"
-        );
-        assert!(shed(33 * I30, 100), "two frames over -> sheds");
-        assert!(!shed(32 * I30, DRAIN_MIN_TICK_INTERVAL - 1), "throttled");
-        assert!(
-            shed(32 * I30, DRAIN_MIN_TICK_INTERVAL),
-            "throttle exactly met"
-        );
-        // Shallow source, unlocked boundary, degenerate interval: never.
-        assert!(!n1_shed_due(w, w - 5 * I30, I30, 3, I30, 100));
-        assert!(!n1_shed_due(w, w - 40 * I30, 29 * I30, 987, I30, 100));
-        assert!(!n1_shed_due(w, 0, I30, 987, I30, 100));
-        assert!(!n1_shed_due(w, w - 40 * I30, I30, 987, 0, 100));
-    }
-
-    #[test]
-    fn n1_hold_fires_only_a_whole_frame_short_of_the_target_on_a_deep_source_1367() {
-        let w = 1_000_000_000_000u64;
-        let hold = |age: u64, n: u32, ticks: u64| {
-            should_hold_n1_phase(w, w - age, I30, 987, I30, n, ticks)
-        };
-        assert!(
-            hold(30 * I30, 1, 100),
-            "the resync depth (30), one short of the target -> holds"
-        );
-        assert!(!hold(31 * I30, 1, 100), "at the target -> inert");
-        assert!(
-            !hold(31 * I30 - I30 / 2, 1, 100),
-            "exactly half a frame short -> inert"
-        );
-        assert!(hold(31 * I30 - I30 / 2 - 1, 1, 100), "one ns more -> holds");
-        assert!(
-            !hold(31 * I30 - 10_000_000, 1, 100),
-            "a 10 ms EARLY schedule phase at the target -> inert"
-        );
-        assert!(
-            hold(30 * I30 + 10_000_000, 1, 100),
-            "a 10 ms late schedule phase one short -> still holds"
-        );
-        assert!(!hold(30 * I30, 1, DRAIN_MIN_TICK_INTERVAL - 1), "throttled");
-        assert!(hold(30 * I30, 0, 100), "source_multiple 0 is N==1");
-        assert!(!hold(30 * I30, 2, 100), "an N>=2 source has its own shed");
-        assert!(
-            !should_hold_n1_phase(w, w - I30 / 3, 0, 3, I30, 1, 100),
-            "shallow never holds"
-        );
-        assert!(!should_hold_n1_phase(w, w - 30 * I30, I30, 987, 0, 1, 100));
-    }
-
-    #[test]
-    fn n1_tick_is_on_grid_within_two_milliseconds_of_a_grid_point_1367() {
-        let s = 1_000_000_000_000u64; // a whole second: a grid point at 30 and 60 fps
-        for interval in [I30, I60] {
-            for (offset, on) in [
-                (0i64, true),
-                (1_999_999, true),
-                (2_000_000, true),
-                (2_000_001, false),
-                (-2_000_000, true),
-                (-2_000_001, false),
-                (10_000_000, false),
-                (-10_000_000, false),
-            ] {
-                let t = s.saturating_add_signed(offset);
-                assert_eq!(
-                    n1_tick_is_on_grid(t, interval),
-                    on,
-                    "offset {offset} ns at interval {interval}"
-                );
-            }
-            // +1_999_999 / +2_000_001 above also bracket the clamped catch-up tick (`video_sleep`
-            // after an overrun of under 2 ms past the next slot schedules slot + 2 ms).
-            // Every grid point of the second is on the grid (the per-second slots, not k * I).
-            let mut g = s;
-            for _ in 0..(1_000_000_000 / interval) {
-                assert!(n1_tick_is_on_grid(g, interval), "grid point {g}");
-                assert!(
-                    !n1_tick_is_on_grid(g + 3_000_000, interval),
-                    "3 ms past {g}"
-                );
-                g = crate::genlock_grid::grid_next_boundary_ns(g, interval);
-            }
-        }
-        // 29.97 fps has no per-second grid: the check floors on the 1970 grid, the same fallback
-        // the render tick uses (`genlock_next_deadline`).
-        let i2997 = 33_366_666u64;
-        // This 29.97 grid point sits ~16.7 ms from any 30 fps per-second slot, so a floor on the
-        // wrong grid would read it OFF the grid.
-        let g2997 = 30_501 * i2997;
-        assert!(
-            !n1_tick_is_on_grid(g2997, I30),
-            "the same instant on the 30 fps grid is off"
-        );
-        assert!(n1_tick_is_on_grid(g2997, i2997));
-        assert!(n1_tick_is_on_grid(g2997 + 2_000_000, i2997));
-        assert!(n1_tick_is_on_grid(g2997 - 2_000_000, i2997));
-        assert!(!n1_tick_is_on_grid(g2997 + 3_000_000, i2997));
-        assert!(!n1_tick_is_on_grid(g2997 - 3_000_000, i2997));
-        // The pure predicate at its edges, whatever grid the caller floors on.
-        assert!(n1_tick_on_grid(1_000, 0));
-        assert!(!n1_tick_on_grid(1_000, 3_000_000 + 1_001));
-        assert!(!n1_tick_on_grid(10_000_000, 5_000_000));
-        assert!(n1_tick_on_grid(u64::MAX, u64::MAX - 2_000_000));
-    }
-
-    /// issue 1367 — the shed and the hold never share an edge: over a dense sweep of presented
-    /// ages there is no age at which both fire, and between them sits a one-frame dead-band.
-    #[test]
-    fn the_shed_and_the_hold_leave_a_one_frame_dead_band_1367() {
-        let w = 1_000_000_000_000u64;
-        for step in 0..2_000u64 {
-            let age = 29 * I30 + step * (4 * I30 / 2_000);
-            let shed = n1_shed_due(w, w - age, I30, 987, I30, 100);
-            let hold = should_hold_n1_phase(w, w - age, I30, 987, I30, 1, 100);
-            assert!(!(shed && hold), "age {age}");
-            let inert = (31 * I30 - I30 / 2..32 * I30 - I30 / 2).contains(&age);
-            assert_eq!(inert, !shed && !hold, "age {age}");
-        }
-    }
-
-    /// issue 1367 — every decision of `should_converge_phase` is BYTE-IDENTICAL to the pre-1367
-    /// authority (a verbatim copy of it) over a deterministic spread of the whole argument space,
-    /// N==1 included (it stays inert there: the SOURCE wrapper routes an N==1 tick to
-    /// [`n1_shed_due`]), and the N==1 hold never touches an N>=2 source.
-    #[test]
-    fn converge_decisions_are_byte_identical_to_before_1367() {
-        fn pre_1367(
-            wall_now_ns: u64,
-            locked_boundary_ns: u64,
-            newest_stamp_ns: u64,
-            latency_ms: u32,
-            interval_ns: u64,
-            source_multiple: u32,
-            ticks_since_last_drain: u64,
-        ) -> bool {
-            if interval_ns == 0 || locked_boundary_ns == 0 {
-                return false;
-            }
-            if source_multiple < 2 {
-                return false;
-            }
-            let n = source_multiple.max(1) as u64;
-            let reserve_ns = (latency_ms as u64).saturating_mul(1_000_000);
-            let floor_ns = wall_now_ns.saturating_sub(newest_stamp_ns);
-            let target = reserve_ns.max(floor_ns);
-            let quantum = interval_ns / n;
-            let budget = PHASE_PIN_HYSTERESIS_NS.max(GENLOCK_N2_JITTER_BUDGET_NS);
-            let threshold = target.saturating_add(quantum).saturating_add(budget);
-            let age = wall_now_ns.saturating_sub(locked_boundary_ns);
-            age > threshold && ticks_since_last_drain >= DRAIN_MIN_TICK_INTERVAL
-        }
-        let w = 1_000_000_000_000u64;
-        let mut x: u64 = 0x1367_2026_0924_0001;
-        let mut fired = 0;
-        for i in 0..20_000u64 {
-            x = x
-                .wrapping_mul(6364136223846793005)
-                .wrapping_add(1442695040888963407);
-            let interval = [I30, I60, 0][(x >> 7) as usize % 3];
-            let latency = ((x >> 20) % 1200) as u32;
-            let n = ((x >> 3) % 5) as u32; // 0..4, the N==1 floor included
-            let ticks = (x >> 11) % 60;
-            let age = latency as u64 * 1_000_000 + (x >> 33) % 90_000_000;
-            let boundary = if i % 97 == 0 {
-                0
-            } else {
-                w.saturating_sub(age)
-            };
-            let newest = w.saturating_sub((x >> 45) % 80_000_000);
-            let old = pre_1367(w, boundary, newest, latency, interval, n, ticks);
-            fired += usize::from(old);
-            assert_eq!(
-                should_converge_phase(w, boundary, newest, latency, interval, n, ticks),
-                old,
-                "n={n} latency={latency} interval={interval} boundary={boundary} newest={newest} \
-                 ticks={ticks}"
-            );
-            if n >= 2 {
-                assert!(!should_hold_n1_phase(
-                    w,
-                    boundary,
-                    w - newest,
-                    latency,
-                    interval,
-                    n,
-                    ticks
-                ));
-            }
-        }
-        assert!(
-            fired > 1000 && fired < 19_000,
-            "the spread must exercise both outcomes: {fired}"
-        );
+    if min_latency_box && d > cap {
+        (0, true)
+    } else {
+        (d, false)
     }
 }
+
+/// issue 1367 — is a GAP RESYNC over this missing-stamp gap a sender restart (a relock)? Mirror of
+/// the C `genlock_n1_shallow_gap_is_relock`.
+pub fn n1_shallow_gap_is_relock(gap_ns: u64) -> bool {
+    gap_ns >= N1_SHALLOW_RELOCK_GAP_NS
+}
+
+/// issue 1367 — open a new measurement window; the latched D (if any) stays maintained. Mirror of
+/// the C `genlock_n1_shallow_rearm`.
+pub fn n1_shallow_rearm(s: &mut ShallowDepth) {
+    s.floor_max_frames = 0;
+    s.window_ticks = 0;
+    s.over_ticks = 0;
+    s.deep_ticks = 0;
+    s.measuring = true;
+}
+
+/// issue 1367 (review round 2) — the window's deep verdict: a strict MAJORITY of its sampled ticks
+/// read deep. One tick (a stall still running on the latch tick) can never decide it. Mirror of the
+/// C `genlock_n1_shallow_window_deep`.
+pub fn n1_shallow_window_deep(deep_ticks: u32, window_ticks: u32) -> bool {
+    u64::from(deep_ticks) * 2 > u64::from(window_ticks)
+}
+
+/// issue 1367 — one PRESENT tick of the shallow-depth state ([`ShallowTick`]). An N>=2 tick clears
+/// the whole state (it has its own conveyor rule). A relock, or an N==1 source with no depth, no
+/// window and no cap, opens a window; a latched source whose rounded floor sat at or over D for
+/// [`N1_SHALLOW_SETTLE_TICKS`] on-grid ticks re-opens one (its arrival rose). Only on-grid ticks are
+/// sampled. Returns true on the tick that LATCHES a D (or a capped report). Mirror of the C
+/// `genlock_n1_shallow_track`.
+pub fn n1_shallow_track(s: &mut ShallowDepth, t: ShallowTick) -> bool {
+    if !t.n1 {
+        *s = ShallowDepth::default();
+        return false;
+    }
+    if t.relock || (s.target_frames == 0 && !s.measuring && !s.capped) {
+        n1_shallow_rearm(s);
+    }
+    if !t.on_grid {
+        return false;
+    }
+    if !s.measuring {
+        if s.target_frames == 0 || t.floor_frames < s.target_frames {
+            s.over_ticks = 0;
+            return false;
+        }
+        s.over_ticks = s.over_ticks.saturating_add(1);
+        if s.over_ticks < N1_SHALLOW_SETTLE_TICKS {
+            return false;
+        }
+        n1_shallow_rearm(s);
+    }
+    s.floor_max_frames = s.floor_max_frames.max(t.floor_frames);
+    s.window_ticks = s.window_ticks.saturating_add(1);
+    if t.deep {
+        s.deep_ticks = s.deep_ticks.saturating_add(1);
+    }
+    if s.window_ticks < N1_SHALLOW_SETTLE_TICKS {
+        return false;
+    }
+    let (d, capped) = n1_shallow_target_frames(
+        t.base_frames,
+        s.floor_max_frames,
+        n1_shallow_window_deep(s.deep_ticks, s.window_ticks),
+        t.min_latency_box,
+    );
+    s.target_frames = d;
+    s.capped = capped;
+    s.measuring = false;
+    true
+}
+
+/// issue 1367 — does the latched shallow depth govern this source now? A latched D on a source
+/// that is NOT deep. Mirror of the C `genlock_n1_shallow_governs`.
+pub fn n1_shallow_governs(
+    target_frames: u64,
+    arrival_floor_ns: u64,
+    latency_ms: u32,
+    interval_ns: u64,
+) -> bool {
+    target_frames != 0
+        && interval_ns != 0
+        && !n1_is_deep_source(arrival_floor_ns, latency_ms, interval_ns)
+}
+
+/// issue 1367 — the shallow SHED half (the caller gates it on [`n1_tick_is_on_grid`]): shed one frame
+/// when the last presented depth (the locked boundary) sits deeper than the latched D, throttled by
+/// the shared #859 counter. Mirror of the C `genlock_n1_shallow_shed_due`.
+pub fn n1_shallow_shed_due(
+    tick_wall_ns: u64,
+    locked_boundary_ns: u64,
+    arrival_floor_ns: u64,
+    latency_ms: u32,
+    interval_ns: u64,
+    target_frames: u64,
+    ticks_since_last_drain: u64,
+) -> bool {
+    locked_boundary_ns != 0
+        && n1_shallow_governs(target_frames, arrival_floor_ns, latency_ms, interval_ns)
+        && n1_depth_frames(tick_wall_ns, locked_boundary_ns, interval_ns) > target_frames
+        && ticks_since_last_drain >= DRAIN_MIN_TICK_INTERVAL
+}
+
+/// issue 1367 — the shallow HOLD half (the caller gates it on [`n1_tick_is_on_grid`]): hold one
+/// STEADY tick when presenting the queue head now would put the conveyor shallower than the latched
+/// D. Called only from the N==1 STEADY branch. Mirror of the C `genlock_n1_shallow_hold_due`.
+pub fn n1_shallow_hold_due(
+    tick_wall_ns: u64,
+    head_stamp_ns: u64,
+    arrival_floor_ns: u64,
+    latency_ms: u32,
+    interval_ns: u64,
+    target_frames: u64,
+    ticks_since_last_drain: u64,
+) -> bool {
+    n1_shallow_governs(target_frames, arrival_floor_ns, latency_ms, interval_ns)
+        && n1_depth_frames(tick_wall_ns, head_stamp_ns, interval_ns) < target_frames
+        && ticks_since_last_drain >= DRAIN_MIN_TICK_INTERVAL
+}
+
+#[cfg(test)]
+#[path = "genlock_n1_depth_tests.rs"]
+mod tests;

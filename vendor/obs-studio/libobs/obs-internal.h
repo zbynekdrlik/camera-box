@@ -1144,6 +1144,25 @@ struct obs_source {
 	uint64_t genlock_video_delay_smoothed_ns;   /* camera-box issue 1367: EMA of the head's age at the render tick's SCHEDULED instant = this source's real stamp->present video delay (0 = not measured). Render thread (genlock_video_delay_track). */
 	uint32_t genlock_video_delay_applied_ms;    /* camera-box issue 1367: the quantized video delay the audio follows (0 = none yet -> the #1303 latency hold). Written on the render thread, read once per packet by the audio ingest -- a benign single-word cross-thread read like genlock_latency_ms. */
 	uint32_t genlock_video_delay_settle_ticks;  /* camera-box issue 1367: render ticks left before an armed re-application applies (0 = idle). Render thread. */
+	/* camera-box issue 1367 (ROZHODNUTÉ 5827497952): the SHALLOW N==1 source's per-LOCK depth
+	 * (genlock_n1_shallow_track; decision authority src/genlock_n1_depth.rs ShallowDepth). Render
+	 * thread, under async_mutex (the latency setter re-arms it there). Zeroed at create (bzalloc). */
+	uint64_t genlock_shallow_target_frames;     /* the latched depth D, frames (0 = none latched) */
+	uint64_t genlock_shallow_floor_max_frames;  /* the max rounded arrival floor of the open window */
+	uint32_t genlock_shallow_window_ticks;      /* on-grid present ticks sampled in the open window */
+	uint32_t genlock_shallow_over_ticks;        /* consecutive on-grid present ticks with the floor at/over D (a whole window re-measures) */
+	uint32_t genlock_shallow_deep_ticks;        /* window ticks that read deep (the latch takes the majority) */
+	bool genlock_shallow_measuring;             /* a measurement window is open (after a relock) */
+	bool genlock_shallow_capped;                /* the last latch was capped by the min-latency (imag) guard: reported, no depth applied */
+	uint32_t genlock_shallow_latches;           /* cumulative latches (audit shallow_latches=) */
+	/* camera-box issue 1367: the audio placement SLEW + withhold (audio thread; the audit reads them
+	 * as benign single-word cross-thread telemetry). Decisions: src/genlock_audio_pairing.rs. */
+	int64_t genlock_audio_slew_remaining_ns;    /* placement move still owed (signed; + = later) */
+	int64_t genlock_audio_slew_step_ns;         /* the step asrc_process_audio stretched, not yet booked by source_output_audio_data */
+	uint64_t genlock_audio_first_packet_ns;     /* the first genlock audio packet (OBS monotonic), the withhold clock; 0 = none */
+	uint32_t genlock_audio_slews;               /* cumulative slews started (audit audio_slews=) */
+	uint32_t genlock_audio_steps;               /* cumulative STEP re-placements while playing (no resampler; audit audio_steps=) */
+	uint64_t genlock_audio_withheld;            /* cumulative withheld packets (audit audio_withheld=) */
 	struct obs_source_frame *async_preload_frame;
 	DARRAY(struct async_frame) async_cache;
 	DARRAY(struct obs_source_frame *) async_frames;
