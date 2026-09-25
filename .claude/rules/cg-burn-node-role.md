@@ -84,11 +84,15 @@ run (songplayer 151 is deployed since 25.9.2026; a supervisor/rig-ops step), per
 
 `CG_CHAIN=1` turns the SongPlayer burn ON + cuts cg OBS program to the SP scene + StartRecords cg
 OBS at `[5/8]` (no cg recording started ⇒ the burn goes straight back OFF), runs ONE tail CG window
-on strih before `[7/8]`, ends the CG leg right after the `[7/8]` StopRecord
-(`cg_chain_after_stoprecord`: cg StopRecord keeping the host path, burn OFF, strih restored — so
-nothing CG runs through the long on-box decodes), pulls the cg recording at `[8/8d]` (feeding
-`--cg`), and — the #246/#844 leak-guard — repeats burn OFF + cg StopRecord + every scene restore in
-`cleanup()` even on an early abort (the burn must NEVER stay on the LED wall). cleanup() uses a 3 s
+on strih before `[7/8]`, ends the CG leg after the `[7/8]` StopRecord
+(`cg_chain_after_stoprecord`, placed AFTER the issue-1354 genlock-audit AFTER snapshot and the
+post-record stomp re-check so it never skews their "exactly the recording" window: cg StopRecord
+keeping the host path, burn OFF, strih AND cg OBS program changes restored — so nothing CG runs
+through the long on-box decodes), pulls the cg recording at `[8/8d]` (feeding `--cg`), and — the
+#246/#844 leak-guard — repeats burn OFF + every scene restore in `cleanup()` even on an early abort
+(the burn must NEVER stay on the LED wall). cleanup()'s cg StopRecord is keyed on
+`CG_RECORDING_STARTED`, never on `CG_HOST_IP` alone (the host resolves BEFORE StartRecord — the
+#649 harness-started-boxes-only rule). cleanup() uses a 3 s
 per-request burn timeout (`CG_CHAIN_CLEANUP_BURN_TIMEOUT`) so an unreachable SongPlayer never
 stalls the stream/strih teardowns behind it by a minute. All runners are best-effort + loud;
 `CG_CHAIN` unset = byte-for-byte inert. A live CG_CHAIN=1 run is a supervisor/rig-ops step, never
@@ -117,7 +121,10 @@ default pull fetches THAT file from `${CG_CHAIN_USER:-newlevel}@<cg-ip>` through
 that reads "No such file"), bounded by `CG_CHAIN_PULL_TIMEOUT` (900 s) via `timeout bash -c '. lib;
 win_ssh_download …'` (`timeout` cannot exec a shell function). Only this run's file is pulled; the
 recording now stops right after `[7/8]`, so it is the recording window, not the whole decode. The
-merge decodes it on dev1.
+merge feeds `--cg` on `[ -f "$CG_RECORDING" ]`, so the pull first drops any stale destination and
+scps into `<dest>.part`, renamed only on success — a failed scp leaves NO file. The merge decodes it
+ON DEV1 (the main design's choice for this slice; the #703 on-box `--extract-partial` on resolume,
+pulling only the small partial, is the follow-up shape if the dev1 decode load bites).
 
 ### The ONE tail CG window (issue 1302) — why it is NOT a switch-schedule window
 
@@ -146,7 +153,10 @@ merge decodes it on dev1.
   undecodable counts and the A/V marker pairing on that run). The window is recorded to
   `$OUTDIR/cg-window.json` (`{"kind":"cg","scene","input","start_ns","end_ns"}`) and echoed into the
   log — the run's evidence of WHEN strih carried the chain; no verdict code reads it yet (scoping the
-  strih/stream `cg_chain` hops to it is a follow-up). Never cut strih BACK to a camera before
+  strih/stream `cg_chain` hops to it is a follow-up). Its path is `cg-window-<RUN_ID>.json`
+  (`cg_chain_window_file`). The strih cut runs under `cg_chain_window_cut_timeout` = max(caller
+  timeout, `OBS_BLACKCHECK_TIMEOUT_S` + 30 s): the helper enumerates every scene AND polls the
+  non-black check, and a kill after the cut would leave strih on CG with no window hold. Never cut strih BACK to a camera before
   StopRecord — a cam burn reappearing after the gap opens missing ids in its `first..=last`.
 - **Snapshot-before-mutate:** every scene change writes its restore snapshot
   (`$OUTDIR/cg-chain-{cg-program,strih-scene}-state-<RUN_ID>.json`: host, scene, previous program,
