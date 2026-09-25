@@ -409,3 +409,90 @@ def test_dst_filter_keeps_only_streams_arriving_at_the_receiver(tmp_path, capsys
     assert vr.main(["analyze", str(p), "--dst", "10.77.9.202", "--min-span-s", "5"]) == 0
     out = capsys.readouterr().out
     assert "stream=fohabl-strih" in out and "stream=cam1" not in out
+
+
+# ---------------------------------------------------------------------------------------------
+# review round 1 (issue 1372): arrival delay is one-sided, restarts near the start, BE pcapng,
+# an empty VBAN name in the shell-facing output, the stderr margin in grading
+# ---------------------------------------------------------------------------------------------
+
+def _stall(recs, at_s, stall_s):
+    """Every packet that would arrive inside [at, at+stall) is held and released as a burst at the
+    stall end -- network/sender delay only ever makes an arrival LATER, never earlier."""
+    t0 = recs[0][0]
+    lo, hi = t0 + int(at_s * 1e9), t0 + int((at_s + stall_s) * 1e9)
+    out, k = [], 0
+    for t, fr in recs:
+        if lo <= t < hi:
+            out.append((hi + k * 20_000, fr))
+            k += 1
+        else:
+            out.append((t, fr))
+    return out
+
+
+def test_a_single_stall_then_burst_does_not_bias_the_rate():
+    """Review round 1: an OLS fit of counter vs ARRIVAL read +65.7 ppm for one 500 ms stall 10 s off
+    centre in a clean 60 s capture. Delay is one-sided, so the rate is read off the LOWER envelope
+    of the arrivals (the least-delayed packet per window)."""
+    n = int(60 * NOMINAL / SPF)
+    s = only_stream(pcap_bytes(276, _stall(stream_records(n, ppm=0.0), at_s=20.0, stall_s=0.5)))
+    assert abs(s.rate_ppm) < 1.0, s.rate_ppm
+    assert s.lost == 0 and s.jumps == 0
+    assert s.max_gap_ms > 490
+
+
+def test_the_envelope_fit_still_reads_a_true_offset_through_stalls_and_jitter():
+    n = int(60 * NOMINAL / SPF)
+    recs = stream_records(n, ppm=-12.0, jitter_ms=5.0)
+    for at in (8.0, 31.0, 47.0):
+        recs = _stall(recs, at_s=at, stall_s=0.3)
+    s = only_stream(pcap_bytes(276, sorted(recs)))
+    assert abs(s.rate_ppm + 12.0) < 1.5, s.rate_ppm
+
+
+def test_a_restart_near_the_start_is_a_jump_not_duplicates():
+    """Review round 1: a sender that started < 64 frames before restarting to 0 was read as a
+    reorder -- 40 'duplicates' and -2156 ppm. A step back to a counter already seen long ago (or
+    below everything seen) is a jump."""
+    n = 6000
+    s = only_stream(pcap_bytes(276, stream_records(n, ppm=4.0, start_frame=0, restart_at=40)))
+    assert s.jumps == 1, (s.jumps, s.duplicates, s.reordered)
+    assert s.duplicates == 0
+    assert abs(s.rate_ppm - 4.0) < 0.5, s.rate_ppm
+
+
+def _pcapng_be(linktype, records):
+    def blk(btype, body):
+        total = 12 + len(body)
+        return struct.pack(">II", btype, total) + body + struct.pack(">I", total)
+    out = blk(0x0A0D0D0A, struct.pack(">IHHq", 0x1A2B3C4D, 1, 0, -1))
+    out += blk(1, struct.pack(">HHI", linktype, 0, 0))
+    for ts_ns, frame in records:
+        ts = ts_ns // 1000
+        body = struct.pack(">IIIII", 0, ts >> 32, ts & 0xFFFFFFFF, len(frame), len(frame))
+        out += blk(6, body + _pad4(frame))
+    return out
+
+
+def test_big_endian_pcapng_is_read_not_silently_empty():
+    s = only_stream(_pcapng_be(1, stream_records(3000, ppm=3.0, link=1)))
+    assert s.unique_frames == 3000
+
+
+def test_tsv_keeps_its_columns_for_an_empty_stream_name():
+    """An empty VBAN name must not collapse a tab column (bash `read` merges empty tab fields)."""
+    recs = [(t, sll2(udp_ipv4(payload=vban_payload(name="", frame=i))))
+            for i, t in enumerate(range(0, 3000 * 5_333_333, 5_333_333))]
+    res = vr.analyze_capture(pcap_bytes(276, recs))
+    g = vr.Grading(min_span_s=5.0)
+    line = vr.render_tsv(res, [vr.grade(s, g) for s in res.streams]).splitlines()[1]
+    fields = line.split("\t")
+    assert len(fields) == 9 and all(fields), fields
+    assert fields[2] == "-" and fields[4] in ("OK", "FAULT")
+
+
+def test_rate_fault_needs_the_bound_cleared_by_two_stderr():
+    g = vr.Grading(ppm_bound=20.0, loss_ceiling=1e-4, min_span_s=20.0)
+    assert vr.grade(_stats(rate_ppm=21.0, rate_stderr_ppm=1.0), g)[0] == "OK"
+    assert vr.grade(_stats(rate_ppm=23.0, rate_stderr_ppm=1.0), g)[0] == "FAULT"
