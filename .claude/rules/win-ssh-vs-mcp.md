@@ -7,6 +7,7 @@ paths:
   - "scripts/recording-e2e.sh"
   - "scripts/recording-verdict-on-strih.sh"
   - "scripts/recording-verdict-on-stream.sh"
+  - "scripts/recording-verdict-on-resolume.sh"
   - "scripts/launch-obs-genlock.sh"
   - "scripts/rig-mode.sh"
 ---
@@ -86,3 +87,16 @@ obs64 COUNT/presence check must filter to LIVE instances first**:
   would false-flag it. It is an active issue-1296 work surface; filtering it there (same
   `Where-Object` one-liner, plus the `test_rig_health_audit_encoded_1259` exact-string update)
   avoids a cross-lane collision.
+
+## `win_ssh_run` exit code = the LAST PowerShell statement's `$?` (issue 1302)
+
+`win_ssh_run` runs `powershell -EncodedCommand`, which exits 1 when the LAST statement failed.
+`-ErrorAction SilentlyContinue` only hides the message; `$?` is still false. So a builder that ends in
+an expected-to-fail cmdlet (`Remove-Item` of a file that is not there, `Get-Process` finding nothing)
+aborts its `set -euo pipefail` caller on a perfectly normal run. Guard it
+(`if (Test-Path -LiteralPath $p) { Remove-Item … }`), append `; exit 0` when failure truly does not
+matter, and never let a silenced cmdlet be the last statement. Also: a path probe should go through
+`win_ssh_run` + `Test-Path` (works whatever the box's OpenSSH default shell is), not
+`win_ssh_path_exists`'s cmd.exe `if exist`, on a box whose default shell was never checked; and tell
+PowerShell's own exit 1 (absent) from an ssh transport rc (255 / sshpass 5-6). Worked example + a test
+fake that models the rule: `scripts/recording-verdict-on-resolume.sh`, `tests/harness_cg_chain_onbox_1302.rs`.
