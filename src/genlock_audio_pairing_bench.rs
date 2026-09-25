@@ -42,6 +42,11 @@
 //! - `LegacyLatency`: the #1303 fixed `latency_ms` hold on the arrival basis.
 //! - `HeadSample` (on a 2× source): the delay sampled on the queue HEAD instead of the presented
 //!   frame over-reads by one source interval.
+//!
+//! The 2× `Production` run gives the same result as the 1× run, because the bench's presented stamp
+//! does not depend on the source rate. It adds no evidence of its own. Only `HeadSample`
+//! discriminates the two samplings. That the C samples the PRESENTED frame (`next_frame`) is pinned
+//! by `tests/genlock_audio_timecode_placement_1367.rs`, not by this bench.
 
 use super::*;
 

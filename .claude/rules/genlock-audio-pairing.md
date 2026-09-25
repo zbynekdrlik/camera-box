@@ -113,7 +113,13 @@ follow whatever delay the video actually has.
   - a tick off the per-second grid (a wall step slewing back) is not sampled
     (`genlock_n1_tick_is_on_grid`), or a long step could apply a transient delay.
 
-  A hold tick presents nothing new and is not sampled. The sample is clamped to ≥ 1 ns, so it never
+  A hold tick presents nothing new and is not sampled. **Dependency:** the tracker samples only an
+  ON-GRID scheduled tick (the same dependency as the N==1 depth rule). On a box whose render tick
+  never lands on the per-second genlock grid (not wall-slaved, or a non-integer canvas rate) the
+  audio silently stays on the latency hold. Because nothing was measured, the pairing offset falls
+  back to the pin and reads 0 (`audio_health=0`). The tell is `audio_hold=latency` +
+  `video_delay_ms=0` on an audible source while `ts_head_skew_ms` shows the real, larger delay.
+  Check that first when a box's audio does not follow its video. The sample is clamped to ≥ 1 ns, so it never
   produces the EMA's `0` "unseeded" sentinel. EMA 1/8 per sample, computed in wrapping u64 on both
   sides (the first cut's signed difference could overflow). This makes the tracker the THIRD
   `genlock_n1_tick_wall_now(wall_now)` reader: the count anchor is 3 in
