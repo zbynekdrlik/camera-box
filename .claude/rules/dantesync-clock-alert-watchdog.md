@@ -87,7 +87,7 @@ production-critical watchdog class (umbrella **#1308**).
     uses `dante-clock-nohttp-dev1-<bucket>`); version drift vs `DANTESYNC_VERSION_PIN` is REPORTED in
     the card, never a page. Recovery stays a machine-channel log line.
   - **Every fleet roll AND every config patch (`gm_allowlist` / `phase_slew`) MUST include dev1** —
-    `dantesync-fleet-upgrade.sh … --local dev1`, "fleet N/N" counts dev1 (the `.claude/skills/ops`
+    `dantesync-fleet-upgrade.sh --fleet` (issue 1372: the whole declared fleet incl. dev1, mbc, fohabl), "fleet N/N" counts dev1 (the `.claude/skills/ops`
     DanteSync rollout checklist). This watchdog is the between-rolls backstop, not a substitute for
     including dev1 in the roll itself.
   - **Cross-consumer coupling — the #1312 "development" handover check reads this watchdog's
