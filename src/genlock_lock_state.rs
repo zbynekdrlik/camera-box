@@ -28,7 +28,8 @@ pub enum LockState {
     /// or no input locked.
     Unlocked = 0,
     /// Amber: some (not all) inputs unlocked, a relock/underrun in the last 60 s, clock
-    /// NTP phase failed, or the wall clock stepped by more than one frame (#1357).
+    /// NTP phase failed, the wall clock stepped by more than one frame (#1357), or the media
+    /// (audio) clock does not follow the disciplined wall clock (issue 1372 part D).
     Degraded = 1,
     /// Green: clock locked, every genlock input held by the FIFO, output stamping wall time.
     Locked = 2,
@@ -65,6 +66,12 @@ pub enum LockReason {
     /// certified per-box audio table (a camera on any box; a Dante-fed box's every NDI input) — the
     /// double-audio hazard. The lowest-precedence DEGRADED reason, below `AudioPairing`.
     AudioUnexpected = 10,
+    /// Issue 1372 part D — OBS's MEDIA clock (`os_gettime_ns`, which paces the audio mixer and every
+    /// output) does not tick with the dantesync-disciplined wall clock: the wall-vs-media drift grew
+    /// beyond [`GENLOCK_MEDIA_CLOCK_DRIFT_BOUND_MS`] over [`GENLOCK_MEDIA_CLOCK_WINDOW_S`], or (Windows)
+    /// the disciplined clock fell back to raw QPC while dantesync runs. Below `QpcDrift`, above the
+    /// audio-pairing axes; never UNLOCKED on its own.
+    MediaClock = 11,
 }
 
 impl LockState {
@@ -139,14 +146,18 @@ pub struct GenlockFacets {
     /// [`GenlockFacets::audio_unpaired`]); audio disabled/absent never sets it, so it can only
     /// DEGRADE, never take a healthy box off LOCKED spuriously.
     pub audio_unexpected: bool,
+    /// Issue 1372 part D — the media-clock verdict ([`media_clock_verdict`]) the widget reduced this
+    /// tick. Anything but [`MediaClock::Ok`] DEGRADES (reason [`LockReason::MediaClock`]); it never
+    /// makes the box UNLOCKED on its own. `Ok` reproduces every earlier verdict exactly.
+    pub media_clock: MediaClock,
 }
 
 /// Decide the genlock lock state and its dominant reason from the scalarised facets.
 ///
 /// UNLOCKED precedence: clock (absent/unlocked) > output (present but not stamping) >
 /// no-input-locked. DEGRADED precedence (only once none of the UNLOCKED conditions hold):
-/// some-input-unlocked > recent-event > ntp-failed > qpc-drift > audio-pairing > audio-unexpected.
-/// Otherwise LOCKED.
+/// some-input-unlocked > recent-event > ntp-failed > qpc-drift > media-clock > audio-pairing >
+/// audio-unexpected. Otherwise LOCKED.
 ///
 /// #1341 — the DEGRADED/no-input decisions judge only CONNECTED-non-idle inputs (`n_connected =
 /// n_inputs - n_absent - n_idle`): a senderless (`n_absent`) OR a keep-alive-only idle (`n_idle`)
@@ -207,6 +218,11 @@ pub fn decide(f: &GenlockFacets) -> (LockState, LockReason) {
     }
     if f.qpc_drift_beyond_bound {
         return (LockState::Degraded, LockReason::QpcDrift);
+    }
+    // Issue 1372 part D — the media (audio) clock does not follow the disciplined wall clock. A
+    // clock-class cause, so it outranks the audio-pairing symptoms below; DEGRADED only.
+    if f.media_clock != MediaClock::Ok {
+        return (LockState::Degraded, LockReason::MediaClock);
     }
     // #1303 — audio parity is the LOWEST-precedence DEGRADED axis: only an audio-enabled genlock
     // source with a material pairing-offset breach trips it (audio disabled/absent never sets the
@@ -371,6 +387,124 @@ pub fn qpc_drift_beyond_bound(
     }
 }
 
+// Issue 1372 part D — the MEDIA-clock (audio clock) term. `os_gettime_ns()` paces OBS's audio mixer,
+// its video thread and every output timestamp. Once issue 1372 part A made the Windows
+// `os_gettime_ns()` run at the dantesync-disciplined system-time rate (Linux's `CLOCK_MONOTONIC` is
+// kernel-disciplined already), the wall-vs-media drift must stay FLAT on every box: 0 ms over 47 min on
+// stream after the part-A deploy, 0 on strih-lx for hours, while the undisciplined stream mixer walked
+// 67 ms in 83 min (≈ 8 ms per 10 min) before it — green on the indicator the whole time. So the drift
+// GROWTH over a window is a real fault signal again, unlike the #1357-removed rate term: that one
+// compared the rate with an instantaneous dantesync `f_ptp + f_phase` sample, which meant a different
+// thing per box; this one compares with 0, which means the same thing everywhere.
+//
+// Single-sample jumps beyond the wall-STEP bound are EXCLUDED from the growth (the `qpc_drift` step
+// verdict owns a step, so a step never reads as a rate for the next 10 min). The second input is the
+// Windows discipline state libobs publishes (`os_gettime_discipline()`): a fallback to raw QPC while
+// dantesync answers is DEGRADED at once, before any drift accrues. The term never makes a box
+// UNLOCKED on its own.
+
+/// The window (s) the media-clock drift growth is measured over — the design's "per 10 min".
+pub const GENLOCK_MEDIA_CLOCK_WINDOW_S: i64 = 600;
+/// Drift growth (ms) over the window beyond which the media clock DEGRADES: > 2 ms per 10 min
+/// (> 3.3 ppm). The integer-ms drift carries ±1 ms of truncation noise; the undisciplined stream
+/// accrued ≈ 8 ms per 10 min; a disciplined box stays at 0.
+pub const GENLOCK_MEDIA_CLOCK_DRIFT_BOUND_MS: i64 = 2;
+
+/// What the Windows `os_gettime_ns()` last read from the system-time adjustment. Discriminants match
+/// libobs `enum os_gettime_discipline_state` (`util/platform.h`) and the C mirror
+/// `genlock_media_discipline` in `GenlockLockState.hpp`; `NotApplicable` is the widget's value on a
+/// box whose OS disciplines the monotonic clock itself (Linux / macOS).
+#[repr(i32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MediaDiscipline {
+    /// Not polled yet (the first ~250 ms after OBS start).
+    Unknown = 0,
+    /// The adjustment is read and enabled: the clock runs at the disciplined rate.
+    Active = 1,
+    /// The adjustment is disabled or zero: raw QPC.
+    Disabled = 2,
+    /// `GetSystemTimeAdjustmentPrecise` returned FALSE: raw QPC.
+    ReadFailed = 3,
+    /// The API is not exported (old Windows): raw QPC.
+    ApiMissing = 4,
+    /// Not a Windows box: the OS kernel disciplines the monotonic clock.
+    NotApplicable = 5,
+}
+
+impl MediaDiscipline {
+    /// The integer libobs and the C mirror use.
+    pub fn code(self) -> i32 {
+        self as i32
+    }
+
+    /// True for the three raw-QPC fallback outcomes.
+    pub fn is_raw_fallback(self) -> bool {
+        matches!(
+            self,
+            MediaDiscipline::Disabled | MediaDiscipline::ReadFailed | MediaDiscipline::ApiMissing
+        )
+    }
+}
+
+/// The media-clock verdict. Discriminants match the C `genlock_media_clock` enum.
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MediaClock {
+    /// The media clock follows the disciplined wall clock (or there is not yet enough data).
+    Ok = 0,
+    /// The wall-vs-media drift grew beyond the bound over the window.
+    Drift = 1,
+    /// Windows: the disciplined clock fell back to raw QPC while dantesync runs.
+    Undisciplined = 2,
+}
+
+impl MediaClock {
+    /// The integer the C `genlock_media_clock_verdict` returns.
+    pub fn code(self) -> u8 {
+        self as u8
+    }
+}
+
+/// The wall-vs-media drift GROWTH across a window of cumulative integer-ms `wall_qpc_drift_ms`
+/// samples (oldest first): the sum of the sample-to-sample deltas whose magnitude is at most
+/// `step_bound_ms`. A larger single-sample jump is a wall STEP (the `qpc_drift` verdict's), not a
+/// rate, and is left out. Saturating, so no input can overflow. Fewer than two samples → 0.
+///
+/// Byte-for-byte mirror of `genlock_media_clock_window_drift_ms` in `GenlockLockState.hpp` — the
+/// parity gate `tests/genlock_lock_state_parity.rs` keeps the two identical.
+pub fn media_clock_window_drift_ms(samples: &[i64], step_bound_ms: i64) -> i64 {
+    let mut sum: i64 = 0;
+    for w in samples.windows(2) {
+        let jump = w[1].saturating_sub(w[0]);
+        if jump.saturating_abs() > step_bound_ms {
+            continue;
+        }
+        sum = sum.saturating_add(jump);
+    }
+    sum
+}
+
+/// Decide the media-clock verdict. `Undisciplined` when the Windows discipline fell back to raw QPC
+/// while dantesync answers (`clock_present`); else `Drift` when the window is ready (spans ≥ 90 % of
+/// [`GENLOCK_MEDIA_CLOCK_WINDOW_S`]) and `|drift_ms|` exceeds `drift_bound_ms`; else `Ok`.
+///
+/// Byte-for-byte mirror of `genlock_media_clock_verdict` in `GenlockLockState.hpp` (parity-gated).
+pub fn media_clock_verdict(
+    window_ready: bool,
+    drift_ms: i64,
+    drift_bound_ms: i64,
+    discipline: MediaDiscipline,
+    clock_present: bool,
+) -> MediaClock {
+    if clock_present && discipline.is_raw_fallback() {
+        return MediaClock::Undisciplined;
+    }
+    if window_ready && drift_ms.saturating_abs() > drift_bound_ms {
+        return MediaClock::Drift;
+    }
+    MediaClock::Ok
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -391,6 +525,7 @@ mod tests {
             output_stamping: true,
             audio_unpaired: false,
             audio_unexpected: false,
+            media_clock: MediaClock::Ok,
         }
     }
 
@@ -723,6 +858,7 @@ mod tests {
         assert_eq!(LockReason::QpcDrift.code(), 8);
         assert_eq!(LockReason::AudioPairing.code(), 9);
         assert_eq!(LockReason::AudioUnexpected.code(), 10);
+        assert_eq!(LockReason::MediaClock.code(), 11);
     }
 
     // --- #1299 Part 3: the connected-phase-only recent-event feed + offender attribution ----------
@@ -921,5 +1057,146 @@ mod tests {
         let mut f = healthy();
         f.qpc_drift_beyond_bound = v.beyond_bound;
         assert_eq!(decide(&f), (LockState::Degraded, LockReason::QpcDrift));
+    }
+
+    // --- Issue 1372 part D: the media-clock (audio clock) term ---------------------------------
+
+    #[test]
+    fn media_clock_drift_is_degraded_media_clock() {
+        let mut f = healthy();
+        f.media_clock = MediaClock::Drift;
+        assert_eq!(decide(&f), (LockState::Degraded, LockReason::MediaClock));
+        f.media_clock = MediaClock::Undisciplined;
+        assert_eq!(decide(&f), (LockState::Degraded, LockReason::MediaClock));
+    }
+
+    #[test]
+    fn media_clock_never_leaves_unlocked_and_never_masks_an_unlock() {
+        // The term only DEGRADES: a clock-down box stays UNLOCKED/clock, a no-input box stays
+        // UNLOCKED/no_input_locked, whatever the media clock says.
+        for mc in [MediaClock::Drift, MediaClock::Undisciplined] {
+            let mut f = healthy();
+            f.media_clock = mc;
+            f.clock_present = false;
+            assert_eq!(decide(&f), (LockState::Unlocked, LockReason::Clock));
+            let mut f = healthy();
+            f.media_clock = mc;
+            f.n_locked = 0;
+            assert_eq!(decide(&f), (LockState::Unlocked, LockReason::NoInputLocked));
+        }
+    }
+
+    #[test]
+    fn qpc_step_beats_media_clock_and_media_clock_beats_audio() {
+        let mut f = healthy();
+        f.media_clock = MediaClock::Drift;
+        f.qpc_drift_beyond_bound = true;
+        assert_eq!(decide(&f), (LockState::Degraded, LockReason::QpcDrift));
+        let mut f = healthy();
+        f.media_clock = MediaClock::Drift;
+        f.audio_unpaired = true;
+        f.audio_unexpected = true;
+        assert_eq!(decide(&f), (LockState::Degraded, LockReason::MediaClock));
+    }
+
+    #[test]
+    fn window_drift_sums_the_rate_and_leaves_a_step_out() {
+        // The pre-part-A stream: +1 ms every ~75 samples (≈ 8 ms over the 600 s window).
+        let mut s = vec![0i64];
+        for i in 1..=600i64 {
+            s.push(i / 75);
+        }
+        assert_eq!(
+            media_clock_window_drift_ms(&s, GENLOCK_QPC_STEP_BOUND_MS),
+            8
+        );
+        // A 40 ms wall step in the middle is the step verdict's, never counted as drift.
+        let mut stepped = s.clone();
+        for v in stepped.iter_mut().skip(301) {
+            *v += 40;
+        }
+        assert_eq!(
+            media_clock_window_drift_ms(&stepped, GENLOCK_QPC_STEP_BOUND_MS),
+            8
+        );
+        // Exactly the step bound still counts (strictly greater is a step).
+        assert_eq!(
+            media_clock_window_drift_ms(&[0, 33], GENLOCK_QPC_STEP_BOUND_MS),
+            33
+        );
+        assert_eq!(
+            media_clock_window_drift_ms(&[0, 34], GENLOCK_QPC_STEP_BOUND_MS),
+            0
+        );
+        // Negative drift, truncation noise that returns, fewer than two samples.
+        assert_eq!(media_clock_window_drift_ms(&[0, -1, -2, -3], 33), -3);
+        assert_eq!(media_clock_window_drift_ms(&[5, 6, 5, 6, 5], 33), 0);
+        assert_eq!(media_clock_window_drift_ms(&[7], 33), 0);
+        assert_eq!(media_clock_window_drift_ms(&[], 33), 0);
+        // Saturating at the extremes, never a panic.
+        assert_eq!(
+            media_clock_window_drift_ms(&[i64::MIN, i64::MAX], i64::MAX),
+            i64::MAX
+        );
+    }
+
+    #[test]
+    fn drift_verdict_follows_the_bound_and_waits_for_the_window() {
+        let b = GENLOCK_MEDIA_CLOCK_DRIFT_BOUND_MS;
+        let a = MediaDiscipline::Active;
+        // Pre-part-A stream (≈ 8 ms / 10 min) -> DRIFT; a disciplined box (0) and truncation
+        // noise (±1, ±2) -> OK.
+        assert_eq!(media_clock_verdict(true, 8, b, a, true), MediaClock::Drift);
+        assert_eq!(media_clock_verdict(true, -3, b, a, true), MediaClock::Drift);
+        for d in [-2, -1, 0, 1, 2] {
+            assert_eq!(media_clock_verdict(true, d, b, a, true), MediaClock::Ok);
+        }
+        // Not ready (the window is not yet ~full) -> never judged on drift.
+        assert_eq!(media_clock_verdict(false, 99, b, a, true), MediaClock::Ok);
+        // Linux: not applicable, judged on drift only.
+        let na = MediaDiscipline::NotApplicable;
+        assert_eq!(media_clock_verdict(true, 0, b, na, true), MediaClock::Ok);
+        assert_eq!(media_clock_verdict(true, 5, b, na, true), MediaClock::Drift);
+    }
+
+    #[test]
+    fn a_raw_qpc_fallback_while_dantesync_runs_is_undisciplined() {
+        let b = GENLOCK_MEDIA_CLOCK_DRIFT_BOUND_MS;
+        for d in [
+            MediaDiscipline::Disabled,
+            MediaDiscipline::ReadFailed,
+            MediaDiscipline::ApiMissing,
+        ] {
+            assert!(d.is_raw_fallback());
+            // Immediately, before any drift accrues and before the window is ready.
+            assert_eq!(
+                media_clock_verdict(false, 0, b, d, true),
+                MediaClock::Undisciplined
+            );
+            // No dantesync answering: raw QPC is the right clock, judged on drift only.
+            assert_eq!(media_clock_verdict(false, 0, b, d, false), MediaClock::Ok);
+            assert_eq!(media_clock_verdict(true, 9, b, d, false), MediaClock::Drift);
+        }
+        for d in [
+            MediaDiscipline::Unknown,
+            MediaDiscipline::Active,
+            MediaDiscipline::NotApplicable,
+        ] {
+            assert!(!d.is_raw_fallback());
+            assert_eq!(media_clock_verdict(false, 0, b, d, true), MediaClock::Ok);
+        }
+    }
+
+    #[test]
+    fn media_codes_match_the_c_and_libobs_values() {
+        assert_eq!(MediaClock::Ok.code(), 0);
+        assert_eq!(MediaClock::Drift.code(), 1);
+        assert_eq!(MediaClock::Undisciplined.code(), 2);
+        assert_eq!(MediaDiscipline::Unknown.code(), 0);
+        assert_eq!(MediaDiscipline::Active.code(), 1);
+        assert_eq!(MediaDiscipline::Disabled.code(), 2);
+        assert_eq!(MediaDiscipline::ReadFailed.code(), 3);
+        assert_eq!(MediaDiscipline::ApiMissing.code(), 4);
+        assert_eq!(MediaDiscipline::NotApplicable.code(), 5);
     }
 }

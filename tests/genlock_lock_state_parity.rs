@@ -19,7 +19,9 @@
 //! no test.
 
 use camera_box::genlock_forced_table_audit::is_camera_input;
-use camera_box::genlock_lock_state::{decide, input_phase_events, GenlockFacets, InputEventCounts};
+use camera_box::genlock_lock_state::{
+    decide, input_phase_events, GenlockFacets, InputEventCounts, MediaClock,
+};
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
@@ -55,7 +57,8 @@ fn lift_decision() -> String {
 }
 
 /// The facet grid both sides must agree on: an exhaustive sweep of all 2^8 boolean-flag
-/// combinations (the #1303 `audio_unpaired` is the 8th flag bit 128, `audio_unexpected` the 9th bit 256) crossed with a small set of
+/// combinations (the #1303 `audio_unpaired` is the 8th flag bit 128, `audio_unexpected` the 9th bit 256)
+/// crossed with the three issue-1372-part-D `media_clock` verdicts and a small set of
 /// (n_inputs, n_locked, n_absent) triples — including the impossible `n_locked > n_inputs` and
 /// `n_absent > n_inputs` (the decision is total and both ports must treat them identically). The
 /// #1299 n_absent axis exercises: none absent (old behaviour), some absent with a real connected
@@ -93,23 +96,27 @@ fn vectors() -> Vec<GenlockFacets> {
         (3, 0, 2, 3),   // n_absent + n_idle > n_inputs (impossible) -> saturate n_connected to 0
     ];
     let mut v = Vec::new();
+    let media = [MediaClock::Ok, MediaClock::Drift, MediaClock::Undisciplined];
     for &(n_inputs, n_locked, n_absent, n_idle) in &counts {
         for bits in 0u32..(1 << 9) {
-            v.push(GenlockFacets {
-                n_inputs,
-                n_locked,
-                n_absent,
-                n_idle,
-                recent_event: bits & 1 != 0,
-                qpc_drift_beyond_bound: bits & 2 != 0,
-                clock_present: bits & 4 != 0,
-                clock_locked: bits & 8 != 0,
-                clock_ntp_failed: bits & 16 != 0,
-                output_present: bits & 32 != 0,
-                output_stamping: bits & 64 != 0,
-                audio_unpaired: bits & 128 != 0,
-                audio_unexpected: bits & 256 != 0, // #1303 the 9th flag
-            });
+            for &media_clock in &media {
+                v.push(GenlockFacets {
+                    n_inputs,
+                    n_locked,
+                    n_absent,
+                    n_idle,
+                    recent_event: bits & 1 != 0,
+                    qpc_drift_beyond_bound: bits & 2 != 0,
+                    clock_present: bits & 4 != 0,
+                    clock_locked: bits & 8 != 0,
+                    clock_ntp_failed: bits & 16 != 0,
+                    output_present: bits & 32 != 0,
+                    output_stamping: bits & 64 != 0,
+                    audio_unpaired: bits & 128 != 0,
+                    audio_unexpected: bits & 256 != 0, // #1303 the 9th flag
+                    media_clock,                       // issue 1372 part D
+                });
+            }
         }
     }
     v
@@ -121,14 +128,14 @@ fn c_lock_state_decision_matches_the_rust_authority_1298() {
     let vs = vectors();
 
     // --- build the C harness --------------------------------------------------------
+    // One table row per vector + one loop (issue 1372 part D tripled the grid with the media_clock
+    // axis; ~35k straight-line assignments took ~1 min to compile at -O1, a table compiles in <1 s).
     let mut c = String::from("#include <stdio.h>\n");
     c.push_str(&block);
-    c.push_str("int main(void){\n    genlock_lock_facets_t f; genlock_lock_reason_t r; genlock_lock_state_t s;\n");
+    c.push_str("static const int V[][14] = {\n");
     for g in &vs {
         c.push_str(&format!(
-            "    f.n_inputs={}; f.n_locked={}; f.n_absent={}; f.n_idle={}; f.recent_event={}; f.qpc_drift_beyond_bound={}; \
-             f.clock_present={}; f.clock_locked={}; f.clock_ntp_failed={}; f.output_present={}; f.output_stamping={}; f.audio_unpaired={}; f.audio_unexpected={};\n\
-             \x20   s=genlock_decide_lock_state(&f,&r); printf(\"%d %d\\n\",(int)s,(int)r);\n",
+            "    {{{},{},{},{},{},{},{},{},{},{},{},{},{},{}}},\n",
             g.n_inputs,
             g.n_locked,
             g.n_absent,
@@ -142,8 +149,22 @@ fn c_lock_state_decision_matches_the_rust_authority_1298() {
             g.output_stamping as i32,
             g.audio_unpaired as i32,
             g.audio_unexpected as i32,
+            g.media_clock.code(),
         ));
     }
+    c.push_str(
+        "};\n\
+         int main(void){\n\
+         \x20   genlock_lock_facets_t f; genlock_lock_reason_t r; genlock_lock_state_t s; size_t i;\n\
+         \x20   for (i = 0; i < sizeof(V) / sizeof(V[0]); i++) {\n\
+         \x20       f.n_inputs=V[i][0]; f.n_locked=V[i][1]; f.n_absent=V[i][2]; f.n_idle=V[i][3];\n\
+         \x20       f.recent_event=V[i][4]; f.qpc_drift_beyond_bound=V[i][5]; f.clock_present=V[i][6];\n\
+         \x20       f.clock_locked=V[i][7]; f.clock_ntp_failed=V[i][8]; f.output_present=V[i][9];\n\
+         \x20       f.output_stamping=V[i][10]; f.audio_unpaired=V[i][11]; f.audio_unexpected=V[i][12];\n\
+         \x20       f.media_clock=V[i][13];\n\
+         \x20       s=genlock_decide_lock_state(&f,&r); printf(\"%d %d\\n\",(int)s,(int)r);\n\
+         \x20   }\n",
+    );
     c.push_str("    return 0;\n}\n");
 
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("genlock_lock_state_parity_1298");
@@ -209,10 +230,11 @@ fn c_lock_state_decision_matches_the_rust_authority_1298() {
         let got_rs = (state.code(), reason.code());
         if got_rs != *got_c {
             diffs.push(format!(
-                "  n_inputs={} n_locked={} n_absent={} n_idle={} recent={} qpc={} clk_present={} clk_locked={} ntp={} out_present={} out_stamp={} audio_unpaired={} audio_unexpected={} -> C {:?}, Rust {:?}",
+                "  n_inputs={} n_locked={} n_absent={} n_idle={} recent={} qpc={} clk_present={} clk_locked={} ntp={} out_present={} out_stamp={} audio_unpaired={} audio_unexpected={} media_clock={} -> C {:?}, Rust {:?}",
                 g.n_inputs, g.n_locked, g.n_absent, g.n_idle, g.recent_event as i32, g.qpc_drift_beyond_bound as i32,
                 g.clock_present as i32, g.clock_locked as i32, g.clock_ntp_failed as i32,
-                g.output_present as i32, g.output_stamping as i32, g.audio_unpaired as i32, g.audio_unexpected as i32, got_c, got_rs
+                g.output_present as i32, g.output_stamping as i32, g.audio_unpaired as i32, g.audio_unexpected as i32,
+                g.media_clock.code(), got_c, got_rs
             ));
         }
     }
@@ -591,5 +613,197 @@ fn c_qpc_drift_beyond_bound_matches_the_rust_authority_1299_part4() {
         diffs.is_empty(),
         "#1299 Part 4: the vendored C genlock_qpc_drift_beyond_bound DIVERGED from the Rust authority on {} of {} vectors — the windowed wall-vs-QPC drift decision must be numerically identical on both ports:\n{}",
         diffs.len(), vs.len(), diffs.join("\n")
+    );
+}
+
+/// Issue 1372 part D — lift the media-clock block VERBATIM out of the header: from the
+/// `genlock_media_discipline` enum through `genlock_media_clock_verdict`'s closing brace (it sits AFTER
+/// `genlock_qpc_drift_beyond_bound`, so no earlier lift is disturbed). The harness compares both the
+/// window-drift reduction and the verdict against the Rust authority.
+fn lift_media_clock() -> String {
+    let path = repo(HEADER);
+    let src = fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+    let start = src
+        .find("typedef enum genlock_media_discipline {")
+        .unwrap_or_else(|| {
+            panic!("issue 1372 part D: {HEADER} no longer defines the genlock_media_discipline enum — the media-clock term's C mirror is gone, nothing to parity-check.")
+        });
+    let func = src
+        .find("static inline genlock_media_clock_t genlock_media_clock_verdict(")
+        .unwrap_or_else(|| {
+            panic!("issue 1372 part D: {HEADER} no longer defines genlock_media_clock_verdict")
+        });
+    assert!(
+        func > start,
+        "issue 1372 part D: the media-clock enums and genlock_media_clock_verdict are no longer contiguous in {HEADER}"
+    );
+    let end = src[func..]
+        .find("\n}\n")
+        .map(|i| func + i + 3)
+        .expect("issue 1372 part D: genlock_media_clock_verdict has no closing brace");
+    src[start..end].to_string()
+}
+
+#[test]
+fn c_media_clock_matches_the_rust_authority_1372_part_d() {
+    use camera_box::genlock_lock_state::{
+        media_clock_verdict, media_clock_window_drift_ms, MediaDiscipline,
+    };
+    let block = lift_media_clock();
+
+    // Window-drift vectors: the pre-part-A stream ramp, a disciplined flat window, truncation noise,
+    // a 40 ms step inside a ramp, the exact step bound, a negative ramp, 0/1 samples, and the i64
+    // extremes the saturating arithmetic must agree on.
+    let ramp: Vec<i64> = (0..=600i64).map(|i| i / 75).collect();
+    let mut stepped = ramp.clone();
+    for v in stepped.iter_mut().skip(301) {
+        *v += 40;
+    }
+    let windows: Vec<(Vec<i64>, i64)> = vec![
+        (ramp.clone(), 33),
+        (stepped, 33),
+        (vec![0; 600], 33),
+        (vec![5, 6, 5, 6, 5, 6], 33),
+        (vec![0, 33], 33),
+        (vec![0, 34], 33),
+        (vec![0, -34, -35], 33),
+        (vec![0, -1, -2, -3, -4], 33),
+        (vec![7], 33),
+        (vec![], 33),
+        (vec![i64::MIN, i64::MAX], i64::MAX),
+        (vec![i64::MAX, i64::MIN], i64::MAX),
+        (vec![i64::MAX - 1, i64::MAX, i64::MAX], 5),
+        (vec![0, i64::MAX, 0, i64::MAX], i64::MAX),
+    ];
+
+    let disciplines = [
+        MediaDiscipline::Unknown,
+        MediaDiscipline::Active,
+        MediaDiscipline::Disabled,
+        MediaDiscipline::ReadFailed,
+        MediaDiscipline::ApiMissing,
+        MediaDiscipline::NotApplicable,
+    ];
+    let drifts = [0i64, 1, 2, 3, -2, -3, 8, -67, i64::MIN, i64::MAX];
+    let mut verdicts: Vec<(bool, i64, i64, MediaDiscipline, bool)> = Vec::new();
+    for &ready in &[false, true] {
+        for &d in &drifts {
+            for &disc in &disciplines {
+                for &present in &[false, true] {
+                    verdicts.push((ready, d, 2, disc, present));
+                }
+            }
+        }
+    }
+
+    let mut c = String::from("#include <stdio.h>\n#include <stdint.h>\n#include <inttypes.h>\n");
+    c.push_str(&block);
+    c.push_str("int main(void){\n");
+    for (i, (w, sb)) in windows.iter().enumerate() {
+        let vals: Vec<String> = w
+            .iter()
+            .map(|v| {
+                if *v == i64::MIN {
+                    "INT64_MIN".to_string()
+                } else {
+                    format!("INT64_C({v})")
+                }
+            })
+            .collect();
+        c.push_str(&format!(
+            "    {{ static const int64_t w{i}[] = {{{}}}; printf(\"W %\" PRId64 \"\\n\", genlock_media_clock_window_drift_ms(w{i}, {}, INT64_C({sb}))); }}\n",
+            if vals.is_empty() { "0".to_string() } else { vals.join(",") },
+            w.len()
+        ));
+    }
+    for &(ready, d, bound, disc, present) in &verdicts {
+        let dv = if d == i64::MIN {
+            "INT64_MIN".to_string()
+        } else {
+            format!("INT64_C({d})")
+        };
+        c.push_str(&format!(
+            "    printf(\"V %d\\n\", (int)genlock_media_clock_verdict({}, {dv}, INT64_C({bound}), {}, {}));\n",
+            i32::from(ready),
+            disc.code(),
+            i32::from(present)
+        ));
+    }
+    c.push_str("    return 0;\n}\n");
+
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("genlock_media_clock_parity_1372");
+    fs::create_dir_all(&dir).expect("create the parity scratch dir");
+    let cfile = dir.join("media.c");
+    let bin = dir.join("media.bin");
+    fs::write(&cfile, &c).expect("write the parity harness");
+
+    let cc = std::env::var("CC").unwrap_or_else(|_| "cc".to_string());
+    let out = Command::new(&cc)
+        .args(["-std=gnu99", "-Wall", "-Wextra", "-Wconversion", "-Werror", "-O1"])
+        .arg(&cfile)
+        .arg("-o")
+        .arg(&bin)
+        .output()
+        .unwrap_or_else(|e| {
+            panic!("issue 1372 part D: could not run the C compiler `{cc}` ({e}). This gate compiles the vendored media-clock term to prove the C and the Rust authority agree; it must FAIL rather than skip. Install a C compiler or set CC.")
+        });
+    assert!(
+        out.status.success(),
+        "issue 1372 part D: the media-clock block lifted from {HEADER} does NOT COMPILE standalone under -Wall -Wextra -Wconversion -Werror:\n--- cc stderr ---\n{}\n--- harness ---\n{c}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let run = Command::new(&bin)
+        .output()
+        .expect("issue 1372 part D: the compiled media-clock parity harness failed to execute");
+    assert!(
+        run.status.success(),
+        "issue 1372 part D: harness exited non-zero: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let stdout = String::from_utf8(run.stdout).expect("harness stdout is utf-8");
+    let c_windows: Vec<i64> = stdout
+        .lines()
+        .filter_map(|l| l.strip_prefix("W "))
+        .map(|v| v.parse().expect("window drift i64"))
+        .collect();
+    let c_verdicts: Vec<u8> = stdout
+        .lines()
+        .filter_map(|l| l.strip_prefix("V "))
+        .map(|v| v.parse().expect("verdict code"))
+        .collect();
+    assert_eq!(
+        c_windows.len(),
+        windows.len(),
+        "issue 1372 part D: window line count"
+    );
+    assert_eq!(
+        c_verdicts.len(),
+        verdicts.len(),
+        "issue 1372 part D: verdict line count"
+    );
+
+    let mut diffs = Vec::new();
+    for ((w, sb), &cv) in windows.iter().zip(&c_windows) {
+        let rv = media_clock_window_drift_ms(w, *sb);
+        if rv != cv {
+            diffs.push(format!(
+                "  window len={} first={:?} bound={sb} -> C {cv}, Rust {rv}",
+                w.len(),
+                w.first()
+            ));
+        }
+    }
+    for (&(ready, d, bound, disc, present), &cv) in verdicts.iter().zip(&c_verdicts) {
+        let rv = media_clock_verdict(ready, d, bound, disc, present).code();
+        if rv != cv {
+            diffs.push(format!(
+                "  ready={ready} drift={d} bound={bound} discipline={disc:?} present={present} -> C {cv}, Rust {rv}"
+            ));
+        }
+    }
+    assert!(
+        diffs.is_empty(),
+        "issue 1372 part D: the vendored C media-clock term DIVERGED from the Rust authority — the LOCK indicator must decide the audio-clock term identically on both ports:\n{}",
+        diffs.join("\n")
     );
 }
