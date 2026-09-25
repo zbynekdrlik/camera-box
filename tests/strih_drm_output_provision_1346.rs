@@ -23,6 +23,15 @@ fn read(rel: &str) -> String {
 
 /// Source the lib and run `body` (optional `stdin`). Returns (exit code, stdout, stderr).
 fn run(body: &str, stdin: Option<&str>) -> (i32, String, String) {
+    run_full(body, stdin, &[])
+}
+
+/// `run` with extra environment variables (fixture text is passed by env, never inlined into bash).
+fn run_env(body: &str, envs: &[(&str, &str)]) -> (i32, String, String) {
+    run_full(body, None, envs)
+}
+
+fn run_full(body: &str, stdin: Option<&str>, envs: &[(&str, &str)]) -> (i32, String, String) {
     use std::io::Write;
     let lib = root().join("scripts/lib/strih-drm-output.sh");
     assert!(lib.exists(), "issue 1346: {} must exist", lib.display());
@@ -31,6 +40,7 @@ fn run(body: &str, stdin: Option<&str>) -> (i32, String, String) {
         .arg("-c")
         .arg(&harness)
         .env("LIB", &lib)
+        .envs(envs.iter().copied())
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -97,6 +107,121 @@ fn hdmi_connected_reads_the_kernel_connector_status() {
     );
     let _ = fs::remove_dir_all(&d);
     let _ = fs::remove_dir_all(&empty);
+}
+
+/// main design 5840508308: on strih-lx the NVIDIA connector reads `card1-HDMI-A-1 disconnected`
+/// in sysfs while X reports `HDMI-0 connected` (the NVIDIA X driver does not drive the KMS
+/// connector status). With the box fact `vk-direct` the detector reads the X RandR view instead --
+/// connected with a mode, and connected with NO mode/CRTC (how xrandr lists HDMI-0 while vk-direct
+/// holds it). The lease backend keeps the sysfs read byte-identical and ignores the xrandr text.
+#[test]
+fn hdmi_connected_vk_direct_reads_the_x_randr_view() {
+    let d = scratch("sysfs_vk");
+    for (name, st) in [
+        ("card1-eDP-1", "connected"),
+        ("card1-HDMI-A-1", "disconnected"),
+    ] {
+        fs::create_dir_all(d.join(name)).unwrap();
+        fs::write(d.join(name).join("status"), format!("{st}\n")).unwrap();
+    }
+    let dir = d.to_str().unwrap();
+    let with_mode = "Screen 0: minimum 8 x 8, current 1920 x 1200\n\
+                     eDP-1-1 connected primary 1920x1200+0+0 (normal left inverted right x axis y axis) 344mm x 215mm\n\
+                     HDMI-0 connected 1920x1080+1920+0 (normal left inverted right x axis y axis) 520mm x 290mm\n";
+    let no_crtc = "Screen 0: minimum 8 x 8, current 1920 x 1200\n\
+                   eDP-1-1 connected primary 1920x1200+0+0 (normal left inverted right x axis y axis) 344mm x 215mm\n\
+                   HDMI-0 connected (normal left inverted right x axis y axis)\n";
+    let unplugged =
+        "eDP-1-1 connected primary 1920x1200+0+0 (normal left inverted right x axis y axis)\n\
+                     HDMI-0 disconnected (normal left inverted right x axis y axis)\n";
+    for (backend, xr, want, why) in [
+        (
+            "vk-direct",
+            with_mode,
+            true,
+            "X shows HDMI-0 connected with a mode",
+        ),
+        (
+            "vk-direct",
+            no_crtc,
+            true,
+            "vk-direct holds HDMI-0: connected, no mode/CRTC",
+        ),
+        ("vk-direct", unplugged, false, "X shows HDMI-0 disconnected"),
+        (
+            "vk-direct",
+            "",
+            false,
+            "no X answer (Xorg :0 not up) is never a false positive",
+        ),
+        (
+            "lease",
+            with_mode,
+            false,
+            "lease keeps the kernel status (disconnected here)",
+        ),
+    ] {
+        let (c, _o, _e) = run_env(
+            &format!("strih_drm_hdmi_connected '{dir}' {backend} \"$XR\" || exit $?"),
+            &[("XR", xr)],
+        );
+        assert_eq!(c == 0, want, "{backend}: {why}");
+    }
+
+    // The lease backend ignores the xrandr text entirely: kernel connected -> connected, whatever X says.
+    fs::write(d.join("card1-HDMI-A-1").join("status"), "connected\n").unwrap();
+    let (c, _o, _e) = run_env(
+        &format!("strih_drm_hdmi_connected '{dir}' lease \"$XR\" || exit $?"),
+        &[("XR", unplugged)],
+    );
+    assert_eq!(c, 0, "lease: the kernel status wins over the X view");
+    let (c2, _o, _e) = run(&format!("strih_drm_hdmi_connected '{dir}'"), None);
+    assert_eq!(c2, 0, "no backend argument = the lease read, unchanged");
+    let _ = fs::remove_dir_all(&d);
+}
+
+/// The X RandR gatherer (`strih_drm_xrandr_query`): queries display :0 with the desktop user's
+/// Xauthority and prints nothing (rc 0, never aborting a set -e caller) when xrandr fails.
+#[test]
+fn xrandr_query_reads_display_zero_and_never_aborts() {
+    let d = scratch("fake_xrandr");
+    let ok = d.join("ok");
+    let bad = d.join("bad");
+    for (dir, body) in [
+        (
+            &ok,
+            "#!/bin/sh\necho \"DISPLAY=$DISPLAY XAUTHORITY=$XAUTHORITY args=$*\"\necho 'HDMI-0 connected (normal)'\n",
+        ),
+        (&bad, "#!/bin/sh\necho 'cannot open display :0' >&2\nexit 1\n"),
+    ] {
+        fs::create_dir_all(dir).unwrap();
+        // a non-root `id` keeps the test on the inline branch even on a root CI runner
+        for (name, text) in [("xrandr", body), ("id", "#!/bin/sh\necho 1000\n")] {
+            let p = dir.join(name);
+            fs::write(&p, text).unwrap();
+            Command::new("chmod").arg("+x").arg(&p).status().unwrap();
+        }
+    }
+    let (c, out, _e) = run_env(
+        "PATH=\"$FAKE:$PATH\"; strih_drm_xrandr_query /home/strihuser strihuser",
+        &[("FAKE", ok.to_str().unwrap())],
+    );
+    assert_eq!(c, 0);
+    assert!(
+        out.contains("DISPLAY=:0 XAUTHORITY=/home/strihuser/.Xauthority args=--query"),
+        "queries :0 with the desktop user's Xauthority: {out}"
+    );
+    assert!(out.contains("HDMI-0 connected"), "{out}");
+    let (c2, out2, _e) = run_env(
+        "PATH=\"$FAKE:$PATH\"; x=\"$(strih_drm_xrandr_query /home/strihuser strihuser)\"; printf '[%s]' \"$x\"",
+        &[("FAKE", bad.to_str().unwrap())],
+    );
+    assert_eq!(
+        (c2, out2.as_str()),
+        (0, "[]"),
+        "a failing xrandr prints nothing and never aborts the set -e caller"
+    );
+    let _ = fs::remove_dir_all(&d);
 }
 
 #[test]
@@ -478,6 +603,58 @@ fn setup_and_verify_take_the_backend_from_the_box_fact() {
     ] {
         assert!(v.contains(token), "verify-strih must contain `{token}`");
     }
+}
+
+/// main design 5840508308: setup-strih step 6 and verify-strih item 4c both detect the HDMI monitor
+/// with the box's backend, so a vk-direct box reads the X RandR view (the sysfs status of the NVIDIA
+/// connector stays `disconnected`) and a lease box keeps the kernel read.
+#[test]
+fn setup_and_verify_detect_the_hdmi_monitor_by_backend() {
+    let s = provision_body();
+    for token in [
+        "DRM_XRANDR=\"$(strih_drm_xrandr_query \"$user_home\" \"$desktop_user\")\"",
+        "elif strih_drm_hdmi_connected /sys/class/drm \"$backend\" \"$DRM_XRANDR\"; then",
+        "DRM_CONN=\"$(printf '%s\\n' \"$DRM_XRANDR\" | strih_drm_hdmi_output_from_xrandr)\"",
+    ] {
+        assert!(
+            s.contains(token),
+            "the step-6 provisioning must contain `{token}`"
+        );
+    }
+    let gather = s
+        .find("DRM_XRANDR=\"$(strih_drm_xrandr_query")
+        .expect("the X RandR gather");
+    let detect = s
+        .find("elif strih_drm_hdmi_connected /sys/class/drm \"$backend\"")
+        .expect("the backend-aware detector");
+    assert!(
+        gather < detect,
+        "the X RandR view is read before the detector uses it"
+    );
+    assert!(
+        !s.contains("elif strih_drm_hdmi_connected /sys/class/drm; then"),
+        "the backend-blind sysfs-only detection is gone from step 6"
+    );
+
+    let v = read("scripts/verify-strih.sh");
+    let fact = v
+        .find("DRM_BACKEND_FACT=\"$(strih_lx_hdmi_output_backend")
+        .expect("verify reads the backend fact");
+    let xr = v
+        .find("DRM_XRANDR_V=\"$(strih_drm_xrandr_query \"$USER_HOME\"")
+        .expect("verify reads the X RandR view for vk-direct");
+    let det = v
+        .find("strih_drm_hdmi_connected /sys/class/drm \"$DRM_BACKEND_FACT\" \"$DRM_XRANDR_V\" && DRM_HDMI=1")
+        .expect("verify's detector takes the backend fact + the X view");
+    assert!(
+        fact < xr && xr < det,
+        "verify: backend fact -> X RandR view -> detector"
+    );
+    assert_eq!(
+        v.matches("strih_drm_hdmi_connected").count(),
+        1,
+        "verify runs the detector exactly once"
+    );
 }
 
 /// A dead vk-direct present loop is visible although `program scanout LIVE` stays in the log (review
