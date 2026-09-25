@@ -18,6 +18,7 @@ import re
 import shutil
 import stat
 import subprocess
+import sys
 import tempfile
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -245,54 +246,84 @@ def test_cli_suggest_pins_only_shutter_and_iso():
 # the bash transport, end to end with fakes
 # ---------------------------------------------------------------------------------------------
 FAKE_SSHPASS = r'''#!/usr/bin/env python3
-import json, os, re, sys
+# Emulates `sshpass -p PW ssh ... root@IP CMD`. The sysfs presence probe is emulated (the box's
+# /sys cannot be faked); every OTHER remote command -- the gphoto2 sessions with their on-box
+# single-gphoto2-user checks -- is really RUN by bash, with PATH = only the stub dir (systemctl,
+# pgrep, gphoto2 stubs + the real timeout), so the lib's generated remote text is what is tested.
+import json, os, subprocess, sys
 d = os.environ["FAKE_CAM_DIR"]
 args = sys.argv[1:]
 ip = next(a[len("root@"):] for a in args if a.startswith("root@"))
 cmd = args[-1]
-state_path = os.path.join(d, "state.json")
-state = json.load(open(state_path))
-def log(line):
-    with open(os.path.join(d, "calls.log"), "a") as f:
-        f.write(line + "\n")
+state = json.load(open(os.path.join(d, "state.json")))
 if "CTS_USB" in cmd:
-    log("PRESENCE " + ip)
+    with open(os.path.join(d, "calls.log"), "a") as f:
+        f.write("PRESENCE " + ip + "\n")
     p = state["present"].get(ip)
     if p is None:
         sys.exit(255)  # unreachable box: no marker line
     print("CTS_USB:%d" % p)
     sys.exit(0)
-if "--set-config" in cmd or "--get-config" in cmd:
-    # The remote shell's own single-gphoto2-user checks: only honoured when the command really
-    # carries them, so a command without the check cannot pass a relay-active test.
-    if state.get("relay_active") and "systemctl is-active --quiet bkshading-relay.service" in cmd:
-        print("CTS_RELAY_ACTIVE")
-        sys.exit(97)
-    if state.get("gphoto2_busy") and "pgrep -x gphoto2" in cmd:
-        print("CTS_GPHOTO2_BUSY")
-        sys.exit(98)
-    if state.get("read_exit"):
-        sys.exit(state["read_exit"])
-if "--set-config" in cmd:
-    log("SET " + ip + " " + " ".join(re.findall(r"--set-config (\S+)", cmd)))
-    for kv in re.findall(r"--set-config (\S+)", cmd):
+env = {"PATH": os.path.join(d, "stubs"), "FAKE_CAM_DIR": d, "FAKE_IP": ip}
+r = subprocess.run(["/bin/bash", "-c", cmd], env=env)
+sys.exit(r.returncode)
+'''
+
+STUB_SYSTEMCTL = r'''
+import json, os, sys
+d = os.environ["FAKE_CAM_DIR"]
+state = json.load(open(os.path.join(d, "state.json")))
+assert sys.argv[1] == "is-active" and sys.argv[2] == "bkshading-relay.service", sys.argv
+s = state.get("relay_state", "inactive")
+after = state.get("relay_active_after_reads")
+if after is not None and state.get("reads", 0) >= after:
+    s = "active"
+print(s)
+sys.exit(0 if s == "active" else 3)
+'''
+
+STUB_PGREP = r'''
+import json, os, sys
+d = os.environ["FAKE_CAM_DIR"]
+state = json.load(open(os.path.join(d, "state.json")))
+assert sys.argv[1:] == ["-x", "gphoto2"], sys.argv
+sys.exit(0 if state.get("gphoto2_busy") else 1)
+'''
+
+STUB_GPHOTO2 = r'''
+import json, os, sys
+d = os.environ["FAKE_CAM_DIR"]
+ip = os.environ["FAKE_IP"]
+state_path = os.path.join(d, "state.json")
+state = json.load(open(state_path))
+args = sys.argv[1:]
+def log(line):
+    with open(os.path.join(d, "calls.log"), "a") as f:
+        f.write(line + "\n")
+if state.get("read_exit"):
+    sys.exit(state["read_exit"])
+sets = [args[i + 1] for i in range(len(args) - 1) if args[i] == "--set-config"]
+gets = [args[i + 1] for i in range(len(args) - 1) if args[i] == "--get-config"]
+if sets:
+    log("SET " + ip + " " + " ".join(sets))
+    for kv in sets:
         k, v = kv.split("=", 1)
         if k not in state.get("ignore", []):
             state["camera"][k] = v
     json.dump(state, open(state_path, "w"))
     sys.exit(0)
-if "--get-config" in cmd:
-    log("GET " + ip)
-    if state.get("read_fail"):
-        sys.stderr.write("*** Error: Could not detect any camera\n")
-        sys.exit(1)
-    for k in re.findall(r"--get-config (\S+)", cmd):
-        print("Label: %s" % k)
-        if state["camera"].get(k) is not None:
-            print("Current: %s" % state["camera"][k])
-        print("END")
-    sys.exit(0)
-sys.exit(99)
+log("GET " + ip)
+state["reads"] = state.get("reads", 0) + 1
+json.dump(state, open(state_path, "w"))
+if state.get("read_fail"):
+    sys.stderr.write("*** Error: Could not detect any camera\n")
+    sys.exit(1)
+for k in gets:
+    print("Label: %s" % k)
+    if state["camera"].get(k) is not None:
+        print("Current: %s" % state["camera"][k])
+    print("END")
+sys.exit(0)
 '''
 
 FAKE_OBS_PHASE2 = r'''#!/usr/bin/env python3
@@ -306,23 +337,34 @@ print(json.dumps({"busy": busy, "diagnostics": [{"host": "stream", "streaming": 
 
 class Rig:
     def __init__(self, present, camera, baseline_values, ack="", busy=False, ignore=(), read_fail=False,
-                 relay_active=False, gphoto2_busy=False, read_exit=0):
+                 relay_state="inactive", relay_active_after_reads=None, gphoto2_busy=False, read_exit=0,
+                 no_pgrep=False):
         self.root = tempfile.mkdtemp(prefix="cts1371-")
         self.here = os.path.join(self.root, "scripts")
         self.bin = os.path.join(self.root, "bin")
+        stubs = os.path.join(self.root, "stubs")
         os.makedirs(os.path.join(self.here, "lib"))
         os.makedirs(self.bin)
+        os.makedirs(stubs)
         shutil.copy(MODULE, os.path.join(self.here, "camera_test_settings.py"))
         for name in ("camera-test-settings.sh", "cambox-offline-ack.sh", "stray-session-check.sh",
                      "bkshading-relay-runtime.sh"):
             shutil.copy(os.path.join(REPO, "scripts", "lib", name), os.path.join(self.here, "lib", name))
         self._exe(os.path.join(self.bin, "sshpass"), FAKE_SSHPASS)
         self._exe(os.path.join(self.here, "obs_phase2.py"), FAKE_OBS_PHASE2)
+        # The on-box stubs run with PATH = the stub dir only, so they carry an absolute interpreter.
+        shebang = "#!%s\n" % sys.executable
+        self._exe(os.path.join(stubs, "systemctl"), shebang + STUB_SYSTEMCTL)
+        self._exe(os.path.join(stubs, "gphoto2"), shebang + STUB_GPHOTO2)
+        if not no_pgrep:
+            self._exe(os.path.join(stubs, "pgrep"), shebang + STUB_PGREP)
+        os.symlink(shutil.which("timeout"), os.path.join(stubs, "timeout"))
         with open(os.path.join(self.here, "camera-test-baseline.json"), "w") as f:
             f.write(_baseline_text(baseline_values))
         with open(os.path.join(self.root, "state.json"), "w") as f:
             json.dump({"present": present, "camera": camera, "ignore": list(ignore), "read_fail": read_fail,
-                       "relay_active": relay_active, "gphoto2_busy": gphoto2_busy, "read_exit": read_exit}, f)
+                       "relay_state": relay_state, "relay_active_after_reads": relay_active_after_reads,
+                       "gphoto2_busy": gphoto2_busy, "read_exit": read_exit, "reads": 0}, f)
         open(os.path.join(self.root, "calls.log"), "w").close()
         self.ack = ack
         self.busy = busy
@@ -450,10 +492,36 @@ def test_gphoto2_read_failure_on_a_present_camera_aborts():
 def test_a_relay_still_active_on_the_camera_box_aborts_by_name():
     # review finding: the issue-808 pause is best-effort, so "exactly one gphoto2 user" is checked
     # on the box, in the same remote command, before every gphoto2 session.
-    r = Rig({"10.77.9.61": 1}, dict(GOOD, iso="1600"), _pinned(), relay_active=True).run()
+    r = Rig({"10.77.9.61": 1}, dict(GOOD, iso="1600"), _pinned(), relay_state="active").run()
     assert r.rc == 1, r.out
     assert "bkshading-relay is still active on cam1 (10.77.9.61)" in r.out
-    assert not any(c.startswith(("SET", "GUARD")) for c in r.calls), r.calls
+    assert not any(c.startswith(("GET", "SET", "GUARD")) for c in r.calls), r.calls
+
+
+def test_a_relay_waiting_to_restart_counts_as_active():
+    # `systemctl is-active --quiet` is false for activating/deactivating; only a truly stopped
+    # unit lets the session run.
+    for st in ("activating", "deactivating", "reloading"):
+        r = Rig({"10.77.9.61": 1}, dict(GOOD), _pinned(), relay_state=st).run()
+        assert r.rc == 1, (st, r.out)
+        assert "bkshading-relay is still active" in r.out, (st, r.out)
+    for st in ("inactive", "failed", "unknown"):
+        r = Rig({"10.77.9.61": 1}, dict(GOOD), _pinned(), relay_state=st).run()
+        assert r.rc == 0, (st, r.out)
+
+
+def test_a_relay_that_comes_back_between_read_and_set_aborts_the_set():
+    r = Rig({"10.77.9.61": 1}, dict(GOOD, iso="1600"), _pinned(), relay_active_after_reads=1).run()
+    assert r.rc == 1, r.out
+    assert "bkshading-relay is still active" in r.out and "the set would race" in r.out
+    assert [c.split(" ")[0] for c in r.calls if not c.startswith("PRESENCE")] == ["GET", "GUARD"], r.calls
+
+
+def test_a_box_without_pgrep_refuses_instead_of_skipping_the_check():
+    r = Rig({"10.77.9.61": 1}, dict(GOOD), _pinned(), no_pgrep=True).run()
+    assert r.rc == 1, r.out
+    assert "pgrep is not available on cam1 (10.77.9.61)" in r.out
+    assert not any(c.startswith("GET") for c in r.calls), r.calls
 
 
 def test_a_leftover_gphoto2_process_aborts_by_name():
@@ -507,8 +575,6 @@ def test_recording_e2e_calls_the_step_once_after_the_relay_pause_trap():
 
 
 if __name__ == "__main__":
-    import sys
-
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     for fn in fns:
         fn()
