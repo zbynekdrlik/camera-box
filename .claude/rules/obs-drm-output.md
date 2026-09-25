@@ -19,6 +19,7 @@ paths:
   - "vendor/obs-studio/frontend/components/DrmOutputView.cpp"
   - "vendor/obs-studio/frontend/components/DrmOutputView.hpp"
   - "tests/drm_output_view_1346.rs"
+  - "tests/drm_output_view_mv_budget_1346.rs"
   - "vendor/obs-studio/libobs/obs-drm-output-backend.c"
   - "vendor/obs-studio/libobs/obs-drm-output-vk.c"
   - "vendor/obs-studio/libobs/obs-drm-output-vk.h"
@@ -300,6 +301,36 @@ absent = program, so imag is byte-for-byte unchanged in behaviour):
   asks the monitoring-surface budget gate `obs_aux_sender_should_skip` (issue 879 over the
   278/293/756/776 `obs_display_should_skip` + canvas-rate divisor): a skipped tick keeps the last frame
   on scanout, the anti-starvation floor still renders every K+1 ticks.
+- **GOTCHA — the view renders INSIDE the tick whose total the gate reads back (main design
+  5840501628, live 25.9.2026: `multiview-render rendered_fps=15` on vk-direct).** The #1063 consumed
+  term is `max(elapsed, obs->video.last_tick_total_ns)`, and the previous tick's total CONTAINS the
+  view's own Multiview render. That cost is also the gate's `ewma_ns`, so it was counted twice: after
+  a rendered tick, 15 ms program work + 14 ms Multiview read as 29 ms consumed + 14 ms ewma > the
+  30 ms budget, so the next tick skipped. Result: a strict render/skip alternation = 15 fps. The X
+  projector never hit it because `render_display()` budgets on `elapsed` only. The view therefore
+  calls `obs_aux_sender_should_skip_excluding(..., self_last_ns)` (obs.c). It subtracts the caller's
+  previous render from the previous tick's total, saturating. `obs_aux_sender_should_skip()` is its
+  `self_last_ns = 0` case, so the ndi_filter aux senders are unchanged.
+  - The view leaves its render out ONLY when that render ran in the immediately previous graphics
+    tick (the pure `drm_output_view_self_last_ns`, lift-tested in `tests/drm_output_view_1346.rs`).
+    The render records its cost and `obs_get_total_frames()` right after `gs_texrender_end()`,
+    BEFORE the scanout-buffer claim, because a failed claim or blit still spent that time in the
+    tick. `total_frames` advances once per processed tick (by the lag count on a lagged one), so the
+    render is excluded exactly when the difference is 1.
+  - Anything else excludes nothing: a lagged tick, no render yet, or a frame-hook call a backend
+    skipped. The vk-direct hook skips the call while the output is disarmed or its present loop is
+    dead (`drm_output_vk_wants_frames()` is a latch set at open and cleared at halt/death, NOT a
+    per-READY-image wait). The lease hook skips while `program_want` is false, and both skip on a
+    GL bind failure.
+  - Review round 1 corrected a first version that read-then-cleared the value per call. That
+    version carried a render across a stop/restart into a tick that did not contain it.
+  - The `multiview-render` line carries `self_ns=` (the value the gate last used). On a healthy
+    30 fps view it reads about the Multiview cost (~14e6).
+  - Tier-0 mirror: `src/render_budget.rs` (`display_should_skip` + `aux_consumed_ns` +
+    `aux_sender_should_skip_excluding`). C parity + the live numbers (pre 15 + mv 14 = 30/30, the
+    wrapper 15/30, pre 25 + mv 14 = the floor 7/30): `tests/drm_output_view_mv_budget_1346.rs`.
+  - Any NEW surface that renders inside the graphics tick and asks this gate must pass its own
+    previous cost the same way, or it runs at half rate whenever it fits the budget.
 - **Logs (all `drm-output:`, mutually non-substring with the M1/M2 markers and with
   `multiview-audit:` / `program-render-audit`):** `view=<v> (from <path>)` at autostart,
   `multiview renderer registered|cleared`, the one-shot `multiview bind LIVE`, the ~5 s

@@ -366,8 +366,20 @@ lease; strih-lx has run Xorg + openbox since 23.9.
   NOTE `hdmi-unplugged` when armed but unplugged; FAIL `classify-failed` (the strih_scenes import
   failed, the one-liner prints `? program`) / `config-missing` / `view-invalid` /
   `lease-not-live` (no `drm-output: program scanout LIVE` in the newest OBS log) /
-  `multiview-not-live` (view multiview but no `drm-output: multiview bind LIVE`). HDMI presence is the
-  KERNEL status — after a lease X RandR can stick at `disconnected`.
+  `multiview-not-live` (view multiview but no `drm-output: multiview bind LIVE`). HDMI presence
+  follows the backend (`strih_drm_hdmi_connected SYSFS BACKEND XRANDR_TEXT`):
+  - **lease** = the KERNEL status — after a lease X RandR can stick at `disconnected`;
+  - **vk-direct** = the X RandR view (`strih_drm_xrandr_query`, display :0 with the desktop user's
+    Xauthority). The NVIDIA X driver does not drive the KMS connector status: live strih-lx
+    25.9.2026 read `card1-HDMI-A-1 disconnected` with `HDMI-0 connected` in X. A connected output
+    with NO mode/CRTC counts too (how xrandr lists HDMI-0 while vk-direct holds it). An empty X answer
+    is never connected. Step 6 then SKIPs by name ("xrandr on :0 answered nothing"), and it queries
+    X only when no config exists yet. Verify reads the fact BEFORE the detector.
+  - An X view verify could not read on a vk-direct box grades **`x-unreadable` (FAIL)**. The cause
+    is Xorg down, or the caller cannot read the desktop user's `.Xauthority`. It is UNKNOWN by name,
+    never a measured "no HDMI" `skip-no-hdmi` that would hide `present-dead` / `lease-not-live` /
+    `backend-drift` (review round 1).
+  - Main design 5840508308.
 - **Backend = a box fact (owner 25.9.2026: the BUILT-IN HDMI, NVIDIA-driven):** the fact
   `STRIH_HDMI_OUTPUT_BACKEND` (`lease` | `vk-direct`; strih-lx = `vk-direct`, strih-pp TODO_OWNER)
   picks how the output leaves X — the NVIDIA X driver refuses the lease, so strih-lx uses the Vulkan

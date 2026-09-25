@@ -16,8 +16,11 @@
 # `strih_scenes.py --projector program|multiview` is the scripted twin.
 #
 # Pure helpers (unit-tested by tests/strih_drm_output_provision_1346.rs):
-#   strih_drm_hdmi_connected [SYSFS_DIR]    0 iff a kernel HDMI connector reads `connected`
+#   strih_drm_hdmi_connected [SYSFS_DIR] [BACKEND] [XRANDR_TEXT]
+#                                           0 iff an HDMI monitor is connected: the kernel status
+#                                           (lease), the X RandR view (vk-direct)
 #   strih_drm_hdmi_output_from_xrandr       stdin `xrandr --query` -> the first connected HDMI name
+#   strih_drm_xrandr_query USER_HOME USER   (gatherer) `xrandr --query` of display :0, or nothing
 #   strih_drm_output_config_json CONN [VIEW] [BACKEND] the one-line config (refuses a bad name/view/backend)
 #   strih_drm_legacy_view TEXT              the retired strih-lx-projector.json type -> initial view
 #   strih_drm_output_verdict ...            verify-strih's drm-output item verdict
@@ -29,11 +32,24 @@
 # The M1 dark-grey solid (0x202020): the image before the first rendered frame + the fail-open one.
 STRIH_DRM_OUTPUT_ARGB=2105376
 
-# strih_drm_hdmi_connected [SYSFS_DIR] -> 0 iff some <dir>/card*-HDMI*/status reads `connected`.
-# The KERNEL status is the truth for "a monitor is plugged in": after a lease X RandR can stick at
-# `disconnected` while the kernel stays `connected` (obs-drm-output.md M1 runbook gotcha).
+# strih_drm_hdmi_connected [SYSFS_DIR] [BACKEND] [XRANDR_QUERY_TEXT] -> 0 iff an HDMI monitor is
+# plugged in, read the way the box's HDMI output backend (the fact STRIH_HDMI_OUTPUT_BACKEND) needs:
+#   lease (the default, also for an absent BACKEND): some <dir>/card*-HDMI*/status reads `connected`.
+#     The KERNEL status is the truth there: after a lease X RandR can stick at `disconnected` while
+#     the kernel stays `connected` (obs-drm-output.md M1 runbook gotcha). The xrandr text is ignored.
+#   vk-direct: the X RandR view (XRANDR_QUERY_TEXT = `xrandr --query`, from strih_drm_xrandr_query)
+#     names a connected HDMI output. The NVIDIA X driver does not drive the KMS connector status, so
+#     sysfs reads `disconnected` with the monitor plugged in (main design 5840508308). A connected
+#     output with NO mode/CRTC counts too -- that is how xrandr lists HDMI-0 while vk-direct holds it.
+#     An empty text (X not up) is never connected. Any connected `HDMI*` output counts: on an
+#     NVIDIA-primary box the NVIDIA outputs (HDMI-0) are the ones X lists first, and the connector the
+#     config arms comes from the same first match (strih_drm_hdmi_output_from_xrandr).
 strih_drm_hdmi_connected() {
-  local dir="${1:-/sys/class/drm}" st
+  local dir="${1:-/sys/class/drm}" backend="${2:-lease}" xr="${3:-}" st
+  if [ "$backend" = vk-direct ]; then
+    [ -n "$(printf '%s\n' "$xr" | strih_drm_hdmi_output_from_xrandr)" ]
+    return
+  fi
   for st in "$dir"/card*-HDMI*/status; do
     [ -f "$st" ] || continue
     if [ "$(cat "$st" 2>/dev/null || true)" = connected ]; then
@@ -48,6 +64,19 @@ strih_drm_hdmi_connected() {
 # exit, so an upstream writer never takes a SIGPIPE under the caller's pipefail).
 strih_drm_hdmi_output_from_xrandr() {
   awk '$1 ~ /^HDMI/ && $2 == "connected" && !done { print $1; done = 1 }' || true
+}
+
+# strih_drm_xrandr_query USER_HOME DESKTOP_USER -> print `xrandr --query` of the desktop user's X
+# session :0 (with that user's Xauthority), or nothing when X does not answer. As root it runs as the
+# desktop user (the setup-strih step-6 shape); otherwise inline (verify-strih run by the operator).
+# Bounded (a wedged X never hangs setup/verify) and always returns 0, so a set -e caller survives.
+strih_drm_xrandr_query() {
+  local user_home="$1" desktop_user="$2"
+  if [ "$(id -u)" = 0 ]; then
+    sudo -u "$desktop_user" env DISPLAY=:0 XAUTHORITY="${user_home}/.Xauthority" timeout 10 xrandr --query 2>/dev/null || true
+  else
+    env DISPLAY=:0 XAUTHORITY="${user_home}/.Xauthority" timeout 10 xrandr --query 2>/dev/null || true
+  fi
 }
 
 # strih_drm_output_config_json CONNECTOR [VIEW] [BACKEND] -> the one-line config the C module and the
@@ -87,7 +116,8 @@ strih_drm_legacy_view() {
 }
 
 # strih_drm_output_verdict HDMI_CONNECTED ARMED_CONNECTOR VIEW LIVE_SCANOUT LIVE_MULTIVIEW [BACKEND FACT [DEAD]]
-#   HDMI_CONNECTED   1 iff strih_drm_hdmi_connected
+#   HDMI_CONNECTED   1 iff strih_drm_hdmi_connected; "?" = UNKNOWN (a vk-direct box whose X RandR
+#                    view could not be read -- never a measured "no HDMI")
 #   ARMED_CONNECTOR  the connector the config arms ("-" / empty = dormant: absent, disabled, bad;
 #                    "?" = the classifier itself could not run, e.g. the strih_scenes import failed)
 #   VIEW             program | multiview | unknown (the config's "view" token)
@@ -98,6 +128,7 @@ strih_drm_legacy_view() {
 #   FACT             the box fact STRIH_HDMI_OUTPUT_BACKEND ("?" or empty = not read -- skipped)
 #   DEAD             1 iff strih_drm_vk_present_dead on the newest OBS log (the vk present loop died)
 # Prints ONE token; return code 0 = PASS, 2 = NOTE (skip / report), 1 = FAIL:
+#   x-unreadable        (1) HDMI_CONNECTED "?": the X view a vk-direct box needs was not readable
 #   skip-no-hdmi        (2) no HDMI monitor and no armed config -- today's eDP-only strih-lx
 #   hdmi-unplugged      (2) the config is armed but no HDMI monitor is plugged in
 #   classify-failed     (1) an HDMI monitor is plugged in but the config could not be classified
@@ -113,6 +144,10 @@ strih_drm_output_verdict() {
   local hdmi="${1:-0}" conn="${2:-}" view="${3:-program}" live="${4:-0}" mv="${5:-0}"
   local backend="${6:-?}" fact="${7:-?}" dead="${8:-0}"
   [ "$conn" = "-" ] && conn=""
+  if [ "$hdmi" = "?" ]; then
+    printf 'x-unreadable'
+    return 1
+  fi
   if [ "$hdmi" != 1 ]; then
     if [ -n "$conn" ] && [ "$conn" != "?" ]; then
       printf 'hdmi-unplugged'
@@ -185,8 +220,9 @@ strih_drm_vk_present_dead() {
 #   * a symlinked ~/.camera-box or config is refused (root never writes through it);
 #   * an EXISTING config is the operator's view choice and is kept -- only its backend is brought onto
 #     the fact, as the desktop user (strih_scenes.write_drm_backend: every other key kept, one line);
-#   * a fresh config is written ONLY when a kernel HDMI connector reads connected AND X RandR names it
-#     (`install -o <desktop user>`, never a root redirect); otherwise a loud SKIP.
+#   * a fresh config is written ONLY when an HDMI monitor is connected (the kernel status for lease, the
+#     X RandR view for vk-direct -- strih_drm_hdmi_connected) AND X RandR names it (`install -o <desktop
+#     user>`, never a root redirect); otherwise a loud SKIP.
 # Uses the caller's warn/fail (setup-strih.sh).
 strih_drm_output_provision() {
   local user_home="$1" desktop_user="$2" scripts_dir="$3" backend="$4"
@@ -194,7 +230,8 @@ strih_drm_output_provision() {
   local DRM_CONF_DIR="${user_home}/.camera-box"
   local DRM_CONF="${DRM_CONF_DIR}/drm-output.json"
   local LEGACY_PROJ=/opt/camera-box/strih-lx-projector.json
-  local DRM_VIEW0 DRM_CONN DRM_LINE
+  LEGACY_PROJ="${STRIH_LEGACY_PROJ:-$LEGACY_PROJ}" # a test seam only; a real step-6 run never sets it
+  local DRM_VIEW0 DRM_CONN DRM_LINE DRM_XRANDR=""
   case "$backend" in
     lease | vk-direct) ;;
     *) fail "issue 1346: the HDMI output backend fact is '${backend}' (want lease or vk-direct) -- fix the box fact STRIH_HDMI_OUTPUT_BACKEND" ;;
@@ -226,18 +263,27 @@ except ValueError as e:
     else
       warn "  issue 1346: could not write backend ${backend} into ${DRM_CONF} (the reason is above) -- verify-strih item 4c reports it as backend-drift"
     fi
-  elif strih_drm_hdmi_connected /sys/class/drm; then
-    DRM_CONN="$(sudo -u "$desktop_user" env DISPLAY=:0 XAUTHORITY="${user_home}/.Xauthority" xrandr --query 2>/dev/null \
-      | strih_drm_hdmi_output_from_xrandr || true)"
-    if [ -n "$DRM_CONN" ] && DRM_LINE="$(strih_drm_output_config_json "$DRM_CONN" "$DRM_VIEW0" "$backend")"; then
-      install -d -o "$desktop_user" -g "$desktop_user" "$DRM_CONF_DIR"
-      printf '%s\n' "$DRM_LINE" | install -m 0644 -o "$desktop_user" -g "$desktop_user" /dev/stdin "$DRM_CONF"
-      echo "  wrote ${DRM_CONF} (HDMI output ${DRM_CONN}, backend ${backend}, view ${DRM_VIEW0}; takes effect at the next OBS start)"
-    else
-      warn "  SKIP issue 1346: an HDMI monitor is connected but X RandR could not name it (Xorg :0 not up yet?) -- ${DRM_CONF} NOT provisioned; re-run setup-strih.sh after the kiosk session is up"
-    fi
   else
-    warn "  SKIP issue 1346: no HDMI monitor connected -- ${DRM_CONF} NOT provisioned (the fixed HDMI output stays dormant); attach the HDMI monitor and re-run setup-strih.sh"
+    # No config yet. The NVIDIA connector's kernel status stays `disconnected`, so a vk-direct box
+    # detects the monitor through the X RandR view (main design 5840508308), queried only here.
+    if [ "$backend" = vk-direct ]; then
+      DRM_XRANDR="$(strih_drm_xrandr_query "$user_home" "$desktop_user")"
+    fi
+    if [ "$backend" = vk-direct ] && [ -z "$DRM_XRANDR" ]; then
+      warn "  SKIP issue 1346: vk-direct detects the HDMI monitor through X RandR, but xrandr on :0 answered nothing (Xorg :0 not up yet?) -- ${DRM_CONF} NOT provisioned; re-run setup-strih.sh after the kiosk session is up"
+    elif strih_drm_hdmi_connected /sys/class/drm "$backend" "$DRM_XRANDR"; then
+      [ -n "$DRM_XRANDR" ] || DRM_XRANDR="$(strih_drm_xrandr_query "$user_home" "$desktop_user")"
+      DRM_CONN="$(printf '%s\n' "$DRM_XRANDR" | strih_drm_hdmi_output_from_xrandr)"
+      if [ -n "$DRM_CONN" ] && DRM_LINE="$(strih_drm_output_config_json "$DRM_CONN" "$DRM_VIEW0" "$backend")"; then
+        install -d -o "$desktop_user" -g "$desktop_user" "$DRM_CONF_DIR"
+        printf '%s\n' "$DRM_LINE" | install -m 0644 -o "$desktop_user" -g "$desktop_user" /dev/stdin "$DRM_CONF"
+        echo "  wrote ${DRM_CONF} (HDMI output ${DRM_CONN}, backend ${backend}, view ${DRM_VIEW0}; takes effect at the next OBS start)"
+      else
+        warn "  SKIP issue 1346: an HDMI monitor is connected but X RandR could not name it (Xorg :0 not up yet?) -- ${DRM_CONF} NOT provisioned; re-run setup-strih.sh after the kiosk session is up"
+      fi
+    else
+      warn "  SKIP issue 1346: no HDMI monitor connected -- ${DRM_CONF} NOT provisioned (the fixed HDMI output stays dormant); attach the HDMI monitor and re-run setup-strih.sh"
+    fi
   fi
   rm -f "$LEGACY_PROJ"
 }

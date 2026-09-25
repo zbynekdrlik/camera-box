@@ -16,7 +16,9 @@
  * MULTIVIEW, and every tick first asks the monitoring-surface budget gate the aux NDI senders use
  * (obs_aux_sender_should_skip -> obs_display_should_skip + the canvas-rate effective divisor): a
  * tick whose remaining budget cannot fit the measured Multiview cost keeps the last frame on
- * scanout, and the anti-starvation floor still renders at least every K+1 ticks. A 5 s
+ * scanout, and the anti-starvation floor still renders at least every K+1 ticks. The view calls
+ * the self-excluding form with its own previous render, which the previous tick's total already
+ * contains (counted twice, a view that fits ran at half rate). A 5 s
  * `drm-output: multiview-render` line reports the real cadence + cost so it can be read next to
  * the Program render audit line's `lagged` counter.
  *
@@ -77,6 +79,18 @@ static int drm_output_view_tick_action(int view, bool have_renderer, bool skip)
 	return 2;
 }
 
+/* main design 5840501628 (review round 1): the render cost the budget gate may leave out on THIS
+ * call. obs_aux_sender_should_skip_excluding() reads the previous graphics tick's total, which holds
+ * the view's render only when that render ran in the immediately previous tick. obs_get_total_frames()
+ * advances once per processed tick (by the lag count on a lagged one), so that is exactly a difference
+ * of 1. Anything else -- a frame-hook call a backend skipped (a disarmed output, a dead vk-direct
+ * present loop, a GL bind failure), a lagged tick, no render yet -- leaves nothing out, which counts
+ * the render in full (the pre-fix term). The u32 counter wraps. */
+static uint64_t drm_output_view_self_last_ns(uint64_t last_render_ns, uint32_t render_frame, uint32_t now_frame)
+{
+	return (uint32_t)(now_frame - render_frame) == 1u ? last_render_ns : 0;
+}
+
 _Static_assert(OBS_DRM_OUTPUT_VIEW_PROGRAM == 0 && OBS_DRM_OUTPUT_VIEW_MULTIVIEW == 1,
 	       "drm_output_parse_view returns the enum values as literals");
 _Static_assert(DRM_OUTPUT_TICK_NOTHING == 0 && DRM_OUTPUT_TICK_PROGRAM == 1 && DRM_OUTPUT_TICK_MULTIVIEW == 2,
@@ -106,6 +120,13 @@ static struct {
 	uint32_t frame_counter;
 	uint32_t consecutive_skips;
 	uint64_t ewma_ns;
+	/* main design 5840501628: the cost of the last Multiview render and the graphics tick it ran in
+	 * (obs_get_total_frames()), so the budget gate can leave this view's own render out of the
+	 * previous tick's total (drm_output_view_self_last_ns). last_self_ns = the value the gate last
+	 * used (the audit line's self_ns=). */
+	uint64_t last_render_ns;
+	uint32_t last_render_frame;
+	uint64_t last_self_ns;
 
 	uint64_t win_start_ns;
 	uint32_t win_renders;
@@ -172,6 +193,9 @@ void obs_drm_output_set_view_renderer(obs_drm_output_view_render_t render, void 
 	g_view.frame_counter = 0;
 	g_view.consecutive_skips = 0;
 	g_view.ewma_ns = 0;
+	g_view.last_render_ns = 0;
+	g_view.last_render_frame = 0;
+	g_view.last_self_ns = 0;
 	drm_output_view_reset_window_locked();
 	obs_leave_graphics();
 	blog(LOG_INFO, "drm-output: multiview renderer %s", render ? "registered" : "cleared");
@@ -272,6 +296,12 @@ static void drm_output_view_render_multiview(void)
 	gs_blend_state_pop();
 	gs_texrender_end(g_view.texrender);
 
+	/* The Multiview cost is spent in this tick even when no scanout buffer is free or the blit fails,
+	 * so record it (and the tick) now; a published render overwrites it with the full cost below. */
+	const uint64_t t_rendered = os_gettime_ns();
+	g_view.last_render_ns = t_rendered > t0 ? t_rendered - t0 : 0;
+	g_view.last_render_frame = obs_get_total_frames();
+
 	const int idx = drm_output_claim_render_buf();
 	if (idx < 0)
 		return; /* nothing writable this tick — the last frame stays on scanout */
@@ -283,6 +313,7 @@ static void drm_output_view_render_multiview(void)
 	const uint64_t t1 = os_gettime_ns();
 	const uint64_t dt = t1 > t0 ? t1 - t0 : 0;
 	g_view.ewma_ns = g_view.ewma_ns ? (g_view.ewma_ns * 3 + dt) / 4 : dt;
+	g_view.last_render_ns = dt;
 	g_view.consecutive_skips = 0;
 	g_view.win_renders++;
 	g_view.win_sum_ns += dt;
@@ -315,9 +346,9 @@ static void drm_output_view_audit(uint64_t now)
 	drm_output_mode_size(&w, &h);
 	blog(LOG_INFO,
 	     "drm-output: multiview-render rendered_fps=%.1f skipped=%u avg_ms=%.2f max_ms=%.2f ewma_ms=%.2f "
-	     "cx=%u cy=%u",
+	     "cx=%u cy=%u self_ns=%llu",
 	     (double)g_view.win_renders / win_s, g_view.win_skips, avg_ms, (double)g_view.win_max_ns / 1000000.0,
-	     (double)g_view.ewma_ns / 1000000.0, w, h);
+	     (double)g_view.ewma_ns / 1000000.0, w, h, (unsigned long long)g_view.last_self_ns);
 	g_view.win_start_ns = now;
 	g_view.win_renders = 0;
 	g_view.win_skips = 0;
@@ -328,6 +359,10 @@ static void drm_output_view_audit(uint64_t now)
 int drm_output_view_frame(void)
 {
 	const int view = (int)os_atomic_load_long(&g_view.view);
+	/* main design 5840501628: leave the view's own render out of the previous tick's total only when
+	 * it ran in that tick (drm_output_view_self_last_ns), never across a skipped call. */
+	const uint64_t self_last_ns =
+		drm_output_view_self_last_ns(g_view.last_render_ns, g_view.last_render_frame, obs_get_total_frames());
 	if (view != OBS_DRM_OUTPUT_VIEW_MULTIVIEW) {
 		if (g_view.win_start_ns != 0)
 			drm_output_view_reset_window_locked();
@@ -338,8 +373,9 @@ int drm_output_view_frame(void)
 	bool skip = false;
 	if (have_renderer) {
 		g_view.frame_counter++;
-		skip = obs_aux_sender_should_skip(DRM_OUTPUT_MV_RENDER_DIVISOR, g_view.frame_counter,
-						  g_view.ewma_ns, g_view.consecutive_skips);
+		g_view.last_self_ns = self_last_ns;
+		skip = obs_aux_sender_should_skip_excluding(DRM_OUTPUT_MV_RENDER_DIVISOR, g_view.frame_counter,
+							    g_view.ewma_ns, g_view.consecutive_skips, self_last_ns);
 	} else if (!g_view.warned_no_renderer) {
 		g_view.warned_no_renderer = true;
 		blog(LOG_INFO, "drm-output: view=multiview but no Multiview renderer registered yet -- keeping "

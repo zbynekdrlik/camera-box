@@ -2934,9 +2934,17 @@ uint64_t obs_get_frame_interval_ns(void)
  * The budget's "already consumed" term is max(elapsed, last_tick_total_ns) so an aux filter
  * that decides EARLY in the tick still throttles a heavy tick regardless of render order (#1063).
  * Never-warmed / not-ticking -> never skip (render once to measure).
+ *
+ * camera-box issue 1346: the _excluding form takes the caller's OWN render cost of the previous
+ * tick (self_last_ns, 0 when it did not render) and subtracts it, saturating, from
+ * last_tick_total_ns before the max(). The previous tick's total includes that render, and the same
+ * cost is already the caller's ewma_ns, so without this a surface that fits the budget was counted
+ * twice after every render and skipped every other tick (the DRM-output HDMI Multiview at 15 fps
+ * instead of 30). obs_aux_sender_should_skip() below is its self_last_ns = 0 case: the #879 aux
+ * ndi_filter senders get the byte-identical result.
  */
-bool obs_aux_sender_should_skip(uint32_t render_divisor, uint32_t frame_counter, uint64_t ewma_ns,
-			       uint32_t consecutive_skips)
+bool obs_aux_sender_should_skip_excluding(uint32_t render_divisor, uint32_t frame_counter, uint64_t ewma_ns,
+					  uint32_t consecutive_skips, uint64_t self_last_ns)
 {
 	const uint64_t interval = obs->video.video_frame_interval_ns;
 	const uint64_t tick_start = obs->video.graphics_frame_start_ns;
@@ -2951,12 +2959,20 @@ bool obs_aux_sender_should_skip(uint32_t render_divisor, uint32_t frame_counter,
 	 * larger of `elapsed` and the PREVIOUS tick's completed total so the "already consumed" term
 	 * is order-independent: a genuinely-heavy tick throttles regardless of where in the tick the
 	 * aux decision falls. last_tick_total_ns is 0 before the first completed tick, so this is
-	 * byte-identical to `elapsed` at startup (fail-open). */
-	const uint64_t last_tick_total = obs->video.last_tick_total_ns;
+	 * byte-identical to `elapsed` at startup (fail-open). issue 1346: minus the caller's own
+	 * previous render (saturating), which its ewma_ns already accounts for. */
+	const uint64_t tick_total = obs->video.last_tick_total_ns;
+	const uint64_t last_tick_total = (tick_total > self_last_ns) ? tick_total - self_last_ns : 0;
 	const uint64_t consumed = (elapsed > last_tick_total) ? elapsed : last_tick_total;
 	const uint64_t budget = interval - interval / 10; /* 90% safety margin */
 	return obs_display_should_skip(effective_divisor, frame_counter, ewma_ns, consumed, budget,
 				       consecutive_skips);
+}
+
+bool obs_aux_sender_should_skip(uint32_t render_divisor, uint32_t frame_counter, uint64_t ewma_ns,
+			       uint32_t consecutive_skips)
+{
+	return obs_aux_sender_should_skip_excluding(render_divisor, frame_counter, ewma_ns, consecutive_skips, 0);
 }
 
 enum obs_obj_type obs_obj_get_type(void *obj)
