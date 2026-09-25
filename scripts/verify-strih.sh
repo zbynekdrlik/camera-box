@@ -181,14 +181,21 @@ fi
 
 # 4c) issue 1346 (owner 24.9.2026): the fixed HDMI output = the in-OBS DRM-lease output (issue 1152),
 #     selectable Program / built-in Multiview -- never a projector window, never the desktop. SKIP
-#     when no HDMI monitor is connected (the kernel connector status; today's strih-lx is eDP-only).
+#     when no HDMI monitor is connected (the kernel connector status for a lease box; the X RandR
+#     view for a vk-direct box, whose NVIDIA connector reads `disconnected` in sysfs -- main design
+#     5840508308).
 #     With one plugged in: ~/.camera-box/drm-output.json must arm the lease (classified by the ONE
 #     Python grammar in strih_scenes.py, the C module's own contract) and the newest OBS log must
 #     reach `drm-output: program scanout LIVE` -- plus `drm-output: multiview bind LIVE` for the
 #     multiview view. The pure verdict is strih_drm_output_verdict (scripts/lib/strih-drm-output.sh).
 DRM_CONF_V="${USER_HOME}/.camera-box/drm-output.json"
+DRM_BACKEND_FACT="$(strih_lx_hdmi_output_backend 2>/dev/null || echo "?")"
+DRM_XRANDR_V=""
+if [ "$DRM_BACKEND_FACT" = vk-direct ]; then
+  DRM_XRANDR_V="$(strih_drm_xrandr_query "$USER_HOME" "${USER_HOME##*/}")"
+fi
 DRM_HDMI=0
-strih_drm_hdmi_connected && DRM_HDMI=1
+strih_drm_hdmi_connected /sys/class/drm "$DRM_BACKEND_FACT" "$DRM_XRANDR_V" && DRM_HDMI=1
 DRM_SUMMARY="? program"   # no classifier at all (strih_scenes / python3 missing) = unclassified
 if [ -f "$SCN_BIN" ] && command -v python3 >/dev/null 2>&1; then
   DRM_SUMMARY="$(python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); import strih_scenes as s; t = s.drm_output_config_text(sys.argv[2]); print(s.drm_output_lease_connector(t) or "-", s.drm_output_view_token(t))' \
@@ -203,7 +210,6 @@ if [ -f "$SCN_BIN" ] && command -v python3 >/dev/null 2>&1; then
   DRM_BACKEND_V="$(python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); import strih_scenes as s; print(s.drm_output_backend_token(s.drm_output_config_text(sys.argv[2])))' \
     "$(dirname "$SCN_BIN")" "$DRM_CONF_V" 2>/dev/null || echo "?")"
 fi
-DRM_BACKEND_FACT="$(strih_lx_hdmi_output_backend 2>/dev/null || echo "?")"
 DRM_LIVE=0
 DRM_MV_LIVE=0
 DRM_LOG="$(newest_log || true)"
