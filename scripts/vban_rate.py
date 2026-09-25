@@ -428,8 +428,9 @@ def _next_continues(times_ns: list, frames: list, i: int, head_u: int, f: int, h
               that) must it also arrive ON TIME for its step (within DUP_WINDOW_S of step / rate
               after HEAD_T) -- a restart's continuation arrives late for the old head;
       "new" -- it continues from F instead: a restart;
-      ""    -- it continues neither. If the lookahead window is used up by already-held counters
-              and F itself is held, the candidate is "old" (a very long replay of old counters)."""
+      ""    -- it continues neither. Another straggler far below the head (a second late original)
+              is skipped too -- it decides nothing. If the lookahead window is used up and F itself
+              is held, the candidate is "old" (a very long replay of old counters)."""
     t_cand = times_ns[i]
     u_cand = head_u + _signed32(f - (head_u & 0xFFFFFFFF))
     skipped_seen = skipped = 0
@@ -454,6 +455,8 @@ def _next_continues(times_ns: list, frames: list, i: int, head_u: int, f: int, h
         limit_new = 2.0 * max(0.0, (t_next - t_cand) / 1e9) * frames_per_s + JUMP_FWD_SLACK_FRAMES
         if 0 < d_new <= limit_new:
             return "new"
+        if d_old < 0:
+            continue  # another straggler far below the head (review round 5): it decides nothing
         return ""
     return "old" if u_cand in seen else ""
 

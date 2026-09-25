@@ -29,7 +29,10 @@ paths:
   stream honestly grades UNCERTAIN; the live strih-lx streams jitter ~0.4-2.7 ms rms.
 - **Known limit:** a sender that restarts less than a second after the capture began, onto counters
   within ~50 ms worth of its head, can be merged under heavy jitter (its continuation is only
-  ~50 ms late). A real restart from a running sender (a large counter) is always a jump.
+  ~50 ms late). A real restart from a running sender (a large counter) is always a jump. A sender
+  that resets its counter with ZERO send pause while its old packets are still reordered in flight
+  can book phantom loss in the old segment (review round 5: 11/20 fohabl-model seeds at 0 ms pause,
+  0/20 at >= 5 ms). Not handled: a VBAN sender reset is a process restart, never under 5 ms.
 - **Grading by the 2-stderr interval (review round 3):** FAULT when `|rate| − 2σ` is outside the
   bound (a gross fault is a FAULT however noisy the fit), OK when `|rate| + 2σ` stays inside it,
   UNCERTAIN when the interval straddles it (no page, no recovery; loss is still graded).
@@ -39,8 +42,9 @@ paths:
   right after the capture began), or a step forward beyond 2 × the frames the elapsed time explains
   + 64 (a sender restart). A real outage advances the counter by ~the elapsed frames and therefore
   counts as LOSS, not a jump. **Every jump candidate is confirmed by lookahead (review rounds 2-3):**
-  counters the segment already holds, and counters still in flight around the head (an ordinary
-  reorder, review round 4), are skipped, and the first counter ABOVE the head decides. If it continues the OLD head AND
+  counters the segment already holds, counters still in flight around the head (an ordinary
+  reorder, review round 4) and further stragglers far below the head (a second late original,
+  round 5) are skipped, and the first counter ABOVE the head decides. If it continues the OLD head AND
   (when the skipped counters cover the whole gap back to the candidate, i.e. a possible restart
   re-send) arrives on time for that step (within 50 ms of step / rate after the last accepted packet),
   the candidate is a straggler or a late duplicate: a duplicate stays a duplicate, a straggler fills its
