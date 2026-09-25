@@ -753,19 +753,31 @@ fn verify_imag_wires_the_clock_discipline_check_into_the_live_flow_1372() {
 }
 
 #[test]
-fn clock_offset_guard_defines_phase_slew_enabled_from_pipe_json_and_phase_slew_check_1215() {
-    let guard_path = manifest_dir().join("scripts/clock-offset-guard.sh");
-    let body = std::fs::read_to_string(&guard_path).unwrap();
-    for needle in [
-        "phase_slew_enabled_from_pipe_json() {",
-        "phase_slew_check() {",
-    ] {
-        assert!(
-            body.contains(needle),
-            "scripts/clock-offset-guard.sh must define {needle} (#1215), following the EXACT \
-             shape of gm_source_ip_from_pipe_json()/gm_check() in the same file"
-        );
-    }
+fn clock_offset_guard_provides_the_phase_slew_parser_and_the_clock_discipline_check_1372() {
+    // #1215 put the phase_slew parser in the guard next to gm_source_ip_from_pipe_json(); issue
+    // 1372 replaced the bare phase_slew_check with clock_discipline_check in the lib the guard
+    // sources (scripts/lib/dantesync-clock-discipline.sh), which verify-imag.sh (l) calls.
+    let guard =
+        std::fs::read_to_string(manifest_dir().join("scripts/clock-offset-guard.sh")).unwrap();
+    let lib =
+        std::fs::read_to_string(manifest_dir().join("scripts/lib/dantesync-clock-discipline.sh"))
+            .unwrap();
+    assert!(
+        guard.contains("phase_slew_enabled_from_pipe_json() {"),
+        "scripts/clock-offset-guard.sh must define phase_slew_enabled_from_pipe_json (#1215)"
+    );
+    assert!(
+        guard.contains("lib/dantesync-clock-discipline.sh"),
+        "scripts/clock-offset-guard.sh must source the clock-discipline lib (#1372)"
+    );
+    assert!(
+        lib.contains("clock_discipline_check() {"),
+        "scripts/lib/dantesync-clock-discipline.sh must define clock_discipline_check (#1372)"
+    );
+    assert!(
+        !guard.contains("phase_slew_check() {") && !lib.contains("phase_slew_check() {"),
+        "the bare phase_slew_check is retired (#1372): no consumer may grade the bare flag"
+    );
 }
 
 #[test]

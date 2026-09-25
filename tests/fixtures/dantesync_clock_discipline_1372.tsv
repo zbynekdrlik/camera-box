@@ -49,3 +49,4 @@ legacy_value_with_lock_false	{"clock_discipline":"legacy","ptp_phase_locked":fal
 master_error_not_finite	{"date_authority":"master","date_offset_error_ms":1e400,"date_step_bound_ms":50.0}	UNKNOWN	unknown	no
 master_error_absurd	{"date_authority":"master","date_offset_error_ms":1e20,"date_step_bound_ms":50.0}	UNKNOWN	unknown	no
 master_bound_absurd	{"date_authority":"master","date_offset_error_ms":-1.0,"date_step_bound_ms":1e20}	UNKNOWN	unknown	no
+master_error_huge_integer	{"date_authority":"master","date_offset_error_ms":10000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000,"date_step_bound_ms":50.0}	UNKNOWN	unknown	no
