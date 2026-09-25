@@ -32,7 +32,7 @@ use std::process::Command;
 
 mod genlock_n1_lift;
 use genlock_n1_lift::{
-    compile_and_run_n1_block, compile_and_run_n1_block_with, converge_defines,
+    compile_and_run_c, compile_and_run_n1_block, compile_and_run_n1_block_with, converge_defines,
     lift_converge_helper, lift_define, lift_relock_helpers as lift_helpers,
     RELOCK_PRELUDE as PRELUDE,
 };
@@ -119,55 +119,10 @@ fn c_relock_selection_matches_the_rust_authority_1003() {
     }
     c.push_str("    return 0;\n}\n");
 
-    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("genlock_parity_1003");
-    fs::create_dir_all(&dir).expect("create the parity scratch dir");
-    let cfile = dir.join("parity.c");
-    let bin = dir.join("parity.bin");
-    fs::write(&cfile, &c).expect("write the parity harness");
-
-    // --- compile (loudly, never skipped) --------------------------------------------
-    let cc = std::env::var("CC").unwrap_or_else(|_| "cc".to_string());
-    let out = Command::new(&cc)
-        .args(["-std=gnu99", "-Wall", "-Wextra", "-Werror", "-O1"])
-        .arg(&cfile)
-        .arg("-o")
-        .arg(&bin)
-        .output()
-        .unwrap_or_else(|e| {
-            panic!(
-                "#1003: could not run the C compiler `{cc}` ({e}). This gate compiles the \
-                 vendored #1003 helpers to prove the C and the Rust authority agree \
-                 numerically; it must FAIL rather than skip when the toolchain is absent (a \
-                 parity test that silently passes without running is worse than none). \
-                 Install a C compiler or set CC."
-            )
-        });
-    assert!(
-        out.status.success(),
-        "#1003: the vendored C helpers lifted from {OBS_SOURCE} do NOT COMPILE standalone \
-         under -Wall -Wextra -Werror. The vendored tree is otherwise built only by the \
-         genlock workflows, so this is very likely a real compile error heading for CI:\n\
-         --- cc stderr ---\n{}\n--- harness ---\n{c}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-
-    // --- run + compare ---------------------------------------------------------------
-    let run = Command::new(&bin)
-        .output()
-        .expect("#1003: the compiled parity harness failed to execute");
-    assert!(
-        run.status.success(),
-        "#1003: the parity harness exited non-zero: {}",
-        String::from_utf8_lossy(&run.stderr)
-    );
-    let stdout = String::from_utf8(run.stdout).expect("harness stdout is utf-8");
-    let c_out: Vec<usize> = stdout
-        .lines()
-        .map(|l| {
-            l.trim()
-                .parse()
-                .expect("harness printed a non-integer index")
-        })
+    // --- compile + run (loudly, never skipped) ----------------------------------------
+    let c_out: Vec<usize> = compile_and_run_c("genlock_parity_1003", &c)
+        .iter()
+        .map(|l| l.parse().expect("harness printed a non-integer index"))
         .collect();
     assert_eq!(
         c_out.len(),

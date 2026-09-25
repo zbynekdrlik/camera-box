@@ -186,6 +186,11 @@ pub fn compile_and_run_c(dirname: &str, c: &str) -> Vec<String> {
     let run = Command::new(&bin)
         .output()
         .expect("the compiled parity harness failed to execute");
+    assert!(
+        run.status.success(),
+        "the parity harness exited non-zero: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
     String::from_utf8(run.stdout)
         .expect("harness stdout is utf-8")
         .lines()

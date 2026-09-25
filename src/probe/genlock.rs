@@ -1643,9 +1643,7 @@ impl ReleaseCadence {
                 // and is dropped the same way (`crate::genlock_backlog::relock_anchor_is_stale`,
                 // n read-only as in `backlog_relock_qdepth`). Mirror of the C
                 // `if ((sel_1003 == 0 || stale_1367) && source->genlock_phase_anchor_ns != 0)`.
-                let n = Self::measure_source_multiple(queue, interval_ns)
-                    .unwrap_or(self.last_known_n)
-                    .max(1);
+                let n = self.read_only_source_multiple(queue, interval_ns);
                 let queue_ts: Vec<u64> = queue.iter().copied().collect();
                 let configured = crate::genlock_backlog::relock_select_nearest(
                     &queue_ts,
@@ -1889,9 +1887,7 @@ impl ReleaseCadence {
         //
         // The source rate as an EXACT rational, never a truncated integer fps: a 29.97 canvas
         // would floor to 29 and under-state the implied depth. source_fps = 1e9 * n / interval_ns.
-        let n = Self::measure_source_multiple(queue, interval_ns)
-            .unwrap_or(self.last_known_n)
-            .max(1);
+        let n = self.read_only_source_multiple(queue, interval_ns);
         let (Ok(src_num), Ok(src_den)) = (
             u32::try_from(1_000_000_000u64.saturating_mul(n as u64)),
             u32::try_from(interval_ns),
@@ -1937,9 +1933,7 @@ impl ReleaseCadence {
         if interval_ns == 0 {
             return false;
         }
-        let n = Self::measure_source_multiple(queue, interval_ns)
-            .unwrap_or(self.last_known_n)
-            .max(1);
+        let n = self.read_only_source_multiple(queue, interval_ns);
         let (Ok(src_num), Ok(src_den)) = (
             u32::try_from(1_000_000_000u64.saturating_mul(n as u64)),
             u32::try_from(interval_ns),
@@ -1983,9 +1977,7 @@ impl ReleaseCadence {
         if interval_ns == 0 {
             return false;
         }
-        let n = Self::measure_source_multiple(queue, interval_ns)
-            .unwrap_or(self.last_known_n)
-            .max(1);
+        let n = self.read_only_source_multiple(queue, interval_ns);
         // issue 1367: an N==1 tick converges to its PIN-DERIVED depth
         // (`genlock_n1_depth::n1_shed_due`) instead of the #1049 reserve-aimed shed, which stays
         // inert for n < 2. That belongs to a tick of the N==1 STEADY branch only (review round 1):
@@ -2065,6 +2057,21 @@ impl ReleaseCadence {
 
     /// camera-box #726 STICKY-N — the EFFECTIVE source-rate multiple to release at THIS tick.
     ///
+    /// The source multiple read WITHOUT latching: the pure measurement, else the sticky latch,
+    /// floored at 1. Same value as [`Self::effective_source_multiple`] on a measurable tick, but a
+    /// getter (a threshold, a drain or a stale-anchor decision) must not write `last_known_n` as a
+    /// side effect. Mirror of the C `n_for_log` derivation (`genlock_measure_source_multiple` with
+    /// the `genlock_last_known_n` fallback).
+    fn read_only_source_multiple(
+        &self,
+        queue: &std::collections::VecDeque<u64>,
+        interval_ns: u64,
+    ) -> u32 {
+        Self::measure_source_multiple(queue, interval_ns)
+            .unwrap_or(self.last_known_n)
+            .max(1)
+    }
+
     /// A fresh measurement ([`Self::measure_source_multiple`]) is the CONFIRMATION authority: when
     /// the front pair is measurable it WINS and updates the latch (so a genuine 1:1 rate re-latches
     /// to 1 → the present-oldest lossless path, byte-identical). When the front pair is INCONCLUSIVE

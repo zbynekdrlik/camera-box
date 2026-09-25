@@ -177,11 +177,12 @@ fn run_burst(ticks: u64, stale_check: bool) -> BurstRun {
             }
             queue.pop_front();
         } else {
-            // STEADY 60-into-30: present one of the pair, decimate the other.
-            let ts = queue.pop_front().expect("non-empty");
+            // STEADY 60-into-30: retire the older frame of the pair and present the NEWER one,
+            // as the C N>=2 steady path does (it presents the newest matured frame).
             if due >= 2 {
                 queue.pop_front();
             }
+            let ts = queue.pop_front().expect("non-empty");
             anchor = phase_anchor_from_present(wall, ts);
         }
     }
