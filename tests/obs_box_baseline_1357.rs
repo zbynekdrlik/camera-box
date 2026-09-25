@@ -632,6 +632,10 @@ dm_lightdm=/usr/lib/systemd/system/lightdm.service
 autologin=1
 gdm3=deinstall ok config-files
 gnome_shell=
+brightness_helper=1
+brightness_rule=1
+brightness_keys=1
+brightness_group=1
 autostart_exec=1
 autostart_xset=1
 autostart_sentinel=1
@@ -643,7 +647,7 @@ touchpad=1
 gather_done=1
 ";
 
-const ITEMS: [&str; 13] = [
+const ITEMS: [&str; 14] = [
     "net",
     "perf",
     "nosleep",
@@ -654,6 +658,7 @@ const ITEMS: [&str; 13] = [
     "dejitter",
     "crash",
     "kiosk",
+    "brightness",
     "autostart",
     "power",
     "touchpad",
@@ -749,6 +754,10 @@ fn verdict_fails_each_item_on_its_own_broken_fact() {
             "openbox=install ok installed",
             "openbox=deinstall ok config-files",
         ),
+        ("brightness", "brightness_helper=1", "brightness_helper=0"),
+        ("brightness", "brightness_rule=1", "brightness_rule=0"),
+        ("brightness", "brightness_keys=1", "brightness_keys=0"),
+        ("brightness", "brightness_group=1", "brightness_group=0"),
         ("autostart", "autostart_unit=1", "autostart_unit=0"),
         ("power", "thermald=", "thermald=install ok installed"),
         ("touchpad", "touchpad=1", "touchpad=0"),
