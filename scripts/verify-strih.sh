@@ -265,7 +265,8 @@ tcp_open "$WS_HOST" 8899 && ok "bundle-state :8899 answering" || bad "bundle-sta
 
 # 8) remoteos-mcp agent (issue 1361): the shared venv install -- the unit runs the /opt/remoteos-mcp-venv
 #    python with the key in its 0600 root EnvironmentFile (never an --auth-key in the unit), the venv
-#    imports remoteos, and the service is enabled + active. A box still on the hand-made / upstream-
+#    imports remoteos, the service is enabled + active, and an unauthenticated /mcp request is refused
+#    (401). A box still on the hand-made / upstream-
 #    installer unit FAILs until setup-strih.sh step 10 re-runs (it keeps the box's key).
 _rm_unit="$(cat "$(remoteos_mcp_unit_path)" 2>/dev/null || true)"
 _rm_env="$(stat -c '%a %U' "$(remoteos_mcp_env_file)" 2>/dev/null || true)"
@@ -273,7 +274,9 @@ _rm_import=0
 "$(remoteos_mcp_venv_dir)/bin/python" -c 'import remoteos' >/dev/null 2>&1 && _rm_import=1
 _rm_en="$(systemctl is-enabled remoteos-mcp 2>/dev/null || true)"
 _rm_act="$(systemctl is-active remoteos-mcp 2>/dev/null || true)"
-_rm_verdict="$(remoteos_mcp_verdict "$_rm_unit" "$_rm_env" "$_rm_import" "$_rm_en" "$_rm_act")" || true
+# An unauthenticated POST to the local agent must be refused (401): an empty key turns auth OFF.
+_rm_unauth="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 -X POST "http://127.0.0.1:$(remoteos_mcp_port)/mcp" 2>/dev/null || true)"
+_rm_verdict="$(remoteos_mcp_verdict "$_rm_unit" "$_rm_env" "$_rm_import" "$_rm_en" "$_rm_act" "$_rm_unauth")" || true
 case "$_rm_verdict" in
   ok*) ok "remoteos-mcp ${_rm_verdict#ok }" ;;
   *) bad "remoteos-mcp ${_rm_verdict#FAIL: } -- re-run setup-strih.sh step 10 (issue 1361)" ;;

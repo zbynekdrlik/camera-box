@@ -1578,7 +1578,9 @@ echo -e "${GREEN}[17b] Provisioning RemoteOS MCP control-channel agent...${NC}"
 # env-secret convention, like CAM_PW/GH_TOKEN) pins it so dev1's gitignored .mcp.json keeps matching
 # a freshly hardware'd box; unset, the box's existing config.json / unit key is kept, and only a bare
 # box gets a fresh one (update dev1's .mcp.json linux-camN entry then). Only 0600 files carry it.
-remoteos_mcp_install root headless enable-only \
+# The agent runs as the operator who ran this script under sudo (root when run as root) -- the
+# upstream installer's SUDO_USER rule, so a re-provision never moves the MCP shell to another account.
+remoteos_mcp_install "${SUDO_USER:-root}" headless enable-only \
     || fail "remoteos-mcp agent install failed (#1066) -- the linux-camN MCP surface would be dead on the next boot (see the remoteos-mcp line above)"
 echo "  #1066: remoteos-mcp agent installed + enabled (linux-camN MCP surface :8092; proven live post-reboot by verify-device.sh (ab))"
 
