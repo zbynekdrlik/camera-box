@@ -6,6 +6,7 @@
 #include <util/dstr.h>
 #include <util/platform.h>
 #include <util/windows/HRError.hpp>
+#include <util/windows/qpc-timestamp.h>
 #include <util/windows/ComPtr.hpp>
 #include <util/windows/WinHandle.hpp>
 #include <util/windows/CoTaskMemPtr.hpp>
@@ -1059,10 +1060,12 @@ bool WASAPISource::ProcessCaptureData()
 		data.speakers = speakers;
 		data.samples_per_sec = sampleRate;
 		data.format = format;
+		/* camera-box issue 1372: ts is a RAW-QPC time; os_gettime_ns() runs at the
+		 * dantesync-disciplined rate, so map the stamp by its age instead of scaling it. */
 		if (sourceType == SourceType::ProcessOutput) {
-			data.timestamp = ts * 100;
+			data.timestamp = os_raw_qpc_100ns_to_gettime_ns(ts);
 		} else {
-			data.timestamp = useDeviceTiming ? ts * 100 : os_gettime_ns();
+			data.timestamp = useDeviceTiming ? os_raw_qpc_100ns_to_gettime_ns(ts) : os_gettime_ns();
 
 			if (!useDeviceTiming) {
 				data.timestamp -= util_mul_div64(frames, UINT64_C(1000000000), sampleRate);

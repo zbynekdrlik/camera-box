@@ -364,6 +364,7 @@ if(OS_WINDOWS)
     util/windows/CoTaskMemPtr.hpp
     util/windows/device-enum.h
     util/windows/HRError.hpp
+    util/windows/qpc-timestamp.h
     util/windows/win-registry.h
     util/windows/win-version.h
     util/windows/window-helpers.h

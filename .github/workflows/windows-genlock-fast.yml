@@ -505,10 +505,12 @@ jobs:
           }
           Write-Output "ASRC sliding-regression estimator present (#1084 constants + buffer fields + slope + flush; EMA gone) — OK"
 
-      # Issue 1372 part A: on Windows os_gettime_ns() is the dantesync-DISCIPLINED media clock --
+      # Issue 1372 part A: on Windows os_gettime_ns() runs at the dantesync-DISCIPLINED rate --
       # QPC deltas scaled by the system-time rate inc/adj from GetSystemTimeAdjustmentPrecise
       # (resolved at runtime from kernelbase.dll), rebased on a rate change; os_sleepto_ns waits on
-      # that same clock, never on raw QPC counts. Mirrors the executable C-vs-Rust parity gate
+      # that same clock, never on raw QPC counts; readers use a sequence counter (no lock) and sample
+      # QPC inside its validated window; WASAPI raw-QPC stamps are mapped by their age
+      # (util/windows/qpc-timestamp.h). Mirrors the executable C-vs-Rust parity gate
       # tests/os_clock_discipline_parity_1372.rs (lifts the block and runs it on a fake Win32
       # layer) + the Tier-0 authority src/os_clock_discipline.rs. Keep all in lock-step.
       - name: Assert the disciplined Windows media clock is present (issue 1372)
@@ -533,10 +535,20 @@ jobs:
           if ($pw -match [regex]::Escape('const LONGLONG count_target = util_mul_div64(time_target, freq, 1000000000);')) {
             Write-Error "platform-windows.c: issue 1372 the raw-QPC os_sleepto_ns target is BACK -- it drifts from the disciplined clock at the dantesync rate"; exit 1
           }
+          if ($pw -notmatch [regex]::Escape('if ((seq & 1) == 0) { QueryPerformanceCounter(&count); *seg = os_clk_state;')) {
+            Write-Error "platform-windows.c: issue 1372 the reader no longer samples QPC inside the validated sequence window -- a thread can apply an old segment to a post-rebase count and step the clock backwards"; exit 1
+          }
+          if ($pw -notmatch [regex]::Escape('InterlockedIncrement64(&os_clk_seq); QueryPerformanceCounter(&count); os_clk_seg_update(')) {
+            Write-Error "platform-windows.c: issue 1372 the writer no longer samples its rebase count inside the odd sequence window"; exit 1
+          }
+          $wa = (Get-Content "vendor/obs-studio/plugins/win-wasapi/win-wasapi.cpp" -Raw) -replace '\s+', ' '
+          if (([regex]::Matches($wa, [regex]::Escape('os_raw_qpc_100ns_to_gettime_ns(ts)'))).Count -ne 2) {
+            Write-Error "win-wasapi.cpp: issue 1372 both raw-QPC WASAPI stamps must be mapped onto the disciplined clock (util/windows/qpc-timestamp.h)"; exit 1
+          }
           Write-Output "disciplined Windows media clock (issue 1372) -- OK"
 
-      # #1325: asrc_process_audio must measure the servo against os_gettime_ns() (the monotonic QPC
-      # clock the OBS audio mixer paces on, media-io/audio-io.c — what buffered_ms is balanced
+      # #1325: asrc_process_audio must measure the servo against os_gettime_ns() (the monotonic
+      # clock the OBS audio mixer paces on -- QPC at the dantesync-disciplined rate since issue 1372, media-io/audio-io.c — what buffered_ms is balanced
       # against), NOT the dantesync-slewed genlock_wall_now_ns(); AND negate the ppm fed to
       # swresample (-applied_ppm), the reciprocal of the compensator's corrected=raw/(1+applied/1e6)
       # lock model. Mirrors tests/genlock_preload.rs::vendored_source::

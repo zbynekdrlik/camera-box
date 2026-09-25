@@ -387,12 +387,13 @@ void os_sleep_ms(uint32_t duration)
 	Sleep(duration);
 }
 
-/* camera-box issue 1372 BEGIN -- the Windows media clock follows the dantesync-disciplined tick.
+/* camera-box issue 1372 BEGIN -- the Windows media clock runs at the dantesync-disciplined rate.
  *
  * libobs paces its audio thread, video thread, the ASRC servo and every output timestamp off
- * os_gettime_ns(). dantesync disciplines the SYSTEM time with SetSystemTimeAdjustmentPrecise (the
- * Dante PTP tick) and never touches QPC, so a raw-QPC clock ran up to ~20 ppm off the Dante
- * network (measured on win-resolume, 25.9.2026) and VBAN between the PCs slipped packets.
+ * os_gettime_ns(). dantesync disciplines the SYSTEM time with SetSystemTimeAdjustmentPrecise (PTP
+ * frequency + NTP phase slew) and never touches QPC, so a raw-QPC clock ran up to ~20 ppm off every
+ * other disciplined box (measured on win-resolume, 25.9.2026) and VBAN between the PCs slipped
+ * packets. Linux needs nothing: adjtimex slews CLOCK_MONOTONIC together with CLOCK_REALTIME.
  *
  * os_gettime_ns() now integrates QPC deltas at the rate the OS currently applies to system time:
  *
@@ -405,6 +406,9 @@ void os_sleep_ms(uint32_t duration)
  * - NTP date steps never reach it: a step changes system TIME, not the adjustment rate.
  * - Integer only: ns = base_ns + floor(floor(dqpc * 1e9 / freq) * num / den).
  * - The rate is re-read at most every freq / OS_CLK_POLL_DIV counts (250 ms), by one thread.
+ * - Readers never lock or write shared memory: a sequence counter (odd while the single writer
+ *   updates) validates each snapshot, and the counter is read INSIDE that window, so no thread can
+ *   apply an old segment to a count taken after a rebase -- no backwards step across threads.
  * - No API (it is in kernelbase.dll, not kernel32.dll), a failed read or a disabled adjustment
  *   gives rate 1/1: stock QPC behaviour. The first value equals the old raw-QPC ns.
  *
@@ -480,9 +484,9 @@ typedef BOOL(WINAPI *get_system_time_adjustment_precise_t)(PDWORD64 adjustment, 
 
 static get_system_time_adjustment_precise_t os_clk_get_adjustment = NULL;
 static INIT_ONCE os_clk_resolve_once = INIT_ONCE_STATIC_INIT;
-static SRWLOCK os_clk_lock = SRWLOCK_INIT;
-static struct os_clk_seg os_clk_state; /* guarded by os_clk_lock */
-static volatile LONG os_clk_polling = 0;
+static volatile LONG64 os_clk_seq = 0;  /* odd while the writer updates os_clk_state */
+static struct os_clk_seg os_clk_state;  /* written only by the os_clk_polling holder */
+static volatile LONG os_clk_polling = 0; /* the single writer's claim */
 
 static BOOL CALLBACK os_clk_resolve(PINIT_ONCE once, PVOID param, PVOID *context)
 {
@@ -513,43 +517,69 @@ static void os_clk_read_rate(uint64_t *num, uint64_t *den)
 	os_clk_rate_from_adjustment(adjustment, increment, disabled != FALSE, num, den);
 }
 
+/* A consistent (segment, counter) pair. The counter is read between the two sequence reads, so if
+ * the sequence did not move, no rebase happened while this reader held the old segment. */
+static void os_clk_snapshot(struct os_clk_seg *seg, uint64_t *qpc)
+{
+	LARGE_INTEGER count;
+	unsigned int spins = 0;
+
+	for (;;) {
+		const LONG64 seq = os_clk_seq;
+		MemoryBarrier();
+		if ((seq & 1) == 0) {
+			QueryPerformanceCounter(&count);
+			*seg = os_clk_state;
+			MemoryBarrier();
+			if (os_clk_seq == seq) {
+				*qpc = (uint64_t)count.QuadPart;
+				return;
+			}
+		}
+
+		/* The writer's window is a counter read and a few stores; if it was preempted in it,
+		 * give it the CPU instead of spinning against it. */
+		if (++spins < 64) {
+			YieldProcessor();
+		} else {
+			SwitchToThread();
+			spins = 0;
+		}
+	}
+}
+
 uint64_t os_gettime_ns(void)
 {
 	const uint64_t freq = get_clockfreq();
-	LARGE_INTEGER qpc;
 	struct os_clk_seg seg;
+	uint64_t qpc;
 	uint64_t num;
 	uint64_t den;
-	uint64_t now;
-	bool own_poll = false;
+	LARGE_INTEGER count;
 
-	/* The counter is read under the lock, so a rebase can never land between this read and the
-	 * segment it is applied to: the clock never steps backwards, across threads either. */
-	AcquireSRWLockShared(&os_clk_lock);
-	QueryPerformanceCounter(&qpc);
-	seg = os_clk_state;
-	ReleaseSRWLockShared(&os_clk_lock);
-
-	if (!os_clk_poll_due(&seg, (uint64_t)qpc.QuadPart, freq))
-		return os_clk_seg_now(&seg, (uint64_t)qpc.QuadPart, freq);
-
-	if (seg.rate_den != 0) {
-		/* One poller at a time; every other thread keeps the current segment. */
-		if (InterlockedCompareExchange(&os_clk_polling, 1, 0) != 0)
-			return os_clk_seg_now(&seg, (uint64_t)qpc.QuadPart, freq);
-		own_poll = true;
+	for (;;) {
+		os_clk_snapshot(&seg, &qpc);
+		if (!os_clk_poll_due(&seg, qpc, freq))
+			return os_clk_seg_now(&seg, qpc, freq);
+		if (InterlockedCompareExchange(&os_clk_polling, 1, 0) == 0)
+			break;
+		/* Another thread is polling: keep the current segment. Only the very first call has no
+		 * segment yet; wait for the thread initialising it. */
+		if (seg.rate_den != 0)
+			return os_clk_seg_now(&seg, qpc, freq);
+		YieldProcessor();
 	}
 
+	/* The single writer. The adjustment syscall stays outside the odd window. */
 	os_clk_read_rate(&num, &den);
 
-	AcquireSRWLockExclusive(&os_clk_lock);
-	QueryPerformanceCounter(&qpc);
-	os_clk_seg_update(&os_clk_state, (uint64_t)qpc.QuadPart, freq, num, den);
-	now = os_clk_seg_now(&os_clk_state, (uint64_t)qpc.QuadPart, freq);
-	ReleaseSRWLockExclusive(&os_clk_lock);
+	InterlockedIncrement64(&os_clk_seq);
+	QueryPerformanceCounter(&count);
+	os_clk_seg_update(&os_clk_state, (uint64_t)count.QuadPart, freq, num, den);
+	const uint64_t now = os_clk_seg_now(&os_clk_state, (uint64_t)count.QuadPart, freq);
+	InterlockedIncrement64(&os_clk_seq);
 
-	if (own_poll)
-		InterlockedExchange(&os_clk_polling, 0);
+	InterlockedExchange(&os_clk_polling, 0);
 	return now;
 }
 /* camera-box issue 1372 END */
