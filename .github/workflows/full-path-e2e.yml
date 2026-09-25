@@ -320,6 +320,11 @@ jobs:
           # is set by the fetch step immediately above (pull_request only). workflow_dispatch
           # (manual operator soak) is UNCHANGED — stays in plan-print mode for the MCP holder.
           E2E_EXECUTE_VERDICT: ${{ github.event_name == 'pull_request' && '1' || '0' }}
+          # #1302: the opt-in CG chain profile (SongPlayer -> cg OBS -> strih -> stream,
+          # scripts/lib/cg-chain-e2e.sh) is armed by the repo variable CG_CHAIN=1, the same
+          # operator-variable pattern as COLD_CUT_BYPASS_*. Unset = byte-inert. pull_request only,
+          # since only that run executes the verdict.
+          CG_CHAIN: ${{ github.event_name == 'pull_request' && vars.CG_CHAIN || '0' }}
           # #711: the SAME bot-token #notifications path ci.yml's/this workflow's own "Discord
           # alert" steps already use (see .claude/skills/ci) — recording-e2e.sh's own
           # E2E_EXECUTE_VERDICT=1 branch posts the full Slovak report via
