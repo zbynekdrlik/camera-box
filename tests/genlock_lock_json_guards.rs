@@ -152,8 +152,8 @@ fn genlock_lock_qpc_windowed_drift_present_1299_part4() {
     assert_has(STATUSBAR_CPP, "obs_data_get_double(d, \"f_phase_ppm\")");
     // the v5 report-only telemetry keys the bundle-state parser reads
     assert_has(STATUSBAR_CPP, "\\\"qpc_drift_ppm\\\":");
-    // #1341 bumped the schema literal to v6 (additive n_idle); pin the current version.
-    assert_has(STATUSBAR_CPP, "{\\\"v\\\":6,\\\"state\\\":");
+    // issue 1372 part D bumped the schema literal to v7 (additive media_clock); pin the current version.
+    assert_has(STATUSBAR_CPP, "{\\\"v\\\":7,\\\"state\\\":");
     // the windowed-rate ring member + the bounds
     assert_has(
         STATUSBAR_HPP,
@@ -201,6 +201,74 @@ fn genlock_lock_qpc_drift_is_the_step_only_1357() {
     );
     // the windowed rate + the dantesync slew survive as REPORT-ONLY JSON telemetry
     assert_has(STATUSBAR_CPP, "\\\"qpc_expected_ppm\\\":");
+}
+
+#[test]
+fn genlock_lock_media_clock_term_present_1372_part_d() {
+    // Issue 1372 part D: the MEDIA-clock (audio clock) term. The widget reduces the wall-vs-media drift
+    // growth over the 600 s window (steps excluded) + the Windows discipline outcome into the pure,
+    // parity-gated verdict, feeds it to the decision, names it in the label/log, and carries it on the
+    // v7 json. A subtree pull that reverts any of these makes the indicator green again while the
+    // audio mixer walks off the video grid. Linux-CI twin of the part-D pwsh gate in BOTH
+    // windows-genlock{,-fast}.yml -- keep all three in lock-step.
+    assert_has(
+        STATUSBAR_CPP,
+        "static constexpr int GENLOCK_MEDIA_CLOCK_WINDOW_S = 600;",
+    );
+    assert_has(
+        STATUSBAR_CPP,
+        "static constexpr int64_t GENLOCK_MEDIA_CLOCK_DRIFT_BOUND_MS = 2;",
+    );
+    assert_has(
+        STATUSBAR_HPP,
+        "std::deque<std::pair<qint64, int64_t>> genlockMediaClockHistory;",
+    );
+    // the pure reduction (steps left to the step verdict) + verdict, fed the widget's own samples
+    assert_has(
+        STATUSBAR_CPP,
+        "genlock_media_clock_window_drift_ms(drift_samples.data(), (int)drift_samples.size(), GENLOCK_QPC_STEP_BOUND_MS);",
+    );
+    assert_has(
+        STATUSBAR_CPP,
+        "genlock_media_clock_verdict(media_window_ready, media_drift_ms, GENLOCK_MEDIA_CLOCK_DRIFT_BOUND_MS, media_discipline, clock_present ? 1 : 0);",
+    );
+    // Windows reads the libobs discipline outcome; every other OS is not applicable
+    assert_has(
+        STATUSBAR_CPP,
+        "const int media_discipline = os_gettime_discipline();",
+    );
+    assert_has(
+        STATUSBAR_CPP,
+        "const int media_discipline = GENLOCK_MEDIA_DISCIPLINE_NOT_APPLICABLE;",
+    );
+    assert_has(STATUSBAR_CPP, "f.media_clock = (int)media_clock;");
+    // the reason token, the label text and the v7 json object the bundle-state parser reads
+    assert_has(STATUSBAR_CPP, "return \"media_clock\";");
+    assert_has(STATUSBAR_CPP, "QString(\"audio clock drift %1 ms/%2 min\")");
+    assert_has(
+        STATUSBAR_CPP,
+        "QString(\"audio clock not disciplined (%1)\")",
+    );
+    assert_has(STATUSBAR_CPP, "\\\"media_clock\\\":{\\\"state\\\":");
+    assert_has(STATUSBAR_CPP, "\\\"discipline\\\":");
+    // the pure C mirror (parity-gated by tests/genlock_lock_state_parity.rs)
+    let hpp = "vendor/obs-studio/frontend/widgets/GenlockLockState.hpp";
+    assert_has(hpp, "GENLOCK_LOCK_REASON_MEDIA_CLOCK = 11,");
+    assert_has(hpp, "int media_clock;");
+    assert_has(
+        hpp,
+        "static inline genlock_media_clock_t genlock_media_clock_verdict(int window_ready, int64_t drift_ms,",
+    );
+    assert_has(
+        hpp,
+        "static inline int64_t genlock_media_clock_window_drift_ms(const int64_t *drift_ms, int n,",
+    );
+    // the media term must never become a rate bound on the qpc STEP verdict (issue 1357 stays intact)
+    let widget = squish(&vendor_file(STATUSBAR_CPP));
+    assert!(
+        !widget.contains("GENLOCK_QPC_DRIFT_PPM_BOUND"),
+        "{STATUSBAR_CPP}: the media-clock term must not bring back the qpc rate bound"
+    );
 }
 
 #[test]

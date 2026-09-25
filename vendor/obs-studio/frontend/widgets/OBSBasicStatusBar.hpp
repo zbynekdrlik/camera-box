@@ -98,6 +98,10 @@ private:
 	 * GENLOCK_QPC_WINDOW_S. The qpc_drift verdict keys on the largest single-sample wall STEP in it; the
 	 * windowed RATE it also yields is report-only telemetry (never the unbounded cumulative offset). */
 	std::deque<std::pair<qint64, int64_t>> genlockQpcHistory;
+	/* camera-box issue 1372 part D: the same (monotonic ms, cumulative drift ms) samples over the
+	 * longer GENLOCK_MEDIA_CLOCK_WINDOW_S. The media-clock term keys on the drift GROWTH across it
+	 * (steps excluded): since part A the media clock follows the disciplined wall on every box. */
+	std::deque<std::pair<qint64, int64_t>> genlockMediaClockHistory;
 	/* #1341: per-input received-frame history (input name -> ring of (monotonic ms, cumulative
 	 * frames_received)) over GENLOCK_IDLE_WINDOW_MS. An input whose received DELTA over the window is
 	 * below GENLOCK_IDLE_INPUT_MIN_FRAMES is IDLE (keep-alive-only) and excluded from the DEGRADED
