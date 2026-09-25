@@ -35,8 +35,12 @@ def _run(tmp_path, pcap_bytes=None, capture_rc=0, **env):
                     + (f'cp "{cap}" "$1"\n' if pcap_bytes is not None else "")
                     + f"exit {capture_rc}\n")
     stub.chmod(stub.stat().st_mode | stat.S_IEXEC)
+    up = tmp_path / "boxup-default.sh"  # hermetic: never probe the real strih-lx :22
+    up.write_text("#!/usr/bin/env bash\nprintf 1\n")
+    up.chmod(up.stat().st_mode | stat.S_IEXEC)
     e = {k: v for k, v in os.environ.items() if not k.startswith(("VBAN_RATE_", "OBS_FLEET"))}
-    e.update({"VBAN_RATE_CAPTURE_CMD": str(stub), "VBAN_RATE_HOST": "10.77.9.202",
+    e.update({"VBAN_RATE_CAPTURE_CMD": str(stub), "VBAN_RATE_BOX_UP_CMD": str(up),
+              "VBAN_RATE_HOST": "10.77.9.202",
               "VBAN_RATE_CONFIRM_THRESHOLD": "1", "VBAN_RATE_NOW": str(_NOW),
               "VBAN_RATE_ALERT_STATE_DIR": str(tmp_path), "VBAN_RATE_MIN_SPAN_S": "10"})
     e.update(env)
