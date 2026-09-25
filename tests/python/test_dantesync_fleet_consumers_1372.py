@@ -157,6 +157,26 @@ def test_upgrade_skips_a_node_whose_own_credential_is_missing(tmp_path):
     assert "master@10.77.7.30" not in log.read_text()
 
 
+def _source_upgrade(tmp_path, body, **env):
+    script = tmp_path / "src.sh"
+    script.write_text(f"set -euo pipefail\n. '{_UPGRADE}'\nset +e\n{body}\n")
+    e = {k: v for k, v in os.environ.items() if not k.startswith(("DANTESYNC_", "OBS_FLEET", "RIG_GRANDMASTER"))}
+    e.update(env)
+    return subprocess.run(["bash", str(script)], capture_output=True, text=True, env=e)
+
+
+def test_upgrade_verify_grades_an_audio_node_against_the_audio_grandmaster(tmp_path):
+    """Review round 1: verify_node ran dantesync-gate.sh against the VIDEO grandmaster for mbc/fohabl
+    too -- harmless only while GM enforcement is off. The gate env now carries the node's ROLE
+    grandmaster for an audio node, and nothing for a video node (the gate keeps its own default)."""
+    r = _source_upgrade(tmp_path, 'echo "A=[$(dantesync_gate_env_for mbc)]"; echo "V=[$(dantesync_gate_env_for cam1)]";'
+                                  ' echo "U=[$(dantesync_gate_env_for nosuchbox)]"')
+    assert "A=[RIG_GRANDMASTER_IP=10.77.7.106]" in r.stdout, r.stdout + r.stderr
+    assert "V=[]" in r.stdout and "U=[]" in r.stdout
+    src = _UPGRADE.read_text()
+    assert src.count('"${gate_env[@]}" "$HERE/dantesync-gate.sh"') == 2
+
+
 def test_upgrade_without_nodes_names_the_fleet_flag(tmp_path):
     bindir, _ = _stub_bin(tmp_path, {})
     r = subprocess.run(["bash", str(_UPGRADE), "--dry-run"], capture_output=True, text=True,

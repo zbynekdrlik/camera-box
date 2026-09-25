@@ -124,6 +124,15 @@ def test_a_malformed_row_fails_loudly_in_both(tmp_path, monkeypatch):
         df.rows()
 
 
+def test_an_obs_row_whose_host_lookup_fails_is_never_printed_empty(tmp_path):
+    """Review round 1: a failing obs_fleet_host still printed the row with an EMPTY address."""
+    r = _bash(tmp_path, 'obs_fleet_host() { return 1; }\ndantesync_fleet_rows || echo RC=$?',
+              DANTESYNC_FLEET="stream|obs:stream|windows|video|obsfleet|-|")
+    assert "RC=1" in r.stdout, r.stdout
+    assert "stream|" not in r.stdout
+    assert "no address for obs-fleet box 'stream'" in r.stderr
+
+
 def test_an_unknown_obs_fleet_name_fails_loudly(tmp_path):
     r = _bash(tmp_path, "dantesync_fleet_rows || echo RC=$?", DANTESYNC_FLEET="ghost|obs:ghost|linux|video|obsfleet|-|")
     assert "RC=1" in r.stdout and "absent from OBS_FLEET" in r.stderr
