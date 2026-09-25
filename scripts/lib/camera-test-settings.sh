@@ -88,18 +88,25 @@ camera_test_settings_ssh() {
 }
 
 # Remote exit codes of the single-gphoto2-user checks below.
+camera_test_settings_rc_no_pgrep() { printf '%s\n' 96; }
 camera_test_settings_rc_relay_active() { printf '%s\n' 97; }
 camera_test_settings_rc_gphoto2_busy() { printf '%s\n' 98; }
 
 # Remote text for ONE gphoto2 session with the given (already validated, plain-token) argv. The
 # issue-808 pause is best-effort (it never confirms the unit stopped), so "exactly one gphoto2 user"
-# is CHECKED on the box, in the same command, right before the session: a still-active relay or a
-# leftover gphoto2 process refuses with its own exit code instead of racing the camera.
+# is CHECKED on the box, in the same command, right before the session:
+#   - the relay unit must be really stopped: only inactive / failed / unknown (or no systemctl
+#     answer) pass. activating (auto-restart), deactivating, reloading and active refuse (exit 97);
+#   - pgrep must exist (exit 96 otherwise -- a missing pgrep must not silently skip the next check);
+#   - no gphoto2 process may be running (exit 98).
+# shellcheck disable=SC2016  # the $(...) / $_cts_rs are REMOTE shell text, expanded on the box
 camera_test_settings_gphoto2_cmd() {
   local unit
   unit="$(bkshading_relay_unit_name)"
-  printf 'if systemctl is-active --quiet %s 2>/dev/null; then echo CTS_RELAY_ACTIVE; exit %s; fi; ' \
+  printf '_cts_rs="$(systemctl is-active %s 2>/dev/null)"; case "$_cts_rs" in inactive|failed|unknown|"") ;; *) echo "CTS_RELAY_ACTIVE $_cts_rs"; exit %s;; esac; ' \
     "$unit" "$(camera_test_settings_rc_relay_active)"
+  printf 'command -v pgrep >/dev/null 2>&1 || { echo CTS_NO_PGREP; exit %s; }; ' \
+    "$(camera_test_settings_rc_no_pgrep)"
   printf 'if pgrep -x gphoto2 >/dev/null 2>&1; then echo CTS_GPHOTO2_BUSY; exit %s; fi; ' \
     "$(camera_test_settings_rc_gphoto2_busy)"
   printf 'timeout 20 gphoto2 %s\n' "$*"
@@ -115,7 +122,11 @@ camera_test_settings_transport_abort() {
       exit 1
       ;;
     "$(camera_test_settings_rc_gphoto2_busy)")
-      echo "ERROR: issue 1371: another gphoto2 process is running on $label ($ip) -- refusing to start the $what next to it (exactly one gphoto2 user)." >&2
+      echo "ERROR: issue 1371: another gphoto2 process is running on $label ($ip) (possibly this step's own timed-out set) -- refusing to start the $what next to it (exactly one gphoto2 user)." >&2
+      exit 1
+      ;;
+    "$(camera_test_settings_rc_no_pgrep)")
+      echo "ERROR: issue 1371: pgrep is not available on $label ($ip) -- cannot prove no other gphoto2 process is running, so the $what is refused." >&2
       exit 1
       ;;
     124) cause="timed out" ;;
@@ -258,7 +269,7 @@ camera_test_settings_enforce() {
   camera_test_settings_ssh "$found_ip" "$pw" "$(camera_test_settings_gphoto2_cmd "$setargs")" >/dev/null || rc=$?
   case "$rc" in
     0) ;;
-    "$(camera_test_settings_rc_relay_active)" | "$(camera_test_settings_rc_gphoto2_busy)")
+    "$(camera_test_settings_rc_relay_active)" | "$(camera_test_settings_rc_gphoto2_busy)" | "$(camera_test_settings_rc_no_pgrep)")
       camera_test_settings_transport_abort "$rc" "$found_label" "$found_ip" set
       ;;
     *) echo "    WARNING: issue 1371: gphoto2 --set-config exited rc=$rc -- the read-back decides" >&2 ;;
