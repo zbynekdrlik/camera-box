@@ -198,7 +198,8 @@ fn fast_then_robust_recovers_every_real_burn_unreadable_frame() {
 /// the tiles run, never WHAT is read — so no decode regression vs the proven #202 robust
 /// path. On a burn-unreadable fixture the fallback fires and runs the same tiles; on a
 /// frame whose burns the plain pass already had, the fast path returns the same plain
-/// superset (the tiles add nothing there anyway).
+/// superset (the tiles add nothing there anyway). (Issue 1370's slot crops add only a burn the
+/// tiles still miss; the tiles read every burn here, so they never run on these fixtures.)
 #[test]
 fn fast_then_robust_matches_robust_always_on_every_fixture() {
     for &(name, run_id, _frame_id) in CASES {
