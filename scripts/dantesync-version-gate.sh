@@ -49,6 +49,7 @@ set -euo pipefail
 #       --linux "cam1=root@10.77.9.61 cam2=root@10.77.9.62 imag-nb=newlevel@10.77.9.182" \
 #       --local dev1 \
 #       --win "strih=newlevel@10.77.9.202 stream=newlevel@10.77.9.204"
+#   dantesync-version-gate.sh --fleet          # issue 1372: every node of the ONE dantesync fleet
 #   dantesync-version-gate.sh --help
 #
 # Exit codes: 0 = every node matches the pin (or is knowingly excluded) — rig test may proceed,
@@ -243,6 +244,34 @@ fi
 
 # --- flow (executed only when run directly) ----------------------------------------------------
 
+# issue 1372: the ONE declared dantesync fleet -- the --fleet node set and the per-node ssh
+# credential BY NAME (fohabl's own password; every other node keeps DANTESYNC_VERSION_GATE_SSH_PASS).
+# Sourced only when EXECUTED, so a unit test sourcing this gate still sees only the pure parser + pin.
+# shellcheck source=scripts/lib/dantesync-fleet.sh
+. "$HERE/lib/dantesync-fleet.sh"
+
+# _dv_ssh_pass TARGET DEFAULT -> the ssh password for TARGET (user@addr): the value of the credvar
+# its dantesync-fleet row names (empty when that variable is unset -> the read fails -> UNKNOWN, never
+# a guess), else DEFAULT.
+_dv_ssh_pass() {
+  local var
+  var="$(dantesync_fleet_cred_var_for_target "${1:-}")"
+  if [ -n "$var" ]; then
+    printf '%s' "${!var:-}"
+  else
+    printf '%s' "${2:-}"
+  fi
+}
+
+# _dv_cred_missing TARGET -> rc 0 iff TARGET's fleet row names its own credential variable and that
+# variable is empty: the read is then SKIPPED (the node reads UNKNOWN) -- never dialled with an empty
+# or a foreign password.
+_dv_cred_missing() {
+  local var
+  var="$(dantesync_fleet_cred_var_for_target "${1:-}")"
+  [ -n "$var" ] && [ -z "${!var:-}" ]
+}
+
 usage() {
   cat <<EOF
 dantesync-version-gate.sh — fleet-wide dantesync VERSION-PARITY precondition gate (#862).
@@ -254,6 +283,7 @@ unread-and-unexcluded node, printing a box->version table.
 Usage:
   dantesync-version-gate.sh [--pin VERSION] [--fleet-file PATH] \\
       --linux "name=user@ip ..." [--local name ...] [--win "name=user@ip ..."]
+  dantesync-version-gate.sh [--pin VERSION] [--fleet-file PATH] --fleet
 
 Options:
   --pin VERSION     the fleet-pinned expected dantesync version (default \$DANTESYNC_VERSION_PIN).
@@ -267,6 +297,11 @@ Options:
   --win "N=U@IP ..."  one or more SSH-reachable Windows nodes (strih/stream), same
                     space-separated "name=user@ip" shape as --linux. Repeatable. Read via the
                     dantesync SERVICE exe's full path over SSH (not on Windows PATH).
+  --fleet           issue 1372: ADD every node of the ONE declared dantesync fleet
+                    (scripts/lib/dantesync-fleet.sh -- cams, dev1, the OBS boxes, mbc, fohabl) not
+                    already named by --linux/--local/--win. A traveling box that is away is SKIPPED
+                    (named); a node's own ssh credential is read by NAME (env or the dev1-local
+                    credential file); ssh login default DANTESYNC_VERSION_GATE_FLEET_USER.
 
 Exit: 0 = every node on the pin (or excluded) — proceed. 20 = a node DRIFTED (REFUSED).
   11 = a node UNKNOWN/unread (INCOMPLETE, not clean). 1 = usage error.
@@ -299,12 +334,16 @@ read_dantesync_version_output() {
     dantesync --version 2>/dev/null || true
     return 0
   fi
+  if _dv_cred_missing "$target"; then
+    echo "  ($name: its ssh credential $(dantesync_fleet_cred_var_for_target "$target") is not set -- export it or add it to $DANTESYNC_FLEET_CRED_FILE)" >&2
+    return 0
+  fi
   if [ "$win" = "1" ]; then
     cmd="\"${DANTESYNC_VERSION_GATE_WIN_EXE}\" --version"
   else
     cmd="dantesync --version"
   fi
-  sshpass -p "${DANTESYNC_VERSION_GATE_SSH_PASS:-newlevel}" ssh \
+  sshpass -p "$(_dv_ssh_pass "$target" "${DANTESYNC_VERSION_GATE_SSH_PASS:-newlevel}")" ssh \
     -o StrictHostKeyChecking=no -o BatchMode=no \
     -o "ConnectTimeout=${DANTESYNC_VERSION_GATE_SSH_TIMEOUT:-8}" \
     "$target" \
@@ -328,7 +367,8 @@ read_dantesync_tray_sha() {
     return 0
   fi
   [ -n "$target" ] || { printf ''; return 0; }
-  out="$(sshpass -p "${DANTESYNC_VERSION_GATE_SSH_PASS:-newlevel}" ssh \
+  _dv_cred_missing "$target" && { printf ''; return 0; }
+  out="$(sshpass -p "$(_dv_ssh_pass "$target" "${DANTESYNC_VERSION_GATE_SSH_PASS:-newlevel}")" ssh \
     -o StrictHostKeyChecking=no -o BatchMode=no \
     -o "ConnectTimeout=${DANTESYNC_VERSION_GATE_SSH_TIMEOUT:-8}" \
     "$target" \
@@ -372,7 +412,7 @@ read_dantesync_newest_release() {
 }
 
 main() {
-  local pin="$DANTESYNC_VERSION_PIN" fleet_file="$DEFAULT_FLEET_FILE"
+  local pin="$DANTESYNC_VERSION_PIN" fleet_file="$DEFAULT_FLEET_FILE" fleet=0
   local -a linux_raw=() local_names=() win_raw=()
   while [ $# -gt 0 ]; do
     case "$1" in
@@ -381,6 +421,7 @@ main() {
       --linux) shift; linux_raw+=("${1:-}") ;;
       --local) shift; local_names+=("${1:-}") ;;
       --win) shift; win_raw+=("${1:-}") ;;
+      --fleet) fleet=1 ;;
       -h | --help)
         usage
         exit 0
@@ -411,6 +452,34 @@ main() {
     win_pairs+=($raw)
   done
   set +f
+
+  # issue 1372: --fleet adds every declared dantesync node not already named on the command line.
+  if [ "$fleet" = 1 ]; then
+    dantesync_fleet_load_credentials
+    local fuser="${DANTESYNC_VERSION_GATE_FLEET_USER:-${WIN_SSH_USER:-newlevel}}" named fpair fname
+    named=" "
+    for fpair in "${linux_pairs[@]}" "${win_pairs[@]}" "${local_names[@]}"; do
+      named="${named}${fpair%%=*} "
+    done
+    set -f
+    for fpair in $(dantesync_fleet_spec linux "$fuser" --present); do
+      case "$named" in *" ${fpair%%=*} "*) continue ;; esac
+      linux_pairs+=("$fpair")
+    done
+    for fpair in $(dantesync_fleet_spec win "$fuser" --present); do
+      case "$named" in *" ${fpair%%=*} "*) continue ;; esac
+      win_pairs+=("$fpair")
+    done
+    for fname in $(dantesync_fleet_spec local "$fuser"); do
+      case "$named" in *" $fname "*) continue ;; esac
+      local_names+=("$fname")
+    done
+    set +f
+    for fname in $(dantesync_fleet_names homegate=obsfleet); do
+      dantesync_fleet_present "$fname" \
+        || echo "  $fname SKIPPED (traveling box away -- obs_fleet_is_home false; it is gated when home)"
+    done
+  fi
 
   if [ "${#linux_pairs[@]}" -eq 0 ] && [ "${#local_names[@]}" -eq 0 ] && [ "${#win_pairs[@]}" -eq 0 ]; then
     echo "ERROR: no node to gate (--linux, --local and --win are all empty)." >&2

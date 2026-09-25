@@ -43,13 +43,16 @@ set -uo pipefail
 # #1119 storm signal is dantesync's OWN ntp_step_storm boolean (its 120/h alarm) -- there is no
 # camera-box numeric storm literal to re-hardcode; ntp_steps_last_hour is carried in the reason only.
 #
-# NODE ROSTER: cam1-7 (all powered + running dantesync today, incl. cam5-7 retired from
-# CAMERA_ACTIVE_SET) resolved via scripts/camera-set.sh's camera_resolve (single IP source of truth)
-# + strih-lx/stream/resolume resolved via scripts/lib/obs-fleet.sh's obs_fleet_host (issue 1317:
-# strih-lx is the production strih since M4; imag is retired). resolume is a
-# TRAVELING CG box: paged only while obs_fleet_is_home resolume holds (the #1296 condition); away ->
-# skipped (never a false page against a box that is simply not here). An OFF cam reads UNREACHABLE ->
-# SKIP (deferred to the #1001 network-reach watchdog), never a page.
+# NODE ROSTER (issue 1372: DERIVED from the ONE declared dantesync fleet, scripts/lib/dantesync-fleet.sh):
+# every camera camera_resolve knows (incl. those retired from CAMERA_ACTIVE_SET -- still powered,
+# still running dantesync), dev1 (the local node), the OBS boxes resolved via obs-fleet.sh's
+# obs_fleet_host (issue 1317: strih-lx is the production strih since M4; imag is retired), and the
+# audio-VLAN PCs mbc + fohabl (the `fixed` nodes). resolume is a TRAVELING CG box: paged only while
+# obs_fleet_is_home resolume holds (the #1296 condition); away -> skipped (never a false page against
+# a box that is simply not here). An OFF cam reads UNREACHABLE -> SKIP (deferred to the #1001
+# network-reach watchdog), never a page. Each node is graded against ITS role's grandmaster: the
+# video nodes against video-clock.lan, the audio-VLAN nodes against the audio grandmaster
+# (DANTESYNC_AUDIO_GM_HOST, the Audinate device -- the same clock on the other VLAN).
 #
 # Usage:
 #   scripts/dantesync-clock-alert-watchdog.sh            # one pass: fetch -> decide -> alert
@@ -67,12 +70,14 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE/lib/watchdog-tcp-probe.sh"
 # shellcheck source=scripts/camera-set.sh
 . "$HERE/camera-set.sh"
+# shellcheck source=scripts/lib/dantesync-fleet.sh
+. "$HERE/lib/dantesync-fleet.sh"
 
 DRY_RUN=0
 case "${1:-}" in
   --dry-run) DRY_RUN=1 ;;
   --help | -h)
-    sed -n '10,55p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+    sed -n '10,60p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
     exit 0
     ;;
   "") : ;;
@@ -80,11 +85,12 @@ case "${1:-}" in
 esac
 
 # -- config (all env-overridable) ---------------------------------------------------------------
-# The cam nodes to watch (space-separated NAMES). Default = the WHOLE powered dantesync cam fleet
-# cam1-7 -- NOT CAMERA_ACTIVE_SET, which excludes cam5-7 (retired grabbers) that are still powered
-# and still running dantesync (so they can silently lose the clock too). Each name resolves to its IP
+# The cam nodes to watch (space-separated NAMES). Default = every camera of the dantesync fleet
+# (issue 1372: dantesync_fleet_camera_names, the camera_resolve walk -- never a literal range) --
+# NOT CAMERA_ACTIVE_SET, which can exclude a camera retired from measurement that is still powered
+# and still running dantesync (so it can silently lose the clock too). Each name resolves to its IP
 # via camera-set.sh's camera_resolve (single source of truth, no second IP literal).
-DANTE_CLOCK_CAM_NODES="${DANTE_CLOCK_CAM_NODES-cam1 cam2 cam3 cam4 cam5 cam6 cam7}"
+DANTE_CLOCK_CAM_NODES="${DANTE_CLOCK_CAM_NODES-$(dantesync_fleet_camera_names)}"
 # The OBS-box dantesync nodes (space-separated NAMES); IPs + the resolume home-gate come from
 # obs-fleet.sh. imag(-nb) IS a dantesync node; resolume is the traveling CG box.
 # issue 1316: `imag` DROPPED from the default — imag-nb was returned to the owner (dark), so it is
@@ -93,7 +99,12 @@ DANTE_CLOCK_CAM_NODES="${DANTE_CLOCK_CAM_NODES-cam1 cam2 cam3 cam4 cam5 cam6 cam
 # issue 1317 (M4 cut-over 20.9.2026): the production strih is `strih-lx` (the Linux notebook at
 # 10.77.9.202, the NTP master since M4); the Windows `strih` row is retired from obs-fleet.sh, so the
 # old `strih` name would resolve to nothing and silently drop the strih from clock paging.
-DANTE_CLOCK_OBS_NODES="${DANTE_CLOCK_OBS_NODES-strih-lx stream resolume}"
+# issue 1372: derived from the dantesync fleet (its obsfleet-gated rows; a `retired` obs-fleet box
+# drops out there).
+DANTE_CLOCK_OBS_NODES="${DANTE_CLOCK_OBS_NODES-$(dantesync_fleet_names homegate=obsfleet)}"
+# issue 1372: the FIXED non-camera nodes -- the audio-VLAN PCs mbc + fohabl (Windows, always home).
+# Probed like any remote node; box-up = ssh :22; graded against their role's grandmaster.
+DANTE_CLOCK_FIXED_NODES="${DANTE_CLOCK_FIXED_NODES-$(dantesync_fleet_fixed_names)}"
 # #1313: the LOCAL node(s) -- dev1 itself. dev1 runs dantesync too (its clock feeds every dev1-hosted
 # gate: clock-offset-painter-gate.sh, the recording-verdict wall references, every date-stamped gate
 # window), yet it is NOT a probed cam/obs node -- so on 14.9.2026 it silently sat NTP-only for ~a day
@@ -101,7 +112,7 @@ DANTE_CLOCK_OBS_NODES="${DANTE_CLOCK_OBS_NODES-strih-lx stream resolume}"
 # would have paged it runs ON dev1 and never looked at 127.0.0.1:8898. A local node is probed on the
 # loopback :8898 with NO ssh/TCP reach probe (the box is by definition up -- the watchdog runs on it),
 # graded with the SAME verdicts (analyze_local / the DECIDE --local flag). Space-separated NAMES.
-DANTE_CLOCK_LOCAL_NODES="${DANTE_CLOCK_LOCAL_NODES-dev1}"
+DANTE_CLOCK_LOCAL_NODES="${DANTE_CLOCK_LOCAL_NODES-$(dantesync_fleet_names homegate=local)}"
 # The loopback address the local node's :8898 is probed on (override for Tier-0 fixtures).
 DANTE_CLOCK_LOCAL_IP="${DANTE_CLOCK_LOCAL_IP:-127.0.0.1}"
 
@@ -153,12 +164,14 @@ STATE_FILE="${DANTE_CLOCK_ALERT_STATE_FILE:-$_state_default}"
 
 log() { printf '%s [dantesync-clock-alert-watchdog] %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$*" >&2; }
 
-# -- roster: NAME|IP|HOMEGATE triples ----------------------------------------------------------
+# -- roster: NAME|IP|HOMEGATE[|ROLE] lines -------------------------------------------------------
 # HOMEGATE ∈ always (cams: probe unconditionally; an OFF box -> UNREACHABLE -> SKIP) |
 # obsfleet (obs_fleet_is_home decides -- always-true for strih-lx/stream, false for a retired box, the traveling gate for
 # resolume) | local (#1313: dev1 itself -- loopback :8898, NO ssh/TCP reach probe, box up by
-# definition so a dead :8898 is NO_DANTESYNC not SKIP). DANTE_CLOCK_NODES (space-separated
-# NAME|IP[|HOMEGATE]) overrides the whole roster.
+# definition so a dead :8898 is NO_DANTESYNC not SKIP) | fixed (issue 1372: an always-home
+# non-camera node -- mbc/fohabl; box-up = ssh :22, no ssh-banner management axis). ROLE (issue
+# 1372) picks the grandmaster the node is graded against (video | audio | ntp-master; absent =
+# video). DANTE_CLOCK_NODES (space-separated NAME|IP[|HOMEGATE[|ROLE]]) overrides the whole roster.
 build_roster() {
   if [ -n "${DANTE_CLOCK_NODES:-}" ]; then
     # NOTE: a full DANTE_CLOCK_NODES override REPLACES the whole roster -- it drops the `local` node
@@ -171,11 +184,11 @@ build_roster() {
   # #1313: the local node(s) first -- dev1 on the loopback, homegate `local` (no camera_resolve /
   # obs_fleet_host lookup: the address is the fixed loopback, the box is by definition up).
   for n in $DANTE_CLOCK_LOCAL_NODES; do
-    printf '%s|%s|local\n' "$n" "$DANTE_CLOCK_LOCAL_IP"
+    printf '%s|%s|local|%s\n' "$n" "$DANTE_CLOCK_LOCAL_IP" "$(_roster_role "$n")"
   done
   for n in $DANTE_CLOCK_CAM_NODES; do
     if camera_resolve "$n" >/dev/null 2>&1; then
-      printf '%s|%s|always\n' "$n" "$CAMERA_IP"
+      printf '%s|%s|always|%s\n' "$n" "$CAMERA_IP" "$(_roster_role "$n")"
     else
       log "roster: camera_resolve failed for '$n' -- skipping (check camera-set.sh)"
     fi
@@ -183,11 +196,25 @@ build_roster() {
   for n in $DANTE_CLOCK_OBS_NODES; do
     host="$(obs_fleet_host "$n" 2>/dev/null || true)"
     if [ -n "$host" ]; then
-      printf '%s|%s|obsfleet\n' "$n" "$host"
+      printf '%s|%s|obsfleet|%s\n' "$n" "$host" "$(_roster_role "$n")"
     else
       log "roster: obs_fleet_host failed for '$n' -- skipping (check obs-fleet.sh)"
     fi
   done
+  # issue 1372: the fixed non-camera nodes (mbc, fohabl) -- address + role from the dantesync fleet.
+  for n in $DANTE_CLOCK_FIXED_NODES; do
+    host="$(dantesync_fleet_field "$n" addr 2>/dev/null || true)"
+    if [ -n "$host" ]; then
+      printf '%s|%s|fixed|%s\n' "$n" "$host" "$(_roster_role "$n")"
+    else
+      log "roster: dantesync_fleet_field failed for '$n' -- skipping (check dantesync-fleet.sh)"
+    fi
+  done
+}
+
+# _roster_role <name> -> the node's dantesync-fleet role (video when the fleet does not know it).
+_roster_role() {
+  dantesync_fleet_field "$1" role 2>/dev/null || printf 'video'
 }
 
 # -- I/O probe (dev1-local; NOT pure) -----------------------------------------------------------
@@ -350,9 +377,11 @@ confirm_then_alert() {
 }
 
 # -- per-node decision --------------------------------------------------------------------------
-# handle_node <name> <ip> <homegate> <grandmaster_ip> <version_pin>
+# handle_node <name> <ip> <homegate> <grandmaster_ip> <version_pin> [<role>]
+#   GRANDMASTER_IP is the one THIS node's role must lock to (issue 1372: the audio-VLAN nodes carry
+#   the audio grandmaster, every other node the video one).
 handle_node() {
-  local name="$1" ip="$2" homegate="$3" gm="$4" vpin="${5:-}" body reachable out verdict reason steps vnote box_up
+  local name="$1" ip="$2" homegate="$3" gm="$4" vpin="${5:-}" role="${6:-video}" body reachable out verdict reason steps vnote box_up
 
   if [ "$homegate" = "obsfleet" ] && ! obs_fleet_is_home "$name"; then
     log "$name away (obs_fleet_is_home false) -- traveling box, skipping this pass (no fetch, no page)"
@@ -442,8 +471,11 @@ handle_node() {
   confirm_then_alert "mgmt_${name}" 0 "dante-clock-${name}-mgmt"   # #1309
   local steps_note=""
   [ -n "$steps" ] && [ "$steps" != "null" ] && steps_note=", ${steps} NTP krokov/h"
+  # issue 1372: an audio-VLAN node locks to the audio grandmaster, never video-clock.lan.
+  local fix_txt="Náprava: over grandmaster (DNS video-clock.lan / DHCP), dantesync na boxe, gm_allowlist."
+  [ "$role" = "audio" ] && fix_txt="Náprava: over audio grandmaster na audio VLAN (${DANTESYNC_AUDIO_GM_HOST}, Audinate), dantesync na boxe, gm_allowlist."
   confirm_then_alert "node_${name}" 1 "dante-clock-${name}" \
-    "🚨 Dante-clock ($REPO_SLUG): **$name** ($ip) STRATIL dante clock -- dôvod **${reason}**${steps_note}.${vnote_txt} Uzol nie je PTP-zosynchronizovaný na rig grandmaster (${gm:-<neznámy>}); pri produkcii to potichu rozhodí A/V aj genlock celej fleet. Potvrdené počas ${CONFIRM_THRESHOLD} kontrol; re-ping každých ~$((REPING_INTERVAL_S/60)) min kým to trvá. Náprava: over grandmaster (DNS video-clock.lan / DHCP), dantesync na boxe, gm_allowlist."
+    "🚨 Dante-clock ($REPO_SLUG): **$name** ($ip) STRATIL dante clock -- dôvod **${reason}**${steps_note}.${vnote_txt} Uzol nie je PTP-zosynchronizovaný na rig grandmaster (${gm:-<neznámy>}); pri produkcii to potichu rozhodí A/V aj genlock celej fleet. Potvrdené počas ${CONFIRM_THRESHOLD} kontrol; re-ping každých ~$((REPING_INTERVAL_S/60)) min kým to trvá. ${fix_txt}"
 }
 
 # handle_grandmaster <resolved_ok 0|1> <grandmaster_ip> -> DNS_UNRESOLVABLE + GM_CHANGED global pages.
@@ -509,7 +541,7 @@ require_tools() {
 }
 
 main() {
-  log "pass start (dry_run=$DRY_RUN, confirm=$CONFIRM_THRESHOLD, reping=${REPING_INTERVAL_S}s, local='$DANTE_CLOCK_LOCAL_NODES', cams='$DANTE_CLOCK_CAM_NODES', obs='$DANTE_CLOCK_OBS_NODES')"
+  log "pass start (dry_run=$DRY_RUN, confirm=$CONFIRM_THRESHOLD, reping=${REPING_INTERVAL_S}s, local='$DANTE_CLOCK_LOCAL_NODES', cams='$DANTE_CLOCK_CAM_NODES', obs='$DANTE_CLOCK_OBS_NODES', fixed='$DANTE_CLOCK_FIXED_NODES')"
   require_tools || { log "pass end (aborted: missing required tools)"; return 3; }
 
   # Resolve the grandmaster ONCE per pass (the DNS name video-clock.lan -> its IPv4, #1307).
@@ -532,13 +564,24 @@ main() {
     log "dantesync version pin UNRESOLVED (dantesync-version-gate.sh unreadable / DANTE_CLOCK_VERSION_PIN unset) -- version reporting disabled this pass (never a page)"
   fi
 
-  local triple name ip homegate
+  # issue 1372: the audio-VLAN grandmaster (the audio nodes' reference) -- resolved ONCE per pass. An
+  # unresolvable one grades those nodes without the gm check (never a false wrong_gm page).
+  local audio_gm=""
+  if audio_gm="$(dantesync_fleet_role_gm_ip audio 2>/dev/null)" && [ -n "$audio_gm" ]; then
+    log "audio-VLAN grandmaster: $DANTESYNC_AUDIO_GM_HOST -> $audio_gm"
+  else
+    audio_gm=""
+    log "audio-VLAN grandmaster UNRESOLVABLE ($DANTESYNC_AUDIO_GM_HOST) -- audio nodes graded without the gm check this pass"
+  fi
+
+  local triple name ip homegate role node_gm
   while IFS= read -r triple; do
     [ -n "$triple" ] || continue
-    name="${triple%%|*}"
-    homegate="${triple##*|}"
-    ip="${triple#*|}"; ip="${ip%%|*}"
-    handle_node "$name" "$ip" "$homegate" "$gm" "$vpin"
+    IFS='|' read -r name ip homegate role <<<"$triple"
+    role="${role:-video}"
+    node_gm="$gm"
+    [ "$role" = "audio" ] && node_gm="$audio_gm"
+    handle_node "$name" "$ip" "$homegate" "$node_gm" "$vpin" "$role"
   done < <(build_roster)
   log "pass end"
 }

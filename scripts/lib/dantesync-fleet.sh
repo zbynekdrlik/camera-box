@@ -183,6 +183,27 @@ dantesync_fleet_names() {
   printf '%s' "$out"
 }
 
+# dantesync_fleet_camera_names -> the space-separated camera node names (the camera_resolve walk).
+dantesync_fleet_camera_names() {
+  local out="" name
+  while IFS='|' read -r name _; do
+    out="${out:+$out }$name"
+  done < <(_dantesync_fleet_camera_rows)
+  printf '%s' "$out"
+}
+
+# dantesync_fleet_fixed_names -> the always-home NON-camera nodes (the audio-VLAN PCs today): every
+# `homegate=always` row that is not a camera.
+dantesync_fleet_fixed_names() {
+  local out="" name cams
+  cams=" $(dantesync_fleet_camera_names) "
+  for name in $(dantesync_fleet_names homegate=always); do
+    case "$cams" in *" $name "*) continue ;; esac
+    out="${out:+$out }$name"
+  done
+  printf '%s' "$out"
+}
+
 # dantesync_fleet_present <name> -> rc 0 iff NAME should be read this pass: a traveling obs-fleet box
 # only while obs_fleet_is_home (the #1296 gate; its I/O), every other node always. Unknown -> rc 1.
 dantesync_fleet_present() {

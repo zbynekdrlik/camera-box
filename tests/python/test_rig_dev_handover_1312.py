@@ -279,6 +279,16 @@ def test_clock_obs_net_audiolag_genlock_items():
     assert _item("clock").decide({"clock": (CLOCK_DEV1_OK_REMOTES_SKIP, 0)})["status"] == d.OK
     # and a dev1 daemon crash (NO_DANTESYNC) is a real FORGOT even though a remote node is OK.
     assert _item("clock").decide({"clock": (CLOCK_DEV1_NODANTESYNC, 0)})["status"] == d.FORGOT
+    # issue 1372: the watchdog roster now also carries the audio-VLAN PCs (mbc, fohabl), graded
+    # against the audio grandmaster -- their verdict lines fold into the same reduction.
+    audio_ok = CLOCK_ALL_OK + (
+        "2026-09-25 [dantesync-clock-alert-watchdog] mbc (10.77.7.232): reachable=1 verdict=OK reason=none\n"
+        "2026-09-25 [dantesync-clock-alert-watchdog] fohabl (10.77.7.30): reachable=1 verdict=OK reason=none\n")
+    assert _item("clock").decide({"clock": (audio_ok, 0)})["status"] == d.OK
+    audio_lost = CLOCK_ALL_OK + (
+        "2026-09-25 [dantesync-clock-alert-watchdog] fohabl (10.77.7.30): reachable=1 verdict=NO_CLOCK "
+        "reason=wrong_gm\n")
+    assert _item("clock").decide({"clock": (audio_lost, 0)})["status"] == d.FORGOT
 
     assert _item("obs").decide({"obs": (OBS_ALL_HEALTHY, 0)})["status"] == d.OK
     assert _item("obs").decide({"obs": (OBS_ONE_WEDGED, 0)})["status"] == d.FORGOT

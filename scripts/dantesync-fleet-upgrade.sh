@@ -57,7 +57,14 @@ set -euo pipefail
 #       --linux "cam1=root@10.77.9.61 cam2=root@10.77.9.62 imag-nb=newlevel@10.77.9.182" \
 #       --win "strih=newlevel@10.77.9.202 stream=newlevel@10.77.9.204" \
 #       [--local dev1] [--canary "cam1 strih"] [--dry-run] [--force]
+#   scripts/dantesync-fleet-upgrade.sh --fleet [--dry-run]   # issue 1372: the ONE declared fleet
 #   scripts/dantesync-fleet-upgrade.sh --help
+#
+# --fleet (issue 1372) adds every node of scripts/lib/dantesync-fleet.sh (every camera, dev1, the
+# OBS boxes, the audio-VLAN PCs mbc + fohabl) not already named by --linux/--win/--local -- so a roll
+# can no longer forget a box. A node whose fleet row names its own ssh credential (fohabl) is reached
+# with that variable's value (env or the dev1-local credential file), every other node with SSH_PASS.
+# A traveling box that is away is skipped as before. Always run --fleet --dry-run first.
 #
 # --linux/--win entries are "name=user@ip"; --local NAME is read+upgraded on this box (dev1).
 # --target defaults to DANTESYNC_VERSION_PIN (the #862 gate's pin). --canary overrides the
@@ -95,6 +102,8 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE/lib/cambox-offline-ack.sh"   # cambox_offline_ack_is_acked/_reason (shared exclusion)
 # shellcheck source=scripts/lib/obs-fleet.sh
 . "$HERE/lib/obs-fleet.sh"            # obs_fleet_is_home / obs_fleet_home_check (#1296 traveling-box gate, issue 1297)
+# shellcheck source=scripts/lib/dantesync-fleet.sh
+. "$HERE/lib/dantesync-fleet.sh"      # issue 1372: the --fleet node set + a node's own credential by name
 
 # The GitHub release download base for the (Claude-stewarded) dantesync repo. Releases are
 # ALL-OR-NOTHING (dantesync #56): a published tag always carries BOTH the Linux and Windows
@@ -461,7 +470,7 @@ fi
 
 # --- flow (executed only when run directly) -------------------------------------------------
 
-usage() { sed -n '2,58p' "$0"; }
+usage() { sed -n '2,71p' "$0"; }
 log()   { printf '%s\n' "$*"; }
 err()   { printf 'ERROR: %s\n' "$*" >&2; }
 
@@ -470,6 +479,7 @@ TARGET="${DANTESYNC_VERSION_PIN}"
 LINUX_SPEC=""
 WIN_SPEC=""
 LOCAL_SPEC=""
+USE_FLEET=0
 CANARY_OVERRIDE=""
 DRY_RUN=0
 FORCE=0
@@ -482,6 +492,7 @@ GATE_WAIT_SECS="${GATE_WAIT_SECS:-6}"
 # gate's master-aware median+freshness grade, #1014, not the strict single-node offset bound) and
 # (b) a LONGER bounded settle window (retry to steady state, clear PASS/FAIL, no silent sleep-and-
 # hope). NTP_MASTER defaults to the SAME name dantesync-gate.sh uses (single source of truth).
+_NTP_MASTER_GIVEN="${NTP_MASTER:-${DANTESYNC_NTP_MASTER_NAME:-}}"
 NTP_MASTER="${NTP_MASTER:-${DANTESYNC_NTP_MASTER_NAME:-strih}}"
 MASTER_GATE_WAIT_TRIES="${MASTER_GATE_WAIT_TRIES:-20}"
 MASTER_GATE_WAIT_SECS="${MASTER_GATE_WAIT_SECS:-15}"
@@ -494,6 +505,7 @@ while [ $# -gt 0 ]; do
     --linux)    LINUX_SPEC="${2:?--linux needs \"name=user@ip ...\"}"; shift 2 ;;
     --win)      WIN_SPEC="${2:?--win needs \"name=user@ip ...\"}"; shift 2 ;;
     --local)    LOCAL_SPEC="${2:?--local needs a node name}"; shift 2 ;;
+    --fleet)    USE_FLEET=1; shift ;;
     --canary)   CANARY_OVERRIDE="${2:?--canary needs a node set}"; shift 2 ;;
     --dry-run)  DRY_RUN=1; shift ;;
     --force)    FORCE=1; shift ;;
@@ -507,11 +519,19 @@ case "$TARGET" in
   *) err "--target '$TARGET' is not an X.Y.Z version"; exit 1 ;;
 esac
 
+# node_pass ADDR -> the ssh password for ADDR (user@ip): issue 1372 -- the value of the credvar the
+# node's dantesync-fleet row names (fohabl), else SSH_PASS. An unset credvar yields "" (the node's
+# ssh then fails loudly), never another node's password.
+node_pass() {
+  local var
+  var="$(dantesync_fleet_cred_var_for_target "$1")"
+  if [ -n "$var" ]; then printf '%s' "${!var:-}"; else printf '%s' "$SSH_PASS"; fi
+}
 ssh_node() {  # ADDR CMD  (ADDR is user@ip)
-  sshpass -p "$SSH_PASS" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=12 "$1" "$2"
+  sshpass -p "$(node_pass "$1")" ssh -o StrictHostKeyChecking=no -o ConnectTimeout=12 "$1" "$2"
 }
 scp_node() {  # LOCAL_PATH  ADDR:REMOTE
-  sshpass -p "$SSH_PASS" scp -O -o StrictHostKeyChecking=no -o ConnectTimeout=12 "$1" "$2"
+  sshpass -p "$(node_pass "${2%%:*}")" scp -O -o StrictHostKeyChecking=no -o ConnectTimeout=12 "$1" "$2"
 }
 
 # #1077: the orchestrator downloads + sha256-verifies the pinned binary ONCE on dev1 (this box HAS
@@ -777,16 +797,44 @@ add_node() {  # NAME KIND ADDR
     log "  $1 SKIPPED (traveling box away -- obs_fleet_is_home false; will roll when home)"
     return 0
   fi
+  # issue 1372: a node that needs its OWN ssh credential (fohabl) is never dialled without it.
+  local credvar=""
+  [ "$2" = "local" ] || credvar="$(dantesync_fleet_cred_var_for_target "$3")"
+  if [ -n "$credvar" ] && [ -z "${!credvar:-}" ]; then
+    log "  $1 SKIPPED (its ssh credential $credvar is not set -- export it or add it to $DANTESYNC_FLEET_CRED_FILE)"
+    return 0
+  fi
   NODES+=("$1|$2|$3")
 }
 
 log "== dantesync-fleet-upgrade (#876): target v${TARGET} =="
+# issue 1372: --fleet appends every declared dantesync node not already named explicitly.
+if [ "$USE_FLEET" -eq 1 ]; then
+  dantesync_fleet_load_credentials
+  # the fleet names its NTP master by ROLE (strih-lx today) -- verify it with the master-aware grade
+  # unless NTP_MASTER / DANTESYNC_NTP_MASTER_NAME was given explicitly.
+  if [ -z "$_NTP_MASTER_GIVEN" ]; then
+    _fleet_master="$(dantesync_fleet_names role=ntp-master)"
+    [ -n "$_fleet_master" ] && NTP_MASTER="${_fleet_master%% *}"
+  fi
+  _fleet_user="${DANTESYNC_FLEET_UPGRADE_USER:-${WIN_SSH_USER:-newlevel}}"
+  _named=" $(for e in $LINUX_SPEC $WIN_SPEC; do printf '%s ' "${e%%=*}"; done)$LOCAL_SPEC "
+  for e in $(dantesync_fleet_spec linux "$_fleet_user"); do
+    case "$_named" in *" ${e%%=*} "*) ;; *) LINUX_SPEC="${LINUX_SPEC:+$LINUX_SPEC }$e" ;; esac
+  done
+  for e in $(dantesync_fleet_spec win "$_fleet_user"); do
+    case "$_named" in *" ${e%%=*} "*) ;; *) WIN_SPEC="${WIN_SPEC:+$WIN_SPEC }$e" ;; esac
+  done
+  for e in $(dantesync_fleet_spec local "$_fleet_user"); do
+    case "$_named" in *" $e "*) ;; *) LOCAL_SPEC="${LOCAL_SPEC:+$LOCAL_SPEC }$e" ;; esac
+  done
+fi
 for entry in $LINUX_SPEC; do add_node "${entry%%=*}" linux "${entry#*=}"; done
 for entry in $WIN_SPEC;   do add_node "${entry%%=*}" win   "${entry#*=}"; done
 for name in $LOCAL_SPEC;  do add_node "$name" local "$name"; done
 
 if [ "${#NODES[@]}" -eq 0 ]; then
-  err "no nodes to act on — pass --linux/--win/--local (see --help)"
+  err "no nodes to act on — pass --fleet or --linux/--win/--local (see --help)"
   exit 1
 fi
 
