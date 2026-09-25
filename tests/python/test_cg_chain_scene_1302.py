@@ -119,15 +119,39 @@ def test_restore_calls_without_a_previous_program_skips_the_cut():
     assert cg_chain_scene.restore_calls(state) == []
 
 
+def test_restore_calls_put_the_previous_transition_back_last():
+    # The cut runs under a forced Cut transition; the operator's own transition comes back LAST,
+    # after the program + items are restored (still under Cut, so the restore is instant too).
+    state = {"host": "h", "scene": None, "prev_program": "sp-slow", "items": [],
+             "prev_transition": "Fade"}
+    assert cg_chain_scene.restore_calls(state) == [
+        ("SetCurrentProgramScene", {"sceneName": "sp-slow"}),
+        ("SetCurrentSceneTransition", {"transitionName": "Fade"}),
+    ]
+
+
+def test_cut_transition_name_is_found_by_kind():
+    listing = {"transitions": [
+        {"transitionName": "Fade", "transitionKind": "fade_transition"},
+        {"transitionName": "Strih", "transitionKind": "cut_transition"},
+    ]}
+    assert cg_chain_scene.cut_transition_name(listing) == "Strih"
+    with pytest.raises(ValueError, match="cut"):
+        cg_chain_scene.cut_transition_name({"transitions": [
+            {"transitionName": "Fade", "transitionKind": "fade_transition"}]})
+
+
 # ---- WS glue against a scripted fake rpc --------------------------------------------------------
 
 
 class FakeObs:
-    """A tiny scripted OBS: scene list, per-scene items, current program. Records every call."""
+    """A tiny scripted OBS: scene list, per-scene items, current program + transition. Records
+    every call."""
 
-    def __init__(self, items_by_scene, program):
+    def __init__(self, items_by_scene, program, transition="Fade"):
         self.items = {k: [dict(i) for i in v] for k, v in items_by_scene.items()}
         self.program = program
+        self.transition = transition
         self.calls = []
 
     def __call__(self, rtype, rdata=None):
@@ -139,9 +163,21 @@ class FakeObs:
             return {"sceneItems": [dict(i) for i in self.items[rdata["sceneName"]]]}
         if rtype == "GetCurrentProgramScene":
             return {"currentProgramSceneName": self.program}
+        if rtype == "GetSceneTransitionList":
+            return {"transitions": [
+                {"transitionName": "Fade", "transitionKind": "fade_transition"},
+                {"transitionName": "Cut", "transitionKind": "cut_transition"},
+            ]}
+        if rtype == "GetCurrentSceneTransition":
+            return {"transitionName": self.transition}
+        if rtype == "SetCurrentSceneTransition":
+            self.transition = rdata["transitionName"]
+            return {}
         if rtype == "SetCurrentProgramScene":
             if rdata["sceneName"] not in self.items:
                 raise RuntimeError("no such scene")
+            # A program cut under anything but Cut would blend the old program into the new one.
+            assert self.transition == "Cut", "the program cut must run under the Cut transition"
             self.program = rdata["sceneName"]
             return {}
         if rtype == "SetSceneItemEnabled":
@@ -155,7 +191,9 @@ class FakeObs:
 def test_strih_solo_writes_the_state_before_mutating_then_cuts(tmp_path):
     obs = FakeObs(STRIH_ITEMS, "Cam 1")
     state_path = tmp_path / "strih.json"
-    scene = cg_chain_scene.strih_solo(obs, "10.77.9.202", "CG-obs", "", str(state_path))
+    seen = []
+    scene = cg_chain_scene.strih_solo(
+        obs, "10.77.9.202", "CG-obs", "", str(state_path), after_cut=seen.append)
     assert scene == "CG bridge"
     assert obs.program == "CG bridge"
     enabled = {i["sourceName"]: i["sceneItemEnabled"] for i in obs.items["CG bridge"]}
@@ -165,11 +203,14 @@ def test_strih_solo_writes_the_state_before_mutating_then_cuts(tmp_path):
         "host": "10.77.9.202",
         "scene": "CG bridge",
         "prev_program": "Cam 1",
+        "prev_transition": "Fade",
         "items": [{"id": 7, "enabled": False}, {"id": 8, "enabled": True}],
     }
-    # The program cut is the LAST mutation (the recording sees a clean CG frame from the cut on).
+    # The program cut is the LAST mutation (the recording sees a clean CG frame from the cut on),
+    # and the non-black check runs on the cut scene right after it.
     mutations = [c for c in obs.calls if c[0].startswith("Set")]
     assert mutations[-1] == ("SetCurrentProgramScene", {"sceneName": "CG bridge"})
+    assert seen == ["CG bridge"]
 
 
 def test_strih_solo_leaves_obs_untouched_when_no_scene_carries_the_input(tmp_path):
@@ -180,7 +221,7 @@ def test_strih_solo_leaves_obs_untouched_when_no_scene_carries_the_input(tmp_pat
     assert not (tmp_path / "s.json").exists()
 
 
-def test_program_select_snapshots_previous_program(tmp_path):
+def test_program_select_snapshots_previous_program_and_transition(tmp_path):
     obs = FakeObs({"sp-slow": [], "sp-fast": []}, "sp-slow")
     state_path = tmp_path / "cg.json"
     cg_chain_scene.program_select(obs, "10.77.9.201", "sp-fast", str(state_path))
@@ -189,6 +230,7 @@ def test_program_select_snapshots_previous_program(tmp_path):
         "host": "10.77.9.201",
         "scene": None,
         "prev_program": "sp-slow",
+        "prev_transition": "Fade",
         "items": [],
     }
 
@@ -198,6 +240,7 @@ def test_program_select_fails_loud_on_a_missing_scene(tmp_path):
     with pytest.raises(ValueError, match="sp-fast"):
         cg_chain_scene.program_select(obs, "h", "sp-fast", str(tmp_path / "cg.json"))
     assert obs.program == "sp-slow"
+    assert obs.transition == "Fade"
     assert not (tmp_path / "cg.json").exists()
 
 
@@ -207,6 +250,7 @@ def test_restore_round_trip_puts_everything_back_and_is_idempotent(tmp_path):
     cg_chain_scene.strih_solo(obs, "h", "CG-obs", "", str(state_path))
     assert cg_chain_scene.restore(lambda host: obs, str(state_path)) is True
     assert obs.program == "Cam 1"
+    assert obs.transition == "Fade"
     enabled = {i["sourceName"]: i["sceneItemEnabled"] for i in obs.items["CG bridge"]}
     assert enabled == {"CG-obs": False, "CG-presenter": True}
     # The state file is retired, so a second cleanup() pass is a no-op (never re-applies an old
@@ -217,7 +261,7 @@ def test_restore_round_trip_puts_everything_back_and_is_idempotent(tmp_path):
     assert len(obs.calls) == before
 
 
-# ---- CLI wiring ---------------------------------------------------------------------------------
+# ---- CLI wiring + WS session lifecycle -----------------------------------------------------------
 
 
 def test_cli_parses_the_three_subcommands():
@@ -228,3 +272,26 @@ def test_cli_parses_the_three_subcommands():
     assert (a.cmd, a.scene) == ("program", "sp-fast")
     a = ap.parse_args(["restore", "--state-file", "s"])
     assert (a.cmd, a.state_file) == ("restore", "s")
+
+
+def test_main_closes_every_ws_session_it_opens(tmp_path, monkeypatch):
+    obs = FakeObs({"sp-slow": [], "sp-fast": []}, "sp-slow")
+    closed = []
+
+    class FakeWs:
+        def close(self):
+            closed.append(True)
+
+    monkeypatch.setattr(cg_chain_scene, "_ws_session", lambda host: (FakeWs(), obs))
+    rc = cg_chain_scene.main(
+        ["program", "--host", "h", "--scene", "sp-fast", "--state-file", str(tmp_path / "cg.json")])
+    assert rc == 0
+    assert closed == [True]
+    rc = cg_chain_scene.main(["restore", "--state-file", str(tmp_path / "cg.json")])
+    assert rc == 0
+    assert closed == [True, True]
+    # A failing command still closes its session.
+    rc = cg_chain_scene.main(
+        ["program", "--host", "h", "--scene", "nope", "--state-file", str(tmp_path / "x.json")])
+    assert rc == 2
+    assert closed == [True, True, True]

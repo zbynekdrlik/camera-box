@@ -92,14 +92,15 @@ fn burn_toggle_is_best_effort_never_aborts_on_failure() {
     );
     assert!(
         ok,
-        "cg_chain_songplayer_burn must return 0 even when the POST fails (songplayer#151 unshipped)"
+        "cg_chain_songplayer_burn must return 0 even when SongPlayer is unreachable"
     );
 }
 
 #[test]
 fn pull_without_configured_cmd_returns_nonzero_so_cg_is_omitted() {
-    // No CG_CHAIN_PULL_CMD ⇒ the pull reports "not configured" and returns nonzero, so the caller's
-    // `if ... cg_chain_pull_recording ...` omits --cg (the merge runs exactly as today).
+    // No CG_CHAIN_PULL_CMD and no StopRecord host path ⇒ the pull has nothing to fetch and returns
+    // nonzero, so the caller's `if ... cg_chain_pull_recording ...` omits --cg (the merge runs
+    // exactly as today).
     let (ok, _) = run(
         "CG_CHAIN=1; if cg_chain_pull_recording 1.2.3.4 /tmp/nope.mkv; then echo GOT; else echo NONE; fi",
     );

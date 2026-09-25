@@ -51,28 +51,63 @@ health_json() {
 }
 "#;
 
-/// Fake `curl` on PATH: a GET of a URL ending in /api/v1/ndi/health prints $FAKE_HEALTH_FILE; any
-/// other call (the burn POST) appends its `-d` body + URL to $FAKE_LOG.
+/// Fake `curl` on PATH: a GET of a URL ending in /api/v1/ndi/health prints $FAKE_HEALTH_FILE and
+/// logs `GET m=<timeout>` to $FAKE_GETLOG; any other call (the burn POST) appends its URL, `-d`
+/// body, `-X` method, `-H` header and `-m` timeout to $FAKE_LOG.
 const FAKE_CURL: &str = r#"
 FAKE_DIR="$(mktemp -d)"
 trap 'rm -rf "$FAKE_DIR"' EXIT
-export FAKE_LOG="$FAKE_DIR/curl.log" FAKE_HEALTH_FILE="$FAKE_DIR/health.json"
+export FAKE_LOG="$FAKE_DIR/curl.log" FAKE_HEALTH_FILE="$FAKE_DIR/health.json" FAKE_GETLOG="$FAKE_DIR/get.log"
 cat > "$FAKE_DIR/curl" <<'SH'
 #!/usr/bin/env bash
-body=""; url=""; prev=""
+body=""; url=""; prev=""; method=""; hdr=""; tmo=""
 for a in "$@"; do
-  case "$prev" in -d|--data|--data-raw) body="$a" ;; esac
+  case "$prev" in
+    -d|--data|--data-raw) body="$a" ;;
+    -X) method="$a" ;;
+    -H) hdr="$a" ;;
+    -m) tmo="$a" ;;
+  esac
   case "$a" in http*) url="$a" ;; esac
   prev="$a"
 done
 case "$url" in
-  */api/v1/ndi/health) cat "$FAKE_HEALTH_FILE" ;;
-  *) printf 'POST %s %s\n' "$url" "$body" >> "$FAKE_LOG" ;;
+  */api/v1/ndi/health) printf 'GET m=%s\n' "$tmo" >> "$FAKE_GETLOG"; cat "$FAKE_HEALTH_FILE" ;;
+  *) printf 'POST %s %s METHOD=%s HDR=%s m=%s\n' "$url" "$body" "$method" "$hdr" "$tmo" >> "$FAKE_LOG" ;;
 esac
 SH
 chmod +x "$FAKE_DIR/curl"
 export PATH="$FAKE_DIR:$PATH"
 export CG_CHAIN_BURN_RETRY_SLEEP=0
+"#;
+
+/// Fake `python3` on PATH that stands in for the two OBS-WS helpers and passes every other call to
+/// the REAL python3 (the lib's JSON builders need it). Every helper call is logged to $PY_LOG:
+///   - `cg_chain_scene.py strih-solo` prints $FAKE_SOLO_OUT (default `100<TAB>CG bridge`) and exits
+///     $FAKE_SOLO_RC (default 0);
+///   - `obs_phase2.py record --action stop` prints $FAKE_STOP_OUT;
+///   - any other `cg_chain_scene.py` / `obs_phase2.py` call exits 0.
+const FAKE_PY: &str = r#"
+PY_DIR="$(mktemp -d)"
+trap 'rm -rf "${FAKE_DIR:-/nonexistent-1302}" "$PY_DIR"' EXIT
+REAL_PY="$(command -v python3)"
+export PY_LOG="$PY_DIR/py.log" REAL_PY
+cat > "$PY_DIR/python3" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  *cg_chain_scene.py*strih-solo*)
+    printf '%s\n' "$*" >> "$PY_LOG"
+    printf '%b\n' "${FAKE_SOLO_OUT:-100\tCG bridge}"
+    exit "${FAKE_SOLO_RC:-0}" ;;
+  *cg_chain_scene.py*|*obs_phase2.py*record*start*)
+    printf '%s\n' "$*" >> "$PY_LOG"; exit 0 ;;
+  *obs_phase2.py*record*stop*)
+    printf '%s\n' "$*" >> "$PY_LOG"; printf '%s\n' "${FAKE_STOP_OUT:-}"; exit 0 ;;
+  *) exec "$REAL_PY" "$@" ;;
+esac
+SH
+chmod +x "$PY_DIR/python3"
+export PATH="$PY_DIR:$PATH"
 "#;
 
 // ---- (a) the shipped burn API ------------------------------------------------------------------
@@ -145,6 +180,10 @@ fn burn_on_posts_the_body_and_verifies_it_on_health() {
             r#"POST http://resolume.lan:8920/api/v1/ndi/burn {"output":"SP-fast","on":true}"#
         ),
         "the ON toggle POSTs the shipped body to the shipped URL: {out}"
+    );
+    assert!(
+        out.contains("METHOD=POST HDR=Content-Type: application/json"),
+        "the toggle is a POST with a JSON content type: {out}"
     );
     assert!(
         out.contains("VERIFIED"),
@@ -222,6 +261,21 @@ printf 'PATH=%s\n' "$CG_HOST_RECORDING_PATH"
         out.contains(r"PATH=C:\Users\Resolume\Videos\2026-09-25 07-24-00.mkv"),
         "{out}"
     );
+}
+
+#[test]
+fn record_stop_with_an_empty_answer_keeps_the_earlier_path() {
+    // The cleanup() re-stop of an already-stopped recording prints nothing; it must never clear the
+    // path the first stop recorded.
+    let snippet = format!(
+        "{FAKE_PY}\n\
+         CG_HOST_RECORDING_PATH='C:\\first.mkv'\n\
+         FAKE_STOP_OUT='' cg_chain_record_stop 10.77.9.201 /x/obs_phase2.py 5\n\
+         printf 'PATH=%s\\n' \"$CG_HOST_RECORDING_PATH\""
+    );
+    let (ok, out, _) = run(&snippet);
+    assert!(ok);
+    assert!(out.contains(r"PATH=C:\first.mkv"), "{out}");
 }
 
 #[test]
@@ -311,8 +365,13 @@ fn window_json_is_the_one_cg_window_record() {
 
 #[test]
 fn state_files_live_in_the_run_dir() {
-    let (_, s, _) = run("CG_CHAIN_STATE_DIR=/r/out cg_chain_state_file strih-scene");
+    let (_, s, _) = run("unset RUN_ID; CG_CHAIN_STATE_DIR=/r/out cg_chain_state_file strih-scene");
     assert_eq!(s, "/r/out/cg-chain-strih-scene-state.json");
+    let (_, r, _) = run("RUN_ID=4711 CG_CHAIN_STATE_DIR=/r/out cg_chain_state_file cg-program");
+    assert_eq!(
+        r, "/r/out/cg-chain-cg-program-state-4711.json",
+        "a snapshot is keyed to its run, so a reused OUTDIR never replays another run's snapshot"
+    );
     let (_, p, _) = run("cg_chain_scene_py /x/scripts/obs_phase2.py");
     assert_eq!(p, "/x/scripts/cg_chain_scene.py");
     let (_, c, _) = run("unset CG_CHAIN_CG_SCENE; cg_chain_cg_scene");
@@ -324,7 +383,8 @@ fn state_files_live_in_the_run_dir() {
 
 #[test]
 fn disabled_profile_never_calls_obs_or_songplayer() {
-    // CG_CHAIN unset: the window, the strih restore and cleanup are byte-inert (no python3, no curl).
+    // CG_CHAIN unset: the window, the after-StopRecord step and cleanup are byte-inert (no python3,
+    // no curl).
     let snippet = r#"
 D="$(mktemp -d)"; trap 'rm -rf "$D"' EXIT
 for b in python3 curl scp sshpass; do
@@ -332,13 +392,141 @@ for b in python3 curl scp sshpass; do
 done
 PATH="$D:$PATH"; unset CG_CHAIN
 cg_chain_window 10.77.9.202 /x/obs_phase2.py 5
-cg_chain_strih_restore /x/obs_phase2.py 5
+cg_chain_after_stoprecord 10.77.9.201 /x/obs_phase2.py 5
 cg_chain_cleanup "" /x/obs_phase2.py 5
 if [ -f "$D/called" ]; then cat "$D/called"; else echo INERT; fi
 "#;
     let (ok, out, _) = run(snippet);
     assert!(ok);
     assert_eq!(out, "INERT");
+}
+
+#[test]
+fn window_cuts_strih_holds_it_and_writes_the_window_record() {
+    let snippet = format!(
+        "{FAKE_PY}\n\
+         OUT=\"$(mktemp -d)\"\n\
+         CG_CHAIN=1 CG_RECORDING_STARTED=1 CG_CHAIN_STATE_DIR=\"$OUT\" CG_CHAIN_WINDOW_SECS=1 \\\n\
+           cg_chain_window 10.77.9.202 /x/obs_phase2.py 5\n\
+         cat \"$OUT/cg-window.json\"; echo\n\
+         cat \"$PY_LOG\"\n\
+         rm -rf \"$OUT\""
+    );
+    let (ok, out, err) = run(&snippet);
+    assert!(ok, "{err}");
+    assert!(
+        out.contains(
+            r#"{"kind":"cg","scene":"CG bridge","input":"CG-obs","start_ns":100,"end_ns":"#
+        ),
+        "the window record carries the helper's cut instant + scene: {out}"
+    );
+    assert!(
+        out.contains("strih-solo --host 10.77.9.202 --input CG-obs"),
+        "the helper cuts strih to the CG-obs scene: {out}"
+    );
+}
+
+#[test]
+fn window_with_a_failing_cut_returns_zero_and_writes_nothing() {
+    let snippet = format!(
+        "{FAKE_PY}\n\
+         OUT=\"$(mktemp -d)\"\n\
+         CG_CHAIN=1 CG_RECORDING_STARTED=1 CG_CHAIN_STATE_DIR=\"$OUT\" CG_CHAIN_WINDOW_SECS=1 \\\n\
+           FAKE_SOLO_RC=2 cg_chain_window 10.77.9.202 /x/obs_phase2.py 5\n\
+         echo REACHED\n\
+         if [ -f \"$OUT/cg-window.json\" ]; then echo WROTE; else echo NOFILE; fi\n\
+         rm -rf \"$OUT\""
+    );
+    let (ok, out, err) = run(&snippet);
+    assert!(ok, "a failed CG cut never aborts the run: {err}");
+    assert!(out.contains("REACHED") && out.contains("NOFILE"), "{out}");
+    assert!(err.contains("strih CG cut failed"), "{err}");
+}
+
+#[test]
+fn record_start_cuts_cg_program_before_start_record() {
+    let snippet = format!(
+        "{FAKE_PY}\n\
+         OUT=\"$(mktemp -d)\"\n\
+         if CG_CHAIN_STATE_DIR=\"$OUT\" cg_chain_record_start 10.77.9.201 /x/obs_phase2.py 5; then echo STARTED; fi\n\
+         cat \"$PY_LOG\"\n\
+         rm -rf \"$OUT\""
+    );
+    let (ok, out, _) = run(&snippet);
+    assert!(ok);
+    let program = out
+        .find("cg_chain_scene.py program --host 10.77.9.201 --scene sp-fast")
+        .expect("the cg program cut to the SongPlayer scene");
+    let start = out
+        .find("obs_phase2.py record --host 10.77.9.201 --action start")
+        .expect("the cg StartRecord");
+    assert!(
+        program < start,
+        "cg program must show SP-fast BEFORE the recording starts: {out}"
+    );
+    assert!(out.contains("STARTED"), "{out}");
+}
+
+#[test]
+fn after_stoprecord_stops_cg_turns_the_burn_off_and_restores_strih() {
+    let snippet = format!(
+        "{HEALTH_FN}{FAKE_CURL}{FAKE_PY}\n\
+         health_json false > \"$FAKE_HEALTH_FILE\"\n\
+         OUT=\"$(mktemp -d)\"; echo '{{}}' > \"$OUT/cg-chain-strih-scene-state.json\"\n\
+         unset RUN_ID\n\
+         CG_CHAIN=1 CG_RECORDING_STARTED=1 CG_CHAIN_STATE_DIR=\"$OUT\" FAKE_STOP_OUT='C:\\cg.mkv' \\\n\
+           cg_chain_after_stoprecord 10.77.9.201 /x/obs_phase2.py 5\n\
+         printf 'PATH=%s\\n' \"${{CG_HOST_RECORDING_PATH:-}}\"\n\
+         cat \"$PY_LOG\"; cat \"$FAKE_LOG\"\n\
+         rm -rf \"$OUT\""
+    );
+    let (ok, out, err) = run(&snippet);
+    assert!(ok, "{err}");
+    assert!(
+        out.contains("obs_phase2.py record --host 10.77.9.201 --action stop"),
+        "{out}"
+    );
+    assert!(
+        out.contains(r"PATH=C:\cg.mkv"),
+        "the stop keeps the host path: {out}"
+    );
+    assert!(
+        out.contains(r#"{"output":"SP-fast","on":false}"#),
+        "the burn goes OFF right after the recordings stop: {out}"
+    );
+    assert!(
+        out.contains("restore --state-file"),
+        "strih is restored right after StopRecord: {out}"
+    );
+}
+
+#[test]
+fn cleanup_turns_the_burn_off_fast_and_restores_both_snapshots() {
+    let snippet = format!(
+        "{HEALTH_FN}{FAKE_CURL}{FAKE_PY}\n\
+         health_json false > \"$FAKE_HEALTH_FILE\"\n\
+         OUT=\"$(mktemp -d)\"\n\
+         echo '{{}}' > \"$OUT/cg-chain-strih-scene-state-9.json\"\n\
+         echo '{{}}' > \"$OUT/cg-chain-cg-program-state-9.json\"\n\
+         RUN_ID=9 CG_CHAIN=1 CG_CHAIN_STATE_DIR=\"$OUT\" cg_chain_cleanup 10.77.9.201 /x/obs_phase2.py 5\n\
+         cat \"$PY_LOG\"; cat \"$FAKE_LOG\"; cat \"$FAKE_GETLOG\"\n\
+         rm -rf \"$OUT\""
+    );
+    let (ok, out, err) = run(&snippet);
+    assert!(ok, "{err}");
+    assert!(
+        out.contains(r#"{"output":"SP-fast","on":false}"#),
+        "cleanup turns the burn OFF: {out}"
+    );
+    assert!(
+        out.contains("cg-chain-strih-scene-state-9.json")
+            && out.contains("cg-chain-cg-program-state-9.json"),
+        "cleanup restores BOTH snapshots of THIS run: {out}"
+    );
+    assert!(
+        out.contains("m=3") && !out.contains("m=10"),
+        "cleanup uses the short per-request burn timeout so it never stalls the teardowns after it: {out}"
+    );
 }
 
 // ---- recording-e2e.sh wiring (static reads) ----------------------------------------------------
@@ -369,15 +557,29 @@ fn recording_e2e_runs_the_cg_window_after_the_camera_schedule_and_before_stoprec
 }
 
 #[test]
-fn recording_e2e_restores_strih_right_after_stoprecord() {
+fn recording_e2e_ends_the_cg_leg_right_after_stoprecord() {
     let s = recording_e2e_text();
     let stop = s
         .find("STREAM_HOST_PATH=$(python3 \"$HERE/obs_phase2.py\" record --host \"$STREAM\" --action stop)")
         .expect("the [7/8] stream StopRecord");
-    let restore = s
-        .find("cg_chain_strih_restore \"$HERE/obs_phase2.py\"")
-        .expect("#1302: strih must be restored after the [7/8] StopRecord");
-    assert!(stop < restore);
+    let after = s
+        .find("cg_chain_after_stoprecord \"${CG_HOST_IP:-}\" \"$HERE/obs_phase2.py\"")
+        .expect("#1302: the cg leg (cg StopRecord, burn OFF, strih restore) ends after [7/8]");
+    let pull = s
+        .find("cg_chain_pull_recording \"$CG_HOST_IP\" \"$CG_RECORDING\"")
+        .expect("the [8/8d] pull");
+    assert!(stop < after && after < pull);
+}
+
+#[test]
+fn recording_e2e_turns_the_burn_off_when_the_cg_recording_never_started() {
+    let s = recording_e2e_text();
+    let start = s.find("cg_chain_record_start").expect("the cg StartRecord");
+    let off = s
+        .find("if [ \"$CG_RECORDING_STARTED\" != 1 ]; then cg_chain_songplayer_burn off; fi")
+        .expect("#1302: a burn with no cg recording is turned straight back off");
+    let next = s.find("[5b/8]").expect("the [5b/8] step");
+    assert!(start < off && off < next);
 }
 
 #[test]
