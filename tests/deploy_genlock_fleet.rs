@@ -1181,24 +1181,39 @@ fn resolume_box_constants_mcp_hostname_with_ahk_1295() {
 }
 
 #[test]
-fn resolume_windows_program_carries_ahk_and_no_keepalive_1295() {
-    let p = win_program("resolume", "full", "1");
-    // issue 1295: the AHK watcher MUST be stopped before the byte copy (it respawns obs64), and
-    // restarted + VERIFIED afterward (the issue-789 restart guard).
+fn resolume_windows_program_guards_ahk_never_restarts_1372() {
+    let p = win_program("resolume", "full", "guard");
+    // issue 1372 (owner ruling "ale ahk nespustaj"): a RUNNING AutoHotkey64 watcher is still stopped
+    // before the byte copy (it respawns obs64, re-locking the files mid-robocopy) ...
+    let stop = p
+        .find("Stop-Process -Name AutoHotkey64")
+        .expect("resolume must stop a running AutoHotkey64 before the copy");
+    let copy = p.find("robocopy").expect("the byte copy");
     assert!(
-        p.contains("Stop-Process -Name AutoHotkey64"),
-        "resolume runs the AHK watcher -- its program must stop AutoHotkey64 before the copy:\n{p}"
+        stop < copy,
+        "the AHK stop must precede the byte copy (stop@{stop} copy@{copy}):\n{p}"
     );
     assert!(
-        p.contains("ahkRelaunchVerified") && p.contains("exit 9"),
-        "resolume must restart AHK VERIFIED + fail loud if it doesn't come back (issue 789):\n{p}"
+        p.contains("if (Get-Process AutoHotkey64 -ErrorAction SilentlyContinue)"),
+        "the stop is conditional on AutoHotkey64 actually running:\n{p}"
     );
-    // the relaunch target is resolume's OWN .ahk path (never the retired strih's D:\_APPS path).
+    // ... and it is NEVER started again: no relaunch machinery, no restart line, no AHK exit 9.
+    for banned in [
+        "$ahkScriptPath",
+        "$ahkRelaunchVerified",
+        "$ahkLnk",
+        "AHK watchdog restarted",
+        "exit 9",
+    ] {
+        assert!(
+            !p.contains(banned),
+            "issue 1372: the resolume deploy must NEVER start AutoHotkey64 (found {banned:?}):\n{p}"
+        );
+    }
+    // step (8) only REPORTS the AutoHotkey64 count, never gates on it.
     assert!(
-        p.contains(
-            "$ahkScriptPath = 'C:\\Users\\Resolume\\Documents\\_NLMEDIA resolume\\_APPS\\NL_STARTUP.ahk'"
-        ) && !p.contains("$ahkScriptPath = 'D:\\_APPS\\NL_STARTUP.ahk'"),
-        "resolume's deploy program must relaunch via its OWN .ahk path, not the retired strih's:\n{p}"
+        p.contains("#1372 AHK REPORT (report-only"),
+        "issue 1372: the resolume deploy logs the AutoHotkey64 count instead of restarting it:\n{p}"
     );
     assert!(
         !p.contains("schtasks /Change"),
@@ -1208,6 +1223,63 @@ fn resolume_windows_program_carries_ahk_and_no_keepalive_1295() {
     assert!(
         p.contains("$ErrorActionPreference = 'Stop'") && p.contains("VERIFY obs.dll"),
         "resolume rides the same fail-loud windows deploy program:\n{p}"
+    );
+}
+
+/// issue 1372: the planners' AHK MODE is `guard` for a box whose owner runs an AHK watcher
+/// (resolume) and `0` for a box with none. The shared obs-fleet `has_ahk` fact is unchanged (it
+/// still says the watcher is INSTALLED); only the planners' policy toward it changed. The resolume
+/// launch title check expects the `cg` profile.
+#[test]
+fn ahk_mode_is_guard_for_an_ahk_box_and_profile_is_cg_1372() {
+    assert_eq!(
+        run_sourced(&script(), "fleet_box_ahk_mode resolume").trim(),
+        "guard"
+    );
+    for no_ahk in ["stream", "strih-lx", "imag"] {
+        assert_eq!(
+            run_sourced(&script(), &format!("fleet_box_ahk_mode {no_ahk}")).trim(),
+            "0",
+            "fleet_box_ahk_mode {no_ahk}"
+        );
+    }
+    assert_eq!(
+        run_sourced(&script(), "fleet_box_obs_profile resolume").trim(),
+        "cg"
+    );
+    let (rc, out, _e) = run_sourced_status(&script(), "fleet_box_obs_profile stream");
+    assert_eq!(rc, 2, "no expected profile for stream: {out:?}");
+    assert!(out.trim().is_empty(), "no profile text for stream: {out:?}");
+}
+
+/// issue 1372: the EMITTED resolume deploy plan (plan == execute, the same builder) is the guard
+/// program -- the plan itself must never restart AHK.
+#[test]
+fn resolume_plan_never_restarts_ahk_1372() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let (code, out, err) = run_script(&[
+        "--plan",
+        "--run-id",
+        "R1",
+        "--sha",
+        "deadbeef",
+        "--stage",
+        tmp.path().to_str().unwrap(),
+        "--boxes",
+        "resolume",
+        "--full",
+    ]);
+    assert_eq!(
+        code, 0,
+        "--plan resolume must succeed.\nstdout={out}\nstderr={err}"
+    );
+    assert!(
+        out.contains("Stop-Process -Name AutoHotkey64") && out.contains("#1372 AHK REPORT"),
+        "the resolume plan stops a running AHK and only reports it afterward:\n{out}"
+    );
+    assert!(
+        !out.contains("$ahkRelaunchVerified") && !out.contains("AHK watchdog restarted"),
+        "issue 1372: the resolume plan must never restart AutoHotkey64:\n{out}"
     );
 }
 

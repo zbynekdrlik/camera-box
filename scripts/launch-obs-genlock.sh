@@ -45,13 +45,42 @@ set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/ahk-watchdog.sh
-# Sourcing (not executing) ahk-watchdog.sh: it defines ONE pure function, no top-level statements.
+# Sourcing (not executing) ahk-watchdog.sh: it defines pure functions only, no top-level statements.
 . "$HERE/lib/ahk-watchdog.sh"
 # shellcheck source=scripts/lib/genlock-fleet-boxes.sh
 # issue 1317 part 3: the per-box MCP / address / AHK-identity table shared with deploy-genlock-fleet.sh.
 . "$HERE/lib/genlock-fleet-boxes.sh"
 
 # --- PURE functions (no network, no MCP, no Windows — unit-tested by sourcing this script) --------
+
+# build_title_identity_ps PROFILE -> the PowerShell title identity check (issue 1372), embedded by
+# build_launch_program in the same-session branch of its #978 gate ($obsDir + $sessProc in scope).
+# The vendored frontend titles the window `... build <short sha> - <Profile label>: <profile> -
+# <Scenes label>: ...`, the short sha being the first 9 lowercased chars of GENLOCK_BUILD_SHA.txt
+# at the install root (NewlevelBuildSha.hpp). The label word is LOCALIZED (en "Profile", sk/cs
+# "Profil"), so the match takes any label word before the colon. PROFILE rides a single-quoted
+# PowerShell literal (quote doubled), never a double-quoted string. Fails loud with exit 8.
+build_title_identity_ps() {
+  local profile_ps="${1//\'/\'\'}"
+  cat <<PSTITLE
+  # (3c-title) issue 1372: the window title must carry the deployed build + the expected profile.
+  \$shaFile = Join-Path \$obsDir 'GENLOCK_BUILD_SHA.txt'
+  if (-not (Test-Path -LiteralPath \$shaFile)) {
+    Write-Error "#1372 FAIL: \$shaFile is missing -- cannot prove which build obs64 runs."
+    exit 8
+  }
+  \$shaTok = @(([string](Get-Content -LiteralPath \$shaFile -Raw)).Trim() -split '\\s+')[0]
+  \$shaShort = \$shaTok.ToLower().Substring(0, [Math]::Min(9, \$shaTok.Length))
+  \$wantProfile = '${profile_ps}'
+  \$wantTitle = 'build ' + \$shaShort + ' - <profile label>: ' + \$wantProfile
+  \$titleRe = 'build ' + [regex]::Escape(\$shaShort) + ' - [^:]+: ' + [regex]::Escape(\$wantProfile) + '( - |\$)'
+  if (-not ([string]\$sessProc.MainWindowTitle -cmatch \$titleRe)) {
+    Write-Error "#1372 FAIL: obs64 title '\$(\$sessProc.MainWindowTitle)' does not carry '\$wantTitle' -- wrong build or wrong profile."
+    exit 8
+  }
+  Write-Host "TITLE OK: '\$wantTitle' is in the obs64 window title '\$(\$sessProc.MainWindowTitle)'."
+PSTITLE
+}
 
 # build_launch_program OBS_DIR FORCE [HAS_AHK] -> the full PowerShell program that (re)launches OBS
 # env-free and then log-verifies + fails-loud. OBS_DIR is the OBS install root (its bin\64bit is the
@@ -61,9 +90,15 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # around the redraw loop (resolume runs NL_STARTUP.ahk, issue 1295); the DEFAULT "0" (issue 1317
 # part 4 -- the retired Windows strih was the only other AHK box) is a box with NO AutoHotkey64
 # auto-respawn watcher (stream), so its program never carries a real AutoHotkey64 command (the #411
-# self-heal stream guard pins this). AHK_SCRIPT ($4, REQUIRED when HAS_AHK=1 -- no default, a missing
-# path fails closed with rc 2) / AHK_PREFER ($5, 'exe' default | 'lnk') are the PER-BOX relaunch
-# identity (issue 1295) passed to scripts/lib/ahk-watchdog.sh. Pure string builder
+# self-heal stream guard pins this). HAS_AHK="guard" (issue 1372, owner ruling "ale ahk nespustaj" --
+# what the CLI now passes for resolume) is a box whose OWNER runs the watcher: the program stops
+# AutoHotkey64 only if it is running (before every obs64 kill), NEVER starts or restarts it, and the
+# AutoHotkey64 count is report-only (scripts/lib/ahk-watchdog.sh ahk_guard_*_ps). AHK_SCRIPT ($4,
+# REQUIRED when HAS_AHK=1 -- no default, a missing path fails closed with rc 2) / AHK_PREFER ($5,
+# 'exe' default | 'lnk') are the PER-BOX relaunch identity (issue 1295) passed to
+# scripts/lib/ahk-watchdog.sh; a guard box needs neither. TITLE_PROFILE ($6, optional, issue 1372)
+# adds a title identity check: the obs64 window title must carry `build <9-char short sha of
+# GENLOCK_BUILD_SHA.txt> - <label>: <profile>` (label localized; resolume: `cg`); empty = no check. Pure string builder
 # so a unit test can assert the program is well-formed without a Windows host. Heredoc body is a
 # literal PowerShell here-string — bash-level interpolation is ONLY $OBS_DIR / the FORCE branch /
 # the AHK bracket; everything else (PowerShell $vars) is literal.
@@ -75,10 +110,17 @@ build_launch_program() {
   # script's main, obs-self-heal-install.sh) passes the box's own identity from
   # scripts/lib/genlock-fleet-boxes.sh -- resolume its v2 .ahk path + 'lnk', a no-AHK box nothing.
   local obs_dir="$1" force="$2" has_ahk="${3:-0}" ahk_script="${4:-}" ahk_prefer="${5:-exe}"
+  local title_profile="${6:-}"
 
   # #786/#411 — the AHK bracket is emitted ONLY for a box that actually runs the AHK watcher.
   local ahk_decl ahk_stop_ps ahk_restart_ps ahk_best_effort_restart_ps
-  if [ "$has_ahk" = "1" ]; then
+  if [ "$has_ahk" = "guard" ]; then
+    # issue 1372: the owner's watcher -- stop-if-running at every obs64-kill site, never started.
+    ahk_decl='# (AutoHotkey64 GUARD box, issue 1372: a running watcher is stopped, NEVER restarted)'
+    ahk_stop_ps="$(ahk_guard_stop_ps)"
+    ahk_restart_ps='# AutoHotkey64: NEVER restarted by this program (issue 1372 owner ruling -- the owner decides whether it runs)'
+    ahk_best_effort_restart_ps='# AutoHotkey64 best-effort restart: none (issue 1372 -- this program never starts AutoHotkey64)'
+  elif [ "$has_ahk" = "1" ]; then
     ahk_decl='$ahkStopped = $false'
     ahk_stop_ps=$(cat <<'PSAHK'
   # Stop AHK BEFORE killing obs64 (AHK boxes only; no-op elsewhere): NL_STARTUP.ahk respawns obs64 via
@@ -166,8 +208,41 @@ if ($ahkSessProcs[0].SessionId -ne $activeSession) {
 Write-Host "SESSION OK: AutoHotkey64 PID $($ahkSessProcs[0].Id) SessionId=$activeSession"
 PSAHKSESS
 )
+  elif [ "$has_ahk" = "guard" ]; then
+    # issue 1372: the #978 AutoHotkey64 count is REPORT-ONLY on a guard box -- logged, never a failure
+    # (0 is the owner's normal state now; this program stopped any running watcher itself).
+    ahk_session_ps="$(ahk_guard_report_ps)"
   else
     ahk_session_ps='# AutoHotkey64 session check: no-op (this box has no AHK auto-respawn watcher)'
+  fi
+  # issue 1372 -- the TITLE identity check, only with a TITLE_PROFILE (build_title_identity_ps). It
+  # runs in the same-session branch of the gate below, where the title is readable, and starts with
+  # its own newline, so a box without a profile emits the gate byte-for-byte as before.
+  local title_identity_ps=""
+  if [ -n "$title_profile" ]; then
+    title_identity_ps=$'\n'"$(build_title_identity_ps "$title_profile")"
+  fi
+  # The two comment blocks around the AHK flag + the single restart point describe the managed
+  # bracket; a guard box (issue 1372) gets its own wording so its program never reads as managed.
+  local ahk_decl_note ahk_restart_note
+  if [ "$has_ahk" = "guard" ]; then
+    ahk_decl_note='# issue 1372: no $ahkStopped flag on a guard box -- nothing in this program ever restarts AutoHotkey64.'
+    ahk_restart_note='# issue 1372: this is where a managed box restarts AutoHotkey64; a guard box never does.'
+  else
+    ahk_decl_note=$(cat <<'NOTE'
+# issue 1272: $ahkStopped is declared ONCE, here -- so both the --force kill below (kill_block,
+# wired in via the has_ahk check above) and the #786 redraw loop further down share the SAME flag
+# across the whole program. Never re-declare it later (a second "= $false" would silently wipe out
+# the --force branch's own stop before the single restart point below runs).
+NOTE
+)
+    ahk_restart_note=$(cat <<'NOTE'
+# issue 1272: restart AHK exactly ONCE here -- after the launch + #786 audio-verify sequence has
+# fully settled (whichever branch above ran: the guarded-launcher verify-only wait, or this
+# wrapper's own redraw loop) -- and BEFORE the (3c) session-visibility gate below, which itself
+# asserts AHK's own SessionId and would otherwise find it missing.
+NOTE
+)
   fi
   local bin64="${obs_dir}\\bin\\64bit"
   local exe="${bin64}\\obs64.exe"
@@ -188,8 +263,8 @@ Get-Process obs64 -ErrorAction SilentlyContinue | ForEach-Object { Stop-Process 
 Start-Sleep -Seconds 2
 PSKILL
 )
-    if [ "$has_ahk" = "1" ]; then
-      # issue 1272: stop AHK BEFORE killing obs64 (strih only). scripts/deploy-genlock-fleet.sh's
+    if [ "$has_ahk" = "1" ] || [ "$has_ahk" = "guard" ]; then
+      # issue 1272: stop AHK BEFORE killing obs64 (an AHK box; a guard box too, issue 1372). scripts/deploy-genlock-fleet.sh's
       # own step 8 already restarted+verified AHK before this planner even runs, and NL_STARTUP.ahk
       # respawns a BARE obs64 within seconds of the kill if left running -- racing this wrapper's
       # own .lnk relaunch into a duplicate obs64 that fails the session-visibility gate's "expected
@@ -212,6 +287,12 @@ if (Get-Process obs64 -ErrorAction SilentlyContinue | Where-Object { -not $_.Has
 }
 PSNOKILL
 )
+    # issue 1372: on a guard box a running owner watcher is stopped before the launch here too (after
+    # the refusal, so a refused run never touches it) -- it would otherwise race a second obs64.
+    if [ "$has_ahk" = "guard" ]; then
+      kill_block="${kill_block}
+${ahk_stop_ps}"
+    fi
   fi
 
   cat <<PS
@@ -221,10 +302,7 @@ PSNOKILL
 # (scripts/obs_burn_filter.py), toggled WITHOUT a relaunch -- this wrapper never touches it.
 \$ErrorActionPreference = 'Stop'
 
-# issue 1272: \$ahkStopped is declared ONCE, here -- so both the --force kill below (kill_block,
-# wired in via the has_ahk check above) and the #786 redraw loop further down share the SAME flag
-# across the whole program. Never re-declare it later (a second "= \$false" would silently wipe out
-# the --force branch's own stop before the single restart point below runs).
+${ahk_decl_note}
 ${ahk_decl}
 
 ${kill_block}
@@ -239,7 +317,7 @@ Remove-Item "\$env:APPDATA\\obs-studio\\.sentinel\\*" -Force -ErrorAction Silent
 #     for camera/mic access; a bare exe launch dropped them and rendered a "Permissions denied"
 #     box on program output, user-caught live). Fallback to the bare exe ONLY if the shortcut is
 #     genuinely absent (fail-open recovery beats no OBS at all -- the verify below still gates).
-#     NB on an AHK box (strih/resolume): its NL_STARTUP.ahk auto-respawns obs64 from this same dir,
+#     NB on a MANAGED AHK box its NL_STARTUP.ahk auto-respawns obs64 from this same dir (a guard box has it stopped),
 #     but it won't double-launch once one is running, so this Start-Process wins; the log verify
 #     below fails loud on a non-genlock build regardless. See obs-ops skill.
 \$obsDir = '${obs_dir_ps}'
@@ -352,10 +430,7 @@ ${ahk_stop_ps}
 }
 }
 
-# issue 1272: restart AHK exactly ONCE here -- after the launch + #786 audio-verify sequence has
-# fully settled (whichever branch above ran: the guarded-launcher verify-only wait, or this
-# wrapper's own redraw loop) -- and BEFORE the (3c) session-visibility gate below, which itself
-# asserts AHK's own SessionId and would otherwise find it missing.
+${ahk_restart_note}
 ${ahk_restart_ps}
 
 # (3c) #978 SESSION-VISIBILITY GATE -- an obs64 launched via ssh+Invoke-CimMethod into Windows
@@ -399,7 +474,7 @@ if (\$ownSession -eq \$sessProc.SessionId) {
     Write-Error "#978 FAIL: obs64 PID \$(\$sessProc.Id) SessionId=\$activeSession but MainWindowTitle is EMPTY -- no visible window (issue 958). Investigate before trusting this box."
     exit 8
   }
-  Write-Host "SESSION OK: obs64 PID \$(\$sessProc.Id) SessionId=\$activeSession MainWindowTitle='\$(\$sessProc.MainWindowTitle)'"
+  Write-Host "SESSION OK: obs64 PID \$(\$sessProc.Id) SessionId=\$activeSession MainWindowTitle='\$(\$sessProc.MainWindowTitle)'"${title_identity_ps}
 } else {
   Write-Host "SESSION OK: obs64 PID \$(\$sessProc.Id) SessionId=\$activeSession (title check skipped -- this program is running cross-session, own SessionId=\$ownSession)"
 }
@@ -478,15 +553,17 @@ main() {
   done
 
   # issue 1317 part 3: the box facts come from the ONE per-box table (scripts/lib/genlock-fleet-boxes.sh)
-  # + the fleet list -- never a literal Windows strih at .202. has_ahk: resolume runs an NL_STARTUP.ahk
-  # AutoHotkey v2 auto-respawn watcher (issue 1295) so its program stops+restart-VERIFIES
-  # AutoHotkey64 around the launch with its OWN .ahk path + Startup-.lnk-first relaunch identity;
-  # stream has none (has_ahk=0, no real AutoHotkey64 command -- the #411 self-heal guard pins this).
+  # + the fleet list -- never a literal Windows strih at .202. AHK mode (fleet_box_ahk_mode, issue
+  # 1372): resolume's NL_STARTUP.ahk AutoHotkey v2 watcher (issue 1295) is the OWNER's, so its program
+  # is `guard` -- a running watcher is stopped before every obs64 kill, NEVER restarted, and the count
+  # is report-only; OBS is launched directly via the box's own shortcut. stream has none (`0`, no real
+  # AutoHotkey64 command -- the #411 self-heal guard pins this). The title profile
+  # (fleet_box_obs_profile) adds the `build <sha> - <label>: cg` title check on resolume (label localized).
   # resolume's host is the HOSTNAME resolume.lan, NEVER a pinned IP -- it DHCP-drifts and currently
   # collides with `bridge` at .201 (targets.md), so the emitted STEP-3/3b WS ops resolve it live via
   # `--host resolume.lan`; confirm the box identity before trusting it. A Linux box (strih-lx) is
   # refused: it has no win-* MCP and is launched by its strih-obs.service systemd user unit.
-  local mcp box_ip has_ahk ahk_script="" ahk_prefer=""
+  local mcp box_ip ahk_mode title_profile=""
   case "$box" in
     strih)
       echo "ERROR: --box strih is the RETIRED Windows strih PC (issue 1317) -- the strih is strih-lx, a Linux box launched by its strih-obs.service user unit, never this Windows planner" >&2
@@ -495,14 +572,11 @@ main() {
   if ! mcp="$(fleet_box_mcp "$box")" || ! box_ip="$(fleet_box_ip "$box")"; then
     echo "ERROR: --box must be a Windows genlock box: 'stream' or 'resolume' (got '${box}')" >&2; usage >&2; exit 2
   fi
-  has_ahk="$(fleet_box_has_ahk "$box")"
-  if [ "$has_ahk" = "1" ]; then
-    ahk_script="$(fleet_box_ahk_script "$box")" && ahk_prefer="$(fleet_box_ahk_prefer "$box")" \
-      || { echo "ERROR: box '${box}' runs AHK but has no relaunch identity in scripts/lib/genlock-fleet-boxes.sh" >&2; exit 2; }
-  fi
+  ahk_mode="$(fleet_box_ahk_mode "$box")"
+  title_profile="$(fleet_box_obs_profile "$box")" || title_profile=""
 
   local PROGRAM
-  PROGRAM="$(build_launch_program "$obs_dir" "$force" "$has_ahk" "$ahk_script" "$ahk_prefer")"
+  PROGRAM="$(build_launch_program "$obs_dir" "$force" "$ahk_mode" "" "" "$title_profile")"
 
   echo "# ===== #257 genlock OBS (re)launch plan — box=${box} (${mcp}, ${box_ip}) ====="
   # resolume (issue 1295): the STEP-3/3b dev1-side WS ops below are keyed on the HOSTNAME
