@@ -680,6 +680,12 @@ def drm_output_lease_connector(config_text):
         cfg = json.loads(config_text)
         if cfg.get("enabled") is not True:
             return ""
+        # issue 1346: the C keeps the output dormant on an unknown "backend" (a non-string reads as
+        # "" = the lease default; only "lease" / "vk-direct" are known) -- mirror it, so the wrapper
+        # never takes the connector out of X for an output that will not start.
+        backend = cfg.get("backend")
+        if isinstance(backend, str) and backend not in ("", "lease", "vk-direct"):
+            return ""
         connector = cfg.get("connector")
         return connector if isinstance(connector, str) and connector else ""
     except (ValueError, AttributeError):

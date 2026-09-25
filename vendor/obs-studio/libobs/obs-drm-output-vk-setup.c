@@ -53,6 +53,20 @@ static int drm_output_vk_pick_mode(const uint32_t *w, const uint32_t *h, const u
 	return best;
 }
 
+/* Pick the swapchain format: B8G8R8A8_UNORM, else R8G8B8A8_UNORM, else -1 (refuse). Never an sRGB
+ * format: the present blit between two UNORM formats copies the bytes; an sRGB swapchain would encode
+ * the already-encoded frame a second time (a gamma step the rig harness would show as grey != 128). */
+static int drm_output_vk_pick_surface_format(const VkFormat *fmts, uint32_t n)
+{
+	for (uint32_t i = 0; i < n; i++)
+		if (fmts[i] == VK_FORMAT_B8G8R8A8_UNORM)
+			return (int)i;
+	for (uint32_t i = 0; i < n; i++)
+		if (fmts[i] == VK_FORMAT_R8G8B8A8_UNORM)
+			return (int)i;
+	return -1;
+}
+
 static bool drm_output_vk_has_ext(const VkExtensionProperties *props, uint32_t n, const char *name)
 {
 	for (uint32_t i = 0; i < n; i++)
@@ -381,7 +395,9 @@ static bool drm_output_vk_create_device(void)
 	return true;
 }
 
-static bool drm_output_vk_create_swapchain(void)
+/* The swapchain (+ its images and per-image present semaphores) at the current mode. Called at open
+ * and by the rebuild. */
+static bool drm_output_vk_create_swapchain_only(void)
 {
 	VkSurfaceCapabilitiesKHR caps;
 	if (g_drm_vk.vk.vkGetPhysicalDeviceSurfaceCapabilitiesKHR(g_drm_vk.pd, g_drm_vk.surface, &caps) != VK_SUCCESS)
@@ -393,14 +409,30 @@ static bool drm_output_vk_create_swapchain(void)
 	uint32_t nf = 0;
 	g_drm_vk.vk.vkGetPhysicalDeviceSurfaceFormatsKHR(g_drm_vk.pd, g_drm_vk.surface, &nf, NULL);
 	VkSurfaceFormatKHR fmts[32];
+	VkFormat plain[32];
 	if (nf > 32)
 		nf = 32;
 	if (nf == 0 || g_drm_vk.vk.vkGetPhysicalDeviceSurfaceFormatsKHR(g_drm_vk.pd, g_drm_vk.surface, &nf, fmts) != VK_SUCCESS)
 		return false;
-	VkSurfaceFormatKHR fmt = fmts[0];
 	for (uint32_t i = 0; i < nf; i++)
-		if (fmts[i].format == VK_FORMAT_B8G8R8A8_UNORM)
-			fmt = fmts[i];
+		plain[i] = fmts[i].format;
+	int pick = drm_output_vk_pick_surface_format(plain, nf);
+	if (pick < 0) {
+		blog(LOG_WARNING,
+		     "drm-output: vk-direct: the display offers no B8G8R8A8/R8G8B8A8 UNORM format (%u formats) -- refusing "
+		     "(an sRGB swapchain would add a gamma step)",
+		     nf);
+		return false;
+	}
+	VkSurfaceFormatKHR fmt = fmts[pick];
+	VkFormatProperties dstp, srcp;
+	g_drm_vk.vk.vkGetPhysicalDeviceFormatProperties(g_drm_vk.pd, fmt.format, &dstp);
+	g_drm_vk.vk.vkGetPhysicalDeviceFormatProperties(g_drm_vk.pd, VK_FORMAT_R8G8B8A8_UNORM, &srcp);
+	if (!(dstp.optimalTilingFeatures & VK_FORMAT_FEATURE_BLIT_DST_BIT) ||
+	    !(srcp.optimalTilingFeatures & VK_FORMAT_FEATURE_BLIT_SRC_BIT)) {
+		blog(LOG_WARNING, "drm-output: vk-direct: the GPU cannot blit RGBA8 into swapchain format %d", (int)fmt.format);
+		return false;
+	}
 
 	uint32_t min_images = caps.minImageCount < 2 ? 2 : caps.minImageCount;
 	if (caps.maxImageCount && min_images > caps.maxImageCount)
@@ -421,6 +453,7 @@ static bool drm_output_vk_create_swapchain(void)
 					.clipped = VK_TRUE};
 	VkResult r = g_drm_vk.vk.vkCreateSwapchainKHR(g_drm_vk.device, &sci, NULL, &g_drm_vk.swapchain);
 	if (r != VK_SUCCESS) {
+		g_drm_vk.swapchain = VK_NULL_HANDLE;
 		blog(LOG_WARNING, "drm-output: vk-direct: vkCreateSwapchainKHR FAILED VkResult %d", (int)r);
 		return false;
 	}
@@ -437,6 +470,17 @@ static bool drm_output_vk_create_swapchain(void)
 	for (uint32_t i = 0; i < n; i++)
 		if (g_drm_vk.vk.vkCreateSemaphore(g_drm_vk.device, &smci, NULL, &g_drm_vk.sem_done[i]) != VK_SUCCESS)
 			return false;
+	blog(LOG_INFO, "drm-output: vk-direct swapchain %ux%u FIFO images=%u format=%d", g_drm_vk.mode_w,
+	     g_drm_vk.mode_h, n, (int)fmt.format);
+	return true;
+}
+
+/* The swapchain + the per-vblank sync objects and command buffer (open only). */
+static bool drm_output_vk_create_swapchain(void)
+{
+	if (!drm_output_vk_create_swapchain_only())
+		return false;
+	VkSemaphoreCreateInfo smci = {.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
 	if (g_drm_vk.vk.vkCreateSemaphore(g_drm_vk.device, &smci, NULL, &g_drm_vk.sem_acquire) != VK_SUCCESS)
 		return false;
 	VkFenceCreateInfo fci = {.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
@@ -451,10 +495,50 @@ static bool drm_output_vk_create_swapchain(void)
 					    .commandPool = g_drm_vk.pool,
 					    .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
 					    .commandBufferCount = 1};
-	if (g_drm_vk.vk.vkAllocateCommandBuffers(g_drm_vk.device, &cbai, &g_drm_vk.cmd) != VK_SUCCESS)
+	return g_drm_vk.vk.vkAllocateCommandBuffers(g_drm_vk.device, &cbai, &g_drm_vk.cmd) == VK_SUCCESS;
+}
+
+/* Drop the swapchain + its present semaphores (the device must be idle). */
+static void drm_output_vk_destroy_swapchain(void)
+{
+	for (uint32_t i = 0; i < DRM_OUTPUT_VK_MAX_SWAP; i++) {
+		if (g_drm_vk.sem_done[i])
+			g_drm_vk.vk.vkDestroySemaphore(g_drm_vk.device, g_drm_vk.sem_done[i], NULL);
+		g_drm_vk.sem_done[i] = VK_NULL_HANDLE;
+	}
+	if (g_drm_vk.swapchain)
+		g_drm_vk.vk.vkDestroySwapchainKHR(g_drm_vk.device, g_drm_vk.swapchain, NULL);
+	g_drm_vk.swapchain = VK_NULL_HANDLE;
+	memset(g_drm_vk.swap_images, 0, sizeof(g_drm_vk.swap_images));
+	g_drm_vk.n_swap = 0;
+}
+
+bool drm_output_vk_rebuild_presentation(bool surface_lost)
+{
+	const uint32_t w = g_drm_vk.mode_w, h = g_drm_vk.mode_h;
+	g_drm_vk.vk.vkDeviceWaitIdle(g_drm_vk.device); /* the present loop fenced its last copy */
+	drm_output_vk_destroy_swapchain();
+	if (surface_lost) {
+		if (g_drm_vk.surface)
+			g_drm_vk.vk.vkDestroySurfaceKHR(g_drm_vk.instance, g_drm_vk.surface, NULL);
+		g_drm_vk.surface = VK_NULL_HANDLE;
+		if (!drm_output_vk_create_surface())
+			return false;
+		if (g_drm_vk.mode_w != w || g_drm_vk.mode_h != h) {
+			blog(LOG_WARNING,
+			     "drm-output: vk-direct: the display now offers %ux%u instead of %ux%u -- the shared images no "
+			     "longer fit (restart OBS)",
+			     g_drm_vk.mode_w, g_drm_vk.mode_h, w, h);
+			g_drm_vk.mode_w = w;
+			g_drm_vk.mode_h = h;
+			return false;
+		}
+	}
+	if (!drm_output_vk_create_swapchain_only()) {
+		drm_output_vk_destroy_swapchain();
 		return false;
-	blog(LOG_INFO, "drm-output: vk-direct swapchain %ux%u FIFO images=%u format=%d", g_drm_vk.mode_w, g_drm_vk.mode_h,
-	     n, (int)fmt.format);
+	}
+	blog(LOG_INFO, "drm-output: vk-direct presentation rebuilt on '%s' (%ux%u)", g_drm_vk.output_name, w, h);
 	return true;
 }
 
@@ -519,7 +603,7 @@ static bool drm_output_vk_create_shared(void)
 			blog(LOG_WARNING, "drm-output: vk-direct: shared semaphore %d create failed", i);
 			return false;
 		}
-		s->armed = false;
+		g_drm_vk.armed[i] = false;
 	}
 	return true;
 }
@@ -541,6 +625,28 @@ bool drm_output_vk_setup(const char *output_name)
 /* Free everything open() built (idempotent, safe on partial init). The present thread is halted. */
 void drm_output_vk_destroy_all(void)
 {
+	if (g_drm_vk.device && g_drm_vk.submit_outstanding && g_drm_vk.fence) {
+		/* The present loop exited on a fence it never saw signalled: wait BOUNDED (5 x 1 s). A GPU that
+		 * never finishes the copy leaks the Vulkan objects instead of hanging the OBS shutdown in an
+		 * unbounded vkDeviceWaitIdle. */
+		VkResult fr = VK_TIMEOUT;
+		for (int i = 0; i < 5 && fr == VK_TIMEOUT; i++)
+			fr = g_drm_vk.vk.vkWaitForFences(g_drm_vk.device, 1, &g_drm_vk.fence, VK_TRUE, DRM_OUTPUT_VK_WAIT_NS);
+		if (fr != VK_SUCCESS) {
+			blog(LOG_WARNING,
+			     "drm-output: vk-direct: the last copy never completed (VkResult %d) -- leaking the Vulkan objects "
+			     "of '%s' instead of hanging the shutdown",
+			     (int)fr, g_drm_vk.output_name);
+			g_drm_vk.device = VK_NULL_HANDLE;
+			g_drm_vk.surface = VK_NULL_HANDLE;
+			g_drm_vk.acquired = false;
+			g_drm_vk.instance = VK_NULL_HANDLE;
+			/* the driver may still use the loader and the X connection: leak them too */
+			g_drm_vk.lib = NULL;
+			g_drm_vk.dpy = NULL;
+		}
+		g_drm_vk.submit_outstanding = false;
+	}
 	if (g_drm_vk.device) {
 		g_drm_vk.vk.vkDeviceWaitIdle(g_drm_vk.device);
 		for (int i = 0; i < DRM_OUTPUT_VK_SHARED_IMAGES; i++) {
@@ -559,11 +665,7 @@ void drm_output_vk_destroy_all(void)
 			g_drm_vk.vk.vkDestroyFence(g_drm_vk.device, g_drm_vk.fence, NULL);
 		if (g_drm_vk.sem_acquire)
 			g_drm_vk.vk.vkDestroySemaphore(g_drm_vk.device, g_drm_vk.sem_acquire, NULL);
-		for (uint32_t i = 0; i < DRM_OUTPUT_VK_MAX_SWAP; i++)
-			if (g_drm_vk.sem_done[i])
-				g_drm_vk.vk.vkDestroySemaphore(g_drm_vk.device, g_drm_vk.sem_done[i], NULL);
-		if (g_drm_vk.swapchain)
-			g_drm_vk.vk.vkDestroySwapchainKHR(g_drm_vk.device, g_drm_vk.swapchain, NULL);
+		drm_output_vk_destroy_swapchain();
 		g_drm_vk.vk.vkDestroyDevice(g_drm_vk.device, NULL);
 	}
 	if (g_drm_vk.surface)

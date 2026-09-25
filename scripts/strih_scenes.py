@@ -402,15 +402,19 @@ def drm_output_view_of(value):
 
 
 def drm_output_lease_connector(config_text):
-    """Pure: the connector IFF the drm-output config arms the in-OBS DRM-lease output, else "".
+    """Pure: the connector IFF the drm-output config arms the in-OBS DRM output, else "".
     The C module's OWN contract (and imag_scenes.drm_output_lease_connector's, pinned equal by
-    tests/python/test_strih_drm_output_1346.py): a full JSON parse, a boolean "enabled": true AND a
-    non-empty string "connector". Empty / malformed / disabled -> "" (dormant), never a raise."""
+    tests/python/test_strih_drm_output_1346.py): a full JSON parse, a boolean "enabled": true, a
+    non-empty string "connector" AND (issue 1346) a known "backend" -- the C keeps the output dormant on
+    an unknown one, so the wrapper must not take the connector out of X for it (a black HDMI).
+    Empty / malformed / disabled / unknown backend -> "" (dormant), never a raise."""
     if not config_text:
         return ""
     try:
         cfg = json.loads(config_text)
         if cfg.get("enabled") is not True:
+            return ""
+        if drm_output_backend_of(cfg.get("backend")) is None:
             return ""
         connector = cfg.get("connector")
         return connector if isinstance(connector, str) and connector else ""

@@ -212,7 +212,12 @@ if [ -n "$DRM_LOG" ]; then
   LC_ALL=C grep -aqF 'drm-output: program scanout LIVE' "$DRM_LOG" 2>/dev/null && DRM_LIVE=1
   LC_ALL=C grep -aqF 'drm-output: multiview bind LIVE' "$DRM_LOG" 2>/dev/null && DRM_MV_LIVE=1
 fi
-DRM_VERDICT="$(strih_drm_output_verdict "$DRM_HDMI" "$DRM_ARMED" "$DRM_VIEW_V" "$DRM_LIVE" "$DRM_MV_LIVE" "$DRM_BACKEND_V" "$DRM_BACKEND_FACT" || true)"
+# issue 1346 review: `program scanout LIVE` stays in the log after the vk-direct present loop died.
+DRM_VK_DEAD=0
+if [ -n "$DRM_LOG" ] && strih_drm_vk_present_dead < "$DRM_LOG"; then
+  DRM_VK_DEAD=1
+fi
+DRM_VERDICT="$(strih_drm_output_verdict "$DRM_HDMI" "$DRM_ARMED" "$DRM_VIEW_V" "$DRM_LIVE" "$DRM_MV_LIVE" "$DRM_BACKEND_V" "$DRM_BACKEND_FACT" "$DRM_VK_DEAD" || true)"
 case "$DRM_VERDICT" in
   ok)                 ok   "HDMI output: ${DRM_ARMED} live (backend ${DRM_BACKEND_V}), view ${DRM_VIEW_V} (${DRM_CONF_V} + the newest OBS log)" ;;
   skip-no-hdmi)       note "HDMI output: SKIP -- no HDMI monitor connected, the DRM-lease output stays dormant (attach one and re-run setup-strih.sh step 6)" ;;
@@ -222,6 +227,7 @@ case "$DRM_VERDICT" in
   view-invalid)       bad  "HDMI output: ${DRM_CONF_V} \"view\" is not program or multiview (OBS falls back to Program) -- fix it in OBS Tools > HDMI výstup" ;;
   backend-invalid)    bad  "HDMI output: ${DRM_CONF_V} \"backend\" is not lease or vk-direct (OBS keeps the output dormant) -- re-run setup-strih.sh step 6" ;;
   backend-drift)      bad  "HDMI output: ${DRM_CONF_V} uses backend ${DRM_BACKEND_V} but the box fact STRIH_HDMI_OUTPUT_BACKEND is ${DRM_BACKEND_FACT} -- re-run setup-strih.sh step 6" ;;
+  present-dead)       bad  "HDMI output: the vk-direct present loop died in the newest OBS log ('vk-direct present loop exited' with no stop after it) -- read its drm-output: lines, then restart strih-obs.service" ;;
   lease-not-live)     bad  "HDMI output: ${DRM_ARMED} is armed but the newest OBS log never reached 'drm-output: program scanout LIVE' -- read its drm-output: lines, then restart strih-obs.service" ;;
   multiview-not-live) bad  "HDMI output: the view is multiview but the newest OBS log has no 'drm-output: multiview bind LIVE' (the built-in Multiview never reached the scanout)" ;;
   *)                  bad  "HDMI output: unknown verdict '${DRM_VERDICT}'" ;;

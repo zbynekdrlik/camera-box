@@ -52,6 +52,7 @@ typedef VkResult(VKAPI_PTR *drm_output_vk_randr_display_fn)(VkPhysicalDevice pd,
 	X(vkGetPhysicalDeviceSurfaceSupportKHR)          \
 	X(vkGetPhysicalDeviceSurfaceCapabilitiesKHR)     \
 	X(vkGetPhysicalDeviceSurfaceFormatsKHR)          \
+	X(vkGetPhysicalDeviceFormatProperties)           \
 	X(vkReleaseDisplayEXT)
 
 #define DRM_OUTPUT_VK_DEVICE_FNS(X)       \
@@ -122,6 +123,7 @@ struct drm_output_vk_gl {
 	PFNGLWAITSEMAPHOREEXTPROC WaitSemaphoreEXT;
 	PFNGLCOPYIMAGESUBDATAPROC CopyImageSubData;
 	drm_output_vk_gl_flush_fn Flush;
+	drm_output_vk_gl_flush_fn Finish; /* same signature as glFlush */
 	drm_output_vk_gl_get_error_fn GetError;
 };
 
@@ -139,7 +141,6 @@ struct drm_output_vk_shared {
 	GLuint gl_mem;
 	GLuint gl_tex;
 	GLuint gl_sem;
-	bool armed; /* GL signalled `sem` and nobody consumed it yet (g_drm_vk.lock) */
 };
 
 struct drm_output_vk_state {
@@ -180,6 +181,11 @@ struct drm_output_vk_state {
 	int front;   /* image last presented (re-copied when nothing new), -1 before the first */
 	int pending; /* image taken by the present thread, copy in flight */
 	int ready;   /* newest published image not yet taken */
+	/* armed[i]: GL signalled shared[i].sem and nobody consumed that signal yet (g_drm_vk.lock). */
+	bool armed[DRM_OUTPUT_VK_SHARED_IMAGES];
+	/* A submit whose fence was never seen signalled (present thread; read by the teardown quiesce). */
+	bool submit_outstanding;
+	unsigned long long gl_consumes; /* overwritten READY signals consumed by the GL side */
 
 	struct drm_output_vk_gl gl;
 	bool gl_bound; /* graphics thread only */
@@ -198,5 +204,12 @@ extern struct drm_output_vk_state g_drm_vk;
 bool drm_output_vk_setup(const char *output_name);
 
 /* obs-drm-output-vk-setup.c: free everything setup built (idempotent, safe on partial init) and release
- * the display. The present thread must be halted. */
+ * the display. The present thread must be halted. An outstanding submit is waited BOUNDED first; a GPU
+ * that never finishes it leaks the Vulkan objects (loudly) instead of hanging the OBS shutdown. */
 void drm_output_vk_destroy_all(void);
+
+/* obs-drm-output-vk-setup.c, present thread only: rebuild the swapchain (and the display-plane surface
+ * too when `surface_lost`) after VK_ERROR_OUT_OF_DATE_KHR / VK_ERROR_SURFACE_LOST_KHR, e.g. an HDMI
+ * replug. false = the display now offers a different mode size (the shared images no longer fit) or a
+ * Vulkan call failed; the caller retries a bounded number of times, then gives up. */
+bool drm_output_vk_rebuild_presentation(bool surface_lost);

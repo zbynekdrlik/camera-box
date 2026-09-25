@@ -14,6 +14,10 @@
  *   2 s solid pattern (before any publish) -> 3 s RED -> 3 s GREEN -> 3 s BLUE -> 3 s GREY 50 %
  * and prints the wall-clock start of each phase, so a capture of the HDMI (cam2 on the SNV rig) can be
  * matched phase by phase: the R/G/B order proves the channel mapping, the grey proves no gamma step.
+ * Then a 2 s BURST phase publishes with no sleep (several frames per vblank), which forces the overwrite
+ * path — the GL side re-claims a READY image the present thread has not taken and must consume its
+ * pending semaphore signal first. The harness requires gl_consumes > 0 (the path really ran) and a clean
+ * release after it (a double-signalled binary semaphore would fail the submit or wedge the fence).
  *
  * Build ON the box (never on dev1 — Tier-0), with the X11/xcb/EGL/GL/Vulkan headers staged in $INC and
  * the libobs tree in $LIBOBS (only the util headers and the four obs-drm-output-vk files are read):
@@ -172,8 +176,24 @@ int main(int argc, char **argv)
 			usleep(16667);
 		}
 	}
-	printf("PHASE end t=%.3f published=%u skipped=%u\n", now_s(), published, skipped);
-	rc = published > 0 ? 0 : 1;
+	printf("PHASE burst t=%.3f\n", now_s());
+	fflush(stdout);
+	unsigned burst = 0;
+	double burst_end = now_s() + 2.0;
+	for (unsigned k = 0; now_s() < burst_end; k++) {
+		const float v = (k & 1u) ? 0.75f : 0.25f;
+		glClearColor(v, v, v, 1.0f);
+		glClear(GL_COLOR_BUFFER_BIT);
+		int idx = drm_output_vk_claim();
+		if (idx >= 0 && drm_output_vk_publish_gl(idx, tex, w, h))
+			burst++;
+	}
+	pthread_mutex_lock(&g_drm_vk.lock);
+	unsigned long long consumes = g_drm_vk.gl_consumes;
+	pthread_mutex_unlock(&g_drm_vk.lock);
+	printf("PHASE end t=%.3f published=%u skipped=%u burst=%u gl_consumes=%llu\n", now_s(), published, skipped,
+	       burst, consumes);
+	rc = (published > 0 && burst > 0 && consumes > 0 && drm_output_vk_wants_frames()) ? 0 : 1;
 
 out:
 	drm_output_vk_halt();
