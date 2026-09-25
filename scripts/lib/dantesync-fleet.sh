@@ -133,7 +133,12 @@ dantesync_fleet_rows() {
           continue
         }
         [ "$check" = "retired" ] && continue
-        addr="$(obs_fleet_host "$obsname")"
+        addr="$(obs_fleet_host "$obsname" 2>/dev/null)" || addr=""
+        if [ -z "$addr" ]; then
+          echo "dantesync-fleet: row '$name': no address for obs-fleet box '$obsname' (obs_fleet_host failed)" >&2
+          rc=1
+          continue
+        fi
         ;;
     esac
     printf '%s|%s|%s|%s|%s|%s|%s\n' "$name" "$addr" "$os" "$role" "$homegate" "$user" "$credvar"

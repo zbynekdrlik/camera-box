@@ -455,6 +455,20 @@ dantesync_resolume_win_spec() {
 # node. Returns 1 (do NOT skip) for an always-home box, a home traveling box, OR an unknown name
 # (fail-safe: never silently skip a box we cannot classify -- it proceeds and fails loudly on its
 # own reachability check if it really is unreachable).
+# dantesync_gate_env_for NAME -> the env assignment the per-node verification gate needs (stdout,
+# one `KEY=VALUE` word, or nothing). issue 1372: an AUDIO-role node (mbc, fohabl) locks to the
+# audio-VLAN grandmaster, so its dantesync-gate.sh run must compare gm_source_ip against THAT, never
+# the video grandmaster (which only stays harmless while DANTESYNC_GATE_GM_ENFORCE is off). A video
+# node or an unknown name prints nothing: the gate keeps its own default (video-clock.lan).
+dantesync_gate_env_for() {
+  local role gm
+  role="$(dantesync_fleet_field "${1:-}" role 2>/dev/null || true)"
+  [ "$role" = "audio" ] || return 0
+  gm="$(dantesync_fleet_role_gm_ip audio 2>/dev/null || true)"
+  [ -n "$gm" ] && printf 'RIG_GRANDMASTER_IP=%s' "$gm"
+  return 0
+}
+
 dantesync_skip_away_traveling() {
   local name="${1:-}" check
   check="$(obs_fleet_home_check "$name" 2>/dev/null || true)"
@@ -636,11 +650,16 @@ verify_node() {
   else
     master_arg=""; tries="$GATE_WAIT_TRIES"; secs="$GATE_WAIT_SECS"
   fi
+  # issue 1372: an audio-role node is verified against ITS grandmaster (dantesync_gate_env_for).
+  local -a gate_env=(env)
+  local genv
+  genv="$(dantesync_gate_env_for "$name")"
+  [ -n "$genv" ] && gate_env+=("$genv")
   for i in $(seq 1 "$tries"); do
     gate_rc=0
     case "$kind" in
-      linux) "$HERE/dantesync-gate.sh" --linux "$name=$ip" --ntp-master "$master_arg" >/dev/null 2>&1 || gate_rc=$? ;;
-      win)   "$HERE/dantesync-gate.sh" --win-http "$name=$ip" --ntp-master "$master_arg" >/dev/null 2>&1 || gate_rc=$? ;;
+      linux) "${gate_env[@]}" "$HERE/dantesync-gate.sh" --linux "$name=$ip" --ntp-master "$master_arg" >/dev/null 2>&1 || gate_rc=$? ;;
+      win)   "${gate_env[@]}" "$HERE/dantesync-gate.sh" --win-http "$name=$ip" --ntp-master "$master_arg" >/dev/null 2>&1 || gate_rc=$? ;;
       local) gate_rc=0 ;;  # dev1 lock is confirmed by the fleet-wide gate precondition on the next E2E
     esac
     [ "$gate_rc" -eq 0 ] && break
