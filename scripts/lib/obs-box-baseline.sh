@@ -91,25 +91,28 @@ obs_box_apt_lock_timeout() {
 }
 
 # obs_box_write_if_changed DEST MODE OWNER LABEL (content on stdin) -- the ONE idempotent install of a
-# rendered config file: compare, rewrite only when the content or the mode differs, log the outcome
-# (`LABEL: DEST unchanged` / `LABEL: DEST written`). OWNER is `user:group`. The new content goes to a
-# `.<name>.new.<pid>` sibling first (chmod + chown there), then one rename, so a reader never sees a
-# half-written file; the temp is removed when any step fails. Fails loud via the caller's fail() when the
-# file cannot be written. Used for the operator-session audio drop-ins (setup-strih step 12) and the
-# kiosk brightness facet (obs_box_brightness_keys).
+# rendered config file: compare, rewrite only when the content, the mode or the owner differs, log the
+# outcome (`LABEL: DEST unchanged` / `LABEL: DEST written`). OWNER is `user:group` (names). The new
+# content goes to an exclusive `mktemp` sibling first (chmod + chown there), then one rename, so a reader
+# never sees a half-written file and a planted symlink is never followed; the temp is removed when any
+# step fails. Fails loud via the caller's fail() (after the tool's own error) when the file cannot be
+# written. Used for the operator-session audio drop-ins (setup-strih step 12) and the kiosk brightness
+# facet (obs_box_brightness_keys).
 obs_box_write_if_changed() {
     local dest="${1:?obs_box_write_if_changed: DEST required}" mode="${2:?obs_box_write_if_changed: MODE required}"
     local owner="${3:?obs_box_write_if_changed: OWNER required}" label="${4:-file}"
-    local tmp="${dest%/*}/.${dest##*/}.new.$$" want
+    local tmp want
     want="$(cat; printf x)"
     want="${want%x}"
     if [ -f "$dest" ] && [ "$(stat -c %a "$dest" 2>/dev/null)" = "${mode#0}" ] \
+        && [ "$(stat -c %U:%G "$dest" 2>/dev/null)" = "$owner" ] \
         && cmp -s "$dest" <(printf '%s' "$want"); then
         echo "  ${label}: ${dest} unchanged"
         return 0
     fi
-    if ! { printf '%s' "$want" > "$tmp" && chmod "$mode" "$tmp" && chown "$owner" "$tmp" && mv -f "$tmp" "$dest"; } 2>/dev/null; then
-        rm -f "$tmp" 2>/dev/null
+    tmp="$(mktemp "${dest%/*}/.${dest##*/}.XXXXXX")" || fail "${label}: could not create a temp file next to ${dest}"
+    if ! { printf '%s' "$want" > "$tmp" && chmod "$mode" "$tmp" && chown "$owner" "$tmp" && mv -f "$tmp" "$dest"; }; then
+        rm -f "$tmp"
         fail "${label}: could not write ${dest}"
     fi
     echo "  ${label}: ${dest} written"

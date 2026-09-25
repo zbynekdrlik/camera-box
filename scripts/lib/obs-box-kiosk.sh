@@ -7,8 +7,8 @@
 # box an OBS-only appliance instead of a desktop: never-sleep, the de-jitter masks + the crash-popup
 # item, the lightdm-autologin -> openbox-on-plain-Xorg kiosk with the GNOME purge (and its
 # panel-brightness keys facet), the touchpad InputClass, and the shared openbox autostart preamble +
-# root menu. The system half (network,
-# performance, boot safety, kernel, CPU affinity, GPU, power envelope) lives in obs-box-baseline.sh;
+# root menu. The system half (network, performance, boot safety, kernel, CPU affinity, GPU, power
+# envelope) lives in obs-box-baseline.sh;
 # see its header for the box-fact ARGUMENTS convention and the item order. The bodies keep
 # setup-imag.sh's column-0 layout so their heredocs stay byte-identical to what imag has always written.
 
@@ -491,18 +491,28 @@ obs_box_openbox_rc_with_brightness_keys() {
 # <keyboard> section.
 obs_box_brightness_keys() {
     local DESKTOP_USER="${1:?obs_box_brightness_keys: desktop user required}"
-    local home grp rc_user rc_src merged
-    home="$(getent passwd "$DESKTOP_USER" | cut -d: -f6)"
-    [ -n "$home" ] || home="/home/${DESKTOP_USER}"
+    local home grp rc_user rc_src merged rule_new=1
     grp="$(id -gn "$DESKTOP_USER")" || fail "brightness keys: unknown desktop user ${DESKTOP_USER}"
+    home="$(getent passwd "$DESKTOP_USER" | cut -d: -f6 || true)"
+    [ -n "$home" ] || home="/home/${DESKTOP_USER}"
     obs_box_brightness_helper_text | obs_box_write_if_changed /usr/local/bin/obs-box-brightness 0755 root:root "brightness helper"
+    if cmp -s /etc/udev/rules.d/90-obs-box-backlight.rules <(obs_box_backlight_udev_rule); then rule_new=0; fi
     obs_box_backlight_udev_rule | obs_box_write_if_changed /etc/udev/rules.d/90-obs-box-backlight.rules 0644 root:root "backlight udev rule"
-    if udevadm control --reload-rules && udevadm trigger --subsystem-match=backlight --action=add; then
-        echo "  brightness keys: udev reloaded + backlight nodes re-triggered (group video may write them now)"
-    else
-        echo "  WARNING: brightness keys: udevadm reload/trigger failed -- the backlight rule applies at the next boot"
+    # Reload + re-trigger only when the rule text changed: a re-run (every strih-lx genlock deploy runs
+    # setup-strih) leaves udev alone, and the rule applies at every boot anyway.
+    if [ "$rule_new" = 1 ]; then
+        if udevadm control --reload-rules && udevadm trigger --subsystem-match=backlight --action=add; then
+            echo "  brightness keys: udev reloaded + backlight nodes re-triggered (group video may write them now)"
+        else
+            echo "  WARNING: brightness keys: udevadm reload/trigger failed -- the backlight rule applies at the next boot"
+        fi
     fi
-    usermod -aG video "$DESKTOP_USER" || fail "brightness keys: could not add ${DESKTOP_USER} to group video"
+    if case " $(id -nG "$DESKTOP_USER") " in *" video "*) true ;; *) false ;; esac; then
+        echo "  brightness keys: ${DESKTOP_USER} already in group video"
+    else
+        usermod -aG video "$DESKTOP_USER" || fail "brightness keys: could not add ${DESKTOP_USER} to group video"
+        echo "  brightness keys: ${DESKTOP_USER} added to group video (takes effect at the next login)"
+    fi
     [ -d "${home}/.config" ] || install -d -o "$DESKTOP_USER" -g "$grp" -m 755 "${home}/.config"
     install -d -o "$DESKTOP_USER" -g "$grp" -m 755 "${home}/.config/openbox"
     rc_user="${home}/.config/openbox/rc.xml"
