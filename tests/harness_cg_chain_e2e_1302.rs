@@ -160,7 +160,7 @@ fn health_parse_reads_burn_on_of_the_named_output_only() {
     let lines: Vec<&str> = out.lines().collect();
     assert_eq!(
         lines,
-        vec!["true", "false", "false", "unknown", "unknown", "unknown"],
+        ["true", "false", "false", "unknown", "unknown", "unknown"],
         "burn_on is read from the NAMED output; absent output / bad JSON / missing field = unknown"
     );
 }
@@ -340,6 +340,21 @@ ls "$D" | grep -c 'cg.mkv' || true
     assert!(lines.contains(&"NONE"), "{out}");
     assert!(lines.contains(&"CLEAN"), "no cg file may remain: {out}");
     assert_eq!(lines.last(), Some(&"0"), "no .part file either: {out}");
+}
+
+#[test]
+fn a_failed_operator_pull_cmd_leaves_no_file_for_the_cg_gate() {
+    // The CG_CHAIN_PULL_CMD override gets the same guarantee: a command that fails after writing
+    // part of the file must not leave it behind for the merge's `[ -f "$CG_RECORDING" ]` gate.
+    let snippet = r#"
+D="$(mktemp -d)"; trap 'rm -rf "$D"' EXIT
+CG_CHAIN_PULL_CMD='echo partial > "$CG_RECORDING"; exit 1'
+if cg_chain_pull_recording 10.77.9.201 "$D/cg.mkv"; then echo GOT; else echo NONE; fi
+if [ -e "$D/cg.mkv" ]; then echo LEFTOVER; else echo CLEAN; fi
+"#;
+    let (ok, out, _) = run(snippet);
+    assert!(ok);
+    assert_eq!(out.lines().collect::<Vec<_>>(), ["NONE", "CLEAN"], "{out}");
 }
 
 #[test]
