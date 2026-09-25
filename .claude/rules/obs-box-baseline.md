@@ -107,7 +107,7 @@ Rules for the facet:
     doctrine (issue 1095). Operator content and the Root right-click binding stay untouched, so that
     reachability check keeps its meaning.
 - **Every file goes through `obs_box_write_if_changed`** (obs-box-baseline.sh): compared, rewritten
-  only on a content or mode difference, logged `unchanged` / `written`, one atomic rename. It is the
+  only on a content, mode or owner difference, logged `unchanged` / `written`, one atomic rename. It is the
   shared install for rendered config files (setup-strih step 12 uses it for the audio drop-ins).
 - **Grader row `brightness`** (after `kiosk`, before `autostart`). It is OK only when all four hold:
   - the helper is executable AND byte-identical to `obs_box_brightness_helper_text`;

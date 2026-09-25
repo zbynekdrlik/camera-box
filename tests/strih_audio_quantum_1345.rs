@@ -200,6 +200,33 @@ fn write_if_changed_fails_loud_on_an_unwritable_destination() {
     assert!(err.contains("FAIL:"), "{err}");
 }
 
+/// The owner is part of the "unchanged" check: a file with the right content and mode but another
+/// owner is rewritten (as a non-root test user the chown to a group it is not in fails loud; run as
+/// root it succeeds) -- either way it is never logged `unchanged`.
+#[test]
+fn write_if_changed_never_calls_a_wrong_owner_unchanged() {
+    let body = r#"
+d="$(mktemp -d)"; f="$d/sub.conf"
+printf 'a\n' | obs_box_write_if_changed "$f" 0644 "$(id -un):$(id -gn)" "test drop-in" || exit 9
+g=root; if [ "$(id -gn)" = root ]; then g=daemon; fi
+( printf 'a\n' | obs_box_write_if_changed "$f" 0644 "$(id -un):$g" "test drop-in" ); echo "RC=$?"
+rm -rf "$d"
+"#;
+    let (c, out, err) = run(BASELINE, &[], body);
+    assert_eq!(c, 0, "stdout={out} stderr={err}");
+    let second: Vec<&str> = out.lines().skip(1).collect();
+    assert!(
+        !second.iter().any(|l| l.contains("unchanged")),
+        "an owner mismatch must never read unchanged: {out}"
+    );
+    let rewrote = second.iter().any(|l| l.contains("written"));
+    let refused = out.contains("RC=1") && err.contains("FAIL:");
+    assert!(
+        rewrote || refused,
+        "an owner mismatch is rewritten (root) or fails loud (non-root): {out} {err}"
+    );
+}
+
 /// The text of setup-strih.sh between the `step 12 "` banner and the `step 13 "` banner.
 fn setup_step12() -> String {
     let s = read("scripts/setup-strih.sh");

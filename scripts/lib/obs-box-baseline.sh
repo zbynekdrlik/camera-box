@@ -94,7 +94,7 @@ obs_box_apt_lock_timeout() {
 # rendered config file: compare, rewrite only when the content, the mode or the owner differs, log the
 # outcome (`LABEL: DEST unchanged` / `LABEL: DEST written`). OWNER is `user:group` (names). The new
 # content goes to an exclusive `mktemp` sibling first (chmod + chown there), then one rename, so a reader
-# never sees a half-written file and a planted symlink is never followed; the temp is removed when any
+# never sees a half-written file and a pre-planted temp name is never reused; the temp is removed when any
 # step fails. Fails loud via the caller's fail() (after the tool's own error) when the file cannot be
 # written. Used for the operator-session audio drop-ins (setup-strih step 12) and the kiosk brightness
 # facet (obs_box_brightness_keys).

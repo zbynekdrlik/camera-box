@@ -549,7 +549,7 @@ Rules for this pair:
 - Both renderers print the LIVE strih-lx text byte-for-byte, comment headers included (sha256
   checked against the box). On the hand-fixed box, a re-run logs `unchanged`.
 - They are written by `obs_box_write_if_changed` (shared baseline lib): compare, rewrite only on a
-  content or mode difference, log, one atomic rename. Use it for any new rendered config file
+  content, mode or owner difference, log, one atomic rename. Use it for any new rendered config file
   instead of a bare `>` redirect.
 - verify-strih item **9b** FAILs when either file is missing or differs from its renderer. This is
   deliberately a hard FAIL, like every other provisioned-file check in verify-strih: a missing file is

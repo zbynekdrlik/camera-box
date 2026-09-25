@@ -388,7 +388,7 @@ fn the_gather_passes_a_provisioned_box_on_all_three_files() {
 fn the_gather_grades_the_helper_and_rule_by_content_not_presence() {
     let d = tempfile::tempdir().unwrap();
     let drifted_helper = HELPER.replace("max / 10", "max / 5");
-    let drifted_rule = UDEV_RULE.replace("chmod g+w", "chmod o+w");
+    let drifted_rule = UDEV_RULE.replace("ACTION==\"add\"", "ACTION==\"change\"");
     write_fixture(
         d.path(),
         &drifted_helper,
