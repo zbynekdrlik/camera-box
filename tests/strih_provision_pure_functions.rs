@@ -103,11 +103,14 @@ fn bundle_artifact_is_the_strih_variant() {
 
 #[test]
 fn dantesync_client_args_point_at_the_ntp_server_and_never_server_mode() {
-    let (_c, out, _e) = run_sourced(&[], "strih_lx_dantesync_client_args");
-    assert!(out.contains("--ntp-server strih.lan"), "got: {out}");
+    // issue 1361: the client upstream is the box fact STRIH_DANTESYNC_UPSTREAM. strih-lx is the NTP
+    // master (role server, NO upstream), so asking it for client args fails closed -- there is no
+    // guessed `strih.lan` default any more.
+    let (c, out, err) = run_sourced(&[], "strih_lx_dantesync_client_args");
+    assert_ne!(c, 0, "a server-role box has no client upstream: out={out}");
     assert!(
-        !out.contains("server_mode") && !out.contains("--master"),
-        "must not be master: {out}"
+        err.contains("STRIH_DANTESYNC_UPSTREAM"),
+        "names the missing fact: {err}"
     );
     // Overridable NTP server seam.
     let (_c2, out2, _e2) = run_sourced(
@@ -118,12 +121,22 @@ fn dantesync_client_args_point_at_the_ntp_server_and_never_server_mode() {
         out2.contains("--ntp-server strih2.lan"),
         "override ignored: {out2}"
     );
+    assert!(
+        !out2.contains("server_mode") && !out2.contains("--master"),
+        "must not be master: {out2}"
+    );
 }
 
 #[test]
 fn dantesync_client_check_is_fail_closed_and_rejects_master_modes() {
-    // Client modes pass.
-    for mode in ["client", "ntp-server=strih.lan", "slave"] {
+    // Client modes pass -- including the exact `--ntp-server <host>` invocation whose host is merely
+    // NAMED like a master (issue 1361: a host name is not a master flag).
+    for mode in [
+        "client",
+        "ntp-server=strih.lan",
+        "slave",
+        "--ntp-server ntp-master.lan",
+    ] {
         let (code, _o, _e) = run_sourced(
             &[],
             &format!("strih_lx_dantesync_is_client_not_master '{mode}'"),
@@ -131,7 +144,16 @@ fn dantesync_client_check_is_fail_closed_and_rejects_master_modes() {
         assert_eq!(code, 0, "client mode '{mode}' should pass");
     }
     // Master/server/empty must FAIL (fail-closed).
-    for mode in ["ntp_server_mode", "server", "master", "grandmaster", ""] {
+    for mode in [
+        "ntp_server_mode",
+        "server",
+        "master",
+        "grandmaster",
+        "",
+        "--ntp-server venue.lan --master",
+        "--ntp-server --master",
+        "--ntp-server -m",
+    ] {
         let (code, _o, _e) = run_sourced(
             &[],
             &format!("strih_lx_dantesync_is_client_not_master '{mode}'"),
@@ -726,16 +748,28 @@ fn dantesync_unit_text_renders_the_role_and_fail_closes_on_ambiguous_shapes() {
         out2.contains("ExecStart=/usr/local/bin/dantesync --ntp-server strih.lan"),
         "client ExecStart must be the CLIENT daemon: {out2}"
     );
-    // client with no ARGS defaults to the client args helper.
-    let (c2b, out2b, _e) = run_sourced(&[], "strih_dantesync_unit_text client ''");
+    // client with no ARGS defaults to the client args helper -- whose upstream is the box fact
+    // STRIH_DANTESYNC_UPSTREAM or the STRIH_LX_NTP_SERVER override (issue 1361).
+    let (c2b, out2b, _e) = run_sourced(
+        &[("STRIH_LX_NTP_SERVER", "venue-ntp.lan")],
+        "strih_dantesync_unit_text client ''",
+    );
     assert_eq!(c2b, 0);
     assert!(
-        out2b.contains("ExecStart=/usr/local/bin/dantesync --ntp-server"),
+        out2b.contains("ExecStart=/usr/local/bin/dantesync --ntp-server venue-ntp.lan"),
         "the default client ExecStart must carry the client args: {out2b}"
+    );
+    // ...and on a box with NO upstream (strih-lx is the NTP master) `client ''` is refused and emits
+    // nothing -- never a guessed default host.
+    let (c2c, out2c, _e) = run_sourced(&[], "strih_dantesync_unit_text client ''");
+    assert_ne!(c2c, 0, "client with no upstream fact must refuse: {out2c}");
+    assert!(
+        out2c.trim().is_empty(),
+        "a refused client unit emits nothing: {out2c}"
     );
 
     // Ambiguous shapes emit NOTHING and return non-zero. (`client ''` is NOT ambiguous: the
-    // printer defaults an empty client args to the client helper -- asserted above.)
+    // printer defaults an empty client args to the client helper -- asserted above, both branches.)
     for (role, args) in [
         ("server", "--ntp-server strih.lan"),
         ("client", "ntp_server_mode"),
@@ -837,9 +871,15 @@ fn setup_strih_installs_the_dantesync_unit_in_step_2() {
         s.contains("/etc/systemd/system/dantesync.service"),
         "setup-strih must write the dantesync unit to /etc/systemd/system/dantesync.service"
     );
+    // issue 1361: the role is a FACT of the selected box (strih-lx.env: server, the post-M4 NTP
+    // master), no longer a per-run STRIH_LX_DANTESYNC_ROLE env knob.
     assert!(
-        s.contains("STRIH_LX_DANTESYNC_ROLE:-server"),
-        "setup-strih step 2 must default the dantesync role to `server` (the post-M4 NTP master)"
+        s.contains("DS_ROLE=\"$(strih_lx_dantesync_role)\""),
+        "setup-strih step 2 must take the dantesync role from the box facts (strih_lx_dantesync_role)"
+    );
+    assert!(
+        !s.contains("STRIH_LX_DANTESYNC_ROLE:-server"),
+        "the per-run role env knob is retired (issue 1361)"
     );
     assert!(
         s.contains("strih_lx_dantesync_role_ok \"$DS_ROLE\" \"$DS_ARGS\""),
@@ -915,46 +955,6 @@ fn verify_strih_dantesync_and_sleep_items_are_fixed() {
         !v.contains("|| echo masked"),
         "verify-strih must drop the `|| echo masked` double-append (the false-FAIL bug)"
     );
-}
-
-/// issue 1346: `strih_projector_verdict SAVEPROJ EXT SAVED` grades the fixed HDMI projector
-/// acceptance (report-only): SaveProjectors=true pre-seeded, and — when an external monitor is
-/// connected — a saved type-3/4 projector entry exists. Fail-closed order: SaveProjectors first,
-/// then external-monitor presence, then the saved entry. Returns 0 ONLY for the fully-`ok` state;
-/// every other state prints its own token and returns non-zero (the caller renders 0->PASS else
-/// NOTE, since the whole item is report-only). Fixtures: connected/not-connected + present/absent.
-#[test]
-fn projector_verdict_grades_saveprojectors_hdmi_and_saved_entry() {
-    // fully healthy: SaveProjectors on, an external monitor, a saved projector -> ok, rc 0
-    let (c, out, _e) = run_sourced(&[], "strih_projector_verdict 1 1 1");
-    assert_eq!(c, 0, "the fully-configured state must be ok; token={out}");
-    assert_eq!(out, "ok");
-
-    // SaveProjectors not pre-seeded -> saveprojectors-missing (checked FIRST, even with no monitor)
-    let (c2, out2, _e) = run_sourced(&[], "strih_projector_verdict 0 1 1");
-    assert_ne!(c2, 0);
-    assert_eq!(out2, "saveprojectors-missing");
-    let (c2b, out2b, _e) = run_sourced(&[], "strih_projector_verdict 0 0 0");
-    assert_ne!(c2b, 0);
-    assert_eq!(
-        out2b, "saveprojectors-missing",
-        "SaveProjectors is graded before the monitor"
-    );
-
-    // SaveProjectors ok but no external monitor connected (today's box) -> hdmi-absent (report-only)
-    let (c3, out3, _e) = run_sourced(&[], "strih_projector_verdict 1 0 0");
-    assert_ne!(c3, 0);
-    assert_eq!(out3, "hdmi-absent");
-
-    // external monitor present but no saved projector yet -> projector-unseeded
-    let (c4, out4, _e) = run_sourced(&[], "strih_projector_verdict 1 1 0");
-    assert_ne!(c4, 0);
-    assert_eq!(out4, "projector-unseeded");
-
-    // fail-closed defaults: missing args behave as 0 (not configured)
-    let (c5, out5, _e) = run_sourced(&[], "strih_projector_verdict");
-    assert_ne!(c5, 0);
-    assert_eq!(out5, "saveprojectors-missing");
 }
 
 /// issue 1345 M3a: `strih_janus_audiobridge_jcfg_text ROOM SECRET_PATH` renders the interkom room
@@ -2251,63 +2251,55 @@ fn setup_strih_pins_janus_local_ip_from_the_static_ip_source_of_truth() {
     );
 }
 
-/// issue 1352 (a): the mv-host helper + `--user` unit exist in the repo; setup installs python3-xlib,
-/// the helper (0755) + the unit, and ENABLE-ONLY registers it (never a live start). The unit's
-/// ExecStart references the installed helper.
+/// issue 1357: the issue-1352 `strih-mv-host` runtime reparenting helper is RETIRED together with the
+/// vendored child-host projector -- both worked around an XWayland + PRIME-offload present stall that no
+/// box has since the plain-Xorg NVIDIA-primary kiosk (23.9.2026). The helper + its `--user` unit are
+/// gone from the repo; setup step 8b only REMOVES a leftover install (disable --now, rm, daemon-reload),
+/// never installs or enables it, and never live-starts anything.
 #[test]
-fn setup_strih_installs_and_enables_the_mv_host_helper() {
+fn setup_strih_retires_the_mv_host_helper() {
     assert!(
-        manifest_dir().join("scripts/strih-mv-host.py").exists(),
-        "scripts/strih-mv-host.py must exist"
+        !manifest_dir().join("scripts/strih-mv-host.py").exists(),
+        "scripts/strih-mv-host.py must be gone (retired with the child-host, issue 1357)"
     );
     assert!(
-        manifest_dir()
+        !manifest_dir()
             .join("systemd/strih-mv-host.service")
             .exists(),
-        "systemd/strih-mv-host.service must exist"
-    );
-    let unit = read_script("systemd/strih-mv-host.service");
-    assert!(
-        unit.contains("/usr/local/bin/strih-mv-host.py"),
-        "the unit ExecStart must reference the installed helper"
+        "systemd/strih-mv-host.service must be gone (retired with the child-host, issue 1357)"
     );
     let setup = read_script("scripts/setup-strih.sh");
-    assert!(
-        setup.contains("apt-get install -y python3-xlib"),
-        "setup must install python3-xlib (the helper's only dep)"
-    );
-    assert!(
-        setup.contains("install -m 0755 \"${HERE}/strih-mv-host.py\""),
-        "setup must install the helper mode 0755"
-    );
-    assert!(
-        setup.contains("install -m 0644 \"${HERE}/../systemd/strih-mv-host.service\""),
-        "setup must install the --user unit"
-    );
-    // issue 1352 acceptance (22.9.2026): the vendored child-host projector is LIVE, and the runtime
-    // helper CONFLICTS with it (both hosting mechanisms active = MV 0.6 fps / 505 ms presents;
-    // helper stopped = 30 fps / 5 ms). Provisioning therefore installs the helper but leaves it
-    // DISABLED unless STRIH_MV_HOST_ENABLED=1 (a bundle without the vendored fix).
-    assert!(
-        setup.contains("STRIH_MV_HOST_ENABLED:-0"),
-        "setup must gate the mv-host enablement on STRIH_MV_HOST_ENABLED (default 0)"
-    );
-    assert!(
-        setup.contains("systemctl --user enable strih-mv-host.service"),
-        "setup must still be able to enable the mv-host unit (the STRIH_MV_HOST_ENABLED=1 fallback)"
-    );
+    for gone in [
+        "apt-get install -y python3-xlib",
+        "install -m 0755 \"${HERE}/strih-mv-host.py\"",
+        "systemctl --user enable strih-mv-host.service",
+        "STRIH_MV_HOST_ENABLED",
+    ] {
+        assert!(
+            !setup.contains(gone),
+            "setup-strih must no longer install/enable the retired helper (found `{gone}`)"
+        );
+    }
     assert!(
         setup.contains("systemctl --user disable --now strih-mv-host.service"),
-        "setup must disable (and stop) the conflicting helper by default"
+        "setup step 8b must disable (and stop) a leftover helper install"
+    );
+    assert!(
+        setup.contains("rm -f \"${MVH_WANTS}\" \"${MVH_UNIT}\" \"${MVH_HELPER}\""),
+        "setup step 8b must remove the leftover WantedBy link, unit and helper"
     );
     assert!(
         !setup.contains("systemctl --user start strih-mv-host"),
-        "mv-host must never be live-started by provisioning (the provisioning convention)"
+        "provisioning never live-starts a unit (the provisioning convention)"
     );
     let verify = read_script("scripts/verify-strih.sh");
     assert!(
-        verify.contains("STRIH_MV_HOST_ENABLED:-0") && verify.contains("enablement mismatch"),
-        "verify-strih must grade the mv-host enablement against STRIH_MV_HOST_ENABLED (default DISABLED)"
+        verify.contains("(mv-host) retired strih-mv-host helper absent"),
+        "verify-strih must grade the retired helper ABSENT"
+    );
+    assert!(
+        !verify.contains("STRIH_MV_HOST_ENABLED") && !verify.contains("import Xlib"),
+        "verify-strih must no longer grade the helper's enablement or its python3-xlib dep"
     );
 }
 
@@ -2327,17 +2319,14 @@ fn setup_strih_installs_avahi_utils_and_verify_greps_avahi_browse() {
 }
 
 /// issue 1352: verify-strih.sh gates the provisioned items that survive the issue-1357 Xorg kiosk
-/// (mv-host enablement, avahi, DistroAV output names, janus local_ip); the gpu-env item is gone.
+/// (the retired mv-host helper graded absent, avahi, DistroAV output names, janus local_ip); the
+/// gpu-env item is gone.
 #[test]
 fn verify_strih_asserts_the_1352_provisioning_items() {
     let v = read_script("scripts/verify-strih.sh");
     assert!(
         v.contains("strih-mv-host.service"),
-        "verify must gate the mv-host unit"
-    );
-    assert!(
-        v.contains("import Xlib"),
-        "verify must assert python3-xlib importable"
+        "verify must still check for a leftover mv-host unit (graded absent, issue 1357)"
     );
     assert!(
         !v.contains("QT_QPA_PLATFORM=xcb") && !v.contains("STRIH_LX_OBS_GPU_ENV"),
@@ -2734,8 +2723,8 @@ fn verify_strih_has_the_dantesync_role_live_item() {
         "verify-strih must check the ntp :123 listener for the server role"
     );
     assert!(
-        v.contains("STRIH_LX_DANTESYNC_ROLE:-server"),
-        "verify-strih must default the role to `server` (matching setup-strih)"
+        v.contains("DS_ROLE_V=\"$(strih_lx_dantesync_role)\""),
+        "verify-strih must grade the role the box facts declare (the same source as setup-strih, issue 1361)"
     );
 }
 
@@ -3724,27 +3713,28 @@ fn openbox_autostart_text_carries_the_preamble_units_and_satellite() {
         !out.contains("WAYLAND") && !out.contains("__NV_PRIME"),
         "no Wayland / PRIME-offload leftovers in the kiosk autostart"
     );
-    for (pinned, fallback) in [
-        (
-            "xrandr --output \"$PANEL\" --primary --mode 1920x1080 --rate 60",
-            "xrandr --output \"$PANEL\" --primary --auto",
-        ),
-        (
-            "xrandr --output \"$PROJ\" --mode 1920x1080 --rate 60 --right-of \"$PANEL\"",
-            "xrandr --output \"$PROJ\" --auto --right-of \"$PANEL\"",
-        ),
-    ] {
-        let p = out
-            .find(pinned)
-            .unwrap_or_else(|| panic!("the autostart pins `{pinned}`:\n{out}"));
-        let f = out
-            .find(fallback)
-            .unwrap_or_else(|| panic!("--auto stays the fallback `{fallback}`"));
-        assert!(
-            p < f,
-            "the pinned mode is tried first, --auto only after it fails"
-        );
-    }
+    let pinned = "xrandr --output \"$PANEL\" --primary --mode 1920x1080 --rate 60";
+    let fallback = "xrandr --output \"$PANEL\" --primary --auto";
+    let p = out
+        .find(pinned)
+        .unwrap_or_else(|| panic!("the autostart pins `{pinned}`:\n{out}"));
+    let f = out
+        .find(fallback)
+        .unwrap_or_else(|| panic!("--auto stays the fallback `{fallback}`"));
+    assert!(
+        p < f,
+        "the pinned mode is tried first, --auto only after it fails"
+    );
+    // issue 1346 (24.9.2026): the HDMI output is the in-OBS DRM lease -- the desktop must NEVER
+    // extend onto it, so the kiosk takes HDMI out of the X layout instead of placing it right-of.
+    assert!(
+        out.contains("xrandr --output \"$PROJ\" --off"),
+        "the kiosk must turn HDMI off in X (issue 1346):\n{out}"
+    );
+    assert!(
+        !out.contains("--right-of"),
+        "the desktop must never extend onto HDMI (issue 1346):\n{out}"
+    );
 }
 
 /// setup-strih.sh sources the shared baseline and runs EVERY baseline item in step 11, in imag's
@@ -3957,7 +3947,7 @@ fn setup_strih_step_15_writes_the_kiosk_autostart_and_menu() {
     for want in [
         "strih_openbox_autostart_text > \"${USER_HOME}/.config/openbox/autostart\"",
         "chmod +x \"${USER_HOME}/.config/openbox/autostart\"",
-        "obs_box_openbox_menu_xml \"strih-lx\" \"systemctl --user start strih-obs.service\" \"/usr/local/bin/strih-obs-stop.sh\"",
+        "obs_box_openbox_menu_xml \"$(strih_lx_hostname)\" \"systemctl --user start strih-obs.service\" \"/usr/local/bin/strih-obs-stop.sh\"",
         "rm -f \"${USER_HOME}/.config/autostart/companion-satellite.desktop\"",
     ] {
         assert!(step15.contains(want), "step 15 must carry `{want}`");
@@ -4005,20 +3995,16 @@ fn reboot_pending_is_the_lowlatency_dropin_without_a_running_preempt_full() {
 #[test]
 fn setup_strih_final_verify_reports_pending_items_before_the_reboot() {
     let s = read_script("scripts/setup-strih.sh");
-    let step17 = block_between(
-        &s,
-        "step 17 \"Final verification",
-        "=== strih-lx setup complete",
-    );
+    let step17 = block_between(&s, "step 17 \"Final verification", "setup complete ===");
     let pending = step17
         .find("if strih_lx_reboot_pending \"$(cat /proc/cmdline 2>/dev/null || true)\"; then")
         .expect("step 17 must branch on the pending reboot");
     let soft = step17
-        .find("\"${HERE}/verify-strih.sh\" || warn")
+        .find("\"${HERE}/verify-strih.sh\" --box \"$STRIH_FACT_BOX\" || warn")
         .expect("pending: verify reports, never fails provisioning");
     let hard = step17
         .find(
-            "\"${HERE}/verify-strih.sh\" || fail \"verify-strih.sh acceptance gate did not pass\"",
+            "\"${HERE}/verify-strih.sh\" --box \"$STRIH_FACT_BOX\" || fail \"verify-strih.sh acceptance gate did not pass\"",
         )
         .expect("running baseline: the hard gate stays");
     assert!(
@@ -4053,5 +4039,40 @@ fn strih_lx_hostname_is_the_fleet_name_not_the_dial_address_1317() {
     assert!(
         !setup.contains("${STRIH_HOST%%.*}"),
         "the hostname must never be cut from the dial address"
+    );
+}
+
+/// Live incident 24.9.2026: the strih-lx deploy ran setup-strih.sh under a 077 umask, so
+/// `install -Dm644 ... /etc/intercom-hub/intercom.toml` created the parent directory 0700 root.
+/// The hub (User=newlevel) could not read its config and crash-looped (NRestarts 15925) until the
+/// directory was chmod-ed by hand. setup-strih.sh must pin a 022 umask before it creates anything.
+#[test]
+fn setup_strih_pins_umask_022_before_it_creates_any_file() {
+    let s = read_script("scripts/setup-strih.sh");
+    let umask = s
+        .find("\numask 022")
+        .expect("setup-strih.sh must set `umask 022` at top level");
+    let first_install = s.find("\ninstall ").expect("setup-strih.sh installs files");
+    assert!(
+        umask < first_install,
+        "`umask 022` must come before the first top-level install, or a caller's 077 umask \
+         creates root-only directories (the intercom-hub config dir incident)"
+    );
+}
+
+/// Root cause of the 24.9.2026 intercom-hub outage: setup-strih.sh created `/etc/intercom-hub`
+/// with `install -d -m 700` (for the Janus room secret) on EVERY run, so the hub (User=newlevel)
+/// lost read access to its own `intercom.toml` after each deploy. The secret stays protected by its
+/// own 0600 file mode; the directory must be traversable (0755).
+#[test]
+fn setup_strih_keeps_the_intercom_config_dir_readable() {
+    let s = read_script("scripts/setup-strih.sh");
+    assert!(
+        !s.contains("install -d -m 700 /etc/intercom-hub"),
+        "/etc/intercom-hub must not be created 0700 -- the hub runs as newlevel and reads intercom.toml there"
+    );
+    assert!(
+        s.contains("install -d -m 755 /etc/intercom-hub"),
+        "setup-strih.sh must (re)create /etc/intercom-hub as 0755 on every run"
     );
 }

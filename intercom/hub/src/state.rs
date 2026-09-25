@@ -20,6 +20,11 @@ pub struct RuntimeStats {
     pub overruns: u64,
     pub last_rx_age_ms: Option<u64>,
     pub level_dbfs: f32,
+    /// The sample rate of the participant's last VBAN packet (issue 1345), `None` for a non-VBAN
+    /// participant or before its first packet.
+    pub sample_rate: Option<u32>,
+    /// VBAN packets dropped because their rate is not 1x / 2x / 4x the hub rate (issue 1345).
+    pub rate_rejects: u64,
     /// The Janus audiobridge facet, present only for the `janus`-adapter participant (M3a).
     pub janus: Option<JanusStats>,
     /// The local PipeWire facet, present only for a `pipewire`-adapter participant — the
@@ -40,6 +45,14 @@ pub struct ParticipantState {
     pub overruns: u64,
     pub last_rx_age_ms: Option<u64>,
     pub level_dbfs: f32,
+    /// The input stream's VBAN sample rate in Hz (issue 1345: a 96 kHz source is decimated to the hub
+    /// rate) — omitted for a non-VBAN participant or before its first packet.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sample_rate: Option<u32>,
+    /// VBAN packets dropped because their rate is not 1x / 2x / 4x the hub rate — present for
+    /// every VBAN participant, omitted for the others.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rate_rejects: Option<u64>,
     /// The Janus audiobridge facet (joined / session age / rejoins / rtp packet counts), present
     /// only for the janus participant — omitted from the JSON for every other participant.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -73,6 +86,7 @@ impl HubState {
             .enumerate()
             .map(|(id, p)| {
                 let s = stats.get(id).copied().unwrap_or_default();
+                let vban = p.adapter == crate::matrix::ADAPTER_VBAN;
                 ParticipantState {
                     name: p.name.clone(),
                     role: p.role.clone(),
@@ -84,6 +98,8 @@ impl HubState {
                     overruns: s.overruns,
                     last_rx_age_ms: s.last_rx_age_ms,
                     level_dbfs: s.level_dbfs,
+                    sample_rate: s.sample_rate.filter(|_| vban),
+                    rate_rejects: vban.then_some(s.rate_rejects),
                     janus: s.janus,
                     local_audio: s.local_audio,
                 }
@@ -101,19 +117,32 @@ impl HubState {
     }
 
     /// A one-line status summary for the periodic log (a dev1 watchdog greps it): worst underruns +
-    /// the participant levels, so a dead/underrunning leg is visible between E2E runs.
+    /// the participant levels, so a dead/underrunning leg is visible between E2E runs. Dropped
+    /// wrong-rate VBAN packets are named as `rate_rejects=N` when there are any (issue 1345), so a
+    /// rejected stream (which reads as silent) stays explained after its one warn scrolls away.
     pub fn status_line(&self) -> String {
         let total_underruns: u64 = self.participants.iter().map(|p| p.underruns).sum();
+        let total_rate_rejects: u64 = self
+            .participants
+            .iter()
+            .filter_map(|p| p.rate_rejects)
+            .sum();
         let levels: Vec<String> = self
             .participants
             .iter()
             .filter(|p| p.adapter == crate::matrix::ADAPTER_VBAN)
             .map(|p| format!("{}={:.0}dBFS", p.name, p.level_dbfs))
             .collect();
+        let rejects = if total_rate_rejects > 0 {
+            format!(" rate_rejects={total_rate_rejects}")
+        } else {
+            String::new()
+        };
         format!(
-            "intercom-hub: status participants={} underruns={} {}",
+            "intercom-hub: status participants={} underruns={}{} {}",
             self.participants.len(),
             total_underruns,
+            rejects,
             levels.join(" ")
         )
     }
@@ -163,6 +192,8 @@ out_channels = 4
                 overruns: 0,
                 last_rx_age_ms: Some(5),
                 level_dbfs: -12.0,
+                sample_rate: Some(48000),
+                rate_rejects: 0,
                 janus: None,
                 local_audio: None,
             },
@@ -176,6 +207,7 @@ out_channels = 4
         assert_eq!(v["participants"][0]["adapter"], "vban");
         assert_eq!(v["participants"][0]["rx_packets"], 10);
         assert_eq!(v["participants"][0]["last_rx_age_ms"], 5);
+        assert_eq!(v["participants"][0]["sample_rate"], 48000);
         assert_eq!(v["participants"][1]["name"], "cutters");
         assert_eq!(v["participants"][1]["adapter"], "none");
         // default stats render as zeros / null age.

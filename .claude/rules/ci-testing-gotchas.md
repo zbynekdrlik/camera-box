@@ -904,6 +904,11 @@ and run the command as its OWN plain Bash call with no pipe/`&&`/`PIPESTATUS`. A
 heredoc block IS allowed (the guard permits `python3 -` / `python3 -c`), so classifier/anchor
 simulations run fine that way — only the runtime-variable-in-the-command shape is the blocker.
 
+**Nested heredocs are refused too (issue 1342).** A `python3 - <<'PY'` edit script is allowed.
+But if the text it writes into a file itself contains a heredoc (a bash function with an inner
+`<<'PY'` block), the guard refuses the whole call as "too complex". Put the edit script in a file
+with the `Write` tool and run `python3 /abs/script.py` as a plain call.
+
 ## A worktree-isolated worker CANNOT locally run a sourced-bash-lib test or a PATH-stubbed dry-run (#1265)
 
 The worktree-isolation guard refuses `bash -c '…source lib…'`, `ENV=x bash <script>`, and any
@@ -1310,3 +1315,23 @@ correctly escaped line (and would pass a wrong one). The faithful pin runs the l
 twice: a fake `ssh` function records `$#` + its args (must be exactly `user@host` + ONE remote
 string), then that string runs under `bash -c` with a fake `rm` that prints its argv NUL-separated.
 Fixture paths: a space, `'`, `"`, `$`, a backtick and `\` (`tests/python/test_strih_windows_remnants_1317.py`).
+
+## Waiting on your own async review dispatch from a worktree: a SCRIPT FILE with a `date +%s` deadline (issue 1357)
+
+When a fresh-context review `Agent` dispatch comes back async, a worktree worker must wait in the
+foreground. Two traps: (1) a bare `inotifywait -e close_write -t N <task.output>` returns on the
+FIRST append (the transcript is written after every tool round), so one call proves nothing;
+(2) an inline `while [ $SECONDS -lt $end ]` loop is refused by the worktree-isolation guard
+("evaluates SECONDS arithmetically"). What works: write a small script with the `Write` tool that
+loops on `[ "$(date +%s)" -lt "$end" ]`, parses ONLY the last JSONL line of the output file
+(`tail -n 1 | python3 -c` printing `type` + the content-block types) and stops on
+`assistant text`, sleeping ~5 s between reads; then run `bash /abs/waitrev.sh` as its own call.
+
+## A Python CLI test that overrides HOME also hides the USER site-packages (issue 1346)
+
+Running `subprocess.run([sys.executable, script, …], env=dict(os.environ, HOME=tmp))` to point a
+CLI at a fake `~/.camera-box/...` file makes Python look for the user site-packages under the FAKE
+home, so a module installed with `pip --user` (python3-websocket on dev1, which `strih_scenes.py`
+imports at module load) raises `ModuleNotFoundError` before the code under test runs. Pin the real
+user base alongside the fake home: `env = dict(os.environ, HOME=str(tmp),
+PYTHONUSERBASE=site.getuserbase())`.

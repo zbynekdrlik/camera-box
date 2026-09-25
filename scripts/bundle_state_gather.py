@@ -128,8 +128,8 @@ def genlock_lock_facet_from_log(text):
     (`n_idle`->None, per-input `idle`->False).
 
     #1299 (schema v5, Part 4): `qpc_drift_ppm` (measured windowed drift rate), `qpc_expected_ppm` (the
-    dantesync-reported slew the verdict compares against) and `qpc_step` (a single-sample wall STEP
-    tripped) are report-only telemetry — the qpc_drift VERDICT is folded into `state` by the widget.
+    dantesync-reported slew) and `qpc_step` (a single-sample wall STEP tripped) are report-only
+    telemetry — the qpc_drift VERDICT (since #1357 the wall STEP only) is folded into `state` by the widget.
     All three default to None for a v1-v4 line from an older build (the cumulative `qpc_drift_ms` stays).
 
     #1299 (schema v3, Part 3): `recent_event_inputs` is the top recent-event offender (name+count),
@@ -214,10 +214,10 @@ def genlock_lock_facet_from_log(text):
         "latency_ms": payload.get("latency_ms"),
         "recent_event": bool(payload.get("recent_event")),
         "qpc_drift_ms": payload.get("qpc_drift_ms"),
-        # #1299 Part 4 (schema v5): windowed wall-vs-QPC drift telemetry (report-only). The qpc_drift
-        # VERDICT now keys on the RATE (`qpc_drift_ppm`) vs the dantesync-reported slew
-        # (`qpc_expected_ppm`) + a STEP (`qpc_step`), not the unbounded cumulative `qpc_drift_ms` above
-        # (kept as raw telemetry). All three default to None for a v1-v4 line from an older build.
+        # #1299 Part 4 (schema v5): windowed wall-vs-QPC drift telemetry (report-only). Since #1357 the
+        # qpc_drift VERDICT is the wall STEP only (`qpc_step`) — neither the rate (`qpc_drift_ppm`) nor
+        # the dantesync slew (`qpc_expected_ppm`) nor the cumulative `qpc_drift_ms` above gates.
+        # All three default to None for a v1-v4 line from an older build.
         "qpc_drift_ppm": payload.get("qpc_drift_ppm"),
         "qpc_expected_ppm": payload.get("qpc_expected_ppm"),
         "qpc_step": payload.get("qpc_step"),

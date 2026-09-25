@@ -132,3 +132,9 @@ costs 2–5 cameras ~380 ms of video at once: strih `recv-timing` n≈277, genlo
    rate (31 bursts / 9.3 min, max +2552). It should be near zero.
 5. Run two release E2E runs with no multi-frame copies/gaps burst.
 6. Expect the `[4i/8align]` strih pins to shift by up to ~7 ms, since CAM7 is now the latest arrival.
+
+## issue 1242 — the second half: full bandwidth only for shown cameras
+
+The send stagger spreads the per-tick burst; the owner ruling of 24.9.2026 also cut the burst
+itself: strih-lx connects a camera's full-bandwidth input only while it is shown and the multiview
+renders low-bandwidth twins. See `.claude/rules/strih-bandwidth-roles.md`.

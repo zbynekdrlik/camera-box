@@ -3,6 +3,7 @@ paths:
   - "scripts/deploy-genlock-fleet.sh"
   - "scripts/lib/genlock-markers.sh"
   - "scripts/lib/genlock-fleet-boxes.sh"
+  - "scripts/lib/strih-lx-deploy.sh"
 ---
 
 # One canonical genlock deploy path across the whole rig (#789 bod 4 + bod 5)
@@ -18,7 +19,8 @@ Full-path E2E at the `genlock_parity` preflight (the recurring #923/#932 pain).
 - Pure builder functions emit each box's program; unit-tested by sourcing (`tests/deploy_genlock_fleet.rs`).
 - **Windows (strih/stream) is EMIT-ONLY** — a bash script cannot drive the `win-*` MCP
   (`win-ssh-vs-mcp` HARD rule), so it PRINTS the PowerShell program the agent pastes into the box's
-  MCP Shell. **imag is Linux** (file copy + CLI = Context B), so execute mode actually scp's + ssh-runs.
+  MCP Shell. **imag and strih-lx are Linux** (file copy + CLI = Context B), so execute mode actually
+  ssh-deploys them (strih-lx: `scripts/lib/strih-lx-deploy.sh`, issue 1317 part 6 — below).
 - `--plan --run-id <id> --sha <headSha> --stage <dir> [--full|--fast] [--boxes …]` prints the whole
   plan offline (no network) — this is the Tier-0-tested surface. Execute mode (`--run-id …`) resolves
   + downloads + deploys live (supervisor-driven; the download/scp/ssh glue is untestable offline).
@@ -42,21 +44,124 @@ The STRIH-SNV Windows PC is gone and 10.77.9.202 is the Linux strih-lx. So:
 - **The strih-lx plan is `emit_strih_lx_plan`, NOT `emit_imag_plan`.** The old arm printed the imag
   program under a `box=imag` header — it restarts `imag-obs.service`, a unit strih-lx does not have,
   so it would have failed AFTER installing bytes. strih-lx installs the strih FULL artifact
-  (`obs-genlock-linux-x86_64-strih`) into `/usr` through `setup-strih.sh STRIH_LX_BUNDLE_SRC=…`
-  (release-parity gate, runtime packages, /usr prefix, chrome-sandbox) and is supervised by
-  `strih-obs.service`. The plan prints the sanctioned recipe from `strih-linux-provisioning.md`
-  ("Staging + ssh gotchas"): prune stale stages with `obs-backup-retention.sh --box strih-lx`, rsync
-  the artifact + `scripts/` + `systemd/` (the repo tree to the FIXED `/tmp/strih-lx-deploy-repo`,
-  `rsync --delete` — a per-sha `-repo` dir matches no retention allowlist and would never be swept),
-  `sshpass … "printf '%s\n' '$PW' | sudo -S … nohup <repo>/scripts/setup-strih.sh …"` (`$PW` expands
-  on dev1; the script runs DIRECTLY, never via `bash`, or `pgrep -x setup-strih.sh` never matches), a
-  `systemctl --user restart strih-obs.service`, `verify-strih.sh`. **Every line is a `#` comment**
-  (the issue-1295 saved-.ps1 parse rule holds for a mixed plan).
-- **Execute mode has no strih-lx arm yet** (a loud stderr note; automating the recipe is not ticketed
-  yet — returned to the supervisor as a follow-up candidate in the issue-1317 part-3 LANE-RETURN). So
-  `fleet_execute_boxes` (in the shared lib) drops strih-lx from what execute mode deploys AND logs —
-  the durable fleet log never claims "strih-lx at <sha>" — and a run with nothing executable (e.g.
-  `--boxes strih-lx` without `--plan`) is exit 2 before any gh call.
+  (`obs-genlock-linux-x86_64-strih`, also under `--fast` — fast is Windows-only) into `/usr` through
+  `setup-strih.sh` (release-parity gate, runtime packages, /usr prefix, chrome-sandbox) and is
+  supervised by `strih-obs.service`. **Every plan line is a `#` comment** (the issue-1295 saved-.ps1
+  parse rule holds for a mixed plan).
+
+## strih-lx EXECUTE arm (issue 1317 part 6) — `scripts/lib/strih-lx-deploy.sh`
+
+`deploy-genlock-fleet.sh --run-id <id> --boxes strih-lx` deploys the production strih end to end;
+it replaced the supervisor's ad-hoc scratch script, which twice failed half-silently (the box's
+`/tmp` is a 7.5 GB tmpfs, each stage ~2.2 GB, rsync died `Disk quota exceeded` rc 11 and the old
+build kept running with nothing refusing). The arm is a sourced lib (the deploy script has a
+< 1000-line budget pinned by `per_box_table_lives_in_the_shared_lib_1317`), and the `--plan` arm
+prints the SAME remote-command builders (`strih_lx_plan_steps`). Each failure =
+`ERROR: [strih-lx <step>] failed (rc=N): …`; a failed strih-lx writes NO fleet-log line.
+
+**Two phases — every requested box resolves BEFORE any box changes.** `strih_lx_prepare` (exit 3, box
+untouched) runs before the Windows and imag resolution; `strih_lx_apply` (exit 4) runs after them and
+before the imag ssh deploy. A default `strih-lx,stream` run with no Windows build at the SHA can
+therefore never leave the production strih on a different commit than stream (genlock_parity).
+The Windows paste-programs are printed only AFTER strih-lx VERIFIED (nobody pastes stream while the
+strih apply can still fail), and the verified strih-lx gets its OWN fleet-log line at once (the rest
+of the fleet is logged at the end), so a later imag failure never hides the strih deploy.
+
+1. **prepare** — the `linux-genlock.yml` run at the anchor SHA; the artifact is REFUSED unless its
+   `GENLOCK_BUILD_SHA.txt` is the canonical SHA and its `BUNDLE_MANIFEST.json` carries the
+   `lib/x86_64-linux-gnu/libobs.so.30` sha256 (the read-back needs it). The dial host must be a dotted
+   IPv4 (`strih_lx_is_ipv4`; the fleet row is one, `strih-lx.lan` does not resolve on dev1, a
+   flag-shaped / mistyped override is refused). The box's OWN address is not the dial host: since
+   issue 1361 setup-strih.sh reads it from the box's fact file, so the runner exports no STRIH_LX_IP.
+   The provisioning tree is the COMMITTED `scripts/ systemd/ intercom/` of the checkout (the archive
+   of HEAD — uncommitted edits never ship) + a generated `run-setup.sh`, and it must carry
+   `scripts/strih-boxes/strih-lx.env` plus the intercom routing file that fact file's
+   `STRIH_INTERCOM_CONFIG` names (read with sed, never sourced on dev1); it is the checkout's tree,
+   not the bundle's SHA (a scripts-only fix never triggers a genlock build; setup-strih.sh is box
+   config — the same split as imag's `genlock-markers.sh`). Token: `STRIH_LX_GH_TOKEN` (read-only)
+   else `gh auth token`.
+2. **preflight** — the box's `hostname` must equal the fact file's `STRIH_HOSTNAME` (a dial override
+   that reaches another box would otherwise be provisioned AS strih-lx: its hostname, IP, janus
+   `local_ip`, NTP-master role), and no previous `setup-strih.sh` may still run (`pgrep -x`): the sweep
+   would delete the stage it is reading and a second installer would race it. LAST, immediately
+   before the first mutation: the shared rig-busy guard `stray_session_check_assert` at the strih-lx
+   dial IP + the obs-fleet stream host — strih or stream streaming/recording = exit 4 naming what is
+   live, nothing changed (`.claude/rules/rig-mutation-broadcast-guard.md`, third caller). The SAME
+   guard runs again right before step 5's stop (exit 4 in step `stop`, OBS NOT stopped). prepare
+   resolves its inputs (stream host, the `obs_phase2.py` dir via `STRIH_LX_OBS_PHASE2_DIR`, the
+   guard's presence, `python3`) so a missing one is exit 3 before the box is touched.
+3. **sweep** — `mkdir` + `touch` the stage FIRST (it is then the newest `genlock-stage-*`), then the
+   EXISTING `obs-backup-retention.sh --local-sweep` decision with **`--stages-only`** (added here: the
+   dated rollback backups are never touched), keep-runs 1 / keep-days 0, **as the operator** (the
+   stage dirs are the operator's; no sudo, so no password line ever reaches a shell), fed the script
+   from the committed tree, at the deploy's own host. The deploying stage is re-checked; any other
+   stage dir still present is a loud WARNING (the rsync is the hard gate).
+4. **stage** — `rsync -a --delete --timeout=120` bundle → `/tmp/genlock-stage-<sha>/bundle/`, tree →
+   `…/repo/` (ONE per-sha dir the next sweep removes whole; the old fixed `/tmp/strih-lx-deploy-repo`
+   is gone). **OBS is still running** — an rsync failure exits 4 BEFORE anything is stopped.
+5. **stop** — delegated to `/usr/local/bin/strih-obs-stop.sh` (plain mode = `systemctl --user stop`,
+   so the unit `ExecStop` runs and `Restart=on-failure` stays quiet) + a bounded wait for the unit AND
+   every `obs`. The deploy itself sends no signal; the stop code's own SIGTERM → grace → SIGKILL ladder
+   is the unit's contract. Not stopped in 30 s = exit 4, nothing installed, best-effort start.
+6. **setup** — `sudo -k -S … bash <stage>/repo/run-setup.sh`, stdin = the sudo password line then
+   `ghtoken:<token>`. The runner reads the token line (skipping a password line a NOPASSWD sudo left
+   unread), exports `GH_TOKEN STRIH_LX_BUNDLE_SRC=<stage>/bundle`, and re-execs itself `setsid nohup`
+   to run `setup-strih.sh --box strih-lx` DIRECTLY (the explicit fact-file box, issue 1361) and write
+   `<stage>/setup-strih.rc`; dev1 polls it
+   (default 45 min). An ssh drop cannot kill the install mid-apt; the token is never an argv or a
+   file. **OBS is never started over a still-running installer**: a launch whose ssh returned
+   non-zero while setup-strih.sh runs is THIS deploy's detached installer (the preflight saw none), so
+   the deploy follows it through the rc poll (WARNING, not a failure — never the strih left dark); an
+   rc timeout with the installer still running (or the box unreachable) is exit 4 "wait for
+   setup-strih.rc" without a start; a genuine failure (rc != 0, or no installer running) gets the log
+   tail + a best-effort start + exit 4; a failed launch with the box UNREACHABLE (installer state
+   unknown) is exit 4 at once, no start, no 45-min poll. setup-strih's pending-reboot warning (rc 0)
+   is printed as a NOTE — the grep is keyed on that warning's own box-agnostic text (`, then run
+   verify-strih`; the line reads `reboot <box>, then run verify-strih.sh --box <box>`, a test pins it
+   in setup-strih.sh), never on "next boot", which the baseline prints on routine lines every run. A
+   settle time the observable read-back window `(polls - 1) x secs` cannot outlast is refused in
+   prepare (exit 3).
+7. **start + verify** — touch `<stage>/obs-start.marker`, start the unit, then poll (default 24 x 10 s)
+   and REFUSE unless the polls pass `strih_lx_deploy_verdict` (marker == canonical,
+   installed `libobs.so.30` sha256 == the manifest's — the BYTES, not only the marker, since `:8899`
+   serves the same marker file — unit `active`, `render tick ENABLED` in an OBS log newer than the
+   start marker, `:8899 genlock_build_sha` == canonical) AND `strih_lx_stable_verdict` holds the SAME
+   non-zero MainPID and NRestarts from the first good poll for `STRIH_LX_VERIFY_SETTLE_SECS` (default
+   90 s; a bad poll restarts the window). A `Type=simple` unit reads `active` between crash-loop
+   restarts, and the one crash loop seen on this box (the CEF trap) cycled every ~60 s, so neither a
+   single `active` read nor two adjacent 10 s polls prove the new OBS runs. The tick grep is
+   `LC_ALL=C grep -a` like every other render-tick reader. The dial host must be four octets 0..255
+   (`strih_lx_is_ipv4`).
+
+Every ssh is `sshpass -p … timeout ${STRIH_LX_SSH_TIMEOUT:-180} ssh …` (`timeout` INSIDE sshpass so
+the password prompt still reaches sshpass's pty).
+
+Tests: `tests/deploy_genlock_fleet_strih_lx_exec_1317.rs` runs the REAL script with `gh` / `sshpass` /
+`ssh` / `rsync` / `curl` stubbed on PATH (the ssh stub dispatches on the remote command text — keep
+the step commands' distinguishing substrings: `pgrep -x setup-strih.sh`, `--local-sweep`, `LEFTOVER`,
+`setup-strih.rc`, `run-setup.sh`, `, then run verify-strih`, `setup-strih.log`, `strih-obs-stop.sh`,
+`GENLOCK_BUILD_SHA.txt`, `--user start`), plus the generated runner (root check stripped for the test)
+and `--stages-only` on real temp dirs. A test SHA must stay SHORT hex — a 40-hex literal trips the
+secret-staging hook. Remaining supervisor step after a green execute: the WS filter-enum survival
+check (printed as ACCEPTANCE in the plan); after a reboot-pending run, `verify-strih.sh --box strih-lx`
+after the reboot.
+
+## GOTCHA — setup-strih.sh's own final gate FAILS while the deploy has OBS stopped (issue 1317 part 6)
+
+`setup-strih.sh` step 17 runs `verify-strih.sh --box <box>` and, when no reboot is pending (the live
+box boots `preempt=full`, so none is), `fail`s on it. The deploy stops OBS BEFORE setup (the libs are
+replaced under a running OBS otherwise), so verify item 1 "OBS running" and the :4455 item always fail
+there → setup exits 1 after EVERY install step succeeded (the old scratch script never noticed: it
+ignored the rc). The arm therefore accepts exactly that failure — rc 1 AND the step-17 line `verify-
+strih.sh acceptance gate did not pass` among the log's last lines (`fail()` exits at the first
+failure, so nothing else failed) — starts OBS, passes the read-back, and then runs `sudo
+verify-strih.sh --box strih-lx` from the staged tree ITSELF as the acceptance gate. Its failure is
+**exit 5**, not 4 — the new build IS installed, running and read back; verify-strih grades the whole
+box, incl. items no deploy changes (e.g. the dantesync offset item on the NTP master) — the error lists
+the verify FAIL lines and the fleet log records `strih-lx:accept-failed`. A read-only root run of
+verify-strih.sh on the healthy box (24.9.2026) was ALL CLEAR in 9 s (inside the 180 s ssh bound). A test pins the gate text in setup-strih.sh. The clean fix is a deploy mode in
+setup-strih.sh that skips step 17 (it belongs to the provisioning lane) — returned as a follow-up
+candidate in the part-6 LANE-RETURN; until then do NOT "fix" the arm by ignoring setup's rc.
 
 ## Same-SHA cross-workflow resolution — the heart of "one canonical version"
 

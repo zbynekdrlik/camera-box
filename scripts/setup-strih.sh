@@ -2,13 +2,15 @@
 # strih-lx One-Shot Setup (issue 1317) -- see the extended header below the strict-mode line.
 # Provisions a Linux notebook as the strih cutter/mix box; runs ON the box as root, idempotent.
 set -euo pipefail
+# Pin a 022 umask: a caller running this under 077 (the 24.9.2026 deploy) made every directory it
+# created root-only, and the intercom-hub (User=newlevel) could not read its own config.
+umask 022
 #
-# The notebook runs IN PARALLEL with the Windows STRIH-SNV cutter until tuned (owner 16.9.2026), so
-# this box:
-#   * emits its NDI outputs under the NAMESPACED `STRIH-LX (...)` names (never a 2nd STRIH-SNV
-#     sender on the wire -- the stream box + receivers must never see two STRIH-SNV (2ME PGM)), and
-#   * joins the cluster clock as a dantesync CLIENT (`--ntp-server strih.lan`) -- the Windows PC
-#     stays the ONE NTP master while both run.
+# The box:
+#   * emits its NDI outputs under its own NAMESPACED `<STRIH_NDI_PREFIX> (...)` names (never a
+#     `STRIH-SNV (...)` sender on the wire -- the stream box + receivers must never see two), and
+#   * runs dantesync in the ROLE its fact file declares (strih-lx: `server`, the fleet NTP master since
+#     the M4 cut-over 20.9.2026; a `client` box syncs from its STRIH_DANTESYNC_UPSTREAM).
 #
 # issue 1357 (owner rulings): the box itself is the SAME OBS-only appliance imag was -- every box-level
 # item (lightdm autologin -> openbox on plain Xorg with GNOME purged, low-latency kernel, boot safety
@@ -22,8 +24,14 @@ set -euo pipefail
 # fail-loud flow around them; it reuses the shared genlock-markers.sh helper and the canonical
 # remoteos-mcp / bundle-state tooling rather than re-implementing any of it.
 #
+# issue 1361: every box/venue FACT (hostname, IP, NDI prefix, dantesync role + upstream, intercom
+# config, NIC rule, OBS profile/collection, NDI-runtime peer, Companion controller, CG sender, cameras)
+# comes from the selected box's fact file scripts/strih-boxes/<box>.env, loaded + validated by
+# scripts/lib/strih-box-facts.sh. One script for every strih box -- strih PP is a new fact file, never
+# a copy of this script. A fact file with any TODO_OWNER value (a template) REFUSES, naming each fact.
+#
 # Usage (on the box):
-#   sudo STRIH_LX_IP=10.77.9.NNN GH_TOKEN=<gh-pat-repo-read> ./setup-strih.sh [--yes]
+#   sudo GH_TOKEN=<gh-pat-repo-read> ./setup-strih.sh [--box <name>] [--yes]    (default box: strih-lx)
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
 
@@ -40,14 +48,26 @@ step() { echo -e "${GREEN}[$1/${TOTAL_STEPS}] $2${NC}"; }
 warn() { echo -e "${YELLOW}$1${NC}"; }
 fail() { echo -e "${RED}FAIL: $1${NC}" >&2; exit 1; }
 
+# shellcheck source=scripts/lib/strih-box-facts.sh
+. "${HERE}/lib/strih-box-facts.sh"   # issue 1361: the ONE per-box fact loader (--box <name>)
 # shellcheck source=scripts/lib/strih-provision.sh
 . "${HERE}/lib/strih-provision.sh"
+# shellcheck source=scripts/lib/strih-drm-output.sh
+. "${HERE}/lib/strih-drm-output.sh"   # issue 1346: the DRM-lease HDMI output config + verdict helpers
 # shellcheck source=scripts/lib/genlock-markers.sh
 . "${HERE}/lib/genlock-markers.sh"
+# shellcheck source=scripts/lib/ndi-discovery.sh
+. "${HERE}/lib/ndi-discovery.sh"   # issue 1342: the receiver-side NDI config, networks.ips (with setup-device.sh)
 # shellcheck source=scripts/lib/ndi-runtime.sh
 . "${HERE}/lib/ndi-runtime.sh"   # issue 1317: shared NDI 6.3.2 runtime install recipe (with setup-imag.sh)
 # shellcheck source=scripts/lib/obs-box-baseline.sh
 . "${HERE}/lib/obs-box-baseline.sh"   # issue 1357: the ONE OBS-box appliance baseline (the SAME lib setup-imag.sh runs)
+
+# --- issue 1361: select + load the box facts BEFORE the source-guard, so a sourced setup (the unit
+# tests) sees exactly the facts the real run uses. Any invalid / TODO_OWNER fact refuses here.
+STRIH_FACT_BOX="$(strih_box_cli_box "$@")" || fail "usage: setup-strih.sh [--box <name>] [--yes]"
+strih_box_load "$STRIH_FACT_BOX" \
+  || fail "box '${STRIH_FACT_BOX}': scripts/strih-boxes/${STRIH_FACT_BOX}.env is missing, invalid or still has TODO_OWNER facts (listed above) -- refusing to provision"
 
 # --- source-guard: when sourced (the unit tests), stop here -- never run the destructive flow ----
 if [ "${BASH_SOURCE[0]}" != "${0}" ]; then
@@ -56,29 +76,31 @@ fi
 
 [ "${EUID:-$(id -u)}" -eq 0 ] || fail "run as root (sudo)"
 
+# issue 1357: the FIRST action, before any apt-get -- apt-get waits up to 10 min for a background apt
+# run's dpkg lock instead of failing at once (the shared baseline drop-in; setup-imag.sh runs it too).
+obs_box_apt_lock_timeout
+
 STATIC_IP="$(strih_lx_ip)"
 STRIH_HOST="$(strih_lx_host)"
+BOX_NAME="$(strih_lx_hostname)"
 
-echo -e "${GREEN}=== strih-lx setup (issue 1317): parallel Linux strih cutter, host ${STRIH_HOST} ===${NC}"
+echo -e "${GREEN}=== ${BOX_NAME} setup (issue 1317 / 1361): Linux strih cutter, facts scripts/strih-boxes/${STRIH_FACT_BOX}.env, host ${STRIH_HOST} ===${NC}"
 
 # ---------------------------------------------------------------------------------------------
 step 1 "Static IP (NetworkManager) + hostname $(strih_lx_hostname)"
-if [ -z "$STATIC_IP" ]; then
-  warn "  STRIH_LX_IP unset -- the notebook's static IP is assigned on arrival (17.9.); leaving DHCP for now"
-else
-  command -v nmcli >/dev/null 2>&1 || fail "nmcli required (desktop Ubuntu NetworkManager)"
-  echo "  (operator: assign ${STATIC_IP}/23 to the rig NIC via nmcli; recorded here as the target)"
-fi
+command -v nmcli >/dev/null 2>&1 || fail "nmcli required (desktop Ubuntu NetworkManager)"
+echo "  (operator: assign ${STATIC_IP}/23 to the rig NIC via nmcli; recorded here as the target)"
 hostnamectl set-hostname "$(strih_lx_hostname)" 2>/dev/null || warn "  could not set hostname (non-fatal)"
 
 # ---------------------------------------------------------------------------------------------
 # issue 1317 (post-M4, 20.9.2026): the strih notebook IS the fleet's ONE NTP master (`strih.lan` ->
-# 10.77.9.202; the cam boxes take NTP from it), so the DEFAULT dantesync ROLE is `server` (a bare
-# `dantesync` daemon = NTP-master mode, ntp_server_mode in /etc/dantesync/config.json). The dead
-# parallel-run CLIENT shape is still available via STRIH_LX_DANTESYNC_ROLE=client. The live box had a
-# hand `dantesync.service.d/10-ntp-master.conf` drop-in overriding the provisioned CLIENT ExecStart --
-# now the role is folded INTO the unit and the stale drop-in is removed.
-DS_ROLE="${STRIH_LX_DANTESYNC_ROLE:-server}"
+# 10.77.9.202; the cam boxes take NTP from it), so strih-lx's dantesync ROLE is `server` (a bare
+# `dantesync` daemon = NTP-master mode, ntp_server_mode in /etc/dantesync/config.json). issue 1361: the
+# role + its upstream are box FACTS (STRIH_DANTESYNC_ROLE / STRIH_DANTESYNC_UPSTREAM), so a venue whose
+# strih is a CLIENT declares it in its fact file. The live box had a hand
+# `dantesync.service.d/10-ntp-master.conf` drop-in overriding the provisioned CLIENT ExecStart -- now
+# the role is folded INTO the unit and the stale drop-in is removed.
+DS_ROLE="$(strih_lx_dantesync_role)"
 step 2 "DanteSync ${DS_ROLE} (single timesync authority; post-M4 the notebook is the fleet NTP master)"
 # Purge any competing timesync daemon (ops hard rule: dantesync OWNS the clock -- never
 # timesyncd/chrony/ptp4l alongside it).
@@ -86,12 +108,8 @@ for svc in systemd-timesyncd chrony chronyd ntp ntpsec; do
   systemctl disable --now "$svc" 2>/dev/null || true
 done
 [ -x /usr/local/bin/dantesync ] || warn "  dantesync binary absent -- install it (see setup-imag.sh step 3 / dantesync-fleet-upgrade.md) before go-live"
-# role -> args: server = bare (NTP master), client = --ntp-server <host>.
-if [ "$DS_ROLE" = client ]; then
-  DS_ARGS="$(strih_lx_dantesync_client_args)"
-else
-  DS_ARGS=""
-fi
+# role -> args: server = bare (NTP master), client = --ntp-server <upstream fact>.
+DS_ARGS="$(strih_lx_dantesync_args)" || fail "dantesync role '${DS_ROLE}' needs STRIH_DANTESYNC_UPSTREAM in the box facts"
 # Fail-closed self-check (the guard BEFORE install): the role+args must be a COHERENT invocation --
 # server with no args, or client with a genuine --ntp-server. An ambiguous shape refuses.
 strih_lx_dantesync_role_ok "$DS_ROLE" "$DS_ARGS" \
@@ -187,7 +205,7 @@ if [ -d "${STRIH_LX_BUNDLE_SRC:-}" ]; then
   echo "  installed bundle into the /usr prefix (/usr/bin/obs + /usr/lib/x86_64-linux-gnu + ldconfig)"
 else
   warn "  STRIH_LX_BUNDLE_SRC unset -- fetch the ${ART} CI artifact and re-run with STRIH_LX_BUNDLE_SRC=<dir>"
-  warn "  (deploy-genlock-fleet.sh --boxes strih-lx does this over ssh once the box is reachable)"
+  warn "  (deploy-genlock-fleet.sh --boxes ${BOX_NAME} does this over ssh once the box is reachable)"
 fi
 # chrome-sandbox setuid-root (issue 1317 F6): the CEF SUID sandbox helper must be owned root:root
 # mode 4755 or the browser sources cannot launch (Chromium aborts unless the sandbox is disabled at
@@ -253,9 +271,10 @@ step 4b "NDI 6.3.2 runtime (fleet-identical from a cambox) -> DistroAV loads WIT
 # issue 1317: without this DistroAV logs `ERR-404 NDI library not found` / `plugin loaded (UI-only)`
 # and the box has NO NDI inputs/outputs. Reuse the shared recipe (scripts/lib/ndi-runtime.sh) so
 # strih + imag install the SAME runtime. Runs BEFORE the OBS launch (step 8) -- DistroAV needs libndi
-# on the loader path at OBS start. Copies from a cam box (default cam1); set STRIH_NDI_PEER=<ip> if
-# cam1 is down, and CAM_PW=<cam ssh pw> (only used when the runtime is not already present).
-NDI_PEER="${STRIH_NDI_PEER:-10.77.9.61}"
+# on the loader path at OBS start. Copies from the box's STRIH_NDI_RUNTIME_PEER fact (a cam box); set
+# STRIH_NDI_PEER=<ip> if that box is down, and CAM_PW=<cam ssh pw> (only used when the runtime is not
+# already present).
+NDI_PEER="${STRIH_NDI_PEER:-$(strih_lx_ndi_runtime_peer)}"
 NDI_RUNTIME_DIR_STRIH="${STRIH_NDI_DIR:-/usr/lib/ndi}"
 if [ -e "${NDI_RUNTIME_DIR_STRIH}/libndi.so.6" ] || [ -n "${CAM_PW:-}" ]; then
   ( eval "$(ndi_runtime_install_cmds "$NDI_PEER" "${CAM_PW:-}" "${STRIH_NDI_USER:-newlevel}" "$NDI_RUNTIME_DIR_STRIH")" ) \
@@ -282,9 +301,27 @@ if DEBIAN_FRONTEND=noninteractive apt-get install -y ffmpeg; then
 else
   warn "  ffmpeg install failed -- ffprobe (on-box E2E verdict) will be absent; fix the box's apt sources and re-run"
 fi
+# issue 1342: the RECEIVER-side NDI config (scripts/lib/ndi-discovery.sh, the SAME generator
+# setup-device.sh writes the camboxes with): networks.ips = every managed NDI sender (every camera
+# from camera-set.sh + the obs-fleet ndi-sender boxes; the traveling resolume hostname resolved now,
+# skipped when away). libndi queries those IPs directly IN ADDITION to mDNS; senders never read the
+# list, so strih-lx's own STRIH-LX outputs keep announcing over mDNS -- no gate. THREE receivers on
+# this box: OBS (strih-obs.service) and bkshading-service, both User=${DESKTOP_USER}, read the desktop
+# user's ~/.ndi; intercom-hub's ProtectHome hides ~/.ndi, so it reads the system dir /etc/ndi via its
+# NDI_CONFIG_DIR drop-in. Written here, before the OBS/intercom units start (steps 8/13); the next
+# start reads it. Every strih-lx genlock deploy re-runs this script, so a renumber converges there.
+NDI_IPS="$(ndi_discovery_sender_ips)" \
+  || fail "could not generate the managed NDI sender list (camera-set.sh + obs-fleet.sh ndi-sender facet, issue 1342)"
+ndi_discovery_write_config "${USER_HOME}/.ndi" "$NDI_IPS" "$DESKTOP_USER" \
+  || fail "NDI receiver config write to ${USER_HOME}/.ndi failed (issue 1342)"
+ndi_discovery_write_config "$NDI_DISCOVERY_SYSTEM_DIR" "$NDI_IPS" \
+  || fail "NDI receiver config write to ${NDI_DISCOVERY_SYSTEM_DIR} failed (issue 1342)"
+mkdir -p "$(dirname "$NDI_DISCOVERY_INTERCOM_DROPIN")"
+ndi_discovery_dropin_content > "$NDI_DISCOVERY_INTERCOM_DROPIN"
+echo "  NDI receiver config: ${USER_HOME}/.ndi + ${NDI_DISCOVERY_SYSTEM_DIR} (networks.ips=${NDI_IPS}) + intercom-hub NDI_CONFIG_DIR drop-in (issue 1342)"
 
 # ---------------------------------------------------------------------------------------------
-step 5 "OBS profile facts (strih-lx: seeded from the Windows 'light' profile)"
+step 5 "OBS profile facts (${BOX_NAME}: seeded from the Windows 'light' profile)"
 # issue 1317: create ~/.config/obs-studio owned by the DESKTOP user (this script runs under sudo, so a
 # bare `mkdir` roots it and the obs user cannot then create .sentinel -- `Permission denied`, hit live).
 install -d -o "$DESKTOP_USER" -g "$DESKTOP_USER" "$OBS_CFG"
@@ -300,16 +337,35 @@ install -d -m 755 /opt/camera-box
 # duplicate `NDI CAMn (usb)` receivers). The full DATA name-map is strih_lx_seed_manifest_json.
 strih_lx_seed_manifest_json > /opt/camera-box/strih-lx-seed.json
 echo "  wrote /opt/camera-box/strih-lx-seed.json (operator collection: update-only, explicit strih input names NDI camN / NDI 2ME PVW / NDI 2ME PGM (mv) / cg / CG-obs, floor-3 pins)"
-# issue 1346: default fixed-HDMI-projector config. The owner ROZHODNUTE (19.9.): multiview default
-# (matching the Windows strih saved_projectors {monitor,type:4}); strih_scenes.py --bootstrap reads
-# it and seeds an OBS fullscreen projector on the HDMI monitor. Do NOT overwrite an existing file --
-# once the box is live the operator's OBS UI choice + `strih_scenes.py --projector` own it.
-if [ ! -f /opt/camera-box/strih-lx-projector.json ]; then
-  echo '{"type":"multiview"}' > /opt/camera-box/strih-lx-projector.json
-  echo "  wrote /opt/camera-box/strih-lx-projector.json (default: multiview HDMI projector)"
+# issue 1346 (owner 24.9.2026): the HDMI output is the in-OBS DRM-lease output (the imag hardware
+# output, issue 1152), selectable Program / built-in Multiview -- never an OBS projector window and
+# never the desktop. Its activation contract is ~/.camera-box/drm-output.json of the OBS user
+# (scripts/lib/strih-drm-output.sh). Provision it ONLY when an HDMI monitor is plugged in (the
+# connector name must come from X RandR), default view multiview; an existing file is the
+# operator's choice (the OBS Tools menu writes it) and is left alone. The retired 19.9. projector
+# config is removed; its type seeds the initial view.
+DRM_CONF_DIR="${USER_HOME}/.camera-box"
+DRM_CONF="${DRM_CONF_DIR}/drm-output.json"
+LEGACY_PROJ=/opt/camera-box/strih-lx-projector.json
+DRM_VIEW0="$(strih_drm_legacy_view "$(cat "$LEGACY_PROJ" 2>/dev/null || true)")"
+if [ -L "$DRM_CONF_DIR" ] || [ -L "$DRM_CONF" ]; then
+  warn "  SKIP issue 1346: ${DRM_CONF_DIR} or ${DRM_CONF} is a symlink -- refusing to write through it as root; remove it and re-run"
+elif [ -f "$DRM_CONF" ]; then
+  echo "  ${DRM_CONF} already present -- leaving the operator's HDMI output choice"
+elif strih_drm_hdmi_connected; then
+  DRM_CONN="$(sudo -u "$DESKTOP_USER" env DISPLAY=:0 XAUTHORITY="${USER_HOME}/.Xauthority" xrandr --query 2>/dev/null \
+    | strih_drm_hdmi_output_from_xrandr || true)"
+  if [ -n "$DRM_CONN" ] && DRM_LINE="$(strih_drm_output_config_json "$DRM_CONN" "$DRM_VIEW0")"; then
+    install -d -o "$DESKTOP_USER" -g "$DESKTOP_USER" "$DRM_CONF_DIR"
+    printf '%s\n' "$DRM_LINE" | install -m 0644 -o "$DESKTOP_USER" -g "$DESKTOP_USER" /dev/stdin "$DRM_CONF"
+    echo "  wrote ${DRM_CONF} (HDMI output ${DRM_CONN} = DRM lease, view ${DRM_VIEW0}; takes effect at the next OBS start)"
+  else
+    warn "  SKIP issue 1346: an HDMI monitor is connected but X RandR could not name it (Xorg :0 not up yet?) -- ${DRM_CONF} NOT provisioned; re-run setup-strih.sh after the kiosk session is up"
+  fi
 else
-  echo "  /opt/camera-box/strih-lx-projector.json already present -- leaving the operator's choice"
+  warn "  SKIP issue 1346: no HDMI monitor connected -- ${DRM_CONF} NOT provisioned (the fixed HDMI output stays dormant); attach the HDMI monitor and re-run setup-strih.sh"
 fi
+rm -f /opt/camera-box/strih-lx-projector.json
 if [ -n "${GH_TOKEN:-}" ]; then
   curl -fsSL -H "Authorization: token ${GH_TOKEN}" -H 'Accept: application/vnd.github.raw' \
     "https://api.github.com/repos/${GENLOCK_REPO}/contents/scripts/obs_phase2.py?ref=dev" \
@@ -328,6 +384,12 @@ fi
 [ -f "${HERE}/strih_scenes.py" ] || fail "scripts/strih_scenes.py not found next to this script (the strih-obs-start.sh --bootstrap seed target)"
 install -m 0755 "${HERE}/strih_scenes.py" /usr/local/bin/strih_scenes.py
 echo "  installed strih_scenes.py -> /usr/local/bin (input/scene/Studio-Mode seeder; strih-obs-start.sh runs --bootstrap on launch)"
+# issue 1242: the strih BANDWIDTH ROLES module (program-path cameras connect only while shown, the
+# multiview renders low-bandwidth MV twins). strih_scenes.py --apply-roles imports it from its own
+# directory, so it installs next to it; strih-obs-start.sh applies the roles on every launch.
+[ -f "${HERE}/strih_bandwidth_roles.py" ] || fail "scripts/strih_bandwidth_roles.py not found next to this script (the strih_scenes.py --apply-roles module)"
+install -m 0755 "${HERE}/strih_bandwidth_roles.py" /usr/local/bin/strih_bandwidth_roles.py
+echo "  installed strih_bandwidth_roles.py -> /usr/local/bin (bandwidth roles; strih-obs-start.sh runs strih_scenes.py --apply-roles on launch)"
 
 # ---------------------------------------------------------------------------------------------
 step 7 "OBS pre-seed: WebSocket :4455 no-auth + Studio Mode"
@@ -341,12 +403,13 @@ WS
 chown -R "$DESKTOP_USER":"$DESKTOP_USER" "$OBS_CFG/plugin_config" 2>/dev/null || true
 echo "  obs-websocket :4455 no-auth pre-seeded; Studio Mode is enforced by the scene seeder (step 6)"
 # issue 1346: pre-seed [BasicWindow] SaveProjectors=true + ProjectorAlwaysOnTop=false in the desktop
-# user's user.ini so OBS PERSISTS the fixed HDMI fullscreen projector and re-opens it on every
-# launch. The OBS default is SaveProjectors=false, so a hand-opened or seeded projector would NEVER
-# come back after strih-obs.service relaunches. Idempotent (RawConfigParser upsert; the literal
-# `SaveProjectors=true` is the verify-strih anchor), owned by the desktop user. NOTE: this is the
-# OPPOSITE of imag (#522 SaveProjectors=false + an openbox-autostart re-open hook) -- strih-lx has no
-# such boot hook, so it relies on OBS's own SaveProjectors restore + the seed_projector idempotency.
+# user's user.ini so OBS PERSISTS the operator's LAPTOP-screen projector (the Multiview on the eDP
+# panel) and re-opens it on every launch. The OBS default is SaveProjectors=false, so a hand-opened
+# projector would NEVER come back after strih-obs.service relaunches. (The HDMI output is NOT a
+# projector since 24.9.2026 -- it is the DRM lease, step 6.) Idempotent (RawConfigParser upsert; the
+# literal `SaveProjectors=true` is the verify-strih anchor), owned by the desktop user. NOTE: this is
+# the OPPOSITE of imag (#522 SaveProjectors=false + an openbox-autostart re-open hook) -- strih-lx
+# has no such boot hook, so it relies on OBS's own SaveProjectors restore.
 # ProjectorAlwaysOnTop=false: owner ruling 23.9.2026 -- the multiview must not stay on top of the
 # operator's other windows (the seed rewrote a hand-set OFF back to ON on every provisioning run).
 USER_INI="${OBS_CFG}/user.ini"
@@ -433,43 +496,38 @@ done
 install -m 0755 "${HERE}/strih-obs-start.sh" /usr/local/bin/strih-obs-start.sh
 install -m 0755 "${HERE}/strih-obs-stop.sh"  /usr/local/bin/strih-obs-stop.sh
 echo "  installed launcher pair -> /usr/local/bin/strih-obs-start.sh + strih-obs-stop.sh (mode 0755)"
+# issue 1361: the box's OBS profile/collection facts reach the launcher through a --user drop-in (the
+# launcher reads STRIH_OBS_PROFILE / STRIH_OBS_COLLECTION from its environment and installs verbatim).
+install -d -o "$DESKTOP_USER" -g "$DESKTOP_USER" "${USER_HOME}/.config/systemd/user/strih-obs.service.d"
+strih_obs_box_facts_dropin_text > "${USER_HOME}/.config/systemd/user/strih-obs.service.d/10-box-facts.conf" \
+  || fail "could not write the strih-obs.service box-facts drop-in"
+chown -R "$DESKTOP_USER":"$DESKTOP_USER" "${USER_HOME}/.config/systemd/user/strih-obs.service.d" 2>/dev/null || true
+echo "  strih-obs.service.d/10-box-facts.conf: OBS profile '$(strih_lx_obs_profile)', collection '$(strih_lx_obs_collection)'"
 sudo -u "$DESKTOP_USER" XDG_RUNTIME_DIR="/run/user/$(id -u "$DESKTOP_USER")" systemctl --user enable strih-obs.service 2>/dev/null \
   || warn "  enable strih-obs.service by hand once the user session bus is up"
 echo "  strih-obs.service installed + enabled (the kiosk openbox autostart, step 15, starts it at every boot)"
 
 # ---------------------------------------------------------------------------------------------
-step "8b" "strih-mv-host projector-host helper (issue 1352, XWayland+PRIME present-stall workaround) -- enable-only"
-# issue 1352: on the RTX-via-XWayland-PRIME render path an OBS projector whose GL surface is the X
-# toplevel stalls the graphics thread ~0.5 s per present (program lag 93 %, MV 1.8 fps). strih-mv-host.py
-# re-hosts every OBS projector into a plain child window at runtime (lag 93 % -> 0 %, MV 29.8 fps
-# proven). Supervised --user unit BESIDE strih-obs.service, independent of OBS's lifecycle (it adopts
-# any projector toplevel whenever one appears). Install python3-xlib (its only dep), the helper (0755)
-# + the --user unit, daemon-reload + ENABLE-ONLY (never live-start -- the provisioning convention; the
-# unit comes up on the next graphical session). A lettered sub-step so TOTAL_STEPS is unchanged.
-# issue 1357: kept in place, but the stall it works around is an XWayland+PRIME-offload artefact --
-# on the plain Xorg openbox kiosk (NVIDIA-primary, baseline step 11) both this helper and the vendored
-# child-host projector must be RE-MEASURED by the supervisor and removed if the stall is gone. Its unit
-# still reads the GNOME mutter Xwayland auth file, so it stays DISABLED (the default below) on Xorg.
-DEBIAN_FRONTEND=noninteractive apt-get install -y python3-xlib \
-  || fail "python3-xlib install failed -- strih-mv-host.py imports Xlib; fix the box's apt sources and re-run"
-[ -f "${HERE}/strih-mv-host.py" ] || fail "scripts/strih-mv-host.py not found next to this script (issue 1352 projector-host helper)"
-[ -f "${HERE}/../systemd/strih-mv-host.service" ] || fail "systemd/strih-mv-host.service not found next to this script (issue 1352)"
-install -m 0755 "${HERE}/strih-mv-host.py" /usr/local/bin/strih-mv-host.py
-install -m 0644 "${HERE}/../systemd/strih-mv-host.service" "${USER_HOME}/.config/systemd/user/strih-mv-host.service"
-chown -R "$DESKTOP_USER":"$DESKTOP_USER" "${USER_HOME}/.config/systemd/user" 2>/dev/null || true
-sudo -u "$DESKTOP_USER" XDG_RUNTIME_DIR="/run/user/$(id -u "$DESKTOP_USER")" systemctl --user daemon-reload 2>/dev/null || true
-# issue 1352 acceptance (22.9.2026): the VENDORED child-host projector is live in the strih bundle and
-# the runtime helper CONFLICTS with it -- both mechanisms active = MV 0.6 fps / 505 ms presents,
-# helper stopped = MV 30 fps / 5 ms. Default = installed but DISABLED (and stopped, the one live
-# action here: a running helper actively breaks the render path); STRIH_MV_HOST_ENABLED=1 restores
-# the enable-only fallback for a bundle WITHOUT the vendored fix.
-if [ "${STRIH_MV_HOST_ENABLED:-0}" = 1 ]; then
-  sudo -u "$DESKTOP_USER" XDG_RUNTIME_DIR="/run/user/$(id -u "$DESKTOP_USER")" systemctl --user enable strih-mv-host.service 2>/dev/null \
-    || warn "  enable strih-mv-host.service by hand once the user session bus is up"
-  echo "  strih-mv-host.service installed + enabled (STRIH_MV_HOST_ENABLED=1: runtime fallback for a bundle without the vendored child-host projector)"
-else
+step "8b" "retired strih-mv-host projector-host helper (issue 1357) -- remove a leftover install"
+# issue 1357: the issue-1352 strih-mv-host.py helper re-hosted every OBS projector into a child X
+# window to work around an XWayland + NVIDIA-PRIME-offload present stall (~0.5 s per present). The
+# plain Xorg openbox kiosk (NVIDIA-primary, baseline step 11) has no XWayland and no PRIME offload,
+# so the stall's premise is gone on every box; the vendored child-host projector was removed with it
+# (the stock upstream toplevel projector, identical on every OS). The helper is retired: this step
+# only REMOVES a leftover install from an earlier provisioning -- stop + disable the --user unit,
+# delete the WantedBy link, the unit file and the helper -- and never installs or enables anything.
+# Idempotent: a box that never had the helper is a no-op. A lettered sub-step so TOTAL_STEPS is
+# unchanged.
+MVH_UNIT="${USER_HOME}/.config/systemd/user/strih-mv-host.service"
+MVH_WANTS="${USER_HOME}/.config/systemd/user/default.target.wants/strih-mv-host.service"
+MVH_HELPER="/usr/local/bin/strih-mv-host.py"
+if [ -e "$MVH_UNIT" ] || [ -L "$MVH_WANTS" ] || [ -e "$MVH_HELPER" ]; then
   sudo -u "$DESKTOP_USER" XDG_RUNTIME_DIR="/run/user/$(id -u "$DESKTOP_USER")" systemctl --user disable --now strih-mv-host.service 2>/dev/null || true
-  echo "  strih-mv-host.service installed but DISABLED (default: the vendored child-host projector is the live mechanism; set STRIH_MV_HOST_ENABLED=1 only for a bundle without it)"
+  rm -f "${MVH_WANTS}" "${MVH_UNIT}" "${MVH_HELPER}"
+  sudo -u "$DESKTOP_USER" XDG_RUNTIME_DIR="/run/user/$(id -u "$DESKTOP_USER")" systemctl --user daemon-reload 2>/dev/null || true
+  echo "  removed the retired strih-mv-host helper (unit, WantedBy link, /usr/local/bin/strih-mv-host.py)"
+else
+  echo "  strih-mv-host helper not installed -- nothing to remove"
 fi
 
 # ---------------------------------------------------------------------------------------------
@@ -635,7 +693,10 @@ step 13 "Intercom hub unit + matrix (issue 1345 M1: ENABLE-ONLY, NEVER started w
 # here: sending VBAN to the real camboxes is the M4 cut-over (the Windows strih stays their live hub
 # until then). The deployable binary (intercom-hub-linux-amd64 from CI) is placed separately.
 install -Dm644 "${HERE}/../systemd/intercom-hub.service" /etc/systemd/system/intercom-hub.service
-install -Dm644 "${HERE}/../intercom/intercom.strih-lx.toml" /etc/intercom-hub/intercom.toml
+# issue 1361: the routing file is the box fact STRIH_INTERCOM_CONFIG (repo-relative).
+[ -f "${HERE}/../$(strih_lx_intercom_config)" ] \
+  || fail "intercom routing file ${HERE}/../$(strih_lx_intercom_config) (fact STRIH_INTERCOM_CONFIG) not found -- stage the repo intercom/ dir next to scripts/"
+install -Dm644 "${HERE}/../$(strih_lx_intercom_config)" /etc/intercom-hub/intercom.toml
 systemctl daemon-reload
 systemctl enable intercom-hub 2>/dev/null || warn "  could not enable intercom-hub.service"
 if [ -x /usr/local/bin/intercom-hub ]; then
@@ -659,7 +720,7 @@ DEBIAN_FRONTEND=noninteractive apt-get install -y janus \
   || warn "  apt-get install janus failed -- install it before the M4 cut-over (the phones leg needs the audiobridge)"
 JANUS_ROOM="1000"
 JANUS_SECRET_FILE="/etc/intercom-hub/janus-room.secret"
-install -d -m 700 /etc/intercom-hub
+install -d -m 755 /etc/intercom-hub
 if [ ! -f "$JANUS_SECRET_FILE" ]; then
   ( umask 077; openssl rand -hex 16 > "$JANUS_SECRET_FILE" ) \
     || fail "could not generate the Janus room secret at ${JANUS_SECRET_FILE} (openssl present?)"
@@ -716,7 +777,7 @@ strih_openbox_autostart_text > "${USER_HOME}/.config/openbox/autostart" \
   || fail "could not write ${USER_HOME}/.config/openbox/autostart"
 chmod +x "${USER_HOME}/.config/openbox/autostart"
 chown "$DESKTOP_USER":"$DESKTOP_USER" "${USER_HOME}/.config/openbox/autostart"
-obs_box_openbox_menu_xml "strih-lx" "systemctl --user start strih-obs.service" "/usr/local/bin/strih-obs-stop.sh" \
+obs_box_openbox_menu_xml "$(strih_lx_hostname)" "systemctl --user start strih-obs.service" "/usr/local/bin/strih-obs-stop.sh" \
   > "${USER_HOME}/.config/openbox/menu.xml" \
   || fail "could not write ${USER_HOME}/.config/openbox/menu.xml"
 chown "$DESKTOP_USER":"$DESKTOP_USER" "${USER_HOME}/.config/openbox/menu.xml"
@@ -892,13 +953,13 @@ if [ -x "${HERE}/verify-strih.sh" ]; then
     # issue 1357: the baseline's kernel / PRIME / Xorg-kiosk changes only run after the next boot, so
     # the gate's baseline items are EXPECTED to report them pending on this run -- report, never fail
     # provisioning here; the post-reboot verify-strih.sh run is the acceptance gate.
-    warn "  the shared OBS-box baseline takes effect at the NEXT boot -- reboot strih-lx, then run verify-strih.sh (the run below only reports what is still pending)"
-    "${HERE}/verify-strih.sh" || warn "  verify-strih.sh reports pending items -- expected before the reboot"
+    warn "  the shared OBS-box baseline takes effect at the NEXT boot -- reboot ${BOX_NAME}, then run verify-strih.sh --box ${STRIH_FACT_BOX} (the run below only reports what is still pending)"
+    "${HERE}/verify-strih.sh" --box "$STRIH_FACT_BOX" || warn "  verify-strih.sh reports pending items -- expected before the reboot"
   else
-    "${HERE}/verify-strih.sh" || fail "verify-strih.sh acceptance gate did not pass"
+    "${HERE}/verify-strih.sh" --box "$STRIH_FACT_BOX" || fail "verify-strih.sh acceptance gate did not pass"
   fi
 else
   warn "  verify-strih.sh not found/executable next to this script -- run it manually"
 fi
 
-echo -e "${GREEN}=== strih-lx setup complete ===${NC}"
+echo -e "${GREEN}=== ${BOX_NAME} setup complete ===${NC}"

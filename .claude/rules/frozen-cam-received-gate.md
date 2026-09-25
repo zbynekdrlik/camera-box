@@ -75,3 +75,10 @@ wrapper under FULL `set -euo pipefail` (the caller invokes it inside a `$(...)` 
 recording-e2e.sh's strict-mode body) via a stateful fake reader on `FROZEN_CAM_RECEIVED_CMD` +
 `FROZEN_CAM_RECEIVED_GAP_S=0` — grep-no-match extracts are `|| true`-guarded so no expected empty
 read aborts the run.
+
+## issue 1242 — `[4c/8]` relies on the E2E connect-on-show hold
+
+The strih program-path camera inputs PARK while hidden (no frames by design). The gate stays
+correct because `recording-e2e.sh` holds that role off for the whole run (right after the cleanup
+trap arms, fail-closed); a failed hold aborts the run rather than letting `[4c/8]` read a parked
+input as FROZEN. See `.claude/rules/strih-bandwidth-roles.md`.

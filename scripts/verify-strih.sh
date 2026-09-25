@@ -8,12 +8,20 @@ set -euo pipefail
 # into them and prints one PASS/FAIL line per acceptance item. Exit 0 = all clear, 1 = a gate item
 # failed. Latency pins are REPORT-ONLY (per-source latency is the operator's A/V-align domain).
 #
-# Usage (on the box):  ./verify-strih.sh   [STRIH_LX_HOST / OBS_WS_HOST override the WS target]
+# Usage (on the box):  ./verify-strih.sh [--box <name>]   (default box: strih-lx; issue 1361 -- the
+#                      box's facts come from scripts/strih-boxes/<name>.env; a TODO_OWNER fact refuses)
+#                      [STRIH_LX_HOST / OBS_WS_HOST override the WS target]
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/lib/strih-box-facts.sh
+. "${HERE}/lib/strih-box-facts.sh"   # issue 1361: the ONE per-box fact loader (--box <name>)
 # shellcheck source=scripts/lib/strih-provision.sh
 . "${HERE}/lib/strih-provision.sh"
+# shellcheck source=scripts/lib/strih-drm-output.sh
+. "${HERE}/lib/strih-drm-output.sh"   # issue 1346: item 4c grades the DRM-lease HDMI output
+# shellcheck source=scripts/lib/ndi-discovery.sh
+. "${HERE}/lib/ndi-discovery.sh"   # issue 1342: item 34 grades the receiver-side NDI config (networks.ips)
 # issue 1359: the REPORT-ONLY CEF keyring item (14b) grades the OBS CEF password-store switch.
 # shellcheck source=scripts/lib/strih-cef-keyring.sh
 . "${HERE}/lib/strih-cef-keyring.sh"
@@ -26,6 +34,12 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # it defines only its pure functions (dantesync_offset_verdict / ptp_locked_from_journal).
 # shellcheck source=scripts/clock-offset-guard.sh
 . "${HERE}/clock-offset-guard.sh"
+
+# --- issue 1361: select + load the box facts BEFORE the source-guard (a sourced verify -- the unit
+# tests -- sees the same facts the real run uses). An invalid / TODO_OWNER fact refuses here.
+STRIH_FACT_BOX="$(strih_box_cli_box "$@")" || { echo "usage: verify-strih.sh [--box <name>]" >&2; exit 1; }
+strih_box_load "$STRIH_FACT_BOX" \
+  || { echo -e "${RED}FAIL: box '${STRIH_FACT_BOX}': scripts/strih-boxes/${STRIH_FACT_BOX}.env is missing, invalid or still has TODO_OWNER facts (listed above)${NC}" >&2; exit 1; }
 
 # --- source-guard: when sourced (the unit tests), stop here -- never run the live checks ----------
 if [ "${BASH_SOURCE[0]}" != "${0}" ]; then
@@ -50,7 +64,8 @@ obs_running() {
     || pgrep -f 'bin/64bit/obs\|/obs$' >/dev/null 2>&1
 }
 
-echo -e "${GREEN}=== verify-strih.sh (issue 1317) acceptance gate ===${NC}"
+NDI_PREFIX_V="$(strih_lx_ndi_prefix)"
+echo -e "${GREEN}=== verify-strih.sh (issue 1317) acceptance gate -- box $(strih_lx_hostname) ===${NC}"
 
 # 0) launcher pair present + executable (issue 1317): strih-obs.service ExecStart/ExecStop reference
 #    /usr/local/bin/strih-obs-start.sh + strih-obs-stop.sh; a missing/dangling launcher makes the
@@ -128,7 +143,7 @@ if [ -f /opt/camera-box/strih-lx-seed.json ] && command -v python3 >/dev/null 2>
   if [ -n "$LIVE_OUTS" ]; then
     all_ns=1
     while IFS= read -r o; do [ -n "$o" ] || continue; strih_lx_output_name_ok "$o" || all_ns=0; done <<< "$LIVE_OUTS"
-    [ "$all_ns" = 1 ] && ok "all declared NDI outputs are STRIH-LX-namespaced" || bad "a declared NDI output is not STRIH-LX-namespaced"
+    [ "$all_ns" = 1 ] && ok "all declared NDI outputs are ${NDI_PREFIX_V}-namespaced" || bad "a declared NDI output is not ${NDI_PREFIX_V}-namespaced"
     printf '%s\n' "$LIVE_OUTS" | strih_lx_no_second_strihsnv_sender && ok "no 2nd STRIH-SNV sender in the output set" || bad "a STRIH-SNV sender is present (collision with the Windows PC)"
   else
     note "no outputs in strih-lx-seed.json to check"
@@ -159,55 +174,57 @@ else
   note "strih_scenes.py / python3 absent -- run setup-strih.sh step 6 first (seed-input parity report skipped)"
 fi
 
-# 4c) issue 1346: fixed HDMI fullscreen projector -- REPORT-ONLY (the live open needs an HDMI display
-#     on the notebook, a supervisor/owner rig step, so this NEVER hard-FAILs). Reports via the pure
-#     strih_projector_verdict: SaveProjectors=true pre-seeded in user.ini; and -- when an external
-#     HDMI/DP monitor is connected -- a saved ProjectorType 3/4 entry in a scene collection.
-OBS_CFG_DIR_V="$(dirname "$OBS_LOG_DIR")"   # OBS_LOG_DIR is <cfg>/logs -> the cfg dir is its parent
-PROJ_USER_INI="${OBS_CFG_DIR_V}/user.ini"
-SAVEPROJ=0
-[ -f "$PROJ_USER_INI" ] && grep -qi '^SaveProjectors=true' "$PROJ_USER_INI" && SAVEPROJ=1
-EXT_CONN=0
-for _st in /sys/class/drm/card*-HDMI*/status /sys/class/drm/card*-DP*/status; do
-  [ -f "$_st" ] || continue
-  if [ "$(cat "$_st" 2>/dev/null)" = connected ]; then EXT_CONN=1; break; fi
-done
-SAVED_ENTRY=0
-if command -v python3 >/dev/null 2>&1; then
-  SAVED_ENTRY="$(python3 - "$OBS_CFG_DIR_V" <<'PY'
-import glob, json, os, sys
-cfg = sys.argv[1]
-found = 0
-for path in glob.glob(os.path.join(cfg, "basic", "scenes", "*.json")):
-    try:
-        with open(path) as fh:
-            d = json.load(fh)
-    except (OSError, ValueError):
-        continue
-    for p in (d.get("saved_projectors") or []):
-        if isinstance(p, dict) and p.get("type") in (3, 4):
-            found = 1
-            break
-    if found:
-        break
-print(found)
-PY
-)"
+# 4c) issue 1346 (owner 24.9.2026): the fixed HDMI output = the in-OBS DRM-lease output (issue 1152),
+#     selectable Program / built-in Multiview -- never a projector window, never the desktop. SKIP
+#     when no HDMI monitor is connected (the kernel connector status; today's strih-lx is eDP-only).
+#     With one plugged in: ~/.camera-box/drm-output.json must arm the lease (classified by the ONE
+#     Python grammar in strih_scenes.py, the C module's own contract) and the newest OBS log must
+#     reach `drm-output: program scanout LIVE` -- plus `drm-output: multiview bind LIVE` for the
+#     multiview view. The pure verdict is strih_drm_output_verdict (scripts/lib/strih-drm-output.sh).
+DRM_CONF_V="${USER_HOME}/.camera-box/drm-output.json"
+DRM_HDMI=0
+strih_drm_hdmi_connected && DRM_HDMI=1
+DRM_SUMMARY="? program"   # no classifier at all (strih_scenes / python3 missing) = unclassified
+if [ -f "$SCN_BIN" ] && command -v python3 >/dev/null 2>&1; then
+  DRM_SUMMARY="$(python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); import strih_scenes as s; t = s.drm_output_config_text(sys.argv[2]); print(s.drm_output_lease_connector(t) or "-", s.drm_output_view_token(t))' \
+    "$(dirname "$SCN_BIN")" "$DRM_CONF_V" 2>/dev/null || echo "? program")"
 fi
-PROJ_VERDICT="$(strih_projector_verdict "$SAVEPROJ" "$EXT_CONN" "${SAVED_ENTRY:-0}" || true)"
-case "$PROJ_VERDICT" in
-  ok)                     ok   "fixed HDMI projector: SaveProjectors + external monitor + a saved ProjectorType 3/4" ;;
-  saveprojectors-missing) note "fixed HDMI projector: SaveProjectors=true NOT pre-seeded in ${PROJ_USER_INI} (re-run setup-strih.sh step 7)" ;;
-  hdmi-absent)            note "fixed HDMI projector: SaveProjectors ok; HDMI display not connected (report-only -- plug a display into HDMI for the live projector)" ;;
-  projector-unseeded)     note "fixed HDMI projector: external monitor present but no saved projector yet (strih_scenes.py --bootstrap opens it on the next launch)" ;;
-  *)                      note "fixed HDMI projector: unknown verdict '${PROJ_VERDICT}'" ;;
+DRM_ARMED="${DRM_SUMMARY%% *}"
+DRM_VIEW_V="${DRM_SUMMARY##* }"
+DRM_LIVE=0
+DRM_MV_LIVE=0
+DRM_LOG="$(newest_log || true)"
+if [ -n "$DRM_LOG" ]; then
+  # byte-safe: OBS logs carry raw invalid UTF-8 (the imag-display-path.sh grep form)
+  LC_ALL=C grep -aqF 'drm-output: program scanout LIVE' "$DRM_LOG" 2>/dev/null && DRM_LIVE=1
+  LC_ALL=C grep -aqF 'drm-output: multiview bind LIVE' "$DRM_LOG" 2>/dev/null && DRM_MV_LIVE=1
+fi
+DRM_VERDICT="$(strih_drm_output_verdict "$DRM_HDMI" "$DRM_ARMED" "$DRM_VIEW_V" "$DRM_LIVE" "$DRM_MV_LIVE" || true)"
+case "$DRM_VERDICT" in
+  ok)                 ok   "HDMI output: DRM lease on ${DRM_ARMED} live, view ${DRM_VIEW_V} (${DRM_CONF_V} + the newest OBS log)" ;;
+  skip-no-hdmi)       note "HDMI output: SKIP -- no HDMI monitor connected, the DRM-lease output stays dormant (attach one and re-run setup-strih.sh step 6)" ;;
+  hdmi-unplugged)     note "HDMI output: ${DRM_ARMED} is armed in ${DRM_CONF_V} but no HDMI monitor is connected (report-only)" ;;
+  classify-failed)    bad  "HDMI output: could not classify ${DRM_CONF_V} (strih_scenes.py / python3 missing or its import failed) -- re-run setup-strih.sh step 6" ;;
+  config-missing)     bad  "HDMI output: an HDMI monitor is connected but ${DRM_CONF_V} does not arm the DRM lease -- re-run setup-strih.sh (step 6)" ;;
+  view-invalid)       bad  "HDMI output: ${DRM_CONF_V} \"view\" is not program or multiview (OBS falls back to Program) -- fix it in OBS Tools > HDMI výstup" ;;
+  lease-not-live)     bad  "HDMI output: ${DRM_ARMED} is armed but the newest OBS log never reached 'drm-output: program scanout LIVE' -- read its drm-output: lines, then restart strih-obs.service" ;;
+  multiview-not-live) bad  "HDMI output: the view is multiview but the newest OBS log has no 'drm-output: multiview bind LIVE' (the built-in Multiview never reached the scanout)" ;;
+  *)                  bad  "HDMI output: unknown verdict '${DRM_VERDICT}'" ;;
 esac
+# The operator's LAPTOP projector (the Multiview on the eDP panel) persists via SaveProjectors
+# (setup-strih.sh step 7) -- report-only.
+if grep -qi '^SaveProjectors=true' "$(dirname "$OBS_LOG_DIR")/user.ini" 2>/dev/null; then
+  ok "laptop projector persistence: SaveProjectors=true pre-seeded in user.ini"
+else
+  note "laptop projector persistence: SaveProjectors=true NOT pre-seeded in user.ini (re-run setup-strih.sh step 7)"
+fi
 
 # 5) Certified latency pins vs scripts/latency-pins-baseline.json (strih-lx key) -- REPORT-ONLY.
 BASELINE="${HERE}/latency-pins-baseline.json"
 if command -v python3 >/dev/null 2>&1 && [ -f "$BASELINE" ]; then
-  FLOOR="$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); b=d.get("strih-lx",{}); print(b.get("_all_camera_ndi_inputs_ms","?"))' "$BASELINE" 2>/dev/null || echo '?')"
-  note "latency-pins-baseline.json strih-lx floor = ${FLOOR} ms (report-only; aligner owns any offset)"
+  PIN_BOX_V="$(strih_lx_hostname)"
+  FLOOR="$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); b=d.get(sys.argv[2],{}); print(b.get("_all_camera_ndi_inputs_ms","?"))' "$BASELINE" "$PIN_BOX_V" 2>/dev/null || echo '?')"
+  note "latency-pins-baseline.json ${PIN_BOX_V} floor = ${FLOOR} ms (report-only; aligner owns any offset)"
 else
   note "latency baseline / python3 absent -- pin verify is report-only"
 fi
@@ -217,8 +234,8 @@ fi
 #    artifact), so this asserts the RUNNING state: the unit is active AND the journal shows a fresh
 #    offset within bound via the SHARED dantesync_offset_verdict/freshest_offset_us. A `stale`/`absent`
 #    offset with the PTP servo LOCKED is disciplined near-zero (the #550 reasoning) -> PASS; not
-#    locked -> FAIL (no trustworthy clock signal). setup-strih.sh step 2 already fail-closes the unit's
-#    ExecStart to a CLIENT invocation, so a 2nd-master risk is guarded at install time, not here.
+#    locked -> FAIL (no trustworthy clock signal). setup-strih.sh step 2 refuses an ambiguous
+#    role+args shape (strih_lx_dantesync_role_ok) at install time; the role itself is graded in 6b.
 DS_ACTIVE="$(systemctl is-active dantesync 2>/dev/null || true)"
 if [ "$DS_ACTIVE" != active ]; then
   bad "dantesync.service not active (state='${DS_ACTIVE:-<none>}') -- clock undisciplined/free-running"
@@ -504,27 +521,19 @@ else
   fi
 fi
 
-# 22) strih-mv-host projector-host helper (issue 1352): the --user unit must be installed + ENABLED
-#     (it re-hosts every OBS projector as a child window so the RTX render path does not stall
-#     0.5 s/present), the helper present + executable, and python3-xlib importable. FAIL loud -- the
-#     RTX render path depends on it until the vendored child-display projector fix lands. Enablement
-#     is read from the WantedBy=default.target symlink (no --user session bus needed at verify time).
+# 22) retired strih-mv-host helper absent (issue 1357): the issue-1352 projector re-hosting helper
+#     worked around an XWayland + PRIME-offload present stall that the plain Xorg kiosk does not have;
+#     it was retired together with the vendored child-host projector (the stock toplevel projector
+#     runs on every box). A leftover unit, WantedBy link or helper is drift from the one baseline --
+#     FAIL loud and point at setup-strih.sh step 8b, which removes it. Read from the files, so no
+#     --user session bus is needed at verify time.
 MVH_UNIT="${USER_HOME}/.config/systemd/user/strih-mv-host.service"
 MVH_WANTS="${USER_HOME}/.config/systemd/user/default.target.wants/strih-mv-host.service"
 MVH_HELPER="/usr/local/bin/strih-mv-host.py"
-MVH_XLIB=MISSING; python3 -c "import Xlib" 2>/dev/null && MVH_XLIB=ok
-# issue 1352 acceptance (22.9.2026): the vendored child-host projector is the live mechanism and the
-# helper CONFLICTS with it (both active = MV 0.6 fps), so the expected enablement follows
-# STRIH_MV_HOST_ENABLED (default 0 = installed but DISABLED); a mismatch either way is a FAIL.
-MVH_WANT="${STRIH_MV_HOST_ENABLED:-0}"
-if [ -f "$MVH_UNIT" ] && [ -x "$MVH_HELPER" ] && [ "$MVH_XLIB" = ok ] && [ "$MVH_WANT" = 1 ] && [ -L "$MVH_WANTS" ]; then
-  ok "(mv-host) strih-mv-host.service installed + enabled (STRIH_MV_HOST_ENABLED=1 fallback) + helper present + python3-xlib importable"
-elif [ -f "$MVH_UNIT" ] && [ -x "$MVH_HELPER" ] && [ "$MVH_XLIB" = ok ] && [ "$MVH_WANT" != 1 ] && [ ! -L "$MVH_WANTS" ]; then
-  ok "(mv-host) strih-mv-host.service installed but DISABLED (vendored child-host projector is the live mechanism) + helper present + python3-xlib importable"
-elif [ -f "$MVH_UNIT" ] && [ -x "$MVH_HELPER" ] && [ "$MVH_XLIB" = ok ]; then
-  bad "(mv-host) enablement mismatch: STRIH_MV_HOST_ENABLED=${MVH_WANT} but the WantedBy symlink is $( [ -L "$MVH_WANTS" ] && echo present || echo absent ) -- both hosting mechanisms active = MV 0.6 fps (22.9.2026); disable the helper unless the bundle lacks the vendored child-host"
+if [ ! -e "$MVH_UNIT" ] && [ ! -L "$MVH_WANTS" ] && [ ! -e "$MVH_HELPER" ]; then
+  ok "(mv-host) retired strih-mv-host helper absent (stock toplevel OBS projector, no re-hosting)"
 else
-  bad "(mv-host) strih-mv-host gate: unit=$( [ -f "$MVH_UNIT" ] && echo present || echo MISSING ) enabled=$( [ -L "$MVH_WANTS" ] && echo yes || echo no ) helper=$( [ -x "$MVH_HELPER" ] && echo present || echo MISSING ) xlib=${MVH_XLIB} -- re-run setup-strih.sh step 8b"
+  bad "(mv-host) retired strih-mv-host helper still installed: unit=$( [ -e "$MVH_UNIT" ] && echo present || echo absent ) enabled=$( [ -L "$MVH_WANTS" ] && echo yes || echo no ) helper=$( [ -e "$MVH_HELPER" ] && echo present || echo absent ) -- re-run setup-strih.sh step 8b"
 fi
 
 # 24) avahi-browse present (issue 1352): the NDI/mDNS discovery CLI (avahi-utils) -- Ubuntu 26.04 omits
@@ -658,7 +667,7 @@ fi
 #     server role (the post-M4 default: the notebook IS the fleet NTP master) -- an ntp UDP :123
 #     listener. Complements item 6 (unit active + fresh offset) with the role/serving-state proof via
 #     the pure strih_lx_dantesync_status_role_verdict.
-DS_ROLE_V="${STRIH_LX_DANTESYNC_ROLE:-server}"
+DS_ROLE_V="$(strih_lx_dantesync_role)"
 DS_STATUS="$(curl -s --max-time 4 http://127.0.0.1:8898/status 2>/dev/null || true)"
 [ -n "$DS_STATUS" ] && DS_REACH=1 || DS_REACH=0
 DS_MODE="$(printf '%s' "$DS_STATUS" | grep -oE '"mode":"[A-Za-z]+"' | head -1 | sed 's/.*:"//; s/"//' || true)"
@@ -726,13 +735,14 @@ fi
 #     SINGLE E-core (>= the first cpu_atom cpu) so its NET_RX softirq never shares an OBS core, AND
 #     that IRQ's /proc/interrupts counter must be ADVANCING over a live 2-s window (NEVER a static
 #     file check -- a smp_affinity_list read alone is a lying gate). Read-only, drain-safe, fail loud.
-IRQ_TARGET_IP="${STRIH_LX_TARGET_IP:-10.77.9.202}"
+IRQ_TARGET_IP="${STRIH_LX_TARGET_IP:-$(strih_lx_ip)}"
 IRQ_IFACE="${STRIH_NIC_IFACE:-}"
 if [ -z "$IRQ_IFACE" ]; then
-  # driver-first (the r8152 USB NIC), then fall back to the address match; MULTI -> NOTE + no iface.
-  IRQ_DRV="$(strih_nic_iface_by_driver /sys r8152 2>/dev/null || true)"
+  # driver-first (the box's STRIH_NIC_DRIVER fact -- strih-lx: the r8152 USB NIC), then fall back to
+  # the address match; MULTI -> NOTE + no iface.
+  IRQ_DRV="$(strih_nic_iface_by_driver /sys "$(strih_lx_nic_driver)" 2>/dev/null || true)"
   case "$IRQ_DRV" in
-    MULTI:*) note "  multiple r8152 NICs (${IRQ_DRV#MULTI:}) -- set STRIH_NIC_IFACE"; IRQ_IFACE="" ;;
+    MULTI:*) note "  multiple $(strih_lx_nic_driver) NICs (${IRQ_DRV#MULTI:}) -- set STRIH_NIC_IFACE"; IRQ_IFACE="" ;;
     "")      IRQ_IFACE="$(ip -o -4 addr show 2>/dev/null | awk -v ip="$IRQ_TARGET_IP" 'BEGIN { gsub(/\./, "\\.", ip) } $4 ~ ("^" ip "/") { print $2; exit }' || true)" ;;
     *)       IRQ_IFACE="$IRQ_DRV" ;;
   esac
@@ -767,6 +777,46 @@ else
   else
     bad "NIC xhci IRQ affinity FAILED (iface ${IRQ_IFACE}, irqs ${IRQ_NUMS}): each must be a single cpu >= first cpu_atom (${ATOM_FIRST}) AND advancing over 2 s"
   fi
+fi
+
+# 34) NDI discovery receiver config (issue 1342): networks.ips lists every PINNED managed NDI sender
+#     (the SAME scripts/lib/ndi-discovery.sh generator setup-strih.sh step 4b writes with -- every
+#     camera + strih-lx/stream; the traveling resolume hostname is best-effort, never required) and
+#     carries no networks.discovery, in BOTH readers' config -- the desktop user's ~/.ndi (OBS +
+#     bkshading-service) and the system dir /etc/ndi (intercom-hub, whose ProtectHome hides ~/.ndi) --
+#     plus the intercom-hub NDI_CONFIG_DIR drop-in. Read-only; FAIL on any miss (a renumbered sender
+#     FAILs until the box is re-provisioned). Placed BEFORE item 32: the item-33 test slices "# 33)"
+#     to the closing summary, so nothing may sit after item 33.
+_ndi_required="$(ndi_discovery_sender_ips pinned)" || _ndi_required=""
+_ndi_dropin_dir="$(ndi_discovery_dropin_config_dir "$(cat "$NDI_DISCOVERY_INTERCOM_DROPIN" 2>/dev/null || true)")"
+if [ -z "$_ndi_required" ]; then
+  bad "(ndi-discovery) could not generate the managed NDI sender list (camera-set.sh + obs-fleet.sh ndi-sender facet) -- both configs ungraded"
+else
+  for _ndi_dir in "${USER_HOME}/.ndi" "$NDI_DISCOVERY_SYSTEM_DIR"; do
+    _ndi_text="$(cat "${_ndi_dir}/${NDI_DISCOVERY_CONFIG_NAME}" 2>/dev/null || true)"
+    _ndi_verdict="$(ndi_discovery_config_verdict "$_ndi_text" "$_ndi_required")"
+    if [ "$_ndi_verdict" = ok ]; then
+      ok "(ndi-discovery) ${_ndi_dir}/${NDI_DISCOVERY_CONFIG_NAME}: networks.ips lists every managed sender"
+    else
+      bad "(ndi-discovery) ${_ndi_dir}/${NDI_DISCOVERY_CONFIG_NAME}: $(printf '%s' "$_ndi_verdict" | tr '\n' ' ' | sed 's/FAIL: //g')-- re-run setup-strih.sh step 4b (issue 1342)"
+    fi
+  done
+  # A traveling sender (resolume.lan, DHCP) is never REQUIRED, but when it resolves NOW to an address
+  # the OBS config does not list (it was away at the last setup-strih run, or its lease moved), say so:
+  # a NOTE, never a FAIL -- re-running setup-strih.sh picks it up.
+  # Only the TRAVELING part (resolved minus pinned) is diffed -- a missing PINNED sender is already a
+  # FAIL above, never re-reported here as "traveling".
+  _ndi_resolved="$(ndi_discovery_sender_ips resolve 2>/dev/null)" || _ndi_resolved=""
+  _ndi_traveling="$(ndi_discovery_list_minus "$_ndi_resolved" "$_ndi_required")"
+  _ndi_drift="$(ndi_discovery_missing_ips "$(cat "${USER_HOME}/.ndi/${NDI_DISCOVERY_CONFIG_NAME}" 2>/dev/null || true)" "$_ndi_traveling")"
+  if [ -n "$_ndi_drift" ]; then
+    note "(ndi-discovery) a traveling NDI sender resolves now to ${_ndi_drift}, which ${USER_HOME}/.ndi/${NDI_DISCOVERY_CONFIG_NAME} does not list -- re-run setup-strih.sh step 4b to add it (issue 1342)"
+  fi
+fi
+if [ "$_ndi_dropin_dir" = "$NDI_DISCOVERY_SYSTEM_DIR" ]; then
+  ok "(ndi-discovery) intercom-hub NDI_CONFIG_DIR=${NDI_DISCOVERY_SYSTEM_DIR} drop-in present"
+else
+  bad "(ndi-discovery) ${NDI_DISCOVERY_INTERCOM_DROPIN} missing or NDI_CONFIG_DIR='${_ndi_dropin_dir:-<none>}' (want ${NDI_DISCOVERY_SYSTEM_DIR}) -- re-run setup-strih.sh step 4b (issue 1342)"
 fi
 
 # 32) the shared OBS-box appliance baseline (issue 1357) -- the ONE grader verify-imag.sh runs too

@@ -1635,24 +1635,153 @@ static inline bool source_muted(obs_source_t *source, uint64_t os_time)
 	       (source->push_to_talk_enabled && !push_to_talk_active);
 }
 
-/* camera-box #1303 — receiver-side AUDIO <-> video-FIFO pairing (pure helpers).
+/* camera-box #1303 + issue 1367 — receiver-side AUDIO <-> video-FIFO pairing (pure helpers).
  * Byte-for-byte mirror of src/genlock_audio_pairing.rs; held identical by the committed
  * parity gate tests/genlock_audio_pairing_parity.rs (the #1003 lift-and-compile recipe,
- * which slices this contiguous block by the three signatures below). Keep the three
- * functions CONTIGUOUS and their bodies numerically identical to the Rust authority. */
+ * which slices this contiguous block from genlock_audio_present_delay_ns through
+ * genlock_audio_decide_health). Keep the block CONTIGUOUS, self-contained (stdint/stdbool only)
+ * and numerically identical to the Rust authority.
+ *
+ * Issue 1367 (Option 3): a genlock_fifo source's VIDEO presents at stamp + the head's age at the
+ * render tick (the FIFO's real stamp->present delay: 60-100 ms on a shallow cg feed at a 3 ms pin),
+ * so its AUDIO is placed at its NDI timecode + that MEASURED delay, mapped timecode -> wall -> OBS
+ * monotonic through the LIVE wall-vs-QPC offset read on every packet. The delay is an EMA of the
+ * per-tick sample, re-applied only on a change of half a frame or more, and only once the EMA has
+ * settled (a mid-step value would stay latched under the half-frame hysteresis). */
 static inline uint64_t genlock_audio_present_delay_ns(uint32_t latency_ms)
 {
-	/* audio held by the SAME latency_ms the video FIFO holds video, so the A/V pair
-	 * survives the hold (present_ts = wall_now - latency_ms). */
+	/* a hold of latency_ms (the #1303 latency-mode hold) or of any applied hold, in ns. */
 	return (uint64_t)latency_ms * 1000000ull;
 }
-static inline int64_t genlock_audio_pairing_offset_ms(int64_t applied_audio_delay_ns, uint32_t video_latency_ms)
+/* EMA weight 1/2^3 per render tick; re-apply 64 ticks (8 EMA time constants) after the half-frame
+ * trigger. Mirror of VIDEO_DELAY_EMA_SHIFT / VIDEO_DELAY_SETTLE_TICKS. */
+#define GENLOCK_VIDEO_DELAY_EMA_SHIFT 3
+#define GENLOCK_VIDEO_DELAY_SETTLE_TICKS 64u
+/* audio hold modes. Mirror of AudioHoldMode. */
+#define GENLOCK_AUDIO_HOLD_OFF 0
+#define GENLOCK_AUDIO_HOLD_LATENCY 1
+#define GENLOCK_AUDIO_HOLD_TIMECODE 2
+/* one stamp->present sample: the PRESENTED frame's age at the render tick's SCHEDULED wall
+ * instant, clamped to >= 1 ns so it never produces the 0 "unseeded" sentinel of the EMA. */
+static inline uint64_t genlock_video_delay_sample_ns(uint64_t tick_wall_ns, uint64_t presented_stamp_ns)
 {
-	/* residual A/V offset (ms, signed): applied audio delay minus the video latency; 0 = paired. */
-	return applied_audio_delay_ns / 1000000 - (int64_t)video_latency_ms;
+	const uint64_t age = tick_wall_ns > presented_stamp_ns ? tick_wall_ns - presented_stamp_ns : 0;
+	return age > 1 ? age : 1;
 }
-/* genlock_audio_health: 0=Ok 1=AudioDisabledOnProgram 2=AsrcSaturated 3=PairingOffsetExceeded.
- * Precedence matches decide_audio_health() in the Rust authority. */
+/* one EMA step; 0 = unseeded (the first sample seeds). The difference is taken in uint64 and read
+ * as two's complement, the eighth truncates toward zero, and the sum wraps -- no signed overflow at
+ * any input, identical to the Rust wrapping form. */
+static inline uint64_t genlock_video_delay_smooth_ns(uint64_t smoothed_ns, uint64_t sample_ns)
+{
+	if (smoothed_ns == 0)
+		return sample_ns;
+	const int64_t diff = (int64_t)(sample_ns - smoothed_ns);
+	return smoothed_ns + (uint64_t)(diff / ((int64_t)1 << GENLOCK_VIDEO_DELAY_EMA_SHIFT));
+}
+/* the smoothed delay rounded to whole ms, never 0 (0 = nothing applied). */
+static inline uint32_t genlock_video_delay_round_ms(uint64_t smoothed_ns)
+{
+	const uint64_t half = 500000ull;
+	const uint64_t ms = (smoothed_ns > UINT64_MAX - half ? UINT64_MAX : smoothed_ns + half) / 1000000ull;
+	if (ms == 0)
+		return 1;
+	return ms > (uint64_t)UINT32_MAX ? UINT32_MAX : (uint32_t)ms;
+}
+/* moved half a frame or more from the applied delay (or nothing applied yet)? */
+static inline bool genlock_video_delay_moved(uint32_t applied_ms, uint64_t smoothed_ns, uint64_t interval_ns)
+{
+	if (applied_ms == 0)
+		return true;
+	if (interval_ns == 0)
+		return false;
+	const uint64_t applied_ns = (uint64_t)applied_ms * 1000000ull;
+	const uint64_t diff = smoothed_ns > applied_ns ? smoothed_ns - applied_ns : applied_ns - smoothed_ns;
+	const uint64_t twice = diff > UINT64_MAX / 2 ? UINT64_MAX : diff * 2;
+	return twice >= interval_ns;
+}
+/* one render tick of the tracker: smooth; an idle tracker arms the settle on a half-frame move; an
+ * armed one counts down and applies the rounded delay at 0 if it is STILL half a frame away. */
+static inline void genlock_video_delay_track(uint64_t *smoothed_ns, uint32_t *applied_ms, uint32_t *settle_ticks,
+					     uint64_t sample_ns, uint64_t interval_ns)
+{
+	*smoothed_ns = genlock_video_delay_smooth_ns(*smoothed_ns, sample_ns);
+	if (*settle_ticks > 0) {
+		*settle_ticks -= 1u;
+		if (*settle_ticks == 0 && genlock_video_delay_moved(*applied_ms, *smoothed_ns, interval_ns))
+			*applied_ms = genlock_video_delay_round_ms(*smoothed_ns);
+	} else if (genlock_video_delay_moved(*applied_ms, *smoothed_ns, interval_ns)) {
+		*settle_ticks = GENLOCK_VIDEO_DELAY_SETTLE_TICKS;
+	}
+}
+/* pick the hold for one audio packet (latency_ms 0 = the unreachable floor violation: no hold). */
+static inline int genlock_audio_hold_mode(bool genlock_fifo, uint32_t latency_ms, bool audio_ts_is_wallclock,
+					  uint32_t video_delay_ms)
+{
+	if (!genlock_fifo || latency_ms == 0)
+		return GENLOCK_AUDIO_HOLD_OFF;
+	if (audio_ts_is_wallclock && video_delay_ms > 0)
+		return GENLOCK_AUDIO_HOLD_TIMECODE;
+	return GENLOCK_AUDIO_HOLD_LATENCY;
+}
+/* the hold (ms) a mode applies -- the audit's audio_delay_ms=. */
+static inline uint32_t genlock_audio_hold_ms(int mode, uint32_t latency_ms, uint32_t video_delay_ms)
+{
+	if (mode == GENLOCK_AUDIO_HOLD_TIMECODE)
+		return video_delay_ms;
+	if (mode == GENLOCK_AUDIO_HOLD_LATENCY)
+		return latency_ms;
+	return 0;
+}
+/* the audit-line token of a mode (audio_hold=). */
+static inline const char *genlock_audio_hold_token(int mode)
+{
+	if (mode == GENLOCK_AUDIO_HOLD_TIMECODE)
+		return "timecode";
+	if (mode == GENLOCK_AUDIO_HOLD_LATENCY)
+		return "latency";
+	return "off";
+}
+/* only a timecode hold (new or previous) needs the live offset; everything else skips the two
+ * clock reads. */
+static inline bool genlock_audio_needs_live_offset(int mode, int prev_mode)
+{
+	return mode == GENLOCK_AUDIO_HOLD_TIMECODE || prev_mode == GENLOCK_AUDIO_HOLD_TIMECODE;
+}
+/* the live wall -> OBS monotonic offset, mono_now - wall_now (two's complement). */
+static inline int64_t genlock_audio_wall_to_mono_ns(uint64_t mono_now_ns, uint64_t wall_now_ns)
+{
+	return (int64_t)(mono_now_ns - wall_now_ns);
+}
+/* the term added to in.timestamp (= tc + timing_adjust at that point): latency -> arrival + hold;
+ * timecode -> tc + off_live + hold. Wraps like the uint64 sums it feeds. */
+static inline int64_t genlock_audio_place_term_ns(int mode, uint32_t hold_ms, int64_t off_live_ns,
+						  uint64_t timing_adjust_ns)
+{
+	const uint64_t hold_ns = genlock_audio_present_delay_ns(hold_ms);
+	if (mode == GENLOCK_AUDIO_HOLD_LATENCY)
+		return (int64_t)hold_ns;
+	if (mode == GENLOCK_AUDIO_HOLD_TIMECODE)
+		return (int64_t)((uint64_t)off_live_ns + hold_ns - timing_adjust_ns);
+	return 0;
+}
+/* the ASRC level-target shift (ms) of a re-placement: new term - previous term of the SAME packet. */
+static inline double genlock_audio_place_shift_ms(int64_t new_term_ns, int64_t prev_term_ns)
+{
+	return (double)(int64_t)((uint64_t)new_term_ns - (uint64_t)prev_term_ns) / 1e6;
+}
+/* the video delay the pairing offset is measured against: the measurement, else the pin. */
+static inline int64_t genlock_audio_video_delay_ref_ns(uint64_t smoothed_ns, uint32_t latency_ms)
+{
+	return smoothed_ns > 0 ? (int64_t)smoothed_ns : (int64_t)genlock_audio_present_delay_ns(latency_ms);
+}
+static inline int64_t genlock_audio_pairing_offset_ms(int64_t applied_audio_delay_ns, int64_t video_delay_ns)
+{
+	/* residual A/V offset (ms, signed, truncated): applied audio hold minus the video's MEASURED
+	 * stamp->present delay; 0 = paired. */
+	return (int64_t)((uint64_t)applied_audio_delay_ns - (uint64_t)video_delay_ns) / 1000000;
+}
+/* genlock_audio_health: 0=Ok 1=AudioDisabledOnProgram 2=AsrcSaturated 3=PairingOffsetExceeded (above
+ * HALF a frame, issue 1367). Precedence matches decide_audio_health() in the Rust authority. */
 static inline int genlock_audio_decide_health(int audio_enabled, int is_program_source, int asrc_saturated,
 					      int64_t pairing_offset_ms, int64_t frame_interval_ms)
 {
@@ -1660,10 +1789,20 @@ static inline int genlock_audio_decide_health(int audio_enabled, int is_program_
 		return 1;
 	if (audio_enabled && asrc_saturated)
 		return 2;
-	if (audio_enabled && (pairing_offset_ms < 0 ? -pairing_offset_ms : pairing_offset_ms) > frame_interval_ms)
-		return 3;
+	if (audio_enabled) {
+		const int64_t mag = pairing_offset_ms >= 0 ? pairing_offset_ms
+				    : (pairing_offset_ms == INT64_MIN ? INT64_MAX : -pairing_offset_ms);
+		const int64_t twice = mag > INT64_MAX / 2 ? INT64_MAX : mag * 2;
+		if (twice > frame_interval_ms)
+			return 3;
+	}
 	return 0;
 }
+
+/* issue 1367: defined with the genlock FIFO further down; the audio ingest below maps a genlock
+ * source's NDI timecode through the live wall clock and checks the timecode is wall-clock. */
+static inline bool genlock_is_wallclock_ts(uint64_t ts_ns);
+static inline uint64_t genlock_wall_now_ns(void);
 
 static void source_output_audio_data(obs_source_t *source, const struct audio_data *data)
 {
@@ -1735,32 +1874,51 @@ static void source_output_audio_data(obs_source_t *source, const struct audio_da
 	in.timestamp += sync_offset;
 	in.timestamp -= source->resample_offset;
 
-	/* camera-box #1303: genlock AUDIO parity. For a genlock_fifo source the video FIFO holds
-	 * every frame to present_ts = wall_now - latency_ms; delay this source's audio by the SAME
-	 * effective latency (a pure duration shift on OBS's converted timeline — the timeline basis
-	 * is irrelevant to a fixed delay) so the A/V pair is presented at the same wall instant.
-	 * genlock_latency_ms is always >= GENLOCK_LATENCY_MS_MIN_INIT (seeded at create, clamped by
-	 * obs_source_set_genlock_latency_ms), so the effective value is the field itself; the >0
-	 * guard is a defensive no-op-delay default. The store feeds the audit line's audio facet
-	 * (genlock_fill_stats). */
+	/* camera-box #1303 + issue 1367 (Option 3): genlock AUDIO parity. A genlock_fifo source's video
+	 * presents at its NDI stamp + the FIFO's real stamp->present delay (the head's age at the render
+	 * tick, measured + quantized by genlock_video_delay_track on the render thread). Its audio is
+	 * placed at its NDI timecode + that SAME measured delay, mapped timecode -> wall -> OBS monotonic
+	 * through the LIVE wall-vs-QPC offset read on this packet (never latched: the two clocks drift,
+	 * resolume measured 318 ms). in.timestamp here is tc + timing_adjust (+ sync/resample offsets), so
+	 * the timecode term is off_live + delay - timing_adjust. Until the first measurement settles, or
+	 * for an audio timestamp that is not a wall-clock timecode, the #1303 hold is kept byte-for-byte:
+	 * arrival basis + latency_ms. genlock_latency_ms is always >= GENLOCK_LATENCY_MS_MIN_INIT, so the
+	 * latency_ms == 0 "no hold" arm is the unreachable defensive default. The applied hold feeds the
+	 * audit line's audio facet (genlock_fill_stats). Decisions: src/genlock_audio_pairing.rs. */
+	const int prev_genlock_audio_hold_mode = source->genlock_audio_hold_mode;
 	const uint32_t prev_genlock_audio_delay_ms = source->genlock_audio_delay_ms;
-	if (source->genlock_fifo && source->genlock_latency_ms > 0) {
-		in.timestamp += (int64_t)genlock_audio_present_delay_ns(source->genlock_latency_ms);
-		source->genlock_audio_delay_ms = source->genlock_latency_ms;
-	} else {
-		/* #1303 review 🔵3: the source is not holding audio (not genlock_fifo, or the field is
-		 * the unreachable 0) — clear the recorded hold so a source that toggled genlock off at
-		 * runtime never reports a STALE audio_delay_ms on the audit facet. */
-		source->genlock_audio_delay_ms = 0;
+	const uint32_t genlock_video_delay_ms = source->genlock_video_delay_applied_ms;
+	const uint64_t genlock_timing_adjust = source->timing_adjust;
+	const int genlock_hold_mode = genlock_audio_hold_mode(source->genlock_fifo, source->genlock_latency_ms,
+							      genlock_is_wallclock_ts(data->timestamp),
+							      genlock_video_delay_ms);
+	const uint32_t genlock_hold_ms =
+		genlock_audio_hold_ms(genlock_hold_mode, source->genlock_latency_ms, genlock_video_delay_ms);
+	const int64_t genlock_off_live_ns =
+		genlock_audio_needs_live_offset(genlock_hold_mode, prev_genlock_audio_hold_mode)
+			? genlock_audio_wall_to_mono_ns(os_gettime_ns(), genlock_wall_now_ns())
+			: 0;
+	const int64_t genlock_term_ns =
+		genlock_audio_place_term_ns(genlock_hold_mode, genlock_hold_ms, genlock_off_live_ns, genlock_timing_adjust);
+	in.timestamp += (uint64_t)genlock_term_ns;
+	source->genlock_audio_hold_mode = genlock_hold_mode;
+	source->genlock_audio_delay_ms = genlock_hold_ms;
+	/* camera-box #1355 + issue 1367: a CHANGE of the applied audio hold (a quantized video-delay
+	 * change, the latency->timecode switch, a pin write, genlock toggled) moves this source's
+	 * placement -- and therefore its ASRC mix-buffer depth -- by the placement delta, like a
+	 * sync-offset change. RE-PLACE now (a back-to-back append would ignore the new placement until the
+	 * next flush) and move the captured level setpoint by the SAME delta (the #1335 shift below is the
+	 * sync-offset twin), so the slow level loop neither walks the new depth back nor needs minutes to
+	 * reach it. The delta is the new minus the previous term of THIS packet, so the live offset and
+	 * timing_adjust cancel on a timecode->timecode change. No-op on the setpoint until captured. */
+	if (genlock_hold_mode != prev_genlock_audio_hold_mode || genlock_hold_ms != prev_genlock_audio_delay_ms) {
+		const int64_t genlock_prev_term_ns =
+			genlock_audio_place_term_ns(prev_genlock_audio_hold_mode, prev_genlock_audio_delay_ms,
+						    genlock_off_live_ns, genlock_timing_adjust);
+		push_back = false;
+		asrc_compensator_shift_level_target(&source->asrc,
+						    genlock_audio_place_shift_ms(genlock_term_ns, genlock_prev_term_ns));
 	}
-	/* camera-box #1355: a CHANGE of the applied audio hold (a pin write, genlock toggled) moves this
-	 * source's placement -- and therefore its ASRC mix-buffer depth -- by exactly the delta, like a
-	 * sync-offset change. Move the captured level setpoint by the same delta (the #1335 shift below is
-	 * the sync-offset twin) so the level loop does not walk the depth back and undo the hold (which
-	 * would break the #1303 A/V pairing until the next flush). No-op until captured. */
-	if (source->genlock_audio_delay_ms != prev_genlock_audio_delay_ms)
-		asrc_compensator_shift_level_target(&source->asrc, (double)source->genlock_audio_delay_ms -
-									   (double)prev_genlock_audio_delay_ms);
 
 	source->next_audio_sys_ts_min = source->next_audio_ts_min + source->timing_adjust;
 
@@ -4387,16 +4545,23 @@ static inline void asrc_process_audio(obs_source_t *source, uint32_t frames, uin
 		 * (parsers extract by name): the running count of unreachable-setpoint fallbacks, 0 on a
 		 * healthy source. target= is now the ABSOLUTE setpoint (ASRC_LEVEL_TARGET_MS + the source's
 		 * placement offset), identical across launches. */
+		/* camera-box #1367: level_avg= appended AFTER the byte-identical 'fallbacks=%u (#1355)' suffix
+		 * (parsers extract by name; level_avg= does not contain the substring level=): the MEAN of
+		 * every callback's buffered_ms over the last closed window -- the tick-free level the loop
+		 * now holds. level= stays the one raw reading, which lands on the 21.33 ms mixer-tick
+		 * sawtooth (sd ~6 ms of pure tick phase). */
 		blog(LOG_INFO,
 		     "asrc: source '%s' estimated=%.2fppm applied=%.2fppm outer_bias=%.2fppm "
 		     "cumulative_correction=%.3fms/%.0fs starved_blocks=%u (#803/#806/#960) "
 		     "level=%.1fms target=%.1fms integral=%.3fppm (#1335) "
-		     "steps=%u last_step_ms=%.1f restore=%d (#1335) fallbacks=%u (#1355)",
+		     "steps=%u last_step_ms=%.1f restore=%d (#1335) fallbacks=%u (#1355) "
+		     "level_avg=%.2fms (#1367)",
 		     obs_source_get_name(source), source->asrc.estimated_ppm, applied_ppm,
 		     source->asrc.outer_bias_ppm, cumulative_correction_ms, ASRC_LOG_INTERVAL_S,
 		     starved_block_count, source->asrc.level_last_ms, source->asrc.level_target_ms,
 		     source->asrc.level_integral_ppm, source->asrc.step_count, source->asrc.last_step_ms,
-		     (int)source->asrc.level_restore, source->asrc.level_fallback_count);
+		     (int)source->asrc.level_restore, source->asrc.level_fallback_count,
+		     source->asrc.level_avg_ms);
 	}
 }
 
@@ -4985,11 +5150,14 @@ static inline uint64_t genlock_wall_now_ns(void)
 
 /* camera-box #800: wall(RTC)-vs-monotonic(QPC) clock drift since the first audit tick, in ms.
  * The video release deadline keys on the WALL clock (genlock_wall_now_ns() =
- * GetSystemTimePreciseAsFileTime on Windows, disciplined by NTP/DanteSync), while the
- * render tick and audio capture ride the MONOTONIC clock (os_gettime_ns() = QPC, free-
- * running). If the two clock domains drift apart over a long event, the wall-slaved video
- * and the QPC-slaved audio diverge — the leading remaining candidate for the #800 all-day
- * A/V shift the instrumented FIFO already ruled out. Both clocks are read back-to-back
+ * GetSystemTimePreciseAsFileTime on Windows, disciplined by NTP/DanteSync), and so does the
+ * render tick (obs-video.c genlock_next_deadline re-derives every deadline from the wall clock
+ * and only maps it into the monotonic sleep timebase), while the audio mixer paces on the
+ * MONOTONIC clock (os_gettime_ns() = QPC on Windows, free-running; CLOCK_MONOTONIC on Linux,
+ * kernel-disciplined like CLOCK_REALTIME, so this reads ~0 there). #800 suspected the Windows
+ * divergence for an all-day A/V shift; #1355/#1357 measured it (~13 ppm) and found no A/V or
+ * FIFO effect (the ASRC servo runs on the mixer clock). Telemetry only — the LOCK indicator
+ * gates on a single-sample wall STEP, never on this value or its rate. Both clocks are read back-to-back
  * (the #269 single-read discipline) and anchored ONCE at the first tick; drift =
  * (wall_now - wall_anchor) - (mono_now - mono_anchor). Positive = wall ran FASTER than QPC
  * (video deadline advancing ahead of audio). Process-global; called only from
@@ -5102,6 +5270,20 @@ static inline uint64_t genlock_phase_pin_deadline(uint64_t deadline_ns, uint64_t
  * max keeps the sub-frame flapping floor honoured. Mirror: src/genlock_backlog.rs
  * GENLOCK_N2_JITTER_BUDGET_NS. */
 #define GENLOCK_N2_JITTER_BUDGET_NS 15000000ULL /* 15 ms */
+
+/* camera-box issue 1367: the N==1 PIN-DERIVED DEPTH constants (genlock_n1_* below). A pin within
+ * GENLOCK_N1_PIN_FRAME_TOLERANCE_NS above a whole number of frame intervals counts as that whole
+ * number (the integer interval is fractionally short of a real frame); the rule acts only when the
+ * pin-derived depth exceeds the arrival floor by GENLOCK_N1_DEEP_MARGIN_FRAMES. Mirrors:
+ * src/genlock_n1_depth.rs N1_PIN_FRAME_TOLERANCE_NS / N1_DEEP_MARGIN_FRAMES. */
+#define GENLOCK_N1_PIN_FRAME_TOLERANCE_NS 1000ULL /* 1 us */
+#define GENLOCK_N1_DEEP_MARGIN_FRAMES 2ULL
+/* camera-box issue 1367 (review round 3): the N==1 rule acts only while the render tick's scheduled
+ * instant is within this many ns of a grid point -- the render tick's own per-tick slew clamp
+ * (GENLOCK_MAX_SLEW_NS, obs-video.c). After a wall-clock step the ticks sit off the grid by the
+ * step until the slew pulls them back, and a depth read there is wrong by up to the step. Mirror:
+ * src/genlock_n1_depth.rs N1_ON_GRID_NS. */
+#define GENLOCK_N1_ON_GRID_NS 2000000ULL /* 2 ms */
 
 /* camera-box #1003: PHASE-CONTINUITY RELOCK (history-anchored selection).
  *
@@ -5301,15 +5483,18 @@ static void genlock_fill_stats(const obs_source_t *source, struct obs_genlock_st
 	/* keep the literal `genlock_wall_qpc_drift_ms());` anchor the #800 gates pin
 	 * (windows-genlock*.yml pwsh + tests/genlock_preload.rs + genlock_wall_qpc_emit.rs). */
 	stats->wall_qpc_drift_ms = (int64_t)(genlock_wall_qpc_drift_ms());
-	/* camera-box #1303: audio genlock parity facet (v2). audio_delay_ms is the hold the audio
-	 * ingest applied (0 until the first audio callback / for a source that carries no audio);
-	 * the pairing offset is the residual vs the video latency via the pure mirror (0 = paired,
-	 * -latency_ms = audio not held). Parsed by src/jitter_audit.rs; consumed by the LOCK
-	 * indicator's audio health via src/genlock_audio_pairing.rs::decide_audio_health. */
+	/* camera-box #1303 + issue 1367: audio genlock parity facet (v2). audio_delay_ms is the hold the
+	 * audio ingest applied (the measured video delay in timecode mode, latency_ms before the first
+	 * measurement settles, 0 until the first audio callback / for a source that carries no audio);
+	 * the pairing offset is that hold minus the video's MEASURED stamp->present delay (the smoothed
+	 * head age; latency_ms before any measurement) via the pure mirror (0 = paired, -video delay =
+	 * audio not held). Parsed by src/jitter_audit.rs; consumed by the LOCK indicator's audio health
+	 * via src/genlock_audio_pairing.rs::decide_audio_health. */
 	stats->audio_enabled = obs_source_audio_active(source);
 	stats->audio_delay_ms = source->genlock_audio_delay_ms;
 	stats->audio_pairing_offset_ms = genlock_audio_pairing_offset_ms(
-		(int64_t)genlock_audio_present_delay_ns(source->genlock_audio_delay_ms), effective_latency_ms);
+		(int64_t)genlock_audio_present_delay_ns(source->genlock_audio_delay_ms),
+		genlock_audio_video_delay_ref_ns(source->genlock_video_delay_smoothed_ns, effective_latency_ms));
 	/* camera-box #1299 (v3): the DistroAV receiver's live NDI connection state. An input with
 	 * connected=false (sender not running) is excluded from the LOCK decision's DEGRADED gate so a
 	 * legitimately-idle NDI input never false-pages the fleet watchdog. Default true (obs_source_init),
@@ -5361,6 +5546,12 @@ static void genlock_audit_log(obs_source_t *source, uint64_t now_ns)
 		have_vi ? ((unsigned long long)latency_ms * fps_num + (1000ULL * fps_den) / 2) /
 				  (1000ULL * fps_den)
 			: 0ULL;
+	/* camera-box issue 1367: the audio pairing verdict, strict half a frame (-1 = fps unknown). The
+	 * program-source and ASRC-saturation inputs are not known at this seam and pass 0. */
+	const int audio_health = have_vi ? genlock_audio_decide_health(gs.audio_enabled ? 1 : 0, 0, 0,
+								       gs.audio_pairing_offset_ms,
+								       (int64_t)((1000ULL * fps_den) / fps_num))
+					 : -1;
 	blog(LOG_INFO,
 	     "genlock-fifo audit '%s': received=%llu consumed=%llu underruns=%llu "
 	     "holds=%llu overruns=%llu backward_steps=%llu dropped_due=%llu relocks=%llu late_holds=%llu locked=%d "
@@ -5394,6 +5585,19 @@ static void genlock_audit_log(obs_source_t *source, uint64_t now_ns)
 	      * irregularity, counted on arrival by genlock_stamp_track_observe. Audit-line-only
 	      * (not in obs_genlock_stats); parsed by src/jitter_audit.rs. */
 	     "stamp_dup=%llu stamp_gap=%llu "
+	     /* camera-box issue 1367: cumulative N==1 DEPTH HOLDS -- a deep N==1 conveyor held one tick
+	      * because it sat shallower than its pin-derived depth (the matching deeper-than-target
+	      * shed counts into converge_sheds=). After a restart it may fire once; in steady state it
+	      * must stay flat. Audit-line-only (not in obs_genlock_stats). */
+	     "n1_grows=%llu "
+	     /* camera-box issue 1367 (Option 3): the audio pairing's basis. audio_hold= off / latency (the
+	      * #1303 arrival + latency_ms hold, before the first measurement settles) / timecode (the NDI
+	      * timecode + the measured video delay); video_delay_ms= the smoothed MEASURED stamp->present
+	      * delay the audio follows (0 = not measured); audio_health= decide_audio_health on the
+	      * pairing offset (0 ok, 3 = more than half a frame off; -1 = fps unknown; the program-source
+	      * and ASRC-saturation inputs are not known here and pass 0). Audit-line-only (not in
+	      * obs_genlock_stats); unknown keys are ignored by src/jitter_audit.rs. */
+	     "audio_hold=%s video_delay_ms=%lld audio_health=%d "
 	     /* camera-box #1303: receiver-side AUDIO genlock parity facet. audio_enabled= the
 	      * source's NDI audio is active; audio_delay_ms= the hold applied at ingest so the
 	      * audio pairs with the video FIFO (= latency_ms for a genlock_fifo source, 0 = not
@@ -5439,6 +5643,11 @@ static void genlock_audit_log(obs_source_t *source, uint64_t now_ns)
 	     (long long)gs.wall_qpc_drift_ms,
 	     (unsigned long long)source->genlock_stamp_dups,
 	     (unsigned long long)source->genlock_stamp_gaps,
+	     (unsigned long long)source->genlock_n1_grows,
+	     /* camera-box issue 1367: the audio pairing basis (audit-line-only). */
+	     genlock_audio_hold_token(source->genlock_audio_hold_mode),
+	     (long long)((source->genlock_video_delay_smoothed_ns + 500000ull) / 1000000ull),
+	     audio_health,
 	     /* camera-box #1303: the audio parity facet, also from the shared snapshot `gs`. */
 	     gs.audio_enabled ? 1 : 0,
 	     gs.audio_delay_ms,
@@ -5622,6 +5831,111 @@ static bool genlock_should_drain_one(const obs_source_t *source, uint32_t reserv
 	       source->genlock_ticks_since_drain >= GENLOCK_DRAIN_MIN_TICK_INTERVAL;
 }
 
+/* camera-box issue 1367: the N==1 PIN-DERIVED DEPTH, PURE part. Self-contained (stdint + the
+ * GENLOCK_N1_* / GENLOCK_DRAIN_MIN_TICK_INTERVAL defines) and CONTIGUOUS with
+ * genlock_phase_converge_due below, so tests/genlock_relock_selection_parity.rs lifts the whole
+ * block standalone and proves it byte-identical to the Rust authority src/genlock_n1_depth.rs
+ * (n1_tick_wall_ns / n1_base_frames / n1_depth_frames / n1_is_deep_source / n1_shed_due /
+ * should_hold_n1_phase).
+ *
+ * WHY: a deep N==1 input (the stream NDI 2ME PGM, pin 987) had TWO absorbing depths. A strih OBS
+ * restart empties the FIFO, the release keeps its locked boundary, GAP-RESYNCs onto the first
+ * post-restart frame at ceil(pin/interval) frames (30), then presents each startup-stall DUPLICATE
+ * stamp one tick later on the STEADY path (+1 frame each); the #859 drain only fires above ceil + 2
+ * (32). Live, four restarts landed on 32 / 31 / 32 / 31 frames at a constant pin -- a whole-frame
+ * A/V step per restart.
+ *
+ * THE RULE: settle to base + 1 frames (base = the resync depth; +1 = the depth the healthy sender
+ * gap/dup tail produces anyway). Deeper -> shed ONE frame (genlock_n1_shed_due, which the source
+ * wrapper genlock_should_converge_phase calls for an N==1 tick); shallower -> HOLD one tick
+ * (genlock_n1_hold_due). Depth is the presented AGE at the render tick's SCHEDULED instant, ROUNDED
+ * to whole frames -- never the queue length (a late tick already holds the NEXT frame, so the queue
+ * reads one deep at the correct state; lowering the drain hysteresis instead churned 10 sheds/h in
+ * the bench) and never the processing wall: video_sleep (obs-video.c) catches a tick that overran
+ * by less than two intervals up without losing its slot, so the processing wall of a late tick
+ * reads the conveyor one frame too deep (review rounds 1-2). Stamps and scheduled ticks share the
+ * per-second grid, so rounding keeps the read exact for a schedule phase of up to half a frame, and
+ * the shed (rounded > base + 1) and the hold (rounded < base + 1) sit a whole frame apart (a tick
+ * EARLY past the pin's headroom to the next frame edge -- only the few ticks after a backward wall
+ * step -- moves the release deadline a frame and costs a hold/shed pair per sender gap/dup). Only a DEEP
+ * source acts: floor_frames + 2 <= base, floor = wall - newest queued stamp (a shallow cg feed /
+ * imag camera is decided by its ARRIVAL, not its pin, and stays byte-identical). Both halves act
+ * only while the scheduled tick is ON the grid (genlock_n1_tick_on_grid, review round 3): a
+ * wall-clock step leaves the ticks off the grid by the step and the render tick slews back 2 ms per
+ * tick, so a read there would shed a frame after a forward step and hold one once back on the grid.
+ * A normal or caught-up late tick is scheduled on its slot, or at most GENLOCK_MAX_SLEW_NS after it
+ * (a tick that overran the next grid point by under 2 ms sleeps to that slot + the clamped 2 ms),
+ * so it is on the grid; at that +2 ms edge the wall/monotonic read order can defer one tick. */
+static inline uint64_t genlock_n1_tick_wall_ns(uint64_t wall_now_ns, uint64_t mono_now_ns, uint64_t scheduled_mono_ns)
+{
+	const uint64_t lateness = mono_now_ns > scheduled_mono_ns ? mono_now_ns - scheduled_mono_ns : 0;
+	return wall_now_ns > lateness ? wall_now_ns - lateness : 0;
+}
+
+/* Is the scheduled tick within GENLOCK_N1_ON_GRID_NS of the grid point grid_floor_ns (the caller's
+ * grid floor of tick_wall_ns + GENLOCK_N1_ON_GRID_NS, the only point that can be that close)? */
+static inline bool genlock_n1_tick_on_grid(uint64_t tick_wall_ns, uint64_t grid_floor_ns)
+{
+	const uint64_t shifted = tick_wall_ns > UINT64_MAX - GENLOCK_N1_ON_GRID_NS ? UINT64_MAX
+										    : tick_wall_ns + GENLOCK_N1_ON_GRID_NS;
+	return shifted >= grid_floor_ns && shifted - grid_floor_ns <= 2 * GENLOCK_N1_ON_GRID_NS;
+}
+
+static inline uint64_t genlock_n1_base_frames(uint32_t latency_ms, uint64_t interval_ns)
+{
+	if (interval_ns == 0)
+		return 0;
+	const uint64_t reserve_ns = (uint64_t)latency_ms * 1000000ULL;
+	const uint64_t tolerated =
+		reserve_ns > GENLOCK_N1_PIN_FRAME_TOLERANCE_NS ? reserve_ns - GENLOCK_N1_PIN_FRAME_TOLERANCE_NS : 0;
+	return (tolerated + interval_ns - 1) / interval_ns;
+}
+
+static inline uint64_t genlock_n1_depth_frames(uint64_t tick_wall_ns, uint64_t stamp_ns, uint64_t interval_ns)
+{
+	if (interval_ns == 0)
+		return 0;
+	const uint64_t age = tick_wall_ns > stamp_ns ? tick_wall_ns - stamp_ns : 0;
+	return (age + interval_ns / 2) / interval_ns;
+}
+
+static inline bool genlock_n1_is_deep_source(uint64_t arrival_floor_ns, uint32_t latency_ms, uint64_t interval_ns)
+{
+	if (interval_ns == 0)
+		return false;
+	return arrival_floor_ns / interval_ns + GENLOCK_N1_DEEP_MARGIN_FRAMES <=
+	       genlock_n1_base_frames(latency_ms, interval_ns);
+}
+
+/* The SHED half: the last presented depth (boundary == last presented + interval) deeper than base + 1. */
+static inline bool genlock_n1_shed_due(uint64_t tick_wall_ns, uint64_t boundary_ns, uint64_t arrival_floor_ns,
+				       uint32_t latency_ms, uint64_t interval_ns, uint64_t ticks_since_drain)
+{
+	if (interval_ns == 0 || boundary_ns == 0)
+		return false;
+	if (!genlock_n1_is_deep_source(arrival_floor_ns, latency_ms, interval_ns))
+		return false;
+	return genlock_n1_depth_frames(tick_wall_ns, boundary_ns, interval_ns) >
+		       genlock_n1_base_frames(latency_ms, interval_ns) + 1 &&
+	       ticks_since_drain >= GENLOCK_DRAIN_MIN_TICK_INTERVAL;
+}
+
+/* The HOLD half: presenting the queue HEAD now would put the conveyor shallower than base + 1. Reads
+ * the head, not the boundary: a startup DUPLICATE sits one interval below the boundary and already
+ * deepens the conveyor when presented. Inert for n >= 2 (the N>=2 conveyor has its own shed). */
+static inline bool genlock_n1_hold_due(uint64_t tick_wall_ns, uint64_t head_stamp_ns, uint64_t arrival_floor_ns,
+				       uint32_t latency_ms, uint64_t interval_ns, uint32_t n,
+				       uint64_t ticks_since_drain)
+{
+	if (n >= 2 || interval_ns == 0)
+		return false;
+	if (!genlock_n1_is_deep_source(arrival_floor_ns, latency_ms, interval_ns))
+		return false;
+	return genlock_n1_depth_frames(tick_wall_ns, head_stamp_ns, interval_ns) <
+		       genlock_n1_base_frames(latency_ms, interval_ns) + 1 &&
+	       ticks_since_drain >= GENLOCK_DRAIN_MIN_TICK_INTERVAL;
+}
+
 /* camera-box #1049: the STEADY-conveyor PHASE-CONVERGENCE shed decision, PURE part.
  * Self-contained (only stdint + the scalars) so tests/genlock_relock_selection_parity.rs can
  * lift it standalone and prove it byte-identical to the Rust authority
@@ -5681,6 +5995,30 @@ static inline bool genlock_phase_converge_due(uint64_t wall_now_ns, uint64_t bou
 	return age > threshold && ticks_since_drain >= GENLOCK_DRAIN_MIN_TICK_INTERVAL;
 }
 
+/* camera-box issue 1367 (review round 2): the WALL instant the current render tick was SCHEDULED
+ * for. obs->video.video_time is the tick's scheduled monotonic instant (the sys_time async_tick
+ * passes down to ready_async_frame; video_sleep advances it one interval per tick, catch-up
+ * included, and past every skipped slot), os_gettime_ns() - video_time is how far this processing
+ * runs behind it, and wall_now is the precise wall clock read once for this tick. The monotonic
+ * read comes a few us after that wall read, and that gap counts as lateness, so the instant comes
+ * out microseconds early -- far inside the rounded read and the 2 ms on-grid window. Graphics
+ * thread only, like every caller. Mirror: src/genlock_n1_depth.rs n1_tick_wall_ns. */
+static inline uint64_t genlock_n1_tick_wall_now(uint64_t wall_now_ns)
+{
+	return genlock_n1_tick_wall_ns(wall_now_ns, os_gettime_ns(), obs->video.video_time);
+}
+
+/* camera-box issue 1367 (review round 3): genlock_n1_tick_on_grid on the ONE per-second grid the
+ * render tick and the senders use (obs-genlock-grid.h). Mirror: src/genlock_n1_depth.rs
+ * n1_tick_is_on_grid. */
+static inline bool genlock_n1_tick_is_on_grid(uint64_t tick_wall_ns, uint64_t interval_ns)
+{
+	const uint64_t shifted_ns = tick_wall_ns > UINT64_MAX - GENLOCK_N1_ON_GRID_NS
+					    ? UINT64_MAX
+					    : tick_wall_ns + GENLOCK_N1_ON_GRID_NS;
+	return genlock_n1_tick_on_grid(tick_wall_ns, genlock_grid_floor_ns(shifted_ns, interval_ns));
+}
+
 /* camera-box #1049: the source-bound wrapper -- reads the live n (READ-ONLY, same as
  * genlock_should_drain_one), the locked boundary + shared throttle, and the FRESHEST queued frame
  * (async_frames.array[num-1], the achievable-floor reference), delegates the arithmetic to
@@ -5693,10 +6031,46 @@ static bool genlock_should_converge_phase(const obs_source_t *source, uint32_t r
 	const uint32_t measured = genlock_measure_source_multiple(source, interval);
 	const uint32_t n = measured >= 1 ? measured
 					 : (source->genlock_last_known_n >= 1 ? source->genlock_last_known_n : 1);
+	/* camera-box issue 1367: an N==1 tick converges to its PIN-DERIVED depth (genlock_n1_shed_due,
+	 * read at the tick's scheduled instant, only while that is on the grid) instead of the #1049
+	 * reserve-aimed shed, which stays
+	 * inert for n < 2 below. That belongs to a tick of the N==1 STEADY branch only (review round 1):
+	 * on the N>=2 branch genlock_effective_source_multiple latched genlock_last_known_n >= 2, so a
+	 * post-erase re-measure that reads a conclusive n == 1 (a pair straddling a dropped 60 fps frame)
+	 * stays inert, exactly as before the N==1 rule. Mirror: src/probe/genlock.rs
+	 * ReleaseCadence::should_converge_phase. */
+	if (n < 2 && source->genlock_last_known_n >= 2)
+		return false;
 	const uint64_t newest_stamp =
 		source->async_frames.array[source->async_frames.num - 1]->timestamp;
+	if (n < 2) {
+		const uint64_t tick_wall = genlock_n1_tick_wall_now(wall_now);
+		return genlock_n1_tick_is_on_grid(tick_wall, interval) &&
+		       genlock_n1_shed_due(tick_wall, source->genlock_locked_next_boundary_ns,
+					   wall_now > newest_stamp ? wall_now - newest_stamp : 0, reserve_ms, interval,
+					   source->genlock_ticks_since_drain);
+	}
 	return genlock_phase_converge_due(wall_now, source->genlock_locked_next_boundary_ns, newest_stamp,
 					  reserve_ms, interval, n, source->genlock_ticks_since_drain);
+}
+
+/* camera-box issue 1367: the source-bound wrapper of the N==1 HOLD half -- reads the queue HEAD (what
+ * this STEADY tick would present) at the tick's scheduled instant (deferring while that is off the
+ * grid), the FRESHEST queued frame (the arrival floor) and the shared #859 throttle, and delegates
+ * to genlock_n1_hold_due. Called ONLY
+ * from the N==1 STEADY branch (the source multiple is 1 there by construction). Mirror:
+ * src/genlock_n1_depth.rs should_hold_n1_phase. */
+static bool genlock_should_hold_n1_phase(const obs_source_t *source, uint32_t reserve_ms, uint64_t interval,
+					 uint64_t wall_now)
+{
+	if (interval == 0 || source->async_frames.num == 0)
+		return false;
+	const uint64_t head_stamp = source->async_frames.array[0]->timestamp;
+	const uint64_t newest_stamp = source->async_frames.array[source->async_frames.num - 1]->timestamp;
+	const uint64_t tick_wall = genlock_n1_tick_wall_now(wall_now);
+	return genlock_n1_tick_is_on_grid(tick_wall, interval) &&
+	       genlock_n1_hold_due(tick_wall, head_stamp, wall_now > newest_stamp ? wall_now - newest_stamp : 0,
+				   reserve_ms, interval, 1, source->genlock_ticks_since_drain);
 }
 
 /* camera-box #1161: the fail-open MARGIN (ticks) the ACQUIRE bracketing gate
@@ -6051,6 +6425,20 @@ static bool genlock_release_tick(obs_source_t *source, uint64_t wall_now, uint64
 			 * persistent phase -- eligible for the bounded phase shed. */
 			converge_eligible = true;
 		} else {
+			/* camera-box issue 1367: a DEEP N==1 conveyor still
+			 * shallower than its pin-derived depth (base + 1 frames)
+			 * HOLDS one tick first -- a deliberate repeat, the conveyor
+			 * one frame deeper next tick -- so every restart settles on
+			 * the same depth whatever its startup stall was. Shares the
+			 * #859 drain throttle; counted as n1_grows= on the audit
+			 * line, never as a benign/late hold. Mirror:
+			 * src/genlock_n1_depth.rs should_hold_n1_phase. */
+			if (genlock_should_hold_n1_phase(source, reserve_ms, interval, wall_now)) {
+				source->genlock_n1_grows++;
+				source->genlock_ticks_since_drain = 0;
+				genlock_audit_log(source, now_ns);
+				return false;
+			}
 			/* present the OLDEST matured frame, exactly one in steady
 			 * state at any arrival skew. Presenting oldest (v1 presented
 			 * the newest matured and dropped the rest) is what makes a
@@ -6197,6 +6585,20 @@ static bool genlock_release_tick(obs_source_t *source, uint64_t wall_now, uint64
 		next_frame->timestamp + interval;
 	source->genlock_frames_consumed++;
 	source->last_frame_ts = next_frame->timestamp;
+	/* camera-box issue 1367 (Option 3): track this source's REAL stamp->present delay for its audio
+	 * -- the age of the frame this tick PRESENTS (the queue head on a canvas-rate source, the newest
+	 * matured frame on an N >= 2 source, whose head is (N-1) source intervals older) at the tick's
+	 * SCHEDULED instant (the head skew sampled in ready_async_frame is taken at the processing wall
+	 * and carries tick lateness). A tick off the per-second grid (a wall step slewing back) is not
+	 * sampled. EMA-smoothed and re-applied only on a half-frame move once settled; the audio ingest
+	 * (source_output_audio_data) places this source's audio at its timecode + the applied delay. */
+	const uint64_t genlock_delay_tick_wall = genlock_n1_tick_wall_now(wall_now);
+	if (genlock_n1_tick_is_on_grid(genlock_delay_tick_wall, interval))
+		genlock_video_delay_track(&source->genlock_video_delay_smoothed_ns,
+					  &source->genlock_video_delay_applied_ms,
+					  &source->genlock_video_delay_settle_ticks,
+					  genlock_video_delay_sample_ns(genlock_delay_tick_wall, next_frame->timestamp),
+					  interval);
 	genlock_audit_log(source, now_ns);
 	return true;
 }

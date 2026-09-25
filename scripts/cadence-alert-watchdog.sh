@@ -68,6 +68,9 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/strih-log-read.sh
 # issue 1360: a Linux strih (strih-lx) is read through the ONE shared strih OBS-log reader.
 . "$HERE/lib/strih-log-read.sh"
+# shellcheck source=scripts/lib/genlock-park.sh
+# issue 1242: a PARKED program-path input (connect-on-show, hidden) is HIDDEN BY DESIGN -> SKIP.
+. "$HERE/lib/genlock-park.sh"
 
 DRY_RUN=0
 case "${1:-}" in
@@ -254,6 +257,20 @@ handle_source() {
   k="$(source_key "$source")"
   prev_recv="$(read_state_field "recv_${k}" "")"
   prev_ts="$(read_state_field "recv_ts_${k}" "")"
+
+  # issue 1242: a PARKED program-path input (connect-on-show: nothing shows it, so its NDI receiver is
+  # released by design) delivers no frames BY DESIGN -- HIDDEN BY DESIGN -> SKIP. Never a cadence
+  # verdict, never a blind-tap count; the stale baseline is dropped so the first pass after it is shown
+  # again reseeds instead of dividing a post-unpark delta by a window that spans the whole park.
+  if [ "$box_reachable" = "1" ] && \
+     [ "$(printf '%s\n' "$raw_log" | genlock_park_state_of "$source")" = "parked" ]; then
+    log "'$source' on $CADENCE_NAME: parked (connect-on-show, hidden by design, issue 1242) -> SKIP"
+    write_state_field "recv_${k}" ""
+    write_state_field "recv_ts_${k}" ""
+    write_state_field "unknown_${k}" 0
+    clear_source_throttle "$k"
+    return 0
+  fi
 
   # Extract this source's newest sample from the ONCE-fetched box log. When the no-double-page guard
   # forced SKIP (box down per issue-1001) the raw log is empty, so the sample is empty and the verdict

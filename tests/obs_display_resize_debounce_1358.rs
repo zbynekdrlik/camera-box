@@ -14,7 +14,7 @@
 //!
 //! SOURCE-level guard, not a runtime test (the vendored Qt/C++ compiles only on CI, Tier-0). It
 //! defends against an upstream `git subtree pull` silently restoring the per-event resize. Same
-//! vendored-source-assertion convention as tests/obs_projector_child_host_1352.rs.
+//! vendored-source-assertion convention as tests/obs_projector_stock_toplevel_1357.rs.
 
 use std::path::PathBuf;
 

@@ -454,3 +454,13 @@ The pure helper is the std-only lift-compile/truth-table gate (a `>= → >` scra
 on the 5 s boundary vector); the live receive-path cure reproduces only live — the acceptance is a
 fleet deploy (7 senders restarting within 45 s) after which every strih camera input's `received=`
 advances within 60 s with no WS heal and no OBS relaunch (the supervisor's post-deploy repro).
+
+## issue 1242 — the connect-on-show PARK is in-thread, never a hide-path thread stop
+
+A genlocked source flagged `genlock_connect_on_show` (the strih program-path role) PARKS while
+hidden: at the TOP of the receiver loop, before the reset block, it hands its receiver to the
+issue-1320 detached reaper and `continue`s; on show it re-arms `reset_ndi_receiver`. It never
+`break`s, never clears `s->running`, never empties `ndi_source_name`, and the forced behavior stays
+KEEP_ACTIVE — because libobs calls `info.hide` on the GRAPHICS thread, and the stock STOP_RESUME
+hide path would `pthread_join` the receiver thread there on every cut. Full mechanism, roles and
+consumer contract: `.claude/rules/strih-bandwidth-roles.md`.

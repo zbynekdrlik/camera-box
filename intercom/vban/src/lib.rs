@@ -124,6 +124,15 @@ impl VbanHeader {
         }
     }
 
+    /// The sample rate in Hz, or `None` for a reserved rate index (20..=31). Unlike
+    /// [`VbanHeader::sample_rate`] there is no 48 kHz fallback, so a receiver that must honour the
+    /// rate (the strih intercom hub, issue 1345) can reject an unknown one instead of mis-playing it.
+    pub fn sample_rate_checked(&self) -> Option<u32> {
+        SAMPLE_RATES
+            .get((self.sample_rate_index & 0x1F) as usize)
+            .copied()
+    }
+
     /// Get the actual number of channels
     #[allow(dead_code)]
     pub fn num_channels(&self) -> u8 {
@@ -230,6 +239,21 @@ mod tests {
         assert_eq!(decoded.sample_rate(), 48000);
         assert_eq!(decoded.num_channels(), 2);
         assert_eq!(decoded.stream_name_str(), "test");
+    }
+
+    #[test]
+    fn sample_rate_checked_is_none_for_a_reserved_index() {
+        let header = VbanHeader::new("t", 96000, 2, VbanCodec::Pcm16).unwrap();
+        let mut enc = header.encode(64);
+        assert_eq!(
+            VbanHeader::decode(&enc).unwrap().sample_rate_checked(),
+            Some(96000)
+        );
+        enc[4] = 20; // rate indices 20..=31 are reserved
+        let decoded = VbanHeader::decode(&enc).unwrap();
+        assert_eq!(decoded.sample_rate_checked(), None);
+        // The lenient accessor the appliance uses keeps its 48 kHz fallback.
+        assert_eq!(decoded.sample_rate(), 48000);
     }
 
     #[test]

@@ -107,6 +107,15 @@ default the script fetches the latest successful CI artifact from **`main`** —
 the `[0/8]` PIN-DRIFT gate, as cam1 did on 2026-09-13). Override the branch with
 `CAMERA_BOX_CI_BRANCH` if you deliberately need a different channel.
 
+`--yes` / `-y` (issue 1311) skips the "Continue with setup? (y/N)" prompt for a remote/unattended
+run -- never pipe a `y` in. Without `--yes`, an EOF on stdin aborts (no hang, no guessed yes).
+
+Before the first apt/curl the script checks the clock against the HTTP `Date` header of
+`http://archive.ubuntu.com/ubuntu/` (issue 1311). A box booted after a CMOS reset can be months
+behind, which breaks apt ("Release file ... is not valid yet") and TLS. More than one day behind:
+it sets the clock FORWARD from that header and logs `!!! CLOCK`. It never moves a clock backward,
+and dantesync (STEP 17) owns the clock afterwards. An unreadable archive only warns.
+
 The script performs 19 steps (hostname, static IP, binary install, NDI library, ALSA, camera-box
 systemd unit + `cpu-affinity.conf`/`genlock.conf` drop-ins, auto-login, capabilities, GRUB
 hardening, network-wait timeout, power-button remap, sleep/power-saving disable, network tuning,
@@ -186,7 +195,15 @@ something `verify-device.sh` should be loosened to tolerate.
   before setup). Cure for THAT window: COLD power-off/on (black USB2 port), boot-menu pick if needed,
   run `setup-device.sh <BOX>` (STEP 17d then creates the entry), or as a manual fallback run ON the
   box `efibootmgr -c -d /dev/sda -p 1 -L cam-box -l '\EFI\BOOT\BOOTX64.EFI'` so a named entry leads
-  `BootOrder`. Verify the stick itself from dev1
+  `BootOrder`. **`efibootmgr -c` succeeding is NOT proof (issue 1311, M.2 migration 24.9.2026):**
+  cam1 ended up with no entry and cam2 with a firmware-mangled `VenHw(...)` device path that was not
+  first. Both create-usb and STEP 17d now run the shared `efi_cam_box_ensure`
+  (`scripts/lib/efi-boot-entry.sh`). It reads the entry back with `efibootmgr -v`, requires an `HD(...)`
+  path on this disk's ESP PARTUUID that leads `BootOrder`, deletes + recreates a mangled or stale entry,
+  and fails loud when it still cannot get one: create-usb exits, setup-device records it and STEP 19
+  refuses "Setup Complete" (STEP 18's read-only fstab still runs). verify-device `(al)` reads
+  `efibootmgr -v` + the `/boot/efi` PARTUUID, so a leading `VenHw(...)` entry no longer passes. A manual repair follows the same shape: `efibootmgr
+  -v`, `efibootmgr -b <num> -B` for the bad entry, recreate, re-check. Verify the stick itself from dev1
   READ-ONLY, never by re-flashing: ro-mount + `sgdisk -v` + grub/UUID/fstab reads, the stick's own
   `cambox-journal` partition (`journalctl --directory=<mount>/<machine-id> --list-boots` proves whether
   it booted after provisioning), and a QEMU/OVMF boot (`-drive file=/dev/sdX,format=raw,readonly=on,

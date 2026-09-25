@@ -509,3 +509,34 @@ run via the #1026 standalone-rustc recipe) goes RED if the patch regresses — t
 compiles only on `linux-genlock.yml`, and this change spans the FRONTEND (obs binary) too, so the
 imag deploy is FULL-BUNDLE (frontend + libobs + libobs-opengl.so via setup-imag.sh), never a
 libobs-opengl-only hot-swap.
+
+## The WHOLE `obs-source.c` type-checks locally, and every std-only test reading it runs locally (issue 1367)
+
+"Zero local verification path" is no longer true for `obs-source.c` as a whole:
+
+- **Type-check the real file.** Run `gcc -std=gnu11 -fsyntax-only -Wall -Wextra -Wformat=2
+  -I<wt>/vendor/obs-studio/libobs -I<wt>/vendor/obs-studio/deps
+  -I<wt>/vendor/obs-studio/deps/libcaption -I<gen> -DHAVE_OBSCONFIG_H obs-source.c`.
+  - `<gen>/obsconfig.h` is a four-line stub: `OBS_DATA_PATH`, `OBS_PLUGIN_PATH`,
+    `OBS_PLUGIN_DESTINATION` and `OBS_INSTALL_PREFIX` as string defines.
+  - This catches undeclared identifiers, a helper used before its definition (a missing forward
+    declaration), and type errors.
+  - `blog()` has a printf format attribute, so it also checks every audit-line specifier against its
+    argument.
+  - Only the pre-existing `-Wcomment` warning at the fps-seqlock comment prints.
+- **Run every std-only test that reads the file.** Classify each file from
+  `grep -l obs-source.c tests/*.rs`:
+  - a file with no `camera_box::`, `tempfile`, `CARGO_BIN_EXE` or probe gate compiles as
+    `CARGO_MANIFEST_DIR=<wt> rustc --edition 2021 --test tests/<f>.rs`;
+  - today that is `genlock_release_cadence`, `genlock_lock_indicator_guards`,
+    `genlock_wall_qpc_emit` and `genlock_audio_timecode_placement_1367`;
+  - run all of them, not only the file you wrote.
+- **Live miss (issue 1367):** a new third `genlock_n1_tick_wall_now(wall_now)` reader broke
+  `genlock_release_cadence`'s count-2 anchor and the matching `Count -ne 2` in both pwsh gates. The
+  lane's own local run covered only its new files and reported green; a fresh-context review caught
+  it. A sanity check: point `CARGO_MANIFEST_DIR` at a scratch tree holding the PREVIOUS
+  `obs-source.c` to prove a new anchor is RED there.
+- **Sampling a release-tick quantity: use the PRESENTED frame, never `array[0]` before the release
+  decision.** On a source at N ≥ 2 × the canvas rate the STEADY branch presents the newest matured
+  frame; the head is (N − 1) source intervals older. The presented frame is `next_frame` at the
+  present tail of `genlock_release_tick`, after every erase, drain and converge shed.

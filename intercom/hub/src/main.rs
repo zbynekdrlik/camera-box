@@ -20,11 +20,15 @@ use std::sync::mpsc::SyncSender;
 use intercom_hub::engine::{Engine, InputBlock};
 use intercom_hub::http::{router, AppState};
 use intercom_hub::local_audio::{
-    spawn_local_source, spawn_program_sink, LocalAudioStats, LocalSourceConfig,
+    spawn_local_sink, spawn_local_source, spawn_program_sink, LocalAudioStats, LocalSinkConfig,
+    LocalSourceConfig, LOCAL_CAPTURE_CAP_BLOCKS, LOCAL_CAPTURE_TARGET_FRAMES,
 };
 use intercom_hub::matrix::Matrix;
 use intercom_hub::state::{HubState, RuntimeStats};
-use intercom_hub::vban_io::{resolve_vban_addr, route_packet, JitterBuffer, OutBlock, VbanSender};
+use intercom_hub::vban_io::{
+    resolve_vban_addr, route_packet, to_hub_rate, JitterBuffer, OutBlock, VbanSender,
+};
+use intercom_hub::vban_rate::{VbanRateConverter, VbanRateStats};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 const DEFAULT_CONFIG: &str = "/etc/intercom-hub/intercom.toml";
@@ -131,11 +135,7 @@ async fn main() -> Result<()> {
         });
     }
     let engine = Arc::new(Engine::new(matrix.clone()));
-    let jitter: Arc<Mutex<Vec<JitterBuffer>>> = Arc::new(Mutex::new(
-        (0..n)
-            .map(|_| JitterBuffer::new(block_frames * JITTER_CAP_BLOCKS))
-            .collect(),
-    ));
+    let jitter: Arc<Mutex<Vec<JitterBuffer>>> = Arc::new(Mutex::new(input_buffers(&matrix)));
 
     // --- Janus audiobridge edge (issue 1345 M3a): the phones participant's plain-RTP leg ---------
     // When the matrix declares a `janus` participant AND a `[janus]` table, spawn the adapter task:
@@ -199,6 +199,298 @@ async fn main() -> Result<()> {
         _ => None,
     };
 
+    // --- Local PipeWire audio (issues 1344 + 1345): the program sink, the talkback capture and the
+    // talkback playback — see `wire_local_audio`.
+    let LocalAudioWiring {
+        program_sink_tx,
+        program_out_report,
+        reports: local_audio_reports,
+        local_sinks,
+    } = wire_local_audio(&matrix, &jitter);
+
+    // --- Interkom picture (issue 1345 M3c): the NDI low-bandwidth → JPEG → /interkom.mjpeg pipe ----
+    // When the matrix declares a `[video]` table AND it is enabled, spawn the capture worker (its own
+    // OS thread — the NDI recv is a blocking FFI call). The shared slot feeds `/interkom.mjpeg`,
+    // `/interkom.jpg`, and the `/api/state` `video` facet. Absent/disabled → the hub serves no picture.
+    let video_state: Option<Arc<intercom_hub::ndi_video::VideoState>> = match &matrix.video {
+        Some(v) if v.enabled => {
+            let st = intercom_hub::ndi_video::start(v);
+            tracing::info!(source = %v.ndi_source_name, fps = v.fps, jpeg_quality = v.jpeg_quality, "interkom-video picture leg enabled");
+            Some(st)
+        }
+        Some(_) => {
+            tracing::info!(
+                "interkom-video picture leg present but disabled ([video].enabled = false)"
+            );
+            None
+        }
+        None => None,
+    };
+
+    // Seed the live channel so a client connecting before the first tick sees current state.
+    let initial = Arc::new(HubState::snapshot(
+        &matrix,
+        VERSION,
+        &vec![RuntimeStats::default(); n],
+    ));
+    let (live_tx, live_rx) = tokio::sync::watch::channel(initial);
+
+    // --- receive task: demux packets, bring each stream to the hub rate, push into its buffer --
+    // Each VBAN input stream owns a rate converter (issue 1345: fohabl-strih arrives at 96 kHz). The
+    // converters live in this task alone (no lock); their rate + reject count are published to the
+    // lock-free `rate_stats` slots the block loop reads for /api/state.
+    let rate_stats: Arc<Vec<VbanRateStats>> =
+        Arc::new((0..n).map(|_| VbanRateStats::default()).collect());
+    {
+        let jitter = jitter.clone();
+        let rate_stats = rate_stats.clone();
+        tokio::spawn(async move {
+            let mut buf = vec![0u8; 65536];
+            let mut converters: Vec<VbanRateConverter> = (0..n)
+                .map(|_| VbanRateConverter::new(sample_rate))
+                .collect();
+            loop {
+                match vban_socket.recv_from(&mut buf).await {
+                    Ok((len, _from)) => {
+                        if let Some((id, audio, rate)) = route_packet(&input_streams, &buf[..len]) {
+                            let Some(conv) = converters.get_mut(id) else {
+                                continue;
+                            };
+                            let converted = to_hub_rate(conv, audio, rate);
+                            if let Some(slot) = rate_stats.get(id) {
+                                slot.publish(conv);
+                            }
+                            if let Some(audio) = converted {
+                                if let Ok(mut jb) = jitter.lock() {
+                                    if let Some(b) = jb.get_mut(id) {
+                                        b.push(&audio);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "VBAN recv error");
+                    }
+                }
+            }
+        });
+    }
+
+    // --- block/mix task: pop a block from every buffer, mix N-1, send each cambox's stream ----
+    {
+        let jitter = jitter.clone();
+        let engine = engine.clone();
+        let matrix = matrix.clone();
+        let out_addrs = out_addrs.clone();
+        let video_for_loop = video_state.clone();
+        // `janus_mix_tx` + `janus_report` are captured by the `async move` below (the block loop is
+        // their sole feeder + facet reader); nothing uses them after this spawn.
+        let sender = VbanSender::bind_ephemeral().context("bind VBAN send socket")?;
+        // Status push cadence: ~1 s worth of blocks.
+        let status_every = ((sample_rate as usize) / block_frames.max(1)).max(1);
+        tokio::spawn(async move {
+            let period = std::time::Duration::from_micros(
+                (block_frames as u64) * 1_000_000 / (sample_rate.max(1) as u64),
+            );
+            let mut ticker = tokio::time::interval(period);
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            let mut tx_packets = vec![0u64; n];
+            let mut frame_counter = vec![0u32; n];
+            let mut cycle: u64 = 0;
+            loop {
+                ticker.tick().await;
+                cycle = cycle.wrapping_add(1);
+
+                // Pop one block per participant + gather rx stats under the lock.
+                let mut input = InputBlock::silent(n);
+                let mut rx_stats = vec![RuntimeStats::default(); n];
+                if let Ok(mut jb) = jitter.lock() {
+                    for (id, b) in jb.iter_mut().enumerate() {
+                        input.set(id, b.pop_block(block_frames));
+                        rx_stats[id].rx_packets = b.rx_packets;
+                        rx_stats[id].underruns = b.underruns;
+                        rx_stats[id].overruns = b.overruns;
+                        rx_stats[id].last_rx_age_ms = b.last_rx_age_ms();
+                        rx_stats[id].level_dbfs = b.last_level_dbfs();
+                        if let Some(slot) = rate_stats.get(id) {
+                            rx_stats[id].sample_rate = slot.sample_rate();
+                            rx_stats[id].rate_rejects = slot.rate_rejects();
+                        }
+                    }
+                }
+
+                let output = engine.mix_block(&input, block_frames);
+
+                // Feed the phones participant's mixed output into the Janus adapter (M3a). Best-effort
+                // try_send: a dropped 20 ms block on backpressure is tolerable talkback jitter, never
+                // a reason to block the mix loop.
+                if let (Some(tx), Some((pid, _))) = (&janus_mix_tx, &janus_report) {
+                    let interleaved = output.interleaved(*pid, block_frames);
+                    if !interleaved.is_empty() {
+                        let _ = tx.try_send(interleaved);
+                    }
+                }
+
+                // Feed the program_out participant's mixed output into the PipeWire sink (issue 1344).
+                // Best-effort try_send: a full queue drops the block (talkback/program jitter is
+                // tolerable), never blocking the mix loop.
+                if let (Some(tx), Some((pid, _))) = (&program_sink_tx, &program_out_report) {
+                    let interleaved = output.interleaved(*pid, block_frames);
+                    if !interleaved.is_empty() {
+                        let _ = tx.try_send(interleaved);
+                    }
+                }
+
+                // Feed every local playback sink its participant's OWN N-1 output bus (issue 1345: the
+                // cutters -> the operator's MiniFuse headphones). Best-effort try_send, like above.
+                for (pid, tx) in &local_sinks {
+                    let interleaved = output.interleaved(*pid, block_frames);
+                    if !interleaved.is_empty() {
+                        let _ = tx.try_send(interleaved);
+                    }
+                }
+
+                // Send each cambox its mixed stereo stream — to the CACHED resolved address only.
+                let addrs: Vec<Option<SocketAddr>> =
+                    out_addrs.lock().map(|a| (*a).clone()).unwrap_or_default();
+                for (slot, (id, stream, host)) in outputs.iter().enumerate() {
+                    let Some(addr) = addrs.get(slot).copied().flatten() else {
+                        if cycle.is_multiple_of(status_every as u64) {
+                            tracing::warn!(%stream, %host, "VBAN output still unresolved — not sending");
+                        }
+                        continue;
+                    };
+                    let chans = matrix.participants[*id].out_channels.max(1) as u8;
+                    let interleaved = output.interleaved(*id, block_frames);
+                    frame_counter[*id] = frame_counter[*id].wrapping_add(1);
+                    let block = OutBlock {
+                        stream_name: stream,
+                        sample_rate,
+                        channels: chans,
+                        frame_counter: frame_counter[*id],
+                        interleaved: &interleaved,
+                        frames: block_frames,
+                    };
+                    match sender.send_block(addr, &block) {
+                        Ok(()) => tx_packets[*id] = tx_packets[*id].wrapping_add(1),
+                        Err(e) => {
+                            tracing::debug!(target: "vban_send", %stream, %host, %addr, error=%e, "VBAN send failed")
+                        }
+                    }
+                }
+
+                if cycle.is_multiple_of(status_every as u64) {
+                    for (id, s) in rx_stats.iter_mut().enumerate() {
+                        s.tx_packets = tx_packets[id];
+                    }
+                    // Attach the Janus facet to the phones participant's stats (M3a).
+                    if let Some((pid, jstats)) = &janus_report {
+                        if let Some(s) = rx_stats.get_mut(*pid) {
+                            s.janus = Some(jstats.snapshot());
+                        }
+                    }
+                    // Attach the local-audio facet to the program_out + talkback capture stats (1344).
+                    if let Some((pid, lstats)) = &program_out_report {
+                        if let Some(s) = rx_stats.get_mut(*pid) {
+                            s.local_audio = Some(lstats.snapshot());
+                        }
+                    }
+                    for (pid, lstats) in &local_audio_reports {
+                        if let Some(s) = rx_stats.get_mut(*pid) {
+                            s.local_audio = Some(lstats.snapshot());
+                        }
+                    }
+                    let mut snapshot = HubState::snapshot(&matrix, VERSION, &rx_stats);
+                    // Attach the Interkom picture facet (M3c) when the video leg is running.
+                    if let Some(vs) = &video_for_loop {
+                        let now_wall = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_millis() as u64)
+                            .unwrap_or(0);
+                        snapshot.video = Some(vs.snapshot(now_wall));
+                    }
+                    tracing::info!("{}", snapshot.status_line());
+                    let _ = live_tx.send(Arc::new(snapshot));
+                }
+            }
+        });
+    }
+
+    tracing::info!(
+        version = VERSION,
+        %http_addr,
+        participants = n,
+        vban_bind = %matrix.hub.vban_bind,
+        outputs = n_outputs,
+        "intercom-hub starting"
+    );
+
+    let state = AppState {
+        live: live_rx,
+        video: video_state,
+    };
+    let listener = tokio::net::TcpListener::bind(http_addr)
+        .await
+        .with_context(|| format!("bind HTTP {http_addr}"))?;
+    axum::serve(listener, router(state))
+        .with_graceful_shutdown(shutdown_signal())
+        .await?;
+    Ok(())
+}
+
+/// One input buffer per participant (issue 1345, 24.9.2026). The local PipeWire captures (the
+/// MiniFuse talkback) get the target-fill ring that absorbs pw-cat's 1024-frame bursts; the generic
+/// 2048-frame no-prefill buffer spliced ~8x/s. Every buffer fans a mono packet into ch2 for a
+/// participant with >= 2 input channels (the camboxes send mono VBAN).
+fn input_buffers(matrix: &Matrix) -> Vec<JitterBuffer> {
+    let block_frames = matrix.hub.block_frames;
+    let local_capture_ids: std::collections::HashSet<usize> = matrix
+        .local_inputs()
+        .into_iter()
+        .map(|(pid, _, _)| pid)
+        .collect();
+    matrix
+        .participants
+        .iter()
+        .enumerate()
+        .map(|(id, p)| {
+            // The Janus (phones) ingress is bursty 960-frame RTP chunks, so it gets the same
+            // target-fill ring as a local capture input (issue 1345: ~60 overruns/s otherwise).
+            let jb = if local_capture_ids.contains(&id)
+                || p.adapter == intercom_hub::matrix::ADAPTER_JANUS
+            {
+                JitterBuffer::local_capture(
+                    block_frames * LOCAL_CAPTURE_CAP_BLOCKS,
+                    LOCAL_CAPTURE_TARGET_FRAMES,
+                )
+            } else {
+                JitterBuffer::new(block_frames * JITTER_CAP_BLOCKS)
+            };
+            jb.with_min_channels(p.in_channels)
+        })
+        .collect()
+}
+
+/// The running local PipeWire bridges the block loop feeds and reports on.
+struct LocalAudioWiring {
+    /// The `program_out` sink's feed (the OBS program capture), if declared.
+    program_sink_tx: Option<SyncSender<Vec<i16>>>,
+    /// The `program_out` participant + its facet counters, if declared.
+    program_out_report: Option<(usize, Arc<LocalAudioStats>)>,
+    /// Every capture / talkback-playback participant + its facet counters (one entry per
+    /// participant; a participant that both captures and plays shares one).
+    reports: Vec<(usize, Arc<LocalAudioStats>)>,
+    /// Every talkback playback sink's feed, by participant (fed from its OWN N-1 output bus).
+    local_sinks: Vec<(usize, SyncSender<Vec<i16>>)>,
+}
+
+/// Spawn every local PipeWire bridge the matrix declares (issues 1344 + 1345). None of them ever
+/// starts from a dev lane (the live PipeWire is on the notebook); absent config = the hub without
+/// local audio.
+fn wire_local_audio(matrix: &Matrix, jitter: &Arc<Mutex<Vec<JitterBuffer>>>) -> LocalAudioWiring {
+    let sample_rate = matrix.hub.sample_rate;
+    let block_frames = matrix.hub.block_frames;
     // --- Local PipeWire audio (issue 1344): the last VB-Matrix function on the strih-lx notebook ---
     // EGRESS: when the matrix declares a `program_out` (a pipewire sink), spawn its supervised
     // `pw-cat --playback` bridge; the block loop feeds it the engine's summed program mix
@@ -251,204 +543,53 @@ async fn main() -> Result<()> {
         })
         .collect();
 
-    // --- Interkom picture (issue 1345 M3c): the NDI low-bandwidth → JPEG → /interkom.mjpeg pipe ----
-    // When the matrix declares a `[video]` table AND it is enabled, spawn the capture worker (its own
-    // OS thread — the NDI recv is a blocking FFI call). The shared slot feeds `/interkom.mjpeg`,
-    // `/interkom.jpg`, and the `/api/state` `video` facet. Absent/disabled → the hub serves no picture.
-    let video_state: Option<Arc<intercom_hub::ndi_video::VideoState>> = match &matrix.video {
-        Some(v) if v.enabled => {
-            let st = intercom_hub::ndi_video::start(v);
-            tracing::info!(source = %v.ndi_source_name, fps = v.fps, jpeg_quality = v.jpeg_quality, "interkom-video picture leg enabled");
-            Some(st)
-        }
-        Some(_) => {
+    // --- Local PipeWire PLAYBACK (issue 1345, 24.9.2026): the operator heard NOTHING because the
+    // cutters were capture-only. Every pipewire participant other than the program_out that declares
+    // output channels + a `pipewire_target` gets its own supervised `pw-cat --playback` sink fed from
+    // its OWN N-1 output bus (the cutters' 4 channels -> the MiniFuse AUX0..3). A participant that is
+    // also a capture shares one stats facet (rx from the capture, tx from the sink).
+    let mut local_output_reports: Vec<(usize, Arc<LocalAudioStats>)> = Vec::new();
+    let local_sinks: Vec<(usize, SyncSender<Vec<i16>>)> = matrix
+        .local_outputs()
+        .into_iter()
+        .map(|(pid, target, chans, channel_map)| {
+            let stats = match local_input_reports.iter().find(|(id, _)| *id == pid) {
+                Some((_, shared)) => shared.clone(),
+                None => {
+                    let fresh = Arc::new(LocalAudioStats::default());
+                    local_output_reports.push((pid, fresh.clone()));
+                    fresh
+                }
+            };
             tracing::info!(
-                "interkom-video picture leg present but disabled ([video].enabled = false)"
+                %target,
+                participant = pid,
+                channels = chans,
+                channel_map = ?channel_map,
+                "local-audio: talkback playback (PipeWire) enabled from the participant's N-1 bus"
             );
-            None
-        }
-        None => None,
-    };
-
-    // Seed the live channel so a client connecting before the first tick sees current state.
-    let initial = Arc::new(HubState::snapshot(
-        &matrix,
-        VERSION,
-        &vec![RuntimeStats::default(); n],
-    ));
-    let (live_tx, live_rx) = tokio::sync::watch::channel(initial);
-
-    // --- receive task: demux packets into per-participant jitter buffers ---------------------
-    {
-        let jitter = jitter.clone();
-        tokio::spawn(async move {
-            let mut buf = vec![0u8; 65536];
-            loop {
-                match vban_socket.recv_from(&mut buf).await {
-                    Ok((len, _from)) => {
-                        if let Some((id, audio)) = route_packet(&input_streams, &buf[..len]) {
-                            if let Ok(mut jb) = jitter.lock() {
-                                if let Some(b) = jb.get_mut(id) {
-                                    b.push(&audio);
-                                }
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        tracing::warn!(error = %e, "VBAN recv error");
-                    }
-                }
-            }
-        });
-    }
-
-    // --- block/mix task: pop a block from every buffer, mix N-1, send each cambox's stream ----
-    {
-        let jitter = jitter.clone();
-        let engine = engine.clone();
-        let matrix = matrix.clone();
-        let out_addrs = out_addrs.clone();
-        let video_for_loop = video_state.clone();
-        // `janus_mix_tx` + `janus_report` are captured by the `async move` below (the block loop is
-        // their sole feeder + facet reader); nothing uses them after this spawn.
-        let sender = VbanSender::bind_ephemeral().context("bind VBAN send socket")?;
-        // Status push cadence: ~1 s worth of blocks.
-        let status_every = ((sample_rate as usize) / block_frames.max(1)).max(1);
-        tokio::spawn(async move {
-            let period = std::time::Duration::from_micros(
-                (block_frames as u64) * 1_000_000 / (sample_rate.max(1) as u64),
+            let tx = spawn_local_sink(
+                LocalSinkConfig {
+                    target,
+                    rate: sample_rate,
+                    channels: chans.clamp(1, u8::MAX as usize) as u8,
+                    channel_map,
+                    label: "talkback playback",
+                },
+                stats,
             );
-            let mut ticker = tokio::time::interval(period);
-            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-            let mut tx_packets = vec![0u64; n];
-            let mut frame_counter = vec![0u32; n];
-            let mut cycle: u64 = 0;
-            loop {
-                ticker.tick().await;
-                cycle = cycle.wrapping_add(1);
+            (pid, tx)
+        })
+        .collect();
 
-                // Pop one block per participant + gather rx stats under the lock.
-                let mut input = InputBlock::silent(n);
-                let mut rx_stats = vec![RuntimeStats::default(); n];
-                if let Ok(mut jb) = jitter.lock() {
-                    for (id, b) in jb.iter_mut().enumerate() {
-                        input.set(id, b.pop_block(block_frames));
-                        rx_stats[id].rx_packets = b.rx_packets;
-                        rx_stats[id].underruns = b.underruns;
-                        rx_stats[id].overruns = b.overruns;
-                        rx_stats[id].last_rx_age_ms = b.last_rx_age_ms();
-                        rx_stats[id].level_dbfs = b.last_level_dbfs();
-                    }
-                }
-
-                let output = engine.mix_block(&input, block_frames);
-
-                // Feed the phones participant's mixed output into the Janus adapter (M3a). Best-effort
-                // try_send: a dropped 20 ms block on backpressure is tolerable talkback jitter, never
-                // a reason to block the mix loop.
-                if let (Some(tx), Some((pid, _))) = (&janus_mix_tx, &janus_report) {
-                    let interleaved = output.interleaved(*pid, block_frames);
-                    if !interleaved.is_empty() {
-                        let _ = tx.try_send(interleaved);
-                    }
-                }
-
-                // Feed the program_out participant's mixed output into the PipeWire sink (issue 1344).
-                // Best-effort try_send: a full queue drops the block (talkback/program jitter is
-                // tolerable), never blocking the mix loop.
-                if let (Some(tx), Some((pid, _))) = (&program_sink_tx, &program_out_report) {
-                    let interleaved = output.interleaved(*pid, block_frames);
-                    if !interleaved.is_empty() {
-                        let _ = tx.try_send(interleaved);
-                    }
-                }
-
-                // Send each cambox its mixed stereo stream — to the CACHED resolved address only.
-                let addrs: Vec<Option<SocketAddr>> =
-                    out_addrs.lock().map(|a| (*a).clone()).unwrap_or_default();
-                for (slot, (id, stream, host)) in outputs.iter().enumerate() {
-                    let Some(addr) = addrs.get(slot).copied().flatten() else {
-                        if cycle.is_multiple_of(status_every as u64) {
-                            tracing::warn!(%stream, %host, "VBAN output still unresolved — not sending");
-                        }
-                        continue;
-                    };
-                    let chans = matrix.participants[*id].out_channels.max(1) as u8;
-                    let interleaved = output.interleaved(*id, block_frames);
-                    frame_counter[*id] = frame_counter[*id].wrapping_add(1);
-                    let block = OutBlock {
-                        stream_name: stream,
-                        sample_rate,
-                        channels: chans,
-                        frame_counter: frame_counter[*id],
-                        interleaved: &interleaved,
-                        frames: block_frames,
-                    };
-                    match sender.send_block(addr, &block) {
-                        Ok(()) => tx_packets[*id] = tx_packets[*id].wrapping_add(1),
-                        Err(e) => {
-                            tracing::debug!(target: "vban_send", %stream, %host, %addr, error=%e, "VBAN send failed")
-                        }
-                    }
-                }
-
-                if cycle.is_multiple_of(status_every as u64) {
-                    for (id, s) in rx_stats.iter_mut().enumerate() {
-                        s.tx_packets = tx_packets[id];
-                    }
-                    // Attach the Janus facet to the phones participant's stats (M3a).
-                    if let Some((pid, jstats)) = &janus_report {
-                        if let Some(s) = rx_stats.get_mut(*pid) {
-                            s.janus = Some(jstats.snapshot());
-                        }
-                    }
-                    // Attach the local-audio facet to the program_out + talkback capture stats (1344).
-                    if let Some((pid, lstats)) = &program_out_report {
-                        if let Some(s) = rx_stats.get_mut(*pid) {
-                            s.local_audio = Some(lstats.snapshot());
-                        }
-                    }
-                    for (pid, lstats) in &local_input_reports {
-                        if let Some(s) = rx_stats.get_mut(*pid) {
-                            s.local_audio = Some(lstats.snapshot());
-                        }
-                    }
-                    let mut snapshot = HubState::snapshot(&matrix, VERSION, &rx_stats);
-                    // Attach the Interkom picture facet (M3c) when the video leg is running.
-                    if let Some(vs) = &video_for_loop {
-                        let now_wall = std::time::SystemTime::now()
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .map(|d| d.as_millis() as u64)
-                            .unwrap_or(0);
-                        snapshot.video = Some(vs.snapshot(now_wall));
-                    }
-                    tracing::info!("{}", snapshot.status_line());
-                    let _ = live_tx.send(Arc::new(snapshot));
-                }
-            }
-        });
+    let mut reports = local_input_reports;
+    reports.extend(local_output_reports);
+    LocalAudioWiring {
+        program_sink_tx,
+        program_out_report,
+        reports,
+        local_sinks,
     }
-
-    tracing::info!(
-        version = VERSION,
-        %http_addr,
-        participants = n,
-        vban_bind = %matrix.hub.vban_bind,
-        outputs = n_outputs,
-        "intercom-hub starting"
-    );
-
-    let state = AppState {
-        live: live_rx,
-        video: video_state,
-    };
-    let listener = tokio::net::TcpListener::bind(http_addr)
-        .await
-        .with_context(|| format!("bind HTTP {http_addr}"))?;
-    axum::serve(listener, router(state))
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
-    Ok(())
 }
 
 async fn shutdown_signal() {

@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# airuleset:script-ok source-only lib (defines one function, no top-level statements) — matches the
+# airuleset:script-ok source-only lib (defines two functions, no top-level statements) — matches the
 # sibling scripts/lib/*.sh convention (rig-test-dropin.sh, camera-box-restart-verify.sh) of
 # deliberately NOT setting `set -euo pipefail` here: sourcing this file executes it in the CALLER's
-# shell, so imposing strict mode here would leak into whichever caller sources it. recording-e2e.sh
-# (the only caller today) already sets -euo pipefail itself.
+# shell, so imposing strict mode here would leak into whichever caller sources it. Every
+# caller (recording-e2e.sh, bkshading-deploy-relay.sh, deploy-genlock-fleet.sh for the strih-lx arm)
+# sets its own strict mode.
 #
 # scripts/lib/stray-session-check.sh — the READ-ONLY stray recording/streaming guard (issue 758),
 # reordered + REPEATED to run immediately BEFORE EVERY rig-mutation step (issue 1271). Sourced by
@@ -40,10 +41,12 @@
 #   STREAM = stream OBS host/IP.
 #   WHAT   = optional label of the mutation about to run (e.g. "[2/8] cam1 camera-box deploy"),
 #            surfaced in the guard banner + the refusal so the log names WHICH mutation was blocked.
-# Refuses (exit 1) BEFORE returning if a REAL broadcast is live; otherwise returns 0. MUST be called
-# as a BARE statement (never $()/a pipe/an `if` condition) so its `exit 1` propagates to the harness
-# — the same discipline the adjacent #860 optical preflight uses. Idempotent + read-only, safe to
-# call repeatedly.
+# Refuses (exit 1) BEFORE returning if a REAL broadcast is live; otherwise returns 0. Call it as a
+# BARE statement (never $()/a pipe/an `if` condition) so its `exit 1` propagates to the harness
+# — the same discipline the adjacent #860 optical preflight uses. The ONE sanctioned alternative is
+# a caller with its OWN exit contract (scripts/lib/strih-lx-deploy.sh): it runs the guard in a
+# SUBSHELL, maps a non-zero rc to its own code, and names what is live with
+# stray_session_busy_summary below. Idempotent + read-only, safe to call repeatedly.
 stray_session_check_assert() {
   local HERE="$1" STRIH="$2" STREAM="$3" WHAT="${4:-a rig mutation}"
   echo "[preflight] OBS stray-session guard (before ${WHAT}) — strih + stream must NOT be recording/streaming (#758/#1271; shared rig-busy read, mirrors rig-busy-gate.sh)"
@@ -64,7 +67,7 @@ stray_session_check_assert() {
     local _readable_busy
     _readable_busy="$(printf '%s' "$out" | python3 -c "import json,sys; d=json.load(sys.stdin); print('yes' if any(x.get('streaming') or x.get('recording') for x in d.get('diagnostics',[])) else '')" 2>/dev/null || true)"
     if [ "$_readable_busy" != "yes" ]; then
-      echo "    WARNING: could not read rig-busy state (${out:-no output}); proceeding to ${WHAT} — the job-start rig-busy-gate.sh already gated a live broadcast at job start (#1271)" >&2
+      echo "    WARNING: could not read rig-busy state (${out:-no output}); proceeding to ${WHAT} — this guard fail-OPENs only when NO box is readable (the E2E harness's job-start rig-busy-gate.sh fail-closes a fully-unreachable rig; other callers accept this risk) (#1271)" >&2
       return 0
     fi
     # a readable box IS busy despite the partial-outage exit 3 -> fall through and REFUSE.
@@ -90,4 +93,38 @@ stray_session_check_assert() {
     [ -n "$_detail" ] && echo "    ${_label} streaming: $_detail" >&2
   done
   exit 1
+}
+
+# stray_session_busy_summary GUARD_STDERR -> one line naming what is live, parsed from
+# stray_session_check_assert's OWN refusal output above (its `    rig-busy-check: <json>` line and
+# the key-free `    <label> streaming: <detail>` lines) -- e.g. `stream streaming
+# (server=rtmp://... outputDuration=...)` or `strih recording (timecode 00:04:10.000)`. Never a
+# second WebSocket read, never the stream key. Unparseable = a pointer to the guard output. Those
+# two refusal line shapes are therefore an interface: change them together with this parser (the
+# strih-lx deploy test pins the pair). Pure; always returns 0.
+stray_session_busy_summary() {
+  local s
+  s="$(printf '%s\n' "${1:-}" | python3 -c '
+import json, sys
+live, detail, diags = [], {}, []
+for line in sys.stdin.read().splitlines():
+    t = line.strip()
+    if t.startswith("rig-busy-check:"):
+        try:
+            diags = json.loads(t[len("rig-busy-check:"):]).get("diagnostics") or []
+        except (ValueError, AttributeError):
+            diags = []
+    elif " streaming: " in t:
+        box, _, rest = t.partition(" streaming: ")
+        detail[box] = rest
+for x in diags:
+    host = str(x.get("host", "?"))
+    if x.get("streaming"):
+        live.append(host + " streaming" + (" (" + detail[host] + ")" if host in detail else ""))
+    if x.get("recording"):
+        tc = x.get("recordTimecode")
+        live.append(host + " recording" + (" (timecode " + str(tc) + ")" if tc else ""))
+print("; ".join(live))
+' 2>/dev/null)" || s=""
+  printf '%s\n' "${s:-see the rig-busy guard output above}"
 }

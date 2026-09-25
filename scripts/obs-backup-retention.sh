@@ -39,6 +39,9 @@ set -euo pipefail
 #   scripts/obs-backup-retention.sh --box strih-lx --execute           # SUPERVISOR only
 #   scripts/obs-backup-retention.sh --imag --execute                   # SUPERVISOR only
 #   scripts/obs-backup-retention.sh --local-sweep --backup-root <dir> --stage-parent <dir>  # test
+#   ... --local-sweep --stages-only ...   stage dirs ONLY -- the dated rollback backups are never
+#                                          touched (the strih-lx execute deploy frees its /tmp quota
+#                                          this way, as the operator, issue 1317 part 6)
 #
 # Env: STRIH_SSH_PW (win boxes, default "newlevel"); IMAG_IP (default 10.77.9.182),
 #      IMAG_USER (default newlevel), IMAG_PW (default newlevel); LINUX_BOX_USER / LINUX_BOX_PW
@@ -55,6 +58,7 @@ STAGE_PARENT="/tmp"             # local-sweep (imag) default
 KEEP_RUNS="3"
 KEEP_DAYS="7"
 EXECUTE=0
+STAGES_ONLY=0
 REMOTE_PS1='C:\Users\newlevel\obs-backup-retention.ps1'
 
 while [ $# -gt 0 ]; do
@@ -72,6 +76,7 @@ while [ $# -gt 0 ]; do
     --keep-days)     KEEP_DAYS="$2"; shift 2 ;;
     --remote-ps1)    REMOTE_PS1="$2"; shift 2 ;;
     --execute)       EXECUTE=1; shift ;;
+    --stages-only)   STAGES_ONLY=1; shift ;;
     -h|--help)       sed -n '2,40p' "$0"; exit 0 ;;
     *) echo "unknown arg: $1" >&2; exit 2 ;;
   esac
@@ -171,7 +176,13 @@ obs_backup_sweep() {
     echo ""
   }
 
-  _sweep_kind "$BACKUP_ROOT" "$DATED_RE" "dated box-backups (<stamp>-789)" "list"
+  if [ "$STAGES_ONLY" = 1 ]; then
+    echo "--- dated box-backups (<stamp>-789) ---"
+    echo "  SKIPPED (--stages-only): the rollback backups are never touched in this mode"
+    echo ""
+  else
+    _sweep_kind "$BACKUP_ROOT" "$DATED_RE" "dated box-backups (<stamp>-789)" "list"
+  fi
   _sweep_kind "$STAGE_PARENT" "$STAGE_RE" "stage dirs (genlock-stage-<sha>)" "count"
 
   echo "--- SUMMARY ---"

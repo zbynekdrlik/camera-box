@@ -293,9 +293,9 @@ pub enum RtThreadRole {
     /// cam1-burn EMIT thread (probe/E2E). Raised to SCHED_FIFO so box load on the
     /// general cores never preempts the grab.
     CaptureEmit,
-    /// Every other worker — painter / `--display` render / intercom / QPSK-marker /
-    /// publish-30p, plus the NDI SDK and tokio internals. Stays SCHED_OTHER (idle
-    /// slack on the general cores), never FIFO.
+    /// Every other worker — painter / `--display` render / intercom / QPSK-marker,
+    /// plus the NDI SDK and tokio internals. Stays SCHED_OTHER (idle slack on the
+    /// general cores), never FIFO.
     Auxiliary,
 }
 

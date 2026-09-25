@@ -275,7 +275,7 @@ obs_box_kiosk() {
 #     issue 1357: xserver-xorg + x11-xserver-utils (xrandr/xset) ride along -- Ubuntu 26.04 (strih-lx)
 #     no longer installs the Xorg server with the Wayland-only GNOME desktop, and lightdm+openbox need
 #     it; on 24.04 (imag) both are already present, so the install is a no-op there.
-apt-get update -qq
+obs_box_apt_update
 DEBIAN_FRONTEND=noninteractive apt-get install -y openbox lightdm feh wmctrl btop xserver-xorg x11-xserver-utils \
     || fail "#504: openbox+lightdm install failed — cannot convert the box to the kiosk WM"
 

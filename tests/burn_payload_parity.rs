@@ -1200,8 +1200,8 @@ int main(int argc, char **argv) {{
 fn songplayer_origin_burn_911014_round_trips_through_the_production_decoder_1301() {
     // #1301 GENERATED decode fixture (pattern-change-needs-decode-fixture.md "A NEW painted-pattern
     // ELEMENT" rule): the SongPlayer-origin burn (run_id 911014) is painted by SongPlayer itself
-    // (zbynekdrlik/songplayer#151, UNSHIPPED), so NO real captured cg-OBS frame carrying it can
-    // exist yet. This synthetic round-trip — render the 911014 payload with the SAME production QR
+    // (zbynekdrlik/songplayer#151, shipped 25.9.2026), but NO real captured cg-OBS frame carrying
+    // it exists in the repo yet. This synthetic round-trip — render the 911014 payload with the SAME production QR
     // renderer (render_qr_bgra → the Payload wire format SongPlayer will emit) and decode it with
     // the SAME production recorded-file decoder (decode_qr_luma_all) — proves the fleet decode path
     // READS BACK the new origin run_id end-to-end. It is a STAND-IN, NOT proof the burn decodes

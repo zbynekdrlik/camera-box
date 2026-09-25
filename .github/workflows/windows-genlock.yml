@@ -223,9 +223,9 @@ jobs:
           if ($sb -notmatch [regex]::Escape('f.n_idle = scan.n_idle;') -or $sb -notmatch [regex]::Escape('GENLOCK_IDLE_INPUT_MIN_FRAMES') -or $sb -notmatch [regex]::Escape('r.idle ? "true" : "false"')) {
             Write-Error "OBSBasicStatusBar.cpp: the #1341 connected-but-idle input class is gone — an idle SongPlayer input would flap the box DEGRADED again; re-apply"; exit 1
           }
-          # #1299 Part 4: the qpc_drift verdict is a WINDOWED RATE + STEP (vs the dantesync-reported f_ptp+f_phase slew), NOT the cumulative wall-vs-QPC offset that grew unbounded and false-paged the fleet overnight 15./16.9. Mirror of GenlockLockState.hpp genlock_qpc_drift_beyond_bound (parity-gated by tests/genlock_lock_state_parity.rs) + tests/genlock_lock_json_guards.rs::genlock_lock_qpc_windowed_drift_present_1299_part4.
-          if ($sb -notmatch [regex]::Escape('genlock_qpc_drift_beyond_bound(') -or $sb -notmatch [regex]::Escape('GENLOCK_QPC_DRIFT_PPM_BOUND')) {
-            Write-Error "OBSBasicStatusBar.cpp: the #1299 Part 4 windowed qpc_drift verdict is gone — the cumulative-slew false-page would re-open; re-apply"; exit 1
+          # #1299 Part 4 + #1357 scope C: the qpc_drift verdict is the wall STEP only (one semantics on every box) — NOT the cumulative wall-vs-QPC offset (grew unbounded, false-paged the fleet overnight 15./16.9.) and NOT a rate vs the dantesync f_ptp+f_phase slew (0 by construction on Linux's disciplined CLOCK_MONOTONIC, the free crystal on Windows: 28 false DEGRADED on strih-lx + 4 on stream 24.9.). Mirror of GenlockLockState.hpp genlock_qpc_drift_beyond_bound (parity-gated by tests/genlock_lock_state_parity.rs) + tests/genlock_lock_json_guards.rs::genlock_lock_qpc_drift_is_the_step_only_1357.
+          if ($sb -notmatch [regex]::Escape('genlock_qpc_drift_beyond_bound( qpc_rate_ready, qpc_delta_ms, qpc_elapsed_ms, qpc_max_step_ms, GENLOCK_QPC_STEP_BOUND_MS, &qpc_measured_ppm);') -or $sb -match [regex]::Escape('GENLOCK_QPC_DRIFT_PPM_BOUND')) {
+            Write-Error "OBSBasicStatusBar.cpp: the #1357 step-only qpc_drift verdict is gone (or the per-box rate bound is back) — the per-box false DEGRADED would re-open; re-apply"; exit 1
           }
           Write-Output "in-OBS genlock LOCK indicator present (stats API + shared audit fill + output wall-stamping + statusbar widget + genlock-lock: log + genlock-lock-json: fleet facet) — OK"
 
@@ -619,8 +619,8 @@ jobs:
           if ($src -notmatch [regex]::Escape('genlock_stamp_track_observe(&source->genlock_rx_last_ts, &source->genlock_rx_min_delta_ns, &source->genlock_stamp_dups, &source->genlock_stamp_gaps, output->timestamp);') -or $src -notmatch [regex]::Escape('"stamp_dup=%llu stamp_gap=%llu "') -or $src -notmatch [regex]::Escape('source->genlock_rx_last_ts = 0; source->genlock_rx_min_delta_ns = 0;')) {
             Write-Error "obs-source.c: #1355 stamp_dup / stamp_gap arrival counters gone — the sender's irregular stamps would be invisible again — re-apply"; exit 1
           }
-          # #1303: receiver-side AUDIO genlock parity — the audio HOLD wired at the source_output_audio_data ingest seam + the audit facet. Mirror of tests/genlock_preload.rs::audio_genlock_parity_present_1303 + the C-vs-Rust parity gate tests/genlock_audio_pairing_parity.rs.
-          if ($src -notmatch [regex]::Escape('static inline uint64_t genlock_audio_present_delay_ns(uint32_t latency_ms)') -or $src -notmatch [regex]::Escape('in.timestamp += (int64_t)genlock_audio_present_delay_ns(source->genlock_latency_ms);') -or $src -notmatch [regex]::Escape('audio_enabled=%d audio_delay_ms=%u audio_pairing_offset_ms=%lld')) {
+          # #1303: receiver-side AUDIO genlock parity — the audio HOLD wired at the source_output_audio_data ingest seam + the audit facet. Mirror of tests/genlock_preload.rs::audio_genlock_parity_present_1303 + tests/genlock_audio_timecode_placement_1367.rs (issue 1367: audio placed at its NDI timecode + the MEASURED video delay through the LIVE wall->mono offset, re-placed with an ASRC level-target shift on a change) + the C-vs-Rust parity gate tests/genlock_audio_pairing_parity.rs.
+          if ($src -notmatch [regex]::Escape('static inline uint64_t genlock_audio_present_delay_ns(uint32_t latency_ms)') -or $src -notmatch [regex]::Escape('in.timestamp += (uint64_t)genlock_term_ns;') -or $src -notmatch [regex]::Escape('const int64_t genlock_off_live_ns = genlock_audio_needs_live_offset(genlock_hold_mode, prev_genlock_audio_hold_mode) ? genlock_audio_wall_to_mono_ns(os_gettime_ns(), genlock_wall_now_ns()) : 0;') -or $src -notmatch [regex]::Escape('const uint64_t genlock_delay_tick_wall = genlock_n1_tick_wall_now(wall_now); if (genlock_n1_tick_is_on_grid(genlock_delay_tick_wall, interval)) genlock_video_delay_track(&source->genlock_video_delay_smoothed_ns,') -or $src -notmatch [regex]::Escape('genlock_video_delay_sample_ns(genlock_delay_tick_wall, next_frame->timestamp), interval);') -or $src -notmatch [regex]::Escape('push_back = false; asrc_compensator_shift_level_target(&source->asrc, genlock_audio_place_shift_ms(genlock_term_ns, genlock_prev_term_ns));') -or $src -notmatch [regex]::Escape('genlock_audio_video_delay_ref_ns(source->genlock_video_delay_smoothed_ns, effective_latency_ms));') -or $src -notmatch [regex]::Escape('audio_enabled=%d audio_delay_ms=%u audio_pairing_offset_ms=%lld')) {
             Write-Error "obs-source.c: #1303 receiver-side audio genlock parity gone — the audio HOLD is not wired at source_output_audio_data and/or the audit line dropped the audio facet; audio would no longer be genlocked to the video FIFO — re-apply"; exit 1
           }
           Write-Output "genlock timestamp-aligned release patch present (#257 build-default ts-align + wall-clock guard + present_ts + #147/#1009 re-qualified backward-step recovery + self-heal + #800 wall-qpc drift + #1303 audio genlock parity) — OK"
@@ -804,6 +804,24 @@ jobs:
           }
           if ($src -notmatch [regex]::Escape('if (n < 2) return false;')) {
             Write-Error "obs-source.c: the N>=2-only gate (if (n < 2) return false;) is gone — convergence would limit-cycle on a deep N==1 source (stream NDI 2ME PGM) (#1049)"; exit 1
+          }
+          if ($src -notmatch [regex]::Escape('static inline uint64_t genlock_n1_tick_wall_ns(') -or $src -notmatch [regex]::Escape('static inline uint64_t genlock_n1_base_frames(') -or $src -notmatch [regex]::Escape('static inline uint64_t genlock_n1_depth_frames(') -or $src -notmatch [regex]::Escape('static inline bool genlock_n1_is_deep_source(') -or $src -notmatch [regex]::Escape('static inline bool genlock_n1_shed_due(') -or $src -notmatch [regex]::Escape('static inline bool genlock_n1_hold_due(') -or $src -notmatch [regex]::Escape('static bool genlock_should_hold_n1_phase(')) {
+            Write-Error "obs-source.c: the N==1 pin-derived depth helpers are gone — a strih OBS restart lands the stream 2ME PGM on a random depth again (issue 1367)"; exit 1
+          }
+          if ($src -notmatch [regex]::Escape('genlock_n1_shed_due(tick_wall,') -or $src -notmatch [regex]::Escape('genlock_n1_hold_due(tick_wall,') -or $src -notmatch [regex]::Escape('if (n < 2 && source->genlock_last_known_n >= 2) return false;')) {
+            Write-Error "obs-source.c: the N==1 shed routing (or its N>=2-branch guard) is gone from genlock_should_converge_phase (issue 1367)"; exit 1
+          }
+          if ($src -notmatch [regex]::Escape('static inline uint64_t genlock_n1_tick_wall_now(uint64_t wall_now_ns)') -or $src -notmatch [regex]::Escape('return genlock_n1_tick_wall_ns(wall_now_ns, os_gettime_ns(), obs->video.video_time);')) {
+            Write-Error "obs-source.c: the N==1 depth is no longer read at the render tick's SCHEDULED instant — a late tick that video_sleep catches up would misfire a shed (issue 1367)"; exit 1
+          }
+          if ($src -notmatch [regex]::Escape('if (genlock_should_hold_n1_phase(source, reserve_ms, interval, wall_now)) { source->genlock_n1_grows++; source->genlock_ticks_since_drain = 0;')) {
+            Write-Error "obs-source.c: the N==1 depth HOLD is no longer wired at the head of the N==1 STEADY branch (issue 1367)"; exit 1
+          }
+          if ($src -notmatch [regex]::Escape('#define GENLOCK_N1_PIN_FRAME_TOLERANCE_NS 1000ULL') -or $src -notmatch [regex]::Escape('#define GENLOCK_N1_DEEP_MARGIN_FRAMES 2ULL') -or $src -notmatch [regex]::Escape('"n1_grows=%llu "')) {
+            Write-Error "obs-source.c: the issue-1367 N==1 constants or the n1_grows= audit field are gone (issue 1367)"; exit 1
+          }
+          if (([regex]::Matches($src, [regex]::Escape('genlock_n1_tick_wall_now(wall_now)'))).Count -ne 3 -or ([regex]::Matches($src, [regex]::Escape('return genlock_n1_tick_is_on_grid(tick_wall, interval) &&'))).Count -ne 2 -or $src -notmatch [regex]::Escape('static inline bool genlock_n1_tick_on_grid(') -or $src -notmatch [regex]::Escape('#define GENLOCK_N1_ON_GRID_NS 2000000ULL') -or $src -notmatch [regex]::Escape('genlock_grid_floor_ns(shifted_ns, interval_ns)') -or $src -notmatch [regex]::Escape('shifted_ns = tick_wall_ns > UINT64_MAX - GENLOCK_N1_ON_GRID_NS ? UINT64_MAX : tick_wall_ns + GENLOCK_N1_ON_GRID_NS;') -or $src -match [regex]::Escape('GENLOCK_N1_TICK_EARLY_MARGIN_NS')) {
+            Write-Error "obs-source.c: the SHED and the HOLD must both read the N==1 depth at the scheduled instant (genlock_n1_tick_wall_now(wall_now) x3 -- the SHED, the HOLD and the audio video-delay tracker -- no processing-wall margin) and defer while it is off the grid after a wall step (genlock_n1_tick_is_on_grid x2) (issue 1367)"; exit 1
           }
           if ($src -notmatch [regex]::Escape('static bool genlock_should_converge_phase(')) {
             Write-Error "obs-source.c: the source wrapper genlock_should_converge_phase is gone (#1049)"; exit 1
@@ -1234,6 +1252,16 @@ jobs:
           }
           if ($ndi -notmatch [regex]::Escape('ndi_reap_receiver_detached(ndiLib, reap_frame_sync, reap_receiver);')) {
             Write-Error "ndi-source.cpp: the receiver-loop exit path no longer hands its teardown to ndi_reap_receiver_detached(ndiLib, reap_frame_sync, reap_receiver) -- the recv_destroy blocks the graphics-thread pthread_join again. Re-apply the #1320 wiring"; exit 1
+          }
+          # camera-box issue 1242: a genlocked PROGRAM-PATH input (genlock_connect_on_show) PARKS in-thread
+          # while hidden -- it releases its NDI receiver through the detached reaper and reconnects on show --
+          # so strih-lx pulls full bandwidth only for shown cameras. In-thread, never the stock graphics-thread
+          # join on hide (the issue-1320 class). Mirrors tests/distroav_connect_on_show_park_1242.rs.
+          if ($ndi -notmatch [regex]::Escape('static inline bool genlock_connect_on_show_park_decision(')) {
+            Write-Error "ndi-source.cpp: the issue-1242 connect-on-show park decision is gone -- every hidden program-path camera is pulled at full bandwidth again (the strih-lx uplink tail-drops). Re-apply the issue-1242 park"; exit 1
+          }
+          if ($ndi -notmatch [regex]::Escape('ndi_reap_receiver_detached(ndiLib, park_frame_sync, park_receiver);')) {
+            Write-Error "ndi-source.cpp: the issue-1242 park no longer releases the NDI receiver through the detached reaper. Re-apply the issue-1242 park"; exit 1
           }
           # #257: the UI is a HARD WHITELIST — the forced knobs are REMOVED from the UI (not hidden via
           # apply_genlock_lockdown_visibility, which is gone). getproperties must expose EXACTLY the

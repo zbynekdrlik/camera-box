@@ -395,6 +395,9 @@ pub fn should_converge_phase(
     // single N==1 source has no cross-source spread and its A/V offset is corrected by the
     // ±50 ms 2ME PGM controller. A hysteresis band cannot separate the natural hold from a real
     // error here — the natural overshoot is frac-dependent (up to ceil+2 frames) and differs by n.
+    // (issue 1367: a DEEP N==1 source converges to its pin-derived depth instead — a different
+    // target, read at the render tick's scheduled instant — via `crate::genlock_n1_depth`, which the
+    // SOURCE wrapper calls for an N==1 tick. This function stays inert for N==1, byte for byte.)
     if source_multiple < 2 {
         return false;
     }

@@ -5,10 +5,12 @@
 //! N-1 mix to 8 kHz mono + µ-law-encodes it for the RTP send, and µ-law-decodes + up-samples the
 //! received room mix back to 48 kHz for the engine's jitter buffer.
 //!
-//! Pure, std-only (no crate): the whole thing is the ITU-T G.711 reference table + a one-pole
+//! Pure, std-only (no crate): the whole thing is the ITU-T G.711 reference table + a windowed-sinc
 //! low-pass, so it verifies RED→GREEN with a rustc `--test` replica under Tier-0 (issue 557 bans a
 //! local cargo compile). µ-law is telephone-band (≈3.4 kHz) talkback speech — the design's stability
 //! trade; an Opus upgrade of this leg is the documented next step if quality is short.
+
+use crate::fir::{kaiser_lowpass_taps, FirDecimator};
 
 /// The µ-law bias added to the magnitude before segment extraction (ITU-T G.711 / the Sun reference).
 const ULAW_BIAS: i32 = 0x84; // 132
@@ -72,9 +74,80 @@ pub fn ulaw_decode_block(bytes: &[u8]) -> Vec<i16> {
 /// The 6:1 ratio between the hub's 48 kHz mix rate and the PCMU 8 kHz RTP rate.
 pub const RESAMPLE_RATIO: usize = 6;
 
-/// A one-pole low-pass smoothing coefficient (`alpha` in `y += alpha*(x-y)`). ~0.35 keeps the
-/// pass-band well below the 4 kHz PCMU band while passing DC exactly (unity gain at DC). Speech
-/// talkback does not need a sharp anti-alias — the design's telephone-band trade.
+/// The hub's mix rate, the rate the anti-alias FIR is designed at.
+const MIX_RATE_HZ: f64 = 48_000.0;
+
+/// Number of taps of the 48 kHz -> 8 kHz anti-alias FIR. Odd, so the filter is linear-phase with an
+/// integer group delay of `(N - 1) / 2` = 120 samples (2.5 ms at 48 kHz — negligible for talkback).
+pub const DECIMATOR_TAPS: usize = 241;
+
+/// The -6 dB cut-off of the anti-alias low-pass. With [`DECIMATOR_TAPS`] and the Kaiser window below,
+/// the transition band is about 0.72 kHz wide: the pass band stays flat to about 3.3 kHz (the
+/// telephone band PCMU carries), and everything above about 4.1 kHz — every frequency that would
+/// fold back into 0-4 kHz after the 6:1 decimation — is at least 60 dB down.
+const DECIMATOR_CUTOFF_HZ: f64 = 3_700.0;
+
+/// The Kaiser window shape parameter for a ~60 dB stop band (`0.1102 * (60 - 8.7)`).
+const DECIMATOR_KAISER_BETA: f64 = 5.653;
+
+/// The Kaiser-windowed-sinc low-pass taps for the 6:1 anti-alias decimation, normalised to exactly
+/// unity DC gain (so a constant input maps to that constant). Built by the shared [`crate::fir`]
+/// machinery the VBAN rate converter uses too.
+fn anti_alias_taps() -> Vec<f64> {
+    kaiser_lowpass_taps(
+        DECIMATOR_TAPS,
+        DECIMATOR_CUTOFF_HZ / MIX_RATE_HZ, // cycles per input sample
+        DECIMATOR_KAISER_BETA,
+    )
+}
+
+/// The STATEFUL 48 kHz -> 8 kHz down-sampler for the PCMU leg: a windowed-sinc FIR low-pass
+/// (~3.4 kHz pass band, >= 60 dB stop band from ~4.1 kHz) evaluated only at every 6th input sample.
+///
+/// Its history and its 6:1 phase carry across calls, so feeding a stream in 20 ms chunks (the Janus
+/// leg's 960-sample packets) produces exactly the output of one pass over the whole stream — no
+/// restart transient every chunk. Replaces the old one-pole + keep-every-6th, which let 4-24 kHz
+/// alias back into the speech band (a 6 kHz tone came out only -6 dB) and restarted every chunk.
+#[derive(Debug, Clone)]
+pub struct Decimator48kTo8k {
+    inner: FirDecimator,
+}
+
+impl Default for Decimator48kTo8k {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Decimator48kTo8k {
+    /// A decimator starting from silence.
+    pub fn new() -> Self {
+        Self::primed(0)
+    }
+
+    /// A decimator whose history is pre-filled with `x0` — the steady state of a constant `x0`
+    /// input, so a DC block maps to that constant from its very first output.
+    fn primed(x0: i16) -> Self {
+        Decimator48kTo8k {
+            inner: FirDecimator::primed(anti_alias_taps(), RESAMPLE_RATIO, x0),
+        }
+    }
+
+    /// Restart from silence (a new RTP session).
+    pub fn reset(&mut self) {
+        self.inner.reset();
+    }
+
+    /// Feed any number of 48 kHz mono samples; returns the 8 kHz samples completed by them (one per
+    /// 6 inputs, counted across calls).
+    pub fn process(&mut self, input: &[i16]) -> Vec<i16> {
+        self.inner.process(input)
+    }
+}
+
+/// A one-pole low-pass smoothing coefficient (`alpha` in `y += alpha*(x-y)`) for the 8 kHz -> 48 kHz
+/// UP-sampling side only (smoothing the zero-order hold). The DOWN-sampling side is the FIR
+/// [`Decimator48kTo8k`].
 const LP_ALPHA_NUM: i64 = 35;
 const LP_ALPHA_DEN: i64 = 100;
 
@@ -96,16 +169,16 @@ fn one_pole_lowpass(input: &[i16]) -> Vec<i16> {
     out
 }
 
-/// Down-sample a 48 kHz mono block to 8 kHz: one-pole low-pass, then keep every 6th sample. Output
-/// length is `input.len() / 6` (floor). DC is preserved (a constant input maps to that constant).
+/// Down-sample ONE self-contained 48 kHz mono block to 8 kHz through the FIR anti-alias filter
+/// ([`Decimator48kTo8k`], history primed with the block's first sample). Output length is
+/// `input.len() / 6` (floor). DC is preserved (a constant input maps to that constant). A STREAM (the
+/// Janus leg) must use one long-lived [`Decimator48kTo8k`] instead, so the filter state carries
+/// across chunks.
 pub fn downsample_48k_to_8k(input: &[i16]) -> Vec<i16> {
-    let filtered = one_pole_lowpass(input);
-    let mut out = Vec::with_capacity(filtered.len() / RESAMPLE_RATIO);
-    // Take one output per full group of RESAMPLE_RATIO input samples (indices 5, 11, 17, …).
-    for i in 0..(filtered.len() / RESAMPLE_RATIO) {
-        out.push(filtered[i * RESAMPLE_RATIO + (RESAMPLE_RATIO - 1)]);
+    match input.first() {
+        Some(&x0) => Decimator48kTo8k::primed(x0).process(input),
+        None => Vec::new(),
     }
-    out
 }
 
 /// Up-sample an 8 kHz mono block to 48 kHz: zero-order hold (each sample repeated 6×) then the same

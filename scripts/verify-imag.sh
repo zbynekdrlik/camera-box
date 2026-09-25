@@ -935,7 +935,8 @@ missing_tool() { printf "  ${RED}[FAIL]${NC} MISSING TOOL: %s -- refusing to run
 # a loud FAIL, never a hang. Every read goes through here -- ssh_box below just picks the default
 # read budget, so "every remote read is bounded" is an invariant, not per-call diligence.
 ssh_box_timeout() {
-  timeout "$1" sshpass -p "$IMAG_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout="$SSH_TIMEOUT" \
+  # UserKnownHostsFile=/dev/null (issue 1311): a reinstalled box's new host key must not read as rc=255.
+  timeout "$1" sshpass -p "$IMAG_PW" ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout="$SSH_TIMEOUT" \
     "${IMAG_USER}@${IMAG_IP}" "$2"
 }
 

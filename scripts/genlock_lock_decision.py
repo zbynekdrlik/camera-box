@@ -55,12 +55,13 @@ R_QPC_DRIFT = "qpc_drift"
 R_AUDIO_PAIRING = "audio_pairing"      # #1303: audio-enabled source unpaired with its video FIFO hold
 R_AUDIO_UNEXPECTED = "audio_unexpected"  # #1303: silent-by-contract source found audible (double-audio hazard)
 
-# #1299 Part 4 -- the windowed wall-vs-QPC drift bounds (mirror src/genlock_lock_state.rs +
-# GenlockLockState.hpp / OBSBasicStatusBar.cpp). The verdict is a WINDOWED RATE + STEP, not the
-# unbounded cumulative offset (which grows ~50 ms/h on a disciplined clock and false-paged the fleet).
-GENLOCK_QPC_DRIFT_PPM_BOUND = 50.0   # max |measured - expected| drift rate (ppm) before DEGRADED
+# #1299 Part 4 + #1357 scope C -- the wall-vs-QPC drift bounds (mirror src/genlock_lock_state.rs +
+# GenlockLockState.hpp / OBSBasicStatusBar.cpp). The verdict is the wall STEP only -- not the unbounded
+# cumulative offset (grows ~50 ms/h on a disciplined Windows box, false-paged the fleet) and not a rate
+# (0 by construction on Linux's disciplined CLOCK_MONOTONIC, the free crystal on Windows: a rate check
+# meant a different thing per box). The windowed rate stays report-only telemetry.
 GENLOCK_QPC_STEP_BOUND_MS = 33       # a single-sample wall STEP beyond this (one 30 fps frame) DEGRADES
-GENLOCK_QPC_WINDOW_S = 300           # rolling window (s) the widget averages the drift rate over
+GENLOCK_QPC_WINDOW_S = 300           # rolling window (s) of the report-only drift-rate telemetry
 
 
 def qpc_window_rate_ppm(drift_delta_ms, elapsed_ms):
@@ -73,21 +74,16 @@ def qpc_window_rate_ppm(drift_delta_ms, elapsed_ms):
     return float(drift_delta_ms) / float(elapsed_ms) * 1_000_000.0
 
 
-def qpc_drift_beyond_bound(rate_ready, drift_delta_ms, elapsed_ms, expected_ppm, ppm_bound,
-                           max_step_ms, step_bound_ms):
-    """#1299 Part 4 -- decide whether wall-vs-QPC drift is a genuine genlock hazard, and report the
-    measured windowed rate. A steady slew on a dantesync-disciplined box is BY DESIGN, so the cumulative
-    offset must NOT gate. DEGRADED only when (a) a single-sample STEP exceeds `step_bound_ms` (judged as
-    soon as two samples exist, rate_ready or not), OR (b) once `rate_ready`, the measured rate departs
-    from `expected_ppm` by more than `ppm_bound`. Returns (beyond_bound: bool, measured_ppm: float) --
-    byte-faithful mirror of camera_box::genlock_lock_state::qpc_drift_beyond_bound (C-vs-Rust
-    parity-gated), so the test suite can pin the same fixture the Rust/C gate uses."""
+def qpc_drift_beyond_bound(rate_ready, drift_delta_ms, elapsed_ms, max_step_ms, step_bound_ms):
+    """#1299 Part 4 + #1357 scope C -- decide whether the wall clock STEPPED against the monotonic
+    timebase, and report the measured windowed rate as telemetry. DEGRADED only when a single-sample
+    STEP exceeds `step_bound_ms` (judged as soon as two samples exist, rate_ready or not) -- the one
+    clock hazard for genlock, the same on every box. The rate never feeds the verdict. Returns
+    (beyond_bound: bool, measured_ppm: float) -- byte-faithful mirror of
+    camera_box::genlock_lock_state::qpc_drift_beyond_bound (C-vs-Rust parity-gated), so the test suite
+    can pin the same fixture the Rust/C gate uses."""
     measured_ppm = qpc_window_rate_ppm(drift_delta_ms, elapsed_ms) if rate_ready else 0.0
-    if abs(max_step_ms) > step_bound_ms:
-        return (True, measured_ppm)          # a STEP is an immediate hazard
-    if not rate_ready:
-        return (False, measured_ppm)         # the rate branch needs a filled window
-    return (abs(measured_ppm - expected_ppm) > ppm_bound, measured_ppm)
+    return (abs(max_step_ms) > step_bound_ms, measured_ppm)
 
 
 def decide(n_inputs, n_locked, recent_event, qpc_drift_beyond_bound, clock_present,
@@ -212,8 +208,9 @@ def analyze(bundle_json_text, box_reachable):
     reason = _enrich_audio_unexpected_reason(reason, facet)
     return {"verdict": classify(state, box_reachable), "state": state, "reason": reason,
             "n_inputs": n_inputs, "n_locked": n_locked, "n_absent": n_absent, "n_idle": n_idle,
-            # #1299 Part 4: windowed drift telemetry (report-only; the widget already decided `state`
-            # from these, so they never change the verdict here — logged so a rate anomaly is visible).
+            # #1299 Part 4: windowed drift telemetry (report-only; since #1357 the widget's qpc_drift
+            # verdict is the wall STEP only, so these never change `state` — logged so a rate anomaly,
+            # e.g. a second clock writer slewing the wall, is visible in-band).
             "qpc_drift_ppm": facet.get("qpc_drift_ppm"),
             "qpc_expected_ppm": facet.get("qpc_expected_ppm")}
 

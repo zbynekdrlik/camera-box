@@ -99,7 +99,9 @@ fn the_baseline_libs_are_source_only() {
          obs_box_boot_safety_net obs_box_lowlatency_kernel obs_box_cpu_affinity obs_box_nvidia_prime \
          obs_box_dejitter obs_box_crash_popups_off obs_box_kiosk obs_box_power_envelope obs_box_touchpad \
          obs_box_maxperf_persistence obs_box_openbox_menu_xml obs_box_openbox_autostart_preamble \
-         obs_box_baseline_gather_snippet obs_box_baseline_verdict; do \
+         obs_box_baseline_gather_snippet obs_box_baseline_verdict \
+         obs_box_apt_lock_timeout_conf obs_box_apt_lock_timeout \
+         obs_box_apt_update_lock_held obs_box_apt_update; do \
            type -t \"$f\" >/dev/null || echo \"MISSING $f\"; done",
     );
     assert_eq!(c, 0, "stderr={err}");
@@ -995,5 +997,510 @@ fn kiosk_keeps_bluetooth_only_when_the_box_asks() {
     assert!(
         imag.contains("obs_box_kiosk \"$DESKTOP_USER\" imag\n"),
         "setup-imag keeps the plain call (bluetooth disabled)"
+    );
+}
+
+// ------------------------------------------------------------------------------------------------
+// The dpkg lock wait (issue 1357 dpkg-lock slice). 24.9.2026: the canonical strih-lx genlock deploy
+// failed twice at setup-strih step 4 with `E: Could not get lock /var/lib/dpkg/lock-frontend ...
+// held by process (apt-get)` -- a periodic apt run held the lock and apt-get's default
+// DPkg::Lock::Timeout is 0. The baseline writes ONE apt drop-in so every present and future apt-get
+// waits up to 10 min; a real apt failure still fails loud after the wait (every call site keeps its
+// `|| fail`). The live box's only lock setting is `Version::2.0::Dpkg::Lock::Timeout`, which binds the
+// interactive `apt` front end, never apt-get.
+// ------------------------------------------------------------------------------------------------
+
+const APT_LOCK_CONF_TEXT: &str = "DPkg::Lock::Timeout \"600\";\n";
+
+/// The rendered drop-in is exactly the 600 s dpkg lock wait (apt's own config mechanism).
+#[test]
+fn apt_lock_timeout_conf_is_the_600s_dpkg_lock_wait() {
+    let (c, out, err) = run(BASELINE, &[], "obs_box_apt_lock_timeout_conf");
+    assert_eq!(c, 0, "stderr={err}");
+    assert_eq!(out, APT_LOCK_CONF_TEXT);
+    assert!(
+        baseline_fn("obs_box_apt_lock_timeout")
+            .contains("/etc/apt/apt.conf.d/90camera-box-lock-timeout"),
+        "the default target is /etc/apt/apt.conf.d/90camera-box-lock-timeout"
+    );
+}
+
+/// The write is idempotent: absent -> written, same -> left alone, different -> rewritten; every
+/// outcome is logged, and the file always ends up as the rendered text.
+#[test]
+fn apt_lock_timeout_write_is_idempotent_and_logged() {
+    let dir = tempfile::tempdir().unwrap();
+    let f = dir.path().join("90camera-box-lock-timeout");
+    let fs = f.to_str().unwrap();
+    let (c, out, err) = run(
+        BASELINE,
+        &[("F", fs)],
+        "obs_box_apt_lock_timeout \"$F\" || exit 3\n\
+         echo '--'\n\
+         obs_box_apt_lock_timeout \"$F\" || exit 4\n\
+         echo '--'\n\
+         printf 'DPkg::Lock::Timeout \"0\";\\n' > \"$F\"\n\
+         obs_box_apt_lock_timeout \"$F\" || exit 5",
+    );
+    assert_eq!(c, 0, "stdout={out} stderr={err}");
+    let logs: Vec<&str> = out.split("--\n").collect();
+    assert_eq!(logs.len(), 3, "three runs, three logs: {out}");
+    assert!(
+        logs[0].contains(&format!("{fs} written")),
+        "absent -> written: {out}"
+    );
+    assert!(
+        logs[1].contains(&format!("{fs} already in place")),
+        "same -> unchanged: {out}"
+    );
+    assert!(
+        !logs[1].contains("written"),
+        "an unchanged file is never rewritten: {out}"
+    );
+    assert!(
+        logs[2].contains(&format!("{fs} written")),
+        "different -> rewritten: {out}"
+    );
+    assert_eq!(std::fs::read_to_string(&f).unwrap(), APT_LOCK_CONF_TEXT);
+}
+
+/// Under a strict root umask the drop-in must still be world-readable (apt run by a non-root user
+/// errors on an unreadable conf file), and no temp file is ever left in apt.conf.d (a `.tmp` sibling
+/// makes apt print an "invalid filename extension" notice on every run).
+#[test]
+fn apt_lock_timeout_write_is_0644_and_leaves_no_temp_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let f = dir.path().join("90camera-box-lock-timeout");
+    let fs = f.to_str().unwrap();
+    let (c, out, err) = run(
+        BASELINE,
+        &[("F", fs)],
+        "umask 077\nobs_box_apt_lock_timeout \"$F\" || exit 3\nstat -c %a \"$F\"",
+    );
+    assert_eq!(c, 0, "stdout={out} stderr={err}");
+    assert!(out.ends_with("644\n"), "the drop-in must be 0644: {out}");
+    let names: Vec<String> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(
+        names,
+        vec!["90camera-box-lock-timeout".to_string()],
+        "only the drop-in itself may remain"
+    );
+}
+
+/// A write that cannot land fails loud (the caller's fail()), never a silent skip.
+#[test]
+fn apt_lock_timeout_write_failure_fails_loud() {
+    let (c, out, err) = run(
+        BASELINE,
+        &[],
+        "obs_box_apt_lock_timeout /nonexistent-dir-1357/90camera-box-lock-timeout; echo survived",
+    );
+    assert_eq!(c, 1, "an unwritable target must exit via fail(): {err}");
+    assert!(err.contains("FAIL:"), "{err}");
+    assert!(!out.contains("survived"), "{out}");
+}
+
+/// The executed provisioning flow of a setup script: everything after its source-guard.
+fn executed_flow(rel: &str) -> String {
+    let s = read(rel);
+    let guard = "if [ \"${BASH_SOURCE[0]}\" != \"${0}\" ]; then";
+    let at = s
+        .find(guard)
+        .unwrap_or_else(|| panic!("{rel} must have the source-guard"));
+    s[at..].to_string()
+}
+
+/// Byte offset of the first non-comment line of `text` matching `pred`.
+fn first_code_line(text: &str, pred: impl Fn(&str) -> bool) -> Option<usize> {
+    let mut off = 0;
+    for line in text.split_inclusive('\n') {
+        if !line.trim_start().starts_with('#') && pred(line) {
+            return Some(off);
+        }
+        off += line.len();
+    }
+    None
+}
+
+/// The lock wait is the FIRST action of every OBS-box provisioning run: both setup scripts call
+/// the writer (a plain statement, once), after the root check and before their first apt-get and
+/// step 1.
+#[test]
+fn apt_lock_timeout_is_written_before_the_first_apt_get() {
+    for script in [SETUP_STRIH, SETUP_IMAG] {
+        let flow = executed_flow(script);
+        let is_call = |l: &str| l.trim() == "obs_box_apt_lock_timeout";
+        let calls = flow
+            .lines()
+            .filter(|l| !l.trim_start().starts_with('#') && is_call(l))
+            .count();
+        assert_eq!(
+            calls, 1,
+            "{script} must call obs_box_apt_lock_timeout exactly once"
+        );
+        let call = first_code_line(&flow, is_call).unwrap();
+        let apt = first_code_line(&flow, |l| l.contains("apt-get"))
+            .unwrap_or_else(|| panic!("{script} runs apt-get"));
+        let step1 = flow
+            .find("\nstep 1 \"")
+            .unwrap_or_else(|| panic!("{script} has a step 1 banner"));
+        let root = flow
+            .find("fail \"run as root (sudo)\"")
+            .unwrap_or_else(|| panic!("{script} has the root check"));
+        assert!(
+            call < apt,
+            "{script}: the lock wait must be written before the first apt-get"
+        );
+        assert!(call < step1, "{script}: the lock wait precedes step 1");
+        assert!(root < call, "{script}: written only once running as root");
+    }
+}
+
+// ------------------------------------------------------------------------------------------------
+// The package-LISTS lock wait (issue 1357, main ruling 5821855428). DPkg::Lock::Timeout does not
+// govern `apt-get update`, which takes /var/lib/apt/lists/lock and fails at once when apt-daily's list
+// refresh holds it. `obs_box_apt_update` is the ONE update call on both provisioning paths: it retries
+// ONLY while that lock is HELD (bounded, 600 s total by default, a log line per wait) and fails loud
+// on anything else or on timeout. The held-lock text below was captured live from apt 2.8.3 (dev1)
+// and apt 3.2.0 (strih-lx).
+// ------------------------------------------------------------------------------------------------
+
+const LISTS_LOCK_HELD: &str = "E: Could not get lock /var/lib/apt/lists/lock. It is held by process 1794555 (apt-get)\nE: Unable to lock directory /var/lib/apt/lists/";
+
+/// The retry decision: ONLY a held package-lists lock is waited out.
+#[test]
+fn apt_update_retries_only_on_a_held_lists_lock() {
+    let cases: &[(&str, bool)] = &[
+        (LISTS_LOCK_HELD, true),
+        // the permission failure is NOT a held lock (a different message: "Could not open lock file")
+        (
+            "E: Could not open lock file /var/lib/apt/lists/lock - open (13: Permission denied)\nE: Unable to lock directory /var/lib/apt/lists/",
+            false,
+        ),
+        // the dpkg lock is the drop-in's job, never this retry
+        (
+            "E: Could not get lock /var/lib/dpkg/lock-frontend. It is held by process 5 (apt-get)",
+            false,
+        ),
+        (
+            "E: Failed to fetch http://archive.ubuntu.com/ubuntu/dists/noble/InRelease  404  Not Found",
+            false,
+        ),
+        ("W: Some index files failed to download.", false),
+        ("", false),
+    ];
+    for (text, want) in cases {
+        let (c, _out, err) = run(
+            BASELINE,
+            &[("TEXT", text)],
+            "obs_box_apt_update_lock_held \"$TEXT\"",
+        );
+        assert_eq!(
+            c == 0,
+            *want,
+            "lock_held({text:?}) must be {want} (exit {c}, stderr={err})"
+        );
+    }
+}
+
+/// A fake `apt-get` on PATH: logs its argv to `$CALLS`, prints `LISTS_LOCK_HELD` + exits 100 for the
+/// first `locked_calls` invocations, then either succeeds or fails with `final_err`.
+fn fake_apt_get(dir: &std::path::Path, locked_calls: u32, final_err: Option<&str>) -> String {
+    use std::os::unix::fs::PermissionsExt;
+    let bin = dir.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let last = match final_err {
+        Some(e) => format!("printf '%s\\n' '{e}' >&2\nexit 100"),
+        None => "exit 0".to_string(),
+    };
+    let script = format!(
+        "#!/bin/bash\nset -euo pipefail\necho \"$*\" >> \"$CALLS\"\nn=$(wc -l < \"$CALLS\")\n\
+         if [ \"$n\" -le {locked_calls} ]; then printf '%s\\n' '{LISTS_LOCK_HELD}' >&2; exit 100; fi\n\
+         {last}\n"
+    );
+    let p = bin.join("apt-get");
+    std::fs::write(&p, script).unwrap();
+    std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+    format!("{}:{}", bin.display(), std::env::var("PATH").unwrap())
+}
+
+/// A held lists lock is waited out (one log line per wait), then the update succeeds.
+#[test]
+fn apt_update_waits_out_a_held_lists_lock_then_succeeds() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = fake_apt_get(dir.path(), 2, None);
+    let calls = dir.path().join("calls");
+    let (c, out, err) = run(
+        BASELINE,
+        &[
+            ("PATH", &path),
+            ("CALLS", calls.to_str().unwrap()),
+            ("OBS_BOX_APT_UPDATE_POLL_S", "0"),
+        ],
+        "obs_box_apt_update",
+    );
+    assert_eq!(c, 0, "stdout={out} stderr={err}");
+    let log = std::fs::read_to_string(&calls).unwrap();
+    assert_eq!(
+        log.lines().collect::<Vec<_>>(),
+        vec!["update -qq"; 3],
+        "two locked attempts then one success: {log}"
+    );
+    let waits = format!("{out}{err}")
+        .lines()
+        .filter(|l| l.contains("apt update: package lists locked"))
+        .count();
+    assert_eq!(waits, 2, "one loud wait line per held attempt: {out}{err}");
+}
+
+/// Any error that is not a held lists lock fails loud at once -- one attempt, the apt error shown.
+#[test]
+fn apt_update_fails_loud_at_once_on_any_other_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let fetch = "E: Failed to fetch http://archive.ubuntu.com/ubuntu/dists/noble/InRelease 404";
+    let path = fake_apt_get(dir.path(), 0, Some(fetch));
+    let calls = dir.path().join("calls");
+    let (c, out, err) = run(
+        BASELINE,
+        &[
+            ("PATH", &path),
+            ("CALLS", calls.to_str().unwrap()),
+            ("OBS_BOX_APT_UPDATE_POLL_S", "0"),
+        ],
+        "obs_box_apt_update; echo survived",
+    );
+    assert_eq!(c, 1, "must exit via fail(): stdout={out} stderr={err}");
+    assert!(err.contains("FAIL:"), "{err}");
+    assert!(err.contains(fetch), "the apt error must be shown: {err}");
+    assert!(!out.contains("survived"), "{out}");
+    assert_eq!(
+        std::fs::read_to_string(&calls).unwrap().lines().count(),
+        1,
+        "no retry on a non-lock error"
+    );
+}
+
+/// A lists lock that outlives the budget fails loud (bounded wait, never an endless loop); the
+/// production budget is 600 s.
+#[test]
+fn apt_update_fails_loud_when_the_lock_outlives_the_budget() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = fake_apt_get(dir.path(), 1000, None);
+    let calls = dir.path().join("calls");
+    let (c, out, err) = run(
+        BASELINE,
+        &[
+            ("PATH", &path),
+            ("CALLS", calls.to_str().unwrap()),
+            ("OBS_BOX_APT_UPDATE_POLL_S", "0"),
+            ("OBS_BOX_APT_UPDATE_BUDGET_S", "0"),
+        ],
+        "obs_box_apt_update; echo survived",
+    );
+    assert_eq!(c, 1, "must exit via fail(): stdout={out} stderr={err}");
+    assert!(err.contains("FAIL:"), "{err}");
+    assert!(
+        err.contains("/var/lib/apt/lists/lock"),
+        "the timeout names the lock: {err}"
+    );
+    assert!(!out.contains("survived"), "{out}");
+    assert!(
+        baseline_fn("obs_box_apt_update").contains("${OBS_BOX_APT_UPDATE_BUDGET_S:-600}"),
+        "the production wait budget is 600 s"
+    );
+}
+
+/// The call-site sweep: no bare `apt-get update` (or `apt update`) is left on the setup-strih /
+/// setup-imag paths -- the scripts and every lib they source. The ONE real update is inside
+/// `obs_box_apt_update`, and `add-apt-repository` never refreshes the lists itself (`-n`).
+#[test]
+fn no_bare_apt_get_update_on_the_obs_box_provisioning_paths() {
+    let wrapper = baseline_fn("obs_box_apt_update");
+    for rel in [
+        SETUP_STRIH,
+        SETUP_IMAG,
+        BASELINE,
+        KIOSK,
+        "scripts/lib/strih-box-facts.sh",
+        "scripts/lib/strih-provision.sh",
+        "scripts/lib/strih-drm-output.sh",
+        "scripts/lib/genlock-markers.sh",
+        "scripts/lib/ndi-discovery.sh",
+        "scripts/lib/ndi-runtime.sh",
+        "scripts/lib/imag-power-envelope.sh",
+        "scripts/lib/rig-grandmaster.sh",
+        // sourced one level down (strih-box-facts.sh / ndi-discovery.sh)
+        "scripts/lib/obs-fleet.sh",
+        "scripts/camera-set.sh",
+    ] {
+        let mut text = read(rel);
+        if rel == BASELINE {
+            text = text.replacen(&wrapper, "", 1);
+        }
+        for (i, line) in text.lines().enumerate() {
+            if line.trim_start().starts_with('#') {
+                continue;
+            }
+            assert!(
+                !runs_apt_update(line),
+                "{rel}:{}: a bare apt update -- use obs_box_apt_update: {line}",
+                i + 1
+            );
+            assert!(
+                !line.contains("add-apt-repository") || line.contains(" -n "),
+                "{rel}:{}: add-apt-repository must pass -n (no hidden list refresh): {line}",
+                i + 1
+            );
+        }
+    }
+    for rel in [SETUP_IMAG, BASELINE, KIOSK] {
+        let calls = read(rel)
+            .lines()
+            .filter(|l| l.trim() == "obs_box_apt_update")
+            .count();
+        assert!(
+            calls >= 1,
+            "{rel} must refresh the lists via obs_box_apt_update"
+        );
+    }
+    assert!(
+        wrapper.contains("LC_ALL=C apt-get update -qq"),
+        "the wrapper runs the real update in the C locale (the lock match reads apt's English text)"
+    );
+}
+
+/// True when a shell line runs `apt`/`apt-get` with an `update` sub-command anywhere after it in the
+/// same command segment -- `apt-get update`, `apt-get -qq update`, `apt update`, `/usr/bin/apt-get
+/// update` -- so a reordered flag cannot slip past the sweep.
+fn runs_apt_update(line: &str) -> bool {
+    line.split(['|', ';', '&']).any(|segment| {
+        let words: Vec<&str> = segment
+            .split_whitespace()
+            .map(|w| w.trim_matches(|c: char| "\"'$()`{}".contains(c)))
+            .collect();
+        words.iter().enumerate().any(|(i, w)| {
+            let tool = w.rsplit(['/', '(', '=']).next().unwrap_or("");
+            (tool == "apt-get" || tool == "apt") && words[i + 1..].contains(&"update")
+        })
+    })
+}
+
+#[test]
+fn the_apt_update_matcher_catches_every_update_shape() {
+    for hit in [
+        "apt-get update -qq",
+        "    apt-get -qq update",
+        "apt update",
+        "sudo /usr/bin/apt-get update && apt-get install -y x",
+        "x=$(apt-get update 2>&1)",
+    ] {
+        assert!(runs_apt_update(hit), "must catch: {hit}");
+    }
+    for miss in [
+        "apt-get install -y curl",
+        "obs_box_apt_update",
+        "echo update the lists; apt-get install -y x",
+        "add-apt-repository -y -n ppa:x",
+    ] {
+        assert!(!runs_apt_update(miss), "must not flag: {miss}");
+    }
+}
+
+/// A fake `apt-get` on PATH running `body` (bash); every invocation appends its argv to `$CALLS`,
+/// and `n` is the 1-based call number.
+fn fake_apt_get_body(dir: &std::path::Path, body: &str) -> String {
+    use std::os::unix::fs::PermissionsExt;
+    let bin = dir.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let script = format!(
+        "#!/bin/bash\nset -euo pipefail\necho \"$*\" >> \"$CALLS\"\nn=$(wc -l < \"$CALLS\")\n{body}\n"
+    );
+    let p = bin.join("apt-get");
+    std::fs::write(&p, script).unwrap();
+    std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+    format!("{}:{}", bin.display(), std::env::var("PATH").unwrap())
+}
+
+/// apt's messages are translated (Slovak ships), and an ssh session forwards the operator's locale.
+/// The held-lock match reads apt's ENGLISH text, so the wrapper runs apt in the C locale -- a
+/// translated held-lock message would otherwise fail at once instead of being waited out.
+#[test]
+fn apt_update_reads_apt_in_the_c_locale() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = fake_apt_get_body(
+        dir.path(),
+        &format!(
+            "if [ \"$n\" -le 1 ]; then\n\
+             if [ \"${{LC_ALL:-}}\" = C ]; then printf '%s\\n' '{LISTS_LOCK_HELD}' >&2;\n\
+             else printf '%s\\n' 'E: Nepodarilo sa ziskat zamok /var/lib/apt/lists/lock.' >&2; fi\n\
+             exit 100\nfi\nexit 0"
+        ),
+    );
+    let calls = dir.path().join("calls");
+    let (c, out, err) = run(
+        BASELINE,
+        &[
+            ("PATH", &path),
+            ("CALLS", calls.to_str().unwrap()),
+            ("OBS_BOX_APT_UPDATE_POLL_S", "0"),
+            ("LC_ALL", ""),
+            ("LANG", "sk_SK.UTF-8"),
+        ],
+        "obs_box_apt_update",
+    );
+    assert_eq!(
+        c, 0,
+        "the held lock must be waited out: stdout={out} stderr={err}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&calls).unwrap().lines().count(),
+        2,
+        "one held attempt, then one success"
+    );
+}
+
+/// apt can print `W:` lines BEFORE the held-lock error; the wait log names the LOCK line, and a
+/// zero poll still sleeps at least 1 s (never a busy loop of apt-get calls).
+#[test]
+fn apt_update_logs_the_lock_line_and_never_busy_loops() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = fake_apt_get_body(
+        dir.path(),
+        &format!(
+            "if [ \"$n\" -le 1 ]; then\n\
+             printf '%s\\n' 'W: Target Packages is configured multiple times' '{LISTS_LOCK_HELD}' >&2\n\
+             exit 100\nfi\nexit 0"
+        ),
+    );
+    let calls = dir.path().join("calls");
+    let (c, out, err) = run(
+        BASELINE,
+        &[
+            ("PATH", &path),
+            ("CALLS", calls.to_str().unwrap()),
+            ("OBS_BOX_APT_UPDATE_POLL_S", "0"),
+        ],
+        "obs_box_apt_update",
+    );
+    assert_eq!(c, 0, "stdout={out} stderr={err}");
+    let log = format!("{out}{err}");
+    let wait = log
+        .lines()
+        .find(|l| l.contains("apt update: package lists locked"))
+        .unwrap_or_else(|| panic!("a wait line: {log}"));
+    assert!(
+        wait.contains("Could not get lock /var/lib/apt/lists/lock"),
+        "the wait line names the lock: {wait}"
+    );
+    assert!(
+        !wait.contains("configured multiple times"),
+        "never a leading warning: {wait}"
+    );
+    assert!(
+        wait.contains("waiting 1s"),
+        "a zero poll still waits 1 s: {wait}"
     );
 }

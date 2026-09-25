@@ -1675,10 +1675,11 @@ struct obs_genlock_stats {
 	int64_t wall_qpc_drift_ms;    /* process-global wall-vs-monotonic clock drift, ms (#800) */
 	/* camera-box #1303 — receiver-side AUDIO genlock parity (added in v2; a consumer reads
 	 * `version >= 2` before touching these). The genlock audio HOLD (src/genlock_audio_pairing.rs)
-	 * delays a genlock source's audio by the same latency_ms the video FIFO holds video. */
+	 * places a genlock source's audio at its NDI timecode + the video's MEASURED stamp->present
+	 * delay (issue 1367; latency_ms before the first measurement settles). */
 	bool audio_enabled;              /* this source's NDI audio is active (obs_source_audio_active) */
-	uint32_t audio_delay_ms;         /* the audio hold last applied at ingest (= latency_ms for a genlock_fifo source; 0 = not held / no audio yet) */
-	int64_t audio_pairing_offset_ms; /* residual A/V offset: audio_delay_ms - latency_ms; 0 = paired, -latency_ms = audio never held */
+	uint32_t audio_delay_ms;         /* the audio hold last applied at ingest (the measured video delay, or latency_ms before it settles; 0 = not held / no audio yet) */
+	int64_t audio_pairing_offset_ms; /* residual A/V offset: audio_delay_ms - the MEASURED video stamp->present delay (latency_ms before any measurement); 0 = paired, -video delay = audio never held. A PROXY: it never observes where the audio samples actually sit */
 	/* camera-box #1299 — receiver connection state (added in v3; a consumer reads `version >= 3`
 	 * before touching it). true = the DistroAV receiver has a live NDI connection (no_connections>0);
 	 * false = its sender is not running. An input with connected=false is EXCLUDED from the DEGRADED

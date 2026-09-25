@@ -1751,6 +1751,29 @@ impl ReleaseCadence {
             // so the VERY NEXT tick reads as a HOLD (nothing yet matured) and the queue regains
             // via a GAP RESYNC exactly what the drain just shed — a self-cancelling no-op,
             // confirmed by simulation before this was caught.
+            //
+            // issue 1367: a DEEP N==1 conveyor still shallower than its pin-derived depth HOLDS one
+            // tick first (a deliberate repeat, one frame deeper next tick), sharing the drain
+            // throttle. Mirror of the C `genlock_should_hold_n1_phase` at the head of its N==1
+            // STEADY branch; the Tier-0 decision is `genlock_n1_depth::should_hold_n1_phase`. The
+            // C reads the depth at the tick's SCHEDULED instant; this sim's ticks run on schedule,
+            // so that instant is `wall_now_ns` itself.
+            if let (Some(&head), Some(&newest)) = (queue.front(), queue.back()) {
+                if crate::genlock_n1_depth::n1_tick_is_on_grid(wall_now_ns, interval_ns)
+                    && crate::genlock_n1_depth::should_hold_n1_phase(
+                        wall_now_ns,
+                        head,
+                        wall_now_ns.saturating_sub(newest),
+                        reserve_ms,
+                        interval_ns,
+                        1,
+                        self.ticks_since_last_drain,
+                    )
+                {
+                    self.ticks_since_last_drain = 0;
+                    return hold(false);
+                }
+            }
             let drain = self.should_drain_one(queue, reserve_ms, interval_ns);
             let mut dropped = Vec::new();
             if drain && queue.len() > 1 {
@@ -1950,6 +1973,27 @@ impl ReleaseCadence {
         let n = Self::measure_source_multiple(queue, interval_ns)
             .unwrap_or(self.last_known_n)
             .max(1);
+        // issue 1367: an N==1 tick converges to its PIN-DERIVED depth
+        // (`genlock_n1_depth::n1_shed_due`) instead of the #1049 reserve-aimed shed, which stays
+        // inert for n < 2. That belongs to a tick of the N==1 STEADY branch only (review round 1):
+        // on the N>=2 branch (`last_known_n` latched >= 2) a post-erase re-measure reading n == 1
+        // stays inert, exactly as before. Mirror of the C `genlock_should_converge_phase` (this
+        // sim ticks on schedule, so the scheduled instant is `wall_now_ns`), including its
+        // defer-while-off-the-grid condition.
+        if n < 2 && self.last_known_n >= 2 {
+            return false;
+        }
+        if n < 2 {
+            return crate::genlock_n1_depth::n1_tick_is_on_grid(wall_now_ns, interval_ns)
+                && crate::genlock_n1_depth::n1_shed_due(
+                    wall_now_ns,
+                    boundary,
+                    wall_now_ns.saturating_sub(newest_stamp),
+                    reserve_ms,
+                    interval_ns,
+                    self.ticks_since_last_drain,
+                );
+        }
         crate::genlock_backlog::should_converge_phase(
             wall_now_ns,
             boundary,
@@ -4213,3 +4257,9 @@ mod tests {
         );
     }
 }
+
+// issue 1367 — the ReleaseCadence N==1 pin-derived-depth tests live in a sibling file (this file is
+// far past the ~1000-line budget; the lane adds no more test bulk here).
+#[cfg(test)]
+#[path = "genlock_n1_tests.rs"]
+mod n1_tests;

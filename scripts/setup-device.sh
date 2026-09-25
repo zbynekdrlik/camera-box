@@ -3,7 +3,7 @@
 # Camera-Box Device Setup Script
 # Sets up a clean Ubuntu installation as a camera-box appliance
 #
-# Usage: ./setup-device.sh [--binary <url|path>] [--probe-binary <url|path>] [--run <ci.yml run id>] DEVICE_NAME
+# Usage: ./setup-device.sh [--yes|-y] [--binary <url|path>] [--probe-binary <url|path>] [--run <ci.yml run id>] DEVICE_NAME
 # Example: ./setup-device.sh CAM5        (case-insensitive; cam5 works too)
 #
 # By default the camera-box binary comes from the latest successful ci.yml run on `main` (the
@@ -78,6 +78,13 @@ fail() {
                            # issue 52) -- also sourced by verify-device.sh's (ae) check +
                            # create-usb-linux.sh, single source of truth for the NTP-client DSCP
                            # nftables OUTPUT-mangle rule (udp dport 123 -> dscp ef) + its boot oneshot
+
+# shellcheck source=scripts/lib/ndi-discovery.sh
+. "$HERE/lib/ndi-discovery.sh"  # ndi_discovery_sender_ips / ndi_discovery_write_config /
+                                # ndi_discovery_dropin_content (issue 1342) -- also sourced by
+                                # verify-device.sh's (an) check + setup-strih.sh, single source of
+                                # truth for the receiver-side NDI config (/etc/ndi/ndi-config.v1.json,
+                                # networks.ips = every managed sender)
 
 # shellcheck source=scripts/lib/ndi-provision.sh
 . "$HERE/lib/ndi-provision.sh"  # NDI_VERSION_PIN + ndi_bootstrap_peer_list / ndi_runtime_version_matches_pin
@@ -308,6 +315,107 @@ restore_root_mode() {
     fi
 }
 
+# confirm_setup ASSUME_YES -> 0 = proceed, 1 = abort (issue 1311). ASSUME_YES=1 (the `--yes|-y`
+# flag, the same contract as create-usb-linux.sh) skips the prompt for a remote/unattended run.
+# Otherwise it asks once; an EOF on stdin (a non-interactive run without --yes) reads as "no",
+# so the script aborts instead of hanging or proceeding on a guess.
+confirm_setup() {
+    if [ "${1:-0}" = "1" ]; then
+        echo "  --yes: non-interactive run, skipping the confirmation prompt"
+        return 0
+    fi
+    local reply=""
+    read -p "Continue with setup? (y/N) " -n 1 -r reply || true
+    echo
+    [[ $reply =~ ^[Yy]$ ]]
+}
+
+# --- Early clock sanity (issue 1311) ------------------------------------------------------------
+# A fresh image booted after a CMOS reset came up with its clock two months behind; apt then fails
+# ("Release file ... is not valid yet") and TLS downloads fail until dantesync (STEP 17) runs. So
+# before the first apt/curl, compare the clock with the HTTP `Date` header of the Ubuntu archive
+# and, when the box is more than CLOCK_SANITY_MAX_BEHIND_S behind, set it FORWARD from that header.
+# Forward only: a box AHEAD of the archive is never moved back. dantesync owns the clock afterwards.
+CLOCK_SANITY_HOST="archive.ubuntu.com"
+CLOCK_SANITY_PATH="/ubuntu/"
+CLOCK_SANITY_PORT=80
+CLOCK_SANITY_MAX_BEHIND_S=86400
+
+# http_date_header_value <http-headers> -> the value of the `Date:` header (case-insensitive,
+# CR-stripped), or empty when there is none. Pure; always returns 0.
+http_date_header_value() {
+    printf '%s\n' "$1" | tr -d '\r' \
+        | awk '!found && tolower($0) ~ /^date:[ \t]*/ {found=1; sub(/^[^:]*:[ \t]*/, ""); print}' || true
+}
+
+# http_date_to_epoch <http-date> -> epoch seconds, or empty for an empty/unparseable date.
+# (An empty argument must stay empty: `date -d ""` would read as today's midnight.)
+http_date_to_epoch() {
+    [ -n "$1" ] || return 0
+    date -u -d "$1" +%s 2>/dev/null || true
+}
+
+# clock_sanity_decision <now-epoch> <server-epoch> -> `set` when the box is MORE than
+# CLOCK_SANITY_MAX_BEHIND_S behind the server; `ok` otherwise (including a box AHEAD of the
+# server -- never moved backward); `unknown` when either value is missing or not a number.
+clock_sanity_decision() {
+    case "${1:-}" in '' | *[!0-9]*) echo unknown; return 0 ;; esac
+    case "${2:-}" in '' | *[!0-9]*) echo unknown; return 0 ;; esac
+    if [ $(($2 - $1)) -gt "$CLOCK_SANITY_MAX_BEHIND_S" ]; then
+        echo set
+    else
+        echo ok
+    fi
+}
+
+# Seams (tests override these after sourcing): the clock read, the network fetch, the clock set.
+clock_sanity_now_epoch() { date -u +%s; }
+
+# clock_sanity_fetch_headers -> the HTTP response headers of the archive, non-zero on failure.
+# curl when present; the create-usb base image ships WITHOUT curl (the pre-flight below installs it
+# with apt -- exactly what a wrong clock breaks), so fall back to a plain HTTP HEAD over bash's own
+# /dev/tcp, bounded by timeout. Plain HTTP on purpose: TLS is what a wrong clock breaks.
+clock_sanity_fetch_headers() {
+    if command -v curl >/dev/null 2>&1; then
+        curl -sSI --max-time 10 "http://${CLOCK_SANITY_HOST}:${CLOCK_SANITY_PORT}${CLOCK_SANITY_PATH}" 2>/dev/null && return 0
+    fi
+    # shellcheck disable=SC2016  # the single-quoted program is expanded by the inner bash, on purpose
+    timeout 10 bash -c 'exec 3<>"/dev/tcp/$1/$3" || exit 1
+        printf "HEAD %s HTTP/1.0\r\nHost: %s\r\nConnection: close\r\n\r\n" "$2" "$1" >&3
+        head -c 8192 <&3' _ "$CLOCK_SANITY_HOST" "$CLOCK_SANITY_PATH" "$CLOCK_SANITY_PORT" 2>/dev/null
+}
+
+clock_sanity_set_clock() { date -u -s "@$1" >/dev/null; }
+
+# clock_sanity_fix_from_archive -- the orchestration. Non-fatal when the archive cannot be read
+# (it warns: apt will then show the real error); fatal only when a needed forward step fails.
+clock_sanity_fix_from_archive() {
+    local headers date_str server now verdict
+    echo "  Checking the system clock against http://${CLOCK_SANITY_HOST}${CLOCK_SANITY_PATH} (Date header)..."
+    headers="$(clock_sanity_fetch_headers)" || headers=""
+    date_str="$(http_date_header_value "$headers")"
+    server="$(http_date_to_epoch "$date_str")"
+    now="$(clock_sanity_now_epoch)"
+    verdict="$(clock_sanity_decision "$now" "$server")"
+    case "$verdict" in
+        set)
+            # printf %s: the Date text comes off the network and must never be escape-interpreted.
+            printf '%b  !!! CLOCK: the system clock is %s day(s) BEHIND the Ubuntu archive (box epoch %s, archive Date '"'"'%s'"'"') -- a CMOS reset? Setting the clock FORWARD to the archive time so apt/TLS work. dantesync (STEP 17) owns the clock from then on (issue 1311).%b\n' \
+                "$YELLOW" "$(((server - now) / 86400))" "$now" "$date_str" "$NC"
+            clock_sanity_set_clock "$server" \
+                || fail "the clock is $(((server - now) / 86400)) day(s) behind and 'date -s' failed -- apt/TLS will fail; set the clock by hand and re-run (issue 1311)"
+            echo "  clock now: $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+            ;;
+        ok)
+            printf '  clock OK (within %ss of the archive Date '"'"'%s'"'"', or ahead of it -- never moved back)\n' "$CLOCK_SANITY_MAX_BEHIND_S" "$date_str"
+            ;;
+        *)
+            echo -e "${YELLOW}  could not read the archive Date header -- clock NOT checked. If apt fails with 'Release file ... is not valid yet', set the clock by hand (date -s) and re-run (issue 1311).${NC}"
+            ;;
+    esac
+    return 0
+}
+
 # --- source-guard: when sourced (the unit tests), stop here -- never run the destructive
 # provisioning flow below. Same convention as scripts/setup-imag.sh / scripts/genlock-manifest.sh.
 if [ "${BASH_SOURCE[0]}" != "${0}" ]; then
@@ -325,9 +433,16 @@ fi
 BINARY_ARG=""
 PROBE_BINARY_ARG=""
 CI_RUN_ID_ARG=""
+ASSUME_YES=0
 POSITIONAL=()
 while [ $# -gt 0 ]; do
     case "$1" in
+        --yes|-y)
+            # issue 1311: non-interactive -- skip the confirmation prompt (the create-usb-linux.sh
+            # contract), for the remote/unattended provisioning run that had to pipe a `y` in.
+            ASSUME_YES=1
+            shift
+            ;;
         --binary)
             BINARY_ARG="${2:?--binary needs a URL or local path}"
             shift 2
@@ -359,7 +474,8 @@ DEVICE_NAME_ARG="${1:-}"
 
 if [ -z "$DEVICE_NAME_ARG" ]; then
     echo -e "${RED}Usage: $0 [--binary <url|path>] DEVICE_NAME${NC}"
-    echo "       (also: --probe-binary <url|path> for cam2's frame-probe #1066 D5, --run <ci.yml run id>)"
+    echo "       (also: --probe-binary <url|path> for cam2's frame-probe #1066 D5, --run <ci.yml run id>;"
+    echo "        --yes|-y = non-interactive, no confirmation prompt)"
     echo ""
     echo "DEVICE_NAME is resolved via scripts/camera-set.sh (cam1-6) -- case-insensitive."
     echo ""
@@ -387,10 +503,8 @@ echo -e "Device IP:    ${YELLOW}${DEVICE_IP}${NC}"
 echo -e "VBAN Stream:  ${YELLOW}${VBAN_STREAM}${NC}"
 echo ""
 
-# Confirm
-read -p "Continue with setup? (y/N) " -n 1 -r
-echo
-if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+# Confirm (issue 1311: --yes|-y skips it; an EOF on stdin without --yes aborts, never hangs)
+if ! confirm_setup "$ASSUME_YES"; then
     echo "Aborted."
     exit 1
 fi
@@ -407,6 +521,14 @@ fi
 # the rw window covers the WHOLE run; restore_root_mode() still runs after STEP 18 unchanged.
 # =============================================================================
 ensure_root_writable
+
+# =============================================================================
+# Pre-flight: early clock sanity BEFORE the first apt/curl (issue 1311) -- a box booted after a
+# CMOS reset can be months behind, which breaks apt ("not valid yet") and every TLS download.
+# Forward-only, from the Ubuntu archive's HTTP Date header; see clock_sanity_fix_from_archive.
+# =============================================================================
+echo -e "${GREEN}[pre-flight] Clock sanity...${NC}"
+clock_sanity_fix_from_archive
 
 # =============================================================================
 # Pre-flight: ensure curl + CA certificates BEFORE first use
@@ -834,22 +956,31 @@ camera_box_free_capture_device_script_content > /usr/local/bin/camera-box-free-c
 chmod +x /usr/local/bin/camera-box-free-capture-device.sh
 camera_box_free_capture_device_dropin_content > /etc/systemd/system/camera-box.service.d/free-capture-device.conf
 echo "  camera-box.service.d/free-capture-device.conf installed -- frees /dev/video on every start (#772)"
-# issue 792 / #1087 — the secondary 30fps NDI blend stream ("CAMn (30p)", a 2-frame 60->30
-# temporal blend) is enabled by this env drop-in; the binary defaults the feature OFF. Every active
-# fleet box already runs it (hand-installed until now), so writing it here makes a re-provisioned
-# box keep the (30p) stream instead of silently regressing to 60p-only. Same enable-only convention
-# as the drop-ins above — effective on the box's next reboot. The heredoc below reproduces the live
-# fleet file byte-for-byte; verify-device.sh's (z) check then proves the drop-in AND the live (30p)
-# stream post-reboot.
-cat > /etc/systemd/system/camera-box.service.d/publish-30p.conf << 'EOF'
-[Service]
-Environment=CAMERA_BOX_PUBLISH_30P=1
-EOF
+# issue 1342 -- the camera box publishes ONE NDI output, `CAMn (usb)`. The retired secondary
+# 30fps blend stream had no consumer (the main's read-only OBS-WS read on 24.9.2026 found 0 of the
+# strih-lx + stream NDI inputs bound to a (30p) source, and no mapping/pin/scene table in this repo
+# names one); its code is gone and a re-provision DELETES the drop-in that used to enable it, so a
+# live box that still carries it converges (the env var is ignored by the new binary either way).
+rm -f /etc/systemd/system/camera-box.service.d/publish-30p.conf
+# issue 1342 -- the RECEIVER-side NDI config (scripts/lib/ndi-discovery.sh): the camera-box service
+# RECEIVES `STRIH-LX (interkom)` for the cameraman HDMI preview, so /etc/ndi/ndi-config.v1.json lists
+# every managed NDI sender IP in networks.ips (generated from camera-set.sh + obs-fleet.sh, never
+# hand-typed); libndi queries them directly IN ADDITION to mDNS. Senders never read the list, so this
+# box keeps announcing CAMn (usb) over mDNS exactly as before -- no gate needed. A drop-in points
+# libndi's NDI_CONFIG_DIR at /etc/ndi (camera-box runs as root with ProtectHome=yes, so /root/.ndi
+# would be invisible to it). Enable-only, effective on the next start. A renumbered sender is picked
+# up by re-running this script (verify-device (an) FAILs until then).
+NDI_IPS="$(ndi_discovery_sender_ips)" \
+    || fail "could not generate the managed NDI sender list (camera-set.sh + obs-fleet.sh ndi-sender facet, issue 1342)"
+ndi_discovery_write_config "$NDI_DISCOVERY_SYSTEM_DIR" "$NDI_IPS" \
+    || fail "NDI receiver config write to ${NDI_DISCOVERY_SYSTEM_DIR} failed (issue 1342)"
+ndi_discovery_dropin_content > "$NDI_DISCOVERY_CAMBOX_DROPIN"
+echo "  NDI receiver config: ${NDI_DISCOVERY_SYSTEM_DIR}/${NDI_DISCOVERY_CONFIG_NAME} (networks.ips=${NDI_IPS}) + camera-box.service.d/ndi-discovery.conf (issue 1342)"
 
 systemctl daemon-reload
 systemctl enable camera-box
 echo "  Service created and enabled"
-echo "  Drop-ins: cpu-affinity.conf (CPUAffinity=3, isolcpus core) + genlock.conf (CAMERA_BOX_GENLOCK_FPS=${CAMERA_GENLOCK_FPS}) + publish-30p.conf (CAMERA_BOX_PUBLISH_30P=1)"
+echo "  Drop-ins: cpu-affinity.conf (CPUAffinity=3, isolcpus core) + genlock.conf (CAMERA_BOX_GENLOCK_FPS=${CAMERA_GENLOCK_FPS}) + ndi-discovery.conf (NDI_CONFIG_DIR=${NDI_DISCOVERY_SYSTEM_DIR})"
 
 # =============================================================================
 # STEP 8: Configure auto-login on tty1
@@ -1600,48 +1731,37 @@ echo "  #1311: netconsole (kernel printk -> ${REMOTE_LOG_DEV1_IP}:${REMOTE_LOG_N
 # efibootmgr is on the base image + STEP 16's package list. Lettered sub-step (STEP 3b idiom, NO
 # /${TOTAL_STEPS}); it writes only NVRAM (efivars), no filesystem, so it is safe here in the rw
 # window before STEP 18's ro flip. Certified post-reboot by verify-device.sh (al).
+# Issue 1311: a failure here is RECORDED, never an abort before STEP 18 -- a fresh box must still
+# get its read-only fstab -- and STEP 19 then refuses "Setup Complete".
+EFI_ENTRY_PROBLEM=""
 echo ""
 echo -e "${GREEN}[17d] Ensuring named UEFI boot entry '${EFI_CAM_BOX_LABEL}' in this box's NVRAM (#1066 D6)...${NC}"
 if [ ! -d /sys/firmware/efi/efivars ]; then
     echo "  Box booted in BIOS/CSM mode (/sys/firmware/efi/efivars absent) -- skipping the named UEFI entry (not applicable on a non-EFI boot)."
 elif ! command -v efibootmgr >/dev/null 2>&1; then
     echo -e "${YELLOW}  efibootmgr not installed -- cannot create the named '${EFI_CAM_BOX_LABEL}' UEFI entry. It is on STEP 16's package list + the base image; install it and re-run.${NC}"
+    EFI_ENTRY_PROBLEM="efibootmgr missing"
 else
     EFI_ROOT_SRC="$(findmnt -no SOURCE / 2>/dev/null || true)"
     EFI_ROOT_DISK="$(efi_whole_disk_of "$EFI_ROOT_SRC")"
-    EFI_CUR="$(efibootmgr 2>/dev/null || true)"
-    EFI_NUMS="$(efi_cam_box_bootnums "$EFI_CUR")"
-    if [ -z "$EFI_NUMS" ]; then
-        if [ -b "$EFI_ROOT_DISK" ]; then
-            if efibootmgr -c -d "$EFI_ROOT_DISK" -p 1 -L "$EFI_CAM_BOX_LABEL" -l "$EFI_CAM_BOX_LOADER" >/dev/null 2>&1; then
-                echo "  Created named UEFI entry '${EFI_CAM_BOX_LABEL}' -> ${EFI_ROOT_DISK} partition 1 (${EFI_CAM_BOX_LOADER}); efibootmgr -c prepends it, so it leads BootOrder (#1066 D6)."
-            else
-                echo -e "${YELLOW}  efibootmgr failed to create the '${EFI_CAM_BOX_LABEL}' entry on ${EFI_ROOT_DISK} -- the box will fall back to the AMI USB auto-entry (the #1066 D6 fragility). Investigate before relying on a warm reboot.${NC}"
-            fi
+    if [ -b "$EFI_ROOT_DISK" ]; then
+        # Issue 1311: never trust an existing entry blind, and never trust `efibootmgr -c` alone.
+        # The shared efi_cam_box_ensure (scripts/lib/efi-boot-entry.sh, also run by create-usb)
+        # reads the entry back with `efibootmgr -v` and repairs it idempotently: create a missing
+        # one, delete + recreate a firmware-mangled VenHw(...) or a stale one (an HD() path on
+        # another ESP GUID -- e.g. from before a reflash), and move a demoted healthy one to the
+        # front of BootOrder. A correct entry is left untouched.
+        EFI_ESP_PARTUUID="$(efi_esp_partuuid_of_disk "$EFI_ROOT_DISK")"
+        if efi_cam_box_ensure "$EFI_ROOT_DISK" "$EFI_ESP_PARTUUID"; then
+            echo "  '${EFI_CAM_BOX_LABEL}' -> ${EFI_ROOT_DISK} partition 1 (${EFI_CAM_BOX_LOADER}, ESP PARTUUID '${EFI_ESP_PARTUUID:-unread}'): HD() path, leads BootOrder (#1066 D6, issue 1311)."
         else
-            echo -e "${YELLOW}  could not derive the root disk from findmnt (source='${EFI_ROOT_SRC}', disk='${EFI_ROOT_DISK}' is not a block device) -- NOT creating a UEFI entry blind. Create it by hand: efibootmgr -c -d <root-disk> -p 1 -L ${EFI_CAM_BOX_LABEL} -l '${EFI_CAM_BOX_LOADER}' (#1066 D6).${NC}"
+            EFI_ENTRY_PROBLEM="not an HD() entry leading BootOrder on ${EFI_ROOT_DISK}"
+            echo -e "${RED}  !!! the named '${EFI_CAM_BOX_LABEL}' UEFI entry could not be made an HD() path that leads BootOrder on ${EFI_ROOT_DISK} (see the FAIL line above) -- the box would fall back to the AMI USB auto-entry that failed on cam2. Continuing to STEP 18 (the read-only fstab), then STEP 19 refuses Setup Complete. Inspect 'efibootmgr -v', delete the bad entry (efibootmgr -b <num> -B), recreate it and re-run (issue 1311).${NC}"
         fi
     else
-        echo "  named UEFI entry '${EFI_CAM_BOX_LABEL}' already present (Boot$(printf '%s' "$EFI_NUMS" | tr '\n' ',' | sed 's/,$//')) -- not recreating (idempotent)."
-    fi
-    # Ensure the entry LEADS BootOrder (a pre-existing entry may have been demoted below another).
-    EFI_CUR="$(efibootmgr 2>/dev/null || true)"
-    if efi_cam_box_leads "$EFI_CUR"; then
-        echo "  '${EFI_CAM_BOX_LABEL}' leads BootOrder (#1066 D6)."
-    else
-        EFI_NUMS="$(efi_cam_box_bootnums "$EFI_CUR")"
-        EFI_ORDER="$(efi_boot_order "$EFI_CUR")"
-        if [ -n "$EFI_NUMS" ] && [ -n "$EFI_ORDER" ]; then
-            EFI_FIRST_NUM="${EFI_NUMS%%$'\n'*}"  # pipe-free first line -- no printf|head SIGPIPE under the caller's set -euo pipefail (.claude/rules/drift-guard-log-parsers.md)
-            EFI_NEW_ORDER="$(efi_boot_order_lead "$EFI_FIRST_NUM" "$EFI_ORDER")"
-            if efibootmgr -o "$EFI_NEW_ORDER" >/dev/null 2>&1; then
-                echo "  Reordered BootOrder so '${EFI_CAM_BOX_LABEL}' (Boot${EFI_FIRST_NUM}) leads: ${EFI_NEW_ORDER} (#1066 D6)."
-            else
-                echo -e "${YELLOW}  could not set BootOrder to lead with '${EFI_CAM_BOX_LABEL}' (Boot${EFI_FIRST_NUM}) -- do it by hand: efibootmgr -o ${EFI_NEW_ORDER} (#1066 D6).${NC}"
-            fi
-        else
-            echo -e "${YELLOW}  '${EFI_CAM_BOX_LABEL}' entry not readable after create -- cannot lead BootOrder; verify-device.sh (al) will FAIL until fixed (#1066 D6).${NC}"
-        fi
+        # The loader path has backslashes: double them so echo -e never turns \E into an ESC byte.
+        echo -e "${YELLOW}  could not derive the root disk from findmnt (source='${EFI_ROOT_SRC}', disk='${EFI_ROOT_DISK}' is not a block device) -- NOT creating a UEFI entry blind. Create it by hand: efibootmgr -c -d <root-disk> -p 1 -L ${EFI_CAM_BOX_LABEL} -l '${EFI_CAM_BOX_LOADER//\\/\\\\}' (#1066 D6).${NC}"
+        EFI_ENTRY_PROBLEM="root disk not derivable from findmnt"
     fi
 fi
 
@@ -1666,7 +1786,10 @@ else
     echo "  /etc/fstab.bak already exists -- keeping the original backup (idempotent re-run)"
 fi
 
-# Create new fstab with read-only root and tmpfs mounts
+# Create new fstab with read-only root and tmpfs mounts.
+# The heredoc is UNQUOTED (it expands ROOT_UUID and two $(...) lines), so a backtick in its comment
+# text is a command substitution: escape every one as \` (issue 1311 -- a bare `nofail` ran as a
+# command and vanished from the written fstab).
 cat > /etc/fstab << FSTABEOF
 # Root filesystem - read-only for reliability
 UUID=${ROOT_UUID} / ext4 ro 0 1
@@ -1678,7 +1801,7 @@ $(grep '/boot/efi' /etc/fstab.bak 2>/dev/null || echo "# No EFI partition")
 tmpfs /tmp tmpfs defaults,noatime,nosuid,nodev,mode=1777,size=100M 0 0
 tmpfs /var/log tmpfs defaults,noatime,nosuid,nodev,mode=0755,size=50M 0 0
 # #1309: persistent journal on the dedicated ext4 partition, mounted OVER the /var/log tmpfs (systemd
-# orders /var/log first by path prefix). `nofail` -> a box WITHOUT the partition (an old box not yet
+# orders /var/log first by path prefix). \`nofail\` -> a box WITHOUT the partition (an old box not yet
 # reflashed via create-usb-linux.sh) still boots and journald simply falls back to a volatile journal
 # on the tmpfs above. Emitted only when the labelled partition actually exists, so setup-device.sh on
 # such an old box writes a harmless comment instead of an unmountable entry.
@@ -1729,6 +1852,8 @@ echo -e "${GREEN}[19/${TOTAL_STEPS}] Verifying installation...${NC}"
 MISSING=""
 [ -f /usr/local/bin/camera-box ] || MISSING="${MISSING}camera-box binary (/usr/local/bin/camera-box) "
 [ -f /usr/lib/ndi/libndi.so.6 ] || MISSING="${MISSING}NDI library (/usr/lib/ndi/libndi.so.6) "
+# Issue 1311: STEP 17d records (never aborts on) a cam-box UEFI entry it could not verify.
+[ -z "${EFI_ENTRY_PROBLEM:-}" ] || MISSING="${MISSING}a verified '${EFI_CAM_BOX_LABEL}' UEFI entry (STEP 17d: ${EFI_ENTRY_PROBLEM}) "
 if [ -n "$MISSING" ]; then
     fail "half-configured box -- missing: ${MISSING}-- refusing to report Setup Complete"
 fi

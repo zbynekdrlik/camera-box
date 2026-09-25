@@ -142,8 +142,8 @@ fn genlock_lock_audio_unexpected_offender_present_1303() {
 
 #[test]
 fn genlock_lock_qpc_windowed_drift_present_1299_part4() {
-    // #1299 Part 4: the qpc_drift verdict is a WINDOWED RATE + STEP (vs the dantesync-reported slew),
-    // NOT the cumulative wall-vs-QPC offset that grew unbounded and false-paged the fleet overnight.
+    // #1299 Part 4: the qpc_drift verdict is NOT the cumulative wall-vs-QPC offset that grew unbounded
+    // and false-paged the fleet overnight (since #1357 it is the wall STEP only — see the test below).
     // A subtree pull that reverts any of these silently re-opens that chronic false page.
     // the widget calls the parity-gated pure decision (not an inline `> 100 ms` compare)
     assert_has(STATUSBAR_CPP, "genlock_qpc_drift_beyond_bound(");
@@ -161,7 +161,7 @@ fn genlock_lock_qpc_windowed_drift_present_1299_part4() {
     );
     assert_has(
         STATUSBAR_CPP,
-        "static constexpr double GENLOCK_QPC_DRIFT_PPM_BOUND = 50.0;",
+        "static constexpr int64_t GENLOCK_QPC_STEP_BOUND_MS = 33;",
     );
     // the pure decision's C mirror + its parity anchor (kept in lock-step by
     // tests/genlock_lock_state_parity.rs)
@@ -169,6 +169,38 @@ fn genlock_lock_qpc_windowed_drift_present_1299_part4() {
         "vendor/obs-studio/frontend/widgets/GenlockLockState.hpp",
         "static inline int genlock_qpc_drift_beyond_bound(int rate_ready, long long drift_delta_ms,",
     );
+}
+
+#[test]
+fn genlock_lock_qpc_drift_is_the_step_only_1357() {
+    // #1357 scope C: the qpc_drift term DEGRADES on a wall STEP only — one semantics on every box.
+    // The removed RATE branch compared a 300 s windowed wall-vs-monotonic rate against ONE
+    // instantaneous dantesync `f_ptp + f_phase` sample: on Linux the measured side is 0 by construction
+    // (CLOCK_MONOTONIC is kernel-disciplined), on Windows it is the free QPC — so the same clock event
+    // gave different LOCK verdicts per box (28 false DEGRADED on strih-lx, 4 on stream, 24.9.2026).
+    // A subtree pull that brings the rate bound back re-opens that per-box divergence.
+    let widget = squish(&vendor_file(STATUSBAR_CPP));
+    assert!(
+        !widget.contains("GENLOCK_QPC_DRIFT_PPM_BOUND"),
+        "{STATUSBAR_CPP}: the qpc_drift RATE bound is back — the verdict must be the wall STEP only (#1357)"
+    );
+    assert!(
+        widget.contains(&squish(
+            "genlock_qpc_drift_beyond_bound( qpc_rate_ready, qpc_delta_ms, qpc_elapsed_ms, qpc_max_step_ms, GENLOCK_QPC_STEP_BOUND_MS, &qpc_measured_ppm);"
+        )),
+        "{STATUSBAR_CPP}: the widget must call the step-only decision (rate_ready, delta, elapsed, step, bound, &measured) (#1357)"
+    );
+    let header = squish(&vendor_file(
+        "vendor/obs-studio/frontend/widgets/GenlockLockState.hpp",
+    ));
+    assert!(
+        header.contains(&squish(
+            "static inline int genlock_qpc_drift_beyond_bound(int rate_ready, long long drift_delta_ms, long long elapsed_ms, long long max_step_ms, long long step_bound_ms, double *measured_ppm_out)"
+        )),
+        "GenlockLockState.hpp: genlock_qpc_drift_beyond_bound must take no expected_ppm / ppm_bound (#1357)"
+    );
+    // the windowed rate + the dantesync slew survive as REPORT-ONLY JSON telemetry
+    assert_has(STATUSBAR_CPP, "\\\"qpc_expected_ppm\\\":");
 }
 
 #[test]

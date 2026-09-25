@@ -62,6 +62,9 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/strih-log-read.sh
 # issue 1360: a Linux strih (strih-lx) is read through the ONE shared strih OBS-log reader.
 . "$HERE/lib/strih-log-read.sh"
+# shellcheck source=scripts/lib/genlock-park.sh
+# issue 1242: a PARKED program-path input (connect-on-show, hidden) is HIDDEN BY DESIGN -> SKIP.
+. "$HERE/lib/genlock-park.sh"
 # shellcheck source=scripts/lib/rig-mode-state.sh
 # #1203 (c): the 3-state rig EVENT/TEST/UNKNOWN classifier -- the sender-restart arm is WITHHELD in
 # EVENT (a ~3s NDI gap must never hit a live show), proceeds in TEST/UNKNOWN (fail-safe = today's).
@@ -395,6 +398,17 @@ handle_input() {
   local input="$1" exp="$2" reachable="$3" raw_log="$4" others_healthy="$5"
   local k verdict fps cap window samples out
   k="$(input_key "$input")"
+
+  # issue 1242: a PARKED program-path input (connect-on-show: nothing shows it, so its NDI receiver is
+  # released by design) has no recv-timing line BY DESIGN -- HIDDEN BY DESIGN -> SKIP: no verdict, no
+  # blind-tap count, no cure. (PHASE 1 counts it out of the healthy siblings the same way.)
+  if [ "$reachable" = "1" ] && \
+     [ "$(printf '%s\n' "$raw_log" | genlock_park_state_of "$input")" = "parked" ]; then
+    log "'$input' on $RECV_NAME: parked (connect-on-show, hidden by design, issue 1242) -> SKIP"
+    write_state_field "unknown_${k}" 0
+    clear_input_throttle "$k"
+    return 0
+  fi
 
   if [ "$reachable" = "1" ]; then
     out="$(printf '%s' "$raw_log" | python3 "$DECIDE" analyze \

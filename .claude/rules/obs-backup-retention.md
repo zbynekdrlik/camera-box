@@ -18,6 +18,11 @@ and refuses a linux-genlock address. **On strih-lx this is the sanctioned stage-
 `obs-backup-retention.sh --box strih-lx` (dry-run) then `--keep-runs 1 --keep-days 0 --execute`.
 The `--local-sweep` leg runs ON the box via `bash -s` and never sources the fleet lib. Tests:
 `tests/python/test_windows_strih_retired_retention_1317.py` (fake `sshpass` on PATH).
+`--stages-only` (issue 1317 part 6) skips the dated `<stamp>-789` kind entirely (never touched, a
+`SKIPPED` line instead) — the strih-lx execute deploy (`scripts/lib/strih-lx-deploy.sh`) runs
+`--local-sweep --stages-only --keep-runs 1 --keep-days 0 --execute` as the operator before staging,
+with its own stage touched newest so it is always the one kept (test:
+`retention_stages_only_never_touches_dated_backups_1317`).
 
 ## Why
 

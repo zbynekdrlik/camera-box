@@ -47,7 +47,7 @@ fn a_stray_session_guard_precedes_every_fleet_mutation_1271() {
     let guard = "stray_session_check_assert \"$HERE\"";
     let guards: Vec<usize> = s.match_indices(guard).map(|(i, _)| i).collect();
     // The mutation sites, in file order (name, unique anchor).
-    let muts: [(&str, &str); 4] = [
+    let muts: [(&str, &str); 5] = [
         (
             "bkshading-relay pause",
             "bkshading_e2e_pause_stop \"$CAMERA_NAME\"",
@@ -55,6 +55,12 @@ fn a_stray_session_guard_precedes_every_fleet_mutation_1271() {
         (
             "[0/8] camera-box parity auto-align",
             "cambox_parity_align_before_gate \"$CAMBOX_VERSION_LINUX\"",
+        ),
+        // issue 1242: the strih connect-on-show HOLD (a strih OBS settings write that keeps every
+        // program-path camera input connected for the measurement).
+        (
+            "issue-1242 connect-on-show hold",
+            "connect_on_show_e2e_hold \"$HERE\"",
         ),
         ("[2/8] cam1 camera-box deploy", "echo \"[2/8] $CAMERA_NAME"),
         ("[2b/8] ALL_CAMBOX deploy loop", "echo \"[2b/8] $_cn"),
@@ -321,8 +327,9 @@ fn stray_check_refuses_on_a_partial_outage_when_a_readable_box_is_busy_1271() {
 }
 
 /// The fail-OPEN semantics claim: a fully-unreadable rig (busy=None, NO readable busy box) must
-/// proceed (exit 0) with a WARNING — the job-start rig-busy-gate.sh already fail-closed a live
-/// broadcast; a momentary WS blip here must not newly abort a healthy run (issue 1271 review 🔵3).
+/// proceed (exit 0) with a WARNING — for the E2E harness the job-start rig-busy-gate.sh already
+/// fail-closed a live broadcast (other callers accept this risk); a momentary WS blip here must not
+/// newly abort a healthy run (issue 1271 review 🔵3).
 #[test]
 fn stray_check_fails_open_when_the_rig_state_is_unreadable_1271() {
     let d = scratch("unreach");

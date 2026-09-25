@@ -20,8 +20,6 @@
 #include "OBSBasic.hpp"
 #include "OBSProjector.hpp"
 
-#include <QVBoxLayout>
-
 obs_data_array_t *OBSBasic::SaveProjectors()
 {
 	obs_data_array_t *savedProjectors = obs_data_array_create();
@@ -48,9 +46,7 @@ obs_data_array_t *OBSBasic::SaveProjectors()
 
 		obs_data_set_int(data, "monitor", projector->GetMonitor());
 		obs_data_set_int(data, "type", static_cast<int>(type));
-		// camera-box #1352: persist the HOST toplevel's geometry (projector->window()),
-		// not the hosted child's. window() == projector when unhosted (byte-identical).
-		obs_data_set_string(data, "geometry", projector->window()->saveGeometry().toBase64().constData());
+		obs_data_set_string(data, "geometry", projector->saveGeometry().toBase64().constData());
 
 		if (projector->IsAlwaysOnTopOverridden()) {
 			obs_data_set_bool(data, "alwaysOnTop", projector->IsAlwaysOnTop());
@@ -170,29 +166,7 @@ OBSProjector *OBSBasic::OpenProjector(obs_source_t *source, int monitor, Project
 		}
 	}
 
-#if defined(__linux__)
-	// camera-box #1352: on Linux (XWayland + NVIDIA PRIME render offload) an OBS projector
-	// whose GL surface IS the X toplevel window stalls the graphics thread ~0.5 s per present
-	// (program lag 93 %, multiview 1.8 fps). Host the projector's GL display in a native CHILD
-	// of a plain toplevel so the NVIDIA GL surface is not the toplevel X window (measured on
-	// strih-lx: lag 0 %, avg render 23 ms, multiview 29.8 fps). The host is a plain QWidget
-	// toplevel; the projector (Qt::Widget child, see projectorWindowFlags) fills it via a
-	// zero-margin layout. The host is WA_DeleteOnClose and forwards focus to the projector so
-	// the Escape QAction still fires; the projector filters the host's Close so its own
-	// bookkeeping runs before the host is deleted.
-	QWidget *host = new QWidget(nullptr, Qt::Window);
-	host->setAttribute(Qt::WA_DeleteOnClose, true);
-	QVBoxLayout *hostLayout = new QVBoxLayout(host);
-	hostLayout->setContentsMargins(0, 0, 0, 0);
-
-	OBSProjector *projector = new OBSProjector(host, source, monitor, type);
-	hostLayout->addWidget(projector);
-	host->setFocusProxy(projector);
-	host->installEventFilter(projector);
-	host->show();
-#else
 	OBSProjector *projector = new OBSProjector(nullptr, source, monitor, type);
-#endif
 
 	projectors.emplace_back(projector);
 
@@ -285,13 +259,11 @@ void OBSBasic::OpenSavedProjector(SavedProjectorInfo *info)
 
 		if (projector && !info->geometry.empty() && info->monitor < 0) {
 			QByteArray byteArray = QByteArray::fromBase64(QByteArray(info->geometry.c_str()));
-			// camera-box #1352: restore/place the HOST toplevel (projector->window()), not
-			// the hosted child. window() == projector when unhosted (byte-identical).
-			projector->window()->restoreGeometry(byteArray);
+			projector->restoreGeometry(byteArray);
 
-			if (!WindowPositionValid(projector->window()->normalGeometry())) {
+			if (!WindowPositionValid(projector->normalGeometry())) {
 				QRect rect = QGuiApplication::primaryScreen()->geometry();
-				projector->window()->setGeometry(
+				projector->setGeometry(
 					QStyle::alignedRect(Qt::LeftToRight, Qt::AlignCenter, size(), rect));
 			}
 

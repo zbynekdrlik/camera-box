@@ -51,6 +51,19 @@ power envelope. A difference between boxes is a defect, not a per-box feature.
   reserved core and its FIFO + affinity leaked to every NDI receiver thread). imag's own issue-484
   limits.d line stays in setup-imag.sh outside the lib (behaviour-identical); setup-strih removes a
   leftover grant and verify-strih item 33 FAILs while one exists.
+- **The dpkg lock wait is the FIRST action of every provisioning run.** `obs_box_apt_lock_timeout` writes `/etc/apt/apt.conf.d/90camera-box-lock-timeout` (`DPkg::Lock::Timeout "600";`) right after the root check in BOTH setup scripts, before any apt-get.
+  - It exists because a periodic apt run held the lock and failed the strih-lx deploy twice at step 4 (24.9.2026). apt-get's default lock wait is 0.
+  - Ubuntu's `Version::2.0::Dpkg::Lock::Timeout` applies only to the `apt` front end, never to apt-get.
+  - Never add a per-call `-o DPkg::Lock::Timeout`. A real apt failure must still fail loud after the wait, through a `|| fail` or the caller's `set -e`.
+  - The file is written 0644 through a `.dpkg-tmp` sibling, a name apt ignores silently.
+  - It covers the DPKG lock only (install/remove/purge). `apt-get update` takes the separate lists lock (`/var/lib/apt/lists/lock`), which this setting does not govern.
+- **Every list refresh is `obs_box_apt_update`, never a bare `apt-get update`** (main ruling 5821855428).
+  - It retries ONLY while the lists lock is HELD (`Could not get lock /var/lib/apt/lists/lock`, the same text on apt 2.8 and 3.2), logs each wait, and gives up after `OBS_BOX_APT_UPDATE_BUDGET_S` (600 s) total.
+  - apt runs under `LC_ALL=C`. The match reads apt's English text, and an ssh session forwards the operator's locale; apt ships translations.
+  - The wait log names the lock line itself, because apt can print `W:` lines before it. Every wait sleeps at least 1 s, never a busy loop.
+  - Any other error fails loud at once, with apt's output shown. A permission failure prints `Could not open lock file` and is not retried.
+  - `add-apt-repository` always passes `-n`, so it never refreshes the lists itself.
+  - `no_bare_apt_get_update_on_the_obs_box_provisioning_paths` sweeps a hand-kept list of files. It covers both setup scripts, the libs they source, and the libs sourced one level down (`obs-fleet.sh`, `camera-set.sh`). It flags any `apt`/`apt-get` with an `update` sub-command, whatever the flag order. A new lib on either path must be added to that list.
 - **Adding an item** = a function in the right half + a call in BOTH setup scripts (imag in the step
   that owns it, strih inside step 11 in imag's order) + a verdict row + its gather keys. The
   `gather_and_verdict_share_one_key_set` test fails if the two halves of the grader drift.
@@ -124,8 +137,9 @@ Live conversion results (strih-lx, 23.9.2026, first kiosk boot on 7.0.0-31 + `pr
 - The lowlatency config meta must be installed at the INSTALLED generic-hwe version (an unpinned
   install pulled a newer HWE image and conflicted); `obs_box_lowlatency_kernel` pins it.
 - MV projector on Xorg: iconified (`WM_STATE Iconic`) keeps `rendered_fps=30` (GNOME/XWayland fell to
-  7 fps), and a 40-step drag-resize keeps program `lagged=0`. `strih-mv-host` stays disabled; the
-  vendored child-host projector is harmless here and its removal is a separate vendored change.
+  7 fps), and a 40-step drag-resize keeps program `lagged=0`. The `strih-mv-host` helper and the
+  vendored child-host projector (both XWayland + PRIME workarounds) are retired on this baseline
+  (issue 1357): the stock toplevel projector runs on every box.
 - verify item 6 (dantesync offset) can FAIL `unstable` on the fleet NTP master: its upstream is an
   internet NTP server (`ntp_server` 162.159.200.1), so the spread tracks WAN jitter (dev1 saw ping
   mdev 1.6 ms to the same server at the same time). The PTP lock (`mode=LOCK`) is the fleet signal;

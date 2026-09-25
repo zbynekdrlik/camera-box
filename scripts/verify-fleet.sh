@@ -126,7 +126,8 @@ for cam in $SET; do
   echo "================================================================"
 
   reachable_rc=0
-  reachable_err="$(sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout="$SSH_TIMEOUT" \
+  # UserKnownHostsFile=/dev/null (issue 1311): a reflashed box's new host key must not read as rc=255.
+  reachable_err="$(sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout="$SSH_TIMEOUT" \
     -o BatchMode=no "$SSH_USER@$ip" true 2>&1)" || reachable_rc=$?
 
   verify_rc=0

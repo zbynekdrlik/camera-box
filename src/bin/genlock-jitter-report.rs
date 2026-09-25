@@ -500,6 +500,7 @@ mod verdict_tests {
             delta_late_holds: 0,
             delta_stamp_dup: 0,
             delta_stamp_gap: 0,
+            delta_n1_grows: 0,
             max_abs_head_skew_ms: skew,
             mean_abs_head_skew_ms: 0.0,
             mean_head_skew_ms: 0.0,

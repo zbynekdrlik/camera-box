@@ -42,12 +42,6 @@ pub mod genlock_stamp;
 pub mod dupe_decimation;
 #[cfg(target_os = "linux")]
 pub mod ndi_display;
-// #792 — optional secondary 30fps NDI stream (2-frame temporal blend of the emitted 60fps
-// pairs). Linux-gated in lock-step with capture/ndi (it carries capture::FrameInfo across a
-// channel and owns a second NdiSender); the pairing/blend/config logic is plain std and
-// unit-tests Tier-0 on the Linux `test` CI job (default features).
-#[cfg(target_os = "linux")]
-pub mod publish_30p;
 pub mod vban;
 
 // #1345 M1b — the pure appliance-side intercom-target env override (`resolve_intercom_target`).
@@ -380,6 +374,15 @@ pub mod painter_pacing;
 // `probe::genlock::ReleaseCadence` and the C `GENLOCK_QDEPTH_RELOCK` both derive from here.
 pub mod genlock_backlog;
 
+// issue 1367 — the N==1 PIN-DERIVED DEPTH: a deep single-cadence input (the stream `NDI 2ME PGM`)
+// settles on `ceil((pin - 1 us) / interval) + 1` frames after every restart, read from the
+// presented age at the render tick's scheduled instant (shed one frame when deeper, hold one tick
+// when shallower, only while the tick is on the grid). `genlock_backlog::should_converge_phase`
+// stays inert for N==1; the SOURCE wrappers (the C `genlock_should_converge_phase`, the probe
+// `ReleaseCadence`) route an N==1 tick here, and the C `genlock_n1_*` helpers in obs-source.c are
+// held identical by `tests/genlock_relock_selection_parity.rs`.
+pub mod genlock_n1_depth;
+
 // #1355 — ONE per-second genlock frame grid: the sender stamps, the receiver ts-align deadline
 // and the render tick all floor on the same per-second grid, so the receiver no longer walks
 // 10 ns/s (0.864 ms/day) against the senders. Crate-root + std-only (Tier-0 verifiable); the C
@@ -399,8 +402,9 @@ pub mod genlock_grid_bench;
 // committed parity gate `tests/genlock_lock_state_parity.rs`.
 pub mod genlock_lock_state;
 
-// #1303 — the pure receiver-side AUDIO ↔ video-FIFO pairing decision (audio held by the same
-// latency_ms the video FIFO holds video). Crate-root + std-only so it is Tier-0 verifiable; the C
+// #1303 — the pure receiver-side AUDIO ↔ video-FIFO pairing decision (issue 1367: audio placed at
+// its NDI timecode + the video's MEASURED stamp→present delay through the live wall→mono offset;
+// the two-clock bench is its test-only child). Crate-root + std-only so it is Tier-0 verifiable; the C
 // mirror (`genlock_audio_*` in `vendor/obs-studio/libobs/obs-source.c`) is held identical by the
 // committed parity gate `tests/genlock_audio_pairing_parity.rs`.
 pub mod genlock_audio_pairing;

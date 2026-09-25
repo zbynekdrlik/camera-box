@@ -290,7 +290,8 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # #1301: the opt-in CG_CHAIN=1 profile for the SongPlayer-originated content chain (SongPlayer ->
 # cg OBS (RESOLUME-SNV) -> strih -> stream). OFF by default (CG_CHAIN unset/0 ⇒ every function the
 # harness calls is a pure no-op). The guarded call lines below follow the #675 sourced-lib pattern
-# (added AFTER anchored lines, never editing one). UNVERIFIED until songplayer#151 ships.
+# (added AFTER anchored lines, never editing one). Since the SongPlayer burn API shipped (songplayer
+# 151, issue 1302) the burn toggle is read back from SongPlayer's own health endpoint.
 # shellcheck source=scripts/lib/cg-chain-e2e.sh
 . "$HERE/lib/cg-chain-e2e.sh"
 # #707 B1 (freeze+jump discriminator, second prong): the per-cambox TCP-transport + NIC sampler.
@@ -314,6 +315,12 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # duplicated per-box loop. See scripts/lib/stray-session-check.sh for the actual call.
 # shellcheck source=scripts/lib/stray-session-check.sh
 . "$HERE/lib/stray-session-check.sh"
+# issue 1242: strih-lx program-path camera inputs connect only while SHOWN (owner ruling 24.9.2026);
+# the run HOLDS that off so every input stays full-bandwidth for the measurement (see the lib header).
+# shellcheck source=scripts/lib/connect-on-show-hold.sh
+. "$HERE/lib/connect-on-show-hold.sh"
+# shellcheck source=scripts/lib/genlock-park.sh
+. "$HERE/lib/genlock-park.sh"
 # #758 item 1 — the fleet-wide minute-0 preflight: a named, loud, self-expiring exclusion for a
 # box that's known-offline for a reason outside this harness's control (cambox-offline-ack.sh),
 # plus the per-box service-active/emitter-count/stray-unit check (preflight-fleet-check.sh).
@@ -2080,6 +2087,9 @@ fi"
   # verify can never abort the cleanup trap.
   NDI_CADENCE_RUN_ID="$RUN_ID" NDI_CADENCE_RUN_DIR="$OUTDIR" \
     ndi_cadence_verify_and_heal "$STRIH" || true
+  # issue 1242: restore strih connect-on-show (hidden program-path cameras park again). AFTER the
+  # cadence verify above, which still reads every input connected. Always returns 0.
+  connect_on_show_e2e_restore "$HERE" "$STRIH" "${CONNECT_ON_SHOW_HOLD_STATE:-}"
   # The cam devices are now freed regardless of what the OBS restore does. #328: bound every OBS
   # call by `timeout` so a hung obs-websocket op (#328) can't block the trap even if it runs.
   # #649: StopRecord itself already ran, FIRST, at the top of this function (harness-started boxes
@@ -2387,6 +2397,10 @@ IMAG_RECORDING_STARTED=0
 CG_HOST_IP=""
 CG_RECORDING_STARTED=0
 CG_RECORDING="$OUTDIR/cg-obs-recording.mkv"
+# #1302: the cg OBS / strih scene snapshots the CG profile restores in cleanup() live in this run's
+# OUTDIR; CG_HOST_RECORDING_PATH is the cg OBS StopRecord host path the default pull scps.
+CG_CHAIN_STATE_DIR="$OUTDIR"
+CG_HOST_RECORDING_PATH=""
 # #286 ALL_CAMBOX — strih's OWN render-time burn (911002) must be present on WHICHEVER strih
 # NDI input the sweep currently has cut into program, not just the single default
 # STRIH_PROG_SOURCE (cam1's mapped input under the plain single-camera path). Without this,
@@ -2423,6 +2437,14 @@ rig_heartbeat_start "recording-e2e" || echo "WARNING: could not start rig-active
 # UNCLEAN death — so "marker present AND heartbeat absent/stale" is the durable stranded-rig signal
 # the rig-restore watchdog keys on, regardless of which scene OBS is left on.
 rig_e2e_marker_set "recording-e2e" || echo "WARNING: could not write rig-in-e2e marker (#353)" >&2
+# issue 1242: HOLD strih connect-on-show off for the whole run (trap armed -> cleanup() restores it),
+# behind its OWN rig-busy guard (a strih OBS settings write is a rig mutation).
+# The state file is STABLE across runs (not the per-run OUTDIR): a SIGKILLed run's held list is
+# unioned by the next run's hold and restored by its cleanup.
+CONNECT_ON_SHOW_HOLD_STATE="${CONNECT_ON_SHOW_HOLD_STATE:-$HOME/.camera-box/connect-on-show-hold.json}"
+stray_session_check_assert "$HERE" "$STRIH" "$STREAM" "the issue-1242 connect-on-show hold"
+connect_on_show_e2e_hold "$HERE" "$STRIH" "$CONNECT_ON_SHOW_HOLD_STATE" || exit 1
+connect_on_show_e2e_wait_live "$HERE" "$STRIH" "$CONNECT_ON_SHOW_HOLD_STATE"
 
 # PROBE_BIN_DIR holds the three probe binaries the harness deploys/runs:
 #   $PROBE_BIN_DIR/camera-box      — PROBE-featured appliance with the #174 cam1 burn
@@ -4469,16 +4491,18 @@ fi
 CAPTURE_RATE_WINDOW_START_EPOCH="$(date +%s)"
 
 # #1301: CG_CHAIN=1 — turn the SongPlayer output burn ON + StartRecord cg OBS (RESOLUME-SNV) for
-# the run. ALL best-effort (the SongPlayer sender is songplayer#151, unshipped) — a failure is
+# the run. ALL best-effort (the burn is read back from SongPlayer's health endpoint) — a failure is
 # loud but NEVER aborts the camera-chain run; the SongPlayer burn OFF + cg OBS StopRecord run in
 # cleanup() (the #246/#844 leak-guard class). Pure no-op unless CG_CHAIN=1.
 if cg_chain_enabled; then
-  echo "[5/8] #1301 CG_CHAIN=1 — SongPlayer burn ON + cg OBS StartRecord (UNVERIFIED until songplayer#151 ships)"
+  echo "[5/8] #1301 CG_CHAIN=1 — SongPlayer burn ON (verified on its health endpoint) + cg OBS program + StartRecord"
   cg_chain_songplayer_burn on
   if CG_HOST_IP="$(cg_chain_resolve_host)" \
     && cg_chain_record_start "$CG_HOST_IP" "$HERE/obs_phase2.py" "${CG_CHAIN_RECORD_TIMEOUT:-${OBS_CLEANUP_TIMEOUT:-30}}"; then
     CG_RECORDING_STARTED=1
   fi
+  # #1302: no cg recording = nothing will judge the burn, so it must not stay on the LED wall.
+  if [ "$CG_RECORDING_STARTED" != 1 ]; then cg_chain_songplayer_burn off; fi
 fi
 
 # [5b/8] #707 B1 (freeze+jump discriminator, SECOND prong) — arm a lightweight per-cambox TCP-to-
@@ -4672,6 +4696,13 @@ else
   interruptible_sleep "$(( DURATION + RECORD_PAD ))"
 fi
 
+# #1302: CG_CHAIN=1 only — ONE tail CG window AFTER every camera window: strih program is hard-cut
+# to the scene carrying the cg OBS input, so the strih + stream recordings carry the SongPlayer
+# chain. The tail placement is meant to keep the camera-chain verdict out of it (no zero-tick
+# cambox window, nothing in the optical span). Pure no-op unless the profile is on AND cg OBS
+# started recording.
+if cg_chain_window_due; then cg_chain_window "$STRIH" "$HERE/obs_phase2.py" "${OBS_CLEANUP_TIMEOUT:-30}"; fi
+
 echo "[7/8] StopRecord + download strih + stream recordings to dev1 (NO grab #179)"
 # #758 item 3 — disarm the in-run freeze watch now that the recording window has ended (its own
 # verdict is read further below, at recording-verdict time, from the poison file this leaves behind).
@@ -4718,6 +4749,12 @@ if measurement_eq_enabled && [ "${ALL_CAMBOX:-0}" = "1" ]; then
   # ever leaves `set +e` (the helper also returns 0 internally; belt-and-suspenders).
   measurement_eq_post_record_stomp_recheck "$MEASUREMENT_EQ_PROFILE" "$STRIH" "$STRIH_PW" "$STREAM" "$STREAM_PW" || true
 fi
+
+# #1302: end the CG leg now that strih + stream stopped recording and the audit/stomp reads above are
+# done — cg StopRecord (the host path is kept for the pull below), SongPlayer burn OFF, the strih and
+# cg OBS program changes restored — so none of it runs through the on-box decodes (cleanup() repeats
+# each step). Pure no-op unless CG_CHAIN=1.
+cg_chain_after_stoprecord "${CG_HOST_IP:-}" "$HERE/obs_phase2.py" "${CG_CHAIN_RECORD_TIMEOUT:-${OBS_CLEANUP_TIMEOUT:-30}}"
 
 # [7b/8] #894: burn-unit run-integrity check. Runs BEFORE the merge/verdict below, so a burn unit
 # that died mid-run (e.g. the exact #894 device-steal race: a hotplug's udev rule restarting
@@ -5451,11 +5488,12 @@ continuing WITHOUT the imag partial; the merge below will omit --merge-partials 
 
   echo "    --- [8/8d] MERGE the small partials ON dev1 (no recording on dev1) ---"
   echo "    After pulling both partials (+ their <partial>-pixels dirs) to dev1, run the merge:"
-  # #1301: CG_CHAIN=1 — StopRecord cg OBS (finalize the file) + pull it to dev1 so the merge can
+  # #1301: CG_CHAIN=1 — confirm cg OBS stopped (the #1302 after-StopRecord step already did) + pull
+  # the StopRecord file to dev1 so the merge can
   # feed it as --cg below. BEST-EFFORT: a failed stop/pull just omits --cg (the merge runs exactly
   # as today, no cg_chain section) — it NEVER aborts the camera-chain verdict. The resolume
-  # recording transport is env-configured via CG_CHAIN_PULL_CMD (pending songplayer#151); with it
-  # unset the pull is a loud no-op. Pure no-op unless CG_CHAIN=1.
+  # recording is scp'd from resolume (the exact StopRecord file) unless CG_CHAIN_PULL_CMD overrides
+  # the transport. Pure no-op unless CG_CHAIN=1.
   if cg_chain_enabled && [ "$CG_RECORDING_STARTED" = 1 ]; then
     cg_chain_record_stop "$CG_HOST_IP" "$HERE/obs_phase2.py" "${CG_CHAIN_RECORD_TIMEOUT:-${OBS_CLEANUP_TIMEOUT:-30}}"
     cg_chain_pull_recording "$CG_HOST_IP" "$CG_RECORDING" || true

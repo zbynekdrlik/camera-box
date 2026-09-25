@@ -14,8 +14,10 @@ set -euo pipefail
 #   * NO taskset CPU pin unless STRIH_ISOLATED_CPUS / /etc/strih-isolated-cpus.conf exists (never a
 #     guessed pin -- the imag #841 lesson); since issue 1357 the shared baseline's obs_box_cpu_affinity
 #     persists the TOPOLOGY-DERIVED P-core block there (AFFINITY-ONLY, like imag's taskset pin);
-#   * NO DRM lease and NO scene-seeder preflight (the strih scene seeder is a separate follow-up --
-#     the launcher must not depend on a seeder that does not exist yet).
+#   * issue 1346 (owner 24.9.2026): the HDMI output is the in-OBS DRM-lease output (issue 1152),
+#     selectable Program / built-in Multiview. When ~/.camera-box/drm-output.json arms it, the
+#     launcher takes that connector OUT of the X layout before the OBS launch (the lease takes the
+#     idle connector -- the imag-obs-start.sh precedent); a dormant config changes nothing.
 #
 # Idempotent: OBS already running -> prints a note and exits 0 (never a second instance).
 # On launch: clear crash sentinels -> launch obs -> wait <=90 s for the :4455 WebSocket (fail loud if
@@ -119,6 +121,19 @@ if ! python3 -c "import sys; sys.path.insert(0, '/usr/local/bin'); import strih_
   exit 1
 fi
 
+# issue 1346: DRM-lease mode. Classify the config with the ONE Python grammar (strih_scenes mirrors the
+# vendored C module's own contract: full JSON parse, "enabled": true, a non-empty connector) -- the
+# import was proven by the preflight above. Armed -> take the connector out of the X layout NOW, so
+# the desktop never extends onto HDMI and the in-OBS lease finds it idle. Best effort + LOUD: a
+# failed xrandr never aborts the unit (the verify-strih drm-output item names a lease that did not
+# go live).
+DRM_CONNECTOR="$(python3 -c "import sys; sys.path.insert(0, '/usr/local/bin'); import strih_scenes; print(strih_scenes.drm_output_lease_connector(strih_scenes.drm_output_config_text()))" 2>/dev/null || true)"
+if [ -n "$DRM_CONNECTOR" ]; then
+  echo "drm-lease mode ENABLED (${DRM_CONNECTOR} = the in-OBS DRM-lease HDMI output) -- taking it out of the X layout"
+  xrandr --output "$DRM_CONNECTOR" --off 2>/dev/null \
+    || echo "WARN issue 1346: xrandr --output ${DRM_CONNECTOR} --off failed -- if ${DRM_CONNECTOR} is still active in X the in-OBS lease may fail (continuing, never aborting the unit)"
+fi
+
 if [ -n "$ISOLATED_CPUS" ]; then
   echo "launching: taskset -c ${ISOLATED_CPUS} ${OBS_BIN} ${OBS_ARGS[*]}"
   taskset -c "$ISOLATED_CPUS" "$OBS_BIN" "${OBS_ARGS[@]}" &
@@ -163,6 +178,16 @@ if python3 "$SCN" --bootstrap; then
 else
   echo "WARN issue 1317: strih_scenes.py --bootstrap FAILED (non-fatal) -- OBS stays UP; collection may be unseeded. Re-seed: python3 ${SCN} --bootstrap. NOT aborting the unit (would flap a live OBS)."
 fi
+
+# issue 1242: the BANDWIDTH ROLES on every launch (default on, never a forgettable manual step) --
+# program-path cameras connect only while shown, the built-in multiview renders the always-connected
+# low-bandwidth `MV` twins. Idempotent (a correct collection is a pure read). Same best-effort contract
+# as the seed above: OBS is live, so a failure is a loud WARN, never a unit abort.
+# OWNER HOLD (24.9.2026, verbatim "Co este dneska nerob to je nizkokvalitne zdroje v multiview"): the
+# role apply is NOT run on launch until the owner releases it -- every camera stays full-bandwidth and
+# the multiview keeps rendering the full inputs. Re-enable = restore the call below (tracked on the
+# issue 1242 ticket), never a per-box toggle.
+echo "HOLD issue 1242: bandwidth roles NOT applied (owner hold 24.9.2026) -- run by hand: python3 ${SCN} --apply-roles"
 
 # #882: BLOCK until obs itself exits, then propagate ITS exit status -- makes obs (not this wrapper)
 # the process a Type=simple unit tracks. A signal death (segfault) reports non-zero and

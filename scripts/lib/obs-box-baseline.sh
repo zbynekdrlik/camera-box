@@ -24,6 +24,8 @@
 #   FETCH         the caller's `FETCH REPO_RELPATH DEST` installer (gh api on imag, the checkout on strih)
 #
 # The items, in the order both callers run them (imag's step numbers in brackets):
+#   obs_box_apt_lock_timeout [preamble, before any apt-get: the dpkg lock wait]
+#   obs_box_apt_update [every list refresh on both paths: the package-lists lock wait]
 #   obs_box_network_tuning [2]   obs_box_max_performance [4]   obs_box_never_sleep [5]
 #   obs_box_boot_safety_net [6]  obs_box_lowlatency_kernel [7] obs_box_cpu_affinity [8]
 #   obs_box_nvidia_prime [9]     obs_box_dejitter [14] (+ obs_box_crash_popups_off)
@@ -49,6 +51,101 @@
 # PATH (setup-imag.sh is sourced that way by its missing-tool tests).
 # shellcheck source=scripts/lib/obs-box-kiosk.sh
 if [ "${BASH_SOURCE[0]%/*}" != "${BASH_SOURCE[0]}" ]; then . "${BASH_SOURCE[0]%/*}/obs-box-kiosk.sh"; else . ./obs-box-kiosk.sh; fi
+
+# obs_box_apt_lock_timeout_conf -> the apt drop-in that makes every apt-get WAIT for the dpkg lock.
+#
+# issue 1357 (24.9.2026): the canonical strih-lx genlock deploy failed twice at setup-strih step 4 with
+# `E: Could not get lock /var/lib/dpkg/lock-frontend ... held by process (apt-get)` -- a periodic apt
+# run (apt-daily / unattended-upgrades) held the lock, and apt-get's default DPkg::Lock::Timeout is 0,
+# so a normal background apt run turned a correct deploy into a failed one. (Ubuntu's own
+# `Version::2.0::Dpkg::Lock::Timeout` binds only the interactive `apt` front end, never apt-get.)
+# With this drop-in every apt-get that takes the DPKG lock (install / remove / purge) waits up to
+# 10 min for it; a REAL apt failure still fails loud after the wait (the call site's `|| fail`, or the
+# caller's `set -e`). One apt config file covers every present and future such call on the box (no
+# per-call-site `-o` option to forget); security updates keep running. `apt-get update` takes the
+# separate package-LISTS lock (/var/lib/apt/lists/lock), which DPkg::Lock::Timeout does not govern --
+# that wait is obs_box_apt_update below.
+obs_box_apt_lock_timeout_conf() {
+    printf 'DPkg::Lock::Timeout "600";\n'
+}
+
+# obs_box_apt_lock_timeout [CONF] -- write the drop-in (default
+# /etc/apt/apt.conf.d/90camera-box-lock-timeout). Idempotent: compared first, rewritten only when it
+# differs, every outcome logged. The FIRST action of every OBS-box provisioning run (setup-strih.sh and
+# setup-imag.sh call it right after their root check, before any apt-get). Written 0644 whatever the
+# umask (apt run by a non-root user errors on an unreadable conf) through a `.dpkg-tmp` sibling (a name
+# apt ignores silently), removed again if the rename fails. Fails loud via the caller's fail() when the
+# file cannot be written.
+obs_box_apt_lock_timeout() {
+    local conf="${1:-/etc/apt/apt.conf.d/90camera-box-lock-timeout}"
+    local tmp="${conf}.dpkg-tmp"
+    if [ -f "$conf" ] && cmp -s "$conf" <(obs_box_apt_lock_timeout_conf); then
+        echo "  apt lock wait: ${conf} already in place (DPkg::Lock::Timeout 600 s)"
+        return 0
+    fi
+    if ! { obs_box_apt_lock_timeout_conf > "$tmp" && chmod 0644 "$tmp" && mv -f "$tmp" "$conf"; }; then
+        rm -f "$tmp"
+        fail "apt lock wait: could not write ${conf} -- apt-get would fail at once on a held dpkg lock"
+    fi
+    echo "  apt lock wait: ${conf} written (DPkg::Lock::Timeout 600 s -- apt-get waits for a background apt run)"
+}
+
+# obs_box_apt_update_lock_held TEXT -> exit 0 iff TEXT is apt-get update's HELD package-lists lock error.
+#
+# The exact message, captured live on apt 2.8.3 (imag's 24.04) and apt 3.2.0 (strih-lx's 26.04):
+#   E: Could not get lock /var/lib/apt/lists/lock. It is held by process N (name)
+#   E: Unable to lock directory /var/lib/apt/lists/
+# Keyed on "Could not get lock" on the LISTS lock only: a permission failure prints "Could not open lock
+# file", and the dpkg lock is the drop-in's job -- neither is ever waited out here.
+obs_box_apt_update_lock_held() {
+    case "$1" in
+        *"Could not get lock /var/lib/apt/lists/lock"*) return 0 ;;
+    esac
+    return 1
+}
+
+# obs_box_apt_update -- the ONE `apt-get update` of every OBS-box provisioning run (issue 1357, main
+# ruling 5821855428). apt-daily refreshes the package lists twice a day and holds /var/lib/apt/lists/lock
+# while it does; a bare `apt-get update` fails at once on that held lock and aborts the run under
+# `set -euo pipefail`, the same class as the two failed strih-lx deploys. This retries ONLY while that
+# lock is held, logging every wait, for at most OBS_BOX_APT_UPDATE_BUDGET_S (600 s) total, polling every
+# OBS_BOX_APT_UPDATE_POLL_S (10 s). Any other error, or a lock that outlives the budget, fails loud via
+# the caller's fail() with apt's own output shown. Never call `apt-get update` directly on these paths
+# (tests/obs_box_baseline_1357.rs sweeps for it).
+obs_box_apt_update() {
+    local budget="${OBS_BOX_APT_UPDATE_BUDGET_S:-600}" poll="${OBS_BOX_APT_UPDATE_POLL_S:-10}"
+    local start waited rc out nap lock_line l
+    start="$(date +%s)"
+    while :; do
+        rc=0
+        # C locale: the held-lock match reads apt's ENGLISH text, and an ssh session forwards the
+        # operator's locale (apt ships translations) -- a translated message would never be retried.
+        out="$(LC_ALL=C apt-get update -qq 2>&1)" || rc=$?
+        if [ "$rc" -eq 0 ]; then
+            [ -z "$out" ] || printf '%s\n' "$out"
+            return 0
+        fi
+        waited=$(( $(date +%s) - start ))
+        if ! obs_box_apt_update_lock_held "$out"; then
+            printf '%s\n' "$out" >&2
+            fail "apt-get update failed (exit ${rc}) -- not a held package-lists lock, so not retried"
+        fi
+        # apt can print W: lines BEFORE the lock error -- log the lock line itself.
+        lock_line=""
+        while IFS= read -r l; do
+            case "$l" in *"Could not get lock /var/lib/apt/lists/lock"*) lock_line="$l"; break ;; esac
+        done <<<"$out"
+        if [ "$waited" -ge "$budget" ]; then
+            printf '%s\n' "$out" >&2
+            fail "apt-get update: /var/lib/apt/lists/lock still held after ${waited}s (budget ${budget}s) -- ${lock_line}"
+        fi
+        nap="$poll"
+        [ $(( budget - waited )) -ge "$nap" ] || nap=$(( budget - waited ))
+        [ "$nap" -ge 1 ] || nap=1   # never a busy loop of apt-get calls
+        echo "  apt update: package lists locked by a background apt run (${lock_line}) -- waiting ${nap}s (${waited}s of ${budget}s)"
+        sleep "$nap"
+    done
+}
 
 # obs_box_cpu_isolation_plan  (stdin: one "CPU SIBLINGS_LIST" line per logical CPU, numerically
 # ordered — i.e. cpuN + the contents of its topology/thread_siblings_list) -> THREE lines:
@@ -352,7 +449,7 @@ obs_box_lowlatency_kernel() {
 # install (not a hand-authored grub.d file), so it needs no idempotent-append logic of its own --
 # `apt-get install` on an already-installed package is already a no-op.
 if ! dpkg -s lowlatency-kernel >/dev/null 2>&1; then
-    apt-get update -qq
+    obs_box_apt_update
     # #820: --allow-change-held-packages so step 6's own kernel hold can never block this install
     # (the lowlatency meta depends on the very HWE packages step 6 pins). Step 6 re-holds nothing
     # here; the hold is restored on the next provisioning pass, and the lowlatency packages get
@@ -561,7 +658,7 @@ SVC_EOF
         || echo "  WARNING: could not enable ${BOX}-igpu-maxperf.service"
     echo "  #841: iGPU max-frequency-pin service provisioned (no xorg.conf.d change -- TearFree does not exist on this driver, live-verified; Present+PageFlip already gives tear-free full-screen scanout without a compositor)"
 elif ! dpkg -s nvidia-driver-595-open 2>/dev/null | grep '^Status: install ok installed' >/dev/null; then
-    apt-get update -qq
+    obs_box_apt_update
     DEBIAN_FRONTEND=noninteractive apt-get install -y nvidia-driver-595-open >/dev/null \
         || fail "nvidia-driver-595-open install failed"
 fi

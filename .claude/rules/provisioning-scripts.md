@@ -72,7 +72,10 @@ below..." instead of quoting the actual command in the same sentence).
 ## Adding a new `camera-box.service.d` drop-in + its `verify-device.sh` acceptance check (#1087)
 
 To bake a NEW env drop-in into provisioning AND prove it takes effect, follow the (e) genlock pattern
-(worked example: (z) publish-30p, `CAMERA_BOX_PUBLISH_30P=1`, the "CAMn (30p)" blend stream):
+(historical worked example: the retired (z) publish-30p check, `CAMERA_BOX_PUBLISH_30P=1`, removed with
+the 30p stream by issue 1342; the current drop-in + check pair is `ndi-discovery.conf` + `(an)` -- the
+receiver-side `networks.ips` list -- which grades a lib verdict over ONE gathered ssh block instead of a
+journal marker):
 
 - **`setup-device.sh` write**: put the `cat > .../<name>.conf` heredoc INSIDE STEP 7, right beside the
   `genlock.conf` write — it shares STEP 7's existing `mkdir` + `daemon-reload` + `enable camera-box`,
@@ -342,3 +345,27 @@ verify-device's acceptance check for such a unit should assert the redirect is i
 `--save-state=/run/...` / a cleared `StateDirectory=`), not just that the unit is enabled — an
 enabled-but-start-failing unit is a silent hole (a check that gates only `is-enabled`, not the
 ro-root-safe config, would pass a box whose service can never actually run).
+
+## Five defects the M.2 migration hit (issue 1311) -- the rules they leave behind
+
+- **A backtick inside an UNQUOTED heredoc runs as a command.** STEP 18's `cat > /etc/fstab <<
+  FSTABEOF` must stay unquoted (it expands `ROOT_UUID` and two `$(...)`), so any backtick in its
+  comment text is escaped as `` \` ``. verify-device.sh's `usage()` had the same bug and ran
+  `v4l2-ctl --version` on `--help`. `tests/provisioning_defects_1311.rs` scans every unquoted heredoc
+  in setup-device / verify-device / create-usb for an unescaped backtick.
+- **Never trust `efibootmgr -c` without reading the entry back.** Both create-usb and STEP 17d call
+  the ONE shared `efi_cam_box_ensure` in `scripts/lib/efi-boot-entry.sh`. It requires an `HD(...)`
+  path (no `VenHw(`, loader `BOOTX64.EFI`) on the ESP PARTUUID that leads `BootOrder`, and repairs
+  the entry. An unreadable `efibootmgr -v` FAILs with no write (never "no entry, create blind").
+  create-usb exits on failure; STEP 17d only RECORDS it (`EFI_ENTRY_PROBLEM`) and STEP 19 refuses
+  "Setup Complete" -- a fail before STEP 18 would leave a fresh box with no read-only fstab. This
+  is stricter than before on purpose: a missing `efibootmgr` or an underivable root disk now also
+  refuses "Setup Complete" (it used to be a yellow note). verify-device `(al)` grades the same path
+  via `efi_entry_verdict <dump> <partuuid>` and FAILs when the `/boot/efi` PARTUUID is unreadable. Test it
+  against the fake-NVRAM `efibootmgr` stub in that test file (`EFI_BOOTMGR_BIN`), never a real box.
+- **`setup-device.sh --yes|-y`** is the non-interactive contract (`confirm_setup`). Do not pipe a `y`.
+- **Every ssh in verify-device.sh, verify-fleet.sh and verify-imag.sh passes
+  `-o UserKnownHostsFile=/dev/null`.** Otherwise a reflashed box's new host key reads as `ssh rc=255`.
+- **Clock sanity runs before the first apt/curl.** Forward-only, from the Ubuntu archive `Date`
+  header (curl, or bash `/dev/tcp` because the base image has no curl). Its pure functions and seams
+  live above the source guard, so tests override the fetch, the clock read and the clock set.

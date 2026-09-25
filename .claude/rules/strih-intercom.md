@@ -78,6 +78,10 @@ cut-over. So:
 - The systemd unit (`systemd/intercom-hub.service`) is installed **ENABLE-ONLY** by
   `setup-strih.sh` (step 13) — enabled, NEVER started/restarted. `verify-strih.sh` reports it
   report-only (an installed+enabled but inactive unit is correct while parallel).
+- **Which routing TOML step 13 installs is a per-box FACT (issue 1361):** `STRIH_INTERCOM_CONFIG` in
+  `scripts/strih-boxes/<box>.env` (strih-lx: `intercom/intercom.strih-lx.toml`). A second strih
+  (Poprad) gets its own `intercom/intercom.<box>.toml` + fact line — never an edit of the strih-lx
+  file. The fact is shape-checked at load; the file's existence is checked by step 13 itself.
 - Never run `intercom-hub` from a dev lane. M1b (the supervisor) does the first live test by
   repointing ONLY dev cambox cam1 at strih-lx via a `/run` env override (`CAMERA_BOX_INTERCOM_TARGET`,
   per the design) — cam2-7 stay on the Windows strih until M4.
@@ -248,6 +252,101 @@ DynamicUser without the drop-in. **Supervisor live steps:** confirm the MiniFuse
 against `wpctl status`, restart the operator PipeWire/WirePlumber for the sink to appear, and do the
 FOH-live level acceptance.
 
+## 24.9.2026 production audio fix (issue 1345, design comment 5813703805)
+
+What was wrong live, and how the code now handles it. Read this before touching `vban_io`,
+`local_audio`, `mulaw` or the converter.
+
+- **The operator heard nothing.** On Linux the `cutters` were capture-only. Now any pipewire
+  participant that is not the `program_out`, has `out_channels > 0` and a `pipewire_target` gets its
+  own `pw-cat --playback` sink fed from its OWN N-1 output bus.
+  - Wiring: `Matrix::local_outputs()` → `local_audio::spawn_local_sink`, the same supervision as
+    the program sink. The cutters share one `local_audio` stats facet: rx comes from the capture,
+    tx from the sink.
+  - The converter emits `pipewire_target = alsa_output.usb-ARTURIA_MiniFuse_4-00.pro-output-0`
+    plus `pipewire_channel_map = "AUX0,AUX1,AUX2,AUX3"`.
+  - The MiniFuse is a pro-audio node with 6 ports `playback_AUX0..5`. A 4-channel pw-cat stream
+    without `--channel-map` defaults to `FL,FR,RL,RR` and never lands on the AUX ports.
+  - Capture is unaffected: WirePlumber links `capture_AUX0/1` → `pw-cat:input_FL/FR` by order
+    (live `pw-link -l`).
+- **The capture ring.** The MiniFuse drives the graph at quantum 1024 (`clock.quantum 1024`, ALSA
+  `period-size 1024`), so `pw-cat --record` delivers 1024-frame bursts. The generic 2048-frame,
+  no-prefill `JitterBuffer` spliced ~8×/s.
+  - `JitterBuffer::local_capture(32 blocks, 2048)` prefills to the target. An underrun outputs
+    WHOLE silent blocks until refilled (never a partial zero-splice). An overrun drops back to the
+    TARGET, not the cap.
+- **`pw-cat --latency` takes SAMPLES or a time unit, never `N/rate`.** `--latency 256/48000` is
+  rejected (`bad latency value … (bad unit)`) and ignored. `--latency 256` with `--rate 48000`
+  gives `node.latency = "256/48000"`.
+  - This was proven with an UNLINKED probe stream (`--target 0`, `timeout 2`), which is harmless on
+    the live graph.
+  - Argument checks that happen before the connect (such as `--channel-map` vs `--channels`) can be
+    probed with `PIPEWIRE_REMOTE=<bogus> XDG_RUNTIME_DIR=/tmp/x pw-cat …`: a bad map fails with
+    `channels and channel-map incompatible` before `pw_context_connect`.
+- **PCMU anti-alias.** `mulaw::Decimator48kTo8k` is a 241-tap Kaiser-windowed sinc (-6 dB at
+  3.7 kHz, ≥ 60 dB from ~4.1 kHz). Its state and 6:1 phase carry across calls.
+  - The Janus leg owns ONE instance and resets it per session.
+  - `downsample_48k_to_8k` is the one-shot form, primed with the first sample so DC stays exact.
+  - The old one-pole let a 6 kHz tone through at -6 dB, and it restarted every 20 ms chunk.
+- **Talkback gain.** `TALKBACK_MAKEUP_DB` (converter, +12 dB) is added to every cutters →
+  phones/camN point. Tune it ONLY there, and regenerate the TOML.
+  - Changing the TOML also changes the strih-lx golden sha (`tests/fixtures/strih_box_1361/strih-lx.golden`,
+    `section intercom-toml`). Update that sha in the same commit.
+  - Check it with `bash tests/fixtures/strih_box_1361/render.sh <root> strih-lx | cmp - <golden>`.
+- **Stale streams.** Once a stream has had no packet for > `STALE_STREAM_MS` (500 ms), it stops
+  counting underruns, and its `level_dbfs` reads -120. A muted cambox used to add 187 underruns/s
+  forever and show its last level.
+- **Mono camboxes.** The camboxes send MONO VBAN (`channels = 1`). A buffer built with
+  `.with_min_channels(in_channels ≥ 2)` copies ch1 into ch2 (ONLY ch2, never padding up to 8
+  channels, which would count as short). Without that, a cam came out left-only and 6 dB down in
+  the phones' stereo→mono average.
+- **Tier-0 verify of these pure parts:** a rustc replica.
+  - Extract `DecodedAudio` + `STALE_STREAM_MS..peak_dbfs` from `vban_io.rs`, or the whole
+    `mulaw.rs`.
+  - Wrap the integration test file as a `#[cfg(test)] mod` with its `use intercom_hub::…` line
+    stripped.
+  - Run it with `rustc --edition 2021 --test`.
+
+## VBAN rate — the hub honours the header sample rate (issue 1345, 24.9.2026)
+
+- **The live cause.** `fohabl-strih` from the FOH desk (10.77.7.30) arrives at VBAN rate index 4 =
+  **96 kHz**, 103 frames × 2 ch per packet, ~934 pkt/s. The hub used to ignore the header rate and
+  push the samples raw into its 48 kHz ring: ~60 % of packets overran (`fohabl` `overruns`
+  6.76 M of 11.3 M rx) and the program audio (OBS `ASIO zvuk`) plus the cans played corrupted.
+- **The seam.** `vban_io::decode_packet` / `route_packet` carry the header rate. Each VBAN input
+  stream owns a `vban_rate::VbanRateConverter` (in the receive task, no lock); `vban_io::to_hub_rate`
+  runs a packet through it before the ring push:
+  - 1× the hub rate (48 k): passthrough, byte-identical, no copy;
+  - 2× / 4× (96 k / 192 k): a Kaiser windowed-sinc FIR decimator, 127 / 255 taps, -6 dB at 22 kHz,
+    flat to 20 kHz, ≥ 70 dB down from 24.5 kHz; history + phase carry across packets, so odd
+    103-frame packets decimate bit-identically to one pass;
+  - anything else (44.1 / 88.2 k, …): DROPPED, counted in `rate_rejects`, one warn per transition;
+  - a RESERVED rate index (20..=31) decodes to rate 0 via `VbanHeader::sample_rate_checked` and is
+    dropped the same way — never trust the codec's lenient `sample_rate()`, which falls back to
+    48 kHz (kept only for the appliance);
+  - a rate change or a channel-count change restarts the filter from silence.
+- **Observability.** `/api/state`, VBAN participants only: `sample_rate` (omitted before the first
+  packet) + `rate_rejects`. The receive task publishes into lock-free `VbanRateStats` slots that the
+  block loop reads. The periodic status line appends `rate_rejects=N` when any packet was dropped (a
+  rejected stream reads as silent -120 dBFS, so the line is what explains it). After a deploy,
+  fohabl must read `sample_rate: 96000` with `overruns` ≈ 0.
+- **Shared FIR.** The Kaiser taps + the stateful `FirDecimator` live in `intercom/hub/src/fir.rs`;
+  the PCMU `mulaw::Decimator48kTo8k` wraps it with the same math (the PCMU tests are the
+  bit-identity pin). A future non-integer source rate slots in as a new converter arm here, not as a
+  new crate.
+- **Tier-0 verify.** A rustc replica of `fir.rs` + `vban_rate.rs` + `mulaw.rs` with the pure half of
+  `tests/vban_rate_1345.rs` (cut at its `// ---- wiring` marker) + the two mulaw test files, run
+  with `rustc --edition 2021 --test`. `clippy-driver --edition 2021 --test -D warnings <replica.rs>`
+  applies the real clippy lints to the pure modules without cargo.
+- **Type-checking `vban_io.rs` without cargo.** Its only external crates are `anyhow`, `tracing` and
+  `intercom-vban`, so build those as rlibs straight from `~/.cargo/registry/src/*/` with `rustc`
+  (`once_cell` → `tracing-core` with `--cfg 'feature="std"' --cfg 'feature="once_cell"'` →
+  `pin-project-lite` → `tracing` with `--cfg 'feature="std"'`; `anyhow` alone), then
+  `clippy-driver --test -D warnings --extern …` a replica root that `#[path]`-includes fir / mulaw /
+  vban_rate / vban_io. That runs vban_io's own in-file tests too. Put the rustc lines in a script
+  file: an inline `--cfg 'feature="std"'` inside a compound Bash call is refused by the worktree
+  guard. `state.rs` / `main.rs` (serde derive, tokio) still first compile at CI.
+
 ## M3a — the Janus audio edge (issue 1345, DONE — this lane)
 
 M3 replaces the phones' VDO.Ninja leg with a supervised **Janus audiobridge** room the hub joins as
@@ -285,8 +384,8 @@ only the WS transport is LAN-reachable (TLS terminates on the dev1 front, no wss
   upgrade path:** the `janus_rtp` PCMU leg is the seam to swap for the vendored `opus` crate if
   quality is short — the adapter boundary and the engine stay unchanged.
 - The adapter up/down-mixes mono↔stereo, so the `phones` participant keeps its 2-in / 2-out matrix
-  shape. `src/mulaw.rs` is the pure G.711 codec + the 6:1 48 kHz↔8 kHz resample (one-pole LP +
-  decimate/ZOH), verified against the ITU reference vectors.
+  shape. `src/mulaw.rs` is the pure G.711 codec + the 6:1 48 kHz↔8 kHz resample (FIR anti-alias decimator down, one-pole-smoothed
+  ZOH up), verified against the ITU reference vectors.
 
 ### Config (`[janus]` table) + the room secret
 

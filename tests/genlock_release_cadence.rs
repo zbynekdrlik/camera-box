@@ -536,6 +536,183 @@ fn phase_convergence_present_and_wired_in_1049() {
     );
 }
 
+/// issue 1367 — the N==1 PIN-DERIVED DEPTH must be present and WIRED. A strih OBS restart landed
+/// the stream `NDI 2ME PGM` on 31 OR 32 frames at random; the rule settles every restart on
+/// `base + 1`. The shed half is routed by the SOURCE wrapper `genlock_should_converge_phase` for an
+/// N==1 tick (the pure `genlock_phase_converge_due` keeps its #1049 `if (n < 2) return false;`, so
+/// every N>=2 decision is the pre-1367 arithmetic, byte for byte); the hold half is
+/// `genlock_n1_hold_due` called at the HEAD of the N==1 STEADY branch. Both read the depth at the
+/// render tick's SCHEDULED instant (review round 2: `video_sleep` catches a late tick up without
+/// losing its slot, so the processing wall of a late tick over-reads the conveyor). Mirrors:
+/// src/genlock_n1_depth.rs n1_shed_due / should_hold_n1_phase / n1_tick_wall_ns + the C-vs-Rust
+/// parity gates in tests/genlock_relock_selection_parity.rs.
+#[test]
+fn n1_pin_derived_depth_present_and_wired_1367() {
+    let raw = vendor_file(OBS_SOURCE);
+    let src = squish(&raw);
+    for (needle, why) in [
+        (
+            "static inline uint64_t genlock_n1_tick_wall_ns(",
+            "the pure scheduled-instant helper (wall_now - (mono_now - scheduled mono))",
+        ),
+        (
+            "static inline uint64_t genlock_n1_base_frames(",
+            "the resync-depth helper (ceil((pin - 1 us) / interval))",
+        ),
+        (
+            "static inline uint64_t genlock_n1_depth_frames(",
+            "the ROUNDED presented depth both halves read",
+        ),
+        (
+            "static inline bool genlock_n1_is_deep_source(",
+            "the deep-source guard (shallow cg / imag sources stay untouched)",
+        ),
+        (
+            "static inline bool genlock_n1_shed_due(",
+            "the pure SHED decision",
+        ),
+        (
+            "static inline bool genlock_n1_hold_due(",
+            "the pure HOLD decision",
+        ),
+        (
+            "static inline uint64_t genlock_n1_tick_wall_now(uint64_t wall_now_ns)",
+            "the source-side scheduled-instant read",
+        ),
+        (
+            "return genlock_n1_tick_wall_ns(wall_now_ns, os_gettime_ns(), obs->video.video_time);",
+            "the scheduled instant = the render tick's own video_time (the sys_time async_tick \
+             passes down), mapped into wall time",
+        ),
+        (
+            "static bool genlock_should_hold_n1_phase(",
+            "the source-bound HOLD wrapper (queue head + freshest frame)",
+        ),
+        (
+            "genlock_n1_shed_due(tick_wall,",
+            "the N==1 SHED routing in the source wrapper genlock_should_converge_phase",
+        ),
+        (
+            "genlock_n1_hold_due(tick_wall,",
+            "the N==1 HOLD reading the scheduled instant in genlock_should_hold_n1_phase",
+        ),
+        (
+            "static inline bool genlock_n1_tick_on_grid(",
+            "the pure on-grid predicate (review round 3: a wall step leaves the tick off the grid)",
+        ),
+        (
+            "#define GENLOCK_N1_ON_GRID_NS 2000000ULL",
+            "the 2 ms on-grid window (= GENLOCK_MAX_SLEW_NS)",
+        ),
+        (
+            "static inline bool genlock_n1_tick_is_on_grid(uint64_t tick_wall_ns, uint64_t interval_ns)",
+            "the source-side on-grid read over the per-second grid",
+        ),
+        (
+            "shifted_ns = tick_wall_ns > UINT64_MAX - GENLOCK_N1_ON_GRID_NS ? UINT64_MAX : \
+             tick_wall_ns + GENLOCK_N1_ON_GRID_NS;",
+            "the on-grid read shifts the tick by the 2 ms window before flooring (a lost shift \
+             collapses the window to the late side)",
+        ),
+        (
+            "genlock_grid_floor_ns(shifted_ns, interval_ns)",
+            "the on-grid read floors on the ONE per-second grid (obs-genlock-grid.h)",
+        ),
+        (
+            "#define GENLOCK_N1_PIN_FRAME_TOLERANCE_NS 1000ULL",
+            "the 1 us pin tolerance (an exact-multiple pin counts one frame too many without it)",
+        ),
+        (
+            "#define GENLOCK_N1_DEEP_MARGIN_FRAMES 2ULL",
+            "the two-frame deep-source margin",
+        ),
+        (
+            "if (genlock_should_hold_n1_phase(source, reserve_ms, interval, wall_now)) { \
+             source->genlock_n1_grows++; source->genlock_ticks_since_drain = 0;",
+            "the HOLD call site (distinct counter + the shared drain throttle reset)",
+        ),
+        ("\"n1_grows=%llu \"", "the n1_grows= audit field"),
+        (
+            "if (n < 2 && source->genlock_last_known_n >= 2) return false;",
+            "the guard that keeps a tick of the N>=2 STEADY branch out of the N==1 shed when the \
+             post-erase re-measure reads below 2 (N>=2 byte-identical at the source level)",
+        ),
+        (
+            "(unsigned long long)source->genlock_stamp_gaps, \
+             (unsigned long long)source->genlock_n1_grows,",
+            "the n1_grows= argument right after stamp_gap= (format order)",
+        ),
+    ] {
+        assert_eq!(
+            src.matches(needle).count(),
+            1,
+            "{OBS_SOURCE}: issue 1367 — {why} is gone or duplicated (anchor `{needle}`)."
+        );
+    }
+    // Both N==1 decisions read the depth at the SCHEDULED instant, never the processing wall, and
+    // so does the audio pairing's video-delay tracker at the present tail (issue 1367 Option 3):
+    // three readers.
+    assert_eq!(
+        src.matches("genlock_n1_tick_wall_now(wall_now)").count(),
+        3,
+        "{OBS_SOURCE}: issue 1367 (review round 2) — the SHED and the HOLD wrappers and the audio \
+         video-delay tracker must all read at the render tick's scheduled instant \
+         (genlock_n1_tick_wall_now(wall_now))."
+    );
+    assert_eq!(
+        src.matches("const uint64_t genlock_delay_tick_wall = genlock_n1_tick_wall_now(wall_now);")
+            .count(),
+        1,
+        "{OBS_SOURCE}: issue 1367 — the audio video-delay tracker's scheduled-instant read is gone \
+         or duplicated (the third genlock_n1_tick_wall_now reader)."
+    );
+    assert_eq!(
+        src.matches("return genlock_n1_tick_is_on_grid(tick_wall, interval) &&")
+            .count(),
+        2,
+        "{OBS_SOURCE}: issue 1367 (review round 3) — the SHED and the HOLD wrappers must both \
+         defer while the scheduled tick is off the grid (a wall step)."
+    );
+    assert!(
+        !src.contains("GENLOCK_N1_TICK_EARLY_MARGIN_NS") && !src.contains("genlock_n1_rounded_depth_frames"),
+        "{OBS_SOURCE}: issue 1367 (review round 2) — the processing-wall early-tick margin and its \
+         separate rounded read are replaced by the scheduled-instant read; a late tick below two \
+         intervals is caught up by video_sleep, so any processing-wall margin misfires."
+    );
+    // ORDER inside the N==1 STEADY branch: the hold decides BEFORE the branch marks itself
+    // drain/converge-eligible, so a held tick neither drains nor sheds (one correction per tick).
+    // `drain_eligible = true;` is set ONLY on the N==1 STEADY branch, and the N>=2 STEADY branch
+    // (the first `converge_eligible = true;`) comes before it in the file.
+    let hold_at = src
+        .find("if (genlock_should_hold_n1_phase(source, reserve_ms, interval, wall_now))")
+        .expect("checked above");
+    assert_eq!(src.matches("drain_eligible = true;").count(), 1);
+    let n1_eligible = src.find("drain_eligible = true;").expect("counted above");
+    let n1_release = src[hold_at..]
+        .find("release = 1;")
+        .map(|i| hold_at + i)
+        .expect("issue 1367: no release after the hold call");
+    let n2_branch = src.find("converge_eligible = true;").expect("#1049 anchor");
+    assert!(
+        n2_branch < hold_at && hold_at < n1_release && n1_release < n1_eligible,
+        "{OBS_SOURCE}: issue 1367 — the N==1 hold must sit at the HEAD of the N==1 STEADY branch \
+         (after the N>=2 branch, before the N==1 release = 1 and its drain_eligible mark)."
+    );
+    // The pure helpers must stay CONTIGUOUS with genlock_phase_converge_due: the parity gate lifts
+    // the whole run from genlock_n1_base_frames to the end of genlock_phase_converge_due.
+    let block_start = raw
+        .find("static inline uint64_t genlock_n1_base_frames(")
+        .expect("checked above");
+    let converge = raw
+        .find("static inline bool genlock_phase_converge_due(")
+        .expect("#1049 helper present");
+    assert!(
+        block_start < converge && !raw[block_start..converge].contains("\nstatic bool "),
+        "{OBS_SOURCE}: issue 1367 — the genlock_n1_* helpers must sit contiguously right before \
+         genlock_phase_converge_due (the parity gate lifts that run verbatim)."
+    );
+}
+
 /// Structural check: within the #1049 converge block, the FIRST `da_erase` erases index 0.
 fn raw_converge_erases_index_zero(raw: &str) -> bool {
     let Some(pos) =

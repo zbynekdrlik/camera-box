@@ -30,6 +30,14 @@ for every tile today, live-verified via GetStats before/after — see the genloc
 Respects decouple-dont-rebuild (#508): this only re-points OBS's OWN existing scene/source
 mechanisms at cheaper feeds — no custom renderer, no new multiview mechanism.
 
+issue 1242 (24.9.2026, owner ruling): on the Linux strih (strih-lx) the multiview-twin ROLE is
+applied on every OBS launch by `strih_scenes.py --apply-roles` (the on-box launch seeder), together
+with the program-path `genlock_connect_on_show` flag on the camera inputs -- a full camera input now
+pulls bandwidth only while it is shown, and the multiview must render these always-connected twins
+(reversing the issue-761 same-source multiview for strih). This Windows-era seeder stays for its
+`--reattach` / `--stats` modes; `reattach()` keeps targeting the MAIN input, which an E2E run holds
+connected (scripts/lib/connect-on-show-hold.sh).
+
 Usage:
   strih_mv_scenes.py --host 10.77.9.202 --password PW               # seed the twins + rewire
   strih_mv_scenes.py --host 10.77.9.202 --password PW --stats 15    # ad-hoc GetStats before/after
@@ -60,11 +68,8 @@ NDI_SOURCE_NOT_DISCOVERABLE = object()
 # obs-websocket v5 SceneItemTransform: only these fields are SETTABLE via SetSceneItemTransform.
 # GetSceneItemList also returns read-only computed fields (width/height/sourceWidth/sourceHeight)
 # that must be stripped before echoing a transform back, or the request can be rejected/ignored.
-_SETTABLE_TRANSFORM_FIELDS = frozenset({
-    "positionX", "positionY", "rotation", "scaleX", "scaleY", "alignment",
-    "boundsType", "boundsAlignment", "boundsWidth", "boundsHeight",
-    "cropLeft", "cropTop", "cropRight", "cropBottom",
-})
+# issue 1242: the ONE owner of this list is strih_bandwidth_roles.py (the strih-lx role module).
+from strih_bandwidth_roles import SETTABLE_TRANSFORM_FIELDS as _SETTABLE_TRANSFORM_FIELDS  # noqa: E402
 
 
 # --- PURE functions (no network — unit-tested from tests/python/test_strih_mv_scenes.py) --------

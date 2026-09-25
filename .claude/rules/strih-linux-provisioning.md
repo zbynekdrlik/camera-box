@@ -11,6 +11,12 @@ paths:
   - "tests/ndi_runtime_lib.rs"
   - "scripts/lib/strih-cef-keyring.sh"
   - "tests/cef_password_store_1359.rs"
+  - "scripts/lib/strih-box-facts.sh"
+  - "scripts/strih-boxes/*.env"
+  - "tests/strih_box_facts_1361.rs"
+  - "tests/fixtures/strih_box_1361/*"
+  - "scripts/lib/strih-drm-output.sh"
+  - "tests/strih_drm_output_provision_1346.rs"
 ---
 
 # strih-lx — the Linux notebook replacing the Windows strih PC (issue 1317)
@@ -29,6 +35,76 @@ covers the provisioning scaffolding built during that preparation.
 > history. strih-obs-start.sh resolves `DISPLAY=:0` only; Companion Satellite starts from the openbox
 > autostart. See `.claude/rules/obs-box-baseline.md` for the conversion runbook.
 
+## Per-box FACT files — one script for every strih box (issue 1361)
+
+`setup-strih.sh` / `verify-strih.sh` take `--box <name>` (default `strih-lx`, so a bare run is
+today's run) and read EVERY box/venue identity value from `scripts/strih-boxes/<name>.env` through
+the ONE loader `scripts/lib/strih-box-facts.sh`. A second strih (strih PP, Poprad) is a new fact
+file, never a copy of the script (the unified-design ruling, umbrella issue 1357).
+
+- **The facts** (all required): `STRIH_HOSTNAME` (= the file name = the fleet name),
+  `STRIH_IP`, `STRIH_NDI_PREFIX` (MUST be the hostname upper-cased — DistroAV prepends the hostname
+  to every output), `STRIH_DANTESYNC_ROLE` (`server` = NTP master, no upstream / `client` + a
+  non-empty `STRIH_DANTESYNC_UPSTREAM`), `STRIH_INTERCOM_CONFIG` (`intercom/<file>.toml`),
+  `STRIH_NIC_DRIVER` (the rig-NIC selection rule; the IP match is the fallback, `STRIH_NIC_IFACE`
+  stays the run-time override), `STRIH_OBS_PROFILE` / `STRIH_OBS_COLLECTION`,
+  `STRIH_NDI_RUNTIME_PEER`, `STRIH_COMPANION_HOST`, `STRIH_CG_SENDER` (`none` = no CG inputs),
+  `STRIH_CAMERAS` (space-separated numbers). **Run-time facts stay derived on the box** — PL1 watts,
+  the CPU plan, the NIC interface name.
+- **The file is PARSED, never sourced.** Only `KEY=value` / `#` / blank lines; the value is literal
+  text and may not carry a shell metacharacter, quote or glob. Unknown / missing / duplicate keys
+  refuse. A `TODO_OWNER` value refuses and EVERY such fact is named (the template `strih-pp.env`
+  carries all of them until the owner answers). A per-run `STRIH_LX_IP` / `STRIH_LX_DANTESYNC_ROLE`
+  that CONTRADICTS the fact refuses (the old knobs are retired; an equal value is harmless).
+- **The fleet list stays literal and is PINNED to the facts.** `scripts/obs_fleet_table.py` parses the
+  literal `OBS_FLEET` default block and ~25 dev1 watchdogs source `obs-fleet.sh`, so the row is NOT
+  computed from the fact files (every watchdog would then depend on the loader). Instead the loader
+  refuses a box whose fleet row host (when it is an IP) differs from `STRIH_IP`, and
+  `tests/strih_box_facts_1361.rs` pins `obs_fleet_host strih-lx` == `strih-lx.env`'s `STRIH_IP`. A box
+  with NO fleet row yet (strih PP before go-live) loads fine; `strih_lx_host` then dials its fact IP.
+  Adding a strih to the fleet = add its `OBS_FLEET` row + facet memberships at go-live.
+- **Load before the source-guard.** Both orchestrators select + load the box BEFORE their
+  `BASH_SOURCE != $0` guard, so a sourced script (the tests, `render.sh`) sees exactly the facts a
+  real run uses (the box variable is `STRIH_FACT_BOX` — recording-e2e.sh exports an unrelated
+  `STRIH_BOX`). The fact ACCESSORS (`strih_lx_hostname` / `_ip` / `_ndi_prefix` / `_cameras` /
+  `_cg_sender` / `_nic_driver` / `_dantesync_role|args|client_args` / `strih_lx_host` / the unit
+  drop-in, historical `strih_lx_` names) live in the loader lib; `strih-provision.sh` sources it (a
+  source-only lib) and each accessor loads the default box on first use — a test that sources
+  `strih-provision.sh` alone still gets strih-lx.
+- **Generated files name the loaded box.** The janus jcfg / Companion conf / openbox autostart headers
+  and the IRQ oneshot's `@STRIH_BOX@` / `@STRIH_NIC_DRIVER@` comments follow the box, so a strih PP
+  file never claims to be strih-lx; `every_fact_dependent_output_follows_a_different_box` renders a
+  synthetic `strih-zz` and fails on ANY surviving strih-lx value or `@STRIH_` placeholder.
+- **A client upstream is a host NAME.** `strih_lx_dantesync_is_client_not_master` accepts the exact
+  `--ntp-server <host>` invocation whatever the host is called (a venue `ntp-master.lan` is a name,
+  not a master flag) and refuses every OTHER `--ntp-server ...` shape; every host-shaped fact (and the
+  `STRIH_LX_NTP_SERVER` override) must START with a letter or digit, so `--master` can never be
+  smuggled in as a "host". A client box that loads therefore always renders its unit.
+- **A failed load stays failed.** After a refused `strih_box_load` in a shell, accessors refuse
+  instead of quietly loading the default box; the unsafe-value check runs under `LC_ALL=C`, so a
+  non-ASCII byte is refused in every locale (sudo and CI differ).
+- **What reaches the box, and how.** The OBS profile/collection go to the UNCHANGED launcher through
+  `~/.config/systemd/user/strih-obs.service.d/10-box-facts.conf` (`strih-obs-start.sh` already reads
+  `STRIH_OBS_PROFILE` / `STRIH_OBS_COLLECTION` from its environment). The NIC driver + target IP are
+  substituted into the boot IRQ oneshot's `@STRIH_NIC_DRIVER@` / `@STRIH_TARGET_IP@` placeholders.
+  The intercom file is only SHAPE-checked at load and checked for existence where step 13 installs it
+  — the dev1 deploy plan rsyncs `scripts/` + `systemd/` only (no `intercom/`), and a load that
+  required the file would refuse the whole deploy before step 4.
+- **On-box artifact names are ROLE paths, not identity** (`/opt/camera-box/strih-lx-seed.json`,
+  the retired `strih-lx-projector.json` that setup step 6 now only removes (issue 1346),
+  `strih-lx-profile-facts.txt`, the retired `90-strih-lx.conf` cleanup,
+  the committed `strih-nic-irq-affinity.service` Description): they are read by `strih_scenes.py` /
+  `strih-obs-start.sh` under that fixed name on every strih box. The static test allowlists exactly
+  these tokens; any OTHER strih-lx identity value on a code line of the four scripts fails it.
+- **Byte-identity net.** `tests/fixtures/strih_box_1361/render.sh <root> <box>` sources
+  `setup-strih.sh --box <box>` and prints every fact-dependent output (hostname/IP/host, NDI names,
+  seed manifest, dantesync unit, janus jcfgs, openbox autostart + menu, IRQ oneshot, intercom sha256,
+  NDI peer, Companion conf/json); `strih-lx.golden` was captured from the PRE-1361 scripts run as
+  `STRIH_LX_IP=10.77.9.202`. Any intentional change to one of those outputs must regenerate the golden
+  in the SAME commit and say why — a drift there is a behaviour change on the live strih.
+- **Owner questions for strih PP** = the `TODO_OWNER` lines in `strih-pp.env`. `STRIH_NIC_DRIVER` is
+  read off the notebook on arrival (`readlink /sys/class/net/<if>/device/driver`), not asked.
+
 ## The parallel-run contract (why the namespacing + the client-clock matter)
 
 While both boxes run, TWO strih senders coexist on the NDI wire and must never collide:
@@ -42,7 +118,8 @@ While both boxes run, TWO strih senders coexist on the NDI wire and must never c
   "dantesync CLIENT only, the Windows PC keeps the single NTP-master role" contract was true ONLY
   during the parallel run; it is STALE. Since M4, `strih.lan` = the notebook (10.77.9.202) and the
   cam boxes take NTP from it, so `setup-strih.sh` step 2 provisions dantesync with a ROLE
-  (`STRIH_LX_DANTESYNC_ROLE`, default **`server`**): `strih_dantesync_unit_text ROLE [ARGS]` renders
+  (the box fact `STRIH_DANTESYNC_ROLE`, strih-lx = **`server`**; issue 1361 retired the per-run
+  `STRIH_LX_DANTESYNC_ROLE` knob): `strih_dantesync_unit_text ROLE [ARGS]` renders
   the bare NTP-master ExecStart for `server` (folding the live hand `dantesync.service.d/10-ntp-master.conf`
   drop-in INTO the unit, and removing any stale drop-in), or `--ntp-server <host>` for the historical
   `client` role. The self-check is now the role-aware `strih_lx_dantesync_role_ok ROLE ARGS`
@@ -50,7 +127,8 @@ While both boxes run, TWO strih senders coexist on the NDI wire and must never c
   role — but NEVER on a plain server role, which is correct post-M4); the internal
   `strih_lx_dantesync_is_client_not_master` is retained as the client-branch classifier. `verify-strih`
   adds a role live-check: `:8898/status` reachable + `mode` LOCK/NANO + (server role) an ntp UDP :123
-  listener. To run a future box as a client again: `STRIH_LX_DANTESYNC_ROLE=client`.
+  listener. To run a box as a client: `STRIH_DANTESYNC_ROLE=client` + `STRIH_DANTESYNC_UPSTREAM=<host>`
+  in its fact file (a client with no upstream is refused -- there is no guessed `strih.lan` default).
 
   The NDI-output `STRIH-LX (...)` namespacing above is a SEPARATE matter (issue 1347 owns the rename
   back to non-namespaced production names now the Windows strih is retired); it is untouched here.
@@ -242,65 +320,58 @@ NON-genlocked (`light.json` `NDI 2ME PGM`/`PVW`: `ndi_sync:1, latency:1`, no `ge
   NOTE from the seeder's `strih ndi input classes:` line; the `strih ndi inputs: OK` verdict line
   (`grep -qxF` anchor) is unchanged.
 
-## Fixed HDMI fullscreen projector — the strih_scenes.py projector seed (issue 1346, DONE)
+## Fixed HDMI output = the in-OBS DRM-lease output, view Program / Multiview (issue 1346)
 
-**The owner ROZHODNUTÉ (19.9.2026 11:05):** the strih-lx HDMI output is an **OBS fullscreen
-projector** on the HDMI display, **selectable in OBS between Program and Multiview**, and **persisted
-across relaunches** — **NOT** Xorg + a DRM-lease scanout (the imag-1152 path was the rejected
-alternative). This is Prístup 1 of the issue-1346 design.
+**The owner ROZHODNUTÉ (24.9.2026, answer „1"; supersedes the 19.9. fullscreen-projector choice):**
+the strih-lx HDMI output is the SAME fixed hardware output imag has — the vendored libobs DRM-lease
+output from issue 1152 (`.claude/rules/obs-drm-output.md`) — selectable between the Program and the
+BUILT-IN frontend Multiview. It is **never an OBS projector window and never the desktop**. The 19.9.
+projector choice existed only because the then-GNOME-Wayland strih-lx could not take an X RandR
+lease; strih-lx has run Xorg + openbox since 23.9.
 
-- **Why OBS's own projector.** OBS already has the whole mechanism: right-click preview → Fullscreen
-  Projector (Program) / Multiview (Fullscreen) → the operator's monitor. `SaveProjectors=true`
-  persists that choice in the scene collection's `saved_projectors` and OBS re-opens it on every
-  launch. No window-manager scripting / compositor plugin needed. The **OBS UI projector menu stays
-  the primary operator switch**; `strih_scenes.py --projector program|multiview` is the scripted twin
-  — **run it with `sudo`** (it rewrites the root-owned `/opt/camera-box/strih-lx-projector.json`; a
-  non-root invocation fails loud with `PermissionError`).
-- **ProjectorType numbers (OBS `saved_projectors` `type`):** **3 = StudioProgram, 4 = Multiview.**
-  strih runs Studio Mode always, so a Program projector persists as StudioProgram (3). The Windows
-  strih's current `saved_projectors` is exactly one entry `{"monitor":0,"type":4}` = Multiview → so
-  **Multiview is the default**, Program the alternative. `/opt/camera-box/strih-lx-projector.json`
-  (`{"type":"multiview"|"program"}`) selects it; `setup-strih.sh` step 6 writes it default-multiview
-  **guarded by `[ ! -f ... ]`** so it never overwrites the operator's later choice.
-- **`SaveProjectors=true` is the OPPOSITE of imag.** imag (`setup-imag.sh` #522) uses
-  `SaveProjectors=false` + an openbox-autostart boot hook that RE-OPENS the projectors (re-applying
-  settings). strih-lx has **no such boot hook**, so it relies on OBS's own `SaveProjectors` restore +
-  the `seed_projector` idempotency check. `setup-strih.sh` step 7 pre-seeds `[BasicWindow]
-  SaveProjectors=true` + `ProjectorAlwaysOnTop=true` in the desktop user's `user.ini` (idempotent
-  `RawConfigParser` upsert; the OBS default is `SaveProjectors=false`, so without this a projector
-  would never come back after `strih-obs.service` relaunches).
-- **`seed_projector(obs)` runs AFTER the input seed inside `--bootstrap`** (and standalone via
-  `--projector`): read the type → `GetMonitorList` → `projector_monitor_index` (the first monitor
-  whose `monitorName` does NOT start with `eDP` — the internal panel) → **no external monitor ⇒ log
-  "projector: no external monitor, skipping" and RETURN, NEVER fall back to the eDP panel** (that
-  would cover the operator UI; the next launch re-checks) → read the current collection's
-  `saved_projectors` (resolved robustly: the authoritative user.ini `[Basic] SceneCollectionFile`
-  base → the `GetSceneCollectionList` name → a glob of every `basic/scenes/*.json` as a last resort,
-  since OBS slugifies a display-name with spaces into a DIFFERENT filename — an exact-name-only read
-  would fail-open and stack a duplicate window) → `projector_already_saved`
-  skips if that type is already saved on that monitor (OBS re-opens saved ones itself; a second
-  `OpenVideoMixProjector` opens a DUPLICATE window, imag #756 class) → else `OpenVideoMixProjector`
-  with the mapped `videoMixType` (`projector_type_to_mix`: program→PROGRAM, multiview→MULTIVIEW).
-- **Live facts today:** `GetMonitorList` = one monitor `eDP-2(0)` (1920×1080); every HDMI connector
-  disconnected. So the seed SKIPs cleanly until a display is plugged into HDMI (the owner rig step for
-  acceptance). The seed never opens a projector on the live box from CI — the supervisor runs the seed
-  on strih-lx.
-- **verify-strih.sh item 4c — REPORT-ONLY** (pure `strih_projector_verdict` in
-  `scripts/lib/strih-provision.sh`): `SaveProjectors=true` present in `user.ini`; and — when an
-  external HDMI/DP monitor is connected (a `/sys/class/drm/card*-HDMI*/status` or `DP*` = `connected`)
-  — a saved `ProjectorType` 3/4 entry exists → PASS, else NOTE. `hdmi-absent` NOTEs "HDMI display not
-  connected". Never a hard FAIL (the live open needs a display).
-- **Tests:** `tests/python/test_strih_projector_1346.py` (pure helpers + fake-WS `seed_projector` +
-  setup-strih anchors) and the `strih_projector_verdict` case in
-  `tests/strih_provision_pure_functions.rs`.
-
-**Follow-up (MEASURED, its own ticket if it bites): HDMI-Multiview tearing.** The issue-1107
-present-vsync arming covers ONLY the fullscreen **non-multiview Program** projector
-(`OBSProjector.cpp` `savedMonitor > -1 && !isMultiview`, `.claude/rules/obs-projector-vsync.md`). The
-**Multiview** projector is NOT vsync-armed. On the notebook (no compositor) this may tear on the HDMI
-output; **measure it once a display is on the notebook** and, if tearing shows, extend the arming to
-the multiview projector when it is the only fullscreen projector — that is a **vendored OBS change**
-(`vendor/obs-studio`), so its own ticket, never bolted onto this provisioning lane.
+- **The config is the module's own contract:** `~/.camera-box/drm-output.json` of the OBS user, ONE
+  machine-written line `{"enabled":true,"connector":"HDMI-0","argb":2105376,"view":"multiview"}`.
+  The connector is the **X RandR output name** (NVIDIA-primary strih-lx prints `HDMI-0`; modesetting
+  would print `HDMI-1`), never the kernel name `HDMI-A-1`. `"view"` absent = program (imag unchanged).
+- **setup-strih step 6** writes it (pure helpers in `scripts/lib/strih-drm-output.sh`) ONLY when a
+  kernel HDMI connector reads `connected` AND X RandR names it (`xrandr --query` as the desktop user
+  on `:0`); otherwise a loud `SKIP issue 1346`. Today strih-lx is eDP-only, so it SKIPs. An existing
+  file is the operator's choice and is left alone. The retired `/opt/camera-box/strih-lx-projector.json`
+  is removed; its `"type"` seeds the initial view (default multiview). The root-run step refuses a
+  symlinked config path and writes the file with `install -o <desktop user>` (never a root redirect).
+- **The desktop never touches HDMI:** the kiosk autostart (`strih_openbox_autostart_text`) turns EVERY
+  HDMI output off in X (the panel is the only desktop screen), and `strih-obs-start.sh` runs
+  `xrandr --output <connector> --off` before the OBS launch whenever the config arms the lease
+  (classified by `strih_scenes.drm_output_lease_connector`, the C module's contract, pinned equal to
+  imag's classifier). Residual: the kernel console / lightdm before the autostart can still light HDMI
+  for a moment at boot (an xorg.conf `Option "Enable" "false"` would be a baseline change).
+- **The operator switch is IN OBS:** Tools > `HDMI výstup: Program` / `HDMI výstup: Multiview`
+  (the Linux-only frontend component `components/DrmOutputView.cpp`). It switches live and persists the
+  `"view"` key through libobs (`obs_drm_output_set_view`). `strih_scenes.py --projector
+  program|multiview` is the scripted twin — it rewrites only the `"view"` key (every other key kept,
+  one compact line) and takes effect at the next OBS start; run it as the desktop user (the file is in
+  their home). It fails loud when the output is not provisioned.
+- **The Multiview is the stock one:** one extra `Multiview` instance, held only while the output is
+  active AND the view is multiview, configured from the same `BasicWindow` `Multiview*` settings the
+  projectors use, refreshed from `OBSProjector::UpdateMultiviewProjectors`, cleared with the
+  projectors in `ClearSceneData`. With issue 1242 it renders the low-bandwidth `MV` twin scenes, like
+  every other built-in Multiview. The operator's LAPTOP projector stays (SaveProjectors=true + the
+  ProjectorAlwaysOnTop=false pre-seed in step 7 are kept for it).
+- **verify-strih item 4c** (`strih_drm_output_verdict`): SKIP (`skip-no-hdmi`) with no HDMI monitor;
+  NOTE `hdmi-unplugged` when armed but unplugged; FAIL `classify-failed` (the strih_scenes import
+  failed, the one-liner prints `? program`) / `config-missing` / `view-invalid` /
+  `lease-not-live` (no `drm-output: program scanout LIVE` in the newest OBS log) /
+  `multiview-not-live` (view multiview but no `drm-output: multiview bind LIVE`). HDMI presence is the
+  KERNEL status — after a lease X RandR can stick at `disconnected`.
+- **Tests:** `tests/strih_drm_output_provision_1346.rs` (the lib helpers + the wiring anchors),
+  `tests/python/test_strih_drm_output_1346.py` (the Python grammar, the shared
+  `tests/fixtures/drm_output_view_parity.tsv` with the C lift, read/write, the CLI) and
+  `tests/drm_output_view_1346.rs` (the vendored side).
+- **Live acceptance (supervisor/owner, needs an HDMI monitor on strih-lx):** FULL-bundle deploy (a
+  frontend + libobs change) → plug the monitor → re-run setup-strih step 6 → restart
+  `strih-obs.service` → both views scan out (switch in Tools), the choice survives an OBS restart,
+  `program-render-audit lagged=0` with the Multiview view, the grid shows labels + tally, and the
+  desktop never shows on HDMI.
 
 ## Runtime packages + the /usr prefix install (issue 1317, DONE)
 
@@ -341,7 +412,9 @@ to `/opt/obs-genlock` (on no loader path) and installed NO runtime packages, so 
   duplicates ~30 lines of the imag on-box install program (the templated heredoc inside
   `scripts/deploy-genlock-fleet.sh`, its `cp -a` + issue-1236 perms-normalize + `ldconfig` block).
   That program has its own probe-gated anchors, so extracting a shared prefix-install helper is the
-  `deploy-genlock-fleet.sh` strih-lx EXECUTE-arm follow-up's job — do it THEN, not now.
+  `deploy-genlock-fleet.sh` strih-lx EXECUTE-arm follow-up's job — do it THEN, not now. (Part 6
+  landed the execute arm WITHOUT touching strih-provision.sh -- it calls setup-strih.sh as it is --
+  so this consolidation remains open -- a follow-up candidate in the part-6 LANE-RETURN.)
 
 ## Baseline completeness — the six live-found gaps, now durable (issue 1317, DONE)
 
@@ -773,9 +846,11 @@ first live boot on strih-lx: re-confirm the oneshot resolved cleanly (the superv
   OUTPUTS** (`STRIH-LX (2ME PGM/PVW)` + the `interkom/MULTIVIEW/Grading` republishes) are a SEPARATE
   ticket — they need a study of the Windows-strih DistroAV output+republish config (imag has one
   output, no reference); the seeder never touches outputs.
-- **`deploy-genlock-fleet.sh` strih-lx EXECUTE deploy** (scp the strih artifact + ssh-run the on-box
-  program). The pure helpers + the PLAN arm exist; execute reuses the imag transport with
-  `fleet_linux_bundle_artifact_for strih-lx` + `STRIH_LX_IP` once the box exists.
+- ~~**`deploy-genlock-fleet.sh` strih-lx EXECUTE deploy**~~ — **DONE (issue 1317 part 6)**:
+  `scripts/lib/strih-lx-deploy.sh`, contract in `.claude/rules/genlock-fleet-deploy.md` ("strih-lx
+  EXECUTE arm"). It drives setup-strih.sh unchanged, so the `strih_install_bundle_prefix` vs imag
+  on-box install duplication below is still open (its lib belongs to the provisioning lane; returned
+  to the supervisor as a follow-up candidate in the part-6 LANE-RETURN, not filed by the lane).
 - ~~**`strih-obs-start.sh` / `strih-obs-stop.sh`** launcher pair (sibling of `imag-obs-start.sh`) that
   `strih-obs.service` ExecStart references~~ — **DONE (issue 1317)**, see the "OBS supervision
   launcher pair" section above.
@@ -860,8 +935,8 @@ The five hand-patches that survived ONLY on the live box (a re-flash would rever
 
 ## 22.9.2026 live session — GPU, projector, Janus, NDI naming (issue 1352 + the #1317 findings comment)
 
-9. **OBS renders on the RTX 5050 via XWayland PRIME, NEVER on the Intel iGPU and NEVER native-Wayland NVIDIA.** Measured: the iGPU (Mesa) is saturated by OBS alone (`intel_gpu_top` render 85–90 % obs), program render lag 7–20 %, multiview 6–7 fps — no scene-graph trimming fixes it. Native Wayland + `__EGL_VENDOR_LIBRARY_FILENAMES=10_nvidia.json` crash-loops (`eglSwapBuffers failed` → `The Wayland connection experienced a fatal error: Protocol error`). The working env block in `strih-obs-start.sh` (line ~110): `QT_QPA_PLATFORM=xcb __NV_PRIME_RENDER_OFFLOAD=1 __GLX_VENDOR_LIBRARY_NAME=nvidia __EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/10_nvidia.json` → `Loading up OpenGL on adapter NVIDIA GeForce RTX 5050`, program 9–23 ms, `lagged=0`, GPU ~22 %. `__GL_SYNC_TO_VBLANK=0` is irrelevant. Still to bake into `strih_lx_*` provisioning (issue 1352).
-10. **Under XWayland+PRIME a projector whose GL surface IS the X toplevel stalls the graphics thread ~0.5 s per present** (`OBSProjector` = `OBSQTDisplay(widget, Qt::Window)`): any MV projector open → avg render 513 ms, lag 93 %, MV 1.8 fps; windowed/fullscreen/no-above/640×360 all the same, minimized 129 ms. The main window's preview/program displays are native CHILD windows and present fine. PROVEN fix: make the projector a child window — `xdotool windowreparent <projector> <obs-main>` → lag 0.0 %, MV 29.8 fps. Live workaround = `strih-mv-host.service` (`--user` unit, `/usr/local/bin/strih-mv-host.py`, python3-xlib): re-hosts every `Projector` toplevel in a plain managed host window, keeps the child sized, forwards focus + WM close to OBS; verified adopt/resize/close/reopen. The durable fix is the vendored child-display projector (issue 1352). A re-flash without this unit = a 93 %-lag strih.
+9. **OBS renders on the RTX 5050 via XWayland PRIME, NEVER on the Intel iGPU and NEVER native-Wayland NVIDIA.** Measured: the iGPU (Mesa) is saturated by OBS alone (`intel_gpu_top` render 85–90 % obs), program render lag 7–20 %, multiview 6–7 fps — no scene-graph trimming fixes it. Native Wayland + `__EGL_VENDOR_LIBRARY_FILENAMES=10_nvidia.json` crash-loops (`eglSwapBuffers failed` → `The Wayland connection experienced a fatal error: Protocol error`). The working env block in `strih-obs-start.sh` (line ~110): `QT_QPA_PLATFORM=xcb __NV_PRIME_RENDER_OFFLOAD=1 __GLX_VENDOR_LIBRARY_NAME=nvidia __EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/10_nvidia.json` → `Loading up OpenGL on adapter NVIDIA GeForce RTX 5050`, program 9–23 ms, `lagged=0`, GPU ~22 %. `__GL_SYNC_TO_VBLANK=0` is irrelevant. **SUPERSEDED (issue 1357, 23.9.2026):** strih-lx now runs the plain Xorg openbox kiosk with NVIDIA as the primary provider, so OBS renders on the RTX with NO offload env; both launchers install verbatim (`obs-box-baseline.md`).
+10. **Under XWayland+PRIME a projector whose GL surface IS the X toplevel stalled the graphics thread ~0.5 s per present** (`OBSProjector` = `OBSQTDisplay(widget, Qt::Window)`): any MV projector open → avg render 513 ms, lag 93 %, MV 1.8 fps. It was worked around twice (the `strih-mv-host.service` X11 re-hosting helper and the vendored child-host projector, issue 1352). **Both are RETIRED (issue 1357, 24.9.2026):** the plain Xorg openbox kiosk with NVIDIA as the primary provider has no XWayland and no PRIME offload, and the hosted shape turned the projector black on a runtime always-on-top toggle. The stock toplevel projector runs on every box; setup step 8b now only REMOVES a leftover helper install and verify item 22 grades it absent (`.claude/rules/obs-projector-stock-toplevel.md`). If a present stall ever comes back, fix the box's display stack in the shared baseline — never re-add a per-OS projector host.
 11. **Multiview divisor on a 30 fps canvas is 1 BY DESIGN** (`obs-display.c` #776: `effective_divisor = round(33.3 ms / frame_interval)` clamped to the frontend's 2) — do not chase `divisor=1` in the audit on strih; on a 60 fps canvas (imag) it is 2.
 12. **Janus binds the plain-RTP port to the IP it auto-detected at START.** After the .203→.202 renumbering every `janus_audiobridge_plainrtp_allocate_port` bind was `EADDRNOTAVAIL` on 10.77.9.203 → `No ports available in range 10000-60000` → the hub's `janus: session establish failed — backing off` forever → phones heard an empty room (their own WebRTC leg was fine). `systemctl restart janus` re-detects. Any IP change → restart janus (provisioning: pin `local_ip` in `janus.plugin.audiobridge.jcfg general:{}` or restart janus after netplan). Diagnose with `strace -f -p <janus> -e trace=bind` during the hub's 60 s retry — the hub log alone never names the IP.
 13. **`avahi-utils` is NOT installed by default on 26.04** — `avahi-browse … 2>/dev/null` reads as "0 entries" (command not found swallowed) and looks exactly like blind mDNS. `apt-get install avahi-utils` (provisioning + a verify-strih item); libndi 6.3.2 links `libavahi-client` so discovery works whenever avahi-daemon runs. Cambox hub levels `cam1..7=-120 dBFS` are BY DESIGN (the cambox intercom starts MUTED, power-button unmute) — not a routing fault.
@@ -878,7 +953,7 @@ Two reusable patterns from wiring findings 9–14 above into `setup-strih.sh` / 
 
 - **Janus `local_ip` (finding 12)** = a 3rd optional `LOCAL_IP` arg on `strih_janus_audiobridge_jcfg_text`, mirroring the `ws_ip` blank-omit idiom (`local ip_line=""; [ -n "$local_ip" ] && ip_line="    local_ip = \"$local_ip\""`), fed `"$STATIC_IP"` (= `strih_lx_ip`, the SAME source the netplan/ws step uses — never a 2nd hard-coded literal). The blank-arg case renders `general: {\n\n}` (a harmless blank line — `strih_janus_room_jcfg_ok` grades only the `room-<N>` block).
 
-- **The mv-host helper (finding 10) is copied BYTE-VERBATIM from the box** (`sha256sum` the local file against `/usr/local/bin/strih-mv-host.py` + `~/.config/systemd/user/strih-mv-host.service` to confirm) and installed as a lettered sub-step `step "8b"` so `TOTAL_STEPS=17` (test-pinned) never changes; enable-only via `systemctl --user enable` (never `start`); verify reads the `default.target.wants/strih-mv-host.service` symlink (no `--user` session bus needed) + `python3 -c "import Xlib"`. The unit's hard-coded `/run/user/1000` + `DISPLAY=:0` stay verbatim (byte-identical mandate; UID 1000 = newlevel).
+- **The mv-host helper (finding 10) is RETIRED (issue 1357).** It used to be installed byte-verbatim as the lettered sub-step `step "8b"`; that step now only removes a leftover install (`disable --now`, `rm -f` of the WantedBy link, the unit and `/usr/local/bin/strih-mv-host.py`, `daemon-reload`) and never installs or enables anything. The lettered-step convention still holds: `TOTAL_STEPS=17` (test-pinned) is unchanged. Verify item 22 reads the files, so it needs no `--user` session bus.
 
 ## GOTCHA — verify-strih.sh acceptance run on the live box (issue 1352, 22.9.2026): three ways a gate lies under `set -euo pipefail`
 

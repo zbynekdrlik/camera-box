@@ -99,10 +99,7 @@
 #   (y) camera-box.service has the ExecStartPre device-free bake-in (drop-in wired to the helper,
 #       helper stops the stray E2E burn UNIT + pkills the burn, never the painter) so every start
 #       frees /dev/video instead of crash-looping on "Device or resource busy" (#772).
-#   (z) publish-30p.conf drop-in present with CAMERA_BOX_PUBLISH_30P=1 (setup-device.sh STEP 7 bakes
-#       it) AND the box is ACTUALLY publishing the secondary "CAMn (30p)" 30fps blend stream right
-#       now (the issue-792 publisher's own journal output). A re-provisioned box that lost the
-#       drop-in, or an old binary predating issue 792, FAILs instead of regressing to 60p-only (#1087).
+#   (z) [REMOVED, issue 1342] the retired secondary 30fps NDI stream; the box publishes ONE output.
 #   (aa) interkom audio bake-in (#782): /etc/asound.conf is the by-NAME form (CARD=HID, not the old
 #       enumeration-time card NUMBER that dangles on re-enumeration), alsa-utils is installed, and
 #       the live `amixer -c HID` Mic/PCM percents match this box's per-box table (cam1-4 75%/79%,
@@ -167,8 +164,15 @@
 #        relay: TasksMax <= 512 (fork/thread runaway can't starve the box pid space) AND a running
 #        relay logs at info (zero journal lines while active = an old binary predating info-by-
 #        default logging). A box without the relay = `na`; a disabled/inactive relay skips logging.
-#   (al) named `cam-box` UEFI boot entry (#1066 D6) -- HARD FAIL: efibootmgr reports a `cam-box`
-#       entry AND it is FIRST in BootOrder -- so the box boots its internal disk without depending on
+#   (an) NDI discovery receiver config (issue 1342) -- HARD FAIL: /etc/ndi/ndi-config.v1.json lists
+#        every PINNED managed NDI sender IP in networks.ips (the SAME generator setup-device.sh writes
+#        with, scripts/lib/ndi-discovery.sh: every camera + strih-lx/stream; a renumber FAILs until
+#        re-provisioned) and carries NO networks.discovery, AND the camera-box.service.d/
+#        ndi-discovery.conf drop-in points NDI_CONFIG_DIR at /etc/ndi (camera-box runs as root with
+#        ProtectHome=yes, so /root/.ndi is invisible).
+#   (al) named `cam-box` UEFI boot entry (#1066 D6) -- HARD FAIL: `efibootmgr -v` reports a `cam-box`
+#       entry with an HD() path to \EFI\BOOT\BOOTX64.EFI on the /boot/efi PARTUUID (never a
+#       firmware-mangled VenHw() one, issue 1311) AND it is FIRST in BootOrder -- so the box boots its internal disk without depending on
 #       the AMI USB auto-entry (which failed on cam2 after a warm reboot). setup-device.sh STEP 17d
 #       creates it on the box; this proves it took effect post-reboot. FAILs (test-strictness) if the
 #       entry is absent, not leading, or efibootmgr is unreadable/absent (a non-EFI box).
@@ -230,6 +234,10 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE/lib/remote-logging.sh"  # remote_log_gather_remote_snippet/remote_log_verdict -- the (ak)
                                  # off-box kernel(netconsole)+journal(upload) forensics check (#1311;
                                  # SAME source of truth as setup-device.sh / create-usb-linux.sh)
+# shellcheck source=scripts/lib/ndi-discovery.sh
+. "$HERE/lib/ndi-discovery.sh"   # ndi_discovery_sender_ips/ndi_discovery_config_verdict/
+                                 # ndi_discovery_dropin_config_dir -- the (an) NDI discovery receiver
+                                 # config check (issue 1342; SAME generator as setup-device.sh)
 # shellcheck source=scripts/lib/efi-boot-entry.sh
 . "$HERE/lib/efi-boot-entry.sh"  # efi_entry_verdict -- the (al) named cam-box UEFI entry check
                                  # (#1066 D6; SAME source of truth as setup-device.sh / create-usb-linux.sh)
@@ -422,28 +430,6 @@ genlock_fps_matches() {
 # missing value).
 cpu_affinity_dropin_value() {
   printf '%s\n' "$1" | grep -oE 'CPUAffinity=[0-9]+' | tail -1 | cut -d= -f2 || true
-}
-
-# --- (y) publish-30p.conf drop-in + live "CAMn (30p)" blend stream (issue 792, baked into
-# provisioning by #1087) ---------------------------------------------------------------------------
-
-# publish_30p_dropin_value TEXT -> the numeric value of CAMERA_BOX_PUBLISH_30P in TEXT (the contents
-# of the camera-box.service.d/publish-30p.conf drop-in), "" if absent. `|| true` -- same #458
-# footgun as genlock_dropin_fps above (a bare-assignment caller must never abort on a merely-missing
-# value).
-publish_30p_dropin_value() {
-  printf '%s\n' "$1" | grep -oE 'CAMERA_BOX_PUBLISH_30P=[0-9]+' | tail -1 | cut -d= -f2 || true
-}
-
-# publish_30p_stream_live JOURNAL -> the COUNT of lines in JOURNAL showing the issue-792 publish-30p
-# publisher actually emitting the secondary "(30p)" blend stream: the one-shot startup
-# `publish-30p ACTIVE` line, or the recurring `camera_box::publish_30p:` output line. "0" iff none.
-# Proves the "(30p)" NDI source is genuinely being published, not merely that the drop-in enabling
-# it is on disk. `grep -c` (NEVER -q: -q's early pipe close can SIGPIPE the upstream printf and,
-# under pipefail, return non-zero even on a real match) + `|| true` (grep -c exits 1 with a printed
-# "0" on no match; the bare-substitution caller must never abort).
-publish_30p_stream_live() {
-  printf '%s\n' "$1" | grep -cE 'publish-30p ACTIVE|camera_box::publish_30p:' || true
 }
 
 # --- (g) libndi root-owned symlink chain --------------------------------------------------------
@@ -835,8 +821,6 @@ Checks:
       power/control currently reads "on" (drift check; N/A when no grabber is fitted, #894)
   (y) camera-box ExecStartPre device-free bake-in present (drop-in + helper) so every start frees
       /dev/video from a killed E2E run's stray capture burn (#772)
-  (z) publish-30p.conf drop-in present (CAMERA_BOX_PUBLISH_30P=1) AND the box is actually
-      publishing the secondary "CAMn (30p)" 30fps blend stream (issue 792 / #1087)
   (aa) interkom audio bake-in: by-NAME /etc/asound.conf (CARD=HID), alsa-utils installed, and the
       live amixer Mic/PCM gain matches the per-box table (cam1-4 75%/79%, cam5-7 80%/94%) (#782)
   (ab) RemoteOS MCP agent: remoteos-mcp.service enabled (reboot-survival) + active, :8092 listening
@@ -847,10 +831,10 @@ Checks:
       to name: "enp*" (the PCI NIC), never the driver wildcard, and no two interfaces carry the box
       IP -- so a USB CDC-NCM camera link (bkshading, issue 808) can never steal the IP + PTP route
   (ae) NTP-client DSCP marking (dantesync issue 52): nftables installed + a dedicated
-      `table ip dantesync_dscp` OUTPUT-mangle rule marks outgoing NTP requests (udp dport 123) with
+      \`table ip dantesync_dscp\` OUTPUT-mangle rule marks outgoing NTP requests (udp dport 123) with
       DSCP EF, applied at boot by the enabled+active dantesync-dscp.service oneshot (rsntp cannot
       setsockopt(IP_TOS) on Linux, so this provisioning rule is the request-half fix)
-  (af) v4l2-ctl (v4l-utils) installed and runnable (`v4l2-ctl --version`) -- already listed in
+  (af) v4l2-ctl (v4l-utils) installed and runnable (\`v4l2-ctl --version\`) -- already listed in
       setup-device.sh STEP 16's apt-get line, but that line silently swallows a per-box apt
       failure; cam3/cam4 were found live missing it despite the script listing it (issue 1213)
   (ag) ethtool installed (command -v ethtool) -- also in setup-device.sh STEP 16's apt-get line,
@@ -866,10 +850,13 @@ Checks:
       cambox-mgmt-selfcheck.timer enabled -- the local ssh-banner probe + restart safety net
   (ak) off-box remote logging (#1311): cambox-netconsole.service enabled+active with a live configfs
       target to dev1:514, AND systemd-journal-upload enabled with URL -> the dev1 sink + a /run cursor
-  (al) named cam-box UEFI boot entry (#1066 D6): efibootmgr reports a `cam-box` entry that is FIRST
-      in BootOrder -- FAILs if absent / not leading / efibootmgr unreadable (test-strictness)
+  (al) named cam-box UEFI boot entry (#1066 D6): efibootmgr reports a \`cam-box\` entry that is FIRST
+      in BootOrder (read with -v), with an HD() path on the /boot/efi PARTUUID (issue 1311) -- FAILs if absent /
+      not leading / mangled (VenHw) or stale path / efibootmgr or ESP PARTUUID unreadable (test-strictness)
   (am) bkshading-relay blast-radius + info logging (#1309): TasksMax <= 512 AND a running relay
       logs at info (zero journal lines while active FAILs); relay not provisioned = n/a
+  (an) NDI discovery receiver config (issue 1342): /etc/ndi/ndi-config.v1.json networks.ips lists
+      every pinned managed sender, no networks.discovery + the camera-box NDI_CONFIG_DIR drop-in
 
 Env: KERNEL_PIN (optional exact running-kernel pin), NDI_VERSION_PIN (default 6.3.2),
      DANTESYNC_OFFSET_FRESHNESS_S (max age of a fresh [NTP] offset line, default 300),
@@ -911,8 +898,11 @@ fail() { printf "  ${RED}[FAIL]${NC} %s\n" "$1"; FAILS=$((FAILS + 1)); }
 # fails the acceptance gate (#453's ".bak cruft is drift to surface, not a functional defect").
 warn() { printf "  ${YELLOW}[WARN]${NC} %s\n" "$1"; }
 
+# UserKnownHostsFile=/dev/null (issue 1311): a REFLASHED box has a new host key. With dev1's real
+# known_hosts, ssh refuses password auth for the mismatched key even under StrictHostKeyChecking=no,
+# so every check read `ssh rc=255` (37 false FAILs on cam4). verify-fleet.sh / verify-imag.sh too.
 ssh_box() {
-  sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no -o ConnectTimeout="$SSH_TIMEOUT" \
+  sshpass -p "$CAM_PW" ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout="$SSH_TIMEOUT" \
     "${SSH_USER}@${IP}" "$1"
 }
 
@@ -1387,28 +1377,6 @@ else
   ok "camera-box ExecStartPre frees /dev/video on every start (#772)"
 fi
 
-# (z) publish-30p.conf drop-in + live "CAMn (30p)" blend stream (issue 792 feature, baked into
-# provisioning by #1087) ------------------------------------------------------------------------
-# TWO facets: (1) the camera-box.service.d/publish-30p.conf drop-in is present with
-# CAMERA_BOX_PUBLISH_30P=1 -- setup-device.sh STEP 7 bakes it, so a re-provisioned box keeps the
-# secondary 30fps blend stream instead of silently regressing to 60p-only -- AND (2) the box is
-# ACTUALLY publishing the "(30p)" NDI source right now (the issue-792 publisher's own journal
-# output), reusing CB_JOURNAL already gathered in (c). A drop-in on disk without the live stream
-# (e.g. an old binary predating issue 792) still FAILs. Inserted BEFORE (q) -- see
-# .claude/rules/provisioning-scripts.md: (q) is the intentionally-LAST check.
-rc=0
-P30_CONF="$(ssh_box "cat /etc/systemd/system/camera-box.service.d/publish-30p.conf 2>/dev/null")" || rc=$?
-P30_VAL="$(publish_30p_dropin_value "$P30_CONF")"
-if [ "$P30_VAL" != "1" ]; then
-  fail "publish-30p.conf drop-in missing or CAMERA_BOX_PUBLISH_30P!=1 (got '${P30_VAL:-<none>}', ssh rc=$rc) -- the secondary 30fps '(30p)' blend stream will not come up (issue 792 / #1087)"
-elif [ -z "$CB_JOURNAL" ]; then
-  fail "publish-30p.conf enabled but the camera-box journal was unreadable -- cannot confirm the '(30p)' stream is actually being published (issue 792 / #1087)"
-elif [ "$(publish_30p_stream_live "$CB_JOURNAL")" != "0" ]; then
-  ok "publish-30p.conf CAMERA_BOX_PUBLISH_30P=1 and the '(30p)' blend stream is live (issue 792 / #1087)"
-else
-  fail "publish-30p.conf enabled but NO '(30p)' publisher activity in the last 300 journal lines -- the secondary blend stream is NOT being published (old binary predating issue 792? issue 792 / #1087)"
-fi
-
 # (aa) interkom audio bake-in: by-NAME asound.conf + per-box Mic/PCM mixer gains + alsa-utils
 # installed (#782) ------------------------------------------------------------------------------
 # Provisioning must reproduce the hand-unified fleet audio state so a re-provisioned box does not
@@ -1737,16 +1705,25 @@ fi
 # creates the `cam-box` entry in the box's OWN NVRAM and makes it lead BootOrder; this proves it took
 # effect post-reboot. Graded by the pure efi_entry_verdict. HARD FAIL (test-strictness): the entry
 # absent, not leading, OR efibootmgr unreadable/absent (a non-EFI box) all fail -- a box that would
-# drop to the firmware menu on the next warm reboot must NOT pass acceptance. Inserted BEFORE (q) per
+# drop to the firmware menu on the next warm reboot must NOT pass acceptance. Issue 1311: it reads
+# `efibootmgr -v` and the /boot/efi PARTUUID, so a leading entry with a firmware-mangled VenHw()
+# path (cam2, 24.9.2026) or one on a stale ESP GUID FAILs too. Inserted BEFORE (q) per
 # .claude/rules/provisioning-scripts.md (the (q)-last invariant).
 alrc=0
-EFI_ENTRIES="$(ssh_box "efibootmgr 2>/dev/null")" || alrc=$?
+EFI_ENTRIES="$(ssh_box "efibootmgr -v 2>/dev/null")" || alrc=$?
+# The ESP the cam-box entry must point at: the /boot/efi mount (STEP 18's fstab carries it; on the
+# create-usb layout it is partition 1 of the root disk, the one setup-device STEP 17d reads).
+EFI_ESP_PARTUUID="$(ssh_box 'blkid -s PARTUUID -o value "$(findmnt -no SOURCE /boot/efi)" 2>/dev/null' 2>/dev/null)" || EFI_ESP_PARTUUID=""
 if [ "$alrc" -ne 0 ] || [ -z "$EFI_ENTRIES" ]; then
   fail "could not read UEFI boot entries over SSH (efibootmgr rc=$alrc, empty=$([ -z "$EFI_ENTRIES" ] && echo yes || echo no)) -- cannot certify the named 'cam-box' entry leads BootOrder (#1066 D6). An unreadable/absent efibootmgr output is a FAIL (test-strictness): a non-EFI box, or a missing efibootmgr, must not silently pass."
+elif [ -z "$EFI_ESP_PARTUUID" ]; then
+  # Issue 1311 review: without the ESP GUID a stale entry from a previous install (right HD() shape
+  # and loader, old GUID) would certify -- an unreadable input is a FAIL (test-strictness).
+  fail "could not read the /boot/efi PARTUUID over SSH (is /boot/efi mounted? blkid output empty) -- cannot certify the 'cam-box' entry points at THIS disk's ESP rather than a stale one (issue 1311)"
 else
-  EFI_AL_VERDICT="$(efi_entry_verdict "$EFI_ENTRIES")"
+  EFI_AL_VERDICT="$(efi_entry_verdict "$EFI_ENTRIES" "$EFI_ESP_PARTUUID")"
   if [ "$EFI_AL_VERDICT" = "ok" ]; then
-    ok "named UEFI boot entry 'cam-box' present AND leads BootOrder -- the box boots its internal disk without depending on the AMI USB auto-entry (#1066 D6)"
+    ok "named UEFI boot entry 'cam-box' present, HD() path on the ESP (PARTUUID '${EFI_ESP_PARTUUID:-unread}'), AND leads BootOrder -- the box boots its internal disk without depending on the AMI USB auto-entry (#1066 D6, issue 1311)"
   else
     fail "UEFI boot entry: ${EFI_AL_VERDICT#FAIL: }"
   fi
@@ -1793,6 +1770,34 @@ else
     FAIL:*) fail "bkshading-relay: ${RELAY_VERDICT#FAIL: }" ;;
     *) fail "could not grade bkshading-relay state (verdict='${RELAY_VERDICT}', present='${R_PRESENT}')" ;;
   esac
+fi
+
+# (an) NDI discovery receiver config (issue 1342) -- HARD FAIL -------------------------------------
+# The camera-box service RECEIVES `STRIH-LX (interkom)` (the cameraman preview). setup-device.sh STEP 7
+# writes /etc/ndi/ndi-config.v1.json (networks.ips = every managed NDI sender, generated from
+# camera-set.sh + obs-fleet.sh) and a camera-box.service.d drop-in pointing libndi's NDI_CONFIG_DIR at
+# /etc/ndi. This grades BOTH, read-only, in one ssh round trip, against the SAME generator's PINNED
+# list (the traveling resolume hostname is best-effort at write time, never required here), so a
+# renumbered sender FAILs until the box is re-provisioned. A stray networks.discovery also FAILs (a
+# configured sender stops mDNS). Inserted BEFORE (q) per .claude/rules/provisioning-scripts.md (the
+# (q)-last invariant); fail() only, never a warn.
+anrc=0
+NDI_DISC_BLOCK="$(ssh_box "$(ndi_discovery_gather_remote_snippet)")" || anrc=$?
+NDI_DISC_CONF="$(ndi_discovery_block_section "$NDI_DISC_BLOCK" NDI_CONF)"
+NDI_DISC_DROPIN="$(ndi_discovery_block_section "$NDI_DISC_BLOCK" NDI_DROPIN)"
+NDI_DISC_REQUIRED="$(ndi_discovery_sender_ips pinned)" || NDI_DISC_REQUIRED=""
+NDI_DISC_VERDICT="$(ndi_discovery_config_verdict "$NDI_DISC_CONF" "$NDI_DISC_REQUIRED")"
+NDI_DISC_DIR="$(ndi_discovery_dropin_config_dir "$NDI_DISC_DROPIN")"
+if [ "$anrc" -ne 0 ]; then
+  fail "could not read the NDI receiver config over SSH (rc=$anrc, issue 1342)"
+elif [ -z "$NDI_DISC_REQUIRED" ]; then
+  fail "could not generate the managed NDI sender list (scripts/camera-set.sh + scripts/lib/obs-fleet.sh ndi-sender facet, issue 1342)"
+elif [ "$NDI_DISC_VERDICT" != "ok" ]; then
+  fail "NDI receiver config ${NDI_DISCOVERY_SYSTEM_DIR}/${NDI_DISCOVERY_CONFIG_NAME}: $(printf '%s' "$NDI_DISC_VERDICT" | tr '\n' ' ' | sed 's/FAIL: //g')-- re-run setup-device.sh (issue 1342)"
+elif [ "$NDI_DISC_DIR" != "$NDI_DISCOVERY_SYSTEM_DIR" ]; then
+  fail "camera-box.service.d/ndi-discovery.conf missing or NDI_CONFIG_DIR='${NDI_DISC_DIR:-<none>}' (want ${NDI_DISCOVERY_SYSTEM_DIR}) -- libndi would never read the receiver config (issue 1342)"
+else
+  ok "NDI receiver config: networks.ips lists every managed sender (${NDI_DISC_REQUIRED}) + NDI_CONFIG_DIR=${NDI_DISCOVERY_SYSTEM_DIR} drop-in (issue 1342)"
 fi
 
 # (q) .bak cruft drift -- WARNING only, never a FAIL (#453) -------------------------------------

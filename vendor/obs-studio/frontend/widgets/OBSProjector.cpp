@@ -2,13 +2,15 @@
 
 #include <OBSApp.hpp>
 #include <components/Multiview.hpp>
+#if defined(__linux__)
+#include <components/DrmOutputView.hpp> // camera-box issue 1346
+#endif
 #include <utility/display-helpers.hpp>
 #include <utility/platform.hpp>
 #include <widgets/OBSBasic.hpp>
 
 #include <qt-wrappers.hpp>
 
-#include <QEvent>
 #include <QScreen>
 #include <QWindow>
 
@@ -18,24 +20,8 @@ static QList<OBSProjector *> multiviewProjectors;
 
 static bool updatingMultiview = false, mouseSwitching, transitionOnDoubleClick;
 
-// camera-box #1352: choose the projector's window flags. On Linux (XWayland + NVIDIA
-// PRIME) a projector whose GL surface IS the X toplevel window stalls the graphics thread
-// ~0.5 s per present, so when a host toplevel parent is provided the display is built as a
-// native CHILD (Qt::Widget) and the host is the toplevel. Everywhere else, and on the
-// no-host path, it stays a toplevel window (Qt::Window) exactly as before.
-static Qt::WindowFlags projectorWindowFlags(QWidget *host)
-{
-#if defined(__linux__)
-	if (host)
-		return Qt::Widget;
-#else
-	(void)host;
-#endif
-	return Qt::Window;
-}
-
 OBSProjector::OBSProjector(QWidget *widget, obs_source_t *source_, int monitor, ProjectorType type_)
-	: OBSQTDisplay(widget, projectorWindowFlags(widget)),
+	: OBSQTDisplay(widget, Qt::Window),
 	  weakSource(OBSGetWeakRef(source_))
 {
 	OBSSource source = GetSource();
@@ -47,18 +33,12 @@ OBSProjector::OBSProjector(QWidget *widget, obs_source_t *source_, int monitor, 
 	isAlwaysOnTop = config_get_bool(App()->GetUserConfig(), "BasicWindow", "ProjectorAlwaysOnTop");
 
 	if (isAlwaysOnTop) {
-		Toplevel()->setWindowFlags(Qt::WindowStaysOnTopHint);
+		setWindowFlags(Qt::WindowStaysOnTopHint);
 	}
 
 	// Mark the window as a projector so SetDisplayAffinity
-	// can skip it. camera-box #1352: set it on the TOPLEVEL's window handle (the
-	// projector's own handle when unhosted). On the Linux hosted path the host toplevel
-	// is not realized yet at ctor time (so its handle is null there) — harmless, since
-	// the property is only ever read on Windows (SetDisplayAffinitySupported() is false
-	// on X11).
-	if (QWindow *handle = Toplevel()->windowHandle()) {
-		handle->setProperty("isOBSProjectorWindow", true);
-	}
+	// can skip it
+	windowHandle()->setProperty("isOBSProjectorWindow", true);
 
 #if defined(__linux__) || defined(__FreeBSD__) || defined(__DragonFly__)
 	// Prevents resizing of projector windows
@@ -67,11 +47,11 @@ OBSProjector::OBSProjector(QWidget *widget, obs_source_t *source_, int monitor, 
 
 	type = type_;
 #ifndef __APPLE__
-	Toplevel()->setWindowIcon(QIcon::fromTheme("obs", QIcon(":/res/images/obs.png")));
+	setWindowIcon(QIcon::fromTheme("obs", QIcon(":/res/images/obs.png")));
 #endif
 
 	if (monitor == -1) {
-		Toplevel()->resize(480, 270);
+		resize(480, 270);
 	} else {
 		SetMonitor(monitor);
 	}
@@ -164,46 +144,13 @@ OBSProjector::~OBSProjector()
 	}
 
 	App()->DecrementSleepInhibition();
-
-	// camera-box #1352: on Linux the projector is a native child of a plain host toplevel.
-	// Whatever deletes the projector (Escape, DeleteProjector, monitor-replace,
-	// CloseAllProjectors) must also tear down the host so no empty toplevel is left behind.
-	// `closing` is set only when the host itself is already handling its own deletion (its
-	// Close was intercepted in eventFilter), so we never re-close a host mid-destruction.
-	// window() == this when unhosted (Windows / no-host), so this is inert there.
-	QWidget *top = Toplevel();
-	if (top != this && !closing) {
-		top->deleteLater();
-	}
-}
-
-QWidget *OBSProjector::Toplevel()
-{
-	return window();
-}
-
-bool OBSProjector::eventFilter(QObject *watched, QEvent *event)
-{
-	// camera-box #1352: the host toplevel is closing (WM "X"). Run the projector's own
-	// close bookkeeping first (removes it from OBSBasic::projectors + multiviewProjectors
-	// and schedules its deletion) so SaveProjectors stays consistent; then let the host
-	// proceed to delete itself (WA_DeleteOnClose) with the projector as its child.
-	if (watched == Toplevel() && event->type() == QEvent::Close) {
-		if (!closing) {
-			closing = true;
-			OBSBasic::Get()->DeleteProjector(this);
-		}
-		return false;
-	}
-
-	return OBSQTDisplay::eventFilter(watched, event);
 }
 
 void OBSProjector::SetMonitor(int monitor)
 {
 	savedMonitor = monitor;
-	Toplevel()->setGeometry(QGuiApplication::screens()[monitor]->geometry());
-	Toplevel()->showFullScreen();
+	setGeometry(QGuiApplication::screens()[monitor]->geometry());
+	showFullScreen();
 	SetHideCursor();
 }
 
@@ -357,7 +304,7 @@ void OBSProjector::mousePressEvent(QMouseEvent *event)
 		if (GetMonitor() > -1) {
 			popup.addAction(QTStr("Windowed"), this, &OBSProjector::OpenWindowedProjector);
 
-		} else if (!Toplevel()->isMaximized()) {
+		} else if (!this->isMaximized()) {
 			popup.addAction(QTStr("Projector.ResizeWindowToContent"), this, &OBSProjector::ResizeToContent);
 		}
 
@@ -440,7 +387,7 @@ void OBSProjector::UpdateProjectorTitle(QString name)
 		break;
 	}
 
-	Toplevel()->setWindowTitle(title);
+	setWindowTitle(title);
 }
 
 OBSSource OBSProjector::GetSource()
@@ -471,6 +418,11 @@ void OBSProjector::UpdateMultiviewProjectors()
 	obs_enter_graphics();
 	updatingMultiview = false;
 	obs_leave_graphics();
+
+#if defined(__linux__)
+	/* camera-box issue 1346: the DRM-lease HDMI output's built-in Multiview follows the same refresh. */
+	DrmOutputViewRefresh();
+#endif
 }
 
 void OBSProjector::RenameProjector(QString oldName, QString newName)
@@ -484,8 +436,8 @@ void OBSProjector::RenameProjector(QString oldName, QString newName)
 
 void OBSProjector::OpenFullScreenProjector()
 {
-	if (!Toplevel()->isFullScreen()) {
-		prevGeometry = Toplevel()->geometry();
+	if (!isFullScreen()) {
+		prevGeometry = geometry();
 	}
 
 	int monitor = sender()->property("monitor").toInt();
@@ -503,14 +455,14 @@ void OBSProjector::OpenFullScreenProjector()
 
 void OBSProjector::OpenWindowedProjector()
 {
-	Toplevel()->showFullScreen();
-	Toplevel()->showNormal();
+	showFullScreen();
+	showNormal();
 	setCursor(Qt::ArrowCursor);
 
 	if (!prevGeometry.isNull()) {
-		Toplevel()->setGeometry(prevGeometry);
+		setGeometry(prevGeometry);
 	} else {
-		Toplevel()->resize(480, 270);
+		resize(480, 270);
 	}
 
 	savedMonitor = -1;
@@ -546,7 +498,7 @@ void OBSProjector::ResizeToContent()
 
 	newX = size.width() - (x * 2);
 	newY = size.height() - (y * 2);
-	Toplevel()->resize(newX, newY);
+	resize(newX, newY);
 }
 
 void OBSProjector::AlwaysOnTopToggled(bool isAlwaysOnTop)
@@ -575,10 +527,7 @@ void OBSProjector::SetIsAlwaysOnTop(bool isAlwaysOnTop, bool isOverridden)
 	this->isAlwaysOnTop = isAlwaysOnTop;
 	this->isAlwaysOnTopOverridden = isOverridden;
 
-	// camera-box #1352: apply the stays-on-top flag to the host TOPLEVEL, not the hosted
-	// child (SetAlwaysOnTop does setWindowFlags + show, which on a child would try to make
-	// it a toplevel again). Toplevel() == this when unhosted (byte-identical on Windows).
-	SetAlwaysOnTop(Toplevel(), isAlwaysOnTop);
+	SetAlwaysOnTop(this, isAlwaysOnTop);
 }
 
 void OBSProjector::ScreenRemoved(QScreen *screen)
@@ -587,7 +536,7 @@ void OBSProjector::ScreenRemoved(QScreen *screen)
 		return;
 	}
 
-	if (screen == Toplevel()->screen()) {
+	if (screen == this->screen()) {
 		EscapeTriggered();
 	}
 }

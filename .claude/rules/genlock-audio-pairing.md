@@ -1,7 +1,9 @@
 ---
 paths:
   - "src/genlock_audio_pairing.rs"
+  - "src/genlock_audio_pairing_bench.rs"
   - "tests/genlock_audio_pairing_parity.rs"
+  - "tests/genlock_audio_timecode_placement_1367.rs"
   - "src/genlock_forced_table_audit.rs"
   - "scripts/lib/genlock-forced-table-audit.sh"
   - "tests/genlock_forced_table_audit_1303.rs"
@@ -15,15 +17,14 @@ the AUDIO leg a first-class genlocked signal with the same evidence bar.
 
 ## The mechanism (three orthogonal pieces — don't conflate)
 
-1. **The audio HOLD (phase)** — for a `genlock_fifo` source, the audio is delayed at ingest by the
-   SAME effective `latency_ms` the video FIFO holds video, so the A/V pair is presented at the same
-   wall instant and survives the hold. Wired at the ONE seam `source_output_audio_data`
+1. **The audio HOLD (phase)** — since issue 1367 (Option 3) a `genlock_fifo` source's audio is
+   PLACED at its NDI timecode + the video's MEASURED stamp→present delay, mapped timecode → wall →
+   OBS monotonic through the LIVE wall-vs-QPC offset. The original #1303 hold (arrival + the fixed
+   `latency_ms`) was WRONG for any source whose FIFO sits deeper than one pin: see the issue-1367
+   section below. Wired at the ONE seam `source_output_audio_data`
    (`vendor/obs-studio/libobs/obs-source.c`, right after the `sync_offset`/`resample_offset`
-   adjusts): `in.timestamp += (int64_t)genlock_audio_present_delay_ns(source->genlock_latency_ms)`.
-   A pure duration shift — the timeline basis (`in.timestamp` is already on OBS's converted
-   monotonic timeline at that point) is irrelevant to a fixed delay. Default-safe: camera inputs
-   keep `ndi_audio=false` so only program-audio sources (cg/SongPlayer) carry a material delay; at
-   the 3 ms floor the delay is negligible.
+   adjusts): `in.timestamp += (uint64_t)genlock_term_ns;`. Default-safe: camera inputs keep
+   `ndi_audio=false`, so only program-audio sources (cg/SongPlayer) carry audio at all.
 2. **The ASRC servo (rate)** — `media-io/asrc-compensator.{h,c}` (#803/#912/#1084) disciplines the
    audio sample-clock RATE (ppm) against `genlock_wall_now_ns()`. ALREADY default-on and correct;
    #1303 changed NOTHING here. It is ORTHOGONAL to the hold above (rate vs phase). NB the constants
@@ -31,34 +32,159 @@ the AUDIO leg a first-class genlocked signal with the same evidence bar.
    `ASRC_TIME_CONSTANT_S`/`ASRC_MIN_LOCK_S` were REMOVED in #1084 (a stale brief may still name
    them).
 3. **Observability** — `obs_genlock_stats` (v2) + the `genlock-fifo audit` line carry
-   `audio_enabled` / `audio_delay_ms` (= `latency_ms` when held, 0 = not held) /
-   `audio_pairing_offset_ms` (0 = paired, `-latency_ms` = the hold never fired). Parsed by
-   `src/jitter_audit.rs` (additive, forward-compatible with pre-#1303 logs).
+   `audio_enabled` / `audio_delay_ms` (the applied hold: the measured video delay in timecode mode,
+   `latency_ms` before it settles, 0 = not held) / `audio_pairing_offset_ms` (applied hold minus the
+   MEASURED video delay; 0 = paired, `-video delay` = the hold never fired). The audit line also
+   carries the audit-line-only `audio_hold=off|latency|timecode video_delay_ms=<smoothed>
+   audio_health=<decide_audio_health, -1 = fps unknown>` (issue 1367), printed BEFORE
+   `audio_enabled=` so `(long long)gs.audio_pairing_offset_ms);` stays the last argument (a
+   `genlock_lock_indicator_guards.rs` anchor). Parsed by `src/jitter_audit.rs` (additive,
+   forward-compatible; the three new keys are ignored there).
 
 ## The pure decision + parity discipline
 
-`src/genlock_audio_pairing.rs` is the Tier-0 authority: `genlock_audio_delay_ns(latency_ms)` (=
-`latency_ms·1e6`), `pairing_offset_ms`, and `decide_audio_health` (Ok / AudioDisabledOnProgram /
-AsrcSaturated / PairingOffsetExceeded — precedence in that order). The C mirror is three contiguous
-`static inline` helpers in `obs-source.c`; `tests/genlock_audio_pairing_parity.rs` lifts them,
-`cc`-compiles under `-Wall -Wextra -Wconversion -Wformat=2 -Werror`, and requires byte-identical
-delay/offset/health over a vector spread (the #1003 lift-and-compile recipe). Keep the three
-helpers CONTIGUOUS and numerically identical to the Rust.
+`src/genlock_audio_pairing.rs` is the Tier-0 authority: the video-delay tracker
+(`video_delay_sample_ns` / `_smooth_ns` / `_round_ms` / `_moved` / `video_delay_track`), the hold
+(`audio_hold_mode` / `audio_hold_ms` / `AudioHoldMode::token`), the placement
+(`audio_wall_to_mono_ns` / `audio_place_term_ns` / `audio_place_shift_ms`), the offset
+(`video_delay_reference_ns` / `pairing_offset_ms`) and `decide_audio_health` (Ok /
+AudioDisabledOnProgram / AsrcSaturated / PairingOffsetExceeded — precedence in that order; the
+pairing bound is HALF a frame, strict, since issue 1367). The C mirror is ONE contiguous block of
+`static inline` helpers in `obs-source.c`, from `genlock_audio_present_delay_ns` through
+`genlock_audio_decide_health` (self-contained: stdint/stdbool only, the `GENLOCK_VIDEO_DELAY_*` /
+`GENLOCK_AUDIO_HOLD_*` defines INSIDE the block). `tests/genlock_audio_pairing_parity.rs` lifts it,
+`cc`-compiles under `-Wall -Wextra -Wconversion -Wformat=2 -Werror`, asserts every helper is inside
+it, and requires byte-identical results over vector spreads plus a tick-by-tick tracker sequence
+(the #1003 lift-and-compile recipe; 16/16 mutations of the block go RED at landing). Keep the block
+CONTIGUOUS and numerically identical to the Rust — every arithmetic wraps the same way (two's
+complement u64/i64) on both sides.
 
 **Lock-step anchors** (the #269 3-copy discipline): `tests/genlock_preload.rs`
-(`audio_genlock_parity_present_1303`) + the pwsh gate in BOTH `windows-genlock.yml` and
-`windows-genlock-fast.yml`. A change to the wiring / the helper signatures / the audit tokens must
-update all three.
+(`audio_genlock_parity_present_1303` + the #1355 hold-change shift anchor), the std-only
+`tests/genlock_audio_timecode_placement_1367.rs` (every wiring seam, runs locally), and the pwsh gate
+in BOTH `windows-genlock.yml` and `windows-genlock-fast.yml`. A change to the wiring / the helper
+signatures / the audit tokens must update all of them.
 
 ## Tier-0 (worktree worker: no cargo, no local sourced-lib)
 
-- Pure module RED→GREEN: `rustc --test --edition 2021 src/genlock_audio_pairing.rs -o /tmp/t && /tmp/t`.
-- C helpers: extract the contiguous block, `gcc -std=gnu99 -Wall -Wextra -Wconversion -Wformat=2
-  -Werror` a driver that asserts a spread (proves the shipped bytes compile + compute right).
+- Pure module + the two-clock bench RED→GREEN: `rustc --test --edition 2021
+  src/genlock_audio_pairing.rs -o <scratch>/t && <scratch>/t` (the bench is a `#[cfg(test)]`
+  `#[path]` child, so this runs it too). `clippy-driver --edition 2021 --test -D warnings` on the
+  same file gives CI's lint verdict.
+- Parity gate LOCALLY: build a stub `camera_box` rlib from the one module (`lib.rs` =
+  `#[path = "<wt>/src/genlock_audio_pairing.rs"] pub mod genlock_audio_pairing;`,
+  `rustc --crate-type rlib --crate-name camera_box`), then `CARGO_MANIFEST_DIR=<wt>
+  CARGO_TARGET_TMPDIR=<scratch> rustc --test tests/genlock_audio_pairing_parity.rs --extern
+  camera_box=<rlib> -L <dir>`. Mutation-proof by pointing `CARGO_MANIFEST_DIR` at a scratch repo
+  holding a mutated `obs-source.c`.
+- The whole `obs-source.c` TYPE-CHECKS locally: `gcc -std=gnu11 -fsyntax-only -Wall -Wextra
+  -Wformat=2 -I<wt>/vendor/obs-studio/libobs -I<wt>/vendor/obs-studio/deps
+  -I<wt>/vendor/obs-studio/deps/libcaption -I<gen> -DHAVE_OBSCONFIG_H obs-source.c` with a
+  hand-written `<gen>/obsconfig.h` (`OBS_DATA_PATH` / `OBS_PLUGIN_PATH` / `OBS_PLUGIN_DESTINATION` /
+  `OBS_INSTALL_PREFIX` string defines). `blog()` carries a printf format attribute, so this also
+  checks every audit-line specifier against its argument. Only the pre-existing `-Wcomment` at the
+  fps-seqlock comment prints.
 - `jitter_audit.rs` uses `serde_json` (not pure-std) — a plain `rustc --test` fails E0463; strip
   the `summaries_to_json` fn + its tests into a copy, or point rustc at a sibling worktree's
   `libserde_json-*.rlib`.
-- The parity gate + genlock_preload guard run on CI (they `use camera_box::…` / are probe-gated).
+- `tests/genlock_preload.rs` is probe-gated and runs on CI only.
+
+## Issue 1367 (Option 3) — the audio follows the video's MEASURED delay
+
+**The defect.** A genlock FIFO presents the queue HEAD, so a frame reaches the program at
+`stamp + (tick − head stamp)` — the head's age, logged as `ts_head_skew_ms`. That is `latency_ms`
+only when the FIFO is exactly one pin deep. A shallow cg feed (resolume `sp-*_video`, pin 3 ms)
+sits 2–3 frames deep: `ts_head_skew_ms=97` at `latency_ms=3`. The #1303 hold put the audio at
+ARRIVAL + 3 ms, so it led the video by ≈ 94 ms (songplayer's own A/V gate measured +98 / +106 ms),
+and `audio_pairing_offset_ms`, computed against the same pin, read 0.
+
+**The decision (ROZHODNUTÉ on the ticket).** Leave the shallow VIDEO depth alone. Make the audio
+follow whatever delay the video actually has.
+
+- **Measure on the render thread at the PRESENT TAIL of `genlock_release_tick`**, on the frame the
+  tick actually presents (`next_frame`, after every erase / drain / converge shed):
+  `genlock_video_delay_sample_ns(genlock_delay_tick_wall, next_frame->timestamp)` with
+  `genlock_delay_tick_wall = genlock_n1_tick_wall_now(wall_now)`. Three things were wrong with the
+  first cut, which sampled `array[0]` at the head-skew site (review round 1):
+  - on a source at N ≥ 2 × the canvas rate the STEADY branch presents the NEWEST matured frame, so
+    the head over-read by (N − 1) source intervals (16.7 ms for a 60p source on a 30p canvas; the
+    bench's `HeadSample` variant shows it);
+  - the processing-wall skew carries tick lateness, so the sample uses the SCHEDULED instant;
+  - a tick off the per-second grid (a wall step slewing back) is not sampled
+    (`genlock_n1_tick_is_on_grid`), or a long step could apply a transient delay.
+
+  A hold tick presents nothing new and is not sampled. **Dependency:** the tracker samples only an
+  ON-GRID scheduled tick (the same dependency as the N==1 depth rule). On a box whose render tick
+  never lands on the per-second genlock grid (not wall-slaved, or a non-integer canvas rate) the
+  audio silently stays on the latency hold. Because nothing was measured, the pairing offset falls
+  back to the pin and reads 0 (`audio_health=0`). The tell is `audio_hold=latency` +
+  `video_delay_ms=0` on an audible source while `ts_head_skew_ms` shows the real, larger delay.
+  Check that first when a box's audio does not follow its video. The sample is clamped to ≥ 1 ns, so it never
+  produces the EMA's `0` "unseeded" sentinel. EMA 1/8 per sample, computed in wrapping u64 on both
+  sides (the first cut's signed difference could overflow). This makes the tracker the THIRD
+  `genlock_n1_tick_wall_now(wall_now)` reader: the count anchor is 3 in
+  `tests/genlock_release_cadence.rs` and both ymls (`Count -ne 3`), and
+  `const uint64_t genlock_delay_tick_wall = genlock_n1_tick_wall_now(wall_now);` is pinned count-1.
+- **Quantize with hysteresis, apply once settled.** A move of the EMA by half a frame or more ARMS
+  a 64-tick settle; at its end the rounded delay is applied only if it is STILL half a frame away.
+  Applying at the crossing would latch the audio mid-step (≈ 83 ms for a 100 → 67 ms step), and the
+  half-frame hysteresis would never fix it. A transient that reverses inside the settle applies
+  nothing (pinned by a parity sequence: excursion to 100, back to 70 with 67 applied → stays 67).
+- **Place through the LIVE offset.** In `source_output_audio_data`, `in.timestamp` is
+  `tc + timing_adjust` at that point, so the term is `off_live + delay − timing_adjust` with
+  `off_live = os_gettime_ns() − genlock_wall_now_ns()` read on EVERY packet whose new or previous
+  hold is the timecode one (`genlock_audio_needs_live_offset`; a mic or a latency-mode source skips
+  the two clock reads, and `GetSystemTimePreciseAsFileTime` is not free). The result is
+  `tc + off_live + delay`. A mapping latched at the first packet walks by the wall-vs-QPC drift
+  (resolume: 318 ms); the bench's `LatchedOffset` variant fails at 150 ms.
+- **Re-place at once on a change.** A change of `(mode, hold)` forces `push_back = false` and shifts
+  the ASRC level target by `new term − previous term` of the SAME packet. For a timecode→timecode
+  change the live offset and `timing_adjust` cancel, so the shift is exactly the delay delta. For
+  the latency→timecode switch the shift is the true placement jump.
+- **Fallback.** No measurement yet (`applied_ms == 0`) or a non-wall-clock audio timestamp →
+  `AudioHoldMode::Latency`, byte-identical to the #1303 hold. So every source starts on the old hold
+  and switches (one re-placement) about 2 s after its first ts-align tick.
+- **Between placements** packets append back to back, and the genlock ASRC (the rate servo
+  disciplined against the wall clock plus its level loop) holds the captured depth. That is what
+  absorbs the wall-vs-QPC drift; the placement only has to be right when it happens.
+- **The pairing offset is a PROXY.** `audio_pairing_offset_ms` = applied hold − measured delay. It
+  never observes where the audio samples actually sit, so a wrong placement, or a depth the rate
+  servo walked, would still read 0. Real A/V proof stays with an end-to-end measurement (the
+  songplayer A/V gate, the camera-box E2E A/V gate).
+- **Health.** The audit's `audio_health=` uses `decide_audio_health` at half a frame (the
+  program-source / ASRC-saturation inputs pass 0 at that seam). The LOCK widget's own
+  `GENLOCK_AUDIO_PAIRING_BOUND_MS` stays one frame (33 ms). It now sees REAL residuals, which were
+  structurally 0 before, so a single-frame step settling (≤ 33 ms truncated) does not degrade it.
+  It DOES degrade for the ~2 s latency-mode window after a source starts (offset ≈ 3 − delay), and
+  permanently for an audio-enabled genlock source whose audio timestamps are not wall-clock
+  timecodes (it stays on the latency hold, and its audio really is off by that much). Both are
+  honest readings; the start window is far shorter than the lock-alert watchdog's 2-pass confirm
+  (a 5 min timer), so it cannot page on it.
+- **Deep sources are unaffected.** Stream `NDI 2ME PGM` and every strih/stream/imag input carry no
+  NDI audio (the certified table below), so their video path is byte-identical.
+
+**Lock-step anchors of THIS change** (all must move together): the std-only
+`tests/genlock_audio_timecode_placement_1367.rs` (tracker at the present tail after the presented
+frame, exactly one call site, the ingest seams, the offset reference, the audit tokens), the
+`tests/genlock_preload.rs` hold + shift anchors, the `genlock_n1_tick_wall_now(wall_now)` count of
+3 + the count-1 tracker read in `tests/genlock_release_cadence.rs`, and the matching
+`-notmatch` / `Count -ne 3` anchors in BOTH `windows-genlock*.yml`.
+
+**The two-clock bench** (`src/genlock_audio_pairing_bench.rs`, a test-only child): wall and QPC
+clocks with 300 ms of drift over an hour, scripted depth changes, a sender restart (3 s silence,
+audio resync) and an OBS restart (all receiver state zeroed), a first-order ASRC (rate servo that
+locks after 5 s with τ = 20 s, plus a clamped P level loop). The A/V error is measured on every tick
+outside a 6 s window after each event. Production: max 1.80 ms. `LatchedOffset`: 150.8 ms.
+`LegacyLatency` (the #1303 hold): 130.3 ms. Single held ticks (1 in 15) cause no extra re-placement.
+A 2× source (60p on a 30p canvas) pairs at 1.80 ms when the presented frame is sampled, and at
+16.7 ms (`HeadSample`) when the queue head is. The bench's rate estimate converges on the TRUE
+drift by construction, so it ASSUMES drift is absorbed between placements (the real servo is
+proven by `src/asrc_bench.rs`). What it proves is that each placement lands on the live offset.
+
+**Live acceptance (supervisor).** Full-bundle deploy on resolume, strih-lx and stream. On resolume
+the `sp-*_video` audit shows `audio_hold=timecode`, `audio_delay_ms` ≈ `video_delay_ms`, and
+`audio_pairing_offset_ms` within ±16 with `audio_health=0`. The songplayer post-deploy A/V gate
+(±40 ms) passes across two OBS restarts. The camera-box release E2E A/V gate stays green.
 
 ## LOCK-indicator audio DEGRADE term — audible-but-expected-silent (#1303 part 3b/c — DONE)
 

@@ -573,3 +573,33 @@ fn verify_imag_lease_tolerance_helper_is_pure_and_two_tier_1152() {
     );
     assert_eq!(run("x 1"), 1, "non-numeric garbage = hard FAIL");
 }
+
+/// issue 1346 review: the OBS Tools view switch ships in the whole Linux bundle, so imag can be
+/// flipped to `"view":"multiview"` -- and `program scanout LIVE` fires for either view. imag's HDMI
+/// is the audience projection AND the cam2 measurement tap, so a multiview view there is DRIFT.
+#[test]
+fn drm_output_drifts_when_the_view_is_multiview_1346() {
+    let g = gather_with_drm(
+        "DRM_OUTPUT_CONFIG|present\nDRM_OUTPUT_ENABLED|true\nDRM_OUTPUT_PROGRAM|true\n\
+         DRM_OUTPUT_VIEW|multiview\nDRM_OUTPUT_LOG|present\nDRM_OUTPUT_SCANOUT|live",
+    );
+    let lines = verdict(&g);
+    let l = facet_line(&lines, "drm_output");
+    assert_eq!(status_of(&lines, "drm_output"), "DRIFT", "{l}");
+    assert!(
+        l.contains("multiview"),
+        "the DRIFT must name the multiview view: {l}"
+    );
+
+    let program = gather_with_drm(
+        "DRM_OUTPUT_CONFIG|present\nDRM_OUTPUT_ENABLED|true\nDRM_OUTPUT_PROGRAM|true\n\
+         DRM_OUTPUT_VIEW|program\nDRM_OUTPUT_LOG|present\nDRM_OUTPUT_SCANOUT|live",
+    );
+    assert_eq!(status_of(&verdict(&program), "drm_output"), "OK");
+
+    let snippet = read_repo("scripts/lib/imag-display-path.sh");
+    assert!(
+        snippet.contains("DRM_OUTPUT_VIEW|multiview"),
+        "the remote gather must report the config's view"
+    );
+}

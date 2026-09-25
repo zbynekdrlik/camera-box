@@ -2067,11 +2067,12 @@ mod vendored_source {
         let c = squish(&vendor_file(ASRC_COMPENSATOR_C));
         assert!(
             c.contains(
-                "c->level_target_ms = c->level_absolute ? ASRC_LEVEL_TARGET_MS + c->level_offset_ms : buffered_ms;"
+                "c->level_target_ms = c->level_absolute ? ASRC_LEVEL_TARGET_MS + c->level_offset_ms : window_level_ms;"
             ),
             "{ASRC_COMPENSATOR_C}: #1355 — the level capture is no longer the ABSOLUTE target plus the \
-             placement offset (depth at lock only for a non-absolute source); keep numerically \
-             identical to src/asrc_bench.rs compensate_with_level."
+             placement offset (depth at lock only for a non-absolute source — since #1367 the \
+             window's MEAN level); keep numerically identical to src/asrc_bench.rs \
+             compensate_with_level."
         );
         assert!(
             !c.contains("c->level_target_ms = buffered_ms; c->level_captured = true;"),
@@ -2105,17 +2106,75 @@ mod vendored_source {
         );
         assert!(
             src.contains(
-                "if (source->genlock_audio_delay_ms != prev_genlock_audio_delay_ms) asrc_compensator_shift_level_target(&source->asrc, (double)source->genlock_audio_delay_ms - (double)prev_genlock_audio_delay_ms);"
+                "if (genlock_hold_mode != prev_genlock_audio_hold_mode || genlock_hold_ms != prev_genlock_audio_delay_ms) {"
+            ) && src.contains(
+                "push_back = false; asrc_compensator_shift_level_target(&source->asrc, genlock_audio_place_shift_ms(genlock_term_ns, genlock_prev_term_ns));"
             ),
-            "{OBS_SOURCE}: #1355 — a change of the applied genlock audio hold no longer moves the ASRC \
-             level setpoint; the level loop would walk the depth back and undo a pin write's audio \
-             hold (breaking the #1303 A/V pairing) until the next flush."
+            "{OBS_SOURCE}: #1355 + issue 1367 — a change of the applied genlock audio hold no longer \
+             re-places the audio at once and moves the ASRC level setpoint by the placement delta; \
+             the level loop would walk the depth back and undo the hold (breaking the A/V pairing) \
+             until the next flush."
         );
         assert!(
             src.contains("UNREACHABLE after %d windows outside +/-%.0fms")
                 && src.contains("restore=%d (#1335) fallbacks=%u (#1355)"),
             "{OBS_SOURCE}: #1355 — the LOG_WARNING unreachable-fallback line and/or the asrc: \
              telemetry fallbacks= field are gone; a fallback would be silent."
+        );
+    }
+
+    #[test]
+    fn asrc_level_loop_reads_the_window_mean_1367() {
+        // issue #1367: the level loop reads the per-window MEAN of every callback's buffered_ms, not
+        // the one reading of the window-closing callback (which lands on the 21.33 ms mixer-tick
+        // sawtooth and made Kp 2 dither the resampler rate, applied - estimated sd ~7 ppm live).
+        // Src authority + Tier-0 gate: src/asrc_bench.rs
+        // per_window_level_mean_kills_tick_sawtooth_rate_chatter_1367 /
+        // level_avg_is_the_window_mean_and_feeds_the_level_loop_1367 /
+        // mid_window_shift_moves_the_open_window_mean_1367, plus the executable C-vs-Rust parity
+        // gate tests/asrc_compensator_parity_1367.rs. This static guard keeps the vendored C in
+        // lock-step; keep byte-exact with the shipped lines.
+        let h = squish(&vendor_file(ASRC_COMPENSATOR_H));
+        assert!(
+            h.contains("double window_level_sum_ms;")
+                && h.contains("uint32_t window_level_count;")
+                && h.contains("double level_avg_ms;"),
+            "{ASRC_COMPENSATOR_H}: #1367 — the per-window level accumulator / level_avg_ms fields are \
+             gone from struct asrc_compensator."
+        );
+        let c = squish(&vendor_file(ASRC_COMPENSATOR_C));
+        assert!(
+            c.contains("c->window_level_sum_ms += buffered_ms; c->window_level_count++;")
+                && c.contains(
+                    "const double window_level_ms = c->window_level_count > 0 ? c->window_level_sum_ms / (double)c->window_level_count : 0.0; c->window_level_sum_ms = 0.0; c->window_level_count = 0;"
+                ),
+            "{ASRC_COMPENSATOR_C}: #1367 — every callback's buffered_ms is no longer folded into the \
+             window, or the window mean is no longer computed + reset at the window close."
+        );
+        assert!(
+            c.contains("const double level_err = window_level_ms - c->level_target_ms;")
+                && c.contains("const double err_ms = c->level_target_ms - window_level_ms;")
+                && c.contains(
+                    "if (fabs(window_level_ms - c->level_target_ms) >= ASRC_LEVEL_RESTORE_ARM_ERR_MS) {"
+                ),
+            "{ASRC_COMPENSATOR_C}: #1367 — the EMA, the integral or the sustained-error arm reads the \
+             single closing reading again; the tick sawtooth would dither the rate (~7 ppm sd)."
+        );
+        assert!(
+            c.contains(
+                "c->window_level_sum_ms += delta_ms * (double)c->window_level_count; if (c->level_captured) {"
+            ),
+            "{ASRC_COMPENSATOR_C}: #1367 — asrc_compensator_shift_level_target no longer moves the \
+             open window's level sum BEFORE (outside) the level_captured gate; a deliberate shift \
+             landing mid-window (or inside the capture window) would feed the level loop a blended \
+             half-old/half-new mean."
+        );
+        let src = squish(&vendor_file(OBS_SOURCE));
+        assert!(
+            src.contains("restore=%d (#1335) fallbacks=%u (#1355) \" \"level_avg=%.2fms (#1367)\"")
+                && src.contains("source->asrc.level_fallback_count, source->asrc.level_avg_ms);"),
+            "{OBS_SOURCE}: #1367 — the asrc: telemetry line no longer ends with level_avg= (the \
+             tick-free level) appended after the byte-identical fallbacks=%u (#1355) suffix."
         );
     }
 
@@ -2510,11 +2569,17 @@ mod vendored_source {
             "{OBS_SOURCE}: #1303 — genlock_audio_decide_health() is gone; the audio LOCK-health \
              decision mirror is missing. Re-apply."
         );
-        // the HOLD is actually wired into the audio ingest path (not just defined).
+        // the HOLD is actually wired into the audio ingest path (not just defined). Issue 1367: it is
+        // the timecode + measured-video-delay placement term through the LIVE wall->mono offset
+        // (full wiring guard: tests/genlock_audio_timecode_placement_1367.rs).
         assert!(
-            src.contains("in.timestamp += (int64_t)genlock_audio_present_delay_ns(source->genlock_latency_ms);"),
-            "{OBS_SOURCE}: #1303 — the audio HOLD is no longer applied in source_output_audio_data; \
-             a genlock source's audio would not be delayed to pair with its video FIFO hold. Re-apply."
+            src.contains("in.timestamp += (uint64_t)genlock_term_ns;")
+                && src.contains(
+                    "const int64_t genlock_off_live_ns = genlock_audio_needs_live_offset(genlock_hold_mode, prev_genlock_audio_hold_mode) ? genlock_audio_wall_to_mono_ns(os_gettime_ns(), genlock_wall_now_ns()) : 0;"
+                ),
+            "{OBS_SOURCE}: #1303 + issue 1367 — the audio HOLD is no longer applied in \
+             source_output_audio_data on the live wall->mono offset; a genlock source's audio would \
+             not be placed to pair with its video's stamp->present delay. Re-apply."
         );
         // the audit line carries the audio parity facet.
         assert!(
