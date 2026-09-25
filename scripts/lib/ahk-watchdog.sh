@@ -138,6 +138,11 @@ ahk_guard_stop_ps() {
 # cannot respawn a second obs64 here. This program NEVER starts or restarts it.
 if (Get-Process AutoHotkey64 -ErrorAction SilentlyContinue) {
   Stop-Process -Name AutoHotkey64 -Force -ErrorAction SilentlyContinue
+  Start-Sleep -Milliseconds 500
+  if (Get-Process AutoHotkey64 -ErrorAction SilentlyContinue) {
+    Write-Error "#1372 FAIL: AutoHotkey64 is still running after Stop-Process -- it would respawn a second obs64; stop it by hand, then re-run."
+    exit 11
+  }
   Write-Host "#1372: stopped the running AutoHotkey64 watcher -- it stays OFF (never restarted by this program)."
 } else {
   Write-Host "#1372: AutoHotkey64 is not running -- nothing to stop (it stays OFF)."

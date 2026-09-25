@@ -53,6 +53,35 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # --- PURE functions (no network, no MCP, no Windows — unit-tested by sourcing this script) --------
 
+# build_title_identity_ps PROFILE -> the PowerShell title identity check (issue 1372), embedded by
+# build_launch_program in the same-session branch of its #978 gate ($obsDir + $sessProc in scope).
+# The vendored frontend titles the window `... build <short sha> - <Profile label>: <profile> -
+# <Scenes label>: ...`, the short sha being the first 9 lowercased chars of GENLOCK_BUILD_SHA.txt
+# at the install root (NewlevelBuildSha.hpp). The label word is LOCALIZED (en "Profile", sk/cs
+# "Profil"), so the match takes any label word before the colon. PROFILE rides a single-quoted
+# PowerShell literal (quote doubled), never a double-quoted string. Fails loud with exit 8.
+build_title_identity_ps() {
+  local profile_ps="${1//\'/\'\'}"
+  cat <<PSTITLE
+  # (3c-title) issue 1372: the window title must carry the deployed build + the expected profile.
+  \$shaFile = Join-Path \$obsDir 'GENLOCK_BUILD_SHA.txt'
+  if (-not (Test-Path -LiteralPath \$shaFile)) {
+    Write-Error "#1372 FAIL: \$shaFile is missing -- cannot prove which build obs64 runs."
+    exit 8
+  }
+  \$shaTok = @(([string](Get-Content -LiteralPath \$shaFile -Raw)).Trim() -split '\\s+')[0]
+  \$shaShort = \$shaTok.ToLower().Substring(0, [Math]::Min(9, \$shaTok.Length))
+  \$wantProfile = '${profile_ps}'
+  \$wantTitle = 'build ' + \$shaShort + ' - <profile label>: ' + \$wantProfile
+  \$titleRe = 'build ' + [regex]::Escape(\$shaShort) + ' - [^:]+: ' + [regex]::Escape(\$wantProfile) + '( - |\$)'
+  if (-not ([string]\$sessProc.MainWindowTitle -match \$titleRe)) {
+    Write-Error "#1372 FAIL: obs64 title '\$(\$sessProc.MainWindowTitle)' does not carry '\$wantTitle' -- wrong build or wrong profile."
+    exit 8
+  }
+  Write-Host "TITLE OK: '\$wantTitle' is in the obs64 window title '\$(\$sessProc.MainWindowTitle)'."
+PSTITLE
+}
+
 # build_launch_program OBS_DIR FORCE [HAS_AHK] -> the full PowerShell program that (re)launches OBS
 # env-free and then log-verifies + fails-loud. OBS_DIR is the OBS install root (its bin\64bit is the
 # mandatory cwd). FORCE="1" inserts a documented force-kill of a wedged obs64 first (obs-ops recovery
@@ -186,29 +215,33 @@ PSAHKSESS
   else
     ahk_session_ps='# AutoHotkey64 session check: no-op (this box has no AHK auto-respawn watcher)'
   fi
-  # issue 1372 -- the TITLE identity check (only with a TITLE_PROFILE): the deployed build SHA marker
-  # (GENLOCK_BUILD_SHA.txt at the install root, the same file the vendored frontend reads for the
-  # title, cut to its 9-char short form) + the box's profile must both be in the obs64 window title.
-  # It runs only in the same-session branch of the gate below, where the title is readable. It starts
-  # with its own newline, so a box without a profile emits the gate byte-for-byte as before.
+  # issue 1372 -- the TITLE identity check, only with a TITLE_PROFILE (build_title_identity_ps). It
+  # runs in the same-session branch of the gate below, where the title is readable, and starts with
+  # its own newline, so a box without a profile emits the gate byte-for-byte as before.
   local title_identity_ps=""
   if [ -n "$title_profile" ]; then
-    local title_profile_ps="${title_profile//\'/\'\'}"
-    title_identity_ps=$'\n'$(cat <<PSTITLE
-  \$shaFile = Join-Path \$obsDir 'GENLOCK_BUILD_SHA.txt'
-  if (-not (Test-Path -LiteralPath \$shaFile)) {
-    Write-Error "#1372 FAIL: \$shaFile is missing -- cannot prove which build obs64 runs."
-    exit 8
-  }
-  \$shaTok = @(([string](Get-Content -LiteralPath \$shaFile -Raw)).Trim() -split '\\s+')[0]
-  \$shaShort = \$shaTok.ToLower().Substring(0, [Math]::Min(9, \$shaTok.Length))
-  \$wantTitle = "build \$shaShort - Profile: ${title_profile_ps}"
-  if (-not ([string]\$sessProc.MainWindowTitle).Contains(\$wantTitle)) {
-    Write-Error "#1372 FAIL: obs64 title '\$(\$sessProc.MainWindowTitle)' does not carry '\$wantTitle' -- wrong build or wrong profile."
-    exit 8
-  }
-  Write-Host "TITLE OK: '\$wantTitle' is in the obs64 window title."
-PSTITLE
+    title_identity_ps=$'\n'"$(build_title_identity_ps "$title_profile")"
+  fi
+  # The two comment blocks around the AHK flag + the single restart point describe the managed
+  # bracket; a guard box (issue 1372) gets its own wording so its program never reads as managed.
+  local ahk_decl_note ahk_restart_note
+  if [ "$has_ahk" = "guard" ]; then
+    ahk_decl_note='# issue 1372: no $ahkStopped flag on a guard box -- nothing in this program ever restarts AutoHotkey64.'
+    ahk_restart_note='# issue 1372: this is where a managed box restarts AutoHotkey64; a guard box never does.'
+  else
+    ahk_decl_note=$(cat <<'NOTE'
+# issue 1272: $ahkStopped is declared ONCE, here -- so both the --force kill below (kill_block,
+# wired in via the has_ahk check above) and the #786 redraw loop further down share the SAME flag
+# across the whole program. Never re-declare it later (a second "= $false" would silently wipe out
+# the --force branch's own stop before the single restart point below runs).
+NOTE
+)
+    ahk_restart_note=$(cat <<'NOTE'
+# issue 1272: restart AHK exactly ONCE here -- after the launch + #786 audio-verify sequence has
+# fully settled (whichever branch above ran: the guarded-launcher verify-only wait, or this
+# wrapper's own redraw loop) -- and BEFORE the (3c) session-visibility gate below, which itself
+# asserts AHK's own SessionId and would otherwise find it missing.
+NOTE
 )
   fi
   local bin64="${obs_dir}\\bin\\64bit"
@@ -269,10 +302,7 @@ ${ahk_stop_ps}"
 # (scripts/obs_burn_filter.py), toggled WITHOUT a relaunch -- this wrapper never touches it.
 \$ErrorActionPreference = 'Stop'
 
-# issue 1272: \$ahkStopped is declared ONCE, here -- so both the --force kill below (kill_block,
-# wired in via the has_ahk check above) and the #786 redraw loop further down share the SAME flag
-# across the whole program. Never re-declare it later (a second "= \$false" would silently wipe out
-# the --force branch's own stop before the single restart point below runs).
+${ahk_decl_note}
 ${ahk_decl}
 
 ${kill_block}
@@ -400,10 +430,7 @@ ${ahk_stop_ps}
 }
 }
 
-# issue 1272: restart AHK exactly ONCE here -- after the launch + #786 audio-verify sequence has
-# fully settled (whichever branch above ran: the guarded-launcher verify-only wait, or this
-# wrapper's own redraw loop) -- and BEFORE the (3c) session-visibility gate below, which itself
-# asserts AHK's own SessionId and would otherwise find it missing.
+${ahk_restart_note}
 ${ahk_restart_ps}
 
 # (3c) #978 SESSION-VISIBILITY GATE -- an obs64 launched via ssh+Invoke-CimMethod into Windows

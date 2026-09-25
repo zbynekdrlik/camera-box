@@ -534,7 +534,8 @@ fn cli_box_resolume_selects_win_resolume_ahk_guard_1372() {
     );
     assert!(
         out.contains("GENLOCK_BUILD_SHA.txt")
-            && out.contains("$wantTitle = \"build $shaShort - Profile: cg\""),
+            && out.contains("$wantProfile = 'cg'")
+            && out.contains("$titleRe = 'build ' + [regex]::Escape($shaShort) + ' - [^:]+: '"),
         "issue 1372: resolume must verify the 'build <sha> - Profile: cg' window title:\n{out}"
     );
     // the build-proof verify still applies
@@ -566,6 +567,11 @@ fn guard_mode_stops_ahk_before_every_obs_kill_and_only_reports_after_1372() {
     let first_stop = p
         .find(stop)
         .expect("guard mode must stop a running AutoHotkey64");
+    // the stop is re-checked: a watcher that survives it would respawn a second obs64.
+    assert!(
+        p.contains("#1372 FAIL: AutoHotkey64 is still running after Stop-Process"),
+        "the guard stop must verify AutoHotkey64 is gone:\n{p}"
+    );
     let force_kill = p
         .find("ForEach-Object { Stop-Process -Id $_.Id -Force }")
         .expect("--force kill of obs64");
@@ -635,23 +641,40 @@ fn title_identity_check_is_same_session_only_and_profile_scoped_1372() {
         .find("} else {")
         .map(|i| same + i)
         .expect("the cross-session branch");
-    let want = p
-        .find("$wantTitle = \"build $shaShort - Profile: cg\"")
-        .expect("title check");
+    let want = p.find("$wantProfile = 'cg'").expect("title check");
+    let fail = p
+        .find("#1372 FAIL: obs64 title")
+        .expect("title failure line");
     assert!(
-        same < want && want < other,
+        same < want && want < fail && fail < other,
         "the title identity check must live in the same-session branch only:\n{p}"
     );
     assert!(
         p.contains("Join-Path $obsDir 'GENLOCK_BUILD_SHA.txt'")
             && p.contains("[Math]::Min(9, $shaTok.Length)")
-            && p.contains("#1372 FAIL: obs64 title"),
-        "the title check reads the deployed marker, cuts the 9-char short sha, fails loud:\n{p}"
+            && p.contains("[string]$sessProc.MainWindowTitle -match $titleRe"),
+        "the title check reads the deployed marker, cuts the 9-char short sha, matches the title:\n{p}"
+    );
+    // the profile LABEL is localized (en "Profile", sk/cs "Profil"): the match takes any label word
+    // and ends the profile at " - " or the end of the title, so "cg" never matches "cgx".
+    assert!(
+        p.contains("' - [^:]+: ' + [regex]::Escape($wantProfile) + '( - |$)'"),
+        "the title match must be label-language independent and profile-exact:\n{p}"
     );
     let (_c, stream, _e) = run_script(&["--box", "stream"]);
     assert!(
-        !stream.contains("$wantTitle") && !stream.contains("Profile: cg"),
+        !stream.contains("$wantProfile") && !stream.contains("$titleRe"),
         "stream has no expected profile -> no title identity check:\n{stream}"
+    );
+}
+
+/// issue 1372: a quote in a profile name stays inside the single-quoted PowerShell literal.
+#[test]
+fn title_profile_is_a_single_quoted_literal_1372() {
+    let p = run_sourced("build_title_identity_ps \"o'x\"");
+    assert!(
+        p.contains("$wantProfile = 'o''x'"),
+        "the profile quote must be doubled inside a single-quoted literal:\n{p}"
     );
 }
 

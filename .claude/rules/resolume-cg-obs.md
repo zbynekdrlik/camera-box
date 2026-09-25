@@ -68,10 +68,15 @@ the AHK mode `guard` for resolume (`fleet_box_ahk_mode` in `scripts/lib/genlock-
 
 Both guard fragments (`ahk_guard_stop_ps`, `ahk_guard_report_ps`) live in `scripts/lib/ahk-watchdog.sh`,
 so the deploy and launch programs cannot drift. The obs-fleet `has_ahk` fact still says the watcher is
-INSTALLED (`obs_fleet_has_ahk resolume` = 1). That fact also drives the obs-session watchdog's AHK
-probe, which still grades "AutoHotkey64 count == 1" on resolume. With AHK off that is a known
-follow-up (it reports a count of 0 as a fault), not part of this slice. The managed stop→restart-
-verified mode `1` still exists in the builders for a box that sets it, but no planner chooses it.
+INSTALLED (`obs_fleet_has_ahk resolume` = 1). Two consumers of that fact still assume a managed
+watcher; the issue-1372 slice that introduced the guard handed both to the supervisor in its
+LANE-RETURN comment on the ticket (a worker cannot file tickets):
+- the ENABLED obs-session watchdog still grades "AutoHotkey64 count == 1" on resolume, so with AHK
+  off it reports a count of 0 as a fault;
+- the obs-self-heal builder still emits the managed restart + backstop for an AHK box (latent: its
+  CLI accepts `--box stream` only).
+The managed stop→restart-verified mode `1` still exists in the builders for a box that sets it, but
+no planner chooses it. The title match takes any profile LABEL word (en `Profile`, sk/cs `Profil`).
 The `.ahk` also RunAs-launches an `Arena-Bridge` app under a second user and embeds a credential.
 Tooling NEVER reads, echoes, or copies the `.ahk` body; it only stops the watcher by process name.
 
