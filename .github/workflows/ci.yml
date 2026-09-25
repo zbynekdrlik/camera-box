@@ -548,7 +548,7 @@ jobs:
 
       # The phones leg's Opus codec (issue 1345): the `opus` crate's `opusic-sys` builds the bundled
       # libopus source with cmake and links it statically, so no libopus-dev is needed — but cmake
-      # is. Fail loud here, by name, if the runner image ever drops it.
+      # is. Install it if the runner image ever drops it (a failed apt install fails this step).
       - name: Ensure cmake (bundled libopus build)
         run: command -v cmake >/dev/null || (sudo apt-get update && sudo apt-get install -y cmake)
 
