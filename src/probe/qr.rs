@@ -20,7 +20,8 @@ pub enum DecodePath {
     /// The plain full-frame pass already carried every expected node burn — the tiles were
     /// skipped (the ~99 %+ common case on a clean recording).
     Fast,
-    /// An expected node burn was missing from the plain pass — the tiled+upscaled recovery ran.
+    /// An expected node burn was missing from the plain pass — the tiled+upscaled recovery ran
+    /// (and, for a burn the tiles still missed, its isolated slot crop — issue 1370).
     Robust,
 }
 
@@ -111,7 +112,7 @@ pub fn cam1_burn_origin(canvas_w: u32, canvas_h: u32, qw: u32, qh: u32) -> (u32,
 /// Render `payload` as a fixed-size EC-H QR with a quiet zone — the one place the QR
 /// build idiom lives (used by both the BGRA blit and the YUYV burn). `qr_px` is the exact
 /// square size in px (min == max). The payload is small, so encoding always succeeds.
-fn render_payload_qr(payload: &Payload, qr_px: u32) -> GrayImage {
+pub(crate) fn render_payload_qr(payload: &Payload, qr_px: u32) -> GrayImage {
     let s = payload.encode();
     let code = QrCode::with_error_correction_level(s.as_bytes(), EcLevel::H)
         .expect("payload is small, encodes within QR capacity");
@@ -735,7 +736,7 @@ pub(crate) const OPTICAL_TOP_BAND_FRAC: f32 = 0.67;
 /// full-frame pass runs before the tiles) — its `gen_ts_ns` is authoritative because a
 /// CRC-valid QR for a given `(run_id, frame_id)` always carries the SAME `gen_ts_ns` (the
 /// payload is one atomic encoded mark), so the dropped duplicates can never differ in it.
-fn merge_payloads(into: &mut Vec<Payload>, add: Vec<Payload>) {
+pub(crate) fn merge_payloads(into: &mut Vec<Payload>, add: Vec<Payload>) {
     for p in add {
         if !into
             .iter()
@@ -962,7 +963,10 @@ fn optical_read_short(payloads: &[Payload], min_distinct_optical: Option<(u32, u
 /// for any frame missing a burn the full robust passes run unchanged — so the #186 0-miss
 /// guarantee is preserved exactly, just gated behind a cheap plain-first check. `expected_…`
 /// empty ⇒ always fast (no burns to require); pass [`recording::NODE_BURN_RUN_IDS`] for the
-/// recording path.
+/// recording path. issue 1370: an expected burn the tiles STILL miss is then read from its own
+/// isolated slot crop ([`crate::probe::burn_region_decode::recover_missing_burns`]), so on such a
+/// frame the result is a superset of [`decode_qr_luma_all_robust`] that adds only that expected
+/// burn.
 pub fn decode_qr_luma_all_fast_then_robust(
     img: GrayImage,
     expected_burn_run_ids: &[u32],
@@ -1113,6 +1117,16 @@ pub fn decode_qr_luma_all_fast_then_robust_grouped_pathed_optical(
     // the dual-QR optical read is STILL short after the #754 top-band recovery — give rqrr the
     // tiled+upscaled look (#202) that recovers reads the full-frame pass intermittently misses.
     robust_tile_passes(&img, &mut out);
+
+    // issue 1370: an expected burn the tiles STILL missed gets an isolated look at its own known
+    // slot, so optical content the camera happens to put next to it in the tile cannot hide it.
+    // A no-op when the frame went robust only for the optical dimension.
+    crate::probe::burn_region_decode::recover_missing_burns(
+        &img,
+        mandatory_burn_run_ids,
+        any_of_burn_run_ids,
+        &mut out,
+    );
     (out, DecodePath::Robust)
 }
 

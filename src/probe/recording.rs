@@ -777,9 +777,12 @@ pub fn analyze_recording_with_grouped_burns_optical(
     // process-global, so the absolute numbers accumulate across all recordings analyzed in one
     // run — what matters is fast ≫ robust.)
     let (fast, robust) = crate::probe::qr::decode_path_counts();
+    // issue 1370: how many expected node burns only the burn-isolated slot crops read. A large
+    // number means the camera view pushed optical content into the #202 burn tiles.
+    let burn_region_recoveries = crate::probe::burn_region_decode::burn_region_recovery_count();
     tracing::info!(
         file = %path.display(), total = frames.len(), with_qr = decoded, workers,
-        fast_path_frames = fast, robust_fallback_frames = robust,
+        fast_path_frames = fast, robust_fallback_frames = robust, burn_region_recoveries,
         "recording analysis complete (#207 decode-path split, cumulative this run)"
     );
     Ok(frames)
