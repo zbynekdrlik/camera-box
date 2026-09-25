@@ -76,6 +76,11 @@ struct Scenario {
     /// the start arrive `extra_ms` later (in order, so the frames right behind wait too): the live
     /// 25.9.2026 12:01 song change that latched `floor_max_frames=11`.
     burst: Option<(u64, u64, u64)>,
+    /// design 5833339163: a SONG CHANGE `(at_s, dur_s)` — for `dur_s` seconds from `at_s` the sender
+    /// SKIPS stamps in bursts ([`song_change_skips`]): single lost frames plus runs long enough to
+    /// starve the queue, the live 25.9.2026 15:29 sp-slow_video pattern (`stamp_gap` +11 and
+    /// `underruns` +7 per 5 s audit while the operator switched scenes).
+    song_change: Option<(u64, u64)>,
 }
 
 impl Scenario {
@@ -91,6 +96,7 @@ impl Scenario {
             band_change: None,
             burst: None,
             legacy_append: false,
+            song_change: None,
         }
     }
 }
@@ -129,6 +135,32 @@ struct Run {
     places: u32,
     slews: u32,
     steps: u32,
+    /// design 5833339163: the song-change window (its skips + 3 s): presents, presents SHALLOWER
+    /// than the latched D, the lowest smoothed video delay the audit's `video_delay_ms=` reads, the
+    /// audio's applied delay range (`audio_delay_ms=`), |A/V| of the samples on every present, and
+    /// the stamps skipped / queue underruns it contained.
+    sc_presents: u64,
+    sc_shallow: u64,
+    sc_min_video_delay_ms: u32,
+    sc_audio_delay_ms: (u32, u32),
+    sc_max_abs_av_ms: f64,
+    sc_skipped: u64,
+    sc_underruns: u64,
+}
+
+/// design 5833339163: the song-change skip pattern — every 500 ms of the window the sender skips
+/// `1 + (k mod 3)` consecutive stamps (burst `k`): a lone lost frame, a pair, and a run of three
+/// that empties the 40-64 ms feed's queue (a starvation underrun). About 12 skipped stamps per 5 s,
+/// the live `stamp_gap` rate. True when `stamp` is skipped.
+fn song_change_skips(stamp: u64, at_s: u64, dur_s: u64) -> bool {
+    const PERIOD_NS: u64 = 500_000_000;
+    let from = W0 + at_s * NS_PER_S;
+    if stamp < from || stamp >= from + dur_s * NS_PER_S {
+        return false;
+    }
+    let off = stamp - from;
+    let burst = off / PERIOD_NS;
+    off % PERIOD_NS < (1 + burst % 3) * IV_NS
 }
 
 fn run(sc: Scenario) -> Run {
@@ -146,7 +178,14 @@ fn run(sc: Scenario) -> Run {
         shallow_depth_rule: sc.rule,
         ..BenchConfig::live_2026_09_24(GridModel::Production)
     };
-    let mut out = Run::default();
+    let mut out = Run {
+        sc_min_video_delay_ms: u32::MAX,
+        sc_audio_delay_ms: (u32::MAX, 0),
+        ..Run::default()
+    };
+    let song_window = sc
+        .song_change
+        .map(|(at_s, dur_s)| (W0 + at_s * NS_PER_S, W0 + (at_s + dur_s + 3) * NS_PER_S));
     let mut rng = 0x1367_5827u64;
     let mut fifo = Fifo::default();
     let mut tracker = VideoDelayTracker::default();
@@ -213,6 +252,12 @@ fn run(sc: Scenario) -> Run {
             sender_slot = grid_next_boundary_ns(sender_slot, IV_NS);
             if stamp >= silent.0 && stamp < silent.1 {
                 continue;
+            }
+            if let Some((at_s, dur_s)) = sc.song_change {
+                if song_change_skips(stamp, at_s, dur_s) {
+                    out.sc_skipped += 1;
+                    continue;
+                }
             }
             let (lo, hi) = match sc.band_change {
                 Some((at_s, lo_ms, hi_ms)) if stamp >= W0 + at_s * NS_PER_S => {
@@ -336,6 +381,31 @@ fn run(sc: Scenario) -> Run {
                 let av = audio.av_ms(presented, mono_sched);
                 out.slew_av_ticks += 1;
                 out.max_abs_av_slew_ms = out.max_abs_av_slew_ms.max(av.abs());
+            }
+        }
+        // design 5833339163: the song-change window, on EVERY presenting tick (a shallow present is
+        // exactly what the settled gate above skips).
+        let in_song = song_window.is_some_and(|(a, b)| nominal >= a && nominal < b);
+        if in_song {
+            out.sc_underruns += c.underruns;
+            if fifo.presented_now {
+                let presented = fifo.presented.expect("a present sets it");
+                let depth = (scheduled - presented + IV_NS / 2) / IV_NS;
+                out.sc_presents += 1;
+                if depth < fifo.shallow.target_frames {
+                    out.sc_shallow += 1;
+                }
+                if tracker.smoothed_ns != 0 {
+                    out.sc_min_video_delay_ms = out
+                        .sc_min_video_delay_ms
+                        .min(video_delay_round_ms(tracker.smoothed_ns));
+                }
+                out.sc_audio_delay_ms.0 = out.sc_audio_delay_ms.0.min(tracker.applied_ms);
+                out.sc_audio_delay_ms.1 = out.sc_audio_delay_ms.1.max(tracker.applied_ms);
+                if audio.playing() && !audio.slewing() {
+                    let av = audio.av_ms(presented, mono_sched);
+                    out.sc_max_abs_av_ms = out.sc_max_abs_av_ms.max(av.abs());
+                }
             }
         }
         out.slewing_ticks += u64::from(audio.slewing());
@@ -692,4 +762,50 @@ fn the_append_after_reset_loses_the_hold_and_the_audit_now_says_so_1367() {
         "the placement formula left the truth by {:.4} ms",
         r.max_formula_vs_truth_ms
     );
+}
+
+// ---- design 5833339163: a song change never shortens the latched video depth -----------------------
+
+#[test]
+fn a_song_change_keeps_the_video_on_its_latched_depth_and_the_audio_paired_1367() {
+    // live 25.9.2026 15:29 on resolume: SongPlayer's song change and the operator's scene switches
+    // skipped stamps on sp-slow_video (lag 40-64 ms, D 3 = 100 ms). Every skip put the post-gap head
+    // on air at once at its arrival age (the GAP RESYNC), one frame under D, and the throttled hold
+    // took a second per frame to climb back: `video_delay_ms=67 audio_delay_ms=100
+    // audio_pairing_offset_ms=33` for ~10 s while the latched depth and the audio stayed 3 / 100.
+    // Now a skipped stamp costs the one repeat it costs anyway: the conveyor HOLDS until the head
+    // is D frames old, so the video never leaves D and the audio never needs to move.
+    let r = run(Scenario {
+        song_change: Some((1500, 12)),
+        ..Scenario::clean(40, 64, 3)
+    });
+    eprintln!("song-change: {r:?}");
+    let d_ms = video_delay_round_ms(3 * IV_NS);
+    assert!(
+        r.sc_skipped >= 20 && r.sc_underruns > 0,
+        "the song change must skip stamps and starve the queue: {r:?}"
+    );
+    assert!(r.latched.iter().all(|&d| d == 3), "latched {:?}", r.latched);
+    assert!(r.sc_presents > 300, "the song-change window is too thin");
+    assert_eq!(
+        r.sc_audio_delay_ms,
+        (d_ms, d_ms),
+        "the audio hold must stay on the latched {d_ms} ms"
+    );
+    assert_eq!(
+        r.sc_shallow, 0,
+        "{} presents under the latched D during the song change",
+        r.sc_shallow
+    );
+    assert!(
+        r.sc_min_video_delay_ms >= d_ms - 1,
+        "video_delay_ms fell to {} (audio {d_ms}) during the song change",
+        r.sc_min_video_delay_ms
+    );
+    assert!(
+        r.sc_max_abs_av_ms <= GATE_MAX_AV_MS,
+        "|A/V| {:.2} ms during the song change",
+        r.sc_max_abs_av_ms
+    );
+    assert_eq!((r.steps, r.slews), (0, 0), "the audio must never move");
 }
