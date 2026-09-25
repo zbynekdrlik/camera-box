@@ -208,6 +208,72 @@ fn manifest_autosource_fetch_dormant_on_empty_sha() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+// ── #1346: the FULL windows-genlock bundle manifest, fetched as the gate's alternate ─────────────
+
+#[test]
+fn win_full_manifest_fetch_targets_the_full_bundle_workflow_and_artifact_1346() {
+    let dir = tmpdir();
+    // The seam records the (workflow, artifact, sha) it was asked for, writes a manifest to DEST and
+    // echoes it -- proving the helper asks for the FULL bundle (windows-genlock.yml /
+    // obs-genlock-windows-x64), keyed on the SAME marker sha as the FAST fetch.
+    let seam = write_file(
+        &dir,
+        "seam.sh",
+        "#!/usr/bin/env bash\nset -e\nprintf '%s %s %s' \"$2\" \"$3\" \"$4\" > \"$(dirname \"$5\")/asked.txt\"\nprintf '{\"files\":[]}' > \"$5\"\nprintf '%s' \"$5\"\n",
+    );
+    std::fs::set_permissions(&seam, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let dest = dir.join("win-full-manifest.json");
+    let out = run_sourced(
+        "manifest_autosource_fetch_win_full owner/repo \"$SHA\" \"$DEST\"",
+        &[
+            ("MANIFEST_AUTOSOURCE_CMD", seam.to_str().unwrap()),
+            ("SHA", "54995646abc"),
+            ("DEST", dest.to_str().unwrap()),
+        ],
+    );
+    assert_eq!(
+        out.trim(),
+        dest.to_str().unwrap(),
+        "the helper must echo the fetched manifest path: {out:?}"
+    );
+    let asked = std::fs::read_to_string(dir.join("asked.txt")).expect("the seam must have run");
+    assert_eq!(
+        asked, "windows-genlock.yml obs-genlock-windows-x64 54995646abc",
+        "must fetch the FULL bundle's manifest for the given marker sha"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn win_full_manifest_fetch_is_dormant_on_failure_1346() {
+    let dir = tmpdir();
+    let seam = write_file(&dir, "fail.sh", "#!/usr/bin/env bash\nexit 3\n");
+    std::fs::set_permissions(&seam, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let dest = dir.join("win-full-manifest.json");
+    let failed = run_sourced(
+        "manifest_autosource_fetch_win_full owner/repo \"$SHA\" \"$DEST\"",
+        &[
+            ("MANIFEST_AUTOSOURCE_CMD", seam.to_str().unwrap()),
+            ("SHA", "abc"),
+            ("DEST", dest.to_str().unwrap()),
+        ],
+    );
+    assert_eq!(
+        failed.trim(),
+        "",
+        "a failed fetch yields no alternate (the FAST manifest is judged alone)"
+    );
+    let no_sha = run_sourced(
+        "manifest_autosource_fetch_win_full owner/repo \"\" \"$DEST\"",
+        &[
+            ("MANIFEST_AUTOSOURCE_CMD", seam.to_str().unwrap()),
+            ("DEST", dest.to_str().unwrap()),
+        ],
+    );
+    assert_eq!(no_sha.trim(), "", "no marker sha -> no alternate");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 // ── the small state-reading helpers recording-e2e.sh keys the auto-source on ────────────────────
 
 #[test]

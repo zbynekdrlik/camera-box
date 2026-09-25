@@ -1466,6 +1466,276 @@ fn compare_build_sha_facet_dormant_without_a_manifest() {
     );
 }
 
+// --- #1346: an ALTERNATE manifest -- the FULL windows-genlock bundle of the SAME build -----------
+//
+// The two Windows CI builds are not byte-reproducible: for ONE marker sha the FAST workflow's
+// obs.dll and the FULL bundle's bin/64bit/obs.dll differ (build 54995646: 18ea7acf... vs e454b134...).
+// The [0/8] gate pinned the box's obs.dll to the FAST manifest only, so a correct full-bundle deploy
+// read DRIFT and refused the E2E. `alt_manifest=` supplies the full manifest as an alternate: an
+// observed obs.dll matching EITHER entry is OK (the line names which), matching neither is DRIFT. With
+// no alternate the engine is byte-identical to before; an alternate alone is judged exactly like a
+// single manifest (fail-closed). The alternate only WIDENS a check the primary makes -- it never
+// switches on the distroav compare an obs.dll-only primary skips (a --fast deploy leaves distroav
+// from an older build, and distroav is not byte-reproducible across builds either).
+
+/// The FULL bundle of the SAME build as MANIFEST_184_FAST, with a DIFFERENT obs.dll (the
+/// non-reproducible full build) and its own distroav.dll.
+const MANIFEST_1346_FULL: &str = "\
+{
+  \"schema\": \"camera-box/genlock-bundle-manifest@1\",
+  \"build_sha\": \"19472506ec156696c6fcb097899ba745e17b8953\",
+  \"files\": [
+    { \"path\": \"bin/64bit/obs64.exe\", \"sha256\": \"aaaa000000000000000000000000000000000000000000000000000000000000\", \"size\": 100 },
+    { \"path\": \"bin/64bit/obs.dll\", \"sha256\": \"e454b1340000000000000000000000000000000000000000000000000000abcd\", \"size\": 1316352 },
+    { \"path\": \"obs-plugins/64bit/distroav.dll\", \"sha256\": \"cef23cab0000000000000000000000000000000000000000000000000000fdde\", \"size\": 663040 }
+  ]
+}
+";
+const FAST_OBS_SHA_1346: &str = "24e2235788988e6ab8da033a129af172ba634ec4b0120815989002d594c1ef33";
+const FULL_OBS_SHA_1346: &str = "e454b1340000000000000000000000000000000000000000000000000000abcd";
+const FULL_DISTROAV_SHA_1346: &str =
+    "cef23cab0000000000000000000000000000000000000000000000000000fdde";
+const FOREIGN_SHA_1346: &str = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
+
+/// A pinned-clean strih `--compare` (versions/settings/capability all OK) plus `extra` keys, so the
+/// ONLY moving part is the byte facet under test.
+fn compare_1346(extra: &[String]) -> (i32, String, String) {
+    let mut args: Vec<String> = [
+        "--compare",
+        "host=strih",
+        "obs_version=32.2.0",
+        "distroav_version=6.2.1",
+        "ndi_runtime=6.3.2.0",
+        "output_fps=30",
+        "genlock_wall_clock=1",
+        "ndi_input_latency=NDI cam5=0,NDI cam1=0,NDI cam3=0",
+        r"distroav_dll_paths=C:\ProgramData\obs-studio\plugins\distroav\bin\64bit\distroav.dll",
+        "genlock_capability=07:42:29.658: genlock: wall-clock-slaved render tick ENABLED (OBS_GENLOCK_WALL_CLOCK)",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    args.extend(extra.iter().cloned());
+    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    run_script(&refs)
+}
+
+fn obs_sha_line(stdout: &str) -> String {
+    stdout
+        .lines()
+        .find(|l| l.contains("obs_dll_sha256"))
+        .unwrap_or_else(|| panic!("must print an obs_dll_sha256 line: {stdout:?}"))
+        .to_string()
+}
+
+#[test]
+fn compare_passes_a_full_bundle_obs_dll_via_the_alternate_manifest_1346() {
+    let fast = write_temp("dg_1346_fast_a", MANIFEST_184_FAST);
+    let full = write_temp("dg_1346_full_a", MANIFEST_1346_FULL);
+    let (code, stdout, stderr) = compare_1346(&[
+        format!("manifest={}", fast.display()),
+        format!("alt_manifest={}", full.display()),
+        format!("obs_dll_sha256={FULL_OBS_SHA_1346}"),
+    ]);
+    assert_eq!(
+        code, 0,
+        "an obs.dll matching the FULL bundle of the same build must pass. stdout={stdout:?} \
+         stderr={stderr:?}"
+    );
+    let line = obs_sha_line(&stdout);
+    assert!(
+        line.contains("OK") && line.contains("alternate"),
+        "the OK line must name the alternate manifest it matched: {line:?}"
+    );
+    assert!(
+        !stderr.contains("unknown observed key"),
+        "alt_manifest must be a known key: {stderr:?}"
+    );
+}
+
+#[test]
+fn compare_names_the_primary_when_obs_dll_matches_it_despite_an_alternate_1346() {
+    let fast = write_temp("dg_1346_fast_b", MANIFEST_184_FAST);
+    let full = write_temp("dg_1346_full_b", MANIFEST_1346_FULL);
+    let (code, stdout, stderr) = compare_1346(&[
+        format!("manifest={}", fast.display()),
+        format!("alt_manifest={}", full.display()),
+        format!("obs_dll_sha256={FAST_OBS_SHA_1346}"),
+    ]);
+    assert_eq!(code, 0, "stdout={stdout:?} stderr={stderr:?}");
+    let line = obs_sha_line(&stdout);
+    assert!(
+        line.contains("OK") && line.contains("primary manifest"),
+        "an obs.dll matching the primary (FAST) manifest must say so: {line:?}"
+    );
+}
+
+#[test]
+fn compare_drifts_a_foreign_obs_dll_that_matches_neither_manifest_1346() {
+    let fast = write_temp("dg_1346_fast_c", MANIFEST_184_FAST);
+    let full = write_temp("dg_1346_full_c", MANIFEST_1346_FULL);
+    let (code, stdout, stderr) = compare_1346(&[
+        format!("manifest={}", fast.display()),
+        format!("alt_manifest={}", full.display()),
+        format!("obs_dll_sha256={FOREIGN_SHA_1346}"),
+    ]);
+    assert_eq!(
+        code, 20,
+        "a foreign obs.dll must still DRIFT with an alternate supplied. stdout={stdout:?} \
+         stderr={stderr:?}"
+    );
+    let line = obs_sha_line(&stdout);
+    assert!(
+        line.contains("DRIFT")
+            && line.contains(FAST_OBS_SHA_1346)
+            && line.contains(FULL_OBS_SHA_1346)
+            && line.contains(FOREIGN_SHA_1346),
+        "the DRIFT line must name BOTH accepted shas and the observed one: {line:?}"
+    );
+}
+
+#[test]
+fn compare_obs_dll_unread_is_unknown_even_with_an_alternate_1346() {
+    let fast = write_temp("dg_1346_fast_d", MANIFEST_184_FAST);
+    let full = write_temp("dg_1346_full_d", MANIFEST_1346_FULL);
+    let (code, stdout, stderr) = compare_1346(&[
+        format!("manifest={}", fast.display()),
+        format!("alt_manifest={}", full.display()),
+        // no obs_dll_sha256 -- the box did not report its bytes
+    ]);
+    assert_eq!(
+        code, 11,
+        "an unread obs.dll sha is UNKNOWN, never a clean pass. stdout={stdout:?} stderr={stderr:?}"
+    );
+    assert!(
+        obs_sha_line(&stdout).contains("UNKNOWN"),
+        "stdout={stdout:?}"
+    );
+}
+
+#[test]
+fn compare_single_manifest_obs_dll_lines_are_byte_identical_1346() {
+    // No alternate -> the historic single-manifest lines, byte for byte.
+    let fast = write_temp("dg_1346_fast_e", MANIFEST_184_FAST);
+    let (code_ok, stdout_ok, _) = compare_1346(&[
+        format!("manifest={}", fast.display()),
+        format!("obs_dll_sha256={FAST_OBS_SHA_1346}"),
+    ]);
+    assert_eq!(code_ok, 0, "stdout={stdout_ok:?}");
+    assert_eq!(
+        obs_sha_line(&stdout_ok),
+        format!("  obs_dll_sha256       OK       ({FAST_OBS_SHA_1346})")
+    );
+    let (code_bad, stdout_bad, _) = compare_1346(&[
+        format!("manifest={}", fast.display()),
+        format!("obs_dll_sha256={FULL_OBS_SHA_1346}"),
+    ]);
+    assert_eq!(
+        code_bad, 20,
+        "without the alternate a full-bundle obs.dll is judged against the FAST manifest only, \
+         exactly as before. stdout={stdout_bad:?}"
+    );
+    assert_eq!(
+        obs_sha_line(&stdout_bad),
+        format!(
+            "  obs_dll_sha256       DRIFT    (expected {FAST_OBS_SHA_1346}, observed {FULL_OBS_SHA_1346})"
+        )
+    );
+}
+
+#[test]
+fn compare_alternate_alone_is_judged_exactly_like_a_single_manifest_1346() {
+    // The FAST manifest could not be fetched, the FULL one could: the remaining manifest is judged
+    // exactly as a lone manifest= is today (fail-closed) -- same stdout, same exit code.
+    let full = write_temp("dg_1346_full_f", MANIFEST_1346_FULL);
+    for obs in [FULL_OBS_SHA_1346, FOREIGN_SHA_1346] {
+        let as_primary = compare_1346(&[
+            format!("manifest={}", full.display()),
+            format!("obs_dll_sha256={obs}"),
+            format!("distroav_dll_sha256={FULL_DISTROAV_SHA_1346}"),
+        ]);
+        let as_alternate = compare_1346(&[
+            format!("alt_manifest={}", full.display()),
+            format!("obs_dll_sha256={obs}"),
+            format!("distroav_dll_sha256={FULL_DISTROAV_SHA_1346}"),
+        ]);
+        assert_eq!(
+            as_alternate.0, as_primary.0,
+            "a lone alternate must exit like a lone manifest (obs={obs}): primary={as_primary:?} \
+             alternate={as_alternate:?}"
+        );
+        assert_eq!(
+            as_alternate.1, as_primary.1,
+            "a lone alternate must print exactly what a lone manifest prints (obs={obs})"
+        );
+    }
+}
+
+#[test]
+fn compare_distroav_stays_skipped_when_only_the_alternate_lists_it_1346() {
+    // FAST primary (obs.dll-only) + FULL alternate: distroav stays SKIPPED as today -- the alternate
+    // never switches on a check the primary does not make (a --fast deploy keeps an older distroav).
+    let fast = write_temp("dg_1346_fast_g", MANIFEST_184_FAST);
+    let full = write_temp("dg_1346_full_g", MANIFEST_1346_FULL);
+    let (code, stdout, stderr) = compare_1346(&[
+        format!("manifest={}", fast.display()),
+        format!("alt_manifest={}", full.display()),
+        format!("obs_dll_sha256={FAST_OBS_SHA_1346}"),
+        format!("distroav_dll_sha256={FOREIGN_SHA_1346}"),
+    ]);
+    assert_eq!(
+        code, 0,
+        "a distroav outside the alternate must NOT refuse when the primary skips distroav. \
+         stdout={stdout:?} stderr={stderr:?}"
+    );
+    let line = stdout
+        .lines()
+        .find(|l| l.contains("distroav_dll_sha256"))
+        .expect("must print a distroav_dll_sha256 line");
+    assert!(
+        line.contains("SKIPPED") && line.contains("alternate"),
+        "the SKIPPED line must report what the alternate lists: {line:?}"
+    );
+}
+
+#[test]
+fn compare_distroav_matches_either_when_the_primary_lists_it_1346() {
+    // A primary that DOES list distroav (a full manifest) + an alternate: either entry is accepted.
+    let primary = write_temp("dg_1346_prim_h", MANIFEST_184_FULL);
+    let full = write_temp("dg_1346_full_h", MANIFEST_1346_FULL);
+    let (code, stdout, stderr) = compare_1346(&[
+        format!("manifest={}", primary.display()),
+        format!("alt_manifest={}", full.display()),
+        format!("obs_dll_sha256={FAST_OBS_SHA_1346}"),
+        format!("distroav_dll_sha256={FULL_DISTROAV_SHA_1346}"),
+    ]);
+    assert_eq!(code, 0, "stdout={stdout:?} stderr={stderr:?}");
+    let line = stdout
+        .lines()
+        .find(|l| l.contains("distroav_dll_sha256"))
+        .expect("must print a distroav_dll_sha256 line");
+    assert!(
+        line.contains("OK") && line.contains("alternate"),
+        "distroav matching the alternate must be OK and say so: {line:?}"
+    );
+}
+
+#[test]
+fn compare_fails_loudly_when_the_alternate_manifest_is_missing_1346() {
+    let fast = write_temp("dg_1346_fast_i", MANIFEST_184_FAST);
+    let (code, _stdout, stderr) = compare_1346(&[
+        format!("manifest={}", fast.display()),
+        "alt_manifest=/nonexistent/dg_1346/BUNDLE_MANIFEST.json".to_string(),
+        format!("obs_dll_sha256={FAST_OBS_SHA_1346}"),
+    ]);
+    assert_eq!(
+        code, 1,
+        "a supplied alternate that does not exist is a usage error, never silently ignored. \
+         stderr={stderr:?}"
+    );
+    assert!(stderr.contains("alt_manifest"), "stderr={stderr:?}");
+}
+
 // --- #121: post-deploy WHOLE-BUNDLE byte/SHA verify (deploy FAILS on ANY file mismatch) -------
 //
 // The #122 facet above checks only obs.dll + distroav.dll against the manifest — the two
