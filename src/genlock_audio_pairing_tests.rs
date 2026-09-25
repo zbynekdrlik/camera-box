@@ -472,14 +472,16 @@ fn a_locked_tracker_applies_the_lock_and_never_follows_the_float_1367() {
     assert_eq!(t.applied_ms, 0);
     assert_eq!(t.settle_ticks, 0);
     assert!(t.smoothed_ns > 60_000_000);
-    // latched: applied at once, and a floating depth never moves it.
+    // latched: applied at once, and a floating depth never moves it. (design 5830750134: under a
+    // lock the tracker now COUNTS a sustained offset of the realized delay -- the settle counter is
+    // no longer pinned at 0 -- but excursions shorter than VIDEO_DELAY_FOLLOW_TICKS never apply.)
     run_locked(&mut t, 100, 66_666_667, 1);
     assert_eq!(t.applied_ms, 100);
     for i in 0..2_000u32 {
         let s = [66_666_667u64, 100_000_000, 133_333_333][(i / 100 % 3) as usize];
         video_delay_track(&mut t, 100, s, IV30);
         assert_eq!(t.applied_ms, 100);
-        assert_eq!(t.settle_ticks, 0);
+        assert!(t.settle_ticks < VIDEO_DELAY_FOLLOW_TICKS);
     }
     // released (an N>=2 source): the free tracker takes over from the EMA.
     run_locked(&mut t, 0, 66_666_667, 200);
@@ -625,4 +627,59 @@ fn a_late_placement_folds_the_owed_slew_into_the_level_1367() {
     assert_eq!(audio_placed_slew_fold_ns(Place, true, 7_000_000), 0);
     assert_eq!(audio_placed_slew_fold_ns(Replace, true, 7_000_000), 0);
     assert_eq!(audio_placed_slew_fold_ns(Withhold, true, 7_000_000), 0);
+}
+
+// ---- issue 1367 (design 5830750134): the hold never exceeds the realized video delay ------------
+
+#[test]
+fn a_locked_hold_never_exceeds_the_realized_video_delay_1367() {
+    // live 25.9.2026 12:04: the latched D 12 asked 400 ms, the video realized ~233 ms, and the audio
+    // held 400 (audio_pairing_offset_ms walking to +166). The realized delay bounds the hold once
+    // it has stayed half a frame or more under it for VIDEO_DELAY_FOLLOW_TICKS.
+    let mut t = VideoDelayTracker::default();
+    run_locked(&mut t, VIDEO_DELAY_LOCK_PENDING, 233_333_333, 200);
+    run_locked(&mut t, 400, 233_333_333, 1);
+    assert_eq!(t.applied_ms, 400, "a new lock applies at once");
+    assert_eq!(t.locked_ms, 400);
+    run_locked(&mut t, 400, 233_333_333, VIDEO_DELAY_FOLLOW_TICKS - 1);
+    assert_eq!(t.applied_ms, 400, "not before the follow window");
+    run_locked(&mut t, 400, 233_333_333, 1);
+    assert_eq!(t.applied_ms, 233, "the hold follows the realized delay");
+    // it stays there, and a NEW (re-measured) lock applies at once again.
+    run_locked(&mut t, 400, 233_333_333, 500);
+    assert_eq!(t.applied_ms, 233);
+    run_locked(&mut t, 100, 233_333_333, 1);
+    assert_eq!(t.applied_ms, 100);
+}
+
+#[test]
+fn the_hold_climb_onto_a_new_lock_never_moves_the_audio_1367() {
+    // a fresh latch at D 4 while the conveyor still sits at 1 frame: the hold climbs one frame per
+    // 30-tick throttle window (90 ticks to D), inside the follow window, so the audio stays on the
+    // lock the whole way.
+    let mut t = VideoDelayTracker::default();
+    run_locked(&mut t, VIDEO_DELAY_LOCK_PENDING, 33_333_333, 100);
+    run_locked(&mut t, 133, 33_333_333, 1);
+    for depth in 1..=4u64 {
+        run_locked(&mut t, 133, depth * IV30, 30);
+        assert_eq!(t.applied_ms, 133, "climbing at depth {depth}");
+    }
+    run_locked(&mut t, 133, 4 * IV30, 1_000);
+    assert_eq!((t.applied_ms, t.settle_ticks), (133, 0));
+}
+
+#[test]
+fn a_realized_delay_over_the_lock_is_followed_too_1367() {
+    // a capped lock (base + 3) under a genuinely slow arrival: the video presents deeper than the
+    // lock, and the audio pairs with the video actually on air.
+    let mut t = VideoDelayTracker::default();
+    run_locked(&mut t, 133, 200_000_000, 1);
+    assert_eq!(t.applied_ms, 133);
+    run_locked(&mut t, 133, 200_000_000, VIDEO_DELAY_FOLLOW_TICKS + 20);
+    assert_eq!(t.applied_ms, 200);
+    // released to the free tracker: the follow count never leaks into its settle countdown.
+    run_locked(&mut t, 133, 100_000_000, 50);
+    run_locked(&mut t, 0, 200_000_000, 1);
+    // a fresh free-tracker arm, not the lock's leftover count ticking down.
+    assert_eq!((t.locked_ms, t.settle_ticks), (0, VIDEO_DELAY_SETTLE_TICKS));
 }

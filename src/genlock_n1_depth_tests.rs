@@ -299,6 +299,10 @@ fn tick(relock: bool, floor_frames: u64) -> ShallowTick {
         base_frames: 1,
         deep: false,
         min_latency_box: false,
+        // design 5830750134: the presented conveyor sits at (or over) any latched D unless a test
+        // says otherwise, so the downward re-measure stays out of the older scenarios.
+        realized_frames: u64::MAX,
+        backlog_relock: false,
     }
 }
 
@@ -574,6 +578,243 @@ fn the_shallow_shed_and_hold_keep_a_one_frame_dead_band_around_d_1367() {
         987,
         I30,
         31,
+        100
+    ));
+}
+
+// ---- issue 1367 (design 5830750134): the shallow latch never latches an outlier -----------------
+
+/// A whole settle window of floors, the first tick a relock.
+fn window(s: &mut ShallowDepth, floors: impl Iterator<Item = u64>) -> u32 {
+    let mut latches = 0;
+    for (i, f) in floors.enumerate() {
+        latches += u32::from(n1_shallow_track(s, tick(i == 0, f)));
+    }
+    latches
+}
+
+/// `n` ticks of floor `burst`, then floor 1 up to the settle window (base 1).
+fn burst_window(n: u64, burst: u64) -> impl Iterator<Item = u64> {
+    (0..u64::from(N1_SHALLOW_SETTLE_TICKS)).map(move |i| if i < n { burst } else { 1 })
+}
+
+#[test]
+fn the_window_histogram_and_its_percentile_1367() {
+    assert_eq!(n1_shallow_hist_bin(0, 1), 0, "under base: bin 0");
+    assert_eq!(n1_shallow_hist_bin(1, 1), 0);
+    assert_eq!(n1_shallow_hist_bin(3, 1), 2);
+    assert_eq!(n1_shallow_hist_bin(4, 1), 3, "base + 3: the over-cap bin");
+    assert_eq!(n1_shallow_hist_bin(11, 1), 3);
+    assert_eq!(n1_shallow_hist_bin(u64::MAX, 0), 3);
+    // 90 ticks: 81 at bin 0 is exactly p90; 80 is not.
+    assert_eq!(n1_shallow_percentile_bin(&[81, 0, 0, 9], 90, 90), 0);
+    assert_eq!(n1_shallow_percentile_bin(&[80, 0, 0, 10], 90, 90), 3);
+    assert_eq!(n1_shallow_percentile_bin(&[80, 0, 0, 10], 90, 10), 0);
+    assert_eq!(n1_shallow_percentile_bin(&[0, 0, 0, 90], 90, 10), 3);
+    assert_eq!(
+        n1_shallow_percentile_bin(&[0; N1_SHALLOW_HIST_BINS], 0, 90),
+        0
+    );
+}
+
+#[test]
+fn a_short_late_burst_in_the_settle_window_cannot_set_d_1367() {
+    // live 25.9.2026 12:01:17: a sender transient pushed the floor to 11 frames and the window MAX
+    // latched D 12 (400 ms). Under a tenth of the window it is ignored: the p90 floor is 1.
+    let mut s = ShallowDepth::default();
+    assert_eq!(window(&mut s, burst_window(8, 11)), 1);
+    assert_eq!(s.target_frames, 2, "p90 floor 1 + 1, never the burst's 12");
+    assert!(!s.capped);
+    assert_eq!(s.floor_max_frames, 11, "the max is still reported");
+}
+
+#[test]
+fn a_window_with_a_transient_in_progress_re_measures_instead_of_latching_1367() {
+    // a third of the window at 11 frames: p90 = the over-cap bin, p10 = bin 0 -> spread 3 > 2.
+    let mut s = ShallowDepth::default();
+    assert_eq!(
+        window(&mut s, burst_window(30, 11)),
+        0,
+        "no latch on a transient"
+    );
+    assert!(s.measuring, "a fresh window is open");
+    assert_eq!(s.target_frames, 0);
+    assert_eq!(s.rejects, 1);
+    // the next window is clean: it latches the real floor.
+    let mut latched = 0;
+    for _ in 0..N1_SHALLOW_SETTLE_TICKS {
+        latched += u32::from(n1_shallow_track(&mut s, tick(false, 1)));
+    }
+    assert_eq!(latched, 1);
+    assert_eq!(s.target_frames, 2);
+    assert_eq!(s.rejects, 0, "a latch clears the reject count");
+}
+
+#[test]
+fn rejected_windows_are_bounded_then_the_cap_latches_1367() {
+    // a feed that never settles: after N1_SHALLOW_MAX_REJECTS rejects the next window latches,
+    // clamped to base + 3 and reported.
+    let mut s = ShallowDepth::default();
+    let mut latched = 0;
+    for w in 0..=N1_SHALLOW_MAX_REJECTS {
+        for i in 0..u64::from(N1_SHALLOW_SETTLE_TICKS) {
+            let t = tick(w == 0 && i == 0, if i < 30 { 11 } else { 1 });
+            latched += u32::from(n1_shallow_track(&mut s, t));
+        }
+    }
+    assert_eq!(
+        latched, 1,
+        "rejects {} then one latch",
+        N1_SHALLOW_MAX_REJECTS
+    );
+    assert_eq!(s.target_frames, 1 + N1_SHALLOW_MAX_EXTRA_FRAMES);
+    assert!(s.capped);
+}
+
+#[test]
+fn the_latched_depth_is_capped_and_the_cap_reported_1367() {
+    let base = n1_base_frames(3, I30);
+    assert_eq!(N1_SHALLOW_MAX_EXTRA_FRAMES, 3);
+    assert_eq!(n1_shallow_target_frames(base, 3, false, false), (4, false));
+    assert_eq!(n1_shallow_target_frames(base, 4, false, false), (4, true));
+    assert_eq!(
+        n1_shallow_target_frames(base, 11, false, false),
+        (4, true),
+        "the live floor 11 is clamped to base + 3, never D 12"
+    );
+    // the imag guard stays first (report-only, no depth).
+    assert_eq!(n1_shallow_target_frames(base, 11, false, true), (0, true));
+    // a deep source still latches its pin depth.
+    assert_eq!(n1_shallow_target_frames(30, 40, true, false), (31, false));
+    // a whole window over the cap (no spread) latches the clamp.
+    let mut s = ShallowDepth::default();
+    assert_eq!(window(&mut s, burst_window(90, 11)), 1);
+    assert_eq!((s.target_frames, s.capped), (4, true));
+}
+
+/// Latch D 3 (floor 2) on a clean window.
+fn latched_at_three() -> ShallowDepth {
+    let mut s = ShallowDepth::default();
+    window(&mut s, (0..u64::from(N1_SHALLOW_SETTLE_TICKS)).map(|_| 2));
+    assert_eq!(s.target_frames, 3);
+    s
+}
+
+#[test]
+fn a_depth_the_video_never_reaches_re_measures_downward_1367() {
+    let mut s = latched_at_three();
+    let under = |r: u64| ShallowTick {
+        realized_frames: r,
+        ..tick(false, 1)
+    };
+    // the hold's climb onto D (one frame per throttle window) never trips it.
+    for _ in 0..90 {
+        assert!(!n1_shallow_track(&mut s, under(2)));
+    }
+    assert!(!n1_shallow_track(&mut s, under(3)));
+    assert_eq!(s.under_ticks, 0, "reaching D resets the count");
+    assert!(!s.measuring);
+    // a D the conveyor stays under for N1_SHALLOW_UNDER_TICKS is unreachable: re-measure.
+    for _ in 0..N1_SHALLOW_UNDER_TICKS - 1 {
+        assert!(!n1_shallow_track(&mut s, under(2)));
+    }
+    assert!(!s.measuring);
+    assert!(!n1_shallow_track(&mut s, under(2)));
+    assert!(s.measuring, "unreachable D: a fresh window");
+    assert_eq!(s.target_frames, 3, "the old D is kept until the new latch");
+    let mut latched = 0;
+    for _ in 1..N1_SHALLOW_SETTLE_TICKS {
+        latched += u32::from(n1_shallow_track(&mut s, under(2)));
+    }
+    assert_eq!(
+        (latched, s.target_frames),
+        (1, 2),
+        "re-latched on the real floor"
+    );
+}
+
+#[test]
+fn a_relock_storm_against_d_re_measures_1367() {
+    let relock = |r: bool| ShallowTick {
+        backlog_relock: r,
+        ..tick(false, 1)
+    };
+    // relocks hours apart never re-measure.
+    let mut s = latched_at_three();
+    for k in 0..4 * N1_SHALLOW_CHURN_QUIET_TICKS {
+        assert!(!n1_shallow_track(
+            &mut s,
+            relock(k % (N1_SHALLOW_CHURN_QUIET_TICKS + 1) == 0)
+        ));
+    }
+    assert!(!s.measuring, "sporadic relocks are not a storm");
+    // the live storm: ~3 relocks per 5 s (one every 50 ticks).
+    let mut s = latched_at_three();
+    for k in 0..2 * 50 {
+        assert!(!n1_shallow_track(&mut s, relock(k % 50 == 0)));
+    }
+    assert!(!s.measuring);
+    n1_shallow_track(&mut s, relock(true));
+    assert!(s.measuring, "the third relock re-measures");
+    assert_eq!(s.target_frames, 3);
+}
+
+#[test]
+fn a_capped_latch_re_measures_once_the_over_cap_floor_is_gone_1367() {
+    let mut s = ShallowDepth::default();
+    window(&mut s, burst_window(90, 11));
+    assert_eq!((s.target_frames, s.capped), (4, true));
+    // a floor still at the cap never re-measures (a genuinely slow arrival keeps the clamp).
+    for _ in 0..3 * N1_SHALLOW_SETTLE_TICKS {
+        assert!(!n1_shallow_track(&mut s, tick(false, 11)));
+        assert!(!n1_shallow_track(&mut s, tick(false, 3)));
+    }
+    assert!(!s.measuring);
+    // the transient passed: a whole window two frames under the clamp re-measures.
+    for _ in 0..N1_SHALLOW_SETTLE_TICKS {
+        assert!(!n1_shallow_track(&mut s, tick(false, 2)));
+    }
+    assert!(s.measuring);
+    let mut latched = 0;
+    for _ in 1..N1_SHALLOW_SETTLE_TICKS {
+        latched += u32::from(n1_shallow_track(&mut s, tick(false, 2)));
+    }
+    assert_eq!((latched, s.target_frames, s.capped), (1, 3, false));
+}
+
+#[test]
+fn the_shallow_shed_never_chases_a_depth_the_arrival_cannot_supply_1367() {
+    let w = 1_000_000_000_000u64;
+    // a capped D 4 under a genuinely slow arrival (the newest frame is already 6 frames old): a shed
+    // could only skip a frame and run the queue dry, so it never fires.
+    assert!(!n1_shallow_shed_due(
+        w,
+        w - 7 * I30,
+        6 * I30,
+        3,
+        I30,
+        4,
+        100
+    ));
+    // the same depth with a fresh newest frame sheds as before.
+    assert!(n1_shallow_shed_due(w, w - 7 * I30, I30, 3, I30, 4, 100));
+    // the newest frame exactly D frames old (truncated) is still suppliable.
+    assert!(n1_shallow_shed_due(
+        w,
+        w - 7 * I30,
+        4 * I30 + I30 / 2,
+        3,
+        I30,
+        4,
+        100
+    ));
+    assert!(!n1_shallow_shed_due(
+        w,
+        w - 7 * I30,
+        5 * I30,
+        3,
+        I30,
+        4,
         100
     ));
 }

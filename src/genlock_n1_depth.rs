@@ -252,6 +252,54 @@ pub const N1_SHALLOW_SETTLE_TICKS: u32 = 90;
 /// the C `GENLOCK_N1_SHALLOW_RELOCK_GAP_NS`.
 pub const N1_SHALLOW_RELOCK_GAP_NS: u64 = 1_000_000_000;
 
+/// issue 1367 (design 5830750134, the shallow-latch outlier) — the latched depth never exceeds
+/// `base + N1_SHALLOW_MAX_EXTRA_FRAMES`. Sized from the live healthy latches: every resolume
+/// `sp-*` / `NDI test` latch of 25.9.2026 had `floor_max_frames` 1–2 (D − base 1–2), and the
+/// bench's 50–80 ms straddle band needs base + 3. The live outlier (`floor_max_frames=11` during a
+/// sender transient → D 12, 400 ms) is what it bounds. An over-cap latch is CLAMPED and reported
+/// (`capped`). Mirror of the C `GENLOCK_N1_SHALLOW_MAX_EXTRA_FRAMES`.
+pub const N1_SHALLOW_MAX_EXTRA_FRAMES: u64 = 3;
+
+/// issue 1367 (design 5830750134) — the settle window's floor histogram bins, RELATIVE to base:
+/// bin k counts floors of `base + k` (a floor under base counts as bin 0 — it cannot change D), the
+/// last bin every floor at or over `base + N1_SHALLOW_MAX_EXTRA_FRAMES` (a D over the cap). Mirror
+/// of the C `GENLOCK_N1_SHALLOW_HIST_BINS`.
+pub const N1_SHALLOW_HIST_BINS: usize = 4;
+const _: () = assert!(N1_SHALLOW_HIST_BINS as u64 == N1_SHALLOW_MAX_EXTRA_FRAMES + 1);
+
+/// issue 1367 (design 5830750134) — the latch reads this PERCENTILE of the window's floors, not the
+/// max: a transient burst shorter than a tenth of the window cannot set D. Mirror of the C
+/// `GENLOCK_N1_SHALLOW_LATCH_PERCENTILE`.
+pub const N1_SHALLOW_LATCH_PERCENTILE: u32 = 90;
+
+/// issue 1367 (design 5830750134) — a non-deep window whose p90 − p10 floor spread (in histogram
+/// bins) exceeds this is a transient in progress: it does not latch, it re-measures. The live
+/// healthy spread is 0–1 (a lag straddling one frame edge). Mirror of the C
+/// `GENLOCK_N1_SHALLOW_MAX_SPREAD_FRAMES`.
+pub const N1_SHALLOW_MAX_SPREAD_FRAMES: u64 = 2;
+
+/// issue 1367 (design 5830750134) — consecutive spread-rejected windows after which the next one
+/// latches anyway (bounded by the cap), so a genuinely bimodal feed still gets a D. Mirror of the
+/// C `GENLOCK_N1_SHALLOW_MAX_REJECTS`.
+pub const N1_SHALLOW_MAX_REJECTS: u32 = 3;
+
+/// issue 1367 (design 5830750134) — a latched D whose REALIZED depth (the presented frame's
+/// rounded age at the scheduled tick) stays below it for this many consecutive on-grid present
+/// ticks is unreachable: re-measure. Twice the settle window, so the hold's climb onto a capped D
+/// (`N1_SHALLOW_MAX_EXTRA_FRAMES` holds × the 30-tick throttle = 90 ticks) never trips it. Mirror
+/// of the C `GENLOCK_N1_SHALLOW_UNDER_TICKS`.
+pub const N1_SHALLOW_UNDER_TICKS: u32 = 180;
+
+/// issue 1367 (design 5830750134) — this many BACKLOG relocks while latched, with no
+/// [`N1_SHALLOW_CHURN_QUIET_TICKS`] gap between them, is a relock storm against D (the live 400 ms
+/// latch relocked ~3 per 5 s): re-measure. Mirror of the C `GENLOCK_N1_SHALLOW_CHURN_RELOCKS`.
+pub const N1_SHALLOW_CHURN_RELOCKS: u32 = 3;
+
+/// issue 1367 (design 5830750134) — on-grid present ticks without a backlog relock that clear the
+/// churn count (an occasional stall's relock hours apart never re-measures). Mirror of the C
+/// `GENLOCK_N1_SHALLOW_CHURN_QUIET_TICKS`.
+pub const N1_SHALLOW_CHURN_QUIET_TICKS: u32 = 180;
+
 /// issue 1367 — the per-source shallow-depth state (the C `genlock_shallow_*` fields).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ShallowDepth {
@@ -270,6 +318,17 @@ pub struct ShallowDepth {
     /// On-grid ticks of the current window on which the source read DEEP (the latch takes the
     /// MAJORITY, so a stall on the one latch tick cannot decide it).
     pub deep_ticks: u32,
+    /// The current window's floor histogram, relative to base ([`N1_SHALLOW_HIST_BINS`]). Cleared
+    /// on the window's FIRST sample (lazily, so the rearm stays a five-field reset in C too).
+    pub hist: [u32; N1_SHALLOW_HIST_BINS],
+    /// Consecutive on-grid present ticks whose realized depth sat below the latched D.
+    pub under_ticks: u32,
+    /// Backlog relocks while latched, since the last quiet gap.
+    pub churn_relocks: u32,
+    /// On-grid present ticks since the last backlog relock (a quiet gap clears the churn count).
+    pub churn_quiet_ticks: u32,
+    /// Consecutive spread-rejected windows.
+    pub rejects: u32,
 }
 
 /// issue 1367 — one PRESENT tick's inputs to [`n1_shallow_track`] (the C passes them as scalars).
@@ -290,6 +349,39 @@ pub struct ShallowTick {
     pub deep: bool,
     /// This OBS box is a min-latency (imag) box.
     pub min_latency_box: bool,
+    /// The REALIZED depth: the rounded age of the frame this tick presents, at the scheduled
+    /// instant (the C `genlock_n1_depth_frames(tick_wall, source->last_frame_ts, interval)`).
+    pub realized_frames: u64,
+    /// A BACKLOG relock happened since the previous call (the C `genlock_relocks` moved).
+    pub backlog_relock: bool,
+}
+
+/// issue 1367 (design 5830750134) — the histogram bin of one rounded floor: `floor − base`,
+/// saturating at 0 (a floor under base cannot change D) and at the last bin (over the cap). Mirror
+/// of the C `genlock_n1_shallow_hist_bin`.
+pub fn n1_shallow_hist_bin(floor_frames: u64, base_frames: u64) -> usize {
+    floor_frames
+        .saturating_sub(base_frames)
+        .min(N1_SHALLOW_HIST_BINS as u64 - 1) as usize
+}
+
+/// issue 1367 (design 5830750134) — the `pct` percentile of a window's histogram, as a bin: the
+/// first bin whose cumulative count reaches `pct %` of `window_ticks` (integer: `cum · 100 ≥
+/// window · pct`). An empty window reads bin 0. Mirror of the C `genlock_n1_shallow_percentile_bin`.
+pub fn n1_shallow_percentile_bin(
+    hist: &[u32; N1_SHALLOW_HIST_BINS],
+    window_ticks: u32,
+    pct: u32,
+) -> u64 {
+    let need = u64::from(window_ticks) * u64::from(pct);
+    let mut cum = 0u64;
+    for (bin, &n) in hist.iter().enumerate() {
+        cum += u64::from(n);
+        if cum * 100 >= need {
+            return bin as u64;
+        }
+    }
+    N1_SHALLOW_HIST_BINS as u64 - 1
 }
 
 /// issue 1367 — the latched depth: `max(base, floor_max) + 1` (a DEEP source: the pin rule's own

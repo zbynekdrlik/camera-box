@@ -157,9 +157,20 @@ pub struct VideoDelayTracker {
     pub smoothed_ns: u64,
     /// The quantized delay the audio follows, ms (0 = not measured yet → the #1303 latency hold).
     pub applied_ms: u32,
-    /// Render ticks left until an armed re-application applies (0 = idle).
+    /// Render ticks left until an armed re-application applies (0 = idle). Under a lock it counts
+    /// UP the consecutive ticks the realized delay sat half a frame or more off the applied one.
     pub settle_ticks: u32,
+    /// Issue 1367 (design 5830750134) — the lock last applied (0 = the free tracker): a NEW lock
+    /// applies at once, the same lock lets the realized delay bound the hold.
+    pub locked_ms: u32,
 }
+
+/// Issue 1367 (design 5830750134) — under the SAME lock, the render ticks the smoothed realized
+/// delay must stay half a frame or more off the applied hold, CONSECUTIVELY, before the hold
+/// follows it. Longer than the hold's climb onto a capped latched depth (3 holds × the 30-tick
+/// throttle = 90 ticks), so a normal climb onto D never moves the audio; a disturbance's one-frame
+/// excursion (≤ one throttle window) resets it. Mirror of `GENLOCK_VIDEO_DELAY_FOLLOW_TICKS`.
+pub const VIDEO_DELAY_FOLLOW_TICKS: u32 = 180;
 
 /// Issue 1367 (ROZHODNUTÉ 5827497952) — the `lock_ms` of [`video_delay_track`] while a SHALLOW N==1
 /// source measures its first per-lock depth: smooth only, apply nothing, so the audio waits for the

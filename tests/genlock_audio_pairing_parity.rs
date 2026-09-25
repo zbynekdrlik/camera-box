@@ -311,9 +311,19 @@ fn c_video_delay_tracker_matches_the_rust_authority_tick_by_tick_1367() {
     }
     seq.extend(std::iter::repeat_n((66_666_667, IV30, 67), 30));
     seq.extend(std::iter::repeat_n((100_000_000, IV30, 0), 150));
+    // design 5830750134: a lock of 400 ms over a realized ~233 ms is followed once the offset has
+    // held for VIDEO_DELAY_FOLLOW_TICKS (with a short return to 400 that resets the count), the
+    // same lock over a realized 500 ms follows upward, a NEW lock applies at once, and the free
+    // tracker afterwards starts from a fresh arm.
+    seq.extend(std::iter::repeat_n((233_333_333, IV30, 400), 100));
+    seq.extend(std::iter::repeat_n((400_000_000, IV30, 400), 30));
+    seq.extend(std::iter::repeat_n((233_333_333, IV30, 400), 250));
+    seq.extend(std::iter::repeat_n((500_000_000, IV30, 400), 250));
+    seq.extend(std::iter::repeat_n((100_000_000, IV30, 100), 60));
+    seq.extend(std::iter::repeat_n((233_333_333, IV30, 0), 100));
 
     let mut body = String::from(
-        "    uint64_t sm = 0; uint32_t ap = 0; uint32_t st = 0;\n    static const unsigned long long S[] = {",
+        "    uint64_t sm = 0; uint32_t ap = 0; uint32_t st = 0; uint32_t lk = 0;\n    static const unsigned long long S[] = {",
     );
     body.push_str(
         &seq.iter()
@@ -336,7 +346,7 @@ fn c_video_delay_tracker_matches_the_rust_authority_tick_by_tick_1367() {
             .join(","),
     );
     body.push_str(&format!(
-        "}};\n    for (int k = 0; k < {}; k++) {{\n        genlock_video_delay_track(&sm, &ap, &st, L[k], S[k], I[k]);\n        printf(\"%llu %u %u\\n\", (unsigned long long)sm, (unsigned)ap, (unsigned)st);\n    }}\n",
+        "}};\n    for (int k = 0; k < {}; k++) {{\n        genlock_video_delay_track(&sm, &ap, &st, &lk, L[k], S[k], I[k]);\n        printf(\"%llu %u %u %u\\n\", (unsigned long long)sm, (unsigned)ap, (unsigned)st, (unsigned)lk);\n    }}\n",
         seq.len()
     ));
     let out = run_c(&body, "tracker");
@@ -345,8 +355,8 @@ fn c_video_delay_tracker_matches_the_rust_authority_tick_by_tick_1367() {
     for (s, iv, lock) in &seq {
         video_delay_track(&mut t, *lock, *s, *iv);
         want.push(format!(
-            "{} {} {}",
-            t.smoothed_ns, t.applied_ms, t.settle_ticks
+            "{} {} {} {}",
+            t.smoothed_ns, t.applied_ms, t.settle_ticks, t.locked_ms
         ));
     }
     assert_eq!(out.len(), want.len());
@@ -364,21 +374,28 @@ fn c_video_delay_tracker_matches_the_rust_authority_tick_by_tick_1367() {
         diffs.join("\n")
     );
     // the sequence must actually exercise re-applications, or the gate compares idle trackers.
+    // A line is `smoothed applied settle locked`.
+    let seen = |applied: u32, locked: u32| {
+        want.iter().any(|l| {
+            let f: Vec<&str> = l.split(' ').collect();
+            f[1] == applied.to_string() && f[2] == "0" && f[3] == locked.to_string()
+        })
+    };
+    assert!(seen(67, 0), "the sequence never applied 67 ms");
+    assert!(seen(133, 0), "the sequence never applied 133 ms");
     assert!(
-        want.iter().any(|l| l.ends_with(" 67 0")),
-        "the sequence never applied 67 ms"
-    );
-    assert!(
-        want.iter().any(|l| l.ends_with(" 133 0")),
-        "the sequence never applied 133 ms"
-    );
-    assert!(
-        !want.iter().any(|l| l.ends_with(" 70 0")),
+        !seen(70, 0),
         "the reversed excursion must not apply its sub-half-frame 70 ms"
     );
+    assert!(seen(100, 100), "the sequence never applied the 100 ms lock");
+    // design 5830750134: the 400 ms lock was bounded by the realized 233 ms, then followed 500 ms.
     assert!(
-        want.iter().any(|l| l.ends_with(" 100 0")),
-        "the sequence never applied the 100 ms lock"
+        seen(233, 400),
+        "the lock never followed the realized 233 ms"
+    );
+    assert!(
+        seen(500, 400),
+        "the lock never followed the realized 500 ms"
     );
 }
 

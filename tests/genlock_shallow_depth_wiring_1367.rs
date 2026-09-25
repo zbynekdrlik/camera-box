@@ -108,6 +108,12 @@ fn the_release_tick_locks_measures_and_keeps_the_drain_out_1367() {
     let track = tick
         .find("genlock_video_delay_lock_ms(source->genlock_shallow_target_frames, source->genlock_shallow_measuring, interval), genlock_video_delay_sample_ns(genlock_delay_tick_wall, next_frame->timestamp), interval);")
         .expect("issue 1367: the audio tracker no longer follows the latched shallow depth");
+    assert_in(
+        tick,
+        "&source->genlock_video_delay_settle_ticks, &source->genlock_video_delay_locked_ms, genlock_video_delay_lock_ms(",
+        "the tracker remembers the lock it applied, so the realized delay can bound the hold \
+         (design 5830750134)",
+    );
     let latch = tick
         .find("genlock_shallow_latch(source, genlock_delay_tick_wall, wall_now, interval, reserve_ms, genlock_shallow_relock);")
         .expect("issue 1367: the present tail no longer samples the arrival floor and latches D");
@@ -131,8 +137,29 @@ fn the_release_tick_locks_measures_and_keeps_the_drain_out_1367() {
     );
     assert_in(
         helper,
-        "reserve_ms, interval), genlock_min_latency_box()))",
-        "the latch passes the deep flag and the min-latency (imag) box guard",
+        "reserve_ms, interval), genlock_min_latency_box(), genlock_n1_depth_frames(tick_wall, source->last_frame_ts, interval), backlog_relock,",
+        "the latch passes the deep flag, the min-latency (imag) box guard, and (design 5830750134) the \
+         REALIZED depth of the frame this tick presents plus the backlog-relock event",
+    );
+    assert_in(
+        helper,
+        "source->genlock_shallow_hist, &source->genlock_shallow_under_ticks, &source->genlock_shallow_churn_relocks, &source->genlock_shallow_churn_quiet_ticks, &source->genlock_shallow_rejects))",
+        "the latch keeps the window histogram (p90 + spread) and the downward re-measure state",
+    );
+    assert_in(
+        helper,
+        "const bool backlog_relock = source->genlock_relocks != source->genlock_shallow_relocks_seen; source->genlock_shallow_relocks_seen = source->genlock_relocks;",
+        "the churn input is the BACKLOG relock counter's delta since the previous call",
+    );
+    assert_in(
+        helper,
+        "\"genlock-shallow-remeasure '%s': reason=%s depth_frames=%llu realized_frames=%llu floor_frames=%llu \"",
+        "every re-measure without a relock is logged with its reason (design 5830750134)",
+    );
+    assert_in(
+        &src,
+        "_Static_assert(GENLOCK_SHALLOW_HIST_FIELD_BINS == GENLOCK_N1_SHALLOW_HIST_BINS,",
+        "the obs_source histogram field and the helper's bin count must agree",
     );
     assert_in(
         helper,
@@ -173,6 +200,11 @@ fn a_pin_change_rearms_and_the_box_marker_log_and_audit_exist_1367() {
         &src,
         "\"wanted_frames=%llu latency_ms=%u capped=%d (issue 1367)\",",
         "the latch line must name the depth the floor asked for (the capped report)",
+    );
+    assert_in(
+        &src,
+        "\"latch_floor_frames=%llu spread_frames=%llu rejects=%u \"",
+        "the latch line must name the p90 floor it latched on and the window spread (design 5830750134)",
     );
     assert_in(
         &src,
