@@ -305,7 +305,9 @@ struct Args {
     /// ticks it can see (ids + timestamps, NEVER frames/pixels). The strih recording is decoded ON
     /// the strih box, the stream recording ON the stream box, the imag recording ON the imag-nb
     /// box; a recording is NEVER copied box-to-box (nor to dev1) — only this small JSON moves.
-    /// dev1 then runs `--merge-partials` to combine them. `<box>` is `strih`, `stream`, or `imag`.
+    /// dev1 then runs `--merge-partials` to combine them. `<box>` is `strih`, `stream`, `imag`, or
+    /// `cg` (issue 1302: the cg OBS recording passed via `--cg`, decoded ON the RESOLUME-SNV box for
+    /// the SongPlayer + cg OBS burns — the REPORT-ONLY cg_chain section's origin hop).
     #[arg(long, value_name = "BOX")]
     extract_partial: Option<String>,
     /// #1143: OBS's own record-session render stats for the imag recording, as a compact JSON object
@@ -7672,6 +7674,9 @@ fn extract_partial_flagged_frames(
                 1,
             ),
         ],
+        // imag, and the issue-1302 cg box: only the undecodable frames above are flagged. The cg
+        // chain's own missing ids are reported by the merge's cg_chain section, which never
+        // extracts pixels for them on the fused path either.
         _ => Vec::new(),
     };
     // #273: thread the cam2 pin so the on-box pixel-proof flagging anchors the optical window to
@@ -7824,6 +7829,10 @@ fn args_expected_burns_for(box_name: &str, args: &Args) -> Option<Vec<u32>> {
             Some(v)
         }
         "imag" => Some(vec![BURN_RUN_ID_IMAG]),
+        // Issue 1302: the cg OBS recording carries the SongPlayer origin burn + the cg OBS hop
+        // burn — the same pair the fused path decodes `--cg` for — regardless of
+        // `--cg-chain-burns` (that flag only widens the strih/stream sets).
+        "cg" => Some(vec![args.burn_songplayer_run_id, args.burn_cg_run_id]),
         _ => None,
     }
 }
@@ -7872,7 +7881,8 @@ fn qpsk_probe(args: &Args, audio: &Path) -> Result<()> {
 fn extract_partial(args: &Args, box_name: &str) -> Result<()> {
     let expected_burns = args_expected_burns_for(box_name, args).ok_or_else(|| {
         anyhow::anyhow!(
-            "--extract-partial: unknown box {box_name:?} (expected `strih`, `stream`, or `imag`)"
+            "--extract-partial: unknown box {box_name:?} (expected `strih`, `stream`, `imag`, or \
+             `cg`)"
         )
     })?;
     let rec_path: &Path = match box_name {
@@ -7892,6 +7902,13 @@ fn extract_partial(args: &Args, box_name: &str) -> Result<()> {
             .imag
             .as_deref()
             .context("--extract-partial imag needs --imag <recording on the imag-nb box>")?,
+        // Issue 1302: the cg OBS recording, decoded IN PLACE on RESOLUME-SNV (never copied to
+        // dev1) for its SongPlayer + cg burns. It takes the plain `analyze_recording_with_burns`
+        // decode below — the same one the fused `--cg` path uses.
+        "cg" => args
+            .cg
+            .as_deref()
+            .context("--extract-partial cg needs --cg <recording on the RESOLUME-SNV box>")?,
         // args_expected_burns_for already returned None (→ bailed) for any other box.
         _ => unreachable!("unknown box rejected by args_expected_burns_for above"),
     };
@@ -8125,6 +8142,10 @@ fn run_merge(args: &Args) -> Result<()> {
     // #1143 — OBS's own record-session render stats carried from the imag partial's `record_render`
     // (Some only when the imag box was extracted with `--record-render-stats`). Surfaced report-only.
     let mut imag_record_render: Option<camera_box::record_render_stats::RecordRenderStats> = None;
+    // Issue 1302 — the cg OBS partial decoded IN PLACE on RESOLUME-SNV (`--extract-partial cg`),
+    // so the CG_CHAIN run never copies the cg recording to dev1 nor decodes it here. It fills the
+    // SAME `cg` slot the fused `--cg` recording does; `None` on every normal (no-CG) merge.
+    let mut cg_partial: Option<DecodedRec> = None;
     for spec in &args.merge_partials {
         let (box_name, path) = spec
             .split_once('=')
@@ -8158,7 +8179,11 @@ fn run_merge(args: &Args) -> Result<()> {
                         eprintln!(
                             "WARNING: --merge-partials {box_name}={path}: {reason} Load error: {e:#}"
                         );
-                        imag_skip_reason = Some(reason);
+                        // Only the imag drop is surfaced as the imag leg's skip reason; a dropped
+                        // issue-1302 cg partial just omits the report-only cg_chain section.
+                        if box_name == "imag" {
+                            imag_skip_reason = Some(reason);
+                        }
                         continue;
                     }
                     camera_box::partial_schema_gate::PartialLoadDisposition::Fatal => {
@@ -8222,13 +8247,16 @@ fn run_merge(args: &Args) -> Result<()> {
                 imag = Some(rec);
                 imag_record_render = record_render; // #1143 report-only OBS record-render stats
             }
+            // Issue 1302: the cg OBS partial (report-only cg_chain origin hop).
+            "cg" => cg_partial = Some(rec),
             other => anyhow::bail!(
-                "--merge-partials: unknown box {other:?} (expected `strih`, `stream`, or `imag`)"
+                "--merge-partials: unknown box {other:?} (expected `strih`, `stream`, `imag`, or \
+                 `cg`)"
             ),
         }
     }
     anyhow::ensure!(
-        strih.is_some() || stream.is_some() || imag.is_some(),
+        strih.is_some() || stream.is_some() || imag.is_some() || cg_partial.is_some(),
         "--merge-partials needs at least one BOX=JSON partial"
     );
     // #186 note: cam1's pixel proof comes from the STRIH box (cam1's burn is crispest in the clean
@@ -8251,14 +8279,27 @@ fn run_merge(args: &Args) -> Result<()> {
         painter = ?args.painter.as_ref().map(|p| p.display().to_string()),
         "merge: building the full-chain verdict from per-box partials (#208 — no recording on dev1)"
     );
-    // #1301: the cg OBS recording for the CG chain is passed as a full recording via `--cg` (the
-    // CG_CHAIN E2E pulls it to dev1 and points `--cg` at it — an on-box cg partial is a follow-up).
-    // `None` on every normal merge (no --cg), so the cg_chain section is omitted. Decoded for BOTH
-    // the SongPlayer origin burn (911014) and the cg OBS hop burn (911015).
-    let cg = decode_for(
-        args.cg.as_deref(),
-        &[args.burn_songplayer_run_id, args.burn_cg_run_id],
-    )?;
+    // #1301 / issue 1302: the cg OBS frames for the CG chain. The CG_CHAIN E2E decodes the cg
+    // recording IN PLACE on RESOLUME-SNV and merges it as `--merge-partials cg=<json>` (the old
+    // copy-to-dev1 + decode-here path blew the job budget). A full recording via `--cg` is still
+    // accepted for a manual run, decoded here for BOTH the SongPlayer origin burn (911014) and the
+    // cg OBS hop burn (911015); a cg partial wins when both are given. `None` on every normal
+    // merge, so the cg_chain section is omitted.
+    let cg = match cg_partial {
+        Some(rec) => {
+            if args.cg.is_some() {
+                eprintln!(
+                    "WARNING: issue 1302: both --cg and --merge-partials cg=… were given — using the \
+                     on-box cg partial and ignoring --cg (no second decode on this host)."
+                );
+            }
+            Some(rec)
+        }
+        None => decode_for(
+            args.cg.as_deref(),
+            &[args.burn_songplayer_run_id, args.burn_cg_run_id],
+        )?,
+    };
     // cam1's contiguity source is the strih partial frames (#133); there is no separate cam1
     // grab in the per-box flow (#179 removed it), so the cam1 grab is Absent.
     let (_report, all_pass) = build_and_print_verdict_with_stream_diffs(

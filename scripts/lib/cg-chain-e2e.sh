@@ -29,18 +29,23 @@
 #     hard cut are DESIGNED to keep the camera-chain verdict out of it (the CG frames are a trailing
 #     no-tick run after the last optical read); the first live CG_CHAIN=1 run is what confirms it.
 #   - right after [7/8] StopRecord (after the genlock-audit AFTER snapshot): StopRecord cg OBS
-#     (keeping the StopRecord host path), burn OFF, strih's scene + program + transition AND cg OBS's
-#     program + transition restored — so nothing CG runs during the on-box decodes.
-#   - at [8/8d]: scp that exact cg file to dev1 (or run the operator's CG_CHAIN_PULL_CMD), fed to the
-#     merge as `--cg <path>`, which emits the REPORT-ONLY cg_chain section (src/cg_chain_gate.rs;
-#     never changes overall_pass).
+#     (keeping the StopRecord host path for the on-box decode), burn OFF, strih's scene + program +
+#     transition AND cg OBS's program + transition restored — so nothing CG runs during the on-box
+#     decodes.
+#   - at [8/8] (issue 1302): recording-verdict-on-resolume.sh decodes that exact cg file IN PLACE on
+#     RESOLUME-SNV (`--extract-partial cg`), in the background next to the strih/stream extracts, and
+#     pulls back only the small partial; the merge takes it as `--merge-partials cg=<json>` and emits
+#     the REPORT-ONLY cg_chain section (src/cg_chain_gate.rs; never changes overall_pass). The
+#     recording is never copied to dev1. A CG-LEG-VERIFIED / -SKIPPED / -NOT-VERIFIED run-log line
+#     names the outcome; resolume away = SKIPPED, never a red.
 #   - at [8/8a]/[8/8b] + the merge (issue 1302 slice 2): the strih/stream extracts and the merge get
 #     `--cg-chain-burns` (the SongPlayer + cg ids join their expected-burn sets), and the merge gets
 #     this run's `--cg-window`, so the strih/stream hops are judged inside the CG window at the
 #     60->30 decimation step.
 #   - in cleanup(): the #246/#844 leak-guard — burn OFF (verified on /health, retried with a SHORT
-#     per-request timeout, a loud LEAK line if it never reads false), StopRecord cg OBS, and every
-#     scene snapshot of this run restored, even on an early abort.
+#     per-request timeout, a loud LEAK line if it never reads false), StopRecord cg OBS, every scene
+#     snapshot of this run restored, and an in-flight background cg extract stopped, even on an
+#     early abort.
 
 # win_ssh_scp_source_path (the backslash-to-slash scp source fix) lives in win-ssh-exec.sh, which
 # recording-e2e.sh sources earlier; source it here too when a caller (a test) did not.
@@ -226,8 +231,8 @@ cg_chain_record_start() {
 }
 
 # StopRecord cg OBS over OBS-WS and KEEP the StopRecord host path (obs_phase2.py prints it as its
-# only stdout line) in CG_HOST_RECORDING_PATH for the pull. An empty answer (already stopped — the
-# cleanup() pass after [8/8d]) never clears a path an earlier stop recorded. Args: $1=host-ip
+# only stdout line) in CG_HOST_RECORDING_PATH for the on-box decode. An empty answer (already
+# stopped — the cleanup() pass) never clears a path an earlier stop recorded. Args: $1=host-ip
 # $2=path-to-obs_phase2.py $3=timeout-secs. BEST-EFFORT + loud; ALWAYS return 0.
 cg_chain_record_stop() {
   local host="$1" py="$2" tmo="${3:-30}" path
@@ -241,52 +246,161 @@ cg_chain_record_stop() {
   return 0
 }
 
-# ---- (b) the cg OBS recording pull --------------------------------------------------------------
+# ---- (b) the cg OBS recording, decoded IN PLACE on RESOLUME-SNV (issue 1302) -----------------
+#
+# The cg recording is NEVER copied to dev1 (a 29-min dev1 decode blew the 75-min job budget on
+# 25.9.2026): recording-verdict-on-resolume.sh decodes it ON the box that recorded it, the way the
+# stream partial is extracted on the stream box, and pulls back only the small partial JSON (+ its
+# pixel proofs). It is launched in the BACKGROUND right after the strih/stream extracts, so the wall
+# time is max() of the legs, not their sum; the collect step waits for it at most a grace period past
+# the camera legs, so a slow or wedged cg decode can never cost the job budget. Report-only end to
+# end: every miss is a named CG-LEG marker, never a red.
 
-# The scp SOURCE spec for a Windows host path: `<user>@<host>:<path with / separators>` (the
-# win_ssh_scp_source_path fix — a backslash scp source reads "No such file"). Spaces stay as they
-# are: the arg reaches scp as ONE argv entry. Pure.
-cg_chain_pull_source_spec() {
-  printf '%s@%s:%s' "$1" "$2" "$(win_ssh_scp_source_path "$3")"
+# The ssh user / password for RESOLUME-SNV (env CG_CHAIN_USER / CG_CHAIN_PW). Pure.
+cg_chain_user() {
+  printf '%s' "${CG_CHAIN_USER:-newlevel}"
+}
+cg_chain_pw() {
+  printf '%s' "${CG_CHAIN_PW:-newlevel}"
 }
 
-# Pull the cg OBS recording to the local path $2. With CG_CHAIN_PULL_CMD set, that operator command
-# runs (with CG_HOST_IP, CG_HOST_PATH and CG_RECORDING exported). Otherwise the DEFAULT: the shared
-# win_ssh_download (win-ssh-exec.sh) fetches the exact StopRecord file (CG_HOST_RECORDING_PATH) from
-# `${CG_CHAIN_USER:-newlevel}@$1`, bounded by CG_CHAIN_PULL_TIMEOUT (default 900 s — `timeout` cannot
-# exec a shell function, so it runs through `bash -c` re-sourcing the lib, the recording-e2e.sh
-# win_ssh_run pattern). $1=cg-host-ip $2=local-dest-path. Returns 0 iff the destination file exists
-# afterwards. MUST be called from an `if` (nonzero = "no cg recording this run, omit --cg").
-cg_chain_pull_recording() {
-  local host="$1" dest="$2"
-  local cmd="${CG_CHAIN_PULL_CMD:-}" hostpath="${CG_HOST_RECORDING_PATH:-}" spec
-  # The merge feeds --cg on `[ -f "$CG_RECORDING" ]`, so the destination must hold THIS run's
-  # complete file or nothing: drop any stale copy first, and scp into a .part that is renamed only
-  # on success (a failed scp can leave a partial file behind).
-  rm -f -- "$dest" "$dest.part"
-  if [ -n "$cmd" ]; then
-    if CG_HOST_IP="$host" CG_HOST_PATH="$hostpath" CG_RECORDING="$dest" bash -c "$cmd" >/dev/null 2>&1 && [ -f "$dest" ]; then
-      echo "[cg_chain] cg OBS recording pulled to $dest (CG_CHAIN_PULL_CMD)"
-      return 0
-    fi
-    rm -f -- "$dest"
-    echo "[cg_chain] WARNING: cg OBS recording pull failed (CG_CHAIN_PULL_CMD) — omitting --cg this run" >&2
-    return 1
+# This run's cg partial on dev1 (in CG_CHAIN_STATE_DIR, keyed to RUN_ID like the snapshots — a
+# reused OUTDIR never merges another run's partial). Its `-pixels` sibling dir holds the pulled-back
+# pixel proofs. Pure.
+cg_chain_partial_file() {
+  printf '%s/cg-partial%s.json' "${CG_CHAIN_STATE_DIR:-${TMPDIR:-/tmp}}" "${RUN_ID:+-$RUN_ID}"
+}
+
+# The same partial's path ON the box (env CG_CHAIN_ONBOX_OUT_DIR, default the stream extract's
+# `C:\camera-box\verdict-out`); its basename matches cg_chain_partial_file so the pull-back lands on
+# exactly that dev1 path. Pure.
+cg_chain_onbox_partial_win() {
+  printf '%s\\cg-partial%s.json' "${CG_CHAIN_ONBOX_OUT_DIR:-C:\\camera-box\\verdict-out}" "${RUN_ID:+-$RUN_ID}"
+}
+
+# The background extract's log on dev1 (replayed into the run log by the collect step). Pure.
+cg_chain_extract_log() {
+  printf '%s/cg-extract%s.log' "${CG_CHAIN_STATE_DIR:-${TMPDIR:-/tmp}}" "${RUN_ID:+-$RUN_ID}"
+}
+
+# How long (s) the collect step still waits for the cg extract once it is reached — i.e. AFTER the
+# strih/stream extracts are done (env CG_CHAIN_EXTRACT_GRACE_SECS, default 900; a non-integer value
+# falls back to 900, 0 means "do not wait"). Pure.
+cg_chain_extract_grace_secs() {
+  case "${CG_CHAIN_EXTRACT_GRACE_SECS:-}" in
+    '' | *[!0-9]*) printf '900' ;;
+    *) printf '%s' "$CG_CHAIN_EXTRACT_GRACE_SECS" ;;
+  esac
+}
+
+# The ONE run-log marker for the cg leg, printed by the collect step. $1=dev1 partial path
+# $2=state (`skipped` | `failed` | empty) $3=reason. Distinct greppable tokens:
+#   CG-LEG-VERIFIED      the on-box cg partial reached dev1 (the merge computes cg_chain).
+#   CG-LEG-SKIPPED       no cg leg this run BY DESIGN (resolume away / unresolvable, a plan-only run).
+#   CG-LEG-NOT-VERIFIED  the cg leg was attempted and did not produce a partial.
+# Pure (one `[ -f ]` + printf).
+cg_chain_leg_marker() {
+  local partial="${1:-}" state="${2:-}" reason="${3:-}"
+  if [ "$state" != failed ] && [ "$state" != skipped ] && [ -n "$partial" ] && [ -f "$partial" ]; then
+    printf 'CG-LEG-VERIFIED: cg OBS partial decoded ON RESOLUME-SNV (%s) — the report-only cg_chain section is computed this run (issue 1302).\n' "$partial"
+  elif [ "$state" = skipped ]; then
+    printf 'CG-LEG-SKIPPED: %s — the report-only cg_chain section is omitted; the camera-chain gate is unaffected (issue 1302).\n' "$reason"
+  else
+    printf 'CG-LEG-NOT-VERIFIED: %s — the report-only cg_chain section is omitted; the camera-chain gate is unaffected (issue 1302).\n' "${reason:-no cg partial reached dev1}"
   fi
-  if [ -z "$hostpath" ]; then
-    echo "[cg_chain] WARNING: no cg OBS recording path from StopRecord — nothing to pull, omitting --cg this run" >&2
-    return 1
-  fi
-  spec="$(cg_chain_pull_source_spec "${CG_CHAIN_USER:-newlevel}" "$host" "$hostpath")"
-  if timeout "${CG_CHAIN_PULL_TIMEOUT:-900}" bash -c '. "$1"; win_ssh_download "$2" "$3" "$4" "$5" "$6"' _ \
-    "$(dirname "${BASH_SOURCE[0]}")/win-ssh-exec.sh" "${CG_CHAIN_USER:-newlevel}" "${CG_CHAIN_PW:-newlevel}" \
-    "$host" "$hostpath" "$dest.part" >/dev/null 2>&1 && [ -f "$dest.part" ] && mv -f -- "$dest.part" "$dest"; then
-    echo "[cg_chain] cg OBS recording pulled to $dest ($(du -h "$dest" 2>/dev/null | cut -f1) from $spec)"
+}
+
+# Stop an in-flight background cg extract (its whole process group — the script, sshpass and ssh).
+# The on-box decode itself may still finish on the box; nothing reads it. ALWAYS returns 0.
+cg_chain_extract_stop() {
+  local pid="${CG_EXTRACT_PID:-}"
+  [ -n "$pid" ] || return 0
+  kill -0 "$pid" 2>/dev/null || return 0
+  kill -TERM -- "-$pid" 2>/dev/null || kill -TERM "$pid" 2>/dev/null || true
+  echo "[cg_chain] stopped the in-flight cg OBS extract (pid $pid)" >&2
+  return 0
+}
+
+# Launch the cg OBS decode ON RESOLUME-SNV in the background. $1=scripts dir (recording-e2e.sh's
+# $HERE) $2=dev1 path of the CI-built Windows recording-verdict.exe $3=E2E_EXECUTE_VERDICT. Sets
+# CG_EXTRACT_PID on a launch; otherwise CG_LEG_STATE + CG_LEG_REASON name why nothing runs. MUST be
+# called as a plain statement (never inside $(...)), so the background job belongs to the harness
+# shell that later waits for it. A pure no-op unless CG_CHAIN=1; ALWAYS returns 0.
+cg_chain_onbox_extract_launch() {
+  cg_chain_enabled || return 0
+  local here="$1" exe_local="${2:-}" execute="${3:-0}" partial log
+  CG_EXTRACT_PID=""
+  CG_LEG_STATE=""
+  CG_LEG_REASON=""
+  partial="$(cg_chain_partial_file)"
+  rm -rf -- "$partial" "${partial%.json}-pixels"
+  if [ "${CG_RECORDING_STARTED:-0}" != 1 ]; then
+    CG_LEG_STATE=skipped
+    CG_LEG_REASON="no cg OBS recording this run (resolume away or unresolvable, or its StartRecord failed at [5/8])"
     return 0
   fi
-  rm -f -- "$dest.part"
-  echo "[cg_chain] WARNING: cg OBS recording scp failed ($spec) — omitting --cg this run" >&2
-  return 1
+  if [ -z "${CG_HOST_IP:-}" ] || [ -z "${CG_HOST_RECORDING_PATH:-}" ]; then
+    CG_LEG_STATE=failed
+    CG_LEG_REASON="cg OBS StopRecord returned no recording path"
+    return 0
+  fi
+  if [ "$execute" != 1 ]; then
+    CG_LEG_STATE=skipped
+    CG_LEG_REASON="plan-only run (E2E_EXECUTE_VERDICT=0) — the cg decode runs only in the executing gate"
+    return 0
+  fi
+  if [ -z "$exe_local" ] || [ ! -f "$exe_local" ]; then
+    CG_LEG_STATE=failed
+    CG_LEG_REASON="no Windows recording-verdict.exe on dev1 (WIN_VERDICT_EXE_LOCAL='$exe_local')"
+    return 0
+  fi
+  log="$(cg_chain_extract_log)"
+  # setsid: its own process group, so the collect step (grace overrun) and cleanup() can stop the
+  # script together with its sshpass/ssh children.
+  RESOLUME_BOX="$CG_HOST_IP" RESOLUME_USER="$(cg_chain_user)" RESOLUME_PW="$(cg_chain_pw)" \
+    setsid "$here/recording-verdict-on-resolume.sh" \
+    --verdict-exe-local "$exe_local" --local-out-dir "$(dirname "$partial")" \
+    -- --extract-partial cg --cg "$CG_HOST_RECORDING_PATH" --out "$(cg_chain_onbox_partial_win)" \
+    >"$log" 2>&1 &
+  CG_EXTRACT_PID=$!
+  echo "    --- [8/8cg] #1302 cg OBS extract launched ON RESOLUME-SNV ($CG_HOST_IP) in the background (pid $CG_EXTRACT_PID, log $log) ---"
+  return 0
+}
+
+# Collect the background cg extract: wait for it at most cg_chain_extract_grace_secs more (polling
+# every CG_CHAIN_EXTRACT_POLL_SECS, default 5), stop it on an overrun, replay its log and print the
+# CG-LEG marker. A failed / stopped extract leaves NO partial behind, so the merge never feeds a
+# stale one. A pure no-op unless CG_CHAIN=1; ALWAYS returns 0.
+cg_chain_onbox_extract_wait() {
+  cg_chain_enabled || return 0
+  local partial pid="${CG_EXTRACT_PID:-}" grace poll waited=0 rc=0
+  partial="$(cg_chain_partial_file)"
+  if [ -n "$pid" ]; then
+    grace="$(cg_chain_extract_grace_secs)"
+    case "${CG_CHAIN_EXTRACT_POLL_SECS:-}" in '' | *[!0-9]* | 0) poll=5 ;; *) poll="$CG_CHAIN_EXTRACT_POLL_SECS" ;; esac
+    echo "    [8/8cg] #1302 waiting for the cg OBS extract (at most ${grace}s more)..."
+    while kill -0 "$pid" 2>/dev/null && [ "$waited" -lt "$grace" ]; do
+      if declare -F interruptible_sleep >/dev/null 2>&1; then interruptible_sleep "$poll"; else sleep "$poll"; fi
+      waited=$((waited + poll))
+    done
+    if kill -0 "$pid" 2>/dev/null; then
+      cg_chain_extract_stop
+      CG_LEG_STATE=failed
+      CG_LEG_REASON="the cg OBS decode on RESOLUME-SNV was still running ${grace}s after the camera extracts — stopped so it can never cost the job budget"
+    fi
+    wait "$pid" 2>/dev/null || rc=$?
+    CG_EXTRACT_PID=""
+    echo "    ----- cg extract log ($(cg_chain_extract_log)) -----"
+    cat "$(cg_chain_extract_log)" 2>/dev/null || true
+    echo "    ------------------------------------"
+    if [ -z "${CG_LEG_STATE:-}" ] && { [ "$rc" != 0 ] || [ ! -f "$partial" ]; }; then
+      CG_LEG_STATE=failed
+      CG_LEG_REASON="the cg OBS extract on RESOLUME-SNV failed (rc=$rc — see its log above)"
+    fi
+    if [ "${CG_LEG_STATE:-}" = failed ]; then rm -rf -- "$partial" "${partial%.json}-pixels"; fi
+  fi
+  echo "    $(cg_chain_leg_marker "$partial" "${CG_LEG_STATE:-}" "${CG_LEG_REASON:-}")"
+  return 0
 }
 
 # ---- (c) the ONE tail CG window on strih --------------------------------------------------------
@@ -385,15 +499,18 @@ cg_chain_extract_burn_flag() {
 
 # Append the CG merge inputs to the caller's MERGE_ARGS array: `--cg-chain-burns` (the merge's
 # expected-burn check must match the extracts), plus `--cg-window <file>` when THIS run's window
-# record exists (cg_chain_window_file is keyed to RUN_ID, so another run's window is never fed). The
-# verdict judges the strih/stream cg_chain hops only inside that window. A no-op unless CG_CHAIN=1.
-# ALWAYS returns 0.
+# record exists (cg_chain_window_file is keyed to RUN_ID, so another run's window is never fed), plus
+# `--merge-partials cg=<json>` when THIS run's on-box cg partial reached dev1 (issue 1302 — the cg
+# OBS origin hop; no partial = no cg_chain section, never a red). The verdict judges the
+# strih/stream cg_chain hops only inside the window. A no-op unless CG_CHAIN=1. ALWAYS returns 0.
 cg_chain_merge_args_append() {
   cg_chain_enabled || return 0
-  local win
+  local win partial
   MERGE_ARGS+=(--cg-chain-burns)
   win="$(cg_chain_window_file)"
   if [ -f "$win" ]; then MERGE_ARGS+=(--cg-window "$win"); fi
+  partial="$(cg_chain_partial_file)"
+  if [ -f "$partial" ]; then MERGE_ARGS+=(--merge-partials "cg=$partial"); fi
   return 0
 }
 
@@ -412,7 +529,7 @@ cg_chain_restore_snapshot() {
 }
 
 # End the CG leg right after [7/8] StopRecord: StopRecord cg OBS (keeping the host path for the
-# [8/8d] pull), burn OFF (verified), strih's CG-window scene + program + transition restored, and cg
+# on-box decode), burn OFF (verified), strih's CG-window scene + program + transition restored, and cg
 # OBS's program + transition restored — so neither the cg recording nor the burn nor either CG
 # program change runs through the long on-box decodes.
 # cleanup() repeats every step (each is idempotent). $1=cg-host-ip-or-empty $2=path-to-obs_phase2.py
@@ -438,6 +555,8 @@ cg_chain_after_stoprecord() {
 cg_chain_cleanup() {
   cg_chain_enabled || return 0
   local host="$1" py="$2" tmo="${3:-30}"
+  # Issue 1302: an aborted run must not leave the background cg extract running.
+  cg_chain_extract_stop
   CG_CHAIN_BURN_TIMEOUT="${CG_CHAIN_CLEANUP_BURN_TIMEOUT:-3}" cg_chain_songplayer_burn off
   # Only a cg recording THIS run started (the #649 harness-started-boxes-only rule): CG_HOST_IP is
   # set as soon as the host resolves, before StartRecord.
