@@ -31,9 +31,16 @@ ci_run_newest_success_filter() {
 #   not, 2 = the artifact list could NOT be read (a gh/api failure). The caller must stop on 2: moving
 #   on to an older run there would be exactly the stale pick this lib exists to prevent.
 ci_run_has_artifact() {
-  local repo="$1" run="$2" art="$3" gh="${CI_RUN_RESOLVE_GH:-gh}" names
+  local repo="$1" run="$2" art="$3" gh="${CI_RUN_RESOLVE_GH:-gh}" names errf rc=0
+  errf="$(mktemp)" || return 2
   names="$("$gh" api "repos/$repo/actions/runs/$run/artifacts?per_page=100" \
-    --jq '.artifacts[] | select(.expired | not) | .name' </dev/null 2>/dev/null)" || return 2
+    --jq '.artifacts[] | select(.expired | not) | .name' </dev/null 2>"$errf")" || rc=2
+  if [ "$rc" -ne 0 ]; then
+    echo "ci-run-resolve: gh api (artifacts of run $run): $(tail -n 1 "$errf" 2>/dev/null)" >&2
+    rm -f "$errf"
+    return 2
+  fi
+  rm -f "$errf"
   printf '%s\n' "$names" | grep -qxF -- "$art" && return 0
   return 1
 }
@@ -45,13 +52,16 @@ ci_run_has_artifact() {
 #      it looks; the list is not status-filtered, so it must cover a streak of failed runs.
 ci_run_latest_success() {
   local repo="$1" branch="$2" workflow="$3" art="$4" limit="${5:-100}" gh="${CI_RUN_RESOLVE_GH:-gh}"
-  local lines id when sha rc
+  local lines id when sha rc errf
+  errf="$(mktemp)" || return 1
   lines="$("$gh" run list --repo "$repo" --branch "$branch" --workflow "$workflow" \
     --limit "$limit" --json databaseId,createdAt,conclusion,headSha \
-    --jq "$(ci_run_newest_success_filter)" 2>/dev/null)" || {
-    echo "ci-run-resolve: gh run list failed for $workflow on $branch ($repo)" >&2
+    --jq "$(ci_run_newest_success_filter)" 2>"$errf")" || {
+    echo "ci-run-resolve: gh run list failed for $workflow on $branch ($repo): $(tail -n 1 "$errf" 2>/dev/null)" >&2
+    rm -f "$errf"
     return 1
   }
+  rm -f "$errf"
   while read -r id when sha; do
     case "$id" in '' | *[!0-9]*) continue ;; esac
     rc=0
