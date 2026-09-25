@@ -764,6 +764,8 @@ fn relock_events_log_phase_evidence_940() {
         "tick_phase_ns=%llu",
         "anchor_ns=%llu",
         "sel_vs_newest_due=%lld",
+        // Issue 1367: whether this relock dropped a stale anchor (an arrival burst).
+        "stale_reset=%d",
     ] {
         assert!(
             squished.contains(field),
@@ -1125,9 +1127,11 @@ fn relock_selection_is_phase_anchored_not_newest_due_1003() {
     );
 
     // The stale-anchor self-heal: a BACKLOG relock that would shed nothing is proof the
-    // anchor cannot describe a queue this deep.
+    // anchor cannot describe a queue this deep. Issue 1367 widened the same guard to an anchor
+    // more than one canvas tick behind the configured phase (an arrival burst); the reset
+    // itself is unchanged. Wiring: tests/genlock_relock_stale_parity_1367.rs.
     assert!(
-        src.contains("if (sel_1003 == 0 && source->genlock_phase_anchor_ns != 0)"),
+        src.contains("if ((sel_1003 == 0 || stale_1367) && source->genlock_phase_anchor_ns != 0)"),
         "{OBS_SOURCE}: #1003 — the BACKLOG branch's stale-anchor self-heal is gone. Without \
          it a relock that sheds zero frames re-fires every tick (the branch pre-empts \
          STEADY, so the settle-back drain never runs either) — the useless-`relocks`-counter \

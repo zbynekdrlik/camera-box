@@ -591,6 +591,32 @@ pub fn relock_select_nearest(queue_ts: &[u64], wall_now_ns: u64, anchor_age_ns: 
     best
 }
 
+/// Issue 1367 — is the tracked phase anchor STALE for a BACKLOG relock?
+///
+/// `sel_anchor` is the index [`relock_select_nearest`] picks against the tracked anchor;
+/// `sel_configured` is the index it picks against the source's CONFIGURED latency
+/// (`relock_anchor_age_ns(0, latency_ms)`). Both index the same queue, oldest first. `n` is the
+/// source's measured integer rate multiple over the canvas (2 for a 60-into-30 ingest).
+///
+/// The anchor is FLOORED at the configured latency, so it only ever targets an OLDER (or the
+/// same) frame: `sel_anchor <= sel_configured`. The gap between the two is how far the
+/// remembered phase sits behind the configured one, in SOURCE frames. Up to `n` source frames is
+/// one canvas tick — ordinary arrival jitter, where the #1003 phase continuity must be kept. More
+/// than that means the anchor was sampled while frames were arriving LATE (an arrival burst): a
+/// relock that keeps it sheds only the frames that aged past it, a 60-into-30 source adds two
+/// frames per tick, and the depth never falls below the relock threshold — the branch fires
+/// every tick for minutes (live 25.9.2026 20:50:58: cam6 relocked 5028 times, ~300 ms late).
+///
+/// Returns `true` (drop the anchor and re-select against the configured latency) when the anchor
+/// pick is MORE than `n` source frames behind the configured pick. `n == 0` (an unmeasured
+/// multiple) counts as 1. An anchor pick at or after the configured pick is never stale.
+///
+/// Mirror of the C `genlock_relock_anchor_is_stale()` (obs-source.c) — keep both in lock-step.
+pub fn relock_anchor_is_stale(sel_anchor: usize, sel_configured: usize, n: u32) -> bool {
+    let _ = (sel_anchor, sel_configured, n);
+    false
+}
+
 /// #1161 — the fail-open MARGIN (ticks) the ACQUIRE bracketing gate ([`relock_acquire_should_hold`])
 /// adds on top of `ceil(reserve/interval)` before it force-acquires regardless of queue depth.
 /// `ceil(reserve/interval)` is how many render ticks a from-empty queue needs to deepen the OLDEST
@@ -3767,3 +3793,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "genlock_backlog_stale_relock_tests.rs"]
+mod stale_relock_tests;
