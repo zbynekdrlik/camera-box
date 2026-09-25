@@ -17,6 +17,11 @@ paths:
   - "tests/fixtures/strih_box_1361/*"
   - "scripts/lib/strih-drm-output.sh"
   - "tests/strih_drm_output_provision_1346.rs"
+  - "tests/strih_audio_quantum_1345.rs"
+  - "scripts/lib/remoteos-mcp.sh"
+  - "scripts/lib/obs-downstream-keyer.sh"
+  - "tests/fresh_install_gaps_1361.rs"
+  - "tests/remoteos_mcp_1361.rs"
 ---
 
 # strih-lx — the Linux notebook replacing the Windows strih PC (issue 1317)
@@ -530,6 +535,39 @@ capture node name against `wpctl status`, restart the operator PipeWire/WirePlum
 appear, and do the FOH-live level acceptance. Arena stays on the Windows PC (Spout has no Linux); its
 cg feed reaches the notebook over NDI (`RESOLUME-SNV (cg-obs)`).
 
+### The MiniFuse period + graph quantum 1024 (issue 1345, owner accepted 25.9.2026)
+
+The interkom became clean on 24.9.2026 only after two hand-made drop-ins. Step 12 now installs both:
+
+- `~/.config/wireplumber/wireplumber.conf.d/51-minifuse-output-period.conf`
+  (`strih_wireplumber_minifuse_output_period_conf`): the MiniFuse PLAYBACK node at
+  `period-size 1024, period-num 3, headroom 256`. At the default period 256 against the 1024 graph it
+  ran ~24 xruns/s, which was the buzz the operator heard.
+- `~/.config/pipewire/pipewire.conf.d/51-strih-quantum-1024.conf` (`strih_pipewire_quantum_conf`):
+  `default.clock.min-quantum = 1024`, so no client can pull the graph below the MiniFuse period.
+  The hub capture child's `--latency 256` did exactly that, and the cameraman sounded robotic. The hub
+  now asks 1024 too (`PW_CAT_RECORD_LATENCY_FRAMES = PW_GRAPH_BURST_FRAMES`).
+
+Rules for this pair:
+
+- Both renderers print the LIVE strih-lx text byte-for-byte, comment headers included (sha256
+  checked against the box). On the hand-fixed box, a re-run logs `unchanged`.
+- They are written by `obs_box_write_if_changed` (shared baseline lib): compare, rewrite only on a
+  content, mode or owner difference, log, one atomic rename. Use it for any new rendered config file
+  instead of a bare `>` redirect.
+- verify-strih item **9b** FAILs when either file is missing or differs from its renderer. This is
+  deliberately a hard FAIL, like every other provisioned-file check in verify-strih: a missing file is
+  a provisioning gap that brings the buzz back. It then
+  REPORTS the live graph quantum from `pw-metadata -n settings`, read in the operator session as root
+  like item 9, through the pure `strih_lx_graph_quantum_ok`:
+  - PASS when `clock.force-quantum` is 1024 (the running session's hand force), or when it is 0 and
+    `clock.min-quantum` is 1024 (the drop-in after a restart);
+  - NOTE otherwise. The drop-in applies only at the next PipeWire start, and the hand force does not
+    survive one;
+  - an unreadable session is never a pass.
+- The two files are box-independent constants, so the issue-1361 golden (fact-dependent renders
+  only) does not include them.
+
 ## CI — the strih FULL-build variant, with obs-browser + CEF (issue 1317)
 
 `linux-genlock.yml` has a `linux-genlock-build-strih` job (artifact
@@ -932,6 +970,90 @@ The five hand-patches that survived ONLY on the live box (a re-flash would rever
     **GOTCHA 1 — masking apport.service does NOT stop the popup on 26.04.** apport 2.34 ships `/usr/lib/systemd/system/systemd-coredump@.service.d/apport-coredump-hook.conf` = `OnSuccess=apport-coredump-hook@%i.service`, which runs `apport --from-systemd-coredump` and writes `/var/crash` regardless of `enabled=` or the apport.service mask — and installing systemd-coredump (the imag recipe) GUARANTEES that route. Mask the TEMPLATE (`systemctl mask apport-coredump-hook@.service` blocks every instance). The imag recipe (`setup-imag.sh` step 8) has the same gap — moot while imag-nb is returned to the owner (16.9.2026); port this template mask into setup-imag.sh if imag-nb is ever re-provisioned. Found by the lane review reading the live box, 23.9.2026.
 
     **GOTCHA 2 — the grant applies at the next REBOOT, not the next login.** OBS runs as the `--user` unit `strih-obs.service`, so it inherits its limits from `user@UID.service`, which LINGERS (step 13 enables linger) and got `pam_limits` (`/usr/lib/pam.d/systemd-user`) when it started at boot. Live 23.9.: grant file present, yet `user@1000` / OBS / `strih-obs.service` all at `Max realtime priority 0`. A logout/login does NOT restart a lingering manager; a reboot (allowed — strih-lx is not a cambox) or a restart of `user@UID` (ends the operator session) does. imag differs: it launches OBS in the autologin graphical session, whose own PAM applies. After the reboot confirm `genlock: render-tick thread set SCHED_FIFO` in the new OBS log (verify item 32 PASSes `ok-sched-fifo`); if it still EPERMs, read `Max realtime priority` in `/proc/<user@UID MainPID>/limits` — 0 there means pam_limits is not applied by the systemd-user PAM stack.
+
+## Fresh-install gaps — a fresh run reproduces the live box (issue 1361 slice, 25.9.2026)
+
+Four things existed only as hand fixes on strih-lx, so a fresh `setup-strih.sh` (the Poprad strih)
+would have produced a different box. Each is now provisioned at its source and graded:
+
+| Gap | setup | verify | lib |
+|---|---|---|---|
+| G1 `python3-websocket` (strih-obs-start.sh refuses to start OBS without it) | shared kiosk package install (step 11) | baseline row `websocket` (item 32) | `obs-box-kiosk.sh` / `obs-box-baseline-verify.sh` |
+| G2 remoteos-mcp in the `/opt/remoteos-mcp-venv` venv | step 10 (`remoteos_mcp_install "$DESKTOP_USER" desktop restart`) | item 8 (FAIL) | `scripts/lib/remoteos-mcp.sh` |
+| G3 Downstream Keyer 0.4.4 plugin | lettered step `4c` | item 35 (FAIL) | `scripts/lib/obs-downstream-keyer.sh` |
+| G4 Windows-strih text in the zero-loss restart mode | — | — | `strih_access_label` / `strih_obs_restart_hint` (`strih-platform.sh`) |
+
+**G2 — the ONE remoteos-mcp install for every Linux box** (setup-imag step 23 and setup-device STEP
+17b call the same function; `.claude/rules/imag-nb-provisioning.md` #858, `provisioning-scripts.md`):
+
+- Source: the project's GitHub API tarball of a PINNED commit, `remoteos_mcp_pinned_ref` = the commit
+  the live strih-lx venv runs (pip `direct_url` commit_id `8b4ce58`, read 25.9.2026). Pin-not-latest:
+  every strih-lx genlock deploy re-runs setup-strih, so an unpinned `main` would install whatever
+  upstream is on every deploy. Bump the pin on purpose (or `REMOTEOS_MCP_REF=<sha>` for one run).
+  `GH_TOKEN`, when set, is the `Authorization` header read by curl from STDIN (`curl -H @-`), never
+  an argv. The repo is public (checked 25.9.2026), so a run without the token fetches anonymously.
+  The tarball's top dir (`zbynekdrlik-remoteos-mcp-<sha7>`) is the source id, recorded in
+  `<venv>/.camera-box-source`.
+- Install: `python3 -m venv` (after `apt-get install python3-venv`), then the venv's own pip with the
+  project's `constraints.txt` (`PIP_CONSTRAINT`). Never the system python, never
+  `--break-system-packages`. pip runs under an `env -i` ALLOWLIST (PATH/HOME/LANG/TMPDIR plus the
+  proxy, CA-bundle and pip-index variables when set): it executes the build code of the source and of
+  every sdist dependency, so no GH_TOKEN, agent key or CAM_PW reaches it. HOME is `/root` when run as
+  root (a `sudo -E` run would hand pip the operator's). An unchanged source id with an
+  importable venv skips pip; a failed pip with an importable venv keeps it (WARNING, the marker stays,
+  the next run retries).
+- Files: `config.json` (the upstream key store) and the unit's `EnvironmentFile`
+  `/etc/remoteos-mcp/remoteos-mcp.env` (`REMOTEOS_AUTH_KEY=...`) are 0600; the unit is 0644. All are
+  compare-then-write. The unit is the live strih-lx unit with ONE change: the key left the
+  world-readable ExecStart (remoteos reads `REMOTEOS_AUTH_KEY` through click's `envvar`; checked on a
+  scratch venv: no key 401, the right key 200).
+- Key order: `REMOTEOS_MCP_AUTH_KEY`, else a legacy unit's `--auth-key` (the hand-made strih-lx unit
+  and the upstream installer both put it there, and it is the key the RUNNING service accepts), else
+  the EnvironmentFile, else `config.json`, else a fresh 32-char key. A differing `config.json` key is
+  a WARNING and follows the installed key. So re-running setup keeps the key dev1's `.mcp.json` holds.
+- Policy: `restart` (strih/imag) restarts only when the source, unit or key changed, else `start`,
+  then requires `/health` on :8092 AND an unauthenticated `POST /mcp` answering 401 (an empty
+  `REMOTEOS_AUTH_KEY` turns remoteos's auth OFF on a 0.0.0.0 full-shell agent); `enable-only` (cams)
+  never starts. Both compare the LITERAL `is-enabled` to `enabled`.
+- The unit's `User=`: strih/imag pass the desktop user; setup-device passes
+  `remoteos_mcp_headless_user` = the EXISTING unit's `User=` first (neither a sudo re-run nor the
+  provision skill's systemd-run re-run as root moves a cam's MCP shell to another account), else
+  SUDO_USER on a fresh box (the upstream installer's rule), else root. verify-device `(ab)` also requires
+  the unauthenticated `/mcp` probe (curl on the cam) to answer 401.
+- A failed fetch with a working venv keeps it (WARNING) and still refreshes the unit/key files; with
+  nothing installed it fails. The strih-lx genlock deploy re-runs setup-strih, so a GitHub outage never
+  breaks a deploy of a box that already has the venv.
+- verify item 8 (`remoteos_mcp_verdict`): the venv ExecStart, no `--auth-key` in the unit, the
+  EnvironmentFile line, env file `600 root`, the venv imports remoteos, enabled + active, and an
+  unauthenticated `POST /mcp` answering 401 (runs as a non-root operator: the config dir is 0755, the
+  key files 0600). strih-lx itself FAILs item 8 until step 10 re-runs once (its hand unit still
+  carries the key in ExecStart).
+- The key files are written compare-then-write on content, mode AND owner (the
+  `obs_box_write_if_changed` rule); the lib keeps its own small writer because setup-device.sh does
+  not source the obs-box baseline.
+
+- **Proving a change to the lib without the rig:** every path is an env seam (`REMOTEOS_MCP_VENV`,
+  `REMOTEOS_MCP_CONFIG_DIR`, `REMOTEOS_MCP_UNIT_PATH`, `REMOTEOS_MCP_HEALTH_SLEEP`), so a script that
+  puts stub `systemctl`/`apt-get` on PATH and points the seams at a scratch dir runs the REAL fetch +
+  `python3 -m venv` + pip as a normal user (~50 s), then a second run must log every file `unchanged`.
+  Start the scratch venv's `python -m remoteos --port <free port>` with the env file sourced to check
+  auth (no key 401, right key 200). The Rust tests' fake venv python must log next to the rig and take
+  its failure flag from a FILE: pip runs under `env -i`, so the test's env vars never reach it.
+
+**G3 — the Downstream Keyer plugin.** The pinned upstream release asset
+`downstream-keyer-0.4.4-x86_64-linux-gnu.deb` (sha256 = its GitHub release digest) carries the
+exact `.so` strih-lx loads (sha256 `9304d665…08be5`, compared 25.9.2026). The .deb `Depends:
+obs-studio`, which the tarball-installed genlock OBS never satisfies, so step 4c EXTRACTS it
+(`dpkg-deb -x`), checks the plugin's own hash too, and installs only the `.so` + its `locale/` into
+`/usr/lib/x86_64-linux-gnu/obs-plugins` + `/usr/share/obs/obs-plugins/downstream-keyer`. A plugin
+that already has the pinned hash downloads nothing. The bundle install (`cp -a` into the prefix)
+never removes it, and the step-4 prune list does not name it. The run fails loud on either hash
+mismatch. The smaller surface than a CI plugin build (no new CMake/Qt step). To bump: repin
+`obs_dsk_version` / `_deb_url` / `_deb_sha256` / `_so_sha256` together.
+
+**verify placement:** item 35 sits BEFORE item 34. `tests/python/test_ndi_discovery_1342.py` RUNS
+the text from `# 34) NDI discovery` up to `# 32) the shared OBS-box` with only `ndi-discovery.sh`
+sourced, so any item placed between 34 and 32 would break it; and nothing may follow item 33.
 
 ## 22.9.2026 live session — GPU, projector, Janus, NDI naming (issue 1352 + the #1317 findings comment)
 

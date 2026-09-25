@@ -18,7 +18,8 @@
 # affinity (AFFINITY-ONLY core reservation, no kernel isolcpus/nohz_full), gpu (PRIME nvidia-primary on
 # a dGPU box, the iGPU max-frequency pin otherwise), dejitter (oomd + off-hours + OBS ProcessPriority=High
 # + the user-unit masks), crash (no operator crash popup), kiosk (lightdm + openbox installed, autologin
-# -> openbox, no GNOME),
+# -> openbox, no GNOME), websocket (python3-websocket for the OBS seeders), brightness (the kiosk
+# panel-brightness keys),
 # autostart (the openbox autostart contract), power (thermald purged + PL1 envelope units), touchpad.
 # Fail-closed: a fact the gather could not read grades FAIL ("unreadable"), never a silent pass.
 
@@ -129,7 +130,8 @@ obs_box_baseline_gather_snippet() {
         return 1
     fi
     printf 'BOX=%q\nU=%q\nUNIT=%q\n' "$box" "$user" "$unit"
-    declare -f obs_box_has_discrete_nvidia obs_box_crash_popup_units obs_box_dejitter_user_units
+    declare -f obs_box_has_discrete_nvidia obs_box_crash_popup_units obs_box_dejitter_user_units \
+        obs_box_brightness_helper_text obs_box_backlight_udev_rule obs_box_brightness_keybinds_xml
     cat <<'GATHER_EOF'
 set +e
 HOMEDIR="$(getent passwd "$U" 2>/dev/null | cut -d: -f6)"; [ -n "$HOMEDIR" ] || HOMEDIR="/home/$U"
@@ -181,6 +183,25 @@ _al="/etc/lightdm/lightdm.conf.d/50-${BOX}-autologin.conf"
 echo "autologin=$(if grep -qxF "autologin-user=${U}" "$_al" 2>/dev/null && grep -qxF 'autologin-session=openbox' "$_al" 2>/dev/null; then echo 1; else echo 0; fi)"
 echo "gdm3=$(pkg gdm3)"
 echo "gnome_shell=$(pkg gnome-shell)"
+echo "pyws=$(pkg python3-websocket)"
+echo "pyws_import=$(if python3 -c 'from websocket import create_connection' >/dev/null 2>&1; then echo 1; else echo 0; fi)"
+_bh=/usr/local/bin/obs-box-brightness
+echo "brightness_helper=$(if [ -x "$_bh" ] && [ -n "$(obs_box_brightness_helper_text)" ] && cmp -s "$_bh" <(obs_box_brightness_helper_text); then echo 1; else echo 0; fi)"
+_br=/etc/udev/rules.d/90-obs-box-backlight.rules
+echo "brightness_rule=$(if [ -n "$(obs_box_backlight_udev_rule)" ] && cmp -s "$_br" <(obs_box_backlight_udev_rule); then echo 1; else echo 0; fi)"
+_rcx="${HOMEDIR}/.config/openbox/rc.xml"; [ -f "$_rcx" ] || _rcx=/etc/xdg/openbox/rc.xml
+_bk_want=0; _bk_have=0
+while IFS= read -r _kl; do
+    _kl="${_kl#"${_kl%%[![:space:]]*}"}"
+    case "$_kl" in
+        '<keybind'*)
+            _bk_want=$((_bk_want + 1))
+            if grep -qF -- "$_kl" "$_rcx" 2>/dev/null; then _bk_have=$((_bk_have + 1)); fi
+            ;;
+    esac
+done < <(obs_box_brightness_keybinds_xml)
+echo "brightness_keys=$(if [ "$_bk_want" -ge 1 ] && [ "$_bk_have" = "$_bk_want" ]; then echo 1; else echo 0; fi)"
+echo "brightness_group=$(case " $(id -nG "$U" 2>/dev/null) " in *" video "*) echo 1 ;; *) echo 0 ;; esac)"
 _as="${HOMEDIR}/.config/openbox/autostart"
 echo "autostart_exec=$(if [ -x "$_as" ]; then echo 1; else echo 0; fi)"
 echo "autostart_xset=$(if grep -qF 'xset s off -dpms s noblank' "$_as" 2>/dev/null; then echo 1; else echo 0; fi)"
@@ -223,7 +244,7 @@ obs_box_baseline_verdict() {
     }
     _obs_box_f() { _obs_box_fact "$1" "$facts"; }
     if [ "$(_obs_box_f gather_done)" != 1 ]; then
-        for v in net perf nosleep boot kernel affinity gpu dejitter crash kiosk autostart power touchpad; do
+        for v in net perf nosleep boot kernel affinity gpu dejitter crash kiosk websocket brightness autostart power touchpad; do
             _obs_box_item "$v" 0 "unreadable (the baseline gather did not complete)"
         done
         return 1
@@ -288,6 +309,18 @@ obs_box_baseline_verdict() {
         && [ -n "$(_obs_box_f dm)" ] && [ "$(_obs_box_f dm)" = "$(_obs_box_f dm_lightdm)" ] && [ "$(_obs_box_f autologin)" = 1 ] \
         && [ "$(_obs_box_f gdm3)" != "install ok installed" ] && [ "$(_obs_box_f gnome_shell)" != "install ok installed" ] && ok=1
     _obs_box_item kiosk "$ok" "lightdm='$(_obs_box_f lightdm)' openbox='$(_obs_box_f openbox)' display-manager=$(_obs_box_f dm) autologin->openbox=$(_obs_box_f autologin) gdm3='$(_obs_box_f gdm3)' gnome-shell='$(_obs_box_f gnome_shell)'"
+    # websocket -- python3-websocket installed AND importable by the system python3 (issue 1361): the
+    # strih/imag OBS launchers run a websocket scene seeder and strih-obs-start.sh refuses to start OBS
+    # without it
+    ok=0; [ "$(_obs_box_f pyws)" = "install ok installed" ] && [ "$(_obs_box_f pyws_import)" = 1 ] && ok=1
+    _obs_box_item websocket "$ok" "python3-websocket='$(_obs_box_f pyws)' importable=$(_obs_box_f pyws_import)"
+    # brightness -- the kiosk panel-brightness facet (issue 1357): the helper executable AND identical to
+    # its renderer, the backlight udev rule identical to its renderer, every keybind line of the renderer in
+    # the rc.xml openbox loads (the user's, else the stock one; zero renderer lines is a FAIL, never a pass),
+    # the desktop user in `video`
+    ok=0; [ "$(_obs_box_f brightness_helper)" = 1 ] && [ "$(_obs_box_f brightness_rule)" = 1 ] \
+        && [ "$(_obs_box_f brightness_keys)" = 1 ] && [ "$(_obs_box_f brightness_group)" = 1 ] && ok=1
+    _obs_box_item brightness "$ok" "helper=$(_obs_box_f brightness_helper) udev-rule=$(_obs_box_f brightness_rule) rc.xml-keybinds=$(_obs_box_f brightness_keys) video-group=$(_obs_box_f brightness_group)"
     # autostart -- the openbox autostart contract: executable, never-blank, sentinel clear, starts the OBS unit
     ok=0; [ "$(_obs_box_f autostart_exec)" = 1 ] && [ "$(_obs_box_f autostart_xset)" = 1 ] && [ "$(_obs_box_f autostart_sentinel)" = 1 ] \
         && [ "$(_obs_box_f autostart_unit)" = 1 ] && ok=1

@@ -294,6 +294,10 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # 151, issue 1302) the burn toggle is read back from SongPlayer's own health endpoint.
 # shellcheck source=scripts/lib/cg-chain-e2e.sh
 . "$HERE/lib/cg-chain-e2e.sh"
+# Issue 1367: after the merge, export the classified slots that have no pixel proof as PNGs ON the
+# box holding the recording (the verdict's own decode indexing), before the report + cleanup plan.
+# shellcheck source=scripts/lib/missing-slot-pixels.sh
+. "$HERE/lib/missing-slot-pixels.sh"
 # #707 B1 (freeze+jump discriminator, second prong): the per-cambox TCP-transport + NIC sampler.
 # Pure REMOTE-COMMAND-STRING builders (no ssh at source time) — launched in [5b/8], harvested in
 # [7c/8]. See the lib header for WHY (record Send-Q/retrans/NIC counters during the window so the
@@ -765,6 +769,16 @@ echo "    bkshading-relay pause (cam2/painter, $PAINTER_IP): was-active=$BKSH_PA
   bkshading_e2e_pause_restore cam2 "$PAINTER_IP" "$CAM_PW" "${BKSH_PAUSE_PAINTER_WAS_ACTIVE:-0}"
 ' EXIT HUP INT TERM
 
+# issue 1371: read + ENFORCE the ONE test camera's shutter/ISO over the bkshading USB-PTP path
+# (gphoto2 on the cambox holding the camera's USB-C) against scripts/camera-test-baseline.json.
+# Runs AFTER the relay pause above (exactly one gphoto2 user) and after its temporary restore
+# handler (an abort here still restores the relays). The whole step lives in the sourced lib (the
+# sourced-helper pattern) + the pure scripts/camera_test_settings.py; a bare statement so its
+# exit propagates. Absent camera + unpinned baseline = a loud report-only UNVERIFIED (issue 1350).
+# shellcheck source=scripts/lib/camera-test-settings.sh
+. "$HERE/lib/camera-test-settings.sh"
+camera_test_settings_enforce "$HERE" "$STRIH" "$STREAM" "$CAM_PW" "$CAMERA_NAME=$CAM1_IP" "cam2=$PAINTER_IP"
+
 echo "[0/8] reachability preflight ($CAMERA_NAME source, cam2 painter, strih, stream, imag — #462)"
 for hp in "$CAMERA_NAME=$CAM1_IP" "cam2(painter)=$PAINTER_IP" "strih=$STRIH" "stream=$STREAM" "imag=$IMAG_IP"; do
   _name="${hp%%=*}"; _ip="${hp#*=}"
@@ -1070,6 +1084,23 @@ if [ -z "$AUTO_WIN_MANIFEST" ]; then
   AUTO_WIN_MANIFEST="$(manifest_autosource_fetch "$VERSION_GATE_REPO" windows-genlock-fast.yml obs-genlock-fast-dll \
     "$(genlock_build_sha_state_read "$VERSION_STRIH_STATE")" "$OUTDIR/win-fast-manifest.json")"
 fi
+# #1346: the two Windows CI workflows are not byte-reproducible -- for ONE marker sha the fast
+# obs.dll and the FULL windows-genlock bundle's bin/64bit/obs.dll differ, so the fast manifest alone
+# refused a correct full-bundle deploy. Also fetch the full bundle's manifest of the same build and
+# hand it to the gate as the ALTERNATE (a box is OK on either entry, DRIFT on neither). Skipped when
+# the operator pinned VERSION_GATE_MANIFEST (a pin is never widened); a failed fetch leaves it empty,
+# so the fast manifest is judged exactly as before. Keyed on strih's marker like the fast fetch (the
+# cross-box parity facet holds strih and stream on one build). Fetch helper (per-run cache + a
+# timeout on every gh call): scripts/lib/manifest-autosource.sh.
+AUTO_WIN_ALT_MANIFEST=""
+[ -z "${VERSION_GATE_MANIFEST:-}" ] && AUTO_WIN_ALT_MANIFEST="$(manifest_autosource_fetch_win_full "$VERSION_GATE_REPO" \
+  "$(genlock_build_sha_state_read "$VERSION_STRIH_STATE")" "$OUTDIR/win-full-manifest.json")"
+# Main ruling (issue comment 5829099220): the full manifest is judged ALONE only for a full-only build
+# (no successful fast run at the marker sha); a fast run whose manifest fetch failed is a fetch outage
+# and the byte pin is omitted for this run with a loud WARNING, never a refusal. An operator-pinned
+# VERSION_GATE_MANIFEST passes through unchanged (no alternate was fetched, no lookup is made).
+{ IFS= read -r AUTO_WIN_MANIFEST; IFS= read -r AUTO_WIN_ALT_MANIFEST; } < <(win_manifest_pair_resolve "$VERSION_GATE_REPO" \
+  "$(genlock_build_sha_state_read "$VERSION_STRIH_STATE")" "$AUTO_WIN_MANIFEST" "$AUTO_WIN_ALT_MANIFEST")
 # imag linux .so byte gather (ssh) + its own CI manifest, keyed on imag's marker SHA. The manifest is
 # fetched only when the .so gather actually returned SHAs, so a failed gather leaves the facet dormant.
 AUTO_IMAG_MANIFEST=""
@@ -1101,6 +1132,7 @@ fi
 if [ "$IMAG_OFFLINE_ACKED" = 1 ]; then
   "$HERE/version-integrity-gate.sh" \
     ${AUTO_WIN_MANIFEST:+--manifest "$AUTO_WIN_MANIFEST"} \
+    ${AUTO_WIN_ALT_MANIFEST:+--alt-manifest "$AUTO_WIN_ALT_MANIFEST"} \
     --win-state "strih=$VERSION_STRIH_STATE" \
     --win-state "stream=$VERSION_STREAM_STATE" \
     --imag-acked-offline "$IMAG_OFFLINE_ACK_REASON" \
@@ -1108,6 +1140,7 @@ if [ "$IMAG_OFFLINE_ACKED" = 1 ]; then
 else
 "$HERE/version-integrity-gate.sh" \
   ${AUTO_WIN_MANIFEST:+--manifest "$AUTO_WIN_MANIFEST"} \
+  ${AUTO_WIN_ALT_MANIFEST:+--alt-manifest "$AUTO_WIN_ALT_MANIFEST"} \
   --win-state "strih=$VERSION_STRIH_STATE" \
   --win-state "stream=$VERSION_STREAM_STATE" \
   --genlock-sha "imag=$IMAG_GENLOCK_SHA" \
@@ -2401,6 +2434,9 @@ CG_RECORDING="$OUTDIR/cg-obs-recording.mkv"
 # OUTDIR; CG_HOST_RECORDING_PATH is the cg OBS StopRecord host path the default pull scps.
 CG_CHAIN_STATE_DIR="$OUTDIR"
 CG_HOST_RECORDING_PATH=""
+# Issue 1302 slice 2: the strih/stream extracts decode for the SongPlayer + cg burns too, only when
+# CG_CHAIN=1 (empty on a normal run, so their argv stays byte-identical).
+CG_CHAIN_BURN_FLAG="$(cg_chain_extract_burn_flag)"
 # #286 ALL_CAMBOX — strih's OWN render-time burn (911002) must be present on WHICHEVER strih
 # NDI input the sweep currently has cut into program, not just the single default
 # STRIH_PROG_SOURCE (cam1's mapped input under the plain single-camera path). Without this,
@@ -4025,7 +4061,7 @@ if [ "${ZERO_LOSS_RESTART_GATE:-0}" = "1" ]; then
     # `harness_recording_e2e_paths.rs`'s `.find("recording-verdict-on-strih.sh\" \\")` anchor
     # keeps landing on the NORMAL [8/8a] invocation (the one it actually guards), not this
     # earlier restart-survival-mode call to the same planner.
-    echo "    --- [$label 8a] extract the STRIH partial ON the strih box (win-strih), in place ---"
+    echo "    --- [$label 8a] extract the STRIH partial ON the strih box ($(strih_access_label "$STRIH")), in place ---"
     "$HERE/recording-verdict-on-strih.sh" --verdict-exe "$VERDICT_EXE_WIN" --out-dir "$OUT_DIR_WIN" \
       --strih-rec "$strih_rec_win" \
       -- --extract-partial strih --strih "$strih_rec_win" --capture-fps "$STRIH_CAPTURE_FPS" \
@@ -4067,7 +4103,7 @@ if [ "${ZERO_LOSS_RESTART_GATE:-0}" = "1" ]; then
 
   echo "[Z2/Z3] #109 restart — OPERATOR/SUPERVISOR ACTION (this script does NOT execute it)"
   echo "    Perform the restart under test now:"
-  echo "      OBS restart: stop then start OBS on strih AND stream (scripts/launch-obs-genlock.sh),"
+  echo "      OBS restart: restart OBS on strih ($(strih_obs_restart_hint "$STRIH")) AND stream (scripts/launch-obs-genlock.sh),"
   echo "      PC restart:  reboot the strih/stream host(s) (approval-gated — get the user's explicit"
   echo "                   go-ahead first; this dev rig's reboot is standing-approved WORK, never"
   echo "                   auto-executed by this unattended script) — then relaunch OBS the same way."
@@ -4117,8 +4153,8 @@ if [ "${ZERO_LOSS_RESTART_GATE:-0}" = "1" ]; then
         ;;
     esac
   else
-    echo "    [zero-loss-restart-gate] both verdict JSONs not yet on dev1 — the win-strih/win-stream-snv"
-    echo "    holder must run the decode+merge plans above for BOTH passes, then run the gate command"
+    echo "    [zero-loss-restart-gate] both verdict JSONs not yet on dev1 — the strih ($(strih_access_label "$STRIH"))"
+    echo "    and stream (win-stream-snv) holders must run the decode+merge plans above for BOTH passes, then run the gate command"
     echo "    printed above by hand."
   fi
   exit "$GATE"
@@ -5299,6 +5335,7 @@ if [ "$VERDICT_ON_STREAM" = "1" ]; then
         --strih-rec "$STRIH_HOST_PATH" \
         -- --extract-partial strih --strih "$STRIH_HOST_PATH" --capture-fps "$STRIH_CAPTURE_FPS" \
            --burn-cam1-run-id "$BURN_CAM1_RUN_ID" --burn-strih-run-id "$BURN_STRIH_RUN_ID" \
+           ${CG_CHAIN_BURN_FLAG:+"$CG_CHAIN_BURN_FLAG"} \
            $CG --out "$STRIH_LX_REMOTE_OUT_DIR/strih-partial-${RUN_ID}.json"
       return
     fi
@@ -5307,6 +5344,7 @@ if [ "$VERDICT_ON_STREAM" = "1" ]; then
       "${EXEC_STRIH_ARGS[@]}" \
       -- --extract-partial strih --strih "$STRIH_REC_WIN" --capture-fps "$STRIH_CAPTURE_FPS" \
          --burn-cam1-run-id "$BURN_CAM1_RUN_ID" --burn-strih-run-id "$BURN_STRIH_RUN_ID" \
+         ${CG_CHAIN_BURN_FLAG:+"$CG_CHAIN_BURN_FLAG"} \
          $CG --out "$STRIH_PARTIAL_WIN"
   }
   STRIH_EXTRACT_PID=""
@@ -5390,6 +5428,7 @@ if [ "$VERDICT_ON_STREAM" = "1" ]; then
          --burn-stream-run-id "$BURN_STREAM_RUN_ID" \
          $_av_marker_args \
          $_switch_schedule_args \
+         ${CG_CHAIN_BURN_FLAG:+"$CG_CHAIN_BURN_FLAG"} \
          $CG --out "$STREAM_PARTIAL_WIN"
   }
   STREAM_EXTRACT_PID=""
@@ -5533,6 +5572,9 @@ continuing WITHOUT the imag partial; the merge below will omit --merge-partials 
   # section. Only when CG_CHAIN=1 AND the pull above actually produced the file — otherwise the
   # merge runs exactly as today (no --cg, no cg_chain). Never changes the camera-chain pass verdict.
   if cg_chain_enabled && [ -f "$CG_RECORDING" ]; then MERGE_ARGS+=(--cg "$CG_RECORDING"); fi
+  # Issue 1302 slice 2: the CG_CHAIN burn flag (matching the extracts) + this run's CG window, so the
+  # strih/stream cg_chain hops are judged only inside it. A no-op unless CG_CHAIN=1.
+  cg_chain_merge_args_append
   if [ -f "$PAINTER_CSV" ]; then MERGE_ARGS+=(--painter "$PAINTER_CSV"); fi
   if [ -f "$CAM1_CAPTURE_STATS" ]; then MERGE_ARGS+=(--cam1-capture-stats "$CAM1_CAPTURE_STATS"); fi
   # #1003 review finding 2: raise the LIVE #1035 cam->strih p99 bound by the marker camera's pin
@@ -5687,6 +5729,12 @@ continuing WITHOUT the imag partial; the merge below will omit --merge-partials 
     # and the composer's `[ -s ]` guard omits the section; it NEVER touches $GATE.
     GENLOCK_AUDIT_JSON="$OUTDIR/genlock-audit-${RUN_ID}.json"
     genlock_audit_snapshot_compute "$OUTDIR/genlock-audit-before-${RUN_ID}.txt" "$OUTDIR/genlock-audit-after-${RUN_ID}.txt" "$GENLOCK_AUDIT_JSON" || true
+    # Issue 1367: PNG proof of the classified slots the merge left without one ($OUTDIR/<node>-missing/,
+    # the report reads it). Best-effort: never changes $GATE. Same recording paths as the extracts.
+    _msp_strih_os="$(strih_platform "$STRIH")"
+    _msp_strih_rec="${STRIH_HOST_PATH:-}"
+    if [ "$_msp_strih_os" != linux ]; then _msp_strih_rec="$STRIH_REC_WIN"; fi
+    missing_slot_pixels_run "$REPORT_JSON" "$OUTDIR" "$RUN_ID" "$STRIH" "$_msp_strih_os" "$_msp_strih_rec" "$STREAM" "$STREAM_REC_WIN" "$OUT_DIR_WIN" || true
     echo "    [8/8f] #711: Discord full-report (fail-open — never affects \$GATE below)"
     e2e_discord_report_send "$REPORT_JSON" "$RUN_ID" "$GATE" "$DURATION" "$PINS_JSON" "$MV_SKEW_JSON" "$GENLOCK_AUDIT_JSON"
     echo "    --- [8/8e] cleanup plan (JSON secured at $REPORT_JSON) ---"

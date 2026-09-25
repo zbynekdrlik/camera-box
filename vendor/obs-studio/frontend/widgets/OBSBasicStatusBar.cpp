@@ -34,10 +34,10 @@ static constexpr float badThreshold = 1.0f;
  * and renders the verdict.
  *
  * camera-box #1299 Part 4 + #1357 scope C: the qpc_drift term is the wall STEP only, NOT the
- * cumulative wall-vs-QPC offset (it grows ~50 ms/h on a dantesync-disciplined Windows box by design and
+ * cumulative wall-vs-QPC offset (it grew ~50 ms/h on a dantesync-disciplined Windows box before issue 1372 and
  * false-paged the whole fleet overnight 15./16.9.) and NOT a rate: on Linux CLOCK_MONOTONIC is
- * kernel-disciplined, so the measured rate is 0 by construction, while on Windows it is the free QPC
- * crystal — the removed rate-vs-instantaneous-slew check meant a different thing per box and
+ * kernel-disciplined, so the measured rate is 0 by construction, while on Windows it was the free QPC
+ * crystal (since issue 1372 the Windows os_gettime_ns runs at the disciplined rate too) — the removed rate-vs-instantaneous-slew check meant a different thing per box and
  * false-DEGRADED both (28 samples on strih-lx, 4 on stream, 24.9.2026, none a step). We DEGRADE only on
  * a single-sample STEP > one 30 fps frame (GENLOCK_QPC_STEP_BOUND_MS); the pure decision is
  * genlock_qpc_drift_beyond_bound in GenlockLockState.hpp. The windowed rate (GENLOCK_QPC_WINDOW_S is
@@ -1146,7 +1146,9 @@ void OBSBasicStatusBar::UpdateGenlockLabel()
 	 * monotonic timestamp; prune the ring to GENLOCK_QPC_WINDOW_S. Derive the drift delta + elapsed
 	 * span across the window (report-only rate telemetry) and the largest single-sample STEP within
 	 * it, and ask the parity-gated pure decision whether the wall STEPPED by more than one frame — the
-	 * one clock hazard, the same on every box. A steady rate (any box) never pages. */
+	 * one clock hazard, the same on every box. A steady rate (any box) never pages. qpc_expected_ppm
+	 * (f_ptp + f_phase) described the free-crystal Windows clock; since issue 1372 the measured rate is
+	 * ~0 on Windows too, so it is report-only context, not an expectation. */
 	const double qpc_expected_ppm = clock_present ? (genlockClockFptpPpm + genlockClockFphasePpm) : 0.0;
 	if (scan.any_input)
 		genlockQpcHistory.emplace_back(now_ms, scan.qpc_signed_ms);

@@ -552,9 +552,42 @@ static inline void clear_audio_output_buf(obs_source_t *source, struct obs_core_
 	}
 }
 
+/* camera-box issue 1367 (the FOH-click report, 25.9.2026: the obs-vban raw-audio output on resolume
+ * sent with 308-378 ms gaps while the recording was clean) -- an audio-thread STALL probe. Every mixer
+ * tick records the gap since the previous tick's entry and its own duration; the 60 s #800 dump logs
+ * the window maxima on their own `audio-stall #1367:` line (a marker no other audio/genlock line
+ * contains) and resets them. A healthy thread shows tick_gap_max_ms near one tick (21.3 ms at 48 kHz)
+ * and ticks_over=0 (gaps over 1.5 ticks). Audio thread only (audio_callback), so plain statics. */
+static uint64_t audio_stall_prev_entry_ns = 0;
+static uint64_t audio_stall_gap_max_ns = 0;
+static uint64_t audio_stall_busy_max_ns = 0;
+static uint64_t audio_stall_ticks = 0;
+static uint64_t audio_stall_ticks_over = 0;
+
+static void audio_stall_probe_entry(uint64_t entry_ns, uint64_t tick_ns)
+{
+	if (audio_stall_prev_entry_ns != 0 && entry_ns > audio_stall_prev_entry_ns) {
+		const uint64_t gap = entry_ns - audio_stall_prev_entry_ns;
+		if (gap > audio_stall_gap_max_ns)
+			audio_stall_gap_max_ns = gap;
+		if (gap > tick_ns + tick_ns / 2)
+			audio_stall_ticks_over++;
+	}
+	audio_stall_prev_entry_ns = entry_ns;
+	audio_stall_ticks++;
+}
+
+static void audio_stall_probe_exit(uint64_t entry_ns)
+{
+	const uint64_t now = os_gettime_ns();
+	if (now > entry_ns && now - entry_ns > audio_stall_busy_max_ns)
+		audio_stall_busy_max_ns = now - entry_ns;
+}
+
 bool audio_callback(void *param, uint64_t start_ts_in, uint64_t end_ts_in, uint64_t *out_ts, uint32_t mixers,
 		    struct audio_output_data *mixes)
 {
+	const uint64_t stall_entry_ns = os_gettime_ns();
 	struct obs_core_data *data = &obs->data;
 	struct obs_core_audio *audio = &obs->audio;
 	struct obs_source *source;
@@ -563,6 +596,8 @@ bool audio_callback(void *param, uint64_t start_ts_in, uint64_t end_ts_in, uint6
 	struct ts_info ts = {start_ts_in, end_ts_in};
 	size_t audio_size;
 	uint64_t min_ts;
+
+	audio_stall_probe_entry(stall_entry_ns, audio_frames_to_ns(sample_rate, AUDIO_OUTPUT_FRAMES));
 
 	da_resize(audio->render_order, 0);
 	da_resize(audio->root_nodes, 0);
@@ -686,6 +721,17 @@ bool audio_callback(void *param, uint64_t start_ts_in, uint64_t end_ts_in, uint6
 			     (int)(audio->total_buffering_ticks * AUDIO_OUTPUT_FRAMES * 1000 / sample_rate),
 			     (int)audio->total_buffering_ticks, (int)audio->max_buffering_ticks,
 			     buffering_name ? buffering_name : "-");
+			/* camera-box issue 1367: the audio-thread stall probe's window (see above), then reset. */
+			blog(LOG_INFO,
+			     "audio-stall #1367: tick_gap_max_ms=%.1f callback_max_ms=%.1f ticks=%llu ticks_over=%llu "
+			     "tick_ms=%.1f",
+			     (double)audio_stall_gap_max_ns / 1e6, (double)audio_stall_busy_max_ns / 1e6,
+			     (unsigned long long)audio_stall_ticks, (unsigned long long)audio_stall_ticks_over,
+			     (double)audio_frames_to_ns(sample_rate, AUDIO_OUTPUT_FRAMES) / 1e6);
+			audio_stall_gap_max_ns = 0;
+			audio_stall_busy_max_ns = 0;
+			audio_stall_ticks = 0;
+			audio_stall_ticks_over = 0;
 			pthread_mutex_lock(&data->audio_sources_mutex);
 			struct obs_source *tsrc = data->first_audio_source;
 			while (tsrc) {
@@ -761,11 +807,13 @@ bool audio_callback(void *param, uint64_t start_ts_in, uint64_t end_ts_in, uint6
 
 	if (audio->buffering_wait_ticks) {
 		audio->buffering_wait_ticks--;
+		audio_stall_probe_exit(stall_entry_ns);
 		return false;
 	}
 
 	execute_audio_tasks();
 
 	UNUSED_PARAMETER(param);
+	audio_stall_probe_exit(stall_entry_ns);
 	return true;
 }

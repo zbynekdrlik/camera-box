@@ -41,13 +41,16 @@ HUB = {
 }
 
 # The Janus audiobridge edge config emitted into the `[janus]` table (issue 1345 M3a). The `phones`
-# participant is carried over the Janus audiobridge room as a plain-RTP PCMU participant. The room
+# participant is carried over the Janus audiobridge room as a plain-RTP participant. The room
 # SECRET is never inlined here — the hub reads it from the 0600 `room_secret_file` at start.
+# `codec` = "opus" (issue 1345, 25.9.2026): Opus 48 kHz mono, 20 ms, in-band FEC, sent on the hub's
+# own 20 ms clock; "pcmu" (G.711 µ-law) stays selectable.
 JANUS = {
     "api_url": "http://127.0.0.1:8088/janus",
     "room": 1000,
     "room_secret_file": "/etc/intercom-hub/janus-room.secret",
     "rtp_bind": "0.0.0.0:6990",
+    "codec": "opus",
 }
 
 # The Interkom picture (MJPEG) config emitted into the `[video]` table (issue 1345 M3c). The hub
@@ -94,11 +97,11 @@ _MINIFUSE_CAPTURE_NODE = "alsa_input.usb-ARTURIA_MiniFuse_4-00.pro-input-0"
 # to FL/FR/RL/RR and never lands on the AUX ports).
 _MINIFUSE_PLAYBACK_NODE = "alsa_output.usb-ARTURIA_MiniFuse_4-00.pro-output-0"
 
-# issue 1345 (24.9.2026): the talkback makeup gain, in dB, on every cutters -> phones and
-# cutters -> camN point. The operator's MiniFuse talkback reached the hub at about -68 dBFS with no
-# makeup gain. Target: speech at -20 to -12 dBFS (the owner also raises the MiniFuse preamp). ONE
-# constant, added to the VB-Matrix point gain. Never hand-edit the generated TOML to tune it.
-TALKBACK_MAKEUP_DB = 12.0
+# issue 1345: the talkback makeup gain, in dB, on every cutters -> phones and cutters -> camN point.
+# ONE constant, added to the VB-Matrix point gain. Never hand-edit the generated TOML to tune it.
+# Owner ruling 24.9.2026 ("nemal si menit hlasitosti na kamerach"): 0 dB -- the +12 dB tried that
+# day put noise into the cameramen's headsets; the talkback level is set on the MiniFuse preamp.
+TALKBACK_MAKEUP_DB = 0.0
 
 _TALKBACK_DST_ROLES = ("cambox", "phones")
 
@@ -303,13 +306,14 @@ def render(model):
     out.append(f'block_frames = {hub["block_frames"]}')
     out.append("")
 
-    # The Janus audiobridge edge (issue 1345 M3a) — the phones participant's plain-RTP PCMU leg. The
+    # The Janus audiobridge edge (issue 1345 M3a) — the phones participant's plain-RTP leg. The
     # room secret is NEVER inlined; the hub reads it from `room_secret_file` (0600) at start.
     out.append("[janus]")
     out.append(f'api_url = "{JANUS["api_url"]}"')
     out.append(f'room = {JANUS["room"]}')
     out.append(f'room_secret_file = "{JANUS["room_secret_file"]}"')
     out.append(f'rtp_bind = "{JANUS["rtp_bind"]}"')
+    out.append(f'codec = "{JANUS["codec"]}"')
     out.append("")
 
     # The Interkom picture (issue 1345 M3c) — the NDI low-bandwidth → JPEG → /interkom.mjpeg pipe.

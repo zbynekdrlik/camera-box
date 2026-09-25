@@ -1,8 +1,10 @@
-//! Issue 1367 (Option 3) — the two-clock A/V PAIRING bench for a genlocked NDI source that carries
-//! its own audio (the SongPlayer → cg OBS chain).
+//! Issue 1367 — the two-clock A/V PAIRING bench for a genlocked NDI source that carries its own
+//! audio (the SongPlayer → cg OBS chain).
 //!
 //! A test-only child of `genlock_audio_pairing` (declared there with `#[path]`), so the plain
-//! standalone recipe `rustc --test --edition 2021 src/genlock_audio_pairing.rs` runs it too.
+//! standalone recipe `rustc --test --edition 2021 src/genlock_audio_pairing.rs` runs it too. Its
+//! audio leg ([`AudioLeg`]) is shared with the shallow-source bench (`genlock_shallow_av_bench.rs`,
+//! a child of this module), which drives it from a real simulated FIFO.
 //!
 //! ## Model
 //!
@@ -13,29 +15,35 @@
 //! - **Video.** The sender stamps frames on the per-second grid, at the canvas rate or at
 //!   `source_multiple` × it (a 60p source on a 30p canvas). The receiver FIFO presents a frame
 //!   `d(t)` canvas frames behind the tick, `d` following a scripted depth profile (depth changes, a
-//!   sender restart, an OBS restart). On an N ≥ 2 source the presented frame is the NEWEST matured
-//!   one, (N − 1) source intervals younger than the queue head. The frame presents at the tick's
-//!   monotonic instant. The receiver measures `tick − presented stamp` every tick and runs the
-//!   production tracker [`video_delay_track`].
-//! - **Audio ingest** runs the production decisions: [`audio_hold_mode`] / [`audio_hold_ms`] pick
-//!   the hold, [`audio_wall_to_mono_ns`] reads the live offset, [`audio_place_term_ns`] places a
-//!   packet, and a change re-places it and shifts the level target by [`audio_place_shift_ms`]. The
-//!   packet timecode is the sender's emit instant, and each packet arrives after a 1–4 ms jittered
-//!   lag. Placed audio plays back to back by sample count.
+//!   sender restart, an OBS restart) — the FREE Option-3 tracker path (an N ≥ 2 source; a shallow
+//!   N == 1 source now LOCKS its depth, see the shallow bench). On an N ≥ 2 source the presented
+//!   frame is the NEWEST matured one, (N − 1) source intervals younger than the queue head. The frame
+//!   presents at the tick's monotonic instant. The receiver measures `tick − presented stamp` every
+//!   tick and runs the production tracker [`video_delay_track`].
+//! - **Audio ingest** runs the production decisions ([`AudioLeg::ingest`]): [`audio_hold_mode`] /
+//!   [`audio_hold_ms`] pick the hold (WITHHELD while the delay is unknown, [`audio_withhold_expired`]),
+//!   [`audio_hold_action`] decides place / continue / SLEW / step, [`audio_wall_to_mono_ns`] reads the
+//!   live offset and [`audio_place_term_ns`] places. A hold change while playing is SLEWED
+//!   ([`audio_slew_step_ns`]): the placement moves 1 ms per second through the resampler, and the
+//!   level target moves with each consumed increment. The packet timecode is the sender's emit
+//!   instant, and each packet arrives after a 1–4 ms jittered lag. Placed audio plays back to back by
+//!   sample count.
 //! - **ASRC**, first order (the real servo is `media-io/asrc-compensator.c`, benched in
 //!   `src/asrc_bench.rs`): a rate estimate that locks after [`ASRC_LOCK_S`] and converges on the
 //!   true wall-vs-mono rate with an EMA of time constant [`ASRC_TAU_S`], plus a P level loop on the
 //!   per-second mean buffered depth against the target captured at lock, clamped at
 //!   [`LEVEL_MAX_PPM`]. A resync (sender restart) or an OBS restart re-captures, while a deliberate
-//!   re-placement shifts the target. The rate estimate converges on the TRUE drift rate by
+//!   re-placement or slew shifts the target. The rate estimate converges on the TRUE drift rate by
 //!   construction, so this bench ASSUMES the drift is absorbed between placements. The real servo's
 //!   ability to do that is proven separately, by `src/asrc_bench.rs`. What this bench proves is the
-//!   placement: each (re-)placement must land at `timecode + live offset + measured delay`.
+//!   placement: each (re-)placement must land at `timecode + live offset + measured delay`, and a
+//!   hold change converges there by a slew, never a step.
 //!
 //! The A/V error of a tick is `audio play instant(timecode = presented stamp) − video present
 //! instant`, both on the monotonic clock. The gate excludes [`GATE_SKIP_S`] after the start and
-//! after every scripted event: a video depth step is instantaneous, while the audio follows it after
-//! the tracker's settle. Everywhere else, `|A/V| ≤ 5 ms`.
+//! after every scripted event, and every tick while a deliberate slew is still converging (a free
+//! tracker re-times the audio 1 ms per second toward the new depth). Everywhere else,
+//! `|A/V| ≤ 5 ms`.
 //!
 //! **Anti-tautology variants** (each MUST fail the same gate):
 //! - `LatchedOffset`: the placement uses the wall→mono offset latched at the first packet.
@@ -74,6 +82,8 @@ enum Variant {
     LatchedOffset,
     LegacyLatency,
     HeadSample,
+    /// The slew steps are not booked out of the smoothing timeline.
+    NoBooking,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -125,7 +135,12 @@ impl Bench {
 struct Outcome {
     max_abs_av_ms: f64,
     gated_ticks: u64,
-    placements: u32,
+    places: u32,
+    slews: u32,
+    steps: u32,
+    slewing_ticks: u64,
+    smoothing_snaps: u32,
+    max_ts_div_ns: u64,
     final_drift_ns: i64,
     worst_at_s: f64,
 }
@@ -157,39 +172,351 @@ impl Asrc {
         self.win_sum = 0.0;
         self.win_n = 0;
     }
+    /// The deliberate level shift of `asrc_compensator_shift_level_target`: the target AND the open
+    /// window's readings move by `delta_ms`.
+    fn shift(&mut self, delta_ms: f64) {
+        self.win_sum += delta_ms * self.win_n as f64;
+        if let Some(t) = self.target_ms.as_mut() {
+            *t += delta_ms;
+        }
+    }
 }
 
-struct Audio {
+/// The audio leg of one source: the ingest decisions, the placement, the slew and the ASRC — the
+/// production seams of `source_output_audio_data` + `asrc_process_audio`, in one struct so the
+/// shallow-source bench drives the SAME model.
+pub(super) struct AudioLeg {
     placed: bool,
+    timing_set: bool,
     anchor_tc: u64,
     anchor_mono: u64,
     correction_ns: f64,
     timing_adjust: u64,
     mode: AudioHoldMode,
     hold_ms: u32,
+    first_packet_mono: u64,
     latched_off: Option<i64>,
+    latch_offset: bool,
+    slew_remaining_ns: i64,
+    asrc: Asrc,
+    /// The ingest's smoothing timeline (`next_audio_ts_min`) and the source's own next timestamp:
+    /// a slew step stretches the samples, so unless it is BOOKED ([`audio_slew_book_ts_ns`]) the
+    /// smoothed timeline walks away from the source time, and at `TS_SMOOTHING_THRESHOLD` (70 ms)
+    /// the ingest snaps the audio back to the old placement. Only the SLEW is modelled here (the
+    /// servo's own stretch has the same class of limit, recorded in the rule).
+    book_steps: bool,
+    ts_raw_next: u64,
+    ts_next_min: u64,
+    pub(super) smoothing_snaps: u32,
+    pub(super) max_ts_div_ns: u64,
+    pub(super) places: u32,
+    pub(super) slews: u32,
+    pub(super) steps: u32,
+    pub(super) withheld: u64,
+    /// Issue 1367 (live 25.9.2026 12:31): the anti-tautology variant — a packet right after a
+    /// timeline reset is APPENDED as OBS decides, never corrected by [`audio_push_back_allowed`].
+    legacy_append_after_reset: bool,
+    /// The smoothed placement error the production ingest measures (actual − intended).
+    place_err_ns: i64,
+    place_err_seeded: bool,
+    /// Review round 1: an OBS-style mix BUFFER beside the truth, so the production formula
+    /// ([`audio_actual_place_ns`] over `audio_ts` + the buffered length) is what the measurement
+    /// reads: the previous packet's timecode, first-sample instant and the stretch applied by then.
+    /// The buffer end for the next append is `buf_actual + (tc − buf_tc) + (correction − buf_corr)`.
+    buf_tc: u64,
+    buf_actual: f64,
+    buf_corr: f64,
+    /// The largest gap between the production formula's actual instant and the truth
+    /// ([`Self::play_mono`]) over every measured packet, ns.
+    pub(super) max_formula_vs_truth_ns: f64,
 }
 
-impl Audio {
-    fn fresh() -> Audio {
-        Audio {
+/// The mixer's read position (`audio_ts`) sits this far behind real time (the live OBS audio
+/// buffering, 64 ms); the bench's buffered length is measured from it.
+const MIX_BUFFERING_NS: u64 = 64_000_000;
+
+/// `TS_SMOOTHING_THRESHOLD` of `obs-source.c`.
+const TS_SMOOTHING_THRESHOLD_NS: u64 = 70_000_000;
+
+impl AudioLeg {
+    pub(super) fn fresh(latch_offset: bool) -> AudioLeg {
+        AudioLeg {
             placed: false,
+            timing_set: false,
             anchor_tc: 0,
             anchor_mono: 0,
             correction_ns: 0.0,
             timing_adjust: 0,
             mode: AudioHoldMode::Off,
             hold_ms: 0,
+            first_packet_mono: 0,
             latched_off: None,
+            latch_offset,
+            slew_remaining_ns: 0,
+            asrc: Asrc::fresh(),
+            book_steps: true,
+            ts_raw_next: 0,
+            ts_next_min: 0,
+            smoothing_snaps: 0,
+            max_ts_div_ns: 0,
+            places: 0,
+            slews: 0,
+            steps: 0,
+            withheld: 0,
+            legacy_append_after_reset: false,
+            place_err_ns: 0,
+            place_err_seeded: false,
+            buf_tc: 0,
+            buf_actual: 0.0,
+            buf_corr: 0.0,
+            max_formula_vs_truth_ns: 0.0,
         }
     }
+
+    /// The anti-tautology variant of the live 12:31 defect: OBS's append after a timeline reset is
+    /// taken as-is, so the hold is lost at every sender restart.
+    pub(super) fn with_legacy_append_after_reset(mut self) -> AudioLeg {
+        self.legacy_append_after_reset = true;
+        self
+    }
+
+    /// The pairing offset's AUDIO side as the production audit computes it
+    /// ([`audio_realized_delay_ns`] over the measured placement error).
+    pub(super) fn realized_delay_ns(&self) -> i64 {
+        audio_realized_delay_ns(
+            self.hold_ms,
+            self.slew_remaining_ns,
+            self.place_err_ns,
+            self.place_err_seeded,
+        )
+    }
+
+    /// The anti-tautology variant: the slew steps are NOT booked out of the smoothing timeline.
+    pub(super) fn without_booking(mut self) -> AudioLeg {
+        self.book_steps = false;
+        self
+    }
+
+    /// Audio is in the mix.
+    pub(super) fn playing(&self) -> bool {
+        self.placed
+    }
+
+    /// A deliberate slew is still converging.
+    pub(super) fn slewing(&self) -> bool {
+        self.slew_remaining_ns != 0
+    }
+
     /// The monotonic instant the sample with timecode `tc` plays.
     fn play_mono(&self, tc: u64) -> f64 {
         self.anchor_mono as f64 + (tc as f64 - self.anchor_tc as f64) + self.correction_ns
     }
+
+    /// The A/V error (ms) of a frame stamped `presented_stamp` presenting at `present_mono`.
+    pub(super) fn av_ms(&self, presented_stamp: u64, present_mono: u64) -> f64 {
+        (self.play_mono(presented_stamp) - present_mono as f64) / 1e6
+    }
+
+    /// One audio packet with timecode `tc`, arriving at `mono` / `wall`, while the render thread's
+    /// applied video delay is `video_delay_ms`. `resync` = a timeline discontinuity (a sender
+    /// restart: `reset_audio_timing`).
+    pub(super) fn ingest(
+        &mut self,
+        tc: u64,
+        mono: u64,
+        wall: u64,
+        video_delay_ms: u32,
+        resync: bool,
+    ) {
+        if self.first_packet_mono == 0 {
+            self.first_packet_mono = mono.max(1);
+        }
+        let expired = audio_withhold_expired(self.first_packet_mono, mono);
+        let mode = audio_hold_mode(true, LATENCY_MS, true, video_delay_ms, expired);
+        let hold = audio_hold_ms(mode, LATENCY_MS, video_delay_ms);
+        if resync || !self.timing_set {
+            // reset_audio_timing: the arrival basis is re-captured
+            self.timing_adjust = mono.wrapping_sub(tc);
+            self.timing_set = true;
+        }
+        // OBS's own continuity verdict: back to back. A sender restart's >2 s timestamp jump runs
+        // handle_ts_jump, which empties the buffer and puts its start AND next_audio_sys_ts_min on the
+        // ARRIVAL instant -- the packet's pre-term timestamp equals it, so OBS still appends (live
+        // 25.9.2026 12:31); the production ingest corrects that for an active genlock hold.
+        let obs_push_back = self.placed;
+        let continuous = if self.legacy_append_after_reset {
+            obs_push_back
+        } else {
+            audio_push_back_allowed(obs_push_back, resync, mode)
+        };
+        let action = audio_hold_action(
+            self.mode,
+            self.hold_ms,
+            mode,
+            hold,
+            continuous,
+            true,
+            self.slew_remaining_ns != 0,
+        );
+        let live = audio_wall_to_mono_ns(mono, wall);
+        let off_used = if self.latch_offset {
+            *self.latched_off.get_or_insert(live)
+        } else {
+            live
+        };
+        let term = audio_place_term_ns(mode, hold, off_used, self.timing_adjust);
+        let prev_term = audio_place_term_ns(self.mode, self.hold_ms, off_used, self.timing_adjust);
+        // the ingest appends on these actions (back to back), and places on the others.
+        let appended =
+            continuous && matches!(action, AudioHoldAction::Continue | AudioHoldAction::Slew);
+        match action {
+            AudioHoldAction::Withhold => {
+                self.withheld += 1;
+                self.placed = false;
+            }
+            AudioHoldAction::Slew => {
+                self.slew_remaining_ns = self
+                    .slew_remaining_ns
+                    .wrapping_add(term.wrapping_sub(prev_term));
+                self.slews += 1;
+            }
+            AudioHoldAction::Continue if continuous => {
+                if resync {
+                    // appended at the reset buffer start: the ARRIVAL instant -- the genlock term
+                    // never reaches the samples (the live 12:31 defect).
+                    self.asrc.recapture();
+                    self.anchor_tc = tc;
+                    self.anchor_mono = mono;
+                    self.correction_ns = 0.0;
+                    self.ts_raw_next = tc;
+                    self.ts_next_min = tc;
+                }
+            }
+            AudioHoldAction::Place | AudioHoldAction::Replace | AudioHoldAction::Continue => {
+                let shift = audio_level_shift_ns(
+                    action,
+                    self.mode,
+                    term,
+                    prev_term,
+                    self.slew_remaining_ns,
+                );
+                if !continuous || !self.mode.is_active() {
+                    self.asrc.recapture();
+                } else {
+                    self.asrc.shift(shift as f64 / 1e6);
+                }
+                if action == AudioHoldAction::Replace {
+                    self.steps += 1;
+                } else {
+                    self.places += 1;
+                }
+                self.placed = true;
+                self.anchor_tc = tc;
+                self.anchor_mono = tc
+                    .wrapping_add(self.timing_adjust)
+                    .wrapping_add(term as u64);
+                self.correction_ns = 0.0;
+                self.slew_remaining_ns = 0;
+                self.ts_raw_next = tc;
+                self.ts_next_min = tc;
+            }
+        }
+        self.mode = mode;
+        self.hold_ms = hold;
+        // the production ingest's placement measurement, through the production formula: an
+        // appended packet lands at the buffer end (audio_ts + buffered), a placed one at its own
+        // timestamp; after a timeline reset OBS emptied the buffer and put audio_ts on the arrival
+        // instant (reset_audio_data). The truth (play_mono) is checked against it on every packet.
+        if self.placed && mode.is_active() {
+            let intended = tc
+                .wrapping_add(self.timing_adjust)
+                .wrapping_add(term as u64);
+            let (audio_ts, buffered, end) = if appended && resync {
+                (mono, 0, mono as f64)
+            } else if appended {
+                let end = self.buf_actual
+                    + (tc as f64 - self.buf_tc as f64)
+                    + (self.correction_ns - self.buf_corr);
+                let read = mono.saturating_sub(MIX_BUFFERING_NS);
+                (read, (end - read as f64).round().max(0.0) as u64, end)
+            } else {
+                (0, 0, intended as f64)
+            };
+            let actual = audio_actual_place_ns(appended, audio_ts, buffered, intended);
+            self.max_formula_vs_truth_ns = self
+                .max_formula_vs_truth_ns
+                .max((actual as f64 - self.play_mono(tc)).abs());
+            let err = audio_place_error_ns(actual, intended);
+            self.place_err_ns =
+                audio_place_error_smooth_ns(self.place_err_ns, err, self.place_err_seeded);
+            self.place_err_seeded = true;
+            self.buf_tc = tc;
+            self.buf_actual = end;
+            self.buf_corr = self.correction_ns;
+        } else {
+            self.place_err_seeded = false;
+        }
+    }
+
+    /// One render tick of the ASRC (`dt_ns` of audio): the rate servo, the slew increment (the
+    /// resampler stretch of `asrc_process_audio`, shifting the level target by the same amount) and
+    /// the level loop. `tc_now` is the latest packet's timecode, `mono` the tick's monotonic instant.
+    pub(super) fn asrc_tick(&mut self, true_ppm: f64, dt_ns: u64, tc_now: u64, mono: u64) {
+        let dt_s = dt_ns as f64 / 1e9;
+        self.asrc.since_capture_s += dt_s;
+        if !self.placed {
+            return;
+        }
+        if self.asrc.since_capture_s >= ASRC_LOCK_S {
+            let alpha = dt_s / (ASRC_TAU_S + dt_s);
+            self.asrc.rate_est_ppm += alpha * (true_ppm - self.asrc.rate_est_ppm);
+        }
+        let step = audio_slew_step_ns(self.slew_remaining_ns, dt_ns);
+        self.slew_remaining_ns -= step;
+        self.correction_ns += step as f64;
+        self.asrc.shift(step as f64 / 1e6);
+        // the smoothing timeline: the source advanced dt, the stretched samples dt + step.
+        self.ts_raw_next = self.ts_raw_next.wrapping_add(dt_ns);
+        let smoothed = self
+            .ts_next_min
+            .wrapping_add(dt_ns)
+            .wrapping_add(step as u64);
+        self.ts_next_min = if self.book_steps {
+            audio_slew_book_ts_ns(smoothed, step)
+        } else {
+            smoothed
+        };
+        let div = (self.ts_next_min.wrapping_sub(self.ts_raw_next) as i64).unsigned_abs();
+        self.max_ts_div_ns = self.max_ts_div_ns.max(div);
+        if div >= TS_SMOOTHING_THRESHOLD_NS {
+            // the ingest takes the raw timestamp: the audio snaps back by the divergence.
+            let back = self.ts_next_min.wrapping_sub(self.ts_raw_next) as i64;
+            self.correction_ns -= back as f64;
+            self.ts_next_min = self.ts_raw_next;
+            self.smoothing_snaps += 1;
+        }
+        self.correction_ns += (self.asrc.rate_est_ppm + self.asrc.level_ppm) * 1e-6 * dt_ns as f64;
+        let depth_ms = (self.play_mono(tc_now) - mono as f64) / 1e6;
+        self.asrc.win_sum += depth_ms;
+        self.asrc.win_n += 1;
+        if self.asrc.win_n as u64 == IV_NUM / dt_ns.max(1) {
+            let mean = self.asrc.win_sum / self.asrc.win_n as f64;
+            self.asrc.win_sum = 0.0;
+            self.asrc.win_n = 0;
+            if self.asrc.since_capture_s >= ASRC_LOCK_S {
+                match self.asrc.target_ms {
+                    None => self.asrc.target_ms = Some(mean),
+                    Some(target) => {
+                        self.asrc.level_ppm = (LEVEL_KP_PPM_PER_MS * (target - mean))
+                            .clamp(-LEVEL_MAX_PPM, LEVEL_MAX_PPM)
+                    }
+                }
+            }
+        }
+    }
 }
 
-fn lcg(x: &mut u64) -> u64 {
+pub(super) fn lcg(x: &mut u64) -> u64 {
     *x = x
         .wrapping_mul(6_364_136_223_846_793_005)
         .wrapping_add(1_442_695_040_888_963_407);
@@ -201,14 +528,23 @@ fn simulate(b: &Bench, variant: Variant) -> Outcome {
     let mut out = Outcome::default();
     let mut rng = 0x1367u64;
     let mut tracker = VideoDelayTracker::default();
-    let mut audio = Audio::fresh();
-    let mut asrc = Asrc::fresh();
+    let leg = |v: Variant| {
+        let a = AudioLeg::fresh(v == Variant::LatchedOffset);
+        if v == Variant::NoBooking {
+            a.without_booking()
+        } else {
+            a
+        }
+    };
+    let mut audio = leg(variant);
     let mut depth = b.initial_depth;
+    let mut snaps = 0u32;
+    let mut max_div = 0u64;
     let mut silent_until_tick = 0u64;
     let mut resync_pending = false;
     let mut skip_until_tick = GATE_SKIP_S * FPS;
     let true_ppm = b.drift_total_ns as f64 / (b.duration_s as f64 * 1e9) * 1e6;
-    let dt_s = IV_NS as f64 / 1e9;
+    let mut totals = (0u32, 0u32, 0u32);
 
     for k in 0..ticks {
         // ---- scripted events -------------------------------------------------------------
@@ -225,8 +561,12 @@ fn simulate(b: &Bench, variant: Variant) -> Outcome {
                     }
                     Event::ObsRestart { depth: d } => {
                         tracker = VideoDelayTracker::default();
-                        audio = Audio::fresh();
-                        asrc = Asrc::fresh();
+                        totals.0 += audio.places;
+                        totals.1 += audio.slews;
+                        totals.2 += audio.steps;
+                        snaps += audio.smoothing_snaps;
+                        max_div = max_div.max(audio.max_ts_div_ns);
+                        audio = leg(variant);
                         depth = d;
                     }
                 }
@@ -244,7 +584,6 @@ fn simulate(b: &Bench, variant: Variant) -> Outcome {
 
         // the sender runs silent across a restart
         if k < silent_until_tick {
-            asrc.since_capture_s += dt_s;
             continue;
         }
 
@@ -262,7 +601,7 @@ fn simulate(b: &Bench, variant: Variant) -> Outcome {
         } else {
             head
         };
-        video_delay_track(&mut tracker, video_delay_sample_ns(wall, sampled), IV_NS);
+        video_delay_track(&mut tracker, 0, video_delay_sample_ns(wall, sampled), IV_NS);
 
         // ---- audio: one packet timecoded at emit, arriving now --------------------------------
         let lag = 1_000_000 + lcg(&mut rng) % 3_000_000;
@@ -272,68 +611,16 @@ fn simulate(b: &Bench, variant: Variant) -> Outcome {
         } else {
             tracker.applied_ms
         };
-        let mode = audio_hold_mode(true, LATENCY_MS, true, video_delay_ms);
-        let hold = audio_hold_ms(mode, LATENCY_MS, video_delay_ms);
-        let resync = !audio.placed || resync_pending;
-        if resync {
-            // reset_audio_timing: the arrival basis is re-captured
-            audio.timing_adjust = mono.wrapping_sub(tc);
-        }
-        if resync || mode != audio.mode || hold != audio.hold_ms {
-            let live = audio_wall_to_mono_ns(mono, wall);
-            let off_used = match variant {
-                Variant::LatchedOffset => *audio.latched_off.get_or_insert(live),
-                _ => live,
-            };
-            let term = audio_place_term_ns(mode, hold, off_used, audio.timing_adjust);
-            let prev_term =
-                audio_place_term_ns(audio.mode, audio.hold_ms, off_used, audio.timing_adjust);
-            let placed = tc
-                .wrapping_add(audio.timing_adjust)
-                .wrapping_add(term as u64);
-            if resync {
-                asrc.recapture();
-            } else if let Some(t) = asrc.target_ms.as_mut() {
-                *t += audio_place_shift_ms(term, prev_term);
-            }
-            audio.placed = true;
-            audio.anchor_tc = tc;
-            audio.anchor_mono = placed;
-            audio.correction_ns = 0.0;
-            audio.mode = mode;
-            audio.hold_ms = hold;
-            resync_pending = false;
-            out.placements += 1;
-        }
-
-        // ---- ASRC: rate servo + level loop ----------------------------------------------------
-        asrc.since_capture_s += dt_s;
-        if asrc.since_capture_s >= ASRC_LOCK_S {
-            let alpha = dt_s / (ASRC_TAU_S + dt_s);
-            asrc.rate_est_ppm += alpha * (true_ppm - asrc.rate_est_ppm);
-        }
-        audio.correction_ns += (asrc.rate_est_ppm + asrc.level_ppm) * 1e-6 * IV_NS as f64;
-        let depth_ms = (audio.play_mono(tc) - mono as f64) / 1e6;
-        asrc.win_sum += depth_ms;
-        asrc.win_n += 1;
-        if asrc.win_n as u64 == FPS {
-            let mean = asrc.win_sum / asrc.win_n as f64;
-            asrc.win_sum = 0.0;
-            asrc.win_n = 0;
-            if asrc.since_capture_s >= ASRC_LOCK_S {
-                match asrc.target_ms {
-                    None => asrc.target_ms = Some(mean),
-                    Some(target) => {
-                        asrc.level_ppm = (LEVEL_KP_PPM_PER_MS * (target - mean))
-                            .clamp(-LEVEL_MAX_PPM, LEVEL_MAX_PPM)
-                    }
-                }
-            }
-        }
+        audio.ingest(tc, mono, wall, video_delay_ms, resync_pending);
+        resync_pending = false;
+        audio.asrc_tick(true_ppm, IV_NS, tc, mono);
 
         // ---- the A/V error of this tick ----------------------------------------------------------
-        let av_ms = (audio.play_mono(head) - mono as f64) / 1e6;
-        if k >= skip_until_tick {
+        if audio.slewing() {
+            out.slewing_ticks += 1;
+        }
+        if audio.playing() && k >= skip_until_tick && !audio.slewing() {
+            let av_ms = audio.av_ms(head, mono);
             out.gated_ticks += 1;
             if av_ms.abs() > out.max_abs_av_ms {
                 out.max_abs_av_ms = av_ms.abs();
@@ -341,6 +628,11 @@ fn simulate(b: &Bench, variant: Variant) -> Outcome {
             }
         }
     }
+    out.places = totals.0 + audio.places;
+    out.slews = totals.1 + audio.slews;
+    out.steps = totals.2 + audio.steps;
+    out.smoothing_snaps = snaps + audio.smoothing_snaps;
+    out.max_ts_div_ns = max_div.max(audio.max_ts_div_ns);
     out
 }
 
@@ -355,7 +647,7 @@ fn av_pair_within_5ms_across_depth_changes_restarts_and_300ms_drift() {
         o.final_drift_ns
     );
     assert!(
-        o.gated_ticks > 90_000,
+        o.gated_ticks > 60_000,
         "the gate must cover most of the run, got {}",
         o.gated_ticks
     );
@@ -365,9 +657,39 @@ fn av_pair_within_5ms_across_depth_changes_restarts_and_300ms_drift() {
         o.max_abs_av_ms,
         o.worst_at_s
     );
-    // one start placement + a latency→timecode switch, one re-placement per depth change, the
-    // resync + its re-application, the OBS restart's placement + switch: no churn beyond that.
-    assert!(o.placements <= 10, "placements = {} (churn)", o.placements);
+    // issue 1367 (ROZHODNUTÉ 5827497952): no hold change ever STEPS the playing audio. The
+    // placements are the start, the sender-restart resync and the OBS restart (each after the
+    // withhold, straight onto the measured delay); every depth change is a slew.
+    assert_eq!(o.steps, 0, "a step re-placement while playing");
+    // the booked slew never walks the smoothing timeline (the 100 ms sender-restart slew included).
+    assert_eq!(o.smoothing_snaps, 0, "a slew snapped back at 70 ms");
+    assert!(
+        o.max_ts_div_ns < 1_000,
+        "booked steps keep the smoothing timeline on the source time: {} ns",
+        o.max_ts_div_ns
+    );
+    assert_eq!(o.places, 3, "places = {}", o.places);
+    assert!(o.slews <= 6, "slews = {} (churn)", o.slews);
+    // a slew moves 1 ms per second: the scripted changes (33 / 67 / 100 / 33 ms) settle within
+    // their own size in seconds.
+    let slewing_s = o.slewing_ticks as f64 / FPS as f64;
+    assert!(
+        slewing_s <= 33.4 + 66.7 + 100.1 + 100.1 + 33.4 + 5.0,
+        "slewing {slewing_s:.1} s"
+    );
+}
+
+#[test]
+fn an_unbooked_slew_walks_the_smoothing_timeline_and_snaps_back_1367() {
+    // the anti-tautology twin of the booking: the scripted run carries a 100 ms slew (the sender
+    // restart re-times the free tracker from 4 frames to 1), which walks an unbooked smoothing
+    // timeline past TS_SMOOTHING_THRESHOLD, and the audio snaps back to the old placement.
+    let o = simulate(&Bench::scripted(), Variant::NoBooking);
+    eprintln!("no booking: {o:?}");
+    assert!(
+        o.smoothing_snaps > 0 && o.max_ts_div_ns >= TS_SMOOTHING_THRESHOLD_NS,
+        "an unbooked 100 ms slew must reach the 70 ms smoothing threshold: {o:?}"
+    );
 }
 
 #[test]
@@ -401,8 +723,9 @@ fn single_tick_holds_neither_churn_nor_break_the_pairing() {
     let base = simulate(&Bench::scripted(), Variant::Production);
     eprintln!("holds: {o:?}");
     assert_eq!(
-        o.placements, base.placements,
-        "single held ticks must not re-place the audio"
+        (o.places, o.slews, o.steps),
+        (base.places, base.slews, base.steps),
+        "single held ticks must not re-time the audio"
     );
     // the held ticks themselves present a frame 33 ms older than the audio beside it — that is the
     // video's own repeat, not a pairing error; every other tick stays paired.
@@ -429,3 +752,23 @@ fn a_source_at_twice_the_canvas_rate_pairs_on_the_presented_frame() {
         h.max_abs_av_ms
     );
 }
+
+#[test]
+fn a_playing_hold_change_slews_instead_of_stepping_1367() {
+    // a playing source whose delay moves 100 -> 67 ms is slewed, not re-placed.
+    let mut leg = AudioLeg::fresh(false);
+    let tc = W0;
+    leg.ingest(tc, MONO0, W0, 100, false);
+    assert_eq!((leg.places, leg.slews, leg.steps), (1, 0, 0));
+    leg.ingest(tc + IV_NS, MONO0 + IV_NS, W0 + IV_NS, 67, false);
+    assert_eq!(
+        (leg.places, leg.slews, leg.steps),
+        (1, 1, 0),
+        "a playing change slews"
+    );
+    assert!(leg.slewing());
+}
+
+#[cfg(test)]
+#[path = "genlock_shallow_av_bench.rs"]
+mod shallow;

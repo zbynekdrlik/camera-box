@@ -48,6 +48,9 @@ exactly the failure a bulk job on the strih notebook would cause during a produc
   brace group so `mkdir -p` still gates the decode (the `&&` binds the whole group, not just the
   `LP=` assignment the snippet starts with):
   `ssh … "mkdir -p '$OUT_DIR' && { $LOWPRIO_SNIPPET \$LP $ONSTRIHLX_CMD; }"`.
+- A THIRD copy lives in `scripts/lib/missing-slot-pixels.sh` (`missing_slot_pixels_lowprio_snippet`,
+  the issue-1367 pixel-proof export on strih-lx); `tests/harness_missing_slot_pixels_1367.rs` pins it
+  byte-identical to `LOWPRIO_SNIPPET` here, so change both together.
 - This is the repo's usual "pure decision + shell replica pinned by a test" pattern: the helper is
   what `tests/recording_verdict_on_strih_lx_lowprio.rs` pins (fixture roots), and a static anchor
   pins that STEP 2's ssh line launches `$ONSTRIHLX_CMD` through the prefix. Keep the two in parity.

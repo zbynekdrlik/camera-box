@@ -4,9 +4,12 @@
 //!
 //! 1. The render thread tracks the source's REAL stamp->present delay at the tick's SCHEDULED
 //!    instant (`genlock_video_delay_track` fed by `genlock_n1_tick_wall_now(wall_now)` and the head).
-//! 2. The audio ingest maps the NDI timecode through the LIVE wall->mono offset read on every packet,
-//!    adds the placement term, and on a hold change RE-PLACES at once and shifts the ASRC level
-//!    target by the placement delta.
+//! 2. The audio ingest maps the NDI timecode through the LIVE wall->mono offset read on every packet
+//!    and adds the placement term. Since ROZHODNUTÉ 5827497952 a hold change while audio PLAYS is
+//!    SLEWED through the ASRC resampler (`asrc_process_audio` stretches at the slew rate, the ingest
+//!    books each step out of the smoothing timeline and into the level setpoint); a packet with no
+//!    video delay known yet is WITHHELD; only a first placement / a discontinuity PLACES (and a
+//!    source with no resampler keeps the legacy step).
 //! 3. The pairing offset is measured against the measured delay, and the audit line carries the
 //!    basis (`audio_hold=` / `video_delay_ms=` / `audio_health=`).
 //!
@@ -110,12 +113,44 @@ fn audio_ingest_places_on_the_live_offset_and_replaces_on_a_change_1367() {
         ),
         ("in.timestamp += (uint64_t)genlock_term_ns;", "the placement term is no longer applied"),
         (
-            "if (genlock_hold_mode != prev_genlock_audio_hold_mode || genlock_hold_ms != prev_genlock_audio_delay_ms) {",
-            "a hold change is no longer detected",
+            "genlock_audio_withhold_expired(source->genlock_audio_first_packet_ns, os_time));",
+            "the hold must withhold a timecode source until its video delay is known (bounded)",
         ),
         (
-            "push_back = false; asrc_compensator_shift_level_target(&source->asrc, genlock_audio_place_shift_ms(genlock_term_ns, genlock_prev_term_ns));",
-            "a hold change must RE-PLACE at once and shift the ASRC level target by the placement delta",
+            "const int genlock_action = genlock_audio_hold_action(",
+            "the per-packet action (withhold / place / continue / slew / step) is no longer decided",
+        ),
+        (
+            "if (genlock_action == GENLOCK_AUDIO_ACT_SLEW) {",
+            "a hold change while playing must SLEW (ROZHODNUTÉ 5827497952), never step",
+        ),
+        (
+            "source->genlock_audio_slew_remaining_ns += (int64_t)((uint64_t)genlock_term_ns - (uint64_t)genlock_prev_term_ns);",
+            "the slew must owe exactly the term delta of this packet",
+        ),
+        (
+            "push_back = false; asrc_compensator_shift_level_target( &source->asrc, (double)genlock_audio_level_shift_ns(",
+            "a (re)placement must place at once and shift the level target by the true buffer jump",
+        ),
+        (
+            "if (genlock_action != GENLOCK_AUDIO_ACT_WITHHOLD && source->monitoring_type != OBS_MONITORING_TYPE_MONITOR_ONLY) {",
+            "a withheld packet must never enter the mix",
+        ),
+        (
+            "source->next_audio_ts_min = genlock_audio_slew_book_ts_ns(source->next_audio_ts_min, genlock_slew_step_ns);",
+            "a slew step must be kept out of the smoothing timeline (else the 70 ms guard snaps it back)",
+        ),
+        (
+            "const int64_t genlock_fold_ns = genlock_audio_placed_slew_fold_ns( genlock_action, !(push_back && source->audio_ts), source->genlock_audio_slew_remaining_ns);",
+            "a slew still owed when the ingest placed the packet anyway must be folded into the level setpoint",
+        ),
+        (
+            "if (genlock_fold_ns != 0) { asrc_compensator_shift_level_target(&source->asrc, (double)genlock_fold_ns / 1e6); source->genlock_audio_slew_remaining_ns = 0; }",
+            "a folded slew must move the level setpoint once and be cleared (no further stretch past it)",
+        ),
+        (
+            "asrc_compensator_shift_level_target(&source->asrc, (double)genlock_slew_step_ns / 1e6);",
+            "a slew step must move the ASRC level setpoint with the buffer",
         ),
     ] {
         assert!(
@@ -129,6 +164,22 @@ fn audio_ingest_places_on_the_live_offset_and_replaces_on_a_change_1367() {
         ),
         "issue 1367: the #1303 fixed-pin ARRIVAL hold is back — genlock audio would again lead a \
          shallow feed's video by its FIFO depth"
+    );
+    // review round 2 + live 25.9.2026 12:31: the pairing offset's audio side is where the SAMPLES
+    // sit -- the hold plus the measured placement error (an owed slew is in it), the hold minus the
+    // owed slew only until a measurement exists.
+    assert!(
+        src.contains("genlock_audio_realized_delay_ns(source->genlock_audio_delay_ms, source->genlock_audio_slew_remaining_ns, source->genlock_audio_place_err_ns, source->genlock_audio_place_err_seeded),"),
+        "issue 1367: the pairing offset no longer reads where the audio samples actually sit -- a \
+         hold that never reached the samples (the live 12:31 append after a reset) would read paired"
+    );
+    // the legacy "re-place on every hold change" is gone: that step IS the audible 33 ms dropout.
+    assert!(
+        !src.contains(
+            "push_back = false; asrc_compensator_shift_level_target(&source->asrc, genlock_audio_place_shift_ms(genlock_term_ns, genlock_prev_term_ns));"
+        ),
+        "issue 1367: the unconditional re-placement on a hold change is back — every relock would \
+         drop out the audio again"
     );
     // forward declarations: the helpers are defined with the genlock FIFO far below the ingest.
     assert_has(
@@ -160,5 +211,98 @@ fn pairing_offset_and_audit_basis_use_the_measured_delay_1367() {
         &src,
         "const int audio_health = have_vi ? genlock_audio_decide_health(",
         "the audit line no longer carries the half-frame pairing verdict",
+    );
+}
+
+/// The body of `asrc_process_audio`.
+fn asrc_process(src: &str) -> &str {
+    let sig = "static inline void asrc_process_audio(obs_source_t *source, uint32_t frames, uint32_t samples_per_sec) {";
+    let start = src
+        .find(sig)
+        .unwrap_or_else(|| panic!("issue 1367: {OBS_SOURCE} no longer defines asrc_process_audio"));
+    let rest = &src[start + sig.len()..];
+    let end = rest.find(" static ").unwrap_or(rest.len());
+    &rest[..end]
+}
+
+#[test]
+fn the_asrc_resampler_carries_the_slew_1367() {
+    let src = squished();
+    let asrc = asrc_process(&src);
+    for (needle, why) in [
+        (
+            "const int64_t genlock_slew_step = genlock_audio_slew_step_ns(source->genlock_audio_slew_remaining_ns, genlock_slew_dt_ns);",
+            "each callback must consume a slew step at the slew rate",
+        ),
+        (
+            "source->genlock_audio_slew_step_ns += genlock_slew_step;",
+            "the consumed step must be handed to the ingest for booking",
+        ),
+        (
+            "audio_resampler_set_compensation_ppm(source->resampler, genlock_slew_ppm - applied_ppm, ASRC_COMPENSATION_DISTANCE_MS);",
+            "the slew must ride on the resampler on top of the servo's own (negated) ppm",
+        ),
+        (
+            "audio_resampler_set_compensation_ppm(source->resampler, -applied_ppm, ASRC_COMPENSATION_DISTANCE_MS);",
+            "with no slew the #1325 negated servo compensation must stay byte-identical",
+        ),
+    ] {
+        assert!(
+            asrc.contains(needle),
+            "issue 1367: asrc_process_audio no longer contains `{needle}` — {why}"
+        );
+    }
+}
+
+/// Live 25.9.2026 12:31 (resolume `sp-slow_video`, build ebea02a2d): after a sender restart the
+/// ingest's `handle_ts_jump` reset the buffer to the ARRIVAL instant and OBS APPENDED the packet
+/// there, so the genlock term never reached the samples (level 111 -> 46 -> 13 ms, songplayer's
+/// gate +101 ms) while the audit still read `audio_delay_ms=133 audio_pairing_offset_ms=0`.
+#[test]
+fn a_timeline_reset_places_and_the_placement_is_measured_on_the_samples_1367() {
+    let src = squished();
+    let ingest = audio_ingest(&src);
+    for (needle, why) in [
+        (
+            "bool genlock_timeline_reset = false;",
+            "the ingest must know when it reset its own timeline in this packet",
+        ),
+        (
+            "handle_ts_jump(source, source->next_audio_ts_min, in.timestamp, diff, os_time); genlock_timeline_reset = true;",
+            "a >2 s timestamp jump (a sender restart / song change) resets the buffer to the arrival instant",
+        ),
+        (
+            "push_back = genlock_audio_push_back_allowed(push_back, genlock_timeline_reset, genlock_hold_mode);",
+            "an active genlock hold must PLACE right after a timeline reset, never append at the arrival instant",
+        ),
+        (
+            "const uint64_t genlock_actual_ns = genlock_audio_actual_place_ns( push_back && source->audio_ts, source->audio_ts, conv_frames_to_time(sample_rate, source->audio_input_buf[0].size / sizeof(float)), in.timestamp);",
+            "where the packet ACTUALLY lands (appended: the buffer end; placed: its timestamp) must be measured",
+        ),
+        (
+            "source->genlock_audio_place_err_ns = genlock_audio_place_error_smooth_ns( source->genlock_audio_place_err_ns, genlock_audio_place_error_ns(genlock_actual_ns, in.timestamp), source->genlock_audio_place_err_seeded);",
+            "the placement error (actual minus intended) must be smoothed per packet",
+        ),
+    ] {
+        assert!(
+            ingest.contains(needle),
+            "issue 1367: source_output_audio_data no longer contains `{needle}` -- {why}"
+        );
+    }
+    // the correction sits before the action is decided, so the action sees the corrected verdict.
+    let fix = ingest
+        .find("push_back = genlock_audio_push_back_allowed(")
+        .expect("the append guard");
+    let action = ingest
+        .find("const int genlock_action = genlock_audio_hold_action(")
+        .expect("the action");
+    assert!(
+        fix < action,
+        "issue 1367: the append guard must run before the hold action reads push_back"
+    );
+    assert_has(
+        &src,
+        "\"audio_place_err_ms=%lld \"",
+        "the audit line must carry the measured placement error",
     );
 }

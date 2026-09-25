@@ -5,11 +5,24 @@
 //! `muted` field, and the transport/plugin `error` shapes.
 
 use intercom_hub::janus_rtp::{
-    build_attach, build_configure, build_create, build_join, build_keepalive, build_leave,
-    parse_error, parse_joined, parse_success_id, rtp_depacketize, JoinedInfo, RtpPacketizer,
-    AUDIOBRIDGE_PLUGIN, PCMU_PAYLOAD_TYPE, RTP_HEADER_LEN,
+    build_attach, build_configure, build_create, build_destroy, build_join, build_keepalive,
+    build_leave, is_session_peer, parse_error, parse_joined, parse_success_id, rtp_depacketize,
+    JanusCodec, JoinSpec, JoinedInfo, RtpPacketizer, AUDIOBRIDGE_PLUGIN, OPUS_PAYLOAD_TYPE,
+    PCMU_PAYLOAD_TYPE, RTP_HEADER_LEN,
 };
 use serde_json::json;
+
+fn spec<'a>(codec: JanusCodec, secret: Option<&'a str>, pin: Option<&'a str>) -> JoinSpec<'a> {
+    JoinSpec {
+        room: 1000,
+        display: "strih-lx-hub",
+        local_ip: "10.77.9.203",
+        local_port: 6990,
+        codec,
+        secret,
+        pin,
+    }
+}
 
 // --- RTP ------------------------------------------------------------------------------------
 
@@ -104,8 +117,8 @@ fn build_attach_targets_the_audiobridge_plugin() {
 
 #[test]
 fn build_join_plain_rtp_participant_shape() {
-    // The plain-RTP join body: request/room/display + the rtp object (ip/port/payload_type 0).
-    let v = build_join("tx3", 1000, "strih-lx-hub", "10.77.9.203", 6990, None, None);
+    // The PCMU plain-RTP join body: request/room/display + the rtp object (ip/port/payload_type 0).
+    let v = build_join("tx3", &spec(JanusCodec::Pcmu, None, None));
     assert_eq!(v["janus"], "message");
     assert_eq!(v["transaction"], "tx3");
     let body = &v["body"];
@@ -121,24 +134,75 @@ fn build_join_plain_rtp_participant_shape() {
     // discards the PCMU the hub sends (hub rx stayed 0 while a second participant was mixing). With
     // `"codec":"pcmu"` Janus answers payload_type 0 and PCMU flows both ways.
     assert_eq!(body["codec"], "pcmu");
+    // FEC is an Opus-only rtp option.
+    assert!(body["rtp"].get("fec").is_none());
     // No secret/pin keys when not supplied.
     assert!(body.get("secret").is_none());
     assert!(body.get("pin").is_none());
 }
 
 #[test]
+fn build_join_opus_asks_for_opus_with_fec() {
+    // Issue 1345 (25.9.2026): the phones leg is Opus 48 kHz mono with in-band FEC. The join names
+    // the codec at the top level, a dynamic payload type, and `rtp.fec` so Janus sends FEC too.
+    let v = build_join("tx3o", &spec(JanusCodec::Opus, None, None));
+    let body = &v["body"];
+    assert_eq!(body["codec"], "opus");
+    assert_eq!(body["rtp"]["payload_type"], OPUS_PAYLOAD_TYPE);
+    assert_eq!(body["rtp"]["fec"], true);
+    assert_eq!(body["rtp"]["port"], 6990);
+}
+
+#[test]
 fn build_join_carries_secret_and_pin_when_present() {
-    let v = build_join(
-        "tx4",
-        42,
-        "hub",
-        "127.0.0.1",
-        7000,
-        Some("s3cr3t"),
-        Some("1234"),
-    );
+    let v = build_join("tx4", &spec(JanusCodec::Pcmu, Some("s3cr3t"), Some("1234")));
     assert_eq!(v["body"]["secret"], "s3cr3t");
     assert_eq!(v["body"]["pin"], "1234");
+}
+
+// --- the codec choice -----------------------------------------------------------------------
+
+#[test]
+fn janus_codec_names_payload_types_and_rtp_clock() {
+    assert_eq!(
+        JanusCodec::default(),
+        JanusCodec::Opus,
+        "opus is the default"
+    );
+    assert_eq!(JanusCodec::Opus.as_str(), "opus");
+    assert_eq!(JanusCodec::Pcmu.as_str(), "pcmu");
+    assert_eq!(JanusCodec::Opus.payload_type(), OPUS_PAYLOAD_TYPE);
+    assert_eq!(JanusCodec::Pcmu.payload_type(), PCMU_PAYLOAD_TYPE);
+    assert!(
+        (96..=127).contains(&OPUS_PAYLOAD_TYPE),
+        "a dynamic payload type"
+    );
+    // One 20 ms frame in RTP clock units: Opus always runs a 48 kHz RTP clock (RFC 7587), PCMU 8 kHz.
+    assert_eq!(JanusCodec::Opus.rtp_samples_per_frame(), 960);
+    assert_eq!(JanusCodec::Pcmu.rtp_samples_per_frame(), 160);
+}
+
+#[test]
+fn opus_packets_advance_the_timestamp_by_960_whatever_their_size() {
+    let mut p = RtpPacketizer::with_payload_type(7, OPUS_PAYLOAD_TYPE);
+    let a = p.packetize_samples(&[1u8; 61], 960);
+    let b = p.packetize_samples(&[2u8; 83], 960);
+    let c = p.packetize_samples(&[3u8; 3], 960);
+    assert_eq!(
+        a[1],
+        0x80 | OPUS_PAYLOAD_TYPE,
+        "marker + PT on the first packet"
+    );
+    assert_eq!(b[1], OPUS_PAYLOAD_TYPE);
+    let ts = |x: &[u8]| u32::from_be_bytes([x[4], x[5], x[6], x[7]]);
+    assert_eq!(ts(&a), 0);
+    assert_eq!(ts(&b), 960);
+    assert_eq!(
+        ts(&c),
+        1920,
+        "contiguous: the payload size never moves the timestamp"
+    );
+    assert_eq!(&c[RTP_HEADER_LEN..], &[3u8; 3]);
 }
 
 #[test]
@@ -147,6 +211,49 @@ fn build_configure_muted_field() {
     assert_eq!(v["janus"], "message");
     assert_eq!(v["body"]["request"], "configure");
     assert_eq!(v["body"]["muted"], false);
+}
+
+#[test]
+fn build_destroy_shape() {
+    // Review round 1: before re-joining, the hub destroys its old session so the old participant's
+    // room mix stops arriving on the same local port.
+    assert_eq!(
+        build_destroy("d1"),
+        json!({ "janus": "destroy", "transaction": "d1" })
+    );
+}
+
+#[test]
+fn only_the_session_peer_is_accepted() {
+    let peer: std::net::SocketAddr = "10.77.9.202:10000".parse().unwrap();
+    assert!(is_session_peer("10.77.9.202:10000".parse().unwrap(), peer));
+    assert!(
+        !is_session_peer("10.77.9.202:10002".parse().unwrap(), peer),
+        "another port"
+    );
+    assert!(
+        !is_session_peer("10.77.9.50:10000".parse().unwrap(), peer),
+        "another host"
+    );
+    // Janus may advertise an unspecified address: then only the port is compared.
+    let any: std::net::SocketAddr = "0.0.0.0:10000".parse().unwrap();
+    assert!(is_session_peer("10.77.9.202:10000".parse().unwrap(), any));
+    assert!(!is_session_peer("10.77.9.202:9999".parse().unwrap(), any));
+}
+
+#[test]
+fn a_skipped_frame_advances_seq_and_timestamp_without_a_packet() {
+    // Review round 1: when a frame cannot be encoded, RTP time still moves on, so Janus sees one
+    // lost packet instead of a stream that falls 20 ms behind the wall clock.
+    let mut p = RtpPacketizer::with_payload_type(9, OPUS_PAYLOAD_TYPE);
+    let a = p.packetize_samples(&[1u8; 40], 960);
+    p.skip(960);
+    let b = p.packetize_samples(&[2u8; 40], 960);
+    let seq = |x: &[u8]| u16::from_be_bytes([x[2], x[3]]);
+    let ts = |x: &[u8]| u32::from_be_bytes([x[4], x[5], x[6], x[7]]);
+    assert_eq!(seq(&b), seq(&a) + 2);
+    assert_eq!(ts(&b), ts(&a) + 1920);
+    assert_eq!(b[1] & 0x80, 0, "a skip is not a new talkspurt");
 }
 
 #[test]
@@ -190,8 +297,25 @@ fn parse_joined_extracts_the_plugins_own_rtp_endpoint() {
             id: 42,
             rtp_ip: "127.0.0.1".to_string(),
             rtp_port: 5005,
+            payload_type: Some(0),
         })
     );
+    // Janus names the payload type it will send: an Opus join answers with its own PT.
+    let opus = json!({
+        "plugindata": { "data": {
+            "audiobridge": "joined", "room": 1000, "id": 7,
+            "rtp": { "ip": "10.77.9.202", "port": 10000, "payload_type": 111 }
+        } }
+    });
+    assert_eq!(parse_joined(&opus).unwrap().payload_type, Some(111));
+    // A joined reply without a payload type still parses.
+    let bare = json!({
+        "plugindata": { "data": {
+            "audiobridge": "joined", "room": 1000, "id": 7,
+            "rtp": { "ip": "10.77.9.202", "port": 10000 }
+        } }
+    });
+    assert_eq!(parse_joined(&bare).unwrap().payload_type, None);
     // A non-joined event yields None.
     let other = json!({ "plugindata": { "data": { "audiobridge": "event" } } });
     assert_eq!(parse_joined(&other), None);

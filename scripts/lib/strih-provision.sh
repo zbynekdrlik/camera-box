@@ -394,6 +394,70 @@ monitor.alsa.rules = [
 RULE
 }
 
+# --- issue 1345 (24.9.2026, owner accepted 25.9): the MiniFuse period + graph quantum ------------
+# The two operator-session drop-ins that made the interkom audio clean existed ONLY as hand-made files
+# on strih-lx; a reprovision (or a second strih box) would ship the buzz / robotic cameraman again.
+# Both renderers print the LIVE file text byte-for-byte (read 25.9.2026, comment headers included), so
+# the step-12 compare-then-rewrite leaves the hand-fixed box untouched. setup-strih step 12 installs
+# them; verify-strih item 9b grades them + the live graph quantum (strih_lx_graph_quantum_ok).
+
+# strih_wireplumber_minifuse_output_period_conf -> the WirePlumber drop-in
+# 51-minifuse-output-period.conf: the MiniFuse PLAYBACK opened at period 256 against the 1024 graph
+# (~24 xruns/s = the buzz); pin it to period 1024 x 3 + headroom 256, like the capture side.
+strih_wireplumber_minifuse_output_period_conf() {
+  cat <<'RULE'
+# issue 1345 (24.9.2026): the MiniFuse playback opened with period 256 / buffer 768 while the graph runs
+# at quantum 1024 -> ~24 xruns/s = the buzz/chop the operator heard. Match the capture side (1024 x 3).
+monitor.alsa.rules = [
+  {
+    matches = [ { node.name = "~alsa_output.usb-ARTURIA_MiniFuse.*" } ]
+    actions = { update-props = { api.alsa.period-size = 1024, api.alsa.period-num = 3, api.alsa.headroom = 256 } }
+  }
+]
+RULE
+}
+
+# strih_pipewire_quantum_conf -> the PipeWire drop-in 51-strih-quantum-1024.conf: the graph's
+# min-quantum floor at the MiniFuse period, so no client (the hub capture child asked 256) can pull
+# the graph below it. Applies at the next pipewire start; the running session was forced to 1024 by
+# hand (pw-metadata clock.force-quantum), which does not survive a restart -- this file does.
+strih_pipewire_quantum_conf() {
+  cat <<'CONF'
+# issue 1345 (24.9.2026): keep the whole graph at the MiniFuse period (1024). With the hub capture child
+# asking --latency 256 the graph dropped to 256 while the MiniFuse playback ran period 1024, and the
+# cameraman sounded robotic in the operator headphones. Takes effect at the next pipewire start; the
+# running session carries the same value via pw-metadata clock.force-quantum 1024.
+context.properties = {
+    default.clock.min-quantum = 1024
+}
+CONF
+}
+
+# strih_lx_graph_quantum_ok SETTINGS_DUMP -> 0 iff the live PipeWire graph cannot run below the
+# MiniFuse period: the `pw-metadata -n settings` dump either FORCES quantum 1024 (the running session's
+# hand fix) or forces nothing (0) while the min-quantum floor is 1024 (the drop-in, after a restart).
+# Prints one detail line on stdout either way; an empty / unparseable dump (the session is down or not
+# reachable) is `unreadable` and returns 1 -- never a pass. Pure: parses text, reads nothing.
+strih_lx_graph_quantum_ok() {
+  local dump="${1-}" force="" min=""
+  force="$(printf '%s\n' "$dump" | sed -n "s/.*key:'clock\.force-quantum' value:'\([0-9]*\)'.*/\1/p" | tail -n 1)"
+  min="$(printf '%s\n' "$dump" | sed -n "s/.*key:'clock\.min-quantum' value:'\([0-9]*\)'.*/\1/p" | tail -n 1)"
+  if [ -z "$force" ] || [ -z "$min" ]; then
+    printf 'graph quantum unreadable (no clock.force-quantum / clock.min-quantum in pw-metadata -n settings)\n'
+    return 1
+  fi
+  if [ "$force" = 1024 ]; then
+    printf 'graph quantum 1024 (clock.force-quantum=1024, min-quantum=%s)\n' "$min"
+    return 0
+  fi
+  if [ "$force" = 0 ] && [ "$min" = 1024 ]; then
+    printf 'graph quantum floor 1024 (clock.min-quantum=1024, not forced)\n'
+    return 0
+  fi
+  printf 'graph quantum NOT held at 1024 (clock.force-quantum=%s, clock.min-quantum=%s) -- a client can pull it below the MiniFuse period\n' "$force" "$min"
+  return 1
+}
+
 # strih_intercom_audio_dropin USER UID -> the systemd drop-in that runs intercom-hub AS THE OPERATOR
 # (not DynamicUser) with the operator's PipeWire runtime, so the pw-cat children reach the operator
 # audio session. DynamicUser cannot traverse the operator's 0700 /run/user/<uid> to reach pipewire-0,

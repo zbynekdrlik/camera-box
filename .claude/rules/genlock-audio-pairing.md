@@ -1,9 +1,12 @@
 ---
 paths:
   - "src/genlock_audio_pairing.rs"
+  - "vendor/obs-studio/libobs/obs-audio.c"
+  - "tests/audio_telemetry_800.rs"
   - "src/genlock_audio_pairing_bench.rs"
   - "tests/genlock_audio_pairing_parity.rs"
   - "tests/genlock_audio_timecode_placement_1367.rs"
+  - "src/genlock_shallow_av_bench.rs"
   - "src/genlock_forced_table_audit.rs"
   - "scripts/lib/genlock-forced-table-audit.sh"
   - "tests/genlock_forced_table_audit_1303.rs"
@@ -35,18 +38,22 @@ the AUDIO leg a first-class genlocked signal with the same evidence bar.
    `audio_enabled` / `audio_delay_ms` (the applied hold: the measured video delay in timecode mode,
    `latency_ms` before it settles, 0 = not held) / `audio_pairing_offset_ms` (applied hold minus the
    MEASURED video delay; 0 = paired, `-video delay` = the hold never fired). The audit line also
-   carries the audit-line-only `audio_hold=off|latency|timecode video_delay_ms=<smoothed>
+   carries the audit-line-only `audio_hold=off|latency|timecode|pending video_delay_ms=<smoothed>
    audio_health=<decide_audio_health, -1 = fps unknown>` (issue 1367), printed BEFORE
    `audio_enabled=` so `(long long)gs.audio_pairing_offset_ms);` stays the last argument (a
    `genlock_lock_indicator_guards.rs` anchor). Parsed by `src/jitter_audit.rs` (additive,
-   forward-compatible; the three new keys are ignored there).
+   forward-compatible; the three new keys are ignored there). Since ROZHODNUTÉ 5827497952 the line
+   also carries `shallow_depth= shallow_capped= shallow_latches= audio_slew_ms= audio_slews=
+   audio_steps= audio_withheld= audio_place_err_ms=` right after `n1_grows=` (audit-line-only;
+   `audio_place_err_ms=` = the measured placement error of the samples, below).
 
 ## The pure decision + parity discipline
 
 `src/genlock_audio_pairing.rs` is the Tier-0 authority: the video-delay tracker
 (`video_delay_sample_ns` / `_smooth_ns` / `_round_ms` / `_moved` / `video_delay_track`), the hold
 (`audio_hold_mode` / `audio_hold_ms` / `AudioHoldMode::token`), the placement
-(`audio_wall_to_mono_ns` / `audio_place_term_ns` / `audio_place_shift_ms`), the offset
+(`audio_wall_to_mono_ns` / `audio_place_term_ns`; the level shift of a placement is
+`audio_level_shift_ns`), the offset
 (`video_delay_reference_ns` / `pairing_offset_ms`) and `decide_audio_health` (Ok /
 AudioDisabledOnProgram / AsrcSaturated / PairingOffsetExceeded — precedence in that order; the
 pairing bound is HALF a frame, strict, since issue 1367). The C mirror is ONE contiguous block of
@@ -99,7 +106,12 @@ ARRIVAL + 3 ms, so it led the video by ≈ 94 ms (songplayer's own A/V gate meas
 and `audio_pairing_offset_ms`, computed against the same pin, read 0.
 
 **The decision (ROZHODNUTÉ on the ticket).** Leave the shallow VIDEO depth alone. Make the audio
-follow whatever delay the video actually has.
+follow whatever delay the video actually has. **Superseded in part by ROZHODNUTÉ 5827497952:** the
+floating shallow depth re-timed the audio by a whole frame on every depth change (the audible
+33 ms dropout), so a shallow source now LATCHES its video depth per lock
+(`genlock-n1-pin-derived-depth.md`, the shallow section), its audio follows that latched depth, and
+every hold change while audio plays is SLEWED (below). The measurement + live-offset placement
+described here stay as they are.
 
 - **Measure on the render thread at the PRESENT TAIL of `genlock_release_tick`**, on the frame the
   tick actually presents (`next_frame`, after every erase / drain / converge shed):
@@ -137,17 +149,50 @@ follow whatever delay the video actually has.
   the two clock reads, and `GetSystemTimePreciseAsFileTime` is not free). The result is
   `tc + off_live + delay`. A mapping latched at the first packet walks by the wall-vs-QPC drift
   (resolume: 318 ms); the bench's `LatchedOffset` variant fails at 150 ms.
-- **Re-place at once on a change.** A change of `(mode, hold)` forces `push_back = false` and shifts
-  the ASRC level target by `new term − previous term` of the SAME packet. For a timecode→timecode
-  change the live offset and `timing_adjust` cancel, so the shift is exactly the delay delta. For
-  the latency→timecode switch the shift is the true placement jump.
-- **Fallback.** No measurement yet (`applied_ms == 0`) or a non-wall-clock audio timestamp →
-  `AudioHoldMode::Latency`, byte-identical to the #1303 hold. So every source starts on the old hold
-  and switches (one re-placement) about 2 s after its first ts-align tick.
+- **A change SLEWS, never steps (ROZHODNUTÉ 5827497952 — superseded the immediate re-placement,
+  which WAS the songplayer gate's 33 ms dropout).** `audio_hold_action` decides every packet:
+  `Withhold` (Pending), `Place` (a first placement after a withhold / genlock toggle, or a timeline
+  discontinuity: `push_back = false`, level target shifted by `audio_level_shift_ns` = new term −
+  (previous term − slew still owed)), `Continue`, `Slew` (a hold change while audio PLAYS:
+  `genlock_audio_slew_remaining_ns += new term − previous term` of the SAME packet, so for a
+  timecode→timecode change exactly the delay delta), or `Replace` (the legacy step, only for a
+  source with no ASRC resampler, counted as `audio_steps=`). The slew rides the resampler:
+  `asrc_process_audio` consumes `audio_slew_step_ns(remaining, callback dt)` at `AUDIO_SLEW_PPM`
+  (1000 ppm = 1 ms per second, 0.1 % pitch) and passes `slew_ppm − applied_ppm` to
+  `audio_resampler_set_compensation_ppm` (the plain `-applied_ppm` call — the #1325 anchor — stays
+  for the no-slew case); `source_output_audio_data` BOOKS each step: it subtracts it from
+  `next_audio_ts_min` through the one wrapping helper `audio_slew_book_ts_ns` /
+  `genlock_audio_slew_book_ts_ns` (so the 70 ms `TS_SMOOTHING_THRESHOLD` guard never snaps a slew
+  back to the old placement — the bench's `NoBooking` variant snaps once, 70.03 ms) and shifts the ASRC level setpoint by it (`asrc_compensator_shift_level_target`
+  also shifts the open window's readings, so a ramp stays error-free for the level loop). The servo's
+  own `applied_ppm` and its telemetry are untouched. **An owed slew is FOLDED when the ingest
+  places the packet anyway** (review round 1): a `Continue` / `Slew` packet that still ends up
+  placed (`!(push_back && audio_ts)` — a sync-offset change, or no `audio_ts` yet) lands at the
+  full new term, so `audio_placed_slew_fold_ns` shifts the level setpoint by the remaining slew
+  and clears it, or the resampler would keep stretching past the placement.
+- **Withhold, then place once.** A wall-clock-timecoded genlock source with no video delay yet is
+  `AudioHoldMode::Pending` (`audio_hold=pending`): its packets never enter the mix (they still reach
+  the audio callbacks/monitoring), for at most `AUDIO_WITHHOLD_MAX_NS` (10 s after the first genlock
+  packet, `genlock_audio_first_packet_ns`), so the first placement lands straight on the right delay.
+  After the window, and for a non-wall-clock audio timestamp, `AudioHoldMode::Latency` (the #1303
+  hold); a video delay that appears later is then SLEWED in.
+- **A shallow N==1 source's audio follows its LATCHED per-lock depth** (`genlock-n1-pin-derived-depth.md`,
+  the shallow section): the tracker takes `genlock_video_delay_lock_ms(D, measuring, interval)` —
+  a latched D → `round(D · interval)` applied as-is (constant between relocks, the EMA keeps running
+  for `video_delay_ms=`); no D yet but a window measuring → `GENLOCK_VIDEO_DELAY_LOCK_PENDING` (apply
+  nothing, so the audio stays withheld); otherwise 0 = the free Option-3 tracker (N>=2 sources).
 - **Between placements** packets append back to back, and the genlock ASRC (the rate servo
   disciplined against the wall clock plus its level loop) holds the captured depth. That is what
   absorbs the wall-vs-QPC drift; the placement only has to be right when it happens.
-- **The pairing offset is a PROXY.** `audio_pairing_offset_ms` = applied hold − measured delay. It
+- **The pairing offset is a PROXY.** `audio_pairing_offset_ms` = (applied hold − the slew still
+  owed, `audio_applied_delay_ns`) − measured delay: mid-slew it reads how far the audio still trails
+  (a one-frame re-time reads −33 ms at the start and walks to 0 over ~33 s; review round 2). That is
+  honest and has two visible effects: the audit's half-frame `audio_health=` reads
+  PairingOffsetExceeded for the first ~16 s of every one-frame re-time; a one-frame re-time can
+  also turn the LOCK widget DEGRADED (its strict 33 ms bound) for ~1–2 s at the slew start (the
+  settled residual on top of −33), and a TWO-frame re-time (a relock onto a much slower band,
+  −66 ms) for ~33 s — shorter than the lock-alert watchdog's 2-pass confirm (a 5 min timer), so a legitimate
+  relock cannot page; read `audio_slew_ms=` on the audit line before treating either as a fault. It
   never observes where the audio samples actually sit, so a wrong placement, or a depth the rate
   servo walked, would still read 0. Real A/V proof stays with an end-to-end measurement (the
   songplayer A/V gate, the camera-box E2E A/V gate).
@@ -160,31 +205,123 @@ follow whatever delay the video actually has.
   timecodes (it stays on the latency hold, and its audio really is off by that much). Both are
   honest readings; the start window is far shorter than the lock-alert watchdog's 2-pass confirm
   (a 5 min timer), so it cannot page on it.
-- **Deep sources are unaffected.** Stream `NDI 2ME PGM` and every strih/stream/imag input carry no
-  NDI audio (the certified table below), so their video path is byte-identical.
+- **Deep sources are unaffected in effect.** Stream `NDI 2ME PGM` and every strih/stream/imag input
+  carry no NDI audio (the certified table below), and a deep source's video keeps the pin rule: the
+  shallow halves act only on a non-deep source, and a deep source latches the pin rule's own
+  `base + 1` (the code path changed, the presented depth did not).
+
+**A timeline reset must PLACE, and the pairing offset reads the SAMPLES (live 25.9.2026 12:31).**
+After each SongPlayer song change on resolume the `sp-slow_video` mix-buffer level fell
+111 → 46 → 13 ms (the `asrc:` line's `level_avg`, the ASRC then re-capturing the low depth) while the
+audit read `audio_delay_ms=133 audio_pairing_offset_ms=0`; songplayer measured the audio +101 ms
+early. Mechanism: a >2 s audio timestamp jump runs `handle_ts_jump`, whose `reset_audio_data` puts the
+buffer start AND `next_audio_sys_ts_min` on the ARRIVAL instant, so the packet's pre-term timestamp
+equals it and OBS APPENDS it there — an append ignores `in.timestamp`, so the genlock term never
+reaches the samples. The latched D keeps the hold constant across the relock (`Continue`), so nothing
+re-placed it; the floating depth of 8151a12ac used to mask it by changing the hold. Fix, all in the
+pure module + mirror:
+- `audio_push_back_allowed(push_back, timeline_reset, mode)`: an ACTIVE hold never appends right
+  after the ingest reset its timeline in this packet. The ingest flags both reset sites
+  (`genlock_timeline_reset`) and corrects `push_back` BEFORE `genlock_audio_hold_action` reads it.
+- The ingest MEASURES every packet under `audio_buf_mutex`: `audio_actual_place_ns` (appended → the
+  buffer end `audio_ts + buffered`; placed → its own timestamp) minus the intended `in.timestamp`
+  (`audio_place_error_ns`), EMA 1/16 per packet (`audio_place_error_smooth_ns`), reset whenever the
+  hold is not active. `audio_pairing_offset_ms` now uses `audio_realized_delay_ns` = hold + that error
+  (an owed slew is in it; hold − owed slew only until a measurement exists), and the audit carries
+  `audio_place_err_ms=`. A hold missing from the samples reads as the gap, never 0.
+- The benches model OBS's append-after-reset (the `AudioLeg` used to re-place on every resync, which
+  hid the defect); every bench with a sender restart went RED on the old verdict (|A/V| 96.9 ms). The
+  measurement runs the PRODUCTION formula (`audio_actual_place_ns` over `audio_ts` = the mixer read
+  position 64 ms behind real time + the buffered length of an OBS-style buffer; after a reset
+  `audio_ts` = the arrival instant and an empty buffer), cross-checked against the modelled truth on
+  every packet (≤ 0.00001 ms). The shallow bench compares the REPORTED pairing offset with the TRUE
+  A/V of the samples on every settled tick (≤ 1.03 ms), and the anti-tautology `legacy_append` run
+  loses the hold (96.9 ms) and the audit reports it within 1.03 ms.
+- **Known limit: rejects at the FIRST lock can outlast the withhold.** While a first window measures,
+  the tracker is PENDING; three spread-rejects plus the latching window is 4 × 90 on-grid ticks
+  (12 s at 30 fps), past `AUDIO_WITHHOLD_MAX_NS` (10 s). The audio then plays on the #1303 latency
+  hold and the latched delay is slewed in (the existing, tested withhold-expiry path) — only on a
+  start that itself carries a multi-second transient.
+
+**Audio-thread stall probe (the FOH-click report, 25.9.2026).** The obs-vban raw-audio output on
+resolume sent with 308–378 ms gaps while the recording was clean. `obs-audio.c` `audio_callback`
+records the gap since the previous tick's entry and its own duration; the 60 s `#800` dump logs
+`audio-stall #1367: tick_gap_max_ms= callback_max_ms= ticks= ticks_over= tick_ms=` (ticks_over = gaps
+over 1.5 ticks) and resets. Healthy: `tick_gap_max_ms` near `tick_ms` (21.3 at 48 kHz), `ticks_over=0`.
+The genlock audio path takes no lock beyond the pre-existing `audio_buf_mutex`, calls no blocking API
+(two clock reads) and has no loop, so it is not a stall candidate. **Reading the probe (review round
+1):** `media-io/audio-io.c` runs `audio_callback` and then `do_audio_output` — every raw-audio output
+callback, obs-vban included — on the SAME thread, so a blocking output callback delays the NEXT entry:
+- `tick_gap_max_ms ≈ callback_max_ms` (both large) → the mixer / `execute_audio_tasks` stalled;
+- `tick_gap_max_ms ≫ callback_max_ms` → the output callbacks (obs-vban's send) or thread scheduling
+  stalled — NOT the mixer;
+- a clean probe (`ticks_over=0`) while VBAN still gaps → obs-vban's own send path (its socket /
+  sender thread), outside this thread.
+Anchored by `tests/audio_telemetry_800.rs` (both `audio_callback` returns close the probe's tick).
 
 **Lock-step anchors of THIS change** (all must move together): the std-only
 `tests/genlock_audio_timecode_placement_1367.rs` (tracker at the present tail after the presented
-frame, exactly one call site, the ingest seams, the offset reference, the audit tokens), the
-`tests/genlock_preload.rs` hold + shift anchors, the `genlock_n1_tick_wall_now(wall_now)` count of
-3 + the count-1 tracker read in `tests/genlock_release_cadence.rs`, and the matching
-`-notmatch` / `Count -ne 3` anchors in BOTH `windows-genlock*.yml`.
+frame, exactly one call site, the ingest seams incl. the withhold / action / slew / booking, the
+asrc_process_audio slew, the offset reference, the audit tokens; the old unconditional
+`push_back = false; asrc_compensator_shift_level_target(&source->asrc, genlock_audio_place_shift_ms(…));`
+must stay ABSENT), the `tests/genlock_preload.rs` slew + placement anchors, the
+`genlock_n1_tick_wall_now(wall_now)` count of 3 + the count-1 tracker read in
+`tests/genlock_release_cadence.rs`, and the matching `-notmatch` / `-match` / `Count -ne 3` anchors
+in BOTH `windows-genlock*.yml`.
 
 **The two-clock bench** (`src/genlock_audio_pairing_bench.rs`, a test-only child): wall and QPC
-clocks with 300 ms of drift over an hour, scripted depth changes, a sender restart (3 s silence,
-audio resync) and an OBS restart (all receiver state zeroed), a first-order ASRC (rate servo that
-locks after 5 s with τ = 20 s, plus a clamped P level loop). The A/V error is measured on every tick
-outside a 6 s window after each event. Production: max 1.80 ms. `LatchedOffset`: 150.8 ms.
-`LegacyLatency` (the #1303 hold): 130.3 ms. Single held ticks (1 in 15) cause no extra re-placement.
-A 2× source (60p on a 30p canvas) pairs at 1.80 ms when the presented frame is sampled, and at
-16.7 ms (`HeadSample`) when the queue head is. The bench's rate estimate converges on the TRUE
+clocks with 300 ms of drift over an hour, scripted depth changes of the FREE tracker (the N>=2
+path), a sender restart (3 s silence, audio resync) and an OBS restart (all receiver state zeroed),
+a first-order ASRC (rate servo that locks after 5 s with τ = 20 s, plus a clamped P level loop).
+The audio leg is `AudioLeg` (the production withhold / action / slew / level-shift decisions),
+shared with the shallow bench. The A/V error is measured on every tick outside a 6 s window after
+each event and outside a deliberate slew (1 ms per second toward the new depth). Production:
+|A/V| ≤ 5 ms, 3 placements (start, sender restart, OBS restart), 0 steps, every depth change a
+slew. `LatchedOffset` and `LegacyLatency` still fail (> 50 ms). A 2× source pairs on the presented
+frame; `HeadSample` over-reads by a source interval.
+
+**The shallow two-clock bench** (`src/genlock_shallow_av_bench.rs`, a child of the bench above)
+drives the REAL N==1 release port (`genlock_grid_bench::Fifo`, now with the shallow rule) from a
+jittery sender at the live floors (`NDI test` 22–31 ms → D 2, `sp-slow_video` 40–64 ms → D 3,
+`CG-obs` 28–40 ms straddling a frame → D 3), with an OBS restart and a sender restart per hour.
+Clean feed: the depth latches once per lock and never moves, 0 hold/shed/drain/underrun/late-hold,
+3 placements, 0 slews, 0 steps, |A/V| ≤ 1.97 ms. Disturbed feed (lost frames + 45 ms late spikes):
+≤ 1 correction per disturbance, back on D within the throttle window, the audio never moves.
+`shallow_depth_rule = false` on the same feed: the depth random-walks (modal depth < 90 % of
+presents) and the free tracker re-times the audio 36 times. A min-latency box REPORTS a floor
+over base + 1 and applies no depth (0 corrections). Review-round-1 scenarios: a band straddling
+the SECOND frame edge (50–80 ms) locks 4 frames; a band that rises mid-run with no gap
+(28–40 → 70–95 ms, every rounded floor = D) re-measures 3 → 4 at the rise — D 4 is presented from
+~1510 s, not only after the later sender restart — and slews the audio exactly once; a sender
+restart onto a slower band (60–80 ms) relatches 3 → 4 and slews once — 0 steps in all of them.
+(A 60–80 ms RISE floors at 2 or 3 and never re-measures; the first round's scenario used it and
+only passed through the sender-restart relatch — corrected in review round 2.) The SLEW window is
+measured on its own, on every presenting tick from the re-latch on (review round 3 — the settled
+gate reopens seconds after the slew starts, and the first seconds are the largest): while the audio
+walks onto the new hold it trails the video by ≤ 35.0 ms (rising) / 33.2 ms (sender restart) —
+bound `SLEW_MAX_AV_MS` = 40, the songplayer gate, and the peak must be ≥ 30 ms so the start is
+provably inside — for 990 ticks (33 s); the settled `|A/V| ≤ 5 ms` excludes those ticks. The
+40 ms slew bound is proven for ONE-frame re-times only: a two-frame re-time trails by up to ~66 ms
+for ~26 s and has no bench scenario yet (a follow-up candidate). The bench's rate estimate converges on the TRUE
 drift by construction, so it ASSUMES drift is absorbed between placements (the real servo is
 proven by `src/asrc_bench.rs`). What it proves is that each placement lands on the live offset.
 
 **Live acceptance (supervisor).** Full-bundle deploy on resolume, strih-lx and stream. On resolume
-the `sp-*_video` audit shows `audio_hold=timecode`, `audio_delay_ms` ≈ `video_delay_ms`, and
-`audio_pairing_offset_ms` within ±16 with `audio_health=0`. The songplayer post-deploy A/V gate
-(±40 ms) passes across two OBS restarts. The camera-box release E2E A/V gate stays green.
+the `sp-*_video` audit shows `audio_hold=timecode`, `audio_delay_ms` = the latched
+`shallow_depth × 33` (constant between restarts), `audio_pairing_offset_ms` within ±16 with
+`audio_health=0`, and `audio_slews=` / `audio_steps=` flat at 0 in steady state (`audio_withheld=`
+grows only in the first seconds after an OBS start). A depth change slews at 1 ms per second, so
+a 2-frame re-time takes ~67 s: read `audio_slew_ms=0` before trusting a post-restart A/V
+measurement (the E2E settle-wait does not wait on it yet). The songplayer post-deploy A/V gate
+(±40 ms, 0 dropouts) passes across two OBS restarts. The camera-box release E2E A/V gate stays
+green.
+
+**Known limit (not this slice): the ASRC servo's own stretch still drifts the TS-smoothing
+timeline.** The rate servo stretches the samples to follow the wall-vs-QPC drift, so
+`next_audio_ts_min` walks away from the source timestamps by the accumulated correction; at 70 ms
+(`TS_SMOOTHING_THRESHOLD`) the ingest re-places at the raw timestamp (a 70 ms snap, every
+`70 ms / drift` — ~2 h at resolume's ~10 ppm). The slew books its own steps out of that timeline;
+the servo's correction does not. Reported to the supervisor as a follow-up candidate.
 
 ## LOCK-indicator audio DEGRADE term — audible-but-expected-silent (#1303 part 3b/c — DONE)
 

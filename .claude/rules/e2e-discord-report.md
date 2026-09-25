@@ -22,6 +22,18 @@ the multi-page wall the owner hated or hide a real FAIL.
   (no `--json-chunks`) = the CI-log / manual-inspection rendering. UNCHANGED since #711. The Discord
   body no longer carries it; the full detail lives here + in the uploaded verdict JSON artifact.
 
+## The pixel-proof block (issue 1367) — a FAIL summary line, never on a PASS
+
+`scripts/lib/missing-slot-pixels.sh` merges a `missing_slot_pixels` block into the verdict JSON
+before the report is sent (the PNGs of the classified slots the merge could not extract). The FULL
+report lists every slot with its PNG paths and each box's status (`_section_missing_slot_pixels`).
+The summary adds ONE `🖼` line only on a FAIL, before the link (`_missing_slot_pixels_line`): it
+names the CI artifact (`recording-e2e-full-path`, which uploads `*-missing/**`) and the proof
+directory NAMES, never a dev1 `/tmp` path (the phone reader has no filesystem access). A PASS keeps
+the 3-line cap even when proofs were exported. The block
+is report-only evidence, never a gate: no `❌`, no `_blocking_failures` entry. No block / nothing
+exported renders byte-identical to before.
+
 ## The caller captures stdout `2>&1` and jq-parses it
 
 `scripts/lib/e2e-discord-report.sh` runs the composer with `--json-chunks 2>&1` and pipes to `jq`.

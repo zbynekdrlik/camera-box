@@ -531,7 +531,7 @@ jobs:
     # (intercom/vban, intercom/hub). The appliance jobs above run cargo at the ROOT WITHOUT
     # --workspace, so they never build/test the hub (they DO compile intercom-vban as a path
     # dep, but its tests only run here); THIS job is the members' first clippy + test + build.
-    # Pure tokio/axum/toml — no libv4l/libasound needed.
+    # tokio/axum/toml + the bundled libopus (built with cmake) — no libv4l/libasound needed.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -545,6 +545,12 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           key: intercom-hub
+
+      # The phones leg's Opus codec (issue 1345): the `opus` crate's `opusic-sys` builds the bundled
+      # libopus source with cmake and links it statically, so no libopus-dev is needed — but cmake
+      # is. Install it if the runner image ever drops it (a failed apt install fails this step).
+      - name: Ensure cmake (bundled libopus build)
+        run: command -v cmake >/dev/null || (sudo apt-get update && sudo apt-get install -y cmake)
 
       # Clippy -D warnings on the codec crate + the hub (all targets incl. the unit tests). Default
       # features = the Interkom picture `ndi` path (issue 1345 M3c): libloading is a RUNTIME dynamic
@@ -581,6 +587,30 @@ jobs:
           # Fail loud on a missing binary (renamed bin / wrong path) — never a green empty artifact.
           if-no-files-found: error
           path: target/release/intercom-hub
+
+  intercom-web-e2e:
+    name: intercom phone PWA E2E (issue 1345)
+    # Real-browser E2E of the phone interkom page (the 25.9.2026 phone UX rework): the REAL
+    # intercom/web client served by a stdlib stub hub (intercom/tests/e2e/stub_hub.py) with a Janus
+    # test double and Chromium fake media, at a 390x844 phone viewport. Auto-join receive-only with
+    # the mic off, the mic toggle + both live meters, tap-to-fullscreen, the reconnect state, the
+    # remembered name, the tap-for-sound layer — and an empty browser console in every test. No Rust
+    # build needed: the page is plain static files.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Node (intercom phone E2E)
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Install Playwright chromium (intercom phone E2E)
+        working-directory: intercom/tests/e2e
+        run: |
+          npm ci
+          npx playwright install --with-deps chromium
+      - name: intercom phone PWA E2E
+        working-directory: intercom/tests/e2e
+        run: npx playwright test
 
   build:
     name: Build
@@ -839,7 +869,7 @@ jobs:
     # (#notifications id). NOTE: the older n8n CLAUDE_DISCORD_WEBHOOK_URL relay
     # accepts POSTs (HTTP 200) but no longer DELIVERS to Discord, so the bot REST
     # API is used directly — Discord returns the created message object on success.
-    needs: [lint, test, coverage, mutants, python-tests, bkshading, bkshading-windows, intercom-hub, build, windows-probe, security, drift-guard, shellcheck, deploy-fleet]
+    needs: [lint, test, coverage, mutants, python-tests, bkshading, bkshading-windows, intercom-hub, build, windows-probe, security, drift-guard, shellcheck, deploy-fleet, intercom-web-e2e]
     if: ${{ failure() }}
     runs-on: ubuntu-latest
     steps:

@@ -650,13 +650,13 @@ fn n1_pin_derived_depth_present_and_wired_1367() {
         );
     }
     // Both N==1 decisions read the depth at the SCHEDULED instant, never the processing wall, and
-    // so does the audio pairing's video-delay tracker at the present tail (issue 1367 Option 3):
-    // three readers.
+    // so do the shallow GAP hold (design 5833339163) and the audio pairing's video-delay tracker at
+    // the present tail (issue 1367 Option 3): four readers.
     assert_eq!(
         src.matches("genlock_n1_tick_wall_now(wall_now)").count(),
-        3,
-        "{OBS_SOURCE}: issue 1367 (review round 2) — the SHED and the HOLD wrappers and the audio \
-         video-delay tracker must all read at the render tick's scheduled instant \
+        4,
+        "{OBS_SOURCE}: issue 1367 (review round 2) — the SHED, the HOLD and the GAP-hold wrappers \
+         and the audio video-delay tracker must all read at the render tick's scheduled instant \
          (genlock_n1_tick_wall_now(wall_now))."
     );
     assert_eq!(
@@ -669,9 +669,9 @@ fn n1_pin_derived_depth_present_and_wired_1367() {
     assert_eq!(
         src.matches("return genlock_n1_tick_is_on_grid(tick_wall, interval) &&")
             .count(),
-        2,
-        "{OBS_SOURCE}: issue 1367 (review round 3) — the SHED and the HOLD wrappers must both \
-         defer while the scheduled tick is off the grid (a wall step)."
+        3,
+        "{OBS_SOURCE}: issue 1367 (review round 3) — the SHED, the HOLD and the GAP-hold wrappers \
+         must all defer while the scheduled tick is off the grid (a wall step)."
     );
     assert!(
         !src.contains("GENLOCK_N1_TICK_EARLY_MARGIN_NS") && !src.contains("genlock_n1_rounded_depth_frames"),

@@ -2,8 +2,9 @@
 //! noble image on 2026-09-13/14, each fixed in `scripts/setup-device.sh` (+ a `verify-device.sh`
 //! constant move and a new `scripts/lib/ndi-provision.sh`; D5/D6 add a `scripts/lib/efi-boot-entry.sh`):
 //!
-//!   D1. STEP 17b remoteos-mcp install died on the noble pip-vs-debian RECORD conflict; the fix
-//!       exports `PIP_BREAK_SYSTEM_PACKAGES=1 PIP_IGNORE_INSTALLED=1` for the installer's own pip.
+//!   D1. STEP 17b remoteos-mcp install died on the noble pip-vs-debian RECORD conflict; the first
+//!       fix exported `PIP_BREAK_SYSTEM_PACKAGES=1 PIP_IGNORE_INSTALLED=1` for the installer's pip.
+//!       Since issue 1361 the agent installs into its own venv, so the conflict cannot occur.
 //!   D2. STEP 4 fetched libndi from ONE hard-coded peer (`NDI_PEER`=cam1); re-provisioning cam1
 //!       itself hit a "nothing to fetch" dead-end. The fix derives an ordered peer list from
 //!       camera-set.sh (`ndi_bootstrap_peer_list`, excluding this box), tries each, then falls back
@@ -168,33 +169,36 @@ fn ndi_provision_lib_single_sources_the_pin_1066() {
 // D1 -- STEP 17b noble pip-vs-debian conflict
 // ============================================================================
 
-/// The remoteos-mcp installer must run with the pip env vars that make it install its deps freshly
-/// under /usr/local (shadowing the RECORD-less debian copies) -- and they must attach to the
-/// installer invocation.
+/// D1 is now structurally impossible (issue 1361): the agent installs into its OWN venv
+/// (`scripts/lib/remoteos-mcp.sh`), so its pip never touches the Debian-packaged, RECORD-less
+/// system packages. No `--break-system-packages` / `PIP_BREAK_SYSTEM_PACKAGES` workaround is left,
+/// the pip is the venv's own, and the #555 no-inline-pip guard still holds.
 #[test]
 fn setup_device_remoteos_install_uses_break_system_and_ignore_installed_1066() {
     let body = setup();
-    for needle in ["PIP_BREAK_SYSTEM_PACKAGES=1", "PIP_IGNORE_INSTALLED=1"] {
-        assert!(
-            on_noncomment_line(&body, needle),
-            "STEP 17b must export `{needle}` for the remoteos-mcp installer so its pip installs \
-             deps freshly instead of failing to uninstall debian's RECORD-less packages (#1066)"
-        );
+    let lib = read("scripts/lib/remoteos-mcp.sh");
+    for text in [&body, &lib] {
+        for banned in [
+            "PIP_BREAK_SYSTEM_PACKAGES",
+            "PIP_IGNORE_INSTALLED",
+            "--break-system-packages",
+        ] {
+            assert!(
+                !on_noncomment_line(text, banned),
+                "`{banned}` must be gone: the agent installs into its own venv, never the system python (issue 1361)"
+            );
+        }
     }
-    let env = body
-        .find("PIP_BREAK_SYSTEM_PACKAGES=1 PIP_IGNORE_INSTALLED=1")
-        .expect("the pip env prefix must exist");
-    let run = body
-        .find("bash \"$REMOTEOS_MCP_INSTALLER_TMP\"")
-        .expect("the installer invocation must exist");
     assert!(
-        env < run && run - env < 200,
-        "the pip env prefix (idx {env}) must attach to the installer invocation (idx {run}) (#1066)"
+        on_noncomment_line(
+            &lib,
+            "\"${venv}/bin/python\" -m pip install --no-cache-dir --upgrade"
+        ),
+        "the pip that installs the agent must be the venv's own (issue 1361)"
     );
-    // The #555 no-inline-pip guard must stay honoured -- the fix must NOT add a bare git pip line.
     assert!(
-        !body.contains("remoteos-mcp.git"),
-        "the pip fix must NOT inline a bare `pip install ...remoteos-mcp.git` (#555 / #1066)"
+        !body.contains("remoteos-mcp.git") && !lib.contains("remoteos-mcp.git"),
+        "never a bare `pip install ...remoteos-mcp.git` (#555 / #1066)"
     );
 }
 

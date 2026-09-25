@@ -28,6 +28,11 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # issue 1357: the ONE grader for the shared OBS-box appliance baseline (verify-imag.sh runs it too).
 # shellcheck source=scripts/lib/obs-box-baseline-verify.sh
 . "${HERE}/lib/obs-box-baseline-verify.sh"
+# issue 1361: item 8 grades the shared remoteos-mcp venv install, item 35 the Downstream Keyer plugin.
+# shellcheck source=scripts/lib/remoteos-mcp.sh
+. "${HERE}/lib/remoteos-mcp.sh"
+# shellcheck source=scripts/lib/obs-downstream-keyer.sh
+. "${HERE}/lib/obs-downstream-keyer.sh"
 # issue 1317: the dantesync item grades a FRESH offset via the SHARED freshness-aware verdict (the
 # cambox verify-device (d) shape) instead of reading a Windows/imag dantesync JSON config file a
 # flag-based Linux client never creates. clock-offset-guard.sh has its own source-guard, so sourcing
@@ -258,8 +263,24 @@ fi
 # 7) bundle-state :8899.
 tcp_open "$WS_HOST" 8899 && ok "bundle-state :8899 answering" || bad "bundle-state :8899 not answering"
 
-# 8) remoteos-mcp agent.
-systemctl is-active remoteos-mcp >/dev/null 2>&1 && ok "remoteos-mcp active" || note "remoteos-mcp not active (install-linux.sh, step 10)"
+# 8) remoteos-mcp agent (issue 1361): the shared venv install -- the unit runs the /opt/remoteos-mcp-venv
+#    python with the key in its 0600 root EnvironmentFile (never an --auth-key in the unit), the venv
+#    imports remoteos, the service is enabled + active, and an unauthenticated /mcp request is refused
+#    (401). A box still on the hand-made / upstream-
+#    installer unit FAILs until setup-strih.sh step 10 re-runs (it keeps the box's key).
+_rm_unit="$(cat "$(remoteos_mcp_unit_path)" 2>/dev/null || true)"
+_rm_env="$(stat -c '%a %U' "$(remoteos_mcp_env_file)" 2>/dev/null || true)"
+_rm_import=0
+"$(remoteos_mcp_venv_dir)/bin/python" -c 'import remoteos' >/dev/null 2>&1 && _rm_import=1
+_rm_en="$(systemctl is-enabled remoteos-mcp 2>/dev/null || true)"
+_rm_act="$(systemctl is-active remoteos-mcp 2>/dev/null || true)"
+# An unauthenticated POST to the local agent must be refused (401): an empty key turns auth OFF.
+_rm_unauth="$(remoteos_mcp_unauth_code)"
+_rm_verdict="$(remoteos_mcp_verdict "$_rm_unit" "$_rm_env" "$_rm_import" "$_rm_en" "$_rm_act" "$_rm_unauth")" || true
+case "$_rm_verdict" in
+  ok*) ok "remoteos-mcp ${_rm_verdict#ok }" ;;
+  *) bad "remoteos-mcp ${_rm_verdict#FAIL: } -- re-run setup-strih.sh step 10 (issue 1361)" ;;
+esac
 
 # 9) PipeWire program audio (issue 1344): the DERIVED verdict — the strih-program null sink + the OBS
 #    `ASIO zvuk` pulse_input_capture + (when the hub is active) the program-feed rx. The FOH-live
@@ -300,6 +321,36 @@ case "$AUDIO_VERDICT" in
 esac
 # talkback capture (report-only): the MiniFuse 4 is the operator talkback mic (the hub reads it).
 if arecord -l 2>/dev/null | grep -qi 'MiniFuse'; then note "talkback: MiniFuse 4 present (operator mic)"; else note "talkback: MiniFuse 4 not detected (plug it in before go-live)"; fi
+
+# 9b) MiniFuse period + graph quantum (issue 1345, owner accepted 25.9.2026): both operator-session
+#     drop-ins present with the rendered content (FAIL when missing or drifted -- the buzz / robotic
+#     cameraman fixes a reprovision must keep), and the LIVE graph held at quantum 1024
+#     (`pw-metadata -n settings`, read in the operator session as root like item 9). The live read is
+#     REPORTED: PASS when held, NOTE otherwise (the drop-in applies only at the next PipeWire start).
+for _q_pair in \
+  "${USER_HOME}/.config/wireplumber/wireplumber.conf.d/51-minifuse-output-period.conf|strih_wireplumber_minifuse_output_period_conf" \
+  "${USER_HOME}/.config/pipewire/pipewire.conf.d/51-strih-quantum-1024.conf|strih_pipewire_quantum_conf"; do
+  _q_file="${_q_pair%%|*}"; _q_fn="${_q_pair##*|}"
+  if [ -f "$_q_file" ] && cmp -s "$_q_file" <("$_q_fn"); then
+    ok "(audio-quantum) ${_q_file##*/} present with the provisioned content"
+  else
+    bad "(audio-quantum) ${_q_file} missing or drifted from ${_q_fn} -- re-run setup-strih.sh step 12 (issue 1345)"
+  fi
+done
+if command -v pw-metadata >/dev/null 2>&1; then
+  if [ "$(id -u)" = 0 ]; then
+    PW_SETTINGS="$(sudo -u "${STRIH_LX_USER:-newlevel}" XDG_RUNTIME_DIR="/run/user/$(id -u "${STRIH_LX_USER:-newlevel}")" timeout 5 pw-metadata -n settings 2>/dev/null || true)"
+  else
+    PW_SETTINGS="$(timeout 5 pw-metadata -n settings 2>/dev/null || true)"
+  fi
+else
+  PW_SETTINGS=""
+fi
+if Q_DETAIL="$(strih_lx_graph_quantum_ok "$PW_SETTINGS")"; then
+  ok "(audio-quantum) ${Q_DETAIL}"
+else
+  note "(audio-quantum) ${Q_DETAIL} -- report-only; restart the operator PipeWire session (or reboot) so the min-quantum drop-in applies"
+fi
 
 # 10) NVENC encoder available.
 { ffmpeg -hide_banner -encoders 2>/dev/null; cat "$LOG" 2>/dev/null; } | strih_lx_nvenc_available_ok && ok "NVENC encoder available" || bad "NVENC encoder not available"
@@ -777,6 +828,22 @@ else
   else
     bad "NIC xhci IRQ affinity FAILED (iface ${IRQ_IFACE}, irqs ${IRQ_NUMS}): each must be a single cpu >= first cpu_atom (${ATOM_FIRST}) AND advancing over 2 s"
   fi
+fi
+
+# 35) Downstream Keyer OBS plugin (issue 1361): setup-strih.sh step 4c installs the pinned upstream
+#     plugin into the /usr prefix OBS loads; FAIL unless the installed .so has the pinned sha256 (the
+#     exact file strih-lx ran by hand before) and its locale is present. Placed BEFORE item 34: the
+#     item-34 behaviour test runs the text from "# 34)" up to "# 32)" with only ndi-discovery.sh
+#     sourced, and nothing may sit after item 33 (its test slices "# 33)" to the closing summary).
+_dsk_so="$(obs_dsk_so_path "${STRIH_LIBDIR:-/usr/lib/x86_64-linux-gnu}")"
+_dsk_sha="$(sha256sum "$_dsk_so" 2>/dev/null | awk '{print $1}' || true)"
+_dsk_loc=0
+[ -f "$(obs_dsk_data_dir "${STRIH_SHAREDIR:-/usr/share}")/locale/en-US.ini" ] && _dsk_loc=1
+_dsk_verdict="$(obs_dsk_verdict "$_dsk_sha" "$(obs_dsk_so_sha256)" "$_dsk_loc")" || true
+if [ "$_dsk_verdict" = ok ]; then
+  ok "(downstream-keyer) $(obs_dsk_version) installed at ${_dsk_so} (pinned sha256)"
+else
+  bad "(downstream-keyer) ${_dsk_verdict#FAIL: } at ${_dsk_so} -- re-run setup-strih.sh step 4c (issue 1361)"
 fi
 
 # 34) NDI discovery receiver config (issue 1342): networks.ips lists every PINNED managed NDI sender

@@ -34,6 +34,10 @@
 #   - at [8/8d]: scp that exact cg file to dev1 (or run the operator's CG_CHAIN_PULL_CMD), fed to the
 #     merge as `--cg <path>`, which emits the REPORT-ONLY cg_chain section (src/cg_chain_gate.rs;
 #     never changes overall_pass).
+#   - at [8/8a]/[8/8b] + the merge (issue 1302 slice 2): the strih/stream extracts and the merge get
+#     `--cg-chain-burns` (the SongPlayer + cg ids join their expected-burn sets), and the merge gets
+#     this run's `--cg-window`, so the strih/stream hops are judged inside the CG window at the
+#     60->30 decimation step.
 #   - in cleanup(): the #246/#844 leak-guard — burn OFF (verified on /health, retried with a SHORT
 #     per-request timeout, a loud LEAK line if it never reads false), StopRecord cg OBS, and every
 #     scene snapshot of this run restored, even on an early abort.
@@ -365,6 +369,31 @@ cg_chain_window() {
   else
     echo "[cg_chain] WARNING: bad CG window bounds (start=$start_ns end=$end_ns) — window record not written" >&2
   fi
+  return 0
+}
+
+# ---- (d) the verdict inputs for the strih/stream hops (issue 1302 slice 2) ----------------------
+
+# The recording-verdict flag that adds the SongPlayer + cg OBS burn ids to the strih/stream
+# expected-burn sets: `--cg-chain-burns` when the profile is on, else NOTHING. The harness splices it
+# as ${CG_CHAIN_BURN_FLAG:+"$CG_CHAIN_BURN_FLAG"}, so a normal run's extract argv is byte-identical.
+# Pure.
+cg_chain_extract_burn_flag() {
+  if cg_chain_enabled; then printf '%s' '--cg-chain-burns'; fi
+  return 0
+}
+
+# Append the CG merge inputs to the caller's MERGE_ARGS array: `--cg-chain-burns` (the merge's
+# expected-burn check must match the extracts), plus `--cg-window <file>` when THIS run's window
+# record exists (cg_chain_window_file is keyed to RUN_ID, so another run's window is never fed). The
+# verdict judges the strih/stream cg_chain hops only inside that window. A no-op unless CG_CHAIN=1.
+# ALWAYS returns 0.
+cg_chain_merge_args_append() {
+  cg_chain_enabled || return 0
+  local win
+  MERGE_ARGS+=(--cg-chain-burns)
+  win="$(cg_chain_window_file)"
+  if [ -f "$win" ]; then MERGE_ARGS+=(--cg-window "$win"); fi
   return 0
 }
 

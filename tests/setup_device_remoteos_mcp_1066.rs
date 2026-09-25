@@ -5,9 +5,9 @@
 //! (`remoteos-mcp.service` on :8092) surviving only as a hand-install on each live box.
 //!
 //! The agent's real home is the SEPARATE `zbynekdrlik/remoteos-mcp` project (documented in the
-//! `ops` skill, #555): camera-box does NOT re-implement or re-pin it — it INVOKES that project's
-//! own canonical `install-linux.sh`, matching the standing "use the installer, never a bare pip
-//! command" discipline. The `--auth-key` is a full-shell-RCE bearer token, so it is sourced from
+//! `ops` skill, #555). Since issue 1361 every box installs it through the ONE shared lib
+//! `scripts/lib/remoteos-mcp.sh`: the project's own source + constraints.txt into a venv at
+//! `/opt/remoteos-mcp-venv` (the upstream `install-linux.sh` pip-installed into the system python). The `--auth-key` is a full-shell-RCE bearer token, so it is sourced from
 //! an env var (like this script's other secrets `CAM_PW`/`GH_TOKEN`) or generated on-box by the
 //! installer — NEVER committed to this repo.
 //!
@@ -28,6 +28,7 @@ fn manifest_dir() -> PathBuf {
 
 const SETUP: &str = "scripts/setup-device.sh";
 const VERIFY: &str = "scripts/verify-device.sh";
+const LIB: &str = "scripts/lib/remoteos-mcp.sh";
 
 fn read(rel: &str) -> String {
     let p = manifest_dir().join(rel);
@@ -39,6 +40,11 @@ fn setup() -> String {
 }
 fn verify() -> String {
     read(VERIFY)
+}
+
+fn on_code_line(body: &str, needle: &str) -> bool {
+    body.lines()
+        .any(|l| l.contains(needle) && !l.trim_start().starts_with('#'))
 }
 
 // ============================================================================
@@ -61,43 +67,52 @@ fn setup_device_provisions_remoteos_mcp_step_17b_1066() {
     );
 }
 
-/// It must delegate to the CANONICAL installer of the separate remoteos-mcp project — never
-/// re-implement the install here (the #555 discipline; identical guard to the imag test).
+/// Since issue 1361 it installs through the ONE shared lib `scripts/lib/remoteos-mcp.sh` (the
+/// project's own source + constraints.txt into the `/opt/remoteos-mcp-venv` venv, the shape the
+/// production strih-lx box runs) — never the upstream system-pip `install-linux.sh` and never a bare
+/// pip of the agent in this script (the #555 discipline).
 #[test]
 fn setup_device_uses_canonical_remoteos_installer_not_inline_pip_1066() {
     let body = setup();
     assert!(
-        body.contains("install-linux.sh"),
-        "{SETUP}: must invoke the canonical remoteos-mcp `install-linux.sh` (#555: use the installer)"
+        on_code_line(&body, ". \"$HERE/lib/remoteos-mcp.sh\""),
+        "{SETUP}: must source scripts/lib/remoteos-mcp.sh (issue 1361)"
     );
     assert!(
-        body.contains("zbynekdrlik/remoteos-mcp"),
-        "{SETUP}: must name the canonical `zbynekdrlik/remoteos-mcp` project as the install source (#1066)"
+        on_code_line(&body, "remoteos_mcp_install \"$(remoteos_mcp_headless_user)\" headless enable-only"),
+        "{SETUP}: STEP 17b must run the shared install as the box's agent account (SUDO_USER, else the existing unit's User=, else root), headless, enable-only (the cam-box convention)"
+    );
+    assert!(
+        !on_code_line(&body, "install-linux.sh"),
+        "{SETUP}: the upstream install-linux.sh (system pip, the Debian RECORD conflicts) is retired (issue 1361)"
+    );
+    assert!(
+        read(LIB).contains("zbynekdrlik/remoteos-mcp"),
+        "{LIB}: must name the canonical `zbynekdrlik/remoteos-mcp` project as the install source (#1066)"
     );
     assert!(
         !body.contains("remoteos-mcp.git"),
-        "{SETUP}: must NOT inline a bare `pip install git+...remoteos-mcp.git` — that belongs in the \
-         canonical installer, not here (#555: never a bare pip command; never re-pin the agent here)"
+        "{SETUP}: must NOT inline a bare `pip install git+...remoteos-mcp.git` (#555)"
     );
 }
 
-/// The bearer token must come from an env var / be box-generated, and land only in a chmod-600
-/// config file — never committed to the repo (security-boundary).
+/// The bearer token must come from an env var / the box / be box-generated, and land only in 0600
+/// files — never committed to the repo (security-boundary).
 #[test]
 fn setup_device_remoteos_auth_key_is_env_sourced_and_never_committed_1066() {
-    let body = setup();
+    let lib = read(LIB);
     assert!(
-        body.contains("REMOTEOS_MCP_AUTH_KEY"),
-        "{SETUP}: the remoteos-mcp auth key must be sourced from the REMOTEOS_MCP_AUTH_KEY env var \
+        lib.contains("REMOTEOS_MCP_AUTH_KEY"),
+        "{LIB}: the remoteos-mcp auth key must be sourced from the REMOTEOS_MCP_AUTH_KEY env var \
          (same env-secret convention as CAM_PW/GH_TOKEN), never hardcoded (#1066, security-boundary)"
     );
     assert!(
-        body.contains("/etc/remoteos-mcp/config.json"),
-        "{SETUP}: the auth key must be written to /etc/remoteos-mcp/config.json (the installer's config), never the repo (#1066)"
+        lib.contains("config.json"),
+        "{LIB}: the key is kept in /etc/remoteos-mcp/config.json (the upstream key store) (#1066)"
     );
     assert!(
-        body.contains("chmod 600"),
-        "{SETUP}: the pre-seeded remoteos-mcp config must be chmod 600 — it holds a full-shell bearer token (#1066)"
+        lib.contains("600 \"config.json\"") && lib.contains("600 \"EnvironmentFile\""),
+        "{LIB}: both key files must be written 0600 — they hold a full-shell bearer token (#1066)"
     );
 }
 
@@ -106,36 +121,42 @@ fn setup_device_remoteos_auth_key_is_env_sourced_and_never_committed_1066() {
 /// live-runtime state during provisioning). It must fail loud if the unit is not enabled.
 #[test]
 fn setup_device_asserts_remoteos_service_enabled_after_install_1066() {
-    let body = setup();
+    let lib = read(LIB);
     assert!(
-        body.contains("systemctl is-enabled remoteos-mcp"),
-        "{SETUP}: after install, must read `systemctl is-enabled remoteos-mcp` to gate on the unit's \
+        lib.contains("systemctl is-enabled remoteos-mcp"),
+        "{LIB}: after install, must read `systemctl is-enabled remoteos-mcp` to gate on the unit's \
          reboot-survival — a fresh box must come up with the :8092 MCP surface on next reboot (#1066)"
     );
     assert!(
-        body.contains("= \"enabled\""),
-        "{SETUP}: the enable gate must compare the LITERAL is-enabled state to `enabled` and `fail` \
-         otherwise — `is-enabled --quiet`'s exit code passes for a `static` unit that is NOT pulled in \
-         at boot, which is the exact reboot-survival property this gate claims to prove (review 🔵, #1066)"
+        lib.contains("= \"enabled\" ]"),
+        "{LIB}: the enable gate must compare the LITERAL is-enabled state to `enabled` — \
+         `is-enabled --quiet`'s exit code passes for a `static` unit that is NOT pulled in at boot (#1066)"
+    );
+    assert!(
+        setup().contains("|| fail \"remoteos-mcp agent install failed"),
+        "{SETUP}: a failed install must `fail` STEP 17b (#1066)"
     );
 }
 
-/// The config pre-seed MUST come BEFORE the installer runs — `install-linux.sh` only REUSES an
-/// existing key, so a reversed order would silently generate a FRESH key and break dev1's pinned
-/// `.mcp.json` while the gate still passes (the same review 🔵 the imag test pins).
+/// The key is RESOLVED (env, else the box's existing config / unit) BEFORE any key file is written,
+/// so a re-provision keeps the key dev1's `.mcp.json` pins (the same review 🔵 the imag test pins).
 #[test]
 fn setup_device_seeds_remoteos_config_before_running_installer_1066() {
-    let body = setup();
-    let seed = body.find("\"auth_key\"").expect(
-        "must pre-seed /etc/remoteos-mcp/config.json with an auth_key field before install",
-    );
-    let run = body
-        .find("bash \"$REMOTEOS_MCP_INSTALLER_TMP\"")
-        .expect("must run the fetched canonical installer via bash");
+    let lib = read(LIB);
+    let install = lib
+        .find("remoteos_mcp_install() {")
+        .expect("the install function");
+    let resolve = install
+        + lib[install..]
+            .find("remoteos_mcp_resolve_key \"${REMOTEOS_MCP_AUTH_KEY:-}\"")
+            .expect("the key resolution");
+    let write = install
+        + lib[install..]
+            .find("_remoteos_mcp_write \"$(remoteos_mcp_config_json_path)\"")
+            .expect("the config.json write");
     assert!(
-        seed < run,
-        "{SETUP}: the config pre-seed (idx {seed}) must precede the installer invocation (idx {run}) \
-         so the installer reuses the known key instead of generating a fresh one (#1066)"
+        resolve < write,
+        "{LIB}: the key must be resolved (idx {resolve}) before config.json is written (idx {write}) (#1066)"
     );
 }
 

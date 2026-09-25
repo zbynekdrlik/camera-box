@@ -592,6 +592,15 @@ nm -D -u "\$OBS_FRONTEND_REAL" 2>/dev/null | grep 'obs_display_set_render_diviso
 genlock_write_markers "\$MARKER_DIR" '${gsha_bq}' '${dsha_bq}'
 cp -a "\$MANIFEST" "\$MARKER_DIR/BUNDLE_MANIFEST.json"
 
+# (5a) issue 1367: the genlock MIN-LATENCY imag marker libobs reads (absent = fail OPEN), as the desktop
+#      user BEFORE the restart (7, which reuses IMAG_USER / IMAG_UID set here). Idempotent.
+IMAG_USER="\${SUDO_USER:-newlevel}"
+IMAG_UID="\$(id -u "\$IMAG_USER" 2>/dev/null || true)"; [ -n "\$IMAG_UID" ] || { echo "#789 IMAG FAIL: no such user \$IMAG_USER" >&2; exit 4; }
+IMAG_HOME="\$(getent passwd "\$IMAG_USER" | cut -d: -f6 || true)"; [ -n "\$IMAG_HOME" ] || { echo "#789 IMAG FAIL: no home directory for \$IMAG_USER (getent)" >&2; exit 4; }
+install -d -o "\$IMAG_USER" -g "\$IMAG_USER" "\$IMAG_HOME/.camera-box"
+install -o "\$IMAG_USER" -g "\$IMAG_USER" -m 0644 /dev/null "\$IMAG_HOME/.camera-box/genlock-min-latency"
+echo "  issue 1367: genlock min-latency box marker present (\$IMAG_HOME/.camera-box/genlock-min-latency)"
+
 # (6) box-backup RETENTION (bod 5) -- keep the newest \$KEEP dated dirs; delete the rest ONLY when the
 #     operator confirmed (--yes), else print the plan.
 echo "RETENTION PLAN (keep newest \$KEEP of \$BACKUP_ROOT/*-789):"
@@ -607,8 +616,6 @@ done
 #     exported; we act as \${SUDO_USER:-newlevel}. Stop-then-pkill guarantees the OLD obs (old libobs
 #     still mapped -- the #912 stop-race; and any stray from a prior background-launch deploy) is gone
 #     before the fresh supervised start. This mirrors the strih AHK stop->verify->relaunch ordering.
-IMAG_USER="\${SUDO_USER:-newlevel}"
-IMAG_UID="\$(id -u "\$IMAG_USER")"
 # env sets XDG_RUNTIME_DIR + DBUS in the CHILD, bypassing sudo env_reset (a bare sudo -u user VAR=val
 # form can be stripped by sudoers env policy -- a stripped XDG_RUNTIME_DIR silently loses the user bus
 # and re-creates the exact unsupervised-launch failure this fix exists to kill; DBUS mirrors
@@ -620,7 +627,7 @@ prev_log_lines="\$(wc -l < "\$OBS_START_LOG" 2>/dev/null || echo 0)"
 uctl stop imag-obs.service 2>/dev/null || true
 pkill -9 -x obs 2>/dev/null || true
 sleep 2
-rm -f "/home/\$IMAG_USER/.config/obs-studio/.sentinel/"* 2>/dev/null || true
+rm -f "\$IMAG_HOME/.config/obs-studio/.sentinel/"* 2>/dev/null || true
 uctl reset-failed imag-obs.service 2>/dev/null || true
 uctl restart imag-obs.service || { echo "#789 IMAG FAIL: systemctl --user restart imag-obs.service failed -- the supervised unit did not come up" >&2; exit 4; }
 

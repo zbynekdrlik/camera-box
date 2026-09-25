@@ -175,6 +175,14 @@ set -euo pipefail
 #       the dev1 genlock-lock alert watchdog (which lists imag in the obs-fleet genlock-lock facet)
 #       stops SKIPping imag ":8899 not fetchable" and can page an imag genlock LOCK loss. Pure ssh
 #       reads + a bounded on-box curl (side-effect free), so it runs BEFORE check (o)'s OBS restart.
+#   (bb) the shared OBS-box appliance baseline (issue 1357): the ONE grader verify-strih.sh runs too.
+#   (bc) genlock MIN-LATENCY box marker (issue 1367): ~/.camera-box/genlock-min-latency exists for the
+#       desktop user. The vendored libobs reads it once as the imag identity and caps a shallow
+#       source's latched depth at base + 1 (reporting the cap); an ABSENT marker fails OPEN -- an
+#       imag input could be deepened past its 3 ms floor -- so its absence FAILs here. A pure ssh
+#       read, BEFORE check (o)'s OBS restart.
+#   (bd) the OBS check (o) just restarted logs `genlock-min-latency: ON` (issue 1367): libobs reads
+#       the marker once per process, so this proves the LOADED libobs honours it. After (o).
 #
 # Every remote helper this gate shells out to (wmctrl, python3) is preflighted BY NAME before use
 # (#822 pattern) -- a missing tool is reported as a missing tool, never folded into a failed
@@ -1588,6 +1596,20 @@ while IFS='|' read -r _bl_item _bl_state _bl_detail; do
   fi
 done < <(obs_box_baseline_verdict <<<"${BASELINE_FACTS:-}" || true)
 
+# (bc) genlock MIN-LATENCY box marker (issue 1367) ------------------------------------------------
+# libobs has no other box identity (the imag and strih inputs share their names), so this file IS the
+# imag identity: its absence fails OPEN (a shallow imag input would latch base + 2 or deeper instead of
+# being capped + reported). setup-imag.sh step 13 and the fleet deploy's imag leg both write it.
+rc=0
+MINLAT_STATE="$(ssh_box 'if [ -f "$HOME/.camera-box/genlock-min-latency" ]; then echo present; else echo absent; fi')" || rc=$?
+if [ "$rc" -ne 0 ] || [ -z "$MINLAT_STATE" ]; then
+  fail "(bc) genlock min-latency marker unreadable (ssh rc=$rc) (issue 1367)"
+elif [ "$MINLAT_STATE" = present ]; then
+  ok "(bc) genlock min-latency marker present -- a shallow imag input is capped at base + 1 and reported (issue 1367)"
+else
+  fail "(bc) genlock min-latency marker ABSENT (~/.camera-box/genlock-min-latency) -- libobs would deepen a shallow imag input past base + 1 (re-run setup-imag.sh or the fleet deploy, issue 1367)"
+fi
+
 # (o) both projectors PRESENT (never self-established) + PERSIST across a real restart (#756/#840)
 # ---------------------------------------------------------------------------------------------
 # #840: this check used to call obs_phase2.py's projector-OPEN action itself, then count via wmctrl --
@@ -1681,6 +1703,28 @@ else
         fail "projectors did NOT persist across a real OBS restart within ${IMAG_OBS_PROJECTOR_POLL_S}s -- Multiview=${MV_COUNT2:-0} Program=${PGM_COUNT2:-0} after 'systemctl --user restart imag-obs.service' (#840/#890)"
       fi
     fi
+  fi
+fi
+
+# (bd) the RESTARTED OBS took the min-latency marker (issue 1367, review round 2) ------------------
+# (bc) proves the file; libobs reads it ONCE per process (genlock_min_latency_box) and logs the
+# verdict on the first genlock present tick, so only the OBS that check (o) just restarted proves the
+# loaded libobs honours it. Runs only after a restart that brought the projectors back.
+if [ "${persist_ok:-0}" -eq 1 ]; then
+  MINLAT_LOG=""
+  minlat_deadline=$((SECONDS + IMAG_OBS_PROJECTOR_POLL_S))
+  while :; do
+    MINLAT_LOG="$(ssh_box "grep -ho 'genlock-min-latency: [A-Za-z]*' \"\$(ls -t \$HOME/.config/obs-studio/logs/*.txt 2>/dev/null | head -1)\" 2>/dev/null | tail -1" || true)"
+    [ -n "$MINLAT_LOG" ] && break
+    [ "$SECONDS" -ge "$minlat_deadline" ] && break
+    sleep 5
+  done
+  if [ "$MINLAT_LOG" = "genlock-min-latency: ON" ]; then
+    ok "(bd) the restarted OBS logs 'genlock-min-latency: ON' -- its libobs caps a shallow imag input at base + 1 (issue 1367)"
+  elif [ -z "$MINLAT_LOG" ]; then
+    fail "(bd) no genlock-min-latency line logged within ${IMAG_OBS_PROJECTOR_POLL_S}s of the restart -- no genlock present tick yet (are any NDI inputs live?), OR the loaded libobs predates the marker (redeploy the genlock bundle), OR the ssh read failed (issue 1367)"
+  else
+    fail "(bd) the restarted OBS logged '${MINLAT_LOG}', want 'genlock-min-latency: ON' -- the loaded libobs does not honour the imag min-latency marker (issue 1367)"
   fi
 fi
 

@@ -827,6 +827,8 @@ void add_ready_encoder_group(obs_encoder_t *encoder)
 /* ---- genlock (camera-box #42) -------------------------------------------
  * Stock OBS schedules every render tick on the FREE-RUNNING monotonic clock
  * (os_gettime_ns = QPC / CLOCK_MONOTONIC), which NTP/PTP do not discipline.
+ * (Since camera-box issue 1372 the Windows os_gettime_ns runs at the
+ * dantesync-disciplined system-time rate; Linux CLOCK_MONOTONIC always did.)
  * Two boxes therefore tick at slightly different real rates and the async
  * source resampler drops/duplicates frames where the clocks beat (measured
  * 0.24-12.66% per hop on the production rig).

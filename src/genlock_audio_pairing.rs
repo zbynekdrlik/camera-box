@@ -35,18 +35,25 @@
 //!    because the wall and QPC clocks drift apart (318 ms on resolume). Packets that follow append
 //!    back to back. The genlock ASRC rate servo (disciplined against the wall clock) and its level
 //!    loop then hold the captured depth, so the drift is absorbed physically between placements.
-//! 4. **Re-place at once.** When the applied delay (or the hold mode) changes, the ingest forces a
-//!    fresh placement and shifts the ASRC level target by the same placement delta
-//!    ([`audio_place_shift_ms`]), exactly like a sync-offset change. The slow level integral alone
-//!    would take minutes to walk a 33 ms step.
+//! 4. **Slew, never step (ROZHODNUTÉ 5827497952).** A shallow N==1 source's audio follows its
+//!    LATCHED per-lock video depth ([`video_delay_lock_ms`]), so its hold is constant between
+//!    relocks. A change of the hold while audio PLAYS (a relock with a new depth, the late
+//!    latency→timecode switch) is SLEWED ([`audio_hold_action`] → [`AudioHoldAction::Slew`]): the
+//!    packets keep appending back to back and the ASRC resampler stretches or compresses at
+//!    [`AUDIO_SLEW_PPM`] until the term delta is paid ([`audio_slew_step_ns`]), the level target
+//!    moving with each step. The old immediate re-placement was the audible dropout the songplayer
+//!    gate measured. A first placement and a timeline discontinuity still PLACE
+//!    ([`audio_level_shift_ns`]); a source with no ASRC resampler keeps the legacy step.
 //! 5. **Observe.** `audio_pairing_offset_ms` is the applied audio delay minus the MEASURED video
 //!    delay ([`pairing_offset_ms`] with [`video_delay_reference_ns`]). The health verdict flags it
 //!    above half a frame ([`decide_audio_health`]). It is a PROXY: it compares the applied hold with
 //!    the measured delay and never observes where the audio samples actually sit, so a wrong
 //!    placement, or a depth the rate servo walked, would still read 0.
 //!
-//! Until the first measurement settles, or for an audio timestamp that is not a wall-clock
-//! timecode, the ingest keeps the #1303 behaviour byte-for-byte: arrival basis + `latency_ms`
+//! Until the first video delay is known, a wall-clock-timecoded source's audio is WITHHELD
+//! ([`AudioHoldMode::Pending`]) so its first placement already lands on the right delay, for at
+//! most [`AUDIO_WITHHOLD_MAX_NS`]; after that, and for an audio timestamp that is not a wall-clock
+//! timecode, the ingest keeps the #1303 behaviour: arrival basis + `latency_ms`
 //! ([`AudioHoldMode::Latency`]).
 //!
 //! This is orthogonal to the ASRC servo (#803/#912/#1084), which disciplines the audio
@@ -150,8 +157,40 @@ pub struct VideoDelayTracker {
     pub smoothed_ns: u64,
     /// The quantized delay the audio follows, ms (0 = not measured yet → the #1303 latency hold).
     pub applied_ms: u32,
-    /// Render ticks left until an armed re-application applies (0 = idle).
+    /// Render ticks left until an armed re-application applies (0 = idle). Under a lock it counts
+    /// UP the consecutive ticks the realized delay sat half a frame or more off the applied one.
     pub settle_ticks: u32,
+    /// Issue 1367 (design 5830750134) — the lock last applied (0 = the free tracker): a NEW lock
+    /// applies at once, the same lock lets the realized delay bound the hold.
+    pub locked_ms: u32,
+}
+
+/// Issue 1367 (design 5830750134) — under the SAME lock, the render ticks the smoothed realized
+/// delay must stay half a frame or more off the applied hold, CONSECUTIVELY, before the hold
+/// follows it. Longer than the hold's climb onto a capped latched depth (3 holds × the 30-tick
+/// throttle = 90 ticks), so a normal climb onto D never moves the audio; a disturbance's one-frame
+/// excursion (≤ one throttle window) resets it. Mirror of `GENLOCK_VIDEO_DELAY_FOLLOW_TICKS`.
+pub const VIDEO_DELAY_FOLLOW_TICKS: u32 = 180;
+
+/// Issue 1367 (ROZHODNUTÉ 5827497952) — the `lock_ms` of [`video_delay_track`] while a SHALLOW N==1
+/// source measures its first per-lock depth: smooth only, apply nothing, so the audio waits for the
+/// latched depth instead of following the floating one. Mirror of `GENLOCK_VIDEO_DELAY_LOCK_PENDING`.
+pub const VIDEO_DELAY_LOCK_PENDING: u32 = u32::MAX;
+
+/// Issue 1367 — the `lock_ms` the render thread passes to [`video_delay_track`] for an N==1 source
+/// with the shallow per-lock depth state (`genlock_n1_depth::ShallowDepth`): a latched depth D →
+/// `round(D · interval)` ms (the audio follows the LOCKED video delay, constant until the next
+/// relock); no D yet but a window measuring → [`VIDEO_DELAY_LOCK_PENDING`]; otherwise 0 (the free
+/// Option-3 tracker, e.g. an N>=2 source). Mirror of `genlock_video_delay_lock_ms`.
+pub fn video_delay_lock_ms(target_frames: u64, measuring: bool, interval_ns: u64) -> u32 {
+    if target_frames != 0 && interval_ns != 0 {
+        video_delay_round_ms(target_frames.saturating_mul(interval_ns))
+            .min(VIDEO_DELAY_LOCK_PENDING - 1)
+    } else if measuring {
+        VIDEO_DELAY_LOCK_PENDING
+    } else {
+        0
+    }
 }
 
 /// One render tick of the tracker: smooth the sample; an idle tracker ARMS a settle countdown when
@@ -159,9 +198,50 @@ pub struct VideoDelayTracker {
 /// the rounded smoothed delay if it is STILL half a frame or more away (a transient that reversed
 /// during the settle applies nothing, so the audio is never re-placed for a sub-half-frame change).
 ///
+/// Issue 1367 (ROZHODNUTÉ 5827497952): `lock_ms` ([`video_delay_lock_ms`]) overrides the apply —
+/// `0` = the free tracker above; [`VIDEO_DELAY_LOCK_PENDING`] = smooth only, apply nothing; any other
+/// value = the LOCKED delay of a shallow source's latched depth.
+///
+/// Design 5830750134 (the audio never holds beyond the video actually on air): a NEW lock applies
+/// at once (a clean latch still places the audio once, straight onto D); under the SAME lock the
+/// hold follows the smoothed REALIZED delay once it has stayed half a frame or more off the applied
+/// hold for [`VIDEO_DELAY_FOLLOW_TICKS`] consecutive ticks — a latched D the video never reaches
+/// (the live 400 ms lock over a 233 ms video) or a clamped D under a slower arrival. A hold climb
+/// onto D, or a disturbance's one-frame excursion, is shorter and never moves the audio. Leaving a
+/// lock for the free tracker clears the follow count, so it cannot leak into the free countdown.
+///
 /// Mirror of `genlock_video_delay_track`.
-pub fn video_delay_track(t: &mut VideoDelayTracker, sample_ns: u64, interval_ns: u64) {
+pub fn video_delay_track(
+    t: &mut VideoDelayTracker,
+    lock_ms: u32,
+    sample_ns: u64,
+    interval_ns: u64,
+) {
     t.smoothed_ns = video_delay_smooth_ns(t.smoothed_ns, sample_ns);
+    if lock_ms == VIDEO_DELAY_LOCK_PENDING {
+        t.settle_ticks = 0;
+        return;
+    }
+    if lock_ms != 0 {
+        if lock_ms != t.locked_ms || t.applied_ms == 0 {
+            t.locked_ms = lock_ms;
+            t.applied_ms = lock_ms;
+            t.settle_ticks = 0;
+        } else if video_delay_moved(t.applied_ms, t.smoothed_ns, interval_ns) {
+            t.settle_ticks = t.settle_ticks.saturating_add(1);
+            if t.settle_ticks >= VIDEO_DELAY_FOLLOW_TICKS {
+                t.applied_ms = video_delay_round_ms(t.smoothed_ns);
+                t.settle_ticks = 0;
+            }
+        } else {
+            t.settle_ticks = 0;
+        }
+        return;
+    }
+    if t.locked_ms != 0 {
+        t.locked_ms = 0;
+        t.settle_ticks = 0;
+    }
     if t.settle_ticks > 0 {
         t.settle_ticks -= 1;
         if t.settle_ticks == 0 && video_delay_moved(t.applied_ms, t.smoothed_ns, interval_ns) {
@@ -183,6 +263,10 @@ pub enum AudioHoldMode {
     Latency = 1,
     /// Issue 1367: timecode → wall → OBS clock through the live offset + the measured video delay.
     Timecode = 2,
+    /// Issue 1367 (ROZHODNUTÉ 5827497952): a timecode-capable genlock source whose video delay is
+    /// not known yet — its audio is WITHHELD (not placed) so the first placement already lands on
+    /// the right delay, at most [`AUDIO_WITHHOLD_MAX_NS`] after its first packet.
+    Pending = 3,
 }
 
 impl AudioHoldMode {
@@ -196,12 +280,33 @@ impl AudioHoldMode {
             AudioHoldMode::Off => "off",
             AudioHoldMode::Latency => "latency",
             AudioHoldMode::Timecode => "timecode",
+            AudioHoldMode::Pending => "pending",
         }
+    }
+    /// Is audio PLAYING under this mode (placed into the mix)? Off plays unheld; Pending plays
+    /// nothing.
+    pub fn is_active(self) -> bool {
+        matches!(self, AudioHoldMode::Latency | AudioHoldMode::Timecode)
     }
 }
 
+/// Issue 1367 — how long a timecode-capable genlock source's audio is withheld at most while its
+/// video delay is unknown (a box whose ticks never land on the grid never measures one). After it,
+/// the #1303 latency hold plays, and a later video delay is SLEWED in. Mirror of
+/// `GENLOCK_AUDIO_WITHHOLD_MAX_NS`.
+pub const AUDIO_WITHHOLD_MAX_NS: u64 = 10_000_000_000;
+
+/// Issue 1367 — has the withhold window of a source whose first genlock audio packet arrived at
+/// `first_packet_ns` (OBS monotonic; 0 = none yet) run out at `now_ns`? Mirror of
+/// `genlock_audio_withhold_expired`.
+pub fn audio_withhold_expired(first_packet_ns: u64, now_ns: u64) -> bool {
+    first_packet_ns != 0 && now_ns.saturating_sub(first_packet_ns) >= AUDIO_WITHHOLD_MAX_NS
+}
+
 /// Pick the hold for one audio packet. `latency_ms == 0` is the unreachable floor-violating value
-/// (the pin is seeded ≥ 3 ms) and holds nothing, as in #1303.
+/// (the pin is seeded ≥ 3 ms) and holds nothing, as in #1303. Issue 1367: a wall-clock-timecoded
+/// source with no video delay yet is WITHHELD ([`AudioHoldMode::Pending`]) until
+/// [`audio_withhold_expired`], then falls back to the latency hold.
 ///
 /// Mirror of `genlock_audio_hold_mode`.
 pub fn audio_hold_mode(
@@ -209,11 +314,14 @@ pub fn audio_hold_mode(
     latency_ms: u32,
     audio_ts_is_wallclock: bool,
     video_delay_ms: u32,
+    withhold_expired: bool,
 ) -> AudioHoldMode {
     if !genlock_fifo || latency_ms == 0 {
         AudioHoldMode::Off
     } else if audio_ts_is_wallclock && video_delay_ms > 0 {
         AudioHoldMode::Timecode
+    } else if audio_ts_is_wallclock && !withhold_expired {
+        AudioHoldMode::Pending
     } else {
         AudioHoldMode::Latency
     }
@@ -224,7 +332,7 @@ pub fn audio_hold_mode(
 /// Mirror of `genlock_audio_hold_ms`.
 pub fn audio_hold_ms(mode: AudioHoldMode, latency_ms: u32, video_delay_ms: u32) -> u32 {
     match mode {
-        AudioHoldMode::Off => 0,
+        AudioHoldMode::Off | AudioHoldMode::Pending => 0,
         AudioHoldMode::Latency => latency_ms,
         AudioHoldMode::Timecode => video_delay_ms,
     }
@@ -268,7 +376,7 @@ pub fn audio_place_term_ns(
 ) -> i64 {
     let hold_ns = genlock_audio_delay_ns(hold_ms) as i64;
     match mode {
-        AudioHoldMode::Off => 0,
+        AudioHoldMode::Off | AudioHoldMode::Pending => 0,
         AudioHoldMode::Latency => hold_ns,
         AudioHoldMode::Timecode => off_live_ns
             .wrapping_add(hold_ns)
@@ -276,13 +384,137 @@ pub fn audio_place_term_ns(
     }
 }
 
-/// The ASRC level-target shift (ms) for a re-placement: the difference between the new and the
-/// previous placement term of the SAME packet (so the live offset and `timing_adjust` cancel for a
-/// timecode→timecode change, which shifts by exactly the delay delta).
+/// Issue 1367 (ROZHODNUTÉ 5827497952) — what the audio ingest does with one packet. Discriminants
+/// match the C `GENLOCK_AUDIO_ACT_*` defines.
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AudioHoldAction {
+    /// Drop the packet: the hold is [`AudioHoldMode::Pending`].
+    Withhold = 0,
+    /// A genuine (re)placement: the first placement after a withhold or genlock toggle, or a
+    /// timeline discontinuity. Places at the full new term and settles any slew.
+    Place = 1,
+    /// Nothing changed: append as the ingest decided.
+    Continue = 2,
+    /// The hold changed while audio plays: keep appending back to back and SLEW the placement by
+    /// the term delta through the ASRC resampler ([`audio_slew_step_ns`]).
+    Slew = 3,
+    /// The hold changed but the source has no ASRC resampler to slew with: the legacy step
+    /// re-placement. Counted as an audible STEP.
+    Replace = 4,
+}
+
+impl AudioHoldAction {
+    /// The integer the C helpers use.
+    pub fn code(self) -> u8 {
+        self as u8
+    }
+}
+
+/// Issue 1367 — decide one packet. `continuous`: the ingest's own continuity verdict (`push_back`)
+/// before any hold logic. `can_slew`: the source's ASRC resampler is active. `slew_pending`: a slew
+/// has not finished yet. A hold change never STEPS while audio plays unless the source cannot slew.
 ///
-/// Mirror of `genlock_audio_place_shift_ms`.
-pub fn audio_place_shift_ms(new_term_ns: i64, prev_term_ns: i64) -> f64 {
-    new_term_ns.wrapping_sub(prev_term_ns) as f64 / 1e6
+/// Mirror of `genlock_audio_hold_action`.
+pub fn audio_hold_action(
+    prev_mode: AudioHoldMode,
+    prev_hold_ms: u32,
+    mode: AudioHoldMode,
+    hold_ms: u32,
+    continuous: bool,
+    can_slew: bool,
+    slew_pending: bool,
+) -> AudioHoldAction {
+    if mode == AudioHoldMode::Pending {
+        return AudioHoldAction::Withhold;
+    }
+    let changed = mode != prev_mode || hold_ms != prev_hold_ms;
+    if !changed {
+        if slew_pending && (!continuous || !can_slew) {
+            return AudioHoldAction::Place;
+        }
+        return AudioHoldAction::Continue;
+    }
+    if !prev_mode.is_active() || !mode.is_active() || !continuous {
+        return AudioHoldAction::Place;
+    }
+    if can_slew {
+        AudioHoldAction::Slew
+    } else {
+        AudioHoldAction::Replace
+    }
+}
+
+/// Issue 1367 — the ASRC level-target shift (ns) a (re)placement moves the buffer by: the new term
+/// minus the effective previous placement (the previous term minus the slew still owed), only when
+/// audio was playing before (a first placement has no captured level to move). Every other action
+/// shifts nothing at once (a slew shifts the target step by step with each consumed increment).
+///
+/// Mirror of `genlock_audio_level_shift_ns`.
+pub fn audio_level_shift_ns(
+    action: AudioHoldAction,
+    prev_mode: AudioHoldMode,
+    new_term_ns: i64,
+    prev_term_ns: i64,
+    slew_remaining_ns: i64,
+) -> i64 {
+    match action {
+        AudioHoldAction::Place | AudioHoldAction::Replace if prev_mode.is_active() => new_term_ns
+            .wrapping_sub(prev_term_ns)
+            .wrapping_add(slew_remaining_ns),
+        _ => 0,
+    }
+}
+
+/// Issue 1367 — the ASRC-rate SLEW of the audio placement: 1000 ppm (0.1 %, ~1.7 cents — the NTSC
+/// pull-down magnitude, inaudible), i.e. 1 ms of placement per second. A one-frame (33 ms) relock
+/// change settles in 33 s. Mirror of `GENLOCK_AUDIO_SLEW_PPM`.
+pub const AUDIO_SLEW_PPM: u64 = 1000;
+
+/// Issue 1367 — the placement slew one audio callback of `dt_ns` consumes from `remaining_ns`
+/// (signed: positive = the audio moves LATER, the resampler stretches): `remaining` clamped to
+/// `±dt · AUDIO_SLEW_PPM / 1e6`. Mirror of `genlock_audio_slew_step_ns`.
+pub fn audio_slew_step_ns(remaining_ns: i64, dt_ns: u64) -> i64 {
+    let cap = (dt_ns.saturating_mul(AUDIO_SLEW_PPM) / 1_000_000).min(i64::MAX as u64) as i64;
+    remaining_ns.clamp(-cap, cap)
+}
+
+/// Issue 1367 — the resampler ppm of one slew step (`step · 1e6 / dt`, 0 for an empty callback).
+/// Positive = stretch (the swresample-native sign). Mirror of `genlock_audio_slew_ppm`.
+pub fn audio_slew_ppm(step_ns: i64, dt_ns: u64) -> f64 {
+    if dt_ns == 0 {
+        0.0
+    } else {
+        step_ns as f64 * 1e6 / dt_ns as f64
+    }
+}
+
+/// Issue 1367 — BOOK one consumed slew step out of the ingest's smoothing timeline
+/// (`next_audio_ts_min`): the resampler stretched this packet by `step_ns` (positive = more
+/// samples, the audio later), a deliberate placement move and not source time, so the next expected
+/// source timestamp is `next_ts_min − step`. Without it a slew over 70 ms walks the smoothing
+/// timeline past `TS_SMOOTHING_THRESHOLD` and the ingest snaps the audio back to the old placement.
+/// Wraps like the C `uint64_t` arithmetic. Mirror of `genlock_audio_slew_book_ts_ns`.
+pub fn audio_slew_book_ts_ns(next_ts_min_ns: u64, step_ns: i64) -> u64 {
+    next_ts_min_ns.wrapping_sub(step_ns as u64)
+}
+
+/// Issue 1367 (review round 1) — the slew still owed when the ingest PLACED a packet anyway
+/// (`push_back` turned false after the action was decided: a sync-offset change, or no `audio_ts`
+/// yet): the placement lands at the full new term, so the owed amount is paid at once and must be
+/// folded into the level setpoint and cleared, or the resampler would keep stretching past it.
+/// Only for an action that left a slew owed (`Continue` / `Slew`); `Place` / `Replace` already
+/// settled it, `Withhold` placed nothing. Returns the level shift (ns) to apply and clear.
+/// Mirror of `genlock_audio_placed_slew_fold_ns`.
+pub fn audio_placed_slew_fold_ns(
+    action: AudioHoldAction,
+    placed: bool,
+    slew_remaining_ns: i64,
+) -> i64 {
+    match action {
+        AudioHoldAction::Continue | AudioHoldAction::Slew if placed => slew_remaining_ns,
+        _ => 0,
+    }
 }
 
 /// The video delay the pairing offset is measured against: the smoothed MEASURED stamp→present
@@ -305,6 +537,83 @@ pub fn video_delay_reference_ns(smoothed_ns: u64, latency_ms: u32) -> i64 {
 /// Mirror of `genlock_audio_pairing_offset_ms` in `obs-source.c`.
 pub fn pairing_offset_ms(applied_audio_delay_ns: i64, video_delay_ns: i64) -> i64 {
     applied_audio_delay_ns.wrapping_sub(video_delay_ns) / NS_PER_MS as i64
+}
+
+/// Issue 1367 (review round 2) — where the audio actually sits: the applied hold minus the slew it
+/// still owes (a hold change is slewed in at [`AUDIO_SLEW_PPM`], so mid-slew the audio is not yet at
+/// the new hold). The pairing offset's audio side, so a slew still owing 33 ms reads −33, not 0.
+/// Mirror of `genlock_audio_applied_delay_ns`.
+pub fn audio_applied_delay_ns(hold_ms: u32, slew_remaining_ns: i64) -> i64 {
+    genlock_audio_delay_ns(hold_ms).wrapping_sub(slew_remaining_ns as u64) as i64
+}
+
+/// Issue 1367 (live 25.9.2026 12:31, resolume `sp-slow_video`) — may the ingest APPEND this packet
+/// back to back? OBS's own continuity verdict `push_back`, EXCEPT right after the ingest reset its
+/// timeline in this packet (`handle_ts_jump` on a timestamp jump over `MAX_TS_VAR` — a sender
+/// restart or song change). `reset_audio_data` then empties the buffer and puts BOTH its start
+/// (`audio_ts`) and `next_audio_sys_ts_min` on the ARRIVAL instant, so the packet's pre-term
+/// timestamp equals it and OBS appends it there: the genlock term never reaches the samples and the
+/// hold is silently lost (the buffer level fell 111 → 46 → 13 ms while the audit still read
+/// `audio_delay_ms=133`). An ACTIVE genlock hold therefore places that packet at its term.
+/// Mirror of `genlock_audio_push_back_allowed`.
+pub fn audio_push_back_allowed(push_back: bool, timeline_reset: bool, mode: AudioHoldMode) -> bool {
+    push_back && !(timeline_reset && mode.is_active())
+}
+
+/// Issue 1367 — the OBS-monotonic instant this packet's first sample ACTUALLY lands in the source's
+/// mix buffer: an APPENDED packet goes to the buffer end (`audio_ts + buffered`), a PLACED one to its
+/// own timestamp. Wraps like the C `uint64_t`. Mirror of `genlock_audio_actual_place_ns`.
+pub fn audio_actual_place_ns(
+    appended: bool,
+    audio_ts_ns: u64,
+    buffered_ns: u64,
+    placed_ns: u64,
+) -> u64 {
+    if appended {
+        audio_ts_ns.wrapping_add(buffered_ns)
+    } else {
+        placed_ns
+    }
+}
+
+/// Issue 1367 — the placement ERROR of one packet: where it actually landed minus where the genlock
+/// hold meant it to land (`in.timestamp` after the term). Negative = the audio sits EARLY (the hold is
+/// not in the samples). Two's complement, like the C. Mirror of `genlock_audio_place_error_ns`.
+pub fn audio_place_error_ns(actual_ns: u64, intended_ns: u64) -> i64 {
+    actual_ns.wrapping_sub(intended_ns) as i64
+}
+
+/// Issue 1367 — the EMA weight of one placement-error sample, as a right shift (1/16 per packet, a
+/// time constant of 16 packets ≈ 0.2–0.3 s). Mirror of `GENLOCK_AUDIO_PLACE_ERR_EMA_SHIFT`.
+pub const AUDIO_PLACE_ERR_EMA_SHIFT: u32 = 4;
+
+/// Issue 1367 — one EMA step of the placement error; an unseeded EMA takes the sample. Division
+/// truncates toward zero and the sums wrap, identically in C. Mirror of
+/// `genlock_audio_place_error_smooth_ns`.
+pub fn audio_place_error_smooth_ns(smoothed_ns: i64, sample_ns: i64, seeded: bool) -> i64 {
+    if !seeded {
+        return sample_ns;
+    }
+    smoothed_ns
+        .wrapping_add(sample_ns.wrapping_sub(smoothed_ns) / (1i64 << AUDIO_PLACE_ERR_EMA_SHIFT))
+}
+
+/// Issue 1367 — the pairing offset's AUDIO side: where the samples REALLY sit. With a measured
+/// placement error it is the applied hold plus that error (an owed slew is already in it: the
+/// buffer is not stretched yet), so a hold that never reached the samples reads as the gap it is.
+/// Without a measurement it falls back to [`audio_applied_delay_ns`] (hold minus the owed slew).
+/// Mirror of `genlock_audio_realized_delay_ns`.
+pub fn audio_realized_delay_ns(
+    hold_ms: u32,
+    slew_remaining_ns: i64,
+    place_err_ns: i64,
+    measured: bool,
+) -> i64 {
+    if measured {
+        genlock_audio_delay_ns(hold_ms).wrapping_add(place_err_ns as u64) as i64
+    } else {
+        audio_applied_delay_ns(hold_ms, slew_remaining_ns)
+    }
 }
 
 /// The audio-parity health of one genlocked source — the reason the LOCK indicator DEGRADES on the
@@ -381,410 +690,5 @@ pub fn decide_audio_health(f: &AudioPairingFacets) -> AudioPairingHealth {
 mod bench;
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    const IV30: u64 = 33_333_333;
-    const IV60: u64 = 16_666_666;
-    const WALL: u64 = 1_790_000_000_123_456_789;
-
-    #[test]
-    fn delay_is_hold_in_ns() {
-        assert_eq!(genlock_audio_delay_ns(3), 3_000_000);
-        assert_eq!(genlock_audio_delay_ns(0), 0);
-        assert_eq!(genlock_audio_delay_ns(2000), 2_000_000_000);
-    }
-
-    // ---- the video stamp→present delay measurement ---------------------------------------
-
-    #[test]
-    fn sample_never_returns_the_unseeded_sentinel() {
-        // a frame stamped at or after the tick would read 0 and re-seed the EMA every tick.
-        assert_eq!(video_delay_sample_ns(WALL, WALL), 1);
-        assert_eq!(video_delay_sample_ns(WALL, WALL + 5_000_000), 1);
-        let mut t = VideoDelayTracker::default();
-        run(&mut t, 100_000_000, IV30, 200);
-        for _ in 0..50 {
-            video_delay_track(&mut t, video_delay_sample_ns(WALL, WALL + 1), IV30);
-            assert_ne!(
-                t.smoothed_ns, 0,
-                "a seeded EMA must never fall back to the sentinel"
-            );
-        }
-    }
-
-    #[test]
-    fn ema_step_never_overflows_at_the_extremes() {
-        // two's-complement wrap, exactly as the C uint64 arithmetic: the difference reads -2 / +2
-        // and an eighth of it truncates to 0, so the EMA stays put.
-        assert_eq!(video_delay_smooth_ns(1, u64::MAX), 1);
-        assert_eq!(video_delay_smooth_ns(u64::MAX, 1), u64::MAX);
-        // i64::MAX minus a "negative" (above 2^63) smoothed value overflowed the old signed
-        // difference; the wrapping form reads it as -11 and steps by -11/8 = -1.
-        assert_eq!(
-            video_delay_smooth_ns((1u64 << 63) + 10, i64::MAX as u64),
-            (1u64 << 63) + 9
-        );
-        // a difference that crosses i64 must not panic.
-        assert_eq!(
-            video_delay_smooth_ns(i64::MAX as u64 + 7, 3),
-            (i64::MAX as u64 + 7)
-                .wrapping_add(((3u64.wrapping_sub(i64::MAX as u64 + 7)) as i64 / 8) as u64)
-        );
-        // an ordinary step is unchanged by the wrapping form.
-        assert_eq!(video_delay_smooth_ns(100_000_000, 108_000_000), 101_000_000);
-    }
-
-    #[test]
-    fn only_a_timecode_hold_needs_the_live_offset() {
-        use AudioHoldMode::*;
-        assert!(!audio_needs_live_offset(Off, Off));
-        assert!(!audio_needs_live_offset(Latency, Latency));
-        assert!(!audio_needs_live_offset(Latency, Off));
-        assert!(audio_needs_live_offset(Timecode, Latency));
-        assert!(audio_needs_live_offset(Latency, Timecode));
-        assert!(audio_needs_live_offset(Timecode, Timecode));
-    }
-
-    #[test]
-    fn sample_is_the_head_age_at_the_scheduled_tick() {
-        assert_eq!(
-            video_delay_sample_ns(1_000_100_000_000, 1_000_000_000_000),
-            100_000_000
-        );
-        // a frame stamped after the tick (a sender stamping ahead) clamps to 1 ns, never 0.
-        assert_eq!(video_delay_sample_ns(5, 9), 1);
-    }
-
-    #[test]
-    fn ema_seeds_on_the_first_sample_and_steps_an_eighth() {
-        assert_eq!(video_delay_smooth_ns(0, 97_000_000), 97_000_000);
-        assert_eq!(video_delay_smooth_ns(100_000_000, 108_000_000), 101_000_000);
-        assert_eq!(video_delay_smooth_ns(100_000_000, 92_000_000), 99_000_000);
-        // truncation toward zero on both signs (C int64 division).
-        assert_eq!(video_delay_smooth_ns(100, 107), 100);
-        assert_eq!(video_delay_smooth_ns(100, 93), 100);
-    }
-
-    #[test]
-    fn round_ms_is_nearest_and_never_zero() {
-        assert_eq!(video_delay_round_ms(66_666_666), 67);
-        assert_eq!(video_delay_round_ms(66_499_999), 66);
-        assert_eq!(video_delay_round_ms(66_500_000), 67);
-        assert_eq!(video_delay_round_ms(0), 1);
-        assert_eq!(video_delay_round_ms(400_000), 1);
-        assert_eq!(video_delay_round_ms(u64::MAX), u32::MAX);
-    }
-
-    #[test]
-    fn moved_is_half_a_frame_or_more() {
-        assert!(
-            video_delay_moved(0, 100_000_000, IV30),
-            "nothing applied yet always moves"
-        );
-        // 30 fps: half a frame is 16.67 ms.
-        assert!(!video_delay_moved(100, 116_666_666, IV30));
-        assert!(video_delay_moved(100, 116_666_667, IV30));
-        assert!(video_delay_moved(100, 83_333_333, IV30));
-        assert!(!video_delay_moved(100, 83_333_334, IV30));
-        // 60 fps: 8.33 ms.
-        assert!(video_delay_moved(50, 58_333_333, IV60));
-        assert!(!video_delay_moved(50, 58_333_332, IV60));
-        // unknown interval never moves once something is applied.
-        assert!(!video_delay_moved(50, 900_000_000, 0));
-    }
-
-    fn run(t: &mut VideoDelayTracker, sample: u64, iv: u64, ticks: u32) {
-        for _ in 0..ticks {
-            video_delay_track(t, sample, iv);
-        }
-    }
-
-    #[test]
-    fn tracker_applies_the_first_delay_after_the_settle() {
-        let mut t = VideoDelayTracker::default();
-        video_delay_track(&mut t, 100_000_000, IV30);
-        assert_eq!(t.applied_ms, 0, "armed, not applied");
-        assert_eq!(t.settle_ticks, VIDEO_DELAY_SETTLE_TICKS);
-        run(&mut t, 100_000_000, IV30, VIDEO_DELAY_SETTLE_TICKS - 1);
-        assert_eq!(t.applied_ms, 0);
-        run(&mut t, 100_000_000, IV30, 1);
-        assert_eq!(t.applied_ms, 100);
-        assert_eq!(t.settle_ticks, 0);
-    }
-
-    #[test]
-    fn a_one_frame_step_lands_on_the_new_delay_not_mid_step() {
-        let mut t = VideoDelayTracker::default();
-        run(&mut t, 100_000_000, IV30, 200);
-        assert_eq!(t.applied_ms, 100);
-        // the FIFO settles one frame shallower.
-        run(&mut t, 66_666_667, IV30, 400);
-        assert_eq!(
-            t.applied_ms, 67,
-            "the re-application must apply the NEW delay (66.7 ms), not the value at the half-frame crossing (~83 ms)"
-        );
-        // and deeper again.
-        run(&mut t, 100_000_000, IV30, 400);
-        assert_eq!(t.applied_ms, 100);
-    }
-
-    #[test]
-    fn single_tick_holds_never_rearm() {
-        let mut t = VideoDelayTracker::default();
-        run(&mut t, 100_000_000, IV30, 200);
-        for i in 0..3000u32 {
-            // one tick in ten presents the frame a tick older (a hold).
-            let s = if i % 10 == 0 {
-                133_333_333
-            } else {
-                100_000_000
-            };
-            video_delay_track(&mut t, s, IV30);
-            assert_eq!(
-                t.settle_ticks, 0,
-                "a single held tick must not arm a re-application"
-            );
-        }
-        assert_eq!(t.applied_ms, 100);
-    }
-
-    #[test]
-    fn a_transient_that_reverses_during_the_settle_applies_nothing() {
-        let mut t = VideoDelayTracker::default();
-        run(&mut t, 100_000_000, IV30, 200);
-        // a 20-tick excursion one frame deeper arms the settle, then the delay comes back.
-        run(&mut t, 133_333_333, IV30, 20);
-        assert!(t.settle_ticks > 0);
-        run(&mut t, 100_000_000, IV30, VIDEO_DELAY_SETTLE_TICKS);
-        assert_eq!(t.settle_ticks, 0);
-        assert_eq!(
-            t.applied_ms, 100,
-            "the reversed transient must leave the applied delay alone"
-        );
-    }
-
-    // ---- the audio hold + placement --------------------------------------------------------
-
-    #[test]
-    fn hold_mode_selection() {
-        assert_eq!(audio_hold_mode(false, 3, true, 97), AudioHoldMode::Off);
-        assert_eq!(audio_hold_mode(true, 0, true, 97), AudioHoldMode::Off);
-        assert_eq!(audio_hold_mode(true, 3, true, 0), AudioHoldMode::Latency);
-        assert_eq!(audio_hold_mode(true, 3, false, 97), AudioHoldMode::Latency);
-        assert_eq!(audio_hold_mode(true, 3, true, 97), AudioHoldMode::Timecode);
-        assert_eq!(audio_hold_ms(AudioHoldMode::Off, 3, 97), 0);
-        assert_eq!(audio_hold_ms(AudioHoldMode::Latency, 3, 97), 3);
-        assert_eq!(audio_hold_ms(AudioHoldMode::Timecode, 3, 97), 97);
-        assert_eq!(AudioHoldMode::Timecode.code(), 2);
-        assert_eq!(AudioHoldMode::Latency.token(), "latency");
-    }
-
-    #[test]
-    fn wall_to_mono_offset_is_signed() {
-        // QPC-style monotonic (seconds since boot) vs a 2026 wall epoch.
-        let wall = 1_790_000_000_000_000_000u64;
-        let mono = 86_400_000_000_000u64;
-        assert_eq!(audio_wall_to_mono_ns(mono, wall), mono as i64 - wall as i64);
-        assert_eq!(audio_wall_to_mono_ns(wall + 5, wall), 5);
-    }
-
-    #[test]
-    fn timecode_term_places_the_packet_at_tc_plus_offset_plus_delay() {
-        // the ingest computes in.timestamp = tc + timing_adjust, then adds the term.
-        let tc = 1_790_000_000_123_000_000u64;
-        let arrival_wall = tc + 2_500_000;
-        let mono_at_arrival = 86_400_000_000_000u64;
-        let timing_adjust = mono_at_arrival.wrapping_sub(tc); // reset_audio_timing
-        let off_live = audio_wall_to_mono_ns(mono_at_arrival, arrival_wall);
-        let term = audio_place_term_ns(AudioHoldMode::Timecode, 97, off_live, timing_adjust);
-        let placed = tc.wrapping_add(timing_adjust).wrapping_add(term as u64);
-        // tc mapped to mono through the live offset, plus the video's delay.
-        let want = (tc as i64 + off_live + 97_000_000) as u64;
-        assert_eq!(placed, want);
-        // the latency term keeps the #1303 arrival basis.
-        let lat = audio_place_term_ns(AudioHoldMode::Latency, 3, off_live, timing_adjust);
-        assert_eq!(
-            tc.wrapping_add(timing_adjust).wrapping_add(lat as u64),
-            mono_at_arrival + 3_000_000
-        );
-        assert_eq!(
-            audio_place_term_ns(AudioHoldMode::Off, 97, off_live, timing_adjust),
-            0
-        );
-    }
-
-    #[test]
-    fn a_later_placement_follows_the_live_offset_not_the_first_one() {
-        // the wall-vs-mono offset walked 300 ms since the first packet (resolume: 318 ms).
-        let tc0 = 1_790_000_000_000_000_000u64;
-        let mono0 = 50_000_000_000_000u64;
-        let timing_adjust = mono0.wrapping_sub(tc0);
-        let tc = tc0 + 3_600_000_000_000; // an hour later
-        let off_live = audio_wall_to_mono_ns(mono0 + 3_600_000_000_000 + 300_000_000, tc);
-        let term = audio_place_term_ns(AudioHoldMode::Timecode, 67, off_live, timing_adjust);
-        let placed = tc.wrapping_add(timing_adjust).wrapping_add(term as u64);
-        assert_eq!(placed, mono0 + 3_600_000_000_000 + 300_000_000 + 67_000_000);
-    }
-
-    #[test]
-    fn shift_is_the_delay_delta_for_a_timecode_change() {
-        let off = -1_789_000_000_000_000_000i64;
-        let ta = 17_000_000_000_000_000_000u64;
-        let a = audio_place_term_ns(AudioHoldMode::Timecode, 100, off, ta);
-        let b = audio_place_term_ns(AudioHoldMode::Timecode, 67, off, ta);
-        assert_eq!(audio_place_shift_ms(b, a), -33.0);
-        let l = audio_place_term_ns(AudioHoldMode::Latency, 3, off, ta);
-        assert_eq!(audio_place_shift_ms(l, 0), 3.0);
-    }
-
-    // ---- the pairing offset + health -------------------------------------------------------
-
-    #[test]
-    fn video_reference_is_the_measurement_else_the_pin() {
-        assert_eq!(video_delay_reference_ns(97_400_000, 3), 97_400_000);
-        assert_eq!(video_delay_reference_ns(0, 3), 3_000_000);
-    }
-
-    #[test]
-    fn pairing_offset_is_measured_against_the_real_video_delay() {
-        // the #1303 fixed 3 ms hold against a 97 ms video delay: the defect is VISIBLE now.
-        assert_eq!(pairing_offset_ms(3_000_000, 97_000_000), -94);
-        // audio following the measured delay.
-        assert_eq!(pairing_offset_ms(97_000_000, 97_400_000), 0);
-        assert_eq!(pairing_offset_ms(100_000_000, 83_400_000), 16);
-        assert_eq!(pairing_offset_ms(67_000_000, 83_700_000), -16);
-        // never held.
-        assert_eq!(pairing_offset_ms(0, 97_000_000), -97);
-        assert_eq!(pairing_offset_ms(923_000_000, 923_000_000), 0);
-    }
-
-    fn healthy() -> AudioPairingFacets {
-        AudioPairingFacets {
-            audio_enabled: true,
-            is_program_source: true,
-            asrc_saturated: false,
-            pairing_offset_ms: 0,
-            frame_interval_ms: 33,
-        }
-    }
-
-    #[test]
-    fn healthy_program_audio_is_ok() {
-        assert_eq!(decide_audio_health(&healthy()), AudioPairingHealth::Ok);
-    }
-
-    #[test]
-    fn program_source_with_audio_off_is_degraded() {
-        let mut f = healthy();
-        f.audio_enabled = false;
-        assert_eq!(
-            decide_audio_health(&f),
-            AudioPairingHealth::AudioDisabledOnProgram
-        );
-    }
-
-    #[test]
-    fn non_program_source_with_audio_off_is_ok() {
-        // a camera input keeps ndi_audio=false by design — NOT a fault.
-        let mut f = healthy();
-        f.is_program_source = false;
-        f.audio_enabled = false;
-        f.pairing_offset_ms = -97;
-        assert_eq!(decide_audio_health(&f), AudioPairingHealth::Ok);
-    }
-
-    #[test]
-    fn asrc_saturated_is_degraded() {
-        let mut f = healthy();
-        f.asrc_saturated = true;
-        assert_eq!(decide_audio_health(&f), AudioPairingHealth::AsrcSaturated);
-    }
-
-    #[test]
-    fn asrc_saturated_ignored_when_audio_disabled_non_program() {
-        let mut f = healthy();
-        f.is_program_source = false;
-        f.audio_enabled = false;
-        f.asrc_saturated = true;
-        assert_eq!(decide_audio_health(&f), AudioPairingHealth::Ok);
-    }
-
-    #[test]
-    fn pairing_offset_within_half_a_frame_is_ok() {
-        let mut f = healthy();
-        f.pairing_offset_ms = 16; // 2*16 = 32, not > 33
-        assert_eq!(decide_audio_health(&f), AudioPairingHealth::Ok);
-        f.pairing_offset_ms = -16;
-        assert_eq!(decide_audio_health(&f), AudioPairingHealth::Ok);
-    }
-
-    #[test]
-    fn pairing_offset_beyond_half_a_frame_is_degraded() {
-        let mut f = healthy();
-        f.pairing_offset_ms = 17;
-        assert_eq!(
-            decide_audio_health(&f),
-            AudioPairingHealth::PairingOffsetExceeded
-        );
-        f.pairing_offset_ms = -94; // the resolume #1303 defect
-        assert_eq!(
-            decide_audio_health(&f),
-            AudioPairingHealth::PairingOffsetExceeded
-        );
-    }
-
-    #[test]
-    fn pairing_offset_bound_follows_frame_interval() {
-        // at 60 fps half a frame is 8 ms.
-        let mut f = healthy();
-        f.frame_interval_ms = 16;
-        f.pairing_offset_ms = 9;
-        assert_eq!(
-            decide_audio_health(&f),
-            AudioPairingHealth::PairingOffsetExceeded
-        );
-        f.pairing_offset_ms = 8;
-        assert_eq!(decide_audio_health(&f), AudioPairingHealth::Ok);
-    }
-
-    #[test]
-    fn pairing_offset_extremes_do_not_overflow() {
-        let mut f = healthy();
-        f.pairing_offset_ms = i64::MIN;
-        assert_eq!(
-            decide_audio_health(&f),
-            AudioPairingHealth::PairingOffsetExceeded
-        );
-    }
-
-    // ---- precedence ----------------------------------------------------------------
-
-    #[test]
-    fn audio_disabled_program_beats_asrc_and_offset() {
-        let mut f = healthy();
-        f.audio_enabled = false;
-        f.asrc_saturated = true;
-        f.pairing_offset_ms = 999;
-        assert_eq!(
-            decide_audio_health(&f),
-            AudioPairingHealth::AudioDisabledOnProgram
-        );
-    }
-
-    #[test]
-    fn asrc_saturated_beats_pairing_offset() {
-        let mut f = healthy();
-        f.asrc_saturated = true;
-        f.pairing_offset_ms = 999;
-        assert_eq!(decide_audio_health(&f), AudioPairingHealth::AsrcSaturated);
-    }
-
-    #[test]
-    fn codes_match_the_c_enum_values() {
-        assert_eq!(AudioPairingHealth::Ok.code(), 0);
-        assert_eq!(AudioPairingHealth::AudioDisabledOnProgram.code(), 1);
-        assert_eq!(AudioPairingHealth::AsrcSaturated.code(), 2);
-        assert_eq!(AudioPairingHealth::PairingOffsetExceeded.code(), 3);
-    }
-}
+#[path = "genlock_audio_pairing_tests.rs"]
+mod tests;

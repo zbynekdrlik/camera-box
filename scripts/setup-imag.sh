@@ -405,6 +405,8 @@ _RG_HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$_RG_HERE/lib/rig-grandmaster.sh"
 # shellcheck source=scripts/lib/ndi-runtime.sh
 . "$_RG_HERE/lib/ndi-runtime.sh"   # issue 1317: shared NDI 6.3.2 runtime install recipe (with setup-strih.sh)
+# shellcheck source=scripts/lib/remoteos-mcp.sh
+. "$_RG_HERE/lib/remoteos-mcp.sh"   # issue 1361: the ONE remoteos-mcp venv install (step 23; with setup-strih.sh + setup-device.sh)
 RIG_GRANDMASTER_IP="$(rig_grandmaster_ip)" || {
   echo "FAIL: setup-imag: cannot resolve the PTP grandmaster host -- refusing to write an empty gm_allowlist (#1307)" >&2
   exit 1
@@ -1046,6 +1048,16 @@ seed_ini "$OBS_CFG/global.ini"
 seed_ini "$OBS_CFG/user.ini"
 chown -R "$DESKTOP_USER:$DESKTOP_USER" "$OBS_CFG"
 
+# camera-box issue 1367 (ROZHODNUTÉ 5827497952, item 4): declare THIS box a genlock MIN-LATENCY box
+# (the imag projection: every input at the 3 ms floor -- "najmensia mozna latencia"). The vendored
+# libobs reads this marker once and caps a shallow source's latched depth at its pin-derived
+# base + 1 here, REPORTING the cap (a genlock-shallow-lock WARNING + shallow_capped=1 on the audit
+# line) instead of deepening an imag input. libobs has no other box identity (the imag and strih
+# inputs share their names), so this file IS the identity. Idempotent.
+install -d -o "$DESKTOP_USER" -g "$DESKTOP_USER" "$USER_HOME/.camera-box"
+install -o "$DESKTOP_USER" -g "$DESKTOP_USER" -m 0644 /dev/null "$USER_HOME/.camera-box/genlock-min-latency"
+echo "  issue 1367: genlock min-latency box marker written ($USER_HOME/.camera-box/genlock-min-latency)"
+
 # #791: install the CANONICAL 17-scene operator collection -- ONLY when this box genuinely has NO
 # scene collection yet (a fresh profile). imag_scenes.py's own WS-based seed deliberately never
 # creates "resolume imag" / "MW resolume imag" (its #785 OPERATOR-WINS carve-out -- those are
@@ -1542,53 +1554,20 @@ imag_fetch_repo_file() {  # imag_fetch_repo_file REPO_RELPATH DEST
 # for the i7-13620H replacement notebook.
 obs_box_power_envelope "${IMAG_PL1_W:-45}" imag_fetch_repo_file
 
-step 23 "RemoteOS MCP control-channel agent (#858): provision via the canonical zbynekdrlik/remoteos-mcp installer"
+step 23 "RemoteOS MCP control-channel agent (#858): the venv install from the shared scripts/lib/remoteos-mcp.sh"
 # The linux-imag-nb MCP surface (:8092) is served by the SEPARATE zbynekdrlik/remoteos-mcp project
-# (ops skill #555). camera-box does NOT re-implement or re-pin the agent -- it INVOKES that project's
-# own canonical install-linux.sh (pip-git install + config.json + systemd unit + enable/start),
-# matching the standing "use the installer, never a bare pip command" discipline.
+# (ops skill #555). issue 1361: every box installs it through the ONE shared lib (setup-strih step 10,
+# setup-device STEP 17b): the project's own source + constraints.txt into /opt/remoteos-mcp-venv (the
+# shape strih-lx runs), never the upstream install-linux.sh, which pip-installs into the system python.
 #
-# Auth-key handling (security-boundary): the --auth-key is a full-shell-RCE bearer token bound to
-# 0.0.0.0:8092, so it NEVER lands in this repo. Two paths, mirroring this script's env-secret
-# convention (CAM_PW/GH_TOKEN):
-#   - REMOTEOS_MCP_AUTH_KEY set  -> pre-seed /etc/remoteos-mcp/config.json (chmod 600) so the
-#     installer REUSES that known key and dev1's gitignored .mcp.json keeps matching a freshly
-#     hardware'd box (fully closes #858: a working MCP surface, not just a running agent).
-#   - unset                      -> the installer generates a fresh key ON the box; we print that
-#     dev1's .mcp.json linux-imag-nb entry must be updated to match (fail-safe fallback).
-REMOTEOS_MCP_INSTALLER_URL="${REMOTEOS_MCP_INSTALLER_URL:-https://raw.githubusercontent.com/zbynekdrlik/remoteos-mcp/master/install-linux.sh}"
-REMOTEOS_MCP_CONFIG="/etc/remoteos-mcp/config.json"
-# curl+ca-certificates are already ensured fail-loud up-front (the cam5/#450 preflight above).
-if [ -n "${REMOTEOS_MCP_AUTH_KEY:-}" ]; then
-    # Reject any shell/JSON-special char: the installer generates [A-Za-z0-9]{32} keys, and a
-    # non-alphanumeric value in the unquoted heredoc below would break the JSON (the installer
-    # then silently discards it and generates a DIFFERENT key -- dev1's .mcp.json breaks while
-    # the is-active gate still passes) or run command substitution. Fail loud instead.
-    case "$REMOTEOS_MCP_AUTH_KEY" in
-        *[!A-Za-z0-9]*) fail "#858: REMOTEOS_MCP_AUTH_KEY must be alphanumeric [A-Za-z0-9] (installer key charset); refusing to write it unsafely" ;;
-    esac
-    install -d -m 700 /etc/remoteos-mcp
-    ( umask 077; cat > "$REMOTEOS_MCP_CONFIG" <<CFG
-{
-  "port": 8092,
-  "auth_key": "${REMOTEOS_MCP_AUTH_KEY}",
-  "host": "0.0.0.0"
-}
-CFG
-    )
-    chmod 600 "$REMOTEOS_MCP_CONFIG"
-    echo "  #858: pre-seeded $REMOTEOS_MCP_CONFIG from REMOTEOS_MCP_AUTH_KEY (installer reuses it; dev1 .mcp.json stays valid)"
-else
-    echo "  #858: REMOTEOS_MCP_AUTH_KEY unset -- the installer will generate a fresh on-box key; update dev1's .mcp.json linux-imag-nb entry to match"
-fi
-REMOTEOS_MCP_INSTALLER_TMP="$(mktemp /tmp/remoteos-mcp-install-linux.XXXXXX.sh)"
-curl -fsSL "$REMOTEOS_MCP_INSTALLER_URL" -o "$REMOTEOS_MCP_INSTALLER_TMP" \
-    || fail "#858: cannot fetch remoteos-mcp installer from $REMOTEOS_MCP_INSTALLER_URL"
-bash "$REMOTEOS_MCP_INSTALLER_TMP" \
-    || fail "#858: canonical remoteos-mcp install-linux.sh failed"
-rm -f "$REMOTEOS_MCP_INSTALLER_TMP"
-systemctl is-active --quiet remoteos-mcp \
-    || fail "#858: remoteos-mcp.service not active after install -- the linux-imag-nb MCP surface would be dead"
+# Auth-key handling (security-boundary): the key is a full-shell-RCE bearer token bound to
+# 0.0.0.0:8092, so it NEVER lands in this repo or in the unit text. REMOTEOS_MCP_AUTH_KEY (the env-secret
+# convention, like CAM_PW/GH_TOKEN) pins it so dev1's gitignored .mcp.json keeps matching a freshly
+# hardware'd box; unset, the box's existing /etc/remoteos-mcp/config.json key is kept, and only a bare
+# box gets a fresh one (update dev1's .mcp.json linux-imag-nb entry then). It lands in 0600 files only.
+# The restart policy requires the service active + /health on :8092 before this step passes.
+remoteos_mcp_install "$DESKTOP_USER" desktop restart \
+    || fail "#858: remoteos-mcp agent install failed -- the linux-imag-nb MCP surface would be dead (see the remoteos-mcp line above)"
 echo "  #858: remoteos-mcp agent active on :8092 (linux-imag-nb MCP surface provisioned)"
 
 # =============================================================================

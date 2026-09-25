@@ -1142,10 +1142,12 @@ The `win-*`/`linux-*` MCP tools this session (and every session working this rig
 by `remoteos-mcp` — its own repo (`~/devel/remoteos-mcp`, GitHub `zbynekdrlik/remoteos-mcp`), with
 its own CLAUDE.md, its own `.claude/skills/install` playbook, and its own versioning
 (`0.7.0.devN`). camera-box does NOT re-implement, re-pin, or UPGRADE this agent — upgrades always
-use the agent's own installer (below). Since #858 the ONE exception is initial PROVISIONING of a
-fresh imag box: `scripts/setup-imag.sh` step 23 INVOKES the canonical `install-linux.sh` (it does
-not duplicate or re-pin it) so a freshly hardware'd imag notebook comes up with a working
-`linux-imag-nb` MCP surface instead of needing a hand-install.
+use the agent's own installer (below). The ONE exception is PROVISIONING a Linux box: since issue
+1361 `setup-strih.sh` step 10, `setup-imag.sh` step 23 and `setup-device.sh` STEP 17b all call the
+shared `scripts/lib/remoteos-mcp.sh`, which pip-installs the project's own source (GitHub API tarball
+of ONE pinned commit, `remoteos_mcp_pinned_ref` = what strih-lx runs; bump it deliberately) with the
+project's own `constraints.txt` into a venv at `/opt/remoteos-mcp-venv`, so a freshly hardware'd box
+comes up with a working MCP surface. The dependency pins stay the project's own.
 
 **How it runs on each box type** (all four rig Windows/Linux boxes, `--enable-all --port 8092`):
 - **Windows (strih/stream):** scheduled task `RemoteOSMCP` (`wscript.exe .remoteos-mcp\
@@ -1159,12 +1161,14 @@ not duplicate or re-pin it) so a freshly hardware'd imag notebook comes up with 
   process serving the request — this is expected, not a failure; the upgrade completes
   server-side before the kill. Verify by simply calling `GetSystemInfo`/`Ping` again right after
   (fresh HTTP request, same host:port:auth_key) and `pip show remoteos-mcp`.
-- **Linux (imag-nb/cam1-4):** `systemd` unit `remoteos-mcp.service`, package installed globally
-  via `pip install --break-system-packages --ignore-installed git+https://github.com/zbynekdrlik/
-  remoteos-mcp.git` (its own `install-linux.sh`). Same upgrade discipline: use the installer, never
-  a bare pip command. On imag, that installer is now invoked automatically by `setup-imag.sh` step
-  23 at provisioning time (#858; `REMOTEOS_MCP_AUTH_KEY` env pre-seeds the key so dev1's `.mcp.json`
-  keeps matching a fresh box) — cam1-4 remain hand-installed until their provisioner gains the same.
+- **Linux (strih-lx/imag-nb/cam1-4):** `systemd` unit `remoteos-mcp.service` running
+  `/opt/remoteos-mcp-venv/bin/python -m remoteos` with the key in the 0600
+  `/etc/remoteos-mcp/remoteos-mcp.env` (issue 1361; strih-lx ran this venv by hand first). Boxes
+  provisioned earlier still carry the upstream installer's system-pip install + a key in ExecStart
+  until their provisioner re-runs (it keeps the key). Upgrade = bump `remoteos_mcp_pinned_ref` (or
+  `REMOTEOS_MCP_REF=<sha>` for one run) and re-run the box's provisioner step: the new commit changes
+  the source id and triggers the pip; never a bare pip command. `REMOTEOS_MCP_AUTH_KEY` pins the key so dev1's `.mcp.json` keeps
+  matching a fresh box.
 
 **Rollback point for a specific old version:** find the exact commit via
 `git log --oneline -- pyproject.toml` in the remoteos-mcp checkout + `git show <sha>:pyproject.toml`

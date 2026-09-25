@@ -74,7 +74,8 @@ anchor). Measure it directly:
 `python3 -c "s=open('scripts/recording-e2e.sh').read(); mb=s.find('\"\$VERDICT_BIN\" \"\${MERGE_ARGS[@]}\" || GATE=\$?'); print(s.find('exit \"\$GATE\"', mb)-mb)"`
 then set the window above that with headroom + the file's own `// #NNNN: widened from A to B bytes
 ... (measured distance N)` convention comment. `recording-e2e-cleanup-composition.md` documents the
-widening itself; THIS entry is the reason the count sweep won't remind you to.
+widening itself; THIS entry is the reason the count sweep won't remind you to. Last measured 25.9.2026
+(issue 1367 pixel-proof step): 11535 of the 12000-byte window — the NEXT step added there must widen it.
 
 ## Raising a shared formula constant (a `PHASE_SYNC_FLOOR_MS`-style floor/cap) breaks EVERY hardcoded literal test expectation that assumed the old value -- across BOTH languages (#707)
 
@@ -1326,6 +1327,9 @@ FIRST append (the transcript is written after every tool round), so one call pro
 loops on `[ "$(date +%s)" -lt "$end" ]`, parses ONLY the last JSONL line of the output file
 (`tail -n 1 | python3 -c` printing `type` + the content-block types) and stops on
 `assistant text`, sleeping ~5 s between reads; then run `bash /abs/waitrev.sh` as its own call.
+**Also require `message.stop_reason == "end_turn"`** (issue 1346): the reviewer emits intermediate
+text-only assistant lines between tool rounds, so an `assistant ['text']` last line alone fired
+"DONE" while the review was still running.
 
 ## A Python CLI test that overrides HOME also hides the USER site-packages (issue 1346)
 
@@ -1335,3 +1339,28 @@ home, so a module installed with `pip --user` (python3-websocket on dev1, which 
 imports at module load) raises `ModuleNotFoundError` before the code under test runs. Pin the real
 user base alongside the fake home: `env = dict(os.environ, HOME=str(tmp),
 PYTHONUSERBASE=site.getuserbase())`.
+
+## Running a std-only test that needs `tempfile` locally (Tier-0, issue 1367)
+
+`tests/deploy_genlock_fleet.rs` / `tests/obs_box_baseline_1357.rs` are otherwise std-only but call
+`tempfile::tempdir()`, so a plain `rustc --test` fails E0433. Build a ~30-line shim crate (a
+`TempDir(PathBuf)` with `path()` / `into_path()` + remove-on-drop, and `tempdir()` under
+`std::env::temp_dir()`) as `rustc --crate-type rlib --crate-name tempfile shim.rs`, then
+`CARGO_MANIFEST_DIR=<wt> rustc --edition 2021 --test tests/<file>.rs --extern tempfile=<shim.rlib>
+-L <dir>` and run the binary from the worktree root. The real crate still runs on CI.
+
+## A fake `sshpass` that PATTERN-MATCHES the remote command and fakes its result tests nothing — make it RUN the text (issue 1371)
+
+A fake `sshpass` on PATH that checks `if "<some check text>" in cmd: exit 97` only proves the
+command CONTAINS the text. A wrong exit code, an inverted condition, or a check placed after the
+real call all still pass. Found by a fresh-context review of `scripts/lib/camera-test-settings.sh`.
+The pattern that tests the real thing (`tests/python/test_camera_test_settings_1371.py`):
+
+- The fake still emulates only what cannot be faked (a remote `/sys` read).
+- Every other remote command is really run: `subprocess.run(["/bin/bash", "-c", cmd],
+  env={"PATH": <stub dir>, ...})`.
+- The stub dir holds python stubs for the box tools (`systemctl`, `pgrep`, `gphoto2`), plus a
+  symlink to the real `timeout`.
+- PATH is the stub dir ONLY. Each stub therefore carries an absolute `#!<sys.executable>` shebang,
+  because `#!/usr/bin/env python3` finds no python on that PATH.
+- Leaving a stub out (for example no `pgrep`) tests the "tool missing on the box" branch for free.

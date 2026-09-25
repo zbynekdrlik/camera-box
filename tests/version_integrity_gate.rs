@@ -1299,6 +1299,137 @@ fn gate_passes_when_deployed_bytes_match_the_manifest_770() {
     let _ = std::fs::remove_file(&manifest);
 }
 
+// ── #1346: `--alt-manifest` -- the FULL windows-genlock bundle of the SAME build as the FAST
+// manifest. The two Windows builds are not byte-reproducible, so a correct full-bundle deploy's
+// obs.dll never equals the FAST manifest's entry; the gate threads the full manifest to every box as
+// drift-guard's `alt_manifest=` and a box is OK when its obs.dll matches EITHER entry.
+
+/// An obs.dll-ONLY manifest, the FAST (windows-genlock-fast.yml) layout: obs.dll at the stage root,
+/// no distroav. One files[] entry per line (drift-guard's parsers are line-based).
+fn write_fast_manifest_1346(name: &str, obs_sha: &str) -> PathBuf {
+    let json = format!(
+        "{{\n  \"schema\": \"camera-box/genlock-bundle-manifest@1\",\n  \"build_sha\": \"deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\",\n  \"files\": [\n    {{ \"path\": \"GENLOCK_BUILD_SHA.txt\", \"sha256\": \"4444444444444444444444444444444444444444444444444444444444444444\", \"size\": 42 }},\n    {{ \"path\": \"obs.dll\", \"sha256\": \"{obs_sha}\", \"size\": 100 }}\n  ]\n}}\n"
+    );
+    write_state(name, &json)
+}
+
+/// Run the gate for a strih+stream fleet whose deployed obs.dll is `obs_on_boxes`, against a FAST
+/// manifest (obs.dll `FAST`) and -- when `with_alt` -- a FULL alternate (obs.dll `FULL`). `tag`
+/// keeps every file name unique (parallel tests share one pid dir).
+fn run_gate_alt_1346(tag: &str, obs_on_boxes: &str, with_alt: bool) -> (i32, String, String) {
+    const SHA: &str = "54995646aaaa0488a110dbf02e5e472f15cb001d";
+    const FAST: &str = "18ea7acf11111111111111111111111111111111111111111111111111111111";
+    const FULL: &str = "e454b13422222222222222222222222222222222222222222222222222222222";
+    const DISTROAV_FULL: &str = "3333333333333333333333333333333333333333333333333333333333333333";
+    let fast = write_fast_manifest_1346(&format!("bundle_1346_fast_{tag}"), FAST);
+    let full = write_manifest(&format!("bundle_1346_full_{tag}"), FULL, DISTROAV_FULL);
+    let obs = if obs_on_boxes == "FULL" {
+        FULL
+    } else {
+        obs_on_boxes
+    };
+    let s = write_state(
+        &format!("strih_bytes_1346_{tag}"),
+        &with_obs_identity_ok(
+            &with_manifest_facet(
+                &with_sha(STRIH_PINNED, SHA),
+                obs,
+                DISTROAV_FULL,
+                GENLOCK_CAP_770,
+            ),
+            true,
+        ),
+    );
+    let t = write_state(
+        &format!("stream_bytes_1346_{tag}"),
+        &with_obs_identity_ok(
+            &with_manifest_facet(
+                &with_sha(STREAM_PINNED, SHA),
+                obs,
+                DISTROAV_FULL,
+                GENLOCK_CAP_770,
+            ),
+            false,
+        ),
+    );
+    let (imag_m, imag_b) = clean_imag_bytes_1100(&format!("alt1346_{tag}"));
+    let mut args: Vec<String> = vec!["--manifest".into(), fast.display().to_string()];
+    if with_alt {
+        args.push("--alt-manifest".into());
+        args.push(full.display().to_string());
+    }
+    args.extend([
+        "--win-state".to_string(),
+        format!("strih={}", s.display()),
+        "--win-state".to_string(),
+        format!("stream={}", t.display()),
+        "--genlock-sha".to_string(),
+        format!("imag={SHA}"),
+        "--imag-manifest".to_string(),
+        imag_m.display().to_string(),
+        "--imag-bytes".to_string(),
+        imag_b,
+    ]);
+    let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let out = run_gate(&refs);
+    for p in [&fast, &full, &s, &t, &imag_m] {
+        let _ = std::fs::remove_file(p);
+    }
+    out
+}
+
+#[test]
+fn gate_passes_a_full_bundle_obs_dll_via_the_alt_manifest_1346() {
+    let (code, stdout, stderr) = run_gate_alt_1346("pass", "FULL", true);
+    assert_eq!(
+        code, 0,
+        "a full-bundle obs.dll of the SAME build must PASS with --alt-manifest. stdout={stdout} \
+         stderr={stderr}"
+    );
+    assert!(stdout.contains("GATE PASS"), "stdout: {stdout}");
+    assert!(
+        stdout
+            .lines()
+            .any(|l| l.contains("obs_dll_sha256") && l.contains("OK") && l.contains("alternate")),
+        "the obs.dll line must say it matched the alternate manifest: {stdout}"
+    );
+}
+
+#[test]
+fn gate_refuses_a_foreign_obs_dll_even_with_the_alt_manifest_1346() {
+    let (code, stdout, stderr) = run_gate_alt_1346(
+        "foreign",
+        "9999999999999999999999999999999999999999999999999999999999999999",
+        true,
+    );
+    assert_eq!(
+        code, 20,
+        "an obs.dll matching NEITHER manifest must still REFUSE. stdout={stdout} stderr={stderr}"
+    );
+    assert!(
+        stdout
+            .lines()
+            .any(|l| l.contains("obs_dll_sha256") && l.contains("DRIFT")),
+        "must name obs_dll_sha256 as DRIFT: {stdout}"
+    );
+}
+
+#[test]
+fn gate_without_the_alt_manifest_still_judges_the_fast_manifest_alone_1346() {
+    // The single-manifest behaviour is unchanged: a full-bundle obs.dll with ONLY the FAST manifest
+    // is the historic DRIFT (the release-E2E refuse this ticket's alternate exists to fix).
+    let (code, stdout, stderr) = run_gate_alt_1346("single", "FULL", false);
+    assert_eq!(
+        code, 20,
+        "without --alt-manifest the FAST manifest is judged alone, exactly as before. \
+         stdout={stdout} stderr={stderr}"
+    );
+    assert!(
+        !stdout.contains("alternate"),
+        "no alternate wording without --alt-manifest: {stdout}"
+    );
+}
+
 // ── #1082 byte-parity follow-up to #770: the imag (Linux) box's DEPLOYED .so BYTES are compared
 // against its CI-authoritative linux BUNDLE_MANIFEST, closing the gap #770 left. #770 wired the
 // WINDOWS obs.dll/distroav.dll byte compare (via drift-guard's by-basename manifest_sha_for_component);

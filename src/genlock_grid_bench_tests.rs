@@ -486,3 +486,32 @@ fn shallow_n1_source_is_untouched_1367() {
         }
     }
 }
+
+/// issue 1367 (design 5833339163, review round 1) — the KNOWN LIMIT of the GAP hold's duplicate
+/// guard, pinned so it cannot grow silently. A send-time-stamping sender labels a slow frame one
+/// slot late; when its duplicate is not queued yet the GAP hold reads the late label as a real skip,
+/// holds (a repeat) and the shallow shed later removes the extra frame. At the live strih-lx jitter
+/// (the test above) that never happens; at a 2.2x wider send jitter (σ 4 ms) it measured 22 + 22
+/// per 2 h (8 ms network) and 12 + 12 (40 ms network). Every such hold is paired with its shed
+/// (the conveyor returns to D), and no drain / relock appears.
+#[test]
+fn a_late_label_without_its_queued_duplicate_costs_a_bounded_repeat_1367() {
+    for network_ns in [8_000_000u64, 40_000_000] {
+        let mut cfg = BenchConfig::live_2026_09_24(GridModel::Production);
+        cfg.latency_ms = 3;
+        cfg.duration_s = 2 * 3600;
+        cfg.send_delay_sigma_ns = 4_000_000;
+        cfg.network_ns = network_ns;
+        let r = run_bench(&cfg);
+        eprintln!("late-label residual, network {network_ns}: {r:?}");
+        assert!(
+            r.n1_grows <= 30 && r.converge_sheds <= 30,
+            "network {network_ns}: the late-label residual grew past the measured 22 + 22 per 2 h: {r:?}"
+        );
+        assert!(
+            r.n1_grows.abs_diff(r.converge_sheds) <= 1,
+            "network {network_ns}: a GAP hold must be paired with the shed that restores D: {r:?}"
+        );
+        assert_eq!((r.drains, r.relocks), (0, 0), "network {network_ns}: {r:?}");
+    }
+}

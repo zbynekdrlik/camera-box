@@ -21,6 +21,11 @@ The offline recording verdict decodes every recorded frame's QR(s): the big opti
 - `decode_qr_luma_all_fast_then_robust(img, expected_burn_run_ids)` (#207) = plain FIRST; run
   the tiles ONLY when an `expected_burn_run_ids` id is missing from the plain pass. This is the
   per-frame recording decode — ~10× faster on a clean recording, identical reads.
+- issue 1370 — on that ROBUST branch, an expected burn the tiles STILL miss is decoded from
+  its own known slot crop (`probe::burn_region_decode`, table `crate::burn_regions`): a tile
+  that also holds optical finder patterns can come back empty from rqrr's single grid pass.
+  Only missing expected ids are merged (superset, never optical/aux). Rule:
+  `.claude/rules/burn-region-recovery.md`.
 
 ## THE GOTCHA — pass the burns THIS recording actually carries (cost me real time)
 
@@ -717,6 +722,12 @@ DIFFERENT from every other node's (burn id vs optical tick):
 
 ## #463 — adding a Nth burn corner: FOUR independent places have to agree
 
+**issue 1370 changed mirror 2:** `src/burn_regions.rs` (`BurnSlot` + `slot_rect` +
+`slot_for_run_id`) is now the ONE Rust copy. `colour_sample::node_burn_exclusions` pads its slots
+by 6 px, and the burn-isolated decode recovery crops them. It is pinned to the shipped
+`burn-geom.hpp` by `tests/burn_regions_cpp_parity_1370.rs`. See
+`.claude/rules/burn-region-recovery.md`.
+
 Adding imag's `Corner::BottomCenterLeft` (a 4th burn corner, after cam1-center + strih-BL +
 stream-BR) touches FOUR separate implementations of "where does this burn sit" — miss one and
 you get a silent geometry mismatch that only a real recording (or the C++ parity test) would
@@ -725,9 +736,11 @@ catch:
 1. **`vendor/distroav/src/burn-geom.hpp`** (C++, the ACTUAL render geometry) — `Corner` enum +
    `corner_placement()`'s per-corner `if`/`else` branch. This is ground truth; everything else
    below is a MIRROR of it.
-2. **`src/probe/colour_sample.rs::node_burn_exclusions`** (Rust, probe-gated) — the colour gate's
-   dodge rects. Must reproduce the SAME formula (margin/side/band_x) as step 1, by hand, in Rust —
-   there is no shared code between the C++ render path and this Rust dodge path.
+2. **`src/burn_regions.rs::slot_rect`** (Rust, Tier-0; issue 1370) — the ONE Rust copy of the
+   formula (margin/side/band_x + the band_cy rounding + every fallback tier).
+   `colour_sample::node_burn_exclusions` (the colour gate's dodge rects) pads these slots, and the
+   decode's burn-isolated recovery crops them. A new corner or tier goes HERE; the default-feature
+   `tests/burn_regions_cpp_parity_1370.rs` compiles step 1 and fails on any drift.
 3. **`src/colour_scale.rs` test module** (Rust, Tier-0) — a THIRD hand-written mirror of the same
    formula, as `const` test fixtures, used to prove (locally, RED→GREEN, no `--features probe`
    needed) that the new corner doesn't collide with any colour patch or any other burn.
@@ -936,7 +949,9 @@ widening `NODE_BURN_RUN_IDS` from 4 to 9 entries (all six camera-under-test ids 
 strih/stream/imag) and locking it with `node_burn_run_ids_includes_every_camera_under_test_312`
 (mirrors the existing `node_burn_run_ids_includes_imag_463`).
 
-**Checklist for the next new node burn:** reserving a fresh `BURN_RUN_ID_*` constant in
+**Checklist for the next new node burn** (issue 1370: ALSO map the id in
+`src/burn_regions.rs::slot_for_run_id` if it is a fixed-position overlay burn, or the
+burn-isolated recovery never looks for it): reserving a fresh `BURN_RUN_ID_*` constant in
 `recording_latency.rs` is NOT enough by itself — also (1) add it to `NODE_BURN_RUN_IDS` in
 `src/probe/recording.rs` (this file, the tick-exclusion list), (2) add it to `CAMERA_UNDER_TEST_NODES`
 in THREE separate places if it's a camera-under-test node (`recording-verdict.rs`,

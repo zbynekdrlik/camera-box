@@ -30,6 +30,10 @@
 #include <IOSurface/IOSurface.h>
 #endif
 
+#ifdef _WIN32
+#include <util/windows/qpc-timestamp.h>
+#endif
+
 #if !defined(_WIN32) && !defined(__APPLE__)
 #include <obs-nix-platform.h>
 
@@ -559,7 +563,13 @@ void BrowserClient::OnAudioStreamPacket(CefRefPtr<CefBrowser> browser, const flo
 	audio.frames = frames;
 	audio.format = AUDIO_FORMAT_FLOAT_PLANAR;
 	audio.speakers = speakers;
+#ifdef _WIN32
+	/* camera-box issue 1372: CEF's pts is base::TimeTicks (QPC-based) ms; os_gettime_ns() runs at
+	 * the dantesync-disciplined rate on Windows, so map the stamp by its age. */
+	audio.timestamp = os_raw_qpc_ns_to_gettime_ns((uint64_t)pts * 1000000LLU);
+#else
 	audio.timestamp = (uint64_t)pts * 1000000LLU;
+#endif
 	obs_source_output_audio(bs->source, &audio);
 }
 

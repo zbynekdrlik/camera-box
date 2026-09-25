@@ -396,6 +396,13 @@ pub mod genlock_grid;
 // per-second grid removes it. Crate-root + default features (Tier-0), no OBS.
 pub mod genlock_grid_bench;
 
+// Issue 1372 part A — the Windows OBS media clock runs at the dantesync-disciplined system-time rate: the
+// vendored `os_gettime_ns()` (platform-windows.c) integrates QPC deltas at the system-time rate
+// `inc / adj` from GetSystemTimeAdjustmentPrecise, rebasing on a rate change. Crate-root +
+// std-only (Tier-0 verifiable); the C block is held identical by the committed parity gate
+// `tests/os_clock_discipline_parity_1372.rs`, which lifts it and runs it on a fake Win32 layer.
+pub mod os_clock_discipline;
+
 // #1298 — the pure LOCKED/DEGRADED/UNLOCKED decision for the in-OBS genlock statusbar
 // indicator. Crate-root + std-only so it is Tier-0 verifiable; the C port in
 // `vendor/obs-studio/frontend/widgets/GenlockLockState.hpp` is held identical by the
@@ -571,6 +578,13 @@ pub mod tear_detect;
 // overlays). The probe-gated painter (src/probe/qr.rs::blit_aux_tick_bgra) only calls
 // `aux_tick_rects` to blit — the colour_scale/motion_sweep seam pattern.
 pub mod aux_tick;
+// issue 1370 — the node-burn SLOT table (camera capture burn + the four `burn_geom` corners) on a
+// W×H frame, pure + Tier-0 like aux_tick/colour_scale. The probe-gated recording decode
+// (src/probe/burn_region_decode.rs) crops a missing expected burn's own slot so optical content in
+// the #202 bottom tile cannot hide it, and colour_sample pads the same slots. Corners are pinned
+// to the shipped burn-geom.hpp by tests/burn_regions_cpp_parity_1370.rs; the camera slot and the
+// run_id map by probe-gated tests in burn_region_decode.rs.
+pub mod burn_regions;
 // #1141 — head-end OPTICAL blur/shutter preflight: pure crate-root classifier (Tier-0) over
 // the running service's `rough=` capture telemetry, consumed by scripts/lib/optical-preflight.sh.
 pub mod optical_preflight;

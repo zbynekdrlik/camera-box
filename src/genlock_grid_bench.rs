@@ -68,7 +68,10 @@ use crate::genlock_grid::{
     grid_next_boundary_ns, per_second_floor, StampTrack, NS_PER_SECOND, UNITS_100NS_PER_SECOND,
 };
 use crate::genlock_n1_depth::{
-    n1_shed_due, n1_tick_on_grid, n1_tick_wall_ns, should_hold_n1_phase, N1_ON_GRID_NS,
+    n1_base_frames, n1_depth_frames, n1_is_deep_source, n1_shallow_gap_hold_due,
+    n1_shallow_gap_is_relock, n1_shallow_governs, n1_shallow_hold_due, n1_shallow_shed_due,
+    n1_shallow_track, n1_shed_due, n1_tick_on_grid, n1_tick_wall_ns, should_hold_n1_phase,
+    ShallowDepth, ShallowTick, N1_ON_GRID_NS,
 };
 use std::collections::{BTreeMap, VecDeque};
 
@@ -141,6 +144,12 @@ pub struct BenchConfig {
     pub receiver_tick_offset_ns: i64,
     /// A wall-clock STEP on the stream box during the run (issue 1367), or none.
     pub tick_step: Option<TickStep>,
+    /// issue 1367 (ROZHODNUTÉ 5827497952): the receiver is a MIN-LATENCY box (the imag guard caps
+    /// a shallow source's latched depth at `base + 1`).
+    pub min_latency_box: bool,
+    /// issue 1367: the shallow per-lock depth rule is active (false = the pre-rule floating
+    /// conveyor, kept only so the shallow A/V bench can show what the rule removes).
+    pub shallow_depth_rule: bool,
 }
 
 /// A wall-clock step on the stream box (issue 1367): from the first tick at or after `at_s` the
@@ -197,6 +206,8 @@ impl BenchConfig {
             restart: None,
             receiver_tick_offset_ns: 0,
             tick_step: None,
+            min_latency_box: false,
+            shallow_depth_rule: true,
         }
     }
 }
@@ -338,34 +349,49 @@ impl Sender {
 }
 
 /// The receiver's per-source FIFO state — the fields `genlock_release_tick` reads and writes.
+/// `pub(crate)` for the issue-1367 shallow-source A/V bench, which drives the same port.
 #[derive(Default)]
-struct Fifo {
-    queue: VecDeque<u64>,
+pub(crate) struct Fifo {
+    pub(crate) queue: VecDeque<u64>,
     locked_next_boundary: u64,
     anchor: u64,
     ticks_since_drain: u64,
-    presented: Option<u64>,
+    /// The frame the last presenting tick put on air.
+    pub(crate) presented: Option<u64>,
+    /// issue 1367 (ROZHODNUTÉ 5827497952): the shallow per-lock depth (the C `genlock_shallow_*`).
+    pub(crate) shallow: ShallowDepth,
+    /// This tick presented a frame (false on every hold / underrun).
+    pub(crate) presented_now: bool,
 }
 
 /// Counter deltas of one tick (only the post-warm-up ones are reported).
 #[derive(Default)]
-struct TickCounters {
-    holds: u64,
-    late_holds: u64,
-    resyncs: u64,
-    relocks: u64,
-    drains: u64,
-    converge_sheds: u64,
-    n1_grows: u64,
-    dropped_due: u64,
-    underruns: u64,
+pub(crate) struct TickCounters {
+    pub(crate) holds: u64,
+    pub(crate) late_holds: u64,
+    pub(crate) resyncs: u64,
+    pub(crate) relocks: u64,
+    pub(crate) drains: u64,
+    pub(crate) converge_sheds: u64,
+    pub(crate) n1_grows: u64,
+    pub(crate) dropped_due: u64,
+    pub(crate) underruns: u64,
+    /// issue 1367: the tick latched a shallow depth.
+    pub(crate) shallow_latches: u64,
 }
 
 impl Fifo {
     /// One render tick: the N==1 branches of the C `genlock_release_tick`, in its order. `wall` is
     /// the processing wall (the C `wall_now`), `scheduled` the wall instant the tick was scheduled
     /// for (the C `obs->video.video_time`, here already in wall time).
-    fn tick(&mut self, cfg: &BenchConfig, wall: u64, scheduled: u64, c: &mut TickCounters) {
+    pub(crate) fn tick(
+        &mut self,
+        cfg: &BenchConfig,
+        wall: u64,
+        scheduled: u64,
+        c: &mut TickCounters,
+    ) {
+        self.presented_now = false;
         if self.queue.is_empty() {
             c.underruns += 1;
             return;
@@ -381,6 +407,11 @@ impl Fifo {
         let mut drain_eligible = false;
         let mut converge_eligible = false;
         let mut anchor_update = false;
+        // issue 1367: an ACQUIRE (or a sender-restart GAP RESYNC below) is a new LOCK — the shallow
+        // depth re-measures its arrival floor (the C `genlock_shallow_relock`).
+        let mut shallow_relock = self.locked_next_boundary == 0;
+        // design 5830750134: a BACKLOG relock this tick (the C `genlock_relocks` moved).
+        let mut backlog_relock = false;
         let release;
         if self.locked_next_boundary == 0 {
             // ACQUIRE (N==1: no #1161 bracket).
@@ -397,6 +428,7 @@ impl Fifo {
         {
             // BACKLOG relock (#1003 phase-continuity selection + the stale-anchor re-select).
             c.relocks += 1;
+            backlog_relock = true;
             let q: Vec<u64> = self.queue.iter().copied().collect();
             let mut sel =
                 relock_select_nearest(&q, wall, relock_anchor_age_ns(self.anchor, cfg.latency_ms));
@@ -431,13 +463,71 @@ impl Fifo {
                 self.ticks_since_drain = 0;
                 return;
             }
+            // issue 1367 (ROZHODNUTÉ 5827497952): a SHALLOW source HOLDS one tick when presenting
+            // the head now would put it shallower than its latched depth D (the C
+            // shallow half of `genlock_should_hold_n1_phase`), counted as an n1 grow too.
+            if tick_on_grid(cfg.grid, tick_wall)
+                && n1_shallow_hold_due(
+                    tick_wall,
+                    head,
+                    wall.saturating_sub(newest),
+                    cfg.latency_ms,
+                    CANVAS_INTERVAL_NS,
+                    self.shallow.target_frames,
+                    self.ticks_since_drain,
+                )
+            {
+                c.n1_grows += 1;
+                self.ticks_since_drain = 0;
+                return;
+            }
             release = 1;
             drain_eligible = true;
+            // issue 1367: while the latched shallow depth governs, its own shed covers depth > D
+            // and the queue-length drain stays out of it (it would fight D on a wide arrival
+            // spread).
+            if n1_shallow_governs(
+                self.shallow.target_frames,
+                wall.saturating_sub(newest),
+                cfg.latency_ms,
+                CANVAS_INTERVAL_NS,
+            ) {
+                drain_eligible = false;
+            }
             converge_eligible = true;
             anchor_update = true;
         } else if present_ts >= head {
             // GAP RESYNC — upstream skipped a stamp and the next frame has aged past the deadline.
+            // design 5833339163: a SHALLOW source whose latched D governs HOLDS while the post-gap
+            // head is still younger than D (the C `genlock_should_hold_n1_gap`), so the head goes
+            // on air at D instead of one frame (or more) under it (never when the head is already
+            // duplicated behind it: a late-labelled frame, on time); counted as an n1 grow, and the
+            // #859 throttle is left alone (the hold never moves the conveyor off D).
+            let newest = *self
+                .queue
+                .back()
+                .expect("head exists, so the queue is not empty");
+            let tick_wall = n1_tick_wall_ns(wall, wall, scheduled);
+            if tick_on_grid(cfg.grid, tick_wall)
+                && n1_shallow_gap_hold_due(
+                    tick_wall,
+                    head,
+                    self.queue.get(1).copied().unwrap_or(0),
+                    self.locked_next_boundary,
+                    wall.saturating_sub(newest),
+                    cfg.latency_ms,
+                    CANVAS_INTERVAL_NS,
+                    self.shallow.target_frames,
+                )
+            {
+                c.n1_grows += 1;
+                return;
+            }
             c.resyncs += 1;
+            // issue 1367: a gap of a second or more is a sender restart, i.e. a relock.
+            if n1_shallow_gap_is_relock(head.saturating_sub(self.locked_next_boundary)) {
+                shallow_relock = true;
+            }
             release = 1;
             anchor_update = true;
         } else {
@@ -483,14 +573,22 @@ impl Fifo {
                 .expect("a STEADY present has a queued frame");
             let tick_wall = n1_tick_wall_ns(wall, wall, scheduled);
             if tick_on_grid(cfg.grid, tick_wall)
-                && n1_shed_due(
+                && (n1_shed_due(
                     tick_wall,
                     self.locked_next_boundary,
                     wall.saturating_sub(newest),
                     cfg.latency_ms,
                     CANVAS_INTERVAL_NS,
                     self.ticks_since_drain,
-                )
+                ) || n1_shallow_shed_due(
+                    tick_wall,
+                    self.locked_next_boundary,
+                    wall.saturating_sub(newest),
+                    cfg.latency_ms,
+                    CANVAS_INTERVAL_NS,
+                    self.shallow.target_frames,
+                    self.ticks_since_drain,
+                ))
                 && self.queue.len() > 1
             {
                 self.queue.pop_front();
@@ -501,10 +599,39 @@ impl Fifo {
                 self.ticks_since_drain += 1;
             }
         }
+        // issue 1367: the shallow per-lock depth samples the arrival floor (the newest queued
+        // frame's rounded age at the scheduled instant) on this on-grid PRESENT tick and latches D
+        // once its window closes (the C present tail, `genlock_n1_shallow_track`).
+        let newest = *self.queue.back().expect("release keeps at least one frame");
+        let tick_wall = n1_tick_wall_ns(wall, wall, scheduled);
+        if cfg.shallow_depth_rule
+            && n1_shallow_track(
+                &mut self.shallow,
+                ShallowTick {
+                    n1: true,
+                    relock: shallow_relock,
+                    on_grid: tick_on_grid(cfg.grid, tick_wall),
+                    floor_frames: n1_depth_frames(tick_wall, newest, CANVAS_INTERVAL_NS),
+                    base_frames: n1_base_frames(cfg.latency_ms, CANVAS_INTERVAL_NS),
+                    deep: n1_is_deep_source(
+                        wall.saturating_sub(newest),
+                        cfg.latency_ms,
+                        CANVAS_INTERVAL_NS,
+                    ),
+                    min_latency_box: cfg.min_latency_box,
+                    // the frame this tick presents (the C `source->last_frame_ts`).
+                    realized_frames: n1_depth_frames(tick_wall, self.queue[0], CANVAS_INTERVAL_NS),
+                    backlog_relock,
+                },
+            )
+        {
+            c.shallow_latches += 1;
+        }
         let presented = self
             .queue
             .pop_front()
             .expect("release keeps at least one frame");
+        self.presented_now = true;
         if anchor_update {
             self.anchor = phase_anchor_from_present(wall, presented);
         }
@@ -515,7 +642,7 @@ impl Fifo {
 
 /// issue 1367 — the on-grid condition of the N==1 rule on the bench's own grid model (the C
 /// `genlock_n1_tick_is_on_grid` floors on the production per-second grid).
-fn tick_on_grid(grid: GridModel, tick_wall: u64) -> bool {
+pub(crate) fn tick_on_grid(grid: GridModel, tick_wall: u64) -> bool {
     n1_tick_on_grid(
         tick_wall,
         grid.deadline_floor(tick_wall.saturating_add(N1_ON_GRID_NS)),

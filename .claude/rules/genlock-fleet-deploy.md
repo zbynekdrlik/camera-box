@@ -385,3 +385,12 @@ had set stream `NDI 2ME PGM genlock_latency_ms_src` 987 + `mbc` audio sync offse
 the box is not actually running. After EVERY stream deploy/relaunch: read the live pin + `mbc`
 offset over WS and, if they differ from `av-sync-last.json`'s `applied_latency_ms` /
 `audio_offset_ms`, re-apply those (read-back verified) before the next E2E.
+
+## Lookups in the emitted remote programs must fail through a NAMED line (issue 1367)
+
+The on-box imag program runs `set -euo pipefail`, so a failing `$(id -u "$U")` or
+`$(getent passwd "$U" | cut -d: -f6)` exits SILENTLY before any guard after it. Swallow the rc and
+guard with a named FAIL on the same line: `X="\$(… || true)"; [ -n "\$X" ] || { echo "#789 IMAG
+FAIL: …" >&2; exit 4; }` (`\$` inside the unquoted `EOS` heredoc). Resolve the desktop user and home
+ONCE (step 5a) and reuse them — never a hardcoded `/home/<user>`. The script has a < 1000-line
+test budget (it sits at 999), so a new step must trim elsewhere.

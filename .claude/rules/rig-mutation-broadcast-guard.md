@@ -31,6 +31,13 @@ before the `[2b/8]` ALL_CAMBOX deploy loop. The existing pre-`[4/8]` reroute re-
 `a_stray_session_guard_precedes_every_fleet_mutation_1271` pins a guard before each mutation banner;
 add the new mutation's anchor to its `muts` list.
 
+**A guard call can also live INSIDE a sourced step lib (issue 1371).** `camera_test_settings_enforce`
+(`scripts/lib/camera-test-settings.sh`) calls `stray_session_check_assert` right before its
+`gphoto2 --set-config`, and only when a set is needed, because the read is not a mutation. That
+call is invisible to the static `muts` test, which reads only recording-e2e.sh text. Its order is
+pinned by `test_a_live_broadcast_blocks_the_set` in `tests/python/test_camera_test_settings_1371.py`.
+A future lib step that mutates the rig follows the same shape.
+
 **The SAME shared guard is reused OUTSIDE `recording-e2e.sh` too** — `scripts/bkshading-deploy-relay.sh`
 calls `stray_session_check_assert` as its rig-busy PREFLIGHT before the first cambox ssh/scp (a relay
 deploy DURING live production fork-wedged cam1, issue 1229 2026-09-13). Its `--force-live` flag is the

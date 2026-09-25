@@ -704,6 +704,47 @@ def _section_residual_events(verdict):
     )
 
 
+_MSP_BOX_STATUS = {"ok": "ok", "failed": "zlyhal"}
+
+
+def _section_missing_slot_pixels(verdict):
+    """Issue 1367 -- the pixel proofs of the classified slots the merge could not extract (the
+    `missing_slot_pixels` block scripts/lib/missing-slot-pixels.sh merges into the verdict JSON):
+    each slot with its exported PNG paths, plus each box's export status. Returns None when the block
+    is absent or lists no slot (a run with nothing to prove renders byte-identical to before)."""
+    m = verdict.get("missing_slot_pixels")
+    if not isinstance(m, dict) or not m.get("slots"):
+        return None
+    boxes = m.get("boxes") or {}
+    box_txt = ", ".join(
+        f"{b}: {_MSP_BOX_STATUS.get(st, st)}" for b, st in sorted(boxes.items())
+    )
+    lines = [
+        "**Pixelový dôkaz chýbajúcich snímok (issue 1367)**",
+        f"  {m.get('exported_slots', 0)} z {m.get('total_slots', 0)} slotov bez dôkazu vyexportovaných"
+        f" (strop {m.get('cap', '?')}) · {box_txt or 'žiadny box'}",
+    ]
+    for slot in m["slots"]:
+        pngs = slot.get("pngs") or []
+        where = ", ".join(pngs) if pngs else "bez PNG"
+        lines.append(f"  {slot.get('node')} snímka {slot.get('frame_index')}: {where}")
+    return "\n".join(lines)
+
+
+def _missing_slot_pixels_line(verdict):
+    """Issue 1367 -- the ONE summary line pointing at the exported pixel proofs, or None when
+    nothing was exported. It names the CI artifact that carries them (the phone reader has no
+    access to the dev1 paths); the full report lists the paths."""
+    m = verdict.get("missing_slot_pixels")
+    if not isinstance(m, dict) or not m.get("exported_slots"):
+        return None
+    names = ", ".join(str(d).rstrip("/").rsplit("/", 1)[-1] for d in m.get("dirs") or [])
+    return (
+        f"🖼 Pixelový dôkaz chýbajúcich snímok: {m['exported_slots']} → artefakt"
+        f" recording-e2e-full-path ({names})"
+    )
+
+
 # ===========================================================================
 # #1127 — the REDESIGNED, phone-readable Discord SUMMARY (owner directive 2026-08-19).
 #
@@ -1191,6 +1232,10 @@ def compose_summary(verdict: dict, meta: dict | None = None) -> str:
     tripped = _report_only_tripped(verdict)
     if tripped:
         lines.append(f"ℹ️ sledované (neovplyvňuje verdikt): {', '.join(tripped)}")
+    # Issue 1367: where to SEE the damaged frames. FAIL only -- a PASS keeps the owner's 3-line cap.
+    msp_line = _missing_slot_pixels_line(verdict)
+    if msp_line:
+        lines.append(msp_line)
     lines.append(_link_line(meta))
     return "\n".join(lines)
 
@@ -1236,6 +1281,9 @@ def compose_report(verdict: dict, meta: dict | None = None) -> str:
     residual_section = _section_residual_events(verdict)
     if residual_section is not None:
         sections.append(residual_section)
+    msp_section = _section_missing_slot_pixels(verdict)  # issue 1367
+    if msp_section is not None:
+        sections.append(msp_section)
     return "\n\n".join(sections)
 
 

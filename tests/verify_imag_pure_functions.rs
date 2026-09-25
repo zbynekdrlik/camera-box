@@ -2023,3 +2023,66 @@ fn verify_imag_check_ba_runs_before_the_obs_restart() {
         "check (ba) must run BEFORE check (o)'s OBS restart (#884 ordering)"
     );
 }
+
+/// issue 1367: check (bc) — the genlock MIN-LATENCY box marker the vendored libobs reads as the imag
+/// identity. An ABSENT marker fails OPEN (a shallow imag input would be deepened past base + 1), so
+/// the acceptance gate must FAIL on it, and it must run BEFORE check (o)'s OBS restart (#884 order).
+#[test]
+fn verify_imag_check_bc_requires_the_min_latency_marker_1367() {
+    let body = std::fs::read_to_string(script()).unwrap();
+    let bc = body
+        .find(r#"ssh_box 'if [ -f "$HOME/.camera-box/genlock-min-latency" ]; then echo present; else echo absent; fi'"#)
+        .expect("check (bc) must read the min-latency marker on the box (issue 1367)");
+    assert!(
+        body.contains(r#"fail "(bc) genlock min-latency marker ABSENT"#),
+        "an ABSENT marker must FAIL the gate (it fails OPEN in libobs, issue 1367)"
+    );
+    assert!(
+        body.contains(r#"fail "(bc) genlock min-latency marker unreadable"#),
+        "an unreadable marker must FAIL, never pass (issue 1367)"
+    );
+    let restart_call = body
+        .find(r#"ssh_box_timeout "$IMAG_OBS_RESTART_TIMEOUT""#)
+        .expect("check (o)'s restart must exist");
+    assert!(
+        bc < restart_call,
+        "check (bc) must run BEFORE check (o)'s OBS restart (#884 ordering)"
+    );
+}
+
+/// issue 1367 (review round 2): check (bd) — the marker file alone does not prove the LOADED libobs
+/// honours it (it is read once per process), so after check (o)'s restart the gate reads the new
+/// OBS log for `genlock-min-latency: ON`, and FAILs on anything else (incl. `off` or nothing).
+#[test]
+fn verify_imag_check_bd_proves_the_restarted_obs_took_the_marker_1367() {
+    let body = std::fs::read_to_string(script()).unwrap();
+    let restart_call = body
+        .find(r#"ssh_box_timeout "$IMAG_OBS_RESTART_TIMEOUT""#)
+        .expect("check (o)'s restart must exist");
+    let bd = body
+        .find(r#"if [ "$MINLAT_LOG" = "genlock-min-latency: ON" ]; then"#)
+        .expect("check (bd) must grade the restarted OBS's min-latency log line (issue 1367)");
+    assert!(
+        bd > restart_call,
+        "check (bd) must read the log of the OBS check (o) RESTARTED (issue 1367)"
+    );
+    assert!(
+        body.contains(r#"if [ "${persist_ok:-0}" -eq 1 ]; then"#),
+        "check (bd) runs only after a restart that came back (issue 1367)"
+    );
+    assert!(
+        body.contains(r#"fail "(bd) the restarted OBS logged"#),
+        "anything but ON must FAIL (issue 1367)"
+    );
+    // review round 3: the log is found under the box's own $HOME (the same home libobs reads the
+    // marker from), and an empty read is reported as "no genlock present tick", not as a marker
+    // the libobs ignores.
+    assert!(
+        body.contains(r#"ls -t \$HOME/.config/obs-studio/logs/*.txt"#),
+        "check (bd) must read the log under the box's own $HOME (issue 1367)"
+    );
+    assert!(
+        body.contains(r#"fail "(bd) no genlock-min-latency line logged within"#),
+        "an empty read must name the missing genlock present tick (issue 1367)"
+    );
+}

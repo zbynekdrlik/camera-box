@@ -88,6 +88,17 @@ strih_access_label() {
   fi
 }
 
+# strih_obs_restart_hint HOST -> how an operator restarts the strih OBS (issue 1361): the systemd user
+# unit on a Linux strih, the launch-obs-genlock.sh win-* MCP plan on a Windows one. Used by the
+# zero-loss restart mode's instruction text.
+strih_obs_restart_hint() {
+  if [ "$(strih_platform "${1:-}")" = "linux" ]; then
+    printf 'systemctl --user restart strih-obs.service over plain ssh'
+  else
+    printf 'scripts/launch-obs-genlock.sh via the win-* MCP'
+  fi
+}
+
 # strih_lx_partial_pullback_note PARTIAL PIXELS -> the strih-lx [8/8a] pull-back lines (the Linux
 # decode sibling already pulled both back over scp). The Windows win-strih FileDownload text stays
 # INLINE in recording-e2e.sh's else-branch: tests/harness_recording_e2e_paths.rs pins it there.
