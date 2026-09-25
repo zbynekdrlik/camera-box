@@ -1348,3 +1348,19 @@ PYTHONUSERBASE=site.getuserbase())`.
 `std::env::temp_dir()`) as `rustc --crate-type rlib --crate-name tempfile shim.rs`, then
 `CARGO_MANIFEST_DIR=<wt> rustc --edition 2021 --test tests/<file>.rs --extern tempfile=<shim.rlib>
 -L <dir>` and run the binary from the worktree root. The real crate still runs on CI.
+
+## A fake `sshpass` that PATTERN-MATCHES the remote command and fakes its result tests nothing — make it RUN the text (issue 1371)
+
+A fake `sshpass` on PATH that checks `if "<some check text>" in cmd: exit 97` only proves the
+command CONTAINS the text. A wrong exit code, an inverted condition, or a check placed after the
+real call all still pass. Found by a fresh-context review of `scripts/lib/camera-test-settings.sh`.
+The pattern that tests the real thing (`tests/python/test_camera_test_settings_1371.py`):
+
+- The fake still emulates only what cannot be faked (a remote `/sys` read).
+- Every other remote command is really run: `subprocess.run(["/bin/bash", "-c", cmd],
+  env={"PATH": <stub dir>, ...})`.
+- The stub dir holds python stubs for the box tools (`systemctl`, `pgrep`, `gphoto2`), plus a
+  symlink to the real `timeout`.
+- PATH is the stub dir ONLY. Each stub therefore carries an absolute `#!<sys.executable>` shebang,
+  because `#!/usr/bin/env python3` finds no python on that PATH.
+- Leaving a stub out (for example no `pgrep`) tests the "tool missing on the box" branch for free.
