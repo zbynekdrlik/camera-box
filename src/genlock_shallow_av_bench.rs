@@ -11,10 +11,15 @@
 //! ## Model
 //!
 //! - **Sender** (a cg feed at a 3 ms pin, SongPlayer / cg OBS): one frame per per-second grid slot,
-//!   stamped with the slot; it ARRIVES `lag` later, `lag` uniform in the scenario's band (the live
-//!   arrival floors: resolume `NDI test` ~31 ms, `sp-slow_video` ~64 ms, strih-lx `CG-obs` 33-67 ms),
-//!   delivered in order. Optional DISTURBANCES: a lost frame (a stamp gap) and a late spike (+45 ms on
-//!   one frame, in order, so the frames behind it wait too). A sender restart = 3 s of silence.
+//!   stamped with the slot; it ARRIVES `lag` later, `lag` uniform in the scenario's band, delivered
+//!   in order. The live figures are FLOORS, i.e. the newest queued frame's AGE on a grid tick
+//!   (`ts_head_skew_ms − (ts_due − 1) × 33`), which is the lag rounded UP to the next frame: resolume
+//!   `NDI test` ~31 ms (lag 22-31 ms → 1 frame), `sp-slow_video` ~64 ms (lag 40-64 ms → 2 frames),
+//!   strih-lx `CG-obs` 33-67 ms (lag 28-40 ms, straddling one frame → 1 or 2 frames). A band that
+//!   straddles the SECOND frame edge (50-80 ms → 2 or 3 frames) and a band that RISES mid-run (no
+//!   gap: the arrival floor climbs over D) or changes at a sender restart cover the review cases.
+//!   Optional DISTURBANCES: a lost frame (a stamp gap) and a late spike (+45 ms on one frame, in
+//!   order, so the frames behind it wait too). A sender restart = 3 s of silence.
 //! - **Receiver**: render ticks on the grid, each scheduled on its slot and run up to a few ms late
 //!   (half-normal 0.3 ms + a rare 5-20 ms tail); the FIFO ticks at the processing wall with the
 //!   scheduled instant (the C `wall_now` + `video_time`). The audio's video delay is the production
@@ -57,6 +62,8 @@ struct Scenario {
     late_ppm: u64,
     rule: bool,
     min_latency_box: bool,
+    /// From this many seconds after the start the lag band becomes `(min, max)` ms (no gap).
+    band_change: Option<(u64, u64, u64)>,
 }
 
 impl Scenario {
@@ -69,6 +76,7 @@ impl Scenario {
             late_ppm: 0,
             rule: true,
             min_latency_box: false,
+            band_change: None,
         }
     }
 }
@@ -151,6 +159,14 @@ fn run(sc: Scenario) -> Run {
             last_depth = None;
             settle_until = nominal + SETTLE_S * NS_PER_S;
         }
+        if let Some((at_s, _, _)) = sc.band_change {
+            if nominal == W0 + at_s * NS_PER_S {
+                // the arrival changed: the re-measure (a whole window over D, then a window) plus
+                // the move onto the new D.
+                last_depth = None;
+                settle_until = nominal + SETTLE_S * NS_PER_S;
+            }
+        }
         if !sender_back && nominal >= silent.1 {
             sender_back = true;
             resync = true;
@@ -165,7 +181,13 @@ fn run(sc: Scenario) -> Run {
             if stamp >= silent.0 && stamp < silent.1 {
                 continue;
             }
-            let mut lag = sc.lag_min_ns + lcg(&mut rng) % (sc.lag_max_ns - sc.lag_min_ns + 1);
+            let (lo, hi) = match sc.band_change {
+                Some((at_s, lo_ms, hi_ms)) if stamp >= W0 + at_s * NS_PER_S => {
+                    (lo_ms * 1_000_000, hi_ms * 1_000_000)
+                }
+                _ => (sc.lag_min_ns, sc.lag_max_ns),
+            };
+            let mut lag = lo + lcg(&mut rng) % (hi - lo + 1);
             if lcg(&mut rng) % 1_000_000 < sc.drop_ppm {
                 out.disturbances += 1;
                 continue;
@@ -375,7 +397,10 @@ fn without_the_rule_the_same_feed_floats_and_re_times_the_audio_1367() {
 }
 
 #[test]
-fn the_min_latency_guard_caps_the_depth_and_reports_it_1367() {
+fn the_min_latency_guard_reports_and_never_governs_1367() {
+    // a floor over the imag cap (lag 40-64 ms: 2 frames, D would be 3 > base + 1 = 2) is REPORTED
+    // and not applied: no depth is stored, the rule never holds/sheds and the #859 drain stays on
+    // (report instead, review round 1: a forced shallower D would churn against the arrival).
     let r = run(Scenario {
         min_latency_box: true,
         ..Scenario::clean(40, 64, 2)
@@ -383,8 +408,60 @@ fn the_min_latency_guard_caps_the_depth_and_reports_it_1367() {
     eprintln!("min-latency: {r:?}");
     assert!(r.capped, "a capped latch must be reported");
     assert!(
-        r.latched.iter().all(|&d| d == 2),
-        "never deeper than base + 1: {:?}",
+        !r.latched.is_empty() && r.latched.iter().all(|&d| d == 0),
+        "no depth may be applied: {:?}",
         r.latched
+    );
+    assert_eq!(r.corrections, 0, "the capped rule must not hold or shed");
+}
+
+#[test]
+fn a_band_straddling_the_second_frame_edge_locks_four_frames_1367() {
+    assert_clean("straddle-67", Scenario::clean(50, 80, 4));
+}
+
+/// A run whose arrival band changes, with the audio re-timed ONCE by a slew and never stepped.
+fn assert_band_change(name: &str, sc: Scenario, latched: &[u64]) {
+    let r = run(sc);
+    eprintln!("{name}: {r:?}");
+    let mut seen: Vec<u64> = r.latched.clone();
+    seen.dedup();
+    assert_eq!(seen, latched, "{name}: latched sequence");
+    assert_eq!(r.steps, 0, "{name}: an audio step re-placement");
+    assert_eq!(r.slews, 1, "{name}: the new D is slewed in exactly once");
+    assert_eq!(r.places, 3, "{name}: start, sender restart, OBS restart");
+    assert!(
+        r.max_abs_av_ms <= GATE_MAX_AV_MS,
+        "{name}: |A/V| {:.2} ms",
+        r.max_abs_av_ms
+    );
+    assert!(r.av_ticks > 80_000, "{name}: A/V gate too thin");
+}
+
+#[test]
+fn a_rising_arrival_re_measures_and_slews_the_audio_once_1367() {
+    // lag 28-40 ms (D 3) rises to 60-80 ms at t = 1500 s with no gap: the floor sits at/over D for
+    // a whole window, the depth re-measures to 4, and the audio slews +33 ms once.
+    assert_band_change(
+        "rising",
+        Scenario {
+            band_change: Some((1500, 60, 80)),
+            ..Scenario::clean(28, 40, 3)
+        },
+        &[3, 4],
+    );
+}
+
+#[test]
+fn a_sender_restart_on_a_new_band_relatches_and_slews_once_1367() {
+    // the sender comes back at t = 2403 s on a slower path: the restart relatch finds D 4, the
+    // resync placement keeps the old delay, and the new one is slewed in once.
+    assert_band_change(
+        "restart-band",
+        Scenario {
+            band_change: Some((2403, 60, 80)),
+            ..Scenario::clean(28, 40, 3)
+        },
+        &[3, 4],
     );
 }

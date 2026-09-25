@@ -26,7 +26,7 @@ use camera_box::genlock_backlog::{
 use camera_box::genlock_n1_depth::{
     n1_shallow_gap_is_relock, n1_shallow_governs, n1_shallow_hold_due, n1_shallow_shed_due,
     n1_shallow_target_frames, n1_shallow_track, n1_shed_due, n1_tick_is_on_grid, n1_tick_on_grid,
-    n1_tick_wall_ns, should_hold_n1_phase, ShallowDepth,
+    n1_tick_wall_ns, should_hold_n1_phase, ShallowDepth, ShallowTick,
 };
 use std::fs;
 use std::path::PathBuf;
@@ -1090,23 +1090,28 @@ fn c_n1_tick_is_on_grid_matches_the_rust_authority_1367() {
 
 /// issue 1367 (ROZHODNUTÉ 5827497952) — the SHALLOW per-lock depth: the lifted
 /// `genlock_n1_shallow_*` helpers (inside the same contiguous N==1 block) must match
-/// [`camera_box::genlock_n1_depth`] on the latch target + cap, the relock gap, the governs guard, the
-/// shed and hold halves at every edge, and a tick-by-tick `genlock_n1_shallow_track` sequence (a
-/// latch, a constant D, a relock that finds a deeper floor, an N>=2 reset, off-grid ticks, the
-/// min-latency cap).
+/// [`camera_box::genlock_n1_depth`] on the latch target (deep, imag cap = report-only 0), the relock
+/// gap, the governs guard, the shed and hold halves at every edge, and a tick-by-tick
+/// `genlock_n1_shallow_track` sequence (a latch, a constant D, a relock that finds a deeper floor,
+/// a floor that rises over D and re-measures, an N>=2 reset and the N==1 auto-window after it,
+/// off-grid ticks, a deep latch, the min-latency report).
 #[test]
 fn c_n1_shallow_depth_matches_the_rust_authority_1367() {
     let i30 = 33_333_333u64;
     let w = 1_000_000_000_000u64;
-    let targets: [(u64, u64, bool); 8] = [
-        (1, 1, false),
-        (1, 2, false),
-        (1, 0, false),
-        (30, 1, false),
-        (1, 2, true),
-        (1, 1, true),
-        (u64::MAX, 0, false),
-        (3, u64::MAX, true),
+    // (base, floor_max, deep, min_latency)
+    let targets: [(u64, u64, bool, bool); 11] = [
+        (1, 1, false, false),
+        (1, 2, false, false),
+        (1, 0, false, false),
+        (30, 1, false, false),
+        (30, 33, true, false),
+        (1, 2, false, true),
+        (1, 1, false, true),
+        (1, 5, true, true),
+        (u64::MAX, 0, false, false),
+        (u64::MAX, 0, true, false),
+        (3, u64::MAX, false, true),
     ];
     let gaps: [u64; 5] = [i30, 999_999_999, 1_000_000_000, 3_000_000_000, 0];
     let governs: [(u64, u64, u32, u64); 6] = [
@@ -1130,32 +1135,57 @@ fn c_n1_shallow_depth_matches_the_rust_authority_1367() {
             }
         }
     }
-    sheds.push((w, 0, i30, 3, i30, 3, 100)); // an unlocked boundary never sheds
-                                             // (n1, relock, on_grid, floor_frames, base, min_latency) per tick.
-    let mut seq: Vec<(bool, bool, bool, u64, u64, bool)> = Vec::new();
+    // an unlocked boundary never sheds
+    sheds.push((w, 0, i30, 3, i30, 3, 100));
+    // One present tick: (n1, relock, on_grid, floor_frames, base, deep, min_latency).
+    let mut seq: Vec<ShallowTick> = Vec::new();
+    let t = |n1: bool, relock: bool, on_grid: bool, floor: u64| ShallowTick {
+        n1,
+        relock,
+        on_grid,
+        floor_frames: floor,
+        base_frames: 1,
+        deep: false,
+        min_latency_box: false,
+    };
     for k in 0..110u64 {
-        seq.push((
-            true,
-            k == 0,
-            k % 11 != 5,
-            1 + u64::from(k % 7 == 3),
-            1,
-            false,
-        ));
+        seq.push(t(true, k == 0, k % 11 != 5, 1 + u64::from(k % 7 == 3)));
     }
     for k in 0..95u64 {
-        seq.push((true, k == 0, true, 2, 1, false));
+        seq.push(t(true, k == 0, true, 2));
     }
-    seq.push((false, false, true, 1, 1, false));
+    // the floor rises to D (3) and over: a whole window re-measures without a relock.
+    for k in 0..200u64 {
+        seq.push(t(true, false, k % 13 != 4, 3 + u64::from(k % 5 == 0)));
+    }
+    // an N>=2 tick clears; back on N==1 without a relock a window opens by itself.
+    seq.push(t(false, false, true, 1));
+    for _ in 0..95u64 {
+        seq.push(t(true, false, true, 1));
+    }
+    // a deep source latches base + 1 whatever its floor did.
     for k in 0..92u64 {
-        seq.push((true, k == 0, true, 3, 1, true));
+        seq.push(ShallowTick {
+            base_frames: 30,
+            deep: true,
+            ..t(true, k == 0, true, if k < 10 { 33 } else { 1 })
+        });
+    }
+    // the imag report-only cap, then no auto re-measure churn while capped.
+    for k in 0..200u64 {
+        seq.push(ShallowTick {
+            min_latency_box: true,
+            ..t(true, k == 0, true, 3)
+        });
     }
 
+    let b = |v: bool| i32::from(v);
     let mut body = String::new();
-    for (b, f, m) in &targets {
+    for (base, f, d, m) in &targets {
         body.push_str(&format!(
-            "    {{ bool cap = false; unsigned long long d = (unsigned long long)genlock_n1_shallow_target_frames({b}ULL, {f}ULL, {}, &cap); printf(\"%llu %d\\n\", d, cap ? 1 : 0); }}\n",
-            *m as i32
+            "    {{ bool cap = false; unsigned long long d = (unsigned long long)genlock_n1_shallow_target_frames({base}ULL, {f}ULL, {}, {}, &cap); printf(\"%llu %d\\n\", d, cap ? 1 : 0); }}\n",
+            b(*d),
+            b(*m)
         ));
     }
     for g in &gaps {
@@ -1163,66 +1193,77 @@ fn c_n1_shallow_depth_matches_the_rust_authority_1367() {
             "    printf(\"%d\\n\", genlock_n1_shallow_gap_is_relock({g}ULL) ? 1 : 0);\n"
         ));
     }
-    for (t, f, l, iv) in &governs {
+    for (tg, f, l, iv) in &governs {
         body.push_str(&format!(
-            "    printf(\"%d\\n\", genlock_n1_shallow_governs({t}ULL, {f}ULL, {l}u, {iv}ULL) ? 1 : 0);\n"
+            "    printf(\"%d\\n\", genlock_n1_shallow_governs({tg}ULL, {f}ULL, {l}u, {iv}ULL) ? 1 : 0);\n"
         ));
     }
-    for (tw, b, f, l, iv, t, k) in &sheds {
+    for (tw, bd, f, l, iv, tg, k) in &sheds {
         body.push_str(&format!(
-            "    printf(\"%d\\n\", genlock_n1_shallow_shed_due({tw}ULL, {b}ULL, {f}ULL, {l}u, {iv}ULL, {t}ULL, {k}ULL) ? 1 : 0);\n"
+            "    printf(\"%d\\n\", genlock_n1_shallow_shed_due({tw}ULL, {bd}ULL, {f}ULL, {l}u, {iv}ULL, {tg}ULL, {k}ULL) ? 1 : 0);\n"
         ));
     }
-    for (tw, h, f, l, iv, t, k) in &holds {
+    for (tw, h, f, l, iv, tg, k) in &holds {
         body.push_str(&format!(
-            "    printf(\"%d\\n\", genlock_n1_shallow_hold_due({tw}ULL, {h}ULL, {f}ULL, {l}u, {iv}ULL, {t}ULL, {k}ULL) ? 1 : 0);\n"
+            "    printf(\"%d\\n\", genlock_n1_shallow_hold_due({tw}ULL, {h}ULL, {f}ULL, {l}u, {iv}ULL, {tg}ULL, {k}ULL) ? 1 : 0);\n"
         ));
     }
-    body.push_str("    { uint64_t tf = 0, fm = 0; uint32_t wt = 0; bool me = false, ca = false;\n");
-    for (n1, rl, og, ff, base, ml) in &seq {
+    body.push_str(
+        "    { uint64_t tf = 0, fm = 0; uint32_t wt = 0, ov = 0; bool me = false, ca = false;\n",
+    );
+    for x in &seq {
         body.push_str(&format!(
-            "      {{ bool l = genlock_n1_shallow_track(&tf, &fm, &wt, &me, &ca, {}, {}, {}, {ff}ULL, {base}ULL, {}); printf(\"%d %llu %llu %u %d %d\\n\", l ? 1 : 0, (unsigned long long)tf, (unsigned long long)fm, (unsigned)wt, me ? 1 : 0, ca ? 1 : 0); }}\n",
-            *n1 as i32, *rl as i32, *og as i32, *ml as i32
+            "      {{ bool l = genlock_n1_shallow_track(&tf, &fm, &wt, &ov, &me, &ca, {}, {}, {}, {}ULL, {}ULL, {}, {}); printf(\"%d %llu %llu %u %u %d %d\\n\", l ? 1 : 0, (unsigned long long)tf, (unsigned long long)fm, (unsigned)wt, (unsigned)ov, me ? 1 : 0, ca ? 1 : 0); }}\n",
+            b(x.n1),
+            b(x.relock),
+            b(x.on_grid),
+            x.floor_frames,
+            x.base_frames,
+            b(x.deep),
+            b(x.min_latency_box)
         ));
     }
     body.push_str("    }\n");
     let c_out = compile_and_run_n1_block("genlock_n1_shallow_parity_1367", &body);
 
     let mut want: Vec<String> = Vec::new();
-    for (b, f, m) in &targets {
-        let (d, cap) = n1_shallow_target_frames(*b, *f, *m);
-        want.push(format!("{d} {}", cap as i32));
+    for (base, f, d, m) in &targets {
+        let (dd, cap) = n1_shallow_target_frames(*base, *f, *d, *m);
+        want.push(format!("{dd} {}", b(cap)));
     }
     for g in &gaps {
-        want.push((n1_shallow_gap_is_relock(*g) as i32).to_string());
+        want.push(b(n1_shallow_gap_is_relock(*g)).to_string());
     }
-    for (t, f, l, iv) in &governs {
-        want.push((n1_shallow_governs(*t, *f, *l, *iv) as i32).to_string());
+    for (tg, f, l, iv) in &governs {
+        want.push(b(n1_shallow_governs(*tg, *f, *l, *iv)).to_string());
     }
     let mut fired = (0usize, 0usize);
-    for (tw, b, f, l, iv, t, k) in &sheds {
-        let r = n1_shallow_shed_due(*tw, *b, *f, *l, *iv, *t, *k);
+    for (tw, bd, f, l, iv, tg, k) in &sheds {
+        let r = n1_shallow_shed_due(*tw, *bd, *f, *l, *iv, *tg, *k);
         fired.0 += usize::from(r);
-        want.push((r as i32).to_string());
+        want.push(b(r).to_string());
     }
-    for (tw, h, f, l, iv, t, k) in &holds {
-        let r = n1_shallow_hold_due(*tw, *h, *f, *l, *iv, *t, *k);
+    for (tw, h, f, l, iv, tg, k) in &holds {
+        let r = n1_shallow_hold_due(*tw, *h, *f, *l, *iv, *tg, *k);
         fired.1 += usize::from(r);
-        want.push((r as i32).to_string());
+        want.push(b(r).to_string());
     }
     let mut s = ShallowDepth::default();
-    let mut latches = 0;
-    for (n1, rl, og, ff, base, ml) in &seq {
-        let l = n1_shallow_track(&mut s, *n1, *rl, *og, *ff, *base, *ml);
-        latches += usize::from(l);
+    let mut latched = Vec::new();
+    for x in &seq {
+        let l = n1_shallow_track(&mut s, *x);
+        if l {
+            latched.push(s.target_frames);
+        }
         want.push(format!(
-            "{} {} {} {} {} {}",
-            l as i32,
+            "{} {} {} {} {} {} {}",
+            b(l),
             s.target_frames,
             s.floor_max_frames,
             s.window_ticks,
-            s.measuring as i32,
-            s.capped as i32
+            s.over_ticks,
+            b(s.measuring),
+            b(s.capped)
         ));
     }
     let diffs: Vec<String> = c_out
@@ -1243,7 +1284,9 @@ fn c_n1_shallow_depth_matches_the_rust_authority_1367() {
         "issue 1367: the vendored C shallow-depth helpers DIVERGED from the Tier-0 Rust authority:\n{}",
         diffs.join("\n")
     );
-    // both outcomes of every decision, and at least two latches (start + relock) plus the capped one.
+    // both outcomes of every decision, and every latch kind the sequence scripts: the first D, the
+    // relock's deeper D, the re-measure after the rise, the auto-window after N>=2, the deep base + 1
+    // and the capped report (0).
     assert!(
         fired.0 > 0 && fired.0 < sheds.len(),
         "shed vectors one-sided: {fired:?}"
@@ -1252,5 +1295,9 @@ fn c_n1_shallow_depth_matches_the_rust_authority_1367() {
         fired.1 > 0 && fired.1 < holds.len(),
         "hold vectors one-sided: {fired:?}"
     );
-    assert!(latches >= 3, "the track sequence latched {latches} times");
+    assert_eq!(
+        latched,
+        vec![3, 3, 5, 2, 31, 0],
+        "the track sequence latched {latched:?}"
+    );
 }

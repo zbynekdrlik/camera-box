@@ -7,8 +7,8 @@
 //!    (`genlock_should_hold_n1_phase`) both carry the shallow half next to the deep one;
 //! 2. the #859 queue-length drain stays out while the shallow depth governs;
 //! 3. a lock is an ACQUIRE or a sender-restart GAP RESYNC, and a pin change re-arms the measurement;
-//! 4. the present tail samples the floor and latches D, AFTER the audio tracker, which follows the
-//!    latched D (`genlock_video_delay_lock_ms`);
+//! 4. the present tail samples the floor and latches D (`genlock_shallow_latch`), AFTER the audio
+//!    tracker, which follows the latched D (`genlock_video_delay_lock_ms`);
 //! 5. the min-latency (imag) box marker, the latch log line and the audit tokens exist.
 //!
 //! Std-only on purpose: it runs under `cargo test` AND standalone
@@ -109,16 +109,30 @@ fn the_release_tick_locks_measures_and_keeps_the_drain_out_1367() {
         .find("genlock_video_delay_lock_ms(source->genlock_shallow_target_frames, source->genlock_shallow_measuring, interval), genlock_video_delay_sample_ns(genlock_delay_tick_wall, next_frame->timestamp), interval);")
         .expect("issue 1367: the audio tracker no longer follows the latched shallow depth");
     let latch = tick
-        .find("genlock_shallow_relock, genlock_n1_tick_is_on_grid(genlock_delay_tick_wall, interval), genlock_n1_depth_frames(genlock_delay_tick_wall, genlock_newest_stamp, interval), genlock_n1_base_frames(reserve_ms, interval), genlock_min_latency_box())) {")
+        .find("genlock_shallow_latch(source, genlock_delay_tick_wall, wall_now, interval, reserve_ms, genlock_shallow_relock);")
         .expect("issue 1367: the present tail no longer samples the arrival floor and latches D");
     assert!(
         latch > track,
         "issue 1367: the shallow latch must sit after the tracker (it reuses the scheduled tick read)"
     );
+    assert_eq!(
+        src.matches("genlock_shallow_latch(source, ").count(),
+        1,
+        "issue 1367: the shallow latch has exactly one call site (the present tail)"
+    );
+    let helper = body(
+        &src,
+        "static void genlock_shallow_latch(obs_source_t *source, uint64_t tick_wall, uint64_t wall_now, uint64_t interval, uint32_t reserve_ms, bool relock)",
+    );
     assert_in(
-        tick,
-        "source->genlock_last_known_n < 2,",
-        "the shallow depth is an N==1 rule (an N>=2 tick clears it)",
+        helper,
+        "source->genlock_last_known_n < 2, relock, genlock_n1_tick_is_on_grid(tick_wall, interval), genlock_n1_depth_frames(tick_wall, newest_stamp, interval), base_frames, genlock_n1_is_deep_source(",
+        "the latch samples the newest frame's floor on an on-grid N==1 tick (an N>=2 tick clears it)",
+    );
+    assert_in(
+        helper,
+        "reserve_ms, interval), genlock_min_latency_box()))",
+        "the latch passes the deep flag and the min-latency (imag) box guard",
     );
     // the relock flag is set before the present tail reads it, and never elsewhere.
     assert_eq!(
@@ -137,8 +151,8 @@ fn a_pin_change_rearms_and_the_box_marker_log_and_audit_exist_1367() {
     );
     assert_in(
         setter,
-        "genlock_n1_shallow_rearm(&source->genlock_shallow_floor_max_frames, &source->genlock_shallow_window_ticks, &source->genlock_shallow_measuring);",
-        "a new pin is a new base: the shallow depth must re-measure",
+        "if (source->genlock_last_known_n < 2) genlock_n1_shallow_rearm(&source->genlock_shallow_floor_max_frames, &source->genlock_shallow_window_ticks, &source->genlock_shallow_over_ticks, &source->genlock_shallow_measuring);",
+        "a new pin is a new base: an N==1 source's shallow depth must re-measure",
     );
     assert_in(
         &src,
@@ -149,6 +163,11 @@ fn a_pin_change_rearms_and_the_box_marker_log_and_audit_exist_1367() {
         &src,
         "\"genlock-shallow-lock '%s': depth_frames=%llu floor_max_frames=%llu base_frames=%llu \"",
         "each latch must be logged (a capped one as a WARNING)",
+    );
+    assert_in(
+        &src,
+        "\"wanted_frames=%llu latency_ms=%u capped=%d (issue 1367)\",",
+        "the latch line must name the depth the floor asked for (the capped report)",
     );
     assert_in(
         &src,

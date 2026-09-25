@@ -21,12 +21,12 @@
 
 use camera_box::genlock_audio_pairing::{
     audio_hold_action, audio_hold_mode, audio_hold_ms, audio_level_shift_ns,
-    audio_needs_live_offset, audio_place_shift_ms, audio_place_term_ns, audio_slew_ppm,
-    audio_slew_step_ns, audio_wall_to_mono_ns, audio_withhold_expired, decide_audio_health,
-    genlock_audio_delay_ns, pairing_offset_ms, video_delay_lock_ms, video_delay_moved,
-    video_delay_reference_ns, video_delay_round_ms, video_delay_sample_ns, video_delay_smooth_ns,
-    video_delay_track, AudioHoldAction, AudioHoldMode, AudioPairingFacets, VideoDelayTracker,
-    VIDEO_DELAY_LOCK_PENDING,
+    audio_needs_live_offset, audio_place_shift_ms, audio_place_term_ns, audio_placed_slew_fold_ns,
+    audio_slew_book_ts_ns, audio_slew_ppm, audio_slew_step_ns, audio_wall_to_mono_ns,
+    audio_withhold_expired, decide_audio_health, genlock_audio_delay_ns, pairing_offset_ms,
+    video_delay_lock_ms, video_delay_moved, video_delay_reference_ns, video_delay_round_ms,
+    video_delay_sample_ns, video_delay_smooth_ns, video_delay_track, AudioHoldAction,
+    AudioHoldMode, AudioPairingFacets, VideoDelayTracker, VIDEO_DELAY_LOCK_PENDING,
 };
 use std::fs;
 use std::path::PathBuf;
@@ -82,6 +82,8 @@ fn lift_block() -> String {
         "genlock_audio_level_shift_ns(",
         "genlock_audio_slew_step_ns(",
         "genlock_audio_slew_ppm(",
+        "genlock_audio_slew_book_ts_ns(",
+        "genlock_audio_placed_slew_fold_ns(",
     ] {
         assert!(
             block.contains(helper),
@@ -608,6 +610,37 @@ fn c_withhold_action_and_slew_match_the_rust_authority_1367() {
             i64_lit(*r)
         ));
     }
+    // the booking of a slew step out of the smoothing timeline (wrapping both ways) and the fold of
+    // an owed slew into the level setpoint when the ingest placed the packet anyway.
+    let books: [(u64, i64); 6] = [
+        (1_000, 5),
+        (1_000, -5),
+        (3, 10),
+        (u64::MAX, -1),
+        (0, 0),
+        (5_000_000_000, 1_000_000),
+    ];
+    let mut folds = Vec::new();
+    for a in 0..5u8 {
+        for placed in [false, true] {
+            for r in [0i64, 33_000_000, -12] {
+                folds.push((a, placed, r));
+            }
+        }
+    }
+    for (t, st) in &books {
+        body.push_str(&format!(
+            "    printf(\"%llu\\n\", (unsigned long long)genlock_audio_slew_book_ts_ns({t}ull, {}));\n",
+            i64_lit(*st)
+        ));
+    }
+    for (a, placed, r) in &folds {
+        body.push_str(&format!(
+            "    printf(\"%lld\\n\", (long long)genlock_audio_placed_slew_fold_ns({a}, {}, {}));\n",
+            *placed as i32,
+            i64_lit(*r)
+        ));
+    }
     let out = run_c(&body, "withhold_action_slew");
     let action_of = |c: u8| match c {
         0 => AudioHoldAction::Withhold,
@@ -638,6 +671,19 @@ fn c_withhold_action_and_slew_match_the_rust_authority_1367() {
         let st = audio_slew_step_ns(*r, *dt);
         want.push(format!("{st} {:.6}", audio_slew_ppm(st, *dt)));
     }
+    for (t, st) in &books {
+        want.push(audio_slew_book_ts_ns(*t, *st).to_string());
+    }
+    let mut folded = 0usize;
+    for (a, placed, r) in &folds {
+        let f = audio_placed_slew_fold_ns(action_of(*a), *placed, *r);
+        folded += usize::from(f != 0);
+        want.push(f.to_string());
+    }
+    assert!(
+        folded > 0 && folded < folds.len(),
+        "the fold vectors must reach both outcomes: {folded}"
+    );
     assert_eq!(
         out, want,
         "issue 1367: a C withhold / action / slew helper diverged from the Rust authority"

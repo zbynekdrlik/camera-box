@@ -137,8 +137,16 @@ fn audio_ingest_places_on_the_live_offset_and_replaces_on_a_change_1367() {
             "a withheld packet must never enter the mix",
         ),
         (
-            "source->next_audio_ts_min -= (uint64_t)genlock_slew_step_ns;",
+            "source->next_audio_ts_min = genlock_audio_slew_book_ts_ns(source->next_audio_ts_min, genlock_slew_step_ns);",
             "a slew step must be kept out of the smoothing timeline (else the 70 ms guard snaps it back)",
+        ),
+        (
+            "const int64_t genlock_fold_ns = genlock_audio_placed_slew_fold_ns( genlock_action, !(push_back && source->audio_ts), source->genlock_audio_slew_remaining_ns);",
+            "a slew still owed when the ingest placed the packet anyway must be folded into the level setpoint",
+        ),
+        (
+            "if (genlock_fold_ns != 0) { asrc_compensator_shift_level_target(&source->asrc, (double)genlock_fold_ns / 1e6); source->genlock_audio_slew_remaining_ns = 0; }",
+            "a folded slew must move the level setpoint once and be cleared (no further stretch past it)",
         ),
         (
             "asrc_compensator_shift_level_target(&source->asrc, (double)genlock_slew_step_ns / 1e6);",

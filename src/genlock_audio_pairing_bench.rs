@@ -82,6 +82,8 @@ enum Variant {
     LatchedOffset,
     LegacyLatency,
     HeadSample,
+    /// The slew steps are not booked out of the smoothing timeline.
+    NoBooking,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -137,6 +139,8 @@ struct Outcome {
     slews: u32,
     steps: u32,
     slewing_ticks: u64,
+    smoothing_snaps: u32,
+    max_ts_div_ns: u64,
     final_drift_ns: i64,
     worst_at_s: f64,
 }
@@ -195,11 +199,24 @@ pub(super) struct AudioLeg {
     latch_offset: bool,
     slew_remaining_ns: i64,
     asrc: Asrc,
+    /// The ingest's smoothing timeline (`next_audio_ts_min`) and the source's own next timestamp:
+    /// a slew step stretches the samples, so unless it is BOOKED ([`audio_slew_book_ts_ns`]) the
+    /// smoothed timeline walks away from the source time, and at `TS_SMOOTHING_THRESHOLD` (70 ms)
+    /// the ingest snaps the audio back to the old placement. Only the SLEW is modelled here (the
+    /// servo's own stretch has the same class of limit, recorded in the rule).
+    book_steps: bool,
+    ts_raw_next: u64,
+    ts_next_min: u64,
+    pub(super) smoothing_snaps: u32,
+    pub(super) max_ts_div_ns: u64,
     pub(super) places: u32,
     pub(super) slews: u32,
     pub(super) steps: u32,
     pub(super) withheld: u64,
 }
+
+/// `TS_SMOOTHING_THRESHOLD` of `obs-source.c`.
+const TS_SMOOTHING_THRESHOLD_NS: u64 = 70_000_000;
 
 impl AudioLeg {
     pub(super) fn fresh(latch_offset: bool) -> AudioLeg {
@@ -217,11 +234,22 @@ impl AudioLeg {
             latch_offset,
             slew_remaining_ns: 0,
             asrc: Asrc::fresh(),
+            book_steps: true,
+            ts_raw_next: 0,
+            ts_next_min: 0,
+            smoothing_snaps: 0,
+            max_ts_div_ns: 0,
             places: 0,
             slews: 0,
             steps: 0,
             withheld: 0,
         }
+    }
+
+    /// The anti-tautology variant: the slew steps are NOT booked out of the smoothing timeline.
+    pub(super) fn without_booking(mut self) -> AudioLeg {
+        self.book_steps = false;
+        self
     }
 
     /// Audio is in the mix.
@@ -321,6 +349,8 @@ impl AudioLeg {
                     .wrapping_add(term as u64);
                 self.correction_ns = 0.0;
                 self.slew_remaining_ns = 0;
+                self.ts_raw_next = tc;
+                self.ts_next_min = tc;
             }
         }
         self.mode = mode;
@@ -344,6 +374,26 @@ impl AudioLeg {
         self.slew_remaining_ns -= step;
         self.correction_ns += step as f64;
         self.asrc.shift(step as f64 / 1e6);
+        // the smoothing timeline: the source advanced dt, the stretched samples dt + step.
+        self.ts_raw_next = self.ts_raw_next.wrapping_add(dt_ns);
+        let smoothed = self
+            .ts_next_min
+            .wrapping_add(dt_ns)
+            .wrapping_add(step as u64);
+        self.ts_next_min = if self.book_steps {
+            audio_slew_book_ts_ns(smoothed, step)
+        } else {
+            smoothed
+        };
+        let div = (self.ts_next_min.wrapping_sub(self.ts_raw_next) as i64).unsigned_abs();
+        self.max_ts_div_ns = self.max_ts_div_ns.max(div);
+        if div >= TS_SMOOTHING_THRESHOLD_NS {
+            // the ingest takes the raw timestamp: the audio snaps back by the divergence.
+            let back = self.ts_next_min.wrapping_sub(self.ts_raw_next) as i64;
+            self.correction_ns -= back as f64;
+            self.ts_next_min = self.ts_raw_next;
+            self.smoothing_snaps += 1;
+        }
         self.correction_ns += (self.asrc.rate_est_ppm + self.asrc.level_ppm) * 1e-6 * dt_ns as f64;
         let depth_ms = (self.play_mono(tc_now) - mono as f64) / 1e6;
         self.asrc.win_sum += depth_ms;
@@ -377,8 +427,18 @@ fn simulate(b: &Bench, variant: Variant) -> Outcome {
     let mut out = Outcome::default();
     let mut rng = 0x1367u64;
     let mut tracker = VideoDelayTracker::default();
-    let mut audio = AudioLeg::fresh(variant == Variant::LatchedOffset);
+    let leg = |v: Variant| {
+        let a = AudioLeg::fresh(v == Variant::LatchedOffset);
+        if v == Variant::NoBooking {
+            a.without_booking()
+        } else {
+            a
+        }
+    };
+    let mut audio = leg(variant);
     let mut depth = b.initial_depth;
+    let mut snaps = 0u32;
+    let mut max_div = 0u64;
     let mut silent_until_tick = 0u64;
     let mut resync_pending = false;
     let mut skip_until_tick = GATE_SKIP_S * FPS;
@@ -403,7 +463,9 @@ fn simulate(b: &Bench, variant: Variant) -> Outcome {
                         totals.0 += audio.places;
                         totals.1 += audio.slews;
                         totals.2 += audio.steps;
-                        audio = AudioLeg::fresh(variant == Variant::LatchedOffset);
+                        snaps += audio.smoothing_snaps;
+                        max_div = max_div.max(audio.max_ts_div_ns);
+                        audio = leg(variant);
                         depth = d;
                     }
                 }
@@ -468,6 +530,8 @@ fn simulate(b: &Bench, variant: Variant) -> Outcome {
     out.places = totals.0 + audio.places;
     out.slews = totals.1 + audio.slews;
     out.steps = totals.2 + audio.steps;
+    out.smoothing_snaps = snaps + audio.smoothing_snaps;
+    out.max_ts_div_ns = max_div.max(audio.max_ts_div_ns);
     out
 }
 
@@ -496,6 +560,13 @@ fn av_pair_within_5ms_across_depth_changes_restarts_and_300ms_drift() {
     // placements are the start, the sender-restart resync and the OBS restart (each after the
     // withhold, straight onto the measured delay); every depth change is a slew.
     assert_eq!(o.steps, 0, "a step re-placement while playing");
+    // the booked slew never walks the smoothing timeline (the 100 ms sender-restart slew included).
+    assert_eq!(o.smoothing_snaps, 0, "a slew snapped back at 70 ms");
+    assert!(
+        o.max_ts_div_ns < 1_000,
+        "booked steps keep the smoothing timeline on the source time: {} ns",
+        o.max_ts_div_ns
+    );
     assert_eq!(o.places, 3, "places = {}", o.places);
     assert!(o.slews <= 6, "slews = {} (churn)", o.slews);
     // a slew moves 1 ms per second: the scripted changes (33 / 67 / 100 / 33 ms) settle within
@@ -504,6 +575,19 @@ fn av_pair_within_5ms_across_depth_changes_restarts_and_300ms_drift() {
     assert!(
         slewing_s <= 33.4 + 66.7 + 100.1 + 100.1 + 33.4 + 5.0,
         "slewing {slewing_s:.1} s"
+    );
+}
+
+#[test]
+fn an_unbooked_slew_walks_the_smoothing_timeline_and_snaps_back_1367() {
+    // the anti-tautology twin of the booking: the scripted run carries a 100 ms slew (the sender
+    // restart re-times the free tracker from 4 frames to 1), which walks an unbooked smoothing
+    // timeline past TS_SMOOTHING_THRESHOLD, and the audio snaps back to the old placement.
+    let o = simulate(&Bench::scripted(), Variant::NoBooking);
+    eprintln!("no booking: {o:?}");
+    assert!(
+        o.smoothing_snaps > 0 && o.max_ts_div_ns >= TS_SMOOTHING_THRESHOLD_NS,
+        "an unbooked 100 ms slew must reach the 70 ms smoothing threshold: {o:?}"
     );
 }
 
