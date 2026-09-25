@@ -36,28 +36,35 @@ set -uo pipefail
 # on the dantesync rate) is live -- a Dante-clocked sender still differs from the system-time rate by
 # dantesync's f_phase (the Dante-GM-vs-UTC term), so the bound must leave room for that.
 #
-# SKIP (no page): the capture failed (strih-lx down / ssh / sudo -> the #1001 network-reach watchdog's
-# territory), no VBAN stream arrived, or a stream is too short to grade. CAPTURE_TRUNCATED (snaplen
-# cut every header) is logged loudly as a configuration error, never a page.
+# SKIP (no page): the capture failed while strih-lx is DOWN (the #1001 network-reach watchdog's
+# territory), no VBAN stream arrived, or a stream is too short to grade. A capture that keeps failing
+# while the box IS up (tcpdump missing, a wrong sudo password) would leave this watchdog blind, so
+# after VBAN_RATE_CAPTURE_FAIL_PASSES consecutive failures on a live box (ssh :22 answers) it pages
+# once, with the remote error in the text. CAPTURE_TRUNCATED (snaplen cut every header) is logged
+# loudly as a configuration error, never a page. A stream unseen for longer than VBAN_RATE_STALE_S
+# restarts its confirm count when it reappears (an old single-pass fault never completes a page).
 #
 # Usage:
 #   scripts/vban-rate-alert-watchdog.sh            # one pass: capture -> grade -> alert
 #   scripts/vban-rate-alert-watchdog.sh --dry-run  # capture + grade + LOG only; never alert
 #   scripts/vban-rate-alert-watchdog.sh --help
-# Seam (Tier-0): VBAN_RATE_CAPTURE_CMD, when set, is invoked as `<cmd> <outfile>` and replaces the
-#   ssh capture (a fixture pcap, no box).
+# Seams (Tier-0): VBAN_RATE_CAPTURE_CMD, when set, is invoked as `<cmd> <outfile>` and replaces the
+#   ssh capture (a fixture pcap, no box); VBAN_RATE_BOX_UP_CMD prints 1/0 in place of the ssh :22
+#   box-up probe.
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/obs-watchdog-decision.sh
 . "$HERE/lib/obs-watchdog-decision.sh"
 # shellcheck source=scripts/lib/obs-fleet.sh
 . "$HERE/lib/obs-fleet.sh"
+# shellcheck source=scripts/lib/watchdog-tcp-probe.sh
+. "$HERE/lib/watchdog-tcp-probe.sh"
 
 DRY_RUN=0
 case "${1:-}" in
   --dry-run) DRY_RUN=1 ;;
   --help | -h)
-    sed -n '11,52p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+    sed -n '11,58p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
     exit 0
     ;;
   "") : ;;
@@ -77,6 +84,8 @@ PPM_BOUND="${VBAN_RATE_PPM_BOUND:-20}"                   # provisional (see the 
 LOSS_CEILING="${VBAN_RATE_LOSS_CEILING:-1e-4}"           # provisional (see the header)
 MIN_SPAN_S="${VBAN_RATE_MIN_SPAN_S:-20}"
 CONFIRM_THRESHOLD="${VBAN_RATE_CONFIRM_THRESHOLD:-2}"
+CAPTURE_FAIL_PASSES="${VBAN_RATE_CAPTURE_FAIL_PASSES:-3}"  # consecutive failures on a live box -> page
+STALE_S="${VBAN_RATE_STALE_S:-900}"                         # 3 timer periods: an unseen stream's state is stale
 REPING_INTERVAL_S="${VBAN_RATE_REPING_INTERVAL_S:-600}"
 DECIDE="${VBAN_RATE_DECIDE:-$HERE/vban_rate.py}"
 NOTIFY="${AIRULESET_NOTIFY:-$HOME/devel/airuleset/airuleset.py}"
@@ -111,17 +120,18 @@ state_key() { printf '%s' "$1" | tr -c 'A-Za-z0-9_-' '_'; }
 
 now_epoch() { printf '%s' "${VBAN_RATE_NOW:-$(date +%s)}"; }
 
-# capture <outfile> -> rc 0 and a pcap in OUTFILE (maybe empty of VBAN), else rc != 0.
+# capture <outfile> <errfile> -> rc 0 and a pcap in OUTFILE (maybe empty of VBAN), else rc != 0.
+# The remote sudo/tcpdump stderr lands in ERRFILE (the reason a failing capture is logged + paged).
 capture() {
-  local out="$1" rc
+  local out="$1" err="$2" rc
   if [ -n "${VBAN_RATE_CAPTURE_CMD:-}" ]; then
-    "$VBAN_RATE_CAPTURE_CMD" "$out"
+    "$VBAN_RATE_CAPTURE_CMD" "$out" 2>"$err"
     return
   fi
-  [ -n "$HOST" ] || { log "no address for box '$BOX' (obs_fleet_host failed)"; return 1; }
+  [ -n "$HOST" ] || { echo "no address for box '$BOX' (obs_fleet_host failed)" >"$err"; return 1; }
   printf '%s\n' "$SSH_PASS" | sshpass -p "$SSH_PASS" ssh -o StrictHostKeyChecking=no \
     -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -o ConnectTimeout=10 "${SSH_USER}@${HOST}" \
-    "sudo -S -p '' timeout ${CAPTURE_S} tcpdump -i any -s ${SNAPLEN} -U -w - '${BPF}' 2>/dev/null" >"$out"
+    "sudo -S -p '' timeout ${CAPTURE_S} tcpdump -i any -s ${SNAPLEN} -U -w - '${BPF}'" >"$out" 2>"$err"
   rc=$?
   # tcpdump stopped by `timeout` exits 124: a complete capture, not an error.
   [ "$rc" -eq 0 ] || [ "$rc" -eq 124 ] || return "$rc"
@@ -129,6 +139,7 @@ capture() {
 }
 
 # fire_alert <base key> <body> -- the ONE alert emit seam (time-bucketed: production-critical class).
+# The key falls back to the stable base if the shared helper ever fails -- never an empty key.
 fire_alert() {
   local base="$1" body="$2" key
   key="$(watchdog_notify_key "$base" "$(now_epoch)" "$REPING_INTERVAL_S" 2>/dev/null || printf '%s' "$base")"
@@ -136,8 +147,35 @@ fire_alert() {
     log "[dry-run] WOULD alert (dedup-key=$key): $body"
     return 0
   fi
-  python3 "$NOTIFY" notify --body "$body" --dedup-key "$(watchdog_notify_key "$base" "$(now_epoch)" "$REPING_INTERVAL_S")" \
+  python3 "$NOTIFY" notify --body "$body" --dedup-key "$(watchdog_notify_key "$base" "$(now_epoch)" "$REPING_INTERVAL_S" 2>/dev/null || printf '%s' "$base")" \
     >/dev/null 2>&1 || log "ALERT: airuleset.py notify failed (non-fatal)"
+}
+
+# box_up -> 1 when the receiver answers ssh :22 (a failing capture is then OUR problem), else 0.
+box_up() {
+  if [ -n "${VBAN_RATE_BOX_UP_CMD:-}" ]; then
+    "$VBAN_RATE_BOX_UP_CMD" 2>/dev/null || printf '0'
+    return 0
+  fi
+  [ -n "$HOST" ] || { printf '0'; return 0; }
+  watchdog_probe_tcp "$HOST" 22 4
+}
+
+# capture_failed <reason> -- count consecutive failures on a LIVE box; page once confirmed.
+capture_failed() {
+  local reason="$1" n
+  if [ "$(box_up)" != "1" ]; then
+    log "capture on $BOX failed or empty -- SKIP: box down (ssh :22 silent), the network-reach watchdog's territory; no page"
+    write_state_field "capture_fail" 0
+    return 0
+  fi
+  n=$(( $(read_state_field "capture_fail" 0) + 1 ))
+  write_state_field "capture_fail" "$n"
+  log "capture on $BOX failed or empty -- SKIP ($n/$CAPTURE_FAIL_PASSES consecutive while the box is up): ${reason:-no error text}"
+  [ "$n" -ge "$CAPTURE_FAIL_PASSES" ] || return 0
+  write_state_field "alerted_capture" 1
+  fire_alert "vban-rate-capture-${BOX}" \
+    "⚠️ VBAN ($REPO_SLUG): meranie VBAN na **$BOX** zlyháva už $n kontrol po sebe, hoci box je hore -- watchdog je slepý. Chyba: ${reason:-bez textu}. Náprava: tcpdump + sudo na $BOX (heslo / balík). Re-ping každých ~$((REPING_INTERVAL_S/60)) min kým to trvá."
 }
 
 # handle_stream <key> <name> <src> <verdict> <rate> <lost> <loss_ratio> <why>
@@ -148,6 +186,15 @@ handle_stream() {
   # would otherwise open a new incident and reset its confirm count); KEY stays in the log only.
   sk="$(state_key "${name}-${src}")"
   log "$name ($src -> $BOX) [$key]: verdict=$verdict rate_ppm=$rate lost=$lost loss_ratio=$ratio${why:+ why=$why}"
+  # a stream unseen for longer than STALE_S restarts its confirm count (never completes an old page)
+  local now last
+  now="$(now_epoch)"
+  last="$(read_state_field "last_seen_${sk}" "")"
+  if [ -n "$last" ] && [ $((now - last)) -gt "$STALE_S" ]; then
+    log "$name: last graded $((now - last))s ago (> ${STALE_S}s) -- its confirm count restarts"
+    write_state_field "confirm_${sk}" 0
+  fi
+  write_state_field "last_seen_${sk}" "$now"
   case "$verdict" in
     FAULT) fault=1 ;;
     OK) fault=0 ;;
@@ -191,15 +238,23 @@ require_tools() {
 main() {
   log "pass start (dry_run=$DRY_RUN, box=$BOX host=${HOST:-?}, capture=${CAPTURE_S}s snaplen=$SNAPLEN, ppm_bound=$PPM_BOUND loss_ceiling=$LOSS_CEILING, confirm=$CONFIRM_THRESHOLD)"
   require_tools || { log "pass end (aborted: missing required tools)"; return 3; }
-  local work pcap out line overall
+  local work pcap errf out overall reason
   work="$(mktemp -d "${TMPDIR:-/tmp}/vban-rate.XXXXXX")" || { log "cannot create a work dir"; return 1; }
   pcap="$work/capture.pcap"
-  if ! capture "$pcap"; then
-    log "capture on $BOX failed or empty -- SKIP (box/ssh reachability is the network-reach watchdog's territory; no page)"
+  errf="$work/capture.err"
+  if ! capture "$pcap" "$errf"; then
+    reason="$(grep -v -e '^listening on' -e 'packets captured' -e 'packets received by filter' \
+      -e 'packets dropped by kernel' "$errf" 2>/dev/null | tail -n 3 | tr '\n' ' ' || true)"
+    capture_failed "$reason"
     rm -rf "$work"
     log "pass end"
     return 0
   fi
+  if [ "$(read_state_field "alerted_capture" 0)" = "1" ]; then
+    log "RECOVERY: the capture on $BOX works again -- machine-channel only (#1206: recovery is not a phone ping)"
+    write_state_field "alerted_capture" 0
+  fi
+  write_state_field "capture_fail" 0
   local -a dst=()
   [ -n "$HOST" ] && [ -z "${VBAN_RATE_ALL_STREAMS:-}" ] && {
     local ip; ip="$(obs_fleet_resolve_host_v4 "$HOST")"; [ -n "$ip" ] && dst=(--dst "$ip")
