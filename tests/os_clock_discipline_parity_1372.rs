@@ -42,6 +42,7 @@ use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 const PLATFORM_WINDOWS: &str = "vendor/obs-studio/libobs/util/platform-windows.c";
+const OBS_SOURCE: &str = "vendor/obs-studio/libobs/obs-source.c";
 const UTIL_UINT64: &str = "vendor/obs-studio/libobs/util/util_uint64.h";
 const QPC_TIMESTAMP_H: &str = "vendor/obs-studio/libobs/util/windows/qpc-timestamp.h";
 const BEGIN: &str = "/* camera-box issue 1372 BEGIN";
@@ -167,8 +168,10 @@ static int g_api_present = 1;
 static DWORD64 g_adj = 0, g_inc = 0;
 static BOOL g_dis = TRUE;
 static int g_polls = 0;
+static uint64_t g_wall = 0; /* the fake dantesync-disciplined system time, ns */
 
 static uint64_t get_clockfreq(void) {{ return g_freq; }}
+static uint64_t genlock_wall_now_ns(void) {{ return g_wall; }}
 static BOOL QueryPerformanceCounter(LARGE_INTEGER *c)
 {{
 	c->QuadPart = (long long)g_qpc;
@@ -512,6 +515,29 @@ fn harness_main(scs: &[Scenario]) -> String {
          \t}}\n",
         v.join(",")
     ));
+    c.push_str(&format!(
+        "\tif (strcmp(argv[1], \"wallqpc\") == 0) {{\n\
+         \t\tg_freq = 10000000ULL; g_inc = 10000000ULL; g_dis = FALSE; g_adj = {WALLQPC_ADJ}ULL;\n\
+         \t\tg_qpc = 36000000000ULL; g_wall = 1790000000000000000ULL;\n\
+         \t\t(void)os_gettime_ns(); (void)genlock_wall_qpc_drift_ms();\n\
+         \t\tconst uint64_t qpc0 = g_qpc, wall0 = g_wall;\n\
+         \t\tuint64_t rng = 0x1372ULL;\n\
+         \t\tlong long max_abs = 0;\n\
+         \t\tfor (int i = 1; i <= {WALLQPC_TICKS}; i++) {{\n\
+         \t\t\tif (i % 10 == 0) {{ rng = rng * 6364136223846793005ULL + 1442695040888963407ULL; g_adj = {WALLQPC_ADJ}ULL - 50ULL + (rng >> 33) % 101ULL; }}\n\
+         \t\t\t/* the system clock advances at inc/adj over this 100 ms of QPC */\n\
+         \t\t\tg_wall += util_mul_div64(util_mul_div64(1000000ULL, 1000000000ULL, g_freq), g_inc, g_adj);\n\
+         \t\t\tg_qpc += 1000000ULL;\n\
+         \t\t\tif (i == {WALLQPC_TICKS} / 2) g_wall -= {WALLQPC_STEP_NS}ULL; /* a dantesync phase step */\n\
+         \t\t\t(void)os_gettime_ns();\n\
+         \t\t\tconst long long d = genlock_wall_qpc_drift_ms();\n\
+         \t\t\tif (llabs(d) > max_abs) max_abs = llabs(d);\n\
+         \t\t}}\n\
+         \t\tconst long long raw_ms = ((long long)(g_wall - wall0) - (long long)((g_qpc - qpc0) * 100ULL)) / 1000000LL;\n\
+         \t\tprintf(\"%lld %lld\\n\", max_abs, raw_ms);\n\
+         \t\treturn 0;\n\
+         \t}}\n"
+    ));
     for (name, step) in BRACKET_STEPS {
         c.push_str(&format!(
             "\tif (strcmp(argv[1], \"{name}\") == 0) {{\n\
@@ -528,6 +554,12 @@ fn harness_main(scs: &[Scenario]) -> String {
     c.push_str("\treturn 3;\n}\n");
     c
 }
+
+/// The wall-vs-monotonic scenario: one hour of 100 ms ticks, dantesync holding about +15 ppm
+/// (adj 9_999_850 ± 5 ppm, re-steered every second) and one −146 µs phase step half way.
+const WALLQPC_ADJ: u64 = 9_999_850;
+const WALLQPC_TICKS: u64 = 36_000;
+const WALLQPC_STEP_NS: u64 = 146_000;
 
 /// The bracket scenarios: every counter read advances the fake QPC by `step` counts. 50 counts
 /// (5 us) between reads is inside the 50 us bracket bound; 400 counts is outside it and forces all
@@ -650,6 +682,15 @@ fn compile(dir: &Scratch, c: &str, extra: &[&str]) -> PathBuf {
 fn build_harness(dir: &Scratch, scs: &[Scenario]) -> PathBuf {
     let mut c = fake_win32();
     c.push_str(&lifted_c());
+    // The genlock wall-vs-monotonic drift helper the #800 audit line prints, verbatim.
+    let obs_source = fs::read_to_string(repo(OBS_SOURCE))
+        .unwrap_or_else(|e| panic!("issue 1372: read {OBS_SOURCE}: {e}"));
+    c.push_str("\n/* ---- lifted VERBATIM from obs-source.c ---- */\n");
+    c.push_str(&lift_fn(
+        &obs_source,
+        "static long long genlock_wall_qpc_drift_ms(void)\n{",
+        OBS_SOURCE,
+    ));
     c.push_str(&harness_main(scs));
     compile(dir, &c, &["-O1"])
 }
@@ -858,6 +899,35 @@ fn a_wasapi_raw_qpc_stamp_is_mapped_onto_the_disciplined_clock() {
     assert!(
         !wasapi.contains("ts * 100"),
         "issue 1372: a raw `ts * 100` WASAPI stamp is back -- it drifts against os_gettime_ns()"
+    );
+}
+
+#[test]
+fn the_genlock_wall_qpc_drift_stays_flat_on_the_disciplined_clock() {
+    // The genlock code maps wall <-> monotonic only through LIVE offsets (the render tick's
+    // `mono + (next_wall - wall)`, the audio pairing's `mono_now - wall_now`), never through a
+    // stored rate, so nothing double-corrects once os_gettime_ns() follows the wall RATE. The
+    // #800 audit term `wall_qpc_drift_ms` is the observable: it must stay ~0 (only dantesync phase
+    // STEPS remain), where raw QPC drifted ~54 ms in the same hour (the live stream showed
+    // 0 -> 67 ms in 83 min).
+    let dir = Scratch::new("wallqpc");
+    let bin = build_harness(&dir, &scenarios());
+    let stdout = run(&bin, "wallqpc");
+    let f: Vec<i64> = stdout
+        .split_whitespace()
+        .map(|t| t.parse().expect("wallqpc fields"))
+        .collect();
+    let (max_abs_ms, raw_drift_ms) = (f[0], f[1]);
+    assert!(
+        raw_drift_ms >= 40,
+        "issue 1372: the scenario must drift raw QPC against the wall clock ({raw_drift_ms} ms) or \\
+         the flat-drift check proves nothing"
+    );
+    assert!(
+        max_abs_ms <= 1,
+        "issue 1372: genlock_wall_qpc_drift_ms reached {max_abs_ms} ms over an hour on the \\
+         disciplined clock (raw QPC: {raw_drift_ms} ms) -- os_gettime_ns no longer follows the \\
+         wall rate, or something corrects the rate twice"
     );
 }
 
