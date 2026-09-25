@@ -52,7 +52,7 @@
 //! the hold term, exactly like the imag leg and the node-burn hold path).
 
 use crate::burn_hold::{burn_hold_distribution, hold_gate_pass, MAX_HOLD_FRAMES};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Presence-only `first..=last` contiguity of a burn-id sequence. Mirrors
 /// [`crate::probe::burn_contiguity::NodeContiguity`]'s shape + `is_contiguous` rule (so the
@@ -70,6 +70,9 @@ pub struct HopContiguity {
     pub expected_count: u32,
     /// The integers in `first..=last` that did NOT decode (the dropped generations).
     pub missing_ids: Vec<u32>,
+    /// Issue 1302 slice 2: histogram of the forward gaps between consecutive DISTINCT present ids
+    /// (`gap -> count`). The calibration evidence for the decimation model on a real run.
+    pub forward_steps: BTreeMap<u32, u32>,
 }
 
 impl HopContiguity {
@@ -97,6 +100,7 @@ pub fn hop_contiguity(ids: &[u32]) -> HopContiguity {
                 present_count: 0,
                 expected_count: 0,
                 missing_ids: Vec::new(),
+                forward_steps: BTreeMap::new(),
             }
         }
     };
@@ -108,7 +112,37 @@ pub fn hop_contiguity(ids: &[u32]) -> HopContiguity {
         // last >= first by construction, and both are u32 ids well under u32::MAX.
         expected_count: last - first + 1,
         missing_ids,
+        forward_steps: BTreeMap::new(),
     }
+}
+
+/// RED stub (issue 1302 slice 2): ignores `expected_step`.
+pub fn hop_contiguity_with_step(ids: &[u32], expected_step: u32) -> HopContiguity {
+    let _ = expected_step;
+    hop_contiguity(ids)
+}
+
+/// Issue 1302 slice 2: the CG window recorded by the harness (`cg-window-<RUN_ID>.json`), in
+/// wall-clock ns on the shared DanteSync clock.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CgWindow {
+    /// Window start (ns).
+    pub start_ns: i64,
+    /// Window end (ns).
+    pub end_ns: i64,
+}
+
+impl CgWindow {
+    /// RED stub.
+    pub fn new(start_ns: i64, end_ns: i64) -> Option<Self> {
+        Some(CgWindow { start_ns, end_ns })
+    }
+}
+
+/// RED stub (issue 1302 slice 2): ignores the window.
+pub fn pairs_in_window(triples: &[(u64, u32, i64)], window: Option<CgWindow>) -> Vec<(u64, u32)> {
+    let _ = window;
+    triples.iter().map(|&(fi, id, _)| (fi, id)).collect()
 }
 
 /// True when the measured max-hold is within [`MAX_HOLD_FRAMES`] (mirrors
@@ -132,6 +166,8 @@ pub struct CgHop {
     pub cg: HopContiguity,
     /// Longest consecutive-recorded-frame run of one cg id (`None` ⇒ none decoded).
     pub cg_max_hold: Option<u32>,
+    /// Issue 1302 slice 2: the by-design decimation step this hop was judged with (1 = 1:1).
+    pub expected_step: u32,
 }
 
 impl CgHop {
@@ -162,7 +198,19 @@ pub fn cg_hop(hop: &str, songplayer_pairs: &[(u64, u32)], cg_pairs: &[(u64, u32)
         songplayer_max_hold: burn_hold_distribution(hop, songplayer_pairs).measured_max_hold(),
         cg: hop_contiguity(&cg_ids),
         cg_max_hold: burn_hold_distribution(hop, cg_pairs).measured_max_hold(),
+        expected_step: 1,
     }
+}
+
+/// RED stub (issue 1302 slice 2): ignores `expected_step`.
+pub fn cg_hop_with_step(
+    hop: &str,
+    songplayer_pairs: &[(u64, u32)],
+    cg_pairs: &[(u64, u32)],
+    expected_step: u32,
+) -> CgHop {
+    let _ = expected_step;
+    cg_hop(hop, songplayer_pairs, cg_pairs)
 }
 
 /// The whole CG chain across its (optional) three recordings.
@@ -368,5 +416,135 @@ mod tests {
         // While report-only, a FAILING cg chain still contributes PASS (camera chain unaffected).
         assert!(folds_into_overall_pass(false));
         assert!(folds_into_overall_pass(true));
+    }
+    // ---- issue 1302 slice 2: decimation-aware hops + the CG window ------------------------------
+
+    #[test]
+    fn step_one_is_the_presence_check_plus_a_step_histogram_1302() {
+        let c = hop_contiguity_with_step(&[5, 6, 8, 9], 1);
+        assert_eq!(c.missing_ids, vec![7]);
+        assert_eq!(c.expected_count, 5);
+        assert_eq!(
+            c.forward_steps,
+            BTreeMap::from([(1, 2), (2, 1)]),
+            "the gap histogram is the calibration evidence"
+        );
+        // Step 1 is exactly the historical presence check.
+        let plain = hop_contiguity(&[5, 6, 8, 9]);
+        assert_eq!(plain.missing_ids, c.missing_ids);
+        assert_eq!(plain.expected_count, c.expected_count);
+    }
+
+    #[test]
+    fn decimated_step_two_is_not_loss_1302() {
+        // 60 fps ids read from a 30 fps recording: every other id, by design.
+        let ids: Vec<u32> = (0..=10).map(|k| 100 + 2 * k).collect();
+        let presence = hop_contiguity(&ids);
+        assert!(
+            !presence.is_contiguous(),
+            "the presence check would false-FAIL the decimated hop"
+        );
+        let c = hop_contiguity_with_step(&ids, 2);
+        assert!(
+            c.is_contiguous(),
+            "gap == step is decimation, not loss: {c:?}"
+        );
+        assert!(c.missing_ids.is_empty());
+        assert_eq!(c.expected_count, 11);
+        assert_eq!(c.forward_steps, BTreeMap::from([(2, 10)]));
+    }
+
+    #[test]
+    fn decimated_hop_charges_only_the_excess_like_burn_contiguity_1302() {
+        // gaps 2, 4, 2, 1, 3 at step 2: only the 4 is a drop (4/2 - 1 = 1); 3 is beat jitter and
+        // 1 an early frame, both charged 0 by the integer division.
+        let c = hop_contiguity_with_step(&[100, 102, 106, 108, 109, 112], 2);
+        assert_eq!(c.missing_ids, vec![104]);
+        assert_eq!(c.present_count, 6);
+        assert_eq!(c.expected_count, 7);
+        assert_eq!(
+            c.forward_steps,
+            BTreeMap::from([(1, 1), (2, 2), (3, 1), (4, 1)])
+        );
+        assert!(!c.is_contiguous());
+    }
+
+    #[test]
+    fn decimated_long_gap_lists_each_missing_slot_1302() {
+        let c = hop_contiguity_with_step(&[0, 8], 2);
+        assert_eq!(c.missing_ids, vec![2, 4, 6], "8/2 - 1 = 3 missing slots");
+    }
+
+    #[test]
+    fn step_zero_floors_to_one_1302() {
+        let c = hop_contiguity_with_step(&[5, 7], 0);
+        assert_eq!(c.missing_ids, vec![6]);
+    }
+
+    #[test]
+    fn cg_window_rejects_an_empty_or_inverted_window_1302() {
+        assert_eq!(CgWindow::new(5, 5), None);
+        assert_eq!(CgWindow::new(6, 5), None);
+        assert_eq!(
+            CgWindow::new(5, 6),
+            Some(CgWindow {
+                start_ns: 5,
+                end_ns: 6
+            })
+        );
+    }
+
+    #[test]
+    fn pairs_in_window_keeps_only_in_window_payloads_inclusive_1302() {
+        let triples = [
+            (0u64, 1u32, 99i64),
+            (1, 2, 100),
+            (2, 3, 150),
+            (3, 4, 200),
+            (4, 5, 201),
+        ];
+        let w = CgWindow::new(100, 200);
+        assert_eq!(pairs_in_window(&triples, w), vec![(1, 2), (2, 3), (3, 4)]);
+        assert_eq!(
+            pairs_in_window(&triples, None),
+            vec![(0, 1), (1, 2), (2, 3), (3, 4), (4, 5)],
+            "no window = the whole recording"
+        );
+    }
+
+    #[test]
+    fn decimated_strih_hop_passes_with_its_step_and_fails_without_1302() {
+        let sp: Vec<(u64, u32)> = (0..30u64).map(|i| (i, 1000 + 2 * i as u32)).collect();
+        let cg: Vec<(u64, u32)> = (0..30u64).map(|i| (i, 2000 + 2 * i as u32)).collect();
+        let h = cg_hop_with_step("strih", &sp, &cg, 2);
+        assert_eq!(h.expected_step, 2);
+        assert!(h.pass(), "a clean decimated strih hop passes: {h:?}");
+        assert!(
+            !cg_hop("strih", &sp, &cg).pass(),
+            "the 1:1 presence check would false-FAIL it"
+        );
+    }
+
+    #[test]
+    fn decimated_hop_real_drop_still_fails_1302() {
+        // One strih frame (SongPlayer id 1010) never reached the recording: a gap of 4 at step 2.
+        let sp: Vec<(u64, u32)> = (0..30u64)
+            .filter(|&i| i != 5)
+            .map(|i| (i, 1000 + 2 * i as u32))
+            .collect();
+        let cg: Vec<(u64, u32)> = (0..30u64).map(|i| (i, 2000 + 2 * i as u32)).collect();
+        let h = cg_hop_with_step("strih", &sp, &cg, 2);
+        assert_eq!(h.songplayer.missing_ids, vec![1010]);
+        assert!(!h.songplayer_ok());
+        assert!(h.cg_ok());
+        assert!(!h.pass());
+    }
+
+    #[test]
+    fn cg_hop_is_the_one_to_one_case_1302() {
+        let sp: Vec<(u64, u32)> = (0..5u64).map(|i| (i, 10 + i as u32)).collect();
+        let h = cg_hop("cg_obs", &sp, &sp);
+        assert_eq!(h.expected_step, 1);
+        assert_eq!(h, cg_hop_with_step("cg_obs", &sp, &sp, 1));
     }
 }

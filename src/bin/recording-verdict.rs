@@ -8967,6 +8967,227 @@ mod tests {
         );
     }
 
+    /// Issue 1302 slice 2 — a recorded frame whose payloads carry their OWN `gen_ts_ns` (the CG
+    /// window filter reads it). The optical tick is `None`: a CG-window frame carries no cam2 QR.
+    fn frame_ts(frame_index: u64, payloads: &[(u32, u32, i64)]) -> RecordingFrame {
+        RecordingFrame {
+            frame_index,
+            payloads: payloads
+                .iter()
+                .map(|&(run_id, frame_id, gen_ts_ns)| Payload {
+                    run_id,
+                    frame_id,
+                    gen_ts_ns,
+                })
+                .collect(),
+            tick: None,
+        }
+    }
+
+    const CG_WIN_START_NS: i64 = 1_000_000_000_000;
+    const CG_WIN_END_NS: i64 = 1_000_000_000_000 + 30 * 33_333_333;
+
+    /// Issue 1302 slice 2 — a strih/stream recording tail: one STRAY SongPlayer frame long before
+    /// the CG window (a transient read outside the window, frame 0), then 30 frames of the CG
+    /// window where the 60 fps SongPlayer + cg ids arrive DECIMATED to 30 fps (step 2), each
+    /// stamped inside `[CG_WIN_START_NS, CG_WIN_END_NS]`.
+    fn decimated_cg_tail() -> Vec<RecordingFrame> {
+        let mut v = vec![frame_ts(0, &[(SP, 4000, CG_WIN_START_NS - 60_000_000_000)])];
+        for k in 0..30u32 {
+            let ts = CG_WIN_START_NS + i64::from(k) * 33_333_333;
+            v.push(frame_ts(
+                10 + u64::from(k),
+                &[(SP, 5000 + 2 * k, ts), (CGB, 6000 + 2 * k, ts)],
+            ));
+        }
+        v
+    }
+
+    fn cg_window_file(tag: &str) -> std::path::PathBuf {
+        let p =
+            std::env::temp_dir().join(format!("cg-window-1302-{tag}-{}.json", std::process::id()));
+        let body = serde_json::json!({
+            "kind": "cg",
+            "scene": "CG bridge",
+            "input": "CG-obs",
+            "start_ns": CG_WIN_START_NS,
+            "end_ns": CG_WIN_END_NS,
+        });
+        std::fs::write(&p, body.to_string()).expect("write cg window");
+        p
+    }
+
+    fn cg_chain_verdict_with(args: &super::Args) -> serde_json::Value {
+        use super::{build_and_print_verdict_with_stream_diffs, Cam1Source, DecodedRec};
+        let rec = |frames: Vec<RecordingFrame>| {
+            Some(DecodedRec {
+                frames,
+                rec_path: None,
+            })
+        };
+        let (v, _pass) = build_and_print_verdict_with_stream_diffs(
+            args,
+            rec(decimated_cg_tail()),
+            rec(decimated_cg_tail()),
+            Cam1Source::Absent,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            rec(cg_window(60, None)),
+        )
+        .expect("verdict");
+        v
+    }
+
+    /// Issue 1302 slice 2 — the strih/stream hops are judged with the 60->30 decimation step and
+    /// only inside the recorded CG window: a clean decimated tail reads contiguous, the stray
+    /// frame outside the window is ignored, and the cg OBS origin hop stays 1:1 and unscoped.
+    #[test]
+    fn cg_chain_strih_stream_hops_are_decimation_aware_and_window_scoped_1302() {
+        use clap::Parser;
+        let win = cg_window_file("scoped");
+        let args = super::Args::parse_from([
+            "recording-verdict",
+            "--min-secs",
+            "1",
+            "--cg-window",
+            win.to_str().expect("utf8 path"),
+        ]);
+        let v = cg_chain_verdict_with(&args);
+        let _ = std::fs::remove_file(&win);
+        let cc = &v["cg_chain"];
+        assert_eq!(
+            cc["window"]["start_ns"],
+            serde_json::json!(CG_WIN_START_NS),
+            "{cc}"
+        );
+        assert_eq!(
+            cc["window"]["end_ns"],
+            serde_json::json!(CG_WIN_END_NS),
+            "{cc}"
+        );
+        for hop in ["strih", "stream"] {
+            assert_eq!(
+                cc[hop]["expected_step"],
+                serde_json::json!(2),
+                "{hop}: {cc}"
+            );
+            assert_eq!(
+                cc[hop]["window_scoped"],
+                serde_json::json!(true),
+                "{hop}: {cc}"
+            );
+            assert_eq!(
+                cc[hop]["songplayer"]["contiguous"],
+                serde_json::json!(true),
+                "{hop}: the decimated SongPlayer ids inside the window are contiguous: {cc}"
+            );
+            assert_eq!(
+                cc[hop]["songplayer"]["first_id"],
+                serde_json::json!(5000),
+                "{hop}"
+            );
+            assert_eq!(
+                cc[hop]["cg"]["contiguous"],
+                serde_json::json!(true),
+                "{hop}: {cc}"
+            );
+            assert_eq!(
+                cc[hop]["songplayer"]["forward_steps"],
+                serde_json::json!({"2": 29}),
+                "{hop}: the step histogram is reported: {cc}"
+            );
+        }
+        assert_eq!(cc["cg_obs"]["expected_step"], serde_json::json!(1), "{cc}");
+        assert_eq!(
+            cc["cg_obs"]["window_scoped"],
+            serde_json::json!(false),
+            "{cc}"
+        );
+        assert_eq!(cc["contiguous"], serde_json::json!(true), "{cc}");
+        assert_eq!(
+            cc["gated_live"],
+            serde_json::json!(false),
+            "still REPORT-ONLY"
+        );
+    }
+
+    /// Issue 1302 slice 2 — without a window the stray frame widens the strih/stream span, so the
+    /// hop reads NOT contiguous: the window is what keeps stray frames out.
+    #[test]
+    fn cg_chain_without_a_window_judges_the_whole_recording_1302() {
+        use clap::Parser;
+        let args = super::Args::parse_from(["recording-verdict", "--min-secs", "1"]);
+        let v = cg_chain_verdict_with(&args);
+        let cc = &v["cg_chain"];
+        assert_eq!(cc["window"], serde_json::Value::Null, "{cc}");
+        assert_eq!(
+            cc["strih"]["window_scoped"],
+            serde_json::json!(false),
+            "{cc}"
+        );
+        assert_eq!(cc["strih"]["expected_step"], serde_json::json!(2), "{cc}");
+        assert_eq!(
+            cc["strih"]["songplayer"]["contiguous"],
+            serde_json::json!(false),
+            "the stray id 4000 far before the window opens a huge span: {cc}"
+        );
+    }
+
+    /// Issue 1302 slice 2 — an unreadable / wrong-kind window file never breaks the verdict: it is
+    /// reported unscoped (a WARNING), exactly like no window.
+    #[test]
+    fn cg_chain_bad_window_file_is_unscoped_not_an_error_1302() {
+        use clap::Parser;
+        let p =
+            std::env::temp_dir().join(format!("cg-window-1302-bad-{}.json", std::process::id()));
+        std::fs::write(&p, r#"{"kind":"cam","start_ns":5,"end_ns":9}"#).expect("write");
+        let args = super::Args::parse_from([
+            "recording-verdict",
+            "--min-secs",
+            "1",
+            "--cg-window",
+            p.to_str().expect("utf8 path"),
+        ]);
+        let v = cg_chain_verdict_with(&args);
+        let _ = std::fs::remove_file(&p);
+        assert_eq!(v["cg_chain"]["window"], serde_json::Value::Null);
+        assert_eq!(
+            v["cg_chain"]["strih"]["window_scoped"],
+            serde_json::json!(false)
+        );
+    }
+
+    /// Issue 1302 slice 2 — `--cg-chain-burns` adds the SongPlayer + cg ids to the strih and
+    /// stream expected-burn sets (the partial metadata + the merge consistency check); without it
+    /// both sets are byte-identical to before, and imag never changes.
+    #[test]
+    fn cg_chain_burns_extend_only_the_strih_and_stream_sets_1302() {
+        use super::args_expected_burns_for;
+        use clap::Parser;
+        let plain = super::Args::parse_from(["recording-verdict"]);
+        let cg = super::Args::parse_from(["recording-verdict", "--cg-chain-burns"]);
+        for bx in ["strih", "stream"] {
+            let base = args_expected_burns_for(bx, &plain).expect("known box");
+            assert!(
+                !base.contains(&SP) && !base.contains(&CGB),
+                "{bx}: {base:?}"
+            );
+            let mut want = base.clone();
+            want.push(SP);
+            want.push(CGB);
+            assert_eq!(args_expected_burns_for(bx, &cg), Some(want), "{bx}");
+        }
+        assert_eq!(
+            args_expected_burns_for("imag", &cg),
+            args_expected_burns_for("imag", &plain)
+        );
+    }
+
     /// #755 — a window of N delivered frames carrying cam7's OWN digital capture-burn in every
     /// frame (mirrors [`window_cam5_and_cam6`] for the 7th camera, #753).
     fn window_cam7(n: u32, with_stream: bool) -> Vec<RecordingFrame> {
