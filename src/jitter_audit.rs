@@ -106,7 +106,11 @@ pub struct AuditSample {
     /// issue 1367 — CUMULATIVE N==1 depth HOLDS (`n1_grows=`): a deep N==1 conveyor (the stream
     /// `NDI 2ME PGM`) held one tick because it sat shallower than its pin-derived depth. After a
     /// restart it may fire once; in steady state it must stay flat (its partner, the shed of a
-    /// frame a restart added, counts into `converge_sheds=`). Absent on older logs — parses as 0.
+    /// frame a restart added, counts into `converge_sheds=`). On a SHALLOW source (the cg feeds)
+    /// it also counts the GAP hold (design 5833339163): one per real skipped sender stamp (a song
+    /// change, a scene switch), with NO `converge_sheds=` partner. Rising TOGETHER with
+    /// `converge_sheds=` on a shallow source is the known late-label residual of that hold. Absent
+    /// on older logs — parses as 0.
     pub n1_grows: u64,
 }
 

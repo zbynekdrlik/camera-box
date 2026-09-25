@@ -623,9 +623,12 @@ pub fn n1_shallow_hold_due(
 /// stamp, `0` = none queued, is at or below the head's) is not missing content: a sender that
 /// stamps at SEND time (strih-lx, the #1355 residual) labels a slow frame one slot late and the
 /// next frame carries the same stamp, so the head IS the frame due now and the GAP RESYNC puts it
-/// on air on time (the stamp age reads one frame short for that tick only). Holding there would
-/// turn that label into a visible repeat plus a shed. Mirror of the C
-/// `genlock_n1_shallow_gap_hold_due`.
+/// on air on time (the stamp age reads one frame short for that tick only). The guard only sees a
+/// duplicate that is ALREADY QUEUED: when it has not arrived yet the hold fires on a late label and
+/// costs one repeat plus a later shallow shed (review round 1: 0 at the live-calibrated strih-lx
+/// jitter, 22 + 22 per 2 h at σ 4 ms, pinned by the grid bench). The stamps alone cannot tell that
+/// case from a real skip (the next frame of a real skip has usually not arrived either); a real
+/// fix needs per-frame arrival times. Mirror of the C `genlock_n1_shallow_gap_hold_due`.
 #[allow(clippy::too_many_arguments)]
 pub fn n1_shallow_gap_hold_due(
     tick_wall_ns: u64,

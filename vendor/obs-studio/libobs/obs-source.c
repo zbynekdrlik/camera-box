@@ -6489,7 +6489,9 @@ static inline bool genlock_n1_shallow_hold_due(uint64_t tick_wall_ns, uint64_t h
  * sender RESTART (the relock gap re-measures the floor, the old path), and never when the head is already
  * DUPLICATED behind it (next_stamp_ns, the second queued frame's stamp, 0 = none, at or below the head's):
  * a SEND-time-stamping sender labels a slow frame one slot late and the next frame carries the same stamp,
- * so the head is the frame due now and presents on time. Mirror of src/genlock_n1_depth.rs
+ * so the head is the frame due now and presents on time. Only an ALREADY-QUEUED duplicate is seen: when
+ * it has not arrived yet the hold fires on the late label (one repeat, then a shallow shed; 0 at the
+ * live strih-lx jitter, bench-pinned at sigma 4 ms). Mirror of src/genlock_n1_depth.rs
  * n1_shallow_gap_hold_due. */
 static inline bool genlock_n1_shallow_gap_hold_due(uint64_t tick_wall_ns, uint64_t head_stamp_ns, uint64_t next_stamp_ns,
 						   uint64_t boundary_ns, uint64_t arrival_floor_ns, uint32_t latency_ms,
