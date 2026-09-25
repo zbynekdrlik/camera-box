@@ -86,7 +86,9 @@ DEFAULT_FLEET_FILE="$HERE/../rig-fleet.txt"
 # GM; canary stream verified 14:3xZ, rest of the fleet rolled after the owner's production window).
 # Bumped 2026-09-13: fleet rolled to v1.8.54 (dantesync#113 hostname gm_allowlist + dantesync#114 per-minute
 # NO-DANTE-CLOCK alarm + clock_alarm /status field -- camera-box issue 1307).
-DANTESYNC_VERSION_PIN="${DANTESYNC_VERSION_PIN:-1.8.54}"
+# Bumped 2026-09-25: fleet (13 nodes incl. mbc, fohabl, resolume) rolled to v1.9.0 (dantesync#88/#117 --
+# rate taken from the Dante PTP tick only, NTP for date steps; master publishes the date offset; issue 1372).
+DANTESYNC_VERSION_PIN="${DANTESYNC_VERSION_PIN:-1.9.0}"
 
 # --- PURE functions (no network, no SSH — unit-tested by sourcing this file) ------------------
 

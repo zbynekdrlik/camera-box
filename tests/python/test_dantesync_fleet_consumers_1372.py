@@ -12,12 +12,14 @@ Tier-0: fixture seams + PATH stubs, no box, no network.
 import os
 import pathlib
 import stat
+import re
 import subprocess
 
 _ROOT = pathlib.Path(__file__).resolve().parents[2]
 _GATE = _ROOT / "scripts" / "dantesync-version-gate.sh"
 _UPGRADE = _ROOT / "scripts" / "dantesync-fleet-upgrade.sh"
-_PIN = "1.8.54"
+# The ONE pin, read from the gate script itself so a fleet roll (a pin bump) never strands this test.
+_PIN = re.search(r'DANTESYNC_VERSION_PIN="\$\{DANTESYNC_VERSION_PIN:-([0-9.]+)\}"', _GATE.read_text()).group(1)
 _WIN = ("stream", "resolume", "mbc", "fohabl")
 
 
@@ -139,7 +141,7 @@ def test_upgrade_fleet_dry_run_covers_the_audio_vlan_with_their_credentials(tmp_
                        capture_output=True, text=True, env=env)
     assert r.returncode == 0, r.stdout + r.stderr
     assert "mbc          win      1.8.53     -> NEWER" in r.stdout, r.stdout
-    assert "fohabl       win      1.8.54     -> SAME" in r.stdout, r.stdout
+    assert f"fohabl       win      {_PIN:<10} -> SAME" in r.stdout, r.stdout
     assert "dev1         local" in r.stdout
     assert "DRY-RUN: would upgrade" in r.stdout
     dials = dict(line.split(" ", 1) for line in log.read_text().splitlines())
