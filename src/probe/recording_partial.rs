@@ -14,7 +14,7 @@
 //! ```json
 //! {
 //!   "schema_version": 6,
-//!   "box": "strih",                 // which box decoded this — "strih" | "stream"
+//!   "box": "strih",                 // which box decoded this — "strih" | "stream" | "imag" | "cg"
 //!   "recording": "strih-1234.mkv",  // basename of the local recording (provenance only)
 //!   "expected_burns": [911001, 911002],  // node-burn run_ids this extract decoded for (#207)
 //!   "frames": [                     // one entry per analyzed recorded frame, in file order
@@ -98,9 +98,9 @@ pub const PARTIAL_SCHEMA_VERSION: u32 = 6;
 pub struct RecordingPartial {
     /// Wire-format version (see [`PARTIAL_SCHEMA_VERSION`]).
     pub schema_version: u32,
-    /// Which box decoded this recording: `"strih"` or `"stream"`. The merge enforces that a
-    /// partial only fills the slot matching its box (a strih partial can never be merged as the
-    /// stream input) — the box-to-box guard at the data level.
+    /// Which box decoded this recording: `"strih"`, `"stream"`, `"imag"` or `"cg"` (issue 1302).
+    /// The merge enforces that a partial only fills the slot matching its box (a strih partial can
+    /// never be merged as the stream input) — the box-to-box guard at the data level.
     #[serde(rename = "box")]
     pub box_name: String,
     /// Basename of the local recording this was decoded from (provenance only — the merge never

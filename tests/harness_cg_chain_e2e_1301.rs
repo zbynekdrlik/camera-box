@@ -6,8 +6,9 @@
 //!     burn-toggle URL builder (env-overridable), and the best-effort runners that ALWAYS return 0
 //!     on a no-op / disabled path so they can never trip the caller's `set -euo pipefail`;
 //!  2. `recording-e2e.sh` actually WIRES the profile: sources the lib, turns the burn ON + cg OBS
-//!     StartRecord at [5/8], the cleanup() leak-guard (burn OFF + StopRecord), and the `--cg`
-//!     MERGE_ARGS append — all behind `cg_chain_enabled`, so a normal run is a pure no-op (a
+//!     StartRecord at [5/8], the cleanup() leak-guard (burn OFF + StopRecord), and the CG
+//!     MERGE_ARGS append (issue 1302: the on-box cg partial, never a dev1-decoded `--cg`
+//!     recording) — all behind `cg_chain_enabled`, so a normal run is a pure no-op (a
 //!     static read of the shell script, the same model as tests/harness_cbox_burn_log_persist.rs).
 
 use std::fs;
@@ -96,18 +97,6 @@ fn burn_toggle_is_best_effort_never_aborts_on_failure() {
     );
 }
 
-#[test]
-fn pull_without_configured_cmd_returns_nonzero_so_cg_is_omitted() {
-    // No CG_CHAIN_PULL_CMD and no StopRecord host path ⇒ the pull has nothing to fetch and returns
-    // nonzero, so the caller's `if ... cg_chain_pull_recording ...` omits --cg (the merge runs
-    // exactly as today).
-    let (ok, _) = run(
-        "CG_CHAIN=1; if cg_chain_pull_recording 1.2.3.4 /tmp/nope.mkv; then echo GOT; else echo NONE; fi",
-    );
-    // The `if` absorbs the nonzero return, so the snippet itself exits 0.
-    assert!(ok);
-}
-
 // ---- recording-e2e.sh wiring (static reads — the CG_CHAIN block must stay wired) ----
 
 #[test]
@@ -136,10 +125,16 @@ fn recording_e2e_wires_the_cg_chain_start_cleanup_and_merge_arg() {
         s.contains("cg_chain_cleanup \"${CG_HOST_IP:-}\""),
         "#1301: cleanup() must call the cg_chain leak-guard (burn OFF + StopRecord)"
     );
-    // the --cg verdict arg, appended to MERGE_ARGS only when the pull produced the file.
+    // Issue 1302: the cg recording is decoded ON RESOLUME-SNV and merged as a cg partial through
+    // cg_chain_merge_args_append — never pulled to dev1 and fed as a --cg recording.
     assert!(
-        s.contains("MERGE_ARGS+=(--cg \"$CG_RECORDING\")"),
-        "#1301: the merge must feed the pulled cg OBS recording as --cg"
+        s.contains("cg_chain_merge_args_append"),
+        "#1302: the merge must receive the CG inputs (incl. the on-box cg partial)"
+    );
+    assert!(
+        !s.contains("MERGE_ARGS+=(--cg \"$CG_RECORDING\")")
+            && !s.contains("cg_chain_pull_recording"),
+        "#1302: the dev1 copy + decode of the cg recording must stay gone"
     );
     // every CG_CHAIN wiring site is gated so a normal run is a pure no-op.
     assert!(

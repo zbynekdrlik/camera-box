@@ -1,10 +1,11 @@
-//! #1302 — the CG_CHAIN=1 E2E profile wired to the SHIPPED SongPlayer burn API, a default cg OBS
-//! recording pull, and ONE tail CG window on strih (so strih + stream record the CG chain).
+//! #1302 — the CG_CHAIN=1 E2E profile wired to the SHIPPED SongPlayer burn API, the cg OBS StopRecord
+//! host path (decoded IN PLACE on RESOLUME-SNV, see harness_cg_chain_onbox_1302.rs), and ONE tail CG
+//! window on strih (so strih + stream record the CG chain).
 //!
 //! All Tier-0 (no rig, no network): the pure builders are called directly, and the runners are
 //! driven against FAKE `curl` / `sshpass` / `scp` / `python3` binaries put first on PATH inside the
-//! bash snippet, so the exact request body, the health read-back and the scp source spec are
-//! asserted without touching SongPlayer, OBS or resolume.
+//! bash snippet, so the exact request body and the health read-back are asserted without
+//! touching SongPlayer, OBS or resolume.
 
 use std::fs;
 use std::path::PathBuf;
@@ -228,19 +229,7 @@ fn burn_off_verified_on_the_first_read_back_posts_once() {
     assert!(!err.contains("LEAK"), "{err}");
 }
 
-// ---- (b) the default recording pull ------------------------------------------------------------
-
-#[test]
-fn pull_source_spec_uses_forward_slashes_and_keeps_spaces() {
-    let (ok, spec, _) = run(
-        r#"cg_chain_pull_source_spec newlevel 10.77.9.201 'C:\Users\Resolume\Videos\2026-09-25 07-24-00.mkv'"#,
-    );
-    assert!(ok);
-    assert_eq!(
-        spec,
-        "newlevel@10.77.9.201:C:/Users/Resolume/Videos/2026-09-25 07-24-00.mkv"
-    );
-}
+// ---- (b) the cg OBS StopRecord host path (read by the on-box decode) ----------------------------
 
 #[test]
 fn record_stop_keeps_the_stoprecord_host_path() {
@@ -276,93 +265,6 @@ fn record_stop_with_an_empty_answer_keeps_the_earlier_path() {
     let (ok, out, _) = run(&snippet);
     assert!(ok);
     assert!(out.contains(r"PATH=C:\first.mkv"), "{out}");
-}
-
-#[test]
-fn default_pull_scps_the_exact_stoprecord_file_to_the_local_dest() {
-    let snippet = r#"
-D="$(mktemp -d)"; trap 'rm -rf "$D"' EXIT
-cat > "$D/sshpass" <<'SH'
-#!/usr/bin/env bash
-shift 2; exec "$@"
-SH
-cat > "$D/scp" <<'SH'
-#!/usr/bin/env bash
-printf '%s\n' "$@" > "$SCP_LOG"
-for last in "$@"; do :; done
-echo cg-bytes > "$last"
-SH
-chmod +x "$D/sshpass" "$D/scp"; PATH="$D:$PATH"; export SCP_LOG="$D/scp.log"
-unset CG_CHAIN_PULL_CMD
-CG_HOST_RECORDING_PATH='C:\Users\Resolume\Videos\2026-09-25 07-24-00.mkv'
-if cg_chain_pull_recording 10.77.9.201 "$D/cg.mkv"; then echo PULLED; fi
-grep -c 'newlevel@10.77.9.201:C:/Users/Resolume/Videos/2026-09-25 07-24-00.mkv' "$SCP_LOG"
-cat "$D/cg.mkv"
-"#;
-    let (ok, out, _) = run(snippet);
-    assert!(ok);
-    let lines: Vec<&str> = out.lines().collect();
-    assert!(lines.contains(&"PULLED"), "{out}");
-    assert!(
-        lines.contains(&"1"),
-        "the scp source is the exact StopRecord file: {out}"
-    );
-    assert!(lines.contains(&"cg-bytes"), "{out}");
-}
-
-#[test]
-fn a_failed_pull_leaves_no_partial_or_stale_file_for_the_cg_gate() {
-    // recording-e2e.sh feeds --cg on `[ -f "$CG_RECORDING" ]`, so a failed scp must leave NO file at
-    // the destination — not a partial one, and not a stale one from an earlier attempt.
-    let snippet = r#"
-D="$(mktemp -d)"; trap 'rm -rf "$D"' EXIT
-cat > "$D/sshpass" <<'SH'
-#!/usr/bin/env bash
-shift 2; exec "$@"
-SH
-cat > "$D/scp" <<'SH'
-#!/usr/bin/env bash
-for last in "$@"; do :; done
-echo partial > "$last"
-exit 1
-SH
-chmod +x "$D/sshpass" "$D/scp"; PATH="$D:$PATH"
-unset CG_CHAIN_PULL_CMD
-echo stale > "$D/cg.mkv"
-CG_HOST_RECORDING_PATH='C:\x.mkv'
-if cg_chain_pull_recording 10.77.9.201 "$D/cg.mkv"; then echo GOT; else echo NONE; fi
-if [ -e "$D/cg.mkv" ]; then echo LEFTOVER; else echo CLEAN; fi
-ls "$D" | grep -c 'cg.mkv' || true
-"#;
-    let (ok, out, _) = run(snippet);
-    assert!(ok);
-    let lines: Vec<&str> = out.lines().collect();
-    assert!(lines.contains(&"NONE"), "{out}");
-    assert!(lines.contains(&"CLEAN"), "no cg file may remain: {out}");
-    assert_eq!(lines.last(), Some(&"0"), "no .part file either: {out}");
-}
-
-#[test]
-fn a_failed_operator_pull_cmd_leaves_no_file_for_the_cg_gate() {
-    // The CG_CHAIN_PULL_CMD override gets the same guarantee: a command that fails after writing
-    // part of the file must not leave it behind for the merge's `[ -f "$CG_RECORDING" ]` gate.
-    let snippet = r#"
-D="$(mktemp -d)"; trap 'rm -rf "$D"' EXIT
-CG_CHAIN_PULL_CMD='echo partial > "$CG_RECORDING"; exit 1'
-if cg_chain_pull_recording 10.77.9.201 "$D/cg.mkv"; then echo GOT; else echo NONE; fi
-if [ -e "$D/cg.mkv" ]; then echo LEFTOVER; else echo CLEAN; fi
-"#;
-    let (ok, out, _) = run(snippet);
-    assert!(ok);
-    assert_eq!(out.lines().collect::<Vec<_>>(), ["NONE", "CLEAN"], "{out}");
-}
-
-#[test]
-fn default_pull_without_a_host_path_omits_cg() {
-    let (ok, out, _) = run("unset CG_CHAIN_PULL_CMD CG_HOST_RECORDING_PATH; \
-         if cg_chain_pull_recording 1.2.3.4 /tmp/none-1302.mkv; then echo GOT; else echo NONE; fi");
-    assert!(ok);
-    assert_eq!(out.lines().last(), Some("NONE"));
 }
 
 // ---- (c) the ONE tail CG window ----------------------------------------------------------------
@@ -656,10 +558,11 @@ fn recording_e2e_ends_the_cg_leg_right_after_stoprecord() {
     let after = s
         .find("cg_chain_after_stoprecord \"${CG_HOST_IP:-}\" \"$HERE/obs_phase2.py\"")
         .expect("#1302: the cg leg (cg StopRecord, burn OFF, strih restore) ends after [7/8]");
-    let pull = s
-        .find("cg_chain_pull_recording \"$CG_HOST_IP\" \"$CG_RECORDING\"")
-        .expect("the [8/8d] pull");
-    assert!(stop < after && after < pull);
+    // Issue 1302: the on-box cg decode launches after the leg ended (it reads the StopRecord path).
+    let launch = s
+        .find("cg_chain_onbox_extract_launch \"$HERE\"")
+        .expect("the on-box cg extract launch");
+    assert!(stop < after && after < launch);
     // It must not skew the genlock-audit AFTER snapshot (its window spans EXACTLY the recording) nor
     // run ahead of the post-record stomp re-check.
     let audit = s

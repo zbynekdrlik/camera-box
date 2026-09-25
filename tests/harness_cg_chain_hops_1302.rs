@@ -142,9 +142,15 @@ fn recording_e2e_threads_the_flag_into_all_three_extract_calls() {
 #[test]
 fn recording_e2e_appends_the_cg_merge_args_before_the_merge_runs() {
     let s = recording_e2e_text();
-    let cg_arg = s
-        .find("MERGE_ARGS+=(--cg \"$CG_RECORDING\")")
-        .expect("the --cg merge arg");
+    // Issue 1302: the cg recording is decoded ON RESOLUME-SNV and merged as a partial, so the old
+    // copy-to-dev1 `--cg` recording argument is gone for good.
+    assert!(
+        !s.contains("MERGE_ARGS+=(--cg \"$CG_RECORDING\")"),
+        "the dev1-decoded --cg recording must not come back"
+    );
+    let base = s
+        .find("MERGE_ARGS=(--merge-partials \"strih=$STRIH_PARTIAL\"")
+        .expect("the merge args base");
     let append = s
         .find("cg_chain_merge_args_append")
         .expect("the cg merge args append");
@@ -152,7 +158,7 @@ fn recording_e2e_appends_the_cg_merge_args_before_the_merge_runs() {
         .find("printf '      %q ' \"$VERDICT_BIN\" \"${MERGE_ARGS[@]}\"")
         .expect("the merge command print");
     assert!(
-        cg_arg < append && append < printed,
-        "appended after --cg, before the merge"
+        base < append && append < printed,
+        "appended to the merge args, before the merge"
     );
 }

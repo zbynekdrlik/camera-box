@@ -44,13 +44,12 @@ set -euo pipefail
 #   present=1 but local_sha empty         -> upload (can't verify identity -> fail-safe)
 #   present=1 and local_sha != remote_sha -> upload (VERSION GATE)
 #   present=1 and local_sha == remote_sha (non-empty) -> skip
+# Issue 1302: the decision itself is the ONE shared verdict_upload_decision (also used by the imag
+# and RESOLUME-SNV extracts); this name stays as the strih-lx entry point.
+# shellcheck source=scripts/lib/verdict-upload-gate.sh
+. "$(dirname "${BASH_SOURCE[0]}")/lib/verdict-upload-gate.sh"
 onstrihlx_upload_decision() {
-  local force="${1:-0}" present="${2:-0}" local_sha="${3:-}" remote_sha="${4:-}"
-  [ "$force" = "1" ] && { echo "upload"; return 0; }
-  [ "$present" = "1" ] || { echo "upload"; return 0; }
-  [ -n "$local_sha" ] || { echo "upload"; return 0; }
-  [ "$local_sha" = "$remote_sha" ] && { echo "skip"; return 0; }
-  echo "upload"
+  verdict_upload_decision "$@"
 }
 
 # Pure-string function so a unit test can source the script and assert the command is well-formed

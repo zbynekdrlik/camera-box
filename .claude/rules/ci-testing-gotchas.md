@@ -1364,3 +1364,13 @@ The pattern that tests the real thing (`tests/python/test_camera_test_settings_1
 - PATH is the stub dir ONLY. Each stub therefore carries an absolute `#!<sys.executable>` shebang,
   because `#!/usr/bin/env python3` finds no python on that PATH.
 - Leaving a stub out (for example no `pgrep`) tests the "tool missing on the box" branch for free.
+
+## Editing a file that holds a credential literal the tool output shows as `<<REDACTED>>` (issue 1302)
+
+The session redacts credential values in every tool OUTPUT, so the Read/Edit view of a line like
+`"${CG_CHAIN_PW:-<value>}"` shows `<<REDACTED>>`. An `Edit` whose old_string contains that line never
+matches, and retyping it would write the placeholder into the file. Move or rewrite such code with a
+small python script run as `python3 /abs/script.py`: extract the literal with a regex
+(`re.search(r"\$\{CG_CHAIN_PW:-([^}]*)\}", s).group(1)`) and splice it into the new text without
+ever printing it. Test assertions should pin the env OVERRIDE, never the default value.
+
