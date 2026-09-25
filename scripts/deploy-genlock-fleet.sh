@@ -57,10 +57,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/genlock-markers.sh
 . "$HERE/lib/genlock-markers.sh"
 # shellcheck source=scripts/lib/ahk-watchdog.sh
-# The AHK watchdog restart (#789 issue-review #1): the deploy program stops AHK to copy, then
-# MUST restart it before handing off to launch-obs-genlock.sh -- launch only restarts AHK IF IT
-# stopped it itself and its #978 session gate then hard-fails (exit 8) on AHK count != 1. Reuse the
-# ONE verified relaunch helper launch itself uses, never a fork.
+# Shared AHK fragments: the issue-1372 GUARD (stop if running, never restart) + the #789 relaunch.
 . "$HERE/lib/ahk-watchdog.sh"
 # shellcheck source=scripts/lib/genlock-fleet-boxes.sh
 # issue 1317 part 3: the per-box constant table (fleet_box_mcp/_ip/_has_ahk/_ahk_script/_ahk_prefer/
@@ -161,8 +158,9 @@ fleet_pick_run_at_sha() {
 }
 
 # build_windows_deploy_program BOX MODE STAGE OBS_DIR HAS_AHK BACKUP_ROOT KEEP GSHA DSHA
-#   Emit the PowerShell program the agent pastes into the box's win-* MCP Shell. It stops the AHK
-#   watchdog (an AHK box only -- resolume) + obs64, clears crash sentinels, backs up the components it overwrites,
+#   Emit the PowerShell program the agent pastes into the box's win-* MCP Shell. HAS_AHK=guard (the
+#   planner's pick for resolume, issue 1372) stops a RUNNING AutoHotkey64 and never restarts it; HAS_AHK=1
+#   stops + restart-verifies it. It stops obs64, clears crash sentinels, backs up the components it overwrites,
 #   copies the new bytes from STAGE (full = 3 surgical robocopies; fast = obs.dll only), writes BOTH
 #   markers + DEPLOYED_AT temp-then-rename, sha256-verifies the deployed obs.dll against the bundle
 #   manifest (fail-closed), and prints a box-backup RETENTION PLAN (keep newest KEEP; delete only
@@ -176,7 +174,11 @@ build_windows_deploy_program() {
   local confirm_ps='$false'; [ "$confirm" = "1" ] && confirm_ps='$true'
 
   local ahk_stop ahk_restart
-  if [ "$has_ahk" = "1" ]; then
+  if [ "$has_ahk" = "guard" ]; then
+    # issue 1372 (owner ruling): the owner's watcher is stopped only if running, NEVER restarted.
+    ahk_stop="# (1) AutoHotkey64 guard -- stopped only if running, before the copy:"$'\n'"$(ahk_guard_stop_ps)"
+    ahk_restart="# (8) AutoHotkey64: NEVER restarted by this deploy (issue 1372) -- report only:"$'\n'"$(ahk_guard_report_ps)"
+  elif [ "$has_ahk" = "1" ]; then
     ahk_stop=$(cat <<'PSAHK'
 # (1) Stop the box's AHK watchdog FIRST -- NL_STARTUP.ahk respawns obs64 via the bare exe within
 #     seconds of the window vanishing, which would re-lock data\ + obs-plugins\ files mid-copy
@@ -188,11 +190,9 @@ if (Get-Process AutoHotkey64 -ErrorAction SilentlyContinue) {
 }
 PSAHK
 )
-    # #789 review #1: restart AHK VERIFIED via the ONE shared helper launch-obs-genlock.sh uses
-    # (scripts/lib/ahk-watchdog.sh) -- never a fork. Fail loud if it does not come back. issue 1295:
-    # the relaunch identity (script path + prefer order) is PER-BOX (resolume: its own v2 .ahk path +
-    # lnk-first). issue 1317 part 3: a box with NO AHK identity in scripts/lib/genlock-fleet-boxes.sh
-    # (the retired Windows strih was the only other one) is a loud error, never another box's script.
+    # #789 review #1: restart AHK VERIFIED via the ONE shared scripts/lib/ahk-watchdog.sh helper, fail
+    # loud if it does not come back. The relaunch identity is PER-BOX (issue 1295); a box with no AHK
+    # identity in scripts/lib/genlock-fleet-boxes.sh is a loud error, never another box's script.
     local ahk_script ahk_prefer ahk_relaunch_ps
     ahk_script="$(fleet_box_ahk_script "$box")" && ahk_prefer="$(fleet_box_ahk_prefer "$box")" \
       || { echo "build_windows_deploy_program: box '$box' has no AHK relaunch identity (scripts/lib/genlock-fleet-boxes.sh) -- refusing HAS_AHK=1" >&2; return 2; }
@@ -761,7 +761,7 @@ PREFLIGHT
 emit_windows_plan() {
   local box="$1" mode="$2" stage="$3" gsha="$4" dsha="$5" confirm="${6:-0}"
   local mcp ip has_ahk win_stage program artifact
-  mcp="$(fleet_box_mcp "$box")"; ip="$(fleet_box_ip "$box")"; has_ahk="$(fleet_box_has_ahk "$box")"
+  mcp="$(fleet_box_mcp "$box")"; ip="$(fleet_box_ip "$box")"; has_ahk="$(fleet_box_ahk_mode "$box")"
   artifact="$(fleet_windows_artifact "$mode")"
   win_stage="C:\\stage-genlock-${gsha}"
   program="$(build_windows_deploy_program "$box" "$mode" "$win_stage" 'C:\Program Files\obs-studio' "$has_ahk" 'C:\obs-backup' "$RETENTION_KEEP" "$gsha" "$dsha" "$confirm")"

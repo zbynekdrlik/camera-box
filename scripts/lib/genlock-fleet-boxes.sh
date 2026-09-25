@@ -52,6 +52,20 @@ fleet_box_has_ahk() { obs_fleet_has_ahk "${1:-}"; echo; }
 fleet_box_ahk_script() { case "${1:-}" in resolume) echo 'C:\Users\Resolume\Documents\_NLMEDIA resolume\_APPS\NL_STARTUP.ahk' ;; *) return 2 ;; esac; }
 fleet_box_ahk_prefer() { case "${1:-}" in resolume) echo "lnk" ;; *) return 2 ;; esac; }
 
+# fleet_box_ahk_mode BOX -> guard|0, the AHK POLICY the deploy + launch planners pass as their
+# HAS_AHK argument (issue 1372, owner ruling "ale ahk nespustaj"). A box whose owner runs an AHK
+# watcher (fleet_box_has_ahk = 1, resolume) is `guard`: the programs stop AutoHotkey64 only if it is
+# running, NEVER start or restart it, and the count is report-only. A box with none is `0`. The
+# builders' managed stop->restart-verified mode `1` is never chosen by a planner any more: whether the
+# watcher runs is the owner's choice. The obs-fleet `has_ahk` fact itself (what is INSTALLED, read by
+# the session watchdog and the self-heal builder) is unchanged.
+fleet_box_ahk_mode() { if [ "$(fleet_box_has_ahk "${1:-}")" = "1" ]; then echo "guard"; else echo "0"; fi; }
+
+# fleet_box_obs_profile BOX -> the OBS profile the launch program expects in the window title
+# (`build <short sha> - Profile: <profile>`, issue 1372): resolume's cg OBS runs profile `cg`. rc 2
+# (no output) for a box with no pinned profile -- its launch program carries no title identity check.
+fleet_box_obs_profile() { case "${1:-}" in resolume) echo "cg" ;; *) return 2 ;; esac; }
+
 # fleet_resolume_identity_confirm_note -> the IDENTITY-CONFIRM preamble the resolume deploy plan
 # prints (issue 1295). RESOLUME-SNV is a TRAVELING box addressed by HOSTNAME, and resolume.lan
 # currently resolves to 10.77.9.201 -- the SAME IP `bridge` lists in targets.md (an event-LAN DHCP

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# airuleset:script-ok source-only lib (defines one pure function, no top-level statements) —
+# airuleset:script-ok source-only lib (defines pure functions only, no top-level statements) —
 # matches the sibling scripts/lib/*.sh convention (camera-box-restart-verify.sh, v4l2-neutral.sh)
 # of deliberately NOT setting `set -euo pipefail` here: sourcing this file executes it in the
 # CALLER's shell, so imposing strict mode here would leak into whichever caller sources it.
@@ -119,5 +119,37 @@ if ($ahkRelaunchTarget) {
     if (Get-Process AutoHotkey64 -ErrorAction SilentlyContinue) { $ahkRelaunchVerified = $true; break }
   }
 }
+PS
+}
+
+# issue 1372 -- the AHK GUARD fragments (owner ruling "ale ahk nespustaj"). On a box whose OWNER runs
+# an NL_STARTUP.ahk watcher (resolume), our deploy/launch programs no longer own that watcher: they
+# stop it ONLY if it is running (so it cannot respawn a second obs64 mid-copy or mid-relaunch), they
+# NEVER start or restart it, and the AutoHotkey64 count is REPORTED, never a gate. Whether AHK runs
+# is the owner's choice, not a postcondition. Both fragments are pure PowerShell text shared by
+# deploy-genlock-fleet.sh (build_windows_deploy_program) and launch-obs-genlock.sh
+# (build_launch_program), so the two programs cannot drift apart. Neither fragment ever launches
+# AutoHotkey64 -- that is the relaunch primitive above, which a guard box never uses.
+#
+# ahk_guard_stop_ps -> stop a RUNNING AutoHotkey64 and log what happened; never start it.
+ahk_guard_stop_ps() {
+  cat <<'PS'
+# AutoHotkey64 GUARD (issue 1372, owner ruling): stop the owner's watcher ONLY if it is running, so it
+# cannot respawn a second obs64 here. This program NEVER starts or restarts it.
+if (Get-Process AutoHotkey64 -ErrorAction SilentlyContinue) {
+  Stop-Process -Name AutoHotkey64 -Force -ErrorAction SilentlyContinue
+  Write-Host "#1372: stopped the running AutoHotkey64 watcher -- it stays OFF (never restarted by this program)."
+} else {
+  Write-Host "#1372: AutoHotkey64 is not running -- nothing to stop (it stays OFF)."
+}
+PS
+}
+
+# ahk_guard_report_ps -> log the AutoHotkey64 count + SessionIds. Report-only: never an exit, never a
+# start. It replaces the #978 "exactly 1 AutoHotkey64" gate on a guard box.
+ahk_guard_report_ps() {
+  cat <<'PS'
+$ahkReport = @(Get-Process AutoHotkey64 -ErrorAction SilentlyContinue)
+Write-Host ("#1372 AHK REPORT (report-only, never a gate): AutoHotkey64 count=" + $ahkReport.Count + " SessionId=[" + (@($ahkReport | ForEach-Object { $_.SessionId }) -join ',') + "] -- whether it runs is the owner's choice.")
 PS
 }

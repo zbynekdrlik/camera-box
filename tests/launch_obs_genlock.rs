@@ -604,6 +604,24 @@ fn guard_mode_stops_ahk_before_every_obs_kill_and_only_reports_after_1372() {
     );
 }
 
+/// issue 1372: a plain (no --force) guard launch refuses a running obs64 FIRST (a refused run never
+/// touches the owner's watcher), then stops a running AutoHotkey64 before the launch itself.
+#[test]
+fn guard_mode_without_force_refuses_first_then_stops_ahk_before_launch_1372() {
+    let p = run_sourced("build_launch_program 'C:\\Program Files\\obs-studio' 0 guard '' '' cg");
+    let refuse = p.find("already running").expect("the no-force refusal");
+    let stop = p
+        .find("Stop-Process -Name AutoHotkey64")
+        .expect("a guard launch stops a running AutoHotkey64");
+    let launch = p
+        .find("Start-Process -FilePath $lnk")
+        .expect("the shortcut launch");
+    assert!(
+        refuse < stop && stop < launch,
+        "refusal@{refuse} < AHK stop@{stop} < launch@{launch} expected:\n{p}"
+    );
+}
+
 /// issue 1372: the title identity check runs only where the title is readable (the same-session
 /// branch of the #978 gate) and fails loud (exit 8). A box with no expected profile (stream) gets
 /// no title identity check at all.
