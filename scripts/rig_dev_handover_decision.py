@@ -187,6 +187,44 @@ def classify_watchdogs(text, imag_retired=False, max_age_s=WD_MAX_AGE_S):
     return {"status": status, "message": msg, "off": off, "missing": missing, "ok": ok}
 
 
+# --- item 17: exposure (issue 1371) --------------------------------------------------------------
+# The ONE line `camera_test_settings.py snapshot-state` prints about the test camera's production
+# ISO/shutter snapshot (taken by the E2E before its first exposure set, restored + moved aside by
+# `rig-mode.sh event`):
+#   exposure state=none | pending box=.. taken=.. <key>=<value>... | restored restored=.. ... | invalid path=.. reason=..
+_EXPOSURE_LINE_RE = re.compile(r"^exposure\s+state=(none|pending|restored|invalid)\b(.*)$")
+
+
+def classify_exposure(text):
+    """Decide the `exposure` item from the snapshot-state line. none/restored -> OK; pending (the
+    last EVENT switch did not restore it, so production ran on the TEST exposure) and invalid (the
+    owner's values are stuck in an unreadable file) -> SUPERVISOR, never the owner's fault; no
+    readable line -> UNKNOWN. Returns {status, message}."""
+    m = None
+    for line in (text or "").splitlines():
+        m = _EXPOSURE_LINE_RE.match(line.strip()) or m
+    if m is None:
+        return {"status": UNKNOWN,
+                "message": "stav produkčnej expozície testovacej kamery sa nepodarilo prečítať "
+                           "(~/.camera-box na dev1)"}
+    state, detail = m.group(1), m.group(2).strip()
+    if state == "none":
+        return {"status": OK,
+                "message": "žiadna produkčná expozícia nečaká na vrátenie (test kameru nemenil)"}
+    if state == "restored":
+        return {"status": OK,
+                "message": "produkčná expozícia testovacej kamery vrátená pri poslednom EVENT (%s)" % detail}
+    if state == "pending":
+        return {"status": SUPERVISOR,
+                "message": "produkčná expozícia testovacej kamery sa pri poslednom EVENT NEVRÁTILA — "
+                           "produkcia bežala na testovacej expozícii; čaká snímka (%s). Zisti prečo "
+                           "(kamera nebola na USB / nesedel read-back / bežal prenos), potom "
+                           "`scripts/rig-mode.sh event` s kamerou na USB ju vráti" % detail}
+    return {"status": SUPERVISOR,
+            "message": "snímka produkčnej expozície testovacej kamery je nečitateľná (%s) — "
+                       "hodnoty vlastníka treba z nej obnoviť ručne" % detail}
+
+
 # --- item specifications ------------------------------------------------------------------------
 class Item(object):
     """One checklist item. `captures` are the <name> keys the orchestrator wrote (.out/.rc). `kind`
@@ -231,6 +269,11 @@ class Item(object):
         """`captures_data`: {name: (text, rc)} for THIS item's captures (a missing name reads as
         ("", RC_MISSING)). Combine the per-capture statuses (FORGOT > OK > UNKNOWN) and produce the
         Slovak line. `imag_retired` (issue 1316) is used only by the `watchdogs` kind."""
+        if self.kind == "exposure":
+            text, _rc = captures_data.get(self.captures[0], ("", RC_MISSING))
+            r = classify_exposure(text)
+            return {"key": self.key, "label": self.label, "status": r["status"],
+                    "message": r["message"]}
         if self.kind == "watchdogs":
             text, _rc = captures_data.get(self.captures[0], ("", RC_MISSING))
             r = classify_watchdogs(text, imag_retired=imag_retired)
@@ -385,6 +428,10 @@ ITEMS = [
          ok_msg="všetky production-critical watchdog timery na dev1 bežia",
          forgot_msg="",  # never emitted for this kind (no owner-forgot path)
          unknown_msg="stav watchdog timerov sa nepodarilo prečítať"),
+    # issue 1371: the test camera's production ISO/shutter snapshot. The "exposure" kind uses
+    # classify_exposure (above): its message carries the snapshot detail (box, time, values).
+    Item("exposure", "expozícia testovacej kamery (ISO/uzávierka)", ["exposure"], "exposure",
+         ok_msg="", forgot_msg="", unknown_msg=""),  # messages come from classify_exposure
 ]
 
 
@@ -399,10 +446,13 @@ def build_checklist(entries):
     forgot = []
     unknown = []
     supervisor = []  # #1319: timer names the supervisor must (re-)enable; owner is not blamed
+    supervisor_other = []  # issue 1371: a non-watchdog supervisor problem (the item label)
     for e in entries:
         lines.append("%s %s: %s" % (GLYPH[e["status"]], e["label"], e["message"]))
         if e["status"] == FORGOT:
             forgot.append(e["label"])
+        elif e["status"] == SUPERVISOR and e.get("key") != "watchdogs" and not e.get("names"):
+            supervisor_other.append(e["label"])
         elif e["status"] == SUPERVISOR:
             supervisor.extend(e.get("names") or [e["label"]])
         elif e["status"] == UNKNOWN:
@@ -412,11 +462,18 @@ def build_checklist(entries):
         summary = "zabudol si: " + ", ".join(forgot)
         if supervisor:
             summary += " (supervisor musí zapnúť: " + ", ".join(supervisor) + ")"
+        if supervisor_other:
+            summary += " (supervisor musí vyriešiť: " + ", ".join(supervisor_other) + ")"
         if unknown:
             summary += " (neoverené: " + ", ".join(unknown) + ")"
         exit_code = 1
-    elif supervisor:
-        summary = "supervisor musí zapnúť watchdogy: " + ", ".join(supervisor)
+    elif supervisor or supervisor_other:
+        parts = []
+        if supervisor:
+            parts.append("supervisor musí zapnúť watchdogy: " + ", ".join(supervisor))
+        if supervisor_other:
+            parts.append("supervisor musí vyriešiť: " + ", ".join(supervisor_other))
+        summary = "; ".join(parts)
         if unknown:
             summary += " (neoverené: " + ", ".join(unknown) + ")"
         exit_code = 1
