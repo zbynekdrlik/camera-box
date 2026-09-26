@@ -991,7 +991,7 @@ fn the_latch_reads_the_budgeted_floor_and_the_rise_watch_the_raw_one_1367() {
     }
     assert_eq!(s.target_frames, 3);
     // a genuine rise past the budget (70 ms: raw floor 3 = D) still re-measures, and the new
-    // latch reads the budgeted floor (4 frames) -> the base + 3 clamp, reported.
+    // latch reads the budgeted floor (85 ms -> 3 frames) -> D 4, exactly the base + 3 clamp.
     let rise = ShallowTick {
         latch_floor_frames: n1_shallow_latch_floor_frames(70_000_000, I30),
         ..tick(false, 3)
@@ -1001,5 +1001,5 @@ fn the_latch_reads_the_budgeted_floor_and_the_rise_watch_the_raw_one_1367() {
         latched += u32::from(n1_shallow_track(&mut s, rise));
     }
     assert_eq!(latched, 1, "one re-measure, one latch");
-    assert_eq!((s.target_frames, s.capped), (4, true));
+    assert_eq!((s.target_frames, s.capped), (4, false));
 }

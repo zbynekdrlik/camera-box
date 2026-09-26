@@ -670,12 +670,30 @@ fn a_song_start_inside_the_budget_never_re_measures_the_latch_1367() {
 
 #[test]
 fn an_idle_lag_far_under_the_edge_pays_no_headroom_1367() {
-    // idle 8 ms -> content 19 ms: both stay inside the first frame with the budget, so D stays
-    // base + 1 = 2 -- the budget costs a frame only where the jitter can cross an edge.
-    let sc = song_start((7, 9), (18, 20), 2);
-    assert_clean("song-start-8-19", sc);
-    let r = run(sc);
+    // idle 8 ms -> content 19 ms: the locks made on the idle lag stay base + 1 = 2 (8 + 15 ms is
+    // inside the first frame) and the song start never re-measures (the tick floor of 19 ms is
+    // one frame, under D) -- the budget costs a frame only where the jitter can cross an edge.
+    // The sender-restart lock at 2403 s is made on the 18-20 ms content lag itself, whose p90 plus
+    // the budget (~35 ms) crosses the first edge: that lock is 3, the budget doing its job.
+    let r = run(song_start((7, 9), (18, 20), 2));
+    eprintln!("song-start-8-19: {r:?}");
+    assert_eq!(r.latched, [2, 2, 3], "idle, OBS restart, content relock");
     assert_eq!(r.latches, 3, "one latch per lock, no re-measure: {r:?}");
+    // D 2 is presented from the song start (1500 s) to the sender restart (2400 s), minus the
+    // settle window: the song start did not move it.
+    let at_2 = r.depth_hist.get(&2).copied().unwrap_or(0);
+    assert!(
+        at_2 > 60_000,
+        "song-start-8-19: D 2 held only {at_2} presents: {:?}",
+        r.depth_hist
+    );
+    assert_eq!(r.corrections, 0, "hold/shed churn");
+    assert_eq!(r.steps, 0, "an audio step re-placement");
+    assert!(
+        r.max_abs_av_ms <= GATE_MAX_AV_MS,
+        "|A/V| {:.2} ms",
+        r.max_abs_av_ms
+    );
 }
 
 #[test]
