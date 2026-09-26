@@ -120,6 +120,8 @@ pub fn converge_defines() -> String {
         "GENLOCK_N1_SHALLOW_UNDER_TICKS",
         "GENLOCK_N1_SHALLOW_CHURN_RELOCKS",
         "GENLOCK_N1_SHALLOW_CHURN_QUIET_TICKS",
+        // design 5844353368: the sticky content floor.
+        "GENLOCK_N1_SHALLOW_STICKY_DECAY_NS",
     ]
     .iter()
     .map(|name| lift_define(name))

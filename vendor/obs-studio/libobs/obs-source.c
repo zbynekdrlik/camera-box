@@ -5590,6 +5590,10 @@ static inline uint64_t genlock_phase_pin_deadline(uint64_t deadline_ns, uint64_t
 #define GENLOCK_N1_SHALLOW_UNDER_TICKS 180u
 #define GENLOCK_N1_SHALLOW_CHURN_RELOCKS 3u
 #define GENLOCK_N1_SHALLOW_CHURN_QUIET_TICKS 180u
+/* camera-box issue 1367 (design 5844353368): the STICKY content floor loses one frame after this much
+ * scheduled-tick wall time with no observation at its level (30 min), so a genuinely faster sender
+ * recovers. Mirror: src/genlock_n1_depth.rs N1_SHALLOW_STICKY_DECAY_NS. */
+#define GENLOCK_N1_SHALLOW_STICKY_DECAY_NS 1800000000000ULL
 
 /* camera-box #1003: PHASE-CONTINUITY RELOCK (history-anchored selection).
  *
@@ -6445,6 +6449,66 @@ static inline bool genlock_n1_shallow_watch(uint64_t target_frames, bool capped,
 	       *churn_relocks >= GENLOCK_N1_SHALLOW_CHURN_RELOCKS;
 }
 
+/* camera-box issue 1367 (design 5844353368): one PRESENT tick of the STICKY content floor; returns the
+ * floor the latch must respect. A per-lock latch taken while the sender idles measures the idle arrival
+ * lag, and every sender re-lock (a song change, an E2E restart) re-latched on idle and lost the content
+ * level: live resolume 26.9.2026, an idle re-lock at 09:33:23 latched latch_floor_frames=1 (D 2) and
+ * each song start then re-measured and slewed the audio. Observed like the latch measures: a block of
+ * GENLOCK_N1_SHALLOW_SETTLE_TICKS on-grid ticks of the budgeted latch floor while the audio flows, read
+ * at its p90; it counts only when its p90 - p10 spread is within GENLOCK_N1_SHALLOW_MAX_SPREAD_FRAMES,
+ * its p90 is above base and under the over-clamp bin, and then raises the floor / resets its decay
+ * clock when at or over it. A relock or a tick without audio restarts the block; an off-grid tick is
+ * not sampled. Decays one frame per GENLOCK_N1_SHALLOW_STICKY_DECAY_NS without such an observation (a
+ * wall stepped back never decays it). Cleared by an N>=2 tick and on a min-latency (imag) box. Mirror
+ * of src/genlock_n1_depth.rs n1_shallow_sticky_track. */
+static inline uint64_t genlock_n1_shallow_sticky_track(uint64_t *floor_frames, uint64_t *seen_ns, uint32_t *obs_ticks,
+						       uint32_t *obs_hist, bool n1, bool relock, bool on_grid,
+						       bool audio_flowing, bool min_latency_box, uint64_t latch_floor_frames,
+						       uint64_t base_frames, uint64_t tick_wall_ns)
+{
+	if (!n1 || min_latency_box) {
+		*floor_frames = 0;
+		*seen_ns = 0;
+		*obs_ticks = 0;
+		for (uint32_t bin = 0; bin < GENLOCK_N1_SHALLOW_HIST_BINS; bin++)
+			obs_hist[bin] = 0;
+		return 0;
+	}
+	if (*floor_frames != 0 && tick_wall_ns > *seen_ns &&
+	    tick_wall_ns - *seen_ns >= GENLOCK_N1_SHALLOW_STICKY_DECAY_NS) {
+		*floor_frames -= 1u;
+		*seen_ns = tick_wall_ns;
+	}
+	if (relock || !audio_flowing)
+		*obs_ticks = 0;
+	if (!audio_flowing || !on_grid)
+		return *floor_frames;
+	if (*obs_ticks == 0) {
+		for (uint32_t bin = 0; bin < GENLOCK_N1_SHALLOW_HIST_BINS; bin++)
+			obs_hist[bin] = 0;
+	}
+	const uint32_t bin = genlock_n1_shallow_hist_bin(latch_floor_frames, base_frames);
+	if (obs_hist[bin] < UINT32_MAX)
+		obs_hist[bin] += 1u;
+	if (*obs_ticks < UINT32_MAX)
+		*obs_ticks += 1u;
+	if (*obs_ticks < GENLOCK_N1_SHALLOW_SETTLE_TICKS)
+		return *floor_frames;
+	const uint64_t high = genlock_n1_shallow_percentile_bin(obs_hist, *obs_ticks, GENLOCK_N1_SHALLOW_LATCH_PERCENTILE);
+	const uint64_t low =
+		genlock_n1_shallow_percentile_bin(obs_hist, *obs_ticks, 100u - GENLOCK_N1_SHALLOW_LATCH_PERCENTILE);
+	*obs_ticks = 0;
+	if (high - low <= GENLOCK_N1_SHALLOW_MAX_SPREAD_FRAMES && high != 0 &&
+	    high < (uint64_t)(GENLOCK_N1_SHALLOW_HIST_BINS - 1u)) {
+		const uint64_t observed = base_frames > UINT64_MAX - high ? UINT64_MAX : base_frames + high;
+		if (observed >= *floor_frames) {
+			*floor_frames = observed;
+			*seen_ns = tick_wall_ns;
+		}
+	}
+	return *floor_frames;
+}
+
 /* one PRESENT tick; returns true on the tick that latches a D (or a capped report). An N>=2 tick
  * clears the state; a relock, or an N==1 source with no depth / window / cap, opens a window; a
  * latched source re-opens one when genlock_n1_shallow_watch says so. The window's floors go into the
@@ -6453,14 +6517,18 @@ static inline bool genlock_n1_shallow_watch(uint64_t target_frames, bool capped,
  * clamped. ROZHODNUTÉ 5842640404: the histogram bins latch_floor_frames (the budgeted receive-lag
  * floor), floor_frames (the raw tick floor) feeds the window max and the rise / fell watch.
  * ROZHODNUTÉ 5842848307: on a min-latency (imag) box the histogram bins the raw floor too -- at a
- * 60p canvas the budget is ~90 % of a frame and every input would ask for more than base + 1. */
+ * 60p canvas the budget is ~90 % of a frame and every input would ask for more than base + 1.
+ * Design 5844353368: the latch floor is at least sticky_floor_frames (genlock_n1_shallow_sticky_track,
+ * ignored on a min-latency box), so an idle re-lock keeps the depth a song needs; the clamp still
+ * applies. */
 static inline bool genlock_n1_shallow_track(uint64_t *target_frames, uint64_t *floor_max_frames,
 					    uint32_t *window_ticks, uint32_t *over_ticks, uint32_t *deep_ticks,
 					    bool *measuring, bool *capped,
 					    bool n1, bool relock, bool on_grid, uint64_t floor_frames,
 					    uint64_t latch_floor_frames, uint64_t base_frames,
 					    bool deep, bool min_latency_box, uint64_t realized_frames, bool backlog_relock,
-					    uint32_t *hist, uint32_t *under_ticks, uint32_t *churn_relocks,
+					    uint64_t sticky_floor_frames, uint32_t *hist, uint32_t *under_ticks,
+					    uint32_t *churn_relocks,
 					    uint32_t *churn_quiet_ticks, uint32_t *rejects)
 {
 	if (!n1) {
@@ -6520,8 +6588,18 @@ static inline bool genlock_n1_shallow_track(uint64_t *target_frames, uint64_t *f
 		genlock_n1_shallow_rearm(floor_max_frames, window_ticks, over_ticks, deep_ticks, measuring);
 		return false;
 	}
-	*target_frames = genlock_n1_shallow_target_frames(base_frames,
-							  base_frames > UINT64_MAX - high ? UINT64_MAX : base_frames + high,
+	/* design 5844353368: never latch under the sticky content floor (none on a min-latency box). The
+	 * floor is absolute frames and may come from a HIGHER pin (review round 1), so it is limited to
+	 * base + GENLOCK_N1_SHALLOW_MAX_EXTRA_FRAMES - 1: a sticky floor alone never caps a latch (the capped
+	 * fell watch would re-measure every window until the floor decayed). */
+	const uint64_t measured = base_frames > UINT64_MAX - high ? UINT64_MAX : base_frames + high;
+	const uint64_t sticky_limit = base_frames > UINT64_MAX - (GENLOCK_N1_SHALLOW_MAX_EXTRA_FRAMES - 1u)
+					      ? UINT64_MAX
+					      : base_frames + (GENLOCK_N1_SHALLOW_MAX_EXTRA_FRAMES - 1u);
+	const uint64_t sticky = min_latency_box                   ? 0
+				: sticky_floor_frames > sticky_limit ? sticky_limit
+								     : sticky_floor_frames;
+	*target_frames = genlock_n1_shallow_target_frames(base_frames, measured > sticky ? measured : sticky,
 							  window_deep, min_latency_box, capped);
 	*measuring = false;
 	*rejects = 0;
@@ -6881,6 +6959,15 @@ static void genlock_shallow_latch(obs_source_t *source, uint64_t tick_wall, uint
 	source->genlock_shallow_relocks_seen = source->genlock_relocks;
 	const bool was_latched = !source->genlock_shallow_measuring && source->genlock_shallow_target_frames != 0;
 	const uint32_t rejects_before = source->genlock_shallow_rejects;
+	/* design 5844353368: the STICKY content floor first; the latch below never goes under it. The audio
+	 * hold mode is the audio thread's (a benign single-word read, like genlock_audio_delay_ms): timecode =
+	 * this source's genlocked audio flows. A video-only source keeps no sticky floor. */
+	const uint64_t sticky_floor = genlock_n1_shallow_sticky_track(
+		&source->genlock_shallow_sticky_frames, &source->genlock_shallow_sticky_seen_ns,
+		&source->genlock_shallow_sticky_obs_ticks, source->genlock_shallow_sticky_obs_hist,
+		source->genlock_last_known_n < 2, relock, genlock_n1_tick_is_on_grid(tick_wall, interval),
+		source->genlock_audio_hold_mode == GENLOCK_AUDIO_HOLD_TIMECODE, genlock_min_latency_box(),
+		genlock_n1_shallow_latch_floor_frames(source->genlock_rx_arrival_lag_ns, interval), base_frames, tick_wall);
 	const bool latched =
 		genlock_n1_shallow_track(&source->genlock_shallow_target_frames, &source->genlock_shallow_floor_max_frames,
 				      &source->genlock_shallow_window_ticks, &source->genlock_shallow_over_ticks,
@@ -6892,7 +6979,7 @@ static void genlock_shallow_latch(obs_source_t *source, uint64_t tick_wall, uint
 				      genlock_n1_is_deep_source(wall_now > newest_stamp ? wall_now - newest_stamp : 0,
 								reserve_ms, interval),
 				      genlock_min_latency_box(), genlock_n1_depth_frames(tick_wall, source->last_frame_ts, interval),
-				      backlog_relock, source->genlock_shallow_hist, &source->genlock_shallow_under_ticks,
+				      backlog_relock, sticky_floor, source->genlock_shallow_hist, &source->genlock_shallow_under_ticks,
 				      &source->genlock_shallow_churn_relocks, &source->genlock_shallow_churn_quiet_ticks,
 				      &source->genlock_shallow_rejects);
 	/* design 5830750134: every re-measure that is not a relock / pin change is logged with its reason
@@ -6937,16 +7024,21 @@ static void genlock_shallow_latch(obs_source_t *source, uint64_t tick_wall, uint
 					       source->genlock_shallow_floor_max_frames > base_frames + high
 				       ? source->genlock_shallow_floor_max_frames
 				       : base_frames + high;
+	/* design 5844353368: wanted_frames stays the p90 floor's own ask; the line names the sticky content
+	 * floor separately (sticky_floor_frames=, 0 on the min-latency box), so a latch above
+	 * latch_floor_frames + 1 reads as the sticky floor holding the song depth (limited to base + 2). */
 	const uint64_t wanted = window_deep ? base_frames + 1 : asked + 1;
 	blog(source->genlock_shallow_capped ? LOG_WARNING : LOG_INFO,
 	     "genlock-shallow-lock '%s': depth_frames=%llu floor_max_frames=%llu base_frames=%llu "
 	     "latch_floor_frames=%llu spread_frames=%llu rejects=%u "
+	     "sticky_floor_frames=%llu "
 	     "wanted_frames=%llu latency_ms=%u capped=%d (issue 1367)",
 	     source->context.name ? source->context.name : "?",
 	     (unsigned long long)source->genlock_shallow_target_frames,
 	     (unsigned long long)source->genlock_shallow_floor_max_frames, (unsigned long long)base_frames,
 	     (unsigned long long)(base_frames + high), (unsigned long long)(high - low), rejects_before,
-	     (unsigned long long)wanted, reserve_ms, source->genlock_shallow_capped ? 1 : 0);
+	     (unsigned long long)sticky_floor, (unsigned long long)wanted, reserve_ms,
+	     source->genlock_shallow_capped ? 1 : 0);
 }
 
 static bool genlock_release_tick(obs_source_t *source, uint64_t wall_now, uint64_t present_ts,

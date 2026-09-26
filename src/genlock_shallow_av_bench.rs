@@ -85,7 +85,17 @@ struct Scenario {
     /// starve the queue, the live 25.9.2026 15:29 sp-slow_video pattern (`stamp_gap` +11 and
     /// `underruns` +7 per 5 s audit while the operator switched scenes).
     song_change: Option<(u64, u64)>,
+    /// design 5844353368: SONGS `(start_s, end_s)` on an idle feed — inside each the lag band is
+    /// `content_ms` (the playing content's decode cost), and each song END is a SongPlayer re-lock:
+    /// the sender skips [`SONG_RELOCK_GAP_NS`] of stamps (a relock gap), audio keeps flowing.
+    songs: &'static [(u64, u64)],
+    /// The content lag band `(min, max)` ms inside a song.
+    content_ms: (u64, u64),
 }
+
+/// design 5844353368: the stamp gap a SongPlayer re-lock between songs leaves (over the 1 s relock
+/// gap, so the receiver re-locks on the idle feed that follows).
+const SONG_RELOCK_GAP_NS: u64 = 1_500_000_000;
 
 impl Scenario {
     fn clean(lag_min_ms: u64, lag_max_ms: u64, want_depth: u64) -> Scenario {
@@ -101,6 +111,8 @@ impl Scenario {
             burst: None,
             legacy_append: false,
             song_change: None,
+            songs: &[],
+            content_ms: (0, 0),
         }
     }
 }
@@ -245,6 +257,15 @@ fn run(sc: Scenario) -> Run {
                 settle_until = nominal + SETTLE_S * NS_PER_S;
             }
         }
+        if sc
+            .songs
+            .iter()
+            .any(|&(a, b)| nominal == W0 + a * NS_PER_S || nominal == W0 + b * NS_PER_S)
+        {
+            // a song start (content) or its end (the re-lock): the gate reopens once settled.
+            last_depth = None;
+            settle_until = nominal + SETTLE_S * NS_PER_S;
+        }
         if !sender_back && nominal >= silent.1 {
             sender_back = true;
             resync = true;
@@ -259,13 +280,25 @@ fn run(sc: Scenario) -> Run {
             if stamp >= silent.0 && stamp < silent.1 {
                 continue;
             }
+            let song_end_gap = sc.songs.iter().any(|&(_, b)| {
+                let end = W0 + b * NS_PER_S;
+                stamp >= end && stamp < end + SONG_RELOCK_GAP_NS
+            });
+            if song_end_gap {
+                continue;
+            }
             if let Some((at_s, dur_s)) = sc.song_change {
                 if song_change_skips(stamp, at_s, dur_s) {
                     out.sc_skipped += 1;
                     continue;
                 }
             }
+            let in_song = sc
+                .songs
+                .iter()
+                .any(|&(a, b)| stamp >= W0 + a * NS_PER_S && stamp < W0 + b * NS_PER_S);
             let (lo, hi) = match sc.band_change {
+                _ if in_song => (sc.content_ms.0 * 1_000_000, sc.content_ms.1 * 1_000_000),
                 Some((at_s, lo_ms, hi_ms)) if stamp >= W0 + at_s * NS_PER_S => {
                     (lo_ms * 1_000_000, hi_ms * 1_000_000)
                 }
@@ -312,6 +345,8 @@ fn run(sc: Scenario) -> Run {
         // tail runs the tracker, then genlock_shallow_latch).
         let lock = video_delay_lock_ms(fifo.shallow.target_frames, fifo.shallow.measuring, IV_NS);
         let mut c = TickCounters::default();
+        // design 5844353368: the C latch reads the audio hold mode the audio thread set last.
+        fifo.audio_flowing = audio.mode == AudioHoldMode::Timecode;
         fifo.tick(&cfg, wall, scheduled, &mut c);
         // the sender's own 3 s silence is the event, not churn: it is outside the gate.
         let gated = nominal >= settle_until && !(nominal >= silent.0 && nominal < silent.1);
@@ -940,3 +975,8 @@ fn a_song_change_keeps_the_video_on_its_latched_depth_and_the_audio_paired_1367(
     );
     assert_eq!((r.steps, r.slews), (0, 0), "the audio must never move");
 }
+
+// design 5844353368: the sticky content floor scenario -- a child module (this file sits at the
+// ~1000-line budget); it reuses `run`, `Scenario` and the gate constants above.
+#[path = "genlock_shallow_av_bench_sticky.rs"]
+mod sticky;

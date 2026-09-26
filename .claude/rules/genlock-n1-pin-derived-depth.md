@@ -12,6 +12,9 @@ paths:
   - "src/genlock_shallow_av_bench.rs"
   - "tests/genlock_shallow_depth_wiring_1367.rs"
   - "tests/genlock_shallow_depth_parity_1367.rs"
+  - "tests/genlock_shallow_sticky_parity_1367.rs"
+  - "src/genlock_n1_depth_sticky_tests.rs"
+  - "src/genlock_shallow_av_bench_sticky.rs"
   - "tests/genlock_n1_lift/mod.rs"
 ---
 
@@ -423,3 +426,72 @@ either way or inverted, no ceil, no budget, degenerate interval, saturation).
 idle lag is within 15 ms of an edge. On imag (the marker) the latch shows no budget:
 `latch_floor_frames=` equals the raw floor, `shallow_capped=0`, D 2 governed; the cap still reports a
 genuinely slow input (raw floor over base).
+
+## An idle re-lock keeps the STICKY content floor (design 5844353368)
+
+**Why.** Acceptance read on the budget slice (resolume log `2026-09-26 09-29-12.txt`): the OBS start
+at 09:29:22 latched `sp-slow_video` D 4 on playing content (`latch_floor_frames=3`); the idle
+SongPlayer re-lock at 09:33:23 re-latched every `sp-*` on black frames at D 2
+(`latch_floor_frames=1`); each song start then re-measured (`reason=rise` at 09:34:48 / 09:36:50 /
+09:38:20) and slewed the audio. A per-lock latch taken on idle cannot represent content, and every
+sender re-lock (song change, E2E restart, reconnect) reset it to the idle level. The idle→content
+lag jump is > 15–20 ms (receive-side decode scales with content), beyond the arrival-jitter budget.
+
+| Piece | Rust (`src/genlock_n1_depth.rs`) | C (`obs-source.c`) |
+|---|---|---|
+| state | `ShallowSticky` (floor, seen instant, block ticks, block histogram) | `genlock_shallow_sticky_{frames,seen_ns,obs_ticks,obs_hist}` (obs-internal.h) |
+| observe / decay / clear | `n1_shallow_sticky_track(&mut ShallowSticky, &ShallowTick, audio_flowing, tick_wall)` | `genlock_n1_shallow_sticky_track` (in the lifted N==1 block) |
+| decay | `N1_SHALLOW_STICKY_DECAY_NS` (30 min) | `GENLOCK_N1_SHALLOW_STICKY_DECAY_NS` |
+| latch reads it | `ShallowTick.sticky_floor_frames`, limited to `base + 2`: D = `max(base, p90, sticky) + 1` | the `sticky_floor_frames` scalar of `genlock_n1_shallow_track` |
+| audio flowing | the bench `Fifo.audio_flowing` (the A/V bench: audio leg mode `Timecode`) | `source->genlock_audio_hold_mode == GENLOCK_AUDIO_HOLD_TIMECODE` |
+
+What carries it (do not undo):
+- **Observed exactly like the latch measures.** A 90-tick on-grid block of the BUDGETED latch floor
+  while the audio flows, read at its p90. It counts only with a p90 − p10 spread within one frame
+  (a transient never becomes sticky), a p90 above base (a floor at base asks for nothing — every
+  deep source; a pin lowered from a deep value never inherits it) and under the over-clamp bin. A counting block at or above the floor
+  raises it or resets its decay clock; a relock or an audio-less tick restarts the block.
+- **"Audio flowing" = the hold mode is `timecode`.** libobs has no silence detector; live the mode is
+  `timecode` across idle and playing. The floor is a MAX, so an idle block never raises it; it only
+  refreshes the clock where the idle lag genuinely sits at that level. A video-only source (cameras)
+  never reaches `timecode`, so it keeps no sticky floor and behaves exactly as before.
+- **Decay: one frame per 30 min** of scheduled-tick wall time without an observation at the level (a
+  wall stepped back never decays it). A genuinely faster sender recovers its shallower D at its next
+  lock after the decay.
+- **In-process only.** bzalloc'd 0, never persisted; no relock / flush / pin-change seam clears it
+  (the wiring gate pins `source->genlock_shallow_sticky_frames =` at 0 occurrences). An OBS restart
+  starts without it, so the first song after an OBS start may still re-measure once. An N>=2 tick
+  and the min-latency (imag) box clear it (no sticky floor, no budget on the marker box).
+- **The latch LIMITS the sticky input to `base + N1_SHALLOW_MAX_EXTRA_FRAMES − 1` (review round 1).**
+  The floor is absolute frames, so one recorded at a HIGHER pin would ask for a D over the base + 3
+  clamp once the pin is lowered: a capped latch whose `fell` watch re-measures every window until the
+  floor decays. Limited, a sticky floor alone never caps a latch (D ≤ base + 3, uncapped); the
+  measured p90 keeps its own clamp + report.
+- **Unchanged:** the clamp (base + 3), the imag min-latency cap, the rise / fell / unreachable /
+  relocks watches. The rise watch still reads the RAW tick floor against D.
+
+Observability: `genlock-shallow-lock … rejects= sticky_floor_frames= wanted_frames= …` — a latch
+whose `depth_frames` is above `latch_floor_frames + 1` with `sticky_floor_frames=` at `depth − 1`
+is the sticky floor holding the content depth through an idle lock. `wanted_frames=` stays the p90
+floor's own ask; `sticky_floor_frames=` is the unlimited floor (0 on the imag marker).
+
+**Bench** (`genlock_shallow_av_bench.rs` `Scenario.songs` + `content_ms`, the scenario in its child
+`genlock_shallow_av_bench_sticky.rs`; each song end is a 1.5 s
+sender stamp gap = a relock on the idle feed): idle 8–12 ms, three songs at 40–50 ms before the OBS
+restart. RED (no sticky): latched `[2, 3, 2, 3, 2, 3, 2, 2, 2]`, 6 audio slews. GREEN: `[2, 3, 3, 3,
+3, 2, 2]` (one re-measure at the first song, the three idle re-locks keep D 3), 1 slew, 0 steps.
+Every other shallow bench scenario is unchanged with the audio flowing. Parity: the tracker sequence
+adds an idle relock over a sticky floor (3), the marker ignoring it (2) and a sticky floor past the
+clamp limited to D 4 UNCAPPED (the last latch must not be capped); the sticky sequence
+(`tests/genlock_shallow_sticky_parity_1367.rs`) covers the audio / relock / on-grid gates, a spread-2
+block whose p90 is UNDER the clamp (review round 1: the earlier transient blocks all sat in the
+over-clamp bin, so the spread gate was only caught by `-Werror` on the unused `low`), the base /
+over-clamp exclusions, a burst the p90 ignores, the exact decay boundary, a refresh at the level, a
+stepped-back wall and both clears. C mutation sweep 19/19 RED, the spread gate now by behaviour
+(`<= MAX_SPREAD + 1`, `(void)low`); a dropped `relock`/`on_grid` gate still dies on the harness
+`-Werror` unused parameter.
+
+**Live acceptance (supervisor).** Full-bundle deploy on resolume, then the songplayer song-start E2E:
+at most one `genlock-shallow-remeasure` per `sp-*` source per OBS session, `audio_slews=` flat on the
+second and later song starts, idle re-lock lines with `sticky_floor_frames=` > `latch_floor_frames=`,
+and the songplayer A/V gate measurable.

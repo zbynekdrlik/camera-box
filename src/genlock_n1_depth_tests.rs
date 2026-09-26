@@ -306,6 +306,8 @@ fn tick(relock: bool, floor_frames: u64) -> ShallowTick {
         // says otherwise, so the downward re-measure stays out of the older scenarios.
         realized_frames: u64::MAX,
         backlog_relock: false,
+        // design 5844353368: no sticky content floor unless a test says otherwise.
+        sticky_floor_frames: 0,
     }
 }
 
@@ -947,3 +949,7 @@ fn a_gap_whose_head_is_duplicated_behind_it_presents_on_time_1367() {
 // sits at the ~1000-line budget); it reuses `tick` and the interval constants above.
 #[path = "genlock_n1_depth_latch_budget_tests.rs"]
 mod latch_budget;
+
+// design 5844353368: the sticky content floor -- a child module, like the latch budget above.
+#[path = "genlock_n1_depth_sticky_tests.rs"]
+mod sticky;

@@ -307,6 +307,12 @@ pub const N1_SHALLOW_CHURN_RELOCKS: u32 = 3;
 /// `GENLOCK_N1_SHALLOW_CHURN_QUIET_TICKS`.
 pub const N1_SHALLOW_CHURN_QUIET_TICKS: u32 = 180;
 
+/// issue 1367 (design 5844353368, the sticky content floor) — a sticky floor loses ONE frame after
+/// this much wall time with no observation at (or above) its level, so a sender that became
+/// genuinely faster recovers its shallower depth. 30 min. Mirror of the C
+/// `GENLOCK_N1_SHALLOW_STICKY_DECAY_NS`.
+pub const N1_SHALLOW_STICKY_DECAY_NS: u64 = 30 * 60 * 1_000_000_000;
+
 /// issue 1367 — the per-source shallow-depth state (the C `genlock_shallow_*` fields).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ShallowDepth {
@@ -368,6 +374,26 @@ pub struct ShallowTick {
     pub realized_frames: u64,
     /// A BACKLOG relock happened since the previous call (the C `genlock_relocks` moved).
     pub backlog_relock: bool,
+    /// issue 1367 (design 5844353368) — the source's STICKY content floor, frames
+    /// ([`n1_shallow_sticky_track`], 0 = none): a latch never goes under it. Ignored on a
+    /// min-latency box.
+    pub sticky_floor_frames: u64,
+}
+
+/// issue 1367 (design 5844353368) — the per-source STICKY content floor (the C
+/// `genlock_shallow_sticky_*` fields): the highest budgeted latch floor observed while the source's
+/// audio flows, kept across relocks (never across an OBS restart: in-process state).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ShallowSticky {
+    /// The sticky floor, frames (0 = none).
+    pub floor_frames: u64,
+    /// The scheduled tick instant of the last observation at (or above) the floor, wall ns.
+    pub seen_ns: u64,
+    /// On-grid audio-flowing ticks of the current observation block.
+    pub obs_ticks: u32,
+    /// The current observation block's latch-floor histogram, relative to base (cleared on the
+    /// block's first sample).
+    pub obs_hist: [u32; N1_SHALLOW_HIST_BINS],
 }
 
 /// issue 1367 (ROZHODNUTÉ 5842640404) — the LATCH floor of the newest received frame, frames:
@@ -517,6 +543,78 @@ pub fn n1_shallow_watch(s: &mut ShallowDepth, t: &ShallowTick) -> bool {
         || s.churn_relocks >= N1_SHALLOW_CHURN_RELOCKS
 }
 
+/// issue 1367 (design 5844353368) — one PRESENT tick of the STICKY content floor; returns the floor
+/// the latch must respect ([`ShallowTick::sticky_floor_frames`]).
+///
+/// WHY. A per-lock latch taken while the sender idles (black frames) measures the idle arrival lag;
+/// the content a song plays costs the sender and the receiver's decode more (live resolume
+/// 26.9.2026: an idle re-lock at 09:33:23 latched `latch_floor_frames=1`, D 2, and each song start
+/// then re-measured to D 3 / 4 and slewed the audio). Every sender re-lock (a song change, an E2E
+/// restart, a reconnect) re-latched on idle and lost the content level again. The sticky floor
+/// remembers it across re-locks, so only the first song after an OBS start may re-measure.
+///
+/// - OBSERVED like the latch measures: a block of [`N1_SHALLOW_SETTLE_TICKS`] on-grid ticks of the
+///   BUDGETED latch floor while the source's audio flows (`audio_flowing`, the C audio hold mode
+///   `timecode`), read at its p90 ([`N1_SHALLOW_LATCH_PERCENTILE`]). The block counts only when its
+///   p90 − p10 spread is within [`N1_SHALLOW_MAX_SPREAD_FRAMES`] (a transient in progress never
+///   becomes sticky), its p90 is above base (a floor at base asks for nothing — every deep source)
+///   and under the over-clamp bin (a floor past the clamp is the latch's own clamped + reported
+///   case; a sticky one would clamp every later lock too). Such a block at or above the floor
+///   raises it / resets its decay clock (`seen_ns`). A relock or a tick without audio restarts the
+///   block; an off-grid tick is not sampled.
+/// - DECAYS one frame per [`N1_SHALLOW_STICKY_DECAY_NS`] of scheduled-tick wall time without such
+///   an observation (a wall stepped back under `seen_ns` never decays it).
+/// - CLEARED by an N>=2 tick (the shallow state is N==1 only) and on a min-latency (imag) box, which
+///   keeps no sticky floor (ROZHODNUTÉ 5842848307 — minimum latency). In-process only: an OBS
+///   restart starts at 0.
+///
+/// Mirror of the C `genlock_n1_shallow_sticky_track`.
+pub fn n1_shallow_sticky_track(
+    s: &mut ShallowSticky,
+    t: &ShallowTick,
+    audio_flowing: bool,
+    tick_wall_ns: u64,
+) -> u64 {
+    if !t.n1 || t.min_latency_box {
+        *s = ShallowSticky::default();
+        return 0;
+    }
+    if s.floor_frames != 0 && tick_wall_ns.saturating_sub(s.seen_ns) >= N1_SHALLOW_STICKY_DECAY_NS {
+        s.floor_frames -= 1;
+        s.seen_ns = tick_wall_ns;
+    }
+    if t.relock || !audio_flowing {
+        s.obs_ticks = 0;
+    }
+    if !audio_flowing || !t.on_grid {
+        return s.floor_frames;
+    }
+    if s.obs_ticks == 0 {
+        s.obs_hist = [0; N1_SHALLOW_HIST_BINS];
+    }
+    let bin = n1_shallow_hist_bin(t.latch_floor_frames, t.base_frames);
+    s.obs_hist[bin] = s.obs_hist[bin].saturating_add(1);
+    s.obs_ticks = s.obs_ticks.saturating_add(1);
+    if s.obs_ticks < N1_SHALLOW_SETTLE_TICKS {
+        return s.floor_frames;
+    }
+    let high = n1_shallow_percentile_bin(&s.obs_hist, s.obs_ticks, N1_SHALLOW_LATCH_PERCENTILE);
+    let low =
+        n1_shallow_percentile_bin(&s.obs_hist, s.obs_ticks, 100 - N1_SHALLOW_LATCH_PERCENTILE);
+    s.obs_ticks = 0;
+    if high - low <= N1_SHALLOW_MAX_SPREAD_FRAMES
+        && high != 0
+        && high < N1_SHALLOW_HIST_BINS as u64 - 1
+    {
+        let observed = t.base_frames.saturating_add(high);
+        if observed >= s.floor_frames {
+            s.floor_frames = observed;
+            s.seen_ns = tick_wall_ns;
+        }
+    }
+    s.floor_frames
+}
+
 /// issue 1367 — one PRESENT tick of the shallow-depth state ([`ShallowTick`]). An N>=2 tick clears
 /// the whole state (it has its own conveyor rule). A relock, or an N==1 source with no depth, no
 /// window and no cap, opens a window; a latched source re-opens one when [`n1_shallow_watch`] says
@@ -534,8 +632,10 @@ pub fn n1_shallow_watch(s: &mut ShallowDepth, t: &ShallowTick) -> bool {
 /// reads its p90 ([`N1_SHALLOW_LATCH_PERCENTILE`]), not the max. A non-deep window whose p90 − p10
 /// spread exceeds [`N1_SHALLOW_MAX_SPREAD_FRAMES`] is a transient in progress: it re-measures (the
 /// old D stays maintained), at most [`N1_SHALLOW_MAX_REJECTS`] times in a row. The depth is clamped
-/// by [`n1_shallow_target_frames`]. Returns true on the tick that LATCHES a D (or a capped report).
-/// Mirror of the C `genlock_n1_shallow_track`.
+/// by [`n1_shallow_target_frames`]. Design 5844353368: the latch floor is at least the source's
+/// sticky content floor ([`ShallowTick::sticky_floor_frames`], [`n1_shallow_sticky_track`]; ignored
+/// on a min-latency box), so an idle re-lock keeps the depth a song needs. Returns true on the tick
+/// that LATCHES a D (or a capped report). Mirror of the C `genlock_n1_shallow_track`.
 pub fn n1_shallow_track(s: &mut ShallowDepth, t: ShallowTick) -> bool {
     if !t.n1 {
         *s = ShallowDepth::default();
@@ -586,9 +686,22 @@ pub fn n1_shallow_track(s: &mut ShallowDepth, t: ShallowTick) -> bool {
         n1_shallow_rearm(s);
         return false;
     }
+    // design 5844353368: a lock never latches under the source's sticky content floor (none on a
+    // min-latency box). The floor is absolute frames and may come from a HIGHER pin (review round 1),
+    // so it is limited to the clamp's own floor (base + N1_SHALLOW_MAX_EXTRA_FRAMES − 1): a sticky
+    // floor alone never produces a capped latch, whose `fell` watch would re-measure every window
+    // until the floor decayed. The measured p90 keeps its own clamp + report.
+    let sticky = if t.min_latency_box {
+        0
+    } else {
+        t.sticky_floor_frames.min(
+            t.base_frames
+                .saturating_add(N1_SHALLOW_MAX_EXTRA_FRAMES - 1),
+        )
+    };
     let (d, capped) = n1_shallow_target_frames(
         t.base_frames,
-        t.base_frames.saturating_add(high),
+        t.base_frames.saturating_add(high).max(sticky),
         deep,
         t.min_latency_box,
     );

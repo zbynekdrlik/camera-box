@@ -361,3 +361,69 @@ fn the_latch_reads_the_receive_time_arrival_lag_1367() {
         "the pure budgeted latch floor (parity-lifted with the N==1 block)",
     );
 }
+
+/// design 5844353368 (the sticky content floor): the present-tail latch helper runs the sticky
+/// track FIRST, fed by the audio hold mode (timecode = the source's genlocked audio flows), and
+/// hands its floor to the latch, which never latches under it (none on the min-latency marker).
+/// The floor is in-process source state that no relock, flush or pin change clears; the latch line
+/// names it.
+#[test]
+fn the_latch_never_goes_under_the_sticky_content_floor_1367() {
+    let src = squished();
+    let latch = body(&src, "static void genlock_shallow_latch(");
+    let sticky = latch
+        .find("const uint64_t sticky_floor = genlock_n1_shallow_sticky_track(")
+        .expect("issue 1367: the latch helper no longer runs the sticky content floor");
+    let track = latch
+        .find("genlock_n1_shallow_track(")
+        .expect("issue 1367: the latch helper no longer runs the tracker");
+    assert!(
+        sticky < track,
+        "issue 1367: the sticky floor must be updated BEFORE the tracker latches on it"
+    );
+    for (needle, why) in [
+        (
+            "source->genlock_audio_hold_mode == GENLOCK_AUDIO_HOLD_TIMECODE, genlock_min_latency_box(),",
+            "the sticky floor is observed only while the audio flows, and never on the imag marker",
+        ),
+        (
+            "genlock_n1_shallow_latch_floor_frames(source->genlock_rx_arrival_lag_ns, interval), base_frames, tick_wall);",
+            "the sticky floor observes the budgeted latch floor at the scheduled tick",
+        ),
+        (
+            "backlog_relock, sticky_floor, source->genlock_shallow_hist,",
+            "the tracker must receive the sticky floor",
+        ),
+        (
+            "\"sticky_floor_frames=%llu \"",
+            "the latch line must name the sticky floor",
+        ),
+    ] {
+        assert_in(latch, needle, why);
+    }
+    assert_in(
+        &src,
+        "const uint64_t sticky = min_latency_box ? 0 : sticky_floor_frames > sticky_limit ? sticky_limit : sticky_floor_frames;",
+        "the latch never goes under the sticky floor (limited to base + 2, never a capped latch), and ignores it on the min-latency box",
+    );
+    assert_eq!(
+        src.matches("genlock_n1_shallow_sticky_track(").count(),
+        2,
+        "issue 1367: the sticky track has exactly one call site (the present-tail latch)"
+    );
+    assert_eq!(
+        src.matches("source->genlock_shallow_sticky_frames =").count(),
+        0,
+        "issue 1367: nothing but the sticky track may write the sticky floor (a relock, a flush or \
+         a pin change must not forget the content level)"
+    );
+    let internal = squished_file(OBS_INTERNAL);
+    for field in [
+        "uint64_t genlock_shallow_sticky_frames;",
+        "uint64_t genlock_shallow_sticky_seen_ns;",
+        "uint32_t genlock_shallow_sticky_obs_ticks;",
+        "uint32_t genlock_shallow_sticky_obs_hist[GENLOCK_SHALLOW_HIST_FIELD_BINS];",
+    ] {
+        assert_in(&internal, field, "the per-source sticky floor fields");
+    }
+}

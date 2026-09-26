@@ -175,6 +175,7 @@ fn c_n1_shallow_depth_matches_the_rust_authority_1367() {
         min_latency_box: false,
         realized_frames: u64::MAX,
         backlog_relock: false,
+        sticky_floor_frames: 0,
     };
     for k in 0..110u64 {
         seq.push(t(true, k == 0, k % 11 != 5, 1 + u64::from(k % 7 == 3)));
@@ -306,6 +307,29 @@ fn c_n1_shallow_depth_matches_the_rust_authority_1367() {
             ..t(true, k == 0, true, 1)
         });
     }
+    // design 5844353368: an idle relock (latch floor 1) whose source carries a sticky content floor
+    // of 2 latches D 3 -- max(p90, sticky) + 1; the same window on the min-latency marker ignores
+    // the sticky floor (D 2); a sticky floor past the clamp (one recorded at a higher pin) is
+    // limited to base + 2, so D is the clamp base + 3 and NOT capped (review round 1).
+    for k in 0..90u64 {
+        seq.push(ShallowTick {
+            sticky_floor_frames: 2,
+            ..t(true, k == 0, true, 1)
+        });
+    }
+    for k in 0..90u64 {
+        seq.push(ShallowTick {
+            sticky_floor_frames: 3,
+            min_latency_box: true,
+            ..t(true, k == 0, true, 1)
+        });
+    }
+    for k in 0..90u64 {
+        seq.push(ShallowTick {
+            sticky_floor_frames: 9,
+            ..t(true, k == 0, true, 1)
+        });
+    }
 
     let b = |v: bool| i32::from(v);
     let mut body = String::new();
@@ -366,15 +390,16 @@ fn c_n1_shallow_depth_matches_the_rust_authority_1367() {
     // harness take minutes to compile at -O1 once the sequence passed 3000 ticks).
     let col = |f: &dyn Fn(&ShallowTick) -> String| seq.iter().map(f).collect::<Vec<_>>().join(",");
     body.push_str(&format!(
-        "    {{ static const unsigned char F[] = {{{}}};\n      static const unsigned long long FL[] = {{{}}};\n      static const unsigned long long LA[] = {{{}}};\n      static const unsigned long long BA[] = {{{}}};\n      static const unsigned long long RE[] = {{{}}};\n",
+        "    {{ static const unsigned char F[] = {{{}}};\n      static const unsigned long long FL[] = {{{}}};\n      static const unsigned long long LA[] = {{{}}};\n      static const unsigned long long BA[] = {{{}}};\n      static const unsigned long long RE[] = {{{}}};\n      static const unsigned long long ST[] = {{{}}};\n",
         col(&|x| (b(x.n1) | (b(x.relock) << 1) | (b(x.on_grid) << 2) | (b(x.deep) << 3) | (b(x.min_latency_box) << 4) | (b(x.backlog_relock) << 5)).to_string()),
         col(&|x| format!("{}ULL", x.floor_frames)),
         col(&|x| format!("{}ULL", x.latch_floor_frames)),
         col(&|x| format!("{}ULL", x.base_frames)),
         col(&|x| format!("{}ULL", x.realized_frames)),
+        col(&|x| format!("{}ULL", x.sticky_floor_frames)),
     ));
     body.push_str(&format!(
-        "      uint64_t tf = 0, fm = 0; uint32_t wt = 0, ov = 0, dt = 0, un = 0, ch = 0, qu = 0, rj = 0; uint32_t hi[4] = {{0u, 0u, 0u, 0u}}; bool me = false, ca = false;\n      for (int k = 0; k < {}; k++) {{\n        const unsigned f = F[k];\n        bool l = genlock_n1_shallow_track(&tf, &fm, &wt, &ov, &dt, &me, &ca, (f & 1u) != 0, (f & 2u) != 0, (f & 4u) != 0, FL[k], LA[k], BA[k], (f & 8u) != 0, (f & 16u) != 0, RE[k], (f & 32u) != 0, hi, &un, &ch, &qu, &rj);\n        printf(\"%d %llu %llu %u %u %u %d %d %u %u %u %u %u %u %u %u\\n\", l ? 1 : 0, (unsigned long long)tf, (unsigned long long)fm, (unsigned)wt, (unsigned)ov, (unsigned)dt, me ? 1 : 0, ca ? 1 : 0, (unsigned)un, (unsigned)ch, (unsigned)qu, (unsigned)rj, (unsigned)hi[0], (unsigned)hi[1], (unsigned)hi[2], (unsigned)hi[3]);\n      }}\n    }}\n",
+        "      uint64_t tf = 0, fm = 0; uint32_t wt = 0, ov = 0, dt = 0, un = 0, ch = 0, qu = 0, rj = 0; uint32_t hi[4] = {{0u, 0u, 0u, 0u}}; bool me = false, ca = false;\n      for (int k = 0; k < {}; k++) {{\n        const unsigned f = F[k];\n        bool l = genlock_n1_shallow_track(&tf, &fm, &wt, &ov, &dt, &me, &ca, (f & 1u) != 0, (f & 2u) != 0, (f & 4u) != 0, FL[k], LA[k], BA[k], (f & 8u) != 0, (f & 16u) != 0, RE[k], (f & 32u) != 0, ST[k], hi, &un, &ch, &qu, &rj);\n        printf(\"%d %llu %llu %u %u %u %d %d %u %u %u %u %u %u %u %u\\n\", l ? 1 : 0, (unsigned long long)tf, (unsigned long long)fm, (unsigned)wt, (unsigned)ov, (unsigned)dt, me ? 1 : 0, ca ? 1 : 0, (unsigned)un, (unsigned)ch, (unsigned)qu, (unsigned)rj, (unsigned)hi[0], (unsigned)hi[1], (unsigned)hi[2], (unsigned)hi[3]);\n      }}\n    }}\n",
         seq.len()
     ));
     let c_out = compile_and_run_n1_block("genlock_n1_shallow_parity_1367", &body);
@@ -472,7 +497,9 @@ fn c_n1_shallow_depth_matches_the_rust_authority_1367() {
     // the bounded rejects' clamp (4), the whole-window transient's clamp (4) and its re-measure once
     // the floor fell (3), the unreachable D's re-measure (3) and the relock storm's (3); then
     // (ROZHODNUTÉ 5842640404) the budgeted idle latch (3) and the rise past the budget (the clamp, 4),
-    // then (ROZHODNUTÉ 5842848307) the min-latency box's raw-floor latch (2, governed).
+    // then (ROZHODNUTÉ 5842848307) the min-latency box's raw-floor latch (2, governed), then (design
+    // 5844353368) the sticky floor's idle latch (3), the marker ignoring it (2) and its limit (4,
+    // uncapped).
     assert!(
         fired.0 > 0 && fired.0 < sheds.len(),
         "shed vectors one-sided: {fired:?}"
@@ -488,7 +515,12 @@ fn c_n1_shallow_depth_matches_the_rust_authority_1367() {
     );
     assert_eq!(
         latched,
-        vec![3, 3, 4, 2, 31, 31, 2, 0, 2, 2, 2, 4, 4, 3, 3, 3, 3, 4, 2],
+        vec![3, 3, 4, 2, 31, 31, 2, 0, 2, 2, 2, 4, 4, 3, 3, 3, 3, 4, 2, 3, 2, 4],
         "the track sequence latched {latched:?}"
+    );
+    assert!(
+        !s.capped,
+        "review round 1: a sticky floor alone must never cap a latch (the capped fell watch would \
+         re-measure it every window until the floor decayed)"
     );
 }
