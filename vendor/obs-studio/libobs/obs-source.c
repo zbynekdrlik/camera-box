@@ -5554,8 +5554,9 @@ static inline uint64_t genlock_phase_pin_deadline(uint64_t deadline_ns, uint64_t
 #define GENLOCK_N1_DEEP_MARGIN_FRAMES 2ULL
 /* camera-box issue 1367 (review round 3): the N==1 rule acts only while the render tick's scheduled
  * instant is within this many ns of a grid point -- the render tick's own per-tick slew clamp
- * (GENLOCK_MAX_SLEW_NS, obs-video.c). After a wall-clock step the ticks sit off the grid by the
- * step until the slew pulls them back, and a depth read there is wrong by up to the step. Mirror:
+ * (GENLOCK_MAX_SLEW_NS, obs-video.c). After a wall-clock step the ticks sit off the grid until the
+ * render tick re-grids (one tick since issue 1372, kept pending while a sleep misses it; the 2 ms
+ * slew before it), and a depth read there is wrong by up to the step. Mirror:
  * src/genlock_n1_depth.rs N1_ON_GRID_NS. */
 #define GENLOCK_N1_ON_GRID_NS 2000000ULL /* 2 ms */
 /* camera-box issue 1367 (ROZHODNUTÉ 5827497952): the SHALLOW per-lock depth -- the on-grid present
@@ -6227,8 +6228,9 @@ static bool genlock_should_drain_one(const obs_source_t *source, uint32_t reserv
  * source acts: floor_frames + 2 <= base, floor = wall - newest queued stamp (a shallow cg feed /
  * imag camera is decided by its ARRIVAL, not its pin, and stays byte-identical). Both halves act
  * only while the scheduled tick is ON the grid (genlock_n1_tick_on_grid, review round 3): a
- * wall-clock step leaves the ticks off the grid by the step and the render tick slews back 2 ms per
- * tick, so a read there would shed a frame after a forward step and hold one once back on the grid.
+ * wall-clock step leaves the ticks off the grid until the render tick re-grids (one tick since issue
+ * 1372; a 2 ms-per-tick slew before it), so a read there would shed a frame after a forward step and
+ * hold one once back on the grid.
  * A normal or caught-up late tick is scheduled on its slot, or at most GENLOCK_MAX_SLEW_NS after it
  * (a tick that overran the next grid point by under 2 ms sleeps to that slot + the clamped 2 ms),
  * so it is on the grid; at that +2 ms edge the wall/monotonic read order can defer one tick. */

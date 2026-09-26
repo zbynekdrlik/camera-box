@@ -412,7 +412,7 @@ pub const GENLOCK_QPC_WALL_STEPS_PER_WINDOW: i64 = 1;
 /// [`qpc_drift_beyond_bound`]; a jump within the bound never degrades, so it is not booked either.
 ///
 /// Byte-for-byte mirror of `genlock_qpc_wall_step_rebase_ms` in `GenlockLockState.hpp` — the parity
-/// gate `tests/genlock_lock_state_parity.rs` lifts that function too.
+/// gate `tests/genlock_qpc_wall_step_parity_1372.rs` lifts that function.
 pub fn qpc_wall_step_rebase_ms(
     jump_ms: i64,
     step_bound_ms: i64,
@@ -1465,56 +1465,5 @@ mod tests {
         assert_eq!(MediaDiscipline::ReadFailed.code(), 3);
         assert_eq!(MediaDiscipline::ApiMissing.code(), 4);
         assert_eq!(MediaDiscipline::NotApplicable.code(), 5);
-    }
-
-    // ---- issue 1372: a booked fleet date step re-baselines the qpc history, no DEGRADED ----
-
-    #[test]
-    fn the_logged_date_step_is_booked_1372() {
-        // live 25.9.2026 23:17:07 UTC: −51 ms against the media clock
-        assert_eq!(
-            qpc_wall_step_rebase_ms(
-                -51,
-                GENLOCK_QPC_STEP_BOUND_MS,
-                GENLOCK_QPC_WALL_STEP_BOOK_MAX_MS,
-                0,
-                GENLOCK_QPC_WALL_STEPS_PER_WINDOW
-            ),
-            -51
-        );
-        assert_eq!(
-            qpc_wall_step_rebase_ms(
-                51,
-                GENLOCK_QPC_STEP_BOUND_MS,
-                GENLOCK_QPC_WALL_STEP_BOOK_MAX_MS,
-                0,
-                GENLOCK_QPC_WALL_STEPS_PER_WINDOW
-            ),
-            51
-        );
-    }
-
-    #[test]
-    fn a_sub_bound_jump_is_not_booked_it_never_degrades_1372() {
-        for j in [-33, -1, 0, 1, 33] {
-            assert_eq!(qpc_wall_step_rebase_ms(j, 33, 66, 0, 1), 0, "jump {j}");
-        }
-        assert_eq!(qpc_wall_step_rebase_ms(34, 33, 66, 0, 1), 34);
-    }
-
-    #[test]
-    fn a_clock_set_and_a_step_storm_still_degrade_1372() {
-        // a jump beyond the book limit stays in the history: two frames is the most a date
-        // step can be; a 67..200 ms jump (an NTP-fallback / second-writer step) still degrades
-        assert_eq!(qpc_wall_step_rebase_ms(66, 33, 66, 0, 1), 66);
-        assert_eq!(qpc_wall_step_rebase_ms(67, 33, 66, 0, 1), 0);
-        assert_eq!(qpc_wall_step_rebase_ms(-120, 33, 66, 0, 1), 0);
-        assert_eq!(qpc_wall_step_rebase_ms(-3_600_000, 33, 66, 0, 1), 0);
-        assert!(qpc_drift_beyond_bound(false, 0, 0, 67, 33).beyond_bound);
-        // a second step inside the window stays in the history
-        assert_eq!(qpc_wall_step_rebase_ms(-51, 33, 66, 1, 1), 0);
-        assert!(qpc_drift_beyond_bound(false, 0, 0, 51, 33).beyond_bound);
-        // the extreme jump saturates, never wraps into a bookable magnitude
-        assert_eq!(qpc_wall_step_rebase_ms(i64::MIN, 33, 66, 0, 1), 0);
     }
 }

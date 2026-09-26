@@ -10,6 +10,10 @@
 //! Kept in its own file (the review of the first cut: `genlock_lock_state_parity.rs` was already
 //! past the file budget). FAILS LOUDLY rather than skipping if the C toolchain is missing.
 
+use camera_box::genlock_lock_state::{
+    qpc_drift_beyond_bound, qpc_wall_step_rebase_ms, GENLOCK_QPC_STEP_BOUND_MS,
+    GENLOCK_QPC_WALL_STEPS_PER_WINDOW, GENLOCK_QPC_WALL_STEP_BOOK_MAX_MS,
+};
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
@@ -41,10 +45,6 @@ fn lift_qpc_wall_step_rebase() -> String {
 
 #[test]
 fn c_qpc_wall_step_rebase_matches_the_rust_authority_1372() {
-    use camera_box::genlock_lock_state::{
-        qpc_wall_step_rebase_ms, GENLOCK_QPC_STEP_BOUND_MS, GENLOCK_QPC_WALL_STEPS_PER_WINDOW,
-        GENLOCK_QPC_WALL_STEP_BOOK_MAX_MS,
-    };
     let block = lift_qpc_wall_step_rebase();
     let (sb, bm, spw) = (
         GENLOCK_QPC_STEP_BOUND_MS,
@@ -150,4 +150,55 @@ fn c_qpc_wall_step_rebase_matches_the_rust_authority_1372() {
     // The vectors must reach every branch: a booked step, a sub-bound jump, a clock set and a storm.
     let r = |j, b| qpc_wall_step_rebase_ms(j, sb, bm, b, spw);
     assert!(r(-51, 0) == -51 && r(33, 0) == 0 && r(67, 0) == 0 && r(-51, 1) == 0);
+}
+
+// ---- the Rust authority's own behaviour (moved here from src/genlock_lock_state.rs) ----
+
+#[test]
+fn the_logged_date_step_is_booked_1372() {
+    // live 25.9.2026 23:17:07 UTC: −51 ms against the media clock
+    assert_eq!(
+        qpc_wall_step_rebase_ms(
+            -51,
+            GENLOCK_QPC_STEP_BOUND_MS,
+            GENLOCK_QPC_WALL_STEP_BOOK_MAX_MS,
+            0,
+            GENLOCK_QPC_WALL_STEPS_PER_WINDOW
+        ),
+        -51
+    );
+    assert_eq!(
+        qpc_wall_step_rebase_ms(
+            51,
+            GENLOCK_QPC_STEP_BOUND_MS,
+            GENLOCK_QPC_WALL_STEP_BOOK_MAX_MS,
+            0,
+            GENLOCK_QPC_WALL_STEPS_PER_WINDOW
+        ),
+        51
+    );
+}
+
+#[test]
+fn a_sub_bound_jump_is_not_booked_it_never_degrades_1372() {
+    for j in [-33, -1, 0, 1, 33] {
+        assert_eq!(qpc_wall_step_rebase_ms(j, 33, 66, 0, 1), 0, "jump {j}");
+    }
+    assert_eq!(qpc_wall_step_rebase_ms(34, 33, 66, 0, 1), 34);
+}
+
+#[test]
+fn a_clock_set_and_a_step_storm_still_degrade_1372() {
+    // a jump beyond the book limit stays in the history: two frames is the most a date
+    // step can be; a 67..200 ms jump (an NTP-fallback / second-writer step) still degrades
+    assert_eq!(qpc_wall_step_rebase_ms(66, 33, 66, 0, 1), 66);
+    assert_eq!(qpc_wall_step_rebase_ms(67, 33, 66, 0, 1), 0);
+    assert_eq!(qpc_wall_step_rebase_ms(-120, 33, 66, 0, 1), 0);
+    assert_eq!(qpc_wall_step_rebase_ms(-3_600_000, 33, 66, 0, 1), 0);
+    assert!(qpc_drift_beyond_bound(false, 0, 0, 67, 33).beyond_bound);
+    // a second step inside the window stays in the history
+    assert_eq!(qpc_wall_step_rebase_ms(-51, 33, 66, 1, 1), 0);
+    assert!(qpc_drift_beyond_bound(false, 0, 0, 51, 33).beyond_bound);
+    // the extreme jump saturates, never wraps into a bookable magnitude
+    assert_eq!(qpc_wall_step_rebase_ms(i64::MIN, 33, 66, 0, 1), 0);
 }

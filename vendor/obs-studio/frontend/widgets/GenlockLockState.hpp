@@ -240,7 +240,7 @@ static inline int genlock_qpc_drift_beyond_bound(int rate_ready, long long drift
  * clock set, not a date correction) and a second step inside the qpc window (a step storm). Returns
  * the jump to re-baseline by, or 0 to leave it in the history (a sub-bound jump never degrades
  * anyway). Mirror of camera_box::genlock_lock_state::qpc_wall_step_rebase_ms; the parity gate
- * tests/genlock_lock_state_parity.rs lifts this function too. */
+ * tests/genlock_qpc_wall_step_parity_1372.rs lifts this function. */
 static inline int64_t genlock_qpc_wall_step_rebase_ms(int64_t jump_ms, int64_t step_bound_ms, int64_t book_max_ms,
 						      int64_t booked_in_window, int64_t steps_per_window)
 {

@@ -134,6 +134,8 @@ private:
 		int discipline = 0;   /* genlock_media_discipline_t */
 	};
 	GenlockMediaClockTick ReduceGenlockMediaClock(qint64 now_ms, bool clock_present);
+	/* camera-box issue 1372: book a fleet date step out of genlockQpcHistory (before the push). */
+	void BookGenlockWallStep(qint64 now_ms, int64_t qpc_signed_ms);
 
 	void UpdateGenlockLabel();
 	void PollGenlockClock();

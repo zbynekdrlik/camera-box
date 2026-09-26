@@ -244,11 +244,19 @@ fn qpc_drift_books_a_fleet_date_step_1372() {
         "\"genlock-wall-step: the wall clock stepped %lld ms",
     );
     assert_has(STATUSBAR_HPP, "std::deque<qint64> genlockQpcBookedSteps;");
+    assert_has(
+        STATUSBAR_HPP,
+        "void BookGenlockWallStep(qint64 now_ms, int64_t qpc_signed_ms);",
+    );
+    assert_has(
+        STATUSBAR_CPP,
+        "void OBSBasicStatusBar::BookGenlockWallStep(qint64 now_ms, int64_t qpc_signed_ms)",
+    );
     // the booking runs BEFORE this tick's sample joins the history (the jump is new vs back())
     let src = squish(&vendor_file(STATUSBAR_CPP));
     let book = src
-        .find("const int64_t rebase = genlock_qpc_wall_step_rebase_ms(")
-        .expect("booking call present");
+        .find("BookGenlockWallStep(now_ms, scan.qpc_signed_ms); genlockQpcHistory.emplace_back(now_ms, scan.qpc_signed_ms);")
+        .expect("the booking call right before the history push");
     let push = src
         .find("genlockQpcHistory.emplace_back(now_ms, scan.qpc_signed_ms);")
         .expect("history push present");
