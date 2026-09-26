@@ -138,6 +138,12 @@ failed on today's arithmetic and the GREEN one passes.
   does see is the pin: over pins 950–1024 ms (2 h each) production holds ONE state per pin
   (30 / 31 / 32 frames, 0 flips, 0 drains) while the 1970 grid flips ~20/h at every one. Four
   more seeds: 1970 22.6–30.3/h, production 0.34–0.67/h.
+- **Never read the port's `resyncs` counter as a pathology.** `Fifo::tick` locks the next boundary at
+  `presented + CANVAS_INTERVAL_NS` (33 333 333 ns, the C `+ interval`), but per-second stamps step
+  33 333 300 / 33 333 400 ns, so every third frame lands 67 ns past the lock and takes the GAP RESYNC
+  branch with a normal one-frame release (~10/s with or without any disturbance). A consumer that
+  needs a viewer-visible cost (the issue-1372 wall-step bench's receiver arm) counts held ticks,
+  backward presents and skipped slots from `presented` / `presented_now` instead.
 - **The two tail rates are the only calibrated knobs** (sender late-render 300 ppm/frame,
   receiver late ticks 1000 ppm/tick): the design measured the correlation, not a per-frame rate.
   Do not tune them to make a new change pass — change them only from new rig measurements.
