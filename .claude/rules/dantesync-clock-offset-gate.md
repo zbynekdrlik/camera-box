@@ -264,10 +264,23 @@ The rules:
     update the last step. On the rig's drift this does not happen; if it ever did, the 26 h rule
     would read OUT for up to a day.
 - **Parity traps fixed in review round 1** (both have table rows):
-  - A window before 1970 is `unknown` on both twins. Python refuses a negative epoch; the bash
-    regex refuses it.
+  - A window before 1970 is `unknown` on both twins. Python refuses a negative epoch. The bash
+    shape regex accepts 1969, but the epoch check then refuses the negative second GNU `date`
+    returns.
   - A JSON `-0` last step is the integer 0 on both twins, which reads stale. python's json reads
     it as 0, so bash maps `-0` to 0.
+- **Review round 2 hardening:**
+  - The daily verdict validates the MARGIN itself, since `date_master_check` hands it straight over.
+    An unreadable margin is `unknown`, and the line names `margin=<x>us unreadable`; bash
+    arithmetic never prints errors.
+  - A typo in `DANTESYNC_DATE_DAILY_BOUND_MS` makes the gate read the master UNKNOWN (11), never a
+    false DRIFT of a day's drift on the bare bound. The gate's `date_bound_unread` /
+    `date_bound_forced` flags force the date check to run and name the bound.
+    `date_master_daily_bound_us` is the one public reader of that bound.
+  - An unknown-mode master's median note says `date_correction_mode=<x> is unknown`, never
+    "daily mode".
+  - A past window names how old it is. Within `DATE_DAILY_WINDOW_S` (1800 s) it reads "is open and
+    has not stepped yet"; older, "is N s in the past: the nightly scheduler did not advance".
 - **Process: the pin bump comes before the roll.** The pin is 1.12.0 before the fleet is rolled. So
   the version gate names every 1.11.1 node, and every E2E refuses until the roll. The order:
   1. canary-first roll with `dantesync-fleet-upgrade.sh`;
