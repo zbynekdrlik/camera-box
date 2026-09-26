@@ -157,8 +157,9 @@ Grading 1.11.0 on the step bound would let a master that stopped correcting read
   - `step-unread:<us>`: no `date_authority` at all (empty, unreachable, not JSON, a pre-1.9.0 blob).
     The step bound + margin too, NAMED by the note (`no readable /status: micro-corrections not
     graded, the looser step bound`). Never a silent loosening.
-  - `none`: an ordinary line (not date-authority), or an unreadable step (up to 15 digits) or
-    margin. STATUS is not read.
+  - `none`: an ordinary line (not date-authority), or a step or margin that is not a plain integer
+    of at most 15 digits (bash integer arithmetic would wrap past that; both twins cap it). STATUS
+    is not read.
 
   `dantesync_journal_date_note` is the ONE printed text for that grade, so the bound a consumer
   prints is the bound that was graded. Wiring:
