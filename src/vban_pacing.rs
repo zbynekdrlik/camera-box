@@ -497,6 +497,37 @@ mod tests {
     }
 
     #[test]
+    fn a_large_retarget_down_during_a_dip_never_drops_below_the_new_target() {
+        // Review round 2: 200 -> 20 ms is a 180 ms pending drop. Taken from a 62.5 ms dip it
+        // would leave less than a packet and underflow; it drops only down to the new target.
+        let mut p = started(200, 15_000);
+        p.retarget(20);
+        assert_eq!(p.pending_trim_samples, 8_640);
+        let s = p.step(p.deadline_ns(p.n_sent), 3_000);
+        // 3000 - 960 = 2040 above the new target, whole packets: 8 x 239 = 1912.
+        assert_eq!(s.drop_samples, 1_912);
+        assert_eq!(s.send, 1);
+        assert_eq!(p.underflows, 0);
+        assert_eq!(p.trims, 1);
+    }
+
+    #[test]
+    fn a_trim_never_takes_more_than_is_buffered_above_the_target() {
+        // The window saw 11761 at its minimum; the wake that closes it sees only 5000. The trim
+        // stops at the target (5000 - 3072 = 1928 -> 8 whole packets), never wraps or underflows.
+        let mut p = started(64, 12_000);
+        let close = p.t0_ns + TRIM_WINDOW_NS;
+        let mut now = p.deadline_ns(p.n_sent);
+        while now < close {
+            now = p.step(now, 12_000).wake_ns;
+        }
+        let s = p.step(now, 5_000);
+        assert_eq!(s.drop_samples, 1_912);
+        assert_eq!(p.trims, 1);
+        assert_eq!(p.underflows, 0);
+    }
+
+    #[test]
     fn other_rates_and_packet_sizes() {
         let p = Pacing::new(19, 256, 44_100);
         assert_eq!(p.target_ms, 20);

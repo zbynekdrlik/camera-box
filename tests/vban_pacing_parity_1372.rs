@@ -227,6 +227,24 @@ fn trim_and_retarget_script() -> Script {
     while next < until {
         next = bld.wake(next, on, None).wake_ns;
     }
+    // A window closing on a wake that sees LESS than the window minimum: the trim stops at the
+    // target (review round 2).
+    loop {
+        let p = &bld.p;
+        let closes_high = p.win_open
+            && next >= p.win_start_ns + TRIM_WINDOW_NS
+            && p.win_min_samples > p.trim_threshold_samples;
+        if closes_high {
+            break;
+        }
+        next = bld.wake(next, 12_000, None).wake_ns;
+    }
+    next = bld.wake(next, 5_000, None).wake_ns;
+    // A large retarget down during a dip: dropped only down to the new target.
+    next = bld.wake(next, 9_000, Some(200)).wake_ns;
+    next = bld.wake(next, 12_000, None).wake_ns;
+    next = bld.wake(next, 3_000, Some(20)).wake_ns;
+    bld.wake(next, 3_000, None);
     bld.script(64, 239, 48_000)
 }
 
