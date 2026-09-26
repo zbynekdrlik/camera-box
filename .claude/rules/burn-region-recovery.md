@@ -8,6 +8,8 @@ paths:
   - "vendor/distroav/src/burn-geom.hpp"
   - "tests/burn_reframed_fixture_decode_1370.rs"
   - "tests/burn_regions_cpp_parity_1370.rs"
+  - "src/probe/burn_echo.rs"
+  - "tests/burn_echo_fixture_decode_1367.rs"
 ---
 
 # Burn-isolated slot recovery — a crisp node burn decodes whatever the camera shows (issue 1370)
@@ -89,3 +91,48 @@ test crate, with stub `image`/`tracing` rlibs shaped like the used API. Measured
 the issue-1370 lane: across every pixel proof of run 68573319 (65 frames), the 1x slot crops read
 all 13 burns the production decode had missed. (That is a sample; the run's 280 slots are proven
 fixed only by a post-merge E2E whose BURN-UNREADABLE count drops.)
+
+## The echo gate — a node burn counts only in its own slot (issue 1367)
+
+A camera that films a monitor showing OBS captures decodable copies of node burns. On run
+386740541 cam2 filmed the strih-lx HDMI multiview, and its Preview, Program and camera cells held
+burns, cam2's own among them. rqrr reads them like any QR.
+- The echoes put stale ids into cam2's contiguity (copies/gaps 145/151 and 51/53).
+- On frame 1521 an echo of strih's burn and one of cam3's burn satisfied the fast-path gate, so
+  the real burns were never read. The unpinned optical-short check was fooled the same way: two
+  cam2 ids (the real one and an echo) looked like a complete dual-QR.
+
+The gate:
+- `burn_regions::node_burn_in_own_slot(run_id, cx, cy, w, h)` is the pure predicate. A slotted
+  run_id counts only when its detected centre is inside its own `recovery_crop` (slot + pad,
+  half-open). An unslotted id (optical, aux 911013, SongPlayer 911014) always counts. A frame with
+  no room for the slot never counts a slotted read.
+- rqrr reads keep their grid centre (`probe::burn_echo::LocatedPayload`, the mean of the four
+  `bounds`). Each pass maps its reads back to frame pixels with its crop offset and resize scale:
+  tiles use `tw / tile.width()`, the 2x slot look uses 1/2.
+- `qr::decode_qr_luma_all_fast_then_robust_gated` is the one decode core. `NodeBurnGate::OwnSlot`
+  gates EVERY pass before it merges: full frame, top band, tiles and slot crops. So an echo never
+  reaches the optical-short check, the fast-path gate or the missing-burn list.
+- The grouped decode (the strih/stream camera chain) runs `OwnSlot`. The single-group
+  `decode_qr_luma_all_fast_then_robust[_pathed]` (imag, cg, the cam1 grab, the diagnostic tools,
+  and the synthetic latency tests that draw burns anywhere) runs `Off`, byte-identical to before.
+- The slot-crop pass also gates, but its crop IS the acceptance region, so for the slot's own ids
+  it can never reject. It is there so that no pass admits an echo, by construction.
+- Report-only count: distinct echoes per frame, summed per process
+  (`burn_echo::burn_echo_rejection_count`). The partial carries `burn_echoes_rejected` (additive,
+  no schema bump). The verdict writes `burn_echoes_rejected: {strih, stream,
+  gates_overall_pass: false}`, null when not carried.
+
+Rules for a future change here:
+- A synthetic decode test that goes through the GROUPED decode must draw every node burn at its
+  real slot (`qr::cam1_burn_origin` for a camera burn, `slot_rect` for a corner). A camera burn
+  drawn in a corner is an echo now. `grouped_gate_fast_path_when_deployed_camera_is_cam3_not_cam1`
+  was moved to the camera slot for exactly this reason.
+- Before changing the slot geometry or the pad, re-run the fixture sweep. Every real decode
+  fixture (20 frames: burn-reframed-1370, burn-unreadable incl. two 4K, optical-soft, the #754
+  sweep frame, qr-align-moire-1239, tear-781) had ZERO slotted reads outside its own slot. The
+  sweep uses the real rqrr harness, with the grid centre printed from `bounds`, over the
+  production regions (full, top band, halves, tiles, slot crops).
+- A frame's echoes can hold the CURRENT id if a monitor shows the program with no delay. The echo
+  list then has an identity that also counts from the slot. That is harmless: the count is a
+  diagnostic, and the slot read is the burn.
