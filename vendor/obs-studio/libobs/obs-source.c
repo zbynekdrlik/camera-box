@@ -6451,7 +6451,9 @@ static inline bool genlock_n1_shallow_watch(uint64_t target_frames, bool capped,
  * histogram (cleared on its first sample, so the rearm stays a five-field reset); the latch reads its
  * p90, a non-deep window with a p90 - p10 spread over one frame re-measures (bounded), and D is
  * clamped. ROZHODNUTÉ 5842640404: the histogram bins latch_floor_frames (the budgeted receive-lag
- * floor), floor_frames (the raw tick floor) feeds the window max and the rise / fell watch. */
+ * floor), floor_frames (the raw tick floor) feeds the window max and the rise / fell watch.
+ * ROZHODNUTÉ 5842848307: on a min-latency (imag) box the histogram bins the raw floor too -- at a
+ * 60p canvas the budget is ~90 % of a frame and every input would ask for more than base + 1. */
 static inline bool genlock_n1_shallow_track(uint64_t *target_frames, uint64_t *floor_max_frames,
 					    uint32_t *window_ticks, uint32_t *over_ticks, uint32_t *deep_ticks,
 					    bool *measuring, bool *capped,
@@ -6498,8 +6500,9 @@ static inline bool genlock_n1_shallow_track(uint64_t *target_frames, uint64_t *f
 	if (floor_frames > *floor_max_frames)
 		*floor_max_frames = floor_frames;
 	/* ROZHODNUTÉ 5842640404: the histogram reads the budgeted receive-lag floor; the watch and the
-	 * window max read the raw tick floor. */
-	const uint32_t bin = genlock_n1_shallow_hist_bin(latch_floor_frames, base_frames);
+	 * window max read the raw tick floor. ROZHODNUTÉ 5842848307: a min-latency (imag) box keeps the
+	 * RAW floor there too -- no budget frame. */
+	const uint32_t bin = genlock_n1_shallow_hist_bin(min_latency_box ? floor_frames : latch_floor_frames, base_frames);
 	if (hist[bin] < UINT32_MAX)
 		hist[bin] += 1u;
 	if (*window_ticks < UINT32_MAX)

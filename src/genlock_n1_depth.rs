@@ -354,7 +354,7 @@ pub struct ShallowTick {
     /// issue 1367 (ROZHODNUTÉ 5842640404) — the LATCH floor, frames: the newest received frame's
     /// receive-time arrival lag plus the arrival-jitter budget
     /// ([`n1_shallow_latch_floor_frames`]). Only the window histogram (the p90 latch + the spread
-    /// reject) reads it.
+    /// reject) reads it, and not on a min-latency box (ROZHODNUTÉ 5842848307: raw floor there).
     pub latch_floor_frames: u64,
     /// The pin-derived base, frames ([`n1_base_frames`]).
     pub base_frames: u64,
@@ -525,7 +525,9 @@ pub fn n1_shallow_watch(s: &mut ShallowDepth, t: &ShallowTick) -> bool {
 /// ROZHODNUTÉ 5842640404: the histogram bins the BUDGETED latch floor
 /// ([`ShallowTick::latch_floor_frames`], [`n1_shallow_latch_floor_frames`]); the rise / fell watch
 /// and `floor_max_frames` keep the raw tick floor, so a content-dependent arrival rise inside the
-/// arrival-jitter budget never re-measures.
+/// arrival-jitter budget never re-measures. ROZHODNUTÉ 5842848307: on a min-latency (imag) box the
+/// histogram bins the RAW floor (no budget): at a 60p canvas the 15 ms budget is ~90 % of a frame and
+/// would ask every input for more than base + 1, which that box only reports (capped).
 ///
 /// Design 5830750134 (the latch never latches an outlier): the window's floors go into a histogram
 /// relative to base ([`n1_shallow_hist_bin`], cleared on the window's first sample) and the latch
@@ -560,8 +562,14 @@ pub fn n1_shallow_track(s: &mut ShallowDepth, t: ShallowTick) -> bool {
     }
     s.floor_max_frames = s.floor_max_frames.max(t.floor_frames);
     // ROZHODNUTÉ 5842640404: the histogram (the p90 latch and the spread reject) reads the budgeted
-    // receive-lag floor; the watch above and floor_max read the raw tick floor.
-    let bin = n1_shallow_hist_bin(t.latch_floor_frames, t.base_frames);
+    // receive-lag floor; the watch above and floor_max read the raw tick floor. ROZHODNUTÉ
+    // 5842848307: a min-latency (imag) box keeps the RAW floor there too -- no budget frame.
+    let hist_floor = if t.min_latency_box {
+        t.floor_frames
+    } else {
+        t.latch_floor_frames
+    };
+    let bin = n1_shallow_hist_bin(hist_floor, t.base_frames);
     s.hist[bin] = s.hist[bin].saturating_add(1);
     s.window_ticks = s.window_ticks.saturating_add(1);
     if t.deep {
