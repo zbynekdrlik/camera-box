@@ -56,9 +56,7 @@ pub const BLOCKING_CHECKS: [&str; 2] = ["node_burn_contiguity", "node_burn_hold"
 /// [`crate::tear_detect::TearStats::multi_path_suspect_fraction`]. Strictly ABOVE the ceiling, so a
 /// window sitting exactly on it stays single-source; NaN reads single-source (fail-closed).
 pub fn window_is_multi_source(multi_path_suspect_fraction: f64) -> bool {
-    let _ = multi_path_suspect_fraction;
-    let _ = MULTI_PATH_SUSPECT_CEILING;
-    false
+    multi_path_suspect_fraction > MULTI_PATH_SUSPECT_CEILING
 }
 
 /// Which per-window checks gate a window's verdict.
