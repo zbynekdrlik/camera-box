@@ -2,6 +2,7 @@
 paths:
   - "vendor/av-sync-dock/src/sync-test-output.cpp"
   - "vendor/av-sync-dock/src/camera-box-decode-mailbox.hpp"
+  - "vendor/av-sync-dock/src/camera-box-frame-copy.hpp"
   - "vendor/av-sync-dock/test/decode-mailbox-selftest.cpp"
   - "tests/av_sync_dock_decode_mailbox_1367.rs"
 ---
@@ -28,18 +29,36 @@ like a genlock problem and was not one.
 - **`raw_video` does bounded copying only**: pixel extraction into a reused buffer, plus the frame
   timestamp. It never runs quirc, a marker search, a signal emit, a log line per frame, or any loop
   whose cost depends on the picture content.
+  - The copies are the pure functions in `camera-box-frame-copy.hpp`: the top band (a row
+    `memcpy` for 8-bit planar luma), norihiro's step grid, and the marker-circle patches. The
+    self-test proves each against a plain reference read, and proves that every pixel
+    `cb_marker_circle_row` hands the marker search lies inside the copied patch, over every frame
+    edge. A new copy goes in that header with a self-test case, never inline in the dock.
+  - What the copy still costs is measured: `publish_max_us=` on the diag line is the longest
+    `st_raw_video` since the previous line (`cb_atomic_max_u64`, reset with `exchange(0)`). A
+    4K RGBA output copies about 6 M pixels per frame on the video thread; read this value before
+    blaming anything else for output skips.
 - **The analysis runs on the dock's worker thread**, fed through the two-buffer latest-pending
   mailbox in `camera-box-decode-mailbox.hpp`:
   - the producer fills the pending buffer under the mailbox lock, and the worker swaps it with its
     working buffer, so the producer only ever waits for a pointer swap;
   - a frame published while the worker is busy REPLACES the pending one;
-  - `dropped()` counts every replaced frame, reported as `decode_dropped=` at the END of the dock
-    diag line (the existing tokens stay byte-identical; `bundle_state_gather.py` keys on
-    `locked=yes`).
+  - `dropped()` counts every replaced frame, reported as `decode_dropped=` near the END of the
+    dock diag line, before `publish_max_us=` (the existing tokens stay byte-identical;
+    `bundle_state_gather.py` keys on `locked=yes`).
+  - `video_frames=` now counts the frames the WORKER processed, so `video_decoded(%)` is a decode
+    rate per processed frame. Every frame OBS delivered is `video_frames + decode_dropped`.
+- **The worker yields to OBS**: `st_decode_worker_thread_setup` (the mailbox's `on_thread_start`)
+  names the thread `av-sync-dock: video decode` and lowers it below normal priority. On Windows
+  this is `SetThreadPriority`; `<windows.h>` comes first in the file, under `NOMINMAX` +
+  `WIN32_LEAN_AND_MEAN`, so its min/max macros never hit this file's `std::min`. On Linux it
+  raises the thread's nice by 5. On a CPU-tight box the decode therefore loses to render / video
+  output / encode instead of competing with them.
 - **Decoders take the frame's OWN timestamp from the job**, never "now", so the marker/QR timing
   is unchanged by the hand-off.
 - **Lifecycle**:
-  - the worker starts in `st_start` before `obs_output_begin_data_capture`;
+  - `st_start` first stops any worker left from a previous start (it rewrites the quirc size and
+    the video geometry the worker reads), then starts it before `obs_output_begin_data_capture`;
   - it is stopped and joined in `st_stop` (after `obs_output_end_data_capture`), in `st_destroy`,
     and FIRST in `~sync_test_output`, before `quirc_destroy` frees what it decodes with;
   - libobs disconnects the raw callbacks on its own end-capture thread, so one `raw_video` can
@@ -62,7 +81,10 @@ the emitting thread does not matter.
 Outside camera-box mode, the norihiro marker search reads four circle patches the video thread
 cut around the corners the worker published after its PREVIOUS decode. That is one frame of
 geometry lag. It is harmless because the phone's QR is stationary, and it is the price of never
-reading the full frame on the worker.
+reading the full frame on the worker. When frames are dropped, the marker search's zero-crossing
+interpolation spans the two frames the worker PROCESSED, not two adjacent frames. The phone method
+therefore loses timing precision under decode load; the camera-box path is unaffected, because it
+pairs by frame_id, not by crossing time.
 
 ## Verifying a change here (Tier-0)
 
