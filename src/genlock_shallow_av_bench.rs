@@ -85,7 +85,17 @@ struct Scenario {
     /// starve the queue, the live 25.9.2026 15:29 sp-slow_video pattern (`stamp_gap` +11 and
     /// `underruns` +7 per 5 s audit while the operator switched scenes).
     song_change: Option<(u64, u64)>,
+    /// design 5844353368: SONGS `(start_s, end_s)` on an idle feed — inside each the lag band is
+    /// `content_ms` (the playing content's decode cost), and each song END is a SongPlayer re-lock:
+    /// the sender skips [`SONG_RELOCK_GAP_NS`] of stamps (a relock gap), audio keeps flowing.
+    songs: &'static [(u64, u64)],
+    /// The content lag band `(min, max)` ms inside a song.
+    content_ms: (u64, u64),
 }
+
+/// design 5844353368: the stamp gap a SongPlayer re-lock between songs leaves (over the 1 s relock
+/// gap, so the receiver re-locks on the idle feed that follows).
+const SONG_RELOCK_GAP_NS: u64 = 1_500_000_000;
 
 impl Scenario {
     fn clean(lag_min_ms: u64, lag_max_ms: u64, want_depth: u64) -> Scenario {
@@ -101,6 +111,8 @@ impl Scenario {
             burst: None,
             legacy_append: false,
             song_change: None,
+            songs: &[],
+            content_ms: (0, 0),
         }
     }
 }
@@ -245,6 +257,15 @@ fn run(sc: Scenario) -> Run {
                 settle_until = nominal + SETTLE_S * NS_PER_S;
             }
         }
+        if sc
+            .songs
+            .iter()
+            .any(|&(a, b)| nominal == W0 + a * NS_PER_S || nominal == W0 + b * NS_PER_S)
+        {
+            // a song start (content) or its end (the re-lock): the gate reopens once settled.
+            last_depth = None;
+            settle_until = nominal + SETTLE_S * NS_PER_S;
+        }
         if !sender_back && nominal >= silent.1 {
             sender_back = true;
             resync = true;
@@ -259,13 +280,25 @@ fn run(sc: Scenario) -> Run {
             if stamp >= silent.0 && stamp < silent.1 {
                 continue;
             }
+            let song_end_gap = sc.songs.iter().any(|&(_, b)| {
+                let end = W0 + b * NS_PER_S;
+                stamp >= end && stamp < end + SONG_RELOCK_GAP_NS
+            });
+            if song_end_gap {
+                continue;
+            }
             if let Some((at_s, dur_s)) = sc.song_change {
                 if song_change_skips(stamp, at_s, dur_s) {
                     out.sc_skipped += 1;
                     continue;
                 }
             }
+            let in_song = sc
+                .songs
+                .iter()
+                .any(|&(a, b)| stamp >= W0 + a * NS_PER_S && stamp < W0 + b * NS_PER_S);
             let (lo, hi) = match sc.band_change {
+                _ if in_song => (sc.content_ms.0 * 1_000_000, sc.content_ms.1 * 1_000_000),
                 Some((at_s, lo_ms, hi_ms)) if stamp >= W0 + at_s * NS_PER_S => {
                     (lo_ms * 1_000_000, hi_ms * 1_000_000)
                 }
@@ -312,6 +345,8 @@ fn run(sc: Scenario) -> Run {
         // tail runs the tracker, then genlock_shallow_latch).
         let lock = video_delay_lock_ms(fifo.shallow.target_frames, fifo.shallow.measuring, IV_NS);
         let mut c = TickCounters::default();
+        // design 5844353368: the C latch reads the audio hold mode the audio thread set last.
+        fifo.audio_flowing = audio.mode == AudioHoldMode::Timecode;
         fifo.tick(&cfg, wall, scheduled, &mut c);
         // the sender's own 3 s silence is the event, not churn: it is outside the gate.
         let gated = nominal >= settle_until && !(nominal >= silent.0 && nominal < silent.1);
@@ -735,6 +770,52 @@ fn a_rise_past_the_budget_still_re_measures_1367() {
     assert!(
         r.max_abs_av_ms <= GATE_MAX_AV_MS,
         "|A/V| {:.2} ms",
+        r.max_abs_av_ms
+    );
+}
+
+// ---- design 5844353368: an idle re-lock never forgets the content floor --------------------------
+
+/// The live resolume 26.9.2026 sequence (log `2026-09-26 09-29-12.txt`): an idle feed (lag 8-12 ms,
+/// budgeted latch floor 1 -> D 2) plays three songs whose content lag is 40-50 ms (tick floor 2 =
+/// D, budgeted latch floor 2), and SongPlayer re-locks on idle at the end of each song. All of it
+/// before the bench's OBS restart (1200 s), which resets the in-process sticky floor.
+fn idle_songs() -> Scenario {
+    Scenario {
+        songs: &[(200, 400), (600, 800), (1000, 1150)],
+        content_ms: (40, 50),
+        ..Scenario::clean(8, 12, 2)
+    }
+}
+
+#[test]
+fn an_idle_relock_keeps_the_content_floor_and_later_song_starts_never_slew_1367() {
+    let r = run(idle_songs());
+    eprintln!("idle-songs: {r:?}");
+    // one lock at the start (2), ONE re-measure at the first song (3), the two idle re-locks keep
+    // the sticky content floor (3, 3), then the OBS restart (2) and the sender restart (2) on idle
+    // start over without it.
+    assert_eq!(r.latches, 6, "one re-measure in the OBS session: {r:?}");
+    let mut seen = r.latched.clone();
+    seen.dedup();
+    assert_eq!(seen, [2, 3, 2], "D stays 3 across the idle re-locks: {r:?}");
+    // the audio moves exactly once (onto the first song's D), never on a later song start or an
+    // idle re-lock, and never steps.
+    assert_eq!(
+        (r.slews, r.steps),
+        (1, 0),
+        "later song starts slewed the audio: {r:?}"
+    );
+    // D 3 is presented from the first song on until the OBS restart, idle and playing alike.
+    let at_3 = r.depth_hist.get(&3).copied().unwrap_or(0);
+    assert!(
+        at_3 > 25_000,
+        "idle-songs: D 3 held only {at_3} presents: {:?}",
+        r.depth_hist
+    );
+    assert!(
+        r.max_abs_av_ms <= GATE_MAX_AV_MS,
+        "idle-songs: |A/V| {:.2} ms",
         r.max_abs_av_ms
     );
 }

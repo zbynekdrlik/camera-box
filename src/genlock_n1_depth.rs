@@ -307,6 +307,12 @@ pub const N1_SHALLOW_CHURN_RELOCKS: u32 = 3;
 /// `GENLOCK_N1_SHALLOW_CHURN_QUIET_TICKS`.
 pub const N1_SHALLOW_CHURN_QUIET_TICKS: u32 = 180;
 
+/// issue 1367 (design 5844353368, the sticky content floor) — a sticky floor loses ONE frame after
+/// this much wall time with no observation at (or above) its level, so a sender that became
+/// genuinely faster recovers its shallower depth. 30 min. Mirror of the C
+/// `GENLOCK_N1_SHALLOW_STICKY_DECAY_NS`.
+pub const N1_SHALLOW_STICKY_DECAY_NS: u64 = 30 * 60 * 1_000_000_000;
+
 /// issue 1367 — the per-source shallow-depth state (the C `genlock_shallow_*` fields).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ShallowDepth {
@@ -368,6 +374,26 @@ pub struct ShallowTick {
     pub realized_frames: u64,
     /// A BACKLOG relock happened since the previous call (the C `genlock_relocks` moved).
     pub backlog_relock: bool,
+    /// issue 1367 (design 5844353368) — the source's STICKY content floor, frames
+    /// ([`n1_shallow_sticky_track`], 0 = none): a latch never goes under it. Ignored on a
+    /// min-latency box.
+    pub sticky_floor_frames: u64,
+}
+
+/// issue 1367 (design 5844353368) — the per-source STICKY content floor (the C
+/// `genlock_shallow_sticky_*` fields): the highest budgeted latch floor observed while the source's
+/// audio flows, kept across relocks (never across an OBS restart: in-process state).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ShallowSticky {
+    /// The sticky floor, frames (0 = none).
+    pub floor_frames: u64,
+    /// The scheduled tick instant of the last observation at (or above) the floor, wall ns.
+    pub seen_ns: u64,
+    /// On-grid audio-flowing ticks of the current observation block.
+    pub obs_ticks: u32,
+    /// The current observation block's latch-floor histogram, relative to base (cleared on the
+    /// block's first sample).
+    pub obs_hist: [u32; N1_SHALLOW_HIST_BINS],
 }
 
 /// issue 1367 (ROZHODNUTÉ 5842640404) — the LATCH floor of the newest received frame, frames:
@@ -515,6 +541,19 @@ pub fn n1_shallow_watch(s: &mut ShallowDepth, t: &ShallowTick) -> bool {
     s.over_ticks >= N1_SHALLOW_SETTLE_TICKS
         || s.under_ticks >= N1_SHALLOW_UNDER_TICKS
         || s.churn_relocks >= N1_SHALLOW_CHURN_RELOCKS
+}
+
+/// issue 1367 (design 5844353368) — one PRESENT tick of the STICKY content floor. RED stub: keeps
+/// nothing.
+pub fn n1_shallow_sticky_track(
+    s: &mut ShallowSticky,
+    t: &ShallowTick,
+    audio_flowing: bool,
+    tick_wall_ns: u64,
+) -> u64 {
+    let _ = (t, audio_flowing, tick_wall_ns);
+    *s = ShallowSticky::default();
+    0
 }
 
 /// issue 1367 — one PRESENT tick of the shallow-depth state ([`ShallowTick`]). An N>=2 tick clears
