@@ -88,7 +88,9 @@ DEFAULT_FLEET_FILE="$HERE/../rig-fleet.txt"
 # NO-DANTE-CLOCK alarm + clock_alarm /status field -- camera-box issue 1307).
 # Bumped 2026-09-25: fleet (13 nodes incl. mbc, fohabl, resolume) rolled to v1.9.0 (dantesync#88/#117 --
 # rate taken from the Dante PTP tick only, NTP for date steps; master publishes the date offset; issue 1372).
-DANTESYNC_VERSION_PIN="${DANTESYNC_VERSION_PIN:-1.9.0}"
+# Bumped 2026-09-26: fleet rolled to v1.10.0 (dantesync#119 -- a backward fleet date correction is slewed
+# at 100 ppm instead of stepped; a backward step lost ~44 ms of Dante audio, camera-box issue 1372).
+DANTESYNC_VERSION_PIN="${DANTESYNC_VERSION_PIN:-1.10.0}"
 
 # --- PURE functions (no network, no SSH — unit-tested by sourcing this file) ------------------
 
