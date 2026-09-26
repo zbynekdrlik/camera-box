@@ -49,8 +49,10 @@ sender) is the supervisor's rig investigation, not this code.
   window's level sum moves with it (the `shift_level_target` window rule), so the P term, the restore
   arms and the unreachable bound never read the recovery as an error. It is an INTERNAL move — it
   never goes through `shift_level_target`, which would arm the restore for ≥ 5 ms.
-- **Nothing but a confirmed step sets the term**: the #1335 corroboration (`|buffered − target| ≥
-  0.5·|r|`). A master-clock-only jump re-bases without recovery; a sub-10 ms loss never re-bases.
+- **Nothing but a confirmed step sets the term**: the #1335 corroboration, SIGNED — the level moved
+  the same way as the samples and by at least half of them (`(target − buffered)·loss > 0` and
+  `|target − buffered| ≥ 0.5·|loss|`, `loss = −r·1000`). A master-clock-only jump re-bases without
+  recovery; a sub-10 ms loss never re-bases.
   `ASRC_MAX_PPM`, the 5 ppm/s slew limit and the ±100 restore clamp are unchanged.
 - **A flush or a capture-rule change drops the owed amount** (it was booked against that capture).
 - **The corrected advance carries the term** (`raw / (1 + (applied + recover)/1e6)`), so every
@@ -58,10 +60,12 @@ sender) is the supervisor's rig investigation, not this code.
 - **The detector trusts only a narrow bracket** (≤ 100 µs): a preempted read decides nothing and does
   not move the reference; every trusted read becomes the reference, so a raw-QPC fallback's slow
   drift (< 1 µs/tick) is never summed into a step.
-- **ONE 2 ms definition**: `obs-video.c` defines `GENLOCK_MAX_SLEW_NS` as
+- **ONE 2 ms definition in the render tick**: `obs-video.c` defines `GENLOCK_MAX_SLEW_NS` as
   `((int)GENLOCK_WALL_STEP_MAX_SLEW_NS)` from the header (the `render tick ENABLED` log still prints
   it); the detector's step threshold is the same constant (pinned by
-  `render_tick_uses_the_wall_step_regrid_1372`).
+  `render_tick_uses_the_wall_step_regrid_1372`). The N==1 on-grid window `GENLOCK_N1_ON_GRID_NS`
+  (obs-source.c ↔ `src/genlock_n1_depth.rs` `N1_ON_GRID_NS`) is a SEPARATE 2 ms literal with its own
+  parity; change the two together.
 - **A re-grid stays PENDING until a tick lands on the new grid** (`genlock_wall_step_regrid_due` ↔
   `WallStepState::regrid_due`): if the render that follows the detection stalls past the re-grid
   target, `video_sleep`'s `os_sleepto_ns` fails and falls back to `cur_time + interval · count` on the
@@ -88,8 +92,14 @@ sender) is the supervisor's rig investigation, not this code.
   the Rust authority, and pins the obs-video.c wiring.
 - `tests/genlock_qpc_wall_step_parity_1372.rs` (the widget's booking, lifted from
   GenlockLockState.hpp), `tests/asrc_compensator_parity_1367.rs` (the trace carries `rec=` / `recp=`; the step
-  scenario must show a payment at −1000 ppm), `tests/genlock_lock_indicator_guards.rs` (widget wiring
-  + the two new log families mutually non-substring), the pwsh blocks in both `windows-genlock*.yml`.
+  scenario must show a payment at −1000 ppm), `tests/genlock_lock_indicator_guards.rs` (widget wiring:
+  the booking is the member `OBSBasicStatusBar::BookGenlockWallStep`, called right before the history
+  push; the two new log families mutually non-substring), the pwsh blocks in both
+  `windows-genlock*.yml`. The render-tick needles are ONE list (`RENDER_TICK_WIRING` in
+  `tests/genlock_wall_step_parity_1372.rs`) that the Rust guard AND
+  `windows_workflows_guard_the_same_render_tick_wiring_1372` check against both workflow files — review
+  round 2 found the pwsh copy still requiring the round-0 line, which would have failed both Windows
+  builds at the guard step.
 - `src/genlock_wall_step_bench.rs` (test-only): the logged step against all three. Production: 1
   off-grid tick, 0 duplicate/skipped stamps (also on a 0–30 ms emit spread, where the legacy slew
   stamps a repeat and a skip), a stalled re-grid still landing within one more tick, 0 s DEGRADED,
@@ -112,7 +122,8 @@ sender) is the supervisor's rig investigation, not this code.
 
 ## Live acceptance (supervisor, FULL bundle: libobs + frontend)
 
-At the next fleet date step: one `genlock-regrid:` and one `genlock-wall-step:` line per Windows box;
+At the next fleet date step: one `genlock-regrid:` and one `genlock-wall-step:` line per OBS box
+(the Windows boxes and strih-lx alike — a date step moves `CLOCK_REALTIME`, never `CLOCK_MONOTONIC`);
 resolume LOCK stays LOCKED; stream `mbc` `recover_ms=` > 0 on the step's `asrc:` line and `level_avg=`
 back within ±2 ms of `target=` inside a minute, `applied=` inside its steady band; strih-lx `CG-obs`
 and stream `2ME PGM` 0 new relocks at the step.

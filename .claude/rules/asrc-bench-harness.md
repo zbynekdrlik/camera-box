@@ -724,7 +724,9 @@ OBS (a real loss: `last_step_ms=-43.7`, `restore=1`, `ts_lag_ms` flat). The foll
 - **Parity:** `tests/asrc_compensator_parity_1367.rs` traces `rec=` / `recp=`; the step scenario must
   show a −1000 ppm payment AND a held window (the driver holds windows 903–905). Scratch C mutants
   (half payment, no setpoint move, half booking, hold ignored) all diverge. Unit:
-  `a_confirmed_step_books_the_measured_loss_capped_and_signed_1372`. Full contract:
+  `a_confirmed_step_books_the_measured_loss_capped_and_signed_1372` (in
+  `src/asrc_bench_step_recover_tests.rs`, a `#[path]` child of the test build so `asrc_bench.rs` stops
+  growing). Full contract:
   `genlock-wall-step.md`.
 
 ## Issue 1367 — the level loop reads the per-window MEAN, not the window-closing reading
