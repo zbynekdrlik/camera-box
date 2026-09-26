@@ -195,11 +195,14 @@ def classify_watchdogs(text, imag_retired=False, max_age_s=WD_MAX_AGE_S):
 _EXPOSURE_LINE_RE = re.compile(r"^exposure\s+state=(none|pending|restored|invalid)\b(.*)$")
 
 
-def classify_exposure(text):
+def classify_exposure(text, mode_text=""):
     """Decide the `exposure` item from the snapshot-state line.
       none / restored            -> OK
-      pending                    -> OK  (a snapshot of this development period, waiting for its EVENT
+      pending, rig in TEST       -> OK  (a snapshot of this development period, waiting for its EVENT
                                          switch -- the E2E takes it; never a false alarm)
+      pending, rig in EVENT      -> SUPERVISOR (the handover moment: the EVENT switch never restored
+                                         it, e.g. it aborted before the restore step, so no marker)
+      pending, rig mode unknown  -> UNKNOWN
       pending + restore_failed=  -> SUPERVISOR (an EVENT switch tried and did NOT restore it, so
                                          production ran on the TEST exposure)
       invalid                    -> SUPERVISOR (the owner's values are stuck in an unreadable file)
@@ -219,10 +222,15 @@ def classify_exposure(text):
     if state == "restored":
         return {"status": OK,
                 "message": "produkčná expozícia testovacej kamery bola naposledy vrátená (%s)" % detail}
-    if state == "pending" and "restore_failed=" not in detail:
+    mode = bare_token(mode_text)
+    if state == "pending" and "restore_failed=" not in detail and mode == "TEST":
         return {"status": OK,
                 "message": "produkčná expozícia testovacej kamery čaká na vrátenie pri najbližšom "
                            "`scripts/rig-mode.sh event` (%s)" % detail}
+    if state == "pending" and "restore_failed=" not in detail and mode != "EVENT":
+        return {"status": UNKNOWN,
+                "message": "čaká snímka produkčnej expozície (%s), ale rig režim sa nepodarilo "
+                           "prečítať — neoverené, či ju EVENT mal vrátiť" % detail}
     if state == "pending":
         return {"status": SUPERVISOR,
                 "message": "produkčná expozícia testovacej kamery sa pri EVENT NEVRÁTILA — "
@@ -281,7 +289,8 @@ class Item(object):
         Slovak line. `imag_retired` (issue 1316) is used only by the `watchdogs` kind."""
         if self.kind == "exposure":
             text, _rc = captures_data.get(self.captures[0], ("", RC_MISSING))
-            r = classify_exposure(text)
+            mode_text, _mrc = captures_data.get(self.captures[1], ("", RC_MISSING))
+            r = classify_exposure(text, mode_text)
             return {"key": self.key, "label": self.label, "status": r["status"],
                     "message": r["message"]}
         if self.kind == "watchdogs":
@@ -440,7 +449,9 @@ ITEMS = [
          unknown_msg="stav watchdog timerov sa nepodarilo prečítať"),
     # issue 1371: the test camera's production ISO/shutter snapshot. The "exposure" kind uses
     # classify_exposure (above): its message carries the snapshot detail (box, time, values).
-    Item("exposure", "expozícia testovacej kamery (ISO/uzávierka)", ["exposure"], "exposure",
+    # It also reads the `mode` capture: a pending snapshot is normal in TEST, but in EVENT (the
+    # handover moment) it means the EVENT switch never restored it.
+    Item("exposure", "expozícia testovacej kamery (ISO/uzávierka)", ["exposure", "mode"], "exposure",
          ok_msg="", forgot_msg="", unknown_msg=""),  # messages come from classify_exposure
 ]
 

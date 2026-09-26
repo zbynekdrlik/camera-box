@@ -456,7 +456,7 @@ _cts_restore_failed() {
   local py="$1" snap="${2:-}" reason="$3"
   CTS_RESTORE_OUTCOME=failed
   echo "::warning title=issue 1371 production exposure NOT restored::the test camera's production ISO/shutter were NOT restored ($reason) -- production would start on the TEST exposure"
-  echo "WARNING: issue 1371: the test camera's production ISO/shutter were NOT restored ($reason). Production would start on the TEST exposure. The snapshot ${snap} stays: run scripts/rig-mode.sh event again once the camera is on USB and the rig is not on air, or set the camera by hand AND move the snapshot aside: $(camera_test_settings_manual_consume_hint)." >&2
+  echo "WARNING: issue 1371: the test camera's production ISO/shutter were NOT restored ($reason). Production would start on the TEST exposure. The snapshot ${snap:-(no path)} stays: run scripts/rig-mode.sh event again once the camera is on USB and the rig is not on air, or set the camera by hand AND move the snapshot aside: $(camera_test_settings_manual_consume_hint)." >&2
   if [ -n "$snap" ] && [ -e "$snap" ]; then
     python3 "$py" restore-failed --snapshot "$snap" --reason "$reason" >/dev/null 2>&1 || true
   fi
@@ -495,7 +495,13 @@ camera_test_settings_restore() {
   fi
   echo "    pending production exposure: $CTS_RESTORE_SUMMARY"
   rc=0
-  (_cts_restore_apply "$here" "$strih" "$stream" "$pw" "$snap" "$@") || rc=$?
+  # rig-mode.sh keeps the OBS WebSocket password in OBS_WS_PASSWORD; the shared rig-busy guard
+  # reads OBS_PASSWORD. Hand it over inside the subshell only (an auth-enabled OBS would otherwise
+  # fail the guard's read and let it fail OPEN).
+  (
+    OBS_PASSWORD="${OBS_PASSWORD:-${OBS_WS_PASSWORD:-}}"
+    _cts_restore_apply "$here" "$strih" "$stream" "$pw" "$snap" "$@"
+  ) || rc=$?
   case "$rc" in
     0)
       CTS_RESTORE_OUTCOME=restored
@@ -521,22 +527,30 @@ camera_test_settings_restore() {
 
 # camera_test_settings_restore_discord_note MSG_FILE -> add the restore outcome to the EVENT
 # Discord confirmation (the owner reads THAT on the phone). A failure goes ON TOP of the message,
-# a success at the end; nothing for `none`. Never fails.
+# a success at the end; nothing for `none`. The phone line never names a command (the owner cannot
+# run it from the phone) -- the commands are in the run log. The confirmation body is never lost:
+# the prepend is written to a temp file and moved over only when complete, and a failed read or
+# write falls back to appending. Never fails.
 camera_test_settings_restore_discord_note() {
-  local msg="${1:-}" line="" body=""
+  local msg="${1:-}" line="" body="" tmp="" top=0
   [ -n "$msg" ] && [ -f "$msg" ] || return 0
   case "${CTS_RESTORE_OUTCOME:-none}" in
     restored) line="✅ Testovacia kamera: produkčná expozícia vrátená (${CTS_RESTORE_SUMMARY:-})." ;;
     already) line="✅ Testovacia kamera: produkčná expozícia už sedela (${CTS_RESTORE_SUMMARY:-})." ;;
-    restored-unconsumed) line="✅ Testovacia kamera: produkčná expozícia vrátená (${CTS_RESTORE_SUMMARY:-}), ale snímku treba odložiť ručne: $(camera_test_settings_manual_consume_hint)." ;;
+    restored-unconsumed) line="✅ Testovacia kamera: produkčná expozícia vrátená (${CTS_RESTORE_SUMMARY:-}), ale snímku treba odložiť — napíš Claudovi." ;;
     failed)
-      line="⚠️ Testovacia kamera: produkčná expozícia (ISO/uzávierka) sa NEVRÁTILA${CTS_RESTORE_SUMMARY:+ (čakala: $CTS_RESTORE_SUMMARY)} — kamera môže ostať na testovacej expozícii. Snímka ostáva: spusti scripts/rig-mode.sh event znova, keď je kamera na USB a rig nevysiela, alebo nastav kameru ručne a snímku odlož: $(camera_test_settings_manual_consume_hint)."
-      body="$(cat "$msg" 2>/dev/null)" || body=""
-      { printf '%s\n\n%s\n' "$line" "$body" >"$msg"; } 2>/dev/null || true
-      return 0
+      line="⚠️ Testovacia kamera: produkčná expozícia (ISO/uzávierka) sa NEVRÁTILA${CTS_RESTORE_SUMMARY:+ (čakala: $CTS_RESTORE_SUMMARY)} — kamera môže ostať na testovacej expozícii. Napíš Claudovi, nech ju vráti, keď je kamera na USB a rig nevysiela."
+      top=1
       ;;
     *) return 0 ;;
   esac
+  if [ "$top" -eq 1 ] && body="$(cat "$msg" 2>/dev/null)"; then
+    tmp="$msg.cts-note.$$"
+    if { printf '%s\n\n%s\n' "$line" "$body" >"$tmp"; } 2>/dev/null && mv -f "$tmp" "$msg" 2>/dev/null; then
+      return 0
+    fi
+    rm -f "$tmp" 2>/dev/null || true
+  fi
   { printf '\n%s\n' "$line" >>"$msg"; } 2>/dev/null || true
   return 0
 }

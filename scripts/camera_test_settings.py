@@ -42,8 +42,10 @@ rig-mode EVENT switch restores them, reads them back and moves the file aside as
   snapshot-path                            -> the snapshot path ($CAMERA_PROD_EXPOSURE_SNAPSHOT, else
                                               ~/.camera-box/camera-prod-exposure.json)
   snapshot --baseline F --snapshot P --box B < get-config text
-                                           -> SNAPSHOT saved|kept (written only when P is absent;
-                                              exit 6 = a value could not be restored / write failed)
+                                           -> SNAPSHOT saved|kept|extended (written only when P is
+                                              absent; a pending P only GAINS a key pinned since, never
+                                              changes a kept one; exit 6 = a value could not be
+                                              restored / an unreadable pending P / write failed)
   restore-status --snapshot P              -> the one-line Slovak summary (exit 4 = no snapshot,
                                               exit 7 = invalid snapshot)
   restore-plan   --snapshot P < get-config -> NOW/RESTORE/RESTOREARGS lines (exit 3 / 7)
@@ -333,6 +335,26 @@ def build_snapshot(current, baseline, box, taken_utc):
             "context": context}
 
 
+def extend_snapshot(doc, current, baseline):
+    """A pending snapshot only GAINS a key the baseline pins now but did not when it was taken (the
+    camera still has the owner's value for it -- the test never set that key); a kept value is never
+    changed. Returns (new doc, [added keys]). An added value must be a plain token, else
+    SnapshotError (no record = no set)."""
+    values = dict(doc["values"])
+    added = []
+    for k in pinned_keys(baseline):
+        if k in values or current.get(k) is None:
+            continue
+        if not SAFE_VALUE_RE.match(current[k]):
+            raise SnapshotError("the camera's current %s %r is not a plain token, so it could not be "
+                                "restored" % (k, current[k]))
+        values[k] = current[k]
+        added.append(k)
+    out = dict(doc)
+    out["values"] = values
+    return out, added
+
+
 def load_snapshot(text):
     """Parse + validate a snapshot document. Every value becomes a word of a remote
     `gphoto2 --set-config`, so only enforceable keys with plain-token string values pass."""
@@ -462,10 +484,17 @@ def _consumed_stamp(path, name):
     return stamp if CONSUMED_STAMP_RE.match(stamp) else None
 
 
+def _consumed_sort_key(stamp):
+    """(time stamp, same-second counter): `…Z` < `…Z-1` < `…Z-2` < `…Z-10`."""
+    base, _sep, n = stamp.partition("-")
+    return base, int(n) if n else 0
+
+
 def newest_consumed(path, names):
     """The newest `<stem>.consumed-<stamp>.json` basename among `names`, or None."""
-    found = [n for n in names if _consumed_stamp(path, n) is not None]
-    return max(found) if found else None
+    found = [(_consumed_sort_key(_consumed_stamp(path, n)), n) for n in names
+             if _consumed_stamp(path, n) is not None]
+    return max(found)[1] if found else None
 
 
 def snapshot_state(path):
@@ -506,20 +535,34 @@ def write_snapshot_once(path, doc):
     """Write `doc` to `path` ONLY when it does not exist yet: a temp file in the same folder, then
     an exclusive hard link (fails when the path appeared meanwhile), so a half-written or replaced
     snapshot is impossible. Returns True when written, False when a snapshot was already there."""
+    return _write_via_temp(path, doc, exclusive=True)
+
+
+def _write_via_temp(path, doc, exclusive):
+    """Write `doc` to a temp file next to `path`, then publish it: an exclusive hard link (False when
+    `path` appeared meanwhile) or an atomic replace. The temp file never survives, even when the
+    write itself fails."""
     folder = os.path.dirname(path) or "."
     os.makedirs(folder, exist_ok=True)
     tmp = "%s.tmp-%d" % (path, os.getpid())
-    with open(tmp, "w", encoding="utf-8") as f:
-        f.write(json.dumps(doc, sort_keys=True) + "\n")
-        f.flush()
-        os.fsync(f.fileno())
     try:
-        os.link(tmp, path)
-    except FileExistsError:
-        return False
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(json.dumps(doc, sort_keys=True) + "\n")
+            f.flush()
+            os.fsync(f.fileno())
+        if exclusive:
+            try:
+                os.link(tmp, path)
+            except FileExistsError:
+                return False
+        else:
+            os.replace(tmp, path)
+        return True
     finally:
-        os.unlink(tmp)
-    return True
+        try:
+            os.unlink(tmp)
+        except FileNotFoundError:
+            pass
 
 
 def _load_snapshot_file(path):
@@ -532,10 +575,33 @@ def _snapshot_kept(path):
     return EXIT_OK
 
 
+def _snapshot_extend(path, baseline, current):
+    """A snapshot is already waiting: never overwrite it, never trust an unreadable one, only add a
+    key pinned since it was taken."""
+    try:
+        existing = _load_snapshot_file(path)
+    except (OSError, SnapshotError) as e:
+        print("the pending production exposure snapshot %s is unreadable (%s): it is no record the "
+              "EVENT switch could restore -- fix it or move it aside (consume) before the camera is "
+              "changed" % (path, e), file=sys.stderr)
+        return EXIT_SNAPSHOT_FAILED
+    try:
+        doc, added = extend_snapshot(existing, current, baseline)
+        if not added:
+            return _snapshot_kept(path)
+        _write_via_temp(path, doc, exclusive=False)
+    except SnapshotError as e:
+        print("cannot snapshot the production exposure: %s" % e, file=sys.stderr)
+        return EXIT_SNAPSHOT_FAILED
+    except OSError as e:
+        print("cannot extend the production exposure snapshot %s: %s" % (path, e), file=sys.stderr)
+        return EXIT_SNAPSHOT_FAILED
+    print("SNAPSHOT extended %s with %s: %s" % (path, ", ".join(added), snapshot_summary(doc)))
+    return EXIT_OK
+
+
 def _snapshot_take(a, path):
     """`snapshot`: store the values the E2E is about to overwrite, only when none is waiting."""
-    if os.path.exists(path):
-        return _snapshot_kept(path)
     try:
         baseline = _load_baseline_file(a.baseline)
     except (OSError, BaselineError) as e:
@@ -545,6 +611,8 @@ def _snapshot_take(a, path):
     if current is None:
         print("unreadable gphoto2 output", file=sys.stderr)
         return EXIT_UNREADABLE
+    if os.path.exists(path):
+        return _snapshot_extend(path, baseline, current)
     try:
         doc = build_snapshot(current, baseline, a.box, _utc_now().strftime("%Y-%m-%dT%H:%M:%SZ"))
         written = write_snapshot_once(path, doc)
@@ -555,7 +623,14 @@ def _snapshot_take(a, path):
         print("cannot write the production exposure snapshot %s: %s" % (path, e), file=sys.stderr)
         return EXIT_SNAPSHOT_FAILED
     if not written:
-        return _snapshot_kept(path)
+        return _snapshot_extend(path, baseline, current)
+    # a marker without a snapshot is stale by definition: it belonged to an earlier period
+    try:
+        os.unlink(restore_failed_path(path))
+    except FileNotFoundError:
+        pass
+    except OSError as e:
+        print("WARNING: a stale restore-failed marker could not be removed: %s" % e, file=sys.stderr)
     print("SNAPSHOT saved %s: %s" % (path, snapshot_summary(doc)))
     return EXIT_OK
 
