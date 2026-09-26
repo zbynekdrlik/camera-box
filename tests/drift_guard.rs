@@ -3142,9 +3142,16 @@ fn genlock_parity_consumed_paths_matches_the_ci_workflow_path_filters_949() {
     assert!(
         windows_wf.contains("vendor/obs-studio/**")
             && windows_wf.contains("vendor/distroav/**")
-            && windows_wf.contains("vendor/av-sync-dock/**"),
-        "windows-genlock-fast.yml must still trigger on all three vendor dirs — \
-         genlock_parity_consumed_paths(<a Windows box>) mirrors exactly this set"
+            && windows_wf.contains("vendor/av-sync-dock/**")
+            && windows_wf.contains("vendor/obs-vban/**"),
+        "windows-genlock-fast.yml must still trigger on all four vendor dirs (issue 1372 added \
+         vendor/obs-vban) — genlock_parity_consumed_paths(<a Windows box>) mirrors exactly this set"
+    );
+    assert!(
+        !linux_wf.contains("vendor/obs-vban/**"),
+        "linux-genlock.yml must NOT trigger on vendor/obs-vban/** (the paced VBAN sender ships only \
+         in the Windows bundle, issue 1372); if it ever does, genlock_parity_consumed_paths(imag) \
+         must gain it too"
     );
 
     let body = r#"
@@ -3165,8 +3172,8 @@ fn genlock_parity_consumed_paths_matches_the_ci_workflow_path_filters_949() {
     for win_section in [sections[1], sections[2]] {
         assert_eq!(
             win_section.trim(),
-            "vendor/obs-studio\nvendor/distroav\nvendor/av-sync-dock",
-            "a Windows box's consumed set must be exactly windows-genlock-fast.yml's three dirs: {out:?}"
+            "vendor/obs-studio\nvendor/distroav\nvendor/av-sync-dock\nvendor/obs-vban",
+            "a Windows box's consumed set must be exactly windows-genlock-fast.yml's four dirs: {out:?}"
         );
     }
 }

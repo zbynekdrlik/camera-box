@@ -577,7 +577,8 @@ imag_build_drift_report() {
 #   - "imag"          -> linux-genlock.yml's own `on.push.paths` (vendor/obs-studio/**,
 #                        vendor/distroav/** — deliberately NOT vendor/av-sync-dock, a Windows-only
 #                        OBS dock DLL imag never links against)
-#   - anything else    -> windows-genlock-fast.yml's `on.push.paths` (adds vendor/av-sync-dock/**)
+#   - anything else    -> windows-genlock-fast.yml's `on.push.paths` (adds vendor/av-sync-dock/** and
+#                        vendor/obs-vban/**, the Windows-only paced VBAN sender, issue 1372)
 # (see tests/drift_guard.rs's genlock_parity_consumed_paths_matches_the_ci_workflow_path_filters_949
 # for the lock-step assertion against the two workflow files themselves.) PURE — a lookup table, no
 # I/O. An unrecognized label gets the WINDOWS (superset) set: the fail-closed default that can never
@@ -585,7 +586,7 @@ imag_build_drift_report() {
 genlock_parity_consumed_paths() {
   case "$1" in
     imag) printf 'vendor/obs-studio\nvendor/distroav\n' ;;
-    *)    printf 'vendor/obs-studio\nvendor/distroav\nvendor/av-sync-dock\n' ;;
+    *)    printf 'vendor/obs-studio\nvendor/distroav\nvendor/av-sync-dock\nvendor/obs-vban\n' ;;
   esac
 }
 

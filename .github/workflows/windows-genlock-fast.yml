@@ -35,6 +35,7 @@ on:
       - 'vendor/obs-studio/**'
       - 'vendor/distroav/**'
       - 'vendor/av-sync-dock/**'
+      - 'vendor/obs-vban/**'
       - '.github/workflows/windows-genlock-fast.yml'
 
 permissions:
@@ -1037,6 +1038,45 @@ jobs:
         shell: bash
         run: cmake --build build_x64 --config RelWithDebInfo --parallel
 
+      # issue 1372: compile-check the vendored obs-vban (the paced VBAN sender) against the SAME
+      # installed OBS SDK, so a C error surfaces at the pre-merge gate instead of after the 150-min
+      # full windows-genlock build. The full build stages it into the bundle.
+      - name: Assert obs-vban send pacing present (issue 1372)
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "vendor/obs-vban/src/vban-pacing.h")) { Write-Error "vendor/obs-vban/src/vban-pacing.h is gone (issue 1372) - the VBAN sender would send one packet per wake again"; exit 1 }
+          $thread = (Get-Content "vendor/obs-vban/src/vban-output-thread.c" -Raw) -replace '\s+', ' '
+          if ($thread -notmatch [regex]::Escape('#include "vban-pacing.h"')) { Write-Error "vban-output-thread.c no longer includes vban-pacing.h (issue 1372)"; exit 1 }
+          if ($thread -notmatch [regex]::Escape('vban_pacing_step(&pacing, now,')) { Write-Error "vban-output-thread.c no longer asks vban_pacing_step what to send (issue 1372)"; exit 1 }
+          if ($thread -notmatch [regex]::Escape('os_sleepto_ns(wake_ns);')) { Write-Error "vban-output-thread.c no longer sleeps to the packet deadline (issue 1372)"; exit 1 }
+          if ($thread -notmatch [regex]::Escape('"obs-vban pacing: depth_ms=%.1f underflows=%"')) { Write-Error "the obs-vban pacing log line is gone (issue 1372)"; exit 1 }
+          Write-Output "issue 1372 obs-vban send pacing present - OK"
+
+      - name: Configure obs-vban against the genlocked OBS (issue 1372)
+        working-directory: vendor/obs-vban
+        shell: bash
+        run: |
+          set -eu
+          WS=$(cygpath "$GITHUB_WORKSPACE")
+          # Same prefix recipe as av-sync-dock: the obs-sdk Development component + the obs-deps
+          # roots, so libobsConfig's find_dependency(SIMDe, Threads) and w32-pthreads resolve.
+          PREFIX="$(cygpath -m "$WS/obs-sdk")"
+          for d in "$WS"/vendor/obs-studio/.deps/*-x64 "$WS"/vendor/distroav/.deps/*-x64; do
+            [ -d "$d" ] && PREFIX="$PREFIX;$(cygpath -m "$d")"
+          done
+          LIBOBS_CFG=$(find "$WS/obs-sdk" -maxdepth 6 -iname 'libobs*config.cmake' | head -1)
+          echo "prefix=$PREFIX"; echo "libobs cfg=$LIBOBS_CFG"
+          test -n "$LIBOBS_CFG" || { echo "ERROR: libobsConfig.cmake not in obs-sdk (Development install failed?)"; exit 1; }
+          cmake -B build_x64 -G "Visual Studio 17 2022" -A x64 \
+            -DCMAKE_PREFIX_PATH="$PREFIX" \
+            -Dlibobs_DIR="$(cygpath -m "$(dirname "$LIBOBS_CFG")")" \
+            -DCMAKE_BUILD_TYPE=RelWithDebInfo
+
+      - name: Compile-check obs-vban (build the plugin, issue 1372)
+        working-directory: vendor/obs-vban
+        shell: bash
+        run: cmake --build build_x64 --config RelWithDebInfo --parallel
+
       # Deploy path for the vendored dock: the compile gate above already builds the REAL
       # RelWithDebInfo obs-audio-video-sync-dock.dll, but until now nothing uploaded it — every
       # merged vendor/av-sync-dock fix sat undeployed on the rig unless someone ran the 150-min
@@ -1063,4 +1103,4 @@ jobs:
       - name: Compile gate passed
         shell: bash
         run: |
-          echo "#101 vendored OBS/DistroAV + #188 av-sync-dock C++ compiled clean - pre-merge gate green."
+          echo "#101 vendored OBS/DistroAV + #188 av-sync-dock C++ + issue-1372 obs-vban C compiled clean - pre-merge gate green."

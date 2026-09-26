@@ -489,6 +489,52 @@ fn windows_fast_does_not_touch_programdata_distroav_1115() {
     );
 }
 
+/// issue 1372 — the FULL bundle carries the vendored, paced obs-vban.dll. It rides the
+/// obs-plugins\64bit robocopy into Program Files (where the stock 0.3.1 DLL lives on the boxes),
+/// the box's old copy is kept for rollback, and the deployed bytes are verified fail-closed
+/// against the manifest. A bundle built before issue 1372 carries none: warn, never fail.
+#[test]
+fn windows_full_byte_verifies_the_paced_obs_vban_1372() {
+    let p = win_program("resolume", "full", "1");
+    assert!(
+        p.contains(r"Join-Path $obsDir 'obs-plugins\64bit\obs-vban.dll'"),
+        "FULL deploy must verify obs-vban.dll where OBS loads it (Program Files):\n{p}"
+    );
+    assert!(
+        !p.contains("/XF distroav.dll obs-vban.dll") && !p.contains("/XF obs-vban.dll"),
+        "obs-vban.dll must ride the obs-plugins robocopy, never be excluded:\n{p}"
+    );
+    assert!(
+        p.contains("obs-vban.dll.pre-789"),
+        "the box's current obs-vban.dll is backed up before the copy:\n{p}"
+    );
+    let backup = p.find("obs-vban.dll.pre-789").unwrap();
+    let copy = p
+        .find(r#"robocopy "$stage\obs-plugins\64bit""#)
+        .expect("the obs-plugins robocopy");
+    assert!(
+        backup < copy,
+        "the backup must happen BEFORE the robocopy overwrites it:\n{p}"
+    );
+    assert!(
+        p.contains("VERIFY obs-vban.dll") && p.contains("VERIFY FAIL: deployed obs-vban.dll"),
+        "a byte mismatch must fail loud:\n{p}"
+    );
+    assert!(
+        p.contains(r"'(^|/)obs-vban\.dll$'"),
+        "the manifest entry is matched by basename like distroav:\n{p}"
+    );
+    assert!(
+        p.contains("the bundle carries no obs-vban.dll (built before issue 1372)"),
+        "an older bundle without obs-vban warns instead of failing:\n{p}"
+    );
+    let fast = win_program("stream", "fast", "0");
+    assert!(
+        !fast.contains("VERIFY obs-vban.dll") && !fast.contains("obs-vban.dll.pre-789"),
+        "FAST (obs.dll-only) deploy never touches obs-vban:\n{fast}"
+    );
+}
+
 // issue 1295: the AHK stop/restart bracket is emitted for any has_ahk=1 box (resolume — the
 // retired Windows strih was the other one, issue 1317), never for stream (has_ahk=0). This test
 // pins the AHK-box-vs-stream split.

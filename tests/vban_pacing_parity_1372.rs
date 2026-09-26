@@ -385,3 +385,75 @@ fn the_scripts_reach_every_boundary_1372() {
         assert!(n >= 5, "issue 1372: the parity scripts hit only {n} {name}");
     }
 }
+
+#[test]
+fn the_paced_obs_vban_is_built_staged_and_wired_1372() {
+    let read = |rel: &str| {
+        fs::read_to_string(repo(rel)).unwrap_or_else(|e| panic!("issue 1372: read {rel}: {e}"))
+    };
+    let full = read(".github/workflows/windows-genlock.yml");
+    let build = full
+        .find("- name: Build obs-vban (issue 1372)")
+        .expect("issue 1372: windows-genlock.yml no longer builds the vendored obs-vban");
+    let stage = full
+        .find("- name: Stage artifact")
+        .expect("windows-genlock.yml lost its Stage artifact step");
+    assert!(
+        build < stage,
+        "issue 1372: obs-vban must be built before the bundle is staged"
+    );
+    for needle in [
+        "working-directory: vendor/obs-vban",
+        "-Filter obs-vban.dll",
+        "Copy-Item $vbandll.FullName \"stage/obs-plugins/64bit/\"",
+        "Copy-Item -Recurse \"vendor/obs-vban/data/*\" \"stage/data/obs-plugins/obs-vban/\"",
+        "- name: Assert obs-vban send pacing present (issue 1372)",
+    ] {
+        assert!(
+            full.contains(needle),
+            "issue 1372: windows-genlock.yml lost `{needle}`"
+        );
+    }
+    let fast = read(".github/workflows/windows-genlock-fast.yml");
+    for needle in [
+        "- 'vendor/obs-vban/**'",
+        "- name: Compile-check obs-vban (build the plugin, issue 1372)",
+        "- name: Assert obs-vban send pacing present (issue 1372)",
+    ] {
+        assert!(
+            fast.contains(needle),
+            "issue 1372: windows-genlock-fast.yml lost `{needle}`"
+        );
+    }
+
+    // The send thread asks the pure decision and sleeps to the deadline; its status line keeps a
+    // marker no other obs-vban line contains.
+    let thread = read("vendor/obs-vban/src/vban-output-thread.c");
+    for needle in [
+        "#include \"vban-pacing.h\"",
+        "vban_pacing_step(&pacing, now,",
+        "os_sleepto_ns(wake_ns);",
+        "\"obs-vban pacing: depth_ms=%.1f underflows=%\"",
+    ] {
+        assert!(
+            thread.contains(needle),
+            "issue 1372: vban-output-thread.c lost `{needle}`"
+        );
+    }
+    let mut marker_lines = 0;
+    for f in fs::read_dir(repo("vendor/obs-vban/src")).unwrap() {
+        let text = fs::read_to_string(f.unwrap().path()).unwrap();
+        marker_lines += text.matches("obs-vban pacing:").count();
+    }
+    assert_eq!(
+        marker_lines, 1,
+        "issue 1372: `obs-vban pacing:` must appear on exactly one log line (the 10 s status)"
+    );
+    let output = read("vendor/obs-vban/src/vban-output.c");
+    assert!(
+        output.contains(
+            "obs_data_set_default_int(data, \"pacing_target_ms\", VBAN_PACING_TARGET_MS_DEFAULT);"
+        ),
+        "issue 1372: the output settings lost the pacing_target_ms default"
+    );
+}
