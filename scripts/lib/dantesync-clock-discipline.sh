@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# airuleset:script-ok source-only lib (pure functions + one default, no top-level statements) --
+# airuleset:script-ok source-only lib (pure functions + defaults + one sibling source) --
 # sourced by scripts/clock-offset-guard.sh, whose callers own their own strictness; a
 # `set -euo pipefail` here would leak into every caller (the scripts/lib/obs-fleet.sh convention).
 #
@@ -22,6 +22,15 @@
 # bound (DATE_MASTER_MICRO_BOUND_MS, default 5 ms) + margin; falling behind is OUT, paused is its own
 # PAUSED verdict. A master without the fields (1.9.0 / 1.10.0) keeps the step-bound grade byte for
 # byte, so a mixed fleet grades each master by what it reports during a roll.
+# dantesync 1.12.0 (PR 123) corrects the fleet date ONCE A NIGHT by default: a master whose
+# date_correction_mode is "daily" corrects nothing by day, so its date_offset_error_ms grows to a
+# day's drift (~1.5 s on the rig) until one coordinated step at the nightly window. It still
+# carries date_correction_falling_behind (always false), so the daily branch is decided FIRST, on
+# date_correction_mode. It is graded on its schedule (the next window within (now, now + 24 h 30 min],
+# the last nightly step within the last 26 h or null = none seen yet, a NOTE) and |error| <=
+# DATE_MASTER_DAILY_BOUND_MS (default 3000 ms) + margin. "micro" and "" keep the 1.11 grade. The
+# pure decision takes "now" as an argument; the public wrappers read it once (date_master_now_s).
+# That daily grading lives in scripts/lib/dantesync-date-daily.sh, sourced below.
 #
 # CONSUMERS (they source scripts/clock-offset-guard.sh, which sources this lib): dantesync-gate.sh
 # (the E2E [0/8] gate), verify-imag.sh (l), verify-strih.sh check 6, dantesync-maintenance-gate.sh.
@@ -46,6 +55,12 @@ DATE_MASTER_MARGIN_US="${DANTESYNC_DATE_MARGIN_US:-1000}"
 # alarm (raised past 10 ms), so a 6-10 ms catch-up transient reads OUT here while dantesync is quiet.
 # shellcheck disable=SC2034  # read by the scripts that source this lib
 DATE_MASTER_MICRO_BOUND_MS="${DANTESYNC_DATE_MICRO_BOUND_MS:-5}"
+
+# The dantesync 1.12.0 NIGHTLY date mode (date_correction_mode "daily") is graded by its own lib,
+# sourced here so every consumer of this lib gets it unchanged; its functions are resolved at call
+# time, like this lib's own dependencies on clock-offset-guard.sh.
+# shellcheck source=scripts/lib/dantesync-date-daily.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/dantesync-date-daily.sh"
 
 # --- CLOCK DISCIPLINE ---------------------------------------------------------------------------
 
@@ -180,14 +195,21 @@ date_authority_from_pipe_json() {
     | sed -n 's/.*"date_authority"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | tail -1 || true
 }
 
+# _pipe_json_raw_value TEXT KEY -> the raw JSON token of KEY's value: `"..."` for a string, `null`,
+# a number or boolean as written; "" when KEY is absent. KEY is always a literal field name from
+# this file, never caller data.
+_pipe_json_raw_value() {
+  printf '%s' "$1" | grep -oE "\"$2\"[[:space:]]*:[[:space:]]*(\"[^\"]*\"|[^,}[:space:]]+)" \
+    | tail -1 | sed "s/^\"$2\"[[:space:]]*:[[:space:]]*//" || true
+}
+
 # _pipe_json_bool_raw TEXT KEY -> "true"/"false" for a JSON boolean, "" when KEY is absent, and the
 # marker `<not a bool>` when KEY is present with any other value (null, a quoted "false", a number),
 # so a present-but-unreadable flag is graded unknown, never guessed (the python twin does the same).
 # KEY is always a literal field name from this file, never caller data.
 _pipe_json_bool_raw() {
   local raw
-  raw="$(printf '%s' "$1" | grep -oE "\"$2\"[[:space:]]*:[[:space:]]*(\"[^\"]*\"|[^,}[:space:]]+)" \
-    | tail -1 | sed "s/^\"$2\"[[:space:]]*:[[:space:]]*//" || true)"
+  raw="$(_pipe_json_raw_value "$1" "$2")"
   case "$raw" in
     "") printf '' ;;
     true|false) printf '%s' "$raw" ;;
@@ -207,9 +229,10 @@ date_master_micro_capable() {
   fi
 }
 
-# _micro_bound_us MICRO_BOUND_MS -> the micro bound in integer us; "" unless MICRO_BOUND_MS is a
-# positive plain decimal (digits, an optional fraction) -- the python twin applies the same shape.
-_micro_bound_us() {
+# _positive_bound_us BOUND_MS -> a date bound (the micro or the daily one) in integer us; "" unless
+# BOUND_MS is a positive plain decimal (digits, an optional fraction) -- the python twin applies the
+# same shape.
+_positive_bound_us() {
   local us
   [[ $1 =~ ^[0-9]+(\.[0-9]+)?$ ]] || { printf ''; return 0; }
   us="$(_ms_to_us "$1")"
@@ -237,7 +260,7 @@ _date_master_micro_verdict() {
     *) printf 'unknown'; return 0 ;;
   esac
   err_us="$(_ms_to_us "$(_pipe_json_number_raw "$text" date_offset_error_ms)")"
-  bound_us="$(_micro_bound_us "$micro")"
+  bound_us="$(_positive_bound_us "$micro")"
   if [ -z "$err_us" ] || [ -z "$bound_us" ]; then
     printf 'unknown'
   elif [ "$(abs_int "$err_us")" -le $((bound_us + 10#$margin)) ]; then
@@ -249,6 +272,10 @@ _date_master_micro_verdict() {
 
 # date_master_verdict TEXT MARGIN_US [MICRO_BOUND_MS] -> none | ok | out | paused | unknown.
 #   none    -- not the date master (follower, local, legacy "", absent)
+#   a master in date_correction_mode "daily" (dantesync 1.12.0, date_master_mode_class) ->
+#     _date_master_daily_verdict on DATE_MASTER_DAILY_BOUND_MS at date_master_now_s; decided FIRST,
+#     because a 1.12.0 master also carries date_correction_falling_behind
+#   an unknown date_correction_mode on a master -> unknown
 #   a micro-capable master (dantesync 1.11.0, date_master_micro_capable) -> _date_master_micro_verdict
 #     on MICRO_BOUND_MS (default DATE_MASTER_MICRO_BOUND_MS); the only source of `paused`
 #   any other master (1.9.0 / 1.10.0) -- graded exactly as before on its own step bound:
@@ -260,6 +287,12 @@ date_master_verdict() {
   local text="$1" margin="$2" micro="${3:-$DATE_MASTER_MICRO_BOUND_MS}" err_us bound_us
   [ "$(date_authority_from_pipe_json "$text")" = master ] || { printf 'none'; return 0; }
   grep -qE '^[0-9]+$' <<<"$margin" || { printf 'unknown'; return 0; }
+  case "$(date_master_mode_class "$text")" in
+    daily)
+      _date_master_daily_verdict "$text" "$margin" "$DATE_MASTER_DAILY_BOUND_MS" "$(date_master_now_s)"
+      return 0 ;;
+    unknown) printf 'unknown'; return 0 ;;
+  esac
   if [ "$(date_master_micro_capable "$text")" = yes ]; then
     _date_master_micro_verdict "$text" "$margin" "$micro"
     return 0
@@ -279,6 +312,10 @@ date_master_verdict() {
 
 # date_master_effective_bound_us TEXT BOUND_US MARGIN_US [MICRO_BOUND_MS] -> the bound the date
 # master's own ntp_offset_us median is graded on:
+#   a daily-mode master (1.12.0), or one with an unknown date_correction_mode (a release newer than
+#     this grading): max(BOUND_US, DATE_MASTER_DAILY_BOUND_MS*1000 + MARGIN_US) when the daily bound
+#     is readable, else BOUND_US -- its median may be a day's drift, and date_master_check reads the
+#     unknown mode UNKNOWN, so the median never turns it into a false DRIFT;
 #   a micro-capable master (1.11.0): max(BOUND_US, micro bound*1000 + MARGIN_US), the micro bound
 #     being MICRO_BOUND_MS (default DATE_MASTER_MICRO_BOUND_MS) when readable, else BOUND_US;
 #   any other master: max(BOUND_US, date_step_bound_ms*1000 + MARGIN_US) with a readable positive
@@ -286,14 +323,17 @@ date_master_verdict() {
 #   every other node: BOUND_US unchanged.
 # So the bound a consumer prints is the one date_master_verdict grades the date on.
 date_master_effective_bound_us() {
-  local text="$1" bound="$2" margin="$3" micro="${4:-$DATE_MASTER_MICRO_BOUND_MS}" step_us
+  local text="$1" bound="$2" margin="$3" micro="${4:-$DATE_MASTER_MICRO_BOUND_MS}" step_us mode
   if ! grep -qE '^[0-9]+$' <<<"$bound" || ! grep -qE '^[0-9]+$' <<<"$margin" \
      || [ "$(date_authority_from_pipe_json "$text")" != master ]; then
     printf '%s' "$bound"
     return 0
   fi
-  if [ "$(date_master_micro_capable "$text")" = yes ]; then
-    step_us="$(_micro_bound_us "$micro")"
+  mode="$(date_master_mode_class "$text")"
+  if [ "$mode" != other ]; then
+    step_us="$(date_master_daily_bound_us)"
+  elif [ "$(date_master_micro_capable "$text")" = yes ]; then
+    step_us="$(_positive_bound_us "$micro")"
   else
     step_us="$(_ms_to_us "$(_pipe_json_number_raw "$text" date_step_bound_ms)")"
   fi
@@ -308,13 +348,23 @@ date_master_effective_bound_us() {
 # returns 0 OK (or not a master, silently) / 2 OUT / 3 UNKNOWN / 4 PAUSED. PAUSED (a 1.11.0 master
 # with no UTC reading) is WARN-level: each consumer decides -- the E2E [0/8] gate (dantesync-gate.sh)
 # refuses it as UNKNOWN, verify-imag reports a warning. A pre-1.11.0 master prints exactly the
-# step-bound lines it always did.
+# step-bound lines it always did. A dantesync 1.12.0 daily-mode master prints its nightly schedule
+# (_date_master_daily_check, 0 OK / 2 OUT / 3 UNKNOWN); an unknown date_correction_mode is UNKNOWN.
 date_master_check() {
-  local label="$1" text="$2" margin="$3" micro="${4:-$DATE_MASTER_MICRO_BOUND_MS}" err bound
-  if [ "$(date_authority_from_pipe_json "$text")" = master ] \
-     && [ "$(date_master_micro_capable "$text")" = yes ]; then
-    _date_master_micro_check "$label" "$text" "$margin" "$micro"
-    return
+  local label="$1" text="$2" margin="$3" micro="${4:-$DATE_MASTER_MICRO_BOUND_MS}" err bound mode
+  if [ "$(date_authority_from_pipe_json "$text")" = master ]; then
+    mode="$(date_master_mode_class "$text")"
+    if [ "$mode" = daily ]; then
+      _date_master_daily_check "$label" "$text" "$margin"
+      return
+    elif [ "$mode" = unknown ]; then
+      printf '  %-14s DATE MASTER UNKNOWN (date_correction_mode=%s is not a mode this grading knows ("daily", "micro" or "") -- status incomplete, #1372)\n' \
+        "$label" "$(date_master_mode_text "$text")"
+      return 3
+    elif [ "$(date_master_micro_capable "$text")" = yes ]; then
+      _date_master_micro_check "$label" "$text" "$margin" "$micro"
+      return
+    fi
   fi
   err="$(_pipe_json_number_raw "$text" date_offset_error_ms)"
   bound="$(_pipe_json_number_raw "$text" date_step_bound_ms)"
@@ -379,6 +429,8 @@ _date_master_micro_check() {
 # own /status does (date_master_micro_capable), so every journal consumer passes it when it has it
 # (verify-strih check 6 reads 127.0.0.1:8898 on the box). Without a readable /status the journal
 # keeps the step bound and dantesync_journal_date_note says so -- never a silent loosening.
+# dantesync 1.12.0 (daily mode) logs the same line shape: its /status decides that too, through the
+# nightly schedule (_date_daily_schedule_verdict) and the daily bound, at date_master_now_s.
 
 # date_step_bound_us_from_journal JOURNAL -> the step bound (us) carried by the FRESHEST
 # `[NTP] offset:` line when it is the master's date-authority shape
@@ -407,9 +459,17 @@ date_step_bound_us_from_journal() {
 #                        1.10.0, or a follower): STEP_US + MARGIN_US
 #   step-unread:<us>  -- STATUS carries no date_authority (empty, unreachable, not a /status, a
 #                        pre-1.9.0 blob): STEP_US + MARGIN_US, the looser bound, named by the note
-# The flag order is _date_master_micro_verdict's, so the journal and /status paths agree.
+#   daily:<us>        -- STATUS is a dantesync 1.12.0 date master in date_correction_mode "daily"
+#                        with a live nightly schedule: median-only on DATE_MASTER_DAILY_BOUND_MS +
+#                        MARGIN_US (its median IS the day's drift)
+#   daily-out         -- that master's schedule is out (no / past / far next window, a stale or far
+#                        ahead last nightly step)
+#   daily-unknown     -- that master's schedule fields, its date_correction_mode (an unknown value)
+#                        or the daily bound are unreadable
+# The flag order is _date_master_micro_verdict's, so the journal and /status paths agree; the daily
+# schedule is _date_daily_schedule_verdict's.
 journal_date_grade_from_step() {
-  local step="$1" margin="$2" text="$3" micro="${4:-$DATE_MASTER_MICRO_BOUND_MS}" auth behind paused bound_us
+  local step="$1" margin="$2" text="$3" micro="${4:-$DATE_MASTER_MICRO_BOUND_MS}" auth behind paused bound_us mode
   if [[ ! $step =~ ^[0-9]{1,15}$ ]] || [ "$((10#$step))" -le 0 ] || [[ ! $margin =~ ^[0-9]{1,15}$ ]]; then
     printf 'none'
     return 0
@@ -418,6 +478,26 @@ journal_date_grade_from_step() {
   if [ -z "$auth" ]; then
     printf 'step-unread:%s' "$((10#$step + 10#$margin))"
     return 0
+  fi
+  if [ "$auth" = master ]; then
+    mode="$(date_master_mode_class "$text")"
+    if [ "$mode" = daily ]; then
+      bound_us="$(date_master_daily_bound_us)"
+      case "$(_date_daily_schedule_verdict "$text" "$(date_master_now_s)")" in
+        out) printf 'daily-out' ;;
+        ok)
+          if [ -n "$bound_us" ]; then
+            printf 'daily:%s' "$((bound_us + 10#$margin))"
+          else
+            printf 'daily-unknown'
+          fi ;;
+        *) printf 'daily-unknown' ;;
+      esac
+      return 0
+    elif [ "$mode" = unknown ]; then
+      printf 'daily-unknown'
+      return 0
+    fi
   fi
   if [ "$auth" != master ] || [ "$(date_master_micro_capable "$text")" != yes ]; then
     printf 'step:%s' "$((10#$step + 10#$margin))"
@@ -431,7 +511,7 @@ journal_date_grade_from_step() {
     false/false) ;;
     *) printf 'unknown'; return 0 ;;
   esac
-  bound_us="$(_micro_bound_us "$micro")"
+  bound_us="$(_positive_bound_us "$micro")"
   if [ -z "$bound_us" ]; then
     printf 'unknown'
   else
@@ -448,13 +528,14 @@ dantesync_journal_date_grade() {
 
 # dantesync_journal_date_bound_us JOURNAL MARGIN_US [STATUS] [MICRO_BOUND_MS] -> the bound (us) a
 # date-authority journal line is graded on (micro bound + margin for a micro-capable master /status,
-# else the line's own step bound + margin); "" for an ordinary line, and for a grade that is decided
-# by a flag rather than a bound (out / paused / unknown).
+# the daily bound + margin for a daily-mode 1.12.0 master /status with a live schedule, else the
+# line's own step bound + margin); "" for an ordinary line, and for a grade that is decided by a flag
+# or the schedule rather than a bound (out / paused / unknown / daily-out / daily-unknown).
 dantesync_journal_date_bound_us() {
   local grade
   grade="$(dantesync_journal_date_grade "$1" "$2" "${3:-}" "${4:-}")"
   case "$grade" in
-    micro:*|step:*|step-unread:*) printf '%s' "${grade#*:}" ;;
+    micro:*|step:*|step-unread:*|daily:*) printf '%s' "${grade#*:}" ;;
   esac
 }
 
@@ -481,6 +562,11 @@ dantesync_journal_date_note() {
       printf 'date master /status reports date_micro_paused=true: no UTC reading for over a minute, the fleet date runs free (#1372)' ;;
     unknown)
       printf 'date master /status micro-correction flags or micro bound (%sms) unreadable (#1372)' "$micro" ;;
+    daily:*)
+      printf 'date master daily bound %sms + %sus margin = %sus, median-only (its /status is a dantesync 1.12.0 daily-mode date master with a live nightly schedule: the fleet date drifts all day and is stepped once a night, #1372)' \
+        "$DATE_MASTER_DAILY_BOUND_MS" "$margin" "${grade#*:}" ;;
+    daily-out|daily-unknown)
+      _date_daily_journal_note "$grade" "$text" ;;
   esac
 }
 
@@ -492,13 +578,17 @@ dantesync_journal_date_note() {
 #     line walks by design and a coordinated (or micro) step moves every sample at once, so the
 #     spread is not a health signal (the gate's HTTP master is median-only for the same reason, #1014)
 #   out -> falling_behind | paused -> paused | unknown -> unknown (the /status flags decide)
+#   daily:<us> -> MEDIAN-ONLY on the daily bound + margin (dantesync 1.12.0 daily mode)
+#   daily-out -> date_out | daily-unknown -> unknown (the nightly schedule decides)
 # Any other journal is graded exactly as before (BOUND_US + STABILITY_US); STATUS is not read.
 dantesync_journal_clock_verdict() {
   local journal="$1" fresh="$2" bound="$3" stability="$4" margin="$5" grade
   grade="$(dantesync_journal_date_grade "$journal" "$margin" "${6:-}" "${7:-}")"
   case "$grade" in
-    micro:*|step:*|step-unread:*) dantesync_offset_verdict "$journal" "$fresh" "${grade#*:}" ;;
+    micro:*|step:*|step-unread:*|daily:*) dantesync_offset_verdict "$journal" "$fresh" "${grade#*:}" ;;
     out) printf 'falling_behind' ;;
+    daily-out) printf 'date_out' ;;
+    daily-unknown) printf 'unknown' ;;
     paused) printf 'paused' ;;
     unknown) printf 'unknown' ;;
     *) dantesync_offset_verdict "$journal" "$fresh" "$bound" "$stability" ;;

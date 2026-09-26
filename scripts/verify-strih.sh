@@ -271,8 +271,10 @@ fi
 #    Issue 1372: strih-lx is the fleet DATE master, whose `(date authority, ..., step bound Nus)`
 #    journal line is graded through the shared dantesync_journal_clock_verdict
 #    (clock-offset-guard.sh) by the capability its OWN :8898/status reports: a micro-capable
-#    dantesync 1.11.x master on the micro bound + margin and its falling_behind/paused flags; without
-#    a readable /status on the step bound + margin, named as such. Never the 2 ms UTC bound.
+#    dantesync 1.11.x master on the micro bound + margin and its falling_behind/paused flags; a
+#    dantesync 1.12.0 master in daily mode on the daily bound + margin and its nightly schedule (a
+#    dead schedule reads DATE MASTER OUT); without a readable /status on the step bound + margin,
+#    named as such. Never the 2 ms UTC bound.
 DS_ACTIVE="$(systemctl is-active dantesync 2>/dev/null || true)"
 if [ "$DS_ACTIVE" != active ]; then
   bad "dantesync.service not active (state='${DS_ACTIVE:-<none>}') -- clock undisciplined/free-running"
@@ -292,6 +294,8 @@ else
     ok)
       ok "dantesync active + FRESH clock offset within ${DS_BOUND_TXT}" ;;
     falling_behind)
+      bad "dantesync DATE MASTER OUT -- ${DS_BOUND_TXT}" ;;
+    date_out)
       bad "dantesync DATE MASTER OUT -- ${DS_BOUND_TXT}" ;;
     paused)
       note "dantesync DATE MASTER PAUSED (WARN) -- ${DS_BOUND_TXT}" ;;

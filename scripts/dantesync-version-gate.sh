@@ -96,7 +96,11 @@ DEFAULT_FLEET_FILE="$HERE/../rig-fleet.txt"
 # Bumped 2026-09-26: fleet (13 nodes) rolled to v1.11.1 (dantesync PR 122 -- every clock step lands
 # exactly; on 1.11.0 a Windows micro-step landed short and swung the rate servo +-17 ppm, taking the OBS
 # media clock off the Dante tick; issue 1372).
-DANTESYNC_VERSION_PIN="${DANTESYNC_VERSION_PIN:-1.11.1}"
+# Bumped 2026-09-27: pin v1.12.0 (dantesync PR 123 -- the fleet date is corrected by ONE coordinated step
+# a night, 02:00 UTC; the 1.11 micro-steps starved the stream box's Dante Virtual Soundcard. camera-box
+# grades a daily-mode master on its nightly schedule + the 3000 ms daily bound, issue 1372). The fleet
+# rolls to it with this pin (dantesync-fleet-upgrade.sh --target); until then the gate names every 1.11.1 node.
+DANTESYNC_VERSION_PIN="${DANTESYNC_VERSION_PIN:-1.12.0}"
 
 # --- PURE functions (no network, no SSH — unit-tested by sourcing this file) ------------------
 

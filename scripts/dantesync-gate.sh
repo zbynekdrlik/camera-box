@@ -482,9 +482,14 @@ grade_http_node() {
   # LINUX client additionally fetches ITS OWN freshest journal to derive its real threshold, ONLY
   # when a master is genuinely configured (master_chase_status non-empty) -- a plain invocation
   # with no master configured never pays this extra SSH call.
-  local date_v="none"
+  local date_v="none" date_bound_unread=0 date_bound_forced=0
   [ "$mode" = "median-only" ] && date_v="$(date_master_verdict "$status" "$DATE_MASTER_MARGIN_US")"
-  if [ "$date_v" = ok ] || [ "$date_v" = out ] || [ "$date_v" = paused ]; then
+  # A daily-mode master (dantesync 1.12.0) whose schedule is unreadable, or a master with an unknown
+  # date_correction_mode, still takes the daily bound: its median may be a day's drift, so the
+  # #1021 widening below would read it as DRIFT (20) instead of the UNKNOWN (11) date_master_check
+  # reports.
+  if [ "$date_v" = ok ] || [ "$date_v" = out ] || [ "$date_v" = paused ] \
+     || { [ "$date_v" = unknown ] && [ "$(date_master_mode_class "$status")" != other ]; }; then
     # Issue 1372 (dantesync 1.9.0 / dantesync#88): the NTP master is the fleet DATE authority. It
     # lets the fleet line sit up to date_step_bound_ms off UTC, then makes a coordinated fleet
     # step, so its own ntp_offset_us (that fleet-line error) is graded on the step bound + margin
@@ -495,10 +500,23 @@ grade_http_node() {
     # reports it UNKNOWN (11) instead of a false DRIFT on the bare bound. A dantesync 1.11.0 master
     # (date_master_micro_capable) holds the date by micro-corrections, so its bound is the micro
     # bound (DATE_MASTER_MICRO_BOUND_MS) + margin instead; a PAUSED one keeps that bound here and
-    # date_master_check below refuses it (rc 4 -> UNKNOWN, fail-closed).
-    local orig_bound="$bound"
+    # date_master_check below refuses it (rc 4 -> UNKNOWN, fail-closed). A dantesync 1.12.0 master
+    # in date_correction_mode "daily" lets the fleet date drift all day and steps it once a night,
+    # so its bound is the daily bound (DATE_MASTER_DAILY_BOUND_MS) + margin, and date_master_check
+    # grades its nightly schedule.
+    local orig_bound="$bound" date_mode
     bound="$(date_master_effective_bound_us "$status" "$bound" "$DATE_MASTER_MARGIN_US")"
-    if [ "$bound" != "$orig_bound" ] && [ "$(date_master_micro_capable "$status")" = yes ]; then
+    date_mode="$(date_master_mode_class "$status")"
+    if [ "$date_mode" != other ] && [ -z "$(date_master_daily_bound_us)" ]; then
+      # A typo in DANTESYNC_DATE_DAILY_BOUND_MS: the median (a day's drift) cannot be graded, so
+      # the node is UNKNOWN (11) below, never a false DRIFT on the bare bound.
+      date_bound_unread=1
+      deadband_note=" -- date master: the daily bound DANTESYNC_DATE_DAILY_BOUND_MS=${DATE_MASTER_DAILY_BOUND_MS} is unreadable, so its median is not graded (UNKNOWN, #1372)"
+    elif [ "$bound" != "$orig_bound" ] && [ "$date_mode" = unknown ]; then
+      deadband_note=" -- date master graded on the daily bound because date_correction_mode=$(date_master_mode_text "$status") is unknown: bound ${bound}us = ${DATE_MASTER_DAILY_BOUND_MS}ms + ${DATE_MASTER_MARGIN_US}us margin (its median may be a day's drift; DATE MASTER UNKNOWN below, #1372; base bound ${orig_bound}us)"
+    elif [ "$bound" != "$orig_bound" ] && [ "$date_mode" = daily ]; then
+      deadband_note=" -- date master graded on its daily bound: bound ${bound}us = ${DATE_MASTER_DAILY_BOUND_MS}ms + ${DATE_MASTER_MARGIN_US}us margin (dantesync 1.12.0 daily mode: the fleet date drifts from UTC all day and is stepped once a night, #1372; base bound ${orig_bound}us)"
+    elif [ "$bound" != "$orig_bound" ] && [ "$(date_master_micro_capable "$status")" = yes ]; then
       deadband_note=" -- date master graded on its micro bound: bound ${bound}us = ${DATE_MASTER_MICRO_BOUND_MS}ms + ${DATE_MASTER_MARGIN_US}us margin (dantesync 1.11.0 micro-corrections hold the fleet date within a few ms of UTC, #1372; base bound ${orig_bound}us)"
     elif [ "$bound" != "$orig_bound" ]; then
       deadband_note=" -- date master graded on its own step bound: bound ${bound}us = date_step_bound_ms + ${DATE_MASTER_MARGIN_US}us margin (the fleet date may sit up to the step bound off UTC before a coordinated fleet step, dantesync#88/#1372; base bound ${orig_bound}us)"
@@ -695,6 +713,13 @@ grade_http_node() {
   # for a client node or a pre-storm-field payload). Default-on, no opt-out env -- an affirmative
   # storm makes cross-node timestamps unreliable, exactly what this precondition gate exists to
   # catch. clock-offset-guard.sh's ntp_master_step_storm_verdict is the single-sourced verdict.
+  # Issue 1372: a daily-mode (or unknown-mode) master whose daily bound is unreadable had its median
+  # graded on the bare bound, which a day's drift always fails. That is not a measured desync: the
+  # node is UNKNOWN (11), and the date check below still runs to name the unreadable bound.
+  if [ "$date_bound_unread" = 1 ] && [ "$rc_off" != 3 ]; then
+    rc_off=3
+    date_bound_forced=1
+  fi
   if [ "$mode" = "median-only" ] && [ "$rc_off" != 3 ] \
      && [ "$(ntp_master_step_storm_verdict "$status")" = storm ]; then
     local steps_h; steps_h="$(ntp_steps_last_hour_from_pipe_json "$status")"
@@ -709,7 +734,7 @@ grade_http_node() {
   # A dantesync 1.11.0 master whose micro-corrections are PAUSED (rc 4, WARN-level in the report
   # consumers) is fail-closed HERE as UNKNOWN (11): with no UTC reading the fleet date is unverified.
   local rc_date=0
-  if [ "$rc_off" != 3 ]; then
+  if [ "$rc_off" != 3 ] || [ "$date_bound_forced" = 1 ]; then
     date_master_check "$name" "$status" "$DATE_MASTER_MARGIN_US" || rc_date=$?
     [ "$rc_date" = 4 ] && rc_date=3
     [ "$rc_date" != 0 ] && [ "$rc_off" != 2 ] && rc_off="$rc_date"
@@ -860,6 +885,18 @@ Options:
                        DATE MASTER OUT (BAD/20); date_micro_paused=true (no UTC reading) reads
                        DATE MASTER PAUSED, refused here as INCOMPLETE/11. A master without those
                        fields (1.9.0/1.10.0) keeps the step-bound grade above.
+    DANTESYNC_DATE_DAILY_BOUND_MS  Date master on dantesync 1.12.0 in date_correction_mode
+                       "daily" (the default since 1.12.0): the master corrects the fleet date
+                       once a night, so by day it drifts ~1.5 s from UTC. It is graded on its
+                       schedule -- date_daily_next_utc within the next 24 h 30 min, and
+                       date_daily_last_step_ts within the last 26 h (null = no nightly step
+                       seen since it started, a NOTE) -- and |date_offset_error_ms| <= this
+                       bound (default ${DATE_MASTER_DAILY_BOUND_MS} ms) + DANTESYNC_DATE_MARGIN_US;
+                       its median bound is the same. A dead schedule or an error past the bound
+                       reads DATE MASTER OUT (BAD/20); an unreadable field UNKNOWN (11).
+                       "micro" mode keeps the micro grade above.
+    DANTESYNC_DATE_NOW_S  "now" (Unix seconds) for that schedule grade; default the wall clock
+                       (tests pin it).
   --deadband-margin-us N  #1021 (dantesync PR #84/#86, closes dantesync issue 83): when the NTP
                        master's own /status reports a numeric "ntp_deadband_us" (its currently
                        active PTP-locked step-deferral threshold), the master's median bound
