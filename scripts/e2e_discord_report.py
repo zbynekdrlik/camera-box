@@ -408,6 +408,18 @@ def _section_overall(verdict, meta):
     else:
         lines.append("RED, ale žiadna konkrétna brána nebola rozpoznaná — pozri celý JSON.")
 
+    # Issue 1367 — every multi-source window, each with its own fraction (report-only, judged by
+    # its node burn: contiguity + hold stay blocking).
+    ms_windows = _multi_source_windows(verdict)
+    if ms_windows:
+        lines.append(
+            "Multi-source okná (kamera sníma OBS multiview; copies/gaps, kadencia a frozen_leg sú "
+            "len informatívne, okno posudzuje jeho node burn):"
+        )
+        lines.extend(
+            f"  • {cambox} {tag}, {_fmt_fraction(fraction)}" for cambox, fraction, tag in ms_windows
+        )
+
     gate_exit = meta.get("gate_exit")
     if gate_exit is not None:
         lines.append(f"(merge recording-verdict exit code: {gate_exit})")
@@ -803,6 +815,46 @@ def _order_nodes(keys):
     return sorted(keys, key=lambda k: order.get(k, 80))
 
 
+# Issue 1367 — the tag recording-verdict.rs puts on a MULTI-SOURCE cambox window
+# (`all_cambox_continuity.segments[].multi_source.tag`); the fallback keeps an older verdict readable.
+MULTI_SOURCE_TAG = "multi-source (report-only by #1367 decision)"
+
+
+def _multi_source_windows(verdict):
+    """Issue 1367 — `[(cambox, fraction, tag), ...]` for every cambox window recording-verdict.rs
+    tagged MULTI-SOURCE (judged by its node burn; its copies/gaps, cadence and frozen_leg are
+    report-only), in schedule order. Empty on a verdict with no such window (or a pre-1367 one)."""
+    out = []
+    for s in _g(verdict, "all_cambox_continuity", "segments", default=[]) or []:
+        if not isinstance(s, dict) or not isinstance(s.get("multi_source"), dict):
+            continue
+        ms = s["multi_source"]
+        fraction = ms.get("multi_path_suspect_fraction")
+        out.append((
+            str(s.get("cambox", "?")).strip() or "?",
+            fraction if isinstance(fraction, (int, float)) else None,
+            ms.get("tag") or MULTI_SOURCE_TAG,
+        ))
+    return out
+
+
+def _fmt_fraction(f):
+    return f"{f:.2f}" if isinstance(f, (int, float)) else "?"
+
+
+def _multi_source_summary(verdict):
+    """Issue 1367 — ONE short line naming every multi-source window grouped by cambox, e.g.
+    `CAM2 multi-source (report-only by #1367 decision), 0.43, 0.60`; None when there is none."""
+    grouped = {}
+    for cambox, fraction, tag in _multi_source_windows(verdict):
+        grouped.setdefault((cambox, tag), []).append(_fmt_fraction(fraction))
+    if not grouped:
+        return None
+    return "; ".join(
+        f"{cambox} {tag}, {', '.join(fractions)}" for (cambox, tag), fractions in grouped.items()
+    )
+
+
 def _stream_drop_total(verdict, cams):
     """Total real frames lost on the camera->stream path: per-camera digital-burn real_drops plus
     any V4L2 capture-card drops. On a PASS this is 0 (headline zero-loss held)."""
@@ -890,6 +942,10 @@ def _blocking_failures(verdict):
         over = []
         for s in segs:
             if not isinstance(s, dict):
+                continue
+            # Issue 1367: a multi-source window's copies/gaps are report-only (it is judged by its
+            # node burn), so it is never named as the continuity blocker.
+            if isinstance(s.get("multi_source"), dict):
                 continue
             # #1251: each window is judged against ITS OWN applied tolerance (a per-cambox override
             # like CAM2 -> 25 while its grabber HW is sick, issue 1249). Fall back to the run-wide
@@ -1176,6 +1232,11 @@ def _report_only_tripped(verdict):
     tear = _g(verdict, "all_cambox_continuity", "tear", default=None)
     if isinstance(tear, dict) and tear.get("signal_operable") is False:
         names.append("tear-gate slepá škvrna (aux nedekóduje)")
+    # issue 1367 — a MULTI-SOURCE cambox window (the camera films an OBS multiview) is judged by its
+    # node burn; its copies/gaps, cadence and frozen_leg are report-only. Named with its fraction.
+    ms_summary = _multi_source_summary(verdict)
+    if ms_summary:
+        names.append(ms_summary)
     return names
 
 
@@ -1215,7 +1276,13 @@ def compose_summary(verdict: dict, meta: dict | None = None) -> str:
         # allowance (still within tolerance, so the run PASSED) — say so rather than pair ✅ with a
         # bare loss count.
         loss_txt = "0 stratených snímok" if drops == 0 else f"{drops} stratených snímok (v rámci tolerancie)"
-        lines.append(f"📷 {n} {_camera_plural(n)} · {loss_txt} (celá cesta kamera → stream)")
+        cams_line = f"📷 {n} {_camera_plural(n)} · {loss_txt} (celá cesta kamera → stream)"
+        # Issue 1367: a multi-source window passed on its node burn — say so on the SAME line so the
+        # owner's 3-line PASS cap holds and the relaxation is never silent.
+        ms_summary = _multi_source_summary(verdict)
+        if ms_summary:
+            cams_line += f" · {ms_summary}"
+        lines.append(cams_line)
         lines.append(_link_line(meta))
         return "\n".join(lines)
 

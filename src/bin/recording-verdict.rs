@@ -62,7 +62,8 @@ use camera_box::probe::recording_latency::{
 use camera_box::probe::recording_partial::RecordingPartial;
 use camera_box::probe::recording_segments::{
     load_switch_schedule, place_frame_in_window, raw_window_index, segment_continuity,
-    SegmentFrame, SwitchWindow, WindowPlacement, DEFAULT_TRANSITION_GUARD_NS,
+    segment_continuity_scoped, SegmentFrame, SwitchWindow, WindowPlacement,
+    DEFAULT_TRANSITION_GUARD_NS,
 };
 use camera_box::probe::recording_verdict::{
     cam_strih_assessment, verdict, FrameTick, RecordingVerdict, VerdictConfig,
@@ -4969,8 +4970,70 @@ fn build_and_print_verdict_with_stream_diffs(
                     &all_burns,
                     cam2_pin,
                 );
-                let seg =
-                    segment_continuity(&seg_frames, schedule, args.switch_guard_ns, expected_step);
+                // #781/#1196 — the per-window tear statistics. Computed BEFORE the continuity fold
+                // since issue 1367: the tear detector's per-window multi-path fraction decides each
+                // window's check scope (a MULTI-SOURCE window -- cam2 filming the strih-lx
+                // multiview -- is judged by its node burn; its copies/gaps, cadence and frozen_leg
+                // fold report-only, `camera_box::multi_source_window`). The tear JSON + LIVE fold
+                // further down read the SAME `tear_stats`.
+                //
+                // issue 1196 (v2): per frame, the PRIMARY dual-QR ids (non-reserved run_ids — the
+                // aux run_id sits IN NODE_BURN_RUN_IDS, so this filter excludes it automatically)
+                // plus the AUX bottom tick pair's ids, extracted BY the reserved AUX_TICK_RUN_ID.
+                // The tear span is computed over their union, which is what makes a seam BETWEEN
+                // the two painted bands detectable.
+                let mut tear_by_window: Vec<Vec<(Vec<u32>, Vec<u32>)>> =
+                    vec![Vec::new(); schedule.len()];
+                for f in stream_frames {
+                    if let Some(gen_ts) =
+                        frame_gen_ts_anchor(f, &anchor_run_ids, &all_burns, cam2_pin)
+                    {
+                        if let WindowPlacement::In(wi) =
+                            place_frame_in_window(gen_ts, schedule, args.switch_guard_ns)
+                        {
+                            let primary: Vec<u32> = f
+                                .payloads
+                                .iter()
+                                .filter(|p| {
+                                    !camera_box::probe::recording::NODE_BURN_RUN_IDS
+                                        .contains(&p.run_id)
+                                })
+                                .map(|p| p.frame_id)
+                                .collect();
+                            let aux: Vec<u32> = f
+                                .payloads
+                                .iter()
+                                .filter(|p| {
+                                    p.run_id
+                                        == camera_box::probe::recording_latency::AUX_TICK_RUN_ID
+                                })
+                                .map(|p| p.frame_id)
+                                .collect();
+                            tear_by_window[wi].push((primary, aux));
+                        }
+                    }
+                }
+                let tear_stats: Vec<camera_box::tear_detect::TearStats> = tear_by_window
+                    .iter()
+                    .map(|w| camera_box::tear_detect::window_tear_stats(w))
+                    .collect();
+                // Issue 1367 — each window's check scope, from its multi-path fraction.
+                let multi_path_fractions: Vec<f64> = tear_stats
+                    .iter()
+                    .map(|s| s.multi_path_suspect_fraction)
+                    .collect();
+                let window_scopes: Vec<camera_box::multi_source_window::WindowCheckScope> =
+                    multi_path_fractions
+                        .iter()
+                        .map(|&f| camera_box::multi_source_window::window_check_scope(f))
+                        .collect();
+                let seg = segment_continuity_scoped(
+                    &seg_frames,
+                    schedule,
+                    args.switch_guard_ns,
+                    expected_step,
+                    &multi_path_fractions,
+                );
                 println!();
                 println!(
                     "=== #312 ALL-CAMBOX per-segment continuity ({} window(s), guard {} ns, painted-tick step {}) ===",
@@ -4994,6 +5057,22 @@ fn build_and_print_verdict_with_stream_diffs(
                     // box), NOT chain loss — print the explicit diagnostic so it is not misread.
                     if let Some(note) = &s.note {
                         println!("      ⚠ {note}");
+                    }
+                    // Issue 1367: a multi-source window is judged by its node burn; its copies/gaps,
+                    // cadence and frozen_leg stay printed below but are REPORT-ONLY.
+                    let multi_source = s.multi_source.is_some();
+                    if let Some(ms) = &s.multi_source {
+                        println!(
+                            "      ⚠ {} -- copies={} gaps={}, cadence and frozen_leg are \
+                             REPORT-ONLY; the window is judged by its node burn (contiguity + \
+                             hold, BLOCKING).",
+                            camera_box::multi_source_window::tag_line(
+                                &s.cambox,
+                                ms.multi_path_suspect_fraction
+                            ),
+                            s.copies,
+                            s.gaps
+                        );
                     }
                     // Issue 889 (2026-07-30 user decision on issue 883) visibility requirement 1,
                     // extended by issue 915 (2026-08-01 user decision) and the 2026-08-05 RE-GATE
@@ -5024,7 +5103,7 @@ fn build_and_print_verdict_with_stream_diffs(
                                     s.undecodable
                                 );
                             }
-                            if s.copies != 0 || s.gaps != 0 {
+                            if !multi_source && (s.copies != 0 || s.gaps != 0) {
                                 // #1132 (owner mandate 2026-08-19): the copies/gaps tolerance
                                 // rescue is DISARMED, so a within-tolerance nonzero copies/gaps
                                 // window (relaxed_pass == true) now GATES overall_pass. The old
@@ -5109,6 +5188,12 @@ fn build_and_print_verdict_with_stream_diffs(
                                              frame_count==0) — it still fails overall_pass."
                                         );
                                     }
+                                    camera_box::window_gate::RelaxedFailureReason::OverCopiesGapsTolerance
+                                        if multi_source =>
+                                    {
+                                        // Issue 1367: reported above by the multi-source line;
+                                        // these copies/gaps do not gate this window.
+                                    }
                                     camera_box::window_gate::RelaxedFailureReason::OverCopiesGapsTolerance => {
                                         println!(
                                             "      ⚠ #889 RE-GATE FAIL: copies={} gaps={} \
@@ -5186,6 +5271,28 @@ fn build_and_print_verdict_with_stream_diffs(
                             pc.delta_histogram
                         );
                     }
+                }
+                // Issue 1367 — prints on every run that has a multi-source window, so the
+                // relaxation is never silent.
+                if seg.windows_multi_source > 0 {
+                    println!(
+                        "  ⚠ #1367 MULTI-SOURCE: {}/{} cambox window(s) film multi-source content \
+                         (multi-path fraction over {:.2}) -- their copies/gaps, cadence and \
+                         frozen_leg are REPORT-ONLY, each is judged by its node burn: {}",
+                        seg.windows_multi_source,
+                        seg.segments.len(),
+                        camera_box::tear_detect::MULTI_PATH_SUSPECT_CEILING,
+                        seg.segments
+                            .iter()
+                            .filter_map(|s| s.multi_source.as_ref().map(|ms| {
+                                camera_box::multi_source_window::tag_line(
+                                    &s.cambox,
+                                    ms.multi_path_suspect_fraction,
+                                )
+                            }))
+                            .collect::<Vec<_>>()
+                            .join("; ")
+                    );
                 }
                 // Issue 889 visibility requirement 3 — this summary line prints UNCONDITIONALLY,
                 // whether or not any window failed, so silence is never mistaken for strictness.
@@ -5265,7 +5372,9 @@ fn build_and_print_verdict_with_stream_diffs(
                         .segments
                         .iter()
                         .filter(|s| {
+                            // Issue 1367: a multi-source window's copies/gaps do not gate.
                             s.frames > 0
+                                && s.multi_source.is_none()
                                 && (s.copies != 0 || s.gaps != 0)
                                 && !camera_box::window_gate::segment_singleton_allowance_consumed(
                                     s.copies, s.gaps,
@@ -5534,46 +5643,7 @@ fn build_and_print_verdict_with_stream_diffs(
                 // init (which would be a dead store -> clippy `unused_assignments` under -D warnings).
                 let projection_tap_summary: camera_box::tear_detect::ProjectionProof;
                 {
-                    // issue 1196 (v2): per frame, the PRIMARY dual-QR ids (non-reserved run_ids —
-                    // the aux run_id sits IN NODE_BURN_RUN_IDS, so this filter excludes it
-                    // automatically) plus the AUX bottom tick pair's ids, extracted BY the
-                    // reserved AUX_TICK_RUN_ID. The tear span is computed over their union, which
-                    // is what makes a seam BETWEEN the two painted bands detectable.
-                    let mut tear_by_window: Vec<Vec<(Vec<u32>, Vec<u32>)>> =
-                        vec![Vec::new(); schedule.len()];
-                    for f in stream_frames {
-                        if let Some(gen_ts) =
-                            frame_gen_ts_anchor(f, &anchor_run_ids, &all_burns, cam2_pin)
-                        {
-                            if let WindowPlacement::In(wi) =
-                                place_frame_in_window(gen_ts, schedule, args.switch_guard_ns)
-                            {
-                                let primary: Vec<u32> = f
-                                    .payloads
-                                    .iter()
-                                    .filter(|p| {
-                                        !camera_box::probe::recording::NODE_BURN_RUN_IDS
-                                            .contains(&p.run_id)
-                                    })
-                                    .map(|p| p.frame_id)
-                                    .collect();
-                                let aux: Vec<u32> = f
-                                    .payloads
-                                    .iter()
-                                    .filter(|p| {
-                                        p.run_id
-                                            == camera_box::probe::recording_latency::AUX_TICK_RUN_ID
-                                    })
-                                    .map(|p| p.frame_id)
-                                    .collect();
-                                tear_by_window[wi].push((primary, aux));
-                            }
-                        }
-                    }
-                    let tear_stats: Vec<camera_box::tear_detect::TearStats> = tear_by_window
-                        .iter()
-                        .map(|w| camera_box::tear_detect::window_tear_stats(w))
-                        .collect();
+                    // `tear_stats` is computed above the continuity fold (issue 1367: it scopes it).
                     let windows_json: Vec<serde_json::Value> = schedule
                         .iter()
                         .zip(&tear_stats)
@@ -5751,11 +5821,29 @@ fn build_and_print_verdict_with_stream_diffs(
                 // cadence window at all (mass optical-decode failure, already hard-failed by
                 // copies/gaps/undecodable) = not applicable, passes. Whether it folds into
                 // `overall_pass` is the one-line-restorable `gates_overall_pass()` seam (LIVE).
-                let worst_cadence_paired_fraction: Option<f64> = seg
+                //
+                // Issue 1367: only single-source windows fold; a multi-source window's cadence is
+                // listed report-only under `multi_source_report_only`.
+                let worst_cadence_paired_fraction: Option<f64> =
+                    camera_box::multi_source_window::gating_items(&seg.segments, &window_scopes)
+                        .filter_map(|s| {
+                            s.presentation_cadence.as_ref().map(|pc| pc.paired_fraction)
+                        })
+                        .fold(None::<f64>, |acc, pf| Some(acc.map_or(pf, |m| m.max(pf))));
+                let cadence_multi_source: Vec<serde_json::Value> = seg
                     .segments
                     .iter()
-                    .filter_map(|s| s.presentation_cadence.as_ref().map(|pc| pc.paired_fraction))
-                    .fold(None::<f64>, |acc, pf| Some(acc.map_or(pf, |m| m.max(pf))));
+                    .filter_map(|s| {
+                        let ms = s.multi_source.as_ref()?;
+                        Some(serde_json::json!({
+                            "cambox": s.cambox,
+                            "multi_path_suspect_fraction": ms.multi_path_suspect_fraction,
+                            "paired_fraction": s.presentation_cadence.as_ref().map(|pc| pc.paired_fraction),
+                            "uniform_fraction": s.presentation_cadence.as_ref().map(|pc| pc.beat_corrected_uniform_fraction),
+                            "tag": ms.tag,
+                        }))
+                    })
+                    .collect();
                 let cadence_bound = args.max_cadence_paired_fraction;
                 let cadence_gate_pass = camera_box::presentation_cadence::cadence_judder_gate_pass(
                     worst_cadence_paired_fraction,
@@ -5767,6 +5855,7 @@ fn build_and_print_verdict_with_stream_diffs(
                     "worst_paired_fraction": worst_cadence_paired_fraction,
                     "pass": cadence_gate_pass,
                     "gates_overall_pass": cadence_gates_overall,
+                    "multi_source_report_only": cadence_multi_source,
                     "note": "#1036 calibrated 15fps-judder bound (issue 726 metric, issue 406 \
                              zero-loss). Worst per-window presentation_cadence.paired_fraction \
                              across cambox windows; None = no cadence window (not applicable, \
@@ -5801,38 +5890,35 @@ fn build_and_print_verdict_with_stream_diffs(
                 // window (mass decode failure, already hard-failed by copies/gaps/undecodable) = not
                 // applicable, passes. LIVE via `presentation_cadence::uniformity_gates_overall_pass`;
                 // floor RESTORED 0.90 -> 0.95 (issue 1242 walk-back).
-                let worst_cadence_uniform_fraction: Option<f64> = seg
-                    .segments
-                    .iter()
-                    .filter_map(|s| {
-                        s.presentation_cadence
-                            .as_ref()
-                            .map(|pc| pc.uniform_fraction)
-                    })
-                    .fold(None::<f64>, |acc, uf| Some(acc.map_or(uf, |m| m.min(uf))));
+                let worst_cadence_uniform_fraction: Option<f64> =
+                    camera_box::multi_source_window::gating_items(&seg.segments, &window_scopes)
+                        .filter_map(|s| {
+                            s.presentation_cadence
+                                .as_ref()
+                                .map(|pc| pc.uniform_fraction)
+                        })
+                        .fold(None::<f64>, |acc, uf| Some(acc.map_or(uf, |m| m.min(uf))));
                 // The DERIVED reading (mode-based, #726) — DIAGNOSTIC since #1250 (the pre-beat
                 // reading; surfaced so reverting the gate to it is a one-field change).
-                let worst_cadence_derived_uniform_fraction: Option<f64> = seg
-                    .segments
-                    .iter()
-                    .filter_map(|s| {
-                        s.presentation_cadence
-                            .as_ref()
-                            .map(|pc| pc.derived_uniform_fraction)
-                    })
-                    .fold(None::<f64>, |acc, uf| Some(acc.map_or(uf, |m| m.min(uf))));
+                let worst_cadence_derived_uniform_fraction: Option<f64> =
+                    camera_box::multi_source_window::gating_items(&seg.segments, &window_scopes)
+                        .filter_map(|s| {
+                            s.presentation_cadence
+                                .as_ref()
+                                .map(|pc| pc.derived_uniform_fraction)
+                        })
+                        .fold(None::<f64>, |acc, uf| Some(acc.map_or(uf, |m| m.min(uf))));
                 // #1250 the GATED reading: the BEAT-AWARE field fed to `cadence_uniformity_gate_pass`
                 // below and serialized as `worst_uniform_fraction`. The derived + raw readings above
                 // are DIAGNOSTIC only. See src/presentation_cadence.rs UNIFORM_FRACTION_MIN.
-                let worst_cadence_beat_corrected_uniform_fraction: Option<f64> = seg
-                    .segments
-                    .iter()
-                    .filter_map(|s| {
-                        s.presentation_cadence
-                            .as_ref()
-                            .map(|pc| pc.beat_corrected_uniform_fraction)
-                    })
-                    .fold(None::<f64>, |acc, uf| Some(acc.map_or(uf, |m| m.min(uf))));
+                let worst_cadence_beat_corrected_uniform_fraction: Option<f64> =
+                    camera_box::multi_source_window::gating_items(&seg.segments, &window_scopes)
+                        .filter_map(|s| {
+                            s.presentation_cadence
+                                .as_ref()
+                                .map(|pc| pc.beat_corrected_uniform_fraction)
+                        })
+                        .fold(None::<f64>, |acc, uf| Some(acc.map_or(uf, |m| m.min(uf))));
                 let uniformity_floor = camera_box::presentation_cadence::UNIFORM_FRACTION_MIN;
                 let uniformity_gate_pass =
                     camera_box::presentation_cadence::cadence_uniformity_gate_pass(
@@ -5848,6 +5934,7 @@ fn build_and_print_verdict_with_stream_diffs(
                     "worst_raw_uniform_fraction": worst_cadence_uniform_fraction,
                     "pass": uniformity_gate_pass,
                     "gates_overall_pass": uniformity_gates_overall,
+                    "multi_source_report_only": cadence_multi_source,
                     "note": "#1142 cadence-uniformity FLOOR (owner mandate). Since #1250 the GATED \
                              value worst_uniform_fraction is the BEAT-AWARE worst per-window \
                              presentation_cadence.beat_corrected_uniform_fraction across cambox \
@@ -5961,7 +6048,11 @@ fn build_and_print_verdict_with_stream_diffs(
                         Vec::with_capacity(dup_windows.len());
                     let mut worst_raw_fraction: Option<f64> = None;
                     let mut masked_windows: usize = 0;
-                    for win_frames in &dup_windows {
+                    for (wi, win_frames) in dup_windows.iter().enumerate() {
+                        // Issue 1367: a multi-source window's duplicate rate is report-only.
+                        let dup_gates_window =
+                            camera_box::multi_source_window::scope_at(&window_scopes, wi)
+                                .test_pattern_checks_gate();
                         // #1112/#1166 — slice the (carried or locally-recomputed) per-frame
                         // MAD-to-predecessor vector into THIS window's near-duplicate sequence, by
                         // frame_index + recording-adjacency (the pure Tier-0 helper — index-alignment
@@ -5973,7 +6064,7 @@ fn build_and_print_verdict_with_stream_diffs(
                         let seq =
                             camera_box::dup_cadence::window_prev_mads(&win_idxs, &frame_prev_mads);
                         let dc = camera_box::dup_cadence::measure_dup_cadence(&seq);
-                        if let Some(ref d) = dc {
+                        if let (Some(d), true) = (dc.as_ref(), dup_gates_window) {
                             worst_raw_fraction = Some(
                                 worst_raw_fraction
                                     .map_or(d.duplicate_fraction, |m| m.max(d.duplicate_fraction)),
@@ -5996,8 +6087,35 @@ fn build_and_print_verdict_with_stream_diffs(
                     // a freeze/glitch has a high raw fraction but is coverage/regularity
                     // vetoed (frozen_leg's domain), so gating on raw would double-jeopardy
                     // it (issue 1088 review finding).
+                    let gated_dcs: Vec<Option<camera_box::dup_cadence::DupCadence>> = dcs
+                        .iter()
+                        .enumerate()
+                        .map(|(wi, dc)| {
+                            if camera_box::multi_source_window::scope_at(&window_scopes, wi)
+                                .test_pattern_checks_gate()
+                            {
+                                dc.clone()
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
                     let worst_masked_fraction =
-                        camera_box::dup_cadence::worst_masked_duplicate_fraction(&dcs);
+                        camera_box::dup_cadence::worst_masked_duplicate_fraction(&gated_dcs);
+                    let dup_multi_source: Vec<serde_json::Value> = dcs
+                        .iter()
+                        .zip(&seg.segments)
+                        .filter_map(|(dc, s)| {
+                            let ms = s.multi_source.as_ref()?;
+                            Some(serde_json::json!({
+                                "cambox": s.cambox,
+                                "multi_path_suspect_fraction": ms.multi_path_suspect_fraction,
+                                "duplicate_fraction": dc.as_ref().map(|d| d.duplicate_fraction),
+                                "duplication_masked": dc.as_ref().map(|d| d.duplication_masked),
+                                "tag": ms.tag,
+                            }))
+                        })
+                        .collect();
                     // #1101/#1166 — fold the per-window signal-viability cross-check (built in the loop
                     // above) into the run-level verdict: does the content near-duplicate signal
                     // actually OBSERVE the duplication the Vernier-tick copies prove is present? The
@@ -6034,6 +6152,7 @@ fn build_and_print_verdict_with_stream_diffs(
                         "bound_duplicate_fraction": dup_bound,
                         "pass": dup_gate_pass,
                         "gates_overall_pass": dup_gates_overall,
+                        "multi_source_report_only": dup_multi_source,
                         "frames_no_anchor": dup_no_anchor,
                         "signal_viability": signal_viability,
                         "signal_promotable": signal_promotable,
@@ -6216,7 +6335,34 @@ fn build_and_print_verdict_with_stream_diffs(
                     .chain(args.restart_event.iter())
                     .filter_map(|t| SelfHealResetEvent::parse(t))
                     .collect();
-                let leg_report = attribute_self_heal(&leg_segments, &self_heal_events);
+                let mut leg_report = attribute_self_heal(&leg_segments, &self_heal_events);
+                // Issue 1367: a hard-frozen entry of a MULTI-SOURCE window is report-only (its tick
+                // repeats are older multiview generations, not a frozen leg; the node burn judges
+                // it). It moves to `frozen_leg.multi_source_report_only`; every other entry (and
+                // every self-heal event) still gates.
+                let frozen_window_keys: Vec<camera_box::multi_source_window::WindowKey<'_>> = seg
+                    .segments
+                    .iter()
+                    .enumerate()
+                    .map(|(wi, s)| camera_box::multi_source_window::WindowKey {
+                        cambox: &s.cambox,
+                        start_ns: s.start_ns,
+                        scope: camera_box::multi_source_window::scope_at(&window_scopes, wi),
+                    })
+                    .collect();
+                let (frozen_gating, frozen_multi_source) =
+                    camera_box::multi_source_window::partition_frozen_legs(
+                        std::mem::take(&mut leg_report.frozen),
+                        &frozen_window_keys,
+                    );
+                leg_report.frozen = frozen_gating;
+                for f in &frozen_multi_source {
+                    println!(
+                        "  {} -- {} (report-only)",
+                        f.message(),
+                        camera_box::multi_source_window::MULTI_SOURCE_TAG
+                    );
+                }
                 for f in &leg_report.frozen {
                     println!("  {}", f.message());
                 }
@@ -6262,6 +6408,17 @@ fn build_and_print_verdict_with_stream_diffs(
                         "cambox": s.cambox,
                         "copies": s.copies,
                         "message": s.message(),
+                    })).collect::<Vec<_>>(),
+                    "multi_source_report_only": frozen_multi_source.iter().map(|f| serde_json::json!({
+                        "cambox": f.cambox,
+                        "since_ns": f.since_ns,
+                        "copies": f.copies,
+                        "approx_stale_secs": f.approx_stale_secs,
+                        "density": f.density,
+                        "message": f.message(),
+                        "multi_source": seg.segments.iter().find(|s| {
+                            s.cambox == f.cambox && s.start_ns == f.since_ns
+                        }).and_then(|s| s.multi_source.clone()),
                     })).collect::<Vec<_>>(),
                 });
                 // The JSON key `self_heal_reset` is kept for back-compat (issue-895/914 consumers +
