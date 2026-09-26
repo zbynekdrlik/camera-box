@@ -6588,9 +6588,17 @@ static inline bool genlock_n1_shallow_track(uint64_t *target_frames, uint64_t *f
 		genlock_n1_shallow_rearm(floor_max_frames, window_ticks, over_ticks, deep_ticks, measuring);
 		return false;
 	}
-	/* design 5844353368: never latch under the sticky content floor (none on a min-latency box). */
+	/* design 5844353368: never latch under the sticky content floor (none on a min-latency box). The
+	 * floor is absolute frames and may come from a HIGHER pin (review round 1), so it is limited to
+	 * base + GENLOCK_N1_SHALLOW_MAX_EXTRA_FRAMES - 1: a sticky floor alone never caps a latch (the capped
+	 * fell watch would re-measure every window until the floor decayed). */
 	const uint64_t measured = base_frames > UINT64_MAX - high ? UINT64_MAX : base_frames + high;
-	const uint64_t sticky = min_latency_box ? 0 : sticky_floor_frames;
+	const uint64_t sticky_limit = base_frames > UINT64_MAX - (GENLOCK_N1_SHALLOW_MAX_EXTRA_FRAMES - 1u)
+					      ? UINT64_MAX
+					      : base_frames + (GENLOCK_N1_SHALLOW_MAX_EXTRA_FRAMES - 1u);
+	const uint64_t sticky = min_latency_box                   ? 0
+				: sticky_floor_frames > sticky_limit ? sticky_limit
+								     : sticky_floor_frames;
 	*target_frames = genlock_n1_shallow_target_frames(base_frames, measured > sticky ? measured : sticky,
 							  window_deep, min_latency_box, capped);
 	*measuring = false;
@@ -7016,9 +7024,10 @@ static void genlock_shallow_latch(obs_source_t *source, uint64_t tick_wall, uint
 					       source->genlock_shallow_floor_max_frames > base_frames + high
 				       ? source->genlock_shallow_floor_max_frames
 				       : base_frames + high;
-	/* design 5844353368: the sticky content floor raised the ask (0 on the min-latency box); the line
-	 * names it (sticky_floor_frames=) so a latch above latch_floor_frames reads as the sticky floor. */
-	const uint64_t wanted = window_deep ? base_frames + 1 : (asked > sticky_floor ? asked : sticky_floor) + 1;
+	/* design 5844353368: wanted_frames stays the p90 floor's own ask; the line names the sticky content
+	 * floor separately (sticky_floor_frames=, 0 on the min-latency box), so a latch above
+	 * latch_floor_frames + 1 reads as the sticky floor holding the song depth (limited to base + 2). */
+	const uint64_t wanted = window_deep ? base_frames + 1 : asked + 1;
 	blog(source->genlock_shallow_capped ? LOG_WARNING : LOG_INFO,
 	     "genlock-shallow-lock '%s': depth_frames=%llu floor_max_frames=%llu base_frames=%llu "
 	     "latch_floor_frames=%llu spread_frames=%llu rejects=%u "

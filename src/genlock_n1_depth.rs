@@ -687,11 +687,17 @@ pub fn n1_shallow_track(s: &mut ShallowDepth, t: ShallowTick) -> bool {
         return false;
     }
     // design 5844353368: a lock never latches under the source's sticky content floor (none on a
-    // min-latency box); the clamp and the min-latency cap still apply through the target.
+    // min-latency box). The floor is absolute frames and may come from a HIGHER pin (review round 1),
+    // so it is limited to the clamp's own floor (base + N1_SHALLOW_MAX_EXTRA_FRAMES − 1): a sticky
+    // floor alone never produces a capped latch, whose `fell` watch would re-measure every window
+    // until the floor decayed. The measured p90 keeps its own clamp + report.
     let sticky = if t.min_latency_box {
         0
     } else {
-        t.sticky_floor_frames
+        t.sticky_floor_frames.min(
+            t.base_frames
+                .saturating_add(N1_SHALLOW_MAX_EXTRA_FRAMES - 1),
+        )
     };
     let (d, capped) = n1_shallow_target_frames(
         t.base_frames,

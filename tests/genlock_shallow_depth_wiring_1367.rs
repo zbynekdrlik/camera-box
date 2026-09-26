@@ -403,8 +403,8 @@ fn the_latch_never_goes_under_the_sticky_content_floor_1367() {
     }
     assert_in(
         &src,
-        "const uint64_t sticky = min_latency_box ? 0 : sticky_floor_frames;",
-        "the latch never goes under the sticky floor, and ignores it on the min-latency box",
+        "const uint64_t sticky = min_latency_box ? 0 : sticky_floor_frames > sticky_limit ? sticky_limit : sticky_floor_frames;",
+        "the latch never goes under the sticky floor (limited to base + 2, never a capped latch), and ignores it on the min-latency box",
     );
     assert_eq!(
         src.matches("genlock_n1_shallow_sticky_track(").count(),
