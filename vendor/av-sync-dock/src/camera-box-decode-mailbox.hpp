@@ -42,6 +42,16 @@
 
 namespace camerabox {
 
+/* Raise `a` to `v` if `v` is larger (lock-free high-water mark). The dock keeps the per-diag-window
+ * max of st_raw_video's own cost this way: written on the video-output thread, read-and-reset with
+ * exchange(0) on the audio thread's diag tick. */
+inline void cb_atomic_max_u64(std::atomic<uint64_t> &a, uint64_t v)
+{
+	uint64_t cur = a.load(std::memory_order_relaxed);
+	while (v > cur && !a.compare_exchange_weak(cur, v, std::memory_order_relaxed))
+		;
+}
+
 template<typename Job> class CbDecodeMailbox {
 public:
 	CbDecodeMailbox() {}
@@ -49,15 +59,18 @@ public:
 	CbDecodeMailbox(const CbDecodeMailbox &) = delete;
 	CbDecodeMailbox &operator=(const CbDecodeMailbox &) = delete;
 
-	/* Spawn the worker; `decode` runs on it once per job taken. Returns false when already running
-	 * or when the thread cannot be created (the mailbox then stays stopped). Clears any frame left
-	 * pending by a previous run, so a restart never decodes a stale frame. */
-	bool start(std::function<void(Job &)> decode)
+	/* Spawn the worker; `decode` runs on it once per job taken, and `on_thread_start` (optional)
+	 * once on the new thread before the first job -- the place to name the thread and lower its
+	 * priority. Returns false when already running or when the thread cannot be created (the
+	 * mailbox then stays stopped). Clears any frame left pending by a previous run, so a restart
+	 * never decodes a stale frame. */
+	bool start(std::function<void(Job &)> decode, std::function<void()> on_thread_start = std::function<void()>())
 	{
 		std::lock_guard<std::mutex> lock(mutex_);
 		if (running_ || thread_.joinable())
 			return false;
 		decode_ = std::move(decode);
+		on_thread_start_ = std::move(on_thread_start);
 		pending_full_ = false;
 		stop_requested_ = false;
 		running_ = true;
@@ -118,6 +131,10 @@ public:
 private:
 	void run()
 	{
+		/* on_thread_start_ is written in start() under the lock before this thread exists and
+		 * not touched again until the thread is joined, so it is read here without the lock. */
+		if (on_thread_start_)
+			on_thread_start_();
 		std::unique_lock<std::mutex> lock(mutex_);
 		for (;;) {
 			cv_.wait(lock, [this]() { return stop_requested_ || pending_full_; });
@@ -142,6 +159,7 @@ private:
 	bool running_ = false;
 	bool stop_requested_ = false;
 	std::function<void(Job &)> decode_;
+	std::function<void()> on_thread_start_;
 	std::atomic<uint64_t> dropped_{0};
 	std::atomic<uint64_t> taken_{0};
 };

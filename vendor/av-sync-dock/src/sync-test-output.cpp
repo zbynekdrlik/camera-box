@@ -17,7 +17,25 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 */
 
+#if defined(_WIN32)
+/* issue 1367: SetThreadPriority for the video decode worker. NOMINMAX keeps windows.h's min/max
+ * macros away from the std::min/std::max this file uses. */
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#elif defined(__linux__)
+#include <cerrno>
+#include <sys/resource.h>
+#include <sys/syscall.h>
+#include <unistd.h>
+#endif
 #include <obs-module.h>
+#include <util/threading.h>
+#include <util/platform.h>
 #include <inttypes.h>
 #include <deque>
 #include <list>
@@ -35,6 +53,7 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 #include "camera-box-qr.hpp"
 #include "camera-box-audio.hpp"
 #include "camera-box-video.hpp"
+#include "camera-box-frame-copy.hpp"
 #include "camera-box-decode-mailbox.hpp"
 
 #include "plugin-macros.generated.h"
@@ -140,8 +159,8 @@ struct corner_type
  * once they have grown. */
 struct st_marker_patch
 {
-	uint32_t x0 = 0, y0 = 0, w = 0, h = 0;
-	std::vector<uint8_t> luma; // w x h intensity samples of the full-res frame, origin (x0, y0)
+	camerabox::CbPatchRect rect; // the circle's bounding box in the full-res frame
+	std::vector<uint8_t> luma;   // rect.w x rect.h intensity samples, origin (rect.x0, rect.y0)
 };
 
 struct st_video_decode_job
@@ -313,6 +332,10 @@ struct sync_test_output
 	 * video-output thread) only publishes a bounded copy of the frame here; the worker runs the
 	 * decoders on it. Started in st_start, stopped + joined in st_stop / st_destroy. */
 	camerabox::CbDecodeMailbox<st_video_decode_job> cb_decode_mailbox;
+	/* issue 1367: the max ns st_raw_video itself took (snapshot + copy + publish) since the last diag
+	 * line -- the video-output thread's remaining cost, reported as publish_max_us. Raised on the
+	 * video thread with cb_atomic_max_u64, read-and-reset on the audio thread's diag tick. */
+	std::atomic<uint64_t> cb_publish_max_ns{0};
 
 	~sync_test_output()
 	{
@@ -329,6 +352,7 @@ struct sync_test_output
 
 static void video_marker_found(struct sync_test_output *st, uint64_t timestamp, float score);
 static void st_video_decode_job_run(struct sync_test_output *, st_video_decode_job &);
+static void st_decode_worker_thread_setup();
 
 static const char *st_get_name(void *)
 {
@@ -379,6 +403,10 @@ static uint8_t get_intensity_10le(const uint8_t *data)
 static bool st_start(void *data)
 {
 	auto *st = (struct sync_test_output *)data;
+
+	/* issue 1367: st_start rewrites state the decode worker reads (the quirc size, the video
+	 * geometry) -- join any worker left from a previous start first. A no-op when none runs. */
+	st->cb_decode_mailbox.stop();
 
 	const video_t *video = obs_output_video(st->context);
 	if (!video) {
@@ -469,8 +497,8 @@ static bool st_start(void *data)
 	/* issue 1367: the QR decode runs on this worker, never on libobs's video-output thread (a
 	 * decode there made OBS skip 28 % of output frames on the cg OBS). Started before data capture
 	 * so the first frame already has somewhere to go. */
-	if (!st->cb_decode_mailbox.running() &&
-	    !st->cb_decode_mailbox.start([st](st_video_decode_job &job) { st_video_decode_job_run(st, job); })) {
+	if (!st->cb_decode_mailbox.start([st](st_video_decode_job &job) { st_video_decode_job_run(st, job); },
+					 st_decode_worker_thread_setup)) {
 		blog(LOG_ERROR, "av-sync-dock: failed to start the video decode worker thread");
 		return false;
 	}
@@ -494,28 +522,9 @@ static void st_stop(void *data, uint64_t)
 	     (unsigned long long)st->cb_decode_mailbox.taken(), (unsigned long long)st->cb_decode_mailbox.dropped());
 }
 
-template<typename T> T sq(T x)
-{
-	return x * x;
-}
-
-static inline uint32_t diff_u32(uint32_t x, uint32_t y)
-{
-	if (x < y)
-		return y - x;
-	else
-		return x - y;
-}
-
-static inline uint32_t sqrt_u32(uint32_t x)
-{
-	uint32_t r = 0;
-	for (uint32_t b = 1 << 15; b; b >>= 1) {
-		if (sq(r | b) <= x)
-			r |= b;
-	}
-	return r;
-}
+/* issue 1367: norihiro's sq / diff_u32 / sqrt_u32 circle-row math moved, unchanged, into
+ * camera-box-frame-copy.hpp (cb_marker_circle_row / cb_isqrt_u32), where the self-test proves the
+ * copied marker patches cover every pixel it reads. */
 
 static inline int qrcode_length(const struct corner_type *cc)
 {
@@ -595,36 +604,26 @@ static void cb_video_qr_record(struct sync_test_output *st, uint32_t frame_id, u
 /* issue 1367 (producer, libobs's video-output thread): sample norihiro's whole-frame QR grid --
  * every qr_step-th pixel of every qr_step-th row, the sampling st_raw_video_qrcode_decode used to do
  * straight into quirc's buffer -- into the decode job, at the size quirc_resize() got in st_start. */
+/* issue 1367: the frame's first plane as camera-box-frame-copy.hpp reads it. */
+static camerabox::CbPlaneView st_plane_view(const struct sync_test_output *st, const struct video_data *frame)
+{
+	camerabox::CbPlaneView v;
+	v.data = frame->data[0];
+	v.linesize = frame->linesize[0];
+	v.pixelsize = st->video_pixelsize;
+	v.pixeloffset = st->video_pixeloffset;
+	v.intensity = st->video_get_intensity;
+	return v;
+}
+
 static void st_norihiro_gather_grid(const struct sync_test_output *st, const struct video_data *frame,
 				    std::vector<uint8_t> &dst)
 {
-	const uint32_t w = st->qr_grid_w;
-	const uint32_t h = st->qr_grid_h;
-	const size_t need = (size_t)w * h;
+	const size_t need = (size_t)st->qr_grid_w * st->qr_grid_h;
 	if (dst.size() < need)
 		dst.resize(need);
-
-	const auto qr_step = st->qr_step;
-	const auto pixelsize = st->video_pixelsize * qr_step;
-	const uint8_t *linedata = frame->data[0] + frame->linesize[0] * (qr_step / 2);
-	auto *ptr = dst.data();
-	for (uint32_t y = 0; y < h; y++) {
-		const uint8_t *data = linedata + st->video_pixeloffset + st->video_pixelsize * (qr_step / 2);
-		if (!st->video_get_intensity) {
-			for (uint32_t x = 0; x < w; x++) {
-				*ptr++ = *data;
-				data += pixelsize;
-			}
-		}
-		else {
-			for (uint32_t x = 0; x < w; x++) {
-				*ptr++ = st->video_get_intensity(data);
-				data += pixelsize;
-			}
-		}
-
-		linedata += frame->linesize[0] * qr_step;
-	}
+	camerabox::cb_copy_step_grid(st_plane_view(st, frame), st->qr_step, st->qr_grid_w, st->qr_grid_h,
+				     dst.data());
 }
 
 /* Decode worker thread (issue 1367): `grid` is the qr_grid_w x qr_grid_h sample
@@ -707,43 +706,15 @@ static void st_raw_video_qrcode_decode(struct sync_test_output *st, const uint8_
 static void st_marker_cut_patches(const struct sync_test_output *st, const struct video_data *frame,
 				  struct st_video_decode_job &job)
 {
-	const uint32_t pixelsize = st->video_pixelsize;
+	const camerabox::CbPlaneView v = st_plane_view(st, frame);
 	for (size_t i = 0; i < N_CORNERS; i++) {
 		const struct corner_type c = job.corners[i];
 		struct st_marker_patch &p = job.patches[i];
-		p.x0 = p.y0 = p.w = p.h = 0;
-		if (c.r == 0)
-			continue;
-		const uint32_t y0 = c.y > c.r ? c.y - c.r : 0;
-		const uint32_t y1 = std::min(c.y + c.r, st->video_height);
-		const uint32_t x0 = c.x > c.r ? c.x - c.r : 0;
-		const uint32_t x1 = std::min(c.x + c.r, st->video_width);
-		if (y1 <= y0 || x1 <= x0)
-			continue;
-		p.x0 = x0;
-		p.y0 = y0;
-		p.w = x1 - x0;
-		p.h = y1 - y0;
-		const size_t need = (size_t)p.w * p.h;
+		p.rect = camerabox::cb_marker_patch_rect(c.x, c.y, c.r, st->video_width, st->video_height);
+		const size_t need = (size_t)p.rect.w * p.rect.h;
 		if (p.luma.size() < need)
 			p.luma.resize(need);
-		uint8_t *out = p.luma.data();
-		for (uint32_t y = y0; y < y1; y++) {
-			const uint8_t *data =
-				frame->data[0] + frame->linesize[0] * y + st->video_pixeloffset + st->video_pixelsize * x0;
-			if (!st->video_get_intensity) {
-				for (uint32_t x = x0; x < x1; x++) {
-					*out++ = *data;
-					data += pixelsize;
-				}
-			}
-			else {
-				for (uint32_t x = x0; x < x1; x++) {
-					*out++ = st->video_get_intensity(data);
-					data += pixelsize;
-				}
-			}
-		}
+		camerabox::cb_copy_patch(v, p.rect, p.luma.data());
 	}
 }
 
@@ -766,20 +737,18 @@ static void st_raw_video_find_marker(struct sync_test_output *st, const struct s
 		const struct st_marker_patch &p = job.patches[i];
 		uint32_t y0 = c.y > c.r ? c.y - c.r : 0;
 		uint32_t y1 = std::min(c.y + c.r, st->video_height);
-		uint32_t sq_r = sq(c.r);
 
 		for (uint32_t y = y0; y < y1; y++) {
-			uint32_t dx = sqrt_u32(sq_r - sq(diff_u32(y, c.y)));
-			uint32_t x0 = c.x > dx ? c.x - dx : 0;
-			uint32_t x1 = std::min(c.x + dx, st->video_width);
+			const camerabox::CbSpan s = camerabox::cb_marker_circle_row(c.x, c.y, c.r, y, st->video_width);
 
 			uint32_t line_sum = 0;
 
-			/* x0..x1 lies inside the patch: dx <= r, and the patch spans c.x -/+ r clamped to the
-			 * frame, rows y0..y1. */
-			if (x0 < x1) {
-				const uint8_t *data = p.luma.data() + (size_t)(y - p.y0) * p.w + (x0 - p.x0);
-				for (uint32_t x = x0; x < x1; x++)
+			/* The span lies inside the patch the video thread copied (cb_marker_patch_rect), which
+			 * the self-test's corner sweep proves over every frame edge. */
+			if (s.x0 < s.x1) {
+				const uint8_t *data =
+					p.luma.data() + (size_t)(y - p.rect.y0) * p.rect.w + (s.x0 - p.rect.x0);
+				for (uint32_t x = s.x0; x < s.x1; x++)
 					line_sum += *data++;
 			}
 
@@ -1016,30 +985,7 @@ static void st_cb_gather_top_band(const struct sync_test_output *st, const struc
 	const size_t need = (size_t)st->video_width * plan.band_h;
 	if (dst.size() < need)
 		dst.resize(need);
-	uint8_t *src = dst.data();
-	const uint32_t pixelsize = st->video_pixelsize;
-	for (uint32_t y = 0; y < plan.band_h; y++) {
-		const uint8_t *line = frame->data[0] + (size_t)frame->linesize[0] * y + st->video_pixeloffset;
-		uint8_t *dstrow = src + (size_t)y * st->video_width;
-		if (!st->video_get_intensity && pixelsize == 1) {
-			/* 8-bit planar luma (NV12 / I420 / I444 ...): the row IS the intensity, so one memcpy
-			 * gives the same bytes as the per-pixel loop below and keeps the video thread's cost
-			 * to a plain copy. */
-			memcpy(dstrow, line, st->video_width);
-		} else if (!st->video_get_intensity) {
-			const uint8_t *d = line;
-			for (uint32_t x = 0; x < st->video_width; x++) {
-				dstrow[x] = *d;
-				d += pixelsize;
-			}
-		} else {
-			const uint8_t *d = line;
-			for (uint32_t x = 0; x < st->video_width; x++) {
-				dstrow[x] = st->video_get_intensity(d);
-				d += pixelsize;
-			}
-		}
-	}
+	camerabox::cb_copy_top_band(st_plane_view(st, frame), st->video_width, plan.band_h, dst.data());
 }
 
 /* issue 1367: libobs calls this on its ONE video-output thread, shared by every raw output on the
@@ -1059,6 +1005,7 @@ static void st_raw_video(void *data, struct video_data *frame)
 	if (!st->start_ts)
 		st->start_ts = frame->timestamp;
 
+	const uint64_t publish_start_ns = os_gettime_ns();
 	bool cb_active;
 	struct corner_type corners[N_CORNERS];
 	{
@@ -1077,6 +1024,25 @@ static void st_raw_video(void *data, struct video_data *frame)
 			st_marker_cut_patches(st, frame, job);
 		}
 	});
+	camerabox::cb_atomic_max_u64(st->cb_publish_max_ns, os_gettime_ns() - publish_start_ns);
+}
+
+/* issue 1367: once, on the decode worker thread before its first job. Named for crash dumps and
+ * profilers, and lowered below normal priority: when the CPU is tight the decode must yield to
+ * libobs's render / video-output / encoder threads, never compete with them. */
+static void st_decode_worker_thread_setup()
+{
+	os_set_thread_name("av-sync-dock: video decode");
+#if defined(_WIN32)
+	if (!SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL))
+		blog(LOG_WARNING, "av-sync-dock: could not lower the video decode worker priority");
+#elif defined(__linux__)
+	/* Per-thread nice on Linux: raise this thread's nice by 5 (lower priority). */
+	errno = 0;
+	const int nice_now = getpriority(PRIO_PROCESS, (id_t)syscall(SYS_gettid));
+	if (errno != 0 || setpriority(PRIO_PROCESS, (id_t)syscall(SYS_gettid), nice_now + 5) != 0)
+		blog(LOG_WARNING, "av-sync-dock: could not lower the video decode worker priority");
+#endif
 }
 
 /* issue 1367: the decode worker thread's per-frame body -- the decode st_raw_video used to run
@@ -1798,11 +1764,12 @@ static void st_raw_audio_camera_box(struct sync_test_output *st, struct audio_da
 		/* issue 1367: video_frames counts the frames the decode worker processed; decode_dropped
 		 * (appended at the END, existing tokens unchanged) the frames the video thread replaced in
 		 * the mailbox while the worker was still decoding, so video_frames + decode_dropped is every
-		 * frame OBS delivered. */
+		 * frame OBS delivered; publish_max_us the longest st_raw_video (the video-output thread's
+		 * remaining cost) since the previous diag line. */
 		blog(LOG_INFO,
 		     "av-sync-dock: diag video_frames=%llu video_decoded=%llu(%.1f%%) "
 		     "audio_samples=%llu preambles=%llu crc_ok=%llu crc_fail=%llu "
-		     "ring_hit=%llu ring_miss=%llu locked=%s state=%s decode_dropped=%llu",
+		     "ring_hit=%llu ring_miss=%llu locked=%s state=%s decode_dropped=%llu publish_max_us=%llu",
 		     (unsigned long long)vseen, (unsigned long long)vdec, vpct,
 		     (unsigned long long)st->cb_audio_pushed,
 		     (unsigned long long)st->cb_audio_dec->stats.preamble_screens_passed,
@@ -1810,7 +1777,8 @@ static void st_raw_audio_camera_box(struct sync_test_output *st, struct audio_da
 		     (unsigned long long)st->cb_audio_dec->stats.crc_fail,
 		     (unsigned long long)st->cb_ring_hits, (unsigned long long)st->cb_ring_misses,
 		     st->cb_lock_state ? "yes" : "no", input_stale ? "STALE" : "LIVE",
-		     (unsigned long long)st->cb_decode_mailbox.dropped());
+		     (unsigned long long)st->cb_decode_mailbox.dropped(),
+		     (unsigned long long)(st->cb_publish_max_ns.exchange(0) / 1000));
 
 		/* #1153: dead-pairing recovery, evaluated at the SAME ~10s cadence. When the pairing has
 		 * been dead for a full epoch (no meaningful ring-hit advance, no genuine lock) while
