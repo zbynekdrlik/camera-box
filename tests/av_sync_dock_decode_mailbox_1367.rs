@@ -246,7 +246,7 @@ fn worker_lifecycle_follows_the_output() {
     );
     assert!(
         start.contains("st_decode_worker_thread_setup)"),
-        "issue 1367: the worker thread must be named and lowered below normal priority"
+        "issue 1367: the worker thread must be named"
     );
     let start_at = start
         .find("st->cb_decode_mailbox.start(")
@@ -288,6 +288,26 @@ fn worker_lifecycle_follows_the_output() {
         dstop < dquirc,
         "issue 1367: the worker must be joined before quirc_destroy frees what it decodes with"
     );
+}
+
+/// Review round 2: the worker must NOT run below normal priority. The video-output thread takes
+/// `st->mutex` and the mailbox lock every frame, and the worker holds both briefly; on Windows a
+/// `std::mutex` (SRW lock) has no priority inheritance, so a starved below-normal worker preempted
+/// inside one of those sections would stall the video thread -- the stall this issue removes.
+#[test]
+fn worker_is_not_lowered_below_normal_priority() {
+    let src = code();
+    for banned in [
+        "SetThreadPriority(",
+        "THREAD_PRIORITY_BELOW_NORMAL",
+        "setpriority(",
+    ] {
+        assert!(
+            !src.contains(banned),
+            "issue 1367: `{banned}` -- a lowered decode worker can priority-invert onto the \
+             video-output thread through the shared locks"
+        );
+    }
 }
 
 #[test]

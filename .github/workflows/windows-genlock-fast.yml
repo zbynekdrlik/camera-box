@@ -725,8 +725,22 @@ jobs:
           if ($output -notmatch [regex]::Escape('obs_output_end_data_capture(st->context); st->cb_decode_mailbox.stop();')) {
             Write-Error "sync-test-output.cpp: st_stop no longer joins the decode worker after ending data capture (issue 1367)"; exit 1
           }
-          if (([regex]::Matches($output, [regex]::Escape('st->cb_decode_mailbox.stop();'))).Count -lt 2) {
-            Write-Error "sync-test-output.cpp: the decode worker is not joined in both st_stop and st_destroy (issue 1367)"; exit 1
+          $dsig = 'static void st_destroy(void *data)'
+          $di = $output.IndexOf($dsig)
+          if ($di -lt 0) { Write-Error "sync-test-output.cpp: st_destroy not found (issue 1367)"; exit 1 }
+          $dj = $output.IndexOf(' static ', $di + $dsig.Length)
+          if ($dj -lt 0) { $dj = $output.Length }
+          $dbody = $output.Substring($di, $dj - $di)
+          $dstop = $dbody.IndexOf('st->cb_decode_mailbox.stop();')
+          $ddel = $dbody.IndexOf('delete st;')
+          if ($dstop -lt 0 -or $ddel -lt 0 -or $dstop -gt $ddel) {
+            Write-Error "sync-test-output.cpp: st_destroy no longer joins the decode worker before freeing the output (issue 1367)"; exit 1
+          }
+          if (-not $body.Contains('job.timestamp = frame->timestamp;')) {
+            Write-Error "sync-test-output.cpp: the decode job no longer carries the frame's own timestamp (issue 1367)"; exit 1
+          }
+          if (-not $body.Contains('camerabox::cb_atomic_max_u64(st->cb_publish_max_ns, os_gettime_ns() - publish_start_ns);')) {
+            Write-Error "sync-test-output.cpp: st_raw_video no longer records its own cost for publish_max_us (issue 1367)"; exit 1
           }
           if ($output -notmatch [regex]::Escape('locked=%s state=%s decode_dropped=%llu publish_max_us=%llu')) {
             Write-Error "sync-test-output.cpp: the diag line no longer reports decode_dropped + publish_max_us (issue 1367)"; exit 1
