@@ -555,6 +555,47 @@ jobs:
           }
           Write-Output "dock bias observability (lag_idx/cands + pin-change marker, #1319) — OK"
 
+      - name: Assert dock decode runs off the video-output thread (issue 1367)
+        shell: pwsh
+        run: |
+          # issue 1367: the dock's per-frame QR decode ran inside st_raw_video, i.e. on libobs's ONE
+          # video-output thread; with QR content on screen OBS skipped 28 % of output frames for
+          # every raw output on the resolume cg OBS. The callback must only hand a bounded copy to
+          # the decode worker, which is started on output start and joined on stop/destroy. Mirrors
+          # tests/av_sync_dock_decode_mailbox_1367.rs (the mailbox policy itself is proven by the
+          # g++ self-test that Rust test compiles and runs on the Linux CI).
+          $output = (Get-Content "vendor/av-sync-dock/src/sync-test-output.cpp" -Raw) -replace '\s+', ' '
+          if ($output -notmatch [regex]::Escape('#include "camera-box-decode-mailbox.hpp"')) {
+            Write-Error "sync-test-output.cpp: camera-box-decode-mailbox.hpp is not included (issue 1367)"; exit 1
+          }
+          $sig = 'static void st_raw_video(void *data, struct video_data *frame)'
+          $i = $output.IndexOf($sig)
+          if ($i -lt 0) { Write-Error "sync-test-output.cpp: st_raw_video not found (issue 1367)"; exit 1 }
+          $j = $output.IndexOf(' static ', $i + $sig.Length)
+          if ($j -lt 0) { $j = $output.Length }
+          $body = $output.Substring($i, $j - $i)
+          if (-not $body.Contains('st->cb_decode_mailbox.publish(')) {
+            Write-Error "sync-test-output.cpp: st_raw_video no longer hands the frame copy to the decode worker (issue 1367)"; exit 1
+          }
+          foreach ($banned in @('st_raw_video_camera_box_decode(', 'st_raw_video_qrcode_decode(', 'st_raw_video_find_marker(', 'quirc_', 'signal_handler_signal(')) {
+            if ($body.Contains($banned)) {
+              Write-Error "sync-test-output.cpp: st_raw_video runs $banned on the video-output thread again (issue 1367) -- OBS would skip output frames"; exit 1
+            }
+          }
+          if ($output -notmatch [regex]::Escape('st->cb_decode_mailbox.start(')) {
+            Write-Error "sync-test-output.cpp: st_start no longer starts the decode worker (issue 1367)"; exit 1
+          }
+          if ($output -notmatch [regex]::Escape('obs_output_end_data_capture(st->context); st->cb_decode_mailbox.stop();')) {
+            Write-Error "sync-test-output.cpp: st_stop no longer joins the decode worker after ending data capture (issue 1367)"; exit 1
+          }
+          if (([regex]::Matches($output, [regex]::Escape('st->cb_decode_mailbox.stop();'))).Count -lt 2) {
+            Write-Error "sync-test-output.cpp: the decode worker is not joined in both st_stop and st_destroy (issue 1367)"; exit 1
+          }
+          if ($output -notmatch [regex]::Escape('locked=%s state=%s decode_dropped=%llu')) {
+            Write-Error "sync-test-output.cpp: the diag line no longer reports decode_dropped (issue 1367)"; exit 1
+          }
+          Write-Output "dock decode off the video-output thread (issue 1367) — OK"
+
       # #116: assert the build-latch drain-to-target patch is present in the vendored
       # OBS source BEFORE the 150-min build, so a future `git subtree pull` (#44) that
       # reverts it fails HERE rather than shipping a binary where cameras freeze at
