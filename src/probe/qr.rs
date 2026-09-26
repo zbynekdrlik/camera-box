@@ -2233,7 +2233,9 @@ mod tests {
         // Composite BOTH the strih burn and cam3's burn into the frame (two distinct node
         // burns, as a real strih recording under cam3 test would carry: cam3's forwarded
         // capture burn + strih's own render burn). `dual_with_bottom_burn` only blits one
-        // burn, so blit a second one manually at a different corner.
+        // burn, so blit the camera burn manually where a real one sits: the capture-burn
+        // slot, bottom-centre (issue 1367: the camera-chain decode counts a node burn only
+        // in its own slot, so a camera burn drawn in the stream corner is an echo).
         let strih_burn = Payload {
             run_id: STRIH_ID,
             frame_id: 1670,
@@ -2246,11 +2248,12 @@ mod tests {
         };
         let mut luma = dual_with_bottom_burn(&left, &right, &strih_burn, 360, 0.0);
         let (w, h) = (1920u32, 1080u32);
-        let cam3_qr = render_payload_qr(&cam3_burn, 360);
+        let cam3_qr = render_payload_qr(&cam3_burn, CAM1_BURN_QR_PX);
         let (qw, qh) = (cam3_qr.width(), cam3_qr.height());
-        // Bottom-RIGHT corner (measured actual size, never the requested px) — clear of the
-        // strih burn `dual_with_bottom_burn` already placed bottom-LEFT.
-        blit_burn_luma(&mut luma, &cam3_burn, 360, w - qw - 40, h - qh - 40);
+        // The production capture-burn origin (measured actual size, never the requested px):
+        // bottom-centre, below the top dual-QR and clear of the strih burn bottom-LEFT.
+        let (ox, oy) = cam1_burn_origin(w, h, qw, qh);
+        blit_burn_luma(&mut luma, &cam3_burn, CAM1_BURN_QR_PX, ox, oy);
 
         // Precondition: the plain pass reads BOTH burns, never cam1's (it was never drawn).
         let plain = decode_qr_luma_all(luma.clone());
