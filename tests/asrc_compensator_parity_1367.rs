@@ -8,7 +8,7 @@
 //! otherwise compiled only by the genlock workflows.
 //!
 //! This gate compiles the REAL `asrc-compensator.c` (the whole file, its own header, no stub)
-//! under `-Wall -Wextra -Wconversion -Wformat=2 -Werror`, drives it through three closed-loop
+//! under `-Wall -Wextra -Wconversion -Wformat=2 -Werror`, drives it through four closed-loop
 //! scenarios from a small C `main`, and requires the printed 9-decimal trace to be byte-identical
 //! to the Rust authority driven the same way:
 //!
@@ -29,8 +29,11 @@
 //! - `tc` (issue 1367, design 5845361166): the TIMECODE mode — a genlock source placed at its NDI
 //!   timecode is fed its placement error and the stamp advance. A skipped slot booked as a loss and
 //!   paid at 1000 ppm, a held payment, a duplicated slot (no stamp advance, booked as a compress), a
-//!   placement at the stamp with an amount still owed (dropped), a no-op setpoint shift and a mode flip.
-//!   The three scenarios above never enter the mode, so they stay byte-identical to the pre-1367 trace.
+//!   placement at the stamp with an amount still owed (dropped), a no-op setpoint shift, a mode flip,
+//!   a skipped slot before the capture (inert) and a 12 ms stamp jump that re-bases the rate but sits
+//!   under the half-packet band (never booked, by the placement or by the residual). 12/12 scratch C
+//!   mutants of the mode diverge. The three scenarios above never enter the mode, so they stay
+//!   byte-identical to the pre-1367 trace.
 //!
 //! Per the project's test-strictness rule it FAILS LOUDLY rather than skipping when the C
 //! toolchain is missing — a parity test that silently passes without running is worse than none.
@@ -172,7 +175,9 @@ static void tcline(const char *tag, long k, const struct asrc_compensator *c, do
 
 /* issue 1367 (design 5845361166): the TIMECODE mode. The plant is the packet's placement error against
  * its stamp: the stamps advance 4 ppm faster than the samples, each packet is resampled by -(applied +
- * the taken recovery), and the error carries a +/-1.5 ms stamp-jitter pattern. A skipped slot (9000), a
+ * the taken recovery), and the error carries a +/-1.5 ms stamp-jitter pattern. A skipped slot before the
+ * capture (500, inert), a 12 ms stamp jump under the half-packet band that re-bases (30000, never
+ * booked, neither by the placement nor by the residual), a skipped slot (9000), a
  * held payment (9100-9129), a duplicated slot with no stamp advance (15000), a placement at the stamp
  * with an amount still owed (21000 after a second skip at 20990), a no-op setpoint shift (24000) and a
  * mode flip off and on (27000/27001). */
@@ -191,8 +196,12 @@ static void tc_scenario(void)
 	for (long k = 0; k < 36000; k++) {
 		bool placed = false;
 		double master_s = packet_s * (1.0 + 4.0 / 1000000.0);
-		if (k == 9000 || k == 20990)
+		if (k == 500 || k == 9000 || k == 20990)
 			place_ms -= packet_ms;
+		if (k == 30000) {
+			place_ms -= 12.0;
+			master_s += 0.012;
+		}
 		if (k == 15000) {
 			place_ms += packet_ms;
 			master_s = 0.0;
@@ -214,9 +223,9 @@ static void tc_scenario(void)
 			asrc_compensator_compensate(&c, packet_s, master_s, err, &applied);
 		recp = asrc_compensator_take_step_recover_ppm(&c);
 		place_ms += -(applied + recp) / 1000000.0 * packet_ms - 4.0 / 1000000.0 * packet_ms;
-		if (k % 1800 == 1799 || (k >= 8998 && k <= 9004) || (k >= 9098 && k <= 9132) ||
+		if (k % 1800 == 1799 || (k >= 498 && k <= 503) || (k >= 8998 && k <= 9004) || (k >= 9098 && k <= 9132) ||
 		    (k >= 14998 && k <= 15003) || (k >= 20988 && k <= 21003) || (k >= 23998 && k <= 24002) ||
-		    (k >= 26998 && k <= 27003))
+		    (k >= 26998 && k <= 27003) || (k >= 29998 && k <= 30004))
 			tcline("tc", k, &c, recp);
 	}
 }
@@ -393,8 +402,12 @@ fn rust_trace() -> Vec<String> {
         for k in 0..36000_i64 {
             let mut placed = false;
             let mut master_s = packet_s * (1.0 + 4.0 / 1000000.0);
-            if k == 9000 || k == 20990 {
+            if k == 500 || k == 9000 || k == 20990 {
                 place_ms -= packet_ms;
+            }
+            if k == 30000 {
+                place_ms -= 12.0;
+                master_s += 0.012;
             }
             if k == 15000 {
                 place_ms += packet_ms;
@@ -423,12 +436,14 @@ fn rust_trace() -> Vec<String> {
             let recp = c.take_step_recover_ppm();
             place_ms += -(applied + recp) / 1000000.0 * packet_ms - 4.0 / 1000000.0 * packet_ms;
             if k % 1800 == 1799
+                || (498..=503).contains(&k)
                 || (8998..=9004).contains(&k)
                 || (9098..=9132).contains(&k)
                 || (14998..=15003).contains(&k)
                 || (20988..=21003).contains(&k)
                 || (23998..=24002).contains(&k)
                 || (26998..=27003).contains(&k)
+                || (29998..=30004).contains(&k)
             {
                 out.push(tcline("tc", k, &c, recp));
             }
