@@ -206,8 +206,8 @@ _MICRO = ('{"date_authority":"master","date_offset_error_ms":%s,"date_step_bound
 
 
 def test_date_master_effective_bound_on_a_1_11_0_master_is_the_micro_bound(tmp_path):
-    master = (_STATUS / "strih-lx-master-1.11.0.json").read_text()
-    slave = (_STATUS / "stream-slave-1.11.0.json").read_text()
+    master = (_STATUS / "strih-lx-master-1.11.1.json").read_text()
+    slave = (_STATUS / "stream-slave-1.11.1.json").read_text()
     assert _bash_call(tmp_path, "date_master_effective_bound_us", master, 2000, 1000) == "6000"
     assert _bash_call(tmp_path, "date_master_effective_bound_us", master, 8000, 1000) == "8000"
     assert _bash_call(tmp_path, "date_master_effective_bound_us", slave, 2000, 1000) == "2000"
@@ -448,7 +448,7 @@ def test_gate_date_margin_is_the_one_shared_knob(tmp_path):
 
 
 def test_gate_passes_a_1_11_0_master_on_its_micro_bound(tmp_path):
-    p = _fresh(tmp_path, "strih", _STATUS / "strih-lx-master-1.11.0.json")
+    p = _fresh(tmp_path, "strih", _STATUS / "strih-lx-master-1.11.1.json")
     code, out, err = _gate(_MASTER_ONLY, DANTESYNC_GATE_WIN_HTTP_STRIH=str(p))
     assert code == 0, out + err
     assert "DATE MASTER OK" in out and "micro bound 5ms" in out
@@ -458,7 +458,7 @@ def test_gate_passes_a_1_11_0_master_on_its_micro_bound(tmp_path):
 def test_gate_fails_a_1_11_0_master_that_sits_inside_the_old_step_bound(tmp_path):
     """The 1.9.0 live master error (-28.776 ms) passed the 50 ms step bound; a 1.11.0 master holds
     the date to ~2-3 ms, so the same error is a master that stopped correcting."""
-    p = _fresh(tmp_path, "strih", _STATUS / "strih-lx-master-1.11.0.json",
+    p = _fresh(tmp_path, "strih", _STATUS / "strih-lx-master-1.11.1.json",
                ntp_offset_us=-28776, date_offset_error_ms=-28.776)
     code, out, err = _gate(_MASTER_ONLY, DANTESYNC_GATE_WIN_HTTP_STRIH=str(p))
     assert code == 20, out + err
@@ -466,7 +466,7 @@ def test_gate_fails_a_1_11_0_master_that_sits_inside_the_old_step_bound(tmp_path
 
 
 def test_gate_fails_a_1_11_0_master_falling_behind(tmp_path):
-    p = _fresh(tmp_path, "strih", _STATUS / "strih-lx-master-1.11.0.json",
+    p = _fresh(tmp_path, "strih", _STATUS / "strih-lx-master-1.11.1.json",
                date_correction_falling_behind=True)
     code, out, err = _gate(_MASTER_ONLY, DANTESYNC_GATE_WIN_HTTP_STRIH=str(p))
     assert code == 20, out + err
@@ -476,14 +476,14 @@ def test_gate_fails_a_1_11_0_master_falling_behind(tmp_path):
 def test_gate_refuses_a_1_11_0_master_whose_micro_corrections_are_paused(tmp_path):
     """Paused is WARN-level in the report consumers but fail-closed in the E2E [0/8] gate: the
     master has no UTC reading, so the fleet date is unverified (INCOMPLETE, 11)."""
-    p = _fresh(tmp_path, "strih", _STATUS / "strih-lx-master-1.11.0.json", date_micro_paused=True)
+    p = _fresh(tmp_path, "strih", _STATUS / "strih-lx-master-1.11.1.json", date_micro_paused=True)
     code, out, err = _gate(_MASTER_ONLY, DANTESYNC_GATE_WIN_HTTP_STRIH=str(p))
     assert code == 11, out + err
     assert "DATE MASTER PAUSED" in out
 
 
 def test_gate_passes_the_1_11_0_slave(tmp_path):
-    p = _fresh(tmp_path, "stream", _STATUS / "stream-slave-1.11.0.json")
+    p = _fresh(tmp_path, "stream", _STATUS / "stream-slave-1.11.1.json")
     code, out, err = _gate(_STREAM_ONLY, DANTESYNC_GATE_WIN_HTTP_STREAM=str(p))
     assert code == 0, out + err
     assert "DATE MASTER" not in out

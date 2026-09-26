@@ -15,11 +15,10 @@
 # The four @ files are /status captured read-only from the live fleet on 26.9.2026 (strih-lx master
 # and the stream slave, both dantesync 1.9.0) plus two legacy nodes synthesized from the pre-1.9.0
 # field shape (no clock_discipline / ptp_phase_locked / date_* fields).
-# The two 1.11.0 @ files (dantesync PR 121, the date micro-corrections) are those two live captures
-# extended with the 1.10.0 slew fields and the 1.11.0 micro fields in dantesync's own
-# src/status.rs order (date_offset_micro, date_micro_active, date_micro_last_us,
-# date_correction_rate_ms_per_min, date_correction_falling_behind, date_micro_paused); the master's
-# fleet-line error set to what 1.11.0 holds (-2.14 ms). A master that carries
+# The two 1.11.1 @ files are /status captured read-only from the same two live nodes on 26.9.2026
+# after the fleet roll to dantesync 1.11.1 (dantesync PR 121 date micro-corrections + PR 122): the
+# master reads date_offset_error_ms=0.471 with last_date_step_kind=micro; the slave is a follower.
+# They replaced the synthesized 1.11.0 fixtures. A master that carries
 # date_correction_falling_behind is graded on the micro bound (DANTESYNC_DATE_MICRO_BOUND_MS,
 # default 5) + margin, falling behind = out, paused = paused; a master without it (1.9.0 / 1.10.0)
 # is graded on date_step_bound_ms exactly as before (the mixed fleet during the roll).
@@ -60,8 +59,8 @@ master_error_not_finite	{"date_authority":"master","date_offset_error_ms":1e400,
 master_error_absurd	{"date_authority":"master","date_offset_error_ms":1e20,"date_step_bound_ms":50.0}	UNKNOWN	unknown	no
 master_bound_absurd	{"date_authority":"master","date_offset_error_ms":-1.0,"date_step_bound_ms":1e20}	UNKNOWN	unknown	no
 master_error_huge_integer	{"date_authority":"master","date_offset_error_ms":10000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000,"date_step_bound_ms":50.0}	UNKNOWN	unknown	no
-live_master_1_11_0	@tests/fixtures/dantesync_status_1372/strih-lx-master-1.11.0.json	PTP_PHASE_LOCK	ok	no
-live_slave_1_11_0	@tests/fixtures/dantesync_status_1372/stream-slave-1.11.0.json	PTP_PHASE_LOCK	none	no
+live_master_1_11_1	@tests/fixtures/dantesync_status_1372/strih-lx-master-1.11.1.json	PTP_PHASE_LOCK	ok	no
+live_slave_1_11_1	@tests/fixtures/dantesync_status_1372/stream-slave-1.11.1.json	PTP_PHASE_LOCK	none	no
 master_1_10_shape_on_step_bound	{"date_authority":"master","date_offset_error_ms":-28.8,"date_step_bound_ms":50.0,"date_slew_active":false,"date_slew_remaining_ms":null,"date_slew_ppm":null}	UNKNOWN	ok	no
 master_1_10_shape_past_step_bound	{"date_authority":"master","date_offset_error_ms":-51.5,"date_step_bound_ms":50.0,"date_slew_active":false,"date_slew_remaining_ms":null,"date_slew_ppm":null}	UNKNOWN	out	no
 micro_on_the_line	{"date_authority":"master","date_offset_error_ms":-2.1,"date_step_bound_ms":50.0,"date_micro_active":true,"date_micro_last_us":500,"date_correction_falling_behind":false,"date_micro_paused":false}	UNKNOWN	ok	no
