@@ -32,6 +32,21 @@ rate. The Tier-0 authority is `src/os_clock_discipline.rs`.
   offset, `asrc-residual-floor.md`). A "VBAN vs a Dante-clocked peer" check keeps that offset.
   Compare against a system-time-disciplined peer, or subtract `f_phase`.
 
+## Part D: libobs publishes the discipline outcome (`os_gettime_discipline()`)
+
+`os_clk_read_rate` records what each adjustment read hit in `os_clk_discipline` (one
+`InterlockedExchange` by the poller, outside the sequence window): ACTIVE, or the raw-QPC fallback
+DISABLED (adjustment disabled or zero) / READ_FAILED (the call returned FALSE; the values it may have
+written are discarded) / API_MISSING; UNKNOWN before the first poll. `enum
+os_gettime_discipline_state` + `EXPORT int os_gettime_discipline(void)` live in `util/platform.h`
+under `_WIN32` (a new obs.dll export). The GENLOCK LOCK indicator reads it for its media-clock term
+(`genlock-lock-indicator.md`): a fallback while dantesync answers is DEGRADED
+`media_clock:undisciplined`. Rust model: `Discipline` / `discipline_of` / `DisciplinedClock::now_read`
+in `src/os_clock_discipline.rs`; the fake-Win32 gate lifts the platform.h enum and checks the outcome
+and the clock value read by read (`the_discipline_outcome_is_published_read_by_read_part_d`, the
+fake adjustment returns `g_read_ok`). The values must equal `genlock_media_discipline` in
+`GenlockLockState.hpp` (`the_discipline_values_match_the_lock_indicator_mirror_part_d`).
+
 ## The API semantics — measured, not guessed
 
 - **The rate is `inc / adj`, NOT `adj / inc`.** `GetSystemTimeAdjustmentPrecise(&adj, &inc,
@@ -161,6 +176,15 @@ Gotchas:
 - Generating the Rust test from a Python edit script: a `\n` inside a C string in a Rust `r#"…"#`
   block must be written as `\\n` in a non-raw Python string, or the C `printf` gets a literal line
   break (the `ci-testing-gotchas.md` raw-byte class).
+
+## A fleet DATE step: what reads it now (issue 1372)
+
+Because this clock follows the rate and never a step, a dantesync fleet date step (up to ~50 ms,
+about every 1.8 h under dantesync 1.9.0) moves the wall clock against it at once. Three consumers
+handle that since issue 1372 — the render tick re-grids in ONE tick, the LOCK indicator books the
+step instead of reading it as `qpc_drift`, and the ASRC pays a confirmed sample loss back at
+1000 ppm. See `genlock-wall-step.md`. Never "fix" a date step by making this clock follow steps:
+every media-timestamped quantity (audio mixer, outputs, the ASRC master) would jump with it.
 
 ## Live verification after deploy (supervisor)
 

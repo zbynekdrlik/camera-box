@@ -1,7 +1,8 @@
-//! Shared by the N==1 parity gates (`tests/genlock_relock_selection_parity.rs` and
-//! `tests/genlock_shallow_depth_parity_1367.rs`): lift the contiguous issue-1367 N==1 +
-//! #1049 convergence block and its `#define`s VERBATIM from the vendored `obs-source.c`, compile
-//! it standalone under `-Werror` with a test `main`, and return the printed lines. A directory
+//! Shared by the genlock parity gates (`tests/genlock_relock_selection_parity.rs` and
+//! `tests/genlock_shallow_depth_parity_1367.rs`): lift the contiguous #1003 relock-selection
+//! block, or the issue-1367 N==1 + #1049 convergence block and its `#define`s, VERBATIM from the
+//! vendored `obs-source.c`, compile it standalone under `-Werror` with a test `main`, and return
+//! the printed lines. A directory
 //! module (`tests/genlock_n1_lift/mod.rs`), so cargo does not build it as a test target of its own.
 //! Each including test file uses a different subset, hence the module-level `dead_code` allow.
 #![allow(dead_code)]
@@ -14,6 +15,47 @@ const OBS_SOURCE: &str = "vendor/obs-studio/libobs/obs-source.c";
 
 fn repo(rel: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(rel)
+}
+
+/// The stub the lifted helpers need: only the fields they actually touch.
+pub const RELOCK_PRELUDE: &str = r#"#include <stdint.h>
+#include <stddef.h>
+#include <stdbool.h>
+#include <stdio.h>
+struct obs_source_frame { uint64_t timestamp; };
+typedef struct obs_source {
+    struct { struct obs_source_frame **array; size_t num; } async_frames;
+    uint64_t genlock_phase_anchor_ns;
+} obs_source_t;
+"#;
+
+/// Lift the `#1003` helper block verbatim from the vendored C.
+pub fn lift_relock_helpers() -> String {
+    let path = repo(OBS_SOURCE);
+    let src = fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+    let start = src
+        .find("static inline uint64_t genlock_abs_diff_ns(")
+        .unwrap_or_else(|| {
+            panic!(
+                "#1003: {OBS_SOURCE} no longer defines genlock_abs_diff_ns — the phase-continuity \
+             helpers are gone, so there is nothing to check parity against."
+            )
+        });
+    let last = src
+        .find("static inline uint64_t genlock_phase_anchor_from_present(")
+        .unwrap_or_else(|| {
+            panic!("#1003: {OBS_SOURCE} no longer defines genlock_phase_anchor_from_present")
+        });
+    let end = src[last..]
+        .find("\n}\n")
+        .map(|i| last + i + 3)
+        .expect("#1003: genlock_phase_anchor_from_present has no closing brace");
+    assert!(
+        end > start,
+        "#1003: the helper block in {OBS_SOURCE} is not contiguous — the lift would splice \
+         unrelated code. Keep the four #1003 helpers adjacent."
+    );
+    src[start..end].to_string()
 }
 
 /// #1049 — the SAME executable-parity discipline for the phase-convergence decision. Lifts the
@@ -109,12 +151,18 @@ pub fn compile_and_run_n1_block_with(
     c.push_str("int main(void){\n");
     c.push_str(main_body);
     c.push_str("    return 0;\n}\n");
+    compile_and_run_c(dirname, &c)
+}
 
+/// Write the C harness `c` to a scratch dir, compile it under `-Wall -Wextra -Werror` and return
+/// its printed lines (trimmed). FAILS LOUDLY (never skips) when no compiler is present or the
+/// lifted code does not compile.
+pub fn compile_and_run_c(dirname: &str, c: &str) -> Vec<String> {
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(dirname);
     fs::create_dir_all(&dir).expect("create the parity scratch dir");
     let cfile = dir.join("harness.c");
     let bin = dir.join("harness.bin");
-    fs::write(&cfile, &c).expect("write the parity harness");
+    fs::write(&cfile, c).expect("write the parity harness");
     let cc = std::env::var("CC").unwrap_or_else(|_| "cc".to_string());
     let out = Command::new(&cc)
         .args(["-std=gnu99", "-Wall", "-Wextra", "-Werror", "-O1"])
@@ -131,14 +179,18 @@ pub fn compile_and_run_n1_block_with(
         });
     assert!(
         out.status.success(),
-        "the lifted genlock convergence / issue-1367 N==1 block from {OBS_SOURCE} does NOT \
-         COMPILE standalone under -Wall -Wextra -Werror:\n--- cc stderr ---\n{}\n--- harness \
-         ---\n{c}",
+        "the lifted genlock block from {OBS_SOURCE} does NOT COMPILE standalone under -Wall \
+         -Wextra -Werror:\n--- cc stderr ---\n{}\n--- harness ---\n{c}",
         String::from_utf8_lossy(&out.stderr)
     );
     let run = Command::new(&bin)
         .output()
         .expect("the compiled parity harness failed to execute");
+    assert!(
+        run.status.success(),
+        "the parity harness exited non-zero: {}",
+        String::from_utf8_lossy(&run.stderr)
+    );
     String::from_utf8(run.stdout)
         .expect("harness stdout is utf-8")
         .lines()

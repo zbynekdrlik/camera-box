@@ -230,8 +230,9 @@ Each routes on the ONE resolver above; the Windows branch is kept (a future Wind
 - **phase/av-sync calibrate push plans**: `.202` → MCP `linux-strih-lx`, destination by fleet class
   (`/home/newlevel/.camera-box/<file>` on a linux-genlock box, `C:\ProgramData\camera-box\…` else).
 - **rig-dev-handover-check.sh**: the dantesync version item routes strih through the gate's
-  `--linux` arm on strih-lx via `strih_dantesync_nodes` (the same routing recording-e2e.sh's `[0/8]`
-  gate does inline since issue 1351).
+  `--linux` arm on strih-lx -- since issue 1372 via the gate's `--fleet` (strih-lx is a `linux` row in
+  `scripts/lib/dantesync-fleet.sh`); `strih_dantesync_nodes` lost its only caller and was removed.
+  recording-e2e.sh's `[0/8]` gate keeps its inline routing (issue 1351).
 - **recording-e2e.sh `[8/8]` text**: banner via `strih_access_label`, planner hand-off via
   `strih_planner_holder_note`, and the pull-back note + all three #652 cleanup plans are a
   `strih_platform` split whose linux branch calls a `strih_lx_*` helper (exact-path `rm -f --` over

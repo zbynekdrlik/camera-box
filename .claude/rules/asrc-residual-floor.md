@@ -8,7 +8,22 @@ paths:
   - "scripts/dantesync-version-gate.sh"
 ---
 
-# ASRC residual floor on `stream` = Dante-GM-vs-UTC frequency offset (≈ +8 ppm), not a defect
+# ASRC residual on `stream` `mbc`: ≈ 0 ppm today; the ≈ +8 / ≈ −6 ppm floors below are HISTORY
+
+**CURRENT (25.9.2026, issue 1372).** dantesync 1.9.0 takes the system-clock RATE from the Dante PTP
+tick only (NTP steps the date, `f_phase=0`), and the Windows OBS media clock follows that
+disciplined rate (issue 1372 part A, `.claude/rules/windows-disciplined-media-clock.md`). So the
+stream mixer clock and the Dante audio now tick together. Measured live: `estimated` −0.7 … +0.3 ppm
+per minute and `level` around its 113 ms target (issue 1372 comment 5840207034). The resolume `cg`
+VBAN measured at fohabl reads −0.04 ppm vs the Dante-clocked streams (comment 5840202393).
+**A steady `estimated` ≥ 3 ppm now means a clock left the Dante tick.** Check first:
+- dantesync `rate_source` / `f_phase` on stream and mbc (a node on `clock_discipline="legacy"`);
+- the `media_clock` facet of the genlock LOCK indicator (a build without the part A clock).
+
+Never tune the ASRC for it. Everything below describes the pre-1.9.0 states and stays for reading
+old logs.
+
+## History: the Dante-GM-vs-UTC floor (≈ +8 ppm) and the DVS port collision (≈ −18 ppm)
 
 The stream OBS log line `asrc: source 'mbc' estimated=<X>ppm applied=<X>ppm … starved_blocks=N` is
 the per-source ASRC servo (#803/#912) reporting the audio-clock-vs-wall-clock rate mismatch it is
@@ -205,3 +220,14 @@ Windows `os_gettime_ns()` run at the dantesync-disciplined SYSTEM-TIME rate
 - Tell the two apart by the deployed build (`GENLOCK_BUILD_SHA.txt` contains the issue-1372 change),
   never by the ppm value alone.
 - The health signal is still a flat `buffered_ms` / `level_avg=` near `target=`.
+
+## Addendum (issue 1372, 26.9.2026): `recover_ms=` — a confirmed sample loss being paid back
+
+A build with issue 1372 ends the `asrc:` line `… level_avg=<ms> (#1367) recover_ms=<ms> (issue 1372)`.
+Non-zero = a confirmed sample-count step (a real loss or duplicate of source samples, e.g. the ~44 ms
+of Dante audio `mbc` lost at a dantesync fleet date step) still owed, paid back at 1000 ppm. While
+it is non-zero, `target=` reads LOWER by the owed amount (the setpoint moves with the lost buffer and
+walks back), `level=`/`level_avg=` track it, and `cumulative_correction=` includes the stretch. A
+healthy loss is paid in about owed-ms seconds and `recover_ms=0.0` again; `applied=` stays in its
+steady band throughout. A recurring non-zero `recover_ms=` at every date step means the upstream
+Dante chain still drops samples at a step — the supervisor's rig investigation, not an ASRC tune.

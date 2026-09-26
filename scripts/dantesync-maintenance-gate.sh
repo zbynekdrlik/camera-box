@@ -19,7 +19,7 @@ set -euo pipefail
 # live lock/NTP/phase on the SAME cadence the fleet asserts strih/stream, REUSING the already-unit-
 # tested pure parsers rather than reinventing any:
 #   * ptp_locked_from_pipe_json / ntp_freshness_verdict (ntp_failed + ntp_age_s) /
-#     offset_us_from_pipe_json / phase_slew_enabled_from_pipe_json / abs_int  -- clock-offset-guard.sh
+#     offset_us_from_pipe_json / clock_discipline_class / abs_int              -- clock-offset-guard.sh
 #   * dantesync_version_from_version_output + DANTESYNC_VERSION_PIN                -- dantesync-version-gate.sh
 #   * obs_fleet_is_home / obs_fleet_host  (#1296 traveling-box home gate)          -- lib/obs-fleet.sh
 # It prints ONE honest row: SKIP when the box is away (never a false red), OK / ALARM / UNKNOWN
@@ -27,14 +27,16 @@ set -euo pipefail
 #
 # Acceptance fields graded (issue 1297 #4), all from the SAME :8898/status blob + `dantesync
 # --version`: dantesync --version == pin, is_locked (PTP LOCKED), ntp_failed=false AND
-# ntp_age_s < 120 (one ntp_freshness_verdict), |ntp_offset_us| < 2000, phase_slew_enabled=true.
+# ntp_age_s < 120 (one ntp_freshness_verdict), |ntp_offset_us| < 2000, and the clock discipline
+# (issue 1372): dantesync 1.9.0's ptp_phase_lock with ptp_phase_locked=true, or on a pre-1.9.0 node
+# phase_slew_enabled=true -- clock_discipline_class, the ONE classifier the E2E gate also uses.
 #
 # Exit codes: 0 = OK or SKIP (away -- never a false red); 30 = ALARM (home + a field is wrong);
 #   11 = UNKNOWN (home but a field could not be read -- never a silent pass); 1 = usage/env error.
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/clock-offset-guard.sh
-. "$HERE/clock-offset-guard.sh"        # ptp_locked_from_pipe_json / ntp_freshness_verdict / offset_us_from_pipe_json / phase_slew_enabled_from_pipe_json / abs_int
+. "$HERE/clock-offset-guard.sh"        # ptp_locked_from_pipe_json / ntp_freshness_verdict / offset_us_from_pipe_json / clock_discipline_class / abs_int
 # shellcheck source=scripts/dantesync-version-gate.sh
 . "$HERE/dantesync-version-gate.sh"    # dantesync_version_from_version_output + DANTESYNC_VERSION_PIN
 # shellcheck source=scripts/lib/obs-fleet.sh
@@ -68,12 +70,12 @@ dantesync_maintenance_verdict() {
     return 0
   fi
 
-  local version ptp ntpf off slew
+  local version ptp ntpf off disc
   version="$(dantesync_version_from_version_output "$vout")"
   ptp="$(ptp_locked_from_pipe_json "$status")"
   ntpf="$(ntp_freshness_verdict "$status" "$fresh")"
   off="$(offset_us_from_pipe_json "$status")"
-  slew="$(phase_slew_enabled_from_pipe_json "$status")"
+  disc="$(clock_discipline_class "$status")"
 
   # Per-field token + state (OK|ALARM|UNKNOWN). Worst state wins the aggregate.
   local agg="OK"
@@ -103,11 +105,18 @@ dantesync_maintenance_verdict() {
   else
     otok="off ${off}us>${bound}"; [ "$agg" = UNKNOWN ] || agg="ALARM"
   fi
-  # phase_slew
-  case "$slew" in
-    true)  stok="phase-slew ENABLED" ;;
-    false) stok="phase-slew DISABLED"; [ "$agg" = UNKNOWN ] || agg="ALARM" ;;
-    *)     stok="phase-slew?"; agg="UNKNOWN" ;;
+  # clock discipline (issue 1372): the dantesync 1.9.0 PTP phase lock, or a pre-1.9.0 node's
+  # phase_slew state. A phase lock that is not locked is a READ, wrong field -> ALARM.
+  case "$disc" in
+    PTP_PHASE_LOCK) stok="clock ptp_phase_lock" ;;
+    LEGACY_SLEW)    stok="phase-slew ENABLED" ;;
+    LEGACY_NO_SLEW) stok="phase-slew DISABLED"; [ "$agg" = UNKNOWN ] || agg="ALARM" ;;
+    *)
+      if [ "$(clock_discipline_unlocked "$status")" = yes ]; then
+        stok="ptp-phase UNLOCKED"; [ "$agg" = UNKNOWN ] || agg="ALARM"
+      else
+        stok="clock-discipline?"; agg="UNKNOWN"
+      fi ;;
   esac
 
   printf '  %-10s %-8s (%s | %s | %s | %s | %s)\n' \

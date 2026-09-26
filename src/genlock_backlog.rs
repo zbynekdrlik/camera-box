@@ -591,6 +591,78 @@ pub fn relock_select_nearest(queue_ts: &[u64], wall_now_ns: u64, anchor_age_ns: 
     best
 }
 
+/// Issue 1367 (ROZHODNUTÉ 5840479751) — the age the BACKLOG relock's EXPECTED-depth pick targets:
+/// `expected_frames` whole frames (the depth the N==1 governor holds the source at,
+/// `crate::genlock_n1_depth::n1_expected_depth_frames`, 0 = none), floored at the configured
+/// latency exactly like the anchor ([`relock_anchor_age_ns`]). With no governor depth it IS the
+/// configured-latency pick. Mirror of the C `genlock_relock_select_expected()` target.
+pub fn relock_expected_age_ns(expected_frames: u64, latency_ms: u32, interval_ns: u64) -> u64 {
+    relock_anchor_age_ns(expected_frames.saturating_mul(interval_ns), latency_ms)
+}
+
+/// Issue 1367 (ROZHODNUTÉ 5840479751) — the BACKLOG relock's EXPECTED-depth pick over `queue_ts`
+/// (oldest first), the whole chain in one place: the arrival floor is the age of the NEWEST queued
+/// frame at `wall_now_ns` (the governor's own floor reference); on an N==1 source (`n1`, the
+/// caller's `n < 2 && last_known_n < 2` gate) the depth is the N==1 governor's
+/// `crate::genlock_n1_depth::n1_expected_depth_frames` with the latched shallow D, otherwise 0
+/// (the configured latency); the pick is [`relock_select_nearest`] at
+/// [`relock_expected_age_ns`]. Mirror of the C BACKLOG branch's `expected_frames_1367` +
+/// `genlock_relock_select_expected()`.
+pub fn relock_select_expected(
+    queue_ts: &[u64],
+    wall_now_ns: u64,
+    latency_ms: u32,
+    interval_ns: u64,
+    n1: bool,
+    shallow_target_frames: u64,
+) -> usize {
+    let expected = if n1 {
+        let floor = queue_ts
+            .last()
+            .map_or(0, |&newest| wall_now_ns.saturating_sub(newest));
+        crate::genlock_n1_depth::n1_expected_depth_frames(
+            floor,
+            latency_ms,
+            interval_ns,
+            shallow_target_frames,
+        )
+    } else {
+        0
+    };
+    relock_select_nearest(
+        queue_ts,
+        wall_now_ns,
+        relock_expected_age_ns(expected, latency_ms, interval_ns),
+    )
+}
+
+/// Issue 1367 — is the tracked phase anchor STALE for a BACKLOG relock?
+///
+/// `sel_anchor` is the index [`relock_select_nearest`] picks against the tracked anchor;
+/// `sel_expected` is the index it picks at the depth the source is SUPPOSED to hold
+/// ([`relock_expected_age_ns`]: `base + 1` on a deep N==1 source, the latched D on a governed
+/// shallow one, else the configured latency — ROZHODNUTÉ 5840479751). Both index the same queue,
+/// oldest first. `n` is the source's measured integer rate multiple over the canvas (2 for a
+/// 60-into-30 ingest).
+///
+/// A correct anchor sits at or within a frame of the expected pick. More than `n + 1` source
+/// frames behind it (one canvas tick of arrival jitter, plus one frame for a relock tick that
+/// runs a few ms late) means the anchor was sampled while frames were arriving LATE, an arrival
+/// burst. A relock that keeps it sheds only the frames that aged past it, a 60-into-30 source
+/// adds two frames per tick, and the depth never falls below the relock threshold, so the branch
+/// fires every tick for minutes (live 25.9.2026 20:50:58: cam6 relocked 5028 times, ~300 ms
+/// late, a 15-frame gap).
+///
+/// Returns `true` (drop the anchor and re-select against the configured latency) when the anchor
+/// pick is MORE than `n + 1` source frames behind the expected pick. `n == 0` (an unmeasured
+/// multiple) counts as 1. An anchor pick at or after the expected pick is never stale.
+///
+/// Mirror of the C `genlock_relock_anchor_is_stale()` (obs-source.c) — keep both in lock-step.
+pub fn relock_anchor_is_stale(sel_anchor: usize, sel_expected: usize, n: u32) -> bool {
+    let tolerance = (n.max(1) as usize).saturating_add(1);
+    sel_expected > sel_anchor && sel_expected - sel_anchor > tolerance
+}
+
 /// #1161 — the fail-open MARGIN (ticks) the ACQUIRE bracketing gate ([`relock_acquire_should_hold`])
 /// adds on top of `ceil(reserve/interval)` before it force-acquires regardless of queue depth.
 /// `ceil(reserve/interval)` is how many render ticks a from-empty queue needs to deepen the OLDEST
@@ -1633,7 +1705,13 @@ mod tests {
                     // relock sheds the overshoot and the anchor rebuilds from the next
                     // STEADY present. (ACQUIRE is exempt: idx 0 there just means "present
                     // the head", and the fresh lock stops the branch re-firing.)
-                    if backlog && i == 0 && self.phase_anchor_ns != 0 {
+                    // Issue 1367 (ROZHODNUTÉ 5840479751): the same reset when the anchor pick
+                    // sits more than n + 1 frames behind the pick at the depth the N==1
+                    // governor holds the source at (an arrival-burst phase). This sim is
+                    // 30-into-30 (n = 1) and carries no shallow latch (D = 0).
+                    let sel_expected = relock_select_expected(&q, wall, ms, I30, true, 0);
+                    let stale = relock_anchor_is_stale(i, sel_expected, 1);
+                    if backlog && (i == 0 || stale) && self.phase_anchor_ns != 0 {
                         self.phase_anchor_ns = 0;
                         i = relock_select_nearest(&q, wall, relock_anchor_age_ns(0, ms));
                     }
@@ -3767,3 +3845,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "genlock_backlog_stale_relock_tests.rs"]
+mod stale_relock_tests;

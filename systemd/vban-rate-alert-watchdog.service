@@ -1,0 +1,19 @@
+[Unit]
+# dev1-side inter-PC AUDIO rate gate (issue 1372 part C). ONE capture -> grade -> alert pass: a ~60 s
+# tcpdump on strih-lx (the dantesync-disciplined receiver, VBAN magic filter, snaplen 96) streamed
+# back to dev1, every VBAN stream ARRIVING there graded by FRAME COUNTER (rate vs nominal +-N ppm,
+# loss vs a ceiling) by the pure scripts/vban_rate.py. REPORT-ONLY (gates nothing); a confirmed fault
+# is on-air audio, so it re-pings on the production-critical time bucket. SHIPS DISABLED: the
+# supervisor installs + live-verifies + enables it, and calibrates the provisional bounds from data.
+Description=camera-box inter-PC VBAN rate/loss watchdog (issue 1372) — one capture/grade/alert pass
+Documentation=https://github.com/zbynekdrlik/camera-box
+
+[Service]
+Type=oneshot
+# %h = the installing user's home on dev1. Adjust if the checkout lives elsewhere.
+ExecStart=%h/devel/camera-box/scripts/vban-rate-alert-watchdog.sh
+# Per pass: the 60 s capture (VBAN_RATE_CAPTURE_S) + ssh setup + a python parse of a few MB.
+TimeoutStartSec=180
+
+[Install]
+WantedBy=default.target

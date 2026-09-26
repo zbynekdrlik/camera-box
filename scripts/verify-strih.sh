@@ -181,14 +181,25 @@ fi
 
 # 4c) issue 1346 (owner 24.9.2026): the fixed HDMI output = the in-OBS DRM-lease output (issue 1152),
 #     selectable Program / built-in Multiview -- never a projector window, never the desktop. SKIP
-#     when no HDMI monitor is connected (the kernel connector status; today's strih-lx is eDP-only).
+#     when no HDMI monitor is connected (the kernel connector status for a lease box; the X RandR
+#     view for a vk-direct box, whose NVIDIA connector reads `disconnected` in sysfs -- main design
+#     5840508308).
 #     With one plugged in: ~/.camera-box/drm-output.json must arm the lease (classified by the ONE
 #     Python grammar in strih_scenes.py, the C module's own contract) and the newest OBS log must
 #     reach `drm-output: program scanout LIVE` -- plus `drm-output: multiview bind LIVE` for the
 #     multiview view. The pure verdict is strih_drm_output_verdict (scripts/lib/strih-drm-output.sh).
 DRM_CONF_V="${USER_HOME}/.camera-box/drm-output.json"
+DRM_BACKEND_FACT="$(strih_lx_hdmi_output_backend 2>/dev/null || echo "?")"
+DRM_XRANDR_V=""
+if [ "$DRM_BACKEND_FACT" = vk-direct ]; then
+  DRM_XRANDR_V="$(strih_drm_xrandr_query "$USER_HOME" "${USER_HOME##*/}")"
+fi
 DRM_HDMI=0
-strih_drm_hdmi_connected && DRM_HDMI=1
+if [ "$DRM_BACKEND_FACT" = vk-direct ] && [ -z "$DRM_XRANDR_V" ]; then
+  DRM_HDMI="?"   # the X view vk-direct needs was not readable: UNKNOWN by name, never "no HDMI"
+elif strih_drm_hdmi_connected /sys/class/drm "$DRM_BACKEND_FACT" "$DRM_XRANDR_V"; then
+  DRM_HDMI=1
+fi
 DRM_SUMMARY="? program"   # no classifier at all (strih_scenes / python3 missing) = unclassified
 if [ -f "$SCN_BIN" ] && command -v python3 >/dev/null 2>&1; then
   DRM_SUMMARY="$(python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); import strih_scenes as s; t = s.drm_output_config_text(sys.argv[2]); print(s.drm_output_lease_connector(t) or "-", s.drm_output_view_token(t))' \
@@ -196,6 +207,13 @@ if [ -f "$SCN_BIN" ] && command -v python3 >/dev/null 2>&1; then
 fi
 DRM_ARMED="${DRM_SUMMARY%% *}"
 DRM_VIEW_V="${DRM_SUMMARY##* }"
+# issue 1346: the config's backend against the box fact STRIH_HDMI_OUTPUT_BACKEND (a lease config on the
+# NVIDIA-driven HDMI never goes live). "?" = not read (an older installed strih_scenes) -- the check skips.
+DRM_BACKEND_V="?"
+if [ -f "$SCN_BIN" ] && command -v python3 >/dev/null 2>&1; then
+  DRM_BACKEND_V="$(python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); import strih_scenes as s; print(s.drm_output_backend_token(s.drm_output_config_text(sys.argv[2])))' \
+    "$(dirname "$SCN_BIN")" "$DRM_CONF_V" 2>/dev/null || echo "?")"
+fi
 DRM_LIVE=0
 DRM_MV_LIVE=0
 DRM_LOG="$(newest_log || true)"
@@ -204,14 +222,23 @@ if [ -n "$DRM_LOG" ]; then
   LC_ALL=C grep -aqF 'drm-output: program scanout LIVE' "$DRM_LOG" 2>/dev/null && DRM_LIVE=1
   LC_ALL=C grep -aqF 'drm-output: multiview bind LIVE' "$DRM_LOG" 2>/dev/null && DRM_MV_LIVE=1
 fi
-DRM_VERDICT="$(strih_drm_output_verdict "$DRM_HDMI" "$DRM_ARMED" "$DRM_VIEW_V" "$DRM_LIVE" "$DRM_MV_LIVE" || true)"
+# issue 1346 review: `program scanout LIVE` stays in the log after the vk-direct present loop died.
+DRM_VK_DEAD=0
+if [ -n "$DRM_LOG" ] && strih_drm_vk_present_dead < "$DRM_LOG"; then
+  DRM_VK_DEAD=1
+fi
+DRM_VERDICT="$(strih_drm_output_verdict "$DRM_HDMI" "$DRM_ARMED" "$DRM_VIEW_V" "$DRM_LIVE" "$DRM_MV_LIVE" "$DRM_BACKEND_V" "$DRM_BACKEND_FACT" "$DRM_VK_DEAD" || true)"
 case "$DRM_VERDICT" in
-  ok)                 ok   "HDMI output: DRM lease on ${DRM_ARMED} live, view ${DRM_VIEW_V} (${DRM_CONF_V} + the newest OBS log)" ;;
+  ok)                 ok   "HDMI output: ${DRM_ARMED} live (backend ${DRM_BACKEND_V}), view ${DRM_VIEW_V} (${DRM_CONF_V} + the newest OBS log)" ;;
+  x-unreadable)       bad  "HDMI output: the box fact is vk-direct, which detects the HDMI monitor through X RandR, but xrandr on :0 answered nothing (Xorg down, or ${USER_HOME}/.Xauthority unreadable for $(id -un)) -- cannot grade the HDMI output" ;;
   skip-no-hdmi)       note "HDMI output: SKIP -- no HDMI monitor connected, the DRM-lease output stays dormant (attach one and re-run setup-strih.sh step 6)" ;;
   hdmi-unplugged)     note "HDMI output: ${DRM_ARMED} is armed in ${DRM_CONF_V} but no HDMI monitor is connected (report-only)" ;;
   classify-failed)    bad  "HDMI output: could not classify ${DRM_CONF_V} (strih_scenes.py / python3 missing or its import failed) -- re-run setup-strih.sh step 6" ;;
   config-missing)     bad  "HDMI output: an HDMI monitor is connected but ${DRM_CONF_V} does not arm the DRM lease -- re-run setup-strih.sh (step 6)" ;;
   view-invalid)       bad  "HDMI output: ${DRM_CONF_V} \"view\" is not program or multiview (OBS falls back to Program) -- fix it in OBS Tools > HDMI výstup" ;;
+  backend-invalid)    bad  "HDMI output: ${DRM_CONF_V} \"backend\" is not lease or vk-direct (OBS keeps the output dormant) -- re-run setup-strih.sh step 6" ;;
+  backend-drift)      bad  "HDMI output: ${DRM_CONF_V} uses backend ${DRM_BACKEND_V} but the box fact STRIH_HDMI_OUTPUT_BACKEND is ${DRM_BACKEND_FACT} -- re-run setup-strih.sh step 6" ;;
+  present-dead)       bad  "HDMI output: the vk-direct present loop died in the newest OBS log ('vk-direct present loop exited' with no stop after it) -- read its drm-output: lines, then restart strih-obs.service" ;;
   lease-not-live)     bad  "HDMI output: ${DRM_ARMED} is armed but the newest OBS log never reached 'drm-output: program scanout LIVE' -- read its drm-output: lines, then restart strih-obs.service" ;;
   multiview-not-live) bad  "HDMI output: the view is multiview but the newest OBS log has no 'drm-output: multiview bind LIVE' (the built-in Multiview never reached the scanout)" ;;
   *)                  bad  "HDMI output: unknown verdict '${DRM_VERDICT}'" ;;
@@ -241,14 +268,25 @@ fi
 #    offset with the PTP servo LOCKED is disciplined near-zero (the #550 reasoning) -> PASS; not
 #    locked -> FAIL (no trustworthy clock signal). setup-strih.sh step 2 refuses an ambiguous
 #    role+args shape (strih_lx_dantesync_role_ok) at install time; the role itself is graded in 6b.
+#    Issue 1372: under dantesync 1.9.0 strih-lx is the fleet DATE master, whose `(date authority,
+#    ..., step bound Nus)` journal line is graded on that step bound + margin through the shared
+#    dantesync_journal_clock_verdict (clock-offset-guard.sh), never on the 2 ms UTC bound.
 DS_ACTIVE="$(systemctl is-active dantesync 2>/dev/null || true)"
 if [ "$DS_ACTIVE" != active ]; then
   bad "dantesync.service not active (state='${DS_ACTIVE:-<none>}') -- clock undisciplined/free-running"
 else
   DS_JOURNAL="$(journalctl -u dantesync --no-pager -n 400 -o short-iso 2>/dev/null || true)"
-  case "$(dantesync_offset_verdict "$DS_JOURNAL" "${DANTESYNC_OFFSET_FRESHNESS_S:-300}" "${CLOCK_GUARD_BOUND_US:-2000}" "${DANTESYNC_STABILITY_US:-2000}")" in
+  # Issue 1372: strih-lx is the fleet DATE master under dantesync 1.9.0; its journal reads
+  # `[NTP] offset:-25217us (date authority, fleet line ..., step bound 50000us)` and is graded on
+  # that step bound + DATE_MASTER_MARGIN_US (the one DANTESYNC_DATE_MARGIN_US knob), median-only
+  # (dantesync_journal_clock_verdict). Any other journal line shape keeps the CLOCK_GUARD_BOUND_US +
+  # stability grade. The printed bound comes from the SAME decision the verdict uses.
+  DS_DATE_BOUND_US="$(dantesync_journal_date_bound_us "$DS_JOURNAL" "$DATE_MASTER_MARGIN_US")"
+  DS_BOUND_TXT="${CLOCK_GUARD_BOUND_US:-2000}us bound"
+  [ -n "$DS_DATE_BOUND_US" ] && DS_BOUND_TXT="date master step bound + ${DATE_MASTER_MARGIN_US}us margin = ${DS_DATE_BOUND_US}us"
+  case "$(dantesync_journal_clock_verdict "$DS_JOURNAL" "${DANTESYNC_OFFSET_FRESHNESS_S:-300}" "${CLOCK_GUARD_BOUND_US:-2000}" "${DANTESYNC_STABILITY_US:-2000}" "$DATE_MASTER_MARGIN_US")" in
     ok)
-      ok "dantesync active + FRESH clock offset within ${CLOCK_GUARD_BOUND_US:-2000}us bound" ;;
+      ok "dantesync active + FRESH clock offset within ${DS_BOUND_TXT}" ;;
     stale|absent)
       if [ "$(ptp_locked_from_journal "$DS_JOURNAL")" = LOCKED ]; then
         ok "dantesync active + PTP servo LOCKED (no fresh [NTP] line; offset disciplined near-zero, #550)"
@@ -256,7 +294,7 @@ else
         bad "dantesync active but NO fresh clock offset and PTP servo not LOCKED -- no trustworthy clock signal"
       fi ;;
     *)
-      bad "dantesync clock offset OUTSIDE the ${CLOCK_GUARD_BOUND_US:-2000}us bound / unstable -- a REAL clock desync" ;;
+      bad "dantesync clock offset OUTSIDE the ${DS_BOUND_TXT} / unstable -- a REAL clock desync" ;;
   esac
 fi
 
@@ -888,7 +926,8 @@ fi
 
 # 32) the shared OBS-box appliance baseline (issue 1357) -- the ONE grader verify-imag.sh runs too
 #     (scripts/lib/obs-box-baseline-verify.sh): network tuning, governor + strih-maxperf persistence,
-#     never-sleep, boot safety net, preempt=full low-latency kernel, AFFINITY-ONLY core reservation,
+#     the PM QoS CPU idle wake-up latency bound (`cstate`), never-sleep, boot safety net,
+#     preempt=full low-latency kernel, AFFINITY-ONLY core reservation,
 #     PRIME nvidia-primary, de-jitter, no operator crash popups, the lightdm -> openbox Xorg kiosk with
 #     GNOME purged, the openbox autostart contract, the power envelope, the touchpad InputClass. One
 #     PASS/FAIL line per item; a box missing ANY item FAILS (it supersedes the old never-sleep,

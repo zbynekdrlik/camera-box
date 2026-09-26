@@ -23,8 +23,10 @@
 //!   margin on the 1080-high design frame. The camera burn is rendered on the 1080 capture frame,
 //!   so on a recording of another height the slot scales with the height (640 px on 4K). A smaller
 //!   burn stays inside the centred, bottom-anchored slot.
-//! - Consumers: the recovery pass (`probe::burn_region_decode`) and the colour gate's burn dodge
-//!   (`probe::colour_sample::node_burn_exclusions`, the slots padded by 6 px).
+//! - Consumers: the recovery pass (`probe::burn_region_decode`), the colour gate's burn dodge
+//!   (`probe::colour_sample::node_burn_exclusions`, the slots padded by 6 px) and the issue-1367
+//!   echo gate (`probe::burn_echo`, via [`node_burn_in_own_slot`]: a node burn counts only when
+//!   read inside its own recovery crop).
 //! - Pins: `tests/burn_regions_cpp_parity_1370.rs` compiles the shipped `burn-geom.hpp` and checks
 //!   every corner on production, 720p, 4K and narrow canvases (default features). The probe-gated
 //!   tests in `src/probe/burn_region_decode.rs` check the camera slot against the `probe::qr`
@@ -197,6 +199,28 @@ pub fn slot_rect(slot: BurnSlot, frame_w: u32, frame_h: u32) -> Option<Rect> {
         h: side,
     };
     (r.x + r.w <= frame_w && r.y + r.h <= frame_h).then_some(r)
+}
+
+/// issue 1367 — may a decoded node burn count for its node? A node burn is a crisp overlay at ONE
+/// known place, so a read of a slotted run_id counts only when its detected centre `(cx, cy)`
+/// (frame pixels) lies inside that run_id's own [`recovery_crop`] (its slot plus the pad). A read
+/// anywhere else is an optical ECHO: a camera that films a monitor showing OBS (cam2 on the
+/// strih-lx HDMI multiview, run 386740541) captures decodable copies of earlier burns, its own
+/// among them.
+///
+/// A run_id without a slot ([`slot_for_run_id`] = `None`: the optical dual-QR, the aux marks, the
+/// SongPlayer burn, an unknown id) is never gated, so this returns `true` for it. A frame too small
+/// to hold the slot has no place a real burn could sit, so a slotted read there is `false`.
+pub fn node_burn_in_own_slot(run_id: u32, cx: f64, cy: f64, frame_w: u32, frame_h: u32) -> bool {
+    let Some(slot) = slot_for_run_id(run_id) else {
+        return true;
+    };
+    let Some(r) = recovery_crop(slot, frame_w, frame_h) else {
+        return false;
+    };
+    let (x0, y0) = (f64::from(r.x), f64::from(r.y));
+    // Half-open, like every Rect here; a NaN centre compares false and never counts.
+    cx >= x0 && cx < x0 + f64::from(r.w) && cy >= y0 && cy < y0 + f64::from(r.h)
 }
 
 /// The recovery crop for `slot`: its [`slot_rect`] grown by [`RECOVERY_PAD_PX`] (scaled with the
@@ -394,6 +418,102 @@ mod tests {
                 BurnSlot::BottomRight
             ]
         );
+    }
+
+    /// The slot centre of `slot` on a `w`x`h` frame (where a real burn's detected centre sits).
+    fn slot_centre(slot: BurnSlot, w: u32, h: u32) -> (f64, f64) {
+        let r = slot_rect(slot, w, h).unwrap();
+        (
+            f64::from(r.x) + f64::from(r.w) / 2.0,
+            f64::from(r.y) + f64::from(r.h) / 2.0,
+        )
+    }
+
+    #[test]
+    fn a_burn_at_its_own_slot_centre_counts_on_every_production_size_1367() {
+        for (w, h) in [(1920, 1080), (3840, 2160), (1280, 720)] {
+            for id in [
+                911_001, 911_007, 911_008, 911_009, 911_010, 911_011, 911_012, 911_002, 911_004,
+                911_003, 911_015,
+            ] {
+                let (cx, cy) = slot_centre(slot_for_run_id(id).unwrap(), w, h);
+                assert!(
+                    node_burn_in_own_slot(id, cx, cy, w, h),
+                    "{w}x{h}: {id} at its slot centre ({cx},{cy}) must count"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn the_real_run_386740541_reads_split_into_burns_and_echoes_1367() {
+        // Frame centres of the real rqrr reads on strih frames 1521 and 7790 (1920x1080).
+        let (w, h) = (1920, 1080);
+        // The crisp in-slot burns.
+        assert!(
+            node_burn_in_own_slot(911_009, 963.0, 916.0, w, h),
+            "cam2 39230 / 51769"
+        );
+        assert!(
+            node_burn_in_own_slot(911_002, 194.0, 893.0, w, h),
+            "strih 16607 / 22774"
+        );
+        // The echoes inside the multiview cells: cam3 17043 (Preview), strih 16602 / 22770
+        // (Program), cam2 51761 / 39220 (Program).
+        for (id, cx, cy) in [
+            (911_008, 481.0, 454.0),
+            (911_002, 1061.0, 442.0),
+            (911_009, 1442.0, 453.0),
+            (911_009, 1441.0, 453.0),
+        ] {
+            assert!(
+                !node_burn_in_own_slot(id, cx, cy, w, h),
+                "{id} at ({cx},{cy}) is an echo, never a burn"
+            );
+        }
+    }
+
+    #[test]
+    fn a_burn_id_read_in_another_nodes_slot_is_an_echo_1367() {
+        let (w, h) = (1920, 1080);
+        let (cam_x, cam_y) = slot_centre(BurnSlot::CameraCapture, w, h);
+        let (bl_x, bl_y) = slot_centre(BurnSlot::BottomLeft, w, h);
+        assert!(!node_burn_in_own_slot(911_002, cam_x, cam_y, w, h));
+        assert!(!node_burn_in_own_slot(911_009, bl_x, bl_y, w, h));
+        let (br_x, br_y) = slot_centre(BurnSlot::BottomRight, w, h);
+        assert!(!node_burn_in_own_slot(911_003, br_x, br_y, w, h));
+    }
+
+    #[test]
+    fn the_acceptance_region_is_the_recovery_crop_half_open_1367() {
+        // Camera crop on 1080: (792, 728, 336, 336) -> x in [792, 1128), y in [728, 1064).
+        let (w, h) = (1920, 1080);
+        assert!(node_burn_in_own_slot(911_001, 792.0, 728.0, w, h));
+        assert!(node_burn_in_own_slot(911_001, 1127.9, 1063.9, w, h));
+        assert!(!node_burn_in_own_slot(911_001, 1128.0, 900.0, w, h));
+        assert!(!node_burn_in_own_slot(911_001, 900.0, 1064.0, w, h));
+        assert!(!node_burn_in_own_slot(911_001, 791.9, 900.0, w, h));
+        assert!(!node_burn_in_own_slot(911_001, 900.0, 727.9, w, h));
+        // The pad grows the slot: 4 px outside the slot edge is still inside the crop.
+        assert!(node_burn_in_own_slot(911_002, 36.0, 734.0, w, h));
+    }
+
+    #[test]
+    fn an_unslotted_id_is_never_gated_1367() {
+        // Optical dual-QR run ids, the aux marks, SongPlayer: accepted anywhere, even on a frame
+        // with no slots at all.
+        for id in [386_740_541, 911_013, 911_014, 7] {
+            assert!(node_burn_in_own_slot(id, 0.0, 0.0, 1920, 1080), "{id}");
+            assert!(node_burn_in_own_slot(id, 1442.0, 453.0, 1920, 1080), "{id}");
+            assert!(node_burn_in_own_slot(id, 1.0, 1.0, 0, 0), "{id}");
+        }
+    }
+
+    #[test]
+    fn a_slotted_read_on_a_frame_without_the_slot_never_counts_1367() {
+        assert!(!node_burn_in_own_slot(911_002, 2.0, 500.0, 5, 1080));
+        assert!(!node_burn_in_own_slot(911_001, 0.0, 0.0, 0, 1080));
+        assert!(!node_burn_in_own_slot(911_001, f64::NAN, 900.0, 1920, 1080));
     }
 
     #[test]

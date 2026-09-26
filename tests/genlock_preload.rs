@@ -2177,9 +2177,17 @@ mod vendored_source {
         let src = squish(&vendor_file(OBS_SOURCE));
         assert!(
             src.contains("restore=%d (#1335) fallbacks=%u (#1355) \" \"level_avg=%.2fms (#1367)\"")
-                && src.contains("source->asrc.level_fallback_count, source->asrc.level_avg_ms);"),
-            "{OBS_SOURCE}: #1367 — the asrc: telemetry line no longer ends with level_avg= (the \
+                && src.contains("source->asrc.level_fallback_count, source->asrc.level_avg_ms,"),
+            "{OBS_SOURCE}: #1367 — the asrc: telemetry line no longer carries level_avg= (the \
              tick-free level) appended after the byte-identical fallbacks=%u (#1355) suffix."
+        );
+        // issue 1372: the confirmed-step recovery still owed rides AFTER level_avg= as recover_ms=,
+        // so every name-extracting parser of the line is unaffected.
+        assert!(
+            src.contains("\"level_avg=%.2fms (#1367)\" \" recover_ms=%.1f (issue 1372)\"")
+                && src.contains("source->asrc.level_avg_ms, source->asrc.step_recover_ms);"),
+            "{OBS_SOURCE}: issue 1372 — the asrc: telemetry line no longer ends with recover_ms= \
+             (the confirmed sample-count step still being paid back at ASRC_STEP_RECOVER_PPM)."
         );
     }
 
@@ -2228,11 +2236,15 @@ mod vendored_source {
              lock, count the step) is gone; a sample-loss step would bias the slope again."
         );
         assert!(
-            c.contains(
-                "if (c->level_captured && fabs(buffered_ms - c->level_target_ms) >= 0.5 * fabs(r_s * 1000.0)) c->level_restore = true;"
+            c.contains("asrc_step_recover_book(c, r_s, buffered_ms);")
+                && c.contains("if (deficit_ms * loss_ms <= 0.0 || fabs(deficit_ms) < 0.5 * fabs(loss_ms)) return;")
+                && c.contains("c->level_target_ms -= owed_ms - c->step_recover_ms;")
+                && c.contains(
+                "const double paid_ms = asrc_clamp(c->step_recover_ms, -budget_ms, budget_ms);"
             ),
-            "{ASRC_COMPENSATOR_C}: #1335 follow-up 2 — the level-corroborated fast-restore entry is \
-             gone; a sample-loss step would not refill the buffer."
+            "{ASRC_COMPENSATOR_C}: #1335 follow-up 2 / issue 1372 — the level-corroborated step \
+             booking (the owed amount paid back at ASRC_STEP_RECOVER_PPM) is gone; a sample-loss \
+             step would not refill the buffer."
         );
         assert!(
             // #1335 follow-up 5: the P term now reads the SMOOTHED error (c->level_err_ema_ms) at
@@ -3062,6 +3074,27 @@ mod vendored_source {
                 "const uint64_t consumed = (elapsed > last_tick_total) ? elapsed : last_tick_total;"
             ),
             "{OBS_CORE_C}: #1063 — obs_aux_sender_should_skip() no longer gates on max(elapsed, obs->video.last_tick_total_ns); the budget term is render-order-dependent again and an aux filter that decides early in the tick under-throttles."
+        );
+        // issue 1346: the self-excluding form (the DRM-output HDMI Multiview view) subtracts the
+        // caller's own previous render from the previous-tick total, saturating; the #879 wrapper
+        // is its self_last_ns = 0 case.
+        assert!(
+            api.contains(
+                "EXPORT bool obs_aux_sender_should_skip_excluding(uint32_t render_divisor, uint32_t frame_counter,"
+            ),
+            "{OBS_API}: issue 1346 — obs_aux_sender_should_skip_excluding() is not EXPORTed; the DRM-output view cannot exclude its own previous render and the HDMI Multiview halves to 15 fps again."
+        );
+        assert!(
+            core.contains(
+                "const uint64_t last_tick_total = (tick_total > self_last_ns) ? tick_total - self_last_ns : 0;"
+            ),
+            "{OBS_CORE_C}: issue 1346 — the aux seam no longer subtracts the caller's own previous render (saturating) from the previous-tick total; the view's cost is counted twice again."
+        );
+        assert!(
+            core.contains(
+                "return obs_aux_sender_should_skip_excluding(render_divisor, frame_counter, ewma_ns, consecutive_skips, 0);"
+            ),
+            "{OBS_CORE_C}: issue 1346 — obs_aux_sender_should_skip() is no longer the self_last_ns = 0 case of the _excluding form; the #879 aux senders may have changed behaviour."
         );
 
         let flt = squish(&vendor_file(NDI_FILTER));

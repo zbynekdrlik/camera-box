@@ -353,35 +353,9 @@ install -d -m 755 /opt/camera-box
 # duplicate `NDI CAMn (usb)` receivers). The full DATA name-map is strih_lx_seed_manifest_json.
 strih_lx_seed_manifest_json > /opt/camera-box/strih-lx-seed.json
 echo "  wrote /opt/camera-box/strih-lx-seed.json (operator collection: update-only, explicit strih input names NDI camN / NDI 2ME PVW / NDI 2ME PGM (mv) / cg / CG-obs, floor-3 pins)"
-# issue 1346 (owner 24.9.2026): the HDMI output is the in-OBS DRM-lease output (the imag hardware
-# output, issue 1152), selectable Program / built-in Multiview -- never an OBS projector window and
-# never the desktop. Its activation contract is ~/.camera-box/drm-output.json of the OBS user
-# (scripts/lib/strih-drm-output.sh). Provision it ONLY when an HDMI monitor is plugged in (the
-# connector name must come from X RandR), default view multiview; an existing file is the
-# operator's choice (the OBS Tools menu writes it) and is left alone. The retired 19.9. projector
-# config is removed; its type seeds the initial view.
-DRM_CONF_DIR="${USER_HOME}/.camera-box"
-DRM_CONF="${DRM_CONF_DIR}/drm-output.json"
-LEGACY_PROJ=/opt/camera-box/strih-lx-projector.json
-DRM_VIEW0="$(strih_drm_legacy_view "$(cat "$LEGACY_PROJ" 2>/dev/null || true)")"
-if [ -L "$DRM_CONF_DIR" ] || [ -L "$DRM_CONF" ]; then
-  warn "  SKIP issue 1346: ${DRM_CONF_DIR} or ${DRM_CONF} is a symlink -- refusing to write through it as root; remove it and re-run"
-elif [ -f "$DRM_CONF" ]; then
-  echo "  ${DRM_CONF} already present -- leaving the operator's HDMI output choice"
-elif strih_drm_hdmi_connected; then
-  DRM_CONN="$(sudo -u "$DESKTOP_USER" env DISPLAY=:0 XAUTHORITY="${USER_HOME}/.Xauthority" xrandr --query 2>/dev/null \
-    | strih_drm_hdmi_output_from_xrandr || true)"
-  if [ -n "$DRM_CONN" ] && DRM_LINE="$(strih_drm_output_config_json "$DRM_CONN" "$DRM_VIEW0")"; then
-    install -d -o "$DESKTOP_USER" -g "$DESKTOP_USER" "$DRM_CONF_DIR"
-    printf '%s\n' "$DRM_LINE" | install -m 0644 -o "$DESKTOP_USER" -g "$DESKTOP_USER" /dev/stdin "$DRM_CONF"
-    echo "  wrote ${DRM_CONF} (HDMI output ${DRM_CONN} = DRM lease, view ${DRM_VIEW0}; takes effect at the next OBS start)"
-  else
-    warn "  SKIP issue 1346: an HDMI monitor is connected but X RandR could not name it (Xorg :0 not up yet?) -- ${DRM_CONF} NOT provisioned; re-run setup-strih.sh after the kiosk session is up"
-  fi
-else
-  warn "  SKIP issue 1346: no HDMI monitor connected -- ${DRM_CONF} NOT provisioned (the fixed HDMI output stays dormant); attach the HDMI monitor and re-run setup-strih.sh"
-fi
-rm -f /opt/camera-box/strih-lx-projector.json
+# issue 1346: the fixed HDMI output's config ~/.camera-box/drm-output.json (Program / built-in Multiview,
+# the box's backend fact) -- the whole step lives in scripts/lib/strih-drm-output.sh.
+strih_drm_output_provision "$USER_HOME" "$DESKTOP_USER" "$HERE" "$(strih_lx_hdmi_output_backend)"
 if [ -n "${GH_TOKEN:-}" ]; then
   curl -fsSL -H "Authorization: token ${GH_TOKEN}" -H 'Accept: application/vnd.github.raw' \
     "https://api.github.com/repos/${GENLOCK_REPO}/contents/scripts/obs_phase2.py?ref=dev" \
@@ -624,6 +598,7 @@ obs_box_kiosk "$DESKTOP_USER" strih keep-bluetooth
 obs_box_power_envelope "$STRIH_PL1_W" strih_fetch_repo_file "$STRIH_PL1_STEPDOWN_W"
 obs_box_touchpad strih
 obs_box_maxperf_persistence strih
+obs_box_cpu_latency strih_fetch_repo_file   # issue 1357: the PM QoS idle wake-up latency bound (150 us)
 # Self-heal: the retired strih never-sleep logind drop-in -- obs_box_never_sleep's 99-strih-no-sleep.conf
 # + 99-production-no-powerkey.conf now own the lid/suspend/power-key policy, one source of truth.
 if [ -e /etc/systemd/logind.conf.d/90-strih-lx.conf ]; then

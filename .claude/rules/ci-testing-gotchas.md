@@ -1364,3 +1364,45 @@ The pattern that tests the real thing (`tests/python/test_camera_test_settings_1
 - PATH is the stub dir ONLY. Each stub therefore carries an absolute `#!<sys.executable>` shebang,
   because `#!/usr/bin/env python3` finds no python on that PATH.
 - Leaving a stub out (for example no `pgrep`) tests the "tool missing on the box" branch for free.
+
+## Editing a file that holds a credential literal the tool output shows as `<<REDACTED>>` (issue 1302)
+
+The session redacts credential values in every tool OUTPUT, so the Read/Edit view of a line like
+`"${CG_CHAIN_PW:-<value>}"` shows `<<REDACTED>>`. An `Edit` whose old_string contains that line never
+matches, and retyping it would write the placeholder into the file. Move or rewrite such code with a
+small python script run as `python3 /abs/script.py`: extract the literal with a regex
+(`re.search(r"\$\{CG_CHAIN_PW:-([^}]*)\}", s).group(1)`) and splice it into the new text without
+ever printing it. Test assertions should pin the env OVERRIDE, never the default value.
+
+
+## An EXIT trap that must restore remote state: four traps that each silently skipped the restore (issue 808)
+
+Found across three review rounds of `scripts/bkshading-deploy-relay.sh`'s "every exit after the box
+is touched restores it" trap. Each item below was reproduced, and each passed the first test that
+was written for it:
+
+- **`set -e` stays on inside an EXIT trap.** When the operator's terminal dies (HUP), the trap's
+  first `echo >&2` fails and bash exits before the restore runs. Start the trap with `set +e;
+  trap '' INT TERM HUP PIPE`.
+- **`{ echo msg >&2; } 2>/dev/null` sends the message itself to /dev/null.** The group's fd 2 is
+  redirected first, so the inner `>&2` follows it. The guarded form is `echo msg >&2 2>/dev/null`.
+  Redirections apply left to right, so fd 1 takes the real stderr before fd 2 is dropped.
+- **Clear the "box is dirty" flag only after the restore returned.** Otherwise a signal inside the
+  restore leaves the trap nothing to do. Keep a separate "restore in progress" flag, and re-run the
+  restore from the trap when it was interrupted. This is safe because it is idempotent: `remount,ro`
+  on an ro root and `start` on an active unit are no-ops.
+- **`trap ''` does not protect a child that installs its own handlers.** sshpass handles SIGINT and
+  forwards it to ssh, so a second Ctrl-C still kills the restore. Run the trap's remote calls under
+  `setsid -w`, outside the terminal's process group.
+  - **The test can hide this.** With an empty sshpass prefix, the fake ssh INHERITS the trap's
+    SIG_IGN and survives anyway, so the test passes without setsid.
+  - **What bites:** a fake sshpass (python) that installs a SIGINT handler, forwards the signal,
+    and starts its child with SIG_DFL. Then send `os.killpg` twice to a `start_new_session=True`
+    Popen.
+  - **Prove it:** delete the setsid line in a scratch copy and watch the test fail.
+
+## bash 5.2 `${var//pat/$rep}`: an `&` in `$rep` expands to the matched text (issue 808)
+
+`patsub_replacement` is on by default in bash 5.2, so `${body//__PROC__/$root}` with `root='/a&b'`
+yields `/a__PROC__b`. Quote the replacement: `"${body//__PROC__/"$root"}"`. The same applies to
+any template placeholder filled from a variable.

@@ -8,6 +8,8 @@ paths:
   - "vendor/distroav/src/burn-geom.hpp"
   - "tests/burn_reframed_fixture_decode_1370.rs"
   - "tests/burn_regions_cpp_parity_1370.rs"
+  - "src/probe/burn_echo.rs"
+  - "tests/burn_echo_fixture_decode_1367.rs"
 ---
 
 # Burn-isolated slot recovery — a crisp node burn decodes whatever the camera shows (issue 1370)
@@ -89,3 +91,69 @@ test crate, with stub `image`/`tracing` rlibs shaped like the used API. Measured
 the issue-1370 lane: across every pixel proof of run 68573319 (65 frames), the 1x slot crops read
 all 13 burns the production decode had missed. (That is a sample; the run's 280 slots are proven
 fixed only by a post-merge E2E whose BURN-UNREADABLE count drops.)
+
+Two extensions from the issue-1367 lane:
+- WHERE a read sits: print `grid.bounds` (the mean of the four corners) next to each content in
+  the harness, and map each crop's reads back through its offset and resize scale. That is how
+  the multiview echoes were found (`zbarimg` and OpenCV `detectAndDecodeMulti` give positions too).
+- Type-check a `qr.rs` edit without the image/qrcode crates: a python script extracts the edited
+  functions VERBATIM (regex from `fn name(` to the next `\n}\n`) into a replica module. Mount it
+  with the real `burn_regions.rs` / `burn_echo.rs` via `#[path]`, stub `rqrr_decode_all_catch`
+  and `binarize_otsu`, and run `clippy-driver --test -D warnings`.
+- Before trusting "flat vs grouped" routing, follow the call chain: `analyze_recording_with_burns`
+  (the flat-looking one) goes through the GROUPED per-frame decode.
+
+## The echo gate — a node burn counts only in its own slot (issue 1367)
+
+A camera that films a monitor showing OBS captures decodable copies of node burns. On run
+386740541 cam2 filmed the strih-lx HDMI multiview, and its Preview, Program and camera cells held
+burns, cam2's own among them. rqrr reads them like any QR.
+- The echoes put stale ids into cam2's contiguity (copies/gaps 145/151 and 51/53).
+- On frame 1521 an echo of strih's burn and one of cam3's burn satisfied the fast-path gate, so
+  the real burns were never read. The unpinned optical-short check was fooled the same way: two
+  cam2 ids (the real one and an echo) looked like a complete dual-QR.
+
+The gate:
+- `burn_regions::node_burn_in_own_slot(run_id, cx, cy, w, h)` is the pure predicate. A slotted
+  run_id counts only when its detected centre is inside its own `recovery_crop` (slot + pad,
+  half-open). An unslotted id (optical, aux 911013, SongPlayer 911014) always counts. A frame with
+  no room for the slot never counts a slotted read.
+- rqrr reads keep their grid centre (`probe::burn_echo::LocatedPayload`, the mean of the four
+  `bounds`). Each pass maps its reads back to frame pixels with its crop offset and resize scale:
+  tiles use `tw / tile.width()`, the 2x slot look uses 1/2.
+- `qr::decode_qr_luma_all_fast_then_robust_gated` is the one decode core. `NodeBurnGate::OwnSlot`
+  gates EVERY read of every pass BEFORE reads merge by id: full frame (plain, then Otsu), top band,
+  tiles and slot crops (`qr::decode_qr_luma_all_reads` returns the raw reads, no identity merge).
+  So an echo never reaches the optical-short check, the fast-path gate or the missing-burn list,
+  and an echo that carries the current id cannot shadow the in-slot read of that id.
+- EVERY recording analysis runs `OwnSlot`: `recording::analyze_recording*` all go through the
+  grouped decode, so strih, stream, imag, cg, the cam1 grab and the A/V / forensic tools are gated.
+  Only the per-frame helpers `qr::decode_qr_luma_all_fast_then_robust[_pathed]` and
+  `recording::decode_recording_frame[_with_burns]` run `Off`, byte-identical to before. No
+  recording goes through them; the synthetic latency tests use them with burns drawn anywhere.
+- The slot-crop pass also gates, but its crop IS the acceptance region, so for the slot's own ids
+  it can never reject. It is there so that no pass admits an echo, by construction.
+- Report-only count: distinct echoes per frame, summed per process
+  (`burn_echo::burn_echo_rejection_count`). Every partial carries `burn_echoes_rejected`
+  (additive, no schema bump). The verdict writes `burn_echoes_rejected: {strih, stream, imag, cg,
+  gates_overall_pass: false}`, null when not carried.
+
+Rules for a future change here:
+- A synthetic decode test that goes through the GROUPED decode or any `analyze_recording*` must
+  draw every node burn at its real slot (`qr::cam1_burn_origin` for a camera burn, `slot_rect`
+  for a corner). A camera burn drawn in a corner is an echo now. Two tests were fixed for this:
+  `grouped_gate_fast_path_when_deployed_camera_is_cam3_not_cam1` draws cam3 at the camera slot,
+  and `analyze_recording_recovers_a_softened_bottom_burn` uses strih's id for its bottom-left burn.
+- Before changing the slot geometry or the pad, re-run the fixture sweep. Every real decode
+  fixture (20 frames: burn-reframed-1370, burn-unreadable incl. two 4K, optical-soft, the #754
+  sweep frame, qr-align-moire-1239, tear-781) had ZERO slotted reads outside its own slot. The
+  sweep uses the real rqrr harness, with the grid centre printed from `bounds`, over the
+  production regions (full, top band, halves, tiles, slot crops).
+- Known limit: the seven camera ids share ONE slot, so an echo of another camera's burn whose
+  centre falls inside the camera recovery crop would count. In practice the opaque 320 px real
+  burn covers the slot and leaves only the 8 px pad, where no decodable echo fits.
+- A #202 tile whose plain pass read only echoes still gets its Otsu retry under `OwnSlot`
+  (`burn_echo::any_read_counts`); under `Off` the retry keeps the old "plain read nothing" rule.
+- A frame's echoes can hold the CURRENT id if a monitor shows the program with no delay. The echo
+  list then has an identity that also counts from the slot. That is harmless: the count is a
+  diagnostic, and the slot read is the burn (gating before the id merge is what keeps it).

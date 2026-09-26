@@ -688,23 +688,17 @@ phase_slew_enabled_from_pipe_json() {
     | sed -n 's/.*:[[:space:]]*\(true\|false\).*/\1/p' | tail -1 || true
 }
 
-# phase_slew_check LABEL STATE -> prints a status line; returns 0 ENABLED / 2 DISABLED /
-# 3 UNKNOWN. An unreadable state is NEVER treated as enabled (test-strictness: an unread field
-# must never look correct) -- DISABLED and UNKNOWN both mean the box will STEP, not slew.
-phase_slew_check() {
-  local label="$1" state="$2"
-  case "$state" in
-    true)
-      printf '  %-14s PHASE-SLEW ENABLED  (dantesync slews phase error, never steps -- #1215)\n' "$label"
-      return 0 ;;
-    false)
-      printf '  %-14s PHASE-SLEW DISABLED (dantesync will STEP the clock in discrete jumps -- #1215)\n' "$label"
-      return 2 ;;
-    *)
-      printf '  %-14s PHASE-SLEW UNKNOWN  (phase_slew_enabled unread -- status incomplete)\n' "$label"
-      return 3 ;;
-  esac
-}
+# --- CLOCK DISCIPLINE + DATE MASTER (issue 1372, dantesync 1.9.0) ------------------------------
+#
+# The bare phase_slew flag is no longer a health signal: dantesync 1.9.0 runs `ptp_phase_lock` with
+# phase slew off BY DESIGN. The ONE classifier (clock_discipline_class / clock_discipline_unlocked /
+# clock_discipline_check) and the ONE fleet date-master verdict (date_master_verdict /
+# date_master_effective_bound_us / date_master_check / dantesync_journal_clock_verdict) live in
+# their own lib, sourced here so every consumer of this guard gets them unchanged. The lib calls
+# this file's own parsers (phase_slew_enabled_from_pipe_json, abs_int, _freshest_ntp_offset_line,
+# dantesync_offset_verdict) at call time.
+# shellcheck source=scripts/lib/dantesync-clock-discipline.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib/dantesync-clock-discipline.sh"
 
 # offset_check LABEL OFFSET_US BOUND_US -> prints a status line; returns 0 OK / 2 DRIFT /
 # 3 UNKNOWN. OK iff |OFFSET_US| <= BOUND_US (NUMERIC compare). An empty OFFSET_US is UNKNOWN,

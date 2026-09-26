@@ -98,6 +98,13 @@ private:
 	 * GENLOCK_QPC_WINDOW_S. The qpc_drift verdict keys on the largest single-sample wall STEP in it; the
 	 * windowed RATE it also yields is report-only telemetry (never the unbounded cumulative offset). */
 	std::deque<std::pair<qint64, int64_t>> genlockQpcHistory;
+	/* camera-box issue 1372: monotonic ms of each wall step booked (re-based out of genlockQpcHistory)
+	 * within GENLOCK_QPC_WINDOW_S -- a second one in the window is a step storm and stays DEGRADED. */
+	std::deque<qint64> genlockQpcBookedSteps;
+	/* camera-box issue 1372 part D: (monotonic ms, wall-minus-media offset us) samples the widget takes
+	 * itself each tick, over GENLOCK_MEDIA_CLOCK_WINDOW_S. The media-clock term keys on their RATE (wall
+	 * steps left out): since part A the media clock follows the disciplined wall on every box. */
+	std::deque<std::pair<qint64, int64_t>> genlockMediaClockHistory;
 	/* #1341: per-input received-frame history (input name -> ring of (monotonic ms, cumulative
 	 * frames_received)) over GENLOCK_IDLE_WINDOW_MS. An input whose received DELTA over the window is
 	 * below GENLOCK_IDLE_INPUT_MIN_FRAMES is IDLE (keep-alive-only) and excluded from the DEGRADED
@@ -114,6 +121,21 @@ private:
 	int genlockJsonHeartbeatTicks = 0;
 	int genlockJsonLastState = -1;
 	int genlockJsonLastReason = -1;
+	/* camera-box issue 1372 part D: the media-clock sub-kind (drift / undisciplined) is part of the
+	 * change key while the reason is media_clock, so a switch between the two logs at once. */
+	int genlockLastLoggedMedia = -1;
+	int genlockJsonLastMedia = -1;
+
+	/* camera-box issue 1372 part D: one tick of the media-clock (audio clock) term. */
+	struct GenlockMediaClockTick {
+		int verdict = 0;      /* genlock_media_clock_t */
+		int64_t drift_us = 0; /* the non-step rate scaled to the window (us per window) */
+		int ready = 0;        /* the window spans >= 90 % */
+		int discipline = 0;   /* genlock_media_discipline_t */
+	};
+	GenlockMediaClockTick ReduceGenlockMediaClock(qint64 now_ms, bool clock_present);
+	/* camera-box issue 1372: book a fleet date step out of genlockQpcHistory (before the push). */
+	void BookGenlockWallStep(qint64 now_ms, int64_t qpc_signed_ms);
 
 	void UpdateGenlockLabel();
 	void PollGenlockClock();

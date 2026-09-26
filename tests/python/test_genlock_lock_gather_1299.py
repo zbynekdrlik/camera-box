@@ -169,3 +169,38 @@ def test_pre_v6_line_defaults_n_idle_none_and_idle_false():
     assert f["n_idle"] is None
     assert f["inputs"]["NDI cam1"]["idle"] is False
     assert f["inputs"]["NDIA cg stream"]["idle"] is False
+
+
+# --- issue 1372 part D (schema v7): the media (audio) clock facet ---------------------------------
+
+V7_MEDIA_DRIFT_LINE = (
+    '12:00:00.000: genlock-lock-json: {"v":7,"state":"DEGRADED","reason":"media_clock","n_inputs":4,'
+    '"n_locked":4,"n_absent":0,"n_idle":0,"latency_ms":3,"clock":"locked","output":"stamping",'
+    '"recent_event":false,"recent_event_inputs":[],"audio_unexpected_inputs":[],"qpc_drift_ms":67,'
+    '"inputs":[],"qpc_drift_ppm":13.500,"qpc_expected_ppm":13.000,"qpc_step":false,'
+    '"media_clock":{"state":"drift","drift_us":8100,"window_s":600,"ready":true,"discipline":"active"}}'
+    ' (#1299)\n'
+)
+
+
+def test_v7_line_carries_the_media_clock_facet():
+    f = bsg.genlock_lock_facet_from_log(V7_MEDIA_DRIFT_LINE)
+    assert f["state"] == "DEGRADED" and f["reason"] == "media_clock"
+    assert f["media_clock"] == {"state": "drift", "drift_us": 8100, "window_s": 600, "ready": True,
+                                "discipline": "active"}
+
+
+def test_pre_v7_line_omits_the_media_clock_facet():
+    # An older build has no media_clock object: the key is OMITTED, never a fabricated verdict.
+    for line in (LOCKED_LINE, UNLOCKED_LINE, RECEIVER_LOCKED_LINE):
+        assert "media_clock" not in bsg.genlock_lock_facet_from_log(line)
+
+
+def test_malformed_media_clock_object_is_omitted():
+    good = ('"media_clock":{"state":"drift","drift_us":8100,"window_s":600,"ready":true,'
+            '"discipline":"active"}')
+    for bad in ('"media_clock":"drift"', '"media_clock":{"drift_us":8100}', '"media_clock":{"state":1}'):
+        line = V7_MEDIA_DRIFT_LINE.replace(good, bad)
+        assert bad in line
+        f = bsg.genlock_lock_facet_from_log(line)
+        assert f is not None and "media_clock" not in f

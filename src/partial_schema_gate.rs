@@ -75,6 +75,17 @@ pub fn box_degrades_on_schema_mismatch(box_name: &str) -> bool {
     box_name == "imag"
 }
 
+/// Issue 1302 — is `box_name` a REPORT-ONLY leg whose partial is DROPPED on ANY load failure
+/// (schema mismatch, unreadable or corrupt JSON alike) instead of aborting the merge? `true` ONLY
+/// for the `cg` leg: the cg OBS (RESOLUME-SNV) partial feeds the REPORT-ONLY `cg_chain` section
+/// (`cg_chain_gate::gates_overall_pass()` is `false`), so a bad cg partial costs only that section.
+/// A fatal merge abort there would turn a report-only leg into a false RED of the camera gate.
+/// Unlike the imag degrade, a dropped cg leg REDs nothing: the section is omitted and the harness's
+/// `CG-LEG-NOT-VERIFIED` run-log marker names the miss.
+pub fn box_drops_on_any_load_failure(box_name: &str) -> bool {
+    box_name == "cg"
+}
+
 /// What to do with a partial whose `load` FAILED: DEGRADE (drop this leg, keep merging the rest,
 /// record the reason) or stay FATAL (abort the whole merge)?
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -89,16 +100,27 @@ pub enum PartialLoadDisposition {
 
 /// Classify a partial-load failure. `found_schema` is the version peeked from the file
 /// ([`peek_schema_version`]) — `None` when the file was not even valid JSON with a numeric
-/// `schema_version` (a non-schema failure). DEGRADES iff: the box degrades on a schema mismatch
-/// ([`box_degrades_on_schema_mismatch`] — imag only) AND a schema version WAS peeked AND it differs
-/// from `expected`. Every other failure — a hard-gate box (strih/stream), the imag box whose
-/// failure is NOT a clean schema mismatch (`None`), or a same-schema error — stays
+/// `schema_version` (a non-schema failure). DEGRADES iff: the box is the report-only cg leg
+/// ([`box_drops_on_any_load_failure`] — ANY failure, issue 1302), OR the box degrades on a schema
+/// mismatch ([`box_degrades_on_schema_mismatch`] — imag only) AND a schema version WAS peeked AND
+/// it differs from `expected`. Every other failure — a hard-gate box (strih/stream), the imag box
+/// whose failure is NOT a clean schema mismatch (`None`), or a same-schema error — stays
 /// [`PartialLoadDisposition::Fatal`].
 pub fn classify_load_failure(
     box_name: &str,
     found_schema: Option<u32>,
     expected_schema: u32,
 ) -> PartialLoadDisposition {
+    if box_drops_on_any_load_failure(box_name) {
+        let found = found_schema.map_or_else(|| "unreadable".to_string(), |v| v.to_string());
+        return PartialLoadDisposition::Degrade {
+            reason: format!(
+                "{box_name} partial could not be loaded (schema_version {found}, this build \
+                 expects {expected_schema}): dropped — the REPORT-ONLY cg_chain section is \
+                 omitted this run; the camera-chain verdict is unaffected (issue 1302)."
+            ),
+        };
+    }
     match found_schema {
         Some(found) if found != expected_schema && box_degrades_on_schema_mismatch(box_name) => {
             PartialLoadDisposition::Degrade {

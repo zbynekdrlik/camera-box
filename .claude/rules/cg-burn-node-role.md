@@ -7,6 +7,9 @@ paths:
   - "tests/harness_cg_chain_e2e_1302.rs"
   - "scripts/cg_chain_scene.py"
   - "tests/python/test_cg_chain_scene_1302.py"
+  - "scripts/recording-verdict-on-resolume.sh"
+  - "scripts/lib/verdict-upload-gate.sh"
+  - "tests/harness_cg_chain_onbox_1302.rs"
 ---
 
 # CG-path burn-id node role — SongPlayer (911014 ORIGIN) / cg OBS (911015 HOP), REPORT-ONLY (#1301)
@@ -105,7 +108,8 @@ on strih before `[7/8]`, ends the CG leg after the `[7/8]` StopRecord
 (`cg_chain_after_stoprecord`, placed AFTER the issue-1354 genlock-audit AFTER snapshot and the
 post-record stomp re-check so it never skews their "exactly the recording" window: cg StopRecord
 keeping the host path, burn OFF, strih AND cg OBS program changes restored — so nothing CG runs
-through the long on-box decodes), pulls the cg recording at `[8/8d]` (feeding `--cg`), and — the
+through the long on-box decodes), decodes the cg recording IN PLACE on RESOLUME-SNV at `[8/8]`
+(merged as a `cg=` partial, below), and — the
 #246/#844 leak-guard — repeats burn OFF + every scene restore in `cleanup()` even on an early abort
 (the burn must NEVER stay on the LED wall). cleanup()'s cg StopRecord is keyed on
 `CG_RECORDING_STARTED`, never on `CG_HOST_IP` alone (the host resolves BEFORE StartRecord — the
@@ -128,20 +132,69 @@ unattended.
   never reads true is a WARNING (the cg_chain section then proves nothing); an OFF that never reads
   false prints a `LEAK` line with the exact manual-off curl. Both always return 0.
 
-### The cg recording pull (issue 1302)
+### The cg recording is decoded IN PLACE on RESOLUME-SNV (issue 1302, the job-budget slice)
 
 `cg_chain_record_stop` keeps the `obs_phase2.py record --action stop` stdout (the StopRecord
-`outputPath`, e.g. `C:\Users\Resolume\Videos\<stamp>.mkv`) in `CG_HOST_RECORDING_PATH`; an empty
-answer (the `[8/8d]` / cleanup() re-stop) never clears it. With `CG_CHAIN_PULL_CMD` unset, the
-default pull fetches THAT file from `${CG_CHAIN_USER:-newlevel}@<cg-ip>` through the SHARED
-`win_ssh_download` (win-ssh-exec.sh — its `win_ssh_scp_source_path` fixes the backslash scp source
-that reads "No such file"), bounded by `CG_CHAIN_PULL_TIMEOUT` (900 s) via `timeout bash -c '. lib;
-win_ssh_download …'` (`timeout` cannot exec a shell function). Only this run's file is pulled; the
-recording now stops right after `[7/8]`, so it is the recording window, not the whole decode. The
-merge feeds `--cg` on `[ -f "$CG_RECORDING" ]`, so the pull first drops any stale destination and
-scps into `<dest>.part`, renamed only on success — a failed scp leaves NO file. The merge decodes it
-ON DEV1 (the main design's choice for this slice; the #703 on-box `--extract-partial` on resolume,
-pulling only the small partial, is the follow-up shape if the dev1 decode load bites).
+`outputPath`, e.g. `C:/Users/Resolume/Videos/<stamp>.mkv`) in `CG_HOST_RECORDING_PATH`; an empty
+answer (the cleanup() re-stop) never clears it. The recording is **never copied to dev1**: the first
+design scp'd it there and decoded it inside the `[8/8d]` merge, and the 25.9.2026 release E2E (run
+36115692830) spent 29 min in that one decode and hit the 75-min job timeout (the 250 MB scp itself
+took 3 s — the decode on the small Tier-0 dev1 box was the cost). Now it follows the stream extract:
+
+- **`scripts/recording-verdict-on-resolume.sh`** (always executes, plain session-agnostic ssh —
+  a file copy, a headless CLI decode and a download, so `win-ssh-vs-mcp.md` context B holds):
+  STEP 0 first puts the newest (by LastWriteTime) `ffmpeg.exe` under `RESOLUME_FFMPEG_ROOT` (default `C:\ffmpeg`)
+  on PATH — RESOLUME-SNV keeps ffmpeg under `C:\ffmpeg\<build>\bin` but NOT on PATH (read live
+  25.9.2026), and the decode session gets the same prefix — then fails loud BY NAME on a missing
+  `ffmpeg`/`ffprobe` (`MISSING-TOOL:`, exit 3); it stops a leftover decode of the same exe and
+  deletes a stale partial of the same name; STEP 1 deploys `recording-verdict.exe` behind the issue-1118 sha256
+  version gate (`Get-FileHash` on the box vs `sha256sum` on dev1); STEP 2 runs
+  `recording-verdict.exe --extract-partial cg --cg <recording> --out <partial>` at the issue-1260
+  BelowNormal PriorityClass (`build_onbox_command`, SOURCED from recording-verdict-on-stream.sh,
+  never re-implemented) so it cannot starve the live obs64/Arena; STEP 3 pulls back only the partial
+  and its `-pixels` dir (probed with PowerShell `Test-Path`, never cmd.exe `if exist` — the box default shell is not known), logging the measured STEP 2 decode time — the evidence the grace is calibrated from. The resolume-owned builders quote paths as single-quoted PowerShell literals; the STEP 2 decode command reuses the stream builder's double-quoted args (OBS timestamp paths hold no `$`/backtick). Credentials come from the caller (`RESOLUME_USER`/`RESOLUME_PW`, which
+  `cg_chain_user`/`cg_chain_pw` resolve from `CG_CHAIN_USER`/`CG_CHAIN_PW`).
+- **The ONE sha256 upload decision** is `scripts/lib/verdict-upload-gate.sh`
+  (`verdict_upload_decision`); `onimag_upload_decision` / `onstrihlx_upload_decision` delegate to it.
+  A new on-box extract uses it, never a fourth copy.
+- **recording-verdict**: `--extract-partial cg` (expected burns = SongPlayer 911014 + cg 911015, the
+  same pair the fused `--cg` path decodes, independent of `--cg-chain-burns`) and a `cg=` merge slot
+  that fills the SAME `cg` DecodedRec the fused path does — the cg_chain section reads frames only,
+  so no verdict logic changed. A cg partial wins over a stray `--cg` (a warning, no second decode).
+  A cg partial that fails to load for ANY reason — or is another box's partial in the cg slot — is
+  DROPPED by the crate-root `partial_schema_gate::box_drops_on_any_load_failure` (the report-only
+  leg must never abort the merge into a false camera RED); only an imag drop sets
+  `imag_leg_skip_reason`.
+- **Harness wiring (#675, two new call lines):** `cg_chain_onbox_extract_launch "$HERE"
+  "${WIN_VERDICT_EXE_LOCAL:-}" "$E2E_EXECUTE_VERDICT"` right after the stream extract's pull-back
+  echo (so strih, stream, imag and cg decode CONCURRENTLY — wall time is max(), not the sum), and
+  `cg_chain_onbox_extract_wait` right after the #703 strih/stream wait block, before the `[8/8d]`
+  banner. `cg_chain_merge_args_append` then adds `--merge-partials cg=<partial>` when THIS run's
+  partial (`cg-partial-<RUN_ID>.json`, RUN_ID-keyed) reached dev1.
+- **The job budget is bounded by construction:** the collect step waits at most
+  `CG_CHAIN_EXTRACT_GRACE_SECS` (default 300 — reasoned in `cg_chain_extract_grace_secs`) PAST the
+  camera legs, then stops the extract's whole dev1 process group (launched under `setsid`, skipped
+  when job control is on) AND, bounded, the decode on the box (`recording-verdict-on-resolume.sh
+  --stop-decode`: only processes running from that one exe path, never OBS/Arena), so it never keeps
+  running next to the live CG box nor keeps the exe locked for the next upload; cleanup() does the
+  same on an early abort, and any other failed extract (a dev1 side that died) asks the box to stop too.
+- **GOTCHA — PowerShell's exit code is the LAST statement's `$?`.** `powershell -EncodedCommand`
+  exits 1 when the last statement failed, and `-ErrorAction SilentlyContinue` only hides the message
+  (`$?` stays false). The first cut ended the prepare step with a silenced `Remove-Item` of files
+  that do not exist on a normal run, so every run died there (a review caught it live on the box).
+  Guard an expected-to-fail statement (`if (Test-Path …) { … }`) or never make it the last one; the
+  harness test's fake `ssh` models this rule, so a builder regressing to that shape goes red.
+- **Every outcome is ONE named run-log line**, never a red: `CG-LEG-VERIFIED` (the partial reached dev1 and goes to the merge, which may still drop an unloadable one with its own WARNING),
+  `CG-LEG-SKIPPED` (no cg recording this run — resolume away/unresolvable or its StartRecord failed,
+  the home gate; or a plan-only run with `E2E_EXECUTE_VERDICT=0`), `CG-LEG-NOT-VERIFIED` (attempted:
+  no StopRecord path, no Windows exe, a failed decode, a grace overrun). A failed/stopped extract
+  leaves no partial behind, so a stale one is never merged.
+- **Live precondition (supervisor, first CG_CHAIN=1 run):** `ffmpeg` + `ffprobe` found under
+  `C:\ffmpeg` on RESOLUME-SNV (STEP 0 names them if absent), and the grace vs the real on-box decode time — a first run
+  that ends `CG-LEG-NOT-VERIFIED: … still running …` means the grace (or the box) needs a look, never
+  a longer job timeout. Tier-0 coverage: `tests/harness_cg_chain_onbox_1302.rs` (std-only, runs with
+  plain `rustc --test` + a `tempfile` shim) drives the launch/collect/marker/merge-args seam against a
+  fake extract script and the resolume script's `main()` against fake `sshpass`/`ssh`/`scp`.
 
 ### The ONE tail CG window (issue 1302) — why it is NOT a switch-schedule window
 
@@ -185,7 +238,7 @@ pulling only the small partial, is the follow-up shape if the dev1 decode load b
   opens.
 - `recording-e2e.sh` wiring adds NEW lines only (plus rewording three stale comment/echo lines of the
   #1301 block that said the SongPlayer burn was unshipped): `CG_CHAIN_STATE_DIR="$OUTDIR"` next to
-  `CG_RECORDING`; the burn-back-OFF line inside the `[5/8]` CG block; `if cg_chain_window_due; then
+  the other CG state; the burn-back-OFF line inside the `[5/8]` CG block; `if cg_chain_window_due; then
   cg_chain_window "$STRIH" …; fi` between the sweep/hold `fi` and the `[7/8]` banner (its comment
   must never contain the `[7/8]` literal — a test anchors on the FIRST `[7/8]` in the file); and
   `cg_chain_after_stoprecord …` after the `imag host file` echo. Anchor gotcha hit here: `[5b/8]`
@@ -198,7 +251,7 @@ pulling only the small partial, is the follow-up shape if the dev1 decode load b
 - **The strih/stream hops (issue 1302 slice 2):** items 2 + 3 above — the `--cg-chain-burns` flag
   (`cg_chain_extract_burn_flag`, spliced as `${CG_CHAIN_BURN_FLAG:+"$CG_CHAIN_BURN_FLAG"}` into all
   three extract calls: strih-lx, Windows strih, stream — an empty flag adds NO argv word) and
-  `cg_chain_merge_args_append` (after the `--cg` merge line). `tests/harness_cg_chain_hops_1302.rs`
+  `cg_chain_merge_args_append` (which also feeds the on-box cg partial). `tests/harness_cg_chain_hops_1302.rs`
   pins both (std-only, runs with plain `rustc --test`); the verdict side is pinned by the
   `*_1302` tests in `recording-verdict.rs` (CI-only) and the `cg_chain_gate` unit tests (Tier-0 via
   a `#[path]` rustc replica with `burn_hold` + `recording_boundary_trim`). A verdict fixture must

@@ -32,54 +32,15 @@ use std::process::Command;
 
 mod genlock_n1_lift;
 use genlock_n1_lift::{
-    compile_and_run_n1_block, compile_and_run_n1_block_with, converge_defines,
-    lift_converge_helper, lift_define,
+    compile_and_run_c, compile_and_run_n1_block, compile_and_run_n1_block_with, converge_defines,
+    lift_converge_helper, lift_define, lift_relock_helpers as lift_helpers,
+    RELOCK_PRELUDE as PRELUDE,
 };
 
 const OBS_SOURCE: &str = "vendor/obs-studio/libobs/obs-source.c";
 
-/// The stub the lifted helpers need: only the fields they actually touch.
-const PRELUDE: &str = r#"#include <stdint.h>
-#include <stddef.h>
-#include <stdio.h>
-struct obs_source_frame { uint64_t timestamp; };
-typedef struct obs_source {
-    struct { struct obs_source_frame **array; size_t num; } async_frames;
-    uint64_t genlock_phase_anchor_ns;
-} obs_source_t;
-"#;
-
 fn repo(rel: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(rel)
-}
-
-/// Lift the `#1003` helper block verbatim from the vendored C.
-fn lift_helpers() -> String {
-    let path = repo(OBS_SOURCE);
-    let src = fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
-    let start = src
-        .find("static inline uint64_t genlock_abs_diff_ns(")
-        .unwrap_or_else(|| {
-            panic!(
-                "#1003: {OBS_SOURCE} no longer defines genlock_abs_diff_ns — the phase-continuity \
-             helpers are gone, so there is nothing to check parity against."
-            )
-        });
-    let last = src
-        .find("static inline uint64_t genlock_phase_anchor_from_present(")
-        .unwrap_or_else(|| {
-            panic!("#1003: {OBS_SOURCE} no longer defines genlock_phase_anchor_from_present")
-        });
-    let end = src[last..]
-        .find("\n}\n")
-        .map(|i| last + i + 3)
-        .expect("#1003: genlock_phase_anchor_from_present has no closing brace");
-    assert!(
-        end > start,
-        "#1003: the helper block in {OBS_SOURCE} is not contiguous — the lift would splice \
-         unrelated code. Keep the four #1003 helpers adjacent."
-    );
-    src[start..end].to_string()
 }
 
 /// The vectors both sides must agree on: hand-picked edges, exact ties, and a deterministic
@@ -158,55 +119,10 @@ fn c_relock_selection_matches_the_rust_authority_1003() {
     }
     c.push_str("    return 0;\n}\n");
 
-    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("genlock_parity_1003");
-    fs::create_dir_all(&dir).expect("create the parity scratch dir");
-    let cfile = dir.join("parity.c");
-    let bin = dir.join("parity.bin");
-    fs::write(&cfile, &c).expect("write the parity harness");
-
-    // --- compile (loudly, never skipped) --------------------------------------------
-    let cc = std::env::var("CC").unwrap_or_else(|_| "cc".to_string());
-    let out = Command::new(&cc)
-        .args(["-std=gnu99", "-Wall", "-Wextra", "-Werror", "-O1"])
-        .arg(&cfile)
-        .arg("-o")
-        .arg(&bin)
-        .output()
-        .unwrap_or_else(|e| {
-            panic!(
-                "#1003: could not run the C compiler `{cc}` ({e}). This gate compiles the \
-                 vendored #1003 helpers to prove the C and the Rust authority agree \
-                 numerically; it must FAIL rather than skip when the toolchain is absent (a \
-                 parity test that silently passes without running is worse than none). \
-                 Install a C compiler or set CC."
-            )
-        });
-    assert!(
-        out.status.success(),
-        "#1003: the vendored C helpers lifted from {OBS_SOURCE} do NOT COMPILE standalone \
-         under -Wall -Wextra -Werror. The vendored tree is otherwise built only by the \
-         genlock workflows, so this is very likely a real compile error heading for CI:\n\
-         --- cc stderr ---\n{}\n--- harness ---\n{c}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-
-    // --- run + compare ---------------------------------------------------------------
-    let run = Command::new(&bin)
-        .output()
-        .expect("#1003: the compiled parity harness failed to execute");
-    assert!(
-        run.status.success(),
-        "#1003: the parity harness exited non-zero: {}",
-        String::from_utf8_lossy(&run.stderr)
-    );
-    let stdout = String::from_utf8(run.stdout).expect("harness stdout is utf-8");
-    let c_out: Vec<usize> = stdout
-        .lines()
-        .map(|l| {
-            l.trim()
-                .parse()
-                .expect("harness printed a non-integer index")
-        })
+    // --- compile + run (loudly, never skipped) ----------------------------------------
+    let c_out: Vec<usize> = compile_and_run_c("genlock_parity_1003", &c)
+        .iter()
+        .map(|l| l.parse().expect("harness printed a non-integer index"))
         .collect();
     assert_eq!(
         c_out.len(),

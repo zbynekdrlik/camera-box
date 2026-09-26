@@ -396,6 +396,19 @@ pub mod genlock_grid;
 // per-second grid removes it. Crate-root + default features (Tier-0), no OBS.
 pub mod genlock_grid_bench;
 
+// Issue 1372 — the ONE wall-step detector of the genlock render tick: a coordinated dantesync fleet
+// DATE step (the wall moves, the media clock does not) re-grids the tick in ONE tick instead of the
+// 2 ms/tick slew-back that left the tick and the sender's floored stamps off phase. Crate-root +
+// std-only (Tier-0 verifiable); the C twin `vendor/obs-studio/libobs/obs-genlock-wall-step.h` is held
+// identical by the committed parity gate `tests/genlock_wall_step_parity_1372.rs`.
+pub mod genlock_wall_step;
+
+// Issue 1372 — the two-clock WALL-STEP bench: the logged −51 ms fleet date step replayed against the
+// render tick + sender stamp, the LOCK indicator's qpc_drift verdict and the stream `mbc` ASRC (a
+// confirmed 44 ms sample loss paid back at 1000 ppm). Test-only.
+#[cfg(test)]
+mod genlock_wall_step_bench;
+
 // Issue 1372 part A — the Windows OBS media clock runs at the dantesync-disciplined system-time rate: the
 // vendored `os_gettime_ns()` (platform-windows.c) integrates QPC deltas at the system-time rate
 // `inc / adj` from GetSystemTimeAdjustmentPrecise, rebasing on a rate change. Crate-root +
@@ -573,6 +586,11 @@ pub mod optical_floor;
 // the two-term gate (TEAR_FRACTION_CEILING + TEAR_FRAME_COUNT_FLOOR, scoped to Observed single-tile
 // windows) folds into overall_pass. One-line disarmable (`gates_overall_pass()` → `false`).
 pub mod tear_detect;
+// issue 1367 — a cambox window whose captured content is MULTI-SOURCE (tear_detect's multi-path
+// fraction over MULTI_PATH_SUSPECT_CEILING, e.g. cam2 filming the strih-lx multiview) is judged by its
+// node burn: its copies/gaps, cadence and frozen_leg checks fold report-only, the burn stays blocking.
+// Pure crate-root (Tier-0); consumed by recording-verdict's all-cambox sweep.
+pub mod multi_source_window;
 // issue 1196 — the aux Vernier tick pair's PURE geometry (bottom burn-gap placement + the Tier-0
 // no-overlap proofs vs the primary dual-QR / colour column / motion sweep / downstream burn
 // overlays). The probe-gated painter (src/probe/qr.rs::blit_aux_tick_bgra) only calls

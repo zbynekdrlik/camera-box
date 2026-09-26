@@ -22,6 +22,8 @@ paths:
   - "vendor/obs-studio/libobs/obs-display-budget.h"
   - "vendor/distroav/src/ndi-filter.cpp"
   - "tests/aux_sender_budget_879.rs"
+  - "tests/drm_output_view_mv_budget_1346.rs"
+  - "vendor/obs-studio/libobs/obs-drm-output-view.c"
   - "tests/aux_sender_teardown_ordering_877.rs"
   - ".github/workflows/windows-genlock.yml"
   - ".github/workflows/windows-genlock-fast.yml"
@@ -319,6 +321,22 @@ Program priority stays STRUCTURAL (different source type, never routed through t
   precisely to avoid a nested block; (b) BOTH lift-compile stubs (the 879 invariant test AND the
   1063 order-independence test) carry the `last_tick_total_ns` field in their `video_stub`, and the
   field + publish line + max-term are anchored in `genlock_preload.rs` and BOTH windows-genlock ymls.
+- **Issue 1346 split the seam in two:** `obs_aux_sender_should_skip_excluding(..., self_last_ns)`
+  holds the body, and `obs_aux_sender_should_skip()` directly after it is a one-line
+  `self_last_ns = 0` wrapper. The wrapper alone no longer compiles standalone, so every lift (both
+  879 tests, `tests/drm_output_view_mv_budget_1346.rs`) takes the text from the `_excluding`
+  signature to the first `"\n}"` after the WRAPPER's signature. Keep the two functions adjacent and
+  in that order, and keep both brace-free. The `_excluding` form exists for a surface that renders
+  INSIDE the tick whose total the gate reads back (the DRM-output HDMI Multiview view,
+  `.claude/rules/obs-drm-output.md`). Anchors for the EXPORT, the saturating subtraction and the
+  wrapper delegation are in `genlock_preload.rs` and in both windows-genlock ymls.
+- **Running a camera_box-dependent lift test locally (Tier-0):** build a one-module stub crate
+  from the real `src/render_budget.rs` (`lib.rs` = `#[path = "<abs>/src/render_budget.rs"] pub mod
+  render_budget;`, `rustc --crate-type rlib --crate-name camera_box`), then `rustc --test --extern
+  camera_box=<rlib>`. For a mutation proof, copy `obs.c` + `obs-display-budget.h` into a scratch
+  `vendor/obs-studio/libobs/`, mutate the copy, and compile the test with `CARGO_MANIFEST_DIR`
+  pointing at the scratch tree. Issue 1346 killed five mutants this way. A mutant that leaves a
+  parameter unused dies on the harness's `-Werror`, which also counts as RED.
 - **Audio is a separate filter callback:** gate ONLY `ndi_filter_render_video`; leave
   `ndi_filter_asyncaudio` untouched so interkom talkback audio stays full-rate.
 

@@ -257,22 +257,15 @@ def test_orchestrator_names_the_linux_unit_when_the_restart_is_impossible():
 
 
 # --- item 3: the handover check routes strih-lx through the dantesync --linux arm --------------------
+# issue 1372: the routing now lives in the ONE dantesync fleet list (strih-lx is a `linux` row), and the
+# handover check derives its whole node set from it through the gate's --fleet.
 
-def test_dantesync_nodes_route_the_linux_strih_to_the_linux_arm():
-    r = _platform("strih_dantesync_nodes linux 10.77.9.202 newlevel 10.77.9.204; echo; "
-                  "strih_dantesync_nodes win 10.77.9.202 newlevel 10.77.9.204")
-    assert r.stdout.splitlines() == ["strih=newlevel@10.77.9.202", "stream=newlevel@10.77.9.204"], r
-    r = _platform("strih_dantesync_nodes linux 10.77.9.202 newlevel 10.77.9.204; echo; "
-                  "strih_dantesync_nodes win 10.77.9.202 newlevel 10.77.9.204",
-                  env={"STRIH_PLATFORM": "windows"})
-    assert r.stdout.splitlines() == ["", "strih=newlevel@10.77.9.202 stream=newlevel@10.77.9.204"], r
-
-
-def test_handover_check_uses_the_platform_routed_nodes():
+def test_handover_check_uses_the_fleet_routed_nodes():
     s = (SCRIPTS / "rig-dev-handover-check.sh").read_text()
     assert '--win "strih=' not in s, "issue 1317: the handover check must not hand strih-lx to --win"
-    assert "strih_dantesync_nodes win" in s and "strih_dantesync_nodes linux" in s
-    assert "lib/strih-platform.sh" in s
+    assert 'run_probe dantesync bash "$DANTESYNC_PROBE" --fleet' in s
+    fleet = (SCRIPTS / "lib" / "dantesync-fleet.sh").read_text()
+    assert "strih-lx|obs:strih-lx|linux|" in fleet
 
 
 # --- item 4: recording-e2e platform-correct plan text ----------------------------------------------

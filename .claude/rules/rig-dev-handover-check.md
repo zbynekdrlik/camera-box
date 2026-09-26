@@ -199,8 +199,10 @@ enabled=.. active=.. age_s=..`), and the pure `classify_watchdogs` decides it.
   HEALTHY core box reads OK) — matching how the watchdogs themselves defer a SKIP to network-reach.
 - **Version items need fleet node specs.** `dantesync-version-gate.sh` /
   `camera-box-version-gate.sh` REFUSE (exit 1 → UNKNOWN) with no `--linux/--win` nodes. The
-  orchestrator builds the active-cam `name=root@ip` spec by sourcing `camera-set.sh` in a `$()`
-  subshell (mirrors recording-e2e.sh's [0/8] enumeration) + fixed imag/OBS/dev1 targets; cambox
+  dantesync item runs the gate with **`--fleet`** (issue 1372): the node set is the ONE declared
+  dantesync fleet (`scripts/lib/dantesync-fleet.sh` — every camera, dev1, the OBS boxes, mbc,
+  fohabl; fohabl's credential from the dev1-local cred file, UNKNOWN without it). The cambox item
+  still builds the active-cam `name=root@ip` spec by sourcing `camera-set.sh` in a `$()` subshell and
   uses `--no-main-pin` (relative peer parity = uniform build, no origin/main read).
 - **The alert-watchdogs log `verdict=`/`reachable=` to STDERR (via `log()`), not stdout** — the
   pure `*_decision.py` `verdict=` stdout is captured into a shell var inside the watchdog and never

@@ -66,8 +66,8 @@ STREAM_HOST="${STREAM_HOST:-10.77.9.204}"
 IMAG_HOST="${IMAG_HOST:-10.77.9.182}"
 CAM2_HOST="${CAM2_HOST:-10.77.9.62}"
 CAM_PW="${CAM_PW:-newlevel}"
-IMAG_USER="${IMAG_USER:-newlevel}"
-WIN_SSH_USER="${WIN_SSH_USER:-newlevel}"
+# issue 1372: exported -- the dantesync version gate's --fleet reads it as the default ssh login.
+export WIN_SSH_USER="${WIN_SSH_USER:-newlevel}"
 CAMSET_LIB="${RDH_CAMSET_LIB:-$HERE/camera-set.sh}"
 export OBS_PASSWORD="${OBS_PASSWORD:-}"
 
@@ -219,23 +219,13 @@ build_cam_linux_spec() {
 }
 CAM_LINUX_SPEC="$(build_cam_linux_spec "$CAMSET_LIB")"
 
-# --- item 12: dantesync version pin (read-only gate; cams + imag-nb + dev1 + OBS boxes) ----------
-# issue 1317 part 4: strih-lx (the Linux strih) answers `dantesync --version` on the bare command
-# line, so it rides the --linux arm; the --win arm's quoted-exe read returns nothing on Linux (strih
-# UNKNOWN). strih_dantesync_nodes routes strih by the ONE fleet-backed platform resolver.
-# shellcheck source=scripts/lib/strih-platform.sh
-. "$HERE/lib/strih-platform.sh"
-DV_STRIH_LINUX="$(strih_dantesync_nodes linux "$STRIH_HOST" "$WIN_SSH_USER" "$STREAM_HOST")"
-DV_WIN_NODES="$(strih_dantesync_nodes win "$STRIH_HOST" "$WIN_SSH_USER" "$STREAM_HOST")"
-if [ -n "$CAM_LINUX_SPEC" ]; then
-  run_probe dantesync bash "$DANTESYNC_PROBE" \
-    --linux "$CAM_LINUX_SPEC imag-nb=${IMAG_USER}@${IMAG_HOST}${DV_STRIH_LINUX:+ $DV_STRIH_LINUX}" \
-    --local dev1 \
-    --win "$DV_WIN_NODES"
-else
-  printf 'roster lib %s unreadable -- no nodes to gate\n' "$CAMSET_LIB" >"$WORKDIR/dantesync.out"
-  printf '%s\n' "$RC_MISSING" >"$WORKDIR/dantesync.rc"
-fi
+# --- item 12: dantesync version pin (read-only gate; EVERY dantesync node) -----------------------
+# issue 1372: the node set is the ONE declared dantesync fleet (scripts/lib/dantesync-fleet.sh, via the
+# gate's --fleet): every camera, dev1, the OBS boxes (strih-lx on the --linux arm by its fleet row --
+# the issue 1317 part 4 routing now lives in that row) and the audio-VLAN PCs mbc + fohabl. A retired
+# obs-fleet box (imag) drops out; an away traveling box (resolume) is skipped by the gate. fohabl's own
+# ssh credential is read by NAME from the dev1-local credential file (UNKNOWN when it is missing).
+run_probe dantesync bash "$DANTESYNC_PROBE" --fleet
 
 # --- item 13: camera-box uniform build (read-only gate; active cam fleet, relative peer parity) --
 if [ -n "$CAM_LINUX_SPEC" ]; then

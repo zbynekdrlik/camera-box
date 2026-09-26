@@ -34,7 +34,8 @@
 mod os_clock_discipline;
 
 use os_clock_discipline::{
-    map_foreign_clock_ns, mul_div64, DisciplinedClock, FOREIGN_STAMP_MAX_AGE_NS, NS_PER_SEC,
+    map_foreign_clock_ns, mul_div64, Discipline, DisciplinedClock, FOREIGN_STAMP_MAX_AGE_NS,
+    NS_PER_SEC,
 };
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -42,6 +43,7 @@ use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 const PLATFORM_WINDOWS: &str = "vendor/obs-studio/libobs/util/platform-windows.c";
+const PLATFORM_H: &str = "vendor/obs-studio/libobs/util/platform.h";
 const OBS_SOURCE: &str = "vendor/obs-studio/libobs/obs-source.c";
 const UTIL_UINT64: &str = "vendor/obs-studio/libobs/util/util_uint64.h";
 const QPC_TIMESTAMP_H: &str = "vendor/obs-studio/libobs/util/windows/qpc-timestamp.h";
@@ -84,6 +86,18 @@ fn lift_fn(src: &str, sig: &str, file: &str) -> String {
     src[start..end].to_string()
 }
 
+/// The verbatim text from `start` through the first `end` after it (inclusive).
+fn lift_until(src: &str, start: &str, end: &str, file: &str) -> String {
+    let s = src
+        .find(start)
+        .unwrap_or_else(|| panic!("issue 1372: {file} lost `{start}`"));
+    let e = src[s..]
+        .find(end)
+        .map(|i| s + i + end.len())
+        .unwrap_or_else(|| panic!("issue 1372: `{start}` has no `{end:?}` terminator in {file}"));
+    src[s..e].to_string()
+}
+
 /// Everything the harnesses compile, lifted verbatim from the shipped files.
 fn lifted_c() -> String {
     let src = platform_src();
@@ -95,7 +109,17 @@ fn lifted_c() -> String {
         .unwrap_or_else(|| {
             panic!("issue 1372: {QPC_TIMESTAMP_H} lost OS_FOREIGN_STAMP_MAX_AGE_NS")
         });
-    let mut c = String::from("\n/* ---- lifted VERBATIM from platform-windows.c ---- */\n");
+    // Part D: the discipline outcome values the block publishes live in util/platform.h.
+    let platform_h = fs::read_to_string(repo(PLATFORM_H))
+        .unwrap_or_else(|e| panic!("issue 1372: read {PLATFORM_H}: {e}"));
+    let mut c = String::from("\n/* ---- lifted VERBATIM from util/platform.h ---- */\n");
+    c.push_str(&lift_until(
+        &platform_h,
+        "enum os_gettime_discipline_state {",
+        "\n};\n",
+        PLATFORM_H,
+    ));
+    c.push_str("\n/* ---- lifted VERBATIM from platform-windows.c ---- */\n");
     c.push_str(&lift_block(&src));
     c.push('\n');
     c.push_str(&lift_fn(
@@ -165,6 +189,7 @@ static uint64_t g_qpc = 0;
 static uint64_t g_qpc_step = 0;
 static uint64_t g_slept_ms = 0;
 static int g_api_present = 1;
+static BOOL g_read_ok = TRUE;
 static DWORD64 g_adj = 0, g_inc = 0;
 static BOOL g_dis = TRUE;
 static int g_polls = 0;
@@ -218,7 +243,7 @@ static BOOL WINAPI fake_get_adjustment(PDWORD64 adj, PDWORD64 inc, PBOOL disable
 	*adj = g_adj;
 	*inc = g_inc;
 	*disabled = g_dis;
-	return TRUE;
+	return g_read_ok; /* part D: a FALSE read still wrote garbage the block must discard */
 }}
 static HMODULE GetModuleHandleW(const wchar_t *name)
 {{
@@ -232,6 +257,7 @@ static FARPROC GetProcAddress(HMODULE mod, const char *name)
 	return (FARPROC)fake_get_adjustment;
 }}
 uint64_t os_gettime_ns(void);
+int os_gettime_discipline(void);
 "#,
         util = util.display()
     )
@@ -553,9 +579,49 @@ fn harness_main(scs: &[Scenario]) -> String {
              \t}}\n"
         ));
     }
+    // Part D: the published discipline outcome, read by read (before the first poll too).
+    for (name, api, steps) in [
+        ("disc-flow", true, &DISC_FLOW[..]),
+        ("disc-absent", false, &DISC_ABSENT[..]),
+    ] {
+        c.push_str(&format!(
+            "\tif (strcmp(argv[1], \"{name}\") == 0) {{\n\
+             \t\tg_freq = 10000000ULL; g_api_present = {};\n\
+             \t\tprintf(\"%d\\n\", os_gettime_discipline());\n",
+            i32::from(api)
+        ));
+        for &(qpc, read_ok, adj, inc, dis) in steps {
+            c.push_str(&format!(
+                "\t\tg_qpc = {qpc}ULL; g_read_ok = {}; g_adj = {adj}ULL; g_inc = {inc}ULL; g_dis = {};\n\
+                 \t\t{{ const uint64_t v = os_gettime_ns(); printf(\"%d %llu\\n\", os_gettime_discipline(), (unsigned long long)v); }}\n",
+                i32::from(read_ok),
+                i32::from(dis)
+            ));
+        }
+        c.push_str("\t\treturn 0;\n\t}\n");
+    }
     c.push_str("\treturn 3;\n}\n");
     c
 }
+
+/// Part D: `(qpc, read_ok, adj, inc, disabled)` per read, each a full poll period (250 ms at 10 MHz)
+/// after the last, except the one marked "not due". A failed read leaves garbage in adj/inc that the
+/// block must discard (raw QPC, rate 1/1).
+const DISC_FLOW: [(u64, bool, u64, u64, bool); 9] = [
+    (100_000_000, true, 9_999_809, 10_000_000, false), // active
+    (100_000_100, false, 9_999_000, 10_000_000, false), // not due: no poll, stays active
+    (103_000_000, true, 9_999_809, 10_000_000, true),  // disabled
+    (106_000_000, false, 9_990_000, 10_000_000, false), // the call returned FALSE
+    (109_000_000, true, 0, 10_000_000, false),         // zero adjustment
+    (112_000_000, true, 9_999_809, 0, false),          // zero increment
+    (115_000_000, true, 10_000_191, 10_000_000, false), // active again
+    (118_000_000, false, 9_999_809, 10_000_000, false), // FALSE again
+    (121_000_000, true, 9_999_809, 10_000_000, false), // active
+];
+const DISC_ABSENT: [(u64, bool, u64, u64, bool); 2] = [
+    (100_000_000, true, 9_999_809, 10_000_000, false),
+    (103_000_000, true, 9_999_809, 10_000_000, false),
+];
 
 /// The wall-vs-monotonic scenario: one hour of 100 ms ticks, dantesync holding about +15 ppm
 /// (adj 9_999_850 ± 5 ppm, re-steered every second) and one −146 µs phase step half way.
@@ -938,6 +1004,89 @@ fn the_genlock_wall_qpc_drift_stays_flat_on_the_disciplined_clock() {
 }
 
 #[test]
+fn the_discipline_outcome_is_published_read_by_read_part_d() {
+    // Part D: `os_gettime_discipline()` tells the GENLOCK LOCK indicator whether the media clock
+    // runs at the disciplined rate or fell back to raw QPC, and why. Each read must match the Rust
+    // authority's outcome AND its clock value (a failed read must run rate 1/1, never the garbage
+    // the call wrote).
+    let dir = Scratch::new("discipline");
+    let bin = build_harness(&dir, &scenarios());
+    for (name, api, steps) in [
+        ("disc-flow", true, &DISC_FLOW[..]),
+        ("disc-absent", false, &DISC_ABSENT[..]),
+    ] {
+        let stdout = run(&bin, name);
+        let mut lines = stdout.lines();
+        assert_eq!(
+            lines.next(),
+            Some("0"),
+            "issue 1372 part D `{name}`: UNKNOWN (0) before the first poll"
+        );
+        let mut clock = DisciplinedClock::new(10_000_000);
+        let mut n = 0;
+        for (i, (&(qpc, read_ok, adj, inc, dis), line)) in steps.iter().zip(lines).enumerate() {
+            let rs_now = clock.now_read(qpc, api, read_ok.then_some((adj, inc, dis)));
+            let want = format!("{} {rs_now}", clock.discipline as i32);
+            assert_eq!(
+                line, want,
+                "issue 1372 part D `{name}` read {i}: C `{line}` vs Rust `{want}` (discipline, ns)"
+            );
+            n += 1;
+        }
+        assert_eq!(n, steps.len(), "issue 1372 part D `{name}`: read count");
+    }
+    // The flow must actually visit every outcome, so a dropped branch cannot pass unseen.
+    let mut clock = DisciplinedClock::new(10_000_000);
+    let mut seen = Vec::new();
+    for &(qpc, read_ok, adj, inc, dis) in &DISC_FLOW {
+        clock.now_read(qpc, true, read_ok.then_some((adj, inc, dis)));
+        seen.push(clock.discipline);
+    }
+    for d in [
+        Discipline::Active,
+        Discipline::Disabled,
+        Discipline::ReadFailed,
+    ] {
+        assert!(seen.contains(&d), "the scripted flow never reaches {d:?}");
+    }
+}
+
+#[test]
+fn the_discipline_values_match_the_lock_indicator_mirror_part_d() {
+    // libobs `enum os_gettime_discipline_state` and the widget's `genlock_media_discipline` must use
+    // the same numbers: the widget passes the libobs value straight through.
+    let squish = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+    let platform_h = squish(&fs::read_to_string(repo(PLATFORM_H)).expect("read platform.h"));
+    let hpp = squish(
+        &fs::read_to_string(repo(
+            "vendor/obs-studio/frontend/widgets/GenlockLockState.hpp",
+        ))
+        .expect("read GenlockLockState.hpp"),
+    );
+    for (name, v) in [
+        ("UNKNOWN", Discipline::Unknown),
+        ("ACTIVE", Discipline::Active),
+        ("DISABLED", Discipline::Disabled),
+        ("READ_FAILED", Discipline::ReadFailed),
+        ("API_MISSING", Discipline::ApiMissing),
+    ] {
+        let n = v as i32;
+        assert!(
+            platform_h.contains(&format!("OS_GETTIME_DISCIPLINE_{name} = {n},")),
+            "platform.h: OS_GETTIME_DISCIPLINE_{name} must be {n}"
+        );
+        assert!(
+            hpp.contains(&format!("GENLOCK_MEDIA_DISCIPLINE_{name} = {n},")),
+            "GenlockLockState.hpp: GENLOCK_MEDIA_DISCIPLINE_{name} must be {n}"
+        );
+    }
+    assert!(
+        platform_h.contains("EXPORT int os_gettime_discipline(void);"),
+        "platform.h must export os_gettime_discipline()"
+    );
+}
+
+#[test]
 fn the_raw_qpc_now_is_the_midpoint_of_a_tight_bracket() {
     // The disciplined now is paired with the MIDPOINT of two counter reads around it, retried while
     // they are more than 50 us apart -- a preemption between the reads cannot skew the age.
@@ -1127,6 +1276,7 @@ static FARPROC GetProcAddress(HMODULE mod, const char *name)
 	return strcmp(name, "GetSystemTimeAdjustmentPrecise") == 0 ? (FARPROC)fake_get_adjustment : NULL;
 }}
 uint64_t os_gettime_ns(void);
+int os_gettime_discipline(void);
 "#,
         util = util.display()
     )

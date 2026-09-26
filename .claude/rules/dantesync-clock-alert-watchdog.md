@@ -57,10 +57,15 @@ production-critical watchdog class (umbrella **#1308**).
 - **`CLOCK_ALARM_FIELD` is a single constant** (dantesync#114 forward-compat): `clock_alarm.active` is
   authoritative for NO_CLOCK when present; the derived `is_locked`/gm/storm check folds in as the
   cross-check (page if EITHER fires). Absent field → derived check only.
-- **Node roster = the WHOLE powered dantesync fleet**, cam1–7 (incl. cam5–7 retired from
-  `CAMERA_ACTIVE_SET` but still powered + running dantesync) + strih/stream/imag/resolume + **dev1
-  itself** (the `local` node, #1313). resolume is traveling → paged only while `obs_fleet_is_home`. An
-  OFF box → UNREACHABLE → SKIP (defers to #1001), never a page.
+- **Node roster = the WHOLE dantesync fleet, DERIVED from `scripts/lib/dantesync-fleet.sh`
+  (issue 1372, `.claude/rules/dantesync-fleet.md`)**: every camera camera_resolve knows (incl. ones
+  retired from `CAMERA_ACTIVE_SET`) + the obs-fleet boxes (a `retired` one drops out) + **dev1**
+  (the `local` node, #1313) + the audio-VLAN PCs **mbc + fohabl** (the `fixed` arm,
+  `DANTE_CLOCK_FIXED_NODES`; box-up = ssh :22, no ssh-banner mgmt axis). resolume is traveling →
+  paged only while `obs_fleet_is_home`. An OFF box → UNREACHABLE → SKIP (defers to #1001), never a
+  page. Roster lines are `NAME|IP|HOMEGATE[|ROLE]`; an **audio** node is graded against the audio
+  grandmaster (`DANTESYNC_AUDIO_GM_HOST`, 10.77.7.106) with an audio remedy text, every other node
+  against video-clock.lan. A 3-field `DANTE_CLOCK_NODES` override still parses (role = video).
 - **dev1 is the `local` node — the control box watches its OWN clock (#1313, the former dev1 blind
   spot, now CLOSED).** dev1 is NOT a probed cam/obs node, yet it runs dantesync and its clock feeds
   every dev1-hosted gate (`clock-offset-painter-gate.sh`, the recording-verdict wall references, every
@@ -82,7 +87,7 @@ production-critical watchdog class (umbrella **#1308**).
     uses `dante-clock-nohttp-dev1-<bucket>`); version drift vs `DANTESYNC_VERSION_PIN` is REPORTED in
     the card, never a page. Recovery stays a machine-channel log line.
   - **Every fleet roll AND every config patch (`gm_allowlist` / `phase_slew`) MUST include dev1** —
-    `dantesync-fleet-upgrade.sh … --local dev1`, "fleet N/N" counts dev1 (the `.claude/skills/ops`
+    `dantesync-fleet-upgrade.sh --fleet` (issue 1372: the whole declared fleet incl. dev1, mbc, fohabl), "fleet N/N" counts dev1 (the `.claude/skills/ops`
     DanteSync rollout checklist). This watchdog is the between-rolls backstop, not a substitute for
     including dev1 in the roll itself.
   - **Cross-consumer coupling — the #1312 "development" handover check reads this watchdog's

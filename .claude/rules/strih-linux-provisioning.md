@@ -366,8 +366,33 @@ lease; strih-lx has run Xorg + openbox since 23.9.
   NOTE `hdmi-unplugged` when armed but unplugged; FAIL `classify-failed` (the strih_scenes import
   failed, the one-liner prints `? program`) / `config-missing` / `view-invalid` /
   `lease-not-live` (no `drm-output: program scanout LIVE` in the newest OBS log) /
-  `multiview-not-live` (view multiview but no `drm-output: multiview bind LIVE`). HDMI presence is the
-  KERNEL status — after a lease X RandR can stick at `disconnected`.
+  `multiview-not-live` (view multiview but no `drm-output: multiview bind LIVE`). HDMI presence
+  follows the backend (`strih_drm_hdmi_connected SYSFS BACKEND XRANDR_TEXT`):
+  - **lease** = the KERNEL status — after a lease X RandR can stick at `disconnected`;
+  - **vk-direct** = the X RandR view (`strih_drm_xrandr_query`, display :0 with the desktop user's
+    Xauthority). The NVIDIA X driver does not drive the KMS connector status: live strih-lx
+    25.9.2026 read `card1-HDMI-A-1 disconnected` with `HDMI-0 connected` in X. A connected output
+    with NO mode/CRTC counts too (how xrandr lists HDMI-0 while vk-direct holds it). An empty X answer
+    is never connected. Step 6 then SKIPs by name ("xrandr on :0 answered nothing"), and it queries
+    X only when no config exists yet. Verify reads the fact BEFORE the detector.
+  - An X view verify could not read on a vk-direct box grades **`x-unreadable` (FAIL)**. The cause
+    is Xorg down, or the caller cannot read the desktop user's `.Xauthority`. It is UNKNOWN by name,
+    never a measured "no HDMI" `skip-no-hdmi` that would hide `present-dead` / `lease-not-live` /
+    `backend-drift` (review round 1).
+  - Main design 5840508308.
+- **Backend = a box fact (owner 25.9.2026: the BUILT-IN HDMI, NVIDIA-driven):** the fact
+  `STRIH_HDMI_OUTPUT_BACKEND` (`lease` | `vk-direct`; strih-lx = `vk-direct`, strih-pp TODO_OWNER)
+  picks how the output leaves X — the NVIDIA X driver refuses the lease, so strih-lx uses the Vulkan
+  direct-display backend (`.claude/rules/obs-drm-output.md`, vk-direct section). Step 6 is ONE call,
+  `strih_drm_output_provision` in `scripts/lib/strih-drm-output.sh` (setup-strih.sh stays under the
+  1000-line budget): it writes the fact into a fresh config (`strih_drm_output_config_json CONN VIEW
+  BACKEND`; lease = the ABSENT key), UPSERTS it into an existing one as the desktop user
+  (`strih_scenes.write_drm_backend`, the view kept; an import failure is named), installs
+  `libvulkan1` (a failure FAILS the step) and warns on a missing NVIDIA ICD. Verify item 4c adds
+  `backend-invalid` / `backend-drift` (the config backend vs the fact; skipped when either is unread)
+  and `present-dead` (`strih_drm_vk_present_dead`: the vk present loop exited with no stop after it).
+  Both Python classifiers (strih_scenes + imag_scenes, pinned equal) treat an unknown backend as
+  dormant, so the wrapper never takes the connector out of X for an output the C will not start.
 - **Tests:** `tests/strih_drm_output_provision_1346.rs` (the lib helpers + the wiring anchors),
   `tests/python/test_strih_drm_output_1346.py` (the Python grammar, the shared
   `tests/fixtures/drm_output_view_parity.tsv` with the C lift, read/write, the CLI) and

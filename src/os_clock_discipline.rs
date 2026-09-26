@@ -158,14 +158,48 @@ pub fn map_foreign_clock_ns(stamp_ns: u64, clock_now_ns: u64, now_ns: u64) -> u6
     now_ns.saturating_sub(age_ns)
 }
 
+/// Part D — which outcome the last adjustment read hit, as `os_gettime_discipline()` publishes it
+/// for the GENLOCK LOCK indicator. Discriminants match libobs `enum os_gettime_discipline_state`
+/// (`util/platform.h`) and `genlock_lock_state::MediaDiscipline`.
+#[repr(i32)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Discipline {
+    /// Not polled yet.
+    Unknown = 0,
+    /// The adjustment was read and is enabled: the disciplined rate.
+    Active = 1,
+    /// The adjustment is disabled or zero: raw QPC.
+    Disabled = 2,
+    /// The API call returned FALSE: raw QPC.
+    ReadFailed = 3,
+    /// The API is not exported: raw QPC.
+    ApiMissing = 4,
+}
+
+/// Classify one adjustment read. `read` is what `GetSystemTimeAdjustmentPrecise` returned,
+/// `(adj, inc, disabled)`, or `None` when the call returned FALSE; it is ignored when the API is
+/// absent. Mirrors the branch in `os_clk_read_rate` (platform-windows.c).
+pub fn discipline_of(api_present: bool, read: Option<(u64, u64, bool)>) -> Discipline {
+    match (api_present, read) {
+        (false, _) => Discipline::ApiMissing,
+        (true, None) => Discipline::ReadFailed,
+        (true, Some((adj, inc, disabled))) if disabled || adj == 0 || inc == 0 => {
+            Discipline::Disabled
+        }
+        (true, Some(_)) => Discipline::Active,
+    }
+}
+
 /// The single-thread model of the C `os_gettime_ns()`: read the segment, poll the adjustment
 /// only when due, return the disciplined time. `adjustment` is what
 /// `GetSystemTimeAdjustmentPrecise` would return right now, `(adj, inc, disabled)`, and
-/// `None` models a missing or failing API.
+/// `None` models a missing API ([`DisciplinedClock::now_read`] separates a missing API from a
+/// failing read). `discipline` is what the C `os_gettime_discipline()` would report.
 #[derive(Clone, Copy, Debug)]
 pub struct DisciplinedClock {
     pub freq: u64,
     pub seg: Segment,
+    pub discipline: Discipline,
 }
 
 impl DisciplinedClock {
@@ -173,14 +207,26 @@ impl DisciplinedClock {
         Self {
             freq,
             seg: Segment::default(),
+            discipline: Discipline::Unknown,
         }
     }
 
     pub fn now(&mut self, qpc: u64, adjustment: Option<(u64, u64, bool)>) -> u64 {
+        self.now_read(qpc, adjustment.is_some(), adjustment)
+    }
+
+    /// [`DisciplinedClock::now`] with the API presence and the read result given separately:
+    /// `read == None` with `api_present` is a read that returned FALSE.
+    pub fn now_read(&mut self, qpc: u64, api_present: bool, read: Option<(u64, u64, bool)>) -> u64 {
         if !self.seg.poll_due(qpc, self.freq) {
             return self.seg.now(qpc, self.freq);
         }
-        let (adj, inc, disabled) = adjustment.unwrap_or((0, 0, true));
+        self.discipline = discipline_of(api_present, read);
+        let (adj, inc, disabled) = if api_present {
+            read.unwrap_or((0, 0, true))
+        } else {
+            (0, 0, true)
+        };
         let (num, den) = rate_from_adjustment(adj, inc, disabled);
         self.seg.update(qpc, self.freq, num, den);
         self.seg.now(qpc, self.freq)
@@ -214,6 +260,43 @@ mod tests {
         for q in [5 * F, 5 * F + 1, 3600 * F + 7] {
             assert_eq!(c.now(q, None), mul_div64(q, NS_PER_SEC, F));
         }
+    }
+
+    #[test]
+    fn the_discipline_outcome_of_each_read_part_d() {
+        assert_eq!(
+            discipline_of(true, Some((9_999_809, F, false))),
+            Discipline::Active
+        );
+        assert_eq!(
+            discipline_of(true, Some((9_999_809, F, true))),
+            Discipline::Disabled
+        );
+        assert_eq!(
+            discipline_of(true, Some((0, F, false))),
+            Discipline::Disabled
+        );
+        assert_eq!(
+            discipline_of(true, Some((F, 0, false))),
+            Discipline::Disabled
+        );
+        assert_eq!(discipline_of(true, None), Discipline::ReadFailed);
+        assert_eq!(
+            discipline_of(false, Some((9_999_809, F, false))),
+            Discipline::ApiMissing
+        );
+        assert_eq!(discipline_of(false, None), Discipline::ApiMissing);
+        // Published only by a poll; a failed read runs raw QPC like a missing API.
+        let mut c = DisciplinedClock::new(F);
+        assert_eq!(c.discipline, Discipline::Unknown);
+        c.now_read(5 * F, true, Some((9_999_809, F, false)));
+        assert_eq!(c.discipline, Discipline::Active);
+        c.now_read(5 * F + 1, true, None); // not due: no poll, unchanged
+        assert_eq!(c.discipline, Discipline::Active);
+        c.now_read(6 * F, true, None);
+        assert_eq!(c.discipline, Discipline::ReadFailed);
+        assert_eq!((c.seg.rate_num, c.seg.rate_den), (1, 1));
+        assert_eq!(Discipline::ApiMissing as i32, 4);
     }
 
     #[test]

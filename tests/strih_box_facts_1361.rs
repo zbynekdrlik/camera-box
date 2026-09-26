@@ -112,6 +112,7 @@ const FACT_KEYS: &[&str] = &[
     "STRIH_COMPANION_HOST",
     "STRIH_CG_SENDER",
     "STRIH_CAMERAS",
+    "STRIH_HDMI_OUTPUT_BACKEND",
 ];
 
 // ---------------------------------------------------------------------------------------------
@@ -149,6 +150,7 @@ fn loader_loads_strih_lx_facts() {
         "STRIH_COMPANION_HOST=10.77.9.205",
         "STRIH_CG_SENDER=RESOLUME-SNV (cg-obs)",
         "STRIH_CAMERAS=1 2 3 4 5 6 7",
+        "STRIH_HDMI_OUTPUT_BACKEND=vk-direct",
         "LOADED=strih-lx",
     ] {
         assert!(
@@ -332,6 +334,14 @@ fn malformed_fact_files_are_refused() {
             "empty required fact",
             vec![("STRIH_NIC_DRIVER=r8152", "STRIH_NIC_DRIVER=")],
             "STRIH_NIC_DRIVER is empty",
+        ),
+        (
+            "HDMI output backend is neither lease nor vk-direct (issue 1346)",
+            vec![(
+                "STRIH_HDMI_OUTPUT_BACKEND=vk-direct",
+                "STRIH_HDMI_OUTPUT_BACKEND=vulkan",
+            )],
+            "STRIH_HDMI_OUTPUT_BACKEND",
         ),
     ];
     for (label, edits, want) in cases {

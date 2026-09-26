@@ -4,6 +4,8 @@
 
 #include <widgets/OBSBasic.hpp>
 
+#include <util/platform.h>
+
 #include <QLabel>
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
@@ -12,6 +14,7 @@
 #include <QUrl>
 
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
 #include <cstdio>
 #include <map>
@@ -45,6 +48,35 @@ static constexpr float badThreshold = 1.0f;
  * report-only JSON telemetry. */
 static constexpr int64_t GENLOCK_QPC_STEP_BOUND_MS = 33;
 static constexpr int GENLOCK_QPC_WINDOW_S = 300;
+/* camera-box issue 1372: a single-sample wall step up to this size (two 30 fps frames) is a
+ * coordinated dantesync fleet DATE step (dantesync 1.9.0 steps the date when its error passes 50 ms,
+ * about every 1.8 h; the live step was 51 ms) and is BOOKED (genlock_qpc_wall_step_rebase_ms): the qpc
+ * history is re-baselined by it and the widget stays LOCKED, because the media clock deliberately
+ * never follows a step and the render tick re-grids onto the stepped wall in one tick. A bigger jump
+ * (a clock set, an NTP-fallback or second-writer step) or a second step inside GENLOCK_QPC_WINDOW_S (a
+ * step storm) still DEGRADES. Mirror of src/genlock_lock_state.rs GENLOCK_QPC_WALL_STEP_BOOK_MAX_MS. */
+static constexpr int64_t GENLOCK_QPC_WALL_STEP_BOOK_MAX_MS = 66;
+static constexpr int64_t GENLOCK_QPC_WALL_STEPS_PER_WINDOW = 1;
+
+/* camera-box issue 1372 part D: the MEDIA-clock (audio clock) term. os_gettime_ns() paces the audio
+ * mixer and every output; since part A it runs at the dantesync-disciplined rate on Windows too, so the
+ * wall-vs-media offset must stay flat on every box apart from wall steps. The widget samples that offset
+ * itself in us each tick (libobs' wall_qpc_drift_ms is integer ms truncated toward zero, which cannot
+ * tell a dantesync phase step from a rate). Over GENLOCK_MEDIA_CLOCK_WINDOW_S the median per-pair rate is
+ * the centre; a pair whose change is off the centre's prediction by more than GENLOCK_MEDIA_CLOCK_BAND_US
+ * is a wall STEP (its deviation IS the step; dantesync requests steps of >= 200/500 us, a Windows step
+ * can land up to a timer tick short, an unbiased <= 100 us remnant) and is left out, and the rate is the
+ * time-weighted rate of the kept pairs -- a drift in only part of the seconds (up to ~95 ppm on ~1 s
+ * pairs) counts at its true share. Scaled to the window it DEGRADES beyond
+ * GENLOCK_MEDIA_CLOCK_DRIFT_BOUND_US (3.3 ppm), and so does a Windows fallback to raw QPC while
+ * dantesync answers. A pair more than GENLOCK_MEDIA_CLOCK_MAX_GAP_MS apart (a stalled UI) is not a
+ * sample; the window is ready once the counted pairs cover >= 90 % of it. Calibration: the
+ * undisciplined stream mixer drifted ~8 ms per 10 min (67 ms / 83 min), a disciplined box stays at 0.
+ * The pure decision is in GenlockLockState.hpp (parity-gated). Never UNLOCKED. */
+static constexpr int GENLOCK_MEDIA_CLOCK_WINDOW_S = 600;
+static constexpr int64_t GENLOCK_MEDIA_CLOCK_DRIFT_BOUND_US = 2000;
+static constexpr int64_t GENLOCK_MEDIA_CLOCK_MAX_GAP_MS = 5000;
+static constexpr int64_t GENLOCK_MEDIA_CLOCK_BAND_US = 100;
 
 /* camera-box #1303: the A/V pairing-offset bound that trips the audio DEGRADE term. An
  * audio-ENABLED genlock source whose |audio_pairing_offset_ms| (from obs_genlock_stats v2)
@@ -246,9 +278,126 @@ const char *genlock_reason_key(genlock_lock_reason_t r)
 		return "audio_pairing";
 	case GENLOCK_LOCK_REASON_AUDIO_UNEXPECTED:
 		return "audio_unexpected";
+	case GENLOCK_LOCK_REASON_MEDIA_CLOCK:
+		return "media_clock";
 	default:
 		return "qpc_drift";
 	}
+}
+
+/* camera-box issue 1372 part D: stable tokens for the media-clock verdict + the Windows discipline
+ * outcome (the genlock-lock: line, the JSON facet and the tooltip). */
+const char *genlock_media_clock_name(genlock_media_clock_t m)
+{
+	switch (m) {
+	case GENLOCK_MEDIA_CLOCK_DRIFT:
+		return "drift";
+	case GENLOCK_MEDIA_CLOCK_UNDISCIPLINED:
+		return "undisciplined";
+	default:
+		return "ok";
+	}
+}
+
+const char *genlock_media_discipline_name(int d)
+{
+	switch (d) {
+	case GENLOCK_MEDIA_DISCIPLINE_ACTIVE:
+		return "active";
+	case GENLOCK_MEDIA_DISCIPLINE_DISABLED:
+		return "disabled";
+	case GENLOCK_MEDIA_DISCIPLINE_READ_FAILED:
+		return "read_failed";
+	case GENLOCK_MEDIA_DISCIPLINE_API_MISSING:
+		return "api_missing";
+	case GENLOCK_MEDIA_DISCIPLINE_NOT_APPLICABLE:
+		return "n/a";
+	default:
+		return "unknown";
+	}
+}
+
+/* camera-box #1298: the human reason text the label appends (names the offending input). Moved out of
+ * UpdateGenlockLabel unchanged when issue 1372 part D added the media-clock case, to keep that function
+ * readable. */
+QString genlock_reason_text(genlock_lock_reason_t reason, const GenlockScan &scan, bool clock_present,
+			    long long qpc_max_step_ms, const std::string &recent_event_input_name,
+			    genlock_media_clock_t media_clock, int64_t media_drift_us, int media_discipline)
+{
+	QString reasonText;
+	switch (reason) {
+	case GENLOCK_LOCK_REASON_NONE:
+		break;
+	case GENLOCK_LOCK_REASON_NO_GENLOCK:
+		reasonText = "no genlock inputs";
+		break;
+	case GENLOCK_LOCK_REASON_CLOCK:
+		reasonText = clock_present ? "clock not locked" : "no clock discipline";
+		break;
+	case GENLOCK_LOCK_REASON_OUTPUT:
+		reasonText = "output not stamping";
+		break;
+	case GENLOCK_LOCK_REASON_NO_INPUT_LOCKED:
+		reasonText = "no input locked";
+		break;
+	case GENLOCK_LOCK_REASON_INPUT_UNLOCKED:
+		if (!scan.unlocked_names.empty()) {
+			reasonText = QString::fromStdString(scan.unlocked_names.front());
+			if (scan.unlocked_names.size() > 1)
+				reasonText += QString(" +%1 more").arg(scan.unlocked_names.size() - 1);
+		} else {
+			reasonText = "input unlocked";
+		}
+		break;
+	case GENLOCK_LOCK_REASON_RECENT_EVENT:
+		/* #1299 Part 3: name the offending input (the connected input with the most phase events);
+		 * "underrun" is no longer a recent-event class, so the text no longer says it. */
+		if (!recent_event_input_name.empty())
+			reasonText = QString("recent event: %1")
+					     .arg(QString::fromStdString(recent_event_input_name));
+		else
+			reasonText = "recent event";
+		break;
+	case GENLOCK_LOCK_REASON_NTP_FAILED:
+		reasonText = "clock NTP failed";
+		break;
+	case GENLOCK_LOCK_REASON_QPC_DRIFT:
+		/* #1357: the verdict is the wall STEP only, so the label names the step size — never the
+		 * unbounded cumulative offset or a (report-only) rate. */
+		reasonText = QString("clock step %1 ms").arg(qpc_max_step_ms);
+		break;
+	case GENLOCK_LOCK_REASON_AUDIO_PAIRING:
+		if (!scan.audio_unpaired_names.empty()) {
+			reasonText = QString("audio unpaired: %1")
+					     .arg(QString::fromStdString(scan.audio_unpaired_names.front()));
+			if (scan.audio_unpaired_names.size() > 1)
+				reasonText += QString(" +%1 more").arg(scan.audio_unpaired_names.size() - 1);
+		} else {
+			reasonText = "audio unpaired";
+		}
+		break;
+	case GENLOCK_LOCK_REASON_MEDIA_CLOCK:
+		/* issue 1372 part D: the audio (media) clock does not follow the disciplined wall clock. */
+		if (media_clock == GENLOCK_MEDIA_CLOCK_UNDISCIPLINED)
+			reasonText = QString("audio clock not disciplined (%1)")
+					     .arg(genlock_media_discipline_name(media_discipline));
+		else
+			reasonText = QString("audio clock drift %1 ms/%2 min")
+					     .arg(QString::number((double)media_drift_us / 1000.0, 'f', 1))
+					     .arg(GENLOCK_MEDIA_CLOCK_WINDOW_S / 60);
+		break;
+	case GENLOCK_LOCK_REASON_AUDIO_UNEXPECTED:
+		if (!scan.audio_unexpected_names.empty()) {
+			reasonText = QString("audio unexpected: %1")
+					     .arg(QString::fromStdString(scan.audio_unexpected_names.front()));
+			if (scan.audio_unexpected_names.size() > 1)
+				reasonText += QString(" +%1 more").arg(scan.audio_unexpected_names.size() - 1);
+		} else {
+			reasonText = "audio unexpected";
+		}
+		break;
+	}
+	return reasonText;
 }
 
 /* camera-box #1299: append *s* as a JSON string (quotes + minimal escaping) to *out*. Pure
@@ -300,6 +449,9 @@ std::string genlock_build_lock_json(const char *state_name, const char *reason_k
 				    const char *recent_event_input_name, uint64_t recent_event_input_events,
 				    int64_t qpc_drift_ms, double qpc_drift_ppm, double qpc_expected_ppm,
 				    int qpc_step, const char *audio_unexpected_input_name,
+				    const char *media_clock_state, int64_t media_clock_drift_us,
+				    int media_clock_window_s, int media_clock_ready,
+				    const char *media_clock_discipline,
 				    const std::vector<GenlockInputRow> &inputs)
 {
 	/* #1299: schema v2 added top-level n_absent + per-input connected; Part 3 (v3) adds
@@ -307,11 +459,12 @@ std::string genlock_build_lock_json(const char *state_name, const char *reason_k
 	 * audio_unexpected_inputs (a silent-by-contract source found audible). Part 4 (v5) adds the
 	 * report-only windowed-drift telemetry qpc_drift_ppm / qpc_expected_ppm / qpc_step at the END.
 	 * #1341 (v6) adds top-level n_idle + per-input idle (a connected-but-keep-alive-only input,
-	 * excluded from the DEGRADED gate). All additive: the bundle-state parser defaults n_absent->None,
-	 * n_idle->None, connected->true, idle->false, the qpc_*_ppm trio->None, and OMITS
-	 * recent_event_inputs / audio_unexpected_inputs when absent/empty, so a v1..v5 line from an older
-	 * build reads cleanly. */
-	std::string j = "{\"v\":6,\"state\":";
+	 * excluded from the DEGRADED gate). Issue 1372 part D (v7) adds the media_clock object at the END
+	 * ({state, drift_us, window_s, ready, discipline}). All additive: the bundle-state parser defaults
+	 * n_absent->None, n_idle->None, connected->true, idle->false, the qpc_*_ppm trio->None, and OMITS
+	 * recent_event_inputs / audio_unexpected_inputs / media_clock when absent/empty, so a v1..v6 line
+	 * from an older build reads cleanly. */
+	std::string j = "{\"v\":7,\"state\":";
 	genlock_json_append_escaped(j, state_name);
 	j += ",\"reason\":";
 	genlock_json_append_escaped(j, reason_key);
@@ -369,9 +522,19 @@ std::string genlock_build_lock_json(const char *state_name, const char *reason_k
 	/* #1299 Part 4 (v5): report-only windowed-drift telemetry at the END of the object. Since #1357 the
 	 * qpc_drift VERDICT is the wall STEP only (qpc_step) — neither the rate nor the dantesync slew nor
 	 * the cumulative qpc_drift_ms above gates. Additive: the parser defaults all three to None. */
-	snprintf(num, sizeof(num), ",\"qpc_drift_ppm\":%.3f,\"qpc_expected_ppm\":%.3f,\"qpc_step\":%s}",
+	snprintf(num, sizeof(num), ",\"qpc_drift_ppm\":%.3f,\"qpc_expected_ppm\":%.3f,\"qpc_step\":%s",
 		 qpc_drift_ppm, qpc_expected_ppm, qpc_step ? "true" : "false");
 	j += num;
+	/* issue 1372 part D (v7): the media-clock (audio clock) facet -- the verdict the decision used, the
+	 * wall-vs-media drift per window (us; the time-weighted rate of the non-step pairs), the window length, whether it has filled, and the Windows
+	 * discipline outcome ("n/a" on a box whose kernel disciplines the monotonic clock). */
+	j += ",\"media_clock\":{\"state\":";
+	genlock_json_append_escaped(j, media_clock_state);
+	snprintf(num, sizeof(num), ",\"drift_us\":%lld,\"window_s\":%d,\"ready\":%s,\"discipline\":",
+		 (long long)media_clock_drift_us, media_clock_window_s, media_clock_ready ? "true" : "false");
+	j += num;
+	genlock_json_append_escaped(j, media_clock_discipline);
+	j += "}}";
 	return j;
 }
 } // namespace
@@ -1033,6 +1196,100 @@ void OBSBasicStatusBar::PollGenlockClock()
 	});
 }
 
+/* camera-box issue 1372 part D: one wall-minus-media offset sample in us. The wall clock (what libobs'
+ * genlock_wall_now_ns reads: GetSystemTimePreciseAsFileTime on Windows, CLOCK_REALTIME elsewhere --
+ * std::chrono::system_clock) is read between two os_gettime_ns() reads and compared with their
+ * midpoint, retried while the bracket is wider than 50 us, so a preemption cannot bias the sample. */
+static int64_t genlock_wall_minus_media_us()
+{
+	int64_t best_offset_us = 0;
+	uint64_t best_width_ns = UINT64_MAX;
+	for (int attempt = 0; attempt < 4; ++attempt) {
+		const uint64_t media_before_ns = os_gettime_ns();
+		const int64_t wall_ns = (int64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(
+						std::chrono::system_clock::now().time_since_epoch())
+						.count();
+		const uint64_t media_after_ns = os_gettime_ns();
+		const uint64_t width_ns = media_after_ns - media_before_ns;
+		if (width_ns < best_width_ns) {
+			best_width_ns = width_ns;
+			best_offset_us = (wall_ns - (int64_t)(media_before_ns + width_ns / 2)) / 1000;
+		}
+		if (width_ns <= 50000)
+			break;
+	}
+	return best_offset_us;
+}
+
+/* camera-box issue 1372: BOOK a dantesync fleet date step, before this tick's sample joins the qpc
+ * history. The jump of the new sample against the previous one is re-based out of the whole history
+ * (every older sample shifted by it), so neither the step verdict nor the rate telemetry reads it; one
+ * genlock-wall-step: line records it. At most GENLOCK_QPC_WALL_STEPS_PER_WINDOW per window: a second
+ * step stays in the history and DEGRADES, like a jump beyond GENLOCK_QPC_WALL_STEP_BOOK_MAX_MS. The
+ * decision is the parity-gated genlock_qpc_wall_step_rebase_ms (GenlockLockState.hpp). */
+void OBSBasicStatusBar::BookGenlockWallStep(qint64 now_ms, int64_t qpc_signed_ms)
+{
+	while (!genlockQpcBookedSteps.empty() &&
+	       now_ms - genlockQpcBookedSteps.front() > (qint64)GENLOCK_QPC_WINDOW_S * 1000)
+		genlockQpcBookedSteps.pop_front();
+	if (genlockQpcHistory.empty())
+		return;
+	const int64_t jump = qpc_signed_ms - genlockQpcHistory.back().second;
+	const int64_t rebase = genlock_qpc_wall_step_rebase_ms(
+		jump, GENLOCK_QPC_STEP_BOUND_MS, GENLOCK_QPC_WALL_STEP_BOOK_MAX_MS,
+		(int64_t)genlockQpcBookedSteps.size(), GENLOCK_QPC_WALL_STEPS_PER_WINDOW);
+	if (rebase == 0)
+		return;
+	for (auto &sample : genlockQpcHistory)
+		sample.second += rebase;
+	genlockQpcBookedSteps.push_back(now_ms);
+	blog(LOG_INFO,
+	     "genlock-wall-step: the wall clock stepped %lld ms against the media clock -- "
+	     "qpc_drift re-baselined, not degraded (booked %d in %d s) (issue 1372)",
+	     (long long)rebase, (int)genlockQpcBookedSteps.size(), GENLOCK_QPC_WINDOW_S);
+}
+
+/* camera-box issue 1372 part D: one tick of the media-clock (audio clock) term. Push this tick's
+ * (monotonic ms, wall-minus-media offset us) sample into the GENLOCK_MEDIA_CLOCK_WINDOW_S ring, reduce it
+ * with the parity-gated pure rate (wall steps left out, a stalled pair is not a sample), read the Windows discipline outcome (libobs os_gettime_discipline(); Linux has none to read --
+ * its kernel disciplines CLOCK_MONOTONIC with the wall), and ask the pure verdict. The widget samples every tick, with or without
+ * genlock inputs, so the ring has no gaps. */
+OBSBasicStatusBar::GenlockMediaClockTick OBSBasicStatusBar::ReduceGenlockMediaClock(qint64 now_ms, bool clock_present)
+{
+	genlockMediaClockHistory.emplace_back(now_ms, genlock_wall_minus_media_us());
+	while (genlockMediaClockHistory.size() > 1 &&
+	       now_ms - genlockMediaClockHistory.front().first > (qint64)GENLOCK_MEDIA_CLOCK_WINDOW_S * 1000)
+		genlockMediaClockHistory.pop_front();
+	std::vector<int64_t> sample_ms;
+	std::vector<int64_t> offset_us;
+	std::vector<int64_t> rate_scratch(genlockMediaClockHistory.size());
+	sample_ms.reserve(genlockMediaClockHistory.size());
+	offset_us.reserve(genlockMediaClockHistory.size());
+	for (const auto &sample : genlockMediaClockHistory) {
+		sample_ms.push_back((int64_t)sample.first);
+		offset_us.push_back(sample.second);
+	}
+	int64_t counted_ms = 0;
+	const int64_t media_drift_us = genlock_media_clock_window_drift_us(
+		sample_ms.data(), offset_us.data(), (int)offset_us.size(), GENLOCK_MEDIA_CLOCK_WINDOW_S,
+		GENLOCK_MEDIA_CLOCK_MAX_GAP_MS, GENLOCK_MEDIA_CLOCK_BAND_US, rate_scratch.data(), &counted_ms);
+	const int media_window_ready = genlock_media_clock_window_ready(counted_ms, GENLOCK_MEDIA_CLOCK_WINDOW_S);
+#ifdef _WIN32
+	const int media_discipline = os_gettime_discipline();
+#else
+	const int media_discipline = GENLOCK_MEDIA_DISCIPLINE_NOT_APPLICABLE;
+#endif
+	GenlockMediaClockTick tick;
+	tick.verdict = (int)genlock_media_clock_verdict(media_window_ready, media_drift_us, GENLOCK_MEDIA_CLOCK_DRIFT_BOUND_US,
+							media_discipline, clock_present ? 1 : 0);
+	/* Not published (label, tooltip, JSON) until the window is ready: while it fills, one step pair is
+	 * its own centre and would read as a huge rate. The verdict already requires ready. */
+	tick.drift_us = media_window_ready ? media_drift_us : 0;
+	tick.ready = media_window_ready;
+	tick.discipline = media_discipline;
+	return tick;
+}
+
 /* camera-box #1298: the 1 Hz indicator update. Scalarise the live libobs genlock stats + the
  * cached clock facet into genlock_lock_facets_t, ask the pure genlock_decide_lock_state() for
  * the verdict, and render it (green/amber/red + per-input tooltip). Emits a `genlock-lock:` log
@@ -1150,8 +1407,10 @@ void OBSBasicStatusBar::UpdateGenlockLabel()
 	 * (f_ptp + f_phase) described the free-crystal Windows clock; since issue 1372 the measured rate is
 	 * ~0 on Windows too, so it is report-only context, not an expectation. */
 	const double qpc_expected_ppm = clock_present ? (genlockClockFptpPpm + genlockClockFphasePpm) : 0.0;
-	if (scan.any_input)
+	if (scan.any_input) {
+		BookGenlockWallStep(now_ms, scan.qpc_signed_ms);
 		genlockQpcHistory.emplace_back(now_ms, scan.qpc_signed_ms);
+	}
 	while (genlockQpcHistory.size() > 1 &&
 	       now_ms - genlockQpcHistory.front().first > (qint64)GENLOCK_QPC_WINDOW_S * 1000)
 		genlockQpcHistory.pop_front();
@@ -1180,6 +1439,13 @@ void OBSBasicStatusBar::UpdateGenlockLabel()
 		&qpc_measured_ppm);
 	const bool qpc_step = qpc_max_step_ms > GENLOCK_QPC_STEP_BOUND_MS;
 
+	/* camera-box issue 1372 part D: the media-clock (audio clock) term (ReduceGenlockMediaClock). */
+	const GenlockMediaClockTick mc = ReduceGenlockMediaClock(now_ms, clock_present);
+	const genlock_media_clock_t media_clock = (genlock_media_clock_t)mc.verdict;
+	const int64_t media_drift_us = mc.drift_us;
+	const int media_window_ready = mc.ready;
+	const int media_discipline = mc.discipline;
+
 	genlock_lock_facets_t f;
 	f.n_inputs = scan.n_inputs;
 	f.n_locked = scan.n_locked;
@@ -1194,74 +1460,14 @@ void OBSBasicStatusBar::UpdateGenlockLabel()
 	f.output_stamping = out.stamping ? 1 : 0;
 	f.audio_unpaired = scan.audio_unpaired ? 1 : 0;
 	f.audio_unexpected = scan.audio_unexpected ? 1 : 0;
+	f.media_clock = (int)media_clock;
 
 	genlock_lock_reason_t reason;
 	const genlock_lock_state_t state = genlock_decide_lock_state(&f, &reason);
 
 	/* human reason text for the label (names the offending input for input_unlocked). */
-	QString reasonText;
-	switch (reason) {
-	case GENLOCK_LOCK_REASON_NONE:
-		break;
-	case GENLOCK_LOCK_REASON_NO_GENLOCK:
-		reasonText = "no genlock inputs";
-		break;
-	case GENLOCK_LOCK_REASON_CLOCK:
-		reasonText = clock_present ? "clock not locked" : "no clock discipline";
-		break;
-	case GENLOCK_LOCK_REASON_OUTPUT:
-		reasonText = "output not stamping";
-		break;
-	case GENLOCK_LOCK_REASON_NO_INPUT_LOCKED:
-		reasonText = "no input locked";
-		break;
-	case GENLOCK_LOCK_REASON_INPUT_UNLOCKED:
-		if (!scan.unlocked_names.empty()) {
-			reasonText = QString::fromStdString(scan.unlocked_names.front());
-			if (scan.unlocked_names.size() > 1)
-				reasonText += QString(" +%1 more").arg(scan.unlocked_names.size() - 1);
-		} else {
-			reasonText = "input unlocked";
-		}
-		break;
-	case GENLOCK_LOCK_REASON_RECENT_EVENT:
-		/* #1299 Part 3: name the offending input (the connected input with the most phase events);
-		 * "underrun" is no longer a recent-event class, so the text no longer says it. */
-		if (!recent_event_input_name.empty())
-			reasonText = QString("recent event: %1")
-					     .arg(QString::fromStdString(recent_event_input_name));
-		else
-			reasonText = "recent event";
-		break;
-	case GENLOCK_LOCK_REASON_NTP_FAILED:
-		reasonText = "clock NTP failed";
-		break;
-	case GENLOCK_LOCK_REASON_QPC_DRIFT:
-		/* #1357: the verdict is the wall STEP only, so the label names the step size — never the
-		 * unbounded cumulative offset or a (report-only) rate. */
-		reasonText = QString("clock step %1 ms").arg(qpc_max_step_ms);
-		break;
-	case GENLOCK_LOCK_REASON_AUDIO_PAIRING:
-		if (!scan.audio_unpaired_names.empty()) {
-			reasonText = QString("audio unpaired: %1")
-					     .arg(QString::fromStdString(scan.audio_unpaired_names.front()));
-			if (scan.audio_unpaired_names.size() > 1)
-				reasonText += QString(" +%1 more").arg(scan.audio_unpaired_names.size() - 1);
-		} else {
-			reasonText = "audio unpaired";
-		}
-		break;
-	case GENLOCK_LOCK_REASON_AUDIO_UNEXPECTED:
-		if (!scan.audio_unexpected_names.empty()) {
-			reasonText = QString("audio unexpected: %1")
-					     .arg(QString::fromStdString(scan.audio_unexpected_names.front()));
-			if (scan.audio_unexpected_names.size() > 1)
-				reasonText += QString(" +%1 more").arg(scan.audio_unexpected_names.size() - 1);
-		} else {
-			reasonText = "audio unexpected";
-		}
-		break;
-	}
+	const QString reasonText = genlock_reason_text(reason, scan, clock_present, qpc_max_step_ms,
+							 recent_event_input_name, media_clock, media_drift_us, media_discipline);
 
 	/* latency display: a single value when all locked inputs share one, else a range. */
 	QString latencyText;
@@ -1304,6 +1510,14 @@ void OBSBasicStatusBar::UpdateGenlockLabel()
 	 * sees why "LOCKED 2/2" rather than "LOCKED 2/12". */
 	if (f.n_idle > 0 || f.n_absent > 0)
 		tip += QString("Idle: %1 (absent %2, low-rate %3)\n").arg(f.n_idle + f.n_absent).arg(f.n_absent).arg(f.n_idle);
+	/* issue 1372 part D: the audio (media) clock facet. */
+	tip += QString("Audio clock: %1 (%2, discipline %3)\n")
+		       .arg(genlock_media_clock_name(media_clock))
+		       .arg(media_window_ready ? QString("drift %1 ms / %2 min")
+							 .arg(QString::number((double)media_drift_us / 1000.0, 'f', 1))
+							 .arg(GENLOCK_MEDIA_CLOCK_WINDOW_S / 60)
+					       : QString("window filling"))
+		       .arg(genlock_media_discipline_name(media_discipline));
 	for (const std::string &row : scan.rows)
 		tip += "  " + QString::fromStdString(row) + "\n";
 	genlockLabel->setToolTip(tip.trimmed());
@@ -1316,11 +1530,21 @@ void OBSBasicStatusBar::UpdateGenlockLabel()
 		reason_key_str += ":";
 		reason_key_str += recent_event_input_name;
 	}
+	/* issue 1372 part D: name the media-clock sub-kind (reason=media_clock:drift / :undisciplined). */
+	if (reason == GENLOCK_LOCK_REASON_MEDIA_CLOCK) {
+		reason_key_str += ":";
+		reason_key_str += genlock_media_clock_name(media_clock);
+	}
+
+	/* issue 1372 part D: the media sub-kind joins the change key while the reason is media_clock. */
+	const int media_key = reason == GENLOCK_LOCK_REASON_MEDIA_CLOCK ? (int)media_clock : -1;
 
 	/* greppable log on state/reason change (the #1298 genlock-lock: family). */
-	if ((int)state != genlockLastLoggedState || (int)reason != genlockLastLoggedReason) {
+	if ((int)state != genlockLastLoggedState || (int)reason != genlockLastLoggedReason ||
+	    media_key != genlockLastLoggedMedia) {
 		genlockLastLoggedState = (int)state;
 		genlockLastLoggedReason = (int)reason;
+		genlockLastLoggedMedia = media_key;
 		blog(LOG_INFO,
 		     "genlock-lock: state=%s inputs=%d/%d latency_ms=%u clock=%s output=%s reason=%s (#1298)",
 		     genlock_state_name(state), f.n_locked, f.n_inputs, scan.any_input ? scan.min_latency_ms : 0u,
@@ -1335,12 +1559,13 @@ void OBSBasicStatusBar::UpdateGenlockLabel()
 	 * carries the SAME verdict + clock/output tokens the widget decided this tick, so the fleet
 	 * facet can never disagree with the statusbar. A state change short-circuits the ++heartbeat
 	 * (not incremented this tick) but the emit resets the counter to 0 either way. */
-	const bool genlock_json_changed =
-		(int)state != genlockJsonLastState || (int)reason != genlockJsonLastReason;
+	const bool genlock_json_changed = (int)state != genlockJsonLastState ||
+					  (int)reason != genlockJsonLastReason || media_key != genlockJsonLastMedia;
 	if (genlock_json_changed || ++genlockJsonHeartbeatTicks >= GENLOCK_JSON_HEARTBEAT_TICKS) {
 		genlockJsonHeartbeatTicks = 0;
 		genlockJsonLastState = (int)state;
 		genlockJsonLastReason = (int)reason;
+		genlockJsonLastMedia = media_key;
 		/* #1299 Part 3: the offender rides the JSON only when there IS a recent event AND a named
 		 * connected phase offender — otherwise recent_event_inputs is an empty list (the parser
 		 * omits the key), so a v3 line never fabricates an attribution. */
@@ -1353,7 +1578,8 @@ void OBSBasicStatusBar::UpdateGenlockLabel()
 			has_offender ? recent_event_input_name.c_str() : nullptr, recent_event_input_events,
 			scan.max_abs_qpc_drift_ms, qpc_measured_ppm, qpc_expected_ppm, qpc_step ? 1 : 0,
 			scan.audio_unexpected_names.empty() ? nullptr : scan.audio_unexpected_names.front().c_str(),
-			scan.inputs);
+			genlock_media_clock_name(media_clock), media_drift_us, GENLOCK_MEDIA_CLOCK_WINDOW_S,
+			media_window_ready, genlock_media_discipline_name(media_discipline), scan.inputs);
 		blog(LOG_INFO, "genlock-lock-json: %s (#1299)", gl_json.c_str());
 	}
 }

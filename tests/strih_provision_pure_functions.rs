@@ -3761,6 +3761,7 @@ fn setup_strih_step_11_runs_the_shared_baseline_in_imag_order() {
         "obs_box_power_envelope \"$STRIH_PL1_W\" strih_fetch_repo_file \"$STRIH_PL1_STEPDOWN_W\"",
         "obs_box_touchpad strih",
         "obs_box_maxperf_persistence strih",
+        "obs_box_cpu_latency strih_fetch_repo_file",
     ];
     let mut last = 0;
     for call in calls {

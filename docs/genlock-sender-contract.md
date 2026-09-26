@@ -163,6 +163,15 @@ so the slot a frame is paced for and the slot it is stamped into drift apart wit
   one grid slot in the future);
 - **MUST**, on an underrun, repeat the last frame stamped with the NEW boundary timecode — never
   leave a hole and never emit two frames inside one interval.
+- **SHOULD**, when its emit is paced by a MONOTONIC clock mapped onto the wall grid (the OBS render
+  tick), re-grid onto a stepped wall clock in ONE interval — never slew back a few ms per interval,
+  which paces and stamps frames off the grid for several intervals (a dantesync fleet date step is
+  ~50 ms, about every 1.8 h).
+
+*Reference for the SHOULD (issue 1372):* the OBS render tick `genlock_next_deadline`
+(`vendor/obs-studio/libobs/obs-video.c`) with the wall-step detector
+`vendor/obs-studio/libobs/obs-genlock-wall-step.h` (Tier-0 authority `src/genlock_wall_step.rs`); the
+DistroAV sender floors the wall clock at emit, so its stamps re-grid with the tick.
 
 *Reference implementation (camera-box):* `genlock_emit_gate` (`src/genlock_pacing.rs:79`) on the
 per-second grid of `src/genlock_grid.rs` (latch / resync `grid_next_boundary_ns`, advance

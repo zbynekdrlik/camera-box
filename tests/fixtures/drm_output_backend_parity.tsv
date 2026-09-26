@@ -1,0 +1,18 @@
+# issue 1346: the drm-output.json "backend" grammar -- ONE table, read by BOTH the vendored C lift
+# (tests/drm_output_vk_direct_1346.rs -> drm_output_parse_backend) and the Python mirror
+# (tests/python/test_strih_drm_output_1346.py -> strih_scenes.drm_output_backend_of).
+# Columns: <value><TAB><expected>. <absent> = no "backend" key, <empty> = "".
+# expected: lease | vk-direct | unknown (the C keeps the output DORMANT on unknown + a WARN line;
+# the Python mirror reports it so verify-strih can name the bad value).
+<absent>	lease
+<empty>	lease
+lease	lease
+vk-direct	vk-direct
+VK-DIRECT	unknown
+Lease	unknown
+vk_direct	unknown
+vkdirect	unknown
+vulkan	unknown
+ vk-direct	unknown
+vk-direct 	unknown
+drm	unknown

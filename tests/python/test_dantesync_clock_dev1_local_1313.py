@@ -63,6 +63,7 @@ def _run_dry(tmp, fetch_stdout=None, fetch_rc=0):
         "DANTE_CLOCK_LOCAL_NODES": "dev1",
         "DANTE_CLOCK_CAM_NODES": "",       # no cams -> only dev1 in the roster
         "DANTE_CLOCK_OBS_NODES": "",       # no obs boxes either
+        "DANTE_CLOCK_FIXED_NODES": "",     # issue 1372: nor the audio-VLAN PCs (mbc, fohabl)
         "DANTE_CLOCK_FETCH_CMD": str(fetch),
         "RIG_GRANDMASTER_IP": GM,          # neutralize the DNS / GM-move global pages
         "DANTE_CLOCK_CONFIRM_THRESHOLD": "1",

@@ -53,25 +53,6 @@ strih_platform() {
   fi
 }
 
-# strih_dantesync_nodes <linux|win> <strih_host> <user> <stream_host> -> the node spec for ONE arm of
-# scripts/dantesync-version-gate.sh (issue 1317 part 4). strih-lx answers `dantesync --version` on the
-# bare command line, so on a linux strih the strih node goes to the --linux arm and --win carries only
-# stream; a Windows strih keeps strih+stream both under --win. The SAME routing recording-e2e.sh's
-# [0/8] version gate does inline (issue 1351), as one helper the handover check calls. Pure.
-strih_dantesync_nodes() {
-  local arm="${1:-}" strih="${2:-}" user="${3:-newlevel}" stream="${4:-}"
-  if [ "$(strih_platform "$strih")" = "linux" ]; then
-    case "$arm" in
-      linux) printf 'strih=%s@%s' "$user" "$strih" ;;
-      win) printf 'stream=%s@%s' "$user" "$stream" ;;
-    esac
-  else
-    case "$arm" in
-      win) printf 'strih=%s@%s stream=%s@%s' "$user" "$strih" "$user" "$stream" ;;
-    esac
-  fi
-}
-
 # ---- recording-e2e.sh [8/8] plan TEXT (issue 1317 part 4) -------------------------------------------
 # The [8/8a] strih decode runs over plain ssh/scp on strih-lx (recording-verdict-on-strih-lx.sh, which
 # also pulls the partial + pixel proofs back itself); the Windows strih ran it via the win-strih MCP.

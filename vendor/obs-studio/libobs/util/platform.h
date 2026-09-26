@@ -100,6 +100,21 @@ EXPORT void os_sleep_ms(uint32_t duration);
 
 EXPORT uint64_t os_gettime_ns(void);
 
+#ifdef _WIN32
+/* camera-box issue 1372 part D: what os_gettime_ns() last read from the system-time adjustment
+ * (platform-windows.c, the issue 1372 block). ACTIVE = it runs at the dantesync-disciplined rate;
+ * every other outcome is the raw-QPC fallback. The in-OBS GENLOCK LOCK indicator reads it for its
+ * media-clock term (GenlockLockState.hpp mirrors these values as genlock_media_discipline). */
+enum os_gettime_discipline_state {
+	OS_GETTIME_DISCIPLINE_UNKNOWN = 0,     /* not polled yet */
+	OS_GETTIME_DISCIPLINE_ACTIVE = 1,      /* adjustment read and enabled */
+	OS_GETTIME_DISCIPLINE_DISABLED = 2,    /* adjustment disabled or zero: raw QPC */
+	OS_GETTIME_DISCIPLINE_READ_FAILED = 3, /* GetSystemTimeAdjustmentPrecise returned FALSE: raw QPC */
+	OS_GETTIME_DISCIPLINE_API_MISSING = 4, /* not exported by kernelbase.dll: raw QPC */
+};
+EXPORT int os_gettime_discipline(void);
+#endif
+
 EXPORT int os_get_config_path(char *dst, size_t size, const char *name);
 EXPORT char *os_get_config_path_ptr(const char *name);
 

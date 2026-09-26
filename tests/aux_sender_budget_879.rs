@@ -41,6 +41,28 @@ fn workdir(tag: &str) -> PathBuf {
     d
 }
 
+/// The aux budget seam lifted VERBATIM from the shipped obs.c: since issue 1346 it is
+/// `obs_aux_sender_should_skip_excluding()` (the self-excluding form the DRM-output view calls)
+/// followed by the `obs_aux_sender_should_skip()` wrapper (its `self_last_ns = 0` case, the aux
+/// ndi_filter senders). Both bodies have no nested braces (single-statement ifs), so the first
+/// "\n}" after the wrapper's signature closes the pair.
+fn lift_aux_seam(tag: &str) -> String {
+    let obs_c = std::fs::read_to_string(libobs().join("obs.c")).expect("read obs.c");
+    let ex_sig = "bool obs_aux_sender_should_skip_excluding(";
+    let start = obs_c.find(ex_sig).unwrap_or_else(|| {
+        panic!("{tag}: obs.c no longer defines {ex_sig} — the aux budget seam is gone.")
+    });
+    let wrap_sig = "bool obs_aux_sender_should_skip(";
+    let wrap = obs_c[start..].find(wrap_sig).unwrap_or_else(|| {
+        panic!("{tag}: obs.c must define {wrap_sig} right after the _excluding form.")
+    }) + start;
+    let end = obs_c[wrap..].find("\n}").unwrap_or_else(|| {
+        panic!("{tag}: could not find the end of obs_aux_sender_should_skip in obs.c")
+    }) + wrap
+        + 2;
+    obs_c[start..end].to_string()
+}
+
 fn compile(src: &PathBuf, bin: &PathBuf) {
     let cc = std::env::var("CC").unwrap_or_else(|_| "cc".to_string());
     let out = Command::new(&cc)
@@ -156,18 +178,7 @@ fn c_effective_divisor_matches_rust_authority_879() {
 fn c_aux_sender_should_skip_holds_invariants_879() {
     // Lift obs_aux_sender_should_skip() VERBATIM from the shipped obs.c and compile it against a
     // tiny obs-global stub + os_gettime_ns stub + the REAL header, then drive the invariants.
-    let obs_c = std::fs::read_to_string(libobs().join("obs.c")).expect("read obs.c");
-    let sig = "bool obs_aux_sender_should_skip(";
-    let start = obs_c.find(sig).unwrap_or_else(|| {
-        panic!("#879: obs.c no longer defines {sig} — the aux budget seam is gone.")
-    });
-    // The function body has no nested braces (all ifs are single-statement), so the first
-    // "\n}" after the signature is its closing brace.
-    let rest = &obs_c[start..];
-    let end = rest.find("\n}").unwrap_or_else(|| {
-        panic!("#879: could not find the end of obs_aux_sender_should_skip in obs.c")
-    }) + 2;
-    let lifted = &rest[..end];
+    let lifted = lift_aux_seam("#879");
 
     let harness = format!(
         r#"
@@ -249,17 +260,7 @@ fn c_aux_sender_order_independent_budget_1063() {
     //
     // Lift the seam VERBATIM from the shipped obs.c and drive the order-independence invariant.
     // Fail-open (last_tick_total 0 before the first completed tick) is byte-identical to today.
-    let obs_c = std::fs::read_to_string(libobs().join("obs.c")).expect("read obs.c");
-    let sig = "bool obs_aux_sender_should_skip(";
-    let start = obs_c.find(sig).unwrap_or_else(|| {
-        panic!("#1063: obs.c no longer defines {sig} — the aux budget seam is gone.")
-    });
-    // Single-statement ifs -> the first "\n}" after the signature is its closing brace.
-    let rest = &obs_c[start..];
-    let end = rest.find("\n}").unwrap_or_else(|| {
-        panic!("#1063: could not find the end of obs_aux_sender_should_skip in obs.c")
-    }) + 2;
-    let lifted = &rest[..end];
+    let lifted = lift_aux_seam("#1063");
 
     let harness = format!(
         r#"

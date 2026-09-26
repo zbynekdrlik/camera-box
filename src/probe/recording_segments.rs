@@ -221,6 +221,15 @@ pub struct CamboxSegment {
     /// recorded-order/per-transition view than the netted `copies`/`gaps` totals above; the two
     /// are not expected to sum to the same total). Empty on a clean window.
     pub residual_events: Vec<crate::residual_events::ResidualEvent>,
+    /// Issue 1367 (ROZHODNUTÉ 5843424054): `Some` when this window's captured content is
+    /// MULTI-SOURCE -- the tear detector's multi-path fraction for the window is over
+    /// `crate::tear_detect::MULTI_PATH_SUSPECT_CEILING` (cam2 filming the strih-lx multiview: several
+    /// generations of the painted pattern per frame). Such a window is judged by its node burn: its
+    /// `copies`/`gaps` (still computed above, and the strict `pass` still reflects them), cadence and
+    /// `frozen_leg` fold REPORT-ONLY. `None` on every single-source window, so its JSON carries no
+    /// new key. Set by [`segment_continuity_scoped`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub multi_source: Option<crate::multi_source_window::MultiSourceTag>,
 }
 
 /// The whole-recording segmented-continuity verdict.
@@ -321,6 +330,11 @@ pub struct SegmentedContinuity {
     /// reads permanently `false` while it stays armed. The field and the underlying mechanism stay
     /// wired (never deleted) as the graduated fallback for a future walk-down step.
     pub windows_singleton_allowance_consumed: u32,
+    /// Issue 1367 -- how many windows are MULTI-SOURCE ([`CamboxSegment::multi_source`]): judged by
+    /// their node burn, their copies/gaps, cadence and `frozen_leg` report-only. Such a window is
+    /// never counted in [`Self::windows_over_copies_gaps_tolerance`] /
+    /// [`Self::windows_singleton_allowance_consumed`] (neither gates it). Always serialized.
+    pub windows_multi_source: u32,
     /// #707 EVENT-FORENSICS — every segment's [`CamboxSegment::residual_events`], concatenated in
     /// schedule order, for a caller that wants the whole run's residual events without walking
     /// `segments` itself (e.g. the Discord report / the collector script).
@@ -448,6 +462,23 @@ pub fn segment_continuity(
     guard_ns: i64,
     expected_step: i64,
 ) -> SegmentedContinuity {
+    segment_continuity_scoped(frames, schedule, guard_ns, expected_step, &[])
+}
+
+/// Issue 1367 -- [`segment_continuity`] with each window's MULTI-SOURCE scope.
+/// `multi_path_fractions[i]` is window `i`'s tear-detector multi-path fraction
+/// (`crate::tear_detect::TearStats::multi_path_suspect_fraction`). A window over the ceiling is
+/// tagged ([`CamboxSegment::multi_source`]) and its copies/gaps term drops out of the blocking
+/// fold (`crate::multi_source_window::scoped_continuity_term`); presence and the optical floor
+/// still gate it. A window with no entry reads 0.0 = single-source (fail-closed), so
+/// `segment_continuity` (an empty slice) is byte-identical to the pre-1367 behaviour.
+pub fn segment_continuity_scoped(
+    frames: &[SegmentFrame],
+    schedule: &[SwitchWindow],
+    guard_ns: i64,
+    expected_step: i64,
+    multi_path_fractions: &[f64],
+) -> SegmentedContinuity {
     let guard_ns = guard_ns.max(0);
     let expected_step = expected_step.max(1);
 
@@ -472,13 +503,18 @@ pub fn segment_continuity(
     let mut segments = Vec::with_capacity(schedule.len());
     let mut all_residual_events = Vec::new();
     for (wi, w) in schedule.iter().enumerate() {
-        let seg = window_segment(
+        let mut seg = window_segment(
             &w.cambox,
             w.start_ns,
             w.end_ns,
             &window_frames[wi],
             expected_step,
         );
+        // Issue 1367: a multi-source window is judged by its node burn -- tag it and drop its
+        // copies/gaps from the blocking term below (a single-source window is unchanged).
+        let multi_path_fraction = multi_path_fractions.get(wi).copied().unwrap_or(0.0);
+        let scope = crate::multi_source_window::window_check_scope(multi_path_fraction);
+        seg.multi_source = crate::multi_source_window::multi_source_tag(multi_path_fraction);
         // #1132 (owner mandate 2026-08-19): fold the BLOCKING verdict (`overall_pass_term`),
         // recomputed from the SAME raw counts `window_segment` already stored on the segment --
         // single source of truth, the identical re-derivation `windows_over_copies_gaps_tolerance`
@@ -503,14 +539,18 @@ pub fn segment_continuity(
         // (`seg.copies_gaps_tolerance`), so a per-cambox override (CAM2 → 25, issue 1249) folds the
         // blocking verdict against that window's OWN band — and the fold can never disagree with the
         // `relaxed_pass` the segment stored (same tolerance, same counts).
-        overall_pass &= crate::window_gate::decide_with_tolerance(
+        //
+        // Issue 1367: `scoped_continuity_term` IS that same `decide_with_tolerance(..)
+        // .overall_pass_term` for a single-source window; a multi-source window drops only its
+        // copies/gaps term (report-only), presence and the optical floor still gate.
+        overall_pass &= crate::multi_source_window::scoped_continuity_term(
+            scope,
             seg.frames,
             seg.undecodable,
             seg.copies,
             seg.gaps,
             seg.copies_gaps_tolerance,
-        )
-        .overall_pass_term;
+        );
         all_residual_events.extend(seg.residual_events.iter().cloned());
         segments.push(seg);
     }
@@ -546,9 +586,13 @@ pub fn segment_continuity(
     // ITS OWN applied tolerance (`s.copies_gaps_tolerance`), so a CAM2 window within its 25 override
     // is correctly NOT counted while a default-5 box over 5 still is.
     let copies_gaps_tolerance = crate::window_gate::WINDOW_COPIES_GAPS_TOLERANCE;
+    // Issue 1367: a multi-source window's copies/gaps are report-only, so it never counts here.
     let windows_over_copies_gaps_tolerance = segments
         .iter()
-        .filter(|s| s.copies > s.copies_gaps_tolerance || s.gaps > s.copies_gaps_tolerance)
+        .filter(|s| {
+            s.multi_source.is_none()
+                && (s.copies > s.copies_gaps_tolerance || s.gaps > s.copies_gaps_tolerance)
+        })
         .count() as u32;
 
     // #1169 (owner, 2026-08-22) -- how many windows had their nonzero copies/gaps ABSORBED by the
@@ -562,9 +606,11 @@ pub fn segment_continuity(
         .iter()
         .filter(|s| {
             s.frames > 0
+                && s.multi_source.is_none()
                 && crate::window_gate::segment_singleton_allowance_consumed(s.copies, s.gaps)
         })
         .count() as u32;
+    let windows_multi_source = segments.iter().filter(|s| s.multi_source.is_some()).count() as u32;
 
     SegmentedContinuity {
         segments,
@@ -575,6 +621,7 @@ pub fn segment_continuity(
         copies_gaps_tolerance,
         windows_over_copies_gaps_tolerance,
         windows_singleton_allowance_consumed,
+        windows_multi_source,
         guard_ns,
         residual_events: all_residual_events,
         expected_step,
@@ -747,6 +794,7 @@ fn window_segment(
         singleton_allowance_note,
         presentation_cadence,
         residual_events,
+        multi_source: None,
     }
 }
 

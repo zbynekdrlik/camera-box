@@ -47,6 +47,8 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE/lib/capture-rate-guard.sh"   # invocation-id-scoped journalctl builder (#694, shared with upgrade-fleet-ndi.sh + verify-device.sh)
 # shellcheck source=scripts/lib/frame-probe-deploy.sh
 . "$HERE/lib/frame-probe-deploy.sh"   # frame_probe_restore_enable_decision() — the #1138 #892 enable-state-preserving painter deploy decision
+# shellcheck source=scripts/lib/ci-run-resolve.sh
+. "$HERE/lib/ci-run-resolve.sh"   # ci_run_latest_success() -- the ONE newest-successful-run resolver, shared with bkshading-deploy-relay.sh (issue 808)
 # shellcheck source=scripts/lib/cam2-painter-deadman.sh
 . "$HERE/lib/cam2-painter-deadman.sh"  # cam2_painter_deadman_arm_cmds() — the #1351 re-arm of the TRANSIENT deadman timer (a stopped systemd-run unit is GC'd, so `systemctl start` cannot revive it)
 # The deadman re-fire window used when RESTORING a prior-armed deadman after the swap (#1351). The
@@ -238,10 +240,11 @@ if [ -n "$BINARY" ]; then
 else
   command -v gh >/dev/null 2>&1 || { err "gh CLI is required to download the artifact"; exit 1; }
   if [ -z "$RUN_ID" ]; then
-    info "Finding latest successful ci.yml run on '$BRANCH'..."
-    RUN_ID="$(gh run list --repo "$REPO" --branch "$BRANCH" --workflow ci.yml \
-      --status success --limit 1 --json databaseId -q '.[0].databaseId')"
-    [ -n "$RUN_ID" ] || { err "no successful ci.yml run found on '$BRANCH'"; exit 1; }
+    info "Finding the newest successful ci.yml run on '$BRANCH' that carries '$ARTIFACT'..."
+    # issue 808: the ONE shared resolver (client-side newest SUCCESS by createdAt that carries the
+    # artifact, logged) -- never the server-side `--status success --limit 1` pick that went stale.
+    RUN_ID="$(ci_run_latest_success "$REPO" "$BRANCH" ci.yml "$ARTIFACT")" || RUN_ID=""
+    [ -n "$RUN_ID" ] || { err "no successful ci.yml run on '$BRANCH' carries '$ARTIFACT'"; exit 1; }
   fi
   RUN_SHA="$(gh run view "$RUN_ID" --repo "$REPO" --json headSha -q .headSha)"
   info "Downloading artifact '$ARTIFACT' from run $RUN_ID (sha ${RUN_SHA:0:9})..."

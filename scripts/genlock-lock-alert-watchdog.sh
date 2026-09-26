@@ -165,6 +165,7 @@ genlock_lock_recovery_decision() {
 # handle_box <box> <ip>
 handle_box() {
   local box="$1" ip="$2" body reachable analyze_out verdict state reason n_absent qpc_ppm qpc_exp
+  local media_clock media_drift media_disc
 
   # resolume is a TRAVELING box -- page it only while home (the #1296 condition). strih/stream/imag
   # are home-check=always so this never skips them; resolume away -> no fetch, no page.
@@ -192,7 +193,12 @@ handle_box() {
   # genuine rate anomaly (measured far off the dantesync-reported expected slew) is visible in-band.
   qpc_ppm="$(printf '%s\n' "$analyze_out" | sed -n 's/^qpc_drift_ppm=//p')"
   qpc_exp="$(printf '%s\n' "$analyze_out" | sed -n 's/^qpc_expected_ppm=//p')"
-  log "$box ($ip): reachable=$reachable verdict=${verdict:-<none>} state=${state:-} reason=${reason:-} n_absent=${n_absent:-} qpc_drift_ppm=${qpc_ppm:-} qpc_expected_ppm=${qpc_exp:-}"
+  # issue 1372 part D: the audio (media) clock facet -- a DEGRADED/media_clock page already carries
+  # `media_clock:<kind>` in the reason; the drift + discipline are logged every pass for the trend.
+  media_clock="$(printf '%s\n' "$analyze_out" | sed -n 's/^media_clock=//p')"
+  media_drift="$(printf '%s\n' "$analyze_out" | sed -n 's/^media_clock_drift_us=//p')"
+  media_disc="$(printf '%s\n' "$analyze_out" | sed -n 's/^media_clock_discipline=//p')"
+  log "$box ($ip): reachable=$reachable verdict=${verdict:-<none>} state=${state:-} reason=${reason:-} n_absent=${n_absent:-} qpc_drift_ppm=${qpc_ppm:-} qpc_expected_ppm=${qpc_exp:-} media_clock=${media_clock:-} media_clock_drift_us=${media_drift:-} media_clock_discipline=${media_disc:-}"
 
   case "$verdict" in
     SKIP)

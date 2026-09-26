@@ -60,28 +60,33 @@ int main() {
     GenlockInputRow a; a.name="NDI cam1"; a.locked=true; a.connected=true; a.idle=false; a.latency_ms=3; a.underruns=0; a.relocks=1; a.late_holds=0; a.backward_steps=0; a.depth=2;
     GenlockInputRow b; b.name="weird \" name \\ x"; b.locked=false; b.connected=false; b.idle=false; b.latency_ms=13; b.depth=4;
     ins.push_back(a); ins.push_back(b);
-    // #1341 v6 signature: (state, reason, n_inputs, n_locked, n_absent, n_idle, latency_ms, clock,
-    //   output, recent_event, recent_event_input_name, recent_event_input_events, qpc_drift_ms,
-    //   qpc_drift_ppm, qpc_expected_ppm, qpc_step, audio_unexpected_input_name, inputs)
+    // v7 signature (issue 1372 part D): (state, reason, n_inputs, n_locked, n_absent, n_idle,
+    //   latency_ms, clock, output, recent_event, recent_event_input_name, recent_event_input_events,
+    //   qpc_drift_ms, qpc_drift_ppm, qpc_expected_ppm, qpc_step, audio_unexpected_input_name,
+    //   media_clock_state, media_clock_drift_us, media_clock_window_s, media_clock_ready,
+    //   media_clock_discipline, inputs)
     // no offender (recent_event false / true-but-none) -> recent_event_inputs is []; nullptr audio
     // offender -> audio_unexpected_inputs is []
-    printf("%s\n", genlock_build_lock_json("LOCKED","none",7,7,1,0,3,"locked","stamping",false,nullptr,0,0,14.244,12.0,0,nullptr,ins).c_str());
-    printf("%s\n", genlock_build_lock_json("UNLOCKED","clock",7,0,0,0,0,"absent","not-stamping",true,nullptr,0,-5,0.0,0.0,0,nullptr,{}).c_str());
-    printf("%s\n", genlock_build_lock_json("LOCKED","none",7,7,0,0,3,"locked","absent",false,nullptr,0,0,13.3,13.0,0,nullptr,{}).c_str());
+    printf("%s\n", genlock_build_lock_json("LOCKED","none",7,7,1,0,3,"locked","stamping",false,nullptr,0,0,14.244,12.0,0,nullptr,"ok",0,600,1,"n/a",ins).c_str());
+    printf("%s\n", genlock_build_lock_json("UNLOCKED","clock",7,0,0,0,0,"absent","not-stamping",true,nullptr,0,-5,0.0,0.0,0,nullptr,"ok",-1,600,0,"unknown",{}).c_str());
+    printf("%s\n", genlock_build_lock_json("LOCKED","none",7,7,0,0,3,"locked","absent",false,nullptr,0,0,13.3,13.0,0,nullptr,"ok",1,600,1,"active",{}).c_str());
     // #1299 Part 3: a DEGRADED/recent_event line NAMING the offender (cg, 25 phase events)
     std::vector<GenlockInputRow> ins2;
     GenlockInputRow c; c.name="cg"; c.locked=true; c.connected=true; c.idle=false; c.latency_ms=3; c.underruns=543; c.relocks=25; c.late_holds=0; c.backward_steps=0; c.depth=2;
     ins2.push_back(c);
-    printf("%s\n", genlock_build_lock_json("DEGRADED","recent_event",4,4,0,0,3,"locked","stamping",true,"cg",25,0,14.0,13.0,0,nullptr,ins2).c_str());
+    printf("%s\n", genlock_build_lock_json("DEGRADED","recent_event",4,4,0,0,3,"locked","stamping",true,"cg",25,0,14.0,13.0,0,nullptr,"ok",0,600,1,"n/a",ins2).c_str());
     // #1341: a LOCKED cg-OBS line with 10 idle SongPlayer inputs (n_idle=10) + a per-input idle flag
     std::vector<GenlockInputRow> ins3;
     GenlockInputRow p; p.name="NDI 2ME PGM"; p.locked=true; p.connected=true; p.idle=false; p.latency_ms=3; p.depth=2;
     GenlockInputRow q; q.name="sp-slow_video"; q.locked=false; q.connected=true; q.idle=true; q.latency_ms=3; q.relocks=60; q.late_holds=5; q.depth=0;
     ins3.push_back(p); ins3.push_back(q);
-    printf("%s\n", genlock_build_lock_json("LOCKED","none",12,2,0,10,3,"locked","stamping",false,nullptr,0,0,13.0,12.0,0,nullptr,ins3).c_str());
+    printf("%s\n", genlock_build_lock_json("LOCKED","none",12,2,0,10,3,"locked","stamping",false,nullptr,0,0,13.0,12.0,0,nullptr,"ok",0,600,1,"active",ins3).c_str());
     // #1303: a DEGRADED/audio_unexpected line NAMING the audible silent-by-contract source
     // #1299 Part 4: a DEGRADED/qpc_drift line carrying a STEP (qpc_step=1)
-    printf("%s\n", genlock_build_lock_json("DEGRADED","audio_unexpected",7,7,0,0,3,"locked","stamping",false,nullptr,0,0,14.0,13.0,1,"CAM3 (usb)",ins).c_str());
+    printf("%s\n", genlock_build_lock_json("DEGRADED","audio_unexpected",7,7,0,0,3,"locked","stamping",false,nullptr,0,0,14.0,13.0,1,"CAM3 (usb)","ok",0,600,1,"active",ins).c_str());
+    // issue 1372 part D: DEGRADED/media_clock lines -- a drifting mixer and a raw-QPC fallback
+    printf("%s\n", genlock_build_lock_json("DEGRADED","media_clock",4,4,0,0,3,"locked","stamping",false,nullptr,0,67,13.5,13.0,0,nullptr,"drift",8100,600,1,"active",ins2).c_str());
+    printf("%s\n", genlock_build_lock_json("DEGRADED","media_clock",4,4,0,0,3,"locked","stamping",false,nullptr,0,0,0.0,13.0,0,nullptr,"undisciplined",0,600,0,"disabled",ins2).c_str());
     return 0;
 }
 '''
@@ -121,7 +126,7 @@ def test_cpp_builder_output_roundtrips_through_the_python_parser(tmp_path):
     run = subprocess.run([str(binp)], capture_output=True, text=True)
     assert run.returncode == 0, run.stderr
     lines = [ln for ln in run.stdout.splitlines() if ln.strip()]
-    assert len(lines) == 6, f"expected 6 emitted lines, got {lines}"
+    assert len(lines) == 8, f"expected 8 emitted lines, got {lines}"
 
     # Each emitted object is valid JSON, and feeding it through the parser (wrapped as a real log
     # line) yields a facet whose NAMES/VALUES match the C++'s own decided fields.
@@ -144,6 +149,15 @@ def test_cpp_builder_output_roundtrips_through_the_python_parser(tmp_path):
         assert facet["qpc_drift_ppm"] == obj["qpc_drift_ppm"]
         assert facet["qpc_expected_ppm"] == obj["qpc_expected_ppm"]
         assert facet["qpc_step"] == obj["qpc_step"]
+        # issue 1372 part D v7: the media-clock facet round-trips key for key.
+        assert obj["v"] == 7
+        assert facet["media_clock"] == {
+            "state": obj["media_clock"]["state"],
+            "drift_us": obj["media_clock"]["drift_us"],
+            "window_s": obj["media_clock"]["window_s"],
+            "ready": obj["media_clock"]["ready"],
+            "discipline": obj["media_clock"]["discipline"],
+        }
         assert facet["source"] == "log"
         # #1299 v3 (Part 3): recent_event_inputs round-trips when non-empty; omitted when empty.
         obj_rei = obj.get("recent_event_inputs") or []
@@ -175,3 +189,10 @@ def test_cpp_builder_output_roundtrips_through_the_python_parser(tmp_path):
             assert got["relocks"] == r["relocks"]
             assert got["late_holds"] == r["late_holds"]
             assert got["depth"] == r["depth"]
+
+    # issue 1372 part D: the two DEGRADED/media_clock lines carry the sub-kind the watchdog names.
+    drift = json.loads(lines[6])["media_clock"]
+    assert drift == {"state": "drift", "drift_us": 8100, "window_s": 600, "ready": True,
+                     "discipline": "active"}
+    undisc = json.loads(lines[7])["media_clock"]
+    assert undisc["state"] == "undisciplined" and undisc["discipline"] == "disabled"

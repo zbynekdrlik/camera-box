@@ -44,15 +44,19 @@ storm the rig boxes + mbc already cured by enabling `phase_slew`.
 
 ## Components
 
-- `scripts/dantesync_config_patch.py` — PURE (pytest Tier-0). `patch_config(text, ntp_server=None)`
-  sets `system.phase_slew.enabled=true` (preserving every other key + order), optionally repoints
+- `scripts/dantesync_config_patch.py` — PURE (pytest Tier-0). `patch_config(text, ntp_server=None,
+  legacy_phase_slew=False)` sets the clock policy (preserving every other key + order): since
+  dantesync 1.9.0 (issue 1372) the default is `system.clock_discipline="ptp_phase_lock"` with
+  `system.phase_slew` left untouched (1.9.0 ignores it); `--legacy-phase-slew` keeps the old
+  `system.phase_slew.enabled=true` flip for a pre-1.9.0 node. It optionally repoints
   `ntp_server`, and REFUSES to touch `ntp_server_mode` (a hard round-trip invariant — the "never
   two masters" rule, `rig-timesync-single-authority`). `emit_apply_program(...)` / `--emit-apply`
   returns the EMIT-ONLY PowerShell the supervisor pastes (backup → write → `Restart-Service
   dantesync` → read back `:8898/status`), mirroring the mbc phase_slew flip on issue 1265.
 - `scripts/dantesync-maintenance-gate.sh` — REPORT-ONLY, NEVER in the blocking `[0/8]` set. Reuses
   the shared parsers (`ptp_locked_from_pipe_json` / `ntp_freshness_verdict` /
-  `offset_us_from_pipe_json` / `phase_slew_enabled_from_pipe_json` from `clock-offset-guard.sh`,
+  `offset_us_from_pipe_json` / `clock_discipline_class` (issue 1372: the 1.9.0 phase lock, or a
+  pre-1.9.0 node's phase_slew) from `clock-offset-guard.sh`,
   `dantesync_version_from_version_output` + `DANTESYNC_VERSION_PIN` from `dantesync-version-gate.sh`)
   and `obs_fleet_is_home` from `obs-fleet.sh`. Prints ONE honest row — **SKIP when away (never a
   false red)**, OK / ALARM / UNKNOWN when home. Exit 0 OK|SKIP, 30 ALARM, 11 UNKNOWN.

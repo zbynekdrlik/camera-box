@@ -62,7 +62,8 @@ use camera_box::probe::recording_latency::{
 use camera_box::probe::recording_partial::RecordingPartial;
 use camera_box::probe::recording_segments::{
     load_switch_schedule, place_frame_in_window, raw_window_index, segment_continuity,
-    SegmentFrame, SwitchWindow, WindowPlacement, DEFAULT_TRANSITION_GUARD_NS,
+    segment_continuity_scoped, SegmentFrame, SwitchWindow, WindowPlacement,
+    DEFAULT_TRANSITION_GUARD_NS,
 };
 use camera_box::probe::recording_verdict::{
     cam_strih_assessment, verdict, FrameTick, RecordingVerdict, VerdictConfig,
@@ -305,7 +306,9 @@ struct Args {
     /// ticks it can see (ids + timestamps, NEVER frames/pixels). The strih recording is decoded ON
     /// the strih box, the stream recording ON the stream box, the imag recording ON the imag-nb
     /// box; a recording is NEVER copied box-to-box (nor to dev1) — only this small JSON moves.
-    /// dev1 then runs `--merge-partials` to combine them. `<box>` is `strih`, `stream`, or `imag`.
+    /// dev1 then runs `--merge-partials` to combine them. `<box>` is `strih`, `stream`, `imag`, or
+    /// `cg` (issue 1302: the cg OBS recording passed via `--cg`, decoded ON the RESOLUME-SNV box for
+    /// the SongPlayer + cg OBS burns — the REPORT-ONLY cg_chain section's origin hop).
     #[arg(long, value_name = "BOX")]
     extract_partial: Option<String>,
     /// #1143: OBS's own record-session render stats for the imag recording, as a compact JSON object
@@ -2882,6 +2885,18 @@ fn report_hop_latency(h: &Option<HopLatency>, label: &str, anchor: &str) -> bool
     }
 }
 
+/// issue 1367 — how many node-burn ECHOES (a burn read outside its own slot, e.g. a copy inside a
+/// multiview a camera films) the recording decode rejected, per recording. `None` = not decoded
+/// here and not carried (no recording, or a partial from an older build). REPORT-ONLY: the verdict
+/// prints it as `burn_echoes_rejected`, it never touches `overall_pass`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct BurnEchoCounts {
+    strih: Option<u64>,
+    stream: Option<u64>,
+    imag: Option<u64>,
+    cg: Option<u64>,
+}
+
 /// One recording's decoded frames + (optionally) the recording file backing them. The frames
 /// come from EITHER a live decode (fused / `--extract-partial`) OR a merged per-box PARTIAL
 /// (#208); `rec_path` is `Some` only when the recording is on THIS host (so pixel-proof PNGs
@@ -3122,31 +3137,43 @@ fn main() -> Result<()> {
     // #707: strih/stream also require both cam2 dual-QR Vernier halves before skipping the
     // robust retry — see `extract_partial`'s identical wiring for the full reasoning.
     let min_distinct_optical = args.cam2_pin().map(|run_id| (run_id, 2));
+    // issue 1367: the recordings decode one after the other, so the delta of the process-wide
+    // echo counter around each decode is that recording's count (report-only).
+    let echo_count = camera_box::probe::burn_echo::burn_echo_rejection_count;
+    let mut burn_echoes = BurnEchoCounts::default();
+    let mark = echo_count();
     let strih = decode_for_grouped(
         args.strih.as_deref(),
         &[args.burn_strih_run_id],
         &camera_under_test_burn_ids(&args),
         min_distinct_optical,
     )?;
+    burn_echoes.strih = strih.as_ref().map(|_| echo_count().saturating_sub(mark));
+    let mark = echo_count();
     let stream = decode_for_grouped(
         args.stream.as_deref(),
         &[args.burn_strih_run_id, args.burn_stream_run_id],
         &camera_under_test_burn_ids(&args),
         min_distinct_optical,
     )?;
+    burn_echoes.stream = stream.as_ref().map(|_| echo_count().saturating_sub(mark));
     // #463: imag now carries its OWN digital corner burn (run_id BURN_RUN_ID_IMAG) — decode for
     // it so the #207 fast/robust gate looks for it. Backward compatible: a recording with no
     // burn at all (a build predating #463) simply decodes with none found, and the verdict falls
     // back to the cam2 optical tick's own contiguity (see `node_verdict_for_imag`).
+    let mark = echo_count();
     let imag = decode_for(args.imag.as_deref(), &[BURN_RUN_ID_IMAG])?;
+    burn_echoes.imag = imag.as_ref().map(|_| echo_count().saturating_sub(mark));
     // #1301: the cg OBS box's OWN recording for the CG chain — decode for BOTH the SongPlayer
     // origin burn (911014, painted upstream by SongPlayer) and the cg OBS hop burn (911015,
     // composited locally) so the #207 fast/robust gate looks for both. `None` when --cg is not
     // supplied (a normal camera-chain run), so the cg_chain section is simply omitted.
+    let mark = echo_count();
     let cg = decode_for(
         args.cg.as_deref(),
         &[args.burn_songplayer_run_id, args.burn_cg_run_id],
     )?;
+    burn_echoes.cg = cg.as_ref().map(|_| echo_count().saturating_sub(mark));
     // #187: a cam1 grab decode failure is NON-FATAL — the stream-only hops still run, and the
     // failure is recorded in nodes.cam1 (never silent). The grab is OPTIONAL (#179).
     let cam1 = match args.cam1.as_deref() {
@@ -3168,7 +3195,19 @@ fn main() -> Result<()> {
     // so the fused path can thread the cg OBS recording through as the new trailing `cg` param —
     // the 3 middle trailing args are the same `None`s the wrapper passes on the fused/test path.
     let (_report, all_pass) = build_and_print_verdict_with_stream_diffs(
-        &args, strih, stream, cam1, None, None, imag, None, None, None, None, cg,
+        &args,
+        strih,
+        stream,
+        cam1,
+        None,
+        None,
+        imag,
+        None,
+        None,
+        None,
+        None,
+        cg,
+        burn_echoes,
     )?;
     if !all_pass {
         std::process::exit(1);
@@ -3238,6 +3277,7 @@ fn build_and_print_verdict(
         None, // issue 1118: the fused/test path never degrades an imag partial (no schema skip)
         None, // #1143: the fused/test path carries no OBS record-render stats
         None, // #1301: the 8-arg wrapper (tests) supplies no cg OBS recording
+        BurnEchoCounts::default(), // issue 1367: the wrapper (tests) carries no echo counts
     )
 }
 
@@ -3289,6 +3329,9 @@ fn build_and_print_verdict_with_stream_diffs(
     // across cg OBS → strih → stream); NEVER folds into the camera-chain overall_pass while
     // `cg_chain_gate::gates_overall_pass()` is false. `None` on every normal run.
     cg: Option<DecodedRec>,
+    // issue 1367 — the node-burn echoes each recording's decode rejected (fused: counted here;
+    // merge: carried in each partial). REPORT-ONLY `burn_echoes_rejected`, never `overall_pass`.
+    burn_echoes: BurnEchoCounts,
 ) -> Result<(serde_json::Value, bool)> {
     let cfg = VerdictConfig {
         capture_fps: args.capture_fps,
@@ -4927,8 +4970,70 @@ fn build_and_print_verdict_with_stream_diffs(
                     &all_burns,
                     cam2_pin,
                 );
-                let seg =
-                    segment_continuity(&seg_frames, schedule, args.switch_guard_ns, expected_step);
+                // #781/#1196 — the per-window tear statistics. Computed BEFORE the continuity fold
+                // since issue 1367: the tear detector's per-window multi-path fraction decides each
+                // window's check scope (a MULTI-SOURCE window -- cam2 filming the strih-lx
+                // multiview -- is judged by its node burn; its copies/gaps, cadence and frozen_leg
+                // fold report-only, `camera_box::multi_source_window`). The tear JSON + LIVE fold
+                // further down read the SAME `tear_stats`.
+                //
+                // issue 1196 (v2): per frame, the PRIMARY dual-QR ids (non-reserved run_ids — the
+                // aux run_id sits IN NODE_BURN_RUN_IDS, so this filter excludes it automatically)
+                // plus the AUX bottom tick pair's ids, extracted BY the reserved AUX_TICK_RUN_ID.
+                // The tear span is computed over their union, which is what makes a seam BETWEEN
+                // the two painted bands detectable.
+                let mut tear_by_window: Vec<Vec<(Vec<u32>, Vec<u32>)>> =
+                    vec![Vec::new(); schedule.len()];
+                for f in stream_frames {
+                    if let Some(gen_ts) =
+                        frame_gen_ts_anchor(f, &anchor_run_ids, &all_burns, cam2_pin)
+                    {
+                        if let WindowPlacement::In(wi) =
+                            place_frame_in_window(gen_ts, schedule, args.switch_guard_ns)
+                        {
+                            let primary: Vec<u32> = f
+                                .payloads
+                                .iter()
+                                .filter(|p| {
+                                    !camera_box::probe::recording::NODE_BURN_RUN_IDS
+                                        .contains(&p.run_id)
+                                })
+                                .map(|p| p.frame_id)
+                                .collect();
+                            let aux: Vec<u32> = f
+                                .payloads
+                                .iter()
+                                .filter(|p| {
+                                    p.run_id
+                                        == camera_box::probe::recording_latency::AUX_TICK_RUN_ID
+                                })
+                                .map(|p| p.frame_id)
+                                .collect();
+                            tear_by_window[wi].push((primary, aux));
+                        }
+                    }
+                }
+                let tear_stats: Vec<camera_box::tear_detect::TearStats> = tear_by_window
+                    .iter()
+                    .map(|w| camera_box::tear_detect::window_tear_stats(w))
+                    .collect();
+                // Issue 1367 — each window's check scope, from its multi-path fraction.
+                let multi_path_fractions: Vec<f64> = tear_stats
+                    .iter()
+                    .map(|s| s.multi_path_suspect_fraction)
+                    .collect();
+                let window_scopes: Vec<camera_box::multi_source_window::WindowCheckScope> =
+                    multi_path_fractions
+                        .iter()
+                        .map(|&f| camera_box::multi_source_window::window_check_scope(f))
+                        .collect();
+                let seg = segment_continuity_scoped(
+                    &seg_frames,
+                    schedule,
+                    args.switch_guard_ns,
+                    expected_step,
+                    &multi_path_fractions,
+                );
                 println!();
                 println!(
                     "=== #312 ALL-CAMBOX per-segment continuity ({} window(s), guard {} ns, painted-tick step {}) ===",
@@ -4952,6 +5057,22 @@ fn build_and_print_verdict_with_stream_diffs(
                     // box), NOT chain loss — print the explicit diagnostic so it is not misread.
                     if let Some(note) = &s.note {
                         println!("      ⚠ {note}");
+                    }
+                    // Issue 1367: a multi-source window is judged by its node burn; its copies/gaps,
+                    // cadence and frozen_leg stay printed below but are REPORT-ONLY.
+                    let multi_source = s.multi_source.is_some();
+                    if let Some(ms) = &s.multi_source {
+                        println!(
+                            "      ⚠ {} -- copies={} gaps={}, cadence and frozen_leg are \
+                             REPORT-ONLY; the window is judged by its node burn (contiguity + \
+                             hold, BLOCKING).",
+                            camera_box::multi_source_window::tag_line(
+                                &s.cambox,
+                                ms.multi_path_suspect_fraction
+                            ),
+                            s.copies,
+                            s.gaps
+                        );
                     }
                     // Issue 889 (2026-07-30 user decision on issue 883) visibility requirement 1,
                     // extended by issue 915 (2026-08-01 user decision) and the 2026-08-05 RE-GATE
@@ -4982,7 +5103,7 @@ fn build_and_print_verdict_with_stream_diffs(
                                     s.undecodable
                                 );
                             }
-                            if s.copies != 0 || s.gaps != 0 {
+                            if !multi_source && (s.copies != 0 || s.gaps != 0) {
                                 // #1132 (owner mandate 2026-08-19): the copies/gaps tolerance
                                 // rescue is DISARMED, so a within-tolerance nonzero copies/gaps
                                 // window (relaxed_pass == true) now GATES overall_pass. The old
@@ -5067,6 +5188,12 @@ fn build_and_print_verdict_with_stream_diffs(
                                              frame_count==0) — it still fails overall_pass."
                                         );
                                     }
+                                    camera_box::window_gate::RelaxedFailureReason::OverCopiesGapsTolerance
+                                        if multi_source =>
+                                    {
+                                        // Issue 1367: reported above by the multi-source line;
+                                        // these copies/gaps do not gate this window.
+                                    }
                                     camera_box::window_gate::RelaxedFailureReason::OverCopiesGapsTolerance => {
                                         println!(
                                             "      ⚠ #889 RE-GATE FAIL: copies={} gaps={} \
@@ -5144,6 +5271,28 @@ fn build_and_print_verdict_with_stream_diffs(
                             pc.delta_histogram
                         );
                     }
+                }
+                // Issue 1367 — prints on every run that has a multi-source window, so the
+                // relaxation is never silent.
+                if seg.windows_multi_source > 0 {
+                    println!(
+                        "  ⚠ #1367 MULTI-SOURCE: {}/{} cambox window(s) film multi-source content \
+                         (multi-path fraction over {:.2}) -- their copies/gaps, cadence and \
+                         frozen_leg are REPORT-ONLY, each is judged by its node burn: {}",
+                        seg.windows_multi_source,
+                        seg.segments.len(),
+                        camera_box::tear_detect::MULTI_PATH_SUSPECT_CEILING,
+                        seg.segments
+                            .iter()
+                            .filter_map(|s| s.multi_source.as_ref().map(|ms| {
+                                camera_box::multi_source_window::tag_line(
+                                    &s.cambox,
+                                    ms.multi_path_suspect_fraction,
+                                )
+                            }))
+                            .collect::<Vec<_>>()
+                            .join("; ")
+                    );
                 }
                 // Issue 889 visibility requirement 3 — this summary line prints UNCONDITIONALLY,
                 // whether or not any window failed, so silence is never mistaken for strictness.
@@ -5223,7 +5372,9 @@ fn build_and_print_verdict_with_stream_diffs(
                         .segments
                         .iter()
                         .filter(|s| {
+                            // Issue 1367: a multi-source window's copies/gaps do not gate.
                             s.frames > 0
+                                && s.multi_source.is_none()
                                 && (s.copies != 0 || s.gaps != 0)
                                 && !camera_box::window_gate::segment_singleton_allowance_consumed(
                                     s.copies, s.gaps,
@@ -5284,11 +5435,21 @@ fn build_and_print_verdict_with_stream_diffs(
                     );
                 }
                 println!(
-                    "  >>> {}",
+                    "  >>> {}{}",
                     if seg.overall_pass {
                         "ALL camboxes CONTINUITY-CLEAN across their program windows."
                     } else {
                         "NOT clean: one or more cambox windows FAILED (see per-cambox above)."
+                    },
+                    // Issue 1367: never let "CONTINUITY-CLEAN" read as "zero copies" when a
+                    // multi-source window passed on its node burn.
+                    if seg.windows_multi_source > 0 {
+                        format!(
+                            " ({} multi-source window(s) judged by their node burn, #1367)",
+                            seg.windows_multi_source
+                        )
+                    } else {
+                        String::new()
                     }
                 );
                 let mut seg_json = serde_json::to_value(&seg).unwrap_or(serde_json::Value::Null);
@@ -5492,46 +5653,7 @@ fn build_and_print_verdict_with_stream_diffs(
                 // init (which would be a dead store -> clippy `unused_assignments` under -D warnings).
                 let projection_tap_summary: camera_box::tear_detect::ProjectionProof;
                 {
-                    // issue 1196 (v2): per frame, the PRIMARY dual-QR ids (non-reserved run_ids —
-                    // the aux run_id sits IN NODE_BURN_RUN_IDS, so this filter excludes it
-                    // automatically) plus the AUX bottom tick pair's ids, extracted BY the
-                    // reserved AUX_TICK_RUN_ID. The tear span is computed over their union, which
-                    // is what makes a seam BETWEEN the two painted bands detectable.
-                    let mut tear_by_window: Vec<Vec<(Vec<u32>, Vec<u32>)>> =
-                        vec![Vec::new(); schedule.len()];
-                    for f in stream_frames {
-                        if let Some(gen_ts) =
-                            frame_gen_ts_anchor(f, &anchor_run_ids, &all_burns, cam2_pin)
-                        {
-                            if let WindowPlacement::In(wi) =
-                                place_frame_in_window(gen_ts, schedule, args.switch_guard_ns)
-                            {
-                                let primary: Vec<u32> = f
-                                    .payloads
-                                    .iter()
-                                    .filter(|p| {
-                                        !camera_box::probe::recording::NODE_BURN_RUN_IDS
-                                            .contains(&p.run_id)
-                                    })
-                                    .map(|p| p.frame_id)
-                                    .collect();
-                                let aux: Vec<u32> = f
-                                    .payloads
-                                    .iter()
-                                    .filter(|p| {
-                                        p.run_id
-                                            == camera_box::probe::recording_latency::AUX_TICK_RUN_ID
-                                    })
-                                    .map(|p| p.frame_id)
-                                    .collect();
-                                tear_by_window[wi].push((primary, aux));
-                            }
-                        }
-                    }
-                    let tear_stats: Vec<camera_box::tear_detect::TearStats> = tear_by_window
-                        .iter()
-                        .map(|w| camera_box::tear_detect::window_tear_stats(w))
-                        .collect();
+                    // `tear_stats` is computed above the continuity fold (issue 1367: it scopes it).
                     let windows_json: Vec<serde_json::Value> = schedule
                         .iter()
                         .zip(&tear_stats)
@@ -5709,11 +5831,29 @@ fn build_and_print_verdict_with_stream_diffs(
                 // cadence window at all (mass optical-decode failure, already hard-failed by
                 // copies/gaps/undecodable) = not applicable, passes. Whether it folds into
                 // `overall_pass` is the one-line-restorable `gates_overall_pass()` seam (LIVE).
-                let worst_cadence_paired_fraction: Option<f64> = seg
+                //
+                // Issue 1367: only single-source windows fold; a multi-source window's cadence is
+                // listed report-only under `multi_source_report_only`.
+                let worst_cadence_paired_fraction: Option<f64> =
+                    camera_box::multi_source_window::gating_items(&seg.segments, &window_scopes)
+                        .filter_map(|s| {
+                            s.presentation_cadence.as_ref().map(|pc| pc.paired_fraction)
+                        })
+                        .fold(None::<f64>, |acc, pf| Some(acc.map_or(pf, |m| m.max(pf))));
+                let cadence_multi_source: Vec<serde_json::Value> = seg
                     .segments
                     .iter()
-                    .filter_map(|s| s.presentation_cadence.as_ref().map(|pc| pc.paired_fraction))
-                    .fold(None::<f64>, |acc, pf| Some(acc.map_or(pf, |m| m.max(pf))));
+                    .filter_map(|s| {
+                        let ms = s.multi_source.as_ref()?;
+                        Some(serde_json::json!({
+                            "cambox": s.cambox,
+                            "multi_path_suspect_fraction": ms.multi_path_suspect_fraction,
+                            "paired_fraction": s.presentation_cadence.as_ref().map(|pc| pc.paired_fraction),
+                            "uniform_fraction": s.presentation_cadence.as_ref().map(|pc| pc.beat_corrected_uniform_fraction),
+                            "tag": ms.tag,
+                        }))
+                    })
+                    .collect();
                 let cadence_bound = args.max_cadence_paired_fraction;
                 let cadence_gate_pass = camera_box::presentation_cadence::cadence_judder_gate_pass(
                     worst_cadence_paired_fraction,
@@ -5725,6 +5865,7 @@ fn build_and_print_verdict_with_stream_diffs(
                     "worst_paired_fraction": worst_cadence_paired_fraction,
                     "pass": cadence_gate_pass,
                     "gates_overall_pass": cadence_gates_overall,
+                    "multi_source_report_only": cadence_multi_source,
                     "note": "#1036 calibrated 15fps-judder bound (issue 726 metric, issue 406 \
                              zero-loss). Worst per-window presentation_cadence.paired_fraction \
                              across cambox windows; None = no cadence window (not applicable, \
@@ -5759,38 +5900,35 @@ fn build_and_print_verdict_with_stream_diffs(
                 // window (mass decode failure, already hard-failed by copies/gaps/undecodable) = not
                 // applicable, passes. LIVE via `presentation_cadence::uniformity_gates_overall_pass`;
                 // floor RESTORED 0.90 -> 0.95 (issue 1242 walk-back).
-                let worst_cadence_uniform_fraction: Option<f64> = seg
-                    .segments
-                    .iter()
-                    .filter_map(|s| {
-                        s.presentation_cadence
-                            .as_ref()
-                            .map(|pc| pc.uniform_fraction)
-                    })
-                    .fold(None::<f64>, |acc, uf| Some(acc.map_or(uf, |m| m.min(uf))));
+                let worst_cadence_uniform_fraction: Option<f64> =
+                    camera_box::multi_source_window::gating_items(&seg.segments, &window_scopes)
+                        .filter_map(|s| {
+                            s.presentation_cadence
+                                .as_ref()
+                                .map(|pc| pc.uniform_fraction)
+                        })
+                        .fold(None::<f64>, |acc, uf| Some(acc.map_or(uf, |m| m.min(uf))));
                 // The DERIVED reading (mode-based, #726) — DIAGNOSTIC since #1250 (the pre-beat
                 // reading; surfaced so reverting the gate to it is a one-field change).
-                let worst_cadence_derived_uniform_fraction: Option<f64> = seg
-                    .segments
-                    .iter()
-                    .filter_map(|s| {
-                        s.presentation_cadence
-                            .as_ref()
-                            .map(|pc| pc.derived_uniform_fraction)
-                    })
-                    .fold(None::<f64>, |acc, uf| Some(acc.map_or(uf, |m| m.min(uf))));
+                let worst_cadence_derived_uniform_fraction: Option<f64> =
+                    camera_box::multi_source_window::gating_items(&seg.segments, &window_scopes)
+                        .filter_map(|s| {
+                            s.presentation_cadence
+                                .as_ref()
+                                .map(|pc| pc.derived_uniform_fraction)
+                        })
+                        .fold(None::<f64>, |acc, uf| Some(acc.map_or(uf, |m| m.min(uf))));
                 // #1250 the GATED reading: the BEAT-AWARE field fed to `cadence_uniformity_gate_pass`
                 // below and serialized as `worst_uniform_fraction`. The derived + raw readings above
                 // are DIAGNOSTIC only. See src/presentation_cadence.rs UNIFORM_FRACTION_MIN.
-                let worst_cadence_beat_corrected_uniform_fraction: Option<f64> = seg
-                    .segments
-                    .iter()
-                    .filter_map(|s| {
-                        s.presentation_cadence
-                            .as_ref()
-                            .map(|pc| pc.beat_corrected_uniform_fraction)
-                    })
-                    .fold(None::<f64>, |acc, uf| Some(acc.map_or(uf, |m| m.min(uf))));
+                let worst_cadence_beat_corrected_uniform_fraction: Option<f64> =
+                    camera_box::multi_source_window::gating_items(&seg.segments, &window_scopes)
+                        .filter_map(|s| {
+                            s.presentation_cadence
+                                .as_ref()
+                                .map(|pc| pc.beat_corrected_uniform_fraction)
+                        })
+                        .fold(None::<f64>, |acc, uf| Some(acc.map_or(uf, |m| m.min(uf))));
                 let uniformity_floor = camera_box::presentation_cadence::UNIFORM_FRACTION_MIN;
                 let uniformity_gate_pass =
                     camera_box::presentation_cadence::cadence_uniformity_gate_pass(
@@ -5806,6 +5944,7 @@ fn build_and_print_verdict_with_stream_diffs(
                     "worst_raw_uniform_fraction": worst_cadence_uniform_fraction,
                     "pass": uniformity_gate_pass,
                     "gates_overall_pass": uniformity_gates_overall,
+                    "multi_source_report_only": cadence_multi_source,
                     "note": "#1142 cadence-uniformity FLOOR (owner mandate). Since #1250 the GATED \
                              value worst_uniform_fraction is the BEAT-AWARE worst per-window \
                              presentation_cadence.beat_corrected_uniform_fraction across cambox \
@@ -5919,7 +6058,11 @@ fn build_and_print_verdict_with_stream_diffs(
                         Vec::with_capacity(dup_windows.len());
                     let mut worst_raw_fraction: Option<f64> = None;
                     let mut masked_windows: usize = 0;
-                    for win_frames in &dup_windows {
+                    for (wi, win_frames) in dup_windows.iter().enumerate() {
+                        // Issue 1367: a multi-source window's duplicate rate is report-only.
+                        let dup_gates_window =
+                            camera_box::multi_source_window::scope_at(&window_scopes, wi)
+                                .test_pattern_checks_gate();
                         // #1112/#1166 — slice the (carried or locally-recomputed) per-frame
                         // MAD-to-predecessor vector into THIS window's near-duplicate sequence, by
                         // frame_index + recording-adjacency (the pure Tier-0 helper — index-alignment
@@ -5932,11 +6075,13 @@ fn build_and_print_verdict_with_stream_diffs(
                             camera_box::dup_cadence::window_prev_mads(&win_idxs, &frame_prev_mads);
                         let dc = camera_box::dup_cadence::measure_dup_cadence(&seq);
                         if let Some(ref d) = dc {
+                            // The raw worst stays a whole-run DIAGNOSTIC (every window); only the
+                            // masked count, which gates, skips a multi-source window (issue 1367).
                             worst_raw_fraction = Some(
                                 worst_raw_fraction
                                     .map_or(d.duplicate_fraction, |m| m.max(d.duplicate_fraction)),
                             );
-                            if d.duplication_masked {
+                            if d.duplication_masked && dup_gates_window {
                                 masked_windows += 1;
                             }
                         }
@@ -5954,8 +6099,35 @@ fn build_and_print_verdict_with_stream_diffs(
                     // a freeze/glitch has a high raw fraction but is coverage/regularity
                     // vetoed (frozen_leg's domain), so gating on raw would double-jeopardy
                     // it (issue 1088 review finding).
+                    let gated_dcs: Vec<Option<camera_box::dup_cadence::DupCadence>> = dcs
+                        .iter()
+                        .enumerate()
+                        .map(|(wi, dc)| {
+                            if camera_box::multi_source_window::scope_at(&window_scopes, wi)
+                                .test_pattern_checks_gate()
+                            {
+                                dc.clone()
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
                     let worst_masked_fraction =
-                        camera_box::dup_cadence::worst_masked_duplicate_fraction(&dcs);
+                        camera_box::dup_cadence::worst_masked_duplicate_fraction(&gated_dcs);
+                    let dup_multi_source: Vec<serde_json::Value> = dcs
+                        .iter()
+                        .zip(&seg.segments)
+                        .filter_map(|(dc, s)| {
+                            let ms = s.multi_source.as_ref()?;
+                            Some(serde_json::json!({
+                                "cambox": s.cambox,
+                                "multi_path_suspect_fraction": ms.multi_path_suspect_fraction,
+                                "duplicate_fraction": dc.as_ref().map(|d| d.duplicate_fraction),
+                                "duplication_masked": dc.as_ref().map(|d| d.duplication_masked),
+                                "tag": ms.tag,
+                            }))
+                        })
+                        .collect();
                     // #1101/#1166 — fold the per-window signal-viability cross-check (built in the loop
                     // above) into the run-level verdict: does the content near-duplicate signal
                     // actually OBSERVE the duplication the Vernier-tick copies prove is present? The
@@ -5992,6 +6164,7 @@ fn build_and_print_verdict_with_stream_diffs(
                         "bound_duplicate_fraction": dup_bound,
                         "pass": dup_gate_pass,
                         "gates_overall_pass": dup_gates_overall,
+                        "multi_source_report_only": dup_multi_source,
                         "frames_no_anchor": dup_no_anchor,
                         "signal_viability": signal_viability,
                         "signal_promotable": signal_promotable,
@@ -6174,7 +6347,34 @@ fn build_and_print_verdict_with_stream_diffs(
                     .chain(args.restart_event.iter())
                     .filter_map(|t| SelfHealResetEvent::parse(t))
                     .collect();
-                let leg_report = attribute_self_heal(&leg_segments, &self_heal_events);
+                let mut leg_report = attribute_self_heal(&leg_segments, &self_heal_events);
+                // Issue 1367: a hard-frozen entry of a MULTI-SOURCE window is report-only (its tick
+                // repeats are older multiview generations, not a frozen leg; the node burn judges
+                // it). It moves to `frozen_leg.multi_source_report_only`; every other entry (and
+                // every self-heal event) still gates.
+                let frozen_window_keys: Vec<camera_box::multi_source_window::WindowKey<'_>> = seg
+                    .segments
+                    .iter()
+                    .enumerate()
+                    .map(|(wi, s)| camera_box::multi_source_window::WindowKey {
+                        cambox: &s.cambox,
+                        start_ns: s.start_ns,
+                        scope: camera_box::multi_source_window::scope_at(&window_scopes, wi),
+                    })
+                    .collect();
+                let (frozen_gating, frozen_multi_source) =
+                    camera_box::multi_source_window::partition_frozen_legs(
+                        std::mem::take(&mut leg_report.frozen),
+                        &frozen_window_keys,
+                    );
+                leg_report.frozen = frozen_gating;
+                for f in &frozen_multi_source {
+                    println!(
+                        "  {} -- {} (report-only)",
+                        f.message(),
+                        camera_box::multi_source_window::MULTI_SOURCE_TAG
+                    );
+                }
                 for f in &leg_report.frozen {
                     println!("  {}", f.message());
                 }
@@ -6220,6 +6420,17 @@ fn build_and_print_verdict_with_stream_diffs(
                         "cambox": s.cambox,
                         "copies": s.copies,
                         "message": s.message(),
+                    })).collect::<Vec<_>>(),
+                    "multi_source_report_only": frozen_multi_source.iter().map(|f| serde_json::json!({
+                        "cambox": f.cambox,
+                        "since_ns": f.since_ns,
+                        "copies": f.copies,
+                        "approx_stale_secs": f.approx_stale_secs,
+                        "density": f.density,
+                        "message": f.message(),
+                        "multi_source": seg.segments.iter().find(|s| {
+                            s.cambox == f.cambox && s.start_ns == f.since_ns
+                        }).and_then(|s| s.multi_source.clone()),
                     })).collect::<Vec<_>>(),
                 });
                 // The JSON key `self_heal_reset` is kept for back-compat (issue-895/914 consumers +
@@ -7454,6 +7665,17 @@ fn build_and_print_verdict_with_stream_diffs(
         all_pass &= cg_chain_gate::folds_into_overall_pass(contiguous);
     }
 
+    // issue 1367 — REPORT-ONLY: the node-burn echoes the recording decode rejected per
+    // recording (a node burn read outside its own slot, e.g. inside a multiview a camera films).
+    // A large count names a camera that films a monitor showing OBS; it never gates.
+    report["burn_echoes_rejected"] = serde_json::json!({
+        "strih": burn_echoes.strih,
+        "stream": burn_echoes.stream,
+        "imag": burn_echoes.imag,
+        "cg": burn_echoes.cg,
+        "gates_overall_pass": false,
+    });
+
     // Record the headline verdict and write the machine-readable report (BEFORE any
     // exit, so a FAIL run still produces the JSON the report renderer consumes).
     report["overall_pass"] = serde_json::Value::Bool(all_pass);
@@ -7672,6 +7894,9 @@ fn extract_partial_flagged_frames(
                 1,
             ),
         ],
+        // imag, and the issue-1302 cg box: only the undecodable frames above are flagged. The cg
+        // chain's own missing ids are reported by the merge's cg_chain section, which never
+        // extracts pixels for them on the fused path either.
         _ => Vec::new(),
     };
     // #273: thread the cam2 pin so the on-box pixel-proof flagging anchors the optical window to
@@ -7824,6 +8049,10 @@ fn args_expected_burns_for(box_name: &str, args: &Args) -> Option<Vec<u32>> {
             Some(v)
         }
         "imag" => Some(vec![BURN_RUN_ID_IMAG]),
+        // Issue 1302: the cg OBS recording carries the SongPlayer origin burn + the cg OBS hop
+        // burn — the same pair the fused path decodes `--cg` for — regardless of
+        // `--cg-chain-burns` (that flag only widens the strih/stream sets).
+        "cg" => Some(vec![args.burn_songplayer_run_id, args.burn_cg_run_id]),
         _ => None,
     }
 }
@@ -7872,7 +8101,8 @@ fn qpsk_probe(args: &Args, audio: &Path) -> Result<()> {
 fn extract_partial(args: &Args, box_name: &str) -> Result<()> {
     let expected_burns = args_expected_burns_for(box_name, args).ok_or_else(|| {
         anyhow::anyhow!(
-            "--extract-partial: unknown box {box_name:?} (expected `strih`, `stream`, or `imag`)"
+            "--extract-partial: unknown box {box_name:?} (expected `strih`, `stream`, `imag`, or \
+             `cg`)"
         )
     })?;
     let rec_path: &Path = match box_name {
@@ -7892,6 +8122,13 @@ fn extract_partial(args: &Args, box_name: &str) -> Result<()> {
             .imag
             .as_deref()
             .context("--extract-partial imag needs --imag <recording on the imag-nb box>")?,
+        // Issue 1302: the cg OBS recording, decoded IN PLACE on RESOLUME-SNV (never copied to
+        // dev1) for its SongPlayer + cg burns. It takes the plain `analyze_recording_with_burns`
+        // decode below — the same one the fused `--cg` path uses.
+        "cg" => args
+            .cg
+            .as_deref()
+            .context("--extract-partial cg needs --cg <recording on the RESOLUME-SNV box>")?,
         // args_expected_burns_for already returned None (→ bailed) for any other box.
         _ => unreachable!("unknown box rejected by args_expected_burns_for above"),
     };
@@ -7930,6 +8167,14 @@ fn extract_partial(args: &Args, box_name: &str) -> Result<()> {
         _ => analyze_recording_with_burns(rec_path, &expected_burns),
     }
     .with_context(|| format!("analyze recording {}", rec_path.display()))?;
+    // issue 1367: every recording analysis rejects node-burn ECHOES — a burn read outside its own
+    // slot. This process decoded only this box's recording, so the count is this box's. Carry it
+    // in the partial (report-only in the verdict).
+    let burn_echoes_rejected = camera_box::probe::burn_echo::burn_echo_rejection_count();
+    println!(
+        "issue 1367 burn echoes [{box_name}]: {burn_echoes_rejected} node-burn read(s) outside \
+         their own slot rejected as optical echoes (report-only)."
+    );
 
     let out = args
         .out
@@ -8068,7 +8313,8 @@ fn extract_partial(args: &Args, box_name: &str) -> Result<()> {
         .with_colour(colour)
         .with_av_sync(av_sync)
         .with_frame_prev_diffs(frame_prev_diffs)
-        .with_record_render(record_render);
+        .with_record_render(record_render)
+        .with_burn_echoes_rejected(Some(burn_echoes_rejected));
     partial.save(&out)?;
     let bytes = std::fs::metadata(&out).map(|m| m.len()).unwrap_or(0);
     println!(
@@ -8125,6 +8371,12 @@ fn run_merge(args: &Args) -> Result<()> {
     // #1143 — OBS's own record-session render stats carried from the imag partial's `record_render`
     // (Some only when the imag box was extracted with `--record-render-stats`). Surfaced report-only.
     let mut imag_record_render: Option<camera_box::record_render_stats::RecordRenderStats> = None;
+    // Issue 1302 — the cg OBS partial decoded IN PLACE on RESOLUME-SNV (`--extract-partial cg`),
+    // so the CG_CHAIN run never copies the cg recording to dev1 nor decodes it here. It fills the
+    // SAME `cg` slot the fused `--cg` recording does; `None` on every normal (no-CG) merge.
+    let mut cg_partial: Option<DecodedRec> = None;
+    // issue 1367 — each partial's carried node-burn echo count (report-only).
+    let mut burn_echoes = BurnEchoCounts::default();
     for spec in &args.merge_partials {
         let (box_name, path) = spec
             .split_once('=')
@@ -8158,7 +8410,11 @@ fn run_merge(args: &Args) -> Result<()> {
                         eprintln!(
                             "WARNING: --merge-partials {box_name}={path}: {reason} Load error: {e:#}"
                         );
-                        imag_skip_reason = Some(reason);
+                        // Only the imag drop is surfaced as the imag leg's skip reason; a dropped
+                        // issue-1302 cg partial just omits the report-only cg_chain section.
+                        if box_name == "imag" {
+                            imag_skip_reason = Some(reason);
+                        }
                         continue;
                     }
                     camera_box::partial_schema_gate::PartialLoadDisposition::Fatal => {
@@ -8167,6 +8423,19 @@ fn run_merge(args: &Args) -> Result<()> {
                 }
             }
         };
+        // Issue 1302: a mislabelled partial in the report-only cg slot is dropped like any other
+        // cg load failure — it must never abort the merge into a false camera-chain RED.
+        if partial.box_name != box_name
+            && camera_box::partial_schema_gate::box_drops_on_any_load_failure(box_name)
+        {
+            eprintln!(
+                "WARNING: --merge-partials {spec}: the partial file's box is {:?}, not {box_name:?} \
+                 — dropped; the REPORT-ONLY cg_chain section is omitted, the camera-chain verdict \
+                 is unaffected (issue 1302).",
+                partial.box_name
+            );
+            continue;
+        }
         // The partial's recorded box name MUST match the slot it is assigned to — a strih
         // partial can NEVER be merged as the stream input (the #208 box-to-box guard, enforced
         // at the data level, not just the path).
@@ -8202,6 +8471,7 @@ fn run_merge(args: &Args) -> Result<()> {
         let av_sync = partial.av_sync;
         let frame_prev_diffs = partial.frame_prev_diffs;
         let record_render = partial.record_render; // #1143 — carried before `frames` moves below
+        let echoes = partial.burn_echoes_rejected; // issue 1367 report-only echo count
         let rec = DecodedRec {
             frames: partial.frames,
             rec_path: None, // merge: the recording is on its own box, never on dev1
@@ -8210,25 +8480,34 @@ fn run_merge(args: &Args) -> Result<()> {
             "strih" => {
                 strih = Some(rec);
                 strih_colour = colour;
+                burn_echoes.strih = echoes;
             }
             "stream" => {
                 stream = Some(rec);
                 stream_colour = colour;
                 stream_av_sync = av_sync;
                 stream_frame_prev_diffs = frame_prev_diffs;
+                burn_echoes.stream = echoes;
             }
             // #461: imag carries no burns, so there is no colour to carry either in this ticket.
             "imag" => {
                 imag = Some(rec);
                 imag_record_render = record_render; // #1143 report-only OBS record-render stats
+                burn_echoes.imag = echoes;
+            }
+            // Issue 1302: the cg OBS partial (report-only cg_chain origin hop).
+            "cg" => {
+                cg_partial = Some(rec);
+                burn_echoes.cg = echoes;
             }
             other => anyhow::bail!(
-                "--merge-partials: unknown box {other:?} (expected `strih`, `stream`, or `imag`)"
+                "--merge-partials: unknown box {other:?} (expected `strih`, `stream`, `imag`, or \
+                 `cg`)"
             ),
         }
     }
     anyhow::ensure!(
-        strih.is_some() || stream.is_some() || imag.is_some(),
+        strih.is_some() || stream.is_some() || imag.is_some() || cg_partial.is_some(),
         "--merge-partials needs at least one BOX=JSON partial"
     );
     // #186 note: cam1's pixel proof comes from the STRIH box (cam1's burn is crispest in the clean
@@ -8251,14 +8530,27 @@ fn run_merge(args: &Args) -> Result<()> {
         painter = ?args.painter.as_ref().map(|p| p.display().to_string()),
         "merge: building the full-chain verdict from per-box partials (#208 — no recording on dev1)"
     );
-    // #1301: the cg OBS recording for the CG chain is passed as a full recording via `--cg` (the
-    // CG_CHAIN E2E pulls it to dev1 and points `--cg` at it — an on-box cg partial is a follow-up).
-    // `None` on every normal merge (no --cg), so the cg_chain section is omitted. Decoded for BOTH
-    // the SongPlayer origin burn (911014) and the cg OBS hop burn (911015).
-    let cg = decode_for(
-        args.cg.as_deref(),
-        &[args.burn_songplayer_run_id, args.burn_cg_run_id],
-    )?;
+    // #1301 / issue 1302: the cg OBS frames for the CG chain. The CG_CHAIN E2E decodes the cg
+    // recording IN PLACE on RESOLUME-SNV and merges it as `--merge-partials cg=<json>` (the old
+    // copy-to-dev1 + decode-here path blew the job budget). A full recording via `--cg` is still
+    // accepted for a manual run, decoded here for BOTH the SongPlayer origin burn (911014) and the
+    // cg OBS hop burn (911015); a cg partial wins when both are given. `None` on every normal
+    // merge, so the cg_chain section is omitted.
+    let cg = match cg_partial {
+        Some(rec) => {
+            if args.cg.is_some() {
+                eprintln!(
+                    "WARNING: issue 1302: both --cg and --merge-partials cg=… were given — using the \
+                     on-box cg partial and ignoring --cg (no second decode on this host)."
+                );
+            }
+            Some(rec)
+        }
+        None => decode_for(
+            args.cg.as_deref(),
+            &[args.burn_songplayer_run_id, args.burn_cg_run_id],
+        )?,
+    };
     // cam1's contiguity source is the strih partial frames (#133); there is no separate cam1
     // grab in the per-box flow (#179 removed it), so the cam1 grab is Absent.
     let (_report, all_pass) = build_and_print_verdict_with_stream_diffs(
@@ -8274,6 +8566,7 @@ fn run_merge(args: &Args) -> Result<()> {
         imag_skip_reason, // issue 1118: Some when a schema-mismatched imag partial was dropped (degrade)
         imag_record_render, // #1143: carried from the imag partial's --record-render-stats extract
         cg,               // #1301: cg OBS recording for the REPORT-ONLY cg_chain section
+        burn_echoes,      // issue 1367: the partials' REPORT-ONLY node-burn echo counts
     )?;
     report_pulled_back_pixel_proofs(&box_paths);
     if !all_pass {
@@ -9006,6 +9299,7 @@ mod tests {
             None,
             None,
             cg,
+            super::BurnEchoCounts::default(),
         )
         .expect("verdict");
 
@@ -9029,6 +9323,72 @@ mod tests {
             pass,
             "#1301: a clean cg_chain (and an empty camera chain) ⇒ overall PASS"
         );
+    }
+
+    /// issue 1367 — the node-burn echo counts land in the verdict as a REPORT-ONLY object: the
+    /// carried per-recording numbers (null when not carried) and `gates_overall_pass: false`, and
+    /// they never change the PASS the same inputs give without them.
+    #[test]
+    fn burn_echo_counts_are_reported_and_never_gate_1367() {
+        use super::{
+            build_and_print_verdict_with_stream_diffs, BurnEchoCounts, Cam1Source, DecodedRec,
+        };
+        use clap::Parser;
+
+        let args = super::Args::parse_from(["recording-verdict", "--min-secs", "1"]);
+        let run = |echoes: BurnEchoCounts| {
+            let cg = Some(DecodedRec {
+                frames: cg_window(60, None),
+                rec_path: None,
+            });
+            build_and_print_verdict_with_stream_diffs(
+                &args,
+                None,
+                None,
+                Cam1Source::Absent,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                cg,
+                echoes,
+            )
+            .expect("verdict")
+        };
+        let (v, pass) = run(BurnEchoCounts {
+            strih: Some(4242),
+            stream: Some(0),
+            imag: Some(7),
+            cg: None,
+        });
+        assert_eq!(
+            v["burn_echoes_rejected"],
+            serde_json::json!({
+                "strih": 4242,
+                "stream": 0,
+                "imag": 7,
+                "cg": null,
+                "gates_overall_pass": false
+            }),
+            "issue 1367: the carried counts are reported as they came"
+        );
+        let (v0, pass0) = run(BurnEchoCounts::default());
+        assert_eq!(
+            v0["burn_echoes_rejected"],
+            serde_json::json!({
+                "strih": null,
+                "stream": null,
+                "imag": null,
+                "cg": null,
+                "gates_overall_pass": false
+            }),
+            "issue 1367: nothing carried reads null, never a false 0"
+        );
+        assert_eq!(pass, pass0, "issue 1367: the echo count never gates");
+        assert_eq!(v["overall_pass"], v0["overall_pass"]);
     }
 
     /// #1301 — a dropped SongPlayer frame is REPORTED as a gap at the cg OBS hop, but because the
@@ -9057,6 +9417,7 @@ mod tests {
             None,
             None,
             cg,
+            super::BurnEchoCounts::default(),
         )
         .expect("verdict");
 
@@ -9162,6 +9523,7 @@ mod tests {
             None,
             None,
             rec(cg_window(60, None)),
+            super::BurnEchoCounts::default(),
         )
         .expect("verdict");
         v
@@ -9310,6 +9672,154 @@ mod tests {
             args_expected_burns_for("imag", &cg),
             args_expected_burns_for("imag", &plain)
         );
+    }
+
+    /// Issue 1302 — the on-box `cg` extract expects exactly the SongPlayer origin + cg OBS hop
+    /// burns (the pair the fused `--cg` decode uses), with or without `--cg-chain-burns`.
+    #[test]
+    fn cg_box_expects_the_songplayer_and_cg_burns_1302() {
+        use super::args_expected_burns_for;
+        use clap::Parser;
+        for argv in [
+            &["recording-verdict"][..],
+            &["recording-verdict", "--cg-chain-burns"][..],
+        ] {
+            let args = super::Args::parse_from(argv);
+            assert_eq!(
+                args_expected_burns_for("cg", &args),
+                Some(vec![SP, CGB]),
+                "{argv:?}"
+            );
+        }
+    }
+
+    /// Issue 1302 — `--extract-partial cg` needs the cg OBS recording via `--cg`; without it the
+    /// extract fails loudly BEFORE any decode (never a silent empty partial).
+    #[test]
+    fn extract_partial_cg_needs_the_cg_recording_1302() {
+        use clap::Parser;
+        let args = super::Args::parse_from(["recording-verdict", "--extract-partial", "cg"]);
+        let err = super::extract_partial(&args, "cg").unwrap_err();
+        assert!(format!("{err:#}").contains("--cg"), "{err:#}");
+    }
+
+    /// Issue 1302 — a cg partial decoded ON the RESOLUME-SNV box fills the cg slot of the merge:
+    /// the report-only cg_chain section is computed from it with NO recording on this host.
+    #[test]
+    fn run_merge_builds_cg_chain_from_an_onbox_cg_partial_1302() {
+        use super::run_merge;
+        use camera_box::probe::recording_partial::RecordingPartial;
+        use clap::Parser;
+        use std::path::PathBuf;
+
+        let dir = tempfile::tempdir().unwrap();
+        let cg_p = RecordingPartial::from_frames(
+            "cg",
+            &PathBuf::from("cg.mkv"),
+            &[SP, CGB],
+            cg_window(60, None),
+        );
+        let cg_path = dir.path().join("cg-partial.json");
+        cg_p.save(&cg_path).unwrap();
+        let json = dir.path().join("verdict.json");
+        let spec = format!("cg={}", cg_path.display());
+        let args = super::Args::parse_from([
+            "recording-verdict",
+            "--min-secs",
+            "1",
+            "--merge-partials",
+            spec.as_str(),
+            "--json",
+            json.to_str().expect("utf8 path"),
+        ]);
+        // run_merge exits the PROCESS on a FAIL verdict: a clean cg-only merge must PASS.
+        run_merge(&args).expect("a clean cg-only merge must not error");
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&json).unwrap()).unwrap();
+        assert_eq!(
+            v["cg_chain"]["cg_obs"]["songplayer"]["contiguous"],
+            serde_json::json!(true),
+            "the cg_chain origin hop comes from the on-box partial: {}",
+            v["cg_chain"]
+        );
+        assert_eq!(v["cg_chain"]["gated_live"], serde_json::json!(false));
+    }
+
+    /// Issue 1302 — an unreadable cg partial is DROPPED (the report-only cg_chain section is
+    /// omitted), never a merge abort that would RED the camera gate.
+    #[test]
+    fn run_merge_drops_an_unreadable_cg_partial_instead_of_aborting_1302() {
+        use super::run_merge;
+        use camera_box::probe::recording_partial::RecordingPartial;
+        use clap::Parser;
+        use std::path::PathBuf;
+
+        let dir = tempfile::tempdir().unwrap();
+        let imag_p = RecordingPartial::from_frames(
+            "imag",
+            &PathBuf::from("imag.mkv"),
+            &[super::BURN_RUN_ID_IMAG],
+            imag_window_with_burn(None),
+        );
+        let imag_path = dir.path().join("imag-partial.json");
+        imag_p.save(&imag_path).unwrap();
+        let cg_path = dir.path().join("cg-partial.json");
+        std::fs::write(&cg_path, "not json at all {").unwrap();
+        let json = dir.path().join("verdict.json");
+        let imag_spec = format!("imag={}", imag_path.display());
+        let cg_spec = format!("cg={}", cg_path.display());
+        let args = super::Args::parse_from([
+            "recording-verdict",
+            "--min-secs",
+            "1",
+            "--merge-partials",
+            imag_spec.as_str(),
+            "--merge-partials",
+            cg_spec.as_str(),
+            "--json",
+            json.to_str().expect("utf8 path"),
+        ]);
+        run_merge(&args).expect("a corrupt cg partial must not abort the merge");
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&json).unwrap()).unwrap();
+        assert_eq!(v["cg_chain"], serde_json::Value::Null, "cg section omitted");
+
+        // A readable partial of ANOTHER box in the cg slot is dropped the same way (the #208
+        // box-mismatch guard stays fatal for the camera-chain slots only).
+        let strih_p = RecordingPartial::from_frames(
+            "strih",
+            &PathBuf::from("strih.mkv"),
+            &[CAM1B, STRIH],
+            vec![],
+        );
+        let mislabelled = dir.path().join("mislabelled-cg.json");
+        strih_p.save(&mislabelled).unwrap();
+        let cg_spec2 = format!("cg={}", mislabelled.display());
+        // Its own verdict path, so a stale verdict of the first case can never satisfy it.
+        let json2 = dir.path().join("verdict-mislabelled.json");
+        let args2 = super::Args::parse_from([
+            "recording-verdict",
+            "--min-secs",
+            "1",
+            "--merge-partials",
+            imag_spec.as_str(),
+            "--merge-partials",
+            cg_spec2.as_str(),
+            "--json",
+            json2.to_str().expect("utf8 path"),
+        ]);
+        run_merge(&args2).expect("a mislabelled cg partial must not abort the merge");
+        let v2: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&json2).unwrap()).unwrap();
+        assert_eq!(v2["cg_chain"], serde_json::Value::Null);
+        for (case, verdict) in [("corrupt", &v), ("mislabelled", &v2)] {
+            assert!(verdict["full_chain"].is_object(), "{case}: {verdict}");
+            assert_eq!(
+                verdict["full_chain"]["imag_leg_skip_reason"],
+                serde_json::Value::Null,
+                "{case}: a dropped cg partial is never reported as an imag skip"
+            );
+        }
     }
 
     /// #755 — a window of N delivered frames carrying cam7's OWN digital capture-burn in every
@@ -11208,6 +11718,205 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Issue 1367 (ROZHODNUTÉ 5843424054): a cambox window whose captured content is MULTI-SOURCE
+    /// (cam2 filming the strih-lx multiview: several generations of the painted pattern per frame)
+    /// is judged by its node burn. Three otherwise-identical fixtures on ONE CAM2 window carrying
+    /// copies=10 (a hard-frozen, over-tolerance tick sequence), the cam2 own burn and the strih
+    /// anchor burn:
+    /// - `single`: ONE optical id per frame -- single-source, so copies/gaps + frozen_leg still
+    ///   FAIL (byte-identical to the pre-1367 behaviour);
+    /// - `multi`: FOUR optical ids per frame (two tiles) -- multi-source, so copies/gaps, cadence
+    ///   and frozen_leg are report-only, the window is tagged, and the run passes on its burn;
+    /// - `multi_burn_gap`: the same multi-source window with one delivered frame missing its cam2
+    ///   burn -- the node burn still FAILS the run.
+    #[test]
+    fn multi_source_window_is_judged_by_its_node_burn_1367() {
+        use super::{build_and_print_verdict, Cam1Source, DecodedRec};
+        use clap::Parser;
+
+        const ONE_S: i64 = 1_000_000_000;
+        let base = 1_000 * ONE_S;
+        let sched = format!(
+            r#"[{{"cambox":"CAM2","start_ns":{a},"end_ns":{b}}}]"#,
+            a = base,
+            b = base + 5 * ONE_S
+        );
+
+        fn build(
+            tag: &str,
+            sched: &str,
+            multi: bool,
+            burn_missing_at: Option<u64>,
+        ) -> serde_json::Value {
+            const ONE_S: i64 = 1_000_000_000;
+            let base = 1_000 * ONE_S;
+            let dir = std::env::temp_dir().join(format!("cb-1367-{tag}-{}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let sched_path = dir.join("switch-schedule.json");
+            std::fs::write(&sched_path, sched).unwrap();
+
+            let mut frames: Vec<RecordingFrame> = Vec::new();
+            for i in 0..30u64 {
+                let gen_ts = base + (i as i64 + 1) * (ONE_S / 10);
+                // Step-2 painted ticks with a 10-frame hold of 1018 in the middle: copies=10 over
+                // frames=30 (hard-frozen density ~0.33, far over the copies/gaps tolerance), no gap.
+                let tick = match i {
+                    0..=9 => 1000 + 2 * i as u32,
+                    10..=19 => 1018,
+                    _ => 1020 + 2 * (i as u32 - 20),
+                };
+                // Multi-source: the fresh tile plus an older generation's tile (4 optical QRs > the 2
+                // one tile can produce). Single-source: one id, like every other sweep fixture.
+                let optical: Vec<u32> = if multi {
+                    vec![tick - 1, tick, tick - 9, tick - 8]
+                } else {
+                    vec![tick]
+                };
+                let mut payloads = vec![Payload {
+                    run_id: STRIH,
+                    frame_id: 1670 + i as u32,
+                    gen_ts_ns: gen_ts,
+                }];
+                if burn_missing_at != Some(i) {
+                    payloads.push(Payload {
+                        run_id: CAM2B,
+                        frame_id: 7000 + i as u32,
+                        gen_ts_ns: gen_ts,
+                    });
+                }
+                for id in optical {
+                    payloads.push(Payload {
+                        run_id: CAM2,
+                        frame_id: id,
+                        gen_ts_ns: gen_ts,
+                    });
+                }
+                frames.push(RecordingFrame {
+                    frame_index: i,
+                    payloads,
+                    tick: Some(tick),
+                });
+            }
+            let args = super::Args::parse_from([
+                "recording-verdict",
+                "--switch-schedule",
+                sched_path.to_str().unwrap(),
+                "--switch-guard-ns",
+                "0",
+                "--switch-expected-step",
+                "2",
+                "--min-secs",
+                "0",
+            ]);
+            let (v, _) = build_and_print_verdict(
+                &args,
+                None,
+                Some(DecodedRec {
+                    frames,
+                    rec_path: None,
+                }),
+                Cam1Source::Absent,
+                None,
+                None,
+                None,
+                None,
+            )
+            .expect("verdict");
+            let _ = std::fs::remove_dir_all(&dir);
+            v
+        }
+
+        let single = build("single", &sched, false, None);
+        let multi = build("multi", &sched, true, None);
+        let multi_burn_gap = build("multi-gap", &sched, true, Some(15));
+        let count = |v: &serde_json::Value, a: &str, b: &str| {
+            v[a][b].as_array().map(|x| x.len()).unwrap_or(0)
+        };
+
+        // Single-source: unchanged, the test-pattern checks still fail the window.
+        let s0 = &single["all_cambox_continuity"]["segments"][0];
+        assert_eq!(s0["copies"], serde_json::json!(10), "sanity: {single}");
+        assert!(
+            s0.get("multi_source").is_none(),
+            "single-source is untagged: {s0}"
+        );
+        assert_eq!(
+            single["all_cambox_continuity"]["overall_pass"],
+            serde_json::json!(false),
+            "a single-source window with copies/gaps still FAILS: {single}"
+        );
+        assert_eq!(count(&single, "frozen_leg", "frozen"), 1, "{single}");
+        assert_eq!(single["overall_pass"], serde_json::json!(false), "{single}");
+
+        // Multi-source: tagged, test-pattern checks report-only, judged by its burn.
+        let m0 = &multi["all_cambox_continuity"]["segments"][0];
+        assert_eq!(
+            m0["copies"],
+            serde_json::json!(10),
+            "copies stay computed: {m0}"
+        );
+        assert_eq!(
+            m0["multi_source"]["tag"],
+            serde_json::json!(camera_box::multi_source_window::MULTI_SOURCE_TAG),
+            "{m0}"
+        );
+        assert_eq!(
+            m0["multi_source"]["multi_path_suspect_fraction"],
+            serde_json::json!(1.0),
+            "{m0}"
+        );
+        assert_eq!(
+            multi["all_cambox_continuity"]["overall_pass"],
+            serde_json::json!(true),
+            "a multi-source window's copies/gaps are report-only: {multi}"
+        );
+        assert_eq!(
+            multi["all_cambox_continuity"]["windows_multi_source"],
+            serde_json::json!(1),
+            "{multi}"
+        );
+        assert_eq!(count(&multi, "frozen_leg", "frozen"), 0, "{multi}");
+        assert_eq!(
+            count(&multi, "frozen_leg", "multi_source_report_only"),
+            1,
+            "the frozen window stays visible, report-only: {multi}"
+        );
+        for gate in ["cadence_judder_gate", "cadence_uniformity_gate"] {
+            assert_eq!(
+                multi["all_cambox_continuity"][gate]["pass"],
+                serde_json::json!(true),
+                "{gate}: {multi}"
+            );
+        }
+        assert_eq!(
+            multi["full_chain"]["loss"]["cam2"]["zero_loss"],
+            serde_json::json!(true),
+            "the cam2 burn is contiguous: {multi}"
+        );
+        assert_eq!(
+            multi["overall_pass"],
+            serde_json::json!(true),
+            "a multi-source window with a clean node burn passes: {multi}"
+        );
+
+        // Multi-source with a burn gap: the node burn still fails the run.
+        assert_eq!(
+            multi_burn_gap["all_cambox_continuity"]["overall_pass"],
+            serde_json::json!(true),
+            "{multi_burn_gap}"
+        );
+        assert_eq!(
+            multi_burn_gap["full_chain"]["loss"]["cam2"]["zero_loss"],
+            serde_json::json!(false),
+            "{multi_burn_gap}"
+        );
+        assert_eq!(
+            multi_burn_gap["overall_pass"],
+            serde_json::json!(false),
+            "a multi-source window with a burn gap still FAILS: {multi_burn_gap}"
+        );
     }
 
     /// Issue 905 item 2 (2026-09-02, RESTORE): the `frozen_leg` (issue 758) and `self_heal_reset`

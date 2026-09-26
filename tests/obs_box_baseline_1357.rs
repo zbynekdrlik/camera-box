@@ -98,7 +98,8 @@ fn the_baseline_libs_are_source_only() {
         "for f in obs_box_network_tuning obs_box_max_performance obs_box_never_sleep \
          obs_box_boot_safety_net obs_box_lowlatency_kernel obs_box_cpu_affinity obs_box_nvidia_prime \
          obs_box_dejitter obs_box_crash_popups_off obs_box_kiosk obs_box_power_envelope obs_box_touchpad \
-         obs_box_maxperf_persistence obs_box_openbox_menu_xml obs_box_openbox_autostart_preamble \
+         obs_box_maxperf_persistence obs_box_cpu_latency obs_box_cpu_latency_bound_us \
+         obs_box_openbox_menu_xml obs_box_openbox_autostart_preamble \
          obs_box_baseline_gather_snippet obs_box_baseline_verdict \
          obs_box_apt_lock_timeout_conf obs_box_apt_lock_timeout \
          obs_box_apt_update_lock_held obs_box_apt_update; do \
@@ -254,6 +255,7 @@ fn setup_imag_runs_every_baseline_item_in_its_original_step() {
         ),
         (25, "obs_box_touchpad imag"),
         (26, "obs_box_maxperf_persistence imag"),
+        (26, "obs_box_cpu_latency imag_fetch_repo_file"),
     ] {
         let body = imag_step(step);
         assert!(
@@ -621,6 +623,12 @@ governors=performance
 maxperf_active=active
 maxperf_udev=1
 ppd=masked
+cstate_unit=enabled
+cstate_active=active
+cstate_bound=150
+cstate_states=64
+cstate_deep=C3_ACPI:1048us
+cstate_deep_delta=0
 sleep_target=masked
 logind_nosleep=1
 logind_powerkey=1
@@ -665,9 +673,10 @@ touchpad=1
 gather_done=1
 ";
 
-const ITEMS: [&str; 15] = [
+const ITEMS: [&str; 16] = [
     "net",
     "perf",
+    "cstate",
     "nosleep",
     "boot",
     "kernel",
@@ -731,6 +740,8 @@ fn verdict_fails_each_item_on_its_own_broken_fact() {
         ("perf", "maxperf_active=active", "maxperf_active=inactive"),
         ("perf", "rc_local_eee=1", "rc_local_eee=0"),
         ("perf", "ppd=masked", "ppd=enabled"),
+        ("cstate", "cstate_active=active", "cstate_active=inactive"),
+        ("cstate", "cstate_deep_delta=0", "cstate_deep_delta=5"),
         ("nosleep", "sleep_target=masked", "sleep_target=static"),
         ("boot", "initrd_hook=1", "initrd_hook=0"),
         (
@@ -935,6 +946,7 @@ fn setup_strih_consumes_the_same_baseline() {
         "obs_box_power_envelope",
         "obs_box_touchpad",
         "obs_box_maxperf_persistence",
+        "obs_box_cpu_latency",
         "obs_box_openbox_menu_xml",
     ] {
         assert!(

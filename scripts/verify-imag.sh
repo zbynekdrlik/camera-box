@@ -82,9 +82,10 @@ set -euo pipefail
 #   (k2) when a discrete NVIDIA GPU IS present: driver installed + `prime-select nvidia`; when
 #        absent: the step is correctly SKIPPED, never assumed either way (#816/#500)
 #   (l) dantesync PTP LOCKED + a FRESH clock offset within bound + the SAME grandmaster as the
-#       rest of the rig (#834 -- gates grandmaster IDENTITY, not just the offset) + phase_slew
-#       ENABLED (#1215 -- the box slews phase error smoothly instead of STEPPING it in discrete
-#       jumps, catching a reprovision that forgets to install /etc/dantesync/config.json)
+#       rest of the rig (#834 -- gates grandmaster IDENTITY, not just the offset) + a healthy
+#       clock DISCIPLINE (issue 1372: dantesync 1.9.0's ptp_phase_lock, or on a pre-1.9.0 build
+#       phase_slew ENABLED -- #1215, the box never STEPS the clock in discrete jumps) + if the box
+#       is the fleet date master, its date error within its own step bound (dantesync#88)
 #   (m) dantesync is the SOLE timesync authority (no systemd-timesyncd/chrony/ntp/linuxptp)
 #   (n) scenes present (Cam 1-N, N = imag_scenes.py's own IMAG_SCENE_CAM_COUNT, default 7) and
 #       Multiview populated (MV Cam 1-N)
@@ -1248,15 +1249,18 @@ if [ -n "$DS_HTTP_STATUS" ]; then
   ptp_state="$(ptp_locked_from_pipe_json "$DS_HTTP_STATUS")"
   offset_us="$(offset_us_from_pipe_json "$DS_HTTP_STATUS")"
   gm_actual="$(gm_source_ip_from_pipe_json "$DS_HTTP_STATUS")"
-  ps_state="$(phase_slew_enabled_from_pipe_json "$DS_HTTP_STATUS")"
   rc_ptp=0; ptp_check imag "$ptp_state" || rc_ptp=$?
-  rc_off=0; offset_check imag "$offset_us" "$IMAG_CLOCK_BOUND_US" || rc_off=$?
+  # Issue 1372: a fleet date master is graded on its own step bound (a no-op on any other box).
+  ds_bound="$(date_master_effective_bound_us "$DS_HTTP_STATUS" "$IMAG_CLOCK_BOUND_US" "$DATE_MASTER_MARGIN_US")"
+  rc_off=0; offset_check imag "$offset_us" "$ds_bound" || rc_off=$?
+  rc_date=0; date_master_check imag "$DS_HTTP_STATUS" "$DATE_MASTER_MARGIN_US" || rc_date=$?
   rc_gm=0; gm_check imag "$gm_actual" "$RIG_GRANDMASTER_IP" || rc_gm=$?
-  rc_ps=0; phase_slew_check imag "$ps_state" || rc_ps=$?
+  rc_ps=0; clock_discipline_check imag "$DS_HTTP_STATUS" || rc_ps=$?
   [ "$rc_ptp" -eq 0 ] && ok "dantesync PTP servo LOCKED (via :8898/status)" || fail "dantesync PTP servo not LOCKED (via :8898/status)"
-  [ "$rc_off" -eq 0 ] && ok "dantesync clock offset within ${IMAG_CLOCK_BOUND_US}us bound" || fail "dantesync clock offset OUTSIDE bound or unreadable (rc=$rc_off)"
+  [ "$rc_off" -eq 0 ] && ok "dantesync clock offset within ${ds_bound}us bound" || fail "dantesync clock offset OUTSIDE bound or unreadable (rc=$rc_off)"
+  [ "$rc_date" -eq 0 ] || fail "dantesync fleet date master outside its own step bound or unreadable (rc=$rc_date, dantesync#88/#1372)"
   [ "$rc_gm" -eq 0 ] && ok "dantesync grandmaster = ${gm_actual} (matches the rig, #834)" || fail "dantesync grandmaster mismatch/unreadable (rc=$rc_gm, want ${RIG_GRANDMASTER_IP})"
-  [ "$rc_ps" -eq 0 ] && ok "dantesync phase_slew ENABLED (#1215 -- slews the clock, never steps)" || fail "dantesync phase_slew disabled/unreadable (rc=$rc_ps, #1215) -- the box will STEP the clock in discrete jumps (a visible hitch on the projected output every ~4 minutes)"
+  [ "$rc_ps" -eq 0 ] && ok "dantesync clock discipline healthy (1.9.0 ptp_phase_lock, or legacy phase_slew ENABLED -- #1215/#1372)" || fail "dantesync clock discipline wrong/unreadable (rc=$rc_ps, #1215/#1372) -- legacy without phase_slew STEPS the clock in discrete jumps, a ptp_phase_lock that is not locked does not own the clock"
 elif [ "$rc" -ne 0 ] || [ -z "$DS_JOURNAL" ]; then
   fail "dantesync journal unreadable (ssh rc=$rc) and :8898/status unreachable"
 else
@@ -1275,7 +1279,7 @@ else
     else
       fail "dantesync PTP servo not LOCKED"
     fi
-    case "$(dantesync_offset_verdict "$DS_JOURNAL" "$DANTESYNC_OFFSET_FRESHNESS_S" "$IMAG_CLOCK_BOUND_US" "$IMAG_CLOCK_STABILITY_US")" in
+    case "$(dantesync_journal_clock_verdict "$DS_JOURNAL" "$DANTESYNC_OFFSET_FRESHNESS_S" "$IMAG_CLOCK_BOUND_US" "$IMAG_CLOCK_STABILITY_US" "$DATE_MASTER_MARGIN_US")" in
       ok) ok "dantesync clock offset within ${IMAG_CLOCK_BOUND_US}us bound + samples within ${IMAG_CLOCK_STABILITY_US}us spread (fresh)" ;;
       drift) fail "dantesync clock offset OUTSIDE the ${IMAG_CLOCK_BOUND_US}us bound -- a real clock desync" ;;
       unstable) fail "dantesync clock offset median within the ${IMAG_CLOCK_BOUND_US}us bound but the FRESH samples scatter past the ${IMAG_CLOCK_STABILITY_US}us stability bound -- scattered/unusable clock (#837)" ;;
@@ -1283,7 +1287,7 @@ else
       *) fail "dantesync clock offset has no FRESH reading -- status incomplete" ;;
     esac
     fail "grandmaster identity unreadable via the journal path (no gm_source_ip in journald text) -- the :8898/status endpoint is required to certify #834; it was unreachable above"
-    fail "phase_slew state unreadable via the journal path (no phase_slew_enabled in journald text) -- the :8898/status endpoint is required to certify #1215; it was unreachable above"
+    fail "clock discipline unreadable via the journal path (no clock_discipline/phase_slew_enabled in journald text) -- the :8898/status endpoint is required to certify #1215/#1372; it was unreachable above"
   fi
 fi
 
@@ -1579,7 +1583,8 @@ fi
 # (bb) the shared OBS-box appliance baseline (issue 1357) ---------------------------------------
 # The ONE grader verify-strih.sh runs too (scripts/lib/obs-box-baseline-verify.sh): every item the
 # shared scripts/lib/obs-box-baseline.sh provisions -- network tuning, governor + imag-maxperf
-# persistence, never-sleep, boot safety net, preempt=full, AFFINITY-ONLY core reservation, PRIME,
+# persistence, the PM QoS CPU idle wake-up latency bound (cstate: +1 s sample inside the gather),
+# never-sleep, boot safety net, preempt=full, AFFINITY-ONLY core reservation, PRIME,
 # de-jitter, no crash popups (incl. the 26.04 apport coredump-hook template), the lightdm -> openbox
 # kiosk, the openbox autostart contract, the power envelope, the touchpad. One [OK]/[FAIL] line per
 # item; the per-item checks above keep imag's deeper reads (PL1 value, maxperf state, ...). A pure

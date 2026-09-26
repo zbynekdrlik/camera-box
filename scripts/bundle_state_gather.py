@@ -120,7 +120,15 @@ def genlock_lock_facet_from_log(text):
        qpc_drift_ppm, qpc_expected_ppm, qpc_step,
        clock:{state}, output:{present, stamping_wallclock},
        inputs:{<name>:{locked, connected, idle, latency_ms, underruns, relocks, late_holds, depth}},
-       [recent_event_inputs:[{name, events}]], [audio_unexpected_inputs:[{name}]], source:"log"}
+       [recent_event_inputs:[{name, events}]], [audio_unexpected_inputs:[{name}]],
+       [media_clock:{state, drift_us, window_s, ready, discipline}], source:"log"}
+
+    Issue 1372 part D (schema v7): `media_clock` is the audio (media) clock facet the widget decided
+    with -- `state` ok|drift|undisciplined, the wall-vs-media drift `drift_us` per `window_s` (the
+    time-weighted rate of the non-step pairs, scaled to the window),
+    whether that window has filled (`ready`), and the Windows discipline outcome (`discipline`:
+    active|disabled|read_failed|api_missing|unknown, or n/a on Linux). Omitted for a pre-v7 line or a
+    malformed object, never fabricated.
 
     #1341 (schema v6): `n_idle` (connected-but-keep-alive-only input count) and per-input `idle`
     distinguish an idle SongPlayer playlist input from a live one so the fleet indicator never
@@ -265,6 +273,18 @@ def genlock_lock_facet_from_log(text):
             aui.append({"name": name})
         if aui:
             facet["audio_unexpected_inputs"] = aui
+
+    # Issue 1372 part D (schema v7): the media (audio) clock facet. Omit the key entirely for a pre-v7
+    # line or a malformed object (no string `state`), so an older build never reads as a verdict.
+    raw_mc = payload.get("media_clock")
+    if isinstance(raw_mc, dict) and isinstance(raw_mc.get("state"), str):
+        facet["media_clock"] = {
+            "state": raw_mc.get("state"),
+            "drift_us": raw_mc.get("drift_us"),
+            "window_s": raw_mc.get("window_s"),
+            "ready": bool(raw_mc.get("ready")),
+            "discipline": raw_mc.get("discipline"),
+        }
 
     return facet
 

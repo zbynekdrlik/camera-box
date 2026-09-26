@@ -39,6 +39,7 @@ typedef enum genlock_lock_reason {
 	GENLOCK_LOCK_REASON_QPC_DRIFT = 8,       /* the wall clock stepped by more than one frame */
 	GENLOCK_LOCK_REASON_AUDIO_PAIRING = 9,   /* #1303 audio-enabled source unpaired with its video FIFO hold */
 	GENLOCK_LOCK_REASON_AUDIO_UNEXPECTED = 10, /* #1303 source audible when the certified per-box table expects it silent (double-audio hazard) */
+	GENLOCK_LOCK_REASON_MEDIA_CLOCK = 11,      /* issue 1372 part D: the media (audio) clock does not follow the disciplined wall clock */
 } genlock_lock_reason_t;
 
 typedef struct genlock_lock_facets {
@@ -55,12 +56,13 @@ typedef struct genlock_lock_facets {
 	int output_stamping;        /* bool: ...and it is stamping wall-clock timecodes */
 	int audio_unpaired;         /* bool: #1303 an audio-enabled genlock source's audio is unpaired with its video FIFO hold */
 	int audio_unexpected;       /* bool: #1303 a source is audible when the certified per-box audio table expects it silent (double-audio hazard) */
+	int media_clock;            /* issue 1372 part D: the genlock_media_clock verdict (0 ok, 1 drift, 2 undisciplined); nonzero DEGRADES, never UNLOCKS */
 } genlock_lock_facets_t;
 
 /* Mirror of camera_box::genlock_lock_state::decide (src/genlock_lock_state.rs) — keep
  * both in lock-step. UNLOCKED precedence: clock > output > no-input-locked. DEGRADED
- * precedence: some-input-unlocked > recent-event > ntp-failed > qpc-drift > audio-pairing >
- * audio-unexpected. Else LOCKED.
+ * precedence: some-input-unlocked > recent-event > ntp-failed > qpc-drift > media-clock >
+ * audio-pairing > audio-unexpected. Else LOCKED.
  * #1299/#1341: the input decisions judge only CONNECTED-non-idle inputs (n_connected = n_inputs -
  * n_absent - n_idle); a senderless (n_absent) OR a keep-alive-only idle (n_idle) input is excluded
  * (never DEGRADES), and inputs-present-but-ALL-absent/idle is HEALTHY-idle (LOCKED), not UNLOCKED.
@@ -106,6 +108,9 @@ static inline genlock_lock_state_t genlock_decide_lock_state(const genlock_lock_
 		state = GENLOCK_LOCK_DEGRADED;
 	} else if (f->qpc_drift_beyond_bound) {
 		reason = GENLOCK_LOCK_REASON_QPC_DRIFT;
+		state = GENLOCK_LOCK_DEGRADED;
+	} else if (f->media_clock != 0) {
+		reason = GENLOCK_LOCK_REASON_MEDIA_CLOCK; /* issue 1372 part D: a clock-class cause, above the audio symptoms */
 		state = GENLOCK_LOCK_DEGRADED;
 	} else if (f->audio_unpaired) {
 		reason = GENLOCK_LOCK_REASON_AUDIO_PAIRING; /* #1303 audio-pairing DEGRADED axis */
@@ -224,6 +229,173 @@ static inline int genlock_qpc_drift_beyond_bound(int rate_ready, long long drift
 	if (max_step_ms < 0)
 		max_step_ms = -max_step_ms;
 	return max_step_ms > step_bound_ms ? 1 : 0;
+}
+
+/* camera-box issue 1372: a single-sample wall STEP that is a coordinated dantesync fleet DATE step
+ * (dantesync 1.9.0 steps the fleet date by up to ~50 ms, about every 1.8 h) is BOOKED: the widget
+ * re-baselines its qpc history by the jump, logs one genlock-wall-step: line and stays LOCKED. The
+ * media clock follows the dantesync RATE and never a step by design (issue 1372 part A), and since
+ * issue 1372 the render tick re-grids onto the stepped wall in one tick, so such a step is no genlock
+ * hazard any more. The hazard the step term exists for stays DEGRADED: a jump beyond book_max_ms (a
+ * clock set, not a date correction) and a second step inside the qpc window (a step storm). Returns
+ * the jump to re-baseline by, or 0 to leave it in the history (a sub-bound jump never degrades
+ * anyway). Mirror of camera_box::genlock_lock_state::qpc_wall_step_rebase_ms; the parity gate
+ * tests/genlock_qpc_wall_step_parity_1372.rs lifts this function. */
+static inline int64_t genlock_qpc_wall_step_rebase_ms(int64_t jump_ms, int64_t step_bound_ms, int64_t book_max_ms,
+						      int64_t booked_in_window, int64_t steps_per_window)
+{
+	const int64_t mag = jump_ms >= 0 ? jump_ms : (jump_ms == INT64_MIN ? INT64_MAX : -jump_ms);
+	if (mag > step_bound_ms && mag <= book_max_ms && booked_in_window < steps_per_window)
+		return jump_ms;
+	return 0;
+}
+
+/* Issue 1372 part D: the MEDIA-clock (audio clock) term. os_gettime_ns() paces the audio mixer, the
+ * video thread and every output timestamp; since part A the Windows os_gettime_ns() runs at the
+ * dantesync-disciplined rate (Linux's CLOCK_MONOTONIC always did), so the wall-vs-media offset must stay
+ * flat on EVERY box apart from wall steps. Its growth over a window is therefore compared with 0 -- the
+ * same meaning on every box, unlike the removed #1357 rate-vs-slew term. Mirror of
+ * camera_box::genlock_lock_state (MediaDiscipline / MediaClock / media_clock_window /
+ * media_clock_window_ready / media_clock_verdict); the parity gate
+ * tests/genlock_lock_state_parity.rs lifts this block from the discipline enum through the verdict's
+ * closing brace. Placed AFTER genlock_qpc_drift_beyond_bound so no earlier lift is disturbed. */
+
+/* The values libobs os_gettime_discipline() returns (enum os_gettime_discipline_state in
+ * util/platform.h), plus NOT_APPLICABLE for a box whose OS disciplines the monotonic clock itself. */
+typedef enum genlock_media_discipline {
+	GENLOCK_MEDIA_DISCIPLINE_UNKNOWN = 0,
+	GENLOCK_MEDIA_DISCIPLINE_ACTIVE = 1,
+	GENLOCK_MEDIA_DISCIPLINE_DISABLED = 2,
+	GENLOCK_MEDIA_DISCIPLINE_READ_FAILED = 3,
+	GENLOCK_MEDIA_DISCIPLINE_API_MISSING = 4,
+	GENLOCK_MEDIA_DISCIPLINE_NOT_APPLICABLE = 5,
+} genlock_media_discipline_t;
+
+typedef enum genlock_media_clock {
+	GENLOCK_MEDIA_CLOCK_OK = 0,
+	GENLOCK_MEDIA_CLOCK_DRIFT = 1,         /* wall-vs-media drift grew beyond the bound over the window */
+	GENLOCK_MEDIA_CLOCK_UNDISCIPLINED = 2, /* Windows: fell back to raw QPC while dantesync runs */
+} genlock_media_clock_t;
+
+/* Saturating int64 helpers (MSVC has no __builtin overflow checks). */
+static inline int64_t genlock_media_sat_add(int64_t a, int64_t b)
+{
+	if (b > 0 && a > INT64_MAX - b)
+		return INT64_MAX;
+	if (b < 0 && a < INT64_MIN - b)
+		return INT64_MIN;
+	return a + b;
+}
+
+static inline int64_t genlock_media_sat_sub(int64_t a, int64_t b)
+{
+	if (b < 0 && a > INT64_MAX + b)
+		return INT64_MAX;
+	if (b > 0 && a < INT64_MIN + b)
+		return INT64_MIN;
+	return a - b;
+}
+
+static inline int64_t genlock_media_sat_abs(int64_t v)
+{
+	if (v == INT64_MIN)
+		return INT64_MAX;
+	return v < 0 ? -v : v;
+}
+
+/* a * b for b > 0, saturating (the Rust saturating_mul for a positive factor). */
+static inline int64_t genlock_media_sat_mul_pos(int64_t a, int64_t b)
+{
+	if (a > INT64_MAX / b)
+		return INT64_MAX;
+	if (a < INT64_MIN / b)
+		return INT64_MIN;
+	return a * b;
+}
+
+/* The wall-vs-media rate across n samples (oldest first; t_ms the widget's monotonic ms, offset_us the
+ * wall-minus-media offset in us). Each consecutive pair with 0 < dt <= max_gap_ms yields one rate in ppb
+ * (change_us * 1e6 / dt_ms, truncated toward zero, saturating), kept sorted in the caller's scratch
+ * (>= n - 1 entries); their MEDIAN (the mean of the two middle rates for an even count, a + (b - a) / 2)
+ * is the centre. A pair is kept when its change is within band_us of centre * dt / 1e6 us (a negative
+ * band keeps none): the deviation of a pair that spans a wall step IS the step; dantesync requests steps
+ * of >= 200 us (server) / >= 500 us (client), and the small remnant of a Windows step that lands up to
+ * one timer tick short is unbiased and <= 100 us. The rate is sum(kept change) * 1e6 / sum(kept dt) ppb (the centre when none is kept),
+ * truncated toward zero, scaled to window_s: rate * window_s / 1000 us. Every step saturates.
+ * *counted_ms_out gets the total interval of the counted pairs. No pair or a non-positive window_s -> 0. */
+static inline int64_t genlock_media_clock_window_drift_us(const int64_t *t_ms, const int64_t *offset_us, int n,
+							  int64_t window_s, int64_t max_gap_ms, int64_t band_us,
+							  int64_t *scratch, int64_t *counted_ms_out)
+{
+	int64_t counted = 0;
+	int64_t centre;
+	int64_t change_sum = 0;
+	int64_t dt_sum = 0;
+	int64_t rate;
+	int m = 0;
+	int i;
+	int j;
+	for (i = 1; i < n; ++i) {
+		const int64_t dt = genlock_media_sat_sub(t_ms[i], t_ms[i - 1]);
+		int64_t pair_rate;
+		if (dt <= 0 || dt > max_gap_ms)
+			continue;
+		pair_rate = genlock_media_sat_mul_pos(genlock_media_sat_sub(offset_us[i], offset_us[i - 1]), 1000000) / dt;
+		for (j = m; j > 0 && scratch[j - 1] > pair_rate; --j)
+			scratch[j] = scratch[j - 1];
+		scratch[j] = pair_rate;
+		++m;
+		counted = genlock_media_sat_add(counted, dt);
+	}
+	if (counted_ms_out)
+		*counted_ms_out = counted;
+	if (m == 0 || window_s <= 0)
+		return 0;
+	if (m % 2 == 1)
+		centre = scratch[m / 2];
+	else
+		centre = genlock_media_sat_add(scratch[m / 2 - 1],
+					       genlock_media_sat_sub(scratch[m / 2], scratch[m / 2 - 1]) / 2);
+	for (i = 1; i < n; ++i) {
+		const int64_t dt = genlock_media_sat_sub(t_ms[i], t_ms[i - 1]);
+		int64_t change;
+		if (dt <= 0 || dt > max_gap_ms)
+			continue;
+		change = genlock_media_sat_sub(offset_us[i], offset_us[i - 1]);
+		if (genlock_media_sat_abs(genlock_media_sat_sub(change, genlock_media_sat_mul_pos(centre, dt) / 1000000)) <=
+		    band_us) {
+			change_sum = genlock_media_sat_add(change_sum, change);
+			dt_sum = genlock_media_sat_add(dt_sum, dt);
+		}
+	}
+	rate = dt_sum == 0 ? centre : genlock_media_sat_mul_pos(change_sum, 1000000) / dt_sum;
+	return genlock_media_sat_mul_pos(rate, window_s) / 1000;
+}
+
+/* 1 once the counted pairs cover >= 90 % of the window_s window; a non-positive window is never ready. */
+static inline int genlock_media_clock_window_ready(int64_t counted_ms, int64_t window_s)
+{
+	int64_t window_ms;
+	if (window_s <= 0)
+		return 0;
+	window_ms = genlock_media_sat_mul_pos(window_s, 1000);
+	return counted_ms >= window_ms / 10 * 9 ? 1 : 0;
+}
+
+/* UNDISCIPLINED when the Windows clock fell back to raw QPC while dantesync answers (clock_present);
+ * else DRIFT when the window is ready and |drift_us| > drift_bound_us; else OK. */
+static inline genlock_media_clock_t genlock_media_clock_verdict(int window_ready, int64_t drift_us,
+								int64_t drift_bound_us, int discipline,
+								int clock_present)
+{
+	const int raw_fallback = discipline == GENLOCK_MEDIA_DISCIPLINE_DISABLED ||
+				 discipline == GENLOCK_MEDIA_DISCIPLINE_READ_FAILED ||
+				 discipline == GENLOCK_MEDIA_DISCIPLINE_API_MISSING;
+	if (clock_present && raw_fallback)
+		return GENLOCK_MEDIA_CLOCK_UNDISCIPLINED;
+	if (window_ready && genlock_media_sat_abs(drift_us) > drift_bound_us)
+		return GENLOCK_MEDIA_CLOCK_DRIFT;
+	return GENLOCK_MEDIA_CLOCK_OK;
 }
 
 #ifdef __cplusplus

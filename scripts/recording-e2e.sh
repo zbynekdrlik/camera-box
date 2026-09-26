@@ -931,11 +931,12 @@ echo "[0/8] DanteSync NTP+PTP gate — $CAMERA_NAME, cam2, strih, stream must AL
 # grandmaster 10.77.9.184 (dantesync election + PTP-interface fix v1.8.42-1.8.46), so a node
 # PTP-locked to a foreign/unreadable GM now HARD-fails here (FOREIGN->20, UNKNOWN->11) instead of
 # only being reported — the stream-on-a-foreign-GM false-green issue 834/1073 is about.
-# Enforce PHASE-SLEW too (was report-first per issue 1130). phase_slew_check ships report-only in
-# dantesync-gate.sh (DANTESYNC_GATE_PHASE_SLEW_ENFORCE default 0); every graded fleet node now
-# serves phase_slew_enabled=true (the fleet-wide cure for the chronic NTP step storm, verified
-# 2026-09-02 including cam5/cam6/cam7), so a box that silently reverts to phase_slew=off now
-# HARD-fails here (DISABLED->20, UNKNOWN->11) instead of only being reported.
+# Enforce the CLOCK DISCIPLINE too (was the issue-1130 phase_slew flag). The env name keeps its
+# phase_slew wording; since issue 1372 it enforces clock-offset-guard.sh's clock_discipline_check:
+# dantesync 1.9.0's ptp_phase_lock (phase_slew off by design) or a pre-1.9.0 node with phase_slew
+# on pass, a pre-1.9.0 node that would STEP (phase_slew off) or a phase lock that is not locked
+# HARD-fails here (->20), an unreadable discipline is INCOMPLETE (->11). The fleet date master
+# (strih-lx, date_authority=master) is graded on its own date step bound, always on.
 DANTESYNC_GATE_GM_ENFORCE=1 DANTESYNC_GATE_PHASE_SLEW_ENFORCE=1 ${STRIH_LX_GATE_PREFIX:-} "$HERE/dantesync-gate.sh" \
   --bound-us "${CLOCK_GUARD_BOUND_US:-2000}" \
   --win-http-port "${WIN_DANTE_PORT:-8898}" \
@@ -1445,9 +1446,9 @@ if [ "${ALL_CAMBOX:-0}" = "1" ]; then
     # call (harmless, already proven clean by the main gate above).
     # Enforce grandmaster identity here too (issue 1073): this call grades strih (the NTP master),
     # whose grandmaster identity must be enforced exactly like the main gate above.
-    # Enforce phase_slew here too (issue 1130 enforce follow-up): this call grades strih plus the
-    # active secondary cameras, whose phase_slew state must be enforced exactly like the main
-    # gate above.
+    # Enforce the clock discipline here too (issue 1130 enforce follow-up, re-scoped to the
+    # dantesync 1.9.0 discipline by issue 1372): this call grades strih plus the active secondary
+    # cameras, whose discipline must be enforced exactly like the main gate above.
     DANTESYNC_GATE_GM_ENFORCE=1 DANTESYNC_GATE_PHASE_SLEW_ENFORCE=1 "$HERE/dantesync-gate.sh" \
       --bound-us "${CLOCK_GUARD_BOUND_US:-2000}" \
       --win-http-port "${WIN_DANTE_PORT:-8898}" \
@@ -2425,13 +2426,14 @@ STREAM_RECORDING_STARTED=0
 IMAG_RECORDING_STARTED=0
 # #1301: CG_CHAIN profile state — all default to the inert values BEFORE the trap arms so
 # cleanup()'s cg leak-guard is a safe no-op on an early abort. CG_HOST_IP is resolved + the flag
-# flipped only once cg OBS StartRecord actually succeeds ([5/8] below); CG_RECORDING is the local
-# path the pulled cg OBS recording lands at (fed to the verdict as --cg only if the pull produced it).
+# flipped only once cg OBS StartRecord actually succeeds ([5/8] below). Issue 1302: the cg recording
+# is decoded IN PLACE on RESOLUME-SNV at [8/8], never copied here; CG_EXTRACT_PID is that background
+# extract (empty until launched, so cleanup() has nothing to stop on an early abort).
 CG_HOST_IP=""
 CG_RECORDING_STARTED=0
-CG_RECORDING="$OUTDIR/cg-obs-recording.mkv"
+CG_EXTRACT_PID=""
 # #1302: the cg OBS / strih scene snapshots the CG profile restores in cleanup() live in this run's
-# OUTDIR; CG_HOST_RECORDING_PATH is the cg OBS StopRecord host path the default pull scps.
+# OUTDIR; CG_HOST_RECORDING_PATH is the cg OBS StopRecord host path the on-box decode reads.
 CG_CHAIN_STATE_DIR="$OUTDIR"
 CG_HOST_RECORDING_PATH=""
 # Issue 1302 slice 2: the strih/stream extracts decode for the SongPlayer + cg burns too, only when
@@ -5444,6 +5446,12 @@ if [ "$VERDICT_ON_STREAM" = "1" ]; then
   echo "      (win-stream-snv FileDownload $STREAM_PARTIAL_WIN -> $STREAM_PARTIAL;"
   echo "       win-stream-snv FileDownload $STREAM_PIXELS_WIN -> $STREAM_PIXELS  [absent on a clean run])"
 
+  # Issue 1302: CG_CHAIN=1 only — decode the cg OBS recording IN PLACE on RESOLUME-SNV, in the
+  # background, concurrently with the strih/stream (and imag) extracts; the recording is never
+  # copied to dev1. Resolume away = a named CG-LEG-SKIPPED line later, never a red. A pure no-op
+  # unless CG_CHAIN=1 (the cg-chain lib).
+  cg_chain_onbox_extract_launch "$HERE" "${WIN_VERDICT_EXE_LOCAL:-}" "$E2E_EXECUTE_VERDICT"
+
   # #462 (EPIC #466): extract the IMAG partial ON imag-nb — UNLIKE 8/8a/8/8b above, this step
   # ACTUALLY RUNS NOW (imag-nb is a plain Linux box reachable over ssh/scp, same access class as
   # cam1/cam2 — no win-* MCP "paste this" dance needed, per the #462 issue text). By the time this
@@ -5524,19 +5532,13 @@ continuing WITHOUT the imag partial; the merge below will omit --merge-partials 
     fi
     echo "    #703: both partials present — proceeding to the REAL merge (below)."
   fi
+  # Issue 1302: CG_CHAIN=1 only — collect the background cg OBS extract launched next to the stream
+  # extract: wait at most a bounded grace past the camera legs, stop it on an overrun, and print the
+  # CG-LEG run-log line. Report-only: a miss omits the cg partial, never aborts the merge.
+  cg_chain_onbox_extract_wait
 
   echo "    --- [8/8d] MERGE the small partials ON dev1 (no recording on dev1) ---"
   echo "    After pulling both partials (+ their <partial>-pixels dirs) to dev1, run the merge:"
-  # #1301: CG_CHAIN=1 — confirm cg OBS stopped (the #1302 after-StopRecord step already did) + pull
-  # the StopRecord file to dev1 so the merge can
-  # feed it as --cg below. BEST-EFFORT: a failed stop/pull just omits --cg (the merge runs exactly
-  # as today, no cg_chain section) — it NEVER aborts the camera-chain verdict. The resolume
-  # recording is scp'd from resolume (the exact StopRecord file) unless CG_CHAIN_PULL_CMD overrides
-  # the transport. Pure no-op unless CG_CHAIN=1.
-  if cg_chain_enabled && [ "$CG_RECORDING_STARTED" = 1 ]; then
-    cg_chain_record_stop "$CG_HOST_IP" "$HERE/obs_phase2.py" "${CG_CHAIN_RECORD_TIMEOUT:-${OBS_CLEANUP_TIMEOUT:-30}}"
-    cg_chain_pull_recording "$CG_HOST_IP" "$CG_RECORDING" || true
-  fi
   # The merge reads ONLY the small JSONs (+ the small painter CSV / capture-stats already on dev1)
   # and produces the SAME full-chain verdict the fused path would — equivalent fields + PASS.
   MERGE_ARGS=(--merge-partials "strih=$STRIH_PARTIAL" --merge-partials "stream=$STREAM_PARTIAL" \
@@ -5568,12 +5570,10 @@ continuing WITHOUT the imag partial; the merge below will omit --merge-partials 
   # silently skipping a requested gate. The carried summary is honored regardless; this just catches
   # a stale/forgotten extract. Empty $CG (COLOUR_GATE=0) adds nothing.
   if [ -n "$CG" ]; then MERGE_ARGS+=("$CG"); fi
-  # #1301: feed the pulled cg OBS recording to the verdict so it emits the REPORT-ONLY cg_chain
-  # section. Only when CG_CHAIN=1 AND the pull above actually produced the file — otherwise the
-  # merge runs exactly as today (no --cg, no cg_chain). Never changes the camera-chain pass verdict.
-  if cg_chain_enabled && [ -f "$CG_RECORDING" ]; then MERGE_ARGS+=(--cg "$CG_RECORDING"); fi
-  # Issue 1302 slice 2: the CG_CHAIN burn flag (matching the extracts) + this run's CG window, so the
-  # strih/stream cg_chain hops are judged only inside it. A no-op unless CG_CHAIN=1.
+  # #1301 / issue 1302: the CG_CHAIN merge inputs — the burn flag (matching the extracts), this
+  # run's CG window (the strih/stream cg_chain hops are judged only inside it) and, when it reached
+  # dev1, the cg OBS partial decoded ON RESOLUME-SNV (the REPORT-ONLY cg_chain section; no partial =
+  # no section). Never changes the camera-chain pass verdict. A no-op unless CG_CHAIN=1.
   cg_chain_merge_args_append
   if [ -f "$PAINTER_CSV" ]; then MERGE_ARGS+=(--painter "$PAINTER_CSV"); fi
   if [ -f "$CAM1_CAPTURE_STATS" ]; then MERGE_ARGS+=(--cam1-capture-stats "$CAM1_CAPTURE_STATS"); fi

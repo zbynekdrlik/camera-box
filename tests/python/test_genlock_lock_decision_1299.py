@@ -356,3 +356,137 @@ def test_analyze_n_idle_none_for_a_pre_v6_facet():
                                         "n_inputs": 7, "n_locked": 7}})
     res = d.analyze(body, box_reachable=1)
     assert res["n_idle"] is None
+
+
+# ------------------------------------------------------------------------------------------------
+# issue 1372 part D -- the media-clock (audio clock) term: the same precedence + verdict cases the
+# Rust authority pins (src/genlock_lock_state.rs), so the python mirror decides it identically.
+# ------------------------------------------------------------------------------------------------
+def test_media_clock_drift_or_undisciplined_is_degraded_media_clock():
+    for mc in (d.MC_DRIFT, d.MC_UNDISCIPLINED):
+        f = healthy()
+        f["media_clock"] = mc
+        assert d.decide(**f) == (d.ST_DEGRADED, d.R_MEDIA_CLOCK)
+
+
+def test_media_clock_never_unlocks_and_never_masks_an_unlock():
+    for mc in (d.MC_DRIFT, d.MC_UNDISCIPLINED):
+        f = healthy()
+        f.update(media_clock=mc, clock_present=False)
+        assert d.decide(**f) == (d.ST_UNLOCKED, d.R_CLOCK)
+        f = healthy()
+        f.update(media_clock=mc, n_locked=0)
+        assert d.decide(**f) == (d.ST_UNLOCKED, d.R_NO_INPUT_LOCKED)
+
+
+def test_qpc_step_beats_media_clock_beats_audio():
+    f = healthy()
+    f.update(media_clock=d.MC_DRIFT, qpc_drift_beyond_bound=True)
+    assert d.decide(**f) == (d.ST_DEGRADED, d.R_QPC_DRIFT)
+    f = healthy()
+    f.update(media_clock=d.MC_DRIFT, audio_unpaired=True, audio_unexpected=True)
+    assert d.decide(**f) == (d.ST_DEGRADED, d.R_MEDIA_CLOCK)
+
+
+def _at_1hz(n, f):
+    return [(i * 1000, f(i)) for i in range(n + 1)]
+
+
+def _window(samples):
+    return d.media_clock_window(samples, d.GENLOCK_MEDIA_CLOCK_WINDOW_S, d.GENLOCK_MEDIA_CLOCK_MAX_GAP_MS,
+                                d.GENLOCK_MEDIA_CLOCK_BAND_US)
+
+
+def test_media_clock_window_mirrors_the_rust_authority():
+    # the pre-part-A stream: 13.5 us per 1 Hz pair -> 8.1 ms over the 600 s window
+    assert _window(_at_1hz(600, lambda i: i * 27 // 2)) == (8100, 600_000)
+    # dantesync steps on a disciplined box (a locked master's 1460 us with phase_slew off, a client's
+    # 600 us, a not-locked master's 250 us, the -146 us seen on win-resolume): never drift
+    for f in (lambda i: (i // 60) * 1460, lambda i: (i // 30) * 600, lambda i: (i // 25) * 250,
+              lambda i: -146 * (i // 20)):
+        assert _window(_at_1hz(600, f))[0] == 0
+    # the same steps on top of the rate: the rate (each step pair's own ~14 us leaves with it)
+    assert _window(_at_1hz(600, lambda i: i * 27 // 2 + (i // 60) * 1460))[0] == 8094
+    # a 20 ppm drift in only 45 % of the seconds: its true share, 5.4 ms (a pure median reads 0)
+    assert _window(_at_1hz(600, lambda i: (i * 9 // 20) * 20))[0] == 5400
+    assert _window(_at_1hz(600, lambda i: (i * 9 // 20) * 40))[0] == 10_800  # 40 ppm, same share
+    # a stalled pair (> 5 s) is not a sample and not coverage
+    gap = _window([(0, 0), (1000, 20), (121_000, -14_000), (122_000, -13_980)])
+    assert gap == (12_000, 2000)
+    assert not d.media_clock_window_ready(gap[1], 600)
+    # negative drift (truncated toward zero like C / Rust), an even count averages the middle two
+    assert _window(_at_1hz(3, lambda i: -20 * i))[0] == -12_000
+    assert _window([(0, 0), (1000, 10), (2000, 30)])[0] == 9000
+    assert _window([(0, 0), (3000, -1)])[0] == -199  # -333 ppb * 600 / 1000, toward zero
+    # an odd, negative middle gap: the centre rounds like the C (a + (b - a) / 2)
+    assert d.media_clock_window([(0, 0), (3, -1), (6, -1)], 600, 5000, -1)[0] == -100_000
+    assert _window([(0, 7)]) == (0, 0)
+    assert _window([]) == (0, 0)
+    assert d.media_clock_window([(0, 0), (1000, 5)], 0, 5000, 100)[0] == 0
+
+
+def test_media_clock_window_ready_mirrors_the_rust_authority():
+    assert not d.media_clock_window_ready(539_999, 600)
+    assert d.media_clock_window_ready(540_000, 600)
+    assert not d.media_clock_window_ready(0, 0)
+
+
+def test_media_clock_verdict_mirrors_the_rust_authority():
+    b = d.GENLOCK_MEDIA_CLOCK_DRIFT_BOUND_US
+    assert d.media_clock_verdict(True, 8100, b, "active", True) == d.MC_DRIFT
+    for drift in (-2000, -1, 0, 1, 2000):
+        assert d.media_clock_verdict(True, drift, b, "active", True) == d.MC_OK
+    assert d.media_clock_verdict(False, 99000, b, "active", True) == d.MC_OK  # window not ready
+    assert d.media_clock_verdict(True, 5000, b, "n/a", True) == d.MC_DRIFT    # Linux: drift only
+    for disc in ("disabled", "read_failed", "api_missing"):
+        assert d.media_clock_verdict(False, 0, b, disc, True) == d.MC_UNDISCIPLINED
+        assert d.media_clock_verdict(False, 0, b, disc, False) == d.MC_OK  # no dantesync
+    for disc in ("unknown", "active", "n/a"):
+        assert d.media_clock_verdict(False, 0, b, disc, True) == d.MC_OK
+
+
+def test_analyze_names_the_media_clock_sub_kind():
+    mc = {"state": "drift", "drift_us": 8100, "window_s": 600, "ready": True, "discipline": "active"}
+    r = d.analyze(_bundle("DEGRADED", "media_clock", extra={"media_clock": mc}), box_reachable=1)
+    assert r["verdict"] == "DEGRADED"
+    assert r["reason"] == "media_clock:drift"
+    assert r["media_clock"] == "drift" and r["media_clock_drift_us"] == 8100
+    assert r["media_clock_discipline"] == "active"
+    mc2 = dict(mc, state="undisciplined", drift_us=0, discipline="disabled")
+    r = d.analyze(_bundle("DEGRADED", "media_clock", extra={"media_clock": mc2}), box_reachable=1)
+    assert r["reason"] == "media_clock:undisciplined"
+
+
+def test_analyze_pre_v7_facet_has_no_media_clock_and_keeps_the_bare_reason():
+    r = d.analyze(_bundle("LOCKED", "none"), box_reachable=1)
+    assert r["media_clock"] is None and r["media_clock_drift_us"] is None
+    # a media_clock reason without the object (malformed) stays the bare token, never `media_clock:`
+    r = d.analyze(_bundle("DEGRADED", "media_clock"), box_reachable=1)
+    assert r["reason"] == "media_clock"
+    # an unrelated reason is never rewritten by a stray media_clock object
+    mc = {"state": "drift", "drift_us": 8100, "window_s": 600, "ready": True, "discipline": "active"}
+    r = d.analyze(_bundle("DEGRADED", "ntp_failed", extra={"media_clock": mc}), box_reachable=1)
+    assert r["reason"] == "ntp_failed"
+
+
+def test_cli_prints_the_media_clock_fields(capsys):
+    mc = {"state": "drift", "drift_us": 8100, "window_s": 600, "ready": True, "discipline": "active"}
+    body = _bundle("DEGRADED", "media_clock", extra={"media_clock": mc})
+
+    class _Stdin:
+        class buffer:  # noqa: N801 -- mimics sys.stdin.buffer
+            @staticmethod
+            def read():
+                return body.encode()
+
+    old = sys.stdin
+    sys.stdin = _Stdin
+    try:
+        assert d._main(["analyze", "--box-reachable", "1"]) == 0
+    finally:
+        sys.stdin = old
+    out = capsys.readouterr().out.splitlines()
+    assert "reason=media_clock:drift" in out
+    assert "media_clock=drift" in out
+    assert "media_clock_drift_us=8100" in out
+    assert "media_clock_discipline=active" in out

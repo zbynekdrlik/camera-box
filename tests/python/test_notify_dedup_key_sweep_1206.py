@@ -178,6 +178,11 @@ _PRODUCTION_CRITICAL_TIME_BUCKETED = {
     # notifies (the liveness arm avsync-lineup-liveness + the preflight-nogo arm) stay STABLE keys --
     # allowlisting the FILE permits the bucketed offset line without requiring every line to bucket.
     "avsync-lineup-alert-watchdog.sh",    # #1331 -- offset ALARM arm (on-air A/V rozladenie)
+    # issue 1372 part C -- a VBAN stream arriving at strih-lx off its nominal rate or losing packets
+    # is ON-AIR audio (the FOH/program feed slips or clicks) and is invisible without a page; its rate
+    # is measured by the frame COUNTER (the quality-gated input the re-ping doctrine requires: a
+    # stream too short to grade reads SHORT, never a page). Ships DISABLED, report-only.
+    "vban-rate-alert-watchdog.sh",        # issue 1372 -- inter-PC VBAN rate / loss
 }
 
 # The bucketing markers an inline --dedup-key carries when it time-buckets: the shared bash helper

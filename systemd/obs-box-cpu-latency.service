@@ -1,0 +1,33 @@
+[Unit]
+Description=camera-box issue 1357: bound the CPU idle wake-up latency (PM QoS /dev/cpu_dma_latency) on the OBS box
+Documentation=https://github.com/zbynekdrlik/camera-box/issues/1357
+# Installed + enabled by obs_box_cpu_latency (scripts/lib/obs-box-baseline.sh) on every OBS box and graded
+# by the `cstate` row of scripts/lib/obs-box-baseline-verify.sh. Hold the bound before the kiosk session
+# (and with it OBS) starts.
+Before=display-manager.service
+
+[Service]
+# The holder sends READY=1 (systemd-notify, a child process -> NotifyAccess=all) only after the bound
+# is written, so `systemctl start` returns once it is held and a failed open/write fails the start.
+Type=notify
+NotifyAccess=all
+# The ONE baseline bound (obs_box_cpu_latency_bound_us, test-pinned to this line): 150 us keeps C1/C2 and
+# keeps out the ~1 ms C3 exit on strih-lx's ACPI idle driver. The grader reads it back from here.
+Environment=OBS_BOX_CPU_LATENCY_US=150
+ExecStart=/usr/local/sbin/obs-box-cpu-latency-hold.sh ${OBS_BOX_CPU_LATENCY_US}
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateNetwork=yes
+# root owns the 0600 device, so no capability is needed; AF_UNIX stays for the systemd-notify socket
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_UNIX
+SystemCallArchitectures=native
+DevicePolicy=closed
+DeviceAllow=/dev/cpu_dma_latency w
+
+[Install]
+WantedBy=multi-user.target

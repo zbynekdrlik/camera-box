@@ -4561,7 +4561,9 @@ fn gate_win_http_client_missing_step_threshold_field_falls_back_to_700_1129() {
 // the PHASE-SLEW ENABLED/DISABLED/UNKNOWN line is ALWAYS printed per HTTP-graded node, but only
 // feeds the node's OK/BAD verdict when DANTESYNC_GATE_PHASE_SLEW_ENFORCE=1 (default off) -- so
 // wiring it cannot brick the standing E2E gate before the enforce flip. Reuses the #1215 pure
-// functions (phase_slew_enabled_from_pipe_json/phase_slew_check) already used by verify-imag.sh.
+// functions already used by verify-imag.sh. Issue 1372 replaced the bare phase_slew_check with
+// clock_discipline_check (scripts/lib/dantesync-clock-discipline.sh): these legacy-shape fixtures
+// (no clock_discipline field) grade as LEGACY_SLEW/LEGACY_NO_SLEW and keep the PHASE-SLEW words.
 // ---------------------------------------------------------------------------------------------
 
 /// A single-read HTTP fixture for the phase_slew tests: fresh (updated_ts = now), locked, in-bound

@@ -692,6 +692,43 @@ so every launch had its own A/V level (dock + `mbc` level ≈ 135 ± 6 ms in eve
   (checked mechanically). The telemetry `fallbacks=%u (#1355)` is appended AFTER the
   byte-identical `restore=%d (#1335)`.
 
+## Issue 1372 — a CONFIRMED step is paid back at 1000 ppm, not restored proportionally
+
+At the first dantesync fleet date step the stream `mbc` lost ~44 ms of Dante samples upstream of
+OBS (a real loss: `last_step_ms=-43.7`, `restore=1`, `ts_lag_ms` flat). The follow-up-2 restore
+(Kr 2, ±100 ppm, decaying) took 3–4 min. ROZHODNUTÉ 5841039244: recover a confirmed step at
+1000 ppm (1 ms per second, the #1303/#1367 placement-slew pitch budget).
+
+- **Where:** the follow-up-2 corroboration on a re-base, now SIGNED (the buffer moved the same way as
+  the samples, by ≥ half of them), BOOKS the step instead of arming `level_restore`
+  (`asrc_step_recover_book` ↔ `step_recover_book`): the MEASURED loss `−r·1000` is added to
+  `step_recover_ms`, the total capped at ±`STEP_RECOVER_MAX_MS` (100 ms), and `level_target_ms` moves
+  by the booked amount. The level only confirms: one callback's reading is up to ~10 ms off within a
+  block (the bench's step callback read 35 ms for a 43 ms loss); booking the smaller of the two left
+  the rest to the slow level loop. Every call then pays (`asrc_step_recover_pay` ↔
+  `step_recover_pay`) `min(owed, STEP_RECOVER_PPM·1e-6·master_block_s·1000)`,
+  reports it as `step_recover_ppm` (servo sign: negative = stretch), and moves the setpoint and the
+  open window's level sum back up by the payment. The P term, the restore arms and the unreachable
+  bound see no error (the level and the setpoint move together), so the servo's own `applied_ppm`
+  stays in its steady band.
+- **Separate term, clamps unchanged:** `ASRC_MAX_PPM`, the 5 ppm/s slew limit and the ±100 restore
+  clamp are untouched; the returned corrected advance and `obs-source.c`'s resampler call carry
+  `applied + recover`. The shift/sustained restore arms still use the ±100 proportional burst.
+- **Cleared by** a flush, a capture-rule change, and any call without a captured setpoint.
+- **Held, not dropped,** while the #1367 audio-placement slew runs: obs-source.c calls
+  `asrc_compensator_set_step_recover_hold(&source->asrc, genlock_audio_slew_remaining_ns != 0)` before
+  `compensate`, so the two 1000 ppm terms never stack.
+- **Bench:** `src/genlock_wall_step_bench.rs` (per-callback `mbc` plant, 1 ms bursty delivery, the
+  logged 44 ms gap): the level is within 2 ms of target from +60 s on (legacy: up to ~36 ms off);
+  no event, a 5 ms loss and a master-only jump never set the term.
+- **Parity:** `tests/asrc_compensator_parity_1367.rs` traces `rec=` / `recp=`; the step scenario must
+  show a −1000 ppm payment AND a held window (the driver holds windows 903–905). Scratch C mutants
+  (half payment, no setpoint move, half booking, hold ignored) all diverge. Unit:
+  `a_confirmed_step_books_the_measured_loss_capped_and_signed_1372` (in
+  `src/asrc_bench_step_recover_tests.rs`, a `#[path]` child of the test build so `asrc_bench.rs` stops
+  growing). Full contract:
+  `genlock-wall-step.md`.
+
 ## Issue 1367 — the level loop reads the per-window MEAN, not the window-closing reading
 
 - **Why:** the mixer drains the input buffer in 1024-sample ticks (21.33 ms), so one `buffered_ms`
