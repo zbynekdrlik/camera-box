@@ -187,7 +187,9 @@ static inline struct vban_pacing_step vban_pacing_step(struct vban_pacing *p, ui
 		p->n_sent = 0;
 		p->win_open = false;
 	} else if (p->pending_trim_samples > 0) {
-		uint64_t t = p->pending_trim_samples < avail ? p->pending_trim_samples : avail;
+		/* never below the new target: a dip takes only what is above it (review round 2) */
+		const uint64_t above = avail > p->target_samples ? avail - p->target_samples : 0;
+		uint64_t t = p->pending_trim_samples < above ? p->pending_trim_samples : above;
 		t -= t % ps;
 		avail -= t;
 		d.drop_samples += t;
@@ -198,11 +200,16 @@ static inline struct vban_pacing_step vban_pacing_step(struct vban_pacing *p, ui
 	} else if (p->win_open && now_ns >= p->win_start_ns &&
 		   now_ns - p->win_start_ns >= VBAN_PACING_TRIM_WINDOW_NS) {
 		if (p->win_min_samples > p->trim_threshold_samples) {
-			const uint64_t excess = p->win_min_samples - p->target_samples;
+			/* back to the target, and never more than this wake has above it */
+			const uint64_t above = avail > p->target_samples ? avail - p->target_samples : 0;
+			uint64_t excess = p->win_min_samples - p->target_samples;
+			if (excess > above)
+				excess = above;
 			const uint64_t t = excess - excess % ps;
 			avail -= t;
 			d.drop_samples += t;
-			p->trims++;
+			if (t > 0)
+				p->trims++;
 		}
 		p->win_open = false;
 	}

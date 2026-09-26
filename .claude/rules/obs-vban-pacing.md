@@ -43,6 +43,9 @@ the latency from about 81 to 214 ms for good, and only the 200 ms overflow drop 
   `target + (anchor lateness − worst lateness)`, which is below the target whenever the audio
   thread has one slow callback in the window. Half the target (20 ms floor) leaves a light-load
   window untouched too.
+- **Never below the target.** A trim or a retarget drop takes at most what the current wake has
+  above the target, so a drop never causes an underflow (review round 2: a 200 -> 20 ms retarget
+  taken from a depth dip used to empty the buffer).
 - **Retarget.** A new Send Buffer value while running moves the schedule later (up) or drops the
   difference at the next wake (down, a trim). The counters carry on; the `pacing-config:` line
   says `counters=kept` for a retarget and `counters=reset` only at the thread start.
@@ -70,8 +73,8 @@ margin is 64 − 5 − 41 ≈ 18 ms. So a target much below ~48 ms underflows on
     part way through a burst, and clamped targets.
   - A second test counts those boundary hits, so the gate cannot quietly go blind.
   - The trace carries the whole state, the window and the pending retarget drop included. Every
-    hand mutation of the C (21: each comparison, the headroom, the hysteresis, the resets, the
-    retarget shift and drop) was killed by value. One survivor showed two resets of the pending
+    hand mutation of the C (24: each comparison, the headroom, the hysteresis, the resets, the
+    retarget shift and drop, the never-below-target clamps) was killed by value. One survivor showed two resets of the pending
     drop were unreachable; they were removed.
 - The same test file pins the wiring:
   - both `windows-genlock*.yml` files build the plugin and assert the patch;
@@ -138,6 +141,8 @@ What healthy looks like:
 - `depth_ms` stays near the target, within about one audio block (21 ms), dipping while the audio
   thread runs late.
 - `underflows` and `trims` stay flat; a trim follows an underflow (the stall's backlog).
+- A trim is an audible skip, like an overflow: it drops about the stall's backlog of audio
+  (~100 ms after a 150 ms stall). It is the price of getting the latency back.
 - `late_max_ms` stays well under 1 ms.
 
 A growing `late_max_ms` with a flat `underflows` means the send thread wakes late. Suspect the

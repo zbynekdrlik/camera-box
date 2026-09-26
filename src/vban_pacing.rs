@@ -207,7 +207,10 @@ impl Pacing {
             self.n_sent = 0;
             self.win_open = false;
         } else if self.pending_trim_samples > 0 {
-            let mut t = self.pending_trim_samples.min(avail);
+            // never below the new target: a dip takes only what is above it (review round 2)
+            let mut t = self
+                .pending_trim_samples
+                .min(avail.saturating_sub(self.target_samples));
             t -= t % ps;
             avail -= t;
             d.drop_samples += t;
@@ -218,11 +221,15 @@ impl Pacing {
             self.win_open = false;
         } else if self.win_open && now_ns.saturating_sub(self.win_start_ns) >= TRIM_WINDOW_NS {
             if self.win_min_samples > self.trim_threshold_samples {
-                let excess = self.win_min_samples - self.target_samples;
+                // back to the target, and never more than this wake has above it
+                let excess = (self.win_min_samples - self.target_samples)
+                    .min(avail.saturating_sub(self.target_samples));
                 let t = excess - excess % ps;
                 avail -= t;
                 d.drop_samples += t;
-                self.trims += 1;
+                if t > 0 {
+                    self.trims += 1;
+                }
             }
             self.win_open = false;
         }

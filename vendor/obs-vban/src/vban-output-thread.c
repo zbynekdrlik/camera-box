@@ -310,8 +310,15 @@ static void pacing_sleep_until(struct pacing_sleeper *s, uint64_t deadline_ns)
 			LARGE_INTEGER due;
 			/* relative, in 100 ns units */
 			due.QuadPart = -(LONGLONG)((deadline_ns - PACING_SPIN_NS - now) / 100);
-			if (SetWaitableTimer(s->timer, &due, 0, NULL, NULL, FALSE))
+			if (SetWaitableTimer(s->timer, &due, 0, NULL, NULL, FALSE)) {
 				WaitForSingleObject(s->timer, INFINITE);
+			} else {
+				blog(LOG_WARNING,
+				     "obs-vban pacing-sleep: SetWaitableTimer failed (error %lu), os_sleepto_ns only",
+				     (unsigned long)GetLastError());
+				CloseHandle(s->timer);
+				s->timer = NULL;
+			}
 		}
 	}
 #else
@@ -426,6 +433,10 @@ static void vban_out_loop(struct vban_out_s *v)
 			     " counters=reset stream='%.*s'",
 			     pacing.target_ms, pacing.packet_samples, pacing.rate, (int)VBAN_STREAM_NAME_SIZE,
 			     t.header->streamname);
+		} else if (pacing_target_ms != target_ms &&
+			   vban_pacing_clamp_target_ms(target_ms) == pacing.target_ms) {
+			/* a new setting value that clamps to the same target: nothing to move */
+			pacing_target_ms = target_ms;
 		} else if (pacing_target_ms != target_ms) {
 			/* a new Send Buffer value: move the schedule, keep the counters */
 			vban_pacing_retarget(&pacing, target_ms);
