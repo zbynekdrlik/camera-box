@@ -228,3 +228,53 @@ fn an_n2_tick_or_the_min_latency_marker_clears_the_sticky_floor_1367() {
     }
     assert_eq!((d.target_frames, d.capped), (2, false));
 }
+
+#[test]
+fn a_spread_block_under_the_clamp_never_becomes_sticky_1367() {
+    // review round 1: 30 of 90 ticks at latch floor 3 (bin 2) and 60 at 1 (bin 0) -- p90 bin 2 is
+    // under the over-clamp bin, so only the p90 - p10 spread (2) keeps this transient out.
+    let mut s = ShallowSticky::default();
+    for k in 0..N1_SHALLOW_SETTLE_TICKS {
+        let latch = if k < 30 { 3 } else { 1 };
+        n1_shallow_sticky_track(&mut s, &at(latch), true, T0 + u64::from(k) * I30);
+    }
+    assert_eq!(s.floor_frames, 0, "a spread-2 block became sticky");
+    // the same share one frame apart (spread 1) is a genuine content level.
+    for k in 0..N1_SHALLOW_SETTLE_TICKS {
+        let latch = if k < 30 { 3 } else { 2 };
+        n1_shallow_sticky_track(&mut s, &at(latch), true, T0 + MIN_NS + u64::from(k) * I30);
+    }
+    assert_eq!(s.floor_frames, 3);
+}
+
+#[test]
+fn a_sticky_floor_from_a_higher_pin_never_caps_a_lower_pin_latch_1367() {
+    // review round 1: the sticky floor is absolute frames. One recorded at base 2 (4 frames) and a
+    // pin lowered to base 1 must not ask for D 5 over the base + 3 clamp: that latch would be capped
+    // and the capped `fell` watch would re-measure it every ~6 s until the floor decayed. The
+    // latch limits the sticky input so D stays base + 3, uncapped.
+    let mut d = ShallowDepth::default();
+    let mut latched = 0;
+    for i in 0..N1_SHALLOW_SETTLE_TICKS {
+        latched += u32::from(n1_shallow_track(
+            &mut d,
+            ShallowTick {
+                sticky_floor_frames: 4,
+                ..tick(i == 0, 1)
+            },
+        ));
+    }
+    assert_eq!(latched, 1);
+    assert_eq!((d.target_frames, d.capped), (4, false));
+    // and it stays latched: an idle floor two frames under D never re-measures.
+    for _ in 0..3 * N1_SHALLOW_SETTLE_TICKS {
+        assert!(!n1_shallow_track(
+            &mut d,
+            ShallowTick {
+                sticky_floor_frames: 4,
+                ..tick(false, 1)
+            },
+        ));
+        assert!(!d.measuring, "the sticky-held latch re-measured");
+    }
+}

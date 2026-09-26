@@ -309,7 +309,8 @@ fn c_n1_shallow_depth_matches_the_rust_authority_1367() {
     }
     // design 5844353368: an idle relock (latch floor 1) whose source carries a sticky content floor
     // of 2 latches D 3 -- max(p90, sticky) + 1; the same window on the min-latency marker ignores
-    // the sticky floor (D 2); a sticky floor past the clamp is clamped and reported (capped).
+    // the sticky floor (D 2); a sticky floor past the clamp (one recorded at a higher pin) is
+    // limited to base + 2, so D is the clamp base + 3 and NOT capped (review round 1).
     for k in 0..90u64 {
         seq.push(ShallowTick {
             sticky_floor_frames: 2,
@@ -497,7 +498,8 @@ fn c_n1_shallow_depth_matches_the_rust_authority_1367() {
     // the floor fell (3), the unreachable D's re-measure (3) and the relock storm's (3); then
     // (ROZHODNUTÉ 5842640404) the budgeted idle latch (3) and the rise past the budget (the clamp, 4),
     // then (ROZHODNUTÉ 5842848307) the min-latency box's raw-floor latch (2, governed), then (design
-    // 5844353368) the sticky floor's idle latch (3), the marker ignoring it (2) and its clamp (4).
+    // 5844353368) the sticky floor's idle latch (3), the marker ignoring it (2) and its limit (4,
+    // uncapped).
     assert!(
         fired.0 > 0 && fired.0 < sheds.len(),
         "shed vectors one-sided: {fired:?}"
@@ -515,5 +517,10 @@ fn c_n1_shallow_depth_matches_the_rust_authority_1367() {
         latched,
         vec![3, 3, 4, 2, 31, 31, 2, 0, 2, 2, 2, 4, 4, 3, 3, 3, 3, 4, 2, 3, 2, 4],
         "the track sequence latched {latched:?}"
+    );
+    assert!(
+        !s.capped,
+        "review round 1: a sticky floor alone must never cap a latch (the capped fell watch would \
+         re-measure it every window until the floor decayed)"
     );
 }

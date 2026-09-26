@@ -55,6 +55,16 @@ fn c_n1_shallow_sticky_floor_matches_the_rust_authority_1367() {
     for _ in 0..blk + 7 {
         push(&mut seq, tick(false, 2), false, &mut wall);
     }
+    // review round 1: a transient block whose p90 (bin 2) is UNDER the clamp -- only its p90 - p10
+    // spread (2) keeps it out.
+    for k in 0..blk {
+        push(
+            &mut seq,
+            tick(k == 0, if k < 30 { 3 } else { 1 }),
+            true,
+            &mut wall,
+        );
+    }
     for k in 0..blk {
         push(&mut seq, tick(k == 40, 2), true, &mut wall);
     }
