@@ -25,6 +25,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <cstdio>
 #include <mutex>
@@ -96,6 +97,7 @@ int main()
 		bool torn = false;
 
 		CHECK(mb.start([&](FakeJob &job) {
+			const uint64_t id_at_start = job.id;
 			const bool intact = payload_intact(job);
 			{
 				std::lock_guard<std::mutex> lock(seen_mutex);
@@ -104,9 +106,9 @@ int main()
 					torn = true;
 			}
 			std::this_thread::sleep_for(std::chrono::milliseconds(DECODE_MS));
-			/* Re-check after the sleep: the producer kept publishing meanwhile, so a shared
-			 * buffer would have been overwritten under the decoder by now. */
-			if (!payload_intact(job)) {
+			/* Re-check after the sleep: the producer kept publishing meanwhile, so a buffer
+			 * shared with the producer would now hold a newer frame. */
+			if (job.id != id_at_start || !payload_intact(job)) {
 				std::lock_guard<std::mutex> lock(seen_mutex);
 				torn = true;
 			}
@@ -159,6 +161,55 @@ int main()
 		CHECK(mb.taken() + mb.dropped() == published, "decoded + dropped == published");
 		std::printf("published=%llu decoded=%llu dropped=%llu\n", (unsigned long long)published,
 			    (unsigned long long)mb.taken(), (unsigned long long)mb.dropped());
+	}
+
+	/* 2-4, deterministic: a burst published while the worker is held inside a decode. Frame 1 is
+	 * taken and held; frames 2..5 arrive meanwhile. Frames 2, 3 and 4 are replaced (3 drops), the
+	 * held frame is never overwritten under the decoder, and the worker's next frame is 5. */
+	{
+		CbDecodeMailbox<FakeJob> mb;
+		std::mutex m;
+		std::condition_variable cv;
+		bool release = false;
+		std::atomic<bool> holding{false};
+		std::vector<uint64_t> ids;
+		bool held_frame_changed = false;
+		CHECK(mb.start([&](FakeJob &job) {
+			const uint64_t id_at_start = job.id;
+			if (id_at_start == 1) {
+				holding = true;
+				std::unique_lock<std::mutex> lock(m);
+				/* Bounded: a broken mailbox makes this test fail, never hang. */
+				(void)cv.wait_for(lock, std::chrono::seconds(2), [&]() { return release; });
+			}
+			std::lock_guard<std::mutex> lock(m);
+			if (job.id != id_at_start || !payload_intact(job))
+				held_frame_changed = true;
+			ids.push_back(job.id);
+		}),
+		      "start() for the burst case");
+		CHECK(mb.publish([&](FakeJob &job) { fill_job(job, 1); }), "publish frame 1");
+		CHECK(wait_for([&]() { return holding.load(); }, 1000), "the worker holds frame 1");
+		for (uint64_t id = 2; id <= 5; id++)
+			CHECK(mb.publish([&](FakeJob &job) { fill_job(job, id); }), "publish during the held decode");
+		CHECK(mb.dropped() == 3, "frames 2, 3 and 4 were replaced before the worker took them");
+		{
+			std::lock_guard<std::mutex> lock(m);
+			release = true;
+		}
+		cv.notify_all();
+		CHECK(wait_for(
+			      [&]() {
+				      std::lock_guard<std::mutex> lock(m);
+				      return ids.size() == 2;
+			      },
+			      1000),
+		      "the worker decodes exactly one more frame after the burst");
+		mb.stop();
+		std::lock_guard<std::mutex> lock(m);
+		CHECK(ids.size() == 2 && ids[0] == 1 && ids[1] == 5, "latest wins: the frame after 1 is 5");
+		CHECK(!held_frame_changed, "the held frame is never overwritten while it is decoded");
+		CHECK(mb.taken() == 2 && mb.dropped() == 3, "taken + dropped == published for the burst");
 	}
 
 	/* 5: stop() while a decode is in flight waits for it, then joins. */
