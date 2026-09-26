@@ -270,14 +270,14 @@ def journal_date_grade(step_bound_us, margin_us, status, micro_bound_ms=None) ->
     """How a date-authority journal line `[NTP] offset:... (date authority, ..., step bound Nus)` is
     graded when the SAME node's /status is STATUS -- the bash journal_date_grade_from_step:
 
-    none (STEP_BOUND_US not a positive integer of at most 15 digits, or MARGIN_US not a non-negative
-    integer) | micro:<us> (a micro-capable date master, both flags false: micro bound + margin) |
+    none (STEP_BOUND_US not a positive integer, or MARGIN_US not a non-negative integer, each of at
+    most 15 digits) | micro:<us> (a micro-capable date master, both flags false: micro bound + margin) |
     out (date_correction_falling_behind true) | paused (date_micro_paused true) | unknown (a flag
     that is not a JSON boolean, or an unreadable micro bound) | step:<us> (a /status with a
     date_authority that is not a micro-capable master: step bound + margin) | step-unread:<us> (no
     date_authority -- empty, not JSON, a pre-1.9.0 blob: step bound + margin, named by the consumer)."""
     step = _plain_int(step_bound_us, max_digits=15)
-    margin = _plain_int(margin_us)
+    margin = _plain_int(margin_us, max_digits=15)
     if step is None or step <= 0 or margin is None:
         return "none"
     s = _status_dict(status)

@@ -394,7 +394,8 @@ date_step_bound_us_from_journal() {
 # journal line whose step bound is STEP_US is graded, given the SAME node's /status (python twin:
 # scripts/dantesync_fleet.py journal_date_grade; both pinned by the journal_grade column of
 # tests/fixtures/dantesync_clock_discipline_1372.tsv):
-#   none              -- STEP_US is not a positive integer or MARGIN_US not a non-negative integer:
+#   none              -- STEP_US is not a positive integer or MARGIN_US not a non-negative integer
+#                        (each at most 15 digits, so bash integer arithmetic never wraps):
 #                        not a date-authority line, grade the journal the ordinary way
 #   micro:<us>        -- STATUS is a micro-capable (1.11.x) date master with both flags false:
 #                        median-only on micro bound (MICRO_BOUND_MS, default
@@ -409,7 +410,7 @@ date_step_bound_us_from_journal() {
 # The flag order is _date_master_micro_verdict's, so the journal and /status paths agree.
 journal_date_grade_from_step() {
   local step="$1" margin="$2" text="$3" micro="${4:-$DATE_MASTER_MICRO_BOUND_MS}" auth behind paused bound_us
-  if [[ ! $step =~ ^[0-9]{1,15}$ ]] || [ "$((10#$step))" -le 0 ] || [[ ! $margin =~ ^[0-9]+$ ]]; then
+  if [[ ! $step =~ ^[0-9]{1,15}$ ]] || [ "$((10#$step))" -le 0 ] || [[ ! $margin =~ ^[0-9]{1,15}$ ]]; then
     printf 'none'
     return 0
   fi
