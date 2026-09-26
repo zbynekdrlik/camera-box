@@ -368,9 +368,16 @@ always-+1 approach) without even stopping the re-measure.
 |---|---|---|
 | per-source receive lag | `Fifo::receive` records `arrival − stamp` (`genlock_grid_bench.rs`, used by all three benches) | `genlock_rx_arrival_lag_ns` (obs-internal.h), set at the producer push site of `obs_source_output_video_internal` right after `genlock_stamp_track_observe`, under `async_mutex`, `genlock_wall_now_ns() − output->timestamp` saturating at 0; zeroed with `genlock_rx_last_ts` at the explicit flush |
 | budgeted latch floor | `n1_shallow_latch_floor_frames(lag, I) = (lag + GENLOCK_N2_JITTER_BUDGET_NS).div_ceil(I)`, 0 for I = 0 | `genlock_n1_shallow_latch_floor_frames`, in the contiguous N==1 block (parity-lifted) |
-| where it is read | `ShallowTick.latch_floor_frames` -> the histogram only | the new `latch_floor_frames` scalar of `genlock_n1_shallow_track`, passed by `genlock_shallow_latch` |
+| where it is read | `ShallowTick.latch_floor_frames` -> the histogram only, and NOT on a min-latency box (the tracker bins `floor_frames` there, ROZHODNUTÉ 5842848307) | the new `latch_floor_frames` scalar of `genlock_n1_shallow_track`, passed by `genlock_shallow_latch`; the bin reads `min_latency_box ? floor_frames : latch_floor_frames` |
 
 What carries it (do not undo):
+- **No budget on a min-latency (imag) box (ROZHODNUTÉ 5842848307, option 2 of Design-question
+  5842838431).** At a 60p canvas the 15 ms budget is ~90 % of a frame: `ceil((lag + 15) / 16.7) >= 2`
+  for any lag over ~1.7 ms, so every shallow 3 ms input would ask for more than base + 1, which the
+  imag guard only REPORTS (`capped=1`, no depth, the #859 drain back on). The owner's hard rule is
+  minimum latency on imag, so the tracker bins the RAW tick floor there and the input stays governed
+  at D 2 exactly as before this slice. The decision lives INSIDE the tracker on its existing
+  `min_latency_box` input (no new argument, no second constant).
 - **ONE budget constant.** The 15 ms `GENLOCK_N2_JITTER_BUDGET_NS` of the N>=2 conveyor (#1354), no
   second shallow-only constant; the parity lift already lifts its `#define`.
 - **The histogram reads the budgeted floor, the watch reads the raw one.** A raw tick floor at or
@@ -404,11 +411,15 @@ clamp (reported `capped`). A band far under the edge pays nothing: idle 8 ms sta
 18–20 ms content lag is 3 — 20 + 15 ms crosses the edge, the same formula); 7–9 -> 59–61 ms
 re-measures once onto D 4 and slews once. Parity: latch-floor vectors at both edges, two intervals,
 a degenerate interval and the saturation, plus a tick sequence whose latch floor differs from the
-raw floor (latched `… 3 4`). C mutation sweep: 7/7 RED (histogram / window max / watch reading the
-wrong floor, no ceil, no budget, degenerate interval, saturation).
+raw floor (latched `… 3 4`), then a marker window on the raw floor (`… 2`). Marker path: a 60p unit
+case (8 ms lag: raw 1, budgeted 2) latches D 2 governed with the marker and D 3 without; the 30p
+two-clock bench at 24–26 ms keeps D 2, never `capped`, on the marker and D 3 without. C mutation
+sweep: 9/9 RED (histogram / window max / watch reading the wrong floor, the marker condition dropped
+either way or inverted, no ceil, no budget, degenerate interval, saturation).
 
 **Live acceptance (supervisor).** Full-bundle deploy on resolume. Across >= 2 song starts: no
 `genlock-shallow-remeasure`, `shallow_latches=` flat, `audio_slews=` flat, `audio_pairing_offset_ms`
 0; `sp-*_video` latch lines show `latch_floor_frames=` one over the raw `floor_max_frames=` where the
-idle lag is within 15 ms of an edge. The imag min-latency cap still applies (a deeper D there is
-reported, not applied).
+idle lag is within 15 ms of an edge. On imag (the marker) the latch shows no budget:
+`latch_floor_frames=` equals the raw floor, `shallow_capped=0`, D 2 governed; the cap still reports a
+genuinely slow input (raw floor over base).
