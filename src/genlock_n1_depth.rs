@@ -71,7 +71,7 @@
 //! (the C `genlock_should_hold_n1_phase`). A separate module because `genlock_backlog.rs` is already
 //! past the ~1000-line budget. Pure `std` + one crate constant — Tier-0 verifiable.
 
-use crate::genlock_backlog::DRAIN_MIN_TICK_INTERVAL;
+use crate::genlock_backlog::{DRAIN_MIN_TICK_INTERVAL, GENLOCK_N2_JITTER_BUDGET_NS};
 
 /// issue 1367 — a pin within this many ns ABOVE a whole number of frame intervals counts as that
 /// whole number (the integer interval is fractionally short of a real frame). Mirror of the C
@@ -347,8 +347,15 @@ pub struct ShallowTick {
     pub relock: bool,
     /// The scheduled tick is on the per-second grid (only those are sampled).
     pub on_grid: bool,
-    /// The rounded arrival floor at the scheduled instant, frames.
+    /// The rounded arrival floor at the scheduled instant, frames. The RAW floor: the rise / fell
+    /// watch and `floor_max_frames` read it (a content-dependent arrival change inside the budget
+    /// never re-measures).
     pub floor_frames: u64,
+    /// issue 1367 (ROZHODNUTÉ 5842640404) — the LATCH floor, frames: the newest received frame's
+    /// receive-time arrival lag plus the arrival-jitter budget
+    /// ([`n1_shallow_latch_floor_frames`]). Only the window histogram (the p90 latch + the spread
+    /// reject) reads it.
+    pub latch_floor_frames: u64,
     /// The pin-derived base, frames ([`n1_base_frames`]).
     pub base_frames: u64,
     /// The source is DEEP now ([`n1_is_deep_source`] at the processing wall); the latch uses the
@@ -361,6 +368,32 @@ pub struct ShallowTick {
     pub realized_frames: u64,
     /// A BACKLOG relock happened since the previous call (the C `genlock_relocks` moved).
     pub backlog_relock: bool,
+}
+
+/// issue 1367 (ROZHODNUTÉ 5842640404) — the LATCH floor of the newest received frame, frames:
+/// `ceil((arrival_lag + GENLOCK_N2_JITTER_BUDGET_NS) / interval)`, 0 when `interval_ns == 0`.
+///
+/// WHY. Since issue 1355 the scheduled ticks and the sender stamps share the per-second grid, so
+/// the age read AT THE TICK is `ceil(lag / interval)` whole frames: where the arrival sits inside
+/// the frame is lost there, and a budget added to it would add a frame on EVERY source (the
+/// rejected always-+1 approach). The lag is therefore measured at RECEIVE time
+/// (`genlock_wall_now_ns() − output->timestamp` at the C stamp-tracking site, the C
+/// `genlock_rx_arrival_lag_ns`). SongPlayer's content-dependent send cost (+8…11 ms from black to
+/// playing, songplayer 147) moved a sp-* feed whose idle lag sat within ~10 ms under a frame edge
+/// across it at every song start: the latch (made on idle) was one frame short, the rise watch
+/// re-measured and the audio slewed +33 ms. With the SAME 15 ms budget the N>=2 conveyor uses
+/// (#1354) the latch adds a frame exactly when the idle arrival sits within 15 ms under a frame
+/// edge, and the rise watch keeps the RAW tick floor, so a rise inside the budget never
+/// re-measures while a genuine rise of more than the budget still does. Monotone in the lag, so
+/// the histogram's p90 of these bins IS the budgeted p90 lag. Mirror of the C
+/// `genlock_n1_shallow_latch_floor_frames`.
+pub fn n1_shallow_latch_floor_frames(arrival_lag_ns: u64, interval_ns: u64) -> u64 {
+    if interval_ns == 0 {
+        return 0;
+    }
+    arrival_lag_ns
+        .saturating_add(GENLOCK_N2_JITTER_BUDGET_NS)
+        .div_ceil(interval_ns)
 }
 
 /// issue 1367 (design 5830750134) — the histogram bin of one rounded floor: `floor − base`,

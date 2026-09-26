@@ -69,9 +69,10 @@ use crate::genlock_grid::{
 };
 use crate::genlock_n1_depth::{
     n1_base_frames, n1_depth_frames, n1_is_deep_source, n1_shallow_gap_hold_due,
-    n1_shallow_gap_is_relock, n1_shallow_governs, n1_shallow_hold_due, n1_shallow_shed_due,
-    n1_shallow_track, n1_shed_due, n1_tick_on_grid, n1_tick_wall_ns, should_hold_n1_phase,
-    ShallowDepth, ShallowTick, N1_ON_GRID_NS,
+    n1_shallow_gap_is_relock, n1_shallow_governs, n1_shallow_hold_due,
+    n1_shallow_latch_floor_frames, n1_shallow_shed_due, n1_shallow_track, n1_shed_due,
+    n1_tick_on_grid, n1_tick_wall_ns, should_hold_n1_phase, ShallowDepth, ShallowTick,
+    N1_ON_GRID_NS,
 };
 use std::collections::{BTreeMap, VecDeque};
 
@@ -362,6 +363,9 @@ pub(crate) struct Fifo {
     pub(crate) shallow: ShallowDepth,
     /// This tick presented a frame (false on every hold / underrun).
     pub(crate) presented_now: bool,
+    /// issue 1367 (ROZHODNUTÉ 5842640404): the newest RECEIVED frame's arrival lag (`arrival wall −
+    /// stamp`, saturating at 0), recorded on receive (the C `genlock_rx_arrival_lag_ns`).
+    pub(crate) rx_lag_ns: u64,
 }
 
 /// Counter deltas of one tick (only the post-warm-up ones are reported).
@@ -381,6 +385,14 @@ pub(crate) struct TickCounters {
 }
 
 impl Fifo {
+    /// Receive one frame (the C producer push site of `obs_source_output_video_internal`): queue its
+    /// stamp and record its arrival lag at the arrival wall instant, like the C
+    /// `genlock_rx_arrival_lag_ns = genlock_wall_now_ns() − output->timestamp`.
+    pub(crate) fn receive(&mut self, arrival_wall_ns: u64, stamp_ns: u64) {
+        self.queue.push_back(stamp_ns);
+        self.rx_lag_ns = arrival_wall_ns.saturating_sub(stamp_ns);
+    }
+
     /// One render tick: the N==1 branches of the C `genlock_release_tick`, in its order. `wall` is
     /// the processing wall (the C `wall_now`), `scheduled` the wall instant the tick was scheduled
     /// for (the C `obs->video.video_time`, here already in wall time).
@@ -612,6 +624,12 @@ impl Fifo {
                     relock: shallow_relock,
                     on_grid: tick_on_grid(cfg.grid, tick_wall),
                     floor_frames: n1_depth_frames(tick_wall, newest, CANVAS_INTERVAL_NS),
+                    // ROZHODNUTÉ 5842640404: the newest received frame's receive-time lag plus the
+                    // arrival-jitter budget (the C `genlock_rx_arrival_lag_ns`).
+                    latch_floor_frames: n1_shallow_latch_floor_frames(
+                        self.rx_lag_ns,
+                        CANVAS_INTERVAL_NS,
+                    ),
                     base_frames: n1_base_frames(cfg.latency_ms, CANVAS_INTERVAL_NS),
                     deep: n1_is_deep_source(
                         wall.saturating_sub(newest),
@@ -710,8 +728,8 @@ pub fn run_bench(cfg: &BenchConfig) -> BenchReport {
             pending.push_back((arrival, stamp));
         }
         while pending.front().is_some_and(|&(arrival, _)| arrival <= wall) {
-            let (_, stamp) = pending.pop_front().expect("front exists");
-            fifo.queue.push_back(stamp);
+            let (arrival, stamp) = pending.pop_front().expect("front exists");
+            fifo.receive(arrival, stamp);
         }
         let counted = nominal >= warm;
         let mut tc = TickCounters::default();

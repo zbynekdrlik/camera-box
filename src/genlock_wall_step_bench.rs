@@ -236,8 +236,8 @@ fn run_boxes(
                     .front()
                     .is_some_and(|&(arrival, _)| arrival <= rx_fire)
                 {
-                    let (_, st) = in_flight.pop_front().expect("front exists");
-                    fifo.queue.push_back(st);
+                    let (arrival, st) = in_flight.pop_front().expect("front exists");
+                    fifo.receive(wall_at(arrival, step_ns), st);
                 }
                 let wall = wall_at(rx_fire, step_ns);
                 let scheduled = rx.sched.wrapping_add(wall.wrapping_sub(rx_fire));
