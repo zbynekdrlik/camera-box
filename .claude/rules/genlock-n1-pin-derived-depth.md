@@ -2,6 +2,7 @@
 paths:
   - "src/genlock_n1_depth.rs"
   - "src/genlock_n1_depth_tests.rs"
+  - "src/genlock_n1_depth_latch_budget_tests.rs"
   - "src/genlock_grid_bench.rs"
   - "src/genlock_grid_bench_tests.rs"
   - "tests/genlock_relock_selection_parity.rs"
@@ -141,7 +142,9 @@ What carries it (do not undo):
 - **The rounded floor, not a raw `ceil`.** Stamps and scheduled ticks share the per-second grid, so
   the rounded newest-frame age already IS `ceil(arrival lag / interval)`; a raw `ceil` of the ns
   value jumps a frame on a 1 ns phase. The max over the window absorbs a late tick (a late tick only
-  UNDER-reads the floor at the scheduled instant).
+  UNDER-reads the floor at the scheduled instant). This RAW tick floor still feeds `floor_max_frames`
+  and the rise / fell watch; the latch HISTOGRAM reads the budgeted receive-lag floor (the section
+  "The latch budgets the receive-time arrival lag" below).
 - **Sampled at the PRESENT TAIL only**, after the audio tracker, through the one helper
   `genlock_shallow_latch` (it reuses `genlock_delay_tick_wall`, so
   `genlock_n1_tick_wall_now(wall_now)` stays count-3; the helper keeps `genlock_release_tick`
@@ -349,3 +352,74 @@ wrapper return count 3, `tests/genlock_shallow_depth_wiring_1367.rs` + both pwsh
 within ±16. `n1_grows=` rises once per real skipped stamp (`stamp_gap=`) with NO `converge_sheds=`
 partner; the two climbing TOGETHER on a shallow feed (strih-lx `CG-obs`, `sp-*`) is the late-label
 residual above.
+
+## The latch budgets the receive-time arrival lag (ROZHODNUTÉ 5842640404, re-baseline 5842656021)
+
+**Why.** Acceptance read 5842599404 (resolume, after songplayer 147 made idle == playing path):
+every song start still logged `genlock-shallow-remeasure reason=rise`, ~3 s later a latch 2 -> 3
+frames, `audio_slews` +1 and a +30 ms audio slew over ~35 s. SongPlayer's `send_video_async` costs
++8..11 ms more on playing content than on black, so real frames ARRIVE ~10 ms older while the stamps
+do not move. The latch made on idle sat one frame short whenever the idle lag was within ~10 ms under
+a frame edge. The tick-read floor cannot budget that: since the per-second grid it is whole frames
+(`ceil(lag / interval)` ± 2 ms), and a budget on it adds a frame on EVERY source (the rejected
+always-+1 approach) without even stopping the re-measure.
+
+| Piece | Rust | C |
+|---|---|---|
+| per-source receive lag | `Fifo::receive` records `arrival − stamp` (`genlock_grid_bench.rs`, used by all three benches) | `genlock_rx_arrival_lag_ns` (obs-internal.h), set at the producer push site of `obs_source_output_video_internal` right after `genlock_stamp_track_observe`, under `async_mutex`, `genlock_wall_now_ns() − output->timestamp` saturating at 0; zeroed with `genlock_rx_last_ts` at the explicit flush |
+| budgeted latch floor | `n1_shallow_latch_floor_frames(lag, I) = (lag + GENLOCK_N2_JITTER_BUDGET_NS).div_ceil(I)`, 0 for I = 0 | `genlock_n1_shallow_latch_floor_frames`, in the contiguous N==1 block (parity-lifted) |
+| where it is read | `ShallowTick.latch_floor_frames` -> the histogram only, and NOT on a min-latency box (the tracker bins `floor_frames` there, ROZHODNUTÉ 5842848307) | the new `latch_floor_frames` scalar of `genlock_n1_shallow_track`, passed by `genlock_shallow_latch`; the bin reads `min_latency_box ? floor_frames : latch_floor_frames` |
+
+What carries it (do not undo):
+- **No budget on a min-latency (imag) box (ROZHODNUTÉ 5842848307, option 2 of Design-question
+  5842838431).** At a 60p canvas the 15 ms budget is ~90 % of a frame: `ceil((lag + 15) / 16.7) >= 2`
+  for any lag over ~1.7 ms, so every shallow 3 ms input would ask for more than base + 1, which the
+  imag guard only REPORTS (`capped=1`, no depth, the #859 drain back on). The owner's hard rule is
+  minimum latency on imag, so the tracker bins the RAW tick floor there and the input stays governed
+  at D 2 exactly as before this slice. The decision lives INSIDE the tracker on its existing
+  `min_latency_box` input (no new argument, no second constant).
+- **ONE budget constant.** The 15 ms `GENLOCK_N2_JITTER_BUDGET_NS` of the N>=2 conveyor (#1354), no
+  second shallow-only constant; the parity lift already lifts its `#define`.
+- **The histogram reads the budgeted floor, the watch reads the raw one.** A raw tick floor at or
+  over D is a rise of MORE than the budget: after a budgeted latch the margin to a `rise` is >= 15 ms
+  by construction. If the watch read the budgeted floor the margin would be ~0 again.
+- **Monotone in the lag**, so the histogram's p90 of the budgeted bins IS the budgeted p90 lag.
+- **The lag is the LAST RECEIVED frame's**, which is the newest queued frame (the push appends
+  under the lock the release tick reads it under). It includes the receive-thread wall read, so a
+  `#797 slow output_video` stall (5–17 ms) enters it; the p90 over 90 ticks absorbs an occasional
+  one, and a sustained one is exactly the arrival the budget covers. Every received frame overwrites
+  it, so no other invalidation seam is needed. A wall step is not gated by `on_grid` here: the p90
+  over 90 ticks absorbs a step's transient, and a lasting sender/receiver clock offset biases the
+  receive lag and the raw tick floor alike.
+- **A lock made while content plays latches on the content lag.** D depends on what the sender is
+  doing at the lock (the bench's 18–20 ms content relock is D 3 while its 7–9 ms idle locks are D 2);
+  the rise watch only ever moves D up past the budget, never back down while latched.
+- **The `wanted_frames=` report mixes floors on a clamped latch.** Past the clamp it falls back to the
+  RAW window max (`floor_max_frames`) when that asks for more than the budgeted p90; otherwise it is
+  the budgeted `base + p90 + 1`. Report-only.
+
+**Re-baseline (ROZHODNUTÉ 5842656021).** A feed whose p90 lag sits within 15 ms under a frame edge
+latches one frame deeper — the feeds a content change would push across it: `NDI test` (22–31 ms)
+D 2 -> 3, `sp-slow` (40–64 ms) D 3 -> 4 (100 -> 133 ms, audio follows), the 40–64 ms transient and
+song-change cases re-baselined with it. `cg-obs` (28–40 ms, D 3), the 50–80 ms straddle (D 4) and
+the restart-band case are unchanged; the 28–40 -> 70–95 ms rise now re-latches onto the base + 3
+clamp (reported `capped`). A band far under the edge pays nothing: idle 8 ms stays D 2.
+
+**Bench** (`genlock_shallow_av_bench.rs`, `song_start(idle, content, D)` = the lag band steps at
+1500 s): 24–26 -> 35–37 ms latches D 3 on idle, 0 re-measures (`Run.latches` = 3), 0 slews;
+7–9 -> 18–20 ms keeps the idle locks on D 2 through the song start (the sender-restart lock made ON the
+18–20 ms content lag is 3 — 20 + 15 ms crosses the edge, the same formula); 7–9 -> 59–61 ms
+re-measures once onto D 4 and slews once. Parity: latch-floor vectors at both edges, two intervals,
+a degenerate interval and the saturation, plus a tick sequence whose latch floor differs from the
+raw floor (latched `… 3 4`), then a marker window on the raw floor (`… 2`). Marker path: a 60p unit
+case (8 ms lag: raw 1, budgeted 2) latches D 2 governed with the marker and D 3 without; the 30p
+two-clock bench at 24–26 ms keeps D 2, never `capped`, on the marker and D 3 without. C mutation
+sweep: 9/9 RED (histogram / window max / watch reading the wrong floor, the marker condition dropped
+either way or inverted, no ceil, no budget, degenerate interval, saturation).
+
+**Live acceptance (supervisor).** Full-bundle deploy on resolume. Across >= 2 song starts: no
+`genlock-shallow-remeasure`, `shallow_latches=` flat, `audio_slews=` flat, `audio_pairing_offset_ms`
+0; `sp-*_video` latch lines show `latch_floor_frames=` one over the raw `floor_max_frames=` where the
+idle lag is within 15 ms of an edge. On imag (the marker) the latch shows no budget:
+`latch_floor_frames=` equals the raw floor, `shallow_capped=0`, D 2 governed; the cap still reports a
+genuinely slow input (raw floor over base).

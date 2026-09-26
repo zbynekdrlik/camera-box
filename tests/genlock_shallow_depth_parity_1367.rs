@@ -7,8 +7,9 @@
 
 use camera_box::genlock_n1_depth::{
     n1_shallow_gap_hold_due, n1_shallow_gap_is_relock, n1_shallow_governs, n1_shallow_hist_bin,
-    n1_shallow_hold_due, n1_shallow_percentile_bin, n1_shallow_shed_due, n1_shallow_target_frames,
-    n1_shallow_track, n1_shallow_window_deep, ShallowDepth, ShallowTick, N1_SHALLOW_HIST_BINS,
+    n1_shallow_hold_due, n1_shallow_latch_floor_frames, n1_shallow_percentile_bin,
+    n1_shallow_shed_due, n1_shallow_target_frames, n1_shallow_track, n1_shallow_window_deep,
+    ShallowDepth, ShallowTick, N1_SHALLOW_HIST_BINS,
 };
 
 mod genlock_n1_lift;
@@ -32,6 +33,9 @@ type GapHoldVector = (u64, u64, u64, u64, u64, u32, u64, u64);
 /// an unreachable D (the realized depth stays under it) and a backlog relock storm. Design 5833339163
 /// (the song change) adds the GAP hold at every edge: the head's age around D, a short gap vs a
 /// sender-restart gap, a duplicated head, an unlocked boundary, no latched D and a deep source.
+/// ROZHODNUTÉ 5842640404 adds the budgeted LATCH floor of the receive-time arrival lag (its edges,
+/// both intervals, a degenerate interval, the saturation) and a sequence whose latch floor differs
+/// from the raw tick floor: the histogram latches the budgeted one, the rise watch keeps the raw.
 #[test]
 fn c_n1_shallow_depth_matches_the_rust_authority_1367() {
     let i30 = 33_333_333u64;
@@ -73,6 +77,24 @@ fn c_n1_shallow_depth_matches_the_rust_authority_1367() {
         ([u32::MAX, 0, 0, 0], u32::MAX, 100),
     ];
     let gaps: [u64; 5] = [i30, 999_999_999, 1_000_000_000, 3_000_000_000, 0];
+    // ROZHODNUTÉ 5842640404: (receive-time arrival lag, interval).
+    let mut latch_floors: Vec<(u64, u64)> = Vec::new();
+    for lag in [
+        0u64,
+        8_000_000,
+        i30 - 15_000_000,
+        i30 - 15_000_000 + 1,
+        25_000_000,
+        36_000_000,
+        60_000_000,
+        2 * i30 - 15_000_000,
+        u64::MAX - 15_000_000,
+        u64::MAX,
+    ] {
+        for iv in [i30, 16_666_667u64, 0, 1] {
+            latch_floors.push((lag, iv));
+        }
+    }
     let majorities: [(u32, u32); 7] = [
         (45, 90),
         (46, 90),
@@ -147,6 +169,7 @@ fn c_n1_shallow_depth_matches_the_rust_authority_1367() {
         relock,
         on_grid,
         floor_frames: floor,
+        latch_floor_frames: floor,
         base_frames: 1,
         deep: false,
         min_latency_box: false,
@@ -253,6 +276,36 @@ fn c_n1_shallow_depth_matches_the_rust_authority_1367() {
             ..t(true, false, k % 13 != 6, 2)
         });
     }
+    // ROZHODNUTÉ 5842640404: a relock on an idle lag whose budgeted latch floor (2) sits a frame
+    // over the raw tick floor (1) latches D 3; a content rise of the raw floor to 2 (latch floor 3)
+    // never re-measures; a raw floor at D for a whole window does, onto the clamp.
+    for k in 0..90u64 {
+        seq.push(ShallowTick {
+            latch_floor_frames: 2,
+            ..t(true, k == 0, true, 1)
+        });
+    }
+    for k in 0..270u64 {
+        seq.push(ShallowTick {
+            latch_floor_frames: 3,
+            ..t(true, false, k % 11 != 7, 2)
+        });
+    }
+    for k in 0..200u64 {
+        seq.push(ShallowTick {
+            latch_floor_frames: 4,
+            ..t(true, false, k % 11 != 7, 3)
+        });
+    }
+    // ROZHODNUTÉ 5842848307: on the min-latency marker the histogram reads the RAW floor -- the
+    // same idle window latches D 2 governed (not the budgeted 3, which the guard would cap).
+    for k in 0..90u64 {
+        seq.push(ShallowTick {
+            latch_floor_frames: 2,
+            min_latency_box: true,
+            ..t(true, k == 0, true, 1)
+        });
+    }
 
     let b = |v: bool| i32::from(v);
     let mut body = String::new();
@@ -277,6 +330,11 @@ fn c_n1_shallow_depth_matches_the_rust_authority_1367() {
     for g in &gaps {
         body.push_str(&format!(
             "    printf(\"%d\\n\", genlock_n1_shallow_gap_is_relock({g}ULL) ? 1 : 0);\n"
+        ));
+    }
+    for (lag, iv) in &latch_floors {
+        body.push_str(&format!(
+            "    printf(\"%llu\\n\", (unsigned long long)genlock_n1_shallow_latch_floor_frames({lag}ULL, {iv}ULL));\n"
         ));
     }
     for (d, w) in &majorities {
@@ -308,14 +366,15 @@ fn c_n1_shallow_depth_matches_the_rust_authority_1367() {
     // harness take minutes to compile at -O1 once the sequence passed 3000 ticks).
     let col = |f: &dyn Fn(&ShallowTick) -> String| seq.iter().map(f).collect::<Vec<_>>().join(",");
     body.push_str(&format!(
-        "    {{ static const unsigned char F[] = {{{}}};\n      static const unsigned long long FL[] = {{{}}};\n      static const unsigned long long BA[] = {{{}}};\n      static const unsigned long long RE[] = {{{}}};\n",
+        "    {{ static const unsigned char F[] = {{{}}};\n      static const unsigned long long FL[] = {{{}}};\n      static const unsigned long long LA[] = {{{}}};\n      static const unsigned long long BA[] = {{{}}};\n      static const unsigned long long RE[] = {{{}}};\n",
         col(&|x| (b(x.n1) | (b(x.relock) << 1) | (b(x.on_grid) << 2) | (b(x.deep) << 3) | (b(x.min_latency_box) << 4) | (b(x.backlog_relock) << 5)).to_string()),
         col(&|x| format!("{}ULL", x.floor_frames)),
+        col(&|x| format!("{}ULL", x.latch_floor_frames)),
         col(&|x| format!("{}ULL", x.base_frames)),
         col(&|x| format!("{}ULL", x.realized_frames)),
     ));
     body.push_str(&format!(
-        "      uint64_t tf = 0, fm = 0; uint32_t wt = 0, ov = 0, dt = 0, un = 0, ch = 0, qu = 0, rj = 0; uint32_t hi[4] = {{0u, 0u, 0u, 0u}}; bool me = false, ca = false;\n      for (int k = 0; k < {}; k++) {{\n        const unsigned f = F[k];\n        bool l = genlock_n1_shallow_track(&tf, &fm, &wt, &ov, &dt, &me, &ca, (f & 1u) != 0, (f & 2u) != 0, (f & 4u) != 0, FL[k], BA[k], (f & 8u) != 0, (f & 16u) != 0, RE[k], (f & 32u) != 0, hi, &un, &ch, &qu, &rj);\n        printf(\"%d %llu %llu %u %u %u %d %d %u %u %u %u %u %u %u %u\\n\", l ? 1 : 0, (unsigned long long)tf, (unsigned long long)fm, (unsigned)wt, (unsigned)ov, (unsigned)dt, me ? 1 : 0, ca ? 1 : 0, (unsigned)un, (unsigned)ch, (unsigned)qu, (unsigned)rj, (unsigned)hi[0], (unsigned)hi[1], (unsigned)hi[2], (unsigned)hi[3]);\n      }}\n    }}\n",
+        "      uint64_t tf = 0, fm = 0; uint32_t wt = 0, ov = 0, dt = 0, un = 0, ch = 0, qu = 0, rj = 0; uint32_t hi[4] = {{0u, 0u, 0u, 0u}}; bool me = false, ca = false;\n      for (int k = 0; k < {}; k++) {{\n        const unsigned f = F[k];\n        bool l = genlock_n1_shallow_track(&tf, &fm, &wt, &ov, &dt, &me, &ca, (f & 1u) != 0, (f & 2u) != 0, (f & 4u) != 0, FL[k], LA[k], BA[k], (f & 8u) != 0, (f & 16u) != 0, RE[k], (f & 32u) != 0, hi, &un, &ch, &qu, &rj);\n        printf(\"%d %llu %llu %u %u %u %d %d %u %u %u %u %u %u %u %u\\n\", l ? 1 : 0, (unsigned long long)tf, (unsigned long long)fm, (unsigned)wt, (unsigned)ov, (unsigned)dt, me ? 1 : 0, ca ? 1 : 0, (unsigned)un, (unsigned)ch, (unsigned)qu, (unsigned)rj, (unsigned)hi[0], (unsigned)hi[1], (unsigned)hi[2], (unsigned)hi[3]);\n      }}\n    }}\n",
         seq.len()
     ));
     let c_out = compile_and_run_n1_block("genlock_n1_shallow_parity_1367", &body);
@@ -333,6 +392,9 @@ fn c_n1_shallow_depth_matches_the_rust_authority_1367() {
     }
     for g in &gaps {
         want.push(b(n1_shallow_gap_is_relock(*g)).to_string());
+    }
+    for (lag, iv) in &latch_floors {
+        want.push(n1_shallow_latch_floor_frames(*lag, *iv).to_string());
     }
     for (d, w) in &majorities {
         want.push(b(n1_shallow_window_deep(*d, *w)).to_string());
@@ -408,7 +470,9 @@ fn c_n1_shallow_depth_matches_the_rust_authority_1367() {
     // not-deep latch tick), the mid-window relock's fresh D, the capped report (0) and the relatch
     // after it; then the short burst the p90 ignores (2), the rejected transient's clean re-latch (2),
     // the bounded rejects' clamp (4), the whole-window transient's clamp (4) and its re-measure once
-    // the floor fell (3), the unreachable D's re-measure (3) and the relock storm's (3).
+    // the floor fell (3), the unreachable D's re-measure (3) and the relock storm's (3); then
+    // (ROZHODNUTÉ 5842640404) the budgeted idle latch (3) and the rise past the budget (the clamp, 4),
+    // then (ROZHODNUTÉ 5842848307) the min-latency box's raw-floor latch (2, governed).
     assert!(
         fired.0 > 0 && fired.0 < sheds.len(),
         "shed vectors one-sided: {fired:?}"
@@ -424,7 +488,7 @@ fn c_n1_shallow_depth_matches_the_rust_authority_1367() {
     );
     assert_eq!(
         latched,
-        vec![3, 3, 4, 2, 31, 31, 2, 0, 2, 2, 2, 4, 4, 3, 3, 3],
+        vec![3, 3, 4, 2, 31, 31, 2, 0, 2, 2, 2, 4, 4, 3, 3, 3, 3, 4, 2],
         "the track sequence latched {latched:?}"
     );
 }

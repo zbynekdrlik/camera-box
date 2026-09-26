@@ -4170,6 +4170,7 @@ static void obs_source_output_video_internal(obs_source_t *source, const struct 
 		 * (never a bogus gap against the pre-flush stamp); the cumulative counters survive. */
 		source->genlock_rx_last_ts = 0;
 		source->genlock_rx_min_delta_ns = 0;
+		source->genlock_rx_arrival_lag_ns = 0; /* issue 1367: no frame received on the new timeline */
 		pthread_mutex_unlock(&source->async_mutex);
 		return;
 	}
@@ -4222,6 +4223,13 @@ static void obs_source_output_video_internal(obs_source_t *source, const struct 
 				genlock_stamp_track_observe(&source->genlock_rx_last_ts, &source->genlock_rx_min_delta_ns,
 							    &source->genlock_stamp_dups, &source->genlock_stamp_gaps,
 							    output->timestamp);
+				/* camera-box issue 1367 (ROZHODNUTÉ 5842640404): the RECEIVE-time arrival lag of this
+				 * frame, the newest queued one now (the release tick reads it under the same lock).
+				 * The shallow latch budgets it: at the scheduled tick the age of the newest frame is
+				 * whole frames since the per-second grid, so where the arrival sits inside the frame
+				 * is only visible here. Saturates at 0 for a stamp ahead of the wall. */
+				const uint64_t rx_wall = genlock_wall_now_ns();
+				source->genlock_rx_arrival_lag_ns = rx_wall > output->timestamp ? rx_wall - output->timestamp : 0;
 			}
 		}
 	}
@@ -5541,8 +5549,9 @@ static inline uint64_t genlock_phase_pin_deadline(uint64_t deadline_ns, uint64_t
  * than the shed drains -> a 100-250 ms per-camera delivery ladder (issue 1354, cam4 15:31-15:37 on
  * strih-lx). 15 ms = one 30 fps canvas half-interval minus the 5 ms slew allowance, covering every
  * measured slow-output event; the conveyor sits ~10 ms deeper per input, uniform across inputs. The
- * max keeps the sub-frame flapping floor honoured. Mirror: src/genlock_backlog.rs
- * GENLOCK_N2_JITTER_BUDGET_NS. */
+ * max keeps the sub-frame flapping floor honoured. Issue 1367 (ROZHODNUTÉ 5842640404) reuses the SAME
+ * arrival-jitter budget for the shallow N==1 latch (genlock_n1_shallow_latch_floor_frames), never a
+ * second constant. Mirror: src/genlock_backlog.rs GENLOCK_N2_JITTER_BUDGET_NS. */
 #define GENLOCK_N2_JITTER_BUDGET_NS 15000000ULL /* 15 ms */
 
 /* camera-box issue 1367: the N==1 PIN-DERIVED DEPTH constants (genlock_n1_* below). A pin within
@@ -6348,6 +6357,22 @@ static inline uint32_t genlock_n1_shallow_hist_bin(uint64_t floor_frames, uint64
 	return rel < (uint64_t)(GENLOCK_N1_SHALLOW_HIST_BINS - 1u) ? (uint32_t)rel : GENLOCK_N1_SHALLOW_HIST_BINS - 1u;
 }
 
+/* ROZHODNUTÉ 5842640404: the shallow LATCH floor of the newest received frame, frames --
+ * ceil((receive-time arrival lag + GENLOCK_N2_JITTER_BUDGET_NS) / interval), 0 for a degenerate interval.
+ * Since the per-second grid the tick-read age is whole frames, so a budget on it would add a frame on
+ * EVERY source; budgeting the receive-time lag adds one only when the arrival sits within the budget
+ * under a frame edge -- where SongPlayer's content-dependent send cost (+8..11 ms) crossed it at every
+ * song start and the rise watch re-measured. The watch keeps the raw tick floor. */
+static inline uint64_t genlock_n1_shallow_latch_floor_frames(uint64_t arrival_lag_ns, uint64_t interval_ns)
+{
+	if (interval_ns == 0)
+		return 0;
+	const uint64_t budgeted = arrival_lag_ns > UINT64_MAX - GENLOCK_N2_JITTER_BUDGET_NS
+					  ? UINT64_MAX
+					  : arrival_lag_ns + GENLOCK_N2_JITTER_BUDGET_NS;
+	return budgeted / interval_ns + (budgeted % interval_ns != 0 ? 1u : 0u);
+}
+
 /* design 5830750134: the pct percentile of a window histogram, as a bin (the first bin whose cumulative
  * count reaches pct % of window_ticks; an empty window reads bin 0). */
 static inline uint64_t genlock_n1_shallow_percentile_bin(const uint32_t *hist, uint32_t window_ticks, uint32_t pct)
@@ -6425,11 +6450,15 @@ static inline bool genlock_n1_shallow_watch(uint64_t target_frames, bool capped,
  * latched source re-opens one when genlock_n1_shallow_watch says so. The window's floors go into the
  * histogram (cleared on its first sample, so the rearm stays a five-field reset); the latch reads its
  * p90, a non-deep window with a p90 - p10 spread over one frame re-measures (bounded), and D is
- * clamped. */
+ * clamped. ROZHODNUTÉ 5842640404: the histogram bins latch_floor_frames (the budgeted receive-lag
+ * floor), floor_frames (the raw tick floor) feeds the window max and the rise / fell watch.
+ * ROZHODNUTÉ 5842848307: on a min-latency (imag) box the histogram bins the raw floor too -- at a
+ * 60p canvas the budget is ~90 % of a frame and every input would ask for more than base + 1. */
 static inline bool genlock_n1_shallow_track(uint64_t *target_frames, uint64_t *floor_max_frames,
 					    uint32_t *window_ticks, uint32_t *over_ticks, uint32_t *deep_ticks,
 					    bool *measuring, bool *capped,
-					    bool n1, bool relock, bool on_grid, uint64_t floor_frames, uint64_t base_frames,
+					    bool n1, bool relock, bool on_grid, uint64_t floor_frames,
+					    uint64_t latch_floor_frames, uint64_t base_frames,
 					    bool deep, bool min_latency_box, uint64_t realized_frames, bool backlog_relock,
 					    uint32_t *hist, uint32_t *under_ticks, uint32_t *churn_relocks,
 					    uint32_t *churn_quiet_ticks, uint32_t *rejects)
@@ -6470,7 +6499,10 @@ static inline bool genlock_n1_shallow_track(uint64_t *target_frames, uint64_t *f
 	}
 	if (floor_frames > *floor_max_frames)
 		*floor_max_frames = floor_frames;
-	const uint32_t bin = genlock_n1_shallow_hist_bin(floor_frames, base_frames);
+	/* ROZHODNUTÉ 5842640404: the histogram reads the budgeted receive-lag floor; the watch and the
+	 * window max read the raw tick floor. ROZHODNUTÉ 5842848307: a min-latency (imag) box keeps the
+	 * RAW floor there too -- no budget frame. */
+	const uint32_t bin = genlock_n1_shallow_hist_bin(min_latency_box ? floor_frames : latch_floor_frames, base_frames);
 	if (hist[bin] < UINT32_MAX)
 		hist[bin] += 1u;
 	if (*window_ticks < UINT32_MAX)
@@ -6855,7 +6887,8 @@ static void genlock_shallow_latch(obs_source_t *source, uint64_t tick_wall, uint
 				      &source->genlock_shallow_deep_ticks, &source->genlock_shallow_measuring,
 				      &source->genlock_shallow_capped,
 				      source->genlock_last_known_n < 2, relock, genlock_n1_tick_is_on_grid(tick_wall, interval),
-				      genlock_n1_depth_frames(tick_wall, newest_stamp, interval), base_frames,
+				      genlock_n1_depth_frames(tick_wall, newest_stamp, interval),
+				      genlock_n1_shallow_latch_floor_frames(source->genlock_rx_arrival_lag_ns, interval), base_frames,
 				      genlock_n1_is_deep_source(wall_now > newest_stamp ? wall_now - newest_stamp : 0,
 								reserve_ms, interval),
 				      genlock_min_latency_box(), genlock_n1_depth_frames(tick_wall, source->last_frame_ts, interval),
@@ -6898,7 +6931,8 @@ static void genlock_shallow_latch(obs_source_t *source, uint64_t tick_wall, uint
 							       100u - GENLOCK_N1_SHALLOW_LATCH_PERCENTILE);
 	const bool window_deep =
 		genlock_n1_shallow_window_deep(source->genlock_shallow_deep_ticks, source->genlock_shallow_window_ticks);
-	/* the over-clamp bin holds every floor at or over base + 3: report the window max there. */
+	/* the over-clamp bin holds every floor at or over base + 3: report the window max there (the RAW
+	 * tick-floor max, used only when it asks for more than the budgeted p90 bin, issue 1367). */
 	const uint64_t asked = high == (uint64_t)(GENLOCK_N1_SHALLOW_HIST_BINS - 1u) &&
 					       source->genlock_shallow_floor_max_frames > base_frames + high
 				       ? source->genlock_shallow_floor_max_frames

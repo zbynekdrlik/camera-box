@@ -11,7 +11,10 @@
 //!    tracker, which follows the latched D (`genlock_video_delay_lock_ms`);
 //! 5. the min-latency (imag) box marker, the latch log line and the audit tokens exist;
 //! 6. a GAP RESYNC of a governed shallow source holds until the post-gap head is D frames old
-//!    (`genlock_should_hold_n1_gap`, design 5833339163).
+//!    (`genlock_should_hold_n1_gap`, design 5833339163);
+//! 7. the latch histogram reads the newest frame's RECEIVE-time arrival lag plus the arrival-jitter
+//!    budget (`genlock_rx_arrival_lag_ns`, ROZHODNUTÉ 5842640404), while the rise / fell watch keeps
+//!    the raw tick floor.
 //!
 //! Std-only on purpose: it runs under `cargo test` AND standalone
 //! (`CARGO_MANIFEST_DIR=<repo> rustc --test --edition 2021 tests/genlock_shallow_depth_wiring_1367.rs`).
@@ -22,11 +25,16 @@ use std::fs;
 use std::path::PathBuf;
 
 const OBS_SOURCE: &str = "vendor/obs-studio/libobs/obs-source.c";
+const OBS_INTERNAL: &str = "vendor/obs-studio/libobs/obs-internal.h";
 
-fn squished() -> String {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(OBS_SOURCE);
+fn squished_file(rel: &str) -> String {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(rel);
     let raw = fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
     raw.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn squished() -> String {
+    squished_file(OBS_SOURCE)
 }
 
 /// The body of a static function, from its definition to the next top-level `static`.
@@ -134,8 +142,9 @@ fn the_release_tick_locks_measures_and_keeps_the_drain_out_1367() {
     );
     assert_in(
         helper,
-        "source->genlock_last_known_n < 2, relock, genlock_n1_tick_is_on_grid(tick_wall, interval), genlock_n1_depth_frames(tick_wall, newest_stamp, interval), base_frames, genlock_n1_is_deep_source(",
-        "the latch samples the newest frame's floor on an on-grid N==1 tick (an N>=2 tick clears it)",
+        "source->genlock_last_known_n < 2, relock, genlock_n1_tick_is_on_grid(tick_wall, interval), genlock_n1_depth_frames(tick_wall, newest_stamp, interval), genlock_n1_shallow_latch_floor_frames(source->genlock_rx_arrival_lag_ns, interval), base_frames, genlock_n1_is_deep_source(",
+        "the latch samples the newest frame's raw tick floor (the rise / fell watch) and its budgeted \
+         receive-lag latch floor (the histogram) on an on-grid N==1 tick (an N>=2 tick clears it)",
     );
     assert_in(
         helper,
@@ -302,4 +311,53 @@ fn a_pin_change_rearms_and_the_box_marker_log_and_audit_exist_1367() {
             "issue 1367: the latch marker aliases `{family}`"
         );
     }
+}
+
+/// ROZHODNUTÉ 5842640404: since issue 1355 the tick-read age is whole frames, so the latch budgets
+/// the RECEIVE-time arrival lag instead. It is measured at the producer push site (under
+/// `async_mutex`, after the stamp tracker), so it always describes the newest queued frame; it is
+/// reset with the stamp timeline at the explicit flush.
+#[test]
+fn the_latch_reads_the_receive_time_arrival_lag_1367() {
+    let internal = squished_file(OBS_INTERNAL);
+    assert_in(
+        &internal,
+        "uint64_t genlock_rx_arrival_lag_ns;",
+        "the per-source receive-time arrival lag field",
+    );
+    let src = squished();
+    let track = src
+        .find("&source->genlock_stamp_gaps, output->timestamp);")
+        .expect("issue 1367: the #1355 arrival-side stamp tracking call is gone");
+    let set = "const uint64_t rx_wall = genlock_wall_now_ns(); source->genlock_rx_arrival_lag_ns = rx_wall > output->timestamp ? rx_wall - output->timestamp : 0;";
+    assert_eq!(
+        src.matches(set).count(),
+        1,
+        "issue 1367: the receive-time arrival lag must be recorded exactly once, saturating at 0"
+    );
+    let at = src.find(set).expect("counted above");
+    let unlock = src[track..]
+        .find("pthread_mutex_unlock(&source->async_mutex);")
+        .map(|i| track + i)
+        .expect("the push path's async_mutex unlock is gone");
+    assert!(
+        track < at && at < unlock,
+        "issue 1367: the arrival lag must be recorded at the producer push site, after the stamp \
+         tracker and under async_mutex (the same lock the release tick reads it under)"
+    );
+    assert_in(
+        &src,
+        "source->genlock_rx_last_ts = 0; source->genlock_rx_min_delta_ns = 0; source->genlock_rx_arrival_lag_ns = 0;",
+        "the explicit flush resets the arrival lag with the stamp timeline",
+    );
+    assert_eq!(
+        src.matches("genlock_rx_arrival_lag_ns = ").count(),
+        2,
+        "issue 1367: the arrival lag has exactly two writers (the push site and the flush)"
+    );
+    assert_in(
+        &src,
+        "static inline uint64_t genlock_n1_shallow_latch_floor_frames(uint64_t arrival_lag_ns, uint64_t interval_ns)",
+        "the pure budgeted latch floor (parity-lifted with the N==1 block)",
+    );
 }
