@@ -136,7 +136,42 @@ def test_the_tray_is_relaunched_whenever_it_was_stopped(ps):
     assert stop < flag < relaunch
     swap = ps[swap_start:relaunch]
     assert "} catch {" in swap and "Register-ScheduledTask" not in swap
-    assert _at(ps, "if ($trayStopped) {", relaunch) < _at(ps, "Register-ScheduledTask", relaunch)
+    # review round 2: the same step also launches a current tray that is not running
+    assert _at(ps, "if ($trayStopped -or $trayLaunch) {", relaunch) < _at(ps, "Register-ScheduledTask", relaunch)
+
+
+def test_a_current_tray_that_is_not_running_is_relaunched(ps):
+    """Review round 2: the likeliest warning (a relaunch that found nobody logged on) leaves the tray
+    exe current but not running; a re-run must relaunch it, never report it OK unread."""
+    swap_start = _at(ps, "# 5. the tray")
+    relaunch = _at(ps, "# 6. relaunch the tray", swap_start)
+    swap = ps[swap_start:relaunch]
+    running = _at(swap, "$trayRunning = @(Get-Process -Name dantesync-tray -ErrorAction SilentlyContinue "
+                        "| Where-Object { $_.SessionId -ge 1 })")
+    assert running < _at(swap, "$trayLaunch = $true", running)
+    assert _at(ps, "if ($trayStopped -or $trayLaunch) {", relaunch) < _at(ps, "Register-ScheduledTask", relaunch)
+    report = ps[_at(ps, "already on sha256", relaunch) - 200:]
+    assert "running in session ' + $trayRunning[0].SessionId" in report, report[:400]
+
+
+def test_the_one_tray_check_is_read_after_the_task_is_unregistered(ps):
+    """Review round 2: the count proves the tray outlives the task deletion."""
+    relaunch = ps[_at(ps, "# 6. relaunch the tray"):]
+    unregister = _at(relaunch, "Unregister-ScheduledTask -TaskName $trayTask")
+    reread = _at(relaunch, "$trayProcs = @(Get-Process -Name dantesync-tray", unregister)
+    assert reread < _at(relaunch, "$trayProcs.Count -ne 1", unregister)
+
+
+def test_a_failed_restore_is_named_not_claimed(ps):
+    """Review round 2: the restore after a failed swap is checked by hash before it is reported."""
+    swap = ps[_at(ps, "# 5. the tray"):_at(ps, "# 6. relaunch the tray")]
+    assert "(Get-FileHash -Algorithm SHA256 $trayPre).Hash" in swap
+    assert "the previous tray restored" in swap and "may be partial" in swap
+
+
+def test_the_tray_download_is_cleaned_up(ps):
+    tail = ps[_at(ps, "# 6. relaunch the tray"):]
+    assert "Remove-Item -Force -ErrorAction SilentlyContinue $trayTmp, ($trayTmp + '.sha256')" in tail
 
 
 def test_a_tray_already_on_the_release_is_left_running(ps):
@@ -230,24 +265,39 @@ def test_the_tray_arm_lives_in_its_own_lib():
 # the orchestrator, end to end: a stateful sshpass stub stands in for the Windows node
 # ---------------------------------------------------------------------------------------------
 
-def _stubs(tmp_path, program_out, start="1.11.0", flip=True):
+def _stubs(tmp_path, program_out, hosts):
+    """A python `sshpass` on PATH that plays each Windows HOST (hosts: ip -> (start version, whether
+    the -File program flips it to the target)): scp saves the .ps1 as uploaded-<ip>.ps1 (and
+    uploaded.ps1, the last one), `--version` answers from version-<ip>, `-File` prints the stubbed
+    program output."""
     b = tmp_path / "bin"
     b.mkdir()
-    state = tmp_path / "version"
-    state.write_text(start)
-    flip_to = _TARGET if flip else start
+    for ip, (start, flip) in hosts.items():
+        (tmp_path / f"version-{ip}").write_text(start)
+        if flip:
+            (tmp_path / f"flip-{ip}").write_text("")
     (tmp_path / "program_out.txt").write_text(program_out)
     (b / "sshpass").write_text(
-        "#!/usr/bin/env bash\n"
-        "shift 2\n"
-        'tool="$1"; shift\n'
-        'last="${!#}"\n'
-        'if [ "$tool" = scp ]; then cp "${@: -2:1}" "' + str(tmp_path / "uploaded.ps1") + '"; exit 0; fi\n'
-        'case "$last" in\n'
-        '  *-File*) echo "' + flip_to + '" > "' + str(state) + '"; cat "' + str(tmp_path / "program_out.txt") + '" ;;\n'
-        '  *--version*) echo "dantesync $(cat "' + str(state) + '")" ;;\n'
-        "  *) exit 255 ;;\n"
-        "esac\n")
+        "#!/usr/bin/env python3\n"
+        "import pathlib, shutil, sys\n"
+        f"d = pathlib.Path({str(tmp_path)!r})\n"
+        "args = sys.argv[3:]\n"
+        "tool = args[0]\n"
+        "host = next(a for a in args[1:] if '@' in a).split('@', 1)[1].split(':', 1)[0]\n"
+        "state = d / f'version-{host}'\n"
+        "if tool == 'scp':\n"
+        "    shutil.copy(args[-2], d / f'uploaded-{host}.ps1')\n"
+        "    shutil.copy(args[-2], d / 'uploaded.ps1')\n"
+        "    sys.exit(0)\n"
+        "cmd = args[-1]\n"
+        "if '-File' in cmd:\n"
+        f"    if (d / f'flip-{{host}}').exists(): state.write_text({_TARGET!r})\n"
+        "    sys.stdout.write((d / 'program_out.txt').read_text())\n"
+        "    sys.exit(0)\n"
+        "if '--version' in cmd:\n"
+        "    print('dantesync ' + state.read_text().strip())\n"
+        "    sys.exit(0)\n"
+        "sys.exit(255)\n")
     for f in b.iterdir():
         f.chmod(f.stat().st_mode | stat.S_IEXEC)
     return b
@@ -264,8 +314,9 @@ def _fresh_slave(tmp_path):
     return p
 
 
-def _roll(tmp_path, program_out, start="1.11.0", flip=True, extra=()):
-    b = _stubs(tmp_path, program_out, start, flip)
+def _roll(tmp_path, program_out, start="1.11.0", flip=True, extra=(), win="stream=user@10.77.9.204",
+          hosts=None):
+    b = _stubs(tmp_path, program_out, hosts or {"10.77.9.204": (start, flip)})
     env = {k: v for k, v in os.environ.items()
            if not k.startswith(("DANTESYNC_", "OBS_FLEET", "CAMBOX_OFFLINE_ACK", "RIG_GRANDMASTER", "GATE_"))}
     env.update({
@@ -281,7 +332,7 @@ def _roll(tmp_path, program_out, start="1.11.0", flip=True, extra=()):
         "DANTESYNC_SAMPLE_WINDOW_S": "0",
         "DANTESYNC_SAMPLE_MIN_DISTINCT": "1",
     })
-    return subprocess.run(["bash", str(_UPGRADE), "--win", "stream=user@10.77.9.204", "--target", _TARGET,
+    return subprocess.run(["bash", str(_UPGRADE), "--win", win, "--target", _TARGET,
                            *extra], capture_output=True, text=True, env=env)
 
 
@@ -335,3 +386,17 @@ def test_dry_run_names_the_tray_check_and_uploads_nothing(tmp_path):
     assert r.returncode == 0, out
     assert "DRY-RUN" in out and "tray" in out and "stream" in out
     assert not (tmp_path / "uploaded.ps1").exists()
+
+
+def test_roll_refreshes_the_tray_of_a_current_node_in_a_mixed_fleet(tmp_path):
+    """Review round 2: after the roll, a Windows node already on the target gets the tray-only
+    program too (not only on the all-current early exit)."""
+    r = _roll(tmp_path, "TRAY OK: dantesync-tray.exe sha256 3C37CB51A064 running in session 1\n",
+              win="stream=user@10.77.9.204 mbc=user@10.77.7.232",
+              hosts={"10.77.9.204": ("1.11.0", True), "10.77.7.232": (_TARGET, False)})
+    out = r.stdout + r.stderr
+    assert r.returncode == 0, out
+    assert "[stream] verified" in out and "[mbc] tray OK:" in out, out
+    tray_only = (tmp_path / "uploaded-10.77.7.232.ps1").read_text()
+    assert "dantesync-tray-windows-amd64.exe" in tray_only and "Stop-Service" not in tray_only
+    assert "Stop-Service" in (tmp_path / "uploaded-10.77.9.204.ps1").read_text()
