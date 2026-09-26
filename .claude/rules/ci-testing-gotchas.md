@@ -1330,6 +1330,10 @@ loops on `[ "$(date +%s)" -lt "$end" ]`, parses ONLY the last JSONL line of the 
 **Also require `message.stop_reason == "end_turn"`** (issue 1346): the reviewer emits intermediate
 text-only assistant lines between tool rounds, so an `assistant ['text']` last line alone fired
 "DONE" while the review was still running.
+**A re-review sent with `SendMessage` to the same (finished) reviewer appends to the SAME output
+file** (issue 1372), whose last line is still the previous round's `end_turn`, so the waiter
+returns at once. Record `wc -l` of the file right after the send and only accept an `end_turn`
+last line once the line count has grown past it.
 
 ## A Python CLI test that overrides HOME also hides the USER site-packages (issue 1346)
 

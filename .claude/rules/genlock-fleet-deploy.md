@@ -4,7 +4,14 @@ paths:
   - "scripts/lib/genlock-markers.sh"
   - "scripts/lib/genlock-fleet-boxes.sh"
   - "scripts/lib/strih-lx-deploy.sh"
+  - "scripts/lib/genlock-plugin-deploy.sh"
 ---
+
+**Line budget (issue 1372):** `tests/deploy_genlock_fleet.rs` pins `deploy-genlock-fleet.sh` under
+1000 lines. The FULL-mode plugin PowerShell blocks (distroav to its ProgramData load path, the paced
+obs-vban backup + byte-verify) live in `scripts/lib/genlock-plugin-deploy.sh` as pure printers
+(`genlock_plugin_backup_ps` / `genlock_plugin_deploy_ps MODE`); add a new plugin's block there,
+never inline in the main script.
 
 # One canonical genlock deploy path across the whole rig (#789 bod 4 + bod 5)
 
