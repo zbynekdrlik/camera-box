@@ -11551,6 +11551,205 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Issue 1367 (ROZHODNUTÉ 5843424054): a cambox window whose captured content is MULTI-SOURCE
+    /// (cam2 filming the strih-lx multiview: several generations of the painted pattern per frame)
+    /// is judged by its node burn. Three otherwise-identical fixtures on ONE CAM2 window carrying
+    /// copies=10 (a hard-frozen, over-tolerance tick sequence), the cam2 own burn and the strih
+    /// anchor burn:
+    /// - `single`: ONE optical id per frame -- single-source, so copies/gaps + frozen_leg still
+    ///   FAIL (byte-identical to the pre-1367 behaviour);
+    /// - `multi`: FOUR optical ids per frame (two tiles) -- multi-source, so copies/gaps, cadence
+    ///   and frozen_leg are report-only, the window is tagged, and the run passes on its burn;
+    /// - `multi_burn_gap`: the same multi-source window with one delivered frame missing its cam2
+    ///   burn -- the node burn still FAILS the run.
+    #[test]
+    fn multi_source_window_is_judged_by_its_node_burn_1367() {
+        use super::{build_and_print_verdict, Cam1Source, DecodedRec};
+        use clap::Parser;
+
+        const ONE_S: i64 = 1_000_000_000;
+        let base = 1_000 * ONE_S;
+        let sched = format!(
+            r#"[{{"cambox":"CAM2","start_ns":{a},"end_ns":{b}}}]"#,
+            a = base,
+            b = base + 5 * ONE_S
+        );
+
+        fn build(
+            tag: &str,
+            sched: &str,
+            multi: bool,
+            burn_missing_at: Option<u64>,
+        ) -> serde_json::Value {
+            const ONE_S: i64 = 1_000_000_000;
+            let base = 1_000 * ONE_S;
+            let dir = std::env::temp_dir().join(format!("cb-1367-{tag}-{}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let sched_path = dir.join("switch-schedule.json");
+            std::fs::write(&sched_path, sched).unwrap();
+
+            let mut frames: Vec<RecordingFrame> = Vec::new();
+            for i in 0..30u64 {
+                let gen_ts = base + (i as i64 + 1) * (ONE_S / 10);
+                // Step-2 painted ticks with a 10-frame hold of 1018 in the middle: copies=10 over
+                // frames=30 (hard-frozen density ~0.33, far over the copies/gaps tolerance), no gap.
+                let tick = match i {
+                    0..=9 => 1000 + 2 * i as u32,
+                    10..=19 => 1018,
+                    _ => 1020 + 2 * (i as u32 - 20),
+                };
+                // Multi-source: the fresh tile plus an older generation's tile (4 optical QRs > the 2
+                // one tile can produce). Single-source: one id, like every other sweep fixture.
+                let optical: Vec<u32> = if multi {
+                    vec![tick - 1, tick, tick - 9, tick - 8]
+                } else {
+                    vec![tick]
+                };
+                let mut payloads = vec![Payload {
+                    run_id: STRIH,
+                    frame_id: 1670 + i as u32,
+                    gen_ts_ns: gen_ts,
+                }];
+                if burn_missing_at != Some(i) {
+                    payloads.push(Payload {
+                        run_id: CAM2B,
+                        frame_id: 7000 + i as u32,
+                        gen_ts_ns: gen_ts,
+                    });
+                }
+                for id in optical {
+                    payloads.push(Payload {
+                        run_id: CAM2,
+                        frame_id: id,
+                        gen_ts_ns: gen_ts,
+                    });
+                }
+                frames.push(RecordingFrame {
+                    frame_index: i,
+                    payloads,
+                    tick: Some(tick),
+                });
+            }
+            let args = super::Args::parse_from([
+                "recording-verdict",
+                "--switch-schedule",
+                sched_path.to_str().unwrap(),
+                "--switch-guard-ns",
+                "0",
+                "--switch-expected-step",
+                "2",
+                "--min-secs",
+                "0",
+            ]);
+            let (v, _) = build_and_print_verdict(
+                &args,
+                None,
+                Some(DecodedRec {
+                    frames,
+                    rec_path: None,
+                }),
+                Cam1Source::Absent,
+                None,
+                None,
+                None,
+                None,
+            )
+            .expect("verdict");
+            let _ = std::fs::remove_dir_all(&dir);
+            v
+        }
+
+        let single = build("single", &sched, false, None);
+        let multi = build("multi", &sched, true, None);
+        let multi_burn_gap = build("multi-gap", &sched, true, Some(15));
+        let count = |v: &serde_json::Value, a: &str, b: &str| {
+            v[a][b].as_array().map(|x| x.len()).unwrap_or(0)
+        };
+
+        // Single-source: unchanged, the test-pattern checks still fail the window.
+        let s0 = &single["all_cambox_continuity"]["segments"][0];
+        assert_eq!(s0["copies"], serde_json::json!(10), "sanity: {single}");
+        assert!(
+            s0.get("multi_source").is_none(),
+            "single-source is untagged: {s0}"
+        );
+        assert_eq!(
+            single["all_cambox_continuity"]["overall_pass"],
+            serde_json::json!(false),
+            "a single-source window with copies/gaps still FAILS: {single}"
+        );
+        assert_eq!(count(&single, "frozen_leg", "frozen"), 1, "{single}");
+        assert_eq!(single["overall_pass"], serde_json::json!(false), "{single}");
+
+        // Multi-source: tagged, test-pattern checks report-only, judged by its burn.
+        let m0 = &multi["all_cambox_continuity"]["segments"][0];
+        assert_eq!(
+            m0["copies"],
+            serde_json::json!(10),
+            "copies stay computed: {m0}"
+        );
+        assert_eq!(
+            m0["multi_source"]["tag"],
+            serde_json::json!(camera_box::multi_source_window::MULTI_SOURCE_TAG),
+            "{m0}"
+        );
+        assert_eq!(
+            m0["multi_source"]["multi_path_suspect_fraction"],
+            serde_json::json!(1.0),
+            "{m0}"
+        );
+        assert_eq!(
+            multi["all_cambox_continuity"]["overall_pass"],
+            serde_json::json!(true),
+            "a multi-source window's copies/gaps are report-only: {multi}"
+        );
+        assert_eq!(
+            multi["all_cambox_continuity"]["windows_multi_source"],
+            serde_json::json!(1),
+            "{multi}"
+        );
+        assert_eq!(count(&multi, "frozen_leg", "frozen"), 0, "{multi}");
+        assert_eq!(
+            count(&multi, "frozen_leg", "multi_source_report_only"),
+            1,
+            "the frozen window stays visible, report-only: {multi}"
+        );
+        for gate in ["cadence_judder_gate", "cadence_uniformity_gate"] {
+            assert_eq!(
+                multi["all_cambox_continuity"][gate]["pass"],
+                serde_json::json!(true),
+                "{gate}: {multi}"
+            );
+        }
+        assert_eq!(
+            multi["full_chain"]["loss"]["cam2"]["zero_loss"],
+            serde_json::json!(true),
+            "the cam2 burn is contiguous: {multi}"
+        );
+        assert_eq!(
+            multi["overall_pass"],
+            serde_json::json!(true),
+            "a multi-source window with a clean node burn passes: {multi}"
+        );
+
+        // Multi-source with a burn gap: the node burn still fails the run.
+        assert_eq!(
+            multi_burn_gap["all_cambox_continuity"]["overall_pass"],
+            serde_json::json!(true),
+            "{multi_burn_gap}"
+        );
+        assert_eq!(
+            multi_burn_gap["full_chain"]["loss"]["cam2"]["zero_loss"],
+            serde_json::json!(false),
+            "{multi_burn_gap}"
+        );
+        assert_eq!(
+            multi_burn_gap["overall_pass"],
+            serde_json::json!(false),
+            "a multi-source window with a burn gap still FAILS: {multi_burn_gap}"
+        );
+    }
+
     /// Issue 905 item 2 (2026-09-02, RESTORE): the `frozen_leg` (issue 758) and `self_heal_reset`
     /// CLASSIFIERS are now RESTORED to blocking -- their `gates_overall_pass` JSON fields read
     /// `true`, and a genuinely-frozen window or a self-heal reset event fails `overall_pass`
