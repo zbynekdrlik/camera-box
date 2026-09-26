@@ -324,7 +324,11 @@ def _roll(tmp_path, program_out, start="1.11.0", flip=True, extra=(), win="strea
         "SSH_PASS": "stub",
         "CAMBOX_OFFLINE_ACK": "",
         "DANTESYNC_FLEET_CRED_FILE": str(tmp_path / "none.env"),
-        "GATE_LINUX": "",
+        # The gate treats an EMPTY GATE_LINUX as unset (`${GATE_LINUX:-cam1=... cam2=...}`), so ""
+        # never disabled its default cam nodes: on dev1 the live cams answered and hid that the
+        # verify of ONE Windows node also graded cam1/cam2. Unreachable TEST-NET defaults make that
+        # coupling fail here as it fails on a CI runner (no rig network).
+        "GATE_LINUX": "cam1=192.0.2.1 cam2=192.0.2.2",
         "GATE_WAIT_TRIES": "1",
         "RIG_GRANDMASTER_IP": "10.77.9.230",
         "DANTESYNC_GATE_WIN_HTTP_STREAM": str(_fresh_slave(tmp_path)),
