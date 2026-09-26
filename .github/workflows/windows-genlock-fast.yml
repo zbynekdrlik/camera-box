@@ -714,7 +714,7 @@ jobs:
           if (-not $body.Contains('st->cb_decode_mailbox.publish(')) {
             Write-Error "sync-test-output.cpp: st_raw_video no longer hands the frame copy to the decode worker (issue 1367)"; exit 1
           }
-          foreach ($banned in @('st_raw_video_camera_box_decode(', 'st_raw_video_qrcode_decode(', 'st_raw_video_find_marker(', 'quirc_', 'signal_handler_signal(')) {
+          foreach ($banned in @('st_raw_video_camera_box_decode(', 'st_raw_video_qrcode_decode(', 'st_raw_video_find_marker(', 'st_video_decode_job_run(', 'video_marker_found(', 'cb_video_qr_record(', 'quirc_', 'signal_handler_signal(')) {
             if ($body.Contains($banned)) {
               Write-Error "sync-test-output.cpp: st_raw_video runs $banned on the video-output thread again (issue 1367) -- OBS would skip output frames"; exit 1
             }
@@ -728,8 +728,11 @@ jobs:
           if (([regex]::Matches($output, [regex]::Escape('st->cb_decode_mailbox.stop();'))).Count -lt 2) {
             Write-Error "sync-test-output.cpp: the decode worker is not joined in both st_stop and st_destroy (issue 1367)"; exit 1
           }
-          if ($output -notmatch [regex]::Escape('locked=%s state=%s decode_dropped=%llu')) {
-            Write-Error "sync-test-output.cpp: the diag line no longer reports decode_dropped (issue 1367)"; exit 1
+          if ($output -notmatch [regex]::Escape('locked=%s state=%s decode_dropped=%llu publish_max_us=%llu')) {
+            Write-Error "sync-test-output.cpp: the diag line no longer reports decode_dropped + publish_max_us (issue 1367)"; exit 1
+          }
+          if ($output -notmatch [regex]::Escape('#include "camera-box-frame-copy.hpp"')) {
+            Write-Error "sync-test-output.cpp: the frame copies no longer come from camera-box-frame-copy.hpp (issue 1367)"; exit 1
           }
           Write-Output "dock decode off the video-output thread (issue 1367) — OK"
 

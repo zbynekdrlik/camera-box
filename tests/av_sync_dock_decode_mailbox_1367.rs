@@ -170,6 +170,10 @@ fn raw_video_callback_only_publishes_the_copy() {
         src.contains("camerabox::CbDecodeMailbox<st_video_decode_job> cb_decode_mailbox;"),
         "issue 1367: the output must own the decode mailbox"
     );
+    assert!(
+        src.contains("#include \"camera-box-frame-copy.hpp\""),
+        "issue 1367: the frame copies must come from the self-tested camera-box-frame-copy.hpp"
+    );
     let body = body_of(
         &src,
         "static void st_raw_video(void *data, struct video_data *frame)",
@@ -178,10 +182,23 @@ fn raw_video_callback_only_publishes_the_copy() {
         body.contains("st->cb_decode_mailbox.publish("),
         "issue 1367: st_raw_video must hand the frame copy to the decode worker"
     );
+    assert!(
+        body.contains("job.timestamp = frame->timestamp;"),
+        "issue 1367: the job must carry the frame's own timestamp"
+    );
+    assert!(
+        body.contains(
+            "camerabox::cb_atomic_max_u64(st->cb_publish_max_ns, os_gettime_ns() - publish_start_ns);"
+        ),
+        "issue 1367: st_raw_video must record its own cost for the diag line's publish_max_us"
+    );
     for banned in [
         "st_raw_video_camera_box_decode(",
         "st_raw_video_qrcode_decode(",
         "st_raw_video_find_marker(",
+        "st_video_decode_job_run(",
+        "video_marker_found(",
+        "cb_video_qr_record(",
         "quirc_",
         "signal_handler_signal(",
     ] {
@@ -217,6 +234,20 @@ fn worker_runs_the_unchanged_decoders_on_the_copy() {
 fn worker_lifecycle_follows_the_output() {
     let src = code();
     let start = body_of(&src, "static bool st_start(void *data)");
+    let restop_at = start
+        .find("st->cb_decode_mailbox.stop();")
+        .expect("issue 1367: st_start must first stop a worker left from a previous start");
+    let resize_at = start
+        .find("quirc_resize(")
+        .expect("st_start resizes the quirc context");
+    assert!(
+        restop_at < resize_at,
+        "issue 1367: no worker may be running while st_start rewrites the state it decodes with"
+    );
+    assert!(
+        start.contains("st_decode_worker_thread_setup)"),
+        "issue 1367: the worker thread must be named and lowered below normal priority"
+    );
     let start_at = start
         .find("st->cb_decode_mailbox.start(")
         .expect("issue 1367: st_start must start the decode worker");
@@ -263,8 +294,15 @@ fn worker_lifecycle_follows_the_output() {
 fn diag_line_reports_dropped_decodes() {
     let src = code();
     assert!(
-        src.contains("ring_hit=%llu ring_miss=%llu locked=%s state=%s decode_dropped=%llu"),
-        "issue 1367: the dock diag line must append decode_dropped=%llu (existing tokens unchanged)"
+        src.contains(
+            "ring_hit=%llu ring_miss=%llu locked=%s state=%s decode_dropped=%llu publish_max_us=%llu"
+        ),
+        "issue 1367: the dock diag line must append decode_dropped=%llu publish_max_us=%llu \
+         (existing tokens unchanged)"
+    );
+    assert!(
+        src.contains("st->cb_publish_max_ns.exchange(0) / 1000"),
+        "issue 1367: publish_max_us must be the per-window max of st_raw_video's own cost"
     );
     assert!(
         src.contains("st->cb_decode_mailbox.dropped()"),
