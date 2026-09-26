@@ -30,6 +30,13 @@ still resolves. Put a new decode pass in `recording_decode`, not `qr`. `qr`'s ow
 `#[path]` child `src/probe/qr_tests.rs`; a test that needs its fixture/blit helpers imports
 `crate::probe::qr::tests::{optical_fixture_luma, blit_burn_luma}`.
 
+Proving a future probe-module split is a pure move (no local compile): moving an inline
+`mod tests` into a `#[path]` child de-indents it, and rustfmt then re-joins calls that now fit and
+drops their trailing commas. So compare whitespace-stripped text with `,)` / `,]` / `,}` normalized
+(token-identical modulo trailing commas), check no multi-line string literal lacks a `\`
+continuation (de-indenting would change it), and use `git diff --color-moved=plain
+--color-moved-ws=allow-indentation-change` (after `git add -N` on new files) to count moved lines.
+
 ## What it is
 
 The recording decode (`qr::decode_qr_luma_all_fast_then_robust_grouped_pathed_optical`) runs the
