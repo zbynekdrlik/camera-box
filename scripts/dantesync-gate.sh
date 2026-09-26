@@ -849,6 +849,14 @@ Options:
                        the #1021/#1119 widening below. The fleet date may sit up to the step bound
                        off UTC before a coordinated fleet step. The same variable sets the margin
                        in verify-imag.sh and verify-strih.sh (one knob).
+    DANTESYNC_DATE_MICRO_BOUND_MS  Date master on dantesync 1.11.0 (a /status that carries
+                       date_correction_falling_behind): the master holds the fleet date by
+                       micro-corrections, so it is graded on |date_offset_error_ms| <= this bound
+                       (default ${DATE_MASTER_MICRO_BOUND_MS} ms) + DANTESYNC_DATE_MARGIN_US, and
+                       its median bound is the same. date_correction_falling_behind=true reads
+                       DATE MASTER OUT (BAD/20); date_micro_paused=true (no UTC reading) reads
+                       DATE MASTER PAUSED, refused here as INCOMPLETE/11. A master without those
+                       fields (1.9.0/1.10.0) keeps the step-bound grade above.
   --deadband-margin-us N  #1021 (dantesync PR #84/#86, closes dantesync issue 83): when the NTP
                        master's own /status reports a numeric "ntp_deadband_us" (its currently
                        active PTP-locked step-deferral threshold), the master's median bound

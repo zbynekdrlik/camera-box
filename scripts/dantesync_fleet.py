@@ -240,7 +240,8 @@ def date_master_verdict(status, margin_us: int, micro_bound_ms=None) -> str:
     if s.get("date_authority") != "master":
         return "none"
     if date_master_micro_capable(s):
-        micro = date_micro_bound_ms() if micro_bound_ms is None else micro_bound_ms
+        # None or "" = the default, like the bash twin's `${3:-$DATE_MASTER_MICRO_BOUND_MS}`
+        micro = date_micro_bound_ms() if micro_bound_ms in (None, "") else micro_bound_ms
         return _date_master_micro_verdict(s, margin_us, micro)
     err_us = _ms_to_us(s.get("date_offset_error_ms"))
     bound_us = _ms_to_us(s.get("date_step_bound_ms"))

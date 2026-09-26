@@ -41,7 +41,9 @@ DATE_MASTER_MARGIN_US="${DANTESYNC_DATE_MARGIN_US:-1000}"
 # DATE_MASTER_MICRO_BOUND_MS -- the ONE bound (ms, before the margin) a dantesync 1.11.0 date master
 # is graded on: 1.11.0 (dantesync PR 121) holds the fleet date within ~2-3 ms by 500 us
 # micro-corrections (2 ms dead band, 20 s interval), so the 50 ms step bound is ~17x too loose for it.
-# DANTESYNC_DATE_MICRO_BOUND_MS overrides it (a non-negative decimal; anything else is unreadable).
+# DANTESYNC_DATE_MICRO_BOUND_MS overrides it (a positive plain decimal; anything else, 0 included,
+# is unreadable). 5 ms + the margin is deliberately stricter than dantesync's own falling-behind
+# alarm (raised past 10 ms), so a 6-10 ms catch-up transient reads OUT here while dantesync is quiet.
 # shellcheck disable=SC2034  # read by the scripts that source this lib
 DATE_MASTER_MICRO_BOUND_MS="${DANTESYNC_DATE_MICRO_BOUND_MS:-5}"
 
@@ -209,7 +211,7 @@ date_master_micro_capable() {
 # positive plain decimal (digits, an optional fraction) -- the python twin applies the same shape.
 _micro_bound_us() {
   local us
-  grep -qE '^[0-9]+(\.[0-9]+)?$' <<<"$1" || { printf ''; return 0; }
+  [[ $1 =~ ^[0-9]+(\.[0-9]+)?$ ]] || { printf ''; return 0; }
   us="$(_ms_to_us "$1")"
   if [ -n "$us" ] && [ "$us" -gt 0 ]; then
     printf '%s' "$us"
