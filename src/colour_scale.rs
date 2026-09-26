@@ -80,8 +80,8 @@ pub const DEFAULT_QR_SIZE: u32 = 700;
 
 /// #718/#754 — crop height (px), measured from the top, for a `frac` fraction of `frame_h`,
 /// floor-clamped to `[1, frame_h]`. Pure arithmetic seam shared by the two probe-gated retry
-/// crops that need it: `qr::robust_optical_top_band` (the #754 continuity-decode top-band
-/// recovery) and `colour_sample::detect_dual_qr`'s OWN retry (#718 — the colour-gate localizer
+/// crops that need it: `recording_decode::robust_optical_top_band` (the #754 continuity-decode
+/// top-band recovery) and `colour_sample::detect_dual_qr`'s OWN retry (#718 — the colour-gate localizer
 /// never got the #754 fix at all). Both crops are `(0, 0, w, this_height)` — top-left anchored,
 /// so a grid detected inside the crop keeps VALID full-frame pixel coordinates, no transform
 /// needed. Kept here (not duplicated in each probe-gated call site) so the crop-height math has
