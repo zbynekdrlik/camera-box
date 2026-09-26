@@ -100,17 +100,24 @@ fn c_n1_shallow_sticky_floor_matches_the_rust_authority_1367() {
             &mut wall,
         );
     }
-    // the decay: 30 min without an observation at the level drops one frame, one per 30 min more;
-    // a wall stepped back never decays; a block at the level resets the clock.
+    // the decay: 30 min without an observation at the level drops one frame, and one more exactly
+    // 30 min after that (the boundary itself decays); a wall stepped back never decays; a block at
+    // the level resets the clock.
     wall += N1_SHALLOW_STICKY_DECAY_NS - blk * i30;
     for _ in 0..3 {
         push(&mut seq, tick(false, 1), false, &mut wall);
     }
-    wall += N1_SHALLOW_STICKY_DECAY_NS;
+    wall += N1_SHALLOW_STICKY_DECAY_NS - 3 * i30;
     push(&mut seq, tick(false, 1), false, &mut wall);
     wall -= 10 * min;
     push(&mut seq, tick(false, 1), true, &mut wall);
     wall += 20 * min;
+    for _ in 0..blk {
+        push(&mut seq, tick(false, 2), true, &mut wall);
+    }
+    // a block AT the level 10 min later refreshes the clock, so 25 min after it nothing decays
+    // (35 min after the raise).
+    wall += 10 * min;
     for _ in 0..blk {
         push(&mut seq, tick(false, 2), true, &mut wall);
     }
@@ -126,8 +133,14 @@ fn c_n1_shallow_sticky_floor_matches_the_rust_authority_1367() {
         true,
         &mut wall,
     );
-    for _ in 0..blk {
-        push(&mut seq, tick(false, 2), true, &mut wall);
+    // a fresh block with a short burst (8 of 90 ticks one frame deeper): the p90 ignores it.
+    for k in 0..blk {
+        push(
+            &mut seq,
+            tick(false, if k < 8 { 3 } else { 2 }),
+            true,
+            &mut wall,
+        );
     }
     for _ in 0..blk + 3 {
         push(
