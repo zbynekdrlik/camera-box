@@ -158,9 +158,13 @@ fn strih_6519_dual_qr_frame_decodes_both_qrs() {
 /// the FULL path (compose a frame with the top dual-QR + a 260px node burn in the bottom-left
 /// corner, soften the whole frame as the NDI/encode chain does, encode to a lossless ffv1
 /// gray8 mkv, decode through `analyze_recording`) and asserts ALL THREE marks decode: both
-/// optical QRs AND the node burn (run_id 911_001). Before the bottom-band tiled robust decode
+/// optical QRs AND the node burn (run_id 911_002). Before the bottom-band tiled robust decode
 /// this frame yielded only the two optical QRs. Requires ffmpeg (a camera-box runtime dep,
 /// installed in CI).
+///
+/// issue 1367: the burn in the bottom-left corner is strih's render burn, the burn that sits
+/// there. The recording decode counts a node burn only inside its own slot, and a camera burn
+/// read in that corner would be an echo (this test used the cam1 id until then).
 #[test]
 fn analyze_recording_recovers_a_softened_bottom_burn() {
     if Command::new("ffmpeg").arg("-version").output().is_err() {
@@ -178,7 +182,7 @@ fn analyze_recording_recovers_a_softened_bottom_burn() {
         gen_ts_ns: 2,
     };
     let burn = Payload {
-        run_id: 911_001, // a cam1-capture node burn
+        run_id: 911_002, // strih's render burn: its slot is the bottom-left corner
         frame_id: 1234,
         gen_ts_ns: 3,
     };
@@ -235,7 +239,7 @@ fn analyze_recording_recovers_a_softened_bottom_burn() {
         "the optical dual-QR must decode: {got:?}"
     );
     assert!(
-        got.contains(&911_001),
+        got.contains(&911_002),
         "the softened bottom node burn must be RECOVERED by the robust offline decode \
          (#202): run_ids={got:?}"
     );
