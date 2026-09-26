@@ -310,6 +310,15 @@ as issue 1270. If a painted best-effort is ever demanded, it must be ADDITIVE (a
 and RIGHT byte-identical/untouched so the splitter control + committed fixtures are safe) with a
 written post-deploy kill criterion — NEVER a relocation.
 
+## A second consumer of `multi_path_suspect_fraction`: the multi-source window scope (issue 1367)
+
+Since issue 1367 the verdict computes the per-window `TearStats` BEFORE the all-cambox continuity
+fold, and a window whose `multi_path_suspect_fraction` is over `MULTI_PATH_SUSPECT_CEILING` is
+MULTI-SOURCE: its copies/gaps, cadence and `frozen_leg` fold report-only and it is judged by its
+node burn. So changing `MULTI_PATH_SUSPECT_CEILING` or `is_multi_path_suspect` now also moves which
+windows those checks gate, not only which windows the tear gate scores. See
+`.claude/rules/multi-source-window.md`.
+
 ## imag-nb RETIRED 16.9.2026 (issue 1316) — cam2 is a NORMAL camera leg; the tear signal reads `Absent`, never a red
 
 The owner returned imag-nb 16.9.2026 and confirmed „do cam2 uz ide obraz zo splitru ako do

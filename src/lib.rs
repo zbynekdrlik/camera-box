@@ -586,6 +586,11 @@ pub mod optical_floor;
 // the two-term gate (TEAR_FRACTION_CEILING + TEAR_FRAME_COUNT_FLOOR, scoped to Observed single-tile
 // windows) folds into overall_pass. One-line disarmable (`gates_overall_pass()` → `false`).
 pub mod tear_detect;
+// issue 1367 — a cambox window whose captured content is MULTI-SOURCE (tear_detect's multi-path
+// fraction over MULTI_PATH_SUSPECT_CEILING, e.g. cam2 filming the strih-lx multiview) is judged by its
+// node burn: its copies/gaps, cadence and frozen_leg checks fold report-only, the burn stays blocking.
+// Pure crate-root (Tier-0); consumed by recording-verdict's all-cambox sweep.
+pub mod multi_source_window;
 // issue 1196 — the aux Vernier tick pair's PURE geometry (bottom burn-gap placement + the Tier-0
 // no-overlap proofs vs the primary dual-QR / colour column / motion sweep / downstream burn
 // overlays). The probe-gated painter (src/probe/qr.rs::blit_aux_tick_bgra) only calls

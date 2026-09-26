@@ -110,3 +110,18 @@ def test_distribution_table_cam2_column():
     pre_row = next(ln for ln in lines if "25635487" in ln)
     assert post_row.split("|")[9].strip() == "0"
     assert pre_row.split("|")[9].strip() == "12"
+
+
+def test_a_multi_source_window_is_left_out_of_the_walk_down_1367():
+    # issue 1367: a window tagged multi_source (a camera filming an OBS multiview) is judged by its
+    # node burn; its copies/gaps are not a genlock-FIFO residual and must not skew the walk-down.
+    v = _verdict(True, 1, 0, 1, 0, 0.9988, 0.9574,
+                 [("CAM2", 212, 214, 0.4467), ("CAM3", 0, 0, 0.9988)])
+    v["all_cambox_continuity"]["segments"][0]["multi_source"] = {
+        "tag": "multi-source (report-only by #1367 decision)",
+        "multi_path_suspect_fraction": 0.6028,
+    }
+    s = w.summarize_verdict(v)
+    assert "CAM2" not in s["per_cam"]
+    assert s["per_cam"]["CAM3"] == [(0, 0, 0.9988)]
+    assert w.nonzero_windows(s) == []
