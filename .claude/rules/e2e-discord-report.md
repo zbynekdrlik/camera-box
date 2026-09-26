@@ -34,6 +34,15 @@ the 3-line cap even when proofs were exported. The block
 is report-only evidence, never a gate: no `❌`, no `_blocking_failures` entry. No block / nothing
 exported renders byte-identical to before.
 
+## A multi-source window (issue 1367) — never a `❌`, always named with its fraction
+
+A cambox window tagged `all_cambox_continuity.segments[].multi_source` (the camera films an OBS
+multiview) is judged by its node burn; its copies/gaps, cadence and `frozen_leg` are report-only.
+`_blocking_failures` item 4 never names it. A PASS keeps the 3-line cap by appending
+`CAM2 multi-source (report-only by #1367 decision), 0.43, 0.60` to the camera line; a FAIL puts
+the same text on the `ℹ️` line; `compose_report`'s overall section lists each window with its
+fraction. A verdict without the key renders exactly as before. See `multi-source-window.md`.
+
 ## The caller captures stdout `2>&1` and jq-parses it
 
 `scripts/lib/e2e-discord-report.sh` runs the composer with `--json-chunks 2>&1` and pipes to `jq`.
