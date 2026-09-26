@@ -50,7 +50,7 @@ _CLEAN = ("DANTESYNC_FLEET", "OBS_FLEET", "OBS_FLEET_HOME", "DANTESYNC_AUDIO_GM_
           "RIG_GRANDMASTER_HOST", "RIG_GRANDMASTER_IP", "DANTESYNC_GATE_GM_ENFORCE",
           "DANTESYNC_GATE_PHASE_SLEW_ENFORCE", "DANTESYNC_NTP_MASTER_NAME",
           "DANTESYNC_DEADBAND_MARGIN_US", "CLOCK_GUARD_BOUND_US", "DANTESYNC_STABILITY_US",
-          "DANTESYNC_DATE_MARGIN_US")
+          "DANTESYNC_DATE_MARGIN_US", "DANTESYNC_DATE_MICRO_BOUND_MS")
 
 
 def _env(**over):
@@ -126,7 +126,7 @@ def test_python_unlocked_helper_matches_the_table(status, klass, date_verdict, u
 def test_the_table_covers_every_class_and_verdict():
     rows = [p.values for p in _rows()]
     assert {r[1] for r in rows} == {"PTP_PHASE_LOCK", "LEGACY_SLEW", "LEGACY_NO_SLEW", "UNKNOWN"}
-    assert {r[2] for r in rows} == {"none", "ok", "out", "unknown"}
+    assert {r[2] for r in rows} == {"none", "ok", "out", "paused", "unknown"}
     assert {r[3] for r in rows} == {"yes", "no"}
 
 
@@ -192,6 +192,77 @@ def test_date_master_effective_bound(tmp_path):
     slave = (_STATUS / "stream-slave-1.9.0.json").read_text()
     assert _bash_call(tmp_path, "date_master_effective_bound_us", master, 2000, 1000) == "51000"
     assert _bash_call(tmp_path, "date_master_effective_bound_us", slave, 2000, 1000) == "2000"
+
+
+# ---------------------------------------------------------------------------------------------
+# dantesync 1.11.0 (PR 121): the master holds the fleet date within ~2-3 ms by 500 us
+# micro-corrections, so a master that carries date_correction_falling_behind is graded on the
+# micro bound (DANTESYNC_DATE_MICRO_BOUND_MS, default 5) + margin; a 1.9.0/1.10.0 master keeps the
+# step-bound grade (issue 1372, main's design comment 5846047309, Approach 1)
+# ---------------------------------------------------------------------------------------------
+
+_MICRO = ('{"date_authority":"master","date_offset_error_ms":%s,"date_step_bound_ms":50.0,'
+          '"date_correction_falling_behind":%s,"date_micro_paused":%s}')
+
+
+def test_date_master_effective_bound_on_a_1_11_0_master_is_the_micro_bound(tmp_path):
+    master = (_STATUS / "strih-lx-master-1.11.0.json").read_text()
+    slave = (_STATUS / "stream-slave-1.11.0.json").read_text()
+    assert _bash_call(tmp_path, "date_master_effective_bound_us", master, 2000, 1000) == "6000"
+    assert _bash_call(tmp_path, "date_master_effective_bound_us", master, 8000, 1000) == "8000"
+    assert _bash_call(tmp_path, "date_master_effective_bound_us", slave, 2000, 1000) == "2000"
+
+
+@pytest.mark.parametrize("micro_ms,err_ms,want", [
+    ("2", "-2.9", "ok"), ("2", "-3.1", "out"), ("1.5", "2.5", "ok"), ("10", "-28.776", "out"),
+    ("0", "-0.1", "unknown"), ("-1", "-0.1", "unknown"), ("abc", "-0.1", "unknown"),
+    ("", "-5.9", "ok"), ("", "-6.1", "out"),
+])
+def test_micro_bound_is_the_one_env_knob_on_both_twins(tmp_path, monkeypatch, micro_ms, err_ms, want):
+    status = _MICRO % (err_ms, "false", "false")
+    (tmp_path / "s.json").write_text(status)
+    r = _sourced(tmp_path, f'date_master_verdict "$(cat "{tmp_path / "s.json"}")" 1000; echo',
+                 DANTESYNC_DATE_MICRO_BOUND_MS=micro_ms)
+    assert r.stdout.strip() == want, r.stdout + r.stderr
+    monkeypatch.setenv("DANTESYNC_DATE_MICRO_BOUND_MS", micro_ms)
+    assert df.date_master_verdict(json.loads(status), _MARGIN_US) == want
+
+
+def test_micro_bound_never_touches_a_pre_1_11_0_master(tmp_path, monkeypatch):
+    status = '{"date_authority":"master","date_offset_error_ms":-28.8,"date_step_bound_ms":50.0}'
+    (tmp_path / "s.json").write_text(status)
+    r = _sourced(tmp_path, f'date_master_verdict "$(cat "{tmp_path / "s.json"}")" 1000; echo',
+                 DANTESYNC_DATE_MICRO_BOUND_MS="abc")
+    assert r.stdout.strip() == "ok", r.stdout + r.stderr
+    monkeypatch.setenv("DANTESYNC_DATE_MICRO_BOUND_MS", "abc")
+    assert df.date_master_verdict(json.loads(status), _MARGIN_US) == "ok"
+
+
+@pytest.mark.parametrize("err,behind,paused,rc,needles", [
+    ("-2.14", "false", "false", 0, ["DATE MASTER OK", "micro bound 5ms"]),
+    ("-7.0", "false", "false", 2, ["DATE MASTER OUT", "micro bound 5ms"]),
+    ("-3.0", "true", "false", 2, ["DATE MASTER OUT", "date_correction_falling_behind=true"]),
+    ("-1.0", "false", "true", 4, ["DATE MASTER PAUSED", "date_micro_paused=true", "no UTC reading"]),
+    ("null", "false", "false", 3, ["DATE MASTER UNKNOWN"]),
+])
+def test_date_master_check_names_the_1_11_0_verdict(tmp_path, err, behind, paused, rc, needles):
+    (tmp_path / "s.json").write_text(_MICRO % (err, behind, paused))
+    r = _sourced(tmp_path, f'date_master_check strih "$(cat "{tmp_path / "s.json"}")" 1000; echo "rc=$?"')
+    assert f"rc={rc}" in r.stdout, r.stdout + r.stderr
+    for needle in needles:
+        assert needle in r.stdout, r.stdout
+
+
+def test_date_master_check_keeps_the_step_bound_line_for_a_1_10_0_master(tmp_path):
+    (tmp_path / "s.json").write_text(
+        '{"date_authority":"master","date_offset_error_ms":-28.8,"date_step_bound_ms":50.0,"date_slew_active":false}')
+    r = _sourced(tmp_path, f'date_master_check strih "$(cat "{tmp_path / "s.json"}")" 1000; echo "rc=$?"')
+    assert "DATE MASTER OK" in r.stdout and "step bound 50.0ms" in r.stdout and "rc=0" in r.stdout, r.stdout
+
+
+def test_the_version_pin_is_the_release_this_date_grading_implements():
+    body = (_ROOT / "scripts" / "dantesync-version-gate.sh").read_text()
+    assert 'DANTESYNC_VERSION_PIN="${DANTESYNC_VERSION_PIN:-1.11.0}"' in body
 
 
 # ---------------------------------------------------------------------------------------------
@@ -355,6 +426,54 @@ def test_gate_date_margin_is_the_one_shared_knob(tmp_path):
     for script in ("verify-imag.sh", "verify-strih.sh"):
         body = (_ROOT / "scripts" / script).read_text()
         assert "DATE_MASTER_MARGIN_US" in body and "IMAG_CLOCK_DATE_MARGIN_US" not in body, script
+
+
+def test_gate_passes_a_1_11_0_master_on_its_micro_bound(tmp_path):
+    p = _fresh(tmp_path, "strih", _STATUS / "strih-lx-master-1.11.0.json")
+    code, out, err = _gate(_MASTER_ONLY, DANTESYNC_GATE_WIN_HTTP_STRIH=str(p))
+    assert code == 0, out + err
+    assert "DATE MASTER OK" in out and "micro bound 5ms" in out
+    assert "bound 6000us" in out, out
+
+
+def test_gate_fails_a_1_11_0_master_that_sits_inside_the_old_step_bound(tmp_path):
+    """The 1.9.0 live master error (-28.776 ms) passed the 50 ms step bound; a 1.11.0 master holds
+    the date to ~2-3 ms, so the same error is a master that stopped correcting."""
+    p = _fresh(tmp_path, "strih", _STATUS / "strih-lx-master-1.11.0.json",
+               ntp_offset_us=-28776, date_offset_error_ms=-28.776)
+    code, out, err = _gate(_MASTER_ONLY, DANTESYNC_GATE_WIN_HTTP_STRIH=str(p))
+    assert code == 20, out + err
+    assert "DATE MASTER OUT" in out
+
+
+def test_gate_fails_a_1_11_0_master_falling_behind(tmp_path):
+    p = _fresh(tmp_path, "strih", _STATUS / "strih-lx-master-1.11.0.json",
+               date_correction_falling_behind=True)
+    code, out, err = _gate(_MASTER_ONLY, DANTESYNC_GATE_WIN_HTTP_STRIH=str(p))
+    assert code == 20, out + err
+    assert "DATE MASTER OUT" in out and "falling_behind" in out
+
+
+def test_gate_refuses_a_1_11_0_master_whose_micro_corrections_are_paused(tmp_path):
+    """Paused is WARN-level in the report consumers but fail-closed in the E2E [0/8] gate: the
+    master has no UTC reading, so the fleet date is unverified (INCOMPLETE, 11)."""
+    p = _fresh(tmp_path, "strih", _STATUS / "strih-lx-master-1.11.0.json", date_micro_paused=True)
+    code, out, err = _gate(_MASTER_ONLY, DANTESYNC_GATE_WIN_HTTP_STRIH=str(p))
+    assert code == 11, out + err
+    assert "DATE MASTER PAUSED" in out
+
+
+def test_gate_passes_the_1_11_0_slave(tmp_path):
+    p = _fresh(tmp_path, "stream", _STATUS / "stream-slave-1.11.0.json")
+    code, out, err = _gate(_STREAM_ONLY, DANTESYNC_GATE_WIN_HTTP_STREAM=str(p))
+    assert code == 0, out + err
+    assert "DATE MASTER" not in out
+
+
+def test_verify_imag_reports_a_paused_date_master_as_a_warning():
+    body = (_ROOT / "scripts" / "verify-imag.sh").read_text()
+    assert '[ "$rc_date" -eq 4 ]' in body
+    assert "date_micro_paused" in body
 
 
 def test_gate_journal_fallback_grades_a_date_master_line_on_its_step_bound(tmp_path):

@@ -4,15 +4,25 @@
 # sourced by scripts/clock-offset-guard.sh) and the python twin `classify_clock_discipline` /
 # `clock_discipline_unlocked` / `date_master_verdict` (scripts/dantesync_fleet.py), pinned by
 # tests/python/test_clock_discipline_1372.py.
-# Columns (TAB-separated): case, status, class, date_verdict (margin 1000 us), unlocked.
+# Columns (TAB-separated): case, status, class, date_verdict (margin 1000 us, micro bound 5 ms),
+# unlocked.
 #   status  = `@<repo-relative path>` to a /status JSON file, or an inline compact JSON object.
 #   class   = PTP_PHASE_LOCK | LEGACY_SLEW | LEGACY_NO_SLEW | UNKNOWN
-#   date_verdict = none (not the date master) | ok | out | unknown (master, fields unreadable)
+#   date_verdict = none (not the date master) | ok | out | paused (a dantesync 1.11.0 master whose
+#              micro-corrections are paused: no UTC reading) | unknown (master, fields unreadable)
 #   unlocked = yes only for clock_discipline=ptp_phase_lock with ptp_phase_locked=false (the
 #              named PTP-PHASE UNLOCKED failure: clock_discipline_unlocked), else no
 # The four @ files are /status captured read-only from the live fleet on 26.9.2026 (strih-lx master
 # and the stream slave, both dantesync 1.9.0) plus two legacy nodes synthesized from the pre-1.9.0
 # field shape (no clock_discipline / ptp_phase_locked / date_* fields).
+# The two 1.11.0 @ files (dantesync PR 121, the date micro-corrections) are those two live captures
+# extended with the 1.10.0 slew fields and the 1.11.0 micro fields in dantesync's own
+# src/status.rs order (date_offset_micro, date_micro_active, date_micro_last_us,
+# date_correction_rate_ms_per_min, date_correction_falling_behind, date_micro_paused); the master's
+# fleet-line error set to what 1.11.0 holds (-2.14 ms). A master that carries
+# date_correction_falling_behind is graded on the micro bound (DANTESYNC_DATE_MICRO_BOUND_MS,
+# default 5) + margin, falling behind = out, paused = paused; a master without it (1.9.0 / 1.10.0)
+# is graded on date_step_bound_ms exactly as before (the mixed fleet during the roll).
 live_master_1_9_0	@tests/fixtures/dantesync_status_1372/strih-lx-master-1.9.0.json	PTP_PHASE_LOCK	ok	no
 live_slave_1_9_0	@tests/fixtures/dantesync_status_1372/stream-slave-1.9.0.json	PTP_PHASE_LOCK	none	no
 legacy_build_slew_on	@tests/fixtures/dantesync_status_1372/legacy-slew-1.8.52.json	LEGACY_SLEW	none	no
@@ -50,3 +60,24 @@ master_error_not_finite	{"date_authority":"master","date_offset_error_ms":1e400,
 master_error_absurd	{"date_authority":"master","date_offset_error_ms":1e20,"date_step_bound_ms":50.0}	UNKNOWN	unknown	no
 master_bound_absurd	{"date_authority":"master","date_offset_error_ms":-1.0,"date_step_bound_ms":1e20}	UNKNOWN	unknown	no
 master_error_huge_integer	{"date_authority":"master","date_offset_error_ms":10000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000,"date_step_bound_ms":50.0}	UNKNOWN	unknown	no
+live_master_1_11_0	@tests/fixtures/dantesync_status_1372/strih-lx-master-1.11.0.json	PTP_PHASE_LOCK	ok	no
+live_slave_1_11_0	@tests/fixtures/dantesync_status_1372/stream-slave-1.11.0.json	PTP_PHASE_LOCK	none	no
+master_1_10_shape_on_step_bound	{"date_authority":"master","date_offset_error_ms":-28.8,"date_step_bound_ms":50.0,"date_slew_active":false,"date_slew_remaining_ms":null,"date_slew_ppm":null}	UNKNOWN	ok	no
+master_1_10_shape_past_step_bound	{"date_authority":"master","date_offset_error_ms":-51.5,"date_step_bound_ms":50.0,"date_slew_active":false,"date_slew_remaining_ms":null,"date_slew_ppm":null}	UNKNOWN	out	no
+micro_on_the_line	{"date_authority":"master","date_offset_error_ms":-2.1,"date_step_bound_ms":50.0,"date_micro_active":true,"date_micro_last_us":500,"date_correction_falling_behind":false,"date_micro_paused":false}	UNKNOWN	ok	no
+micro_at_bound_plus_margin	{"date_authority":"master","date_offset_error_ms":-6.0,"date_step_bound_ms":50.0,"date_correction_falling_behind":false,"date_micro_paused":false}	UNKNOWN	ok	no
+micro_past_bound_plus_margin	{"date_authority":"master","date_offset_error_ms":6.001,"date_step_bound_ms":50.0,"date_correction_falling_behind":false,"date_micro_paused":false}	UNKNOWN	out	no
+micro_inside_step_bound_is_still_out	{"date_authority":"master","date_offset_error_ms":-28.776,"date_step_bound_ms":50.0,"date_correction_falling_behind":false,"date_micro_paused":false}	UNKNOWN	out	no
+micro_falling_behind	{"date_authority":"master","date_offset_error_ms":-3.0,"date_step_bound_ms":50.0,"date_correction_falling_behind":true,"date_micro_paused":false}	UNKNOWN	out	no
+micro_falling_behind_wins_over_paused	{"date_authority":"master","date_offset_error_ms":-3.0,"date_step_bound_ms":50.0,"date_correction_falling_behind":true,"date_micro_paused":true}	UNKNOWN	out	no
+micro_paused	{"date_authority":"master","date_offset_error_ms":-1.0,"date_step_bound_ms":50.0,"date_correction_falling_behind":false,"date_micro_paused":true}	UNKNOWN	paused	no
+micro_paused_error_null	{"date_authority":"master","date_offset_error_ms":null,"date_step_bound_ms":50.0,"date_correction_falling_behind":false,"date_micro_paused":true}	UNKNOWN	paused	no
+micro_error_null	{"date_authority":"master","date_offset_error_ms":null,"date_step_bound_ms":50.0,"date_correction_falling_behind":false,"date_micro_paused":false}	UNKNOWN	unknown	no
+micro_step_bound_null_is_not_needed	{"date_authority":"master","date_offset_error_ms":-2.0,"date_step_bound_ms":null,"date_correction_falling_behind":false,"date_micro_paused":false}	UNKNOWN	ok	no
+micro_falling_behind_is_a_string	{"date_authority":"master","date_offset_error_ms":-2.0,"date_step_bound_ms":50.0,"date_correction_falling_behind":"false","date_micro_paused":false}	UNKNOWN	unknown	no
+micro_falling_behind_null	{"date_authority":"master","date_offset_error_ms":-2.0,"date_step_bound_ms":50.0,"date_correction_falling_behind":null,"date_micro_paused":false}	UNKNOWN	unknown	no
+micro_paused_null	{"date_authority":"master","date_offset_error_ms":-2.0,"date_step_bound_ms":50.0,"date_correction_falling_behind":false,"date_micro_paused":null}	UNKNOWN	unknown	no
+micro_paused_absent	{"date_authority":"master","date_offset_error_ms":-2.0,"date_step_bound_ms":50.0,"date_correction_falling_behind":false}	UNKNOWN	unknown	no
+micro_spaced_json	{ "date_authority" : "master" , "date_offset_error_ms" : -2.5 , "date_correction_falling_behind" : false , "date_micro_paused" : false }	UNKNOWN	ok	no
+micro_error_absurd	{"date_authority":"master","date_offset_error_ms":1e20,"date_step_bound_ms":50.0,"date_correction_falling_behind":false,"date_micro_paused":false}	UNKNOWN	unknown	no
+micro_follower	{"date_authority":"follower","date_offset_error_ms":null,"date_step_bound_ms":null,"date_correction_falling_behind":false,"date_micro_paused":false}	UNKNOWN	none	no
