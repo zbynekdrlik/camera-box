@@ -1421,3 +1421,16 @@ any template placeholder filled from a variable.
 - **A recursive `grep -r` whose path list includes `.claude` is refused** by the airuleset
   credential-store hook, which reads it as a recursive read of the store's parent directory. Use
   the Grep tool for repo-wide searches that must cover `.claude/rules/`.
+
+## GOTCHA — a python harness test that passes on dev1 can be reaching the LIVE rig (issue 1372)
+
+dev1 sits on the rig network, so a subprocess test whose stubs miss one network call still passes
+locally: the real `curl`/ssh answers from a live box. The CI runner has no rig network and reads the
+same call as UNREACHABLE. Live case: the dantesync tray roll tests set `GATE_LINUX=""` to drop the
+gate's default cam nodes, but the gate reads `${GATE_LINUX:-cam1=... cam2=...}` (`:-` treats an EMPTY
+value as unset), so every Windows-node verify also graded the live cam1/cam2. Green on dev1, rc=11 on
+CI, and a real upgrader bug (a stream roll depended on the cameras).
+- **Reproduce CI's view before pushing a subprocess test:** run it with no network,
+  `sudo -n unshare -n -- sudo -u "$USER" env HOME=$HOME PATH=$PATH python3 -m pytest -q <file>`.
+- **To empty a `${VAR:-default}` list, pass the flag, not an empty env** (`--linux ""`), or point
+  the default at unreachable TEST-NET addresses (192.0.2.x) so a leak fails everywhere.
