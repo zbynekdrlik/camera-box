@@ -831,12 +831,14 @@ def test_the_pure_daily_decision_never_reads_the_clock(tmp_path, monkeypatch):
     wrapper. A `date` that fails without -d (bash) and a time.time that raises (python) prove it."""
     status = _LIVE_MASTER_1_12.read_text()
     (tmp_path / "s.json").write_text(status)
-    shadow = ('date() { case "$*" in *-d*) command date "$@" ;; *) echo CLOCK-READ >&2; return 1 ;; esac; }\n'
+    mark = tmp_path / "clock-read"
+    # A marker FILE, not stderr: the wrapper silences the clock read's stderr (`date +%s 2>/dev/null`).
+    shadow = (f'date() {{ case "$*" in *-d*) command date "$@" ;; *) : > "{mark}"; return 1 ;; esac; }}\n'
               f'S="$(cat "{tmp_path / "s.json"}")"\n')
     r = _sourced(tmp_path, shadow + '_date_master_daily_verdict "$S" 1000 3000 1790501400; echo')
-    assert r.stdout.strip() == "ok" and "CLOCK-READ" not in r.stderr, r.stdout + r.stderr
+    assert r.stdout.strip() == "ok" and not mark.exists(), r.stdout + r.stderr
     r = _sourced(tmp_path, shadow + 'date_master_verdict "$S" 1000; echo')
-    assert "CLOCK-READ" in r.stderr, r.stdout + r.stderr   # the wrapper is where the clock is read
+    assert mark.exists(), r.stdout + r.stderr   # the wrapper is where the clock is read
 
     def boom():
         raise AssertionError("the pure daily decision read the clock")
