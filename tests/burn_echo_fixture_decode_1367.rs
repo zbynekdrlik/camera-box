@@ -31,9 +31,11 @@
 #![cfg(feature = "probe")]
 
 use camera_box::burn_regions::slot_for_run_id;
+use camera_box::probe::burn_echo::NodeBurnGate;
 use camera_box::probe::payload::Payload;
 use camera_box::probe::qr::{
-    decode_qr_luma_all, decode_qr_luma_all_fast_then_robust_grouped_pathed_optical, DecodePath,
+    decode_qr_luma_all, decode_qr_luma_all_fast_then_robust_gated,
+    decode_qr_luma_all_fast_then_robust_grouped_pathed_optical, DecodePath,
 };
 use camera_box::probe::recording_latency::{
     BURN_RUN_ID_CAM1, BURN_RUN_ID_CAM2, BURN_RUN_ID_CAM3, BURN_RUN_ID_CAM4, BURN_RUN_ID_CAM5,
@@ -213,6 +215,59 @@ fn optical_and_aux_payloads_are_untouched_1367() {
                 "{}: the unslotted payload {p:?} must survive; got {:?}",
                 case.file,
                 ids(&got)
+            );
+        }
+    }
+}
+
+/// The rejected echoes are reported (the count the verdict carries), and they are exactly what the
+/// gate removed: with the gate OFF — the pre-issue-1367 decode, still used by the single-group
+/// decode — the same frame keeps the echoes, so it is the gate and nothing else that drops them.
+#[test]
+fn the_gate_reports_the_echoes_it_rejected_and_off_keeps_them_1367() {
+    for case in cases() {
+        for pinned in [false, true] {
+            let optical = pinned.then_some((OPTICAL_RUN_ID, 2));
+            let gated = decode_qr_luma_all_fast_then_robust_gated(
+                fixture_luma(case.file),
+                &[BURN_RUN_ID_STRIH],
+                &CAMERA_IDS,
+                optical,
+                NodeBurnGate::OwnSlot,
+            );
+            for echo in case.echoes {
+                assert!(
+                    ids(&gated.echoes).contains(echo),
+                    "{} (pinned={pinned}): the echo {echo:?} must be counted as rejected; got {:?}",
+                    case.file,
+                    ids(&gated.echoes)
+                );
+            }
+            for e in &gated.echoes {
+                assert!(
+                    slot_for_run_id(e.run_id).is_some(),
+                    "{} (pinned={pinned}): only a slotted node burn is ever an echo: {e:?}",
+                    case.file
+                );
+            }
+            let off = decode_qr_luma_all_fast_then_robust_gated(
+                fixture_luma(case.file),
+                &[BURN_RUN_ID_STRIH],
+                &CAMERA_IDS,
+                optical,
+                NodeBurnGate::Off,
+            );
+            assert!(
+                off.echoes.is_empty(),
+                "{}: Off never reports echoes",
+                case.file
+            );
+            assert!(
+                case.echoes.iter().any(|e| ids(&off.payloads).contains(e)),
+                "{} (pinned={pinned}): without the gate the decode keeps an echo (the bug this \
+                 gate fixes); got {:?}",
+                case.file,
+                ids(&off.payloads)
             );
         }
     }

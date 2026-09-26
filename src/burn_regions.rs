@@ -23,8 +23,10 @@
 //!   margin on the 1080-high design frame. The camera burn is rendered on the 1080 capture frame,
 //!   so on a recording of another height the slot scales with the height (640 px on 4K). A smaller
 //!   burn stays inside the centred, bottom-anchored slot.
-//! - Consumers: the recovery pass (`probe::burn_region_decode`) and the colour gate's burn dodge
-//!   (`probe::colour_sample::node_burn_exclusions`, the slots padded by 6 px).
+//! - Consumers: the recovery pass (`probe::burn_region_decode`), the colour gate's burn dodge
+//!   (`probe::colour_sample::node_burn_exclusions`, the slots padded by 6 px) and the issue-1367
+//!   echo gate (`probe::burn_echo`, via [`node_burn_in_own_slot`]: a node burn counts only when
+//!   read inside its own recovery crop).
 //! - Pins: `tests/burn_regions_cpp_parity_1370.rs` compiles the shipped `burn-geom.hpp` and checks
 //!   every corner on production, 720p, 4K and narrow canvases (default features). The probe-gated
 //!   tests in `src/probe/burn_region_decode.rs` check the camera slot against the `probe::qr`
@@ -210,8 +212,15 @@ pub fn slot_rect(slot: BurnSlot, frame_w: u32, frame_h: u32) -> Option<Rect> {
 /// SongPlayer burn, an unknown id) is never gated, so this returns `true` for it. A frame too small
 /// to hold the slot has no place a real burn could sit, so a slotted read there is `false`.
 pub fn node_burn_in_own_slot(run_id: u32, cx: f64, cy: f64, frame_w: u32, frame_h: u32) -> bool {
-    let _ = (run_id, cx, cy, frame_w, frame_h);
-    true
+    let Some(slot) = slot_for_run_id(run_id) else {
+        return true;
+    };
+    let Some(r) = recovery_crop(slot, frame_w, frame_h) else {
+        return false;
+    };
+    let (x0, y0) = (f64::from(r.x), f64::from(r.y));
+    // Half-open, like every Rect here; a NaN centre compares false and never counts.
+    cx >= x0 && cx < x0 + f64::from(r.w) && cy >= y0 && cy < y0 + f64::from(r.h)
 }
 
 /// The recovery crop for `slot`: its [`slot_rect`] grown by [`RECOVERY_PAD_PX`] (scaled with the

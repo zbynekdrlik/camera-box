@@ -24,15 +24,20 @@
 //!   look read no burn of that slot at all (a slot carries one burn).
 //! - A run_id without a reserved slot (the aux marks, SongPlayer, an operator override) is never
 //!   localized, so it costs nothing here.
+//! - issue 1367: each read is placed on the frame and kept only inside its own slot, like every
+//!   other pass of the camera-chain decode (`probe::burn_echo`). The slot crop IS that
+//!   acceptance region, so for the slot's own ids this can never reject; it holds the "no pass
+//!   admits an echo" invariant by construction.
 //!
 //! It lives in its own module rather than in `qr.rs` (already over the ~1000-line budget). The
 //! pure slot geometry is the Tier-0 [`crate::burn_regions`]; this is the thin probe-gated decode
 //! glue plus the probe-gated pins of that table against the camera-burn writer (`probe::qr`) and
 //! the reserved run_ids (`probe::recording_latency`).
 
-use crate::burn_regions::{recovery_crop, recovery_slots, slot_for_run_id};
+use crate::burn_regions::{node_burn_in_own_slot, recovery_crop, recovery_slots, slot_for_run_id};
+use crate::probe::burn_echo::{reads_in_frame, LocatedPayload};
 use crate::probe::payload::Payload;
-use crate::probe::qr::{decode_qr_luma_all, merge_payloads};
+use crate::probe::qr::{decode_qr_luma_all_located, merge_payloads};
 use crate::probe::recording_latency::{AUX_TICK_RUN_ID, BURN_RUN_ID_SONGPLAYER};
 use image::GrayImage;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -107,17 +112,22 @@ pub fn burn_region_passes(img: &GrayImage, missing_run_ids: &[u32], out: &mut Ve
             continue;
         };
         let crop = image::imageops::crop_imm(img, r.x, r.y, r.w, r.h).to_image();
-        let first = decode_qr_luma_all(crop.clone());
+        // Reads in frame pixels, so the issue-1367 own-slot check below sees where they sit.
+        let first = reads_in_frame(decode_qr_luma_all_located(crop.clone()), r.x, r.y, 1.0, 1.0);
         // One slot carries one burn: if the 1x look read THIS slot's burn under a run_id that is
         // not missing (for example the deployed camera while the others are "missing"), a 2x
         // look cannot find a missing one there.
         let slot_occupied = first
             .iter()
-            .any(|p| slot_for_run_id(p.run_id) == Some(slot));
-        let keep_wanted = |payloads: Vec<Payload>| -> Vec<Payload> {
-            payloads
+            .any(|l| slot_for_run_id(l.payload.run_id) == Some(slot));
+        let keep_wanted = |reads: Vec<LocatedPayload>| -> Vec<Payload> {
+            reads
                 .into_iter()
-                .filter(|p| wanted.contains(&p.run_id))
+                .filter(|l| {
+                    wanted.contains(&l.payload.run_id)
+                        && node_burn_in_own_slot(l.payload.run_id, l.cx, l.cy, w, h)
+                })
+                .map(|l| l.payload)
                 .collect()
         };
         let mut found = keep_wanted(first);
@@ -128,7 +138,14 @@ pub fn burn_region_passes(img: &GrayImage, missing_run_ids: &[u32], out: &mut Ve
                 r.h * BURN_REGION_UPSCALE,
                 image::imageops::FilterType::CatmullRom,
             );
-            found = keep_wanted(decode_qr_luma_all(upscaled));
+            let back = 1.0 / f64::from(BURN_REGION_UPSCALE);
+            found = keep_wanted(reads_in_frame(
+                decode_qr_luma_all_located(upscaled),
+                r.x,
+                r.y,
+                back,
+                back,
+            ));
         }
         let before = out.len();
         merge_payloads(out, found);

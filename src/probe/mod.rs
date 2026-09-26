@@ -9,6 +9,9 @@
 
 pub mod analyzer;
 pub mod burn_contiguity;
+// issue 1367 — the camera-chain decode's node-burn ECHO gate: a node burn counts only when read
+// inside its own `crate::burn_regions` slot; any other read of it is an optical echo.
+pub mod burn_echo;
 // issue 1370 — the burn-isolated recovery pass of the recording decode: an expected node burn the
 // plain + #202 tile passes still miss is decoded from its own `crate::burn_regions` slot crop.
 pub mod burn_region_decode;
