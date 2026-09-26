@@ -41,7 +41,9 @@ multiview) is judged by its node burn; its copies/gaps, cadence and `frozen_leg`
 `_blocking_failures` item 4 never names it. A PASS keeps the 3-line cap by appending
 `CAM2 multi-source (report-only by #1367 decision), 0.43, 0.60` to the camera line; a FAIL puts
 the same text on the `ℹ️` line; `compose_report`'s overall section lists each window with its
-fraction. A verdict without the key renders exactly as before. See `multi-source-window.md`.
+fraction, its cadence section appends `— <tag>, <fraction>` to that window's line, and its
+residual-events line adds `, z toho N v multi-source oknách (<tag>)`. A verdict without the key
+renders exactly as before. See `multi-source-window.md`.
 
 ## The caller captures stdout `2>&1` and jq-parses it
 

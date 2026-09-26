@@ -4,6 +4,9 @@ paths:
   - "src/probe/recording_segments.rs"
   - "tests/multi_source_window_1367.rs"
   - "tests/fixtures/multi-source-1367/**"
+  - "scripts/e2e_discord_report.py"
+  - "scripts/window_gate_walkdown.py"
+  - "tests/python/fixtures/e2e_discord_report/regen_multi_source_1367.py"
   - "tests/python/test_e2e_discord_report_multi_source_1367.py"
 ---
 
@@ -83,7 +86,10 @@ frame once (its node burn: zero loss, max hold 2).
   - item 4 of `_blocking_failures` never names a multi-source window;
   - a PASS keeps its 3 lines and appends the tag to the camera line;
   - a FAIL puts it on the `ℹ️` line;
-  - `compose_report`'s overall section lists each window with its fraction.
+  - `compose_report`'s overall section lists each window with its fraction;
+  - its cadence section appends `— <tag>, <fraction>` to a multi-source window's line;
+  - its residual-events line appends `, z toho N v multi-source oknách (<tag>)` (events matched by
+    cambox + `start_ns <= gen_ts_ns < end_ns`).
 
 ## Verifying under Tier-0
 
@@ -102,5 +108,7 @@ frame once (its node burn: zero loss, max hold 2).
   - a multi-source window with a delivered frame missing its cam2 burn FAILS.
   It compiles first on CI.
 - **Python report fixture:** the REAL run-2059624745 verdict re-folded exactly as the Rust now
-  folds it (the generator mirrors every key above). Regenerate it from a real verdict whenever a key
-  changes, and never hand-invent a shape.
+  folds it. The committed generator `tests/python/fixtures/e2e_discord_report/regen_multi_source_1367.py
+  <real verdict.json> <out.json>` mirrors every key above and reproduces the fixture byte-identically.
+  When a key changes, update the generator next to the Rust `json!` bodies and rerun it. Never
+  hand-invent a shape.
