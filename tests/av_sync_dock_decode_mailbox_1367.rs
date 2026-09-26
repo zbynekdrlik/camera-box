@@ -12,16 +12,16 @@
 //! a two-buffer latest-pending mailbox (`camera-box-decode-mailbox.hpp`) and a worker thread runs
 //! the unchanged decoders on the copy, with the frame's own timestamp.
 //!
-//! Two gates here:
-//!   1. `mailbox_policy_selftest_passes` compiles and runs the dependency-free g++ self-test
-//!      (`vendor/av-sync-dock/test/decode-mailbox-selftest.cpp`): a 50 ms fake decode never blocks
-//!      the producer > 2 ms, the latest frame wins, dropped frames are counted, stop/destroy join an
-//!      in-flight decode.
-//!   2. the source-anchor checks prove `sync-test-output.cpp` is WIRED to it — the callback only
-//!      publishes, the worker starts on output start and is stopped on stop/destroy, and the diag
-//!      line reports `decode_dropped`. The dock compiles ONLY on the Windows runner, so these are
-//!      ALSO mirrored by the pwsh step "Assert dock decode runs off the video-output thread" in BOTH
-//!      windows-genlock workflows (`.claude/rules/av-sync-dock-anchor-refactor-safety.md`).
+//! Two gates here. `mailbox_policy_selftest_passes` compiles and runs the dependency-free g++
+//! self-test (`vendor/av-sync-dock/test/decode-mailbox-selftest.cpp`): a 50 ms fake decode never
+//! blocks the producer for more than 2 ms, the latest frame wins, dropped frames are counted, and
+//! stop/destroy join an in-flight decode.
+//!
+//! The source-anchor checks prove `sync-test-output.cpp` is WIRED to it: the callback only
+//! publishes, the worker starts on output start and is stopped on stop/destroy, and the diag line
+//! reports `decode_dropped`. The dock compiles ONLY on the Windows runner, so these are ALSO
+//! mirrored by the pwsh step "Assert dock decode runs off the video-output thread" in BOTH
+//! windows-genlock workflows (`.claude/rules/av-sync-dock-anchor-refactor-safety.md`).
 
 use std::path::PathBuf;
 use std::process::Command;
