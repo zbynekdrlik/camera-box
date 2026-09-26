@@ -1,6 +1,7 @@
 //! Render a payload to a centered QR on a white BGRA canvas, and decode a payload
 //! from a grayscale image.
 
+use crate::probe::burn_echo::{self, LocatedPayload, NodeBurnGate};
 use crate::probe::luma::{bgra_to_luma, crop_center_luma, crop_top, uyvy_to_luma};
 use crate::probe::payload::Payload;
 use image::{GrayImage, Luma};
@@ -441,14 +442,27 @@ pub fn decode_capture(
 /// (rqrr needs a few px/module) while keeping the prepare cost at ~the single-QR path's.
 const DUAL_BAND_WIDTH: u32 = 1280;
 
-/// Run one rqrr prepare+detect pass over a luma image, returning all CRC-valid payloads.
+/// Run one rqrr prepare+detect pass over a luma image, returning all CRC-valid payloads (no
+/// panic guard: the tests' bare-rqrr baseline; production goes through [`rqrr_decode_all_catch`]).
+#[cfg(test)]
 fn rqrr_decode_all(img: GrayImage) -> Vec<Payload> {
+    burn_echo::payloads(rqrr_decode_all_located(img))
+}
+
+/// [`rqrr_decode_all`] that also keeps WHERE each payload was read: the centre of its rqrr grid
+/// (the mean of the four `bounds` corners) in `img` pixels. The issue-1367 echo gate needs it.
+fn rqrr_decode_all_located(img: GrayImage) -> Vec<LocatedPayload> {
     let mut prepared = rqrr::PreparedImage::prepare(img);
     let mut out = Vec::new();
     for grid in prepared.detect_grids() {
         if let Ok((_meta, content)) = grid.decode() {
-            if let Some(p) = Payload::decode(&content) {
-                out.push(p);
+            if let Some(payload) = Payload::decode(&content) {
+                let b = &grid.bounds;
+                out.push(LocatedPayload {
+                    payload,
+                    cx: b.iter().map(|p| f64::from(p.x)).sum::<f64>() / 4.0,
+                    cy: b.iter().map(|p| f64::from(p.y)).sum::<f64>() / 4.0,
+                });
             }
         }
     }
@@ -502,8 +516,9 @@ fn install_rqrr_assert_silencer() {
 /// `catch_unwind` here still catches it (the silencer only affects what gets PRINTED, never
 /// what gets caught). Used by BOTH the #202 tiled retry AND (#673) the primary full-frame pass
 /// in [`decode_qr_luma_all`] — the old assumption that "the full frame never panics" was
-/// live-disproven on a real recording (see that function's doc).
-fn rqrr_decode_all_catch(img: GrayImage) -> Vec<Payload> {
+/// live-disproven on a real recording (see that function's doc). Returns each payload with its
+/// grid centre ([`rqrr_decode_all_located`]) so the issue-1367 echo gate can place it.
+fn rqrr_decode_all_catch(img: GrayImage) -> Vec<LocatedPayload> {
     install_rqrr_assert_silencer();
     // #673 opt-in diagnostic: when QR_DECODE_PANIC_DUMP_DIR is set, save the EXACT
     // panic-triggering frame as a PNG for building a real-pixel regression fixture later — a
@@ -514,8 +529,10 @@ fn rqrr_decode_all_catch(img: GrayImage) -> Vec<Payload> {
     static DUMP_COUNTER: AtomicU64 = AtomicU64::new(0);
     let dump_dir = DUMP_DIR.get_or_init(|| std::env::var("QR_DECODE_PANIC_DUMP_DIR").ok());
     let img_for_dump = dump_dir.as_ref().map(|_| img.clone());
-    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| rqrr_decode_all(img))) {
-        Ok(payloads) => payloads,
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        rqrr_decode_all_located(img)
+    })) {
+        Ok(reads) => reads,
         Err(e) => {
             // Log every caught rqrr internal panic (not just the silenced "scan >= 1" one).
             // Diagnostic only: the caller already treats "nothing decoded" as a normal outcome
@@ -650,24 +667,29 @@ pub(crate) fn binarize_otsu(img: &GrayImage) -> GrayImage {
 /// "undecodable frame" outcome) — this changes crash-vs-no-crash, never any pass/fail
 /// semantics of the zero-loss verdict itself.
 pub fn decode_qr_luma_all(img: GrayImage) -> Vec<Payload> {
-    let mut out = rqrr_decode_all_catch(img.clone());
+    let (plain, otsu) = plain_and_otsu_reads(img);
+    let mut out = burn_echo::payloads(plain);
     // The hard Otsu cut recovers the soft optical capture the plain adaptive prepare misses,
     // even when the plain pass already decoded the crisp burns (#363).
-    merge_payloads(&mut out, rqrr_decode_all_catch(binarize_otsu(&img)));
+    merge_payloads(&mut out, burn_echo::payloads(otsu));
     out
 }
 
-/// Tile-scoped twin of [`decode_qr_luma_all`] for the #202 tile passes (plain pass, then an
-/// Otsu-binarized retry if empty). Both this AND `decode_qr_luma_all` route through the same
-/// panic-safe [`rqrr_decode_all_catch`] (#673) so a degenerate tile — or a degenerate
-/// full-frame homography — that trips an rqrr internal assert yields "nothing" instead of
-/// aborting the whole frame's decode.
-fn decode_qr_luma_all_tile(img: GrayImage) -> Vec<Payload> {
-    let first = rqrr_decode_all_catch(img.clone());
-    if !first.is_empty() {
-        return first;
-    }
-    rqrr_decode_all_catch(binarize_otsu(&img))
+/// The two passes of [`decode_qr_luma_all`] (plain, then Otsu-binarized), each read with its
+/// grid centre in `img` pixels and nothing merged yet.
+fn plain_and_otsu_reads(img: GrayImage) -> (Vec<LocatedPayload>, Vec<LocatedPayload>) {
+    let otsu = binarize_otsu(&img);
+    (rqrr_decode_all_catch(img), rqrr_decode_all_catch(otsu))
+}
+
+/// Every read of [`decode_qr_luma_all`]'s two passes, plain then Otsu, with its grid centre in
+/// `img` pixels and NO identity merge (issue 1367). The echo gate must judge every read before
+/// reads merge: a keep-first merge could otherwise keep an echo of a burn and drop the in-slot
+/// read of the same id. Merged keep-first after gating, the payloads equal `decode_qr_luma_all`'s.
+pub fn decode_qr_luma_all_reads(img: GrayImage) -> Vec<LocatedPayload> {
+    let (mut reads, otsu) = plain_and_otsu_reads(img);
+    reads.extend(otsu);
+    reads
 }
 
 /// #202 — how many horizontal tiles the robust (offline-recording) decode splits the BOTTOM
@@ -842,10 +864,21 @@ fn robust_optical_half_passes(img: &GrayImage, out: &mut Vec<Payload>) {
 /// payloads into `out` (de-duped by `(run_id, frame_id)`), so `out` is always a SUPERSET of
 /// what it carried on entry — never fewer.
 fn robust_tile_passes(img: &GrayImage, out: &mut Vec<Payload>) {
+    merge_payloads(
+        out,
+        burn_echo::payloads(tile_pass_reads(img, NodeBurnGate::Off)),
+    );
+}
+
+/// Every read of the #202 bottom tiles, tile after tile, each mapped back to FRAME pixels through
+/// its crop offset and upscale (issue 1367: the echo gate places each read on the frame). `gate`
+/// only decides when a tile gets its Otsu retry; the reads are gated by the caller.
+fn tile_pass_reads(img: &GrayImage, gate: NodeBurnGate) -> Vec<LocatedPayload> {
     let (w, h) = (img.width(), img.height());
+    let mut reads = Vec::new();
     // A tiny frame is one tile — the plain pass already covered it; nothing to gain.
     if w < TILE_COLS || h < 2 {
-        return;
+        return reads;
     }
 
     // The bottom band that holds the burns (the top dual-QR is excluded — it decodes
@@ -881,24 +914,48 @@ fn robust_tile_passes(img: &GrayImage, out: &mut Vec<Payload>) {
         } else {
             tile
         };
-        merge_payloads(out, decode_qr_luma_all_tile(tile));
+        // One decoded pixel spans (tile px / decoded px) of the frame; 1.0 when not upscaled.
+        let scale_x = f64::from(tw) / f64::from(tile.width().max(1));
+        let scale_y = f64::from(band_h) / f64::from(tile.height().max(1));
+        let in_frame =
+            |tile_reads| burn_echo::reads_in_frame(tile_reads, x0, band_top, scale_x, scale_y);
+        // The tile decode: the plain pass, then an Otsu-binarized retry when no plain read counts.
+        // Both go through the panic-safe `rqrr_decode_all_catch` (#673), so a degenerate tile
+        // yields "nothing" instead of aborting the frame's decode. Under `Off` "counts" is "any
+        // read at all" (the #202 rule); under `OwnSlot` a tile whose plain pass read only node-burn
+        // echoes gets the Otsu look too, so an echo never costs a real burn its retry (issue 1367).
+        let plain = in_frame(rqrr_decode_all_catch(tile.clone()));
+        let retry = !burn_echo::any_read_counts(&plain, w, h, gate);
+        reads.extend(plain);
+        if retry {
+            reads.extend(in_frame(rqrr_decode_all_catch(binarize_otsu(&tile))));
+        }
     }
+    reads
 }
 
 /// #754 — the TOP-band optical-recovery pass: crop the top [`OPTICAL_TOP_BAND_FRAC`] of the
 /// frame (which holds the whole cam2 dual-QR Vernier and NONE of the bottom node burns) and run
 /// the SAME plain∪Otsu decode ([`decode_qr_luma_all`]) over just that band, merging any
 /// CRC-valid payloads into `out` (de-duped by `(run_id, frame_id)`). Because the crop excludes
-/// the bottom burns entirely, this can only ever ADD optical payloads — `out` stays a strict
-/// SUPERSET of what it carried on entry — so it is safe to fire without knowing which run_id the
-/// optical is (pin-independent). This is the top-band twin of [`robust_tile_passes`] (which
+/// the bottom burns' SLOTS, it never adds a real node burn — `out` stays a strict SUPERSET of
+/// what it carried on entry — so it is safe to fire without knowing which run_id the optical is
+/// (pin-independent). It CAN read a node burn's optical ECHO when a camera films a monitor showing
+/// OBS (issue 1367, cam2 on the strih-lx HDMI multiview); the recording decode gates those out
+/// ([`crate::probe::burn_echo`]). This is the top-band twin of [`robust_tile_passes`] (which
 /// crops the BOTTOM band for the small burns); see [`OPTICAL_TOP_BAND_FRAC`] for the #751/#754
 /// root cause and the 30/30-vs-0/30 offline measurement that fixes the band fraction.
 fn robust_optical_top_band(img: &GrayImage, out: &mut Vec<Payload>) {
+    merge_payloads(out, burn_echo::payloads(top_band_reads(img)));
+}
+
+/// Every read of the #754 top-band crop, in FRAME pixels (the crop starts at the frame origin and
+/// is not resized, so its pixels are frame pixels).
+fn top_band_reads(img: &GrayImage) -> Vec<LocatedPayload> {
     let (w, h) = (img.width(), img.height());
     // A tiny frame is already one look for the plain pass — nothing a crop can add.
     if w < 2 || h < 2 {
-        return;
+        return Vec::new();
     }
     // #718: crop-height arithmetic now lives in the pure crate-root helper (shared with
     // `colour_sample::detect_dual_qr`'s own retry) — same formula, one source of truth.
@@ -906,7 +963,7 @@ fn robust_optical_top_band(img: &GrayImage, out: &mut Vec<Payload>) {
     // Same size as the source when the frac rounds to the full height — still a valid, cheap
     // second look (Otsu over the whole frame), never a panic.
     let band = image::imageops::crop_imm(img, 0, 0, w, band_h).to_image();
-    merge_payloads(out, decode_qr_luma_all(band));
+    decode_qr_luma_all_reads(band)
 }
 
 /// #754 — is the plain full-frame pass SHORT of the optical dual-QR, i.e. does the top-band
@@ -1026,12 +1083,23 @@ pub fn decode_qr_luma_all_fast_then_robust_pathed(
     expected_burn_run_ids: &[u32],
 ) -> (Vec<Payload>, DecodePath) {
     // Every id in `expected_burn_run_ids` is MANDATORY (an empty `any_of` group is vacuously
-    // satisfied) — this is the pre-#632 behavior, unchanged for every existing caller.
-    decode_qr_luma_all_fast_then_robust_grouped_pathed(img, expected_burn_run_ids, &[])
+    // satisfied) — this is the pre-#632 behavior, unchanged for every existing caller. This
+    // per-frame helper keeps every read wherever it was found (issue 1367 `Off`): no recording
+    // goes through it (`recording::analyze_recording*` runs the gated grouped decode), and tests
+    // use it with node burns drawn at arbitrary positions on synthetic canvases.
+    let d = decode_qr_luma_all_fast_then_robust_gated(
+        img,
+        expected_burn_run_ids,
+        &[],
+        None,
+        NodeBurnGate::Off,
+    );
+    (d.payloads, d.path)
 }
 
 /// #632 gap 1 — [`decode_qr_luma_all_fast_then_robust_pathed`] generalized with a SECOND,
-/// independent group: `mandatory_burn_run_ids` must ALL be found (unchanged semantics), and
+/// independent group: `mandatory_burn_run_ids` must ALL be found (unchanged semantics; since
+/// issue 1367 this grouped path also runs the node-burn echo gate, the flat one does not), and
 /// `any_of_burn_run_ids` needs only ONE member found (empty ⇒ vacuously satisfied, matching
 /// `mandatory`'s existing empty-list behavior). This is what lets a recording whose
 /// camera-under-test is cam3/cam4/cam5/cam6/cam2 (instead of the historically-hardcoded cam1)
@@ -1083,13 +1151,48 @@ pub fn decode_qr_luma_all_fast_then_robust_grouped_pathed(
 /// gen_ts_ns)` against the painter's own ground-truth CSV: 92939/92939 payloads across 5 full
 /// recordings matched a REAL painted tick exactly — zero hallucinated/misread values — so this
 /// is a decode-COVERAGE gap, never a decoder-correctness bug; see #707's own issue thread).
+///
+/// issue 1367: this is the decode behind every recording analysis (`recording::analyze_recording*`:
+/// strih, stream, imag, cg, the cam1 grab), so it runs the node-burn echo gate
+/// ([`NodeBurnGate::OwnSlot`], see [`crate::probe::burn_echo`]).
 pub fn decode_qr_luma_all_fast_then_robust_grouped_pathed_optical(
     img: GrayImage,
     mandatory_burn_run_ids: &[u32],
     any_of_burn_run_ids: &[u32],
     min_distinct_optical: Option<(u32, usize)>,
 ) -> (Vec<Payload>, DecodePath) {
-    let mut out = decode_qr_luma_all(img.clone());
+    let d = decode_qr_luma_all_fast_then_robust_gated(
+        img,
+        mandatory_burn_run_ids,
+        any_of_burn_run_ids,
+        min_distinct_optical,
+        NodeBurnGate::OwnSlot,
+    );
+    (d.payloads, d.path)
+}
+
+/// The per-frame recording decode core (#207 fast-then-robust, #632 groups, #707 optical gate,
+/// #754 top band, issue 1370 slot recovery), with the issue-1367 node-burn echo gate: under
+/// [`NodeBurnGate::OwnSlot`] each pass's reads are placed on the frame and a slotted node burn
+/// read outside its own slot is dropped as an echo before it merges. An echo therefore never
+/// satisfies the optical-short check, the fast-path gate or the missing-burn list. Under
+/// [`NodeBurnGate::Off`] the result is byte-identical to the pre-issue-1367 decode.
+pub fn decode_qr_luma_all_fast_then_robust_gated(
+    img: GrayImage,
+    mandatory_burn_run_ids: &[u32],
+    any_of_burn_run_ids: &[u32],
+    min_distinct_optical: Option<(u32, usize)>,
+    gate: NodeBurnGate,
+) -> burn_echo::FrameDecode {
+    let (w, h) = (img.width(), img.height());
+    // The full-frame pass (plain, then Otsu), gated read by read before anything merges: under
+    // `Off` this is exactly `decode_qr_luma_all` (the plain reads as they came, Otsu merged
+    // keep-first).
+    let (plain, otsu) = plain_and_otsu_reads(img.clone());
+    let (mut out, plain_echoes) = burn_echo::split_node_burn_echoes(plain, w, h, gate);
+    let mut echoes = Vec::new();
+    merge_payloads(&mut echoes, plain_echoes);
+    burn_echo::admit_reads(&mut out, &mut echoes, otsu, w, h, gate);
 
     // #754: the SOFT optical dual-QR (top band) is missed by the full-frame plain pass on late
     // #751-sweep frames (rqrr locates the grid but the full-frame perspective/threshold decode
@@ -1099,35 +1202,52 @@ pub fn decode_qr_luma_all_fast_then_robust_grouped_pathed_optical(
     // isolated look robust_tile_passes gives the bottom burns, BEFORE the gate, whenever the
     // plain pass is short of the optical — so a frame that was ONLY optical-short (burns fine)
     // recovers and takes the cheap FAST path instead of the ~10× bottom-tile robust fallback.
-    // The crop excludes the burns, so this only ever ADDS optical payloads (out stays a superset).
+    // The crop excludes the burn slots, so it never adds a real burn; a node-burn ECHO it reads
+    // (issue 1367) is dropped by the gate here, before the fast-path check below.
     if optical_read_short(&out, min_distinct_optical) {
-        robust_optical_top_band(&img, &mut out);
+        burn_echo::admit_reads(&mut out, &mut echoes, top_band_reads(&img), w, h, gate);
     }
 
-    if fast_path_gate_satisfied(
+    let path = if fast_path_gate_satisfied(
         &out,
         mandatory_burn_run_ids,
         any_of_burn_run_ids,
         min_distinct_optical,
     ) {
-        return (out, DecodePath::Fast);
+        DecodePath::Fast
+    } else {
+        // Robust fallback: a mandatory burn is missing, NONE of the any-of group decoded, or
+        // (#707) the dual-QR optical read is STILL short after the #754 top-band recovery — give
+        // rqrr the tiled+upscaled look (#202) that recovers reads the full-frame pass
+        // intermittently misses.
+        burn_echo::admit_reads(
+            &mut out,
+            &mut echoes,
+            tile_pass_reads(&img, gate),
+            w,
+            h,
+            gate,
+        );
+
+        // issue 1370: an expected burn the tiles STILL missed gets an isolated look at its own
+        // known slot, so optical content the camera happens to put next to it in the tile cannot
+        // hide it. A no-op when the frame went robust only for the optical dimension.
+        crate::probe::burn_region_decode::recover_missing_burns(
+            &img,
+            mandatory_burn_run_ids,
+            any_of_burn_run_ids,
+            &mut out,
+        );
+        DecodePath::Robust
+    };
+    if gate == NodeBurnGate::OwnSlot {
+        burn_echo::record_frame_echoes(&echoes);
     }
-
-    // Robust fallback: a mandatory burn is missing, NONE of the any-of group decoded, or (#707)
-    // the dual-QR optical read is STILL short after the #754 top-band recovery — give rqrr the
-    // tiled+upscaled look (#202) that recovers reads the full-frame pass intermittently misses.
-    robust_tile_passes(&img, &mut out);
-
-    // issue 1370: an expected burn the tiles STILL missed gets an isolated look at its own known
-    // slot, so optical content the camera happens to put next to it in the tile cannot hide it.
-    // A no-op when the frame went robust only for the optical dimension.
-    crate::probe::burn_region_decode::recover_missing_burns(
-        &img,
-        mandatory_burn_run_ids,
-        any_of_burn_run_ids,
-        &mut out,
-    );
-    (out, DecodePath::Robust)
+    burn_echo::FrameDecode {
+        payloads: out,
+        path,
+        echoes,
+    }
 }
 
 /// Pure #207/#707 fast-path gate DECISION — every completeness dimension the plain-pass
@@ -2233,7 +2353,9 @@ mod tests {
         // Composite BOTH the strih burn and cam3's burn into the frame (two distinct node
         // burns, as a real strih recording under cam3 test would carry: cam3's forwarded
         // capture burn + strih's own render burn). `dual_with_bottom_burn` only blits one
-        // burn, so blit a second one manually at a different corner.
+        // burn, so blit the camera burn manually where a real one sits: the capture-burn
+        // slot, bottom-centre (issue 1367: the recording decode counts a node burn only
+        // in its own slot, so a camera burn drawn in the stream corner is an echo).
         let strih_burn = Payload {
             run_id: STRIH_ID,
             frame_id: 1670,
@@ -2246,11 +2368,12 @@ mod tests {
         };
         let mut luma = dual_with_bottom_burn(&left, &right, &strih_burn, 360, 0.0);
         let (w, h) = (1920u32, 1080u32);
-        let cam3_qr = render_payload_qr(&cam3_burn, 360);
+        let cam3_qr = render_payload_qr(&cam3_burn, CAM1_BURN_QR_PX);
         let (qw, qh) = (cam3_qr.width(), cam3_qr.height());
-        // Bottom-RIGHT corner (measured actual size, never the requested px) — clear of the
-        // strih burn `dual_with_bottom_burn` already placed bottom-LEFT.
-        blit_burn_luma(&mut luma, &cam3_burn, 360, w - qw - 40, h - qh - 40);
+        // The production capture-burn origin (measured actual size, never the requested px):
+        // bottom-centre, below the top dual-QR and clear of the strih burn bottom-LEFT.
+        let (ox, oy) = cam1_burn_origin(w, h, qw, qh);
+        blit_burn_luma(&mut luma, &cam3_burn, CAM1_BURN_QR_PX, ox, oy);
 
         // Precondition: the plain pass reads BOTH burns, never cam1's (it was never drawn).
         let plain = decode_qr_luma_all(luma.clone());

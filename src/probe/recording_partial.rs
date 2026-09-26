@@ -152,6 +152,14 @@ pub struct RecordingPartial {
     /// flag, so old behaviour is unchanged.
     #[serde(default)]
     pub record_render: Option<RecordRenderStats>,
+    /// issue 1367 — how many node-burn ECHOES the decode of THIS recording rejected (distinct echo
+    /// payloads per frame, summed; `probe::burn_echo`): node burns rqrr read outside their own
+    /// slot, e.g. copies inside a multiview a camera films. Report-only, surfaced as the verdict's
+    /// `burn_echoes_rejected`. `Some` on every extract (every recording analysis is gated), `None`
+    /// on a partial from an older build. Additive + optional (`#[serde(default)]`), so no schema
+    /// bump: an older reader ignores it, a newer one reads `None` from an older file.
+    #[serde(default)]
+    pub burn_echoes_rejected: Option<u64>,
 }
 
 impl RecordingPartial {
@@ -177,6 +185,7 @@ impl RecordingPartial {
             av_sync: None,
             frame_prev_diffs: None,
             record_render: None,
+            burn_echoes_rejected: None,
         }
     }
 
@@ -213,6 +222,14 @@ impl RecordingPartial {
     /// (mirrors `with_colour` / `with_av_sync` / `with_frame_prev_diffs`).
     pub fn with_record_render(mut self, record_render: Option<RecordRenderStats>) -> Self {
         self.record_render = record_render;
+        self
+    }
+
+    /// Attach the issue-1367 node-burn echo count of THIS box's recording decode — set by
+    /// `--extract-partial` from `probe::burn_echo::burn_echo_rejection_count` after the decode.
+    /// Builder, like the other carried fields.
+    pub fn with_burn_echoes_rejected(mut self, burn_echoes_rejected: Option<u64>) -> Self {
+        self.burn_echoes_rejected = burn_echoes_rejected;
         self
     }
 
@@ -353,6 +370,22 @@ mod tests {
             restored.record_render, None,
             "absent record_render field ⇒ None (#1143 additive #[serde(default)])"
         );
+        assert_eq!(
+            restored.burn_echoes_rejected, None,
+            "absent burn_echoes_rejected ⇒ None (issue 1367, additive, no schema bump)"
+        );
+    }
+
+    #[test]
+    fn burn_echo_count_survives_the_partial_roundtrip_1367() {
+        let p = RecordingPartial::from_frames("strih", Path::new("strih-1367.mkv"), &[], vec![])
+            .with_burn_echoes_rejected(Some(4242));
+        assert_eq!(
+            p.schema_version, 6,
+            "an additive field needs no schema bump"
+        );
+        let restored = RecordingPartial::from_json(&p.to_json().unwrap()).unwrap();
+        assert_eq!(restored.burn_echoes_rejected, Some(4242));
     }
 
     #[test]
