@@ -85,6 +85,9 @@ struct Sim {
     left: u64,
     /// The largest number of packets sent in one wake.
     max_send_per_wake: u32,
+    /// Per sent packet: send instant minus the production instant of its first sample (the
+    /// sample's slot on the mixer clock) -- the latency the receiver sees.
+    latency: Vec<u64>,
 }
 
 /// The patched send thread driven by `Pacing::step`.
@@ -117,9 +120,12 @@ fn run_paced(p: &mut Pacing, arrivals: &[u64], rng: &mut Rng) -> Sim {
         assert!(s.drop_samples + u64::from(s.send) * ps <= buffered);
         buffered -= s.drop_samples + u64::from(s.send) * ps;
         sim.dropped += s.drop_samples;
-        sim.sent_samples += u64::from(s.send) * ps;
         sim.max_send_per_wake = sim.max_send_per_wake.max(s.send);
         for _ in 0..s.send {
+            let first = sim.dropped + sim.sent_samples;
+            sim.latency
+                .push(now - (BASE_NS + samples_to_ns(first, RATE)));
+            sim.sent_samples += ps;
             sim.sends.push(now);
         }
         if p.underflows > underflows_before {
@@ -192,6 +198,20 @@ fn run_stats(sim: &Sim) -> Vec<(u64, u64, usize)> {
         .collect()
 }
 
+/// The median receiver-side latency of the packets sent in `[from, to)`.
+fn median_latency(sim: &Sim, from: u64, to: u64) -> u64 {
+    let mut v: Vec<u64> = sim
+        .sends
+        .iter()
+        .zip(&sim.latency)
+        .filter(|(t, _)| **t >= from && **t < to)
+        .map(|(_, l)| *l)
+        .collect();
+    assert!(!v.is_empty(), "no packets sent in the window");
+    v.sort_unstable();
+    v[v.len() / 2]
+}
+
 fn assert_conserved(sim: &Sim) {
     assert_eq!(
         sim.produced,
@@ -232,6 +252,10 @@ fn logged_pattern_at_64ms_is_smooth_with_no_underflow() {
         );
         assert!(p.late_max_ns <= WAKE_JITTER_MAX_NS);
         assert_eq!(
+            p.trims, 0,
+            "seed {seed}: a stall inside the buffer is never trimmed"
+        );
+        assert_eq!(
             sim.max_send_per_wake, 1,
             "seed {seed}: on time, one packet per deadline"
         );
@@ -271,13 +295,24 @@ fn a_stall_longer_than_the_buffer_is_counted_never_hidden() {
         "one stall, {} underflows",
         sim.underflows
     );
-    assert_eq!(sim.dropped, 0);
     for (spread, _, _) in run_stats(&sim) {
         assert!(
             spread <= MS,
             "each run stays on its own schedule, spread {spread} ns"
         );
     }
+    // The latency comes back: the re-anchor on top of the audio thread's catch-up backlog is
+    // trimmed once, and nothing else is ever dropped.
+    let stall_ns = BASE_NS + samples_to_ns(3_000 * BLOCK, RATE);
+    let before = median_latency(&sim, stall_ns - 3_000 * MS, stall_ns);
+    let end = *sim.sends.last().unwrap();
+    let after = median_latency(&sim, end - 3_000 * MS, end + 1);
+    assert_eq!(p.trims, 1, "one trim restores the latency");
+    assert_eq!(sim.overflows, 0);
+    assert!(
+        after <= before + 30 * MS && after >= 64 * MS,
+        "latency before the stall {before} ns, after {after} ns"
+    );
 
     // The same stall inside a 200 ms buffer is absorbed.
     let mut rng = Rng(7);

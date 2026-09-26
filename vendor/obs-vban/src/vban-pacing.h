@@ -49,6 +49,7 @@ struct vban_pacing {
 	uint64_t underflows;
 	uint64_t overflows;
 	uint64_t late_max_ns;
+	uint64_t trims;
 };
 
 struct vban_pacing_step {
@@ -102,6 +103,14 @@ static inline void vban_pacing_init(struct vban_pacing *p, int64_t target_ms, ui
 	p->underflows = 0;
 	p->overflows = 0;
 	p->late_max_ns = 0;
+	p->trims = 0;
+}
+
+/* A new target while the output runs (RED stub: ignored). */
+static inline void vban_pacing_retarget(struct vban_pacing *p, int64_t target_ms)
+{
+	(void)p;
+	(void)target_ms;
 }
 
 /* The deadline of packet n of the current schedule. */

@@ -31,6 +31,10 @@ pub const TARGET_MS_MIN: i64 = 20;
 pub const TARGET_MS_MAX: i64 = 200;
 /// Depth above the target at which the oldest packets are dropped.
 pub const OVERFLOW_HEADROOM_MS: u64 = 200;
+/// The window over which a sustained excess depth is measured before it is trimmed.
+pub const TRIM_WINDOW_NS: u64 = 2_000_000_000;
+/// The trim hysteresis is half the target, but at least this.
+pub const TRIM_HYSTERESIS_MIN_MS: u64 = 20;
 /// The `obs-vban pacing:` log line cadence.
 pub const LOG_INTERVAL_NS: u64 = 10_000_000_000;
 
@@ -89,6 +93,10 @@ pub struct Pacing {
     pub underflows: u64,
     pub overflows: u64,
     pub late_max_ns: u64,
+    /// Sustained-excess and retarget drops (RED stub: never counted).
+    pub trims: u64,
+    /// A running window whose minimum depth stays above this is trimmed back to the target.
+    pub trim_threshold_samples: u64,
 }
 
 impl Pacing {
@@ -101,6 +109,8 @@ impl Pacing {
             target_ns: u64::from(target_ms) * 1_000_000,
             target_samples,
             overflow_samples: target_samples + ms_to_samples(OVERFLOW_HEADROOM_MS, rate),
+            trim_threshold_samples: target_samples
+                + ms_to_samples((u64::from(target_ms) / 2).max(TRIM_HYSTERESIS_MIN_MS), rate),
             packet_samples: packet_samples.max(1),
             rate,
             running: false,
@@ -111,8 +121,12 @@ impl Pacing {
             underflows: 0,
             overflows: 0,
             late_max_ns: 0,
+            trims: 0,
         }
     }
+
+    /// A new target while the output runs (RED stub: ignored).
+    pub fn retarget(&mut self, _target_ms: i64) {}
 
     /// The deadline of packet `n` of the current schedule.
     pub fn deadline_ns(&self, n: u64) -> u64 {
@@ -312,6 +326,102 @@ mod tests {
         assert_eq!(s.drop_samples % u64::from(PS), 0);
         assert_eq!(p.overflows, 1);
         assert!(p.overflow_samples + 1 - s.drop_samples >= p.target_samples);
+    }
+
+    /// Drive the running schedule from `from_ns` for `dur_ns`, waking exactly at each deadline
+    /// with `buffered` samples, and return every wake's decision.
+    fn run_at_deadlines(p: &mut Pacing, dur_ns: u64, buffered: u64) -> Vec<(u64, Step)> {
+        let end = p.deadline_ns(p.n_sent) + dur_ns;
+        let mut out = Vec::new();
+        let mut now = p.deadline_ns(p.n_sent);
+        while now < end {
+            let s = p.step(now, buffered);
+            out.push((now, s));
+            now = s.wake_ns;
+        }
+        out
+    }
+
+    fn started(target_ms: i64, buffered: u64) -> Pacing {
+        let mut p = Pacing::new(target_ms, PS, RATE);
+        p.step(0, buffered);
+        p.step(u64::from(p.target_ms) * 1_000_000, buffered);
+        assert!(p.running);
+        p
+    }
+
+    #[test]
+    fn a_sustained_excess_is_trimmed_back_to_the_target_after_the_window() {
+        // A stall re-anchored on top of the audio thread's catch-up leaves the buffer at target +
+        // backlog. Without a trim the latency would stay raised for good.
+        let mut p = started(64, 12_000);
+        let min_after_send = 12_000 - u64::from(PS);
+        let wakes = run_at_deadlines(&mut p, 2_500_000_000, 12_000);
+        let trims: Vec<_> = wakes.iter().filter(|(_, s)| s.drop_samples > 0).collect();
+        assert_eq!(trims.len(), 1, "one trim after the window: {trims:?}");
+        let (at, s) = trims[0];
+        assert!(
+            *at >= p.t0_ns + TRIM_WINDOW_NS,
+            "never before the window closes"
+        );
+        let excess = min_after_send - p.target_samples;
+        assert_eq!(s.drop_samples, excess - excess % u64::from(PS));
+        assert_eq!(p.trims, 1);
+        assert_eq!((p.underflows, p.overflows), (0, 0));
+    }
+
+    #[test]
+    fn a_depth_inside_the_hysteresis_is_never_trimmed() {
+        // target + half the target (64 ms: 3072 + 1536 samples) is still ordinary jitter slack.
+        let mut p = started(64, 4_608 + u64::from(PS));
+        assert_eq!(p.trim_threshold_samples, 4_608);
+        let wakes = run_at_deadlines(&mut p, 6_000_000_000, 4_608 + u64::from(PS));
+        assert!(wakes.iter().all(|(_, s)| s.drop_samples == 0));
+        assert_eq!(p.trims, 0);
+        // One sample more and the whole window sits above it: trimmed.
+        let mut p = started(64, 4_609 + u64::from(PS));
+        run_at_deadlines(&mut p, 2_500_000_000, 4_609 + u64::from(PS));
+        assert_eq!(p.trims, 1);
+        // The 20 ms floor of the hysteresis: target 20 ms = 960 samples, threshold 960 + 960.
+        assert_eq!(Pacing::new(20, PS, RATE).trim_threshold_samples, 1_920);
+    }
+
+    #[test]
+    fn retarget_up_delays_the_schedule_and_down_drops_the_difference() {
+        let mut p = started(64, 10_000);
+        let next = p.deadline_ns(p.n_sent);
+        p.retarget(100);
+        assert_eq!(p.target_ms, 100);
+        assert_eq!(p.target_samples, 4_800);
+        assert_eq!(
+            p.deadline_ns(p.n_sent),
+            next + 36_000_000,
+            "36 ms later, nothing dropped"
+        );
+        let s = p.step(next, 10_000);
+        assert_eq!((s.send, s.drop_samples), (0, 0));
+        assert_eq!(s.wake_ns, next + 36_000_000);
+
+        let mut p = started(64, 10_000);
+        let next = p.deadline_ns(p.n_sent);
+        p.retarget(40);
+        assert_eq!(p.deadline_ns(p.n_sent), next, "the schedule stays");
+        let s = p.step(next, 10_000);
+        // 24 ms = 1152 samples, whole packets: 4 x 239 = 956.
+        assert_eq!(s.drop_samples, 956);
+        assert_eq!(s.send, 1);
+        assert_eq!(p.trims, 1);
+        // The same value, or a value that clamps to it, changes nothing.
+        p.retarget(40);
+        p.retarget(40);
+        assert_eq!(p.step(p.deadline_ns(p.n_sent), 10_000).drop_samples, 0);
+        assert_eq!(p.trims, 1);
+        // Before the schedule runs, a retarget only moves the anchor.
+        let mut p = Pacing::new(64, PS, RATE);
+        p.step(1_000, 500);
+        p.retarget(30);
+        assert_eq!(p.step(2_000, 500).wake_ns, 1_000 + 30_000_000);
+        assert_eq!(p.trims, 0);
     }
 
     #[test]

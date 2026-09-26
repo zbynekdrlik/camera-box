@@ -32,7 +32,7 @@ use std::fmt::Write as _;
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
-use vban_pacing::{clamp_target_ms, samples_to_ns, Pacing};
+use vban_pacing::{clamp_target_ms, samples_to_ns, Pacing, Step, TRIM_WINDOW_NS};
 
 const HEADER: &str = "vendor/obs-vban/src/vban-pacing.h";
 
@@ -40,12 +40,28 @@ fn repo(rel: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(rel)
 }
 
+/// One scripted wake: `now`, the buffered samples, and a target change applied just before it.
+#[derive(Clone, Copy)]
+struct Wake {
+    now: u64,
+    buffered: u64,
+    retarget: Option<i64>,
+}
+
+fn w(now: u64, buffered: u64) -> Wake {
+    Wake {
+        now,
+        buffered,
+        retarget: None,
+    }
+}
+
 /// One scripted output: its config and the wakes it sees.
 struct Script {
     target_ms: i64,
     packet_samples: u32,
     rate: u32,
-    wakes: Vec<(u64, u64)>,
+    wakes: Vec<Wake>,
 }
 
 struct Rng(u64);
@@ -65,14 +81,58 @@ impl Rng {
     }
 }
 
+/// Builds a wake script while running the Rust model, so the next wake can land on the model's
+/// own deadlines and window boundaries.
+struct Builder {
+    p: Pacing,
+    wakes: Vec<Wake>,
+    buffered: u64,
+}
+
+impl Builder {
+    fn new(target_ms: i64, packet_samples: u32, rate: u32) -> Self {
+        Builder {
+            p: Pacing::new(target_ms, packet_samples, rate),
+            wakes: Vec::new(),
+            buffered: 0,
+        }
+    }
+
+    /// One wake with `buffered` samples (and a target change just before it); the model then
+    /// consumes what it sent or dropped. Returns the decision.
+    fn wake(&mut self, now: u64, buffered: u64, retarget: Option<i64>) -> Step {
+        self.wakes.push(Wake {
+            now,
+            buffered,
+            retarget,
+        });
+        if let Some(t) = retarget {
+            self.p.retarget(t);
+        }
+        let s = self.p.step(now, buffered);
+        self.buffered =
+            buffered - s.drop_samples - u64::from(s.send) * u64::from(self.p.packet_samples);
+        s
+    }
+
+    fn script(self, target_ms: i64, packet_samples: u32, rate: u32) -> Script {
+        Script {
+            target_ms,
+            packet_samples,
+            rate,
+            wakes: self.wakes,
+        }
+    }
+}
+
 /// A wake script steered by the Rust model so that it keeps landing on the boundaries.
 fn steered_script(seed: u64, target_ms: i64, packet_samples: u32, rate: u32, n: usize) -> Script {
     let mut rng = Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
-    let mut p = Pacing::new(target_ms, packet_samples, rate);
-    let ps = u64::from(p.packet_samples);
+    let mut bld = Builder::new(target_ms, packet_samples, rate);
+    let ps = u64::from(bld.p.packet_samples);
     let block = 1024u64;
-    let (mut now, mut wake, mut buffered) = (1_000_000_000u64, 0u64, 0u64);
-    let mut wakes = Vec::with_capacity(n);
+    let targets = [-5i64, 0, 19, 20, 30, 64, 90, 200, 250];
+    let (mut now, mut wake) = (1_000_000_000u64, 0u64);
     for _ in 0..n {
         let candidate = match (wake != 0, rng.below(8)) {
             (true, 0) | (true, 1) => wake,
@@ -82,27 +142,26 @@ fn steered_script(seed: u64, target_ms: i64, packet_samples: u32, rate: u32, n: 
             _ => now + rng.below(12_000_000),
         };
         now = now.max(candidate);
-        buffered = match rng.below(12) {
+        let prev = bld.buffered;
+        let buffered = match rng.below(14) {
             0 => ps.saturating_sub(1),
             1 => ps,
-            2 => p.overflow_samples,
-            3 => p.overflow_samples + 1,
+            2 => bld.p.overflow_samples,
+            3 => bld.p.overflow_samples + 1,
             4 => 0,
-            5 => buffered + 3 * block,
-            6 => buffered.saturating_sub(rng.below(ps)),
-            _ => buffered + block * rng.below(2),
+            5 => prev + 3 * block,
+            6 => prev.saturating_sub(rng.below(ps)),
+            7 | 8 => bld.p.trim_threshold_samples + ps + rng.below(2),
+            _ => prev + block * rng.below(2),
         };
-        wakes.push((now, buffered));
-        let s = p.step(now, buffered);
-        buffered -= s.drop_samples + u64::from(s.send) * ps;
-        wake = s.wake_ns;
+        let retarget = if rng.below(20) == 0 {
+            Some(targets[rng.below(targets.len() as u64) as usize])
+        } else {
+            None
+        };
+        wake = bld.wake(now, buffered, retarget).wake_ns;
     }
-    Script {
-        target_ms,
-        packet_samples,
-        rate,
-        wakes,
-    }
+    bld.script(target_ms, packet_samples, rate)
 }
 
 /// Hand-written wakes that hit each boundary in order (64 ms, 239-sample packets, 48 kHz).
@@ -110,20 +169,20 @@ fn boundary_script() -> Script {
     let p = Pacing::new(64, 239, 48_000);
     let d = |n: u64| 1_064_000_000 + samples_to_ns(n * 239, 48_000);
     let wakes = vec![
-        (1_000_000_000, 0),
-        (1_000_000_000, 238),
-        (1_000_000_000, 239), // primed: anchor at 1.064 s
-        (1_064_000_000 - 1, 4096),
-        (1_064_000_000, 4096), // packet 0
-        (d(1) - 1, 4096 - 239),
-        (d(1), 4096 - 239), // packet 1
-        (d(4), 4096 - 478), // packets 2, 3, 4 in one wake
-        (d(5) - 1, p.overflow_samples),
-        (d(5) - 1, p.overflow_samples + 1), // overflow: drop to the target
-        (d(9), 239 * 2 + 5),                // packets 5, 6, then an underflow
-        (d(9) + 1, 5),
-        (d(9) + 2, 239), // re-primed
-        (d(9) + 2 + 64_000_000, 239),
+        w(1_000_000_000, 0),
+        w(1_000_000_000, 238),
+        w(1_000_000_000, 239), // primed: anchor at 1.064 s
+        w(1_064_000_000 - 1, 4096),
+        w(1_064_000_000, 4096), // packet 0
+        w(d(1) - 1, 4096 - 239),
+        w(d(1), 4096 - 239), // packet 1
+        w(d(4), 4096 - 478), // packets 2, 3, 4 in one wake
+        w(d(5) - 1, p.overflow_samples),
+        w(d(5) - 1, p.overflow_samples + 1), // overflow: drop to the target
+        w(d(9), 239 * 2 + 5),                // packets 5, 6, then an underflow
+        w(d(9) + 1, 5),
+        w(d(9) + 2, 239), // re-primed
+        w(d(9) + 2 + 64_000_000, 239),
     ];
     Script {
         target_ms: 64,
@@ -133,8 +192,40 @@ fn boundary_script() -> Script {
     }
 }
 
+/// The trim window closing one ns early and exactly on time, then target changes up, down, to
+/// the same value and to a value that clamps (64 ms, 239-sample packets, 48 kHz).
+fn trim_and_retarget_script() -> Script {
+    let mut bld = Builder::new(64, 239, 48_000);
+    let full = 12_000;
+    bld.wake(1_000_000_000, full, None);
+    bld.wake(1_064_000_000, full, None);
+    let t0 = bld.p.t0_ns;
+    let mut next = bld.p.deadline_ns(bld.p.n_sent);
+    while next < t0 + TRIM_WINDOW_NS - 1 {
+        next = bld.wake(next, full, None).wake_ns;
+    }
+    bld.wake(t0 + TRIM_WINDOW_NS - 1, full, None);
+    bld.wake(t0 + TRIM_WINDOW_NS, full, None); // the window closes: trimmed to the target
+    let mut next = bld.p.deadline_ns(bld.p.n_sent);
+    for rt in [
+        Some(100),
+        None,
+        None,
+        Some(40),
+        None,
+        Some(40),
+        Some(10),
+        None,
+        Some(0),
+        None,
+    ] {
+        next = bld.wake(next, 6_000, rt).wake_ns;
+    }
+    bld.script(64, 239, 48_000)
+}
+
 fn scripts() -> Vec<Script> {
-    let mut v = vec![boundary_script()];
+    let mut v = vec![boundary_script(), trim_and_retarget_script()];
     let configs: [(i64, u32, u32); 8] = [
         (64, 239, 48_000),
         (20, 256, 44_100),
@@ -147,7 +238,7 @@ fn scripts() -> Vec<Script> {
     ];
     for (i, &(t, ps, rate)) in configs.iter().enumerate() {
         for seed in 0..3u64 {
-            v.push(steered_script(i as u64 * 16 + seed + 1, t, ps, rate, 600));
+            v.push(steered_script(i as u64 * 16 + seed + 1, t, ps, rate, 1_500));
         }
     }
     v
@@ -166,7 +257,7 @@ const NS_INPUTS: [(u64, u32); 7] = [
 
 fn line(p: &Pacing, send: u32, drop: u64, wake: u64) -> String {
     format!(
-        "{send} {drop} {wake} {} {} {} {} {} {} {} {}",
+        "{send} {drop} {wake} {} {} {} {} {} {} {} {} {} {} {}",
         u8::from(p.running),
         u8::from(p.primed),
         p.prime_ns,
@@ -174,7 +265,10 @@ fn line(p: &Pacing, send: u32, drop: u64, wake: u64) -> String {
         p.n_sent,
         p.underflows,
         p.overflows,
-        p.late_max_ns
+        p.late_max_ns,
+        p.trims,
+        p.target_ms,
+        p.target_samples
     )
 }
 
@@ -189,16 +283,20 @@ fn rust_trace(scripts: &[Script]) -> Vec<String> {
     for sc in scripts {
         let mut p = Pacing::new(sc.target_ms, sc.packet_samples, sc.rate);
         out.push(format!(
-            "init {} {} {} {} {} {}",
+            "init {} {} {} {} {} {} {}",
             p.target_ms,
             p.target_ns,
             p.target_samples,
             p.overflow_samples,
+            p.trim_threshold_samples,
             p.packet_samples,
             p.rate
         ));
-        for (i, &(now, buffered)) in sc.wakes.iter().enumerate() {
-            let s = p.step(now, buffered);
+        for (i, wk) in sc.wakes.iter().enumerate() {
+            if let Some(t) = wk.retarget {
+                p.retarget(t);
+            }
+            let s = p.step(wk.now, wk.buffered);
             out.push(line(&p, s.send, s.drop_samples, s.wake_ns));
             if i % 7 == 6 {
                 out.push(format!("take {}", p.take_late_max_ns()));
@@ -216,15 +314,21 @@ fn c_driver(scripts: &[Script]) -> String {
     writeln!(
         c,
         "static void line(const struct vban_pacing *p, struct vban_pacing_step s)\n{{\n\
-         \tprintf(\"%\" PRIu32 \" %\" PRIu64 \" %\" PRIu64 \" %d %d %\" PRIu64 \" %\" PRIu64 \" %\" PRIu64 \" %\" PRIu64 \" %\" PRIu64 \" %\" PRIu64 \"\\n\",\n\
+         \tprintf(\"%\" PRIu32 \" %\" PRIu64 \" %\" PRIu64 \" %d %d %\" PRIu64 \" %\" PRIu64 \" %\" PRIu64 \" %\" PRIu64 \" %\" PRIu64 \" %\" PRIu64 \" %\" PRIu64 \" %\" PRIu32 \" %\" PRIu64 \"\\n\",\n\
          \t       s.send, s.drop_samples, s.wake_ns, p->running ? 1 : 0, p->primed ? 1 : 0, p->prime_ns, p->t0_ns,\n\
-         \t       p->n_sent, p->underflows, p->overflows, p->late_max_ns);\n}}"
+         \t       p->n_sent, p->underflows, p->overflows, p->late_max_ns, p->trims, p->target_ms, p->target_samples);\n}}"
+    )
+    .unwrap();
+    writeln!(
+        c,
+        "struct wake {{ uint64_t now; uint64_t buffered; int has_retarget; int64_t retarget; }};"
     )
     .unwrap();
     for (i, sc) in scripts.iter().enumerate() {
-        writeln!(c, "static const uint64_t wakes_{i}[][2] = {{").unwrap();
-        for &(now, b) in &sc.wakes {
-            writeln!(c, "\t{{{now}ULL, {b}ULL}},").unwrap();
+        writeln!(c, "static const struct wake wakes_{i}[] = {{").unwrap();
+        for wk in &sc.wakes {
+            let (has, rt) = wk.retarget.map_or((0, 0), |t| (1, t));
+            writeln!(c, "\t{{{}ULL, {}ULL, {has}, {rt}LL}},", wk.now, wk.buffered).unwrap();
         }
         writeln!(c, "}};").unwrap();
     }
@@ -253,13 +357,15 @@ fn c_driver(scripts: &[Script]) -> String {
         .unwrap();
         writeln!(
             c,
-            "\tprintf(\"init %\" PRIu32 \" %\" PRIu64 \" %\" PRIu64 \" %\" PRIu64 \" %\" PRIu32 \" %\" PRIu32 \"\\n\", p.target_ms, p.target_ns, p.target_samples, p.overflow_samples, p.packet_samples, p.rate);"
+            "\tprintf(\"init %\" PRIu32 \" %\" PRIu64 \" %\" PRIu64 \" %\" PRIu64 \" %\" PRIu64 \" %\" PRIu32 \" %\" PRIu32 \"\\n\", p.target_ms, p.target_ns, p.target_samples, p.overflow_samples, p.trim_threshold_samples, p.packet_samples, p.rate);"
         )
         .unwrap();
         writeln!(
             c,
             "\tfor (size_t i = 0; i < sizeof(wakes_{i}) / sizeof(wakes_{i}[0]); i++) {{\n\
-             \t\ts = vban_pacing_step(&p, wakes_{i}[i][0], wakes_{i}[i][1]);\n\
+             \t\tif (wakes_{i}[i].has_retarget)\n\
+             \t\t\tvban_pacing_retarget(&p, wakes_{i}[i].retarget);\n\
+             \t\ts = vban_pacing_step(&p, wakes_{i}[i].now, wakes_{i}[i].buffered);\n\
              \t\tline(&p, s);\n\
              \t\tif (i % 7 == 6)\n\
              \t\t\tprintf(\"take %\" PRIu64 \"\\n\", vban_pacing_take_late_max_ns(&p));\n\
@@ -356,32 +462,43 @@ fn c_vban_pacing_matches_the_rust_authority_1372() {
 fn the_scripts_reach_every_boundary_1372() {
     // A parity gate is only as good as the states it visits (the libobs tie-break lesson).
     let scripts = scripts();
-    let (mut multi, mut under, mut over, mut exact_deadline, mut at_limit) = (0, 0, 0, 0, 0);
+    let mut hits = [0usize; 8];
     for sc in &scripts {
         let mut p = Pacing::new(sc.target_ms, sc.packet_samples, sc.rate);
         let mut wake = 0u64;
-        for &(now, buffered) in &sc.wakes {
-            if wake != 0 && now == wake && p.running {
-                exact_deadline += 1;
+        for wk in &sc.wakes {
+            if wake != 0 && wk.now == wake && p.running {
+                hits[0] += 1;
             }
-            if buffered == p.overflow_samples {
-                at_limit += 1;
+            if wk.buffered == p.overflow_samples {
+                hits[1] += 1;
             }
-            let (u, o) = (p.underflows, p.overflows);
-            let s = p.step(now, buffered);
-            multi += usize::from(s.send >= 2);
-            under += usize::from(p.underflows > u);
-            over += usize::from(p.overflows > o);
+            if let Some(t) = wk.retarget {
+                let before = (p.target_ms, p.running);
+                p.retarget(t);
+                hits[2] += usize::from(before.1 && p.target_ms > before.0);
+                hits[3] += usize::from(before.1 && p.target_ms < before.0);
+            }
+            let (u, o, tr) = (p.underflows, p.overflows, p.trims);
+            let s = p.step(wk.now, wk.buffered);
+            hits[4] += usize::from(s.send >= 2);
+            hits[5] += usize::from(p.underflows > u);
+            hits[6] += usize::from(p.overflows > o);
+            hits[7] += usize::from(p.trims > tr);
             wake = s.wake_ns;
         }
     }
-    for (name, n) in [
-        ("multi-packet wakes", multi),
-        ("underflows", under),
-        ("overflows", over),
-        ("exact-deadline wakes", exact_deadline),
-        ("at-limit depths", at_limit),
-    ] {
+    let names = [
+        "exact-deadline wakes",
+        "at-limit depths",
+        "running retargets up",
+        "running retargets down",
+        "multi-packet wakes",
+        "underflows",
+        "overflows",
+        "trims",
+    ];
+    for (name, n) in names.iter().zip(hits) {
         assert!(n >= 5, "issue 1372: the parity scripts hit only {n} {name}");
     }
 }
