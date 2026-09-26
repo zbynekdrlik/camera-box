@@ -679,8 +679,8 @@ fn an_idle_lag_far_under_the_edge_pays_no_headroom_1367() {
     eprintln!("song-start-8-19: {r:?}");
     assert_eq!(r.latched, [2, 2, 3], "idle, OBS restart, content relock");
     assert_eq!(r.latches, 3, "one latch per lock, no re-measure: {r:?}");
-    // D 2 is presented from the song start (1500 s) to the sender restart (2400 s), minus the
-    // settle window: the song start did not move it.
+    // D 2 is presented from the start to the sender restart (2400 s), minus the settle windows:
+    // a re-measure at the song start (1500 s) would cut that to ~44 000 presents.
     let at_2 = r.depth_hist.get(&2).copied().unwrap_or(0);
     assert!(
         at_2 > 60_000,

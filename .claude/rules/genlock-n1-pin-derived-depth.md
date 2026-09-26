@@ -2,6 +2,7 @@
 paths:
   - "src/genlock_n1_depth.rs"
   - "src/genlock_n1_depth_tests.rs"
+  - "src/genlock_n1_depth_latch_budget_tests.rs"
   - "src/genlock_grid_bench.rs"
   - "src/genlock_grid_bench_tests.rs"
   - "tests/genlock_relock_selection_parity.rs"
@@ -380,7 +381,15 @@ What carries it (do not undo):
   under the lock the release tick reads it under). It includes the receive-thread wall read, so a
   `#797 slow output_video` stall (5–17 ms) enters it; the p90 over 90 ticks absorbs an occasional
   one, and a sustained one is exactly the arrival the budget covers. Every received frame overwrites
-  it, so no other invalidation seam is needed (a wall step is wrong for at most one frame).
+  it, so no other invalidation seam is needed. A wall step is not gated by `on_grid` here: the p90
+  over 90 ticks absorbs a step's transient, and a lasting sender/receiver clock offset biases the
+  receive lag and the raw tick floor alike.
+- **A lock made while content plays latches on the content lag.** D depends on what the sender is
+  doing at the lock (the bench's 18–20 ms content relock is D 3 while its 7–9 ms idle locks are D 2);
+  the rise watch only ever moves D up past the budget, never back down while latched.
+- **The `wanted_frames=` report mixes floors on a clamped latch.** Past the clamp it falls back to the
+  RAW window max (`floor_max_frames`) when that asks for more than the budgeted p90; otherwise it is
+  the budgeted `base + p90 + 1`. Report-only.
 
 **Re-baseline (ROZHODNUTÉ 5842656021).** A feed whose p90 lag sits within 15 ms under a frame edge
 latches one frame deeper — the feeds a content change would push across it: `NDI test` (22–31 ms)

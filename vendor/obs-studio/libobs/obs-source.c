@@ -6928,7 +6928,8 @@ static void genlock_shallow_latch(obs_source_t *source, uint64_t tick_wall, uint
 							       100u - GENLOCK_N1_SHALLOW_LATCH_PERCENTILE);
 	const bool window_deep =
 		genlock_n1_shallow_window_deep(source->genlock_shallow_deep_ticks, source->genlock_shallow_window_ticks);
-	/* the over-clamp bin holds every floor at or over base + 3: report the window max there. */
+	/* the over-clamp bin holds every floor at or over base + 3: report the window max there (the RAW
+	 * tick-floor max, used only when it asks for more than the budgeted p90 bin, issue 1367). */
 	const uint64_t asked = high == (uint64_t)(GENLOCK_N1_SHALLOW_HIST_BINS - 1u) &&
 					       source->genlock_shallow_floor_max_frames > base_frames + high
 				       ? source->genlock_shallow_floor_max_frames
