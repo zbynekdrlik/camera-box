@@ -47,7 +47,9 @@ hand (25.9.2026). Adding a node is now ONE row; every consumer picks it up.
   for it yet; the address lives in this ONE variable.
 - **Python twin:** `scripts/dantesync_fleet.py rows` prints byte-identical rows (parity pinned).
 - **Clock-discipline twin (issue 1372):** `dantesync_fleet.classify_clock_discipline(status)`,
-  `clock_discipline_unlocked(status)` and `date_master_verdict(status, margin_us)` are the python
+  `clock_discipline_unlocked(status)`, `date_master_micro_capable(status)` and
+  `date_master_verdict(status, margin_us, micro_bound_ms=None)` (none/ok/out/paused/unknown; a
+  dantesync 1.11.0 master is graded on its micro-corrections) are the python
   twins of `scripts/lib/dantesync-clock-discipline.sh`'s `clock_discipline_class` /
   `clock_discipline_unlocked` / `date_master_verdict`, pinned by ONE table
   `tests/fixtures/dantesync_clock_discipline_1372.tsv` (see `dantesync-clock-offset-gate.md`). A python

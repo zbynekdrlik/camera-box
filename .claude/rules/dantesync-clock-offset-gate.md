@@ -100,6 +100,59 @@ and both now have TSV rows:
   limit before any float conversion (|us| >= 1e15 = more than 15 digits for bash integer arithmetic).
 When adding a field to the table, add a non-string row and an absurd-magnitude row.
 
+### dantesync 1.11.0: the date master is graded on its MICRO-corrections (issue 1372, design 5846047309)
+
+dantesync 1.11.0 (PR 121) no longer lets the fleet date drift up to the 50 ms step bound. The
+master holds it within ~2-3 ms by 500 us micro-corrections (2 ms dead band, 20 s interval). A
+large step exists only past 2 x the step bound. `/status` gains these fields (plain
+`#[serde(default)]`, so they are always present on a 1.11.0 node):
+
+- `date_micro_active` (bool)
+- `date_micro_last_us` (i64 or null)
+- `date_correction_rate_ms_per_min`
+- `date_correction_falling_behind` (bool)
+- `date_micro_paused` (bool)
+
+Grading 1.11.0 on the step bound would let a master that stopped correcting read ok for ~45 min.
+
+- **Capability, never a version string.** `date_master_micro_capable STATUS` (python
+  `date_master_micro_capable`) is yes iff the blob carries `date_correction_falling_behind`, with
+  any value. A capable master goes through `_date_master_micro_verdict`, checked in this order:
+  1. `falling_behind=true` gives `out` (it wins over paused).
+  2. `date_micro_paused=true` gives the NEW verdict `paused`.
+  3. Either flag not a JSON boolean (null, a quoted "false", absent paused) gives `unknown`.
+  4. Otherwise it is `ok` when `|date_offset_error_ms| <= micro bound + margin`, else `out`.
+
+  `date_step_bound_ms` is not read on this path. A master WITHOUT the field (1.9.0 / 1.10.0) keeps
+  the step-bound grade byte for byte, so a mixed fleet grades each master by what it reports during
+  the roll.
+- **ONE micro knob**: `DATE_MASTER_MICRO_BOUND_MS` (env `DANTESYNC_DATE_MICRO_BOUND_MS`, default 5;
+  empty = default on both twins). Only a positive plain decimal (`^[0-9]+(\.[0-9]+)?$`) is readable;
+  `0`, `-1`, `abc` give `unknown`. The shape check comes BEFORE the conversion, because awk turns
+  `5abc` into 5 while python `float()` rejects it. A capable master's
+  `date_master_effective_bound_us` is `max(base, micro*1000 + margin)`, which is 6000 us at the
+  defaults. The gate prints `date master graded on its micro bound: bound 6000us = 5ms + 1000us margin`.
+- **`date_master_check` rc 4 = PAUSED** (WARN; the line names `date_micro_paused=true: no UTC
+  reading for over a minute`). The E2E `[0/8]` gate maps rc 4 to UNKNOWN, so it exits 11 and is
+  fail-closed. verify-imag `warn`s on it. The OUT line names `date_correction_falling_behind=true`
+  when that is the cause.
+- **The journal path keeps the step bound.** The 1.11.0 master's `[NTP] offset:` line keeps the
+  `(date authority, fleet line …, step bound …us)` shape and carries no capability. So verify-strih
+  check 6 and the gate's journal FALLBACK still grade a 1.11.0 master on 50 ms + margin (a known
+  looser limit). 1.11.0 also logs transition lines: `[DATE] AUTHORITY: micro-corrections paused` /
+  `resumed`, and `date correction falling behind` / `caught up`. A healthy 1.11.0 master logs
+  neither, so the journal alone cannot tell 1.11.0 from 1.10.0. The journal twin needs a design
+  pick first: the transition lines, or `dantesync --version`, or moving verify-strih check 6 to
+  `/status`. It is recorded on issue 1372 as a supervisor follow-up candidate.
+- **Deliberately stricter than dantesync.** dantesync raises `date_correction_falling_behind` only
+  past 10 ms. The micro bound + margin (6 ms at the defaults) therefore reads a 6-10 ms catch-up
+  transient OUT while dantesync itself is quiet, for example right after a pause ends or after a
+  master restart. That is the design's intent, not a false red.
+- **Fixtures.** `strih-lx-master-1.11.0.json` / `stream-slave-1.11.0.json` are SYNTHESIZED from
+  the live 1.9.0 captures. They add the 1.10.0 slew fields plus the 1.11.0 micro fields in
+  dantesync's own `src/status.rs` order, and set the master error to -2.14 ms. Replace them with a
+  real read-only capture after the fleet roll. The pin (`DANTESYNC_VERSION_PIN`) is 1.11.0.
+
 **Live check (read-only, allowed):** `DANTESYNC_GATE_GM_ENFORCE=1 DANTESYNC_GATE_PHASE_SLEW_ENFORCE=1
 scripts/dantesync-gate.sh --linux "" --win-http strih=10.77.9.202 --win-http stream=10.77.9.204`
 only curls `:8898/status` — run it before trusting a change here.

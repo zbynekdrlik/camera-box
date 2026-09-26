@@ -1410,3 +1410,14 @@ was written for it:
 `patsub_replacement` is on by default in bash 5.2, so `${body//__PROC__/$root}` with `root='/a&b'`
 yields `/a__PROC__b`. Quote the replacement: `"${body//__PROC__/"$root"}"`. The same applies to
 any template placeholder filled from a variable.
+
+## Two worktree-lane setup traps (issue 1372, dantesync 1.11.0 slice)
+
+- **A lane worktree created on `origin/main` cannot `git merge --ff-only origin/dev`.** main's tip is
+  a PR merge commit that dev never contains, so the branches have diverged. If
+  `git log HEAD --not origin/dev` shows nothing except main's own merge commits, and the lane has no
+  commits of its own, re-point the lane branch instead: `git switch -C <own-lane-branch> origin/dev`.
+  Do this BEFORE the version bump. Never cherry-pick or merge main's merge commits into the lane.
+- **A recursive `grep -r` whose path list includes `.claude` is refused** by the airuleset
+  credential-store hook, which reads it as a recursive read of the store's parent directory. Use
+  the Grep tool for repo-wide searches that must cover `.claude/rules/`.
