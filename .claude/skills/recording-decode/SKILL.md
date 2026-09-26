@@ -645,7 +645,7 @@ encoder-degraded 4K pixels). So:
   `full_frame_otsu_union_recovers_a_softened_burn_bare_rqrr_misses` (bare single rqrr misses →
   the Otsu union recovers).
 
-RED→GREEN lock (probe-gated, CI-only, in `src/probe/qr.rs`):
+RED→GREEN lock (probe-gated, CI-only, in `src/probe/qr_tests.rs` since issue 1374):
 `optical_soft_dual_qr_recovered_on_real_stream_frames` (fixtures `tests/fixtures/optical-soft-f5.png`
 / `optical-soft-f150.png`, run 354003): the plain pass returns NO run_id 354003; `decode_qr_luma_all`
 returns BOTH optical halves; the recording per-frame path surfaces it too. Reverting to the

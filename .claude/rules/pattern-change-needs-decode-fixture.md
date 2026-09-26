@@ -7,6 +7,7 @@ paths:
   - "src/aux_tick.rs"
   - "src/probe/painter.rs"
   - "src/probe/qr.rs"
+  - "src/probe/qr_tests.rs"
   - "src/probe/recording_decode.rs"
   - "src/probe/recording_decode_tests.rs"
 ---
@@ -127,7 +128,7 @@ Confirmed live (issue 1270's co-located aux pair, `AUX_QR_SIZE_PX=210`): `zbarim
 both marks cleanly at pad=0 on every mined frame, because the design already renders the quiet
 zone INSIDE the box (`render_payload_qr(...).quiet_zone(true)`, box size == qr_px) — so the Rust
 test's `image::imageops::crop_imm` can safely use the bare design rect too, matching the sibling
-`dual_render_places_two_decodable_qrs_left_and_right` pattern in `src/probe/qr.rs`.
+`dual_render_places_two_decodable_qrs_left_and_right` pattern in `src/probe/qr_tests.rs`.
 
 **A geometry-only pattern change (no algorithm/decode-parameter tweak) can still use the RED→GREEN
 staging this rule mandates, by staging the TEST's OWN crop source, not production code.** When the

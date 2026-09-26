@@ -3,6 +3,7 @@ paths:
   - "src/burn_regions.rs"
   - "src/probe/burn_region_decode.rs"
   - "src/probe/qr.rs"
+  - "src/probe/qr_tests.rs"
   - "src/probe/recording_decode.rs"
   - "src/probe/recording_decode_tests.rs"
   - "src/probe/colour_sample.rs"
@@ -25,8 +26,9 @@ child `src/probe/recording_decode_tests.rs`. It holds the fast-then-robust famil
 plain/Otsu rqrr passes, `decode_qr_luma_all[_reads]`, `merge_payloads`, `OPTICAL_TOP_BAND_FRAC`,
 the live-tap captures) and `pub use`-re-exports the public decode items, so every
 `qr::decode_qr_luma_all_fast_then_robust_*` / `qr::DecodePath` path in this file and in callers
-still resolves. Put a new decode pass in `recording_decode`, not `qr`. A test that needs the
-`qr` fixture/blit helpers imports `crate::probe::qr::tests::{optical_fixture_luma, blit_burn_luma}`.
+still resolves. Put a new decode pass in `recording_decode`, not `qr`. `qr`'s own tests are the
+`#[path]` child `src/probe/qr_tests.rs`; a test that needs its fixture/blit helpers imports
+`crate::probe::qr::tests::{optical_fixture_luma, blit_burn_luma}`.
 
 ## What it is
 
@@ -118,7 +120,7 @@ Two extensions from the issue-1367 lane:
   `#[path]` (its `#[path]` tests child follows under `--test`), next to the real
   `burn_echo.rs` / `burn_regions.rs` / `colour_scale.rs` with their own test modules stripped.
   Give it a `qr` stub that carries qr.rs's REAL `pub use` re-export block, the real
-  `merge_payloads` and the real `qr::tests` helpers (extracted verbatim), plus stub `image` /
+  `merge_payloads` and the real `qr_tests.rs` helpers (extracted verbatim), plus stub `image` /
   `tracing` rlibs shaped like the used API. Set `CARGO_MANIFEST_DIR` for the `env!` in the test
   helper, and run `clippy-driver` for the lib and for `--test` with `-D warnings`. Prove the
   harness bites with a negative control (e.g. drop a helper's `pub(in crate::probe)` → E0603).
