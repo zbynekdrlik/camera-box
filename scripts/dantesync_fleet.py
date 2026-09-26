@@ -250,6 +250,55 @@ def date_master_verdict(status, margin_us: int, micro_bound_ms=None) -> str:
     return "ok" if abs(err_us) <= bound_us + int(margin_us) else "out"
 
 
+_DIGITS = re.compile(r"[0-9]+")
+
+
+def _plain_int(value, max_digits=None):
+    """A non-negative integer from an int or a plain digit string (the bash twin's `^[0-9]+$`, with
+    at most MAX_DIGITS digits); None for anything else (a bool, a sign, a fraction, "")."""
+    if isinstance(value, bool):
+        return None
+    text = str(value) if isinstance(value, int) else value
+    if not isinstance(text, str) or not _DIGITS.fullmatch(text):
+        return None
+    if max_digits is not None and len(text) > max_digits:
+        return None
+    return int(text)
+
+
+def journal_date_grade(step_bound_us, margin_us, status, micro_bound_ms=None) -> str:
+    """How a date-authority journal line `[NTP] offset:... (date authority, ..., step bound Nus)` is
+    graded when the SAME node's /status is STATUS -- the bash journal_date_grade_from_step:
+
+    none (STEP_BOUND_US not a positive integer of at most 15 digits, or MARGIN_US not a non-negative
+    integer) | micro:<us> (a micro-capable date master, both flags false: micro bound + margin) |
+    out (date_correction_falling_behind true) | paused (date_micro_paused true) | unknown (a flag
+    that is not a JSON boolean, or an unreadable micro bound) | step:<us> (a /status with a
+    date_authority that is not a micro-capable master: step bound + margin) | step-unread:<us> (no
+    date_authority -- empty, not JSON, a pre-1.9.0 blob: step bound + margin, named by the consumer)."""
+    step = _plain_int(step_bound_us, max_digits=15)
+    margin = _plain_int(margin_us)
+    if step is None or step <= 0 or margin is None:
+        return "none"
+    s = _status_dict(status)
+    auth = s.get("date_authority")
+    if not isinstance(auth, str) or not auth:
+        return f"step-unread:{step + margin}"
+    if auth != "master" or not date_master_micro_capable(s):
+        return f"step:{step + margin}"
+    behind = s.get("date_correction_falling_behind")
+    paused = s.get("date_micro_paused")
+    if behind is True:
+        return "out"
+    if behind is not False or not isinstance(paused, bool):
+        return "unknown"
+    if paused:
+        return "paused"
+    micro = date_micro_bound_ms() if micro_bound_ms in (None, "") else micro_bound_ms
+    bound_us = _micro_bound_us(micro)
+    return "unknown" if bound_us is None else f"micro:{bound_us + margin}"
+
+
 # ---------------------------------------------------------------------------------------------
 # config drift
 # ---------------------------------------------------------------------------------------------

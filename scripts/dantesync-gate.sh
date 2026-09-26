@@ -424,14 +424,17 @@ grade_http_node() {
       # (the twin of the HTTP path's sampled_offset_check). A scattered-but-in-bound-median node
       # now grades UNSTABLE/DRIFT+UNSTABLE (rc 2, the drift class) instead of a silent NTP OK.
       # Issue 1372: through the SHARED journal verdict, so a date master's `(date authority, ...)`
-      # line is graded median-only on its own step bound + DATE_MASTER_MARGIN_US.
-      local jdate_bound jspread_txt
+      # line is graded median-only. This fallback runs only when the node's HTTP /status is
+      # unreachable, so no /status rides along: the master keeps its own step bound +
+      # DATE_MASTER_MARGIN_US and the printed note names that (dantesync_journal_date_note).
+      local jdate_bound jdate_note jspread_txt
       jspread_txt="spread within ${GATE_STABILITY_US} us"
       jdate_bound="$(dantesync_journal_date_bound_us "$status" "$DATE_MASTER_MARGIN_US")"
+      jdate_note="$(dantesync_journal_date_note "$status" "$DATE_MASTER_MARGIN_US")"
       if [ -n "$jdate_bound" ]; then
         bound="$jdate_bound"
         jspread_txt="spread not graded"
-        deadband_note=" -- date master step bound $(date_step_bound_us_from_journal "$status")us + ${DATE_MASTER_MARGIN_US}us margin, median-only (dantesync#88/#1372)"
+        deadband_note=" -- ${jdate_note}"
       fi
       case "$(dantesync_journal_clock_verdict "$status" "$freshness" "$bound" "$GATE_STABILITY_US" "$DATE_MASTER_MARGIN_US")" in
         ok)

@@ -371,7 +371,14 @@ _date_master_micro_check() {
   esac
 }
 
-# --- the JOURNAL path (a node read from journald, no /status) -----------------------------------
+# --- the JOURNAL path (a node read from journald, graded with its own /status when readable) -----
+#
+# A dantesync 1.11.x date master still logs `[NTP] offset:-2140us (date authority, fleet line
+# -2140us, step bound 50000us)`: the journal line carries no capability, so the journal alone cannot
+# tell a 1.11.x master (micro-corrections, ~2-3 ms) from a 1.10.0 one (steps at 50 ms). The node's
+# own /status does (date_master_micro_capable), so every journal consumer passes it when it has it
+# (verify-strih check 6 reads 127.0.0.1:8898 on the box). Without a readable /status the journal
+# keeps the step bound and dantesync_journal_date_note says so -- never a silent loosening.
 
 # date_step_bound_us_from_journal JOURNAL -> the step bound (us) carried by the FRESHEST
 # `[NTP] offset:` line when it is the master's date-authority shape
@@ -383,32 +390,116 @@ date_step_bound_us_from_journal() {
     | tail -1 || true
 }
 
-# dantesync_journal_date_bound_us JOURNAL MARGIN_US -> the date master's own step bound + MARGIN_US
-# when the freshest `[NTP] offset:` line has the date-authority shape with a positive bound and
-# MARGIN_US is a non-negative integer; "" otherwise (grade the journal the ordinary way). The ONE
-# place the journal branch decision lives, so a consumer's printed bound always matches the graded
-# one (verify-strih prints it, the gate's journal fallback prints it).
-dantesync_journal_date_bound_us() {
-  local step margin="$2"
-  step="$(date_step_bound_us_from_journal "$1")"
-  if [ -n "$step" ] && [ "$step" -gt 0 ] && grep -qE '^[0-9]+$' <<<"$margin"; then
-    printf '%s' "$((10#$step + 10#$margin))"
+# journal_date_grade_from_step STEP_US MARGIN_US STATUS [MICRO_BOUND_MS] -> how a date-authority
+# journal line whose step bound is STEP_US is graded, given the SAME node's /status (python twin:
+# scripts/dantesync_fleet.py journal_date_grade; both pinned by the journal_grade column of
+# tests/fixtures/dantesync_clock_discipline_1372.tsv):
+#   none              -- STEP_US is not a positive integer or MARGIN_US not a non-negative integer:
+#                        not a date-authority line, grade the journal the ordinary way
+#   micro:<us>        -- STATUS is a micro-capable (1.11.x) date master with both flags false:
+#                        median-only on micro bound (MICRO_BOUND_MS, default
+#                        DATE_MASTER_MICRO_BOUND_MS) + MARGIN_US
+#   out               -- that master reports date_correction_falling_behind=true (wins over paused)
+#   paused            -- that master reports date_micro_paused=true
+#   unknown           -- that master's flags are not JSON booleans, or the micro bound is unreadable
+#   step:<us>         -- STATUS carries a date_authority but is not a micro-capable master (1.9.0 /
+#                        1.10.0, or a follower): STEP_US + MARGIN_US
+#   step-unread:<us>  -- STATUS carries no date_authority (empty, unreachable, not a /status, a
+#                        pre-1.9.0 blob): STEP_US + MARGIN_US, the looser bound, named by the note
+# The flag order is _date_master_micro_verdict's, so the journal and /status paths agree.
+journal_date_grade_from_step() {
+  local step="$1" margin="$2" text="$3" micro="${4:-$DATE_MASTER_MICRO_BOUND_MS}" auth behind paused bound_us
+  if [[ ! $step =~ ^[0-9]{1,15}$ ]] || [ "$((10#$step))" -le 0 ] || [[ ! $margin =~ ^[0-9]+$ ]]; then
+    printf 'none'
+    return 0
+  fi
+  auth="$(date_authority_from_pipe_json "$text")"
+  if [ -z "$auth" ]; then
+    printf 'step-unread:%s' "$((10#$step + 10#$margin))"
+    return 0
+  fi
+  if [ "$auth" != master ] || [ "$(date_master_micro_capable "$text")" != yes ]; then
+    printf 'step:%s' "$((10#$step + 10#$margin))"
+    return 0
+  fi
+  behind="$(_pipe_json_bool_raw "$text" date_correction_falling_behind)"
+  paused="$(_pipe_json_bool_raw "$text" date_micro_paused)"
+  [ "$behind" = true ] && { printf 'out'; return 0; }
+  case "$behind/$paused" in
+    false/true) printf 'paused'; return 0 ;;
+    false/false) ;;
+    *) printf 'unknown'; return 0 ;;
+  esac
+  bound_us="$(_micro_bound_us "$micro")"
+  if [ -z "$bound_us" ]; then
+    printf 'unknown'
+  else
+    printf 'micro:%s' "$((bound_us + 10#$margin))"
   fi
 }
 
-# dantesync_journal_clock_verdict JOURNAL FRESHNESS_S BOUND_US STABILITY_US DATE_MARGIN_US ->
-# the dantesync_offset_verdict word for a node read from its JOURNAL (verify-strih check 6, the
-# verify-imag fallback, the gate's linux journal fallback). A date-authority freshest line is
-# graded MEDIAN-ONLY on dantesync_journal_date_bound_us -- the fleet line walks by design and a
-# coordinated step moves every sample at once, so the spread is not a health signal (the gate's
-# HTTP master is median-only for the same reason, #1014). Any other journal is graded exactly as
-# before (BOUND_US + STABILITY_US).
+# dantesync_journal_date_grade JOURNAL MARGIN_US [STATUS] [MICRO_BOUND_MS] -> the grade of the
+# JOURNAL's freshest offset line (journal_date_grade_from_step on its step bound); `none` for an
+# ordinary line. STATUS omitted = no readable /status.
+dantesync_journal_date_grade() {
+  journal_date_grade_from_step "$(date_step_bound_us_from_journal "$1")" "$2" "${3:-}" "${4:-}"
+}
+
+# dantesync_journal_date_bound_us JOURNAL MARGIN_US [STATUS] [MICRO_BOUND_MS] -> the bound (us) a
+# date-authority journal line is graded on (micro bound + margin for a micro-capable master /status,
+# else the line's own step bound + margin); "" for an ordinary line, and for a grade that is decided
+# by a flag rather than a bound (out / paused / unknown).
+dantesync_journal_date_bound_us() {
+  local grade
+  grade="$(dantesync_journal_date_grade "$1" "$2" "${3:-}" "${4:-}")"
+  case "$grade" in
+    micro:*|step:*|step-unread:*) printf '%s' "${grade#*:}" ;;
+  esac
+}
+
+# dantesync_journal_date_note JOURNAL MARGIN_US [STATUS] [MICRO_BOUND_MS] -> the text a consumer
+# prints for what the date master's journal was graded on (the SAME decision the verdict uses); ""
+# for an ordinary line. verify-strih check 6 and the gate's journal fallback print it.
+dantesync_journal_date_note() {
+  local journal="$1" margin="$2" text="${3:-}" micro="${4:-$DATE_MASTER_MICRO_BOUND_MS}" grade step
+  grade="$(dantesync_journal_date_grade "$journal" "$margin" "$text" "$micro")"
+  step="$(date_step_bound_us_from_journal "$journal")"
+  case "$grade" in
+    micro:*)
+      printf 'date master micro bound %sms + %sus margin = %sus, median-only (its /status is a micro-capable dantesync 1.11.x date master, #1372)' \
+        "$micro" "$margin" "${grade#*:}" ;;
+    step:*)
+      printf 'date master step bound %sus + %sus margin = %sus, median-only (its /status is not a micro-capable 1.11.x date master, dantesync#88/#1372)' \
+        "$step" "$margin" "${grade#*:}" ;;
+    step-unread:*)
+      printf 'date master step bound %sus + %sus margin = %sus, median-only (no readable /status: micro-corrections not graded, the looser step bound, #1372)' \
+        "$step" "$margin" "${grade#*:}" ;;
+    out)
+      printf 'date master /status reports date_correction_falling_behind=true: the micro-corrections cannot hold the fleet date (#1372)' ;;
+    paused)
+      printf 'date master /status reports date_micro_paused=true: no UTC reading for over a minute, the fleet date runs free (#1372)' ;;
+    unknown)
+      printf 'date master /status micro-correction flags or micro bound (%sms) unreadable (#1372)' "$micro" ;;
+  esac
+}
+
+# dantesync_journal_clock_verdict JOURNAL FRESHNESS_S BOUND_US STABILITY_US DATE_MARGIN_US [STATUS]
+# [MICRO_BOUND_MS] -> the verdict word for a node read from its JOURNAL (verify-strih check 6, the
+# verify-imag fallback, the gate's linux journal fallback). A date-authority freshest line is graded
+# per dantesync_journal_date_grade:
+#   micro:/step:/step-unread:<us> -> dantesync_offset_verdict MEDIAN-ONLY on that bound -- the fleet
+#     line walks by design and a coordinated (or micro) step moves every sample at once, so the
+#     spread is not a health signal (the gate's HTTP master is median-only for the same reason, #1014)
+#   out -> falling_behind | paused -> paused | unknown -> unknown (the /status flags decide)
+# Any other journal is graded exactly as before (BOUND_US + STABILITY_US); STATUS is not read.
 dantesync_journal_clock_verdict() {
-  local journal="$1" fresh="$2" bound="$3" stability="$4" margin="$5" dbound
-  dbound="$(dantesync_journal_date_bound_us "$journal" "$margin")"
-  if [ -n "$dbound" ]; then
-    dantesync_offset_verdict "$journal" "$fresh" "$dbound"
-  else
-    dantesync_offset_verdict "$journal" "$fresh" "$bound" "$stability"
-  fi
+  local journal="$1" fresh="$2" bound="$3" stability="$4" margin="$5" grade
+  grade="$(dantesync_journal_date_grade "$journal" "$margin" "${6:-}" "${7:-}")"
+  case "$grade" in
+    micro:*|step:*|step-unread:*) dantesync_offset_verdict "$journal" "$fresh" "${grade#*:}" ;;
+    out) printf 'falling_behind' ;;
+    paused) printf 'paused' ;;
+    unknown) printf 'unknown' ;;
+    *) dantesync_offset_verdict "$journal" "$fresh" "$bound" "$stability" ;;
+  esac
 }
