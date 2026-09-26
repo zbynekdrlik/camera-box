@@ -697,6 +697,30 @@ fn an_idle_lag_far_under_the_edge_pays_no_headroom_1367() {
 }
 
 #[test]
+fn a_min_latency_box_keeps_the_raw_floor_and_stays_governed_1367() {
+    // ROZHODNUTÉ 5842848307 (option 2): on the imag marker the latch histogram reads the RAW tick
+    // floor. An idle lag of 24-26 ms is one frame at the tick, so the input stays governed at
+    // base + 1 = 2 -- never the budgeted 3 that the min-latency guard would only report (capped).
+    let sc = Scenario {
+        min_latency_box: true,
+        ..Scenario::clean(24, 26, 2)
+    };
+    assert_clean("min-latency-24-26", sc);
+    let r = run(sc);
+    assert!(
+        !r.capped,
+        "the min-latency input must never be reported capped: {r:?}"
+    );
+    assert_eq!(r.latches, 3, "one latch per lock: {r:?}");
+}
+
+#[test]
+fn without_the_marker_the_same_feed_latches_the_budget_1367() {
+    // the same 24-26 ms feed on a box without the marker keeps the budget: D 3.
+    assert_clean("no-marker-24-26", Scenario::clean(24, 26, 3));
+}
+
+#[test]
 fn a_rise_past_the_budget_still_re_measures_1367() {
     // idle 8 ms (D 2) -> 60 ms: the tick floor reaches D for a whole window, so the latch
     // re-measures onto the budgeted 60 ms lag (3 frames -> D 4), and the audio follows by one slew.

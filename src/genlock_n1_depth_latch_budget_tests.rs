@@ -63,3 +63,36 @@ fn the_latch_reads_the_budgeted_floor_and_the_rise_watch_the_raw_one_1367() {
     assert_eq!(latched, 1, "one re-measure, one latch");
     assert_eq!((s.target_frames, s.capped), (4, false));
 }
+
+/// ROZHODNUTÉ 5842848307 (option 2) — the 60p imag case: an 8 ms receive lag is one frame at the
+/// tick (`ceil(8 / 16.7)`) but two budgeted (`ceil(23 / 16.7)`). One latch window of it.
+fn latch_60p(min_latency_box: bool) -> ShallowDepth {
+    let mut s = ShallowDepth::default();
+    for i in 0..N1_SHALLOW_SETTLE_TICKS {
+        let t = ShallowTick {
+            latch_floor_frames: n1_shallow_latch_floor_frames(8_000_000, I60),
+            min_latency_box,
+            // the raw tick floor: the newest frame is one grid slot old at the tick.
+            ..tick(i == 0, 1)
+        };
+        n1_shallow_track(&mut s, t);
+    }
+    s
+}
+
+#[test]
+fn a_min_latency_box_latches_the_raw_floor_and_stays_governed_1367() {
+    // the imag marker: the histogram reads the RAW tick floor (no budget), so a 60p shallow input
+    // keeps its governed D 2 = base + 1 and is never reported capped.
+    assert_eq!(n1_shallow_latch_floor_frames(8_000_000, I60), 2);
+    let s = latch_60p(true);
+    assert_eq!((s.target_frames, s.capped), (2, false));
+    assert!(n1_shallow_governs(s.target_frames, 8_000_000, 3, I60));
+}
+
+#[test]
+fn without_the_marker_the_budgeted_floor_still_latches_1367() {
+    // the same 60p feed on any other box keeps the arrival-jitter budget: D 3, not capped.
+    let s = latch_60p(false);
+    assert_eq!((s.target_frames, s.capped), (3, false));
+}

@@ -297,6 +297,15 @@ fn c_n1_shallow_depth_matches_the_rust_authority_1367() {
             ..t(true, false, k % 11 != 7, 3)
         });
     }
+    // ROZHODNUTÉ 5842848307: on the min-latency marker the histogram reads the RAW floor -- the
+    // same idle window latches D 2 governed (not the budgeted 3, which the guard would cap).
+    for k in 0..90u64 {
+        seq.push(ShallowTick {
+            latch_floor_frames: 2,
+            min_latency_box: true,
+            ..t(true, k == 0, true, 1)
+        });
+    }
 
     let b = |v: bool| i32::from(v);
     let mut body = String::new();
@@ -462,7 +471,8 @@ fn c_n1_shallow_depth_matches_the_rust_authority_1367() {
     // after it; then the short burst the p90 ignores (2), the rejected transient's clean re-latch (2),
     // the bounded rejects' clamp (4), the whole-window transient's clamp (4) and its re-measure once
     // the floor fell (3), the unreachable D's re-measure (3) and the relock storm's (3); then
-    // (ROZHODNUTÉ 5842640404) the budgeted idle latch (3) and the rise past the budget (the clamp, 4).
+    // (ROZHODNUTÉ 5842640404) the budgeted idle latch (3) and the rise past the budget (the clamp, 4),
+    // then (ROZHODNUTÉ 5842848307) the min-latency box's raw-floor latch (2, governed).
     assert!(
         fired.0 > 0 && fired.0 < sheds.len(),
         "shed vectors one-sided: {fired:?}"
@@ -478,7 +488,7 @@ fn c_n1_shallow_depth_matches_the_rust_authority_1367() {
     );
     assert_eq!(
         latched,
-        vec![3, 3, 4, 2, 31, 31, 2, 0, 2, 2, 2, 4, 4, 3, 3, 3, 3, 4],
+        vec![3, 3, 4, 2, 31, 31, 2, 0, 2, 2, 2, 4, 4, 3, 3, 3, 3, 4, 2],
         "the track sequence latched {latched:?}"
     );
 }
