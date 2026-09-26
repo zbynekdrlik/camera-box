@@ -75,11 +75,14 @@ imag|obs:imag|linux|video|obsfleet|-|
 mbc|10.77.7.232|windows|audio|always|-|
 fohabl|10.77.7.30|windows|audio|always|master|DANTESYNC_FOHABL_SSH_PASS}"
 
-# The audio-VLAN PTP grandmaster: an Audinate device (MAC 00:1d:c1:1a:44:30), the same clock as the
-# video grandmaster video-clock.lan (#1367 comment 5832526338: the two are ONE clock). There is no
-# DNS name for it yet, so it is an address here -- the ONE place it is written; the canonical audio
-# config's gm_allowlist and the clock watchdog's audio grading both read it from this variable.
-DANTESYNC_AUDIO_GM_HOST="${DANTESYNC_AUDIO_GM_HOST:-10.77.7.106}"
+# The audio-VLAN PTP grandmaster: an Audinate device, locked to the same clock as the video
+# grandmaster video-clock.lan (#1367 comment 5832526338). Since 25.9.2026 ~21:07 the leader is
+# 10.77.7.104 (MAC 00:1d:c1:08:02:14/15); the earlier leader 10.77.7.106 (00:1d:c1:1a:44:30) is
+# unreachable. A 20-min FOH VBAN capture on 26.9. put the audio Dante rate within 0.06 ppm of the
+# video clock. There is no DNS name for it yet, so it is an address here -- the ONE place it is
+# written; the canonical audio config's gm_allowlist and the clock watchdog's audio grading both read
+# it from this variable.
+DANTESYNC_AUDIO_GM_HOST="${DANTESYNC_AUDIO_GM_HOST:-10.77.7.104}"
 
 # The dev1-local file that carries per-node ssh passwords by NAME (KEY=VALUE lines, mode 0600, never
 # committed). Only keys that a fleet row names as its credvar are read from it.

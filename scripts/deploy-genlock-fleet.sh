@@ -64,6 +64,9 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # _keepalive_tasks + the resolume identity note) lives in ONE sourced lib shared with
 # launch-obs-genlock.sh + obs-self-heal-install.sh; it sources scripts/lib/obs-fleet.sh itself.
 . "$HERE/lib/genlock-fleet-boxes.sh"
+# shellcheck source=scripts/lib/genlock-plugin-deploy.sh
+# #1115 + issue 1372: the FULL-mode plugin deploy + byte-verify PowerShell blocks (distroav, obs-vban).
+. "$HERE/lib/genlock-plugin-deploy.sh"
 # shellcheck source=scripts/lib/strih-lx-deploy.sh
 # issue 1317 part 6: the strih-lx EXECUTE arm + the builders its --plan arm prints (plan == execute).
 . "$HERE/lib/strih-lx-deploy.sh"
@@ -324,49 +327,11 @@ try { Copy-Item -Force $src $dst } catch { Start-Sleep -Seconds 5; Copy-Item -Fo
 PSFAST
 )
   fi
-  # #1115 (Option A): FULL mode ALSO deploys the bundle's genlock distroav.dll to the REAL OBS load
-  # path in ProgramData (backup + fail-closed byte verify), so the LOADED plugin is the canonical
-  # build and the byte-parity gather/compare against the manifest becomes real. FAST is obs.dll-only
-  # (the fast bundle carries no distroav.dll), so the block is a no-op there. Quoted heredoc =>
-  # literal PowerShell (same pattern as copy_block); $backupDir/$manifest come from steps 3/6.
-  local distroav_deploy_block
-  if [ "$mode" = "full" ]; then
-    distroav_deploy_block=$(cat <<'PSDISTROAV'
-# (6b) #1115 -- deploy the bundle's genlock distroav.dll to the REAL OBS load path and byte-verify it
-#      (Option A). OBS loads DistroAV ONLY from C:\ProgramData\obs-studio\plugins\distroav\bin\64bit\
-#      distroav.dll (NEVER Program Files\obs-plugins\64bit -- that copy stays /XF-excluded above as a
-#      shadow drift-guard #124 flags). The bundle->ProgramData layout is NOT 1:1 (bundle path
-#      obs-plugins/64bit/distroav.dll; on-box plugins\distroav\bin\64bit\distroav.dll), so this is an
-#      EXPLICIT path-mapped copy of the ONE DLL the byte-parity gather (bundle-state-server.py, the
-#      ProgramData first-located copy) + compare (drift-guard.sh, matched by basename) hash -- never a
-#      bulk copy. The distroav data\ tree is left unmanaged on purpose: the byte-parity gate is
-#      DLL-scoped and DistroAV data is stable across genlock rebuilds at the pinned 6.2.1.
-$pdDistroav  = 'C:\ProgramData\obs-studio\plugins\distroav\bin\64bit\distroav.dll'
-$srcDistroav = Join-Path $stage 'obs-plugins\64bit\distroav.dll'
-if (-not (Test-Path $srcDistroav)) { Write-Error "staged distroav.dll not found at $srcDistroav -- the FULL bundle must carry it"; exit 4 }
-if (-not (Test-Path $pdDistroav))  { Write-Error "ProgramData distroav load path $pdDistroav not found -- DistroAV is not installed where OBS loads it"; exit 4 }
-# back up the pre-deploy ProgramData distroav.dll alongside obs.dll.pre-789 (instant rollback).
-Copy-Item -Force $pdDistroav (Join-Path $backupDir 'distroav.dll.pre-789') -ErrorAction SilentlyContinue
-# explicit path-mapped copy: staged bundle obs-plugins\64bit\distroav.dll -> the ProgramData load path.
-Copy-Item -Force $srcDistroav $pdDistroav
-# byte-verify the DEPLOYED ProgramData distroav.dll vs the manifest's distroav entry (matched by
-# basename: manifest path obs-plugins/64bit/distroav.dll == the on-box ProgramData DLL), fail-closed --
-# proof the canonical genlock distroav actually landed (mirrors the obs.dll verify in step 6).
-if (Test-Path $manifest) {
-  $md = Get-Content $manifest -Raw | ConvertFrom-Json
-  $wantD = ($md.files | Where-Object { $_.path -match '(^|/)distroav\.dll$' } | Select-Object -First 1).sha256
-  $gotD  = (Get-FileHash -Algorithm SHA256 $pdDistroav).Hash.ToLower()
-  $matchD = ($wantD -and ($gotD -eq $wantD.ToLower()))
-  Write-Host "VERIFY distroav.dll want=$wantD got=$gotD match=$matchD"
-  if (-not $matchD) { Write-Error "VERIFY FAIL: deployed distroav.dll bytes do not match the bundle manifest -- do NOT trust this box"; exit 4 }
-} else {
-  Write-Warning "no BUNDLE_MANIFEST.json in $stage -- cannot byte-verify distroav.dll (marker-only)."
-}
-PSDISTROAV
-)
-  else
-    distroav_deploy_block='# (6b) #1115: distroav ProgramData deploy -- no-op on a FAST (obs.dll-only) deploy (no distroav in the fast bundle).'
-  fi
+  # #1115 + issue 1372: the FULL-mode plugin deploys + byte verifies (distroav to its ProgramData
+  # load path, the paced obs-vban into Program Files) live in scripts/lib/genlock-plugin-deploy.sh.
+  local plugin_backup_block plugin_deploy_block
+  plugin_backup_block="$(genlock_plugin_backup_ps "$mode")"
+  plugin_deploy_block="$(genlock_plugin_deploy_ps "$mode")"
 
   cat <<PS
 # ===== issue 789 genlock FLEET deploy -- box=${box} mode=${mode} (paste into the ${box} win-* MCP Shell) =====
@@ -401,6 +366,7 @@ Remove-Item "\$env:APPDATA\\obs-studio\\.sentinel\\*" -Force -ErrorAction Silent
 New-Item -ItemType Directory -Force -Path \$backupDir | Out-Null
 Copy-Item -Force (Join-Path \$obsDir 'bin\\64bit\\obs.dll') (Join-Path \$backupDir 'obs.dll.pre-789') -ErrorAction SilentlyContinue
 Copy-Item -Force (Join-Path \$obsDir 'GENLOCK_BUILD_SHA.txt') (Join-Path \$backupDir 'GENLOCK_BUILD_SHA.txt.pre-789') -ErrorAction SilentlyContinue
+${plugin_backup_block}
 
 ${copy_block}
 
@@ -430,7 +396,7 @@ if (Test-Path \$manifest) {
   Write-Warning "no BUNDLE_MANIFEST.json in \$stage -- cannot byte-verify obs.dll (fast deploy); marker-only proof."
 }
 
-${distroav_deploy_block}
+${plugin_deploy_block}
 
 # (7) box-backup RETENTION PLAN (bod 5) -- keep the newest ${keep} dated backup dirs; list the rest
 #     as "would delete". Deletion happens ONLY when \$fleetConfirmRetention is \$true (never silent).

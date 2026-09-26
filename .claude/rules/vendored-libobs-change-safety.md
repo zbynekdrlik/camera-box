@@ -133,6 +133,12 @@ PROOF was lying. Anchor the mutation on the unique `return …` (or `if (…` wi
 conjunct that is a parameter's ONLY use (e.g. removing the `ticks_since_drain >= …` throttle
 clause) is caught by the gate's own `-Werror` compile step as `unused-parameter`, not a value
 diff — a compile FAIL is still the gate biting, count it as RED.
+**But a `-Werror` kill proves the CODE is reached, not that a VECTOR exercises the branch (issue 1367
+sticky floor, review round 1).** A "spread check removed" mutant died only on the unused `low`, so
+the sweep read RED while no parity vector had a spread-gated block (every transient sat in the
+over-clamp bin, which rejected it first). For every mutant whose only kill is the compiler, add a
+COMPILING twin — `(void)low;` plus the dropped condition, or the threshold nudged `+ 1u` — and
+require that twin to diverge by VALUE.
 
 **Adding an audit-line-ONLY observability field (no API consumer) is the minimal choice — do NOT
 grow `obs_genlock_stats` for it (#1355).** A new `genlock-fifo audit '<src>':` key that only the

@@ -416,6 +416,13 @@ mod genlock_wall_step_bench;
 // `tests/os_clock_discipline_parity_1372.rs`, which lifts it and runs it on a fake Win32 layer.
 pub mod os_clock_discipline;
 
+// Issue 1372 — the send pacing of the vendored obs-vban VBAN output: a jitter buffer of a
+// configurable target depth (default 64 ms) whose packets leave at `t0 + n × packet_duration` on the
+// disciplined OBS clock, every due packet per wake, underflows waited out and overflows dropped,
+// both counted. Crate-root + std-only (Tier-0 verifiable); the C twin
+// `vendor/obs-vban/src/vban-pacing.h` is held identical by `tests/vban_pacing_parity_1372.rs`.
+pub mod vban_pacing;
+
 // #1298 — the pure LOCKED/DEGRADED/UNLOCKED decision for the in-OBS genlock statusbar
 // indicator. Crate-root + std-only so it is Tier-0 verifiable; the C port in
 // `vendor/obs-studio/frontend/widgets/GenlockLockState.hpp` is held identical by the
@@ -428,6 +435,14 @@ pub mod genlock_lock_state;
 // mirror (`genlock_audio_*` in `vendor/obs-studio/libobs/obs-source.c`) is held identical by the
 // committed parity gate `tests/genlock_audio_pairing_parity.rs`.
 pub mod genlock_audio_pairing;
+
+// Issue 1367 (design 5845361166) — the two-clock bench of the TIMECODE mode of the per-source ASRC: a
+// genlock source placed at its NDI timecode is judged by where each packet lands against its stamp,
+// never by arrival timing (a skipped / duplicated slot, a restart catch-up, a date step, a stamp leap
+// placed at its stamp). Drives `asrc_bench::RealtimeAsrcCompensator` through the production ingest
+// decisions of `genlock_audio_pairing`. Test-only.
+#[cfg(test)]
+mod asrc_timecode_bench;
 
 // #1303 part 4 — the report-only per-box-class certified-table AUDIO-parity audit (camera inputs
 // silent, sp-*/cg/program inputs audio). Deploy-time preflight logic (no runtime OBS path, no C

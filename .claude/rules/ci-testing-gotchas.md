@@ -1330,6 +1330,10 @@ loops on `[ "$(date +%s)" -lt "$end" ]`, parses ONLY the last JSONL line of the 
 **Also require `message.stop_reason == "end_turn"`** (issue 1346): the reviewer emits intermediate
 text-only assistant lines between tool rounds, so an `assistant ['text']` last line alone fired
 "DONE" while the review was still running.
+**A re-review sent with `SendMessage` to the same (finished) reviewer appends to the SAME output
+file** (issue 1372), whose last line is still the previous round's `end_turn`, so the waiter
+returns at once. Record `wc -l` of the file right after the send and only accept an `end_turn`
+last line once the line count has grown past it.
 
 ## A Python CLI test that overrides HOME also hides the USER site-packages (issue 1346)
 
@@ -1406,3 +1410,14 @@ was written for it:
 `patsub_replacement` is on by default in bash 5.2, so `${body//__PROC__/$root}` with `root='/a&b'`
 yields `/a__PROC__b`. Quote the replacement: `"${body//__PROC__/"$root"}"`. The same applies to
 any template placeholder filled from a variable.
+
+## Two worktree-lane setup traps (issue 1372, dantesync 1.11.0 slice)
+
+- **A lane worktree created on `origin/main` cannot `git merge --ff-only origin/dev`.** main's tip is
+  a PR merge commit that dev never contains, so the branches have diverged. If
+  `git log HEAD --not origin/dev` shows nothing except main's own merge commits, and the lane has no
+  commits of its own, re-point the lane branch instead: `git switch -C <own-lane-branch> origin/dev`.
+  Do this BEFORE the version bump. Never cherry-pick or merge main's merge commits into the lane.
+- **A recursive `grep -r` whose path list includes `.claude` is refused** by the airuleset
+  credential-store hook, which reads it as a recursive read of the store's parent directory. Use
+  the Grep tool for repo-wide searches that must cover `.claude/rules/`.

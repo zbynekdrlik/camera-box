@@ -63,11 +63,11 @@ the guard gets it unchanged; the guard was already ~2000 lines), a python twin i
   `dantesync_journal_clock_verdict JOURNAL FRESH BOUND STABILITY MARGIN`: when the freshest
   `[NTP] offset:` line has the master's shape
   `[NTP] offset:-25217us (date authority, fleet line -25217us, step bound 50000us)` it grades
-  MEDIAN-ONLY on that step bound + margin (a coordinated step moves every sample, so spread is not a
-  health signal — the gate's master is median-only for the same reason); any other line keeps the
-  2 ms bound + stability. `date_step_bound_us_from_journal` reads the bound from the line itself;
-  `dantesync_journal_date_bound_us` is the ONE branch decision (step + margin, or "" = ordinary), so
-  the bound a consumer PRINTS is always the one the verdict graded.
+  MEDIAN-ONLY (a coordinated step moves every sample, so spread is not a health signal — the gate's
+  master is median-only for the same reason); any other line keeps the 2 ms bound + stability. WHICH
+  bound the master's line is graded on is decided from the node's own `/status` (the 1.11.0 section
+  below: micro bound for a micro-capable master, else the line's own step bound + margin).
+  `date_step_bound_us_from_journal` reads the step bound from the line itself.
 
 **Wiring.** `dantesync-gate.sh` `grade_http_node`: the median-only (master) branch takes the date
 bound only when the date verdict is `ok`/`out` (a master whose date fields are unreadable falls
@@ -82,7 +82,8 @@ uses `clock_discipline_check` + `date_master_effective_bound_us` + `date_master_
 `clock-discipline?`.
 
 **Parity table.** `tests/fixtures/dantesync_clock_discipline_1372.tsv` (case, status, class,
-date_verdict at margin 1000 us, unlocked) — `@` rows are `/status` captured read-only from the live 1.9.0 fleet
+date_verdict at margin 1000 us, unlocked, journal_grade) — `@` rows are `/status` captured read-only
+from the live 1.9.0 and 1.11.1 fleet
 (`tests/fixtures/dantesync_status_1372/`: strih-lx master, stream slave) plus two legacy nodes
 synthesized from the old field shape. `tests/python/test_clock_discipline_1372.py` runs BOTH the bash
 (through `bash <file>` subprocesses) and the python twin over every row, plus the gate on fresh
@@ -99,6 +100,91 @@ and both now have TSV rows:
   value). Bash's awk turns it into `inf` or a 20+ digit string. Both sides must reject any value past the same
   limit before any float conversion (|us| >= 1e15 = more than 15 digits for bash integer arithmetic).
 When adding a field to the table, add a non-string row and an absurd-magnitude row.
+
+**Gotcha: editing EVERY row of the TSV (a new column) trips the secret-staging hook.** The 401-digit
+`master_error_huge_integer` row reads as a "40+ char hex blob", so `git add` and `git commit` of the
+changed table are blocked. It is a test value, not a secret: append
+`# airuleset:secret-ok <reason>` to BOTH the `git add` and the `git commit` command, and pass the
+commit message with `-F <file>` (a heredoc in the same call is refused by the worktree guard).
+
+### dantesync 1.11.0: the date master is graded on its MICRO-corrections (issue 1372, design 5846047309)
+
+dantesync 1.11.0 (PR 121) no longer lets the fleet date drift up to the 50 ms step bound. The
+master holds it within ~2-3 ms by 500 us micro-corrections (2 ms dead band, 20 s interval). A
+large step exists only past 2 x the step bound. `/status` gains these fields (plain
+`#[serde(default)]`, so they are always present on a 1.11.0 node):
+
+- `date_micro_active` (bool)
+- `date_micro_last_us` (i64 or null)
+- `date_correction_rate_ms_per_min`
+- `date_correction_falling_behind` (bool)
+- `date_micro_paused` (bool)
+
+Grading 1.11.0 on the step bound would let a master that stopped correcting read ok for ~45 min.
+
+- **Capability, never a version string.** `date_master_micro_capable STATUS` (python
+  `date_master_micro_capable`) is yes iff the blob carries `date_correction_falling_behind`, with
+  any value. A capable master goes through `_date_master_micro_verdict`, checked in this order:
+  1. `falling_behind=true` gives `out` (it wins over paused).
+  2. `date_micro_paused=true` gives the NEW verdict `paused`.
+  3. Either flag not a JSON boolean (null, a quoted "false", absent paused) gives `unknown`.
+  4. Otherwise it is `ok` when `|date_offset_error_ms| <= micro bound + margin`, else `out`.
+
+  `date_step_bound_ms` is not read on this path. A master WITHOUT the field (1.9.0 / 1.10.0) keeps
+  the step-bound grade byte for byte, so a mixed fleet grades each master by what it reports during
+  the roll.
+- **ONE micro knob**: `DATE_MASTER_MICRO_BOUND_MS` (env `DANTESYNC_DATE_MICRO_BOUND_MS`, default 5;
+  empty = default on both twins). Only a positive plain decimal (`^[0-9]+(\.[0-9]+)?$`) is readable;
+  `0`, `-1`, `abc` give `unknown`. The shape check comes BEFORE the conversion, because awk turns
+  `5abc` into 5 while python `float()` rejects it. A capable master's
+  `date_master_effective_bound_us` is `max(base, micro*1000 + margin)`, which is 6000 us at the
+  defaults. The gate prints `date master graded on its micro bound: bound 6000us = 5ms + 1000us margin`.
+- **`date_master_check` rc 4 = PAUSED** (WARN; the line names `date_micro_paused=true: no UTC
+  reading for over a minute`). The E2E `[0/8]` gate maps rc 4 to UNKNOWN, so it exits 11 and is
+  fail-closed. verify-imag `warn`s on it. The OUT line names `date_correction_falling_behind=true`
+  when that is the cause.
+- **The journal path grades the master by the capability its OWN `/status` reports (design
+  5847562945, part b).** The 1.11.x master's `[NTP] offset:` line keeps the `(date authority, fleet
+  line …, step bound …us)` shape and carries no capability. Its transition lines (`micro-corrections
+  paused/resumed`, `falling behind/caught up`) cannot decide it either, because a healthy master
+  logs neither. So every journal consumer passes the node's `/status` as the optional last argument
+  of `dantesync_journal_clock_verdict` / `dantesync_journal_date_bound_us` /
+  `dantesync_journal_date_note`. ONE decision `journal_date_grade_from_step STEP_US MARGIN_US STATUS
+  [MICRO]` (python twin `dantesync_fleet.journal_date_grade`, same argument order) returns:
+  - `micro:<us>`: a micro-capable `date_authority=master`, both flags false. The median is graded
+    on micro bound + margin (6000 us at the defaults).
+  - `out` -> the verdict word `falling_behind`: `date_correction_falling_behind=true`, which wins
+    over paused.
+  - `paused` -> `paused`: `date_micro_paused=true`.
+  - `unknown` -> `unknown`: a flag that is not a JSON boolean, or an unreadable micro bound. The
+    flag order is `_date_master_micro_verdict`'s, so the journal and /status paths agree.
+  - `step:<us>`: a `/status` with a `date_authority` that is not a micro-capable master (1.9.0 /
+    1.10.0, or a follower). The line's step bound + margin.
+  - `step-unread:<us>`: no `date_authority` at all (empty, unreachable, not JSON, a pre-1.9.0 blob).
+    The step bound + margin too, NAMED by the note (`no readable /status: micro-corrections not
+    graded, the looser step bound`). Never a silent loosening.
+  - `none`: an ordinary line (not date-authority), or a step or margin that is not a plain integer
+    of at most 15 digits (bash integer arithmetic would wrap past that; both twins cap it). STATUS
+    is not read.
+
+  `dantesync_journal_date_note` is the ONE printed text for that grade, so the bound a consumer
+  prints is the bound that was graded. Wiring:
+  - verify-strih check 6 reads `127.0.0.1:8898/status` on the box (the same read as 6b). It FAILs
+    `falling_behind` and `unknown`, and NOTEs `paused` as WARN (verify-imag's convention).
+  - The gate's linux journal fallback runs only when HTTP `/status` is unreachable, so it passes no
+    status and prints the `no readable /status` note.
+  - verify-imag's fallback also has no `/status` and grades exactly as before.
+  - The parity table's `journal_grade` column pins every row on both twins.
+- **Deliberately stricter than dantesync.** dantesync raises `date_correction_falling_behind` only
+  past 10 ms. The micro bound + margin (6 ms at the defaults) therefore reads a 6-10 ms catch-up
+  transient OUT while dantesync itself is quiet, for example right after a pause ends or after a
+  master restart. That is the design's intent, not a false red.
+- **Fixtures.** `strih-lx-master-1.11.1.json` / `stream-slave-1.11.1.json` are LIVE read-only
+  captures (`curl -s http://10.77.9.202:8898/status` / `.204`, 26.9.2026, both on 1.11.1). They
+  replaced the synthesized 1.11.0 files; every expectation held unchanged. The master reads
+  `date_offset_error_ms=0.471`, `last_date_step_kind=micro` and the 1.11.1-only
+  `date_step_phase_jump_us`. The pin (`DANTESYNC_VERSION_PIN`) is 1.11.1 (1.11.1 = every clock step
+  lands exactly, dantesync PR 122). Capture the next release the same way, named by its version.
 
 **Live check (read-only, allowed):** `DANTESYNC_GATE_GM_ENFORCE=1 DANTESYNC_GATE_PHASE_SLEW_ENFORCE=1
 scripts/dantesync-gate.sh --linux "" --win-http strih=10.77.9.202 --win-http stream=10.77.9.204`

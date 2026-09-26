@@ -185,10 +185,10 @@ def test_credentials_load_from_the_file_parsed_not_sourced(tmp_path):
 
 def test_role_grandmaster(tmp_path, monkeypatch):
     r = _bash(tmp_path, 'echo "V=$(dantesync_fleet_role_gm_host video)"; echo "A=$(dantesync_fleet_role_gm_ip audio)"')
-    assert "V=video-clock.lan" in r.stdout and "A=10.77.7.106" in r.stdout
+    assert "V=video-clock.lan" in r.stdout and "A=10.77.7.104" in r.stdout
     _with_env(monkeypatch)
     assert df.role_gm_host("video") == "video-clock.lan"
-    assert df.role_gm_host("audio") == "10.77.7.106"
+    assert df.role_gm_host("audio") == "10.77.7.104"
     assert df.role_gm_host("ntp-master") == "video-clock.lan"
     _with_env(monkeypatch, DANTESYNC_AUDIO_GM_HOST="10.77.7.99")
     assert df.role_gm_host("audio") == "10.77.7.99"
@@ -208,7 +208,7 @@ def test_live_mbc_drift_is_named(monkeypatch):
     _with_env(monkeypatch)
     verdict, diffs = df.drift((_FIX / "mbc.json").read_bytes(), "audio")
     assert verdict == df.DRIFT
-    assert diffs == ['system.gm_allowlist: missing (canonical ["10.77.7.106"])']
+    assert diffs == ['system.gm_allowlist: missing (canonical ["10.77.7.104"])']
 
 
 def test_live_fohabl_drift_names_the_missing_allowlist(monkeypatch):
@@ -217,7 +217,7 @@ def test_live_fohabl_drift_names_the_missing_allowlist(monkeypatch):
     _with_env(monkeypatch)
     verdict, diffs = df.drift((_FIX / "fohabl.json").read_bytes(), "audio")
     assert verdict == df.DRIFT
-    assert diffs == ['system.gm_allowlist: missing (canonical ["10.77.7.106"])']
+    assert diffs == ['system.gm_allowlist: missing (canonical ["10.77.7.104"])']
 
 
 def test_a_byte_order_mark_is_drift_even_when_the_content_matches(monkeypatch):

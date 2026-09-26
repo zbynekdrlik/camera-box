@@ -268,25 +268,35 @@ fi
 #    offset with the PTP servo LOCKED is disciplined near-zero (the #550 reasoning) -> PASS; not
 #    locked -> FAIL (no trustworthy clock signal). setup-strih.sh step 2 refuses an ambiguous
 #    role+args shape (strih_lx_dantesync_role_ok) at install time; the role itself is graded in 6b.
-#    Issue 1372: under dantesync 1.9.0 strih-lx is the fleet DATE master, whose `(date authority,
-#    ..., step bound Nus)` journal line is graded on that step bound + margin through the shared
-#    dantesync_journal_clock_verdict (clock-offset-guard.sh), never on the 2 ms UTC bound.
+#    Issue 1372: strih-lx is the fleet DATE master, whose `(date authority, ..., step bound Nus)`
+#    journal line is graded through the shared dantesync_journal_clock_verdict
+#    (clock-offset-guard.sh) by the capability its OWN :8898/status reports: a micro-capable
+#    dantesync 1.11.x master on the micro bound + margin and its falling_behind/paused flags; without
+#    a readable /status on the step bound + margin, named as such. Never the 2 ms UTC bound.
 DS_ACTIVE="$(systemctl is-active dantesync 2>/dev/null || true)"
 if [ "$DS_ACTIVE" != active ]; then
   bad "dantesync.service not active (state='${DS_ACTIVE:-<none>}') -- clock undisciplined/free-running"
 else
   DS_JOURNAL="$(journalctl -u dantesync --no-pager -n 400 -o short-iso 2>/dev/null || true)"
-  # Issue 1372: strih-lx is the fleet DATE master under dantesync 1.9.0; its journal reads
-  # `[NTP] offset:-25217us (date authority, fleet line ..., step bound 50000us)` and is graded on
-  # that step bound + DATE_MASTER_MARGIN_US (the one DANTESYNC_DATE_MARGIN_US knob), median-only
-  # (dantesync_journal_clock_verdict). Any other journal line shape keeps the CLOCK_GUARD_BOUND_US +
-  # stability grade. The printed bound comes from the SAME decision the verdict uses.
-  DS_DATE_BOUND_US="$(dantesync_journal_date_bound_us "$DS_JOURNAL" "$DATE_MASTER_MARGIN_US")"
+  # Issue 1372: the date master's journal reads `[NTP] offset:-2140us (date authority, fleet line
+  # ..., step bound 50000us)` on every release since 1.9.0 -- the line cannot tell a 1.11.x master
+  # (micro-corrections, DATE_MASTER_MICRO_BOUND_MS) from a 1.10.0 one (step bound). The box's own
+  # :8898/status can (the same read as 6b), so it rides along: the grade, the printed bound and the
+  # verdict all come from ONE decision (dantesync_journal_date_note / _clock_verdict). Any other
+  # journal line shape keeps the CLOCK_GUARD_BOUND_US + stability grade.
+  DS_CLOCK_STATUS="$(curl -s --max-time 4 http://127.0.0.1:8898/status 2>/dev/null || true)"
+  DS_DATE_NOTE="$(dantesync_journal_date_note "$DS_JOURNAL" "$DATE_MASTER_MARGIN_US" "$DS_CLOCK_STATUS")"
   DS_BOUND_TXT="${CLOCK_GUARD_BOUND_US:-2000}us bound"
-  [ -n "$DS_DATE_BOUND_US" ] && DS_BOUND_TXT="date master step bound + ${DATE_MASTER_MARGIN_US}us margin = ${DS_DATE_BOUND_US}us"
-  case "$(dantesync_journal_clock_verdict "$DS_JOURNAL" "${DANTESYNC_OFFSET_FRESHNESS_S:-300}" "${CLOCK_GUARD_BOUND_US:-2000}" "${DANTESYNC_STABILITY_US:-2000}" "$DATE_MASTER_MARGIN_US")" in
+  [ -n "$DS_DATE_NOTE" ] && DS_BOUND_TXT="$DS_DATE_NOTE"
+  case "$(dantesync_journal_clock_verdict "$DS_JOURNAL" "${DANTESYNC_OFFSET_FRESHNESS_S:-300}" "${CLOCK_GUARD_BOUND_US:-2000}" "${DANTESYNC_STABILITY_US:-2000}" "$DATE_MASTER_MARGIN_US" "$DS_CLOCK_STATUS")" in
     ok)
       ok "dantesync active + FRESH clock offset within ${DS_BOUND_TXT}" ;;
+    falling_behind)
+      bad "dantesync DATE MASTER OUT -- ${DS_BOUND_TXT}" ;;
+    paused)
+      note "dantesync DATE MASTER PAUSED (WARN) -- ${DS_BOUND_TXT}" ;;
+    unknown)
+      bad "dantesync DATE MASTER UNKNOWN -- ${DS_BOUND_TXT}" ;;
     stale|absent)
       if [ "$(ptp_locked_from_journal "$DS_JOURNAL")" = LOCKED ]; then
         ok "dantesync active + PTP servo LOCKED (no fresh [NTP] line; offset disciplined near-zero, #550)"

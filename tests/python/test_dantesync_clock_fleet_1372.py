@@ -4,7 +4,7 @@ WHY: the watchdog watched only the video fleet (a literal `cam1 ... cam7` + the 
 The audio-VLAN PCs mbc (10.77.7.232) and fohabl (10.77.7.30) run dantesync too and were never
 clock-watched. Now every default roster list comes from scripts/lib/dantesync-fleet.sh, and each
 node is graded against ITS role's grandmaster: an audio-VLAN node locks to the audio grandmaster
-(10.77.7.106, the Audinate device -- the same clock as video-clock.lan on the other VLAN), so a
+(10.77.7.104, the Audinate device -- the same clock as video-clock.lan on the other VLAN), so a
 correctly locked mbc must read OK, never a false `wrong_gm` page against the video grandmaster.
 
 Drives the REAL watchdog in --dry-run through its seams (fetch stub keyed by IP), no live rig.
@@ -18,7 +18,7 @@ _ROOT = pathlib.Path(__file__).resolve().parents[2]
 _WATCHDOG = _ROOT / "scripts" / "dantesync-clock-alert-watchdog.sh"
 _NOW = 1790349506
 VIDEO_GM = "10.77.9.230"
-AUDIO_GM = "10.77.7.106"
+AUDIO_GM = "10.77.7.104"
 
 
 def _status(gm, is_locked="true", mode="LOCK"):
@@ -94,7 +94,7 @@ def test_an_audio_node_on_the_wrong_grandmaster_pages_with_the_audio_remedy(tmp_
     err = _run_dry(tmp_path, {"10.77.7.232": _status(VIDEO_GM), "10.77.7.30": _status(AUDIO_GM)})
     assert "mbc (10.77.7.232): reachable=1 verdict=NO_CLOCK reason=wrong_gm" in err, err
     assert "WOULD alert" in err and "dante-clock-mbc-" in err
-    assert "audio grandmaster na audio VLAN (10.77.7.106" in err
+    assert "audio grandmaster na audio VLAN (10.77.7.104" in err
     assert "fohabl (10.77.7.30): reachable=1 verdict=OK" in err
 
 

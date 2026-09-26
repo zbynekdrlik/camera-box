@@ -206,6 +206,12 @@ RIG_MODE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/bkshading-relay-mode.sh
 . "$RIG_MODE_DIR/lib/bkshading-relay-mode.sh"
 
+# issue 1371: leaving development puts the test camera's production ISO + shutter back (the values
+# the E2E snapshotted right before its first exposure set), through the ONE camera-test-settings
+# transport + its read-back. Source-only lib, no side effects at source time.
+# shellcheck source=scripts/lib/camera-test-settings.sh
+. "$RIG_MODE_DIR/lib/camera-test-settings.sh"
+
 # --- pinned constants (overridable via env, but DEFAULTS are the single source of truth) -----------
 CAM_PW="${CAM_PW:-newlevel}"                 # dev-rig LAN root pw (same as the sibling e2e scripts)
 PAINTER_IP="${PAINTER_IP:-10.77.9.62}"       # cam2 — has /dev/fb0 + the monitor the broadcast cam films
@@ -1639,6 +1645,9 @@ do_event() {
   echo
   event_mode_ledger_cleanup
   echo
+  # issue 1371: while the relay is still stopped (one gphoto2 user). Loud on failure, never fatal.
+  camera_test_settings_restore "$RIG_MODE_DIR" "$STRIH_IP" "$STREAM_IP" "$CAM_PW" "${RIG_SOURCE_BOX}=$RIG_SOURCE_IP" "cam2=$PAINTER_IP" || true
+  echo
   echo "[relay] issue 1311: enable+start bkshading-relay on the relay boxes (EVENT-only — shading available for the broadcast):"
   bkshading_relay_mode_apply event "$CAM_PW" "${RIG_SOURCE_BOX}=$RIG_SOURCE_IP" "cam2=$PAINTER_IP"
   echo
@@ -1665,6 +1674,7 @@ do_event() {
   echo
   echo "===== [#722] EVENT-mode CONTRACT — the full machine-checkable assert phase ====="
   event_mode_assert
+  camera_test_settings_restore_discord_note "${EVENT_ASSERT_DISCORD_MSG_PATH:-}"
   echo "=================================================================================="
   echo
   # #724: send the Discord confirmation on BOTH outcomes (pass=confirmation, fail=warning naming

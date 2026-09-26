@@ -64,7 +64,7 @@ production-critical watchdog class (umbrella **#1308**).
   `DANTE_CLOCK_FIXED_NODES`; box-up = ssh :22, no ssh-banner mgmt axis). resolume is traveling →
   paged only while `obs_fleet_is_home`. An OFF box → UNREACHABLE → SKIP (defers to #1001), never a
   page. Roster lines are `NAME|IP|HOMEGATE[|ROLE]`; an **audio** node is graded against the audio
-  grandmaster (`DANTESYNC_AUDIO_GM_HOST`, 10.77.7.106) with an audio remedy text, every other node
+  grandmaster (`DANTESYNC_AUDIO_GM_HOST`, 10.77.7.104 since 25.9.2026; earlier 10.77.7.106) with an audio remedy text, every other node
   against video-clock.lan. A 3-field `DANTE_CLOCK_NODES` override still parses (role = video).
 - **dev1 is the `local` node — the control box watches its OWN clock (#1313, the former dev1 blind
   spot, now CLOSED).** dev1 is NOT a probed cam/obs node, yet it runs dantesync and its clock feeds

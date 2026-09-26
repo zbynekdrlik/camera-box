@@ -42,14 +42,18 @@ hand (25.9.2026). Adding a node is now ONE row; every consumer picks it up.
     with an empty or a foreign password.
 - **lv1 (10.77.7.100) is deliberately absent** (owner ROZHODNUTÉ 25.9.2026: an operational PC, on the
   network temporarily).
-- **The audio grandmaster** is `DANTESYNC_AUDIO_GM_HOST` (default 10.77.7.106, Audinate
-  00:1d:c1:1a:44:30 — the same clock as video-clock.lan, #1367 comment 5832526338). No DNS name exists
+- **The audio grandmaster** is `DANTESYNC_AUDIO_GM_HOST` (default 10.77.7.104 since the leader moved
+  on 25.9.2026 ~21:07, Audinate 00:1d:c1:08:02:14/15; earlier 10.77.7.106, 00:1d:c1:1a:44:30 — the same clock as video-clock.lan, #1367 comment 5832526338). No DNS name exists
   for it yet; the address lives in this ONE variable.
 - **Python twin:** `scripts/dantesync_fleet.py rows` prints byte-identical rows (parity pinned).
 - **Clock-discipline twin (issue 1372):** `dantesync_fleet.classify_clock_discipline(status)`,
-  `clock_discipline_unlocked(status)` and `date_master_verdict(status, margin_us)` are the python
+  `clock_discipline_unlocked(status)`, `date_master_micro_capable(status)`,
+  `date_master_verdict(status, margin_us, micro_bound_ms=None)` (none/ok/out/paused/unknown; a
+  dantesync 1.11.0 master is graded on its micro-corrections) and
+  `journal_date_grade(step_bound_us, margin_us, status, micro_bound_ms=None)` (the journal path's
+  date grade from the node's own /status) are the python
   twins of `scripts/lib/dantesync-clock-discipline.sh`'s `clock_discipline_class` /
-  `clock_discipline_unlocked` / `date_master_verdict`, pinned by ONE table
+  `clock_discipline_unlocked` / `date_master_verdict` / `journal_date_grade_from_step`, pinned by ONE table
   `tests/fixtures/dantesync_clock_discipline_1372.tsv` (see `dantesync-clock-offset-gate.md`). A python
   consumer (a watchdog, a report) grades the 1.9.0 discipline through them, never by re-reading
   `phase_slew_enabled`.

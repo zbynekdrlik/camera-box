@@ -186,17 +186,117 @@ def _ms_to_us(value):
     return us if abs(us) < _US_LIMIT else None
 
 
-def date_master_verdict(status, margin_us: int) -> str:
-    """none / ok / out / unknown: the date master (`date_authority` master) is graded on
-    |date_offset_error_ms| <= date_step_bound_ms + margin; any other node is `none`."""
+DATE_MICRO_BOUND_MS_DEFAULT = "5"
+_MICRO_BOUND_SHAPE = re.compile(r"[0-9]+(\.[0-9]+)?")
+
+
+def date_micro_bound_ms() -> str:
+    """The micro bound (ms) a dantesync 1.11.0 date master is graded on: DANTESYNC_DATE_MICRO_BOUND_MS,
+    or 5 when it is unset or empty (the bash twin's `${DANTESYNC_DATE_MICRO_BOUND_MS:-5}`)."""
+    return os.environ.get("DANTESYNC_DATE_MICRO_BOUND_MS") or DATE_MICRO_BOUND_MS_DEFAULT
+
+
+def _micro_bound_us(micro_bound_ms):
+    """Integer us of a positive plain-decimal ms string; None for any other shape or a zero bound
+    (the bash twin's _micro_bound_us)."""
+    text = str(micro_bound_ms)
+    if not _MICRO_BOUND_SHAPE.fullmatch(text):
+        return None
+    us = _ms_to_us(float(text))
+    return us if us is not None and us > 0 else None
+
+
+def date_master_micro_capable(status) -> bool:
+    """True iff the /status carries date_correction_falling_behind (any value): a dantesync 1.11.0+
+    node, whose date master is graded on its micro-corrections -- read from the status, never a
+    version string."""
+    return "date_correction_falling_behind" in _status_dict(status)
+
+
+def _date_master_micro_verdict(s: dict, margin_us: int, micro_bound_ms) -> str:
+    behind = s.get("date_correction_falling_behind")
+    paused = s.get("date_micro_paused")
+    if behind is True:
+        return "out"
+    if behind is not False or not isinstance(paused, bool):
+        return "unknown"
+    if paused:
+        return "paused"
+    err_us = _ms_to_us(s.get("date_offset_error_ms"))
+    bound_us = _micro_bound_us(micro_bound_ms)
+    if err_us is None or bound_us is None:
+        return "unknown"
+    return "ok" if abs(err_us) <= bound_us + int(margin_us) else "out"
+
+
+def date_master_verdict(status, margin_us: int, micro_bound_ms=None) -> str:
+    """none / ok / out / paused / unknown for one node's /status.
+
+    Not the date master (`date_authority` != master) -> none. A micro-capable master (dantesync
+    1.11.0) -> out on date_correction_falling_behind, paused on date_micro_paused, else
+    |date_offset_error_ms| <= micro bound (MICRO_BOUND_MS, default date_micro_bound_ms()) + margin.
+    Any other master (1.9.0 / 1.10.0) -> |date_offset_error_ms| <= date_step_bound_ms + margin."""
     s = _status_dict(status)
     if s.get("date_authority") != "master":
         return "none"
+    if date_master_micro_capable(s):
+        # None or "" = the default, like the bash twin's `${3:-$DATE_MASTER_MICRO_BOUND_MS}`
+        micro = date_micro_bound_ms() if micro_bound_ms in (None, "") else micro_bound_ms
+        return _date_master_micro_verdict(s, margin_us, micro)
     err_us = _ms_to_us(s.get("date_offset_error_ms"))
     bound_us = _ms_to_us(s.get("date_step_bound_ms"))
     if err_us is None or bound_us is None or bound_us <= 0:
         return "unknown"
     return "ok" if abs(err_us) <= bound_us + int(margin_us) else "out"
+
+
+_DIGITS = re.compile(r"[0-9]+")
+
+
+def _plain_int(value, max_digits=None):
+    """A non-negative integer from an int or a plain digit string (the bash twin's `^[0-9]+$`, with
+    at most MAX_DIGITS digits); None for anything else (a bool, a sign, a fraction, "")."""
+    if isinstance(value, bool):
+        return None
+    text = str(value) if isinstance(value, int) else value
+    if not isinstance(text, str) or not _DIGITS.fullmatch(text):
+        return None
+    if max_digits is not None and len(text) > max_digits:
+        return None
+    return int(text)
+
+
+def journal_date_grade(step_bound_us, margin_us, status, micro_bound_ms=None) -> str:
+    """How a date-authority journal line `[NTP] offset:... (date authority, ..., step bound Nus)` is
+    graded when the SAME node's /status is STATUS -- the bash journal_date_grade_from_step:
+
+    none (STEP_BOUND_US not a positive integer, or MARGIN_US not a non-negative integer, each of at
+    most 15 digits) | micro:<us> (a micro-capable date master, both flags false: micro bound + margin) |
+    out (date_correction_falling_behind true) | paused (date_micro_paused true) | unknown (a flag
+    that is not a JSON boolean, or an unreadable micro bound) | step:<us> (a /status with a
+    date_authority that is not a micro-capable master: step bound + margin) | step-unread:<us> (no
+    date_authority -- empty, not JSON, a pre-1.9.0 blob: step bound + margin, named by the consumer)."""
+    step = _plain_int(step_bound_us, max_digits=15)
+    margin = _plain_int(margin_us, max_digits=15)
+    if step is None or step <= 0 or margin is None:
+        return "none"
+    s = _status_dict(status)
+    auth = s.get("date_authority")
+    if not isinstance(auth, str) or not auth:
+        return f"step-unread:{step + margin}"
+    if auth != "master" or not date_master_micro_capable(s):
+        return f"step:{step + margin}"
+    behind = s.get("date_correction_falling_behind")
+    paused = s.get("date_micro_paused")
+    if behind is True:
+        return "out"
+    if behind is not False or not isinstance(paused, bool):
+        return "unknown"
+    if paused:
+        return "paused"
+    micro = date_micro_bound_ms() if micro_bound_ms in (None, "") else micro_bound_ms
+    bound_us = _micro_bound_us(micro)
+    return "unknown" if bound_us is None else f"micro:{bound_us + margin}"
 
 
 # ---------------------------------------------------------------------------------------------

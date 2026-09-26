@@ -280,7 +280,7 @@ fn a_timeline_reset_places_and_the_placement_is_measured_on_the_samples_1367() {
             "where the packet ACTUALLY lands (appended: the buffer end; placed: its timestamp) must be measured",
         ),
         (
-            "source->genlock_audio_place_err_ns = genlock_audio_place_error_smooth_ns( source->genlock_audio_place_err_ns, genlock_audio_place_error_ns(genlock_actual_ns, in.timestamp), source->genlock_audio_place_err_seeded);",
+            "source->genlock_audio_place_err_ns = genlock_audio_place_error_smooth_ns( source->genlock_audio_place_err_ns, genlock_place_err_ns, source->genlock_audio_place_err_seeded);",
             "the placement error (actual minus intended) must be smoothed per packet",
         ),
     ] {
@@ -304,5 +304,138 @@ fn a_timeline_reset_places_and_the_placement_is_measured_on_the_samples_1367() {
         &src,
         "\"audio_place_err_ms=%lld \"",
         "the audit line must carry the measured placement error",
+    );
+}
+
+/// The body of `asrc_timecode_ingest` (issue 1367, design 5845361166).
+fn asrc_timecode_ingest(src: &str) -> &str {
+    let sig = "static void asrc_timecode_ingest(obs_source_t *source, uint64_t stamp_mono_ns, double err_ms, bool appended) {";
+    let start = src.find(sig).unwrap_or_else(|| {
+        panic!("issue 1367: {OBS_SOURCE} no longer defines asrc_timecode_ingest -- a timecode-placed source is judged by arrival timing again")
+    });
+    let rest = &src[start + sig.len()..];
+    let end = rest.find(" static ").unwrap_or(rest.len());
+    &rest[..end]
+}
+
+/// Issue 1367 (design 5845361166, investigation finding 5845350148): a genlock source whose audio is
+/// placed at its NDI timecode (resolume `sp-*`) must be judged by where each packet lands against its
+/// RAW stamp, never by arrival timing: the arrival servo read a skipped SongPlayer slot as a loss while
+/// the buffer moved the other way (no 1000 ppm booking, ~130 ppm for ~9 min) and a restart catch-up as
+/// +288 ppm, and `audio_place_err_ms` compared against the already-snapped stamp and read 0.
+#[test]
+fn the_timecode_asrc_reads_the_raw_stamp_placement_not_arrival_1367() {
+    let src = squished();
+    let ingest = audio_ingest(&src);
+    for (needle, why) in [
+        (
+            "const uint64_t genlock_intended_ns = genlock_audio_intended_raw_ns( data->timestamp, genlock_timing_adjust, sync_offset, source->resample_offset, genlock_term_ns);",
+            "the intended landing must come from the RAW stamp (before the 70 ms smoothing snap) through the same term",
+        ),
+        (
+            "const int64_t genlock_place_err_ns = genlock_audio_place_error_ns(genlock_actual_ns, genlock_intended_ns);",
+            "the placement error (audio_place_err_ms) must be measured against the raw-stamp intended landing",
+        ),
+        (
+            "genlock_audio_asrc_timecode(genlock_hold_mode, source->monitoring_type == OBS_MONITORING_TYPE_MONITOR_ONLY, source->asrc_enabled && source->resampler);",
+            "the ASRC must enter timecode mode exactly for audio placed at its timecode that reaches the mix",
+        ),
+        (
+            "asrc_compensator_set_timecode(&source->asrc, genlock_asrc_tc);",
+            "the compensator must be told the mode on every packet",
+        ),
+        (
+            "genlock_asrc_err_ms = genlock_audio_asrc_error_ms(genlock_place_err_ns, source->genlock_audio_slew_remaining_ns);",
+            "the ASRC's error is the placement error with the owed placement slew excluded",
+        ),
+        (
+            "if (genlock_asrc_tc && genlock_asrc_measured) asrc_timecode_ingest(source, genlock_audio_stamp_mono_ns(data->timestamp, genlock_off_live_ns), genlock_asrc_err_ms, genlock_asrc_appended);",
+            "the timecode ASRC must be fed each measured packet's stamp and placement",
+        ),
+    ] {
+        assert!(
+            ingest.contains(needle),
+            "issue 1367: source_output_audio_data no longer contains `{needle}` -- {why}"
+        );
+    }
+    assert!(
+        !ingest.contains("genlock_audio_place_error_ns(genlock_actual_ns, in.timestamp)"),
+        "issue 1367: the placement error is measured against the SNAPPED stamp again -- a skipped or \
+         duplicated slot under 70 ms would read 0"
+    );
+    // the mode is set before any setpoint shift of this packet (a PLACE / sync-offset / fold shift is
+    // a no-op in timecode mode), and the servo runs after the buffer lock is released.
+    let set = ingest
+        .find("asrc_compensator_set_timecode(&source->asrc, genlock_asrc_tc);")
+        .expect("the mode");
+    for shift in [
+        "push_back = false; asrc_compensator_shift_level_target(",
+        "asrc_compensator_shift_level_target(&source->asrc, (double)(sync_offset - source->last_sync_offset) / 1e6);",
+        "asrc_compensator_shift_level_target(&source->asrc, (double)genlock_fold_ns / 1e6);",
+    ] {
+        let at = ingest.find(shift).unwrap_or_else(|| panic!("the shift `{shift}`"));
+        assert!(
+            set < at,
+            "issue 1367: the timecode mode must be set before `{shift}`"
+        );
+    }
+    let unlock = ingest
+        .find("pthread_mutex_unlock(&source->audio_buf_mutex); /* camera-box issue 1367")
+        .expect("the timecode ASRC right after the buffer unlock");
+    assert!(unlock > set);
+
+    let tc = asrc_timecode_ingest(&src);
+    for (needle, why) in [
+        (
+            "const bool contiguous = appended && source->asrc_tc_have_prev;",
+            "only an interval between two appended packets is a rate point",
+        ),
+        (
+            "contiguous ? genlock_audio_stamp_interval_s(source->asrc_tc_prev_stamp_ns, stamp_mono_ns) : 0.0;",
+            "the master block is the STAMP advance, never the arrival time",
+        ),
+        (
+            "asrc_compensator_observe_placement(&source->asrc, err_ms, source->asrc_tc_raw_s * 1000.0, !appended);",
+            "a placement jump must be booked (1000 ppm, its own sign) before the reading enters the window",
+        ),
+        (
+            "asrc_compensator_set_step_recover_hold(&source->asrc, source->genlock_audio_slew_remaining_ns != 0); asrc_compensator_observe_placement(",
+            "the recovery payment must wait while the placement slew owes (never 2000 ppm; the bench's SkipThenSlew)",
+        ),
+        (
+            "if (master_s > 0.0) asrc_compensator_compensate(&source->asrc, source->asrc_tc_prev_raw_s, master_s, err_ms, &applied_ppm);",
+            "a placed packet or a duplicated slot adds no rate point and never flushes",
+        ),
+    ] {
+        assert!(
+            tc.contains(needle),
+            "issue 1367: asrc_timecode_ingest no longer contains `{needle}` -- {why}"
+        );
+    }
+
+    let asrc = asrc_process(&src);
+    for (needle, why) in [
+        (
+            "source->asrc_tc_raw_s = (double)frames / (double)samples_per_sec;",
+            "the ingest pairs the stamp advance with the packet's PRE-resample duration",
+        ),
+        (
+            "if (source->asrc.timecode) applied_ppm = source->asrc.applied_ppm; else asrc_compensator_compensate(&source->asrc, raw_advance_s, master_block_s, buffered_ms, &applied_ppm);",
+            "a timecode-placed source must never run the arrival servo; every other source must",
+        ),
+        (
+            "const double asrc_recover_ppm = source->asrc.timecode ? asrc_compensator_take_step_recover_ppm(&source->asrc) : source->asrc.step_recover_ppm;",
+            "the ingest's payment rides on the next packet's resampler exactly once",
+        ),
+    ] {
+        assert!(
+            asrc.contains(needle),
+            "issue 1367: asrc_process_audio no longer contains `{needle}` -- {why}"
+        );
+    }
+    assert_has(
+        &src,
+        "\" recover_ms=%.1f (issue 1372)\" \" timecode=%d place_jumps=%u last_jump_ms=%.1f (issue 1367)\",",
+        "the asrc: line must say whether the servo runs on the timecode placement",
     );
 }

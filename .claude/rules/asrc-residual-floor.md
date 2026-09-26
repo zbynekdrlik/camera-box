@@ -231,3 +231,12 @@ walks back), `level=`/`level_avg=` track it, and `cumulative_correction=` includ
 healthy loss is paid in about owed-ms seconds and `recover_ms=0.0` again; `applied=` stays in its
 steady band throughout. A recurring non-zero `recover_ms=` at every date step means the upstream
 Dante chain still drops samples at a step — the supervisor's rig investigation, not an ASRC tune.
+
+## Addendum (issue 1367, 26.9.2026): `timecode=1` lines are a different reading
+
+A genlock source whose audio is placed at its NDI timecode (resolume `sp-*`) runs the ASRC in
+timecode mode: its `asrc:` line ends `timecode=1 place_jumps= last_jump_ms= (issue 1367)`, and
+then `level=` / `level_avg=` are the packet placement error in ms (≈ 0 healthy), `target=` is 0
+minus what is still owed, and `estimated=` follows the stamps (≈ 0 on a correct sender). `mbc`
+and every non-genlock source stay `timecode=0` and read as above. Full contract:
+`asrc-bench-harness.md`, the issue-1367 TIMECODE section.

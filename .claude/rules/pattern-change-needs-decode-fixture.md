@@ -7,6 +7,9 @@ paths:
   - "src/aux_tick.rs"
   - "src/probe/painter.rs"
   - "src/probe/qr.rs"
+  - "src/probe/qr_tests.rs"
+  - "src/probe/recording_decode.rs"
+  - "src/probe/recording_decode_tests.rs"
 ---
 
 # Zmena vzoru => decode fixture test (#921, #690, #751/#754)
@@ -125,7 +128,7 @@ Confirmed live (issue 1270's co-located aux pair, `AUX_QR_SIZE_PX=210`): `zbarim
 both marks cleanly at pad=0 on every mined frame, because the design already renders the quiet
 zone INSIDE the box (`render_payload_qr(...).quiet_zone(true)`, box size == qr_px) — so the Rust
 test's `image::imageops::crop_imm` can safely use the bare design rect too, matching the sibling
-`dual_render_places_two_decodable_qrs_left_and_right` pattern in `src/probe/qr.rs`.
+`dual_render_places_two_decodable_qrs_left_and_right` pattern in `src/probe/qr_tests.rs`.
 
 **A geometry-only pattern change (no algorithm/decode-parameter tweak) can still use the RED→GREEN
 staging this rule mandates, by staging the TEST's OWN crop source, not production code.** When the
@@ -186,7 +189,8 @@ full `Payload` whichever pass found it. Never loosen an assertion, never `#[igno
 loop (a per-region isolated decode is coverage, not a blind retry).
 
 **Follow-up (deferred, needs a CI run):** the RED→GREEN diagnostic
-(`dual_qr_plus_aux_four_code_canvas_decodes_all_four_across_masks_1280` in `src/probe/qr.rs`) uses
+(`dual_qr_plus_aux_four_code_canvas_decodes_all_four_across_masks_1280`, in
+`src/probe/recording_decode_tests.rs` since the issue-1374 split) uses
 FIXED `gen_ts_ns` seeds so it is deterministic, but it reproduces the plain-pass miss only
 PROBABILISTICALLY across a seed set — a DETERMINISTIC RED needs the real failing canvas captured as a
 committed fixture, mineable only from a CI run (per this rule's own "mine the real-frame fixture"

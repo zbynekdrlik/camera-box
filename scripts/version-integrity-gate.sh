@@ -810,10 +810,10 @@ main() {
           [ "$sa" = "$sb" ] && continue
           __ep_a=()
           while IFS= read -r pth; do [ -n "$pth" ] && __ep_a+=("$pth"); done \
-            < <(genlock_parity_consumed_paths "$la")
+            < <(genlock_parity_consumed_paths "$la" "$strih_linux")
           __ep_b=()
           while IFS= read -r pth; do [ -n "$pth" ] && __ep_b+=("$pth"); done \
-            < <(genlock_parity_consumed_paths "$lb")
+            < <(genlock_parity_consumed_paths "$lb" "$strih_linux")
           local -a inter=()
           for pth in "${__ep_a[@]}"; do
             found_p=0

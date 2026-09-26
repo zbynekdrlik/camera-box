@@ -37,6 +37,11 @@ add the new mutation's anchor to its `muts` list.
 call is invisible to the static `muts` test, which reads only recording-e2e.sh text. Its order is
 pinned by `test_a_live_broadcast_blocks_the_set` in `tests/python/test_camera_test_settings_1371.py`.
 A future lib step that mutates the rig follows the same shape.
+The same lib's `camera_test_settings_restore` (the production-exposure restore, called from
+`rig-mode.sh`'s EVENT path) runs the guard TWICE, in its own subshell: before the relay stop + the
+first PTP session, and again before the set. A busy rig touches nothing and is a loud
+"NOT restored", never an aborted EVENT switch
+(`test_restore_blocked_by_a_live_broadcast_keeps_the_snapshot`).
 
 **The SAME shared guard is reused OUTSIDE `recording-e2e.sh` too** — `scripts/bkshading-deploy-relay.sh`
 calls `stray_session_check_assert` as its rig-busy PREFLIGHT before the first cambox ssh/scp (a relay

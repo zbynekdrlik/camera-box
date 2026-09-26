@@ -1020,6 +1020,14 @@ struct obs_source {
 	struct asrc_compensator asrc;
 	uint64_t asrc_last_wall_ns;
 	bool asrc_has_last_wall;
+	/* camera-box issue 1367 (design 5845361166): the TIMECODE mode of the ASRC -- a source whose audio
+	 * the genlock pairing places at its NDI timecode is judged per packet in source_output_audio_data by
+	 * where it landed against its stamp, and its rate regression is fed the stamp advance between two
+	 * appended packets (asrc_timecode_ingest). Audio thread, same writer as `asrc`. */
+	double asrc_tc_raw_s;           /* this packet's pre-resample duration (asrc_process_audio) */
+	double asrc_tc_prev_raw_s;      /* the previous timecode packet's pre-resample duration */
+	uint64_t asrc_tc_prev_stamp_ns; /* the previous timecode packet's stamp on the OBS monotonic clock */
+	bool asrc_tc_have_prev;         /* a previous timecode packet exists (the rate interval is defined) */
 	pthread_mutex_t audio_actions_mutex;
 	pthread_mutex_t audio_buf_mutex;
 	pthread_mutex_t audio_mutex;
@@ -1122,6 +1130,7 @@ struct obs_source {
 	uint32_t genlock_converge_sheds;   /* camera-box #1049: cumulative SETTLE-BACK PHASE-CONVERGENCE sheds (genlock_should_converge_phase fired one extra drop to pull a per-camera acquire-phase back toward the configured latency). A converge shed ALSO counts into genlock_dropped_due; this distinguishes it so post-deploy verification can see the shed fire AND go QUIET once the phase converged (the genlock-hold-collapse playbook's "log silence lies" lesson). Printed on the 5s audit line (converge_sheds=). Zeroed at create (bzalloc). Decision authority: src/genlock_backlog.rs should_converge_phase. */
 	uint64_t genlock_late_holds;       /* camera-box #401: holds because the matured boundary's frame has NOT ARRIVED (late/lost upstream) — distinct from the benign not-yet-due genlock_holds, so the audit separates \"source early\" from \"source late\". Mirror of CadenceOutcome::late_hold. */
 	uint64_t genlock_rx_last_ts;        /* camera-box #1355: stamp of the previously RECEIVED frame (0 = none; cleared with genlock_rx_min_delta_ns at the explicit flush). Input to genlock_stamp_track_observe (obs-genlock-grid.h). */
+	uint64_t genlock_rx_arrival_lag_ns; /* camera-box issue 1367 (ROZHODNUTÉ 5842640404): the RECEIVE-time arrival lag of the newest received (= newest queued) frame, genlock_wall_now_ns() at the producer push minus its stamp, saturating at 0; written under async_mutex at the push site, zeroed with genlock_rx_last_ts at the explicit flush, overwritten by every received frame. The shallow latch budgets it (genlock_n1_shallow_latch_floor_frames): since the per-second grid the tick-read age is whole frames and hides where the arrival sits inside the frame. */
 	uint64_t genlock_rx_min_delta_ns;   /* camera-box #1355: the source's own stamp step — the smallest positive received stamp interval (#1042 min-delta rule). */
 	uint64_t genlock_stamp_dups;        /* camera-box #1355: cumulative received stamps EQUAL to their predecessor (a sender duplicate). Printed as stamp_dup= on the 5 s audit line; audit-line-only (not in obs_genlock_stats). */
 	uint64_t genlock_stamp_gaps;        /* camera-box #1355: cumulative MISSING stamp intervals against genlock_rx_min_delta_ns (a sender gap). Printed as stamp_gap=; audit-line-only. */
@@ -1166,6 +1175,16 @@ struct obs_source {
 	uint32_t genlock_shallow_rejects;           /* consecutive spread-rejected windows (bounded) */
 	uint64_t genlock_shallow_relocks_seen;      /* genlock_relocks at the previous latch call (its delta = a backlog relock) */
 	uint32_t genlock_shallow_latches;           /* cumulative latches (audit shallow_latches=) */
+	/* camera-box issue 1367 (design 5844353368): the STICKY content floor -- the highest budgeted latch
+	 * floor observed (a p90 block) while the source's audio flows; a lock never latches under it, so an
+	 * idle re-lock keeps the depth a song needs. Render thread only; in-process (bzalloc'd 0, never
+	 * persisted: an OBS restart starts without it); NOT cleared by a relock, a flush or a pin change (it
+	 * describes the sender's arrival, not the FIFO). Decision: src/genlock_n1_depth.rs
+	 * n1_shallow_sticky_track. */
+	uint64_t genlock_shallow_sticky_frames;     /* the sticky floor, frames (0 = none) */
+	uint64_t genlock_shallow_sticky_seen_ns;    /* scheduled tick wall of the last observation at/over it (30 min decay) */
+	uint32_t genlock_shallow_sticky_obs_ticks;  /* on-grid audio-flowing ticks of the open observation block */
+	uint32_t genlock_shallow_sticky_obs_hist[GENLOCK_SHALLOW_HIST_FIELD_BINS]; /* that block's latch-floor histogram, relative to base */
 	/* camera-box issue 1367: the audio placement SLEW + withhold (audio thread; the audit reads them
 	 * as benign single-word cross-thread telemetry). Decisions: src/genlock_audio_pairing.rs. */
 	int64_t genlock_audio_slew_remaining_ns;    /* placement move still owed (signed; + = later) */

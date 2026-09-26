@@ -32,6 +32,10 @@ use camera_box::genlock_audio_pairing::{
     video_delay_sample_ns, video_delay_smooth_ns, video_delay_track, AudioHoldAction,
     AudioHoldMode, AudioPairingFacets, VideoDelayTracker, VIDEO_DELAY_LOCK_PENDING,
 };
+use camera_box::genlock_audio_pairing::{
+    audio_asrc_error_ms, audio_asrc_timecode, audio_intended_raw_ns, audio_stamp_interval_s,
+    audio_stamp_mono_ns,
+};
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
@@ -93,6 +97,11 @@ fn lift_block() -> String {
         "genlock_audio_place_error_ns(",
         "genlock_audio_place_error_smooth_ns(",
         "genlock_audio_realized_delay_ns(",
+        "genlock_audio_intended_raw_ns(",
+        "genlock_audio_asrc_timecode(",
+        "genlock_audio_asrc_error_ms(",
+        "genlock_audio_stamp_mono_ns(",
+        "genlock_audio_stamp_interval_s(",
     ] {
         assert!(
             block.contains(helper),
@@ -969,4 +978,113 @@ fn c_audio_placement_measurement_matches_the_rust_authority_1367() {
         true,
         AudioHoldMode::Timecode
     ));
+}
+
+/// Issue 1367 (design 5845361166) — the timecode ASRC's inputs: the RAW-stamp intended landing
+/// (`genlock_audio_intended_raw_ns`), the mode predicate (`genlock_audio_asrc_timecode`), the error
+/// with the owed slew excluded (`genlock_audio_asrc_error_ms`), the stamp on the monotonic clock
+/// (`genlock_audio_stamp_mono_ns`) and its signed advance (`genlock_audio_stamp_interval_s`) must match
+/// the Rust authority on every mode, both signs and the wrap extremes.
+#[test]
+fn c_timecode_asrc_inputs_match_the_rust_authority_1367() {
+    let intended: [(u64, u64, i64, u64, i64); 6] = [
+        (WALL, 0, 0, 0, 0),
+        (WALL, MONO.wrapping_sub(WALL), -14_000_000, 0, 133_000_000),
+        (
+            WALL,
+            MONO.wrapping_sub(WALL),
+            24_000_000,
+            4_000_000,
+            -97_000_000,
+        ),
+        (u64::MAX, 1, 0, 0, 0),
+        (0, 0, i64::MIN, u64::MAX, i64::MAX),
+        (1, 2, -3, 4, -5),
+    ];
+    let err: [(i64, i64); 6] = [
+        (0, 0),
+        (-33_333_333, 0),
+        (-33_333_333, 33_333_333),
+        (33_333_333, -1),
+        (i64::MIN, i64::MIN),
+        (i64::MAX, 1),
+    ];
+    let stamps: [(u64, i64); 4] = [
+        (WALL, (MONO as i64).wrapping_sub(WALL as i64)),
+        (WALL, -50_000_000),
+        (0, -1),
+        (u64::MAX, 1),
+    ];
+    let intervals: [(u64, u64); 6] = [
+        (WALL, WALL + 33_333_333),
+        (WALL + 33_333_333, WALL),
+        (WALL, WALL),
+        (WALL, WALL + 66_666_666),
+        (u64::MAX, 32),
+        (0, u64::MAX),
+    ];
+    let b = |v: bool| i32::from(v);
+    let mut body = String::new();
+    for (ts, ta, so, ro, term) in &intended {
+        body.push_str(&format!(
+            "    printf(\"%llu\\n\", (unsigned long long)genlock_audio_intended_raw_ns({ts}ull, {ta}ull, {}, {ro}ull, {}));\n",
+            i64_lit(*so),
+            i64_lit(*term)
+        ));
+    }
+    for m in 0..4_u8 {
+        for (mo, rs) in [(false, false), (false, true), (true, false), (true, true)] {
+            body.push_str(&format!(
+                "    printf(\"%d\\n\", genlock_audio_asrc_timecode({m}, {}, {}) ? 1 : 0);\n",
+                b(mo),
+                b(rs)
+            ));
+        }
+    }
+    for (e, r) in &err {
+        body.push_str(&format!(
+            "    printf(\"%.9f\\n\", genlock_audio_asrc_error_ms({}, {}));\n",
+            i64_lit(*e),
+            i64_lit(*r)
+        ));
+    }
+    for (ts, off) in &stamps {
+        body.push_str(&format!(
+            "    printf(\"%llu\\n\", (unsigned long long)genlock_audio_stamp_mono_ns({ts}ull, {}));\n",
+            i64_lit(*off)
+        ));
+    }
+    for (p, n) in &intervals {
+        body.push_str(&format!(
+            "    printf(\"%.9f\\n\", genlock_audio_stamp_interval_s({p}ull, {n}ull));\n"
+        ));
+    }
+    let out = run_c(&body, "timecode_asrc");
+    let mut want: Vec<String> = Vec::new();
+    for (ts, ta, so, ro, term) in &intended {
+        want.push(audio_intended_raw_ns(*ts, *ta, *so, *ro, *term).to_string());
+    }
+    for m in 0..4_u8 {
+        for (mo, rs) in [(false, false), (false, true), (true, false), (true, true)] {
+            want.push(b(audio_asrc_timecode(mode_of(m), mo, rs)).to_string());
+        }
+    }
+    for (e, r) in &err {
+        want.push(format!("{:.9}", audio_asrc_error_ms(*e, *r)));
+    }
+    for (ts, off) in &stamps {
+        want.push(audio_stamp_mono_ns(*ts, *off).to_string());
+    }
+    for (p, n) in &intervals {
+        want.push(format!("{:.9}", audio_stamp_interval_s(*p, *n)));
+    }
+    assert_eq!(
+        out, want,
+        "issue 1367: the C timecode ASRC inputs diverged from the Rust authority"
+    );
+    // a skipped slot snapped contiguous: the raw stamp is one packet later than the snapped one, so the
+    // placement read against the raw stamp is one packet EARLY; the owed slew is not the servo's error
+    assert!(audio_asrc_error_ms(-33_333_333, 33_333_333).abs() < 1e-12);
+    assert!(audio_asrc_timecode(AudioHoldMode::Timecode, false, true));
+    assert!(!audio_asrc_timecode(AudioHoldMode::Latency, false, true));
 }

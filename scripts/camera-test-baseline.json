@@ -1,9 +1,9 @@
 {
-  "_comment": "issue 1371: the ONE test-camera exposure baseline the E2E enforces at [0/8] over the bkshading USB-PTP path (scripts/lib/camera-test-settings.sh + scripts/camera_test_settings.py). Values are the raw gphoto2 --get-config values the bkshading relay uses: iso = ISO label, d002 = shutter ANGLE x100 (18000 = 180 deg), f-number = choice label like f/5.6, d004 = white balance Kelvin, d005 = tint. iso + d002 are REQUIRED; f-number/d004/d005 null = read and logged only. null everywhere until the supervisor pins the owner-corrected camera (issue 1350): while iso/d002 are null and the camera is absent the step is a LOUD report-only UNVERIFIED; once they have values an absent camera aborts the run.",
+  "_comment": "issue 1371: the ONE test-camera exposure baseline the E2E enforces at [0/8] over the bkshading USB-PTP path (scripts/lib/camera-test-settings.sh + scripts/camera_test_settings.py). Values are the raw gphoto2 --get-config values the bkshading relay uses: iso = ISO label, d002 = shutter ANGLE x100 (18000 = 180 deg), f-number = choice label like f/5.6, d004 = white balance Kelvin, d005 = tint. iso + d002 are REQUIRED; f-number/d004/d005 null = read and logged only. iso + d002 pinned 26.9.2026 from the owner-confirmed camera (ISO 8000, 1/1000 s at 60 fps = angle 21.6 deg): an absent camera now aborts the run unless acked as testcam.",
   "schema": 1,
   "values": {
-    "iso": null,
-    "d002": null,
+    "iso": "8000",
+    "d002": "2160",
     "f-number": null,
     "d004": null,
     "d005": null

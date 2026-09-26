@@ -1956,6 +1956,37 @@ static inline int64_t genlock_audio_realized_delay_ns(uint32_t hold_ms, int64_t 
 		return (int64_t)(genlock_audio_present_delay_ns(hold_ms) + (uint64_t)place_err_ns);
 	return genlock_audio_applied_delay_ns(hold_ms, slew_remaining_ns);
 }
+/* issue 1367 (design 5845361166): where a packet SHOULD land, from its RAW stamp -- the timestamp the
+ * source handed OBS, before the 70 ms TS smoothing snapped it onto next_audio_ts_min -- plus the same
+ * timing_adjust, sync_offset, resample_offset and genlock term the ingest adds to in.timestamp. */
+static inline uint64_t genlock_audio_intended_raw_ns(uint64_t raw_ts_ns, uint64_t timing_adjust_ns, int64_t sync_offset_ns,
+						     uint64_t resample_offset_ns, int64_t term_ns)
+{
+	return raw_ts_ns + timing_adjust_ns + (uint64_t)sync_offset_ns - resample_offset_ns + (uint64_t)term_ns;
+}
+/* issue 1367: the ASRC runs in TIMECODE mode only for audio placed at its timecode that reaches the mix
+ * and has a resampler; mbc, every ASIO/WASAPI input and a latency hold keep the arrival servo. */
+static inline bool genlock_audio_asrc_timecode(int mode, bool monitor_only, bool can_resample)
+{
+	return mode == GENLOCK_AUDIO_HOLD_TIMECODE && !monitor_only && can_resample;
+}
+/* issue 1367: the ASRC's error input (ms): the placement error plus the placement slew still owed (a
+ * hold slew is paid by its own 1000 ppm term, so until then the packet is early by exactly that). */
+static inline double genlock_audio_asrc_error_ms(int64_t place_err_ns, int64_t slew_remaining_ns)
+{
+	return (double)(int64_t)((uint64_t)place_err_ns + (uint64_t)slew_remaining_ns) / 1e6;
+}
+/* issue 1367: a packet's stamp on the OBS monotonic clock (raw NDI timecode + the live offset); its
+ * advance between two appended packets is the timecode ASRC's master block. */
+static inline uint64_t genlock_audio_stamp_mono_ns(uint64_t raw_ts_ns, int64_t off_live_ns)
+{
+	return raw_ts_ns + (uint64_t)off_live_ns;
+}
+/* issue 1367: the signed advance (s) from one stamp to the next (a duplicated slot reads <= 0). */
+static inline double genlock_audio_stamp_interval_s(uint64_t prev_ns, uint64_t now_ns)
+{
+	return (double)(int64_t)(now_ns - prev_ns) / 1e9;
+}
 /* genlock_audio_health: 0=Ok 1=AudioDisabledOnProgram 2=AsrcSaturated 3=PairingOffsetExceeded (above
  * HALF a frame, issue 1367). Precedence matches decide_audio_health() in the Rust authority. */
 static inline int genlock_audio_decide_health(int audio_enabled, int is_program_source, int asrc_saturated,
@@ -1973,6 +2004,30 @@ static inline int genlock_audio_decide_health(int audio_enabled, int is_program_
 			return 3;
 	}
 	return 0;
+}
+
+/* camera-box issue 1367 (design 5845361166): the ASRC of a source whose audio is placed at its NDI
+ * timecode runs HERE, once per placed-or-appended packet, on where the packet landed against its RAW
+ * stamp (err_ms: actual - intended, the owed placement slew excluded) -- never on arrival timing
+ * (asrc_process_audio only reads the servo for such a source). A jump of the error is booked at
+ * ASRC_STEP_RECOVER_PPM (asrc_compensator_observe_placement); the rate regression is fed the stamp
+ * advance between two APPENDED packets as its master block and the previous packet's pre-resample
+ * duration as its raw advance, so a sender's pacing, the network and the receive thread never read as a
+ * rate. A placed packet or a non-positive advance (a duplicated slot) adds no point and never flushes.
+ * The payment this call computes rides on the NEXT packet's resampler (asrc_process_audio takes it). */
+static void asrc_timecode_ingest(obs_source_t *source, uint64_t stamp_mono_ns, double err_ms, bool appended)
+{
+	const bool contiguous = appended && source->asrc_tc_have_prev;
+	const double master_s =
+		contiguous ? genlock_audio_stamp_interval_s(source->asrc_tc_prev_stamp_ns, stamp_mono_ns) : 0.0;
+	double applied_ppm = 0.0;
+	asrc_compensator_set_step_recover_hold(&source->asrc, source->genlock_audio_slew_remaining_ns != 0);
+	asrc_compensator_observe_placement(&source->asrc, err_ms, source->asrc_tc_raw_s * 1000.0, !appended);
+	if (master_s > 0.0)
+		asrc_compensator_compensate(&source->asrc, source->asrc_tc_prev_raw_s, master_s, err_ms, &applied_ppm);
+	source->asrc_tc_prev_stamp_ns = stamp_mono_ns;
+	source->asrc_tc_prev_raw_s = source->asrc_tc_raw_s;
+	source->asrc_tc_have_prev = true;
 }
 
 /* issue 1367: defined with the genlock FIFO further down; the audio ingest below maps a genlock
@@ -2099,6 +2154,25 @@ static void source_output_audio_data(obs_source_t *source, const struct audio_da
 	in.timestamp += (uint64_t)genlock_term_ns;
 	source->genlock_audio_hold_mode = genlock_hold_mode;
 	source->genlock_audio_delay_ms = genlock_hold_ms;
+	/* camera-box issue 1367 (design 5845361166): where this packet SHOULD land -- its RAW timestamp
+	 * (data->timestamp, before the 70 ms TS smoothing above may have snapped in.timestamp onto
+	 * next_audio_ts_min) through the same offsets and the same genlock term. A skipped or duplicated
+	 * sender slot under 70 ms is snapped contiguous, so only the raw stamp shows it. */
+	const uint64_t genlock_intended_ns = genlock_audio_intended_raw_ns(
+		data->timestamp, genlock_timing_adjust, sync_offset, source->resample_offset, genlock_term_ns);
+	/* camera-box issue 1367: a source whose audio is placed at its timecode is judged by the ASRC on that
+	 * placement, not on arrival (asrc_timecode_ingest below); every other source -- mbc, ASIO/WASAPI, a
+	 * latency hold -- keeps the arrival servo byte-identical. Decided before any setpoint shift below,
+	 * which the timecode mode ignores (the placement error already carries a deliberate move). */
+	const bool genlock_asrc_tc =
+		genlock_audio_asrc_timecode(genlock_hold_mode, source->monitoring_type == OBS_MONITORING_TYPE_MONITOR_ONLY,
+					    source->asrc_enabled && source->resampler);
+	if (source->asrc.timecode != genlock_asrc_tc)
+		source->asrc_tc_have_prev = false;
+	asrc_compensator_set_timecode(&source->asrc, genlock_asrc_tc);
+	bool genlock_asrc_measured = false;
+	bool genlock_asrc_appended = false;
+	double genlock_asrc_err_ms = 0.0;
 	/* camera-box #1355 + issue 1367 (ROZHODNUTÉ 5827497952): a CHANGE of the applied audio hold (a
 	 * relock with a new latched depth, the late latency->timecode switch, a pin write, genlock toggled)
 	 * moves this source's placement -- and its ASRC mix-buffer depth -- by the term delta of THIS packet
@@ -2172,17 +2246,24 @@ static void source_output_audio_data(obs_source_t *source, const struct audio_da
 		source->genlock_audio_place_err_seeded = false;
 	if (genlock_action != GENLOCK_AUDIO_ACT_WITHHOLD && source->monitoring_type != OBS_MONITORING_TYPE_MONITOR_ONLY) {
 		/* issue 1367 (live 25.9.2026 12:31): MEASURE where this packet actually lands against where the
-		 * hold meant it to (in.timestamp carries the term). The audit's pairing offset reads the samples
-		 * through it, so a hold that never reached them can no longer read 0. Under audio_buf_mutex,
-		 * so audio_ts and the buffer size are the mixer's consistent pair. */
+		 * hold meant it to. The audit's pairing offset reads the samples through it, so a hold that
+		 * never reached them can no longer read 0. Under audio_buf_mutex, so audio_ts and the buffer
+		 * size are the mixer's consistent pair. Design 5845361166: measured against the RAW-stamp
+		 * intended landing (genlock_intended_ns), BEFORE the 70 ms smoothing -- against the snapped
+		 * in.timestamp a skipped or duplicated slot read 0. The same error, the owed placement slew
+		 * excluded, is the timecode ASRC's input. */
 		if (genlock_audio_mode_active(genlock_hold_mode)) {
 			const uint64_t genlock_actual_ns = genlock_audio_actual_place_ns(
 				push_back && source->audio_ts, source->audio_ts,
 				conv_frames_to_time(sample_rate, source->audio_input_buf[0].size / sizeof(float)), in.timestamp);
+			const int64_t genlock_place_err_ns = genlock_audio_place_error_ns(genlock_actual_ns, genlock_intended_ns);
 			source->genlock_audio_place_err_ns = genlock_audio_place_error_smooth_ns(
-				source->genlock_audio_place_err_ns, genlock_audio_place_error_ns(genlock_actual_ns, in.timestamp),
-				source->genlock_audio_place_err_seeded);
+				source->genlock_audio_place_err_ns, genlock_place_err_ns, source->genlock_audio_place_err_seeded);
 			source->genlock_audio_place_err_seeded = true;
+			genlock_asrc_err_ms =
+				genlock_audio_asrc_error_ms(genlock_place_err_ns, source->genlock_audio_slew_remaining_ns);
+			genlock_asrc_appended = push_back && source->audio_ts;
+			genlock_asrc_measured = true;
 		}
 		if (push_back && source->audio_ts)
 			source_output_audio_push_back(source, &in);
@@ -2191,6 +2272,11 @@ static void source_output_audio_data(obs_source_t *source, const struct audio_da
 	}
 
 	pthread_mutex_unlock(&source->audio_buf_mutex);
+
+	/* camera-box issue 1367 (design 5845361166): the timecode ASRC, fed this packet's placement. */
+	if (genlock_asrc_tc && genlock_asrc_measured)
+		asrc_timecode_ingest(source, genlock_audio_stamp_mono_ns(data->timestamp, genlock_off_live_ns),
+				     genlock_asrc_err_ms, genlock_asrc_appended);
 
 	source_signal_audio_data(source, data, source_muted(source, os_time));
 }
@@ -4170,6 +4256,7 @@ static void obs_source_output_video_internal(obs_source_t *source, const struct 
 		 * (never a bogus gap against the pre-flush stamp); the cumulative counters survive. */
 		source->genlock_rx_last_ts = 0;
 		source->genlock_rx_min_delta_ns = 0;
+		source->genlock_rx_arrival_lag_ns = 0; /* issue 1367: no frame received on the new timeline */
 		pthread_mutex_unlock(&source->async_mutex);
 		return;
 	}
@@ -4222,6 +4309,13 @@ static void obs_source_output_video_internal(obs_source_t *source, const struct 
 				genlock_stamp_track_observe(&source->genlock_rx_last_ts, &source->genlock_rx_min_delta_ns,
 							    &source->genlock_stamp_dups, &source->genlock_stamp_gaps,
 							    output->timestamp);
+				/* camera-box issue 1367 (ROZHODNUTÉ 5842640404): the RECEIVE-time arrival lag of this
+				 * frame, the newest queued one now (the release tick reads it under the same lock).
+				 * The shallow latch budgets it: at the scheduled tick the age of the newest frame is
+				 * whole frames since the per-second grid, so where the arrival sits inside the frame
+				 * is only visible here. Saturates at 0 for a stamp ahead of the wall. */
+				const uint64_t rx_wall = genlock_wall_now_ns();
+				source->genlock_rx_arrival_lag_ns = rx_wall > output->timestamp ? rx_wall - output->timestamp : 0;
 			}
 		}
 	}
@@ -4693,6 +4787,10 @@ static inline void asrc_process_audio(obs_source_t *source, uint32_t frames, uin
 	if (!source->asrc_enabled || !source->resampler || samples_per_sec == 0)
 		return;
 
+	/* camera-box issue 1367 (design 5845361166): this packet's pre-resample duration, the raw advance
+	 * the timecode ASRC pairs with the stamp advance in the ingest (asrc_timecode_ingest). */
+	source->asrc_tc_raw_s = (double)frames / (double)samples_per_sec;
+
 	/* camera-box #1325: the servo's MASTER basis is os_gettime_ns() -- the monotonic QPC clock
 	 * the OBS audio mixer thread paces its ticks on (media-io/audio-io.c audio_thread:
 	 * start_time = os_gettime_ns()) and that buffered_ms (obs-audio.c audio_input_buf[0].size)
@@ -4742,7 +4840,14 @@ static inline void asrc_process_audio(obs_source_t *source, uint32_t frames, uin
 	/* camera-box issue 1372: a confirmed-step recovery waits while the genlock audio placement slew
 	 * still owes a move on this resampler, so the two never stack past one 1000 ppm pitch budget. */
 	asrc_compensator_set_step_recover_hold(&source->asrc, source->genlock_audio_slew_remaining_ns != 0);
-	asrc_compensator_compensate(&source->asrc, raw_advance_s, master_block_s, buffered_ms, &applied_ppm);
+	/* camera-box issue 1367 (design 5845361166): a source whose audio is placed at its NDI timecode is
+	 * judged per packet by where it lands against its stamp (asrc_timecode_ingest, in
+	 * source_output_audio_data); its arrival timing and buffer depth never drive it. Here it only reads
+	 * the servo. Every other source runs the arrival servo exactly as before. */
+	if (source->asrc.timecode)
+		applied_ppm = source->asrc.applied_ppm;
+	else
+		asrc_compensator_compensate(&source->asrc, raw_advance_s, master_block_s, buffered_ms, &applied_ppm);
 	/* camera-box #1355: an ABSOLUTE setpoint the mixer cannot reach is bounded inside the
 	 * compensator (ASRC_LEVEL_TARGET_UNREACHABLE_WINDOWS of smoothed error outside the restore's exit
 	 * band -> fall back to the live depth). Say so LOUDLY, once per event -- it means this source's
@@ -4786,8 +4891,10 @@ static inline void asrc_process_audio(obs_source_t *source, uint32_t frames, uin
 	 * ASRC_STEP_RECOVER_PPM; that rate rides on the same resampler, in the servo's sign (negated like
 	 * applied_ppm). It is NOT booked out of the TS-smoothing timeline like the placement slew above: the
 	 * lost samples left the timeline behind the source's own stamps, and the stretch is what brings it
-	 * back. 0 on every callback without an owed step. */
-	const double asrc_recover_ppm = source->asrc.step_recover_ppm;
+	 * back. 0 on every callback without an owed step. camera-box issue 1367: in timecode mode the
+	 * servo paid in the previous packet's ingest; this packet carries that payment exactly once. */
+	const double asrc_recover_ppm = source->asrc.timecode ? asrc_compensator_take_step_recover_ppm(&source->asrc)
+							     : source->asrc.step_recover_ppm;
 	if (genlock_slew_ppm != 0.0 || asrc_recover_ppm != 0.0)
 		audio_resampler_set_compensation_ppm(source->resampler, genlock_slew_ppm - applied_ppm - asrc_recover_ppm,
 						     ASRC_COMPENSATION_DISTANCE_MS);
@@ -4821,19 +4928,25 @@ static inline void asrc_process_audio(obs_source_t *source, uint32_t frames, uin
 		 * every callback's buffered_ms over the last closed window -- the tick-free level the loop
 		 * now holds. level= stays the one raw reading, which lands on the 21.33 ms mixer-tick
 		 * sawtooth (sd ~6 ms of pure tick phase). */
+		/* camera-box issue 1367 (design 5845361166): timecode= place_jumps= last_jump_ms= appended AFTER
+		 * the byte-identical 'recover_ms=%.1f (issue 1372)' suffix (parsers extract by name). With
+		 * timecode=1 the level= / level_avg= fields are the packet PLACEMENT error in ms (actual - raw-stamp
+		 * intended) and target= is 0 minus what is still owed; estimated= follows the stamps. */
 		blog(LOG_INFO,
 		     "asrc: source '%s' estimated=%.2fppm applied=%.2fppm outer_bias=%.2fppm "
 		     "cumulative_correction=%.3fms/%.0fs starved_blocks=%u (#803/#806/#960) "
 		     "level=%.1fms target=%.1fms integral=%.3fppm (#1335) "
 		     "steps=%u last_step_ms=%.1f restore=%d (#1335) fallbacks=%u (#1355) "
 		     "level_avg=%.2fms (#1367)"
-		     " recover_ms=%.1f (issue 1372)",
+		     " recover_ms=%.1f (issue 1372)"
+		     " timecode=%d place_jumps=%u last_jump_ms=%.1f (issue 1367)",
 		     obs_source_get_name(source), source->asrc.estimated_ppm, applied_ppm,
 		     source->asrc.outer_bias_ppm, cumulative_correction_ms, ASRC_LOG_INTERVAL_S,
 		     starved_block_count, source->asrc.level_last_ms, source->asrc.level_target_ms,
 		     source->asrc.level_integral_ppm, source->asrc.step_count, source->asrc.last_step_ms,
 		     (int)source->asrc.level_restore, source->asrc.level_fallback_count,
-		     source->asrc.level_avg_ms, source->asrc.step_recover_ms);
+		     source->asrc.level_avg_ms, source->asrc.step_recover_ms, (int)source->asrc.timecode,
+		     source->asrc.place_jump_count, source->asrc.last_place_jump_ms);
 	}
 }
 
@@ -5541,8 +5654,9 @@ static inline uint64_t genlock_phase_pin_deadline(uint64_t deadline_ns, uint64_t
  * than the shed drains -> a 100-250 ms per-camera delivery ladder (issue 1354, cam4 15:31-15:37 on
  * strih-lx). 15 ms = one 30 fps canvas half-interval minus the 5 ms slew allowance, covering every
  * measured slow-output event; the conveyor sits ~10 ms deeper per input, uniform across inputs. The
- * max keeps the sub-frame flapping floor honoured. Mirror: src/genlock_backlog.rs
- * GENLOCK_N2_JITTER_BUDGET_NS. */
+ * max keeps the sub-frame flapping floor honoured. Issue 1367 (ROZHODNUTÉ 5842640404) reuses the SAME
+ * arrival-jitter budget for the shallow N==1 latch (genlock_n1_shallow_latch_floor_frames), never a
+ * second constant. Mirror: src/genlock_backlog.rs GENLOCK_N2_JITTER_BUDGET_NS. */
 #define GENLOCK_N2_JITTER_BUDGET_NS 15000000ULL /* 15 ms */
 
 /* camera-box issue 1367: the N==1 PIN-DERIVED DEPTH constants (genlock_n1_* below). A pin within
@@ -5581,6 +5695,10 @@ static inline uint64_t genlock_phase_pin_deadline(uint64_t deadline_ns, uint64_t
 #define GENLOCK_N1_SHALLOW_UNDER_TICKS 180u
 #define GENLOCK_N1_SHALLOW_CHURN_RELOCKS 3u
 #define GENLOCK_N1_SHALLOW_CHURN_QUIET_TICKS 180u
+/* camera-box issue 1367 (design 5844353368): the STICKY content floor loses one frame after this much
+ * scheduled-tick wall time with no observation at its level (30 min), so a genuinely faster sender
+ * recovers. Mirror: src/genlock_n1_depth.rs N1_SHALLOW_STICKY_DECAY_NS. */
+#define GENLOCK_N1_SHALLOW_STICKY_DECAY_NS 1800000000000ULL
 
 /* camera-box #1003: PHASE-CONTINUITY RELOCK (history-anchored selection).
  *
@@ -6348,6 +6466,22 @@ static inline uint32_t genlock_n1_shallow_hist_bin(uint64_t floor_frames, uint64
 	return rel < (uint64_t)(GENLOCK_N1_SHALLOW_HIST_BINS - 1u) ? (uint32_t)rel : GENLOCK_N1_SHALLOW_HIST_BINS - 1u;
 }
 
+/* ROZHODNUTÉ 5842640404: the shallow LATCH floor of the newest received frame, frames --
+ * ceil((receive-time arrival lag + GENLOCK_N2_JITTER_BUDGET_NS) / interval), 0 for a degenerate interval.
+ * Since the per-second grid the tick-read age is whole frames, so a budget on it would add a frame on
+ * EVERY source; budgeting the receive-time lag adds one only when the arrival sits within the budget
+ * under a frame edge -- where SongPlayer's content-dependent send cost (+8..11 ms) crossed it at every
+ * song start and the rise watch re-measured. The watch keeps the raw tick floor. */
+static inline uint64_t genlock_n1_shallow_latch_floor_frames(uint64_t arrival_lag_ns, uint64_t interval_ns)
+{
+	if (interval_ns == 0)
+		return 0;
+	const uint64_t budgeted = arrival_lag_ns > UINT64_MAX - GENLOCK_N2_JITTER_BUDGET_NS
+					  ? UINT64_MAX
+					  : arrival_lag_ns + GENLOCK_N2_JITTER_BUDGET_NS;
+	return budgeted / interval_ns + (budgeted % interval_ns != 0 ? 1u : 0u);
+}
+
 /* design 5830750134: the pct percentile of a window histogram, as a bin (the first bin whose cumulative
  * count reaches pct % of window_ticks; an empty window reads bin 0). */
 static inline uint64_t genlock_n1_shallow_percentile_bin(const uint32_t *hist, uint32_t window_ticks, uint32_t pct)
@@ -6420,18 +6554,86 @@ static inline bool genlock_n1_shallow_watch(uint64_t target_frames, bool capped,
 	       *churn_relocks >= GENLOCK_N1_SHALLOW_CHURN_RELOCKS;
 }
 
+/* camera-box issue 1367 (design 5844353368): one PRESENT tick of the STICKY content floor; returns the
+ * floor the latch must respect. A per-lock latch taken while the sender idles measures the idle arrival
+ * lag, and every sender re-lock (a song change, an E2E restart) re-latched on idle and lost the content
+ * level: live resolume 26.9.2026, an idle re-lock at 09:33:23 latched latch_floor_frames=1 (D 2) and
+ * each song start then re-measured and slewed the audio. Observed like the latch measures: a block of
+ * GENLOCK_N1_SHALLOW_SETTLE_TICKS on-grid ticks of the budgeted latch floor while the audio flows, read
+ * at its p90; it counts only when its p90 - p10 spread is within GENLOCK_N1_SHALLOW_MAX_SPREAD_FRAMES,
+ * its p90 is above base and under the over-clamp bin, and then raises the floor / resets its decay
+ * clock when at or over it. A relock or a tick without audio restarts the block; an off-grid tick is
+ * not sampled. Decays one frame per GENLOCK_N1_SHALLOW_STICKY_DECAY_NS without such an observation (a
+ * wall stepped back never decays it). Cleared by an N>=2 tick and on a min-latency (imag) box. Mirror
+ * of src/genlock_n1_depth.rs n1_shallow_sticky_track. */
+static inline uint64_t genlock_n1_shallow_sticky_track(uint64_t *floor_frames, uint64_t *seen_ns, uint32_t *obs_ticks,
+						       uint32_t *obs_hist, bool n1, bool relock, bool on_grid,
+						       bool audio_flowing, bool min_latency_box, uint64_t latch_floor_frames,
+						       uint64_t base_frames, uint64_t tick_wall_ns)
+{
+	if (!n1 || min_latency_box) {
+		*floor_frames = 0;
+		*seen_ns = 0;
+		*obs_ticks = 0;
+		for (uint32_t bin = 0; bin < GENLOCK_N1_SHALLOW_HIST_BINS; bin++)
+			obs_hist[bin] = 0;
+		return 0;
+	}
+	if (*floor_frames != 0 && tick_wall_ns > *seen_ns &&
+	    tick_wall_ns - *seen_ns >= GENLOCK_N1_SHALLOW_STICKY_DECAY_NS) {
+		*floor_frames -= 1u;
+		*seen_ns = tick_wall_ns;
+	}
+	if (relock || !audio_flowing)
+		*obs_ticks = 0;
+	if (!audio_flowing || !on_grid)
+		return *floor_frames;
+	if (*obs_ticks == 0) {
+		for (uint32_t bin = 0; bin < GENLOCK_N1_SHALLOW_HIST_BINS; bin++)
+			obs_hist[bin] = 0;
+	}
+	const uint32_t bin = genlock_n1_shallow_hist_bin(latch_floor_frames, base_frames);
+	if (obs_hist[bin] < UINT32_MAX)
+		obs_hist[bin] += 1u;
+	if (*obs_ticks < UINT32_MAX)
+		*obs_ticks += 1u;
+	if (*obs_ticks < GENLOCK_N1_SHALLOW_SETTLE_TICKS)
+		return *floor_frames;
+	const uint64_t high = genlock_n1_shallow_percentile_bin(obs_hist, *obs_ticks, GENLOCK_N1_SHALLOW_LATCH_PERCENTILE);
+	const uint64_t low =
+		genlock_n1_shallow_percentile_bin(obs_hist, *obs_ticks, 100u - GENLOCK_N1_SHALLOW_LATCH_PERCENTILE);
+	*obs_ticks = 0;
+	if (high - low <= GENLOCK_N1_SHALLOW_MAX_SPREAD_FRAMES && high != 0 &&
+	    high < (uint64_t)(GENLOCK_N1_SHALLOW_HIST_BINS - 1u)) {
+		const uint64_t observed = base_frames > UINT64_MAX - high ? UINT64_MAX : base_frames + high;
+		if (observed >= *floor_frames) {
+			*floor_frames = observed;
+			*seen_ns = tick_wall_ns;
+		}
+	}
+	return *floor_frames;
+}
+
 /* one PRESENT tick; returns true on the tick that latches a D (or a capped report). An N>=2 tick
  * clears the state; a relock, or an N==1 source with no depth / window / cap, opens a window; a
  * latched source re-opens one when genlock_n1_shallow_watch says so. The window's floors go into the
  * histogram (cleared on its first sample, so the rearm stays a five-field reset); the latch reads its
  * p90, a non-deep window with a p90 - p10 spread over one frame re-measures (bounded), and D is
- * clamped. */
+ * clamped. ROZHODNUTÉ 5842640404: the histogram bins latch_floor_frames (the budgeted receive-lag
+ * floor), floor_frames (the raw tick floor) feeds the window max and the rise / fell watch.
+ * ROZHODNUTÉ 5842848307: on a min-latency (imag) box the histogram bins the raw floor too -- at a
+ * 60p canvas the budget is ~90 % of a frame and every input would ask for more than base + 1.
+ * Design 5844353368: the latch floor is at least sticky_floor_frames (genlock_n1_shallow_sticky_track,
+ * ignored on a min-latency box), so an idle re-lock keeps the depth a song needs; the clamp still
+ * applies. */
 static inline bool genlock_n1_shallow_track(uint64_t *target_frames, uint64_t *floor_max_frames,
 					    uint32_t *window_ticks, uint32_t *over_ticks, uint32_t *deep_ticks,
 					    bool *measuring, bool *capped,
-					    bool n1, bool relock, bool on_grid, uint64_t floor_frames, uint64_t base_frames,
+					    bool n1, bool relock, bool on_grid, uint64_t floor_frames,
+					    uint64_t latch_floor_frames, uint64_t base_frames,
 					    bool deep, bool min_latency_box, uint64_t realized_frames, bool backlog_relock,
-					    uint32_t *hist, uint32_t *under_ticks, uint32_t *churn_relocks,
+					    uint64_t sticky_floor_frames, uint32_t *hist, uint32_t *under_ticks,
+					    uint32_t *churn_relocks,
 					    uint32_t *churn_quiet_ticks, uint32_t *rejects)
 {
 	if (!n1) {
@@ -6470,7 +6672,10 @@ static inline bool genlock_n1_shallow_track(uint64_t *target_frames, uint64_t *f
 	}
 	if (floor_frames > *floor_max_frames)
 		*floor_max_frames = floor_frames;
-	const uint32_t bin = genlock_n1_shallow_hist_bin(floor_frames, base_frames);
+	/* ROZHODNUTÉ 5842640404: the histogram reads the budgeted receive-lag floor; the watch and the
+	 * window max read the raw tick floor. ROZHODNUTÉ 5842848307: a min-latency (imag) box keeps the
+	 * RAW floor there too -- no budget frame. */
+	const uint32_t bin = genlock_n1_shallow_hist_bin(min_latency_box ? floor_frames : latch_floor_frames, base_frames);
 	if (hist[bin] < UINT32_MAX)
 		hist[bin] += 1u;
 	if (*window_ticks < UINT32_MAX)
@@ -6488,8 +6693,18 @@ static inline bool genlock_n1_shallow_track(uint64_t *target_frames, uint64_t *f
 		genlock_n1_shallow_rearm(floor_max_frames, window_ticks, over_ticks, deep_ticks, measuring);
 		return false;
 	}
-	*target_frames = genlock_n1_shallow_target_frames(base_frames,
-							  base_frames > UINT64_MAX - high ? UINT64_MAX : base_frames + high,
+	/* design 5844353368: never latch under the sticky content floor (none on a min-latency box). The
+	 * floor is absolute frames and may come from a HIGHER pin (review round 1), so it is limited to
+	 * base + GENLOCK_N1_SHALLOW_MAX_EXTRA_FRAMES - 1: a sticky floor alone never caps a latch (the capped
+	 * fell watch would re-measure every window until the floor decayed). */
+	const uint64_t measured = base_frames > UINT64_MAX - high ? UINT64_MAX : base_frames + high;
+	const uint64_t sticky_limit = base_frames > UINT64_MAX - (GENLOCK_N1_SHALLOW_MAX_EXTRA_FRAMES - 1u)
+					      ? UINT64_MAX
+					      : base_frames + (GENLOCK_N1_SHALLOW_MAX_EXTRA_FRAMES - 1u);
+	const uint64_t sticky = min_latency_box                   ? 0
+				: sticky_floor_frames > sticky_limit ? sticky_limit
+								     : sticky_floor_frames;
+	*target_frames = genlock_n1_shallow_target_frames(base_frames, measured > sticky ? measured : sticky,
 							  window_deep, min_latency_box, capped);
 	*measuring = false;
 	*rejects = 0;
@@ -6849,17 +7064,27 @@ static void genlock_shallow_latch(obs_source_t *source, uint64_t tick_wall, uint
 	source->genlock_shallow_relocks_seen = source->genlock_relocks;
 	const bool was_latched = !source->genlock_shallow_measuring && source->genlock_shallow_target_frames != 0;
 	const uint32_t rejects_before = source->genlock_shallow_rejects;
+	/* design 5844353368: the STICKY content floor first; the latch below never goes under it. The audio
+	 * hold mode is the audio thread's (a benign single-word read, like genlock_audio_delay_ms): timecode =
+	 * this source's genlocked audio flows. A video-only source keeps no sticky floor. */
+	const uint64_t sticky_floor = genlock_n1_shallow_sticky_track(
+		&source->genlock_shallow_sticky_frames, &source->genlock_shallow_sticky_seen_ns,
+		&source->genlock_shallow_sticky_obs_ticks, source->genlock_shallow_sticky_obs_hist,
+		source->genlock_last_known_n < 2, relock, genlock_n1_tick_is_on_grid(tick_wall, interval),
+		source->genlock_audio_hold_mode == GENLOCK_AUDIO_HOLD_TIMECODE, genlock_min_latency_box(),
+		genlock_n1_shallow_latch_floor_frames(source->genlock_rx_arrival_lag_ns, interval), base_frames, tick_wall);
 	const bool latched =
 		genlock_n1_shallow_track(&source->genlock_shallow_target_frames, &source->genlock_shallow_floor_max_frames,
 				      &source->genlock_shallow_window_ticks, &source->genlock_shallow_over_ticks,
 				      &source->genlock_shallow_deep_ticks, &source->genlock_shallow_measuring,
 				      &source->genlock_shallow_capped,
 				      source->genlock_last_known_n < 2, relock, genlock_n1_tick_is_on_grid(tick_wall, interval),
-				      genlock_n1_depth_frames(tick_wall, newest_stamp, interval), base_frames,
+				      genlock_n1_depth_frames(tick_wall, newest_stamp, interval),
+				      genlock_n1_shallow_latch_floor_frames(source->genlock_rx_arrival_lag_ns, interval), base_frames,
 				      genlock_n1_is_deep_source(wall_now > newest_stamp ? wall_now - newest_stamp : 0,
 								reserve_ms, interval),
 				      genlock_min_latency_box(), genlock_n1_depth_frames(tick_wall, source->last_frame_ts, interval),
-				      backlog_relock, source->genlock_shallow_hist, &source->genlock_shallow_under_ticks,
+				      backlog_relock, sticky_floor, source->genlock_shallow_hist, &source->genlock_shallow_under_ticks,
 				      &source->genlock_shallow_churn_relocks, &source->genlock_shallow_churn_quiet_ticks,
 				      &source->genlock_shallow_rejects);
 	/* design 5830750134: every re-measure that is not a relock / pin change is logged with its reason
@@ -6898,21 +7123,27 @@ static void genlock_shallow_latch(obs_source_t *source, uint64_t tick_wall, uint
 							       100u - GENLOCK_N1_SHALLOW_LATCH_PERCENTILE);
 	const bool window_deep =
 		genlock_n1_shallow_window_deep(source->genlock_shallow_deep_ticks, source->genlock_shallow_window_ticks);
-	/* the over-clamp bin holds every floor at or over base + 3: report the window max there. */
+	/* the over-clamp bin holds every floor at or over base + 3: report the window max there (the RAW
+	 * tick-floor max, used only when it asks for more than the budgeted p90 bin, issue 1367). */
 	const uint64_t asked = high == (uint64_t)(GENLOCK_N1_SHALLOW_HIST_BINS - 1u) &&
 					       source->genlock_shallow_floor_max_frames > base_frames + high
 				       ? source->genlock_shallow_floor_max_frames
 				       : base_frames + high;
+	/* design 5844353368: wanted_frames stays the p90 floor's own ask; the line names the sticky content
+	 * floor separately (sticky_floor_frames=, 0 on the min-latency box), so a latch above
+	 * latch_floor_frames + 1 reads as the sticky floor holding the song depth (limited to base + 2). */
 	const uint64_t wanted = window_deep ? base_frames + 1 : asked + 1;
 	blog(source->genlock_shallow_capped ? LOG_WARNING : LOG_INFO,
 	     "genlock-shallow-lock '%s': depth_frames=%llu floor_max_frames=%llu base_frames=%llu "
 	     "latch_floor_frames=%llu spread_frames=%llu rejects=%u "
+	     "sticky_floor_frames=%llu "
 	     "wanted_frames=%llu latency_ms=%u capped=%d (issue 1367)",
 	     source->context.name ? source->context.name : "?",
 	     (unsigned long long)source->genlock_shallow_target_frames,
 	     (unsigned long long)source->genlock_shallow_floor_max_frames, (unsigned long long)base_frames,
 	     (unsigned long long)(base_frames + high), (unsigned long long)(high - low), rejects_before,
-	     (unsigned long long)wanted, reserve_ms, source->genlock_shallow_capped ? 1 : 0);
+	     (unsigned long long)sticky_floor, (unsigned long long)wanted, reserve_ms,
+	     source->genlock_shallow_capped ? 1 : 0);
 }
 
 static bool genlock_release_tick(obs_source_t *source, uint64_t wall_now, uint64_t present_ts,

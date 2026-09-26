@@ -85,7 +85,17 @@ struct Scenario {
     /// starve the queue, the live 25.9.2026 15:29 sp-slow_video pattern (`stamp_gap` +11 and
     /// `underruns` +7 per 5 s audit while the operator switched scenes).
     song_change: Option<(u64, u64)>,
+    /// design 5844353368: SONGS `(start_s, end_s)` on an idle feed — inside each the lag band is
+    /// `content_ms` (the playing content's decode cost), and each song END is a SongPlayer re-lock:
+    /// the sender skips [`SONG_RELOCK_GAP_NS`] of stamps (a relock gap), audio keeps flowing.
+    songs: &'static [(u64, u64)],
+    /// The content lag band `(min, max)` ms inside a song.
+    content_ms: (u64, u64),
 }
+
+/// design 5844353368: the stamp gap a SongPlayer re-lock between songs leaves (over the 1 s relock
+/// gap, so the receiver re-locks on the idle feed that follows).
+const SONG_RELOCK_GAP_NS: u64 = 1_500_000_000;
 
 impl Scenario {
     fn clean(lag_min_ms: u64, lag_max_ms: u64, want_depth: u64) -> Scenario {
@@ -101,6 +111,8 @@ impl Scenario {
             burst: None,
             legacy_append: false,
             song_change: None,
+            songs: &[],
+            content_ms: (0, 0),
         }
     }
 }
@@ -109,6 +121,8 @@ impl Scenario {
 struct Run {
     /// Latched depths, one per lock (start, sender restart, OBS restart).
     latched: Vec<u64>,
+    /// ROZHODNUTÉ 5842640404: every latch (one per lock, plus one per re-measure).
+    latches: u64,
     capped: bool,
     /// Presenting ticks in the gated (settled) windows, and how many sat at the latched depth.
     gated_presents: u64,
@@ -243,6 +257,15 @@ fn run(sc: Scenario) -> Run {
                 settle_until = nominal + SETTLE_S * NS_PER_S;
             }
         }
+        if sc
+            .songs
+            .iter()
+            .any(|&(a, b)| nominal == W0 + a * NS_PER_S || nominal == W0 + b * NS_PER_S)
+        {
+            // a song start (content) or its end (the re-lock): the gate reopens once settled.
+            last_depth = None;
+            settle_until = nominal + SETTLE_S * NS_PER_S;
+        }
         if !sender_back && nominal >= silent.1 {
             sender_back = true;
             resync = true;
@@ -257,13 +280,25 @@ fn run(sc: Scenario) -> Run {
             if stamp >= silent.0 && stamp < silent.1 {
                 continue;
             }
+            let song_end_gap = sc.songs.iter().any(|&(_, b)| {
+                let end = W0 + b * NS_PER_S;
+                stamp >= end && stamp < end + SONG_RELOCK_GAP_NS
+            });
+            if song_end_gap {
+                continue;
+            }
             if let Some((at_s, dur_s)) = sc.song_change {
                 if song_change_skips(stamp, at_s, dur_s) {
                     out.sc_skipped += 1;
                     continue;
                 }
             }
+            let in_song = sc
+                .songs
+                .iter()
+                .any(|&(a, b)| stamp >= W0 + a * NS_PER_S && stamp < W0 + b * NS_PER_S);
             let (lo, hi) = match sc.band_change {
+                _ if in_song => (sc.content_ms.0 * 1_000_000, sc.content_ms.1 * 1_000_000),
                 Some((at_s, lo_ms, hi_ms)) if stamp >= W0 + at_s * NS_PER_S => {
                     (lo_ms * 1_000_000, hi_ms * 1_000_000)
                 }
@@ -298,8 +333,8 @@ fn run(sc: Scenario) -> Run {
         let wall = (scheduled + late).max(prev_wall + 1_000);
         prev_wall = wall;
         while arrivals.front().is_some_and(|&(a, _)| a <= wall) {
-            let (_, stamp) = arrivals.pop_front().expect("front exists");
-            fifo.queue.push_back(stamp);
+            let (arrival, stamp) = arrivals.pop_front().expect("front exists");
+            fifo.receive(arrival, stamp);
         }
         let drift = (DRIFT_PER_HOUR_NS as i128 * (nominal - W0) as i128 / 3_600_000_000_000) as i64;
         let off = (MONO0 as i64).wrapping_sub(W0 as i64).wrapping_add(drift);
@@ -310,6 +345,8 @@ fn run(sc: Scenario) -> Run {
         // tail runs the tracker, then genlock_shallow_latch).
         let lock = video_delay_lock_ms(fifo.shallow.target_frames, fifo.shallow.measuring, IV_NS);
         let mut c = TickCounters::default();
+        // design 5844353368: the C latch reads the audio hold mode the audio thread set last.
+        fifo.audio_flowing = audio.mode == AudioHoldMode::Timecode;
         fifo.tick(&cfg, wall, scheduled, &mut c);
         // the sender's own 3 s silence is the event, not churn: it is outside the gate.
         let gated = nominal >= settle_until && !(nominal >= silent.0 && nominal < silent.1);
@@ -320,6 +357,7 @@ fn run(sc: Scenario) -> Run {
             out.underruns += c.underruns;
             out.late_holds += c.late_holds;
         }
+        out.latches += c.shallow_latches;
         if fifo.shallow.target_frames != 0 && fifo.shallow.target_frames != last_latched
             || c.shallow_latches > 0
         {
@@ -459,14 +497,18 @@ fn assert_clean(name: &str, sc: Scenario) {
     );
 }
 
+// ROZHODNUTÉ 5842656021 (re-baseline): the latch adds the 15 ms arrival-jitter budget to the
+// receive-time lag, so a feed whose p90 lag sits within 15 ms under a frame edge latches one frame
+// deeper -- `NDI test` (lag 22-31 ms) 2 -> 3 and `sp-slow` (40-64 ms) 3 -> 4. Those are exactly the
+// feeds a content change pushes across the edge.
 #[test]
-fn ndi_test_floor_31ms_locks_two_frames_and_pairs_1367() {
-    assert_clean("ndi-test", Scenario::clean(22, 31, 2));
+fn ndi_test_floor_31ms_locks_three_frames_and_pairs_1367() {
+    assert_clean("ndi-test", Scenario::clean(22, 31, 3));
 }
 
 #[test]
-fn sp_slow_floor_64ms_locks_three_frames_and_pairs_1367() {
-    assert_clean("sp-slow", Scenario::clean(40, 64, 3));
+fn sp_slow_floor_64ms_locks_four_frames_and_pairs_1367() {
+    assert_clean("sp-slow", Scenario::clean(40, 64, 4));
 }
 
 #[test]
@@ -604,6 +646,8 @@ fn a_rising_arrival_re_measures_and_slews_the_audio_once_1367() {
     // lag 28-40 ms (D 3) rises to 70-95 ms at t = 1500 s with no gap: every rounded floor is 3 =
     // D, so after a whole window at/over D the depth re-measures to 4 and the audio slews +33 ms
     // once. (A 60-80 ms band floors at 2 or 3 and never re-measures -- it waits for a relock.)
+    // ROZHODNUTÉ 5842656021: the budgeted latch floor of 70-95 ms asks for base + 4, so the new D is
+    // the base + 3 clamp, reported (capped).
     let r = assert_band_change(
         "rising",
         Scenario {
@@ -612,6 +656,7 @@ fn a_rising_arrival_re_measures_and_slews_the_audio_once_1367() {
         },
         &[3, 4],
     );
+    assert!(r.capped, "rising: the clamped re-latch must be reported");
     // the re-measure happened at the RISE, not at the later sender restart (t = 2400 s): D 4 is
     // presented from ~1510 s on (the sender-restart relatch alone would give ~1190 s of it).
     let at_4 = r.depth_hist.get(&4).copied().unwrap_or(0);
@@ -635,18 +680,117 @@ fn a_sender_restart_on_a_new_band_relatches_and_slews_once_1367() {
     );
 }
 
+// ---- ROZHODNUTÉ 5842640404: a content-dependent send cost never re-measures the latch -----------
+
+/// A feed whose idle (black) lag rises by the sender's content-dependent compression cost at
+/// t = 1500 s -- songplayer 147 measured +8..+11 ms from black to playing. The OBS restart (1200 s)
+/// latches on the idle lag, the sender restart (2403 s) on the content lag.
+fn song_start(idle_ms: (u64, u64), content_ms: (u64, u64), want_depth: u64) -> Scenario {
+    Scenario {
+        band_change: Some((1500, content_ms.0, content_ms.1)),
+        ..Scenario::clean(idle_ms.0, idle_ms.1, want_depth)
+    }
+}
+
+#[test]
+fn a_song_start_inside_the_budget_never_re_measures_the_latch_1367() {
+    // the live case: an idle lag ~25 ms (one frame at the tick) latched D 2 and the +11 ms playing
+    // cost put the tick floor on D, so every song start re-measured to 3 and slewed the audio
+    // +33 ms. The budgeted latch floor of the idle lag already asks for D 3: no re-measure, no slew.
+    let sc = song_start((24, 26), (35, 37), 3);
+    assert_clean("song-start-25-36", sc);
+    let r = run(sc);
+    assert_eq!(r.latches, 3, "one latch per lock, no re-measure: {r:?}");
+}
+
+#[test]
+fn an_idle_lag_far_under_the_edge_pays_no_headroom_1367() {
+    // idle 8 ms -> content 19 ms: the locks made on the idle lag stay base + 1 = 2 (8 + 15 ms is
+    // inside the first frame) and the song start never re-measures (the tick floor of 19 ms is
+    // one frame, under D) -- the budget costs a frame only where the jitter can cross an edge.
+    // The sender-restart lock at 2403 s is made on the 18-20 ms content lag itself, whose p90 plus
+    // the budget (~35 ms) crosses the first edge: that lock is 3, the budget doing its job.
+    let r = run(song_start((7, 9), (18, 20), 2));
+    eprintln!("song-start-8-19: {r:?}");
+    assert_eq!(r.latched, [2, 2, 3], "idle, OBS restart, content relock");
+    assert_eq!(r.latches, 3, "one latch per lock, no re-measure: {r:?}");
+    // D 2 is presented from the start to the sender restart (2400 s), minus the settle windows:
+    // a re-measure at the song start (1500 s) would cut that to ~44 000 presents.
+    let at_2 = r.depth_hist.get(&2).copied().unwrap_or(0);
+    assert!(
+        at_2 > 60_000,
+        "song-start-8-19: D 2 held only {at_2} presents: {:?}",
+        r.depth_hist
+    );
+    assert_eq!(r.corrections, 0, "hold/shed churn");
+    assert_eq!(r.steps, 0, "an audio step re-placement");
+    assert!(
+        r.max_abs_av_ms <= GATE_MAX_AV_MS,
+        "|A/V| {:.2} ms",
+        r.max_abs_av_ms
+    );
+}
+
+#[test]
+fn a_min_latency_box_keeps_the_raw_floor_and_stays_governed_1367() {
+    // ROZHODNUTÉ 5842848307 (option 2): on the imag marker the latch histogram reads the RAW tick
+    // floor. An idle lag of 24-26 ms is one frame at the tick, so the input stays governed at
+    // base + 1 = 2 -- never the budgeted 3 that the min-latency guard would only report (capped).
+    let sc = Scenario {
+        min_latency_box: true,
+        ..Scenario::clean(24, 26, 2)
+    };
+    assert_clean("min-latency-24-26", sc);
+    let r = run(sc);
+    assert!(
+        !r.capped,
+        "the min-latency input must never be reported capped: {r:?}"
+    );
+    assert_eq!(r.latches, 3, "one latch per lock: {r:?}");
+}
+
+#[test]
+fn without_the_marker_the_same_feed_latches_the_budget_1367() {
+    // the same 24-26 ms feed on a box without the marker keeps the budget: D 3.
+    assert_clean("no-marker-24-26", Scenario::clean(24, 26, 3));
+}
+
+#[test]
+fn a_rise_past_the_budget_still_re_measures_1367() {
+    // idle 8 ms (D 2) -> 60 ms: the tick floor reaches D for a whole window, so the latch
+    // re-measures onto the budgeted 60 ms lag (3 frames -> D 4), and the audio follows by one slew.
+    let r = run(song_start((7, 9), (59, 61), 2));
+    eprintln!("song-start-8-60: {r:?}");
+    let mut seen = r.latched.clone();
+    seen.dedup();
+    assert_eq!(seen, [2, 4], "latched sequence");
+    assert_eq!(r.latches, 4, "one re-measure at the rise: {r:?}");
+    assert_eq!((r.steps, r.slews), (0, 1), "the new D is slewed in once");
+    assert_eq!(r.places, 3, "start, sender restart, OBS restart");
+    assert!(
+        r.max_abs_av_ms <= GATE_MAX_AV_MS,
+        "|A/V| {:.2} ms",
+        r.max_abs_av_ms
+    );
+}
+
 // ---- design 5830750134: the shallow latch never latches an outlier ------------------------------
 
 /// The sender comes back from its restart (t = 2403 s, the relock that opens a fresh window) with
 /// its first frames 300 ms late for `dur_ms` — the live song change: every `sp-*` source re-latched
 /// at 12:01:17 and `sp-slow_video` measured `floor_max_frames=11` (a +300 ms transient on its
-/// 40-64 ms band floors at 11 frames).
+/// 40-64 ms band floors at 11 frames). ROZHODNUTÉ 5842656021: the healthy D of that band is 4 with
+/// the arrival-jitter budget (was 3).
 fn transient(dur_ms: u64) -> Scenario {
     Scenario {
         burst: Some((2_403_000, dur_ms, 300)),
-        ..Scenario::clean(40, 64, 3)
+        ..Scenario::clean(40, 64, 4)
     }
 }
+
+/// The healthy latched depth of the 40-64 ms band the transient cases run on (re-baselined by
+/// ROZHODNUTÉ 5842656021 from 3).
+const TRANSIENT_D: u64 = 4;
 
 /// The acceptance of design 5830750134: every latch inside the cap, no relock churn once settled,
 /// the settled A/V pairing within 5 ms, and the depth back on the healthy D.
@@ -658,7 +802,11 @@ fn assert_transient(name: &str, r: &Run, max_slews: u32) {
         "{name}: latched {:?} over the cap {cap}",
         r.latched
     );
-    assert_eq!(r.latched.last(), Some(&3), "{name}: re-converged on D 3");
+    assert_eq!(
+        r.latched.last(),
+        Some(&TRANSIENT_D),
+        "{name}: re-converged on D {TRANSIENT_D}"
+    );
     assert_eq!(r.relocks, 0, "{name}: relock churn once settled");
     assert_eq!(r.late_holds, 0, "{name}: late holds once settled");
     assert_eq!(r.steps, 0, "{name}: an audio step re-placement");
@@ -670,10 +818,10 @@ fn assert_transient(name: &str, r: &Run, max_slews: u32) {
         "{name}: |A/V| {:.2} ms",
         r.max_abs_av_ms
     );
-    let at_3 = r.depth_hist.get(&3).copied().unwrap_or(0);
+    let at_d = r.depth_hist.get(&TRANSIENT_D).copied().unwrap_or(0);
     assert!(
-        at_3 * 100 >= r.gated_presents * 99,
-        "{name}: D 3 held on {at_3} of {} gated presents: {:?}",
+        at_d * 100 >= r.gated_presents * 99,
+        "{name}: D {TRANSIENT_D} held on {at_d} of {} gated presents: {:?}",
         r.gated_presents,
         r.depth_hist
     );
@@ -682,10 +830,14 @@ fn assert_transient(name: &str, r: &Run, max_slews: u32) {
 #[test]
 fn a_short_transient_in_the_settle_window_is_ignored_by_the_p90_latch_1367() {
     // 150 ms (5 ticks, under a tenth of the window): the percentile never sees it, the relatch
-    // finds the same D 3 and the audio never moves.
+    // finds the same D and the audio never moves.
     let r = run(transient(150));
     assert_transient("transient-150ms", &r, 0);
-    assert!(r.latched.iter().all(|&d| d == 3), "latched {:?}", r.latched);
+    assert!(
+        r.latched.iter().all(|&d| d == TRANSIENT_D),
+        "latched {:?}",
+        r.latched
+    );
 }
 
 #[test]
@@ -693,20 +845,29 @@ fn the_live_one_second_transient_never_latches_the_400ms_depth_1367() {
     // the live case: a one-second song-change transient in the window after the sender restart.
     // Before the fix the window MAX latched D 12 (400 ms), the hold drove the queue into a backlog
     // relock storm and the audio held 400 ms against a far shallower video. Now the window's spread
-    // rejects it, the next window latches the healthy D 3, and the audio never moves.
+    // rejects it, the next window latches the healthy D, and the audio never moves.
     let r = run(transient(1_000));
     assert_transient("transient-1s", &r, 0);
-    assert!(r.latched.iter().all(|&d| d == 3), "latched {:?}", r.latched);
+    assert!(
+        r.latched.iter().all(|&d| d == TRANSIENT_D),
+        "latched {:?}",
+        r.latched
+    );
 }
 
 #[test]
 fn a_whole_window_transient_latches_the_clamp_then_re_measures_1367() {
     // 4 s: the whole first window sits on the transient (no spread to reject), so the latch is the
     // clamp base + 3 = 4, reported. Once the floor falls back, a whole window two frames under it
-    // re-measures onto D 3. The audio follows the clamp and back by the slew, never a step.
+    // re-measures onto the healthy D (4 since ROZHODNUTÉ 5842656021, the clamp's own value, so the
+    // audio never has to move). The audio follows by the slew, never a step.
     let r = run(transient(4_000));
     assert!(r.capped, "the over-cap latch must be reported");
     assert!(r.latched.contains(&4), "latched {:?}", r.latched);
+    assert_eq!(
+        r.latches, 4,
+        "start, OBS restart, the clamped sender-restart latch and its re-measure: {r:?}"
+    );
     assert_transient("transient-4s", &r, 2);
 }
 
@@ -773,23 +934,24 @@ fn the_append_after_reset_loses_the_hold_and_the_audit_now_says_so_1367() {
 #[test]
 fn a_song_change_keeps_the_video_on_its_latched_depth_and_the_audio_paired_1367() {
     // live 25.9.2026 15:29 on resolume: SongPlayer's song change and the operator's scene switches
-    // skipped stamps on sp-slow_video (lag 40-64 ms, D 3 = 100 ms). Every skip put the post-gap head
+    // skipped stamps on sp-slow_video (lag 40-64 ms, then D 3 = 100 ms). Every skip put the post-gap head
     // on air at once at its arrival age (the GAP RESYNC), one frame under D, and the throttled hold
     // took a second per frame to climb back: `video_delay_ms=67 audio_delay_ms=100
     // audio_pairing_offset_ms=33` for ~10 s while the latched depth and the audio stayed 3 / 100.
     // Now a skipped stamp costs the one repeat it costs anyway: the conveyor HOLDS until the head
     // is D frames old, so the video never leaves D and the audio never needs to move.
+    // ROZHODNUTÉ 5842656021: the band's D is 4 (133 ms) with the arrival-jitter budget.
     let r = run(Scenario {
         song_change: Some((1500, 12)),
-        ..Scenario::clean(40, 64, 3)
+        ..Scenario::clean(40, 64, 4)
     });
     eprintln!("song-change: {r:?}");
-    let d_ms = video_delay_round_ms(3 * IV_NS);
+    let d_ms = video_delay_round_ms(4 * IV_NS);
     assert!(
         r.sc_skipped >= 20 && r.sc_underruns > 0,
         "the song change must skip stamps and starve the queue: {r:?}"
     );
-    assert!(r.latched.iter().all(|&d| d == 3), "latched {:?}", r.latched);
+    assert!(r.latched.iter().all(|&d| d == 4), "latched {:?}", r.latched);
     assert!(r.sc_presents > 300, "the song-change window is too thin");
     assert_eq!(
         r.sc_audio_delay_ms,
@@ -813,3 +975,8 @@ fn a_song_change_keeps_the_video_on_its_latched_depth_and_the_audio_paired_1367(
     );
     assert_eq!((r.steps, r.slews), (0, 0), "the audio must never move");
 }
+
+// design 5844353368: the sticky content floor scenario -- a child module (this file sits at the
+// ~1000-line budget); it reuses `run`, `Scenario` and the gate constants above.
+#[path = "genlock_shallow_av_bench_sticky.rs"]
+mod sticky;
