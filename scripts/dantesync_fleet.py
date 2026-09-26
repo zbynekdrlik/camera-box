@@ -186,12 +186,62 @@ def _ms_to_us(value):
     return us if abs(us) < _US_LIMIT else None
 
 
-def date_master_verdict(status, margin_us: int) -> str:
-    """none / ok / out / unknown: the date master (`date_authority` master) is graded on
-    |date_offset_error_ms| <= date_step_bound_ms + margin; any other node is `none`."""
+DATE_MICRO_BOUND_MS_DEFAULT = "5"
+_MICRO_BOUND_SHAPE = re.compile(r"[0-9]+(\.[0-9]+)?")
+
+
+def date_micro_bound_ms() -> str:
+    """The micro bound (ms) a dantesync 1.11.0 date master is graded on: DANTESYNC_DATE_MICRO_BOUND_MS,
+    or 5 when it is unset or empty (the bash twin's `${DANTESYNC_DATE_MICRO_BOUND_MS:-5}`)."""
+    return os.environ.get("DANTESYNC_DATE_MICRO_BOUND_MS") or DATE_MICRO_BOUND_MS_DEFAULT
+
+
+def _micro_bound_us(micro_bound_ms):
+    """Integer us of a positive plain-decimal ms string; None for any other shape or a zero bound
+    (the bash twin's _micro_bound_us)."""
+    text = str(micro_bound_ms)
+    if not _MICRO_BOUND_SHAPE.fullmatch(text):
+        return None
+    us = _ms_to_us(float(text))
+    return us if us is not None and us > 0 else None
+
+
+def date_master_micro_capable(status) -> bool:
+    """True iff the /status carries date_correction_falling_behind (any value): a dantesync 1.11.0+
+    node, whose date master is graded on its micro-corrections -- read from the status, never a
+    version string."""
+    return "date_correction_falling_behind" in _status_dict(status)
+
+
+def _date_master_micro_verdict(s: dict, margin_us: int, micro_bound_ms) -> str:
+    behind = s.get("date_correction_falling_behind")
+    paused = s.get("date_micro_paused")
+    if behind is True:
+        return "out"
+    if behind is not False or not isinstance(paused, bool):
+        return "unknown"
+    if paused:
+        return "paused"
+    err_us = _ms_to_us(s.get("date_offset_error_ms"))
+    bound_us = _micro_bound_us(micro_bound_ms)
+    if err_us is None or bound_us is None:
+        return "unknown"
+    return "ok" if abs(err_us) <= bound_us + int(margin_us) else "out"
+
+
+def date_master_verdict(status, margin_us: int, micro_bound_ms=None) -> str:
+    """none / ok / out / paused / unknown for one node's /status.
+
+    Not the date master (`date_authority` != master) -> none. A micro-capable master (dantesync
+    1.11.0) -> out on date_correction_falling_behind, paused on date_micro_paused, else
+    |date_offset_error_ms| <= micro bound (MICRO_BOUND_MS, default date_micro_bound_ms()) + margin.
+    Any other master (1.9.0 / 1.10.0) -> |date_offset_error_ms| <= date_step_bound_ms + margin."""
     s = _status_dict(status)
     if s.get("date_authority") != "master":
         return "none"
+    if date_master_micro_capable(s):
+        micro = date_micro_bound_ms() if micro_bound_ms is None else micro_bound_ms
+        return _date_master_micro_verdict(s, margin_us, micro)
     err_us = _ms_to_us(s.get("date_offset_error_ms"))
     bound_us = _ms_to_us(s.get("date_step_bound_ms"))
     if err_us is None or bound_us is None or bound_us <= 0:

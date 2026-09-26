@@ -90,7 +90,10 @@ DEFAULT_FLEET_FILE="$HERE/../rig-fleet.txt"
 # rate taken from the Dante PTP tick only, NTP for date steps; master publishes the date offset; issue 1372).
 # Bumped 2026-09-26: fleet rolled to v1.10.0 (dantesync#119 -- a backward fleet date correction is slewed
 # at 100 ppm instead of stepped; a backward step lost ~44 ms of Dante audio, camera-box issue 1372).
-DANTESYNC_VERSION_PIN="${DANTESYNC_VERSION_PIN:-1.10.0}"
+# Bumped 2026-09-26: pin v1.11.0 (dantesync PR 121 -- the date master holds the fleet date within ~2-3 ms
+# by 500 us micro-corrections; camera-box grades it on the micro bound, issue 1372). The fleet rolls to
+# it with this pin (dantesync-fleet-upgrade.sh --target); until then the gate names every 1.10.0 node.
+DANTESYNC_VERSION_PIN="${DANTESYNC_VERSION_PIN:-1.11.0}"
 
 # --- PURE functions (no network, no SSH — unit-tested by sourcing this file) ------------------
 

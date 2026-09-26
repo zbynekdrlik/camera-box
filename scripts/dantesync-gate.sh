@@ -481,7 +481,7 @@ grade_http_node() {
   # with no master configured never pays this extra SSH call.
   local date_v="none"
   [ "$mode" = "median-only" ] && date_v="$(date_master_verdict "$status" "$DATE_MASTER_MARGIN_US")"
-  if [ "$date_v" = ok ] || [ "$date_v" = out ]; then
+  if [ "$date_v" = ok ] || [ "$date_v" = out ] || [ "$date_v" = paused ]; then
     # Issue 1372 (dantesync 1.9.0 / dantesync#88): the NTP master is the fleet DATE authority. It
     # lets the fleet line sit up to date_step_bound_ms off UTC, then makes a coordinated fleet
     # step, so its own ntp_offset_us (that fleet-line error) is graded on the step bound + margin
@@ -489,10 +489,15 @@ grade_http_node() {
     # by accident through the #1021 deadband widening. date_master_check below grades the
     # freshest date_offset_error_ms on the same bound. A master whose date fields are unreadable
     # (verdict unknown) falls through to the #1021/#1119 widening below, and date_master_check
-    # reports it UNKNOWN (11) instead of a false DRIFT on the bare bound.
+    # reports it UNKNOWN (11) instead of a false DRIFT on the bare bound. A dantesync 1.11.0 master
+    # (date_master_micro_capable) holds the date by micro-corrections, so its bound is the micro
+    # bound (DATE_MASTER_MICRO_BOUND_MS) + margin instead; a PAUSED one keeps that bound here and
+    # date_master_check below refuses it (rc 4 -> UNKNOWN, fail-closed).
     local orig_bound="$bound"
     bound="$(date_master_effective_bound_us "$status" "$bound" "$DATE_MASTER_MARGIN_US")"
-    if [ "$bound" != "$orig_bound" ]; then
+    if [ "$bound" != "$orig_bound" ] && [ "$(date_master_micro_capable "$status")" = yes ]; then
+      deadband_note=" -- date master graded on its micro bound: bound ${bound}us = ${DATE_MASTER_MICRO_BOUND_MS}ms + ${DATE_MASTER_MARGIN_US}us margin (dantesync 1.11.0 micro-corrections hold the fleet date within a few ms of UTC, #1372; base bound ${orig_bound}us)"
+    elif [ "$bound" != "$orig_bound" ]; then
       deadband_note=" -- date master graded on its own step bound: bound ${bound}us = date_step_bound_ms + ${DATE_MASTER_MARGIN_US}us margin (the fleet date may sit up to the step bound off UTC before a coordinated fleet step, dantesync#88/#1372; base bound ${orig_bound}us)"
     fi
   elif [ "$mode" = "median-only" ]; then
@@ -698,9 +703,12 @@ grade_http_node() {
   # + margin (a date the master failed to step is a real fault). Silent and rc 0 on any node that
   # is not the date master; folds into the offset rc. Like the #1119 storm check it only grades a
   # freshly-graded payload (rc_off != 3): a stale/unknown status stays UNKNOWN, never flipped BAD.
+  # A dantesync 1.11.0 master whose micro-corrections are PAUSED (rc 4, WARN-level in the report
+  # consumers) is fail-closed HERE as UNKNOWN (11): with no UTC reading the fleet date is unverified.
   local rc_date=0
   if [ "$rc_off" != 3 ]; then
     date_master_check "$name" "$status" "$DATE_MASTER_MARGIN_US" || rc_date=$?
+    [ "$rc_date" = 4 ] && rc_date=3
     [ "$rc_date" != 0 ] && [ "$rc_off" != 2 ] && rc_off="$rc_date"
   fi
   ptp="$(ptp_locked_from_pipe_json "$status")"
