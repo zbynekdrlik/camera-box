@@ -38,6 +38,9 @@ DATE_MASTER_DAILY_BOUND_MS="${DANTESYNC_DATE_DAILY_BOUND_MS:-3000}"
 DATE_DAILY_NEXT_MAX_S=88200
 DATE_DAILY_LAST_MAX_AGE_S=93600
 DATE_DAILY_LAST_MAX_AHEAD_S=1800
+# How long dantesync keeps a nightly window open while it has no fresh UTC reading (DAILY_WINDOW_NS):
+# a window this recent that has not stepped is waiting for UTC; an older one is a stuck scheduler.
+DATE_DAILY_WINDOW_S=1800
 
 # --- the dantesync 1.12.0 NIGHTLY date mode (date_correction_mode "daily") --------------------
 
@@ -52,9 +55,15 @@ date_master_now_s() {
   fi
 }
 
-# _date_master_mode_text TEXT -> `date_correction_mode` as printed in a line: the string without its
+# date_master_daily_bound_us -> DATE_MASTER_DAILY_BOUND_MS in integer us; "" when it is unreadable
+# (a typo in DANTESYNC_DATE_DAILY_BOUND_MS -- every consumer then grades the date UNKNOWN).
+date_master_daily_bound_us() {
+  _positive_bound_us "$DATE_MASTER_DAILY_BOUND_MS"
+}
+
+# date_master_mode_text TEXT -> `date_correction_mode` as printed in a line: the string without its
 # quotes, or the raw token of a non-string value; "" when absent.
-_date_master_mode_text() {
+date_master_mode_text() {
   local mode
   mode="$(_pipe_json_raw_value "$1" date_correction_mode)"
   mode="${mode#\"}"
@@ -163,7 +172,9 @@ _date_master_daily_verdict() {
   sched="$(_date_daily_schedule_verdict "$text" "$now")"
   err_us="$(_ms_to_us "$(_pipe_json_number_raw "$text" date_offset_error_ms)")"
   bound_us="$(_positive_bound_us "$daily")"
-  if [ -z "$err_us" ] || [ -z "$bound_us" ]; then
+  # date_master_check hands MARGIN_US straight here, so it is validated here too (bash arithmetic
+  # on "abc" would print errors, not a verdict).
+  if [[ ! $margin =~ ^[0-9]{1,15}$ ]] || [ -z "$err_us" ] || [ -z "$bound_us" ]; then
     err_v=unknown
   elif [ "$(abs_int "$err_us")" -le $((bound_us + 10#$margin)) ]; then
     err_v=ok
@@ -181,7 +192,7 @@ _date_master_daily_verdict() {
 # schedule is not OK (empty when it is). It reads the SAME states _date_daily_schedule_verdict
 # decides on, so the text never disagrees with the verdict.
 _date_daily_schedule_problems() {
-  local text="$1" now="$2" out="" next last nraw lraw
+  local text="$1" now="$2" out="" next last nraw lraw ago
   if [[ ! $now =~ ^[0-9]{1,15}$ ]]; then
     printf 'now=%s (DANTESYNC_DATE_NOW_S or the wall clock) unreadable' "${now:-<empty>}"
     return 0
@@ -193,7 +204,15 @@ _date_daily_schedule_problems() {
   last="$(_date_daily_last_state "$text" "$now")"
   case "$next" in
     missing) out="${out}; no next nightly window (date_daily_next_utc ${nraw:-absent})" ;;
-    past) out="${out}; next nightly window ${nraw} is open and has not stepped yet (waiting for UTC? the window stays open up to 30 min)" ;;
+    past)
+      # The open window reads "past" until the scheduler steps: normally seconds, up to the 30 min
+      # the window stays open without UTC. Longer ago, the scheduler did not advance at all.
+      ago=$((10#$now - $(_date_daily_utc_epoch "$nraw")))
+      if [ "$ago" -le "$DATE_DAILY_WINDOW_S" ]; then
+        out="${out}; next nightly window ${nraw} is open and has not stepped yet (waiting for UTC? the window stays open up to 30 min)"
+      else
+        out="${out}; next nightly window ${nraw} is ${ago} s in the past: the nightly scheduler did not advance"
+      fi ;;
     far) out="${out}; next nightly window ${nraw} is more than 24 h 30 min ahead" ;;
     unknown) out="${out}; date_daily_next_utc=${nraw:-<absent>} unreadable" ;;
   esac
@@ -215,7 +234,9 @@ _date_daily_problems() {
   err="$(_pipe_json_number_raw "$text" date_offset_error_ms)"
   err_us="$(_ms_to_us "$err")"
   bound_us="$(_positive_bound_us "$daily")"
-  if [ -z "$err_us" ] || [ -z "$bound_us" ]; then
+  if [[ ! $margin =~ ^[0-9]{1,15}$ ]]; then
+    out="${out}; margin=${margin}us unreadable"
+  elif [ -z "$err_us" ] || [ -z "$bound_us" ]; then
     out="${out}; date_offset_error_ms=${err:-<absent>} or the daily bound ${daily}ms unreadable"
   elif [ "$(abs_int "$err_us")" -gt $((bound_us + 10#$margin)) ]; then
     out="${out}; fleet date ${err}ms off UTC > daily bound ${daily}ms + ${margin}us margin"
@@ -263,7 +284,7 @@ _date_daily_journal_note() {
   local grade="$1" text="$2" reasons
   if [ "$(date_master_mode_class "$text")" = unknown ]; then
     printf 'date master /status date_correction_mode=%s is not a mode this grading knows ("daily", "micro" or ""): UNKNOWN (#1372)' \
-      "$(_date_master_mode_text "$text")"
+      "$(date_master_mode_text "$text")"
     return 0
   fi
   reasons="$(_date_daily_schedule_problems "$text" "$(date_master_now_s)")"

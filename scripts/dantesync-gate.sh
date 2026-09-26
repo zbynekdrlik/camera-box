@@ -482,7 +482,7 @@ grade_http_node() {
   # LINUX client additionally fetches ITS OWN freshest journal to derive its real threshold, ONLY
   # when a master is genuinely configured (master_chase_status non-empty) -- a plain invocation
   # with no master configured never pays this extra SSH call.
-  local date_v="none"
+  local date_v="none" date_bound_unread=0 date_bound_forced=0
   [ "$mode" = "median-only" ] && date_v="$(date_master_verdict "$status" "$DATE_MASTER_MARGIN_US")"
   # A daily-mode master (dantesync 1.12.0) whose schedule is unreadable, or a master with an unknown
   # date_correction_mode, still takes the daily bound: its median may be a day's drift, so the
@@ -504,9 +504,17 @@ grade_http_node() {
     # in date_correction_mode "daily" lets the fleet date drift all day and steps it once a night,
     # so its bound is the daily bound (DATE_MASTER_DAILY_BOUND_MS) + margin, and date_master_check
     # grades its nightly schedule.
-    local orig_bound="$bound"
+    local orig_bound="$bound" date_mode
     bound="$(date_master_effective_bound_us "$status" "$bound" "$DATE_MASTER_MARGIN_US")"
-    if [ "$bound" != "$orig_bound" ] && [ "$(date_master_mode_class "$status")" != other ]; then
+    date_mode="$(date_master_mode_class "$status")"
+    if [ "$date_mode" != other ] && [ -z "$(date_master_daily_bound_us)" ]; then
+      # A typo in DANTESYNC_DATE_DAILY_BOUND_MS: the median (a day's drift) cannot be graded, so
+      # the node is UNKNOWN (11) below, never a false DRIFT on the bare bound.
+      date_bound_unread=1
+      deadband_note=" -- date master: the daily bound DANTESYNC_DATE_DAILY_BOUND_MS=${DATE_MASTER_DAILY_BOUND_MS} is unreadable, so its median is not graded (UNKNOWN, #1372)"
+    elif [ "$bound" != "$orig_bound" ] && [ "$date_mode" = unknown ]; then
+      deadband_note=" -- date master graded on the daily bound because date_correction_mode=$(date_master_mode_text "$status") is unknown: bound ${bound}us = ${DATE_MASTER_DAILY_BOUND_MS}ms + ${DATE_MASTER_MARGIN_US}us margin (its median may be a day's drift; DATE MASTER UNKNOWN below, #1372; base bound ${orig_bound}us)"
+    elif [ "$bound" != "$orig_bound" ] && [ "$date_mode" = daily ]; then
       deadband_note=" -- date master graded on its daily bound: bound ${bound}us = ${DATE_MASTER_DAILY_BOUND_MS}ms + ${DATE_MASTER_MARGIN_US}us margin (dantesync 1.12.0 daily mode: the fleet date drifts from UTC all day and is stepped once a night, #1372; base bound ${orig_bound}us)"
     elif [ "$bound" != "$orig_bound" ] && [ "$(date_master_micro_capable "$status")" = yes ]; then
       deadband_note=" -- date master graded on its micro bound: bound ${bound}us = ${DATE_MASTER_MICRO_BOUND_MS}ms + ${DATE_MASTER_MARGIN_US}us margin (dantesync 1.11.0 micro-corrections hold the fleet date within a few ms of UTC, #1372; base bound ${orig_bound}us)"
@@ -705,6 +713,13 @@ grade_http_node() {
   # for a client node or a pre-storm-field payload). Default-on, no opt-out env -- an affirmative
   # storm makes cross-node timestamps unreliable, exactly what this precondition gate exists to
   # catch. clock-offset-guard.sh's ntp_master_step_storm_verdict is the single-sourced verdict.
+  # Issue 1372: a daily-mode (or unknown-mode) master whose daily bound is unreadable had its median
+  # graded on the bare bound, which a day's drift always fails. That is not a measured desync: the
+  # node is UNKNOWN (11), and the date check below still runs to name the unreadable bound.
+  if [ "$date_bound_unread" = 1 ] && [ "$rc_off" != 3 ]; then
+    rc_off=3
+    date_bound_forced=1
+  fi
   if [ "$mode" = "median-only" ] && [ "$rc_off" != 3 ] \
      && [ "$(ntp_master_step_storm_verdict "$status")" = storm ]; then
     local steps_h; steps_h="$(ntp_steps_last_hour_from_pipe_json "$status")"
@@ -719,7 +734,7 @@ grade_http_node() {
   # A dantesync 1.11.0 master whose micro-corrections are PAUSED (rc 4, WARN-level in the report
   # consumers) is fail-closed HERE as UNKNOWN (11): with no UTC reading the fleet date is unverified.
   local rc_date=0
-  if [ "$rc_off" != 3 ]; then
+  if [ "$rc_off" != 3 ] || [ "$date_bound_forced" = 1 ]; then
     date_master_check "$name" "$status" "$DATE_MASTER_MARGIN_US" || rc_date=$?
     [ "$rc_date" = 4 ] && rc_date=3
     [ "$rc_date" != 0 ] && [ "$rc_off" != 2 ] && rc_off="$rc_date"

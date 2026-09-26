@@ -309,10 +309,11 @@ def _date_master_daily_verdict(s: dict, margin_us, daily_bound_ms, now_s) -> str
     sched = _daily_schedule_verdict(s, now_s)
     err_us = _ms_to_us(s.get("date_offset_error_ms"))
     bound_us = _positive_bound_us(daily_bound_ms)
-    if err_us is None or bound_us is None:
+    margin = _plain_int(margin_us, max_digits=15)   # validated here, like the bash twin
+    if margin is None or err_us is None or bound_us is None:
         err_v = "unknown"
     else:
-        err_v = "ok" if abs(err_us) <= bound_us + int(margin_us) else "out"
+        err_v = "ok" if abs(err_us) <= bound_us + margin else "out"
     if "out" in (sched, err_v):
         return "out"
     if "unknown" in (sched, err_v):

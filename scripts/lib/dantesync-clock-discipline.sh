@@ -331,7 +331,7 @@ date_master_effective_bound_us() {
   fi
   mode="$(date_master_mode_class "$text")"
   if [ "$mode" != other ]; then
-    step_us="$(_positive_bound_us "$DATE_MASTER_DAILY_BOUND_MS")"
+    step_us="$(date_master_daily_bound_us)"
   elif [ "$(date_master_micro_capable "$text")" = yes ]; then
     step_us="$(_positive_bound_us "$micro")"
   else
@@ -359,7 +359,7 @@ date_master_check() {
       return
     elif [ "$mode" = unknown ]; then
       printf '  %-14s DATE MASTER UNKNOWN (date_correction_mode=%s is not a mode this grading knows ("daily", "micro" or "") -- status incomplete, #1372)\n' \
-        "$label" "$(_date_master_mode_text "$text")"
+        "$label" "$(date_master_mode_text "$text")"
       return 3
     elif [ "$(date_master_micro_capable "$text")" = yes ]; then
       _date_master_micro_check "$label" "$text" "$margin" "$micro"
@@ -482,7 +482,7 @@ journal_date_grade_from_step() {
   if [ "$auth" = master ]; then
     mode="$(date_master_mode_class "$text")"
     if [ "$mode" = daily ]; then
-      bound_us="$(_positive_bound_us "$DATE_MASTER_DAILY_BOUND_MS")"
+      bound_us="$(date_master_daily_bound_us)"
       case "$(_date_daily_schedule_verdict "$text" "$(date_master_now_s)")" in
         out) printf 'daily-out' ;;
         ok)
