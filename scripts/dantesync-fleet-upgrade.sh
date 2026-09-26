@@ -44,6 +44,14 @@ set -euo pipefail
 #     rolled back (which — with a pre-existing `.bak` — would otherwise stop a HEALTHY master and
 #     downgrade it).
 #
+#   * THE TRAY RIDES THE ROLL (issue 1372): on a Windows node the same .ps1 also refreshes
+#     dantesync-tray.exe (the version the operator sees) from the SAME pinned release -- fetched +
+#     sha-verified before any stop, swapped after the service is back, backed up to
+#     .pre-<version>, relaunched in the logged-on user's session through a temporary BUILTIN\Users
+#     scheduled task that is unregistered again, verified as one tray process. A tray failure is a
+#     named WARNING in the roll summary ("dantesync-tray was NOT refreshed on ..."), never a
+#     service rollback and never a non-zero exit: the tray is UI, the service is the clock.
+#
 # REUSE, NEVER REINVENT: sources dantesync-version-gate.sh for the version PARSER
 # (dantesync_version_from_version_output) + the PIN; uses dantesync-gate.sh (→ clock-offset-guard.sh
 # pure parsers) as the per-canary verification gate; uses scripts/lib/cambox-offline-ack.sh +
@@ -112,6 +120,11 @@ DANTESYNC_RELEASE_BASE="${DANTESYNC_RELEASE_BASE:-https://github.com/zbynekdrlik
 DANTESYNC_WIN_EXE='C:\Program Files\DanteSync\dantesync.exe'
 DANTESYNC_WIN_BAK='C:\Program Files\DanteSync\dantesync.exe.bak'
 DANTESYNC_WIN_PS_REMOTE='C:\Windows\Temp\dantesync-fleet-upgrade.ps1'
+# issue 1372: the tray (the version the operator sees) rides the same roll. Its install path is the
+# one dantesync-version-gate.sh sha-pins (DANTESYNC_TRAY_GATE_WIN_EXE); the relaunch task is
+# temporary and unregistered in the same program.
+DANTESYNC_WIN_TRAY_EXE='C:\Program Files\DanteSync\dantesync-tray.exe'
+DANTESYNC_WIN_TRAY_TASK='DanteSyncTrayRelaunch-1372'
 DANTESYNC_LINUX_BIN="/usr/local/bin/dantesync"
 DANTESYNC_LINUX_BAK="/usr/local/bin/dantesync.bak"
 DANTESYNC_DEAD_TASK="DanteSyncUpdate"
@@ -155,6 +168,12 @@ dantesync_release_url_linux() {
 # dantesync_release_url_windows VERSION -> the pinned-tag Windows asset URL. NEVER releases/latest.
 dantesync_release_url_windows() {
   echo "${DANTESYNC_RELEASE_BASE}/v${1}/dantesync-windows-amd64.exe"
+}
+
+# dantesync_release_url_windows_tray VERSION -> the pinned-tag Windows TRAY asset URL (issue 1372):
+# the same release as the service, never releases/latest.
+dantesync_release_url_windows_tray() {
+  echo "${DANTESYNC_RELEASE_BASE}/v${1}/dantesync-tray-windows-amd64.exe"
 }
 
 # dantesync_linux_upgrade_cmd VERSION -> the remote bash text to upgrade a Linux node to VERSION.
@@ -289,11 +308,111 @@ dantesync_windows_wait_service_exit_ps() {
 EOF
 }
 
+# dantesync_windows_tray_fetch_ps VERSION -> the PowerShell lines (issue 1372) that download the SAME
+# pinned release's dantesync-tray asset and sha256-verify it, BEFORE anything on the box is stopped.
+# Every failure is recorded in $trayNotes and never thrown: the tray is UI, the service is the clock,
+# so a tray that cannot be fetched must not stop the service upgrade that follows.
+dantesync_windows_tray_fetch_ps() {
+  local version="$1" url
+  url="$(dantesync_release_url_windows_tray "$version")"
+  cat <<EOF
+# 1b. the tray (issue 1372): the same pinned release's tray asset, fetched + verified before any stop
+\$trayUrl = '$url'
+\$trayExe = '$DANTESYNC_WIN_TRAY_EXE'
+\$trayPre = '$DANTESYNC_WIN_TRAY_EXE.pre-$version'
+\$trayTask = '$DANTESYNC_WIN_TRAY_TASK'
+EOF
+  cat <<'EOF'
+$trayTmp = Join-Path $env:TEMP 'dantesync-tray-new.exe'
+$trayNotes = @()
+$trayExpected = ''
+$trayProcs = @()
+try {
+    if (-not (Test-Path $trayExe)) { throw ('no tray installed at ' + $trayExe) }
+    Invoke-WebRequest -UseBasicParsing -Uri $trayUrl -OutFile $trayTmp
+    Invoke-WebRequest -UseBasicParsing -Uri ($trayUrl + '.sha256') -OutFile ($trayTmp + '.sha256')
+    $trayExpected = ((Get-Content ($trayTmp + '.sha256')) -split '\s+')[0].Trim()
+    $trayGot = (Get-FileHash -Algorithm SHA256 $trayTmp).Hash
+    if ($trayExpected -ne $trayGot) { throw ('download SHA256 MISMATCH expected ' + $trayExpected + ' got ' + $trayGot) }
+} catch {
+    $trayNotes += ('tray not fetched: ' + $_.Exception.Message)
+}
+EOF
+}
+
+# dantesync_windows_tray_swap_ps -> the PowerShell lines (issue 1372) that run AFTER the service is
+# back: stop the tray, back it up to .pre-<version>, replace it, verify the installed sha (a failed
+# replace or a wrong sha restores the backup), relaunch it through a temporary BUILTIN\Users (Limited)
+# scheduled task -- a group principal starts it in the logged-on user's interactive session with no
+# password, proven live on mbc + fohabl -- unregister that task in a finally, and verify one tray
+# process in an interactive session (SessionId >= 1; session 0 is the ssh/service session). The
+# block never throws: it ends with ONE `TRAY OK:` or `TRAY-WARNING:` line, which the orchestrator
+# (dantesync_tray_outcome) turns into a named WARNING in the roll summary, never a service rollback.
+dantesync_windows_tray_swap_ps() {
+  cat <<'EOF'
+# 5. the tray (issue 1372): swapped after the service is back; a failure is a TRAY-WARNING, never a throw
+if ($trayNotes.Count -eq 0) {
+    try {
+        Get-Process -Name dantesync-tray -ErrorAction SilentlyContinue | Stop-Process -Force
+        Wait-Process -Name dantesync-tray -Timeout 15 -ErrorAction SilentlyContinue
+        if (Get-Process -Name dantesync-tray -ErrorAction SilentlyContinue) { throw 'the running tray did not exit' }
+        Copy-Item -Force $trayExe $trayPre
+        try {
+            Copy-Item -Force $trayTmp $trayExe
+            $trayNow = (Get-FileHash -Algorithm SHA256 $trayExe).Hash
+            if ($trayNow -ne $trayExpected) { throw ('installed tray SHA256 ' + $trayNow + ' is not ' + $trayExpected) }
+        } catch {
+            Copy-Item -Force $trayPre $trayExe -ErrorAction SilentlyContinue
+            $trayNotes += ('tray swap failed, the previous tray restored: ' + $_.Exception.Message)
+        }
+        $trayAction = New-ScheduledTaskAction -Execute $trayExe
+        $trayPrincipal = New-ScheduledTaskPrincipal -GroupId 'BUILTIN\Users' -RunLevel Limited
+        Register-ScheduledTask -TaskName $trayTask -Action $trayAction -Principal $trayPrincipal -Force | Out-Null
+        try {
+            Start-ScheduledTask -TaskName $trayTask
+            for ($i = 0; $i -lt 30; $i++) {
+                $trayProcs = @(Get-Process -Name dantesync-tray -ErrorAction SilentlyContinue | Where-Object { $_.SessionId -ge 1 })
+                if ($trayProcs.Count -ge 1) { break }
+                Start-Sleep -Milliseconds 500
+            }
+        } finally {
+            Unregister-ScheduledTask -TaskName $trayTask -Confirm:$false -ErrorAction SilentlyContinue
+        }
+        if ($trayProcs.Count -ne 1) { throw ('expected one tray process in an interactive session after the relaunch, found ' + $trayProcs.Count + ' (is a user logged on?)') }
+    } catch {
+        $trayNotes += ('tray: ' + $_.Exception.Message)
+    }
+}
+if ($trayNotes.Count -gt 0) {
+    Write-Output ('TRAY-WARNING: ' + ($trayNotes -join '; '))
+} else {
+    Write-Output ('TRAY OK: dantesync-tray.exe sha256 ' + $trayExpected + ' running in session ' + $trayProcs[0].SessionId)
+}
+EOF
+}
+
+# dantesync_tray_outcome OUTPUT -> "OK <detail>" or "WARNING <reason>" from the LAST `TRAY OK:` /
+# `TRAY-WARNING:` line the Windows upgrade program printed (issue 1372); a missing line is a
+# WARNING too (the program never reached its tray report), never a silent OK.
+dantesync_tray_outcome() {
+  local line
+  line="$(printf '%s\n' "$1" | tr -d '\r' | grep -E '^TRAY( OK|-WARNING): ' | tail -1 || true)"
+  case "$line" in
+    'TRAY OK: '*) printf 'OK %s' "${line#TRAY OK: }" ;;
+    'TRAY-WARNING: '*) printf 'WARNING %s' "${line#TRAY-WARNING: }" ;;
+    *) printf 'WARNING no tray report in the upgrade output' ;;
+  esac
+}
+
 # dantesync_windows_upgrade_ps VERSION -> the CONTENT of a PowerShell .ps1 that upgrades a Windows
 # node to VERSION. Sent as a FILE (scp -O) and run with `-File` — never a nested
 # `powershell -Command "..."` over ssh (which fails SILENTLY, .claude/rules/rig-state-inspection.md
 # §2). Same safety order as Linux: download + Get-FileHash-verify FIRST, back up the exe, then a
 # try/catch self-heal around stop/swap/start, purge the dead relic task, read the version back.
+# Issue 1372: the tray rides the same program -- fetched + verified with the service binary before any
+# stop (dantesync_windows_tray_fetch_ps), swapped after the service is back
+# (dantesync_windows_tray_swap_ps); a tray failure prints TRAY-WARNING and never throws, so it can
+# never roll back or block the service.
 dantesync_windows_upgrade_ps() {
   local version="$1" url
   url="$(dantesync_release_url_windows "$version")"
@@ -309,6 +428,7 @@ Invoke-WebRequest -UseBasicParsing -Uri (\$url + '.sha256') -OutFile (\$tmp + '.
 \$expected = ((Get-Content (\$tmp + '.sha256')) -split '\s+')[0].Trim()
 \$actual = (Get-FileHash -Algorithm SHA256 \$tmp).Hash
 if (\$expected -ne \$actual) { throw ('SHA256 MISMATCH expected ' + \$expected + ' got ' + \$actual) }
+$(dantesync_windows_tray_fetch_ps "$version")
 # 2. back up the current exe BEFORE overwriting it
 Copy-Item -Force \$exe \$bak
 # 3. self-heal: any failure during stop/swap/start restores the .bak and restarts before rethrow
@@ -328,6 +448,7 @@ $(dantesync_windows_wait_service_exit_ps)
 # (live 2026-08-16 v1.8.43 canary: swap completed, ps1 exited non-zero, orchestrator misreported
 # a failed upgrade).
 cmd /c "schtasks /Delete /TN \"$DANTESYNC_DEAD_TASK\" /F >nul 2>&1"
+$(dantesync_windows_tray_swap_ps)
 & \$exe --version
 EOF
 }
@@ -489,7 +610,7 @@ fi
 
 # --- flow (executed only when run directly) -------------------------------------------------
 
-usage() { sed -n '2,71p' "$0"; }
+usage() { sed -n '2p;4,/^HERE=/{/^HERE=/!p}' "$0"; }   # the whole extended header (line 3 is set -e)
 log()   { printf '%s\n' "$*"; }
 err()   { printf 'ERROR: %s\n' "$*" >&2; }
 
@@ -686,6 +807,27 @@ verify_node() {
 # header): a failure PAST the swap restores the previous binary on the box before returning
 # non-zero, so a non-zero rc here means the service is on the PREVIOUS (working) version already.
 REMOTE_OUT=""
+
+# issue 1372: the tray outcome of every Windows node the roll upgraded. A tray failure is reported,
+# never a reason to roll back the service or fail the roll.
+declare -a TRAY_WARNINGS=()
+note_tray_outcome() {  # NAME UPGRADE_OUTPUT
+  local outcome
+  outcome="$(dantesync_tray_outcome "$2")"
+  case "$outcome" in
+    "OK "*) log "[$1] tray OK: ${outcome#OK }" ;;
+    *)
+      log "[$1] tray WARNING: ${outcome#WARNING }"
+      TRAY_WARNINGS+=("$1: ${outcome#WARNING }") ;;
+  esac
+}
+report_tray_warnings() {
+  local w
+  [ "${#TRAY_WARNINGS[@]}" -gt 0 ] || return 0
+  log "WARNING: dantesync-tray was NOT refreshed on ${#TRAY_WARNINGS[@]} node(s) -- the service roll is unaffected (the tray is UI, the service is the clock); the version gate's tray sha-pin names it until the tray is swapped:"
+  for w in "${TRAY_WARNINGS[@]}"; do log "  - $w"; done
+}
+
 run_upgrade() {
   local name="$1" kind="$2" addr="$3" rc=0 local_ps local_sh user runcmd
   case "$kind" in
@@ -801,6 +943,8 @@ upgrade_node() {
     [ -n "$REMOTE_OUT" ] && err "[$name] upgrade output: $REMOTE_OUT"
     return 1
   fi
+  # issue 1372: the tray rode the same program; its outcome is reported, never rolled back.
+  if [ "$kind" = win ]; then note_tray_outcome "$name" "$REMOTE_OUT"; fi
 
   if verify_node "$name" "$kind" "$addr"; then
     return 0
@@ -913,6 +1057,7 @@ declare -a FAILED=()
 for node in $CANARY_SET; do
   if ! upgrade_node "$node" "$(kind_of "$node")" "$(addr_of "$node")"; then
     err "CANARY $node failed — ABORTING the fleet roll. The rest of the fleet was NOT touched."
+    report_tray_warnings
     exit 10
   fi
 done
@@ -927,6 +1072,7 @@ for node in $REST; do
 done
 
 echo
+report_tray_warnings
 if [ "${#FAILED[@]}" -gt 0 ]; then
   err "FLEET DANTESYNC UPGRADE INCOMPLETE: canaries passed but ${#FAILED[*]} node(s) failed (recovered): ${FAILED[*]}"
   exit 20
