@@ -65,22 +65,33 @@ EOF
 }
 
 # dantesync_windows_tray_swap_ps -> the PowerShell lines that run AFTER the service is back:
-#   5. stop the tray (exact process name), back it up to .pre-<version> unless that backup already
-#      exists (a re-run never overwrites the original pre-roll tray), replace it and verify the
-#      installed sha -- a failed replace or a wrong sha restores the backup;
-#   6. whenever the running tray was stopped -- even after a failed backup/replace/sha -- relaunch
-#      it through a temporary BUILTIN\Users (Limited) scheduled task, named by its well-known SID
-#      S-1-5-32-545 because the account name is localized. A group principal starts it in the
-#      logged-on user's interactive session with no password (proven live on mbc + fohabl). The
-#      task has explicit settings (start and keep running on battery, no time limit) and is
-#      unregistered in a finally; then exactly ONE tray process in an interactive session
-#      (SessionId >= 1; session 0 is the ssh/service session) is required.
+#   5. a tray whose exe is not current: stop it (exact process name), back it up to .pre-<version>
+#      unless that backup already exists (a re-run never overwrites the original pre-roll tray),
+#      replace it and verify the installed sha -- a failed replace or a wrong sha restores the
+#      backup, and the restore itself is checked by hash before it is reported. A tray whose exe is
+#      already current is only checked for a running process (a relaunch that found nobody logged
+#      on leaves exactly that state, so a re-run must launch it, never report it OK unread).
+#   6. whenever the tray was stopped -- even after a failed backup/replace/sha -- or a current tray
+#      is not running, launch it through a temporary BUILTIN\Users (Limited) scheduled task, named
+#      by its well-known SID S-1-5-32-545 because the account name is localized. A group principal
+#      starts it in the logged-on user's interactive session with no password. The name form with
+#      default settings was proven live on mbc + fohabl (26.9.2026); this SID + settings form is the
+#      same principal by the documented API and is UNVERIFIED live until the next roll. The task has
+#      explicit settings (start and keep running on battery, no time limit) and is unregistered in a
+#      finally; the count is read again AFTER that, and exactly ONE tray process in an interactive
+#      session (SessionId >= 1; session 0 is the ssh/service session) is required.
 # The block never throws: it ends with ONE `TRAY OK:` or `TRAY-WARNING:` line that
 # dantesync_tray_outcome reads.
 dantesync_windows_tray_swap_ps() {
   cat <<'EOF'
 # 5. the tray (issue 1372): swapped after the service is back; a failure is a TRAY-WARNING, never a throw
 $trayStopped = $false
+$trayLaunch = $false
+$trayRunning = @()
+if ($trayNotes.Count -eq 0 -and $trayCurrent) {
+    $trayRunning = @(Get-Process -Name dantesync-tray -ErrorAction SilentlyContinue | Where-Object { $_.SessionId -ge 1 })
+    if ($trayRunning.Count -eq 0) { $trayLaunch = $true }
+}
 if ($trayNotes.Count -eq 0 -and -not $trayCurrent) {
     try {
         Get-Process -Name dantesync-tray -ErrorAction SilentlyContinue | Stop-Process -Force
@@ -93,15 +104,24 @@ if ($trayNotes.Count -eq 0 -and -not $trayCurrent) {
             $trayNow = (Get-FileHash -Algorithm SHA256 $trayExe).Hash
             if ($trayNow -ne $trayExpected) { throw ('installed tray SHA256 ' + $trayNow + ' is not ' + $trayExpected) }
         } catch {
-            Copy-Item -Force $trayPre $trayExe -ErrorAction SilentlyContinue
-            $trayNotes += ('tray swap failed, the previous tray restored: ' + $_.Exception.Message)
+            $trayWhy = $_.Exception.Message
+            $trayRestored = $false
+            try {
+                Copy-Item -Force $trayPre $trayExe
+                $trayRestored = ((Get-FileHash -Algorithm SHA256 $trayExe).Hash -eq (Get-FileHash -Algorithm SHA256 $trayPre).Hash)
+            } catch { }
+            if ($trayRestored) {
+                $trayNotes += ('tray swap failed, the previous tray restored: ' + $trayWhy)
+            } else {
+                $trayNotes += ('tray swap failed AND the restore from ' + $trayPre + ' failed, the tray exe may be partial: ' + $trayWhy)
+            }
         }
     } catch {
         $trayNotes += ('tray: ' + $_.Exception.Message)
     }
 }
-# 6. relaunch the tray whenever it was stopped, through a temporary BUILTIN\Users (Limited) task
-if ($trayStopped) {
+# 6. relaunch the tray whenever it was stopped or is not running, through a temporary BUILTIN\Users (Limited) task
+if ($trayStopped -or $trayLaunch) {
     try {
         $trayAction = New-ScheduledTaskAction -Execute $trayExe
         $trayPrincipal = New-ScheduledTaskPrincipal -GroupId 'S-1-5-32-545' -RunLevel Limited
@@ -121,17 +141,19 @@ if ($trayStopped) {
                 $trayNotes += ('the temporary task ' + $trayTask + ' could not be unregistered: ' + $_.Exception.Message)
             }
         }
+        $trayProcs = @(Get-Process -Name dantesync-tray -ErrorAction SilentlyContinue | Where-Object { $_.SessionId -ge 1 })
         if ($trayProcs.Count -ne 1) { throw ('expected one tray process in an interactive session after the relaunch, found ' + $trayProcs.Count + ' (is a user logged on?)') }
     } catch {
         $trayNotes += ('tray relaunch: ' + $_.Exception.Message)
     }
 }
+Remove-Item -Force -ErrorAction SilentlyContinue $trayTmp, ($trayTmp + '.sha256')
 if ($trayNotes.Count -gt 0) {
     Write-Output ('TRAY-WARNING: ' + ($trayNotes -join '; '))
-} elseif ($trayCurrent) {
-    Write-Output ('TRAY OK: dantesync-tray.exe already on sha256 ' + $trayExpected + ', left running')
-} else {
+} elseif ($trayStopped -or $trayLaunch) {
     Write-Output ('TRAY OK: dantesync-tray.exe sha256 ' + $trayExpected + ' running in session ' + $trayProcs[0].SessionId)
+} else {
+    Write-Output ('TRAY OK: dantesync-tray.exe already on sha256 ' + $trayExpected + ', running in session ' + $trayRunning[0].SessionId)
 }
 EOF
 }
