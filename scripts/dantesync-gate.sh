@@ -484,11 +484,12 @@ grade_http_node() {
   # with no master configured never pays this extra SSH call.
   local date_v="none"
   [ "$mode" = "median-only" ] && date_v="$(date_master_verdict "$status" "$DATE_MASTER_MARGIN_US")"
-  # A daily-mode master (dantesync 1.12.0) whose schedule is unreadable still takes its daily bound:
-  # its median IS the day's drift, so the #1021 widening below would read a healthy clock as DRIFT
-  # (20) instead of the UNKNOWN (11) date_master_check reports.
+  # A daily-mode master (dantesync 1.12.0) whose schedule is unreadable, or a master with an unknown
+  # date_correction_mode, still takes the daily bound: its median may be a day's drift, so the
+  # #1021 widening below would read it as DRIFT (20) instead of the UNKNOWN (11) date_master_check
+  # reports.
   if [ "$date_v" = ok ] || [ "$date_v" = out ] || [ "$date_v" = paused ] \
-     || { [ "$date_v" = unknown ] && [ "$(date_master_mode_class "$status")" = daily ]; }; then
+     || { [ "$date_v" = unknown ] && [ "$(date_master_mode_class "$status")" != other ]; }; then
     # Issue 1372 (dantesync 1.9.0 / dantesync#88): the NTP master is the fleet DATE authority. It
     # lets the fleet line sit up to date_step_bound_ms off UTC, then makes a coordinated fleet
     # step, so its own ntp_offset_us (that fleet-line error) is graded on the step bound + margin
@@ -505,7 +506,7 @@ grade_http_node() {
     # grades its nightly schedule.
     local orig_bound="$bound"
     bound="$(date_master_effective_bound_us "$status" "$bound" "$DATE_MASTER_MARGIN_US")"
-    if [ "$bound" != "$orig_bound" ] && [ "$(date_master_mode_class "$status")" = daily ]; then
+    if [ "$bound" != "$orig_bound" ] && [ "$(date_master_mode_class "$status")" != other ]; then
       deadband_note=" -- date master graded on its daily bound: bound ${bound}us = ${DATE_MASTER_DAILY_BOUND_MS}ms + ${DATE_MASTER_MARGIN_US}us margin (dantesync 1.12.0 daily mode: the fleet date drifts from UTC all day and is stepped once a night, #1372; base bound ${orig_bound}us)"
     elif [ "$bound" != "$orig_bound" ] && [ "$(date_master_micro_capable "$status")" = yes ]; then
       deadband_note=" -- date master graded on its micro bound: bound ${bound}us = ${DATE_MASTER_MICRO_BOUND_MS}ms + ${DATE_MASTER_MARGIN_US}us margin (dantesync 1.11.0 micro-corrections hold the fleet date within a few ms of UTC, #1372; base bound ${orig_bound}us)"

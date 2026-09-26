@@ -244,15 +244,17 @@ def date_master_mode_class(status) -> str:
 
 
 def _utc_epoch(value):
-    """Unix second of an RFC 3339 UTC second `YYYY-MM-DDTHH:MM:SSZ`; None for any other shape or an
-    impossible date (the bash twin's _date_daily_utc_epoch)."""
+    """Unix second of an RFC 3339 UTC second `YYYY-MM-DDTHH:MM:SSZ`; None for any other shape, an
+    impossible date, or a second before 1970 (the bash twin's _date_daily_utc_epoch accepts only a
+    non-negative epoch)."""
     if not isinstance(value, str) or not _RFC3339_UTC_SECOND.fullmatch(value):
         return None
     try:
         dt = datetime.datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ")
     except ValueError:
         return None
-    return int(dt.replace(tzinfo=datetime.timezone.utc).timestamp())
+    epoch = int(dt.replace(tzinfo=datetime.timezone.utc).timestamp())
+    return epoch if epoch >= 0 else None
 
 
 def _daily_next_state(s: dict, now_s) -> str:
