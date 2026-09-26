@@ -32,12 +32,14 @@ Exit (drift): 0 = matches its template, 20 = DRIFT, 11 = UNKNOWN, 2 = usage.
 from __future__ import annotations
 
 import argparse
+import datetime
 import importlib.util
 import json
 import math
 import os
 import re
 import sys
+import time
 from pathlib import Path
 
 _SCRIPTS = Path(__file__).resolve().parent
@@ -187,7 +189,7 @@ def _ms_to_us(value):
 
 
 DATE_MICRO_BOUND_MS_DEFAULT = "5"
-_MICRO_BOUND_SHAPE = re.compile(r"[0-9]+(\.[0-9]+)?")
+_BOUND_SHAPE = re.compile(r"[0-9]+(\.[0-9]+)?")
 
 
 def date_micro_bound_ms() -> str:
@@ -196,14 +198,124 @@ def date_micro_bound_ms() -> str:
     return os.environ.get("DANTESYNC_DATE_MICRO_BOUND_MS") or DATE_MICRO_BOUND_MS_DEFAULT
 
 
-def _micro_bound_us(micro_bound_ms):
-    """Integer us of a positive plain-decimal ms string; None for any other shape or a zero bound
-    (the bash twin's _micro_bound_us)."""
-    text = str(micro_bound_ms)
-    if not _MICRO_BOUND_SHAPE.fullmatch(text):
+def _positive_bound_us(bound_ms):
+    """Integer us of a positive plain-decimal ms string (the micro or the daily bound); None for any
+    other shape or a zero bound (the bash twin's _positive_bound_us)."""
+    text = str(bound_ms)
+    if not _BOUND_SHAPE.fullmatch(text):
         return None
     us = _ms_to_us(float(text))
     return us if us is not None and us > 0 else None
+
+
+# --- the dantesync 1.12.0 NIGHTLY date mode (date_correction_mode "daily", PR 123) ------------
+# The twin of the bash `date_master_mode_class` / `_date_daily_*` / `_date_master_daily_verdict`.
+# The pure decisions take "now" as an argument; date_now_s() is the ONE place it is read.
+
+DATE_DAILY_BOUND_MS_DEFAULT = "3000"
+DATE_DAILY_NEXT_MAX_S = 88200          # the next window within (now, now + 24 h 30 min]
+DATE_DAILY_LAST_MAX_AGE_S = 93600      # the last nightly step within the last 26 h ...
+DATE_DAILY_LAST_MAX_AHEAD_S = 1800     # ... or up to 30 min ahead (announced, not landed yet)
+_RFC3339_UTC_SECOND = re.compile(
+    r"[1-9][0-9]{3}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])T([01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9]Z")
+
+
+def date_daily_bound_ms() -> str:
+    """The daily bound (ms) a dantesync 1.12.0 daily-mode date master is graded on:
+    DANTESYNC_DATE_DAILY_BOUND_MS, or 3000 when unset or empty (bash `${...:-3000}`)."""
+    return os.environ.get("DANTESYNC_DATE_DAILY_BOUND_MS") or DATE_DAILY_BOUND_MS_DEFAULT
+
+
+def date_now_s():
+    """"now" (Unix seconds) for the nightly-schedule grade: DANTESYNC_DATE_NOW_S when set (tests pin
+    it, as text -- the decisions validate it), else the wall clock (the bash `date +%s`)."""
+    return os.environ.get("DANTESYNC_DATE_NOW_S") or int(time.time())
+
+
+def date_master_mode_class(status) -> str:
+    """daily / other / unknown from `date_correction_mode`: "daily" -> daily; absent, null, "" or
+    "micro" -> other (graded exactly as before 1.12.0); any other value -> unknown."""
+    mode = _status_dict(status).get("date_correction_mode")
+    if mode == "daily":
+        return "daily"
+    if mode in (None, "", "micro"):
+        return "other"
+    return "unknown"
+
+
+def _utc_epoch(value):
+    """Unix second of an RFC 3339 UTC second `YYYY-MM-DDTHH:MM:SSZ`; None for any other shape or an
+    impossible date (the bash twin's _date_daily_utc_epoch)."""
+    if not isinstance(value, str) or not _RFC3339_UTC_SECOND.fullmatch(value):
+        return None
+    try:
+        dt = datetime.datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ")
+    except ValueError:
+        return None
+    return int(dt.replace(tzinfo=datetime.timezone.utc).timestamp())
+
+
+def _daily_next_state(s: dict, now_s) -> str:
+    """ok / missing / past / far / unknown for date_daily_next_utc at NOW_S (bash
+    _date_daily_next_state)."""
+    now = _plain_int(now_s, max_digits=15)
+    if now is None:
+        return "unknown"
+    raw = s.get("date_daily_next_utc")
+    if raw is None:
+        return "missing"
+    epoch = _utc_epoch(raw)
+    if epoch is None:
+        return "unknown"
+    if epoch <= now:
+        return "past"
+    return "far" if epoch - now > DATE_DAILY_NEXT_MAX_S else "ok"
+
+
+def _daily_last_state(s: dict, now_s) -> str:
+    """ok / none / stale / ahead / unknown for date_daily_last_step_ts at NOW_S (bash
+    _date_daily_last_state): null = none (no nightly step since the master started), absent or not a
+    non-negative integer of at most 15 digits = unknown."""
+    now = _plain_int(now_s, max_digits=15)
+    if now is None or "date_daily_last_step_ts" not in s:
+        return "unknown"
+    raw = s["date_daily_last_step_ts"]
+    if raw is None:
+        return "none"
+    if isinstance(raw, bool) or not isinstance(raw, int) or raw < 0 or raw >= _US_LIMIT:
+        return "unknown"
+    age = now - raw
+    if age > DATE_DAILY_LAST_MAX_AGE_S:
+        return "stale"
+    return "ahead" if age < -DATE_DAILY_LAST_MAX_AHEAD_S else "ok"
+
+
+def _daily_schedule_verdict(s: dict, now_s) -> str:
+    """ok / out / unknown: out when the next window is missing/past/far or the last step
+    stale/ahead (a read, wrong field wins), else unknown when either is unreadable, else ok."""
+    nxt, last = _daily_next_state(s, now_s), _daily_last_state(s, now_s)
+    if nxt in ("missing", "past", "far") or last in ("stale", "ahead"):
+        return "out"
+    if "unknown" in (nxt, last):
+        return "unknown"
+    return "ok"
+
+
+def _date_master_daily_verdict(s: dict, margin_us, daily_bound_ms, now_s) -> str:
+    """ok / out / unknown for a daily-mode date master (bash _date_master_daily_verdict). PURE:
+    NOW_S is an argument, the clock is never read here."""
+    sched = _daily_schedule_verdict(s, now_s)
+    err_us = _ms_to_us(s.get("date_offset_error_ms"))
+    bound_us = _positive_bound_us(daily_bound_ms)
+    if err_us is None or bound_us is None:
+        err_v = "unknown"
+    else:
+        err_v = "ok" if abs(err_us) <= bound_us + int(margin_us) else "out"
+    if "out" in (sched, err_v):
+        return "out"
+    if "unknown" in (sched, err_v):
+        return "unknown"
+    return "ok"
 
 
 def date_master_micro_capable(status) -> bool:
@@ -223,7 +335,7 @@ def _date_master_micro_verdict(s: dict, margin_us: int, micro_bound_ms) -> str:
     if paused:
         return "paused"
     err_us = _ms_to_us(s.get("date_offset_error_ms"))
-    bound_us = _micro_bound_us(micro_bound_ms)
+    bound_us = _positive_bound_us(micro_bound_ms)
     if err_us is None or bound_us is None:
         return "unknown"
     return "ok" if abs(err_us) <= bound_us + int(margin_us) else "out"
@@ -232,13 +344,21 @@ def _date_master_micro_verdict(s: dict, margin_us: int, micro_bound_ms) -> str:
 def date_master_verdict(status, margin_us: int, micro_bound_ms=None) -> str:
     """none / ok / out / paused / unknown for one node's /status.
 
-    Not the date master (`date_authority` != master) -> none. A micro-capable master (dantesync
-    1.11.0) -> out on date_correction_falling_behind, paused on date_micro_paused, else
-    |date_offset_error_ms| <= micro bound (MICRO_BOUND_MS, default date_micro_bound_ms()) + margin.
-    Any other master (1.9.0 / 1.10.0) -> |date_offset_error_ms| <= date_step_bound_ms + margin."""
+    Not the date master (`date_authority` != master) -> none. A master in date_correction_mode
+    "daily" (dantesync 1.12.0) -> its nightly schedule + the daily bound at date_now_s() (decided
+    FIRST: it also carries date_correction_falling_behind); an unknown mode -> unknown. A
+    micro-capable master (dantesync 1.11.0) -> out on date_correction_falling_behind, paused on
+    date_micro_paused, else |date_offset_error_ms| <= micro bound (MICRO_BOUND_MS, default
+    date_micro_bound_ms()) + margin. Any other master (1.9.0 / 1.10.0) -> |date_offset_error_ms| <=
+    date_step_bound_ms + margin."""
     s = _status_dict(status)
     if s.get("date_authority") != "master":
         return "none"
+    mode = date_master_mode_class(s)
+    if mode == "daily":
+        return _date_master_daily_verdict(s, margin_us, date_daily_bound_ms(), date_now_s())
+    if mode == "unknown":
+        return "unknown"
     if date_master_micro_capable(s):
         # None or "" = the default, like the bash twin's `${3:-$DATE_MASTER_MICRO_BOUND_MS}`
         micro = date_micro_bound_ms() if micro_bound_ms in (None, "") else micro_bound_ms
@@ -275,7 +395,10 @@ def journal_date_grade(step_bound_us, margin_us, status, micro_bound_ms=None) ->
     out (date_correction_falling_behind true) | paused (date_micro_paused true) | unknown (a flag
     that is not a JSON boolean, or an unreadable micro bound) | step:<us> (a /status with a
     date_authority that is not a micro-capable master: step bound + margin) | step-unread:<us> (no
-    date_authority -- empty, not JSON, a pre-1.9.0 blob: step bound + margin, named by the consumer)."""
+    date_authority -- empty, not JSON, a pre-1.9.0 blob: step bound + margin, named by the consumer) |
+    daily:<us> (a dantesync 1.12.0 daily-mode master with a live nightly schedule: daily bound +
+    margin) | daily-out (its schedule is out) | daily-unknown (its schedule fields, an unknown
+    date_correction_mode or the daily bound unreadable)."""
     step = _plain_int(step_bound_us, max_digits=15)
     margin = _plain_int(margin_us, max_digits=15)
     if step is None or step <= 0 or margin is None:
@@ -284,6 +407,18 @@ def journal_date_grade(step_bound_us, margin_us, status, micro_bound_ms=None) ->
     auth = s.get("date_authority")
     if not isinstance(auth, str) or not auth:
         return f"step-unread:{step + margin}"
+    if auth == "master":
+        mode = date_master_mode_class(s)
+        if mode == "daily":
+            sched = _daily_schedule_verdict(s, date_now_s())
+            bound_us = _positive_bound_us(date_daily_bound_ms())
+            if sched == "out":
+                return "daily-out"
+            if sched == "ok" and bound_us is not None:
+                return f"daily:{bound_us + margin}"
+            return "daily-unknown"
+        if mode == "unknown":
+            return "daily-unknown"
     if auth != "master" or not date_master_micro_capable(s):
         return f"step:{step + margin}"
     behind = s.get("date_correction_falling_behind")
@@ -295,7 +430,7 @@ def journal_date_grade(step_bound_us, margin_us, status, micro_bound_ms=None) ->
     if paused:
         return "paused"
     micro = date_micro_bound_ms() if micro_bound_ms in (None, "") else micro_bound_ms
-    bound_us = _micro_bound_us(micro)
+    bound_us = _positive_bound_us(micro)
     return "unknown" if bound_us is None else f"micro:{bound_us + margin}"
 
 
