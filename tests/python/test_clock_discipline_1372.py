@@ -50,7 +50,11 @@ _CLEAN = ("DANTESYNC_FLEET", "OBS_FLEET", "OBS_FLEET_HOME", "DANTESYNC_AUDIO_GM_
           "RIG_GRANDMASTER_HOST", "RIG_GRANDMASTER_IP", "DANTESYNC_GATE_GM_ENFORCE",
           "DANTESYNC_GATE_PHASE_SLEW_ENFORCE", "DANTESYNC_NTP_MASTER_NAME",
           "DANTESYNC_DEADBAND_MARGIN_US", "CLOCK_GUARD_BOUND_US", "DANTESYNC_STABILITY_US",
-          "DANTESYNC_DATE_MARGIN_US", "DANTESYNC_DATE_MICRO_BOUND_MS")
+          "DANTESYNC_DATE_MARGIN_US", "DANTESYNC_DATE_MICRO_BOUND_MS", "DANTESYNC_DATE_DAILY_BOUND_MS",
+          "DANTESYNC_DATE_NOW_S")
+# The table's "now" (DANTESYNC_DATE_NOW_S) for the dantesync 1.12.0 daily-mode rows:
+# 2026-09-27T09:30:00Z. Every other row ignores it.
+_NOW_S = 1790501400
 
 
 def _env(**over):
@@ -92,7 +96,8 @@ def _sourced(tmp_path, body, **env):
 def _bash_call(tmp_path, fn, status, *args):
     (tmp_path / "status.json").write_text(status)
     extra = " ".join(f"'{a}'" for a in args)
-    r = _sourced(tmp_path, f'S="$(cat "{tmp_path / "status.json"}")"\n{fn} "$S" {extra}; echo')
+    r = _sourced(tmp_path, f'S="$(cat "{tmp_path / "status.json"}")"\n{fn} "$S" {extra}; echo',
+                 DANTESYNC_DATE_NOW_S=str(_NOW_S))
     assert r.returncode == 0, r.stderr
     return r.stdout.strip()
 
@@ -117,7 +122,8 @@ def test_bash_date_master_verdict_matches_the_table(tmp_path, status, klass, dat
 
 
 @pytest.mark.parametrize("status,klass,date_verdict,unlocked", _rows())
-def test_python_date_master_verdict_matches_the_table(status, klass, date_verdict, unlocked):
+def test_python_date_master_verdict_matches_the_table(monkeypatch, status, klass, date_verdict, unlocked):
+    monkeypatch.setenv("DANTESYNC_DATE_NOW_S", str(_NOW_S))
     assert df.date_master_verdict(json.loads(status), _MARGIN_US) == date_verdict
 
 
@@ -291,7 +297,7 @@ def test_date_master_check_keeps_the_step_bound_line_for_a_1_10_0_master(tmp_pat
 
 def test_the_version_pin_is_the_release_this_date_grading_implements():
     body = (_ROOT / "scripts" / "dantesync-version-gate.sh").read_text()
-    assert 'DANTESYNC_VERSION_PIN="${DANTESYNC_VERSION_PIN:-1.11.1}"' in body
+    assert 'DANTESYNC_VERSION_PIN="${DANTESYNC_VERSION_PIN:-1.12.0}"' in body
 
 
 # ---------------------------------------------------------------------------------------------
@@ -360,18 +366,21 @@ _LIVE_MASTER_1_9 = _STATUS / "strih-lx-master-1.9.0.json"
 @pytest.mark.parametrize("status,journal_grade", _journal_rows())
 def test_bash_journal_date_grade_matches_the_table(tmp_path, status, journal_grade):
     (tmp_path / "status.json").write_text(status)
-    r = _sourced(tmp_path, f'journal_date_grade_from_step 50000 1000 "$(cat "{tmp_path / "status.json"}")"; echo')
+    r = _sourced(tmp_path, f'journal_date_grade_from_step 50000 1000 "$(cat "{tmp_path / "status.json"}")"; echo',
+                 DANTESYNC_DATE_NOW_S=str(_NOW_S))
     assert r.stdout.strip() == journal_grade, r.stdout + r.stderr
 
 
 @pytest.mark.parametrize("status,journal_grade", _journal_rows())
-def test_python_journal_date_grade_matches_the_table(status, journal_grade):
+def test_python_journal_date_grade_matches_the_table(monkeypatch, status, journal_grade):
+    monkeypatch.setenv("DANTESYNC_DATE_NOW_S", str(_NOW_S))
     assert df.journal_date_grade(50000, _MARGIN_US, json.loads(status)) == journal_grade
 
 
 def test_the_table_covers_every_journal_grade():
     grades = {p.values[1].split(":")[0] for p in _journal_rows()}
-    assert grades == {"micro", "step", "step-unread", "out", "paused", "unknown"}
+    assert grades == {"micro", "step", "step-unread", "out", "paused", "unknown",
+                      "daily", "daily-out", "daily-unknown"}
 
 
 @pytest.mark.parametrize("step,margin,micro,want", [
@@ -753,6 +762,200 @@ def test_gate_discipline_check_stays_report_only_without_enforce(tmp_path):
                            DANTESYNC_GATE_PHASE_SLEW_ENFORCE="0")
     assert code == 0, out + err
     assert "PTP-PHASE UNLOCKED" in out
+
+
+# ---------------------------------------------------------------------------------------------
+# dantesync 1.12.0 (PR 123): the NIGHTLY date step. A master in date_correction_mode "daily"
+# corrects nothing by day and is graded on its schedule + the daily bound (issue 1372, main's
+# design comment 5850538767, Approach 1). The 1.12.0 fixtures are synthesized until the roll.
+# ---------------------------------------------------------------------------------------------
+
+_LIVE_MASTER_1_12 = _STATUS / "strih-lx-master-1.12.0.json"
+_LIVE_SLAVE_1_12 = _STATUS / "stream-slave-1.12.0.json"
+
+
+def _daily_status(**edits):
+    s = json.loads(_LIVE_MASTER_1_12.read_text())
+    s.update(edits)
+    return json.dumps(s)
+
+
+def _utc(epoch):
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(epoch))
+
+
+def test_date_master_effective_bound_on_a_daily_master_is_the_daily_bound(tmp_path):
+    master = _LIVE_MASTER_1_12.read_text()
+    slave = _LIVE_SLAVE_1_12.read_text()
+    assert _bash_call(tmp_path, "date_master_effective_bound_us", master, 2000, 1000) == "3001000"
+    assert _bash_call(tmp_path, "date_master_effective_bound_us", master, 5000000, 1000) == "5000000"
+    assert _bash_call(tmp_path, "date_master_effective_bound_us", slave, 2000, 1000) == "2000"
+
+
+@pytest.mark.parametrize("daily_ms,err_ms,want,bound", [
+    ("", 2999.0, "ok", "3001000"), ("", 3001.5, "out", "3001000"),
+    ("2000", 1999.0, "ok", "2001000"), ("2000", 2001.5, "out", "2001000"), ("2.5", 2.4, "ok", "3500"),
+    ("0", 1.0, "unknown", "2000"), ("abc", 1.0, "unknown", "2000"), ("-1", 1.0, "unknown", "2000"),
+    ("5\nabc", 1.0, "unknown", "2000"),
+])
+def test_daily_bound_is_the_one_env_knob_on_both_twins(tmp_path, monkeypatch, daily_ms, err_ms, want, bound):
+    status = _daily_status(date_offset_error_ms=err_ms)
+    (tmp_path / "s.json").write_text(status)
+    r = _sourced(tmp_path, f'S="$(cat "{tmp_path / "s.json"}")"\n'
+                           'date_master_verdict "$S" 1000; echo; date_master_effective_bound_us "$S" 2000 1000; echo',
+                 DANTESYNC_DATE_DAILY_BOUND_MS=daily_ms, DANTESYNC_DATE_NOW_S=str(_NOW_S))
+    assert r.stdout.split() == [want, bound], r.stdout + r.stderr
+    monkeypatch.setenv("DANTESYNC_DATE_DAILY_BOUND_MS", daily_ms)
+    monkeypatch.setenv("DANTESYNC_DATE_NOW_S", str(_NOW_S))
+    assert df.date_master_verdict(json.loads(status), _MARGIN_US) == want
+
+
+@pytest.mark.parametrize("now,want", [
+    (str(_NOW_S), "ok"),
+    (str(_NOW_S + 86400), "out"),        # a day later: the schedule is past, the last step stale
+    (str(_NOW_S - 86400), "out"),        # a day earlier: the next window is too far ahead
+    ("abc", "unknown"), ("-5", "unknown"), ("1790501400.5", "unknown"),
+])
+def test_now_is_the_one_env_seam_on_both_twins(tmp_path, monkeypatch, now, want):
+    status = _LIVE_MASTER_1_12.read_text()
+    (tmp_path / "s.json").write_text(status)
+    r = _sourced(tmp_path, f'date_master_verdict "$(cat "{tmp_path / "s.json"}")" 1000; echo',
+                 DANTESYNC_DATE_NOW_S=now)
+    assert r.stdout.strip() == want, r.stdout + r.stderr
+    monkeypatch.setenv("DANTESYNC_DATE_NOW_S", now)
+    assert df.date_master_verdict(json.loads(status), _MARGIN_US) == want
+
+
+def test_the_pure_daily_decision_never_reads_the_clock(tmp_path, monkeypatch):
+    """The design's rule: "now" is an argument of the pure decision, read once by the public
+    wrapper. A `date` that fails without -d (bash) and a time.time that raises (python) prove it."""
+    status = _LIVE_MASTER_1_12.read_text()
+    (tmp_path / "s.json").write_text(status)
+    shadow = ('date() { case "$*" in *-d*) command date "$@" ;; *) echo CLOCK-READ >&2; return 1 ;; esac; }\n'
+              f'S="$(cat "{tmp_path / "s.json"}")"\n')
+    r = _sourced(tmp_path, shadow + '_date_master_daily_verdict "$S" 1000 3000 1790501400; echo')
+    assert r.stdout.strip() == "ok" and "CLOCK-READ" not in r.stderr, r.stdout + r.stderr
+    r = _sourced(tmp_path, shadow + 'date_master_verdict "$S" 1000; echo')
+    assert "CLOCK-READ" in r.stderr, r.stdout + r.stderr   # the wrapper is where the clock is read
+
+    def boom():
+        raise AssertionError("the pure daily decision read the clock")
+    monkeypatch.setattr(df.time, "time", boom)
+    assert df._date_master_daily_verdict(json.loads(status), _MARGIN_US, "3000", _NOW_S) == "ok"
+
+
+@pytest.mark.parametrize("edits,rc,needles", [
+    ({}, 0, ["DATE MASTER OK", "daily mode", "412.5ms off UTC <= daily bound 3000ms + 1000us margin",
+             "next nightly window 2026-09-28T02:00:00Z", "last nightly step -1523.4ms at 1790474400"]),
+    ({"date_daily_last_step_ts": None, "date_daily_last_step_ms": None}, 0,
+     ["DATE MASTER OK", "NOTE: no nightly step seen since the master started"]),
+    ({"date_offset_error_ms": 3500.0}, 2, ["DATE MASTER OUT", "3500.0ms off UTC > daily bound 3000ms"]),
+    ({"date_daily_next_utc": None}, 2, ["DATE MASTER OUT", "no next nightly window"]),
+    ({"date_daily_next_utc": "2026-09-27T02:00:00Z"}, 2,
+     ["DATE MASTER OUT", "next nightly window 2026-09-27T02:00:00Z is not within the next 24 h 30 min"]),
+    ({"date_daily_last_step_ts": 1790407799}, 2,
+     ["DATE MASTER OUT", "last nightly step at 1790407799 is not within the last 26 h"]),
+    ({"date_daily_next_utc": "tomorrow"}, 3, ["DATE MASTER UNKNOWN", "date_daily_next_utc"]),
+    ({"date_offset_error_ms": None}, 3, ["DATE MASTER UNKNOWN", "date_offset_error_ms"]),
+    ({"date_correction_mode": "weekly"}, 3, ["DATE MASTER UNKNOWN", "date_correction_mode=weekly"]),
+])
+def test_date_master_check_names_the_daily_verdict(tmp_path, edits, rc, needles):
+    (tmp_path / "s.json").write_text(_daily_status(**edits))
+    r = _sourced(tmp_path, f'date_master_check strih "$(cat "{tmp_path / "s.json"}")" 1000; echo "rc=$?"',
+                 DANTESYNC_DATE_NOW_S=str(_NOW_S))
+    assert f"rc={rc}" in r.stdout, r.stdout + r.stderr
+    for needle in needles:
+        assert needle in r.stdout, (needle, r.stdout)
+
+
+@pytest.mark.parametrize("offsets,edits,want", [
+    ((1500000, 1500100, 1499900), {}, "ok"),
+    ((-3001000, -3001000, -3001000), {}, "ok"),
+    ((3001001, 3001002, 3001003), {}, "drift"),
+    ((1500000, 1500000, 1500000), {"date_daily_next_utc": None}, "date_out"),
+    ((1500000, 1500000, 1500000), {"date_daily_last_step_ts": 1}, "date_out"),
+    ((1500000, 1500000, 1500000), {"date_daily_next_utc": "x"}, "unknown"),
+])
+def test_journal_verdict_grades_a_daily_master_on_its_schedule_and_the_daily_bound(tmp_path, offsets, edits, want):
+    journal = _journal(*(_date_line(o) for o in offsets))
+    got = _journal_verdict(tmp_path, journal, _daily_status(**edits), DANTESYNC_DATE_NOW_S=str(_NOW_S))
+    assert got == want
+
+
+@pytest.mark.parametrize("edits,needles", [
+    ({}, ["daily bound 3000ms", "3001000us", "median-only", "daily"]),
+    ({"date_daily_next_utc": None}, ["nightly schedule", "no next nightly window"]),
+    ({"date_daily_next_utc": "x"}, ["unreadable", "date_daily_next_utc"]),
+])
+def test_journal_date_note_names_the_daily_grade(tmp_path, edits, needles):
+    (tmp_path / "j.log").write_text(_journal(_date_line(1500000), _date_line(1500100)))
+    (tmp_path / "s.json").write_text(_daily_status(**edits))
+    r = _sourced(tmp_path, f'dantesync_journal_date_note "$(cat "{tmp_path / "j.log"}")" 1000 '
+                           f'"$(cat "{tmp_path / "s.json"}")"; echo', DANTESYNC_DATE_NOW_S=str(_NOW_S))
+    for needle in needles:
+        assert needle in r.stdout, (needle, r.stdout + r.stderr)
+
+
+def test_verify_strih_check_6_fails_a_daily_master_whose_schedule_is_dead():
+    body = (_ROOT / "scripts" / "verify-strih.sh").read_text()
+    check6 = body[body.index("# 6) dantesync unit ACTIVE"):body.index("# 7) bundle-state :8899.")]
+    arm = check6[check6.index("date_out)") + len("date_out)"):]
+    assert arm.split(";;")[0].strip().startswith("bad "), arm[:200]
+
+
+def _daily_fresh(tmp_path, **edits):
+    now = int(time.time())
+    base = {"date_daily_next_utc": _utc(now + 6 * 3600), "date_daily_last_step_ts": now - 7 * 3600}
+    base.update(edits)
+    return _fresh(tmp_path, "strih", _LIVE_MASTER_1_12, **base)
+
+
+def test_gate_passes_a_1_12_0_daily_master_on_its_daily_bound(tmp_path):
+    code, out, err = _gate(_MASTER_ONLY, DANTESYNC_GATE_WIN_HTTP_STRIH=str(_daily_fresh(tmp_path)))
+    assert code == 0, out + err
+    assert "DATE MASTER OK" in out and "daily bound 3000ms" in out, out
+    assert "bound 3001000us" in out, out
+
+
+def test_gate_fails_a_daily_master_whose_nightly_window_is_past(tmp_path):
+    p = _daily_fresh(tmp_path, date_daily_next_utc=_utc(int(time.time()) - 3600))
+    code, out, err = _gate(_MASTER_ONLY, DANTESYNC_GATE_WIN_HTTP_STRIH=str(p))
+    assert code == 20, out + err
+    assert "DATE MASTER OUT" in out and "next nightly window" in out, out
+
+
+def test_gate_fails_a_daily_master_whose_last_nightly_step_is_stale(tmp_path):
+    p = _daily_fresh(tmp_path, date_daily_last_step_ts=int(time.time()) - 27 * 3600)
+    code, out, err = _gate(_MASTER_ONLY, DANTESYNC_GATE_WIN_HTTP_STRIH=str(p))
+    assert code == 20, out + err
+    assert "DATE MASTER OUT" in out and "last nightly step" in out, out
+
+
+def test_gate_fails_a_daily_master_past_its_daily_bound(tmp_path):
+    p = _daily_fresh(tmp_path, ntp_offset_us=3500000, date_offset_error_ms=3500.0)
+    code, out, err = _gate(_MASTER_ONLY, DANTESYNC_GATE_WIN_HTTP_STRIH=str(p))
+    assert code == 20, out + err
+    assert "DATE MASTER OUT" in out
+
+
+def test_gate_is_incomplete_on_an_unreadable_nightly_schedule(tmp_path):
+    p = _daily_fresh(tmp_path, date_daily_next_utc="tomorrow")
+    code, out, err = _gate(_MASTER_ONLY, DANTESYNC_GATE_WIN_HTTP_STRIH=str(p))
+    assert code == 11, out + err
+    assert "DATE MASTER UNKNOWN" in out
+
+
+def test_gate_passes_the_1_12_0_slave(tmp_path):
+    p = _fresh(tmp_path, "stream", _LIVE_SLAVE_1_12)
+    code, out, err = _gate(_STREAM_ONLY, DANTESYNC_GATE_WIN_HTTP_STREAM=str(p))
+    assert code == 0, out + err
+    assert "DATE MASTER" not in out
+
+
+def test_gate_help_documents_the_daily_mode():
+    code, out, err = _gate(["--help"])
+    for needle in ("DANTESYNC_DATE_DAILY_BOUND_MS", "DANTESYNC_DATE_NOW_S", "date_correction_mode"):
+        assert needle in out + err, needle
 
 
 # ---------------------------------------------------------------------------------------------
