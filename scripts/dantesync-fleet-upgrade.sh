@@ -689,7 +689,7 @@ verify_node() {
     gate_rc=0
     case "$kind" in
       linux) "${gate_env[@]}" "$HERE/dantesync-gate.sh" --linux "$name=$ip" --ntp-master "$master_arg" >/dev/null 2>&1 || gate_rc=$? ;;
-      win)   "${gate_env[@]}" "$HERE/dantesync-gate.sh" --win-http "$name=$ip" --ntp-master "$master_arg" >/dev/null 2>&1 || gate_rc=$? ;;
+      win)   "${gate_env[@]}" "$HERE/dantesync-gate.sh" --linux "" --win-http "$name=$ip" --ntp-master "$master_arg" >/dev/null 2>&1 || gate_rc=$? ;;
       local) gate_rc=0 ;;  # dev1 lock is confirmed by the fleet-wide gate precondition on the next E2E
     esac
     [ "$gate_rc" -eq 0 ] && break
