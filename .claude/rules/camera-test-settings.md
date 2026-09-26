@@ -4,6 +4,7 @@ paths:
   - "scripts/lib/camera-test-settings.sh"
   - "scripts/camera-test-baseline.json"
   - "tests/python/test_camera_test_settings_1371.py"
+  - "tests/python/test_camera_prod_exposure_restore_1371.py"
   - "tests/python/test_rig_dev_handover_exposure_1371.py"
   - "scripts/rig-mode.sh"
   - "scripts/rig-dev-handover-check.sh"
@@ -140,6 +141,13 @@ run (wrong timing; TEST mode must stay alive between runs).
   from the values of the same read session. It is written ONLY when no snapshot is waiting: the
   first set of a development period records the owner's values, and later runs print
   `SNAPSHOT kept` and never overwrite it.
+- A waiting snapshot is LOADED, never just checked for existence. An unreadable one is no record,
+  so the E2E aborts before the set (`SNAPSHOT kept` on a broken file would overwrite the owner's
+  values with nothing restorable). A key the baseline pins mid-period is ADDED from the camera's
+  current value (the test never set that key, so it is still the owner's) -- `SNAPSHOT extended`;
+  a kept key is never changed.
+- Writing a NEW snapshot drops a leftover restore-failed marker: a marker without a snapshot is
+  stale, and it would otherwise flag the fresh period as failed.
 - No set = no snapshot. A camera already at the baseline, or a set the rig-busy guard blocks,
   writes nothing.
 - Path: `~/.camera-box/camera-prod-exposure.json` on the runner (dev1, where both the E2E and
@@ -163,7 +171,9 @@ run (wrong timing; TEST mode must stay alive between runs).
   relay on the camera box before its read (a rig that ran an E2E outside TEST mode); the EVENT
   switch starts + enables it right after.
 - Candidates are the same two relay boxes as the E2E (`${RIG_SOURCE_BOX}=$RIG_SOURCE_IP`,
-  `cam2=$PAINTER_IP`); the guard reads `STRIH_IP` / `STREAM_IP`.
+  `cam2=$PAINTER_IP`); the guard reads `STRIH_IP` / `STREAM_IP`. rig-mode keeps the OBS WebSocket
+  password in `OBS_WS_PASSWORD` while the shared guard reads `OBS_PASSWORD`, so the restore hands
+  it over inside its subshell (an auth-enabled OBS would otherwise make the guard fail OPEN).
 - Flow: presence probe, **the issue-1271 guard**, relay stop, ONE read, `restore-plan` (only the
   snapshot keys that differ), the guard AGAIN, ONE set, ONE read-back, `restore-grade`, then
   `consume` moves the file to `camera-prod-exposure.consumed-<UTC stamp>.json` (a `-N` suffix if
@@ -190,16 +200,21 @@ run (wrong timing; TEST mode must stay alive between runs).
 - The outcome reaches the owner's phone: `camera_test_settings_restore_discord_note` adds one
   Slovak line to the EVENT Discord confirmation file right after the EVENT contract, before the
   send. A failure (⚠️ sa NEVRÁTILA) goes ON TOP of the message, so it is not buried under a green
-  contract; a success (✅ vrátená / ✅ už sedela / ✅ vrátená, ale snímku treba odložiť ručne) goes
-  at the end. Nothing is added when no snapshot was waiting. The note can never fail the caller.
+  contract; a success (✅ vrátená / ✅ už sedela / ✅ vrátená, ale snímku treba odložiť) goes at the
+  end. The phone line never names a command (the owner cannot run one from the phone, it says
+  "napíš Claudovi"); the commands are in the run log. The prepend is written to a temp file and
+  moved over only when complete, and a failed read or write falls back to appending, so the
+  contract text itself is never lost. Nothing is added when no snapshot was waiting. The note can
+  never fail the caller.
 - The outcome does NOT change the EVENT exit status: that verdict is the rig-cleanliness contract,
   and the camera exposure is a separate, loudly reported fact.
 
 **The handover check** reads the state with `camera_test_settings.py snapshot-state` (item
-`exposure`, see `.claude/rules/rig-dev-handover-check.md`): none / restored / pending = OK (a
-pending snapshot is the normal state between an E2E and its EVENT switch); pending WITH the
-restore-failed marker, or an unreadable snapshot = SUPERVISOR (an EVENT switch tried and did not
-restore it, so production ran on the TEST exposure).
+`exposure`, see `.claude/rules/rig-dev-handover-check.md`), together with the rig-mode capture:
+none / restored = OK; pending in TEST = OK (the normal state between an E2E and its EVENT switch);
+pending in EVENT = SUPERVISOR (the handover moment: the EVENT switch never restored it -- it may
+have aborted before the restore step, which leaves no marker); pending with an unreadable mode =
+UNKNOWN; pending WITH the restore-failed marker, or an unreadable snapshot = SUPERVISOR.
 
 **Supervisor live acceptance (never a worker step):** run the enforce with no snapshot and the
 camera already at the baseline (no set, no snapshot); then put a hand-made snapshot on dev1 and run
@@ -217,7 +232,9 @@ bare column-0 statement between the temporary trap close and the reachability ba
 The harness runs with a temp `HOME` (and `CAMERA_PROD_EXPOSURE_SNAPSHOT` unset), so no test ever
 reads or writes the real dev1 snapshot. The fake `systemctl` also answers `stop` (the restore's
 relay stop), and the fake `gphoto2` records whether the snapshot was already on disk at the moment
-of the set. The restore tests drive `camera_test_settings_restore` under the caller's
+of the set. The snapshot/restore tests live in `tests/python/test_camera_prod_exposure_restore_1371.py`
+(they import this file's harness; keep each file under ~1000 lines). They drive
+`camera_test_settings_restore` under the caller's
 `set -euo pipefail` and assert the script continues after every failure. `rig-mode.sh` itself is
 checked statically (the call sits before the relay start, the note between the EVENT contract and
 the Discord send) and by sourcing it (the helpers are defined above its source-guard). The EVENT
