@@ -92,6 +92,17 @@ the issue-1370 lane: across every pixel proof of run 68573319 (65 frames), the 1
 all 13 burns the production decode had missed. (That is a sample; the run's 280 slots are proven
 fixed only by a post-merge E2E whose BURN-UNREADABLE count drops.)
 
+Two extensions from the issue-1367 lane:
+- WHERE a read sits: print `grid.bounds` (the mean of the four corners) next to each content in
+  the harness, and map each crop's reads back through its offset and resize scale. That is how
+  the multiview echoes were found (`zbarimg` and OpenCV `detectAndDecodeMulti` give positions too).
+- Type-check a `qr.rs` edit without the image/qrcode crates: a python script extracts the edited
+  functions VERBATIM (regex from `fn name(` to the next `\n}\n`) into a replica module. Mount it
+  with the real `burn_regions.rs` / `burn_echo.rs` via `#[path]`, stub `rqrr_decode_all_catch`
+  and `binarize_otsu`, and run `clippy-driver --test -D warnings`.
+- Before trusting "flat vs grouped" routing, follow the call chain: `analyze_recording_with_burns`
+  (the flat-looking one) goes through the GROUPED per-frame decode.
+
 ## The echo gate — a node burn counts only in its own slot (issue 1367)
 
 A camera that films a monitor showing OBS captures decodable copies of node burns. On run
