@@ -616,6 +616,56 @@ pub fn audio_realized_delay_ns(
     }
 }
 
+/// Issue 1367 (design 5845361166) — where a packet SHOULD land, from its RAW stamp: the timestamp the
+/// source handed OBS (before the 70 ms TS smoothing snapped it onto `next_audio_ts_min`) plus the
+/// same `timing_adjust`, `sync_offset`, `resample_offset` and genlock placement term the ingest adds
+/// to `in.timestamp`. For a timecode hold the term carries `− timing_adjust`, so this is the NDI
+/// timecode + the live wall→mono offset + the hold + the sync offset. Wraps like the C `uint64_t`.
+/// Mirror of `genlock_audio_intended_raw_ns`.
+pub fn audio_intended_raw_ns(
+    raw_ts_ns: u64,
+    timing_adjust_ns: u64,
+    sync_offset_ns: i64,
+    resample_offset_ns: u64,
+    term_ns: i64,
+) -> u64 {
+    raw_ts_ns
+        .wrapping_add(timing_adjust_ns)
+        .wrapping_add(sync_offset_ns as u64)
+        .wrapping_sub(resample_offset_ns)
+        .wrapping_add(term_ns as u64)
+}
+
+/// Issue 1367 — does the ASRC run in TIMECODE mode for this packet? Only for audio the genlock
+/// pairing places at its timecode, that reaches the mix (not MONITOR_ONLY) and has a resampler to
+/// correct it. Every other source — `mbc`, every ASIO/WASAPI input, a genlock source on the latency
+/// hold — keeps the arrival-based servo. Mirror of `genlock_audio_asrc_timecode`.
+pub fn audio_asrc_timecode(mode: AudioHoldMode, monitor_only: bool, can_resample: bool) -> bool {
+    mode == AudioHoldMode::Timecode && !monitor_only && can_resample
+}
+
+/// Issue 1367 — the ASRC's error input for one packet, in ms: its placement error (actual − the
+/// raw-stamp intended) plus the placement slew still owed. A #1367 hold slew is a deliberate move
+/// paid by its own 1000 ppm term: until it is paid the packet is early by exactly what is owed, which
+/// is no error of the servo's. Mirror of `genlock_audio_asrc_error_ms`.
+pub fn audio_asrc_error_ms(place_err_ns: i64, slew_remaining_ns: i64) -> f64 {
+    place_err_ns.wrapping_add(slew_remaining_ns) as f64 / 1e6
+}
+
+/// Issue 1367 — a packet's stamp on the OBS monotonic clock: the raw NDI timecode + the live
+/// wall→mono offset read for this packet. Its advance between two appended packets is the timecode
+/// ASRC's master block (a fleet date step moves the timecode and the offset by the same amount).
+/// Mirror of `genlock_audio_stamp_mono_ns`.
+pub fn audio_stamp_mono_ns(raw_ts_ns: u64, off_live_ns: i64) -> u64 {
+    raw_ts_ns.wrapping_add(off_live_ns as u64)
+}
+
+/// Issue 1367 — the signed advance, in seconds, from one stamp to the next (a duplicated slot reads
+/// 0 or negative, which adds no rate point). Mirror of `genlock_audio_stamp_interval_s`.
+pub fn audio_stamp_interval_s(prev_ns: u64, now_ns: u64) -> f64 {
+    now_ns.wrapping_sub(prev_ns) as i64 as f64 / 1e9
+}
+
 /// The audio-parity health of one genlocked source — the reason the LOCK indicator DEGRADES on the
 /// audio axis (mirrors the video-side `LockReason` discriminant model). Discriminants match the C
 /// `genlock_audio_health` enum and are compared as `u8` by the parity gate.

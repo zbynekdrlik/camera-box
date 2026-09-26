@@ -436,6 +436,14 @@ pub mod genlock_lock_state;
 // committed parity gate `tests/genlock_audio_pairing_parity.rs`.
 pub mod genlock_audio_pairing;
 
+// Issue 1367 (design 5845361166) — the two-clock bench of the TIMECODE mode of the per-source ASRC: a
+// genlock source placed at its NDI timecode is judged by where each packet lands against its stamp,
+// never by arrival timing (a skipped / duplicated slot, a restart catch-up, a date step, a stamp leap
+// placed at its stamp). Drives `asrc_bench::RealtimeAsrcCompensator` through the production ingest
+// decisions of `genlock_audio_pairing`. Test-only.
+#[cfg(test)]
+mod asrc_timecode_bench;
+
 // #1303 part 4 — the report-only per-box-class certified-table AUDIO-parity audit (camera inputs
 // silent, sp-*/cg/program inputs audio). Deploy-time preflight logic (no runtime OBS path, no C
 // mirror); crate-root + std-only so it is Tier-0 verifiable and is the canonical table the bash

@@ -283,6 +283,13 @@ extern "C" {
  * src/asrc_bench.rs LEVEL_TARGET_UNREACHABLE_WINDOWS -- keep numerically identical. */
 #define ASRC_LEVEL_TARGET_UNREACHABLE_WINDOWS 2400
 
+/* camera-box issue 1367 (design 5845361166): the smallest placement jump (ms) the TIMECODE error books.
+ * The band is max(half the packet, this): a whole-packet jump (a skipped or duplicated 1600-sample
+ * SongPlayer slot = 33.3 ms) always books, sub-half stamp jitter never does, and a small-packet source
+ * cannot book on a few ms of jitter. Mirror of src/asrc_bench_timecode.rs PLACE_JUMP_MIN_MS -- keep
+ * numerically identical. */
+#define ASRC_PLACE_JUMP_MIN_MS 10.0
+
 /* Per-source servo state. One instance lives per obs_source_t (see
  * obs-internal.h's `struct asrc_compensator asrc` field) and is mutated only
  * from the audio-ingest call path (process_audio(), always invoked from the
@@ -468,6 +475,19 @@ struct asrc_compensator {
 	 * resampler, so the two never stack past one 1000 ppm pitch budget. Caller state: survives a
 	 * flush. Mirror of src/asrc_bench.rs RealtimeAsrcCompensator::step_recover_hold. */
 	bool step_recover_hold;
+	/* camera-box issue 1367 (design 5845361166): TIMECODE mode -- the source's audio is placed by the
+	 * genlock pairing at its own NDI timecode, so the level loop reads the packet's PLACEMENT error
+	 * (where it lands minus where its raw stamp says it belongs) instead of the buffer depth, the
+	 * capture is 0, and obs-source.c feeds the rate regression the stamp advance instead of the
+	 * arrival time. Caller state; a change flushes. Mirror of src/asrc_bench.rs
+	 * RealtimeAsrcCompensator::timecode. */
+	bool timecode;
+	/* camera-box issue 1367: cumulative placement jumps booked in timecode mode (telemetry, the asrc:
+	 * line's place_jumps=). Mirror of RealtimeAsrcCompensator::place_jump_count. */
+	uint32_t place_jump_count;
+	/* camera-box issue 1367: the most recent booked placement jump, in ms (negative = the audio sat
+	 * early; the asrc: line's last_jump_ms=). Mirror of RealtimeAsrcCompensator::last_place_jump_ms. */
+	double last_place_jump_ms;
 };
 
 /* Reset a servo to its just-constructed state: 0 ppm estimated/applied (assume
@@ -576,6 +596,33 @@ EXPORT void asrc_compensator_set_level_absolute(struct asrc_compensator *c, bool
  * while the audio placement slew still owes a move. Mirror of src/asrc_bench.rs
  * RealtimeAsrcCompensator::set_step_recover_hold. */
 EXPORT void asrc_compensator_set_step_recover_hold(struct asrc_compensator *c, bool hold);
+
+/* camera-box issue 1367 (design 5845361166): enter or leave TIMECODE mode. obs-source.c passes, per
+ * packet, whether the source's audio is placed by the genlock pairing at its timecode (and reaches the
+ * mix, with a resampler). A CHANGE discards the open window and flushes: the regression points, the
+ * capture and anything owed were measured on the other basis. Mirror of src/asrc_bench.rs
+ * RealtimeAsrcCompensator::set_timecode. */
+EXPORT void asrc_compensator_set_timecode(struct asrc_compensator *c, bool timecode);
+
+/* camera-box issue 1367 (design 5845361166): observe one packet's placement error `place_err_ms` in
+ * timecode mode (actual - intended from its RAW stamp, the owed placement slew excluded; negative = the
+ * audio sits EARLY), BEFORE the packet's reading enters the window (asrc_compensator_compensate with
+ * buffered_ms = the same error). `packet_ms` is the packet's own duration, `placed` whether the ingest
+ * PLACED it at its stamp (not appended): a placement lands on its stamp, so whatever was still owed is
+ * dropped. A jump of at least max(half the packet, ASRC_PLACE_JUMP_MIN_MS) against the servo's
+ * expectation (setpoint + smoothed error) is booked with its own sign into step_recover_ms (an early
+ * packet is owed as a loss = stretch, a late one as a duplicate = compress), capped at
+ * +/-ASRC_STEP_RECOVER_MAX_MS, the setpoint moving with it, and paid at ASRC_STEP_RECOVER_PPM by the
+ * next compensate calls. Inert outside timecode mode and before the setpoint is captured. Mirror of
+ * src/asrc_bench.rs RealtimeAsrcCompensator::observe_placement. */
+EXPORT void asrc_compensator_observe_placement(struct asrc_compensator *c, double place_err_ms, double packet_ms,
+					       bool placed);
+
+/* camera-box issue 1367: read and clear the recovery rate (ppm, servo sign) the last compensate call
+ * paid. In timecode mode the servo runs in the ingest AFTER the packet was resampled, so the NEXT
+ * packet's resampler carries that payment exactly once. Mirror of src/asrc_bench.rs
+ * RealtimeAsrcCompensator::take_step_recover_ppm. */
+EXPORT double asrc_compensator_take_step_recover_ppm(struct asrc_compensator *c);
 
 #ifdef __cplusplus
 }

@@ -649,6 +649,18 @@ pub struct RealtimeAsrcCompensator {
     /// two never stack past one 1000 ppm pitch budget. Caller state: survives a flush. Mirror of the
     /// C `step_recover_hold`.
     step_recover_hold: bool,
+    /// Issue 1367 (design 5845361166): TIMECODE mode — the source's audio is placed by the genlock
+    /// pairing at its own NDI timecode, so the level loop reads the packet's PLACEMENT error (where
+    /// it lands minus where its stamp says it belongs) instead of the buffer depth, the capture is 0,
+    /// and the rate regression is fed the stamp advance instead of the arrival time (see
+    /// `asrc_bench_timecode.rs`). Caller state; a change flushes. Mirror of the C `timecode`.
+    timecode: bool,
+    /// Issue 1367: cumulative placement jumps booked in timecode mode (telemetry). Mirror of the C
+    /// `place_jump_count`.
+    place_jump_count: u32,
+    /// Issue 1367: the most recent booked placement jump, in ms (negative = the audio sat early).
+    /// Mirror of the C `last_place_jump_ms`.
+    last_place_jump_ms: f64,
 }
 
 impl RealtimeAsrcCompensator {
@@ -691,6 +703,9 @@ impl RealtimeAsrcCompensator {
             step_recover_ms: 0.0,          // issue 1372
             step_recover_ppm: 0.0,         // issue 1372
             step_recover_hold: false,      // issue 1372
+            timecode: false,               // issue 1367
+            place_jump_count: 0,           // issue 1367
+            last_place_jump_ms: 0.0,       // issue 1367
         }
     }
 
@@ -954,6 +969,12 @@ impl RealtimeAsrcCompensator {
     /// frozen (follow-up 2) instead of the ~1 h at the +-3 ppm rail the plain I term needs (the 18.9.
     /// 12 h series). A sub-band shift arms nothing — the gentle I+P loop absorbs it.
     pub fn shift_level_target(&mut self, delta_ms: f64) {
+        // Issue 1367 (design 5845361166): in timecode mode the level loop reads the PLACEMENT error,
+        // which already moves with every deliberate placement change (the intended landing time
+        // carries the new offset or hold), so a setpoint shift would itself be the error. No-op.
+        if self.timecode {
+            return;
+        }
         // issue #1367: the level loop reads the per-window MEAN. The buffer moves by delta in the
         // same callback as this shift, so the readings already folded into the open window are moved
         // by delta too: the closing mean is then all in the new frame, and the smoothed error sees no
@@ -1152,7 +1173,11 @@ impl RealtimeAsrcCompensator {
                     // sample loss/dup, not a wall-clock-only jump) is BOOKED and paid back at
                     // STEP_RECOVER_PPM — the live 44 ms loss in ≈ 44 s — instead of arming the
                     // proportional restore (3–4 min). Keeps the captured setpoint + integral.
-                    self.step_recover_book(r_s, buf_ms);
+                    // Issue 1367: in timecode mode the re-base only keeps the rate regression clean;
+                    // the placement error books the jump (observe_placement), never this residual.
+                    if !self.timecode {
+                        self.step_recover_book(r_s, buf_ms);
+                    }
                 }
                 rebased = true;
             }
@@ -1229,7 +1254,12 @@ impl RealtimeAsrcCompensator {
                             // to have at lock (that froze a random per-launch A/V level). Re-captured
                             // (to the same absolute value) after every flush/relock; the P term plus the
                             // restore burst the sustained-error arm fires walk the buffer there.
-                            self.level_target_ms = if self.level_absolute {
+                            // Issue 1367: in timecode mode the level is the placement error, whose
+                            // setpoint is 0 (the packet lands where its stamp says), never the
+                            // lock-time depth.
+                            self.level_target_ms = if self.timecode {
+                                0.0
+                            } else if self.level_absolute {
                                 LEVEL_TARGET_MS + self.level_offset_ms
                             } else {
                                 window_level_ms
@@ -1303,7 +1333,11 @@ impl RealtimeAsrcCompensator {
                         // LOUDLY. At most ONE fallback per capture (level_fallback_done, cleared only
                         // by a re-capture): a steady residual the P+I terms hold at >= 5 ms would
                         // otherwise re-trip the bound every 40 min and ratchet the target away.
-                        if !self.level_fallback_done
+                        // Issue 1367 (review round 1): never in timecode mode -- the setpoint is the
+                        // packet's own stamp (0), always reachable by the stretch; falling back would
+                        // accept a lasting A/V offset as the new truth.
+                        if !self.timecode
+                            && !self.level_fallback_done
                             && self.level_err_ema_ms.abs() >= LEVEL_RESTORE_ARM_MS
                         {
                             self.level_unconverged_windows += 1;
@@ -1388,6 +1422,12 @@ impl RealtimeAsrcCompensator {
 #[cfg(test)]
 #[path = "asrc_bench_step_recover_tests.rs"]
 mod step_recover_tests;
+
+/// Issue 1367 (design 5845361166): the TIMECODE mode — the placement-error input, the jump booking
+/// and the stamp-fed rate — in its own file, so this module does not grow past its budget.
+#[path = "asrc_bench_timecode.rs"]
+mod timecode;
+pub use timecode::PLACE_JUMP_MIN_MS;
 
 #[cfg(test)]
 mod tests {
