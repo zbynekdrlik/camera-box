@@ -116,6 +116,21 @@ pub fn split_node_burn_echoes(
     (accepted, echoes)
 }
 
+/// Does any of `reads` (frame pixels) count under `gate`? Under [`NodeBurnGate::Off`] any read
+/// counts; under [`NodeBurnGate::OwnSlot`] a node-burn echo does not. A #202 tile gets its Otsu
+/// retry only when none counts, so a tile that read only echoes still gets it.
+pub(crate) fn any_read_counts(
+    reads: &[LocatedPayload],
+    frame_w: u32,
+    frame_h: u32,
+    gate: NodeBurnGate,
+) -> bool {
+    reads.iter().any(|r| {
+        gate == NodeBurnGate::Off
+            || node_burn_in_own_slot(r.payload.run_id, r.cx, r.cy, frame_w, frame_h)
+    })
+}
+
 /// Gate one later pass's reads (frame pixels) and merge them: what counts into `out`, the echoes
 /// into `echoes`, each keeping every distinct `(run_id, frame_id)` once (`qr::merge_payloads`).
 pub(crate) fn admit_reads(
@@ -214,6 +229,26 @@ mod tests {
         let (all, none) = split_node_burn_echoes(reads.clone(), 1920, 1080, NodeBurnGate::Off);
         assert_eq!(all, payloads(reads));
         assert!(none.is_empty());
+    }
+
+    #[test]
+    fn a_tile_that_read_only_echoes_still_gets_its_retry_1367() {
+        let echo_only = [at(p(911_009, 51761), 1442.0, 453.0)];
+        let with_burn = [
+            at(p(911_009, 51761), 1442.0, 453.0),
+            at(p(911_002, 22774), 194.0, 893.0),
+        ];
+        let optical_only = [at(p(386_740_541, 47825), 1202.0, 784.0)];
+        let gated = |r: &[LocatedPayload]| any_read_counts(r, 1920, 1080, NodeBurnGate::OwnSlot);
+        let off = |r: &[LocatedPayload]| any_read_counts(r, 1920, 1080, NodeBurnGate::Off);
+        assert!(
+            !gated(&echo_only),
+            "only an echo: no read counts, so the tile retries"
+        );
+        assert!(gated(&with_burn) && gated(&optical_only));
+        assert!(!gated(&[]) && !off(&[]), "nothing read: always retry");
+        // Off keeps the #202 rule: any plain read at all skips the retry.
+        assert!(off(&echo_only) && off(&with_burn) && off(&optical_only));
     }
 
     #[test]

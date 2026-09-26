@@ -138,6 +138,11 @@ Rules for a future change here:
   sweep frame, qr-align-moire-1239, tear-781) had ZERO slotted reads outside its own slot. The
   sweep uses the real rqrr harness, with the grid centre printed from `bounds`, over the
   production regions (full, top band, halves, tiles, slot crops).
+- Known limit: the seven camera ids share ONE slot, so an echo of another camera's burn whose
+  centre falls inside the camera recovery crop would count. In practice the opaque 320 px real
+  burn covers the slot and leaves only the 8 px pad, where no decodable echo fits.
+- A #202 tile whose plain pass read only echoes still gets its Otsu retry under `OwnSlot`
+  (`burn_echo::any_read_counts`); under `Off` the retry keeps the old "plain read nothing" rule.
 - A frame's echoes can hold the CURRENT id if a monitor shows the program with no delay. The echo
   list then has an identity that also counts from the slot. That is harmless: the count is a
   diagnostic, and the slot read is the burn (gating before the id merge is what keeps it).

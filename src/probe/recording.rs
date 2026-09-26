@@ -220,9 +220,13 @@ const GENERIC_DIAGNOSTIC_BURN_IDS: [u32; 3] = [
 /// stream, so any recording missing a burn (e.g. a strih recording, which never carries the
 /// stream burn) always runs the full robust recovery — exactly what the diagnostic tools
 /// (forensic-dump, recording-probe) want. The verdict (the perf-critical 30-min 4K path)
-/// instead calls [`decode_recording_frame_with_burns`] with the burns that recording is KNOWN
-/// to carry, so the fast path fires on its ~99 %+ clean frames. See
-/// [`decode_recording_frame_with_burns`].
+/// instead decodes with the burns that recording is KNOWN to carry, so the fast path fires on its
+/// ~99 %+ clean frames. See [`decode_recording_frame_with_burns`].
+///
+/// issue 1367: this per-frame helper (and [`decode_recording_frame_with_burns`]) runs the flat
+/// decode with the node-burn echo gate OFF. Every recording analysis (`analyze_recording*`, the
+/// parallel pool) runs the GROUPED decode instead, which drops a node burn read outside its own
+/// slot.
 pub fn decode_recording_frame(frame_index: u64, luma: GrayImage) -> RecordingFrame {
     decode_recording_frame_with_burns(frame_index, luma, &GENERIC_DIAGNOSTIC_BURN_IDS)
 }
@@ -995,6 +999,8 @@ mod tests {
     /// #632 gap 1: the new grouped wrapper (mandatory/any-of split) must decode IDENTICALLY to
     /// the plain flat-list function when the any-of group is empty — proving the #632 addition
     /// is a pure superset, never a behavior change for any existing (mandatory-only) caller.
+    /// (issue 1367: the grouped path also runs the node-burn echo gate and the flat one does not,
+    /// so the two differ once a node burn sits outside its slot; this frame carries no node burn.)
     #[test]
     fn decode_recording_frame_with_grouped_burns_matches_flat_when_any_of_empty() {
         let luma = dual_qr_luma(200, 201);
