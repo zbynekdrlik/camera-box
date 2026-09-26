@@ -2060,7 +2060,7 @@ When `copies`/`gaps` look elevated or growing across a run, don't guess — run 
      checks).
    - **But every one of the 33+15 burst frames had exactly ONE optical payload (always the "held"
      half), never two** — root cause: the #207 fast/robust decode gate
-     (`decode_qr_luma_all_fast_then_robust_grouped_pathed`, `src/probe/qr.rs`) only ever checked
+     (`decode_qr_luma_all_fast_then_robust_grouped_pathed`, now `src/probe/recording_decode.rs`) only ever checked
      digital NODE BURNS before skipping the #202 robust tiled retry — never the dual-QR Vernier's
      own two-half completeness. A frame where the plain pass read the (easy, digital) burns fine
      but missed the actively-repainting Vernier half took the FAST path anyway, silently skipping
