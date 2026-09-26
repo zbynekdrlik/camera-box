@@ -1167,6 +1167,16 @@ struct obs_source {
 	uint32_t genlock_shallow_rejects;           /* consecutive spread-rejected windows (bounded) */
 	uint64_t genlock_shallow_relocks_seen;      /* genlock_relocks at the previous latch call (its delta = a backlog relock) */
 	uint32_t genlock_shallow_latches;           /* cumulative latches (audit shallow_latches=) */
+	/* camera-box issue 1367 (design 5844353368): the STICKY content floor -- the highest budgeted latch
+	 * floor observed (a p90 block) while the source's audio flows; a lock never latches under it, so an
+	 * idle re-lock keeps the depth a song needs. Render thread only; in-process (bzalloc'd 0, never
+	 * persisted: an OBS restart starts without it); NOT cleared by a relock, a flush or a pin change (it
+	 * describes the sender's arrival, not the FIFO). Decision: src/genlock_n1_depth.rs
+	 * n1_shallow_sticky_track. */
+	uint64_t genlock_shallow_sticky_frames;     /* the sticky floor, frames (0 = none) */
+	uint64_t genlock_shallow_sticky_seen_ns;    /* scheduled tick wall of the last observation at/over it (30 min decay) */
+	uint32_t genlock_shallow_sticky_obs_ticks;  /* on-grid audio-flowing ticks of the open observation block */
+	uint32_t genlock_shallow_sticky_obs_hist[GENLOCK_SHALLOW_HIST_FIELD_BINS]; /* that block's latch-floor histogram, relative to base */
 	/* camera-box issue 1367: the audio placement SLEW + withhold (audio thread; the audit reads them
 	 * as benign single-word cross-thread telemetry). Decisions: src/genlock_audio_pairing.rs. */
 	int64_t genlock_audio_slew_remaining_ns;    /* placement move still owed (signed; + = later) */
