@@ -348,7 +348,7 @@ print(json.dumps({"busy": busy, "diagnostics": [{"host": "stream", "streaming": 
 class Rig:
     def __init__(self, present, camera, baseline_values, ack="", busy=False, ignore=(), read_fail=False,
                  relay_state="inactive", relay_active_after_reads=None, gphoto2_busy=False, read_exit=0,
-                 no_pgrep=False, snapshot=None):
+                 no_pgrep=False, snapshot=None, pipefail=True, readonly_snap_dir=False):
         self.root = tempfile.mkdtemp(prefix="cts1371-")
         # A temp HOME: the production-exposure snapshot lives in ~/.camera-box on the runner, and a
         # test must never read or write the real one.
@@ -360,6 +360,8 @@ class Rig:
             os.makedirs(self.snap_dir)
             with open(self.snap_path, "w") as f:
                 f.write(snapshot if isinstance(snapshot, str) else json.dumps(snapshot))
+        self.shell_opts = "set -euo pipefail\n" if pipefail else "set -eu\n"
+        self.readonly_snap_dir = readonly_snap_dir
         self.here = os.path.join(self.root, "scripts")
         self.bin = os.path.join(self.root, "bin")
         stubs = os.path.join(self.root, "stubs")
@@ -400,8 +402,8 @@ class Rig:
         with open(script, "w") as f:
             if mode == "enforce":
                 f.write(
-                    "set -euo pipefail\n"
-                    '. "%s/lib/camera-test-settings.sh"\n'
+                    self.shell_opts
+                    + '. "%s/lib/camera-test-settings.sh"\n'
                     'camera_test_settings_enforce "%s" 10.0.0.2 10.0.0.4 pw "cam1=10.77.9.61" "cam2=10.77.9.62"\n'
                     'echo "AFTER-ENFORCE rc=0"\n' % (self.here, self.here)
                 )
@@ -426,10 +428,14 @@ class Rig:
         env["CAMBOX_OFFLINE_ACK"] = self.ack
         env.pop("CAMERA_TEST_BASELINE", None)
         env.pop("OBS_PASSWORD", None)
+        if self.readonly_snap_dir:
+            os.chmod(self.snap_dir, 0o555)
         r = subprocess.run(["bash", script], capture_output=True, text=True, env=env)
         self.out = r.stdout + r.stderr
         self.rc = r.returncode
         self.calls = open(os.path.join(self.root, "calls.log")).read().splitlines()
+        if self.readonly_snap_dir:
+            os.chmod(self.snap_dir, 0o755)
         state = json.load(open(os.path.join(self.root, "state.json")))
         self.camera = state["camera"]
         self.snapshot_at_set = state.get("snapshot_at_set")
@@ -439,6 +445,8 @@ class Rig:
                 self.snapshot = f.read()
         self.consumed = sorted(n for n in (os.listdir(self.snap_dir) if os.path.isdir(self.snap_dir) else [])
                                if ".consumed-" in n)
+        failed = os.path.join(self.snap_dir, "camera-prod-exposure.restore-failed.json")
+        self.restore_failed = json.load(open(failed)) if os.path.exists(failed) else None
         self.consumed_docs = [json.load(open(os.path.join(self.snap_dir, n))) for n in self.consumed]
         dpath = os.path.join(self.root, "discord.txt")
         self.discord = open(dpath).read() if os.path.exists(dpath) else None
@@ -830,8 +838,10 @@ def test_restore_puts_the_owners_exposure_back_and_consumes_the_snapshot():
     r = _restore(dict(GOOD, iso="400", d002="18000"))
     assert r.rc == 0, r.out
     assert "AFTER-RESTORE rc=0 outcome=restored" in r.out
+    # review round 1: the rig-busy guard runs BEFORE the relay stop and the camera session, and
+    # again right before the set (each is a rig mutation during a possibly live broadcast)
     seq = [c.split(" ")[0] for c in r.calls if not c.startswith("PRESENCE")]
-    assert seq == ["RELAYSTOP", "GET", "GUARD", "SET", "GET"], r.calls
+    assert seq == ["GUARD", "RELAYSTOP", "GET", "GUARD", "SET", "GET"], r.calls
     assert "SET 10.77.9.61 iso=800 d002=36000" in r.calls
     assert r.camera["iso"] == "800" and r.camera["d002"] == "36000"
     assert r.snapshot is None, "a verified restore moves the snapshot aside"
@@ -844,7 +854,8 @@ def test_restore_when_the_camera_already_has_the_production_values_sets_nothing(
     r = _restore(dict(GOOD, iso="800", d002="36000"))
     assert r.rc == 0, r.out
     assert "outcome=already" in r.out
-    assert not any(c.startswith(("SET", "GUARD")) for c in r.calls), r.calls
+    assert not any(c.startswith("SET") for c in r.calls), r.calls
+    assert [c.split(" ")[0] for c in r.calls if not c.startswith("PRESENCE")] == ["GUARD", "RELAYSTOP", "GET"]
     assert r.snapshot is None and len(r.consumed) == 1
 
 
@@ -856,6 +867,12 @@ def test_restore_with_the_camera_absent_is_loud_and_keeps_the_snapshot():
     assert "::warning" in r.out
     assert json.loads(r.snapshot) == PROD and r.consumed == []
     assert "⚠️" in r.discord and "NEVRÁTILA" in r.discord
+    # the failure is ON TOP of the EVENT confirmation, not buried under a green message
+    assert r.discord.startswith("⚠️"), r.discord
+    # setting the camera by hand must also move the snapshot aside, or the next EVENT overwrites it
+    assert "camera_test_settings.py consume" in r.out and "camera_test_settings.py consume" in r.discord
+    # the handover check can tell a failed restore from a snapshot still waiting for its EVENT
+    assert r.restore_failed is not None and r.restore_failed["utc"]
 
 
 def test_restore_that_does_not_read_back_keeps_the_snapshot():
@@ -869,8 +886,10 @@ def test_restore_blocked_by_a_live_broadcast_keeps_the_snapshot():
     r = _restore(dict(GOOD, iso="400", d002="18000"), busy=True)
     assert "outcome=failed" in r.out, r.out
     assert any(c.startswith("GUARD") for c in r.calls)
-    assert not any(c.startswith("SET") for c in r.calls), r.calls
+    # a live broadcast: no relay stop, no camera session, no set
+    assert not any(c.startswith(("RELAYSTOP", "GET", "SET")) for c in r.calls), r.calls
     assert json.loads(r.snapshot) == PROD
+    assert "nevysiela" in r.discord
 
 
 def test_restore_refuses_a_relay_that_comes_back_before_the_set():
@@ -893,6 +912,89 @@ def test_restore_of_an_invalid_snapshot_is_loud_and_touches_nothing():
     assert "invalid" in r.out
     assert not any(c.startswith(("PRESENCE", "RELAYSTOP", "GET", "SET")) for c in r.calls), r.calls
     assert r.snapshot == "{broken"
+
+
+def test_restore_that_cannot_move_the_snapshot_aside_is_restored_but_flagged():
+    # review round 1: a verified restore whose consume fails is NOT "not restored"
+    r = _restore(dict(GOOD, iso="400", d002="18000"), readonly_snap_dir=True)
+    assert "outcome=restored-unconsumed" in r.out, r.out
+    assert r.camera["iso"] == "800" and r.camera["d002"] == "36000"
+    assert "NOT restored" not in r.out
+    assert "camera_test_settings.py consume" in r.out
+    assert json.loads(r.snapshot) == PROD
+    assert "✅" in r.discord and "ručne" in r.discord
+
+
+def test_a_successful_restore_clears_an_earlier_failure_marker():
+    r = Rig({"10.77.9.61": 1}, dict(GOOD, iso="400", d002="18000"), _pinned(), snapshot=PROD)
+    with open(os.path.join(r.snap_dir, "camera-prod-exposure.restore-failed.json"), "w") as f:
+        json.dump({"utc": "2026-09-26T16:00:00Z", "reason": "camera absent"}, f)
+    r.run(mode="restore")
+    assert "outcome=restored" in r.out, r.out
+    assert r.restore_failed is None
+
+
+def test_the_snapshot_abort_does_not_depend_on_the_callers_pipefail():
+    # review round 1: `python3 ... | prefix || rc=$?` only saw the python rc under pipefail
+    r = Rig({"10.77.9.61": 1}, dict(GOOD, iso="1600"), _pinned(), pipefail=False)
+    with open(r.snap_dir, "w") as f:
+        f.write("not a dir")
+    r.run()
+    assert r.rc == 1, r.out
+    assert not any(c.startswith("SET") for c in r.calls), r.calls
+
+
+def test_build_snapshot_refuses_a_box_or_time_it_could_not_read_back():
+    b = cts.load_baseline(_baseline_text(_pinned()))
+    cur = {"iso": "800", "d002": "36000", "d007": "60"}
+    for box, utc in (("cam 1", "t"), ("cam1", ""), ("cam1;x", "t")):
+        try:
+            cts.build_snapshot(cur, b, box, utc)
+        except cts.SnapshotError:
+            continue
+        raise AssertionError("box %r / time %r must be refused" % (box, utc))
+
+
+def test_a_consumed_name_never_overwrites_an_earlier_one():
+    p = "/h/.camera-box/camera-prod-exposure.json"
+    first = cts.consumed_path(p, "20260926T160000Z")
+    taken = {first}
+    second = cts.unique_consumed_path(p, "20260926T160000Z", taken.__contains__)
+    assert second != first and second.startswith("/h/.camera-box/camera-prod-exposure.consumed-20260926T160000Z")
+    names = [os.path.basename(first), os.path.basename(second)]
+    assert cts.newest_consumed(p, names) in names
+    assert cts.unique_consumed_path(p, "20260926T160000Z", lambda _p: False) == first
+
+
+def test_snapshot_state_reports_a_failed_restore():
+    root = tempfile.mkdtemp(prefix="cts1371-failed-")
+    try:
+        p = os.path.join(root, "camera-prod-exposure.json")
+        with open(p, "w") as f:
+            json.dump(PROD, f)
+        assert "restore_failed=" not in cts.snapshot_state(p)
+        env = dict(os.environ, CAMERA_PROD_EXPOSURE_SNAPSHOT=p)
+        r = subprocess.run(["python3", MODULE, "restore-failed", "--reason", "camera not on USB"],
+                           capture_output=True, text=True, env=env)
+        assert r.returncode == 0, r.stderr
+        line = cts.snapshot_state(p)
+        assert line.startswith("exposure state=pending ") and " restore_failed=" in line
+        # consume (the verified restore, or the manual move-aside) clears the failure marker
+        r = subprocess.run(["python3", MODULE, "consume"], capture_output=True, text=True, env=env)
+        assert r.returncode == 0, r.stderr
+        assert not os.path.exists(os.path.join(root, "camera-prod-exposure.restore-failed.json"))
+        assert cts.snapshot_state(p).startswith("exposure state=restored ")
+    finally:
+        shutil.rmtree(root)
+
+
+def test_the_discord_note_never_fails_without_a_message_file():
+    here = os.path.join(REPO, "scripts")
+    h = ('. "%s/lib/camera-test-settings.sh"\nCTS_RESTORE_OUTCOME=failed\n'
+         'camera_test_settings_restore_discord_note ""\n'
+         'camera_test_settings_restore_discord_note /nonexistent/dir/msg.txt\necho NOTE-OK\n' % here)
+    r = subprocess.run(["bash", "-c", "set -euo pipefail\n" + h], capture_output=True, text=True)
+    assert r.returncode == 0 and "NOTE-OK" in r.stdout, r.stderr
 
 
 # --- the rig-mode.sh EVENT wiring (static: #675 sourced helper, never an edited anchor line) ------
