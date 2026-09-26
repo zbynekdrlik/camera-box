@@ -228,6 +228,25 @@ def test_micro_bound_is_the_one_env_knob_on_both_twins(tmp_path, monkeypatch, mi
     assert df.date_master_verdict(json.loads(status), _MARGIN_US) == want
 
 
+def test_micro_bound_multi_line_env_is_unreadable_on_both_twins(tmp_path, monkeypatch):
+    """Review round 1: a line-based grep shape check let `5<newline>abc` through in bash while
+    python's fullmatch rejected it."""
+    status = _MICRO % ("-0.1", "false", "false")
+    (tmp_path / "s.json").write_text(status)
+    r = _sourced(tmp_path, f'date_master_verdict "$(cat "{tmp_path / "s.json"}")" 1000; echo',
+                 DANTESYNC_DATE_MICRO_BOUND_MS="5\nabc")
+    assert r.stdout.strip() == "unknown", r.stdout + r.stderr
+    monkeypatch.setenv("DANTESYNC_DATE_MICRO_BOUND_MS", "5\nabc")
+    assert df.date_master_verdict(json.loads(status), _MARGIN_US) == "unknown"
+
+
+def test_an_explicit_empty_micro_bound_argument_is_the_default_on_both_twins(tmp_path):
+    """Review round 1: bash `${3:-...}` reads an explicit "" as the default; python must too."""
+    status = _MICRO % ("-5.9", "false", "false")
+    assert _bash_call(tmp_path, "date_master_verdict", status, _MARGIN_US, "") == "ok"
+    assert df.date_master_verdict(json.loads(status), _MARGIN_US, "") == "ok"
+
+
 def test_micro_bound_never_touches_a_pre_1_11_0_master(tmp_path, monkeypatch):
     status = '{"date_authority":"master","date_offset_error_ms":-28.8,"date_step_bound_ms":50.0}'
     (tmp_path / "s.json").write_text(status)
@@ -472,8 +491,15 @@ def test_gate_passes_the_1_11_0_slave(tmp_path):
 
 def test_verify_imag_reports_a_paused_date_master_as_a_warning():
     body = (_ROOT / "scripts" / "verify-imag.sh").read_text()
-    assert '[ "$rc_date" -eq 4 ]' in body
-    assert "date_micro_paused" in body
+    start = body.index('if [ "$rc_date" -eq 4 ]; then')
+    branch = body[start:body.index("elif", start)]
+    assert 'warn "' in branch and 'fail "' not in branch, branch
+    assert "date_micro_paused" in branch
+
+
+def test_gate_help_documents_the_micro_bound():
+    code, out, err = _gate(["--help"])
+    assert "DANTESYNC_DATE_MICRO_BOUND_MS" in out + err and "DATE MASTER PAUSED" in out + err
 
 
 def test_gate_journal_fallback_grades_a_date_master_line_on_its_step_bound(tmp_path):
