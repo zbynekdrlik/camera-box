@@ -183,8 +183,79 @@ Grading 1.11.0 on the step bound would let a master that stopped correcting read
   captures (`curl -s http://10.77.9.202:8898/status` / `.204`, 26.9.2026, both on 1.11.1). They
   replaced the synthesized 1.11.0 files; every expectation held unchanged. The master reads
   `date_offset_error_ms=0.471`, `last_date_step_kind=micro` and the 1.11.1-only
-  `date_step_phase_jump_us`. The pin (`DANTESYNC_VERSION_PIN`) is 1.11.1 (1.11.1 = every clock step
-  lands exactly, dantesync PR 122). Capture the next release the same way, named by its version.
+  `date_step_phase_jump_us`. The pin (`DANTESYNC_VERSION_PIN`) was 1.11.1 (1.11.1 = every clock step
+  lands exactly, dantesync PR 122); it is 1.12.0 since the section below. Capture the next release
+  the same way, named by its version.
+
+### dantesync 1.12.0: a DAILY-mode date master is graded on its NIGHTLY schedule (issue 1372, design 5850538767)
+
+dantesync 1.12.0 (PR 123) corrects the fleet date ONCE A NIGHT by default. The 1.11 micro-steps
+starved the stream box's Dante Virtual Soundcard. By day nothing is corrected: the master's
+`date_offset_error_ms` grows to a day's drift (~1.5 s on the rig at +17.6 ppm), then ONE coordinated
+step at the nightly window (`daily_step_utc`, 02:00 UTC). An error past dantesync's 5 s emergency cap
+is stepped at once. New `/status` fields (after `date_step_phase_jump_us`):
+
+- `date_correction_mode`: `"daily"` / `"micro"` on an anchored master, `""` elsewhere
+- `date_daily_next_utc`: the RFC 3339 UTC second `YYYY-MM-DDTHH:MM:SSZ` of the next window, or null
+- `date_daily_last_step_ts` (u64 or null) and `date_daily_last_step_ms` (f64 or null)
+
+The rules:
+
+- **Decide the mode FIRST.** A 1.12.0 master still serializes `date_correction_falling_behind`
+  (serde default, always false in daily mode). So the micro-capability test alone would grade it
+  on the 5 ms micro bound and fail every healthy master. `date_master_mode_class STATUS` (python
+  `date_master_mode_class`) returns:
+  - `daily` for the string `"daily"`;
+  - `other` for absent, null, `""` or `"micro"`, which keep today's grade byte for byte;
+  - `unknown` for any other string or a non-string, which reads `unknown` on a master.
+- **The daily verdict** (`_date_master_daily_verdict TEXT MARGIN DAILY_MS NOW_S`, python
+  `_date_master_daily_verdict`) is PURE: NOW_S is an argument. It reads three things:
+  - **The next window** (`_date_daily_next_state`): `ok` within `(now, now + 88200 s]` (24 h 30 min);
+    `missing` when null or absent; `past` at or before now; `far` beyond that; `unknown` when it is
+    not a string, not exactly the RFC 3339 UTC-second shape, or an impossible date. Both twins use
+    the same strict regex first, then GNU `date -u -d` / `strptime`, which both refuse 2026-02-30.
+  - **The last nightly step** (`_date_daily_last_state`): `ok` within the last 93600 s (26 h);
+    `none` when null (no nightly step since the master started, printed as a NOTE, still OK);
+    `stale` older; `ahead` more than 1800 s in the future (dantesync records a step when it
+    ANNOUNCES it, and it lands two leads later, so a few seconds ahead is normal); `unknown` when
+    absent or not a non-negative integer.
+  - **The error:** `|date_offset_error_ms| <= DATE_MASTER_DAILY_BOUND_MS + margin`.
+    `DATE_MASTER_DAILY_BOUND_MS` comes from env `DANTESYNC_DATE_DAILY_BOUND_MS`, default 3000,
+    same shape rule as the micro bound.
+
+  A read, wrong field wins: `out` before `unknown`, then `ok`. The micro flags are not read.
+- **"now" is read in ONE place:** `date_master_now_s` (python `date_now_s`) returns
+  `DANTESYNC_DATE_NOW_S` when set (tests pin it), else `date +%s` / `int(time.time())`. The parity
+  table's rows are graded at 1790501400 (2026-09-27T09:30:00Z). A test proves the pure decision
+  never reads the clock by shadowing `date`.
+  - **Test gotcha:** the wrapper reads the clock as `date +%s 2>/dev/null`, so the probe must write
+    a marker FILE; a probe that writes to stderr is silenced by the wrapper and proves nothing.
+- **Bound + lines.** `date_master_effective_bound_us` gives a daily master
+  `max(base, daily*1000 + margin)` = 3001000 us. The gate prints `date master graded on its daily
+  bound`. It also takes that bound when a daily master's verdict is `unknown` (an unreadable
+  schedule), so the median of a day's drift reads UNKNOWN (11), never a false DRIFT on the #1021
+  widening. `date_master_check` prints the daily lines:
+  - OK: the error, the next window, and the last step or the NOTE;
+  - OUT (rc 2) / UNKNOWN (rc 3): the reasons from `_date_daily_problems`, which reads the SAME
+    states as the verdict.
+
+  An unknown mode prints its own UNKNOWN line.
+- **Journal path.** `journal_date_grade_from_step` checks the daily mode before micro and returns:
+  - `daily:<us>`: a live schedule; median-only on the daily bound + margin;
+  - `daily-out`: verdict word **`date_out`**, a new verify-strih check 6 `bad` arm;
+  - `daily-unknown`: verdict word `unknown`; an unreadable schedule, an unknown mode or an
+    unreadable daily bound.
+
+  The journal path grades the journal MEDIAN, not the `/status` error field, so the error clause
+  is not in it. `dantesync_journal_date_note` names each grade.
+- **Known limit (from the dantesync source):** a night whose estimated error sits inside
+  dantesync's own dead band (`NoStep`) does not update the last step. On the rig's drift this does
+  not happen; if it ever did, the 26 h rule would read OUT for up to a day.
+- **Fixtures:** `strih-lx-master-1.12.0.json` / `stream-slave-1.12.0.json` are SYNTHESIZED from the
+  1.11.1 captures plus the four fields in `src/status.rs` order (master: error 412.5 ms, next
+  2026-09-28T02:00:00Z, last step at 2026-09-27T02:00:00Z, -1523.4 ms). Replace them with live
+  captures after the roll, keeping the table's "now" consistent with the captured `updated_ts`.
+  The pin is 1.12.0.
 
 **Live check (read-only, allowed):** `DANTESYNC_GATE_GM_ENFORCE=1 DANTESYNC_GATE_PHASE_SLEW_ENFORCE=1
 scripts/dantesync-gate.sh --linux "" --win-http strih=10.77.9.202 --win-http stream=10.77.9.204`
