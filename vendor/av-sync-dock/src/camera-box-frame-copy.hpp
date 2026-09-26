@@ -38,12 +38,6 @@ struct CbPlaneView {
 	CbIntensityFn intensity;
 };
 
-inline uint8_t cb_plane_sample(const CbPlaneView &v, uint32_t x, uint32_t y)
-{
-	const uint8_t *p = v.data + (size_t)v.linesize * y + v.pixeloffset + (size_t)v.pixelsize * x;
-	return v.intensity ? v.intensity(p) : *p;
-}
-
 /* Rows 0..rows, columns 0..width into `dst` (width x rows, row-major). */
 inline void cb_copy_top_band(const CbPlaneView &v, uint32_t width, uint32_t rows, uint8_t *dst)
 {
@@ -150,8 +144,18 @@ inline CbPatchRect cb_marker_patch_rect(uint32_t cx, uint32_t cy, uint32_t r, ui
 inline void cb_copy_patch(const CbPlaneView &v, const CbPatchRect &rect, uint8_t *dst)
 {
 	for (uint32_t y = 0; y < rect.h; y++) {
-		for (uint32_t x = 0; x < rect.w; x++)
-			*dst++ = cb_plane_sample(v, rect.x0 + x, rect.y0 + y);
+		const uint8_t *d = v.data + (size_t)v.linesize * (rect.y0 + y) + v.pixeloffset + (size_t)v.pixelsize * rect.x0;
+		if (!v.intensity) {
+			for (uint32_t x = 0; x < rect.w; x++) {
+				*dst++ = *d;
+				d += v.pixelsize;
+			}
+		} else {
+			for (uint32_t x = 0; x < rect.w; x++) {
+				*dst++ = v.intensity(d);
+				d += v.pixelsize;
+			}
+		}
 	}
 }
 

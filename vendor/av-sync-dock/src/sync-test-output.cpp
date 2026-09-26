@@ -17,22 +17,6 @@ with this program; if not, write to the Free Software Foundation, Inc.,
 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
 */
 
-#if defined(_WIN32)
-/* issue 1367: SetThreadPriority for the video decode worker. NOMINMAX keeps windows.h's min/max
- * macros away from the std::min/std::max this file uses. */
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
-#ifndef WIN32_LEAN_AND_MEAN
-#define WIN32_LEAN_AND_MEAN
-#endif
-#include <windows.h>
-#elif defined(__linux__)
-#include <cerrno>
-#include <sys/resource.h>
-#include <sys/syscall.h>
-#include <unistd.h>
-#endif
 #include <obs-module.h>
 #include <util/threading.h>
 #include <util/platform.h>
@@ -601,9 +585,6 @@ static void cb_video_qr_record(struct sync_test_output *st, uint32_t frame_id, u
 	st->qr_data.valid = true;
 }
 
-/* issue 1367 (producer, libobs's video-output thread): sample norihiro's whole-frame QR grid --
- * every qr_step-th pixel of every qr_step-th row, the sampling st_raw_video_qrcode_decode used to do
- * straight into quirc's buffer -- into the decode job, at the size quirc_resize() got in st_start. */
 /* issue 1367: the frame's first plane as camera-box-frame-copy.hpp reads it. */
 static camerabox::CbPlaneView st_plane_view(const struct sync_test_output *st, const struct video_data *frame)
 {
@@ -616,6 +597,9 @@ static camerabox::CbPlaneView st_plane_view(const struct sync_test_output *st, c
 	return v;
 }
 
+/* issue 1367 (producer, libobs's video-output thread): sample norihiro's whole-frame QR grid --
+ * every qr_step-th pixel of every qr_step-th row, the sampling st_raw_video_qrcode_decode used to do
+ * straight into quirc's buffer -- into the decode job, at the size quirc_resize() got in st_start. */
 static void st_norihiro_gather_grid(const struct sync_test_output *st, const struct video_data *frame,
 				    std::vector<uint8_t> &dst)
 {
@@ -1027,22 +1011,15 @@ static void st_raw_video(void *data, struct video_data *frame)
 	camerabox::cb_atomic_max_u64(st->cb_publish_max_ns, os_gettime_ns() - publish_start_ns);
 }
 
-/* issue 1367: once, on the decode worker thread before its first job. Named for crash dumps and
- * profilers, and lowered below normal priority: when the CPU is tight the decode must yield to
- * libobs's render / video-output / encoder threads, never compete with them. */
+/* issue 1367: once, on the decode worker thread before its first job. Names it (15 characters: the
+ * Linux thread-name limit; visible in top -H / gdb, and to an attached debugger on Windows).
+ * The worker deliberately stays at NORMAL priority: the video-output thread takes `st->mutex` and
+ * the mailbox lock every frame and the worker holds both briefly, and a Windows std::mutex (SRW
+ * lock) has no priority inheritance -- a starved below-normal worker preempted inside one of those
+ * sections would stall the video thread, the very stall this worker exists to remove. */
 static void st_decode_worker_thread_setup()
 {
-	os_set_thread_name("av-sync-dock: video decode");
-#if defined(_WIN32)
-	if (!SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL))
-		blog(LOG_WARNING, "av-sync-dock: could not lower the video decode worker priority");
-#elif defined(__linux__)
-	/* Per-thread nice on Linux: raise this thread's nice by 5 (lower priority). */
-	errno = 0;
-	const int nice_now = getpriority(PRIO_PROCESS, (id_t)syscall(SYS_gettid));
-	if (errno != 0 || setpriority(PRIO_PROCESS, (id_t)syscall(SYS_gettid), nice_now + 5) != 0)
-		blog(LOG_WARNING, "av-sync-dock: could not lower the video decode worker priority");
-#endif
+	os_set_thread_name("avsync-decode");
 }
 
 /* issue 1367: the decode worker thread's per-frame body -- the decode st_raw_video used to run
