@@ -48,14 +48,18 @@ like a genlock problem and was not one.
     `bundle_state_gather.py` keys on `locked=yes`).
   - `video_frames=` now counts the frames the WORKER processed, so `video_decoded(%)` is a decode
     rate per processed frame. Every frame OBS delivered is `video_frames + decode_dropped`.
-- **The worker yields to OBS**: `st_decode_worker_thread_setup` (the mailbox's `on_thread_start`)
-  names the thread `av-sync-dock: video decode` and lowers it below normal priority. On Windows
-  this is `SetThreadPriority`; `<windows.h>` comes first in the file, under `NOMINMAX` +
-  `WIN32_LEAN_AND_MEAN`, so its min/max macros never hit this file's `std::min`. On Linux it
-  raises the thread's nice by 5. On a CPU-tight box the decode therefore loses to render / video
-  output / encode instead of competing with them.
-- **Decoders take the frame's OWN timestamp from the job**, never "now", so the marker/QR timing
-  is unchanged by the hand-off.
+- **The worker runs at NORMAL priority, never lower** (review round 2). The video-output thread
+  takes `st->mutex` and the mailbox lock every frame, and the worker holds both briefly. A Windows
+  `std::mutex` (SRW lock) has no priority inheritance. A below-normal worker preempted inside one
+  of those sections on a busy box can therefore be starved for seconds, and the video thread waits
+  that long: the very stall the worker removes.
+  - `tests/av_sync_dock_decode_mailbox_1367.rs` bans `SetThreadPriority(` / `setpriority(` in the
+    dock.
+  - `st_decode_worker_thread_setup` (the mailbox's `on_thread_start`) only names the thread
+    `avsync-decode`, which fits the 15-character Linux limit; `os_set_thread_name` truncates longer
+    names. The name shows in `top -H` / gdb on Linux, and only to an attached debugger on Windows.
+  - To make the worker yield in the future, first make the video-thread side lock-free (an atomic
+    `cb_mode_active`, a seqlock for `marker_corners`). Only then lower the priority.
 - **Lifecycle**:
   - `st_start` first stops any worker left from a previous start (it rewrites the quirc size and
     the video geometry the worker reads), then starts it before `obs_output_begin_data_capture`;
@@ -73,6 +77,7 @@ like a genlock problem and was not one.
 | the ring `cb_video_ts_ns/valid`, `cb_mode_active`, `cb_video_last_decode_ts_ns`, `f/c/q_ms`, `sync_indices` | worker writes, audio thread reads | `st->mutex` (unchanged) |
 | `start_ts` | video thread writes once; worker and audio thread read | `std::atomic` |
 | `cb_video_frames_seen/decoded`, the mailbox's `dropped()` | worker / producer; the audio diag reads | atomics |
+| `cb_publish_max_ns` (publish_max_us) | video thread raises it (`cb_atomic_max_u64`); the audio diag reads and resets it (`exchange(0)`) | atomic |
 
 Signals (`qrcode_found`, `video_marker_found`, `sync_found`) are now emitted from the worker. The
 dock UI copies each calldata and queues it to the Qt thread with `QMetaObject::invokeMethod`, so
