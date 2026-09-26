@@ -792,10 +792,10 @@ fn idle_songs() -> Scenario {
 fn an_idle_relock_keeps_the_content_floor_and_later_song_starts_never_slew_1367() {
     let r = run(idle_songs());
     eprintln!("idle-songs: {r:?}");
-    // one lock at the start (2), ONE re-measure at the first song (3), the two idle re-locks keep
-    // the sticky content floor (3, 3), then the OBS restart (2) and the sender restart (2) on idle
-    // start over without it.
-    assert_eq!(r.latches, 6, "one re-measure in the OBS session: {r:?}");
+    // one lock at the start (2), ONE re-measure at the first song (3), the three idle re-locks at the
+    // song ends keep the sticky content floor (3, 3, 3), then the OBS restart (2) and the sender
+    // restart (2) on idle start over without it.
+    assert_eq!(r.latches, 7, "one re-measure in the OBS session: {r:?}");
     let mut seen = r.latched.clone();
     seen.dedup();
     assert_eq!(seen, [2, 3, 2], "D stays 3 across the idle re-locks: {r:?}");
