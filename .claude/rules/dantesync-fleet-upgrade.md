@@ -2,6 +2,7 @@
 paths:
   - "scripts/dantesync-fleet-upgrade.sh"
   - "tests/dantesync_fleet_upgrade.rs"
+  - "tests/python/test_dantesync_fleet_upgrade_tray_1372.py"
 ---
 
 # dantesync fleet-upgrade mechanism (#876)
@@ -105,8 +106,55 @@ a box (mbc sat one release behind on 25.9.2026). A node whose fleet row names it
 `NTP_MASTER`, the fleet's `ntp-master` row (strih-lx) gets the master-aware verify. An
 audio-role node (mbc, fohabl) is verified with `RIG_GRANDMASTER_IP` = the audio grandmaster
 (`dantesync_gate_env_for`), never the video one, so GM enforcement cannot fail its verify. Always
-`--fleet --dry-run` first. A daemon roll does NOT refresh `dantesync-tray.exe`; the version gate's
-report-only tray check names a lagging tray (mbc, 25.9.2026).
+`--fleet --dry-run` first. A roll also refreshes `dantesync-tray.exe` on every Windows node it
+upgrades (next section); the version gate's report-only tray sha-pin still names any lagging tray,
+e.g. on a node that was already on the target and therefore not touched.
+
+## The tray rides the roll (issue 1372)
+
+Before this, a roll swapped only the service, and the tray (the version the operator sees) lagged
+until someone swapped it by hand (after the 1.11.0 and 1.11.1 rolls, 26.9.2026). The SAME emitted
+`.ps1` now carries a tray arm:
+
+- **Fetch before any stop.** `dantesync_windows_tray_fetch_ps VERSION` downloads
+  `dantesync-tray-windows-amd64.exe` + its `.sha256` from the SAME pinned tag
+  (`dantesync_release_url_windows_tray`, never latest) right after the service binary is verified.
+  A missing install or a failed download / sha is recorded in `$trayNotes`, never thrown, so the
+  service upgrade still runs.
+- **Swap after the service is back.** `dantesync_windows_tray_swap_ps` runs after the service's
+  try/catch and the dead-task purge. It stops `dantesync-tray` (exact name) and backs it up to
+  `dantesync-tray.exe.pre-<version>`. It replaces the file and verifies the installed sha; a failed
+  replace or a wrong sha restores the backup.
+- **Relaunch into the user's session with no password.** A temporary scheduled task whose principal
+  is the GROUP `BUILTIN\Users` with `-RunLevel Limited` (`DanteSyncTrayRelaunch-1372`) starts the tray
+  in the logged-on user's interactive session. It was proven live on mbc and fohabl, where the ssh
+  account (`master`) differs from the desktop user (`Ableton-FOH`). The task is unregistered in a
+  `finally`. The check is exactly ONE `dantesync-tray` process with `SessionId >= 1` (session 0 is
+  the ssh/service session). A box with nobody logged on therefore reads as a warning, which is
+  honest.
+- **Never a throw, never a rollback.** The block ends with ONE `TRAY OK: …` or `TRAY-WARNING: …`
+  line. `dantesync_tray_outcome` reads the last one, and a missing line is a warning too.
+  `upgrade_node` logs `[name] tray OK/WARNING` for a Windows node, and `report_tray_warnings` prints
+  `WARNING: dantesync-tray was NOT refreshed on N node(s)` with one reason per node before EVERY exit
+  after the roll started (canary abort, incomplete, complete). The exit code stays the service's: the
+  tray is UI, the service is the clock.
+- **Anchors.** The Rust test `windows_upgrade_ps_waits_for_the_process_to_exit_between_stop_and_swap_1265`
+  now bans `dantesync-tray` only inside the daemon's stop -> swap window (the wildcard ban stays
+  program-wide). The tray code uses its own variable names (`$trayExe`, `$trayTmp`, `$trayPre`), so
+  the service anchors `Copy-Item -Force $exe $bak` / `$tmp $exe` / `$bak $exe` stay unique.
+- **The service rollback does not touch the tray.** On a verify failure the service goes back to
+  `.bak` while the tray stays on the target release; the node already counts as a failed node, and
+  the version gate names the service drift. Restoring the tray by hand is `dantesync-tray.exe.pre-<version>`.
+
+`--help` prints the whole extended header (`sed -n '2p;4,/^HERE=/…'`); it used to stop at a fixed
+line 71, mid-paragraph.
+
+**Tier-0:** `pytest tests/python/test_dantesync_fleet_upgrade_tray_1372.py`. It covers the emitted
+program as text (order, principal, `finally`, no throw after the tray catch) and runs the
+orchestrator end to end: a stateful PATH `sshpass` stub plays the Windows node (scp saves the
+`.ps1`, `--version` answers from a state file, `-File` flips it and prints the stubbed TRAY line),
+and the gate's `DANTESYNC_GATE_WIN_HTTP_STREAM` seam is fed a fresh live `/status`. The Rust file
+runs locally with a plain `rustc --test` (std-only; `ci-testing-gotchas.md`).
 
 ## Testing (Tier-0)
 
