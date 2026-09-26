@@ -418,14 +418,12 @@ pub fn qpc_wall_step_rebase_ms(
     booked_in_window: i64,
     steps_per_window: i64,
 ) -> i64 {
-    let _ = (
-        jump_ms,
-        step_bound_ms,
-        book_max_ms,
-        booked_in_window,
-        steps_per_window,
-    );
-    0
+    let mag = jump_ms.saturating_abs();
+    if mag > step_bound_ms && mag <= book_max_ms && booked_in_window < steps_per_window {
+        jump_ms
+    } else {
+        0
+    }
 }
 
 // Issue 1372 part D — the MEDIA-clock (audio clock) term. `os_gettime_ns()` paces OBS's audio mixer,

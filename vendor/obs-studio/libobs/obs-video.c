@@ -36,6 +36,7 @@
 #include "obs-drm-output.h" /* camera-box #1152 M2: the DRM-lease Program scanout frame hook */
 #endif
 #include "obs-genlock-grid.h" /* camera-box #1355: the ONE per-second genlock grid */
+#include "obs-genlock-wall-step.h" /* camera-box issue 1372: the one-tick wall-step re-grid */
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
@@ -839,9 +840,13 @@ void add_ready_encoder_group(obs_encoder_t *encoder)
  * stamp on (obs-genlock-grid.h: slot k of second S = S + floor(k * 1 s / fps)),
  * no longer wall_ns % interval == 0 counted from 1970. All genlocked machines tick at
  * the same disciplined frequency AND phase, so a chained camera->OBS->OBS
- * pipeline has zero rate mismatch end to end. Wall-clock steps (the NTP
- * fallback regime) are absorbed by clamping the per-tick correction to
- * GENLOCK_MAX_SLEW_NS - the tick slews toward the new boundary, never jumps.
+ * pipeline has zero rate mismatch end to end. Scheduling jitter and slow
+ * corrections are absorbed by clamping the per-tick correction to
+ * GENLOCK_MAX_SLEW_NS. A wall-clock STEP (camera-box issue 1372: a coordinated
+ * dantesync date step, ~50 ms every ~1.8 h) is detected against the media
+ * clock (obs-genlock-wall-step.h) and re-grids the tick in ONE tick instead:
+ * the 2 ms/tick slew-back left the tick -- and every stamp the NDI sender
+ * floors at emit -- off phase for ~9 ticks at 30 fps.
  */
 #define GENLOCK_MAX_SLEW_NS (2 * 1000 * 1000) /* 2 ms per tick */
 
@@ -886,18 +891,24 @@ static uint64_t genlock_wall_ns(void)
  * counted from 1970 that lost 10 ns per second against the stamps. */
 static uint64_t genlock_next_deadline(uint64_t cur_time, uint64_t interval_ns)
 {
+	/* camera-box issue 1372: the wall-step detector state. Graphics thread only (video_sleep is its
+	 * one caller), like the other function-local genlock statics. */
+	static struct genlock_wall_step_state wall_step;
+	const uint64_t mono_before = os_gettime_ns();
 	const uint64_t wall = genlock_wall_ns();
 	const uint64_t mono = os_gettime_ns();
 	const uint64_t next_wall = genlock_grid_next_boundary_ns(wall, interval_ns);
 	const uint64_t target = mono + (next_wall - wall);
 	const uint64_t stock = cur_time + interval_ns;
-	const int64_t corr = (int64_t)(target - stock);
-
-	if (corr > GENLOCK_MAX_SLEW_NS)
-		return stock + GENLOCK_MAX_SLEW_NS;
-	if (corr < -GENLOCK_MAX_SLEW_NS)
-		return stock - GENLOCK_MAX_SLEW_NS;
-	return target;
+	/* camera-box issue 1372: a wall STEP against the media clock re-grids the tick in ONE tick (the
+	 * clamp would slew it back 2 ms per tick, and the sender stamps off phase meanwhile). */
+	const int64_t wall_step_ns = genlock_wall_step_observe(&wall_step, mono_before, wall, mono);
+	if (wall_step_ns != 0)
+		blog(LOG_INFO,
+		     "genlock-regrid: the wall clock stepped %+.3f ms against the media clock -- render tick "
+		     "re-gridded in one tick (steps=%llu) (issue 1372)",
+		     (double)wall_step_ns / 1e6, (unsigned long long)wall_step.steps);
+	return genlock_wall_step_deadline_ns(target, stock, wall_step_ns != 0);
 }
 
 #if defined(__linux__) && !defined(_WIN32)

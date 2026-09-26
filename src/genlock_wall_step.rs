@@ -95,8 +95,14 @@ impl WallStepState {
             self.offset_ns = offset;
             return 0;
         }
+        let step = offset.wrapping_sub(self.offset_ns);
         self.offset_ns = offset;
-        0
+        if step.saturating_abs() > WALL_STEP_MIN_NS {
+            self.steps = self.steps.wrapping_add(1);
+            step
+        } else {
+            0
+        }
     }
 
     /// How many wall steps this detector has seen.
@@ -112,7 +118,9 @@ impl WallStepState {
 ///
 /// Mirror of the C `genlock_wall_step_deadline_ns()`.
 pub fn deadline_ns(target: u64, stock: u64, regrid: bool) -> u64 {
-    let _ = regrid;
+    if regrid {
+        return target;
+    }
     let corr = target.wrapping_sub(stock) as i64;
     if corr > MAX_SLEW_NS {
         stock.wrapping_add(MAX_SLEW_NS as u64)

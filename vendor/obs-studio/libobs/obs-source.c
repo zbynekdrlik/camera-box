@@ -4778,8 +4778,15 @@ static inline void asrc_process_audio(obs_source_t *source, uint32_t frames, uin
 	source->genlock_audio_slew_remaining_ns -= genlock_slew_step;
 	source->genlock_audio_slew_step_ns += genlock_slew_step;
 	const double genlock_slew_ppm = genlock_audio_slew_ppm(genlock_slew_step, genlock_slew_dt_ns);
-	if (genlock_slew_ppm != 0.0)
-		audio_resampler_set_compensation_ppm(source->resampler, genlock_slew_ppm - applied_ppm,
+	/* camera-box issue 1372 (ROZHODNUTE 5841039244): a CONFIRMED sample-count step (the stream mbc lost
+	 * 44 ms of Dante samples at the 25.9.2026 fleet date step) is paid back by the compensator at
+	 * ASRC_STEP_RECOVER_PPM; that rate rides on the same resampler, in the servo's sign (negated like
+	 * applied_ppm). It is NOT booked out of the TS-smoothing timeline like the placement slew above: the
+	 * lost samples left the timeline behind the source's own stamps, and the stretch is what brings it
+	 * back. 0 on every callback without an owed step. */
+	const double asrc_recover_ppm = source->asrc.step_recover_ppm;
+	if (genlock_slew_ppm != 0.0 || asrc_recover_ppm != 0.0)
+		audio_resampler_set_compensation_ppm(source->resampler, genlock_slew_ppm - applied_ppm - asrc_recover_ppm,
 						     ASRC_COMPENSATION_DISTANCE_MS);
 	else
 		audio_resampler_set_compensation_ppm(source->resampler, -applied_ppm, ASRC_COMPENSATION_DISTANCE_MS);
@@ -4816,13 +4823,14 @@ static inline void asrc_process_audio(obs_source_t *source, uint32_t frames, uin
 		     "cumulative_correction=%.3fms/%.0fs starved_blocks=%u (#803/#806/#960) "
 		     "level=%.1fms target=%.1fms integral=%.3fppm (#1335) "
 		     "steps=%u last_step_ms=%.1f restore=%d (#1335) fallbacks=%u (#1355) "
-		     "level_avg=%.2fms (#1367)",
+		     "level_avg=%.2fms (#1367)"
+		     " recover_ms=%.1f (issue 1372)",
 		     obs_source_get_name(source), source->asrc.estimated_ppm, applied_ppm,
 		     source->asrc.outer_bias_ppm, cumulative_correction_ms, ASRC_LOG_INTERVAL_S,
 		     starved_block_count, source->asrc.level_last_ms, source->asrc.level_target_ms,
 		     source->asrc.level_integral_ppm, source->asrc.step_count, source->asrc.last_step_ms,
 		     (int)source->asrc.level_restore, source->asrc.level_fallback_count,
-		     source->asrc.level_avg_ms);
+		     source->asrc.level_avg_ms, source->asrc.step_recover_ms);
 	}
 }
 

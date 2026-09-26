@@ -57,6 +57,9 @@ static void asrc_regression_flush(struct asrc_compensator *c)
 	 * caller state and survive. */
 	c->level_unconverged_windows = 0;
 	c->level_fallback_done = false;
+	/* camera-box issue 1372: a flush re-captures the setpoint, so a step still owed is abandoned with
+	 * the capture it was booked against. */
+	c->step_recover_ms = 0.0;
 }
 
 void asrc_compensator_init(struct asrc_compensator *c)
@@ -88,12 +91,16 @@ void asrc_compensator_init(struct asrc_compensator *c)
 	c->window_level_sum_ms = 0.0; /* camera-box #1367 */
 	c->window_level_count = 0; /* camera-box #1367 */
 	c->level_avg_ms = 0.0; /* camera-box #1367 */
+	c->step_recover_ms = 0.0; /* camera-box issue 1372 */
+	c->step_recover_ppm = 0.0; /* camera-box issue 1372 */
 	asrc_regression_flush(c); /* camera-box #1084/#1335: empty buffer, 0 cumulatives, 0 integral, unlocked */
 }
 
 double asrc_compensator_compensate(struct asrc_compensator *c, double raw_advance_s, double master_block_s,
 				    double buffered_ms, double *applied_ppm_out)
 {
+	/* camera-box issue 1372: the recovery rate is per call; only the owed-step block below sets it. */
+	c->step_recover_ppm = 0.0;
 	if (master_block_s <= 0.0) {
 		/* A non-positive block duration carries no timing information (e.g. a duplicate or
 		 * backward wall-clock read -- an NTP step) and, because the regression accumulates a
@@ -196,9 +203,17 @@ double asrc_compensator_compensate(struct asrc_compensator *c, double raw_advanc
 				/* FAST bounded level restore, but ONLY if the buffer level corroborates a real
 				 * sample loss/dup (|level err| >= half the residual magnitude). A wall-clock-only
 				 * jump leaves buffered_ms unchanged => re-base only, no restore. */
+				/* camera-box issue 1372 (ROZHODNUTE 5841039244): a CONFIRMED step is booked, not
+				 * restored proportionally. The owed amount is the measured sample-count step
+				 * itself; the setpoint moves with the buffer (so the level loop, the restore arms and
+				 * the unreachable bound see no disturbance) and walks back as the recovery pays it
+				 * at ASRC_STEP_RECOVER_PPM below -- the live 44 ms loss in ~44 s, not 3-4 min. */
 				if (c->level_captured &&
-				    fabs(buffered_ms - c->level_target_ms) >= 0.5 * fabs(r_s * 1000.0))
-					c->level_restore = true;
+				    fabs(buffered_ms - c->level_target_ms) >= 0.5 * fabs(r_s * 1000.0)) {
+					const double owed_ms = -r_s * 1000.0;
+					c->step_recover_ms += owed_ms;
+					c->level_target_ms -= owed_ms;
+				}
 				rebased = true;
 			}
 
@@ -420,9 +435,28 @@ double asrc_compensator_compensate(struct asrc_compensator *c, double raw_advanc
 		const double max_step = ASRC_MAX_SLEW_PPM_PER_S * master_block_s;
 		const double delta = asrc_clamp(target_ppm - c->applied_ppm, -max_step, max_step);
 		c->applied_ppm += delta;
+
+		/* camera-box issue 1372: pay a CONFIRMED step back at ASRC_STEP_RECOVER_PPM (1 ms per second
+		 * of master time), on top of the servo's own applied_ppm -- its clamp and slew limit are
+		 * untouched. The buffer grows (loss) or shrinks (dup) by the paid amount, so the setpoint and
+		 * the open window's level sum move with it and the level loop never reads the recovery as an
+		 * error. Only while the setpoint is captured: the step was booked against that capture.
+		 * Mirror of src/asrc_bench.rs compensate_core. */
+		if (c->level_captured && c->step_recover_ms != 0.0) {
+			const double budget_ms = ASRC_STEP_RECOVER_PPM / 1000000.0 * master_block_s * 1000.0;
+			const double paid_ms = asrc_clamp(c->step_recover_ms, -budget_ms, budget_ms);
+			c->step_recover_ms -= paid_ms;
+			c->step_recover_ppm = -paid_ms / (master_block_s * 1000.0) * 1000000.0;
+			c->level_target_ms += paid_ms;
+			c->window_level_sum_ms += paid_ms * (double)c->window_level_count;
+		} else {
+			c->step_recover_ms = 0.0;
+		}
 	}
 
-	const double corrected_advance_s = raw_advance_s / (1.0 + c->applied_ppm / 1000000.0);
+	/* camera-box issue 1372: a confirmed step's recovery rides on the same resampler, so the advance
+	 * the source actually produces carries it too (0 on every call without an owed step). */
+	const double corrected_advance_s = raw_advance_s / (1.0 + (c->applied_ppm + c->step_recover_ppm) / 1000000.0);
 
 	/* Telemetry accumulator: cumulative |raw - corrected| advance, in ms, since the last log
 	 * line (issue #803: "kumulatívneho rezídua"). camera-box #960: kept UNCONDITIONAL (runs on
@@ -533,5 +567,7 @@ void asrc_compensator_set_level_absolute(struct asrc_compensator *c, bool absolu
 		c->level_err_ema_seeded = false;
 		c->level_unconverged_windows = 0;
 		c->level_fallback_done = false;
+		/* camera-box issue 1372: the owed step belongs to the dropped capture. */
+		c->step_recover_ms = 0.0;
 	}
 }

@@ -1093,7 +1093,9 @@ impl RealtimeAsrcCompensator {
                     if self.level_captured
                         && (buf_ms - self.level_target_ms).abs() >= 0.5 * (r_s * 1000.0).abs()
                     {
-                        self.level_restore = true;
+                        let owed_ms = -r_s * 1000.0;
+                        self.step_recover_ms += owed_ms;
+                        self.level_target_ms -= owed_ms;
                     }
                 }
                 rebased = true;
@@ -1317,6 +1319,22 @@ impl RealtimeAsrcCompensator {
         let max_step = MAX_SLEW_PPM_PER_S * master_block_s;
         let delta = (target_ppm - self.applied_ppm).clamp(-max_step, max_step);
         self.applied_ppm += delta;
+
+        // Issue 1372: pay a CONFIRMED step back at STEP_RECOVER_PPM (1 ms per second of master time),
+        // on top of the servo's own applied_ppm — its clamp and slew limit are untouched. The buffer
+        // grows (loss) or shrinks (dup) by the paid amount, so the setpoint and the open window's
+        // level sum move with it and the level loop never sees the recovery as an error. Only while
+        // the setpoint is captured: the step was booked against that capture.
+        if self.level_captured && self.step_recover_ms != 0.0 {
+            let budget_ms = STEP_RECOVER_PPM / 1_000_000.0 * master_block_s * 1000.0;
+            let paid_ms = self.step_recover_ms.clamp(-budget_ms, budget_ms);
+            self.step_recover_ms -= paid_ms;
+            self.step_recover_ppm = -paid_ms / (master_block_s * 1000.0) * 1_000_000.0;
+            self.level_target_ms += paid_ms;
+            self.window_level_sum_ms += paid_ms * f64::from(self.window_level_count);
+        } else {
+            self.step_recover_ms = 0.0;
+        }
 
         self.corrected_advance(raw_advance_s)
     }

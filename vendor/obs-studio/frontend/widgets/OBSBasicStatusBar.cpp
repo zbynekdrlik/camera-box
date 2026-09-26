@@ -48,6 +48,14 @@ static constexpr float badThreshold = 1.0f;
  * report-only JSON telemetry. */
 static constexpr int64_t GENLOCK_QPC_STEP_BOUND_MS = 33;
 static constexpr int GENLOCK_QPC_WINDOW_S = 300;
+/* camera-box issue 1372: a single-sample wall step up to this size is a coordinated dantesync fleet
+ * DATE step (dantesync 1.9.0 bounds the date error at 50 ms, so a step is <= ~50 ms, about every
+ * 1.8 h) and is BOOKED (genlock_qpc_wall_step_rebase_ms): the qpc history is re-baselined by it and
+ * the widget stays LOCKED, because the media clock deliberately never follows a step and the render
+ * tick re-grids onto the stepped wall in one tick. A bigger jump (a clock set) or a second step inside
+ * GENLOCK_QPC_WINDOW_S (a step storm) still DEGRADES. */
+static constexpr int64_t GENLOCK_QPC_WALL_STEP_BOOK_MAX_MS = 200;
+static constexpr int64_t GENLOCK_QPC_WALL_STEPS_PER_WINDOW = 1;
 
 /* camera-box issue 1372 part D: the MEDIA-clock (audio clock) term. os_gettime_ns() paces the audio
  * mixer and every output; since part A it runs at the dantesync-disciplined rate on Windows too, so the
@@ -1370,8 +1378,32 @@ void OBSBasicStatusBar::UpdateGenlockLabel()
 	 * (f_ptp + f_phase) described the free-crystal Windows clock; since issue 1372 the measured rate is
 	 * ~0 on Windows too, so it is report-only context, not an expectation. */
 	const double qpc_expected_ppm = clock_present ? (genlockClockFptpPpm + genlockClockFphasePpm) : 0.0;
-	if (scan.any_input)
+	if (scan.any_input) {
+		/* camera-box issue 1372: BOOK a dantesync fleet date step. The jump of this sample against
+		 * the previous one is re-based out of the whole history (every older sample shifted by it), so
+		 * neither the step verdict nor the rate telemetry reads it; one genlock-wall-step: line records
+		 * it. At most GENLOCK_QPC_WALL_STEPS_PER_WINDOW per window: a second step stays in the history
+		 * and DEGRADES, like a jump beyond GENLOCK_QPC_WALL_STEP_BOOK_MAX_MS. */
+		while (!genlockQpcBookedSteps.empty() &&
+		       now_ms - genlockQpcBookedSteps.front() > (qint64)GENLOCK_QPC_WINDOW_S * 1000)
+			genlockQpcBookedSteps.pop_front();
+		if (!genlockQpcHistory.empty()) {
+			const int64_t jump = scan.qpc_signed_ms - genlockQpcHistory.back().second;
+			const int64_t rebase = genlock_qpc_wall_step_rebase_ms(
+				jump, GENLOCK_QPC_STEP_BOUND_MS, GENLOCK_QPC_WALL_STEP_BOOK_MAX_MS,
+				(int64_t)genlockQpcBookedSteps.size(), GENLOCK_QPC_WALL_STEPS_PER_WINDOW);
+			if (rebase != 0) {
+				for (auto &sample : genlockQpcHistory)
+					sample.second += rebase;
+				genlockQpcBookedSteps.push_back(now_ms);
+				blog(LOG_INFO,
+				     "genlock-wall-step: the wall clock stepped %lld ms against the media clock -- "
+				     "qpc_drift re-baselined, not degraded (booked %d in %d s) (issue 1372)",
+				     (long long)rebase, (int)genlockQpcBookedSteps.size(), GENLOCK_QPC_WINDOW_S);
+			}
+		}
 		genlockQpcHistory.emplace_back(now_ms, scan.qpc_signed_ms);
+	}
 	while (genlockQpcHistory.size() > 1 &&
 	       now_ms - genlockQpcHistory.front().first > (qint64)GENLOCK_QPC_WINDOW_S * 1000)
 		genlockQpcHistory.pop_front();
