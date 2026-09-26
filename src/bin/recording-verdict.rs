@@ -2885,13 +2885,15 @@ fn report_hop_latency(h: &Option<HopLatency>, label: &str, anchor: &str) -> bool
 }
 
 /// issue 1367 — how many node-burn ECHOES (a burn read outside its own slot, e.g. a copy inside a
-/// multiview a camera films) the camera-chain decode rejected per recording. `None` = not decoded
+/// multiview a camera films) the recording decode rejected, per recording. `None` = not decoded
 /// here and not carried (no recording, or a partial from an older build). REPORT-ONLY: the verdict
 /// prints it as `burn_echoes_rejected`, it never touches `overall_pass`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct BurnEchoCounts {
     strih: Option<u64>,
     stream: Option<u64>,
+    imag: Option<u64>,
+    cg: Option<u64>,
 }
 
 /// One recording's decoded frames + (optionally) the recording file backing them. The frames
@@ -3134,44 +3136,43 @@ fn main() -> Result<()> {
     // #707: strih/stream also require both cam2 dual-QR Vernier halves before skipping the
     // robust retry — see `extract_partial`'s identical wiring for the full reasoning.
     let min_distinct_optical = args.cam2_pin().map(|run_id| (run_id, 2));
-    // issue 1367: the strih/stream decodes run one after the other, so the process-wide echo
-    // counter's delta around each is that recording's count (report-only).
-    let echoes_before = camera_box::probe::burn_echo::burn_echo_rejection_count();
+    // issue 1367: the recordings decode one after the other, so the delta of the process-wide
+    // echo counter around each decode is that recording's count (report-only).
+    let echo_count = camera_box::probe::burn_echo::burn_echo_rejection_count;
+    let mut burn_echoes = BurnEchoCounts::default();
+    let mark = echo_count();
     let strih = decode_for_grouped(
         args.strih.as_deref(),
         &[args.burn_strih_run_id],
         &camera_under_test_burn_ids(&args),
         min_distinct_optical,
     )?;
-    let echoes_after_strih = camera_box::probe::burn_echo::burn_echo_rejection_count();
+    burn_echoes.strih = strih.as_ref().map(|_| echo_count().saturating_sub(mark));
+    let mark = echo_count();
     let stream = decode_for_grouped(
         args.stream.as_deref(),
         &[args.burn_strih_run_id, args.burn_stream_run_id],
         &camera_under_test_burn_ids(&args),
         min_distinct_optical,
     )?;
-    let burn_echoes = BurnEchoCounts {
-        strih: strih
-            .as_ref()
-            .map(|_| echoes_after_strih.saturating_sub(echoes_before)),
-        stream: stream.as_ref().map(|_| {
-            camera_box::probe::burn_echo::burn_echo_rejection_count()
-                .saturating_sub(echoes_after_strih)
-        }),
-    };
+    burn_echoes.stream = stream.as_ref().map(|_| echo_count().saturating_sub(mark));
     // #463: imag now carries its OWN digital corner burn (run_id BURN_RUN_ID_IMAG) — decode for
     // it so the #207 fast/robust gate looks for it. Backward compatible: a recording with no
     // burn at all (a build predating #463) simply decodes with none found, and the verdict falls
     // back to the cam2 optical tick's own contiguity (see `node_verdict_for_imag`).
+    let mark = echo_count();
     let imag = decode_for(args.imag.as_deref(), &[BURN_RUN_ID_IMAG])?;
+    burn_echoes.imag = imag.as_ref().map(|_| echo_count().saturating_sub(mark));
     // #1301: the cg OBS box's OWN recording for the CG chain — decode for BOTH the SongPlayer
     // origin burn (911014, painted upstream by SongPlayer) and the cg OBS hop burn (911015,
     // composited locally) so the #207 fast/robust gate looks for both. `None` when --cg is not
     // supplied (a normal camera-chain run), so the cg_chain section is simply omitted.
+    let mark = echo_count();
     let cg = decode_for(
         args.cg.as_deref(),
         &[args.burn_songplayer_run_id, args.burn_cg_run_id],
     )?;
+    burn_echoes.cg = cg.as_ref().map(|_| echo_count().saturating_sub(mark));
     // #187: a cam1 grab decode failure is NON-FATAL — the stream-only hops still run, and the
     // failure is recorded in nodes.cam1 (never silent). The grab is OPTIONAL (#179).
     let cam1 = match args.cam1.as_deref() {
@@ -3327,7 +3328,7 @@ fn build_and_print_verdict_with_stream_diffs(
     // across cg OBS → strih → stream); NEVER folds into the camera-chain overall_pass while
     // `cg_chain_gate::gates_overall_pass()` is false. `None` on every normal run.
     cg: Option<DecodedRec>,
-    // issue 1367 — the node-burn echoes the strih/stream decode rejected (fused: counted here;
+    // issue 1367 — the node-burn echoes each recording's decode rejected (fused: counted here;
     // merge: carried in each partial). REPORT-ONLY `burn_echoes_rejected`, never `overall_pass`.
     burn_echoes: BurnEchoCounts,
 ) -> Result<(serde_json::Value, bool)> {
@@ -7495,12 +7496,14 @@ fn build_and_print_verdict_with_stream_diffs(
         all_pass &= cg_chain_gate::folds_into_overall_pass(contiguous);
     }
 
-    // issue 1367 — REPORT-ONLY: the node-burn echoes the camera-chain decode rejected per
+    // issue 1367 — REPORT-ONLY: the node-burn echoes the recording decode rejected per
     // recording (a node burn read outside its own slot, e.g. inside a multiview a camera films).
     // A large count names a camera that films a monitor showing OBS; it never gates.
     report["burn_echoes_rejected"] = serde_json::json!({
         "strih": burn_echoes.strih,
         "stream": burn_echoes.stream,
+        "imag": burn_echoes.imag,
+        "cg": burn_echoes.cg,
         "gates_overall_pass": false,
     });
 
@@ -7995,16 +7998,14 @@ fn extract_partial(args: &Args, box_name: &str) -> Result<()> {
         _ => analyze_recording_with_burns(rec_path, &expected_burns),
     }
     .with_context(|| format!("analyze recording {}", rec_path.display()))?;
-    // issue 1367: the strih/stream (camera-chain) decode rejects node-burn ECHOES — a burn read
-    // outside its own slot. Carry this box's count in the partial (report-only in the verdict).
-    let burn_echoes_rejected = matches!(box_name, "strih" | "stream")
-        .then(camera_box::probe::burn_echo::burn_echo_rejection_count);
-    if let Some(n) = burn_echoes_rejected {
-        println!(
-            "issue 1367 burn echoes [{box_name}]: {n} node-burn read(s) outside their own slot \
-             rejected as optical echoes (report-only)."
-        );
-    }
+    // issue 1367: every recording analysis rejects node-burn ECHOES — a burn read outside its own
+    // slot. This process decoded only this box's recording, so the count is this box's. Carry it
+    // in the partial (report-only in the verdict).
+    let burn_echoes_rejected = camera_box::probe::burn_echo::burn_echo_rejection_count();
+    println!(
+        "issue 1367 burn echoes [{box_name}]: {burn_echoes_rejected} node-burn read(s) outside \
+         their own slot rejected as optical echoes (report-only)."
+    );
 
     let out = args
         .out
@@ -8144,7 +8145,7 @@ fn extract_partial(args: &Args, box_name: &str) -> Result<()> {
         .with_av_sync(av_sync)
         .with_frame_prev_diffs(frame_prev_diffs)
         .with_record_render(record_render)
-        .with_burn_echoes_rejected(burn_echoes_rejected);
+        .with_burn_echoes_rejected(Some(burn_echoes_rejected));
     partial.save(&out)?;
     let bytes = std::fs::metadata(&out).map(|m| m.len()).unwrap_or(0);
     println!(
@@ -8205,7 +8206,7 @@ fn run_merge(args: &Args) -> Result<()> {
     // so the CG_CHAIN run never copies the cg recording to dev1 nor decodes it here. It fills the
     // SAME `cg` slot the fused `--cg` recording does; `None` on every normal (no-CG) merge.
     let mut cg_partial: Option<DecodedRec> = None;
-    // issue 1367 — each strih/stream partial's carried node-burn echo count (report-only).
+    // issue 1367 — each partial's carried node-burn echo count (report-only).
     let mut burn_echoes = BurnEchoCounts::default();
     for spec in &args.merge_partials {
         let (box_name, path) = spec
@@ -8323,9 +8324,13 @@ fn run_merge(args: &Args) -> Result<()> {
             "imag" => {
                 imag = Some(rec);
                 imag_record_render = record_render; // #1143 report-only OBS record-render stats
+                burn_echoes.imag = echoes;
             }
             // Issue 1302: the cg OBS partial (report-only cg_chain origin hop).
-            "cg" => cg_partial = Some(rec),
+            "cg" => {
+                cg_partial = Some(rec);
+                burn_echoes.cg = echoes;
+            }
             other => anyhow::bail!(
                 "--merge-partials: unknown box {other:?} (expected `strih`, `stream`, `imag`, or \
                  `cg`)"
@@ -8392,7 +8397,7 @@ fn run_merge(args: &Args) -> Result<()> {
         imag_skip_reason, // issue 1118: Some when a schema-mismatched imag partial was dropped (degrade)
         imag_record_render, // #1143: carried from the imag partial's --record-render-stats extract
         cg,               // #1301: cg OBS recording for the REPORT-ONLY cg_chain section
-        burn_echoes,      // issue 1367: the strih/stream partials' REPORT-ONLY echo counts
+        burn_echoes,      // issue 1367: the partials' REPORT-ONLY node-burn echo counts
     )?;
     report_pulled_back_pixel_proofs(&box_paths);
     if !all_pass {
@@ -9187,16 +9192,30 @@ mod tests {
         let (v, pass) = run(BurnEchoCounts {
             strih: Some(4242),
             stream: Some(0),
+            imag: Some(7),
+            cg: None,
         });
         assert_eq!(
             v["burn_echoes_rejected"],
-            serde_json::json!({"strih": 4242, "stream": 0, "gates_overall_pass": false}),
+            serde_json::json!({
+                "strih": 4242,
+                "stream": 0,
+                "imag": 7,
+                "cg": null,
+                "gates_overall_pass": false
+            }),
             "issue 1367: the carried counts are reported as they came"
         );
         let (v0, pass0) = run(BurnEchoCounts::default());
         assert_eq!(
             v0["burn_echoes_rejected"],
-            serde_json::json!({"strih": null, "stream": null, "gates_overall_pass": false}),
+            serde_json::json!({
+                "strih": null,
+                "stream": null,
+                "imag": null,
+                "cg": null,
+                "gates_overall_pass": false
+            }),
             "issue 1367: nothing carried reads null, never a false 0"
         );
         assert_eq!(pass, pass0, "issue 1367: the echo count never gates");

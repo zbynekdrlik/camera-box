@@ -152,13 +152,12 @@ pub struct RecordingPartial {
     /// flag, so old behaviour is unchanged.
     #[serde(default)]
     pub record_render: Option<RecordRenderStats>,
-    /// issue 1367 — how many node-burn ECHOES the camera-chain decode of THIS recording rejected
-    /// (distinct echo payloads per frame, summed; `probe::burn_echo`): node burns rqrr read outside
-    /// their own slot, e.g. copies inside a multiview a camera films. Report-only, surfaced as the
-    /// verdict's `burn_echoes_rejected`. `Some` on strih/stream extracts, `None` on imag/cg (their
-    /// single-group decode is not gated) and on a partial from an older build. Additive + optional
-    /// (`#[serde(default)]`), so no schema bump: an older reader ignores it, a newer one reads
-    /// `None` from an older file.
+    /// issue 1367 — how many node-burn ECHOES the decode of THIS recording rejected (distinct echo
+    /// payloads per frame, summed; `probe::burn_echo`): node burns rqrr read outside their own
+    /// slot, e.g. copies inside a multiview a camera films. Report-only, surfaced as the verdict's
+    /// `burn_echoes_rejected`. `Some` on every extract (every recording analysis is gated), `None`
+    /// on a partial from an older build. Additive + optional (`#[serde(default)]`), so no schema
+    /// bump: an older reader ignores it, a newer one reads `None` from an older file.
     #[serde(default)]
     pub burn_echoes_rejected: Option<u64>,
 }
@@ -226,9 +225,9 @@ impl RecordingPartial {
         self
     }
 
-    /// Attach the issue-1367 node-burn echo count of THIS box's camera-chain decode — set by
-    /// `--extract-partial strih|stream` from `probe::burn_echo::burn_echo_rejection_count` after
-    /// the decode. Builder, like the other carried fields.
+    /// Attach the issue-1367 node-burn echo count of THIS box's recording decode — set by
+    /// `--extract-partial` from `probe::burn_echo::burn_echo_rejection_count` after the decode.
+    /// Builder, like the other carried fields.
     pub fn with_burn_echoes_rejected(mut self, burn_echoes_rejected: Option<u64>) -> Self {
         self.burn_echoes_rejected = burn_echoes_rejected;
         self

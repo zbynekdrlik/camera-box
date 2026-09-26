@@ -111,23 +111,28 @@ The gate:
   `bounds`). Each pass maps its reads back to frame pixels with its crop offset and resize scale:
   tiles use `tw / tile.width()`, the 2x slot look uses 1/2.
 - `qr::decode_qr_luma_all_fast_then_robust_gated` is the one decode core. `NodeBurnGate::OwnSlot`
-  gates EVERY pass before it merges: full frame, top band, tiles and slot crops. So an echo never
-  reaches the optical-short check, the fast-path gate or the missing-burn list.
-- The grouped decode (the strih/stream camera chain) runs `OwnSlot`. The single-group
-  `decode_qr_luma_all_fast_then_robust[_pathed]` (imag, cg, the cam1 grab, the diagnostic tools,
-  and the synthetic latency tests that draw burns anywhere) runs `Off`, byte-identical to before.
+  gates EVERY read of every pass BEFORE reads merge by id: full frame (plain, then Otsu), top band,
+  tiles and slot crops (`qr::decode_qr_luma_all_reads` returns the raw reads, no identity merge).
+  So an echo never reaches the optical-short check, the fast-path gate or the missing-burn list,
+  and an echo that carries the current id cannot shadow the in-slot read of that id.
+- EVERY recording analysis runs `OwnSlot`: `recording::analyze_recording*` all go through the
+  grouped decode, so strih, stream, imag, cg, the cam1 grab and the A/V / forensic tools are gated.
+  Only the per-frame helpers `qr::decode_qr_luma_all_fast_then_robust[_pathed]` and
+  `recording::decode_recording_frame[_with_burns]` run `Off`, byte-identical to before. No
+  recording goes through them; the synthetic latency tests use them with burns drawn anywhere.
 - The slot-crop pass also gates, but its crop IS the acceptance region, so for the slot's own ids
   it can never reject. It is there so that no pass admits an echo, by construction.
 - Report-only count: distinct echoes per frame, summed per process
-  (`burn_echo::burn_echo_rejection_count`). The partial carries `burn_echoes_rejected` (additive,
-  no schema bump). The verdict writes `burn_echoes_rejected: {strih, stream,
+  (`burn_echo::burn_echo_rejection_count`). Every partial carries `burn_echoes_rejected`
+  (additive, no schema bump). The verdict writes `burn_echoes_rejected: {strih, stream, imag, cg,
   gates_overall_pass: false}`, null when not carried.
 
 Rules for a future change here:
-- A synthetic decode test that goes through the GROUPED decode must draw every node burn at its
-  real slot (`qr::cam1_burn_origin` for a camera burn, `slot_rect` for a corner). A camera burn
-  drawn in a corner is an echo now. `grouped_gate_fast_path_when_deployed_camera_is_cam3_not_cam1`
-  was moved to the camera slot for exactly this reason.
+- A synthetic decode test that goes through the GROUPED decode or any `analyze_recording*` must
+  draw every node burn at its real slot (`qr::cam1_burn_origin` for a camera burn, `slot_rect`
+  for a corner). A camera burn drawn in a corner is an echo now. Two tests were fixed for this:
+  `grouped_gate_fast_path_when_deployed_camera_is_cam3_not_cam1` draws cam3 at the camera slot,
+  and `analyze_recording_recovers_a_softened_bottom_burn` uses strih's id for its bottom-left burn.
 - Before changing the slot geometry or the pad, re-run the fixture sweep. Every real decode
   fixture (20 frames: burn-reframed-1370, burn-unreadable incl. two 4K, optical-soft, the #754
   sweep frame, qr-align-moire-1239, tear-781) had ZERO slotted reads outside its own slot. The
@@ -135,4 +140,4 @@ Rules for a future change here:
   production regions (full, top band, halves, tiles, slot crops).
 - A frame's echoes can hold the CURRENT id if a monitor shows the program with no delay. The echo
   list then has an identity that also counts from the slot. That is harmless: the count is a
-  diagnostic, and the slot read is the burn.
+  diagnostic, and the slot read is the burn (gating before the id merge is what keeps it).

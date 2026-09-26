@@ -667,17 +667,29 @@ pub(crate) fn binarize_otsu(img: &GrayImage) -> GrayImage {
 /// "undecodable frame" outcome) — this changes crash-vs-no-crash, never any pass/fail
 /// semantics of the zero-loss verdict itself.
 pub fn decode_qr_luma_all(img: GrayImage) -> Vec<Payload> {
-    burn_echo::payloads(decode_qr_luma_all_located(img))
-}
-
-/// [`decode_qr_luma_all`] with each payload's grid centre in `img` pixels (issue 1367): the same
-/// plain ∪ Otsu passes and keep-first merge, so its payloads are exactly `decode_qr_luma_all`'s.
-pub fn decode_qr_luma_all_located(img: GrayImage) -> Vec<LocatedPayload> {
-    let mut out = rqrr_decode_all_catch(img.clone());
+    let (plain, otsu) = plain_and_otsu_reads(img);
+    let mut out = burn_echo::payloads(plain);
     // The hard Otsu cut recovers the soft optical capture the plain adaptive prepare misses,
     // even when the plain pass already decoded the crisp burns (#363).
-    burn_echo::merge_located(&mut out, rqrr_decode_all_catch(binarize_otsu(&img)));
+    merge_payloads(&mut out, burn_echo::payloads(otsu));
     out
+}
+
+/// The two passes of [`decode_qr_luma_all`] (plain, then Otsu-binarized), each read with its
+/// grid centre in `img` pixels and nothing merged yet.
+fn plain_and_otsu_reads(img: GrayImage) -> (Vec<LocatedPayload>, Vec<LocatedPayload>) {
+    let otsu = binarize_otsu(&img);
+    (rqrr_decode_all_catch(img), rqrr_decode_all_catch(otsu))
+}
+
+/// Every read of [`decode_qr_luma_all`]'s two passes, plain then Otsu, with its grid centre in
+/// `img` pixels and NO identity merge (issue 1367). The echo gate must judge every read before
+/// reads merge: a keep-first merge could otherwise keep an echo of a burn and drop the in-slot
+/// read of the same id. Merged keep-first after gating, the payloads equal `decode_qr_luma_all`'s.
+pub fn decode_qr_luma_all_reads(img: GrayImage) -> Vec<LocatedPayload> {
+    let (mut reads, otsu) = plain_and_otsu_reads(img);
+    reads.extend(otsu);
+    reads
 }
 
 /// Tile-scoped twin of [`decode_qr_luma_all`] for the #202 tile passes (plain pass, then an
@@ -932,7 +944,7 @@ fn tile_pass_reads(img: &GrayImage) -> Vec<LocatedPayload> {
 /// the bottom burns' SLOTS, it never adds a real node burn — `out` stays a strict SUPERSET of
 /// what it carried on entry — so it is safe to fire without knowing which run_id the optical is
 /// (pin-independent). It CAN read a node burn's optical ECHO when a camera films a monitor showing
-/// OBS (issue 1367, cam2 on the strih-lx HDMI multiview); the camera-chain decode gates those out
+/// OBS (issue 1367, cam2 on the strih-lx HDMI multiview); the recording decode gates those out
 /// ([`crate::probe::burn_echo`]). This is the top-band twin of [`robust_tile_passes`] (which
 /// crops the BOTTOM band for the small burns); see [`OPTICAL_TOP_BAND_FRAC`] for the #751/#754
 /// root cause and the 30/30-vs-0/30 offline measurement that fixes the band fraction.
@@ -954,7 +966,7 @@ fn top_band_reads(img: &GrayImage) -> Vec<LocatedPayload> {
     // Same size as the source when the frac rounds to the full height — still a valid, cheap
     // second look (Otsu over the whole frame), never a panic.
     let band = image::imageops::crop_imm(img, 0, 0, w, band_h).to_image();
-    decode_qr_luma_all_located(band)
+    decode_qr_luma_all_reads(band)
 }
 
 /// #754 — is the plain full-frame pass SHORT of the optical dual-QR, i.e. does the top-band
@@ -1074,9 +1086,10 @@ pub fn decode_qr_luma_all_fast_then_robust_pathed(
     expected_burn_run_ids: &[u32],
 ) -> (Vec<Payload>, DecodePath) {
     // Every id in `expected_burn_run_ids` is MANDATORY (an empty `any_of` group is vacuously
-    // satisfied) — this is the pre-#632 behavior, unchanged for every existing caller. The
-    // single-group decode (imag, cg, the cam1 grab, the diagnostic tools) keeps every read
-    // wherever it was found: issue 1367's echo gate is the camera-chain decode's (strih/stream).
+    // satisfied) — this is the pre-#632 behavior, unchanged for every existing caller. This
+    // per-frame helper keeps every read wherever it was found (issue 1367 `Off`): no recording
+    // goes through it (`recording::analyze_recording*` runs the gated grouped decode), and tests
+    // use it with node burns drawn at arbitrary positions on synthetic canvases.
     let d = decode_qr_luma_all_fast_then_robust_gated(
         img,
         expected_burn_run_ids,
@@ -1141,8 +1154,9 @@ pub fn decode_qr_luma_all_fast_then_robust_grouped_pathed(
 /// recordings matched a REAL painted tick exactly — zero hallucinated/misread values — so this
 /// is a decode-COVERAGE gap, never a decoder-correctness bug; see #707's own issue thread).
 ///
-/// issue 1367: this is the camera-chain decode (the strih and stream recordings), so it runs the
-/// node-burn echo gate ([`NodeBurnGate::OwnSlot`], see [`crate::probe::burn_echo`]).
+/// issue 1367: this is the decode behind every recording analysis (`recording::analyze_recording*`:
+/// strih, stream, imag, cg, the cam1 grab), so it runs the node-burn echo gate
+/// ([`NodeBurnGate::OwnSlot`], see [`crate::probe::burn_echo`]).
 pub fn decode_qr_luma_all_fast_then_robust_grouped_pathed_optical(
     img: GrayImage,
     mandatory_burn_run_ids: &[u32],
@@ -1173,10 +1187,14 @@ pub fn decode_qr_luma_all_fast_then_robust_gated(
     gate: NodeBurnGate,
 ) -> burn_echo::FrameDecode {
     let (w, h) = (img.width(), img.height());
-    let (mut out, first_echoes) =
-        burn_echo::split_node_burn_echoes(decode_qr_luma_all_located(img.clone()), w, h, gate);
+    // The full-frame pass (plain, then Otsu), gated read by read before anything merges: under
+    // `Off` this is exactly `decode_qr_luma_all` (the plain reads as they came, Otsu merged
+    // keep-first).
+    let (plain, otsu) = plain_and_otsu_reads(img.clone());
+    let (mut out, plain_echoes) = burn_echo::split_node_burn_echoes(plain, w, h, gate);
     let mut echoes = Vec::new();
-    merge_payloads(&mut echoes, first_echoes);
+    merge_payloads(&mut echoes, plain_echoes);
+    burn_echo::admit_reads(&mut out, &mut echoes, otsu, w, h, gate);
 
     // #754: the SOFT optical dual-QR (top band) is missed by the full-frame plain pass on late
     // #751-sweep frames (rqrr locates the grid but the full-frame perspective/threshold decode
@@ -2331,7 +2349,7 @@ mod tests {
         // burns, as a real strih recording under cam3 test would carry: cam3's forwarded
         // capture burn + strih's own render burn). `dual_with_bottom_burn` only blits one
         // burn, so blit the camera burn manually where a real one sits: the capture-burn
-        // slot, bottom-centre (issue 1367: the camera-chain decode counts a node burn only
+        // slot, bottom-centre (issue 1367: the recording decode counts a node burn only
         // in its own slot, so a camera burn drawn in the stream corner is an echo).
         let strih_burn = Payload {
             run_id: STRIH_ID,

@@ -25,7 +25,7 @@
 //! - A run_id without a reserved slot (the aux marks, SongPlayer, an operator override) is never
 //!   localized, so it costs nothing here.
 //! - issue 1367: each read is placed on the frame and kept only inside its own slot, like every
-//!   other pass of the camera-chain decode (`probe::burn_echo`). The slot crop IS that
+//!   other pass of the recording decode (`probe::burn_echo`). The slot crop IS that
 //!   acceptance region, so for the slot's own ids this can never reject; it holds the "no pass
 //!   admits an echo" invariant by construction.
 //!
@@ -37,7 +37,7 @@
 use crate::burn_regions::{node_burn_in_own_slot, recovery_crop, recovery_slots, slot_for_run_id};
 use crate::probe::burn_echo::{reads_in_frame, LocatedPayload};
 use crate::probe::payload::Payload;
-use crate::probe::qr::{decode_qr_luma_all_located, merge_payloads};
+use crate::probe::qr::{decode_qr_luma_all_reads, merge_payloads};
 use crate::probe::recording_latency::{AUX_TICK_RUN_ID, BURN_RUN_ID_SONGPLAYER};
 use image::GrayImage;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -113,7 +113,7 @@ pub fn burn_region_passes(img: &GrayImage, missing_run_ids: &[u32], out: &mut Ve
         };
         let crop = image::imageops::crop_imm(img, r.x, r.y, r.w, r.h).to_image();
         // Reads in frame pixels, so the issue-1367 own-slot check below sees where they sit.
-        let first = reads_in_frame(decode_qr_luma_all_located(crop.clone()), r.x, r.y, 1.0, 1.0);
+        let first = reads_in_frame(decode_qr_luma_all_reads(crop.clone()), r.x, r.y, 1.0, 1.0);
         // One slot carries one burn: if the 1x look read THIS slot's burn under a run_id that is
         // not missing (for example the deployed camera while the others are "missing"), a 2x
         // look cannot find a missing one there.
@@ -140,7 +140,7 @@ pub fn burn_region_passes(img: &GrayImage, missing_run_ids: &[u32], out: &mut Ve
             );
             let back = 1.0 / f64::from(BURN_REGION_UPSCALE);
             found = keep_wanted(reads_in_frame(
-                decode_qr_luma_all_located(upscaled),
+                decode_qr_luma_all_reads(upscaled),
                 r.x,
                 r.y,
                 back,

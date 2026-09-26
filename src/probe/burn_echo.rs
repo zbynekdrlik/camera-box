@@ -1,4 +1,4 @@
-//! issue 1367 — the node-burn ECHO gate of the camera-chain recording decode.
+//! issue 1367 — the node-burn ECHO gate of the recording decode.
 //!
 //! A node burn (a camera capture burn or an OBS render burn) is a crisp overlay at ONE known place
 //! on the recorded frame: its slot in [`crate::burn_regions`]. A camera that films a monitor showing
@@ -12,13 +12,17 @@
 //! The gate: every decode pass keeps the centre of each rqrr grid ([`LocatedPayload`], in frame
 //! pixels), and [`split_node_burn_echoes`] lets a slotted run_id through only when that centre lies
 //! in its own slot plus the pad ([`crate::burn_regions::node_burn_in_own_slot`]). Anything else of
-//! that run_id is an echo and never merges. The optical dual-QR, the aux marks and every other
-//! unslotted payload pass untouched.
+//! that run_id is an echo and never merges. Every read is judged BEFORE reads merge by id, so an
+//! echo that carries the current id cannot shadow the in-slot read. The optical dual-QR, the aux
+//! marks and every other unslotted payload pass untouched.
 //!
-//! The camera-chain decode (`qr::decode_qr_luma_all_fast_then_robust_grouped_pathed_optical`, the
-//! strih and stream recordings) applies it after every pass: the full frame, the #754 top band, the
-//! #202 tiles and the issue-1370 slot crops. The single-group decode (imag, cg, the cam1 grab, the
-//! generic diagnostic tools) runs with [`NodeBurnGate::Off`], byte-identical to before.
+//! Every recording analysis runs it (`qr::decode_qr_luma_all_fast_then_robust_grouped_pathed_optical`
+//! behind `probe::recording::analyze_recording*`: strih, stream, imag, cg, the cam1 grab, the
+//! A/V and forensic tools), after every pass: the full frame, the #754 top band, the #202 tiles
+//! and the issue-1370 slot crops. Only the per-frame helpers
+//! `qr::decode_qr_luma_all_fast_then_robust[_pathed]` (and `recording::decode_recording_frame*`
+//! on top of them) run [`NodeBurnGate::Off`], byte-identical to before: no recording goes
+//! through them, and tests use them with node burns drawn at arbitrary positions.
 //!
 //! The rejected echoes are counted per process ([`burn_echo_rejection_count`]): distinct echo
 //! payloads per frame, summed. The extract carries the count in its partial and the verdict reports
@@ -42,7 +46,7 @@ pub struct FrameDecode {
 /// Whether a decode lets a slotted node burn through only from its own slot.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NodeBurnGate {
-    /// The camera-chain decode: a slotted node burn counts only inside its own slot + pad.
+    /// The recording decode: a slotted node burn counts only inside its own slot + pad.
     OwnSlot,
     /// Every CRC-valid payload counts wherever it was read (the pre-issue-1367 behaviour).
     Off,
@@ -88,20 +92,6 @@ pub fn payloads(reads: Vec<LocatedPayload>) -> Vec<Payload> {
     reads.into_iter().map(|r| r.payload).collect()
 }
 
-/// Merge `add` into `into`, keeping each distinct `(run_id, frame_id)` once and the FIRST read's
-/// position: the located twin of `qr::merge_payloads`, with the same keep-first rule.
-pub fn merge_located(into: &mut Vec<LocatedPayload>, add: Vec<LocatedPayload>) {
-    for r in add {
-        let p = r.payload;
-        if !into
-            .iter()
-            .any(|q| q.payload.run_id == p.run_id && q.payload.frame_id == p.frame_id)
-        {
-            into.push(r);
-        }
-    }
-}
-
 /// Split the reads of one pass (frame pixels, on a `frame_w`x`frame_h` frame) into the payloads
 /// that count and the node-burn echoes, both in read order. Under [`NodeBurnGate::Off`] every read
 /// counts and there are no echoes.
@@ -141,7 +131,7 @@ pub(crate) fn admit_reads(
     merge_payloads(echoes, rejected);
 }
 
-/// Process-wide count of node-burn echoes the camera-chain decode rejected (distinct payloads per
+/// Process-wide count of node-burn echoes the recording decode rejected (distinct payloads per
 /// frame, summed). The extract reads it once at the end; tests assert on the per-call echoes
 /// instead, since a global counter races concurrent tests.
 static BURN_ECHOES_REJECTED: AtomicU64 = AtomicU64::new(0);
@@ -227,22 +217,26 @@ mod tests {
     }
 
     #[test]
-    fn merge_located_keeps_the_first_read_of_each_identity_1367() {
-        let mut into = vec![at(p(911_009, 51769), 963.0, 916.0)];
-        merge_located(
-            &mut into,
+    fn every_read_is_judged_before_ids_merge_1367() {
+        // A zero-delay echo can carry the CURRENT id. Read first, it must not shadow the in-slot
+        // read of the same id: the in-slot read counts, the echo is recorded, each id once.
+        let mut out = vec![p(386_740_541, 47817)];
+        let mut echoes = Vec::new();
+        admit_reads(
+            &mut out,
+            &mut echoes,
             vec![
-                at(p(911_009, 51769), 1.0, 1.0),
-                at(p(911_009, 51761), 1442.0, 453.0),
-                at(p(911_009, 51761), 2.0, 2.0),
-            ],
-        );
-        assert_eq!(
-            into,
-            vec![
+                at(p(911_009, 51769), 1442.0, 453.0),
                 at(p(911_009, 51769), 963.0, 916.0),
-                at(p(911_009, 51761), 1442.0, 453.0)
-            ]
+                at(p(911_009, 51769), 964.0, 915.0),
+                at(p(911_009, 51761), 1442.0, 453.0),
+                at(p(911_009, 51761), 1441.0, 454.0),
+            ],
+            1920,
+            1080,
+            NodeBurnGate::OwnSlot,
         );
+        assert_eq!(out, vec![p(386_740_541, 47817), p(911_009, 51769)]);
+        assert_eq!(echoes, vec![p(911_009, 51769), p(911_009, 51761)]);
     }
 }

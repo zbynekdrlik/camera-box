@@ -221,8 +221,9 @@ fn optical_and_aux_payloads_are_untouched_1367() {
 }
 
 /// The rejected echoes are reported (the count the verdict carries), and they are exactly what the
-/// gate removed: with the gate OFF — the pre-issue-1367 decode, still used by the single-group
-/// decode — the same frame keeps the echoes, so it is the gate and nothing else that drops them.
+/// gate removed: with the gate OFF — the pre-issue-1367 decode, still what the per-frame test
+/// helpers run — the same frame keeps the echoes, so it is the gate and nothing else that drops
+/// them.
 #[test]
 fn the_gate_reports_the_echoes_it_rejected_and_off_keeps_them_1367() {
     for case in cases() {
