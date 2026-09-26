@@ -151,7 +151,7 @@ Grading 1.11.0 on the step bound would let a master that stopped correcting read
 - **Fixtures.** `strih-lx-master-1.11.0.json` / `stream-slave-1.11.0.json` are SYNTHESIZED from
   the live 1.9.0 captures. They add the 1.10.0 slew fields plus the 1.11.0 micro fields in
   dantesync's own `src/status.rs` order, and set the master error to -2.14 ms. Replace them with a
-  real read-only capture after the fleet roll. The pin (`DANTESYNC_VERSION_PIN`) is 1.11.0.
+  real read-only capture after the fleet roll. The pin (`DANTESYNC_VERSION_PIN`) is 1.11.1 (1.11.1 = every clock step lands exactly, dantesync PR 122).
 
 **Live check (read-only, allowed):** `DANTESYNC_GATE_GM_ENFORCE=1 DANTESYNC_GATE_PHASE_SLEW_ENFORCE=1
 scripts/dantesync-gate.sh --linux "" --win-http strih=10.77.9.202 --win-http stream=10.77.9.204`

@@ -281,7 +281,7 @@ def test_date_master_check_keeps_the_step_bound_line_for_a_1_10_0_master(tmp_pat
 
 def test_the_version_pin_is_the_release_this_date_grading_implements():
     body = (_ROOT / "scripts" / "dantesync-version-gate.sh").read_text()
-    assert 'DANTESYNC_VERSION_PIN="${DANTESYNC_VERSION_PIN:-1.11.0}"' in body
+    assert 'DANTESYNC_VERSION_PIN="${DANTESYNC_VERSION_PIN:-1.11.1}"' in body
 
 
 # ---------------------------------------------------------------------------------------------
