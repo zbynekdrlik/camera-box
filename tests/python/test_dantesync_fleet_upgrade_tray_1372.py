@@ -97,6 +97,8 @@ def test_the_tray_is_backed_up_replaced_and_its_installed_sha_verified(ps):
     swap = ps[_at(ps, "# 5. the tray"):]
     assert "$trayPre = 'C:\\Program Files\\DanteSync\\dantesync-tray.exe.pre-1.11.1'" in ps
     backup = _at(swap, "Copy-Item -Force $trayExe $trayPre")
+    # review round 1: a re-run on the same target never overwrites the original pre-roll backup
+    assert _at(swap, "if (-not (Test-Path $trayPre)) {") < backup
     replace = _at(swap, "Copy-Item -Force $trayTmp $trayExe")
     verify = _at(swap, "(Get-FileHash -Algorithm SHA256 $trayExe).Hash")
     assert backup < replace < verify, swap
@@ -105,15 +107,48 @@ def test_the_tray_is_backed_up_replaced_and_its_installed_sha_verified(ps):
 
 
 def test_the_tray_is_relaunched_through_a_temporary_builtin_users_task(ps):
+    relaunch = ps[_at(ps, "# 6. relaunch the tray"):]
+    # BUILTIN\Users by its well-known SID: the account NAME is localized (review round 1)
+    assert "BUILTIN\\Users" in relaunch
+    principal = _at(relaunch, "New-ScheduledTaskPrincipal -GroupId 'S-1-5-32-545' -RunLevel Limited")
+    # Task Scheduler defaults would refuse a laptop on battery and time the tray out (review round 1)
+    settings = _at(relaunch, "New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries "
+                             "-DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero)")
+    register = _at(relaunch, "Register-ScheduledTask -TaskName $trayTask -Action $trayAction "
+                             "-Principal $trayPrincipal -Settings $traySettings")
+    start = _at(relaunch, "Start-ScheduledTask -TaskName $trayTask")
+    fin = _at(relaunch, "} finally {", start)
+    unregister = _at(relaunch, "Unregister-ScheduledTask -TaskName $trayTask -Confirm:$false -ErrorAction Stop", fin)
+    assert principal < register and settings < register < start < fin < unregister, relaunch
+    noted = relaunch[unregister:]
+    assert "$trayNotes += ('the temporary task " in noted[:400], noted[:400]
+    assert "-Execute $trayExe" in relaunch
+    assert "-Password" not in relaunch and "-User " not in relaunch
+
+
+def test_the_tray_is_relaunched_whenever_it_was_stopped(ps):
+    """Review round 1: a failed backup, replace or sha check must never leave the operator without
+    a tray -- the relaunch is its own step, run whenever the running tray was stopped."""
+    swap_start = _at(ps, "# 5. the tray")
+    relaunch = _at(ps, "# 6. relaunch the tray", swap_start)
+    stop = _at(ps, "Stop-Process -Force", swap_start)
+    flag = _at(ps, "$trayStopped = $true", stop)
+    assert stop < flag < relaunch
+    swap = ps[swap_start:relaunch]
+    assert "} catch {" in swap and "Register-ScheduledTask" not in swap
+    assert _at(ps, "if ($trayStopped) {", relaunch) < _at(ps, "Register-ScheduledTask", relaunch)
+
+
+def test_a_tray_already_on_the_release_is_left_running(ps):
+    """Review round 1: only the small .sha256 is fetched first; a tray already on the release is
+    neither downloaded again nor restarted, so a re-run (or a SAME node) costs nothing."""
+    fetch = ps[_at(ps, "$trayUrl = "):_at(ps, "# 2. back up the current exe")]
+    sha_dl = _at(fetch, "($trayUrl + '.sha256')")
+    current = _at(fetch, "(Get-FileHash -Algorithm SHA256 $trayExe).Hash -eq $trayExpected")
+    exe_dl = _at(fetch, "-Uri $trayUrl -OutFile $trayTmp")
+    assert sha_dl < current < exe_dl, fetch
     swap = ps[_at(ps, "# 5. the tray"):]
-    principal = _at(swap, "New-ScheduledTaskPrincipal -GroupId 'BUILTIN\\Users' -RunLevel Limited")
-    register = _at(swap, "Register-ScheduledTask -TaskName $trayTask")
-    start = _at(swap, "Start-ScheduledTask -TaskName $trayTask")
-    fin = _at(swap, "} finally {", start)
-    unregister = _at(swap, "Unregister-ScheduledTask -TaskName $trayTask -Confirm:$false", fin)
-    assert principal < register < start < fin < unregister, swap
-    assert "-Execute $trayExe" in swap
-    assert "-Password" not in swap and "-User " not in swap
+    assert "-not $trayCurrent" in swap and "already on sha256" in swap
 
 
 def test_the_relaunch_is_verified_as_one_tray_process_in_an_interactive_session(ps):
@@ -159,15 +194,46 @@ def test_help_documents_the_tray_arm(tmp_path):
     assert "Exit codes" in r.stdout
 
 
+def test_help_never_prints_the_default_ssh_password(tmp_path):
+    """Review round 1: --help prints the whole header now, so the header must not carry the value."""
+    default = re.search(r'SSH_PASS="\$\{SSH_PASS:-([^}]*)\}"', _UPGRADE.read_text()).group(1)
+    r = subprocess.run(["bash", str(_UPGRADE), "--help"], capture_output=True, text=True)
+    assert "SSH_PASS" in r.stdout
+    assert default not in r.stdout
+
+
+def test_the_tray_only_program_fetches_and_swaps_without_touching_the_service(tmp_path):
+    r = _source(tmp_path, "dantesync_windows_tray_only_ps 1.11.1")
+    prog = r.stdout
+    assert prog.startswith("$ErrorActionPreference = 'Stop'"), prog[:80]
+    assert "v1.11.1/dantesync-tray-windows-amd64.exe" in prog
+    assert "# 5. the tray" in prog and "# 6. relaunch the tray" in prog and "TRAY-WARNING:" in prog
+    for service in ("Stop-Service", "Start-Service", "dantesync-windows-amd64.exe", "--version"):
+        assert service not in prog, service
+
+
+def test_the_tray_arm_lives_in_its_own_lib():
+    """Review round 1: the upgrade script stays under the ~1000-line budget; the emitted tray
+    program and its outcome parser are their own sourced lib."""
+    lib = (_ROOT / "scripts" / "lib" / "dantesync-tray-upgrade.sh").read_text()
+    upgrade = _UPGRADE.read_text()
+    for fn in ("dantesync_windows_tray_fetch_ps", "dantesync_windows_tray_swap_ps",
+               "dantesync_windows_tray_only_ps", "dantesync_tray_outcome"):
+        assert f"{fn}() {{" in lib and f"{fn}() {{" not in upgrade, fn
+    assert '. "$HERE/lib/dantesync-tray-upgrade.sh"' in upgrade
+    assert len(upgrade.splitlines()) <= 1000, len(upgrade.splitlines())
+
+
 # ---------------------------------------------------------------------------------------------
 # the orchestrator, end to end: a stateful sshpass stub stands in for the Windows node
 # ---------------------------------------------------------------------------------------------
 
-def _stubs(tmp_path, program_out):
+def _stubs(tmp_path, program_out, start="1.11.0", flip=True):
     b = tmp_path / "bin"
     b.mkdir()
     state = tmp_path / "version"
-    state.write_text("1.11.0")
+    state.write_text(start)
+    flip_to = _TARGET if flip else start
     (tmp_path / "program_out.txt").write_text(program_out)
     (b / "sshpass").write_text(
         "#!/usr/bin/env bash\n"
@@ -176,7 +242,7 @@ def _stubs(tmp_path, program_out):
         'last="${!#}"\n'
         'if [ "$tool" = scp ]; then cp "${@: -2:1}" "' + str(tmp_path / "uploaded.ps1") + '"; exit 0; fi\n'
         'case "$last" in\n'
-        '  *-File*) echo "' + _TARGET + '" > "' + str(state) + '"; cat "' + str(tmp_path / "program_out.txt") + '" ;;\n'
+        '  *-File*) echo "' + flip_to + '" > "' + str(state) + '"; cat "' + str(tmp_path / "program_out.txt") + '" ;;\n'
         '  *--version*) echo "dantesync $(cat "' + str(state) + '")" ;;\n'
         "  *) exit 255 ;;\n"
         "esac\n")
@@ -196,8 +262,8 @@ def _fresh_slave(tmp_path):
     return p
 
 
-def _roll(tmp_path, program_out):
-    b = _stubs(tmp_path, program_out)
+def _roll(tmp_path, program_out, start="1.11.0", flip=True, extra=()):
+    b = _stubs(tmp_path, program_out, start, flip)
     env = {k: v for k, v in os.environ.items()
            if not k.startswith(("DANTESYNC_", "OBS_FLEET", "CAMBOX_OFFLINE_ACK", "RIG_GRANDMASTER", "GATE_"))}
     env.update({
@@ -213,8 +279,8 @@ def _roll(tmp_path, program_out):
         "DANTESYNC_SAMPLE_WINDOW_S": "0",
         "DANTESYNC_SAMPLE_MIN_DISTINCT": "1",
     })
-    return subprocess.run(["bash", str(_UPGRADE), "--win", "stream=user@10.77.9.204", "--target", _TARGET],
-                          capture_output=True, text=True, env=env)
+    return subprocess.run(["bash", str(_UPGRADE), "--win", "stream=user@10.77.9.204", "--target", _TARGET,
+                           *extra], capture_output=True, text=True, env=env)
 
 
 def test_roll_reports_a_tray_warning_by_name_and_keeps_the_service(tmp_path):
@@ -236,3 +302,34 @@ def test_roll_with_a_refreshed_tray_prints_no_warning(tmp_path):
     assert r.returncode == 0, out
     assert "[stream] tray OK: dantesync-tray.exe sha256 3C37CB51A064 running in session 1" in out
     assert "NOT refreshed" not in out
+
+
+def test_roll_reports_tray_warnings_on_the_canary_abort_too(tmp_path):
+    """Review round 1: the summary is printed before EVERY exit after the roll started -- here the
+    service verify fails (the version never flips), the canary aborts with exit 10."""
+    r = _roll(tmp_path, "TRAY-WARNING: tray: expected one tray process in an interactive session\n",
+              flip=False)
+    out = r.stdout + r.stderr
+    assert r.returncode == 10, out
+    assert "WARNING: dantesync-tray was NOT refreshed on 1 node" in out, out
+    assert "stream: tray: expected one tray process" in out
+
+
+def test_roll_refreshes_the_tray_of_a_node_already_on_the_target(tmp_path):
+    """Review round 1: a TRAY-WARNING on an earlier roll is repaired by simply re-running it -- a
+    Windows node whose service is already on the target gets the tray-only program."""
+    r = _roll(tmp_path, "TRAY OK: dantesync-tray.exe sha256 3C37CB51A064 running in session 1\n",
+              start=_TARGET)
+    out = r.stdout + r.stderr
+    assert r.returncode == 0, out
+    assert "[stream] tray OK: dantesync-tray.exe sha256 3C37CB51A064 running in session 1" in out
+    uploaded = (tmp_path / "uploaded.ps1").read_text()
+    assert "dantesync-tray-windows-amd64.exe" in uploaded and "Stop-Service" not in uploaded
+
+
+def test_dry_run_names_the_tray_check_and_uploads_nothing(tmp_path):
+    r = _roll(tmp_path, "TRAY OK: x\n", start=_TARGET, extra=("--dry-run",))
+    out = r.stdout + r.stderr
+    assert r.returncode == 0, out
+    assert "DRY-RUN" in out and "tray" in out and "stream" in out
+    assert not (tmp_path / "uploaded.ps1").exists()

@@ -379,6 +379,8 @@ def test_the_table_covers_every_journal_grade():
     ("50000", "", "", "none"), ("50000", "-1", "", "none"), ("50000", "1000", "0", "unknown"),
     ("50000", "1000", "2", "micro:3000"), ("50000", "0", "", "micro:5000"),
     ("50000", "1000", "abc", "unknown"),
+    # review round 1: the margin is capped at 15 digits like the step (bash int64 would wrap)
+    ("50000", "999999999999999", "", "micro:1000000000004999"), ("50000", "9999999999999999", "", "none"),
 ])
 def test_journal_date_grade_edge_inputs_agree_on_both_twins(tmp_path, step, margin, micro, want):
     master = _LIVE_MASTER_1_11.read_text()
