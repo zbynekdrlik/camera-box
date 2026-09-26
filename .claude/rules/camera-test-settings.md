@@ -55,9 +55,9 @@ in `CAMBOX_OFFLINE_ACK` / `rig-fleet.txt` (the existing `cambox-offline-ack.sh` 
 | no | no | null | loud report-only UNVERIFIED (`::warning` annotation + log block) |
 | no | no | pinned | ABORT: named, lists the boxes checked + how to ack |
 
-**The shipped state is `null` everywhere**, because no BMPCC was on USB on any cambox on 25.9.2026
-(issue 1350). So today every run prints the loud UNVERIFIED and continues. It is never a silent
-pass, and never a red.
+**Pinned 26.9.2026**: `iso=8000`, `d002=2160` (1/1000 s at 60 fps), owner-confirmed with the BMPCC on
+cam1 USB. So every run ENFORCES them, and an absent camera ABORTS unless acked `testcam:<reason>`.
+(Until then the shipped state was `null` everywhere, a loud report-only UNVERIFIED.)
 
 **Pinning (a SUPERVISOR step, once the owner plugs the BMPCC USB-C into the source cambox and
 confirms the camera is set right):**
