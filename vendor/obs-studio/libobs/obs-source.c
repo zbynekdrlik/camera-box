@@ -1956,6 +1956,37 @@ static inline int64_t genlock_audio_realized_delay_ns(uint32_t hold_ms, int64_t 
 		return (int64_t)(genlock_audio_present_delay_ns(hold_ms) + (uint64_t)place_err_ns);
 	return genlock_audio_applied_delay_ns(hold_ms, slew_remaining_ns);
 }
+/* issue 1367 (design 5845361166): where a packet SHOULD land, from its RAW stamp -- the timestamp the
+ * source handed OBS, before the 70 ms TS smoothing snapped it onto next_audio_ts_min -- plus the same
+ * timing_adjust, sync_offset, resample_offset and genlock term the ingest adds to in.timestamp. */
+static inline uint64_t genlock_audio_intended_raw_ns(uint64_t raw_ts_ns, uint64_t timing_adjust_ns, int64_t sync_offset_ns,
+						     uint64_t resample_offset_ns, int64_t term_ns)
+{
+	return raw_ts_ns + timing_adjust_ns + (uint64_t)sync_offset_ns - resample_offset_ns + (uint64_t)term_ns;
+}
+/* issue 1367: the ASRC runs in TIMECODE mode only for audio placed at its timecode that reaches the mix
+ * and has a resampler; mbc, every ASIO/WASAPI input and a latency hold keep the arrival servo. */
+static inline bool genlock_audio_asrc_timecode(int mode, bool monitor_only, bool can_resample)
+{
+	return mode == GENLOCK_AUDIO_HOLD_TIMECODE && !monitor_only && can_resample;
+}
+/* issue 1367: the ASRC's error input (ms): the placement error plus the placement slew still owed (a
+ * hold slew is paid by its own 1000 ppm term, so until then the packet is early by exactly that). */
+static inline double genlock_audio_asrc_error_ms(int64_t place_err_ns, int64_t slew_remaining_ns)
+{
+	return (double)(int64_t)((uint64_t)place_err_ns + (uint64_t)slew_remaining_ns) / 1e6;
+}
+/* issue 1367: a packet's stamp on the OBS monotonic clock (raw NDI timecode + the live offset); its
+ * advance between two appended packets is the timecode ASRC's master block. */
+static inline uint64_t genlock_audio_stamp_mono_ns(uint64_t raw_ts_ns, int64_t off_live_ns)
+{
+	return raw_ts_ns + (uint64_t)off_live_ns;
+}
+/* issue 1367: the signed advance (s) from one stamp to the next (a duplicated slot reads <= 0). */
+static inline double genlock_audio_stamp_interval_s(uint64_t prev_ns, uint64_t now_ns)
+{
+	return (double)(int64_t)(now_ns - prev_ns) / 1e9;
+}
 /* genlock_audio_health: 0=Ok 1=AudioDisabledOnProgram 2=AsrcSaturated 3=PairingOffsetExceeded (above
  * HALF a frame, issue 1367). Precedence matches decide_audio_health() in the Rust authority. */
 static inline int genlock_audio_decide_health(int audio_enabled, int is_program_source, int asrc_saturated,
@@ -1973,6 +2004,30 @@ static inline int genlock_audio_decide_health(int audio_enabled, int is_program_
 			return 3;
 	}
 	return 0;
+}
+
+/* camera-box issue 1367 (design 5845361166): the ASRC of a source whose audio is placed at its NDI
+ * timecode runs HERE, once per placed-or-appended packet, on where the packet landed against its RAW
+ * stamp (err_ms: actual - intended, the owed placement slew excluded) -- never on arrival timing
+ * (asrc_process_audio only reads the servo for such a source). A jump of the error is booked at
+ * ASRC_STEP_RECOVER_PPM (asrc_compensator_observe_placement); the rate regression is fed the stamp
+ * advance between two APPENDED packets as its master block and the previous packet's pre-resample
+ * duration as its raw advance, so a sender's pacing, the network and the receive thread never read as a
+ * rate. A placed packet or a non-positive advance (a duplicated slot) adds no point and never flushes.
+ * The payment this call computes rides on the NEXT packet's resampler (asrc_process_audio takes it). */
+static void asrc_timecode_ingest(obs_source_t *source, uint64_t stamp_mono_ns, double err_ms, bool appended)
+{
+	const bool contiguous = appended && source->asrc_tc_have_prev;
+	const double master_s =
+		contiguous ? genlock_audio_stamp_interval_s(source->asrc_tc_prev_stamp_ns, stamp_mono_ns) : 0.0;
+	double applied_ppm = 0.0;
+	asrc_compensator_set_step_recover_hold(&source->asrc, source->genlock_audio_slew_remaining_ns != 0);
+	asrc_compensator_observe_placement(&source->asrc, err_ms, source->asrc_tc_raw_s * 1000.0, !appended);
+	if (master_s > 0.0)
+		asrc_compensator_compensate(&source->asrc, source->asrc_tc_prev_raw_s, master_s, err_ms, &applied_ppm);
+	source->asrc_tc_prev_stamp_ns = stamp_mono_ns;
+	source->asrc_tc_prev_raw_s = source->asrc_tc_raw_s;
+	source->asrc_tc_have_prev = true;
 }
 
 /* issue 1367: defined with the genlock FIFO further down; the audio ingest below maps a genlock
@@ -2099,6 +2154,25 @@ static void source_output_audio_data(obs_source_t *source, const struct audio_da
 	in.timestamp += (uint64_t)genlock_term_ns;
 	source->genlock_audio_hold_mode = genlock_hold_mode;
 	source->genlock_audio_delay_ms = genlock_hold_ms;
+	/* camera-box issue 1367 (design 5845361166): where this packet SHOULD land -- its RAW timestamp
+	 * (data->timestamp, before the 70 ms TS smoothing above may have snapped in.timestamp onto
+	 * next_audio_ts_min) through the same offsets and the same genlock term. A skipped or duplicated
+	 * sender slot under 70 ms is snapped contiguous, so only the raw stamp shows it. */
+	const uint64_t genlock_intended_ns = genlock_audio_intended_raw_ns(
+		data->timestamp, genlock_timing_adjust, sync_offset, source->resample_offset, genlock_term_ns);
+	/* camera-box issue 1367: a source whose audio is placed at its timecode is judged by the ASRC on that
+	 * placement, not on arrival (asrc_timecode_ingest below); every other source -- mbc, ASIO/WASAPI, a
+	 * latency hold -- keeps the arrival servo byte-identical. Decided before any setpoint shift below,
+	 * which the timecode mode ignores (the placement error already carries a deliberate move). */
+	const bool genlock_asrc_tc =
+		genlock_audio_asrc_timecode(genlock_hold_mode, source->monitoring_type == OBS_MONITORING_TYPE_MONITOR_ONLY,
+					    source->asrc_enabled && source->resampler);
+	if (source->asrc.timecode != genlock_asrc_tc)
+		source->asrc_tc_have_prev = false;
+	asrc_compensator_set_timecode(&source->asrc, genlock_asrc_tc);
+	bool genlock_asrc_measured = false;
+	bool genlock_asrc_appended = false;
+	double genlock_asrc_err_ms = 0.0;
 	/* camera-box #1355 + issue 1367 (ROZHODNUTÉ 5827497952): a CHANGE of the applied audio hold (a
 	 * relock with a new latched depth, the late latency->timecode switch, a pin write, genlock toggled)
 	 * moves this source's placement -- and its ASRC mix-buffer depth -- by the term delta of THIS packet
@@ -2172,17 +2246,24 @@ static void source_output_audio_data(obs_source_t *source, const struct audio_da
 		source->genlock_audio_place_err_seeded = false;
 	if (genlock_action != GENLOCK_AUDIO_ACT_WITHHOLD && source->monitoring_type != OBS_MONITORING_TYPE_MONITOR_ONLY) {
 		/* issue 1367 (live 25.9.2026 12:31): MEASURE where this packet actually lands against where the
-		 * hold meant it to (in.timestamp carries the term). The audit's pairing offset reads the samples
-		 * through it, so a hold that never reached them can no longer read 0. Under audio_buf_mutex,
-		 * so audio_ts and the buffer size are the mixer's consistent pair. */
+		 * hold meant it to. The audit's pairing offset reads the samples through it, so a hold that
+		 * never reached them can no longer read 0. Under audio_buf_mutex, so audio_ts and the buffer
+		 * size are the mixer's consistent pair. Design 5845361166: measured against the RAW-stamp
+		 * intended landing (genlock_intended_ns), BEFORE the 70 ms smoothing -- against the snapped
+		 * in.timestamp a skipped or duplicated slot read 0. The same error, the owed placement slew
+		 * excluded, is the timecode ASRC's input. */
 		if (genlock_audio_mode_active(genlock_hold_mode)) {
 			const uint64_t genlock_actual_ns = genlock_audio_actual_place_ns(
 				push_back && source->audio_ts, source->audio_ts,
 				conv_frames_to_time(sample_rate, source->audio_input_buf[0].size / sizeof(float)), in.timestamp);
+			const int64_t genlock_place_err_ns = genlock_audio_place_error_ns(genlock_actual_ns, genlock_intended_ns);
 			source->genlock_audio_place_err_ns = genlock_audio_place_error_smooth_ns(
-				source->genlock_audio_place_err_ns, genlock_audio_place_error_ns(genlock_actual_ns, in.timestamp),
-				source->genlock_audio_place_err_seeded);
+				source->genlock_audio_place_err_ns, genlock_place_err_ns, source->genlock_audio_place_err_seeded);
 			source->genlock_audio_place_err_seeded = true;
+			genlock_asrc_err_ms =
+				genlock_audio_asrc_error_ms(genlock_place_err_ns, source->genlock_audio_slew_remaining_ns);
+			genlock_asrc_appended = push_back && source->audio_ts;
+			genlock_asrc_measured = true;
 		}
 		if (push_back && source->audio_ts)
 			source_output_audio_push_back(source, &in);
@@ -2191,6 +2272,11 @@ static void source_output_audio_data(obs_source_t *source, const struct audio_da
 	}
 
 	pthread_mutex_unlock(&source->audio_buf_mutex);
+
+	/* camera-box issue 1367 (design 5845361166): the timecode ASRC, fed this packet's placement. */
+	if (genlock_asrc_tc && genlock_asrc_measured)
+		asrc_timecode_ingest(source, genlock_audio_stamp_mono_ns(data->timestamp, genlock_off_live_ns),
+				     genlock_asrc_err_ms, genlock_asrc_appended);
 
 	source_signal_audio_data(source, data, source_muted(source, os_time));
 }
@@ -4701,6 +4787,10 @@ static inline void asrc_process_audio(obs_source_t *source, uint32_t frames, uin
 	if (!source->asrc_enabled || !source->resampler || samples_per_sec == 0)
 		return;
 
+	/* camera-box issue 1367 (design 5845361166): this packet's pre-resample duration, the raw advance
+	 * the timecode ASRC pairs with the stamp advance in the ingest (asrc_timecode_ingest). */
+	source->asrc_tc_raw_s = (double)frames / (double)samples_per_sec;
+
 	/* camera-box #1325: the servo's MASTER basis is os_gettime_ns() -- the monotonic QPC clock
 	 * the OBS audio mixer thread paces its ticks on (media-io/audio-io.c audio_thread:
 	 * start_time = os_gettime_ns()) and that buffered_ms (obs-audio.c audio_input_buf[0].size)
@@ -4750,7 +4840,14 @@ static inline void asrc_process_audio(obs_source_t *source, uint32_t frames, uin
 	/* camera-box issue 1372: a confirmed-step recovery waits while the genlock audio placement slew
 	 * still owes a move on this resampler, so the two never stack past one 1000 ppm pitch budget. */
 	asrc_compensator_set_step_recover_hold(&source->asrc, source->genlock_audio_slew_remaining_ns != 0);
-	asrc_compensator_compensate(&source->asrc, raw_advance_s, master_block_s, buffered_ms, &applied_ppm);
+	/* camera-box issue 1367 (design 5845361166): a source whose audio is placed at its NDI timecode is
+	 * judged per packet by where it lands against its stamp (asrc_timecode_ingest, in
+	 * source_output_audio_data); its arrival timing and buffer depth never drive it. Here it only reads
+	 * the servo. Every other source runs the arrival servo exactly as before. */
+	if (source->asrc.timecode)
+		applied_ppm = source->asrc.applied_ppm;
+	else
+		asrc_compensator_compensate(&source->asrc, raw_advance_s, master_block_s, buffered_ms, &applied_ppm);
 	/* camera-box #1355: an ABSOLUTE setpoint the mixer cannot reach is bounded inside the
 	 * compensator (ASRC_LEVEL_TARGET_UNREACHABLE_WINDOWS of smoothed error outside the restore's exit
 	 * band -> fall back to the live depth). Say so LOUDLY, once per event -- it means this source's
@@ -4794,8 +4891,10 @@ static inline void asrc_process_audio(obs_source_t *source, uint32_t frames, uin
 	 * ASRC_STEP_RECOVER_PPM; that rate rides on the same resampler, in the servo's sign (negated like
 	 * applied_ppm). It is NOT booked out of the TS-smoothing timeline like the placement slew above: the
 	 * lost samples left the timeline behind the source's own stamps, and the stretch is what brings it
-	 * back. 0 on every callback without an owed step. */
-	const double asrc_recover_ppm = source->asrc.step_recover_ppm;
+	 * back. 0 on every callback without an owed step. camera-box issue 1367: in timecode mode the
+	 * servo paid in the previous packet's ingest; this packet carries that payment exactly once. */
+	const double asrc_recover_ppm = source->asrc.timecode ? asrc_compensator_take_step_recover_ppm(&source->asrc)
+							     : source->asrc.step_recover_ppm;
 	if (genlock_slew_ppm != 0.0 || asrc_recover_ppm != 0.0)
 		audio_resampler_set_compensation_ppm(source->resampler, genlock_slew_ppm - applied_ppm - asrc_recover_ppm,
 						     ASRC_COMPENSATION_DISTANCE_MS);
@@ -4829,19 +4928,25 @@ static inline void asrc_process_audio(obs_source_t *source, uint32_t frames, uin
 		 * every callback's buffered_ms over the last closed window -- the tick-free level the loop
 		 * now holds. level= stays the one raw reading, which lands on the 21.33 ms mixer-tick
 		 * sawtooth (sd ~6 ms of pure tick phase). */
+		/* camera-box issue 1367 (design 5845361166): timecode= place_jumps= last_jump_ms= appended AFTER
+		 * the byte-identical 'recover_ms=%.1f (issue 1372)' suffix (parsers extract by name). With
+		 * timecode=1 the level= / level_avg= fields are the packet PLACEMENT error in ms (actual - raw-stamp
+		 * intended) and target= is 0 minus what is still owed; estimated= follows the stamps. */
 		blog(LOG_INFO,
 		     "asrc: source '%s' estimated=%.2fppm applied=%.2fppm outer_bias=%.2fppm "
 		     "cumulative_correction=%.3fms/%.0fs starved_blocks=%u (#803/#806/#960) "
 		     "level=%.1fms target=%.1fms integral=%.3fppm (#1335) "
 		     "steps=%u last_step_ms=%.1f restore=%d (#1335) fallbacks=%u (#1355) "
 		     "level_avg=%.2fms (#1367)"
-		     " recover_ms=%.1f (issue 1372)",
+		     " recover_ms=%.1f (issue 1372)"
+		     " timecode=%d place_jumps=%u last_jump_ms=%.1f (issue 1367)",
 		     obs_source_get_name(source), source->asrc.estimated_ppm, applied_ppm,
 		     source->asrc.outer_bias_ppm, cumulative_correction_ms, ASRC_LOG_INTERVAL_S,
 		     starved_block_count, source->asrc.level_last_ms, source->asrc.level_target_ms,
 		     source->asrc.level_integral_ppm, source->asrc.step_count, source->asrc.last_step_ms,
 		     (int)source->asrc.level_restore, source->asrc.level_fallback_count,
-		     source->asrc.level_avg_ms, source->asrc.step_recover_ms);
+		     source->asrc.level_avg_ms, source->asrc.step_recover_ms, (int)source->asrc.timecode,
+		     source->asrc.place_jump_count, source->asrc.last_place_jump_ms);
 	}
 }
 

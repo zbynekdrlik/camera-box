@@ -40,7 +40,16 @@ impl RealtimeAsrcCompensator {
     /// window and flushes: the regression points, the capture and anything owed were measured on the
     /// other basis. Mirror of the C `asrc_compensator_set_timecode`.
     pub fn set_timecode(&mut self, timecode: bool) {
-        let _ = timecode;
+        if timecode == self.timecode {
+            return;
+        }
+        self.timecode = timecode;
+        self.window_raw_s = 0.0;
+        self.window_master_s = 0.0;
+        self.window_block_count = 0;
+        self.window_level_sum_ms = 0.0;
+        self.window_level_count = 0;
+        self.regression_flush();
     }
 
     /// Issue 1367: whether the servo runs in timecode mode (the C `asrc:` line's `timecode=`).
@@ -58,6 +67,16 @@ impl RealtimeAsrcCompensator {
         self.last_place_jump_ms
     }
 
+    /// Issue 1367: set what is owed to `owed_ms`. The setpoint moves by the change of the owed amount
+    /// (a booked loss lowers it to where the early audio sits, a payment walks it back) and the open
+    /// window's readings move with it, so the window mean stays in one frame.
+    fn step_recover_set(&mut self, owed_ms: f64) {
+        let shift_ms = self.step_recover_ms - owed_ms;
+        self.level_target_ms += shift_ms;
+        self.window_level_sum_ms += shift_ms * f64::from(self.window_level_count);
+        self.step_recover_ms = owed_ms;
+    }
+
     /// Issue 1367 (design 5845361166): observe one packet's placement error `place_err_ms`
     /// (actual − intended, the owed placement slew excluded; negative = the audio sits EARLY) in
     /// timecode mode, BEFORE its reading enters the window. `packet_ms` is the packet's own duration,
@@ -68,7 +87,27 @@ impl RealtimeAsrcCompensator {
     /// (compress) — and paid at `STEP_RECOVER_PPM` by the next accepted calls. Inert outside timecode
     /// mode and before the setpoint is captured. Mirror of the C `asrc_compensator_observe_placement`.
     pub fn observe_placement(&mut self, place_err_ms: f64, packet_ms: f64, placed: bool) {
-        let _ = (place_err_ms, packet_ms, placed, PLACE_JUMP_MIN_MS);
+        if !self.timecode || !self.level_captured {
+            return;
+        }
+        if placed {
+            self.step_recover_set(0.0);
+        }
+        let jump_ms = place_err_ms - (self.level_target_ms + self.level_err_ema_ms);
+        let half_packet_ms = 0.5 * packet_ms;
+        let band_ms = if half_packet_ms > PLACE_JUMP_MIN_MS {
+            half_packet_ms
+        } else {
+            PLACE_JUMP_MIN_MS
+        };
+        if jump_ms.abs() < band_ms {
+            return;
+        }
+        self.step_recover_set(
+            (self.step_recover_ms - jump_ms).clamp(-STEP_RECOVER_MAX_MS, STEP_RECOVER_MAX_MS),
+        );
+        self.place_jump_count = self.place_jump_count.saturating_add(1);
+        self.last_place_jump_ms = jump_ms;
     }
 
     /// Issue 1367: read and clear the recovery rate the last accepted call paid (servo sign). In
@@ -76,7 +115,7 @@ impl RealtimeAsrcCompensator {
     /// resampler carries this payment exactly once. Mirror of the C
     /// `asrc_compensator_take_step_recover_ppm`.
     pub fn take_step_recover_ppm(&mut self) -> f64 {
-        self.step_recover_ppm
+        std::mem::take(&mut self.step_recover_ppm)
     }
 }
 

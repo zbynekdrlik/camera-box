@@ -969,6 +969,12 @@ impl RealtimeAsrcCompensator {
     /// frozen (follow-up 2) instead of the ~1 h at the +-3 ppm rail the plain I term needs (the 18.9.
     /// 12 h series). A sub-band shift arms nothing — the gentle I+P loop absorbs it.
     pub fn shift_level_target(&mut self, delta_ms: f64) {
+        // Issue 1367 (design 5845361166): in timecode mode the level loop reads the PLACEMENT error,
+        // which already moves with every deliberate placement change (the intended landing time
+        // carries the new offset or hold), so a setpoint shift would itself be the error. No-op.
+        if self.timecode {
+            return;
+        }
         // issue #1367: the level loop reads the per-window MEAN. The buffer moves by delta in the
         // same callback as this shift, so the readings already folded into the open window are moved
         // by delta too: the closing mean is then all in the new frame, and the smoothed error sees no
@@ -1167,7 +1173,11 @@ impl RealtimeAsrcCompensator {
                     // sample loss/dup, not a wall-clock-only jump) is BOOKED and paid back at
                     // STEP_RECOVER_PPM — the live 44 ms loss in ≈ 44 s — instead of arming the
                     // proportional restore (3–4 min). Keeps the captured setpoint + integral.
-                    self.step_recover_book(r_s, buf_ms);
+                    // Issue 1367: in timecode mode the re-base only keeps the rate regression clean;
+                    // the placement error books the jump (observe_placement), never this residual.
+                    if !self.timecode {
+                        self.step_recover_book(r_s, buf_ms);
+                    }
                 }
                 rebased = true;
             }
@@ -1244,7 +1254,12 @@ impl RealtimeAsrcCompensator {
                             // to have at lock (that froze a random per-launch A/V level). Re-captured
                             // (to the same absolute value) after every flush/relock; the P term plus the
                             // restore burst the sustained-error arm fires walk the buffer there.
-                            self.level_target_ms = if self.level_absolute {
+                            // Issue 1367: in timecode mode the level is the placement error, whose
+                            // setpoint is 0 (the packet lands where its stamp says), never the
+                            // lock-time depth.
+                            self.level_target_ms = if self.timecode {
+                                0.0
+                            } else if self.level_absolute {
                                 LEVEL_TARGET_MS + self.level_offset_ms
                             } else {
                                 window_level_ms

@@ -1020,6 +1020,14 @@ struct obs_source {
 	struct asrc_compensator asrc;
 	uint64_t asrc_last_wall_ns;
 	bool asrc_has_last_wall;
+	/* camera-box issue 1367 (design 5845361166): the TIMECODE mode of the ASRC -- a source whose audio
+	 * the genlock pairing places at its NDI timecode is judged per packet in source_output_audio_data by
+	 * where it landed against its stamp, and its rate regression is fed the stamp advance between two
+	 * appended packets (asrc_timecode_ingest). Audio thread, same writer as `asrc`. */
+	double asrc_tc_raw_s;           /* this packet's pre-resample duration (asrc_process_audio) */
+	double asrc_tc_prev_raw_s;      /* the previous timecode packet's pre-resample duration */
+	uint64_t asrc_tc_prev_stamp_ns; /* the previous timecode packet's stamp on the OBS monotonic clock */
+	bool asrc_tc_have_prev;         /* a previous timecode packet exists (the rate interval is defined) */
 	pthread_mutex_t audio_actions_mutex;
 	pthread_mutex_t audio_buf_mutex;
 	pthread_mutex_t audio_mutex;
