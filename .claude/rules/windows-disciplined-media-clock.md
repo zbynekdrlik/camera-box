@@ -177,6 +177,15 @@ Gotchas:
   block must be written as `\\n` in a non-raw Python string, or the C `printf` gets a literal line
   break (the `ci-testing-gotchas.md` raw-byte class).
 
+## A fleet DATE step: what reads it now (issue 1372)
+
+Because this clock follows the rate and never a step, a dantesync fleet date step (up to ~50 ms,
+about every 1.8 h under dantesync 1.9.0) moves the wall clock against it at once. Three consumers
+handle that since issue 1372 — the render tick re-grids in ONE tick, the LOCK indicator books the
+step instead of reading it as `qpc_drift`, and the ASRC pays a confirmed sample loss back at
+1000 ppm. See `genlock-wall-step.md`. Never "fix" a date step by making this clock follow steps:
+every media-timestamped quantity (audio mixer, outputs, the ASRC master) would jump with it.
+
 ## Live verification after deploy (supervisor)
 
 - **This needs a FULL bundle, not only the fast obs.dll.** The clock is in obs.dll, but the stamp

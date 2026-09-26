@@ -223,6 +223,20 @@ lowest)**; else LOCKED (green).
   and both `windows-genlock*.yml` pwsh anchors forbid `GENLOCK_QPC_DRIFT_PPM_BOUND` in the widget. The
   separate media-clock term (issue 1372 part D, above) grades the drift GROWTH against 0, with its own
   constants and reason, and never touches the step verdict.
+- **A coordinated dantesync fleet DATE step is BOOKED, not DEGRADED (issue 1372).** Before
+  pushing this tick's sample, the widget asks the parity-gated `genlock_qpc_wall_step_rebase_ms`
+  (GenlockLockState.hpp, right after the verdict ↔ `src/genlock_lock_state.rs::qpc_wall_step_rebase_ms`,
+  parity-gated by `tests/genlock_qpc_wall_step_parity_1372.rs`) whether the jump against the previous
+  sample is a date step: `33 < |jump| ≤ 66 ms` (`GENLOCK_QPC_WALL_STEP_BOOK_MAX_MS`, two frames:
+  dantesync steps the date at a 50 ms error) and fewer than `GENLOCK_QPC_WALL_STEPS_PER_WINDOW` = 1
+  booked in the 300 s window (`genlockQpcBookedSteps`). A booked jump re-bases every older history
+  sample by it and logs ONE `genlock-wall-step:` line; the widget stays LOCKED. The verdict function
+  is unchanged, so a bigger jump (> 66 ms: a clock set, an NTP-fallback step) or a step STORM (a 2nd
+  step in the window) still DEGRADES `qpc_drift`. Why booking is right: the media clock never follows a step by design (issue 1372
+  part A), and the render tick re-grids onto the stepped wall in one tick (`genlock-wall-step.md`),
+  so a date step is no longer the genlock hazard this term was guarding. Anchors:
+  `tests/genlock_lock_indicator_guards.rs::qpc_drift_books_a_fleet_date_step_1372` + the issue-1372
+  pwsh block in both `windows-genlock*.yml`.
 - **A `tests/genlock_lock_json_guards.rs` needle for a REAL C++ quote uses Rust `\"`, not the
   escaped-JSON `\\\"` (#1299 Part 4).** The guards `squish()` the source then `.contains(needle)`.
   A JSON KEY in the builder is an escaped-quote C string literal (`,\"qpc_drift_ppm\":`), so its

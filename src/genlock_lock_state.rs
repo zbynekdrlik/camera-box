@@ -387,6 +387,47 @@ pub fn qpc_drift_beyond_bound(
     }
 }
 
+/// Issue 1372 — the largest single-sample wall jump (ms) the widget BOOKS as a coordinated
+/// dantesync fleet DATE step: two 30 fps frames. dantesync 1.9.0 steps the fleet date when its error
+/// passes 50 ms, so a date step lands at ~50 ms plus the drift of one poll (the live one was
+/// 51.039 ms); 66 ms keeps that with margin and nothing more. A bigger jump (a clock SET, an NTP
+/// fallback step, another clock writer) stays in the history and DEGRADES — the hazard the step
+/// verdict exists for (#1357).
+pub const GENLOCK_QPC_WALL_STEP_BOOK_MAX_MS: i64 = 66;
+/// Issue 1372 — how many wall steps the widget books inside one [`GENLOCK_QPC_WINDOW_S`]. A second
+/// step in the window is a step STORM (dantesync steps the date every ~1.8 h) and keeps DEGRADING.
+pub const GENLOCK_QPC_WALL_STEPS_PER_WINDOW: i64 = 1;
+
+/// Issue 1372 — whether a single-sample wall jump is a BOOKED date step: returns the jump to
+/// re-baseline the widget's qpc history by, or `0` to leave it in the history.
+///
+/// A coordinated dantesync fleet date step (−51 ms live, 25.9.2026 23:17:07 UTC) moves the wall
+/// clock at once while the media clock follows only the dantesync RATE (issue 1372 part A, by
+/// design), and the render tick re-grids onto the stepped wall in ONE tick (`crate::genlock_wall_step`).
+/// Such a step is no genlock hazard any more, so the widget re-baselines its history by the jump,
+/// logs one `genlock-wall-step:` line and stays LOCKED — before issue 1372 it read the step as a
+/// `qpc_drift` hazard for the whole 300 s window (resolume DEGRADED from the step on). Booked only
+/// when `step_bound_ms < |jump| <= book_max_ms` and fewer than `steps_per_window` steps were booked in
+/// the window: a bigger jump and a step STORM stay in the history and still DEGRADE through
+/// [`qpc_drift_beyond_bound`]; a jump within the bound never degrades, so it is not booked either.
+///
+/// Byte-for-byte mirror of `genlock_qpc_wall_step_rebase_ms` in `GenlockLockState.hpp` — the parity
+/// gate `tests/genlock_qpc_wall_step_parity_1372.rs` lifts that function.
+pub fn qpc_wall_step_rebase_ms(
+    jump_ms: i64,
+    step_bound_ms: i64,
+    book_max_ms: i64,
+    booked_in_window: i64,
+    steps_per_window: i64,
+) -> i64 {
+    let mag = jump_ms.saturating_abs();
+    if mag > step_bound_ms && mag <= book_max_ms && booked_in_window < steps_per_window {
+        jump_ms
+    } else {
+        0
+    }
+}
+
 // Issue 1372 part D — the MEDIA-clock (audio clock) term. `os_gettime_ns()` paces OBS's audio mixer,
 // its video thread and every output timestamp. Once issue 1372 part A made the Windows
 // `os_gettime_ns()` run at the dantesync-disciplined system-time rate (Linux's `CLOCK_MONOTONIC` is

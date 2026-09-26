@@ -239,7 +239,7 @@ fn the_asrc_resampler_carries_the_slew_1367() {
             "the consumed step must be handed to the ingest for booking",
         ),
         (
-            "audio_resampler_set_compensation_ppm(source->resampler, genlock_slew_ppm - applied_ppm, ASRC_COMPENSATION_DISTANCE_MS);",
+            "audio_resampler_set_compensation_ppm(source->resampler, genlock_slew_ppm - applied_ppm - asrc_recover_ppm, ASRC_COMPENSATION_DISTANCE_MS);",
             "the slew must ride on the resampler on top of the servo's own (negated) ppm",
         ),
         (

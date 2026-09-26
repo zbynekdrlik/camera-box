@@ -231,6 +231,25 @@ static inline int genlock_qpc_drift_beyond_bound(int rate_ready, long long drift
 	return max_step_ms > step_bound_ms ? 1 : 0;
 }
 
+/* camera-box issue 1372: a single-sample wall STEP that is a coordinated dantesync fleet DATE step
+ * (dantesync 1.9.0 steps the fleet date by up to ~50 ms, about every 1.8 h) is BOOKED: the widget
+ * re-baselines its qpc history by the jump, logs one genlock-wall-step: line and stays LOCKED. The
+ * media clock follows the dantesync RATE and never a step by design (issue 1372 part A), and since
+ * issue 1372 the render tick re-grids onto the stepped wall in one tick, so such a step is no genlock
+ * hazard any more. The hazard the step term exists for stays DEGRADED: a jump beyond book_max_ms (a
+ * clock set, not a date correction) and a second step inside the qpc window (a step storm). Returns
+ * the jump to re-baseline by, or 0 to leave it in the history (a sub-bound jump never degrades
+ * anyway). Mirror of camera_box::genlock_lock_state::qpc_wall_step_rebase_ms; the parity gate
+ * tests/genlock_qpc_wall_step_parity_1372.rs lifts this function. */
+static inline int64_t genlock_qpc_wall_step_rebase_ms(int64_t jump_ms, int64_t step_bound_ms, int64_t book_max_ms,
+						      int64_t booked_in_window, int64_t steps_per_window)
+{
+	const int64_t mag = jump_ms >= 0 ? jump_ms : (jump_ms == INT64_MIN ? INT64_MAX : -jump_ms);
+	if (mag > step_bound_ms && mag <= book_max_ms && booked_in_window < steps_per_window)
+		return jump_ms;
+	return 0;
+}
+
 /* Issue 1372 part D: the MEDIA-clock (audio clock) term. os_gettime_ns() paces the audio mixer, the
  * video thread and every output timestamp; since part A the Windows os_gettime_ns() runs at the
  * dantesync-disciplined rate (Linux's CLOCK_MONOTONIC always did), so the wall-vs-media offset must stay

@@ -162,6 +162,23 @@ extern "C" {
  * ASRC_MAX_PPM. Mirror of src/asrc_bench.rs LEVEL_RESTORE_MAX_PPM -- keep numerically identical. */
 #define ASRC_LEVEL_RESTORE_MAX_PPM 100.0
 
+/* camera-box issue 1372 (ROZHODNUTE 5841039244): the rate, in ppm, at which a CONFIRMED sample-count
+ * step is paid back. A re-based step whose size the buffer level corroborates (a real sample
+ * loss/dup, not a wall-clock-only jump -- the #1335 follow-up-2 corroboration) is booked as an owed
+ * amount and stretched (loss) or compressed (dup) back at exactly this rate: 1000 ppm = 1 ms per
+ * second, so the live 44 ms mbc loss at the 25.9.2026 fleet date step returns in ~44 s instead of the
+ * 3-4 min the proportional +/-100 ppm restore needed. The #1303/#1367 audio placement slew uses the
+ * same pitch budget (GENLOCK_AUDIO_SLEW_PPM). A separate term on top of applied_ppm: ASRC_MAX_PPM and
+ * ASRC_MAX_SLEW_PPM_PER_S are unchanged, and nothing but a confirmed step sets it. Mirror of
+ * src/asrc_bench.rs STEP_RECOVER_PPM -- keep numerically identical. */
+#define ASRC_STEP_RECOVER_PPM 1000.0
+
+/* camera-box issue 1372: the most a confirmed-step recovery may owe, in ms (+/-). A bigger loss is
+ * booked up to this and the rest stays a level error for the ordinary loop (the sustained arm +
+ * restore burst), so a garbage residual can never schedule minutes of pitch shift. Mirror of
+ * src/asrc_bench.rs STEP_RECOVER_MAX_MS -- keep numerically identical. */
+#define ASRC_STEP_RECOVER_MAX_MS 100.0
+
 /* camera-box #1335 follow-up 3: arm band for the FAST level RESTORE when a DELIBERATE setpoint shift
  * (asrc_compensator_shift_level_target) moves level_target_ms, in ms. A shift whose |delta| is at
  * least this arms the restore burst so a deliberate audio sync-offset trim settles in minutes with
@@ -435,6 +452,22 @@ struct asrc_compensator {
 	 * window, in ms -- telemetry (obs-source.c prints it as the asrc: line's level_avg= field; level=
 	 * keeps the one raw reading). Mirror of src/asrc_bench.rs RealtimeAsrcCompensator::level_avg_ms. */
 	double level_avg_ms;
+	/* camera-box issue 1372: the part of a CONFIRMED sample-count step still owed, in ms (+ = the
+	 * buffer lost samples, stretch; - = duplicated samples, compress). Booked at the corroborated
+	 * re-base together with a setpoint move of the same size, paid back at ASRC_STEP_RECOVER_PPM,
+	 * printed as the asrc: line's recover_ms= field. Cleared by a flush and a capture-rule change.
+	 * Mirror of src/asrc_bench.rs RealtimeAsrcCompensator::step_recover_ms. */
+	double step_recover_ms;
+	/* camera-box issue 1372: the recovery rate applied on THIS call, in ppm, servo sign (negative =
+	 * stretch, like applied_ppm); 0 on every call without an owed step. obs-source.c adds it to the
+	 * resampler compensation on top of applied_ppm. Mirror of src/asrc_bench.rs
+	 * RealtimeAsrcCompensator::step_recover_ppm. */
+	double step_recover_ppm;
+	/* camera-box issue 1372: while set, the recovery pays nothing (the owed amount waits).
+	 * obs-source.c sets it while the #1303/#1367 audio placement slew still owes a move on the same
+	 * resampler, so the two never stack past one 1000 ppm pitch budget. Caller state: survives a
+	 * flush. Mirror of src/asrc_bench.rs RealtimeAsrcCompensator::step_recover_hold. */
+	bool step_recover_hold;
 };
 
 /* Reset a servo to its just-constructed state: 0 ppm estimated/applied (assume
@@ -538,6 +571,11 @@ EXPORT void asrc_compensator_set_level_offset_ms(struct asrc_compensator *c, dou
  * next accepted window re-captures under the new rule. Mirror of src/asrc_bench.rs
  * RealtimeAsrcCompensator::set_level_absolute. */
 EXPORT void asrc_compensator_set_level_absolute(struct asrc_compensator *c, bool absolute);
+
+/* camera-box issue 1372: hold (true) or release the confirmed-step recovery; obs-source.c holds it
+ * while the audio placement slew still owes a move. Mirror of src/asrc_bench.rs
+ * RealtimeAsrcCompensator::set_step_recover_hold. */
+EXPORT void asrc_compensator_set_step_recover_hold(struct asrc_compensator *c, bool hold);
 
 #ifdef __cplusplus
 }

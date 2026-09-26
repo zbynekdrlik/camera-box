@@ -4739,6 +4739,9 @@ static inline void asrc_process_audio(obs_source_t *source, uint32_t frames, uin
 	asrc_compensator_set_level_absolute(&source->asrc, !source->genlock_fifo && source->monitoring_type !=
 									       OBS_MONITORING_TYPE_MONITOR_ONLY);
 	asrc_compensator_set_level_offset_ms(&source->asrc, (double)source->last_sync_offset / 1e6);
+	/* camera-box issue 1372: a confirmed-step recovery waits while the genlock audio placement slew
+	 * still owes a move on this resampler, so the two never stack past one 1000 ppm pitch budget. */
+	asrc_compensator_set_step_recover_hold(&source->asrc, source->genlock_audio_slew_remaining_ns != 0);
 	asrc_compensator_compensate(&source->asrc, raw_advance_s, master_block_s, buffered_ms, &applied_ppm);
 	/* camera-box #1355: an ABSOLUTE setpoint the mixer cannot reach is bounded inside the
 	 * compensator (ASRC_LEVEL_TARGET_UNREACHABLE_WINDOWS of smoothed error outside the restore's exit
@@ -4778,8 +4781,15 @@ static inline void asrc_process_audio(obs_source_t *source, uint32_t frames, uin
 	source->genlock_audio_slew_remaining_ns -= genlock_slew_step;
 	source->genlock_audio_slew_step_ns += genlock_slew_step;
 	const double genlock_slew_ppm = genlock_audio_slew_ppm(genlock_slew_step, genlock_slew_dt_ns);
-	if (genlock_slew_ppm != 0.0)
-		audio_resampler_set_compensation_ppm(source->resampler, genlock_slew_ppm - applied_ppm,
+	/* camera-box issue 1372 (ROZHODNUTE 5841039244): a CONFIRMED sample-count step (the stream mbc lost
+	 * 44 ms of Dante samples at the 25.9.2026 fleet date step) is paid back by the compensator at
+	 * ASRC_STEP_RECOVER_PPM; that rate rides on the same resampler, in the servo's sign (negated like
+	 * applied_ppm). It is NOT booked out of the TS-smoothing timeline like the placement slew above: the
+	 * lost samples left the timeline behind the source's own stamps, and the stretch is what brings it
+	 * back. 0 on every callback without an owed step. */
+	const double asrc_recover_ppm = source->asrc.step_recover_ppm;
+	if (genlock_slew_ppm != 0.0 || asrc_recover_ppm != 0.0)
+		audio_resampler_set_compensation_ppm(source->resampler, genlock_slew_ppm - applied_ppm - asrc_recover_ppm,
 						     ASRC_COMPENSATION_DISTANCE_MS);
 	else
 		audio_resampler_set_compensation_ppm(source->resampler, -applied_ppm, ASRC_COMPENSATION_DISTANCE_MS);
@@ -4816,13 +4826,14 @@ static inline void asrc_process_audio(obs_source_t *source, uint32_t frames, uin
 		     "cumulative_correction=%.3fms/%.0fs starved_blocks=%u (#803/#806/#960) "
 		     "level=%.1fms target=%.1fms integral=%.3fppm (#1335) "
 		     "steps=%u last_step_ms=%.1f restore=%d (#1335) fallbacks=%u (#1355) "
-		     "level_avg=%.2fms (#1367)",
+		     "level_avg=%.2fms (#1367)"
+		     " recover_ms=%.1f (issue 1372)",
 		     obs_source_get_name(source), source->asrc.estimated_ppm, applied_ppm,
 		     source->asrc.outer_bias_ppm, cumulative_correction_ms, ASRC_LOG_INTERVAL_S,
 		     starved_block_count, source->asrc.level_last_ms, source->asrc.level_target_ms,
 		     source->asrc.level_integral_ppm, source->asrc.step_count, source->asrc.last_step_ms,
 		     (int)source->asrc.level_restore, source->asrc.level_fallback_count,
-		     source->asrc.level_avg_ms);
+		     source->asrc.level_avg_ms, source->asrc.step_recover_ms);
 	}
 }
 
@@ -5543,8 +5554,9 @@ static inline uint64_t genlock_phase_pin_deadline(uint64_t deadline_ns, uint64_t
 #define GENLOCK_N1_DEEP_MARGIN_FRAMES 2ULL
 /* camera-box issue 1367 (review round 3): the N==1 rule acts only while the render tick's scheduled
  * instant is within this many ns of a grid point -- the render tick's own per-tick slew clamp
- * (GENLOCK_MAX_SLEW_NS, obs-video.c). After a wall-clock step the ticks sit off the grid by the
- * step until the slew pulls them back, and a depth read there is wrong by up to the step. Mirror:
+ * (GENLOCK_MAX_SLEW_NS, obs-video.c). After a wall-clock step the ticks sit off the grid until the
+ * render tick re-grids (one tick since issue 1372, kept pending while a sleep misses it; the 2 ms
+ * slew before it), and a depth read there is wrong by up to the step. Mirror:
  * src/genlock_n1_depth.rs N1_ON_GRID_NS. */
 #define GENLOCK_N1_ON_GRID_NS 2000000ULL /* 2 ms */
 /* camera-box issue 1367 (ROZHODNUTÉ 5827497952): the SHALLOW per-lock depth -- the on-grid present
@@ -6216,8 +6228,9 @@ static bool genlock_should_drain_one(const obs_source_t *source, uint32_t reserv
  * source acts: floor_frames + 2 <= base, floor = wall - newest queued stamp (a shallow cg feed /
  * imag camera is decided by its ARRIVAL, not its pin, and stays byte-identical). Both halves act
  * only while the scheduled tick is ON the grid (genlock_n1_tick_on_grid, review round 3): a
- * wall-clock step leaves the ticks off the grid by the step and the render tick slews back 2 ms per
- * tick, so a read there would shed a frame after a forward step and hold one once back on the grid.
+ * wall-clock step leaves the ticks off the grid until the render tick re-grids (one tick since issue
+ * 1372; a 2 ms-per-tick slew before it), so a read there would shed a frame after a forward step and
+ * hold one once back on the grid.
  * A normal or caught-up late tick is scheduled on its slot, or at most GENLOCK_MAX_SLEW_NS after it
  * (a tick that overran the next grid point by under 2 ms sleeps to that slot + the clamped 2 ms),
  * so it is on the grid; at that +2 ms edge the wall/monotonic read order can defer one tick. */

@@ -98,6 +98,9 @@ private:
 	 * GENLOCK_QPC_WINDOW_S. The qpc_drift verdict keys on the largest single-sample wall STEP in it; the
 	 * windowed RATE it also yields is report-only telemetry (never the unbounded cumulative offset). */
 	std::deque<std::pair<qint64, int64_t>> genlockQpcHistory;
+	/* camera-box issue 1372: monotonic ms of each wall step booked (re-based out of genlockQpcHistory)
+	 * within GENLOCK_QPC_WINDOW_S -- a second one in the window is a step storm and stays DEGRADED. */
+	std::deque<qint64> genlockQpcBookedSteps;
 	/* camera-box issue 1372 part D: (monotonic ms, wall-minus-media offset us) samples the widget takes
 	 * itself each tick, over GENLOCK_MEDIA_CLOCK_WINDOW_S. The media-clock term keys on their RATE (wall
 	 * steps left out): since part A the media clock follows the disciplined wall on every box. */
@@ -131,6 +134,8 @@ private:
 		int discipline = 0;   /* genlock_media_discipline_t */
 	};
 	GenlockMediaClockTick ReduceGenlockMediaClock(qint64 now_ms, bool clock_present);
+	/* camera-box issue 1372: book a fleet date step out of genlockQpcHistory (before the push). */
+	void BookGenlockWallStep(qint64 now_ms, int64_t qpc_signed_ms);
 
 	void UpdateGenlockLabel();
 	void PollGenlockClock();
