@@ -259,6 +259,53 @@ mod tests {
     }
 
     #[test]
+    fn timecode_mode_never_falls_back_to_a_nonzero_setpoint_1367() {
+        // Review round 1: a placement error the loop cannot pull in (this plant ignores the stretch)
+        // for longer than the #1355 unreachable bound. The arrival rule falls back to the live depth;
+        // in timecode mode that would bake a lasting A/V offset in as the new truth, so the setpoint
+        // must stay 0 and no fallback may fire.
+        let mut c = locked_timecode();
+        let windows = f64::from(LEVEL_TARGET_UNREACHABLE_WINDOWS) + 200.0;
+        for _ in 0..(windows / PACKET_S) as usize {
+            c.observe_placement(-8.0, PACKET_MS, false);
+            c.compensate_with_level(PACKET_S, PACKET_S, -8.0);
+            c.take_step_recover_ppm();
+        }
+        assert!(
+            c.level_fallback_count() == 0
+                && !c.take_level_fallback_pending()
+                && c.level_target_ms() == 0.0,
+            "issue 1367: the timecode setpoint stays 0: fallbacks {} target {}",
+            c.level_fallback_count(),
+            c.level_target_ms()
+        );
+    }
+
+    #[test]
+    fn a_jump_at_the_owed_cap_is_not_counted_again_1367() {
+        // Review round 1: once the owed amount sits at the cap, a packet still beyond it books
+        // nothing more, so it must not count as another placement jump either.
+        let mut c = locked_timecode();
+        c.observe_placement(-60.0, PACKET_MS, false);
+        c.observe_placement(-120.0, PACKET_MS, false);
+        assert!(
+            c.step_recover_ms() == STEP_RECOVER_MAX_MS && c.place_jump_count() == 2,
+            "issue 1367: the second jump books up to the cap: owed {} jumps {}",
+            c.step_recover_ms(),
+            c.place_jump_count()
+        );
+        for _ in 0..30 {
+            c.observe_placement(-120.0, PACKET_MS, false);
+        }
+        assert!(
+            c.place_jump_count() == 2 && c.level_target_ms() == -STEP_RECOVER_MAX_MS,
+            "issue 1367: a packet beyond the cap books nothing and counts nothing: jumps {} target {}",
+            c.place_jump_count(),
+            c.level_target_ms()
+        );
+    }
+
+    #[test]
     fn the_arrival_path_is_untouched_outside_timecode_mode_1367() {
         // Two identical servos on an arrival feed: one never touches the timecode API, the other
         // calls it with timecode off. Their state must be bit-identical every call.

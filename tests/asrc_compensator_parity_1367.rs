@@ -8,7 +8,7 @@
 //! otherwise compiled only by the genlock workflows.
 //!
 //! This gate compiles the REAL `asrc-compensator.c` (the whole file, its own header, no stub)
-//! under `-Wall -Wextra -Wconversion -Wformat=2 -Werror`, drives it through four closed-loop
+//! under `-Wall -Wextra -Wconversion -Wformat=2 -Werror`, drives it through five closed-loop
 //! scenarios from a small C `main`, and requires the printed 9-decimal trace to be byte-identical
 //! to the Rust authority driven the same way:
 //!
@@ -32,8 +32,9 @@
 //!   placement at the stamp with an amount still owed (dropped), a no-op setpoint shift, a mode flip,
 //!   a skipped slot before the capture (inert) and a 12 ms stamp jump that re-bases the rate but sits
 //!   under the half-packet band (never booked, by the placement or by the residual). 12/12 scratch C
-//!   mutants of the mode diverge. The three scenarios above never enter the mode, so they stay
-//!   byte-identical to the pre-1367 trace.
+//!   mutants of the mode diverge. `tce` (review round 1): the timecode edges, open loop -- no
+//!   unreachable fallback in the mode, and a jump at the owed cap counted once. The three
+//!   scenarios above never enter the mode, so they stay byte-identical to the pre-1367 trace.
 //!
 //! Per the project's test-strictness rule it FAILS LOUDLY rather than skipping when the C
 //! toolchain is missing — a parity test that silently passes without running is worse than none.
@@ -230,12 +231,42 @@ static void tc_scenario(void)
 	}
 }
 
+/* issue 1367 review round 1: the timecode edges, open loop. A locked servo whose placement error
+ * sits at -8 ms beyond the #1355 unreachable bound (no fallback in timecode mode), then two jumps that
+ * reach the 100 ms owed cap and 30 packets still beyond it (counted once, not per packet). */
+static void tc_edges_scenario(void)
+{
+	const double packet_s = 1600.0 / 48000.0;
+	const double packet_ms = packet_s * 1000.0;
+	struct asrc_compensator c;
+	asrc_compensator_init(&c);
+	asrc_compensator_set_level_absolute(&c, false);
+	asrc_compensator_set_timecode(&c, true);
+	double applied = 0.0;
+	for (long k = 0; k < 82000; k++) {
+		const double err = k < 3600 ? 0.0 : -8.0;
+		asrc_compensator_observe_placement(&c, err, packet_ms, false);
+		asrc_compensator_compensate(&c, packet_s, packet_s, err, &applied);
+		(void)asrc_compensator_take_step_recover_ppm(&c);
+		if (k % 9000 == 8999)
+			tcline("tce", k, &c, 0.0);
+	}
+	printf("tce fallbacks=%u target=%.9f\n", c.level_fallback_count, c.level_target_ms);
+	asrc_compensator_observe_placement(&c, -60.0 - 8.0, packet_ms, false);
+	asrc_compensator_observe_placement(&c, -120.0 - 8.0, packet_ms, false);
+	tcline("tcecap", 0, &c, 0.0);
+	for (long k = 1; k <= 30; k++)
+		asrc_compensator_observe_placement(&c, -120.0 - 8.0, packet_ms, false);
+	tcline("tcecap", 30, &c, 0.0);
+}
+
 int main(void)
 {
 	tick_scenario();
 	shift_scenario();
 	step_scenario();
 	tc_scenario();
+	tc_edges_scenario();
 	return 0;
 }
 "##;
@@ -449,6 +480,35 @@ fn rust_trace() -> Vec<String> {
             }
         }
     }
+    // tce (issue 1367 review round 1): the timecode edges, mirrored statement for statement
+    {
+        let packet_s = 1600.0 / 48000.0;
+        let packet_ms = packet_s * 1000.0;
+        let mut c = RealtimeAsrcCompensator::new();
+        c.set_level_absolute(false);
+        c.set_timecode(true);
+        for k in 0..82000_i64 {
+            let err = if k < 3600 { 0.0 } else { -8.0 };
+            c.observe_placement(err, packet_ms, false);
+            c.compensate_with_level(packet_s, packet_s, err);
+            c.take_step_recover_ppm();
+            if k % 9000 == 8999 {
+                out.push(tcline("tce", k, &c, 0.0));
+            }
+        }
+        out.push(format!(
+            "tce fallbacks={} target={:.9}",
+            c.level_fallback_count(),
+            c.level_target_ms()
+        ));
+        c.observe_placement(-60.0 - 8.0, packet_ms, false);
+        c.observe_placement(-120.0 - 8.0, packet_ms, false);
+        out.push(tcline("tcecap", 0, &c, 0.0));
+        for _ in 1..=30 {
+            c.observe_placement(-120.0 - 8.0, packet_ms, false);
+        }
+        out.push(tcline("tcecap", 30, &c, 0.0));
+    }
     out
 }
 
@@ -564,7 +624,11 @@ fn c_asrc_compensator_matches_the_rust_authority_1367() {
             // books a duplicated slot as a compress (paid at +1000 ppm),
             && r.iter().any(|l| l.starts_with("tc") && l.contains(" recp=1000.000000000"))
             // and leaves the mode (the flip at 27000).
-            && r.iter().any(|l| l.starts_with("tc") && l.contains(" tc=0 ")),
+            && r.iter().any(|l| l.starts_with("tc") && l.contains(" tc=0 "))
+            // review round 1: no unreachable fallback in timecode mode (the setpoint stays 0) ...
+            && r.iter().any(|l| l == "tce fallbacks=0 target=0.000000000")
+            // ... and a jump at the owed cap counts once (two jumps, then 30 packets beyond the cap).
+            && r.iter().any(|l| l.starts_with("tcecap k=30 ") && l.contains(" jumps=2 ")),
         "#1367: the parity scenarios no longer exercise the restore burst and a step re-base \
          ({} lines) — the gate would pass on a trace that skips the paths it guards",
         r.len()
