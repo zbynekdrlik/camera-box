@@ -416,6 +416,13 @@ mod genlock_wall_step_bench;
 // `tests/os_clock_discipline_parity_1372.rs`, which lifts it and runs it on a fake Win32 layer.
 pub mod os_clock_discipline;
 
+// Issue 1372 — the send pacing of the vendored obs-vban VBAN output: a jitter buffer of a
+// configurable target depth (default 64 ms) whose packets leave at `t0 + n × packet_duration` on the
+// disciplined OBS clock, every due packet per wake, underflows waited out and overflows dropped,
+// both counted. Crate-root + std-only (Tier-0 verifiable); the C twin
+// `vendor/obs-vban/src/vban-pacing.h` is held identical by `tests/vban_pacing_parity_1372.rs`.
+pub mod vban_pacing;
+
 // #1298 — the pure LOCKED/DEGRADED/UNLOCKED decision for the in-OBS genlock statusbar
 // indicator. Crate-root + std-only so it is Tier-0 verifiable; the C port in
 // `vendor/obs-studio/frontend/widgets/GenlockLockState.hpp` is held identical by the
