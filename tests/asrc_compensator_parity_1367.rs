@@ -134,6 +134,7 @@ static void step_scenario(void)
 	double buffer_ms = 110.0;
 	double applied = 0.0;
 	for (long w = 0; w < 3000; w++) {
+		asrc_compensator_set_step_recover_hold(&c, w >= 903 && w <= 905);
 		for (int i = 0; i < 4; i++) {
 			double raw = raw_s;
 			double master = master_s;
@@ -261,6 +262,8 @@ fn rust_trace() -> Vec<String> {
         c.set_level_offset_ms(24.0);
         let mut buffer_ms = 110.0_f64;
         for w in 0..3000_i64 {
+            // issue 1372: the #1367 placement slew holds the recovery payment for three windows.
+            c.set_step_recover_hold((903..=905).contains(&w));
             for i in 0..4 {
                 let mut raw = raw_s;
                 let mut master = master_s;
@@ -382,6 +385,12 @@ fn c_asrc_compensator_matches_the_rust_authority_1367() {
             && r.iter().any(|l| {
                 l.starts_with("step")
                     && l.contains(" recp=-1000.000000000")
+                    && !l.contains(" rec=0.000000000")
+            })
+            // ... and a held window keeps the owed amount without paying it.
+            && r.iter().any(|l| {
+                l.starts_with("step")
+                    && l.contains(" recp=0.000000000")
                     && !l.contains(" rec=0.000000000")
             }),
         "#1367: the parity scenarios no longer exercise the restore burst and a step re-base \

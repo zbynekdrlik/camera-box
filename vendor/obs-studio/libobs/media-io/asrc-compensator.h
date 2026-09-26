@@ -173,6 +173,12 @@ extern "C" {
  * src/asrc_bench.rs STEP_RECOVER_PPM -- keep numerically identical. */
 #define ASRC_STEP_RECOVER_PPM 1000.0
 
+/* camera-box issue 1372: the most a confirmed-step recovery may owe, in ms (+/-). A bigger loss is
+ * booked up to this and the rest stays a level error for the ordinary loop (the sustained arm +
+ * restore burst), so a garbage residual can never schedule minutes of pitch shift. Mirror of
+ * src/asrc_bench.rs STEP_RECOVER_MAX_MS -- keep numerically identical. */
+#define ASRC_STEP_RECOVER_MAX_MS 100.0
+
 /* camera-box #1335 follow-up 3: arm band for the FAST level RESTORE when a DELIBERATE setpoint shift
  * (asrc_compensator_shift_level_target) moves level_target_ms, in ms. A shift whose |delta| is at
  * least this arms the restore burst so a deliberate audio sync-offset trim settles in minutes with
@@ -457,6 +463,11 @@ struct asrc_compensator {
 	 * resampler compensation on top of applied_ppm. Mirror of src/asrc_bench.rs
 	 * RealtimeAsrcCompensator::step_recover_ppm. */
 	double step_recover_ppm;
+	/* camera-box issue 1372: while set, the recovery pays nothing (the owed amount waits).
+	 * obs-source.c sets it while the #1303/#1367 audio placement slew still owes a move on the same
+	 * resampler, so the two never stack past one 1000 ppm pitch budget. Caller state: survives a
+	 * flush. Mirror of src/asrc_bench.rs RealtimeAsrcCompensator::step_recover_hold. */
+	bool step_recover_hold;
 };
 
 /* Reset a servo to its just-constructed state: 0 ppm estimated/applied (assume
@@ -560,6 +571,11 @@ EXPORT void asrc_compensator_set_level_offset_ms(struct asrc_compensator *c, dou
  * next accepted window re-captures under the new rule. Mirror of src/asrc_bench.rs
  * RealtimeAsrcCompensator::set_level_absolute. */
 EXPORT void asrc_compensator_set_level_absolute(struct asrc_compensator *c, bool absolute);
+
+/* camera-box issue 1372: hold (true) or release the confirmed-step recovery; obs-source.c holds it
+ * while the audio placement slew still owes a move. Mirror of src/asrc_bench.rs
+ * RealtimeAsrcCompensator::set_step_recover_hold. */
+EXPORT void asrc_compensator_set_step_recover_hold(struct asrc_compensator *c, bool hold);
 
 #ifdef __cplusplus
 }

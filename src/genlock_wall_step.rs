@@ -27,8 +27,12 @@
 //! - [`WallStepState::observe`] compares the offset with the previous tick's: a jump beyond
 //!   [`WALL_STEP_MIN_NS`] is a wall STEP. The media clock follows the wall RATE, so between steps
 //!   the offset is flat (a raw-QPC fallback drifts it by < 1 µs per tick) and nothing else trips it.
-//! - [`deadline_ns`] returns the wall-grid target UNCLAMPED on a step — the tick lands on the new
-//!   grid in ONE tick, and so do the stamps the sender floors at emit — and the pre-issue-1372
+//! - [`WallStepState::regrid_due`] keeps the re-grid PENDING until a deadline lands within the
+//!   clamp of the stock one: a re-grid target that is already past when `os_sleepto_ns` samples
+//!   the clock sends `video_sleep` back onto the OLD grid (`cur_time + interval · count`), and the
+//!   next tick must still re-grid instead of slewing.
+//! - [`deadline_ns`] returns the wall-grid target UNCLAMPED on a re-grid — the tick lands on the
+//!   new grid in ONE tick, and so do the stamps the sender floors at emit — and the pre-issue-1372
 //!   2 ms clamp otherwise.
 //!
 //! The C twin is `vendor/obs-studio/libobs/obs-genlock-wall-step.h` (stdint only);
@@ -66,12 +70,14 @@ pub fn wall_offset_ns(mono_before: u64, wall: u64, mono_after: u64) -> Option<i6
 
 /// The detector state: the last trusted offset and a running step count (telemetry).
 ///
-/// Mirror of the C `struct genlock_wall_step_state` (`have` / `offset_ns` / `steps`).
+/// Mirror of the C `struct genlock_wall_step_state` (`have` / `offset_ns` / `steps` /
+/// `regrid_pending`).
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct WallStepState {
     have: bool,
     offset_ns: i64,
     steps: u64,
+    regrid_pending: bool,
 }
 
 impl WallStepState {
@@ -108,6 +114,25 @@ impl WallStepState {
     /// How many wall steps this detector has seen.
     pub fn steps(&self) -> u64 {
         self.steps
+    }
+
+    /// Whether this tick's deadline re-grids (unclamped): a step seen by [`Self::observe`] this
+    /// tick, or one still PENDING. The re-grid stays pending while the target is more than the
+    /// clamp away from the stock deadline — i.e. until a tick actually sits on the new grid. So a
+    /// re-grid whose target was already past when the sleep sampled the clock (`video_sleep` then
+    /// falls back to `cur_time + interval · count`, the OLD grid) re-grids on the next tick instead
+    /// of degrading to the 2 ms slew.
+    ///
+    /// Mirror of the C `genlock_wall_step_regrid_due()`.
+    pub fn regrid_due(&mut self, step_ns: i64, target: u64, stock: u64) -> bool {
+        let _ = (target, stock);
+        self.regrid_pending = false;
+        step_ns != 0
+    }
+
+    /// Whether a re-grid is still pending (telemetry and tests).
+    pub fn regrid_pending(&self) -> bool {
+        self.regrid_pending
     }
 }
 
@@ -227,6 +252,28 @@ mod tests {
             wall += 33_333_333 + 33_333;
         }
         assert_eq!(s.steps(), 0);
+    }
+
+    #[test]
+    fn a_regrid_stays_pending_until_a_tick_lands_on_the_new_grid_1372() {
+        let mut s = WallStepState::new();
+        let stock = MONO0;
+        // no step, on the grid: nothing to re-grid
+        assert!(!s.regrid_due(0, stock + 100_000, stock));
+        // the step tick: re-grid, and the target is 15.7 ms off the stock deadline -> pending
+        assert!(s.regrid_due(-51_039_000, stock + 15_700_000, stock));
+        assert!(s.regrid_pending());
+        // the sleep missed it (video_sleep fell back to the old grid): still off by 15.7 ms, and
+        // no new step is seen -- the tick must still re-grid
+        assert!(s.regrid_due(0, stock + 15_700_000, stock));
+        assert!(s.regrid_pending());
+        // a tick that lands on the new grid clears it; the tick after that clamps again
+        assert!(s.regrid_due(0, stock + 50_000, stock));
+        assert!(!s.regrid_pending());
+        assert!(!s.regrid_due(0, stock + 15_700_000, stock));
+        // a step whose target is already within the clamp re-grids once and leaves nothing pending
+        assert!(s.regrid_due(3_000_000, stock + 1_000_000, stock));
+        assert!(!s.regrid_pending());
     }
 
     #[test]

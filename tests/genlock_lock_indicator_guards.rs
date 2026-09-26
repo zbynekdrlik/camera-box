@@ -260,8 +260,8 @@ fn qpc_drift_books_a_fleet_date_step_1372() {
     let rust = vendor_file("src/genlock_lock_state.rs");
     for (widget, authority) in [
         (
-            "static constexpr int64_t GENLOCK_QPC_WALL_STEP_BOOK_MAX_MS = 200;",
-            "pub const GENLOCK_QPC_WALL_STEP_BOOK_MAX_MS: i64 = 200;",
+            "static constexpr int64_t GENLOCK_QPC_WALL_STEP_BOOK_MAX_MS = 66;",
+            "pub const GENLOCK_QPC_WALL_STEP_BOOK_MAX_MS: i64 = 66;",
         ),
         (
             "static constexpr int64_t GENLOCK_QPC_WALL_STEPS_PER_WINDOW = 1;",

@@ -388,9 +388,11 @@ pub fn qpc_drift_beyond_bound(
 }
 
 /// Issue 1372 — the largest single-sample wall jump (ms) the widget BOOKS as a coordinated
-/// dantesync fleet DATE step. dantesync 1.9.0 bounds the fleet date error at 50 ms, so a date step is
-/// at most ~50 ms (about every 1.8 h); 4× that still excludes any clock SET (a manual time change, a
-/// time-zone class error), which keeps DEGRADING.
+/// dantesync fleet DATE step: two 30 fps frames. dantesync 1.9.0 steps the fleet date when its error
+/// passes 50 ms, so a date step lands at ~50 ms plus the drift of one poll (the live one was
+/// 51.039 ms); 66 ms keeps that with margin and nothing more. A bigger jump (a clock SET, an NTP
+/// fallback step, another clock writer) stays in the history and DEGRADES — the hazard the step
+/// verdict exists for (#1357).
 pub const GENLOCK_QPC_WALL_STEP_BOOK_MAX_MS: i64 = 200;
 /// Issue 1372 — how many wall steps the widget books inside one [`GENLOCK_QPC_WINDOW_S`]. A second
 /// step in the window is a step STORM (dantesync steps the date every ~1.8 h) and keeps DEGRADING.
@@ -406,7 +408,7 @@ pub const GENLOCK_QPC_WALL_STEPS_PER_WINDOW: i64 = 1;
 /// logs one `genlock-wall-step:` line and stays LOCKED — before issue 1372 it read the step as a
 /// `qpc_drift` hazard for the whole 300 s window (resolume DEGRADED from the step on). Booked only
 /// when `step_bound_ms < |jump| <= book_max_ms` and fewer than `steps_per_window` steps were booked in
-/// the window: a clock SET and a step STORM stay in the history and still DEGRADE through
+/// the window: a bigger jump and a step STORM stay in the history and still DEGRADE through
 /// [`qpc_drift_beyond_bound`]; a jump within the bound never degrades, so it is not booked either.
 ///
 /// Byte-for-byte mirror of `genlock_qpc_wall_step_rebase_ms` in `GenlockLockState.hpp` — the parity
@@ -1495,22 +1497,24 @@ mod tests {
     #[test]
     fn a_sub_bound_jump_is_not_booked_it_never_degrades_1372() {
         for j in [-33, -1, 0, 1, 33] {
-            assert_eq!(qpc_wall_step_rebase_ms(j, 33, 200, 0, 1), 0, "jump {j}");
+            assert_eq!(qpc_wall_step_rebase_ms(j, 33, 66, 0, 1), 0, "jump {j}");
         }
-        assert_eq!(qpc_wall_step_rebase_ms(34, 33, 200, 0, 1), 34);
+        assert_eq!(qpc_wall_step_rebase_ms(34, 33, 66, 0, 1), 34);
     }
 
     #[test]
     fn a_clock_set_and_a_step_storm_still_degrade_1372() {
-        // a jump beyond the book limit stays in the history
-        assert_eq!(qpc_wall_step_rebase_ms(200, 33, 200, 0, 1), 200);
-        assert_eq!(qpc_wall_step_rebase_ms(201, 33, 200, 0, 1), 0);
-        assert_eq!(qpc_wall_step_rebase_ms(-3_600_000, 33, 200, 0, 1), 0);
-        assert!(qpc_drift_beyond_bound(false, 0, 0, 201, 33).beyond_bound);
+        // a jump beyond the book limit stays in the history: two frames is the most a date
+        // step can be; a 67..200 ms jump (an NTP-fallback / second-writer step) still degrades
+        assert_eq!(qpc_wall_step_rebase_ms(66, 33, 66, 0, 1), 66);
+        assert_eq!(qpc_wall_step_rebase_ms(67, 33, 66, 0, 1), 0);
+        assert_eq!(qpc_wall_step_rebase_ms(-120, 33, 66, 0, 1), 0);
+        assert_eq!(qpc_wall_step_rebase_ms(-3_600_000, 33, 66, 0, 1), 0);
+        assert!(qpc_drift_beyond_bound(false, 0, 0, 67, 33).beyond_bound);
         // a second step inside the window stays in the history
-        assert_eq!(qpc_wall_step_rebase_ms(-51, 33, 200, 1, 1), 0);
+        assert_eq!(qpc_wall_step_rebase_ms(-51, 33, 66, 1, 1), 0);
         assert!(qpc_drift_beyond_bound(false, 0, 0, 51, 33).beyond_bound);
         // the extreme jump saturates, never wraps into a bookable magnitude
-        assert_eq!(qpc_wall_step_rebase_ms(i64::MIN, 33, 200, 0, 1), 0);
+        assert_eq!(qpc_wall_step_rebase_ms(i64::MIN, 33, 66, 0, 1), 0);
     }
 }

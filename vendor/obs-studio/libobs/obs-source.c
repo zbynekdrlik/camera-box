@@ -4739,6 +4739,9 @@ static inline void asrc_process_audio(obs_source_t *source, uint32_t frames, uin
 	asrc_compensator_set_level_absolute(&source->asrc, !source->genlock_fifo && source->monitoring_type !=
 									       OBS_MONITORING_TYPE_MONITOR_ONLY);
 	asrc_compensator_set_level_offset_ms(&source->asrc, (double)source->last_sync_offset / 1e6);
+	/* camera-box issue 1372: a confirmed-step recovery waits while the genlock audio placement slew
+	 * still owes a move on this resampler, so the two never stack past one 1000 ppm pitch budget. */
+	asrc_compensator_set_step_recover_hold(&source->asrc, source->genlock_audio_slew_remaining_ns != 0);
 	asrc_compensator_compensate(&source->asrc, raw_advance_s, master_block_s, buffered_ms, &applied_ppm);
 	/* camera-box #1355: an ABSOLUTE setpoint the mixer cannot reach is bounded inside the
 	 * compensator (ASRC_LEVEL_TARGET_UNREACHABLE_WINDOWS of smoothed error outside the restore's exit

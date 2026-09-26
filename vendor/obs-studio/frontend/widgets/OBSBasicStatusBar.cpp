@@ -48,12 +48,13 @@ static constexpr float badThreshold = 1.0f;
  * report-only JSON telemetry. */
 static constexpr int64_t GENLOCK_QPC_STEP_BOUND_MS = 33;
 static constexpr int GENLOCK_QPC_WINDOW_S = 300;
-/* camera-box issue 1372: a single-sample wall step up to this size is a coordinated dantesync fleet
- * DATE step (dantesync 1.9.0 bounds the date error at 50 ms, so a step is <= ~50 ms, about every
- * 1.8 h) and is BOOKED (genlock_qpc_wall_step_rebase_ms): the qpc history is re-baselined by it and
- * the widget stays LOCKED, because the media clock deliberately never follows a step and the render
- * tick re-grids onto the stepped wall in one tick. A bigger jump (a clock set) or a second step inside
- * GENLOCK_QPC_WINDOW_S (a step storm) still DEGRADES. */
+/* camera-box issue 1372: a single-sample wall step up to this size (two 30 fps frames) is a
+ * coordinated dantesync fleet DATE step (dantesync 1.9.0 steps the date when its error passes 50 ms,
+ * about every 1.8 h; the live step was 51 ms) and is BOOKED (genlock_qpc_wall_step_rebase_ms): the qpc
+ * history is re-baselined by it and the widget stays LOCKED, because the media clock deliberately
+ * never follows a step and the render tick re-grids onto the stepped wall in one tick. A bigger jump
+ * (a clock set, an NTP-fallback or second-writer step) or a second step inside GENLOCK_QPC_WINDOW_S (a
+ * step storm) still DEGRADES. Mirror of src/genlock_lock_state.rs GENLOCK_QPC_WALL_STEP_BOOK_MAX_MS. */
 static constexpr int64_t GENLOCK_QPC_WALL_STEP_BOOK_MAX_MS = 200;
 static constexpr int64_t GENLOCK_QPC_WALL_STEPS_PER_WINDOW = 1;
 

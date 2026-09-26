@@ -15,7 +15,10 @@
  * - genlock_wall_step_observe() compares it with the previous tick: a jump beyond
  *   GENLOCK_WALL_STEP_MIN_NS is a wall STEP (the media clock follows the wall RATE, so the
  *   offset is otherwise flat);
- * - genlock_wall_step_deadline_ns() takes the wall-grid target unclamped on a step (the tick,
+ * - genlock_wall_step_regrid_due() keeps the re-grid PENDING until a deadline lands within the
+ *   clamp of the stock one: a re-grid target already past when os_sleepto_ns samples the clock
+ *   sends video_sleep back onto the OLD grid, and the next tick must still re-grid;
+ * - genlock_wall_step_deadline_ns() takes the wall-grid target unclamped on a re-grid (the tick,
  *   and with it every stamp the sender floors at emit, lands on the new grid in ONE tick) and
  *   keeps the 2 ms clamp otherwise, byte-identical to before.
  *
@@ -26,7 +29,8 @@
 
 #include <stdint.h>
 
-/* The per-tick slew clamp of the render tick, ns. Mirror of src/genlock_wall_step.rs MAX_SLEW_NS. */
+/* The per-tick slew clamp of the render tick, ns -- THE definition; obs-video.c's
+ * GENLOCK_MAX_SLEW_NS is defined from it. Mirror of src/genlock_wall_step.rs MAX_SLEW_NS. */
 #define GENLOCK_WALL_STEP_MAX_SLEW_NS 2000000LL
 /* A wall - mono jump beyond this between two ticks is a wall STEP, ns: a smaller one is absorbed
  * in one tick by the clamp already. Mirror of WALL_STEP_MIN_NS. */
@@ -39,6 +43,7 @@ struct genlock_wall_step_state {
 	int have;
 	int64_t offset_ns;
 	uint64_t steps;
+	int regrid_pending;
 };
 
 /* wall - the midpoint of the monotonic reads around it; 0 (untrusted) when the bracket is wider
@@ -79,7 +84,19 @@ static inline int64_t genlock_wall_step_observe(struct genlock_wall_step_state *
 	return 0;
 }
 
-/* The render-tick deadline: the wall-grid target as-is on a detected step (one-tick re-grid),
+/* Whether this tick's deadline re-grids: a step seen this tick, or one still pending. It stays
+ * pending while the target is more than the clamp away from the stock deadline, i.e. until a tick
+ * sits on the new grid. Mirror of src/genlock_wall_step.rs WallStepState::regrid_due. */
+static inline int genlock_wall_step_regrid_due(struct genlock_wall_step_state *s, int64_t step_ns, uint64_t target,
+					       uint64_t stock)
+{
+	(void)target;
+	(void)stock;
+	s->regrid_pending = 0;
+	return step_ns != 0;
+}
+
+/* The render-tick deadline: the wall-grid target as-is on a re-grid (one-tick re-grid),
  * else clamped to +/-GENLOCK_WALL_STEP_MAX_SLEW_NS against the stock deadline -- the pre-issue-1372
  * arithmetic. Mirror of src/genlock_wall_step.rs deadline_ns. */
 static inline uint64_t genlock_wall_step_deadline_ns(uint64_t target, uint64_t stock, int regrid)

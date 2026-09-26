@@ -2236,9 +2236,10 @@ mod vendored_source {
              lock, count the step) is gone; a sample-loss step would bias the slope again."
         );
         assert!(
-            c.contains(
-                "if (c->level_captured && fabs(buffered_ms - c->level_target_ms) >= 0.5 * fabs(r_s * 1000.0)) { const double owed_ms = -r_s * 1000.0; c->step_recover_ms += owed_ms; c->level_target_ms -= owed_ms; }"
-            ) && c.contains(
+            c.contains("asrc_step_recover_book(c, r_s, buffered_ms);")
+                && c.contains("if (deficit_ms * loss_ms <= 0.0 || fabs(deficit_ms) < 0.5 * fabs(loss_ms)) return;")
+                && c.contains("c->level_target_ms -= owed_ms - c->step_recover_ms;")
+                && c.contains(
                 "const double paid_ms = asrc_clamp(c->step_recover_ms, -budget_ms, budget_ms);"
             ),
             "{ASRC_COMPENSATOR_C}: #1335 follow-up 2 / issue 1372 — the level-corroborated step \

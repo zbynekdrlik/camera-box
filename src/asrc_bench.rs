@@ -314,6 +314,12 @@ pub const LEVEL_RESTORE_MAX_PPM: f64 = 100.0;
 /// ASRC_STEP_RECOVER_PPM — keep numerically identical.
 pub const STEP_RECOVER_PPM: f64 = 1000.0;
 
+/// Issue 1372: the most a confirmed-step recovery may owe, in ms (±). A bigger loss is booked up to
+/// this and the rest stays a level error for the ordinary loop (the sustained arm + restore burst),
+/// so a garbage residual can never schedule minutes of pitch shift. The live date-step loss was
+/// 44 ms. Mirror of asrc-compensator.h ASRC_STEP_RECOVER_MAX_MS — keep numerically identical.
+pub const STEP_RECOVER_MAX_MS: f64 = 100.0;
+
 /// camera-box #1335 follow-up 3: arm band (ms) for the FAST level restore when a DELIBERATE setpoint
 /// shift ([`RealtimeAsrcCompensator::shift_level_target`]) moves the setpoint. A shift whose |delta|
 /// is at least this arms the restore burst, so a deliberate audio sync-offset trim settles in minutes
@@ -638,6 +644,11 @@ pub struct RealtimeAsrcCompensator {
     /// resampler compensation on top of the servo's own `applied_ppm`. Mirror of the C
     /// `step_recover_ppm`.
     step_recover_ppm: f64,
+    /// Issue 1372: while set, the recovery pays nothing (the owed amount waits). The C caller sets
+    /// it while the #1303/#1367 audio placement slew still owes a move on the same resampler, so the
+    /// two never stack past one 1000 ppm pitch budget. Caller state: survives a flush. Mirror of the
+    /// C `step_recover_hold`.
+    step_recover_hold: bool,
 }
 
 impl RealtimeAsrcCompensator {
@@ -679,6 +690,7 @@ impl RealtimeAsrcCompensator {
             level_avg_ms: 0.0,             // issue #1367
             step_recover_ms: 0.0,          // issue 1372
             step_recover_ppm: 0.0,         // issue 1372
+            step_recover_hold: false,      // issue 1372
         }
     }
 
@@ -843,6 +855,57 @@ impl RealtimeAsrcCompensator {
     /// stretch). The C caller adds it to the resampler compensation.
     pub fn step_recover_ppm(&self) -> f64 {
         self.step_recover_ppm
+    }
+
+    /// Issue 1372: hold (true) or release the confirmed-step recovery. The C caller holds it while
+    /// the audio placement slew still owes a move on the same resampler. Mirror of the C
+    /// `asrc_compensator_set_step_recover_hold`.
+    pub fn set_step_recover_hold(&mut self, hold: bool) {
+        let _ = hold;
+    }
+
+    /// Issue 1372 (ROZHODNUTÉ 5841039244): BOOK a re-based step the buffer level confirms. `r_s` is
+    /// the step's single-window residual (negative = source samples lost), `buf_ms` the live level.
+    /// Confirmed = the buffer moved the SAME way as the samples and by at least half of it (the
+    /// #1335 follow-up-2 corroboration, now signed). The booked amount is the MEASURED sample step:
+    /// the regression residual counts the lost samples exactly, while the per-callback level only
+    /// confirms the direction (it reads up to ~10 ms off within a block — the bench's step callback
+    /// read 35 ms for a 43 ms loss, and booking the smaller one left the rest to the slow level
+    /// loop). The total owed is capped at ±`STEP_RECOVER_MAX_MS`, and the setpoint moves with the lost
+    /// buffer by exactly the booked amount (so the level loop, the restore arms and the unreachable
+    /// bound see no disturbance). A wall-clock-only jump leaves the level alone: nothing is booked.
+    /// Mirror of the C `asrc_step_recover_book`.
+    fn step_recover_book(&mut self, r_s: f64, buf_ms: f64) {
+        if !self.level_captured {
+            return;
+        }
+        if (buf_ms - self.level_target_ms).abs() >= 0.5 * (r_s * 1000.0).abs() {
+            let owed_ms = -r_s * 1000.0;
+            self.step_recover_ms += owed_ms;
+            self.level_target_ms -= owed_ms;
+        }
+    }
+
+    /// Issue 1372: PAY the owed step back at `STEP_RECOVER_PPM` (1 ms per second of master time),
+    /// on top of the servo's own `applied_ppm` — its clamp and slew limit are untouched. The buffer
+    /// grows (loss) or shrinks (dup) by the paid amount, so the setpoint and the open window's level
+    /// sum move with it and the level loop never reads the recovery as an error. Nothing is paid
+    /// while held; an owed amount without a captured setpoint is dropped (it was booked against that
+    /// capture). Mirror of the C `asrc_step_recover_pay`.
+    fn step_recover_pay(&mut self, master_block_s: f64) {
+        if !self.level_captured {
+            self.step_recover_ms = 0.0;
+            return;
+        }
+        if self.step_recover_hold || self.step_recover_ms == 0.0 {
+            return;
+        }
+        let budget_ms = STEP_RECOVER_PPM / 1_000_000.0 * master_block_s * 1000.0;
+        let paid_ms = self.step_recover_ms.clamp(-budget_ms, budget_ms);
+        self.step_recover_ms -= paid_ms;
+        self.step_recover_ppm = -paid_ms / (master_block_s * 1000.0) * 1_000_000.0;
+        self.level_target_ms += paid_ms;
+        self.window_level_sum_ms += paid_ms * f64::from(self.window_level_count);
     }
 
     /// issue #1355: the smoothed level error (`buffered − target` EMA), in ms — exposed for tests.
@@ -1081,22 +1144,11 @@ impl RealtimeAsrcCompensator {
                     // issue #1367: telemetry only here; the restore corroboration below stays on the
                     // live reading of this same call.
                     self.level_avg_ms = window_level_ms;
-                    // FAST bounded level restore, but ONLY if the buffer level corroborates a real
-                    // sample loss/dup (|level err| >= half the residual magnitude). A wall-clock-only
-                    // jump leaves buffered_ms unchanged => re-base only, no restore. Keeps the
-                    // captured setpoint + integral (the design's intent).
-                    // Issue 1372 (ROZHODNUTÉ 5841039244): a CONFIRMED step is booked, not restored
-                    // proportionally. The owed amount is the measured sample-count step itself; the
-                    // setpoint moves with the buffer (so the level loop, the restore arms and the
-                    // unreachable bound see no disturbance) and walks back as the recovery pays it at
-                    // STEP_RECOVER_PPM below — the live 44 ms loss in ≈ 44 s, not 3–4 min.
-                    if self.level_captured
-                        && (buf_ms - self.level_target_ms).abs() >= 0.5 * (r_s * 1000.0).abs()
-                    {
-                        let owed_ms = -r_s * 1000.0;
-                        self.step_recover_ms += owed_ms;
-                        self.level_target_ms -= owed_ms;
-                    }
+                    // Issue 1372 (ROZHODNUTÉ 5841039244): a step the buffer level CONFIRMS (a real
+                    // sample loss/dup, not a wall-clock-only jump) is BOOKED and paid back at
+                    // STEP_RECOVER_PPM — the live 44 ms loss in ≈ 44 s — instead of arming the
+                    // proportional restore (3–4 min). Keeps the captured setpoint + integral.
+                    self.step_recover_book(r_s, buf_ms);
                 }
                 rebased = true;
             }
@@ -1320,21 +1372,8 @@ impl RealtimeAsrcCompensator {
         let delta = (target_ppm - self.applied_ppm).clamp(-max_step, max_step);
         self.applied_ppm += delta;
 
-        // Issue 1372: pay a CONFIRMED step back at STEP_RECOVER_PPM (1 ms per second of master time),
-        // on top of the servo's own applied_ppm — its clamp and slew limit are untouched. The buffer
-        // grows (loss) or shrinks (dup) by the paid amount, so the setpoint and the open window's
-        // level sum move with it and the level loop never sees the recovery as an error. Only while
-        // the setpoint is captured: the step was booked against that capture.
-        if self.level_captured && self.step_recover_ms != 0.0 {
-            let budget_ms = STEP_RECOVER_PPM / 1_000_000.0 * master_block_s * 1000.0;
-            let paid_ms = self.step_recover_ms.clamp(-budget_ms, budget_ms);
-            self.step_recover_ms -= paid_ms;
-            self.step_recover_ppm = -paid_ms / (master_block_s * 1000.0) * 1_000_000.0;
-            self.level_target_ms += paid_ms;
-            self.window_level_sum_ms += paid_ms * f64::from(self.window_level_count);
-        } else {
-            self.step_recover_ms = 0.0;
-        }
+        // Issue 1372: pay a confirmed step back (see step_recover_pay).
+        self.step_recover_pay(master_block_s);
 
         self.corrected_advance(raw_advance_s)
     }
@@ -2332,11 +2371,64 @@ mod tests {
         );
     }
 
+    /// Issue 1372 (review round 1): a confirmed step books the MEASURED loss (the regression
+    /// residual), never the noisier per-callback level deficit; the level only confirms it, SIGNED —
+    /// a sample loss while the buffer went UP books nothing — and the total owed is capped at
+    /// ±`STEP_RECOVER_MAX_MS`, so no single step can queue more than ~100 s at 1000 ppm.
+    #[test]
+    fn a_confirmed_step_books_the_measured_loss_capped_and_signed_1372() {
+        const TRUE_PPM: f64 = -5.0;
+        const BLOCK_S: f64 = 1.0;
+        const START_BUF_MS: f64 = 100.0;
+        // Consecutive step windows of (samples lost, ms; how the live buffer level moved on that
+        // window, ms) → the owed amount after the last one (before its own window's payment).
+        fn booked(steps: &[(f64, f64)]) -> f64 {
+            let mut c = RealtimeAsrcCompensator::new();
+            let clock = DriftingAudioClock::new(TRUE_PPM);
+            let mut buffer_ms = START_BUF_MS;
+            let mut t = 0.0;
+            while t < 200.0 {
+                let raw = clock.raw_advance(BLOCK_S);
+                let corrected = c.compensate_with_level(raw, BLOCK_S, buffer_ms);
+                buffer_ms += (corrected - BLOCK_S) * 1000.0;
+                t += BLOCK_S;
+            }
+            for &(step_ms, buffer_move_ms) in steps {
+                buffer_ms += buffer_move_ms;
+                let raw_step = clock.raw_advance(BLOCK_S) - step_ms / 1000.0;
+                let corrected = c.compensate_with_level(raw_step, BLOCK_S, buffer_ms);
+                buffer_ms += (corrected - raw_step) * 1000.0;
+            }
+            c.step_recover_ms() - c.step_recover_ppm() * BLOCK_S / 1000.0
+        }
+        // The level read only 30 ms low for a 50 ms loss (≥ half: confirmed): the MEASURED 50 ms.
+        let partial = booked(&[(50.0, -30.0)]);
+        assert!(
+            (partial - 50.0).abs() < 1.0,
+            "issue 1372: a confirmed 50 ms loss must book the measured 50 ms, got {partial:.3}"
+        );
+        // Two 80 ms losses back to back (a single window loses at most what the window acceptance
+        // lets through): the total owed is capped at STEP_RECOVER_MAX_MS.
+        let big = booked(&[(80.0, -80.0), (80.0, -80.0)]);
+        assert!(
+            (big - STEP_RECOVER_MAX_MS).abs() < 1e-6,
+            "issue 1372: the owed amount must be capped at {STEP_RECOVER_MAX_MS} ms, got {big:.3}"
+        );
+        // Samples lost but the buffer went UP by as much: not confirmed, nothing booked.
+        let opposite = booked(&[(50.0, 30.0)]);
+        assert!(
+            opposite == 0.0,
+            "issue 1372: a loss the buffer contradicts must book nothing, got {opposite:.3}"
+        );
+    }
+
     /// issue #1335 follow-up 2 (a): a permanent 50 ms INPUT sample-loss step (the live 17.9. 18:52
     /// StartStream stall: mbc buffered_ms 108 → 51, starved_blocks=0) must NOT bias the rate slope —
-    /// the servo RE-BASEs the step out of the regression (estimate stays put) AND fast-restores the
-    /// lost 50 ms of buffer within ~12 min, then exits the restore. The anti-tautology: the rate-only
-    /// path (which inserts the step) swings the slope ≥40 ppm — the −83 ppm class this fix kills.
+    /// the servo RE-BASEs the step out of the regression (estimate stays put) AND refills the lost
+    /// 50 ms of buffer. Since issue 1372 the confirmed step is BOOKED and paid back at 1000 ppm
+    /// (≈ 50 s at 1 s windows) instead of the proportional restore, which is never armed for it. The
+    /// anti-tautology: the rate-only path (which inserts the step) swings the slope ≥40 ppm — the
+    /// −83 ppm class this fix kills.
     #[test]
     fn step_tolerant_rebase_holds_estimate_and_restores_level_1335() {
         const TRUE_PPM: f64 = -5.0; // healthy mbc floor
@@ -2345,18 +2437,15 @@ mod tests {
         const WARMUP_S: f64 = 200.0; // past lock (~65 s) + settle
         const STEP_MS: f64 = -50.0; // input sample loss: raw short by 50 ms in one window
 
-        // The restore is PROPORTIONAL (Kr*err, clamped +-100) so it decays with a ~500 s time
-        // constant (k*Kr = 2e-3/s) -- it returns a 50 ms step to within +-5 ms in ~19-25 min, NOT
-        // the design's stated "+-5 ms inside 12 min" (that needs the +-100 clamp to bind for most of
-        // the return, i.e. Kr~20 so it stays near-constant 100 ppm -- see the issue-1335-follow-up-2
-        // anchors-confirmed comment; the specified Kr=2 is used as-is here). Observe 30 min so the
-        // restore completes; a 12-min checkpoint documents the ~76% progress the design assumed done.
+        // Issue 1372: the booked recovery pays 1 ms per 1 s window, so the 50 ms is back after
+        // ~50 s. (Before it, the proportional restore took ~19-25 min; the 30-min window and the
+        // 12-min checkpoint are kept from that era and now sit far past the return.)
         const POST_S: f64 = 30.0 * 60.0;
 
         // Closed-loop buffer sim. `use_level` selects the C-equivalent level path (which re-bases)
         // vs the rate-only trait entry (which inserts the step — the anti-tautology). Returns
         // (est_pre, target, final_buffer, max |est − est_pre| over recovery, restore_active, servo).
-        fn run(use_level: bool) -> (f64, f64, f64, f64, f64, bool, RealtimeAsrcCompensator) {
+        fn run(use_level: bool) -> (f64, f64, f64, f64, f64, bool, RealtimeAsrcCompensator, f64) {
             let mut c = RealtimeAsrcCompensator::new();
             let clock = DriftingAudioClock::new(TRUE_PPM);
             let mut buffer_ms = START_BUF_MS;
@@ -2383,11 +2472,15 @@ mod tests {
             // residual; the withdrawal replaces the normal fill/drain accounting for the loss window.
             buffer_ms += STEP_MS;
             let raw_step = clock.raw_advance(BLOCK_S) + STEP_MS / 1000.0;
-            let _ = if use_level {
+            let step_corrected = if use_level {
                 c.compensate_with_level(raw_step, BLOCK_S, buffer_ms)
             } else {
                 c.compensate(raw_step, BLOCK_S)
             };
+            // issue 1372: the owed amount the step booked (before this window's first payment)
+            let owed_booked = c.step_recover_ms() - c.step_recover_ppm() * BLOCK_S / 1000.0;
+            // the step window's own recovery stretch lands in the buffer too
+            buffer_ms += (step_corrected - raw_step) * 1000.0;
             // Observe recovery, capturing the buffer at the design's 12-min checkpoint.
             let mut est_dev_max = 0.0_f64;
             let mut buf_at_12min = buffer_ms;
@@ -2410,10 +2503,24 @@ mod tests {
                 est_dev_max,
                 restore_active,
                 c,
+                owed_booked,
             )
         }
 
-        let (est_pre, target, final_buf, buf_12, est_dev_max, restore_active, c) = run(true);
+        let (est_pre, target, final_buf, buf_12, est_dev_max, restore_active, c, owed_booked) =
+            run(true);
+        // issue 1372: the confirmed 50 ms loss is booked, fully paid back, and the setpoint returned.
+        assert!(
+            (owed_booked + STEP_MS).abs() < 5.0,
+            "issue 1372: the confirmed 50 ms loss must be booked as ~50 ms owed, got {owed_booked:.2}"
+        );
+        assert!(
+            c.step_recover_ms() == 0.0 && (c.level_target_ms() - target).abs() < 1e-6,
+            "issue 1372: the owed step must be fully paid and the setpoint back at {target:.3}, got \
+             owed {:.3} target {:.3}",
+            c.step_recover_ms(),
+            c.level_target_ms()
+        );
         // 1) The step was detected and re-based (not inserted), and recorded in telemetry.
         assert!(
             c.step_count() >= 1,
@@ -2452,7 +2559,7 @@ mod tests {
             "issue #1335 f2: the restore burst must have EXITED once the buffer was back within 5 ms"
         );
         // 4) Anti-tautology: the rate-only path (no re-base) lets the step corrupt the slope.
-        let (rate_est_pre, _, _, _, rate_dev_max, _, _) = run(false);
+        let (rate_est_pre, _, _, _, rate_dev_max, _, _, _) = run(false);
         assert!(
             rate_dev_max >= 40.0,
             "issue #1335 f2: the rate-only path must swing the estimate >=40 ppm (proving re-base, \
@@ -2499,6 +2606,13 @@ mod tests {
             !c.level_restore(),
             "issue #1335 f2: a wall-clock-only jump (buffer unchanged) must NOT engage the fast \
              level restore"
+        );
+        // issue 1372: nor book a confirmed-step recovery (nothing was lost), and nothing is paid.
+        assert!(
+            c.step_recover_ms() == 0.0 && c.step_recover_ppm() == 0.0,
+            "issue 1372: a wall-clock-only jump must not book a recovery, got owed {} ms at {} ppm",
+            c.step_recover_ms(),
+            c.step_recover_ppm()
         );
         assert!(
             (c.estimated_ppm() - est_pre).abs() < 2.0,

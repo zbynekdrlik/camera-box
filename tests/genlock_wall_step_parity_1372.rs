@@ -89,6 +89,36 @@ fn sequences() -> Vec<Vec<(u64, u64, u64)>> {
     out
 }
 
+/// `(step_ns, target − stock)` per tick, each sequence on ONE fresh state: the re-grid decision
+/// with a missed re-grid (pending), a landing, a step inside the clamp, and the i64 extremes.
+fn regrid_sequences() -> Vec<Vec<(i64, i64)>> {
+    let m = MAX_SLEW_NS;
+    vec![
+        vec![
+            (0, 100_000),
+            (-51_039_000, 15_700_000),
+            (0, 15_700_000),
+            (0, 50_000),
+            (0, 15_700_000),
+        ],
+        vec![
+            (51_000_000, -17_600_000),
+            (0, -17_600_000),
+            (0, -17_600_000),
+            (0, 0),
+        ],
+        vec![(3_000_000, 1_000_000), (0, 5_000_000)],
+        vec![
+            (-3_000_000, m),
+            (0, m + 1),
+            (-3_000_000, m + 1),
+            (0, -m - 1),
+            (0, -m),
+        ],
+        vec![(i64::MIN, i64::MAX), (0, i64::MIN), (0, 0)],
+    ]
+}
+
 /// `(target, stock)` pairs around the ±2 ms clamp edges and far beyond it.
 fn deadline_vectors() -> Vec<(u64, u64)> {
     let stock = MONO0;
@@ -125,13 +155,35 @@ fn rust_trace() -> Vec<String> {
             deadline_ns(t, st, true)
         ));
     }
+    for (n, seq) in regrid_sequences().iter().enumerate() {
+        let mut s = WallStepState::new();
+        for &(step, d) in seq {
+            let stock = MONO0;
+            let target = stock.wrapping_add(d as u64);
+            let r = s.regrid_due(step, target, stock);
+            out.push(format!(
+                "regrid {n} {step} {d} {} {}",
+                u8::from(r),
+                u8::from(s.regrid_pending())
+            ));
+        }
+    }
     out
+}
+
+/// An i64 as a C expression (`INT64_MIN` has no literal form).
+fn c_i64(v: i64) -> String {
+    if v == i64::MIN {
+        "INT64_MIN".to_string()
+    } else {
+        format!("{v}LL")
+    }
 }
 
 fn c_harness() -> String {
     let mut body = String::new();
     for (n, seq) in sequences().iter().enumerate() {
-        body.push_str("\t{\n\t\tstruct genlock_wall_step_state s = {0, 0, 0};\n");
+        body.push_str("\t{\n\t\tstruct genlock_wall_step_state s = {0, 0, 0, 0};\n");
         for &(b, w, a) in seq {
             body.push_str(&format!(
                 "\t\tobserve_line({n}, &s, {b}ULL, {w}ULL, {a}ULL);\n"
@@ -141,6 +193,17 @@ fn c_harness() -> String {
     }
     for (t, st) in deadline_vectors() {
         body.push_str(&format!("\tdeadline_line({t}ULL, {st}ULL);\n"));
+    }
+    for (n, seq) in regrid_sequences().iter().enumerate() {
+        body.push_str("\t{\n\t\tstruct genlock_wall_step_state s = {0, 0, 0, 0};\n");
+        for &(step, d) in seq {
+            body.push_str(&format!(
+                "\t\tregrid_line({n}, &s, {}, {});\n",
+                c_i64(step),
+                c_i64(d)
+            ));
+        }
+        body.push_str("\t}\n");
     }
     format!(
         r#"#include <stdio.h>
@@ -158,6 +221,14 @@ static void observe_line(int n, struct genlock_wall_step_state *s, uint64_t b, u
 		printf("seq %d off none step %" PRId64 " steps %" PRIu64 "\n", n, step, s->steps);
 }}
 
+static void regrid_line(int n, struct genlock_wall_step_state *s, int64_t step, int64_t d)
+{{
+	const uint64_t stock = {mono0}ULL;
+	const uint64_t target = stock + (uint64_t)d;
+	const int r = genlock_wall_step_regrid_due(s, step, target, stock);
+	printf("regrid %d %" PRId64 " %" PRId64 " %d %d\n", n, step, d, r ? 1 : 0, s->regrid_pending ? 1 : 0);
+}}
+
 static void deadline_line(uint64_t t, uint64_t st)
 {{
 	printf("deadline %" PRIu64 " %" PRIu64 " %" PRIu64 " %" PRIu64 "\n", t, st,
@@ -168,7 +239,8 @@ int main(void)
 {{
 {body}	return 0;
 }}
-"#
+"#,
+        mono0 = MONO0
     )
 }
 
@@ -251,7 +323,8 @@ fn c_wall_step_matches_the_rust_authority_1372() {
     assert!(
         logged_step
             && has("off none")
-            && r.iter().filter(|l| l.contains(" step 0 ")).count() > 3000,
+            && r.iter().filter(|l| l.contains(" step 0 ")).count() > 3000
+            && r.iter().any(|l| l.starts_with("regrid 0 0 15700000 1 1")),
         "issue 1372: the parity sequences no longer exercise the step, an untrusted read and the \
          long no-step drift"
     );
@@ -267,8 +340,9 @@ fn render_tick_uses_the_wall_step_regrid_1372() {
         "#include \"obs-genlock-wall-step.h\"",
         "const uint64_t mono_before = os_gettime_ns(); const uint64_t wall = genlock_wall_ns(); const uint64_t mono = os_gettime_ns();",
         "const int64_t wall_step_ns = genlock_wall_step_observe(&wall_step, mono_before, wall, mono);",
-        "return genlock_wall_step_deadline_ns(target, stock, wall_step_ns != 0);",
-        "#define GENLOCK_MAX_SLEW_NS (2 * 1000 * 1000)",
+        "const int regrid = genlock_wall_step_regrid_due(&wall_step, wall_step_ns, target, stock);",
+        "const uint64_t deadline = genlock_wall_step_deadline_ns(target, stock, regrid);",
+        "#define GENLOCK_MAX_SLEW_NS ((int)GENLOCK_WALL_STEP_MAX_SLEW_NS)",
         "genlock-regrid: the wall clock stepped",
     ] {
         assert!(

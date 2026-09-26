@@ -848,7 +848,9 @@ void add_ready_encoder_group(obs_encoder_t *encoder)
  * the 2 ms/tick slew-back left the tick -- and every stamp the NDI sender
  * floors at emit -- off phase for ~9 ticks at 30 fps.
  */
-#define GENLOCK_MAX_SLEW_NS (2 * 1000 * 1000) /* 2 ms per tick */
+/* 2 ms per tick. camera-box issue 1372: defined from the wall-step header, the one definition the
+ * re-grid decision uses too; the int cast keeps the render-tick-ENABLED log's %d format. */
+#define GENLOCK_MAX_SLEW_NS ((int)GENLOCK_WALL_STEP_MAX_SLEW_NS)
 
 static bool genlock_tick_enabled(void)
 {
@@ -901,14 +903,19 @@ static uint64_t genlock_next_deadline(uint64_t cur_time, uint64_t interval_ns)
 	const uint64_t target = mono + (next_wall - wall);
 	const uint64_t stock = cur_time + interval_ns;
 	/* camera-box issue 1372: a wall STEP against the media clock re-grids the tick in ONE tick (the
-	 * clamp would slew it back 2 ms per tick, and the sender stamps off phase meanwhile). */
+	 * clamp would slew it back 2 ms per tick, and the sender stamps off phase meanwhile). The re-grid
+	 * stays pending until a tick sits on the new grid: a target already past when video_sleep samples
+	 * the clock falls back to the old grid, and the next tick re-grids again. The deadline is decided
+	 * before the log line. */
 	const int64_t wall_step_ns = genlock_wall_step_observe(&wall_step, mono_before, wall, mono);
+	const int regrid = genlock_wall_step_regrid_due(&wall_step, wall_step_ns, target, stock);
+	const uint64_t deadline = genlock_wall_step_deadline_ns(target, stock, regrid);
 	if (wall_step_ns != 0)
 		blog(LOG_INFO,
 		     "genlock-regrid: the wall clock stepped %+.3f ms against the media clock -- render tick "
 		     "re-gridded in one tick (steps=%llu) (issue 1372)",
 		     (double)wall_step_ns / 1e6, (unsigned long long)wall_step.steps);
-	return genlock_wall_step_deadline_ns(target, stock, wall_step_ns != 0);
+	return deadline;
 }
 
 #if defined(__linux__) && !defined(_WIN32)

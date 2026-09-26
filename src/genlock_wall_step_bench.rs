@@ -22,8 +22,9 @@
 
 use crate::asrc_bench::{RealtimeAsrcCompensator, STEP_RECOVER_PPM};
 use crate::genlock_grid::{
-    grid_floor_ns, grid_next_boundary_ns, per_second_floor, UNITS_100NS_PER_SECOND,
+    grid_floor_ns, grid_next_boundary_ns, per_second_floor, NS_PER_SECOND, UNITS_100NS_PER_SECOND,
 };
+use crate::genlock_grid_bench::{BenchConfig, Fifo, GridModel, TickCounters};
 use crate::genlock_lock_state::{
     qpc_drift_beyond_bound, qpc_wall_step_rebase_ms, GENLOCK_QPC_STEP_BOUND_MS,
     GENLOCK_QPC_WALL_STEPS_PER_WINDOW, GENLOCK_QPC_WALL_STEP_BOOK_MAX_MS, GENLOCK_QPC_WINDOW_S,
@@ -52,22 +53,35 @@ impl Lcg {
     }
 }
 
-// ---- 1. the render tick + the NDI sender stamp --------------------------------------------------
+// ---- 1. the render tick + the NDI sender stamp + a receiver FIFO ---------------------------------
 
 const INTERVAL_NS: u64 = 33_333_333; // the 30 fps canvas
 const MONO0: u64 = 50_000_000_000_000; // ~14 h since boot
 const WALL0: u64 = 1_790_378_167_000_000_000; // 60 s before the logged step
 const STEP_AT_MONO: u64 = MONO0 + 60_000_000_000;
 
-/// The wall clock at a monotonic instant: continuous until the step, then −51 ms.
-fn wall_at(mono: u64) -> u64 {
+/// The wall clock at a monotonic instant, `step_ns` applied from `STEP_AT_MONO` on. A coordinated
+/// fleet date step applies the SAME step on every box at (to the ms) the same instant.
+fn wall_at(mono: u64, step_ns: i64) -> u64 {
     let wall = WALL0 + (mono - MONO0);
     if mono >= STEP_AT_MONO {
-        wall.wrapping_add(STEP_NS as u64)
+        wall.wrapping_add(step_ns as u64)
     } else {
         wall
     }
 }
+
+/// Grid slots from stamp `a` to stamp `b` (ns, both on the per-second grid; negative = backward).
+fn slots_between(a: u64, b: u64) -> i64 {
+    ((b as i64 - a as i64) as f64 / INTERVAL_NS as f64).round() as i64
+}
+
+/// The sender's emit delay after the tick fires (render → video-io → DistroAV `send_video`), ns.
+/// TIGHT is an unloaded box; WIDE spreads it over most of a frame, like the video-io lag the
+/// resolume `cg-obs` log shows (comment 5841262854). On the wide spread an off-phase tick puts
+/// emits on both sides of a grid boundary, which is how the legacy slew walks the stamps off phase.
+const EMIT_TIGHT: (u64, u64) = (2_000_000, 8_000_000);
+const EMIT_WIDE: (u64, u64) = (0, 30_000_000);
 
 /// Signed distance (ns) of a wall instant from its nearest grid point.
 fn grid_phase_err(wall: u64) -> i64 {
@@ -75,38 +89,130 @@ fn grid_phase_err(wall: u64) -> i64 {
     wall.wrapping_sub(nearest) as i64
 }
 
+/// One box's render tick: obs-video.c `genlock_next_deadline` (a bracketed mono/wall/mono read →
+/// the detector → the wall-grid target → [`WallStepState::regrid_due`] → [`deadline_ns`]) followed
+/// by `video_sleep`: a deadline still ahead of the clock is slept to; one already past falls back to
+/// `cur_time + interval · count`, the OLD grid. `regrid = false` is the legacy tick (the 2 ms clamp
+/// even across a step).
+struct RenderTick {
+    detector: WallStepState,
+    regrid: bool,
+    /// The deadline this tick was scheduled for (the C `*p_time`).
+    sched: u64,
+    /// Extra time between deciding the deadline and `os_sleepto_ns` on the tick that detects the
+    /// step (the `genlock-regrid:` log write, a preemption): a re-grid target closer than this is
+    /// already past when the sleep samples the clock.
+    late_on_step: u64,
+}
+
+impl RenderTick {
+    fn new(regrid: bool, step_ns: i64) -> Self {
+        let first_wall = wall_at(MONO0, step_ns);
+        RenderTick {
+            detector: WallStepState::new(),
+            regrid,
+            sched: MONO0 + (grid_next_boundary_ns(first_wall, INTERVAL_NS) - first_wall),
+            late_on_step: 0,
+        }
+    }
+
+    /// Compute the next deadline at `call` (the end of this tick's render) and sleep to it.
+    fn advance(&mut self, call: u64, step_ns: i64) {
+        let mono_before = call;
+        let wall = wall_at(call + 1_000, step_ns);
+        let mono = call + 2_000;
+        let step = self.detector.observe(mono_before, wall, mono);
+        let target = mono + (grid_next_boundary_ns(wall, INTERVAL_NS) - wall);
+        let stock = self.sched + INTERVAL_NS;
+        let regrid = self.detector.regrid_due(step, target, stock) && self.regrid;
+        let deadline = deadline_ns(target, stock, regrid);
+        // video_sleep: os_sleepto_ns samples the clock after the (possible) log line
+        let now = mono + 50_000 + if step != 0 { self.late_on_step } else { 0 };
+        self.sched = if deadline > now {
+            deadline
+        } else {
+            let count = ((now - self.sched) / INTERVAL_NS).max(1);
+            self.sched + INTERVAL_NS * count
+        };
+    }
+}
+
 #[derive(Debug)]
 struct TickRun {
-    /// Scheduled ticks after the step whose wall instant is more than 100 µs off the grid.
+    /// Scheduled sender ticks after the step whose wall instant is more than 100 µs off the grid.
     off_grid_ticks: usize,
-    /// Scheduled ticks after the step until the first on-grid one (inclusive of the off ones).
+    /// Scheduled sender ticks after the step until the first on-grid one (inclusive).
     ticks_to_regrid: usize,
     /// Stamp intervals of 0 slots after the step (a repeated stamp).
     dups: usize,
     /// Stamp intervals of 2+ slots after the step (a skipped slot).
     gaps: usize,
-    /// Wall steps the detector counted.
+    /// The one stamp interval that carries the step itself, in slots (negative = backward).
+    step_interval_slots: i64,
+    /// Wall steps the sender's detector counted.
     steps: u64,
+    /// Receiver FIFO counters in the 30 s after the step, minus the same seed's no-step run.
+    receiver: Option<ReceiverCost>,
 }
 
-/// Run the render tick 120 s with the step at 60 s. Each tick fires at its deadline + 0–200 µs,
-/// renders for 3–10 ms and then computes the next deadline exactly like obs-video.c
-/// `genlock_next_deadline` (a bracketed mono/wall/mono read → the detector → the wall-grid target
-/// → [`deadline_ns`]); the sender floors the wall clock at emit, 2–8 ms after the fire, like
-/// DistroAV `genlock_emit_timecode_100ns`. `regrid = false` is the legacy tick (the 2 ms clamp
-/// even across a step).
-fn run_render_tick(regrid: bool) -> TickRun {
+/// What a receiver FIFO put on air in the 30 s after the step, as the viewer sees it: ticks that
+/// presented nothing (the previous frame stays on air), presents whose stamp is not newer than the
+/// previous one's slot (a backward / repeated frame), and grid slots skipped between two presents;
+/// plus the relocks and underruns the FIFO counted. Compared against the identical run with no step.
+/// (The FIFO's own `resyncs` counter is not used: on the per-second grid every third stamp interval
+/// is 100 ns longer than `interval`, which the N==1 port books as a GAP RESYNC with a normal one-frame
+/// release, ~10 per second with or without a step.)
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct ReceiverCost {
+    held_ticks: i64,
+    backward_presents: i64,
+    skipped_slots: i64,
+    relocks: i64,
+    underruns: i64,
+}
+
+impl ReceiverCost {
+    /// Frames the viewer sees out of order: held, repeated/backward, or skipped.
+    fn visible(&self) -> i64 {
+        self.held_ticks + self.backward_presents + self.skipped_slots
+    }
+}
+
+/// Run a sender box and (optionally) a receiver box 120 s with the coordinated step at 60 s.
+/// Sender: each tick fires at its deadline + 0–200 µs, renders 3–10 ms (on the tick that detects
+/// the step, `stall_ns` passes between the deadline decision and the sleep, so a re-grid target
+/// closer than that is already past when the sleep samples the clock), and the NDI sender floors the wall clock at emit, `emit_ns` after the fire, like DistroAV
+/// `genlock_emit_timecode_100ns`. Receiver (`receiver_latency_ms`): the production N==1 FIFO port
+/// ([`Fifo`], the issue-1355 grid bench) fed those stamps 1–3 ms after emit, on its own render tick
+/// with its own detector, the same wall step at the same instant. `regrid` switches BOTH ticks.
+fn run_boxes(
+    regrid: bool,
+    step_ns: i64,
+    stall_ns: u64,
+    receiver_latency_ms: Option<u32>,
+    emit_ns: (u64, u64),
+) -> TickRun {
     let mut rng = Lcg(0x1372);
-    let mut detector = WallStepState::new();
-    let first_wall = wall_at(MONO0);
-    let mut sched = MONO0 + (grid_next_boundary_ns(first_wall, INTERVAL_NS) - first_wall);
+    let mut tx = RenderTick::new(regrid, step_ns);
+    tx.late_on_step = stall_ns;
     let mut stamps: Vec<(u64, u64)> = Vec::new(); // (sched mono, stamp 100 ns)
+    let mut in_flight: VecDeque<(u64, u64)> = VecDeque::new(); // (arrival mono, stamp ns)
     let mut off_grid_ticks = 0;
     let mut ticks_to_regrid = 0;
     let mut regridded = false;
-    for _ in 0..(120 * 30) {
-        if sched >= STEP_AT_MONO {
-            let off = grid_phase_err(wall_at(sched)).unsigned_abs() > 100_000;
+    let mut rx = RenderTick::new(regrid, step_ns);
+    let mut rx_rng = Lcg(0x1372_00ff);
+    let mut fifo = Fifo::default();
+    let rx_cfg = receiver_latency_ms.map(|ms| {
+        let mut cfg = BenchConfig::live_2026_09_24(GridModel::Production);
+        cfg.latency_ms = ms;
+        cfg
+    });
+    let mut cost = ReceiverCost::default();
+    let end = MONO0 + 120 * NS_PER_SECOND;
+    while tx.sched < end {
+        if tx.sched >= STEP_AT_MONO {
+            let off = grid_phase_err(wall_at(tx.sched, step_ns)).unsigned_abs() > 100_000;
             if off {
                 off_grid_ticks += 1;
             }
@@ -115,78 +221,197 @@ fn run_render_tick(regrid: bool) -> TickRun {
                 regridded = !off;
             }
         }
-        let fire = sched + rng.ns(0, 200_000);
-        let emit = fire + rng.ns(2_000_000, 8_000_000);
-        stamps.push((
-            sched,
-            per_second_floor(wall_at(emit) / 100, 30, UNITS_100NS_PER_SECOND),
-        ));
+        let fire = tx.sched + rng.ns(0, 200_000);
+        let emit = fire + rng.ns(emit_ns.0, emit_ns.1);
+        let stamp = per_second_floor(wall_at(emit, step_ns) / 100, 30, UNITS_100NS_PER_SECOND);
+        stamps.push((tx.sched, stamp));
+        in_flight.push_back((emit + rng.ns(1_000_000, 3_000_000), stamp * 100));
         let call = fire + rng.ns(3_000_000, 10_000_000);
-        let mono_before = call;
-        let wall = wall_at(call + 1_000);
-        let mono = call + 2_000;
-        let step = detector.observe(mono_before, wall, mono);
-        let target = mono + (grid_next_boundary_ns(wall, INTERVAL_NS) - wall);
-        let stock = sched + INTERVAL_NS;
-        sched = deadline_ns(target, stock, regrid && step != 0).max(call);
-    }
-    // Stamp intervals from the SECOND stamp emitted after the step on: the first one carries the
-    // step itself (the wall moved back 51 ms) and is inherent to a date step on every sender.
-    let slot = UNITS_100NS_PER_SECOND / 30;
-    let after: Vec<u64> = stamps
-        .iter()
-        .filter(|(s, _)| *s >= STEP_AT_MONO)
-        .map(|&(_, st)| st)
-        .collect();
-    let mut dups = 0;
-    let mut gaps = 0;
-    for w in after.windows(2).skip(1) {
-        let d = w[1] as i64 - w[0] as i64;
-        let slots = (d as f64 / slot as f64).round() as i64;
-        if slots <= 0 {
-            dups += 1;
-        } else if slots >= 2 {
-            gaps += 1;
+        tx.advance(call, step_ns);
+        // the receiver ticks up to the sender's next fire, taking every frame that has arrived
+        if let Some(cfg) = rx_cfg.as_ref() {
+            while rx.sched < tx.sched {
+                let rx_fire = rx.sched + rx_rng.ns(0, 300_000);
+                while in_flight
+                    .front()
+                    .is_some_and(|&(arrival, _)| arrival <= rx_fire)
+                {
+                    let (_, st) = in_flight.pop_front().expect("front exists");
+                    fifo.queue.push_back(st);
+                }
+                let wall = wall_at(rx_fire, step_ns);
+                let scheduled = rx.sched.wrapping_add(wall.wrapping_sub(rx_fire));
+                let before = fifo.presented;
+                let mut tc = TickCounters::default();
+                fifo.tick(cfg, wall, scheduled, &mut tc);
+                if rx.sched >= STEP_AT_MONO && rx.sched < STEP_AT_MONO + 30 * NS_PER_SECOND {
+                    cost.relocks += tc.relocks as i64;
+                    cost.underruns += tc.underruns as i64;
+                    match (before, fifo.presented_now) {
+                        (_, false) => cost.held_ticks += 1,
+                        (Some(prev), true) => {
+                            let now = fifo.presented.expect("a present sets it");
+                            match slots_between(prev, now) {
+                                d if d <= 0 => cost.backward_presents += 1,
+                                d => cost.skipped_slots += d - 1,
+                            }
+                        }
+                        (None, true) => {}
+                    }
+                }
+                rx.advance(rx_fire + rx_rng.ns(3_000_000, 10_000_000), step_ns);
+            }
+        } else {
+            in_flight.clear();
         }
     }
+    let slot = UNITS_100NS_PER_SECOND / 30;
+    let slots = |a: u64, b: u64| ((b as i64 - a as i64) as f64 / slot as f64).round() as i64;
+    let first_after = stamps
+        .iter()
+        .position(|(s, _)| *s >= STEP_AT_MONO)
+        .expect("the run reaches the step");
+    let step_interval_slots = slots(stamps[first_after - 1].1, stamps[first_after].1);
+    let (mut dups, mut gaps) = (0, 0);
+    for w in stamps[first_after..].windows(2) {
+        match slots(w[0].1, w[1].1) {
+            s if s <= 0 => dups += 1,
+            s if s >= 2 => gaps += 1,
+            _ => {}
+        }
+    }
+    let receiver = receiver_latency_ms.map(|_| cost);
     TickRun {
         off_grid_ticks,
         ticks_to_regrid,
         dups,
         gaps,
-        steps: detector.steps(),
+        step_interval_slots,
+        steps: tx.detector.steps(),
+        receiver,
+    }
+}
+
+/// The step's cost to a receiver: the step run minus the identical run with no step.
+fn receiver_cost(regrid: bool, step_ns: i64, latency_ms: u32) -> ReceiverCost {
+    let with = run_boxes(regrid, step_ns, 0, Some(latency_ms), EMIT_WIDE)
+        .receiver
+        .expect("receiver ran");
+    let without = run_boxes(regrid, 0, 0, Some(latency_ms), EMIT_WIDE)
+        .receiver
+        .expect("receiver ran");
+    ReceiverCost {
+        held_ticks: with.held_ticks - without.held_ticks,
+        backward_presents: with.backward_presents - without.backward_presents,
+        skipped_slots: with.skipped_slots - without.skipped_slots,
+        relocks: with.relocks - without.relocks,
+        underruns: with.underruns - without.underruns,
     }
 }
 
 #[test]
 fn the_render_tick_and_the_sender_regrid_in_one_tick_1372() {
-    let prod = run_render_tick(true);
-    assert_eq!(
-        prod.steps, 1,
-        "the detector must count the one step: {prod:?}"
-    );
-    // The one tick already scheduled when the wall stepped lands off the new grid; the tick after
-    // it is back on the grid.
-    assert_eq!(
-        prod.ticks_to_regrid, 2,
-        "issue 1372: the render tick must re-grid in ONE tick after the step: {prod:?}"
-    );
-    assert_eq!(
-        prod.off_grid_ticks, 1,
-        "issue 1372: only the tick scheduled before the step may be off the grid: {prod:?}"
-    );
-    assert_eq!(
-        (prod.dups, prod.gaps),
-        (0, 0),
-        "issue 1372: after the step the sender must stamp one slot per frame: {prod:?}"
-    );
+    for step_ns in [STEP_NS, -STEP_NS] {
+        let prod = run_boxes(true, step_ns, 0, None, EMIT_TIGHT);
+        assert_eq!(
+            prod.steps, 1,
+            "the detector must count the one step: {prod:?}"
+        );
+        // The one tick already scheduled when the wall stepped lands off the new grid; the tick
+        // after it is back on the grid.
+        assert_eq!(
+            (prod.ticks_to_regrid, prod.off_grid_ticks),
+            (2, 1),
+            "issue 1372: the render tick must re-grid in ONE tick after a {step_ns} ns step: {prod:?}"
+        );
+        // After the stamp interval that carries the step itself, one slot per frame.
+        assert_eq!(
+            (prod.dups, prod.gaps),
+            (0, 0),
+            "issue 1372: after the step the sender must stamp one slot per frame: {prod:?}"
+        );
+        // Anti-tautology: the legacy 2 ms/tick clamp on the SAME feed walks the tick back over
+        // ~8-9 ticks (51 ms mod one 33.3 ms frame at 2 ms per tick), off phase meanwhile.
+        let legacy = run_boxes(false, step_ns, 0, None, EMIT_TIGHT);
+        assert!(
+            legacy.off_grid_ticks >= 7 && legacy.ticks_to_regrid >= 8,
+            "the legacy clamp must slew over >= 7 off-grid ticks on this feed: {legacy:?}"
+        );
+    }
+    // On the wide emit spread the legacy slew walks the stamps off phase (a repeated and a skipped
+    // stamp while the tick is off the grid); the one-tick re-grid does not.
+    for step_ns in [STEP_NS, -STEP_NS] {
+        let prod = run_boxes(true, step_ns, 0, None, EMIT_WIDE);
+        let legacy = run_boxes(false, step_ns, 0, None, EMIT_WIDE);
+        assert_eq!(
+            (prod.dups, prod.gaps),
+            (0, 0),
+            "issue 1372: a wide emit spread must not put a repeated/skipped stamp after the re-grid: \
+             {prod:?}"
+        );
+        assert!(
+            legacy.dups + legacy.gaps >= 2,
+            "the legacy slew must stamp off phase on the wide emit spread: {legacy:?}"
+        );
+    }
+    // The step interval itself is inherent to a date step on EVERY sender (the wall moved): the
+    // stamp after a −51 ms step repeats an earlier slot (backward), after +51 ms it skips a slot.
+    assert!(run_boxes(true, STEP_NS, 0, None, EMIT_TIGHT).step_interval_slots <= 0);
+    assert!(run_boxes(true, -STEP_NS, 0, None, EMIT_TIGHT).step_interval_slots >= 2);
+}
 
-    // Anti-tautology: the legacy 2 ms/tick clamp on the SAME feed walks the tick back over ~9
-    // ticks (51 ms mod one 33.3 ms frame = 17.7 ms at 2 ms per tick), off phase meanwhile.
-    let legacy = run_render_tick(false);
+#[test]
+fn a_regrid_whose_target_passed_during_a_stall_still_lands_1372() {
+    // On the tick that detects the step, 45 ms (more than a frame) pass between the deadline decision
+    // and the sleep: the re-grid target is already past when os_sleepto_ns samples the clock, and
+    // video_sleep falls back to `cur_time + interval · count` on the OLD grid. The pending re-grid
+    // still lands on the next tick instead of degrading to the 2 ms slew.
+    let prod = run_boxes(true, STEP_NS, 45_000_000, None, EMIT_TIGHT);
     assert!(
-        legacy.off_grid_ticks >= 8 && legacy.ticks_to_regrid >= 9,
-        "the legacy clamp must slew over >= 8 off-grid ticks on this feed: {legacy:?}"
+        prod.ticks_to_regrid <= 3 && prod.off_grid_ticks <= 2,
+        "issue 1372: a stalled re-grid must still land within one more tick: {prod:?}"
+    );
+    let legacy = run_boxes(false, STEP_NS, 45_000_000, None, EMIT_TIGHT);
+    assert!(
+        legacy.off_grid_ticks >= 7,
+        "the legacy clamp slews after the stall too: {legacy:?}"
+    );
+}
+
+#[test]
+fn a_receiver_fifo_pays_the_step_once_and_no_more_than_the_slew_did_1372() {
+    // The coordinated step reaching a receiver FIFO: the deep stream `NDI 2ME PGM` (pin 987 ms) and a
+    // shallow cg feed (3 ms), on the wide emit spread. Both boxes step together, so the receiver's
+    // present deadline and the sender's stamps move by the same 51 ms. What remains is inherent: the
+    // stamp interval that carries the step is 1.5 frames long (backward after −51 ms: a repeated
+    // frame; forward after +51 ms: a skipped one), plus the one tick in which the receiver's own
+    // render tick changes phase. The legacy slew pays more on the deep FIFO (its off-phase stamps
+    // add a repeat and a skip); on the shallow one the receiver's re-grid tick costs a held frame the
+    // legacy slew spreads out, and the sender side pays that back.
+    for latency_ms in [987u32, 3] {
+        for step_ns in [STEP_NS, -STEP_NS] {
+            let prod = receiver_cost(true, step_ns, latency_ms);
+            let legacy = receiver_cost(false, step_ns, latency_ms);
+            assert_eq!(
+                (prod.relocks, prod.underruns),
+                (0, 0),
+                "issue 1372: pin {latency_ms} ms, step {step_ns} ns: the step must not relock or \
+                 underrun the receiver: {prod:?}"
+            );
+            assert!(
+                prod.visible() <= 5 && prod.visible() <= legacy.visible(),
+                "issue 1372: pin {latency_ms} ms, step {step_ns} ns: the step may cost the viewer at \
+                 most the inherent 1.5-frame jump plus one re-grid tick, and never more than the \
+                 legacy slew: prod {prod:?} legacy {legacy:?}"
+            );
+        }
+    }
+    // Anti-tautology: the deep FIFO on the legacy slew pays strictly more for the same step.
+    let prod = receiver_cost(true, STEP_NS, 987);
+    let legacy = receiver_cost(false, STEP_NS, 987);
+    assert!(
+        prod.visible() < legacy.visible(),
+        "the legacy slew must cost the deep FIFO more: prod {prod:?} legacy {legacy:?}"
     );
 }
 
