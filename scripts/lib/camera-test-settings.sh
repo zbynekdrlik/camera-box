@@ -296,29 +296,20 @@ camera_test_settings_enforce() {
   stray_session_check_assert "$here" "$strih" "$stream" "the test-camera shutter/ISO set"
   # The owner's production exposure: stored from the values just read, BEFORE the camera changes,
   # only when no snapshot is waiting (the EVENT switch restores + consumes it). No record = no set.
-  local snap
+  # The python output is captured first, so its exit code never depends on the caller's pipefail.
+  local snap snap_out
   rc=0
   snap="$(python3 "$py" snapshot-path)" || rc=$?
   if [ "$rc" -eq 0 ] && [ -n "$snap" ]; then
-    python3 "$py" snapshot --baseline "$baseline" --snapshot "$snap" --box "$found_label" <<<"$raw" | _cts_prefix || rc=$?
+    snap_out="$(python3 "$py" snapshot --baseline "$baseline" --snapshot "$snap" --box "$found_label" <<<"$raw")" || rc=$?
+    [ -z "${snap_out:-}" ] || printf '%s\n' "$snap_out" | _cts_prefix
   fi
   if [ "$rc" -ne 0 ] || [ -z "$snap" ]; then
     echo "ERROR: issue 1371: the test camera's production exposure could not be stored (${snap:-no snapshot path}, rc=$rc, see above) -- refusing to overwrite the owner's ISO/shutter without a record the EVENT switch can restore." >&2
     exit 1
   fi
-  rc=0
-  camera_test_settings_ssh "$found_ip" "$pw" "$(camera_test_settings_gphoto2_cmd "$setargs")" >/dev/null || rc=$?
-  case "$rc" in
-    0) ;;
-    "$(camera_test_settings_rc_relay_active)" | "$(camera_test_settings_rc_gphoto2_busy)" | "$(camera_test_settings_rc_no_pgrep)")
-      camera_test_settings_transport_abort "$rc" "$found_label" "$found_ip" set
-      ;;
-    *) echo "    WARNING: issue 1371: gphoto2 --set-config exited rc=$rc -- the read-back decides" >&2 ;;
-  esac
-
-  read_rc=0
-  readback="$(camera_test_settings_ssh "$found_ip" "$pw" "$(camera_test_settings_gphoto2_cmd "$read_args")")" || read_rc=$?
-  [ "$read_rc" -eq 0 ] || camera_test_settings_transport_abort "$read_rc" "$found_label" "$found_ip" read-back
+  readback="$(_cts_set_and_readback "$found_ip" "$found_label" "$pw" "$setargs" "$read_args" \
+    "refusing to run on an unknown exposure")" || exit 1
   rc=0
   grade="$(python3 "$py" grade --baseline "$baseline" <<<"$readback")" || rc=$?
   printf '%s\n' "$grade" | _cts_prefix
@@ -338,9 +329,37 @@ camera_test_settings_enforce() {
   esac
 }
 
+# _cts_set_and_readback IP LABEL PW SETARGS READ_ARGS CONSEQUENCE -> ONE --set-config session, then
+# ONE read-back session; prints the read-back text. Shared by the E2E enforce and the EVENT restore,
+# so both handle every transport code the same way. The single-gphoto2-user refusals (96/97/98) and
+# a failed read-back exit 1 through camera_test_settings_transport_abort (CONSEQUENCE ends the
+# message); any other set rc is only a WARNING, because the read-back decides. Call it as
+# `x="$(_cts_set_and_readback ...)" || exit 1` -- it runs in the command-substitution subshell.
+_cts_set_and_readback() {
+  local ip="$1" label="$2" pw="$3" setargs="$4" read_args="$5" consequence="$6" rc=0 readback
+  camera_test_settings_ssh "$ip" "$pw" "$(camera_test_settings_gphoto2_cmd "$setargs")" >/dev/null || rc=$?
+  case "$rc" in
+    0) ;;
+    "$(camera_test_settings_rc_relay_active)" | "$(camera_test_settings_rc_gphoto2_busy)" | "$(camera_test_settings_rc_no_pgrep)")
+      camera_test_settings_transport_abort "$rc" "$label" "$ip" set "$consequence"
+      ;;
+    *) echo "    WARNING: issue 1371: gphoto2 --set-config exited rc=$rc -- the read-back decides" >&2 ;;
+  esac
+  rc=0
+  readback="$(camera_test_settings_ssh "$ip" "$pw" "$(camera_test_settings_gphoto2_cmd "$read_args")")" || rc=$?
+  [ "$rc" -eq 0 ] || camera_test_settings_transport_abort "$rc" "$label" "$ip" read-back "$consequence"
+  printf '%s\n' "$readback"
+}
+
 # ---------------------------------------------------------------------------------------------
 # the EVENT-switch restore of the production exposure (called from rig-mode.sh's EVENT path)
 # ---------------------------------------------------------------------------------------------
+
+# The operator's manual way out, named in every restore failure: set the camera by hand AND move
+# the snapshot aside, or the next EVENT switch writes the stale values over the owner's new ones.
+camera_test_settings_manual_consume_hint() {
+  printf '%s\n' "python3 scripts/camera_test_settings.py consume"
+}
 
 # Remote text: stop the relay on the camera box before the restore's gphoto2 sessions. The relay is
 # normally already stopped (TEST mode stopped+disabled it); this covers a rig that ran an E2E
@@ -349,22 +368,26 @@ camera_test_settings_relay_stop_cmds() {
   printf 'systemctl stop %s 2>/dev/null || true\n' "$(bkshading_relay_unit_name)"
 }
 
-# _cts_consume PY SNAP -> moves the snapshot aside as consumed; exits 1 when that fails (a snapshot
-# left in place would be restored AGAIN at the next EVENT switch, over the owner's later choice).
+# Exit code of the restore subshell when the camera IS back on its production values but the
+# snapshot could not be moved aside (restored, yet the next EVENT switch would restore it again).
+camera_test_settings_rc_unconsumed() { printf '%s\n' 22; }
+
+# _cts_consume PY SNAP -> moves the snapshot aside as consumed (which also clears a restore-failed
+# marker); exits 22 when that fails.
 _cts_consume() {
   local py="$1" snap="$2" moved rc=0
   moved="$(python3 "$py" consume --snapshot "$snap")" || rc=$?
   if [ "$rc" -ne 0 ]; then
-    echo "ERROR: issue 1371: the production exposure is back on the camera, but the snapshot $snap could not be moved aside (rc=$rc, see above) -- move it by hand, or the next EVENT switch restores it again." >&2
-    exit 1
+    echo "WARNING: issue 1371: the production exposure is back on the camera, but the snapshot $snap could not be moved aside (rc=$rc, see above) -- move it by hand: $(camera_test_settings_manual_consume_hint), or the next EVENT switch restores it again." >&2
+    exit "$(camera_test_settings_rc_unconsumed)"
   fi
   echo "    snapshot moved aside: $moved"
 }
 
 # _cts_restore_apply HERE STRIH STREAM PW SNAP LABEL=IP [...] -> run ONLY in a subshell (every
 # failure is an `exit`, the shared transport/guard helpers exit too). exit 0 = restored + read back
-# + consumed; 21 = the camera already had the production values (consumed, nothing set); anything
-# else = NOT restored, the snapshot stays.
+# + consumed; 21 = the camera already had the production values (consumed, nothing set); 22 =
+# restored but not consumed; anything else = NOT restored, the snapshot stays.
 _cts_restore_apply() {
   local here="$1" strih="$2" stream="$3" pw="$4" snap="$5"
   shift 5
@@ -377,6 +400,10 @@ _cts_restore_apply() {
     exit 1
   fi
   echo "    camera on USB: $CTS_FOUND_LABEL ($CTS_FOUND_IP)"
+  # issue 1271: the relay stop and the camera's PTP session are rig mutations too -- the shared
+  # read-only rig-busy guard runs BEFORE them (its exit 1 ends this subshell, never the EVENT switch),
+  # and again right before the set.
+  stray_session_check_assert "$here" "$strih" "$stream" "the test-camera production exposure read"
   camera_test_settings_ssh "$CTS_FOUND_IP" "$pw" "$(camera_test_settings_relay_stop_cmds)" >/dev/null 2>&1 || true
 
   rc=0
@@ -402,22 +429,9 @@ _cts_restore_apply() {
     exit 21
   fi
 
-  # issue 1271: a camera --set-config is a rig mutation -- the shared read-only rig-busy guard runs
-  # IMMEDIATELY before it (its exit 1 ends this subshell, never the EVENT switch).
   stray_session_check_assert "$here" "$strih" "$stream" "the test-camera production exposure restore"
-  rc=0
-  camera_test_settings_ssh "$CTS_FOUND_IP" "$pw" "$(camera_test_settings_gphoto2_cmd "$setargs")" >/dev/null || rc=$?
-  case "$rc" in
-    0) ;;
-    "$(camera_test_settings_rc_relay_active)" | "$(camera_test_settings_rc_gphoto2_busy)" | "$(camera_test_settings_rc_no_pgrep)")
-      camera_test_settings_transport_abort "$rc" "$CTS_FOUND_LABEL" "$CTS_FOUND_IP" set "$consequence"
-      ;;
-    *) echo "    WARNING: issue 1371: gphoto2 --set-config exited rc=$rc -- the read-back decides" >&2 ;;
-  esac
-
-  read_rc=0
-  readback="$(camera_test_settings_ssh "$CTS_FOUND_IP" "$pw" "$(camera_test_settings_gphoto2_cmd "$read_args")")" || read_rc=$?
-  [ "$read_rc" -eq 0 ] || camera_test_settings_transport_abort "$read_rc" "$CTS_FOUND_LABEL" "$CTS_FOUND_IP" read-back "$consequence"
+  readback="$(_cts_set_and_readback "$CTS_FOUND_IP" "$CTS_FOUND_LABEL" "$pw" "$setargs" "$read_args" \
+    "$consequence")" || exit 1
   rc=0
   grade="$(python3 "$py" restore-grade --snapshot "$snap" <<<"$readback")" || rc=$?
   printf '%s\n' "$grade" | _cts_prefix
@@ -436,18 +450,24 @@ _cts_restore_apply() {
   exit 0
 }
 
-# _cts_restore_failed SNAP REASON -> the LOUD not-restored report (run log + a ::warning annotation).
+# _cts_restore_failed PY SNAP REASON -> the LOUD not-restored report (run log + a ::warning
+# annotation), plus the restore-failed marker next to the snapshot for the handover check.
 _cts_restore_failed() {
+  local py="$1" snap="${2:-}" reason="$3"
   CTS_RESTORE_OUTCOME=failed
-  echo "::warning title=issue 1371 production exposure NOT restored::the test camera's production ISO/shutter were NOT restored ($2) -- production would start on the TEST exposure"
-  echo "WARNING: issue 1371: the test camera's production ISO/shutter were NOT restored ($2). Production would start on the TEST exposure. The snapshot ${1:-} stays: run scripts/rig-mode.sh event again once the camera is on USB and the rig is idle, or set the camera by hand." >&2
+  echo "::warning title=issue 1371 production exposure NOT restored::the test camera's production ISO/shutter were NOT restored ($reason) -- production would start on the TEST exposure"
+  echo "WARNING: issue 1371: the test camera's production ISO/shutter were NOT restored ($reason). Production would start on the TEST exposure. The snapshot ${snap} stays: run scripts/rig-mode.sh event again once the camera is on USB and the rig is not on air, or set the camera by hand AND move the snapshot aside: $(camera_test_settings_manual_consume_hint)." >&2
+  if [ -n "$snap" ] && [ -e "$snap" ]; then
+    python3 "$py" restore-failed --snapshot "$snap" --reason "$reason" >/dev/null 2>&1 || true
+  fi
 }
 
 # camera_test_settings_restore SCRIPTS_DIR STRIH STREAM CAM_PW LABEL=IP [LABEL=IP ...]
 # The rig-mode EVENT switch: put the production exposure the E2E snapshotted back on the test
 # camera. NEVER exits (the whole camera part runs in a subshell); returns 0 when restored / nothing
-# was pending, 1 when it was NOT restored (a loud named line, the snapshot kept for a retry). Sets
-# CTS_RESTORE_OUTCOME (none | restored | already | failed) + CTS_RESTORE_SUMMARY for the Discord note.
+# was pending, 1 otherwise (a loud named line; a not-restored snapshot is kept for a retry). Sets
+# CTS_RESTORE_OUTCOME (none | restored | already | restored-unconsumed | failed) +
+# CTS_RESTORE_SUMMARY for the Discord note.
 camera_test_settings_restore() {
   local here="$1" strih="$2" stream="$3" pw="$4"
   shift 4
@@ -458,7 +478,7 @@ camera_test_settings_restore() {
   echo "[exposure] issue 1371: restore the test camera's production ISO + shutter (snapshotted by the E2E before its first set) while the relay is still stopped"
   snap="$(python3 "$py" snapshot-path)" || rc=$?
   if [ "$rc" -ne 0 ] || [ -z "$snap" ]; then
-    _cts_restore_failed "" "the snapshot path could not be resolved, rc=$rc"
+    _cts_restore_failed "$py" "" "the snapshot path could not be resolved, rc=$rc"
     return 1
   fi
   if [ ! -e "$snap" ]; then
@@ -470,7 +490,7 @@ camera_test_settings_restore() {
   CTS_RESTORE_SUMMARY="$(python3 "$py" restore-status --snapshot "$snap")" || rc=$?
   if [ "$rc" -ne 0 ]; then
     CTS_RESTORE_SUMMARY=""
-    _cts_restore_failed "$snap" "the snapshot is invalid, see above"
+    _cts_restore_failed "$py" "$snap" "the snapshot is invalid, see above"
     return 1
   fi
   echo "    pending production exposure: $CTS_RESTORE_SUMMARY"
@@ -487,22 +507,34 @@ camera_test_settings_restore() {
       echo "    ok: the test camera already had its production exposure -- nothing set (issue 1371): $CTS_RESTORE_SUMMARY"
       return 0
       ;;
+    "$(camera_test_settings_rc_unconsumed)")
+      CTS_RESTORE_OUTCOME=restored-unconsumed
+      echo "::warning title=issue 1371 production exposure snapshot not moved aside::the camera is back on its production exposure, but move the snapshot aside by hand: $(camera_test_settings_manual_consume_hint)"
+      return 1
+      ;;
     *)
-      _cts_restore_failed "$snap" "rc=$rc, see above"
+      _cts_restore_failed "$py" "$snap" "rc=$rc, see above"
       return 1
       ;;
   esac
 }
 
-# camera_test_settings_restore_discord_note MSG_FILE -> append the restore outcome to the EVENT
-# Discord confirmation (the owner reads THAT on the phone). Nothing for `none`. Never fails.
+# camera_test_settings_restore_discord_note MSG_FILE -> add the restore outcome to the EVENT
+# Discord confirmation (the owner reads THAT on the phone). A failure goes ON TOP of the message,
+# a success at the end; nothing for `none`. Never fails.
 camera_test_settings_restore_discord_note() {
-  local msg="${1:-}" line=""
+  local msg="${1:-}" line="" body=""
   [ -n "$msg" ] && [ -f "$msg" ] || return 0
   case "${CTS_RESTORE_OUTCOME:-none}" in
     restored) line="✅ Testovacia kamera: produkčná expozícia vrátená (${CTS_RESTORE_SUMMARY:-})." ;;
     already) line="✅ Testovacia kamera: produkčná expozícia už sedela (${CTS_RESTORE_SUMMARY:-})." ;;
-    failed) line="⚠️ Testovacia kamera: produkčná expozícia (ISO/uzávierka) sa NEVRÁTILA${CTS_RESTORE_SUMMARY:+ (čakala: $CTS_RESTORE_SUMMARY)} — kamera môže ostať na testovacej expozícii. Snímka ostáva: spusti scripts/rig-mode.sh event znova, keď je kamera na USB, alebo nastav kameru ručne." ;;
+    restored-unconsumed) line="✅ Testovacia kamera: produkčná expozícia vrátená (${CTS_RESTORE_SUMMARY:-}), ale snímku treba odložiť ručne: $(camera_test_settings_manual_consume_hint)." ;;
+    failed)
+      line="⚠️ Testovacia kamera: produkčná expozícia (ISO/uzávierka) sa NEVRÁTILA${CTS_RESTORE_SUMMARY:+ (čakala: $CTS_RESTORE_SUMMARY)} — kamera môže ostať na testovacej expozícii. Snímka ostáva: spusti scripts/rig-mode.sh event znova, keď je kamera na USB a rig nevysiela, alebo nastav kameru ručne a snímku odlož: $(camera_test_settings_manual_consume_hint)."
+      body="$(cat "$msg" 2>/dev/null)" || body=""
+      { printf '%s\n\n%s\n' "$line" "$body" >"$msg"; } 2>/dev/null || true
+      return 0
+      ;;
     *) return 0 ;;
   esac
   { printf '\n%s\n' "$line" >>"$msg"; } 2>/dev/null || true

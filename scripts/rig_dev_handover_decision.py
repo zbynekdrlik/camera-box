@@ -196,10 +196,15 @@ _EXPOSURE_LINE_RE = re.compile(r"^exposure\s+state=(none|pending|restored|invali
 
 
 def classify_exposure(text):
-    """Decide the `exposure` item from the snapshot-state line. none/restored -> OK; pending (the
-    last EVENT switch did not restore it, so production ran on the TEST exposure) and invalid (the
-    owner's values are stuck in an unreadable file) -> SUPERVISOR, never the owner's fault; no
-    readable line -> UNKNOWN. Returns {status, message}."""
+    """Decide the `exposure` item from the snapshot-state line.
+      none / restored            -> OK
+      pending                    -> OK  (a snapshot of this development period, waiting for its EVENT
+                                         switch -- the E2E takes it; never a false alarm)
+      pending + restore_failed=  -> SUPERVISOR (an EVENT switch tried and did NOT restore it, so
+                                         production ran on the TEST exposure)
+      invalid                    -> SUPERVISOR (the owner's values are stuck in an unreadable file)
+      no readable line           -> UNKNOWN
+    SUPERVISOR is never the owner's fault. Returns {status, message}."""
     m = None
     for line in (text or "").splitlines():
         m = _EXPOSURE_LINE_RE.match(line.strip()) or m
@@ -213,13 +218,18 @@ def classify_exposure(text):
                 "message": "žiadna produkčná expozícia nečaká na vrátenie (test kameru nemenil)"}
     if state == "restored":
         return {"status": OK,
-                "message": "produkčná expozícia testovacej kamery vrátená pri poslednom EVENT (%s)" % detail}
+                "message": "produkčná expozícia testovacej kamery bola naposledy vrátená (%s)" % detail}
+    if state == "pending" and "restore_failed=" not in detail:
+        return {"status": OK,
+                "message": "produkčná expozícia testovacej kamery čaká na vrátenie pri najbližšom "
+                           "`scripts/rig-mode.sh event` (%s)" % detail}
     if state == "pending":
         return {"status": SUPERVISOR,
-                "message": "produkčná expozícia testovacej kamery sa pri poslednom EVENT NEVRÁTILA — "
-                           "produkcia bežala na testovacej expozícii; čaká snímka (%s). Zisti prečo "
-                           "(kamera nebola na USB / nesedel read-back / bežal prenos), potom "
-                           "`scripts/rig-mode.sh event` s kamerou na USB ju vráti" % detail}
+                "message": "produkčná expozícia testovacej kamery sa pri EVENT NEVRÁTILA — "
+                           "produkcia bežala na testovacej expozícii; snímka stále čaká (%s). Zisti "
+                           "prečo (kamera nebola na USB / nesedel read-back / bežal prenos), potom "
+                           "`scripts/rig-mode.sh event` s kamerou na USB, keď rig nevysiela, ju vráti"
+                           % detail}
     return {"status": SUPERVISOR,
             "message": "snímka produkčnej expozície testovacej kamery je nečitateľná (%s) — "
                        "hodnoty vlastníka treba z nej obnoviť ručne" % detail}

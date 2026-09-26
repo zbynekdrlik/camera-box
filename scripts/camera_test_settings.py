@@ -48,7 +48,10 @@ rig-mode EVENT switch restores them, reads them back and moves the file aside as
                                               exit 7 = invalid snapshot)
   restore-plan   --snapshot P < get-config -> NOW/RESTORE/RESTOREARGS lines (exit 3 / 7)
   restore-grade  --snapshot P < get-config -> AFTER/RESTORED/MISMATCH lines (exit 5 = not restored)
-  consume        --snapshot P              -> moves P to <stem>.consumed-<UTC stamp>.json (exit 6)
+  consume        --snapshot P              -> moves P to <stem>.consumed-<UTC stamp>.json, never over an
+                                              earlier one, and clears the restore-failed marker (exit 6)
+  restore-failed --snapshot P --reason R   -> records a failed EVENT restore next to P
+                                              (<stem>.restore-failed.json) for the handover check
   snapshot-state --snapshot P              -> ONE `exposure state=none|pending|restored|invalid ...`
                                               line for the development handover check (always exit 0)
 Every `--snapshot` defaults to snapshot-path.
@@ -92,7 +95,7 @@ SNAPSHOT_SCHEMA = 1
 SNAPSHOT_ENV = "CAMERA_PROD_EXPOSURE_SNAPSHOT"
 SNAPSHOT_DIR = ".camera-box"
 SNAPSHOT_BASENAME = "camera-prod-exposure.json"
-CONSUMED_STAMP_RE = re.compile(r"^\d{8}T\d{6}Z$")
+CONSUMED_STAMP_RE = re.compile(r"^\d{8}T\d{6}Z(-\d+)?$")
 # box label + UTC time are logged and parsed back as `key=value` words: plain tokens only
 SNAPSHOT_FIELD_RE = re.compile(r"^[A-Za-z0-9._:+-]+$")
 
@@ -289,7 +292,7 @@ def suggest_baseline(current):
 # the production-exposure snapshot (taken before the FIRST test set, restored at the EVENT switch)
 # ---------------------------------------------------------------------------------------------
 SNAPSHOT_COMMANDS = ("snapshot-path", "snapshot", "restore-status", "restore-plan", "restore-grade",
-                     "consume", "snapshot-state")
+                     "consume", "snapshot-state", "restore-failed")
 
 
 def default_snapshot_path(env=None):
@@ -309,6 +312,10 @@ def build_snapshot(current, baseline, box, taken_utc):
     left out (there is nothing to put back). A value that is not a plain token could not be written
     back by the restore, so it raises SnapshotError: the caller refuses the set rather than
     overwrite a production value it cannot restore."""
+    for field, v in (("box", box), ("taken_utc", taken_utc)):
+        if not isinstance(v, str) or not SNAPSHOT_FIELD_RE.match(v):
+            raise SnapshotError("snapshot %s %r is not a plain token, the restore could not read it back"
+                                % (field, v))
     values = {}
     for k in pinned_keys(baseline):
         v = current.get(k)
@@ -414,6 +421,39 @@ def consumed_path(path, stamp):
     return os.path.join(os.path.dirname(path), prefix + stamp + suffix)
 
 
+def unique_consumed_path(path, stamp, exists):
+    """consumed_path(path, stamp), or the same name with `-1`, `-2`, ... when `exists` says it is
+    taken: two restores in one second never overwrite an earlier consumed snapshot."""
+    target = consumed_path(path, stamp)
+    n = 0
+    while exists(target):
+        n += 1
+        target = consumed_path(path, "%s-%d" % (stamp, n))
+    return target
+
+
+def restore_failed_path(path):
+    """The marker a failed EVENT restore leaves next to the snapshot: `<stem>.restore-failed.json`."""
+    base = os.path.basename(path)
+    stem = base[:-len(".json")] if base.endswith(".json") else base
+    return os.path.join(os.path.dirname(path), stem + ".restore-failed.json")
+
+
+def _restore_failed_token(path):
+    """` restore_failed=<utc>` when a failed EVENT restore is recorded for this snapshot, else ''."""
+    marker = restore_failed_path(path)
+    if not os.path.exists(marker):
+        return ""
+    try:
+        with open(marker, encoding="utf-8") as f:
+            utc = json.load(f).get("utc")
+    except (OSError, ValueError, AttributeError):
+        utc = None
+    if not isinstance(utc, str) or not SNAPSHOT_FIELD_RE.match(utc):
+        utc = "unknown"
+    return " restore_failed=%s" % utc
+
+
 def _consumed_stamp(path, name):
     prefix, suffix = _consumed_parts(path)
     if not (name.startswith(prefix) and name.endswith(suffix)):
@@ -439,8 +479,9 @@ def snapshot_state(path):
             doc = _load_snapshot_file(path)
         except (OSError, SnapshotError) as e:
             return "exposure state=invalid path=%s reason=%s" % (path, re.sub(r"\s+", "-", str(e))[:160])
-        return "exposure state=pending box=%s taken=%s %s" % (doc["box"], doc["taken_utc"],
-                                                             _values_tokens(doc["values"]))
+        return "exposure state=pending box=%s taken=%s %s%s" % (doc["box"], doc["taken_utc"],
+                                                               _values_tokens(doc["values"]),
+                                                               _restore_failed_token(path))
     folder = os.path.dirname(path) or "."
     try:
         names = os.listdir(folder)
@@ -571,13 +612,29 @@ def _snapshot_main(a):
     if a.cmd == "snapshot":
         return _snapshot_take(a, path)
     if a.cmd == "consume":
-        target = consumed_path(path, _utc_now().strftime("%Y%m%dT%H%M%SZ"))
+        target = unique_consumed_path(path, _utc_now().strftime("%Y%m%dT%H%M%SZ"), os.path.exists)
         try:
             os.rename(path, target)
         except OSError as e:
             print("cannot move the snapshot %s aside: %s" % (path, e), file=sys.stderr)
             return EXIT_SNAPSHOT_FAILED
+        try:
+            os.unlink(restore_failed_path(path))
+        except FileNotFoundError:
+            pass
+        except OSError as e:
+            print("the snapshot is moved aside, but the restore-failed marker could not be removed: %s"
+                  % e, file=sys.stderr)
         print(target)
+        return EXIT_OK
+    if a.cmd == "restore-failed":
+        doc = {"utc": _utc_now().strftime("%Y-%m-%dT%H:%M:%SZ"), "reason": a.reason}
+        try:
+            with open(restore_failed_path(path), "w", encoding="utf-8") as f:
+                f.write(json.dumps(doc, sort_keys=True) + "\n")
+        except OSError as e:
+            print("cannot record the failed restore next to %s: %s" % (path, e), file=sys.stderr)
+            return EXIT_SNAPSHOT_FAILED
         return EXIT_OK
     return _snapshot_restore(a, path)
 
@@ -608,7 +665,10 @@ def main(argv=None):
     sn.add_argument("--snapshot")
     sn.add_argument("--box", required=True)
     for name in SNAPSHOT_COMMANDS[2:]:
-        sub.add_parser(name).add_argument("--snapshot")
+        sp = sub.add_parser(name)
+        sp.add_argument("--snapshot")
+        if name == "restore-failed":
+            sp.add_argument("--reason", required=True)
     a = p.parse_args(argv)
 
     if a.cmd in SNAPSHOT_COMMANDS:

@@ -5,6 +5,9 @@ paths:
   - "scripts/camera-test-baseline.json"
   - "tests/python/test_camera_test_settings_1371.py"
   - "tests/python/test_rig_dev_handover_exposure_1371.py"
+  - "scripts/rig-mode.sh"
+  - "scripts/rig-dev-handover-check.sh"
+  - "scripts/rig_dev_handover_decision.py"
 ---
 
 # E2E `[0/8]` test-camera shutter/ISO ENFORCE over the bkshading USB path (issue 1371)
@@ -147,9 +150,10 @@ run (wrong timing; TEST mode must stay alive between runs).
   `d002`), `d007` as log context, the box and the UTC time. A key the camera reports no value for is
   left out. `d007` is never restored.
 - **No record = no set.** A value that is not a plain token (it could not be written back through
-  the word-split `--set-config`), or a snapshot that cannot be written (a full disk, a file where
-  the directory should be), ABORTS the E2E before the camera changes. Losing the owner's value
-  silently is worse than one aborted run.
+  the word-split `--set-config`), a box label or time that is not one, or a snapshot that cannot be
+  written (a full disk, a file where the directory should be), ABORTS the E2E before the camera
+  changes. Losing the owner's value silently is worse than one aborted run. The python output is
+  captured into a variable first, so the abort never depends on the caller's `pipefail`.
 - Written atomically and exclusively: a temp file in the same folder, then `os.link` to the final
   name (fails when a snapshot appeared meanwhile). A half-written snapshot cannot exist.
 
@@ -160,26 +164,42 @@ run (wrong timing; TEST mode must stay alive between runs).
   switch starts + enables it right after.
 - Candidates are the same two relay boxes as the E2E (`${RIG_SOURCE_BOX}=$RIG_SOURCE_IP`,
   `cam2=$PAINTER_IP`); the guard reads `STRIH_IP` / `STREAM_IP`.
-- Flow: presence probe, relay stop, ONE read, `restore-plan` (only the snapshot keys that differ),
-  the issue-1271 guard, ONE set, ONE read-back, `restore-grade`, then `consume` moves the file to
-  `camera-prod-exposure.consumed-<UTC stamp>.json`, so the next development period snapshots afresh.
-  A camera already at the production values costs one read and no guard; the snapshot is consumed.
+- Flow: presence probe, **the issue-1271 guard**, relay stop, ONE read, `restore-plan` (only the
+  snapshot keys that differ), the guard AGAIN, ONE set, ONE read-back, `restore-grade`, then
+  `consume` moves the file to `camera-prod-exposure.consumed-<UTC stamp>.json` (a `-N` suffix if
+  that name is taken), so the next development period snapshots afresh. The first guard sits BEFORE
+  the relay stop and the PTP session: both are rig mutations, and a re-run of `rig-mode.sh event`
+  while strih/stream is live must touch nothing (review round 1 found the stop + read ran first).
+  A camera already at the production values costs one read and one guard; the snapshot is consumed.
+- The set + read-back is ONE shared helper, `_cts_set_and_readback`, used by the E2E enforce and
+  the restore, so every transport code (96/97/98 refusals, the read-back abort) is handled the same.
 - **Never fatal to the EVENT switch.** Every camera step runs in a SUBSHELL (the sanctioned
   "own exit contract" caller shape of `stray-session-check.sh`), so the shared transport/guard
   helpers' `exit 1` ends only the subshell. An absent camera, a MISMATCH, a live broadcast, a relay
   that comes back before the set, a transport timeout, an invalid snapshot or a failed consume is a
   LOUD `WARNING: issue 1371 ... NOT restored` line + a `::warning` annotation, the snapshot STAYS
-  for a retry (run `rig-mode.sh event` again with the camera on USB), and the function returns 1.
-- The outcome reaches the owner's phone: `camera_test_settings_restore_discord_note` appends one
-  Slovak line to the EVENT Discord confirmation file right after the EVENT contract (✅ vrátená /
-  ✅ už sedela / ⚠️ sa NEVRÁTILA), before the send. Nothing is appended when no snapshot was waiting.
-  The append can never fail the caller.
+  for a retry (run `rig-mode.sh event` again with the camera on USB and the rig not on air), and the
+  function returns 1. It also writes `camera-prod-exposure.restore-failed.json` next to the
+  snapshot (`restore-failed` subcommand); `consume` removes it.
+- **"Set the camera by hand" is never enough on its own.** A snapshot left in place is kept by the
+  next development period's E2E (`SNAPSHOT kept`) and written back at the next EVENT switch, over
+  whatever the owner set. So every failure text names the move-aside:
+  `python3 scripts/camera_test_settings.py consume`.
+- A restore that read back fine but could not move the snapshot aside is `restored-unconsumed`
+  (subshell exit 22), never "NOT restored": the camera IS right, only the file needs moving.
+- The outcome reaches the owner's phone: `camera_test_settings_restore_discord_note` adds one
+  Slovak line to the EVENT Discord confirmation file right after the EVENT contract, before the
+  send. A failure (⚠️ sa NEVRÁTILA) goes ON TOP of the message, so it is not buried under a green
+  contract; a success (✅ vrátená / ✅ už sedela / ✅ vrátená, ale snímku treba odložiť ručne) goes
+  at the end. Nothing is added when no snapshot was waiting. The note can never fail the caller.
 - The outcome does NOT change the EVENT exit status: that verdict is the rig-cleanliness contract,
   and the camera exposure is a separate, loudly reported fact.
 
 **The handover check** reads the state with `camera_test_settings.py snapshot-state` (item
-`exposure`, see `.claude/rules/rig-dev-handover-check.md`): none / restored = OK, pending / invalid
-= SUPERVISOR (the last EVENT switch did not restore it, so production ran on the TEST exposure).
+`exposure`, see `.claude/rules/rig-dev-handover-check.md`): none / restored / pending = OK (a
+pending snapshot is the normal state between an E2E and its EVENT switch); pending WITH the
+restore-failed marker, or an unreadable snapshot = SUPERVISOR (an EVENT switch tried and did not
+restore it, so production ran on the TEST exposure).
 
 **Supervisor live acceptance (never a worker step):** run the enforce with no snapshot and the
 camera already at the baseline (no set, no snapshot); then put a hand-made snapshot on dev1 and run
