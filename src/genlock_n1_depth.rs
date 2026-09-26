@@ -522,6 +522,11 @@ pub fn n1_shallow_watch(s: &mut ShallowDepth, t: &ShallowTick) -> bool {
 /// window and no cap, opens a window; a latched source re-opens one when [`n1_shallow_watch`] says
 /// so. Only on-grid ticks are sampled.
 ///
+/// ROZHODNUTÉ 5842640404: the histogram bins the BUDGETED latch floor
+/// ([`ShallowTick::latch_floor_frames`], [`n1_shallow_latch_floor_frames`]); the rise / fell watch
+/// and `floor_max_frames` keep the raw tick floor, so a content-dependent arrival rise inside the
+/// arrival-jitter budget never re-measures.
+///
 /// Design 5830750134 (the latch never latches an outlier): the window's floors go into a histogram
 /// relative to base ([`n1_shallow_hist_bin`], cleared on the window's first sample) and the latch
 /// reads its p90 ([`N1_SHALLOW_LATCH_PERCENTILE`]), not the max. A non-deep window whose p90 − p10
@@ -554,7 +559,9 @@ pub fn n1_shallow_track(s: &mut ShallowDepth, t: ShallowTick) -> bool {
         s.hist = [0; N1_SHALLOW_HIST_BINS];
     }
     s.floor_max_frames = s.floor_max_frames.max(t.floor_frames);
-    let bin = n1_shallow_hist_bin(t.floor_frames, t.base_frames);
+    // ROZHODNUTÉ 5842640404: the histogram (the p90 latch and the spread reject) reads the budgeted
+    // receive-lag floor; the watch above and floor_max read the raw tick floor.
+    let bin = n1_shallow_hist_bin(t.latch_floor_frames, t.base_frames);
     s.hist[bin] = s.hist[bin].saturating_add(1);
     s.window_ticks = s.window_ticks.saturating_add(1);
     if t.deep {
