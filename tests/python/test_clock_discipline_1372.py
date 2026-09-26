@@ -792,6 +792,25 @@ def test_date_master_effective_bound_on_a_daily_master_is_the_daily_bound(tmp_pa
     assert _bash_call(tmp_path, "date_master_effective_bound_us", slave, 2000, 1000) == "2000"
 
 
+def test_the_daily_grading_lives_in_its_own_lib_sourced_by_the_clock_discipline_lib():
+    """Review round 1 (structure): the nightly-mode grading is its own lib, so the clock-discipline
+    lib does not grow past its size budget with every new dantesync correction mode."""
+    daily = (_ROOT / "scripts" / "lib" / "dantesync-date-daily.sh").read_text()
+    lib = (_ROOT / "scripts" / "lib" / "dantesync-clock-discipline.sh").read_text()
+    for fn in ("date_master_now_s()", "date_master_mode_class()", "_date_daily_next_state()",
+               "_date_daily_last_state()", "_date_master_daily_verdict()", "_date_master_daily_check()"):
+        assert fn + " {" in daily and fn + " {" not in lib, fn
+    assert '/dantesync-date-daily.sh"' in lib
+    assert len(lib.splitlines()) < 700 and len(daily.splitlines()) < 400
+
+
+def test_an_unknown_mode_master_keeps_the_daily_bound_so_its_median_is_not_a_false_drift(tmp_path):
+    """Review round 1: a master with an unknown date_correction_mode reads DATE MASTER UNKNOWN, so
+    its median (a day's drift, whatever the mode means) must not fall to the 2 ms / #1021 bound."""
+    weekly = _daily_status(date_correction_mode="weekly")
+    assert _bash_call(tmp_path, "date_master_effective_bound_us", weekly, 2000, 1000) == "3001000"
+
+
 @pytest.mark.parametrize("daily_ms,err_ms,want,bound", [
     ("", 2999.0, "ok", "3001000"), ("", 3001.5, "out", "3001000"),
     ("2000", 1999.0, "ok", "2001000"), ("2000", 2001.5, "out", "2001000"), ("2.5", 2.4, "ok", "3500"),
@@ -854,7 +873,9 @@ def test_the_pure_daily_decision_never_reads_the_clock(tmp_path, monkeypatch):
     ({"date_offset_error_ms": 3500.0}, 2, ["DATE MASTER OUT", "3500.0ms off UTC > daily bound 3000ms"]),
     ({"date_daily_next_utc": None}, 2, ["DATE MASTER OUT", "no next nightly window"]),
     ({"date_daily_next_utc": "2026-09-27T02:00:00Z"}, 2,
-     ["DATE MASTER OUT", "next nightly window 2026-09-27T02:00:00Z is not within the next 24 h 30 min"]),
+     ["DATE MASTER OUT", "next nightly window 2026-09-27T02:00:00Z is open and has not stepped yet"]),
+    ({"date_daily_next_utc": "2026-09-29T02:00:00Z"}, 2,
+     ["DATE MASTER OUT", "next nightly window 2026-09-29T02:00:00Z is more than 24 h 30 min ahead"]),
     ({"date_daily_last_step_ts": 1790407799}, 2,
      ["DATE MASTER OUT", "last nightly step at 1790407799 is not within the last 26 h"]),
     ({"date_daily_next_utc": "tomorrow"}, 3, ["DATE MASTER UNKNOWN", "date_daily_next_utc"]),
@@ -888,6 +909,7 @@ def test_journal_verdict_grades_a_daily_master_on_its_schedule_and_the_daily_bou
     ({}, ["daily bound 3000ms", "3001000us", "median-only", "daily"]),
     ({"date_daily_next_utc": None}, ["nightly schedule", "no next nightly window"]),
     ({"date_daily_next_utc": "x"}, ["unreadable", "date_daily_next_utc"]),
+    ({"date_correction_mode": "weekly"}, ["date_correction_mode=weekly", "UNKNOWN"]),
 ])
 def test_journal_date_note_names_the_daily_grade(tmp_path, edits, needles):
     (tmp_path / "j.log").write_text(_journal(_date_line(1500000), _date_line(1500100)))
@@ -896,6 +918,15 @@ def test_journal_date_note_names_the_daily_grade(tmp_path, edits, needles):
                            f'"$(cat "{tmp_path / "s.json"}")"; echo', DANTESYNC_DATE_NOW_S=str(_NOW_S))
     for needle in needles:
         assert needle in r.stdout, (needle, r.stdout + r.stderr)
+
+
+def test_journal_date_note_of_an_unknown_mode_never_calls_it_daily_mode(tmp_path):
+    """Review round 1: an unknown date_correction_mode is not the daily mode; its note says so."""
+    (tmp_path / "j.log").write_text(_journal(_date_line(1500000)))
+    (tmp_path / "s.json").write_text(_daily_status(date_correction_mode="weekly"))
+    r = _sourced(tmp_path, f'dantesync_journal_date_note "$(cat "{tmp_path / "j.log"}")" 1000 '
+                           f'"$(cat "{tmp_path / "s.json"}")"; echo', DANTESYNC_DATE_NOW_S=str(_NOW_S))
+    assert "daily mode" not in r.stdout and "nightly schedule" not in r.stdout, r.stdout
 
 
 def test_verify_strih_check_6_fails_a_daily_master_whose_schedule_is_dead():
@@ -945,6 +976,15 @@ def test_gate_is_incomplete_on_an_unreadable_nightly_schedule(tmp_path):
     code, out, err = _gate(_MASTER_ONLY, DANTESYNC_GATE_WIN_HTTP_STRIH=str(p))
     assert code == 11, out + err
     assert "DATE MASTER UNKNOWN" in out
+
+
+def test_gate_is_incomplete_on_an_unknown_correction_mode(tmp_path):
+    """Review round 1: an unknown date_correction_mode is UNKNOWN (11), never a false DRIFT (20) of
+    the day's drift on the #1021 widening."""
+    p = _daily_fresh(tmp_path, date_correction_mode="weekly")
+    code, out, err = _gate(_MASTER_ONLY, DANTESYNC_GATE_WIN_HTTP_STRIH=str(p))
+    assert code == 11, out + err
+    assert "DATE MASTER UNKNOWN" in out and "DRIFT" not in out, out
 
 
 def test_gate_passes_the_1_12_0_slave(tmp_path):
