@@ -330,8 +330,6 @@ fn c_wall_step_matches_the_rust_authority_1372() {
     );
 }
 
-/// The render tick calls the header — a bracketed read into the detector, and the deadline through
-/// the re-grid decision — and keeps its own 2 ms clamp define equal to the header's.
 /// The render-tick wiring both the Rust guard below and the pwsh guard in both `windows-genlock*.yml`
 /// workflows require in `obs-video.c` (squished). ONE list, so the two copies cannot drift apart —
 /// review round 2: the pwsh copy still required the round-0 `return` line and would have failed the
@@ -349,6 +347,8 @@ const WINDOWS_WORKFLOWS: [&str; 2] = [
     ".github/workflows/windows-genlock-fast.yml",
 ];
 
+/// The render tick calls the header — a bracketed read into the detector, and the deadline through
+/// the re-grid decision — and keeps its own 2 ms clamp define equal to the header's.
 #[test]
 fn render_tick_uses_the_wall_step_regrid_1372() {
     let src = fs::read_to_string(repo(OBS_VIDEO)).expect("read obs-video.c");

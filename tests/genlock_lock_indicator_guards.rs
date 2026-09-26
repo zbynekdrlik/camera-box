@@ -254,15 +254,17 @@ fn qpc_drift_books_a_fleet_date_step_1372() {
     );
     // the booking runs BEFORE this tick's sample joins the history (the jump is new vs back())
     let src = squish(&vendor_file(STATUSBAR_CPP));
-    let book = src
-        .find("BookGenlockWallStep(now_ms, scan.qpc_signed_ms); genlockQpcHistory.emplace_back(now_ms, scan.qpc_signed_ms);")
-        .expect("the booking call right before the history push");
-    let push = src
-        .find("genlockQpcHistory.emplace_back(now_ms, scan.qpc_signed_ms);")
-        .expect("history push present");
     assert!(
-        book < push,
-        "issue 1372: the date-step booking must run before the new sample is pushed"
+        src.contains(
+            "BookGenlockWallStep(now_ms, scan.qpc_signed_ms); genlockQpcHistory.emplace_back(now_ms, scan.qpc_signed_ms);"
+        ),
+        "issue 1372: the date-step booking must run right before the new sample is pushed"
+    );
+    // ... and that is the ONLY push of a qpc sample (a second, unbooked push would bypass it)
+    assert_eq!(
+        src.matches("genlockQpcHistory.emplace_back(").count(),
+        1,
+        "issue 1372: a second genlockQpcHistory push would skip the date-step booking"
     );
     // the widget's two booking constants stay equal to the Rust authority's
     let rust = vendor_file("src/genlock_lock_state.rs");
