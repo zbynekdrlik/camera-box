@@ -75,7 +75,12 @@ def test_a_failed_tray_fetch_is_a_warning_never_an_abort(ps):
     """The fetch sits in its own try/catch that records a warning -- it must not throw, or the
     service upgrade (which follows) would be skipped for a UI binary."""
     stop = _at(ps, "Stop-Service dantesync")
-    fetch = ps[_at(ps, "$trayUrl = "):stop]
+    start = _at(ps, "$trayUrl = ")
+    # the fetch block ends where the service backup begins (the service's own self-heal comment,
+    # which says "rethrow", follows it and is not part of the tray fetch)
+    end = _at(ps, "# 2. back up the current exe", start)
+    assert end < stop
+    fetch = ps[start:end]
     catch = fetch[fetch.index("} catch {"):]
     assert "$trayNotes +=" in catch and "throw" not in catch, catch
 
