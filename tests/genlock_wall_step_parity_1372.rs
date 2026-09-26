@@ -332,19 +332,31 @@ fn c_wall_step_matches_the_rust_authority_1372() {
 
 /// The render tick calls the header — a bracketed read into the detector, and the deadline through
 /// the re-grid decision — and keeps its own 2 ms clamp define equal to the header's.
+/// The render-tick wiring both the Rust guard below and the pwsh guard in both `windows-genlock*.yml`
+/// workflows require in `obs-video.c` (squished). ONE list, so the two copies cannot drift apart —
+/// review round 2: the pwsh copy still required the round-0 `return` line and would have failed the
+/// Windows build.
+const RENDER_TICK_WIRING: [&str; 5] = [
+    "#include \"obs-genlock-wall-step.h\"",
+    "const int64_t wall_step_ns = genlock_wall_step_observe(&wall_step, mono_before, wall, mono);",
+    "const int regrid = genlock_wall_step_regrid_due(&wall_step, wall_step_ns, target, stock);",
+    "const uint64_t deadline = genlock_wall_step_deadline_ns(target, stock, regrid);",
+    "#define GENLOCK_MAX_SLEW_NS ((int)GENLOCK_WALL_STEP_MAX_SLEW_NS)",
+];
+
+const WINDOWS_WORKFLOWS: [&str; 2] = [
+    ".github/workflows/windows-genlock.yml",
+    ".github/workflows/windows-genlock-fast.yml",
+];
+
 #[test]
 fn render_tick_uses_the_wall_step_regrid_1372() {
     let src = fs::read_to_string(repo(OBS_VIDEO)).expect("read obs-video.c");
     let squished: String = src.split_whitespace().collect::<Vec<_>>().join(" ");
-    for needle in [
-        "#include \"obs-genlock-wall-step.h\"",
+    for needle in RENDER_TICK_WIRING.into_iter().chain([
         "const uint64_t mono_before = os_gettime_ns(); const uint64_t wall = genlock_wall_ns(); const uint64_t mono = os_gettime_ns();",
-        "const int64_t wall_step_ns = genlock_wall_step_observe(&wall_step, mono_before, wall, mono);",
-        "const int regrid = genlock_wall_step_regrid_due(&wall_step, wall_step_ns, target, stock);",
-        "const uint64_t deadline = genlock_wall_step_deadline_ns(target, stock, regrid);",
-        "#define GENLOCK_MAX_SLEW_NS ((int)GENLOCK_WALL_STEP_MAX_SLEW_NS)",
         "genlock-regrid: the wall clock stepped",
-    ] {
+    ]) {
         assert!(
             squished.contains(needle),
             "issue 1372: {OBS_VIDEO} lost `{needle}` — the render tick no longer re-grids a wall \
@@ -357,4 +369,23 @@ fn render_tick_uses_the_wall_step_regrid_1372() {
         "issue 1372: the header's slew clamp is no longer the render tick's 2 ms"
     );
     assert_eq!(MAX_SLEW_NS, 2_000_000);
+}
+
+#[test]
+fn windows_workflows_guard_the_same_render_tick_wiring_1372() {
+    for wf in WINDOWS_WORKFLOWS {
+        let text = fs::read_to_string(repo(wf)).unwrap_or_else(|e| panic!("read {wf}: {e}"));
+        for needle in RENDER_TICK_WIRING {
+            assert!(
+                text.contains(&format!("$vid1355 -notmatch [regex]::Escape('{needle}')")),
+                "issue 1372: {wf} no longer guards `{needle}` in obs-video.c — its pwsh copy of \
+                 render_tick_uses_the_wall_step_regrid_1372 drifted from the Rust guard"
+            );
+        }
+        assert!(
+            !text.contains("wall_step_ns != 0);"),
+            "issue 1372: {wf} still requires the round-0 re-grid line, which obs-video.c no longer \
+             has — the Windows build would fail at the source guard"
+        );
+    }
 }
