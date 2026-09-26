@@ -339,7 +339,8 @@ sys.exit(0)
 FAKE_OBS_PHASE2 = r'''#!/usr/bin/env python3
 import json, os, sys
 with open(os.path.join(os.environ["FAKE_CAM_DIR"], "calls.log"), "a") as f:
-    f.write("GUARD " + sys.argv[1] + "\n")
+    pw = sys.argv[sys.argv.index("--password") + 1] if "--password" in sys.argv else "-"
+    f.write("GUARD " + sys.argv[1] + " pw=" + pw + "\n")
 busy = os.environ.get("FAKE_BUSY") == "1"
 print(json.dumps({"busy": busy, "diagnostics": [{"host": "stream", "streaming": busy, "recording": False}]}))
 '''
@@ -348,7 +349,7 @@ print(json.dumps({"busy": busy, "diagnostics": [{"host": "stream", "streaming": 
 class Rig:
     def __init__(self, present, camera, baseline_values, ack="", busy=False, ignore=(), read_fail=False,
                  relay_state="inactive", relay_active_after_reads=None, gphoto2_busy=False, read_exit=0,
-                 no_pgrep=False, snapshot=None, pipefail=True, readonly_snap_dir=False):
+                 no_pgrep=False, snapshot=None, pipefail=True, readonly_snap_dir=False, extra_env=None):
         self.root = tempfile.mkdtemp(prefix="cts1371-")
         # A temp HOME: the production-exposure snapshot lives in ~/.camera-box on the runner, and a
         # test must never read or write the real one.
@@ -362,6 +363,7 @@ class Rig:
                 f.write(snapshot if isinstance(snapshot, str) else json.dumps(snapshot))
         self.shell_opts = "set -euo pipefail\n" if pipefail else "set -eu\n"
         self.readonly_snap_dir = readonly_snap_dir
+        self.extra_env = dict(extra_env or {})
         self.here = os.path.join(self.root, "scripts")
         self.bin = os.path.join(self.root, "bin")
         stubs = os.path.join(self.root, "stubs")
@@ -428,6 +430,8 @@ class Rig:
         env["CAMBOX_OFFLINE_ACK"] = self.ack
         env.pop("CAMERA_TEST_BASELINE", None)
         env.pop("OBS_PASSWORD", None)
+        env.pop("OBS_WS_PASSWORD", None)
+        env.update(self.extra_env)
         if self.readonly_snap_dir:
             os.chmod(self.snap_dir, 0o555)
         r = subprocess.run(["bash", script], capture_output=True, text=True, env=env)
@@ -848,6 +852,7 @@ def test_restore_puts_the_owners_exposure_back_and_consumes_the_snapshot():
     assert len(r.consumed) == 1 and r.consumed_docs[0] == PROD
     assert "RESTORE iso 400 -> 800" in r.out and "RESTORED iso 800" in r.out
     assert "✅" in r.discord and "ISO 800" in r.discord and "1/60 s" in r.discord
+    assert r.discord.startswith("EVENT contract ok\n"), r.discord
 
 
 def test_restore_when_the_camera_already_has_the_production_values_sets_nothing():
@@ -867,10 +872,14 @@ def test_restore_with_the_camera_absent_is_loud_and_keeps_the_snapshot():
     assert "::warning" in r.out
     assert json.loads(r.snapshot) == PROD and r.consumed == []
     assert "⚠️" in r.discord and "NEVRÁTILA" in r.discord
-    # the failure is ON TOP of the EVENT confirmation, not buried under a green message
+    # the failure is ON TOP of the EVENT confirmation, not buried under a green message, and the
+    # confirmation itself survives below it
     assert r.discord.startswith("⚠️"), r.discord
-    # setting the camera by hand must also move the snapshot aside, or the next EVENT overwrites it
-    assert "camera_test_settings.py consume" in r.out and "camera_test_settings.py consume" in r.discord
+    assert "EVENT contract ok" in r.discord
+    # setting the camera by hand must also move the snapshot aside, or the next EVENT overwrites it;
+    # the command is for the run log -- the owner's phone line asks him to tell Claude instead
+    assert "camera_test_settings.py consume" in r.out
+    assert "camera_test_settings.py" not in r.discord and "Claud" in r.discord
     # the handover check can tell a failed restore from a snapshot still waiting for its EVENT
     assert r.restore_failed is not None and r.restore_failed["utc"]
 
@@ -922,7 +931,8 @@ def test_restore_that_cannot_move_the_snapshot_aside_is_restored_but_flagged():
     assert "NOT restored" not in r.out
     assert "camera_test_settings.py consume" in r.out
     assert json.loads(r.snapshot) == PROD
-    assert "✅" in r.discord and "ručne" in r.discord
+    assert "✅" in r.discord and "odložiť" in r.discord and "EVENT contract ok" in r.discord
+    assert "camera_test_settings.py" not in r.discord
 
 
 def test_a_successful_restore_clears_an_earlier_failure_marker():
@@ -962,7 +972,12 @@ def test_a_consumed_name_never_overwrites_an_earlier_one():
     second = cts.unique_consumed_path(p, "20260926T160000Z", taken.__contains__)
     assert second != first and second.startswith("/h/.camera-box/camera-prod-exposure.consumed-20260926T160000Z")
     names = [os.path.basename(first), os.path.basename(second)]
-    assert cts.newest_consumed(p, names) in names
+    # review round 2: the later same-second name is the newest (a text max picked the earlier one)
+    assert cts.newest_consumed(p, names) == os.path.basename(second)
+    many = ["camera-prod-exposure.consumed-20260926T160000Z-%d.json" % n for n in (2, 10, 9)]
+    assert cts.newest_consumed(p, many) == "camera-prod-exposure.consumed-20260926T160000Z-10.json"
+    later = "camera-prod-exposure.consumed-20260926T160001Z.json"
+    assert cts.newest_consumed(p, many + [later]) == later
     assert cts.unique_consumed_path(p, "20260926T160000Z", lambda _p: False) == first
 
 
@@ -995,6 +1010,72 @@ def test_the_discord_note_never_fails_without_a_message_file():
          'camera_test_settings_restore_discord_note /nonexistent/dir/msg.txt\necho NOTE-OK\n' % here)
     r = subprocess.run(["bash", "-c", "set -euo pipefail\n" + h], capture_output=True, text=True)
     assert r.returncode == 0 and "NOTE-OK" in r.stdout, r.stderr
+
+
+def test_an_invalid_pending_snapshot_is_never_counted_as_kept():
+    # review round 2: "No record = no set" -- an unreadable snapshot is no record
+    r = Rig({"10.77.9.61": 1}, dict(GOOD, iso="1600"), _pinned(), snapshot="{broken").run()
+    assert r.rc == 1, r.out
+    assert not any(c.startswith("SET") for c in r.calls), r.calls
+    assert r.snapshot == "{broken"
+
+
+def test_a_pending_snapshot_gains_a_newly_pinned_key_but_never_changes_a_kept_one():
+    # the baseline pins d004 mid-period: the owner's d004 is still on the camera, so it is added;
+    # the kept iso/d002 (the owner's, from before the first set) are never touched
+    r = Rig({"10.77.9.61": 1}, dict(GOOD, iso="1600", d004="3200"), _pinned(d004=5600), snapshot=PROD).run()
+    assert r.rc == 0, r.out
+    doc = json.loads(r.snapshot)
+    assert doc["values"] == {"iso": "800", "d002": "36000", "d004": "3200"}
+    assert doc["box"] == PROD["box"] and doc["taken_utc"] == PROD["taken_utc"]
+    assert r.snapshot_at_set is True
+
+
+def test_a_new_snapshot_drops_a_stale_restore_failed_marker():
+    r = Rig({"10.77.9.61": 1}, dict(GOOD, iso="1600"), _pinned())
+    os.makedirs(r.snap_dir)
+    with open(os.path.join(r.snap_dir, "camera-prod-exposure.restore-failed.json"), "w") as f:
+        json.dump({"utc": "2026-09-20T10:00:00Z", "reason": "old"}, f)
+    r.run()
+    assert r.rc == 0, r.out
+    assert r.snapshot is not None and r.restore_failed is None
+
+
+def test_the_restore_guard_gets_rig_modes_obs_password():
+    # review round 2: rig-mode.sh keeps the OBS WS password in OBS_WS_PASSWORD, the shared guard
+    # reads OBS_PASSWORD -- the restore must hand it over, or an auth-enabled OBS fails the guard open
+    r = _restore(dict(GOOD, iso="400", d002="18000"), extra_env={"OBS_WS_PASSWORD": "wspw"})
+    assert "outcome=restored" in r.out, r.out
+    guards = [c for c in r.calls if c.startswith("GUARD")]
+    assert guards and all(c.endswith("pw=wspw") for c in guards), guards
+
+
+def test_a_failed_snapshot_write_leaves_no_temp_file():
+    root = tempfile.mkdtemp(prefix="cts1371-tmp-")
+    base = _tmp_baseline(_pinned())
+    try:
+        target = os.path.join(root, "camera-prod-exposure.json")
+        orig = cts.os.fsync
+
+        def boom(_fd):
+            raise OSError(28, "No space left on device")
+
+        cts.os.fsync = boom
+        try:
+            doc = cts.build_snapshot({"iso": "800", "d002": "36000"}, cts.load_baseline(open(base).read()),
+                                     "cam1", "2026-09-26T15:00:00Z")
+            try:
+                cts.write_snapshot_once(target, doc)
+            except OSError:
+                pass
+            else:
+                raise AssertionError("the failed write must raise")
+        finally:
+            cts.os.fsync = orig
+        assert os.listdir(root) == [], os.listdir(root)
+    finally:
+        shutil.rmtree(root)
+        os.unlink(base)
 
 
 # --- the rig-mode.sh EVENT wiring (static: #675 sourced helper, never an edited anchor line) ------

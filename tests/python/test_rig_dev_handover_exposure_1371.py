@@ -7,7 +7,10 @@ three states the snapshot is in, read by `camera_test_settings.py snapshot-state
 
   none      -> OK          nothing was changed / nothing is waiting
   restored  -> OK          an EVENT switch put the production exposure back (the newest consumed file)
-  pending   -> OK          a snapshot of this development period, waiting for its EVENT switch
+  pending   -> OK          rig in TEST: a snapshot of this development period, waiting for its
+                           EVENT switch
+  pending   -> SUPERVISOR  rig in EVENT (the handover moment): the EVENT switch never restored it
+  pending   -> UNKNOWN     rig mode unreadable
   pending + restore_failed
             -> SUPERVISOR  an EVENT switch tried and did NOT restore it (camera absent, read-back
                            mismatch, a live broadcast): production ran on the TEST exposure
@@ -42,14 +45,15 @@ def _item():
 
 def test_the_exposure_item_is_in_the_checklist():
     item = _item()
-    assert item.captures == ["exposure"]
+    # it also reads the rig-mode capture: a pending snapshot means something different in EVENT
+    assert item.captures == ["exposure", "mode"]
     assert "expozícia" in item.label
 
 
 def test_no_snapshot_and_a_restored_snapshot_are_ok():
-    e = _item().decide({"exposure": (NONE, 0)})
-    assert e["status"] == d.OK
-    e = _item().decide({"exposure": (RESTORED, 0)})
+    for mode in ("TEST\n", "EVENT\n", ""):
+        assert _item().decide({"exposure": (NONE, 0), "mode": (mode, 0)})["status"] == d.OK
+    e = _item().decide({"exposure": (RESTORED, 0), "mode": ("EVENT\n", 0)})
     assert e["status"] == d.OK
     assert "vrátená" in e["message"] and "iso=800 d002=36000" in e["message"]
     # review round 1: a consumed file does not prove it was the LAST EVENT switch
@@ -59,13 +63,25 @@ def test_no_snapshot_and_a_restored_snapshot_are_ok():
 def test_a_snapshot_still_waiting_for_its_event_switch_is_ok():
     # review round 1: an E2E earlier in THIS development period leaves a pending snapshot; that is
     # the expected state, never a false supervisor alarm
-    e = _item().decide({"exposure": (PENDING, 0)})
+    e = _item().decide({"exposure": (PENDING, 0), "mode": ("TEST\n", 0)})
     assert e["status"] == d.OK
     assert "čaká" in e["message"] and "cam1" in e["message"]
 
 
+def test_a_snapshot_still_pending_while_the_rig_is_in_event_was_never_restored():
+    # review round 2: the restore-failed marker only exists when the restore RAN and failed; an EVENT
+    # switch that aborted before it leaves none. At the handover the rig is in EVENT, so a pending
+    # snapshot there means production ran on the TEST exposure.
+    e = _item().decide({"exposure": (PENDING, 0), "mode": ("EVENT\n", 0)})
+    assert e["status"] == d.SUPERVISOR
+    assert "NEVRÁTILA" in e["message"] and "cam1" in e["message"]
+    # the rig mode unreadable (cam2 down): a pending snapshot cannot be judged -> UNKNOWN, never OK
+    for mode in (("UNKNOWN\n", 0), ("", d.RC_MISSING)):
+        assert _item().decide({"exposure": (PENDING, 0), "mode": mode})["status"] == d.UNKNOWN
+
+
 def test_a_failed_restore_is_a_supervisor_problem_naming_what_was_not_restored():
-    e = _item().decide({"exposure": (PENDING_FAILED, 0)})
+    e = _item().decide({"exposure": (PENDING_FAILED, 0), "mode": ("TEST\n", 0)})
     assert e["status"] == d.SUPERVISOR
     assert "NEVRÁTILA" in e["message"]
     assert "cam1" in e["message"] and "iso=800 d002=36000" in e["message"]
@@ -125,7 +141,7 @@ def test_the_probe_line_the_orchestrator_captures_is_what_the_decision_parses(tm
     cli = ["python3", str(_SCRIPTS / "camera_test_settings.py")]
     r = subprocess.run(cli + ["snapshot-state"], capture_output=True, text=True, env=env)
     assert r.returncode == 0, r.stderr
-    assert _item().decide({"exposure": (r.stdout, r.returncode)})["status"] == d.OK
+    assert _item().decide({"exposure": (r.stdout, r.returncode), "mode": ("TEST\n", 0)})["status"] == d.OK
     # an EVENT switch that failed to restore it marks the snapshot -> SUPERVISOR
     assert subprocess.run(cli + ["restore-failed", "--reason", "camera absent"], env=env).returncode == 0
     r = subprocess.run(cli + ["snapshot-state"], capture_output=True, text=True, env=env)
