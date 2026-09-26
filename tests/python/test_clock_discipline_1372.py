@@ -873,7 +873,9 @@ def test_the_pure_daily_decision_never_reads_the_clock(tmp_path, monkeypatch):
     ({"date_offset_error_ms": 3500.0}, 2, ["DATE MASTER OUT", "3500.0ms off UTC > daily bound 3000ms"]),
     ({"date_daily_next_utc": None}, 2, ["DATE MASTER OUT", "no next nightly window"]),
     ({"date_daily_next_utc": "2026-09-27T02:00:00Z"}, 2,
-     ["DATE MASTER OUT", "next nightly window 2026-09-27T02:00:00Z is open and has not stepped yet"]),
+     ["DATE MASTER OUT", "next nightly window 2026-09-27T02:00:00Z is 27000 s in the past: the nightly scheduler did not advance"]),
+    ({"date_daily_next_utc": "2026-09-27T09:10:00Z"}, 2,
+     ["DATE MASTER OUT", "next nightly window 2026-09-27T09:10:00Z is open and has not stepped yet"]),
     ({"date_daily_next_utc": "2026-09-29T02:00:00Z"}, 2,
      ["DATE MASTER OUT", "next nightly window 2026-09-29T02:00:00Z is more than 24 h 30 min ahead"]),
     ({"date_daily_last_step_ts": 1790407799}, 2,
@@ -889,6 +891,23 @@ def test_date_master_check_names_the_daily_verdict(tmp_path, edits, rc, needles)
     assert f"rc={rc}" in r.stdout, r.stdout + r.stderr
     for needle in needles:
         assert needle in r.stdout, (needle, r.stdout)
+
+
+@pytest.mark.parametrize("margin", ["abc", "-1", "1.5", ""])
+def test_a_daily_master_with_an_unreadable_margin_is_unknown_and_named(tmp_path, margin):
+    """Review round 2: the daily path validates the margin itself (date_master_check hands it
+    straight over), names it, and never lets bash arithmetic print errors."""
+    status = _LIVE_MASTER_1_12.read_text()
+    (tmp_path / "s.json").write_text(status)
+    r = _sourced(tmp_path, f'S="$(cat "{tmp_path / "s.json"}")"\n'
+                           f'_date_master_daily_verdict "$S" "{margin}" 3000 {_NOW_S}; echo\n'
+                           f'date_master_check strih "$S" "{margin}"; echo "rc=$?"',
+                 DANTESYNC_DATE_NOW_S=str(_NOW_S))
+    lines = r.stdout.splitlines()
+    assert lines[0] == "unknown", r.stdout + r.stderr
+    assert "DATE MASTER UNKNOWN" in r.stdout and f"margin={margin}us unreadable" in r.stdout, r.stdout
+    assert "rc=3" in r.stdout and r.stderr == "", r.stdout + r.stderr
+    assert df._date_master_daily_verdict(json.loads(status), margin, "3000", _NOW_S) == "unknown"
 
 
 @pytest.mark.parametrize("offsets,edits,want", [
@@ -985,6 +1004,23 @@ def test_gate_is_incomplete_on_an_unknown_correction_mode(tmp_path):
     code, out, err = _gate(_MASTER_ONLY, DANTESYNC_GATE_WIN_HTTP_STRIH=str(p))
     assert code == 11, out + err
     assert "DATE MASTER UNKNOWN" in out and "DRIFT" not in out, out
+
+
+def test_gate_names_an_unknown_mode_bound_without_calling_it_daily_mode(tmp_path):
+    """Review round 2: the median note of an unknown-mode master says why it took the daily bound."""
+    p = _daily_fresh(tmp_path, date_correction_mode="weekly")
+    code, out, err = _gate(_MASTER_ONLY, DANTESYNC_GATE_WIN_HTTP_STRIH=str(p))
+    assert "date_correction_mode=weekly is unknown" in out, out
+    assert "daily mode: the fleet date drifts" not in out, out
+
+
+def test_gate_is_incomplete_on_an_unreadable_daily_bound(tmp_path):
+    """Review round 2: a typo in DANTESYNC_DATE_DAILY_BOUND_MS is UNKNOWN (11), never a false DRIFT
+    (20) of a day's drift graded on the bare bound."""
+    code, out, err = _gate(_MASTER_ONLY, DANTESYNC_GATE_WIN_HTTP_STRIH=str(_daily_fresh(tmp_path)),
+                           DANTESYNC_DATE_DAILY_BOUND_MS="abc")
+    assert code == 11, out + err
+    assert "DATE MASTER UNKNOWN" in out and "daily bound abcms unreadable" in out, out
 
 
 def test_gate_passes_the_1_12_0_slave(tmp_path):
