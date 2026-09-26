@@ -649,6 +649,18 @@ pub struct RealtimeAsrcCompensator {
     /// two never stack past one 1000 ppm pitch budget. Caller state: survives a flush. Mirror of the
     /// C `step_recover_hold`.
     step_recover_hold: bool,
+    /// Issue 1367 (design 5845361166): TIMECODE mode — the source's audio is placed by the genlock
+    /// pairing at its own NDI timecode, so the level loop reads the packet's PLACEMENT error (where
+    /// it lands minus where its stamp says it belongs) instead of the buffer depth, the capture is 0,
+    /// and the rate regression is fed the stamp advance instead of the arrival time (see
+    /// `asrc_bench_timecode.rs`). Caller state; a change flushes. Mirror of the C `timecode`.
+    timecode: bool,
+    /// Issue 1367: cumulative placement jumps booked in timecode mode (telemetry). Mirror of the C
+    /// `place_jump_count`.
+    place_jump_count: u32,
+    /// Issue 1367: the most recent booked placement jump, in ms (negative = the audio sat early).
+    /// Mirror of the C `last_place_jump_ms`.
+    last_place_jump_ms: f64,
 }
 
 impl RealtimeAsrcCompensator {
@@ -691,6 +703,9 @@ impl RealtimeAsrcCompensator {
             step_recover_ms: 0.0,          // issue 1372
             step_recover_ppm: 0.0,         // issue 1372
             step_recover_hold: false,      // issue 1372
+            timecode: false,               // issue 1367
+            place_jump_count: 0,           // issue 1367
+            last_place_jump_ms: 0.0,       // issue 1367
         }
     }
 
@@ -1388,6 +1403,12 @@ impl RealtimeAsrcCompensator {
 #[cfg(test)]
 #[path = "asrc_bench_step_recover_tests.rs"]
 mod step_recover_tests;
+
+/// Issue 1367 (design 5845361166): the TIMECODE mode — the placement-error input, the jump booking
+/// and the stamp-fed rate — in its own file, so this module does not grow past its budget.
+#[path = "asrc_bench_timecode.rs"]
+mod timecode;
+pub use timecode::PLACE_JUMP_MIN_MS;
 
 #[cfg(test)]
 mod tests {

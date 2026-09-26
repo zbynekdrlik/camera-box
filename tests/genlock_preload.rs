@@ -2185,9 +2185,41 @@ mod vendored_source {
         // so every name-extracting parser of the line is unaffected.
         assert!(
             src.contains("\"level_avg=%.2fms (#1367)\" \" recover_ms=%.1f (issue 1372)\"")
-                && src.contains("source->asrc.level_avg_ms, source->asrc.step_recover_ms);"),
+                && src.contains("source->asrc.level_avg_ms, source->asrc.step_recover_ms,"),
             "{OBS_SOURCE}: issue 1372 — the asrc: telemetry line no longer ends with recover_ms= \
              (the confirmed sample-count step still being paid back at ASRC_STEP_RECOVER_PPM)."
+        );
+    }
+
+    #[test]
+    fn asrc_timecode_mode_judges_the_placement_not_arrival_1367() {
+        // issue 1367 (design 5845361166): a genlock source whose audio is placed at its NDI timecode
+        // is judged by the ASRC on the packet PLACEMENT error (the level, setpoint 0), its jumps are
+        // booked at ASRC_STEP_RECOVER_PPM with their own sign, and the rate regression is fed the
+        // stamp advance (obs-source.c asrc_timecode_ingest). Src authority + Tier-0 gates:
+        // src/asrc_bench_timecode.rs, the two-clock bench src/asrc_timecode_bench.rs, the executable
+        // parity scenario `tc` in tests/asrc_compensator_parity_1367.rs; the obs-source.c wiring is
+        // pinned by tests/genlock_audio_timecode_placement_1367.rs + both windows-genlock*.yml.
+        let h = squish(&vendor_file(ASRC_COMPENSATOR_H));
+        assert!(
+            h.contains("#define ASRC_PLACE_JUMP_MIN_MS 10.0")
+                && h.contains("bool timecode;")
+                && h.contains("EXPORT void asrc_compensator_set_timecode(struct asrc_compensator *c, bool timecode);")
+                && h.contains("EXPORT void asrc_compensator_observe_placement(struct asrc_compensator *c, double place_err_ms, double packet_ms, bool placed);")
+                && h.contains("EXPORT double asrc_compensator_take_step_recover_ppm(struct asrc_compensator *c);"),
+            "{ASRC_COMPENSATOR_H}: issue 1367 — the timecode mode API (constant, field, set / observe \
+             / take) is gone."
+        );
+        let c = squish(&vendor_file(ASRC_COMPENSATOR_C));
+        assert!(
+            c.contains("if (!c->timecode) asrc_step_recover_book(c, r_s, buffered_ms);")
+                && c.contains("if (c->timecode) c->level_target_ms = 0.0; else c->level_target_ms = c->level_absolute ? ASRC_LEVEL_TARGET_MS + c->level_offset_ms : window_level_ms;")
+                && c.contains("void asrc_compensator_shift_level_target(struct asrc_compensator *c, double delta_ms) { /* camera-box issue 1367")
+                && c.contains("const double jump_ms = place_err_ms - (c->level_target_ms + c->level_err_ema_ms);")
+                && c.contains("asrc_step_recover_set(c, asrc_clamp(c->step_recover_ms - jump_ms, -ASRC_STEP_RECOVER_MAX_MS, ASRC_STEP_RECOVER_MAX_MS));"),
+            "{ASRC_COMPENSATOR_C}: issue 1367 — the timecode mode (no residual booking, setpoint 0, \
+             no-op shift, the signed placement-jump booking) is gone; a timecode-placed source \
+             would be judged by arrival timing and its buffer depth again."
         );
     }
 

@@ -26,6 +26,11 @@
 //!   confirmed loss is booked and paid back at `STEP_RECOVER_PPM`, traced as `rec=` / `recp=`), a starved window (rejected, flushed — the window level sum must reset; the mixer
 //!   pads, so the depth holds), and a duplicate wall read (a zero master block, flushed, the next
 //!   block carrying both intervals), each followed by a relock.
+//! - `tc` (issue 1367, design 5845361166): the TIMECODE mode — a genlock source placed at its NDI
+//!   timecode is fed its placement error and the stamp advance. A skipped slot booked as a loss and
+//!   paid at 1000 ppm, a held payment, a duplicated slot (no stamp advance, booked as a compress), a
+//!   placement at the stamp with an amount still owed (dropped), a no-op setpoint shift and a mode flip.
+//!   The three scenarios above never enter the mode, so they stay byte-identical to the pre-1367 trace.
 //!
 //! Per the project's test-strictness rule it FAILS LOUDLY rather than skipping when the C
 //! toolchain is missing — a parity test that silently passes without running is worse than none.
@@ -157,11 +162,71 @@ static void step_scenario(void)
 	}
 }
 
+static void tcline(const char *tag, long k, const struct asrc_compensator *c, double recp)
+{
+	printf("%s k=%ld est=%.9f app=%.9f lvl=%.9f avg=%.9f tgt=%.9f int=%.9f ema=%.9f rst=%d steps=%u rec=%.9f recp=%.9f tc=%d jumps=%u lastj=%.9f\n",
+	       tag, k, c->estimated_ppm, c->applied_ppm, c->level_last_ms, c->level_avg_ms, c->level_target_ms,
+	       c->level_integral_ppm, c->level_err_ema_ms, c->level_restore ? 1 : 0, c->step_count, c->step_recover_ms,
+	       recp, c->timecode ? 1 : 0, c->place_jump_count, c->last_place_jump_ms);
+}
+
+/* issue 1367 (design 5845361166): the TIMECODE mode. The plant is the packet's placement error against
+ * its stamp: the stamps advance 4 ppm faster than the samples, each packet is resampled by -(applied +
+ * the taken recovery), and the error carries a +/-1.5 ms stamp-jitter pattern. A skipped slot (9000), a
+ * held payment (9100-9129), a duplicated slot with no stamp advance (15000), a placement at the stamp
+ * with an amount still owed (21000 after a second skip at 20990), a no-op setpoint shift (24000) and a
+ * mode flip off and on (27000/27001). */
+static void tc_scenario(void)
+{
+	const double packet_s = 1600.0 / 48000.0;
+	const double packet_ms = packet_s * 1000.0;
+	const double pattern[4] = {-1.5, 0.5, 1.0, -0.5};
+	struct asrc_compensator c;
+	asrc_compensator_init(&c);
+	asrc_compensator_set_level_absolute(&c, false);
+	asrc_compensator_set_timecode(&c, true);
+	double place_ms = 0.0;
+	double applied = 0.0;
+	double recp = 0.0;
+	for (long k = 0; k < 36000; k++) {
+		bool placed = false;
+		double master_s = packet_s * (1.0 + 4.0 / 1000000.0);
+		if (k == 9000 || k == 20990)
+			place_ms -= packet_ms;
+		if (k == 15000) {
+			place_ms += packet_ms;
+			master_s = 0.0;
+		}
+		if (k == 21000) {
+			place_ms = 0.0;
+			placed = true;
+		}
+		if (k == 24000)
+			asrc_compensator_shift_level_target(&c, 12.0);
+		if (k == 27000)
+			asrc_compensator_set_timecode(&c, false);
+		if (k == 27001)
+			asrc_compensator_set_timecode(&c, true);
+		const double err = place_ms + pattern[k % 4];
+		asrc_compensator_set_step_recover_hold(&c, k >= 9100 && k < 9130);
+		asrc_compensator_observe_placement(&c, err, packet_ms, placed);
+		if (!placed && master_s > 0.0)
+			asrc_compensator_compensate(&c, packet_s, master_s, err, &applied);
+		recp = asrc_compensator_take_step_recover_ppm(&c);
+		place_ms += -(applied + recp) / 1000000.0 * packet_ms - 4.0 / 1000000.0 * packet_ms;
+		if (k % 1800 == 1799 || (k >= 8998 && k <= 9004) || (k >= 9098 && k <= 9132) ||
+		    (k >= 14998 && k <= 15003) || (k >= 20988 && k <= 21003) || (k >= 23998 && k <= 24002) ||
+		    (k >= 26998 && k <= 27003))
+			tcline("tc", k, &c, recp);
+	}
+}
+
 int main(void)
 {
 	tick_scenario();
 	shift_scenario();
 	step_scenario();
+	tc_scenario();
 	return 0;
 }
 "##;
@@ -181,6 +246,26 @@ fn line(tag: &str, k: i64, c: &RealtimeAsrcCompensator) -> String {
         c.level_fallback_count(),
         c.step_recover_ms(),
         c.step_recover_ppm()
+    )
+}
+
+fn tcline(tag: &str, k: i64, c: &RealtimeAsrcCompensator, recp: f64) -> String {
+    format!(
+        "{tag} k={k} est={:.9} app={:.9} lvl={:.9} avg={:.9} tgt={:.9} int={:.9} ema={:.9} rst={} steps={} rec={:.9} recp={:.9} tc={} jumps={} lastj={:.9}",
+        c.estimated_ppm(),
+        c.applied_ppm(),
+        c.level_last_ms(),
+        c.level_avg_ms(),
+        c.level_target_ms(),
+        c.level_integral_ppm(),
+        c.level_err_ema_ms(),
+        u8::from(c.level_restore()),
+        c.step_count(),
+        c.step_recover_ms(),
+        recp,
+        u8::from(c.timecode()),
+        c.place_jump_count(),
+        c.last_place_jump_ms()
     )
 }
 
@@ -294,6 +379,61 @@ fn rust_trace() -> Vec<String> {
             }
         }
     }
+
+    // tc (issue 1367): the timecode mode, mirrored statement for statement
+    {
+        let packet_s = 1600.0 / 48000.0;
+        let packet_ms = packet_s * 1000.0;
+        let pattern = [-1.5, 0.5, 1.0, -0.5];
+        let mut c = RealtimeAsrcCompensator::new();
+        c.set_level_absolute(false);
+        c.set_timecode(true);
+        let mut place_ms = 0.0_f64;
+        let mut applied = 0.0_f64;
+        for k in 0..36000_i64 {
+            let mut placed = false;
+            let mut master_s = packet_s * (1.0 + 4.0 / 1000000.0);
+            if k == 9000 || k == 20990 {
+                place_ms -= packet_ms;
+            }
+            if k == 15000 {
+                place_ms += packet_ms;
+                master_s = 0.0;
+            }
+            if k == 21000 {
+                place_ms = 0.0;
+                placed = true;
+            }
+            if k == 24000 {
+                c.shift_level_target(12.0);
+            }
+            if k == 27000 {
+                c.set_timecode(false);
+            }
+            if k == 27001 {
+                c.set_timecode(true);
+            }
+            let err = place_ms + pattern[(k % 4) as usize];
+            c.set_step_recover_hold((9100..9130).contains(&k));
+            c.observe_placement(err, packet_ms, placed);
+            if !placed && master_s > 0.0 {
+                c.compensate_with_level(packet_s, master_s, err);
+                applied = c.applied_ppm();
+            }
+            let recp = c.take_step_recover_ppm();
+            place_ms += -(applied + recp) / 1000000.0 * packet_ms - 4.0 / 1000000.0 * packet_ms;
+            if k % 1800 == 1799
+                || (8998..=9004).contains(&k)
+                || (9098..=9132).contains(&k)
+                || (14998..=15003).contains(&k)
+                || (20988..=21003).contains(&k)
+                || (23998..=24002).contains(&k)
+                || (26998..=27003).contains(&k)
+            {
+                out.push(tcline("tc", k, &c, recp));
+            }
+        }
+    }
     out
 }
 
@@ -392,7 +532,24 @@ fn c_asrc_compensator_matches_the_rust_authority_1367() {
                 l.starts_with("step")
                     && l.contains(" recp=0.000000000")
                     && !l.contains(" rec=0.000000000")
-            }),
+            })
+            // issue 1367: the timecode mode books a skipped slot as a loss and pays it at the budget,
+            && r.iter().any(|l| {
+                l.starts_with("tc")
+                    && l.contains(" recp=-1000.000000000")
+                    && !l.contains(" rec=0.000000000")
+                    && !l.contains(" jumps=0 ")
+            })
+            // holds it while the placement slew owes,
+            && r.iter().any(|l| {
+                l.starts_with("tc")
+                    && l.contains(" recp=0.000000000")
+                    && !l.contains(" rec=0.000000000")
+            })
+            // books a duplicated slot as a compress (paid at +1000 ppm),
+            && r.iter().any(|l| l.starts_with("tc") && l.contains(" recp=1000.000000000"))
+            // and leaves the mode (the flip at 27000).
+            && r.iter().any(|l| l.starts_with("tc") && l.contains(" tc=0 ")),
         "#1367: the parity scenarios no longer exercise the restore burst and a step re-base \
          ({} lines) — the gate would pass on a trace that skips the paths it guards",
         r.len()
