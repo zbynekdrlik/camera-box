@@ -103,9 +103,13 @@ impl RealtimeAsrcCompensator {
         if jump_ms.abs() < band_ms {
             return;
         }
-        self.step_recover_set(
-            (self.step_recover_ms - jump_ms).clamp(-STEP_RECOVER_MAX_MS, STEP_RECOVER_MAX_MS),
-        );
+        let owed_ms =
+            (self.step_recover_ms - jump_ms).clamp(-STEP_RECOVER_MAX_MS, STEP_RECOVER_MAX_MS);
+        // review round 1: at the owed cap a packet still beyond it books nothing and counts nothing
+        if owed_ms == self.step_recover_ms {
+            return;
+        }
+        self.step_recover_set(owed_ms);
         self.place_jump_count = self.place_jump_count.saturating_add(1);
         self.last_place_jump_ms = jump_ms;
     }

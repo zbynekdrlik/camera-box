@@ -409,7 +409,11 @@ double asrc_compensator_compensate(struct asrc_compensator *c, double raw_advanc
 					 * per capture (level_fallback_done, cleared only by a re-capture): a steady residual
 					 * the P+I terms hold at >= 5 ms would otherwise re-trip the bound every 40 min and
 					 * ratchet the target away. Mirror of src/asrc_bench.rs compensate_with_level. */
-					if (!c->level_fallback_done && fabs(c->level_err_ema_ms) >= ASRC_LEVEL_RESTORE_ARM_MS) {
+					/* camera-box issue 1367 (review round 1): never in timecode mode -- the setpoint is
+					 * the packet's own stamp (0), always reachable by the stretch; falling back would
+					 * accept a lasting A/V offset as the new truth. */
+					if (!c->timecode && !c->level_fallback_done &&
+					    fabs(c->level_err_ema_ms) >= ASRC_LEVEL_RESTORE_ARM_MS) {
 						if (++c->level_unconverged_windows >= ASRC_LEVEL_TARGET_UNREACHABLE_WINDOWS) {
 							c->level_fallback_from_ms = c->level_target_ms;
 							c->level_target_ms += c->level_err_ema_ms;
@@ -656,8 +660,12 @@ void asrc_compensator_observe_placement(struct asrc_compensator *c, double place
 	const double band_ms = half_packet_ms > ASRC_PLACE_JUMP_MIN_MS ? half_packet_ms : ASRC_PLACE_JUMP_MIN_MS;
 	if (fabs(jump_ms) < band_ms)
 		return;
-	asrc_step_recover_set(c, asrc_clamp(c->step_recover_ms - jump_ms, -ASRC_STEP_RECOVER_MAX_MS,
-					    ASRC_STEP_RECOVER_MAX_MS));
+	const double owed_ms =
+		asrc_clamp(c->step_recover_ms - jump_ms, -ASRC_STEP_RECOVER_MAX_MS, ASRC_STEP_RECOVER_MAX_MS);
+	/* review round 1: at the owed cap a packet still beyond it books nothing and counts nothing */
+	if (owed_ms == c->step_recover_ms)
+		return;
+	asrc_step_recover_set(c, owed_ms);
 	if (c->place_jump_count < UINT32_MAX)
 		c->place_jump_count++;
 	c->last_place_jump_ms = jump_ms;

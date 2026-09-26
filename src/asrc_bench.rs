@@ -1333,7 +1333,11 @@ impl RealtimeAsrcCompensator {
                         // LOUDLY. At most ONE fallback per capture (level_fallback_done, cleared only
                         // by a re-capture): a steady residual the P+I terms hold at >= 5 ms would
                         // otherwise re-trip the bound every 40 min and ratchet the target away.
-                        if !self.level_fallback_done
+                        // Issue 1367 (review round 1): never in timecode mode -- the setpoint is the
+                        // packet's own stamp (0), always reachable by the stretch; falling back would
+                        // accept a lasting A/V offset as the new truth.
+                        if !self.timecode
+                            && !self.level_fallback_done
                             && self.level_err_ema_ms.abs() >= LEVEL_RESTORE_ARM_MS
                         {
                             self.level_unconverged_windows += 1;

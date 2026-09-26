@@ -2083,7 +2083,7 @@ mod vendored_source {
         );
         assert!(
             c.contains(
-                "if (!c->level_fallback_done && fabs(c->level_err_ema_ms) >= ASRC_LEVEL_RESTORE_ARM_MS) {"
+                "if (!c->timecode && !c->level_fallback_done && fabs(c->level_err_ema_ms) >= ASRC_LEVEL_RESTORE_ARM_MS) {"
             ) && c.contains(
                 "if (++c->level_unconverged_windows >= ASRC_LEVEL_TARGET_UNREACHABLE_WINDOWS) {"
             ) && c.contains("c->level_target_ms += c->level_err_ema_ms; c->level_fallback_done = true;")
@@ -2186,7 +2186,7 @@ mod vendored_source {
         assert!(
             src.contains("\"level_avg=%.2fms (#1367)\" \" recover_ms=%.1f (issue 1372)\"")
                 && src.contains("source->asrc.level_avg_ms, source->asrc.step_recover_ms,"),
-            "{OBS_SOURCE}: issue 1372 — the asrc: telemetry line no longer ends with recover_ms= \
+            "{OBS_SOURCE}: issue 1372 — the asrc: telemetry line no longer carries recover_ms= \
              (the confirmed sample-count step still being paid back at ASRC_STEP_RECOVER_PPM)."
         );
     }
@@ -2216,7 +2216,8 @@ mod vendored_source {
                 && c.contains("if (c->timecode) c->level_target_ms = 0.0; else c->level_target_ms = c->level_absolute ? ASRC_LEVEL_TARGET_MS + c->level_offset_ms : window_level_ms;")
                 && c.contains("void asrc_compensator_shift_level_target(struct asrc_compensator *c, double delta_ms) { /* camera-box issue 1367")
                 && c.contains("const double jump_ms = place_err_ms - (c->level_target_ms + c->level_err_ema_ms);")
-                && c.contains("asrc_step_recover_set(c, asrc_clamp(c->step_recover_ms - jump_ms, -ASRC_STEP_RECOVER_MAX_MS, ASRC_STEP_RECOVER_MAX_MS));"),
+                && c.contains("const double owed_ms = asrc_clamp(c->step_recover_ms - jump_ms, -ASRC_STEP_RECOVER_MAX_MS, ASRC_STEP_RECOVER_MAX_MS);")
+                && c.contains("if (owed_ms == c->step_recover_ms) return; asrc_step_recover_set(c, owed_ms);"),
             "{ASRC_COMPENSATOR_C}: issue 1367 — the timecode mode (no residual booking, setpoint 0, \
              no-op shift, the signed placement-jump booking) is gone; a timecode-placed source \
              would be judged by arrival timing and its buffer depth again."
