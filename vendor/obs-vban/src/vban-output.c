@@ -24,6 +24,7 @@
 #include "vban.h"
 #include "vban-output-internal.h"
 #include "resolve-thread.h"
+#include "vban-pacing.h"
 
 #if LIBOBS_API_VER < MAKE_SEMANTIC_VERSION(30, 1, 0)
 #define AUDIO_ONLY_WORKAROUND
@@ -148,6 +149,7 @@ static void vban_out_update(void *data, obs_data_t *settings)
 
 	v->frequency = (int)obs_data_get_int(settings, "frequency");
 	v->format_bit = (uint8_t)obs_data_get_int(settings, "format_bit");
+	v->pacing_target_ms = obs_data_get_int(settings, "pacing_target_ms");
 
 	pthread_mutex_unlock(&v->mutex);
 }
@@ -179,6 +181,11 @@ static obs_properties_t *vban_out_get_properties(void *data)
 	obs_property_list_add_int(prop, obs_module_text("VBAN.out.prop.format_bit.int24"), VBAN_BITFMT_24_INT);
 	obs_property_list_add_int(prop, obs_module_text("VBAN.out.prop.format_bit.flt32"), VBAN_BITFMT_32_FLOAT);
 
+	// camera-box issue 1372: the send jitter-buffer target depth
+	prop = obs_properties_add_int(props, "pacing_target_ms", obs_module_text("VBAN.out.prop.pacing_target_ms"),
+				      VBAN_PACING_TARGET_MS_MIN, VBAN_PACING_TARGET_MS_MAX, 1);
+	obs_property_int_set_suffix(prop, " ms");
+
 	return props;
 }
 
@@ -187,6 +194,7 @@ static void vban_out_get_defaults(obs_data_t *data)
 	obs_data_set_default_int(data, "port", 6980);
 	obs_data_set_default_int(data, "mixer", 1);
 	obs_data_set_default_int(data, "format_bit", VBAN_BITFMT_24_INT);
+	obs_data_set_default_int(data, "pacing_target_ms", VBAN_PACING_TARGET_MS_DEFAULT);
 }
 
 static void *vban_out_create(obs_data_t *settings, obs_output_t *output)

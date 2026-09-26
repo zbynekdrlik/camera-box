@@ -18,11 +18,13 @@
 
 #include <obs-module.h>
 #include <media-io/audio-resampler.h>
+#include <util/platform.h>
 #include "plugin-macros.generated.h"
 #include "vban.h"
 #include "socket.h"
 #include "vban-output-internal.h"
 #include "resolve-thread.h"
+#include "vban-pacing.h"
 
 struct output_thread_s
 {
@@ -240,10 +242,50 @@ static void convert_from_packet(struct output_thread_s *t, struct audio_data *pk
 	}
 }
 
+/* camera-box issue 1372: one VBAN packet of nbs samples from the head of the converted buffer.
+ * The payload bytes and the nuFrame counter are exactly what 0.3.1 sent for the same samples. */
+static void send_packet(struct output_thread_s *t, char *vban_buf, size_t nbs, size_t sample_size,
+			struct sockaddr_in *addr)
+{
+	t->header->format_nbs = (uint8_t)(nbs - 1);
+	size_t n = nbs * sample_size;
+	memcpy(t->payload, t->buffer.array, n);
+	memmove(t->buffer.array, (char *)t->buffer.array + n, t->buffer.num - n);
+	t->buffer.num -= n;
+	sendto(t->vban_socket, vban_buf, VBAN_HEADER_SIZE + n, 0, (struct sockaddr *)addr, (socklen_t)sizeof(*addr));
+
+#ifdef DEBUG_PACKET
+	blog(LOG_DEBUG, "sent packet nuFrame: %d", t->header->nuFrame);
+#endif
+
+	t->header->nuFrame++;
+}
+
+/* camera-box issue 1372: the packet size 0.3.1 cut the stream into -- 256 samples, or fewer when
+ * 256 samples do not fit VBAN_DATA_MAX_SIZE (239 for 24-bit stereo). */
+static size_t packet_samples_for(size_t sample_size)
+{
+	size_t nbs = VBAN_DATA_MAX_SIZE / sample_size;
+	return nbs > 256 ? 256 : nbs;
+}
+
+static void free_blocks(struct darray *blocks)
+{
+	struct audio_data *b = blocks->array;
+	for (size_t i = 0; i < blocks->num; i++) {
+		for (size_t j = 0; j < MAX_AV_PLANES; j++)
+			bfree(b[i].data[j]);
+	}
+	blocks->num = 0;
+}
+
+/* camera-box issue 1372: the send thread is paced. Every audio block is converted into the jitter
+ * buffer (t.buffer) the moment it arrives, and vban_pacing_step() (vban-pacing.h) decides when and
+ * how many packets leave: packet n at t0 + n * packet_duration on the disciplined os_gettime_ns(),
+ * every due packet per wake, an underflow waited out (no zero-fill), an overflow dropped from the
+ * oldest, both counted. The thread sleeps to the next deadline with os_sleepto_ns(). */
 static void vban_out_loop(struct vban_out_s *v)
 {
-	struct audio_data pkt = {0};
-
 	char vban_buf[VBAN_PROTOCOL_MAX_SIZE];
 
 	struct output_thread_s t = {
@@ -258,66 +300,91 @@ static void vban_out_loop(struct vban_out_s *v)
 		return;
 	}
 
-	unsigned long wait_ms = 100;
+	struct darray blocks;
+	darray_init(&blocks);
+
+	struct vban_pacing pacing;
+	bool pacing_ready = false;
+	int64_t pacing_target_ms = 0;
+	uint64_t wake_ns = 0;
+	uint64_t next_log_ns = 0;
 
 	while (v->cont) {
 		// copy of properties
 		struct sockaddr_in addr;
 		addr.sin_family = AF_INET;
 
-		os_event_timedwait(v->event, wait_ms);
+		if (wake_ns)
+			os_sleepto_ns(wake_ns);
+		else
+			os_event_timedwait(v->event, VBAN_PACING_IDLE_WAIT_MS);
 
 		pthread_mutex_lock(&v->mutex);
 
-		if (v->buffer.size && !pkt.frames) {
+		while (v->buffer.size) {
+			struct audio_data pkt;
 			deque_pop_front(&v->buffer, &pkt, sizeof(pkt));
+			darray_push_back(sizeof(struct audio_data), &blocks, &pkt);
 		}
 
 		bool restart = bring_settings_unlocked(v, &t, &addr);
+		const int64_t target_ms = v->pacing_target_ms;
 
 		pthread_mutex_unlock(&v->mutex);
 
 		if (restart)
 			break;
 
+		struct audio_data *b = blocks.array;
+		for (size_t i = 0; i < blocks.num; i++) {
+			if (t.resampler)
+				resample_from_packet(&t, &b[i]);
+			else
+				convert_from_packet(&t, &b[i]);
+		}
+		free_blocks(&blocks);
+
 		size_t channels = v->channels;
 		size_t fmt_size = VBanBitResolutionSize[t.header->format_bit & VBAN_BIT_RESOLUTION_MASK];
 		size_t sample_size = channels * fmt_size;
+		size_t nbs = packet_samples_for(sample_size);
 
-		if (t.buffer.num + sample_size <= VBAN_DATA_MAX_SIZE && pkt.frames) {
-			t.buf_ts_ns =
-				pkt.timestamp - (uint64_t)(t.buffer.num / sample_size) * 1000000000 / t.frequency_vban;
-			if (t.resampler)
-				resample_from_packet(&t, &pkt);
-			else
-				convert_from_packet(&t, &pkt);
-			for (size_t i = 0; i < MAX_AV_PLANES; i++) {
-				bfree(pkt.data[i]);
-				pkt.data[i] = NULL;
-			}
-			pkt.frames = 0;
+		const uint64_t now = os_gettime_ns();
+		if (!pacing_ready || pacing.packet_samples != (uint32_t)nbs || pacing_target_ms != target_ms) {
+			vban_pacing_init(&pacing, target_ms, (uint32_t)nbs, (uint32_t)t.frequency_vban);
+			pacing_ready = true;
+			pacing_target_ms = target_ms;
+			next_log_ns = now + VBAN_PACING_LOG_INTERVAL_NS;
+			blog(LOG_INFO,
+			     "obs-vban pacing-config: target_ms=%" PRIu32 " packet_samples=%" PRIu32 " rate=%" PRIu32
+			     " stream='%.*s'",
+			     pacing.target_ms, pacing.packet_samples, pacing.rate, (int)VBAN_STREAM_NAME_SIZE,
+			     t.header->streamname);
 		}
 
-		size_t nbs = t.buffer.num / sample_size;
-		if (nbs >= 256 || t.buffer.num + sample_size > VBAN_DATA_MAX_SIZE) {
-			if (nbs * sample_size > VBAN_DATA_MAX_SIZE)
-				nbs = VBAN_DATA_MAX_SIZE / sample_size;
-			if (nbs > 256)
-				nbs = 256;
-			t.header->format_nbs = (uint8_t)(nbs - 1);
-			size_t n = nbs * sample_size;
-			memcpy(t.payload, t.buffer.array, n);
+		const struct vban_pacing_step d = vban_pacing_step(&pacing, now, (uint64_t)(t.buffer.num / sample_size));
+
+		if (d.drop_samples) {
+			size_t n = (size_t)d.drop_samples * sample_size;
 			memmove(t.buffer.array, (char *)t.buffer.array + n, t.buffer.num - n);
 			t.buffer.num -= n;
-			sendto(t.vban_socket, vban_buf, VBAN_HEADER_SIZE + n, 0, (struct sockaddr *)&addr,
-			       (socklen_t)sizeof(addr));
+		}
 
-#ifdef DEBUG_PACKET
-			blog(LOG_DEBUG, "sent packet nuFrame: %d", t.header->nuFrame);
-#endif
+		for (uint32_t i = 0; i < d.send; i++)
+			send_packet(&t, vban_buf, nbs, sample_size, &addr);
 
-			t.header->nuFrame++;
-			wait_ms = (unsigned long)nbs * 1000 / t.frequency_vban;
+		wake_ns = d.wake_ns;
+
+		if (now >= next_log_ns) {
+			const uint64_t depth_samples = t.buffer.num / sample_size;
+			const uint64_t late_ns = vban_pacing_take_late_max_ns(&pacing);
+			blog(LOG_INFO,
+			     "obs-vban pacing: depth_ms=%.1f underflows=%" PRIu64 " overflows=%" PRIu64
+			     " late_max_ms=%.3f target_ms=%" PRIu32 " stream='%.*s'",
+			     (double)depth_samples * 1000.0 / (double)pacing.rate, pacing.underflows, pacing.overflows,
+			     (double)late_ns / 1000000.0, pacing.target_ms, (int)VBAN_STREAM_NAME_SIZE,
+			     t.header->streamname);
+			next_log_ns = now + VBAN_PACING_LOG_INTERVAL_NS;
 		}
 	}
 
@@ -325,8 +392,8 @@ static void vban_out_loop(struct vban_out_s *v)
 
 	if (t.resampler)
 		audio_resampler_destroy(t.resampler);
-	for (size_t i = 0; i < MAX_AV_PLANES; i++)
-		bfree(pkt.data[i]);
+	free_blocks(&blocks);
+	darray_free(&blocks);
 	closesocket(t.vban_socket);
 	darray_free(&t.buffer);
 }

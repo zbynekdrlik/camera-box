@@ -24,6 +24,8 @@ struct vban_out_s
 	int frequency;
 	size_t channels;
 	uint8_t format_bit;
+	// camera-box issue 1372: the send jitter-buffer target depth (ms), clamped by vban-pacing.h
+	int64_t pacing_target_ms;
 
 	// thread
 	pthread_mutex_t mutex;

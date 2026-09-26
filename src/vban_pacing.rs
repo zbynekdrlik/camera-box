@@ -120,17 +120,53 @@ impl Pacing {
     }
 
     /// The decision for a wake at `now_ns` with `buffered` samples waiting.
-    ///
-    /// RED stub (issue 1372): the obs-vban 0.3.1 behaviour — at most one packet per wake, the
-    /// next wake a truncated packet duration later, no schedule, nothing counted.
     pub fn step(&mut self, now_ns: u64, buffered: u64) -> Step {
         let ps = u64::from(self.packet_samples);
-        let wait_ms = ps * 1000 / u64::from(self.rate);
-        Step {
-            send: u32::from(buffered >= ps),
-            drop_samples: 0,
-            wake_ns: now_ns + wait_ms * 1_000_000,
+        let mut d = Step::default();
+        let mut avail = buffered;
+
+        if avail > self.overflow_samples {
+            let excess = avail - self.target_samples;
+            d.drop_samples = excess - excess % ps;
+            avail -= d.drop_samples;
+            self.overflows += 1;
         }
+
+        if !self.running {
+            if !self.primed {
+                if avail < ps {
+                    return d;
+                }
+                self.primed = true;
+                self.prime_ns = now_ns;
+            }
+            let start = self.prime_ns + self.target_ns;
+            if now_ns < start {
+                d.wake_ns = start;
+                return d;
+            }
+            self.running = true;
+            self.t0_ns = start;
+            self.n_sent = 0;
+        }
+
+        let mut deadline = self.deadline_ns(self.n_sent);
+        while deadline <= now_ns {
+            if avail < ps {
+                self.running = false;
+                self.primed = false;
+                self.underflows += 1;
+                d.wake_ns = 0;
+                return d;
+            }
+            self.late_max_ns = self.late_max_ns.max(now_ns - deadline);
+            avail -= ps;
+            d.send += 1;
+            self.n_sent += 1;
+            deadline = self.deadline_ns(self.n_sent);
+        }
+        d.wake_ns = deadline;
+        d
     }
 
     /// The largest lateness since the last call, then reset (the 10 s log window).
