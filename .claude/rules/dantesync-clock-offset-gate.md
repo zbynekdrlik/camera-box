@@ -101,6 +101,12 @@ and both now have TSV rows:
   limit before any float conversion (|us| >= 1e15 = more than 15 digits for bash integer arithmetic).
 When adding a field to the table, add a non-string row and an absurd-magnitude row.
 
+**Gotcha: editing EVERY row of the TSV (a new column) trips the secret-staging hook.** The 401-digit
+`master_error_huge_integer` row reads as a "40+ char hex blob", so `git add` and `git commit` of the
+changed table are blocked. It is a test value, not a secret: append
+`# airuleset:secret-ok <reason>` to BOTH the `git add` and the `git commit` command, and pass the
+commit message with `-F <file>` (a heredoc in the same call is refused by the worktree guard).
+
 ### dantesync 1.11.0: the date master is graded on its MICRO-corrections (issue 1372, design 5846047309)
 
 dantesync 1.11.0 (PR 121) no longer lets the fleet date drift up to the 50 ms step bound. The
