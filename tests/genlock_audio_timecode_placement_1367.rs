@@ -399,6 +399,10 @@ fn the_timecode_asrc_reads_the_raw_stamp_placement_not_arrival_1367() {
             "a placement jump must be booked (1000 ppm, its own sign) before the reading enters the window",
         ),
         (
+            "asrc_compensator_set_step_recover_hold(&source->asrc, source->genlock_audio_slew_remaining_ns != 0); asrc_compensator_observe_placement(",
+            "the recovery payment must wait while the placement slew owes (never 2000 ppm; the bench's SkipThenSlew)",
+        ),
+        (
             "if (master_s > 0.0) asrc_compensator_compensate(&source->asrc, source->asrc_tc_prev_raw_s, master_s, err_ms, &applied_ppm);",
             "a placed packet or a duplicated slot adds no rate point and never flushes",
         ),

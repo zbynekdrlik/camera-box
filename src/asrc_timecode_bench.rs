@@ -43,9 +43,11 @@
 
 use crate::asrc_bench::{RealtimeAsrcCompensator, STEP_RECOVER_PPM};
 use crate::genlock_audio_pairing::{
-    audio_actual_place_ns, audio_asrc_error_ms, audio_asrc_timecode, audio_intended_raw_ns,
-    audio_place_error_ns, audio_place_term_ns, audio_push_back_allowed, audio_stamp_interval_s,
-    audio_stamp_mono_ns, audio_wall_to_mono_ns, genlock_audio_delay_ns, AudioHoldMode,
+    audio_actual_place_ns, audio_asrc_error_ms, audio_asrc_timecode, audio_hold_action,
+    audio_intended_raw_ns, audio_level_shift_ns, audio_place_error_ns, audio_place_term_ns,
+    audio_placed_slew_fold_ns, audio_push_back_allowed, audio_slew_book_ts_ns, audio_slew_ppm,
+    audio_slew_step_ns, audio_stamp_interval_s, audio_stamp_mono_ns, audio_wall_to_mono_ns,
+    genlock_audio_delay_ns, AudioHoldAction, AudioHoldMode,
 };
 
 const RATE: u64 = 48_000;
@@ -54,6 +56,10 @@ const TICK_FRAMES: u64 = 1024;
 const MONO0: u64 = 50_000_000_000_000;
 const WALL0: u64 = 1_790_000_000_000_000_000;
 const HOLD_MS: u32 = 100;
+/// The latched depth after a one-frame relock (the #1367 hold slew scenarios).
+const HOLD_SLEWED_MS: u32 = 133;
+/// SkipThenSlew: the relock comes this long after the skipped slot, while the payment still owes.
+const SLEW_AFTER_SKIP_NS: u64 = 5 * NS_PER_S;
 const BUFFERING_NS: u64 = 64_000_000;
 const MAX_TS_VAR: u64 = 2_000_000_000;
 const TS_SMOOTHING_THRESHOLD: u64 = 70_000_000;
@@ -117,6 +123,12 @@ enum Event {
     /// OBS PLACES the next packet at its stamp (an 80 ms jump), so the buffer grows while the arrival
     /// count lost a slot.
     StampLeap,
+    /// The receiver's latched depth moves one frame (100 -> 133 ms) while the audio plays: the #1367
+    /// hold SLEW moves the placement at 1000 ppm, a deliberate move the servo must not book.
+    HoldSlew,
+    /// A skipped slot, then 5 s later (28 ms still owed) the same one-frame relock: the recovery
+    /// payment WAITS while the slew owes (never 2000 ppm), then finishes.
+    SkipThenSlew,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -151,6 +163,7 @@ fn sender_packets(event: Event) -> Vec<Packet> {
         let mut emit_copies = 1;
         match event {
             Event::Skip(n) if (event_slot..event_slot + n).contains(&k) => emit_copies = 0,
+            Event::SkipThenSlew if k == event_slot => emit_copies = 0,
             Event::Dup if k == event_slot => emit_copies = 2,
             Event::Restart if (EVENT_AT_NS..EVENT_AT_NS + RESTART_SILENT_NS).contains(&nominal) => {
                 emit_copies = 0
@@ -199,6 +212,15 @@ fn receiver_wall(t_ns: u64, event: Event) -> u64 {
     WALL0 + t_ns + step
 }
 
+/// The receiver's latched audio hold at arrival `t_ns` (the pairing's video-delay latch).
+fn receiver_hold_ms(t_ns: u64, event: Event) -> u32 {
+    match event {
+        Event::HoldSlew if t_ns >= EVENT_AT_NS => HOLD_SLEWED_MS,
+        Event::SkipThenSlew if t_ns >= EVENT_AT_NS + SLEW_AFTER_SKIP_NS => HOLD_SLEWED_MS,
+        _ => HOLD_MS,
+    }
+}
+
 /// One OBS source: `asrc_process_audio` + `source_output_audio_data` + the mixer.
 struct Obs {
     variant: Variant,
@@ -214,7 +236,12 @@ struct Obs {
     next_sys_min: u64,
     audio_ts: u64,
     end: u64,
-    placed_once: bool,
+    prev_mode: AudioHoldMode,
+    prev_hold_ms: u32,
+    slew_remaining_ns: i64,
+    slew_step_ns: i64,
+    /// A recovery payment and a slew step reached the same resampler call (the 2000 ppm stack).
+    stacked: bool,
     have_prev: bool,
     prev_stamp_mono: u64,
     prev_raw_s: f64,
@@ -237,7 +264,11 @@ impl Obs {
             next_sys_min: 0,
             audio_ts: 0,
             end: 0,
-            placed_once: false,
+            prev_mode: AudioHoldMode::Off,
+            prev_hold_ms: 0,
+            slew_remaining_ns: 0,
+            slew_step_ns: 0,
+            stacked: false,
             have_prev: false,
             prev_stamp_mono: 0,
             prev_raw_s: 0.0,
@@ -286,14 +317,20 @@ impl Obs {
             let buffered_ms = self.buffered_ns() as f64 / 1e6;
             self.c.set_level_absolute(false);
             self.c.set_level_offset_ms(0.0);
-            self.c.set_step_recover_hold(false);
+            self.c.set_step_recover_hold(self.slew_remaining_ns != 0);
             let (applied, recover) = if self.c.timecode() {
                 (self.c.applied_ppm(), self.c.take_step_recover_ppm())
             } else {
                 self.c.compensate_with_level(raw_s, master_s, buffered_ms);
                 (self.c.applied_ppm(), self.c.step_recover_ppm())
             };
-            self.ppm_res = -applied - recover;
+            // the #1367 placement slew rides on the same resampler call
+            let dt_ns = frames_ns(PACKET_FRAMES);
+            let step = audio_slew_step_ns(self.slew_remaining_ns, dt_ns);
+            self.slew_remaining_ns -= step;
+            self.slew_step_ns += step;
+            self.stacked |= step != 0 && recover != 0.0;
+            self.ppm_res = audio_slew_ppm(step, dt_ns) - applied - recover;
         }
         let frames_f = PACKET_FRAMES as f64 * (1.0 + self.ppm_res / 1e6) + self.frac;
         let frames = frames_f.floor();
@@ -302,7 +339,14 @@ impl Obs {
     }
 
     /// `source_output_audio_data` for one packet; returns where its first sample landed.
-    fn ingest(&mut self, pkt: &Packet, mono_now: u64, wall_now: u64, dur: u64) -> u64 {
+    fn ingest(
+        &mut self,
+        pkt: &Packet,
+        mono_now: u64,
+        wall_now: u64,
+        hold_ms: u32,
+        dur: u64,
+    ) -> u64 {
         let ts = pkt.stamp;
         let mut in_ts = ts;
         let mut timeline_reset = false;
@@ -323,6 +367,11 @@ impl Obs {
             }
         }
         self.next_ts_min = in_ts + dur;
+        let slew_step = std::mem::take(&mut self.slew_step_ns);
+        if slew_step != 0 {
+            self.next_ts_min = audio_slew_book_ts_ns(self.next_ts_min, slew_step);
+            self.c.shift_level_target(slew_step as f64 / 1e6);
+        }
         in_ts = in_ts.wrapping_add(self.timing_adjust);
         let mut push_back = false;
         if self.next_sys_min == in_ts {
@@ -339,20 +388,59 @@ impl Obs {
         }
         let mode = AudioHoldMode::Timecode;
         let off_live = audio_wall_to_mono_ns(mono_now, wall_now);
-        let term = audio_place_term_ns(mode, HOLD_MS, off_live, self.timing_adjust);
+        let term = audio_place_term_ns(mode, hold_ms, off_live, self.timing_adjust);
         in_ts = in_ts.wrapping_add(term as u64);
+        let prev_term = audio_place_term_ns(
+            self.prev_mode,
+            self.prev_hold_ms,
+            off_live,
+            self.timing_adjust,
+        );
         push_back = audio_push_back_allowed(push_back, timeline_reset, mode);
-        if !self.placed_once {
-            // the first packet after the withhold: the hold action PLACES it
-            self.placed_once = true;
-            push_back = false;
-        }
-        self.next_sys_min = self.next_ts_min.wrapping_add(self.timing_adjust);
+        let action = audio_hold_action(
+            self.prev_mode,
+            self.prev_hold_ms,
+            mode,
+            hold_ms,
+            push_back,
+            true,
+            self.slew_remaining_ns != 0,
+        );
         let tc = self.timecode_path() && audio_asrc_timecode(mode, false, true);
         if self.c.timecode() != tc {
             self.have_prev = false;
         }
         self.c.set_timecode(tc);
+        match action {
+            AudioHoldAction::Slew => {
+                self.slew_remaining_ns += term.wrapping_sub(prev_term);
+            }
+            AudioHoldAction::Place | AudioHoldAction::Replace => {
+                push_back = false;
+                let shift = audio_level_shift_ns(
+                    action,
+                    self.prev_mode,
+                    term,
+                    prev_term,
+                    self.slew_remaining_ns,
+                );
+                self.c.shift_level_target(shift as f64 / 1e6);
+                self.slew_remaining_ns = 0;
+            }
+            _ => {}
+        }
+        self.prev_mode = mode;
+        self.prev_hold_ms = hold_ms;
+        self.next_sys_min = self.next_ts_min.wrapping_add(self.timing_adjust);
+        let fold = audio_placed_slew_fold_ns(
+            action,
+            !(push_back && self.audio_ts != 0),
+            self.slew_remaining_ns,
+        );
+        if fold != 0 {
+            self.c.shift_level_target(fold as f64 / 1e6);
+            self.slew_remaining_ns = 0;
+        }
 
         let intended = audio_intended_raw_ns(ts, self.timing_adjust, 0, 0, term);
         let appended = push_back && self.audio_ts != 0;
@@ -371,8 +459,8 @@ impl Obs {
 
         // asrc_timecode_ingest, for a source the servo judges in timecode mode
         if self.c.timecode() {
-            let err_ms = audio_asrc_error_ms(place_err_ns, 0);
-            self.c.set_step_recover_hold(false);
+            let err_ms = audio_asrc_error_ms(place_err_ns, self.slew_remaining_ns);
+            self.c.set_step_recover_hold(self.slew_remaining_ns != 0);
             if self.variant != Variant::NoBooking {
                 self.c
                     .observe_placement(err_ms, self.raw_cur_s * 1000.0, !appended);
@@ -406,18 +494,23 @@ struct Run {
     jumps: u32,
     recovering: bool,
     recover_owed_final_ms: f64,
+    /// max |A/V| (ms) from the event to the event + the settle time (a slew trails by up to a frame).
+    av_peak_ms: f64,
+    /// A recovery payment and a slew step reached the same resampler call.
+    stacked: bool,
 }
 
 fn run(event: Event, variant: Variant, settle_ns: u64) -> Run {
     let mut obs = Obs::new(variant);
-    let hold_ns = genlock_audio_delay_ns(HOLD_MS);
     let mut r = Run::default();
     for pkt in sender_packets(event) {
         let mono_now = MONO0 + pkt.arrival_ns;
+        let hold_ms = receiver_hold_ms(pkt.arrival_ns, event);
         obs.mix_until(mono_now);
         let dur = obs.asrc_process(mono_now);
-        let actual = obs.ingest(&pkt, mono_now, receiver_wall(pkt.arrival_ns, event), dur);
-        let truth = MONO0 + slot_ns(pkt.slot) + pkt.leap_ns + hold_ns;
+        let wall = receiver_wall(pkt.arrival_ns, event);
+        let actual = obs.ingest(&pkt, mono_now, wall, hold_ms, dur);
+        let truth = MONO0 + slot_ns(pkt.slot) + pkt.leap_ns + genlock_audio_delay_ns(hold_ms);
         let av_ms = actual.wrapping_sub(truth) as i64 as f64 / 1e6;
         let t = pkt.arrival_ns;
         if (STEADY_FROM_NS..EVENT_AT_NS).contains(&t) {
@@ -425,6 +518,8 @@ fn run(event: Event, variant: Variant, settle_ns: u64) -> Run {
         }
         if t >= EVENT_AT_NS + settle_ns {
             r.av_after_ms = r.av_after_ms.max(av_ms.abs());
+        } else if t >= EVENT_AT_NS {
+            r.av_peak_ms = r.av_peak_ms.max(av_ms.abs());
         }
         if t >= STEADY_FROM_NS {
             r.est_max_ppm = r.est_max_ppm.max(obs.c.estimated_ppm().abs());
@@ -434,14 +529,17 @@ fn run(event: Event, variant: Variant, settle_ns: u64) -> Run {
     }
     r.jumps = obs.c.place_jump_count();
     r.recover_owed_final_ms = obs.c.step_recover_ms();
+    r.stacked = obs.stacked;
     r
 }
 
 const SETTLE_NS: u64 = 60 * NS_PER_S;
 /// Two skipped slots owe 66.7 ms: the 1000 ppm budget pays them in 66.7 s (+ 5 s margin).
 const SETTLE_TWO_SLOTS_NS: u64 = 72 * NS_PER_S;
+/// A skip, the relock 5 s later: 5 s paid, the 33.3 ms slew (payment held), the other 28.3 ms paid.
+const SETTLE_SKIP_THEN_SLEW_NS: u64 = 75 * NS_PER_S;
 
-fn scenarios() -> [(Event, u64); 6] {
+fn scenarios() -> [(Event, u64); 8] {
     [
         (Event::Skip(1), SETTLE_NS),
         (Event::Skip(2), SETTLE_TWO_SLOTS_NS),
@@ -449,6 +547,8 @@ fn scenarios() -> [(Event, u64); 6] {
         (Event::Restart, SETTLE_NS),
         (Event::WallStep, SETTLE_NS),
         (Event::StampLeap, SETTLE_NS),
+        (Event::HoldSlew, SETTLE_NS),
+        (Event::SkipThenSlew, SETTLE_SKIP_THEN_SLEW_NS),
     ]
 }
 
@@ -471,7 +571,34 @@ fn timecode_asrc_holds_av_and_rate_through_every_sender_event_1367() {
             r.recover_owed_final_ms, 0.0,
             "issue 1367: {event:?}: everything booked must be paid by the end: {r:?}"
         );
+        assert!(
+            !r.stacked,
+            "issue 1367: {event:?}: a recovery payment must wait while the placement slew owes \
+             (never 2000 ppm on one resampler): {r:?}"
+        );
     }
+}
+
+#[test]
+fn a_hold_slew_is_followed_never_booked_and_holds_the_payment_1367() {
+    // review round 1: a one-frame relock while the audio plays is a deliberate SLEW -- the servo's
+    // error excludes what the slew still owes, so nothing is booked, and the audio trails the new
+    // hold by at most a frame until the slew lands (the slew itself is real: peak >= 30 ms).
+    let slew = run(Event::HoldSlew, Variant::Production, SETTLE_NS);
+    assert!(
+        slew.jumps == 0 && !slew.recovering && (30.0..=34.0).contains(&slew.av_peak_ms),
+        "issue 1367: a hold slew books nothing and the audio follows it: {slew:?}"
+    );
+    // a skip still being paid when the relock comes: booked once, paid only around the slew
+    let both = run(
+        Event::SkipThenSlew,
+        Variant::Production,
+        SETTLE_SKIP_THEN_SLEW_NS,
+    );
+    assert!(
+        both.jumps == 1 && both.recovering && !both.stacked,
+        "issue 1367: the skip is booked once and its payment waits for the slew: {both:?}"
+    );
 }
 
 #[test]
