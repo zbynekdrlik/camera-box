@@ -393,7 +393,7 @@ pub fn qpc_drift_beyond_bound(
 /// 51.039 ms); 66 ms keeps that with margin and nothing more. A bigger jump (a clock SET, an NTP
 /// fallback step, another clock writer) stays in the history and DEGRADES — the hazard the step
 /// verdict exists for (#1357).
-pub const GENLOCK_QPC_WALL_STEP_BOOK_MAX_MS: i64 = 200;
+pub const GENLOCK_QPC_WALL_STEP_BOOK_MAX_MS: i64 = 66;
 /// Issue 1372 — how many wall steps the widget books inside one [`GENLOCK_QPC_WINDOW_S`]. A second
 /// step in the window is a step STORM (dantesync steps the date every ~1.8 h) and keeps DEGRADING.
 pub const GENLOCK_QPC_WALL_STEPS_PER_WINDOW: i64 = 1;

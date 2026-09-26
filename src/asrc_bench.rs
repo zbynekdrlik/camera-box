@@ -861,7 +861,7 @@ impl RealtimeAsrcCompensator {
     /// the audio placement slew still owes a move on the same resampler. Mirror of the C
     /// `asrc_compensator_set_step_recover_hold`.
     pub fn set_step_recover_hold(&mut self, hold: bool) {
-        let _ = hold;
+        self.step_recover_hold = hold;
     }
 
     /// Issue 1372 (ROZHODNUTÉ 5841039244): BOOK a re-based step the buffer level confirms. `r_s` is
@@ -879,11 +879,15 @@ impl RealtimeAsrcCompensator {
         if !self.level_captured {
             return;
         }
-        if (buf_ms - self.level_target_ms).abs() >= 0.5 * (r_s * 1000.0).abs() {
-            let owed_ms = -r_s * 1000.0;
-            self.step_recover_ms += owed_ms;
-            self.level_target_ms -= owed_ms;
+        let loss_ms = -r_s * 1000.0; // + = samples lost, the buffer must grow back
+        let deficit_ms = self.level_target_ms - buf_ms; // + = the buffer is below its setpoint
+        if deficit_ms * loss_ms <= 0.0 || deficit_ms.abs() < 0.5 * loss_ms.abs() {
+            return;
         }
+        let owed_ms =
+            (self.step_recover_ms + loss_ms).clamp(-STEP_RECOVER_MAX_MS, STEP_RECOVER_MAX_MS);
+        self.level_target_ms -= owed_ms - self.step_recover_ms;
+        self.step_recover_ms = owed_ms;
     }
 
     /// Issue 1372: PAY the owed step back at `STEP_RECOVER_PPM` (1 ms per second of master time),

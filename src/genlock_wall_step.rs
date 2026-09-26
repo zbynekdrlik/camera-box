@@ -125,9 +125,10 @@ impl WallStepState {
     ///
     /// Mirror of the C `genlock_wall_step_regrid_due()`.
     pub fn regrid_due(&mut self, step_ns: i64, target: u64, stock: u64) -> bool {
-        let _ = (target, stock);
-        self.regrid_pending = false;
-        step_ns != 0
+        let regrid = step_ns != 0 || self.regrid_pending;
+        let corr = target.wrapping_sub(stock) as i64;
+        self.regrid_pending = regrid && corr.saturating_abs() > MAX_SLEW_NS;
+        regrid
     }
 
     /// Whether a re-grid is still pending (telemetry and tests).

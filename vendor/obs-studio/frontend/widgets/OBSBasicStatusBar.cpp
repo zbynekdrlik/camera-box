@@ -55,7 +55,7 @@ static constexpr int GENLOCK_QPC_WINDOW_S = 300;
  * never follows a step and the render tick re-grids onto the stepped wall in one tick. A bigger jump
  * (a clock set, an NTP-fallback or second-writer step) or a second step inside GENLOCK_QPC_WINDOW_S (a
  * step storm) still DEGRADES. Mirror of src/genlock_lock_state.rs GENLOCK_QPC_WALL_STEP_BOOK_MAX_MS. */
-static constexpr int64_t GENLOCK_QPC_WALL_STEP_BOOK_MAX_MS = 200;
+static constexpr int64_t GENLOCK_QPC_WALL_STEP_BOOK_MAX_MS = 66;
 static constexpr int64_t GENLOCK_QPC_WALL_STEPS_PER_WINDOW = 1;
 
 /* camera-box issue 1372 part D: the MEDIA-clock (audio clock) term. os_gettime_ns() paces the audio

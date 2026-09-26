@@ -76,11 +76,14 @@ static void asrc_step_recover_book(struct asrc_compensator *c, double r_s, doubl
 {
 	if (!c->level_captured)
 		return;
-	if (fabs(buffered_ms - c->level_target_ms) >= 0.5 * fabs(r_s * 1000.0)) {
-		const double owed_ms = -r_s * 1000.0;
-		c->step_recover_ms += owed_ms;
-		c->level_target_ms -= owed_ms;
-	}
+	const double loss_ms = -r_s * 1000.0;
+	const double deficit_ms = c->level_target_ms - buffered_ms;
+	if (deficit_ms * loss_ms <= 0.0 || fabs(deficit_ms) < 0.5 * fabs(loss_ms))
+		return;
+	const double owed_ms =
+		asrc_clamp(c->step_recover_ms + loss_ms, -ASRC_STEP_RECOVER_MAX_MS, ASRC_STEP_RECOVER_MAX_MS);
+	c->level_target_ms -= owed_ms - c->step_recover_ms;
+	c->step_recover_ms = owed_ms;
 }
 
 /* camera-box issue 1372: PAY the owed step back at ASRC_STEP_RECOVER_PPM (1 ms per second of master
@@ -595,6 +598,5 @@ void asrc_compensator_set_level_absolute(struct asrc_compensator *c, bool absolu
 
 void asrc_compensator_set_step_recover_hold(struct asrc_compensator *c, bool hold)
 {
-	(void)c;
-	(void)hold;
+	c->step_recover_hold = hold;
 }

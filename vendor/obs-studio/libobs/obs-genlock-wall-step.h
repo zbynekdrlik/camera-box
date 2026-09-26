@@ -90,10 +90,11 @@ static inline int64_t genlock_wall_step_observe(struct genlock_wall_step_state *
 static inline int genlock_wall_step_regrid_due(struct genlock_wall_step_state *s, int64_t step_ns, uint64_t target,
 					       uint64_t stock)
 {
-	(void)target;
-	(void)stock;
-	s->regrid_pending = 0;
-	return step_ns != 0;
+	const int regrid = step_ns != 0 || s->regrid_pending;
+	const int64_t corr = (int64_t)(target - stock);
+	const int64_t mag = corr >= 0 ? corr : (corr == INT64_MIN ? INT64_MAX : -corr);
+	s->regrid_pending = regrid && mag > GENLOCK_WALL_STEP_MAX_SLEW_NS;
+	return regrid;
 }
 
 /* The render-tick deadline: the wall-grid target as-is on a re-grid (one-tick re-grid),
