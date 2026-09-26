@@ -102,3 +102,30 @@ def test_a_verdict_without_multi_source_windows_renders_unchanged_1367():
     text = edr.compose_summary(v, {"run_id": "2059624745"})
     assert TAG not in text
     assert "multi-source" not in edr.compose_report(v, {"run_id": "2059624745"})
+
+
+def test_full_report_tags_the_cadence_and_residual_lines_of_multi_source_windows_1367():
+    text = edr.compose_report(_load(), {"run_id": "2059624745"})
+    cadence = [line for line in text.splitlines() if line.startswith("  CAM2: rovnomernosť")]
+    assert len(cadence) == 2, text
+    assert all(TAG in line for line in cadence), cadence
+    other = [line for line in text.splitlines() if line.startswith("  CAM3: rovnomernosť")]
+    assert other and not any(TAG in line for line in other), other
+    residual = [line for line in text.splitlines() if "Odchýlky s dôvodmi:" in line]
+    assert len(residual) == 1, text
+    # All 352 residual events of the run fall inside the two CAM2 multiview windows.
+    assert f"352 v multi-source oknách ({TAG})" in residual[0], residual
+
+
+def test_the_fixture_keeps_every_rust_emitted_multi_source_key_1367():
+    ac = _load()["all_cambox_continuity"]
+    judder = ac["cadence_judder_gate"]["multi_source_report_only"]
+    assert judder == ac["cadence_uniformity_gate"]["multi_source_report_only"]
+    assert [set(e) for e in judder] == [
+        {"cambox", "multi_path_suspect_fraction", "paired_fraction", "uniform_fraction", "tag"}
+    ] * 2
+    dup = ac["duplication_masked_cadence"]["multi_source_report_only"]
+    assert [set(e) for e in dup] == [
+        {"cambox", "multi_path_suspect_fraction", "duplicate_fraction", "duplication_masked", "tag"}
+    ] * 2
+    assert len(ac["residual_events"]) == 352
