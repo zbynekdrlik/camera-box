@@ -23,7 +23,7 @@ grandmaster within 0.2 ppm (finding in issue 1372, comment 5845239583).
 | file | change |
 |---|---|
 | `src/vban-pacing.h` | NEW. The pure pacing decision (see below). It has no OBS dependency, and `tests/vban_pacing_parity_1372.rs` compiles it and pins it to `src/vban_pacing.rs`. |
-| `src/vban-output-thread.c` | `vban_out_loop` is paced (details below). `send_packet` and `packet_samples_for` are the 0.3.1 packet code, moved into helpers without changing it. |
+| `src/vban-output-thread.c` | `vban_out_loop` is paced (details below). `send_packet` and `packet_samples_for` are the 0.3.1 packet code, moved into helpers without changing it. `pacing_sleep_until` waits on a Windows high-resolution timer and spins only the last 0.2 ms. The unused `buf_ts_ns` field is removed. |
 | `src/vban-output.c` | Adds the `pacing_target_ms` setting: the "Send Buffer" property (20–200 ms), with a default of 64. |
 | `src/vban-output-internal.h` | Adds `pacing_target_ms` to `struct vban_out_s`. |
 | `data/locale/en-US.ini` | Adds `VBAN.out.prop.pacing_target_ms="Send Buffer"`. |
@@ -49,6 +49,11 @@ How the paced `vban_out_loop` works:
   packet re-anchors the schedule.
 - **Overflow.** Above target + 200 ms, the oldest whole packets are dropped down to the target,
   and `overflows` counts it.
+- **Trim.** After an underflow the re-anchor lands on the audio thread's catch-up backlog. When
+  the minimum depth over a 2 s window stayed above target + max(target / 2, 20 ms), the excess is
+  dropped back to the target (whole packets) and `trims` counts it.
+- **Retarget.** A new target while running moves the schedule later (up) or drops the difference
+  at the next wake (down, a trim). The counters carry on.
 - **Unchanged.** The packet contents and the frame counter are unchanged. The stream is cut into
   the same packets as in 0.3.1: 256 samples, or 239 for 24-bit stereo. The payload bytes and
   `nuFrame` are the same.
@@ -56,12 +61,13 @@ How the paced `vban_out_loop` works:
 ### Log lines (OBS log, prefixed `[obs-vban]` by the plugin macro)
 
 ```
-obs-vban pacing-config: target_ms=64 packet_samples=239 rate=48000 stream='cg'
-obs-vban pacing: depth_ms=… underflows=… overflows=… late_max_ms=… target_ms=64 stream='cg'
+obs-vban pacing-config: target_ms=64 packet_samples=239 rate=48000 counters=reset stream='cg'
+obs-vban pacing: depth_ms=… underflows=… overflows=… late_max_ms=… trims=… target_ms=64 stream='cg'
 ```
 
-The second line comes every 10 s. `underflows` and `overflows` are cumulative since the last
-(re)configuration. `late_max_ms` is the largest send lateness in the window.
+The second line comes every 10 s. `underflows`, `overflows` and `trims` are cumulative since the
+thread started (`counters=reset`); a Send Buffer change logs `counters=kept`. `late_max_ms` is
+the largest send lateness in the window.
 
 ## Re-basing onto a newer upstream
 

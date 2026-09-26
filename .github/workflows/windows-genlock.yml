@@ -1551,7 +1551,7 @@ jobs:
           $thread = (Get-Content "vendor/obs-vban/src/vban-output-thread.c" -Raw) -replace '\s+', ' '
           if ($thread -notmatch [regex]::Escape('#include "vban-pacing.h"')) { Write-Error "vban-output-thread.c no longer includes vban-pacing.h (issue 1372)"; exit 1 }
           if ($thread -notmatch [regex]::Escape('vban_pacing_step(&pacing, now,')) { Write-Error "vban-output-thread.c no longer asks vban_pacing_step what to send (issue 1372)"; exit 1 }
-          if ($thread -notmatch [regex]::Escape('os_sleepto_ns(wake_ns);')) { Write-Error "vban-output-thread.c no longer sleeps to the packet deadline (issue 1372)"; exit 1 }
+          if ($thread -notmatch [regex]::Escape('pacing_sleep_until(&sleeper, wake_ns);')) { Write-Error "vban-output-thread.c no longer sleeps to the packet deadline (issue 1372)"; exit 1 }
           if ($thread -notmatch [regex]::Escape('"obs-vban pacing: depth_ms=%.1f underflows=%"')) { Write-Error "the obs-vban pacing log line is gone (issue 1372)"; exit 1 }
           Write-Output "issue 1372 obs-vban send pacing present - OK"
 

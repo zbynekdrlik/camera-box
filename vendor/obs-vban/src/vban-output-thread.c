@@ -22,6 +22,9 @@
 #include "plugin-macros.generated.h"
 #include "vban.h"
 #include "socket.h"
+#ifdef _WIN32
+#include <windows.h> /* the high-resolution waitable timer of pacing_sleep_until() */
+#endif
 #include "vban-output-internal.h"
 #include "resolve-thread.h"
 #include "vban-pacing.h"
@@ -38,7 +41,6 @@ struct output_thread_s
 	audio_resampler_t *resampler;
 
 	struct darray buffer;
-	uint64_t buf_ts_ns;
 
 	socket_t vban_socket;
 };
@@ -269,6 +271,65 @@ static size_t packet_samples_for(size_t sample_size)
 	return nbs > 256 ? 256 : nbs;
 }
 
+/* camera-box issue 1372: sleep to a deadline on the os_gettime_ns() clock. os_sleepto_ns() alone
+ * sleeps (ms - 1) and then spins up to ~2 ms with YieldProcessor() -- about a third of a core at a
+ * packet every 4.98 ms. On Windows a high-resolution waitable timer takes the thread to
+ * PACING_SPIN_NS before the deadline, and os_sleepto_ns() spins only that last stretch. A timer
+ * that cannot be created (older Windows) falls back to os_sleepto_ns() alone, logged once. */
+#define PACING_SPIN_NS 200000ULL
+#ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION
+#define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x00000002
+#endif
+
+struct pacing_sleeper {
+#ifdef _WIN32
+	HANDLE timer;
+#else
+	int unused;
+#endif
+};
+
+static void pacing_sleeper_init(struct pacing_sleeper *s)
+{
+#ifdef _WIN32
+	s->timer = CreateWaitableTimerExW(NULL, NULL, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
+	if (!s->timer)
+		blog(LOG_WARNING, "obs-vban pacing-sleep: no high-resolution timer (error %lu), os_sleepto_ns only",
+		     (unsigned long)GetLastError());
+#else
+	s->unused = 0;
+#endif
+}
+
+static void pacing_sleep_until(struct pacing_sleeper *s, uint64_t deadline_ns)
+{
+#ifdef _WIN32
+	if (s->timer) {
+		const uint64_t now = os_gettime_ns();
+		if (deadline_ns > now + PACING_SPIN_NS) {
+			LARGE_INTEGER due;
+			/* relative, in 100 ns units */
+			due.QuadPart = -(LONGLONG)((deadline_ns - PACING_SPIN_NS - now) / 100);
+			if (SetWaitableTimer(s->timer, &due, 0, NULL, NULL, FALSE))
+				WaitForSingleObject(s->timer, INFINITE);
+		}
+	}
+#else
+	(void)s;
+#endif
+	os_sleepto_ns(deadline_ns);
+}
+
+static void pacing_sleeper_free(struct pacing_sleeper *s)
+{
+#ifdef _WIN32
+	if (s->timer)
+		CloseHandle(s->timer);
+#else
+	(void)s;
+#endif
+}
+
 static void free_blocks(struct darray *blocks)
 {
 	struct audio_data *b = blocks->array;
@@ -282,8 +343,9 @@ static void free_blocks(struct darray *blocks)
 /* camera-box issue 1372: the send thread is paced. Every audio block is converted into the jitter
  * buffer (t.buffer) the moment it arrives, and vban_pacing_step() (vban-pacing.h) decides when and
  * how many packets leave: packet n at t0 + n * packet_duration on the disciplined os_gettime_ns(),
- * every due packet per wake, an underflow waited out (no zero-fill), an overflow dropped from the
- * oldest, both counted. The thread sleeps to the next deadline with os_sleepto_ns(). */
+ * every due packet per wake, an underflow waited out (no zero-fill), an overflow or a sustained
+ * excess dropped from the oldest, all counted. The thread sleeps to the next deadline with
+ * pacing_sleep_until(). */
 static void vban_out_loop(struct vban_out_s *v)
 {
 	char vban_buf[VBAN_PROTOCOL_MAX_SIZE];
@@ -309,13 +371,16 @@ static void vban_out_loop(struct vban_out_s *v)
 	uint64_t wake_ns = 0;
 	uint64_t next_log_ns = 0;
 
+	struct pacing_sleeper sleeper;
+	pacing_sleeper_init(&sleeper);
+
 	while (v->cont) {
 		// copy of properties
 		struct sockaddr_in addr;
 		addr.sin_family = AF_INET;
 
 		if (wake_ns)
-			os_sleepto_ns(wake_ns);
+			pacing_sleep_until(&sleeper, wake_ns);
 		else
 			os_event_timedwait(v->event, VBAN_PACING_IDLE_WAIT_MS);
 
@@ -350,14 +415,24 @@ static void vban_out_loop(struct vban_out_s *v)
 		size_t nbs = packet_samples_for(sample_size);
 
 		const uint64_t now = os_gettime_ns();
-		if (!pacing_ready || pacing.packet_samples != (uint32_t)nbs || pacing_target_ms != target_ms) {
+		if (!pacing_ready || pacing.packet_samples != (uint32_t)nbs) {
+			/* a fresh schedule: the thread's start (the packet size only changes with a restart) */
 			vban_pacing_init(&pacing, target_ms, (uint32_t)nbs, (uint32_t)t.frequency_vban);
 			pacing_ready = true;
 			pacing_target_ms = target_ms;
 			next_log_ns = now + VBAN_PACING_LOG_INTERVAL_NS;
 			blog(LOG_INFO,
 			     "obs-vban pacing-config: target_ms=%" PRIu32 " packet_samples=%" PRIu32 " rate=%" PRIu32
-			     " stream='%.*s'",
+			     " counters=reset stream='%.*s'",
+			     pacing.target_ms, pacing.packet_samples, pacing.rate, (int)VBAN_STREAM_NAME_SIZE,
+			     t.header->streamname);
+		} else if (pacing_target_ms != target_ms) {
+			/* a new Send Buffer value: move the schedule, keep the counters */
+			vban_pacing_retarget(&pacing, target_ms);
+			pacing_target_ms = target_ms;
+			blog(LOG_INFO,
+			     "obs-vban pacing-config: target_ms=%" PRIu32 " packet_samples=%" PRIu32 " rate=%" PRIu32
+			     " counters=kept stream='%.*s'",
 			     pacing.target_ms, pacing.packet_samples, pacing.rate, (int)VBAN_STREAM_NAME_SIZE,
 			     t.header->streamname);
 		}
@@ -380,9 +455,9 @@ static void vban_out_loop(struct vban_out_s *v)
 			const uint64_t late_ns = vban_pacing_take_late_max_ns(&pacing);
 			blog(LOG_INFO,
 			     "obs-vban pacing: depth_ms=%.1f underflows=%" PRIu64 " overflows=%" PRIu64
-			     " late_max_ms=%.3f target_ms=%" PRIu32 " stream='%.*s'",
+			     " late_max_ms=%.3f trims=%" PRIu64 " target_ms=%" PRIu32 " stream='%.*s'",
 			     (double)depth_samples * 1000.0 / (double)pacing.rate, pacing.underflows, pacing.overflows,
-			     (double)late_ns / 1000000.0, pacing.target_ms, (int)VBAN_STREAM_NAME_SIZE,
+			     (double)late_ns / 1000000.0, pacing.trims, pacing.target_ms, (int)VBAN_STREAM_NAME_SIZE,
 			     t.header->streamname);
 			next_log_ns = now + VBAN_PACING_LOG_INTERVAL_NS;
 		}
@@ -394,6 +469,7 @@ static void vban_out_loop(struct vban_out_s *v)
 		audio_resampler_destroy(t.resampler);
 	free_blocks(&blocks);
 	darray_free(&blocks);
+	pacing_sleeper_free(&sleeper);
 	closesocket(t.vban_socket);
 	darray_free(&t.buffer);
 }

@@ -14,6 +14,12 @@
  *    or fabricated (no zero-fill), underflows counts it, and the next full packet re-anchors.
  *  - Overflow: more than target + 200 ms buffered drops the oldest whole packets down to the
  *    target, and overflows counts it.
+ *  - Trim: a re-anchor after an underflow lands on top of the audio thread's catch-up backlog, so
+ *    the depth would stay at target + backlog for good. While running, the minimum depth after
+ *    each wake is tracked over a 2 s window; when it stayed above target + max(target / 2, 20 ms)
+ *    the excess is dropped back to the target (whole packets) and trims counts it.
+ *  - Retarget: a new target while running moves the schedule later (up) or drops the difference
+ *    at the next wake (down, counted as a trim); the counters carry on.
  *
  * Pure: no OBS dependency. The Tier-0 authority is src/vban_pacing.rs in camera-box, and
  * tests/vban_pacing_parity_1372.rs compiles THIS header and requires identical decisions.
@@ -29,6 +35,8 @@
 #define VBAN_PACING_TARGET_MS_MIN 20
 #define VBAN_PACING_TARGET_MS_MAX 200
 #define VBAN_PACING_OVERFLOW_HEADROOM_MS 200ULL
+#define VBAN_PACING_TRIM_WINDOW_NS 2000000000ULL
+#define VBAN_PACING_TRIM_HYSTERESIS_MIN_MS 20ULL
 #define VBAN_PACING_LOG_INTERVAL_NS 10000000000ULL
 /* Wait for audio with this timeout while no deadline is scheduled (priming, after an underflow). */
 #define VBAN_PACING_IDLE_WAIT_MS 10
@@ -39,6 +47,7 @@ struct vban_pacing {
 	uint64_t target_ns;
 	uint64_t target_samples;
 	uint64_t overflow_samples;
+	uint64_t trim_threshold_samples; /* a running window whose minimum stays above is trimmed */
 	uint32_t packet_samples;
 	uint32_t rate;
 	bool running;
@@ -49,7 +58,11 @@ struct vban_pacing {
 	uint64_t underflows;
 	uint64_t overflows;
 	uint64_t late_max_ns;
-	uint64_t trims;
+	uint64_t trims; /* sustained-excess and retarget drops */
+	bool win_open;
+	uint64_t win_start_ns;
+	uint64_t win_min_samples;
+	uint64_t pending_trim_samples; /* dropped at the very next wake after a lower target */
 };
 
 struct vban_pacing_step {
@@ -84,17 +97,23 @@ static inline uint64_t vban_pacing_ms_to_samples(uint64_t ms, uint32_t rate)
 	return ms * r / 1000;
 }
 
+static inline void vban_pacing_set_target(struct vban_pacing *p, uint32_t target_ms)
+{
+	uint64_t hysteresis_ms = (uint64_t)target_ms / 2;
+	if (hysteresis_ms < VBAN_PACING_TRIM_HYSTERESIS_MIN_MS)
+		hysteresis_ms = VBAN_PACING_TRIM_HYSTERESIS_MIN_MS;
+	p->target_ms = target_ms;
+	p->target_ns = (uint64_t)target_ms * 1000000ULL;
+	p->target_samples = vban_pacing_ms_to_samples(target_ms, p->rate);
+	p->overflow_samples = p->target_samples + vban_pacing_ms_to_samples(VBAN_PACING_OVERFLOW_HEADROOM_MS, p->rate);
+	p->trim_threshold_samples = p->target_samples + vban_pacing_ms_to_samples(hysteresis_ms, p->rate);
+}
+
 static inline void vban_pacing_init(struct vban_pacing *p, int64_t target_ms, uint32_t packet_samples,
 				    uint32_t rate)
 {
-	const uint32_t t = vban_pacing_clamp_target_ms(target_ms);
-	const uint32_t r = rate ? rate : 1;
-	p->target_ms = t;
-	p->target_ns = (uint64_t)t * 1000000ULL;
-	p->target_samples = vban_pacing_ms_to_samples(t, r);
-	p->overflow_samples = p->target_samples + vban_pacing_ms_to_samples(VBAN_PACING_OVERFLOW_HEADROOM_MS, r);
 	p->packet_samples = packet_samples ? packet_samples : 1;
-	p->rate = r;
+	p->rate = rate ? rate : 1;
 	p->running = false;
 	p->primed = false;
 	p->prime_ns = 0;
@@ -104,13 +123,30 @@ static inline void vban_pacing_init(struct vban_pacing *p, int64_t target_ms, ui
 	p->overflows = 0;
 	p->late_max_ns = 0;
 	p->trims = 0;
+	p->win_open = false;
+	p->win_start_ns = 0;
+	p->win_min_samples = 0;
+	p->pending_trim_samples = 0;
+	vban_pacing_set_target(p, vban_pacing_clamp_target_ms(target_ms));
 }
 
-/* A new target while the output runs (RED stub: ignored). */
+/* A new target (an output setting value) while the output exists. Running: a higher target moves
+ * the schedule later by the difference, a lower one drops the difference at the next wake. Not
+ * running: the anchor simply uses the new target. The counters carry on. */
 static inline void vban_pacing_retarget(struct vban_pacing *p, int64_t target_ms)
 {
-	(void)p;
-	(void)target_ms;
+	const uint32_t new_ms = vban_pacing_clamp_target_ms(target_ms);
+	if (new_ms == p->target_ms)
+		return;
+	const uint32_t old_ms = p->target_ms;
+	vban_pacing_set_target(p, new_ms);
+	if (p->running) {
+		if (new_ms > old_ms)
+			p->t0_ns += (uint64_t)(new_ms - old_ms) * 1000000ULL;
+		else
+			p->pending_trim_samples += vban_pacing_ms_to_samples(old_ms - new_ms, p->rate);
+	}
+	p->win_open = false;
 }
 
 /* The deadline of packet n of the current schedule. */
@@ -131,6 +167,7 @@ static inline struct vban_pacing_step vban_pacing_step(struct vban_pacing *p, ui
 		d.drop_samples = excess - excess % ps;
 		avail -= d.drop_samples;
 		p->overflows++;
+		p->win_open = false;
 	}
 
 	if (!p->running) {
@@ -148,6 +185,26 @@ static inline struct vban_pacing_step vban_pacing_step(struct vban_pacing *p, ui
 		p->running = true;
 		p->t0_ns = start;
 		p->n_sent = 0;
+		p->win_open = false;
+	} else if (p->pending_trim_samples > 0) {
+		uint64_t t = p->pending_trim_samples < avail ? p->pending_trim_samples : avail;
+		t -= t % ps;
+		avail -= t;
+		d.drop_samples += t;
+		p->pending_trim_samples = 0;
+		if (t > 0)
+			p->trims++;
+		p->win_open = false;
+	} else if (p->win_open && now_ns >= p->win_start_ns &&
+		   now_ns - p->win_start_ns >= VBAN_PACING_TRIM_WINDOW_NS) {
+		if (p->win_min_samples > p->trim_threshold_samples) {
+			const uint64_t excess = p->win_min_samples - p->target_samples;
+			const uint64_t t = excess - excess % ps;
+			avail -= t;
+			d.drop_samples += t;
+			p->trims++;
+		}
+		p->win_open = false;
 	}
 
 	uint64_t deadline = vban_pacing_deadline_ns(p, p->n_sent);
@@ -156,6 +213,7 @@ static inline struct vban_pacing_step vban_pacing_step(struct vban_pacing *p, ui
 			p->running = false;
 			p->primed = false;
 			p->underflows++;
+			p->win_open = false;
 			d.wake_ns = 0;
 			return d;
 		}
@@ -165,6 +223,15 @@ static inline struct vban_pacing_step vban_pacing_step(struct vban_pacing *p, ui
 		d.send++;
 		p->n_sent++;
 		deadline = vban_pacing_deadline_ns(p, p->n_sent);
+	}
+
+	if (p->win_open) {
+		if (avail < p->win_min_samples)
+			p->win_min_samples = avail;
+	} else {
+		p->win_open = true;
+		p->win_start_ns = now_ns;
+		p->win_min_samples = avail;
 	}
 	d.wake_ns = deadline;
 	return d;

@@ -18,6 +18,13 @@
 //!   sent or fabricated (no zero-fill), `underflows` counts it, and the next full packet re-anchors.
 //! * **Overflow.** More than `target + 200 ms` buffered drops the oldest whole packets down to the
 //!   target, and `overflows` counts it.
+//! * **Trim.** A re-anchor after an underflow lands on top of the audio thread's catch-up
+//!   backlog, so the depth would stay at target + backlog for good. While running, the minimum
+//!   depth after each wake is tracked over a 2 s window; when that minimum stayed above
+//!   `target + max(target / 2, 20 ms)` the excess is dropped back to the target (whole packets)
+//!   and `trims` counts it. Ordinary jitter never reaches the threshold.
+//! * **Retarget.** A new target while running moves the schedule later (up) or drops the
+//!   difference at the next wake (down, counted as a trim); the counters carry on.
 //!
 //! The C twin is `vendor/obs-vban/src/vban-pacing.h`; `tests/vban_pacing_parity_1372.rs` compiles
 //! the shipped header and requires identical decisions. Packet contents and the VBAN frame
@@ -83,6 +90,8 @@ pub struct Pacing {
     pub target_ns: u64,
     pub target_samples: u64,
     pub overflow_samples: u64,
+    /// A running window whose minimum depth stays above this is trimmed back to the target.
+    pub trim_threshold_samples: u64,
     pub packet_samples: u32,
     pub rate: u32,
     pub running: bool,
@@ -93,26 +102,26 @@ pub struct Pacing {
     pub underflows: u64,
     pub overflows: u64,
     pub late_max_ns: u64,
-    /// Sustained-excess and retarget drops (RED stub: never counted).
+    /// Sustained-excess and retarget drops.
     pub trims: u64,
-    /// A running window whose minimum depth stays above this is trimmed back to the target.
-    pub trim_threshold_samples: u64,
+    pub win_open: bool,
+    pub win_start_ns: u64,
+    pub win_min_samples: u64,
+    /// Samples to drop at the very next wake after a lower target (set only while running, so
+    /// the next wake is a running one and always consumes it).
+    pub pending_trim_samples: u64,
 }
 
 impl Pacing {
     pub fn new(target_ms: i64, packet_samples: u32, rate: u32) -> Self {
-        let target_ms = clamp_target_ms(target_ms);
-        let rate = rate.max(1);
-        let target_samples = ms_to_samples(u64::from(target_ms), rate);
-        Pacing {
-            target_ms,
-            target_ns: u64::from(target_ms) * 1_000_000,
-            target_samples,
-            overflow_samples: target_samples + ms_to_samples(OVERFLOW_HEADROOM_MS, rate),
-            trim_threshold_samples: target_samples
-                + ms_to_samples((u64::from(target_ms) / 2).max(TRIM_HYSTERESIS_MIN_MS), rate),
+        let mut p = Pacing {
+            target_ms: 0,
+            target_ns: 0,
+            target_samples: 0,
+            overflow_samples: 0,
+            trim_threshold_samples: 0,
             packet_samples: packet_samples.max(1),
-            rate,
+            rate: rate.max(1),
             running: false,
             primed: false,
             prime_ns: 0,
@@ -122,11 +131,44 @@ impl Pacing {
             overflows: 0,
             late_max_ns: 0,
             trims: 0,
-        }
+            win_open: false,
+            win_start_ns: 0,
+            win_min_samples: 0,
+            pending_trim_samples: 0,
+        };
+        p.set_target(clamp_target_ms(target_ms));
+        p
     }
 
-    /// A new target while the output runs (RED stub: ignored).
-    pub fn retarget(&mut self, _target_ms: i64) {}
+    fn set_target(&mut self, target_ms: u32) {
+        self.target_ms = target_ms;
+        self.target_ns = u64::from(target_ms) * 1_000_000;
+        self.target_samples = ms_to_samples(u64::from(target_ms), self.rate);
+        self.overflow_samples =
+            self.target_samples + ms_to_samples(OVERFLOW_HEADROOM_MS, self.rate);
+        let hysteresis_ms = (u64::from(target_ms) / 2).max(TRIM_HYSTERESIS_MIN_MS);
+        self.trim_threshold_samples = self.target_samples + ms_to_samples(hysteresis_ms, self.rate);
+    }
+
+    /// A new target (an output setting value) while the output exists. Running: a higher target
+    /// moves the schedule later by the difference, a lower one drops the difference at the next
+    /// wake. Not running: the anchor simply uses the new target. The counters carry on.
+    pub fn retarget(&mut self, target_ms: i64) {
+        let new_ms = clamp_target_ms(target_ms);
+        if new_ms == self.target_ms {
+            return;
+        }
+        let old_ms = self.target_ms;
+        self.set_target(new_ms);
+        if self.running {
+            if new_ms > old_ms {
+                self.t0_ns += u64::from(new_ms - old_ms) * 1_000_000;
+            } else {
+                self.pending_trim_samples += ms_to_samples(u64::from(old_ms - new_ms), self.rate);
+            }
+        }
+        self.win_open = false;
+    }
 
     /// The deadline of packet `n` of the current schedule.
     pub fn deadline_ns(&self, n: u64) -> u64 {
@@ -144,6 +186,7 @@ impl Pacing {
             d.drop_samples = excess - excess % ps;
             avail -= d.drop_samples;
             self.overflows += 1;
+            self.win_open = false;
         }
 
         if !self.running {
@@ -162,6 +205,26 @@ impl Pacing {
             self.running = true;
             self.t0_ns = start;
             self.n_sent = 0;
+            self.win_open = false;
+        } else if self.pending_trim_samples > 0 {
+            let mut t = self.pending_trim_samples.min(avail);
+            t -= t % ps;
+            avail -= t;
+            d.drop_samples += t;
+            self.pending_trim_samples = 0;
+            if t > 0 {
+                self.trims += 1;
+            }
+            self.win_open = false;
+        } else if self.win_open && now_ns.saturating_sub(self.win_start_ns) >= TRIM_WINDOW_NS {
+            if self.win_min_samples > self.trim_threshold_samples {
+                let excess = self.win_min_samples - self.target_samples;
+                let t = excess - excess % ps;
+                avail -= t;
+                d.drop_samples += t;
+                self.trims += 1;
+            }
+            self.win_open = false;
         }
 
         let mut deadline = self.deadline_ns(self.n_sent);
@@ -170,6 +233,7 @@ impl Pacing {
                 self.running = false;
                 self.primed = false;
                 self.underflows += 1;
+                self.win_open = false;
                 d.wake_ns = 0;
                 return d;
             }
@@ -178,6 +242,14 @@ impl Pacing {
             d.send += 1;
             self.n_sent += 1;
             deadline = self.deadline_ns(self.n_sent);
+        }
+
+        if self.win_open {
+            self.win_min_samples = self.win_min_samples.min(avail);
+        } else {
+            self.win_open = true;
+            self.win_start_ns = now_ns;
+            self.win_min_samples = avail;
         }
         d.wake_ns = deadline;
         d

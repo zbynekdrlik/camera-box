@@ -221,6 +221,12 @@ fn trim_and_retarget_script() -> Script {
     ] {
         next = bld.wake(next, 6_000, rt).wake_ns;
     }
+    // A whole window whose minimum sits exactly ON the threshold: never trimmed.
+    let on = bld.p.trim_threshold_samples + u64::from(bld.p.packet_samples);
+    let until = next + TRIM_WINDOW_NS + 100_000_000;
+    while next < until {
+        next = bld.wake(next, on, None).wake_ns;
+    }
     bld.script(64, 239, 48_000)
 }
 
@@ -257,7 +263,7 @@ const NS_INPUTS: [(u64, u32); 7] = [
 
 fn line(p: &Pacing, send: u32, drop: u64, wake: u64) -> String {
     format!(
-        "{send} {drop} {wake} {} {} {} {} {} {} {} {} {} {} {}",
+        "{send} {drop} {wake} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {}",
         u8::from(p.running),
         u8::from(p.primed),
         p.prime_ns,
@@ -268,7 +274,11 @@ fn line(p: &Pacing, send: u32, drop: u64, wake: u64) -> String {
         p.late_max_ns,
         p.trims,
         p.target_ms,
-        p.target_samples
+        p.target_samples,
+        u8::from(p.win_open),
+        p.win_start_ns,
+        p.win_min_samples,
+        p.pending_trim_samples
     )
 }
 
@@ -314,9 +324,10 @@ fn c_driver(scripts: &[Script]) -> String {
     writeln!(
         c,
         "static void line(const struct vban_pacing *p, struct vban_pacing_step s)\n{{\n\
-         \tprintf(\"%\" PRIu32 \" %\" PRIu64 \" %\" PRIu64 \" %d %d %\" PRIu64 \" %\" PRIu64 \" %\" PRIu64 \" %\" PRIu64 \" %\" PRIu64 \" %\" PRIu64 \" %\" PRIu64 \" %\" PRIu32 \" %\" PRIu64 \"\\n\",\n\
+         \tprintf(\"%\" PRIu32 \" %\" PRIu64 \" %\" PRIu64 \" %d %d %\" PRIu64 \" %\" PRIu64 \" %\" PRIu64 \" %\" PRIu64 \" %\" PRIu64 \" %\" PRIu64 \" %\" PRIu64 \" %\" PRIu32 \" %\" PRIu64 \" %d %\" PRIu64 \" %\" PRIu64 \" %\" PRIu64 \"\\n\",\n\
          \t       s.send, s.drop_samples, s.wake_ns, p->running ? 1 : 0, p->primed ? 1 : 0, p->prime_ns, p->t0_ns,\n\
-         \t       p->n_sent, p->underflows, p->overflows, p->late_max_ns, p->trims, p->target_ms, p->target_samples);\n}}"
+         \t       p->n_sent, p->underflows, p->overflows, p->late_max_ns, p->trims, p->target_ms, p->target_samples,\n\
+         \t       p->win_open ? 1 : 0, p->win_start_ns, p->win_min_samples, p->pending_trim_samples);\n}}"
     )
     .unwrap();
     writeln!(
@@ -549,7 +560,8 @@ fn the_paced_obs_vban_is_built_staged_and_wired_1372() {
     for needle in [
         "#include \"vban-pacing.h\"",
         "vban_pacing_step(&pacing, now,",
-        "os_sleepto_ns(wake_ns);",
+        "pacing_sleep_until(&sleeper, wake_ns);",
+        "os_sleepto_ns(deadline_ns);",
         "\"obs-vban pacing: depth_ms=%.1f underflows=%\"",
     ] {
         assert!(
