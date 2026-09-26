@@ -201,6 +201,10 @@ is stepped at once. New `/status` fields (after `date_step_phase_jump_us`):
 
 The rules:
 
+- **Where it lives.** The daily grading is its own lib, `scripts/lib/dantesync-date-daily.sh`,
+  sourced by `dantesync-clock-discipline.sh`, which does the routing. Every consumer of
+  `clock-offset-guard.sh` gets it unchanged. The split keeps the clock-discipline lib under the
+  ~1000-line budget as correction modes accumulate. The next mode also goes into its own lib.
 - **Decide the mode FIRST.** A 1.12.0 master still serializes `date_correction_falling_behind`
   (serde default, always false in daily mode). So the micro-capability test alone would grade it
   on the 5 ms micro bound and fail every healthy master. `date_master_mode_class STATUS` (python
@@ -231,10 +235,11 @@ The rules:
   - **Test gotcha:** the wrapper reads the clock as `date +%s 2>/dev/null`, so the probe must write
     a marker FILE; a probe that writes to stderr is silenced by the wrapper and proves nothing.
 - **Bound + lines.** `date_master_effective_bound_us` gives a daily master
-  `max(base, daily*1000 + margin)` = 3001000 us. The gate prints `date master graded on its daily
-  bound`. It also takes that bound when a daily master's verdict is `unknown` (an unreadable
-  schedule), so the median of a day's drift reads UNKNOWN (11), never a false DRIFT on the #1021
-  widening. `date_master_check` prints the daily lines:
+  `max(base, daily*1000 + margin)` = 3001000 us, and so does a master with an UNKNOWN mode (a newer
+  release). The gate prints `date master graded on its daily bound`. It takes that bound whenever
+  the mode is not `other`, including when the verdict is `unknown` (an unreadable schedule or an
+  unknown mode). So the median of a day's drift reads UNKNOWN (11), never a false DRIFT (20) on
+  the #1021 widening (review round 1, reproduced). `date_master_check` prints the daily lines:
   - OK: the error, the next window, and the last step or the NOTE;
   - OUT (rc 2) / UNKNOWN (rc 3): the reasons from `_date_daily_problems`, which reads the SAME
     states as the verdict.
@@ -248,9 +253,27 @@ The rules:
 
   The journal path grades the journal MEDIAN, not the `/status` error field, so the error clause
   is not in it. `dantesync_journal_date_note` names each grade.
-- **Known limit (from the dantesync source):** a night whose estimated error sits inside
-  dantesync's own dead band (`NoStep`) does not update the last step. On the rig's drift this does
-  not happen; if it ever did, the 26 h rule would read OUT for up to a day.
+- **Known limits (from the dantesync source):**
+  - **02:00 UTC window.** `date_daily_next_utc` is the OPEN window while it has not stepped yet.
+    From the window start until the step is announced, a healthy master reads OUT
+    (`next nightly window X is open and has not stepped yet`). That is a few seconds normally, and
+    up to 30 min when dantesync has no fresh UTC reading.
+    - An E2E `[0/8]` run that lands exactly then refuses. Re-run it after the step.
+    - Never widen the bound to hide this: a window still open is a scheduler that has not stepped.
+  - **NoStep night.** A night whose estimated error sits inside dantesync's own dead band does not
+    update the last step. On the rig's drift this does not happen; if it ever did, the 26 h rule
+    would read OUT for up to a day.
+- **Parity traps fixed in review round 1** (both have table rows):
+  - A window before 1970 is `unknown` on both twins. Python refuses a negative epoch; the bash
+    regex refuses it.
+  - A JSON `-0` last step is the integer 0 on both twins, which reads stale. python's json reads
+    it as 0, so bash maps `-0` to 0.
+- **Process: the pin bump comes before the roll.** The pin is 1.12.0 before the fleet is rolled. So
+  the version gate names every 1.11.1 node, and every E2E refuses until the roll. The order:
+  1. canary-first roll with `dantesync-fleet-upgrade.sh`;
+  2. `gh run rerun` the PR's E2E;
+  3. merge;
+  4. replace the synthesized fixtures with live captures.
 - **Fixtures:** `strih-lx-master-1.12.0.json` / `stream-slave-1.12.0.json` are SYNTHESIZED from the
   1.11.1 captures plus the four fields in `src/status.rs` order (master: error 412.5 ms, next
   2026-09-28T02:00:00Z, last step at 2026-09-27T02:00:00Z, -1523.4 ms). Replace them with live
