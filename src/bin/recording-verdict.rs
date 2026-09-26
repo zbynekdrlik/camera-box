@@ -5435,11 +5435,21 @@ fn build_and_print_verdict_with_stream_diffs(
                     );
                 }
                 println!(
-                    "  >>> {}",
+                    "  >>> {}{}",
                     if seg.overall_pass {
                         "ALL camboxes CONTINUITY-CLEAN across their program windows."
                     } else {
                         "NOT clean: one or more cambox windows FAILED (see per-cambox above)."
+                    },
+                    // Issue 1367: never let "CONTINUITY-CLEAN" read as "zero copies" when a
+                    // multi-source window passed on its node burn.
+                    if seg.windows_multi_source > 0 {
+                        format!(
+                            " ({} multi-source window(s) judged by their node burn, #1367)",
+                            seg.windows_multi_source
+                        )
+                    } else {
+                        String::new()
                     }
                 );
                 let mut seg_json = serde_json::to_value(&seg).unwrap_or(serde_json::Value::Null);
@@ -6064,12 +6074,14 @@ fn build_and_print_verdict_with_stream_diffs(
                         let seq =
                             camera_box::dup_cadence::window_prev_mads(&win_idxs, &frame_prev_mads);
                         let dc = camera_box::dup_cadence::measure_dup_cadence(&seq);
-                        if let (Some(d), true) = (dc.as_ref(), dup_gates_window) {
+                        if let Some(ref d) = dc {
+                            // The raw worst stays a whole-run DIAGNOSTIC (every window); only the
+                            // masked count, which gates, skips a multi-source window (issue 1367).
                             worst_raw_fraction = Some(
                                 worst_raw_fraction
                                     .map_or(d.duplicate_fraction, |m| m.max(d.duplicate_fraction)),
                             );
-                            if d.duplication_masked {
+                            if d.duplication_masked && dup_gates_window {
                                 masked_windows += 1;
                             }
                         }

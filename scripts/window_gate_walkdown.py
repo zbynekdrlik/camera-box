@@ -35,6 +35,10 @@ def summarize_verdict(verdict):
     cu = c.get("cadence_uniformity_gate", {}) or {}
     per_cam = {}
     for seg in c.get("segments", []) or []:
+        # issue 1367: a MULTI-SOURCE window (a camera filming an OBS multiview) is judged by its
+        # node burn; its copies/gaps are not the genlock-FIFO residual this walk-down measures.
+        if isinstance(seg.get("multi_source"), dict):
+            continue
         pc = seg.get("presentation_cadence") or {}
         beat = pc.get("beat_corrected_uniform_fraction")
         per_cam.setdefault(seg.get("cambox", "?"), []).append(

@@ -450,9 +450,16 @@ def _section_presentation_cadence(verdict):
         total = pc.get("sample_deltas", 0)
         cam = seg.get("cambox", "?")
         pct = f"{score * 100:.0f}%" if score is not None else "N/A"
+        # Issue 1367: a multi-source window's cadence is report-only (judged by its node burn).
+        ms = seg.get("multi_source")
+        ms_note = (
+            f" — {ms.get('tag') or MULTI_SOURCE_TAG}, "
+            f"{_fmt_fraction(ms.get('multi_path_suspect_fraction'))}"
+            if isinstance(ms, dict) else ""
+        )
         lines.append(
             f"  {cam}: rovnomernosť {pct} ({dup} zdvojených z {total} snímok, {paired} "
-            f"spárovaných udalostí 'drž a dobehni' — signatúra '15fps' pri 30fps plátne)"
+            f"spárovaných udalostí 'drž a dobehni' — signatúra '15fps' pri 30fps plátne){ms_note}"
         )
     return "\n".join(lines)
 
@@ -710,9 +717,12 @@ def _section_residual_events(verdict):
                 events.extend(seg.get("residual_events") or [])
     with_reason = sum(1 for e in events if isinstance(e, dict) and e.get("reason"))
     open_count = len(events) - with_reason
+    # Issue 1367: name how many of them sit inside a multi-source window (report-only there).
+    in_ms = _events_in_multi_source_windows(verdict, events)
+    ms_note = f", z toho {in_ms} v multi-source oknách ({MULTI_SOURCE_TAG})" if in_ms else ""
     return (
         "**Odchýlky s dôvodmi (#707 forenzný rozbor)**\n"
-        f"  Odchýlky s dôvodmi: {with_reason} s dôkazmi / {open_count} otvorených"
+        f"  Odchýlky s dôvodmi: {with_reason} s dôkazmi / {open_count} otvorených{ms_note}"
     )
 
 
@@ -840,6 +850,26 @@ def _multi_source_windows(verdict):
 
 def _fmt_fraction(f):
     return f"{f:.2f}" if isinstance(f, (int, float)) else "?"
+
+
+def _events_in_multi_source_windows(verdict, events):
+    """Issue 1367 — how many residual events fall inside a multi-source window (same cambox,
+    `start_ns <= gen_ts_ns < end_ns`). 0 when there is no such window or no usable timestamps."""
+    windows = [
+        s for s in (_g(verdict, "all_cambox_continuity", "segments", default=[]) or [])
+        if isinstance(s, dict) and isinstance(s.get("multi_source"), dict)
+        and isinstance(s.get("start_ns"), int) and isinstance(s.get("end_ns"), int)
+    ]
+    count = 0
+    for e in events or []:
+        if not isinstance(e, dict) or not isinstance(e.get("gen_ts_ns"), int):
+            continue
+        if any(
+            e.get("cambox") == s.get("cambox") and s["start_ns"] <= e["gen_ts_ns"] < s["end_ns"]
+            for s in windows
+        ):
+            count += 1
+    return count
 
 
 def _multi_source_summary(verdict):
