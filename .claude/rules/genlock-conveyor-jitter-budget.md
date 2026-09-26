@@ -27,6 +27,10 @@ The constant lives in exactly TWO arithmetic copies kept byte-parallel (the #120
   the `budget` line in `genlock_phase_converge_due`.
 - `src/probe/genlock.rs` `ReleaseCadence::should_converge_phase` is a pure DELEGATOR (no
   arithmetic) — it inherits the change automatically, do NOT edit it.
+- Issue 1367 (ROZHODNUTÉ 5842640404): the SAME constant also budgets the shallow N==1 latch
+  (`n1_shallow_latch_floor_frames` / `genlock_n1_shallow_latch_floor_frames`, the receive-time
+  arrival lag + budget, rounded up). Changing it moves which shallow feeds latch one frame deeper —
+  re-run the shallow A/V bench and see `genlock-n1-pin-derived-depth.md`.
 
 **When you change the C threshold, the parity gate MUST lift the new `#define`.** The C↔Rust gate
 `c_phase_convergence_matches_the_rust_authority_1049` (`tests/genlock_relock_selection_parity.rs`)
