@@ -30,6 +30,8 @@ use cpp_source::{body_of, squish, strip_cpp_comments};
 
 const DOCK_OUTPUT: &str = "vendor/av-sync-dock/src/sync-test-output.cpp";
 const SELFTEST: &str = "vendor/av-sync-dock/test/audio-worker-selftest.cpp";
+const AUDIO_HEADER: &str = "vendor/av-sync-dock/src/camera-box-audio.hpp";
+const DOCK_UI: &str = "vendor/av-sync-dock/src/sync-test-dock.cpp";
 
 fn manifest(rel: &str) -> PathBuf {
     [env!("CARGO_MANIFEST_DIR"), rel].iter().collect()
@@ -177,14 +179,26 @@ fn the_audio_worker_decodes_the_copy_and_resets_on_a_gap() {
              stitch two stretches of audio into a false marker"
         );
     }
+    let forget = body_of(
+        &src,
+        "static void cb_audio_forget_lock(struct sync_test_output *st)",
+    );
+    for need in [
+        "st->cb_lock_audit = camerabox::CbLockAuditTracker();",
+        "signal_lock_state_changed(st->context, false);",
+    ] {
+        assert!(
+            forget.contains(need),
+            "{DOCK_OUTPUT}: cb_audio_forget_lock no longer has `{need}` (issue 1381)"
+        );
+    }
     let end = body_of(
         &src,
         "static void st_audio_session_end(struct sync_test_output *st, unsigned reason)",
     );
     for need in [
         "if (st->cb_audio_dec) st->cb_audio_dec->reset_window();",
-        "st->cb_lock_audit = camerabox::CbLockAuditTracker();",
-        "signal_lock_state_changed(st->context, false);",
+        "cb_audio_forget_lock(st);",
         "signal_stale_changed(st->context, true);",
         "st->cb_audio_paused = true;",
     ] {
@@ -197,9 +211,12 @@ fn the_audio_worker_decodes_the_copy_and_resets_on_a_gap() {
         &src,
         "static void cb_audio_session_begin(struct sync_test_output *st)",
     );
+    // A session also begins after an output restart, which discards a session end the worker had
+    // not reached: the lock is forgotten here too (review round 1).
     for need in [
         "st->cb_input_staleness = camerabox::CbDockInputStaleness();",
         "st->cb_pairing_watchdog = camerabox::CbDockPairingWatchdog();",
+        "cb_audio_forget_lock(st);",
         "signal_stale_changed(st->context, false);",
     ] {
         assert!(
@@ -255,11 +272,30 @@ fn audio_worker_lifecycle_follows_the_output() {
 }
 
 /// The `mbc` presence check takes the sources mutex, so it runs on the video decode worker, rate
-/// limited, and the audio thread only reads an atomic.
+/// limited, and the audio thread only reads an atomic. The name is declared once, in
+/// `camera-box-audio.hpp`, which both the output and the dock UI (its ASRC section) include.
 #[test]
 fn measurement_source_presence_is_read_off_the_audio_thread() {
+    let read = |rel: &str| {
+        let p = manifest(rel);
+        let s = std::fs::read_to_string(&p)
+            .unwrap_or_else(|e| panic!("cannot read {}: {e}", p.display()));
+        squish(&strip_cpp_comments(&s))
+    };
+    assert!(
+        read(AUDIO_HEADER).contains("#define CAMERA_BOX_MEASURE_SOURCE_NAME \"mbc\""),
+        "{AUDIO_HEADER}: the measurement source name is declared here (issue 1381)"
+    );
+    assert!(
+        read(DOCK_UI)
+            .contains("#define CAMERA_BOX_ASRC_SOURCE_NAME CAMERA_BOX_MEASURE_SOURCE_NAME"),
+        "{DOCK_UI}: the ASRC section names the same measurement source (issue 1381)"
+    );
     let src = code();
-    assert!(src.contains("#define CAMERA_BOX_MEASURE_SOURCE_NAME \"mbc\""));
+    assert!(
+        !src.contains("#define CAMERA_BOX_MEASURE_SOURCE_NAME"),
+        "{DOCK_OUTPUT}: the measurement source name has one declaration, in {AUDIO_HEADER}"
+    );
     assert!(src.contains("std::atomic<bool> cb_measure_source_present{false};"));
     let record = body_of(
         &src,

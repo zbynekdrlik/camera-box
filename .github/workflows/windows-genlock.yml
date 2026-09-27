@@ -722,10 +722,19 @@ jobs:
             }
             Write-Error "sync-test-output.cpp: unbalanced body for '$sig' (issue 1381)"; exit 1
           }
-          foreach ($need in @('#include "camera-box-audio-worker.hpp"', 'camerabox::CbAudioBlockFifo cb_audio_fifo;', '#define CAMERA_BOX_MEASURE_SOURCE_NAME "mbc"', 'std::atomic<bool> cb_measure_source_present{false};', 'channel_switches=%llu" " decode_ms_max=%.3f decode_ms_sum=%.1f audio_dropped=%llu decode_resets=%llu audio_publish_max_us=%llu"', '(unsigned long long)st->cb_switch_log.total, (double)st->cb_audio_fifo.take_process_max_ns() / 1e6, (double)st->cb_audio_fifo.take_process_sum_ns() / 1e6, (unsigned long long)st->cb_audio_fifo.dropped(), (unsigned long long)st->cb_audio_fifo.resets(), (unsigned long long)(st->cb_audio_publish_max_ns.exchange(0) / 1000));')) {
+          foreach ($need in @('#include "camera-box-audio-worker.hpp"', 'camerabox::CbAudioBlockFifo cb_audio_fifo;', 'std::atomic<bool> cb_measure_source_present{false};', 'channel_switches=%llu" " decode_ms_max=%.3f decode_ms_sum=%.1f audio_dropped=%llu decode_resets=%llu audio_publish_max_us=%llu"', '(unsigned long long)st->cb_switch_log.total, (double)st->cb_audio_fifo.take_process_max_ns() / 1e6, (double)st->cb_audio_fifo.take_process_sum_ns() / 1e6, (unsigned long long)st->cb_audio_fifo.dropped(), (unsigned long long)st->cb_audio_fifo.resets(), (unsigned long long)(st->cb_audio_publish_max_ns.exchange(0) / 1000));')) {
             if (-not $output.Contains($need)) {
               Write-Error "sync-test-output.cpp: '$need' is gone -- the audio decode worker or its diag tokens regressed (issue 1381)"; exit 1
             }
+          }
+          if (-not ((Get-Content "vendor/av-sync-dock/src/camera-box-audio.hpp" -Raw) -replace '\s+', ' ').Contains('#define CAMERA_BOX_MEASURE_SOURCE_NAME "mbc"')) {
+            Write-Error "camera-box-audio.hpp no longer declares the measurement source name (issue 1381)"; exit 1
+          }
+          if (-not ((Get-Content "vendor/av-sync-dock/src/sync-test-dock.cpp" -Raw) -replace '\s+', ' ').Contains('#define CAMERA_BOX_ASRC_SOURCE_NAME CAMERA_BOX_MEASURE_SOURCE_NAME')) {
+            Write-Error "sync-test-dock.cpp: the ASRC section no longer names the measurement source (issue 1381)"; exit 1
+          }
+          if ($output.Contains('#define CAMERA_BOX_MEASURE_SOURCE_NAME')) {
+            Write-Error "sync-test-output.cpp: the measurement source name has one declaration, in camera-box-audio.hpp (issue 1381)"; exit 1
           }
           $cb = Get-Body 'static void st_raw_audio(void *data, struct audio_data *frames)'
           if (-not $cb.Contains('cb_active = st->cb_mode_active; last_qr_ns = st->cb_video_last_decode_ts_ns; } if (cb_active) { cb_audio_gate_and_publish(st, frames, last_qr_ns); return; }')) {
@@ -752,8 +761,16 @@ jobs:
           foreach ($need in @('if (st->cb_audio_dec) st->cb_audio_dec->reset_window();', 'if (block.gap & camerabox::CB_AUDIO_GAP_SESSION) cb_audio_session_begin(st);')) {
             if (-not $gap.Contains($need)) { Write-Error "sync-test-output.cpp: st_audio_block_gap no longer has '$need' (issue 1381) -- a gap could stitch into a false marker"; exit 1 }
           }
+          $forget = Get-Body 'static void cb_audio_forget_lock(struct sync_test_output *st)'
+          foreach ($need in @('st->cb_lock_audit = camerabox::CbLockAuditTracker();', 'signal_lock_state_changed(st->context, false);')) {
+            if (-not $forget.Contains($need)) { Write-Error "sync-test-output.cpp: cb_audio_forget_lock no longer has '$need' (issue 1381)"; exit 1 }
+          }
+          $begin = Get-Body 'static void cb_audio_session_begin(struct sync_test_output *st)'
+          foreach ($need in @('st->cb_input_staleness = camerabox::CbDockInputStaleness();', 'st->cb_pairing_watchdog = camerabox::CbDockPairingWatchdog();', 'cb_audio_forget_lock(st);', 'signal_stale_changed(st->context, false);')) {
+            if (-not $begin.Contains($need)) { Write-Error "sync-test-output.cpp: cb_audio_session_begin no longer has '$need' (issue 1381)"; exit 1 }
+          }
           $end = Get-Body 'static void st_audio_session_end(struct sync_test_output *st, unsigned reason)'
-          foreach ($need in @('if (st->cb_audio_dec) st->cb_audio_dec->reset_window();', 'st->cb_lock_audit = camerabox::CbLockAuditTracker();', 'signal_lock_state_changed(st->context, false);', 'signal_stale_changed(st->context, true);', 'st->cb_audio_paused = true;')) {
+          foreach ($need in @('if (st->cb_audio_dec) st->cb_audio_dec->reset_window();', 'cb_audio_forget_lock(st);', 'signal_stale_changed(st->context, true);', 'st->cb_audio_paused = true;')) {
             if (-not $end.Contains($need)) { Write-Error "sync-test-output.cpp: st_audio_session_end no longer has '$need' (issue 1381)"; exit 1 }
           }
           $record = Get-Body 'static void cb_video_qr_record(struct sync_test_output *st, uint32_t frame_id, uint64_t video_ts)'

@@ -11,13 +11,16 @@
  *      block;
  *   2. blocks reach the worker in publish order, with their own timestamps and samples, the first
  *      block of a session flagged CB_AUDIO_GAP_SESSION;
- *   3. the producer is never blocked by a slow worker (a 20 ms handler never holds a publish past
- *      2 ms); a full FIFO drops the NEW block and counts it, and accepted + dropped == published;
+ *   3. the producer is never blocked by a slow worker (with a 20 ms handler, 95 % of publishes take
+ *      under 2 ms and none takes 15 ms -- a lock held across the handler blocks most of them for up to
+ *      20 ms); a full FIFO drops the NEW block and counts it, and accepted + dropped == published;
  *   4. a dropped block flags the next one CB_AUDIO_GAP_DROPPED, counted as a reset, and with the
  *      dock's reset in on_gap a marker cut by the dropped block is NOT decoded -- while without the
  *      reset the two halves stitch into a (false) marker;
- *   5. end_session() hands the worker exactly one on_session_end, after the blocks published before
- *      it and before the blocks published after it; outside a session it is a no-op;
+ *   5. every end_session() hands the worker one on_session_end, after the blocks published before
+ *      it and before the blocks published after it -- two sessions that end inside the worker's
+ *      backlog get both ends, in order; outside a session it is a no-op; a session whose blocks were
+ *      all dropped merges its end into the previous one (the worker never saw it);
  *   6. stop() waits for an in-flight block and joins; publish() after stop() is a no-op; a restarted
  *      FIFO starts a new session; on_thread_start runs once on the worker;
  *   7. the per-block handling time is measured (max and sum, read-and-reset).
@@ -30,6 +33,7 @@
 #include "../src/camera-box-channel-pick.hpp"
 #include "cb-marker-emitter.hpp"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -168,23 +172,29 @@ static void test_producer_never_blocked()
 	CHECK(fifo.start(h, 2, BLOCK), "producer: start");
 	std::vector<float> l(BLOCK, 0.1f), r(BLOCK, 0.2f);
 	const float *planes[2] = {l.data(), r.data()};
-	double worst = 0;
+	std::vector<double> ms;
 	uint64_t accepted = 0;
 	const uint64_t published = 200;
 	for (uint64_t k = 0; k < published; k++) {
 		const steady::time_point t0 = steady::now();
 		if (fifo.publish(planes, 2, BLOCK, k))
 			accepted++;
-		const double ms = ms_since(t0);
-		if (ms > worst)
-			worst = ms;
+		ms.push_back(ms_since(t0));
+		/* Paced like a real audio thread (faster, so the FIFO still fills): a publish that had to
+		 * wait for the worker then shows up in most samples, not only the first. */
+		std::this_thread::sleep_for(std::chrono::milliseconds(1));
 	}
-	CHECK(worst < 2.0, "producer: a 20 ms decode never blocks a publish past 2 ms");
+	std::sort(ms.begin(), ms.end());
+	const double p95 = ms[ms.size() * 95 / 100], worst = ms.back();
+	/* A scheduler hiccup on a loaded CI runner can stretch one publish; a lock held across the
+	 * handler stretches most of them (to up to 20 ms). */
+	CHECK(p95 < 2.0, "producer: 95 % of publishes take under 2 ms while the worker decodes for 20 ms");
+	CHECK(worst < 15.0, "producer: no publish waits for a 20 ms decode");
 	CHECK(fifo.dropped() > 0, "producer: a full FIFO drops blocks");
 	CHECK(accepted + fifo.dropped() == published, "producer: accepted + dropped == published");
 	CHECK(wait_taken(fifo, accepted), "producer: every accepted block is handled");
 	fifo.stop();
-	std::printf("producer: worst publish %.3f ms, %llu accepted, %llu dropped\n", worst,
+	std::printf("producer: publish p95 %.3f ms, worst %.3f ms, %llu accepted, %llu dropped\n", p95, worst,
 		    (unsigned long long)accepted, (unsigned long long)fifo.dropped());
 }
 
@@ -292,8 +302,9 @@ static void test_sessions()
 	latch.wait_entered();
 	fifo.publish(p, 1, BLOCK, 2);
 	fifo.end_session(3);
-	fifo.end_session(4); // already ended: nothing
+	fifo.end_session(8); // already ended: nothing
 	fifo.publish(p, 1, BLOCK, 5);
+	fifo.end_session(4); // the second session ends while the first end is still queued
 	latch.release();
 	CHECK(wait_taken(fifo, 3), "session: every block handled");
 	{
@@ -305,10 +316,104 @@ static void test_sessions()
 	std::string trace;
 	for (size_t k = 0; k < events.size(); k++)
 		trace += (k ? " " : "") + events[k];
-	CHECK(trace == "gap2@1 b1 b2 end3 gap2@5 b5",
-	      "session: the end comes after the session's blocks and before the next session's");
-	if (trace != "gap2@1 b1 b2 end3 gap2@5 b5")
+	CHECK(trace == "gap2@1 b1 b2 end3 gap2@5 b5 end4",
+	      "session: each end comes after its session's blocks and before the next session's");
+	if (trace != "gap2@1 b1 b2 end3 gap2@5 b5 end4")
 		std::printf("  trace: %s\n", trace.c_str());
+}
+
+/* A session whose every block was dropped (the FIFO stayed full) is invisible to the worker: its end
+ * merges into the previous session's end (with the later reason), and the next accepted block starts
+ * a session with the drop flagged. */
+static void test_dropped_session_merges_its_end()
+{
+	std::vector<std::string> events;
+	std::mutex m;
+	Latch latch;
+	CbAudioBlockFifo fifo(2);
+	CbAudioBlockFifo::Handlers h;
+	h.on_gap = [&](const CbAudioBlock &b) {
+		std::lock_guard<std::mutex> lock(m);
+		events.push_back("gap" + std::to_string(b.gap) + "@" + std::to_string(b.timestamp));
+	};
+	h.process = [&](const CbAudioBlock &b) {
+		if (b.timestamp == 1)
+			latch.wait_inside();
+		std::lock_guard<std::mutex> lock(m);
+		events.push_back("b" + std::to_string(b.timestamp));
+	};
+	h.on_session_end = [&](unsigned reason) {
+		std::lock_guard<std::mutex> lock(m);
+		events.push_back("end" + std::to_string(reason));
+	};
+	CHECK(fifo.start(h, 1, BLOCK), "merge: start");
+	std::vector<float> x(BLOCK, 0.f);
+	const float *p[1] = {x.data()};
+	fifo.publish(p, 1, BLOCK, 1);
+	latch.wait_entered();
+	fifo.publish(p, 1, BLOCK, 2); // the 2-slot FIFO is full now
+	fifo.end_session(3);
+	CHECK(!fifo.publish(p, 1, BLOCK, 6), "merge: the next session's only block is dropped");
+	fifo.end_session(7);
+	latch.release();
+	CHECK(wait_taken(fifo, 2), "merge: b1 and b2 handled");
+	fifo.publish(p, 1, BLOCK, 8);
+	CHECK(wait_taken(fifo, 3), "merge: b8 handled");
+	fifo.stop();
+	std::string trace;
+	for (size_t k = 0; k < events.size(); k++)
+		trace += (k ? " " : "") + events[k];
+	CHECK(trace == "gap2@1 b1 b2 end7 gap3@8 b8",
+	      "merge: one end for the unseen session, then a session start with the drop flagged");
+	if (trace != "gap2@1 b1 b2 end7 gap3@8 b8")
+		std::printf("  trace: %s\n", trace.c_str());
+}
+
+/* Many sessions end inside the worker's backlog: every end is delivered, in order, and the end ring
+ * (slots + 1 entries) never overflows, since each queued end follows a later accepted block. */
+static void test_every_end_in_a_full_backlog()
+{
+	std::vector<std::string> events;
+	std::mutex m;
+	Latch latch;
+	CbAudioBlockFifo fifo(4);
+	CbAudioBlockFifo::Handlers h;
+	h.process = [&](const CbAudioBlock &b) {
+		if (b.timestamp == 0)
+			latch.wait_inside();
+		std::lock_guard<std::mutex> lock(m);
+		events.push_back("b" + std::to_string(b.timestamp));
+	};
+	h.on_session_end = [&](unsigned reason) {
+		std::lock_guard<std::mutex> lock(m);
+		events.push_back("end" + std::to_string(reason));
+	};
+	CHECK(fifo.start(h, 1, BLOCK), "backlog: start");
+	std::vector<float> x(BLOCK, 0.f);
+	const float *p[1] = {x.data()};
+	fifo.publish(p, 1, BLOCK, 0);
+	latch.wait_entered();
+	fifo.end_session(100);
+	for (uint64_t k = 1; k <= 12; k++) { // 3 accepted (the FIFO holds 4, b0 included), 9 dropped
+		fifo.publish(p, 1, BLOCK, k);
+		fifo.end_session((unsigned)(100 + k));
+	}
+	latch.release();
+	CHECK(wait_taken(fifo, 4), "backlog: the accepted blocks are handled");
+	{
+		const steady::time_point t0 = steady::now();
+		while (ms_since(t0) < 200)
+			std::this_thread::sleep_for(std::chrono::milliseconds(5));
+	}
+	fifo.stop();
+	std::string trace;
+	for (size_t k = 0; k < events.size(); k++)
+		trace += (k ? " " : "") + events[k];
+	const std::string want = "b0 end100 b1 end101 b2 end102 b3 end112";
+	CHECK(trace == want, "backlog: every end is delivered in order, merged only over dropped sessions");
+	if (trace != want)
+		std::printf("  trace: %s\n", trace.c_str());
+	CHECK(fifo.dropped() == 9, "backlog: nine blocks dropped");
 }
 
 static void test_lifecycle_and_timing()
@@ -323,7 +428,9 @@ static void test_lifecycle_and_timing()
 		starts++;
 		on_worker = std::this_thread::get_id() != main_id;
 	};
+	std::atomic<bool> entered{false};
 	h.process = [&](const CbAudioBlock &) {
+		entered = true;
 		std::this_thread::sleep_for(std::chrono::milliseconds(30));
 		finished = true;
 	};
@@ -338,7 +445,12 @@ static void test_lifecycle_and_timing()
 	std::vector<float> x(BLOCK, 0.f);
 	const float *p[1] = {x.data()};
 	fifo.publish(p, 1, BLOCK, 1);
-	std::this_thread::sleep_for(std::chrono::milliseconds(5));
+	{
+		const steady::time_point t0 = steady::now();
+		while (!entered && ms_since(t0) < 5000)
+			std::this_thread::sleep_for(std::chrono::milliseconds(1));
+	}
+	CHECK(entered, "lifecycle: the worker took the block");
 	fifo.stop(); // the 30 ms block is in flight
 	CHECK(finished, "lifecycle: stop() waits for the in-flight block");
 	CHECK(starts == 1 && on_worker, "lifecycle: on_thread_start ran once, on the worker");
@@ -364,6 +476,8 @@ int main()
 	test_producer_never_blocked();
 	test_drop_resets_and_never_stitches();
 	test_sessions();
+	test_dropped_session_merges_its_end();
+	test_every_end_in_a_full_backlog();
 	test_lifecycle_and_timing();
 	if (g_failures == 0) {
 		std::printf("audio-worker-selftest: ALL PASS\n");
