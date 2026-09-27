@@ -201,6 +201,27 @@ Two extensions from the issue-1367 lane:
 - Before trusting "flat vs grouped" routing, follow the call chain: `analyze_recording_with_burns`
   (the flat-looking one) goes through the GROUPED per-frame decode.
 
+Two more from the issue-1367 tight-box lane:
+- **RUN the real glue, not just type-check it.** Make the `image` stub behave, not only
+  type-check: keep the pixels plus working `crop_imm().to_image()`, `replace`, `from_pixel`,
+  `pixels` and `as_raw`. Give the stub `qr` module a `decode_qr_luma_all_reads` that calls the real
+  rqrr (plain, then the production Otsu). Then mount the real `burn_region_decode.rs` /
+  `burn_echo.rs` / `burn_regions.rs` and call `burn_region_passes` on `.y8` frames: that is a
+  RED/GREEN of the actual glue. Swap in `git show HEAD:<file>` for the RED side.
+  - Build the same modules as a `--crate-name camera_box` rlib, and add an `image::open` stub that
+    reads `$Y8_DIR/<png name>.y8` (a PIL `convert('L')` dump). A probe-gated `tests/*.rs` file then
+    compiles with `--cfg 'feature="probe"'` and runs.
+  - Stub any function the file needs but the stub crate lacks with `unimplemented!()`, and skip
+    that test at run time with `--skip`.
+  - The `tracing` stub needs one macro arm per call shape. When a field list changes, the pre-fix
+    file needs its old arm too.
+  - The stub's 2x `resize` is NEAREST, not CatmullRom, so it can read a frame production missed.
+- **Synthetic burns in python:** `qrcode.QRCode(error_correction=ERROR_CORRECT_H, box_size=7,
+  border=4)` on the payload string renders the same 287 px version-4 burn as the Rust writer.
+  Paste it at `((1920 - 287) / 2, 1080 - 287 - 24)`. The mode choice matters (digits plus `P`
+  and `.` go alphanumeric): a short payload like `P911009.1.1.<crc>` is version 3 and renders
+  about 296 px.
+
 ## The echo gate — a node burn counts only in its own slot (issue 1367)
 
 A camera that films a monitor showing OBS captures decodable copies of node burns. On run
