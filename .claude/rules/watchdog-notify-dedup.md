@@ -84,6 +84,7 @@ production without, invisible without a page:
 | `imag-obs-alert-watchdog.sh` | #882 | imag OBS down / latency-drift / restart-storm |
 | `measurement-audio-alert-watchdog.sh` | #1310 | mbc measurement-audio chain digital-silent (TEST-gated) |
 | `vban-rate-alert-watchdog.sh` | issue 1372 | a VBAN stream at strih-lx off its nominal rate or losing packets (on-air audio) |
+| `audio-mixer-alert-watchdog.sh` | issue 1381 | an OBS audio mixer off real time (BEHIND / OVERLOADED) or an obs-vban sender losing audio (VBAN_LOSS) -- audible on air |
 
 (`measurement-audio-alert-watchdog.sh` is EVENT-gated on `rig-mode-state.sh` like splitter-port #1290
 — the QPSK marker only sounds in TEST — but its FAULT is production-critical: a silent measurement
