@@ -1445,3 +1445,26 @@ Typed inline in a worktree lane, the isolation guard REFUSES that command ("runs
 (`set -euo pipefail`, `cd` to the worktree, the one `sudo -n unshare -n ...` line), then run
 `bash /abs/nonet.sh` as its own call. The run is the same, and a test that needed the network now
 fails instead of passing.
+
+## Emitted PowerShell can be RUN locally, not only read as text (issue 1372)
+
+Several libs emit Windows PowerShell as text (the dantesync upgrade/tray programs, genlock deploy
+programs). There is no pwsh on dev1, so their tests read that text. That misses logic bugs; live
+case: a first cut that raced a relaunched tray, and a lock violation called "untouched".
+
+To run the text locally:
+- Unpack the `powershell-7.x-linux-x64` release tarball into the scratchpad.
+- Dot-source the emitted program from a harness that defines `[CmdletBinding()]` stub FUNCTIONS
+  for the cmdlets it calls. A function outranks the cmdlet.
+- Model the node's state in the stubs.
+- Parse the full program with `[System.Management.Automation.Language.Parser]::ParseFile`.
+- Worked example: `tests/pwsh/run_dantesync_tray_swap_1372.sh`. It needs `PWSH`, is not in CI,
+  and exits 2 without pwsh; it never skips.
+
+Limits:
+- pwsh 7 is not Windows PowerShell 5.1. In 5.1, `Get-FileHash` is a script FUNCTION: a read
+  failure is a non-terminating error that returns a NULL hash, while pwsh 7's cmdlet throws. So
+  every hash comparison in emitted text needs `-ErrorAction Stop` and a non-empty check. A pwsh 7
+  run cannot catch that.
+- A runner that sources a repo script must not reuse its variable names. The sourced
+  `dantesync-fleet-upgrade.sh` sets `HERE`.
