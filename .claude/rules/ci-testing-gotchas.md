@@ -1445,3 +1445,12 @@ Typed inline in a worktree lane, the isolation guard REFUSES that command ("runs
 (`set -euo pipefail`, `cd` to the worktree, the one `sudo -n unshare -n ...` line), then run
 `bash /abs/nonet.sh` as its own call. The run is the same, and a test that needed the network now
 fails instead of passing.
+
+## Moving a test's assertions to another file can leave its HELPER dead — CI clippy then fails (issue 1357)
+
+When a refactor moves the last caller of a shared test helper (`run_block` in
+`tests/strih_provision_pure_functions.rs`) into another test file, the helper becomes dead code.
+`cargo clippy --all-targets -D warnings` on CI rejects it, and no Tier-0 step catches it (a plain
+standalone `rustc --test -A warnings` run hides it too). Run
+`clippy-driver --edition 2021 --test -D warnings <file>` (with the tempfile shim for files that need it)
+on every std-only test file you edit, and delete a helper whose last caller went away.
