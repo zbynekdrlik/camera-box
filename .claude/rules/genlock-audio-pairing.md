@@ -379,8 +379,8 @@ The classifier `src/genlock_forced_table_audit.rs` (canonical) + the byte-for-by
 pins the two together over a fixed vector set (bash verdict == Rust `audio_verdict` for every
 box×name×`ndi_audio`). That verdict parity is BLIND to the program key set (no verdict depends on
 it), so `bash_program_key_set_matches_rust_1380` also pins the two program predicates
-(`is_program_audio_input` / `is_program_video_input`) over every key; a key on one side only goes
-RED there (issue 1380). Verdicts: `OK`, `MISMATCH-PROGRAM-SILENT` (a cg program source with audio off
+(`is_program_audio_input` / `is_program_video_input`) over names that each match ONE key only (one per key), so a key on
+one side only goes RED there (issue 1380; mutation-proven for `hudba` and `vban`). Verdicts: `OK`, `MISMATCH-PROGRAM-SILENT` (a cg program source with audio off
 — the #1295 event-morning defect), `MISMATCH-CAMERA-AUDIBLE` (a camera audible), and
 `MISMATCH-AUDIBLE` (a NON-camera input audible on a Dante-fed silent box — the double-audio hazard;
 added per the owner's own term). `deploy-genlock-fleet.sh` emits the report-only preflight

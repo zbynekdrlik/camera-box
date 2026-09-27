@@ -92,14 +92,25 @@ insert. None of them retypes the scene name.
   gate and `warm_cam_scenes.py` preview restores, and the imag `--bootstrap` restore of
   `~/.config/imag-last-program`. That last one falls back to its own `Cam 1` default, because a
   refusal would abort the boot seed and Restart-loop the imag OBS (the issue-1156 class).
-- **imag without obs_phase2.** `setup-imag.sh` installs `obs_phase2.py` next to `imag_scenes.py`. If
-  the module cannot be imported (an older box), `Obs.req` cannot check anything. The one selection
-  the seed makes, the `--bootstrap` program restore, then sends nothing and prints why; OBS keeps its
-  saved scene.
+- **imag without the guard.** `setup-imag.sh` installs `obs_phase2.py` next to `imag_scenes.py`.
+  `_scene_guard()` accepts it as the guard only when it carries `_refuse_forbidden_scene`,
+  `ForbiddenSceneError` and `NEVER_PROGRAM_SCENES`. A missing module or an older copy (a
+  half-finished fetch, a hand copy) reads as "no guard": `Obs.req` cannot check anything but never
+  raises. The one selection the seed makes, the `--bootstrap` program restore, then sends nothing
+  and prints why; OBS keeps its saved scene.
+- **The Studio Mode swap re-assert is obs_phase2-only.** `_keep_forbidden_scene_out_of_preview` runs
+  in `switch` / `prod-scene`. The standalone clients never cut program on the stream box (their hosts
+  are the cg OBS, strih, imag and validation boxes), so no box of theirs has a `PRO` to leave. A
+  client that ever cuts program on the stream box must reuse it, or OBS's swap leaves `PRO` in the
+  preview.
 - **Completeness pin.** `tests/python/test_scene_select_guard_clients_1380.py` checks that every
-  `scripts/**/*.py` naming `SetCurrentProgramScene` / `SetCurrentPreviewScene` is in the covered
-  list (the five clients + `obs_phase2.py` + `stream_dev_scene.py`, whose `rpc` is obs_phase2's). A
-  new client must join the list and reuse the guard.
+  file under `scripts/` (`.py` / `.sh` / `.ps1` / `.psm1` / `.js` / `.ahk` / `.cmd` / `.bat`) that
+  names, quoted, a v5 selection (`SetCurrentProgramScene` / `SetCurrentPreviewScene`), a v4 name
+  (`SetCurrentScene` / `SetPreviewScene` / `TransitionToProgram`) or `TriggerStudioModeTransition` is
+  in the covered list (the five clients + `obs_phase2.py` + `stream_dev_scene.py`, whose `rpc` is
+  obs_phase2's), and that every listed client still selects. A new client must join the list and
+  reuse the guard; a Studio Mode transition user needs its own check against the rule (the guard
+  only sees selections).
 
 ## The seeder — `obs_phase2.py dev-scene` (bash: `stream_dev_scene_ensure`)
 
@@ -158,7 +169,9 @@ The same cleanup removed the stream input `NDI obs hudba`. `scripts/cg-chain-ver
 line (`.claude/rules/cg-chain-verify.md`). Slice 2 dropped the name everywhere else: the certified
 audio table lost its `hudba` key (Rust + the bash replica, 9 → 8 keys, no verdict changed, see
 `genlock-audio-pairing.md`), and the docs, the ops skill, `targets.md` and four test fixtures no
-longer name it. `scripts/latency-pins-baseline.json` never had an entry for it.
+longer name it. `scripts/latency-pins-baseline.json` never had an entry for it. The comment at
+`vendor/distroav/src/ndi-source.cpp:381` still names it, on purpose: a vendored-file edit triggers
+the genlock CI builds and a full-bundle deploy, for a comment.
 
 ## Consumers that did NOT need a change
 
