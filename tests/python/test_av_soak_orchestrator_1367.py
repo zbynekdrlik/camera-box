@@ -12,6 +12,7 @@ Fakes on PATH / behind the documented seams:
     CONNECT_ON_SHOW_MARKER_CMD / CONNECT_ON_SHOW_LOG_READ_CMD seams -- the REAL dev1 lease, heartbeat
     and hold state are never touched (an E2E may hold the real lease while this runs).
 """
+import base64
 import json
 import os
 import signal
@@ -49,7 +50,12 @@ cmd = a[0]
 host = arg("--host")
 if cmd == "rig-busy-check":
     busy = os.environ.get("FAKE_BUSY") == "1"
-    print(json.dumps({"busy": busy, "diagnostics": [{"host": "stream", "streaming": busy, "recording": False}]}))
+    diags = []
+    for box in ("strih", "stream"):
+        streaming = busy or os.environ.get("FAKE_STREAMING_BOX") == box
+        diags.append({"host": box, "streaming": streaming,
+                      "recording": os.path.exists(os.path.join(state, "recording-" + box))})
+    print(json.dumps({"busy": busy, "diagnostics": diags}))
 elif cmd == "stream-detail":
     pass
 elif cmd == "program-scene":
@@ -69,7 +75,8 @@ elif cmd == "record":
         if os.environ.get("FAKE_START_FAIL") == box:
             sys.exit("fake: StartRecord verify failed")
     elif act == "stop":
-        if os.environ.get("FAKE_STOP_STICKY") != box or bump("stop-" + box) > 1:
+        never = os.environ.get("FAKE_STOP_NEVER") == box
+        if not never and (os.environ.get("FAKE_STOP_STICKY") != box or bump("stop-" + box) > 1):
             if os.path.exists(flag):
                 os.remove(flag)
         if os.environ.get("FAKE_TOUCH_STOP"):
@@ -83,6 +90,8 @@ elif cmd == "switch":
         sys.exit("fake: scene renders black")
     if os.environ.get("FAKE_RESTORE_DELAY") and "--prod-floor" in a:
         time.sleep(float(os.environ["FAKE_RESTORE_DELAY"]))
+    if os.environ.get("FAKE_RESTORE_FAIL") and "--prod-floor" in a:
+        sys.exit("fake: the restored scene is dim (non-black check)")
     print(time.time_ns())
 elif cmd == "connect-on-show":
     if "--hold" in a:
@@ -124,7 +133,8 @@ case "$*" in
     echo "$n" > "$FAKE_STATE/count-probe"
     active="${FAKE_PAINTER_ACTIVE:-active}"
     if [ -n "${FAKE_PAINTER_FAIL_AFTER:-}" ] && [ "$n" -gt "$FAKE_PAINTER_FAIL_AFTER" ]; then active=inactive; fi
-    printf 'active=%s\nrun_id=4242\nmarkers=10\nmarkers2=14\n' "$active" ;;
+    rid=4242; [ -n "${FAKE_PAINTER_NO_RUN_ID:-}" ] && rid=""
+    printf 'active=%s\nrun_id=%s\nmarkers=10\nmarkers2=14\n' "$active" "$rid" ;;
   *"head -n 1"*)
     printf 'index,frame_id,emit_ts_ns\n1,100,5\n2,130,6\n' ;;
   *) : ;;
@@ -133,6 +143,7 @@ esac
 
 FAKE_CURL = r'''#!/usr/bin/env bash
 printf 'curl %s\n' "$*" >> "$FAKE_LOG"
+[ -n "${FAKE_CURL_FAIL:-}" ] && exit 7
 printf '{"free_bytes": %s}\n' "${FAKE_FREE_BYTES:-500000000000}"
 '''
 
@@ -145,6 +156,10 @@ for a in "$@"; do
   [ "$prev" = "--out" ] && out="$a"
   prev="$a"
 done
+case "$(basename "$0")" in
+  strih-*) [ -n "${FAKE_DECODE_SLEEP_STRIH:-}" ] && sleep "$FAKE_DECODE_SLEEP_STRIH" ;;
+  stream-*) [ -n "${FAKE_DECODE_SLEEP_STREAM:-}" ] && sleep "$FAKE_DECODE_SLEEP_STREAM" ;;
+esac
 name="${out##*/}"; name="${name##*\\}"
 printf '{}\n' > "$ldir/$name"
 '''
@@ -223,7 +238,7 @@ def rig(tmp_path):
         "CONNECT_ON_SHOW_LOG_READ_CMD": "true",
         "CONNECT_ON_SHOW_LIVE_WAIT_S": "0",
         "RIG_FLEET_ACK_FILE": str(tmp_path / "no-acks.txt"),
-        "CAM_PW": "x", "STREAM_USER": "u", "STREAM_PW": "y",
+        "CAM_PW": "x", "STREAM_USER": "u", "STREAM_PW": "y", "STRIH_USER": "su", "STRIH_PW": "sp",
         "STRIH_HOST": STRIH, "STREAM_HOST": STREAM,
         "E2E_ONBOX_DECODE_PRIORITY": "BelowNormal",
     })
@@ -253,6 +268,21 @@ def _csv_rows(run):
     lines = (run / "soak.csv").read_text().splitlines()
     header = lines[0].split(",")
     return [dict(zip(header, line.split(","))) for line in lines[1:]]
+
+
+def _ps_commands(log):
+    """The PowerShell text of every win_ssh_run -EncodedCommand the fake sshpass saw."""
+    out = []
+    for line in log.read_text().splitlines():
+        if line.startswith("sshpass") and "-EncodedCommand" in line:
+            blob = line.split("-EncodedCommand", 1)[1].strip().split()[0].strip("'\"")
+            out.append(base64.b64decode(blob).decode("utf-16-le"))
+    return out
+
+
+QUICK_TWO_WINDOWS = {"AV_SOAK_SLOT_SECS": "12", "AV_SOAK_HOURS": "0.0033334",
+                     "AV_SOAK_OVERHEAD_S": "0", "AV_SOAK_MERGE_TIMEOUT_S": "3",
+                     "AV_SOAK_DECODE_TIMEOUT_S": "3", "AV_SOAK_MIN_DECODE_S": "0"}
 
 
 def _assert_rig_restored(p):
@@ -452,23 +482,140 @@ def test_sigterm_mid_slot_restores_everything(rig):
     assert "--restore" in cos[-1]
 
 
-def test_a_second_signal_during_cleanup_cannot_cut_the_restore_short(rig):
+def test_a_second_ctrl_c_to_the_process_group_cannot_cut_the_restore_short(rig):
     env, p = rig
     proc = subprocess.Popen(["bash", SOAK, "--run"],
                             env=dict(env, AV_SOAK_SEGMENT_SECS="20", FAKE_RESTORE_DELAY="3"),
-                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                            start_new_session=True)
     deadline = time.time() + 60
     while time.time() < deadline and '"switch"' not in p["log"].read_text():
         time.sleep(0.2)
-    proc.send_signal(signal.SIGTERM)
+    os.killpg(proc.pid, signal.SIGINT)  # Ctrl-C at the terminal: the whole foreground group
     deadline = time.time() + 60
     while time.time() < deadline and "--prod-floor" not in p["log"].read_text():
         time.sleep(0.1)
     assert "--prod-floor" in p["log"].read_text(), "cleanup never reached the strih restore"
-    proc.send_signal(signal.SIGTERM)  # the second Ctrl-C / stop, while the restore runs
+    os.killpg(proc.pid, signal.SIGINT)  # the second Ctrl-C, while the restore runs
     out, err = proc.communicate(timeout=60)
     assert proc.returncode == 5, out + err
     _assert_rig_restored(p)
+
+
+def test_a_strih_decode_timeout_stops_the_decode_on_strih_lx(rig):
+    env, p = rig
+    r = _soak(dict(env, AV_SOAK_MIN_DECODE_S="0", AV_SOAK_DECODE_TIMEOUT_S="2",
+                   FAKE_DECODE_SLEEP_STRIH="10"), "--run")
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert _csv_rows(p["run"])[0]["outcome"] == "no_verdict:decode_failed"
+    kills = [line for line in p["log"].read_text().splitlines()
+             if line.startswith("sshpass") and "pkill" in line]
+    assert kills and all("su@10.77.9.202" in k for k in kills), kills
+    assert "recording-verdic\\[t\\]\\ --extract-partial\\ strih" in kills[0] \
+        or "recording-verdic[t] --extract-partial strih" in kills[0], kills[0]
+    _assert_rig_restored(p)
+
+
+def test_sigterm_during_the_decode_stops_both_remote_decodes(rig):
+    env, p = rig
+    proc = subprocess.Popen(["bash", SOAK, "--run"],
+                            env=dict(env, FAKE_DECODE_SLEEP_STRIH="30", FAKE_DECODE_SLEEP_STREAM="30"),
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    deadline = time.time() + 60
+    while time.time() < deadline and "decode stream-decode.sh" not in p["log"].read_text():
+        time.sleep(0.2)
+    proc.send_signal(signal.SIGTERM)
+    out, err = proc.communicate(timeout=60)
+    assert proc.returncode == 5, out + err
+    assert any(line.startswith("sshpass") and "pkill" in line
+               for line in p["log"].read_text().splitlines())
+    assert any("Stop-Process" in c for c in _ps_commands(p["log"]))
+    _assert_rig_restored(p)
+
+
+def test_a_recording_that_never_stops_is_a_loud_exit_5(rig):
+    env, p = rig
+    r = _soak(dict(env, FAKE_STOP_NEVER="stream"), "--run")
+    assert r.returncode == 5, r.stdout + r.stderr
+    assert "RECORDING MAY STILL BE RUNNING on stream" in r.stdout + r.stderr
+    state = (p["run"] / "recording.state").read_text()
+    assert "stream=1" in state and "strih=0" in state
+
+
+def test_stop_leftovers_stops_only_the_soaks_own_recording(rig):
+    env, p = rig
+    p["run"].mkdir()
+    (p["run"] / "recording.state").write_text("strih=0\nstream=1\n")
+    (p["state"] / "recording-stream").write_text("")
+    r = _soak(env, "--stop-leftovers", str(p["run"]))
+    assert r.returncode == 0, r.stdout + r.stderr
+    stops = [c for c in _calls(p["log"], "obs") if c[:1] == ["record"] and "stop" in c]
+    assert [_host(c) for c in stops] == [STREAM]
+    assert not (p["state"] / "recording-stream").exists()
+    assert "stream=0" in (p["run"] / "recording.state").read_text()
+
+
+def test_stop_leftovers_never_stops_a_streaming_box(rig):
+    env, p = rig
+    p["run"].mkdir()
+    (p["run"] / "recording.state").write_text("strih=0\nstream=1\n")
+    (p["state"] / "recording-stream").write_text("")
+    r = _soak(dict(env, FAKE_STREAMING_BOX="stream"), "--stop-leftovers", str(p["run"]))
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert not [c for c in _calls(p["log"], "obs") if c[:1] == ["record"] and "stop" in c]
+    assert "NOT stopping" in r.stdout + r.stderr
+
+
+def test_run_without_the_strih_credentials_is_refused(rig):
+    env, p = rig
+    env = dict(env)
+    env.pop("STRIH_PW")
+    r = _soak(env, "--run")
+    assert r.returncode == 4
+    assert not p["lease"].exists() and p["log"].read_text() == ""
+
+
+def test_two_windows_retry_a_stuck_stop_and_log_an_unreadable_volume_once(rig):
+    env, p = rig
+    r = _soak(dict(env, FAKE_STOP_STICKY="stream", FAKE_CURL_FAIL="1", **QUICK_TWO_WINDOWS), "--run")
+    assert r.returncode == 2, r.stdout + r.stderr
+    rows = _csv_rows(p["run"])
+    assert [row["outcome"] for row in rows] == ["ok", "ok"]
+    assert "a broadcast is live" not in r.stdout + r.stderr
+    out = r.stdout + r.stderr
+    assert out.count("free space unreadable") == 2, out  # once per box, not once per slot
+    _assert_rig_restored(p)
+
+
+def test_an_unpinned_painter_run_id_is_a_warning(rig):
+    env, p = rig
+    r = _soak(dict(env, FAKE_PAINTER_NO_RUN_ID="1"), "--run")
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert "WARNING" in r.stdout and "unpinned" in r.stdout
+    merge = _calls(p["log"], "verdict")[0]
+    assert merge[merge.index("--cam2-run-id") + 1] == "0"
+
+
+def test_a_restore_that_fails_its_brightness_check_is_confirmed_by_a_re_read(rig):
+    env, p = rig
+    r = _soak(dict(env, FAKE_RESTORE_FAIL="1"), "--run")
+    assert r.returncode == 2, r.stdout + r.stderr
+    assert "strih program restored to 'Cam 1'" in r.stdout
+    assert "could not restore" not in r.stdout
+
+
+def test_the_cleanup_plan_names_the_on_box_verdict_artifacts(rig):
+    env, p = rig
+    assert _soak(env, "--run").returncode == 2
+    plan = (p["run"] / "cleanup-plan.txt").read_text()
+    assert "verdict-out/av-soak-" in plan and "Remove-Item -Recurse" in plan
+
+
+def test_a_negative_decode_budget_names_the_slot_budget(rig):
+    env, _ = rig
+    r = _soak(dict(env, AV_SOAK_SEGMENT_SECS="300"), "--plan")
+    assert r.returncode == 3
+    assert "slot budget does not fit" in r.stderr
 
 
 def test_the_stop_file_ends_the_run_with_its_report(rig):
