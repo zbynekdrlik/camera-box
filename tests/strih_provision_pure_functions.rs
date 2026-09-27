@@ -3503,23 +3503,6 @@ fn block_between<'a>(text: &'a str, start: &str, end: &str) -> &'a str {
     &text[s..e]
 }
 
-/// Run an extracted script block under the callers' real `set -euo pipefail` with the lib sourced
-/// and the caller's prelude. Returns (exit, out, err).
-fn run_block(env: &[(&str, &str)], prelude: &str, block: &str) -> (i32, String, String) {
-    let harness = format!("set -euo pipefail\n. \"$SCRIPT\"\n{prelude}\n{block}\n");
-    let mut cmd = Command::new("bash");
-    cmd.arg("-c").arg(&harness).env("SCRIPT", lib());
-    for (k, v) in env {
-        cmd.env(k, v);
-    }
-    let out = cmd.output().expect("run block");
-    (
-        out.status.code().unwrap_or(-1),
-        String::from_utf8_lossy(&out.stdout).into_owned(),
-        String::from_utf8_lossy(&out.stderr).into_owned(),
-    )
-}
-
 /// A fake /sys with `class/net/<iface>/device/driver -> .../<driver>` links.
 fn fake_sysroot(nics: &[(&str, &str)]) -> tempfile::TempDir {
     let root = tempfile::tempdir().unwrap();
