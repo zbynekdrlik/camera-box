@@ -98,6 +98,7 @@ $trayStopped = $false
 $trayLaunch = $false
 $trayRunning = @()
 $trayRespawnedBy = @()
+$trayKept = $false
 # the process that started a tray (svchost -s Schedule for a scheduled task, explorer for the HKLM
 # Run entry at logon); never throws, it only names
 function Get-TrayParent([int]$trayChildId) {
@@ -106,7 +107,12 @@ function Get-TrayParent([int]$trayChildId) {
         if (-not $trayChild) { return ('pid ' + $trayChildId + ' already exited') }
         $trayParent = Get-CimInstance Win32_Process -Filter ('ProcessId=' + $trayChild.ParentProcessId) -ErrorAction Stop
         if (-not $trayParent) { return ('parent pid ' + $trayChild.ParentProcessId + ' already exited') }
-        if ($trayParent.CommandLine) { return ($trayParent.Name + ' (' + $trayParent.CommandLine + ')') }
+        if ($trayParent.CommandLine) {
+            # the line lands in the roll summary: never an unexpected parent's arguments in full
+            $trayCmd = [string]$trayParent.CommandLine
+            if ($trayCmd.Length -gt 120) { $trayCmd = $trayCmd.Substring(0, 120) + '...' }
+            return ($trayParent.Name + ' (' + $trayCmd + ')')
+        }
         return $trayParent.Name
     } catch {
         return ('parent unknown: ' + $_.Exception.Message)
@@ -124,19 +130,26 @@ if ($trayNotes.Count -eq 0 -and -not $trayCurrent) {
         $trayKilled | Stop-Process -Force -ErrorAction SilentlyContinue
         $trayStopped = $true
         $trayPids = @($trayKilled | ForEach-Object { $_.Id })
+        $trayTried = @($trayPids)
         if ($trayPids.Count -gt 0) {
             Wait-Process -Id $trayPids -Timeout 15 -ErrorAction SilentlyContinue
-            if (@(Get-Process -Id $trayPids -ErrorAction SilentlyContinue).Count -gt 0) {
-                throw ('the killed tray (pid ' + ($trayPids -join ', ') + ') did not exit')
-            }
+            # a reused PID is not the tray: only a still-alive dantesync-tray counts
+            if (@(Get-Process -Id $trayPids -ErrorAction SilentlyContinue | Where-Object { $_.ProcessName -eq 'dantesync-tray' }).Count -gt 0) { throw "the killed tray (pid $($trayPids -join ', ')) did not exit" }
         }
         if (-not (Test-Path $trayPre)) { Copy-Item -Force $trayExe $trayPre }
+        # the exe as it is now: a failed replace is "untouched" only when the file still hashes to this
+        $trayBefore = (Get-FileHash -Algorithm SHA256 -LiteralPath $trayExe).Hash
         # a tray relaunched since the kill holds the exe again: kill it right before the replace,
-        # at most 3 times, and remember who started it
+        # at most 3 times, and remember who started each NEW one (a PID tried before is not a relaunch)
         for ($trayTry = 1; $trayTry -le 3; $trayTry++) {
             $trayFresh = @(Get-Process -Name dantesync-tray -ErrorAction SilentlyContinue)
             if ($trayFresh.Count -eq 0) { break }
-            foreach ($trayP in $trayFresh) { $trayRespawnedBy += (Get-TrayParent $trayP.Id) }
+            foreach ($trayP in $trayFresh) {
+                if ($trayTried -notcontains $trayP.Id) {
+                    $trayRespawnedBy += (Get-TrayParent $trayP.Id)
+                    $trayTried += $trayP.Id
+                }
+            }
             $trayFresh | Stop-Process -Force -ErrorAction SilentlyContinue
             Wait-Process -Id @($trayFresh | ForEach-Object { $_.Id }) -Timeout 5 -ErrorAction SilentlyContinue
         }
@@ -146,14 +159,25 @@ if ($trayNotes.Count -eq 0 -and -not $trayCurrent) {
             if ($trayNow -ne $trayExpected) { throw ('installed tray SHA256 ' + $trayNow + ' is not ' + $trayExpected) }
         } catch {
             $trayWhy = $_.Exception.Message
-            # a sharing / lock violation (Win32 32 / 33) never wrote the file: the previous tray exe
-            # is untouched, and a restore would only hit the same lock
+            # a sharing violation (Win32 32: a running exe) fails before the file is opened for
+            # write, but a lock violation (33) can come after truncation -- so "untouched" is PROVEN
+            # by the hash read before the copy, never assumed; an untouched exe needs no restore
+            # (a restore would only hit the same lock), anything else is restored
             $trayInUse = @(32, 33) -contains ($_.Exception.HResult -band 0xFFFF)
+            $trayUntouched = $false
+            if ($trayInUse) {
+                try { $trayUntouched = ((Get-FileHash -Algorithm SHA256 -LiteralPath $trayExe).Hash -eq $trayBefore) } catch { }
+            }
+            # who holds it now: a NEW PID is a relaunch, a PID already tried is a tray that did not die
             $trayHolders = @(Get-Process -Name dantesync-tray -ErrorAction SilentlyContinue)
-            foreach ($trayP in $trayHolders) { $trayRespawnedBy += (Get-TrayParent $trayP.Id) }
-            if ($trayInUse -and $trayRespawnedBy.Count -gt 0) {
+            $trayNew = @($trayHolders | Where-Object { $trayTried -notcontains $_.Id })
+            $trayStuck = @($trayHolders | Where-Object { $trayTried -contains $_.Id })
+            foreach ($trayP in $trayNew) { $trayRespawnedBy += (Get-TrayParent $trayP.Id) }
+            if ($trayUntouched -and $trayNew.Count -gt 0) {
                 $trayNotes += ('a tray keeps relaunching: ' + (($trayRespawnedBy | Select-Object -Unique) -join ' / ') + '; the previous tray exe is untouched: ' + $trayWhy)
-            } elseif ($trayInUse) {
+            } elseif ($trayUntouched -and $trayStuck.Count -gt 0) {
+                $trayNotes += ('a tray did not die (pid ' + (($trayStuck | ForEach-Object { $_.Id }) -join ', ') + '), the previous tray exe is untouched: ' + $trayWhy)
+            } elseif ($trayUntouched) {
                 $trayNotes += ('the tray exe is locked by another process (no tray running), the previous tray exe is untouched: ' + $trayWhy)
             } else {
                 $trayRestored = $false
@@ -196,6 +220,8 @@ if ($trayStopped -or $trayLaunch) {
                     $trayNotes += ('the temporary task ' + $trayTask + ' could not be unregistered: ' + $_.Exception.Message)
                 }
             }
+        } else {
+            $trayKept = $true
         }
         $trayProcs = @(Get-Process -Name dantesync-tray -ErrorAction SilentlyContinue | Where-Object { $_.SessionId -ge 1 })
         if ($trayProcs.Count -ne 1) { throw ('expected one tray process in an interactive session after the relaunch, found ' + $trayProcs.Count + ' (is a user logged on?)') }
@@ -210,6 +236,10 @@ if ($trayNotes.Count -gt 0) {
     $trayOkNote = ''
     if ($trayRespawnedBy.Count -gt 0) {
         $trayOkNote = ' (killed a relaunched tray before the swap, started by: ' + (($trayRespawnedBy | Select-Object -Unique) -join ' / ') + ')'
+    }
+    if ($trayKept) {
+        # the swap succeeded, so a tray running afterwards was started from the new exe
+        $trayOkNote += ' (kept a tray that was running again, not launched)'
     }
     Write-Output ('TRAY OK: dantesync-tray.exe sha256 ' + $trayExpected + ' running in session ' + $trayProcs[0].SessionId + $trayOkNote)
 } else {
