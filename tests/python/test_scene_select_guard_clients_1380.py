@@ -335,7 +335,34 @@ def test_imag_bootstrap_selects_nothing_with_an_obs_phase2_without_the_guard(mon
     monkeypatch.setattr(imag, "_obs_phase2_module", _pre_guard_obs_phase2)
     selects = _bootstrap_seed(imag, monkeypatch, tmp_path, "Cam 3")
     assert selects == [], "an unguardable scene selection is never sent"
-    assert "guard" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "guard" in out
+    # review round 2: the module IS importable here, it only predates the guard -- say unavailable
+    assert "not importable" not in out, out
+
+
+def test_imag_bootstrap_reuses_the_connection_guard(monkeypatch, tmp_path):
+    # review round 2: seed() takes the guard its Obs connection already resolved, never a second
+    # lookup (on a degraded box every lookup prints its warning again).
+    imag = _imag()
+    obs, ws = _imag_obs(imag, monkeypatch, {
+        "GetSceneItemId": {"sceneItemId": 7},
+        "GetVideoSettings": {"fpsNumerator": 60, "fpsDenominator": 1, "baseWidth": 1920,
+                             "baseHeight": 1080},
+        "GetSceneList": {"scenes": [{"sceneName": s} for s in
+                                    [f"Cam {n}" for n in range(1, 8)]
+                                    + [f"MV Cam {n}" for n in range(1, 8)]]},
+    })
+    assert obs._guard is not None
+    monkeypatch.setattr(imag, "_scene_guard", lambda: pytest.fail("a second guard lookup"))
+    monkeypatch.setattr(imag, "enforce_ndi_names", lambda o: {})
+    home = tmp_path / "home"
+    (home / ".config").mkdir(parents=True)
+    (home / ".config" / "imag-last-program").write_text("PRO\n")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(imag, "BOOTSTRAP", True)
+    imag.seed(obs)
+    assert _selects_of(ws.sent) == [("SetCurrentProgramScene", {"sceneName": "Cam 1"})]
 
 
 # ---- cg_chain_scene.py (rides obs_phase2._rpc; refuses the target before its snapshot) ----------
@@ -497,8 +524,9 @@ _SCRIPT_SUFFIXES = (".py", ".sh", ".ps1", ".psm1", ".js", ".ahk", ".cmd", ".bat"
 def test_every_scene_selecting_script_is_a_covered_client():
     # A new OBS-WS client that selects a scene must join this list (and reuse the guard; a
     # TriggerStudioModeTransition user must also be checked against the rule by hand).
+    # Paths relative to scripts/, so a same-named copy in a subfolder is never read as covered.
     covered = set(_CLIENTS) | {"obs_phase2.py", "stream_dev_scene.py"}
-    senders = {p.name for p in SCRIPTS.rglob("*")
+    senders = {p.relative_to(SCRIPTS).as_posix() for p in SCRIPTS.rglob("*")
                if p.is_file() and p.suffix in _SCRIPT_SUFFIXES
                and _SCENE_SELECT_REQUEST_RE.search(p.read_text(errors="replace"))}
     assert senders <= covered, f"uncovered scene-selecting scripts: {sorted(senders - covered)}"
